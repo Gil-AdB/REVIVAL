@@ -1,4 +1,5 @@
 #include "FillerTest.h"
+#include "Base/FDS_VARS.H"
 #define MEASURE_ZSTATS
 #include "Base/Scene.h"
 #include "Gradient.h"
@@ -6,6 +7,7 @@
 #include "Clipper.h"
 #include "Threads.h"
 #include <FILLERS/TheOtherBarry.h>
+#include <FILLERS/Mekalele.h>
 
 #include <VESA/VESA.H>
 
@@ -1108,7 +1110,8 @@ static void drawPoly(float DT)
 	F.Txtr->Txtr->LSizeY = 8;
 	F.Txtr->ZBufferWrite = 0;
 	//F.Filler = IX_Prefiller_TGZSAM;
-	F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE>;
+	//F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE>;
+	F.Filler = Mekalele;
 	//F.Filler = IX_Prefiller_FZ;
 	//F.Filler = IX_Prefiller_TGZM;
 
@@ -1224,6 +1227,15 @@ void FillerTest()
 	Sc.NZP = 0.5;
 	Sc.FZP = 1000.0;
 
+	meka::GBuffer gbuffer;
+	{
+		size_t numPixels = XRes * YRes;
+		gbuffer.position.resize(numPixels);
+		gbuffer.normal.resize(numPixels);
+		gbuffer.txtr.resize(numPixels);
+	}
+	SetGBuffer(&gbuffer);
+
 //	Texture Tx;
 //	Tx.FileName = strdup("Textures/PBRK34.JPG");
 //	Load_Texture(&Tx);
@@ -1278,7 +1290,7 @@ void FillerTest()
 				//(((i<<3)^(j<<3)) & 0xFF) *0x010101;
 				//(i<<16)+(j<<8)+(i^j) * 0x010101;
 				//(i ^ j) * 0x010101;
-				(((i ^ j) >> 3) & 1) * 0xffffff;
+				(((i ^ j) >> 4) & 1) * 0xffffff;
 			//((i>>2)&1)*0xFFFFFF;
 
 		}

@@ -88,6 +88,7 @@ set(Fillers
     "FILLERS/IXTZ.cpp"
     "FILLERS/SimdHelpers.h"
     "FILLERS/TheOtherBarry.h"
+        FILLERS/Mekalele.cpp
 )
 source_group("Fillers" FILES ${Fillers})
 
@@ -224,6 +225,7 @@ set(ALL_FILES
     ${Skycube}
     ${V3D}
     ${VESA}
+        FILLERS/Mekalele.cpp
 )
 
 ################################################################################

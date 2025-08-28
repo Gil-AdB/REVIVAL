@@ -240,6 +240,10 @@ struct alignas(16) XMMVector
 	inline float Length()
 	{
 		// (v dot v) * 1/sqrt(v dot v)
+		if (x == 0.0 && y == 0.0 && z == 0) 
+		{
+			return 0.f;
+		}
 		auto dp = _mm_dp_ps(v, v, 0x71);
 		return _mm_cvtss_f32(_mm_mul_ss(dp , _mm_rsqrt_ss(dp)));
 	}

@@ -12,30 +12,26 @@ if (EMSCRIPTEN)
     endif()
 
 elseif (APPLE)
-add_compile_options(-mcpu=apple-a14)
+    #add_compile_options(-mcpu=native)
 endif()
+
+set(CMAKE_OSX_ARCHITECTURES "arm64")
 
 project(REVIVAL CXX)
 
 add_compile_options ( "-I${PROJECT_SOURCE_DIR}/FDS" )
 
-################################################################################
-# Set target arch type if empty. Visual studio solution generator provides it.
-################################################################################
-if(NOT CMAKE_VS_PLATFORM_NAME)
-    set(CMAKE_VS_PLATFORM_NAME "x64")
-endif()
-message("${CMAKE_VS_PLATFORM_NAME} architecture in use")
+
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     message("Running under MacOS")
     set(MACOSX TRUE)
 endif()
 
-if(NOT ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32"
-     OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64"))
-    message(FATAL_ERROR "${CMAKE_VS_PLATFORM_NAME} arch is not supported!")
-endif()
+#if(NOT ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32"
+#     OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64"))
+#    message(FATAL_ERROR "${CMAKE_VS_PLATFORM_NAME} arch is not supported!")
+#endif()
 
 ################################################################################
 # Global configuration types

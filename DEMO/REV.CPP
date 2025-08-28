@@ -1127,19 +1127,19 @@ void CodeEntry(void *var)
 		//std::cerr << "push event: " << ecode << std::endl;
 	});
 
-	// Timer = 0;
-	// FillerTest();
-	// return;
+	Timer = 0;
+//	FillerTest();
+//	return;
 
 	Timer = 0;
-	RT rt;
+	// RT rt;
 
-	while (!Keyboard[ScESC]) 
-	{
-		rt.RunFrame(((float)Timer)/100.0);
-	}
+	// while (!Keyboard[ScESC]) 
+	// {
+	// 	rt.RunFrame(((float)Timer)/100.0);
+	// }
 
-	return;
+	// return;
 
 	Initialize_Glato(); //9.3
 	//Initialize_Nova();

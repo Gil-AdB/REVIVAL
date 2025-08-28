@@ -100,6 +100,7 @@ VESA_Surface Layer2;
 #include "SORTS.H"
 #include <Threads.h>
 #include <FILLERS/TheOtherBarry.h>
+#include <FILLERS/Mekalele.h>
 
 // RULEZ
 #ifdef _C_WATCOM
@@ -1755,6 +1756,47 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 			} else {
 				clipper.Render(F, F->Filler, false);
 			}
+			//if (F->Flags & Face_Reflective) {
+			//	clipper.Render(F, IX_Prefiller_Reflective, true);
+			//}
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
+
+void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(CurScene);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+
+	int32_t I = CAll;
+	Face** FLS = FList;//+CAll-1;
+	Vertex* A, * B, * C;
+
+	Vertex* V[4];
+
+	while (I--) {
+		Face* F = *FLS++;
+
+		// Get Mapping Coordinates from the rendered face.
+		A = F->A; B = F->B;
+		if (A == B) {
+			continue;
+		} else {
+			// Polygon - can further check the expression
+			// (A->Flags|B->Flags|C->Flags)&Vtx_Visible
+			// if it is zero, we can use something lighter than
+			// the frustrum clipper.
+			C = F->C;
+
+			auto flags = A->Flags & B->Flags & C->Flags;
+			if (flags & Vtx_Visible) continue;
+			RasterFunc filler;
+			clipper.Render(F, Mekalele, false);
 			//if (F->Flags & Face_Reflective) {
 			//	clipper.Render(F, IX_Prefiller_Reflective, true);
 			//}

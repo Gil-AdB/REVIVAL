@@ -78,7 +78,11 @@ elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
         $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:llvm>,$<CONFIG:Release>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
     )
 endif()
-set_target_properties(${PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
+
+
+if(("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32" OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64"))
+    set_target_properties(${PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
+endif()
 
 ################################################################################
 # Compile definitions

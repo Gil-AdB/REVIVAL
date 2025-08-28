@@ -1,6 +1,10 @@
 set(PROJECT_NAME DEMO)
 
-find_package(SDL2 REQUIRED)
+find_library(SDL2_LIBRARY NAMES SDL2 PATHS /opt/homebrew/lib)
+if (NOT SDL2_LIBRARY)
+    message(FATAL_ERROR "SDL2 library not found in /opt/homebrew/lib")
+endif()
+include_directories(/opt/homebrew/include/SDL2)
 
 ################################################################################
 # Source groups
@@ -101,11 +105,24 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     FDS
     Modplayer
+    "-framework CoreAudio"
+    "-framework AudioUnit"
+    "-framework CoreFoundation"
+    "-framework IOKit"
+    "-framework Carbon"
+    "-framework AppKit"
+    "-framework ForceFeedback"
+    "-framework GameController"
+    "-framework CoreHaptics"
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework AudioToolbox"
+    ${SDL2_LIBRARY}
+    "-liconv"
 )
 
 
-target_link_libraries(${PROJECT_NAME} PRIVATE "${ADDITIONAL_LIBRARY_DEPENDENCIES}" "${SDL2_LIBRARIES}")
-include_directories(${PROJECT_NAME} "${SDL2_INCLUDE_DIRS}")
+
 
 install(TARGETS ${PROJECT_NAME}
         RUNTIME DESTINATION "../Runtime")

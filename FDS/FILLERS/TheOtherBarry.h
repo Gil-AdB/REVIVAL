@@ -14,6 +14,9 @@
 #include <array>
 #include "SimdHelpers.h"
 
+#include "Base/Scene.h"
+
+
 namespace barry {
 constexpr const int32_t TILE_SIZE = 8;
 using TScreenCoord = int32_t;
