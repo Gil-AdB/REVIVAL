@@ -1,109 +1,30 @@
-cmake_minimum_required(VERSION 3.16.0 FATAL_ERROR)
-
-set(CMAKE_SYSTEM_VERSION 10.0 CACHE STRING "" FORCE)
-
-add_compile_options(-std=c++20)
-
-if (EMSCRIPTEN)
-    add_compile_options(-msimd128 -sUSE_SDL=2)
-
-    if (APPLE)
-        add_definitions(-DEMSCRIPTEN_MACOS=1)
-    endif()
-
-elseif (APPLE)
-    #add_compile_options(-mcpu=native)
-endif()
-
-set(CMAKE_OSX_ARCHITECTURES "arm64")
+cmake_minimum_required(VERSION 3.16)
 
 project(REVIVAL CXX)
 
-add_compile_options ( "-I${PROJECT_SOURCE_DIR}/FDS" )
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-
-
-if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    message("Running under MacOS")
-    set(MACOSX TRUE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-#if(NOT ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32"
-#     OR "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64"))
-#    message(FATAL_ERROR "${CMAKE_VS_PLATFORM_NAME} arch is not supported!")
-#endif()
-
-################################################################################
-# Global configuration types
-################################################################################
-set(CMAKE_CONFIGURATION_TYPES
-    "Debug"
-    "llvm"
-    "Release"
-    CACHE STRING "" FORCE
-)
-
-################################################################################
-# Global compiler options
-################################################################################
-if(MSVC)
-    # remove default flags provided with CMake for MSVC
-    set(CMAKE_CXX_FLAGS "")
-    set(CMAKE_CXX_FLAGS_DEBUG "")
-    set(CMAKE_CXX_FLAGS_LLVM "")
-    set(CMAKE_CXX_FLAGS_RELEASE "")
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS architectures to build for")
 endif()
 
-################################################################################
-# Global linker options
-################################################################################
-if(MSVC)
-    # remove default flags provided with CMake for MSVC
-    set(CMAKE_EXE_LINKER_FLAGS "")
-    set(CMAKE_MODULE_LINKER_FLAGS "")
-    set(CMAKE_SHARED_LINKER_FLAGS "")
-    set(CMAKE_STATIC_LINKER_FLAGS "")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS}")
-    set(CMAKE_MODULE_LINKER_FLAGS_DEBUG "${CMAKE_MODULE_LINKER_FLAGS}")
-    set(CMAKE_SHARED_LINKER_FLAGS_DEBUG "${CMAKE_SHARED_LINKER_FLAGS}")
-    set(CMAKE_STATIC_LINKER_FLAGS_DEBUG "${CMAKE_STATIC_LINKER_FLAGS}")
-    set(CMAKE_EXE_LINKER_FLAGS_LLVM "${CMAKE_EXE_LINKER_FLAGS}")
-    set(CMAKE_MODULE_LINKER_FLAGS_LLVM "${CMAKE_MODULE_LINKER_FLAGS}")
-    set(CMAKE_SHARED_LINKER_FLAGS_LLVM "${CMAKE_SHARED_LINKER_FLAGS}")
-    set(CMAKE_STATIC_LINKER_FLAGS_LLVM "${CMAKE_STATIC_LINKER_FLAGS}")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS}")
-    set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS}")
-    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS}")
-    set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "${CMAKE_STATIC_LINKER_FLAGS}")
+if(EMSCRIPTEN)
+    add_compile_options(-msimd128 -sUSE_SDL=2)
+    if(APPLE)
+        add_definitions(-DEMSCRIPTEN_MACOS=1)
+    endif()
 endif()
 
-################################################################################
-# Nuget packages function stub.
-################################################################################
-function(use_package TARGET PACKAGE VERSION)
-    message(WARNING "No implementation of use_package. Create yours. "
-                    "Package \"${PACKAGE}\" with version \"${VERSION}\" "
-                    "for target \"${TARGET}\" is ignored!")
-endfunction()
-
-################################################################################
-# Common utils
-################################################################################
-include(CMake/Utils.cmake)
-
-################################################################################
-# Additional Global Settings(add specific info there)
-################################################################################
-include(CMake/GlobalSettingsInclude.cmake OPTIONAL)
-
-################################################################################
-# Use solution folders feature
-################################################################################
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-################################################################################
-# Sub-projects
-################################################################################
-add_subdirectory(DEMO)
-add_subdirectory(FDS)
 add_subdirectory(Modplayer)
+add_subdirectory(FDS)
+add_subdirectory(DEMO)

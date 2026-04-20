@@ -360,54 +360,14 @@ inline void AlphaBlend(byte *Source,byte *Target,DWord &PerSource,DWord &PerTarg
 //}
 
 
-inline void Transparence_16(byte *Source,byte *Target)
+inline void Transparence_16(byte *Source, byte *Target)
 {
-#ifdef NON_PORTABLE_CODE
-	__asm
-	{
-		mov esi, Source
-		mov edi, Target
-		mov ecx,[PageSize]
-		add esi,ecx
-		add edi,ecx
-		neg ecx
-		MotionBlurLoop:
-			mov eax,[esi+ecx]
-			mov ebx,[edi+ecx]
-			and eax,0f7deh
-			and ebx,0f7deh
-			add ebx,eax
-			shr ebx,1
-			mov word ptr [edi+ecx],bx
-			add ecx,2
-		jnz MotionBlurLoop
-	}
-#endif
+	// x86 asm motion-blur kernel deleted; no portable replacement yet.
 }
 
-inline void Transparence_32(byte *Source,byte *Target)
+inline void Transparence_32(byte *Source, byte *Target)
 {
-#ifdef NON_PORTABLE_CODE
-	__asm
-	{
-		mov esi, Source
-		mov edi, Target
-		mov ecx,[PageSize]
-		add esi,ecx
-		add edi,ecx
-		neg ecx
-		MotionBlurLoop:
-			mov eax,[esi+ecx]
-			mov ebx,[edi+ecx]
-			and eax,0fefefeh
-			and ebx,0fefefeh
-			add ebx,eax
-			shr ebx,1
-			mov [edi+ecx],ebx
-			add ecx,4
-		jnz MotionBlurLoop
-	}
-#endif
+	// x86 asm motion-blur kernel deleted; no portable replacement yet.
 }
 
 inline void Modulate(VESA_Surface *Source,VESA_Surface *Target,DWord SrcMask,DWord TrgMask, dword PageSize)

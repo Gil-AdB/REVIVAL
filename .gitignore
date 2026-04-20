@@ -259,8 +259,30 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 __pycache__/
 *.pyc
-/cmake-build-debug/CMakeFiles/REVIVAL.dir
-/cmake-build-debug
+
+# CMake / Ninja / CLion build trees
+/build/
+/build.local/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+build.ninja
+.ninja_deps
+.ninja_log
+
+# IDE / editor
+.idea/
+.vscode/
+.cache/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Claude / local notes
+CODEBASE_ANALYSIS.md
 /FDS/IXTGZM.lst
 /FDS/ZSCALE.lst
 /FDS/WOBTRXXX.lst

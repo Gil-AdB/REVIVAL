@@ -1562,20 +1562,6 @@ void The_Seven_UP_HALFSIZE(Vertex **V, dword numVerts)
 extern "C" void Seven_UP_64_(void);
 void Seven_UP_64V(int X, int Y, int SizeX, int SizeY, byte* Txtr, byte* Page)
 {
-#ifdef NON_PORTABLE_CODE
-	__asm
-	{
-		pushad
-		mov eax, [X]
-		mov ebx, [Y]
-		mov ecx, [SizeX]
-		mov edx, [SizeY]
-		mov esi, [Txtr]
-		mov edi, [Page]
-		call Seven_UP_64_
-		popad
-	}
-#endif
 }
 
 void The_Seven_UP_64(int32_t X, int32_t Y, int32_t SX, int32_t SY, DWord* Bitmap, byte* Page)
@@ -1588,24 +1574,6 @@ void The_Seven_UP_64(int32_t X, int32_t Y, int32_t SX, int32_t SY, DWord* Bitmap
 extern "C" void Seven_UP_MMX_(void);
 void Seven_UP_MMXV(int X,int Y,int SizeX,int SizeY, byte *Txtr, byte *Page, dword Color, dword Z)
 {
-#ifdef NON_PORTABLE_CODE
-	__asm
-	{
-	mov eax, [X]
-	mov ebx, [Y]
-	mov ecx, [SizeX]
-	mov edx, [SizeY]
-	mov esi, [Txtr]
-	mov edi, [Page]
-	pushad
-	push Z
-	push Color
-	call Seven_UP_MMX_
-	pop eax
-	pop eax
-	popad
-	}
-#endif
 }
 
 
@@ -1830,9 +1798,6 @@ void Spriter32(float x, float y,float width,float height,void *txtr,void *VPage,
 #if defined(PORTABLE_CODE) && defined(PIG_VOMIT)
 	__m64 mm4 { (int32_t)Color };
 	__m64 mm1 = {};
-#ifdef NON_PORTABLE_CODE
-	mm4 = _m_punpcklbw(mm4, mm1);
-#endif
 #else
 	__asm
 	{
@@ -1960,14 +1925,6 @@ EndScanline:
 			//mm0 = _m_pxor(mm0, mm0);
 //			mm0 = _m_punpcklbw(mm0, *(__m64*)&tex[(u >> 16) + ((v >> 11) & 0x3E0)]);
 			__m64 mm0 = { 0 };
-#ifdef NON_PORTABLE_CODE
-			mm0 = _m_punpcklbw(mm0, _mm_set_pi32(0, tex[(u >> 16) + ofs]));
-			mm0 = _m_psrlwi(mm0, 8);
-			mm0 = _m_pmullw(mm0, mm4);
-			mm0 = _m_psrlwi(mm0, 8);
-			mm0 = _m_packuswb(mm0, mm0);
-			mm0 = _m_paddusb(mm0, _mm_set_pi32(0, ((dword*)ScanLine)[j]));
-#endif
 			//*x = mm0.m64_u32[0];
 #ifdef __clang__
 			((dword*)ScanLine)[j] = (dword)mm0[0];
@@ -1999,9 +1956,6 @@ EndScanline:
 		v += idv;
 	}
 #ifdef PORTABLE_CODE
-#ifdef NON_PORTABLE_CODE
-	_mm_empty();
-#endif
 #else
 	__asm
 	{
@@ -2239,9 +2193,6 @@ extern "C"
 	extern dword P_Texture_32_CodeStart;
 	extern dword PG_Texture_32_Size;
 	extern dword PT_Texture_32_Size;
-#ifdef NON_PORTABLE_CODE
-	extern 
-#endif	
 	dword Seven_UP_MMX_Size;
 	extern dword Seven_UP_MMX_32_Size;
 	extern dword WobMMX_Size;

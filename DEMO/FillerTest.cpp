@@ -479,27 +479,6 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
 				//tex = 0xFFFFFF;
 
-#ifdef NON_PORTABLE_CODE
-				__asm
-				{
-					mov edi, [SpanPtr]
-
-					; additive
-;					pxor mm2, mm2
-;					movd mm3, [edi]
-;					punpcklbw mm3, mm2
-
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-;					paddusw mm1,mm3
-					packuswb mm1, mm1
-					movd [edi], mm1
-				}
-#endif
 //				*SpanPtr = 0x7F7F7F;
 				//tex = 0x00ffffff;
 
@@ -515,13 +494,8 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 			Col[0] += dBdx;
 			Col[1] += dGdx;
 			Col[2] += dRdx;
-			//Z += dZdx;			
+			//Z += dZdx;
 		}
-#ifdef NON_PORTABLE_CODE
-		__asm {
-			emms
-		}
-#endif
 
 		Width -= SPANSIZE;
 		if (Width <= 0) return;
@@ -633,33 +607,6 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
 
-#ifdef NON_PORTABLE_CODE
-				__asm
-				{
-					mov edi, [SpanPtr]
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-
-					;packuswb mm1, mm1
-					;movd [edi], mm1
-
-					movd mm2, [edi]
-					punpcklbw mm0, mm2
-
-					;movq mm3, mm0
-					;psrlw mm3, 9
-					psrlw mm0, 9
-					psrlw mm1, 1
-					;paddw mm0, mm3
-					paddw mm0, mm1
-					packuswb mm0, mm0
-					movd [edi], mm0
-				}
-#endif
 //				*SpanPtr = 0x7F7F7F;
 
 //				*SpanPtr += 0x7F7F7F;
@@ -689,14 +636,8 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 			Col[1] += dGdx;
 			Col[2] += dRdx;
 			
-			//Z += dZdx;			
+			//Z += dZdx;
 		}
-#ifdef NON_PORTABLE_CODE
-		__asm
-		{
-			emms
-		}
-#endif
 
 		Width -= SPANSIZE;
 		if (Width <= 0) return;

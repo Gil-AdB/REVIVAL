@@ -109,11 +109,6 @@ void DO_NOP();
 #endif
 void DO_NOP()
 {
-#ifdef NON_PORTABLE_CODE
-	__asm {
-		NOP
-	}
-#endif
 }
 
 Vector Transform_Vec(Vector Pos, Vector Source, Matrix Mat) {

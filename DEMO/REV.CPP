@@ -1,15 +1,3 @@
-#pragma comment(lib, "delayimp")  
-//#ifndef _DEBUG
-//#pragma comment(lib, "Modplayer")  
-//#endif // !DEBUG
-
-#pragma comment(lib, "WS2_32")
-#pragma comment(lib, "userenv.lib")
-#pragma comment(lib, "Version.lib") 
-#pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "imm32.lib")
-#pragma comment(lib, "Setupapi.lib")
-
 /******************************************************************************
 	Source code for REVIVAL / FLOOD.
 
@@ -495,10 +483,6 @@ int32_t g_fullScreenMode;
 int32_t g_displayType;
 
 float dTime;
-
-struct ThreadLocalFillerInitializer;
-
-ThreadLocalFillerInitializer* filler_initializer = nullptr;
 
 char *ModuleBuf;
 //dword g_RevModuleHandle;
@@ -1012,41 +996,6 @@ void VolTrace(Image &Im)
 	}
 }
 
-#ifdef NON_PORTABLE_CODE
-#include <CoffReader/CoffReader.h>
-//extern "C" {	void IX_TGZSAM_AsmFiller(); }
-
-
-struct ThreadLocalFillerInitializer {
-	ThreadLocalFillerInitializer() noexcept:
-		global_symbols({
-			{"_g_zscale",		(uintptr_t)&g_zscale},
-			{"_g_zscale256",	(uintptr_t)&g_zscale256},
-			{"_VESA_BPSL",		(uintptr_t)&VESA_BPSL},
-			{"_PageSize",		(uintptr_t)&PageSize},
-			{"_XRes",			(uintptr_t)&XRes},
-		}),
-		IXTGZM("Fillers\\IXTGZM.obj", global_symbols),
-		IXTGZSAM("Fillers\\IXTGZSAM.obj", global_symbols),
-		IXTGZTAM("Fillers\\IXTGZTAM.obj", global_symbols),
-		IXTGZTM("Fillers\\IXTGZTM.obj", global_symbols)
-	{}
-
-	void Apply() {
-		p_IXTGZM_AsmFiller = (AsmFiller)IXTGZM.MapCode(VirtualProtect, PAGE_EXECUTE_READWRITE);
-		p_IXTGZSAM_AsmFiller = (AsmFiller)IXTGZSAM.MapCode(VirtualProtect, PAGE_EXECUTE_READWRITE);
-		p_IXTGZTAM_AsmFiller = (AsmFiller)IXTGZTAM.MapCode(VirtualProtect, PAGE_EXECUTE_READWRITE);
-		p_IXTGZTM_AsmFiller = (AsmFiller)IXTGZTM.MapCode(VirtualProtect, PAGE_EXECUTE_READWRITE);
-	}
- private:
-	std::map<std::string, uintptr_t, std::less<>> global_symbols; 
-	CoffReader IXTGZM;
-	CoffReader IXTGZSAM;
-	CoffReader IXTGZTAM;
-	CoffReader IXTGZTM;
-};
-#endif
-
 struct ThreadPoolCleanup {
 	~ThreadPoolCleanup() {
 		ThreadPool::instance().close();
@@ -1060,18 +1009,12 @@ struct scope_guard {
 	F f;
 };
 
-#include "RT.h"
-
-
 void CodeEntry(void *var)
 {
 	Generate_RGBFlares(); // should be in fds_init
-	
+
 	//if (g_playMusic)
 	//	FModInit();
-#ifdef NON_PORTABLE_CODE
-	InitFillers(VirtualProtect, PAGE_EXECUTE_READWRITE);
-#endif
 
 	// device init parameters
 	// g_DIP.hInst = G_hInst;
@@ -1107,15 +1050,7 @@ void CodeEntry(void *var)
 	}
 	g_RevModuleHandle = sh;
 
-#ifdef NON_PORTABLE_CODE
-	filler_initializer = new ThreadLocalFillerInitializer();
-	filler_initializer->Apply();
-#endif
-
 	ThreadPool::instance().init([]() {
-#ifdef NON_PORTABLE_CODE
-		filler_initializer->Apply();
-#endif
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
 		FPU_LPrecision();
@@ -1152,9 +1087,6 @@ void CodeEntry(void *var)
 	//Initialize_Nova();
 
 	std::thread t1([]() {
-#ifdef NON_PORTABLE_CODE
-		filler_initializer->Apply();
-#endif
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
 		FPU_LPrecision();
