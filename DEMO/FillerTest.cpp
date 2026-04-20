@@ -1110,7 +1110,7 @@ static void drawPoly(float DT)
 	F.Txtr->Txtr->LSizeY = 8;
 	F.Txtr->ZBufferWrite = 0;
 	//F.Filler = IX_Prefiller_TGZSAM;
-	//F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE>;
+	// F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE>;
 	F.Filler = Mekalele;
 	//F.Filler = IX_Prefiller_FZ;
 	//F.Filler = IX_Prefiller_TGZM;
@@ -1286,11 +1286,11 @@ void FillerTest()
 		for (i = 0; i < 256; i++)
 		{
 			l_TestTexture[i + (j << 8)] =
-				//0xFFFFFF;				
+				0xFFFFFF;
 				//(((i<<3)^(j<<3)) & 0xFF) *0x010101;
 				//(i<<16)+(j<<8)+(i^j) * 0x010101;
 				//(i ^ j) * 0x010101;
-				(((i ^ j) >> 4) & 1) * 0xffffff;
+				// (((i ^ j) >> 4) & 1) * 0xffffff;
 			//((i>>2)&1)*0xFFFFFF;
 
 		}
@@ -1328,8 +1328,8 @@ void FillerTest()
 		//	}
 		//}
 
-		drawPoly(0);
-		//drawPoly(500);
+		// drawPoly(0);
+		drawPoly(500);
 
 		DWord pSrc = 0x80808080;
 		DWord pDst = 0x8C8C8C8C;
@@ -1351,7 +1351,7 @@ void FillerTest()
 		sprintf(MSGStr, "%f frame", CurFrame);
 		scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
-
+		memcpy(MainSurf->Data, g_gbuffer->txtr.data(), XRes * YRes * 4);
 
 		Flip(MainSurf);
 

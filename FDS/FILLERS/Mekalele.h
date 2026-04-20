@@ -346,6 +346,10 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 
 	Vertex vc[12];
 
+	for (dword i = 0; i < numVerts; ++i) {
+		vc[i] = *V[i];
+	}
+
 	for (dword i = 2; i < numVerts; ++i) {
 		//r.setVertexIndexes(0, i - 1, i);
 

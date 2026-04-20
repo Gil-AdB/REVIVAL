@@ -1127,9 +1127,16 @@ void CodeEntry(void *var)
 		//std::cerr << "push event: " << ecode << std::endl;
 	});
 
+	FPU_LPrecision();
+	if (g_playMusic)
+	{
+		if (sh) Modplayer_Start(sh);
+	}
 	Timer = 0;
-//	FillerTest();
-//	return;
+
+	// Timer = 0;
+	// FillerTest();
+	// return;
 
 	Timer = 0;
 	// RT rt;
