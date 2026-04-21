@@ -13,7 +13,6 @@ set(DEMO_SOURCES
     CRASH.H
     CREDITS.CPP
     CREDITS.H
-    END.CPP
     FillerTest.cpp
     FillerTest.h
     FOUNTAIN.CPP
