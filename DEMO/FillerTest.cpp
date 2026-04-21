@@ -9,7 +9,7 @@
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/Mekalele.h>
 
-#include <VESA/VESA.H>
+#include <VESA/Vesa.h>
 
 #include <thread>
 
