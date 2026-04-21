@@ -65,7 +65,7 @@ Organized as subdirectories with source groups mirrored in `FDS/CMakeLists.txt`:
 
 ### Portability story
 
-The preprocessor split is `PORTABLE_CODE=1` (defined for both `DEMO` and `FDS`) vs `NON_PORTABLE_CODE` (MSVC/x86-only paths: thread-local filler initializers, inline x86 asm, DirectDraw/D3D8/GDI display backends in `DEMO/DDRAW.cpp`, `D3D8.CPP`, `Gdi.cpp`). The macOS build compiles only the portable path; the legacy Windows display files are excluded from `DEMO/CMakeLists.txt`. `SIMDE_ENABLE_NATIVE_ALIASES` lets intrinsics code read as if on x86.
+The preprocessor split is `PORTABLE_CODE=1` (defined for both `DEMO` and `FDS`) vs `NON_PORTABLE_CODE` (MSVC/x86-only paths: thread-local filler initializers, inline x86 asm). The macOS build compiles only the portable path. The legacy Windows display backends (DirectDraw/D3D8/GDI) were deleted in the Tier 1 cleanup; SDL2 is the only remaining backend. `SIMDE_ENABLE_NATIVE_ALIASES` lets intrinsics code read as if on x86.
 
 ### Display backend
 
