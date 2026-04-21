@@ -27,7 +27,7 @@ int32_t CFGInteger::toInteger()
 char *CFGInteger::toString()
 {
 	char buffer[128];
-	sprintf(buffer, "%d", _value);
+	snprintf(buffer, sizeof(buffer), "%d", _value);
 	return fld_strdup(buffer);
 }
 

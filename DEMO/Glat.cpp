@@ -620,15 +620,15 @@ void Run_Glato(void)
 				if (timerIndex == 20)
 				{
 					timerIndex = 0;
-					sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
+					snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
 				}
 				else {
-					sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
+					snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
 				}
 			}
 
 			if (skip) {
-				sprintf(MSGStr, "%f FPS", (float)(tm - TTrd));
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", (float)(tm - TTrd));
 			}
 
 			OutTextXY(FinalPage,0,0,MSGStr,255, xres, yres);

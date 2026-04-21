@@ -95,11 +95,11 @@ void Run_Crash()
 		Render();
 
 		dword scroll = 0;
-		sprintf(MSGStr, "g_FrameTime %d", g_FrameTime);
+		snprintf(MSGStr, sizeof(MSGStr), "g_FrameTime %d", g_FrameTime);
 		scroll += OutTextXY(VPage, 0, scroll, MSGStr, 255);
-		sprintf(MSGStr, "CrPartTime %d", CrPartTime);
+		snprintf(MSGStr, sizeof(MSGStr), "CrPartTime %d", CrPartTime);
 		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-		sprintf(MSGStr, "Frame %f/%f", CurFrame, CrashSc->EndFrame);
+		snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
 		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
 #ifdef _C_WATCOM

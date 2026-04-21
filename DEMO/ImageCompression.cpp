@@ -697,7 +697,7 @@ void ImageCompressionTestCode()
 	// #pixels*timer resolution*#passes / time taken
 	float pixelsPerSecond = float(I.x*I.y)*100.0f*numPasses / float(timeTaken);
 	char str[128];
-	sprintf(str, "%f pixels per second\n", pixelsPerSecond);
+	snprintf(str, sizeof(str), "%f pixels per second\n", pixelsPerSecond);
 //	OutputDebugString(str);
 
 
