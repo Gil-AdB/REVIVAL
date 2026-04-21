@@ -1,0 +1,79 @@
+#include "Rev.H"
+
+#include "Greets.H"
+
+static Scene *GreetSc;
+
+static long CHPartTime = 20.0f*100;
+
+void Initialize_Greets()
+{
+	GreetSc = new Scene; memset(GreetSc,0,sizeof(Scene));
+	LoadFLD(GreetSc,"Scenes\\Greets.FLD");
+	CHPartTime = 100.0f*(GreetSc->EndFrame-GreetSc->StartFrame)/30.0f;
+
+//	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
+	Preprocess_Scene(GreetSc);
+//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
+	GreetSc->FZP = 25000.0f;
+	GreetSc->Flags |= Scn_Fogged;
+	// also make the appropriate Layer 2 fillers,
+
+}
+
+void Run_Greets()
+{
+	long Polys = 0;
+	TriMesh *T;
+	Omni *O;
+
+	CurScene = GreetSc;
+	for(T = GreetSc->TriMeshHead;T;T=T->Next)
+		Polys+=T->FIndex;
+	for(O = GreetSc->OmniHead;O;O=O->Next)
+		Polys++;
+
+	FList = new Face * [Polys];
+	SList = new Face * [Polys];
+
+	View = GreetSc->CameraHead;
+
+	C_FZP = GreetSc->FZP;
+	C_rFZP = 1.0f/C_FZP;
+
+	Ambient_Factor = 32;
+	Diffusive_Factor = 1500;
+	ImageSize = 50;
+	while ((!Keyboard[ScESC])&&Timer<CHPartTime)
+	{
+		memset(VPage,0,PageSize);
+
+		CurFrame = GreetSc->StartFrame + (GreetSc->EndFrame-GreetSc->StartFrame) * (float)Timer / (float)CHPartTime;
+
+		Animate_Objects(GreetSc);
+
+		Transform_Objects(GreetSc);
+
+		Lighting(GreetSc);
+
+		if (!CAll) continue;
+		Radix_SortingASM(FList,SList,CAll);
+
+		Render();
+
+		Flip(Screen);
+
+	} Timer-=CHPartTime;
+	if (Keyboard[ScESC])
+	{
+		#ifdef Play_Music
+		ShutDown();
+		#endif
+		FDS_End();
+		exit(-1);
+	}
+
+	delete FList;
+	delete SList;
+	Destroy_Scene(GreetSc);
+}

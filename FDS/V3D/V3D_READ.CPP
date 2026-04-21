@@ -30,7 +30,7 @@ void Material2Face(Material *M,Face *F)
 // Applies stuff to the basic object read from the V3D file
 void Insert_TriMesh2Scene(Scene *Sc,TriMesh *T)
 {
-  long I;
+  int32_t I;
   Face *F;
   Object *Obj = new Object,*O;
   TriMesh *Tri;
@@ -90,7 +90,7 @@ void Insert_TriMesh2Scene(Scene *Sc,TriMesh *T)
 
 void Insert_Omni2Scene(Scene *Sc, Omni *Om)
 {
-  long I;
+  int32_t I;
   Face *F;
   Object *Obj = new Object,*O;
   Omni *Omni;
@@ -139,8 +139,8 @@ void Insert_Omni2Scene(Scene *Sc, Omni *Om)
 
 char Load_V3D(Scene *Sc,char *FileName)
 {
-  long LPts,LPolys;
-  long A,B,C,I;
+  int32_t LPts,LPolys;
+  int32_t A,B,C,I;
   signed short Ch;
 
   V3D_Object=NULL;

@@ -1,10 +1,12 @@
-#include "REV.H"
+#include "Rev.h"
 #include "IMGGENR/IMGGENR.H"
-#include "VESA/VESA.H"
+#include "VESA/Vesa.h"
 
-void Cross_Fade(byte *U1,byte *U2,byte *Target,long Perc)
+#include <algorithm>
+
+void Cross_Fade(byte *U1,byte *U2,byte *Target,int32_t Perc)
 {
-	long I;
+	int32_t I;
 	for(I=0;I<PageSize;I++)
 		Target[I] = (U1[I]*(255-Perc) + U2[I]*Perc)>>8;
 }
@@ -35,12 +37,14 @@ static VESA_Surface Surf1;
 static VESA_Surface Surf2;
 static VESA_Surface Surf3;
 static VESA_Surface Surf4;
-static long numGridPoints;
+static VESA_Surface FinalSurf;
+static int32_t numGridPoints;
 static byte *Page1;
 static byte *Page2;
 static byte *Page3;
 static byte *Page4;
-static long TrigOffset;
+static byte* FinalPage;
+static int32_t TrigOffset;
 static Texture *LogoTexture;
 static Image *LogoImage;
 static Texture *PlaneTexture;
@@ -52,13 +56,19 @@ static Image *GfxImage;
 static Texture *SfxTexture;
 static Image *SfxImage;
 
+static int32_t InitScreenXRes, InitScreenYRes;
+
 
 void Initialize_Glato()
 {
-
-	static int x,y,i,j;
+	InitScreenXRes = XRes;
+	InitScreenYRes = YRes;
+	int32_t xres = InitScreenXRes;
+	int32_t yres = InitScreenYRes;
+	int x,y,i,j;
 	int X,Y;
-	float XResFactor = XRes/320.0;
+	float XResFactor = xres/320.0;
+
 
 	LogoTexture = new Texture;
 	LogoImage = new Image;
@@ -71,10 +81,10 @@ void Initialize_Glato()
 	SfxTexture = new Texture;
 	SfxImage = new Image;
 
-	Load_Image_JPEG(LogoImage,"Textures//Logo.JPG");
-	Scale_Image(LogoImage,XRes,YRes);
+	Load_Image_JPEG(LogoImage,"Textures/Logo.JPG");
+	Scale_Image(LogoImage,xres,yres);
 
-/*	LogoTexture->FileName = strdup("Textures//Logo.JPG");
+/*	LogoTexture->FileName = strdup("Textures/Logo.JPG");
 	Identify_Texture(LogoTexture);
 	if (!LogoTexture->BPP)
 	{
@@ -86,7 +96,7 @@ void Initialize_Glato()
 	Convert_Texture2Image(LogoTexture,LogoImage);*/
 	
 
-	PlaneTexture->FileName = strdup("Textures//SC13.JPG");
+	PlaneTexture->FileName = strdup("Textures/SC13.JPG");
 	Identify_Texture(PlaneTexture);
 	if (!PlaneTexture->BPP)
 	{
@@ -95,11 +105,12 @@ void Initialize_Glato()
 	}
 	Load_Texture(PlaneTexture);
 	Convert_Texture2Image(PlaneTexture,PlaneImage);
+	Sachletz(PlaneImage->Data, PlaneImage->x, PlaneImage->y);
 //	memset(PlaneImage->Data, 128, 256 * 256 * 4);
 	//PlaneImage->Data[0] = 0x80808080;
 //	WOBPOINTSHEIGHT = 30;
 
-	CodeTexture->FileName = strdup("Textures//Code.JPG");
+	CodeTexture->FileName = strdup("Textures/Code.JPG");
 	Identify_Texture(CodeTexture);
 	if (!CodeTexture->BPP)
 	{
@@ -110,7 +121,7 @@ void Initialize_Glato()
 	Convert_Texture2Image(CodeTexture,CodeImage);
 
 
-	GfxTexture->FileName = strdup("Textures//Gfx.JPG");
+	GfxTexture->FileName = strdup("Textures/Gfx.JPG");
 	Identify_Texture(GfxTexture);
 	if (!GfxTexture->BPP)
 	{
@@ -120,7 +131,7 @@ void Initialize_Glato()
 	Load_Texture(GfxTexture);
 	Convert_Texture2Image(GfxTexture,GfxImage);
 
-	SfxTexture->FileName = strdup("Textures//Sfx.JPG");
+	SfxTexture->FileName = strdup("Textures/Sfx.JPG");
 	Identify_Texture(SfxTexture);
 	if (!SfxTexture->BPP)
 	{
@@ -131,25 +142,29 @@ void Initialize_Glato()
 	Convert_Texture2Image(SfxTexture,SfxImage);
 
 
-	Page1 = new byte[PageSize];
-	Page2 = new byte[PageSize];
-	Page3 = new byte[PageSize];
-	Page4 = new byte[PageSize];
+	Page1 = (byte*)_aligned_malloc(PageSize, 32);
+	Page2 = (byte*)_aligned_malloc(PageSize, 32);
+	Page3 = (byte*)_aligned_malloc(PageSize, 32);
+	Page4 = (byte*)_aligned_malloc(PageSize, 32);
+	FinalPage = (byte*)_aligned_malloc(PageSize, 32);
 
 	// only last YRes - YRes & (~7) lines should be cleared
 	memset(Page1, 0, PageSize);
 	memset(Page2, 0, PageSize);
 	memset(Page3, 0, PageSize);
 	memset(Page4, 0, PageSize);
+	memset(FinalPage, 0, PageSize);
 
 	memcpy(&Surf1,VSurface,sizeof(VESA_Surface));
 	memcpy(&Surf2,VSurface,sizeof(VESA_Surface));
 	memcpy(&Surf3,VSurface,sizeof(VESA_Surface));
 	memcpy(&Surf4,VSurface,sizeof(VESA_Surface));
+	memcpy(&FinalSurf, VSurface, sizeof(VESA_Surface));
 	Surf1.Data = Page1;
 	Surf2.Data = Page2;
 	Surf3.Data = Page3;
 	Surf4.Data = Page4;
+	FinalSurf.Data = FinalPage;
 	Surf1.Flags = VSurf_Noalloc;
 	Surf1.Targ = NULL;
 	Surf2.Flags = VSurf_Noalloc;
@@ -158,8 +173,10 @@ void Initialize_Glato()
 	Surf3.Targ = NULL;
 	Surf4.Flags = VSurf_Noalloc;
 	Surf4.Targ = NULL;
+	FinalSurf.Flags = VSurf_Noalloc;
+	FinalSurf.Targ = NULL;
 
-	numGridPoints = ((XRes>>3)+1)*((YRes>>3)+1);
+	numGridPoints = ((xres>>3)+1)*((yres>>3)+1);
 	//Plane_GP = new NewGridPoint[numGridPoints];
 	//Plane_GP = new GridPoint[numGridPoints];
 	Plane_GP = new GridPointTG[numGridPoints];
@@ -181,10 +198,10 @@ void Initialize_Glato()
 
 	for (y=0;y<=YRes;y+=8)
 	{
-		for (x=0;x<=XRes;x+=8)
+		for (x=0;x<=xres;x+=8)
 		{
-			X = x - XRes * 0.5;
-			Y = y - YRes * 0.5;
+			X = x - xres * 0.5;
+			Y = y - yres * 0.5;
 
 			LenTable[j] = sqrt((float)(X*X + Y*Y))/XResFactor;
 			j++;
@@ -192,25 +209,32 @@ void Initialize_Glato()
 	}
 }
 
+static inline float max_magnitude(float a, float b)
+{
+	if (fabs(a) > fabs(b)) return a; else return b;
+}
+
 void Run_Glato(void)
 {
 //	Setup_Grid_Texture_Mapper_XXX(XRes, YRes);
-	Setup_Grid_Texture_Mapper_MMX(XRes, YRes);
+//	Setup_Grid_Texture_Mapper_MMX(XRes, YRes);
+	int32_t xres = InitScreenXRes;
+	int32_t yres = InitScreenYRes;
+	Setup_Grid_Texture_Mapper_MMX(xres, yres);
 
 	XMMVector CameraPos(0,0,0);
 	XMMMatrix CamMat;
 	float Radius;
-	static int x,y,i,j;
-	static float a,bb,c,d,Delta,X1,X2,X3,z,Rx,Ry,Rz;
-	static float u,v,u1,v1,u2,v2,r,g,b;
-	static float Code_R1,Code_RS,Code_R2,CCosR1,CSinR1,CCosR2,CSinR2;
-	static float Gfx_R1,Gfx_R2,GCosR1,GSinR1,GCosR2,GSinR2,Gfx_RS;
-	static XMMVector Intersection1,Origin1,Direction1,U;
+	int x,y,i,j;
+	float a = 0.0f,bb = 0.0f,c = 0.0f,d = 0.0f,Delta = 0.0f,X1 = 0.0f,X2 = 0.0f,X3 = 0.0f,z = 0.0f,Rx = 0.0f,Ry = 0.0f,Rz = 0.0f;
+	float u,v,u1,v1,u2,v2,r,g,b;
+	float Code_R1,Code_RS,Code_R2,CCosR1,CSinR1,CCosR2,CSinR2;
+	float Gfx_R1,Gfx_R2,GCosR1,GSinR1,GCosR2,GSinR2,Gfx_RS;
+	XMMVector Intersection1,Origin1,Direction1,U;
 	
 	int X,Y;
 	float R1,R3,R4;
 
-	Matrix_Identity(CamMat.XMMMatrix);
 	Radius = 1;
 
 
@@ -223,31 +247,34 @@ void Run_Glato(void)
 #endif
 
 	float ST;
-	long timerStack[20], timerIndex = 0;
+	int32_t timerStack[20], timerIndex = 0;
 	for(i=0; i<20; i++)
 		timerStack[i] = Timer;
 
 	char MSGStr[MAX_GSTRING];
 
-	float XResFactor = XRes/320.0;
-	float rXResFactor = 320.0/XRes;
-	float rYResFactor = 240.0/YRes;
+	float XResFactor = xres/320.0;
+	float rXResFactor = 320.0/xres;
+	float rYResFactor = 240.0/yres;
 
 	dword TTrd = Timer;
 
 	// clear the screen once (only yres % 8 last lines are really needed)
-	memset(VPage, 0, PageSize);
+	memset(FinalPage, 0, PageSize);
 
 	while (Timer<3500)
 	{
+		bool skip = false;
 		// fast forward/rewind
 		dTime = Timer-TTrd;		
 		if (Keyboard[ScF2])
 		{
+			skip = true;
 			Timer += dTime * 8;
 		}
 		if (Keyboard[ScF1])
 		{
+			skip = true;
 			if (dTime * 8 > Timer)
 				Timer = 0;
 			else
@@ -264,7 +291,7 @@ void Run_Glato(void)
 			ST = ((Timer-2300)*2500)/(1000+(Timer-2300));//  sqrt(Timer*1600);
 		}
 //		ST = (Timer*2000)/(1000+Timer);//  sqrt(Timer*1600);
-		Euler_Angles(CamMat.XMMMatrix,Rx,Ry,Rz);
+		Euler_Angles(CamMat.Data,Rx,Ry,Rz);
 		i=0;
 		j=0;
 		//code
@@ -292,21 +319,22 @@ void Run_Glato(void)
 		//Origin1.x=CameraPos.x;
 		//Origin1.y=CameraPos.y;
 		//Origin1.z=CameraPos.z;
-		
+	
+		Radius = 1;
 		Origin1 = CameraPos;
 		// Clear page isn't required as wobbler overwrites entire screen / frame
 //		memset(VPage, 0, PageSize);
-		for (y=0;y<=YRes;y+=8)
-			for (x=0;x<=XRes;x+=8)
+		for (y=0;y<=yres;y+=8)
+			for (x=0;x<=xres;x+=8)
 			{
-				Direction1.x=x-(XRes >> 1);
-				Direction1.y=y-(YRes >> 1);
+				Direction1.x=x-(xres >> 1);
+				Direction1.y=y-(yres >> 1);
 				Direction1.z=256.0*XResFactor;
 				Direction1.w = .0f;
-				MatrixXVector(CamMat.XMMMatrix,&Direction1,&U);
+				MatrixXVector(CamMat.Data,&Direction1,&U);
 				Direction1=U;
 				Direction1.Normalize();
-				Radius = sin(Direction1.x) * cos(Direction1.z);
+//				Radius = std::max(std::max(fabs(Direction1.y), fabs(Direction1.x)), fabs(Direction1.z));//1.0;//sin(Direction1.x) * cos(Direction1.z);
 				a=Radius-Origin1.y;
 				c=-Radius-Origin1.y;
 				d=Direction1.y;
@@ -356,8 +384,8 @@ void Run_Glato(void)
 					if (b>254.0f) b=254.0f;
 					if (b<1.0f) b=1.0f;
 
-					u*=65536.0f;
-					v*=65536.0f;
+					u*=256.0f;
+					v*=256.0f;
 				}
 				else
 				{
@@ -402,34 +430,27 @@ void Run_Glato(void)
 					if (b>254.0f) b=254.0f;
 					if (b<1.0f) b=1.0f;
 
-					u*=65536.0f;
-					v*=65536.0f;
+					u*=256.0f;
+					v*=256.0f;
 				}
 				//r = 0; // green
 				//g = 0; // red
 				//b = g = r; // blue
 
-				r*=254.0f;
-				g*=254.0f;
-				b*=254.0f;
+				//r*=254.0f;
+				//g*=254.0f;
+				//b*=254.0f;
+				r*=63.0f;
+				g*=63.0f;
+				b*=63.0f;
 
 				Plane_GP[j].u=u;
 				Plane_GP[j].v=v;
-//				Plane_GP[j].R=127.0 * 256.0;
-//				Plane_GP[j].G=127.0 * 256.0;
-//				Plane_GP[j].B=127.0 * 256.0;
-
-//				Plane_GP[j].R=0;
-//				Plane_GP[j].G=0;
-//				Plane_GP[j].B=0;				
-				Plane_GP[j].BGRA._d16[2]=r;
-				Plane_GP[j].BGRA._d16[1]=g;
-				Plane_GP[j].BGRA._d16[0]=b;
-//				Plane_GP[j].RGB = ((long)r<<16)+((long)g<<8)+(long)b;
+				Plane_GP[j].BGRA = Vec8us{ uint16_t(b) , uint16_t(g), uint16_t(r) , 0, uint16_t(b) , uint16_t(g), uint16_t(r) , 0};
 
 
-				X = x - XRes * 0.5;
-				Y = y - YRes * 0.5;
+				X = x - xres * 0.5;
+				Y = y - yres * 0.5;
 
 				if (Code)
 				{
@@ -551,40 +572,40 @@ void Run_Glato(void)
 			}
 
 //		Grid_Texture_Mapper_XXX(Plane_GP,PlaneImage,(DWord *)Page1);
-		Grid_Texture_Mapper_TG(Plane_GP,PlaneImage,(DWord *)Page1);
+		Grid_Texture_Mapper_TG(Plane_GP,PlaneImage,(DWord *)Page1, xres, yres);
 		//GridRendererTG(Plane_GP,PlaneImage,(DWord *)Page1, XRes, YRes);
 
 		if (Code)
 		{
 //			Grid_Texture_Mapper_XXX(Code_GP,CodeImage,(DWord *)Page2);
-			//GridRendererT(Code_GP,CodeImage,(DWord *)Page2, XRes, YRes);
-			Grid_Texture_Mapper_T(Code_GP, CodeImage, (DWord *)Page2);
-			Modulate(&Surf1,&Surf2,0xa0a0a0,0xa0a0a0);
-			Modulate(&Surf2,VSurface,0xa0a0a0, 0xa0a0a0);
+			GridRendererT(Code_GP,CodeImage,(DWord *)Page2, Surf1.X, Surf1.Y);
+			//Grid_Texture_Mapper_T(Code_GP, CodeImage, (DWord *)Page2);
+			Modulate(&Surf1,&Surf2,0xa0a0a0,0xa0a0a0, Surf1.PageSize);
+			Modulate(&Surf2,&FinalSurf,0xa0a0a0, 0xb0b0b0, Surf2.PageSize);
 		}
 		if (Gfx)
 		{
 //			Grid_Texture_Mapper_XXX(Gfx_GP,GfxImage,(DWord *)Page3);
-			Grid_Texture_Mapper_T(Gfx_GP,GfxImage,(DWord *)Page3);
-			Modulate(&Surf1,&Surf3,0xa0a0a0, 0xd0d0d0);
-			Modulate(&Surf3,VSurface,0xa0a0a0, 0xa0a0a0);
+			GridRendererT(Gfx_GP,GfxImage,(DWord *)Page3, Surf3.X, Surf3.Y);
+			Modulate(&Surf1,&Surf3,0xa0a0a0, 0xd0d0d0, Surf1.PageSize);
+			Modulate(&Surf3,&FinalSurf,0xa0a0a0, 0xb0b0b0, Surf3.PageSize);
  //			Modulate(&Surf2,&Surf3,0xa0a0a0,0xa0a0a0);
 		}
 		if (Sfx)
 		{
 //			Grid_Texture_Mapper_XXX(Sfx_GP,SfxImage,(DWord *)Page4);
-			Grid_Texture_Mapper_T(Sfx_GP,SfxImage,(DWord *)Page4);
-			Modulate(&Surf1,&Surf4,0xa0a0a0,0xa0a0a0);
-			Modulate(&Surf4,VSurface,0xa0a0a0, 0xa0a0a0);
+			GridRendererT(Sfx_GP,SfxImage,(DWord *)Page4, Surf4.X, Surf4.Y);
+			Modulate(&Surf1,&Surf4,0xa0a0a0,0xa0a0a0, Surf1.PageSize);
+			Modulate(&Surf4,&FinalSurf,0xa0a0a0, 0xb0b0b0, Surf4.PageSize);
 		}
 //		memcpy(VPage, Page1, PageSize);
 		if (Timer>3200)
 		{
-			long cfVal = (Timer-3200)*255/300;
+			int32_t cfVal = (Timer-3200)*255/300;
 			if (cfVal>255) cfVal = 255;
 			DWord SrcPer = ((DWord)cfVal) * 0x01010101;
 			DWord DstPer = ((DWord)(255-cfVal)) * 0x01010101;
-			AlphaBlend((byte *)LogoImage->Data, VPage, SrcPer, DstPer);
+			AlphaBlend((byte *)LogoImage->Data, FinalPage, SrcPer, DstPer, FinalSurf.PageSize);
 		}
 		//if (Timer < 750)
 		//{
@@ -593,17 +614,26 @@ void Run_Glato(void)
 		// FPS printer
 		if (g_profilerActive)
 		{
-			timerStack[timerIndex++] = Timer;
-			if (timerIndex==20) 
+			dword tm = Timer;
+			timerStack[timerIndex++] = tm;
 			{
-				timerIndex = 0;
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
-			} else {
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				if (timerIndex == 20)
+				{
+					timerIndex = 0;
+					sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
+				}
+				else {
+					sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
+				}
 			}
-			OutTextXY(VPage,0,0,MSGStr,255);
+
+			if (skip) {
+				sprintf(MSGStr, "%f FPS", (float)(tm - TTrd));
+			}
+
+			OutTextXY(FinalPage,0,0,MSGStr,255, xres, yres);
 		}
-		Flip(VSurface);
+		Flip(&FinalSurf);
 //		Flip(&Surf1);
 
 //		Rx += 0.01;
@@ -642,8 +672,8 @@ void Run_Glato(void)
 	delete Code_GP;
 	delete Gfx_GP;
 	delete Sfx_GP;
-	delete Page1;
-	delete Page2;
-	delete Page3;
-	delete Page4;
+	_aligned_free(Page1);
+	_aligned_free(Page2);
+	_aligned_free(Page3);
+	_aligned_free(Page4);
 }

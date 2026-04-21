@@ -4,9 +4,9 @@
 */
 
 #include <stdio.h>
-#include <dos.h>
+//#include <dos.h>
 #include <stdlib.h>
-#include <conio.h>
+//#include <conio.h>
 #include <string.h>
 #include <math.h>
 
@@ -29,12 +29,12 @@ Scene *SceneGroup;
 
 static float ZoomFactor2FOV(float zf)
 {
-	return 360.0/PI * atan( (float(XRes)/float(YRes))/zf );
+	return 360.0f/PI * atanf( (float(XRes)/float(YRes))/zf );
 }
 
 void AddTriMesh(Scene *Sc,TriMesh *T,char *ObjName,Vector Pivot)
 {
-	long I;
+	int32_t I;
 	Face *F;
 	Object *Obj = new Object,*O;
 	TriMesh *Tri;
@@ -82,8 +82,6 @@ void AddTriMesh(Scene *Sc,TriMesh *T,char *ObjName,Vector Pivot)
 
 void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 {
-	long I;
-	Face *F;
 	Object *Obj = new Object,*O;
 	Omni *Omni;
 
@@ -124,8 +122,6 @@ void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 
 void ConvertKey(FldKeyFrame *KF,SplineKey *Pos,SplineKey *Rot,SplineKey *Scl)
 {
-	Matrix M;
-
 	Pos->Frame=Rot->Frame=Scl->Frame=KF->FrameNumber;
 
 // Convert position
@@ -221,9 +217,9 @@ void ConvertFace(FldFace *Org,Face *Dest,Vertex *V,int *Cur,FldMat *FM)
 
 TriMesh *ConvertTriMesh(FldObject *Src)
 {
-	int i,j,TotalFaces;
+	uint32_t i,TotalFaces;
+	int j;
 	TriMesh *T;
-	void    *Lgt;
 	bool stationary = true;
 
 	T=(TriMesh *)getAlignedBlock(sizeof(TriMesh), 16);
@@ -324,8 +320,8 @@ Camera *ConvertCamera(FldCamera *Src,Scene *Sc)
 	Camera *Cam;
 	SplineKey *Pos;
 	FldKeyFrame *KF;
-	float Roll,Temp;
-	int i;
+	float Temp;
+	uint32_t i;
 	dword n;
 
 	Cam=new Camera;
@@ -543,13 +539,10 @@ Scene *ConvertFLD(FldScene *FLD)
 {
 	Scene				*Sc;
 	TriMesh			*T;
-	Camera			*C;
 	FldObject		*SourceObj;
 	FldLight    *SourceLgt;
-	SpotLight   *SL;
 	Omni        *OL;
 	Object 			*Obj;
-	int					 i;
 
 #ifdef DebugMode
 	printf("Converting FLD...\n");
@@ -621,8 +614,6 @@ Scene *ConvertFLD(FldScene *FLD)
 
 void Delete_Envelope(FldEnv *E)
 {
-	int i;
-
 	if (!E) return;
 
 /*	for (i=0;i<E->Keys;i++) delete (E->Key[i].Channel);*/
@@ -634,8 +625,6 @@ void Delete_Scene(FldScene *Sc)
 {
 	FldLight *L;
 	FldObject *O;
-	FldMat *M;
-	int i;
 
 	Delete_Envelope(Sc->AmbientColor);
 	Delete_Envelope(Sc->AmbientIntensity);
@@ -711,4 +700,3 @@ char LoadFLD(Scene *Sc, const char *FileName)
 	freeAlignedBlock(OUT);
 	return 1;
 }
-

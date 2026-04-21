@@ -1,0 +1,6 @@
+system dos4g
+name FDS
+debug all
+file *.Obj
+library *.Lib
+

@@ -15,7 +15,7 @@ struct GZLeft
 		Index; // Current Vertex index
 };
 
-static GZLeft Left;
+thread_local static GZLeft Left;
 
 struct GZRight
 {
@@ -28,12 +28,12 @@ struct GZRight
 		Index;  // Current Vertex index
 };
 
-static GZRight Right;
+thread_local static GZRight Right;
 
-static void *IX_Texture;
-static void *IX_Page;
-static word *IX_ZBuffer;
-static dword IX_L2X, IX_L2Y;
+thread_local static void *IX_Texture;
+thread_local static void *IX_Page;
+thread_local static word *IX_ZBuffer;
+thread_local static dword IX_L2X, IX_L2Y;
 
 
 union deltas
@@ -47,14 +47,14 @@ union deltas
 
 #define L2SPANSIZE 4
 #define SPANSIZE 16
-#define fSPANSIZE 16.0
-static deltas ddx;
-static deltas ddx32;
+#define fSPANSIZE 16.0f
+thread_local static deltas ddx;
+thread_local static deltas ddx32;
 
-static sword	dRdx;
-static sword	dGdx;
-static sword	dBdx;
-static sword	dZdx;
+thread_local static sword	dRdx;
+thread_local static sword	dGdx;
+thread_local static sword	dBdx;
+thread_local static sword	dZdx;
 
 static void CalcRightSection (IXVertexG *V1, IXVertexG *V2)
 {
@@ -72,12 +72,12 @@ static void CalcRightSection (IXVertexG *V1, IXVertexG *V2)
 	
 	// Calculate delta
 	Right.Height = (V2->y - V1->y);
-	float rHeight = 1.0/Right.Height;		
+	float rHeight = 1.0f/Right.Height;		
 	Right.dX = (V2->x - V1->x) * rHeight;
 	sdword FPRevHeight;
 	if (Right.ScanLines > 0)
 	{
-		FPRevHeight = Fist(rHeight * 65536.0);
+		FPRevHeight = Fist(rHeight * 65536.0f);
 		Right.dR = (V2->R - V1->R) * FPRevHeight;
 		Right.dG = (V2->G - V1->G) * FPRevHeight;
 		Right.dB = (V2->B - V1->B) * FPRevHeight;
@@ -97,10 +97,10 @@ static void CalcRightSection (IXVertexG *V1, IXVertexG *V2)
 	float prestep;
 	prestep = (float)iy1 - V1->y;
 	Right.x = V1->x + Right.dX * prestep;
-	Right.R = V1->R * 65536.0 + prestep * Right.dR;//+ (((Right.dR>>8) * iprestep)>>8);
-	Right.G = V1->G * 65536.0 + prestep * Right.dG;//+ (((Right.dG>>8) * iprestep)>>8);
-	Right.B = V1->B * 65536.0 + prestep * Right.dB;//+ (((Right.dB>>8) * iprestep)>>8);
-	Right.z = V1->z * 65536.0 + prestep * Right.dZ;//+ (((Right.dZ>>8) * iprestep)>>8);
+	Right.R = V1->R * 65536.0f + prestep * Right.dR;//+ (((Right.dR>>8) * iprestep)>>8);
+	Right.G = V1->G * 65536.0f + prestep * Right.dG;//+ (((Right.dG>>8) * iprestep)>>8);
+	Right.B = V1->B * 65536.0f + prestep * Right.dB;//+ (((Right.dB>>8) * iprestep)>>8);
+	Right.z = V1->z * 65536.0f + prestep * Right.dZ;//+ (((Right.dZ>>8) * iprestep)>>8);
 }
 
 
@@ -136,7 +136,7 @@ static void CalcLeftSection (IXVertexG *V1, IXVertexG *V2)
 	sdword FPRevHeight;
 	if (Left.ScanLines > 0)
 	{
-		FPRevHeight = Fist(RevHeight*65536.0);
+		FPRevHeight = Fist(RevHeight*65536.0f);
 		Left.dR = (V2->R - V1->R) * FPRevHeight;
 		Left.dG = (V2->G - V1->G) * FPRevHeight;
 		Left.dB = (V2->B - V1->B) * FPRevHeight;
@@ -156,23 +156,19 @@ static void CalcLeftSection (IXVertexG *V1, IXVertexG *V2)
 	Left.x  = V1->x  + Left.dX  * prestep;
 	Left.RZ = V1->RZ + Left.dRZ * prestep;
 
-	//long iprestep = Fist(65536.0 * prestep);
-	Left.R = V1->R * 65536.0 + prestep * Left.dR;//+ (((Left.dR>>8) * iprestep)>>8);
-	Left.G = V1->G * 65536.0 + prestep * Left.dG;//+ (((Left.dG>>8) * iprestep)>>8);
-	Left.B = V1->B * 65536.0 + prestep * Left.dB;//+ (((Left.dB>>8) * iprestep)>>8);
-	Left.z = V1->z * 65536.0 + prestep * Left.dZ;//+ (((Left.dZ>>8) * iprestep)>>8);
+	//int32_t iprestep = Fist(65536.0 * prestep);
+	Left.R = V1->R * 65536.0f + prestep * Left.dR;//+ (((Left.dR>>8) * iprestep)>>8);
+	Left.G = V1->G * 65536.0f + prestep * Left.dG;//+ (((Left.dG>>8) * iprestep)>>8);
+	Left.B = V1->B * 65536.0f + prestep * Left.dB;//+ (((Left.dB>>8) * iprestep)>>8);
+	Left.z = V1->z * 65536.0f + prestep * Left.dZ;//+ (((Left.dZ>>8) * iprestep)>>8);
 }
 
-static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
+thread_local static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
 
 
 static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep)
 {
 	int i = 0;
-
-	//F4Vec _u, _v, _z;
-
-	int _w0, _w1, _w2, _w3;
 
 	float _z0, _z1, _z2, _z3;
 	word _Z0, _Z1;
@@ -192,7 +188,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 		};
 	};*/
 	//static word B, G, R, Z;
-	static word Col[4];
+	word Col[4];
 
 	Col[0] = Left.B >> 8;
 	Col[1] = Left.G >> 8;
@@ -229,8 +225,6 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 		
 		while (SpanWidth--)
 		{
-			dword r,g,b, tex;
-
 			// ZBuffer test			
 			if (_Z0 > *ZSpanPtr)
 			{
@@ -285,18 +279,9 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 {
 	int i = 0;
 
-	//F4Vec _u, _v, _z;
-	int   _u0, _v0;
-	int   _u1, _v1;
-	int   _u2, _v2;
-	int   _u3, _v3;
-
-	int _w0, _w1, _w2, _w3;
-
 	float _z0, _z1, _z2, _z3;
 	word _Z0, _Z1;
 	short _dZ;
-	
 
 	int   Width = bWidth;
 
@@ -311,13 +296,13 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 	int SpanWidth = Width;
 	if (Width > SPANSIZE) SpanWidth = SPANSIZE;
 
-	_z0 = 256.0 / RZ;
+	_z0 = 256.0f / RZ;
 	RZ += ddx32.dRZdx;
-	_z1 = 256.0 / RZ;
+	_z1 = 256.0f / RZ;
 	RZ += ddx32.dRZdx;
-	_z2 = 256.0 / RZ;
+	_z2 = 256.0f / RZ;
 	RZ += ddx32.dRZdx;
-	_z3 = 256.0 / RZ;
+	_z3 = 256.0f / RZ;
 	RZ += ddx32.dRZdx;
 	
 	_Z0 = 0xFF80 - Fist(g_zscale256 * _z0);
@@ -401,7 +386,7 @@ static void IXFiller(IXVertexG *Verts, dword numVerts, void *Page)
 	IX_Page = Page;
 
 	// ZBuffer data starts at the end of framebuffer
-	IX_ZBuffer = (word *) ((dword)Page + PageSize);
+	IX_ZBuffer = (word *) ((uintptr_t)Page + PageSize);
 
 	Left.Index = 1;
 	Right.Index = numVerts - 1;
@@ -434,7 +419,7 @@ static void IXFiller(IXVertexG *Verts, dword numVerts, void *Page)
 
 		float dy01 = Verts[1].y - Verts[0].y;
 		float dy02 = Verts[2].y - Verts[0].y;
-		float invArea = 1.0 / ((Verts[1].x - Verts[0].x) * dy02 - (Verts[2].x - Verts[0].x) * dy01);
+		float invArea = 1.0f / ((Verts[1].x - Verts[0].x) * dy02 - (Verts[2].x - Verts[0].x) * dy01);
 		ddx.dRZdx = invArea * ((Verts[1].RZ - Verts[0].RZ) * dy02 - (Verts[2].RZ - Verts[0].RZ) * dy01);
 		
 		//invArea *= 256.0; 
@@ -458,9 +443,9 @@ static void IXFiller(IXVertexG *Verts, dword numVerts, void *Page)
 
 	dword y, SectionHeight;
 	y = Fist(Verts[0].y);
-	dword *Scanline = (dword *)((dword)Page + VESA_BPSL * y);
-	word *ZScanline = (word *)((dword)Page + PageSize + sizeof(word) * XRes * y);
-	long Width;
+	dword *Scanline = (dword *)((uintptr_t)Page + VESA_BPSL * y);
+	word *ZScanline = (word *)((uintptr_t)Page + PageSize + sizeof(word) * XRes * y);
+	int32_t Width;
 	
 	// Iterate over sections
 	SectionHeight = (Left.ScanLines < Right.ScanLines) ? Left.ScanLines : Right.ScanLines;
@@ -471,7 +456,7 @@ static void IXFiller(IXVertexG *Verts, dword numVerts, void *Page)
 		{
 
 			// *** Draw scan line *** //
-			long lx, rx;
+			int32_t lx, rx;
 			lx = Fist(Left.x);
 			dword *SpanPtr = Scanline + lx;
 			word *ZSpanPtr = ZScanline + lx;
@@ -489,7 +474,7 @@ static void IXFiller(IXVertexG *Verts, dword numVerts, void *Page)
 			if (Width>1)
 			{
 				rWidth = //65536/Width;
-					Fist(65536.0 / (Right.x - Left.x));
+					Fist(65536.0f / (Right.x - Left.x));
 				sdword delta;
 				delta = ((sdword)Right.R - (sdword)Left.R) >> 8;
 				dRdx = delta * rWidth >> 16;
@@ -559,11 +544,11 @@ AfterScanConv:
 
 
 const dword maximalNgon = 16;
-static dword *l_TestTexture = NULL;
-static char l_IXMemBlock[sizeof(IXVertexG) * (maximalNgon+1)];
-static IXVertexG *l_IXArray = (IXVertexG *)( ((dword)l_IXMemBlock + 0xF) & (~0xF) );
-static Material DummyMat;
-static Texture DummyTex;
+thread_local static dword *l_TestTexture = NULL;
+thread_local static char l_IXMemBlock[sizeof(IXVertexG) * (maximalNgon+1)];
+thread_local static IXVertexG *l_IXArray = (IXVertexG *)( ((uintptr_t)l_IXMemBlock + 0xF) & (~0xF) );
+thread_local static Material DummyMat;
+thread_local static Texture DummyTex;
 
 
 #define ENABLE_PIXELCOUNT
@@ -615,13 +600,13 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 	IXFiller(l_IXArray, numVerts, VPage);
 }
 
-void IX_Prefiller_GZ(Vertex **V, dword numVerts)
+void IX_Prefiller_GZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoop;
 	PrefillerCommon(V, numVerts);
 }
 
-void IX_Prefiller_GAcZ(Vertex **V, dword numVerts)
+void IX_Prefiller_GAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoopT;
 	PrefillerCommon(V, numVerts);

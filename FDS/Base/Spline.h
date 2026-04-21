@@ -37,12 +37,12 @@ struct SplineKey
 // Total: [16 Bytes+88 Bytes per Key]
 struct Spline
 {
-	DWord NumKeys,CurKey;
-	SplineKey *Keys;
-	DWord Flags;
+	DWord NumKeys = 0,CurKey = 0;
+	SplineKey *Keys				= nullptr;
+	DWord Flags					= 0;
 	void print() {
 		printf("Flags: %X\n", Flags);
-		for (int i = 0; i < NumKeys; ++i) {
+		for (auto i = 0UL; i < NumKeys; ++i) {
 			Keys[i].print();
 			printf("\n");
 		}

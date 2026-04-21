@@ -62,7 +62,6 @@ void ReadVertList(unsigned int EndPos)
 {
   unsigned short Verts;
   Vector Pos;
-  int a;
   TriMesh *T = Cur_Tri;
   Vertex *Vtx,*VE;
 
@@ -91,7 +90,6 @@ void ReadFaceList(unsigned int EndPos)
   unsigned short Faces;
   unsigned short A,B,C;
   unsigned short Flag;
-  int a;
   TriMesh *T = Cur_Tri;
   Face *F,*FE;
   Vertex *Vtx = T->Verts;
@@ -125,7 +123,6 @@ void ReadFaceMaterial(unsigned int EndPos)
   unsigned short n;
   Material *M;
   char *s;
-  int a;
   Face *F = Cur_Tri->Faces;
 
   ReadASCIIZ(&s);
@@ -152,7 +149,6 @@ void ReadMapList(unsigned int EndPos)
 {
   unsigned short Verts;
   float u,v;
-  int a;
   TriMesh *T = Cur_Tri;
   Vertex *Vtx = T->Verts,*VE;
 
@@ -176,8 +172,6 @@ void ReadTranslation(unsigned int EndPos)
   Matrix TransMatrix;
   Vector TransPivot;
   Vector U;
-  int a;
-  float L;
   Vertex *Vtx = Cur_Tri->Verts,*VE = Vtx + Cur_Tri->VIndex;
 
   Read(TransMatrix,sizeof(Matrix));
@@ -196,7 +190,6 @@ void ReadTranslation(unsigned int EndPos)
 void ReadCamera(unsigned int EndPos)
 {
   Vector Source,Target;
-  float  Roll,FOV;
   Camera *Cm;
 //  printf("<3DS:Cam> Reading a Camera object...\n");
   New_Object();

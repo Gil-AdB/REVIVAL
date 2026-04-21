@@ -1,15 +1,15 @@
-#include "REV.H"
+#include "Rev.h"
 
 static Scene *Endc;
 
-static long CHPartTime = (long) (20.0f*100);
+static int32_t CHPartTime = (int32_t) (20.0f*100);
 
 void Initialize_End()
 {
 	Endc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
 	memset(Endc,0,sizeof(Scene));
-	LoadFLD(Endc,"Scenes\\End.FLD");
-	CHPartTime = (long)(100.0f*(Endc->EndFrame-Endc->StartFrame)/30.0f);
+	LoadFLD(Endc,"SCENES/End.FLD");
+	CHPartTime = (int32_t)(100.0f*(Endc->EndFrame-Endc->StartFrame)/30.0f);
 
 //	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
 	Preprocess_Scene(Endc);
@@ -22,7 +22,7 @@ void Initialize_End()
 
 void Run_End()
 {
-	long Polys = 0;
+	int32_t Polys = 0;
 	TriMesh *T;
 	Omni *O;
 

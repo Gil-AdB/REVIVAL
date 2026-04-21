@@ -1,4 +1,4 @@
-#include "REV.H"
+#include "Rev.h"
 
 #include "CRASH.H"
 
@@ -10,7 +10,7 @@ void Initialize_Crash()
 {
 	CrashSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
 	memset(CrashSc,0,sizeof(Scene));
-	LoadFLD(CrashSc,"Scenes\\Crash.FLD");
+	LoadFLD(CrashSc,"SCENES/Crash.FLD");
 	CrPartTime = 1.5f*100.0f*(CrashSc->EndFrame-CrashSc->StartFrame)/30.0f;
 
 //	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
@@ -39,7 +39,7 @@ void Run_Crash()
 {
 	char MSGStr[128];
 
-	long Polys = 0;
+	int32_t Polys = 0;
 	TriMesh *T;
 	Omni *O;
 

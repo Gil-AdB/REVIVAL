@@ -8,7 +8,7 @@
 #endif
 #include <math.h>
 #include <stdlib.h>
-#include <dos.h>
+//#include <dos.h>
 #include <stdio.h>
 
 #include "I_defs.h"

@@ -11,21 +11,22 @@ Vector FV,FT,ColN,OldIS;
 Vector Grav(0.0,-0.01,0.0);
 static Face *ColFace;
 static Matrix NormConv;
-static const long Max_Collision_Det = 4;
-static long CAttempt;
+static const int32_t Max_Collision_Det = 4;
+static int32_t CAttempt;
 
 Vertex **ColVtx_Stack = new Vertex * [30],**CVS;
 Edge **ColEdge_Stack = new Edge * [50],**CES;
 static Face **ColFace_Stack = new Face * [15],**CFS;
 static Vector *ColNorm_Stack = new Vector[50],*CVV;
+float AspectRatio = 4.0 / 3.0;
+
 
 void CalcPersp(Camera *Cm)
 {
-	float TanFOV;
-	float AspectRatio = (float)(YRes*4)/(float)(XRes*3);
-	TanFOV = tan((Cm->IFOV/2.0)/180.0*PI);
+	const float screenAR = (float)(YRes) / (float)(XRes);
+	const float TanFOV = tanf((Cm->IFOV/2.0f)/180.0f*PI);
 	Cm->PerspX = CntrX / TanFOV;
-	Cm->PerspY = Cm->PerspX * AspectRatio;
+	Cm->PerspY = Cm->PerspX * AspectRatio * screenAR;
 }
 
 float LensToFOV(float lens)
@@ -42,7 +43,7 @@ float LensToFOV(float lens)
 	for (i = 0; i < 9; i++) if (lens == lens_table[i].lens) {
 		return lens_table[i].fov;
   }
-  return 15.0 / lens * 160;
+  return 15.0f / lens * 160.0f;
 }
 
 
@@ -51,16 +52,15 @@ void Shatter_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat)
 {
   Vector CamVec,Temp;
   float VecLen,SinX,CosX,SinY,CosY,SinZ,CosZ;
-  int a;
 
   Vector_Sub(Target,Source,&CamVec);
-  VecLen=sqrt(CamVec.x*CamVec.x+CamVec.y*CamVec.y+CamVec.z*CamVec.z);
-  Temp.x=-atan2(CamVec.x,CamVec.z);
-  Temp.y=asin(CamVec.y/VecLen);
+  VecLen=sqrtf(CamVec.x*CamVec.x+CamVec.y*CamVec.y+CamVec.z*CamVec.z);
+  Temp.x=-atan2f(CamVec.x,CamVec.z);
+  Temp.y=asinf(CamVec.y/VecLen);
   Temp.z=-Roll*PI/180.0;
-  SinX=sin(Temp.x); CosX=cos(Temp.x);
-  SinY=sin(Temp.y); CosY=cos(Temp.y);
-  SinZ=sin(Temp.z); CosZ=cos(Temp.z);
+  SinX=sinf(Temp.x); CosX=cosf(Temp.x);
+  SinY=sinf(Temp.y); CosY=cosf(Temp.y);
+  SinZ=sinf(Temp.z); CosZ=cosf(Temp.z);
   CamMat[0][0]=SinX*SinY*SinZ+CosX*CosZ;
   CamMat[0][1]=CosY*SinZ;
   CamMat[0][2]=SinX*CosZ-CosX*SinY*SinZ;
@@ -75,7 +75,7 @@ void Shatter_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat)
 void Kick_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat)
 {
   Vector UP,N,V,U;
-  float S = sin(Roll*PI/180.0),C = cos(Roll*PI/180.0);
+  float S = sinf(Roll*PI/180.0f),C = cosf(Roll*PI/180.0f);
   float F;
 
   Vector_Form(&UP,0,1,0);
@@ -86,9 +86,9 @@ void Kick_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat)
 //  UP.z=0;
 //  Cross_Product(&UP,&V,&N);
   N.x = V.z;
-  N.y = 0.0;
+  N.y = 0.0f;
   N.z =-V.x;
-  F = 1.0/sqrt(N.x*N.x+N.z*N.z);
+  F = 1.0f/sqrtf(N.x*N.x+N.z*N.z);
   N.x *= F;
   N.z *= F;
   Cross_Product(&V,&N,&U);
@@ -100,8 +100,8 @@ void Kick_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat)
 //  Matrix_Rotation(M,-Roll*PI/180.0,0,0);
 }
 
-#define Camera_Sphere 25.0
-#define Camera_SphereTINY 24.9
+#define Camera_Sphere 25.0f
+#define Camera_SphereTINY 24.9f
 #define Camera_Sphere2 Camera_Sphere*Camera_Sphere
 #define Camera_Sphere2TINY Camera_SphereTINY*Camera_SphereTINY
 
@@ -201,10 +201,10 @@ void Advanced_Collision_Detection()
 {
   TriMesh *T;
   Face *F,*FEnd;
-  Face **FP,**FPEnd;
+  Face **FP;
   Vector U,AP,V,TV,W;
   Vector CV,*VP;
-  long Still;
+  int32_t Still;
   float f,d;
   Face **Col_Buff,**Prev;
   Vector *Col_NBuff;
@@ -370,7 +370,7 @@ struct LineSeg
 };
 
 LineSeg *LEBuf = NULL;
-DWord LEBufSize;
+size_t LEBufSize;
 
 // must be robust (inaccuracy tolerant)
 // updates A as necessary in case of overlapping.
@@ -393,8 +393,8 @@ void Initiate_LEBuf(Scene *Sc)
 	TriMesh *T;
 	Face *F,*FE;
 
-	long Polys = 0;
-	long EffLines = 0;
+	int32_t Polys = 0;
+	int32_t EffLines = 0;
 	float t1,t2,t3;
 
 	for(T=Sc->TriMeshHead;T;T=T->Next)
@@ -531,7 +531,6 @@ void Vertex2SphereIntersect2D(Vertex *Vtx,Vector *Pos,Vector *Vel)
 void A2DC(Scene *Sc,Vector *Pos,Vector *Vel)
 {
 	TriMesh *T;
-	Face *F,*FE;
 	Vertex *Vtx,*VE;
 
 	LineSeg *L,*LE;
@@ -552,7 +551,7 @@ void A2DC(Scene *Sc,Vector *Pos,Vector *Vel)
 	}
 }
 
-// Note! This function uses the 'long dTime' global variable.
+// Note! This function uses the 'int32_t dTime' global variable.
 // this means that: the camera is passed positioned at its previous
 // location. it will attempt to progress by 'dTime * Vel'.
 void Advanced2DCollision(Scene *Sc,Vector *Pos,Vector *Vel)
@@ -700,6 +699,6 @@ void Dynamic_Camera()
 	Vector_SelfAdd(&FV,&V);*/
 
 	// falloff
-  Vector_SelfScale(&FV,exp(-Vel_FallOff*dTime));
-  Vector_SelfScale(&FT,exp(-Rot_FallOff*dTime));
+  Vector_SelfScale(&FV,expf(-Vel_FallOff*dTime));
+  Vector_SelfScale(&FT,expf(-Rot_FallOff*dTime));
 }

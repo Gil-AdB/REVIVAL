@@ -4,8 +4,11 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <string.h>
-#include <conio.h>
+//#include <conio.h>
 #include <Base/Vector.h>
+#include <memory>
+#include <vector>
+#include <algorithm>
 
 #ifdef _C_WATCOM
 #include <i86.H>
@@ -16,27 +19,56 @@
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
-#include "VESA/VESA.H"
+#include "VESA/Vesa.h"
+#include "FRUSTRUM.H"
+
+//#define TRACE_OBJECTS
+
+thread_local FrustumClipper clipper;
+
 
 float frand() {
-	return static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
+	return static_cast <float> (RAND_15()) / static_cast <float> (RAND_15_MAX);
 }
 
 // Front-to-back sorting used together with ZBuffer.
 #define FRONT_TO_BACK_SORTING
 
+//struct SceneContext {
+//	std::unique_ptr<Scene>  CurScene;
+//	std::vector<Face *>     FList;
+//	std::vector<Face *>     SList;
+//	Face                    *DoFace;
+//	int32_t CPolys,COmnies,CPcls,CAll,Polys;
+//	char Cam_HeadLight;
+//	float CurFrame;
+//	float g_zscale;
+//	float g_zscale256;
+//	int32_t g_FrameTime;
+//	float Ambient_Factor;
+//	float Diffusive_Factor;
+//	float Specular_Factor;
+//	float Range_Factor;
+//};
+
+
 Scene *CurScene;
-Face **FList;
-Face **SList;
-Face *DoFace; // mar gamish, ta'ase partsuf!
-long CPolys,COmnies,CPcls,CAll,Polys;
-char *TxtrBuf,*TxtrAlign;
-float Exec_FPS;
+Face **FList = nullptr;
+Face **SList = nullptr;
+//Face *DoFace; // mar gamish, ta'ase partsuf!
+int32_t CPolys,COmnies,CPcls,CAll,Polys;
+//char *TxtrBuf,*TxtrAlign;
+//float Exec_FPS;
 Material Default_Mat;
+#ifdef PORTABLE_CODE
+unsigned int OldFPUCW, FPUCW;
+#else
 unsigned short int OldFPUCW,FPUCW;
+#endif
+
 dword OldMXCSR, CurMXCSR;
 char **MsgStr;
-long *MsgClock;
+int32_t *MsgClock;
 DWord *MsgID;
 char Cam_HeadLight;
 float CurFrame;
@@ -53,8 +85,10 @@ float Diffusive_Factor;
 float Specular_Factor;
 float Range_Factor;
 
-long Frames;
-float dTime;
+int32_t Frames;
+#ifndef __clang__
+extern float dTime;
+#endif
 
 Texture Phong_Mapping;
 Font *Font1;
@@ -64,28 +98,74 @@ VESA_Surface Layer2;
 
 #include "GENERAL.H"
 #include "SORTS.H"
+#include <Threads.h>
+#include <FILLERS/TheOtherBarry.h>
+#include <FILLERS/Mekalele.h>
 
 // RULEZ
 #ifdef _C_WATCOM
 void DO_NOP();
 #pragma aux DO_NOP="NOP";
 #endif
-#ifdef WIN32
 void DO_NOP()
 {
-	__asm {
-		NOP
+}
+
+Vector Transform_Vec(Vector Pos, Vector Source, Matrix Mat) {
+	Vector U, V, S;
+
+	// postrioric Offset Vector.
+	Vector_Sub(&Pos, &Source, &U);
+	MatrixXVector(Mat, &U, &S);
+	V.x = CntrEX * S.z + FOVX * S.x;
+	V.y = CntrEY * S.z - FOVY * S.y;
+	V.z = S.z;
+
+	//MatrixXVector(Mat, &V, &AP);
+	//Vector_SelfAdd(&S, &AP);
+	V.x /= V.z;
+	V.y /= V.z;
+
+	return V;
+}
+
+void Draw_Line_32Bit_ForKids(Vertex* V1, Vertex* V2);
+void Draw_Line_32Bit(Vertex* V1, Vertex* V2);
+
+void Bivex_Frustrum_Perspective(Vertex* A, Vertex* B, void (*Filler)(Vertex* V1, Vertex* V2));
+
+void DrawSpline(Spline Pos, Vector CamISource, int EndFrame) {
+	Vertex Last, Cur;
+	for (auto frame = 0; frame < EndFrame; ++frame) {
+		Vector IPos;
+		Spline_Calc_3D(&Pos, frame, &IPos);
+		IPos = Transform_Vec(IPos, CamISource, View->Mat);
+		//auto pos = ((Fist(IPos.x * 4) + Fist(IPos.y) * VESA_BPSL));
+		//if (pos < PageSize) {
+		//	*(dword*)(VPage + pos) = 0xffffffff;
+		//}
+		Cur.PX = IPos.x;
+		Cur.PY = IPos.y;
+		if (frame != 0) {
+			if (Last.PX < XRes-1 && Last.PY < YRes-1 && Last.PX > 0 && Last.PY > 0 &&
+				Cur.PX < XRes-1 && Cur.PY < YRes-1 && Cur.PX > 0 && Cur.PY > 0) {
+
+				Draw_Line_32Bit_ForKids(&Last, &Cur);
+			}
+		}
+		Last.PX = Cur.PX;
+		Last.PY = Cur.PY;
 	}
 }
-#endif
 
-void Animate_Objects(Scene *Sc)
+
+void Animate_Objects(Scene *Sc, bool SkipCameraAnimation)
 {
 	TriMesh *T;
 	Omni *Om;
 	Object *Obj;
 	Vector U,*W,Z;
-	Matrix M, PathMat;
+	Matrix M, PathMat, tmp;
 	FILE *F;
     Vector ZeroVector(0.0f, 0.0f, 0.0f);
 
@@ -108,7 +188,7 @@ void Animate_Objects(Scene *Sc)
 			//    Spline_Calc_4D(&T->Rotate,CurFrame,&T->IRot);
 			
 			Convert_Quat2Mat(&T->IRot,T->RotMat);
-			//    fprintf(F,"%d:((%1.3f,%1.3f,%1.3f),(%1.3f,%1.3f,%1.3f),(%1.3f,%1.3f,%1.3f))\n\n",(long)CurFrame,T->RotMat[0][0],T->RotMat[0][1],T->RotMat[0][2],T->RotMat[1][0],T->RotMat[1][1],T->RotMat[1][2],T->RotMat[2][0],T->RotMat[2][1],T->RotMat[2][2]);
+			//    fprintf(F,"%d:((%1.3f,%1.3f,%1.3f),(%1.3f,%1.3f,%1.3f),(%1.3f,%1.3f,%1.3f))\n\n",(int32_t)CurFrame,T->RotMat[0][0],T->RotMat[0][1],T->RotMat[0][2],T->RotMat[1][0],T->RotMat[1][1],T->RotMat[1][2],T->RotMat[2][0],T->RotMat[2][1],T->RotMat[2][2]);
 		}
 		
 		if (T->Flags&Tri_AlignToPath) 
@@ -127,10 +207,16 @@ void Animate_Objects(Scene *Sc)
 			
 			Kick_Camera(&ZeroVector, &T->Heading, 0.0, PathMat);
 			Matrix_Transpose(PathMat);
-			Matrix_Copy(T->RotMat,PathMat);
-			
+
+			Spline_Calc_3D(&T->Rotate, CurFrame, &U);
+			Euler_Angles(T->RotMat, 0, 0, U.z);
+
+
+			MatrixXMatrix(PathMat, T->RotMat, tmp);
+			Matrix_Copy(T->RotMat,tmp);
 		}
 		
+		memcpy(T->UnscaledRotMat, T->RotMat, sizeof(T->RotMat));
 		W = (Vector *)T->RotMat;
 		Vector_SelfScale(W,T->IScale.x); W++;
 		Vector_SelfScale(W,T->IScale.y); W++;
@@ -159,32 +245,37 @@ void Animate_Objects(Scene *Sc)
 		Om->rRange = 1.0f/Om->IRange;
 		//		Om->IRange*=Om->IRange;
 	}
-	if (View!=&FC)
+	if (View!=&FC && !SkipCameraAnimation)
 	{
 		Spline_Calc_3D(&View->Source,CurFrame,&View->ISource);
 		Spline_Calc_3D(&View->Target,CurFrame,&View->ITarget);
 		Spline_Calc_1D(&View->Roll,CurFrame,&View->IRoll);
 		Spline_Calc_1D(&View->FOV,CurFrame,&View->IFOV);
-		if (View->Flags&Cam_Euler)
+		if (View->Flags & Cam_Euler) {
 			//Euler_Angles(View->Mat,View->ITarget.x,View->ITarget.y,View->ITarget.z);
-			Euler_Angles(View->Mat,View->ITarget.y,View->ITarget.x,-View->ITarget.z);
-		else
-			Kick_Camera(&View->ISource,&View->ITarget,View->IRoll,View->Mat);
+			Euler_Angles(View->Mat, View->ITarget.y, View->ITarget.x, -View->ITarget.z);
+		} else {
+			Kick_Camera(&View->ISource, &View->ITarget, View->IRoll, View->Mat);
+		}
 	}
 	
 	CalcPersp(View);
+	FOVX = View->PerspX;
+	FOVY = View->PerspY;
 	
-	FOVX=View->PerspX;
-	FOVY=View->PerspY;
 	
 	// lalala, HARARCHIA , Ver 3, it now rulati
 	for (Obj=Sc->ObjectHead;Obj;Obj=Obj->Next)
 	{
-		if (Obj->Pivot.is_zero()) {
-			U.x = U.y = U.z = 0.0f;
-		} else {
-			MatrixXVector(*Obj->Rot, &Obj->Pivot, &U);
+		if (Obj->Type == Obj_Omni) {
+			Matrix_Identity(*Obj->Rot);
 		}
+		//if (Obj->Pivot.is_zero()) {
+		MatrixXVector(*Obj->Rot, &Obj->Pivot, &U);
+//			U.x = U.y = U.z = 0.0f;
+		//} else {
+			//MatrixXVector(*Obj->Rot, &Obj->Pivot, &U);
+		//}
 		//printf("%s U: \n", Obj->Name);
 		//U.print();
 		//printf("\n");
@@ -226,10 +317,78 @@ void Vertex_Loop1(Vertex *Vert,Vertex *VEnd,Matrix M,Vector *V)
 		if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 		if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 		if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-		if (Vtx->PY>=YRes_1) Vtx->Flags|=Vtx_VisDown;
+		if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
 	}
 }
 
+void calcVisibilityFlags(Scene* Sc, Vertex* Vtx) {
+	Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
+	//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+	if (Vtx->TPos.z > Sc->NZP) {
+		Vtx->RZ = 1.0 / Vtx->TPos.z;
+		Vtx->PX = Vtx->TPos.x * Vtx->RZ;
+		Vtx->PY = Vtx->TPos.y * Vtx->RZ;
+		//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+		//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+		Vtx->UZ = Vtx->U * Vtx->RZ;
+		Vtx->VZ = Vtx->V * Vtx->RZ;
+		if (Vtx->PX < 0) Vtx->Flags |= Vtx_VisLeft;
+		if (Vtx->PX >= XRes) Vtx->Flags |= Vtx_VisRight;
+		if (Vtx->PY < 0) Vtx->Flags |= Vtx_VisUp;
+		if (Vtx->PY >= YRes) Vtx->Flags |= Vtx_VisDown;
+		if (Vtx->TPos.z > Sc->FZP) Vtx->Flags |= Vtx_VisFar;
+	} else Vtx->Flags |= Vtx_VisNear;
+}
+
+void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Particle& p) {
+	Vector V;
+
+	Vector VelDir = p.Vel;
+	Vector_Norm(&VelDir);
+
+	Vector src = p.V.Pos - p.TrailLength * VelDir;
+	Vector targ = p.V.Pos;
+
+	Vector d1 = (src - View->ISource).cross(targ - View->ISource);
+	Vector_Norm(&d1);
+
+	int quad_uvs[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+	Vector* centerPoints[2] = { &src, &targ };
+	Vertex* quad = p.TrailV;
+	for (const auto& uv : quad_uvs) {
+		float u = float(uv[0]);
+		int v = uv[1];
+		// interpolate along middle of raindrop quad
+
+		const Vector& tmp = *(centerPoints[v]);
+		Vertex& A = *quad;
+		V = tmp + d1 * (u - 0.5f) * p.TrailWidth - View->ISource;
+		MatrixXVector(View->Mat, &V, &A.TPos);
+
+		A.TPos.x = A.TPos.z * CntrX + A.TPos.x * FOVX;
+		A.TPos.y = A.TPos.z * CntrY - A.TPos.y * FOVY;
+		A.RZ = 1.0f / A.TPos.z;
+		A.PX = A.TPos.x * A.RZ;
+		A.PY = A.TPos.y * A.RZ;
+
+		A.LA = A.LR = A.LG = A.LB = 255.0;
+
+		calcVisibilityFlags(Sc, &A);
+		++quad;
+	}
+
+	for (size_t i = 0; i != 2; ++i) {
+#ifdef FRONT_TO_BACK_SORTING
+		p.TrailF[i].SortZ.F = 2 * Sc->FZP - p.V.TPos.z;
+#else
+		p.TrailF[i].SortZ.F = Sc->FZP - p.V.TPos.z;
+#endif
+	}
+	*Ins++ = &p.TrailF[0];
+	*Ins++ = &p.TrailF[1];
+}
+
+#define DEBUG_PARTICLES 0
 
 void Transform_Objects(Scene *Sc)
 {
@@ -243,14 +402,15 @@ void Transform_Objects(Scene *Sc)
 	Face *F,*FEnd;
 	float PX=FOVX,PY=FOVY,Temp;
 	float dz;
-	long *pdz = (long *)(&dz);
-	long I;
+	int32_t *pdz = (int32_t *)(&dz);
+	int32_t I;
 	Face **Ins = FList;
 	float *f = (float *)(&M);
 	float *fv;
 
 	float fzp = Sc->FZP;
-	
+
+#if not(DEBUG_PARTICLES)
 	Object *Obj; 
 //	for (T=Sc->TriMeshHead;T;T=T->Next)
 	for(Obj=Sc->ObjectHead; Obj; Obj=Obj->Next)
@@ -275,6 +435,7 @@ void Transform_Objects(Scene *Sc)
 		// postrioric Offset Vector.
 		Vector_Sub(&T->IPos,&View->ISource,&U);
 		MatrixXVector(View->Mat,&U,&S);
+
 		V.x = CntrEX*S.z+PX*S.x;
 		V.y = CntrEY*S.z-PY*S.y;
 		V.z = S.z;
@@ -432,7 +593,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 				if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-				if (Vtx->PY>=YRes_1) Vtx->Flags|=Vtx_VisDown;
+				if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
 				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
@@ -448,7 +609,7 @@ Regular:
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				if (Vtx->TPos.z>Sc->NZP)
 				{
 					Vtx->RZ=1.0/Vtx->TPos.z;
@@ -461,7 +622,7 @@ Regular:
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-					if (Vtx->PY>=YRes_1) Vtx->Flags|=Vtx_VisDown;
+					if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
 					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				//      printf("Regular shit!\n");
@@ -527,7 +688,7 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
 				if (Vtx->PX>=XRes) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
-				if (Vtx->PY>=YRes_1) Vtx->Flags+=Vtx_VisDown;
+				if (Vtx->PY>=YRes) Vtx->Flags+=Vtx_VisDown;
 				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
@@ -541,7 +702,7 @@ ERegular:
 				Vector_Add(&U,&V,&Vtx->TPos);
 				
 				Vtx->Flags = 0;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
@@ -561,7 +722,7 @@ ERegular:
 					if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft;
 					if (Vtx->PX>=XRes) Vtx->Flags+=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
-					if (Vtx->PY>=YRes_1) Vtx->Flags+=Vtx_VisDown;
+					if (Vtx->PY>=YRes) Vtx->Flags+=Vtx_VisDown;
 					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags=Vtx_VisNear;
 				
@@ -571,12 +732,70 @@ ERegular:
 		}
 AfterXForm:FEnd=T->Faces+T->FIndex;
 	for (F=T->Faces;F<FEnd;F++)
-		if ((!(F->A->Flags&F->B->Flags&F->C->Flags&Vtx_Visible))
+		if ((!F->VisibilityFlagsAll())
 			&&((F->Txtr->Flags&Mat_TwoSided)
 			||(AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) // Backface culling
 			//||(1) // no backface culling
 			))
 		{
+			if (0 != (F->Flags & Face_Reflective)) {
+				// clobber U1, V1, etc. with the equilateral-whatever coordinates matching
+				// the direction from camera to the specific vertex, reflected on the face's plane
+				float eu[3];
+				float ev[3];
+				size_t i = 0;
+				Vector wsPos[3];
+
+				for (Vertex* v : { F->A, F->B, F->C }) {
+					wsPos[i] = T->RotMat * v->Pos + T->IPos;
+					++i;
+				}
+
+				// auto cv = (T->BSphereCtr - View->ISource) * 0.9 + View->ISource;
+				auto cv = View->ISource;
+				float optimalDistFromPlane = fabs(T->BSphereCtr * F->N - F->NormProd);
+				float viewDistFromPlane = fabs(AP * F->N - F->NormProd);
+				if (viewDistFromPlane > optimalDistFromPlane) {
+					float hackDistFromPlane = pow(viewDistFromPlane - optimalDistFromPlane, 0.8) + optimalDistFromPlane;
+					Vector bsWorldPos;
+					MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorldPos);
+					bsWorldPos += T->IPos;
+
+					auto pullDir = bsWorldPos - View->ISource;
+					float step = pullDir * F->N;
+					cv += (hackDistFromPlane - viewDistFromPlane) / step * pullDir;
+				}
+				auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
+				Vector_Norm(&n);
+				i = 0;
+				for (Vertex* v : { F->A, F->B, F->C }) {
+					auto d = wsPos[i] - cv;
+					d -= (d * n) * 2.0f * n;
+					Vector_Norm(&d);
+					float lat = asin(d.y);
+					float lon = atan2(-d.z, -d.x);
+
+					eu[i] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
+					ev[i] = 0.5 - 0.5 * lat / (PI / 2.0);
+					++i;
+				}
+
+				// U-wrapping
+				if (std::max({ eu[0], eu[1], eu[2] }) - std::min({ eu[0], eu[1], eu[2] }) > 0.8) {
+					for (int i = 0; i < 3; ++i) {
+						if (eu[i] < 0.5) {
+							eu[i] += 1;
+						}
+					}
+				}
+
+				F->EU1 = eu[0];
+				F->EV1 = ev[0];
+				F->EU2 = eu[1];
+				F->EV2 = ev[1];
+				F->EU3 = eu[2];
+				F->EV3 = ev[2];
+			}
 			*Ins++ = F;
 
 #ifdef FRONT_TO_BACK_SORTING
@@ -610,7 +829,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 
 			}
 
-			static long BiasedSortValues[] = {0, 0, (long)0xFFFFFFFF};
+			static int32_t BiasedSortValues[] = {0, 0, (int32_t)0xFFFFFFFF};
 			if (T->SortPriorityBias)
 				F->SortZ.F = BiasedSortValues[T->SortPriorityBias];
 #else
@@ -664,23 +883,46 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 			*Ins++ = &O->F;
 		}
 	}
+
 	COmnies = (Ins-FList)-CPolys;
-	for(I=0;I<Sc->NumOfParticles;I++)
-		if (Sc->Pcl[I].Flags&Particle_Active)
-			if ((dz=Sc->Pcl[I].V.TPos.z)>=Sc->NZP) {
-				F = &Sc->Pcl[I].F;
-				//dz *=-16384;
-				//dz +=0x7FFFFFFF;
-				//RoundToInt(&F->SortZ.DW,dz);
-#ifdef FRONT_TO_BACK_SORTING
-				F->SortZ.F = 2*fzp-dz;
-#else
-				F->SortZ.F = fzp-dz;
 #endif
-				*Ins++ = F;
+	for (I = 0; I < Sc->NumOfParticles; I++) {
+		Particle& p = Sc->Pcl[I];
+
+		auto v = p.V.Pos - View->ISource;
+		
+		p.V.TPos = View->Mat * v;
+
+		if (p.V.TPos.z >= Sc->NZP)
+		{
+			p.V.RZ = 1.0 / p.V.TPos.z;
+			p.V.PX = CntrX + FOVX * p.V.TPos.x * p.V.RZ;
+			p.V.PY = CntrY - FOVY * p.V.TPos.y * p.V.RZ;
+			p.V.Flags = 0;
+		} else {
+			p.V.Flags |= Vtx_VisNear;
+		}
+
+
+		if (p.Flags & Particle_Active) {
+			if ((dz = p.V.TPos.z) >= Sc->NZP) {
+				if (p.TrailLength == 0) {
+					F = &Sc->Pcl[I].F;
+#ifdef FRONT_TO_BACK_SORTING
+					F->SortZ.F = 2 * fzp - dz;
+#else
+					F->SortZ.F = fzp - dz;
+#endif
+					*Ins++ = F;
+				} else {
+					addParticleTrail(Sc, Ins, p);
+				}
 			}
-			CAll = Ins-FList;
-			CPcls = CAll-COmnies-CPolys;
+		}
+	}
+
+	CAll = Ins-FList;
+	CPcls = CAll-COmnies-CPolys;
 }
 
 float Vector_CosAngleFAST(Vector *U,Vector *V)
@@ -981,7 +1223,7 @@ void StaticLighting(Scene *Sc)
 
 
 
-#ifdef __clang__
+#if defined(__clang__) || defined(PORTABLE_CODE)
 
 void Lighting(Scene *Sc)
 {
@@ -1470,45 +1712,140 @@ void Restore_Splines(Scene *Sc)
 	}
 }
 
+namespace renderns {
+	std::mutex					tileCounterMutex;
+	std::atomic<int>			tileCounter;
+	std::condition_variable		condition;
+};
+
+void RenderInner(float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(CurScene);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+
+	int32_t I = CAll;
+	Face** FLS = FList;//+CAll-1;
+	Vertex* A, * B, * C;
+
+	Vertex* V[4];
+
+	while (I--) {
+		Face* F = *FLS++;
+
+		// Get Mapping Coordinates from the rendered face.
+		A = F->A; B = F->B;
+		if (A == B) {
+			continue;
+		} else {
+			// Polygon - can further check the expression
+			// (A->Flags|B->Flags|C->Flags)&Vtx_Visible
+			// if it is zero, we can use something lighter than
+			// the frustrum clipper.
+			C = F->C;
+
+			auto flags = A->Flags & B->Flags & C->Flags;
+			if (flags & Vtx_Visible) continue;
+			RasterFunc filler;
+			if (F->Flags & Face_Reflective) {
+				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false);
+			} else {
+				clipper.Render(F, F->Filler, false);
+			}
+			//if (F->Flags & Face_Reflective) {
+			//	clipper.Render(F, IX_Prefiller_Reflective, true);
+			//}
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
+
+void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(CurScene);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+
+	int32_t I = CAll;
+	Face** FLS = FList;//+CAll-1;
+	Vertex* A, * B, * C;
+
+	Vertex* V[4];
+
+	while (I--) {
+		Face* F = *FLS++;
+
+		// Get Mapping Coordinates from the rendered face.
+		A = F->A; B = F->B;
+		if (A == B) {
+			continue;
+		} else {
+			// Polygon - can further check the expression
+			// (A->Flags|B->Flags|C->Flags)&Vtx_Visible
+			// if it is zero, we can use something lighter than
+			// the frustrum clipper.
+			C = F->C;
+
+			auto flags = A->Flags & B->Flags & C->Flags;
+			if (flags & Vtx_Visible) continue;
+			RasterFunc filler;
+			clipper.Render(F, Mekalele, false);
+			//if (F->Flags & Face_Reflective) {
+			//	clipper.Render(F, IX_Prefiller_Reflective, true);
+			//}
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
 void Render()
 {
-	long I = CAll;
-	Face **FLS = FList;//+CAll-1;
-	Vertex *A,*B,*C,*T;
-	TriMesh *Tri;
-	Edge **EP;
+	constexpr auto		numTilesX = 6;
+	constexpr auto		numTilesY = 4;
+	const auto			tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
+	const auto			tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 
-	Vertex *V[3];
+	renderns::tileCounter = 0;
+
+	for (auto j = 0; j < numTilesY; ++j) {
+		auto y1 = tileSizeY * j;
+		auto y2 = std::min(y1 + tileSizeY, YRes);
+		for (auto i = 0; i < numTilesX; ++i) {
+			auto x1 = tileSizeX * i;
+			auto x2 = std::min(x1 + tileSizeX, XRes);
+
+			ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInner(x1, y1, x2, y2); });
+			// RenderInner(x1, y1, x2, y2);
+		}
+	}
+
+	{
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::condition.wait(lock, [] {return renderns::tileCounter == numTilesX * numTilesY; });
+	}
+
+	int32_t I = CAll;
+	Face **FLS = FList;//+CAll-1;
+	Vertex *A,*B;
 	
 	while (I--)
 	{
-		DoFace=*FLS++;
+		Face *F = *FLS++;
 		
 		// Get Mapping Coordinates from the rendered face.
-		A=DoFace->A; B=DoFace->B; 
+		A=F->A; B=F->B; 
 				
 		// TODO: change this into a flag check
 		if (A == B)
 		{
 			// Particle/Sprite - no far-Z clipping
 			if (A->TPos.z < C_NZP) continue;
-			V[0] = A;
-			DoFace->Filler(V, 1);
-		} else {
-			// Polygon - can further check the expression
-			// (A->Flags|B->Flags|C->Flags)&Vtx_Visible
-			// if it is zero, we can use something lighter than
-			// the frustrum clipper.
-			C=DoFace->C;
-			A->U = DoFace->U1; A->V = DoFace->V1;
-			B->U = DoFace->U2; B->V = DoFace->V2;
-			C->U = DoFace->U3; C->V = DoFace->V3;
-			A->UZ = A->U * A->RZ; A->VZ = A->V * A->RZ;
-			B->UZ = B->U * B->RZ; B->VZ = B->V * B->RZ;
-			C->UZ = C->U * C->RZ; C->VZ = C->V * C->RZ;
-
-			if ((A->Flags&B->Flags&C->Flags)&Vtx_Visible) continue;
-			FrustrumClipper();
+			F->Filler(F, &A, 1, 0);
 		}
 	}
 
@@ -1517,17 +1854,38 @@ void Render()
 		TBR_Render(CurScene);
 	}
 	
-	//test for edges stuff
-	/*  for(Tri=CurScene->TriMeshHead;Tri;Tri=Tri->Next)
+
+#ifdef TRACE_OBJECTS
+	//printf("frame: %f\n\t", CurFrame);
+	Camera* Cam = CurScene->CameraHead;
+
+	for (Object* O = CurScene->ObjectHead; O; O = O->Next)
 	{
-	if (Tri->Flags&Tri_Invisible) continue;
-    for(I=0;I<Tri->EIndex;I++)
-	if (Tri->Edges[I].Flags&Edge_Concave)
-	Bivex_Frustrum_Perspective(Tri->Edges[I].A,Tri->Edges[I].B,&Draw_Line_32Bit_ForKids);
-	else
-	Bivex_Frustrum_Perspective(Tri->Edges[I].A,Tri->Edges[I].B,&Draw_Line_32Bit);
-}*/
-	
+		if (O->Type != Obj_TriMesh) continue;
+		TriMesh* T = (TriMesh*)O->Data;
+		if (!(T->Flags & Tri_Invisible) && T->Flags & Tri_Ahead) {
+			if (T->BSphereScreenPos.x < XRes && T->BSphereScreenPos.y < YRes && T->BSphereScreenPos.x > 0 && T->BSphereScreenPos.y > 0) {
+				char text[255] = { 0 };
+				snprintf(text, 254, "%s (%d)", O->Name, O->Number);
+				OutTextXY(VPage, T->BSphereScreenPos.x, T->BSphereScreenPos.y, text, 255);
+			}
+
+			DrawSpline(T->Pos, View->ISource, Fist(CurScene->EndFrame));
+		}
+	}
+#endif
+
+	//test for edges stuff
+/*	for(Tri=CurScene->TriMeshHead;Tri;Tri=Tri->Next)
+	{
+		if (Tri->Flags&Tri_Invisible) continue;
+		for(I=0;I<Tri->EIndex;I++)
+		if (Tri->Edges[I].Flags&Edge_Concave)
+		Bivex_Frustrum_Perspective(Tri->Edges[I].A,Tri->Edges[I].B,&Draw_Line_32Bit_ForKids);
+		else
+		Bivex_Frustrum_Perspective(Tri->Edges[I].A,Tri->Edges[I].B,&Draw_Line_32Bit);
+    }
+	*/
 /*  for(EP = ColEdge_Stack;EP<CES;EP++)
     Bivex_Frustrum_Perspective(EP[0]->A,EP[0]->B,&Draw_Line_32Bit_ForKids);*/
 	
@@ -1571,13 +1929,13 @@ char Check_Texture_Memory_Range(Scene *Sc)
 		}
 	}
 	//  for(M=MatLib;M;M=M->Next)
-	//    printf("Mat-lib = %xh ==> txtr = %xh\n",(long)M,(long)(M->Txtr));
+	//    printf("Mat-lib = %xh ==> txtr = %xh\n",(int32_t)M,(int32_t)(M->Txtr));
 	return 1;
 }
 
 void SetCurrentScene(Scene *Sc)
 {
-	InitClipperViewport(Sc);
+	clipper.InitViewport(Sc);
 	CurScene = Sc;
 	g_zscale = (float)0xff00 / (CurScene->FZP * 1.1);
 	g_zscale256 = g_zscale / 256.0f;
@@ -1592,14 +1950,14 @@ void SetCurrentScene(Scene *Sc)
 void RunScene(Scene *Sc,float Seconds)
 {
 	float t;
-	long TTrd=0;
-	long Par1,Par2,Par3,Par4,Par5,Par6,Tot;
-	long RenderedPolys=0;
-	long Y;
-	long SceneTime = Seconds * Timer_Freq;
+	int32_t TTrd=0;
+	int32_t Par1,Par2,Par3,Par4,Par5,Par6,Tot;
+	int32_t RenderedPolys=0;
+	int32_t Y;
+	int32_t SceneTime = Seconds * Timer_Freq;
 	char MotionBlur_Enabled = 0;
 	
-	long I,J;
+	int32_t I,J;
 	float FPS;
 	char *Str = new char[80];
 	char AfterFirstFrame = 0,Cur = 0;
@@ -1715,7 +2073,7 @@ Away:Tot = Timer-TTrd;
 			 }
 		 }
 #ifdef RUNTIME_INFO_L1
-		 sprintf(Str,"Time = %d , Frame = %5.1f",Timer,CurFrame);
+		 sprintf(Str,"Time = %d , Frame = %5.1f",Timer.load(), CurFrame);
 		 Y = OutTextXY(VPage,0,Y+15,Str,64);
 		 sprintf(Str,"Inst. FPS = %3.2f (%3.2f)",FPS,100.0*(float)Frames/(float)Timer);
 		 Y = OutTextXY(VPage,0,Y+15,Str,64);
@@ -1732,7 +2090,7 @@ Away:Tot = Timer-TTrd;
 		 //    Y = OutTextXY(VPage,0,Y+15,Str,64);
 		 sprintf(Str,"Average Polys/Frame: %5.1f (%3.1f%%)",(float)RenderedPolys/(float)Frames,100.0*(float)CPolys/(float)Polys);
 		 Y = OutTextXY(VPage,0,Y+15,Str,64);
-		 long GTP = 0,GTPP = 0;
+		 int32_t GTP = 0,GTPP = 0;
 		 for(TriMesh *Tri = Sc->TriMeshHead;Tri;Tri = Tri->Next)
 			 if (!(Tri->Flags&Tri_Invisible)) {GTP++; GTPP += Tri->FIndex;}
 			 sprintf(Str,"%d Triangle Meshes totalling in %d Faces",GTP,GTPP);
@@ -1751,7 +2109,7 @@ Away:Tot = Timer-TTrd;
 				 if (MotionBlur_Enabled)
 				 {
 					 if (MMXState)
-						 Modulate(Screen,&Blurred,0xb0b0b0,0xb0b0b0);
+						 Modulate(Screen,&Blurred,0xb0b0b0,0xb0b0b0, PageSize);
 					 else
 						 Transparence(Screen,&Blurred);
 					 Flip(&Blurred);
@@ -1792,8 +2150,8 @@ Away:Tot = Timer-TTrd;
 	}
 	//	printf("FPS == %f\n",100.0*(float)Frames/(float)Timer);
 	while (Keyboard[ScESC]) DO_NOP();
-	Exec_FPS = 100.0*(float)Frames/(float)Par5;
-	/*  sprintf(Str,"Inst. FPS = %3.2f (%3.2f)",FPS,100.0*(float)Frames/(float)Par4);
+	//Exec_FPS = 100.0*(float)Frames/(float)Par5;
+	/*  sprintf(Str,"Inst. FPS = %3.2f (%3.2f)",FPGS,100.0*(float)Frames/(float)Par4);
 	OutTextXY(VGAPtr,0,0,Str,63);
 	while (!Keyboard[ScESC]) DO_NOP();
 	while (Keyboard[ScESC]) DO_NOP();*/

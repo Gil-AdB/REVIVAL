@@ -40,7 +40,7 @@ void Display_Linked_List(Scene *Sc)
 // A script for Loading a chain of 3DS files from a given string array.
 void LoadScenes(char Scenes,char *Name[])
 {
-  long I;
+  int32_t I;
   Scene *Sc = new Scene[Scenes];
   CurScene = Sc;
   memset(Sc,0,sizeof(Scene)*Scenes);
@@ -104,122 +104,21 @@ void Init_Randomseed()
 	
 }
 
-/*char FDS_Init(unsigned short x,unsigned short y,unsigned char BPP)
-{
-  long I;
-  char *DP;
-  char Res;
-  DWord RR;
-
-	setbuf(stdout,NULL);
-  FDS_Title();
-  Detect_MMX();
-
-  if (MMXState) printf("] Using MMX(TM) for Rasterization.\n");
-  else printf("] MMX(TM) not available.\n");
-
-  // Initialize Internal Variables.
-  printf("] Hacking Random-seed.\n");
-  Init_Randomseed();
-  printf("] Mathematical Identities.\n");
-  Init_Identities();
-	printf("] Diffusing Materials.\n");
-//  Init_Default_Material();
-
-  MsgStr = new char * [10];
-  memset(MsgStr,0,40);
-  MsgClock = new long [10];
-
-	printf("] FPU >> Low Precision.\n");
-  FPU_LPrecision();
-
-  printf("] Basic font.\n");
-  Font1=LoadAFT("Fonts\\Standard.AFT");
-  Active_Font = Font1;
-  printf("] Timer ISR.\n");
-  Install_8();
-  printf("] Keyboard ISR.\n");
-  Install_9();
-  Timer_Freq = 100;
-  Set_Rate(Rate_Div/Timer_Freq); //100Hz
-
-  if (!Find_RetraceRate())
-  {
-    delay(200);
-    printf("Warning: FDS may not run well under ");
-    switch(rand()*3>>15)
-    {
-			case 0:printf("M$ WINSLOW 95.\n"); break;
-      case 1:printf("M$ WINDOZE 95.\n"); break;
-      case 2:printf("Micro$UX WINZOL 95.\n");
-    }
-    printf("Press <ESC> to Terminate FDS operation,or any other key to continue.\n");
-    fflush(stdout);
-    while (!Keypressed());
-    if (Keyboard[ScESC])
-    {
-      Restore_8();
-      Restore_9();
-      Set_Rate(Basic_Rate);
-			exit(-1);
-    }
-  }
-  printf("] Initializing Video system.\n");
-
-  Initialize_VESA(); //yeah
-
-	Set_Screen(x,y,BPP,0,0);
-  Res=Modesetup();
-  VESA_Surface2Global(Screen);
-  //  Res=ModeSetup(x,y,32);
-//  if (!Res) Res=ModeSetup(x,y,24);
-
-  Set_Rate(Basic_Rate);
-
-  if (Res&&BPP==8)
-  {
-    for(I=0;I<64;I++)
-    {
-			VESA_Pal[I*3]=I>>2;
-      VESA_Pal[I*3+1]=I>>1;
-      VESA_Pal[I*3+2]=I;
-    }
-    VESA_Pal[192]=63; VESA_Pal[193]=63; VESA_Pal[194]=63;
-    Set_Palette(VESA_Pal);
-  }
-	Init_FreeCamera();
-	Init_InvTbl(1024);
-
-  SetVGAMode(3);
-#ifdef Play_Music
-  printf("] Timer >> MIDAS Callback.\n");
-  Restore_8();
-  Restore_9();
-  printf("] MIDAS Sound system - Installing.\n");
-  Install_MIDAS();
-  Install_9();
-#endif
-	//Set 100Hz
-	Timer_Freq = 100;
-	Set_Rate(Rate_Div/Timer_Freq);
-//  printf("XRes : %d  YRes : %d  VESA_BPSL : %d\n",XRes,YRes,VESA_BPSL);
-	return Res;
-}*/
-
 char FDS_Init(unsigned short x,unsigned short y,unsigned char bpp)
 {
-	long I;
+	int32_t I;
 	char *DP;
 	char Res;
 	DWord RR;
-	long XR,YR;
+	int32_t XR,YR;
 
 	setbuf(stdout,NULL);
 	FDS_Title();
-	Detect_MMX();
 
-	if (MMXState) printf("] Using MMX(TM) for Rasterization.\n");
-	else printf("] MMX(TM) not available.\n");
+	// Let me guess... you have an MMX enabled processor. Also SSE4.1. If not, tough luck...
+	//Detect_MMX();
+	//if (MMXState) printf("] Using MMX(TM) for Rasterization.\n");
+	//else printf("] MMX(TM) not available.\n");
 
   // Initialize Internal Variables.
 	printf("] Hacking Random-seed.\n");
@@ -233,7 +132,7 @@ char FDS_Init(unsigned short x,unsigned short y,unsigned char bpp)
 	// init text message system.
 	MsgStr = new char * [10];	
 	memset(MsgStr,0,40);
-	MsgClock = new long [10];
+	MsgClock = new int32_t [10];
 	MsgID = new dword [10];
 
 	// set FPU precision to single (23bit)
@@ -242,127 +141,26 @@ char FDS_Init(unsigned short x,unsigned short y,unsigned char bpp)
 
 	// read std. font from AFT file.
 	printf("] Basic font.\n");
-	Font1=LoadAFT("Fonts\\Standard.AFT");
+	Font1=LoadAFT("Fonts/Standard.AFT");
 	Active_Font = Font1;
-
-	// install keyboard ISR (DOS only)
-#ifdef _C_WATCOM
-	printf("] Keyboard ISR.\n");
-	Install_9();
-#endif
-
-	// find vertical retrace rate (DOS only)
-#ifdef _C_WATCOM
-	if (!Find_RetraceRate())
-	{
-		printf("Warning: FDS may not run well under ");
-		switch(rand()*3>>15)
-		{
-			case 0:printf("M$ WINSLOW 95.\n"); break;
-			case 1:printf("M$ WINDOZE 95.\n"); break;
-			case 2:printf("Micro$UX WINZOL 95.\n");
-		}
-		printf("Press <ESC> to Terminate FDS operation,or any other key to continue.\n");
-		fflush(stdout);
-		while (!Keypressed());
-		if (Keyboard[ScESC])
-		{
-			Restore_8();
-			Restore_9();
-			Set_Rate(Basic_Rate);
-			exit(-1);
-		}
-	}
-#endif
-
-#ifdef _C_WATCOM
-#ifdef Play_Music
-	Restore_9();
-	printf("] Timer >> MIDAS Callback.\n");
-	printf("] MIDAS Sound system - Installing.\n");
-	Install_MIDAS();
-	Install_9();
-#else
-	printf("] Timer ISR.\n");
-	Install_8();
-	Timer_Freq = 100;
-	Set_Rate(Rate_Div/Timer_Freq); //100Hz
-#endif
-#endif
 
 	printf("] Initializing Video system.\n");
 	// VM setup (DOS only)
-#ifdef _C_WATCOM
-	Initialize_VESA();
-
-	if (1)
-	{
-		DWord ResAm = 9;
-		Word XRTbl[9] = {320,320,320,320,400,512,640,640,800};
-		Word YRTbl[9] = {200,240,400,480,300,384,400,480,600};
-
-		printf("Video Mode Setup: (Logical)\n");
-		for(I=0;I<ResAm;I++)
-			printf("%d. %dx%d\n",I+1,XRTbl[I],YRTbl[I]);
-		while (!Keypressed());
-		for(I=0;I<ResAm;I++)
-			if (Keyboard[I+2])
-			{
-				XR = XRTbl[I];
-				YR = YRTbl[I];
-				break;
-			}
-		if (I==ResAm) {XR=x; YR=y;}
-		Res = AttemptGraphicsSet(XR,YR,bpp,0);
-		if (!Res)
-			Res = Modesetup();
-	} else {
-		//default resolution.
-		XR = x;
-		YR = y;
-		if (!(Res = AttemptGraphicsSet(XR,YR,bpp,0)))
-		{
-			Res = Modesetup();
-			XR = VMode.xRes;
-			YR = VMode.yRes;
-		}
-	}
-
-	Set_Screen(XR,YR,bpp,0,0);
-	VESA_Surface2Global(Screen);
-
-	//  Res=ModeSetup(x,y,32);
-//  if (!Res) Res=ModeSetup(x,y,24);
-
-	if (Res&&VMode.BPP==8)
-	{
-		for(I=0;I<64;I++)
-		{
-			VESA_Pal[I*3]=I>>2;
-			VESA_Pal[I*3+1]=I>>1;
-			VESA_Pal[I*3+2]=I;
-		}
-		VESA_Pal[192]=63; VESA_Pal[193]=63; VESA_Pal[194]=63;
-		Set_Palette(VESA_Pal);
-	}
-#else 
 	// initialize logical part of video system based on specified (x,y)xbpp.
 	VESA_InitExternal(x, y, bpp);
 	Res = 1;
-#endif	
 
 	Init_FreeCamera();
 
-	InitFrustrumClipper();
+	//InitFrustrumClipper();
 
 	return Res;
 }
 
-
 void MsgToDisplay(DWord ID,DWord Issue,char *Str)
 {
-  long CurMsg=0;
-  long IDDW = (ID<<16)+Issue;
+  int32_t CurMsg=0;
+  int32_t IDDW = (ID<<16)+Issue;
   while (MsgStr[CurMsg]&&MsgID[CurMsg]!=IDDW) CurMsg++;
   if (MsgStr[CurMsg]) delete MsgStr[CurMsg]; else MsgID[CurMsg]=IDDW;
   MsgStr[CurMsg] = strdup(Str);
@@ -396,7 +194,7 @@ void Display_Hierarchy_Node(Scene *Sc,Object *Last,char Level)
 {
   Object *O;
   char *s = new char[Level*2+1];
-  long I;
+  int32_t I;
   for(I=0;I<Level*2;I++) s[I]=32;
   s[Level*2]=0;
   for(O=Sc->ObjectHead;O;O=O->Next)
@@ -442,8 +240,8 @@ void WaitRetrace(void);
 DWord Find_RetraceRate()
 {
   int         FailCount = 0, Success = 0;
-  long        Count1, Count2, PrevCount = 0, Count = 0;
-  long        RefreshRate;
+  int32_t        Count1, Count2, PrevCount = 0, Count = 0;
+  int32_t        RefreshRate;
 
   // Try to be safe. Nasty for possible music playback, but the only way
   // to get reliable results:
@@ -536,19 +334,19 @@ DWord Find_RetraceRate()
 	return 0;
 }
 
-void Detect_MMX()
-{
-	// Assume MMX is avilable
-	MMXState = 1;
-	// use cpuid.
-	__asm {
-		mov eax, 1
-		cpuid
-		shr edx, 23
-		and edx, 1
-		mov [MMXState], edx
-	}
-}
+//void Detect_MMX()
+//{
+//	// Assume MMX is avilable
+//	MMXState = 1;
+//	// use cpuid.
+//	__asm {
+//		mov eax, 1
+//		cpuid
+//		shr edx, 23
+//		and edx, 1
+//		mov [MMXState], edx
+//	}
+//}
 
 
 #endif

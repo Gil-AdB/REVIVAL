@@ -2,10 +2,12 @@
 
 const float log2conv = 1.0 / log(2.0);
 
-inline float log2(float x)
+#if !defined(__APPLE__)
+inline float log2(float x) noexcept
 {
 	return log(x)*log2conv;
 }
+#endif
 
 mword S3TC_coder::calcError3(dword *pixels, mword numPixels, dword u, dword v)
 {
@@ -77,9 +79,9 @@ mword S3TC_coder::calcError4(dword *pixels, mword numPixels, mword u, mword v)
 		mword index;
 		for(mword j=0; j<4; j++)
 		{
-			long dr = long(pr - r[j]);
-			long dg = long(pg - g[j]);
-			long db = long(pb - b[j]);
+			int32_t dr = int32_t(pr - r[j]);
+			int32_t dg = int32_t(pg - g[j]);
+			int32_t db = int32_t(pb - b[j]);
 			mword error = dr*dr + dg*dg + db*db;
 			if (minError > error)
 			{
@@ -184,9 +186,9 @@ mword S3TC_coder::rgbDistance(mword u, mword v)
 //	sdword g = ((u>>8) - (v>>8)) & 0xff;
 //	sdword b = (u - v) & 0xff;
 
-	long r = ((u>>16)&0xff) - ((v>>16)&0xff);
-	long g = ((u>>8)&0xff) - ((v>>8)&0xff);
-	long b = (u&0xff) - (v&0xff);
+	int32_t r = ((u>>16)&0xff) - ((v>>16)&0xff);
+	int32_t g = ((u>>8)&0xff) - ((v>>8)&0xff);
+	int32_t b = (u&0xff) - (v&0xff);
 	return r*r + g*g + b*b;
 }
 
@@ -613,13 +615,13 @@ void S3TC_coder::compress()
 	// NOTE: compressing deltas works much better than MTF.
 
 	// array implementation is inefficient, try to find a better datastructure
-	long symbolEncoder[bins];
+	int32_t symbolEncoder[bins];
 	
 	mword i;
 	for(i=0; i<bins; i++)
 		symbolEncoder[i] = i;
 
-	long prev = 0, symbol, value;
+	int32_t prev = 0, symbol, value;
 	for(i=0; i<numBlocks; i++)
 	{
 		// assuming no wraparound to next dword
@@ -664,7 +666,7 @@ void S3TC_coder::decompress()
 {
 }
 #define POINTER_64
-#include <windows.h>
+//#include <windows.h>
 void ImageCompressionTestCode()
 {
 	Image I, Output;
@@ -696,7 +698,7 @@ void ImageCompressionTestCode()
 	float pixelsPerSecond = float(I.x*I.y)*100.0f*numPasses / float(timeTaken);
 	char str[128];
 	sprintf(str, "%f pixels per second\n", pixelsPerSecond);
-	OutputDebugString(str);
+//	OutputDebugString(str);
 
 
 	Timer = 0;

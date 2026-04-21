@@ -4,9 +4,9 @@ Flood Demo System - Flood scene file reader
 */
 
 #include <stdio.h>
-#include <dos.h>
+//#include <dos.h>
 #include <stdlib.h>
-#include <conio.h>
+//#include <conio.h>
 #include <string.h>
 #include <math.h>
 
@@ -37,12 +37,12 @@ void ReadString(char **s)
 	int a=0;
 	char Temp[256];
 	do fread(&Temp[a],1,1,FLD); while (Temp[a++]);
-	*s=strdup(Temp);
+	*s=_strdup(Temp);
 }
 
 FldEnv *ReadEnvelope(void)
 {
-	int a,b;
+	uint32_t a,b;
 	FldEnv *Env;
 	
 	Env=new FldEnv;
@@ -70,7 +70,6 @@ void ReadGeneralSceneData(FldScene *Sc)
 {
 	char ID[8],Names[3];
 	float Ver;
-	int i;
 	
 	ID[7]=0;
 	fread(ID,1,7,FLD);
@@ -157,7 +156,7 @@ void ReadMaterial(FldMat *Mat)
 
 void ReadObject(FldObject *Obj)
 {
-	int i,j;
+	uint32_t i,j;
 	
 #ifdef DebugMode
 	printf("-|Loading object...\n");
@@ -216,7 +215,7 @@ void ReadObject(FldObject *Obj)
 
 void ReadLight(FldLight *Light)
 {
-	int i,j;
+	uint32_t i;
 	
 #ifdef DebugMode
 	printf("-|Loading light...\n");
@@ -250,7 +249,7 @@ void ReadLight(FldLight *Light)
 
 void ReadCamera(FldCamera *Cam)
 {
-	int i,j;
+	int i;
 	
 #ifdef DebugMode
 	printf("-|Loading Camera....\n");
@@ -281,7 +280,6 @@ FldScene *ReadFLD(const char *FileName)
 {
 	FldObject *Obj;
 	FldLight	*Lgt;
-	FldCamera	*Cam;
 	FldScene  *Sc;
 	unsigned short Chunk;
 	

@@ -2,6 +2,7 @@
 #include "FUtils.h"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
+#include "Base/FDS_DEFS.H"
 
 // Material Library Reader, Format: 3DS ver 4.0
 void ReadMaterialName(unsigned int EndPos)
@@ -11,7 +12,7 @@ void ReadMaterialName(unsigned int EndPos)
 
   ReadASCIIZ(&MatName);
 //  printf("<3DS:M>: Attempting to insert Material %s to Library.\n",MatName);
-//  printf("<3DS:M>: MatLib addr = %xh.\n",(long)MatLib);
+//  printf("<3DS:M>: MatLib addr = %xh.\n",(int32_t)MatLib);
   fflush(stdout);
   if (MatLib)
     for(M=MatLib;M;M=M->Next) if (!strcmp(MatName,M->Name)) break;
@@ -27,19 +28,19 @@ void ReadMaterialName(unsigned int EndPos)
   {
 //    printf("<3DS:M>: No previous entries detected, Creating Library.\n");
     fflush(stdout);
-    MatLib = (Material *)getAlignedBlock(sizeof(Material), 16);
+    MatLib = getAlignedType<Material>(16);// (Material*)getAlignedBlock(sizeof(Material), 16);
     Cur_Mat = MatLib;
-    memset(MatLib,0,sizeof(Material));
+    //memset(MatLib,0,sizeof(Material));
   } else {
 //    printf("<3DS:M>: New material will be linked to last entry %s\n",Cur_Mat->Name);
     fflush(stdout);
-    Cur_Mat->Next=(Material *)getAlignedBlock(sizeof(Material), 16);
-    memset(Cur_Mat->Next,0,sizeof(Material));
+    Cur_Mat->Next = getAlignedType<Material>(16);// (Material*)getAlignedBlock(sizeof(Material), 16);
+//    memset(Cur_Mat->Next,0,sizeof(Material));
     Cur_Mat->Next->Prev = Cur_Mat;
     Cur_Mat=Cur_Mat->Next;
   }
   Cur_Mat->RelScene = Host;
-  Cur_Mat->Name = strdup(MatName);
+  Cur_Mat->Name = _strdup(MatName);
   delete []MatName;
   ReadTextureToo = 1;
 }
@@ -50,7 +51,7 @@ void ReadMapFile(unsigned int EndPos)
   char *NewFile = new char[40];
   Material *M;
   Texture *Tx;
-  strcpy(NewFile,"Textures//");
+  strcpy(NewFile,"TexturesNew//");
 
   ReadASCIIZ(&MapFile);
   strcat(NewFile,MapFile);
@@ -71,7 +72,7 @@ void ReadMapFile(unsigned int EndPos)
   Cur_Mat->Txtr = new Texture;
   Tx = Cur_Mat->Txtr;
   memset(Tx,0,sizeof(Texture));
-  Tx->FileName = strdup(NewFile);
+  Tx->FileName = _strdup(NewFile);
   Identify_Texture(Tx);
 
   if (!Tx->BPP) printf("<3DS:T>: Identification Failure for Texture %s at Material %s.\n",NewFile,Cur_Mat->Name); //else printf("<3DS:T>: Texture %s was Identified correctly\n         for Material %s as a %d BPP image file.\n",NewFile,Cur_Mat->Name,Cur_Mat->Txtr->BPP);

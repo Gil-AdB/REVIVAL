@@ -39,7 +39,7 @@ struct IXVertexT
 };
 
 
-struct IXVertexTG
+struct alignas(16) IXVertexTG
 {
 	union
 	{
@@ -72,6 +72,20 @@ struct IXVertexF
 };
 
 extern mword zPass, zReject;
-extern __int64 precisePixelCount;
+extern int64_t precisePixelCount;
+
+
+// Interface to assembly mappers
+extern "C"
+{
+	typedef void (*AsmFiller)(IXVertexTG* Verts, dword numVerts, void* Texture, void* Page, dword logWidth, dword logHeight);
+};
+
+extern thread_local AsmFiller p_IXTGZM_AsmFiller;
+extern thread_local AsmFiller p_IXTGZSAM_AsmFiller;
+extern thread_local AsmFiller p_IXTGZTAM_AsmFiller;
+extern thread_local AsmFiller p_IXTGZTM_AsmFiller;
+extern thread_local AsmFiller p_IXTGZTTAM_AsmFiller;
+
 
 #endif //IX_H_INCLUDED

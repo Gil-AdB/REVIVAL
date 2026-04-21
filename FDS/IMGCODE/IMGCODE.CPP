@@ -1,9 +1,10 @@
 #include <stdio.h>
-#include <conio.h>
+//#include <conio.h>
 #include <stdlib.h>
-#include <dos.h>
-#include <io.h>
+//#include <dos.h>
+//#include <io.h>
 #include <string.h>
+#include <string>
 
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
@@ -11,13 +12,17 @@
 
 #include "Base/Scene.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+
 Material * MatLib = NULL; // Internal Material Library. This is global for
 // all Scenes.
 
-DWord TexAutoSize = TAS_256x256; //autosizing flag
-long TexSizeX,TexSizeY;
+DWord TexAutoSize = TAS_Disable; //autosizing flag
+int32_t TexSizeX,TexSizeY;
 
-void TAS_Set(DWord TASType,long X = 256,long Y = 256)
+void TAS_Set(DWord TASType,int32_t X = 256,int32_t Y = 256)
 {
 	if ((TexAutoSize = TASType) == TAS_Arbitrary)
 	{
@@ -26,7 +31,7 @@ void TAS_Set(DWord TASType,long X = 256,long Y = 256)
 	}
 }
 
-void TAS_Get(Texture *Tx,long X,long Y)
+void TAS_Get(Texture *Tx,int32_t X,int32_t Y)
 {
 	switch(TexAutoSize)
 	{
@@ -45,10 +50,10 @@ void TAS_Get(Texture *Tx,long X,long Y)
 // Scales Texture Src to Texture Dest. recieves X/Y resolution of Src and
 // Dest in (X1,Y1) and (X2,Y2) accordingly.
 // Both textures should have a common BPP given as a parameter (CP=BPP+1>>3).
-void BitMap_Scale(byte *Src,byte *Dest,long X1,long Y1,long X2,long Y2,char CP)
+void BitMap_Scale(byte *Src,byte *Dest,int32_t X1,int32_t Y1,int32_t X2,int32_t Y2,char CP)
 {
-	long I,J,A,B;
-	long X,Y,DX,DY;
+	int32_t I,J,A,B;
+	int32_t X,Y,DX,DY;
 	DX=(X1<<16)/X2;
 	DY=(Y1<<16)/Y2;
 	Y=0;
@@ -64,7 +69,7 @@ void BitMap_Scale(byte *Src,byte *Dest,long X1,long Y1,long X2,long Y2,char CP)
 	}
 }
 
-void BitMapScale2Texture(Texture *Tx,void *Src,long BX,long BY,long CPP)
+void BitMapScale2Texture(Texture *Tx,void *Src,int32_t BX,int32_t BY,int32_t CPP)
 {
 	BitMap_Scale((byte *)Src,Tx->Data,BX,BY,Tx->SizeX,Tx->SizeY,CPP);
 }
@@ -120,7 +125,7 @@ extern "C" {
 
 void BPPConvert_Texture(Texture *Tx,byte TB)
 {
-	long I,J;
+	int32_t I,J;
 	void (* Read)(DWord Src,QColor *C);
 	void (* Write)(DWord *Src,QColor C);
 	QColor Col;
@@ -155,13 +160,14 @@ void BPPConvert_Texture(Texture *Tx,byte TB)
 		Quantitize(Tx);
 		return;
 	}
-	Data = new byte[65536*RW];
+	size_t nPixels = 1 << (Tx->LSizeX + Tx->LSizeY);
+	Data = new byte[nPixels*RW];
 	P1 = Tx->Data;
 	P2 = Data;
 	
 	if (Tx->BPP>8)
 	{
-		for(I=0;I<65536;I++,P1+=RR,P2+=RW)
+		for(I=0;I<nPixels;I++,P1+=RR,P2+=RW)
 		{
 			//      printf("Data : %d\n",*((Word *)P1));
 //			Read(*((DWord *)P1),&Col);
@@ -178,7 +184,7 @@ void BPPConvert_Texture(Texture *Tx,byte TB)
 		//    delete Data;
 		Tx->BPP = TB;
 	} else {
-		for(I=0;I<65536;I++,P1++,P2+=RW)
+		for(I=0;I<nPixels;I++,P1++,P2+=RW)
 		{
 			Col.R=Tx->Pal->C[*P1].R<<2;
 			Col.G=Tx->Pal->C[*P1].G<<2;
@@ -199,7 +205,7 @@ void BPPConvert_Texture(Texture *Tx,byte TB)
 // weakens Texture intensity by 1/2.
 void Darken_Texture(Texture *T)
 {
-	long I;
+	int32_t I;
 	Word *W;
 	DWord *DW;
 	switch(T->BPP)
@@ -231,7 +237,7 @@ void Darken_Texture(Texture *T)
 // Quality reduction will follow.
 void FilterLSB_Texture(Texture *T)
 {
-	long I;
+	int32_t I;
 	Word *W;
 	DWord *DW;
 	switch(T->BPP)
@@ -375,15 +381,38 @@ ImageDetectResult JPGDetect(const char *FN)
 	return Res;
 }
 
+ImageDetectResult PNGDetect(const char* FN)
+{
+	ImageDetectResult Res;
+	FILE* F;
+
+	uint8_t ID[8] = {};
+	uint8_t png_signature[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+
+	Res.BPP = 0;
+
+
+	F = fopen(FN, "rb");
+	if (!F) return Res;
+	fread(ID, 1, 8, F);
+	fclose(F);
+	if (!memcmp(ID, png_signature, 8)) Res.BPP = 24; else Res.BPP = 0;
+
+	return Res;
+}
+
+
+
+
 // Loads a PCX image from FN to Store,using IDR as results from previous
 // Detection via PCXDetect, and Pal to store the Palette.
 char PCXLoad(char *FN,unsigned char *Store,ImageDetectResult IDR,Palette *Pal)
 {
 	FILE *F;
 	char Ret;
-	long I,J,K;
-	long X,Y;
-	long FSize;
+	int32_t I,J,K;
+	int32_t X,Y;
+	int32_t FSize;
 	unsigned char V;
 	unsigned char C;
 	unsigned char *outpt;
@@ -468,7 +497,7 @@ bye:  if (feof(F)) Ret=0;
 
 
 // GIF definations.
-const long MAX_CODES = 4096;
+const int32_t MAX_CODES = 4096;
 
 static int            curr_size;
 static int            clear;
@@ -482,7 +511,7 @@ static unsigned char  b1;
 static unsigned char  byte_buff[257];
 static unsigned char* pbytes;
 
-static unsigned long code_mask[13] =
+static uint32_t code_mask[13] =
 {
 	0L,
 		0x0001L, 0x0003L,
@@ -500,7 +529,7 @@ static Word *prefix;
 static int get_next_code(FILE *F)
 {
 	int i;
-	static unsigned long ret;
+	static uint32_t ret;
 	
 	if( ! nbits_left )
 	{
@@ -692,7 +721,7 @@ ImageDetectResult TGADetect(const char *FN)
 	ImageDetectResult IDR;
 	FILE *F;
 	TGAHeader TH;
-	long I;
+	int32_t I;
 	
 	IDR.BPP=0;
 	
@@ -858,7 +887,7 @@ char TGALoad(const char *FN,Byte *Store,Palette *Pal)
 	char *cPal = (char *)Pal;
 	char PalBytes;
 	DWord Uniform;
-	long I;
+	int32_t I;
 	dword BPSL;
 	
 	F = fopen(FN,"rb");
@@ -922,7 +951,7 @@ ImageDetectResult (*IFDetectors[4])(const char *FN)
 char Identify_Texture(Texture *Tx)
 {
 	FILE *F;
-	long I,J;
+	int32_t I,J;
 	ImageDetectResult IDR; // Stores results from format detectors.
 	char *Txd; // Host for extracted image. Transferred/Scaled to Tx->Data.
 	
@@ -975,10 +1004,19 @@ char Identify_Texture(Texture *Tx)
 		TAS_Get(Tx,256,256); // detector does not specify X,Y!
 		return 1;
 	}
+
+	IDR = PNGDetect(Tx->FileName);
+	if (IDR.BPP)
+	{
+		Tx->BPP = IDR.BPP;
+		TAS_Get(Tx, 256, 256); // detector does not specify X,Y!
+		return 1;
+	}
+
 	return 0;
 }
 
-DWord GetOptClass(long X,long Y)
+DWord GetOptClass(int32_t X,int32_t Y)
 {
 	if (X==256&&Y==256) return 0;
 	if (X==Y)
@@ -990,13 +1028,35 @@ DWord GetOptClass(long X,long Y)
 }
 
 
+
+char* LoadPNG(Texture* Tx)
+{
+	unsigned char* Txtr;
+	int x, y, n;
+	if (!(Txtr = stbi_load(Tx->FileName, &x, &y, &n, 4))) return 0;
+	Tx->SizeX = x;
+	Tx->SizeY = y;
+	Tx->BPP = 32;
+	Tx->Data = (byte *)malloc(4 * x * y);
+	memcpy(Tx->Data, Txtr, sizeof(DWord) * x * y);
+
+	auto ptr = (byte*)Tx->Data;
+	for (auto i = 0; i < x * y; ++i) {
+		std::swap(ptr[4 * i], ptr[4 * i + 2]);
+	}
+
+	stbi_image_free(Txtr);
+	return (char *)Tx->Data;
+}
+
+
 // Attempts to Load the neccesary file to Texture Tx. Tx->Filename is used
 // In the process, failure to give a valid filename will cause an error.
 // Returns 1 on success.
 static char _Load_Texture(Texture *Tx)
 {
 	FILE *F;
-	long I,J;
+	int32_t I,J;
 	ImageDetectResult IDR; // Stores results from format detectors.
 	char *Txd; // Host for extracted image. Transferred/Scaled to Tx->Data.
 	
@@ -1078,7 +1138,7 @@ static char _Load_Texture(Texture *Tx)
 			Tx->BPP=IDR.BPP; //validate the texture
 			
 			Tx->Data = new byte[Tx->SizeX*Tx->SizeY*((Tx->BPP+1)>>3)];
-			printf("Allocated memory for texture at %xh\n",(uint32_t)Tx->Data);
+			printf("Allocated memory for texture at %lxh\n",(uintptr_t)Tx->Data);
 			
 			BitMapScale2Texture(Tx,Txd,IDR.x,IDR.y,(IDR.BPP+1)>>3);
 			printf("Scaled tex to (%d,%d)\n",Tx->SizeX,Tx->SizeY);
@@ -1143,31 +1203,24 @@ static char _Load_Texture(Texture *Tx)
 	// JPG detection and load goes here
 	fflush(stdout);
 	IDR = JPGDetect(Tx->FileName);
-	fcloseall();
+	// fcloseall(); // WTF???
 	if (IDR.BPP)
 	{
-		Txd=LoadJPEG(Tx->FileName,0);
-		
-		IDR.x = *(unsigned short *)Txd;
-		IDR.y = *(unsigned short *)(Txd+2);
-		char r,g,b;
-		for (I=4;I<4+IDR.x*IDR.y*3;I+=3)
-		{
-			r=Txd[I];
-			g=Txd[I+1];
-			b=Txd[I+2];
-			Txd[I+2]=r;
-			Txd[I+1]=g;
-			Txd[I]=b;
-		}
-		Tx->BPP=IDR.BPP; //validate the texture
-		TAS_Get(Tx,IDR.x,IDR.y);
-		Tx->Data = new byte[Tx->SizeX*Tx->SizeY*((Tx->BPP+1)>>3)];
-		BitMapScale2Texture(Tx,Txd+4,IDR.x,IDR.y,(IDR.BPP+1)>>3);
-		delete Txd;
+		LoadPNG(Tx);
+		uint8_t* temp = new uint8_t[4 * Tx->SizeX * Tx->SizeY];
+		memcpy(temp, Tx->Data, 4 * Tx->SizeX * Tx->SizeY);
+		BitMapScale2Texture(Tx, temp, Tx->SizeX, Tx->SizeY, (IDR.BPP+1)>>3);
+		delete[] temp;
 		return 1;
 	}
-	// CEL detection and load goes here
+
+	IDR = PNGDetect(Tx->FileName);
+	if (IDR.BPP)
+	{
+		Txd = LoadPNG(Tx);
+		return 1;
+	}
+		// CEL detection and load goes here
 	return 0;
 }
 
@@ -1194,9 +1247,9 @@ char Load_Texture(Texture *Tx)
 
 void View_Texture(Texture *T)
 {
-	long PX,PY;
+	int32_t PX,PY;
 	char PBPP;
-	long I,J,K;
+	int32_t I,J,K;
 	
 	PX = XRes; PY = YRes; PBPP=BPP;
 	
@@ -1306,7 +1359,7 @@ void Generate_Mipmaps(Texture *Tx, mword blockSizeX, mword blockSizeY, mword ena
 	Im.Data = (dword *)Tx->Data; // pointer stealing
 
 	// calc num. of mipmap levels
-	long edgeLen, X = Tx->SizeX >> blockSizeX, Y = Tx->SizeY >> blockSizeY;
+	int32_t edgeLen, X = Tx->SizeX >> blockSizeX, Y = Tx->SizeY >> blockSizeY;
 	if (X>Y) 
 		edgeLen = Y; 
 	else 
@@ -1314,7 +1367,7 @@ void Generate_Mipmaps(Texture *Tx, mword blockSizeX, mword blockSizeY, mword ena
 
 	Tx->numMipmaps = 1;
 
-	long numPixels = X*Y;
+	int32_t numPixels = X*Y;
 	if (enableMip)
 	{
 		while (edgeLen > 1)
@@ -1399,9 +1452,9 @@ char Load_Image_PCX(Image *Img, const char *FN)
 {
 	FILE *F;
 	char Ret;
-	long I,J,K;
-	long X,Y;
-	long FSize;
+	int32_t I,J,K;
+	int32_t X,Y;
+	int32_t FSize;
 	Byte V;
 	Byte C;
 	DWord *Pen,*PP,*Line;
@@ -1552,24 +1605,21 @@ char Load_Image_GIF(Image *Img, const char *FN)
 
 char Load_Image_JPEG(Image *Img, const char *FN)
 {
-	char *Tx,*Txd;
-	if (!(Tx=LoadJPEG(FN,0))) return 0;
-	Txd=Tx;
-	Img->x = *(unsigned short *)Txd;
-	Img->y = *(unsigned short *)(Txd+2);
+	std::string upstr = FN;
+	for (auto & c: upstr) c = toupper(c);
+	unsigned char *Tx;
+	int x, y, n;
+	if (!(Tx=stbi_load(upstr.c_str(), &x, &y, &n, 4))) return 0;
+	Img->x = x;
+	Img->y = y;
 	Img->Data = (DWord *)_aligned_malloc(sizeof(DWord) * Img->x*Img->y, 16);
-	DWord *VP = Img->Data;
-	Txd+=4;
-	char r,g,b;
-	char *TE = Txd + Img->x*Img->y*3;
-	
-	while (Txd<TE)
-	{
-		r=*Txd++;
-		g=*Txd++;
-		b=*Txd++;
-		*VP++ = (r<<16)+(g<<8)+b;
+	memcpy(Img->Data, Tx, sizeof(DWord) * Img->x * Img->y);
+
+	auto ptr = (byte*)Img->Data;
+	for (auto i = 0; i < x * y; ++i) {
+		std::swap(ptr[4 * i], ptr[4 * i + 2]);
 	}
-	delete Tx;
+
+	stbi_image_free(Tx);
 	return 1;
 }

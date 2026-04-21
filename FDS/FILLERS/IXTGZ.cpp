@@ -1,5 +1,7 @@
 #include "IX.h"
 #include "Base/Scene.h"
+#include <vector>
+#include <string>
 
 /////////////////////////////////
 // static filler variables (SFV)
@@ -15,7 +17,7 @@ struct TGZLeft
 		Index; // Current Vertex index
 };
 
-static TGZLeft Left;
+thread_local static TGZLeft Left;
 
 struct TGZRight
 {
@@ -28,12 +30,12 @@ struct TGZRight
 		Index;  // Current Vertex index
 };
 
-static TGZRight Right;
+thread_local static TGZRight Right;
 
-static void *IX_Texture;
-static void *IX_Page;
-static word *IX_ZBuffer;
-static dword IX_L2X, IX_L2Y;
+thread_local static void *IX_Texture;
+thread_local static void *IX_Page;
+thread_local static word *IX_ZBuffer;
+thread_local static dword IX_L2X, IX_L2Y;
 
 
 union deltas
@@ -48,13 +50,13 @@ union deltas
 #define L2SPANSIZE 4
 #define SPANSIZE 16
 #define fSPANSIZE 16.0
-static deltas ddx;
-static deltas ddx32;
+thread_local static deltas ddx;
+thread_local static deltas ddx32;
 
-static sword	dRdx;
-static sword	dGdx;
-static sword	dBdx;
-static sword	dZdx;
+thread_local static sword	dRdx;
+thread_local static sword	dGdx;
+thread_local static sword	dBdx;
+thread_local static sword	dZdx;
 
 static void CalcRightSection (IXVertexTG *V1, IXVertexTG *V2)
 {
@@ -79,7 +81,7 @@ static void CalcRightSection (IXVertexTG *V1, IXVertexTG *V2)
 	sdword FPRevHeight;
 	if (Right.ScanLines > 0)
 	{
-		FPRevHeight = Fist(rHeight * 65536.0);
+		FPRevHeight = Fist(rHeight * 65536.0f);
 		Right.dR = (V2->R - V1->R) * FPRevHeight;
 		Right.dG = (V2->G - V1->G) * FPRevHeight;
 		Right.dB = (V2->B - V1->B) * FPRevHeight;
@@ -142,7 +144,7 @@ static void CalcLeftSection (IXVertexTG *V1, IXVertexTG *V2)
 	sdword FPRevHeight;
 	if (Left.ScanLines > 0)
 	{
-		FPRevHeight = Fist(RevHeight*65536.0);
+		FPRevHeight = Fist(RevHeight*65536.0f);
 		Left.dR = (V2->R - V1->R) * FPRevHeight;
 		Left.dG = (V2->G - V1->G) * FPRevHeight;
 		Left.dB = (V2->B - V1->B) * FPRevHeight;
@@ -164,22 +166,22 @@ static void CalcLeftSection (IXVertexTG *V1, IXVertexTG *V2)
 	Left.VZ = V1->VZ + Left.dVZ * prestep;
 	Left.RZ = V1->RZ + Left.dRZ * prestep;
 
-	//long iprestep = Fist(65536.0 * prestep);
+	//int32_t iprestep = Fist(65536.0 * prestep);
 	Left.R = V1->R * 65536.0 + prestep * Left.dR;//+ (((Left.dR>>8) * iprestep)>>8);
 	Left.G = V1->G * 65536.0 + prestep * Left.dG;//+ (((Left.dG>>8) * iprestep)>>8);
 	Left.B = V1->B * 65536.0 + prestep * Left.dB;//+ (((Left.dB>>8) * iprestep)>>8);
 	Left.z = V1->z * 65536.0 + prestep * Left.dZ;//+ (((Left.dZ>>8) * iprestep)>>8);
 }
 
-static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
+thread_local static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
 /*
 static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr, float prestep)
 {
-	long i;
+	int32_t i;
 
 	//F4Vec _u, _v, _z;
-	long  _u0, _u1;
-	long  _v0, _v1;
+	int32_t  _u0, _u1;
+	int32_t  _v0, _v1;
 	word _Z0, _Z1;
 
 	float _z[4];
@@ -200,10 +202,10 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	dword Z = Fist(Left.z * 256.0 + prestep * dZdx);
 
 	// number of full sections
-	long ns = Width >> L2SPANSIZE;
+	int32_t ns = Width >> L2SPANSIZE;
 
 	// remainder section
-	long wrem = Width & (SPANSIZE-1); // % SPANSIZE.
+	int32_t wrem = Width & (SPANSIZE-1); // % SPANSIZE.
 
 	if (ns >= 4)
 	{
@@ -228,7 +230,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	_v0 = Fist(VZ * _z[0]);
 	_Z0 = 0xFF80 - Fist(g_zscale256 * _z[0]);
 	
-	long _du, _dv;
+	int32_t _du, _dv;
 
 	while (ns--)
 	{
@@ -244,7 +246,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 		_dv = _v1 - _v0 >> L2SPANSIZE;
 		_dZ = _Z1 - _Z0 >> L2SPANSIZE;
 		
-		long SpanWidth = SPANSIZE;
+		int32_t SpanWidth = SPANSIZE;
 		while (SpanWidth--)
 		{
 			dword r,g,b, tex;
@@ -403,7 +405,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 		};
 	};*/
 	//static word B, G, R, Z;
-	static word Col[4];
+	word Col[4];
 
 	Col[0] = Left.B >> 8;
 	Col[1] = Left.G >> 8;
@@ -445,7 +447,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -474,6 +476,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
 
+#ifndef PORTABLE_CODE
 				__asm
 				{
 					mov edi, [SpanPtr]
@@ -493,6 +496,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 					packuswb mm1, mm1
 					movd [edi], mm1
 				}
+#endif
 
 //				*SpanPtr = 0x7F7F7F;
 				//tex = 0x00ffffff;
@@ -516,9 +520,6 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 			Col[1] += dGdx;
 			Col[2] += dRdx;
 			//Z += dZdx;			
-		}
-		__asm {
-			emms
 		}
 
 		Width -= SPANSIZE;
@@ -629,7 +630,7 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -657,32 +658,6 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 				// *ZSpanPtr = _Z0;
 
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
-
-				__asm
-				{
-					mov edi, [SpanPtr]
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-
-					;packuswb mm1, mm1
-					;movd [edi], mm1
-
-					movd mm2, [edi]
-					punpcklbw mm0, mm2
-
-					;movq mm3, mm0
-					;psrlw mm3, 9
-					psrlw mm0, 9
-					psrlw mm1, 1
-					;paddw mm0, mm3
-					paddw mm0, mm1
-					packuswb mm0, mm0
-					movd [edi], mm0
-				}
 
 //				*SpanPtr = 0x7F7F7F;
 
@@ -721,10 +696,6 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 			Col[2] += dRdx;
 			
 			//Z += dZdx;			
-		}
-		__asm
-		{
-			emms
 		}
 
 		Width -= SPANSIZE;
@@ -771,7 +742,7 @@ static void IXFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Pag
 	IX_L2Y = logHeight;
 
 	// ZBuffer data starts at the end of framebuffer
-	IX_ZBuffer = (word *) ((dword)Page + PageSize);
+	IX_ZBuffer = (word *) ((uintptr_t)Page + PageSize);
 
 	Left.Index = 1;
 	Right.Index = numVerts - 1;
@@ -836,9 +807,9 @@ static void IXFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Pag
 
 	dword y, SectionHeight;
 	y = Fist(Verts[0].y);
-	dword *Scanline = (dword *)((dword)Page + VESA_BPSL * y);
-	word *ZScanline = (word *)((dword)Page + PageSize + sizeof(word) * XRes * y);
-	long Width;
+	dword *Scanline = (dword *)((uintptr_t)Page + VESA_BPSL * y);
+	word *ZScanline = (word *)((uintptr_t)Page + PageSize + sizeof(word) * XRes * y);
+	int32_t Width;
 	
 	// Iterate over sections
 	SectionHeight = (Left.ScanLines < Right.ScanLines) ? Left.ScanLines : Right.ScanLines;
@@ -849,7 +820,7 @@ static void IXFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Pag
 		{
 
 			// *** Draw scan line *** //
-			long lx, rx;
+			int32_t lx, rx;
 			lx = Fist(Left.x);
 			dword *SpanPtr = Scanline + lx;
 			word *ZSpanPtr = ZScanline + lx;
@@ -950,21 +921,21 @@ AfterScanConv:
 
 
 const dword maximalNgon = 16;
-static dword *l_TestTexture = NULL;
-static char l_IXMemBlock[sizeof(IXVertexTG) * (maximalNgon+1)];
-static IXVertexTG *l_IXArray = (IXVertexTG *)( ((dword)l_IXMemBlock + 0xF) & (~0xF) );
-static Material DummyMat;
-static Texture DummyTex;
+thread_local static dword *l_TestTexture = NULL;
+thread_local static char l_IXMemBlock[sizeof(IXVertexTG) * (maximalNgon+1)];
+thread_local static IXVertexTG *l_IXArray = (IXVertexTG *)( ((uintptr_t)l_IXMemBlock + 0xF) & (~0xF) );
+thread_local static Material DummyMat;
+thread_local static Texture DummyTex;
 
 
-static void PrefillerCommon(Vertex **V, dword numVerts)
+static void PrefillerCommon(Face *F, Vertex **V, dword numVerts, dword miplevel)
 {
 	dword i;
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
-	
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
+
+    uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
 
 	
 	float UScaleFactor = (1<<LogWidth);
@@ -987,9 +958,9 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 			{
 				fogRate = 0.0;
 			}
-			l_IXArray[i].R = V[i]->LR * fogRate;
-			l_IXArray[i].G = V[i]->LG * fogRate;
-			l_IXArray[i].B = V[i]->LB * fogRate;
+			l_IXArray[i].R = V[i]->LR * fogRate * fogRate;
+			l_IXArray[i].G = V[i]->LG * fogRate * fogRate;
+			l_IXArray[i].B = V[i]->LB * fogRate * fogRate;
 
 			// protect against gouraud interpolation underflows
 			if (l_IXArray[i].R < 2.0) l_IXArray[i].R = 2.0;
@@ -1018,35 +989,58 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 	IXFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
 }
 
-void IX_Prefiller_TGZ(Vertex **V, dword numVerts)
+void IX_Prefiller_TGZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoop;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts, miplevel);
 }
 
-void IX_Prefiller_TGAcZ(Vertex **V, dword numVerts)
+void IX_Prefiller_TGAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoopT;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts, miplevel);
 }
+
 
 
 // Interface to assembly mappers
+thread_local AsmFiller p_IXTGZM_AsmFiller;
+thread_local AsmFiller p_IXTGZSAM_AsmFiller;
+thread_local AsmFiller p_IXTGZTAM_AsmFiller;
+thread_local AsmFiller p_IXTGZTM_AsmFiller;
+
+
 extern "C"
 {
-	void IX_TGZM_AsmFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Page, dword logWidth, dword logHeight);
-	void IX_TGZTM_AsmFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Page, dword logWidth, dword logHeight);
 	void IX_TGZTAM_AsmFiller(IXVertexTG *Verts, dword numVerts, void *Texture, void *Page, dword logWidth, dword logHeight);
+	void IX_TGZSAM_AsmFiller(IXVertexTG* Verts, dword numVerts, void* Texture, void* Page, dword logWidth, dword logHeight);
 }
 
-void IX_Prefiller_TGZM(Vertex **V, dword numVerts)
+struct debug_outtext {
+	dword x, y;
+	std::string str;
+};
+
+extern std::vector<debug_outtext> DebugStrs;
+
+void IX_Prefiller_TGZM(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
+	IXVertexTG ixArray[maximalNgon];
+	const IXVertexTG* pIxArray = ixArray;
+
 	dword i;
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
 
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+    uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
+
+	dword updateZBuffer;
+	if (F->Flags & Face_Reflective) {
+		updateZBuffer = 0;
+	} else {
+		updateZBuffer = F->Txtr->ZBufferWrite ? 1 : 0;
+	}
 
 	float UScaleFactor = (1<<LogWidth);
 	float VScaleFactor = (1<<LogHeight);
@@ -1055,74 +1049,65 @@ void IX_Prefiller_TGZM(Vertex **V, dword numVerts)
 	{
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
 			float fogRate;
 			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;
 			}
-			l_IXArray[i].R = V[i]->LR * fogRate;
-			l_IXArray[i].G = V[i]->LG * fogRate;
-			l_IXArray[i].B = V[i]->LB * fogRate;
+			ixArray[i].R = V[i]->LR * fogRate * fogRate;
+			ixArray[i].G = V[i]->LG * fogRate * fogRate;
+			ixArray[i].B = V[i]->LB * fogRate * fogRate;
 
 			// protect against gouraud interpolation underflows
-			if (l_IXArray[i].R < 2.0) l_IXArray[i].R = 2.0;
-			if (l_IXArray[i].G < 2.0) l_IXArray[i].G = 2.0;
-			if (l_IXArray[i].B < 2.0) l_IXArray[i].B = 2.0;
+			if (ixArray[i].R < 2.0) ixArray[i].R = 2.0;
+			if (ixArray[i].G < 2.0) ixArray[i].G = 2.0;
+			if (ixArray[i].B < 2.0) ixArray[i].B = 2.0;
 
-			l_IXArray[i].y = V[i]->PY;
+			ixArray[i].y = V[i]->PY;
 		}
 	} else {
+		char MSGStr[128];
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
-			l_IXArray[i].R = V[i]->LR;
-			l_IXArray[i].G = V[i]->LG;
-			l_IXArray[i].B = V[i]->LB;
-			l_IXArray[i].y = V[i]->PY;
+#ifdef TRACE_OBJECTS
+			sprintf(MSGStr, "%f, %f, %x", V[i]->PX, V[i]->PY, V[i]->i);
+			//OutTextXY(VPage, Fist(V[i]->PX), Fist(V[i]->PY), MSGStr, 255);
+			DebugStrs.emplace_back(Fist(V[i]->PX), Fist(V[i]->PY) + (V[i]->i >> 4) * 15, MSGStr);
+#endif
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			ixArray[i].R = V[i]->LR;
+			ixArray[i].G = V[i]->LG;
+			ixArray[i].B = V[i]->LB;
+			ixArray[i].y = V[i]->PY;
 		}
-	}
-
-//	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
-	__asm
-	{
-		pushad
-		push LogHeight
-		push LogWidth
-		push VPage
-		push TextureAddr
-		push numVerts
-		push l_IXArray
-		call IX_TGZM_AsmFiller
-		add esp, 24
-		popad
 	}
 //	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
 }
 
 
 
-void IX_Prefiller_TGZTM(Vertex **V, dword numVerts)
+void IX_Prefiller_TGZTM(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
+	IXVertexTG ixArray[maximalNgon];
+	const IXVertexTG* pIxArray = ixArray;
+
 	dword i;
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
 
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+    uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
+
+//	dword updateZBuffer = F->Txtr->ZBufferWrite ? 1 : 0;
+	dword updateZBuffer = 0;
 
 	float UScaleFactor = (1<<LogWidth);
 	float VScaleFactor = (1<<LogHeight);
@@ -1131,134 +1116,224 @@ void IX_Prefiller_TGZTM(Vertex **V, dword numVerts)
 	{
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
 			float fogRate;
 			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;
 			}
-			l_IXArray[i].R = V[i]->LR * fogRate;
-			l_IXArray[i].G = V[i]->LG * fogRate;
-			l_IXArray[i].B = V[i]->LB * fogRate;
+			ixArray[i].R = V[i]->LR * fogRate * fogRate;
+			ixArray[i].G = V[i]->LG * fogRate * fogRate;
+			ixArray[i].B = V[i]->LB * fogRate * fogRate;
 
 			// protect against gouraud interpolation underflows
-			if (l_IXArray[i].R < 2.0) l_IXArray[i].R = 2.0;
-			if (l_IXArray[i].G < 2.0) l_IXArray[i].G = 2.0;
-			if (l_IXArray[i].B < 2.0) l_IXArray[i].B = 2.0;
+			if (ixArray[i].R < 2.0) ixArray[i].R = 2.0;
+			if (ixArray[i].G < 2.0) ixArray[i].G = 2.0;
+			if (ixArray[i].B < 2.0) ixArray[i].B = 2.0;
 
-			l_IXArray[i].y = V[i]->PY;
+			ixArray[i].y = V[i]->PY;
 		}
 	} else {
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
-			l_IXArray[i].R = V[i]->LR;
-			l_IXArray[i].G = V[i]->LG;
-			l_IXArray[i].B = V[i]->LB;
-			l_IXArray[i].y = V[i]->PY;
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].R = V[i]->LR;
+			ixArray[i].G = V[i]->LG;
+			ixArray[i].B = V[i]->LB;
+			ixArray[i].y = V[i]->PY;
 		}
 	}
 
-//	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
-	__asm
-	{
-		pushad
-		push LogHeight
-		push LogWidth
-		push VPage
-		push TextureAddr
-		push numVerts
-		push l_IXArray
-		call IX_TGZTM_AsmFiller
-		add esp, 24
-		popad
-	}
-//	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+	//dword updateZBuffer = F->Txtr->ZBufferWrite ? 1 : 0;
+
+//	IXAsmFiller(ixArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
 }
 
-void IX_Prefiller_TGZTAM(Vertex **V, dword numVerts)
+void IX_Prefiller_TGZTAM(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
+	IXVertexTG ixArray[maximalNgon];
+	const IXVertexTG* pIxArray = ixArray;
 	dword i;
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
 
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+    uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
 
 	float UScaleFactor = (1<<LogWidth);
 	float VScaleFactor = (1<<LogHeight);
 
-	if (CurScene->Flags & Scn_Fogged)
+	if (false) //CurScene->Flags & Scn_Fogged)
 	{
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
 			float fogRate;
 			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;
 			}
-			l_IXArray[i].R = V[i]->LR * fogRate;
-			l_IXArray[i].G = V[i]->LG * fogRate;
-			l_IXArray[i].B = V[i]->LB * fogRate;
+			ixArray[i].z = V[i]->LA; // Alpha is called z. Because reasons
+			ixArray[i].R = V[i]->LR * fogRate * fogRate;
+			ixArray[i].G = V[i]->LG * fogRate * fogRate;
+			ixArray[i].B = V[i]->LB * fogRate * fogRate;
 
 			// protect against gouraud interpolation underflows
-			if (l_IXArray[i].R < 2.0) l_IXArray[i].R = 2.0;
-			if (l_IXArray[i].G < 2.0) l_IXArray[i].G = 2.0;
-			if (l_IXArray[i].B < 2.0) l_IXArray[i].B = 2.0;
+			if (ixArray[i].R < 2.0) ixArray[i].R = 2.0;
+			if (ixArray[i].G < 2.0) ixArray[i].G = 2.0;
+			if (ixArray[i].B < 2.0) ixArray[i].B = 2.0;
 
-			l_IXArray[i].y = V[i]->PY;
+			ixArray[i].y = V[i]->PY;
 		}
 	} else {
 		for(i=0; i<numVerts; i++)
 		{
-			l_IXArray[i].x = V[i]->PX;
-			l_IXArray[i].UZ = V[i]->UZ * UScaleFactor;
-			l_IXArray[i].VZ = V[i]->VZ * VScaleFactor;
-			l_IXArray[i].RZ = V[i]->RZ;
-			//Fist(l_IXArray[i].R, V[i]->LR * 256.0f);
-			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
-			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
-			l_IXArray[i].R = V[i]->LR;
-			l_IXArray[i].G = V[i]->LG;
-			l_IXArray[i].B = V[i]->LB;
-			l_IXArray[i].y = V[i]->PY;
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].z = V[i]->LA; // Alpha is called z. Because reasons
+			ixArray[i].R = V[i]->LR;
+			ixArray[i].G = V[i]->LG;
+			ixArray[i].B = V[i]->LB;
+			ixArray[i].y = V[i]->PY;
 		}
 	}
 
-//	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
-	__asm
+//	IXAsmFiller(ixArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+
+//	IXAsmFiller(ixArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+}
+
+void IX_Prefiller_TGZSAM(Face* F, Vertex** V, dword numVerts, dword miplevel)
+{
+	IXVertexTG ixArray[maximalNgon];
+	const IXVertexTG* pIxArray = ixArray;
+	dword i;
+
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
+	dword updateZBuffer = F->Txtr->ZBufferWrite ? 1 :0;
+
+    uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
+
+	float UScaleFactor = (1 << LogWidth);
+	float VScaleFactor = (1 << LogHeight);
+
+	if (false) // CurScene->Flags & Scn_Fogged)
 	{
-		pushad
-		push LogHeight
-		push LogWidth
-		push VPage
-		push TextureAddr
-		push numVerts
-		push l_IXArray
-		call IX_TGZTAM_AsmFiller
-		add esp, 24
-		popad
+		//if (V[0]->)
+		for (i = 0; i < numVerts; i++)
+		{
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
+			float fogRate;
+			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
+			if (fogRate < 0.0)
+			{
+				fogRate = 0.0;
+			}
+			ixArray[i].R = V[i]->LR * fogRate * fogRate;
+			ixArray[i].G = V[i]->LG * fogRate * fogRate;
+			ixArray[i].B = V[i]->LB * fogRate * fogRate;
+
+			// protect against gouraud interpolation underflows
+			if (ixArray[i].R < 2.0) ixArray[i].R = 2.0;
+			if (ixArray[i].G < 2.0) ixArray[i].G = 2.0;
+			if (ixArray[i].B < 2.0) ixArray[i].B = 2.0;
+
+			ixArray[i].y = V[i]->PY;
+		}
 	}
-//	IXAsmFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+	else {
+		for (i = 0; i < numVerts; i++)
+		{
+			ixArray[i].x = V[i]->PX;
+			ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+			ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+			ixArray[i].RZ = V[i]->RZ;
+			//Fist(ixArray[i].R, V[i]->LR * 256.0f);
+			//Fist(ixArray[i].G, V[i]->LG * 256.0f);
+			//Fist(ixArray[i].B, V[i]->LB * 256.0f);
+			ixArray[i].R = V[i]->LR;
+			ixArray[i].G = V[i]->LG;
+			ixArray[i].B = V[i]->LB;
+			ixArray[i].y = V[i]->PY;
+		}
+	}
+
+	//	IXAsmFiller(ixArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+	//	IXAsmFiller(ixArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
+}
+
+
+void IX_Prefiller_Reflective(Face* F, Vertex** V, dword numVerts, dword miplevel)
+{
+	IXVertexTG ixArray[maximalNgon];
+	const IXVertexTG* pIxArray = ixArray;
+	dword i;
+
+	auto Tx = F->ReflectionTexture;
+    uintptr_t TextureAddr = (uintptr_t)Tx->Mipmap[0];
+
+	int32_t LogWidth = Tx->LSizeX;
+	int32_t LogHeight = Tx->LSizeY;
+
+	float UScaleFactor = (1 << LogWidth);
+	float VScaleFactor = (1 << LogHeight);
+	dword updateZBuffer = 1;
+
+	for (i = 0; i < numVerts; i++) {
+		ixArray[i].x = V[i]->PX;
+		ixArray[i].y = V[i]->PY;
+		ixArray[i].UZ = V[i]->UZ * UScaleFactor;
+		ixArray[i].VZ = V[i]->VZ * VScaleFactor;
+		ixArray[i].RZ = V[i]->RZ;
+		//ixArray[i].R = 127.0;
+		//ixArray[i].G = 127.0;
+		//ixArray[i].B = 127.0;
+
+		float fogRate;
+		fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
+		if (fogRate < 0.0) {
+			fogRate = 0.0;
+		}
+		ixArray[i].R = 192.0 * fogRate * fogRate;
+		ixArray[i].G = 192.0 * fogRate * fogRate;
+		ixArray[i].B = 192.0 * fogRate * fogRate;
+
+		// protect against gouraud interpolation underflows
+		if (ixArray[i].R < 2.0) ixArray[i].R = 2.0;
+		if (ixArray[i].G < 2.0) ixArray[i].G = 2.0;
+		if (ixArray[i].B < 2.0) ixArray[i].B = 2.0;
+	}
+
 }

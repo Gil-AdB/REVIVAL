@@ -199,7 +199,7 @@ int DPMI_int86x(int intno, RMREGS *in, RMREGS *out, RMSREGS *sregs);
 int DPMI_allocSelector(void);
 void DPMI_setSelectorBase(int sel,dword linAddr);
 void DPMI_setSelectorLimit(int sel,dword limit);
-void Init_Aligned(long Amount);
+void Init_Aligned(int32_t Amount);
 void * Get_Aligned_Block();
 void Remove_Aligned_Block(void *Target);
 void Deinit_Aligned();
@@ -212,10 +212,10 @@ void DPMI_Del_P2L(void *Linear);
 #define VESAIncluded
 void Initialize_VESA();
 int VBE_Detect();
-void VESA_FullInfo(long RX,long RY,char RBPP);
-extern VESA_Surface * VESA_Alloc_Surface(long RX,long RY,long RBPP,long FOV,dword Flags);
-char VESA_Init_Video(long X,long Y,long BPP);
-void Set_Screen(long X,long Y,long BPP,char ZBuf,float FOV);
+void VESA_FullInfo(int32_t RX,int32_t RY,char RBPP);
+extern VESA_Surface * VESA_Alloc_Surface(int32_t RX,int32_t RY,int32_t RBPP,int32_t FOV,dword Flags);
+char VESA_Init_Video(int32_t X,int32_t Y,int32_t BPP);
+void Set_Screen(int32_t X,int32_t Y,int32_t BPP,char ZBuf,float FOV);
 void VESA_Surface2Global(VESA_Surface *VS);
 char Modesetup();
 void End_Graphics();
@@ -223,8 +223,9 @@ void End_Graphics();
 //void Build_YOffs_Table(VESA_Surface *VS);
 
 Font * LoadAFT(const char *FileName);
-long OutTextXY(byte *Where,long X,long Y, const char *S,char C, int xres = XRes, int yres = YRes);
-long Write_String_T32(long X,long Y,char *S,dword C);
+int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int xres = XRes, int yres = YRes);
+void OutTextXYExtents(int32_t X, int32_t Y, const char* S, int xres, int yres, int32_t& out_height, int32_t& out_width);
+int32_t Write_String_T32(int32_t X,int32_t Y,char *S,dword C);
 void Set_RGB(char Reg,char R,char G,char B);
 void Set_Palette(VPalette Pal);
 void Make_Gouraud_8(char R0,char G0,char B0,char R1,char G1,char B1);
@@ -239,11 +240,11 @@ void Deinitialize_VESA();
 void SetVESAMode(int Mode);
 void SetVGAMode(unsigned short Mode);
 void Transparence(VESA_Surface *Source,VESA_Surface *Target);
-void Modulate(VESA_Surface *Source,VESA_Surface *Target,dword SrcMask,dword TrgMask);
+void Modulate(VESA_Surface *Source,VESA_Surface *Target,dword SrcMask,dword TrgMask, dword PageSize);
 
-dword AttemptGraphicsSet(long X,long Y,long BPP,dword ForceBanked);
+dword AttemptGraphicsSet(int32_t X,int32_t Y,int32_t BPP,dword ForceBanked);
 
-void VESA_InitExternal(long x, long y, long bpp);
+void VESA_InitExternal(int32_t x, int32_t y, int32_t bpp);
 void VESA_VPageExternal(VESA_Surface *ExtrnVS);
 #endif
 
@@ -279,19 +280,15 @@ void DisplayMouse();
 void Hierarchy_Sort(Scene *Sc);
 void Detect_MMX();
 
-void *getAlignedBlock(mword size, mword alignment = 64);
+void *getAlignedBlock(uintptr_t size, uintptr_t alignment = 64);
 void freeAlignedBlock(void *ptr);
+
 #endif
 
 #ifndef ImageCodeIncluded
 #define ImageCodeIncluded
 char Identify_Texture(Texture *Tx);
 char Load_Texture(Texture *Tx);
-#ifdef C_WATCOM
-extern "C++" char *LoadJPEG(const char *argv1,unsigned int SeekPos);
-#else
-char *LoadJPEG(const char *argv1,unsigned int SeekPos);
-#endif
 void View_Texture(Texture *Tx);
 void BPPConvert_Texture(Texture *Tx, byte TB);
 void FilterLSB_Texture(Texture *T);
@@ -299,19 +296,19 @@ void Unify_Textures(Scene *Sc);
 char Load_Image_PCX(Image *Img,	const char *FN);
 char Load_Image_GIF(Image *Img, const char *FN);
 char Load_Image_JPEG(Image *Img, const char *FN);
-void TAS_Set(dword TASType,long X,long Y);
+void TAS_Set(dword TASType,int32_t X,int32_t Y);
 void Generate_Mipmaps(Texture *Tx, mword blockSizeX, mword blockSizeY, mword enableMip);
 #endif
 
 #ifndef ImageProcessingIncluded
 #define ImageProcessingIncluded
 // Kombat's stuph go here
-void T16Conv(Word **Data,long OldX,long OldY,long X,long Y);
+void T16Conv(Word **Data,int32_t OldX,int32_t OldY,int32_t X,int32_t Y);
 // end
 void MipmapXY(Image *Img);
 void MipmapX(Image *Img);
 void MipmapY(Image *Img);
-void Scale_Image(Image *Img,long NX,long NY);
+void Scale_Image(Image *Img,int32_t NX,int32_t NY);
 void Convert_Texture2Image(Texture *Tx,Image *Img);
 void Convert_Image2Texture(Image *Img,Texture *Tx);
 void Gamma_Correction(Image *Img,float Gamma);
@@ -322,13 +319,13 @@ void Image_Laplasian(Image *Img);
 void Image_LPF(Image *Img);
 void Image_HPF(Image *Img);
 void Image_Enhance(Image *Img);
-void Bump_Image_2D(Image *Prim,Image *BMap,Image *BTbl,long LX,long LY);
+void Bump_Image_2D(Image *Prim,Image *BMap,Image *BTbl,int32_t LX,int32_t LY);
 void Image_Ripple(Image *Prim,float Amp,float Freq,float Ofs);
 #endif
 
 #ifndef ImageGeneratorsIncluded
 #define ImageGeneratorsIncluded
-void New_Image(Image *Img,long X,long Y);
+void New_Image(Image *Img,int32_t X,int32_t Y);
 void Generate_Flare_Image(Image *Img,float FR,float FG,float FB);
 void Generate_Flare_Image_Test(Image *Img,float FR,float FG,float FB,float blah,float XDec,float YDec);
 void Generate_RGBFlares();
@@ -337,7 +334,7 @@ Material *Generate_RGBFlare(unsigned char R,unsigned char G,unsigned char B);
 void Setup_Grid_Texture_Mapper_MMX(dword xres, dword yres);
 void Grid_Texture_Mapper(GridPoint *GP,Image *Img,dword *DAC);
 void Generate_Fractal_Noise(Image *Img,float Graininess);
-void Generate_Plasma(Image *Img, short p, long seed);
+void Generate_Plasma(Image *Img, short p, int32_t seed);
 AGridPoint * Init_Antiwobbler();
 void AW_Staticmap(AGridPoint *AGP);
 #endif
@@ -346,6 +343,7 @@ void AW_Staticmap(AGridPoint *AGP);
 #define RenderIncluded
 void FDS_Title(void);
 char FDS_Init(unsigned short x,unsigned short y,unsigned char BPP);
+void DrawSpline(Spline Pos, Vector CamISource, int EndFrame);
 #ifdef _C_WATCOM
 void SetGraphicsMode(void);
 #endif
@@ -366,7 +364,7 @@ void Radix_Sorting();
 
 void SetCurrentScene(Scene *Sc);
 
-void Animate_Objects(Scene *Sc);
+void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
 void Transform_Objects(Scene *Sc);
 char BFC(Face *F);
 char BOC(Face *F);
@@ -381,9 +379,9 @@ void Render();
 #define FrustrumIncluded
 
 // Third generation Frustrum clipper
-void InitFrustrumClipper();
-void InitClipperViewport(Scene *Sc);
-void FrustrumClipper();
+//void InitFrustrumClipper();
+//void InitClipperViewport(Scene *Sc);
+//void FrustrumClipper();
 
 
 #endif
@@ -397,28 +395,30 @@ void GridRendererTG(GridPointTG *GP, Image *Img, dword *page, dword XRes, dword 
 
 // Sprite scalers
 void The_Seven_UP(Vertex **V, dword numVerts);
-void The_Seven_UP_64(long X,long Y,long SX,long SY,dword *Bitmap,byte *Page);
-void The_MMX_Scalar(Vertex **V, dword numVerts);
+void The_Seven_UP_64(int32_t X,int32_t Y,int32_t SX,int32_t SY,dword *Bitmap,byte *Page);
+void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel);
 
 // House IX technology
-void InitPolyStats(long cells);
+void InitPolyStats(int32_t cells);
 void SavePolyStats(const char *fileName);
-void IX_Prefiller_FZ(Vertex **V, dword numVerts);
-void IX_Prefiller_FAcZ(Vertex **V, dword numVerts);
-void IX_Prefiller_GZ(Vertex **V, dword numVerts);
-void IX_Prefiller_GAcZ(Vertex **V, dword numVerts);
-void IX_Prefiller_TZ(Vertex **V, dword numVerts);
-void IX_Prefiller_TAcZ(Vertex **V, dword numVerts);
-void IX_Prefiller_TGZ(Vertex **V, dword numVerts);
-void IX_Prefiller_TGAcZ(Vertex **V, dword numVerts);
-void IX_Prefiller_TGZM(Vertex **V, dword numVerts);
-void IX_Prefiller_TGZTM(Vertex **V, dword numVerts);
-void IX_Prefiller_TGZTAM(Vertex **V, dword numVerts);
+void IX_Prefiller_FZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_FAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_GZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_GAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGZM(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGZTM(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGZTAM(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void IX_Prefiller_TGZSAM(Face* F, Vertex** V, dword numVerts, dword miplevel);
+void IX_Prefiller_Reflective(Face* F, Vertex** V, dword numVerts, dword miplevel);
 
 
 // Tile based rendering
 void TBR_Init(Scene *Sc, mword size);
-void TBR_Sprite(Vertex **V, dword numVerts);
+void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel);
 void TBR_Render(Scene *Sc);
 
 #ifdef WIN32
@@ -474,23 +474,40 @@ extern dword New_SCache(dword Size);
 // C++ linkage
 
 // v0.8: FMod module player interface; no library-specific structures are interfaced
-#ifndef FMod_Included
-#define FMod_Included
-dword FModInit();
-dword FModLoadModule(const char *ModuleFilename);
-//dword FModLoadModule(void *moduleBuffer, dword moduleLength);
-void FModPlayModule(dword handle);
-void FModFreeModule(dword handle);
-void FModClose();
-
-// FMod: Advanced features
-void FModGetModuleInfo(MusicModuleInfo &mmi);
-void FModSetModuleInfo(MusicModuleInfo &mmi);
-#endif
+//#ifndef FMod_Included
+//#define FMod_Included
+//dword FModInit();
+//dword FModLoadModule(const char *ModuleFilename);
+////dword FModLoadModule(void *moduleBuffer, dword moduleLength);
+//void FModPlayModule(dword handle);
+//void FModFreeModule(dword handle);
+//void FModClose();
+//
+//// FMod: Advanced features
+//void FModGetModuleInfo(MusicModuleInfo &mmi);
+//void FModSetModuleInfo(MusicModuleInfo &mmi);
+//#endif
 
 // Skycube generation routine
 Scene * CreateSkyCube(dword skyType);
-void RenderSkyCube(Scene *Sc, Camera *Cm);
+void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation);
+
+void Sachletz(dword* data, dword xres, dword yres);
+
+template <typename T>
+T* getAlignedArray(size_t N, size_t alignment) {
+	T* block = (T*)getAlignedBlock(sizeof(T) * N, alignment);
+	for (auto i = 0u; i < N; ++i) {
+		new(&block[i]) T();
+	}
+	return block;
+}
+
+template <typename T>
+T* getAlignedType(uintptr_t alignment) {
+	T* block = (T*)getAlignedBlock(sizeof(T), alignment);
+	return new(block) T();
+}
 
 
 #endif //FDS_DECS_H_INCLUDED

@@ -1,0 +1,299 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 60
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 600
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  67.5 0 35 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -910 0 -85 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  945 0 -525 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  660 0 717.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -847.5 0 917.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1042.5 0 95 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7.5 0 1000 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -777.5 0 -930 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  275 0 -800 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1715 0 440 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1572.5 0 1032.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1215 0 -1352.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2145 0 -747.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1792.5 0 1307.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  757.5 0 1490 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -687.5 0 1570 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -572.5 0 420 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1630 0 422.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1572.5 0 -912.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1762.5 0 -250 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2557.5 0 725 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -296.6255 209.5 -583.4439 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  8
+  79.43315 385.125 -1024.431 0.7 17 0 1 1 1
+  0 0 0 0 0
+  -74.51289 385.125 -248.411 -14.3 -1.440743e-006 0 1 1 1
+  170 0 0 0 0
+  -390.2458 385.125 636.0063 -74.5 -0.2000014 0 1 1 1
+  267 0 0 0 0
+  -882.0533 385.125 436.7884 -132.6 1.599998 0 1 1 1
+  334 0 0 0 0
+  -1023.983 385.125 -36.74841 -160.6 6.099998 0 1 1 1
+  398 0 0 0 0
+  -929.9807 385.125 -605.2506 -256.8 -0.4000014 0 1 1 1
+  472 0 0 0 0
+  -929.9807 907.625 -605.2506 -261.4 19 0 1 1 1
+  527 0 0 0 0
+  -219.9824 907.625 -40.06606 -261.4 19 0 1 1 1
+  600 0 0 0 0
+EndBehavior 1
+ZoomFactor 3.200000
+Resolution 1
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 0.000000 0.000000 0.000000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 13.500000
+GridNumber 0
+GridSize 500.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

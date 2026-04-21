@@ -3,7 +3,7 @@
 	[10.09.02] Version 0.01: basic version operative
 */
 
-#include "REV.H"
+#include "Rev.h"
 
 static void rayFaceIsect(rtIntersection &isect, rtLocalRay &ray, Face *F)
 {
@@ -151,8 +151,8 @@ void GlowRaytracer(Scene *Sc, Camera *Viewer)
 			colorAccum.B = 0.0;
 			for(k=0; k<stochSamples; k++)
 			{				
-//				tdir.x = x + rand()*dx/32768.0;
-//				tdir.y = y + rand()*dy/32768.0;
+//				tdir.x = x + RAND_15()*dx/32768.0;
+//				tdir.y = y + RAND_15()*dy/32768.0;
 				tdir.x = x + (float)(k%gridSamples)*dx/(gridSamples);
 				tdir.y = y + (float)(k/gridSamples)*dy/(gridSamples);
 				tdir.z = 1.0;

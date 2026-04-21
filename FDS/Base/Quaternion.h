@@ -11,11 +11,11 @@ struct Quaternion
 {
 	union
 	{
-		float W;
+		float W = 0.0f;
 		float s;
 	};
 
-	float x, y, z;
+	float x = 0.0f, y = 0.0, z = 0.0;
 
 	Vector im()
 	{

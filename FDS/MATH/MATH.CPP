@@ -9,7 +9,8 @@
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
-#include <smmintrin.h>
+#include "simde/x86/sse4.1.h"
+
 //Externals
 float SinTab[1440];
 float CosTab[1440];
@@ -22,7 +23,7 @@ Quaternion Quat_ID;
 // Generates Sine/Cosine Lookup Tables, at 1/4 a Degree accuracy.
 void Generate_SCTabs()
 {
-	long I;
+	int32_t I;
 	SinTab[0]=0.0;
 	CosTab[0]=1.0;
 	SinTab[1]=sin(PI/720);
@@ -1135,7 +1136,7 @@ void Spline_CompDerivLast_Bezier(SplineKey *P,SplineKey *C)
 
 void Spline_Init_Bezier(Spline *S)
 {
-	long I;
+	int32_t I;
 	
 	S->CurKey = 0;
 	if (S->NumKeys < 2) return;
@@ -1193,8 +1194,12 @@ void Spline_Subdivide_Bezier(Spline *S,float Frame,Quaternion *Out)
 			Out->W = NK->Pos.W;
 			return;
 		}
-		t=(Frame - SK->Frame)/(NK->Frame - SK->Frame);
-		t=BKS_Ease(t,SK->EaseFrom,NK->EaseTo);
+		if (Frame == SK->Frame) {
+			t = 0;
+		} else {
+			t = (Frame - SK->Frame) / (NK->Frame - SK->Frame);
+			t = BKS_Ease(t, SK->EaseFrom, NK->EaseTo);
+		}
 		if (NK->AA.W>2.0*PI)
 		{
 			SLERP_Axis(&SK->Pos,&NK->AA,t,Out);
@@ -1368,13 +1373,24 @@ void BKS_QuatDeriviate(SplineKey *KeyP,SplineKey *Key,SplineKey *KeyN)
 	Quaternion_Mul(&P,&Key->Pos,&Key->DD);
 }
 
+void Spline_Remove_Duplicates(Spline* S) {
+		
+	for (int i = 0; i != S->NumKeys; ++i) {
+		if (S->Keys[i].Frame > 0) {
+			return;
+		}
+	}
+	S->NumKeys = 1;
+}
+
 // Initializes a 3D/Pos spline. Must always be executed before the spline can
 // be correctly Interpolated.
 void Spline_Init_3D(Spline *S)
 {
-	long I;
+	int32_t I;
 	
 	S->CurKey = 0;
+	Spline_Remove_Duplicates(S);
 	if (S->NumKeys < 2) return;
 	if (S->NumKeys > 2)
 	{
@@ -1400,8 +1416,9 @@ void Spline_Init_3D(Spline *S)
 // spline can be correctly Interpolated. (Doesn't support LOOPS)
 void Spline_Init_4D(Spline *S)
 {
-	long I;
+	int32_t I;
 	S->CurKey = 0;
+	Spline_Remove_Duplicates(S);
 	if (S->NumKeys < 2) return;
 	if (S->NumKeys > 2)
 	{
@@ -1441,7 +1458,12 @@ void Spline_Calc_1D(Spline *S,float Frame, float *Out)
 	NK = SK+1;
 	if (Frame > NK->Frame) {*Out = NK->Pos.x; return;}
 	
-	t = (Frame - SK->Frame)/(NK->Frame - SK->Frame);
+	float step = NK->Frame - SK->Frame;
+	if (step == 0.0) {
+		t = 0.0;
+	} else {
+		t = (Frame - SK->Frame) / step;
+	}
 	t = BKS_Ease(t, SK->EaseFrom, NK->EaseTo);
 	
 	t2 = t*t;    // t2 = t^2;
@@ -1542,7 +1564,7 @@ void Spline_Calc_4D_Alt(Spline *S,float Frame, Quaternion *Out)
 	Out->W = (h[0]*SK->Pos.W)+(h[1]*NK->Pos.W)+(h[2]*SK->DD.W)+(h[3]*NK->DS.W);
 }
 
-// Under Research. An attempt to interpolate arcs over long distances.
+// Under Research. An attempt to interpolate arcs over int32_t distances.
 void Spline_Calc_4D(Spline *S,float Frame, Quaternion *Out)
 {
 	float t;

@@ -7,16 +7,17 @@
 
 #include <Base/Scene.h>
 
+#include "FRUSTRUM.H"
+#include <atomic>
+
 #define ClipAccurate
 #define COUNT_POLYS
-//#define NO_MIPMAPS
+#define NO_MIPMAPS
 
 float FOVX,FOVY;
 float C_FZP,C_rFZP, C_NZP, C_rNZP;
 
-dword g_MipLevel;
-dword g_renderedPolys;
-
+std::atomic<dword> g_renderedPolys;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Third Generation Triangle -> Convex counterclockwise NGon Frustrum clipper.
@@ -37,32 +38,13 @@ dword g_renderedPolys;
 
 #define ENABLE_PIXELCOUNT
 
-struct Viewport
-{
-	float ClipX1, ClipX2, ClipY1, ClipY2;
-	float NearZ, FarZ;
-	float iNearZ, iFarZ;
-};
-
-#define CLIPPER_MAXVERTS 48
-
-static Viewport C_VP;
-static mword C_numVerts;
-static Vertex C_Verts[CLIPPER_MAXVERTS];
-static Vertex *C_Ptr[3][CLIPPER_MAXVERTS];
-static Vertex **C_Prim, **C_Scnd, **C_Tetr;
-
-static Vertex *_IA,*_IB;
-static float _IVal;
-static dword C_Flags;
-
 
 #define LOGTABLEPREC 8
 #define EXPTABLEPREC 8
 #define EXPTABLEMASK 0x000000FF
 
-static float LogTable[1<<LOGTABLEPREC];
-static float ExpTable[(1<<EXPTABLEPREC)+1];
+thread_local static float LogTable[1<<LOGTABLEPREC];
+thread_local static float ExpTable[(1<<EXPTABLEPREC)+1];
 
 float fastLog2(float x)
 {
@@ -76,12 +58,12 @@ float fastPow2(float x)
 {
 //	static const float b2 = log(2.0);
 //	return exp(b2*x);
-	static const float ETP = (1 << EXPTABLEPREC);
+	constexpr float ETP = (1 << EXPTABLEPREC);
 	// generate pow2 LUT
-	long i = Fist(x * ETP);
+	int32_t i = Fist(x * ETP);
 	union {
 		float e;
-		long le;
+		int32_t le;
 	};
 	e = ExpTable[i & EXPTABLEMASK];
 
@@ -103,11 +85,10 @@ static float invTable[32] = {0.0,
 	2.0/29.0, 2.0/30.0, 2.0/31.0, 
 };
 
-
-void InitFrustrumClipper()
+void FrustumClipper::Init()
 {
 	dword i;
-	static const float rl2 = 1.0 / log(2.0);
+	const float rl2 = 1.0f / logf(2.0f);
 
 	memset(C_Verts, 0, sizeof(C_Verts));
 
@@ -124,60 +105,73 @@ void InitFrustrumClipper()
 	for (i = 0; i < 1 << LOGTABLEPREC; i++)
 	{
 		ix = (127 << 23) + (i << (23-LOGTABLEPREC));
-		LogTable[i] = log(x) * rl2;
+		LogTable[i] = logf(x) * rl2;
 	}
 
-	static const float b2 = log(2.0);
-	static const float rETP = 1.0f / (1 << EXPTABLEPREC);
+	const float b2 = logf(2.0f);
+	const float rETP = 1.0f / (1 << EXPTABLEPREC);
 	// generate pow2 LUT
 	for (i = 0; i <= 1 << EXPTABLEPREC; i++)
 	{
 		x = i * rETP;
-		ExpTable[i] = exp(b2*x);
+		ExpTable[i] = expf(b2*x);
 	}
 	
-	for(i=0;i<10; i++)
-	{
-		x = rand() / 391.241;
+	//for(i=0;i<10; i++)
+	//{
+	//	x = RAND_15() / 391.241;
 
-		float l_acc = log(x) * rl2;
-		float l_tbl = fastLog2(x);
+	//	float l_acc = log(x) * rl2;
+	//	float l_tbl = fastLog2(x);
 
-		l_acc = exp(x * b2);
-		l_tbl = fastPow2(x);
-	}
+	//	l_acc = exp(x * b2);
+	//	l_tbl = fastPow2(x);
+	//}
 }
 
-void InitClipperViewport(Scene *Sc)
-{
-	C_VP.NearZ = Sc->NZP;
-	C_VP.FarZ = Sc->FZP;
-	C_VP.iNearZ = 1.0 / Sc->NZP;
-	C_VP.iFarZ = 1.0 / Sc->FZP;
+void viewportInit(Viewport& vp, const Scene* Sc) {
+	vp.NearZ = Sc->NZP;
+	vp.FarZ = Sc->FZP;
+	vp.iNearZ = 1.0f / Sc->NZP;
+	vp.iFarZ = 1.0f / Sc->FZP;
 
 	// scene should have a flag for modifyable clipping bounds.
-	C_VP.ClipX1 = 0.0;
-	C_VP.ClipX2 = XRes;
-	C_VP.ClipY1 = 0.0;
-	C_VP.ClipY2 = YRes-1;
+	vp.ClipX1 = 0.0;
+	vp.ClipX2 = XRes;
+	vp.ClipY1 = 0.0;
+	vp.ClipY2 = YRes;
 }
-static inline void Calc_Flags(Vertex *V)
+
+void viewportCalcFlags(const Viewport& vp, Vertex* v) {
+	if (v->PX < vp.ClipX1) v->Flags = Vtx_VisLeft; else v->Flags = 0;
+	if (v->PX > vp.ClipX2) v->Flags |= Vtx_VisRight;
+	if (v->PY < vp.ClipY1) v->Flags |= Vtx_VisUp;
+	if (v->PY > vp.ClipY2) v->Flags |= Vtx_VisDown;
+}
+
+void viewportCalcYFlags(const Viewport& vp, Vertex* v) {
+	if (v->PY < vp.ClipY1) v->Flags = Vtx_VisUp; else v->Flags = 0;
+	if (v->PY > vp.ClipY2) v->Flags |= Vtx_VisDown;
+}
+
+void FrustumClipper::InitViewport(Scene *Sc)
 {
-	if (V->PX<C_VP.ClipX1) V->Flags = Vtx_VisLeft; else V->Flags = 0;
-	if (V->PX>C_VP.ClipX2) V->Flags |= Vtx_VisRight;
-	if (V->PY<C_VP.ClipY1) V->Flags |= Vtx_VisUp;
-	if (V->PY>C_VP.ClipY2) V->Flags |= Vtx_VisDown;
+	viewportInit(C_VP, Sc);
+}
+
+void FrustumClipper::Calc_Flags(Vertex *V)
+{
+	viewportCalcFlags(C_VP, V);
 	C_Flags |= V->Flags;
 }
 
-static inline void Calc_YFlags(Vertex *V)
+void FrustumClipper::Calc_YFlags(Vertex *V)
 {
-	if (V->PY<C_VP.ClipY1) V->Flags = Vtx_VisUp; else V->Flags = 0;
-	if (V->PY>C_VP.ClipY2) V->Flags |= Vtx_VisDown;
+	viewportCalcYFlags(C_VP, V);
 	C_Flags |= V->Flags;
 }
 
-static inline void ClipperSwap()
+void FrustumClipper::Swap()
 {
 	C_Scnd[C_numVerts] = C_Scnd[0];
 
@@ -186,13 +180,13 @@ static inline void ClipperSwap()
 	C_Scnd = Swap;
 }
 
-static void FClipper_Near()
+void FrustumClipper::Near()
 {
 	dword i,j = 0;
 	_IB = C_Prim[0];
 
 	float t;
-	Vertex *newVert = C_Verts;
+//	newVert = C_Verts + 0;
 	for(i=0; i<C_numVerts;i++)
 	{
 		_IA = _IB;
@@ -214,28 +208,32 @@ static void FClipper_Near()
 		newVert->LB = _IA->LB + t * (_IB->LB - _IA->LB);
 		newVert->U = _IA->U + t * (_IB->U - _IA->U);
 		newVert->V = _IA->V + t * (_IB->V - _IA->V);
+		newVert->EU = _IA->EU + t * (_IB->EU - _IA->EU);
+		newVert->EV = _IA->EV + t * (_IB->EV - _IA->EV);
 
 		newVert->PX = newVert->TPos.x * C_VP.iNearZ;
 		newVert->PY = newVert->TPos.y * C_VP.iNearZ;
 		newVert->RZ = C_VP.iNearZ;
 		newVert->UZ = newVert->U * C_VP.iNearZ;
 		newVert->VZ = newVert->V * C_VP.iNearZ;
+		newVert->EUZ = newVert->EU * C_VP.iNearZ;
+		newVert->EVZ = newVert->EV * C_VP.iNearZ;
 
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
-static void FClipper_Far()
+void FrustumClipper::Far()
 {
 	dword i,j = 0;
 	_IB = C_Prim[0];
 
 	float t;
-	Vertex *newVert = C_Verts+2;
+	//newVert = C_Verts + 2;
 	for(i=0;i<C_numVerts;i++)
 	{
 		_IA = _IB;
@@ -259,17 +257,24 @@ static void FClipper_Far()
 		newVert->V = _IA->V + t * (_IB->V-_IA->V);
 		newVert->UZ = C_VP.iFarZ * newVert->U;
 		newVert->VZ = C_VP.iFarZ * newVert->V;
+		newVert->EU = _IA->EU + t * (_IB->EU - _IA->EU);
+		newVert->EV = _IA->EV + t * (_IB->EV - _IA->EV);
+		newVert->EUZ = C_VP.iFarZ * newVert->EU;
+		newVert->EVZ = C_VP.iFarZ * newVert->EV;
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
 // one day, with the appropriate technology, this will use functions generated by code
-static void FInterpolator(Vertex *V, float t)
+void FrustumClipper::FInterpolator(Vertex *V, float t)
 {
+	//if (isnan(t) || t < -0.01 || t > 1.01) {
+	//	__asm int 3
+	//}
 	V->PX = _IA->PX + t * (_IB->PX - _IA->PX);
 	V->PY = _IA->PY + t * (_IB->PY - _IA->PY);
 	V->LR = _IA->LR + t * (_IB->LR - _IA->LR);
@@ -278,19 +283,24 @@ static void FInterpolator(Vertex *V, float t)
 	V->RZ = _IA->RZ + t * (_IB->RZ - _IA->RZ);
 	V->UZ = _IA->UZ + t * (_IB->UZ - _IA->UZ);
 	V->VZ = _IA->VZ + t * (_IB->VZ - _IA->VZ);
+	V->EUZ = _IA->EUZ + t * (_IB->EUZ - _IA->EUZ);
+	V->EVZ = _IA->EVZ + t * (_IB->EVZ - _IA->EVZ);
+	V->i = _IA->i;
 
 	// calculate (U,V)
 	V->TPos.z = 1.0 / V->RZ;
 	V->U = V->UZ * V->TPos.z;
 	V->V = V->VZ * V->TPos.z;
+	V->EU = V->EUZ * V->TPos.z;
+	V->EV = V->EVZ * V->TPos.z;
 }
 
-static void FClipper_Left()
+void FrustumClipper::Left()
 {
 	dword i, j = 0;
 	_IB = C_Prim[0];
 
-	Vertex *newVert = C_Verts+4;
+//	newVert = C_Verts + 4;
 	for(i=0; i<C_numVerts; i++)
 	{
 		_IA = _IB;
@@ -309,15 +319,15 @@ static void FClipper_Left()
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
-static void FClipper_Right()
+void FrustumClipper::Right()
 {
 	dword i, j = 0;
 	_IB = C_Prim[0];
 
-	Vertex *newVert = C_Verts+6;
+	//newVert = C_Verts + 6;
 	for(i=0; i<C_numVerts; i++)
 	{
 		_IA = _IB;
@@ -336,15 +346,16 @@ static void FClipper_Right()
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
-static void FClipper_Up()
+void FrustumClipper::Up()
 {
 	dword i, j = 0;
 	_IB = C_Prim[0];
 
-	Vertex *newVert = C_Verts+8;
+	// WTFWTFWTF
+	//newVert = C_Verts + 8 + 3;
 	for(i=0; i<C_numVerts; i++)
 	{
 		_IA = _IB;
@@ -357,20 +368,21 @@ static void FClipper_Up()
 			if (!(_IB->Flags & Vtx_VisUp)) continue;
 		}
 		FInterpolator(newVert, (C_VP.ClipY1-_IA->PY)/(_IB->PY-_IA->PY));
+		newVert->Flags = 0;
 		newVert->PY = C_VP.ClipY1;
 		C_Scnd[j++] = newVert++;
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
-static void FClipper_Down()
+void FrustumClipper::Down()
 {
 	dword i, j = 0;
 	_IB = C_Prim[0];
 
-	Vertex *newVert = C_Verts+10;
+	//newVert = C_Verts + 10;
 	for(i=0; i<C_numVerts; i++)
 	{
 		_IA = _IB;
@@ -383,16 +395,17 @@ static void FClipper_Down()
 			if (!(_IB->Flags & Vtx_VisDown)) continue;
 		}
 		FInterpolator(newVert, (C_VP.ClipY2-_IA->PY)/(_IB->PY-_IA->PY));
+		newVert->Flags = 0;
 		newVert->PY = C_VP.ClipY2;
 		C_Scnd[j++] = newVert++;
 	}
 
 	C_numVerts = j;
-	ClipperSwap();
+	Swap();
 }
 
 
-static void CorrectCWOrder()
+void FrustumClipper::CorrectCWOrder()
 {
 	Vertex *A = C_Prim[0], *B = C_Prim[1], *C = C_Prim[2];
 	
@@ -404,11 +417,11 @@ static void CorrectCWOrder()
 		{
 			C_Scnd[i] = C_Prim[C_numVerts-i];
 		}
-		ClipperSwap();
+		Swap();
 	}
 }
 
-static void YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
+void FrustumClipper::YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
 {
 	// Find vertex with minimal y-value.
 	mword i, j;
@@ -438,12 +451,12 @@ static void YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
 
 }
 
-void MiplevelClipper()
+void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 {
 	const float mipBias = 0.5;
 
-	Texture *Tx = DoFace->Txtr->Txtr;
-	long L = Tx->numMipmaps-1; // maximal level	
+	Texture *Tx = F->Txtr->Txtr;
+	int32_t L = Tx->numMipmaps-1; // maximal level	
 
 	// polygon texel / pixel area
 	float pixArea = 0.0f, texArea = 0.0f;
@@ -460,18 +473,18 @@ void MiplevelClipper()
 	}
 
 #ifdef ENABLE_PIXELCOUNT
-	FillerPixelcount += 0.5f * fabs(pixArea);
+	FillerPixelcount = FillerPixelcount + 0.5f * fabs(pixArea);
 #endif
 	// Simple miplevel calculation
 	//if (!Keyboard[ScY])
-	static float MinSize = XRes*YRes * 0.02; // update if XRes and/or YRes changes...
+	static const float MinSize = XRes*YRes * 0.02; // update if XRes and/or YRes changes...
 
 	if ((Tx->Flags & Txtr_Nomip) ||  pixArea < MinSize)
 	{
 		if (Tx->Flags & Txtr_Nomip) {
 			g_MipLevel = 0;
 		} else {
-			long mip = 0.5 * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
+			int32_t mip = 0.5 * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
 			if (mip < 0) mip = 0;
 			if (mip > L) mip = L;
 			g_MipLevel = mip;
@@ -483,8 +496,7 @@ void MiplevelClipper()
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		DoFace->Filler(C_Prim, C_numVerts);
-
+		filler(F, C_Prim, C_numVerts, g_MipLevel);
 		return;
 	}
 
@@ -499,7 +511,7 @@ void MiplevelClipper()
 
 	// calculate range of 1/z values along polygon
 	float mrz = 1E+38, Mrz = 0;
-	long mlindex = 0;
+	int32_t mlindex = 0;
 	for(i=0; i<C_numVerts; i++)
 	{
 //		level = _C - 2 * log2(rz);
@@ -522,8 +534,8 @@ void MiplevelClipper()
 	float ml = _C - 2 * fastLog2(Mrz);
 	float Ml = _C - 2 * fastLog2(mrz);
 
-	long iml = Fist(ml-0.99999);
-	long iMl = Fist(Ml-0.99999);
+	int32_t iml = Fist(ml-0.99999);
+	int32_t iMl = Fist(Ml-0.99999);
 
 	if (iml < 0) iml = 0;
 	if (iml > L) iml = L;
@@ -544,16 +556,17 @@ void MiplevelClipper()
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		DoFace->Filler(C_Prim, C_numVerts);
+		filler(F, C_Prim, C_numVerts, g_MipLevel);
 		return;
 	}
 
 	// scanconversion
-	long left, right, limit;
+	int32_t left, right, limit;
 
 	float t;
 	mword numSectionVerts;
-	Vertex *newVert = C_Verts + 12;
+//	newVert = C_Verts + 12;
+
 
 	left = right = mlindex;
 
@@ -620,7 +633,7 @@ void MiplevelClipper()
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		DoFace->Filler(C_Tetr, numSectionVerts);
+		filler(F, C_Tetr, numSectionVerts, g_MipLevel);
 
 		// prepare new section - add last two intersection points
 		numRight = 1; // vertex #0 is ignored
@@ -642,7 +655,7 @@ void MiplevelClipper()
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		DoFace->Filler(C_Prim, C_numVerts);
+		filler(F, C_Prim, C_numVerts, g_MipLevel);
 		return;
 	}
 	while (left != right)
@@ -657,12 +670,12 @@ void MiplevelClipper()
 	g_renderedPolys++;
 #endif
 #ifdef NO_MIPMAPS
-		g_MipLevel = 0;
+	g_MipLevel = 0;
 #endif
-	DoFace->Filler(C_Tetr, numSectionVerts);
+	filler(F, C_Tetr, numSectionVerts, g_MipLevel);
 }
 
-float PolyArea()
+float FrustumClipper::PolyArea()
 {
 	// polygon pixel area
 	float pixArea = 0.0f;
@@ -681,21 +694,57 @@ float PolyArea()
 }
 
 
-void FrustrumClipper()
+void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords)
 {
 	mword i, j;
 
+	Vertex* A = &C_Verts[0];
+	Vertex* B = &C_Verts[1];
+	Vertex* C = &C_Verts[2];
+
+	*A = *F->A;
+	*B = *F->B;
+	*C = *F->C;
+	newVert = &C_Verts[3];
+
+	A->U = F->U1; A->V = F->V1;
+	B->U = F->U2; B->V = F->V2;
+	C->U = F->U3; C->V = F->V3;
+
+	if (F->Flags & Face_Reflective) {
+		A->EU = F->EU1; A->EV = F->EV1;
+		B->EU = F->EU2; B->EV = F->EV2;
+		C->EU = F->EU3; C->EV = F->EV3;
+	}
+
+	A->UZ = A->U * A->RZ; A->VZ = A->V * A->RZ;
+	B->UZ = B->U * B->RZ; B->VZ = B->V * B->RZ;
+	C->UZ = C->U * C->RZ; C->VZ = C->V * C->RZ;
+	if (F->Flags & Face_Reflective) {
+		A->EUZ = A->EU * A->RZ; A->EVZ = A->EV * A->RZ;
+		B->EUZ = B->EU * B->RZ; B->EVZ = B->EV * B->RZ;
+		C->EUZ = C->EU * C->RZ; C->EVZ = C->EV * C->RZ;
+	}
+
+	auto [Af, Bf, Cf] = std::tuple(A->Flags, B->Flags, C->Flags);
+	Calc_Flags(A);
+	Calc_Flags(B);
+	Calc_Flags(C);
+	A->Flags |= Af;
+	B->Flags |= Bf;
+	C->Flags |= Cf;
+
+	C_Flags = A->Flags | B->Flags | C->Flags;
+
 	// Assign polygon
 	C_numVerts = 3;
-	C_Prim[0] = DoFace->A;
-	C_Prim[1] = DoFace->B;
-	C_Prim[2] = DoFace->C;
-	C_Prim[3] = DoFace->A;
-		
-	C_Flags = C_Prim[0]->Flags|C_Prim[1]->Flags|C_Prim[2]->Flags;
+	C_Prim[0] = A;
+	C_Prim[1] = B;
+	C_Prim[2] = C;
+	C_Prim[3] = A;
 
-	if (C_Flags&Vtx_VisNear)  FClipper_Near(); 
-	if (C_Flags&Vtx_VisFar)   FClipper_Far();
+	if (C_Flags&Vtx_VisNear)  Near(); 
+	if (C_Flags&Vtx_VisFar)   Far();
 
 	// Z-Clipping may have placed the entire polygon outside 2D boundary
 	/*j = C_Prim[0]->Flags;
@@ -706,10 +755,10 @@ void FrustrumClipper()
 	// Swap vertex order if it isn't CCW.	
 	CorrectCWOrder();
 
-	if (C_Flags&Vtx_VisLeft)  FClipper_Left();
-	if (C_Flags&Vtx_VisRight) FClipper_Right();
-	if (C_Flags&Vtx_VisUp)    FClipper_Up();
-	if (C_Flags&Vtx_VisDown)  FClipper_Down();
+	if (C_Flags&Vtx_VisLeft)  Left();
+	if (C_Flags&Vtx_VisRight) Right();
+	if (C_Flags&Vtx_VisUp)    Up();
+	if (C_Flags&Vtx_VisDown)  Down();
 
 	// Clipping process may have eliminated the entire polygon
 	if (!C_numVerts) return;
@@ -719,24 +768,24 @@ void FrustrumClipper()
 	// triangulate result NGon and sort triangle vertices by Y
 	// to conform to legacy rasterizer convension
 
-	if (DoFace->Txtr->Txtr)
+	if (F->Txtr->Txtr)
 	{
-		ClipperSwap();
-		MiplevelClipper();
+		Swap();
+		MiplevelClipper(F, filler);
 	} else {
 #ifdef ENABLE_PIXELCOUNT
-		FillerPixelcount += PolyArea();
+		FillerPixelcount = FillerPixelcount + PolyArea();
 #endif
 #ifdef COUNT_POLYS
 		g_renderedPolys++;
 #endif		
-		DoFace->Filler(C_Scnd, C_numVerts);
+		filler(F, C_Scnd, C_numVerts, g_MipLevel);
 	}
 	/*for(i=2; i<C_numVerts; i++)
 	{
 		if (C_Scnd[i-1]->PY < C_Scnd[i]->PY)
-			DoFace->Filler(C_Scnd[0], C_Scnd[i-1], C_Scnd[i]);
+			filler(C_Scnd[0], C_Scnd[i-1], C_Scnd[i]);
 		else
-			DoFace->Filler(C_Scnd[0], C_Scnd[i], C_Scnd[i-1]);
+			filler(C_Scnd[0], C_Scnd[i], C_Scnd[i-1]);
 	}*/
 }

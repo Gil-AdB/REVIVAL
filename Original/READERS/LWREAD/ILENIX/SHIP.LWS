@@ -1,0 +1,427 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 60
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 1000
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\ilenium\ship\ilenix.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  13
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+  0 5.049999 0 0 0 0 1 1 1
+  75 0 0 0 0
+  0 5.049999 146.1727 0 0 0 1 1 1
+  186 0 0 0 0
+  0.01287453 5.62589 147.7977 -0.2999997 -33.9 0 1 1 1
+  187 0 0 0 0
+  0 91.14999 261.0727 -73.50002 -32 0 1 1 1
+  241 0 0 0 0
+  -142.8 98.74998 186.4727 16.3 1.1 0 1 1 1
+  384 0 0 0 0
+  -61.19999 98.74998 7.172706 123.2 6.299992 0 1 1 1
+  520 0 0 0 0
+  55.90001 98.74998 59.7727 15.1 30.90001 0 1 1 1
+  640 0 0 0 0
+  12.05729 52.349 105.2675 -121.9247 15.53254 0 1 1 1
+  693 0 0 0 0
+  -2.315902 52.0647 59.59394 -177.0958 1.887735 0 1 1 1
+  738 0 0 0 0
+  -7.600002 51.54998 12.97274 -175.8 25.09999 0 1 1 1
+  778 0 0 0 0
+  0 5.049999 0 0 0 0 1 1 1
+  842 0 0 0 0
+  0 0 0 0 0 0 1 1 1
+  1000 1 0 0 0
+EndBehavior 1
+LockedChannels 3104
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\door1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1.13 -0.22 0.33 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.13 -0.22 0.33
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\door2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1.13 -0.2 0.34 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -1.13 -0.2 0.34
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l1_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -0.9099999 -0.85 1.94 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -0.9099999 -0.85 1.94
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l1_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -1.5 -1.27 2.35 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.5 -1.27 2.35 34.8 0 94.89999 1 1 1
+  50 0 0 0 0
+  -1.5 -1.27 2.35 34.8 0 94.89999 1 1 1
+  979 0 0 0 0
+  -1.5 -1.27 2.35 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3088
+PivotPoint -1.5 -1.27 2.35
+ParentObject 4
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l2_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -1.04 -0.83 1.28 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.04 -0.83 1.28 0 0 0 1 1 1
+  50 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -1.04 -0.83 1.28
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l2_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -1.71 -1.27 1.26 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.71 -1.27 1.26 0 0 96.49998 1 1 1
+  50 0 0 0 0
+  -1.71 -1.27 1.26 0 0 96.49998 1 1 1
+  979 0 0 0 0
+  -1.71 -1.27 1.26 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3088
+PivotPoint -1.71 -1.27 1.26
+ParentObject 6
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l3_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1.06 -0.8699999 -0.7699999 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -1.06 -0.8699999 -0.7699999
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l3_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -1.73 -1.25 -0.77 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.73 -1.25 -0.77 0 0 95.80001 1 1 1
+  50 0 0 0 0
+  -1.73 -1.25 -0.77 0 0 95.80001 1 1 1
+  979 0 0 0 0
+  -1.73 -1.25 -0.77 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -1.73 -1.25 -0.77
+ParentObject 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l4_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1.02 -0.86 -2.15 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint -1.02 -0.86 -2.15
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l4_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -1.62 -1.25 -2.6 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.62 -1.25 -2.6 -40 0 96.30001 1 1 1
+  50 0 0 0 0
+  -1.62 -1.25 -2.6 -40 0 96.30001 1 1 1
+  979 0 0 0 0
+  -1.62 -1.25 -2.6 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3088
+PivotPoint -1.62 -1.25 -2.6
+ParentObject 10
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l5_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0.8999999 -0.8599999 1.96 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 0.8999999 -0.8599999 1.96
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l5_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  1.49 -1.28 2.359999 0 0 0 1 1 1
+  0 0 0 0 0
+  1.49 -1.28 2.359999 -34.9 0 -96.8 1 1 1
+  50 0 0 0 0
+  1.49 -1.28 2.359999 -34.9 0 -96.8 1 1 1
+  979 0 0 0 0
+  1.49 -1.28 2.359999 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3088
+PivotPoint 1.49 -1.28 2.359999
+ParentObject 12
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l6_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1.02 -0.8399999 1.27 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.02 -0.8399999 1.27
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l6_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  1.73 -1.28 1.27 0 0 0 1 1 1
+  0 0 0 0 0
+  1.73 -1.28 1.27 0 0 -95.89999 1 1 1
+  50 0 0 0 0
+  1.73 -1.28 1.27 0 0 -95.89999 1 1 1
+  979 0 0 0 0
+  1.73 -1.28 1.27 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.73 -1.28 1.27
+ParentObject 14
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l7_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1.02 -0.84 -0.7599999 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.02 -0.84 -0.7599999
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l7_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  1.74 -1.27 -0.77 0 0 0 1 1 1
+  0 0 0 0 0
+  1.74 -1.27 -0.77 0 0 -96.5 1 1 1
+  50 0 0 0 0
+  1.74 -1.27 -0.77 0 0 -96.5 1 1 1
+  979 0 0 0 0
+  1.74 -1.27 -0.77 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.74 -1.27 -0.77
+ParentObject 16
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l8_1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1.02 -0.85 -2.13 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3072
+PivotPoint 1.02 -0.85 -2.13
+ParentObject 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\ilenium\ship\l8_2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  1.62 -1.26 -2.62 0 0 0 1 1 1
+  0 0 0 0 0
+  1.62 -1.26 -2.62 38 0 -97.60001 1 1 1
+  50 0 0 0 0
+  1.62 -1.26 -2.62 38 0 -97.60001 1 1 1
+  979 0 0 0 0
+  1.62 -1.26 -2.62 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+LockedChannels 3088
+PivotPoint 1.62 -1.26 -2.62
+ParentObject 18
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\ilenium\stars.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0 0 0 0 0 1 1 1
+  33 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -2 2 -2 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 0
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  12
+  -6.577181 0.8489961 10.59825 0 0 0 1 1 1
+  0 0 0 0 0
+  -9.298285 3.832265 6.339729 0 0 0 1 1 1
+  33 0 0 0 0
+  -7.477559 6.342288 -6.836373 0 0 0 1 1 1
+  75 0 0 0 0
+  -8.798861 1.520153 139.983 0 0 0 1 1 1
+  186 0 0 0 0
+  -2.887948 91.62798 268.7647 0 0 0 1 1 1
+  241 0 0 0 0
+  -144.6017 96.15426 194.3786 0 0 0 1 1 1
+  384 0 0 0 0
+  -67.01062 112.9268 12.64206 0 0 0 1 1 1
+  520 0 0 0 0
+  47.31552 94.50229 47.78207 0 0 0 1 1 1
+  640 0 0 0 0
+  16.80739 57.99696 93.35954 0 0 0 1 1 1
+  695 0 0 0 0
+  -32.39404 45.62417 15.21314 0 0 0 1 1 1
+  778 0 0 0 0
+  -14.5681 1.101359 15.44222 0 0 0 1 1 1
+  842 0 0 0 0
+  -6.577181 0.8489961 10.59825 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 1
+TargetObject 1
+ZoomFactor 3.200000
+Resolution 1
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+DataOverlayLabel  
+
+ViewMode 5
+ViewAimpoint 0.000000 4.314873 0.000000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 6.000000
+GridNumber 100
+GridSize 10.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

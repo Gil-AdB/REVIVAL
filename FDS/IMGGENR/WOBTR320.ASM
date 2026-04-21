@@ -40,7 +40,7 @@ _TEXT	SEGMENT BYTE PUBLIC 'CODE'
 
 	PUBLIC	_Grid_Texture_MapASM_320_
 _Grid_Texture_MapASM_320_:
-; On Entry : ecx - texture ; esi = pointer to points array which contains : {signed long u,v}; edi - Screen Pointer
+; On Entry : ecx - texture ; esi = pointer to points array which contains : {signed int32_t u,v}; edi - Screen Pointer
 mov [Tebp],ebp
 mov [ScanLine],edi
 mov [Texture],ecx

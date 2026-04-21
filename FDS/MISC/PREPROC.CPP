@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <conio.h>
 #include <math.h>
 #include <memory.h>
 #include <string.h>
@@ -12,7 +11,11 @@
 #include "Base/TriMesh.h"
 #include "Base/Omni.h"
 #include "Base/Scene.h"
+#include <FILLERS/TheOtherBarry.h>
 
+FILE *LogFile;
+
+#if 0
 #ifdef _C_WATCOM
 #pragma aux REPSTDW=\
 	"Rep StoSD",\
@@ -31,7 +34,6 @@ void REPSTDW(void *buf, DWord val, DWord count)
 }
 #endif
 
-FILE *LogFile;
 
 // Computes Re-sorted Indexing that will hopefully produce less CACHE misses.
 // ok, maybe not. I'm just keeping this proc for fun. now, all we need is
@@ -41,8 +43,8 @@ void Compute_Optimized_Indices(TriMesh *T)
 	Face *F,*FEnd;
 	DWord *Conversion = new DWord[T->VIndex];
 	Vertex *Buffer;
-	long I=0;
-	long A,B,C;
+	int32_t I=0;
+	int32_t A,B,C;
 	REPSTDW(Conversion,-1,T->VIndex);
 	F=T->Faces;
 	FEnd=F+T->FIndex;
@@ -70,6 +72,7 @@ void Compute_Optimized_Indices(TriMesh *T)
 	delete [] Buffer;
 	delete [] Conversion;
 }
+#endif
 
 // Computes Face/Triangle Plane Normals for Trimesh T.
 void Compute_Face_Normals(TriMesh *T)
@@ -153,7 +156,7 @@ void Compute_Bounding_Sphere(TriMesh *T)
 	Face *F,*FEnd = T->Faces+T->FIndex;
 	float Rad,F1;
 	Vector U,V;
-	long I;
+	int32_t I;
 	
 	Rad=0;
 	// arithematic center
@@ -197,7 +200,7 @@ void Compute_Bounding_Sphere(TriMesh *T)
   // look for someone else to do the lousy job. it-would-have-been-possible
   // it was just for a single,non-hierarchial spline.
   
-	/*  F1 = 0.0;
+	//  F1 = 0.0;
 	for(I=0;I<T->Scale.NumKeys;I++)
 	{
     if ((Rad = T->Scale.Keys[0].Pos.x)>F1) F1 = Rad;
@@ -236,7 +239,7 @@ void Compute_Spikes(TriMesh *T)
 	Vertex *V = T->Verts,*VE = V + T->VIndex;
 	Edge *E = T->Edges,*EE = E + T->EIndex;
 	Vector U;
-	long Count;
+	int32_t Count;
 	for(;V<VE;V++)
 	{
 		for(;E<EE;E++)
@@ -361,7 +364,7 @@ void Compute_Edges(TriMesh *T)
 {
 	Edge *Edgebuf,*EP,*EPE;
 	EdgeNode *Nodebuf;
-	long I,J;
+	int32_t I,J;
 	Face *GP,*GE;
 	
 	// Edges will now be calculated
@@ -594,6 +597,8 @@ void FList_Allocate(Scene *Sc)
 	for(O=Sc->OmniHead;O;O=O->Next)
 		Polys++;
 	Polys += Sc->NumOfParticles;
+	delete[] FList;
+	delete[] SList;
 	FList = new Face * [Polys];
 	SList = new Face * [Polys];
 }
@@ -640,7 +645,7 @@ void Init_Flare_Textures(Scene *Sc)
 	{
 		if (Obj->Type!=Obj_Omni) continue;
 		Scan = Obj->Name;
-		while (*Scan&&*Scan!=46&&*Scan<128) Scan++;
+		while (*Scan&&*Scan!=46&&*Scan<=127) Scan++;
 		if (*Scan>127||!(*Scan)) Already=1;
 	}
 	
@@ -651,13 +656,13 @@ void Init_Flare_Textures(Scene *Sc)
 		if (MatLib) {
 			for(M=MatLib;M->Next;M=M->Next);
 			//      printf("<PR:IFT>: New material will be linked to last entry %s",M->Name);
-			M->Next = (Material *)getAlignedBlock(sizeof(Material), 16);
+			M->Next = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
 			M->Next->Prev = M;
 			M=M->Next;
 			M->Next = NULL;
 		} else {
 			//      printf("<PR:IFT>: No previous entries detected, Creating Library.\n");
-			MatLib = (Material *)getAlignedBlock(sizeof(Material), 16);
+			MatLib = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
 			M = MatLib;
 			M->Next = NULL;
 			M->Prev = NULL;
@@ -666,7 +671,7 @@ void Init_Flare_Textures(Scene *Sc)
 		//    printf("<PR:IFT>: Assigning new material to Group %d.\n",M->Group);
 		M->Name = strdup("Default Flare material");
 		M->Txtr = new Texture;
-		M->Txtr->FileName = strdup ("Textures//Flare.GIF");
+		M->Txtr->FileName = strdup ("Textures/Flare.GIF");
 		Identify_Texture(M->Txtr);
 		
 		//    if (!M->Txtr->BPP) printf("<PR:IFT>: Identification Failure for Texture %s at Material %s.\n",M->Txtr->FileName,M->Name); else printf("<PR:IFT>: Texture %s was Identified correctly\n         for Material %s as a %d BPP image file.\n",M->Txtr->FileName,M->Name,M->Txtr->BPP);
@@ -711,7 +716,7 @@ void Init_Flare_Textures(Scene *Sc)
 		M->Next = M->Prev = NULL;
 		}
 		strcpy(M->Name,O->Name);
-		strcpy(S,"Textures//");
+		strcpy(S,"Textures/");
 		strcat(S,O->Name);
 		M->Txtr->FileName = strdup(S);
 		Identify_Texture(M->Txtr);
@@ -741,7 +746,7 @@ void Init_Flares(Scene *Sc)
 			}
 #endif
 //			printf("Generating flare: R:%.3f G:%.3f B:%.3f\n",O->L.R,O->L.G,O->L.B);
-			O->F.Txtr=Generate_RGBFlare(O->L.R,O->L.G,O->L.B);
+			O->F.Txtr=Generate_RGBFlare(O->L.B,O->L.G,O->L.R);
 			O->F.Txtr->RelScene = Sc;
 
 			// insertion
@@ -773,14 +778,14 @@ void Default_Texture(Scene *Sc)
 			if (MatLib)
 			{
 				for(M=MatLib;M->Next;M=M->Next);
-				M->Next = (Material *)getAlignedBlock(sizeof(Material), 16);
+				M->Next = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
 				M->Next->Prev = M;
 				M = M->Next;
 				M->Next = NULL;
 			}
 			else
 			{
-				MatLib = (Material *)getAlignedBlock(sizeof(Material), 16);
+				MatLib = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
 				M = MatLib;
 				M->Next = M->Prev = NULL;
 			}
@@ -799,7 +804,7 @@ void Default_Texture(Scene *Sc)
 			Convert_Image2Texture(&Plasma,M->Txtr);
 			M->Flags = Mat_Nonconv | Mat_RGBInterp;*/
 			
-			M->Txtr->FileName = strdup("Textures//Default.GIF");
+			M->Txtr->FileName = strdup("Textures/Default.GIF");
 			M->Txtr->BPP=0;
 			Load_Texture(M->Txtr);
 			if (!M->Txtr->BPP) {delete M->Txtr; M->Txtr=NULL;}
@@ -829,12 +834,12 @@ void Default_Texture(Scene *Sc)
 // other buffers maybe require aligned shit.
 /*void Materials_Remap_Aligned()
 {
-/*  Material *M;
+Material *M;
 TriMesh *T;
 Face *F,*FEnd;
 char *AlignOffs;
 char xBPP=0;
-long I,J;
+int32_t I,J;
 
   // load txtr by default,if no solid materials really available
   
@@ -870,7 +875,7 @@ void Materials_Remap_Aligned()
 	Material *M;
 	TriMesh *T;
 	Face *F,*FEnd;
-	long NumOfMats = 0;
+	int32_t NumOfMats = 0;
 	byte *NB;
 	
 	// load txtr by default,if no solid materials really available
@@ -912,7 +917,7 @@ void Materials_Remap_Aligned()
 			for(M=MatLib;M;M=M->Next)
 			{
 				if (!M->Txtr) continue;
-				printf("<PR:Aln>: Material %s ===> Address %xH.\n",M->Name,(DWord)M->Txtr->Data);
+				printf("<PR:Aln>: Material %s ===> Address %pH.\n",M->Name,M->Txtr->Data);
 			}
 			//  getchar();
 }
@@ -927,7 +932,7 @@ void Materials_Load(Scene *Sc)
 	Face *F,*FEnd;
 	
 	//  printf("Loading Materials, Please wait\n");
-	//  printf("Matlib = %xh",(long)MatLib);
+	//  printf("Matlib = %xh",(int32_t)MatLib);
 	for(M=MatLib;M;M=M->Next)
 	{
 		//    if (M->Group!=Group) printf("ALERT!! GROUP MISMATCH!! (S%d!=M%d) (MATERIAL %s)\n",Group,M->Group,M->Name);
@@ -978,7 +983,7 @@ void Assign_Fillers(Scene *Sc)
 	TriMesh *T;
 	Omni *O;
 	Face *F,*FEnd;
-	int test_for_alpha = 1;
+	int test_for_alpha = 0;
 	
 	for(T=Sc->TriMeshHead;T;T=T->Next)
 	{
@@ -997,21 +1002,40 @@ void Assign_Fillers(Scene *Sc)
 			if (F->Txtr->Txtr) rasterFlags += 1;
 			if (F->Txtr->Flags & Mat_RGBInterp) rasterFlags += 2;
 			if (F->Txtr->Flags & Mat_Transparent) rasterFlags += 4;
-			if (test_for_alpha && (F->Txtr->Flags & Mat_Transparent)) rasterFlags = 8;
+			if (F->Txtr->Flags & Mat_SrcAlpha) rasterFlags = 8;
+			if (F->Txtr->Flags & Mat_Additive) rasterFlags = 9;
+			//			F->Txtr->ZBufferWrite = !(F->Txtr->Flags & Mat_SkipZ);
+
 			//if (F->Txtr->Flags & Mat_UseTextureAlpha) rasterFlags += 8;
-			RasterFunc stdFillers[9] = {
+			//RasterFunc stdFillers[10] = {
+			//	IX_Prefiller_FZ, // Flat (impl. gouraud)
+			//	IX_Prefiller_TZ, // Texture
+			//	IX_Prefiller_GZ, // Gouraud
+			//	//IX_Prefiller_TGZM, // Txtr/Gouraud
+			//	TheOtherBarry,
+			//	IX_Prefiller_FAcZ, // transparent Flat
+			//	IX_Prefiller_TAcZ, // transparent Texture
+			//	IX_Prefiller_GAcZ, // transparent Gouraud
+			//	IX_Prefiller_TGZTM,//TGAcZ, // transparent Texture/Gouraud
+			//	IX_Prefiller_TGZTAM, //TGAcZ, // transparent Texture/Gouraud with Alpha blending
+			//	IX_Prefiller_TGZSAM,
+			//};
+			RasterFunc stdFillers[10] = {
 				IX_Prefiller_FZ, // Flat (impl. gouraud)
-				IX_Prefiller_TZ, // Texture
+				TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>,
 				IX_Prefiller_GZ, // Gouraud
-				IX_Prefiller_TGZM, // Txtr/Gouraud
-//				IX_Prefiller_TGZ, // Txtr/Gouraud
+				TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::NORMAL>,
 				IX_Prefiller_FAcZ, // transparent Flat
-				IX_Prefiller_TAcZ, // transparent Texture
-				IX_Prefiller_GAcZ, // transparent Gouraud
-				IX_Prefiller_TGZTM,//TGAcZ, // transparent Texture/Gouraud
-				IX_Prefiller_TGZTAM//TGAcZ, // transparent Texture/Gouraud with Alpha blending
+				TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, // transparent TG
+				TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, // transparent TG
+				TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, // transparent TG
+				TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, // transparent TG
+				TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>, // transparent TG
 			};
 
+			//if (rasterFlags > 0 && rasterFlags < 3) {
+			//	volatile int banama = 1;
+			//}
 			F->Filler = stdFillers[rasterFlags];
 			continue;
 
@@ -1043,13 +1067,7 @@ void Assign_Fillers(Scene *Sc)
 			switch (BPP)
 			{
 			case 32: 
-				if (MMXState) 
-				{
-					O->F.Filler = &The_MMX_Scalar; 
-				} else {
-					//O->F.Filler = Spirit_16;
-					O->F.Filler = &The_Seven_UP; 
-				}
+				O->F.Filler = &The_MMX_Scalar;
 				break;
 			}
 		}
@@ -1059,7 +1077,7 @@ void Assign_Fillers(Scene *Sc)
 void Force_Default_Mat(Scene *Sc)
 {
 	TriMesh *T;
-	long I;
+	int32_t I;
 	for(T=Sc->TriMeshHead;T;T=T->Next)
 		for(I=0;I<T->FIndex;I++)
 			/*     if (!T->Faces[I].Txtr) */T->Faces[I].Txtr = &Default_Mat;
@@ -1077,13 +1095,12 @@ void Preprocess_Scene(Scene *Sc)
 	if (BPP==8) Materials_Remap_Aligned();
 	Assign_Fillers(Sc);
 	Restore_Splines(Sc);
-	
 }
 
 
 static Object **ObjSort,**ObjPtr;
 static Scene *HTSc;
-static long Objs;
+static int32_t Objs;
 
 void Hierarchy_TreeSort(Object *Node)
 {
@@ -1096,7 +1113,7 @@ void Hierarchy_TreeSort(Object *Node)
 
 void Hierarchy_Sort(Scene *Sc)
 {
-	long I;
+	int32_t I;
 	
 	HTSc = Sc;
 	// Count Objects
@@ -1109,20 +1126,21 @@ void Hierarchy_Sort(Scene *Sc)
 	ObjSort = new Object * [Objs];
 	ObjPtr = ObjSort;
 	
-	for(Obj = Sc->ObjectHead; Obj ; Obj=Obj->Next)
+	for (Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
 		if (!Obj->Parent) Hierarchy_TreeSort(Obj);
+	}
 		
-		Sc->ObjectHead = ObjSort[0];
+	Sc->ObjectHead = ObjSort[0];
 		
-		ObjSort[0]->Prev = NULL; ObjSort[0]->Next = ObjSort[1];
-		for(I=1;I<Objs-1;I++)
-		{
-			ObjSort[I]->Prev = ObjSort[I-1];
-			ObjSort[I]->Next = ObjSort[I+1];
-		}
-		ObjSort[I]->Prev = ObjSort[I-1]; ObjSort[I]->Next = NULL;
+	ObjSort[0]->Prev = NULL; ObjSort[0]->Next = ObjSort[1];
+	for(I=1;I<Objs-1;I++)
+	{
+		ObjSort[I]->Prev = ObjSort[I-1];
+		ObjSort[I]->Next = ObjSort[I+1];
+	}
+	ObjSort[I]->Prev = ObjSort[I-1]; ObjSort[I]->Next = NULL;
 		
-		delete ObjSort;
+	delete ObjSort;
 }
 
 void SetPointFlare(Omni *O)

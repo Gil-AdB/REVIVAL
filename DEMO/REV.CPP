@@ -1,6 +1,3 @@
-#pragma comment(lib, "delayimp")  
-#pragma comment(lib, "fmod")  
-
 /******************************************************************************
 	Source code for REVIVAL / FLOOD.
 
@@ -460,14 +457,19 @@ material global ID or ptr
 
 ******************************************************************************/
 #define POINTER_64
-#include "REV.H"
+#include "Rev.h"
 #include "FillerTest.h"
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
 #include <float.h>
 #include <Base/TriMesh.h>
 #include "Config.h"
-//#include "FModWrapper.h"
+#include "FILLERS/IX.h"
+#include "Threads.h"
+#include "../Modplayer/Modplayer.h"
+#include <SDL.h>
+#include <utility>
+#include <iostream>
 
 // global configuration db
 static ConfigurationDB *g_cfg;
@@ -475,14 +477,16 @@ static ConfigurationDB *g_cfg;
 // global status flags
 dword g_playMusic;
 dword g_profilerActive;
-long g_demoXRes;
-long g_demoYRes;
-long g_fullScreenMode;
-long g_displayType;
+int32_t g_demoXRes;
+int32_t g_demoYRes;
+int32_t g_fullScreenMode;
+int32_t g_displayType;
 
+float dTime;
 
 char *ModuleBuf;
-dword g_RevModuleHandle;
+//dword g_RevModuleHandle;
+ModplayerHandle g_RevModuleHandle;
 //FModWrapper	module;
 VESA_Surface *g_FlipRequestPage;
 
@@ -490,7 +494,7 @@ void Destroy_Scene(Scene *Sc)
 {
 	return;
 	TriMesh *Tri;
-	long total = 0,f;
+	int32_t total = 0,f;
 
 //	printf("Shootin' scene...\n");
 	for(Tri=Sc->TriMeshHead;Tri;Tri=Tri->Next)
@@ -519,150 +523,63 @@ void Destroy_Scene(Scene *Sc)
 	freeAlignedBlock(Sc);
 }
 
-#ifdef _C_WATCOM
-
-void Initialize_System()
-{
-	LogFile = fopen("Runtime.LOG","wt");
-
-	if (!FDS_Init(512,384,32))    // Initialize FDS
-	{
-		printf("Initializing failed! Crashing to OS\n");
-		exit(1);
-	}
-
-	if (g_playMusic)
-	{
-		ModuleBuf = LoadARJ("Music\\Music.ARJ","Revival.xM");
-		Initialize_Module(ModuleBuf);
-	}
-	Generate_RGBFlares();
-	if (BPP==8) Materials_Remap_Aligned();
-//  InitMouse();
-	// all Hardwired Initializations complete
-}
-
-void Scan_MaterialLib()
-{
-	printf("Scanning MatLib\n");
-	for(Material *M=MatLib;M;M=M->Next)
-		printf("Material %s at Scene %xH\n",M->Name,(DWord)M->RelScene);
-}
-/*
-void main(int argc,char *argv[])
-{
-	Initialize_System();
-
-//	printf("MEM = %d\n",DPMI_Free_Memory());
-//	Initialize_Credits();
-//	printf("[Credits]MEM = %d\n",DPMI_Free_Memory());
-//	printf("[City]MEM = %d\n",DPMI_Free_Memory());
-//
-//	printf("[Chase]MEM = %d\n",DPMI_Free_Memory());
-//	printf("[Fountain]MEM = %d\n",DPMI_Free_Memory());
-
-	setbuf(stdout,NULL);
-	printf("Initializing, please wait...");
-	SetGraphicsMode();
-
-//	Initialize_City(); //9.3
-	Initialize_Fountain(); //8.3
-//	Run_Glato();
-//	while (Timer<4500) continue;
-	Timer = 1;
-//	Run_City();
-
-	Timer = 1;
-	Run_Fountain();
-
-	Initialize_Greets(); //5.6
-	Timer = 1;
-	Run_Greets();
-
-
-
-
-//	Initialize_Crash();
-	Timer = 1;
-
-//	Run_Crash();
-#if Play_Music
-	ShutDown();
-#endif
-	FDS_End();
-
-//	printf("MEM = %d\n",DPMI_Free_Memory());
-}
-*/
-void SysSleep(dword ticks)
-{
-}
-
-#endif
-
-
-#ifdef WIN32
-#include "GDI.H"
-#include "DDRAW.h"
-#include "D3D8.h"
 
 FILE *Stub_Log;
-DWORD Stub_Disable;
+uint32_t Stub_Disable;
 
-static MMRESULT TimerID = 0; //MM Timer Handle
-static long Timer__NA = -1;
-static volatile int32_t *TimerPtr = &Timer;
+static SDL_TimerID TimerID = 0; //MM Timer Handle
+static int32_t Timer__NA = -1;
 
-static HINSTANCE G_hInst;
-static HWND G_hWnd;
 static char G_TitleStr[MAX_GSTRING] = "Revival / Flood";
 static char G_WindowClassStr[MAX_GSTRING] = "Revival";
 static char G_AppTitle[MAX_GSTRING];
 
-static HACCEL hAccelTable;
-static DWORD MID,STID;
+static uint32_t MID,STID;
 
-static DWORD StubI = 0;
+static uint32_t StubI = 0;
 
 // cheap substitute for a semaphore...
-static DWORD Thread_Interlock_Mutex = 0;
+static uint32_t Thread_Interlock_Mutex = 0;
 
 static dword S_InitRet;
 static void *Signmem;
-DisplayInitParams g_DIP;
 
 void FlipRequest(VESA_Surface *VS)
 {	
-	Thread_Interlock_Mutex = 1;
-	g_FlipRequestPage = VS;
-	PostMessage(G_hWnd,WM_USER+3,0,0); //DEVICE INIT SIGNAL  
-	while (Thread_Interlock_Mutex)
-	{
-		Sleep(1);
-	}
+	// Thread_Interlock_Mutex = 1;
+	// g_FlipRequestPage = VS;
+	// PostMessage(G_hWnd,WM_USER+3,0,0); //DEVICE INIT SIGNAL
+	// while (Thread_Interlock_Mutex)
+	// {
+	// 	Sleep(1);
+	// }
 }
 
 // Timer code.
-static void CALLBACK TimerProc(UINT wTimerID, UINT msg, 
-    DWORD dwUser, DWORD dw1, DWORD dw2) 
+// static void CALLBACK TimerProc(UINT wTimerID, UINT msg, 
+//     DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2)
+
+Uint32 TimerProc(Uint32 interval, void *param)
 { 
-    (*TimerPtr)++;
+    Timer++;
+	return interval;
 } 
 
-int TimerInit(long Freq)
+int TimerInit(int32_t Freq)
 {
 	Timer_Freq = Freq;
-	DWORD msInterval = 1000/Timer_Freq; //millisecond accuracy.
-	DWORD wTimerRes = 0;
+	uint32_t msInterval = 1000/Timer_Freq; //millisecond accuracy.
+	uint32_t wTimerRes = 0;
 
-	TimerID = timeSetEvent(msInterval,wTimerRes,TimerProc,NULL,TIME_PERIODIC );
+//	TimerID = timeSetEvent(msInterval,wTimerRes,TimerProc,NULL,TIME_PERIODIC);
+	TimerID = SDL_AddTimer(msInterval, TimerProc, nullptr);
 
 	if (!TimerID)
 	{
 		return 0;
 	}
 
-	*TimerPtr = 0;
+	Timer = 0;
 	return 1;
 }
 
@@ -670,46 +587,20 @@ void TimerRemove(void)
 {
 	if (TimerID)
 	{
-		timeKillEvent(TimerID);
+		SDL_RemoveTimer(TimerID);
 		TimerID = 0;
 	}
 } 
 //Timer code ends.
 
-static dword InitDisplayDevice()
-{
-	long rv = -1;
-	char *displayAPI = g_cfg->extractString("DisplayAPI");
-	if (!strcmp(displayAPI, "D3D8"))
-	{
-		// initialize Direct3D 8.0 based display
-		g_displayType = 0;
-		rv = D3D8_InitDisplay();
-	} else if (!strcmp(displayAPI, "DDRAW"))
-	{
-		// initialize DDRAW based display.
-		g_displayType = 1;
-		rv = DDRAW_InitDisplay();
-	} else if (!strcmp(displayAPI, "GDI"))
-	{
-		// initialize GDI based display
-		g_displayType = 2;
-		rv = GDI_InitDisplay();
-	}
-	delete [] displayAPI;
-	return rv;
-}
-
-
-
-DWORD StubInit__(void)
+uint32_t StubInit__(void)
 {
 	StubI = 1;
 
 
 	//hAccelTable = LoadAccelerators(G_hInst, (LPCTSTR)IDC_W32STUB);
 
-	SetForegroundWindow(G_hWnd);
+	// SetForegroundWindow(G_hWnd);
 
 	//SetTimer(G_hWnd,1,1000/TimerFreq,NULL);
 	int TimerFreq = 100;
@@ -717,6 +608,7 @@ DWORD StubInit__(void)
 	// redirect console output to a file
 	freopen("logfile.txt", "w+", stdout);
 
+	FPU_LPrecision();
 	return 0;
 }
 
@@ -729,7 +621,7 @@ DWORD StubInit__(void)
 //	Complex_Form(&R1, -2.0,-2.0);
 //	Complex_Form(&R2,  2.0, 2.0);
 //	Generate_Julia_Fractal(&Im, &C, &R1, &R2);
-	long i,j;
+	int32_t i,j;
 	for(i=0; i<256; i++)
 		for(j=0; j<256; j++)
 			Im.Data[i+j*256] = (  ((i>>2) ^ (j>>2)) <<3) * 0x010101;
@@ -767,16 +659,20 @@ struct Raindrop
 
 dword numDrops;
 Raindrop *RD;
-static float dTime;
+//static float dTime;
 
-inline void fist(long &r, float x)
+inline void fist(int32_t &r, float x)
 {
-	__asm 
+#ifdef PORTABLE_CODE
+	r = static_cast<int32_t>(x);
+#else
+	__asm
 	{
 		FLD dword ptr [x]
 		mov edi, dword ptr [r]
 		FISTP dword ptr [edi]
 	}
+#endif
 }
 
 static void rainmapper(float x1, float y1, float x2, float y2)
@@ -786,7 +682,7 @@ static void rainmapper(float x1, float y1, float x2, float y2)
 	float rdy = 1.0 / (y2-y1);
 	float dxdy = (x2-x1) * rdy;
 
-	long iy1,iy2, ix;
+	int32_t iy1,iy2, ix;
 	fist(iy1, y1);
 	fist(iy2, y2);
 	float x = x1 + (iy1-y1) * dxdy;
@@ -798,7 +694,7 @@ static void rainmapper(float x1, float y1, float x2, float y2)
 	float lt = (iy1-y1) * rdy;
 	dword R, G, B, a, A, pixel;
 
-	for(long y=iy1; y<iy2; y++)
+	for(int32_t y=iy1; y<iy2; y++)
 	{
 		fist(ix, x);
 
@@ -908,150 +804,6 @@ static void rainmapper(float x1, float y1, float x2, float y2)
 	}
 }
 
-static void initrain()
-{
-	numDrops = 5000;
-	RD = new Raindrop [numDrops];
-
-	for(dword i=0; i<numDrops; i++)
-	{
-		RD[i].pos.x = ((rand()-16384) * 10.0) / 16384.0;
-		RD[i].pos.y = ((rand()-16384) * 10.0) / 16384.0;
-		RD[i].pos.z = ((rand()-16834) * 10.0) / 16384.0;
-	}
-}
-
-static void calc_DomDirection(Vector &RainDir, Vector &DomDir)
-{
-	float dom = 0.0;
-	if (RainDir.x > dom)
-	{
-		dom = RainDir.x;
-		DomDir.x = 1.0;
-		DomDir.y = 0.0;
-		DomDir.z = 0.0;
-	}
-	if (-RainDir.x > dom)
-	{
-		dom =-RainDir.x;
-		DomDir.x =-1.0;
-		DomDir.y = 0.0;
-		DomDir.z = 0.0;
-	}
-	if (RainDir.y > dom)
-	{
-		dom = RainDir.y;
-		DomDir.x = 0.0;
-		DomDir.y = 1.0;
-		DomDir.z = 0.0;
-	}
-	if (-RainDir.y > dom)
-	{
-		dom =-RainDir.y;
-		DomDir.x = 0.0;
-		DomDir.y =-1.0;
-		DomDir.z = 0.0;
-	}
-	if (RainDir.z > dom)
-	{
-		dom = RainDir.z;
-		DomDir.x = 0.0;
-		DomDir.y = 0.0;
-		DomDir.z = 1.0;
-	}
-	if (-RainDir.z > dom)
-	{
-		dom =-RainDir.z;
-		DomDir.x = 0.0;
-		DomDir.y = 0.0;
-		DomDir.z =-1.0;
-	}
-}
-
-static void rain(Image &Im)
-{
-	float cx = Im.x * 0.5;
-	float cy = Im.y * 0.5;
-
-	float kx = Im.x * 0.8;
-	float ky = Im.x * 0.8;
-
-	static float alpha = PI*0.9, beta = 0.0;
-
-	if (Keyboard[ScLeft]) alpha -= 0.01;
-	if (Keyboard[ScRight]) alpha += 0.01;
-	if (Keyboard[ScDown]) beta -= 0.01;
-	if (Keyboard[ScUp]) beta += 0.01;
-
-	Vector RainDir;
-	RainDir.x = sin(alpha) * cos(beta);
-	RainDir.y = cos(alpha) * cos(beta);
-	RainDir.z = sin(beta);	
-
-	Vector DomDir;
-	calc_DomDirection(RainDir, DomDir);
-
-	Vector delta;
-	Vector_Form(&delta, 
-		RainDir.x * dTime * 10.0, 
-		RainDir.y * dTime * 10.0, 
-		RainDir.z * dTime * 10.0);
-
-	Vector rainTrail;
-	Vector_Scale(&RainDir, 0.5, &rainTrail);
-
-	for(dword i=0; i<numDrops; i++)
-	{
-		RD[i].pos.x += delta.x;
-		RD[i].pos.y += delta.y;
-		RD[i].pos.z += delta.z;
-
-		if (Dot_Product(&RD[i].pos, &DomDir) > 10.0)
-		{
-			RD[i].pos.x = ((rand()-16384) * 10.0) / 16384.0;
-			RD[i].pos.y = ((rand()-16384) * 10.0) / 16384.0;
-			RD[i].pos.z = ((rand()-16834) * 10.0) / 16384.0;
-
-			// project on <x,DomDir> = -10.0
-			// x := x + a*RainDir.
-			// <x+a*RainDir, DomDir> = -10.0.
-			// <x,DomDir> + a*<RainDir, DomDir> = -10.0
-			// a = - (10.0 + <x, DomDir>) / <RainDir, DomDir>.
-			float a = - (10.0 + Dot_Product(&RD[i].pos, &DomDir)) / Dot_Product(&RainDir, &DomDir);
-			RD[i].pos.x += a*RainDir.x;
-			RD[i].pos.y += a*RainDir.y;
-			RD[i].pos.z += a*RainDir.z;
-		}
-
-		float ahead_z = RD[i].pos.z + rainTrail.z;
-
-		if (RD[i].pos.z < 1.0 || ahead_z < 1.0) continue;
-
-		float rz = 1.0 / RD[i].pos.z;
-
-		float x = cx + kx * RD[i].pos.x * rz;
-		float y = cy - ky * RD[i].pos.y * rz;
-
-		float raz = 1.0 / ahead_z;
-		float ahead_x = cx + kx * (RD[i].pos.x + rainTrail.x) * raz;
-		float ahead_y = cy - ky * (RD[i].pos.y + rainTrail.y) * raz;
-
-		// fat map
-		if (ahead_y > y)			
-			rainmapper(x, y, ahead_x, ahead_y);
-		else
-			rainmapper(ahead_x, ahead_y, x, y);
-
-		// pixel rendering
-//		int ix = x;
-//		int iy = y;
-
-//		if (ix>=0 && ix<Im.x && iy>=0 && iy<Im.y)
-//			((dword *)Im.Data)[ix + iy * Im.x] = 0xFFFFFF;
-	}
-}
-
-
 static Vector 
 	TexOrigin(-1.0, 1.5, 6.0), 
 	TexU(3.0, 0.0,-1.0), 
@@ -1082,10 +834,10 @@ void PointGetUV(Vector *V, float &u, float &v)
 
 dword TexGetColor(float u, float v)
 {
-	long U = u*16.0;
-	long V = v*16.0;
-	long U2 = u*256.0;
-	long V2 = v*256.0;
+	int32_t U = u*16.0;
+	int32_t V = v*16.0;
+	int32_t U2 = u*256.0;
+	int32_t V2 = v*256.0;
 	return ((U^V)&1)*0xFF0000 + (U2<<8) + V2;
 }
 
@@ -1236,182 +988,154 @@ void VolTrace(Image &Im)
 				v += rdv * scanres;
 				h += rdh * scanres;
 			}
-			long res_R = res_r; if (res_R>255) res_R = 255;
-			long res_G = res_g; if (res_G>255) res_G = 255;
-			long res_B = res_b; if (res_B>255) res_B = 255;
+			int32_t res_R = res_r; if (res_R>255) res_R = 255;
+			int32_t res_G = res_g; if (res_G>255) res_G = 255;
+			int32_t res_B = res_b; if (res_B>255) res_B = 255;
 			Im.Data[i+j*Im.x] = (res_R<<16)+(res_G<<8)+res_B;
 		}
 	}
 }
 
-void Run_RainFX()
-{
-	const long PartTime = 10000;
+struct ThreadPoolCleanup {
+	~ThreadPoolCleanup() {
+		ThreadPool::instance().close();
+	}
+};
 
-	Image Im;
-	Im.x = XRes;
-	Im.y = YRes;
-	Im.Data = (dword *)VPage;
-
-	initrain();
-
-	// motion blur trash
-	byte *BPage = new byte[PageSize];
-	VESA_Surface Blur;
-	memcpy(&Blur,MainSurf,sizeof(VESA_Surface));
-	Blur.Data = BPage;
-	Blur.Flags = VSurf_Noalloc;
-	Blur.Targ = VPage;
-
-
-	float TT = Timer;
-	while (Timer < PartTime)
-	{
-		dTime = (Timer - TT) / 100.0;
-		TT = Timer;
-
-		memset(VPage, 0, PageSize);
-		
-		// draw scene
-		//Generate_Plasma(&Im, 10, 3621);
-		
-//		VolTrace(Im);
-		rain(Im);
-//		int fpcw = _control87(0, 0);
-//		FILE *F = fopen("fpu.log", "at");
-//		fprintf(F, "[exec] control word = %xh\n" , fpcw);
-//		fclose(F);
-
-		Flip(MainSurf);
-//		Modulate(MainSurf,&Blur,0x707070,0x808080);
-//		Flip(&Blur);
-
-		//while (Timer < TT + 50) continue;
-		if (Keyboard[ScESC])
-		{
-			Timer = PartTime;
-			break;
-		}
-	} Timer -= PartTime;
-
-	delete [] BPage;
-}
-
+template <typename F>
+struct scope_guard {
+	scope_guard(F &&f): f(std::forward<F>(f)) {}
+	~scope_guard() {f();}
+	F f;
+};
 
 void CodeEntry(void *var)
 {
-	_controlfp(_EM_INEXACT, _MCW_EM);
-	ConfigurationDB cfg;
-	g_cfg = &cfg;
-	if (0)
-	{
-		// Write ConfigurationDB.
-		cfg.setCategory("Primary");	
-		cfg.addEntry(new CFGInteger("MusicEnable", 1));
-		cfg.addEntry(new CFGInteger("ResolutionX", 640));
-		cfg.addEntry(new CFGInteger("ResolutionY", 480));
-		cfg.addEntry(new CFGInteger("FullScreenMode", 1));
-		cfg.addEntry(new CFGInteger("ProfilerEnable", 1));
-		cfg.toFile("rev.cfg");		
-	} else
-	{
-		// Read ConfigurationDB.
-		cfg.fromFile("rev.cfg");
-	}
-	
-	g_playMusic = cfg.extractInteger("MusicEnable");
-	g_profilerActive = cfg.extractInteger("ProfilerEnable");
-	g_demoXRes = cfg.extractInteger("ResolutionX");	
-	g_demoYRes = cfg.extractInteger("ResolutionY");
-
-	int yadda = 0;
-
-	int internalXRes = g_demoXRes;
-	int internalYRes = g_demoYRes;
-	LogFile = fopen("Runtime.LOG","wt");
-
-	if (!FDS_Init(internalXRes, internalYRes,32))    // Initialize FDS
-	{
-		return;
-	}
 	Generate_RGBFlares(); // should be in fds_init
-	
-	if (g_playMusic)
-		FModInit();
-	InitFillers (VirtualProtect, PAGE_EXECUTE_READWRITE);
+
+	//if (g_playMusic)
+	//	FModInit();
 
 	// device init parameters
-	g_DIP.hInst = G_hInst;
-	g_DIP.hWnd = G_hWnd;
-	g_DIP.x = internalXRes;
-	g_DIP.y = internalYRes;
-	g_DIP.bpp = 32;
-	g_DIP.flags = 0;
+	// g_DIP.hInst = G_hInst;
+	// g_DIP.hWnd = G_hWnd;
+	// g_DIP.x = internalXRes;
+	// g_DIP.y = internalYRes;
+	// g_DIP.bpp = 32;
+	// g_DIP.flags = 0;
 
-	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
-	if (g_fullScreenMode)
-		g_DIP.flags |= DISP_FULLSCREEN;
+	// if (g_fullScreenMode)
+	// 	g_DIP.flags |= DISP_FULLSCREEN;
 
 	// request display initialization
-	Thread_Interlock_Mutex = 1;
-	PostMessage(G_hWnd,WM_USER+1,0,0); //DEVICE INIT SIGNAL  
-	while (Thread_Interlock_Mutex)
-	{		
-		Sleep(10);
-	}
+	// Thread_Interlock_Mutex = 1;
+	// PostMessage(G_hWnd,WM_USER+1,0,0); //DEVICE INIT SIGNAL  
+	// while (Thread_Interlock_Mutex)
+	// {		
+	// 	Sleep(10);
+	// }
 	// direct display initialization
 //	InitDisplayDevice(cfg);
 	InitPolyStats(200);
 
-	dword sh = 0;
+	//TestCoff();
+
+	//dword sh = 0;
+	ModplayerHandle sh = 0;
 	if (g_playMusic)
 	{
-		sh = FModLoadModule("Revival.XM");
+		//sh = FModLoadModule("Revival.XM");
 		//module.Load("Revival.xM");
+		sh = Modplayer_Create("Revival.xM");
 	}
 	g_RevModuleHandle = sh;
 
+	ThreadPool::instance().init([]() {
+		InitPolyStats(200);
+		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
+		FPU_LPrecision();
+	});
+	ThreadPoolCleanup _guard;
+	scope_guard guard([](){
+		SDL_QuitEvent q = {SDL_QUIT, SDL_GetTicks()};
+		int ecode = SDL_PushEvent((SDL_Event*)&q);
+		//std::cerr << "push event: " << ecode << std::endl;
+	});
+
+	FPU_LPrecision();
+	if (g_playMusic)
+	{
+		if (sh) Modplayer_Start(sh);
+	}
+	Timer = 0;
+
+	// Timer = 0;
+	// FillerTest();
+	// return;
+
+	Timer = 0;
+	// RT rt;
+
+	// while (!Keyboard[ScESC]) 
+	// {
+	// 	rt.RunFrame(((float)Timer)/100.0);
+	// }
+
+	// return;
+
 	Initialize_Glato(); //9.3
-	//Initialize_City(); //9.3
-	//Initialize_Chase();
-	//Initialize_Fountain(); //8.3
-	//Initialize_Crash();
-	//Initialize_Greets(); //5.6
 	//Initialize_Nova();
-	
+
+	std::thread t1([]() {
+		InitPolyStats(200);
+		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
+		FPU_LPrecision();
+
+		Initialize_City();
+		Initialize_Chase();
+		Initialize_Fountain(); //8.3
+		Initialize_Crash();
+		Initialize_Greets(); //5.6
+	});// (); //9.3
+
 //	Initialize_Koch();
 //	ImageCompressionTestCode();
 //	TestPhotonTracer();
 
 	if (g_playMusic)
 	{
-		if (sh) FModPlayModule(sh);
+		//if (sh) FModPlayModule(sh);
+		if (sh) Modplayer_Start(sh);
 		//module.Start();
 	}
 	Timer = 0;
-//	FillerTest();
-//	return;
-
+		
 	Run_Glato();
+
+	t1.join();
+
 	while (Timer<4000);
+
+
 	Timer = 0;
 	if (Timer<=0) Timer = 1;
-	//Run_City();
+	Run_City();
 //	SavePolyStats("City.stat");
 //
-//	if (Timer <= 0) Timer = 1;
-//	Run_Chase();
-//
-//	if (Timer<=0) Timer = 1;
-//	Run_Fountain();
-//
-////	SavePolyStats("Fountain.stat");
-//	if (Timer<=0) Timer = 1;
-//	Run_Greets();
+	if (Timer <= 0) Timer = 1;
+	Run_Chase();
+
+	if (Timer<=0) Timer = 1;
+	Run_Fountain();
+	
+	if (Timer <= 0) Timer = 1;
+	Timer = 1;
+	Run_Crash();
 //	
-//	if (Timer <= 0) Timer = 1;
-//	Timer = 1;
-//	Run_Crash();
+//	SavePolyStats("Fountain.stat");
+	if (Timer<=0) Timer = 1;
+	Run_Greets();
+//	
 
 	//	SavePolyStats("Greets.stat");
 //	Run_RainFX();
@@ -1420,25 +1144,11 @@ void CodeEntry(void *var)
 
 	if (g_playMusic)
 	{
-		if (sh) FModFreeModule(sh);
-		FModClose();
+		//if (sh) FModFreeModule(sh);
+		//FModClose();
 		//module.Stop();
+		if (sh) Modplayer_Stop(sh);
 	}
-}
-
-static dword RemoveDisplayDevice(void)
-{
-	switch (g_displayType)
-	{
-	case 0:
-		return D3D8_RemoveDisplay();
-	case 1:
-		return DDRAW_RemoveDisplay();
-	case 2:
-		// TODO: GDI_RemoveDisplay();
-		break;
-	}
-	return 0;
 }
 
 void StubRemove()
@@ -1453,10 +1163,9 @@ void StubRemove()
 
 }
 
-
 static void StubbedThread(void *var)
 {
-	STID = GetCurrentThreadId();
+	// STID = GetCurrentThreadId();
 
 	StubInit__();
 
@@ -1470,179 +1179,75 @@ static void StubbedThread(void *var)
 	//a DOS STUB would do the same jumping from main() into that CodeEntry function.
 
 	//PostThreadMessage(MID,WM_QUIT,0,0);
-	PostMessage(G_hWnd,WM_USER+2,0,0); //TERMINATION SIGNAL
+	// PostMessage(G_hWnd,WM_USER+2,0,0); //TERMINATION SIGNAL
 
-	_endthread();
+	// _endthread();
 }
 
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+#include "SDL2.h"
+
+int main(int argc, const char *argv[])
 {
+	ConfigurationDB cfg;
+	g_cfg = &cfg;
+	cfg.fromFile("rev.cfg");
+	g_playMusic = cfg.extractInteger("MusicEnable");
+	g_profilerActive = cfg.extractInteger("ProfilerEnable");
+	g_demoXRes = cfg.extractInteger("ResolutionX");
+	g_demoYRes = cfg.extractInteger("ResolutionY");
+	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
 
-	dword scanCode;
-	if (StubI)
+    SDL_Init(SDL_INIT_VIDEO);
+
+    SDL_Window * window = SDL_CreateWindow("",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        g_demoXRes, g_demoYRes,
+        0);
+
+	// _controlfp(_EM_INEXACT, _MCW_EM);
+	FPU_LPrecision();
+	const int internalXRes = g_demoXRes;
+	const int internalYRes = g_demoYRes;
+	LogFile = fopen("Runtime.LOG","wt");
+
+	if (!FDS_Init(internalXRes, internalYRes,32))    // Initialize FDS
 	{
-		switch (message)
-		{
-			// Keyboard Array may require conversions to my own standard.
-			// (parhaps to the std. scancodes. messing with the interrupt 9h code later on to refit wont be fun.)
-			case WM_ACTIVATE:
-				WORD fActive,fMinimized;
-				fActive = LOWORD(wParam);           // activation flag 
-				fMinimized = (BOOL) HIWORD(wParam); // minimized flag 
-				Stub_Disable = (fActive==WA_INACTIVE||fMinimized);
-			break;
-			case WM_KEYDOWN:
-				scanCode = MapVirtualKey(wParam, 0);
-				//fprintf(Stub_Log,"<%d> Keyboard Key [%d] down\n",*TimerPtr,wParam);
-				Keyboard[scanCode] = 1;
-			break;
-			case WM_KEYUP:
-				scanCode = MapVirtualKey(wParam, 0);
-				//fprintf(Stub_Log,"<%d> Keyboard Key [%d] up\n",*TimerPtr,wParam);
-				Keyboard[scanCode] = 0;
-			break;
-/*			case WM_MOUSEMOVE:
-				CMS->Buttons = 0;
-				StubProcessMouseSignal(wParam);
-
-				CMS->X = LOWORD(lParam);  // horizontal position of cursor 
-				CMS->Y = HIWORD(lParam);  // vertical position of cursor  
-			break;
-			case WM_LBUTTONDOWN:
-				CMS->Buttons = MouseLDC;
-				StubProcessMouseSignal(wParam);
-
-				CMS->SX = LOWORD(lParam);  // horizontal position of cursor 
-				CMS->SY = HIWORD(lParam);  // vertical position of cursor  
-			break;
-
-			case WM_LBUTTONDBLCLK:
-				CMS->Buttons = MouseLDC;
-				StubProcessMouseSignal(wParam);
-
-				CMS->SX = LOWORD(lParam);  // horizontal position of cursor 
-				CMS->SY = HIWORD(lParam);  // vertical position of cursor  
-			break;*/
-		}
+		return -1;
 	}
-	switch (message)
-	{
-		case WM_DESTROY:
-			PostQuitMessage(0);
-		break;
-        case WM_SETCURSOR:
-			// kill fullscreen cursor, no matter the cost!
-			if (g_fullScreenMode)
-				while (ShowCursor(FALSE)>=0);
-        break;
-		case WM_TIMER:
-			//(*TimerPtr)++;
-		break;
-/*
-		case WM_USER:
-			fprintf(Stub_Log,"<%d> Initialization Signal\n",*TimerPtr);
-			S_InitRet = StubInit__(InStS);
-			Thread_Interlock_Mutex = 0;
-		break;*/
 
-		case WM_USER+1:
-			//fprintf(Stub_Log,"<%d> Device Initialization Signal\n",*TimerPtr);
-			S_InitRet = InitDisplayDevice();
-			StubI = 2;
-			Thread_Interlock_Mutex = 0;
-		break;
-		// Page flip signal
-		case WM_USER+3:
-			Flip(g_FlipRequestPage);
-			Thread_Interlock_Mutex = 0;
-		break;
+	SDL2_InitDisplay(window);
 
-		case WM_USER+2:
-			//fprintf(Stub_Log,"<%d> Termination Signal\n",*TimerPtr);
-			StubRemove();
-			// Try to allow "recovery time" from low res fullscreen.
-			//SetWindowLong( G_hWnd, GWL_STYLE, WS_OVERLAPPED );
-			//Sleep(1000);
-			DestroyWindow(G_hWnd);			
-//			PostMessage(G_hWnd,WM_DESTROY,0,0);
-			//PostQuitMessage(0);
-		break;
-
-		default:
-			//fprintf(Stub_Log,"<%d> Unknown Signal\n",*TimerPtr);
-			return DefWindowProc(hWnd, message, wParam, lParam);
-   }
-   return 0;
-}
-
-
-int APIENTRY WinMain(HINSTANCE hInstance,
-                     HINSTANCE hPrevInstance,
-                     LPSTR     lpCmdLine,
-                     int       nCmdShow)
-{
-	MID = GetCurrentThreadId();
-	
-	MSG msg;
-	G_hInst = hInstance;
-	WNDCLASSEX wcex;
-	wcex.cbSize = sizeof(WNDCLASSEX);
-
-	wcex.style			= CS_HREDRAW | CS_VREDRAW;
-	wcex.lpfnWndProc	= (WNDPROC)WndProc;
-	wcex.cbClsExtra		= 0;
-	wcex.cbWndExtra		= 0;
-	wcex.hInstance		= G_hInst;
-	wcex.hIcon			= NULL;//LoadIcon(G_hInst, (LPCTSTR)IDI_W32STUB);
-	wcex.hCursor		= LoadCursor(NULL, IDC_HELP);
-	wcex.hbrBackground	= (HBRUSH)(COLOR_DESKTOP+1);
-	wcex.lpszMenuName	= NULL;
-	wcex.lpszClassName	= G_WindowClassStr;
-	wcex.hIconSm		= NULL;//LoadIcon(wcex.hInstance, (LPCTSTR)IDI_SMALL);
-
-	if (!RegisterClassEx(&wcex)) return 0;
-
-//	HACCEL hac;
-//	hac = CreateAcceleratorTable(NULL,0);
-//	G_hWnd = CreateWindowEx(WS_EX_APPWINDOW,G_WindowClassStr,G_TitleStr,WS_OVERLAPPEDWINDOW,0,0,0,0, NULL, NULL, G_hInst, NULL);
-    G_hWnd = CreateWindowEx(WS_EX_TOPMOST,
-                          G_WindowClassStr,
-                          G_TitleStr,
-                          WS_POPUP,
-                          0,
-                          0,
-                          0,//GetSystemMetrics(SM_CXSCREEN),
-                          0,//GetSystemMetrics(SM_CYSCREEN),
-                          NULL,
-                          NULL,
-                          G_hInst,
-                          NULL);
-
-    ShowWindow(G_hWnd, nCmdShow);
-    UpdateWindow(G_hWnd);
-    SetFocus(G_hWnd);
+	memset(VPage, 0xcd, MainSurf->BPSL * YRes);
+	Flip(MainSurf);
 
 	// Ow shit
 	// STUB must initialize all video,raster and render devices.
 	//
-	_beginthread(StubbedThread,64*1024,NULL);
- 
-	// do the stuff
-	while (GetMessage(&msg, NULL, 0, 0))
-	{
-		if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg)) 
-		{
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
-	}
+	auto t = std::thread(StubbedThread, nullptr);
 	
+    while (1)
+    {
+        SDL_Event event;
+        SDL_WaitEvent(&event);
+		//std::cerr << "event type is " << event.type << std::endl;
+		if (event.type == SDL_QUIT) {
+			break;
+		}
+		if (event.type == SDL_KEYDOWN) {
+			
+			//fprintf(Stub_Log,"<%d> Keyboard Key [%d] down\n",Timer,wParam);
+			Keyboard[event.key.keysym.scancode] = 1;
+		}
+		if (event.type == SDL_KEYUP) {
+			
+			//fprintf(Stub_Log,"<%d> Keyboard Key [%d] down\n",Timer,wParam);
+			Keyboard[event.key.keysym.scancode] = 0;
+		}
+    }
+
+out:
+	t.join();
+	SDL_DestroyRenderer((SDL_Renderer *)MainSurf->Renderer);
+	SDL_Quit();
 	return 0;
 }
-
-void SysSleep(dword ticks)
-{
-	Sleep(ticks);
-}
-
-#endif

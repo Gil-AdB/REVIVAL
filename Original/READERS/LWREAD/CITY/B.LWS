@@ -1,0 +1,328 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 60
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 60
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 5.444999 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5.524999 5.444999 2.525 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0.145 5.444999 4.880001 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5.345 5.444999 7.270001 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0.2500001 5.444999 9.824999 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5.215001 5.444999 12.675 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0.305 5.444999 14.655 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5.535001 5.444999 -3.245 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -0.6899998 5.444999 -5.895 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  4.860001 5.444999 1.02 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  4.48 5.444999 -5.974999 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10.45 5.444999 7.005 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5.859998 5.444999 13.505 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5.715002 5.444999 6.920002 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10.4 5.444999 2.075 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10.5 5.444999 -4.15 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  9.900001 5.444999 0.5750013 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  9.575001 5.444999 -5.975 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10.4 5.444999 12.85 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10.725 5.444999 7.000001 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\DEMO\city\b1s.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  11.25 5.444999 13.25 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2560
+PivotPoint 0 5.444999 0
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  965.5 1399.5 -2137 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  1
+  10.55042 9.679999 -10.9109 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+TargetObject 1
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 1
+ViewAimpoint 0.000000 0.000000 0.000000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 3.999998
+GridNumber 0
+GridSize 5.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

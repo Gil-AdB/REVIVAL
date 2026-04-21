@@ -1,0 +1,98 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 60
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 500
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\DEMO\city\cars\car1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -2 2 -2 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  7
+  -4.837538 2.4 5.361162 138.9 18.6 0 1 1 1
+  0 0 0 0 0
+  -6.366146 2.4 -2.78301 72.7 21.2 0 1 1 1
+  106 0 0 0 0
+  -1.617646 2.4 -6.766264 16.7 22.2 0 1 1 1
+  203 0 0 0 0
+  5.750401 2.27 -3.93846 -58.8 21.90001 0 1 1 1
+  299 0 0 0 0
+  4.921739 2.08 4.111869 -130.6 20.1 0 1 1 1
+  371 0 0 0 0
+  1.07691 1.820001 7.436614 -170.9 15.7 0 1 1 1
+  428 0 0 0 0
+  -5.297736 1.265 -0.5983832 -208 8.399998 0 1 1 1
+  500 0 0 0 0
+EndBehavior 1
+TargetObject 1
+ZoomFactor 3.200000
+Resolution 1
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 0.000000 0.000000 0.000000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 1.185185
+GridNumber 0
+GridSize 1.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

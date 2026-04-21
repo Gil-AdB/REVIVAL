@@ -8,13 +8,13 @@
 // [16 Bytes]
 struct Color
 {
-	float B, G, R, A;
+	float B = 0.0f, G = 0.0f, R = 0.0f, A = 0.0f;
 };
 
 // [4 Bytes]
 union QColor
 {
-    dword BGRA;
+    dword BGRA = 0;
     struct
     {
         byte B,G,R,A; //Red,Green,Blue,Alpha.

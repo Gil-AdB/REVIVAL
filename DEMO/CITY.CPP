@@ -1,38 +1,74 @@
 
-#include "REV.H"
+#include "Rev.h"
 #include "CITY.H"
+#include <algorithm>
+#include <vector>
+#include "FRUSTRUM.H"
+#include "Gradient.h"
+#include <map>
 
 #define FRONT_TO_BACK_SORTING
 #define CITY_RAIN
-//#define TRACE_OBJECTS
 
 static Scene *CitySc;
-//static Scene *SkySc;
+Scene *SkySc;
 static Object *RflObj;
 static Vector RflSurfNorm(0,1,0);
 static float RflSurfOfs = 0;
 
-static long CTPartTime;
+static int32_t CTPartTime;
+static Matrix AxisAlignedViews[6] = {
+	{
+		{ 1,  0,  0},
+		{ 0,  1,  0},
+		{ 0,  0,  1},
+	},
+	{
+		{ 0,  0,  1},
+		{ 0,  1,  0},
+		{-1,  0,  0},
+	},
+	{
+		{-1,  0,  0},
+		{ 0,  1,  0},
+		{ 0,  0, -1},
+	},
+	{
+		{ 0,  0, -1},
+		{ 0,  1,  0},
+		{ 1,  0,  0},
+	},
+	{
+		{ 1,  0,  0},
+		{ 0,  0,  1},
+		{ 0,  -1, 0},
+	},
+	{
+		{ 1,  0,  0},
+		{ 0,  0, -1},
+		{ 0,  1,  0},
+	},
+};
 
 
-signed char *STbl,*SOTbl,*CTbl,*COTbl;
+static signed char *STbl,*SOTbl,*CTbl,*COTbl;
 
 void Calc_STable()
 {
 	STbl = new signed char [15*XRes];
 	SOTbl = STbl + 5*XRes;
-	long I;
+	int32_t I;
 	for(I=-5*XRes;I<10*XRes;I++)
-		SOTbl[I] = (long) (1.5f * YRes/240.0 * sin (I * 0.01f));
+		SOTbl[I] = (int32_t) (1.5f * YRes/240.0 * sin (I * 0.01f));
 }
 
 void Calc_CTable()
 {
 	CTbl = new signed char [13*XRes];
 	COTbl = CTbl + 3*XRes;
-	long I;
+	int32_t I;
 	for(I=-3*XRes;I<10*XRes;I++)
-		COTbl[I] = (long) (4.0f * XRes/320.0 * cos (I * 0.01f));
+		COTbl[I] = (int32_t) (4.0f * XRes/320.0 * cos (I * 0.01f));
 //	COTbl = SOTbl + 157;
 }
 
@@ -48,7 +84,7 @@ void Setup_Water_Distort()
 
 void Water_Distort()
 {
-/*	long I;
+/*	int32_t I;
 	GridPoint *Water_GP;
 //	DWord *TempBuf = new DWord[65536 * 4];
 	Image WaterImg;
@@ -116,10 +152,10 @@ void Run_Distort(void)
 //	Scale_Image(&Img,XRes,YRes);
 //	DWord *Ptr;
 //	DWord *DPtr = Img.Data;
-	long I,T;
+	int32_t I,T;
 
-	long X,Y,hX = XRes>>1,hY = YRes>>1;
-//	long Frames = 0;
+	int32_t X,Y,hX = XRes>>1,hY = YRes>>1;
+//	int32_t Frames = 0;
 //	Timer = 0;
 //	while(!Keyboard[ScESC])
 //	{
@@ -135,8 +171,8 @@ void Run_Distort(void)
 				*Ptr++ = DPtr[(I++) + COTbl[(T+(X<<1)-Y)<<1]+//-(X>>3)+
 					XRes*(SOTbl[(T<<1)+3*X+5*Y])]; //- (Y>>3))];
 		memcpy(Ptr,DPtr+XRes*YRes_1,VESA_BPSL);
-				//(long)(cos(T*0.02+X*0.04-Y*0.02) * 5.0f)
-				//(long)(sin(T*0.02+X*0.03+Y*0.05) * 5.0f) - (long)(Y * 0.1)
+				//(int32_t)(cos(T*0.02+X*0.04-Y*0.02) * 5.0f)
+				//(int32_t)(sin(T*0.02+X*0.03+Y*0.05) * 5.0f) - (int32_t)(Y * 0.1)
 //		Frames++;
 //	}
 //	printf("FPS = %1.3f\n",100.0f*(float)Frames/(float)Timer);
@@ -156,7 +192,7 @@ static void Reflective_Surface_Setup()
 	Vector U,V;
 
 	Object *O;
-	long IID = 0;
+	int32_t IID = 0;
 	for(O = CitySc->ObjectHead;O;O=O->Next)
 	{
 		if (O->Type!=Obj_TriMesh) continue;
@@ -215,7 +251,7 @@ static void Reflective_Surface_Setup()
 
 			// Extract coverage (range) over XZ plane and over texture
 			// (notice: this reads texture coords. from vertices, not faces).
-/*			float mx, Mx, mz, Mz, y;
+			float mx, Mx, mz, Mz, y;
 			float mu, Mu, mv, Mv;
 			dword i, j;
 			mx = Mx = T->Verts[0].Pos.x;
@@ -273,8 +309,8 @@ static void Reflective_Surface_Setup()
 					Vtx->Pos.x = x;
 					Vtx->Pos.y = y;
 					Vtx->Pos.z = z;
-					Vtx->U = u;
-					Vtx->V = v;
+					Vtx->U = u / 2.5;
+					Vtx->V = v / 2.5;
 					Vtx++;
 				}
 			}
@@ -308,7 +344,7 @@ static void Reflective_Surface_Setup()
 					F->V3 = F->C->V;
 					F++;
 				}
-			}*/
+			}
 
 //			break;
 		} else {
@@ -323,12 +359,6 @@ static void Reflective_Surface_Setup()
 
 		IID++;
 	}
-	Omni *Om;
-	for(Om=CitySc->OmniHead;Om;Om=Om->Next)
-	{
-//		printf("City Flare Range was %f\n",Om->Range.Keys[0].Pos.x);
-		//Om->Range.Keys[0].Pos.x *= 5.0f;
-	}
 }
 
 
@@ -340,7 +370,7 @@ void Reflective_Mapper_Setup()
 	Vector U,V;
 
 	Object *O;
-	long IID = 0;
+	int32_t IID = 0;
 	for(O = CitySc->ObjectHead;O;O=O->Next)
 	{
 		if (O->Type!=Obj_TriMesh) continue;
@@ -381,8 +411,8 @@ static void Reflected_Transform(Scene *Sc)
 	Face *F,*FEnd;
 	float PX=FOVX,PY=FOVY,Temp;
 	float dz;
-	long *pdz = (long *)(&dz);
-	long I;
+	int32_t *pdz = (int32_t *)(&dz);
+	int32_t I;
 	Face **Ins = FList;
 	float *f = (float *)(&M);
 	float *fv;
@@ -571,7 +601,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 				if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-				if (Vtx->PY>=YRes_1) Vtx->Flags|=Vtx_VisDown;
+				if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
 				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
@@ -587,7 +617,7 @@ Regular:
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				if (Vtx->TPos.z>Sc->NZP)
 				{
 					Vtx->RZ=1.0/Vtx->TPos.z;
@@ -600,7 +630,7 @@ Regular:
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-					if (Vtx->PY>=YRes_1) Vtx->Flags|=Vtx_VisDown;
+					if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
 					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				
@@ -665,7 +695,7 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
 				if (Vtx->PX>=XRes) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
-				if (Vtx->PY>=YRes_1) Vtx->Flags+=Vtx_VisDown;
+				if (Vtx->PY>=YRes) Vtx->Flags+=Vtx_VisDown;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			goto OUT;
@@ -677,7 +707,7 @@ ERegular:
 				Vector_Add(&U,&V,&Vtx->TPos);
 				
 				Vtx->Flags = 0;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+127.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->EV=128.0+127.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
@@ -703,30 +733,32 @@ ERegular:
 			
 		}
 OUT:FEnd=T->Faces+T->FIndex;
-    for (F=T->Faces;F<FEnd;F++)
-		if ((!(F->A->Flags&F->B->Flags&F->C->Flags&Vtx_Visible))
-			&&((F->Txtr->Flags&Mat_TwoSided)||
-			//(1)
-			(AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) //backface culling
-			
-			))
-		{
-			*Ins++ = F;
-			dz = F->A->TPos.z;
-			if (F->B->TPos.z>dz) dz=F->B->TPos.z;
-			if (F->C->TPos.z>dz) dz=F->C->TPos.z;
+		for (F = T->Faces; F < FEnd; F++) {
+			if (!F->VisibilityFlagsAll()
+				&& ((F->Txtr->Flags & Mat_TwoSided) ||
+					//(1)
+					(AP.x * F->N.x + AP.y * F->N.y + AP.z * F->N.z < F->NormProd) //backface culling
+
+					)) {
+				*Ins++ = F;
+				dz = F->A->TPos.z;
+				if (F->B->TPos.z > dz) dz = F->B->TPos.z;
+				if (F->C->TPos.z > dz) dz = F->C->TPos.z;
 #ifdef FRONT_TO_BACK_SORTING
-			F->SortZ.F = dz;
+				F->SortZ.F = dz;
 #else
-			F->SortZ.F = fzp-dz;
+				F->SortZ.F = fzp - dz;
 #endif
+			}
 		}
 	}
 	CPolys = Ins-FList;
 	for(O=Sc->OmniHead;O;O=O->Next)
 	{
 		Vtx=&O->V;
-		Vector_Sub(&O->IPos,&View->ISource,&V);
+		Vector ReflectedPos = O->IPos;
+		ReflectedPos.y = -ReflectedPos.y;
+		Vector_Sub(&ReflectedPos,&View->ISource,&V);
 		MatrixXVector(View->Mat,&V,&Vtx->TPos);
 		if (Vtx->TPos.z>Sc->NZP&&Vtx->TPos.z<Sc->FZP)
 		{
@@ -734,11 +766,13 @@ OUT:FEnd=T->Faces+T->FIndex;
 			Vtx->PX=CntrEX+Vtx->TPos.x*PX*Vtx->RZ;
 			Vtx->PY=CntrEY-Vtx->TPos.y*PY*Vtx->RZ;
 			// Insert to List
+			//dz = Vtx->TPos.z;
+			//dz *=-16384;
+			//dz +=0x7FFFFFFF;
+			//RoundToInt((int32_t *)&O->F.SortZ.DW,dz);
 			dz = Vtx->TPos.z;
-			dz *=-16384;
-			dz +=0x7FFFFFFF;
-			RoundToInt((long *)&O->F.SortZ.DW,dz);
 			*Ins++ = &O->F; // no insertion : flares are not reflected for now
+			O->F.SortZ.F = 2 * fzp - dz;
 		}
 	}
 	COmnies = (Ins-FList)-CPolys;
@@ -750,7 +784,7 @@ OUT:FEnd=T->Faces+T->FIndex;
 				F = &Sc->Pcl[I].F;
 				dz *=-16384;
 				dz +=0x7FFFFFFF;
-				RoundToInt((long*)&F->SortZ.DW,dz);
+				RoundToInt((int32_t*)&F->SortZ.DW,dz);
 #ifdef FRONT_TO_BACK_SORTING
 				F->SortZ.F = 2*fzp-dz;
 #else
@@ -782,7 +816,7 @@ static void SceneCorrections()
 
 	Scene *Sc = CitySc;
 	Omni *O;
-	long index;
+	int32_t index;
 	float redRangeMult = 1.8;
 	for(O=Sc->OmniHead, index=0; O; O=O->Next)
 	{
@@ -973,14 +1007,13 @@ void Reflective_AnimateTexture()
 	Face *F, *FE;
 	for(F = T->Faces, FE = F + T->FIndex; F<FE; F++)
 	{
-		F->U1 += dTime * 0.0007;
-		F->V1 += dTime * 0.0003;
-		F->U2 += dTime * 0.0007;
-		F->V2 += dTime * 0.0003;
-		F->U3 += dTime * 0.0007;
-		F->V3 += dTime * 0.0003;
+		F->U1 += dTime * 0.0007 * 2;
+		F->V1 += dTime * 0.0003 * 2;
+		F->U2 += dTime * 0.0007 * 2;
+		F->V2 += dTime * 0.0003 * 2;
+		F->U3 += dTime * 0.0007 * 2;
+		F->V3 += dTime * 0.0003 * 2;
 	}
-
 }
 
 // this fixes an omnilight to follow the camera and light things up a bit.
@@ -988,47 +1021,46 @@ static void AddCameraOmni()
 {
 }
 
-#define NUM_RAIN_PCLS 5000
+const float rainMaxHeight = 2000.0f;
+const float rainMaxDist = 6000.0f;
+
+XMMVector rainVel;
+
+#define NUM_RAIN_PCLS 3000
 
 static Material dummyRainMat;
-
-static void getRadialRandomHeight(Vector &c, Vector &v)
-{
-	float x, y;
-	do
-	{
-		x = (rand() - 16384)/16384.0;
-		y = (rand() - 16384)/16384.0;
-	} while (x*x+y*y > 1.0);
-	v.x = c.x + x * rainMaxDist;
-	v.y = rand() * rainMaxHeight / 32768.0;
-	v.z = c.z + y * rainMaxDist;
-}
 
 static void getRadial(Vector &c, Vector &v)
 {
 	float a, b;
 	do
 	{
-		a = (rand() - 16384)/16384.0;
-		b = (rand() - 16384)/16384.0;
+		a = (RAND_15() - 16384)/16384.0;
+		b = (RAND_15() - 16384)/16384.0;
 	} while (a*a+b*b > 1.0);
 
 	// project c onto plane y = v.y + rainMaxHeight.
 	float y = v.y;
-	float t = (y - c.y) / rainDir.y;
+	float t = (y - c.y) / rainVel.y;
 
-	v.x = c.x + t * rainDir.x + a * rainMaxDist;
-	v.z = c.z + t * rainDir.z + b * rainMaxDist;
+	v.x = c.x + t * rainVel.x + a * rainMaxDist;
+	v.z = c.z + t * rainVel.z + b * rainMaxDist;
 }
 
+static void getRadialRandomHeight(Vector& c, Vector& v)
+{
+	v.y = RAND_15() * rainMaxHeight / 32768.0;
+	getRadial(c, v);
+}
+
+
 static dword numDropsRendered;
-static void drawRainDrop(Vertex **VA, mword numVerts)
+static void drawRainDrop(Face* F, Vertex **VA, mword numVerts, dword miplevel)
 {
 	Vertex *V = VA[0];
 
-	long x = Fist(V->PX);
-	long y = Fist(V->PY);
+	int32_t x = Fist(V->PX);
+	int32_t y = Fist(V->PY);
 	
 	if (x>=0&&x<XRes&&y>=0&&y<YRes)
 	{
@@ -1053,7 +1085,7 @@ static void rainmapper(float x1, float y1, float x2, float y2)
 	float rdy = 1.0 / (y2-y1);
 	float dxdy = (x2-x1) * rdy;
 
-	long iy1,iy2, ix;
+	int32_t iy1,iy2, ix;
 	iy1 = Fist(y1);
 	iy2 = Fist(y2);
 	float x = x1 + (iy1-y1) * dxdy;
@@ -1065,7 +1097,7 @@ static void rainmapper(float x1, float y1, float x2, float y2)
 	float lt = (iy1-y1) * rdy;
 	dword R, G, B, a, A, pixel;
 
-	for(long y=iy1; y<iy2; y++)
+	for(int32_t y=iy1; y<iy2; y++)
 	{
 		ix = Fist(x);
 
@@ -1179,8 +1211,8 @@ static void drawRainDropV2(Vertex **VA, mword numVerts)
 {
 	Vertex *V = VA[0];
 
-	long x = Fist(V->PX);
-	long y = Fist(V->PY);
+	int32_t x = Fist(V->PX);
+	int32_t y = Fist(V->PY);
 
 	float ahead_z = V->TPos.z;
 
@@ -1206,42 +1238,85 @@ static void drawRainDropV2(Vertex **VA, mword numVerts)
 	}
 }
 
+XMMVector evalRainVel(float curFrame) {
+	const float rainVelMult = 200.0;
+	XMMVector vel(2.0, -7.0, -1.0);
+	vel *= rainVelMult;
+	
+	vel.x += sin(curFrame * 0.1) * 30.0 + sin(curFrame * 0.15) * 30.0 + sin(curFrame * 0.19) * 20.0;
+	vel.z += sin(curFrame * 0.07) * 30.0 + sin(curFrame * 0.17) * 30.0 + sin(curFrame * 0.23) * 20.0;
+	return vel;
+}
 
 static void initRain(Scene *Sc)
 {
+	rainVel = evalRainVel(0);
 	Sc->NumOfParticles = NUM_RAIN_PCLS;
 	Sc->Pcl = new Particle[Sc->NumOfParticles];
-	memset(Sc->Pcl,0,sizeof(Particle)*Sc->NumOfParticles);
+	//memset(Sc->Pcl,0,sizeof(Particle)*Sc->NumOfParticles);
 
-	memset(&dummyRainMat, 0, sizeof(Material));
+//	memset(&dummyRainMat, 0, sizeof(Material));
 	// dont use TBR for rain.
 //	float typicalParticleSize = 30.0/384.0;
 //	dword typicalSpans = Fist(YRes * typicalParticleSize / 4.0);
 //	TBR_Init(Sc, Sc->NumOfParticles * typicalSpans);
 	Vector InitialCenter = Sc->CameraHead->Source.Keys[0].Pos.im();
 
+	std::vector<GradientEndpoint> endpoints;
+	endpoints.emplace_back(0.0, Color{ 0.75, 0.65, 0.55, 0.0 });
+	endpoints.emplace_back(1.0, Color{ 0.75, 0.65, 0.55, 0.6 });
+
+	auto M = Generate_Gradient(endpoints, 256, 1, true);
+	M->Flags |= Mat_SrcAlpha | Mat_Transparent;
+
+	/*dword i,j;
+	for(j=0; j<256; j++)
+	{
+		for(i=0; i<256; i++)		
+		{
+			((dword*)M->Txtr->Data)[i + (j << 8)] =
+				//0xFFFFFF;				
+				//(((i<<3)^(j<<3)) & 0xFF) *0x010101;
+				//(i<<16)+(j<<8)+(i^j) * 0x010101;
+				(i == 0 && j == 0) ? 0xffffffff : 0;
+				//0xff000000 | ((((i ^ j) & 8) != 0) ? 0xffffff : 0);
+				//((i>>2)&1)*0xFFFFFF;
+				
+		}
+	}
+	Sachletz((dword*)(M->Txtr->Data), 256, 256);*/
+	
 	for(mword i=0; i<NUM_RAIN_PCLS; i++)
 	{
-		Sc->Pcl[i].Grav = 0.0;
-		Sc->Pcl[i].Mass = 1.0;
-		Sc->Pcl[i].Charge = 0.0;
-		Sc->Pcl[i].Radius = 0.0;
-		Sc->Pcl[i].Flags = Particle_Active;
-		getRadialRandomHeight(InitialCenter, Sc->Pcl[i].V.Pos);
+		Particle& p = Sc->Pcl[i];
+		p.Grav = 0.0;
+		p.Mass = 1.0;
+		p.Charge = 0.0;
+		p.Radius = 0.0;
+		p.Flags = Particle_Active;
+		getRadialRandomHeight(InitialCenter, p.V.Pos);
 
 		// Particle Virtual Face -> Particle Vertex		
-		Sc->Pcl[i].F.FlareSize = 3.0f; 
-		Sc->Pcl[i].F.A = Sc->Pcl[i].F.B = &Sc->Pcl[i].V;
+		p.F.FlareSize = 3.0f; 
+		p.F.A = p.F.B = &p.V;
 		// manual assignment
-		Sc->Pcl[i].F.Filler = drawRainDrop;
-		Sc->Pcl[i].F.Txtr = &dummyRainMat;
+		p.F.Filler = drawRainDrop;
+		p.F.Txtr = M;
 
-		Sc->Pcl[i].Vel = rainVel;
+		p.InitTrail(M, IX_Prefiller_TGZTAM, 50.0f, 5.0f);
+
+		// NOTE: consider adding some randomization (per particle and over time)
+		p.Vel.x = rainVel.x;
+		p.Vel.y = rainVel.y;
+		p.Vel.z = rainVel.z;
 	}
 }
 
-static void runRain(Scene *Sc)
+static void riskOfRain(Scene *Sc)
 {
+	// set rainvel based on some noise function of current frame
+	rainVel = evalRainVel(CurFrame);
+
 	// Animate Particles
 	float dt = 0.01*dTime;
 	Particle *P, *PE;
@@ -1261,8 +1336,10 @@ static void runRain(Scene *Sc)
 
 	// the amount of time taken for 'FrameStep' Frames to be presented (at 25FPS)
 	const float TimeStep = FrameStep / 25.0;
+	
 	Vector rVelStep;
 	Vector_Scale(&rainVel, TimeStep, &rVelStep);
+	
 	Vector cPos[NumFrames];
 	Matrix cMat[NumFrames];
 	Spline_Calc_3D(&Cm->Source, CurFrame+50.0, &centerPred);
@@ -1282,6 +1359,9 @@ static void runRain(Scene *Sc)
 		Vector_SelfAdd(&P->V.Pos, &v);
 		if (P->V.Pos.y < 0.0f)
 		{
+			P->Vel.x = rainVel.x;
+			P->Vel.y = rainVel.y;
+			P->Vel.z = rainVel.z;
 			P->V.Pos.y += rainMaxHeight;
 			for(i=0; i<100; i++)
 			{
@@ -1318,20 +1398,167 @@ BailOut:;
 
 }
 
+static dword V_Create(VESA_Surface* VS)
+{
+	VS->CPP = (VS->BPP + 1) >> 3;
+	VS->BPSL = VS->CPP * VS->X;
+	VS->PageSize = VS->BPSL * VS->Y;
+
+	dword ZBufferSize = sizeof(word) * VS->X * VS->Y;
+	if (!(VS->Data = (byte*)malloc(VS->PageSize + ZBufferSize))) return 1;
+	memset(VS->Data, 0, VS->PageSize + ZBufferSize);
+
+	//	VS->Flags = VSurf_Exists;
+	
+	VS->Handle = 0;
+
+	return 0;
+}
+
+struct CubeMapCoord {
+	uint32_t textureIdx : 3;
+	uint32_t u : 10;
+	uint32_t v : 10;
+
+	void set(uint32_t textureIdx, float u, float v) {
+		this->textureIdx = textureIdx;
+		this->u = uint32_t(u * 1023.999);
+		this->v = uint32_t(v * 1023.999);
+	}
+
+	uint32_t getTextureIdx() const {
+		return textureIdx;
+	}
+	float getU() const {
+		return u / 1023.999;
+	}
+	float getV() const {
+		return v / 1023.999;
+	}
+};
+
+using std::min;
+using std::max;
+
+std::vector<CubeMapCoord> CalcEquirectangularPanoramaTable(int xRes, int yRes) {
+	std::vector<CubeMapCoord> res(xRes * yRes);
+	auto it = res.begin();
+	for (int y = 0; y != yRes; ++y) {
+		const float lat = PI * (float(y) / yRes) - PI / 2.0f;
+		Vector d;
+		d.y = sin(lat);
+		const float xzFactor = cos(lat);
+		for (int x = 0; x != xRes; ++x, ++it) {
+			const float lon = 2.0 * PI * (float(x) / xRes);
+			d.x = xzFactor * sin(lon);
+			d.z = xzFactor * cos(lon);
+			const int ROT = 2;
+			if (d.z > max(fabs(d.x), fabs(d.y))) {
+				const float u = ((d.x / d.z) + 1.0) / 2.0;
+				const float v = ((d.y / d.z) + 1.0) / 2.0;
+				it->set(ROT % 4,1-u, v);
+			} else if (d.x > max(fabs(d.y), fabs(d.z))) {
+				const float u = ((d.z / d.x) + 1.0) / 2.0;
+				const float v = ((d.y / d.x) + 1.0) / 2.0;
+				it->set((ROT + 1) % 4, u, v);
+			} else if (d.z < -max(fabs(d.x), fabs(d.y))) {
+				const float u = ((d.x / d.z) + 1.0) / 2.0;
+				const float v = ((d.y / d.z) + 1.0) / 2.0;
+				it->set((ROT + 2) % 4,1-u,1-v);
+			} else if (d.x < -max(fabs(d.y), fabs(d.z))) {
+				const float u = ((d.z / d.x) + 1.0) / 2.0;
+				const float v = ((d.y / d.x) + 1.0) / 2.0;
+				it->set((ROT + 3) % 4,u,1-v);
+			} else if (d.y > max(fabs(d.x), fabs(d.z))) {
+				const float u = ((d.x / d.y) + 1.0) / 2.0;
+				const float v = ((d.z / d.y) + 1.0) / 2.0;
+				it->set(4, u, v);
+			} else if (d.y < -max(fabs(d.x), fabs(d.z))) {
+				const float u = ((d.x / d.y) + 1.0) / 2.0;
+				const float v = ((d.z / d.y) + 1.0) / 2.0;
+				it->set(5, 1 - u, v);
+			}
+		}
+	}
+	return res;
+}
+
+int32_t iLog2(int32_t x)
+{
+	union fi {
+		uint32_t i;
+		float f;
+	};
+
+	fi u{.f =(float)x};
+
+	return ((u.i >> 23) - 127);
+}
+
+Material* Materialize(void* data, int x, int y) {
+	Material* M = getAlignedType<Material>(16); //(Material*)getAlignedBlock(sizeof(Material), 16);
+	// whatever that means
+	M->Txtr = new Texture;
+	memset(M->Txtr, 0, sizeof(Texture));
+	M->Txtr->Flags = Txtr_Nomip | Txtr_Tiled;
+	M->Txtr->Data = (byte *)_aligned_malloc(x * y * 4, 16);
+	memcpy(M->Txtr->Data, data, x * y * 4);
+
+	M->Txtr->BPP = 32;
+	M->Txtr->SizeX = x; M->Txtr->LSizeX = iLog2(x);
+	M->Txtr->SizeY = y; M->Txtr->LSizeY = iLog2(y);
+
+	Sachletz((dword*)(M->Txtr->Data), x, y);
+	M->Txtr->Mipmap[0] = M->Txtr->Data;
+	M->Txtr->numMipmaps = 1;
+
+	return M;
+}
+
+using std::pair;
+using std::vector;
+using std::map;
+
+pair <Vertex*, Vertex*> make_vertex_pair(Vertex *A, Vertex *B) {
+	return (A < B) ? std::make_pair(A, B) : std::make_pair(B, A);
+}
+
+Vertex* get_non_edge_vertex(pair <Vertex*, Vertex*> E, Face* F) {
+	if (F->A != E.first && F->A != E.second) {
+		return F->A;
+	}
+	if (F->B != E.first && F->B != E.second) {
+		return F->B;
+	}
+	return F->C;
+}
+
+Vector ComputeFaceNormal(Vertex *A, Vertex* B, Vertex *C) {
+	Vector U, V, N;
+	U = B->Pos - A->Pos;
+	V = C->Pos - A->Pos;
+	N = V.cross(U);
+	N.normalize();
+
+	return N;
+}
+
+
+
 void Initialize_City()
 {
 	CitySc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
 	memset(CitySc,0,sizeof(Scene));
-	LoadFLD(CitySc,"Scenes\\CITY.FLD");
+	LoadFLD(CitySc,"SCENES/CITY.FLD");
 //	CitySc->EndFrame = 1046.0f;
 	CTPartTime = 100.0f*(CitySc->EndFrame-CitySc->StartFrame)/50.0f;
 //	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
 	CitySc->NZP = 20.0;
-	CitySc->FZP = 5000.0f;
+	CitySc->FZP = 7500.0f;
 	CitySc->Flags |= Scn_Fogged|Scn_ZBuffer;
-	CitySc->Ambient.B = 32 * 2;
-	CitySc->Ambient.G = 48 * 2;
-	CitySc->Ambient.R = 64 * 2;
+	CitySc->Ambient.B = 32*2;
+	CitySc->Ambient.G = 48*2;
+	CitySc->Ambient.R = 64*2;
 	
 	Material *M;
 	for(M = MatLib;M;M=M->Next)
@@ -1345,7 +1572,7 @@ void Initialize_City()
 	Reflective_Surface_Setup();
 	AddCameraOmni(); 
 
-//	SceneCorrections();
+	//SceneCorrections();
 
 
 	Preprocess_Scene(CitySc);
@@ -1355,13 +1582,216 @@ void Initialize_City()
 	//	if (M->RelScene != CitySc) continue;
 	//	if (!M->Txtr) continue;
 	//}
+
+	const auto PANORAMA_XRES = 1024;
+	const auto PANORAMA_YRES = 1024;
+
+	auto cubeMapper = CalcEquirectangularPanoramaTable(PANORAMA_XRES, PANORAMA_YRES);
 	
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 	// also make the appropriate Layer 2 fillers,
 	// when fog will be implemented
 	Init_Distort();
 
-//	SkySc = CreateSkyCube(0);
+	SkySc = CreateSkyCube(0);
+
+	// TODO: should animate the object to the frame where the camera is nearest to it
+	CurFrame = 0;
+	View = CitySc->CameraHead;
+
+	const auto CUBE_MAP_XRES = 1024;
+	const auto CUBE_MAP_YRES = 1024;
+
+	// render env maps for a few select objects
+	FList_Allocate(CitySc);
+	auto oldAspectRatio = AspectRatio;
+	// HACK: using exactly 1 triggers frustrum clipper bugs
+	AspectRatio = 0.999;
+	Camera EnvCam = { 0 };
+	View = &EnvCam;
+	EnvCam.IFOV = 90.0;
+	CalcPersp(&EnvCam);
+	//EnvCam.PerspX = CUBE_MAP_XRES / 2;
+	//EnvCam.PerspY = CUBE_MAP_YRES / 2;
+	FOVX = View->PerspX;
+	FOVY = View->PerspY;
+
+	Animate_Objects(CitySc, true);
+	Lighting(CitySc);
+
+	VESA_Surface* PrevMainSurf = MainSurf;
+	VESA_Surface TmpSurf = { 0 };
+	MainSurf = &TmpSurf;
+	TmpSurf.X = CUBE_MAP_XRES;
+	TmpSurf.Y = CUBE_MAP_YRES;
+	TmpSurf.BPP = 32;
+	TmpSurf.Flip = PrevMainSurf->Flip;
+	VESA_BPSL = CUBE_MAP_XRES * 4;
+	V_Create(&TmpSurf);
+	VESA_VPageExternal(&TmpSurf);
+
+	SetCurrentScene(CitySc);
+
+	const auto OmniFactor = 4.0;
+
+	for (auto O = CitySc->OmniHead; O; O = O->Next) {
+		O->ISize /= OmniFactor;
+	}
+
+	int building_count = 0;
+	bool bailout = false;
+
+	std::vector<uint32_t> cubeMaps[6];
+	for (auto& cubeMap : cubeMaps) {
+		cubeMap.resize(CUBE_MAP_XRES * CUBE_MAP_YRES);
+	}
+
+	std::vector<uint32_t> panorama(PANORAMA_XRES * PANORAMA_YRES);
+
+	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) { continue; }
+		if (Obj->Name == nullptr) { continue; }
+		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
+
+		building_count++;
+		auto T = (TriMesh*)(Obj->Data);
+		auto flags = T->Flags;
+		T->Flags &= ~HTrack_Visible;
+
+		EnvCam.ISource = T->IPos + T->BSphereCtr;
+		for (int i = 0; i != 6; ++i) {
+			FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+			memcpy(EnvCam.Mat, AxisAlignedViews[i], sizeof(EnvCam.Mat));
+
+			RenderSkyCube(SkySc, View, true);
+			Reflected_Transform(CitySc);
+			if (0 != CAll) {
+				Radix_SortingASM(FList, SList, CAll);
+				Render();
+			}
+			Transform_Objects(CitySc);
+			if (0 != CAll) {
+				Radix_SortingASM(FList, SList, CAll);
+				Render();
+			}
+			//if (!bailout) {
+			//	if (Keyboard[ScESC]) {
+			//		bailout = true;
+			//	}
+			//	Flip(&TmpSurf);
+			//	while (!Keyboard[ScSpace]) {
+			//	}
+			//	while (Keyboard[ScSpace]) {
+			//	}
+			//	if (Keyboard[ScESC]) {
+			//		bailout = true;
+			//	}
+			//}
+			memcpy(cubeMaps[i].data(), TmpSurf.Data, CUBE_MAP_XRES * CUBE_MAP_YRES * 4);
+		}
+		T->Flags = flags;
+
+		auto outputIt = panorama.begin();
+		auto mapperIt = cubeMapper.begin();
+		for (int y = 0; y != PANORAMA_YRES; ++y) {
+			for (int x = 0; x != PANORAMA_XRES; ++x, ++mapperIt, ++outputIt) {
+				const int u = int(mapperIt->getU() * CUBE_MAP_XRES);
+				const int v = int(mapperIt->getV() * CUBE_MAP_YRES);
+				*outputIt = cubeMaps[mapperIt->getTextureIdx()][u + v * CUBE_MAP_XRES];
+			}
+		}
+
+		Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
+		// HACK: works because panorma size = cube
+		//memcpy(TmpSurf.Data, panorama.data(), PANORAMA_XRES * PANORAMA_YRES * 4);
+		//		
+		//if (!bailout) {
+		//	if (Keyboard[ScESC]) {
+		//		bailout = true;
+		//	}
+		//	Flip(&TmpSurf);
+		//	while (!Keyboard[ScSpace]) {
+		//	}
+		//	while (Keyboard[ScSpace]) {
+		//	}
+		//	if (Keyboard[ScESC]) {
+		//		bailout = true;
+		//	}
+		//}
+	}
+
+	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) { continue; }
+		if (Obj->Name == nullptr) { continue; }
+		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
+
+		auto T = (TriMesh*)(Obj->Data);
+		for (Face* F = T->Faces, *FE = T->Faces + T->FIndex; F != FE; ++F) {
+			if (strstr(F->Txtr->Name, "windows")) {
+				F->Flags |= Face_Reflective;
+				F->ReflectionTexture = Obj->Reflection->Txtr;
+			}
+		}
+	}
+	AspectRatio = oldAspectRatio;
+
+	for (auto O = CitySc->OmniHead; O; O = O->Next) {
+		O->ISize *= OmniFactor;
+	}
+
+	using edge_list_t = map<pair<Vertex*, Vertex*>, vector<Face*>>;
+
+
+	/*for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) { continue; }
+		if (Obj->Name == nullptr) { continue; }
+		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
+
+		edge_list_t edge_list;
+
+		auto T = (TriMesh*)(Obj->Data);
+		for (Face* F = T->Faces, *FE = T->Faces + T->FIndex; F != FE; ++F) {
+			if (!(F->Flags & Face_Reflective)) { continue; }
+			edge_list[make_vertex_pair(F->A, F->B)].push_back(F);
+			edge_list[make_vertex_pair(F->B, F->C)].push_back(F);
+			edge_list[make_vertex_pair(F->C, F->A)].push_back(F);
+		}
+
+		Face* NewFaces = new Face[T->FIndex];
+		Face* NewFacePtr = NewFaces;
+
+
+		for (const auto& [edge, faces] : edge_list) {
+			if (faces.size() != 2 ||
+				faces[0]->A == nullptr || faces[0]->D != nullptr ||
+				faces[1]->A == nullptr || faces[1]->D != nullptr) {
+				continue;
+			}
+
+			if (faces[0]->N * faces[1]->N >= 0.9999) {
+				// We have a winner!
+				Vertex* v[4] = { get_non_edge_vertex(edge, faces[0]), edge.first, get_non_edge_vertex(edge, faces[1]), edge.second };
+				auto N = ComputeFaceNormal(v[0], v[1], v[2]);
+				if (N * faces[0]->N < 0.0) {
+					std::swap(v[0], v[2]);
+				}
+
+				faces[0]->uvToVertices();
+				faces[1]->uvToVertices();
+
+				faces[0]->A = v[0];
+				faces[0]->B = v[1];
+				faces[0]->C = v[2];
+				faces[0]->D = v[3];
+				faces[0]->uvFromVertices();
+				faces[1]->A = nullptr;
+			}
+		}
+		T->FIndex = std::remove_if(T->Faces, T->Faces + T->FIndex, [](const auto &F) {return !F.A; }) - T->Faces;
+	}*/
+
+	MainSurf = PrevMainSurf;
+	VESA_Surface2Global(MainSurf);
 
 	// initialize rain FX
 #ifdef CITY_RAIN
@@ -1446,10 +1876,19 @@ static void TextureBlockTest()
 		}
 	}
 }
+#ifdef TRACE_OBJECTS
+struct debug_outtext {
+	dword x, y;
+	std::string str;
+};
+
+std::vector<debug_outtext> DebugStrs;
+
+#endif
 
 void Run_City()
 {
-	long Polys = 0,TTrd;
+	int32_t Polys = 0,TTrd;
 	TriMesh *T;
 	Omni *O;
 
@@ -1464,9 +1903,9 @@ void Run_City()
 	/*for(O=CitySc->OmniHead;O;O=O->Next)
 	{
 		Quaternion_Form(&O->Pos.Keys[0].Pos, 
-			((rand()-16384)*5000.0)/16384.0,
-			(rand()*2000.0)/32768.0,
-			((rand()-16384)*5000.0)/16384.0,
+			((RAND_15()-16384)*5000.0)/16384.0,
+			(RAND_15()*2000.0)/32768.0,
+			((RAND_15()-16384)*5000.0)/16384.0,
 			0);
 	}*/
 
@@ -1476,8 +1915,8 @@ void Run_City()
 	for(O = CitySc->OmniHead;O;O=O->Next)
 		Polys++;
 
-	MusicModuleInfo mmi;
-	mmi.ModuleHandle = g_RevModuleHandle;
+	//MusicModuleInfo mmi;
+	//mmi.ModuleHandle = g_RevModuleHandle;
 
 	FList = new Face * [Polys];
 	SList = new Face * [Polys];
@@ -1485,7 +1924,7 @@ void Run_City()
 	View = CitySc->CameraHead;
 //	View = &FC;
 
-	long i, timerStack[20], timerIndex = 0;
+	int32_t i, timerStack[20], timerIndex = 0;
 	for(i=0; i<20; i++)
 		timerStack[i] = Timer;
 
@@ -1509,8 +1948,10 @@ void Run_City()
 	char MSGStr[128];
 
 	// SYNC music: set order #7
-	mmi.Order = 7;
-	FModSetModuleInfo(mmi);
+	//mmi.Order = 7;
+	//FModSetModuleInfo(mmi);
+
+	Modplayer_SetOrder(g_RevModuleHandle, 7);
 
 	dword numFrames = 0;
 
@@ -1526,16 +1967,47 @@ void Run_City()
 	const char *ProfNames[] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
 	dword ProfSum = 0;
 
+	std::vector<int> dispMap;
+	dispMap.resize(XRes * YRes);
+
+	//float waves[10][2];
+	//for (int w = 0; w != 10; ++w) {
+	//	waves[w][0] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
+	//	waves[w][1] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
+	//	waves[w][2] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
+	//	waves[w][3] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
+	//}
+	int idx = 0;
+	for (int y = 0; y < YRes; ++y) {
+		for (int x = 0; x < XRes; ++x) {
+			int tx = x, ty = y;
+
+			//for (int w = 0; w != 10; ++w) {
+			//	tx += sin(x * waves[w][0] + y * waves[w][1]) * 3.5;
+			//	ty += cos(x * waves[w][0] + y * waves[w][1]) * 3.5;
+			//}
+			tx += sin(x/30.0) * 15;
+			ty += cos(y/50.0) * 15;
+
+			if (tx < 0) { tx = -tx; } if (tx > XRes_1) { tx = 2 * XRes_1 - tx; }
+			if (ty < 0) { ty = -ty; } if (ty > YRes_1) { ty = 2 * YRes_1 - ty; }
+			dispMap[idx++] = ty * XRes + tx;
+		}
+	}
+	std::vector<dword> backBuffer;
+	backBuffer.resize(XRes * YRes);
+
 	for(i=0; i<PROF_NUM; i++)
 		Profiler[i] = 0;	
 
-	while ((!Keyboard[ScESC])&&Timer<CTPartTime)
+	while ((!Keyboard[ScESC]) && Timer < CTPartTime)
 	{
 		numFrames++;
 
 		Profiler[PROF_ZCLR] -= Timer;
 
-		dTime = Timer-TTrd;
+		dTime = Timer - TTrd;
+		if (dTime > 300) dTime = 300;
 		// fast forward/rewind
 		if (Keyboard[ScF2])
 		{
@@ -1558,34 +2030,34 @@ void Run_City()
 			Timer = TTrd;
 		}
 		g_FrameTime = TTrd = Timer;
-
-		// Clear framebuffer and Z-buffer
-		//memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
-		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
-
-		Profiler[PROF_ZCLR] += Timer;
-		Profiler[PROF_ANIM] -= Timer;
-
-		Reflective_AnimateTexture();
-//		Water_Distort();
-
-		if (Keyboard[ScTab])
-		{
+		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
+		if (Keyboard[ScTab]) {
 			if (View == &FC)
 				View = CitySc->CameraHead;
 			else
 				View = &FC;
 		}
-
-		CurFrame = CitySc->StartFrame + (CitySc->EndFrame-CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
- //							 CitySc->StartFrame + 500 * (float)Timer / (float)CTPartTime;
-
 		Dynamic_Camera();
-		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
+
+		// Clear framebuffer and Z-buffer
+		//memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
+		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+		RenderSkyCube(SkySc, View, false);
+//		FastWrite(VPage + PageSize, 0, (XRes * YRes * sizeof(word)) >> 2);
+
+		Profiler[PROF_ZCLR] += Timer;
+		Profiler[PROF_ANIM] -= Timer;
+
+		Reflective_AnimateTexture();
+		//		Water_Distort();
+
+		//							 CitySc->StartFrame + 500 * (float)Timer / (float)CTPartTime;
+
+		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
 		Animate_Objects(CitySc);
 
-		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF-HTrack_Visible;
+		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
 		Profiler[PROF_ANIM] += Timer;
 		Profiler[PROF_LGHT] -= Timer;
@@ -1595,7 +2067,7 @@ void Run_City()
 
 		// NOTE: Profiler ignores rain f/x
 #ifdef CITY_RAIN
-		runRain(CitySc);
+		riskOfRain(CitySc);
 #endif
 		Profiler[PROF_LGHT] += Timer;
 		Profiler[PROF_XFRM] -= Timer;
@@ -1609,12 +2081,25 @@ void Run_City()
 		if (!CAll) goto norefl;
 		Profiler[PROF_SORT] -= Timer;
 
-		Radix_SortingASM(FList,SList,CAll);
+		Radix_SortingASM(FList, SList, CAll);
 
 		Profiler[PROF_SORT] += Timer;
 		Profiler[PROF_RNDR] -= Timer;
 
 		Render();
+		{
+			memcpy(backBuffer.data(), VPage, PageSize);
+			int ii = 0;
+			dword* ptr = (dword*)VPage;
+			uint16_t* zbuffer_ptr = (uint16_t*)(VPage + PageSize);
+			for (auto displacement : dispMap) {
+				if (*zbuffer_ptr++ != 0) {
+					*ptr = backBuffer[displacement];
+				}
+				ptr++;
+			}
+		}
+
 
 		Profiler[PROF_RNDR] += Timer;
 
@@ -1624,40 +2109,19 @@ void Run_City()
 		//memset(VPage,0,PageSize + XRes*YRes*sizeof(word));		
 //		FastWrite(VPage+PageSize, 0, (XRes*YRes*sizeof(word)) >> 2);
 
-		norefl:
-		//RenderSkyCube(SkySc, View);
+	norefl:
 
 		// render all objects normally
 		Profiler[PROF_XFRM] -= Timer;
-		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;		 
+		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(CitySc);
 		Profiler[PROF_XFRM] += Timer;
 		if (!CAll) continue;
 		Profiler[PROF_SORT] -= Timer;
-		Radix_SortingASM(FList,SList,CAll);
+		Radix_SortingASM(FList, SList, CAll);
 		Profiler[PROF_SORT] += Timer;
 		Profiler[PROF_RNDR] -= Timer;
 		Render();
-
-#ifdef TRACE_OBJECTS
-		//printf("frame: %f\n\t", CurFrame);
-		for (Object *O = CitySc->ObjectHead; O; O = O->Next)
-		{
-			//for (Object *po = O; po; po = po->Parent) {
-			//	printf("%s->", po->Name);
-			//}
-			//printf("NULL\n");
-			if (O->Type != Obj_TriMesh) continue;
-			TriMesh * T = (TriMesh *)O->Data;
-			if (T->Flags&Tri_Inside || T->Flags & Tri_Ahead) {
-				if (T->BSphereScreenPos.x < XRes && T->BSphereScreenPos.y < YRes && T->BSphereScreenPos.x > 0 && T->BSphereScreenPos.y > 0) {
-					char text[255] = { 0 };
-					snprintf(text, 254, "%s (%d)", O->Name, O->Number);
-					OutTextXY(VPage, T->BSphereScreenPos.x, T->BSphereScreenPos.y, text, 255);
-				}
-			}
-		}
-#endif
 
 		Profiler[PROF_RNDR] += Timer;
 
@@ -1667,66 +2131,70 @@ void Run_City()
 			mword scroll = 0;
 
 			timerStack[timerIndex++] = Timer;
-			if (timerIndex==20) 
+			if (timerIndex == 20)
 			{
 				timerIndex = 0;
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
-			} else {
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
 			}
-			scroll = OutTextXY(VPage,0,0,MSGStr,255);
+			else {
+				sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
+			}
+			scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
 
 			sprintf(MSGStr, "%f frame", CurFrame);
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			sprintf(MSGStr, "%dK pixels/frame" , (int32_t)(FillerPixelcount/(1000.0*numFrames)));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			sprintf(MSGStr, "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			sprintf(MSGStr, "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
-			OutTextXY(VPage,0,45,MSGStr,255);
-	//		numDropsRendered=0;
-	//		sprintf(MSGStr, "%d raindrops" , (long)(numDropsRendered) );
-	//		OutTextXY(VPage,0,60,MSGStr,255);
+			sprintf(MSGStr, "%.3lfM pixels/frame", (FillerPixelcount / (1000000.0 * numFrames)));
+			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+			sprintf(MSGStr, "%.3lfM pixels/second", (FillerPixelcount / 1000000.0 * 100.0 / Profiler[PROF_RNDR]));
+			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+			sprintf(MSGStr, "%d polys/frame", (int32_t)(g_renderedPolys / numFrames));
+			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+			//		numDropsRendered=0;
+			//		sprintf(MSGStr, "%d raindrops" , (int32_t)(numDropsRendered) );
+			//		OutTextXY(VPage,0,60,MSGStr,255);
 
-	//		FModGetModuleInfo(mmi);
-	//		sprintf(MSGStr, "Order: %d, Row: %d", mmi.Order, mmi.Row);
-	//		OutTextXY(VPage,0,15,MSGStr,255);
-	//		sprintf(MSGStr, "%dK pixels/second" , (long)(FillerPixelcount/1000.0 * 100.0 / Timer));
-	//		OutTextXY(VPage,0,30,MSGStr,255);
-	//		PROFILER: display stats		
-			for(i=0; i<PROF_NUM; i++)
+			//		FModGetModuleInfo(mmi);
+			//		sprintf(MSGStr, "Order: %d, Row: %d", mmi.Order, mmi.Row);
+			//		OutTextXY(VPage,0,15,MSGStr,255);
+			//		sprintf(MSGStr, "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Timer));
+			//		OutTextXY(VPage,0,30,MSGStr,255);
+			//		PROFILER: display stats		
+			for (i = 0; i < PROF_NUM; i++)
 			{
-				sprintf(MSGStr, "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+				sprintf(MSGStr, "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
+				scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 			}
 
-			sprintf(MSGStr, "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			sprintf(MSGStr, "TOTL %3.1fms", ProfSum * 10.0 / numFrames);
+			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
 		}
 		Profiler[PROF_FLIP] -= Timer;
-		
-#ifdef _C_WATCOM
-		Flip(Screen);
-#else
-		Flip(MainSurf);
+
+#ifdef TRACE_OBJECTS
+		for (const auto& str : DebugStrs) {
+			OutTextXY(VPage, str.x, str.y, str.str.c_str(), 255);
+		}
+		DebugStrs.clear();
 #endif
+
+		Flip(MainSurf);
 		Profiler[PROF_FLIP] += Timer;
 
-//		PROFILER: Generate sample
+		//		PROFILER: Generate sample
 		ProfSum = 0;
-		for(i=0; i<PROF_NUM; i++)
+		for (i = 0; i < PROF_NUM; i++)
 			ProfSum += Profiler[i];
-		for(i=0; i<PROF_NUM; i++)
+		for (i = 0; i < PROF_NUM; i++)
 		{
 			ProfSample[i] =
-				Profiler[i]*10.0 / numFrames;
-			ProfPerc[i] = 
-				Profiler[i]*100.0/ProfSum;
+				Profiler[i] * 10.0 / numFrames;
+			ProfPerc[i] =
+				Profiler[i] * 100.0 / ProfSum;
 		}
 
 		//if (dTime<5) SysSleep(10*(5-dTime));
-	} Timer-=CTPartTime;
+	} Timer -= CTPartTime;
 /*	if (Keyboard[ScESC])
 	{
 		#ifdef Play_Music

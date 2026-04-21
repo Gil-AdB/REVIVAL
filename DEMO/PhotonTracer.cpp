@@ -2,7 +2,7 @@
 
 static ptRealType uRandom(ptRealType a, ptRealType b)
 {
-	ptRealType x = ptRealType(rand()/ptRealType(RAND_MAX));
+	ptRealType x = ptRealType(RAND_15()/ptRealType(RAND_15_MAX));
 	return a + (b-a)*x;
 }
 
@@ -116,7 +116,7 @@ static ptVector3 WLtoRGB(ptRealType waveLength)
 	if (waveLength < 380E-09 || waveLength >= 780E-09)
 		return ptVector3(0, 0, 0);
 
-/*	long index = (waveLength - 380E-09) / 5E-09;
+/*	int32_t index = (waveLength - 380E-09) / 5E-09;
 	ptRealType t = //fmod(waveLength - 380E-09, 5E-09) / 5E-09;
 		(waveLength - (380E-09 + index * 5E-09)) / 5E-09;
 	ptVector3 cie;
@@ -221,7 +221,7 @@ static void PhotonTracer(const ptObject2D &O, ptPhoton2D &p)
 	// right using some bizayoni combination
 	ptVector3 photonColor = 1E-03 * WLtoRGB(p._waveLength);
 
-//	long test_x = (p._waveLength - 350E-09) *1E+09;
+//	int32_t test_x = (p._waveLength - 350E-09) *1E+09;
 //	for(mword test_y=0; test_y<10; test_y++)
 //	{
 //		mword offset = 3*(test_y*XRes + test_x);
@@ -239,7 +239,7 @@ static void PhotonTracer(const ptObject2D &O, ptPhoton2D &p)
 		ptVector2 rayNormal( p._direction.y, -p._direction.x);
 
 		// intersect p with boundaries of the object
-		long col = 0;
+		int32_t col = 0;
 		ptVector2 normal;
 		ptRealType t, isect = 1E+17;
 		ptRealType prevDot = (O[O._numVerts-1]._position - p._position) * rayNormal, dot;
@@ -301,9 +301,9 @@ static void PhotonTracer(const ptObject2D &O, ptPhoton2D &p)
 				}
 
 			}
-			long ix = long(x);
-			long iy = long(y);
-			long offset = (ix + iy * XRes) * 3;
+			int32_t ix = int32_t(x);
+			int32_t iy = int32_t(y);
+			int32_t offset = (ix + iy * XRes) * 3;
 			ptFramebuffer[offset+0] += photonColor.z; //B
 			ptFramebuffer[offset+1] += photonColor.y; //G
 			ptFramebuffer[offset+2] += photonColor.x; //R
@@ -391,8 +391,8 @@ static void PhotonTracerPrismTest()
 
 	O.computeNormals();
 
-	// beamAngle/beamTarget either selected at random or predetermined so rays go a long way inside the prism.
-	ptRealType beamAngle = rand() * TWOPI / 32768.0;
+	// beamAngle/beamTarget either selected at random or predetermined so rays go a int32_t way inside the prism.
+	ptRealType beamAngle = RAND_15() * TWOPI / 32768.0;
 	ptVector2 beamDirection;
 	beamDirection.fromPolar(beamAngle, 1.0);
 	ptVector2 beamTarget(uRandom(-0.2, 0.2), uRandom(-0.2, 0.2));
@@ -412,9 +412,9 @@ static void PhotonTracerPrismTest()
 	{
 		ptRealType x = XRes * (O[i]._position.x / xRange + 0.5);
 		ptRealType y = YRes * (O[i]._position.y / yRange + 0.5);
-		long ix = long(x);
-		long iy = long(y);
-		long offset = (ix + iy * XRes) * 3;
+		int32_t ix = int32_t(x);
+		int32_t iy = int32_t(y);
+		int32_t offset = (ix + iy * XRes) * 3;
 		ptFramebuffer[offset] = 1.0;
 		ptFramebuffer[offset+1] = 1.0;
 		ptFramebuffer[offset+2] = 1.0;
@@ -460,7 +460,7 @@ void PhotonTracerRender()
 
 void TestPhotonTracer()
 {
-	const long PartTime = 10000;
+	const int32_t PartTime = 10000;
 
 	ptFramebuffer = new ptRealType [XRes * YRes * 3];
 	

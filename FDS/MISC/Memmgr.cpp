@@ -5,12 +5,12 @@
 #include <map>
 
 using namespace std;
-map<mword, mword> g_AlignedBlockMap;
+map<uintptr_t, uintptr_t> g_AlignedBlockMap;
 
-void *getAlignedBlock(mword size, mword alignment)
+void *getAlignedBlock(uintptr_t size, uintptr_t alignment)
 {
-	mword addr = (dword)malloc(size+alignment);
-	mword aligned = (addr + alignment-1)&(~(alignment-1));
+	uintptr_t addr = (uintptr_t)malloc(size+alignment);
+	uintptr_t aligned = (addr + alignment-1)&(~(alignment-1));
 	
 	//g_AlignedBlockMap.insert(pair<mword, mword> ();
 	g_AlignedBlockMap[aligned] = addr;
@@ -19,9 +19,9 @@ void *getAlignedBlock(mword size, mword alignment)
 
 void freeAlignedBlock(void *ptr)
 {
-	mword aligned = (mword)ptr;
+	uintptr_t aligned = (uintptr_t)ptr;
 	bool exists = g_AlignedBlockMap.find(aligned) != g_AlignedBlockMap.end();
-	mword addr;
+	uintptr_t addr;
 	if (exists)
 	{
 		addr = g_AlignedBlockMap[aligned];
@@ -32,3 +32,4 @@ void freeAlignedBlock(void *ptr)
 	if (!addr) return;
 	free((void *)addr);
 }
+

@@ -5,6 +5,7 @@
 #include "Base/FDS_DECS.H"
 #include "Raytracer.h"
 #include <Base/Scene.h>
+#include "../Modplayer/Modplayer.h"
 
 enum
 {
@@ -18,7 +19,7 @@ enum
 	PROF_NUM	=	7
 };
 
-extern dword g_RevModuleHandle;
+extern ModplayerHandle g_RevModuleHandle;
 extern dword g_profilerActive;
 
 void FlipRequest(VESA_Surface *VS);
@@ -33,6 +34,7 @@ void Run_Credits();
 
 void Initialize_Glato();
 void Initialize_City();
+static void TextureBlockTest();
 void Run_City();
 
 void Initialize_Chase();

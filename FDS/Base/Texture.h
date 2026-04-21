@@ -10,25 +10,25 @@
 // Total: [16 Bytes+64K per Charperpixel,+1Kb if Palettized]
 struct Texture
 {
-    Palette *Pal;   // Texture's Local Palette. Relevant only for 8BPP Textures
-    byte *Data;     // Texture's Storage space.
-    DWord BPP;      // Texture's BPP. Adjusts format in memory.
+    Palette *Pal            = nullptr;   // Texture's Local Palette. Relevant only for 8BPP Textures
+    byte *Data              = nullptr;     // Texture's Storage space.
+    DWord BPP               = 0;      // Texture's BPP. Adjusts format in memory.
     // 0 used when Texture is invalid.
     // DWord size for Aligning, Should be treated as Byte.
-    char *FileName; // Texture's Originating File-name.
+    char* FileName          = 0; // Texture's Originating File-name.
 
     // OptClass - Will be used by Assign_Fillers to determine Raster device
-    DWord OptClass; // 0 = 256x256 ; 1 = square 2^n ; 2 = arbitrary size.
-    int32_t SizeX,SizeY;
-	int32_t LSizeX, LSizeY; // log2(SizeX), log2(SizeY).
+    DWord OptClass          = 0; // 0 = 256x256 ; 1 = square 2^n ; 2 = arbitrary size.
+    int32_t SizeX  = 0, SizeY  = 0;
+	int32_t LSizeX = 0, LSizeY = 0; // log2(SizeX), log2(SizeY).
 
     // Mipmapping/blocktiling support.
-	int32_t blockSizeX, blockSizeY; // zero to disable, 1<<blockSize measures length in pixels of each block
-    byte *Mipmap[16]; // pointers to up to 16 levels of mipmaps
-    dword numMipmaps; // number of mipmap levels.
+	int32_t blockSizeX = 0, blockSizeY = 0; // zero to disable, 1<<blockSize measures length in pixels of each block
+    byte* Mipmap[16]        = {nullptr}; // pointers to up to 16 levels of mipmaps
+    dword numMipmaps        = 0; // number of mipmap levels.
 
-    dword ID;
-    dword Flags;
+    dword ID                = 0;
+    dword Flags             = 0;
 };
 
 #pragma pack(pop)

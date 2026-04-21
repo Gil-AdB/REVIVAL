@@ -1,0 +1,282 @@
+Module: D:\CW\OBJREAD\OBJREADE.CPP
+GROUP: 'DGROUP' CONST,CONST2,_DATA,_BSS
+
+Segment: _TEXT PARA USE32 0000025B bytes
+0000                          void near Read( void near *, int ):
+0000    53                        push      ebx
+0001    51                        push      ecx
+0002    56                        push      esi
+0003    89 D6                     mov       esi,edx
+0005    8B 0D 00 00 00 00         mov       ecx,__iobuf near * near ObjFile
+000B    89 D3                     mov       ebx,edx
+000D    BA 01 00 00 00            mov       edx,0x00000001
+0012    E8 00 00 00 00            call      fread_
+0017    A1 00 00 00 00            mov       eax,__iobuf near * near ObjFile
+001C    F6 40 0C 10               test      byte ptr [eax+0xc],0x10
+0020    75 0A                     jne       L$1
+0022    01 35 00 00 00 00         add       int unsigned near Pointer,esi
+0028    5E                        pop       esi
+0029    59                        pop       ecx
+002A    5B                        pop       ebx
+002B    C3                        ret       
+002C                          L$1:
+002C    C6 05 00 00 00 00 01      mov       byte ptr char near IsEOF,0x01
+0033    01 35 00 00 00 00         add       int unsigned near Pointer,esi
+0039    5E                        pop       esi
+003A    59                        pop       ecx
+003B    5B                        pop       ebx
+003C    C3                        ret       
+003D    8D 40 00                  lea       eax,[eax]
+
+Routine Size: 64 bytes,    Routine Base: _TEXT + 0000
+
+0040                          void near Seek( int unsigned ):
+0040    53                        push      ebx
+0041    51                        push      ecx
+0042    52                        push      edx
+0043    89 C1                     mov       ecx,eax
+0045    A1 00 00 00 00            mov       eax,__iobuf near * near ObjFile
+004A    89 CA                     mov       edx,ecx
+004C    31 DB                     xor       ebx,ebx
+004E    E8 00 00 00 00            call      fseek_
+0053    A1 00 00 00 00            mov       eax,__iobuf near * near ObjFile
+0058    F6 40 0C 10               test      byte ptr [eax+0xc],0x10
+005C    75 0A                     jne       L$2
+005E    89 0D 00 00 00 00         mov       int unsigned near Pointer,ecx
+0064    5A                        pop       edx
+0065    59                        pop       ecx
+0066    5B                        pop       ebx
+0067    C3                        ret       
+0068                          L$2:
+0068    C6 05 00 00 00 00 01      mov       byte ptr char near IsEOF,0x01
+006F    89 0D 00 00 00 00         mov       int unsigned near Pointer,ecx
+0075    5A                        pop       edx
+0076    59                        pop       ecx
+0077    5B                        pop       ebx
+0078    C3                        ret       
+0079    8D 40 00                  lea       eax,[eax]
+
+Routine Size: 60 bytes,    Routine Base: _TEXT + 0040
+
+007C                          void near ReadTHeader():
+007C    53                        push      ebx
+007D    51                        push      ecx
+007E    52                        push      edx
+007F    83 EC 08                  sub       esp,0x00000008
+0082    8A 1D 00 00 00 00         mov       bl,char unsigned near CheckSum
+0088    BA 01 00 00 00            mov       edx,0x00000001
+008D    89 E0                     mov       eax,esp
+008F    E8 00 00 00 00            call      void near Read( void near *, int )
+0094    31 D2                     xor       edx,edx
+0096    B8 00 00 00 00            mov       eax,offset char near String[]
+009B    8A 14 24                  mov       dl,[esp]
+009E    E8 00 00 00 00            call      void near Read( void near *, int )
+00A3    31 C0                     xor       eax,eax
+00A5    8A 04 24                  mov       al,[esp]
+00A8    30 D2                     xor       dl,dl
+00AA    88 90 00 00 00 00         mov       [eax+char near String[]],dl
+00B0    66 8B 15 01 00 00 00      mov       dx,__9oae3ObjChunk near Chunk+0x1
+00B7    31 DB                     xor       ebx,ebx
+00B9    30 F6                     xor       dh,dh
+00BB    66 89 D3                  mov       bx,dx
+00BE    31 D2                     xor       edx,edx
+00C0    66 8B 0D 01 00 00 00      mov       cx,__9oae3ObjChunk near Chunk+0x1
+00C7    8A 15 00 00 00 00         mov       dl,__9oae3ObjChunk near Chunk
+00CD    30 C9                     xor       cl,cl
+00CF    01 D3                     add       ebx,edx
+00D1    81 E1 FF FF 00 00         and       ecx,0x0000ffff
+00D7    C1 F9 08                  sar       ecx,0x00000008
+00DA    01 CB                     add       ebx,ecx
+00DC    01 C3                     add       ebx,eax
+00DE    31 C0                     xor       eax,eax
+00E0    66 A1 01 00 00 00         mov       ax,__9oae3ObjChunk near Chunk+0x1
+00E6    50                        push      eax
+00E7    52                        push      edx
+00E8    68 00 00 00 00            push      offset L$13
+00ED    88 1D 00 00 00 00         mov       char unsigned near CheckSum,bl
+00F3    E8 00 00 00 00            call      printf_
+00F8    83 C4 0C                  add       esp,0x0000000c
+00FB    68 00 00 00 00            push      offset char near String[]
+0100    68 32 00 00 00            push      offset L$14
+0105    E8 00 00 00 00            call      printf_
+010A    8A 1D 00 00 00 00         mov       bl,char unsigned near CheckSum
+0110    83 C4 08                  add       esp,0x00000008
+0113    31 C0                     xor       eax,eax
+0115                          L$3:
+0115    31 D2                     xor       edx,edx
+0117    8A 14 24                  mov       dl,[esp]
+011A    39 D0                     cmp       eax,edx
+011C    7D 0B                     jge       L$4
+011E    8A 90 00 00 00 00         mov       dl,[eax+char near String[]]
+0124    40                        inc       eax
+0125    00 D3                     add       bl,dl
+0127    EB EC                     jmp       L$3
+0129                          L$4:
+0129    BA 01 00 00 00            mov       edx,0x00000001
+012E    8D 44 24 04               lea       eax,[esp+0x4]
+0132    88 1D 00 00 00 00         mov       char unsigned near CheckSum,bl
+0138    E8 00 00 00 00            call      void near Read( void near *, int )
+013D    8A 74 24 04               mov       dh,[esp+0x4]
+0141    8A 1D 00 00 00 00         mov       bl,char unsigned near CheckSum
+0147    00 F3                     add       bl,dh
+0149    31 D2                     xor       edx,edx
+014B    88 DA                     mov       dl,bl
+014D    B9 00 01 00 00            mov       ecx,0x00000100
+0152    89 D0                     mov       eax,edx
+0154    C1 FA 1F                  sar       edx,0x0000001f
+0157    F7 F9                     idiv      ecx
+0159    88 1D 00 00 00 00         mov       char unsigned near CheckSum,bl
+015F    85 D2                     test      edx,edx
+0161    74 0A                     je        L$5
+0163    31 C0                     xor       eax,eax
+0165    8A 44 24 04               mov       al,[esp+0x4]
+0169    85 C0                     test      eax,eax
+016B    75 1A                     jne       L$7
+016D                          L$5:
+016D    68 50 00 00 00            push      offset L$15
+0172                          L$6:
+0172    E8 00 00 00 00            call      printf_
+0177    83 C4 04                  add       esp,0x00000004
+017A    8A 1D 00 00 00 00         mov       bl,char unsigned near CheckSum
+0180    83 C4 08                  add       esp,0x00000008
+0183    5A                        pop       edx
+0184    59                        pop       ecx
+0185    5B                        pop       ebx
+0186    C3                        ret       
+0187                          L$7:
+0187    68 5D 00 00 00            push      offset L$16
+018C    EB E4                     jmp       L$6
+018E    8B C0                     mov       eax,eax
+
+Routine Size: 276 bytes,    Routine Base: _TEXT + 007C
+
+0190                          main_:
+0190    83 F8 02                  cmp       eax,0x00000002
+0193    7C 5C                     jl        L$10
+0195    8B 42 04                  mov       eax,[edx+0x4]
+0198    BA 92 00 00 00            mov       edx,offset L$18
+019D    E8 00 00 00 00            call      fopen_
+01A2    A3 00 00 00 00            mov       __iobuf near * near ObjFile,eax
+01A7    85 C0                     test      eax,eax
+01A9    74 63                     je        L$11
+01AB    31 C0                     xor       eax,eax
+01AD    E8 00 00 00 00            call      void near Seek( int unsigned )
+01B2    80 3D 00 00 00 00 00      cmp       byte ptr char near IsEOF,0x00
+01B9    75 33                     jne       L$9
+01BB                          L$8:
+01BB    68 95 00 00 00            push      offset L$19
+01C0    E8 00 00 00 00            call      printf_
+01C5    83 C4 04                  add       esp,0x00000004
+01C8    BA 03 00 00 00            mov       edx,0x00000003
+01CD    B8 00 00 00 00            mov       eax,offset __9oae3ObjChunk near Chunk
+01D2    E8 00 00 00 00            call      void near Read( void near *, int )
+01D7    A0 00 00 00 00            mov       al,__9oae3ObjChunk near Chunk
+01DC    3C 80                     cmp       al,0x80
+01DE    75 39                     jne       L$12
+01E0    E8 00 00 00 00            call      void near ReadTHeader()
+01E5    80 3D 00 00 00 00 00      cmp       byte ptr char near IsEOF,0x00
+01EC    74 CD                     je        L$8
+01EE                          L$9:
+01EE    31 C0                     xor       eax,eax
+01F0    C3                        ret       
+01F1                          L$10:
+01F1    68 6E 00 00 00            push      offset L$17
+01F6    E8 00 00 00 00            call      printf_
+01FB    83 C4 04                  add       esp,0x00000004
+01FE    B8 1A 00 00 00            mov       eax,offset ___iob+0x1a
+0203    E8 00 00 00 00            call      fflush_
+0208    B8 01 00 00 00            mov       eax,0x00000001
+020D    C3                        ret       
+020E                          L$11:
+020E    E8 00 00 00 00            call      fclose_
+0213    B8 01 00 00 00            mov       eax,0x00000001
+0218    C3                        ret       
+0219                          L$12:
+0219    31 D2                     xor       edx,edx
+021B    66 8B 15 01 00 00 00      mov       dx,__9oae3ObjChunk near Chunk+0x1
+0222    52                        push      edx
+0223    25 FF 00 00 00            and       eax,0x000000ff
+0228    50                        push      eax
+0229    68 97 00 00 00            push      offset L$20
+022E    E8 00 00 00 00            call      printf_
+0233    31 C0                     xor       eax,eax
+0235    8B 15 00 00 00 00         mov       edx,int unsigned near Pointer
+023B    66 A1 01 00 00 00         mov       ax,__9oae3ObjChunk near Chunk+0x1
+0241    83 C4 0C                  add       esp,0x0000000c
+0244    01 D0                     add       eax,edx
+0246    E8 00 00 00 00            call      void near Seek( int unsigned )
+024B    80 3D 00 00 00 00 00      cmp       byte ptr char near IsEOF,0x00
+0252    0F 84 63 FF FF FF         je        L$8
+0258    31 C0                     xor       eax,eax
+025A    C3                        ret       
+
+Routine Size: 203 bytes,    Routine Base: _TEXT + 0190
+
+No disassembly errors
+
+List of external references
+
+SYMBOL
+-------
+__9oae3ObjChunk near Chunk
+			00B3 00C3 00C9 00E2 01CE 01D8 021E 023D 
+___iob			01FF 
+__iobuf near * near ObjFile
+			0007 0018 0046 0054 01A3 
+char near IsEOF		002E 006A 01B4 01E7 024D 
+char near String[]	0097 00AC 00FC 0120 
+char unsigned near CheckSum
+			0084 00EF 010C 0134 0143 015B 017C 
+fclose_			020F 
+fflush_			0204 
+fopen_			019E 
+fread_			0013 
+fseek_			004F 
+int unsigned near Pointer
+			0024 0035 0060 0071 0237 
+printf_			00F4 0106 0173 01C1 01F7 022F 
+void near Read( void near *, int )
+			0090 009F 0139 01D3 
+void near ReadTHeader()	01E1 
+void near Seek( int unsigned )
+			01AE 0247 
+
+Segment: CONST BYTE USE32 000000B3 bytes
+0000                          L$13:
+0000    54 79 70 65 20 3A 25 78 20 4E 61 6D 65 3A 54 72 Type :%x Name:Tr
+0010    61 6E 73 6C 61 74 6F 72 20 48 65 61 64 65 72 20 anslator Header 
+0020    52 65 63 6F 72 64 20 4C 65 6E 67 74 68 3A 25 64 Record Length:%d
+0030    0A 00                                           ..
+0032                          L$14:
+0032    4E 61 6D 65 20 6F 66 20 74 68 65 20 6F 62 6A 65 Name of the obje
+0042    63 74 20 6D 6F 75 64 6C 65 3A 25 73 0A 00       ct moudle:%s..
+0050                          L$15:
+0050    43 68 65 63 6B 53 75 6D 20 4F 4B 0A 00          CheckSum OK..
+005D                          L$16:
+005D    43 68 65 63 6B 53 75 6D 20 57 72 6F 6E 67 21 0A CheckSum Wrong!.
+006D    00                                              .
+006E                          L$17:
+006E    50 61 72 61 6D 65 74 65 72 20 6E 65 65 64 65 64 Parameter needed
+007E    3A 20 4F 62 6A 65 63 74 20 66 69 6C 65 20 6E 61 : Object file na
+008E    6D 65 0A 00                                     me..
+0092                          L$18:
+0092    72 62 00                                        rb.
+0095                          L$19:
+0095    0A 00                                           ..
+0097                          L$20:
+0097    75 6E 6B 6E 6F 77 6E 20 48 65 61 64 65 72 3A 20 unknown Header: 
+00A7    25 78 20 53 69 7A 65 3A 25 64 0A 00             %x Size:%d..
+
+
+
+Segment: _BSS PARA USE32 0000006B bytes
+0000                          char near IsEOF:
+0004                          __iobuf near * near ObjFile:
+0008                          int unsigned near Pointer:
+0010                          char near String[]:
+0060                          short unsigned near Size:
+0062                          char unsigned near CheckSum:
+0068                          __9oae3ObjChunk near Chunk:
+
+BSS Size: 107 bytes
+

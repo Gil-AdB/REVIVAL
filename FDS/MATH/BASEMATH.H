@@ -1,11 +1,11 @@
-long double fabs(long double);
-long double sin(long double);
-long double cos(long double);
-long double sqrt(long double);
-long double acos(long double);
-long double asin(long double);
-long double atan(long double);
-long double fldpi(void);
+int32_t double fabs(int32_t double);
+int32_t double sin(int32_t double);
+int32_t double cos(int32_t double);
+int32_t double sqrt(int32_t double);
+int32_t double acos(int32_t double);
+int32_t double asin(int32_t double);
+int32_t double atan(int32_t double);
+int32_t double fldpi(void);
 
 #pragma aux fabs parm [8087] value [8087] modify exact [8087] = "fabs"
 #pragma aux sin parm [8087] value [8087] modify exact [8087] = "fsin"

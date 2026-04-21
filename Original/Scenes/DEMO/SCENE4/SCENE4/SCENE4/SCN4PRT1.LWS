@@ -1,0 +1,370 @@
+LWSC
+1
+
+FirstFrame 653
+LastFrame 1541
+FrameStep 1
+PreviewFirstFrame 653
+PreviewLastFrame 1542
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject C:\LWAVE\DEMO\SCENE4\SCENE4\SCENE4\surface.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\SCENE4\SCENE4\SCENE4\buldings.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\SCENE4\SCENE4\SCENE4\sky.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\SCENE4\SCENE4\SCENE4\DESERT_C\des_crus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  282.7 562.3 207.3 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\SCENE4\SCENE4\SCENE4\DESERT_C\des_cnn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0.2 -22.90001 -0.6999994 0 0 0 1 1 1
+  0 0 0 0 0
+  0.2 -22.90001 -0.6999994 -81.79997 -40.19999 0 1 1 1
+  652 0 0 0 0
+EndBehavior 1
+LockedChannels 32
+PivotPoint 0.2 -22.90001 -0.6999994
+ParentObject 4
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\body.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  18
+  827.976 9.999987 219.2788 180 0 0 4 4 4
+  0 0 0 0 0
+  827.9496 9.999987 219.2191 180 0 0 4 4 4
+  653 1 0 0 0
+  827.9496 9.999987 99.93199 180 0 0 4 4 4
+  780 0 0 0 0
+  827.9496 9.999987 5.809669 180 0 0 4 4 4
+  937 0 0 0 0
+  814.1498 9.999987 -45.19032 180 0 0 4 4 4
+  1013 0 0 0 0
+  791.3499 9.999987 -83.29031 180 0 0 4 4 4
+  1081 0 0 0 0
+  720.75 9.999987 -160.0903 180 0 0 4 4 4
+  1142 0 0 0 0
+  613.4501 9.999987 -188.0904 -91.69777 0 0 4 4 4
+  1187 0 0 0 0
+  512.2293 6.380854 -191.8252 -89.28757 0.5712661 0 4 4 4
+  1230 0 0 0 0
+  453.5987 7.716378 -191.1257 -89.65157 -22.74649 0 4 4 4
+  1256 0 0 0 0
+  421.3569 18.97544 -190.9293 -89.65428 -25.85887 0 4 4 4
+  1270 0 0 0 0
+  283.9963 81.63216 -190.1682 -89.68279 -28.46771 0 4 4 4
+  1330 0 0 0 0
+  163.4023 142.1198 -189.5025 -89.68413 -29.90237 0 4 4 4
+  1382 0 0 0 0
+  -104.2263 294.1918 -188.0272 -89.68413 -24.49228 0 4 4 4
+  1498 0 0 0 0
+  -126.7974 304.7458 -187.9032 -89.68549 -10.17831 0 4 4 4
+  1508 0 0 0 0
+  -202.2498 304.1001 -187.4903 180 0 0 4 4 4
+  1541 0 0 0 0
+  -205.6926 304.1001 -186.7926 180 0 0 4 4 4
+  1542 0 0 0 0
+  -211.992 304.1001 -187.4903 180 0 0 4 4 4
+  1543 0 0 0 0
+EndBehavior 1
+LockedChannels 2623
+PathAlignment 1
+LookAheadFrames 1
+PivotPoint 0 0.8899999 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\b_l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0 0.5349999 -0.74 0.2 -44.20003 0 1 1 1
+  0 1 0 0 0
+  0 0.5349999 -0.74 8.599998 31.6 0 1 1 1
+  3 1 0 0 0
+  0 0.5349999 -0.74 0.2 -44.20003 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.5349999 -0.74
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\b_l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -0.235 0.2749999 -0.7999999 0 19.49999 0 1 1 1
+  0 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 -8.999999 0 1 1 1
+  3 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 39.94999 0 1 1 1
+  4 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 19.49999 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3112
+PivotPoint -0.235 0.2749999 -0.7999999
+ParentObject 7
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\b_r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0.2149999 0.535 -0.7399999 7.199999 30.2 0 1 1 1
+  0 0 0 0 0
+  0.2149999 0.535 -0.7399999 -4.5 -45.90002 0 1 1 1
+  3 1 0 0 0
+  0.2149999 0.535 -0.7399999 7.199999 30.2 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.2149999 0.535 -0.7399999
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\b_r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0.2300001 0.2800001 -0.8 -0.6999998 -15.3 0 1 1 1
+  0 1 0 0 0
+  0.2300001 0.2800001 -0.8 13.85 14.9 0 1 1 1
+  1 1 0 0 0
+  0.2300001 0.2800001 -0.8 6 14.5 0 1 1 1
+  3 1 0 0 0
+  0.2300001 0.2800001 -0.8 -0.6999998 -15.3 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.2300001 0.2800001 -0.8
+ParentObject 9
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\f_l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  -0.225 0.575 0.4399999 -1.4 -21.6 0 1 1 1
+  0 1 0 0 0
+  -0.225 0.575 0.4399999 10.2 34.6 0 1 1 1
+  3 1 0 0 0
+  -0.225 0.575 0.4399999 -1.4 -21.6 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint -0.225 0.575 0.4399999
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\f_l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -0.215 0.2749999 0.45 1.2 20.9 0 1 1 1
+  0 1 0 0 0
+  -0.215 0.2749999 0.45 0.5000002 4.900001 0 1 1 1
+  3 1 0 0 0
+  -0.215 0.2749999 0.45 17.55 47.79999 0 1 1 1
+  4 1 0 0 0
+  -0.215 0.2749999 0.45 1.2 20.9 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint -0.215 0.2749999 0.45
+ParentObject 11
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\f_r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0.205 0.5999998 0.44 15.8 34.6 0 1 1 1
+  0 1 0 0 0
+  0.205 0.5999998 0.44 6.500001 -28.60001 0 1 1 1
+  3 1 0 0 0
+  0.205 0.5999998 0.44 15.8 34.6 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.205 0.5999998 0.44
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\COW\f_r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0.24 0.285 0.4499999 0.2 0 0 1 1 1
+  0 1 0 0 0
+  0.24 0.285 0.4499999 0.2 40.65001 0 1 1 1
+  1 1 0 0 0
+  0.24 0.285 0.4499999 0.2 37.50001 0 1 1 1
+  3 1 0 0 0
+  0.24 0.285 0.4499999 0.2 0 0 1 1 1
+  6 1 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0.24 0.285 0.4499999
+ParentObject 13
+ShadowOptions 7
+
+AddNullObject target
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  109.5001 137.9999 82.40005 0 0 0 1 1 1
+  0 0 0 0 0
+  133.2001 140.2998 92.40005 0 0 0 1 1 1
+  652 1 0 0 0
+  5.00232e-005 1.199888 -0.09996041 0 0 0 1 1 1
+  653 1 0 0 0
+EndBehavior 1
+ParentObject 6
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  2
+  489.5 658.3001 -357.8999 -90.59999 6.1 0 1 1 1
+  0 0 0 0 0
+  489.5 683.8 -357.8999 -90.59999 6.1 0 1 1 1
+  2 0 0 0 0
+EndBehavior 1
+TargetObject 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  13
+  -373.4258 419.1 -120.7063 180 0 0 1 1 1
+  0 0 0 0 0
+  47.80096 419.1 157.0025 180 0 0 1 1 1
+  236 0 0 0 0
+  186.0719 553.8999 366.869 180 0 0 1 1 1
+  366 0 0 0 0
+  211.5721 750.5795 375.1391 180 0 0 1 1 1
+  444 0 0 0 0
+  393.7538 731.1 318.1021 180 0 0 1 1 1
+  522 0 0 0 0
+  384.9388 731.1 104.6014 180 0 0 1 1 1
+  652 0 0 0 0
+  649.1843 161.0001 -7.148951 180 0 0 1 1 1
+  653 0 0 0 0
+  812.3497 251.2001 144.6025 180 0 0 1 1 1
+  834 0 0 0 0
+  885.975 251.2001 -13.46028 180 0 0 1 1 1
+  1140 0 0 0 0
+  765.4902 251.2001 -218.2913 180 0 0 1 1 1
+  1255 0 0 0 0
+  492.6762 251.2001 -337.1706 180 0 0 1 1 1
+  1470 0 0 0 0
+  84.16969 381.6002 -114.3817 180 0 0 1 1 1
+  1541 1 0 0 0
+  -315.3852 322.1002 -174.0189 180 0 0 1 1 1
+  1542 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+TargetObject 15
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 1
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+DataOverlayLabel  
+SaveAnimationName walktest.avi
+AnimationType 5
+EndPlugin
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\inv\inv_d
+RGBImageFormat 7
+
+ViewMode 5
+ViewAimpoint 828.100342 11.239539 78.886650
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 0.526750
+GridNumber 0
+GridSize 20.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

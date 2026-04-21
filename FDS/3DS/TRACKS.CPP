@@ -18,7 +18,7 @@ void ReadTrackHeader(Word *Keys,Word *Flags)
 
 void ReadSplineFlags(float *OutFlags)
 {
-  long I,J;
+  int32_t I,J;
   float Temp;
   Word SplineFlags;
 
@@ -203,7 +203,6 @@ void ReadStatusTrack(unsigned int EndPos)
   Word TrackFlag[2];
   Word i;
   Word Frame;
-  float SplineFlags[5];
   unsigned char Status;
   ObjectStatus *OS;
   TriMesh *T;
@@ -342,6 +341,6 @@ void ReadFrames(unsigned int EndPos)
   DWord SF,EF;
   Read(&SF,4);
   Read(&EF,4);
-  Host->StartFrame=SF;
-  Host->EndFrame=EF;
+  Host->StartFrame=float(SF);
+  Host->EndFrame= float(EF);
 }

@@ -3,11 +3,14 @@
 
 // basic ANSI-C includes.
 #include <stdio.h>
-#include <conio.h>
+//#include <conio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
+
+#define RAND_15() (rand() / (((unsigned)RAND_MAX+1) / 32768))
+#define RAND_15_MAX 0x7fff
 
 // Enivronmental IDs (Not used for now,only works for dos32/watcom)
 #define _O_DOS32 //DOS PROTECTED MODE RUNTIME
@@ -18,6 +21,13 @@
 //#define WIN32 //Compiles under Visual C 6.0
 
 #define MAX_GSTRING 128
+
+#if defined(__APPLE__) || defined(EMSCRIPTEN_MACOS)
+#define _strdup strdup
+//#define _aligned_malloc aligned_alloc
+#define _aligned_malloc(a,b) malloc(a)
+#define _aligned_free free
+#endif
 
 // Unit IDs
 #define _KERNEL_ID          0
@@ -121,6 +131,9 @@ enum SceneFlags
 #define Mat_Phong        0x0008
 #define Mat_TwoSided     0x0010
 #define Mat_Transparent  0x0020
+#define Mat_Additive	 0x0040
+#define Mat_SrcAlpha	 0x0080
+#define Mat_SkipZ		 0x0100
 
 #define DEFAULT_BLOCKSIZEX 2
 #define DEFAULT_BLOCKSIZEY 2
@@ -150,7 +163,7 @@ enum TrimeshFlags
 
 	// This flag indicates the trimesh has a fixed position throughout scene runtime.
 	// It is set by the scene loader. Manual removal of this flag should be made prior to
-	// scene Preprocess routine. 
+	// scene Preprocess routine.
 	Tri_Stationary		= 1 << 14,
 };
 
@@ -185,6 +198,7 @@ enum SortPriority
 #define Face_TwoSided    0x0008
 #define Face_Transparent 0x0010
 #define Face_PointZTest  0x0020
+#define Face_Reflective  0x0040
 
 // Camera Flags.
 #define Cam_Euler        0x0001
@@ -192,7 +206,7 @@ enum SortPriority
 #define Particle_Active  0x0001
 
 // Key Scancodes.
-#define ScESC 1
+#define ScESC 41 // an oracle told me it's 41
 #define ScF1  59
 #define ScF2  60
 #define ScF3  61
@@ -298,8 +312,8 @@ enum SortPriority
 
 /*
 	FDS version 0.85 (last change: Silvatar, 05.07.02)
-	
-	v0.9: 
+
+	v0.9:
 	- mappers with optimized MMX/SSE assembly; optimized software T&L.
 	- upgraded class scene representation, operative full scene convertion
 	- modular software renderer
@@ -308,7 +322,7 @@ enum SortPriority
 	- 3dsmax exporter plugin
 	- full code cleanup
 */
-#define FDS_Version "0.85" 
+#define FDS_Version "0.85"
 
 #define Tex_Default_Size 256
 
@@ -328,13 +342,13 @@ enum OmniFlags
 	// 1<<0 used by HTrack_Visible
 
 	// if this flag is clear, the omni will be ignored by the std. rendering pipeline
-	Omni_Active		= 1<<1, 
+	Omni_Active		= 1<<1,
 
 	// omnilight will be rendered as a simple lens flare
-	Omni_Flare		= 1<<2, 
+	Omni_Flare		= 1<<2,
 
 	// depth rejection is based only on central point
-	Omni_PointFlare	= 1<<3, 
+	Omni_PointFlare	= 1<<3,
 
 	// If this flag is set, the omnilight is used during Radiosity-based precalculations.
 	// uh-huh
@@ -342,7 +356,7 @@ enum OmniFlags
 
 	// This flag indicates the light source has a fixed position throughout scene runtime.
 	// It is set by the scene loader. Manual removal of this flag should be made prior to
-	// scene Preprocess routine. 
+	// scene Preprocess routine.
 	Omni_Stationary = 1<<5,
 
 	Omni_Rand = 1 << 6,
@@ -361,6 +375,5 @@ enum OmniFlags
 #pragma warning(disable : 4103)
 #pragma warning(disable : 4731)
 #endif
-
 
 #endif //FDS_DEFS_H_INCLUDED

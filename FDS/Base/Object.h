@@ -10,27 +10,29 @@
 // [16 Bytes per Status Key]
 struct ObjectStatus
 {
-    float          Frame;
-    DWord          Stat;
-    ObjectStatus * Next;
-    ObjectStatus * Prev;
+    float          Frame	= 0.0f;
+    DWord          Stat		= 0;
+    ObjectStatus * Next		= nullptr;
+    ObjectStatus * Prev		= nullptr;
 };
 
+struct Material;
 
 // [36 Bytes]
 struct  Object
 {
-	void           * Data;
-	DWord            Type;
-	DWord            Number;
-	Vector         * Pos;
-	Matrix         * Rot;
+	void           * Data		= nullptr;
+	DWord            Type		= 0;
+	DWord            Number		= 0;
+	Vector         * Pos		= nullptr;
+	Matrix         * Rot		= nullptr;
 	Vector           Pivot;
-	Object		   * Next;
-	Object		   * Prev;
-	Object		   * Parent;
-	signed short	 ParentID;
-	char           * Name;
+	Object		   * Next		= nullptr;
+	Object		   * Prev		= nullptr;
+	Object		   * Parent		= nullptr;
+	signed short	 ParentID	= 0;
+	char           * Name		= nullptr;
+	Material	   * Reflection = nullptr;
 };
 
 #pragma pack(pop)

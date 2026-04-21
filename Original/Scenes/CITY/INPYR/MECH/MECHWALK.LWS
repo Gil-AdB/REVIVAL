@@ -1,0 +1,214 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 120
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 40
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\mechs\M1\hull.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0.4849999 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+PivotPoint 0 0.4299998 -0.09000007
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\M1\hull2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  8
+  0 3.09 -1.81 0 0 0 1 1 1
+  0 0 0 0 0
+  0 3.823081 -0.7863703 0 0 0 1 1 1
+  5 0 0 0 0
+  0 3.8685 0.1165 0 0 0 1 1 1
+  10 0 0 0 0
+  0 3.1585 1.1465 0 0 0 1 1 1
+  20 0 0 0 0
+  0 3.708499 2.2665 0 0 0 1 1 1
+  25 0 0 0 0
+  0 3.838499 3.336499 0 0 0 1 1 1
+  30 0 0 0 0
+  0 3.493422 3.80165 0 0 0 1 1 1
+  35 0 0 0 0
+  0 3.1085 4.256501 0 0 0 1 1 1
+  40 0 0 0 0
+EndBehavior 1
+LockedChannels 45
+PivotPoint 0 0.05 -0.49
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\M1\l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  0 0.05 -0.49 0 29.50001 0 1 1 1
+  0 0 0 0 0
+  0 0.05 -0.49 0 7.000013 0 1 1 1
+  10 0 0 0 0
+  0 0.05 -0.49 0 -78.79996 0 1 1 1
+  20 0 0 0 0
+  0 0.05 -0.49 0 -5.49997 0 1 1 1
+  30 0 0 0 0
+  0 0.05 -0.49 0 29.50001 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.05 -0.49
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\MECH1\l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  0 -1.72 -1.31 0 -29.8 0 1 1 1
+  0 0 0 0 0
+  0 -1.72 -1.31 0 -20.3 0 1 1 1
+  10 0 0 0 0
+  0 -1.72 -1.31 0 -7.89376 0 1 1 1
+  15 0 0 0 0
+  0 -1.72 -1.31 0 78.69999 0 1 1 1
+  20 0 0 0 0
+  0 -1.72 -1.31 0 5.39999 0 1 1 1
+  30 0 0 0 0
+  0 -1.72 -1.31 0 -29.8 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 -1.72 -1.31
+ParentObject 3
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\MECH1\r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  0 0.05 -0.4999999 0 -80.19999 0 1 1 1
+  0 1 0 0 0
+  0 0.05 -0.4999999 0 -8.359987 0 1 1 1
+  10 1 0 0 0
+  0 0.05 -0.4999999 0 29.24003 0 1 1 1
+  20 1 0 0 0
+  0 0.05 -0.4999999 0 -8.959969 0 1 1 1
+  30 0 0 0 0
+  0 0.05 -0.4999999 0 -52.75998 0 1 1 1
+  35 0 0 0 0
+  0 0.05 -0.4999999 0 -80.19999 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.05 -0.4999999
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\MECH1\r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  0 -1.72 -1.31 0 80.20004 0 1 1 1
+  0 0 0 0 0
+  0 -1.72 -1.31 0 8.925056 0 1 1 1
+  10 1 0 0 0
+  0 -1.72 -1.31 0 -28.67495 0 1 1 1
+  20 1 0 0 0
+  0 -1.72 -1.31 0 -34.47496 0 1 1 1
+  30 0 0 0 0
+  0 -1.72 -1.31 0 80.20004 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 -1.72 -1.31
+ParentObject 5
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.235 8.11 11.005 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  2
+  -4.158565 4.44 10.84894 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.768958 4.054999 8.885585 0 0 0 1 1 1
+  40 0 0 0 0
+EndBehavior 1
+TargetObject 2
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+GlowEffect 1
+GlowIntensity 1.000000
+GlowRadius 5.000000
+
+RenderMode 2
+RayTraceEffects 2
+RayRecursionLimit 16
+DataOverlayLabel  
+SaveAnimationName LWP\mech\mech.avi
+AnimationType 5
+EndPlugin
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\mech\m
+RGBImageFormat 7
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 0.000000 3.090000 -1.810000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 5.999989
+GridNumber 100
+GridSize 1.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 1
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

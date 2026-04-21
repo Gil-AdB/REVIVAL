@@ -35,4 +35,4 @@
 #include "IX.h"
 
 mword zPass, zReject;
-__int64 precisePixelCount;
+int64_t precisePixelCount;

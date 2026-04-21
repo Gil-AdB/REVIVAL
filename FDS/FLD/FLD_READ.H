@@ -50,7 +50,7 @@ typedef struct
 	float					 TFP1;
 } FldMat;
 
-typedef struct
+typedef struct _FldKeyFrame_
 {
   Vector        Position;
   Vector        Rotation;
@@ -88,9 +88,9 @@ typedef struct
 typedef struct
 {
   FldEnvKey    *Key;
-  unsigned long Keys;
-  unsigned long Channels;
-  unsigned long EndBehavior;
+  uint32_t Keys;
+  uint32_t Channels;
+  uint32_t EndBehavior;
 } FldEnv;
 
 typedef struct FldObj
@@ -114,13 +114,13 @@ typedef struct FldObj
 typedef struct FldLgt
 {
   char          *Name;
-  unsigned long  Flags;
-  unsigned long  Keys;
+  uint32_t  Flags;
+  uint32_t  Keys;
   FldKeyFrame   *KF;
   FldColor       Color;
   FldEnv        *Intensity;
-  unsigned long  Parent;
-	unsigned long  TargetObject;
+  uint32_t  Parent;
+	uint32_t  TargetObject;
 	FldEnv        *Falloff;
 	FldEnv        *ConeAngle;
 	FldEnv        *Range;
@@ -129,11 +129,11 @@ typedef struct FldLgt
 
 typedef struct
 {
-  unsigned long  Flags;
-  unsigned long  Keys;
+  uint32_t  Flags;
+  uint32_t  Keys;
   FldKeyFrame   *KF;
-  unsigned long  Parent;
-  unsigned long  TargetObject;
+  uint32_t  Parent;
+  uint32_t  TargetObject;
   FldEnv        *zoomFactor;
 } FldCamera;
 
@@ -142,9 +142,9 @@ typedef struct
   FldObject    *Object;
   FldLight     *Light;
   FldCamera    *Camera;
-  unsigned long FirstFrame;
-  unsigned long LastFrame;
-  unsigned long FrameStep;
+  uint32_t FirstFrame;
+  uint32_t LastFrame;
+  uint32_t FrameStep;
   float         FramesPerSecond;
   FldEnv       *AmbientColor;
 	FldEnv       *AmbientIntensity;

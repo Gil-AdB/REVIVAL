@@ -1,4 +1,4 @@
-#include "REV.H"
+#include "Rev.h"
 #include <Base/Object.h>
 #include <Base/TriMesh.h>
 #include <Base/Scene.h>
@@ -8,7 +8,7 @@
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
 
-static long CHPartTime = 25.0f*100;
+static int32_t CHPartTime = 25.0f*100;
 
 static Object *RflObj;
 static Vector RflSurfNorm(0, 1, 0);
@@ -30,7 +30,7 @@ static void Reflective_Mapper_Setup()
 	Vector U, V;
 
 	Object *O;
-	long IID = 0;
+	int32_t IID = 0;
 	for (O = ChaseSc->ObjectHead; O; O = O->Next)
 	{
 		if (O->Type != Obj_TriMesh) continue;
@@ -72,8 +72,8 @@ static void Reflected_Transform(Scene *Sc)
 	Face *F, *FEnd;
 	float PX = FOVX, PY = FOVY, Temp;
 	float dz;
-	long *pdz = (long *)(&dz);
-	long I;
+	int32_t *pdz = (int32_t *)(&dz);
+	int32_t I;
 	Face **Ins = FList;
 	float *f = (float *)(&M);
 	float *fv;
@@ -266,7 +266,7 @@ static void Reflected_Transform(Scene *Sc)
 				if (Vtx->PX < 0) Vtx->Flags |= Vtx_VisLeft;
 				if (Vtx->PX >= XRes) Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0) Vtx->Flags |= Vtx_VisUp;
-				if (Vtx->PY >= YRes_1) Vtx->Flags |= Vtx_VisDown;
+				if (Vtx->PY >= YRes) Vtx->Flags |= Vtx_VisDown;
 				if (Vtx->TPos.z > Sc->FZP) Vtx->Flags |= Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
@@ -282,7 +282,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vtx->TPos.z = M34[2][0] * Vtx->Pos.x + M34[2][1] * Vtx->Pos.y + M34[2][2] * Vtx->Pos.z + M34[2][3];
 
 				Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				if (Vtx->TPos.z > Sc->NZP)
 				{
 					Vtx->RZ = 1.0 / Vtx->TPos.z;
@@ -295,7 +295,7 @@ static void Reflected_Transform(Scene *Sc)
 					if (Vtx->PX < 0) Vtx->Flags |= Vtx_VisLeft;
 					if (Vtx->PX >= XRes) Vtx->Flags |= Vtx_VisRight;
 					if (Vtx->PY < 0) Vtx->Flags |= Vtx_VisUp;
-					if (Vtx->PY >= YRes_1) Vtx->Flags |= Vtx_VisDown;
+					if (Vtx->PY >= YRes) Vtx->Flags |= Vtx_VisDown;
 					if (Vtx->TPos.z > Sc->FZP) Vtx->Flags |= Vtx_VisFar;
 				}
 				else Vtx->Flags |= Vtx_VisNear;
@@ -362,7 +362,7 @@ static void Reflected_Transform(Scene *Sc)
 				if (Vtx->PX < 0) Vtx->Flags = Vtx_VisLeft; else Vtx->Flags = 0;
 				if (Vtx->PX >= XRes) Vtx->Flags += Vtx_VisRight;
 				if (Vtx->PY < 0) Vtx->Flags += Vtx_VisUp;
-				if (Vtx->PY >= YRes_1) Vtx->Flags += Vtx_VisDown;
+				if (Vtx->PY >= YRes) Vtx->Flags += Vtx_VisDown;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			goto OUT;
@@ -374,7 +374,7 @@ static void Reflected_Transform(Scene *Sc)
 				Vector_Add(&U, &V, &Vtx->TPos);
 
 				Vtx->Flags = 0;
-				//      if (*(long *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+127.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->EV=128.0+127.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
@@ -424,7 +424,9 @@ static void Reflected_Transform(Scene *Sc)
 	for (O = Sc->OmniHead; O; O = O->Next)
 	{
 		Vtx = &O->V;
-		Vector_Sub(&O->IPos, &View->ISource, &V);
+		Vector ReflectedPos = O->IPos;
+		ReflectedPos.y = -ReflectedPos.y;
+		Vector_Sub(&ReflectedPos, &View->ISource, &V);
 		MatrixXVector(View->Mat, &V, &Vtx->TPos);
 		if (Vtx->TPos.z > Sc->NZP&&Vtx->TPos.z < Sc->FZP)
 		{
@@ -436,7 +438,7 @@ static void Reflected_Transform(Scene *Sc)
 			//dz *=-16384;
 			//dz +=0x7FFFFFFF;
 			//RoundToInt(&O->Face.SortZ.DW,dz);
-			// *Ins++ = &O->F; // no insertion : flares are not reflected for now
+			*Ins++ = &O->F; // no insertion : flares are not reflected for now
 
 			O->F.FlareSize = O->ISize;
 #ifdef FRONT_TO_BACK_SORTING
@@ -487,8 +489,8 @@ static void SceneCorrections()
 
 	Scene *Sc = ChaseSc;
 	Omni *O;
-	long index;
-	float redRangeMult = 1000.0;
+	int32_t index;
+	float redRangeMult = 100000.0;
 	for (O = Sc->OmniHead, index = 0; O; O = O->Next)
 	{
 		//if (index == NumOmnis) break;
@@ -500,7 +502,11 @@ static void SceneCorrections()
 //		if (OmniSizeMult[index] == 0)
 //			O->Flags &=~(Omni_Flare | Omni_PointFlare);
 		Spline_Scale(&O->Size, OmniSizeMult[index]);
-		O->ISize *= 5.0;
+		O->IRange = 1000.0;
+		O->rRange = 1000.0;
+		//O->ISize *= 50.0;
+		//O->IRange *= 50.0;
+		O->FallOff = 5000.0;
 
 		// adjust range
 //		Spline_Scale(&O->Range, OmniRangeMult[index]);
@@ -508,7 +514,7 @@ static void SceneCorrections()
 		Spline_Scale(&O->Range, redRangeMult);
 		//Spline_Scale(&O->R, redRangeMult);
 
-		O->Flags |= Omni_Rand;
+		//O->Flags |= Omni_Rand;
 		index++;
 	}
 }
@@ -523,7 +529,7 @@ static void Reflective_Surface_Setup()
 	Vector U, V;
 
 	Object *O;
-	long IID = 0;
+	int32_t IID = 0;
 	for (O = ChaseSc->ObjectHead; O; O = O->Next)
 	{
 		if (O->Type != Obj_TriMesh) continue;
@@ -695,15 +701,15 @@ void Initialize_Chase()
 {
 	ChaseSc = (Scene *)getAlignedBlock(sizeof(Scene), 16); 
 	memset(ChaseSc,0,sizeof(Scene));
-	LoadFLD(ChaseSc,"Scenes\\CHASE.FLD");
+	LoadFLD(ChaseSc,"SCENES/CHASE.FLD");
 	CHPartTime = 25.0*(ChaseSc->EndFrame-ChaseSc->StartFrame)/25.0f;
 //	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
 	ChaseSc->FZP = 50000.0f;
 	ChaseSc->NZP = 2.0f;
 	ChaseSc->Flags |= Scn_Fogged | Scn_ZBuffer;
 
-	ChaseSc->Ambient.R = 64 * 2;
-	ChaseSc->Ambient.G = 64 * 2;
+	ChaseSc->Ambient.R = 4 * 2;
+	ChaseSc->Ambient.G = 4 * 2;
 	ChaseSc->Ambient.B = 64 * 2;
 
 	// also make the appropriate Layer 2 fillers.
@@ -726,7 +732,7 @@ void Initialize_Chase()
 
 void Run_Chase()
 {
-	long Polys = 0;
+	int32_t Polys = 0;
 	TriMesh *T;
 
 	SetCurrentScene(ChaseSc);

@@ -1,0 +1,589 @@
+LWSC
+1
+
+FirstFrame 0
+LastFrame 1300
+FrameStep 1
+PreviewFirstFrame 420
+PreviewLastFrame 1300
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject C:\LWAVE\CITY\S1FNT\moutine.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\fount.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 48.05 0 0 0 0 1.958 1.958 1.958
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 24.05 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -74.70002 46.04999 -106.3 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.09999 0 0 0 0 1 1 1
+  0 0 0 0 0
+  0 30.09999 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  48.60001 45.75002 -116.3 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3013
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  114.9 46.04998 -0.2000192 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  61.14999 45.59999 86.8 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -35.80003 45.65001 112.5 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\pilon.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -112.5 45.95 22.8 0 0 0 2 2 2
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 22.50001 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.15 0 6 0 0 1 1 1
+  0 0 0 0 0
+  0 30.15 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.15 0 6 0 0 1 1 1
+  0 0 0 0 0
+  0 30.15 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 7
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.15 0 6 0 0 1 1 1
+  0 0 0 0 0
+  0 30.15 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 8
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.15 0 6 0 0 1 1 1
+  0 0 0 0 0
+  0 30.15 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 9
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\inbal.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30.15 0 6 0 0 1 1 1
+  0 0 0 0 0
+  0 30.15 0 360 0 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 2613
+ParentObject 10
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 7
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 8
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 9
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\S1FNT\dio.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 30 0 6 6 0 1 1 1
+  0 0 0 0 0
+  0 30 0 360 360 0 1 1 1
+  60 0 0 0 0
+EndBehavior 2
+LockedChannels 37
+ParentObject 10
+ShadowOptions 7
+
+AddNullObject particle_emmiter
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 -2.6 0 0 0 0 1 1 1
+  0 0 0 0 0
+  0 -2.6 0 0 0 0 1 1 1
+  600 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+AddNullObject CameraTarget
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0 3.950018 -0.25 0 0 0 1 1 1
+  0 0 0 0 0
+  0 3.950018 -0.25 0 0 0 1 1 1
+  355 1 0 0 0
+  0 3.950018 -0.25 0 0 0 1 1 1
+  659 1 0 0 0
+  0 349.8001 -0.25 0 0 0 1 1 1
+  1239 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 -8.649981 0
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+EnableLensFlare 0
+EnableShadowMaps 0
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -17 673.3983 247.0496 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+AddLight
+LightName fountian flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 102.4 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 255 255 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.100000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -74.705 130.71 -106.3 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 5 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  48.595 130.41 -116.3 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 132 9 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  114.895 130.01 -0.150007 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 13 255 13
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  61.09499 132.86 86.90002 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 252 67 20
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -35.805 132.21 112.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 15 73 249
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName coz_flares
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -112.505 132.66 22.8 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+LightColor 255 255 11
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 70.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 555
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  14
+  -8.060263 79.65001 -90.96908 0 0 0 1 1 1
+  0 0 0 0 0
+  44.82036 74.39999 -67.38702 0 0 0 1 1 1
+  67 1 0 0 0
+  62.11704 73.9 -84.68458 0 0 0 1 1 1
+  140 0 0 0 0
+  79.41703 96.6 34.51542 0 0 0 1 1 1
+  215 0 0 0 0
+  11.86702 137.05 96.41542 0 0 0 1 1 1
+  322 0 0 0 0
+  -30.00565 73.21285 142.2823 0 0 0 1 1 1
+  355 0 0 0 0
+  -225.2986 180.5999 103.9512 0 0 0 1 1 1
+  383 0 0 0 0
+  -158.7051 282.2499 -314.1071 0 0 0 1 1 1
+  477 0 0 0 0
+  224.3939 319.0499 -190.3075 0 0 0 1 1 1
+  624 0 0 0 0
+  -346.4005 273.7999 141.1656 0 0 0 1 1 1
+  725 0 0 0 0
+  -328.7413 248.8999 137.9383 0 0 0 1 1 1
+  771 0 0 0 0
+  -303.5541 248.8999 -83.2207 0 0 0 1 1 1
+  900 0 0 0 0
+  -268.9473 256.1499 -205.9861 0 0 0 1 1 1
+  998 0 0 0 0
+  3.737197 256.1499 -98.38238 0 0 0 1 1 1
+  1239 0 0 0 0
+EndBehavior 1
+TargetObject 22
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+SaveAnimationName 2.avi
+AnimationType 6
+EndPlugin
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint -169.030228 173.799896 117.678093
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 0.790125
+GridNumber 0
+GridSize 10.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 1
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

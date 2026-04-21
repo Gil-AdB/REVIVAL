@@ -2,7 +2,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 
-static long M_x,M_y;
+static int32_t M_x,M_y;
 
 void InitMouse()
 {
@@ -59,7 +59,7 @@ void UpdateMousePos()
 #ifdef _C_WATCOM
 	union REGS r;
 	
-	long x,y;
+	int32_t x,y;
 	r.w.ax = 0x000B;
 	int386(0x33,&r,&r);
 	x = (short)r.w.cx;

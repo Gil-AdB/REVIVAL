@@ -1,0 +1,10 @@
+enum Model_Classes {
+  2D_BASIC,
+  3D_BASIC3,
+  CONICS,
+  TRANS_SURF,
+  REVOL_SURF,
+  HELIX_SURF,
+  ROTOID_SURF,
+  SPIRAL_SURF
+}

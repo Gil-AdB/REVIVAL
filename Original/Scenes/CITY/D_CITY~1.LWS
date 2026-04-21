@@ -1,0 +1,3858 @@
+LWSC
+1
+
+FirstFrame 171
+LastFrame 171
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 4400
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1405 0 -2945 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -865 0 -2570 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1595 0 -2215 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1305 0 -3720 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -500 0 -3815 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  930 0 -1175 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1165 0 -1170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -595 0 -1830 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  715 0 -3870 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  1895 0 -3665 0 0 0 1 1 1
+  0 0 0 0 0
+  1894.989 0 -3664.5 0 0 0 1 1 1
+  737 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  860 0 -4740 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2110 0 -2670 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1645 0 -1500 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2160 0 -1815 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2030 0 -4530 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2625 0 -3730 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2700 0 -2615 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1980 0 -3780 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1815 0 -2605 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -465 0 -645 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  115 0 -3960 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1410 0 -1875 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1200 0 -3985 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  815 0 -2095 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  940 0 -495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1165 0 -515 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2435 0 -1345 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2562.887 0 -3466.739 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1885 0 -525 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -85 0 -4645 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1115 0 -4715 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2405 0 -1035 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1020 0 1335 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1205 0 1295 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1015 0 2630 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1380 0 2650 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1090 0 4165 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1740 0 4650 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1210 0 6810 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2955 0 3330 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1710 0 7350 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2535 0 5355 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3115 0 5960 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1330 0 3655 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1295 0 5390 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1875 0 5675 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  990 0 6170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -420 0 5170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1910 0 3470 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2710 0 6975 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2230 0 6560 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1080 0 7765 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2000 0 1945 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2865 0 4705 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3075 0 3385 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2680 0 2085 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1795 0 8550 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1015 0 8715 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -380 0 9855 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  785 0 10170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2995 0 8070 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2110 0 10530 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2450 0 795 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2555 0 7920 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3205 0 1265 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  4225 0 8430 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2255 0 85 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3730 0 6435 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\b5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -2310 0 9390 0 0 0 1 1 1
+  0 0 0 0 0
+  -2305.029 0 9390.535 0 0 0 1 1 1
+  807 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\water.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 20 0 0 0 0 20 20 20
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2995 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1584
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2845 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2695 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2545 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2395 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2245 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2095 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1945 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1795 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1645 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1495 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1345 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1195 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1045 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -895 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -745 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -595 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -445 60 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 -15 -3444.95 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 7
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1744 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1594 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1444 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1294 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1144 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -846.7999 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -699.2 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -551.8 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -403.9001 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -255.4001 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -995.8997 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -106.8 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+  -107.0376 126 -1451 90 0 0 1 1 1
+  745 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  41.40003 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  190.15 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  338.7 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  487.75 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  637.7001 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  787.6501 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  937.7001 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1087.7 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1237.75 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -3051.449 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2900.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2751.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2600.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2449.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2303.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2154.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -2006.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1860.449 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1710.449 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1560.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1411.449 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1264.949 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -1116.449 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -968.4495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -817.9495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -668.9495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -520.4495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -374.4495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -226.4495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 60 -80.44946 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1587
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  101.9 -15.05 463 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  498.7999 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  648.2999 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  796.7999 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  945.2999 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1093.3 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1242.8 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1391.8 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1541.3 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1690.8 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  1840.8 60 463.05 90 0 0 1 1 1
+  0 0 0 0 0
+  1840.8 60 463.05 90 0 0 1 1 1
+  1200 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1892.5 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2040.107 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2188.946 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2339.596 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2488 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2636 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2782 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2930 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3078.5 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3226 126 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 1590
+PivotPoint 0 0 -75
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  -2539.4 126.1 -1451 90 0 0 1 1 1
+  0 0 0 0 0
+  1366.9 126.1 -1451 90 0 0 1 1 1
+  300 0 0 0 0
+  -2539.4 126.1 -1451 90 0 0 1 1 1
+  600 0 0 0 0
+EndBehavior 2
+LockedChannels 54
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -55.2 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 153
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -61.54999 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 154
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -61.65001 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 155
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -61.60004 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 156
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -61.59998 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 157
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -0.05000019 -0.1000244 -55.15031 180 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+ParentObject 158
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  12
+  -2475.4 60.09998 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+  -201.3999 60.09998 -3445 90 0 0 1 1 1
+  290 1 0 0 0
+  -76.68108 60.09998 -3413.142 59.95634 0 0 1 1 1
+  308 0 0 0 0
+  2.771526 60.09998 -3356.977 52.69539 0 0 1 1 1
+  320 0 0 0 0
+  35.16518 60.09998 -3321.06 33.69647 0 0 1 1 1
+  326 0 0 0 0
+  79.57804 60.09998 -3243.411 18.42367 0 0 1 1 1
+  340 0 0 0 0
+  101.6001 60.09998 -3140.5 0.3987468 0 0 1 1 1
+  354 0 0 0 0
+  101.6001 60.09998 110 1.245333 0 0 1 1 1
+  803 1 0 0 0
+  144.1369 60.09998 303.37 29.6665 0 0 1 1 1
+  830 0 0 0 0
+  283.6208 60.09998 432.8914 63.21637 0 0 1 1 1
+  854 0 0 0 0
+  454.6001 60.09998 463 90 0 0 1 1 1
+  875 0 0 0 0
+  1954.6 60.09998 463 90 0 0 1 1 1
+  1100 1 0 0 0
+EndBehavior 1
+LockedChannels 50
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  16
+  -2530.65 60.09998 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+  -201.3999 60.09998 -3445 90 0 0 1 1 1
+  297 1 0 0 0
+  -96.70086 60.09998 -3421.573 67.83007 0 0 1 1 1
+  312 0 0 0 0
+  -76.68108 60.09998 -3413.142 59.95634 0 0 1 1 1
+  315 0 0 0 0
+  2.771526 60.09998 -3356.977 52.69539 0 0 1 1 1
+  327 0 0 0 0
+  35.16518 60.09998 -3321.06 33.69647 0 0 1 1 1
+  333 0 0 0 0
+  79.57804 60.09998 -3243.411 18.42367 0 0 1 1 1
+  347 0 0 0 0
+  101.6001 60.09998 -3140.5 0.3987468 0 0 1 1 1
+  361 0 0 0 0
+  101.6001 60.09998 110 1.245333 0 0 1 1 1
+  810 1 0 0 0
+  144.1369 60.09998 303.37 29.6665 0 0 1 1 1
+  837 0 0 0 0
+  283.6208 60.09998 432.8914 63.21637 0 0 1 1 1
+  861 0 0 0 0
+  454.6001 60.09998 463 90 0 0 1 1 1
+  882 0 0 0 0
+  1907.933 60.09998 463 90 0 0 1 1 1
+  1100 1 0 0 0
+  1954.6 60.09998 463 90 0 0 1 1 1
+  1107 1 0 0 0
+  1899.429 60.09998 463 90 0 0 1 1 1
+  1115 0 0 0 0
+  1899.35 60.09998 463 90 0 0 1 1 1
+  1200 0 0 0 0
+EndBehavior 1
+LockedChannels 54
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  14
+  -2592.15 60.09998 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+  -201.3999 60.09998 -3445 90 0 0 1 1 1
+  305 1 0 0 0
+  -74.18108 60.09998 -3410.392 59.95634 0 0 1 1 1
+  323 0 0 0 0
+  2.521526 60.09998 -3355.977 47.89538 0 0 1 1 1
+  335 0 0 0 0
+  35.16518 60.09998 -3321.06 33.69647 0 0 1 1 1
+  341 0 0 0 0
+  79.57804 60.09998 -3243.411 18.42367 0 0 1 1 1
+  355 0 0 0 0
+  101.6001 60.09998 -3140.5 0.3987468 0 0 1 1 1
+  369 0 0 0 0
+  101.6001 60.09998 110 1.245333 0 0 1 1 1
+  818 1 0 0 0
+  144.3869 60.09998 304.12 29.6665 0 0 1 1 1
+  845 0 0 0 0
+  290.1208 60.09998 434.3914 63.21637 0 0 1 1 1
+  869 0 0 0 0
+  454.6001 60.09998 463 90 0 0 1 1 1
+  890 0 0 0 0
+  1846.35 60.09998 463 90 0 0 1 1 1
+  1100 1 0 0 0
+  1838.85 60.09998 463 90 0 0 1 1 1
+  1115 1 0 0 0
+  1838.35 60.09998 463 90 0 0 1 1 1
+  1200 0 0 0 0
+EndBehavior 1
+LockedChannels 54
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  15
+  -2652.4 60.09998 -3445 90 0 0 1 1 1
+  0 0 0 0 0
+  -201.3999 60.09998 -3445 90 0 0 1 1 1
+  312 1 0 0 0
+  -74.18108 60.09998 -3410.392 59.95634 0 0 1 1 1
+  330 0 0 0 0
+  2.521526 60.09998 -3355.977 47.89538 0 0 1 1 1
+  342 0 0 0 0
+  35.16518 60.09998 -3321.06 33.69647 0 0 1 1 1
+  348 0 0 0 0
+  79.57804 60.09998 -3243.411 18.42367 0 0 1 1 1
+  362 0 0 0 0
+  101.6001 60.09998 -3140.5 0.3987468 0 0 1 1 1
+  376 0 0 0 0
+  101.6001 60.09998 110 1.245333 0 0 1 1 1
+  825 1 0 0 0
+  144.3869 60.09998 304.12 29.6665 0 0 1 1 1
+  852 0 0 0 0
+  290.1208 60.09998 434.3914 63.21637 0 0 1 1 1
+  876 0 0 0 0
+  454.6001 60.09998 463 90 0 0 1 1 1
+  897 0 0 0 0
+  1786.208 60.09998 463 90 0 0 1 1 1
+  1100 1 0 0 0
+  1846.35 60.09998 463 90 0 0 1 1 1
+  1107 1 0 0 0
+  1778.35 60.09998 463 90 0 0 1 1 1
+  1122 1 0 0 0
+  1838.35 60.09998 463 90 0 0 1 1 1
+  1207 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  16
+  -2706.65 60.09998 -3445 270 0 0 1 1 1
+  0 0 0 0 0
+  -201.3999 60.09998 -3445 270 0 0 1 1 1
+  319 1 0 0 0
+  -74.18108 60.09998 -3410.392 239.9563 0 0 1 1 1
+  337 0 0 0 0
+  2.521526 60.09998 -3355.977 227.8954 0 0 1 1 1
+  349 0 0 0 0
+  35.16518 60.09998 -3321.06 213.6965 0 0 1 1 1
+  355 0 0 0 0
+  79.57804 60.09998 -3243.411 198.4237 0 0 1 1 1
+  369 0 0 0 0
+  101.6001 60.09998 -3140.5 180.3987 0 0 1 1 1
+  383 0 0 0 0
+  101.6001 60.09998 110 181.2453 0 0 1 1 1
+  832 1 0 0 0
+  144.3869 60.09998 304.12 209.6665 0 0 1 1 1
+  859 0 0 0 0
+  290.1208 60.09998 434.3914 243.2164 0 0 1 1 1
+  883 0 0 0 0
+  454.6001 60.09998 463 270 0 0 1 1 1
+  904 0 0 0 0
+  1732.082 60.09998 463 270 0 0 1 1 1
+  1099 1 0 0 0
+  1730.6 60.09998 463 270 0 0 1 1 1
+  1100 1 0 0 0
+  1732.35 60.09998 463 270 0 0 1 1 1
+  1114 1 0 0 0
+  1838.85 60.09998 463 270 0 0 1 1 1
+  1129 1 0 0 0
+  1838.35 60.09998 463 270 0 0 1 1 1
+  1214 0 0 0 0
+EndBehavior 2
+LockedChannels 54
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7638 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 0 9447 -90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8976 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8827.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8679 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8530.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8382 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8233.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 8085 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7936.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7786.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7489.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7341 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7192.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  925.5 75 7044 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  927 0 6570 -90.29998 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1840.4 73.5 6571.948 89.99999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1690.4 73.5 6571.948 89.99999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1540.4 73.5 6571.948 89.99999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1390.4 73.5 6571.948 89.99999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2439.42 73.31993 6571.933 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2289.42 73.31993 6571.933 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2139.42 73.31993 6571.933 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1989.42 73.31993 6571.933 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2443.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2293.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2143.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1993.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1843.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1693.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1543.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1393.5 75 9447 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9877.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9729 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9579 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9429 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9280.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 9130.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8982 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8832 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8682 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8532 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8382 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8232 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 10026 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 8083.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7935 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7786.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7638 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7489.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7341 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7192.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 7044 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6895.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6745.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6595.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6447 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6298.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6150 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 6000 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5851.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5703 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5553 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5404.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5256 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 5106 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4956 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4806 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4656 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4506 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4357.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4207.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 4059 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3909 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3760.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3610.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3460.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3310.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3162 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 3013.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2865 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2715 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2566.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2416.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2268 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 2119.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1971 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1822.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1674 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1524 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1375.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1225.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 1077 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 927 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 777 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 627 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 477 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 337.3948 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 187.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  223.5 105 37.5 0 0 0 1 1 1
+  0 0 0 0 0
+  223.5 105 35.75781 0 0 0 1 1 1
+  1023 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -112.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -261 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -411 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -559.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -709.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -858 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1006.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1156.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1306.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1455 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1605 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1755 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -1903.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2052 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2202 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2350.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2500.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2649 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2799 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -2947.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -3097.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -3247.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -3398 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -3547.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  223.5 105 -3697.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  223.5 106.5 -2993.793 0 0 0 1 1 1
+  0 0 0 0 0
+  223.5 106.5 10059.21 0 0 0 1 1 1
+  2200 0 0 0 0
+  223.5 106.5 -2993.793 0 0 0 1 1 1
+  4400 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -116 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -177.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -239 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -300.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -361.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -422.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -484 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -545.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 -0.5 -55 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 290
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\TRAIN\Tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  223.5 106.5 -3594.293 180 0 0 1 1 1
+  0 0 0 0 0
+  223.5 106.5 9458.71 180 0 0 1 1 1
+  2200 0 0 0 0
+  223.5 106.5 -3594.293 180 0 0 1 1 1
+  4400 0 0 0 0
+EndBehavior 1
+LockedChannels 51
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -3507.5 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  2155 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  2156 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4316 1 0 0 0
+EndBehavior 2
+LockedChannels 6
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Abulans.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -3277.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  2120 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  2121 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4281 1 0 0 0
+EndBehavior 2
+LockedChannels 6
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Car1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -3077.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  2090 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  2091 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4251 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Car1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2895.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  2055 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  2056 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4216 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Poliece.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2717.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  2020 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  2021 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4181 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Bike.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2587.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1985 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1986 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4146 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Bike.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2455.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1950 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1951 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4111 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2282.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1915 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1916 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4076 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2140.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1880 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1881 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4041 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Car2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -2015.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1845 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1846 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  4006 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Abulans.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1855.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1810 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1811 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3971 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1717.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1775 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1776 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3936 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1557.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1740 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1741 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3901 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Bike.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1445.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1705 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1706 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3866 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Car1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1340.342 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1670 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1671 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3831 1 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\CARS\Poliece.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  115 222.5 -1187.842 0 0 0 1 1 1
+  0 1 0 0 0
+  115 222.5 9305 0 0 0 1 1 1
+  1635 1 0 0 0
+  307.5 222.5 9305 -179.6756 0 0 1 1 1
+  1636 1 0 0 0
+  307.5 222.5 -3502.5 -182.5545 0 0 1 1 1
+  3796 1 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  120.5294 7492 16816.54 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LensFlare 1
+FlareIntensity 1.000000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 31
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareStarFilter 10
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  7
+  105.9641 91.5 -292.4412 144.4001 -14.70002 0 1 1 1
+  0 0 0 0 0
+  -83.83891 52.64317 113.6816 144.4001 -14.70002 0 1 1 1
+  502 0 0 0 0
+  -49.35982 59.6238 -60.83248 144.4001 -14.70002 0 1 1 1
+  597 0 0 0 0
+  159.5414 112.7946 -1085.656 144.4001 -14.70002 0 1 1 1
+  985 0 0 0 0
+  170.7764 116.2138 -1195.14 144.4001 -14.70002 0 1 1 1
+  1112 0 0 0 0
+  102.7415 109.9016 -780.2481 144.4001 -14.70002 0 1 1 1
+  2689 0 0 0 0
+  140.0399 35.5 -613.0552 144.4001 -14.70002 0 1 1 1
+  4374 0 0 0 0
+EndBehavior 1
+ParentObject 290
+TargetObject 290
+ZoomFactor 2.347999
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 1
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 192 192 192
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 3
+FogMinDist 0.000000
+FogMaxDist 5000.000000
+FogMinAmount 0.000000
+FogMaxAmount 1.000000
+FogColor 192 192 192
+BackdropFog 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 6
+ClipRayColors 0
+RayRecursionLimit 16
+DataOverlayLabel  
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\demo\city
+RGBImageFormat 2
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 115.000000 222.500000 -1187.842041
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 1.055180
+GridNumber 0
+GridSize 500.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 1
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

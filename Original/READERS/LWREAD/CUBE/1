@@ -1,0 +1,77 @@
+
+
+Flood's Lightwave reader in action...
+
+Parsing scene file: "cube.lws"...
+Scene file signature confirmed...
+Reading object: "cube.lwo"...
+Vertex list:
+Number of vertices: 8
+Vertex 0: X:-1.000000  Y:-1.000000  Z:-1.000000
+Vertex 1: X:-1.000000  Y:1.000000  Z:1.000000
+Vertex 2: X:-1.000000  Y:1.000000  Z:-1.000000
+Vertex 3: X:-1.000000  Y:-1.000000  Z:1.000000
+Vertex 4: X:1.000000  Y:-1.000000  Z:-1.000000
+Vertex 5: X:1.000000  Y:1.000000  Z:1.000000
+Vertex 6: X:1.000000  Y:1.000000  Z:-1.000000
+Vertex 7: X:1.000000  Y:-1.000000  Z:1.000000
+Surface #1: x
+Surface #2: z
+Surface #3: y
+Face list:
+Face 0 has 4 vertices:0 3 1 2 | Surface: 0
+Face 1 has 4 vertices:4 0 2 6 | Surface: 1
+Face 2 has 4 vertices:6 2 1 5 | Surface: 2
+Face 3 has 4 vertices:5 1 3 7 | Surface: 1
+Face 4 has 4 vertices:7 3 0 4 | Surface: 2
+Face 5 has 4 vertices:4 6 5 7 | Surface: 0
+Total faces: 6
+Detailed data for surface "x":
+  Color (Red/Green/Blue): 200/200/200
+  Flags: 0h
+  Diffuse(int): 0.39%
+  Diffuse(float): 100.00%
+	Color texture: "Planar Image Map"
+	Texture image: "x.jpg"
+	Wrapping options: 2h/2h
+  TextureFlags: 61h
+  Texture size: X:  2.000 Y:  2.000 Z:  2.000
+	Antialiasing strength: 100.00%
+Detailed data for surface "z":
+  Color (Red/Green/Blue): 200/200/200
+  Flags: 0h
+  Diffuse(int): 0.39%
+  Diffuse(float): 100.00%
+	Color texture: "Planar Image Map"
+	Texture image: "z.jpg"
+	Wrapping options: 2h/2h
+  TextureFlags: 64h
+  Texture size: X:  2.000 Y:  2.000 Z:  2.000
+	Antialiasing strength: 100.00%
+Detailed data for surface "y":
+  Color (Red/Green/Blue): 200/200/200
+  Flags: 0h
+  Diffuse(int): 0.39%
+  Diffuse(float): 100.00%
+	Color texture: "Planar Image Map"
+	Texture image: "y.jpg"
+	Wrapping options: 2h/2h
+  TextureFlags: 62h
+  Texture size: X:  2.000 Y:  2.000 Z:  2.000
+	Antialiasing strength: 100.00%
+Adding camera...
+
+Done reading scene file!
+Saving FLD file: "test.fld" (version 0.111)...
+Saving general scene data...
+Saving object information:
+-|Saving object: "cube.lwo"...
+---|Saving 3 materials...
+---|Saving modeller info(faces/vertices)...
+---|Saving keyframer info...
+-|Saving light: "Light"...
+---|Saving keyframer info...
+-|Saving Camera....
+---|Saving keyframer info...
+Closing file...
+Convertion routine completed!

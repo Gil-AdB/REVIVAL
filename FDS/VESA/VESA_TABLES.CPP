@@ -1,20 +1,20 @@
-#include "VESA.H"
+#include "Vesa.h"
 
 // Available tables: Y Offset table
 // Next: 8Bit Palette tables (Gouraud-txtr,Transparence,Addative,DAC Emu)
 // Next: 15/16Bit Diffuse tables (Gouraud-txtr)
 // SLOW
 
-long *YOffs = NULL;
+int32_t *YOffs = NULL;
 char *GrdTbl = NULL;
 char *ATable = NULL,*STable = NULL,*CTable = NULL,*TTable = NULL;
 char *Tblmem = NULL,*Tblali = NULL;
 
 void Build_YOffs_Table(VESA_Surface *VS)
 {
-  long I;
+  int32_t I;
   if (VS->YTable) delete [] VS->YTable; //DPMI_Delete(VS->YTable);
-  VS->YTable = new long [VS->Y];//(long *)DPMI_New(VESAModule,VS->Y<<2,"Y Offset table");
+  VS->YTable = new int32_t [VS->Y];//(int32_t *)DPMI_New(VESAModule,VS->Y<<2,"Y Offset table");
   for(I=0;I<VS->Y;I++)
     VS->YTable[I] = I*VS->X;
 }
@@ -26,8 +26,8 @@ void Build_YOffs_Table(VESA_Surface *VS)
 void Make_Gouraud_8(char R0,char G0,char B0,char R1,char G1,char B1)
 {
   char R,G,B;
-  long I,J;
-  long M,K,E;
+  int32_t I,J;
+  int32_t M,K,E;
   char *Pal = Screen->Pal;
   if (BPP!=8) return;
   for(I=0;I<64;I++)
@@ -53,8 +53,8 @@ void Make_Gouraud_8(char R0,char G0,char B0,char R1,char G1,char B1)
 void Make_Addative()
 {
   char R,G,B;
-  long I,J,L;
-  long M,K,E;
+  int32_t I,J,L;
+  int32_t M,K,E;
   char *Pal = Screen->Pal,*Pal1,*Pal2;
   if (BPP!=8) return;
   printf("Addative Table: ");
@@ -95,8 +95,8 @@ void Make_Addative()
 void Make_ColorMap()
 {
   char R,G,B;
-  long I,J,L,N;
-  long M,K,E;
+  int32_t I,J,L,N;
+  int32_t M,K,E;
   char *Pal;
   if (BPP!=8) return;
   printf("Color(DAC->Pal) Table: ");
@@ -131,8 +131,8 @@ void Make_ColorMap()
 void Make_Shade(float Dark,float Bright)
 {
   char R,G,B;
-  long I,J,K;
-  long M,E,L;
+  int32_t I,J,K;
+  int32_t M,E,L;
   char *Pal=Screen->Pal,*Pal1;
   float LMul = Dark,dL = (Bright-Dark)*0.015625;
   if (BPP!=8) return;
@@ -173,8 +173,8 @@ void Make_Shade(float Dark,float Bright)
 void Make_Transparence()
 {
   char R,G,B;
-  long I,J,L;
-  long M,K,E;
+  int32_t I,J,L;
+  int32_t M,K,E;
   char *Pal = Screen->Pal,*Pal1,*Pal2;
   if (BPP!=8) return;
   printf("Transparency Table: ");
@@ -217,8 +217,8 @@ void Make_Transparence()
 
 void View_8Tables()
 {
-  long I,J;
-  long MY;
+  int32_t I,J;
+  int32_t MY;
   if (YRes<256) MY=YRes; else MY=256;
   if (!Tblmem) {VESA_Warning("Alert! Attempting to view non-allocated Tables"); return;}
 
@@ -246,7 +246,7 @@ void Build_8Tables()
   // Allocating shit
   //Tblmem = (char *)DPMI_New(VESAModule,327680,"8Bit Aligned Table space");
   Tblmem = new char [327680];
-  Tblali = Tblmem+0x10000-(((DWord)Tblmem)&0xFFFF);
+  Tblali = Tblmem+0x10000-(((uintptr_t)Tblmem)&0xFFFF);
   ATable = Tblali;
   TTable = Tblali+0x10000;
   CTable = Tblali+0x20000;

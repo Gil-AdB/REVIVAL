@@ -28,14 +28,14 @@ void Quick_Sorting(long L,long R)
 // <..<.*.>..> Radix_256
 
 // <*The Radix*>
-long Bytes1[257];
-long Bytes2[257];
-long Bytes3[257];
-long Bytes4[257];
+int32_t Bytes1[257];
+int32_t Bytes2[257];
+int32_t Bytes3[257];
+int32_t Bytes4[257];
 
 void Radix_Sorting()
 {
-  unsigned long Z;
+  uint32_t Z;
 //  char *ZC1 = (char *)(&Z),*ZC2 = ZC1+1,*ZC3 = ZC2+1,*ZC4 = ZC3+1;
   long I;
   long *P;

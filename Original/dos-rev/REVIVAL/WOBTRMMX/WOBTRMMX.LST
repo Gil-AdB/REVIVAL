@@ -1,0 +1,311 @@
+.387
+.386p
+.model flat
+		PUBLIC	Grid_Texture_MapASMMX_
+_TEXT		SEGMENT	BYTE PUBLIC USE32 'CODE'
+		ASSUME CS:_TEXT, DS:DGROUP, SS:DGROUP
+Grid_Texture_MapASMMX_:
+    emms      
+    mov       dword ptr FLAT:L$41,ebp
+    mov       dword ptr FLAT:L$8,edi
+    mov       dword ptr FLAT:L$4,ecx
+    mov       dword ptr FLAT:L$38,esi
+    mov       dword ptr FLAT:L$39,00000028H
+    mov       dword ptr FLAT:L$40,0000001eH
+L$1:
+    mov       eax,dword ptr [esi]
+    mov       ebx,dword ptr 4H[esi]
+    mov       dword ptr FLAT:L$19,eax
+    mov       dword ptr FLAT:L$21,ebx
+    mov       ecx,dword ptr 334H[esi]
+    mov       edx,dword ptr 338H[esi]
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    mov       eax,dword ptr 14H[esi]
+    sar       edx,00000003H
+    mov       dword ptr FLAT:L$9,ecx
+    mov       dword ptr FLAT:L$10,edx
+    mov       ebx,dword ptr 18H[esi]
+    mov       dword ptr FLAT:L$26,eax
+    mov       dword ptr FLAT:L$27,ebx
+    mov       ecx,dword ptr 348H[esi]
+    mov       edx,dword ptr 34cH[esi]
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    mov       eax,dword ptr 0cH[esi]
+    sar       edx,00000003H
+    mov       ebx,dword ptr 8H[esi]
+    mov       dword ptr FLAT:L$14,ecx
+    mov       dword ptr FLAT:L$15,edx
+    mov       edi,dword ptr FLAT:L$8
+    mov       dword ptr FLAT:L$23,eax
+    mov       dword ptr FLAT:L$24,ebx
+    mov       ecx,dword ptr 340H[esi]
+    mov       edx,dword ptr 33cH[esi]
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    mov       eax,dword ptr 20H[esi]
+    sar       edx,00000003H
+    mov       dword ptr FLAT:L$11,ecx
+    mov       dword ptr FLAT:L$12,edx
+    mov       ebx,dword ptr 1cH[esi]
+    mov       dword ptr FLAT:L$28,eax
+    mov       dword ptr FLAT:L$29,ebx
+    mov       ecx,dword ptr 354H[esi]
+    mov       edx,dword ptr 350H[esi]
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    mov       eax,dword ptr 10H[esi]
+    sar       edx,00000003H
+    mov       dword ptr FLAT:L$25,eax
+    mov       dword ptr FLAT:L$16,ecx
+    mov       dword ptr FLAT:L$17,edx
+    mov       ecx,dword ptr 344H[esi]
+    sub       ecx,eax
+    mov       eax,dword ptr 24H[esi]
+    sar       ecx,00000003H
+    mov       dword ptr FLAT:L$30,eax
+    mov       dword ptr FLAT:L$13,ecx
+    mov       ecx,dword ptr 358H[esi]
+    sub       ecx,eax
+    add       esi,00000014H
+    sar       ecx,00000003H
+    mov       dword ptr FLAT:L$38,esi
+    mov       dword ptr FLAT:L$18,ecx
+    mov       dword ptr FLAT:L$42,00000008H
+L$2:
+    mov       eax,dword ptr FLAT:L$19
+    mov       ebx,dword ptr FLAT:L$21
+    mov       ecx,dword ptr FLAT:L$26
+    mov       edx,dword ptr FLAT:L$27
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    mov       eax,dword ptr FLAT:L$23
+    sar       edx,00000003H
+    mov       dword ptr FLAT:L$31,ecx
+    mov       dword ptr FLAT:L$33,edx
+    sub       dword ptr FLAT:L$19,ecx
+    sub       dword ptr FLAT:L$21,edx
+    mov       ebx,dword ptr FLAT:L$24
+    mov       ecx,dword ptr FLAT:L$28
+    mov       edx,dword ptr FLAT:L$29
+    sub       ecx,eax
+    sub       edx,ebx
+    sar       ecx,00000003H
+    sar       edx,00000003H
+    mov       dword ptr FLAT:L$35,ecx
+    mov       dword ptr FLAT:L$36,edx
+    sub       dword ptr FLAT:L$23,ecx
+    sub       dword ptr FLAT:L$24,edx
+    mov       eax,dword ptr FLAT:L$25
+    mov       ecx,dword ptr FLAT:L$30
+    sub       ecx,eax
+    sar       ecx,00000003H
+    mov       dword ptr FLAT:L$37,ecx
+    sub       dword ptr FLAT:L$25,ecx
+    mov       ecx,dword ptr FLAT:L$31
+    mov       edx,dword ptr FLAT:L$33
+    add       dword ptr FLAT:L$19,ecx
+    add       dword ptr FLAT:L$21,edx
+    mov       ecx,dword ptr FLAT:L$35
+    mov       edx,dword ptr FLAT:L$36
+    add       dword ptr FLAT:L$23,ecx
+    add       dword ptr FLAT:L$24,edx
+    mov       ecx,dword ptr FLAT:L$37
+    add       dword ptr FLAT:L$25,ecx
+    mov       eax,dword ptr FLAT:L$25
+    mov       word ptr FLAT:L$5,ax
+    mov       eax,dword ptr FLAT:L$23
+    mov       word ptr FLAT:L$6,ax
+    mov       eax,dword ptr FLAT:L$24
+    mov       word ptr FLAT:L$7,ax
+    movq      mm0,qword ptr FLAT:L$5
+    mov       eax,dword ptr FLAT:L$37
+    mov       word ptr FLAT:L$5,ax
+    mov       eax,dword ptr FLAT:L$35
+    mov       word ptr FLAT:L$6,ax
+    mov       eax,dword ptr FLAT:L$36
+    mov       word ptr FLAT:L$7,ax
+    movq      mm1,qword ptr FLAT:L$5
+    mov       ebp,0ffffffe0H
+    mov       ecx,00000000H
+    mov       al,byte ptr FLAT:L$19
+    mov       bl,byte ptr FLAT:L$31
+    mov       ah,byte ptr FLAT:L$21
+    mov       bh,byte ptr FLAT:L$33
+    mov       cl,byte ptr FLAT:L$20
+    mov       dl,byte ptr FLAT:L$32
+    mov       ch,byte ptr FLAT:L$22
+    mov       dh,byte ptr FLAT:L$34
+    add       edi,00000020H
+L$3:
+    add       al,bl
+    movq      mm3,mm0
+    DB	0fH, 60H, 14H, 8dH
+L$4:
+    DB	00H, 00H, 00H, 00H
+    psrlw     mm3,00000008H
+    psrlw     mm2,00000008H
+    pmullw    mm2,mm3
+    adc       cl,dl
+    add       ah,bh
+    psrlw     mm2,00000007H
+    packuswb  mm2,mm2
+    adc       ch,dh
+    movd      dword ptr [edi+ebp],mm2
+    paddw     mm0,mm1
+    add       ebp,00000004H
+    jne       L$3
+    add       edi,000004e0H
+    mov       eax,dword ptr FLAT:L$19
+    mov       ebx,dword ptr FLAT:L$21
+    mov       ecx,dword ptr FLAT:L$9
+    mov       edx,dword ptr FLAT:L$10
+    add       eax,ecx
+    add       ebx,edx
+    mov       dword ptr FLAT:L$19,eax
+    mov       dword ptr FLAT:L$21,ebx
+    mov       eax,dword ptr FLAT:L$23
+    mov       ebx,dword ptr FLAT:L$24
+    mov       ecx,dword ptr FLAT:L$11
+    mov       edx,dword ptr FLAT:L$12
+    add       eax,ecx
+    add       ebx,edx
+    mov       dword ptr FLAT:L$23,eax
+    mov       dword ptr FLAT:L$24,ebx
+    mov       eax,dword ptr FLAT:L$25
+    mov       ecx,dword ptr FLAT:L$13
+    add       eax,ecx
+    mov       ebx,dword ptr FLAT:L$27
+    mov       dword ptr FLAT:L$25,eax
+    mov       eax,dword ptr FLAT:L$26
+    mov       ecx,dword ptr FLAT:L$14
+    mov       edx,dword ptr FLAT:L$15
+    add       eax,ecx
+    add       ebx,edx
+    mov       dword ptr FLAT:L$26,eax
+    mov       dword ptr FLAT:L$27,ebx
+    mov       eax,dword ptr FLAT:L$28
+    mov       ebx,dword ptr FLAT:L$29
+    mov       ecx,dword ptr FLAT:L$16
+    mov       edx,dword ptr FLAT:L$17
+    add       eax,ecx
+    add       ebx,edx
+    mov       dword ptr FLAT:L$28,eax
+    mov       dword ptr FLAT:L$29,ebx
+    mov       eax,dword ptr FLAT:L$30
+    mov       ecx,dword ptr FLAT:L$18
+    add       eax,ecx
+    mov       esi,dword ptr FLAT:L$42
+    mov       dword ptr FLAT:L$30,eax
+    dec       esi
+    mov       dword ptr FLAT:L$42,esi
+    jne       L$2
+    mov       eax,dword ptr FLAT:L$8
+    add       eax,00000020H
+    mov       dword ptr FLAT:L$8,eax
+    mov       esi,dword ptr FLAT:L$38
+    mov       ebx,dword ptr FLAT:L$39
+    dec       ebx
+    mov       dword ptr FLAT:L$39,ebx
+    jne       L$1
+    mov       ecx,dword ptr FLAT:L$8
+    mov       ebx,dword ptr FLAT:L$40
+    add       ecx,00002300H
+    add       esi,00000014H
+    mov       dword ptr FLAT:L$39,00000028H
+    mov       dword ptr FLAT:L$38,esi
+    mov       dword ptr FLAT:L$8,ecx
+    dec       ebx
+    mov       dword ptr FLAT:L$40,ebx
+    jne       L$1
+    mov       ebp,dword ptr FLAT:L$41
+    emms      
+    ret       
+_TEXT		ENDS
+_DATA		SEGMENT	PARA PUBLIC USE32 'DATA'
+L$5:
+    DB	00H, 00H
+L$6:
+    DB	00H, 00H
+L$7:
+    DB	00H, 00H, 00H, 00H
+L$8:
+    DB	00H, 00H, 00H, 00H
+L$9:
+    DB	00H, 00H, 00H, 00H
+L$10:
+    DB	00H, 00H, 00H, 00H
+L$11:
+    DB	00H, 00H, 00H, 00H
+L$12:
+    DB	00H, 00H, 00H, 00H
+L$13:
+    DB	00H, 00H, 00H, 00H
+L$14:
+    DB	00H, 00H, 00H, 00H
+L$15:
+    DB	00H, 00H, 00H, 00H
+L$16:
+    DB	00H, 00H, 00H, 00H
+L$17:
+    DB	00H, 00H, 00H, 00H
+L$18:
+    DB	00H, 00H, 00H, 00H
+L$19:
+    DB	00H
+L$20:
+    DB	00H, 00H, 00H
+L$21:
+    DB	00H
+L$22:
+    DB	00H, 00H, 00H
+L$23:
+    DB	00H, 00H, 00H, 00H
+L$24:
+    DB	00H, 00H, 00H, 00H
+L$25:
+    DB	00H, 00H, 00H, 00H
+L$26:
+    DB	00H, 00H, 00H, 00H
+L$27:
+    DB	00H, 00H, 00H, 00H
+L$28:
+    DB	00H, 00H, 00H, 00H
+L$29:
+    DB	00H, 00H, 00H, 00H
+L$30:
+    DB	00H, 00H, 00H, 00H
+L$31:
+    DB	00H
+L$32:
+    DB	00H, 00H, 00H
+L$33:
+    DB	00H
+L$34:
+    DB	00H, 00H, 00H
+L$35:
+    DB	00H, 00H, 00H, 00H
+L$36:
+    DB	00H, 00H, 00H, 00H
+L$37:
+    DB	00H, 00H, 00H, 00H
+L$38:
+    DB	00H, 00H, 00H, 00H
+L$39:
+    DB	00H, 00H, 00H, 00H
+L$40:
+    DB	00H, 00H, 00H, 00H
+L$41:
+    DB	00H, 00H, 00H, 00H, 00H, 00H, 00H, 00H
+L$42:
+    DB	00H, 00H, 00H, 00H, 00H, 00H, 00H, 00H
+    DB	00H, 00H, 00H, 00H, 00H, 00H, 00H, 00H
+
+_DATA		ENDS
+		END

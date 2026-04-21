@@ -1,0 +1,650 @@
+WATCOM Linker Version 11.0
+Copyright by Sybase, Inc., and its subsidiaries, 1985, 1997.
+Created on:       95/09/22 19:50:31
+Executable Image: TG.exe
+creating a PMODE/W executable
+Error! E2028: XRes is an undefined reference
+
+
+                        +------------+
+                        |   Groups   |
+                        +------------+
+
+Group                           Address              Size
+=====                           =======              ====
+
+DGROUP                          0002:00000000        000041b0
+
+
+
+                        +--------------+
+                        |   Segments   |
+                        +--------------+
+
+Segment                Class          Group          Address         Size
+=======                =====          =====          =======         ====
+
+BEGTEXT                CODE           AUTO           0001:00000000   00000010
+_TEXT                  CODE           AUTO           0001:00000010   00015c89
+_NULL                  BEGDATA        DGROUP         0002:00000000   00000004
+_AFTERNULL             BEGDATA        DGROUP         0002:00000004   00000000
+_DATA                  DATA           DGROUP         0002:00000010   0000105d
+CONST                  DATA           DGROUP         0002:00001070   00001990
+CONST2                 DATA           DGROUP         0002:00002a00   00000008
+YIB                    DATA           DGROUP         0002:00002a08   00000000
+YI                     DATA           DGROUP         0002:00002a08   00000012
+YIE                    DATA           DGROUP         0002:00002a1a   00000000
+XIB                    DATA           DGROUP         0002:00002a1a   00000000
+XI                     DATA           DGROUP         0002:00002a1a   0000004e
+XIE                    DATA           DGROUP         0002:00002a68   00000000
+TIB                    DATA           DGROUP         0002:00002a68   00000000
+TI                     DATA           DGROUP         0002:00002a68   00000000
+TIE                    DATA           DGROUP         0002:00002a68   00000000
+DATA                   DATA           DGROUP         0002:00002a68   00000000
+_BSS                   BSS            DGROUP         0002:00002a70   0000073c
+STACK                  STACK          DGROUP         0002:000031b0   00001000
+
+
+                        +----------------+
+                        |   Memory Map   |
+                        +----------------+
+
+* = unreferenced symbol
++ = symbol only referenced locally
+
+Address        Symbol
+=======        ======
+
+Module: TG.obj(D:\CW\MAPPER32\TG.ASM)
+0001:00000010  TGTriangle_
+Module: TEXMAP.obj(D:\CW\MAPPER32\TEXMAP.CPP)
+0002:00002b18+ REGS near regs
+0002:00002b38+ SREGS near sregs
+0002:00002b44+ short unsigned near selector
+0002:00002b48+ int unsigned near segment
+0001:000007e0* void near PrintInfo( int unsigned )
+0001:00000c8c+ int unsigned near SetVesa( int unsigned )
+0001:00001290+ long unsigned near SetVPage()
+0001:000012c0  main_
+0002:00002b64+ short near IsVbe2
+0002:00002b66* short unsigned near curbbank
+0002:00002b68+ VbeInfoBlock near * near VbeInfo
+0002:00002b6c+ char near * near OemString
+0002:00002b70+ short unsigned near * near VideoModes
+0002:00002b74+ int unsigned near ModeInfoSegment
+0002:00002b78+ ModeInfoBlock near * near ModeInfo
+0002:00002b7c+ int unsigned near XRes
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(memset)
+0001:000015a2  memset_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(intx386)
+0001:000015ba  int386x_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(printf)
+0001:000015d3  printf_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(iob)
+0002:00000124  ___iob
+0002:0000032c  ___tmpfnext
+0002:0000032d  __fmode
+0002:00002b80  ___OpenStreams
+0002:00002b84  ___ClosedStreams
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fflush)
+0001:000015f5  fflush_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(getch)
+0001:00001605  getch_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(nmalloc)
+0001:00001622  _nmalloc_
+0001:00001622  malloc_
+0002:00000334  ___nheapbeg
+0002:00000338  ___MiniHeapRover
+0002:0000033c  ___LargestSizeB4MiniHeapRover
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(exit)
+0001:00001703  __null_int23_exit_
+0001:00001704  exit_
+0001:00001727+ _exit_
+0002:00000340  ___int23_exit
+0002:00000344  ___FPE_handler_exit
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\DJPEG.C)
+0001:00001740  char near * near LoadJPEG( char near *, int unsigned )
+Module: e:\WATCOM11\lib386\plib3r.lib(opnewarr)
+0001:00001849  void near * near operator new []( int unsigned )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(rand)
+0001:00001854  rand_
+0001:00001878  srand_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(cstart)
+0001:00000003* ___begtext
+0002:00000000* __nullarea
+0002:00000380  __GDAptr
+0002:00000384  __D16Infoseg
+0002:00000386  __x386_zero_base_selector
+0001:00001888  _cstart_
+0001:00001b17  __exit_
+0001:00001b19  __do_exit_with_msg__
+0001:00001b54  __GETDS
+0001:00001b54  ___GETDSStart_
+0001:00001b5f  ___GETDSEnd_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fltused)
+0002:00000388  _fltused_
+Module: e:\WATCOM11\lib386\plib3r.lib(iofefg)
+0002:00002a26  __ppfltused_
+Module: e:\WATCOM11\lib386\dos\emu387.lib(386inite)
+0001:00001b8d* __fini_387_emulator
+0001:00001b88  __init_387_emulator
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(01h)
+0002:0000038c  __8087
+0002:0000038d  __real87
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(argcv)
+0002:00002b94  __argc
+0002:00002b98  __argv
+0002:00002b9c  ___argc
+0002:00002ba0  ___argv
+Module: e:\WATCOM11\lib386\plib3r.lib(fsroot)
+0002:00002a3e  ___wcpp_4_data_init_fs_root_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(__stos)
+0001:00001ba0  __STOSB
+0001:00001bd7* __STOSD
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(int386xa)
+0001:00001c44  __int386x_
+0001:00001ca1  _DoINTR_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fprtf)
+0001:00002033  __fprtf_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(initfile)
+0001:000020d8  __InitFiles_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(ioexit)
+0001:0000216a  __full_io_exit_
+0001:00002176* fcloseall_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(flush)
+0001:000021d3  __flush_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(flushall)
+0001:000022d1  flushall_
+0001:000022d6  __flushall_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(crwdata)
+0002:000003a0  __psp
+0002:000003cb  __osmajor
+0002:000003cc  __osminor
+0002:000003c2  __Extender
+0002:000003c3  __ExtenderSubtype
+0002:000003c4  __X32VM
+0002:000003a4* __x386_stacklow
+0002:00000398  __LpCmdLine
+0002:0000039c  __LpPgmName
+0002:00000390  __dynend
+0002:00000394  __curbrk
+0002:000003a4  __STACKLOW
+0002:000003a8  __STACKTOP
+0002:000003ac  __ASTACKSIZ
+0002:000003b0  __ASTACKPTR
+0002:000003b4  __cbyte
+0002:000003b8* __cbyte2
+0002:000003bc  __child
+0002:000003c5  __Envptr
+0002:000003c9  __Envseg
+0002:000003c0  __no87
+0002:000003cd  __FPE_handler
+0002:000003cd  ___FPE_handler
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mem)
+0001:00002310  __MemAllocator
+0001:000023c0  __MemFree
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(grownear)
+0001:0000255b+ __FreeDPMIBlocks_
+0001:000025b7* __ReAllocDPMIBlock_
+0001:00002722+ __LastFree_
+0001:000028ef  __ExpandDGROUP_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(nmemneed)
+0001:00002ab0  __nmemneed_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(heapmod)
+0002:00002bb0  ___nheap_clean
+0002:00002bb1* ___fheap_clean
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(initrtns)
+0001:00002abf  __InitRtns
+0001:00002b0b  __FiniRtns
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JERROR.C)
+0001:00002ca0  jpeg_error_mgr near * near jpeg_std_error( jpeg_error_mgr near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDAPI.C)
+0001:00002d00  void near jpeg_create_decompress( jpeg_decompress_struct near * )
+0001:00002d88  void near jpeg_destroy_decompress( jpeg_decompress_struct near * )
+0001:00002d90* void near jpeg_set_marker_processor( jpeg_decompress_struct near *, int, int (near *)( ))
+0001:00002f78  int near jpeg_read_header( jpeg_decompress_struct near *, int )
+0001:000031e4  void near jpeg_start_decompress( jpeg_decompress_struct near * )
+0001:000032d8  int unsigned near jpeg_read_scanlines( jpeg_decompress_struct near *, char unsigned near * near *, int unsigned )
+0001:00003368* int unsigned near jpeg_read_raw_data( jpeg_decompress_struct near *, char unsigned near * near * near *, int unsigned )
+0001:0000341c  int near jpeg_finish_decompress( jpeg_decompress_struct near * )
+0001:000034d8* void near jpeg_abort_decompress( jpeg_decompress_struct near * )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fopen)
+0001:000034dd+ __open_flags_
+0001:000036d4+ _fsopen_
+0001:00003718  fopen_
+0001:0000378a* freopen_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fprintf)
+0001:000037db  fprintf_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fseek)
+0001:00003851  fseek_
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDATASRC.C)
+0001:00003a20  void near jpeg_stdio_src( jpeg_decompress_struct near *, __iobuf near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\WRTARGA.C)
+0001:00003e8c  char near * near finish_output_tga()
+0001:00003e94  djpeg_dest_struct near * near jinit_write_targa( jpeg_decompress_struct near * )
+0002:00002bb4+ char near * near Buffer
+0002:00002bb8+ int unsigned near Pointer
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fclose)
+0001:00003efc  fclose_
+0001:00003f29  __shutdown_stream_
+0001:00003f4a  __MkTmpFile_
+0001:00003ff4  __doclose_
+Module: e:\WATCOM11\lib386\plib3r.lib(opnew)
+0001:00004092  void near * near operator new( int unsigned )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(cmain386)
+0001:000040d4  __CMain
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(dosseg)
+0000:00001234  __DOSseg__
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(setefg)
+0001:00004132  __setEFGfmt_
+Module: e:\WATCOM11\lib386\plib3r.lib(iofnoefg)
+0002:00000590  void (near * near __EFG_cnvs2d)( char near *, double near * )
+0002:00000594  int (near * near __EFG_cnvd2f)( double near *, float near * )
+0002:00000598  void (near * near __EFG_LDcvt)( __6ks9tmlong_double near *, cvt_info near *, char near * )
+0002:0000059c  char near * (near * near __EFG_fcvt)( double, int, int near *, int near * )
+Module: e:\WATCOM11\lib386\math387r.lib(cnvs2d)
+0001:0000415f  __cnvs2d_
+Module: e:\WATCOM11\lib386\math387r.lib(cnvd2f)
+0001:0000416d  __cnvd2f_
+Module: e:\WATCOM11\lib386\math387r.lib(ldcvt)
+0001:000042bf  _LDScale10x_
+0001:00004319  __LDcvt_
+Module: e:\WATCOM11\lib386\math387r.lib(_i_fcvt_)
+0001:00004cd0  _fcvt_
+Module: e:\WATCOM11\lib386\math387r.lib(dosinite)
+0001:00004cd6  __sys_init_387_emulator
+0001:00004e5b  __sys_fini_387_emulator
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(chk8087)
+0001:00004f3a+ __init_8087_
+0001:00004f6b* _fpreset_
+0001:00004f75  __chk8087_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(initargv)
+0001:00004fb9  __Init_Argv_
+Module: e:\WATCOM11\lib386\plib3r.lib(cppdata)
+0002:00002bbc  __wint_thread_data
+0002:00002be0* __compiled_under_generic
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fputc)
+0001:00005198  fputc_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(ioalloc)
+0001:0000525b  __ioalloc_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(prtf)
+0001:000052e2  __prtf_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(xmsg)
+0001:00005f69* __exit_with_msg_
+0001:00005f6e  __fatal_runtime_error_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(allocfp)
+0001:00005f8b  __allocfp_
+0001:00006034  __freefp_
+0001:0000606d  __purgefp_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(qwrit)
+0001:0000608b  __qwrite_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(seterrno)
+0001:000060ff  __set_errno_
+0001:0000610b* __set_EDOM_
+0001:00006112  __set_ERANGE_
+0001:00006119* __set_EINVAL_
+0001:00006129  __set_doserrno_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(lseek)
+0001:00006135  lseek_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fsync)
+0001:0000619a  fsync_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(nfree)
+0001:0000619f  _nfree_
+0001:0000619f  free_
+0002:00002be4  ___MiniHeapFreeRover
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(minreal)
+0002:00002be8  ___minreal
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(heapen)
+0001:0000629a* _heapenable_
+0002:00000678  ___heap_enabled
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(sbrk386)
+0001:000062aa* sbrk_
+0001:0000636a  __brk_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(amblksiz)
+0002:0000067c  __amblksiz
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(sgdef086)
+0002:00002a1a  __Start_XI
+0002:00002a68  __End_XI
+0002:00002a08  __Start_YI
+0002:00002a1a  __End_YI
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JCOMAPI.C)
+0001:00006430  void near jpeg_abort( jpeg_common_struct near * )
+0001:00006460  void near jpeg_destroy( jpeg_common_struct near * )
+0001:00006490  __anrh5JQUANT_TBL near * near jpeg_alloc_quant_table( jpeg_common_struct near * )
+0001:000064b0  __4gbbeoJHUFF_TBL near * near jpeg_alloc_huff_table( jpeg_common_struct near * )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(sprintf)
+0001:000064cd  sprintf_
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JMEMMGR.C)
+0001:00006ff0  void near jinit_memory_mgr( jpeg_common_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDMARKER.C)
+0001:00009b70  int near jpeg_resync_to_restart( jpeg_decompress_struct near * )
+0001:00009cdc  void near jinit_marker_reader( jpeg_decompress_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDMASTER.C)
+0001:00009d98  void near jpeg_calc_output_dimensions( jpeg_decompress_struct near * )
+0001:0000a688  void near jinit_master_decompress( jpeg_decompress_struct near * )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(comtflag)
+0001:0000a8cb* __set_commode_
+0002:00000690  __commode
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(tolower)
+0001:0000a8d6  tolower_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(open)
+0001:0000a8e4* open_
+0001:0000a908  sopen_
+0001:0000ab46* __set_binary_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(chktty)
+0001:0000abab  __chktty_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(tell)
+0001:0000abdc  tell_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fread)
+0001:0000abed  fread_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fwrite)
+0001:0000adce  fwrite_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(gtpid)
+0001:0000afae  getpid_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(tmpfl)
+0001:0000afb4* tmpfile_
+0001:0000b0a7  __GetTmpPath_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(ftell)
+0001:0000b16f  ftell_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(_clse)
+0001:0000b1b2  __close_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(remove)
+0001:0000b1e7  remove_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(stack386)
+0001:0000b1ec  stackavail_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(stk)
+0001:0000b211* __STK
+0001:0000b1fe  __CHK
+0001:0000b20e  __GRO
+0001:0000b22f* __STKOVERFLOW_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(cinit)
+0001:0000b23e  __CommonInit_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(___argc)
+0002:00002bec  ____Argc
+0002:00002bf0  ____Argv
+Module: e:\WATCOM11\lib386\math387r.lib(efgfmt)
+0001:0000b299  _EFG_Format_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(noefgfmt)
+0002:0000074c  ___EFG_printf
+0002:00000750  ___EFG_scanf
+Module: e:\WATCOM11\lib386\math387r.lib(strtod)
+0001:0000b3bf+ __Strtold_
+0001:0000b553  strtod_
+Module: e:\WATCOM11\lib386\math387r.lib(ldclass)
+0001:0000b5d2  __LDClass_
+Module: e:\WATCOM11\lib386\math387r.lib(efcvt)
+0001:0000b65a* ecvt_
+0001:0000b693  fcvt_
+Module: e:\WATCOM11\lib386\dos\emu387.lib(emu387)
+0001:0000baac* __int7_X32VM
+0001:0000baf8  __int7
+0001:0000ba88  __int7_pl3
+0001:0000ba48* stkop1
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(hook387)
+0001:0000eba0  __hook387
+0001:0000ec6a  __unhook387
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(8087cw)
+0002:000007d8  __8087cw
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(save8087)
+0002:000007dc  ___Save8087
+0002:000007e0  ___Rest8087
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(init8087)
+0001:0000ecc4  __init_80x87
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(histsplt)
+0002:00002c74  ___historical_splitparms
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(wctomb)
+0001:0000eceb  wctomb_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(itoa)
+0001:0000ed17+ utoa_
+0001:0000ed60  itoa_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(lltoa)
+0001:0000ed7b  __clib_ulltoa_
+0001:0000ee12* __clib_lltoa_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(ltoa)
+0001:0000ee68  ultoa_
+0001:0000eeb1* ltoa_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbisdbcs)
+0002:00002c78  ___IsDBCS
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbislead)
+0001:0000eecc* _ismbblead_
+0002:00002c7c  ___MBCSIsTable
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(toupper)
+0001:0000eee1  toupper_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(enterdb)
+0001:0000eeef  __EnterWVIDEO_
+0002:0000085c+ ___WD_Present
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(iomode)
+0001:0000ef15  __IOMode_
+0001:0000ef6a  __SetIOMode_
+0002:00000860  ___NFiles
+0002:00000864+ ___init_mode
+0002:000008b4+ __iomode
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(dosret)
+0001:0000ef8b  _dosret0_
+0001:0000ef92* _dosretax_
+0001:0000ef96  __set_errno_dos_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(errno)
+0001:0000effa  __get_errno_ptr_
+0001:0000f000  __get_doserrno_ptr_
+0002:00002d80+ _errno
+0002:00002d84+ __doserrno
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(dosfile)
+0001:0000f006* _dos_close_
+0001:0000f015  _dos_commit_
+0001:0000f025* _dos_open_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(vsprintf)
+0001:0000f047  vsprintf_
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JMEMNOBS.C)
+0001:0000f060  void near * near jpeg_get_small( jpeg_common_struct near *, int unsigned )
+0001:0000f068  void near jpeg_free_small( jpeg_common_struct near *, void near *, int unsigned )
+0001:0000f070  void near * near jpeg_get_large( jpeg_common_struct near *, int unsigned )
+0001:0000f078  void near jpeg_free_large( jpeg_common_struct near *, void near *, int unsigned )
+0001:0000f080  long near jpeg_mem_available( jpeg_common_struct near *, long, long, long )
+0001:0000f084  void near jpeg_open_backing_store( jpeg_common_struct near *, backing_store_struct near *, long )
+0001:0000f094  long near jpeg_mem_init( jpeg_common_struct near * )
+0001:0000f098  void near jpeg_mem_term( jpeg_common_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JUTILS.C)
+0001:0000f0a0  long near jdiv_round_up( long, long )
+0001:0000f0b4  long near jround_up( long, long )
+0001:0000f0d0  void near jcopy_sample_rows( char unsigned near * near *, int, char unsigned near * near *, int, int, int unsigned )
+0001:0000f124* void near jcopy_block_row( short (near *)[64], short (near *)[64], int unsigned )
+0001:0000f144  void near jzero_far( void near *, int unsigned )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(getenv)
+0001:0000f150  getenv_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(sscanf)
+0001:0000f1d7+ vsscanf_
+0001:0000f1fe  sscanf_
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDDCTMGR.C)
+0001:0000f3d0  void near jinit_inverse_dct( jpeg_decompress_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDCOEFCT.C)
+0001:0000fbd8  void near jinit_d_coef_controller( jpeg_decompress_struct near *, int )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDMAINCT.C)
+0001:00010868  void near jinit_d_main_controller( jpeg_decompress_struct near *, int )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDPOSTCT.C)
+0001:00010a38  void near jinit_d_post_controller( jpeg_decompress_struct near *, int )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDCOLOR.C)
+0001:00010f58  void near jinit_color_deconverter( jpeg_decompress_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDSAMPLE.C)
+0001:0001169c  void near jinit_upsampler( jpeg_decompress_struct near * )
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JDHUFF.C)
+0001:000124c0  void near jinit_huff_decoder( jpeg_decompress_struct near * )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(isatt)
+0001:00012504  isatty_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(umaskval)
+0002:00000bd0  ___umaskval
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(qread)
+0001:00012522  __qread_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fgetc)
+0001:00012541* fgetc_
+0001:000125e9+ __filbuf_
+0001:00012618  __fill_buffer_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(accss)
+0001:000126cc  access_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(renam)
+0001:00012707  rename_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fullpath)
+0001:00012735  _fullpath_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(gtcwd)
+0001:00012a04  getcwd_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(unlnk)
+0001:00012a94  unlink_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(sigsy)
+0001:00012bc2  __DPMI_hosted_
+0001:00012c4d  __restore_int23_
+0001:00012e42  __restore_int_ctrl_break_
+0001:00012e63  __grab_int23_
+0001:00012fab  __grab_int_ctrl_break_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(bufld386)
+0001:0001311c  __ZBuf2LD
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(hugeval)
+0002:00002a00  __HugeValue
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(istable)
+0002:00000bf0  __IsTable
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(cvtbuf)
+0001:000131bf  __CVTBuffer_
+Module: e:\WATCOM11\lib386\math387r.lib(cvt)
+0001:000131c5  __cvt_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(d_setvec)
+0001:0001324a  _dos_setvect_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(i8d)
+0001:00013276* __I8D
+0001:000132cb  __U8D
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbinit)
+0001:00013359  __mbinit_
+0001:000134a0+ dos_get_dbcs_lead_table_
+0001:000135a2+ dos_get_code_page_
+0002:00000cf4  ___MBCodePage
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(doserror)
+0001:00013708  __doserror_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(environ)
+0002:0000319c  ___env_mask
+0002:000031a0  _environ
+0002:000031a4* __wenviron
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbsnicmp)
+0001:0001371b  _mbsnicmp_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(scnf)
+0001:0001379c  __scnf_
+Module: jpeglibd.lib(E:\EEEEEE\BUFFER\GENERAL\COMPRESS\JPEGSRC5\JPEG5\JIDCTFLT.C)
+0001:00014640  void near jpeg_idct_float( jpeg_decompress_struct near *, __3hsse0jpeg_component_info near *, short near *, char unsigned near * near *, int unsigned )
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(gtche)
+0001:00014d02  getche_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(strncpy)
+0001:00014d1f  strncpy_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(signl)
+0001:00014d44+ __sigabort_
+0001:00014d4e  __sigfpe_handler_
+0001:00014d85* signal_
+0001:00014e60  raise_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(chainint)
+0001:00014f14  _chain_intr_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(nonibm)
+0001:00014f2d+ __is_nonIBM_
+0002:00000d34  ___NonIBM
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(d_getvec)
+0001:00014f85  _dos_getvect_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(intr)
+0001:00014fb5  intr_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(inirmsel)
+0002:000031a8  __ExtenderRealModeSelector
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(setenvp)
+0001:000150c6  __setenvp_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbterm)
+0001:0001519a  _mbterm_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbcicmp)
+0001:000151d6  _mbcicmp_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbsinc)
+0001:0001522d  _mbsinc_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbtowc)
+0001:0001525a  mbtowc_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fdfs)
+0001:0001531a  __FDFS
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(i8m)
+0001:00015366* __I8M
+0001:00015366  __U8M
+Module: e:\WATCOM11\lib386\math387r.lib(fchop)
+0001:00015382  __CHP
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(abort)
+0001:0001539f* abort_
+0001:000153a5  __terminate_
+0002:00000d38  ___abort
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(cntrl87)
+0001:000153b7  _control87_
+Module: e:\WATCOM11\lib386\math387r.lib(grabfpe)
+0001:00015403  __grab_fpe_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbccpy)
+0001:00015408  _mbccpy_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbclen)
+0001:00015439  _mbclen_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbsupr)
+0001:00015464  _mbsupr_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbccmp)
+0001:000154b3  _mbccmp_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(grabfp87)
+0001:0001550b  __GrabFP87_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbsnextc)
+0001:00015587  _mbsnextc_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbcupper)
+0001:000155c2  _mbctoupper_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbconv)
+0001:00015657  _mbvtop_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpe387)
+0002:00000d3c  ___PMSeg
+0002:00000d3e  ___PMAddr
+0002:00000d42  ___RMAddr
+0001:00015672  __Init_FPE_handler_
+0001:000156cf  __Fini_FPE_handler_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpeinth)
+0001:0001572c  __Enable_FPE_
+0001:00015741  __FPEHandler_
+0001:00015741  ___FPEHandlerStart_
+0001:0001574e  __FPE2Handler_
+0001:00015851  ___FPEHandlerEnd_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbdtoupp)
+0001:00015989  _mbdtoupper_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpephar)
+0001:0001599c  __Phar_hook_init_
+0001:00015a5f  __Phar_hook_fini_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpedos4g)
+0001:00015a8c  __DOS4G_hook_init_
+0001:00015ab9  __DOS4G_hook_fini_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpeergo)
+0001:00015ad2  __Ergo_hook_init_
+0001:00015b10  __Ergo_hook_fini_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpeintel)
+0001:00015b2a  __Intel_hook_init_
+0001:00015b82  __Intel_hook_fini_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(ismbdlow)
+0001:00015b83  _ismbdlower_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(fpeint)
+0002:00000f64  ___FPE_int
+0002:00000f65  ___IRQ_num
+0002:00000f66  ___IRQ_int
+0002:00000f67  ___MST_pic
+0002:00000f68+ ___SLV_pic
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbislegl)
+0001:00015c25  _ismbclegal_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(mbistrai)
+0001:00015c64  _ismbbtrail_
+Module: e:\WATCOM11\lib386\dos\clib3r.lib(isktable)
+0002:00000f6c  __IsKTable
+
+
+                        +---------------------------+
+                        |   Unresolved References   |
+                        +---------------------------+
+
+Undefined Symbol                Referenced by
+================                =============
+
+XRes                            TG.obj(D:\CW\MAPPER32\TG.ASM)
+
+
+                        +--------------------+
+                        |   Libraries Used   |
+                        +--------------------+
+
+jpeglibd.lib
+e:\WATCOM11\lib386\dos\clib3r.lib
+e:\WATCOM11\lib386\plib3r.lib
+e:\WATCOM11\lib386\math387r.lib
+e:\WATCOM11\lib386\dos\emu387.lib

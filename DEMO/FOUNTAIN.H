@@ -1,10 +1,11 @@
-#define FntInnerPcls 1000
-#define FntOuterPcls 2000
+#define FntFactor 1.5
+#define FntInnerPcls int(1000 * FntFactor)
+#define FntOuterPcls int(2000 * FntFactor)
 #define FntSpiralPclsOff (FntInnerPcls*3+FntOuterPcls)
-#define FntSpiralPcls 500
+#define FntSpiralPcls int(500 * FntFactor)
 
-#define FntSpawnOutPcl 400.0
-#define FntSpawnInnerPcl 80.0
+#define FntSpawnOutPcl int(400.0 * FntFactor)
+#define FntSpawnInnerPcl int(80.0 * FntFactor)
 
 #define FntSpawnOutDisp 1.0
 #define FntSpawnOutPow 30.0
@@ -20,8 +21,14 @@
 #define FntLightningTime4 2700
 #define FntLightningTime5 3200
 #define FntLightningTime6 3500
+//#define FntLightningTime1 500
+//#define FntLightningTime2 1500
+//#define FntLightningTime3 2200
+//#define FntLightningTime4 2700
+//#define FntLightningTime5 3200
+//#define FntLightningTime6 3500
 
-#define FntLightningPcls  400
+#define FntLightningPcls  int(400 * FntFactor)
 
 //#define FntPhotonStart 4500
 //#define FntPhotonAtVortex 4650

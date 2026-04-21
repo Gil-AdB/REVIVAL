@@ -4,11 +4,13 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include <dos.h>
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
-#include "Base/Omni.H"
+#include "Base/Omni.h"
+#include <memory>
+#include <simd/vectorclass.h>
+#include <FILLERS/SimdHelpers.h>
 
 dword WobNumOfHorizontalBlocks;
 dword WobNumOfVerticalBlocks;
@@ -31,7 +33,7 @@ DWord Colors32[256]; // a 32bit 256 color palette. For use with intensity
 Vector *WPDT = NULL;
 float WRFOV;
 
-void New_Image(Image *Img,long X,long Y)
+void New_Image(Image *Img, int32_t X, int32_t Y)
 {
 	Img->x = X; Img->y = Y; Img->Data = (DWord *)_aligned_malloc(sizeof(DWord)*X*Y, 16);
 }
@@ -39,15 +41,15 @@ void New_Image(Image *Img,long X,long Y)
 // Return Pseudorandom value between -1 and 1. Requires a polynomial
 // seed given at x.
 
-float frand1d(long x)
+float frand1d(int32_t x)
 {
-	long s = 71 * x; s = s * 8192 ^ s;
+	int32_t s = 71 * x; s = s * 8192 ^ s;
 	return 1.0 - ((s*(s*s*15731+789221)+1376312589)& 0x7fffffff)/1073741824.0;
 }
 
 float Noise1D(float x)
 {
-	long i;
+	int32_t i;
 	float f,n0,n1;
 	
 	i = floor(x);
@@ -60,7 +62,7 @@ float Noise1D(float x)
 
 void Make_Noise()
 {
-	long I;
+	int32_t I;
 	float f;
 	if (!NoiseTblRdy)
 	{
@@ -69,7 +71,7 @@ void Make_Noise()
 	}
 	for(I=0;I<=6283;I++)
 	{
-		f = I/100.0;
+		f = I/100.0f;
 		NoiseTbl[I] = Noise1D(f);
 	}
 }
@@ -79,7 +81,7 @@ void Make_Noise()
 // All additional variables are considered constant.
 void Generate_Flare_Image_Test(Image *Img,float FR,float FG,float FB,float blah,float XDec,float YDec)
 {
-	signed long X, Y;
+	int32_t X, Y;
 	char  Col;
 	float D, R, G, B, F, V ,A ,Bump;
 	float Y2;
@@ -142,7 +144,7 @@ void Generate_Flare_Image(Image *Img,float FR,float FG,float FB)
 {
     //memset(Img->Data, Img->x * Img->y * 4, 0);
     //return;
-	signed long X, Y;
+	int32_t X, Y;
 	float D, R, G, B, F, V ,A ,Bump;
 	float Y2;
 	float Linear = 2.0;
@@ -194,7 +196,7 @@ void Generate_Flare_Image(Image *Img,float FR,float FG,float FB)
 				G = Bump*FG;
 				B = Bump*FB;
 			}
-			if (R>=1.0&&G>=1.0&&B>=1.0) {*(unsigned long *)Pen = 0x00FFFFFF; Pen+=4; continue;}
+			if (R>=1.0&&G>=1.0&&B>=1.0) {*(uint32_t *)Pen = 0x00FFFFFF; Pen+=4; continue;}
 			
 			if (D<RMin || D>RMax)
 				Ring = 0;
@@ -266,8 +268,8 @@ void Generate_RGBFlares()
 Material *Generate_RGBFlare(unsigned char R,unsigned char G,unsigned char B)
 {
 	Image Img;
-	Material *M=(Material *)getAlignedBlock(sizeof(Material), 16);
-	memset(M,0,sizeof(Material));
+	Material *M = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
+	//memset(M,0,sizeof(Material));
 	Img.x = 256;
 	Img.y = 256;
 	M->Flags = Mat_Virtual;
@@ -292,19 +294,19 @@ void Fit_FlareImage(Omni *O)
 
 byte *FrcNoise;
 float FrcNoise_Grain;
-static long FN_X;
+static int32_t FN_X;
 
-long Linear_Rand(long Base,long Limit)
+int32_t Linear_Rand(int32_t Base, int32_t Limit)
 {
-	long L = Base-Limit+(rand()*Limit>>14);
+	int32_t L = Base-Limit+(RAND_15()*Limit>>14);
 	if (L<0) L=0;
 	if (L>255) L=255;
 	return L;
 }
 
-void Fract_Noise(long X1,long Y1,long X2,long Y2)
+void Fract_Noise(int32_t X1, int32_t Y1, int32_t X2, int32_t Y2)
 {
-	long X,Y;
+	int32_t X,Y;
 	byte C11,C12,C21,C22;
 	
 	if (X2-X1<2&&Y2-Y1<2) return;
@@ -329,7 +331,7 @@ void Fract_Noise(long X1,long Y1,long X2,long Y2)
 // note : Also generates noise within alpha channel
 void Generate_Fractal_Noise(Image *Img,float Graininess)
 {
-	long I;
+	int32_t I;
 	FrcNoise = (byte *)Img->Data;
 	FrcNoise_Grain = Graininess;
 	FN_X = Img->x;
@@ -345,7 +347,7 @@ void Generate_Fractal_Noise(Image *Img,float Graininess)
 	}
 }
 
-static long xseed;
+static int32_t xseed;
 
 unsigned char cfunc (short x)
 {
@@ -380,13 +382,13 @@ void initrand (void)
 	}
 }
 
-char gb (byte *buf, long x)
+char gb (byte *buf, int32_t x)
 {
 	//  cout << hex << x << '\n';
 	return buf[x<<2];
 }
 
-void Generate_Plasma(Image *Img, short p, long seed)
+void Generate_Plasma(Image *Img, short p, int32_t seed)
 {
 	byte *buf = (byte *)Img->Data;
 
@@ -398,13 +400,13 @@ void Generate_Plasma(Image *Img, short p, long seed)
 		initrand();
 		buf[0]=the_rand()&255;
 		
-		unsigned long mx2=0x100;
-		unsigned long my2=0x10000l;
-		unsigned long x,y;
+		uint32_t mx2=0x100;
+		uint32_t my2=0x10000l;
+		uint32_t x,y;
 		
 		do {
-			unsigned long mx=mx2>>1;
-			unsigned long my=my2>>1;
+			uint32_t mx=mx2>>1;
+			uint32_t my=my2>>1;
 			for (y=0; y<0x10000l; y+=my2)
 				for (x=0; x<0x100; x+=mx2)
 				{
@@ -424,7 +426,7 @@ void Generate_Plasma(Image *Img, short p, long seed)
 							gb(buf, (x+y))+
 							gb(buf, (x+mx+y+my))+
 							gb(buf, (x+((y+my2)&0xffffl)));
-						((the_rand()*p)>>16);
+						// ((the_rand()*p)>>16);
 						buf[(x+y+my)<<2]=cfunc (c>>2);
 					}
 					for (y=0; y<0x10000l; y+=my2)
@@ -435,7 +437,7 @@ void Generate_Plasma(Image *Img, short p, long seed)
 								gb(buf,x+mx+((y-my)&0xffffl))+
 								gb(buf,((x+mx2)&255)+y)+
 								gb(buf,x+mx+y+my);
-							((the_rand()*p)>>16);
+							// ((the_rand()*p)>>16);
 							buf[(x+mx+y)<<2]=cfunc(c>>2);
 						}
 						mx2=mx;
@@ -456,8 +458,8 @@ void Generate_Plasma(Image *Img, short p, long seed)
 #define Grid_LOGSubsamp 3
 #define Grid_Subsamp 8
 
-long Grid_X,Grid_Y,Grid_XY;
-long AGrid_X,AGrid_Y,AGrid_XY;
+int32_t Grid_X,Grid_Y,Grid_XY;
+int32_t AGrid_X,AGrid_Y,AGrid_XY;
 
 void Init_PlanarGrid(GridPoint **GP)
 {
@@ -530,12 +532,12 @@ long J1 = XRes-Grid_Subsamp,J2 = YOffs[Grid_Subsamp];
 } */
 
 // texture grid renderer.
-void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword XRes, dword YRes)
+void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword xres, dword yres)
 {
 	// hopefully, paragraph aligned
-	static mmreg c0, c1, dc0dy, dc1dy, c, dcdx, t;
+//	mmreg c0, c1, dc0dy, dc1dy, c, dcdx, t;
 
-	mword i, j, x, y, gx = (XRes / Grid_Subsamp)+1;
+	mword i, j, x, y, gx = (xres / Grid_Subsamp)+1;
 	dword *tex = Img->Data;
 	
 	GridPointT *p[4];
@@ -548,27 +550,27 @@ void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword XRes, dword YRes
 
 	dword *block = page, *scanline;
 
-	long YLimit = YRes-Grid_Subsamp;
+	int32_t YLimit = yres-Grid_Subsamp;
 	for(j=0; j<=YLimit; j += Grid_Subsamp)
 	{
-		for(i=0; i<XRes; i += Grid_Subsamp)
+		for(i=0; i<xres; i += Grid_Subsamp)
 		{
-			long u0 = p[0]->u;
-			long v0 = p[0]->v;
-			long u1 = p[1]->u;
-			long v1 = p[1]->v;
+			int32_t u0 = p[0]->u;
+			int32_t v0 = p[0]->v;
+			int32_t u1 = p[1]->u;
+			int32_t v1 = p[1]->v;
 
-			long du0dy = (p[2]->u - u0) >> Grid_LOGSubsamp;
-			long dv0dy = (p[2]->v - v0) >> Grid_LOGSubsamp;			
-			long du1dy = (p[3]->u - u1) >> Grid_LOGSubsamp;
-			long dv1dy = (p[3]->v - v1) >> Grid_LOGSubsamp;
+			int32_t du0dy = (p[2]->u - u0) >> Grid_LOGSubsamp;
+			int32_t dv0dy = (p[2]->v - v0) >> Grid_LOGSubsamp;			
+			int32_t du1dy = (p[3]->u - u1) >> Grid_LOGSubsamp;
+			int32_t dv1dy = (p[3]->v - v1) >> Grid_LOGSubsamp;
 
 			scanline = block;
 			for(y=0; y<Grid_Subsamp; y++)
 			{
-				long u = u0, v = v0;
-				long dudx = (u1-u0)>>Grid_LOGSubsamp;
-				long dvdx = (v1-v0)>>Grid_LOGSubsamp;
+				int32_t u = u0, v = v0;
+				int32_t dudx = (u1-u0)>>Grid_LOGSubsamp;
+				int32_t dvdx = (v1-v0)>>Grid_LOGSubsamp;
 				for(x=0; x<Grid_Subsamp; x++)
 				{
 					scanline[x] = tex[((u&0xFF00)>>8) + (v&0xFF00)];
@@ -576,7 +578,7 @@ void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword XRes, dword YRes
 					u += dudx;
 					v += dvdx;
 				}
-				scanline += XRes;
+				scanline += xres;
 				u0 += du0dy;
 				v0 += dv0dy;
 				u1 += du1dy;
@@ -588,7 +590,7 @@ void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword XRes, dword YRes
 			p[2]++;
 			p[3]++;
 		}
-		block += (Grid_Subsamp-1) * XRes;
+		block += (Grid_Subsamp-1) * xres;
 		p[0]++;
 		p[1]++;
 		p[2]++;
@@ -597,8 +599,8 @@ void GridRendererT(GridPointT *GP,Image *Img,dword *page, dword XRes, dword YRes
 }
 
 #pragma pack(push, 1)
-__declspec(align(16)) struct uint128 {
-	uint64 low, high;
+struct alignas(16) uint128 {
+	uint64_t low, high;
 };
 #pragma pack(pop)
 
@@ -606,118 +608,78 @@ __declspec(align(16)) struct uint128 {
 // texture/gouraud grid renderer.
 void GridRendererTG(GridPointTG *GP,Image *Img,dword *page, dword XRes, dword YRes)
 {
+	const auto UScaleFactor = 256.0f;
+	const auto VScaleFactor = 256.0f;
+	int32_t t0_umask = (1 << 8) - 1;
+	int32_t t0_vmask = (1 << 8) - 1;
+	int32_t t0_umask_swizzled = swizzle_umask(8, t0_umask);
+
+
 	// hopefully, paragraph aligned
-	static mmreg c0, c1, dc0dy, dc1dy, c, dcdx, t;
 
-	mword i, j, x, y, gx = (XRes / Grid_Subsamp)+1;
-	dword *tex = Img->Data;
-	
-	GridPointTG *p[4];
-//	GridPointTG *p00, *p01, *p10, *p11;		
+//	Vec8ui c0, c1, dc0dy, dc1dy, c, dcdx, t;
+	dword i, j, x, y, gx = (XRes / Grid_Subsamp) + 1;
+	dword* tex = Img->Data;
+	GridPointTG* p[4];
+	//	GridPointTG *p00, *p01, *p10, *p11;		
 
-	p[0] = GP; 
+	p[0] = GP;
 	p[1] = GP + 1;
-	p[2] = GP + gx; 
+	p[2] = GP + gx;
 	p[3] = GP + gx + 1;
 
-	dword *block = page, *scanline;
+	dword* block = page, * scanline;
 
-	long YLimit = YRes-Grid_Subsamp;
-	for(j=0; j<=YLimit; j += Grid_Subsamp)
-	{
-		for(i=0; i<XRes; i += Grid_Subsamp)
-		{
-			long u0 = p[0]->u;
-			long v0 = p[0]->v;
-			c0 = p[0]->BGRA;
-			long u1 = p[1]->u;
-			long v1 = p[1]->v;
-			c1 = p[1]->BGRA;
+	int32_t YLimit = YRes - Grid_Subsamp;
+	for (j = 0; j <= YLimit; j += Grid_Subsamp) {
+		for (i = 0; i < XRes; i += Grid_Subsamp) {
+			auto c0 = p[0]->BGRA;
+			auto c1 = p[1]->BGRA;
+			auto dc0dy = ((p[2]->BGRA) - c0) >> Grid_LOGSubsamp;
+			auto dc1dy = ((p[3]->BGRA) - c1) >> Grid_LOGSubsamp;
 
-			long du0dy = (p[2]->u - u0) >> Grid_LOGSubsamp;
-			long dv0dy = (p[2]->v - v0) >> Grid_LOGSubsamp;			
-//			dc0dy = (p[2]->BGRA - c0)   >> Grid_LOGSubsamp;
-			dc0dy.subw(p[2]->BGRA, c0);
-			dc0dy.sarw(Grid_LOGSubsamp);
-			long du1dy = (p[3]->u - u1) >> Grid_LOGSubsamp;
-			long dv1dy = (p[3]->v - v1) >> Grid_LOGSubsamp;
-//			dc1dy = (p[3]->BGRA - c1)   >> Grid_LOGSubsamp;
-			dc1dy.subw(p[3]->BGRA, c1);
-			dc1dy.sarw(Grid_LOGSubsamp);
+
+			auto u0 = p[0]->u;
+			auto v0 = p[0]->v;
+			auto u1 = p[1]->u;
+			auto v1 = p[1]->v;
+
+			auto du0dy = (p[2]->u - u0) / Grid_Subsamp;
+			auto dv0dy = (p[2]->v - v0) / Grid_Subsamp;
+			auto du1dy = (p[3]->u - u1) / Grid_Subsamp;
+			auto dv1dy = (p[3]->v - v1) / Grid_Subsamp;
 
 			scanline = block;
-			for(y=0; y<Grid_Subsamp; y++)
-			{
-				long u = u0, v = v0;
-				c = c0;
-				long dudx = (u1-u0)>>Grid_LOGSubsamp;
-				long dvdx = (v1-v0)>>Grid_LOGSubsamp;
-//				dcdx = (c1-c0)>>Grid_LOGSubsamp;
-				dcdx.subw(c1, c0);
-				dcdx.sarw(Grid_LOGSubsamp);
-				for(x=0; x<Grid_Subsamp; x+=4)
-				{
-//					t._d32[0] = tex[((u&0xFF00)>>8) + v&0xFF00];
-//					t.cbw();
-//					t.shlw(1);
-//					t.mulh(c);
-//					t.cwb();
-//					scanline[x] = t._d32[0];
-//					c.addw(dcdx);
-					uint128 tx;
-					tx.low = static_cast<uint64>(tex[((u&0xFF00)>>8) + (v&0xFF00)]);
-					u += dudx; v += dvdx;
-					tx.low |= static_cast<uint64>(tex[((u & 0xFF00) >> 8) + (v & 0xFF00)]) << 32;
-					u += dudx; v += dvdx;
-					tx.high = static_cast<uint64>(tex[((u & 0xFF00) >> 8) + (v & 0xFF00)]);
-					u += dudx; v += dvdx;
-					tx.high |= static_cast<uint64>(tex[((u & 0xFF00) >> 8) + (v & 0xFF00)]) << 32;
-					u += dudx; v += dvdx;
-					uint128 color1, color2;
-					color1.low = (static_cast<uint64>(c._d16[3]) << 48) | (static_cast<uint64>(c._d16[2]) << 32) | (static_cast<uint64>(c._d16[1]) << 16) | (static_cast<uint64>(c._d16[0]));
-					c.addw(dcdx);
-					color1.high = (static_cast<uint64>(c._d16[3]) << 48) | (static_cast<uint64>(c._d16[2]) << 32) | (static_cast<uint64>(c._d16[1]) << 16) | (static_cast<uint64>(c._d16[0]));
-					c.addw(dcdx);
-					color2.low = (static_cast<uint64>(c._d16[3]) << 48) | (static_cast<uint64>(c._d16[2]) << 32) | (static_cast<uint64>(c._d16[1]) << 16) | (static_cast<uint64>(c._d16[0]));
-					c.addw(dcdx);
-					color2.high = (static_cast<uint64>(c._d16[3]) << 48) | (static_cast<uint64>(c._d16[2]) << 32) | (static_cast<uint64>(c._d16[1]) << 16) | (static_cast<uint64>(c._d16[0]));
-					c.addw(dcdx);
-					//color1.low = color2.low = color1.high = color2.high = 0x8080808080808080ULL;
-					char * WritePtr = (char *)&scanline[x];
-					__asm
-					{
-						push esi
-						mov esi, WritePtr
-						movdqa xmm0, [tx]
-						pxor xmm2, xmm2
-						pxor xmm4, xmm4
-						movdqa xmm1, [color1]
-						movdqa xmm3, [color2]
-						punpcklbw xmm4, xmm0
-						punpckhbw xmm2, xmm0
-						; psrlw xmm2, 8
-						; psrlw xmm4, 8
-						 psrlw xmm1, 8
-						 psrlw xmm3, 8
-						 pmulhuw xmm2, xmm1
-						 pmulhuw xmm4, xmm3
-						 psllw xmm2, 1
-						 psllw xmm4, 1
-						 packuswb xmm4, xmm2
-						movdqa [esi], xmm4
-						pop esi
-					}
-//					scanline[x] = tx;
-					
-					//u += dudx;
-					//v += dvdx;
-					//c.addw(dcdx);
-				}
+			for (y = 0; y < Grid_Subsamp; y++) {
+				auto dudx = (u1 - u0) / Grid_Subsamp;
+				auto dvdx = (v1 - v0) / Grid_Subsamp;
+				Vec8f p_u = v8_from_arith_seq(u0, dudx);
+				Vec8f p_v = v8_from_arith_seq(v0, dvdx);
+
+				Vec8i u = roundi(p_u);
+				Vec8i v = roundi(p_v);
+
+				auto c = c0;
+				auto dcdx = (c1 - c0) >> Grid_LOGSubsamp;
+				auto color = Vec32us(v32_from_arith_seq(c0, dcdx));
+
+
+				Vec8i tu = packed_tile_u(u, 8, t0_umask_swizzled);
+				Vec8i tv = packed_tile_v(v, t0_vmask);
+
+				auto p_offset = tu + tv;
+				const auto texture_samples = colorize<6>(Vec32uc(gather(Vec8ui(p_offset), tex)), color);
+
+				texture_samples.store(scanline);
+
 				scanline += XRes;
+
 				u0 += du0dy;
 				v0 += dv0dy;
 				u1 += du1dy;
 				v1 += dv1dy;
+				c0 += dc0dy;
+				c1 += dc1dy;
 			}
 			block += Grid_Subsamp;
 			p[0]++;
@@ -725,17 +687,13 @@ void GridRendererTG(GridPointTG *GP,Image *Img,dword *page, dword XRes, dword YR
 			p[2]++;
 			p[3]++;
 		}
-		block += (Grid_Subsamp-1) * XRes;
+		block += (Grid_Subsamp - 1) * XRes;
 		p[0]++;
 		p[1]++;
 		p[2]++;
 		p[3]++;
 	}
-	//mmreg::clearstate();
-	__asm
-	{
-		emms
-	}
+
 }
 
 #ifdef _C_WATCOM
@@ -765,7 +723,7 @@ extern "C" void _Grid_Texture_Mapper_TG(char *Texture,GridPoint *Points,char *Vi
 #define CGrid_Texture_MapASM_320	Grid_Texture_MapASM_320V
 #define CGrid_Texture_MapASM_XXX	Grid_Texture_MapASM_XXXV
 #define CGrid_Texture_MapASMMX		Grid_Texture_MapASMMXV
-#define CGrid_Texture_Mapper_TG		Grid_Texture_Mapper_TGV
+#define CGrid_Texture_Mapper_TG		GridRendererTG // Grid_Texture_Mapper_TGV
 #define CGrid_Texture_Mapper_T		Grid_Texture_Mapper_TV
 
 //extern "C" void Grid_Texture_MapASM_(void);
@@ -849,169 +807,6 @@ void Grid_Texture_Mapper_TV(char *Texture, GridPointT *Points, char *VirScr)
 #define u_ofs		0
 #define v_ofs		4
 #define ElementSize 8
-	__asm
-	{
-		mov esi, [Points]
-		mov edi, [VirScr]
-
-		//pushad
-		//call Grid_Texture_Mapper_TG_
-		//popad
-
-		mov[ScanLine], edi
-		mov[PointsList], esi
-		mov eax, [MMXWobNumOfHorizontalBlocks]
-		mov[x], eax
-		mov eax, [MMXWobNumOfVerticalBlocks]
-		mov[y], eax
-
-		DrawLoop :
-			mov edi, [MMXWobNumOfHorizontalBlocks]
-			mov eax, [esi + u_ofs]
-			inc edi
-			shl edi, 3
-
-			mov		  ebx, [esi + v_ofs]
-			mov		  [Left_U], eax
-			mov		  [Left_V], ebx
-			mov		  ecx, [esi + edi + u_ofs]
-			mov		  edx, [esi + edi + v_ofs]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			mov		  eax, [esi + ElementSize + u_ofs]
-			sar		  edx, 3
-			mov		  [Delta_Left_U], ecx
-			mov		  [Delta_Left_V], edx
-			mov		  ebx, [esi + ElementSize + v_ofs]
-			mov		  [Right_U], eax
-			mov		  [Right_V], ebx
-			mov		  ecx, [esi + edi + u_ofs + ElementSize]
-			mov		  edx, [esi + edi + v_ofs + ElementSize]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			sar		  edx, 3
-			mov		  [Delta_Right_U], ecx
-			mov		  [Delta_Right_V], edx
-
-			mov [PointsList], esi
-			mov edi, [ScanLine]
-			mov [Counter], 8
-			Inner8:
-			mov eax, [Left_U]
-			mov ebx, [Left_V]
-			mov ecx, [Right_U]
-			mov edx, [Right_V]
-			sub ecx, eax
-			sub edx, ebx
-			sar ecx, 3
-			sar edx, 3
-			mov [du], ecx
-			mov [dv], edx
-
-			xor edx, edx
-			mov dl, ah
-			mov dh, bh
-			pxor      mm0, mm0
-			mov esi, [Texture]
-			// inner loop(unrolled)
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi+4], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi+8], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi+12], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi+16], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movq		[edi+20], mm0
-
-			movd		mm0, [esi + edx * 4]
-			add			eax, [du]
-			add			ebx, [dv]
-			mov			dl, ah
-			mov			dh, bh
-			movd		[edi+24], mm0
-
-			movd		mm0, [esi + edx * 4]
-			movd		[edi + 28], mm0
-
-			// inner loop end(unrolled)
-			// sub		  edi, 32
-			add       edi, [MMXWobBPSL]
-			mov       eax, [Left_U]
-			mov       ebx, [Left_V]
-			add       eax, [Delta_Left_U]
-			add       ebx, [Delta_Left_V]
-			mov		  [Left_U], eax
-			mov		  [Left_V], ebx
-			mov       ebx, [Right_V]
-			mov       eax, [Right_U]
-			add       eax, [Delta_Right_U]
-			add       ebx, [Delta_Right_V]
-			mov		  [Right_U], eax
-			mov		  [Right_V], ebx
-			mov       esi, [Counter]
-			dec       esi
-			mov		  [Counter], esi
-			jne       Inner8
-			mov       eax, [ScanLine]
-			add       eax, 32
-			mov		  [ScanLine], eax
-			mov       esi, [PointsList]
-			add		  esi, ElementSize
-			mov		  [PointsList], esi
-			mov       ebx, [x]
-			dec       ebx
-			mov		  [x], ebx
-			jne       DrawLoop
-			mov		  ecx, [MMXWobNumOfHorizontalBlocks]
-			mov		  [x], ecx
-			mov       ecx, [ScanLine]
-			mov       ebx, [y]
-			add		  ecx, [MMXWobBlockJump]; (8 - 1)*ScreenWidth * 4
-			add		  esi, ElementSize
-			mov[PointsList], esi
-			mov[ScanLine], ecx
-			dec       ebx
-			mov[y], ebx
-			jne       DrawLoop
-			emms
-
-	}
 #undef	u_ofs
 #undef	v_ofs
 #undef	ElementSize
@@ -1046,232 +841,6 @@ void Grid_Texture_Mapper_TGV(char *Texture,GridPointTG *Points,char *VirScr)
 #define v_ofs		4
 #define RGBA_ofs	8
 #define ElementSize 16
-	__asm
-	{
-		mov esi, [Points]
-		mov edi, [VirScr]
-
-		//pushad
-		//call Grid_Texture_Mapper_TG_
-		//popad
-
-		mov	[ScanLine], edi
-		mov	[PointsList], esi
-		mov eax, [MMXWobNumOfHorizontalBlocks]
-		mov	[x], eax
-		mov eax, [MMXWobNumOfVerticalBlocks]
-		mov	[y], eax
-
-		DrawLoop:
-			mov edi, [MMXWobNumOfHorizontalBlocks]
-			mov eax, [esi + u_ofs]
-			inc edi
-			shl edi, 4
-
-			mov ebx,  [esi + v_ofs]
-			mov		  [Left_U], eax
-			mov		  [Left_V], ebx
-			mov		  ecx, [esi + edi + u_ofs]
-			mov		  edx, [esi + edi + v_ofs]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			mov		  eax, [esi + ElementSize + u_ofs]
-			sar		  edx, 3
-			mov		  [Delta_Left_U], ecx
-			mov		  [Delta_Left_V], edx
-			mov		  ebx, [esi + ElementSize + v_ofs]
-			mov		  [Right_U], eax
-			mov		  [Right_V], ebx
-			mov		  ecx, [esi + edi + u_ofs + ElementSize]
-			mov		  edx, [esi + edi + v_ofs + ElementSize]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			sar		  edx, 3
-			mov		  [Delta_Right_U], ecx
-			mov		  [Delta_Right_V], edx
-
-			; MMX stuff
-			; MM4 - Left RGBA
-			; MM5 - Delta Left RGBA
-			; MM6 - Right RGBA
-			; MM7 - Delta Right RGBA
-			movq	mm4, [esi + RGBA_ofs]; Left RGBA
-			movq	mm5, [esi + edi + RGBA_ofs]; Bottom Left RGBA
-			psubw	mm5, mm4
-			psraw	mm5, 3
-			movq    mm6, [esi + ElementSize + RGBA_ofs]; Right RGBA
-			movq    mm7, [esi + edi + ElementSize + RGBA_ofs]; Bottom Right RGBA
-			psubw	mm7, mm6
-			psraw	mm7, 3
-
-			mov	[PointsList], esi
-			mov edi, [ScanLine]
-			mov	[Counter], 8
-
-Inner8:
-			; MMX stuff
-				; MM2 - Left RGBA
-				; MM3 - Delta RGBA
-				movq	mm2, mm4
-				movq	mm3, mm6
-				psubw   mm3, mm2
-				psraw	mm3, 3
-				mov eax, [Left_U]
-				mov ebx, [Left_V]
-				mov ecx, [Right_U]
-				mov edx, [Right_V]
-				sub ecx, eax
-				sub edx, ebx
-				sar ecx, 3
-				sar edx, 3
-				mov[du], ecx
-				mov[dv], edx
-
-				xor edx, edx
-				mov dl, ah
-				mov dh, bh
-
-				mov esi, [Texture]
-				; inner loop(unrolled)
-				mov ecx,4
-				ALIGN 16
-		Inner:
-				punpcklbw	mm0, [esi + edx * 4]
-				add			eax, [du]
-				add			ebx, [dv]
-				mov			dl, ah
-				mov			dh, bh
-				psrlw		mm0, 8
-				pmulhuw		mm0, mm2
-				paddw		mm2, mm3
-
-				punpcklbw	mm1, [esi + edx * 4]
-				add			eax, [du]
-				add			ebx, [dv]
-				mov			dl, ah
-				mov			dh, bh
-				psrlw		mm1, 8
-				pmulhuw		mm1, mm2
-				psllw		mm0, 1
-				psllw		mm1, 1
-				packuswb	mm0, mm1
-				movq		[edi], mm0
-
-				add edi, 8
-
-				paddw		mm2, mm3
-
-				dec ecx
-				jnz Inner
-
-				//punpcklbw	mm0, [esi + edx * 4]
-				//psrlw		mm0, 8
-				//pmulhuw		mm0, mm2
-				//add			eax, [du]
-				//add			ebx, [dv]
-				//mov			dl, ah
-				//mov			dh, bh
-				//punpcklbw	mm1, [esi + edx * 4]
-				//paddw		mm2, mm3
-
-				//psrlw		mm1, 8
-				//pmulhuw		mm1, mm2
-				//psllw		mm0, 1
-				//psllw		mm1, 1
-				//packuswb	mm0, mm1
-				//movq		[edi + 8], mm0
-				//add			eax, [du]
-				//add			ebx, [dv]
-				//mov			dl, ah
-				//mov			dh, bh
-				//paddw		mm2, mm3
-
-				//punpcklbw	mm0, [esi + edx * 4]
-				//psrlw		mm0, 8
-				//pmulhuw		mm0, mm2
-				//add			eax, [du]
-				//add			ebx, [dv]
-				//mov			dl, ah
-				//mov			dh, bh
-				//paddw		mm2, mm3
-
-				//punpcklbw	mm1, [esi + edx * 4]
-				//psrlw		mm1, 8
-				//pmulhuw		mm1, mm2
-				//psllw		mm0, 1
-				//psllw		mm1, 1
-				//packuswb	mm0, mm1
-				//movq		[edi + 16], mm0
-				//add			eax, [du]
-				//add			ebx, [dv]
-				//mov			dl, ah
-				//mov			dh, bh
-				//paddw		mm2, mm3
-
-				//punpcklbw	mm0, [esi + edx * 4]
-				//psrlw		mm0, 8
-				//pmulhuw		mm0, mm2
-				//add			eax, [du]
-				//add			ebx, [dv]
-				//mov			dl, ah
-				//mov			dh, bh
-				//paddw		mm2, mm3
-
-				//punpcklbw	mm1, [esi + edx * 4]
-				//psrlw		mm1, 8
-				//pmulhuw		mm1, mm2
-				//psllw		mm0, 1
-				//psllw		mm1, 1
-				//packuswb	mm0, mm1
-				//movq		[edi + 24], mm0
-
-				; inner loop end(unrolled)
-				sub		  edi, 32
-				add       edi, [MMXWobBPSL]
-				paddw	  mm4, mm5;	Left RGBA
-				paddw	  mm6, mm7;	Left RGBA
-				mov       eax, [Left_U]
-				mov       ebx, [Left_V]
-				add       eax, [Delta_Left_U]
-				add       ebx, [Delta_Left_V]
-				mov		  [Left_U], eax
-				mov		  [Left_V], ebx
-				mov       ebx, [Right_V]
-				mov       eax, [Right_U]
-				add       eax, [Delta_Right_U]
-				add       ebx, [Delta_Right_V]
-				mov		  [Right_U], eax
-				mov		  [Right_V], ebx
-				mov       esi, [Counter]
-				dec       esi
-				mov	[Counter], esi
-			jne       Inner8
-			mov       eax, [ScanLine]
-			add       eax, 32
-			mov	[ScanLine], eax
-			mov       esi, [PointsList]
-			add		  esi, ElementSize
-			mov	[PointsList], esi
-			mov       ebx, [x]
-			dec       ebx
-			mov	[x], ebx
-		jne       DrawLoop
-		mov		  ecx, [MMXWobNumOfHorizontalBlocks]
-		mov	[x], ecx
-		mov       ecx, [ScanLine]
-		mov       ebx, [y]
-		add		  ecx, [MMXWobBlockJump]; (8 - 1)*ScreenWidth * 4
-		add		  esi, ElementSize
-		mov	[PointsList], esi
-		mov	[ScanLine], ecx
-		dec       ebx
-		mov	[y], ebx
-		jne       DrawLoop
-		emms
-
-	}
 #undef	u_ofs
 #undef	v_ofs
 #undef	RGBA_ofs
@@ -1307,240 +876,6 @@ void Grid_Texture_Mapper_TGV_XMM(char *Texture, GridPointTG *Points, char *VirSc
 #define v_ofs		4
 #define RGBA_ofs	8
 #define ElementSize 16
-	__asm
-	{
-		mov esi, [Points]
-		mov edi, [VirScr]
-
-		mov[ScanLine], edi
-		mov[PointsList], esi
-		mov eax, [MMXWobNumOfHorizontalBlocks]
-		mov[x], eax
-		mov eax, [MMXWobNumOfVerticalBlocks]
-		mov[y], eax
-
-		DrawLoop :
-		mov edi, [MMXWobNumOfHorizontalBlocks]
-			mov eax, [esi + u_ofs]
-			inc edi
-			shl edi, 4
-
-			mov ebx, [esi + v_ofs]
-			mov		  [Left_U], eax
-			mov		  [Left_V], ebx
-			mov		  ecx, [esi + edi + u_ofs]
-			mov		  edx, [esi + edi + v_ofs]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			mov		  eax, [esi + ElementSize + u_ofs]
-			sar		  edx, 3
-			mov		  [Delta_Left_U], ecx
-			mov		  [Delta_Left_V], edx
-			mov		  ebx, [esi + ElementSize + v_ofs]
-			mov		  [Right_U], eax
-			mov		  [Right_V], ebx
-			mov		  ecx, [esi + edi + u_ofs + ElementSize]
-			mov		  edx, [esi + edi + v_ofs + ElementSize]
-			sub		  ecx, eax
-			sub		  edx, ebx
-			sar		  ecx, 3
-			sar		  edx, 3
-			mov		  [Delta_Right_U], ecx
-			mov		  [Delta_Right_V], edx
-
-			//; MMX stuff
-			//; MM4 - Left RGBA
-			//; MM5 - Delta Left RGBA
-			//; MM6 - Right RGBA
-			//; MM7 - Delta Right RGBA
-			movq	mm4, [esi + RGBA_ofs]; Left RGBA
-			movq	mm5, [esi + edi + RGBA_ofs]; Bottom Left RGBA
-			psubw	mm5, mm4
-			psraw	mm5, 3
-			movq    mm6, [esi + ElementSize + RGBA_ofs]; Right RGBA
-			movq    mm7, [esi + edi + ElementSize + RGBA_ofs]; Bottom Right RGBA
-			psubw	mm7, mm6
-			psraw	mm7, 3
-			//; movdqa[DULC], xmm5
-			//; movdqa[DURC], xmm7
-
-			mov [PointsList], esi
-			mov edi, [ScanLine]
-			mov [Counter], 8
-			Inner8:
-			//; MMX stuff
-			//	; MM2 - Left RGBA
-			//	; MM3 - Delta RGBA
-				movq	mm2, mm4
-				movq	mm3, mm6
-				psubw   mm3, mm2
-				psraw	mm3, 3
-				mov eax, [Left_U]
-				mov ebx, [Left_V]
-				mov ecx, [Right_U]
-				mov edx, [Right_V]
-				sub ecx, eax
-				sub edx, ebx
-				sar ecx, 3
-				sar edx, 3
-				mov[du], ecx
-				mov[dv], edx
-
-				xor edx, edx
-				mov dl, ah
-				mov dh, bh
-
-				mov esi, [Texture]
-				; inner loop(unrolled)
-
-				movq[color1], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 0
-				mov			dl, ah
-				mov			dh, bh
-
-				movq[color1 + 8], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 1
-				mov			dl, ah
-				mov			dh, bh
-
-				movq[color2], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 2
-				mov			dl, ah
-				mov			dh, bh
-
-				movq[color2 + 8], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 3
-				mov			dl, ah
-				mov			dh, bh
-
-
-				pxor		xmm1, xmm1
-				pxor		xmm2, xmm2
-				movdqa		xmm3, [color1]
-				movdqa		xmm4, [color2]
-				punpcklbw	xmm1, xmm0
-				punpckhbw	xmm2, xmm0
-				psrlw		xmm3, 8
-				psrlw		xmm4, 8
-				pmulhuw		xmm1, xmm3
-				pmulhuw		xmm2, xmm4
-				psllw		xmm1, 1
-				psllw		xmm2, 1
-				packuswb	xmm1, xmm2
-				movdqa		[edi], xmm1
-
-
-
-				pxor		xmm0, xmm0
-				pxor		xmm1, xmm1
-				pxor		xmm2, xmm2
-
-				movq		[color1], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 0
-				mov			dl, ah
-				mov			dh, bh
-
-				movq		[color1 + 8], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 1
-				mov			dl, ah
-				mov			dh, bh
-
-				movq[color2], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 2
-				mov			dl, ah
-				mov			dh, bh
-
-				movq[color2 + 8], mm2
-				paddw		mm2, mm3
-				add			eax, [du]
-				add			ebx, [dv]
-				PINSRD		xmm0, [esi + edx * 4], 3
-				mov			dl, ah
-				mov			dh, bh
-
-
-				movdqa		xmm3, [color1]
-				movdqa		xmm4, [color2]
-				punpcklbw	xmm1, xmm0
-				punpckhbw	xmm2, xmm0
-				psrlw		xmm3, 8
-				psrlw		xmm4, 8
-				pmulhuw		xmm1, xmm3
-				pmulhuw		xmm2, xmm4
-				psllw		xmm1, 1
-				psllw		xmm2, 1
-				packuswb	xmm1, xmm2
-				movdqa		[edi+16], xmm1
-
-
-				; inner loop end(unrolled)
-				add       edi, [MMXWobBPSL]
-				; paddw	  xmm4, xmm5;	Left RGBA
-				paddw	  xmm4, [DULC];	Left RGBA
-				; paddw	  xmm6, xmm7;	Right RGBA
-				paddw	  xmm6, [DURC];	Right RGBA
-				mov       eax, [Left_U]
-				mov       ebx, [Left_V]
-				add       eax, [Delta_Left_U]
-				add       ebx, [Delta_Left_V]
-				mov[Left_U], eax
-				mov[Left_V], ebx
-				mov       ebx, [Right_V]
-				mov       eax, [Right_U]
-				add       eax, [Delta_Right_U]
-				add       ebx, [Delta_Right_V]
-				mov[Right_U], eax
-				mov[Right_V], ebx
-				mov       esi, [Counter]
-				dec       esi
-				mov[Counter], esi
-			jne       Inner8
-			mov       eax, [ScanLine]
-			add       eax, 32
-			mov[ScanLine], eax
-			mov       esi, [PointsList]
-			add		  esi, ElementSize
-			mov[PointsList], esi
-			mov       ebx, [x]
-			dec       ebx
-			mov[x], ebx
-			jne       DrawLoop
-			mov		  ecx, [MMXWobNumOfHorizontalBlocks]
-			mov[x], ecx
-			mov       ecx, [ScanLine]
-			mov       ebx, [y]
-			add		  ecx, [MMXWobBlockJump]; (8 - 1)*ScreenWidth * 4
-			add		  esi, ElementSize
-			mov[PointsList], esi
-			mov[ScanLine], ecx
-			dec       ebx
-			mov[y], ebx
-			jne       DrawLoop
-			emms
-
-	}
 #undef	u_ofs
 #undef	v_ofs
 #undef	RGBA_ofs
@@ -1594,9 +929,10 @@ void Grid_Texture_MapASMMX(GridPoint *GP,Image *Img,DWord *DAC)
 	CGrid_Texture_MapASMMX((char *)Img->Data,GP,(char *)DAC);
 }
 */
-void Grid_Texture_Mapper_TG(GridPointTG *GP,Image *Img,DWord *DAC)
+void Grid_Texture_Mapper_TG(GridPointTG *GP,Image *Img,DWord *DAC, dword x, dword y)
 {
-	CGrid_Texture_Mapper_TG((char *)Img->Data,GP,(char *)DAC);
+	GridRendererTG(GP, Img, DAC, x, y);
+	//CGrid_Texture_Mapper_TG((char *)Img->Data,GP,(char *)DAC, XRes, YRes);
 }
 
 void Grid_Texture_Mapper_T(GridPointT *GP, Image *Img, DWord *DAC)
@@ -1625,7 +961,7 @@ void GridFX_Test()
 		Grid_Texture_Mapper(GP,&Img,(DWord *)VPage);*/
 }
 
-long WW_Spots,WW_CS;
+int32_t WW_Spots,WW_CS;
 float WW_Grav,WW_Pulse;
 AGridPoint *WW_Grid,*WW_GO;
 AGridPoint *WW_SP;
@@ -1664,7 +1000,7 @@ void Reset_WWGrid()
 
 void Update_WWGrid()
 {
-	long I,J;
+	int32_t I,J;
 	//  GridPoint *V,*W;
 	//  GridPoint F,U;
 	float D;
@@ -1738,19 +1074,12 @@ extern "C" void __cdecl _P_Texture_32(Bi_Triangle * BT, char * Bitmap,unsigned i
 extern "C" void __cdecl P_Texture_32_(void);
 static void P_Texture_32V(Bi_Triangle * BTM, char * Bitmap,unsigned int u)
 {
-	__asm
-	{
-		mov ebx, [BTM]
-			mov eax, [Bitmap]
-			mov ecx, [u]
-			call	P_Texture_32_
-	}
 }
 #endif
 
 void AW_Staticmap(AGridPoint *AGP)
 {
-	long I,J;
+	int32_t I,J;
 	AGridPoint *GP = AGP;
 	float QX=XRes*0.1;
 	float QY=YRes*0.1;
@@ -1767,14 +1096,14 @@ void AW_Staticmap(AGridPoint *AGP)
 
 void AW_Distort(AGridPoint *AGP,float Bang)
 {
-	long I,J;
+	int32_t I,J;
 	AGridPoint *GP = AGP;
 	float ratio = Bang/16384.0;
 	for(J=0;J<AGrid_Y;J++)
 		for(I=0;I<AGrid_X;I++)
 		{
-			GP->x += (rand()-16384)*ratio;
-			GP->y += (rand()-16384)*ratio;
+			GP->x += (RAND_15()-16384)*ratio;
+			GP->y += (RAND_15()-16384)*ratio;
 			GP++;
 		}
 }
@@ -1783,7 +1112,7 @@ void AW_Distort(AGridPoint *AGP,float Bang)
 //Useful to make them move along more complex paths
 void AW_FromParticles(AGridPoint *AGP,Particle *P)
 {
-	long I,J;
+	int32_t I,J;
 	for(J=0;J<AGrid_Y;J++)
 		for(I=0;I<AGrid_X;I++)
 		{
@@ -1834,9 +1163,9 @@ void Generate_Julia_Fractal(Image *Img,Complex *C,Complex *R1,Complex *R2)
 {
 	Complex L,Z,Z2;
 	float dX,dY;
-	long I,J;
+	int32_t I,J;
 	DWord *Ptr = Img->Data;
-	long Orb;
+	int32_t Orb;
 	
 	L.y = R2->y;
 	dX = (R2->x-R1->x)/(float)Img->x;
@@ -1871,9 +1200,9 @@ void Generate_Mandelbrot_Fractal(Image *Img,Complex *R1,Complex *R2)
 {
 	Complex L,Z,Z2;
 	float dX,dY;
-	long I,J;
+	int32_t I,J;
 	DWord *Ptr = Img->Data;
-	long Orb;
+	int32_t Orb;
 	
 	L.y = R2->y;
 	dX = (R2->x-R1->x)/(float)Img->x;
@@ -1909,9 +1238,9 @@ void Generate_Phoenix_Fractal(Image *Img,float P1,float P2,Complex *R1,Complex *
 {
 	Complex L,X,Y,Z,Z2;
 	float dX,dY;
-	long I,J;
+	int32_t I,J;
 	DWord *Ptr = Img->Data;
-	long Orb;
+	int32_t Orb;
 	
 	L.y = R2->y;
 	dX = (R2->x-R1->x)/(float)Img->x;
@@ -1957,7 +1286,7 @@ void Affine_Wobbler(GridPoint *Target_GP,float Ang,float Zoom,float XO,float YO)
 	float Mat[2][2]; // Rotation and scale matrix
 	float *Ptr = (float *)Mat;
 	float dX,dY,X,Y;
-	long I,J;
+	int32_t I,J;
 	GridPoint *GP = Target_GP;
 	Mat[1][1] = Mat[0][0] = cos(Ang)*Zoom;
 	Mat[0][1] = sin(Ang)*Zoom;
@@ -1989,7 +1318,7 @@ void Affine_Wobbler(GridPoint *Target_GP,float Ang,float Zoom,float XO,float YO)
 // constant, and is given in Degrees.
 void Init_WRaytrace_Table(float FOV)
 {
-	long I,J;
+	int32_t I,J;
 	float X,Y;
 	Vector *V = WPDT;
 	
@@ -2171,7 +1500,7 @@ void WRaytrace_Sphere(GridPoint *Target_GP,Vector *Origin,Matrix Orient,float Ra
 // for sharper highlights.
 void Phong_Map(Image *Img,float R,float G,float B,float Power)
 {
-	long I,J;
+	int32_t I,J;
 	float X,Y,Y2,Z,dX,dY;
 	DWord *Ptr = Img->Data;
 	Y = -1.0;
@@ -2185,7 +1514,7 @@ void Phong_Map(Image *Img,float R,float G,float B,float Power)
 		{
 			Z = Y2-X*X; //so the Magnitude of (X,Y,Z) will be 1
 			if (Z<0.0) {*Ptr++ = 0; X += dX; continue;}
-			Z = 255.0*pow(Z,Power);
+			Z = 255.0f*powf(Z,Power);
 			*Ptr++ = ((int)(R*Z)<<16)+((int)(G*Z)<<8)+(int)(B*Z);
 			X += dX;
 		}
@@ -2205,5 +1534,21 @@ void Hidden_Flare(Image *Src,Vector L,Image *Trg)
 	
 }
 
-
-
+void Sachletz(dword *data, dword xres, dword yres) {
+	auto backbuffer = std::make_unique<dword[]>(xres * yres);
+	// right now, there is no support for non-blocked textures,
+	// so we need to rearrange TempBuf by 4x4 blocks
+	//memcpy(VorSurf, TempBuf, 65536 * 4);
+	auto ptr = backbuffer.get();
+	memcpy(ptr, data, xres * yres * 4);
+	dword* writePtr = data;
+	for (int X = 0; X < xres / 4; X++)
+		for (int Y = 0; Y < yres / 4;  Y++)
+		{
+			dword* blockPtr = ptr + ((X + (Y * xres)) << 2);
+			for (int y = 0; y < 4; y++)
+				for (int x = 0; x < 4; x++) {
+					*writePtr++ = blockPtr[x + (y * xres)];
+				}
+		}
+}

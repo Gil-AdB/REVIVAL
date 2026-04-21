@@ -14,7 +14,7 @@ struct TZLeft
 		Index; // Current Vertex index
 };
 
-static TZLeft Left;
+thread_local static TZLeft Left;
 
 struct TZRight
 {
@@ -27,12 +27,12 @@ struct TZRight
 		Index;  // Current Vertex index
 };
 
-static TZRight Right;
+thread_local static TZRight Right;
 
-static void *IX_Texture;
-static void *IX_Page;
-static word *IX_ZBuffer;
-static dword IX_L2X, IX_L2Y;
+thread_local static void *IX_Texture;
+thread_local static void *IX_Page;
+thread_local static word *IX_ZBuffer;
+thread_local static dword IX_L2X, IX_L2Y;
 
 
 union deltas
@@ -47,8 +47,8 @@ union deltas
 #define L2SPANSIZE 4
 #define SPANSIZE 16
 #define fSPANSIZE 16.0
-static deltas ddx;
-static deltas ddx32;
+thread_local static deltas ddx;
+thread_local static deltas ddx32;
 
 static void CalcRightSection (IXVertexT *V1, IXVertexT *V2)
 {
@@ -110,15 +110,15 @@ static void CalcLeftSection (IXVertexT *V1, IXVertexT *V2)
 	Left.RZ = V1->RZ + Left.dRZ * prestep;
 }
 
-static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
+thread_local static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
 /*
 static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr, float prestep)
 {
-	long i;
+	int32_t i;
 
 	//F4Vec _u, _v, _z;
-	long  _u0, _u1;
-	long  _v0, _v1;
+	int32_t  _u0, _u1;
+	int32_t  _v0, _v1;
 	word _Z0, _Z1;
 
 	float _z[4];
@@ -139,10 +139,10 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	dword Z = Fist(Left.z * 256.0 + prestep * dZdx);
 
 	// number of full sections
-	long ns = Width >> L2SPANSIZE;
+	int32_t ns = Width >> L2SPANSIZE;
 
 	// remainder section
-	long wrem = Width & (SPANSIZE-1); // % SPANSIZE.
+	int32_t wrem = Width & (SPANSIZE-1); // % SPANSIZE.
 
 	if (ns >= 4)
 	{
@@ -167,7 +167,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	_v0 = Fist(VZ * _z[0]);
 	_Z0 = 0xFF80 - Fist(g_zscale256 * _z[0]);
 	
-	long _du, _dv;
+	int32_t _du, _dv;
 
 	while (ns--)
 	{
@@ -183,7 +183,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 		_dv = _v1 - _v0 >> L2SPANSIZE;
 		_dZ = _Z1 - _Z0 >> L2SPANSIZE;
 		
-		long SpanWidth = SPANSIZE;
+		int32_t SpanWidth = SPANSIZE;
 		while (SpanWidth--)
 		{
 			dword r,g,b, tex;
@@ -342,7 +342,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 		};
 	};*/
 	//static word B, G, R, Z;
-	static word Col[4];
+	word Col[4];
 
 	Col[0] = Left.B >> 8;
 	Col[1] = Left.G >> 8;
@@ -369,7 +369,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -492,7 +492,7 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -581,7 +581,7 @@ static void IXFiller(IXVertexT *Verts, dword numVerts, void *Texture, void *Page
 	IX_L2Y = logHeight;
 
 	// ZBuffer data starts at the end of framebuffer
-	IX_ZBuffer = (word *) ((dword)Page + PageSize);
+	IX_ZBuffer = (word *) ((uintptr_t)Page + PageSize);
 
 	Left.Index = 1;
 	Right.Index = numVerts - 1;
@@ -644,9 +644,9 @@ static void IXFiller(IXVertexT *Verts, dword numVerts, void *Texture, void *Page
 
 	dword y, SectionHeight;
 	y = Fist(Verts[0].y);
-	dword *Scanline = (dword *)((dword)Page + VESA_BPSL * y);
-	word *ZScanline = (word *)((dword)Page + PageSize + sizeof(word) * XRes * y);
-	long Width;
+	dword *Scanline = (dword *)((uintptr_t)Page + VESA_BPSL * y);
+	word *ZScanline = (word *)((uintptr_t)Page + PageSize + sizeof(word) * XRes * y);
+	int32_t Width;
 	
 	// Iterate over sections
 	SectionHeight = (Left.ScanLines < Right.ScanLines) ? Left.ScanLines : Right.ScanLines;
@@ -657,7 +657,7 @@ static void IXFiller(IXVertexT *Verts, dword numVerts, void *Texture, void *Page
 		{
 
 			// *** Draw scan line *** //
-			long lx, rx;
+			int32_t lx, rx;
 			lx = Fist(Left.x);
 			dword *SpanPtr = Scanline + lx;
 			word *ZSpanPtr = ZScanline + lx;
@@ -724,25 +724,25 @@ AfterScanConv:
 
 
 const dword maximalNgon = 16;
-static dword *l_TestTexture = NULL;
-static char l_IXMemBlock[sizeof(IXVertexT) * (maximalNgon+1)];
-static IXVertexT *l_IXArray = (IXVertexT *)( ((dword)l_IXMemBlock + 0xF) & (~0xF) );
-static Material DummyMat;
-static Texture DummyTex;
+thread_local static dword *l_TestTexture = NULL;
+thread_local static char l_IXMemBlock[sizeof(IXVertexT) * (maximalNgon+1)];
+thread_local static IXVertexT *l_IXArray = (IXVertexT *)( ((uintptr_t)l_IXMemBlock + 0xF) & (~0xF) );
+thread_local static Material DummyMat;
+thread_local static Texture DummyTex;
 
 
-static void PrefillerCommon(Vertex **V, dword numVerts)
+static void PrefillerCommon(Face *F, Vertex **V, dword numVerts, dword miplevel)
 {
 	dword i;
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX - miplevel;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY - miplevel;
 	
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+	auto TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[miplevel];
 
 	
-	float UScaleFactor = (1<<LogWidth);
-	float VScaleFactor = (1<<LogHeight);
+	float UScaleFactor = float((1<<LogWidth));
+	float VScaleFactor = float((1<<LogHeight));
 
 	for(i=0; i<numVerts; i++)
 	{
@@ -756,16 +756,14 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 	IXFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
 }
 
-void IX_Prefiller_TZ(Vertex **V, dword numVerts)
+void IX_Prefiller_TZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoop;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts, miplevel);
 }
 
-void IX_Prefiller_TAcZ(Vertex **V, dword numVerts)
+void IX_Prefiller_TAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	SubInnerPtr = SubInnerLoopT;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts, miplevel);
 }
-
-

@@ -1,0 +1,656 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 60
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 200
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+AddNullObject Flares Master Parent
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  0 0 0 0 0 0 0.998 0.998 0.998
+  0 0 0 0 0
+  0 0 0 -81.60002 -34.2 28.9 0.998 0.998 0.998
+  50 0 0 0 0
+  0 0 0 -172.7112 42.81822 78.11746 1.754 1.754 1.754
+  100 0 0 0 0
+  0 0 0 -109.6939 -8.140824 60.00714 0.998 0.998 0.998
+  174 0 0 0 0
+  0 0 0 0 0 0 0.998 0.998 0.998
+  200 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\test\coz.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.658116 -0.175 -0.947046 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 131 113 252
+LgtIntensity 0.705000
+LightType 1
+LensFlare 1
+FlareIntensity 0.770000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 131 113 252
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.25 0.775 0.675 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 162 126 95
+LgtIntensity 1.000000
+LightType 1
+LensFlare 1
+FlareIntensity 0.830000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 162 126 95
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.136432 0.275 1.2563 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 99 254 81
+LgtIntensity 0.500000
+LightType 1
+LensFlare 1
+FlareIntensity 0.660000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 99 254 81
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1.15 0.275 -0.7 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 105 175 137
+LgtIntensity 0.410000
+LightType 1
+LensFlare 1
+FlareIntensity 0.650000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 105 175 137
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.075 -0.325 0.825 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 70 134 185
+LgtIntensity 0.460000
+LightType 1
+LensFlare 1
+FlareIntensity 0.570000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 70 134 185
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1.3 0.275 0.3 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 241 218 125
+LgtIntensity 0.540000
+LightType 1
+LensFlare 1
+FlareIntensity 0.140000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 241 218 125
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.219038 0.275 -1.1207 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 242 121 201
+LgtIntensity 0.500000
+LightType 1
+LensFlare 1
+FlareIntensity 0.715000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 242 121 201
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.478619 -0.325 1.15804 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 69 152 132
+LgtIntensity 0.535000
+LightType 1
+LensFlare 1
+FlareIntensity 0.625000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 69 152 132
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.420815 -0.175 -0.819814 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 73 224 100
+LgtIntensity 0.585000
+LightType 1
+LensFlare 1
+FlareIntensity 0.495000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 73 224 100
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.725 0.925 -0.775 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 253 151 237
+LgtIntensity 0.350000
+LightType 1
+LensFlare 1
+FlareIntensity 0.840000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 253 151 237
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.025 -0.325 -0.975 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 60 240 81
+LgtIntensity 0.530000
+LightType 1
+LensFlare 1
+FlareIntensity 0.645000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 60 240 81
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.25 -0.0242778 -0.177803 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 232 73 94
+LgtIntensity 0.350000
+LightType 1
+LensFlare 1
+FlareIntensity 0.740000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 232 73 94
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.25 -0.251273 0.2677 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 172 131 54
+LgtIntensity 0.450000
+LightType 1
+LensFlare 1
+FlareIntensity 0.720000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 172 131 54
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.6 0.775 0.75 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 92 126 146
+LgtIntensity 0.550000
+LightType 1
+LensFlare 1
+FlareIntensity 0.125000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 92 126 146
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.25 1.075 -7.45058e-010 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 219 128 130
+LgtIntensity 0.455000
+LightType 1
+LensFlare 1
+FlareIntensity 0.390000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 219 128 130
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.45 1.075 0.1 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 143 243 170
+LgtIntensity 0.520000
+LightType 1
+LensFlare 1
+FlareIntensity 0.445000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 143 243 170
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0.875 0.35 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 165 185 230
+LgtIntensity 1.000000
+LightType 1
+LensFlare 1
+FlareIntensity 0.390000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 165 185 230
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.9 0.275 0.75 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 143 121 207
+LgtIntensity 0.570000
+LightType 1
+LensFlare 1
+FlareIntensity 0.660000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 143 121 207
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.1 0.875 -0.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 110 99 139
+LgtIntensity 0.455000
+LightType 1
+LensFlare 1
+FlareIntensity 0.635000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 110 99 139
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.5 -0.525 -0.55 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 180 251 146
+LgtIntensity 0.655000
+LightType 1
+LensFlare 1
+FlareIntensity 0.450000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 180 251 146
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1.15 -0.625 -0.05 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 92 227 83
+LgtIntensity 0.760000
+LightType 1
+LensFlare 1
+FlareIntensity 0.880000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 92 227 83
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+AddLight
+LightName Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -0.126151 0.275 -1.26722 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 1
+LightColor 210 224 126
+LgtIntensity 0.825000
+LightType 1
+LensFlare 1
+FlareIntensity 0.800000
+FlareDissolve 0.000000
+LensFlareFade 12
+LensFlareOptions 59
+FlareRingColor 210 224 126
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 0
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  9
+  0.5171981 0 -4.694999 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.47571 0.149 -4.004768 0 0 0 1 1 1
+  25 0 0 0 0
+  -3.415305 0.2129999 -2.217049 0 0 0 1 1 1
+  50 0 0 0 0
+  -3.7619 0.2631461 0.9059917 0 0 0 1 1 1
+  75 0 0 0 0
+  -0.8492706 0.2793783 3.272285 0 0 0 1 1 1
+  100 0 0 0 0
+  2.646585 0.2817673 2.111501 0 0 0 1 1 1
+  125 0 0 0 0
+  3.782232 0.2238795 -0.727549 0 0 0 1 1 1
+  150 0 0 0 0
+  2.719562 0.1339441 -3.858801 0 0 0 1 1 1
+  175 0 0 0 0
+  0.5171981 0 -4.694999 0 0 0 1 1 1
+  200 0 0 0 0
+EndBehavior 1
+TargetObject 2
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 8670000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+RayRecursionLimit 16
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 0.000000 0.000000 0.000000
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 1.777778
+GridNumber 0
+GridSize 1.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

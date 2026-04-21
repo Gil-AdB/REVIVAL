@@ -4,25 +4,25 @@
 
 struct Quantum_Node
 {
-  long Count;
+  int32_t Count;
   QColor *Col;
   Quantum_Node *Next[8];
 };
 
 Quantum_Node *Root;
-long LNum;
-long Max_Count;
+int32_t LNum;
+int32_t Max_Count;
 Quantum_Node *Cut_This;
 Quantum_Node **QList;
-long **PalEnum;
+int32_t **PalEnum;
 Palette *UPal;
 QColor *UCol;
 
-long Col;
-long LCntr;
-long LJmp;
+int32_t Col;
+int32_t LCntr;
+int32_t LJmp;
 
-long PalsNum;
+int32_t PalsNum;
 
 void Init_Tree()
 {
@@ -40,7 +40,7 @@ void Texture2QTree(byte *Txtr,char TPP)
   Quantum_Node *QN;
   unsigned char Mask;
   signed char Shr;
-  long I,J;
+  int32_t I,J;
 
   switch (TPP)
   {
@@ -81,7 +81,7 @@ void Texture2QTree(byte *Txtr,char TPP)
 
 void Count_Leaves(Quantum_Node *QN)
 {
-  long I;
+  int32_t I;
   char Flag = 1;
   for(I=0;I<8;I++)
     if (QN->Next[I]) {Flag = 0; Count_Leaves(QN->Next[I]);}
@@ -90,7 +90,7 @@ void Count_Leaves(Quantum_Node *QN)
 
 void Count_Nonleaves(Quantum_Node *QN)
 {
-  long I;
+  int32_t I;
   char Flag = 0;
   for(I=0;I<8;I++)
     if (QN->Next[I]) {Flag = 1; Count_Nonleaves(QN->Next[I]);}
@@ -99,7 +99,7 @@ void Count_Nonleaves(Quantum_Node *QN)
 
 void QTree2QList(Quantum_Node *QN)
 {
-  long I;
+  int32_t I;
   char Flag = 0;
   for(I=0;I<8;I++)
     if (QN->Next[I]) {Flag = 1; QTree2QList(QN->Next[I]);}
@@ -110,9 +110,9 @@ void QTree2QList(Quantum_Node *QN)
   }
 }
 
-void Quant_Sorting(long L,long R)
+void Quant_Sorting(int32_t L,int32_t R)
 {
-  long I,J;
+  int32_t I,J;
   float Av;
   Quantum_Node *Swapper;
   I=L;
@@ -135,9 +135,9 @@ void Quant_Sorting(long L,long R)
 }
 
 
-/*void Reduce_Tree(long Limit)
+/*void Reduce_Tree(int32_t Limit)
 {
-  long I,J;
+  int32_t I,J;
 
   LNum=1;
   Count_NonLeaves(Root);
@@ -175,9 +175,9 @@ void Quant_Sorting(long L,long R)
   printf("\n");
 }*/
 
-void Reduce_QTree(long Limit)
+void Reduce_QTree(int32_t Limit)
 {
-  long I,J;
+  int32_t I,J;
   Quantum_Node *QN;
   LNum=0;
   Count_Nonleaves(Root);
@@ -206,10 +206,10 @@ void Reduce_QTree(long Limit)
 }
 
 
-/*void QTree_Palette(char Level,Quantum_Node *QN,Palette *Pal,long R,long G,long B)
+/*void QTree_Palette(char Level,Quantum_Node *QN,Palette *Pal,int32_t R,int32_t G,int32_t B)
 {
   char F=1,NR,NG,NB;
-  long I;
+  int32_t I;
 
   for(I=0;I<8;I++)
   {
@@ -231,7 +231,7 @@ void Reduce_QTree(long Limit)
 
 void Reconstruct_QImage(Texture *Src,byte *Dest)
 {
-  long I,K;
+  int32_t I,K;
   char J;
 
   char Dif;
@@ -284,7 +284,7 @@ void Reconstruct_QImage(Texture *Src,byte *Dest)
 
 void Delete_QTree(Quantum_Node *QN)
 {
-  long I;
+  int32_t I;
   for(I=0;I<8;I++)
     if (QN->Next[I]) Delete_QTree(QN->Next[I]);
 
@@ -293,21 +293,21 @@ void Delete_QTree(Quantum_Node *QN)
 
 void Evaluate_Palettes(Scene *Sc)
 {
-  long I,J;
+  int32_t I,J;
   Material *M;
   Palette *Pal;
-  long **IEnum,*CEnum;
+  int32_t **IEnum,*CEnum;
 
   // Count Textured Materials on Group.
   I=0;
   for(M=MatLib;M;M=M->Next) if (M->RelScene==Sc&&M->Txtr) I++;
 
   // Allocate and clear space for Palette enumerator.
-  PalEnum = new long * [I];
+  PalEnum = new int32_t * [I];
   for(J=0;J<I;J++)
   {
-    PalEnum[J] = new long[256];
-    memset(PalEnum[J],0,256*sizeof(long));
+    PalEnum[J] = new int32_t[256];
+    memset(PalEnum[J],0,256*sizeof(int32_t));
   }
   PalsNum = I; // for eventual deletion.
 
@@ -337,8 +337,8 @@ void Palettes2QTree(Scene *Sc)
   Palette *Pal;
   QColor C;
   byte N,RB,GB,BB;
-  long I,J,K;
-  long **IEnum,*CEnum,Val;
+  int32_t I,J,K;
+  int32_t **IEnum,*CEnum,Val;
   char Mask,Shr;
 
   IEnum = PalEnum;
@@ -425,7 +425,7 @@ void Remap_Textures(Scene *Sc)
   QColor C;
   byte Mask,Shr,Out;
   byte N,RB,GB,BB;
-  long I;
+  int32_t I;
   Quantum_Node *QN;
   byte *Pen;
 
@@ -479,7 +479,7 @@ void Remap_Textures(Scene *Sc)
 
 void Delete_Enums()
 {
-  long I;
+  int32_t I;
   for(I=0;I<PalsNum;I++)
     delete PalEnum[I];
   delete PalEnum;

@@ -11,7 +11,7 @@ struct Surface
 	DWord         * LMap;  // Light Map (16x16)
 	DWord         * DTex;  // Dynamic Texture Map (64x64)
 	DWord						TCacheEntry; //last frame surface was inserted to cache
-	long            TCacheOffset; //-1 if surface is cached ; Cache pointer index otherwise.
+	int32_t            TCacheOffset; //-1 if surface is cached ; Cache pointer index otherwise.
 };
 
 #pragma pack(pop)

@@ -3,11 +3,11 @@
 #include <Base/FDS_DECS.H>
 #include <Base/Scene.h>
 
-long Temp;
+int32_t Temp;
 Object *Obj_Temp,*Obj_Ptr;
 extern FILE *IN_3DS;     // This is the File handle which will be used
 
-void FSeek(long Where)
+void FSeek(int32_t Where)
 {
   fseek(IN_3DS,Where,SEEK_SET);
 }
@@ -89,7 +89,7 @@ Object *FindObject(char *Name)
 
 // Sorts all object in scene by their hierarchial position in the scene
 // Note: This procedure is very ZOL! which means, EXTREMELY unefficient!
-//       But who cares? (As long as it is not done in real-time... ;)
+//       But who cares? (As int32_t as it is not done in real-time... ;)
 void Hierarchy_Sort(Scene *Sc)
 {
   Object *OldList=Sc->ObjectHead;

@@ -1,0 +1,2260 @@
+LWSC
+1
+
+FirstFrame 0
+LastFrame 6000
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 1401
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1405 0 -2945 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -865 0 -2570 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1595 0 -2215 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1305 0 -3720 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -521 0 -3814 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  930 0 -1175 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1165 0 -1170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -595 0 -1830 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  648 0 -3850 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  2
+  1895 0 -3665 0 0 0 1 1 1
+  0 0 0 0 0
+  1894.989 0 -3664.5 0 0 0 1 1 1
+  737 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  860 0 -4740 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2110 0 -2670 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1645 0 -1500 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2160 0 -1815 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2030 0 -4530 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3412.5 0 -3837.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3365 0 -2270 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1980 0 -3780 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1815 0 -2605 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -465 0 -645 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b1.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  37 0 -3963 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1410 0 -1875 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1212.5 0 -3825 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  815 0 -2095 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  940 0 -495 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1178.5 0 -402.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2435 0 -1345 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2290.387 0 -3194.239 -63.8 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1657.5 0 -70 -24.4 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -880 0 -4630 41.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2405 0 -1035 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1020 0 1335 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1211 0 1274 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1015 0 2630 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1380 0 2650 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1020.5 0 4251 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1752.5 0 4797.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1210 0 6810 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2955 0 3330 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1710 0 7350 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2535 0 5355 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b3.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  3115 0 5960 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  749.5 0 3915.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1295 0 5390 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  1943.5 0 5995.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  3852.5 0 7105 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -457.5 0 9715 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2232.5 0 3846.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2710 0 6975 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2575 0 6580 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1100 0 7980 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2229 0 2037 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b4.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2865 0 4705 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3277.5 0 2990.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2680 0 2085 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1347.5 0 8990 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  742 0 10231 -45.5 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2995 0 8070 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2110 0 10530 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2527.5 0 672.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2555 0 7920 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  4225 0 8430 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b5.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2255 0 85 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\water.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 20 0 0 0 0 20 20 20
+  0 0 0 0 0
+  0 0 0 0 0 0 20 20 20
+  6100 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b6.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  212 0 5692.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b6.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2680 0 -3059.5 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\b6.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  182.5 0 213 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  520.5 0 9373 -27.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  2031.5 0 8480 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  3016.5 0 10445 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  3384 0 8945 22.8 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\newtek\my_objec\demo\city\b2.lwo
+ShowObject 7 7
+ObjectMotion (unnamed)
+  9
+  1
+  4311.5 0 9460 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\ll_pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2640 95 -3091.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\pas2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  157.5 95 -3091.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\lll_pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  157.5 95 6902.5 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 54
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\ll_pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -135.5 95 3395.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\lll_pas.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  304.5 95 4220.5 90 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 51
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  14
+  -4545 170.5 -3091.5 90 0 0 1 1 1
+  0 0 0 0 0
+  -176.2198 170.5 -3092.07 90.12814 0 0 1 1 1
+  599 0 0 0 0
+  -169.5 170.5 -3091.5 90 0 0 1 1 1
+  600 0 0 0 0
+  -87.52333 170.5 -3083.775 81.0619 0 0 1 1 1
+  610 0 0 0 0
+  -35.97245 170.5 -3066.522 66.46043 0 0 1 1 1
+  620 0 0 0 0
+  18.53969 170.5 -3036.165 57.75342 0 0 1 1 1
+  630 0 0 0 0
+  63.57429 170.5 -2998.161 46.04584 0 0 1 1 1
+  640 0 0 0 0
+  97.64329 170.5 -2957.351 36.7382 0 0 1 1 1
+  650 0 0 0 0
+  125.9717 170.5 -2909.499 27.23056 0 0 1 1 1
+  660 0 0 0 0
+  145.154 170.5 -2855.747 17.32292 0 0 1 1 1
+  670 0 0 0 0
+  155.9434 170.5 -2801.609 6.815283 0 0 1 1 1
+  680 0 0 0 0
+  157.556 170.5 -2746.631 -0.7923576 0 0 1 1 1
+  690 0 0 0 0
+  157.5 170.5 -2691.5 0 0 0 1 1 1
+  700 0 0 0 0
+  157.5 170.5 11181 0 0 0 1 1 1
+  2000 0 0 0 0
+EndBehavior 2
+LockedChannels 51
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  14
+  -4545 170.5 -3091.5 90 0 0 1 1 1
+  0 0 0 0 0
+  -176.2198 170.5 -3092.07 90.12814 0 0 1 1 1
+  599 0 0 0 0
+  -169.5 170.5 -3091.5 90 0 0 1 1 1
+  600 0 0 0 0
+  -87.52333 170.5 -3083.775 81.0619 0 0 1 1 1
+  610 0 0 0 0
+  -35.97245 170.5 -3066.522 66.46043 0 0 1 1 1
+  620 0 0 0 0
+  18.53969 170.5 -3036.165 57.75342 0 0 1 1 1
+  630 0 0 0 0
+  63.57429 170.5 -2998.161 46.04584 0 0 1 1 1
+  640 0 0 0 0
+  97.64329 170.5 -2957.351 36.7382 0 0 1 1 1
+  650 0 0 0 0
+  125.9717 170.5 -2909.499 27.23056 0 0 1 1 1
+  660 0 0 0 0
+  145.154 170.5 -2855.747 17.32292 0 0 1 1 1
+  670 0 0 0 0
+  155.9434 170.5 -2801.609 6.815283 0 0 1 1 1
+  680 0 0 0 0
+  157.556 170.5 -2746.631 -0.7923576 0 0 1 1 1
+  690 0 0 0 0
+  157.5 170.5 -2691.5 0 0 0 1 1 1
+  700 0 0 0 0
+  157.5 170.5 11181 0 0 0 1 1 1
+  2000 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -135 1040 -3440 0 0 0 1 1 1
+  0 0 0 0 0
+  -135 1040 9020 0 0 0 1 1 1
+  1000 0 0 0 0
+EndBehavior 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -97.5 990 -3365 0 0 0 1 1 1
+  0 0 0 0 0
+  -97.5 990 9020 0 0 0 1 1 1
+  950 0 0 0 0
+EndBehavior 2
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -75 1042.5 -3522.5 0 0 0 1 1 1
+  0 0 0 0 0
+  -75 1042.5 9020 0 0 0 1 1 1
+  1050 0 0 0 0
+EndBehavior 2
+LockedChannels 4
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -97.5 1017.5 -3272.5 0 0 0 1 1 1
+  0 0 0 0 0
+  -97.5 1017.5 9020 0 0 0 1 1 1
+  900 0 0 0 0
+EndBehavior 2
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  1930 452.5 8897.5 -110.6 0 0 1 1 1
+  0 0 0 0 0
+  1073.316 452.5 8664.909 -110.6 0 0 1 1 1
+  96 0 0 0 0
+  650 452.5 7967.5 -165.9 0 0 1 1 1
+  193 0 0 0 0
+  572.1023 452.5 6613.151 -230.7001 0 0 1 1 1
+  555 0 0 0 0
+  2104.197 452.5 6525.014 -270 0 0 1 1 1
+  652 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\car2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  1990 452.5 9010 -110.6 0 0 1 1 1
+  0 0 0 0 0
+  1073.316 452.5 8664.909 -110.6 0 0 1 1 1
+  76 0 0 0 0
+  650 452.5 7967.5 -165.9 0 0 1 1 1
+  173 0 0 0 0
+  572.1023 452.5 6613.151 -230.7001 0 0 1 1 1
+  535 0 0 0 0
+  2104.197 452.5 6525.014 -270 0 0 1 1 1
+  632 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  420 317.5 9147.5 180 0 0 1 1 1
+  0 0 0 0 0
+  240 317.5 5980 180 0 0 1 1 1
+  400 0 0 0 0
+  95 317.5 3512.5 199.3 0 0 1 1 1
+  800 0 0 0 0
+  -920.7449 317.5 3390.526 271.3 0 0 1 1 1
+  916 0 0 0 0
+  -1746.96 317.5 3449.867 277.5999 0 0 1 1 1
+  1040 0 0 0 0
+EndBehavior 2
+LockedChannels 50
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  420 317.5 9147.5 180 0 0 1 1 1
+  0 0 0 0 0
+  240 317.5 5980 180 0 0 1 1 1
+  359 0 0 0 0
+  95 317.5 3512.5 199.3 0 0 1 1 1
+  719 0 0 0 0
+  -920.7449 317.5 3390.526 271.3 0 0 1 1 1
+  824 0 0 0 0
+  -1746.96 317.5 3449.867 277.5999 0 0 1 1 1
+  935 0 0 0 0
+EndBehavior 2
+LockedChannels 50
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\poliece.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  2157.5 240 -3325 -90 0 0 1 1 1
+  0 0 0 0 0
+  -3150 360 -3055 -91.3 0 0 1 1 1
+  608 0 0 0 0
+  -3743.59 368.8765 -3371.438 -155.218 0 0 1 1 1
+  802 0 0 0 0
+  -3970 360 -4427.5 -155.5 0 0 1 1 1
+  1216 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  2250 240 -3385 -90 0 0 1 1 1
+  0 0 0 0 0
+  -3150 360 -3055 -91.3 0 0 1 1 1
+  628 0 0 0 0
+  -3743.59 368.8765 -3371.438 -155.218 0 0 1 1 1
+  822 0 0 0 0
+  -3970 360 -4427.5 -155.5 0 0 1 1 1
+  1236 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\taxi.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  2142.5 240 -3242.5 -90 0 0 1 1 1
+  0 0 0 0 0
+  -3150 360 -3055 -91.3 0 0 1 1 1
+  568 0 0 0 0
+  -3743.59 368.8765 -3371.438 -155.218 0 0 1 1 1
+  762 0 0 0 0
+  -3970 360 -4427.5 -155.5 0 0 1 1 1
+  1176 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bike.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -1668.24 89.44 -4398.98 0 0 0 1 1 1
+  0 0 0 0 0
+  -1615 295 -2175 0 0 0 1 1 1
+  625 0 0 0 0
+EndBehavior 2
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  -1600.74 89.44 -4398.98 0 0 0 1 1 1
+  0 0 0 0 0
+  -1600.74 89.44 -4398.98 0 0 0 1 1 1
+  50 0 0 0 0
+  -1615 295 -2175 0 0 0 1 1 1
+  675 0 0 0 0
+EndBehavior 2
+LockedChannels 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  8
+  1500 310 10787.5 194.8 0 0 1 1 1
+  0 0 0 0 0
+  950.2754 327.5 8995.279 194.5999 0 0 1 1 1
+  211 0 0 0 0
+  362.5 347.5 6940 195 0 0 1 1 1
+  581 0 0 0 0
+  273.2491 347.5 5145.518 183.8 0 0 1 1 1
+  872 0 0 0 0
+  265.1953 506.1637 3560.628 180 0 0 1 1 1
+  1101 0 0 0 0
+  257.9224 334.3743 1844.134 180 0 0 1 1 1
+  1419 0 0 0 0
+  244.5011 467.0248 -132.3086 180 0 0 1 1 1
+  1780 0 0 0 0
+  340.1953 478.6637 -3914.372 180 0 0 1 1 1
+  2009 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  8
+  1437.5 310 10495 194.8 0 0 1 1 1
+  0 0 0 0 0
+  950.2754 327.5 8995.279 194.5999 0 0 1 1 1
+  197 0 0 0 0
+  362.5 347.5 6940 195 0 0 1 1 1
+  546 0 0 0 0
+  273.2491 347.5 5145.518 183.8 0 0 1 1 1
+  819 0 0 0 0
+  265.1953 506.1637 3560.628 180 0 0 1 1 1
+  1034 0 0 0 0
+  257.9224 334.3743 1844.134 180 0 0 1 1 1
+  1333 0 0 0 0
+  244.5011 467.0248 -132.3086 180 0 0 1 1 1
+  1673 0 0 0 0
+  340.1953 478.6637 -3914.372 180 0 0 1 1 1
+  1888 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\bus.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  8
+  1500 310 10787.5 194.8 0 0 1 1 1
+  0 0 0 0 0
+  950.2754 327.5 8995.279 194.5999 0 0 1 1 1
+  211 0 0 0 0
+  362.5 347.5 6940 195 0 0 1 1 1
+  581 0 0 0 0
+  273.2491 347.5 5145.518 183.8 0 0 1 1 1
+  872 0 0 0 0
+  265.1953 506.1637 3560.628 180 0 0 1 1 1
+  1101 0 0 0 0
+  257.9224 334.3743 1844.134 180 0 0 1 1 1
+  1419 0 0 0 0
+  244.5011 467.0248 -132.3086 180 0 0 1 1 1
+  1780 0 0 0 0
+  340.1953 478.6637 -3914.372 180 0 0 1 1 1
+  2009 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\car2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  1500 310 10787.5 194.8 0 0 1 1 1
+  0 0 0 0 0
+  1500 310 10787.5 194.8 0 0 1 1 1
+  300 0 0 0 0
+  950.2754 327.5 8995.279 194.5999 0 0 1 1 1
+  511 0 0 0 0
+  362.5 347.5 6940 195 0 0 1 1 1
+  881 0 0 0 0
+  273.2491 347.5 5145.518 183.8 0 0 1 1 1
+  1172 0 0 0 0
+  265.1953 506.1637 3560.628 180 0 0 1 1 1
+  1401 0 0 0 0
+  257.9224 334.3743 1844.134 180 0 0 1 1 1
+  1719 0 0 0 0
+  244.5011 467.0248 -132.3086 180 0 0 1 1 1
+  2080 0 0 0 0
+  340.1953 478.6637 -3914.372 180 0 0 1 1 1
+  2309 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\cars\abulans.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  8
+  1470 362.5 10787.5 194.8 0 0 1 1 1
+  0 0 0 0 0
+  935.2754 387.5 8995.279 194.5999 0 0 1 1 1
+  232 0 0 0 0
+  350 397.5 6940 195 0 0 1 1 1
+  639 0 0 0 0
+  188.2491 355 5145.518 183.8 0 0 1 1 1
+  959 0 0 0 0
+  365.1953 521.1637 3560.628 180 0 0 1 1 1
+  1211 0 0 0 0
+  247.9224 211.8743 1844.134 180 0 0 1 1 1
+  1560 0 0 0 0
+  247.0011 447.0248 -132.3086 180 0 0 1 1 1
+  1958 0 0 0 0
+  340.1953 411.1637 -3914.372 180 0 0 1 1 1
+  2209 0 0 0 0
+EndBehavior 2
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\ships\shp1\SHIP1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  17
+  -470 237.5 -37920 81.71937 0.04855783 0 18.86999 18.86999 18.86999
+  0 0 0 0 0
+  813.4556 235.0035 -40618.09 81.71912 0.04855926 0 18.19492 18.19492 18.19492
+  721 1 0 0 0
+  -1440 235 -3080 73.12984 -4.260758 0 18.19399 18.19399 18.19399
+  722 1 0 0 0
+  -586.9388 409.949 -2931.837 65.21228 -11.57383 0 18.17746 18.17746 18.17746
+  749 1 0 0 0
+  -32.5 552.5 -2430 29.04072 -5.659209 0 18.16399 18.16399 18.16399
+  771 0 0 0 0
+  120 552.5 -282.5 2.098191 6.346731 0 18.14001 18.14001 18.14001
+  894 0 0 0 0
+  107.5 120 1355 -4.305911 5.754658 0 18.1 18.1 18.1
+  943 0 0 0 0
+  -152.5 160 3517.5 0 0 0 18.13799 18.13799 18.13799
+  1000 0 0 0 0
+  117.5 747.5 4815 0 0 0 18.13799 18.13799 18.13799
+  1075 0 0 0 0
+  142.5 747.5 7000 0 0 0 18.13799 18.13799 18.13799
+  1155 0 0 0 0
+  229.6636 747.5 7728.848 12.69153 0 0 18.13799 18.13799 18.13799
+  1193 0 0 0 0
+  457.5 747.5 8330 0 0 0 18.13799 18.13799 18.13799
+  1225 0 0 0 0
+  1425 747.5 9515 0 0 0 18.13799 18.13799 18.13799
+  1269 0 0 0 0
+  1570.117 747.5 10094.26 -4.47491 0 0 18.13799 18.13799 18.13799
+  1315 0 0 0 0
+  1307.328 747.5 10834.31 -32.34496 0 0 18.13799 18.13799 18.13799
+  1336 0 0 0 0
+  850 747.5 11960 -11.92175 0 0 18.13799 18.13799 18.13799
+  1408 0 0 0 0
+  592.5 747.5 14195 0 0 0 18.13799 18.13799 18.13799
+  1518 0 0 0 0
+EndBehavior 1
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\ships\shp2\shp2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  9
+  -1302.616 357.5 7491.384 0 0 0 7.824 7.824 7.824
+  0 0 0 0 0
+  -1302.616 357.5 7491.384 0 0 0 7.824 7.824 7.824
+  1204 1 0 0 0
+  252.3844 732.5 7636.384 59.51755 -7.2823 41.60001 7.824 7.824 7.824
+  1260 0 0 0 0
+  947.3844 732.5 8611.384 30.50097 0 48.69999 7.824 7.824 7.824
+  1282 0 0 0 0
+  1417.384 732.5 9606.384 13.57959 0 30.60001 7.824 7.824 7.824
+  1315 0 0 0 0
+  1397.384 732.5 10436.38 -13.34253 0 41.5 7.824 7.824 7.824
+  1360 0 0 0 0
+  907.3844 732.5 11803.88 0 0 0 7.824 7.824 7.824
+  1423 0 0 0 0
+  779.7024 732.5 12445.28 -10.35695 0 -12.7 7.824 7.824 7.824
+  1454 0 0 0 0
+  694.8844 732.5 12956.38 0 0 0 7.824 7.824 7.824
+  1477 0 0 0 0
+EndBehavior 1
+LockedChannels 24
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 0 -55 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0 -55 0 0 0 1 1 1
+  1079 0 0 0 0
+EndBehavior 1
+ParentObject 101
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  305 170 -2662.5 0 0 0 1 1 1
+  0 0 0 0 0
+  305 170 4550 0 0 0 1 1 1
+  1079 1 0 0 0
+EndBehavior 1
+LockedChannels 3
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 0 -115 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0 -115 0 0 0 1 1 1
+  1079 1 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 101
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 0 -175 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0 -175 0 0 0 1 1 1
+  1079 1 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 101
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  0 0 -236.131 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0 -235 0 0 0 1 1 1
+  1079 1 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 101
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_frnt.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  -2390 170 3395 90 0 0 1 1 1
+  0 0 0 0 0
+  2237.5 170 3395 89.99998 0 0 1 1 1
+  400 0 0 0 0
+  -2392.5 170 3395 89.99998 0 0 1 1 1
+  801 0 0 0 0
+EndBehavior 2
+LockedChannels 54
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -55 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 105
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -57.5 -180 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 51
+ParentObject 106
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -57.5 -180 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 51
+ParentObject 106
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\city\train\tra_vagn.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 -57.5 -180 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 51
+ParentObject 106
+ShadowOptions 7
+
+AddNullObject Camera Target
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  19
+  1522.5 122.5 9152.5 0 0 0 1 1 1
+  0 0 0 0 0
+  680 122.5 8227.5 0 0 0 1 1 1
+  163 0 0 0 0
+  135 122.5 6585 0 0 0 1 1 1
+  297 0 0 0 0
+  137.5 122.5 3840 0 0 0 1 1 1
+  528 0 0 0 0
+  250.58 122.5 76.40479 0 0 0 1 1 1
+  649 0 0 0 0
+  -10 122.5 -502.5 0 0 0 1 1 1
+  696 0 0 0 0
+  -10 122.5 -502.5 0 0 0 1 1 1
+  724 1 0 0 0
+  -1322.5 122.5 -3067.5 0 0 0 1 1 1
+  725 0 0 0 0
+  -961.8357 235.756 -3002.898 0 0 0 1 1 1
+  738 1 0 0 0
+  -420.2942 388.6222 -2826.447 0 0 0 1 1 1
+  755 0 0 0 0
+  -22.5 547.5 -2307.5 0 0 0 1 1 1
+  779 0 0 0 0
+  100 547.5 -660 0 0 0 1 1 1
+  876 0 0 0 0
+  112.5 547.5 -305 0 0 0 1 1 1
+  894 0 0 0 0
+  106.8369 170 1340.769 0 0 0 1 1 1
+  943 0 0 0 0
+  -40.66306 170 2465.769 0 0 0 1 1 1
+  971 0 0 0 0
+  -155.6631 157.5 3485.769 0 0 0 1 1 1
+  1000 0 0 0 0
+  136.8369 782.5 5148.269 0 0 0 1 1 1
+  1089 0 0 0 0
+  119.3369 755 6645.769 0 0 0 1 1 1
+  1143 0 0 0 0
+  166.8369 755 7415.769 0 0 0 1 1 1
+  1176 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  120.5294 7492 16816.54 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LensFlare 1
+FlareIntensity 1.000000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 31
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareStarFilter 10
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 22
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 23
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 24
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 25
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 26
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 27
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 28
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 29
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 30
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 31
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 68
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 69
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 70
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 71
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.5 1313.5 -86.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 72
+LightColor 0 128 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 700.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 54
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 55
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 56
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 57
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 58
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 59
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 60
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 61
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 62
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName big bilding flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 1772 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 63
+LightColor 255 0 0
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 500.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  11
+  3562.5 1495 9702.5 -2.5 8.900001 0 1 1 1
+  0 0 0 0 0
+  1711.718 1495 9671.894 -2.5 8.900001 0 1 1 1
+  159 0 0 0 0
+  663.5707 660 7859.644 -2.5 8.900001 0 1 1 1
+  315 0 0 0 0
+  119.5363 197.5 4869.039 -2.5 8.900001 0 1 1 1
+  524 0 0 0 0
+  277.1435 197.5 1264.271 -2.5 8.900001 0 1 1 1
+  649 0 0 0 0
+  258.0172 197.5 -2725.407 -2.5 8.900001 0 1 1 1
+  755 0 0 0 0
+  249.5873 740 67.99353 -2.5 8.900001 0 1 1 1
+  931 0 0 0 0
+  99.73577 337.5 2839.284 -2.5 8.900001 0 1 1 1
+  998 0 0 0 0
+  59.02499 572.5 3302.133 -2.5 8.900001 0 1 1 1
+  1026 0 0 0 0
+  495.0875 867.5 6659.061 -2.5 8.900001 0 1 1 1
+  1145 0 0 0 0
+  165.0875 867.5 6479.061 -2.5 8.900001 0 1 1 1
+  1321 1 0 0 0
+EndBehavior 1
+TargetObject 110
+ZoomFactor 2.347999
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 1
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 30 30 30
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 3
+FogMinDist 0.000000
+FogMaxDist 5000.000000
+FogMinAmount 0.000000
+FogMaxAmount 1.000000
+FogColor 30 30 30
+BackdropFog 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\demo\city
+RGBImageFormat 2
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint 364.404572 786.792297 5577.308105
+ViewDirection -6.260499 -0.162316 0.000000
+ViewZoomFactor 9.513952
+GridNumber 0
+GridSize 500.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 1
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

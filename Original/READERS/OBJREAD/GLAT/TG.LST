@@ -1,0 +1,896 @@
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 1
+tg.asm
+
+
+
+      1					 .386p
+      2
+      3	00000000			 _DATA	 SEGMENT DWORD PUBLIC 'DATA'
+      4					 align 4
+      5					 EXTRN			 _XRes : DWORD
+      6	00000000  00000000		 Left_Section		 dd 0
+      7	00000004  00000000		 Right_Section		 dd 0
+      8	00000008  00000000		 Left_Section_Height	 dd 0
+      9	0000000C  00000000		 Right_Section_Height	 dd 0
+     10	00000010  00000000		 Left_U			 dd 0.0	; float
+     11	00000014  00000000		 Delta_left_U		 dd 0.0	; float
+     12	00000018  00000000		 Left_V			 dd 0.0	; float
+     13	0000001C  00000000		 Delta_left_V		 dd 0.0	; float
+     14	00000020  00000000		 Left_Z			 dd 0.0	; float
+     15	00000024  00000000		 Delta_left_Z		 dd 0.0	; float
+     16	00000028  00000000		 Right_Z		 dd 0.0	; float
+     17	0000002C  00000000		 Delta_right_Z		 dd 0.0	; float
+     18	00000030  00000000		 Right_U		 dd 0.0	; float
+     19	00000034  00000000		 Delta_right_U		 dd 0.0	; float
+     20	00000038  00000000		 Right_V		 dd 0.0	; float
+     21	0000003C  00000000		 Delta_right_V		 dd 0.0	; float
+     22	00000040  00000000		 Left_R			 dd 0.0	; float
+     23	00000044  00000000		 Delta_left_R		 dd 0.0	; float
+     24	00000048  00000000		 Left_G			 dd 0.0	; float
+     25	0000004C  00000000		 Delta_left_G		 dd 0.0	; float
+     26	00000050  00000000		 Left_B			 dd 0.0	; float
+     27	00000054  00000000		 Delta_left_B		 dd 0.0	; float
+     28	00000058  00000000		 Right_R		 dd 0.0	; float
+     29	0000005C  00000000		 Delta_right_R		 dd 0.0	; float
+     30	00000060  00000000		 Right_G		 dd 0.0	; float
+     31	00000064  00000000		 Delta_right_G		 dd 0.0	; float
+     32	00000068  00000000		 Right_B		 dd 0.0	; float
+     33	0000006C  00000000		 Delta_right_B		 dd 0.0	; float
+     34	00000070  00000000		 RevHeight		 dd 0.0	; float
+     35	00000074  00000000		 RevWidth		 dd 0.0	; float
+     36	00000078  00000000		 gour			 dd 0
+     37	0000007C  00000000		 R			 dd 0
+     38	00000080  00000000		 G			 dd 0
+     39	00000084  00000000		 B			 dd 0
+     40	00000088  00000000		 dr			 dd 0
+     41	0000008C  00000000		 dg			 dd 0
+     42	00000090  00000000		 dbb			 dd 0
+     43	00000094  00000000		 uu			 dd 0
+     44	00000098  00000000		 vv			 dd 0
+     45	0000009C  00000000		 u0			 dd 0
+     46	000000A0  00000000		 v0			 dd 0
+     47	000000A4  00000000		 u1			 dd 0
+     48	000000A8  00000000		 v1			 dd 0
+     49	000000AC  00000000		 du			 dd 0
+     50	000000B0  00000000		 dv			 dd 0
+     51	000000B4  00000000		 XWidth			 dd 0
+     52	000000B8  00000000		 Height			 dd 0
+     53	000000BC  00000000		 Longest		 dd 0
+     54	000000C0  03*(00000000)		 Left_Array		 dd 3 dup(0)
+     55	000000CC  03*(00000000)		 RIght_Array		 dd 3 dup(0)
+     56	000000D8  00000000		 Left_X			 dd 0
+     57	000000DC  00000000		 Delta_Left_X		 dd 0
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 2
+tg.asm
+
+
+
+     58	000000E0  00000000		 Right_X		 dd 0
+     59	000000E4  00000000		 Delta_Right_X		 dd 0
+     60	000000E8  00000000		 BitMap			 dd 0
+     61	000000EC  00000000		 Where			 dd 0
+     62	000000F0  00000000		 Top			 dd 0
+     63	000000F4  00000000		 Middle			 dd 0
+     64	000000F8  00000000		 Bottom			 dd 0
+     65	000000FC  00000000		 ScanLine		 dd 0
+     66	00000100  00000000		 TEBP			 dd 0
+     67		  =0000			 Vertex_X  equ 0
+     68		  =0004			 Vertex_Y  equ 4
+     69		  =0008			 Vertex_Z  equ 8
+     70		  =000C			 Vertex_U  equ 12
+     71		  =0010			 Vertex_V  equ 16
+     72		  =0014			 Vertex_R  equ 20
+     73		  =0018			 Vertex_G  equ 24
+     74		  =001C			 Vertex_B  equ 28
+     75	00000104  3D800000		 OneTwo	   dd  0.0625
+     76	00000108  3F800000		 One	   dd  1.0
+     77	0000010C  41800000		 Sixteen   dd  16.0
+     78	00000110  43800000		 Sixtyfive dd  256.0
+     79					 align 1
+     80	00000114			 _DATA	 ENDS
+     81
+     82	00000000			 _TEXT	 SEGMENT BYTE PUBLIC 'CODE'
+     83						 ASSUME	 cs:_TEXT, ds:_DATA
+     84
+     85
+     86						 PUBLIC	 TGTriangle_
+     87	00000000			 TGTriangle_:
+     88
+     89	00000000  89 2D	00000100r	 mov [TEBP],ebp
+     90
+     91					 ;vtx in ebx , bitmap in eax , where in	ecx
+     92
+     93	00000006  A3 000000E8r		 mov [BitMap],eax
+     94	0000000B  89 0D	000000ECr	 mov [Where],ecx
+     95
+     96	00000011  8B CB			 mov ecx,ebx
+     97	00000013  8B F3			 mov esi,ebx
+     98	00000015  8B FB			 mov edi,ebx
+     99	00000017  83 C6	20		 add esi,32
+    100	0000001A  83 C7	40		 add edi,64
+    101
+    102					 ;ecx -	vertex 1
+    103					 ;esi -	vertex 2
+    104					 ;edi -	vertex 3
+    105
+    106	0000001D  8B 41	04		 mov eax,[ecx+Vertex_Y]
+    107	00000020  3B 46	04		 cmp eax,[esi+Vertex_Y]
+    108	00000023  7E 06	90 90 90 90	 jle @@sort1
+    109	00000029  87 CE			 xchg ecx,esi
+    110	0000002B			 @@sort1:
+    111	0000002B  8B 41	04		 mov eax,[ecx+Vertex_Y]
+    112	0000002E  3B 47	04		 cmp eax,[edi+Vertex_Y]
+    113	00000031  7E 06	90 90 90 90	 jle @@sort2
+    114	00000037  87 CF			 xchg ecx,edi
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 3
+tg.asm
+
+
+
+    115	00000039			 @@sort2:
+    116	00000039  8B 46	04		 mov eax,[esi+Vertex_Y]
+    117	0000003C  3B 47	04		 cmp eax,[edi+Vertex_Y]
+    118	0000003F  7E 06	90 90 90 90	 jle @@sort3
+    119	00000045  87 F7			 xchg esi,edi
+    120	00000047			 @@sort3:
+    121
+    122	00000047  8B 5F	04		 mov ebx,[edi+Vertex_Y]
+    123	0000004A  2B 59	04		 sub ebx,[ecx+Vertex_Y]
+    124	0000004D  0F 84	000005B2	 jz TextureEnd
+    125
+    126					 ;    int temp = ((v2->y - v1->y) << 16) / height;
+    127					 ;    int longest = temp * (v3->x - v1->x) + ((v1->x - v2->x) << 16);
+    128					 ;eax-longest
+    129
+    130	00000053  8B 46	04		 mov eax,[esi+Vertex_Y]
+    131	00000056  8B 29			 mov ebp,[ecx+Vertex_X]
+    132	00000058  2B 41	04		 sub eax,[ecx+Vertex_Y]
+    133	0000005B  2B 2E			 sub ebp,[esi+Vertex_X]
+    134	0000005D  C1 E0	10		 sal eax,16
+    135	00000060  C1 E5	10		 sal ebp,16
+    136	00000063  8B D0			 mov edx,eax
+    137	00000065  C1 FA	1F		 sar edx,31
+    138	00000068  F7 FB			 idiv ebx
+    139	0000006A  8B 1F			 mov ebx,[edi+Vertex_X]
+    140	0000006C  2B 19			 sub ebx,[ecx+Vertex_X]
+    141	0000006E  F7 EB			 imul ebx
+    142	00000070  03 C5			 add eax,ebp
+    143	00000072  A3 000000BCr		 mov [Longest],eax
+    144	00000077  0F 84	00000588	 jz TextureEnd
+    145	0000007D  0F 8D	00000080	 jge LongestOverZero
+    146
+    147
+    148	00000083  89 0D	000000F0r	 mov [Top],ecx
+    149	00000089  8B E9			 mov ebp,ecx
+    150	0000008B  89 35	000000F4r	 mov [Middle],esi
+    151	00000091  89 3D	000000F8r	 mov [Bottom],edi
+    152	00000097  89 3D	000000CCr	 mov [Right_Array],edi
+    153	0000009D  89 35	000000D0r	 mov [Right_Array+4],esi
+    154	000000A3  89 0D	000000D4r	 mov [Right_Array+8],ecx
+    155	000000A9  C7 05	00000004r     +	 mov [Right_Section],2
+    156		  00000002
+    157
+    158	000000B3  89 3D	000000C0r	 mov [Left_Array],edi
+    159	000000B9  89 0D	000000C4r	 mov [Left_Array+4],ecx
+    160	000000BF  C7 05	00000000r     +	 mov [Left_Section],1
+    161		  00000001
+    162
+    163	000000C9  E8 0000053E		 call CalcLeftSection
+    164	000000CE  83 FB	00		 cmp ebx,0
+    165	000000D1  0F 8E	0000052E	 jle TextureEnd
+    166
+    167	000000D7  E8 0000060F		 call CalcRightSection
+    168	000000DC  83 FB	00		 cmp ebx,0
+    169	000000DF  0F 8F	00000099	 jg FLSNZ  ; First Right Section Is Not	Zero
+    170	000000E5  A1 00000004r		 mov eax,[Right_Section]
+    171	000000EA  48			 dec eax
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 4
+tg.asm
+
+
+
+    172	000000EB  A3 00000004r		 mov [Right_Section],eax
+    173	000000F0  E8 000005F6		 call CalcRightSection
+    174	000000F5  83 FB	00		 cmp ebx,0
+    175	000000F8  0F 8E	00000507	 jle TextureEnd
+    176	000000FE  EB 7E	90 90 90	 jmp FLSNZ
+    177
+    178	00000103			 LongestOverZero:
+    179	00000103  89 0D	000000F0r	 mov [Top],ecx
+    180	00000109  8B E9			 mov ebp,ecx
+    181	0000010B  89 35	000000F4r	 mov [Middle],esi
+    182	00000111  89 3D	000000F8r	 mov [Bottom],edi
+    183	00000117  89 3D	000000C0r	 mov [Left_Array],edi
+    184	0000011D  89 35	000000C4r	 mov [Left_Array+4],esi
+    185	00000123  89 0D	000000C8r	 mov [Left_Array+8],ecx
+    186	00000129  C7 05	00000000r     +	 mov [Left_Section],2
+    187		  00000002
+    188
+    189	00000133  89 3D	000000CCr	 mov [Right_Array],edi
+    190	00000139  89 0D	000000D0r	 mov [Right_Array+4],ecx
+    191	0000013F  C7 05	00000004r     +	 mov [Right_Section],1
+    192		  00000001
+    193
+    194	00000149  E8 0000059D		 call CalcRightSection
+    195	0000014E  83 FB	00		 cmp ebx,0
+    196	00000151  0F 8E	000004AE	 jle TextureEnd
+    197
+    198	00000157  E8 000004B0		 call CalcLeftSection
+    199	0000015C  83 FB	00		 cmp ebx,0
+    200	0000015F  7F 1D	90 90 90 90	 jg FLSNZ  ; First Left	Section	Is Not Zero
+    201	00000165  A1 00000000r		 mov eax,[Left_Section]
+    202	0000016A  48			 dec eax
+    203	0000016B  A3 00000000r		 mov [Left_Section],eax
+    204	00000170  E8 00000497		 call CalcLeftSection
+    205	00000175  83 FB	00		 cmp ebx,0
+    206	00000178  0F 8E	00000487	 jle TextureEnd
+    207	0000017E			 FLSNZ:
+    208
+    209	0000017E  8B 7D	04		 mov edi,[ebp+vertex_y]
+    210	00000181  A1 00000000e		 mov eax,[_Xres]
+    211	00000186  F7 E7			 mul edi
+    212	00000188  8B F8			 mov edi,eax
+    213	0000018A  03 3D	000000ECr	 add edi,[Where]
+    214	00000190  89 3D	000000FCr	 mov [ScanLine],edi
+    215
+    216	00000196			 OuterLoop:
+    217					 ;Inner	Loop Start Here
+    218	00000196  A1 000000D8r		 mov eax,[Left_X]
+    219	0000019B  8B 2D	000000E0r	 mov ebp,[Right_X]
+    220	000001A1  C1 F8	10		 sar eax,16
+    221	000001A4  8B 3D	000000FCr	 mov edi,[ScanLine]
+    222	000001AA  C1 FD	10		 sar ebp,16
+    223	000001AD  2B E8			 sub ebp,eax
+    224	000001AF  0F 8E	000002B9	 jle UpdateValues
+    225	000001B5  89 2D	000000B4r	 mov [XWidth],ebp
+    226
+    227	000001BB  D9 05	00000110r	 FLD dword ptr [SixtyFive]
+    228	000001C1  DB 05	000000B4r	 FILD dword ptr	[XWidth]
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 5
+tg.asm
+
+
+
+    229	000001C7  DE F9			 FDIV		     ;ST(6) - 1.0/Width
+    230	000001C9  D9 C0			 FLD ST(0)
+    231	000001CB  D9 05	00000040r	 FLD dword ptr [Left_R]	  ;ST(5)
+    232	000001D1  D9 05	00000048r	 FLD dword ptr [Left_G]	  ;ST(4)
+    233	000001D7  D9 05	00000050r	 FLD dword ptr [Left_B]	  ;ST(3)
+    234	000001DD  D9 05	00000058r	 FLD dword ptr [Right_R]  ;ST(2)
+    235	000001E3  D9 05	00000060r	 FLD dword ptr [Right_G]  ;ST(1)
+    236	000001E9  D9 05	00000068r	 FLD dword ptr [Right_B]  ;ST(0)
+    237	000001EF  D8 E3			 FSUB ST(0),ST(3) ;ST(1) = Delta B
+    238	000001F1  D9 C9			 FXCH ST(1)
+    239	000001F3  D8 E4			 FSUB ST(0),ST(4) ;ST(2) = Delta G
+    240	000001F5  D9 CA			 FXCH ST(2)
+    241	000001F7  D8 E5			 FSUB ST(0),ST(5) ;ST(0) = Delta R
+    242	000001F9  D8 CE			 FMUL ST(0),ST(6)
+    243	000001FB  D9 CA			 FXCH ST(2)
+    244	000001FD  D8 CE			 FMUL ST(0),ST(6)
+    245	000001FF  D9 C9			 FXCH ST(1)
+    246	00000201  D8 CE			 FMUL ST(0),ST(6)
+    247					 ;FFREE	ST(6)
+    248	00000203  DB 1D	00000090r	 FISTP dword ptr [dbb]
+    249	00000209  DB 1D	0000008Cr	 FISTP dword ptr [dg]
+    250	0000020F  DB 1D	00000088r	 FISTP dword ptr [dr]
+    251	00000215  8D 3C	87		 lea edi,[edi+eax*4]
+    252					 ;FLD One
+    253					 ;FDIV ST(0),ST(6)
+    254	00000218  8A 0F			 mov cl,[Edi]
+    255	0000021A  D9 05	00000110r	 FLD dword ptr [SixtyFive]
+    256	00000220  D9 C0			 FLD ST(0)
+    257	00000222  D8 CC			 FMUL ST(0),ST(4)
+    258	00000224  DB 1D	0000007Cr	 FISTP dword ptr [R]
+    259	0000022A  D9 C0			 FLD ST(0)
+    260	0000022C  D8 CB			 FMUL ST(0),ST(3)
+    261	0000022E  DB 1D	00000080r	 FISTP dword ptr [G]
+    262	00000234  DE C9			 FMUL
+    263	00000236  DB 1D	00000084r	 FISTP dword ptr [B]
+    264	0000023C  DD C0			 FFREE ST(0)
+    265	0000023E  DD C1			 FFREE ST(1)
+    266	00000240  DD C2			 FFREE ST(2)
+    267	00000242  D9 F7			 FINCSTP
+    268	00000244  D9 F7			 FINCSTP
+    269	00000246  D9 F7			 FINCSTP
+    270	00000248  D9 05	00000104r	 FLD dword ptr [OneTwo]
+    271	0000024E  DE C9			 FMUL
+    272					 ;FILD dword ptr [XWidth]
+    273					 ;FDIV		      ;ST(6) - 1.0/Width
+    274
+    275	00000250  D9 05	00000020r	 FLD dword ptr [Left_Z]	  ;ST(5)
+    276	00000256  D9 05	00000010r	 FLD dword ptr [Left_U]	  ;ST(4)
+    277	0000025C  D9 05	00000018r	 FLD dword ptr [Left_V]	  ;ST(3)
+    278	00000262  D9 05	00000028r	 FLD dword ptr [Right_Z]  ;ST(2)
+    279	00000268  D9 05	00000030r	 FLD dword ptr [Right_U]  ;ST(1)
+    280	0000026E  D9 05	00000038r	 FLD dword ptr [Right_V]  ;ST(0)
+    281	00000274  D8 E3			 FSUB ST(0),ST(3) ;ST(1) = Delta V
+    282	00000276  D9 C9			 FXCH ST(1)
+    283	00000278  D8 E4			 FSUB ST(0),ST(4) ;ST(2) = Delta U
+    284	0000027A  D9 CA			 FXCH ST(2)
+    285	0000027C  D8 E5			 FSUB ST(0),ST(5) ;ST(0) = Delta Z
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 6
+tg.asm
+
+
+
+    286	0000027E  D8 CE			 FMUL ST(0),ST(6)
+    287	00000280  D9 CA			 FXCH ST(2)
+    288	00000282  D8 CE			 FMUL ST(0),ST(6)
+    289	00000284  D9 C9			 FXCH ST(1)
+    290	00000286  D8 CE			 FMUL ST(0),ST(6)
+    291	00000288  DD C6			 FFREE ST(6)
+    292	0000028A  D9 05	00000108r	 FLD One
+    293	00000290  D8 F6			 FDIV ST(0),ST(6)
+    294					 ;mov cl,[Edi]
+    295	00000292  D8 0D	00000110r	 FMUL dword ptr	[SixtyFive]
+    296	00000298  D9 C0			 FLD ST(0)
+    297	0000029A  D8 CE			 FMUL ST(0),ST(6)
+    298	0000029C  DB 1D	0000009Cr	 FISTP dword ptr [u0]
+    299	000002A2  D8 CC			 FMUL ST(0),ST(4)
+    300	000002A4  DB 1D	000000A0r	 FISTP dword ptr [v0]
+    301
+    302					 ;Left Z   ST(5)
+    303					 ;Left U   ST(4)
+    304					 ;Left V   ST(3)
+    305					 ;Delta	Z  ST(2)
+    306					 ;Delta	U  ST(1)
+    307					 ;Delta	V  ST(0)
+    308
+    309	000002AA  D9 CB			 FXCH ST(3)  ;ST(0) = V	   ST(3) = Delta V
+    310	000002AC  D8 C3			 FADD ST(0),ST(3)
+    311	000002AE  D9 C9			 FXCH ST(1)  ;ST(0) = Delta U	 ST(1) = V
+    312	000002B0  D9 CC			 FXCH ST(4)  ;ST(0) = U	   ST(4) = Delta U
+    313	000002B2  D8 C4			 FADD ST(0),ST(4)
+    314	000002B4  D9 CA			 FXCH ST(2)  ;ST(0) = Delta Z	 ST(2) = U
+    315	000002B6  D9 CD			 FXCH ST(5)  ;ST(0) = Z	   ST(5) = Delta Z
+    316	000002B8  D8 C5			 FADD ST(0),ST(5)
+    317
+    318					 ;Delta	Z  ST(5)
+    319					 ;Delta	U  ST(4)
+    320					 ;Delta	V  ST(3)
+    321					 ;Left U   ST(2)
+    322					 ;Left V   ST(1)
+    323					 ;Left Z   ST(0)
+    324	000002BA  BB 00000000		 mov ebx,0
+    325	000002BF  8B 0D	0000009Cr	 mov ecx,[u0]
+    326	000002C5  8B 15	000000A0r	 mov edx,[v0]
+    327	000002CB  8A DD			 mov   bl, ch
+    328	000002CD  8A FE			 mov   bh, dh
+    329	000002CF  8B 0D	000000E8r	 mov ecx,[BitMap]
+    330
+    331	000002D5  D9 05	00000108r	 FLD dword ptr [One]
+    332	000002DB  D8 F1			 FDIV ST(0),ST(1)
+    333	000002DD  8A 0C	99		 mov cl,[ecx+ebx*4]
+    334
+    335	000002E0  D8 0D	00000110r	 FMUL dword ptr	[SixtyFive]
+    336	000002E6  D9 C0			 FLD ST(0)
+    337	000002E8  D8 CC			 FMUL ST(0),ST(4)
+    338	000002EA  DB 1D	000000A4r	 FISTP dword ptr [u1]
+    339	000002F0  D8 CA			 FMUL ST(0),ST(2)
+    340	000002F2  DB 1D	000000A8r	 FISTP dword ptr [v1]
+    341
+    342
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 7
+tg.asm
+
+
+
+    343	000002F8			 InnerOuterLoop:
+    344
+    345					 ;Delta	Z  ST(5)
+    346					 ;Delta	U  ST(4)
+    347					 ;Delta	V  ST(3)
+    348					 ;Left U   ST(2)
+    349					 ;Left V   ST(1)
+    350					 ;Left Z   ST(0)
+    351
+    352	000002F8  D8 C5			 FADD ST(0),ST(5)
+    353	000002FA  D9 C9			 FXCH ST(1)
+    354	000002FC  D8 C3			 FADD ST(0),ST(3)
+    355	000002FE  D9 CA			 FXCH ST(2)
+    356	00000300  D8 C4			 FADD ST(0),ST(4)
+    357	00000302  D9 CA			 FXCH ST(2)
+    358	00000304  D9 C9			 FXCH ST(1)
+    359	00000306  D9 05	00000108r	 FLD dword ptr [One]
+    360	0000030C  D8 F1			 FDIV ST(0),ST(1)
+    361					 ;mov esi,[u0]
+    362					 ;mov edx,[v0]
+    363					 ;mov [uu],esi
+    364					 ;mov [vv],edx
+    365
+    366
+    367	0000030E  8B 35	000000A4r	 mov esi,[u1]
+    368	00000314  8B 15	000000A8r	 mov edx,[v1]
+    369	0000031A  2B 35	0000009Cr	 sub esi,[u0]
+    370	00000320  2B 15	000000A0r	 sub edx,[v0]
+    371	00000326  C1 FE	04		 sar esi,4
+    372	00000329  A1 000000B4r		 mov eax,[Xwidth]
+    373	0000032E  C1 FA	04		 sar edx,4
+    374	00000331  8B E8			 mov ebp,eax
+    375	00000333  83 E8	10		 sub eax,16
+    376	00000336  83 FD	10		 cmp ebp,16
+    377	00000339  7E 09	90 90 90 90	 jle @@NoOver16
+    378	0000033F  BD 00000010		 mov ebp,16
+    379	00000344			 @@NoOver16:
+    380	00000344  89 15	000000B0r	 mov [dv],edx
+    381	0000034A  89 35	000000ACr	 mov [du],esi
+    382	00000350  8D 3C	AF		 lea edi,[edi+ebp*4]
+    383	00000353  C1 E5	02		 shl ebp,2
+    384	00000356  BB 00000000		 mov ebx,0
+    385	0000035B  83 F5	FF		 xor ebp,-1
+    386	0000035E  8B 35	000000E8r	 mov esi,[BitMap]
+    387	00000364  45			 inc ebp
+    388	00000365  A3 000000B4r		 mov [Xwidth],eax
+    389	0000036A  A1 0000007Cr		 mov eax,[r]
+    390	0000036F  8B 1D	00000080r	 mov ebx,[g]
+    391	00000375  8B 0D	00000084r	 mov ecx,[b]
+    392	0000037B  2B 05	00000088r	 sub eax,[dr]
+    393	00000381  2B 1D	0000008Cr	 sub ebx,[dg]
+    394	00000387  2B 0D	00000090r	 sub ecx,[dbb]
+    395	0000038D  A3 0000007Cr		 mov [r],eax
+    396	00000392  89 1D	00000080r	 mov [g],ebx
+    397	00000398  89 0D	00000084r	 mov [b],ecx
+    398
+    399
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 8
+tg.asm
+
+
+
+    400	0000039E			 @@InnerLoop:
+    401	0000039E  A1 0000007Cr		 mov eax,[r]		  ; 1
+    402	000003A3  8B 1D	00000080r	 mov ebx,[g]		  ; 1
+    403	000003A9  8B 0D	00000084r	 mov ecx,[b]		  ; 2
+    404	000003AF  03 05	00000088r	 add eax,[dr]		  ; 2
+    405	000003B5  03 1D	0000008Cr	 add ebx,[dg]		  ; 3
+    406	000003BB  03 0D	00000090r	 add ecx,[dbb]		  ; 3
+    407	000003C1  A3 0000007Cr		 mov [r],eax		  ; 4
+    408	000003C6  89 1D	00000080r	 mov [g],ebx		  ; 4
+    409	000003CC  89 0D	00000084r	 mov [b],ecx		  ; 5
+    410
+    411	000003D2  8A F4			 mov dh,ah		  ; 5
+    412	000003D4  C1 E2	08		 shl edx,8		  ; 6
+    413	000003D7  8A F7			 mov dh,bh		  ; 7
+    414	000003D9  8A D5			 mov dl,ch		  ; 8
+    415	000003DB  81 E2	FEFEFEFE	 and  edx,0fefefefeh	  ; 9
+    416	000003E1  89 15	00000078r	 mov [gour],edx		  ; 10
+    417
+    418	000003E7  8B 0D	0000009Cr	 mov ecx,[u0]		  ; 11
+    419	000003ED  8B 15	000000A0r	 mov edx,[v0]		  ; 11
+    420	000003F3  8A DD			 mov   bl, ch		  ; 12
+    421	000003F5  8A FE			 mov   bh, dh		  ; 13
+    422
+    423	000003F7  03 15	000000B0r	     add   edx,	[dv]		     ;13  update v
+    424	000003FD  03 0D	000000ACr	     add   ecx,	[du]		     ;14  update u
+    425	00000403  8B 04	9E		     mov   eax,	[esi+ebx*4]	     ;14 get pixel from	aligned	texture	map
+    426	00000406  89 0D	0000009Cr	     mov   [u0],ecx		     ;15
+    427	0000040C  03 05	00000078r	     add   eax,[gour]		     ;15
+    428	00000412  D1 E8			     shr   eax,1		     ;16
+    429	00000414  89 15	000000A0r	     mov   [v0],edx		     ;16
+    430	0000041A  89 04	2F		     mov   [edi+ebp], eax	     ; plot pixel
+    431	0000041D  83 C5	04		     add   ebp,4
+    432	00000420  0F 85	FFFFFF78	     jnz   @@InnerLoop
+    433
+    434	00000426  A1 000000A4r		 mov eax,[u1]
+    435	0000042B  8B 0D	000000A8r	 mov ecx,[v1]
+    436	00000431  A3 0000009Cr		 mov [u0],eax
+    437	00000436  89 0D	000000A0r	 mov [v0],ecx
+    438
+    439	0000043C  D8 0D	00000110r	 FMUL dword ptr	[SixtyFive]
+    440	00000442  A1 000000B4r		 mov eax,[XWidth]
+    441	00000447  D9 C0			 FLD ST(0)
+    442	00000449  D8 CC			 FMUL ST(0),ST(4)
+    443	0000044B  DB 1D	000000A4r	 FISTP dword ptr [u1]
+    444	00000451  D8 CA			 FMUL ST(0),ST(2)
+    445	00000453  DB 1D	000000A8r	 FISTP dword ptr [v1]
+    446
+    447	00000459  83 F8	00		 cmp eax,0
+    448	0000045C  0F 8F	FFFFFE96	 jg InnerOuterLoop
+    449	00000462  DD C0			 FFREE ST(0)
+    450	00000464  DD C1			 FFREE ST(1)
+    451	00000466  DD C2			 FFREE ST(2)
+    452	00000468  DD C3			 FFREE ST(3)
+    453	0000046A  DD C4			 FFREE ST(4)
+    454	0000046C  DD C5			 FFREE ST(5)
+    455
+    456					 ;Inner	Loop End Here
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 9
+tg.asm
+
+
+
+    457
+    458	0000046E			 UpdateValues:
+    459	0000046E  A1 000000FCr		 mov eax,[ScanLine]
+    460	00000473  8B 1D	00000008r	 mov ebx,[Left_Section_Height]
+    461	00000479  03 05	00000000e	 add eax,[_XRes]
+    462	0000047F  4B			 dec ebx
+    463	00000480  A3 000000FCr		 mov [ScanLine],eax
+    464	00000485  89 1D	00000008r	 mov [Left_Section_Height],ebx
+    465	0000048B  7F 2A	90 90 90 90	 jg @@Update_Left_UVXZ
+    466	00000491  8B 1D	00000000r	 mov ebx,[Left_Section]
+    467	00000497  4B			 dec ebx
+    468	00000498  0F 8E	00000167	 jle TextureEnd
+    469	0000049E  89 1D	00000000r	 mov [Left_Section],ebx
+    470	000004A4  E8 00000163		 call CalcLeftSection
+    471	000004A9  83 FB	00		 cmp ebx,0
+    472	000004AC  0F 8E	00000153	 jle TextureEnd
+    473	000004B2  E9 00000088		 jmp RightSectionCheck
+    474	000004B7			 @@Update_Left_UVXZ:
+    475	000004B7  D9 05	00000010r	 FLD dword ptr [Left_U]
+    476	000004BD  D9 05	00000018r	 FLD dword ptr [Left_V]
+    477	000004C3  D9 C9			 FXCH ST(1)
+    478	000004C5  D8 05	00000014r	 FADD dword ptr	[Delta_Left_U]
+    479	000004CB  D9 C9			 FXCH ST(1)
+    480	000004CD  D8 05	0000001Cr	 FADD [Delta_Left_V]
+    481	000004D3  D9 C9			 FXCH ST(1)
+    482	000004D5  D9 1D	00000010r	 FSTP dword ptr	[Left_U]
+    483	000004DB  D9 1D	00000018r	 FSTP dword ptr	[Left_V]
+    484
+    485	000004E1  D9 05	00000020r	 FLD dword ptr [Left_Z]
+    486	000004E7  D8 05	00000024r	 FADD dword ptr	[Delta_Left_Z]
+    487	000004ED  D9 1D	00000020r	 FSTP dword ptr	[Left_Z]
+    488
+    489
+    490	000004F3  D9 05	00000040r	 FLD dword ptr [Left_R]
+    491	000004F9  D9 05	00000048r	 FLD dword ptr [Left_G]
+    492	000004FF  D9 C9			 FXCH ST(1)
+    493	00000501  D8 05	00000044r	 FADD dword ptr	[Delta_Left_R]
+    494	00000507  D9 C9			 FXCH ST(1)
+    495	00000509  D8 05	0000004Cr	 FADD [Delta_Left_G]
+    496	0000050F  D9 C9			 FXCH ST(1)
+    497	00000511  D9 1D	00000040r	 FSTP dword ptr	[Left_R]
+    498	00000517  D9 1D	00000048r	 FSTP dword ptr	[Left_G]
+    499
+    500
+    501	0000051D  D9 05	00000050r	 FLD dword ptr [Left_B]
+    502	00000523  A1 000000D8r		 mov eax,[Left_X]
+    503	00000528  D8 05	00000054r	 FADD dword ptr	[Delta_Left_B]
+    504	0000052E  03 05	000000DCr	 add eax,[Delta_Left_X]
+    505	00000534  D9 1D	00000050r	 FSTP dword ptr	[Left_B]
+    506	0000053A  A3 000000D8r		 mov [Left_X],eax
+    507
+    508
+    509
+    510
+    511	0000053F			 RightSectionCheck:
+    512	0000053F  8B 1D	0000000Cr	 mov ebx,[Right_Section_Height]
+    513	00000545  4B			 dec ebx
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 10
+tg.asm
+
+
+
+    514	00000546  89 1D	0000000Cr	 mov [Right_Section_Height],ebx
+    515	0000054C  7F 2A	90 90 90 90	 jg @@Update_Right_UVXZ
+    516	00000552  8B 1D	00000004r	 mov ebx,[Right_Section]
+    517	00000558  4B			 dec ebx
+    518	00000559  0F 8E	000000A6	 jle TextureEnd
+    519	0000055F  89 1D	00000004r	 mov [Right_Section],ebx
+    520	00000565  E8 00000181		 call CalcRightSection
+    521	0000056A  83 FB	00		 cmp ebx,0
+    522	0000056D  0F 8E	00000092	 jle TextureEnd
+    523	00000573  E9 FFFFFC1E		 jmp OuterLoop
+    524
+    525	00000578			 @@Update_Right_UVXZ:
+    526	00000578  D9 05	00000030r	 FLD dword ptr [Right_U]
+    527	0000057E  D9 05	00000038r	 FLD dword ptr [Right_V]
+    528	00000584  D9 C9			 FXCH ST(1)
+    529	00000586  D8 05	00000034r	 FADD dword ptr	[Delta_Right_U]
+    530	0000058C  D9 C9			 FXCH ST(1)
+    531	0000058E  D8 05	0000003Cr	 FADD [Delta_Right_V]
+    532	00000594  D9 C9			 FXCH ST(1)
+    533	00000596  D9 1D	00000030r	 FSTP dword ptr	[Right_U]
+    534	0000059C  D9 1D	00000038r	 FSTP dword ptr	[Right_V]
+    535
+    536	000005A2  D9 05	00000028r	 FLD dword ptr [Right_Z]
+    537	000005A8  D8 05	0000002Cr	 FADD dword ptr	[Delta_Right_Z]
+    538	000005AE  D9 1D	00000028r	 FSTP dword ptr	[Right_Z]
+    539
+    540
+    541	000005B4  D9 05	00000058r	 FLD dword ptr [Right_R]
+    542	000005BA  D9 05	00000060r	 FLD dword ptr [Right_G]
+    543	000005C0  D9 C9			 FXCH ST(1)
+    544	000005C2  D8 05	0000005Cr	 FADD dword ptr	[Delta_Right_R]
+    545	000005C8  D9 C9			 FXCH ST(1)
+    546	000005CA  D8 05	00000064r	 FADD [Delta_Right_G]
+    547	000005D0  D9 C9			 FXCH ST(1)
+    548	000005D2  D9 1D	00000058r	 FSTP dword ptr	[Right_R]
+    549	000005D8  D9 1D	00000060r	 FSTP dword ptr	[Right_G]
+    550
+    551
+    552	000005DE  D9 05	00000068r	 FLD dword ptr [Right_B]
+    553	000005E4  A1 000000E0r		 mov eax,[Right_X]
+    554	000005E9  D8 05	0000006Cr	 FADD dword ptr	[Delta_Right_B]
+    555	000005EF  03 05	000000E4r	 add eax,[Delta_Right_X]
+    556	000005F5  D9 1D	00000068r	 FSTP dword ptr	[Right_B]
+    557	000005FB  A3 000000E0r		 mov [Right_X],eax
+    558
+    559	00000600  E9 FFFFFB91		 jmp OuterLoop
+    560
+    561	00000605			 TextureEnd:
+    562	00000605  8B 2D	00000100r	 mov ebp,[Tebp]
+    563	0000060B  C3			 ret
+    564
+    565	0000060C			 CalcLeftSection proc near
+    566
+    567	0000060C  A1 00000000r		 mov eax,[Left_Section]
+    568	00000611  8B 0C	85 000000C0r	 mov ecx,[Left_Array+eax*4]
+    569	00000618  83 E8	01		 sub eax,1
+    570	0000061B  8B 34	85 000000C0r	 mov esi,[Left_Array+eax*4]
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 11
+tg.asm
+
+
+
+    571	00000622  8B 5E	04		 mov ebx,[esi+Vertex_Y]
+    572	00000625  2B 59	04		 sub ebx,[ecx+Vertex_Y]
+    573	00000628  0F 84	000000B6	 jz @@CLSend
+    574	0000062E  89 1D	000000B8r	 mov [Height],ebx
+    575	00000634  8B 11			 mov edx,[ecx+Vertex_X]
+    576	00000636  DB 05	000000B8r	 FILD dword ptr	[Height]
+    577	0000063C  C1 E2	10		 sal edx,16
+    578	0000063F  8B 06			 mov eax,[esi+Vertex_X]
+    579	00000641  2B 01			 sub eax,[ecx+Vertex_X]
+    580	00000643  D9 05	00000108r	 FLD dword ptr [One]
+    581	00000649  C1 E0	10		 sal eax,16
+    582	0000064C  89 15	000000D8r	 mov [left_x],edx
+    583	00000652  8B D0			 mov edx,eax
+    584	00000654  DE F1			 FDIVR
+    585	00000656  C1 FA	1F		 sar edx,31
+    586	00000659  F7 FB			 idiv ebx
+    587	0000065B  D9 46	08		 FLD dword ptr [esi+Vertex_Z]
+    588	0000065E  A3 000000DCr		 mov [Delta_Left_X],eax
+    589	00000663  D9 41	08		 FLD dword ptr [ecx+Vertex_Z]
+    590	00000666  D9 15	00000020r	 FST [Left_Z]
+    591	0000066C  DE E9			 FSUB
+    592	0000066E  D8 C9			 FMUL ST,ST(1)
+    593	00000670  D9 1D	00000024r	 FSTP dword ptr	[Delta_Left_Z]
+    594
+    595	00000676  D9 46	0C		 FLD dword ptr [esi+Vertex_U]
+    596	00000679  D9 41	0C		 FLD dword ptr [ecx+Vertex_U]
+    597	0000067C  D9 15	00000010r	 FST [Left_U]
+    598	00000682  DE E9			 FSUB
+    599	00000684  D8 C9			 FMUL ST,ST(1)
+    600	00000686  D9 1D	00000014r	 FSTP dword ptr	[Delta_Left_U]
+    601
+    602	0000068C  D9 46	10		 FLD dword ptr [esi+Vertex_V]
+    603	0000068F  D9 41	10		 FLD dword ptr [ecx+Vertex_V]
+    604	00000692  D9 15	00000018r	 FST [Left_V]
+    605	00000698  DE E9			 FSUB
+    606	0000069A  D8 C9			 FMUL ST,ST(1)
+    607	0000069C  D9 1D	0000001Cr	 FSTP dword ptr	[Delta_Left_V]
+    608
+    609	000006A2  D9 46	14		 FLD dword ptr [esi+Vertex_R]
+    610	000006A5  D9 41	14		 FLD dword ptr [ecx+Vertex_R]
+    611	000006A8  D9 15	00000040r	 FST [Left_R]
+    612	000006AE  DE E9			 FSUB
+    613	000006B0  D8 C9			 FMUL ST,ST(1)
+    614	000006B2  D9 1D	00000044r	 FSTP dword ptr	[Delta_Left_R]
+    615
+    616	000006B8  D9 46	18		 FLD dword ptr [esi+Vertex_G]
+    617	000006BB  D9 41	18		 FLD dword ptr [ecx+Vertex_G]
+    618	000006BE  D9 15	00000048r	 FST [Left_G]
+    619	000006C4  DE E9			 FSUB
+    620	000006C6  D8 C9			 FMUL ST,ST(1)
+    621	000006C8  D9 1D	0000004Cr	 FSTP dword ptr	[Delta_Left_G]
+    622
+    623
+    624	000006CE  D9 46	1C		 FLD dword ptr [esi+Vertex_B]
+    625	000006D1  D9 41	1C		 FLD dword ptr [ecx+Vertex_B]
+    626	000006D4  D9 15	00000050r	 FST [Left_B]
+    627	000006DA  DE E9			 FSUB
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 12
+tg.asm
+
+
+
+    628	000006DC  DE C9			 FMUL
+    629	000006DE  D9 1D	00000054r	 FSTP dword ptr	[Delta_Left_B]
+    630	000006E4			 @@CLSend:
+    631	000006E4  89 1D	00000008r	 mov [Left_Section_Height],ebx
+    632	000006EA  C3			   ret
+    633	000006EB			 CalcLeftSection endp
+    634
+    635
+    636
+    637	000006EB			 CalcRightSection proc near
+    638
+    639	000006EB  A1 00000004r		 mov eax,[Right_Section]
+    640	000006F0  8B 0C	85 000000CCr	 mov ecx,[Right_Array+eax*4]
+    641	000006F7  83 E8	01		 sub eax,1
+    642	000006FA  8B 34	85 000000CCr	 mov esi,[Right_Array+eax*4]
+    643	00000701  8B 5E	04		 mov ebx,[esi+Vertex_Y]
+    644	00000704  2B 59	04		 sub ebx,[ecx+Vertex_Y]
+    645	00000707  0F 84	000000B6	 jz @@CRSend
+    646	0000070D  89 1D	000000B8r	 mov [Height],ebx
+    647	00000713  8B 11			 mov edx,[ecx+Vertex_X]
+    648	00000715  DB 05	000000B8r	 FILD dword ptr	[Height]
+    649	0000071B  C1 E2	10		 sal edx,16
+    650	0000071E  8B 06			 mov eax,[esi+Vertex_X]
+    651	00000720  2B 01			 sub eax,[ecx+Vertex_X]
+    652	00000722  D9 05	00000108r	 FLD dword ptr [One]
+    653	00000728  C1 E0	10		 sal eax,16
+    654	0000072B  89 15	000000E0r	 mov [Right_X],edx
+    655	00000731  8B D0			 mov edx,eax
+    656	00000733  DE F1			 FDIVR
+    657	00000735  C1 FA	1F		 sar edx,31
+    658	00000738  F7 FB			 idiv ebx
+    659	0000073A  D9 46	08		 FLD dword ptr [esi+Vertex_Z]
+    660	0000073D  A3 000000E4r		 mov [Delta_Right_X],eax
+    661	00000742  D9 41	08		 FLD dword ptr [ecx+Vertex_Z]
+    662	00000745  D9 15	00000028r	 FST [Right_Z]
+    663	0000074B  DE E9			 FSUB
+    664	0000074D  D8 C9			 FMUL ST,ST(1)
+    665	0000074F  D9 1D	0000002Cr	 FSTP dword ptr	[Delta_Right_Z]
+    666
+    667	00000755  D9 46	0C		 FLD dword ptr [esi+Vertex_U]
+    668	00000758  D9 41	0C		 FLD dword ptr [ecx+Vertex_U]
+    669	0000075B  D9 15	00000030r	 FST [Right_U]
+    670	00000761  DE E9			 FSUB
+    671	00000763  D8 C9			 FMUL ST,ST(1)
+    672	00000765  D9 1D	00000034r	 FSTP dword ptr	[Delta_Right_U]
+    673
+    674	0000076B  D9 46	10		 FLD dword ptr [esi+Vertex_V]
+    675	0000076E  D9 41	10		 FLD dword ptr [ecx+Vertex_V]
+    676	00000771  D9 15	00000038r	 FST [Right_V]
+    677	00000777  DE E9			 FSUB
+    678	00000779  D8 C9			 FMUL ST,ST(1)
+    679	0000077B  D9 1D	0000003Cr	 FSTP dword ptr	[Delta_Right_V]
+    680
+    681
+    682	00000781  D9 46	14		 FLD dword ptr [esi+Vertex_R]
+    683	00000784  D9 41	14		 FLD dword ptr [ecx+Vertex_R]
+    684	00000787  D9 15	00000058r	 FST [Right_R]
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 13
+tg.asm
+
+
+
+    685	0000078D  DE E9			 FSUB
+    686	0000078F  D8 C9			 FMUL ST,ST(1)
+    687	00000791  D9 1D	0000005Cr	 FSTP dword ptr	[Delta_Right_R]
+    688
+    689	00000797  D9 46	18		 FLD dword ptr [esi+Vertex_G]
+    690	0000079A  D9 41	18		 FLD dword ptr [ecx+Vertex_G]
+    691	0000079D  D9 15	00000060r	 FST [Right_G]
+    692	000007A3  DE E9			 FSUB
+    693	000007A5  D8 C9			 FMUL ST,ST(1)
+    694	000007A7  D9 1D	00000064r	 FSTP dword ptr	[Delta_Right_G]
+    695
+    696
+    697	000007AD  D9 46	1C		 FLD dword ptr [esi+Vertex_B]
+    698	000007B0  D9 41	1C		 FLD dword ptr [ecx+Vertex_B]
+    699	000007B3  D9 15	00000068r	 FST [Right_B]
+    700	000007B9  DE E9			 FSUB
+    701	000007BB  DE C9			 FMUL
+    702	000007BD  D9 1D	0000006Cr	 FSTP dword ptr	[Delta_Right_B]
+    703	000007C3			 @@CRSend:
+    704	000007C3  89 1D	0000000Cr	 mov [Right_Section_Height],ebx
+    705	000007C9  C3			   ret
+    706	000007CA			 CalcRightSection endp
+    707
+    708
+    709	000007CA			 _TEXT	 ENDS
+    710
+    711					 END
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 14
+Symbol Table
+
+
+
+
+Symbol Name			  Type	 Value
+
+??DATE				  Text	 "05/10/95"
+??FILENAME			  Text	 "tg	  "
+??TIME				  Text	 "19:50:04"
+??VERSION			  Number 0400
+@@CLSEND			  Near	 _TEXT:06E4
+@@CRSEND			  Near	 _TEXT:07C3
+@@INNERLOOP			  Near	 _TEXT:039E
+@@NOOVER16			  Near	 _TEXT:0344
+@@SORT1				  Near	 _TEXT:002B
+@@SORT2				  Near	 _TEXT:0039
+@@SORT3				  Near	 _TEXT:0047
+@@UPDATE_LEFT_UVXZ		  Near	 _TEXT:04B7
+@@UPDATE_RIGHT_UVXZ		  Near	 _TEXT:0578
+@CPU				  Text	 0F8FH
+@CURSEG				  Text	 _TEXT
+@FILENAME			  Text	 TG
+@WORDSIZE			  Text	 4
+B				  Dword	 _DATA:0084
+BITMAP				  Dword	 _DATA:00E8
+BOTTOM				  Dword	 _DATA:00F8
+CALCLEFTSECTION			  Near	 _TEXT:060C
+CALCRIGHTSECTION		  Near	 _TEXT:06EB
+DBB				  Dword	 _DATA:0090
+DELTA_LEFT_B			  Dword	 _DATA:0054
+DELTA_LEFT_G			  Dword	 _DATA:004C
+DELTA_LEFT_R			  Dword	 _DATA:0044
+DELTA_LEFT_U			  Dword	 _DATA:0014
+DELTA_LEFT_V			  Dword	 _DATA:001C
+DELTA_LEFT_X			  Dword	 _DATA:00DC
+DELTA_LEFT_Z			  Dword	 _DATA:0024
+DELTA_RIGHT_B			  Dword	 _DATA:006C
+DELTA_RIGHT_G			  Dword	 _DATA:0064
+DELTA_RIGHT_R			  Dword	 _DATA:005C
+DELTA_RIGHT_U			  Dword	 _DATA:0034
+DELTA_RIGHT_V			  Dword	 _DATA:003C
+DELTA_RIGHT_X			  Dword	 _DATA:00E4
+DELTA_RIGHT_Z			  Dword	 _DATA:002C
+DG				  Dword	 _DATA:008C
+DR				  Dword	 _DATA:0088
+DU				  Dword	 _DATA:00AC
+DV				  Dword	 _DATA:00B0
+FLSNZ				  Near	 _TEXT:017E
+G				  Dword	 _DATA:0080
+GOUR				  Dword	 _DATA:0078
+HEIGHT				  Dword	 _DATA:00B8
+INNEROUTERLOOP			  Near	 _TEXT:02F8
+LEFT_ARRAY			  Dword	 _DATA:00C0
+LEFT_B				  Dword	 _DATA:0050
+LEFT_G				  Dword	 _DATA:0048
+LEFT_R				  Dword	 _DATA:0040
+LEFT_SECTION			  Dword	 _DATA:0000
+LEFT_SECTION_HEIGHT		  Dword	 _DATA:0008
+LEFT_U				  Dword	 _DATA:0010
+LEFT_V				  Dword	 _DATA:0018
+Turbo Assembler	 Version 4.0	    05/10/95 19:50:05	    Page 15
+Symbol Table
+
+
+
+LEFT_X				  Dword	 _DATA:00D8
+LEFT_Z				  Dword	 _DATA:0020
+LONGEST				  Dword	 _DATA:00BC
+LONGESTOVERZERO			  Near	 _TEXT:0103
+MIDDLE				  Dword	 _DATA:00F4
+ONE				  Dword	 _DATA:0108
+ONETWO				  Dword	 _DATA:0104
+OUTERLOOP			  Near	 _TEXT:0196
+R				  Dword	 _DATA:007C
+REVHEIGHT			  Dword	 _DATA:0070
+REVWIDTH			  Dword	 _DATA:0074
+RIGHTSECTIONCHECK		  Near	 _TEXT:053F
+RIGHT_ARRAY			  Dword	 _DATA:00CC
+RIGHT_B				  Dword	 _DATA:0068
+RIGHT_G				  Dword	 _DATA:0060
+RIGHT_R				  Dword	 _DATA:0058
+RIGHT_SECTION			  Dword	 _DATA:0004
+RIGHT_SECTION_HEIGHT		  Dword	 _DATA:000C
+RIGHT_U				  Dword	 _DATA:0030
+RIGHT_V				  Dword	 _DATA:0038
+RIGHT_X				  Dword	 _DATA:00E0
+RIGHT_Z				  Dword	 _DATA:0028
+SCANLINE			  Dword	 _DATA:00FC
+SIXTEEN				  Dword	 _DATA:010C
+SIXTYFIVE			  Dword	 _DATA:0110
+TEBP				  Dword	 _DATA:0100
+TEXTUREEND			  Near	 _TEXT:0605
+TGTRIANGLE_			  Near	 _TEXT:0000
+TOP				  Dword	 _DATA:00F0
+U0				  Dword	 _DATA:009C
+U1				  Dword	 _DATA:00A4
+UPDATEVALUES			  Near	 _TEXT:046E
+UU				  Dword	 _DATA:0094
+V0				  Dword	 _DATA:00A0
+V1				  Dword	 _DATA:00A8
+VERTEX_B			  Number 001C
+VERTEX_G			  Number 0018
+VERTEX_R			  Number 0014
+VERTEX_U			  Number 000C
+VERTEX_V			  Number 0010
+VERTEX_X			  Number 0000
+VERTEX_Y			  Number 0004
+VERTEX_Z			  Number 0008
+VV				  Dword	 _DATA:0098
+WHERE				  Dword	 _DATA:00EC
+XWIDTH				  Dword	 _DATA:00B4
+_XRES				  Dword	 _DATA:---- Extern
+
+Groups & Segments		  Bit Size Align  Combine Class
+
+_DATA				  32  0114 Dword  Public  DATA
+_TEXT				  32  07CA Byte	  Public  CODE
+

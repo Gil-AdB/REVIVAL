@@ -1,0 +1,300 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 120
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 120
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\mechs\mech1\hull.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0 0.4299998 -0.09000007 0 0 0 1 1 1
+  0 0 0 0 0
+  0 0.4299998 -0.09000007 0 0 0 1 1 1
+  20 0 0 0 0
+  0 0.4299998 -0.09000007 -72.29999 0 0 1 1 1
+  60 0 0 0 0
+  0 0.4299998 -0.09000007 115.6 0 0 1 1 1
+  100 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+PivotPoint 0 0.4299998 -0.09000007
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\mech1\hull2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  22
+  0 3.09 -1.81 0 0 0 1 1 1
+  0 0 0 0 0
+  0 3.823081 -0.7863703 0 0 0 1 1 1
+  5 0 0 0 0
+  0 3.8685 0.1165 0 0 0 1 1 1
+  10 0 0 0 0
+  0 3.1585 1.1465 0 0 0 1 1 1
+  20 0 0 0 0
+  0 3.708499 2.2665 0 0 0 1 1 1
+  25 0 0 0 0
+  0 3.838499 3.336499 0 0 0 1 1 1
+  30 0 0 0 0
+  0 3.493422 3.80165 0 0 0 1 1 1
+  35 0 0 0 0
+  0 3.1085 4.256501 0 0 0 1 1 1
+  40 0 0 0 0
+  0 3.839428 5.264706 0 0 0 1 1 1
+  45 0 0 0 0
+  0 3.917884 6.192835 0 0 0 1 1 1
+  49 0 0 0 0
+  0 3.878499 6.436505 0 0 0 1 1 1
+  50 0 0 0 0
+  0 3.566245 6.859607 0 0 0 1 1 1
+  55 0 0 0 0
+  0 3.1285 7.376505 0 0 0 1 1 1
+  60 0 0 0 0
+  0 3.759124 8.493381 0 0 0 1 1 1
+  65 0 0 0 0
+  0 3.838499 9.606505 0 0 0 1 1 1
+  70 0 0 0 0
+  0 3.1085 10.5165 0 0 0 1 1 1
+  80 0 0 0 0
+  0 3.847874 11.60463 0 0 0 1 1 1
+  85 0 0 0 0
+  0 3.888499 12.7065 0 0 0 1 1 1
+  90 0 0 0 0
+  0 3.1685 13.72651 0 0 0 1 1 1
+  100 0 0 0 0
+  0 3.77225 14.80401 0 0 0 1 1 1
+  105 0 0 0 0
+  0 3.8585 15.87651 0 0 0 1 1 1
+  110 0 0 0 0
+  0 3.158501 16.8565 0 0 0 1 1 1
+  120 0 0 0 0
+EndBehavior 1
+LockedChannels 45
+PivotPoint 0 0.05 -0.49
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\mech1\l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  0 0.05 -0.49 0 29.50001 0 1 1 1
+  0 0 0 0 0
+  0 0.05 -0.49 0 7.000013 0 1 1 1
+  10 0 0 0 0
+  0 0.05 -0.49 0 -78.79996 0 1 1 1
+  20 0 0 0 0
+  0 0.05 -0.49 0 -5.49997 0 1 1 1
+  30 0 0 0 0
+  0 0.05 -0.49 0 29.50001 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.05 -0.49
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\mech1\l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  0 -1.72 -1.31 0 -29.8 0 1 1 1
+  0 0 0 0 0
+  0 -1.72 -1.31 0 -20.3 0 1 1 1
+  10 0 0 0 0
+  0 -1.72 -1.31 0 -7.89376 0 1 1 1
+  15 0 0 0 0
+  0 -1.72 -1.31 0 78.69999 0 1 1 1
+  20 0 0 0 0
+  0 -1.72 -1.31 0 5.39999 0 1 1 1
+  30 0 0 0 0
+  0 -1.72 -1.31 0 -29.8 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 -1.72 -1.31
+ParentObject 3
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\mech1\r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  0 0.05 -0.4999999 0 -80.19999 0 1 1 1
+  0 1 0 0 0
+  0 0.05 -0.4999999 0 -8.359987 0 1 1 1
+  10 1 0 0 0
+  0 0.05 -0.4999999 0 29.24003 0 1 1 1
+  20 1 0 0 0
+  0 0.05 -0.4999999 0 -8.959969 0 1 1 1
+  30 0 0 0 0
+  0 0.05 -0.4999999 0 -52.75998 0 1 1 1
+  35 0 0 0 0
+  0 0.05 -0.4999999 0 -80.19999 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.05 -0.4999999
+ParentObject 2
+ShadowOptions 7
+
+LoadObject MY_OBJEC\mechs\mech1\r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  5
+  0 -1.72 -1.31 0 80.20004 0 1 1 1
+  0 0 0 0 0
+  0 -1.72 -1.31 0 8.925056 0 1 1 1
+  10 1 0 0 0
+  0 -1.72 -1.31 0 -28.67495 0 1 1 1
+  20 1 0 0 0
+  0 -1.72 -1.31 0 -34.47496 0 1 1 1
+  30 0 0 0 0
+  0 -1.72 -1.31 0 80.20004 0 1 1 1
+  40 0 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 -1.72 -1.31
+ParentObject 5
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\mechs\mech1\laser.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  -1.68 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  0 1 0 0 0
+  -1.68 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  60 1 0 0 0
+  -1.68 0.34 100 0 0 0 0.06800003 0.06800003 0.06800003
+  70 1 0 0 0
+  -1.68 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  71 1 0 0 0
+  -1.68 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  110 1 0 0 0
+  -1.68 0.34 100 0 0 0 0.06800003 0.06800003 0.06800003
+  120 0 0 0 0
+EndBehavior 1
+LockedChannels 3
+ParentObject 1
+ShadowOptions 7
+
+LoadObject C:\Newtek\MY_OBJEC\mechs\mech1\laser.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  6
+  1.675 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  0 1 0 0 0
+  1.675 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  60 1 0 0 0
+  1.675 0.34 100 0 0 0 0.06800003 0.06800003 0.06800003
+  70 1 0 0 0
+  1.675 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  71 1 0 0 0
+  1.675 0.34 2.019999 0 0 0 0.06800003 0.06800003 0.06800003
+  110 1 0 0 0
+  1.675 0.34 100 0 0 0 0.06800003 0.06800003 0.06800003
+  120 0 0 0 0
+EndBehavior 1
+LockedChannels 6
+ParentObject 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  147.6 171.4 -123.2 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 0
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  3
+  5.438793 1.77887 15.52557 0 0 0 1 1 1
+  0 0 0 0 0
+  -20.82625 3.347115 21.37234 0 0 0 1 1 1
+  60 0 0 0 0
+  -6.726027 8.202115 29.37345 0 0 0 1 1 1
+  100 0 0 0 0
+EndBehavior 1
+TargetObject 2
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 1
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 3
+BlurLength 0.500000
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 201 109 54
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 1
+FogMinDist 0.000000
+FogMaxDist 150.000000
+FogMinAmount 0.200000
+FogMaxAmount 1.000000
+FogColor 201 109 54
+BackdropFog 0
+DitherIntensity 1
+AnimatedDither 0
+GlowEffect 1
+GlowIntensity 1.000000
+GlowRadius 5.000000
+
+RenderMode 2
+RayTraceEffects 3
+RayRecursionLimit 16
+DataOverlayLabel  
+SaveAnimationName LWP\mech\mech.avi
+AnimationType 5
+EndPlugin
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\mech\m
+RGBImageFormat 7
+
+ViewMode 5
+ViewAimpoint 11.311304 1.837620 11.714255
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 0.069366
+GridNumber 100
+GridSize 1.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 1
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

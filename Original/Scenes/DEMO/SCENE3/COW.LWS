@@ -1,0 +1,353 @@
+LWSC
+1
+
+FirstFrame 0
+LastFrame 2400
+FrameStep 1
+PreviewFirstFrame 1000
+PreviewLastFrame 2400
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject C:\LWAVE\DEMO\scene3\room1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\body.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  13
+  0 -1.25 30.925 180 0 0 1 1 1
+  0 0 0 0 0
+  0 -1.45 29.19999 180 0 0 1 1 1
+  20 0 0 0 0
+  0 -1.825 26.77499 180 27.4 0 1 1 1
+  40 0 0 0 0
+  0 -2.7 25.84999 180 32.9 0 1 1 1
+  60 0 0 0 0
+  0 -3.4 24.72499 180 32.9 0 1 1 1
+  80 0 0 0 0
+  0 -4.175 23.34999 180 32.9 0 1 1 1
+  100 0 0 0 0
+  0 -4.475001 21.84999 180 0.5999937 0 1 1 1
+  120 0 0 0 0
+  0.4599999 -4.475001 -35.13107 180 0.5999937 0 1 1 1
+  1100 0 0 0 0
+  -14.425 -4.475001 -42.56104 180 0.5999937 0 1 1 1
+  1400 0 0 0 0
+  -14.425 -4.475001 -69.14696 180 0.5999937 0 1 1 1
+  1800 0 0 0 0
+  -14.43 -4.475001 -86.24267 180 0.5999937 0 1 1 1
+  2100 0 0 0 0
+  -3.869995 -4.475001 -92.64763 180 0.5999937 0 1 1 1
+  2300 0 0 0 0
+  -3.234995 -3.889999 -98.10765 180 -12.3 0 1 1 1
+  2400 0 0 0 0
+EndBehavior 1
+LockedChannels 2605
+PathAlignment 1
+LookAheadFrames 1
+PivotPoint 0 0.8899999 0
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\b_l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0 0.5349999 -0.74 0.2 -44.20003 0 1 1 1
+  0 1 0 0 0
+  0 0.5349999 -0.74 8.599998 31.6 0 1 1 1
+  20 1 0 0 0
+  0 0.5349999 -0.74 0.2 -44.20003 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0 0.5349999 -0.74
+ParentObject 2
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\b_l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -0.235 0.2749999 -0.7999999 0 19.49999 0 1 1 1
+  0 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 -8.999999 0 1 1 1
+  20 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 39.94999 0 1 1 1
+  30 1 0 0 0
+  -0.235 0.2749999 -0.7999999 0 19.49999 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3112
+PivotPoint -0.235 0.2749999 -0.7999999
+ParentObject 3
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\b_r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0.2149999 0.535 -0.7399999 7.199999 30.2 0 1 1 1
+  0 0 0 0 0
+  0.2149999 0.535 -0.7399999 -4.5 -45.90002 0 1 1 1
+  20 1 0 0 0
+  0.2149999 0.535 -0.7399999 7.199999 30.2 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.2149999 0.535 -0.7399999
+ParentObject 2
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\b_r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0.2300001 0.2800001 -0.8 -0.6999998 -15.3 0 1 1 1
+  0 1 0 0 0
+  0.2300001 0.2800001 -0.8 13.85 14.9 0 1 1 1
+  10 1 0 0 0
+  0.2300001 0.2800001 -0.8 6 14.5 0 1 1 1
+  20 1 0 0 0
+  0.2300001 0.2800001 -0.8 -0.6999998 -15.3 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.2300001 0.2800001 -0.8
+ParentObject 5
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\f_l_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  -0.225 0.575 0.4399999 -1.4 -21.6 0 1 1 1
+  0 1 0 0 0
+  -0.225 0.575 0.4399999 10.2 34.6 0 1 1 1
+  20 1 0 0 0
+  -0.225 0.575 0.4399999 -1.4 -21.6 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint -0.225 0.575 0.4399999
+ParentObject 2
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\f_l_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  -0.215 0.2749999 0.45 1.2 20.9 0 1 1 1
+  0 1 0 0 0
+  -0.215 0.2749999 0.45 0.5000002 4.900001 0 1 1 1
+  20 1 0 0 0
+  -0.215 0.2749999 0.45 17.55 47.79999 0 1 1 1
+  30 1 0 0 0
+  -0.215 0.2749999 0.45 1.2 20.9 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint -0.215 0.2749999 0.45
+ParentObject 7
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\f_r_leg1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  3
+  0.205 0.5999998 0.44 15.8 34.6 0 1 1 1
+  0 1 0 0 0
+  0.205 0.5999998 0.44 6.500001 -28.60001 0 1 1 1
+  20 1 0 0 0
+  0.205 0.5999998 0.44 15.8 34.6 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 3072
+PivotPoint 0.205 0.5999998 0.44
+ParentObject 2
+ShadowOptions 7
+
+LoadObject C:\LWAVE\DEMO\scene3\f_r_leg2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  4
+  0.24 0.285 0.4499999 0.2 0 0 1 1 1
+  0 1 0 0 0
+  0.24 0.285 0.4499999 0.2 40.65001 0 1 1 1
+  10 1 0 0 0
+  0.24 0.285 0.4499999 0.2 37.50001 0 1 1 1
+  20 1 0 0 0
+  0.24 0.285 0.4499999 0.2 0 0 1 1 1
+  40 1 0 0 0
+EndBehavior 2
+LockedChannels 40
+PivotPoint 0.24 0.285 0.4499999
+ParentObject 9
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.4 4.175 18.1 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 1.000000
+FlareNominalDistance 5.000000
+FlareDissolve 0.000000
+LensFlareFade 6
+LensFlareOptions 43
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 0.8749999 -17.225 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LightFalloff 1
+LightRange 15.000000
+LensFlare 1
+FlareIntensity 1.000000
+FlareNominalDistance 5.000000
+FlareDissolve 0.000000
+LensFlareFade 6
+LensFlareOptions 59
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.8249999 6.65 -66.35001 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 1.000000
+FlareNominalDistance 5.000000
+FlareDissolve 0.000000
+LensFlareFade 6
+LensFlareOptions 59
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  7
+  -1.902461 6.54 21.14257 0 0 0 1 1 1
+  0 0 0 0 0
+  -1.902461 6.54 21.14257 0 0 0 1 1 1
+  350 1 0 0 0
+  -2.827219 -1.14 -35.07312 0 0 0 1 1 1
+  351 0 0 0 0
+  -2.827219 -1.14 -35.07312 0 0 0 1 1 1
+  1100 0 0 0 0
+  -13.41902 2.765 -93.53404 0 0 0 1 1 1
+  1101 0 0 0 0
+  -13.41902 2.765 -93.53404 0 0 0 1 1 1
+  2080 1 0 0 0
+  -21.88833 6.404999 -81.11149 0 0 0 1 1 1
+  2320 0 0 0 0
+EndBehavior 1
+LockedChannels 24
+TargetObject 2
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 1
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 2
+BlurLength 0.500000
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+DataOverlayLabel  
+SaveAnimationName cowtest.avi
+AnimationType 5
+EndPlugin
+OutputFilenameFormat 1
+SaveRGBImagesPrefix LWP\inv\inv_r
+RGBImageFormat 7
+
+ViewMode 5
+ViewAimpoint -3.234995 -4.475001 -98.107651
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 0.351166
+GridNumber 0
+GridSize 1.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

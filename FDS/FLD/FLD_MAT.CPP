@@ -4,9 +4,9 @@
 */
 
 #include <stdio.h>
-#include <dos.h>
+//#include <dos.h>
 #include <stdlib.h>
-#include <conio.h>
+//#include <conio.h>
 #include <string.h>
 #include <math.h>
 
@@ -28,23 +28,23 @@ void AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 
 	if (!MatLib)
 	{
-		MatLib=(Material *)getAlignedBlock(sizeof(Material), 16);
+		MatLib = getAlignedType<Material>(16);//(Material *)getAlignedBlock(sizeof(Material), 16);
 		CurMat=MatLib;
 	}
 	else
 	{
-		CurMat->Next=(Material *)getAlignedBlock(sizeof(Material), 16);
+		CurMat->Next = getAlignedType<Material>(16); //(Material *)getAlignedBlock(sizeof(Material), 16);
 		CurMat=CurMat->Next;
 	}
-	memset(CurMat,0,sizeof(Material));
+//	memset(CurMat,0,sizeof(Material));
 	CurMat->Name=OrgMat->Name;
 	CurMat->Flags=0;
-	CurMat->Diffuse=OrgMat->Diffuse*0.01;
-	CurMat->Specular=OrgMat->Specular*0.01;
+	CurMat->Diffuse=OrgMat->Diffuse*0.01f;
+	CurMat->Specular=OrgMat->Specular*0.01f;
 	CurMat->RelScene=SceneGroup;
 	if (!(*OrgMat->TextureImage)) return;
 	Image=new char[strlen(OrgMat->TextureImage) + 15];
-	strcpy(Image,"Textures//");
+	strcpy(Image,"Textures/");
 	strcat(Image,OrgMat->TextureImage);
 	for (Temp=MatLib;Temp!=CurMat;Temp=Temp->Next)
 	{
@@ -59,8 +59,8 @@ void AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 	if (Temp==CurMat)
 	{
 		Tx=new Texture;
-		memset(Tx,0,sizeof(Texture));
-		Tx->FileName=strdup(Image);
+//		memset(Tx,0,sizeof(Texture));
+		Tx->FileName=_strdup(Image);
 #ifdef DebugMode
 		printf("Attempting to identify texture \"%s\"...\n",Image);
 #endif
@@ -120,42 +120,42 @@ void AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 // Cartesian Coordinates ==> Cylindrical Coordinates
 void xyztoh(float x,float y,float z,float *h)
 {
-	if (x == 0.0 && z == 0.0) *h = 0.0;
+	if (x == 0.0f && z == 0.0f) *h = 0.0f;
 	else
 	{
-		if (z == 0.0)
-			*h = (x < 0.0) ? PI_D2 : -PI_D2;
-		else if (z < 0.0)
-			*h = -atan(x / z) + PI;
+		if (z == 0.0f)
+			*h = (x < 0.0f) ? PI_D2 : -PI_D2;
+		else if (z < 0.0f)
+			*h = -atanf(x / z) + PI;
 		else
-			*h = -atan(x / z);
+			*h = -atanf(x / z);
 	}
 }
 
 //Cartesian Coordinates ==> Spherical Coordinates
 void xyztohp(float x,float y,float z,float *h,float *p)
 {
-	if (x == 0.0 && z == 0.0)
+	if (x == 0.0f && z == 0.0f)
 	{
-		*h = 0.0;
-		if (y != 0.0)
-			*p = (y < 0.0) ? -PI_D2 : PI_D2;
+		*h = 0.0f;
+		if (y != 0.0f)
+			*p = (y < 0.0f) ? -PI_D2 : PI_D2;
 		else
-			*p = 0.0;
+			*p = 0.0f;
 	}
 	else
 	{
-		if (z == 0.0)
-			*h = (x < 0.0) ? PI_D2 : -PI_D2;
-		else if (z < 0.0)
-			*h = -atan(x / z) + PI;
+		if (z == 0.0f)
+			*h = (x < 0.0f) ? PI_D2 : -PI_D2;
+		else if (z < 0.0f)
+			*h = -atanf(x / z) + PI;
 		else
-			*h = -atan(x / z);
-		x = sqrt(x * x + z * z);
-		if (x == 0.0)
-			*p = (y < 0.0) ? -PI_D2 : PI_D2;
+			*h = -atanf(x / z);
+		x = sqrtf(x * x + z * z);
+		if (x == 0.0f)
+			*p = (y < 0.0f) ? -PI_D2 : PI_D2;
 		else
-			*p = atan(y / x);
+			*p = atanf(y / x);
 	}
 }
 
@@ -177,10 +177,10 @@ void Get_UV(Face *F,Vertex *Vtx,FldMat *Mat)
 
 	if (!strcmp(Mat->ColorTexture,"Planar Image Map"))
 	{
-		s = (Mat->TextureFlags&Texture_XAxis) ? V.z / Mat->TextureSize.z + .5 :
+		s = (Mat->TextureFlags&Texture_XAxis) ? V.z / Mat->TextureSize.z + .5f :
 			V.x / Mat->TextureSize.x + .5;
-		t = (Mat->TextureFlags&Texture_YAxis) ? -V.z / Mat->TextureSize.z + .5 :
-			-V.y / Mat->TextureSize.y + .5;
+		t = (Mat->TextureFlags&Texture_YAxis) ? -V.z / Mat->TextureSize.z + .5f :
+			-V.y / Mat->TextureSize.y + .5f;
 
 		Vtx->U = fract(s);
 		Vtx->V = fract(t);
@@ -192,14 +192,14 @@ void Get_UV(Face *F,Vertex *Vtx,FldMat *Mat)
 	{
 		if (Mat->TextureFlags&Texture_XAxis) {
 			xyztoh(V.z,V.x,-V.y,&lon);
-			t = -V.x / Mat->TextureSize.x + .5;
+			t = -V.x / Mat->TextureSize.x + .5f;
 		}
 		else if (Mat->TextureFlags&Texture_YAxis) {
 			xyztoh(-V.x,V.y,V.z,&lon);
-			t = -V.y / Mat->TextureSize.y + .5;
+			t = -V.y / Mat->TextureSize.y + .5f;
 		} else {
 			xyztoh(-V.x,V.z,-V.y,&lon);
-			t = -V.z / Mat->TextureSize.z + .5;
+			t = -V.z / Mat->TextureSize.z + .5f;
 		}
 		lon = 1.0 - lon / PI_M2;
 /*		if (Mat->TFP0 != 1.0)
@@ -218,8 +218,8 @@ void Get_UV(Face *F,Vertex *Vtx,FldMat *Mat)
 			xyztohp(-V.x,V.y,V.z,&lon,&lat);
 		else
 			xyztohp(-V.x,V.z,-V.y,&lon,&lat);
-		lon = 1.0 - lon / PI_M2;
-		lat = 0.5 - lat / PI;
+		lon = 1.0f - lon / PI_M2;
+		lat = 0.5f - lat / PI;
 
 /*		 if (Mat->TFP0 != 1.0)
 			 lon = fract(lon) * Mat->TFP0;
@@ -235,7 +235,7 @@ void Get_UV(Face *F,Vertex *Vtx,FldMat *Mat)
 		Vector_Sub(&F->B->Pos,&F->A->Pos,&U);
 		Vector_Sub(&F->C->Pos,&F->A->Pos,&W);
 		Cross_Product(&U,&W,&N);
-		N.x = fabs(N.x); N.y = fabs(N.y); N.z = fabs(N.z);
+		N.x = fabsf(N.x); N.y = fabsf(N.y); N.z = fabsf(N.z);
 		char XAxis=0,YAxis=0;
 
 		if (N.x>N.y&&N.x>N.z) XAxis=1;
@@ -244,7 +244,7 @@ void Get_UV(Face *F,Vertex *Vtx,FldMat *Mat)
 		s = (XAxis) ?  V.z / Mat->TextureSize.z :  V.x / Mat->TextureSize.x;
 		t = (YAxis) ? -V.z / Mat->TextureSize.z :	-V.y / Mat->TextureSize.y;
 
-		s += .5; t += .5;
+		s += .5f; t += .5f;
 
 		Vtx->U = fract(s);
 		Vtx->V = fract(t);

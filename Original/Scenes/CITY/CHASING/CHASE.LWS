@@ -1,0 +1,1441 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 4936
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 4928
+PreviewFrameStep 5
+FramesPerSecond 30.000000
+
+LoadObject c:\lwave\city\water.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 37.568 37.568 37.568
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\big_m.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -51690 1535 60810 0 0 0 1.526 1.526 1.526
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 -1840 0
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1660 -40 -78620 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  6460 -110 -77310 -32.3 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10660 -90 -81760 23 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3390 -330 -76950 24.5 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3120 -130 -72550 -20.7 -0.6 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  8250 -500 -71380 -16 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1210 -90 -71370 19.7 0.2 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3560 -370 -65370 62.59999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5490 -100 -65300 28.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10920 -170 -63070 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  12180 -120 -69480 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5250 -100 -60080 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2370 -90 -61170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1170 -200 -58320 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4770 -240 -56170 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  900 -30 -53210 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4620 -30 -51480 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  530 -280 -45580 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4290 -30 -44760 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  320 -30 -37790 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5680 -30 -37610 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10 -30 -28220 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6830 -30 -30520 -26.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  900 -30 -53210 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  900 -30 -53210 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  900 -30 -53210 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -2950 -50 -19780 40.09999 0 0 1 1 1
+  0 0 0 0 0
+  -2950 -50 -19780 40.09999 0 0 1 1 1
+  2175 0 0 0 0
+EndBehavior 1
+LockedChannels 61
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10200 0 -24930 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -13320 -50 -20380 40.09999 0 0 1 1 1
+  0 0 0 0 0
+  -13320.18 -50 -20376 40.09999 0 0 1 1 1
+  2261 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26200 -50 26900 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2950 -50 -19780 40.09999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 61
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7180 -40 -48520 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  4710 -40 -48170 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  6240 -40 -51650 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6070 -40 -24700 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12270 -40 -28990 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5440 -40 -34500 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -11950 -40 -35990 10.2 0 0 1 1 1
+  0 0 0 0 0
+  -11950.57 -40 -35992.77 10.2 0 0 1 1 1
+  1141 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  11335 -40 -53920 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18065 -40 -53245 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17015 -40 -35870 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\mm7.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14875 -175 -6800 -25.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24075 0 3770 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18500 0 4895 -205.8 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26975 0 6345 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19625 0 7770 -200.3 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21875 0 10670 -200.7 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26625 0 10295 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -22250 0 15545 -201.2 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28925 0 13420 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -23850 0 19345 -197.8 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28975 0 18395 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -35540 -40 13180 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -31575 0 4600 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13475 0 7225 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14325 0 18575 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30725 0 8750 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -41900 0 23500 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  8725 0 -11525 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30100 0 -7225 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15250 0 12950 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  2
+  -47450 0 15350 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+  -47448.91 0 15351.68 0 0 0 2.256 2.256 2.256
+  3364 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17175 0 24675 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -56600 0 29550 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10600 0 -40325 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5850 0 -40700 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9250 0 -80500 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -8950 0 -44600 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21775 0 45000 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34500 0 36600 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -60675 0 44875 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -41600 0 47375 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -36175 0 44300 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28125 0 -15325 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34090 -30 20705 -61.40001 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -38065 -30 25930 -5.4 -1.6 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30515 -30 32680 -38.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -43015 -30 32030 -35.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -50390 -30 40305 -36.5 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject c:\lwave\city\chasing\Shp1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  28
+  1510.5 571 -76030.5 0 0 0 1 1 1
+  0 0 0 0 0
+  3660.162 571 -70423.47 0 0 0 1 1 1
+  132 0 0 0 0
+  2868.162 109 -66103.47 0 0 0 1 1 1
+  243 0 0 0 0
+  2518.781 278.4615 -63875.88 -8.5803 -7.757012 0 1 1 1
+  320 0 0 0 0
+  2345.093 421.5096 -62784.35 -9.343955 -8.03719 0 1 1 1
+  360 0 0 0 0
+  2169.635 539 -61833.97 0 0 0 1 1 1
+  393 0 0 0 0
+  923.635 989 -56335.97 0 0 0 1 1 1
+  560 0 0 0 0
+  -1723.935 213 -52795.66 -21.38984 5.647101 0 1 1 1
+  712 0 0 0 0
+  -1900.365 213 -49117.97 0 0 0 1 1 1
+  837 0 0 0 0
+  -1300.365 31 -43727.97 0 0 0 1 1 1
+  990 0 0 0 0
+  -3454.365 31 -38901.97 0 0 0 1 1 1
+  1157 0 0 0 0
+  -3584.365 31 -33857.97 0 0 0 1 1 1
+  1340 0 0 0 0
+  -3966.365 31 -29125.97 0 0 0 1 1 1
+  1565 0 0 0 0
+  -4669.542 31.93552 -27160.72 -23.33563 1.359953 0 1 1 1
+  1654 0 0 0 0
+  -4992.643 14.24643 -26397.07 -22.21187 1.314444 0 1 1 1
+  1690 1 0 0 0
+  -5136.365 117 -25965.97 -7.680767 -53.8395 0 1 1 1
+  1712 0 0 0 0
+  -5136.365 1395 -25349.97 0 0 0 1 1 1
+  1769 0 0 0 0
+  -5136.365 1243 -22661.97 -20.4674 -7.267591 0 1 1 1
+  1878 0 0 0 0
+  -7256.365 2159 -19657.97 0 0 0 1 1 1
+  2060 0 0 0 0
+  -10310.61 1699.582 -16091.85 -33.90153 3.697024 0 1 1 1
+  2239 0 0 0 0
+  -12484.37 1549.5 -11902.47 -26.36132 2.215593 0 1 1 1
+  2377 0 0 0 0
+  -18513.88 952.6344 332.9427 -25.86337 2.186732 0 1 1 1
+  2661 0 0 0 0
+  -20524.37 811 4520.029 -24.9926 2.31788 0 1 1 1
+  2764 0 0 0 0
+  -28532.37 791 22478.03 0 0 0 1 1 1
+  3280 0 0 0 0
+  -45930.37 791 37910.03 0 0 0 1 1 1
+  4152 0 0 0 0
+  -49726.37 877 56340.03 -13.47242 -7.762865 0 1 1 1
+  4673 0 0 0 0
+  -51110.65 3751.045 59615.93 -27.67309 -48.71679 0 1 1 1
+  4878 0 0 0 0
+  -51497.61 4443 60470.99 0 0 0 1 1 1
+  4936 0 0 0 0
+EndBehavior 1
+LockedChannels 40
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+LoadObject C:\LWAVE\CITY\SHIPS\SHP2\Shp2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  33
+  -216.1013 460 -78025.38 19.80046 -57.18911 0 15.40001 15.40001 15.40001
+  0 0 0 0 0
+  -107.9278 452 -77479.74 18.79743 1.339232 -16 15.40001 15.40001 15.40001
+  7 0 0 0 0
+  1755 318 -72216 13.16936 -0.5351847 34.10001 15.40001 15.40001 15.40001
+  128 0 0 0 0
+  1861 518 -69178 -2.525079 0.1222706 36.79995 15.40001 15.40001 15.40001
+  221 0 0 0 0
+  1393 304 -63952 -6.55534 1.656224 15.19998 15.40001 15.40001 15.40001
+  406 0 0 0 0
+  811 250 -60004 -10.3015 -0.6224 0 15.40001 15.40001 15.40001
+  506 0 0 0 0
+  428.7081 359.6564 -58554.25 -16.09593 -10.13512 18.29996 15.40001 15.40001 15.40001
+  549 0 0 0 0
+  -53 788 -56996 -15.89073 -4.652579 5.199997 15.40001 15.40001 15.40001
+  599 0 0 0 0
+  -61.63389 790.5662 -56965.67 -15.94822 -4.478906 5.078456 15.40001 15.40001 15.40001
+  600 0 0 0 0
+  -983 788 -53586 -9.523168 0 -1.8 15.40001 15.40001 15.40001
+  713 0 0 0 0
+  -1271 788 -49786 -7.146774 -0.008695146 -10.70002 15.40001 15.40001 15.40001
+  884 0 0 0 0
+  -2453 788 -41814 -4.289896 2.097789 10.09999 15.40001 15.40001 15.40001
+  1141 0 0 0 0
+  -2301 302 -36330 -4.126265 4.156136 -33.40001 15.40001 15.40001 15.40001
+  1333 0 0 0 0
+  -3155 78 -32080 -25.74093 1.4299 39.2 15.40001 15.40001 15.40001
+  1519 0 0 0 0
+  -5253.688 70.66348 -29397.5 -42.02462 -0.4327075 43.24293 15.40001 15.40001 15.40001
+  1647 0 0 0 0
+  -6125 78 -28334 -31.43287 -0.08760759 4.7 15.40001 15.40001 15.40001
+  1704 0 0 0 0
+  -7733 78 -25340 -21.0955 0.001114867 -16.8 15.40001 15.40001 15.40001
+  1904 0 0 0 0
+  -8307.045 76.18385 -22745.41 -13.84911 -0.01078249 36.24682 15.40001 15.40001 15.40001
+  2032 0 0 0 0
+  -8693 78 -21734 -40.93375 -0.3318157 39.50002 15.40001 15.40001 15.40001
+  2089 0 0 0 0
+  -11916.04 108.4169 -18578.85 -44.5804 -1.162924 39.8 15.40001 15.40001 15.40001
+  2361 0 0 0 0
+  -14899 264 -15392 -26.55465 -5.410899 -42.7 15.40001 15.40001 15.40001
+  2532 0 0 0 0
+  -21961 2230 1508 -18.70202 -3.852228 10.39999 15.40001 15.40001 15.40001
+  2853 0 0 0 0
+  -24215 2230 11970 -12.92259 2.309134 -8.099998 15.40001 15.40001 15.40001
+  3031 0 0 0 0
+  -25398.88 1623.966 16487.84 -20.09219 10.13579 16.42266 15.40001 15.40001 15.40001
+  3174 0 0 0 0
+  -26475 1332 18474 -42.28662 2.124753 37.40001 15.40001 15.40001 15.40001
+  3259 0 0 0 0
+  -38659 892 31070 -45.17912 1.125762 0 15.40001 15.40001 15.40001
+  3851 0 0 0 0
+  -42041 892 34088 -42.50432 -0.003475573 -10.8 15.40001 15.40001 15.40001
+  3994 0 0 0 0
+  -46024.45 910.8626 38423.98 -33.77437 0.2409886 -25.76308 15.40001 15.40001 15.40001
+  4208 0 0 0 0
+  -46959 892 40138 -13.54161 1.380487 -35.70001 15.40001 15.40001 15.40001
+  4272 0 0 0 0
+  -48661.61 640.3282 49351.81 -6.5153 1.393984 0 15.40001 15.40001 15.40001
+  4500 0 0 0 0
+  -48619 586 52386 -6.104828 -2.319866 25.09999 15.40001 15.40001 15.40001
+  4565 0 0 0 0
+  -49201.45 822.2402 54123.94 -25.10082 -7.270254 33.40773 15.40001 15.40001 15.40001
+  4615 0 0 0 0
+  -52729 1742 59852 0 0 52.1 15.40001 15.40001 15.40001
+  4771 0 0 0 0
+EndBehavior 1
+LockedChannels 24
+PathAlignment 1
+LookAheadFrames 1
+ShadowOptions 7
+
+AddNullObject Camera Target
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  101
+  -216.1013 460 -78025.38 19.80046 -57.18911 0 15.40001 15.40001 15.40001
+  0 0 0 0 0
+  -107.9278 452 -77479.74 18.79743 1.339232 -13.1 15.40001 15.40001 15.40001
+  7 0 0 0 0
+  1755 318 -72216 13.16936 -0.5351847 26.7 15.40001 15.40001 15.40001
+  128 0 0 0 0
+  1873.271 514.3453 -69415.84 -1.785164 2.037136 1.23907 15.40001 15.40001 15.40001
+  213 0 0 0 0
+  1861 518 -69178 -2.525079 2.18068 0 15.40001 15.40001 15.40001
+  221 0 0 0 0
+  1393 304 -63952 -6.55534 3.174808 0 15.40001 15.40001 15.40001
+  406 0 0 0 0
+  811 250 -60004 -10.30148 -1.129497 0 15.40001 15.40001 15.40001
+  506 0 0 0 0
+  428.7081 359.6564 -58554.25 -17.14682 -17.78536 0 15.40001 15.40001 15.40001
+  549 0 0 0 0
+  -53 788 -56996 -21.91102 -6.534013 0 15.40001 15.40001 15.40001
+  599 0 0 0 0
+  -983 788 -53586 -9.371639 0 0 15.40001 15.40001 15.40001
+  713 0 0 0 0
+  -1245.361 787.7324 -50106.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  870 0 0 0 0
+  -1245.361 787.7324 -50106.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  955 1 0 0 0
+  -1263.361 63.73242 -44860.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  956 0 0 0 0
+  -1255.596 45.20301 -44181.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  977 1 0 0 0
+  -1299.361 33.73242 -43755.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  990 1 0 0 0
+  -1403.006 32.94054 -43260.23 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1005 0 0 0 0
+  -1551.343 32.93738 -42810.44 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1020 0 0 0 0
+  -2266.527 33.20308 -41375.2 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1069 0 0 0 0
+  -3036.4 33.49733 -39979.18 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1119 0 0 0 0
+  -3380.681 33.67646 -39158.25 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1148 0 0 0 0
+  -3447.361 33.73242 -38924.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1157 0 0 0 0
+  -3632.111 33.74204 -37556.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1205 0 0 0 0
+  -3642.391 33.73839 -36315.45 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1248 0 0 0 0
+  -3596.812 33.73522 -35132.69 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1291 0 0 0 0
+  -3583.861 33.73242 -33878.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1340 0 0 0 0
+  -3666.698 33.73206 -32261.02 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1412 0 0 0 0
+  -3785.513 33.73228 -30543.04 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1497 0 0 0 0
+  -3800.395 33.7323 -30400.45 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1505 0 0 0 0
+  -3814.979 33.73232 -30242.27 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1512 0 0 0 0
+  -3925.61 33.73241 -29381.71 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1554 0 0 0 0
+  -3960.361 33.73242 -29148.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1565 0 0 0 0
+  -4093.447 33.73242 -28606.2 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1590 0 0 0 0
+  -4206.361 33.73242 -28299.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1604 0 0 0 0
+  -4342.043 33.73242 -27962.6 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1619 0 0 0 0
+  -4657.861 33.73242 -27191.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1654 0 0 0 0
+  -4980.361 14.23242 -26424.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1690 0 0 0 0
+  -5095.398 21.67249 -26132.66 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1704 0 0 0 0
+  -5133.361 92.23242 -25982.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1712 0 0 0 0
+  -5144.624 221.7962 -25900.84 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1719 0 0 0 0
+  -5150.442 592.4024 -25776.52 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1733 0 0 0 0
+  -5147.316 966.08 -25664.32 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1747 0 0 0 0
+  -5143.365 1144.89 -25595.83 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1754 0 0 0 0
+  -5137.716 1279.613 -25504.45 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1761 0 0 0 0
+  -5136.361 1388.232 -25377.86 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1769 0 0 0 0
+  -5135.139 1426.818 -25239.78 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1776 0 0 0 0
+  -5109.591 1462.515 -24911.48 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1790 0 0 0 0
+  -5067.616 1430.5 -24374.94 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1811 0 0 0 0
+  -5025.384 1336.416 -23781.19 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1833 0 0 0 0
+  -5027.365 1254.164 -23227.45 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1854 0 0 0 0
+  -5104.801 1234.187 -22752.8 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1875 0 0 0 0
+  -5127.361 1236.732 -22700.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1878 0 0 0 0
+  -5144.992 1244.107 -22641.27 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1881 0 0 0 0
+  -5150.601 1246.806 -22619.55 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1882 0 0 0 0
+  -5157.175 1253.142 -22595.27 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1883 0 0 0 0
+  -5271.263 1302.651 -22333.33 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1897 0 0 0 0
+  -5529.147 1439.166 -21849.06 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1925 0 0 0 0
+  -6086.231 1757.19 -21058.5 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1975 0 0 0 0
+  -6175.844 1799.332 -20959.5 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  1982 0 0 0 0
+  -6742.449 2045.215 -20280.17 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2025 0 0 0 0
+  -6948.998 2111.211 -20039.19 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2040 0 0 0 0
+  -7234.861 2157.732 -19682.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2060 0 0 0 0
+  -7349.457 2166.704 -19542.01 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2068 0 0 0 0
+  -7924.066 2139.173 -18889.15 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2104 0 0 0 0
+  -8664.877 2015.42 -18091.68 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2147 0 0 0 0
+  -9292.875 1881.306 -17396.46 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2182 0 0 0 0
+  -9815.96 1776.72 -16776.55 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2211 0 0 0 0
+  -10296.36 1703.232 -16118.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2239 0 0 0 0
+  -10535.13 1675.704 -15746.82 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2254 0 0 0 0
+  -10745.93 1659.195 -15388.83 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2268 0 0 0 0
+  -11052.74 1636.058 -14828.81 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2289 0 0 0 0
+  -11419.62 1610.722 -14108.24 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2314 0 0 0 0
+  -11880.62 1591.157 -13146.68 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2344 0 0 0 0
+  -12301.06 1561.953 -12278.9 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2368 0 0 0 0
+  -12469.86 1550.232 -11933.36 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2377 0 0 0 0
+  -12607.3 1541.048 -11662.29 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2384 0 0 0 0
+  -12706.02 1533.687 -11455.9 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2389 0 0 0 0
+  -12842.34 1521.827 -11181.18 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2396 0 0 0 0
+  -13435.52 1459.66 -9994.336 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2425 0 0 0 0
+  -14019.14 1398.459 -8813.521 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2453 0 0 0 0
+  -15247.72 1273.397 -6338.21 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2510 0 0 0 0
+  -16822.56 1115.528 -3155.745 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2582 0 0 0 0
+  -17279.22 1070.208 -2228.724 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2603 0 0 0 0
+  -18335.68 969.7451 -53.97335 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2653 0 0 0 0
+  -19042.3 910.6977 1393.685 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2687 0 0 0 0
+  -19575.49 867.7927 2509.614 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2714 0 0 0 0
+  -19924.25 844.2028 3229.862 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2731 0 0 0 0
+  -20511.36 812.2324 4491.641 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2764 1 0 0 0
+  -20142.36 1764.732 -3443.359 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2765 0 0 0 0
+  -21979.86 2226.732 1488.641 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  2853 1 0 0 0
+  -24189.36 2229.732 11954.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  3031 0 0 0 0
+  -25398.36 1623.732 16478.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  3174 0 0 0 0
+  -26470.86 1329.732 18453.64 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  3259 0 0 0 0
+  -38644.86 891.7324 31067.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  3851 0 0 0 0
+  -42028.86 891.7324 34071.64 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  3994 0 0 0 0
+  -46021.86 891.7324 38411.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4208 0 0 0 0
+  -46954.86 891.7324 40106.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4272 0 0 0 0
+  -48271.86 714.7324 46682.14 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4436 0 0 0 0
+  -50494.66 824.2324 56049.73 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4700 0 0 0 0
+  -50494.66 824.2324 56049.73 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4736 1 0 0 0
+  -49150.52 1172.232 55997.51 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4748 0 0 0 0
+  -51111.82 119.9773 55822.9 -0.6647859 0.02412673 0 15.40001 15.40001 15.40001
+  4764 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  2
+  0 1524 0 45 35 0 1 1 1
+  0 0 0 0 0
+  0 1524 -2 45 35 0 1 1 1
+  1565 0 0 0 0
+EndBehavior 1
+ParentObject 82
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName Engine_Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0.95 0 -3.35 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 83
+LightColor 255 255 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 10.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName Engine_Flare
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1.2 0 -3.3 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ParentObject 83
+LightColor 255 255 255
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 10.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  45
+  -176.1013 844 -78561.38 19.80046 -57.18911 0 1 1 1
+  0 0 0 0 0
+  -107.9278 731 -77479.74 18.79743 1.339232 -13.1 15.40001 15.40001 15.40001
+  27 0 0 0 0
+  1755 597 -72216 13.16936 -0.5351847 26.7 15.40001 15.40001 15.40001
+  148 0 0 0 0
+  1861 797 -69178 -2.525079 2.18068 0 15.40001 15.40001 15.40001
+  241 0 0 0 0
+  1393 583 -63952 -6.55534 3.174808 0 15.40001 15.40001 15.40001
+  426 0 0 0 0
+  811 529 -60004 -10.30148 -1.129497 0 15.40001 15.40001 15.40001
+  526 0 0 0 0
+  428.7081 638.6564 -58554.25 -17.14682 -17.78536 0 15.40001 15.40001 15.40001
+  569 0 0 0 0
+  -53 1067 -56996 -21.91102 -6.534013 0 15.40001 15.40001 15.40001
+  619 0 0 0 0
+  -873.9619 1074.557 -54120.4 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  713 0 0 0 0
+  -741.9619 1237.557 -50712.4 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  714 1 0 0 0
+  -741.9619 1237.557 -50712.4 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  920 1 0 0 0
+  -741.9619 1237.557 -50712.4 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  955 1 0 0 0
+  -1373.278 147.057 -44501.42 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  956 0 0 0 0
+  -1471.717 127.557 -43346.5 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  990 0 0 0 0
+  -3751.307 127.557 -38435.77 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1157 0 0 0 0
+  -3848.77 127.557 -33397.65 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1340 0 0 0 0
+  -4097.342 123.7383 -29733.7 -11.30232 -0.5307546 0 1 1 1
+  1504 0 0 0 0
+  -4278.653 127.557 -28410.01 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1565 0 0 0 0
+  -4848.125 161.2568 -27174.9 -11.30232 -0.5307546 0 1 1 1
+  1626 0 0 0 0
+  -5085.847 127.557 -26662.53 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1654 0 0 0 0
+  -5396.832 1954.557 -24814.59 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1769 0 0 0 0
+  -5596.773 1662.057 -22197.28 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  1878 0 0 0 0
+  -7940.235 2652.057 -19198.58 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2060 0 0 0 0
+  -14283.75 981.0571 -9006.284 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2239 0 0 0 0
+  -14130.88 964.8822 -8725.29 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2246 0 0 0 0
+  -14130.88 964.8822 -8725.29 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2503 1 0 0 0
+  -20137.33 981.0571 3934.565 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2764 0 0 0 0
+  -20138.9 2223.057 -3455.652 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2765 0 0 0 0
+  -20812.33 1525.557 -1690.817 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2831 1 0 0 0
+  -21956.9 1894.557 1498.848 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2888 1 0 0 0
+  -23245.39 1980.057 7107.331 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  2973 0 0 0 0
+  -23753.87 2074.557 9489.632 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3016 0 0 0 0
+  -24016.3 1909.262 10102.09 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3031 0 0 0 0
+  -24215.9 2223.057 11974.85 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3066 0 0 0 0
+  -25384.4 2223.057 16462.85 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3209 0 0 0 0
+  -26467.4 1665.057 18474.35 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3294 0 0 0 0
+  -38651.9 1191.057 31062.35 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  3886 0 0 0 0
+  -41467.66 1282.557 34013.19 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  4029 0 0 0 0
+  -44031.56 1314.057 36511.96 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  4150 0 0 0 0
+  -45836.2 1024.557 38395.18 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  4243 0 0 0 0
+  -48664.29 526.6307 48591.02 -11.20232 -0.4307546 0 15.40001 15.40001 15.40001
+  4422 0 0 0 0
+  -49017.1 779.1799 50011.36 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  4435 0 0 0 0
+  -51422.92 5389.557 60829.69 -11.30232 -0.5307546 0 15.40001 15.40001 15.40001
+  4736 1 0 0 0
+  -51422.92 5389.557 60829.69 -52.8023 -35.0308 0 15.40001 15.40001 15.40001
+  4741 0 0 0 0
+  -51422.92 5389.557 60829.69 -11.3023 -0.5308 0 15.40001 15.40001 15.40001
+  4749 0 0 0 0
+EndBehavior 1
+LockedChannels 32
+TargetObject 84
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 5
+ViewAimpoint -243.682480 460.698975 -78071.890625
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 1.777779
+GridNumber 0
+GridSize 10.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

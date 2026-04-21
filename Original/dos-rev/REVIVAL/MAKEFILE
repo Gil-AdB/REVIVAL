@@ -1,0 +1,50 @@
+CC = wpp386
+ASM = wasm
+CFLAGS = -bt=dos -5r -5 -fp5 -fpi87 -oxl+
+#CFLAGS = -bt=dos -d2 -hw -mf -fp5
+DIR = .\
+OUTDIR = .\LIB\
+LIBDIR = .\LIB\
+
+libfile = $(LIBDIR)Rev.lib
+
+OBJ = $(OUTDIR)Credits.OBJ $(OUTDIR)City.OBJ $(OUTDIR)Fountain.OBJ &
+      $(OUTDIR)Chase.OBJ $(OUTDIR)Greets.OBJ $(OUTDIR)Crash.OBJ $(OUTDIR)Glat.OBJ
+
+libshit = +-$(OUTDIR)Credits.OBJ +-$(OUTDIR)City.OBJ +-$(OUTDIR)Fountain.OBJ &
+          +-$(OUTDIR)Chase.OBJ +-$(OUTDIR)Greets.OBJ +-$(OUTDIR)Crash.OBJ +-$(OUTDIR)Glat.OBJ
+
+$(libfile): $(OBJ)
+			*wlib /b $(libfile) $(libshit)
+
+.c.obj:
+	$(CC) $(CFLAGS) $<
+
+$(OUTDIR)Chase.OBJ : $(DIR)Chase.CPP $(DIR)Chase.H
+	$(CC) $[@ $(CFLAGS)
+  move Chase.OBJ $(OUTDIR)
+
+$(OUTDIR)Credits.OBJ : $(DIR)Credits.CPP $(DIR)Credits.H
+	$(CC) $[@ $(CFLAGS)
+	move Credits.OBJ $(OUTDIR)
+
+$(OUTDIR)City.OBJ : $(DIR)City.CPP $(DIR)City.H
+	$(CC) $[@ $(CFLAGS)
+	move City.OBJ $(OUTDIR)
+
+$(OUTDIR)Fountain.OBJ : $(DIR)Fountain.CPP $(DIR)Fountain.H
+	$(CC) $[@ $(CFLAGS)
+  move Fountain.OBJ $(OUTDIR)
+
+$(OUTDIR)Greets.OBJ : $(DIR)Greets.CPP $(DIR)Greets.H
+	$(CC) $[@ $(CFLAGS)
+  move Greets.OBJ $(OUTDIR)
+
+$(OUTDIR)Crash.OBJ : $(DIR)Crash.CPP $(DIR)Crash.H
+	$(CC) $[@ $(CFLAGS)
+  move Crash.OBJ $(OUTDIR)
+
+$(OUTDIR)Glat.OBJ : $(DIR)Glat.CPP $(DIR)Glat.H
+	$(CC) $[@ $(CFLAGS)
+  move Glat.OBJ $(OUTDIR)
+

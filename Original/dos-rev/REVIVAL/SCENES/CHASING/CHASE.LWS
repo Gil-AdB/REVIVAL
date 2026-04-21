@@ -1,0 +1,1290 @@
+LWSC
+1
+
+FirstFrame 1
+LastFrame 1700
+FrameStep 1
+PreviewFirstFrame 1
+PreviewLastFrame 1700
+PreviewFrameStep 5
+FramesPerSecond 30.000000
+
+LoadObject MY_OBJEC\DEMO\city\water.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 37.568 37.568 37.568
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\big_m.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -51690 1535 60810 0 0 0 1.526 1.526 1.526
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 2565
+PivotPoint 0 -1840 0
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1660 11 -78620 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  6460 11 -77310 -32.3 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10660 18 -81767.5 23 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -3390 17.5 -76959.5 24.5 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3120 19.5 -72554.5 -20.7 -0.6 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  8250 19.5 -71396.5 -16 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1210 16 -71370 19.7 0.2 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  3560 21 -65373 62.59999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5490 21 -65338 28.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10920 24 -63069.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  12180 22.5 -69478.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5250 18.5 -60075 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  2370 25 -61169 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  1170 26 -58318.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4770 26 -56171 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  900 36 -53208.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4620 27.5 -51480.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  530 32.5 -45580 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4290 43.5 -44763 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  320 32 -37788.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5680 32.5 -37613.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10 24 -28220.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6830 26 -30521.5 -26.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2950 29.5 -19780 40.09999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 61
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10200 42 -24929.5 -21.1 -0.6999999 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13320 22.5 -20379.5 40.09999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26200 29.5 26900.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2950 17.5 -19780 40.09999 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 61
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7180 24 -48519.5 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  4710 25.5 -48171 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  6240 35 -51649.5 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6070 34 -24700 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12270 38.5 -28992 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5440 22 -34500 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -11950 24.5 -35992 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  11335 17.5 -53923 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18065 26.5 -53241 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17015 28.5 -35867 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\mm7.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14875 111.5 -6800 -25.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 53
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24075 20.5 3766.5 -21.1 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18500 15.5 4894 -205.8 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26975 25.5 6345 -21.1 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19625 28 7770 -200.3 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21875 28 10668.5 -200.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -26625 24 10294 -21.1 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -22250 27.5 15543 -201.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28925 32 13420 -21.1 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -23850 16.5 19345 -197.8 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28975 28.5 18393.5 -21.1 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -35540 17 13179 10.2 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -31575 21.5 4599.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13475 32 7223 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14325 21 18573 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30725 28 8746.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -41900 18.5 23500 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  8725 22 -11526 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30100 14.5 -7225.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15250 11.5 12951.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -47450 11.5 15347.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17175 17 24673.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -56600 12 29551 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10600 13.5 -40326 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  5850 14 -40699 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9250 19 -80499.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -8950 18 -44599.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21775 17.5 45000.5 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34500 17 36599 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -60675 15 44875 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -41600 19.5 47378 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -36175 26 44300 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28125 19 -15325 0 0 0 2.256 2.256 2.256
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34090 17.5 20700 -61.40001 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -38065 18.5 25925 -5.4 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -30515 18.5 32676 -38.7 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -43015 17 32028.5 -35.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -50390 20 40301 -36.5 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\Ship1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  53
+  9025 400 -82225 -48.3 0 0 1 1 1
+  0 0 0 0 0
+  5108.57 311.0266 -78875.44 -46.1 0 0 1 1 1
+  127 0 0 0 0
+  4300 300 -78050 -43.7 0 0 1 1 1
+  153 0 0 0 0
+  2942.709 321.1327 -76358.2 -33.6 0 0 1 1 1
+  193 0 0 0 0
+  1725 325 -74325 -22.3 0 0 1 1 1
+  234 0 0 0 0
+  875 200 -69825 -13.8 0 0 1 1 1
+  291 0 0 0 0
+  -575 100 -65350 -12.4 0 0 1 1 1
+  384 0 0 0 0
+  -1047.63 129.0513 -61900.25 -7.599998 0 0 1 1 1
+  421 0 0 0 0
+  -1175 128 -60625 -1.9 0 0 1 1 1
+  436 0 0 0 0
+  -1307.641 129.2311 -59007.63 -1.06392 0 -15.4 1 1 1
+  460 0 0 0 0
+  -1625 134.5 -54550 -1.3 0 0 1 1 1
+  528 0 0 0 0
+  -1892.151 155.289 -44857.2 0 0 0 1 1 1
+  673 0 0 0 0
+  -2225 165 -35000 -4 0 0 1 1 1
+  817 0 0 0 0
+  -3075 150 -27050 -8.599998 0 0 1 1 1
+  924 0 0 0 0
+  -3303.078 158.2267 -25848.23 -15.5 -0.3 0 1 1 1
+  939 0 0 0 0
+  -4350 225 -22850 -34.3 0 0 1 1 1
+  973 0 0 0 0
+  -7849.886 530.2166 -18658.68 -39.7 0.2 0 1 1 1
+  1028 0 0 0 0
+  -10400 750 -15675 -35.39999 0 0 1 1 1
+  1066 0 0 0 0
+  -12250 875 -12250 -29.3 0 0 1 1 1
+  1098 0 0 0 0
+  -14350 800 -8425 -27.5 0 0 1 1 1
+  1135 0 0 0 0
+  -19289.58 742.9814 1172.687 -26.5 -0.2999999 0 1 1 1
+  1196 0 0 0 0
+  -22425 675 7475 -24.8 0 0 1 1 1
+  1236 0 0 0 0
+  -26525 350 16800 -26.3 0 0 1 1 1
+  1306 0 0 0 0
+  -30975 275 23925 -36.89999 0 0 1 1 1
+  1361 0 0 0 0
+  -33555.73 334.819 26998.59 -40.3 -0.5 0 1 1 1
+  1390 0 0 0 0
+  -35088.55 382.0032 28692.19 -41.8 -0.5 0 1 1 1
+  1408 0 0 0 0
+  -35256.54 386.3549 28883.02 -40.60001 0.4 0 1 1 1
+  1410 0 0 0 0
+  -35297.29 387.2325 28930.59 -40.09999 0.9999999 0 1 1 1
+  1411 0 0 0 0
+  -35502.48 391.8886 29168.34 -41.09999 0 0 1 1 1
+  1413 0 0 0 0
+  -35707.84 396.5742 29406.09 -40.09999 0 0 1 1 1
+  1415 0 0 0 0
+  -35913.25 401.2689 29643.84 -40.09999 0 0 1 1 1
+  1418 0 0 0 0
+  -36118.71 405.9717 29881.59 -41.49999 -0.6999999 0 1 1 1
+  1420 0 0 0 0
+  -36324.21 410.6824 30119.33 -41.789 -0.7895004 0 1 1 1
+  1423 0 0 0 0
+  -36529.75 415.4007 30357.08 -40.94554 -1.017768 0 1 1 1
+  1425 0 0 0 0
+  -36735.32 420.125 30594.82 -40.40546 1.419209 0 1 1 1
+  1428 0 0 0 0
+  -38300 450 32450 -34.5 0 0 1 1 1
+  1447 0 0 0 0
+  -41182.89 342.8795 37051.77 -30.98095 -0.7005215 0 1 1 1
+  1495 0 0 0 0
+  -41332.46 337.4813 37290.76 -31.91231 2.661615 0 1 1 1
+  1498 0 0 0 0
+  -41482.14 332.4954 37528.8 -31.8 0 0 1 1 1
+  1500 0 0 0 0
+  -41631.81 327.5292 37766.8 -31.8 -1 0 1 1 1
+  1503 0 0 0 0
+  -43350 275 40475 -36 0 0 1 1 1
+  1531 0 0 0 0
+  -47085.14 315.6244 45531.86 -36.10001 2.7 0 1 1 1
+  1586 0 0 0 0
+  -49593.4 364.4752 48887.7 -36.40001 2.8 0 1 1 1
+  1623 0 0 0 0
+  -49764.02 367.8561 49118.65 -34.2 0.6999999 0 1 1 1
+  1625 0 0 0 0
+  -49928.2 370.9355 49355.02 -33.2 -2.8 0 1 1 1
+  1628 0 0 0 0
+  -50087.42 373.7182 49595.48 -30.3 -0.1 0 1 1 1
+  1630 0 0 0 0
+  -50200 375 49800 -22.6 0.2 0 1 1 1
+  1632 0 0 0 0
+  -50997.3 374.1722 51743.55 -16 -0.3999999 0 1 1 1
+  1650 0 0 0 0
+  -51770.51 401.2489 54817.33 -11.5 0.3 0 1 1 1
+  1675 0 0 0 0
+  -51836.44 418.4786 55099.36 -11.7 0 0 1 1 1
+  1678 0 0 0 0
+  -51893.91 449.5373 55362.38 -14.1 -0.4 0 1 1 1
+  1680 0 0 0 0
+  -52350 800 57500 -8.599998 -47.89999 0 1 1 1
+  1702 0 0 0 0
+  -52525 4175 59600 0 -61.79999 0 1 1 1
+  1760 0 0 0 0
+EndBehavior 1
+LockedChannels 29
+DisplacementMap Planar Image Map
+TextureImage (none)
+TextureWrapModes 2 2
+TextureFlags 12
+TextureAxis 2
+TextureSize 1 1 1
+TextureAmplitude 0.500000
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\ship2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  29
+  9879 365 -83555.5 0 0 0 1 1 1
+  0 0 0 0 0
+  4536.657 365 -79475.29 0 0 0 1 1 1
+  173 0 0 0 0
+  1229 365 -71255.5 -21.5 0 0 1 1 1
+  286 0 0 0 0
+  -471 365 -66495.5 -11.4 0 0 1 1 1
+  388 0 0 0 0
+  -1781 365 -60715.5 -13.7 0 -37 1 1 1
+  460 0 0 0 0
+  -3011 365 -54985.5 0 0 -39.5 1 1 1
+  547 0 0 0 0
+  -2431 245 -45645.5 0 0 0 1 1 1
+  670 0 0 0 0
+  -2501 245 -39515.5 0 0 0 1 1 1
+  767 0 0 0 0
+  -2711 245 -34045.5 0 0 0 1 1 1
+  849 0 0 0 0
+  -3481 245 -24695.5 0 0 0 1 1 1
+  961 0 0 0 0
+  -7051 245 -19865.5 0 0 0 1 1 1
+  1028 0 0 0 0
+  -10811 755 -15505.5 0 0 0 1 1 1
+  1074 0 0 0 0
+  -12011 755 -12775.5 0 0 0 1 1 1
+  1105 0 0 0 0
+  -13661 755 -9365.5 0 0 0 1 1 1
+  1135 0 0 0 0
+  -15101 755 -6295.5 0 0 0 1 1 1
+  1156 0 0 0 0
+  -17341 755 -1995.5 0 0 0 1 1 1
+  1182 0 0 0 0
+  -19681 755 2274.5 0 0 0 1 1 1
+  1212 0 0 0 0
+  -23701 485 9724.5 0 0 0 1 1 1
+  1263 0 0 0 0
+  -24811 485 12754.5 0 0 0 1 1 1
+  1284 0 0 0 0
+  -28287.06 625 18730.63 0 0 0 1 1 1
+  1330 0 0 0 0
+  -30921 485 23684.5 0 0 0 1 1 1
+  1371 0 0 0 0
+  -34641 485 27704.5 0 0 0 1 1 1
+  1417 0 0 0 0
+  -38101 485 31464.5 0 0 0 1 1 1
+  1463 0 0 0 0
+  -41641 485 37724.5 0 0 0 1 1 1
+  1509 0 0 0 0
+  -44351 485 41964.5 0 0 0 1 1 1
+  1550 0 0 0 0
+  -48131 485 46964.5 0 0 0 1 1 1
+  1606 0 0 0 0
+  -50001 485 49534.5 0 0 0 1 1 1
+  1632 0 0 0 0
+  -51771 485 54574.5 0 0 0 1 1 1
+  1678 0 0 0 0
+  -51771 1425 58754.5 0 0 0 1 1 1
+  1734 0 0 0 0
+EndBehavior 1
+LockedChannels 16
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName Light
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -2 20127 -2 45 35 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightType 1
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  28 21 -88 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 79
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  28 -21 -88 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 79
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -28 21 -88 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 79
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -28 -21 -88 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 79
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.500000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -15 0 -64 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 80
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.200000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+AddLight
+LightName shp1 engine glow
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  15 0 -64 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 80
+LightColor 253 65 2
+LgtIntensity 0.500000
+LightType 1
+LightFalloff 1
+LightRange 50.000000
+LensFlare 1
+FlareIntensity 0.200000
+FlareDissolve 0.000000
+LensFlareFade 4
+LensFlareOptions 11
+FlareRingColor 80 20 10
+FlareRingSize 0.220000
+FlareRandStreakInt 0.030000
+FlareRandStreakDens 50.000000
+FlareRandStreakSharp 6.000000
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  18
+  9505.78 618.084 -83574.03 -25.5 0.9 0 1 1 1
+  0 0 0 0 0
+  1689.74 393.084 -74978.46 -25.5 0.9 0 1 1 1
+  236 0 0 0 0
+  -971.6257 43.08398 -61200.67 -25.5 0.9 0 1 1 1
+  424 0 0 0 0
+  -650.1207 293.084 -47236.36 -25.5 0.9 0 1 1 1
+  632 0 0 0 0
+  -1799.497 293.084 -36190.19 -25.5 0.9 0 1 1 1
+  794 0 0 0 0
+  -2585.002 243.084 -29611.73 -25.5 0.9 0 1 1 1
+  895 0 0 0 0
+  -5632.386 393.084 -21268.94 -25.5 0.9 0 1 1 1
+  1000 0 0 0 0
+  -11736.9 968.084 -13278.21 -25.5 0.9 0 1 1 1
+  1092 0 0 0 0
+  -14781.28 718.084 -7420.447 -25.5 0.9 0 1 1 1
+  1144 0 0 0 0
+  -19600.38 843.084 1539.308 -25.5 0.9 0 1 1 1
+  1202 0 0 0 0
+  -24519.88 443.084 14037.02 -25.5 0.9 0 1 1 1
+  1283 0 0 0 0
+  -31167.99 343.084 23889.68 -25.5 0.9 0 1 1 1
+  1364 0 0 0 0
+  -37799.42 343.084 30529.01 -25.5 0.9 0 1 1 1
+  1450 0 0 0 0
+  -50862.07 1258.276 46487.78 -25.5 0.9 0 1 1 1
+  1622 0 0 0 0
+  -50415.32 329.0067 48411.07 -25.5 0.9 0 1 1 1
+  1647 0 0 0 0
+  -49735.17 1118.084 49512.87 -25.5 0.9 0 1 1 1
+  1656 0 0 0 0
+  -49550.88 1118.084 50600.87 -25.5 0.9 0 1 1 1
+  1673 0 0 0 0
+  -49843.88 1118.084 51951.87 -25.5 0.9 0 1 1 1
+  1700 0 0 0 0
+EndBehavior 1
+TargetObject 79
+ZoomFactor 3.200000
+Resolution 0
+PixelAspectRatio 2
+SegmentMemory 2200000
+Antialiasing 0
+AdaptiveSampling 1
+AdaptiveThreshold 16
+FilmSize 2
+FieldRendering 0
+MotionBlur 0
+DepthOfField 0
+
+SolidBackdrop 1
+BackdropColor 0 0 0
+ZenithColor 0 40 80
+SkyColor 120 180 240
+GroundColor 50 40 30
+NadirColor 100 80 60
+FogType 0
+DitherIntensity 1
+AnimatedDither 0
+
+RenderMode 2
+RayTraceEffects 0
+ClipRayColors 0
+DataOverlayLabel  
+FullSceneParamEval 0
+
+ViewMode 1
+ViewAimpoint -49550.878906 1118.083984 50600.871094
+ViewDirection 0.300197 -0.314159 0.000000
+ViewZoomFactor 0.626762
+GridNumber 0
+GridSize 200.000000
+ShowMotionPath 1
+ShowBGImage 0
+ShowFogRadius 0
+ShowRedraw 0
+ShowSafeAreas 0
+ShowFieldChart 0

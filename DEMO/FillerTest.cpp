@@ -1,6 +1,17 @@
 #include "FillerTest.h"
+#include "Base/FDS_VARS.H"
 #define MEASURE_ZSTATS
 #include "Base/Scene.h"
+#include "Gradient.h"
+#include "FRUSTRUM.H"
+#include "Clipper.h"
+#include "Threads.h"
+#include <FILLERS/TheOtherBarry.h>
+#include <FILLERS/Mekalele.h>
+
+#include <VESA/Vesa.h>
+
+#include <thread>
 
 struct IXVertex
 {
@@ -51,10 +62,10 @@ struct
 		Index;  // Current Vertex index
 } Right;
 
-static void *IX_Texture;
-static void *IX_Page;
-static word *IX_ZBuffer;
-static dword IX_L2X, IX_L2Y;
+thread_local static void *IX_Texture;
+thread_local static void *IX_Page;
+thread_local static word *IX_ZBuffer;
+thread_local static dword IX_L2X, IX_L2Y;
 
 
 union deltas
@@ -69,13 +80,13 @@ union deltas
 #define L2SPANSIZE 4
 #define SPANSIZE 16
 #define fSPANSIZE 16.0
-static deltas ddx;
-static deltas ddx32;
+thread_local static deltas ddx;
+thread_local static deltas ddx32;
 
-static sword	dRdx;
-static sword	dGdx;
-static sword	dBdx;
-static sword	dZdx;
+thread_local static sword	dRdx;
+thread_local static sword	dGdx;
+thread_local static sword	dBdx;
+thread_local static sword	dZdx;
 
 //dword zReject, zPass;
 
@@ -184,22 +195,22 @@ void CalcLeftSection (IXVertex *V1, IXVertex *V2)
 	Left.VZ = V1->VZ + Left.dVZ * prestep;
 	Left.RZ = V1->RZ + Left.dRZ * prestep;
 
-	//long iprestep = Fist(65536.0 * prestep);
+	//int32_t iprestep = Fist(65536.0 * prestep);
 	Left.R = V1->R * 65536.0 + prestep * Left.dR;//+ (((Left.dR>>8) * iprestep)>>8);
 	Left.G = V1->G * 65536.0 + prestep * Left.dG;//+ (((Left.dG>>8) * iprestep)>>8);
 	Left.B = V1->B * 65536.0 + prestep * Left.dB;//+ (((Left.dB>>8) * iprestep)>>8);
 	Left.z = V1->z * 65536.0 + prestep * Left.dZ;//+ (((Left.dZ>>8) * iprestep)>>8);
 }
 
-static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
+thread_local static void (*SubInnerPtr)(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float prestep);
 /*
 static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr, float prestep)
 {
-	long i;
+	int32_t i;
 
 	//F4Vec _u, _v, _z;
-	long  _u0, _u1;
-	long  _v0, _v1;
+	int32_t  _u0, _u1;
+	int32_t  _v0, _v1;
 	word _Z0, _Z1;
 
 	float _z[4];
@@ -220,10 +231,10 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	dword Z = Fist(Left.z * 256.0 + prestep * dZdx);
 
 	// number of full sections
-	long ns = Width >> L2SPANSIZE;
+	int32_t ns = Width >> L2SPANSIZE;
 
 	// remainder section
-	long wrem = Width & (SPANSIZE-1); // % SPANSIZE.
+	int32_t wrem = Width & (SPANSIZE-1); // % SPANSIZE.
 
 	if (ns >= 4)
 	{
@@ -248,7 +259,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 	_v0 = Fist(VZ * _z[0]);
 	_Z0 = 0xFF80 - Fist(g_zscale256 * _z[0]);
 	
-	long _du, _dv;
+	int32_t _du, _dv;
 
 	while (ns--)
 	{
@@ -264,7 +275,7 @@ static void SubInnerLoopCorrectSlow(dword Width, dword *SpanPtr, word * ZSpanPtr
 		_dv = _v1 - _v0 >> L2SPANSIZE;
 		_dZ = _Z1 - _Z0 >> L2SPANSIZE;
 		
-		long SpanWidth = SPANSIZE;
+		int32_t SpanWidth = SPANSIZE;
 		while (SpanWidth--)
 		{
 			dword r,g,b, tex;
@@ -411,7 +422,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 		};
 	};*/
 	//static word B, G, R, Z;
-	static word Col[4];
+	word Col[4];
 
 	Col[0] = Left.B >> 8;
 	Col[1] = Left.G >> 8;
@@ -438,7 +449,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -468,26 +479,6 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
 				//tex = 0xFFFFFF;
 
-				__asm
-				{
-					mov edi, [SpanPtr]
-
-					; additive
-;					pxor mm2, mm2
-;					movd mm3, [edi]
-;					punpcklbw mm3, mm2
-
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-;					paddusw mm1,mm3
-					packuswb mm1, mm1
-					movd [edi], mm1
-				}
-
 //				*SpanPtr = 0x7F7F7F;
 				//tex = 0x00ffffff;
 
@@ -503,10 +494,7 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 			Col[0] += dBdx;
 			Col[1] += dGdx;
 			Col[2] += dRdx;
-			//Z += dZdx;			
-		}
-		__asm {
-			emms
+			//Z += dZdx;
 		}
 
 		Width -= SPANSIZE;
@@ -590,7 +578,7 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 	
 	for(;;)
 	{
-		long _du, _dv;
+		int32_t _du, _dv;
 
 		_u1 = Fist(UZ * _z1);
 		_v1 = Fist(VZ * _z1);
@@ -618,32 +606,6 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 				// *ZSpanPtr = _Z0;
 
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
-
-				__asm
-				{
-					mov edi, [SpanPtr]
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-
-					;packuswb mm1, mm1
-					;movd [edi], mm1
-
-					movd mm2, [edi]
-					punpcklbw mm0, mm2
-
-					;movq mm3, mm0
-					;psrlw mm3, 9
-					psrlw mm0, 9
-					psrlw mm1, 1
-					;paddw mm0, mm3
-					paddw mm0, mm1
-					packuswb mm0, mm0
-					movd [edi], mm0
-				}
 
 //				*SpanPtr = 0x7F7F7F;
 
@@ -674,11 +636,7 @@ static void SubInnerLoopT(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float p
 			Col[1] += dGdx;
 			Col[2] += dRdx;
 			
-			//Z += dZdx;			
-		}
-		__asm
-		{
-			emms
+			//Z += dZdx;
 		}
 
 		Width -= SPANSIZE;
@@ -722,7 +680,7 @@ static void IXFiller(IXVertex *Verts, dword numVerts, void *Texture, void *Page,
 	IX_L2Y = logHeight;
 
 	// ZBuffer data starts at the end of framebuffer
-	IX_ZBuffer = (word *) ((dword)Page + PageSize);
+	IX_ZBuffer = (word *) ((uintptr_t)Page + PageSize);
 
 	Left.Index = 1;
 	Right.Index = numVerts - 1;
@@ -785,9 +743,9 @@ static void IXFiller(IXVertex *Verts, dword numVerts, void *Texture, void *Page,
 
 	dword y, SectionHeight;
 	y = Fist(Verts[0].y);
-	dword *Scanline = (dword *)((dword)Page + VESA_BPSL * y);
-	word *ZScanline = (word *)((dword)Page + PageSize + sizeof(word) * XRes * y);
-	long Width;
+	dword *Scanline = (dword *)((uintptr_t)Page + VESA_BPSL * y);
+	word *ZScanline = (word *)((uintptr_t)Page + PageSize + sizeof(word) * XRes * y);
+	int32_t Width;
 	
 	// Iterate over sections
 	SectionHeight = (Left.ScanLines < Right.ScanLines) ? Left.ScanLines : Right.ScanLines;
@@ -798,7 +756,7 @@ static void IXFiller(IXVertex *Verts, dword numVerts, void *Texture, void *Page,
 		{
 
 			// *** Draw scan line *** //
-			long lx, rx;
+			int32_t lx, rx;
 			lx = Fist(Left.x);
 			dword *SpanPtr = Scanline + lx;
 			word *ZSpanPtr = ZScanline + lx;
@@ -889,15 +847,15 @@ AfterScanConv:
 
 
 const dword maximalNgon = 16;
-static dword *l_TestTexture = NULL;
-static char l_IXMemBlock[sizeof(IXVertex) * (maximalNgon+1)];
-static IXVertex *l_IXArray = (IXVertex *)( ((dword)l_IXMemBlock + 0xF) & (~0xF) );
-static Material DummyMat;
-static Texture DummyTex;
+thread_local static dword *l_TestTexture = NULL;
+thread_local static char l_IXMemBlock[sizeof(IXVertex) * (maximalNgon+1)];
+thread_local static IXVertex *l_IXArray = (IXVertex *)( ((uintptr_t)l_IXMemBlock + 0xF) & (~0xF) );
+thread_local static Material DummyMat;
+thread_local static Texture DummyTex;
 
 
 #define ENABLE_PIXELCOUNT
-static void PrefillerCommon(Vertex **V, dword numVerts)
+static void PrefillerCommon(Face *F, Vertex **V, dword numVerts)
 {
 	dword i;
 
@@ -923,13 +881,13 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 	//float ZScaleFactor = 0xFFFF * CurScene->NZP;
 	//float ZDenom = (float)0xFFFF * CurScene->FZP / (CurScene->FZP - CurScene->NZP);
 
-	//long MipLevel = 0;
+	//int32_t MipLevel = 0;
 	// [Shirman98]	
 
-	long LogWidth = DoFace->Txtr->Txtr->LSizeX - g_MipLevel;
-	long LogHeight = DoFace->Txtr->Txtr->LSizeY - g_MipLevel;
+	int32_t LogWidth = F->Txtr->Txtr->LSizeX;
+	int32_t LogHeight = F->Txtr->Txtr->LSizeY;
 	
-	dword TextureAddr = (dword)DoFace->Txtr->Txtr->Mipmap[g_MipLevel];
+	uintptr_t TextureAddr = (uintptr_t)F->Txtr->Txtr->Mipmap[0];
 
 //	dword TextureAddr =
 		//(dword)l_TestTexture; 
@@ -993,16 +951,16 @@ static void PrefillerCommon(Vertex **V, dword numVerts)
 	IXFiller(l_IXArray, numVerts, (void *)TextureAddr, VPage, LogWidth, LogHeight);
 }
 
-void Prefiller(Vertex **V, dword numVerts)
+void Prefiller(Face *F, Vertex **V, dword numVerts)
 {
 	SubInnerPtr = SubInnerLoop;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts);
 }
 
-void Prefiller_T(Vertex **V, dword numVerts)
+void Prefiller_T(Face *F, Vertex **V, dword numVerts)
 {
 	SubInnerPtr = SubInnerLoopT;
-	PrefillerCommon(V, numVerts);
+	PrefillerCommon(F, V, numVerts);
 }
 
 extern "C"
@@ -1010,92 +968,139 @@ extern "C"
 	void IXAsmFiller(IXVertex *Verts, dword numVerts, void *Texture, void *Page, dword logWidth, dword logHeight);
 }
 
-static void drawPoly()
+std::mutex mut;
+std::condition_variable cv;
+std::atomic<int> counter;
+
+
+static void drawPoly(float DT)
 {
 	Vertex V[4];
 	Face F;
 	dword i;
 	static float T = 0;
 
-	float a = T * 0.003;
+	float a = (T + DT) * 0.003;
 	float c = cos(a);
 	float s = sin(a);
 
-//	T += 0.5;
+	T += 0.5;
 
-	i=0;
-	V[i].PX = 300.1 - 80 * c - 50 * s;
-	V[i].PY = 200.1 + 80 * s - 50 * c;
-//	V[i].PX = 200.0;
-//	V[i].PY = 100.0;
+	const auto W = 280;
+	const auto H = 250;
+
+	i = 0;
+	V[i].PX = 900.1 - W * c - H * s;
+	V[i].PY = 400.1 + W * s - H * c;
+	//	V[i].PX = 200.0;
+	//	V[i].PY = 100.0;
 	V[i].TPos.z = 1.0;
-	V[i].U = 0.0;
-	V[i].V = 0.0;
-	V[i].LR = 2.0;
-	V[i].LG = 2.0;
-	V[i].LB = 253.0;
+	V[i].U =-1.0 / 512.0;
+	V[i].V =-1.0 / 512.0;
+	V[i].LA = 255;
+	V[i].LR = 2;
+	V[i].LG = 2;
+	V[i].LB = 253;
 
-	i=1;
-	V[i].PX = 300.1 + 80 * c - 50 * s;
-	V[i].PY = 200.1 - 80 * s - 50 * c;
-//	V[i].PX = 130.0;
-//	V[i].PY = 200.0;
+	i = 1;
+	V[i].PX = 900.1 + W * c - H * s;
+	V[i].PY = 400.1 - W * s - H * c;
+	//	V[i].PX = 130.0;
+	//	V[i].PY = 200.0;
 	V[i].TPos.z = 1.0;
-	V[i].U = 0.999;
-	V[i].V = 0.0;
-	V[i].LR = 2.0;
-	V[i].LG = 253.0;
-	V[i].LB = 127.0;
+	V[i].U = 511.0 / 512.0;
+	V[i].V =-1.0 / 512.0;
+	V[i].LA = 255;
+	V[i].LR = 2;
+	V[i].LG = 2;
+	V[i].LB = 127;
 
-	i=2;
-	V[i].PX = 300.1 + 80 * c + 50 * s;
-	V[i].PY = 200.1 - 80 * s + 50 * c;
-//	V[i].PX = 100.0;
-//	V[i].PY = 100.0;
+	i = 2;
+	V[i].PX = 900.1 + W * c + H * s;
+	V[i].PY = 400.1 - W * s + H * c;
+	//	V[i].PX = 100.0;
+	//	V[i].PY = 100.0;
 	V[i].TPos.z = 1.0;
-	V[i].U = 0.999;
-	V[i].V = 0.999;
-	V[i].LR = 253.0;
-	V[i].LG = 253.0;
-	V[i].LB = 2.0;
+	V[i].U = 511.0 / 512.0;
+	V[i].V = 511.0 / 512.0;
+	V[i].LA = 255;
+	V[i].LR = 253;
+	V[i].LG = 2;
+	V[i].LB = 2;
 
-	i=3;
-	V[i].PX = 300.1 - 80 * c + 50 * s;
-	V[i].PY = 200.1 + 80 * s + 50 * c;
+	i = 3;
+	V[i].PX = 900.1 - W * c + H * s;
+	V[i].PY = 400.1 + W * s + H * c;
 	V[i].TPos.z = 1.0;
-	V[i].U = 0;
-	V[i].V = 0.999;
-	V[i].LR = 253.0;
-	V[i].LG = 2.0;
-	V[i].LB = 127.0;
+	V[i].U =-1.0 / 512.0;
+	V[i].V = 511.0 / 512.0;
+	V[i].LA = 255;
+	V[i].LR = 255;
+	V[i].LG = 2;
+	V[i].LB = 127;
 
-	DoFace = &F;
-	F.Txtr = &DummyMat;
-	DummyMat.Txtr = &DummyTex;
-	DummyTex.Data = (byte *)l_TestTexture;
-	DummyTex.Mipmap[0] = DummyTex.Data;
-	DoFace->Txtr->Txtr->LSizeX = 8;
-	DoFace->Txtr->Txtr->LSizeY = 8;
-			
-	for(i=0; i<4; i++)
-	{
-		V[i].RZ = 1.0 / V[i].TPos.z;
-		V[i].UZ = V[i].U * V[i].RZ;
-		V[i].VZ = V[i].V * V[i].RZ;		
+	for (i = 0; i != 4; ++i) {
+		V[i].LR = V[i].LG = V[i].LB = V[i].LA = 255;
 	}
 
-	long my=0;
-	float minY = V[0].PY;
+	F.Txtr = &DummyMat;
+	DummyMat.Txtr = &DummyTex;
+	DummyTex.Data = (byte*)l_TestTexture;
+	DummyTex.Mipmap[0] = DummyTex.Data;
+	F.Txtr->Txtr->LSizeX = 8;
+	F.Txtr->Txtr->LSizeY = 8;
+	F.Txtr->ZBufferWrite = 0;
+	//F.Filler = IX_Prefiller_TGZSAM;
+	// F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE>;
+	F.Filler = Mekalele;
+	//F.Filler = IX_Prefiller_FZ;
+	//F.Filler = IX_Prefiller_TGZM;
 
+	Viewport vp;
+	vp.ClipX1 = 0;
+	vp.ClipX2 = XRes;
+	vp.ClipY1 = 0;
+	vp.ClipY2 = YRes_1;
+
+	for (i = 0; i < 4; i++) {
+		V[i].RZ = 1.0 / V[i].TPos.z;
+		V[i].UZ = V[i].U * V[i].RZ;
+		V[i].VZ = V[i].V * V[i].RZ;
+		viewportCalcFlags(vp, &V[i]);
+	}
+
+	counter = 0;
+	ThreadPool::instance().enqueue([&F, &vp, V = &V[0]]() {
+		F.A = &V[0];
+		F.B = &V[1];
+		F.C = &V[2];
+		_2DClipper::getInstance()->clip(vp, F);
+
+		F.A = &V[0];
+		F.B = &V[2];
+		F.C = &V[3];
+		_2DClipper::getInstance()->clip(vp, F);
+
+		std::unique_lock<std::mutex> lock(mut);
+		++counter;
+		cv.notify_one();
+	});
+
+	{
+		std::unique_lock<std::mutex> lock(mut);
+		cv.wait(lock, [] {return counter == 1; });
+	}
+
+	/*int32_t my=0;
+	float minY = V[0].PY;
 	for(i=1; i<4; i++)
 	{
-		if (V[i].PY < minY) 
+		if (V[i].PY < minY)
 		{
 			my = i;
 			minY = V[i].PY;
 		}
 	}
-
 	Vertex *VP[4];
 	switch (my)
 	{
@@ -1124,79 +1129,171 @@ static void drawPoly()
 		VP[3] = &V[0];
 		break;
 	}
-/*	switch (my)
-	{
-	case 0:
-		VP[0] = &V[0];
-		VP[1] = &V[2];
-		VP[2] = &V[1];
-		break;
-	case 1:
-		VP[0] = &V[1];
-		VP[1] = &V[0];
-		VP[2] = &V[2];
-		break;
-	case 2:
-		VP[0] = &V[2];
-		VP[1] = &V[1];
-		VP[2] = &V[0];
-		break;
-	}*/
 	float fl = 5.3;
-	long ifl;
+	int32_t ifl;
 	__asm
 	{
 		fld dword ptr [fl]
 		fistp dword ptr [ifl]
 	}
-	IX_Prefiller_TGZM(VP, 4);
-//	VPage -= 800;
-//	IX_Prefiller_TGZ(VP, 4);
-//	VPage += 800;
-	while (!Keyboard[ScSpace])
+	F.Txtr->ZBufferWrite = 0;
+	counter = 0;
+	ThreadPool::instance().enqueue([&F, VP=&VP[0]]() {
+		IX_Prefiller_TGZSAM(&F, VP, 4, 0);
+		std::unique_lock<std::mutex> lock(mut);
+		++counter;
+		cv.notify_one();
+	});
 	{
-		continue;
-	}
+		std::unique_lock<std::mutex> lock(mut);
+		cv.wait(lock, [] {return counter == 1; });
+	}*/
+
+	//	VPage -= 800;
+	//	IX_Prefiller_TGZ(&F, VP, 4);
+	//	VPage += 800;*/
+
+	/*	while (!Keyboard[ScSpace])
+		{
+			continue;
+		}*/
 }
+
 
 void FillerTest()
 {
 	Scene Sc;
 	CurScene = &Sc;
-	Sc.NZP = 1.0;
+	Sc.Flags = 0;
+	Sc.NZP = 0.5;
 	Sc.FZP = 1000.0;
-	g_MipLevel = 0;
 
-	// prepare texture
-	l_TestTexture = new dword [1<<(2*8)];
-
-	dword i,j;
-	for(j=0; j<256; j++)
+	meka::GBuffer gbuffer;
 	{
-		for(i=0; i<256; i++)		
+		size_t numPixels = XRes * YRes;
+		gbuffer.position.resize(numPixels);
+		gbuffer.normal.resize(numPixels);
+		gbuffer.txtr.resize(numPixels);
+	}
+	SetGBuffer(&gbuffer);
+
+//	Texture Tx;
+//	Tx.FileName = strdup("Textures/PBRK34.JPG");
+//	Load_Texture(&Tx);
+//	BPPConvert_Texture(&Tx, 32);
+	// prepare texture
+	//l_TestTexture = new dword [1<<(2*8)];
+
+	std::vector<GradientEndpoint> endpoints;
+/*	endpoints.emplace_back(0.0, Color{ 0.0, 0.0, 0.0, 0.0 });
+	endpoints.emplace_back(0.1, Color{ 1.0, 0.0, 0.1 });
+	endpoints.emplace_back(0.35, Color{ 1.0, 0.4, 0.8 });
+	endpoints.emplace_back(0.5, Color{ 1.0, 1.0, 1.0 });
+	endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0 });
+	//	endpoints.emplace_back(0.4, Color{ 1.0, 0.2, 0.6 });
+//	endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0 });
+	auto M = Generate_Gradient(endpoints, 256, 0.2);*/
+
+	//endpoints.emplace_back(0, Color{ 0.0, 0.0, 0.0, 0.0 });
+	//endpoints.emplace_back(0.5, Color{ 0.3, 0.0, 0.1, 0.20 });
+	//endpoints.emplace_back(0.6, Color{ 1.0, 0.0, 0.1, 0.40 });
+	//endpoints.emplace_back(0.75, Color{ 1.0, 0.4, 0.8, 0.60 });
+	//endpoints.emplace_back(0.8, Color{ 1.0, 1.0, 1.0, 0.80 });
+	//endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0, 1.0 });
+
+	//endpoints.emplace_back(0, Color{ 1.0, 1.0, 1.0, 1.0 });
+	//endpoints.emplace_back(0.5, Color{ 1.0, 1.0, 1.0, 0.80 });
+	//endpoints.emplace_back(0.6, Color{ 1.0, 1.0, 1., 0.60 });
+	//endpoints.emplace_back(0.75, Color{ 1.0, 1., 1., 0.40 });
+	//endpoints.emplace_back(0.8, Color{ 1.0, 1.0, 1.0, 0.20 });
+	//endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0, 0.0 });
+
+	endpoints.emplace_back(0, Color{ 0.0, 0.0, 0.0, 0.2 });
+	endpoints.emplace_back(0.5, Color{ 0.3, 0.0, 0.1, 0.2 });
+	endpoints.emplace_back(0.6, Color{ 1.0, 0.0, 0.1, 0.2 });
+	endpoints.emplace_back(0.75, Color{ 1.0, 0.4, 0.8, 0.2 });
+	endpoints.emplace_back(0.8, Color{ 1.0, 1.0, 1.0, 0.2 });
+	endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0, 0.2 });
+
+	auto M = Generate_Gradient(endpoints, 256, 0.2, false);
+
+	l_TestTexture = (DWord *)M->Txtr->Data;
+//	l_TestTexture = (DWord *)Tx.Data;
+	//memset(l_TestTexture, 255, 256 * 256 * 4);
+
+	dword i, j;
+	for (j = 0; j < 256; j++)
+	{
+		for (i = 0; i < 256; i++)
 		{
-			l_TestTexture[i+(j<<8)] = 
-				//0xFFFFFF;				
+			l_TestTexture[i + (j << 8)] =
+				0xFFFFFF;
 				//(((i<<3)^(j<<3)) & 0xFF) *0x010101;
-				//(i<<16)+(j<<8)+(i^j);
-				((i>>2)&1)*0xFFFFFF;
-				
+				//(i<<16)+(j<<8)+(i^j) * 0x010101;
+				//(i ^ j) * 0x010101;
+				// (((i ^ j) >> 4) & 1) * 0xffffff;
+			//((i>>2)&1)*0xFFFFFF;
+
 		}
 	}
+	Sachletz(l_TestTexture, 256, 256);
+	const int32_t PartTime = 10000;
 
-	const long PartTime = 10000;
+	M->Txtr->Flags = Txtr_Tiled | Txtr_Nomip;
+
+	int32_t timerStack[20], timerIndex = 0;
+	for (int i = 0; i < 20; i++)
+		timerStack[i] = Timer;
+	char MSGStr[128];
+
 
 	float TT = Timer;
+	byte* TempBuf = new byte[XRes*YRes*4];
+	memset(TempBuf, 0, XRes * YRes * 4);
 	while (Timer < PartTime)
 	{
 		dTime = (Timer - TT) / 100.0;
 		TT = Timer;
 
 		//memset(VPage, 0, PageSize);
+		/*for (int y = 0; y != YRes; ++y) {
+			for (int x = 0; x != XRes; ++x) {
+				((dword*)VPage)[y * XRes + x] = (x % 64 < 32) ? 0x3f3f3f : 0;
+			}
+		}*/
 		memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
-		
-		drawPoly();
-		
+		//memset(VPage, 0, PageSize);
+		//for (int y = 0; y != YRes; ++y) {
+		//	for (int x = 0; x != XRes; ++x) {
+		//		((dword*)VPage)[y * XRes + x] = ((x ^ y) & 8) ? 0x7f7f7f : 0;
+		//	}
+		//}
+
+		// drawPoly(0);
+		drawPoly(500);
+
+		DWord pSrc = 0x80808080;
+		DWord pDst = 0x8C8C8C8C;
+
+		//AlphaBlend((byte*)MainSurf->Data, TempBuf, pSrc, pDst, XRes * YRes * 4);
+		//memcpy(MainSurf->Data, TempBuf, XRes * YRes * 4);
+
+		timerStack[timerIndex++] = Timer;
+		if (timerIndex == 20)
+		{
+			timerIndex = 0;
+			sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
+		}
+		else {
+			sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
+		}
+		dword scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+
+		sprintf(MSGStr, "%f frame", CurFrame);
+		scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+
+		memcpy(MainSurf->Data, g_gbuffer->txtr.data(), XRes * YRes * 4);
+
 		Flip(MainSurf);
 
 		if (Keyboard[ScESC])

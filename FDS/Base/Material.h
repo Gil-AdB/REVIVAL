@@ -14,48 +14,51 @@ struct Material
     // 16 byte alignment variables
     Color                 BaseCol; //Base Color for the material
 
-    Scene               * RelScene; //Related Scene  // This should be nuked from orbit. Just keep a scene id instead of a pointer
-    Texture             * Txtr;
-    DWord                 Flags;
-    DWord                 TFlags; //Texture Flags
+    Scene               * RelScene              = nullptr; //Related Scene  // This should be nuked from orbit. Just keep a scene id instead of a pointer
+    Texture             * Txtr                  = nullptr;
+    DWord                 Flags                 = 0;
+    DWord                 TFlags                = 0; //Texture Flags
 
-    dword				  ID;
+    dword				  ID                    = 0;
 
-    float                 Luminosity;
-    float                 Diffuse; //Diffuse reflection
-    float                 Specular; //Specular reflection
-    float                 Reflection; //Rebounded light Reflection
-    float                 Transparency; //Transparency ratio
-    unsigned short        Glossiness; //unknown parameter
-    unsigned short        ReflectionMode; //unknown parameter
-    char                * ReflectionImage; //Reflection detail
-    float                 ReflectionSeamAngle; //unknown
-    float                 RefractiveIndex; //Optic Factor
-    float                 EdgeTransparency; //unknown factor
-    float                 MaxSmoothingAngle; //?
-    char                * ColorTexture; //Color Map Textutre Filename
-    char                * DiffuseTexture; //Diffuse Map Texture Filename
-    char                * SpecularTexture; //Specular Map Texture Filename
-    char                * ReflectionTexture; //Reflection Map Texture Filename
-    char                * TransparencyTexture; //Transparency Map Texture Filename
-    char                * BumpTexture; //Bump Map Texture Filename
-    char                * TextureImage; //Texture Map Filename
-    unsigned short        TextureFlags; //Should be replaced by dword TFlags
+    float                 Luminosity            = 0.0f;
+    float                 Diffuse               = 0.0f; //Diffuse reflection
+    float                 Specular              = 0.0f; //Specular reflection
+    float                 Reflection            = 0.0f; //Rebounded light Reflection
+    float                 Transparency          = 0.0f; //Transparency ratio
+    unsigned short        Glossiness            = 0; //unknown parameter
+    unsigned short        ReflectionMode        = 0; //unknown parameter
+    char                * ReflectionImage       = nullptr; //Reflection detail
+    float                 ReflectionSeamAngle   = 0.0f; //unknown
+    float                 RefractiveIndex       = 0.0f; //Optic Factor
+    float                 EdgeTransparency      = 0.0f; //unknown factor
+    float                 MaxSmoothingAngle     = 0.0f; //?
+    char                * ColorTexture          = nullptr; //Color Map Textutre Filename
+    char                * DiffuseTexture        = nullptr; //Diffuse Map Texture Filename
+    char                * SpecularTexture       = nullptr; //Specular Map Texture Filename
+    char                * ReflectionTexture     = nullptr; //Reflection Map Texture Filename
+    char                * TransparencyTexture   = nullptr; //Transparency Map Texture Filename
+    char                * BumpTexture           = nullptr; //Bump Map Texture Filename
+    char                * TextureImage          = nullptr; //Texture Map Filename
+    unsigned short        TextureFlags          = 0; //Should be replaced by dword TFlags
     Vector                TextureSize; //Texture Proj. Size in spatial coordinates
     Vector                TextureCenter; //Texture Origin in space
     Vector                TextureFallOff; //??
     Vector                TextureVelocity; //U/V animation speed
-    char                * TextureAlpha; //Texture Map for Alpha Channel
-    unsigned short        NoiseFrequencies; //??
-    unsigned short        TextureWrapX; //Wrap flag for U
-    unsigned short        TextureWrapY; //Wrap flag for V
-    float                 AAStrength; //Antialiasing Strength
-    float                 Opacity; //?? gotta learn some physics
-    Texture							* EnvTexture;
-    float									TFP0;
-    float									TFP1;
-    Material            * Next, * Prev;
-    char                * Name;
+    char                * TextureAlpha          = nullptr; //Texture Map for Alpha Channel
+    unsigned short        NoiseFrequencies      = 0; //??
+    unsigned short        TextureWrapX          = 0; //Wrap flag for U
+    unsigned short        TextureWrapY          = 0; //Wrap flag for V
+    float                 AAStrength            = 0.0f; //Antialiasing Strength
+    float                 Opacity               = 0.0f; //?? gotta learn some physics
+    Texture				* EnvTexture            = nullptr;
+    float				  TFP0                  = 0.0f;
+    float				  TFP1                  = 0.0f;
+    bool                  ZBufferWrite          = true;
+    bool                  ZBufferTest           = true;
+    Material            * Next                  = nullptr;
+    Material            * Prev                  = nullptr;
+    char                * Name                  = nullptr;
 };
 
 #pragma pack(pop)

@@ -4,7 +4,7 @@ char *fld_strdup(const char *s)
 {
 	if (s == NULL)
 		return NULL;
-	long l = strlen(s)+1;
+	int32_t l = strlen(s)+1;
 	char *d = new char [l];
 	memcpy(d, s, l);
 	return d;
@@ -19,7 +19,7 @@ mword CFGInteger::write(FILE *F)
 	return 0;
 }
 
-long CFGInteger::toInteger()
+int32_t CFGInteger::toInteger()
 {
 	return _value;
 }
@@ -40,9 +40,9 @@ mword CFGString::write(FILE *F)
 	return 0;
 }
 
-long CFGString::toInteger()
+int32_t CFGString::toInteger()
 {
-	return long(atoi(_value));
+	return int32_t(atoi(_value));
 }
 
 char *CFGString::toString()
@@ -57,7 +57,7 @@ ConfigurationDB::ConfigurationDB()
 
 ConfigurationDB::~ConfigurationDB()
 {
-	for(long i=0, n = _entries.size(); i<n; ++i)
+	for(int32_t i=0, n = _entries.size(); i<n; ++i)
 	{
 		delete _entries[i];
 	}
@@ -111,7 +111,7 @@ mword ConfigurationDB::write(FILE *F, int32_t indent)
 	fprintf(F, "Category %s (%d entries, %d subcategories)\n", _categoryName, n, c);
 	for(i=0; i<n; ++i)
 	{
-		for(long j=0; j<=indent; ++j)
+		for(int32_t j=0; j<=indent; ++j)
 			fprintf(F, "\t");
 		if (_entries[i]->write(F))
 			return 1;
@@ -127,7 +127,7 @@ mword ConfigurationDB::read(FILE *F, int32_t indent)
 	setCategory(buffer);
 	_entries.resize(n);
 	_children.resize(c);
-	for(long i=0; i<n; ++i)
+	for(int32_t i=0; i<n; ++i)
 	{
 		if ((_entries[i] = readEntry(F)) == NULL)
 			return 1; // report failure.
@@ -152,7 +152,7 @@ CFGEntry *ConfigurationDB::readEntry(FILE *F)
 	case 1:
 		{
 			char value[128];
-			fscanf(F, "%s", &value);
+			fscanf(F, "%127s", &value);
 			return new CFGString(buffer, value);
 		}
 		break;
@@ -174,7 +174,7 @@ CFGEntry *ConfigurationDB::find(const char *id)
 	return NULL;
 }
 
-long ConfigurationDB::extractInteger(const char *id)
+int32_t ConfigurationDB::extractInteger(const char *id)
 {
 	CFGEntry *e = find(id);
 	if (e == NULL)

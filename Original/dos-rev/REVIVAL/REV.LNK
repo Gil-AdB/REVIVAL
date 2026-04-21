@@ -1,0 +1,5 @@
+system dos4g
+name FDS
+file *.Obj
+library *.Lib,LIB\*.LIB
+

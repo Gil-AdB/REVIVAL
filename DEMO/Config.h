@@ -19,7 +19,7 @@ protected:
 	char *_id;
 public:
 	virtual mword write(FILE *F) = 0;
-	virtual long toInteger() = 0;
+	virtual int32_t toInteger() = 0;
 	virtual char *toString() = 0;
 
 	CFGEntry()
@@ -48,7 +48,7 @@ class CFGInteger : public CFGEntry
 {
 	int32_t _value;
 public:
-	inline long getValue()
+	inline int32_t getValue()
 	{
 		return _value;
 	}
@@ -71,7 +71,7 @@ public:
 	}
 
 	mword write(FILE *F);
-	long toInteger();
+	int32_t toInteger();
 	char *toString();
 
 };
@@ -109,7 +109,7 @@ public:
 	}
 
 	mword write(FILE *F);
-	long toInteger();
+	int32_t toInteger();
 	char *toString();
 };
 
@@ -131,7 +131,7 @@ public:
 	void addEntry(CFGEntry *e);
 
 	CFGEntry *find(const char *id);
-	long extractInteger(const char *id);
+	int32_t extractInteger(const char *id);
 	char *extractString(const char *id);
 	mword fromFile(const char *filename);
 	mword toFile(const char *filename);

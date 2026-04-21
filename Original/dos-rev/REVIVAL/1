@@ -1,0 +1,49 @@
+] Vertigo GL (V0.76) - INITIALIZE
+] MMX(TM) not available.
+] Hacking Random-seed.
+] Mathematical Identities.
+] Diffusing Materials.
+] FPU >> Low Precision.
+] Basic font.
+] Timer ISR.
+] Keyboard ISR.
+Warning: FDS may not run well under M$ WINDOZE 95.
+Press <ESC> to Terminate FDS operation,or any other key to continue.
+] Initializing Video system.
+Silvatar's Integrated DPMI memory Abstraction unit, Version 1.21.
+Video Mode Setup
+================
+ Available Pixel Formats
+ -----------------------
+  Text Mode (ANSI GFX)
+  4BPP/16 Colors (EGA)
+  8BPP/256 Colors (VGA)
+  15BPP/32K Colors (HiColor)
+  16BPP/64K Colors (HiColor)
+* 24BPP/16M Colors (TrueColor)
+Available Resolutions
+---------------------
+  320x200 (VBE 2.0)             
+* 320x240 (VBE 2.0)             
+  320x400 (VBE 2.0)             
+  320x480 (VBE 2.0)             
+  400x300 (VBE 2.0)             
+  512x384 (VBE 2.0)             
+  640x350 (VBE 2.0)             
+  640x400 (VBE 2.0)             
+] Timer >> MIDAS Callback.
+] MIDAS Sound system - Installing.
+Initializing, please wait...DOS/4GW error (2001): exception 06h (invalid opcode) at 237:82818590
+TSF32: prev_tsf32 5288
+SS       23F DS       23F ES       23F FS         0 GS        87
+EAX 8B921E40 EBX 8C206038 ECX 8C06F038 EDX 8AD73278
+ESI 8B921E40 EDI 8C206038 EBP 828AFBF8 ESP 828AF9C8
+CS:IP  237:82818590 ID 06 COD        4 FLG   210202
+CS=  237, USE32, page granular, limit FFFFFFFF, base        0, acc CFFB
+SS=  23F, USE32, page granular, limit FFFFFFFF, base        0, acc CFF3
+DS=  23F, USE32, page granular, limit FFFFFFFF, base        0, acc CFF3
+ES=  23F, USE32, page granular, limit FFFFFFFF, base        0, acc CFF3
+FS=    0, USE16, byte granular, limit        0, base        0, acc  0
+GS=   87, USE16, byte granular, limit     FFFF, base     C080, acc F3
+CR0: unavailable
+Crash address (unrelocated) = 1:00030590

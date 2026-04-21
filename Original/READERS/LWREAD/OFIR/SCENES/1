@@ -1,0 +1,14 @@
+DOS/4GW error (2001): exception 0Eh (page fault) at 150:00462FFD
+TSF32: prev_tsf32 5274
+SS       158 DS       158 ES       158 FS         0 GS        20
+EAX   4CAC14 EBX   4CAC18 ECX BF7CFC89 EDX   4D59C0
+ESI   4CAD84 EDI   4CAC0C EBP   4CAD58 ESP   4CAC08
+CS:IP  150:00462FFD ID 0E COD        0 FLG    10206
+CS=  150, USE32, page granular, limit FFFFFFFF, base        0, acc CF9B
+SS=  158, USE32, page granular, limit FFFFFFFF, base        0, acc CF93
+DS=  158, USE32, page granular, limit FFFFFFFF, base        0, acc CF93
+ES=  158, USE32, page granular, limit FFFFFFFF, base        0, acc CF93
+FS=    0, USE16, byte granular, limit        0, base       14, acc  0
+GS=   20, USE16, byte granular, limit     FFFF, base    10C10, acc 93
+CR0: PG:1 ET:1 TS:0 EM:0 MP:0 PE:1   CR2: BF7CFC8D CR3: 13067
+Crash address (unrelocated) = 1:00006FFD
