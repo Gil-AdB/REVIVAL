@@ -22,7 +22,6 @@ enum
 extern ModplayerHandle g_RevModuleHandle;
 extern dword g_profilerActive;
 
-void FlipRequest(VESA_Surface *VS);
 void SysSleep(dword ticks);
 
 void Destroy_Scene(Scene *Sc);

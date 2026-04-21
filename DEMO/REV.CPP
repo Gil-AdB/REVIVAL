@@ -488,8 +488,6 @@ char *ModuleBuf;
 //dword g_RevModuleHandle;
 ModplayerHandle g_RevModuleHandle;
 //FModWrapper	module;
-VESA_Surface *g_FlipRequestPage;
-
 void Destroy_Scene(Scene *Sc)
 {
 	return;
@@ -524,40 +522,12 @@ void Destroy_Scene(Scene *Sc)
 }
 
 
-FILE *Stub_Log;
-uint32_t Stub_Disable;
-
-static SDL_TimerID TimerID = 0; //MM Timer Handle
+static SDL_TimerID TimerID = 0;
 static int32_t Timer__NA = -1;
 
 static char G_TitleStr[MAX_GSTRING] = "Revival / Flood";
 static char G_WindowClassStr[MAX_GSTRING] = "Revival";
 static char G_AppTitle[MAX_GSTRING];
-
-static uint32_t MID,STID;
-
-static uint32_t StubI = 0;
-
-// cheap substitute for a semaphore...
-static uint32_t Thread_Interlock_Mutex = 0;
-
-static dword S_InitRet;
-static void *Signmem;
-
-void FlipRequest(VESA_Surface *VS)
-{	
-	// Thread_Interlock_Mutex = 1;
-	// g_FlipRequestPage = VS;
-	// PostMessage(G_hWnd,WM_USER+3,0,0); //DEVICE INIT SIGNAL
-	// while (Thread_Interlock_Mutex)
-	// {
-	// 	Sleep(1);
-	// }
-}
-
-// Timer code.
-// static void CALLBACK TimerProc(UINT wTimerID, UINT msg, 
-//     DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2)
 
 Uint32 TimerProc(Uint32 interval, void *param)
 { 
@@ -590,26 +560,6 @@ void TimerRemove(void)
 		SDL_RemoveTimer(TimerID);
 		TimerID = 0;
 	}
-} 
-//Timer code ends.
-
-uint32_t StubInit__(void)
-{
-	StubI = 1;
-
-
-	//hAccelTable = LoadAccelerators(G_hInst, (LPCTSTR)IDC_W32STUB);
-
-	// SetForegroundWindow(G_hWnd);
-
-	//SetTimer(G_hWnd,1,1000/TimerFreq,NULL);
-	int TimerFreq = 100;
-	TimerInit(TimerFreq);
-	// redirect console output to a file
-	freopen("logfile.txt", "w+", stdout);
-
-	FPU_LPrecision();
-	return 0;
 }
 
 /*void Run_RotationTest()
@@ -1151,39 +1101,6 @@ void CodeEntry(void *var)
 	}
 }
 
-void StubRemove()
-{
-	if (StubI)
-	{
-		//RemoveDisplayDevice();
-		TimerRemove();
-		StubI = 0;
-		free(Signmem);
-	}
-
-}
-
-static void StubbedThread(void *var)
-{
-	// STID = GetCurrentThreadId();
-
-	StubInit__();
-
-	// randomize
-//	SYSTEMTIME st;
-//	GetSystemTime(&st);
-//	srand(st.wMilliseconds+1000*st.wSecond);
-
-	CodeEntry(var); // if this was a real STUB, it should have
-	//supposedly read an OBJ file where this CodeEntry is located.
-	//a DOS STUB would do the same jumping from main() into that CodeEntry function.
-
-	//PostThreadMessage(MID,WM_QUIT,0,0);
-	// PostMessage(G_hWnd,WM_USER+2,0,0); //TERMINATION SIGNAL
-
-	// _endthread();
-}
-
 #include "SDL2.h"
 
 int main(int argc, const char *argv[])
@@ -1220,33 +1137,27 @@ int main(int argc, const char *argv[])
 	memset(VPage, 0xcd, MainSurf->BPSL * YRes);
 	Flip(MainSurf);
 
-	// Ow shit
-	// STUB must initialize all video,raster and render devices.
-	//
-	auto t = std::thread(StubbedThread, nullptr);
-	
+	TimerInit(100);
+	freopen("logfile.txt", "w+", stdout);
+
+	auto demoThread = std::thread(CodeEntry, nullptr);
+
     while (1)
     {
         SDL_Event event;
         SDL_WaitEvent(&event);
-		//std::cerr << "event type is " << event.type << std::endl;
 		if (event.type == SDL_QUIT) {
 			break;
 		}
 		if (event.type == SDL_KEYDOWN) {
-			
-			//fprintf(Stub_Log,"<%d> Keyboard Key [%d] down\n",Timer,wParam);
 			Keyboard[event.key.keysym.scancode] = 1;
 		}
 		if (event.type == SDL_KEYUP) {
-			
-			//fprintf(Stub_Log,"<%d> Keyboard Key [%d] down\n",Timer,wParam);
 			Keyboard[event.key.keysym.scancode] = 0;
 		}
     }
 
-out:
-	t.join();
+	demoThread.join();
 	SDL_DestroyRenderer((SDL_Renderer *)MainSurf->Renderer);
 	SDL_Quit();
 	return 0;
