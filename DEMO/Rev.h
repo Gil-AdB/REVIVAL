@@ -22,9 +22,6 @@ enum
 extern ModplayerHandle g_RevModuleHandle;
 extern dword g_profilerActive;
 
-void FlipRequest(VESA_Surface *VS);
-void SysSleep(dword ticks);
-
 void Destroy_Scene(Scene *Sc);
 
 void Run_Glato(void);
@@ -34,7 +31,6 @@ void Run_Credits();
 
 void Initialize_Glato();
 void Initialize_City();
-static void TextureBlockTest();
 void Run_City();
 
 void Initialize_Chase();
@@ -48,11 +44,5 @@ void Run_Greets();
 
 void Initialize_Crash();
 void Run_Crash();
-
-void Initialize_Koch();
-void Run_Koch();
-
-void Initialize_Nova();
-void Run_Nova();
 
 #endif
