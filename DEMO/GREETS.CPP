@@ -564,34 +564,34 @@ void Run_Greets()
 			if (timerIndex==20) 
 			{
 				timerIndex = 0;
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
 			} else {
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
 			}
 			dword scroll = 0;
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
-			sprintf(MSGStr, "Frame %f", CurFrame);
+			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
 			scroll = OutTextXY(VPage,0, scroll+15,MSGStr,255);
-			sprintf(MSGStr, "%d polys/frame", (int)(g_renderedPolys / numFrames));
+			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int)(g_renderedPolys / numFrames));
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			sprintf(MSGStr, "%dK pixels/frame" , (int)(FillerPixelcount/(1000.0*numFrames)));
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame" , (int)(FillerPixelcount/(1000.0*numFrames)));
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			sprintf(MSGStr, "%dK pixels/second" , (int)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second" , (int)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 
 	//		PROFILER: display stats	
 			for(i=0; i<PROF_NUM; i++)
 			{
-				sprintf(MSGStr, "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
+				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
 				scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 			}
 
-			sprintf(MSGStr, "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
+			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 
-	//		sprintf(MSGStr, "%d percent Z-rejection", (int32_t) ( (float)zReject*100.0/ (zReject+zPass) ));
+	//		snprintf(MSGStr, sizeof(MSGStr), "%d percent Z-rejection", (int32_t) ( (float)zReject*100.0/ (zReject+zPass) ));
 	//		OutTextXY(VPage,0,45,MSGStr,255);
-	//		sprintf(MSGStr, "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
+	//		snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
 	//		OutTextXY(VPage,0,45,MSGStr,255);
 			// display messages.
 	/*		int32_t I, Y = -15;

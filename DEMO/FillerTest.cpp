@@ -1282,14 +1282,14 @@ void FillerTest()
 		if (timerIndex == 20)
 		{
 			timerIndex = 0;
-			sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
 		}
 		else {
-			sprintf(MSGStr, "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
 		}
 		dword scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 
-		sprintf(MSGStr, "%f frame", CurFrame);
+		snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
 		scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
 		memcpy(MainSurf->Data, g_gbuffer->txtr.data(), XRes * YRes * 4);

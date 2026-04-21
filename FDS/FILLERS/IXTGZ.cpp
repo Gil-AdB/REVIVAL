@@ -1075,7 +1075,7 @@ void IX_Prefiller_TGZM(Face* F, Vertex **V, dword numVerts, dword miplevel)
 		for(i=0; i<numVerts; i++)
 		{
 #ifdef TRACE_OBJECTS
-			sprintf(MSGStr, "%f, %f, %x", V[i]->PX, V[i]->PY, V[i]->i);
+			snprintf(MSGStr, sizeof(MSGStr), "%f, %f, %x", V[i]->PX, V[i]->PY, V[i]->i);
 			//OutTextXY(VPage, Fist(V[i]->PX), Fist(V[i]->PY), MSGStr, 255);
 			DebugStrs.emplace_back(Fist(V[i]->PX), Fist(V[i]->PY) + (V[i]->i >> 4) * 15, MSGStr);
 #endif

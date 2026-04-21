@@ -1970,7 +1970,7 @@ void Run_Fountain()
 		Profiler[PROF_RNDR] -= Timer;		
 		Render();
 
-//		sprintf(MSGStr,"Rendered %d Polys,%d Omnis and %d pcls.\n",CPolys,COmnies,CPcls);
+//		snprintf(MSGStr, sizeof(MSGStr),"Rendered %d Polys,%d Omnis and %d pcls.\n",CPolys,COmnies,CPcls);
 //		OutTextXY(VPage,0,0,MSGStr,64);
 
 		if (Rsv_LState)
@@ -2011,28 +2011,28 @@ void Run_Fountain()
 			if (timerIndex==20) 
 			{
 				timerIndex = 0;
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
 			} else {
-				sprintf(MSGStr,"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
 			}
 			scroll = OutTextXY(VPage,0,0,MSGStr,255);
-			sprintf(MSGStr,"%d outer pcls", g_numPcls);
-			sprintf(MSGStr, "%dK pixels/frame" , (int32_t)(FillerPixelcount/(1000.0*numFrames)));
+			snprintf(MSGStr, sizeof(MSGStr),"%d outer pcls", g_numPcls);
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame" , (int32_t)(FillerPixelcount/(1000.0*numFrames)));
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			sprintf(MSGStr, "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 
-			sprintf(MSGStr, "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
+			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 
 	//		PROFILER: display stats
 			for(i=0; i<PROF_NUM; i++)
 			{
-				sprintf(MSGStr, "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
+				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
 				scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 			}
 
-			sprintf(MSGStr, "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
+			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
 			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
 		}
 		Profiler[PROF_FLIP] -= Timer;		
