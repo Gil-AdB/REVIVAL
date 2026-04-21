@@ -1,15 +1,17 @@
 set(PROJECT_NAME Modplayer)
 
-# The heavy lifting is in a sibling Rust workspace. Default to ../modplayer-2
-# (relative to the revival repo root); override with -DMODPLAYER2_DIR=... .
-set(MODPLAYER2_DIR "${CMAKE_SOURCE_DIR}/../modplayer-2" CACHE PATH
+# The heavy lifting is in a Rust workspace tracked as a git submodule at
+# Modplayer/modplayer-2. Override with -DMODPLAYER2_DIR=... to point at a
+# sibling checkout instead (useful for cross-repo development).
+set(MODPLAYER2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modplayer" CACHE PATH
     "Path to the modplayer-2 Rust workspace")
 
 if(NOT EXISTS "${MODPLAYER2_DIR}/Cargo.toml")
     message(FATAL_ERROR
         "modplayer-2 not found at '${MODPLAYER2_DIR}'.\n"
-        "Clone https://<...>/modplayer-2 next to this repo or pass "
-        "-DMODPLAYER2_DIR=/path/to/modplayer-2.")
+        "Run `git submodule update --init --recursive` from the repo root, "
+        "or pass -DMODPLAYER2_DIR=/path/to/modplayer-2 to point at a sibling "
+        "checkout.")
 endif()
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
@@ -28,7 +30,10 @@ set(_modplayer_rust_lib
 
 add_custom_command(
     OUTPUT "${_modplayer_rust_lib}"
-    COMMAND "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag} --package modplayer-lib
+    # CMAKE_POLICY_VERSION_MINIMUM=3.5 lets the vendored sdl2-sys build under
+    # CMake >= 4.0, which dropped compatibility with its older cmake_minimum_required.
+    COMMAND ${CMAKE_COMMAND} -E env CMAKE_POLICY_VERSION_MINIMUM=3.5
+            "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag} --package modplayer-lib
     WORKING_DIRECTORY "${MODPLAYER2_DIR}"
     COMMENT "Building modplayer-2 (Rust, ${_cargo_profile_dir})"
     USES_TERMINAL)

@@ -1,0 +1,3 @@
+[submodule "Modplayer/modplayer"]
+	path = Modplayer/modplayer
+	url = https://github.com/Gil-AdB/modplayer.git
