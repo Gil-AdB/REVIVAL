@@ -37,7 +37,6 @@ source_group("" FILES ${DEMO_SOURCES})
 add_executable(${PROJECT_NAME} ${DEMO_SOURCES})
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    PORTABLE_CODE=1
     SIMDE_ENABLE_NATIVE_ALIASES)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
