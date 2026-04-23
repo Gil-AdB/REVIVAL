@@ -476,28 +476,6 @@ static void SubInnerLoop(dword bWidth, dword *SpanPtr, word * ZSpanPtr, float pr
 
 				tex = ((dword *)IX_Texture)[((_u0& ((0x100<<IX_L2X) - 0x100) )>> 8) + (((_v0&((0x100<<IX_L2Y) - 0x100))>>8) << IX_L2X)];
 
-#ifndef PORTABLE_CODE
-				__asm
-				{
-					mov edi, [SpanPtr]
-
-					; additive
-					;pxor mm2, mm2
-					;movd mm3, [edi]
-					;punpcklbw mm3, mm2
-
-					pxor mm1, mm1
-					movd mm0, [tex]
-					punpcklbw mm0, mm1
-					movq mm1, qword ptr [Col]
-					pmulhuw mm1, mm0
-					psllw mm1, 1
-					;paddusw mm1,mm3
-					packuswb mm1, mm1
-					movd [edi], mm1
-				}
-#endif
-
 //				*SpanPtr = 0x7F7F7F;
 				//tex = 0x00ffffff;
 

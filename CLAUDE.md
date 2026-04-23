@@ -65,7 +65,7 @@ Organized as subdirectories with source groups mirrored in `FDS/CMakeLists.txt`:
 
 ### Portability story
 
-The preprocessor split is `PORTABLE_CODE=1` (defined for both `DEMO` and `FDS`) vs `NON_PORTABLE_CODE` (MSVC/x86-only paths: thread-local filler initializers, inline x86 asm). The macOS build compiles only the portable path. The legacy Windows display backends (DirectDraw/D3D8/GDI) were deleted in the Tier 1 cleanup; SDL2 is the only remaining backend. `SIMDE_ENABLE_NATIVE_ALIASES` lets intrinsics code read as if on x86.
+The legacy MSVC/x86-only paths (inline x86 asm, `#ifndef PORTABLE_CODE` branches) were removed; the remaining code is portable C++ with SIMD via `simde` on arm64. The legacy Windows display backends (DirectDraw/D3D8/GDI) were deleted in the Tier 1 cleanup; SDL2 is the only remaining backend. `SIMDE_ENABLE_NATIVE_ALIASES` lets intrinsics code read as if on x86.
 
 ### Display backend
 
@@ -79,5 +79,5 @@ Supported via `if (EMSCRIPTEN) add_compile_options(-msimd128 -sUSE_SDL=2)` at th
 
 - Source files are mixed UPPERCASE (`REV.CPP`, `CITY.CPP`, `FDS_VARS.H`) and CamelCase (`Config.cpp`, `SkyCube.cpp`). Keep the style of the surrounding directory when adding files; `CMakeLists.txt` source lists are explicit, so new files must be added there.
 - `REV.CPP` contains a large historical dev log as a leading comment — preserve it when editing.
-- Many code paths are commented-out alternative implementations (e.g. FMOD vs Modplayer, pre-SIMD asm vs `.cpp` ports). Treat these as historical reference; don't mass-delete without checking `NON_PORTABLE_CODE` gates.
+- Many code paths are commented-out alternative implementations (e.g. FMOD vs Modplayer, pre-SIMD asm vs `.cpp` ports). Treat these as historical reference.
 - The `Original/` directory holds pristine 1998 sources — read-only reference.

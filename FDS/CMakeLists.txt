@@ -183,7 +183,6 @@ add_library(${PROJECT_NAME} STATIC ${ALL_FILES})
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    PORTABLE_CODE=1
     _CRT_SECURE_NO_WARNINGS
     _LIB
     _MBCS

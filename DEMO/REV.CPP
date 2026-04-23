@@ -613,16 +613,7 @@ Raindrop *RD;
 
 inline void fist(int32_t &r, float x)
 {
-#ifdef PORTABLE_CODE
 	r = static_cast<int32_t>(x);
-#else
-	__asm
-	{
-		FLD dword ptr [x]
-		mov edi, dword ptr [r]
-		FISTP dword ptr [edi]
-	}
-#endif
 }
 
 static void rainmapper(float x1, float y1, float x2, float y2)

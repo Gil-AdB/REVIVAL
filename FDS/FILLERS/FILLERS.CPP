@@ -1795,173 +1795,28 @@ void Spriter32(float x, float y,float width,float height,void *txtr,void *VPage,
 
 	if (Height <= 0 || LineWidth <= 0) return;
 	FillerPixelcount = FillerPixelcount + Height * LineWidth;
-#if defined(PORTABLE_CODE) && defined(PIG_VOMIT)
 	__m64 mm4 { (int32_t)Color };
 	__m64 mm1 = {};
-#else
-	__asm
-	{
-		movd mm4, [Color]
-		pxor mm1,mm1
-		punpcklbw mm4,mm1
-	}
-#endif
 	
 	for(int i=0; i<Height; i++)
 	{
 
 		dword u = iu;
-#ifndef PORTABLE_CODE
-		dword *texScanLine = &tex[((v>>11)&0x3E0)];
-		__asm
-		{
-			push ebp
-
-			; uploading virus
-			mov		ecx,	[LineWidth]
-			mov		esi,	[texScanLine]
-			mov		edi,	[ScanLine]
-			mov		eax,	[u]
-			mov		edx,	[idu]
-			mov		ebp,	edi			
-
-			; next scanline prefetch (bad impl - should prefetch entire tile in TBR renderer)
-;			mov		ebx,	[VESA_BPSL]
-;			prefetcht0		byte ptr [edi+ebp]
-
-			; align to 8 bytes
-			and		ebp,	4
-			jz		AfterLeftAlign
-
-			mov		ebx,	eax
-			shr		ebx,	14
-			and		ebx,	0fffffffch
-			
-			movd mm1, [edi]
-			punpcklbw mm0, [esi+ebx]
-			psrlw mm0, 8
-			pmullw mm0, mm4
-			psrlw mm0, 8
-			packuswb mm0, mm0			
-			paddusb mm0, mm1				
-			movd [edi], mm0			
-		
-			add		eax,	edx
-			add		edi,	4
-			sub		ecx,	1
-			jz		EndScanline
-AfterLeftAlign:
-			mov		ebp,	ecx
-			and		ebp,	1			
-			and		ecx,	0fffffffeh
-			jz		BeforeRightAlign
-
-			; read two pixels from screen
-			movq mm1, [edi]
-
-			; read first pixel from texture
-			mov		ebx,	eax
-			shr		ebx,	14
-			and		ebx,	0fffffffch
-			
-			punpcklbw mm0, [esi+ebx]
-
-			add		eax,	edx
-
-			; read second pixel from texture
-			mov			ebx,	eax
-			shr			ebx,	14
-			and			ebx,	0fffffffch
-			
-			punpcklbw	mm2,	[esi+ebx]
-
-			pmulhuw		mm0,	mm4
-			pmulhuw		mm2,	mm4
-
-			packuswb	mm0,	mm2
-			paddusb		mm0,	mm1
-
-			movq		[edi],	mm0
-
-			add		eax,	edx
-			add		edi,	8
-
-			sub		ecx,	2
-
-			cmp		ebp,	ebp
-			jz		AfterLeftAlign
-
-BeforeRightAlign:
-			mov		ebx,	eax
-			shr		ebx,	14
-			and		ebx,	0fffffffch
-			
-			movd mm1, [edi]
-			punpcklbw mm0, [esi+ebx]
-			psrlw mm0, 8
-			pmullw mm0, mm4
-			psrlw mm0, 8
-			packuswb mm0, mm0			
-			paddusb mm0, mm1				
-			movd [edi], mm0			
-			
-EndScanline:
-			pop ebp
-		}
-
-#else
 		uintptr_t ofs = ((v >> 11) & 0x3E0);
-		//__m64 x = { 0 };
 		for(int j = 0;j<LineWidth; j++)
 		{
-#ifdef PIG_VOMIT
-
-
-			//dword t = tex[(u >> 16) + ofs];
-
-////			tmm.m64_u32[0] = t;
-//			*(dword *)&tmm = t;
-
-			//mm0 = _m_pxor(mm0, mm0);
-//			mm0 = _m_punpcklbw(mm0, *(__m64*)&tex[(u >> 16) + ((v >> 11) & 0x3E0)]);
 			__m64 mm0 = { 0 };
-			//*x = mm0.m64_u32[0];
 #ifdef __clang__
 			((dword*)ScanLine)[j] = (dword)mm0[0];
 #else
 			((dword*)ScanLine)[j] = mm0.m64_u32[0];
 #endif
-#else
-			dword t = tex[(u >> 16) + ofs];
-			dword x = ((dword*)ScanLine)[j] ;
-			__asm
-			{
-				pxor mm0, mm0
-				punpcklbw mm0, [t]
-				psrlw mm0, 8
-				pmullw mm0, mm4
-				psrlw mm0, 8
-				packuswb mm0, mm0
-				movd mm1, [x]
-				paddusb mm0, mm1				
-				movd [x], mm0
-			}
-			((dword *)ScanLine)[j] = x;
-#endif // PIG_VOMIT
 
 			u += idu;
 		}
-#endif
 		ScanLine += VESA_BPSL;
 		v += idv;
 	}
-#ifdef PORTABLE_CODE
-#else
-	__asm
-	{
-		emms
-	}
-#endif
 }
 
 #if 0

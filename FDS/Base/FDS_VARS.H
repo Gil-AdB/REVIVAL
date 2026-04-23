@@ -232,11 +232,7 @@ extern Camera             FC;             // Free Camera..(Future Crew rulez)
 extern Material           Default_Mat;    // Default Material...
 extern Material         * MatLib;         // yosi
 
-#ifdef PORTABLE_CODE
 extern unsigned int OldFPUCW, FPUCW;
-#else
-extern unsigned short int OldFPUCW, FPUCW;
-#endif
 
 extern dword OldMXCSR, CurMXCSR;
 extern int32_t Timer_Freq;
@@ -862,7 +858,6 @@ static void SetFPCR(uint64_t fpcr)
 
 inline void FPU_LPrecision()
 {
-#ifdef PORTABLE_CODE
 #ifdef _MSVC
 
 //	OldFPUCW = _controlfp(_RC_UP | _PC_24, _MCW_RC | _MCW_PC);
@@ -897,39 +892,12 @@ inline void FPU_LPrecision()
 #else
 // #error "Unsopported arch"
 #endif
-
-#else
-	__asm {
-		// FPU control word - round up, 24 bit precision
-		FNStCW  [OldFPUCW]
-		Mov     ax,[OldFPUCW]
-		And     eax,1111101111111111b
-		Or      eax,0000100000000000b
-		And     eax,1111110011111111b
-		Mov     [FPUCW],ax
-		FLdCW   [FPUCW]
-
-		// SSE control word
-		STMXCSR	 [OldMXCSR];      RCMSKBIT EXPBIT
-		mov eax, [OldMXCSR];  8765432109876543210
-		and eax, 11111111111111110000000001000000b
-		or  eax, 00000000000000001101111111000000b
-		mov [CurMXCSR], eax
-		LDMXCSR  [CurMXCSR]
-	}
-#endif
 }
 
 
 inline void FPU_NormalState()
 {
-#ifdef PORTABLE_CODE
 //	_controlfp(OldFPUCW, _MCW_RC | _MCW_PC);
-#else
-	__asm {
-		FLdCW   [OldFPUCW]
-	}
-#endif
 }
 
 inline void RoundToInt(int32_t *dest, float val)
@@ -976,20 +944,8 @@ inline float SQRT(float Value)
 
 inline float RSQRT(float Value)
 {
-#ifdef PORTABLE_CODE
 	return _mm_cvtss_f32(_mm_rsqrt_ss(_mm_load_ss(&Value)));
 	//	return 1.0f / sqrt(Value);
-#else
-	float &val = Value;
-	float retval;
-	__asm
-	{
-		//mov edi, [val]
-		rsqrtss xmm0, [val]
-		movss [retval], xmm0
-	}
-	return retval;
-#endif
 
 //	__asm {
 //		mov eax, dword ptr [Value]
@@ -1016,136 +972,37 @@ inline float RSQRT(float Value)
 
 inline void Fist(word &r, float x)
 {
-#ifdef PORTABLE_CODE
 	r = static_cast<word>(x);
-#else
-	__asm
-	{
-		mov edi, [r]
-		FLD dword ptr x
-		FISTP word ptr [edi]
-	}
-#endif
 }
 
 inline void Fist(sword &r, float x)
 {
-#ifdef PORTABLE_CODE
 	r = static_cast<sword>(x);
-#else
-	__asm
-	{
-		mov edi, [r]
-		FLD dword ptr x
-		FISTP word ptr [edi]
-	}
-#endif
 }
 
 inline void Fist(dword &r, float x)
 {
-#ifdef PORTABLE_CODE
 	r = static_cast<dword>(x);
-#else
-	__asm
-	{
-		mov edi, [r]
-		FLD dword ptr x
-		FISTP dword ptr [edi]
-	}
-#endif
 }
 
 inline dword Fist(float x)
 {
-#ifdef PORTABLE_CODE
 	//x += 0.99999;
 	return (dword)_mm_cvtt_ss2si(_mm_load_ss(&x));
 	//return static_cast<dword>(ceilf(x));
-#else
-	dword ceiled;
-	__asm
-	{
-		FLD   dword ptr [x]
-		FISTP dword ptr [ceiled]
-		;mov eax, [ceiled]
-	}
-	return ceiled;
-#endif
 }
 
 // stores 'data' n times starting from address p
 // (p[0...n-1] = data)
 inline void FastWrite(void *p, dword data, dword n)
 {
-#ifdef PORTABLE_CODE
 	memset(p, data, n*4);
-#else
-	__asm
-	{
-		mov edi, [p]
-		mov eax, data
-		mov ecx, n
-
-		cmp ecx, 16
-		jge optver
-		rep stosd
-		jmp afterfill
-		; setup MMX register
-optver:
-		movd MM0, data
-		movq MM1, MM0
-		punpckldq MM0, MM1
-
-		lea edi, [edi+ecx*4]
-		neg ecx
-
-		; align write
-		test edi, 4
-		jz afterprior
-
-		mov [edi+ecx*4], eax
-		inc ecx
-
-afterprior:
-		mov edx, ecx
-
-		sar ecx, 1 ; # qwords
-		and edx, 1 ; remainder dwords
-
-quads:
-		;movntq [edi+ecx*8], MM0
-		__asm _emit 0x0F
-		__asm _emit 0xE7
-		__asm _emit 0x04
-		__asm _emit 0xCF
-		inc ecx
-		jnz quads
-
-		and edx,edx
-		jz afterpost
-		mov [edi-4], eax
-afterpost:
-		emms
-afterfill:
-	}
-#endif
 }
 
 inline void rcpss(float *s)
 {
-#ifdef PORTABLE_CODE
 	*s = _mm_cvtss_f32(_mm_rcp_ss(_mm_load_ss(s)));
-
 	//*s = 1.0 / *s;
-#else
-	__asm
-	{
-		mov edi, [s]
-		rcpss xmm0, [edi]
-		movss [edi], xmm0
-	}
-#endif
 }
 
 #pragma pack (pop)
