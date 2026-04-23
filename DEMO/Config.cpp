@@ -152,7 +152,7 @@ CFGEntry *ConfigurationDB::readEntry(FILE *F)
 	case 1:
 		{
 			char value[128];
-			fscanf(F, "%127s", &value);
+			fscanf(F, "%127s", value);
 			return new CFGString(buffer, value);
 		}
 		break;

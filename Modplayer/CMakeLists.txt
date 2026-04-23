@@ -45,7 +45,7 @@ set_target_properties(modplayer_rust PROPERTIES
     IMPORTED_LOCATION "${_modplayer_rust_lib}")
 add_dependencies(modplayer_rust modplayer_rust_build)
 
-# Thin C++ wrapper.
-add_library(${PROJECT_NAME} STATIC Modplayer.cpp)
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${PROJECT_NAME} PUBLIC modplayer_rust)
+# Header-only C++ facade — all implementation lives in the Rust lib.
+add_library(${PROJECT_NAME} INTERFACE)
+target_include_directories(${PROJECT_NAME} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(${PROJECT_NAME} INTERFACE modplayer_rust)
