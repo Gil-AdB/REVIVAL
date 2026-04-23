@@ -339,7 +339,7 @@ void Initialize_Greets()
 	GreetSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
 	memset(GreetSc,0,sizeof(Scene));
 	
-	LoadFLD(GreetSc,"SCENES/Greets.FLD");
+	LoadFLD(GreetSc,"SCENES/GREETS.FLD");
 
 	gg = new GreetsGenerator;
 

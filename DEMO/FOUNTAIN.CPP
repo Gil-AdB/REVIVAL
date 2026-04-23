@@ -684,7 +684,7 @@ void Initialize_Fountain()
 	FntSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
 	memset(FntSc,0,sizeof(Scene));
 
-	LoadFLD(FntSc,"SCENES/Fountain.FLD");
+	LoadFLD(FntSc,"SCENES/FOUNTAIN.FLD");
 
 	for(M = MatLib;M;M=M->Next)
 	{
