@@ -1112,6 +1112,8 @@ int main(int argc, const char *argv[])
         g_demoXRes, g_demoYRes,
         0);
 
+    SDL_RaiseWindow(window);
+
 	// _controlfp(_EM_INEXACT, _MCW_EM);
 	FPU_LPrecision();
 	const int internalXRes = g_demoXRes;
