@@ -13,9 +13,4 @@ typedef int32_t		sdword;
 typedef uint32_t	mword;
 typedef int32_t		smword;
 
-#ifdef WIN32
-typedef uint64_t	uint64;
-typedef int64_t		int64;
-#endif
-
 #endif //REVIVAL_BASEDEFS_H

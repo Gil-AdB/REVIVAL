@@ -272,13 +272,7 @@ void  Dynamic_Camera();
 
 #ifndef MiscIncluded
 #define MiscIncluded
-//Mouse stuff
-void InitMouse();
-void ShowMouse();
-void HideMouse();
-void DisplayMouse();
 void Hierarchy_Sort(Scene *Sc);
-void Detect_MMX();
 
 void *getAlignedBlock(uintptr_t size, uintptr_t alignment = 64);
 void freeAlignedBlock(void *ptr);
@@ -344,11 +338,7 @@ void AW_Staticmap(AGridPoint *AGP);
 void FDS_Title(void);
 char FDS_Init(unsigned short x,unsigned short y,unsigned char BPP);
 void DrawSpline(Spline Pos, Vector CamISource, int EndFrame);
-#ifdef _C_WATCOM
-void SetGraphicsMode(void);
-#endif
 void FDS_End(void);
-extern dword Find_RetraceRate();
 void Init_Randomseed();
 
 
@@ -420,10 +410,6 @@ void IX_Prefiller_Reflective(Face* F, Vertex** V, dword numVerts, dword miplevel
 void TBR_Init(Scene *Sc, mword size);
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel);
 void TBR_Render(Scene *Sc);
-
-#ifdef WIN32
-void InitFillers (VPFunc VirtualProtectFunc, dword Protection);
-#endif
 
 #endif
 

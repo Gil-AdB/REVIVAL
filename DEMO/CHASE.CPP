@@ -793,11 +793,7 @@ void Run_Chase()
 		Radix_SortingASM(FList, SList, CAll);
 		Render();
 
-#ifdef _C_WATCOM
-		Flip(Screen);
-#else
 		Flip(MainSurf);
-#endif
 
 	} Timer-=CHPartTime;
 	/*

@@ -17,11 +17,7 @@ void Cross_Fade(byte *U1,byte *U2,byte *Target,int32_t Perc)
 #define TRIG_MASK (TRIG_ACC-1)
 #define TRIG_FACTOR (float(TRIG_ACC)/PI_M2)
 
-#ifdef _C_WATCOM
-#define VSurface Screen
-#else
 #define VSurface MainSurf
-#endif
 
 
 static float *LenTable;
@@ -239,13 +235,6 @@ void Run_Glato(void)
 
 
 	int Gfx = 0,Sfx = 0, Code = 1;
-	// Run wobbler
-#ifdef _C_WATCOM
-#ifdef Play_Music
-	Play_Module();
-#endif
-#endif
-
 	float ST;
 	int32_t timerStack[20], timerIndex = 0;
 	for(i=0; i<20; i++)

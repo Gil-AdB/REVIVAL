@@ -15,64 +15,6 @@
 
 FILE *LogFile;
 
-#if 0
-#ifdef _C_WATCOM
-#pragma aux REPSTDW=\
-	"Rep StoSD",\
-parm [EDI] [EAX] [ECX];
-#endif
-#ifdef WIN32
-void REPSTDW(void *buf, DWord val, DWord count)
-{
-	__asm
-	{
-		mov edi, [buf]
-			mov eax, [val]
-			mov ecx, [count]
-			rep stosd
-	}
-}
-#endif
-
-
-// Computes Re-sorted Indexing that will hopefully produce less CACHE misses.
-// ok, maybe not. I'm just keeping this proc for fun. now, all we need is
-// a kipper.
-void Compute_Optimized_Indices(TriMesh *T)
-{
-	Face *F,*FEnd;
-	DWord *Conversion = new DWord[T->VIndex];
-	Vertex *Buffer;
-	int32_t I=0;
-	int32_t A,B,C;
-	REPSTDW(Conversion,-1,T->VIndex);
-	F=T->Faces;
-	FEnd=F+T->FIndex;
-	// Remapping
-	for(;F<FEnd;F++)
-	{
-		A = F->A-T->Verts; B=F->B-T->Verts; C=F->C-T->Verts;
-		if (Conversion[A]==-1) Conversion[A]=I++;
-		if (Conversion[B]==-1) Conversion[B]=I++;
-		if (Conversion[C]==-1) Conversion[C]=I++;
-	}
-	// Redistribition
-	Buffer = new Vertex[T->VIndex];
-	memcpy(Buffer,T->Verts,T->VIndex*sizeof(Vertex));
-	for(I=0;I<T->VIndex;I++)
-		memcpy(T->Verts+Conversion[I],Buffer+I,sizeof(Vertex));
-	F=T->Faces;
-	for(;F<FEnd;F++)
-	{
-		A = F->A-T->Verts; B=F->B-T->Verts; C=F->C-T->Verts;
-		F->A = T->Verts+Conversion[A];
-		F->B = T->Verts+Conversion[B];
-		F->C = T->Verts+Conversion[C];
-	}
-	delete [] Buffer;
-	delete [] Conversion;
-}
-#endif
 
 // Computes Face/Triangle Plane Normals for Trimesh T.
 void Compute_Face_Normals(TriMesh *T)
@@ -736,15 +678,6 @@ void Init_Flares(Scene *Sc)
 		}
 		if (O2==O)
 		{
-#ifdef _C_WATCOM
-			if (DPMI_Free_Memory()<2000000) // At least 2 MB are free
-			{
-				printf("Error! Not enough memory for flares!\n");
-				Restore_8();
-				Restore_9();
-				exit(1);
-			}
-#endif
 //			printf("Generating flare: R:%.3f G:%.3f B:%.3f\n",O->L.R,O->L.G,O->L.B);
 			O->F.Txtr=Generate_RGBFlare(O->L.B,O->L.G,O->L.R);
 			O->F.Txtr->RelScene = Sc;
