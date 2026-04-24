@@ -1,5 +1,6 @@
 #include "Rev.h"
 #include "IMGGENR/IMGGENR.H"
+#include "SceneTick.h"
 #include "VESA/Vesa.h"
 
 #include <algorithm>
@@ -210,59 +211,66 @@ static inline float max_magnitude(float a, float b)
 	if (fabs(a) > fabs(b)) return a; else return b;
 }
 
-void Run_Glato(void)
-{
-//	Setup_Grid_Texture_Mapper_XXX(XRes, YRes);
-//	Setup_Grid_Texture_Mapper_MMX(XRes, YRes);
-	int32_t xres = InitScreenXRes;
-	int32_t yres = InitScreenYRes;
-	Setup_Grid_Texture_Mapper_MMX(xres, yres);
+namespace {
+struct GlatoScene : SceneDriver {
+	int32_t xres = 0;
+	int32_t yres = 0;
+	float XResFactor = 0.0f;
+	float rXResFactor = 0.0f;
+	float rYResFactor = 0.0f;
 
-	XMMVector CameraPos(0,0,0);
+	XMMVector CameraPos{0, 0, 0};
 	XMMMatrix CamMat;
-	float Radius;
-	int x,y,i,j;
-	float a = 0.0f,bb = 0.0f,c = 0.0f,d = 0.0f,Delta = 0.0f,X1 = 0.0f,X2 = 0.0f,X3 = 0.0f,z = 0.0f,Rx = 0.0f,Ry = 0.0f,Rz = 0.0f;
-	float u,v,u1,v1,u2,v2,r,g,b;
-	float Code_R1,Code_RS,Code_R2,CCosR1,CSinR1,CCosR2,CSinR2;
-	float Gfx_R1,Gfx_R2,GCosR1,GSinR1,GCosR2,GSinR2,Gfx_RS;
-	XMMVector Intersection1,Origin1,Direction1,U;
-	
-	int X,Y;
-	float R1,R3,R4;
+	float Rx = 0.0f, Ry = 0.0f, Rz = 0.0f;
 
-	Radius = 1;
+	dword TTrd = 0;
+	int32_t timerStack[20] = {};
+	int32_t timerIndex = 0;
 
+	char MSGStr[MAX_GSTRING] = {};
 
-	int Gfx = 0,Sfx = 0, Code = 1;
-	float ST;
-	int32_t timerStack[20], timerIndex = 0;
-	for(i=0; i<20; i++)
-		timerStack[i] = Timer;
+	void init() override {
+		xres = InitScreenXRes;
+		yres = InitScreenYRes;
+		Setup_Grid_Texture_Mapper_MMX(xres, yres);
 
-	char MSGStr[MAX_GSTRING];
+		for(int i = 0; i < 20; i++)
+			timerStack[i] = Timer;
 
-	float XResFactor = xres/320.0;
-	float rXResFactor = 320.0/xres;
-	float rYResFactor = 240.0/yres;
+		XResFactor = xres / 320.0;
+		rXResFactor = 320.0 / xres;
+		rYResFactor = 240.0 / yres;
 
-	dword TTrd = Timer;
+		TTrd = Timer;
 
-	// clear the screen once (only yres % 8 last lines are really needed)
-	memset(FinalPage, 0, PageSize);
+		// clear the screen once (only yres % 8 last lines are really needed)
+		memset(FinalPage, 0, PageSize);
+	}
 
-	while (Timer<3500)
-	{
+	bool tick() override {
+		if (Timer >= 3500) return false;
+
+		int x, y, i, j;
+		float a = 0.0f, bb = 0.0f, c = 0.0f, d = 0.0f;
+		float X1 = 0.0f, X2 = 0.0f;
+		float u, v, u1, v1, u2, v2, r, g, b;
+		float Code_R1 = 0.0f, Code_RS = 0.0f, Code_R2;
+		float CCosR1, CSinR1, CCosR2, CSinR2;
+		float Gfx_R1, Gfx_R2, GCosR1, GSinR1, GCosR2, GSinR2, Gfx_RS = 0.0f;
+		XMMVector Intersection1, Origin1, Direction1, U;
+		int X, Y;
+		float Radius = 1;
+		int Gfx = 0, Sfx = 0, Code = 1;
+		float ST;
+
 		bool skip = false;
 		// fast forward/rewind
-		dTime = Timer-TTrd;		
-		if (Keyboard[ScF2])
-		{
+		dTime = Timer - TTrd;
+		if (Keyboard[ScF2]) {
 			skip = true;
 			Timer += dTime * 8;
 		}
-		if (Keyboard[ScF1])
-		{
+		if (Keyboard[ScF1]) {
 			skip = true;
 			if (dTime * 8 > Timer)
 				Timer = 0;
@@ -639,30 +647,30 @@ void Run_Glato(void)
 //		Flip(VSurface);
 		if (Keyboard[ScESC])
 			Timer = 1000000;
+		return true;
 	}
 
-	while (Keyboard[ScESC]) continue;
+	void cleanup() override {
+		while (Keyboard[ScESC]) continue;
 
-//	Timer -= 3500;
+		delete [] LenTable;
+		delete [] CosTable;
+		delete [] SinTable;
 
-///	if (Keyboard[ScESC])
-//	{
-//		#ifdef Play_Music
-///		ShutDown();
-//		#endif
-//		FDS_End();
-//		exit(-1);
-//	}
-	delete [] LenTable;
-	delete [] CosTable;
-	delete [] SinTable;
+		delete Plane_GP;
+		delete Code_GP;
+		delete Gfx_GP;
+		delete Sfx_GP;
+		_aligned_free(Page1);
+		_aligned_free(Page2);
+		_aligned_free(Page3);
+		_aligned_free(Page4);
+	}
+};
+} // anonymous namespace
 
-	delete Plane_GP;
-	delete Code_GP;
-	delete Gfx_GP;
-	delete Sfx_GP;
-	_aligned_free(Page1);
-	_aligned_free(Page2);
-	_aligned_free(Page3);
-	_aligned_free(Page4);
+void Run_Glato(void)
+{
+	GlatoScene scene;
+	runSceneBlocking(scene);
 }
