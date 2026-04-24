@@ -696,28 +696,6 @@ void GridRendererTG(GridPointTG *GP,Image *Img,dword *page, dword XRes, dword YR
 
 }
 
-#ifdef _C_WATCOM
-
-#define CGrid_Texture_MapASM _Grid_Texture_MapASM
-#define CGrid_Texture_MapASM_320 _Grid_Texture_MapASM_320
-#define CGrid_Texture_MapASM_XXX _Grid_Texture_MapASM_XXX
-#define CGrid_Texture_MapASMMX_ _Grid_Texture_MapASMMX
-#define CGrid_Texture_Mapper_TG _Grid_Texture_Mapper_TG
-
-extern "C" void _Grid_Texture_MapASM(char *Texture,GridPoint *Points,char *VirScr);
-#pragma aux _Grid_Texture_MapASM parm [ecx] [esi] [edi] modify exact [eax ebx ecx edx esi edi];
-
-extern "C" void _Grid_Texture_MapASM_320(char *Texture,GridPoint *Points,char *VirScr);
-#pragma aux _Grid_Texture_MapASM_320 parm [ecx] [esi] [edi] modify exact [eax ebx ecx edx esi edi];
-
-extern "C" void _Grid_Texture_MapASM_XXX(char *Texture,GridPoint *Points,char *VirScr);
-#pragma aux _Grid_Texture_MapASM_XXX parm [ecx] [esi] [edi] modify exact [eax ebx ecx edx esi edi];
-
-extern "C" void _Grid_Texture_Mapper_TG(char *Texture,GridPoint *Points,char *VirScr);
-#pragma aux _Grid_Texture_Mapper_TG parm [ecx] [esi] [edi] modify exact [eax ebx ecx edx esi edi];
-
-#else
-
 
 #define CGrid_Texture_MapASM		Grid_Texture_MapASMV
 #define CGrid_Texture_MapASM_320	Grid_Texture_MapASM_320V
@@ -882,7 +860,6 @@ void Grid_Texture_Mapper_TGV_XMM(char *Texture, GridPointTG *Points, char *VirSc
 #undef	ElementSize
 }
 
-#endif
 
 void Setup_Grid_Texture_Mapper_MMX(dword xres, dword yres)
 {
@@ -1061,13 +1038,6 @@ AGridPoint * Init_Antiwobbler()
 	return AGP;
 }
 
-#ifdef _C_WATCOM
-
-#define CP_Texture_32 P_Texture_32_
-
-extern "C" void __cdecl _P_Texture_32(Bi_Triangle * BT, char * Bitmap,unsigned int u);
-#pragma aux _P_Texture_32 parm [ebx] [eax] [ecx] modify exact [eax ebx ecx edx esi edi 8087];
-#else
 
 #define CP_Texture_32 P_Texture_32V
 
@@ -1075,7 +1045,6 @@ extern "C" void __cdecl P_Texture_32_(void);
 static void P_Texture_32V(Bi_Triangle * BTM, char * Bitmap,unsigned int u)
 {
 }
-#endif
 
 void AW_Staticmap(AGridPoint *AGP)
 {

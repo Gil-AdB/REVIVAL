@@ -10,12 +10,6 @@
 #include <vector>
 #include <algorithm>
 
-#ifdef _C_WATCOM
-#include <i86.H>
-#include <DOS.H>
-#include <Time.H>
-#endif
-
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
@@ -99,10 +93,6 @@ VESA_Surface Layer2;
 #include <FILLERS/Mekalele.h>
 
 // RULEZ
-#ifdef _C_WATCOM
-void DO_NOP();
-#pragma aux DO_NOP="NOP";
-#endif
 void DO_NOP()
 {
 }
@@ -1675,23 +1665,7 @@ void RunScene(Scene *Sc,float Seconds)
 	}
 	
 	FList_Allocate(Sc);
-	// Force LINEAR palette
-#ifdef _C_WATCOM
-	if (BPP==8)
-	{
-		char *Palbuf = new char[768],*Pal = Palbuf;
-		for(I=0;I<256;I++)
-		{
-			//			printf("color %d (%d,%d,%d)\n",I,Sc->Pal->C[I].R,Sc->Pal->C[I].G,Sc->Pal->C[I].B);
-			*Pal++ = Sc->Pal->C[I].R;
-			*Pal++ = Sc->Pal->C[I].G;
-			*Pal++ = Sc->Pal->C[I].B;
-		}
-		Set_Palette(Palbuf);
-		delete Palbuf;
-	}
-#endif
-	
+
 	if (!Check_Texture_Memory_Range(Sc)) return;
 	
 	/*  for(Obj = Sc->ObjectHead;Obj;Obj=Obj->Next)
@@ -1736,11 +1710,7 @@ void RunScene(Scene *Sc,float Seconds)
 		
 		//if (Sc->PclExec) Sc->PclExec(); Par2 = Timer;
 		if (!CAll) goto Away;
-#ifdef _C_WATCOM
-		Radix_Asm(FList,SList,CAll);
-#else
 		Radix_Sorting();
-#endif
 		//    Quick_Sorting(0,CAll-1);
 		if (!Keyboard[ScE]) Render();     Par5 = Timer;
 Away:Tot = Timer-TTrd;

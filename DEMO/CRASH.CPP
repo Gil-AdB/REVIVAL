@@ -102,11 +102,7 @@ void Run_Crash()
 		snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
 		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
-#ifdef _C_WATCOM
-		Flip(Screen);
-#else
 		Flip(MainSurf);
-#endif
 
 	} Timer-=CrPartTime;
 

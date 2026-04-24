@@ -100,7 +100,6 @@ source_group("MATH" FILES ${MATH})
 set(MISC
     MISC/Memmgr.cpp
     MISC/mmreg.inl
-    MISC/MOUSE.CPP
     MISC/PREPROC.CPP
     MISC/TABLES.CPP
     MISC/TxtrLib.cpp)

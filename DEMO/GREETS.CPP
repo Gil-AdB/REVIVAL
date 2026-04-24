@@ -609,11 +609,7 @@ void Run_Greets()
 
 		Profiler[PROF_FLIP] -= Timer;
 
-#ifdef _C_WATCOM
-		Flip(Screen);
-#else
 		Flip(MainSurf);
-#endif
 		//		PROFILER: frame finished
 		Profiler[PROF_FLIP] += Timer;
 

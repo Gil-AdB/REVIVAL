@@ -96,17 +96,7 @@ void Radix_Sorting()
   }
 }
 
-#ifdef _C_WATCOM
-extern "C" void Radix_Asm(Face **f,Face **s,unsigned int n);
-#pragma aux Radix_Asm parm [esi] [edx] [ebx] modify [eax ebx ecx edx edi esi ebp];
-#endif
-
 void Radix_SortingASM(Face **f,Face **s,unsigned int n)
 {
-#ifdef _C_WATCOM
-	Radix_Asm(f,s,n);
-#else
 	Radix_Sorting();
-#endif
-	
 }

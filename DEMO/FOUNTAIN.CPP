@@ -1816,11 +1816,7 @@ void Run_Fountain()
 
 	byte *BPage = new byte[PageSize];
 
-#ifdef _C_WATCOM
-#define VSurface Screen
-#else
 #define VSurface MainSurf
-#endif
 	VESA_Surface Blur;
 	memcpy(&Blur,VSurface,sizeof(VESA_Surface));
 	Blur.Data = BPage;

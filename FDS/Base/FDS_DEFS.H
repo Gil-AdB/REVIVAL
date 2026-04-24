@@ -12,14 +12,6 @@
 #define RAND_15() (rand() / (((unsigned)RAND_MAX+1) / 32768))
 #define RAND_15_MAX 0x7fff
 
-// Enivronmental IDs (Not used for now,only works for dos32/watcom)
-#define _O_DOS32 //DOS PROTECTED MODE RUNTIME
-//#define _O_WIN32 //WINDOWS 32-BIT APPLICATION
-//#define _O_UNIX //UNIX TASK
-//#define _C_WATCOM //Compiles under WATCOM C
-//#define _C_GCC //Compiles under G.C.C. (or DJGPP)
-//#define WIN32 //Compiles under Visual C 6.0
-
 #define MAX_GSTRING 128
 
 #if defined(__APPLE__) || defined(EMSCRIPTEN_MACOS)
@@ -369,11 +361,5 @@ enum OmniFlags
 
 // Table generator flags
 #define TblMod_Made 0x0001
-
-#ifdef WIN32
-// ignorance is bliss
-#pragma warning(disable : 4103)
-#pragma warning(disable : 4731)
-#endif
 
 #endif //FDS_DEFS_H_INCLUDED
