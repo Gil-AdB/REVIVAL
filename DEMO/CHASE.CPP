@@ -5,6 +5,7 @@
 
 #include "CHASE.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include <memory>
 
 #define FRONT_TO_BACK_SORTING
@@ -810,8 +811,13 @@ struct ChaseScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createChaseScene()
+{
+	return std::make_unique<ChaseScene>();
+}
+
 void Run_Chase()
 {
-	ChaseScene scene;
-	runSceneBlocking(scene);
+	auto scene = createChaseScene();
+	runSceneBlocking(*scene);
 }

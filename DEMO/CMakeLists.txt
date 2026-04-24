@@ -29,6 +29,7 @@ set(DEMO_SOURCES
     Raytracer.h
     REV.CPP
     Rev.h
+    Scenes.h
     SceneTick.h
     SDL2.cpp
     SDL2.h)

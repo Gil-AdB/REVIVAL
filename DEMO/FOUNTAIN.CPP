@@ -6,6 +6,7 @@
 #include "FRUSTRUM.H"
 #include "Clipper.h"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include <memory>
 
 static Scene *FntSc;
@@ -2018,8 +2019,13 @@ struct FountainScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createFountainScene()
+{
+	return std::make_unique<FountainScene>();
+}
+
 void Run_Fountain()
 {
-	FountainScene scene;
-	runSceneBlocking(scene);
+	auto scene = createFountainScene();
+	runSceneBlocking(*scene);
 }

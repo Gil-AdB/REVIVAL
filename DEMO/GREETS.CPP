@@ -4,6 +4,7 @@
 #include "FillerTest.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include "Base/FDS_DECS.H"
 #include <memory>
 #include <vector>
@@ -599,8 +600,13 @@ struct GreetsScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createGreetsScene()
+{
+	return std::make_unique<GreetsScene>();
+}
+
 void Run_Greets()
 {
-	GreetsScene scene;
-	runSceneBlocking(scene);
+	auto scene = createGreetsScene();
+	runSceneBlocking(*scene);
 }

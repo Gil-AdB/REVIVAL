@@ -1,9 +1,11 @@
 #include "Rev.h"
 #include "IMGGENR/IMGGENR.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include "VESA/Vesa.h"
 
 #include <algorithm>
+#include <memory>
 
 void Cross_Fade(byte *U1,byte *U2,byte *Target,int32_t Perc)
 {
@@ -669,8 +671,13 @@ struct GlatoScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createGlatoScene()
+{
+	return std::make_unique<GlatoScene>();
+}
+
 void Run_Glato(void)
 {
-	GlatoScene scene;
-	runSceneBlocking(scene);
+	auto scene = createGlatoScene();
+	runSceneBlocking(*scene);
 }

@@ -2,6 +2,7 @@
 #include "Rev.h"
 #include "CITY.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -2060,8 +2061,13 @@ struct CityScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createCityScene()
+{
+	return std::make_unique<CityScene>();
+}
+
 void Run_City()
 {
-	CityScene scene;
-	runSceneBlocking(scene);
+	auto scene = createCityScene();
+	runSceneBlocking(*scene);
 }
