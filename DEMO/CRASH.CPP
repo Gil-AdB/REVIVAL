@@ -2,6 +2,7 @@
 
 #include "CRASH.H"
 #include "SceneTick.h"
+#include <memory>
 
 static Scene *CrashSc;
 
@@ -39,6 +40,10 @@ void Initialize_Crash()
 namespace {
 struct CrashScene : SceneDriver {
 	char MSGStr[128];
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
+
+	~CrashScene() override { Destroy_Scene(CrashSc); }
 
 	void init() override {
 		int32_t Polys = 0;
@@ -54,8 +59,10 @@ struct CrashScene : SceneDriver {
 			Polys++;
 		}
 
-		FList = new Face * [Polys];
-		SList = new Face * [Polys];
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
 
 		View = CrashSc->CameraHead;
 
@@ -118,10 +125,6 @@ struct CrashScene : SceneDriver {
 		// eventual Emscripten port this will need to become a tick state.
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;
-
-		delete FList;
-		delete SList;
-		Destroy_Scene(CrashSc);
 	}
 };
 } // anonymous namespace

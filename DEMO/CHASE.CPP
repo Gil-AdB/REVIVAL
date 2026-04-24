@@ -5,6 +5,7 @@
 
 #include "CHASE.H"
 #include "SceneTick.h"
+#include <memory>
 
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
@@ -733,6 +734,11 @@ void Initialize_Chase()
 
 namespace {
 struct ChaseScene : SceneDriver {
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
+
+	~ChaseScene() override { Destroy_Scene(ChaseSc); }
+
 	void init() override {
 		int32_t Polys = 0;
 		TriMesh *T;
@@ -744,8 +750,10 @@ struct ChaseScene : SceneDriver {
 
 		for(T = ChaseSc->TriMeshHead; T; T = T->Next)
 			Polys += T->FIndex;
-		FList = new Face * [Polys];
-		SList = new Face * [Polys];
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
 
 		View = ChaseSc->CameraHead;
 
@@ -798,10 +806,6 @@ struct ChaseScene : SceneDriver {
 		Timer -= CHPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;
-
-		delete FList;
-		delete SList;
-		Destroy_Scene(ChaseSc);
 	}
 };
 } // anonymous namespace

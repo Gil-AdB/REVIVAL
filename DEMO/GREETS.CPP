@@ -5,6 +5,7 @@
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
 #include "Base/FDS_DECS.H"
+#include <memory>
 #include <vector>
 #include <VESA/Vesa.h>
 
@@ -408,6 +409,8 @@ void Initialize_Greets()
 namespace {
 struct GreetsScene : SceneDriver {
 	char MSGStr[128];
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -418,6 +421,8 @@ struct GreetsScene : SceneDriver {
 	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
 	dword ProfSum = 0;
 	bool pause_mode = false;
+
+	~GreetsScene() override { Destroy_Scene(GreetSc); }
 
 	void init() override {
 		int32_t Polys = 0;
@@ -437,8 +442,10 @@ struct GreetsScene : SceneDriver {
 		for(O = GreetSc->OmniHead; O; O = O->Next)
 			Polys++;
 
-		FList = new Face * [Polys];
-		SList = new Face * [Polys];
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
 
 		View = GreetSc->CameraHead;
 
@@ -588,10 +595,6 @@ struct GreetsScene : SceneDriver {
 		Timer -= CHPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;
-
-		delete [] FList;
-		delete [] SList;
-		Destroy_Scene(GreetSc);
 	}
 };
 } // anonymous namespace

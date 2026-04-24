@@ -6,6 +6,7 @@
 #include "FRUSTRUM.H"
 #include "Clipper.h"
 #include "SceneTick.h"
+#include <memory>
 
 static Scene *FntSc;
 static Vector FntHead(-0.053f,43.381f, 0.251f);
@@ -1809,7 +1810,9 @@ extern Scene* SkySc;
 
 namespace {
 struct FountainScene : SceneDriver {
-	byte *BPage = nullptr;
+	std::unique_ptr<byte[]> BPage;
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
 	VESA_Surface Blur = {};
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -1822,15 +1825,17 @@ struct FountainScene : SceneDriver {
 	dword ProfSum = 0;
 	bool pause_mode = false;
 
+	~FountainScene() override { Destroy_Scene(FntSc); }
+
 	void init() override {
 		int32_t Polys = 0;
 		TriMesh *T;
 		Omni *O;
 
-		BPage = new byte[PageSize];
+		BPage = std::make_unique<byte[]>(PageSize);
 
 		memcpy(&Blur, MainSurf, sizeof(VESA_Surface));
-		Blur.Data = BPage;
+		Blur.Data = BPage.get();
 		Blur.Flags = VSurf_Noalloc;
 		Blur.Targ = VGAPtr;
 
@@ -1843,8 +1848,10 @@ struct FountainScene : SceneDriver {
 		for(O = FntSc->OmniHead; O; O = O->Next)
 			Polys++;
 		Polys += FntSc->NumOfParticles;
-		FList = new Face * [Polys];
-		SList = new Face * [Polys];
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
 
 		View = FntSc->CameraHead;
 
@@ -2007,11 +2014,6 @@ struct FountainScene : SceneDriver {
 			fprintf(F, "%s %3.1fms (%3.1f%%)\n", ProfNames[i], ProfSample[i], ProfPerc[i]);
 		}
 		fclose(F);
-
-		delete FList;
-		delete SList;
-		delete [] BPage;
-		Destroy_Scene(FntSc);
 	}
 };
 } // anonymous namespace
