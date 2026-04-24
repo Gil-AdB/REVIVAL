@@ -14,6 +14,15 @@ if(NOT EXISTS "${MODPLAYER2_DIR}/Cargo.toml")
         "checkout.")
 endif()
 
+if(EMSCRIPTEN)
+    # Music is stubbed out in the Emscripten build (see Modplayer.h) — skip
+    # the Rust build entirely. The stubs are inline in the header, so the
+    # INTERFACE target just needs to propagate the include directory.
+    add_library(${PROJECT_NAME} INTERFACE)
+    target_include_directories(${PROJECT_NAME} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+    return()
+endif()
+
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
 # Rust profile: release unless the user asked for a debug CMake build.
