@@ -8,11 +8,11 @@ REVIVAL / FLOOD — a 1998 demoscene production being revived on modern platform
 
 - **DEMO/** — executable. Orchestrates scenes, owns `main()` + SDL event loop.
 - **FDS/** — static library. Custom software 3D engine (transform, lighting, clipper, rasterizer, model loaders, SIMD fillers).
-- **Modplayer/** — thin C++ static lib that links a *Rust* `libmodplayer.a` for `.MOD`/`.XM` playback.
+- **Modplayer/** — header-only CMake INTERFACE target that forwards its include directory and links a *Rust* `libmodplayer.a` built from the `Modplayer/modplayer` submodule for `.MOD`/`.XM` playback.
 
 ## Build (macOS arm64, current working config)
 
-The active branch is `macos`; `master` is the PR target. Builds out-of-tree with Ninja:
+Work lands on `master` via feature-branch PRs (branch names like `cleanup/*`, `fix/*`). Builds out-of-tree with Ninja:
 
 ```sh
 cmake -S . -B build -G Ninja
