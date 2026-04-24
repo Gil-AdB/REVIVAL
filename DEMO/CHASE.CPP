@@ -4,6 +4,8 @@
 #include <Base/Scene.h>
 
 #include "CHASE.H"
+#include "SceneTick.h"
+#include <memory>
 
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
@@ -730,39 +732,44 @@ void Initialize_Chase()
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 }
 
-void Run_Chase()
-{
-	int32_t Polys = 0;
-	TriMesh *T;
+namespace {
+struct ChaseScene : SceneDriver {
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
 
-	SetCurrentScene(ChaseSc);
+	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
-	Reflective_Mapper_Setup();
-	Setup_Water_Distort();
+	void init() override {
+		int32_t Polys = 0;
+		TriMesh *T;
 
+		SetCurrentScene(ChaseSc);
 
-	for(T = ChaseSc->TriMeshHead;T;T=T->Next)
-		Polys+=T->FIndex;
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
+		Reflective_Mapper_Setup();
+		Setup_Water_Distort();
 
-	View = ChaseSc->CameraHead;
+		for(T = ChaseSc->TriMeshHead; T; T = T->Next)
+			Polys += T->FIndex;
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
 
-	C_FZP = ChaseSc->FZP;
-	C_rFZP = 1.0f / C_FZP;
+		View = ChaseSc->CameraHead;
 
+		C_FZP = ChaseSc->FZP;
+		C_rFZP = 1.0f / C_FZP;
+	}
 
+	bool tick() override {
+		if (Keyboard[ScESC] || Timer >= CHPartTime) return false;
 
-	while ((!Keyboard[ScESC])&&Timer<CHPartTime)
-	{
 		g_FrameTime = Timer;
-		//memset(VPage,0,PageSize);
 		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 
-		if (Keyboard[ScTab])
-		{
+		if (Keyboard[ScTab]) {
 			if (View == &FC)
 				View = ChaseSc->CameraHead;
 			else
@@ -780,38 +787,31 @@ void Run_Chase()
 
 		Reflected_Transform(ChaseSc);
 
-		if (!CAll) goto norefl;
-		Radix_SortingASM(FList,SList,CAll);
-
-		Render();
-
-	norefl:
+		if (CAll) {
+			Radix_SortingASM(FList, SList, CAll);
+			Render();
+		}
 
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(ChaseSc);
-		if (!CAll) continue;
+		if (!CAll) return true;
 		Radix_SortingASM(FList, SList, CAll);
 		Render();
 
 		Flip(MainSurf);
-
-	} Timer-=CHPartTime;
-	/*
-	if (Keyboard[ScESC])
-	{
-		#ifdef Play_Music
-		ShutDown();
-		#endif
-		FDS_End();
-		exit(-1);
+		return true;
 	}
-	*/
 
-	while (Keyboard[ScESC]) continue;
-	if (Timer < 0)
-		Timer = 0;
+	void cleanup() override {
+		Timer -= CHPartTime;
+		while (Keyboard[ScESC]) continue;
+		if (Timer < 0) Timer = 0;
+	}
+};
+} // anonymous namespace
 
-	delete FList;
-	delete SList;
-	Destroy_Scene(ChaseSc);
+void Run_Chase()
+{
+	ChaseScene scene;
+	runSceneBlocking(scene);
 }

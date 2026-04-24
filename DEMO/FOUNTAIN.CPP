@@ -5,6 +5,8 @@
 #include "Gradient.h"
 #include "FRUSTRUM.H"
 #include "Clipper.h"
+#include "SceneTick.h"
+#include <memory>
 
 static Scene *FntSc;
 static Vector FntHead(-0.053f,43.381f, 0.251f);
@@ -1806,94 +1808,91 @@ void Add_Vortex_ToScene()
 }
 extern Scene* SkySc;
 
-void Run_Fountain()
-{
-	int32_t Polys = 0;
-	TriMesh *T;
-	Omni *O;
-	int32_t TTrd;
-	Vector U,V;
-
-	byte *BPage = new byte[PageSize];
-
-#define VSurface MainSurf
-	VESA_Surface Blur;
-	memcpy(&Blur,VSurface,sizeof(VESA_Surface));
-	Blur.Data = BPage;
-	Blur.Flags = VSurf_Noalloc;
-	Blur.Targ = VGAPtr;
-
-	int32_t i, timerStack[20], timerIndex = 0;
-	for(i=0; i<20; i++)
-		timerStack[i] = Timer;
-
-//Setup_Grid_Texture_Mapper_XXX(256, 256);
-
-	SetCurrentScene(FntSc);
-	for(T = FntSc->TriMeshHead;T;T=T->Next)
-		Polys+=T->FIndex;
-	for(O = FntSc->OmniHead;O;O=O->Next)
-		Polys++;
-	Polys += FntSc->NumOfParticles;
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
-
-
-	View = FntSc->CameraHead;
-//	View = &FC;
-
-	//Timer = 4000;
-	TTrd = Timer;
+namespace {
+struct FountainScene : SceneDriver {
+	std::unique_ptr<byte[]> BPage;
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
+	VESA_Surface Blur = {};
+	int32_t timerStack[20] = {};
+	int32_t timerIndex = 0;
+	int32_t TTrd = 0;
 	mword numFrames = 0;
-
-	CParticle_ISize = 0.07f;
-	Ambient_Factor = basicSceneAmbient;
-	Diffusive_Factor = 500.0f;
-	ImageSize = 10.0;
-
-	g_renderedPolys = 0;
-	FillerPixelcount = 0;
-
-	dword Profiler[PROF_NUM];
-	float ProfSample[PROF_NUM];
-	float ProfPerc[PROF_NUM];
-	const char *ProfNames[] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
+	dword Profiler[PROF_NUM] = {};
+	float ProfSample[PROF_NUM] = {};
+	float ProfPerc[PROF_NUM] = {};
+	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
 	dword ProfSum = 0;
+	bool pause_mode = false;
 
-	for(i=0; i<PROF_NUM; i++)
-		Profiler[i] = 0;	
+	~FountainScene() override { Destroy_Scene(FntSc); }
 
-	while ((!Keyboard[ScESC])&&Timer<FNTPartTime)
-	{
+	void init() override {
+		int32_t Polys = 0;
+		TriMesh *T;
+		Omni *O;
+
+		BPage = std::make_unique<byte[]>(PageSize);
+
+		memcpy(&Blur, MainSurf, sizeof(VESA_Surface));
+		Blur.Data = BPage.get();
+		Blur.Flags = VSurf_Noalloc;
+		Blur.Targ = VGAPtr;
+
+		for(int32_t i = 0; i < 20; i++)
+			timerStack[i] = Timer;
+
+		SetCurrentScene(FntSc);
+		for(T = FntSc->TriMeshHead; T; T = T->Next)
+			Polys += T->FIndex;
+		for(O = FntSc->OmniHead; O; O = O->Next)
+			Polys++;
+		Polys += FntSc->NumOfParticles;
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
+
+		View = FntSc->CameraHead;
+
+		TTrd = Timer;
+
+		CParticle_ISize = 0.07f;
+		Ambient_Factor = basicSceneAmbient;
+		Diffusive_Factor = 500.0f;
+		ImageSize = 10.0;
+
+		g_renderedPolys = 0;
+		FillerPixelcount = 0;
+	}
+
+	bool tick() override {
+		if (Keyboard[ScESC] || Timer >= FNTPartTime) return false;
+
 		numFrames++;
 
 		Profiler[PROF_ZCLR] -= Timer;
 
-//		memset(VPage, 0, PageSize + XRes*YRes*sizeof(word));
 		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
 		bool SkipCameraAnimation = false;
 		RenderSkyCube(SkySc, View, SkipCameraAnimation);
 
-		dTime = Timer-TTrd;
+		dTime = Timer - TTrd;
 		// fast forward/rewind
-		if (Keyboard[ScF2])
-		{
+		if (Keyboard[ScF2]) {
 			Timer += dTime * 8;
 		}
-		if (Keyboard[ScF1])
-		{
+		if (Keyboard[ScF1]) {
 			if (dTime * 8 > Timer)
 				Timer = 0;
 			else
 				Timer -= dTime * 8;
 		}
-		static bool pause_mode = false;
 		if (Keyboard[ScP])
 			pause_mode = true;
 		if (Keyboard[ScU])
 			pause_mode = false;
-		if (pause_mode)
-		{
+		if (pause_mode) {
 			Timer = TTrd;
 		}
 		g_FrameTime = TTrd = Timer;
@@ -1903,8 +1902,7 @@ void Run_Fountain()
 
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
-		if (Keyboard[ScTab])
-		{
+		if (Keyboard[ScTab]) {
 			if (View == &FC)
 				View = FntSc->CameraHead;
 			else
@@ -1915,156 +1913,113 @@ void Run_Fountain()
 
 		CurFrame = FntSc->StartFrame + (FntSc->EndFrame-FntSc->StartFrame) * (float)g_FrameTime / (float)FNTPartTime;
 
-		if (Timer>FntVortexStart)
-		{
+		if (Timer > FntVortexStart) {
 			Vortex_Distort();
 			float scl;
-			if (Timer>FntVortexMax)
+			if (Timer > FntVortexMax)
 				scl = 1.0f + 0.1 * sin((Timer - FntVortexMax)*0.01);
 			else
 				scl = (float)(Timer-FntVortexStart)/(float)(FntVortexMax-FntVortexStart);
-			Quaternion_Form(&VortexTri.Scale.Keys->Pos,scl,scl,scl,0.0f);
-			//Quaternion_Form(&VortexTri.Scale.Keys->Pos,1.0,1.0,1.0,0.0f);
-			
-//			Vector_Form(&VortexTri.Verts[0].Pos,-150.0f*scl,0.0f,-150.0f*scl);
-//			Vector_Form(&VortexTri.Verts[1].Pos,-150.0f*scl,0.0f, 150.0f*scl);
-//			Vector_Form(&VortexTri.Verts[2].Pos, 150.0f*scl,0.0f, 150.0f*scl);
-//			Vector_Form(&VortexTri.Verts[3].Pos, 150.0f*scl,0.0f,-150.0f*scl);
+			Quaternion_Form(&VortexTri.Scale.Keys->Pos, scl, scl, scl, 0.0f);
 		}
 
 		Animate_Objects(FntSc);
 
-//		float xfov = View->IFOV;
-//		float zf = tan(xfov*PI/360.0);
-//		float yfov = 360.0/PI * atan(zf*3.0/4.0);
-
-		if (Timer>FntVortexStart)
-		{
+		if (Timer > FntVortexStart) {
 			VortexTri.Flags |= HTrack_Visible;
 		} else VortexTri.Flags &= 0xFFFFFFFF-HTrack_Visible;
 
 		Particle_Kinematics(FntSc);
-		Profiler[PROF_ANIM] += Timer;		
-		Profiler[PROF_XFRM] -= Timer;		
+		Profiler[PROF_ANIM] += Timer;
+		Profiler[PROF_XFRM] -= Timer;
 
 		Transform_Objects(FntSc);
 
-		Profiler[PROF_XFRM] += Timer;		
-		Profiler[PROF_LGHT] -= Timer;		
+		Profiler[PROF_XFRM] += Timer;
+		Profiler[PROF_LGHT] -= Timer;
 
 		Lighting(FntSc);
 
-		Profiler[PROF_LGHT] += Timer;		
+		Profiler[PROF_LGHT] += Timer;
 
-		if (!CAll) continue;
-		Profiler[PROF_SORT] -= Timer;		
-		Radix_SortingASM(FList,SList,CAll);
-		Profiler[PROF_SORT] += Timer;		
+		if (!CAll) return true;
+		Profiler[PROF_SORT] -= Timer;
+		Radix_SortingASM(FList, SList, CAll);
+		Profiler[PROF_SORT] += Timer;
 
-//		Run_Rain();
-
-		Profiler[PROF_RNDR] -= Timer;		
+		Profiler[PROF_RNDR] -= Timer;
 		Render();
 
-//		snprintf(MSGStr, sizeof(MSGStr),"Rendered %d Polys,%d Omnis and %d pcls.\n",CPolys,COmnies,CPcls);
-//		OutTextXY(VPage,0,0,MSGStr,64);
-
-		if (Rsv_LState)
-		{
-			if (Rsv_LPow>-1)
-			{
-				Lightning_Bolt(&Rsv_LSrc,&Rsv_LTarg,Rsv_LPow, g_LnMat);
+		if (Rsv_LState) {
+			if (Rsv_LPow > -1) {
+				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
 				Rsv_LState = 0;
 			} else {
-//				Spark(Pylon  ,Pylon+1);
-//				Spark(Pylon+1,Pylon+2);
-//				Spark(Pylon+2,Pylon+3);
-//				Spark(Pylon+3,Pylon+4);
-//				Spark(Pylon+4,Pylon+5);
-//				Spark(Pylon+5,Pylon  );
 				Rsv_LState = 0;
 			}
 		}
-		Profiler[PROF_RNDR] += Timer;		
+		Profiler[PROF_RNDR] += Timer;
 
-/*		if (Timer>FntPhotonStart)
-		{
-			if (Timer>FntPhotonAtVortex)
-				Fire_Photon_Beam(&FntHead,&Vortex_Center);
-			else
-			{
-				Vector_Sub(&Vortex_Center,&FntHead,&V);
-				Vector_SelfScale(&V,(float)(Timer-FntPhotonStart)/(float)(FntPhotonAtVortex-FntPhotonStart));
-				Vector_SelfAdd(&V,&FntHead);
-				Fire_Photon_Beam(&FntHead,&V);
-			}
-		}*/
-		if (g_profilerActive)
-		{
+		if (g_profilerActive) {
 			mword scroll = 0;
 			// FPS printer
 			timerStack[timerIndex++] = Timer;
-			if (timerIndex==20) 
-			{
+			if (timerIndex == 20) {
 				timerIndex = 0;
-				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]));
 			} else {
-				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
 			}
-			scroll = OutTextXY(VPage,0,0,MSGStr,255);
-			snprintf(MSGStr, sizeof(MSGStr),"%d outer pcls", g_numPcls);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame" , (int32_t)(FillerPixelcount/(1000.0*numFrames)));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "%d outer pcls", g_numPcls);
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame", (int32_t)(FillerPixelcount/(1000.0*numFrames)));
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second", (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 
-			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int32_t)(g_renderedPolys / numFrames));
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 
-	//		PROFILER: display stats
-			for(i=0; i<PROF_NUM; i++)
-			{
-				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			for(int32_t i = 0; i < PROF_NUM; i++) {
+				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
+				scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 			}
 
-			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum*10.0/numFrames);
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 		}
-		Profiler[PROF_FLIP] -= Timer;		
-//		Lightning_Particles();
+		Profiler[PROF_FLIP] -= Timer;
 
-		Flip(VSurface);
-		//Modulate(VSurface,&Blur,0x808080,0x808080);
-		//Flip(&Blur);
-		Profiler[PROF_FLIP] += Timer;		
+		Flip(MainSurf);
+		Profiler[PROF_FLIP] += Timer;
 
-
-//		PROFILER: Generate sample
+		// PROFILER: Generate sample
 		ProfSum = 0;
-		for(i=0; i<PROF_NUM; i++)
+		for(int32_t i = 0; i < PROF_NUM; i++)
 			ProfSum += Profiler[i];
-		for(i=0; i<PROF_NUM; i++)
-		{
-			ProfSample[i] =
-				Profiler[i]*10.0 / numFrames;
-			ProfPerc[i] = 
-				Profiler[i]*100.0/ProfSum;
+		for(int32_t i = 0; i < PROF_NUM; i++) {
+			ProfSample[i] = Profiler[i]*10.0 / numFrames;
+			ProfPerc[i] = Profiler[i]*100.0/ProfSum;
 		}
-	} 
-	Timer-=FNTPartTime;
-	while (Keyboard[ScESC]) continue;
-	if (Timer < 0) Timer = 0;
-
-	FILE *F = fopen("fountain-profiling.txt", "wt");
-	for(i=0; i<PROF_NUM; i++)
-	{
-		fprintf(F, "%s %3.1fms (%3.1f%%)\n" , ProfNames[i], ProfSample[i], ProfPerc[i]);
+		return true;
 	}
-	fclose(F);
-	
-	delete FList;
-	delete SList;
-	delete [] BPage;
-	Destroy_Scene(FntSc);
+
+	void cleanup() override {
+		Timer -= FNTPartTime;
+		while (Keyboard[ScESC]) continue;
+		if (Timer < 0) Timer = 0;
+
+		FILE *F = fopen("fountain-profiling.txt", "wt");
+		for(int32_t i = 0; i < PROF_NUM; i++) {
+			fprintf(F, "%s %3.1fms (%3.1f%%)\n", ProfNames[i], ProfSample[i], ProfPerc[i]);
+		}
+		fclose(F);
+	}
+};
+} // anonymous namespace
+
+void Run_Fountain()
+{
+	FountainScene scene;
+	runSceneBlocking(scene);
 }

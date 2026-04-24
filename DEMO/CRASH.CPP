@@ -1,6 +1,8 @@
 #include "Rev.h"
 
 #include "CRASH.H"
+#include "SceneTick.h"
+#include <memory>
 
 static Scene *CrashSc;
 
@@ -35,40 +37,49 @@ void Initialize_Crash()
 	Preprocess_Scene(CrashSc);
 }
 
-void Run_Crash()
-{
+namespace {
+struct CrashScene : SceneDriver {
 	char MSGStr[128];
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
 
-	int32_t Polys = 0;
-	TriMesh *T;
-	Omni *O;
+	~CrashScene() override { Destroy_Scene(CrashSc); }
 
-	SetCurrentScene(CrashSc);
+	void init() override {
+		int32_t Polys = 0;
+		TriMesh *T;
+		Omni *O;
 
-	for(T = CrashSc->TriMeshHead;T;T=T->Next)
-		Polys+=T->FIndex;
-	for (O = CrashSc->OmniHead; O; O = O->Next) {
-		O->IRange = 2000.0f;
-		Polys++;
+		SetCurrentScene(CrashSc);
+
+		for(T = CrashSc->TriMeshHead; T; T=T->Next)
+			Polys += T->FIndex;
+		for (O = CrashSc->OmniHead; O; O = O->Next) {
+			O->IRange = 2000.0f;
+			Polys++;
+		}
+
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
+
+		View = CrashSc->CameraHead;
+
+		C_FZP = CrashSc->FZP;
+		C_rFZP = 1.0f / C_FZP;
+
+		Ambient_Factor = 1;
+		Diffusive_Factor = 1;
+		ImageSize = 1;
 	}
 
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
+	bool tick() override {
+		if (Keyboard[ScESC] || Timer >= CrPartTime) return false;
 
-	View = CrashSc->CameraHead;
-
-	C_FZP = CrashSc->FZP;
-	C_rFZP = 1.0f/C_FZP;
-
-	Ambient_Factor = 1;
-	Diffusive_Factor = 1;
-	ImageSize = 1;
-	while ((!Keyboard[ScESC])&&Timer<CrPartTime)
-	{
 		g_FrameTime = Timer;
 
-		if (Keyboard[ScTab])
-		{
+		if (Keyboard[ScTab]) {
 			if (View == &FC)
 				View = CrashSc->CameraHead;
 			else
@@ -89,8 +100,8 @@ void Run_Crash()
 
 		Lighting(CrashSc);
 
-		if (!CAll) continue;
-		Radix_SortingASM(FList,SList,CAll);
+		if (!CAll) return true;
+		Radix_SortingASM(FList, SList, CAll);
 
 		Render();
 
@@ -103,22 +114,23 @@ void Run_Crash()
 		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
 		Flip(MainSurf);
+		return true;
+	}
 
-	} Timer-=CrPartTime;
+	void cleanup() override {
+		Timer -= CrPartTime;
 
-	while (Keyboard[ScESC]) continue;
-	if (Timer < 0) Timer = 0;
+		// Wait for the user to release ESC before returning, otherwise the
+		// next scene will immediately see Keyboard[ScESC] and bail. In the
+		// eventual Emscripten port this will need to become a tick state.
+		while (Keyboard[ScESC]) continue;
+		if (Timer < 0) Timer = 0;
+	}
+};
+} // anonymous namespace
 
-/*	if (Keyboard[ScESC])
-	{
-		#ifdef Play_Music
-		ShutDown();
-		#endif
-		FDS_End();
-		exit(-1);
-	}*/
-
-	delete FList;
-	delete SList;
-	Destroy_Scene(CrashSc);
+void Run_Crash()
+{
+	CrashScene scene;
+	runSceneBlocking(scene);
 }

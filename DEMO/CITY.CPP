@@ -1,7 +1,9 @@
 
 #include "Rev.h"
 #include "CITY.H"
+#include "SceneTick.h"
 #include <algorithm>
+#include <memory>
 #include <vector>
 #include "FRUSTRUM.H"
 #include "Gradient.h"
@@ -1809,122 +1811,91 @@ std::vector<debug_outtext> DebugStrs;
 
 #endif
 
-void Run_City()
-{
-	int32_t Polys = 0,TTrd;
-	TriMesh *T;
-	Omni *O;
-
-	SetCurrentScene(CitySc);
-
-	// get the reflective water surface object
-	Reflective_Mapper_Setup();
-	Setup_Water_Distort();
-//	Setup_Grid_Texture_Mapper_XXX(256, 256);
-
-	// scatter point lights.
-	/*for(O=CitySc->OmniHead;O;O=O->Next)
-	{
-		Quaternion_Form(&O->Pos.Keys[0].Pos, 
-			((RAND_15()-16384)*5000.0)/16384.0,
-			(RAND_15()*2000.0)/32768.0,
-			((RAND_15()-16384)*5000.0)/16384.0,
-			0);
-	}*/
-
-
-	for(T = CitySc->TriMeshHead;T;T=T->Next)
-		Polys+=T->FIndex;
-	for(O = CitySc->OmniHead;O;O=O->Next)
-		Polys++;
-
-	//MusicModuleInfo mmi;
-	//mmi.ModuleHandle = g_RevModuleHandle;
-
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
-
-	View = CitySc->CameraHead;
-//	View = &FC;
-
-	int32_t i, timerStack[20], timerIndex = 0;
-	for(i=0; i<20; i++)
-		timerStack[i] = Timer;
-
-	C_FZP = CitySc->FZP;
-	C_rFZP = 1.0f/C_FZP;
-	//C_reFZP = 1.0f/(C_FZP*1.15f);
-
-	g_FrameTime = TTrd = Timer;
-
-//  old lighting model
-//	Ambient_Factor = 32;
-//	Diffusive_Factor = 10000000;//80 000 000;
-
-	Ambient_Factor = 0.25;
-	Diffusive_Factor = 1.0;
-	Specular_Factor = 0.0;
-	Range_Factor = 1.3;
-
-
-	ImageSize = 200;
+namespace {
+struct CityScene : SceneDriver {
 	char MSGStr[128];
-
-	// SYNC music: set order #7
-	//mmi.Order = 7;
-	//FModSetModuleInfo(mmi);
-
-	Modplayer_SetOrder(g_RevModuleHandle, 7);
-
+	std::unique_ptr<Face*[]> fListStorage;
+	std::unique_ptr<Face*[]> sListStorage;
+	int32_t TTrd = 0;
+	int32_t timerStack[20] = {};
+	int32_t timerIndex = 0;
 	dword numFrames = 0;
-
-	//dword avgPolys = 0;
-	g_renderedPolys = 0;
-	numDropsRendered = 0;
-
-	FillerPixelcount = 0;
-
-	dword Profiler[PROF_NUM];
-	float ProfSample[PROF_NUM];
-	float ProfPerc[PROF_NUM];
-	const char *ProfNames[] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
+	dword Profiler[PROF_NUM] = {};
+	float ProfSample[PROF_NUM] = {};
+	float ProfPerc[PROF_NUM] = {};
+	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
 	dword ProfSum = 0;
+	bool pause_mode = false;
 
 	std::vector<int> dispMap;
-	dispMap.resize(XRes * YRes);
-
-	//float waves[10][2];
-	//for (int w = 0; w != 10; ++w) {
-	//	waves[w][0] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
-	//	waves[w][1] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
-	//	waves[w][2] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
-	//	waves[w][3] = (1.0 / 50.0) * (2 * (RAND_15() / 32768.0f) - 1);
-	//}
-	int idx = 0;
-	for (int y = 0; y < YRes; ++y) {
-		for (int x = 0; x < XRes; ++x) {
-			int tx = x, ty = y;
-
-			//for (int w = 0; w != 10; ++w) {
-			//	tx += sin(x * waves[w][0] + y * waves[w][1]) * 3.5;
-			//	ty += cos(x * waves[w][0] + y * waves[w][1]) * 3.5;
-			//}
-			tx += sin(x/30.0) * 15;
-			ty += cos(y/50.0) * 15;
-
-			if (tx < 0) { tx = -tx; } if (tx > XRes_1) { tx = 2 * XRes_1 - tx; }
-			if (ty < 0) { ty = -ty; } if (ty > YRes_1) { ty = 2 * YRes_1 - ty; }
-			dispMap[idx++] = ty * XRes + tx;
-		}
-	}
 	std::vector<dword> backBuffer;
-	backBuffer.resize(XRes * YRes);
 
-	for(i=0; i<PROF_NUM; i++)
-		Profiler[i] = 0;	
+	~CityScene() override { Destroy_Scene(CitySc); }
 
-	while ((!Keyboard[ScESC]) && Timer < CTPartTime)
-	{
+	void init() override {
+		int32_t Polys = 0;
+		TriMesh *T;
+		Omni *O;
+
+		SetCurrentScene(CitySc);
+
+		// get the reflective water surface object
+		Reflective_Mapper_Setup();
+		Setup_Water_Distort();
+
+		for(T = CitySc->TriMeshHead; T; T = T->Next)
+			Polys += T->FIndex;
+		for(O = CitySc->OmniHead; O; O = O->Next)
+			Polys++;
+
+		fListStorage = std::make_unique<Face*[]>(Polys);
+		sListStorage = std::make_unique<Face*[]>(Polys);
+		FList = fListStorage.get();
+		SList = sListStorage.get();
+
+		View = CitySc->CameraHead;
+
+		for(int32_t i = 0; i < 20; i++)
+			timerStack[i] = Timer;
+
+		C_FZP = CitySc->FZP;
+		C_rFZP = 1.0f / C_FZP;
+
+		g_FrameTime = TTrd = Timer;
+
+		Ambient_Factor = 0.25;
+		Diffusive_Factor = 1.0;
+		Specular_Factor = 0.0;
+		Range_Factor = 1.3;
+
+		ImageSize = 200;
+
+		// SYNC music: set order #7
+		Modplayer_SetOrder(g_RevModuleHandle, 7);
+
+		g_renderedPolys = 0;
+		numDropsRendered = 0;
+		FillerPixelcount = 0;
+
+		dispMap.resize(XRes * YRes);
+		int idx = 0;
+		for (int y = 0; y < YRes; ++y) {
+			for (int x = 0; x < XRes; ++x) {
+				int tx = x, ty = y;
+				tx += sin(x/30.0) * 15;
+				ty += cos(y/50.0) * 15;
+
+				if (tx < 0) { tx = -tx; } if (tx > XRes_1) { tx = 2 * XRes_1 - tx; }
+				if (ty < 0) { ty = -ty; } if (ty > YRes_1) { ty = 2 * YRes_1 - ty; }
+				dispMap[idx++] = ty * XRes + tx;
+			}
+		}
+		backBuffer.resize(XRes * YRes);
+	}
+
+	bool tick() override {
+		if (Keyboard[ScESC] || Timer >= CTPartTime) return false;
+
 		numFrames++;
 
 		Profiler[PROF_ZCLR] -= Timer;
@@ -1932,24 +1903,20 @@ void Run_City()
 		dTime = Timer - TTrd;
 		if (dTime > 300) dTime = 300;
 		// fast forward/rewind
-		if (Keyboard[ScF2])
-		{
+		if (Keyboard[ScF2]) {
 			Timer += dTime * 8;
 		}
-		if (Keyboard[ScF1])
-		{
+		if (Keyboard[ScF1]) {
 			if (dTime * 8 > Timer)
 				Timer = 0;
 			else
 				Timer -= dTime * 8;
 		}
-		static bool pause_mode = false;
 		if (Keyboard[ScP])
 			pause_mode = true;
 		if (Keyboard[ScU])
 			pause_mode = false;
-		if (pause_mode)
-		{
+		if (pause_mode) {
 			Timer = TTrd;
 		}
 		g_FrameTime = TTrd = Timer;
@@ -1963,18 +1930,13 @@ void Run_City()
 		Dynamic_Camera();
 
 		// Clear framebuffer and Z-buffer
-		//memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
 		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
 		RenderSkyCube(SkySc, View, false);
-//		FastWrite(VPage + PageSize, 0, (XRes * YRes * sizeof(word)) >> 2);
 
 		Profiler[PROF_ZCLR] += Timer;
 		Profiler[PROF_ANIM] -= Timer;
 
 		Reflective_AnimateTexture();
-		//		Water_Distort();
-
-		//							 CitySc->StartFrame + 500 * (float)Timer / (float)CTPartTime;
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
@@ -1986,7 +1948,6 @@ void Run_City()
 		Profiler[PROF_LGHT] -= Timer;
 
 		Lighting(CitySc);
-		//City_Lighting();
 
 		// NOTE: Profiler ignores rain f/x
 #ifdef CITY_RAIN
@@ -1998,48 +1959,38 @@ void Run_City()
 		// render reflection of all objects except water
 		Reflected_Transform(CitySc);
 
-
 		Profiler[PROF_XFRM] += Timer;
 
-		if (!CAll) goto norefl;
-		Profiler[PROF_SORT] -= Timer;
+		if (CAll) {
+			Profiler[PROF_SORT] -= Timer;
 
-		Radix_SortingASM(FList, SList, CAll);
+			Radix_SortingASM(FList, SList, CAll);
 
-		Profiler[PROF_SORT] += Timer;
-		Profiler[PROF_RNDR] -= Timer;
+			Profiler[PROF_SORT] += Timer;
+			Profiler[PROF_RNDR] -= Timer;
 
-		Render();
-		{
-			memcpy(backBuffer.data(), VPage, PageSize);
-			int ii = 0;
-			dword* ptr = (dword*)VPage;
-			uint16_t* zbuffer_ptr = (uint16_t*)(VPage + PageSize);
-			for (auto displacement : dispMap) {
-				if (*zbuffer_ptr++ != 0) {
-					*ptr = backBuffer[displacement];
+			Render();
+			{
+				memcpy(backBuffer.data(), VPage, PageSize);
+				dword* ptr = (dword*)VPage;
+				uint16_t* zbuffer_ptr = (uint16_t*)(VPage + PageSize);
+				for (auto displacement : dispMap) {
+					if (*zbuffer_ptr++ != 0) {
+						*ptr = backBuffer[displacement];
+					}
+					ptr++;
 				}
-				ptr++;
 			}
+
+			Profiler[PROF_RNDR] += Timer;
 		}
-
-
-		Profiler[PROF_RNDR] += Timer;
-
-		//Reflective_Distortion();
-		//Run_Distort();
-		// Clear framebuffer and Z-buffer
-		//memset(VPage,0,PageSize + XRes*YRes*sizeof(word));		
-//		FastWrite(VPage+PageSize, 0, (XRes*YRes*sizeof(word)) >> 2);
-
-	norefl:
 
 		// render all objects normally
 		Profiler[PROF_XFRM] -= Timer;
 		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(CitySc);
 		Profiler[PROF_XFRM] += Timer;
-		if (!CAll) continue;
+		if (!CAll) return true;
 		Profiler[PROF_SORT] -= Timer;
 		Radix_SortingASM(FList, SList, CAll);
 		Profiler[PROF_SORT] += Timer;
@@ -2049,17 +2000,14 @@ void Run_City()
 		Profiler[PROF_RNDR] += Timer;
 
 		// FPS printer
-		if (g_profilerActive)
-		{
+		if (g_profilerActive) {
 			mword scroll = 0;
 
 			timerStack[timerIndex++] = Timer;
-			if (timerIndex == 20)
-			{
+			if (timerIndex == 20) {
 				timerIndex = 0;
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
-			}
-			else {
+			} else {
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
 			}
 			scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
@@ -2072,25 +2020,14 @@ void Run_City()
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int32_t)(g_renderedPolys / numFrames));
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			//		numDropsRendered=0;
-			//		snprintf(MSGStr, sizeof(MSGStr), "%d raindrops" , (int32_t)(numDropsRendered) );
-			//		OutTextXY(VPage,0,60,MSGStr,255);
 
-			//		FModGetModuleInfo(mmi);
-			//		snprintf(MSGStr, sizeof(MSGStr), "Order: %d, Row: %d", mmi.Order, mmi.Row);
-			//		OutTextXY(VPage,0,15,MSGStr,255);
-			//		snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second" , (int32_t)(FillerPixelcount/1000.0 * 100.0 / Timer));
-			//		OutTextXY(VPage,0,30,MSGStr,255);
-			//		PROFILER: display stats		
-			for (i = 0; i < PROF_NUM; i++)
-			{
+			for (int32_t i = 0; i < PROF_NUM; i++) {
 				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
 				scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 			}
 
 			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum * 10.0 / numFrames);
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-
 		}
 		Profiler[PROF_FLIP] -= Timer;
 
@@ -2104,32 +2041,27 @@ void Run_City()
 		Flip(MainSurf);
 		Profiler[PROF_FLIP] += Timer;
 
-		//		PROFILER: Generate sample
+		// PROFILER: Generate sample
 		ProfSum = 0;
-		for (i = 0; i < PROF_NUM; i++)
+		for (int32_t i = 0; i < PROF_NUM; i++)
 			ProfSum += Profiler[i];
-		for (i = 0; i < PROF_NUM; i++)
-		{
-			ProfSample[i] =
-				Profiler[i] * 10.0 / numFrames;
-			ProfPerc[i] =
-				Profiler[i] * 100.0 / ProfSum;
+		for (int32_t i = 0; i < PROF_NUM; i++) {
+			ProfSample[i] = Profiler[i] * 10.0 / numFrames;
+			ProfPerc[i] = Profiler[i] * 100.0 / ProfSum;
 		}
+		return true;
+	}
 
-		//if (dTime<5) SysSleep(10*(5-dTime));
-	} Timer -= CTPartTime;
-/*	if (Keyboard[ScESC])
-	{
-		#ifdef Play_Music
-		ShutDown();
-		#endif
-		FDS_End();
-		exit(-1);
-	}*/
-	while (Keyboard[ScESC]) continue;
-	if (Timer < 0)
-		Timer = 0;
-	delete FList;
-	delete SList;
-	Destroy_Scene(CitySc);
+	void cleanup() override {
+		Timer -= CTPartTime;
+		while (Keyboard[ScESC]) continue;
+		if (Timer < 0) Timer = 0;
+	}
+};
+} // anonymous namespace
+
+void Run_City()
+{
+	CityScene scene;
+	runSceneBlocking(scene);
 }
