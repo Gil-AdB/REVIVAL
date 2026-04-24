@@ -3,6 +3,7 @@
 #include "GREETS.H"
 #include "FillerTest.h"
 #include "MISC/PREPROC.H"
+#include "SceneTick.h"
 #include "Base/FDS_DECS.H"
 #include <vector>
 #include <VESA/Vesa.h>
@@ -404,111 +405,96 @@ void Initialize_Greets()
 //	}
 //}
 
-void Run_Greets()
-{
+namespace {
+struct GreetsScene : SceneDriver {
 	char MSGStr[128];
-	int32_t Polys = 0, TTrd;
-	TriMesh *T;
-	Omni *O;
-
-	int32_t i, timerStack[20], timerIndex = 0;
-	for(i=0; i<20; i++)
-		timerStack[i] = Timer;
-
-	SetCurrentScene(GreetSc);
-//	for(T = GreetSc->TriMeshHead;T;T=T->Next)
-	for(Object *Obj = GreetSc->ObjectHead;Obj;Obj=Obj->Next)
-	{
-		if (Obj->Type != Obj_TriMesh) continue;
-		T = (TriMesh *)Obj->Data;
-//		if (!stricmp(Obj->Name, "piramid.lwo"))
-//			T->Flags &=~HTrack_Visible;
-		Polys+=T->FIndex;
-	}
-		
-	for(O = GreetSc->OmniHead;O;O=O->Next)
-		Polys++;
-
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
-
-	View = GreetSc->CameraHead;
-
-	Ambient_Factor = 0.25;
-	Diffusive_Factor = 1.0;
-	Specular_Factor = 0.0;
-	Range_Factor = 1.0;
-	ImageSize = 0.25;//2.5;
-
+	int32_t TTrd = 0;
+	int32_t timerStack[20] = {};
+	int32_t timerIndex = 0;
 	dword numFrames = 0;
-
-
-	// this scene messes up at time zero
-	Timer++;
-
-	TTrd = Timer;
-	g_renderedPolys = 0;
-	FillerPixelcount = 0;
-
-
-	dword Profiler[PROF_NUM];
-	float ProfSample[PROF_NUM];
-	float ProfPerc[PROF_NUM];
-	const char *ProfNames[] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
+	dword Profiler[PROF_NUM] = {};
+	float ProfSample[PROF_NUM] = {};
+	float ProfPerc[PROF_NUM] = {};
+	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
 	dword ProfSum = 0;
+	bool pause_mode = false;
 
-	for(i=0; i<PROF_NUM; i++)
-		Profiler[i] = 0;	
+	void init() override {
+		int32_t Polys = 0;
+		TriMesh *T;
+		Omni *O;
 
+		for(int32_t i = 0; i < 20; i++)
+			timerStack[i] = Timer;
 
-//	View = &FC;	
-	while ((!Keyboard[ScESC])&&Timer<CHPartTime)
-	{
+		SetCurrentScene(GreetSc);
+		for(Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
+			T = (TriMesh *)Obj->Data;
+			Polys += T->FIndex;
+		}
+
+		for(O = GreetSc->OmniHead; O; O = O->Next)
+			Polys++;
+
+		FList = new Face * [Polys];
+		SList = new Face * [Polys];
+
+		View = GreetSc->CameraHead;
+
+		Ambient_Factor = 0.25;
+		Diffusive_Factor = 1.0;
+		Specular_Factor = 0.0;
+		Range_Factor = 1.0;
+		ImageSize = 0.25;
+
+		// this scene messes up at time zero
+		Timer++;
+
+		TTrd = Timer;
+		g_renderedPolys = 0;
+		FillerPixelcount = 0;
+	}
+
+	bool tick() override {
+		if (Keyboard[ScESC] || Timer >= CHPartTime) return false;
+
 		numFrames++;
 
-
-//		PROFILER: ZClear phase. also includes control keys handling
+		// PROFILER: ZClear phase. also includes control keys handling
 		Profiler[PROF_ZCLR] -= Timer;
 
-
-		if (Keyboard[ScTab])
-		{
+		if (Keyboard[ScTab]) {
 			if (View == &FC)
 				View = GreetSc->CameraHead;
 			else
 				View = &FC;
 		}
 
-		
-		dTime = Timer-TTrd;
+		dTime = Timer - TTrd;
 		// fast forward/rewind
-		if (Keyboard[ScF2])
-		{
+		if (Keyboard[ScF2]) {
 			Timer += dTime * 8;
 		}
-		if (Keyboard[ScF1])
-		{
+		if (Keyboard[ScF1]) {
 			if (dTime * 8 > Timer)
 				Timer = 0;
 			else
 				Timer -= dTime * 8;
 		}
-		static bool pause_mode = false;
 		if (Keyboard[ScP])
 			pause_mode = true;
 		if (Keyboard[ScU])
 			pause_mode = false;
-		if (pause_mode)
-		{
+		if (pause_mode) {
 			Timer = TTrd;
 		}
 		g_FrameTime = TTrd = Timer;
-		
+
 		// Clear Framebuffer and ZBuffer
-//		memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
 		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
 
-//		PROFILER: ANIM phase. also includes Dynamic Camera manager
+		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		Profiler[PROF_ANIM-1] += Timer;
 		Profiler[PROF_ANIM] -= Timer;
 
@@ -520,124 +506,98 @@ void Run_Greets()
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
 
-
 		Animate_Objects(GreetSc);
 
-//		PROFILER: XFRM phase. 
+		// PROFILER: XFRM phase.
 		Profiler[PROF_XFRM-1] += Timer;
 		Profiler[PROF_XFRM] -= Timer;
 
 		Transform_Objects(GreetSc);
 
-//		PROFILER: LGHT phase. 
+		// PROFILER: LGHT phase.
 		Profiler[PROF_LGHT-1] += Timer;
 		Profiler[PROF_LGHT] -= Timer;
 
 		Lighting(GreetSc);
 
-//		PROFILER: SORT phase. 
+		// PROFILER: SORT phase.
 		Profiler[PROF_SORT-1] += Timer;
-		if (!CAll) continue;
+		if (!CAll) return true;
 		Profiler[PROF_SORT] -= Timer;
 
-		Radix_SortingASM(FList,SList,CAll);
+		Radix_SortingASM(FList, SList, CAll);
 
-//		PROFILER: RNDR phase. 
+		// PROFILER: RNDR phase.
 		Profiler[PROF_RNDR-1] += Timer;
 		Profiler[PROF_RNDR] -= Timer;
 
-
-        gg->Render();
+		gg->Render();
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
 		Render();
-//		memset(VPage,0,PageSize);
-//		MMXClear(VPage,PageSize);
-//		FillerPixelcount += XRes*YRes;
 
-//		PROFILER: FLIP phase. also contains display of runtime stats
+		// PROFILER: FLIP phase. also contains display of runtime stats
 		Profiler[PROF_FLIP-1] += Timer;
-		if (g_profilerActive)
-		{
+		if (g_profilerActive) {
 			// FPS printer
 			timerStack[timerIndex++] = Timer;
-			if (timerIndex==20) 
-			{
+			if (timerIndex == 20) {
 				timerIndex = 0;
-				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]));
 			} else {
-				snprintf(MSGStr, sizeof(MSGStr),"%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]) );
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
 			}
 			dword scroll = 0;
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
-			scroll = OutTextXY(VPage,0, scroll+15,MSGStr,255);
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int)(g_renderedPolys / numFrames));
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame" , (int)(FillerPixelcount/(1000.0*numFrames)));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second" , (int)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame", (int)(FillerPixelcount/(1000.0*numFrames)));
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second", (int)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 
-	//		PROFILER: display stats	
-			for(i=0; i<PROF_NUM; i++)
-			{
-				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)" , ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
+			for(int32_t i = 0; i < PROF_NUM; i++) {
+				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
+				scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 			}
 
-			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms" , ProfSum*10.0/ numFrames);
-			scroll = OutTextXY(VPage,0,scroll+15,MSGStr,255);
-
-	//		snprintf(MSGStr, sizeof(MSGStr), "%d percent Z-rejection", (int32_t) ( (float)zReject*100.0/ (zReject+zPass) ));
-	//		OutTextXY(VPage,0,45,MSGStr,255);
-	//		snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame" , (int32_t)(g_renderedPolys / numFrames) );
-	//		OutTextXY(VPage,0,45,MSGStr,255);
-			// display messages.
-	/*		int32_t I, Y = -15;
-			for(I=0;I<10;I++)
-			if (MsgStr[I])
-			{
-				Y = OutTextXY(VPage,0,Y+15,MsgStr[I],255);
-				if (Timer>MsgClock[I]+150)
-				{
-					delete MsgStr[I];
-					MsgStr[I]=NULL;
-				}
-			}*/
+			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum*10.0/numFrames);
+			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 		}
 
 		Profiler[PROF_FLIP] -= Timer;
 
 		Flip(MainSurf);
-		//		PROFILER: frame finished
+		// PROFILER: frame finished
 		Profiler[PROF_FLIP] += Timer;
 
-//		PROFILER: Generate sample
+		// PROFILER: Generate sample
 		ProfSum = 0;
-		for(i=0; i<PROF_NUM; i++)
+		for(int32_t i = 0; i < PROF_NUM; i++)
 			ProfSum += Profiler[i];
-		for(i=0; i<PROF_NUM; i++)
-		{
-			ProfSample[i] =
-				Profiler[i]*10.0 / numFrames;
-			ProfPerc[i] = 
-				Profiler[i]*100.0/ProfSum;
+		for(int32_t i = 0; i < PROF_NUM; i++) {
+			ProfSample[i] = Profiler[i]*10.0 / numFrames;
+			ProfPerc[i] = Profiler[i]*100.0/ProfSum;
 		}
+		return true;
+	}
 
-	} Timer-=CHPartTime;
-//	if (Keyboard[ScESC])
-//	{
-//		#ifdef Play_Music
-//		ShutDown();
-//		#endif
-//		FDS_End();
-//		exit(-1);
-//	}
-	while (Keyboard[ScESC]) continue;
-	if (Timer<0) Timer = 0;
+	void cleanup() override {
+		Timer -= CHPartTime;
+		while (Keyboard[ScESC]) continue;
+		if (Timer < 0) Timer = 0;
 
-	delete [] FList;
-	delete [] SList;
-	Destroy_Scene(GreetSc);
+		delete [] FList;
+		delete [] SList;
+		Destroy_Scene(GreetSc);
+	}
+};
+} // anonymous namespace
+
+void Run_Greets()
+{
+	GreetsScene scene;
+	runSceneBlocking(scene);
 }
