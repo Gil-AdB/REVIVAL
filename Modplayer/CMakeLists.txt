@@ -1,16 +1,16 @@
 set(PROJECT_NAME Modplayer)
 
 # The heavy lifting is in a Rust workspace tracked as a git submodule at
-# Modplayer/modplayer-2. Override with -DMODPLAYER2_DIR=... to point at a
+# Modplayer/modplayer. Override with -DMODPLAYER_DIR=... to point at a
 # sibling checkout instead (useful for cross-repo development).
-set(MODPLAYER2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modplayer" CACHE PATH
-    "Path to the modplayer-2 Rust workspace")
+set(MODPLAYER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modplayer" CACHE PATH
+    "Path to the modplayer Rust workspace")
 
-if(NOT EXISTS "${MODPLAYER2_DIR}/Cargo.toml")
+if(NOT EXISTS "${MODPLAYER_DIR}/Cargo.toml")
     message(FATAL_ERROR
-        "modplayer-2 not found at '${MODPLAYER2_DIR}'.\n"
+        "modplayer not found at '${MODPLAYER_DIR}'.\n"
         "Run `git submodule update --init --recursive` from the repo root, "
-        "or pass -DMODPLAYER2_DIR=/path/to/modplayer-2 to point at a sibling "
+        "or pass -DMODPLAYER_DIR=/path/to/modplayer to point at a sibling "
         "checkout.")
 endif()
 
@@ -25,18 +25,49 @@ else()
     set(_cargo_profile_dir "release")
 endif()
 
-set(_modplayer_rust_lib
-    "${MODPLAYER2_DIR}/target/${_cargo_profile_dir}/libmodplayer.a")
+# On Emscripten the bundled sdl2 crate collides with emcc's -sUSE_SDL=2,
+# so we build with --no-default-features --features external-audio. The C++
+# side opens its own SDL_AudioDevice and pulls samples via Modplayer_FillBuffer.
+if(EMSCRIPTEN)
+    set(_cargo_target_flag --target wasm32-unknown-emscripten)
+    set(_cargo_features_flag --no-default-features --features external-audio)
+    set(_modplayer_rust_lib
+        "${MODPLAYER_DIR}/target/wasm32-unknown-emscripten/${_cargo_profile_dir}/libmodplayer.a")
+else()
+    set(_cargo_target_flag "")
+    set(_cargo_features_flag "")
+    set(_modplayer_rust_lib
+        "${MODPLAYER_DIR}/target/${_cargo_profile_dir}/libmodplayer.a")
+endif()
 
-add_custom_command(
-    OUTPUT "${_modplayer_rust_lib}"
-    # CMAKE_POLICY_VERSION_MINIMUM=3.5 lets the vendored sdl2-sys build under
-    # CMake >= 4.0, which dropped compatibility with its older cmake_minimum_required.
-    COMMAND ${CMAKE_COMMAND} -E env CMAKE_POLICY_VERSION_MINIMUM=3.5
-            "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag} --package modplayer-lib
-    WORKING_DIRECTORY "${MODPLAYER2_DIR}"
-    COMMENT "Building modplayer-2 (Rust, ${_cargo_profile_dir})"
-    USES_TERMINAL)
+if(EMSCRIPTEN)
+    # The C++ side links with -pthread (--shared-memory). Rust objects must be
+    # built with the matching wasm features, otherwise wasm-ld rejects them.
+    # Rebuild std too (-Z build-std) so its objects also carry +atomics.
+    add_custom_command(
+        OUTPUT "${_modplayer_rust_lib}"
+        COMMAND ${CMAKE_COMMAND} -E env
+                CMAKE_POLICY_VERSION_MINIMUM=3.5
+                "RUSTFLAGS=-C target-feature=+atomics,+bulk-memory"
+                "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag}
+                ${_cargo_target_flag} ${_cargo_features_flag}
+                -Z build-std=std,panic_abort
+                --package modplayer-lib
+        WORKING_DIRECTORY "${MODPLAYER_DIR}"
+        COMMENT "Building modplayer (Rust wasm, ${_cargo_profile_dir})"
+        USES_TERMINAL)
+else()
+    add_custom_command(
+        OUTPUT "${_modplayer_rust_lib}"
+        # CMAKE_POLICY_VERSION_MINIMUM=3.5 lets the vendored sdl2-sys build under
+        # CMake >= 4.0, which dropped compatibility with its older cmake_minimum_required.
+        COMMAND ${CMAKE_COMMAND} -E env CMAKE_POLICY_VERSION_MINIMUM=3.5
+                "${CARGO_EXECUTABLE}" build ${_cargo_profile_flag}
+                --package modplayer-lib
+        WORKING_DIRECTORY "${MODPLAYER_DIR}"
+        COMMENT "Building modplayer (Rust, ${_cargo_profile_dir})"
+        USES_TERMINAL)
+endif()
 
 add_custom_target(modplayer_rust_build DEPENDS "${_modplayer_rust_lib}")
 

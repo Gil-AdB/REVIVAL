@@ -18,6 +18,11 @@ endif()
 
 if(EMSCRIPTEN)
     add_compile_options(-msimd128 -sUSE_SDL=2)
+    # The vendored Agner Fog vectorclass checks `EMSCRIPTEN` (no underscores)
+    # to skip x86-specific inline asm and __m128/__m128i/__m128d overloads
+    # that collapse when simde maps them all to the same wasm32 type. emcc
+    # only defines `__EMSCRIPTEN__` itself, so we define the plain form too.
+    add_compile_definitions(EMSCRIPTEN)
     if(APPLE)
         add_definitions(-DEMSCRIPTEN_MACOS=1)
     endif()

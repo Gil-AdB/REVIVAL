@@ -2,6 +2,7 @@
 
 #include "CRASH.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include <memory>
 
 static Scene *CrashSc;
@@ -129,8 +130,13 @@ struct CrashScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createCrashScene()
+{
+	return std::make_unique<CrashScene>();
+}
+
 void Run_Crash()
 {
-	CrashScene scene;
-	runSceneBlocking(scene);
+	auto scene = createCrashScene();
+	runSceneBlocking(*scene);
 }

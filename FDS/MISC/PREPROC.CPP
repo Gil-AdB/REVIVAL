@@ -613,7 +613,7 @@ void Init_Flare_Textures(Scene *Sc)
 		//    printf("<PR:IFT>: Assigning new material to Group %d.\n",M->Group);
 		M->Name = strdup("Default Flare material");
 		M->Txtr = new Texture;
-		M->Txtr->FileName = strdup ("Textures/Flare.GIF");
+		M->Txtr->FileName = strdup ("TEXTURES/Flare.GIF");
 		Identify_Texture(M->Txtr);
 		
 		//    if (!M->Txtr->BPP) printf("<PR:IFT>: Identification Failure for Texture %s at Material %s.\n",M->Txtr->FileName,M->Name); else printf("<PR:IFT>: Texture %s was Identified correctly\n         for Material %s as a %d BPP image file.\n",M->Txtr->FileName,M->Name,M->Txtr->BPP);
@@ -658,7 +658,7 @@ void Init_Flare_Textures(Scene *Sc)
 		M->Next = M->Prev = NULL;
 		}
 		strcpy(M->Name,O->Name);
-		strcpy(S,"Textures/");
+		strcpy(S,"TEXTURES/");
 		strcat(S,O->Name);
 		M->Txtr->FileName = strdup(S);
 		Identify_Texture(M->Txtr);
@@ -737,7 +737,7 @@ void Default_Texture(Scene *Sc)
 			Convert_Image2Texture(&Plasma,M->Txtr);
 			M->Flags = Mat_Nonconv | Mat_RGBInterp;*/
 			
-			M->Txtr->FileName = strdup("Textures/Default.GIF");
+			M->Txtr->FileName = strdup("TEXTURES/Default.GIF");
 			M->Txtr->BPP=0;
 			Load_Texture(M->Txtr);
 			if (!M->Txtr->BPP) {delete M->Txtr; M->Txtr=NULL;}

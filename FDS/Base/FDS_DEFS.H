@@ -14,7 +14,7 @@
 
 #define MAX_GSTRING 128
 
-#if defined(__APPLE__) || defined(EMSCRIPTEN_MACOS)
+#if defined(__APPLE__) || defined(EMSCRIPTEN_MACOS) || defined(__EMSCRIPTEN__)
 #define _strdup strdup
 //#define _aligned_malloc aligned_alloc
 #define _aligned_malloc(a,b) malloc(a)

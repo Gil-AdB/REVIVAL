@@ -4,6 +4,7 @@
 #include "FillerTest.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
+#include "Scenes.h"
 #include "Base/FDS_DECS.H"
 #include <memory>
 #include <vector>
@@ -155,7 +156,7 @@ struct GreetsGenerator
 	{
 		Material *Mat;
 		for (Mat = MatLib; Mat->Next; Mat = Mat->Next) {
-			if (Mat->RelScene == GreetSc && Mat->Txtr && Mat->Txtr->FileName && !strcmp(Mat->Txtr->FileName, "Textures/p_text.jpg"))
+			if (Mat->RelScene == GreetSc && Mat->Txtr && Mat->Txtr->FileName && !strcmp(Mat->Txtr->FileName, "TEXTURES/P_TEXT.JPG"))
 			{
 				Mat->Txtr->Mipmap[0] = (byte *)OutBuf;
 				Mat->Txtr->Flags = Txtr_Nomip;
@@ -176,7 +177,7 @@ struct GreetsGenerator
 		ScaledBuf = (DWord*)_aligned_malloc(256 * 256 * 4, 16);
 
 
-		CodeTexture.FileName = strdup("Textures/Code.JPG");
+		CodeTexture.FileName = strdup("TEXTURES/CODE.JPG");
 		Identify_Texture(&CodeTexture);
 		if (!CodeTexture.BPP)
 		{
@@ -599,8 +600,13 @@ struct GreetsScene : SceneDriver {
 };
 } // anonymous namespace
 
+std::unique_ptr<SceneDriver> createGreetsScene()
+{
+	return std::make_unique<GreetsScene>();
+}
+
 void Run_Greets()
 {
-	GreetsScene scene;
-	runSceneBlocking(scene);
+	auto scene = createGreetsScene();
+	runSceneBlocking(*scene);
 }

@@ -308,3 +308,4 @@ DEMO.exe
 /Runtime/fountain-profiling.txt
 /libpng16/libpng16.lib
 /libpng16/zlib.lib
+/build-wasm/

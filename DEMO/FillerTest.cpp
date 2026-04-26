@@ -1178,7 +1178,7 @@ void FillerTest()
 	SetGBuffer(&gbuffer);
 
 //	Texture Tx;
-//	Tx.FileName = strdup("Textures/PBRK34.JPG");
+//	Tx.FileName = strdup("TEXTURES/PBRK34.JPG");
 //	Load_Texture(&Tx);
 //	BPPConvert_Texture(&Tx, 32);
 	// prepare texture

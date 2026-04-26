@@ -186,3 +186,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     _LIB
     _MBCS
     SIMDE_ENABLE_NATIVE_ALIASES)
+
+if(EMSCRIPTEN)
+    # std::thread / mutex / condition_variable need -pthread at compile time
+    # for the PROXY_TO_PTHREAD mode we use in DEMO.
+    target_compile_options(${PROJECT_NAME} PUBLIC -pthread)
+endif()

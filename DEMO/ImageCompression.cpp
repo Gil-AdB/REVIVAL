@@ -2,7 +2,7 @@
 
 const float log2conv = 1.0 / log(2.0);
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
 inline float log2(float x) noexcept
 {
 	return log(x)*log2conv;
