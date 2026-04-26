@@ -1,0 +1,77 @@
+name: Build & deploy WASM demo to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Modplayer/modplayer/target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('Modplayer/modplayer/**/Cargo.lock') }}
+
+      - name: Install Rust nightly + rust-src
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup default nightly
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 5.0.6
+          actions-cache-folder: emsdk-cache
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (emcmake)
+        run: emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-wasm
+
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          cp build-wasm/DEMO/DEMO.html _site/index.html
+          cp build-wasm/DEMO/DEMO.js _site/
+          cp build-wasm/DEMO/DEMO.wasm _site/
+          cp build-wasm/DEMO/DEMO.data _site/
+          cp build-wasm/DEMO/coi-serviceworker.js _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

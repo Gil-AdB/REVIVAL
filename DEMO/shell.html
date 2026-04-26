@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <title>REVIVAL / FLOOD</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #000; color: #ccc;
+                   font: 14px/1.3 sans-serif; height: 100%; }
+      body { display: flex; flex-direction: column;
+             align-items: center; justify-content: center; }
+      #status { position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px;
+                background: rgba(0,0,0,0.6); font-size: 12px;
+                pointer-events: none; }
+      #status.hidden { display: none; }
+      canvas { background: #000; display: block; image-rendering: pixelated; }
+    </style>
+  </head>
+  <body>
+    <!-- coi-serviceworker injects COOP/COEP headers so SharedArrayBuffer
+         (required for our pthread build) works on hosts like GitHub Pages
+         that don't support custom HTTP headers. No-op on emrun, which
+         already sets the headers itself. -->
+    <script src="coi-serviceworker.js"></script>
+    <div id="status">Downloading...</div>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <script>
+      var statusEl = document.getElementById('status');
+      var canvasEl = document.getElementById('canvas');
+      function setStatus(text) {
+        if (!text) { statusEl.classList.add('hidden'); return; }
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = text;
+      }
+      var Module = {
+        canvas: canvasEl,
+        setStatus: setStatus,
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          setStatus(left
+            ? 'Loading... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')'
+            : '');
+        }
+      };
+      setStatus('Downloading...');
+      window.onerror = function() {
+        setStatus('Exception thrown, see console');
+        setStatus = function(t) { if (t) console.error('[post-exception] ' + t); };
+      };
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>

@@ -1647,7 +1647,7 @@ Material VortexMat;
 void Load_Vortex()
 {
 	int32_t X,Y;
-	VorTexture.FileName = strdup("Textures/Vortex.JPG");
+	VorTexture.FileName = strdup("TEXTURES/VORTEX.JPG");
 	Identify_Texture(&VorTexture);
 	if (!VorTexture.BPP)
 	{

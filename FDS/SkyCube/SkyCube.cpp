@@ -180,7 +180,7 @@ Scene * CreateSkyCube(dword skyType)
 	Material *M[6];
 	Texture *Tx[6];
 
-	const char* names[6] = { "Textures/SBBK.JPG", "Textures/SBRT.JPG", "Textures/SBFT.JPG", "Textures/SBLF.JPG", "Textures/SBDN.JPG", "Textures/SBUP.JPG" };
+	const char* names[6] = { "TEXTURES/SBBK.JPG", "TEXTURES/SBRT.JPG", "TEXTURES/SBFT.JPG", "TEXTURES/SBLF.JPG", "TEXTURES/SBDN.JPG", "TEXTURES/SBUP.JPG" };
 
 	//DWord* TempBuf = new DWord[65536];
 	for (i = 0; i < 6; i++)

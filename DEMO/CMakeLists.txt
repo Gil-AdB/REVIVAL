@@ -59,15 +59,34 @@ if(EMSCRIPTEN)
     target_link_options(${PROJECT_NAME} PRIVATE
         -pthread
         -sPROXY_TO_PTHREAD=1
-        -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency
+        # Pool size: main-proxy + CodeEntry + nested init thread + ThreadPool
+        # render workers. navigator.hardwareConcurrency alone isn't enough;
+        # add headroom and allow on-demand creation above the pool.
+        -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+4
+        # Emscripten's default pthread stack is 64KB which overflows during
+        # XM module parsing (and probably elsewhere — the engine wasn't
+        # written with such a tight stack in mind). Match a typical native
+        # default of ~4MB for both the proxy main thread and pthread workers.
+        -sSTACK_SIZE=4MB
+        -sDEFAULT_PTHREAD_STACK_SIZE=4MB
+        -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=128MB
         -sASSERTIONS=1
         -sEXIT_RUNTIME=1
         -sUSE_SDL=2
         --preload-file "${CMAKE_SOURCE_DIR}/Runtime@/"
+        --shell-file "${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
     )
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
+
+    # Copy the COOP/COEP service worker next to the generated HTML so it's
+    # served at the same scope (needed when hosting on plain static servers
+    # like GitHub Pages that don't send the headers themselves).
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/coi-serviceworker.js"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/coi-serviceworker.js")
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE
         FDS

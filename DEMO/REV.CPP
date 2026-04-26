@@ -467,9 +467,13 @@ material global ID or ptr
 #include "FILLERS/IX.h"
 #include "Threads.h"
 #include "../Modplayer/Modplayer.h"
+#include "SDL2.h"
 #include <SDL.h>
 #include <utility>
 #include <iostream>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 // global configuration db
 static ConfigurationDB *g_cfg;
@@ -983,11 +987,14 @@ void CodeEntry(void *var)
 
 	//dword sh = 0;
 	ModplayerHandle sh = 0;
+	fprintf(stderr, "[DEMO] g_playMusic=%u\n", (unsigned)g_playMusic);
 	if (g_playMusic)
 	{
 		//sh = FModLoadModule("Revival.XM");
 		//module.Load("Revival.xM");
-		sh = Modplayer_Create("Revival.xM");
+		fprintf(stderr, "[DEMO] before Modplayer_Create\n");
+		sh = Modplayer_Create("REVIVAL.XM");
+		fprintf(stderr, "[DEMO] after Modplayer_Create sh=%p\n", sh);
 	}
 	g_RevModuleHandle = sh;
 
@@ -1006,7 +1013,12 @@ void CodeEntry(void *var)
 	FPU_LPrecision();
 	if (g_playMusic)
 	{
+		fprintf(stderr, "[DEMO] before Modplayer_Start\n");
 		if (sh) Modplayer_Start(sh);
+		fprintf(stderr, "[DEMO] after Modplayer_Start\n");
+#ifdef __EMSCRIPTEN__
+		if (sh) SDL2_StartMusic(sh);
+#endif
 	}
 	Timer = 0;
 
@@ -1085,14 +1097,15 @@ void CodeEntry(void *var)
 
 	if (g_playMusic)
 	{
+#ifdef __EMSCRIPTEN__
+		SDL2_StopMusic();
+#endif
 		//if (sh) FModFreeModule(sh);
 		//FModClose();
 		//module.Stop();
 		if (sh) Modplayer_Stop(sh);
 	}
 }
-
-#include "SDL2.h"
 
 int main(int argc, const char *argv[])
 {
@@ -1105,7 +1118,7 @@ int main(int argc, const char *argv[])
 	g_demoYRes = cfg.extractInteger("ResolutionY");
 	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
 
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
 
     SDL_Window * window = SDL_CreateWindow("",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -1125,15 +1138,61 @@ int main(int argc, const char *argv[])
 		return -1;
 	}
 
+	fprintf(stderr, "[DEMO] before SDL2_InitDisplay\n");
 	SDL2_InitDisplay(window);
+	fprintf(stderr, "[DEMO] after SDL2_InitDisplay, MainSurf=%p\n", (void*)MainSurf);
 
 	memset(VPage, 0xcd, MainSurf->BPSL * YRes);
+	fprintf(stderr, "[DEMO] memset VPage done\n");
 	Flip(MainSurf);
+	fprintf(stderr, "[DEMO] first flip done\n");
 
 	TimerInit(100);
+	fprintf(stderr, "[DEMO] TimerInit done\n");
+	// Route stdout to logfile.txt; on Emscripten this goes to MEMFS and
+	// keeps the browser console quiet (our diagnostics use stderr).
 	freopen("logfile.txt", "w+", stdout);
 
+#ifdef __EMSCRIPTEN__
+	// Browsers require a user gesture before AudioContext can start. To keep
+	// audio in lockstep with scene playback, defer the entire demo (CodeEntry)
+	// until the first input event arrives. Show a hint overlay until then.
+	// PROXY_TO_PTHREAD: main() runs on a pthread worker with no DOM access,
+	// so dispatch DOM work to the browser main thread via MAIN_THREAD_EM_ASM.
+	MAIN_THREAD_EM_ASM({
+		var hint = document.createElement('div');
+		hint.id = 'rev-click-hint';
+		hint.textContent = 'Click or press any key to start';
+		hint.style.cssText =
+			'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+			'padding:1em 2em;background:rgba(0,0,0,0.75);color:#fff;' +
+			'font:18px/1.2 sans-serif;border-radius:4px;z-index:9999;' +
+			'pointer-events:none;';
+		document.body.appendChild(hint);
+	});
+	while (1) {
+		SDL_Event event;
+		SDL_WaitEvent(&event);
+		if (event.type == SDL_QUIT) {
+			SDL_Quit();
+			return 0;
+		}
+		if (event.type == SDL_KEYDOWN ||
+		    event.type == SDL_MOUSEBUTTONDOWN ||
+		    event.type == SDL_FINGERDOWN) {
+			break;
+		}
+	}
+	MAIN_THREAD_EM_ASM({
+		var h = document.getElementById('rev-click-hint');
+		if (h) h.remove();
+	});
+	fprintf(stderr, "[DEMO] user gesture observed, starting demo\n");
+#endif
+
+	fprintf(stderr, "[DEMO] spawning CodeEntry thread\n");
 	auto demoThread = std::thread(CodeEntry, nullptr);
+	fprintf(stderr, "[DEMO] CodeEntry thread spawned\n");
 
     while (1)
     {

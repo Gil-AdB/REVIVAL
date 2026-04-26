@@ -8,6 +8,7 @@
 #include <stdlib.h>
 //#include <conio.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 
 #include "Base/FDS_DEFS.H"
@@ -44,8 +45,12 @@ void AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 	CurMat->RelScene=SceneGroup;
 	if (!(*OrgMat->TextureImage)) return;
 	Image=new char[strlen(OrgMat->TextureImage) + 15];
-	strcpy(Image,"Textures/");
+	strcpy(Image,"TEXTURES/");
 	strcat(Image,OrgMat->TextureImage);
+#ifdef __EMSCRIPTEN__
+	// Emscripten's MEMFS is case-sensitive; runtime assets are uppercase.
+	for (char *p = Image + 9; *p; ++p) *p = (char)toupper((unsigned char)*p);
+#endif
 	for (Temp=MatLib;Temp!=CurMat;Temp=Temp->Next)
 	{
 		if (Temp->RelScene!=SceneGroup) continue;

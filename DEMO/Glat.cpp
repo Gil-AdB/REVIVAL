@@ -80,10 +80,10 @@ void Initialize_Glato()
 	SfxTexture = new Texture;
 	SfxImage = new Image;
 
-	Load_Image_JPEG(LogoImage,"Textures/Logo.JPG");
+	Load_Image_JPEG(LogoImage,"TEXTURES/LOGO.JPG");
 	Scale_Image(LogoImage,xres,yres);
 
-/*	LogoTexture->FileName = strdup("Textures/Logo.JPG");
+/*	LogoTexture->FileName = strdup("TEXTURES/LOGO.JPG");
 	Identify_Texture(LogoTexture);
 	if (!LogoTexture->BPP)
 	{
@@ -95,7 +95,7 @@ void Initialize_Glato()
 	Convert_Texture2Image(LogoTexture,LogoImage);*/
 	
 
-	PlaneTexture->FileName = strdup("Textures/SC13.JPG");
+	PlaneTexture->FileName = strdup("TEXTURES/SC13.JPG");
 	Identify_Texture(PlaneTexture);
 	if (!PlaneTexture->BPP)
 	{
@@ -109,7 +109,7 @@ void Initialize_Glato()
 	//PlaneImage->Data[0] = 0x80808080;
 //	WOBPOINTSHEIGHT = 30;
 
-	CodeTexture->FileName = strdup("Textures/Code.JPG");
+	CodeTexture->FileName = strdup("TEXTURES/CODE.JPG");
 	Identify_Texture(CodeTexture);
 	if (!CodeTexture->BPP)
 	{
@@ -120,7 +120,7 @@ void Initialize_Glato()
 	Convert_Texture2Image(CodeTexture,CodeImage);
 
 
-	GfxTexture->FileName = strdup("Textures/Gfx.JPG");
+	GfxTexture->FileName = strdup("TEXTURES/GFX.JPG");
 	Identify_Texture(GfxTexture);
 	if (!GfxTexture->BPP)
 	{
@@ -130,7 +130,7 @@ void Initialize_Glato()
 	Load_Texture(GfxTexture);
 	Convert_Texture2Image(GfxTexture,GfxImage);
 
-	SfxTexture->FileName = strdup("Textures/Sfx.JPG");
+	SfxTexture->FileName = strdup("TEXTURES/SFX.JPG");
 	Identify_Texture(SfxTexture);
 	if (!SfxTexture->BPP)
 	{

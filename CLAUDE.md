@@ -25,7 +25,7 @@ Prerequisites:
 
 - **SDL2** discovered via `find_package(SDL2)`. On macOS: `brew install sdl2`.
 - **Rust toolchain** (`cargo` on PATH) — CMake invokes `cargo build` on the modplayer workspace automatically.
-- **Submodules** — the Rust workspace lives at `Modplayer/modplayer` as a submodule. Clone with `--recurse-submodules` or run `git submodule update --init --recursive` after checkout. Override with `-DMODPLAYER2_DIR=/path` to point at an external checkout (e.g. for cross-repo development).
+- **Submodules** — the Rust workspace lives at `Modplayer/modplayer` as a submodule. Clone with `--recurse-submodules` or run `git submodule update --init --recursive` after checkout. Override with `-DMODPLAYER_DIR=/path` to point at an external checkout (e.g. for cross-repo development).
 
 Stale/obsolete build trees that may still be on disk from pre-Tier-1 work (`CMake/`, `cmake-build-*`, `build.local/`) are gitignored — delete them freely.
 

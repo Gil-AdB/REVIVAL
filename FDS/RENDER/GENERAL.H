@@ -119,7 +119,7 @@ char FDS_Init(unsigned short x,unsigned short y,unsigned char bpp)
 
 	// read std. font from AFT file.
 	printf("] Basic font.\n");
-	Font1=LoadAFT("Fonts/Standard.AFT");
+	Font1=LoadAFT("FONTS/STANDARD.AFT");
 	Active_Font = Font1;
 
 	printf("] Initializing Video system.\n");
