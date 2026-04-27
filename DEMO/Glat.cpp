@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "GLAT.H"
 #include "IMGGENR/IMGGENR.H"
 #include "SceneTick.h"
 #include "Scenes.h"
@@ -56,6 +57,8 @@ static Texture *SfxTexture;
 static Image *SfxImage;
 
 static int32_t InitScreenXRes, InitScreenYRes;
+
+GlatoTraceHook g_glatoTraceHook = nullptr;
 
 
 void Initialize_Glato()
@@ -649,6 +652,18 @@ struct GlatoScene : SceneDriver {
 //		Flip(VSurface);
 		if (Keyboard[ScESC])
 			Timer = 1000000;
+
+		if (g_glatoTraceHook) {
+			GlatoTraceSample s = {
+				.timer = Timer,
+				.st = ST,
+				.rx = Rx, .ry = Ry, .rz = Rz,
+				.camX = CameraPos.x,
+				.camY = CameraPos.y,
+				.camZ = CameraPos.z,
+			};
+			g_glatoTraceHook(s);
+		}
 		return true;
 	}
 

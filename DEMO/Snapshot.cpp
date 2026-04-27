@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "GLAT.H"
 #include "Rev.h"
 #include "Scenes.h"
 #include "SceneTick.h"
@@ -92,6 +93,56 @@ void write_pgm16(const char* path, const word* z, int xres, int yres) {
 
 void noop_flip(VESA_Surface*) {}
 
+// Bootstrap the FDS/VESA pipeline + ThreadPool without touching SDL or
+// Modplayer. Both city and glat snapshot modes share this. Returns false
+// on failure.
+bool initSnapshotEnvironment(int xres, int yres) {
+    if (!FDS_Init(static_cast<unsigned short>(xres),
+                  static_cast<unsigned short>(yres), 32)) {
+        std::fprintf(stderr, "[SNAPSHOT] FDS_Init failed\n");
+        return false;
+    }
+
+    static VESA_Surface surf = {};
+    surf.X = xres;
+    surf.Y = yres;
+    surf.BPP = 32;
+    surf.CPP = 4;
+    surf.BPSL = surf.CPP * surf.X;
+    surf.PageSize = surf.BPSL * surf.Y;
+    const std::size_t zSize = sizeof(word) * static_cast<std::size_t>(xres) * yres;
+    surf.Data = static_cast<byte*>(std::malloc(surf.PageSize + zSize));
+    if (!surf.Data) {
+        std::fprintf(stderr, "[SNAPSHOT] malloc framebuffer failed\n");
+        return false;
+    }
+    std::memset(surf.Data, 0, surf.PageSize + zSize);
+    surf.Flip = &noop_flip;
+
+    VESA_VPageExternal(&surf);
+    VESA_Surface2Global(MainSurf);
+
+    Generate_RGBFlares();
+    InitPolyStats(200);
+    ThreadPool::instance().init([]() {
+        InitPolyStats(200);
+        FPU_LPrecision();
+    });
+    FPU_LPrecision();
+
+    g_profilerActive = 0;
+    return true;
+}
+
+void ensureOutDir(const std::string& outDir) {
+    if (outDir.empty() || outDir == ".") return;
+#ifdef _WIN32
+    _mkdir(outDir.c_str());
+#else
+    mkdir(outDir.c_str(), 0755);
+#endif
+}
+
 } // namespace
 
 bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
@@ -121,61 +172,8 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
 }
 
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
-    if (cfg.scene != "city") {
-        std::fprintf(stderr, "[SNAPSHOT] only --snapshot=city is implemented (got '%s')\n",
-                     cfg.scene.c_str());
-        return 2;
-    }
-
-    // mkdir -p outDir (best effort).
-    if (!cfg.outDir.empty() && cfg.outDir != ".") {
-#ifdef _WIN32
-        _mkdir(cfg.outDir.c_str());
-#else
-        mkdir(cfg.outDir.c_str(), 0755);
-#endif
-    }
-
-    if (!FDS_Init(static_cast<unsigned short>(xres),
-                  static_cast<unsigned short>(yres), 32)) {
-        std::fprintf(stderr, "[SNAPSHOT] FDS_Init failed\n");
-        return 3;
-    }
-
-    // Allocate a real framebuffer + Z-buffer surface so the rasterizer has
-    // somewhere to write. No window, no SDL — the Flip callback is a no-op.
-    VESA_Surface surf = {};
-    surf.X = xres;
-    surf.Y = yres;
-    surf.BPP = 32;
-    surf.CPP = 4;
-    surf.BPSL = surf.CPP * surf.X;
-    surf.PageSize = surf.BPSL * surf.Y;
-    const std::size_t zSize = sizeof(word) * static_cast<std::size_t>(xres) * yres;
-    surf.Data = static_cast<byte*>(std::malloc(surf.PageSize + zSize));
-    if (!surf.Data) {
-        std::fprintf(stderr, "[SNAPSHOT] malloc framebuffer failed\n");
-        return 4;
-    }
-    std::memset(surf.Data, 0, surf.PageSize + zSize);
-    surf.Flip = &noop_flip;
-
-    VESA_VPageExternal(&surf);
-    VESA_Surface2Global(MainSurf);
-
-    // Match the production init sequence used by CodeEntry, minus the audio
-    // / scene-sequence / SDL bits. ThreadPool is required because Render()
-    // dispatches tile work onto its workers.
-    Generate_RGBFlares();
-    InitPolyStats(200);
-    ThreadPool::instance().init([]() {
-        InitPolyStats(200);
-        FPU_LPrecision();
-    });
-    FPU_LPrecision();
-
-    // Suppress profiler overlay so it doesn't appear in the dumped frame.
-    g_profilerActive = 0;
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
 
     Initialize_City();
 
@@ -234,4 +232,65 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
     ThreadPool::instance().close();
     return produced > 0 ? 0 : 5;
+}
+
+namespace {
+// Records every GlatoScene::tick() invocation; flushed to CSV at the end.
+std::vector<GlatoTraceSample> g_glatoTraceBuf;
+void glatoTraceCollector(const GlatoTraceSample& s) {
+    g_glatoTraceBuf.push_back(s);
+}
+} // namespace
+
+int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    Initialize_Glato();
+
+    // Default sweep: every 10 ticks across Glat's playable range (Timer
+    // < 3500). Override with --snapshot=glat-trace@t=N1,N2,...
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) {
+        for (int32_t t = 0; t < 3500; t += 10) timestamps.push_back(t);
+    }
+
+    g_glatoTraceBuf.clear();
+    g_glatoTraceBuf.reserve(timestamps.size());
+    g_glatoTraceHook = &glatoTraceCollector;
+
+    auto driver = createGlatoScene();
+    driver->init();
+
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();
+    }
+
+    driver->cleanup();
+    driver.reset();
+    g_glatoTraceHook = nullptr;
+
+    char csvPath[1024];
+    std::snprintf(csvPath, sizeof(csvPath), "%s/glat_trace.csv", cfg.outDir.c_str());
+    std::FILE* f = std::fopen(csvPath, "w");
+    if (!f) {
+        std::fprintf(stderr, "[SNAPSHOT] fopen('%s') failed: %s\n", csvPath, std::strerror(errno));
+        ThreadPool::instance().close();
+        return 4;
+    }
+    std::fprintf(f, "timer,st,rx,ry,rz,camX,camY,camZ\n");
+    // %.9g preserves enough digits to round-trip a float exactly so a
+    // single-bit divergence shows up as different text.
+    for (const auto& s : g_glatoTraceBuf) {
+        std::fprintf(f, "%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+                     s.timer, s.st, s.rx, s.ry, s.rz, s.camX, s.camY, s.camZ);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[SNAPSHOT] wrote %s (%zu rows)\n", csvPath, g_glatoTraceBuf.size());
+
+    ThreadPool::instance().close();
+    return 0;
 }
