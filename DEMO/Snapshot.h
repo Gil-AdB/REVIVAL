@@ -28,3 +28,9 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);
 // state to <outDir>/glat_trace.csv. Useful for cross-platform / cross-
 // commit comparison of animation behaviour.
 int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres);
+
+// Renders FillerTest's two-triangle quad through TheOtherBarry per seed,
+// dumping VPage/Z to <outDir>/filler_t<seed>_color.ppm + _z.pgm. Used to
+// reproduce rasterizer-edge / mask divergence between native and wasm in
+// isolation from the city pipeline.
+int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres);

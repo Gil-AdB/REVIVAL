@@ -1129,7 +1129,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "glat-trace") {
 			return RunGlatTrace(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace)\n",
+		if (snap.scene == "filler") {
+			return RunFillerTestSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

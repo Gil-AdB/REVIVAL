@@ -1305,3 +1305,133 @@ void FillerTest()
 
 	delete [] l_TestTexture;
 }
+
+// -----------------------------------------------------------------------------
+// Snapshot harness entry points. Mirrors the relevant parts of FillerTest()'s
+// setup but skips the loop / FPS overlay / Mekalele path; the renderer is
+// pinned to TheOtherBarry so we can isolate the rasterizer-edge / mask
+// behaviour under wasm-vs-native diff.
+
+static Scene s_snapshotScene;
+static Material* s_snapshotGradient = nullptr;
+
+static void drawPolyOtherBarry(float T_in, float DT)
+{
+	Vertex V[4];
+	Face F;
+
+	float a = (T_in + DT) * 0.003f;
+	float c = cosf(a);
+	float s = sinf(a);
+
+	const auto W = 280;
+	const auto H = 250;
+
+	V[0].PX = 900.1f - W * c - H * s;
+	V[0].PY = 400.1f + W * s - H * c;
+	V[0].TPos.z = 1.0f;
+	V[0].U = -1.0f / 512.0f;
+	V[0].V = -1.0f / 512.0f;
+
+	V[1].PX = 900.1f + W * c - H * s;
+	V[1].PY = 400.1f - W * s - H * c;
+	V[1].TPos.z = 1.0f;
+	V[1].U = 511.0f / 512.0f;
+	V[1].V = -1.0f / 512.0f;
+
+	V[2].PX = 900.1f + W * c + H * s;
+	V[2].PY = 400.1f - W * s + H * c;
+	V[2].TPos.z = 1.0f;
+	V[2].U = 511.0f / 512.0f;
+	V[2].V = 511.0f / 512.0f;
+
+	V[3].PX = 900.1f - W * c + H * s;
+	V[3].PY = 400.1f + W * s + H * c;
+	V[3].TPos.z = 1.0f;
+	V[3].U = -1.0f / 512.0f;
+	V[3].V = 511.0f / 512.0f;
+
+	for (int i = 0; i < 4; i++) {
+		V[i].LR = V[i].LG = V[i].LB = V[i].LA = 255;
+	}
+
+	F.Txtr = &DummyMat;
+	DummyMat.Txtr = &DummyTex;
+	DummyTex.Data = (byte*)l_TestTexture;
+	DummyTex.Mipmap[0] = DummyTex.Data;
+	DummyTex.LSizeX = 8;
+	DummyTex.LSizeY = 8;
+	F.Txtr->ZBufferWrite = 0;
+	F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::NORMAL>;
+
+	Viewport vp;
+	vp.ClipX1 = 0;
+	vp.ClipX2 = XRes;
+	vp.ClipY1 = 0;
+	vp.ClipY2 = YRes_1;
+
+	for (int i = 0; i < 4; i++) {
+		V[i].RZ = 1.0f / V[i].TPos.z;
+		V[i].UZ = V[i].U * V[i].RZ;
+		V[i].VZ = V[i].V * V[i].RZ;
+		viewportCalcFlags(vp, &V[i]);
+	}
+
+	counter = 0;
+	ThreadPool::instance().enqueue([&F, &vp, V = &V[0]]() {
+		F.A = &V[0]; F.B = &V[1]; F.C = &V[2];
+		_2DClipper::getInstance()->clip(vp, F);
+
+		F.A = &V[0]; F.B = &V[2]; F.C = &V[3];
+		_2DClipper::getInstance()->clip(vp, F);
+
+		std::unique_lock<std::mutex> lock(mut);
+		++counter;
+		cv.notify_one();
+	});
+
+	{
+		std::unique_lock<std::mutex> lock(mut);
+		cv.wait(lock, [] { return counter == 1; });
+	}
+}
+
+void FillerTestSnapshotInit(int /*xres*/, int /*yres*/)
+{
+	CurScene = &s_snapshotScene;
+	s_snapshotScene.Flags = 0;
+	s_snapshotScene.NZP = 0.5f;
+	s_snapshotScene.FZP = 1000.0f;
+
+	std::vector<GradientEndpoint> endpoints;
+	endpoints.emplace_back(0,    Color{ 0.0, 0.0, 0.0, 0.2 });
+	endpoints.emplace_back(0.5,  Color{ 0.3, 0.0, 0.1, 0.2 });
+	endpoints.emplace_back(0.6,  Color{ 1.0, 0.0, 0.1, 0.2 });
+	endpoints.emplace_back(0.75, Color{ 1.0, 0.4, 0.8, 0.2 });
+	endpoints.emplace_back(0.8,  Color{ 1.0, 1.0, 1.0, 0.2 });
+	endpoints.emplace_back(1.0,  Color{ 1.0, 1.0, 1.0, 0.2 });
+
+	s_snapshotGradient = Generate_Gradient(endpoints, 256, 0.2, false);
+	l_TestTexture = (DWord*)s_snapshotGradient->Txtr->Data;
+
+	for (dword j = 0; j < 256; ++j) {
+		for (dword i = 0; i < 256; ++i) {
+			l_TestTexture[i + (j << 8)] = 0xFFFFFF;
+		}
+	}
+	Sachletz(l_TestTexture, 256, 256);
+	s_snapshotGradient->Txtr->Flags = Txtr_Tiled | Txtr_Nomip;
+}
+
+void FillerTestSnapshotRender(int32_t seed)
+{
+	const std::size_t zSize = sizeof(word) * static_cast<std::size_t>(XRes) * YRes;
+	memset(VPage, 0, PageSize + zSize);
+	drawPolyOtherBarry(static_cast<float>(seed) * 0.5f, 500.0f);
+}
+
+void FillerTestSnapshotCleanup()
+{
+	l_TestTexture = nullptr;
+	s_snapshotGradient = nullptr;
+}
