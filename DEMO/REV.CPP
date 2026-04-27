@@ -461,6 +461,7 @@ material global ID or ptr
 #include "FillerTest.h"
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
+#include "Snapshot.h"
 #include <float.h>
 #include <Base/TriMesh.h>
 #include "Config.h"
@@ -1117,6 +1118,13 @@ int main(int argc, const char *argv[])
 	g_demoXRes = cfg.extractInteger("ResolutionX");
 	g_demoYRes = cfg.extractInteger("ResolutionY");
 	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
+
+	SnapshotConfig snap;
+	if (ParseSnapshotArgs(argc, argv, snap)) {
+		// Headless deterministic dump path — no SDL window, no music.
+		// Used to diff native vs wasm at the pixel level.
+		return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
+	}
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
 

@@ -306,6 +306,7 @@ DEMO.exe
 /libpng
 /Runtime/logfile.txt
 /Runtime/fountain-profiling.txt
+/Runtime/snapshots/
 /libpng16/libpng16.lib
 /libpng16/zlib.lib
 /build-wasm/
