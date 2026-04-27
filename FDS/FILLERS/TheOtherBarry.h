@@ -103,14 +103,12 @@ inline Vec8f compat_approx_recipr(Vec8f a) {
 // On wasm, _mm256_cvtps_epi32 → simde → nearbyintf which uses the C-library
 // rounding mode (round-to-nearest-even on wasm, with no way to change it).
 // On x86/arm64 the same call respects the ROUND_UP mode that FPU_LPrecision()
-// sets, biasing UV/Z conversions slightly upward. Beyond the convert itself,
-// every preceding FP add/mul on x86/arm64 also rounds up by ~1 ULP, so by
-// the time a value reaches the convert it's accumulated a small upward bias.
-// Emulate that on wasm via ceil-after-tiny-relative-nudge so values that
-// would land exactly on integer boundaries pop to the same texel as macOS.
+// sets, biasing UV conversions slightly upward — the rasterizer's texel
+// addressing depends on that bias. Emulate ROUND_UP via explicit ceil before
+// convert so values land on the same texel as the native build.
 inline Vec8i compat_roundi(Vec8f a) {
 #if defined(__EMSCRIPTEN__)
-	return _mm256_cvtps_epi32(_mm256_ceil_ps(a * Vec8f(1.0f + 1.0e-5f)));
+	return _mm256_cvtps_epi32(_mm256_ceil_ps(a));
 #else
 	return roundi(a);
 #endif
