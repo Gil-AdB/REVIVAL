@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "FillerTest.h"
 #include "GLAT.H"
 #include "Rev.h"
 #include "Scenes.h"
@@ -293,4 +294,36 @@ int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres) {
 
     ThreadPool::instance().close();
     return 0;
+}
+
+int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    FillerTestSnapshotInit(xres, yres);
+
+    std::vector<int32_t> seeds = cfg.timestamps;
+    if (seeds.empty()) seeds = {0};
+
+    int produced = 0;
+    for (int32_t seed : seeds) {
+        FillerTestSnapshotRender(seed);
+
+        char colorPath[1024];
+        char zPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/filler_t%06d_color.ppm",
+                      cfg.outDir.c_str(), seed);
+        std::snprintf(zPath, sizeof(zPath), "%s/filler_t%06d_z.pgm",
+                      cfg.outDir.c_str(), seed);
+
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        write_pgm16(zPath,
+                    reinterpret_cast<const word*>(MainSurf->Data + MainSurf->PageSize),
+                    xres, yres);
+        ++produced;
+    }
+
+    FillerTestSnapshotCleanup();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
 }
