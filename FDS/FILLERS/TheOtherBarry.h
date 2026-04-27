@@ -245,7 +245,15 @@ struct TileRasterizer {
 		//Vec16s rg
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += XRes) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
-			if (horizontal_or(p_mask)) {
+			// horizontal_or(Vec8ib) compiles to !_mm256_testz_si256(a,a).
+			// simde's wasm impl of testz misses some cases where only the
+			// low lane has bits set (we observed lane 0 = 0xFFFFFFFF +
+			// horizontal_or returning 0), which silently drops every pixel
+			// on a triangle edge whose 8-pixel SIMD row has only lane 0
+			// inside the triangle. _mm256_movemask_epi8 routes through a
+			// different simde primitive that handles this correctly on
+			// every target.
+			if (_mm256_movemask_epi8(*(__m256i*)(&p_mask)) != 0) {
 				Vec8f p_z = compat_approx_recipr(p_rz);
 
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(compat_roundi(g_zscale * p_z)));
@@ -257,7 +265,7 @@ struct TileRasterizer {
 
 				p_mask &= zmask;
 
-				if (horizontal_or(p_mask)) {
+				if (_mm256_movemask_epi8(*(__m256i*)(&p_mask)) != 0) {
 
 //					if constexpr (BlendMode != TBlendMode::TRANSPARENT) {
 						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
