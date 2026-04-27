@@ -23,3 +23,8 @@ struct SnapshotConfig {
 bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);
 
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);
+
+// Drives Glat through a deterministic Timer sweep and records per-tick
+// state to <outDir>/glat_trace.csv. Useful for cross-platform / cross-
+// commit comparison of animation behaviour.
+int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres);

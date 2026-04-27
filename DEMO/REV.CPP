@@ -1122,8 +1122,16 @@ int main(int argc, const char *argv[])
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {
 		// Headless deterministic dump path — no SDL window, no music.
-		// Used to diff native vs wasm at the pixel level.
-		return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
+		// Used to diff native vs wasm at the pixel level / per-tick state.
+		if (snap.scene == "city") {
+			return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
+		}
+		if (snap.scene == "glat-trace") {
+			return RunGlatTrace(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace)\n",
+		        snap.scene.c_str());
+		return 2;
 	}
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
