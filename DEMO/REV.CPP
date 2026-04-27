@@ -1201,11 +1201,54 @@ int main(int argc, const char *argv[])
 		if (event.type == SDL_QUIT) {
 			break;
 		}
-		if (event.type == SDL_KEYDOWN) {
-			Keyboard[event.key.keysym.scancode] = 1;
-		}
-		if (event.type == SDL_KEYUP) {
-			Keyboard[event.key.keysym.scancode] = 0;
+		if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+			// FDS_DEFS.H ScXxx constants are PS/2 set-1 scancodes inherited
+			// from the original DOS build; SDL2 reports USB-HID scancodes,
+			// which collide for almost everything. Only ScESC happens to
+			// match (both = 41), which is why exit worked but pause/tab/etc.
+			// did not. Translate so the legacy scene code keeps working.
+			int legacy = -1;
+			switch (event.key.keysym.scancode) {
+				case SDL_SCANCODE_ESCAPE:    legacy = ScESC; break;
+				case SDL_SCANCODE_F1:        legacy = ScF1; break;
+				case SDL_SCANCODE_F2:        legacy = ScF2; break;
+				case SDL_SCANCODE_F11:       legacy = ScF11; break;
+				case SDL_SCANCODE_TAB:       legacy = ScTab; break;
+				case SDL_SCANCODE_SPACE:     legacy = ScSpace; break;
+				case SDL_SCANCODE_LCTRL:
+				case SDL_SCANCODE_RCTRL:     legacy = ScCtrl; break;
+				case SDL_SCANCODE_LEFT:      legacy = ScLeft; break;
+				case SDL_SCANCODE_RIGHT:     legacy = ScRight; break;
+				case SDL_SCANCODE_UP:        legacy = ScUp; break;
+				case SDL_SCANCODE_DOWN:      legacy = ScDown; break;
+				case SDL_SCANCODE_HOME:      legacy = ScHome; break;
+				case SDL_SCANCODE_END:       legacy = ScEnd; break;
+				case SDL_SCANCODE_PAGEUP:    legacy = ScPgUp; break;
+				case SDL_SCANCODE_PAGEDOWN:  legacy = ScPgDn; break;
+				case SDL_SCANCODE_KP_MINUS:
+				case SDL_SCANCODE_MINUS:     legacy = ScGrayMinus; break;
+				case SDL_SCANCODE_KP_PLUS:
+				case SDL_SCANCODE_EQUALS:    legacy = ScGrayPlus; break;
+				case SDL_SCANCODE_LEFTBRACKET:  legacy = ScOpenSq; break;
+				case SDL_SCANCODE_RIGHTBRACKET: legacy = ScCloseSq; break;
+				case SDL_SCANCODE_COMMA:     legacy = ScComma; break;
+				case SDL_SCANCODE_PERIOD:    legacy = ScPeriod; break;
+				case SDL_SCANCODE_A:         legacy = ScA; break;
+				case SDL_SCANCODE_C:         legacy = ScC; break;
+				case SDL_SCANCODE_D:         legacy = ScD; break;
+				case SDL_SCANCODE_E:         legacy = ScE; break;
+				case SDL_SCANCODE_H:         legacy = ScH; break;
+				case SDL_SCANCODE_M:         legacy = ScM; break;
+				case SDL_SCANCODE_P:         legacy = ScP; break;
+				case SDL_SCANCODE_R:         legacy = ScR; break;
+				case SDL_SCANCODE_U:         legacy = ScU; break;
+				case SDL_SCANCODE_Y:         legacy = ScY; break;
+				case SDL_SCANCODE_Z:         legacy = ScZ; break;
+				default: break;
+			}
+			if (legacy >= 0) {
+				Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
+			}
 		}
     }
 

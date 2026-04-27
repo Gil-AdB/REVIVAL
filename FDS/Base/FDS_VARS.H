@@ -838,8 +838,22 @@ inline void FastWrite(void *p, dword data, dword n)
 
 inline void rcpss(float *s)
 {
+#if defined(__EMSCRIPTEN__)
+	// simde maps _mm_rcp_ss to wasm_f32x4_div (full IEEE precision) on wasm,
+	// while x86/arm64 give ~12-bit approximate. The rasterizer was tuned for
+	// approximate-reciprocal bias and produces per-span seam artifacts when
+	// the reciprocal is too accurate. Use a bit-trick + 1 Newton step to
+	// match x86 RCPSS precision on wasm.
+	float a = *s;
+	int32_t i;
+	__builtin_memcpy(&i, &a, sizeof(i));
+	i = 0x7EF311C3 - i;
+	float y;
+	__builtin_memcpy(&y, &i, sizeof(y));
+	*s = y * (2.0f - a * y);
+#else
 	*s = _mm_cvtss_f32(_mm_rcp_ss(_mm_load_ss(s)));
-	//*s = 1.0 / *s;
+#endif
 }
 
 #pragma pack (pop)
