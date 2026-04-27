@@ -34,7 +34,9 @@ set(DEMO_SOURCES
     Scenes.h
     SceneTick.h
     SDL2.cpp
-    SDL2.h)
+    SDL2.h
+    Snapshot.cpp
+    Snapshot.h)
 
 source_group("" FILES ${DEMO_SOURCES})
 

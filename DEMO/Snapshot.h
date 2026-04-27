@@ -1,0 +1,25 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+// CLI-driven scene snapshot harness. Renders one or more deterministic
+// frames of a scene without the SDL window or audio path so we can diff
+// native vs wasm output at the pixel level.
+//
+// Invocation (parsed by ParseSnapshotArgs):
+//   DEMO --snapshot=city@t=1000,5000,10000 [--out=PATH]
+//
+// For each requested Timer value we drive one tick() of the City scene
+// driver and dump VPage as PPM (color) and the Z-buffer as PGM.
+
+struct SnapshotConfig {
+    std::string scene;
+    std::vector<int32_t> timestamps;
+    std::string outDir = ".";
+};
+
+bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);
+
+int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);

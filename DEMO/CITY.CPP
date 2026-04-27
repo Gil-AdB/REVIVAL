@@ -2066,6 +2066,11 @@ std::unique_ptr<SceneDriver> createCityScene()
 	return std::make_unique<CityScene>();
 }
 
+int32_t getCityCTPartTime()
+{
+	return CTPartTime;
+}
+
 void Run_City()
 {
 	auto scene = createCityScene();
