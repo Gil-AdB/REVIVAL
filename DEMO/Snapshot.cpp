@@ -200,6 +200,10 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                          ts, ctPart, ctPart - 1);
             ts = ctPart - 1;
         }
+        // Reset rand() to a fixed seed each frame. Omni-light flicker and
+        // similar effects use rand(); without this the snapshot is
+        // non-deterministic across invocations even on the same build.
+        std::srand(0);
         // TTrd = Timer makes dTime = 0 in tick(); avoids any branch tied to
         // wall-clock motion.
         Timer = ts;

@@ -89,6 +89,37 @@ if(EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_CURRENT_SOURCE_DIR}/coi-serviceworker.js"
                 "$<TARGET_FILE_DIR:${PROJECT_NAME}>/coi-serviceworker.js")
+
+    # Headless wasm snapshot binary, runs under node:
+    #   cd Runtime && node ../build-wasm/DEMO/DEMO_snapshot.js \
+    #     --snapshot=city --out=snapshots
+    # Same source as DEMO but stripped of browser-only scaffolding so it
+    # exits cleanly after the snapshot path returns from main().
+    add_executable(DEMO_snapshot ${DEMO_SOURCES})
+    target_compile_definitions(DEMO_snapshot PRIVATE
+        SIMDE_ENABLE_NATIVE_ALIASES)
+    target_link_libraries(DEMO_snapshot PRIVATE
+        FDS
+        Modplayer)
+    target_compile_options(DEMO_snapshot PRIVATE -pthread)
+    target_link_options(DEMO_snapshot PRIVATE
+        -pthread
+        -sENVIRONMENT=node
+        # NODERAWFS gives fopen() direct access to the host filesystem so
+        # PPM/PGM/CSV outputs land on disk and the demo's relative-path
+        # asset loads (rev.cfg, SCENES/, ...) work when run from Runtime/.
+        -sNODERAWFS=1
+        -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+4
+        -sSTACK_SIZE=4MB
+        -sDEFAULT_PTHREAD_STACK_SIZE=4MB
+        -sALLOW_BLOCKING_ON_MAIN_THREAD=1
+        -sALLOW_MEMORY_GROWTH=1
+        -sINITIAL_MEMORY=128MB
+        -sASSERTIONS=1
+        -sEXIT_RUNTIME=1
+        -sUSE_SDL=2
+    )
+    set_target_properties(DEMO_snapshot PROPERTIES SUFFIX ".js")
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE
         FDS
