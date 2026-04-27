@@ -81,6 +81,39 @@ inline TScreenCoord orient2d(
 	return (int64_t(bx - ax) * int64_t(cy - ay) - int64_t(by - ay) * int64_t(cx - ax)) >> SUBPIXEL_BITS;
 }
 
+// On wasm, simde maps _mm_rcp_ps / _mm256_rcp_ps to wasm_f32x4_div(1, x) —
+// full IEEE precision. The rasterizer's perspective-correct mapping was
+// tuned for the ~12-bit approximate reciprocal that x86 (RCPPS) and arm64
+// (vrecpeq_f32) produce; the extra precision lands UVs exactly on texel
+// boundaries where the float-to-int convert flips, producing 1-pixel
+// perspective seam artifacts. Bit-trick initial estimate + 1 Newton-Raphson
+// step gives matching ~12-bit precision on wasm. Other targets keep the
+// native path.
+inline Vec8f compat_approx_recipr(Vec8f a) {
+#if defined(__EMSCRIPTEN__)
+	Vec8i ai = _mm256_castps_si256(a);
+	Vec8i mi = Vec8i(0x7EF311C3) - ai;
+	Vec8f y = _mm256_castsi256_ps(mi);
+	return y * (Vec8f(2.0f) - a * y);
+#else
+	return approx_recipr(a);
+#endif
+}
+
+// On wasm, _mm256_cvtps_epi32 → simde → nearbyintf which uses the C-library
+// rounding mode (round-to-nearest-even on wasm, with no way to change it).
+// On x86/arm64 the same call respects the ROUND_UP mode that FPU_LPrecision()
+// sets, biasing UV conversions slightly upward — the rasterizer's texel
+// addressing depends on that bias. Emulate ROUND_UP via explicit ceil before
+// convert so values land on the same texel as the native build.
+inline Vec8i compat_roundi(Vec8f a) {
+#if defined(__EMSCRIPTEN__)
+	return _mm256_cvtps_epi32(_mm256_ceil_ps(a));
+#else
+	return roundi(a);
+#endif
+}
+
 // block-tiling adjustment functions
 // Example for 256x256 texture
 //    3         2         1         0
@@ -221,9 +254,9 @@ struct TileRasterizer {
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += XRes) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
 			if (horizontal_or(p_mask)) {
-				Vec8f p_z = approx_recipr(p_rz);
+				Vec8f p_z = compat_approx_recipr(p_rz);
 
-				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
+				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(compat_roundi(g_zscale * p_z)));
 				Vec8us z_existing_c;
 				z_existing_c.load_a(zspan);
 				auto z_existing = extend(z_existing_c);
@@ -238,8 +271,8 @@ struct TileRasterizer {
 						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
 					//}
 
-					Vec8i u = roundi(p_uz * p_z * t0.UScaleFactor);
-					Vec8i v = roundi(p_vz * p_z * t0.VScaleFactor);
+					Vec8i u = compat_roundi(p_uz * p_z * t0.UScaleFactor);
+					Vec8i v = compat_roundi(p_vz * p_z * t0.VScaleFactor);
 
 					Vec8i tu = packed_tile_u(u, t0.LogHeight, t0_umask_swizzled);
 					Vec8i tv = packed_tile_v(v, t0_vmask);
@@ -250,8 +283,8 @@ struct TileRasterizer {
 
 					auto texture0_samples = gather(Vec8ui(p_offset), t0.TextureAddr, p_mask);
 					if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
-						Vec8i u1 = roundi(p_u1z * p_z * 1024.0f);
-						Vec8i v1 = roundi(p_v1z * p_z * 1024.0f);
+						Vec8i u1 = compat_roundi(p_u1z * p_z * 1024.0f);
+						Vec8i v1 = compat_roundi(p_v1z * p_z * 1024.0f);
 
 						Vec8i tu1 = packed_tile_u(u1, 10, t1_umask_swizzled);
 						Vec8i tv1 = packed_tile_v(v1, t1_vmask);

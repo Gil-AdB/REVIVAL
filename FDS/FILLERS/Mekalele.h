@@ -196,9 +196,9 @@ struct TileRasterizer {
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
 			if (horizontal_or(p_mask)) {
-				Vec8f p_z = approx_recipr(p_rz);
+				Vec8f p_z = barry::compat_approx_recipr(p_rz);
 
-				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
+				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(barry::compat_roundi(g_zscale * p_z)));
 				Vec8us z_existing_c;
 				z_existing_c.load_a(span.zbuffer);
 				auto z_existing = extend(z_existing_c);
@@ -209,8 +209,8 @@ struct TileRasterizer {
 
 				if (horizontal_or(p_mask)) {
 					*(__m128i*)span.zbuffer = _mm_blendv_epi8(*(__m128i*)span.zbuffer, compress(z_candidate), compress(Vec8ui(p_mask)));
-					Vec8i u = roundi(p_uz * p_z * UScaleFactor);
-					Vec8i v = roundi(p_vz * p_z * VScaleFactor);
+					Vec8i u = barry::compat_roundi(p_uz * p_z * UScaleFactor);
+					Vec8i v = barry::compat_roundi(p_vz * p_z * VScaleFactor);
 
 					Vec8i tu = packed_tile_u(u, LogHeight, t_umask_swizzled);
 					Vec8i tv = packed_tile_v(v, t_vmask);
