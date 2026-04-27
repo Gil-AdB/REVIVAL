@@ -1320,36 +1320,46 @@ static void drawPolyOtherBarry(float T_in, float DT)
 	Vertex V[4];
 	Face F;
 
-	float a = (T_in + DT) * 0.003f;
-	float c = cosf(a);
-	float s = sinf(a);
+	// seed==0 uses axis-aligned integer-valued vertices so vertex coords
+	// are bit-identical across platforms (no sinf/cosf, no libm noise).
+	// Any remaining native-vs-wasm diff in this configuration is purely a
+	// rasterizer-side bug. Non-zero seeds keep the original rotation path.
+	if (T_in == 0.0f) {
+		V[0].PX = 600.0f; V[0].PY = 200.0f;
+		V[1].PX = 1200.0f; V[1].PY = 200.0f;
+		V[2].PX = 1200.0f; V[2].PY = 800.0f;
+		V[3].PX = 600.0f; V[3].PY = 800.0f;
+		V[0].U = -1.0f / 512.0f; V[0].V = -1.0f / 512.0f;
+		V[1].U = 511.0f / 512.0f; V[1].V = -1.0f / 512.0f;
+		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
+		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
+		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
+	} else {
+		float a = (T_in + DT) * 0.003f;
+		float c = cosf(a);
+		float s = sinf(a);
 
-	const auto W = 280;
-	const auto H = 250;
+		const auto W = 280;
+		const auto H = 250;
 
-	V[0].PX = 900.1f - W * c - H * s;
-	V[0].PY = 400.1f + W * s - H * c;
-	V[0].TPos.z = 1.0f;
-	V[0].U = -1.0f / 512.0f;
-	V[0].V = -1.0f / 512.0f;
+		V[0].PX = 900.1f - W * c - H * s;
+		V[0].PY = 400.1f + W * s - H * c;
+		V[0].U = -1.0f / 512.0f; V[0].V = -1.0f / 512.0f;
 
-	V[1].PX = 900.1f + W * c - H * s;
-	V[1].PY = 400.1f - W * s - H * c;
-	V[1].TPos.z = 1.0f;
-	V[1].U = 511.0f / 512.0f;
-	V[1].V = -1.0f / 512.0f;
+		V[1].PX = 900.1f + W * c - H * s;
+		V[1].PY = 400.1f - W * s - H * c;
+		V[1].U = 511.0f / 512.0f; V[1].V = -1.0f / 512.0f;
 
-	V[2].PX = 900.1f + W * c + H * s;
-	V[2].PY = 400.1f - W * s + H * c;
-	V[2].TPos.z = 1.0f;
-	V[2].U = 511.0f / 512.0f;
-	V[2].V = 511.0f / 512.0f;
+		V[2].PX = 900.1f + W * c + H * s;
+		V[2].PY = 400.1f - W * s + H * c;
+		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
 
-	V[3].PX = 900.1f - W * c + H * s;
-	V[3].PY = 400.1f + W * s + H * c;
-	V[3].TPos.z = 1.0f;
-	V[3].U = -1.0f / 512.0f;
-	V[3].V = 511.0f / 512.0f;
+		V[3].PX = 900.1f - W * c + H * s;
+		V[3].PY = 400.1f + W * s + H * c;
+		V[3].U = -1.0f / 512.0f; V[3].V = 511.0f / 512.0f;
+
+		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
+	}
 
 	for (int i = 0; i < 4; i++) {
 		V[i].LR = V[i].LG = V[i].LB = V[i].LA = 255;

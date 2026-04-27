@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 
 #include "Base/FDS_DECS.H"
 #include "F4Vec.h"
@@ -327,12 +328,18 @@ struct TileRasterizer {
 		const int tile_my = clampedY(std::min({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
 		const int tile_My = clampedY(std::max({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
 
-		TScreenCoord v1x = TScreenCoord(v1.PX * SUBPIXEL_MULT + 0.5);
-		TScreenCoord v1y = TScreenCoord(v1.PY * SUBPIXEL_MULT + 0.5);
-		TScreenCoord v2x = TScreenCoord(v2.PX * SUBPIXEL_MULT + 0.5);
-		TScreenCoord v2y = TScreenCoord(v2.PY * SUBPIXEL_MULT + 0.5);
-		TScreenCoord v3x = TScreenCoord(v3.PX * SUBPIXEL_MULT + 0.5);
-		TScreenCoord v3y = TScreenCoord(v3.PY * SUBPIXEL_MULT + 0.5);
+		// std::lroundf does round-half-away-from-zero in software, ignoring
+		// the FPU rounding mode. The float `v.PX * SUBPIXEL_MULT` step is
+		// still subject to FPCR on native (ROUND_UP) vs RTNE on wasm, but
+		// doing the *round* in lroundf instead of `int(x + 0.5)` makes the
+		// conversion stable even when the multiplication lands exactly on a
+		// half-integer.
+		TScreenCoord v1x = TScreenCoord(std::lroundf(v1.PX * SUBPIXEL_MULT));
+		TScreenCoord v1y = TScreenCoord(std::lroundf(v1.PY * SUBPIXEL_MULT));
+		TScreenCoord v2x = TScreenCoord(std::lroundf(v2.PX * SUBPIXEL_MULT));
+		TScreenCoord v2y = TScreenCoord(std::lroundf(v2.PY * SUBPIXEL_MULT));
+		TScreenCoord v3x = TScreenCoord(std::lroundf(v3.PX * SUBPIXEL_MULT));
+		TScreenCoord v3y = TScreenCoord(std::lroundf(v3.PY * SUBPIXEL_MULT));
 
 		TScreenCoord x0 = tile_mx * TILE_SIZE << SUBPIXEL_BITS;
 		TScreenCoord y0 = tile_my * TILE_SIZE << SUBPIXEL_BITS;
