@@ -82,28 +82,39 @@ inline TScreenCoord orient2d(
 	return (int64_t(bx - ax) * int64_t(cy - ay) - int64_t(by - ay) * int64_t(cx - ax)) >> SUBPIXEL_BITS;
 }
 
-// Native (x86 RCPPS, arm64 vrecpeq_f32) and wasm (simde → exact 1/x) all
-// produce *different* bit patterns even at similar nominal precision.
-// The rasterizer's per-tile UV chain is sensitive enough that those
-// differences flip Z-test outcomes at polygon edges and shift point-
-// sampled texel lookups by 1 — visible as polygon seams native-side and
-// black speckle / heavier divergence wasm-side. Use a deterministic
-// bit-trick + 1 Newton-Raphson step on every target so all builds compute
-// the same ~12-bit approximate reciprocal.
+// On wasm, simde maps _mm_rcp_ps / _mm256_rcp_ps to wasm_f32x4_div(1, x) —
+// full IEEE precision. The rasterizer's perspective-correct mapping was
+// tuned for the ~12-bit approximate reciprocal that x86 (RCPPS) and arm64
+// (vrecpeq_f32) produce; the extra precision lands UVs exactly on texel
+// boundaries where the float-to-int convert flips. Bit-trick + 1 Newton
+// step gives matching ~12-bit precision on wasm. Native paths keep their
+// hardware reciprocal — switching arm64 to the bit-trick path shifted
+// pass-1/pass-2 Z values relative to each other and let the wobble bleed
+// through opaque geometry in the City scene.
 inline Vec8f compat_approx_recipr(Vec8f a) {
+#if defined(__EMSCRIPTEN__)
 	Vec8i ai = _mm256_castps_si256(a);
 	Vec8i mi = Vec8i(0x7EF311C3) - ai;
 	Vec8f y = _mm256_castsi256_ps(mi);
 	return y * (Vec8f(2.0f) - a * y);
+#else
+	return approx_recipr(a);
+#endif
 }
 
-// The rasterizer's texel addressing was tuned for ROUND_UP at the float→int
-// step. Native (x86 MXCSR / arm64 FPCR) gets that via FPU_LPrecision(); wasm
-// has no rounding-mode register, so we have to emulate. Use explicit ceil
-// before the convert on every target so the rasterizer behaves identically
-// regardless of FPCR — no implicit dependency on the host rounding mode.
+// On wasm, _mm256_cvtps_epi32 → simde → nearbyintf which uses the C-library
+// rounding mode (round-to-nearest-even on wasm, with no way to change it).
+// On x86/arm64 the same call respects the ROUND_UP mode that FPU_LPrecision()
+// sets, biasing every FP op feeding into the convert; the rasterizer's
+// per-pixel UV stepping accumulates that bias. Emulate via explicit ceil
+// before convert on wasm; native keeps the FPCR-driven path so the City
+// scene's pass-2 Z-test still overdraws the wobbled reflection correctly.
 inline Vec8i compat_roundi(Vec8f a) {
+#if defined(__EMSCRIPTEN__)
 	return _mm256_cvtps_epi32(_mm256_ceil_ps(a));
+#else
+	return roundi(a);
+#endif
 }
 
 // block-tiling adjustment functions
