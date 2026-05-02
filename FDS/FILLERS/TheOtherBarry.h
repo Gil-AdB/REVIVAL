@@ -81,6 +81,24 @@ inline TScreenCoord orient2d(
 	return (int64_t(bx - ax) * int64_t(cy - ay) - int64_t(by - ay) * int64_t(cx - ax)) >> SUBPIXEL_BITS;
 }
 
+// On wasm, simde maps _mm_rcp_ps / _mm256_rcp_ps to wasm_f32x4_div(1, x) —
+// full IEEE precision. The rasterizer's perspective-correct mapping was
+// tuned for the ~12-bit approximate reciprocal that x86 RCPPS and arm64
+// vrecpeq_f32 produce; the extra precision lands UVs exactly on texel
+// boundaries where the float-to-int convert flips, producing per-span
+// seam artifacts. Bit-trick + 1 Newton step gives matching ~12-bit
+// precision on wasm. Native paths keep their hardware reciprocal.
+inline Vec8f compat_approx_recipr(Vec8f a) {
+#if defined(__EMSCRIPTEN__)
+	Vec8i ai = _mm256_castps_si256(a);
+	Vec8i mi = Vec8i(0x7EF311C3) - ai;
+	Vec8f y = _mm256_castsi256_ps(mi);
+	return y * (Vec8f(2.0f) - a * y);
+#else
+	return approx_recipr(a);
+#endif
+}
+
 // block-tiling adjustment functions
 // Example for 256x256 texture
 //    3         2         1         0
@@ -221,7 +239,7 @@ struct TileRasterizer {
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += XRes) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
 			if (horizontal_or(p_mask)) {
-				Vec8f p_z = approx_recipr(p_rz);
+				Vec8f p_z = compat_approx_recipr(p_rz);
 
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
 				Vec8us z_existing_c;
