@@ -228,6 +228,11 @@ struct GlatoScene : SceneDriver {
 	XMMMatrix CamMat;
 	float Rx = 0.0f, Ry = 0.0f, Rz = 0.0f;
 
+	// Conditionally written inside tick (only while ST is in range); reads
+	// outside that window must see the last computed value, not 0.
+	float Code_RS = 0.0f;
+	float Gfx_RS = 0.0f;
+
 	dword TTrd = 0;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -259,9 +264,9 @@ struct GlatoScene : SceneDriver {
 		float a = 0.0f, bb = 0.0f, c = 0.0f, d = 0.0f;
 		float X1 = 0.0f, X2 = 0.0f;
 		float u, v, u1, v1, u2, v2, r, g, b;
-		float Code_R1 = 0.0f, Code_RS = 0.0f, Code_R2;
+		float Code_R1 = 0.0f, Code_R2;
 		float CCosR1, CSinR1, CCosR2, CSinR2;
-		float Gfx_R1, Gfx_R2, GCosR1, GSinR1, GCosR2, GSinR2, Gfx_RS = 0.0f;
+		float Gfx_R1, Gfx_R2, GCosR1, GSinR1, GCosR2, GSinR2;
 		XMMVector Intersection1, Origin1, Direction1, U;
 		int X, Y;
 		float Radius = 1;
