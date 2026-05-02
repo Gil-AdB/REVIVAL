@@ -704,28 +704,27 @@ inline void FPU_LPrecision()
 	_mm_setcsr(CurMXCSR);
 #elif defined(__ARM_ARCH)
 
+	// Effective FP spec: round-to-nearest-even + flush-to-zero on outputs.
+	// The 1998 Watcom build used round-toward-+infinity, but f4ad9ab
+	// (2023-08-29) silently dropped a `<< 22` shift when refactoring the
+	// rounding-mode setup, leaving RMode at its default RTNE. TheOtherBarry
+	// rasterizer was written and tuned in that period — its boundary
+	// behavior is implicitly specified against RTNE, not round-up. Adopting
+	// RTNE explicitly here aligns native with wasm (which has no FPCR
+	// equivalent) and matches what's actually been shipping for ~2.5 years.
+	//
+	// AH=1 means FZ controls only output flushing; FIZ would control input
+	// flushing (left zero — denormal inputs pass through unchanged).
 	uint64_t default_fpcr = GetFPCR();
 	OldMXCSR = default_fpcr;
-	// When AH is disabled, FZ controls flush-to-zero for both inputs and outputs. When AH is enabled,
-	// FZ controls flush-to-zero for outputs, and FIZ controls flush-to-zero for inputs.
 	constexpr uint32_t FZ = 1 << 24;
 	constexpr uint32_t AH = 1 << 1;
 	constexpr uint32_t FIZ = 1 << 0;
 	constexpr uint32_t flush_to_zero_mask = FZ | AH | FIZ;
-
-	enum ROUNDING_MODE {
-		NEAREST,
-		ROUND_DOWN,
-		ROUND_UP,
-		ROUND_TO_ZERO
-	};
-
 	constexpr uint32_t rounding_mode_mask = 3 << 22;
-	const uint32_t rounding_mode_bits = ROUND_UP;
-	const uint32_t flush_to_zero_bits = FZ | AH;
 
 	const uint64_t base = default_fpcr & ~(flush_to_zero_mask | rounding_mode_mask);
-  	SetFPCR(base | rounding_mode_bits | flush_to_zero_bits);
+	SetFPCR(base | FZ | AH);
 #else
 // #error "Unsopported arch"
 #endif
