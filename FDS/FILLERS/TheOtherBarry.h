@@ -82,6 +82,33 @@ inline TScreenCoord orient2d(
 	return (int64_t(bx - ax) * int64_t(cy - ay) - int64_t(by - ay) * int64_t(cx - ax)) >> SUBPIXEL_BITS;
 }
 
+// True iff any lane of m has its sign bit set. Used as the per-tile-row
+// "is any pixel inside the triangle / passes Z?" gate in the rasterizer.
+//
+// Native: vectorclass's horizontal_or compiles to !_mm256_testz_si256, which
+// is fine on x86/arm64.
+//
+// Wasm: simde's _mm256_testz_si256 misses some low-lane-only mask cases (we
+// observed lane 0 = 0xFFFFFFFF returning 0), silently dropping pixels along
+// triangle edges whose 8-pixel SIMD row has only lane 0 inside the triangle.
+// _mm256_movemask_epi8 is correct but expensive on wasm (no native 256-bit
+// movemask, ~15 simd ops per call), and called per tile-row it dominates
+// the rasterizer cost. Workaround: collapse the two 128-bit halves with OR
+// and test via _mm_testz_si128 — that simde mapping routes through
+// wasm_v128_any_true, which is a single instruction and isn't subject to
+// the 256-bit testz bug.
+inline bool any_lane_set(Vec8ib m) {
+#if defined(__EMSCRIPTEN__)
+	__m256i v = *(const __m256i*)(&m);
+	__m128i combined = _mm_or_si128(
+		_mm256_castsi256_si128(v),
+		_mm256_extracti128_si256(v, 1));
+	return !_mm_testz_si128(combined, combined);
+#else
+	return horizontal_or(m);
+#endif
+}
+
 // block-tiling adjustment functions
 // Example for 256x256 texture
 //    3         2         1         0
@@ -229,7 +256,7 @@ struct TileRasterizer {
 			// inside the triangle. _mm256_movemask_epi8 routes through a
 			// different simde primitive that handles this correctly on
 			// every target.
-			if (_mm256_movemask_epi8(*(__m256i*)(&p_mask)) != 0) {
+			if (any_lane_set(p_mask)) {
 				Vec8f p_z = approx_recipr(p_rz);
 
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
@@ -241,7 +268,7 @@ struct TileRasterizer {
 
 				p_mask &= zmask;
 
-				if (_mm256_movemask_epi8(*(__m256i*)(&p_mask)) != 0) {
+				if (any_lane_set(p_mask)) {
 
 //					if constexpr (BlendMode != TBlendMode::TRANSPARENT) {
 						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
