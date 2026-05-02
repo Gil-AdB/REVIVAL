@@ -837,22 +837,8 @@ inline void FastWrite(void *p, dword data, dword n)
 
 inline void rcpss(float *s)
 {
-#if defined(__EMSCRIPTEN__)
-	// simde maps _mm_rcp_ss to wasm_f32x4_div (full IEEE precision) on wasm,
-	// while x86/arm64 give ~12-bit approximate. The IX* fillers were tuned
-	// for approximate-reciprocal precision; exact reciprocals shift values
-	// enough to produce per-span artifacts. Bit-trick + 1 Newton step
-	// matches x86 RCPSS precision.
-	float a = *s;
-	int32_t i;
-	__builtin_memcpy(&i, &a, sizeof(i));
-	i = 0x7EF311C3 - i;
-	float y;
-	__builtin_memcpy(&y, &i, sizeof(y));
-	*s = y * (2.0f - a * y);
-#else
 	*s = _mm_cvtss_f32(_mm_rcp_ss(_mm_load_ss(s)));
-#endif
+	//*s = 1.0 / *s;
 }
 
 #pragma pack (pop)

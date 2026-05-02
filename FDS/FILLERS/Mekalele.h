@@ -196,7 +196,7 @@ struct TileRasterizer {
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
 			if (_mm256_movemask_epi8(*(__m256i*)(&p_mask)) != 0) {
-				Vec8f p_z = barry::compat_approx_recipr(p_rz);
+				Vec8f p_z = approx_recipr(p_rz);
 
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
 				Vec8us z_existing_c;
