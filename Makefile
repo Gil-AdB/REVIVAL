@@ -75,7 +75,7 @@ branches:
 	@echo "=== ahead of origin/master ==="
 	@for b in $$(git for-each-ref --format='%(refname:short)' refs/heads/); do \
 		ahead=$$(git rev-list --count origin/master..$$b 2>/dev/null); \
-		[ "$$ahead" != "0" ] && echo "  $$b: +$$ahead"; \
+		if [ "$$ahead" != "0" ]; then echo "  $$b: +$$ahead"; fi; \
 	done
 
 status:
