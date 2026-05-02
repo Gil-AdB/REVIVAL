@@ -1315,16 +1315,56 @@ void FillerTest()
 static Scene s_snapshotScene;
 static Material* s_snapshotGradient = nullptr;
 
-static void drawPolyOtherBarry(float T_in, float DT)
+// Fill the 256x256 test texture with a per-texel checkerboard. Each texel
+// alternates between high-contrast colors so any UV mis-step by even one
+// texel is visually loud. Used by the seam test (seed >= 2).
+static void fillCheckerboardTexture()
+{
+	for (dword j = 0; j < 256; ++j) {
+		for (dword i = 0; i < 256; ++i) {
+			// 1-texel checkerboard: black/white based on parity of (i^j).
+			l_TestTexture[i + (j << 8)] = ((i ^ j) & 1) ? 0xFFFFFFFF : 0xFF000000;
+		}
+	}
+	Sachletz(l_TestTexture, 256, 256);
+}
+
+// Restore the uniform white texture used by seed=0/1 (rasterizer-edge
+// tests where UV variation must NOT contribute to the diff).
+static void fillUniformTexture()
+{
+	for (dword j = 0; j < 256; ++j) {
+		for (dword i = 0; i < 256; ++i) {
+			l_TestTexture[i + (j << 8)] = 0xFFFFFFFF;
+		}
+	}
+	Sachletz(l_TestTexture, 256, 256);
+}
+
+static void drawPolyOtherBarry(int32_t seed)
 {
 	Vertex V[4];
 	Face F;
 
+	const float T_in = static_cast<float>(seed) * 0.5f;
+	const float DT = 500.0f;
+
 	// seed==0 uses axis-aligned integer-valued vertices so vertex coords
 	// are bit-identical across platforms (no sinf/cosf, no libm noise).
-	// Any remaining native-vs-wasm diff in this configuration is purely a
-	// rasterizer-side bug. Non-zero seeds keep the original rotation path.
-	if (T_in == 0.0f) {
+	// All vertices share TPos.z=1, so per-pixel p_z is also 1 — perspective
+	// division is a no-op. Any native-vs-wasm diff here is purely a
+	// rasterizer-side bug (mask gating, edge coverage, etc).
+	//
+	// seed==1 keeps the original rotation path, also TPos.z=1.
+	//
+	// seed==2 is the seam test: same axis-aligned screen-space rectangle as
+	// seed=0, but TPos.z varies across vertices so the rasterizer has to do
+	// real perspective-correct UV interpolation. Combined with a per-texel
+	// checkerboard texture, any per-pixel UV divergence between the two
+	// triangles (V0,V1,V2) and (V0,V2,V3) sharing the V0-V2 diagonal lights
+	// up as a seam line. Designed for native-vs-wasm seam regression
+	// hunting; useful as a proxy for the City scene's textured-edge issue.
+	if (seed == 0) {
 		V[0].PX = 600.0f; V[0].PY = 200.0f;
 		V[1].PX = 1200.0f; V[1].PY = 200.0f;
 		V[2].PX = 1200.0f; V[2].PY = 800.0f;
@@ -1334,6 +1374,20 @@ static void drawPolyOtherBarry(float T_in, float DT)
 		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
 		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
 		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
+	} else if (seed == 2) {
+		V[0].PX = 600.0f; V[0].PY = 200.0f;
+		V[1].PX = 1200.0f; V[1].PY = 200.0f;
+		V[2].PX = 1200.0f; V[2].PY = 800.0f;
+		V[3].PX = 600.0f; V[3].PY = 800.0f;
+		V[0].U = -1.0f / 512.0f; V[0].V = -1.0f / 512.0f;
+		V[1].U = 511.0f / 512.0f; V[1].V = -1.0f / 512.0f;
+		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
+		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
+		// 8x perspective ratio between top (close) and bottom (far) edges.
+		// V0-V2 diagonal spans the full depth range — that's where seams
+		// will surface if adjacent-triangle UVs diverge.
+		V[0].TPos.z = 0.5f; V[1].TPos.z = 0.5f;
+		V[2].TPos.z = 4.0f; V[3].TPos.z = 4.0f;
 	} else {
 		float a = (T_in + DT) * 0.003f;
 		float c = cosf(a);
@@ -1424,12 +1478,7 @@ void FillerTestSnapshotInit(int /*xres*/, int /*yres*/)
 	s_snapshotGradient = Generate_Gradient(endpoints, 256, 0.2, false);
 	l_TestTexture = (DWord*)s_snapshotGradient->Txtr->Data;
 
-	for (dword j = 0; j < 256; ++j) {
-		for (dword i = 0; i < 256; ++i) {
-			l_TestTexture[i + (j << 8)] = 0xFFFFFF;
-		}
-	}
-	Sachletz(l_TestTexture, 256, 256);
+	fillUniformTexture();
 	s_snapshotGradient->Txtr->Flags = Txtr_Tiled | Txtr_Nomip;
 }
 
@@ -1437,7 +1486,12 @@ void FillerTestSnapshotRender(int32_t seed)
 {
 	const std::size_t zSize = sizeof(word) * static_cast<std::size_t>(XRes) * YRes;
 	memset(VPage, 0, PageSize + zSize);
-	drawPolyOtherBarry(static_cast<float>(seed) * 0.5f, 500.0f);
+	if (seed == 2) {
+		fillCheckerboardTexture();
+	} else {
+		fillUniformTexture();
+	}
+	drawPolyOtherBarry(seed);
 }
 
 void FillerTestSnapshotCleanup()
