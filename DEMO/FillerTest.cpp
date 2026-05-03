@@ -1343,8 +1343,11 @@ static void fillUniformTexture()
 
 static void drawPolyOtherBarry(int32_t seed)
 {
-	Vertex V[4];
+	// Up to 8 vertices: seed=2 uses two adjacent quads (8 verts) sharing a
+	// vertical edge at x=900. Other seeds use 4.
+	Vertex V[8];
 	Face F;
+	int numQuads = 1;
 
 	const float T_in = static_cast<float>(seed) * 0.5f;
 	const float DT = 500.0f;
@@ -1357,13 +1360,16 @@ static void drawPolyOtherBarry(int32_t seed)
 	//
 	// seed==1 keeps the original rotation path, also TPos.z=1.
 	//
-	// seed==2 is the seam test: same axis-aligned screen-space rectangle as
-	// seed=0, but TPos.z varies across vertices so the rasterizer has to do
-	// real perspective-correct UV interpolation. Combined with a per-texel
-	// checkerboard texture, any per-pixel UV divergence between the two
-	// triangles (V0,V1,V2) and (V0,V2,V3) sharing the V0-V2 diagonal lights
-	// up as a seam line. Designed for native-vs-wasm seam regression
-	// hunting; useful as a proxy for the City scene's textured-edge issue.
+	// seed==2 is the *adjacent-quad seam test*: two side-by-side quads
+	// sharing a vertical edge at screen x=900, each with independent
+	// perspective foreshortening (z=1 top, z=4 bottom). Both quads have
+	// continuous U,V across the shared edge (U=0.5 on both sides) and
+	// share Z values at the boundary verts. Per-pixel UVs computed by the
+	// left quad and the right quad along x=900 should agree exactly; any
+	// divergence shows up as a seam line. This mirrors the City scene
+	// where adjacent building faces with independent vertex setups expose
+	// seams along their shared edges. Combined with a per-texel
+	// checkerboard, any 1-texel UV mis-step is loud.
 	if (seed == 0) {
 		V[0].PX = 600.0f; V[0].PY = 200.0f;
 		V[1].PX = 1200.0f; V[1].PY = 200.0f;
@@ -1375,19 +1381,24 @@ static void drawPolyOtherBarry(int32_t seed)
 		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
 		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
 	} else if (seed == 2) {
-		V[0].PX = 600.0f; V[0].PY = 200.0f;
-		V[1].PX = 1200.0f; V[1].PY = 200.0f;
-		V[2].PX = 1200.0f; V[2].PY = 800.0f;
-		V[3].PX = 600.0f; V[3].PY = 800.0f;
-		V[0].U = -1.0f / 512.0f; V[0].V = -1.0f / 512.0f;
-		V[1].U = 511.0f / 512.0f; V[1].V = -1.0f / 512.0f;
-		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
-		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
-		// 8x perspective ratio between top (close) and bottom (far) edges.
-		// V0-V2 diagonal spans the full depth range — that's where seams
-		// will surface if adjacent-triangle UVs diverge.
-		V[0].TPos.z = 0.5f; V[1].TPos.z = 0.5f;
+		// Left quad: V[0..3] cover x=600..900, U=0..0.5
+		V[0].PX = 600.0f; V[0].PY = 200.0f; V[0].U = 0.0f;  V[0].V = 0.0f;
+		V[1].PX = 900.0f; V[1].PY = 200.0f; V[1].U = 0.5f;  V[1].V = 0.0f;
+		V[2].PX = 900.0f; V[2].PY = 800.0f; V[2].U = 0.5f;  V[2].V = 1.0f;
+		V[3].PX = 600.0f; V[3].PY = 800.0f; V[3].U = 0.0f;  V[3].V = 1.0f;
+		// Right quad: V[4..7] cover x=900..1200, U=0.5..1.0; V[4]/V[7] are
+		// at the same screen-space and UV as V[1]/V[2] but kept as separate
+		// vertices so each quad has its own independent setup.
+		V[4].PX = 900.0f; V[4].PY = 200.0f; V[4].U = 0.5f;  V[4].V = 0.0f;
+		V[5].PX = 1200.0f;V[5].PY = 200.0f; V[5].U = 1.0f;  V[5].V = 0.0f;
+		V[6].PX = 1200.0f;V[6].PY = 800.0f; V[6].U = 1.0f;  V[6].V = 1.0f;
+		V[7].PX = 900.0f; V[7].PY = 800.0f; V[7].U = 0.5f;  V[7].V = 1.0f;
+		// 4x perspective ratio. Top edge close (z=1), bottom edge far (z=4).
+		V[0].TPos.z = 1.0f; V[1].TPos.z = 1.0f;
 		V[2].TPos.z = 4.0f; V[3].TPos.z = 4.0f;
+		V[4].TPos.z = 1.0f; V[5].TPos.z = 1.0f;
+		V[6].TPos.z = 4.0f; V[7].TPos.z = 4.0f;
+		numQuads = 2;
 	} else {
 		float a = (T_in + DT) * 0.003f;
 		float c = cosf(a);
@@ -1415,7 +1426,8 @@ static void drawPolyOtherBarry(int32_t seed)
 		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
 	}
 
-	for (int i = 0; i < 4; i++) {
+	const int numVerts = numQuads * 4;
+	for (int i = 0; i < numVerts; i++) {
 		V[i].LR = V[i].LG = V[i].LB = V[i].LA = 255;
 	}
 
@@ -1434,7 +1446,7 @@ static void drawPolyOtherBarry(int32_t seed)
 	vp.ClipY1 = 0;
 	vp.ClipY2 = YRes_1;
 
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < numVerts; i++) {
 		V[i].RZ = 1.0f / V[i].TPos.z;
 		V[i].UZ = V[i].U * V[i].RZ;
 		V[i].VZ = V[i].V * V[i].RZ;
@@ -1442,12 +1454,14 @@ static void drawPolyOtherBarry(int32_t seed)
 	}
 
 	counter = 0;
-	ThreadPool::instance().enqueue([&F, &vp, V = &V[0]]() {
-		F.A = &V[0]; F.B = &V[1]; F.C = &V[2];
-		_2DClipper::getInstance()->clip(vp, F);
-
-		F.A = &V[0]; F.B = &V[2]; F.C = &V[3];
-		_2DClipper::getInstance()->clip(vp, F);
+	ThreadPool::instance().enqueue([&F, &vp, V = &V[0], numQuads]() {
+		for (int q = 0; q < numQuads; ++q) {
+			Vertex* Q = const_cast<Vertex*>(V) + q * 4;
+			F.A = &Q[0]; F.B = &Q[1]; F.C = &Q[2];
+			_2DClipper::getInstance()->clip(vp, F);
+			F.A = &Q[0]; F.B = &Q[2]; F.C = &Q[3];
+			_2DClipper::getInstance()->clip(vp, F);
+		}
 
 		std::unique_lock<std::mutex> lock(mut);
 		++counter;
