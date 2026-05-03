@@ -15,6 +15,10 @@
 #include <array>
 #include "SimdHelpers.h"
 
+#if defined(__EMSCRIPTEN__)
+#include <wasm_simd128.h>
+#endif
+
 #include "Base/Scene.h"
 
 
@@ -99,11 +103,15 @@ inline TScreenCoord orient2d(
 // the 256-bit testz bug.
 inline bool any_lane_set(Vec8ib m) {
 #if defined(__EMSCRIPTEN__)
+	// Native wasm SIMD any-bit-set on each 128-bit half then OR — bypasses
+	// simde's testz mappings (both 128- and 256-bit versions silently miss
+	// some lane patterns and drop edge pixels). _mm256_movemask_epi8 is
+	// also correct but expensive (~15 SIMD ops on wasm); this is 3 wasm
+	// instructions total and verified against filler@t=0.
 	__m256i v = *(const __m256i*)(&m);
-	__m128i combined = _mm_or_si128(
-		_mm256_castsi256_si128(v),
-		_mm256_extracti128_si256(v, 1));
-	return !_mm_testz_si128(combined, combined);
+	v128_t lo = (v128_t)_mm256_castsi256_si128(v);
+	v128_t hi = (v128_t)_mm256_extracti128_si256(v, 1);
+	return wasm_v128_any_true(wasm_v128_or(lo, hi));
 #else
 	return horizontal_or(m);
 #endif
