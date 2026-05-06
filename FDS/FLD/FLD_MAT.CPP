@@ -47,10 +47,14 @@ void AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 	Image=new char[strlen(OrgMat->TextureImage) + 15];
 	strcpy(Image,"TEXTURES/");
 	strcat(Image,OrgMat->TextureImage);
-#ifdef __EMSCRIPTEN__
-	// Emscripten's MEMFS is case-sensitive; runtime assets are uppercase.
+	// Uppercase the FLD-stored basename so a) emscripten's case-sensitive
+	// MEMFS finds the asset and b) downstream string-match consumers (e.g.
+	// GreetsGenerator::AttachMatToScene matching "TEXTURES/P_TEXT.JPG") see
+	// a stable filename. macOS's default case-insensitive APFS hides the
+	// load-side issue but exposes the strcmp-identity issue: pre-fix native
+	// loaded p_text.jpg fine but never matched it for the dynamic-texture
+	// rebind, so the Greets text never animated.
 	for (char *p = Image + 9; *p; ++p) *p = (char)toupper((unsigned char)*p);
-#endif
 	for (Temp=MatLib;Temp!=CurMat;Temp=Temp->Next)
 	{
 		if (Temp->RelScene!=SceneGroup) continue;
