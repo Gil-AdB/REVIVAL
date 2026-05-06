@@ -148,6 +148,26 @@ inline uint32_t tile_du(uint32_t u, uint32_t vbits, uint32_t umask) {
 	return tile_u(u, vbits, umask) | 0x800 | (((1 << vbits) - 1) << 14);
 }
 
+// Bench variants — set via -DBENCH_SKIP_*=1 to stub specific operations and
+// measure their isolated cost. Default (all 0) is the production rasterizer;
+// each #define can be flipped on independently to isolate one op. See the
+// `bench-variants-*` Makefile targets.
+#ifndef BENCH_SKIP_TEXTURE
+#define BENCH_SKIP_TEXTURE 0
+#endif
+#ifndef BENCH_SKIP_PERSPECTIVE
+#define BENCH_SKIP_PERSPECTIVE 0
+#endif
+#ifndef BENCH_SKIP_MASKSTORE
+#define BENCH_SKIP_MASKSTORE 0
+#endif
+#ifndef BENCH_SKIP_Z
+#define BENCH_SKIP_Z 0
+#endif
+#ifndef BENCH_SKIP_COLOR
+#define BENCH_SKIP_COLOR 0
+#endif
+
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode>
 struct TileRasterizer {
 	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres, Texture* Txtr, int miplevel)
@@ -267,6 +287,14 @@ struct TileRasterizer {
 			if (any_lane_set(p_mask)) {
 				Vec8f p_z = approx_recipr(p_rz);
 
+#if BENCH_SKIP_Z
+				// Stub: skip the Z-test chain (z_candidate compute, Z load,
+				// extend/compare, mask blend, zspan store). p_z is still
+				// computed above because the perspective UV mul needs it
+				// (unless BENCH_SKIP_PERSPECTIVE is also on). Pixel block
+				// still runs so we keep gather/maskstore in the timing.
+				if (any_lane_set(p_mask)) {
+#else
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
 				Vec8us z_existing_c;
 				z_existing_c.load_a(zspan);
@@ -281,9 +309,17 @@ struct TileRasterizer {
 //					if constexpr (BlendMode != TBlendMode::TRANSPARENT) {
 						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
 					//}
+#endif
 
+#if BENCH_SKIP_PERSPECTIVE
+					// Stub: linear UV (no `* p_z` perspective divide). Wrong UVs,
+					// useful only for isolating the perspective compute cost.
+					Vec8i u = roundi(p_uz * t0.UScaleFactor);
+					Vec8i v = roundi(p_vz * t0.VScaleFactor);
+#else
 					Vec8i u = roundi(p_uz * p_z * t0.UScaleFactor);
 					Vec8i v = roundi(p_vz * p_z * t0.VScaleFactor);
+#endif
 
 					Vec8i tu = packed_tile_u(u, t0.LogHeight, t0_umask_swizzled);
 					Vec8i tv = packed_tile_v(v, t0_vmask);
@@ -292,7 +328,13 @@ struct TileRasterizer {
 
 					auto blend_color = Vec32us(color);
 
+#if BENCH_SKIP_TEXTURE
+					// Stub: constant white instead of texture gather. Isolates
+					// gather/cache cost.
+					auto texture0_samples = Vec8ui(0xFFFFFFFF);
+#else
 					auto texture0_samples = gather(Vec8ui(p_offset), t0.TextureAddr, p_mask);
+#endif
 					if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
 						Vec8i u1 = roundi(p_u1z * p_z * 1024.0f);
 						Vec8i v1 = roundi(p_v1z * p_z * 1024.0f);
@@ -305,7 +347,14 @@ struct TileRasterizer {
 						texture0_samples = Vec8ui(add_saturated(Vec32uc(texture1_samples), Vec32uc(texture0_samples) >> 1));
 					}
 
+#if BENCH_SKIP_COLOR
+					// Stub: skip the gouraud color multiply blend. Texture
+					// gather feeds the maskstore unmodified — isolates the
+					// per-lane colorize cost.
+					auto texture_samples = Vec32uc(texture0_samples);
+#else
 					auto texture_samples = colorize(Vec32uc(texture0_samples), blend_color);
+#endif
 
 					if constexpr (BlendMode == TBlendMode::TRANSPARENT) {
 						Vec32uc dst;
@@ -320,7 +369,13 @@ struct TileRasterizer {
 					}
 
 
+#if BENCH_SKIP_MASKSTORE
+					// Stub: unmasked 256-bit store. Writes pixels outside the
+					// triangle (visually wrong) but isolates maskstore cost.
+					_mm256_storeu_ps((float*)span, *(__m256*)(&texture_samples));
+#else
 					_mm256_maskstore_ps((float*)span, *(__m256i*)(&p_mask), *(__m256*)(&texture_samples));
+#endif
 				}
 			}
 
