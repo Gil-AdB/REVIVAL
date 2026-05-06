@@ -514,10 +514,18 @@ simde_mm256_avg_epu8 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_avg_epu8(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_avg_epu8(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.u8) / sizeof(r_.u8[0])) ; i++) {
       r_.u8[i] = (a_.u8[i] + b_.u8[i] + 1) >> 1;
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -538,10 +546,18 @@ simde_mm256_avg_epu16 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_avg_epu16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_avg_epu16(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.u16) / sizeof(r_.u16[0])) ; i++) {
       r_.u16[i] = (a_.u16[i] + b_.u16[i] + 1) >> 1;
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -3487,10 +3503,18 @@ simde_mm256_mulhi_epi16 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_mulhi_epi16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_mulhi_epi16(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.i16) / sizeof(r_.i16[0])) ; i++) {
       r_.u16[i] = HEDLEY_STATIC_CAST(uint16_t, (HEDLEY_STATIC_CAST(uint32_t, HEDLEY_STATIC_CAST(int32_t, a_.i16[i]) * HEDLEY_STATIC_CAST(int32_t, b_.i16[i])) >> 16));
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -3510,10 +3534,18 @@ simde_mm256_mulhi_epu16 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_mulhi_epu16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_mulhi_epu16(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.u16) / sizeof(r_.u16[0])) ; i++) {
       r_.u16[i] = HEDLEY_STATIC_CAST(uint16_t, HEDLEY_STATIC_CAST(uint32_t, a_.u16[i]) * HEDLEY_STATIC_CAST(uint32_t, b_.u16[i]) >> 16);
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -3533,10 +3565,18 @@ simde_mm256_mulhrs_epi16 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_mulhrs_epi16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_mulhrs_epi16(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.i16) / sizeof(r_.i16[0])) ; i++) {
       r_.i16[i] = HEDLEY_STATIC_CAST(int16_t, (((HEDLEY_STATIC_CAST(int32_t, a_.i16[i]) * HEDLEY_STATIC_CAST(int32_t, b_.i16[i])) + 0x4000) >> 15));
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -4100,10 +4140,18 @@ simde_mm256_sign_epi8 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_sign_epi8(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_sign_epi8(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.i8) / sizeof(r_.i8[0])) ; i++) {
       r_.i8[i] = (b_.i8[i] == INT8_C(0)) ? INT8_C(0) : (b_.i8[i] < INT8_C(0)) ? -a_.i8[i] : a_.i8[i];
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -4124,10 +4172,18 @@ simde_mm256_sign_epi16 (simde__m256i a, simde__m256i b) {
       a_ = simde__m256i_to_private(a),
       b_ = simde__m256i_to_private(b);
 
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback,
+       * which clang on wasm fails to auto-vectorize for i8/i16-lane ops.
+       * Same fan-out pattern simde already uses for _mm256_add_epi16. */
+      r_.m128i[0] = simde_mm_sign_epi16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_sign_epi16(a_.m128i[1], b_.m128i[1]);
+    #else
     SIMDE_VECTORIZE
     for (size_t i = 0 ; i < (sizeof(r_.i16) / sizeof(r_.i16[0])) ; i++) {
       r_.i16[i] = (b_.i16[i] == INT16_C(0)) ? INT16_C(0) : (b_.i16[i] < INT16_C(0)) ? -a_.i16[i] : a_.i16[i];
     }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
