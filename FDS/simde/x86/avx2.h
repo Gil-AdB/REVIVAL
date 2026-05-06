@@ -3556,10 +3556,20 @@ simde_mm256_mullo_epi16 (simde__m256i a, simde__m256i b) {
     b_ = simde__m256i_to_private(b),
     r_;
 
-    SIMDE_VECTORIZE
-    for (size_t i = 0 ; i < (sizeof(r_.i16) / sizeof(r_.i16[0])) ; i++) {
-      r_.i16[i] = HEDLEY_STATIC_CAST(int16_t, a_.i16[i] * b_.i16[i]);
-    }
+    /* Local patch: 0.8.2 only had the SIMDE_VECTORIZE scalar fallback here,
+     * which clang on wasm fails to auto-vectorize. The 128-bit fan-out via
+     * simde_mm_mullo_epi16 produces wasm_i16x8_mul cleanly on wasm and is
+     * the same pattern simde already uses for _mm256_add_epi16,
+     * _mm256_unpacklo_epi8, _mm256_packus_epi16, etc. */
+    #if SIMDE_NATURAL_INT_VECTOR_SIZE_LE(128)
+      r_.m128i[0] = simde_mm_mullo_epi16(a_.m128i[0], b_.m128i[0]);
+      r_.m128i[1] = simde_mm_mullo_epi16(a_.m128i[1], b_.m128i[1]);
+    #else
+      SIMDE_VECTORIZE
+      for (size_t i = 0 ; i < (sizeof(r_.i16) / sizeof(r_.i16[0])) ; i++) {
+        r_.i16[i] = HEDLEY_STATIC_CAST(int16_t, a_.i16[i] * b_.i16[i]);
+      }
+    #endif
 
     return simde__m256i_from_private(r_);
   #endif
@@ -4869,6 +4879,15 @@ simde_mm256_srli_epi16 (simde__m256i a, const int imm8)
     for (size_t i = 0 ; i < (sizeof(a_.altivec_u16) / sizeof(a_.altivec_u16[0])) ; i++) {
       r_.altivec_u16[i] = vec_sr(a_.altivec_u16[i], sv);
     }
+  #elif defined(SIMDE_WASM_SIMD128_NATIVE)
+    /* Local patch: 0.8.2 had only the SIMDE_VECTOR_SUBSCRIPT_SCALAR / scalar
+     * loop fallback below, both of which clang on wasm fails to vectorize.
+     * Wasm-only direct fan-out to wasm_u16x8_shr. We can't use simde_mm_srli_epi16
+     * here as the broader fan-out path because that macro on arm64 requires
+     * a compile-time-constant imm8, which the macro expansion doesn't see
+     * through the inline simde_mm256_srli_epi16 boundary. */
+    r_.m128i_private[0].wasm_v128 = wasm_u16x8_shr(a_.m128i_private[0].wasm_v128, imm8);
+    r_.m128i_private[1].wasm_v128 = wasm_u16x8_shr(a_.m128i_private[1].wasm_v128, imm8);
   #else
     if (HEDLEY_STATIC_CAST(unsigned int, imm8) > 15) {
       simde_memset(&r_, 0, sizeof(r_));
