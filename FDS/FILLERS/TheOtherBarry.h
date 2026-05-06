@@ -585,6 +585,49 @@ struct TileRasterizer {
 				const int tx_start = std::max(sx * SUPER, tile_mx);
 				const int tx_end   = std::min(sx * SUPER + SUPER - 1, tile_Mx);
 
+				if (super_full) {
+					// Coarse-acceptance fast path (Phase 3): every tile in this
+					// super-tile is fully inside all three edges by precondition,
+					// so per-tile max/min-corner edge tests would all pass.
+					// Skip them and dispatch apply_exact<FULL> directly. Also
+					// skip a0/b0/c0 stepping — apply_exact<FULL> doesn't read
+					// Tile.a0/b0/c0 (the per-row p_mask path is dead code there).
+					for (int y = ty_start; y <= ty_end; ++y, ++i) {
+						for (int x = tx_start; x <= tx_end; ++x, ++i) {
+							Tile tile = {
+								.x = x,
+								.y = y,
+								.a0 = 0,
+								.dadx = dadx,
+								.dady = dady,
+								.b0 = 0,
+								.dbdx = dbdx,
+								.dbdy = dbdy,
+								.c0 = 0,
+								.dcdx = dcdx,
+								.dcdy = dcdy,
+								.rz0 = (v1.RZ + (x * TILE_SIZE - v1.PX) * drzdx + (y * TILE_SIZE - v1.PY) * drzdy),
+								.t0 = {
+									.uz0 = (v1.UZ + (x * TILE_SIZE - v1.PX) * t0.du0zdx + (y * TILE_SIZE - v1.PY) * t0.du0zdy),
+									.vz0 = (v1.VZ + (x * TILE_SIZE - v1.PX) * t0.dv0zdx + (y * TILE_SIZE - v1.PY) * t0.dv0zdy),
+									.r0 = (float(v1.LR) + float(x * TILE_SIZE - v1.PX) * this->drdx + float(y * TILE_SIZE - v1.PY) * this->drdy),
+									.g0 = (float(v1.LG) + float(x * TILE_SIZE - v1.PX) * this->dgdx + float(y * TILE_SIZE - v1.PY) * this->dgdy),
+									.b0 = (float(v1.LB) + float(x * TILE_SIZE - v1.PX) * this->dbdx + float(y * TILE_SIZE - v1.PY) * this->dbdy),
+									.a0 = (float(v1.LA) + float(x * TILE_SIZE - v1.PX) * this->dadx + float(y * TILE_SIZE - v1.PY) * this->dady),
+								}
+							};
+
+							if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
+								tile.t0.uz1 = (v1.EUZ + (x * TILE_SIZE - v1.PX) * t0.du1zdx + (y * TILE_SIZE - v1.PY) * t0.du1zdy);
+								tile.t0.vz1 = (v1.EVZ + (x * TILE_SIZE - v1.PX) * t0.dv1zdx + (y * TILE_SIZE - v1.PY) * t0.dv1zdy);
+							}
+
+							apply_exact<barry::TCoverage::FULL>(tile);
+						}
+					}
+					continue;
+				}
+
 				TScreenCoord _ta0 = sa0 + (tx_start - sx * SUPER) * TILE_SIZE * dadx
 				                       + (ty_start - sy * SUPER) * TILE_SIZE * dady;
 				TScreenCoord _tb0 = sb0 + (tx_start - sx * SUPER) * TILE_SIZE * dbdx
@@ -602,15 +645,10 @@ struct TileRasterizer {
 						TScreenCoord max_c = c0 + ((dcdx > 0) ? dcdx * TILE_SIZE : 0) + ((dcdy > 0) ? dcdy * TILE_SIZE : 0);
 
 						if ((max_a | max_b | max_c) >= 0) {
-							bool full_cover;
-							if (super_full) {
-								full_cover = true;
-							} else {
-								TScreenCoord min_a = a0 + ((dadx < 0) ? dadx * TILE_SIZE : 0) + ((dady < 0) ? dady * TILE_SIZE : 0);
-								TScreenCoord min_b = b0 + ((dbdx < 0) ? dbdx * TILE_SIZE : 0) + ((dbdy < 0) ? dbdy * TILE_SIZE : 0);
-								TScreenCoord min_c = c0 + ((dcdx < 0) ? dcdx * TILE_SIZE : 0) + ((dcdy < 0) ? dcdy * TILE_SIZE : 0);
-								full_cover = (min_a >= 0) && (min_b >= 0) && (min_c >= 0);
-							}
+							TScreenCoord min_a = a0 + ((dadx < 0) ? dadx * TILE_SIZE : 0) + ((dady < 0) ? dady * TILE_SIZE : 0);
+							TScreenCoord min_b = b0 + ((dbdx < 0) ? dbdx * TILE_SIZE : 0) + ((dbdy < 0) ? dbdy * TILE_SIZE : 0);
+							TScreenCoord min_c = c0 + ((dcdx < 0) ? dcdx * TILE_SIZE : 0) + ((dcdy < 0) ? dcdy * TILE_SIZE : 0);
+							const bool full_cover = (min_a >= 0) && (min_b >= 0) && (min_c >= 0);
 
 							Tile tile = {
 								.x = x,
