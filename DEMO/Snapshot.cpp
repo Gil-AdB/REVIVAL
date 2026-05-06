@@ -12,6 +12,7 @@
 #include <Threads.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -326,4 +327,127 @@ int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     FillerTestSnapshotCleanup();
     ThreadPool::instance().close();
     return produced > 0 ? 0 : 5;
+}
+
+bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg) {
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a(argv[i]);
+        if (!starts_with(a, "--bench=")) continue;
+        std::string_view rest = a.substr(strlen("--bench="));
+        std::size_t at = rest.find('@');
+        if (at == std::string_view::npos) {
+            cfg.kind = std::string(rest);
+        } else {
+            cfg.kind = std::string(rest.substr(0, at));
+            std::string_view tail = rest.substr(at + 1);
+            // Parse comma-separated key=value pairs.
+            while (!tail.empty()) {
+                auto comma = tail.find(',');
+                std::string_view kv = (comma == std::string_view::npos)
+                    ? tail : tail.substr(0, comma);
+                auto eq = kv.find('=');
+                if (eq != std::string_view::npos) {
+                    std::string_view k = kv.substr(0, eq);
+                    std::string_view v = kv.substr(eq + 1);
+                    if (k == "scene") {
+                        cfg.scene = std::string(v);
+                    } else {
+                        long lv = std::strtol(std::string(v).c_str(), nullptr, 10);
+                        if (k == "iters") cfg.iters = static_cast<int>(lv);
+                        else if (k == "seed") cfg.seed = static_cast<int>(lv);
+                        else if (k == "t") cfg.ts = static_cast<int32_t>(lv);
+                    }
+                }
+                tail = (comma == std::string_view::npos)
+                    ? std::string_view{} : tail.substr(comma + 1);
+            }
+        }
+        found = true;
+    }
+    return found;
+}
+
+int RunRasterBench(const BenchConfig& cfg, int xres, int yres) {
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    FillerTestSnapshotInit(xres, yres);
+
+    // Warmup — first iteration tends to include first-touch cache misses
+    // and any lazy initialization that hides under timing if not excluded.
+    for (int i = 0; i < 3; ++i) FillerTestSnapshotRender(cfg.seed);
+
+    using clock = std::chrono::steady_clock;
+    auto t0 = clock::now();
+    for (int i = 0; i < cfg.iters; ++i) {
+        FillerTestSnapshotRender(cfg.seed);
+    }
+    auto t1 = clock::now();
+
+    double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    double mean_ms = total_ms / cfg.iters;
+    // Pixels processed per iter is the screen area (the fixture covers a big
+    // quad — close enough for relative comparison; absolute Mpx/s is approx).
+    double mpx_per_iter = static_cast<double>(xres) * yres / 1e6;
+    double mpx_per_sec = mean_ms > 0 ? mpx_per_iter * 1000.0 / mean_ms : 0.0;
+
+    std::printf("[BENCH] raster: iters=%d  res=%dx%d  seed=%d\n",
+                cfg.iters, xres, yres, cfg.seed);
+    std::printf("[BENCH] total=%.2f ms  mean=%.3f ms/iter  ~%.1f Mpx/s\n",
+                total_ms, mean_ms, mpx_per_sec);
+    std::fflush(stdout);
+
+    FillerTestSnapshotCleanup();
+    ThreadPool::instance().close();
+    return 0;
+}
+
+int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    std::unique_ptr<SceneDriver> driver;
+    if (cfg.scene == "city") {
+        Initialize_City();
+        driver = createCityScene();
+    } else if (cfg.scene == "greets") {
+        Initialize_Greets();
+        driver = createGreetsScene();
+    } else {
+        std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, greets)\n",
+                     cfg.scene.c_str());
+        ThreadPool::instance().close();
+        return 2;
+    }
+
+    driver->init();
+
+    // Warm-up: one tick at the bench Timer value to populate any lazy
+    // first-touch state (mipmaps, model caches) so it doesn't skew iter 0.
+    std::srand(0);
+    Timer = cfg.ts;
+    std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+    driver->tick();
+
+    using clock = std::chrono::high_resolution_clock;
+    auto t0 = clock::now();
+    for (int i = 0; i < cfg.iters; ++i) {
+        std::srand(0);
+        Timer = cfg.ts;
+        driver->tick();
+    }
+    auto t1 = clock::now();
+
+    double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    double mean_ms = cfg.iters > 0 ? total_ms / cfg.iters : 0.0;
+
+    std::fprintf(stderr,
+                 "[BENCH] scene=%s t=%d iters=%d total=%.2f ms  mean=%.3f ms/iter\n",
+                 cfg.scene.c_str(), cfg.ts, cfg.iters, total_ms, mean_ms);
+    std::fflush(stderr);
+
+    driver->cleanup();
+    driver.reset();
+
+    ThreadPool::instance().close();
+    return 0;
 }

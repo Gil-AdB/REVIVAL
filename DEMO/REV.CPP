@@ -996,6 +996,8 @@ void CodeEntry(void *var)
 		fprintf(stderr, "[DEMO] before Modplayer_Create\n");
 		sh = Modplayer_Create("REVIVAL.XM");
 		fprintf(stderr, "[DEMO] after Modplayer_Create sh=%p\n", sh);
+		// We don't render a visualizer; skip the per-buffer FFT + scope copy.
+		if (sh) Modplayer_SetDisplay(sh, false);
 	}
 	g_RevModuleHandle = sh;
 
@@ -1134,6 +1136,23 @@ int main(int argc, const char *argv[])
 		}
 		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler)\n",
 		        snap.scene.c_str());
+		return 2;
+	}
+
+	BenchConfig bench;
+	if (ParseBenchArgs(argc, argv, bench)) {
+		// Headless rasterizer benchmark — no SDL window, no music.
+		// Same flow as the snapshot harness but the inner loop times instead
+		// of dumping. Run under `node --cpu-prof DEMO_snapshot.js --bench=...`
+		// for an automatic V8 cpuprofile next to the output.
+		if (bench.kind == "raster") {
+			return RunRasterBench(bench, g_demoXRes, g_demoYRes);
+		}
+		if (bench.kind == "scene") {
+			return RunSceneBench(bench, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[BENCH] unknown kind '%s' (try raster, scene)\n",
+		        bench.kind.c_str());
 		return 2;
 	}
 

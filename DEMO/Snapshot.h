@@ -34,3 +34,35 @@ int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres);
 // reproduce rasterizer-edge / mask divergence between native and wasm in
 // isolation from the city pipeline.
 int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres);
+
+// Synthetic rasterizer benchmark. Repeatedly renders the FillerTest fixture
+// and reports ms/iter + Mpx/s. Same fixture across native and wasm so the
+// numbers compare apples-to-apples.
+//
+// Invocation:
+//   DEMO --bench=raster                 -> default 200 iters, seed 0
+//   DEMO --bench=raster@iters=1000      -> 1000 iters
+//   DEMO --bench=raster@iters=500,seed=2-> custom iters + seed
+//
+// Under wasm: run via `node --cpu-prof DEMO_snapshot.js --bench=raster`
+// and V8 dumps a .cpuprofile that opens in Chrome DevTools Performance.
+struct BenchConfig {
+    std::string kind;
+    int iters = 200;
+    int seed = 0;
+    // Used by --bench=scene: which scene driver + Timer value to drive.
+    std::string scene;
+    int32_t ts = 0;
+};
+bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg);
+int RunRasterBench(const BenchConfig& cfg, int xres, int yres);
+
+// Drives a real scene's tick() repeatedly at a fixed Timer value and reports
+// total/mean ms. Used to attribute the wasm rasterizer cost to scene-shaped
+// triangle workloads (small overdrawn triangles, varied UVs/lighting) versus
+// the synthetic full-screen quad of --bench=raster.
+//
+// Invocation:
+//   DEMO --bench=scene@scene=city,t=1961,iters=200
+//   DEMO --bench=scene@scene=greets,t=600,iters=200
+int RunSceneBench(const BenchConfig& cfg, int xres, int yres);
