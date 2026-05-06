@@ -1,11 +1,17 @@
-BUILD_DIR      := build
-WASM_BUILD_DIR := build-wasm
-RUNTIME_DIR    := Runtime
-SERVE_PORT     := 8000
+BUILD_DIR              := build
+WASM_BUILD_DIR         := build-wasm
+WASM_PROFILE_BUILD_DIR := build-wasm-profile
+BENCH_BUILD_DIR        := build-bench
+WASM_BENCH_BUILD_DIR   := build-wasm-bench
+RUNTIME_DIR            := Runtime
+SERVE_PORT             := 8000
 
 .PHONY: help build build-debug install run clean \
-        wasm serve \
+        wasm serve wasm-profile serve-profile \
         snapshot-city snapshot-glat-trace snapshot-filler \
+        bench-native bench-wasm \
+        bench-variants-native bench-variants-wasm \
+        bench-scenes-native bench-scenes-wasm \
         branches push-master status
 
 help:
@@ -18,10 +24,18 @@ help:
 	@echo ""
 	@echo "  wasm               (Re)configure with emcmake + build wasm artifacts"
 	@echo "  serve              Serve wasm build at http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "  wasm-profile       Like wasm, but with -g3 DWARF for Chrome profiling"
+	@echo "  serve-profile      Serve the profiling wasm build"
 	@echo ""
 	@echo "  snapshot-city      Run --snapshot=city headless dump"
 	@echo "  snapshot-glat-trace  Run --snapshot=glat-trace CSV recorder"
 	@echo "  snapshot-filler    Run --snapshot=filler synthetic harness"
+	@echo ""
+	@echo "  bench-native       Native rasterizer benchmark (FillerTest fixture)"
+	@echo "  bench-wasm         Wasm rasterizer benchmark under node --cpu-prof"
+	@echo "                     Args: BENCH_ITERS=200 BENCH_SEED=0"
+	@echo "  bench-scenes-native  6-variant x 3-workload matrix on native"
+	@echo "  bench-scenes-wasm    6-variant x 3-workload matrix on wasm"
 	@echo ""
 	@echo "  branches           Show local + remote branch state vs origin/master"
 	@echo "  status             git status + diverge count"
@@ -42,7 +56,7 @@ run: install
 	cd $(RUNTIME_DIR) && ./DEMO
 
 clean:
-	rm -rf $(BUILD_DIR) $(WASM_BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(WASM_BUILD_DIR) $(WASM_PROFILE_BUILD_DIR)
 
 wasm:
 	@command -v emcmake >/dev/null 2>&1 || { \
@@ -56,6 +70,21 @@ serve: wasm
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
 	cd $(WASM_BUILD_DIR)/DEMO && python3 -m http.server $(SERVE_PORT)
 
+# Optimized release wasm + full DWARF debug info. Larger binary (~3-5x);
+# use only for profiling sessions, not for shipping.
+wasm-profile:
+	@command -v emcmake >/dev/null 2>&1 || { \
+		echo "emcmake not on PATH — source your emsdk_env.sh (e.g. 'source /opt/homebrew/Cellar/emscripten/*/libexec/emsdk_env.sh') or 'brew install emscripten'"; \
+		exit 1; \
+	}
+	emcmake cmake -S . -B $(WASM_PROFILE_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Release -DWASM_PROFILE=ON
+	cmake --build $(WASM_PROFILE_BUILD_DIR)
+
+serve-profile: wasm-profile
+	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "Make sure Chrome has the 'C/C++ DevTools Support (DWARF)' extension installed."
+	cd $(WASM_PROFILE_BUILD_DIR)/DEMO && python3 -m http.server $(SERVE_PORT)
+
 snapshot-city: install
 	cd $(RUNTIME_DIR) && ./DEMO --snapshot=city
 
@@ -64,6 +93,117 @@ snapshot-glat-trace: install
 
 snapshot-filler: install
 	cd $(RUNTIME_DIR) && ./DEMO --snapshot=filler
+
+# Override at the command line: make bench-native BENCH_ITERS=1000 BENCH_SEED=2
+BENCH_ITERS ?= 200
+BENCH_SEED  ?= 0
+
+bench-native: install
+	cd $(RUNTIME_DIR) && ./DEMO --bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)
+
+# Wasm bench under node with V8's CPU profiler. Drops a .cpuprofile in
+# the Runtime directory; drag-drop into Chrome DevTools Performance to
+# see a flame chart with C++ symbols. wasm-profile build has DWARF +
+# the wasm `name` section, so symbols resolve.
+bench-wasm: wasm-profile
+	@command -v node >/dev/null 2>&1 || { echo "node not on PATH"; exit 1; }
+	cd $(RUNTIME_DIR) && \
+	  node --cpu-prof --cpu-prof-dir=. \
+	    ../$(WASM_PROFILE_BUILD_DIR)/DEMO/DEMO_snapshot.js \
+	    --bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)
+	@echo ""
+	@echo "Profile written to $(RUNTIME_DIR)/CPU.*.cpuprofile"
+	@echo "Open Chrome DevTools -> Performance -> drag-drop the file."
+
+# Build + run each rasterizer variant on native, print a comparison.
+# Each variant gets its own build dir to keep configs clean and re-runs cheap.
+# Bench has to run from Runtime/ (rev.cfg supplies the resolution).
+BENCH_VARIANTS := full no-texture no-perspective no-maskstore no-z no-color
+
+bench-variants-native:
+	@for variant in $(BENCH_VARIANTS); do \
+	    bdir=$(abspath $(BENCH_BUILD_DIR))/$$variant; \
+	    cmake -S . -B $$bdir -G Ninja -DBENCH_VARIANT=$$variant >/dev/null; \
+	    cmake --build $$bdir --target DEMO >/dev/null 2>&1 || { echo "build $$variant FAILED"; exit 1; }; \
+	    printf "%-15s  " "$$variant"; \
+	    (cd $(RUNTIME_DIR) && $$bdir/DEMO/DEMO --bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)) 2>/dev/null \
+	      | grep "^\[BENCH\] total" | sed 's/^\[BENCH\] //'; \
+	done
+
+# Same on wasm. Slower (rebuild per variant; wasm builds aren't free) but
+# the deltas tell us which op is the wasm tax. Runs under node — no cpuprof.
+bench-variants-wasm:
+	@command -v node >/dev/null 2>&1 || { echo "node not on PATH"; exit 1; }
+	@command -v emcmake >/dev/null 2>&1 || { echo "emcmake not on PATH"; exit 1; }
+	@for variant in $(BENCH_VARIANTS); do \
+	    bdir=$(abspath $(WASM_BENCH_BUILD_DIR))/$$variant; \
+	    emcmake cmake -S . -B $$bdir -G Ninja -DCMAKE_BUILD_TYPE=Release \
+	        -DBENCH_VARIANT=$$variant >/dev/null 2>&1; \
+	    cmake --build $$bdir --target DEMO_snapshot >/dev/null 2>&1 \
+	        || { echo "build $$variant FAILED"; exit 1; }; \
+	    printf "%-15s  " "$$variant"; \
+	    (cd $(RUNTIME_DIR) && node $$bdir/DEMO/DEMO_snapshot.js --bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)) 2>/dev/null \
+	      | grep "^\[BENCH\] total" | sed 's/^\[BENCH\] //'; \
+	done
+
+# 6 variants × {synthetic-quad, city@t=1961, greets@t=600} matrix.
+# synthetic-quad uses --bench=raster (full-screen FillerTest fixture);
+# city / greets use --bench=scene to drive a real scene's tick() repeatedly.
+# Each variant builds once and is reused for all three workloads.
+BENCH_SCENE_ITERS ?= $(BENCH_ITERS)
+
+bench-scenes-native:
+	@bdirs=""; \
+	for variant in $(BENCH_VARIANTS); do \
+	    bdir=$(abspath $(BENCH_BUILD_DIR))/$$variant; \
+	    cmake -S . -B $$bdir -G Ninja -DBENCH_VARIANT=$$variant >/dev/null; \
+	    cmake --build $$bdir --target DEMO >/dev/null 2>&1 || { echo "build $$variant FAILED"; exit 1; }; \
+	done
+	@printf "%-16s" ""; \
+	for variant in $(BENCH_VARIANTS); do printf " %-12s" "$$variant"; done; \
+	printf "\n"
+	@for row in "synthetic-quad:--bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)" \
+	            "city@t=1961:--bench=scene@scene=city,t=1961,iters=$(BENCH_SCENE_ITERS)" \
+	            "greets@t=600:--bench=scene@scene=greets,t=600,iters=$(BENCH_SCENE_ITERS)"; do \
+	    label=$${row%%:*}; args=$${row#*:}; \
+	    printf "%-16s" "$$label"; \
+	    for variant in $(BENCH_VARIANTS); do \
+	        bdir=$(abspath $(BENCH_BUILD_DIR))/$$variant; \
+	        ms=$$( (cd $(RUNTIME_DIR) && $$bdir/DEMO/DEMO $$args) 2>&1 \
+	            | grep -oE 'mean=[0-9.]+ ms/iter' \
+	            | sed -E 's/mean=([0-9.]+) ms\/iter/\1/' ); \
+	        printf " %-12s" "$$ms ms"; \
+	    done; \
+	    printf "\n"; \
+	done
+
+bench-scenes-wasm:
+	@command -v node >/dev/null 2>&1 || { echo "node not on PATH"; exit 1; }
+	@command -v emcmake >/dev/null 2>&1 || { echo "emcmake not on PATH"; exit 1; }
+	@for variant in $(BENCH_VARIANTS); do \
+	    bdir=$(abspath $(WASM_BENCH_BUILD_DIR))/$$variant; \
+	    emcmake cmake -S . -B $$bdir -G Ninja -DCMAKE_BUILD_TYPE=Release \
+	        -DBENCH_VARIANT=$$variant >/dev/null 2>&1; \
+	    cmake --build $$bdir --target DEMO_snapshot >/dev/null 2>&1 \
+	        || { echo "build $$variant FAILED"; exit 1; }; \
+	done
+	@printf "%-16s" ""; \
+	for variant in $(BENCH_VARIANTS); do printf " %-12s" "$$variant"; done; \
+	printf "\n"
+	@for row in "synthetic-quad:--bench=raster@iters=$(BENCH_ITERS),seed=$(BENCH_SEED)" \
+	            "city@t=1961:--bench=scene@scene=city,t=1961,iters=$(BENCH_SCENE_ITERS)" \
+	            "greets@t=600:--bench=scene@scene=greets,t=600,iters=$(BENCH_SCENE_ITERS)"; do \
+	    label=$${row%%:*}; args=$${row#*:}; \
+	    printf "%-16s" "$$label"; \
+	    for variant in $(BENCH_VARIANTS); do \
+	        bdir=$(abspath $(WASM_BENCH_BUILD_DIR))/$$variant; \
+	        ms=$$( (cd $(RUNTIME_DIR) && node $$bdir/DEMO/DEMO_snapshot.js $$args) 2>&1 \
+	            | grep -oE 'mean=[0-9.]+ ms/iter' \
+	            | sed -E 's/mean=([0-9.]+) ms\/iter/\1/' ); \
+	        printf " %-12s" "$$ms ms"; \
+	    done; \
+	    printf "\n"; \
+	done
 
 branches:
 	@echo "=== local ==="
