@@ -993,7 +993,7 @@ static inline Vec4fb is_nan(Vec4f const a) {
 
 #elif INSTRSET >= 7
 
-#if (defined(__GNUC__) || defined(__clang__)) && !defined(__INTEL_COMPILER) && !defined(EMSCRIPTEN)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__INTEL_COMPILER) && !defined(__EMSCRIPTEN__)
     // use assembly to avoid optimizing away with -ffinite-math-only and similar options
     __m128 aa = a;
     __m128i unordered;
@@ -1980,7 +1980,7 @@ static inline Vec2db is_nan(Vec2d const a) {
 
 #elif INSTRSET >= 7
 
-#if (defined(__GNUC__) || defined(__clang__)) && !defined(__INTEL_COMPILER)  && !defined(EMSCRIPTEN)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__INTEL_COMPILER)  && !defined(__EMSCRIPTEN__)
     // use assembly to avoid optimizing away with -ffinite-math-only and similar options
     __m128d aa = a;
     __m128i unordered;
@@ -2396,13 +2396,13 @@ static inline __m128i reinterpret_i(__m128i const x) {
     return x;
 }
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128i reinterpret_i(__m128  const x) {
     return _mm_castps_si128(x);
 }
 #endif
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128i reinterpret_i(__m128d const x) {
     return _mm_castpd_si128(x);
 }
@@ -2412,13 +2412,13 @@ static inline __m128  reinterpret_f(__m128i const x) {
     return _mm_castsi128_ps(x);
 }
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128  reinterpret_f(__m128  const x) {
     return x;
 }
 #endif
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128  reinterpret_f(__m128d const x) {
     return _mm_castpd_ps(x);
 }
@@ -2428,13 +2428,13 @@ static inline __m128d reinterpret_d(__m128i const x) {
     return _mm_castsi128_pd(x);
 }
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128d reinterpret_d(__m128  const x) {
     return _mm_castps_pd(x);
 }
 #endif
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 static inline __m128d reinterpret_d(__m128d const x) {
     return x;
 }
