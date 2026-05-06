@@ -6,6 +6,10 @@ extern "C" {
 	void Modplayer_Start(ModplayerHandle handle);
 	void Modplayer_Stop(ModplayerHandle handle);
 	void Modplayer_SetOrder(ModplayerHandle handle, unsigned int order);
+	// Enable/disable the display path (oscilloscope copy, channel-status
+	// snapshot, master FFT). Embedders that don't render a visualizer should
+	// pass `false` to skip per-buffer FFT work. Defaults to enabled.
+	void Modplayer_SetDisplay(ModplayerHandle handle, bool on);
 
 #if defined(__EMSCRIPTEN__)
 	// external-audio backend: host opens its own audio device (SDL_AudioDevice
