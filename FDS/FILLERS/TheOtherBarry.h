@@ -78,6 +78,16 @@ enum class TTextureMode {
 	TEXTURETEXTURE,
 };
 
+// Per-tile coverage classification driving apply_exact's fast/slow path
+// selection. PARTIAL is the conservative default and runs the per-row
+// edge-mask test; FULL is selected when rasterize_triangle has proven (via
+// min-edge corner check) that every pixel of the tile is inside the
+// triangle, letting apply_exact skip ~9 SIMD ops per row.
+enum class TCoverage {
+	PARTIAL,
+	FULL,
+};
+
 inline TScreenCoord orient2d(
 	TScreenCoord ax, TScreenCoord ay,
 	TScreenCoord bx, TScreenCoord by,
@@ -229,6 +239,12 @@ struct TileRasterizer {
 		return int16_t(f);
 	}
 
+	// Coverage::FULL is the inside-tile fast path: rasterize_triangle has
+	// proven (via min-edge-function) that every pixel of this tile is inside
+	// the triangle. Drop the per-row edge-mask construction (3 SIMD adds
+	// + 3 ORs + 1 compare) and the outer any-lane-set check; pixel writes are
+	// gated only by Z-test. ~9 SIMD ops/row × 8 rows = 72 ops saved per tile.
+	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
 		auto scanline = dstSurface + tile.y * TILE_SIZE * bpsl;
 		auto zscanline = dstSurface + PageSize + tile.y * TILE_SIZE * XRes * 2;
@@ -240,9 +256,13 @@ struct TileRasterizer {
 		TScreenCoord b0 = tile.b0;
 		TScreenCoord c0 = tile.c0;
 
-		Vec8i p_a = v8_from_arith_seq(a0, tile.dadx);
-		Vec8i p_b = v8_from_arith_seq(b0, tile.dbdx);
-		Vec8i p_c = v8_from_arith_seq(c0, tile.dcdx);
+		// Edge gradients only consumed by the partial-coverage path.
+		Vec8i p_a, p_b, p_c;
+		if constexpr (Coverage == barry::TCoverage::PARTIAL) {
+			p_a = v8_from_arith_seq(a0, tile.dadx);
+			p_b = v8_from_arith_seq(b0, tile.dbdx);
+			p_c = v8_from_arith_seq(c0, tile.dcdx);
+		}
 
 		int32_t t0_umask = (1 << t0.LogWidth) - 1;
 		int32_t t0_vmask = (1 << t0.LogHeight) - 1;
@@ -275,16 +295,25 @@ struct TileRasterizer {
 
 		//Vec16s rg
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += XRes) {
-			auto p_mask = (p_a | p_b | p_c) >= 0;
-			// horizontal_or(Vec8ib) compiles to !_mm256_testz_si256(a,a).
-			// simde's wasm impl of testz misses some cases where only the
-			// low lane has bits set (we observed lane 0 = 0xFFFFFFFF +
-			// horizontal_or returning 0), which silently drops every pixel
-			// on a triangle edge whose 8-pixel SIMD row has only lane 0
-			// inside the triangle. _mm256_movemask_epi8 routes through a
-			// different simde primitive that handles this correctly on
-			// every target.
-			if (any_lane_set(p_mask)) {
+			Vec8ib p_mask;
+			bool row_has_pixels;
+			if constexpr (Coverage == barry::TCoverage::FULL) {
+				// All 8 lanes are inside the triangle by precondition.
+				p_mask = Vec8i(0) == Vec8i(0);  // splat-true mask
+				row_has_pixels = true;
+			} else {
+				p_mask = (p_a | p_b | p_c) >= 0;
+				// horizontal_or(Vec8ib) compiles to !_mm256_testz_si256(a,a).
+				// simde's wasm impl of testz misses some cases where only the
+				// low lane has bits set (we observed lane 0 = 0xFFFFFFFF +
+				// horizontal_or returning 0), which silently drops every pixel
+				// on a triangle edge whose 8-pixel SIMD row has only lane 0
+				// inside the triangle. _mm256_movemask_epi8 routes through a
+				// different simde primitive that handles this correctly on
+				// every target.
+				row_has_pixels = any_lane_set(p_mask);
+			}
+			if (row_has_pixels) {
 				Vec8f p_z = approx_recipr(p_rz);
 
 #if BENCH_SKIP_Z
@@ -388,9 +417,11 @@ struct TileRasterizer {
 			}
 			color += Vec32sFromVec4s({ FixedPoint(drdy), FixedPoint(dgdy), FixedPoint(dbdy), FixedPoint(dady) });
 
-			p_a += Vec8i(tile.dady);
-			p_b += Vec8i(tile.dbdy);
-			p_c += Vec8i(tile.dcdy);
+			if constexpr (Coverage == barry::TCoverage::PARTIAL) {
+				p_a += Vec8i(tile.dady);
+				p_b += Vec8i(tile.dbdy);
+				p_c += Vec8i(tile.dcdy);
+			}
 		}
 	}
 
@@ -457,6 +488,17 @@ struct TileRasterizer {
 				TScreenCoord max_c = c0 + ((dcdx > 0) ? dcdx * TILE_SIZE : 0) + ((dcdy > 0) ? dcdy * TILE_SIZE : 0);
 
 				if ((max_a | max_b | max_c) >= 0) {
+					// Inside-tile fast-path detection: edge function reaches its
+					// minimum at the corner where each component's gradient is
+					// negative (mirror of the max-corner logic above). If the
+					// minimum is non-negative on all three edges, every pixel
+					// of the tile is inside the triangle and we can skip per-row
+					// edge-mask construction in apply_exact.
+					TScreenCoord min_a = a0 + ((dadx < 0) ? dadx * TILE_SIZE : 0) + ((dady < 0) ? dady * TILE_SIZE : 0);
+					TScreenCoord min_b = b0 + ((dbdx < 0) ? dbdx * TILE_SIZE : 0) + ((dbdy < 0) ? dbdy * TILE_SIZE : 0);
+					TScreenCoord min_c = c0 + ((dcdx < 0) ? dcdx * TILE_SIZE : 0) + ((dcdy < 0) ? dcdy * TILE_SIZE : 0);
+					const bool full_cover = (min_a >= 0) && (min_b >= 0) && (min_c >= 0);
+
 					// FIXME: define outside and maintain
 					Tile tile = {
 						.x = x,
@@ -489,7 +531,11 @@ struct TileRasterizer {
 						tile.t0.vz1 = (v1.EVZ + (x * TILE_SIZE - v1.PX) * t0.dv1zdx + (y * TILE_SIZE - v1.PY) * t0.dv1zdy);
 					}
 
-					apply_exact(tile);
+					if (full_cover) {
+						apply_exact<barry::TCoverage::FULL>(tile);
+					} else {
+						apply_exact<barry::TCoverage::PARTIAL>(tile);
+					}
 				}
 			}
 		}
