@@ -184,6 +184,7 @@
 #  undef HEDLEY_EMSCRIPTEN_VERSION
 #endif
 #if defined(__EMSCRIPTEN__)
+#  include <emscripten.h>
 #  define HEDLEY_EMSCRIPTEN_VERSION HEDLEY_VERSION_ENCODE(__EMSCRIPTEN_major__, __EMSCRIPTEN_minor__, __EMSCRIPTEN_tiny__)
 #endif
 
@@ -1353,7 +1354,7 @@ HEDLEY_DIAGNOSTIC_POP
 #  define HEDLEY_PREDICT_TRUE(expr, probability)   __builtin_expect_with_probability(!!(expr),    1   , (probability))
 #  define HEDLEY_PREDICT_FALSE(expr, probability)  __builtin_expect_with_probability(!!(expr),    0   , (probability))
 #  define HEDLEY_LIKELY(expr)                      __builtin_expect                 (!!(expr),    1                  )
-#  define HEDLEY_UNLIKELY(expr)                    __builtin_expect                 ((!!(expr)),    0                  )
+#  define HEDLEY_UNLIKELY(expr)                    __builtin_expect                 (!!(expr),    0                  )
 #elif \
   (HEDLEY_HAS_BUILTIN(__builtin_expect) && !defined(HEDLEY_INTEL_CL_VERSION)) || \
   HEDLEY_GCC_VERSION_CHECK(3,0,0) || \
