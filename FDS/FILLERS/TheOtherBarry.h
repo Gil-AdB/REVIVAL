@@ -478,6 +478,22 @@ struct TileRasterizer {
 			// this is constant across entire triangle
 		int i = 0;
 		float zoltek = 1.0f / (_a0 + _b0 + _c0);
+
+		// Hierarchical traversal gating: only triangles spanning ≥2
+		// super-tiles (4×TILE_SIZE = 32 px each) hit the outer super-tile
+		// loop. Smaller triangles take the direct per-tile loop below to
+		// avoid the super-tile setup overhead (3 orient2d calls + a
+		// classify-or-skip per super-tile that has nothing to skip when
+		// the bbox is contained).
+		constexpr int SUPER = 4;
+		constexpr int SUPER_PIXELS = SUPER * TILE_SIZE;
+		const int super_mx = tile_mx / SUPER;
+		const int super_Mx = tile_Mx / SUPER;
+		const int super_my = tile_my / SUPER;
+		const int super_My = tile_My / SUPER;
+		const bool spans_multi_super = (super_mx != super_Mx) || (super_my != super_My);
+
+		if (!spans_multi_super) {
 		for (int y = tile_my; y <= tile_My; ++y, _a0 += TILE_SIZE * dady, _b0 += TILE_SIZE * dbdy, _c0 += TILE_SIZE * dcdy, ++i) {
 			TScreenCoord a0 = _a0;
 			TScreenCoord b0 = _b0;
@@ -535,6 +551,101 @@ struct TileRasterizer {
 						apply_exact<barry::TCoverage::FULL>(tile);
 					} else {
 						apply_exact<barry::TCoverage::PARTIAL>(tile);
+					}
+				}
+			}
+		}
+		return;
+		}  // !spans_multi_super
+
+		// Hierarchical (large-triangle) path.
+		TScreenCoord ssx0 = super_mx * SUPER_PIXELS << SUBPIXEL_BITS;
+		TScreenCoord ssy0 = super_my * SUPER_PIXELS << SUBPIXEL_BITS;
+		TScreenCoord _sa0 = orient2d(v2x, v2y, v1x, v1y, ssx0, ssy0);
+		TScreenCoord _sb0 = orient2d(v3x, v3y, v2x, v2y, ssx0, ssy0);
+		TScreenCoord _sc0 = orient2d(v1x, v1y, v3x, v3y, ssx0, ssy0);
+
+		for (int sy = super_my; sy <= super_My; ++sy,
+				_sa0 += SUPER_PIXELS * dady, _sb0 += SUPER_PIXELS * dbdy, _sc0 += SUPER_PIXELS * dcdy) {
+			TScreenCoord sa0 = _sa0, sb0 = _sb0, sc0 = _sc0;
+			for (int sx = super_mx; sx <= super_Mx; ++sx,
+					sa0 += SUPER_PIXELS * dadx, sb0 += SUPER_PIXELS * dbdx, sc0 += SUPER_PIXELS * dcdx) {
+				TScreenCoord smax_a = sa0 + ((dadx > 0) ? dadx * SUPER_PIXELS : 0) + ((dady > 0) ? dady * SUPER_PIXELS : 0);
+				TScreenCoord smax_b = sb0 + ((dbdx > 0) ? dbdx * SUPER_PIXELS : 0) + ((dbdy > 0) ? dbdy * SUPER_PIXELS : 0);
+				TScreenCoord smax_c = sc0 + ((dcdx > 0) ? dcdx * SUPER_PIXELS : 0) + ((dcdy > 0) ? dcdy * SUPER_PIXELS : 0);
+				if ((smax_a | smax_b | smax_c) < 0) continue;
+
+				TScreenCoord smin_a = sa0 + ((dadx < 0) ? dadx * SUPER_PIXELS : 0) + ((dady < 0) ? dady * SUPER_PIXELS : 0);
+				TScreenCoord smin_b = sb0 + ((dbdx < 0) ? dbdx * SUPER_PIXELS : 0) + ((dbdy < 0) ? dbdy * SUPER_PIXELS : 0);
+				TScreenCoord smin_c = sc0 + ((dcdx < 0) ? dcdx * SUPER_PIXELS : 0) + ((dcdy < 0) ? dcdy * SUPER_PIXELS : 0);
+				const bool super_full = (smin_a >= 0) && (smin_b >= 0) && (smin_c >= 0);
+
+				const int ty_start = std::max(sy * SUPER, tile_my);
+				const int ty_end   = std::min(sy * SUPER + SUPER - 1, tile_My);
+				const int tx_start = std::max(sx * SUPER, tile_mx);
+				const int tx_end   = std::min(sx * SUPER + SUPER - 1, tile_Mx);
+
+				TScreenCoord _ta0 = sa0 + (tx_start - sx * SUPER) * TILE_SIZE * dadx
+				                       + (ty_start - sy * SUPER) * TILE_SIZE * dady;
+				TScreenCoord _tb0 = sb0 + (tx_start - sx * SUPER) * TILE_SIZE * dbdx
+				                       + (ty_start - sy * SUPER) * TILE_SIZE * dbdy;
+				TScreenCoord _tc0 = sc0 + (tx_start - sx * SUPER) * TILE_SIZE * dcdx
+				                       + (ty_start - sy * SUPER) * TILE_SIZE * dcdy;
+
+				for (int y = ty_start; y <= ty_end; ++y, _ta0 += TILE_SIZE * dady, _tb0 += TILE_SIZE * dbdy, _tc0 += TILE_SIZE * dcdy, ++i) {
+					TScreenCoord a0 = _ta0;
+					TScreenCoord b0 = _tb0;
+					TScreenCoord c0 = _tc0;
+					for (int x = tx_start; x <= tx_end; ++x, a0 += TILE_SIZE * dadx, b0 += TILE_SIZE * dbdx, c0 += TILE_SIZE * dcdx, ++i) {
+						TScreenCoord max_a = a0 + ((dadx > 0) ? dadx * TILE_SIZE : 0) + ((dady > 0) ? dady * TILE_SIZE : 0);
+						TScreenCoord max_b = b0 + ((dbdx > 0) ? dbdx * TILE_SIZE : 0) + ((dbdy > 0) ? dbdy * TILE_SIZE : 0);
+						TScreenCoord max_c = c0 + ((dcdx > 0) ? dcdx * TILE_SIZE : 0) + ((dcdy > 0) ? dcdy * TILE_SIZE : 0);
+
+						if ((max_a | max_b | max_c) >= 0) {
+							bool full_cover;
+							if (super_full) {
+								full_cover = true;
+							} else {
+								TScreenCoord min_a = a0 + ((dadx < 0) ? dadx * TILE_SIZE : 0) + ((dady < 0) ? dady * TILE_SIZE : 0);
+								TScreenCoord min_b = b0 + ((dbdx < 0) ? dbdx * TILE_SIZE : 0) + ((dbdy < 0) ? dbdy * TILE_SIZE : 0);
+								TScreenCoord min_c = c0 + ((dcdx < 0) ? dcdx * TILE_SIZE : 0) + ((dcdy < 0) ? dcdy * TILE_SIZE : 0);
+								full_cover = (min_a >= 0) && (min_b >= 0) && (min_c >= 0);
+							}
+
+							Tile tile = {
+								.x = x,
+								.y = y,
+								.a0 = a0,
+								.dadx = dadx,
+								.dady = dady,
+								.b0 = b0,
+								.dbdx = dbdx,
+								.dbdy = dbdy,
+								.c0 = c0,
+								.dcdx = dcdx,
+								.dcdy = dcdy,
+								.rz0 = (v1.RZ + (x * TILE_SIZE - v1.PX) * drzdx + (y * TILE_SIZE - v1.PY) * drzdy),
+								.t0 = {
+									.uz0 = (v1.UZ + (x * TILE_SIZE - v1.PX) * t0.du0zdx + (y * TILE_SIZE - v1.PY) * t0.du0zdy),
+									.vz0 = (v1.VZ + (x * TILE_SIZE - v1.PX) * t0.dv0zdx + (y * TILE_SIZE - v1.PY) * t0.dv0zdy),
+									.r0 = (float(v1.LR) + float(x * TILE_SIZE - v1.PX) * this->drdx + float(y * TILE_SIZE - v1.PY) * this->drdy),
+									.g0 = (float(v1.LG) + float(x * TILE_SIZE - v1.PX) * this->dgdx + float(y * TILE_SIZE - v1.PY) * this->dgdy),
+									.b0 = (float(v1.LB) + float(x * TILE_SIZE - v1.PX) * this->dbdx + float(y * TILE_SIZE - v1.PY) * this->dbdy),
+									.a0 = (float(v1.LA) + float(x * TILE_SIZE - v1.PX) * this->dadx + float(y * TILE_SIZE - v1.PY) * this->dady),
+								}
+							};
+
+							if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
+								tile.t0.uz1 = (v1.EUZ + (x * TILE_SIZE - v1.PX) * t0.du1zdx + (y * TILE_SIZE - v1.PY) * t0.du1zdy);
+								tile.t0.vz1 = (v1.EVZ + (x * TILE_SIZE - v1.PX) * t0.dv1zdx + (y * TILE_SIZE - v1.PY) * t0.dv1zdy);
+							}
+
+							if (full_cover) {
+								apply_exact<barry::TCoverage::FULL>(tile);
+							} else {
+								apply_exact<barry::TCoverage::PARTIAL>(tile);
+							}
+						}
 					}
 				}
 			}
