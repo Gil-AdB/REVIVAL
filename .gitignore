@@ -263,6 +263,8 @@ __pycache__/
 # CMake / Ninja / CLion build trees
 /build/
 /build.local/
+/build-bench/
+/build-wasm-*/
 /cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
@@ -308,6 +310,7 @@ DEMO.exe
 /Runtime/fountain-profiling.txt
 /Runtime/snapshots/
 /Runtime/snapshots-*/
+/Runtime/snap-*/
 /Runtime/glat-*/
 /libpng16/libpng16.lib
 /libpng16/zlib.lib
