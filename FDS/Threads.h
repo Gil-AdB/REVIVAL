@@ -92,12 +92,15 @@ private:
 
 // Parallel memset across the ThreadPool. Splits the buffer into N chunks
 // (one per worker) and waits for completion. For small buffers, falls back
-// to a serial memset since the enqueue + condvar overhead (~50us per
-// worker) would dwarf the actual memset cost.
+// to a serial memset since the enqueue + atomic-wait overhead would dwarf
+// the actual memset cost.
+//
+// Sync uses a shared_ptr<atomic<size_t>>: workers capture it by value, the
+// caller polls .load() and yields until 0. shared_ptr keeps the counter
+// alive until the last worker's lambda is done — capturing by reference
+// would UAF the caller's stack as soon as the predicate hit 0 (the last
+// worker's notify_one would land in whatever stack frame replaced ours).
 inline void parallel_memset(void *p, int value, size_t n) {
-	// Below this, single-threaded is faster — enqueue-and-wait overhead
-	// is on the order of 100-400us, which is more than memset spends on a
-	// few-hundred-KB clear.
 	constexpr size_t SERIAL_THRESHOLD = 256 * 1024;
 	auto &tp = ThreadPool::instance();
 	const size_t numThreads = tp.size();
@@ -107,21 +110,19 @@ inline void parallel_memset(void *p, int value, size_t n) {
 	}
 
 	const size_t chunk = n / numThreads;
-	std::atomic<size_t> remaining{numThreads};
-	std::mutex doneM;
-	std::condition_variable doneCV;
+	auto remaining = std::make_shared<std::atomic<size_t>>(numThreads);
 	for (size_t i = 0; i < numThreads; ++i) {
 		const size_t start = i * chunk;
 		const size_t end = (i + 1 == numThreads) ? n : start + chunk;
-		tp.enqueue([p, value, start, end, &remaining, &doneM, &doneCV]() {
+		tp.enqueue([p, value, start, end, remaining]() {
 			std::memset(static_cast<unsigned char *>(p) + start, value, end - start);
-			if (remaining.fetch_sub(1) == 1) {
-				std::lock_guard<std::mutex> lock(doneM);
-				doneCV.notify_one();
-			}
+			remaining->fetch_sub(1, std::memory_order_release);
 		});
 	}
-	std::unique_lock<std::mutex> lock(doneM);
-	doneCV.wait(lock, [&] { return remaining.load() == 0; });
+	// Caller spins on yield — fast since memset is bandwidth-limited and
+	// finishes in well under a millisecond at HiDPI sizes.
+	while (remaining->load(std::memory_order_acquire) != 0) {
+		std::this_thread::yield();
+	}
 }
 
