@@ -1044,6 +1044,15 @@ void CodeEntry(void *var)
 	Initialize_Glato(); //9.3
 	//Initialize_Nova();
 
+	// Initialize_City swaps MainSurf to a CUBE_MAP_XRES x CUBE_MAP_YRES
+	// TmpSurf for cube-map rendering and updates the engine globals
+	// (XRes/YRes/PageSize/VPage/...) while doing so. Run_Glato reads those
+	// same globals from the demo thread; if Initialize_City overlaps with
+	// Glato rendering, Glato's tick writes to TmpSurf-sized memory at
+	// full screen dimensions and traps OOB. Native completes
+	// Initialize_City in milliseconds so the race practically never
+	// trips, but on wasm Glato runs ~250x slower and the window is
+	// seconds wide. Serialize the inits for now.
 	std::thread t1([]() {
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
@@ -1055,6 +1064,7 @@ void CodeEntry(void *var)
 		Initialize_Crash();
 		Initialize_Greets(); //5.6
 	});// (); //9.3
+	t1.join();
 
 //	Initialize_Koch();
 //	ImageCompressionTestCode();
@@ -1069,8 +1079,6 @@ void CodeEntry(void *var)
 	Timer = 0;
 		
 	Run_Glato();
-
-	t1.join();
 
 	while (Timer<4000);
 
@@ -1165,7 +1173,17 @@ int main(int argc, const char *argv[])
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
 
     Uint32 windowFlags = SDL_WINDOW_RESIZABLE;
+#ifndef __EMSCRIPTEN__
+    // On native (macOS retina, Windows DPI scaling, Linux fractional
+    // scaling) we honor the rev.cfg HiDPI flag by asking SDL for a
+    // backing-store-sized renderer. On emscripten the canvas backing
+    // size is owned by the JS shell (devicePixelRatio when ?hidpi=1 in
+    // the URL); SDL_WINDOW_ALLOW_HIGHDPI there causes emscripten's SDL2
+    // port to silently multiply canvas dims by devicePixelRatio on top
+    // of what the JS shell already set, which doubles the effective
+    // resolution and torpedoes framerate.
     if (g_hiDPI) windowFlags |= SDL_WINDOW_ALLOW_HIGHDPI;
+#endif
     SDL_Window * window = SDL_CreateWindow("",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         g_demoXRes, g_demoYRes,
@@ -1257,6 +1275,8 @@ int main(int argc, const char *argv[])
 			int px = 0, py = 0;
 			SDL_Renderer *r = MainSurf ? static_cast<SDL_Renderer *>(MainSurf->Renderer) : nullptr;
 			if (r) SDL_GetRendererOutputSize(r, &px, &py);
+			fprintf(stderr, "[RESIZE-EVT] kind=%d points=%dx%d pixels=%dx%d\n",
+			        event.window.event, event.window.data1, event.window.data2, px, py);
 			if (px > 0 && py > 0) {
 				// Latest pending size wins; demo thread polls + applies at frame top.
 				g_pendingResize.store(pack_size(px, py));
