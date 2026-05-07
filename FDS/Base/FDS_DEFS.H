@@ -66,6 +66,7 @@
 #define VSurf_EffScreen   0x0010 //Surface used exclusively as a screen
 #define VSurf_Nonexist    0x0020 //Fatal: don't use the surface
 #define VSurf_Locked	  0x0040 //data pointer invalid unless surface is LOCKED or in system memory.
+#define VSurf_LockRender  0x0080 //V_Flip writes engine framebuffer directly into SDL_Texture's locked pixels (skip UpdateTexture). Used on the engine MainSurf only.
 
 // Video Driver ID's
 #define VGA_ID  0x0100

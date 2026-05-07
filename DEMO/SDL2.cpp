@@ -51,11 +51,19 @@ static void V_Flip(VESA_Surface *VS)
 	}
 	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
-	// Engine wrote directly into the texture's locked pixel buffer this
-	// frame. Unlock to commit (no-op for the SW renderer beyond an
-	// internal flag), then RenderCopy/Present.
-	SDL_UnlockTexture(texture);
-	VS->Data = nullptr;
+	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
+	if (lockMode) {
+		// Engine wrote directly into the texture's locked pixel buffer
+		// this frame. Unlock to commit (no-op for the SW renderer
+		// beyond an internal flag), then RenderCopy/Present.
+		SDL_UnlockTexture(texture);
+		VS->Data = nullptr;
+	} else {
+		// Legacy path used by Glat's FinalSurf: VS->Data is a separate
+		// malloc (FinalPage) that we copy into the texture each frame.
+		// Engine surfaces use lockMode and skip this memcpy.
+		SDL_UpdateTexture(texture, NULL, VS->Data, VS->BPSL);
+	}
 
 	// Letterbox: preserve the surface's aspect ratio inside the window.
 	// The source is VS->X * VS->Y (e.g. Glat snaps to /8 multiples while
@@ -103,20 +111,22 @@ static void V_Flip(VESA_Surface *VS)
 	}
 	SDL_RenderPresent(renderer);
 
-	// Re-lock for the next frame's writes. Update VS->Data + engine
-	// globals so the next tick renders into the new lock pointer (which
-	// can in principle differ each frame, though in practice for SW
-	// renderer it's the same surface->pixels).
-	void *pixels = nullptr;
-	int pitch = 0;
-	if (SDL_LockTexture(texture, nullptr, &pixels, &pitch) == 0) {
-		VS->Data = static_cast<byte *>(pixels);
-		VS->BPSL = pitch;
-		// Propagate to globals (VPage, VESA_BPSL) so the engine reads
-		// the up-to-date pointer + stride for the next frame.
-		VESA_Surface2Global(VS);
-	} else {
-		fprintf(stderr, "[SDL] LockTexture failed in V_Flip: %s\n", SDL_GetError());
+	if (lockMode) {
+		// Re-lock for the next frame's writes. Update VS->Data + engine
+		// globals so the next tick renders into the new lock pointer
+		// (which can in principle differ each frame, though in practice
+		// for SW renderer it's the same surface->pixels). Only do this
+		// for engine surfaces — Glat's FinalSurf has its own malloc'd
+		// FinalPage and shouldn't have its globals touched here.
+		void *pixels = nullptr;
+		int pitch = 0;
+		if (SDL_LockTexture(texture, nullptr, &pixels, &pitch) == 0) {
+			VS->Data = static_cast<byte *>(pixels);
+			VS->BPSL = pitch;
+			VESA_Surface2Global(VS);
+		} else {
+			fprintf(stderr, "[SDL] LockTexture failed in V_Flip: %s\n", SDL_GetError());
+		}
 	}
 }
 
@@ -135,6 +145,12 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 
 	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
 	VS->Handle = static_cast<void *>(s_engineTex.get());
+
+	// Mark this surface as lock-render so V_Flip writes the engine
+	// framebuffer directly into the texture's pixel buffer — child
+	// surfaces (Glat's FinalSurf) don't set this flag and stay on the
+	// legacy SDL_UpdateTexture path.
+	VS->Flags |= VSurf_LockRender;
 
 	// Lock the texture and point VS->Data at the lock pointer. The engine
 	// then renders straight into the texture each frame; V_Flip just
