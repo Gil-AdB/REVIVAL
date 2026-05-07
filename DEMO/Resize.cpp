@@ -6,7 +6,18 @@
 extern void SDL2_HandleResize(int newX, int newY);
 
 std::atomic<uint64_t> g_pendingResize{0};
+std::mutex g_engineSurfaceMutex;
 
 void EngineResize(int newX, int newY) {
+    // Try-lock + defer: if a scene-init thread is mid-MainSurf-swap (e.g.
+    // Initialize_City's cube-map render), don't block the demo thread for
+    // the duration of that init — it can take ~10s on wasm. Push the
+    // pending resize back into the atomic and let the next frame's poll
+    // try again. Newest size wins regardless.
+    std::unique_lock<std::mutex> lock(g_engineSurfaceMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        g_pendingResize.store(pack_size(newX, newY));
+        return;
+    }
     SDL2_HandleResize(newX, newY);
 }

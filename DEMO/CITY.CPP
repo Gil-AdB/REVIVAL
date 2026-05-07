@@ -1623,6 +1623,16 @@ void Initialize_City()
 	Animate_Objects(CitySc, true);
 	Lighting(CitySc);
 
+	// MainSurf swap to a CUBE_MAP_XRES x CUBE_MAP_YRES TmpSurf for the
+	// off-screen reflection passes. The demo thread's resize-pending poll
+	// can fire EngineResize at any time; that path goes through
+	// VESA_VPageExternal which does memcpy(MainSurf, &SDL_MainSurf, ...) —
+	// while we have MainSurf pointed at this stack-local TmpSurf, that
+	// memcpy would stomp our cube-map state with the SDL screen surface.
+	// Hold g_engineSurfaceMutex for the duration of the swap so a
+	// concurrent EngineResize blocks until we restore MainSurf below.
+	std::lock_guard<std::mutex> mainsurfLock(g_engineSurfaceMutex);
+
 	VESA_Surface* PrevMainSurf = MainSurf;
 	VESA_Surface TmpSurf = { 0 };
 	MainSurf = &TmpSurf;

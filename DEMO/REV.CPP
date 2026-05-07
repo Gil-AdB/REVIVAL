@@ -1044,15 +1044,6 @@ void CodeEntry(void *var)
 	Initialize_Glato(); //9.3
 	//Initialize_Nova();
 
-	// Initialize_City swaps MainSurf to a CUBE_MAP_XRES x CUBE_MAP_YRES
-	// TmpSurf for cube-map rendering and updates the engine globals
-	// (XRes/YRes/PageSize/VPage/...) while doing so. Run_Glato reads those
-	// same globals from the demo thread; if Initialize_City overlaps with
-	// Glato rendering, Glato's tick writes to TmpSurf-sized memory at
-	// full screen dimensions and traps OOB. Native completes
-	// Initialize_City in milliseconds so the race practically never
-	// trips, but on wasm Glato runs ~250x slower and the window is
-	// seconds wide. Serialize the inits for now.
 	std::thread t1([]() {
 		InitPolyStats(200);
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
@@ -1064,7 +1055,6 @@ void CodeEntry(void *var)
 		Initialize_Crash();
 		Initialize_Greets(); //5.6
 	});// (); //9.3
-	t1.join();
 
 //	Initialize_Koch();
 //	ImageCompressionTestCode();
@@ -1079,6 +1069,8 @@ void CodeEntry(void *var)
 	Timer = 0;
 		
 	Run_Glato();
+
+	t1.join();
 
 	while (Timer<4000);
 
