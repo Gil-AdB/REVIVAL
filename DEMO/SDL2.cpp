@@ -170,7 +170,10 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	// snaps to the actual browser window size (modulated by devicePixelRatio
 	// when HiDPI is on). Without this the demo opens at g_demoXRes/Y and
 	// stays there until the user manually resizes the window.
-	emscripten_run_script("window.dispatchEvent(new Event('resize'))");
+	//
+	// Must run on the main browser thread — under PROXY_TO_PTHREAD this
+	// function is on a pthread worker where `window` is undefined.
+	MAIN_THREAD_EM_ASM({ window.dispatchEvent(new Event('resize')); });
 #endif
 
 	return 0;
