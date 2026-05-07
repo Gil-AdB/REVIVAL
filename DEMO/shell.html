@@ -5,14 +5,16 @@
     <title>REVIVAL / FLOOD</title>
     <style>
       html, body { margin: 0; padding: 0; background: #000; color: #ccc;
-                   font: 14px/1.3 sans-serif; height: 100%; }
-      body { display: flex; flex-direction: column;
-             align-items: center; justify-content: center; }
+                   font: 14px/1.3 sans-serif; height: 100%; overflow: hidden; }
       #status { position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px;
                 background: rgba(0,0,0,0.6); font-size: 12px;
                 pointer-events: none; }
       #status.hidden { display: none; }
-      canvas { background: #000; display: block; image-rendering: pixelated; }
+      /* Canvas fills the viewport; the wasm side handles aspect-preserving
+         letterbox via SDL_RenderCopy inside V_Flip, so we don't need
+         object-fit / centering tricks here. */
+      canvas { background: #000; display: block; image-rendering: pixelated;
+               position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
     </style>
   </head>
   <body>
@@ -57,6 +59,34 @@
       window.addEventListener('keydown', function(e) {
         if (swallowed.has(e.key)) e.preventDefault();
       }, { capture: true });
+
+      // Dynamic canvas resize. The CSS makes the canvas fill the viewport
+      // visually, but the canvas drawing-buffer (canvas.width/height) is
+      // a separate value that determines the actual pixel resolution we
+      // render at. When the user drags the browser, rotates a device, or
+      // moves the window between displays with different DPRs, this
+      // handler updates the drawing-buffer size; emscripten's SDL2 then
+      // emits SDL_WINDOWEVENT_SIZE_CHANGED, our native event loop picks
+      // it up, and EngineResize redraws everything at the new dims.
+      //
+      // HiDPI on by default on the web (browser-native devicePixelRatio
+      // gets us crisp rendering on retina); pass ?hidpi=0 in the URL to
+      // disable for perf comparisons.
+      var hiDPI = !/[?&]hidpi=0/.test(window.location.search);
+      function resizeCanvasToWindow() {
+        var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
+        var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
+        var h = Math.max(1, Math.floor(window.innerHeight * dpr));
+        if (canvasEl.width  !== w) canvasEl.width  = w;
+        if (canvasEl.height !== h) canvasEl.height = h;
+      }
+      window.addEventListener('resize', resizeCanvasToWindow);
+      // DPR change (e.g. moving the window between a retina and non-retina
+      // display) doesn't fire 'resize'; subscribe to a media query that
+      // matches the current resolution to catch it.
+      var dprMQ = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+      if (dprMQ.addEventListener) dprMQ.addEventListener('change', resizeCanvasToWindow);
+      else if (dprMQ.addListener) dprMQ.addListener(resizeCanvasToWindow);
     </script>
     {{{ SCRIPT }}}
   </body>

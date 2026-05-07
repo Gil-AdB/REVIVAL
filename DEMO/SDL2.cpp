@@ -5,6 +5,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include "../Modplayer/Modplayer.h"
+#include <emscripten.h>
 #include <emscripten/threading.h>
 #endif
 
@@ -28,9 +29,38 @@ static void V_Flip(VESA_Surface *VS)
 		if (x < 0) x = 0;
 		OutTextXY(VS->Data, x, 4, buf, 255, (int)VS->X, (int)VS->Y);
 	}
-	auto x = SDL_UpdateTexture(static_cast<SDL_Texture*>(VS->Handle), NULL, VS->Data, VS->BPSL);
-	auto y = SDL_RenderCopy(static_cast<SDL_Renderer*>(VS->Renderer), static_cast<SDL_Texture*>(VS->Handle), NULL, NULL);
-	SDL_RenderPresent(static_cast<SDL_Renderer*>(VS->Renderer));
+	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
+	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
+	SDL_UpdateTexture(texture, NULL, VS->Data, VS->BPSL);
+
+	// Letterbox: preserve the surface's aspect ratio inside the window.
+	// The source is VS->X * VS->Y (e.g. Glat snaps to /8 multiples while
+	// the window may not), the destination is the renderer's pixel size.
+	// Scale uniformly to fit, center, fill remainder with black. When the
+	// ARs match (true mid-flight resize where MainSurf == window), this
+	// reduces to a full-window blit with no bars.
+	int rw = 0, rh = 0;
+	SDL_GetRendererOutputSize(renderer, &rw, &rh);
+	if (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0) {
+		SDL_RenderCopy(renderer, texture, NULL, NULL);
+	} else {
+		// Clear so any side bars from a previous frame's letterbox
+		// (or from a window drag where the bar widths just changed)
+		// don't keep stale pixels.
+		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+		SDL_RenderClear(renderer);
+
+		float sx = (float)rw / (float)VS->X;
+		float sy = (float)rh / (float)VS->Y;
+		float s  = sx < sy ? sx : sy;
+		SDL_Rect dst;
+		dst.w = (int)((float)VS->X * s);
+		dst.h = (int)((float)VS->Y * s);
+		dst.x = (rw - dst.w) / 2;
+		dst.y = (rh - dst.h) / 2;
+		SDL_RenderCopy(renderer, texture, NULL, &dst);
+	}
+	SDL_RenderPresent(renderer);
 }
 
 static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
@@ -134,6 +164,14 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	V_Flip(MainSurf);
 
 	FPU_LPrecision();
+
+#ifdef __EMSCRIPTEN__
+	// Trigger our shell.html resize handler so the canvas drawing-buffer
+	// snaps to the actual browser window size (modulated by devicePixelRatio
+	// when HiDPI is on). Without this the demo opens at g_demoXRes/Y and
+	// stays there until the user manually resizes the window.
+	emscripten_run_script("window.dispatchEvent(new Event('resize'))");
+#endif
 
 	return 0;
 }
