@@ -69,14 +69,16 @@ Font * LoadAFT(const char *FileName)
 int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int xres /* = XRes*/, int yres /*= YRes*/)
 {
 	int DX;
-	int II, IJ, IK;
-	byte CP = 0, Ch;
+	int II, IJ;
+	byte Ch;
 	int32_t PgOffset, POfs, FOfs, FEnd, Hisx;
 	byte TC[2];
 	char CPP = (BPP + 1) >> 3;
 	byte *Ptr, *Pen;
 	Font *F = Active_Font;
-	if (Y >= yres - F->Y) {
+	const int scale = g_fontScale > 0 ? g_fontScale : 1;
+	const int glyphH = F->Y * scale;
+	if (Y >= yres - glyphH) {
 		return Y;
 	}
 
@@ -87,7 +89,6 @@ int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int
 		TC[1] = 192;
 	}
 
-	long width = 0;
 	DX = X;
 	PgOffset = Y * xres;//YOffs[Y];
 
@@ -96,35 +97,38 @@ int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int
 	while ((Ch = *S++))
 	{
 		FEnd = F->Len[Ch];
-		if (Ch == 13 || Ch == 10 || DX + FEnd + 2 >= xres) { 
-			Y += F->Y + 2;
-			PgOffset = Y * xres; 
-			DX = X; 
-			if (Y >= yres - F->Y) return Y;
+		const int glyphW = (FEnd + 2) * scale;
+		if (Ch == 13 || Ch == 10 || DX + glyphW >= xres) {
+			Y += glyphH + 2 * scale;
+			PgOffset = Y * xres;
+			DX = X;
+			if (Y >= yres - glyphH) return Y;
 			continue;
 		}
 
-		POfs = (PgOffset + DX)*CPP;
+		POfs = (PgOffset + DX) * CPP;
 		FOfs = Ch * F->XY;
+		// Each font row is replicated `scale` times in the output, and
+		// each font column writes a `scale`-wide horizontal run. So one
+		// font pixel becomes a scale×scale block in the framebuffer.
 		for (IJ = 0; IJ < F->Y; IJ++)
 		{
-			Ptr = F->Ch + FOfs;
-			II = FEnd;
-			Pen = Where + POfs;
-			while (II--)
-			{
-				//        Where[POfs+II] = TC[F->Ch[FOfs+II]];
-				if (TC[*Ptr++])
-					memset(Pen, C, CPP);
-				Pen += CPP;
+			for (int sj = 0; sj < scale; ++sj) {
+				Ptr = F->Ch + FOfs;
+				II = FEnd;
+				Pen = Where + POfs + sj * xres * CPP;
+				while (II--)
+				{
+					if (TC[*Ptr++]) {
+						memset(Pen, C, CPP * scale);
+					}
+					Pen += scale * CPP;
+				}
 			}
 			FOfs += Hisx;
-			POfs += xres * CPP;
+			POfs += xres * CPP * scale;
 		}
-		DX += FEnd + 2;
-		if (width < DX - X) {
-			width = DX - X;
-		}
+		DX += glyphW;
 	}
 	return Y;
 }

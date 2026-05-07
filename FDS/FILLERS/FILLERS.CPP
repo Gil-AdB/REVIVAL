@@ -1428,7 +1428,7 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel)
 			int32_t y = _A->PY;
 			if (y<0) y=0;
 			if (y>YRes-1) y=YRes-1;
-			if (Z <= ((word *)VPage) [(PageSize>>1)+XRes*y+x]) return;
+			if (Z <= ZPage16[XRes*y+x]) return;
 		}
 		Spriter<256, true>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
 		//CSeven_UP_MMX(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Col, Z);
@@ -1552,7 +1552,7 @@ void The_MMX_Scalar_32(Vertex **V, dword numVerts)
 		int32_t y = _A->PY;
 		if (y<0) y=0;
 		if (y>YRes-1) y=YRes-1;
-		if (Z > ((word *)VPage) [(PageSize>>1)+XRes*y+x])
+		if (Z > ZPage16[XRes*y+x])
 			CSeven_UP_MMX_32(_A->PX,_A->PY,edgeLen,edgeLen,DoFace->Txtr->Txtr->Data,VPage, Color, Z);
 		//Spriter32(_A->PX,_A->PY,edgeLen,edgeLen,DoFace->Txtr->Txtr->Data,VPage, Color, Z);
 		//CSeven_UP(_A->PX,_A->PY,Size<<1,Size<<1,DoFace->Txtr->Txtr->Data,VPage);
@@ -1601,6 +1601,13 @@ void TBR_Init(Scene *Sc, mword size)
 
 void InsertSpanToTBR(Face *F, dword tile)
 {
+	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
+	// of the *average* tile-coverage per particle. Particles near the
+	// camera with large FlareSize can easily cover 5-10× that, so once we
+	// hit the cap we drop excess spans rather than write past the buffer
+	// end (heap corruption used to surface as an SBuffer[n].next bogus
+	// index, then OOB in TBR_Render's lambda chasing it).
+	if (CurScene->SBufferCur >= CurScene->SBufferSize) return;
 	sdword h = CurScene->SBufferHead[tile];
 	mword  n = CurScene->SBufferCur;
 	CurScene->SBuffer[n].F = F;
@@ -1613,7 +1620,11 @@ void InsertSpanToTBR(Face *F, dword tile)
 void InsertSpriteToTBR(Face *F, float y, float Height)
 {
 	int y1, y2;
-	static int32_t numTiles = CurScene->NumTiles;
+	// Read fresh every call — `static` here used to cache the value, but
+	// rebuildSizedBuffers (engine resize) reallocates SBufferHead at a
+	// different size. A stale cached numTiles would let us index past the
+	// new (smaller) SBufferHead end on HD→SD transitions.
+	int32_t numTiles = CurScene->NumTiles;
 
 	y1 = Fist(((y - Height) * rTILESIZE) - 0.999999);
 	y2 = Fist((y + Height) * rTILESIZE);
@@ -1659,7 +1670,7 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel)
 		if (y<0) y=0;
 		if (y>YRes-1) y=YRes-1;
 		if (
-			(Z > ((word *)VPage) [(PageSize>>1)+XRes*y+x]) && // depth test
+			(Z > ZPage16[XRes*y+x]) && // depth test
 			((_A->PX + edgeLen > 0) && (_A->PX - edgeLen < XRes)) // x-clipping
 			)
 		{

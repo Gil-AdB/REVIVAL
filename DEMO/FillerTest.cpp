@@ -1261,7 +1261,8 @@ void FillerTest()
 				((dword*)VPage)[y * XRes + x] = (x % 64 < 32) ? 0x3f3f3f : 0;
 			}
 		}*/
-		memset(VPage,0,PageSize + XRes*YRes*sizeof(word));
+		memset(VPage, 0, PageSize);
+		memset(ZPage16, 0, XRes * YRes * sizeof(word));
 		//memset(VPage, 0, PageSize);
 		//for (int y = 0; y != YRes; ++y) {
 		//	for (int x = 0; x != XRes; ++x) {
@@ -1290,7 +1291,7 @@ void FillerTest()
 		dword scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 
 		snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
-		scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+		scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
 		memcpy(MainSurf->Data, g_gbuffer->txtr.data(), XRes * YRes * 4);
 

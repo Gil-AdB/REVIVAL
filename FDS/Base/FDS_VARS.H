@@ -368,6 +368,13 @@ struct VESA_Surface
 	VESA_Surface *Next,*Prev;
 	void *Handle;
 	void *Renderer;
+	// 16-bit Z-buffer. Used to live at (VPage + PageSize) — i.e. tail-end of
+	// the same allocation as the framebuffer. Split out so V_Flip can use
+	// SDL_LockTexture() to point Data directly at the SDL_Texture's pixel
+	// buffer (engine writes go straight into it, no UpdateTexture memcpy).
+	// Z16 stays in a separate malloc since the texture buffer is sized for
+	// color only.
+	byte *Z16;
 };
 
 
@@ -427,6 +434,15 @@ extern char Direct_FLIP;
 
 // Global Surface Scalar variables (Fastest access)
 extern "C" int32_t XRes,YRes,XRes_1,YRes_1,CntrX,CntrY,BPP,CPP;
+// Integer pixel-replication factor for OutTextXY. 1 = native bitmap-font
+// size; 2 = each font pixel becomes a 2×2 block (used at HiDPI resolutions
+// so the FPS / profiler / resolution overlays stay legible). Updated by
+// VESA_Surface2Global based on the live XRes.
+extern int32_t g_fontScale;
+// 16-bit Z-buffer, sized X*Y. Used to live at (VPage + PageSize); now in a
+// separate allocation so VPage can be the SDL_Texture's locked pixel
+// buffer. Set by VESA_Surface2Global from VS->Z16.
+extern word *ZPage16;
 extern float CntrEX,CntrEY;
 extern int32_t PageSize,PageSizeW,PageSizeDW;
 

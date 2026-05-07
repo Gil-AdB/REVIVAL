@@ -1,7 +1,9 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
-#include <SDL.h>
+#include "SDL2.h"
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 
 #ifdef __EMSCRIPTEN__
 #include "../Modplayer/Modplayer.h"
@@ -9,9 +11,27 @@
 #include <emscripten/threading.h>
 #endif
 
+void SDLTexDeleter::operator()(SDL_Texture *t) const noexcept {
+    if (!t) return;
+    fprintf(stderr, "[SDL] -tex tag=%s ptr=%p\n", tag ? tag : "?", (void *)t);
+    SDL_DestroyTexture(t);
+}
+
+SDLTex SDL2_MakeTexture(SDL_Renderer *r, int X, int Y, const char *tag) {
+    SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
+                                       SDL_TEXTUREACCESS_STREAMING, X, Y);
+    fprintf(stderr, "[SDL] +tex tag=%s ptr=%p size=%dx%d%s\n",
+            tag ? tag : "?", (void *)t, X, Y,
+            t ? "" : " (FAILED)");
+    return SDLTex(t, SDLTexDeleter{tag});
+}
+
 
 static VESA_Surface SDL_MainSurf;
 static SDL_Window *sdl_window;
+// Owns the engine display texture. Reset (-> destroy) and reassigned
+// (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
+static SDLTex s_engineTex;
 
 static void V_Flip(VESA_Surface *VS)
 {
@@ -21,17 +41,21 @@ static void V_Flip(VESA_Surface *VS)
 	if (VS->Data && VS->X > 0 && VS->Y > 0) {
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%dx%d", (int)VS->X, (int)VS->Y);
-		// Approximate text width: ~10 px per char at the standard font.
-		// Right-align at a small inset; if the surface is narrow we just
-		// clamp to 0.
-		int textPx = (int)strlen(buf) * 10;
-		int x = (int)VS->X - textPx - 8;
+		// Approximate per-char width is ~10 px at the native font; scales
+		// with g_fontScale (HiDPI auto-doubles glyph dimensions).
+		const int scale = g_fontScale > 0 ? g_fontScale : 1;
+		int textPx = (int)strlen(buf) * 10 * scale;
+		int x = (int)VS->X - textPx - 8 * scale;
 		if (x < 0) x = 0;
-		OutTextXY(VS->Data, x, 4, buf, 255, (int)VS->X, (int)VS->Y);
+		OutTextXY(VS->Data, x, 4 * scale, buf, 255, (int)VS->X, (int)VS->Y);
 	}
 	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
-	SDL_UpdateTexture(texture, NULL, VS->Data, VS->BPSL);
+	// Engine wrote directly into the texture's locked pixel buffer this
+	// frame. Unlock to commit (no-op for the SW renderer beyond an
+	// internal flag), then RenderCopy/Present.
+	SDL_UnlockTexture(texture);
+	VS->Data = nullptr;
 
 	// Letterbox: preserve the surface's aspect ratio inside the window.
 	// The source is VS->X * VS->Y (e.g. Glat snaps to /8 multiples while
@@ -44,12 +68,6 @@ static void V_Flip(VESA_Surface *VS)
 	if (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0) {
 		SDL_RenderCopy(renderer, texture, NULL, NULL);
 	} else {
-		// Clear so any side bars from a previous frame's letterbox
-		// (or from a window drag where the bar widths just changed)
-		// don't keep stale pixels.
-		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-		SDL_RenderClear(renderer);
-
 		float sx = (float)rw / (float)VS->X;
 		float sy = (float)rh / (float)VS->Y;
 		float s  = sx < sy ? sx : sy;
@@ -58,9 +76,48 @@ static void V_Flip(VESA_Surface *VS)
 		dst.h = (int)((float)VS->Y * s);
 		dst.x = (rw - dst.w) / 2;
 		dst.y = (rh - dst.h) / 2;
+
+		// Only fill the letterbox bar regions — clearing the whole
+		// renderer output is a 20+ MB write per frame on wasm software
+		// renderer, which dwarfs everything else in V_Flip when the
+		// bars are tiny. Pixels under the engine area are about to be
+		// overwritten by RenderCopy anyway.
+		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+		SDL_Rect bars[4];
+		int n = 0;
+		if (dst.y > 0) {                    // top
+			bars[n++] = SDL_Rect{0, 0, rw, dst.y};
+		}
+		if (dst.y + dst.h < rh) {           // bottom
+			bars[n++] = SDL_Rect{0, dst.y + dst.h, rw, rh - (dst.y + dst.h)};
+		}
+		if (dst.x > 0) {                    // left
+			bars[n++] = SDL_Rect{0, dst.y, dst.x, dst.h};
+		}
+		if (dst.x + dst.w < rw) {           // right
+			bars[n++] = SDL_Rect{dst.x + dst.w, dst.y, rw - (dst.x + dst.w), dst.h};
+		}
+		if (n > 0) SDL_RenderFillRects(renderer, bars, n);
+
 		SDL_RenderCopy(renderer, texture, NULL, &dst);
 	}
 	SDL_RenderPresent(renderer);
+
+	// Re-lock for the next frame's writes. Update VS->Data + engine
+	// globals so the next tick renders into the new lock pointer (which
+	// can in principle differ each frame, though in practice for SW
+	// renderer it's the same surface->pixels).
+	void *pixels = nullptr;
+	int pitch = 0;
+	if (SDL_LockTexture(texture, nullptr, &pixels, &pitch) == 0) {
+		VS->Data = static_cast<byte *>(pixels);
+		VS->BPSL = pitch;
+		// Propagate to globals (VPage, VESA_BPSL) so the engine reads
+		// the up-to-date pointer + stride for the next frame.
+		VESA_Surface2Global(VS);
+	} else {
+		fprintf(stderr, "[SDL] LockTexture failed in V_Flip: %s\n", SDL_GetError());
+	}
 }
 
 static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
@@ -69,38 +126,96 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	VS->BPSL = VS->CPP * VS->X;
 	VS->PageSize = VS->BPSL * VS->Y;
 
+	// Z-buffer in its own malloc, sized X*Y*sizeof(word). Used to be the
+	// tail of VS->Data; split out so VS->Data can be the SDL_Texture's
+	// locked pixel buffer (zero-copy framebuffer write).
 	dword ZBufferSize = sizeof(word) * VS->X * VS->Y;
-	if (!(VS->Data = (byte *)malloc(VS->PageSize + ZBufferSize))) return 1;
-	memset(VS->Data,0,VS->PageSize + ZBufferSize);
+	if (!(VS->Z16 = (byte *)malloc(ZBufferSize))) return 1;
+	memset(VS->Z16, 0, ZBufferSize);
 
+	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
+	VS->Handle = static_cast<void *>(s_engineTex.get());
 
-	SDL_Texture * screen_texture = SDL_CreateTexture(renderer,
-		SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-		VS->X, VS->Y);
-
-	VS->Handle = static_cast<void *>(screen_texture);
+	// Lock the texture and point VS->Data at the lock pointer. The engine
+	// then renders straight into the texture each frame; V_Flip just
+	// unlocks (commit), presents, and re-locks for the next frame.
+	// SW renderer's lock is essentially free (returns surface->pixels with
+	// no copy and unlock is a no-op).
+	void *pixels = nullptr;
+	int pitch = 0;
+	if (SDL_LockTexture(s_engineTex.get(), nullptr, &pixels, &pitch) != 0) {
+		fprintf(stderr, "[SDL] LockTexture failed in V_Create: %s\n", SDL_GetError());
+		return 1;
+	}
+	VS->Data = static_cast<byte *>(pixels);
+	VS->BPSL = pitch;
+	memset(VS->Data, 0, pitch * VS->Y);
 
 	return 0;
 }
 
 
-void *SDL2_CreateChildTexture(int X, int Y)
+SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag)
 {
 	// Same renderer the engine display uses; assumes SDL2_InitDisplay ran.
-	if (!SDL_MainSurf.Renderer || X <= 0 || Y <= 0) return nullptr;
-	return SDL_CreateTexture(static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer),
-	                         SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-	                         X, Y);
+	if (!SDL_MainSurf.Renderer || X <= 0 || Y <= 0) return SDLTex(nullptr, SDLTexDeleter{tag});
+	return SDL2_MakeTexture(static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer), X, Y, tag);
 }
 
 // Tear down + reallocate the SDL-side framebuffer / Z-buffer / SDL_Texture
 // at new dimensions, then re-install into the engine globals via
 // VESA_VPageExternal (which calls Build_YOffs_Table + VESA_Surface2Global).
 // Called from the demo thread at a frame boundary by EngineResize.
+// TheOtherBarry's apply_exact iterates a hard-coded 8 rows per tile, so the
+// engine surface and Z-buffer must be sized in multiples of TILE_SIZE
+// otherwise the last tile row walks past the buffer end and trips the
+// rasterizer ~6 rows out (lldb: ldr q30 from a wild pointer). The actual
+// window can be any size — V_Flip's letterbox absorbs the 0–7px mismatch.
+static constexpr int kEngineSnap = 8;
+static int snapEngineDim(int v) {
+	v &= ~(kEngineSnap - 1);
+	return v < kEngineSnap ? kEngineSnap : v;
+}
+
+// Demo's authoring aspect ratio (from rev.cfg's ResolutionX/Y). The engine
+// surface always renders at this AR; V_Flip letterboxes the slot inside
+// the renderer output. Falls back to 16:9 if the configuration globals
+// haven't been initialized yet (FDS_Init path).
+extern int32_t g_demoXRes, g_demoYRes;
+static float demoAR() {
+	if (g_demoXRes > 0 && g_demoYRes > 0) {
+		return (float)g_demoXRes / (float)g_demoYRes;
+	}
+	return 16.0f / 9.0f;
+}
+
+// Clamp a window size to the demo's authoring aspect ratio. The result is
+// the largest demoAR rectangle that fits inside (winX, winY); any window
+// pixels outside that rectangle become black bars in V_Flip's letterbox.
+static void clampToDemoAR(int winX, int winY, int &outX, int &outY) {
+	const float ar = demoAR();
+	const float winAR = (float)winX / (float)winY;
+	if (winAR > ar) {
+		// Window is wider than demo AR — height limits, bars on left/right.
+		outX = (int)((float)winY * ar);
+		outY = winY;
+	} else {
+		// Window is taller (or equal) — width limits, bars on top/bottom.
+		outX = winX;
+		outY = (int)((float)winX / ar);
+	}
+}
+
 void SDL2_HandleResize(int newX, int newY)
 {
-	fprintf(stderr, "[RESIZE] requested %dx%d, current %dx%d\n",
-	        newX, newY, SDL_MainSurf.X, SDL_MainSurf.Y);
+	const int rawX = newX;
+	const int rawY = newY;
+	// Letterbox engine surface to the demo's authoring AR before snapping.
+	clampToDemoAR(newX, newY, newX, newY);
+	newX = snapEngineDim(newX);
+	newY = snapEngineDim(newY);
+	fprintf(stderr, "[RESIZE] window %dx%d → engine %dx%d (AR %.3f), current %dx%d\n",
+	        rawX, rawY, newX, newY, demoAR(), SDL_MainSurf.X, SDL_MainSurf.Y);
 	if (newX <= 0 || newY <= 0) return;
 	if (newX == SDL_MainSurf.X && newY == SDL_MainSurf.Y) return;
 
@@ -112,13 +227,20 @@ void SDL2_HandleResize(int newX, int newY)
 		MainSurf->YTable = nullptr;
 	}
 
-	if (SDL_MainSurf.Handle) {
-		SDL_DestroyTexture(static_cast<SDL_Texture *>(SDL_MainSurf.Handle));
-		SDL_MainSurf.Handle = nullptr;
+	// VS->Data is the texture's locked pixel buffer — unlock it before
+	// destroying the texture (SDL_DestroyTexture on a still-locked
+	// streaming texture is undefined). The deleter (RAII) actually frees;
+	// we just need to release the lock + alias.
+	if (SDL_MainSurf.Data && SDL_MainSurf.Handle) {
+		SDL_UnlockTexture(static_cast<SDL_Texture *>(SDL_MainSurf.Handle));
 	}
-	if (SDL_MainSurf.Data) {
-		free(SDL_MainSurf.Data);
-		SDL_MainSurf.Data = nullptr;
+	SDL_MainSurf.Data = nullptr;
+	s_engineTex.reset();
+	SDL_MainSurf.Handle = nullptr;
+	// Z-buffer is its own allocation now.
+	if (SDL_MainSurf.Z16) {
+		free(SDL_MainSurf.Z16);
+		SDL_MainSurf.Z16 = nullptr;
 	}
 
 	SDL_MainSurf.X = newX;
@@ -155,7 +277,12 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	// what the framebuffer + SDL_Texture are sized in.
 	int px, py;
 	SDL_GetRendererOutputSize(renderer, &px, &py);
-	SDL_MainSurf.X = px; SDL_MainSurf.Y = py;
+	// Letterbox to demo AR + snap to TILE_SIZE — same as SDL2_HandleResize,
+	// just for the boot path.
+	int engX = px, engY = py;
+	clampToDemoAR(px, py, engX, engY);
+	SDL_MainSurf.X = snapEngineDim(engX);
+	SDL_MainSurf.Y = snapEngineDim(engY);
 
 	V_Create(&SDL_MainSurf, renderer);
 
@@ -186,6 +313,35 @@ dword SDL2_InitDisplay(SDL_Window *window)
 #ifdef __EMSCRIPTEN__
 static SDL_AudioDeviceID g_audio_dev = 0;
 static int g_audio_cb_count = 0;
+// Mute flag toggled from the JS shell's button. We still pull samples from
+// the modplayer (so position keeps advancing) and just silence the output —
+// that way unmute resumes mid-track instead of restarting.
+static std::atomic<bool> g_mute{false};
+
+extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
+{
+	g_mute.store(muted != 0);
+	fprintf(stderr, "[AUDIO] mute=%d\n", muted);
+}
+
+// Tell SDL the canvas backing size (in physical pixels) has changed.
+// JS-side toggles (HiDPI button, orientationchange, window drag at a new
+// DPR) pick the desired backing size and call into here. SDL_SetWindowSize
+// updates window->w/h, calls emscripten_set_canvas_element_size internally
+// (which actually resizes the canvas DOM element), and fires
+// SDL_WINDOWEVENT_SIZE_CHANGED — the demo thread's resize event handler
+// then queues g_pendingResize and EngineResize redoes the framebuffer.
+//
+// Setting canvas.width/height from JS alone doesn't get there: emscripten's
+// SDL2 listens to window 'resize' but reads window.innerWidth/innerHeight,
+// not the canvas dims, so HiDPI toggles never reached SDL. Routing through
+// SDL_SetWindowSize is the canonical fix.
+extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
+{
+	if (!sdl_window || w <= 0 || h <= 0) return;
+	fprintf(stderr, "[SDL] RequestSize %dx%d\n", w, h);
+	SDL_SetWindowSize(sdl_window, w, h);
+}
 
 static void wasm_audio_callback(void* userdata, Uint8* stream, int len)
 {
@@ -198,6 +354,9 @@ static void wasm_audio_callback(void* userdata, Uint8* stream, int len)
 	Modplayer_FillBuffer((ModplayerHandle)userdata,
 	                     reinterpret_cast<float*>(stream),
 	                     len / (2 * sizeof(float)));
+	if (g_mute.load(std::memory_order_relaxed)) {
+		memset(stream, 0, len);
+	}
 }
 
 // Runs on the browser main thread (proxied via emscripten_sync_run_in_main_runtime_thread).

@@ -340,7 +340,7 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 		.V = V,
 		.xres = XRes,
 		.yres = YRes,
-		.zbuffer = reinterpret_cast<uint16_t *>(VPage + PageSize),
+		.zbuffer = ZPage16,
 	};
 	meka::TileRasterizer r(*g_gbuffer, ctx);
 

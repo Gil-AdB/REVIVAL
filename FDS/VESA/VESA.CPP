@@ -43,6 +43,9 @@ char *VESA_Pal = NULL;
 
 char *Fake8_R,*Fake8_G,*Fake8_B;
 
+int32_t g_fontScale = 1;
+word *ZPage16 = nullptr;
+
 int32_t VMdMenuItems[8],VMdMenuTotal;
 
 void (*Flip)(VESA_Surface *VS);
@@ -72,8 +75,13 @@ void VESA_Surface2Global(VESA_Surface *VS)
   PageSizeDW = PageSizeW>>1;
   VPage = VS->Data;
   ZBuffer = VS->ZBuffer;
+  ZPage16 = (word *)VS->Z16;
   Flip = VS->Flip;
   YOffs = VS->YTable;
+  // HiDPI font auto-scale. The bitmap font is ~8 px tall — at 1920×1080+
+  // each glyph is sub-millimeter on a retina display. Threshold at 1600 px
+  // wide; matches "1080p or larger" for the common cases.
+  g_fontScale = (XRes >= 1600) ? 2 : 1;
 }
 
 void VESA_Warning(const char *Msg)

@@ -1892,7 +1892,7 @@ struct FountainScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
+		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 		bool SkipCameraAnimation = false;
 		RenderSkyCube(SkySc, View, SkipCameraAnimation);
 

@@ -1074,7 +1074,7 @@ static void drawRainDrop(Face* F, Vertex **VA, mword numVerts, dword miplevel)
 		else
 			Z = 1;
 		dword offset = x + y*XRes;
-		if ( ((word *)(VPage+PageSize))[offset] < Z )
+		if ( ZPage16[offset] < Z )
 		{
 			((dword *)VPage)[offset] = 0x7FAFFF;
 			numDropsRendered++;
@@ -1233,7 +1233,7 @@ static void drawRainDropV2(Vertex **VA, mword numVerts)
 		else
 			Z = 1;
 		dword offset = x + y*XRes;
-		if ( ((word *)(VPage+PageSize))[offset] < Z )
+		if ( ZPage16[offset] < Z )
 		{
 			rainmapper(x, y, ahead_x, ahead_y);
 			numDropsRendered++;
@@ -1408,14 +1408,19 @@ static dword V_Create(VESA_Surface* VS)
 	VS->BPSL = VS->CPP * VS->X;
 	VS->PageSize = VS->BPSL * VS->Y;
 
+	// Color + Z now live in separate allocations (post-LockTexture
+	// refactor). The cube-map render uses this local V_Create on a
+	// stack-local TmpSurf, so allocate both buffers here too.
 	dword ZBufferSize = sizeof(word) * VS->X * VS->Y;
-	if (!(VS->Data = (byte*)malloc(VS->PageSize + ZBufferSize))) return 1;
-	memset(VS->Data, 0, VS->PageSize + ZBufferSize);
+	if (!(VS->Z16 = (byte*)malloc(ZBufferSize))) return 1;
+	memset(VS->Z16, 0, ZBufferSize);
+	if (!(VS->Data = (byte*)malloc(VS->PageSize))) {
+		free(VS->Z16); VS->Z16 = nullptr;
+		return 1;
+	}
+	memset(VS->Data, 0, VS->PageSize);
 
-	//	VS->Flags = VSurf_Exists;
-	
 	VS->Handle = 0;
-
 	return 0;
 }
 
@@ -1674,7 +1679,7 @@ void Initialize_City()
 
 		EnvCam.ISource = T->IPos + T->BSphereCtr;
 		for (int i = 0; i != 6; ++i) {
-			FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+			FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 			memcpy(EnvCam.Mat, AxisAlignedViews[i], sizeof(EnvCam.Mat));
 
 			RenderSkyCube(SkySc, View, true);
@@ -1806,6 +1811,13 @@ void Initialize_City()
 
 	MainSurf = PrevMainSurf;
 	VESA_Surface2Global(MainSurf);
+
+	// TmpSurf.Data + Z16 were malloc'd by the local V_Create above. The
+	// struct itself is stack-local and goes away at scope end, but its
+	// allocations would leak. Free them here, after we've restored
+	// MainSurf so no further code will read from TmpSurf.
+	if (TmpSurf.Data) { free(TmpSurf.Data); TmpSurf.Data = nullptr; }
+	if (TmpSurf.Z16) { free(TmpSurf.Z16); TmpSurf.Z16 = nullptr; }
 
 	// initialize rain FX
 #ifdef CITY_RAIN
@@ -1951,7 +1963,7 @@ struct CityScene : SceneDriver {
 		Dynamic_Camera();
 
 		// Clear framebuffer and Z-buffer
-		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 		RenderSkyCube(SkySc, View, false);
 
 		prof.switchTo(PROF_ANIM);
@@ -1990,7 +2002,7 @@ struct CityScene : SceneDriver {
 			{
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;
-				uint16_t* zbuffer_ptr = (uint16_t*)(VPage + PageSize);
+				uint16_t* zbuffer_ptr = ZPage16;
 				for (auto displacement : dispMap) {
 					if (*zbuffer_ptr++ != 0) {
 						*ptr = backBuffer[displacement];
@@ -2029,7 +2041,7 @@ struct CityScene : SceneDriver {
 			scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
 
 			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
 			double rndrMs = prof.cumulativeMs(PROF_RNDR);
 			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);

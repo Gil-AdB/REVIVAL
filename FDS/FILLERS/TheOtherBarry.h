@@ -247,9 +247,10 @@ struct TileRasterizer {
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
 		auto scanline = dstSurface + tile.y * TILE_SIZE * bpsl;
-		auto zscanline = dstSurface + PageSize + tile.y * TILE_SIZE * XRes * 2;
+		// Z-buffer lives in its own allocation now (ZPage16 global). Was
+		// previously contiguous at dstSurface + PageSize.
+		auto zspan = ZPage16 + tile.y * TILE_SIZE * XRes + tile.x * TILE_SIZE;
 		auto span = ((uint32_t*)scanline) + tile.x * TILE_SIZE;
-		auto zspan = ((uint16_t*)zscanline) + tile.x * TILE_SIZE;
 		auto bpsl_u32 = bpsl / sizeof(uint32_t);
 
 		TScreenCoord a0 = tile.a0;

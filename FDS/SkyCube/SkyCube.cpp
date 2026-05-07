@@ -309,7 +309,7 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 	{
 		Radix_SortingASM(FList,SList,CAll);
 		Render();
-		FastWrite(VPage + PageSize, 0, (XRes * YRes * sizeof(word)) >> 2);
+		FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 	}
 	View->ISource = PrevViewPos;
 

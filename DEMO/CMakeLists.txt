@@ -81,6 +81,10 @@ if(EMSCRIPTEN)
         -sASSERTIONS=1
         -sEXIT_RUNTIME=1
         -sUSE_SDL=2
+        # Emit a wasm name section so browser stack traces show function
+        # names instead of wasm-function[N]. Cheap (no codegen impact) and
+        # essential for diagnosing OOB / unreachable traps.
+        --profiling-funcs
         --preload-file "${CMAKE_SOURCE_DIR}/Runtime@/"
         --shell-file "${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
     )

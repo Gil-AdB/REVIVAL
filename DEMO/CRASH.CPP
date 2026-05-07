@@ -93,7 +93,7 @@ struct CrashScene : SceneDriver {
 		}
 
 		//memset(VPage,0,PageSize);
-		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 
 		CurFrame = CrashSc->StartFrame + (CrashSc->EndFrame-CrashSc->StartFrame) * ((float)g_FrameTime / (float)CrPartTime);
 
@@ -122,9 +122,9 @@ struct CrashScene : SceneDriver {
 		snprintf(MSGStr, sizeof(MSGStr), "g_FrameTime %d", g_FrameTime);
 		scroll += OutTextXY(VPage, 0, scroll, MSGStr, 255);
 		snprintf(MSGStr, sizeof(MSGStr), "CrPartTime %d", CrPartTime);
-		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+		scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 		snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
-		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+		scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);

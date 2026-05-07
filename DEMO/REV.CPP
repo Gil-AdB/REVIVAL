@@ -1176,12 +1176,21 @@ int main(int argc, const char *argv[])
     // resolution and torpedoes framerate.
     if (g_hiDPI) windowFlags |= SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
-    SDL_Window * window = SDL_CreateWindow("",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        g_demoXRes, g_demoYRes,
-        windowFlags);
+    auto windowDeleter = [](SDL_Window *w) {
+        if (!w) return;
+        fprintf(stderr, "[SDL] -window ptr=%p\n", (void *)w);
+        SDL_DestroyWindow(w);
+    };
+    std::unique_ptr<SDL_Window, decltype(windowDeleter)> window(
+        SDL_CreateWindow("",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            g_demoXRes, g_demoYRes,
+            windowFlags),
+        windowDeleter);
+    fprintf(stderr, "[SDL] +window ptr=%p size=%dx%d\n",
+            (void *)window.get(), g_demoXRes, g_demoYRes);
 
-    SDL_RaiseWindow(window);
+    SDL_RaiseWindow(window.get());
 
 	// _controlfp(_EM_INEXACT, _MCW_EM);
 	FPU_LPrecision();
@@ -1195,7 +1204,7 @@ int main(int argc, const char *argv[])
 	}
 
 	fprintf(stderr, "[DEMO] before SDL2_InitDisplay\n");
-	SDL2_InitDisplay(window);
+	SDL2_InitDisplay(window.get());
 	fprintf(stderr, "[DEMO] after SDL2_InitDisplay, MainSurf=%p\n", (void*)MainSurf);
 
 	memset(VPage, 0xcd, MainSurf->BPSL * YRes);
@@ -1326,7 +1335,19 @@ int main(int argc, const char *argv[])
     }
 
 	demoThread.join();
-	SDL_DestroyRenderer((SDL_Renderer *)MainSurf->Renderer);
+	// SDL_DestroyRenderer walks the renderer's child-texture list and
+	// frees each. If any of those textures is in a corrupt state (the
+	// post-greets OOB pattern points here), we want a "[SDL] -renderer"
+	// trace right before the explosion.
+	SDL_Renderer *renderer = (SDL_Renderer *)MainSurf->Renderer;
+	fprintf(stderr, "[SDL] -renderer ptr=%p\n", (void *)renderer);
+	SDL_DestroyRenderer(renderer);
+	fprintf(stderr, "[SDL] -renderer done\n");
+	// Drop the window before SDL_Quit — once SDL_Quit unloads the video
+	// subsystem, SDL_DestroyWindow on a stale handle is undefined.
+	window.reset();
+	fprintf(stderr, "[SDL] SDL_Quit start\n");
 	SDL_Quit();
+	fprintf(stderr, "[SDL] SDL_Quit done\n");
 	return 0;
 }

@@ -1722,7 +1722,7 @@ Away:Tot = Timer-TTrd;
 	 for(I=0;I<10;I++)
 		 if (MsgStr[I])
 		 {
-			 Y = OutTextXY(VPage,0,Y+15,MsgStr[I],64);
+			 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,MsgStr[I],64);
 			 if (Timer>MsgClock[I]+150)
 			 {
 				 delete MsgStr[I];
@@ -1731,31 +1731,31 @@ Away:Tot = Timer-TTrd;
 		 }
 #ifdef RUNTIME_INFO_L1
 		 snprintf(Str, 80,"Time = %d , Frame = %5.1f",Timer.load(), CurFrame);
-		 Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 		 snprintf(Str, 80,"Inst. FPS = %3.2f (%3.2f)",FPS,100.0*(float)Frames/(float)Timer);
-		 Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 #endif
 #ifdef RUNTIME_INFO_L2
 		 //    snprintf(Str, 80,"Active Camera = %s",View->Name);
-		 //    Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 //    Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 		 //    if (Tot)
 		 //		{
 		 //			snprintf(Str, 80,"Perf. Distribution: xForm=%d%%,P.Knmtx=%d%%,FList=%d%%,Light=%d%%,\nRender=%d%%",(Par1-TTrd)*100/Tot,(Par2-Par1)*100/Tot,(Par3-Par2)*100/Tot,(Par4-Par3)*100/Tot,(Par5-Par4)*100/Tot);
-		 //			Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 //			Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 		 //		}
 		 //    snprintf(Str, 80,"Dyn. Kinematics: p(%4.2f,%4.2f,%4.2f),v(%1.4f,%1.4f,%1.4f) r(%1.4f,%1.4f,%1.4f)",FC.ISource.x,FC.ISource.y,FC.ISource.z,FV.x,FV.y,FV.z,FT.x,FT.y,FT.z);
-		 //    Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 //    Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 		 snprintf(Str, 80,"Average Polys/Frame: %5.1f (%3.1f%%)",(float)RenderedPolys/(float)Frames,100.0*(float)CPolys/(float)Polys);
-		 Y = OutTextXY(VPage,0,Y+15,Str,64);
+		 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 		 int32_t GTP = 0,GTPP = 0;
 		 for(TriMesh *Tri = Sc->TriMeshHead;Tri;Tri = Tri->Next)
 			 if (!(Tri->Flags&Tri_Invisible)) {GTP++; GTPP += Tri->FIndex;}
 			 snprintf(Str, 80,"%d Triangle Meshes totalling in %d Faces",GTP,GTPP);
-			 Y = OutTextXY(VPage,0,Y+15,Str,64);
+			 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 #endif
 #ifdef RUNTIME_INFO_L3
 			 snprintf(Str, 80,"Rendered %d Polygons,%d Omnilights and %d particles.\n",CPolys,COmnies,CPcls);
-			 Y = OutTextXY(VPage,0,Y+15,Str,64);
+			 Y = OutTextXY(VPage,0,Y+15 * g_fontScale,Str,64);
 #endif
 			 //    DisplayMouse();
 			 //		Radiosity(Sc);

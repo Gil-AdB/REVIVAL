@@ -2,7 +2,24 @@
 #define _REV_SDL2_H_INCLUDED
 
 #include <SDL.h>
+#include <memory>
 #include "Base/FDS_VARS.H"
+
+// RAII for SDL_Texture. The deleter carries a short tag (e.g. "engine",
+// "glat-final") so create/destroy show up in the trace identifying which
+// logical texture they belong to. VESA_Surface::Handle stays as a non-owning
+// void* — these RAII owners live in the .cpp that conceptually owns the
+// texture, and Handle is just a view.
+struct SDLTexDeleter {
+    const char *tag = nullptr;
+    void operator()(SDL_Texture *t) const noexcept;
+};
+using SDLTex = std::unique_ptr<SDL_Texture, SDLTexDeleter>;
+
+// Allocates a streaming ARGB8888 SDL_Texture and prints a "[SDL] +tex" line.
+// Returns an owning SDLTex; caller decides where to keep it alive. Pass a
+// stable C-string literal for `tag` (it's stored in the deleter).
+SDLTex SDL2_MakeTexture(SDL_Renderer *r, int X, int Y, const char *tag);
 
 dword SDL2_InitDisplay(SDL_Window * window);
 dword SDL2_RemoveDisplay();
@@ -15,7 +32,7 @@ void SDL2_Flip(VESA_Surface *VS);
 // window resizes — by holding their own texture, they survive the
 // destroy/recreate dance in SDL2_HandleResize, and SDL_RenderCopy
 // auto-stretches their content to whatever size the window has become.
-void *SDL2_CreateChildTexture(int X, int Y);
+SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag);
 
 #ifdef __EMSCRIPTEN__
 // Emscripten music: the Rust modplayer-lib is built with the external-audio

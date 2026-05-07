@@ -40,6 +40,10 @@ static VESA_Surface Surf2;
 static VESA_Surface Surf3;
 static VESA_Surface Surf4;
 static VESA_Surface FinalSurf;
+// Owns FinalSurf's dedicated SDL_Texture. Keeps it alive across engine
+// resizes (which destroy MainSurf's texture but not this one) and ensures
+// it's destroyed before the renderer at process exit.
+static SDLTex s_glatFinalTex;
 static int32_t numGridPoints;
 static byte *Page1;
 static byte *Page2;
@@ -134,10 +138,9 @@ static void Rebuild_Glato_Sized(int xres, int yres)
 	Surf1.Flags = Surf2.Flags = Surf3.Flags = Surf4.Flags = VSurf_Noalloc;
 	Surf1.Targ = Surf2.Targ = Surf3.Targ = Surf4.Targ = NULL;
 
-	if (FinalSurf.Handle) {
-		SDL_DestroyTexture(static_cast<SDL_Texture*>(FinalSurf.Handle));
-		FinalSurf.Handle = nullptr;
-	}
+	// Drop the previous SDL_Texture (logged by the deleter) before
+	// memcpy stomps the alias in FinalSurf.Handle.
+	s_glatFinalTex.reset();
 	memcpy(&FinalSurf, VSurface, sizeof(VESA_Surface));
 	FinalSurf.Data = FinalPage;
 	FinalSurf.X = xres;
@@ -149,7 +152,8 @@ static void Rebuild_Glato_Sized(int xres, int yres)
 	// Dedicated SDL_Texture sized to current Glat dims. Engine resize
 	// destroys MainSurf's texture but leaves this one alone, so Glat keeps
 	// flipping into a valid texture across resize events.
-	FinalSurf.Handle = SDL2_CreateChildTexture(xres, yres);
+	s_glatFinalTex = SDL2_CreateChildTexture(xres, yres, "glat-final");
+	FinalSurf.Handle = static_cast<void *>(s_glatFinalTex.get());
 
 	if (Plane_GP) delete[] Plane_GP;
 	if (Code_GP) delete[] Code_GP;

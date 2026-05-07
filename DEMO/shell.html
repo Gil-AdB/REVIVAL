@@ -15,6 +15,23 @@
          object-fit / centering tricks here. */
       canvas { background: #000; display: block; image-rendering: pixelated;
                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+      /* Bottom-right control bar: mute / HiDPI / fullscreen. Stays on top
+         of the canvas (z-index) and ignores its own click events from
+         reaching the demo (each button only flips its own state). */
+      #controls { position: fixed; bottom: 12px; right: 12px; display: flex;
+                  gap: 6px; z-index: 100; }
+      #controls button { background: rgba(0,0,0,0.6); color: #fff;
+                         border: 1px solid rgba(255,255,255,0.3);
+                         border-radius: 4px; padding: 8px 12px;
+                         font: 16px/1 sans-serif; cursor: pointer;
+                         min-width: 44px; min-height: 44px;
+                         user-select: none; -webkit-tap-highlight-color: transparent; }
+      #controls button:hover { background: rgba(0,0,0,0.85); }
+      #controls button:active { background: rgba(255,255,255,0.2); }
+      /* Auto-hide: fade out after a few seconds of mouse inactivity, fade
+         back in when the cursor approaches the bottom of the viewport. */
+      #controls { transition: opacity 0.25s ease-out; }
+      #controls.idle { opacity: 0; pointer-events: none; }
     </style>
   </head>
   <body>
@@ -25,6 +42,11 @@
     <script src="coi-serviceworker.js"></script>
     <div id="status">Downloading...</div>
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <div id="controls">
+      <button id="btn-mute" title="Mute / unmute audio" aria-label="Mute">🔊</button>
+      <button id="btn-hidpi" title="Toggle high-DPI rendering" aria-label="HiDPI">SD</button>
+      <button id="btn-fullscreen" title="Toggle fullscreen" aria-label="Fullscreen">⛶</button>
+    </div>
     <script>
       var statusEl = document.getElementById('status');
       var canvasEl = document.getElementById('canvas');
@@ -69,25 +91,129 @@
       // emits SDL_WINDOWEVENT_SIZE_CHANGED, our native event loop picks
       // it up, and EngineResize redraws everything at the new dims.
       //
-      // HiDPI off by default on the web — at retina scale the rasterizer
-      // gets ~4x as many pixels to fill, which drops the heavier scenes
-      // (city, fountain) below 60fps in the browser. Pass ?hidpi=1 in
-      // the URL to opt in for crisp rendering at the cost of framerate.
+      // HiDPI starts off by default on the web — at retina scale the
+      // rasterizer gets ~4x as many pixels to fill, which drops the
+      // heavier scenes (city, fountain) below 60fps in the browser. The
+      // HD/SD button toggles it at runtime; ?hidpi=1 in the URL opts in
+      // at boot.
       var hiDPI = /[?&]hidpi=1/.test(window.location.search);
       function resizeCanvasToWindow() {
         var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
         var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
         var h = Math.max(1, Math.floor(window.innerHeight * dpr));
-        if (canvasEl.width  !== w) canvasEl.width  = w;
-        if (canvasEl.height !== h) canvasEl.height = h;
+        // Route through SDL_SetWindowSize once the wasm is ready — it
+        // updates window->w/h, calls emscripten_set_canvas_element_size
+        // (which sizes the canvas DOM), and fires SIZE_CHANGED so the
+        // demo thread can repaint at the new dims. Setting canvas.width
+        // /height directly here doesn't reach SDL.
+        if (typeof Module !== 'undefined' && Module._SDL2_RequestSize) {
+          Module._SDL2_RequestSize(w, h);
+        } else {
+          if (canvasEl.width  !== w) canvasEl.width  = w;
+          if (canvasEl.height !== h) canvasEl.height = h;
+        }
       }
       window.addEventListener('resize', resizeCanvasToWindow);
+      // iOS/Safari fires `orientationchange` slightly before the layout
+      // settles; resize alone is sometimes missed. Belt and suspenders.
+      window.addEventListener('orientationchange', function() {
+        // Defer one frame so innerWidth/Height reflect the new orientation.
+        requestAnimationFrame(resizeCanvasToWindow);
+      });
       // DPR change (e.g. moving the window between a retina and non-retina
       // display) doesn't fire 'resize'; subscribe to a media query that
       // matches the current resolution to catch it.
       var dprMQ = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
       if (dprMQ.addEventListener) dprMQ.addEventListener('change', resizeCanvasToWindow);
       else if (dprMQ.addListener) dprMQ.addListener(resizeCanvasToWindow);
+
+      // ---- Control bar: mute / HiDPI / fullscreen ---------------------
+      var btnMute = document.getElementById('btn-mute');
+      var btnHidpi = document.getElementById('btn-hidpi');
+      var btnFullscreen = document.getElementById('btn-fullscreen');
+      var muted = false;
+
+      function applyMute() {
+        btnMute.textContent = muted ? '🔇' : '🔊';
+        btnMute.setAttribute('aria-pressed', muted ? 'true' : 'false');
+        // Module._SDL2_SetMute is exported via EMSCRIPTEN_KEEPALIVE in
+        // SDL2.cpp. Guard since the module may not be ready when the user
+        // taps the button mid-load.
+        if (typeof Module !== 'undefined' && Module._SDL2_SetMute) {
+          Module._SDL2_SetMute(muted ? 1 : 0);
+        }
+      }
+      function applyHidpi() {
+        btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
+        btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
+        // resizeCanvasToWindow now routes through Module._SDL2_RequestSize
+        // → SDL_SetWindowSize, which both resizes the canvas DOM element
+        // and fires SDL_WINDOWEVENT_SIZE_CHANGED so the demo thread
+        // repaints at the new resolution.
+        resizeCanvasToWindow();
+      }
+      function isFullscreen() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement);
+      }
+      function applyFullscreenLabel() {
+        btnFullscreen.textContent = isFullscreen() ? '✕' : '⛶';
+      }
+
+      btnMute.addEventListener('click', function() {
+        muted = !muted;
+        applyMute();
+      });
+      btnHidpi.addEventListener('click', function() {
+        hiDPI = !hiDPI;
+        applyHidpi();
+      });
+      btnFullscreen.addEventListener('click', function() {
+        if (isFullscreen()) {
+          (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        } else {
+          var el = document.documentElement;
+          (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+        }
+      });
+      document.addEventListener('fullscreenchange', applyFullscreenLabel);
+      document.addEventListener('webkitfullscreenchange', applyFullscreenLabel);
+
+      // Initial sync.
+      applyHidpi();
+      applyMute();
+      applyFullscreenLabel();
+
+      // ---- Auto-hide control bar -------------------------------------
+      // Fade out after a couple seconds of no input. Cursor entering the
+      // bottom 20% of the viewport (or any touch on mobile) brings it
+      // back. Hovering the bar itself pauses the hide so the user has
+      // time to click without playing whack-a-mole.
+      var controlsEl = document.getElementById('controls');
+      var hideTimer = null;
+      function scheduleHide() {
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(function() {
+          controlsEl.classList.add('idle');
+        }, 2500);
+      }
+      function showControls() {
+        controlsEl.classList.remove('idle');
+        scheduleHide();
+      }
+      window.addEventListener('mousemove', function(e) {
+        // Bottom-region trigger only — don't flash the bar every time the
+        // viewer moves their cursor anywhere on screen during playback.
+        if (e.clientY > window.innerHeight - Math.max(120, window.innerHeight * 0.2)) {
+          showControls();
+        }
+      });
+      window.addEventListener('touchstart', showControls, { passive: true });
+      controlsEl.addEventListener('mouseenter', function() { clearTimeout(hideTimer); });
+      controlsEl.addEventListener('mouseleave', scheduleHide);
+      // Keep the bar up while a button is being clicked.
+      controlsEl.addEventListener('click', showControls);
+      // Show at boot so the controls are discoverable, then auto-hide.
+      showControls();
     </script>
     {{{ SCRIPT }}}
   </body>

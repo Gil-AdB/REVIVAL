@@ -771,7 +771,7 @@ struct ChaseScene : SceneDriver {
 		prof.enter(PROF_ZCLR);
 
 		g_FrameTime = Timer;
-		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
+		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 

@@ -498,7 +498,7 @@ struct GreetsScene : SceneDriver {
 		g_FrameTime = TTrd = Timer;
 
 		// Clear Framebuffer and ZBuffer
-		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
+		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		prof.switchTo(PROF_ANIM);
@@ -552,7 +552,7 @@ struct GreetsScene : SceneDriver {
 			int scroll = 0;
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
+			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
 			double rndrMs = prof.cumulativeMs(PROF_RNDR);
 			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);

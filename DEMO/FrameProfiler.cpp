@@ -87,18 +87,18 @@ int FrameProfiler::drawOverlay(int scrollY,
                                 double mPxPerSec) const {
     char buf[128];
     snprintf(buf, sizeof(buf), "%.3f Mpx/frame", mPxPerFrame);
-    scrollY = OutTextXY(VPage, 0, scrollY + 15, buf, 255);
+    scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     snprintf(buf, sizeof(buf), "%.3f Mpx/sec", mPxPerSec);
-    scrollY = OutTextXY(VPage, 0, scrollY + 15, buf, 255);
+    scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     snprintf(buf, sizeof(buf), "%d polys/frame", static_cast<int>(polysPerFrame));
-    scrollY = OutTextXY(VPage, 0, scrollY + 15, buf, 255);
+    scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     for (int i = 0; i < PROF_NUM; ++i) {
         snprintf(buf, sizeof(buf), "%s %3.1fms (%3.1f%%)",
                  kNames[i], overlayMeanMs_[i], overlayPercent_[i]);
-        scrollY = OutTextXY(VPage, 0, scrollY + 15, buf, 255);
+        scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     }
     snprintf(buf, sizeof(buf), "TOTL %3.1fms", overlayTotalMs_);
-    scrollY = OutTextXY(VPage, 0, scrollY + 15, buf, 255);
+    scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     return scrollY;
 }
 
