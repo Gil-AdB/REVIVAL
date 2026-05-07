@@ -1345,7 +1345,9 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 
 	Vec8i v_x0 = v8_from_arith_seq(tile_x1 * TILE_SIZE, 1);
 	dword* scanline = (dword*)(((byte*)vpage) + iy1 * VESA_BPSL);
-	auto zscanline = (((byte*)vpage) + PageSize + iy1 * XRes * 2);
+	// Z-buffer is in its own allocation now (ZPage16 global), no longer
+	// contiguous with vpage. iy1 * XRes is in u16 units.
+	auto zscanline = (byte*)(ZPage16 + iy1 * XRes);
 
 	for (int32_t y = iy1; y != iy2; ++y) {
 		Vec8i v_x = v_x0;

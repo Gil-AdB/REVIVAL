@@ -581,7 +581,7 @@ static void IXFiller(IXVertexT *Verts, dword numVerts, void *Texture, void *Page
 	IX_L2Y = logHeight;
 
 	// ZBuffer data starts at the end of framebuffer
-	IX_ZBuffer = (word *) ((uintptr_t)Page + PageSize);
+	IX_ZBuffer = ZPage16;
 
 	Left.Index = 1;
 	Right.Index = numVerts - 1;
@@ -645,7 +645,7 @@ static void IXFiller(IXVertexT *Verts, dword numVerts, void *Texture, void *Page
 	dword y, SectionHeight;
 	y = Fist(Verts[0].y);
 	dword *Scanline = (dword *)((uintptr_t)Page + VESA_BPSL * y);
-	word *ZScanline = (word *)((uintptr_t)Page + PageSize + sizeof(word) * XRes * y);
+	word *ZScanline = ZPage16 + XRes * y;
 	int32_t Width;
 	
 	// Iterate over sections
