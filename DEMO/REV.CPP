@@ -1257,8 +1257,6 @@ int main(int argc, const char *argv[])
 			int px = 0, py = 0;
 			SDL_Renderer *r = MainSurf ? static_cast<SDL_Renderer *>(MainSurf->Renderer) : nullptr;
 			if (r) SDL_GetRendererOutputSize(r, &px, &py);
-			fprintf(stderr, "[RESIZE-EVT] kind=%d points=%dx%d pixels=%dx%d\n",
-			        event.window.event, event.window.data1, event.window.data2, px, py);
 			if (px > 0 && py > 0) {
 				// Latest pending size wins; demo thread polls + applies at frame top.
 				g_pendingResize.store(pack_size(px, py));

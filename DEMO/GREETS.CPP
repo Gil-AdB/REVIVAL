@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "FrameProfiler.h"
 
 #include "GREETS.H"
 #include "FillerTest.h"
@@ -416,11 +417,7 @@ struct GreetsScene : SceneDriver {
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
 	dword numFrames = 0;
-	dword Profiler[PROF_NUM] = {};
-	float ProfSample[PROF_NUM] = {};
-	float ProfPerc[PROF_NUM] = {};
-	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
-	dword ProfSum = 0;
+	FrameProfiler prof{"greets"};
 	bool pause_mode = false;
 
 	~GreetsScene() override { Destroy_Scene(GreetSc); }
@@ -469,8 +466,9 @@ struct GreetsScene : SceneDriver {
 
 		numFrames++;
 
+		prof.beginFrame();
 		// PROFILER: ZClear phase. also includes control keys handling
-		Profiler[PROF_ZCLR] -= Timer;
+		prof.enter(PROF_ZCLR);
 
 		if (Keyboard[ScTab]) {
 			if (View == &FC)
@@ -503,8 +501,7 @@ struct GreetsScene : SceneDriver {
 		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
 
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
-		Profiler[PROF_ANIM-1] += Timer;
-		Profiler[PROF_ANIM] -= Timer;
+		prof.switchTo(PROF_ANIM);
 
 		if (Timer < CHPartTime-500.0)
 			CurFrame = GreetSc->StartFrame + (GreetSc->EndFrame-GreetSc->StartFrame) * (float)g_FrameTime / (float)(CHPartTime-500.0);
@@ -517,27 +514,24 @@ struct GreetsScene : SceneDriver {
 		Animate_Objects(GreetSc);
 
 		// PROFILER: XFRM phase.
-		Profiler[PROF_XFRM-1] += Timer;
-		Profiler[PROF_XFRM] -= Timer;
+		prof.switchTo(PROF_XFRM);
 
 		Transform_Objects(GreetSc);
 
 		// PROFILER: LGHT phase.
-		Profiler[PROF_LGHT-1] += Timer;
-		Profiler[PROF_LGHT] -= Timer;
+		prof.switchTo(PROF_LGHT);
 
 		Lighting(GreetSc);
 
 		// PROFILER: SORT phase.
-		Profiler[PROF_SORT-1] += Timer;
+		prof.leave(PROF_LGHT);
 		if (!CAll) return true;
-		Profiler[PROF_SORT] -= Timer;
+		prof.enter(PROF_SORT);
 
 		Radix_SortingASM(FList, SList, CAll);
 
 		// PROFILER: RNDR phase.
-		Profiler[PROF_RNDR-1] += Timer;
-		Profiler[PROF_RNDR] -= Timer;
+		prof.switchTo(PROF_RNDR);
 
 		gg->Render();
 		// reset per-frame zbuffer statistics
@@ -545,7 +539,7 @@ struct GreetsScene : SceneDriver {
 		Render();
 
 		// PROFILER: FLIP phase. also contains display of runtime stats
-		Profiler[PROF_FLIP-1] += Timer;
+		prof.leave(PROF_RNDR);
 		if (g_profilerActive) {
 			// FPS printer
 			timerStack[timerIndex++] = Timer;
@@ -555,44 +549,29 @@ struct GreetsScene : SceneDriver {
 			} else {
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
 			}
-			dword scroll = 0;
+			int scroll = 0;
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
 			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int)(g_renderedPolys / numFrames));
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame", (int)(FillerPixelcount/(1000.0*numFrames)));
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second", (int)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 
-			for(int32_t i = 0; i < PROF_NUM; i++) {
-				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-			}
-
-			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum*10.0/numFrames);
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
+			double rndrMs = prof.cumulativeMs(PROF_RNDR);
+			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
+			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
+			double polysPerFrame = (double)g_renderedPolys / numFrames;
+			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
 		}
 
-		Profiler[PROF_FLIP] -= Timer;
+		prof.enter(PROF_FLIP);
 
 		Flip(MainSurf);
 		// PROFILER: frame finished
-		Profiler[PROF_FLIP] += Timer;
-
-		// PROFILER: Generate sample
-		ProfSum = 0;
-		for(int32_t i = 0; i < PROF_NUM; i++)
-			ProfSum += Profiler[i];
-		for(int32_t i = 0; i < PROF_NUM; i++) {
-			ProfSample[i] = Profiler[i]*10.0 / numFrames;
-			ProfPerc[i] = Profiler[i]*100.0/ProfSum;
-		}
+		prof.leave(PROF_FLIP);
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;

@@ -69,11 +69,8 @@ void *SDL2_CreateChildTexture(int X, int Y)
 // Called from the demo thread at a frame boundary by EngineResize.
 void SDL2_HandleResize(int newX, int newY)
 {
-	fprintf(stderr, "[RESIZE] requested %dx%d, current %dx%d\n",
-	        newX, newY, SDL_MainSurf.X, SDL_MainSurf.Y);
-	if (newX <= 0 || newY <= 0) { fprintf(stderr, "[RESIZE] skip: bad dims\n"); return; }
-	if (newX == SDL_MainSurf.X && newY == SDL_MainSurf.Y) { fprintf(stderr, "[RESIZE] skip: same\n"); return; }
-	fprintf(stderr, "[RESIZE] applying\n");
+	if (newX <= 0 || newY <= 0) return;
+	if (newX == SDL_MainSurf.X && newY == SDL_MainSurf.Y) return;
 
 	// Free the engine-side YOffs that came from the previous
 	// Build_YOffs_Table(MainSurf); VESA_VPageExternal stomps the pointer

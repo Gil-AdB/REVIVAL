@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "FrameProfiler.h"
 #include <Base/Object.h>
 #include <Base/TriMesh.h>
 #include <Base/Scene.h>
@@ -737,6 +738,7 @@ namespace {
 struct ChaseScene : SceneDriver {
 	std::unique_ptr<Face*[]> fListStorage;
 	std::unique_ptr<Face*[]> sListStorage;
+	FrameProfiler prof{"chase"};
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
@@ -765,6 +767,9 @@ struct ChaseScene : SceneDriver {
 	bool tick() override {
 		if (Keyboard[ScESC] || Timer >= CHPartTime) return false;
 
+		prof.beginFrame();
+		prof.enter(PROF_ZCLR);
+
 		g_FrameTime = Timer;
 		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
 
@@ -777,6 +782,7 @@ struct ChaseScene : SceneDriver {
 				View = &FC;
 		}
 
+		prof.switchTo(PROF_ANIM);
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
@@ -784,26 +790,41 @@ struct ChaseScene : SceneDriver {
 
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
+		prof.switchTo(PROF_LGHT);
 		Lighting(ChaseSc);
 
+		prof.switchTo(PROF_XFRM);
 		Reflected_Transform(ChaseSc);
+		prof.leave(PROF_XFRM);
 
 		if (CAll) {
+			prof.enter(PROF_SORT);
 			Radix_SortingASM(FList, SList, CAll);
+			prof.switchTo(PROF_RNDR);
 			Render();
+			prof.leave(PROF_RNDR);
 		}
 
+		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(ChaseSc);
+		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
+		prof.enter(PROF_SORT);
 		Radix_SortingASM(FList, SList, CAll);
+		prof.switchTo(PROF_RNDR);
 		Render();
+		prof.leave(PROF_RNDR);
 
+		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
+		prof.leave(PROF_FLIP);
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;

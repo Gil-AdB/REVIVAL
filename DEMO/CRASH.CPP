@@ -1,6 +1,7 @@
 #include "Rev.h"
 
 #include "CRASH.H"
+#include "FrameProfiler.h"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <memory>
@@ -43,6 +44,7 @@ struct CrashScene : SceneDriver {
 	char MSGStr[128];
 	std::unique_ptr<Face*[]> fListStorage;
 	std::unique_ptr<Face*[]> sListStorage;
+	FrameProfiler prof{"crash"};
 
 	~CrashScene() override { Destroy_Scene(CrashSc); }
 
@@ -78,6 +80,9 @@ struct CrashScene : SceneDriver {
 	bool tick() override {
 		if (Keyboard[ScESC] || Timer >= CrPartTime) return false;
 
+		prof.beginFrame();
+		prof.enter(PROF_ZCLR);
+
 		g_FrameTime = Timer;
 
 		if (Keyboard[ScTab]) {
@@ -92,19 +97,26 @@ struct CrashScene : SceneDriver {
 
 		CurFrame = CrashSc->StartFrame + (CrashSc->EndFrame-CrashSc->StartFrame) * ((float)g_FrameTime / (float)CrPartTime);
 
+		prof.switchTo(PROF_ANIM);
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
 		Animate_Objects(CrashSc);
 
+		prof.switchTo(PROF_XFRM);
 		Transform_Objects(CrashSc);
 
+		prof.switchTo(PROF_LGHT);
 		Lighting(CrashSc);
 
+		prof.leave(PROF_LGHT);
 		if (!CAll) return true;
+		prof.enter(PROF_SORT);
 		Radix_SortingASM(FList, SList, CAll);
 
+		prof.switchTo(PROF_RNDR);
 		Render();
+		prof.leave(PROF_RNDR);
 
 		dword scroll = 0;
 		snprintf(MSGStr, sizeof(MSGStr), "g_FrameTime %d", g_FrameTime);
@@ -114,11 +126,15 @@ struct CrashScene : SceneDriver {
 		snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
 		scroll += OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
+		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
+		prof.leave(PROF_FLIP);
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		Timer -= CrPartTime;
 
 		// Wait for the user to release ESC before returning, otherwise the
