@@ -69,10 +69,11 @@
       // emits SDL_WINDOWEVENT_SIZE_CHANGED, our native event loop picks
       // it up, and EngineResize redraws everything at the new dims.
       //
-      // HiDPI on by default on the web (browser-native devicePixelRatio
-      // gets us crisp rendering on retina); pass ?hidpi=0 in the URL to
-      // disable for perf comparisons.
-      var hiDPI = !/[?&]hidpi=0/.test(window.location.search);
+      // HiDPI off by default on the web — at retina scale the rasterizer
+      // gets ~4x as many pixels to fill, which drops the heavier scenes
+      // (city, fountain) below 60fps in the browser. Pass ?hidpi=1 in
+      // the URL to opt in for crisp rendering at the cost of framerate.
+      var hiDPI = /[?&]hidpi=1/.test(window.location.search);
       function resizeCanvasToWindow() {
         var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
         var w = Math.max(1, Math.floor(window.innerWidth  * dpr));

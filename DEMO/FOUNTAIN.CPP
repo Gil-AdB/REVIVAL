@@ -1825,17 +1825,18 @@ struct FountainScene : SceneDriver {
 
 	~FountainScene() override { Destroy_Scene(FntSc); }
 
-	void on_resize(int /*newX*/, int /*newY*/) override {
-		// Blur backing buffer is sized to PageSize; rebuild + rebind.
+	// Rebuild every per-resolution buffer the scene owns: blur backing
+	// page, mirrored Blur surface, and the TBR span buffer (SBufferHead
+	// is sized by YRes / TILESIZE). Called from init() so a resize that
+	// fired before Fountain became active gets reflected, and from
+	// on_resize() for mid-scene resizes.
+	void rebuildSizedBuffers() {
 		BPage = std::make_unique<byte[]>(PageSize);
 		memcpy(&Blur, MainSurf, sizeof(VESA_Surface));
 		Blur.Data = BPage.get();
 		Blur.Flags = VSurf_Noalloc;
 		Blur.Targ = VGAPtr;
 
-		// TBR span buffer's SBufferHead is sized by YRes (one head per
-		// 8-pixel Y-tile). Re-derive size and rebuild via TBR_Init, freeing
-		// the previous allocation first.
 		delete[] FntSc->SBuffer;
 		delete[] FntSc->SBufferHead;
 		FntSc->SBuffer = nullptr;
@@ -1845,17 +1846,16 @@ struct FountainScene : SceneDriver {
 		TBR_Init(FntSc, FntSc->NumOfParticles * typicalSpans);
 	}
 
+	void on_resize(int /*newX*/, int /*newY*/) override {
+		rebuildSizedBuffers();
+	}
+
 	void init() override {
 		int32_t Polys = 0;
 		TriMesh *T;
 		Omni *O;
 
-		BPage = std::make_unique<byte[]>(PageSize);
-
-		memcpy(&Blur, MainSurf, sizeof(VESA_Surface));
-		Blur.Data = BPage.get();
-		Blur.Flags = VSurf_Noalloc;
-		Blur.Targ = VGAPtr;
+		rebuildSizedBuffers();
 
 		for(int32_t i = 0; i < 20; i++)
 			timerStack[i] = Timer;

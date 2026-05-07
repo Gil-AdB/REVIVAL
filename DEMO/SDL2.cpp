@@ -147,6 +147,21 @@ dword SDL2_InitDisplay(SDL_Window *window)
 #endif
 	SDL_MainSurf.Renderer = renderer;
 
+#ifdef __EMSCRIPTEN__
+	// Synchronously fire our shell.html resize handler so the JS side
+	// snaps the canvas drawing-buffer to the actual browser window size
+	// (and devicePixelRatio when HiDPI is on) BEFORE we query the renderer
+	// output size below. Otherwise the framebuffer is allocated at
+	// g_demoXRes/Y from rev.cfg and SDL_RenderCopy stretches with a slight
+	// vertical squash until the user manually resizes.
+	//
+	// Must run on the main browser thread — under PROXY_TO_PTHREAD this
+	// function is on a pthread worker where `window` is undefined. Both
+	// MAIN_THREAD_EM_ASM and `window.dispatchEvent` are synchronous, so by
+	// the time this returns the canvas backing has the new size.
+	MAIN_THREAD_EM_ASM({ window.dispatchEvent(new Event('resize')); });
+#endif
+
 	// Use renderer output size (in pixels) rather than window size (in
 	// points). With SDL_WINDOW_ALLOW_HIGHDPI on a retina display these
 	// differ by the DPI scale factor; we always want pixels because that's
@@ -164,17 +179,6 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	V_Flip(MainSurf);
 
 	FPU_LPrecision();
-
-#ifdef __EMSCRIPTEN__
-	// Trigger our shell.html resize handler so the canvas drawing-buffer
-	// snaps to the actual browser window size (modulated by devicePixelRatio
-	// when HiDPI is on). Without this the demo opens at g_demoXRes/Y and
-	// stays there until the user manually resizes the window.
-	//
-	// Must run on the main browser thread — under PROXY_TO_PTHREAD this
-	// function is on a pthread worker where `window` is undefined.
-	MAIN_THREAD_EM_ASM({ window.dispatchEvent(new Event('resize')); });
-#endif
 
 	return 0;
 }
