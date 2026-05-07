@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Threads.h>
 #include "FrameProfiler.h"
 #include <Base/Object.h>
 #include <Base/TriMesh.h>
@@ -771,7 +772,7 @@ struct ChaseScene : SceneDriver {
 		prof.enter(PROF_ZCLR);
 
 		g_FrameTime = Timer;
-		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 

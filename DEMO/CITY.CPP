@@ -1,5 +1,6 @@
 
 #include "Rev.h"
+#include <Threads.h>
 #include "CITY.H"
 #include "FrameProfiler.h"
 #include "SceneTick.h"
@@ -1679,7 +1680,7 @@ void Initialize_City()
 
 		EnvCam.ISource = T->IPos + T->BSphereCtr;
 		for (int i = 0; i != 6; ++i) {
-			FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+			parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 			memcpy(EnvCam.Mat, AxisAlignedViews[i], sizeof(EnvCam.Mat));
 
 			RenderSkyCube(SkySc, View, true);
@@ -1963,7 +1964,7 @@ struct CityScene : SceneDriver {
 		Dynamic_Camera();
 
 		// Clear framebuffer and Z-buffer
-		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 		RenderSkyCube(SkySc, View, false);
 
 		prof.switchTo(PROF_ANIM);

@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Threads.h>
 #include "FrameProfiler.h"
 
 #include "FOUNTAIN.H"
@@ -1892,7 +1893,7 @@ struct FountainScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 		bool SkipCameraAnimation = false;
 		RenderSkyCube(SkySc, View, SkipCameraAnimation);
 

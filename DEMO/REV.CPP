@@ -959,6 +959,10 @@ struct scope_guard {
 
 void CodeEntry(void *var)
 {
+	// Demo thread does the per-frame timing work; on Apple Silicon we
+	// want it on a P-core, not an E-core. No-op on wasm/Linux.
+	HintHighPerfThread();
+
 	Generate_RGBFlares(); // should be in fds_init
 
 	//if (g_playMusic)

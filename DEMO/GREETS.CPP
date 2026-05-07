@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Threads.h>
 #include "FrameProfiler.h"
 
 #include "GREETS.H"
@@ -498,7 +499,7 @@ struct GreetsScene : SceneDriver {
 		g_FrameTime = TTrd = Timer;
 
 		// Clear Framebuffer and ZBuffer
-		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		prof.switchTo(PROF_ANIM);

@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Threads.h>
 
 #include "CRASH.H"
 #include "FrameProfiler.h"
@@ -93,7 +94,7 @@ struct CrashScene : SceneDriver {
 		}
 
 		//memset(VPage,0,PageSize);
-		FastWrite(VPage, 0, PageSize >> 2); FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
 		CurFrame = CrashSc->StartFrame + (CrashSc->EndFrame-CrashSc->StartFrame) * ((float)g_FrameTime / (float)CrPartTime);
 

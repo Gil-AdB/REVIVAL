@@ -64,7 +64,12 @@
           setStatus(left
             ? 'Loading... (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')'
             : '');
-        }
+        },
+        // Flip the guard once main() returns so late-firing DOM events
+        // (resize, mousemove, fullscreenchange) can't call into a torn-down
+        // wasm runtime — that path used to throw "called after runtime
+        // exit" assertions in the console.
+        onExit: function() { runtimeExited = true; }
       };
       setStatus('Downloading...');
       window.onerror = function() {
@@ -97,6 +102,9 @@
       // HD/SD button toggles it at runtime; ?hidpi=1 in the URL opts in
       // at boot.
       var hiDPI = /[?&]hidpi=1/.test(window.location.search);
+      // Becomes true once main() has returned — guards against late-firing
+      // resize/orientation listeners trying to call into freed wasm.
+      var runtimeExited = false;
       function resizeCanvasToWindow() {
         var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
         var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
@@ -106,8 +114,10 @@
         // (which sizes the canvas DOM), and fires SIZE_CHANGED so the
         // demo thread can repaint at the new dims. Setting canvas.width
         // /height directly here doesn't reach SDL.
+        if (runtimeExited) return;
         if (typeof Module !== 'undefined' && Module._SDL2_RequestSize) {
-          Module._SDL2_RequestSize(w, h);
+          try { Module._SDL2_RequestSize(w, h); }
+          catch (e) { runtimeExited = true; }
         } else {
           if (canvasEl.width  !== w) canvasEl.width  = w;
           if (canvasEl.height !== h) canvasEl.height = h;
