@@ -132,7 +132,11 @@ void VESA_VPageExternal(VESA_Surface *ExtrnVS)//void *vPagePtr, void (*FlipperCa
 
 //	VS->BPP = VMode.BPP;
 	VS->CPP = (VS->BPP+7)>>3;
-	VS->BPSL = VESA_BPSL;
+	// BPSL was set by the SDL backend's V_Create from current X (= CPP*X
+	// for 32bpp). Don't override with the legacy VESA_BPSL global — that
+	// reflects the boot-time stride and goes stale across a resize. The
+	// `VS->BPSL = VESA_BPSL;` line previously here caused mismatched
+	// scanline stride after a resize event.
 
 	VS->CX = X>>1;
 	VS->CY = Y>>1;

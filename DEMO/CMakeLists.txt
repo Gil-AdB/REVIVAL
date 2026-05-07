@@ -19,6 +19,8 @@ set(DEMO_SOURCES
     FillerTest.h
     FOUNTAIN.CPP
     FOUNTAIN.H
+    FrameProfiler.cpp
+    FrameProfiler.h
     Glat.cpp
     GLAT.H
     GREETS.CPP
@@ -29,6 +31,8 @@ set(DEMO_SOURCES
     PhotonTracer.h
     Raytracer.cpp
     Raytracer.h
+    Resize.cpp
+    Resize.h
     REV.CPP
     Rev.h
     Scenes.h

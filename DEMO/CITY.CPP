@@ -1,6 +1,7 @@
 
 #include "Rev.h"
 #include "CITY.H"
+#include "FrameProfiler.h"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <algorithm>
@@ -1821,17 +1822,38 @@ struct CityScene : SceneDriver {
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
 	dword numFrames = 0;
-	dword Profiler[PROF_NUM] = {};
-	float ProfSample[PROF_NUM] = {};
-	float ProfPerc[PROF_NUM] = {};
-	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
-	dword ProfSum = 0;
+	FrameProfiler prof{"city"};
 	bool pause_mode = false;
 
 	std::vector<int> dispMap;
 	std::vector<dword> backBuffer;
 
 	~CityScene() override { Destroy_Scene(CitySc); }
+
+	// Rebuild the per-resolution displacement and back buffers. dispMap
+	// stores precomputed source-pixel indices for the water-distort effect;
+	// the contents bake the current XRes (row stride), so on resize we have
+	// to refill, not just resize.
+	void rebuildDispBuffers() {
+		dispMap.assign(XRes * YRes, 0);
+		int idx = 0;
+		for (int y = 0; y < YRes; ++y) {
+			for (int x = 0; x < XRes; ++x) {
+				int tx = x, ty = y;
+				tx += sin(x/30.0) * 15;
+				ty += cos(y/50.0) * 15;
+
+				if (tx < 0) { tx = -tx; } if (tx > XRes_1) { tx = 2 * XRes_1 - tx; }
+				if (ty < 0) { ty = -ty; } if (ty > YRes_1) { ty = 2 * YRes_1 - ty; }
+				dispMap[idx++] = ty * XRes + tx;
+			}
+		}
+		backBuffer.assign(XRes * YRes, 0);
+	}
+
+	void on_resize(int /*newX*/, int /*newY*/) override {
+		rebuildDispBuffers();
+	}
 
 	void init() override {
 		int32_t Polys = 0;
@@ -1878,20 +1900,7 @@ struct CityScene : SceneDriver {
 		numDropsRendered = 0;
 		FillerPixelcount = 0;
 
-		dispMap.resize(XRes * YRes);
-		int idx = 0;
-		for (int y = 0; y < YRes; ++y) {
-			for (int x = 0; x < XRes; ++x) {
-				int tx = x, ty = y;
-				tx += sin(x/30.0) * 15;
-				ty += cos(y/50.0) * 15;
-
-				if (tx < 0) { tx = -tx; } if (tx > XRes_1) { tx = 2 * XRes_1 - tx; }
-				if (ty < 0) { ty = -ty; } if (ty > YRes_1) { ty = 2 * YRes_1 - ty; }
-				dispMap[idx++] = ty * XRes + tx;
-			}
-		}
-		backBuffer.resize(XRes * YRes);
+		rebuildDispBuffers();
 	}
 
 	bool tick() override {
@@ -1899,7 +1908,8 @@ struct CityScene : SceneDriver {
 
 		numFrames++;
 
-		Profiler[PROF_ZCLR] -= Timer;
+		prof.beginFrame();
+		prof.enter(PROF_ZCLR);
 
 		dTime = Timer - TTrd;
 		if (dTime > 300) dTime = 300;
@@ -1934,8 +1944,7 @@ struct CityScene : SceneDriver {
 		FastWrite(VPage, 0, (PageSize + XRes * YRes * sizeof(word)) >> 2);
 		RenderSkyCube(SkySc, View, false);
 
-		Profiler[PROF_ZCLR] += Timer;
-		Profiler[PROF_ANIM] -= Timer;
+		prof.switchTo(PROF_ANIM);
 
 		Reflective_AnimateTexture();
 
@@ -1945,8 +1954,7 @@ struct CityScene : SceneDriver {
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
-		Profiler[PROF_ANIM] += Timer;
-		Profiler[PROF_LGHT] -= Timer;
+		prof.switchTo(PROF_LGHT);
 
 		Lighting(CitySc);
 
@@ -1954,21 +1962,19 @@ struct CityScene : SceneDriver {
 #ifdef CITY_RAIN
 		riskOfRain(CitySc);
 #endif
-		Profiler[PROF_LGHT] += Timer;
-		Profiler[PROF_XFRM] -= Timer;
+		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
 		Reflected_Transform(CitySc);
 
-		Profiler[PROF_XFRM] += Timer;
+		prof.leave(PROF_XFRM);
 
 		if (CAll) {
-			Profiler[PROF_SORT] -= Timer;
+			prof.enter(PROF_SORT);
 
 			Radix_SortingASM(FList, SList, CAll);
 
-			Profiler[PROF_SORT] += Timer;
-			Profiler[PROF_RNDR] -= Timer;
+			prof.switchTo(PROF_RNDR);
 
 			Render();
 			{
@@ -1983,26 +1989,25 @@ struct CityScene : SceneDriver {
 				}
 			}
 
-			Profiler[PROF_RNDR] += Timer;
+			prof.leave(PROF_RNDR);
 		}
 
 		// render all objects normally
-		Profiler[PROF_XFRM] -= Timer;
+		prof.enter(PROF_XFRM);
 		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(CitySc);
-		Profiler[PROF_XFRM] += Timer;
+		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
-		Profiler[PROF_SORT] -= Timer;
+		prof.enter(PROF_SORT);
 		Radix_SortingASM(FList, SList, CAll);
-		Profiler[PROF_SORT] += Timer;
-		Profiler[PROF_RNDR] -= Timer;
+		prof.switchTo(PROF_RNDR);
 		Render();
 
-		Profiler[PROF_RNDR] += Timer;
+		prof.leave(PROF_RNDR);
 
 		// FPS printer
 		if (g_profilerActive) {
-			mword scroll = 0;
+			int scroll = 0;
 
 			timerStack[timerIndex++] = Timer;
 			if (timerIndex == 20) {
@@ -2015,22 +2020,14 @@ struct CityScene : SceneDriver {
 
 			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
 			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%.3lfM pixels/frame", (FillerPixelcount / (1000000.0 * numFrames)));
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%.3lfM pixels/second", (FillerPixelcount / 1000000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int32_t)(g_renderedPolys / numFrames));
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
 
-			for (int32_t i = 0; i < PROF_NUM; i++) {
-				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
-			}
-
-			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum * 10.0 / numFrames);
-			scroll = OutTextXY(VPage, 0, scroll + 15, MSGStr, 255);
+			double rndrMs = prof.cumulativeMs(PROF_RNDR);
+			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
+			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
+			double polysPerFrame = (double)g_renderedPolys / numFrames;
+			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
 		}
-		Profiler[PROF_FLIP] -= Timer;
+		prof.enter(PROF_FLIP);
 
 #ifdef TRACE_OBJECTS
 		for (const auto& str : DebugStrs) {
@@ -2040,20 +2037,13 @@ struct CityScene : SceneDriver {
 #endif
 
 		Flip(MainSurf);
-		Profiler[PROF_FLIP] += Timer;
-
-		// PROFILER: Generate sample
-		ProfSum = 0;
-		for (int32_t i = 0; i < PROF_NUM; i++)
-			ProfSum += Profiler[i];
-		for (int32_t i = 0; i < PROF_NUM; i++) {
-			ProfSample[i] = Profiler[i] * 10.0 / numFrames;
-			ProfPerc[i] = Profiler[i] * 100.0 / ProfSum;
-		}
+		prof.leave(PROF_FLIP);
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		Timer -= CTPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;

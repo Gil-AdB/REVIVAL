@@ -4,6 +4,8 @@
 #include <memory>
 #include <vector>
 
+#include "Resize.h"
+
 // Scene driver interface for the tick-based scene loop.
 //
 // Each scene is expressed as three phases:
@@ -21,11 +23,31 @@ struct SceneDriver {
     virtual void init() = 0;
     virtual bool tick() = 0;
     virtual void cleanup() = 0;
+    // Called at frame boundary when an SDL window resize is pending. Override
+    // in scenes with resolution-dependent buffers (City's dispMap, Fountain's
+    // TBR span buffer, ...). Engine globals (XRes, YRes, PageSize, VPage,
+    // YOffs, ...) have already been updated by the time this fires.
+    virtual void on_resize(int /*newX*/, int /*newY*/) {}
 };
+
+// Drain g_pendingResize: if a resize is pending, apply it engine-side and
+// notify the active driver. Called at frame top so the upcoming tick()
+// renders at the new dimensions.
+inline void poll_pending_resize(SceneDriver* driver) {
+    uint64_t v = g_pendingResize.exchange(0);
+    if (!v) return;
+    int x, y;
+    unpack_size(v, x, y);
+    EngineResize(x, y);
+    if (driver) driver->on_resize(x, y);
+}
 
 inline void runSceneBlocking(SceneDriver& driver) {
     driver.init();
-    while (driver.tick()) continue;
+    while (true) {
+        poll_pending_resize(&driver);
+        if (!driver.tick()) break;
+    }
     driver.cleanup();
 }
 
@@ -46,6 +68,8 @@ struct SceneSequence {
             current_ = factories_[index_]();
             current_->init();
         }
+
+        poll_pending_resize(current_.get());
 
         if (!current_->tick()) {
             current_->cleanup();

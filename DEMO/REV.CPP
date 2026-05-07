@@ -462,6 +462,7 @@ material global ID or ptr
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
 #include "Snapshot.h"
+#include "Resize.h"
 #include <float.h>
 #include <Base/TriMesh.h>
 #include "Config.h"
@@ -486,6 +487,7 @@ int32_t g_demoXRes;
 int32_t g_demoYRes;
 int32_t g_fullScreenMode;
 int32_t g_displayType;
+int32_t g_hiDPI;
 
 float dTime;
 
@@ -1120,6 +1122,10 @@ int main(int argc, const char *argv[])
 	g_demoXRes = cfg.extractInteger("ResolutionX");
 	g_demoYRes = cfg.extractInteger("ResolutionY");
 	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
+	// HiDPI=1 in rev.cfg adds SDL_WINDOW_ALLOW_HIGHDPI so we render at the
+	// physical backing-store size on retina displays (sharper, ~4× pixel
+	// load on 2× scale). Default 0 keeps the cheap point-sized render.
+	g_hiDPI = cfg.extractInteger("HiDPI");
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {
@@ -1158,10 +1164,12 @@ int main(int argc, const char *argv[])
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
 
+    Uint32 windowFlags = SDL_WINDOW_RESIZABLE;
+    if (g_hiDPI) windowFlags |= SDL_WINDOW_ALLOW_HIGHDPI;
     SDL_Window * window = SDL_CreateWindow("",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         g_demoXRes, g_demoYRes,
-        0);
+        windowFlags);
 
     SDL_RaiseWindow(window);
 
@@ -1238,6 +1246,23 @@ int main(int argc, const char *argv[])
         SDL_WaitEvent(&event);
 		if (event.type == SDL_QUIT) {
 			break;
+		}
+		if (event.type == SDL_WINDOWEVENT &&
+		    (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+		     event.window.event == SDL_WINDOWEVENT_RESIZED)) {
+			// event.window.data1/data2 are in window points (logical units);
+			// SDL_GetRendererOutputSize gives the actual backing-store pixel
+			// size, which is what we render in. With HiDPI off they're equal;
+			// with HiDPI on (retina) they differ by the OS scale factor.
+			int px = 0, py = 0;
+			SDL_Renderer *r = MainSurf ? static_cast<SDL_Renderer *>(MainSurf->Renderer) : nullptr;
+			if (r) SDL_GetRendererOutputSize(r, &px, &py);
+			fprintf(stderr, "[RESIZE-EVT] kind=%d points=%dx%d pixels=%dx%d\n",
+			        event.window.event, event.window.data1, event.window.data2, px, py);
+			if (px > 0 && py > 0) {
+				// Latest pending size wins; demo thread polls + applies at frame top.
+				g_pendingResize.store(pack_size(px, py));
+			}
 		}
 		if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
 			// FDS_DEFS.H ScXxx constants are PS/2 set-1 scancodes inherited

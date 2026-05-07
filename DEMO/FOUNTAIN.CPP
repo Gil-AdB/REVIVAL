@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "FrameProfiler.h"
 
 #include "FOUNTAIN.H"
 #include "VESA/Vesa.h"
@@ -1819,14 +1820,30 @@ struct FountainScene : SceneDriver {
 	int32_t timerIndex = 0;
 	int32_t TTrd = 0;
 	mword numFrames = 0;
-	dword Profiler[PROF_NUM] = {};
-	float ProfSample[PROF_NUM] = {};
-	float ProfPerc[PROF_NUM] = {};
-	const char *ProfNames[PROF_NUM] = {"ZCLR","ANIM","XFRM", "LGHT", "SORT", "RNDR", "FLIP"};
-	dword ProfSum = 0;
+	FrameProfiler prof{"fountain"};
 	bool pause_mode = false;
 
 	~FountainScene() override { Destroy_Scene(FntSc); }
+
+	void on_resize(int /*newX*/, int /*newY*/) override {
+		// Blur backing buffer is sized to PageSize; rebuild + rebind.
+		BPage = std::make_unique<byte[]>(PageSize);
+		memcpy(&Blur, MainSurf, sizeof(VESA_Surface));
+		Blur.Data = BPage.get();
+		Blur.Flags = VSurf_Noalloc;
+		Blur.Targ = VGAPtr;
+
+		// TBR span buffer's SBufferHead is sized by YRes (one head per
+		// 8-pixel Y-tile). Re-derive size and rebuild via TBR_Init, freeing
+		// the previous allocation first.
+		delete[] FntSc->SBuffer;
+		delete[] FntSc->SBufferHead;
+		FntSc->SBuffer = nullptr;
+		FntSc->SBufferHead = nullptr;
+		float typicalParticleSize = 30.0/384.0;
+		dword typicalSpans = Fist(YRes * typicalParticleSize / 4.0);
+		TBR_Init(FntSc, FntSc->NumOfParticles * typicalSpans);
+	}
 
 	void init() override {
 		int32_t Polys = 0;
@@ -1872,7 +1889,8 @@ struct FountainScene : SceneDriver {
 
 		numFrames++;
 
-		Profiler[PROF_ZCLR] -= Timer;
+		prof.beginFrame();
+		prof.enter(PROF_ZCLR);
 
 		FastWrite(VPage, 0, (PageSize + XRes*YRes*sizeof(word)) >> 2);
 		bool SkipCameraAnimation = false;
@@ -1898,8 +1916,7 @@ struct FountainScene : SceneDriver {
 		}
 		g_FrameTime = TTrd = Timer;
 
-		Profiler[PROF_ZCLR] += Timer;
-		Profiler[PROF_ANIM] -= Timer;
+		prof.switchTo(PROF_ANIM);
 
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
@@ -1931,24 +1948,20 @@ struct FountainScene : SceneDriver {
 		} else VortexTri.Flags &= 0xFFFFFFFF-HTrack_Visible;
 
 		Particle_Kinematics(FntSc);
-		Profiler[PROF_ANIM] += Timer;
-		Profiler[PROF_XFRM] -= Timer;
+		prof.switchTo(PROF_XFRM);
 
 		Transform_Objects(FntSc);
 
-		Profiler[PROF_XFRM] += Timer;
-		Profiler[PROF_LGHT] -= Timer;
+		prof.switchTo(PROF_LGHT);
 
 		Lighting(FntSc);
 
-		Profiler[PROF_LGHT] += Timer;
+		prof.leave(PROF_LGHT);
 
 		if (!CAll) return true;
-		Profiler[PROF_SORT] -= Timer;
+		prof.enter(PROF_SORT);
 		Radix_SortingASM(FList, SList, CAll);
-		Profiler[PROF_SORT] += Timer;
-
-		Profiler[PROF_RNDR] -= Timer;
+		prof.switchTo(PROF_RNDR);
 		Render();
 
 		if (Rsv_LState) {
@@ -1959,10 +1972,10 @@ struct FountainScene : SceneDriver {
 				Rsv_LState = 0;
 			}
 		}
-		Profiler[PROF_RNDR] += Timer;
+		prof.leave(PROF_RNDR);
 
 		if (g_profilerActive) {
-			mword scroll = 0;
+			int scroll = 0;
 			// FPS printer
 			timerStack[timerIndex++] = Timer;
 			if (timerIndex == 20) {
@@ -1972,49 +1985,26 @@ struct FountainScene : SceneDriver {
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
 			}
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%d outer pcls", g_numPcls);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/frame", (int32_t)(FillerPixelcount/(1000.0*numFrames)));
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "%dK pixels/second", (int32_t)(FillerPixelcount/1000.0 * 100.0 / Profiler[PROF_RNDR]));
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
 
-			snprintf(MSGStr, sizeof(MSGStr), "%d polys/frame", (int32_t)(g_renderedPolys / numFrames));
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-
-			for(int32_t i = 0; i < PROF_NUM; i++) {
-				snprintf(MSGStr, sizeof(MSGStr), "%s %3.1fms (%3.1f%%)", ProfNames[i], ProfSample[i], ProfPerc[i]);
-				scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
-			}
-
-			snprintf(MSGStr, sizeof(MSGStr), "TOTL %3.1fms", ProfSum*10.0/numFrames);
-			scroll = OutTextXY(VPage, 0, scroll+15, MSGStr, 255);
+			double rndrMs = prof.cumulativeMs(PROF_RNDR);
+			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
+			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
+			double polysPerFrame = (double)g_renderedPolys / numFrames;
+			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
 		}
-		Profiler[PROF_FLIP] -= Timer;
+		prof.enter(PROF_FLIP);
 
 		Flip(MainSurf);
-		Profiler[PROF_FLIP] += Timer;
-
-		// PROFILER: Generate sample
-		ProfSum = 0;
-		for(int32_t i = 0; i < PROF_NUM; i++)
-			ProfSum += Profiler[i];
-		for(int32_t i = 0; i < PROF_NUM; i++) {
-			ProfSample[i] = Profiler[i]*10.0 / numFrames;
-			ProfPerc[i] = Profiler[i]*100.0/ProfSum;
-		}
+		prof.leave(PROF_FLIP);
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		Timer -= FNTPartTime;
 		while (Keyboard[ScESC]) continue;
 		if (Timer < 0) Timer = 0;
-
-		FILE *F = fopen("fountain-profiling.txt", "wt");
-		for(int32_t i = 0; i < PROF_NUM; i++) {
-			fprintf(F, "%s %3.1fms (%3.1f%%)\n", ProfNames[i], ProfSample[i], ProfPerc[i]);
-		}
-		fclose(F);
 	}
 };
 } // anonymous namespace

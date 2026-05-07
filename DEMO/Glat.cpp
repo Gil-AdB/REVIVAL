@@ -1,8 +1,10 @@
 #include "Rev.h"
+#include "FrameProfiler.h"
 #include "GLAT.H"
 #include "IMGGENR/IMGGENR.H"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "SDL2.h"
 #include "VESA/Vesa.h"
 
 #include <algorithm>
@@ -57,23 +59,138 @@ static Texture *SfxTexture;
 static Image *SfxImage;
 
 static int32_t InitScreenXRes, InitScreenYRes;
+// Glat's current pipeline dims and page size. Updated by Rebuild_Glato_Sized
+// at boot and on each engine-resize event so that GlatoScene's per-frame
+// reads stay in sync with the size of Page1-4/FinalPage/FinalSurf and the
+// grid arrays. Decoupled from the global XRes/YRes/PageSize so a resize
+// applied after Glat's per-scene init() can't OOB our buffers.
+static int32_t InitScreenPageSize;
 
 GlatoTraceHook g_glatoTraceHook = nullptr;
+
+// Free + reallocate every per-resolution buffer in Glat's pipeline at the
+// given dimensions, then rebuild dependent state (LogoImage scale, grid
+// point arrays, LenTable, FinalSurf SDL_Texture). Called once from
+// Initialize_Glato (with all pointers null) and again from
+// GlatoScene::on_resize whenever the engine resizes. The size-independent
+// state — SinTable/CosTable, the Texture/Image structs themselves, the
+// JPEG-decoded source data of non-Logo textures — stays in place.
+static void Rebuild_Glato_Sized(int xres, int yres)
+{
+	// Glat's grid texture mapper writes 8 pixels per inner-loop iteration but
+	// advances scanline pointers by xres dwords. When xres isn't a multiple
+	// of 8 the last iteration of each row overwrites the start of the next
+	// row — visible as a diagonal stride-mismatch shear. Round both dims
+	// down so the rendered area is grid-aligned; SDL_RenderCopy stretches
+	// the (slightly smaller) texture to the window so the user sees a tiny
+	// 0-7 pixel inset on the right/bottom rather than a corrupted frame.
+	xres &= ~7;
+	yres &= ~7;
+	if (xres < 8) xres = 8;
+	if (yres < 8) yres = 8;
+
+	const int32_t pageSize = xres * yres * 4;  // 32bpp
+	const int32_t bpsl = xres * 4;
+
+	// LogoImage is the only resolution-scaled input. Scale_Image is
+	// destructive (frees Img->Data and replaces with a scaled copy), so to
+	// re-target a new size we re-load from disk, then re-scale.
+	if (LogoImage->Data) {
+		_aligned_free(LogoImage->Data);
+		LogoImage->Data = nullptr;
+	}
+	Load_Image_JPEG(LogoImage, "TEXTURES/LOGO.JPG");
+	Scale_Image(LogoImage, xres, yres);
+
+	if (Page1) _aligned_free(Page1);
+	if (Page2) _aligned_free(Page2);
+	if (Page3) _aligned_free(Page3);
+	if (Page4) _aligned_free(Page4);
+	if (FinalPage) _aligned_free(FinalPage);
+	Page1 = (byte*)_aligned_malloc(pageSize, 32);
+	Page2 = (byte*)_aligned_malloc(pageSize, 32);
+	Page3 = (byte*)_aligned_malloc(pageSize, 32);
+	Page4 = (byte*)_aligned_malloc(pageSize, 32);
+	FinalPage = (byte*)_aligned_malloc(pageSize, 32);
+	memset(Page1, 0, pageSize);
+	memset(Page2, 0, pageSize);
+	memset(Page3, 0, pageSize);
+	memset(Page4, 0, pageSize);
+	memset(FinalPage, 0, pageSize);
+
+	// Surf1-4 and FinalSurf carry renderer/Flip pointers from VSurface
+	// (= MainSurf). After an engine resize, MainSurf has a fresh
+	// SDL_Texture which we don't want to inherit for these — we override
+	// the size + Data + (FinalSurf only) Handle below.
+	memcpy(&Surf1, VSurface, sizeof(VESA_Surface));
+	memcpy(&Surf2, VSurface, sizeof(VESA_Surface));
+	memcpy(&Surf3, VSurface, sizeof(VESA_Surface));
+	memcpy(&Surf4, VSurface, sizeof(VESA_Surface));
+	Surf1.Data = Page1; Surf2.Data = Page2; Surf3.Data = Page3; Surf4.Data = Page4;
+	Surf1.X = Surf2.X = Surf3.X = Surf4.X = xres;
+	Surf1.Y = Surf2.Y = Surf3.Y = Surf4.Y = yres;
+	Surf1.BPSL = Surf2.BPSL = Surf3.BPSL = Surf4.BPSL = bpsl;
+	Surf1.PageSize = Surf2.PageSize = Surf3.PageSize = Surf4.PageSize = pageSize;
+	Surf1.Flags = Surf2.Flags = Surf3.Flags = Surf4.Flags = VSurf_Noalloc;
+	Surf1.Targ = Surf2.Targ = Surf3.Targ = Surf4.Targ = NULL;
+
+	if (FinalSurf.Handle) {
+		SDL_DestroyTexture(static_cast<SDL_Texture*>(FinalSurf.Handle));
+		FinalSurf.Handle = nullptr;
+	}
+	memcpy(&FinalSurf, VSurface, sizeof(VESA_Surface));
+	FinalSurf.Data = FinalPage;
+	FinalSurf.X = xres;
+	FinalSurf.Y = yres;
+	FinalSurf.BPSL = bpsl;
+	FinalSurf.PageSize = pageSize;
+	FinalSurf.Flags = VSurf_Noalloc;
+	FinalSurf.Targ = NULL;
+	// Dedicated SDL_Texture sized to current Glat dims. Engine resize
+	// destroys MainSurf's texture but leaves this one alone, so Glat keeps
+	// flipping into a valid texture across resize events.
+	FinalSurf.Handle = SDL2_CreateChildTexture(xres, yres);
+
+	if (Plane_GP) delete[] Plane_GP;
+	if (Code_GP) delete[] Code_GP;
+	if (Gfx_GP) delete[] Gfx_GP;
+	if (Sfx_GP) delete[] Sfx_GP;
+	if (LenTable) delete[] LenTable;
+	numGridPoints = ((xres>>3)+1)*((yres>>3)+1);
+	Plane_GP = new GridPointTG[numGridPoints];
+	Code_GP = new GridPointT[numGridPoints];
+	Gfx_GP = new GridPointT[numGridPoints];
+	Sfx_GP = new GridPointT[numGridPoints];
+	memset(Plane_GP, 0, sizeof(GridPointTG) * numGridPoints);
+	LenTable = new float[numGridPoints];
+
+	const float XResFactor = xres / 320.0f;
+	int j = 0;
+	for (int y = 0; y <= yres; y += 8) {
+		for (int x = 0; x <= xres; x += 8) {
+			float X = x - xres * 0.5f;
+			float Y = y - yres * 0.5f;
+			LenTable[j++] = sqrtf(X*X + Y*Y) / XResFactor;
+		}
+	}
+
+	Setup_Grid_Texture_Mapper_MMX(xres, yres);
+
+	InitScreenXRes = xres;
+	InitScreenYRes = yres;
+	InitScreenPageSize = pageSize;
+}
 
 
 void Initialize_Glato()
 {
-	InitScreenXRes = XRes;
-	InitScreenYRes = YRes;
-	int32_t xres = InitScreenXRes;
-	int32_t yres = InitScreenYRes;
-	int x,y,i,j;
-	int X,Y;
-	float XResFactor = xres/320.0;
+	int32_t xres = XRes;
+	int32_t yres = YRes;
 
 
 	LogoTexture = new Texture;
 	LogoImage = new Image;
+	memset(LogoImage, 0, sizeof(Image));  // Data=NULL so Rebuild_Glato_Sized's free guard is a no-op first time.
 	PlaneTexture = new Texture;
 	PlaneImage = new Image;
 	CodeTexture = new Texture;
@@ -82,9 +199,6 @@ void Initialize_Glato()
 	GfxImage = new Image;
 	SfxTexture = new Texture;
 	SfxImage = new Image;
-
-	Load_Image_JPEG(LogoImage,"TEXTURES/LOGO.JPG");
-	Scale_Image(LogoImage,xres,yres);
 
 /*	LogoTexture->FileName = strdup("TEXTURES/LOGO.JPG");
 	Identify_Texture(LogoTexture);
@@ -144,71 +258,18 @@ void Initialize_Glato()
 	Convert_Texture2Image(SfxTexture,SfxImage);
 
 
-	Page1 = (byte*)_aligned_malloc(PageSize, 32);
-	Page2 = (byte*)_aligned_malloc(PageSize, 32);
-	Page3 = (byte*)_aligned_malloc(PageSize, 32);
-	Page4 = (byte*)_aligned_malloc(PageSize, 32);
-	FinalPage = (byte*)_aligned_malloc(PageSize, 32);
-
-	// only last YRes - YRes & (~7) lines should be cleared
-	memset(Page1, 0, PageSize);
-	memset(Page2, 0, PageSize);
-	memset(Page3, 0, PageSize);
-	memset(Page4, 0, PageSize);
-	memset(FinalPage, 0, PageSize);
-
-	memcpy(&Surf1,VSurface,sizeof(VESA_Surface));
-	memcpy(&Surf2,VSurface,sizeof(VESA_Surface));
-	memcpy(&Surf3,VSurface,sizeof(VESA_Surface));
-	memcpy(&Surf4,VSurface,sizeof(VESA_Surface));
-	memcpy(&FinalSurf, VSurface, sizeof(VESA_Surface));
-	Surf1.Data = Page1;
-	Surf2.Data = Page2;
-	Surf3.Data = Page3;
-	Surf4.Data = Page4;
-	FinalSurf.Data = FinalPage;
-	Surf1.Flags = VSurf_Noalloc;
-	Surf1.Targ = NULL;
-	Surf2.Flags = VSurf_Noalloc;
-	Surf2.Targ = NULL;
-	Surf3.Flags = VSurf_Noalloc;
-	Surf3.Targ = NULL;
-	Surf4.Flags = VSurf_Noalloc;
-	Surf4.Targ = NULL;
-	FinalSurf.Flags = VSurf_Noalloc;
-	FinalSurf.Targ = NULL;
-
-	numGridPoints = ((xres>>3)+1)*((yres>>3)+1);
-	//Plane_GP = new NewGridPoint[numGridPoints];
-	//Plane_GP = new GridPoint[numGridPoints];
-	Plane_GP = new GridPointTG[numGridPoints];
-	Code_GP = new GridPointT[numGridPoints];
-	Gfx_GP = new GridPointT[numGridPoints];
-	Sfx_GP = new GridPointT[numGridPoints];
-	
-	memset(Plane_GP, 0, sizeof(GridPointTG) * numGridPoints);
-	LenTable = new float [numGridPoints];
-	SinTable = new float [TRIG_ACC];
-	CosTable = new float [TRIG_ACC];
-	
-	j = 0;
-	for(i=0; i<TRIG_ACC; i++)
-	{
+	// Trig lookup tables: resolution-independent, set up once here.
+	SinTable = new float[TRIG_ACC];
+	CosTable = new float[TRIG_ACC];
+	for (int i = 0; i < TRIG_ACC; i++) {
 		SinTable[i] = sin(i*PI_M2/TRIG_ACC);
 		CosTable[i] = cos(i*PI_M2/TRIG_ACC);
 	}
 
-	for (y=0;y<=YRes;y+=8)
-	{
-		for (x=0;x<=xres;x+=8)
-		{
-			X = x - xres * 0.5;
-			Y = y - yres * 0.5;
-
-			LenTable[j] = sqrt((float)(X*X + Y*Y))/XResFactor;
-			j++;
-		}
-	}
+	// Allocate + populate every per-resolution buffer for the current
+	// engine dimensions. Subsequent engine resize events re-call this
+	// (via GlatoScene::on_resize) to retarget to the new size.
+	Rebuild_Glato_Sized(xres, yres);
 }
 
 static inline float max_magnitude(float a, float b)
@@ -236,29 +297,45 @@ struct GlatoScene : SceneDriver {
 	dword TTrd = 0;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
+	FrameProfiler prof{"glato"};
 
 	char MSGStr[MAX_GSTRING] = {};
 
-	void init() override {
+	void capture_dims() {
 		xres = InitScreenXRes;
 		yres = InitScreenYRes;
+		XResFactor = float(xres) / 320.0f;
+		rXResFactor = 320.0f / float(xres);
+		rYResFactor = 240.0f / float(yres);
+	}
+
+	void init() override {
+		capture_dims();
 		Setup_Grid_Texture_Mapper_MMX(xres, yres);
 
 		for(int i = 0; i < 20; i++)
 			timerStack[i] = Timer;
 
-		XResFactor = xres / 320.0;
-		rXResFactor = 320.0 / xres;
-		rYResFactor = 240.0 / yres;
-
 		TTrd = Timer;
 
 		// clear the screen once (only yres % 8 last lines are really needed)
-		memset(FinalPage, 0, PageSize);
+		memset(FinalPage, 0, InitScreenPageSize);
+	}
+
+	void on_resize(int newX, int newY) override {
+		// Rebuild every per-resolution buffer Glat owns at the new size,
+		// then re-capture the scene-level scaling factors so the per-frame
+		// math (UV strides, code/gfx swirl scales) matches the new dims.
+		Rebuild_Glato_Sized(newX, newY);
+		capture_dims();
+		memset(FinalPage, 0, InitScreenPageSize);
 	}
 
 	bool tick() override {
 		if (Timer >= 3500) return false;
+
+		prof.beginFrame();
+		prof.enter(PROF_ANIM);
 
 		int x, y, i, j;
 		float a = 0.0f, bb = 0.0f, c = 0.0f, d = 0.0f;
@@ -578,6 +655,8 @@ struct GlatoScene : SceneDriver {
 				j++;
 			}
 
+		prof.switchTo(PROF_RNDR);
+
 //		Grid_Texture_Mapper_XXX(Plane_GP,PlaneImage,(DWord *)Page1);
 		Grid_Texture_Mapper_TG(Plane_GP,PlaneImage,(DWord *)Page1, xres, yres);
 		//GridRendererTG(Plane_GP,PlaneImage,(DWord *)Page1, XRes, YRes);
@@ -640,7 +719,9 @@ struct GlatoScene : SceneDriver {
 
 			OutTextXY(FinalPage,0,0,MSGStr,255, xres, yres);
 		}
+		prof.switchTo(PROF_FLIP);
 		Flip(&FinalSurf);
+		prof.leave(PROF_FLIP);
 //		Flip(&Surf1);
 
 //		Rx += 0.01;
@@ -669,10 +750,12 @@ struct GlatoScene : SceneDriver {
 			};
 			g_glatoTraceHook(s);
 		}
+		prof.endFrame();
 		return true;
 	}
 
 	void cleanup() override {
+		if (g_profilerActive) prof.dump();
 		while (Keyboard[ScESC]) continue;
 
 		delete [] LenTable;

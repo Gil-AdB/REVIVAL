@@ -1,6 +1,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <SDL.h>
+#include <cstdio>
 
 #ifdef __EMSCRIPTEN__
 #include "../Modplayer/Modplayer.h"
@@ -13,6 +14,20 @@ static SDL_Window *sdl_window;
 
 static void V_Flip(VESA_Surface *VS)
 {
+	// Top-right resolution overlay. Draw into the surface's data buffer
+	// just before pushing to the SDL_Texture so it shows up regardless of
+	// which scene's surface is being flipped (MainSurf vs Glat's FinalSurf).
+	if (VS->Data && VS->X > 0 && VS->Y > 0) {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%dx%d", (int)VS->X, (int)VS->Y);
+		// Approximate text width: ~10 px per char at the standard font.
+		// Right-align at a small inset; if the surface is narrow we just
+		// clamp to 0.
+		int textPx = (int)strlen(buf) * 10;
+		int x = (int)VS->X - textPx - 8;
+		if (x < 0) x = 0;
+		OutTextXY(VS->Data, x, 4, buf, 255, (int)VS->X, (int)VS->Y);
+	}
 	auto x = SDL_UpdateTexture(static_cast<SDL_Texture*>(VS->Handle), NULL, VS->Data, VS->BPSL);
 	auto y = SDL_RenderCopy(static_cast<SDL_Renderer*>(VS->Renderer), static_cast<SDL_Texture*>(VS->Handle), NULL, NULL);
 	SDL_RenderPresent(static_cast<SDL_Renderer*>(VS->Renderer));
@@ -39,12 +54,54 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 }
 
 
+void *SDL2_CreateChildTexture(int X, int Y)
+{
+	// Same renderer the engine display uses; assumes SDL2_InitDisplay ran.
+	if (!SDL_MainSurf.Renderer || X <= 0 || Y <= 0) return nullptr;
+	return SDL_CreateTexture(static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer),
+	                         SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+	                         X, Y);
+}
+
+// Tear down + reallocate the SDL-side framebuffer / Z-buffer / SDL_Texture
+// at new dimensions, then re-install into the engine globals via
+// VESA_VPageExternal (which calls Build_YOffs_Table + VESA_Surface2Global).
+// Called from the demo thread at a frame boundary by EngineResize.
+void SDL2_HandleResize(int newX, int newY)
+{
+	fprintf(stderr, "[RESIZE] requested %dx%d, current %dx%d\n",
+	        newX, newY, SDL_MainSurf.X, SDL_MainSurf.Y);
+	if (newX <= 0 || newY <= 0) { fprintf(stderr, "[RESIZE] skip: bad dims\n"); return; }
+	if (newX == SDL_MainSurf.X && newY == SDL_MainSurf.Y) { fprintf(stderr, "[RESIZE] skip: same\n"); return; }
+	fprintf(stderr, "[RESIZE] applying\n");
+
+	// Free the engine-side YOffs that came from the previous
+	// Build_YOffs_Table(MainSurf); VESA_VPageExternal stomps the pointer
+	// via memcpy below, so freeing it here avoids the leak.
+	if (MainSurf && MainSurf->YTable) {
+		delete[] MainSurf->YTable;
+		MainSurf->YTable = nullptr;
+	}
+
+	if (SDL_MainSurf.Handle) {
+		SDL_DestroyTexture(static_cast<SDL_Texture *>(SDL_MainSurf.Handle));
+		SDL_MainSurf.Handle = nullptr;
+	}
+	if (SDL_MainSurf.Data) {
+		free(SDL_MainSurf.Data);
+		SDL_MainSurf.Data = nullptr;
+	}
+
+	SDL_MainSurf.X = newX;
+	SDL_MainSurf.Y = newY;
+	V_Create(&SDL_MainSurf, static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer));
+
+	VESA_VPageExternal(&SDL_MainSurf);
+}
+
 dword SDL2_InitDisplay(SDL_Window *window)
 {
 	sdl_window = window;
-	int x, y;
-	SDL_GetWindowSize(sdl_window, &x, &y);
-	SDL_MainSurf.X = x; SDL_MainSurf.Y = y;
 	SDL_MainSurf.BPP = 32;
 
 	// Fill in the secondary surface VSurf structure
@@ -62,6 +119,14 @@ dword SDL2_InitDisplay(SDL_Window *window)
 	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_PRESENTVSYNC);
 #endif
 	SDL_MainSurf.Renderer = renderer;
+
+	// Use renderer output size (in pixels) rather than window size (in
+	// points). With SDL_WINDOW_ALLOW_HIGHDPI on a retina display these
+	// differ by the DPI scale factor; we always want pixels because that's
+	// what the framebuffer + SDL_Texture are sized in.
+	int px, py;
+	SDL_GetRendererOutputSize(renderer, &px, &py);
+	SDL_MainSurf.X = px; SDL_MainSurf.Y = py;
 
 	V_Create(&SDL_MainSurf, renderer);
 
