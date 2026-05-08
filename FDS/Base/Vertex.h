@@ -34,7 +34,12 @@ struct  Vertex
 	// 17.04.02 consider replacing PX, PY and TPos with x, y, and z.
 	float			UZ = 0.0f, VZ = 0.0f, RZ = 0.0f; // U/Z, V/Z and 1/Z. (should be called UZ, VZ, RZ)
 	Vector			Pos,TPos;   // Position and transformed position
-	Vector			N;          // PseudoNormal
+	Vector			N;          // PseudoNormal (object space; computed at scene init)
+	Vector			TN;         // Transformed normal (view space; populated per frame
+	                            // in Transform_Objects from N * IM, where IM is the
+	                            // unscaled View*RotMat. Read by the deferred-path
+	                            // clipper + rasterizer; the forward-path Lighting()
+	                            // still reads N in object space.
 //	float			EU,EV;      // Environment mapping coordinates
 //	float			REU,REV;    // EU/Z, EV/Z.
 	float			EUZ = 0.0f, EVZ = 0.0f;

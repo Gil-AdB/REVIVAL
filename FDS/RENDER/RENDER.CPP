@@ -544,7 +544,12 @@ void Transform_Objects(Scene *Sc)
 				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				
+				// Object-space N -> view-space TN. IM is the un-scaled
+				// View*RotMat (orthogonal rotation, so inverse-transpose
+				// = same matrix). Read by the deferred-path clipper +
+				// rasterizer; forward-path Lighting() still reads N.
+				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				Vtx->RZ=1.0/Vtx->TPos.z;
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
@@ -567,7 +572,8 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				
+				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+
 				Vtx->RZ=1.0/Vtx->TPos.z;
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
@@ -593,7 +599,8 @@ Regular:
 				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				
+				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
 				if (Vtx->TPos.z>Sc->NZP)

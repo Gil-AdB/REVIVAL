@@ -349,9 +349,9 @@ struct TileRasterizer {
 						.rz0 = v1.RZ + dx * drzdx + dy * drzdy,
 						.uz0 = v1.UZ + dx * duzdx + dy * duzdy,
 						.vz0 = v1.VZ + dx * dvzdx + dy * dvzdy,
-						.nx0 = v1.N.x + dx * dnxdx + dy * dnxdy,
-						.ny0 = v1.N.y + dx * dnydx + dy * dnydy,
-						.nz0 = v1.N.z + dx * dnzdx + dy * dnzdy,
+						.nx0 = v1.TN.x + dx * dnxdx + dy * dnxdy,
+						.ny0 = v1.TN.y + dx * dnydx + dy * dnydy,
+						.nz0 = v1.TN.z + dx * dnzdx + dy * dnzdy,
 					};
 					apply_exact(tile);
 				}
@@ -418,12 +418,12 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 		// Per-vertex shading-normal gradients. Same screen-space
 		// inverse-Jacobian (`im`) as UV — the rasterizer interpolates
 		// linearly across the triangle and renormalizes per-pixel (nlerp).
-		r.dnxdx = im[0] * (v2.N.x - v1.N.x) + im[1] * (v3.N.x - v1.N.x);
-		r.dnxdy = im[2] * (v2.N.x - v1.N.x) + im[3] * (v3.N.x - v1.N.x);
-		r.dnydx = im[0] * (v2.N.y - v1.N.y) + im[1] * (v3.N.y - v1.N.y);
-		r.dnydy = im[2] * (v2.N.y - v1.N.y) + im[3] * (v3.N.y - v1.N.y);
-		r.dnzdx = im[0] * (v2.N.z - v1.N.z) + im[1] * (v3.N.z - v1.N.z);
-		r.dnzdy = im[2] * (v2.N.z - v1.N.z) + im[3] * (v3.N.z - v1.N.z);
+		r.dnxdx = im[0] * (v2.TN.x - v1.TN.x) + im[1] * (v3.TN.x - v1.TN.x);
+		r.dnxdy = im[2] * (v2.TN.x - v1.TN.x) + im[3] * (v3.TN.x - v1.TN.x);
+		r.dnydx = im[0] * (v2.TN.y - v1.TN.y) + im[1] * (v3.TN.y - v1.TN.y);
+		r.dnydy = im[2] * (v2.TN.y - v1.TN.y) + im[3] * (v3.TN.y - v1.TN.y);
+		r.dnzdx = im[0] * (v2.TN.z - v1.TN.z) + im[1] * (v3.TN.z - v1.TN.z);
+		r.dnzdy = im[2] * (v2.TN.z - v1.TN.z) + im[3] * (v3.TN.z - v1.TN.z);
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;
