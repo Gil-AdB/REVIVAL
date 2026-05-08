@@ -1763,15 +1763,34 @@ static bool deferredLightingVecEnabled() {
 	return cached;
 }
 
+// FDS_DEFERRED_CHECKERBOARD=1 enables half-rate lighting: only pixels
+// where (px + py) & 1 == 0 (the "even" cells of a checkerboard) get the
+// full per-pixel omni evaluation; the odd cells are filled in a second
+// wave by averaging two of their already-shaded neighbors when those
+// share matID, falling back to full shade when they don't (e.g. across
+// material edges). ~50% of pixels skip the omni loop entirely.
+static bool deferredLightingCheckerboardEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED_CHECKERBOARD");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
+	const bool checker = deferredLightingCheckerboardEnabled();
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
+			// Wave-1 of checkerboard: skip odd cells (filled by the
+			// fill-pass after all wave-1 tiles complete).
+			if (checker && ((px ^ py) & 1)) continue;
+
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;  // pixel not touched by Mekalele
@@ -2102,6 +2121,180 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	renderns::condition.notify_one();
 }
 
+// Wave-2 of checkerboard: fills the odd (skipped) cells. For each odd
+// pixel: if both horizontal neighbors share the same matID, average
+// their already-shaded VPage values (~5 cycles per pixel — 2 loads,
+// 3 lane averages, 1 store). If matID disagrees (material edge), fall
+// back to full deferred shading for that pixel via the same kernel as
+// wave-1. The mismatch rate on City is ~5% per the snapshot pixel
+// distribution — most of the frame is large continuous surfaces.
+//
+// Race-free because wave-2 reads only what wave-1 wrote; tile-job
+// dispatch waits on tileCounter between waves. Tile-edge odd pixels
+// (px==x1 or px==x2-1) read the next/prev tile's shaded result, which
+// is safe because that neighbor tile finished its wave-1 already.
+static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
+                                              int tileIndex,
+                                              int x1, int y1, int x2, int y2)
+{
+	const meka::GBuffer &gb = *ctx.gb;
+	dword *out = reinterpret_cast<dword *>(VPage);
+
+	for (int py = y1; py < y2; ++py) {
+		for (int px = x1; px < x2; ++px) {
+			if (((px ^ py) & 1) == 0) continue;  // wave-1 already shaded these
+
+			const size_t i = size_t(py) * XRes + px;
+			const word zEnc = ZPage16[i];
+			if (zEnc == 0) continue;
+
+			// Need at least one valid horizontal neighbor.
+			const bool haveLeft  = (px > 0);
+			const bool haveRight = (px < XRes - 1);
+			if (!haveLeft && !haveRight) continue;
+
+			// Quick-path: average L/R when their matIDs match each other
+			// AND match this pixel's matID. Mismatch → fall back below.
+			const uint32_t mat32  = gb.txtr[i];
+			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
+			bool matched = false;
+			if (haveLeft && haveRight) {
+				const uint32_t matIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
+				const uint32_t matIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
+				if (matIDl == matIDc && matIDr == matIDc) {
+					const dword pl = out[i - 1];
+					const dword pr = out[i + 1];
+					// Per-channel average. (pl & 0xFEFEFEFE) >> 1 +
+					// (pr & 0xFEFEFEFE) >> 1 — branch-free, no overflow.
+					const dword avg = ((pl & 0xFEFEFEFEu) >> 1) +
+					                   ((pr & 0xFEFEFEFEu) >> 1);
+					out[i] = avg | 0xFF000000u;
+					matched = true;
+				}
+			}
+			if (matched) continue;
+
+			// Fallback path — replays the wave-1 kernel for this pixel.
+			// We don't expect this branch to be hot (most frame area is
+			// continuous surface), so the simpler scalar-only fallback
+			// keeps the code small even if we're in vec mode otherwise.
+			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
+			const uint32_t matID       = matIDc;
+			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
+			if (matID >= ctx.matTable.count) continue;
+			Material *Mat = ctx.matTable.data[matID];
+			if (!Mat || !Mat->Txtr) continue;
+			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
+			if (!texData) continue;
+			const dword texel = texData[swizzledUV];
+			const float texB = float(texel & 0xFF);
+			const float texG = float((texel >> 8) & 0xFF);
+			const float texR = float((texel >> 16) & 0xFF);
+
+			float nx, ny, nz;
+			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+
+			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
+			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
+			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
+
+			float lB, lG, lR;
+			if (Mat->Txtr) {
+				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
+				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
+				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
+			} else {
+				lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * ctx.Sc->Ambient.B;
+				lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * ctx.Sc->Ambient.G;
+				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * ctx.Sc->Ambient.R;
+			}
+
+			const bool isWater = (int(matID) == ctx.waterMatID);
+			const TileLights &tl = ctx.tileLights[tileIndex];
+
+			float sB = 0, sG = 0, sR = 0;
+			float vx = 0, vy = 0, vz = 0;
+			const bool wantSpecular = (Mat->Specular > 0.0f) && (Specular_Factor > 0.0f);
+			const float gloss = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
+			if (wantSpecular) {
+				const float vlen2 = x*x + y*y + z*z;
+				const float vlenInv = fast_rsqrt(vlen2);
+				vx = -x * vlenInv;
+				vy = -y * vlenInv;
+				vz = -z * vlenInv;
+			}
+
+			for (int n = 0; !isWater && n < tl.count; ++n) {
+				const float wx = tl.posX[n] - x;
+				const float wy = tl.posY[n] - y;
+				const float wz = tl.posZ[n] - z;
+				const float dot = wx*nx + wy*ny + wz*nz;
+				if (dot < 0.0f) continue;
+				const float len2 = wx*wx + wy*wy + wz*wz;
+				if (len2 > tl.range2[n]) continue;
+				const float lenInv = fast_rsqrt(len2);
+				const float dist   = len2 * lenInv;
+				const float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
+				const float intensity = k * Mat->Diffuse;
+				lB += intensity * tl.colB[n];
+				lG += intensity * tl.colG[n];
+				lR += intensity * tl.colR[n];
+
+				if (wantSpecular) {
+					const float ldx = wx * lenInv;
+					const float ldy = wy * lenInv;
+					const float ldz = wz * lenInv;
+					float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
+					const float hLen2 = hx*hx + hy*hy + hz*hz;
+					if (hLen2 > 0.0f) {
+						const float hLenInv = fast_rsqrt(hLen2);
+						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+						const float NdotH = nx*hx + ny*hy + nz*hz;
+						if (NdotH > 0.0f) {
+							const float spec = std::pow(NdotH, gloss);
+							const float specStrength = spec * Mat->Specular * (1.0f - dist * tl.rRange[n]);
+							sB += specStrength * tl.colB[n];
+							sG += specStrength * tl.colG[n];
+							sR += specStrength * tl.colR[n];
+						}
+					}
+				}
+			}
+
+			if (lB > 250.0f) lB = 250.0f;
+			if (lG > 250.0f) lG = 250.0f;
+			if (lR > 250.0f) lR = 250.0f;
+			if (lB < 0.0f) lB = 0.0f;
+			if (lG < 0.0f) lG = 0.0f;
+			if (lR < 0.0f) lR = 0.0f;
+
+			float fdB = (texB * lB) * (1.0f / 256.0f);
+			float fdG = (texG * lG) * (1.0f / 256.0f);
+			float fdR = (texR * lR) * (1.0f / 256.0f);
+			int outB = int(fdB) + int(sB);
+			int outG = int(fdG) + int(sG);
+			int outR = int(fdR) + int(sR);
+			if (isWater) {
+				const dword existing = out[i];
+				outB += int(existing & 0xFF) >> 1;
+				outG += int((existing >> 8) & 0xFF) >> 1;
+				outR += int((existing >> 16) & 0xFF) >> 1;
+			}
+			if (outB > 255) outB = 255;
+			if (outG > 255) outG = 255;
+			if (outR > 255) outR = 255;
+			if (outB < 0) outB = 0;
+			if (outG < 0) outG = 0;
+			if (outR < 0) outR = 0;
+			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
 // Per-frame setup + dispatch tile jobs across the ThreadPool. Same 6×4
 // split the rasterizer uses; tiles are independent (each writes a
 // disjoint slice of VPage). Reuses the renderns::tileCounter +
@@ -2192,6 +2385,8 @@ static void Render_DeferredLighting() {
 	ctx.Sc         = Sc;
 	ctx.waterMatID = g_deferredWaterMatID;
 
+	// Wave 1: shade even cells (full deferred kernel). When checkerboard
+	// is off, this is the entire pass and odd-cell skip is a no-op.
 	renderns::tileCounter = 0;
 	for (int j = 0; j < numTilesY; ++j) {
 		const int y1 = tileSizeY * j;
@@ -2206,6 +2401,29 @@ static void Render_DeferredLighting() {
 		}
 	}
 	{
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::condition.wait(lock, []{
+			return renderns::tileCounter == numTilesX * numTilesY;
+		});
+	}
+
+	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
+	// fallback at material edges). Skip entirely when checkerboard is
+	// off — wave 1 already covered everything.
+	if (deferredLightingCheckerboardEnabled()) {
+		renderns::tileCounter = 0;
+		for (int j = 0; j < numTilesY; ++j) {
+			const int y1 = tileSizeY * j;
+			const int y2 = std::min(y1 + tileSizeY, YRes);
+			for (int i = 0; i < numTilesX; ++i) {
+				const int x1 = tileSizeX * i;
+				const int x2 = std::min(x1 + tileSizeX, XRes);
+				const int tileIndex = j * numTilesX + i;
+				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+					Render_DeferredLighting_TileFill(ctx, tileIndex, x1, y1, x2, y2);
+				});
+			}
+		}
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::condition.wait(lock, []{
 			return renderns::tileCounter == numTilesX * numTilesY;
