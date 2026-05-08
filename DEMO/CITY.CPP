@@ -788,7 +788,11 @@ OUT:FEnd=T->Faces+T->FIndex;
 			if ((dz=Sc->Pcl[I].V.TPos.z)>=Sc->NZP) {
 				F = &Sc->Pcl[I].F;
 				dz *=-16384;
-				dz +=0x7FFFFFFF;
+				// 0x7FFFFFFF = INT_MAX. Written as a float literal so
+				// the implicit int→float doesn't warn (INT_MAX rounds
+				// up to 2^31 = 2147483648.0, which is what the original
+				// did but the compiler flags it).
+				dz += 2147483648.0f;
 				RoundToInt((int32_t*)&F->SortZ.DW,dz);
 #ifdef FRONT_TO_BACK_SORTING
 				F->SortZ.F = 2*fzp-dz;

@@ -307,9 +307,10 @@ struct TileRasterizer {
 						.c0 = c0,
 						.dcdx = dcdx,
 						.dcdy = dcdy,
-						.rz0 = (v1.RZ + (x * TILE_SIZE - v1.PX) * drzdx + (y * TILE_SIZE - v1.PY) * drzdy),
+						// Match struct field order (uz0, vz0, rz0).
 						.uz0 = (v1.UZ + (x * TILE_SIZE - v1.PX) * duzdx + (y * TILE_SIZE - v1.PY) * duzdy),
-						.vz0 = (v1.VZ + (x * TILE_SIZE - v1.PX) * dvzdx + (y * TILE_SIZE - v1.PY) * dvzdy)
+						.vz0 = (v1.VZ + (x * TILE_SIZE - v1.PX) * dvzdx + (y * TILE_SIZE - v1.PY) * dvzdy),
+						.rz0 = (v1.RZ + (x * TILE_SIZE - v1.PX) * drzdx + (y * TILE_SIZE - v1.PY) * drzdy),
 					};
 					apply_exact(tile);
 				}
@@ -334,12 +335,13 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 	//	V[i]->U = V[i]->UZ * z;
 	//	V[i]->V = V[i]->VZ * z;
 	//}
+	// Match struct field order: V, xres, yres, Txtr, miplevel, zbuffer.
 	meka::TileRasterizerCtx ctx = {
-		.miplevel = miplevel,
-		.Txtr = F->Txtr->Txtr,
 		.V = V,
 		.xres = XRes,
 		.yres = YRes,
+		.Txtr = F->Txtr->Txtr,
+		.miplevel = miplevel,
 		.zbuffer = ZPage16,
 	};
 	meka::TileRasterizer r(*g_gbuffer, ctx);

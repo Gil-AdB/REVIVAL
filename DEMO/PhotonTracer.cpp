@@ -41,8 +41,9 @@ ptErrorCode ptObject2D::create(mword numVerts)
 	_verts = new ptObject2DVertex [numVerts];
 	_numVerts = numVerts;
 
-	// unimportant, can be remarked
-	memset(_verts, 0, sizeof(ptObject2DVertex) * numVerts);
+	// unimportant, can be remarked. Cast to void* — ptObject2DVertex
+	// has non-trivial members and clang warns on memset of such types.
+	memset(static_cast<void *>(_verts), 0, sizeof(ptObject2DVertex) * numVerts);
 
 	return PT_OK;
 }
