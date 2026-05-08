@@ -136,4 +136,13 @@ else()
 
     install(TARGETS ${PROJECT_NAME}
             RUNTIME DESTINATION "${CMAKE_SOURCE_DIR}/Runtime")
+
+    # Auto-install on every native rebuild so `cd Runtime && ./DEMO` always
+    # picks up the freshly-linked binary. Saves a class of "ran a stale
+    # exe" debugging — the build/Runtime split bit us repeatedly today.
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:${PROJECT_NAME}>"
+                "${CMAKE_SOURCE_DIR}/Runtime/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
+        COMMENT "Updating Runtime/DEMO with the freshly-linked binary")
 endif()
