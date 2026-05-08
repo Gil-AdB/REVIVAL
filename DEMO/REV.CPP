@@ -476,6 +476,65 @@ material global ID or ptr
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
+#ifndef __EMSCRIPTEN__
+#include <unistd.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+#endif
+
+// Locate the executable's directory and chdir into the asset root so
+// the demo's CWD-relative fopen()s (rev.cfg, SCENES/, TEXTURES/,
+// FONTS/, Revival.xM) resolve no matter where you launched it from.
+// Tries: <bindir>, <bindir>/../Runtime, <bindir>/../../Runtime — the
+// first one that has rev.cfg wins. No-op on emscripten (assets are
+// preloaded at "/").
+static void ChdirToAssetRoot(const char* argv0)
+{
+#ifndef __EMSCRIPTEN__
+	char exe[4096] = {0};
+#ifdef __APPLE__
+	uint32_t size = sizeof(exe);
+	if (_NSGetExecutablePath(exe, &size) != 0) {
+		strncpy(exe, argv0, sizeof(exe) - 1);
+	}
+#elif defined(__linux__)
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n <= 0) strncpy(exe, argv0, sizeof(exe) - 1);
+#else
+	strncpy(exe, argv0, sizeof(exe) - 1);
+#endif
+
+	char resolved[4096];
+	if (realpath(exe, resolved)) {
+		strncpy(exe, resolved, sizeof(exe) - 1);
+		exe[sizeof(exe) - 1] = 0;
+	}
+
+	char* dir = dirname(exe);
+	const char* suffixes[] = { "", "/../Runtime", "/../../Runtime" };
+	for (const char* sfx : suffixes) {
+		char cand[4096];
+		snprintf(cand, sizeof(cand), "%s%s/rev.cfg", dir, sfx);
+		if (access(cand, R_OK) == 0) {
+			char target[4096];
+			snprintf(target, sizeof(target), "%s%s", dir, sfx);
+			if (chdir(target) != 0) {
+				fprintf(stderr, "ChdirToAssetRoot: chdir(%s) failed\n", target);
+			}
+			return;
+		}
+	}
+	// No rev.cfg found anywhere obvious — leave CWD alone and let
+	// the next fopen() report the error in context.
+#else
+	(void)argv0;
+#endif
+}
 
 // global configuration db
 static ConfigurationDB *g_cfg;
@@ -1118,6 +1177,7 @@ void CodeEntry(void *var)
 
 int main(int argc, const char *argv[])
 {
+	ChdirToAssetRoot(argc > 0 ? argv[0] : "");
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
