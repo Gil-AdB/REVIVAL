@@ -119,16 +119,19 @@ static int Wasm_InitGL()
 		Module.__floodTex = gl.createTexture();
 		Module.__floodTexW = 0;
 		Module.__floodTexH = 0;
-		// VAO with a dummy attribute at location 0 — the vertex shader
-		// synthesizes the quad from gl_VertexID and uses no attributes,
-		// but desktop GL drivers (Mac in particular) fall into a slow
-		// emulation path if attribute 0 is unbound. A 4-byte buffer is
-		// enough to satisfy them; the shader never reads from it.
+		// VAO with a dummy attribute at location 0. The vertex shader
+		// declares aDummy at location 0 (silences the desktop-GL
+		// emulation warning) and multiplies it by 0 so the optimizer
+		// can't strip it. The buffer must hold enough data for the
+		// full draw — drawArrays(TRIANGLE_STRIP, 0, 4) reads 4 floats
+		// at this attribute, so a 4-element buffer; an undersized buffer
+		// triggers out-of-bounds reads that some drivers handle by
+		// dropping the entire draw call (= black canvas).
 		Module.__floodVAO = gl.createVertexArray();
 		gl.bindVertexArray(Module.__floodVAO);
 		var dummyVBO = gl.createBuffer();
 		gl.bindBuffer(gl.ARRAY_BUFFER, dummyVBO);
-		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0]), gl.STATIC_DRAW);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 0, 0]), gl.STATIC_DRAW);
 		gl.enableVertexAttribArray(0);
 		gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
 		gl.bindVertexArray(null);
