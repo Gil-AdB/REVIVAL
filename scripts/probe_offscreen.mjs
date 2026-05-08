@@ -33,7 +33,8 @@ process.on("exit", () => server.kill());
 await new Promise((r) => setTimeout(r, 400)); // server warmup
 
 const launcher = browserName === "chromium" ? chromium : firefox;
-const browser = await launcher.launch({ headless: true });
+const headless = process.argv[4] !== "headed";
+const browser = await launcher.launch({ headless });
 const ctx = await browser.newContext();
 const page = await ctx.newPage();
 
@@ -52,8 +53,18 @@ try {
 // to trigger the user-gesture gate (the demo blocks on a click before
 // audio + scene start).
 await new Promise((r) => setTimeout(r, 1500));
-try { await page.click("body", { force: true, timeout: 1500 }); } catch (_) {}
+try { await page.click("#canvas", { force: true, timeout: 1500 }); } catch (_) {}
+try { await page.keyboard.press("Space"); } catch (_) {}
 await new Promise((r) => setTimeout(r, seconds * 1000));
+// Visual snapshot — useful for verifying the canvas actually renders
+// (FLIP timings alone don't catch an OffscreenCanvas-placeholder bridge
+// failure that produces a black canvas with sub-millisecond GL ops).
+try {
+	await page.screenshot({ path: "/tmp/probe_screenshot.png", fullPage: false });
+	console.log("[probe] screenshot -> /tmp/probe_screenshot.png");
+} catch (e) {
+	console.log(`[probe] screenshot: ${e.message}`);
+}
 await browser.close();
 server.kill();
 process.exit(0);
