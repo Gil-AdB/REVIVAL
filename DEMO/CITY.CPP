@@ -1578,6 +1578,19 @@ static void MakeFacesIndependent(TriMesh *T) {
 	// extends to scene teardown.
 	T->Verts = newVerts;
 	T->VIndex = newCount;
+
+	// T->SL (static-lighting cache) was sized for the original VIndex.
+	// StaticLighting iterates `for vi in [0, T->VIndex)` writing
+	// T->SL[vi] — without growing SL too, those writes overflow into
+	// neighbouring TriMesh structs (corruption manifests as
+	// 0x42800000xxxxxxxx in someone's Next pointer, where 0x42800000
+	// is float 64.0 = CitySc->Ambient.B). Found via ASan
+	// (heap-buffer-overflow at RENDER.CPP:1207). Reallocate to match
+	// the new VIndex.
+	if (T->Flags & Tri_Stationary) {
+		T->SL = (Color *)getAlignedBlock(sizeof(Color) * newCount, 16);
+		// Old SL is also leaked. Same per-scene-init story as Verts.
+	}
 }
 
 using std::pair;
@@ -1696,17 +1709,7 @@ void Initialize_City()
 			&& '0' <= Obj->Name[1] && Obj->Name[1] <= '9'
 			&& 0 == strcmp(Obj->Name + 2, ".lwo"));
 		if (!isBuilding) continue;
-		// Disabled — see comment on MakeFacesIndependent. Allocating any
-		// fresh Vertex storage at this point reproducibly corrupts a
-		// TriMesh's Next pointer downstream (0x42800000 = float 64.0
-		// shows up in the upper 32 bits, lower bits look heap-ish).
-		// Survives across allocator choices (new[], getAlignedArray,
-		// std::vector::resize/assign) and the pack(1)-vs-natural-
-		// alignment swap, so it isn't the obvious suspect. Needs a
-		// dedicated investigation pass — for now City keeps the
-		// area-weighted vertex normals (visible Phong rounding on
-		// building corners in the deferred normal viz).
-		// MakeFacesIndependent((TriMesh *)Obj->Data);
+		MakeFacesIndependent((TriMesh *)Obj->Data);  // re-enabled for ASan
 	}
 
 	Animate_Objects(CitySc, true);
