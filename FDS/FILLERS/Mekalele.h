@@ -26,23 +26,35 @@ using u32 = uint32_t;
 constexpr const i32 TILE_SIZE = 8;
 using TScreenCoord = i32;
 
-struct alignas(16) Vector4f {
-	// NOTE: can use w to store 1/z.
-	float x, y, z, w;
-
-	static Vector4f fromVertex(const Vertex* v) {
-		return { v->PX, v->PY, 1.0f / v->RZ, v->RZ };
-	}
-};
-
 struct GBuffer {
-	// Interpolated position in camera space
-	std::vector<Vector4f> position;
-	// Interpolated normal in camera space
-	std::vector<Vector4f> normal;
-	// packed: txtr id - 7 bit, swizzled u+v - 20 bit, miplevel - 3-4 bit
+	// Octahedral-packed shading normal: 8-bit x, 8-bit y, decoded to
+	// (nx, ny, nz) on a unit sphere in the lighting pass. The lighting
+	// pass reconstructs view-space position from ZPage16 + screen XY,
+	// so we don't carry position here.
+	std::vector<u16> normal;
+	// packed: miplevel:4 | matID:8 | swizzled UV:20
 	std::vector<u32> txtr;
 };
+
+// Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
+// Quantization error is sub-degree at 8 bits per axis, well below
+// what visibly matters for diffuse lighting. The lighting pass does
+// the inverse via oct_decode_u16.
+inline u16 oct_encode_u16(float nx, float ny, float nz) {
+	float invL1 = 1.0f / (std::fabs(nx) + std::fabs(ny) + std::fabs(nz));
+	float ox = nx * invL1;
+	float oy = ny * invL1;
+	if (nz < 0.0f) {
+		float fx = (1.0f - std::fabs(oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
+		float fy = (1.0f - std::fabs(ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
+		ox = fx; oy = fy;
+	}
+	int qx = int(std::round(ox * 127.0f));
+	int qy = int(std::round(oy * 127.0f));
+	if (qx < -128) qx = -128; if (qx > 127) qx = 127;
+	if (qy < -128) qy = -128; if (qy > 127) qy = 127;
+	return u16((qx & 0xff) | ((qy & 0xff) << 8));
+}
 
 struct Tile {
 	int x, y;
@@ -52,6 +64,10 @@ struct Tile {
 	TScreenCoord c0, dcdx, dcdy;
 
 	float uz0, vz0, rz0;
+	// Per-tile origin of the interpolated shading normal. The rasterizer
+	// adds dnxdx/dnydx etc. across the 8 lanes of a row and dnxdy/.. down
+	// the rows; per-pixel we renormalize via rsqrt to recover unit length.
+	float nx0, ny0, nz0;
 };
 
 struct TileRasterizerCtx {
@@ -63,13 +79,11 @@ struct TileRasterizerCtx {
 };
 
 struct GBufferSpan {
-	Vector4f *position;
-	Vector4f *normal;
+	u16 *normal;
 	u32 *txtr;
 	u16 *zbuffer;
-	
+
 	GBufferSpan &operator+=(i32 offset) {
-		position += offset;
 		normal += offset;
 		txtr += offset;
 		zbuffer += offset;
@@ -79,7 +93,6 @@ struct GBufferSpan {
 	static GBufferSpan of(GBuffer &gbuffer, const TileRasterizerCtx &ctx, u32 x, u32 y) {
 		u32 offset = x + y * ctx.xres;
 		return {
-			gbuffer.position.data() + offset,
 			gbuffer.normal.data() + offset,
 			gbuffer.txtr.data() + offset,
 			ctx.zbuffer + offset
@@ -158,6 +171,11 @@ struct TileRasterizer {
 	float duzdx, duzdy;
 	float dvzdx, dvzdy;
 	float drzdx, drzdy;
+	// Per-pixel shading-normal gradients. Linear-in-screen interpolation
+	// (nlerp): renormalize per-pixel after summing lane offsets.
+	float dnxdx, dnxdy;
+	float dnydx, dnydy;
+	float dnzdx, dnzdy;
 
 	uint32_t umask;// = (1 << LogWidth) - 1);
 	uint32_t vmask;// = (1 << LogHeight) - 1);
@@ -192,6 +210,9 @@ struct TileRasterizer {
 		Vec8f p_rz = v8_from_arith_seq(tile.rz0, drzdx);
 		Vec8f p_uz = v8_from_arith_seq(tile.uz0, duzdx);
 		Vec8f p_vz = v8_from_arith_seq(tile.vz0, dvzdx);
+		Vec8f p_nx = v8_from_arith_seq(tile.nx0, dnxdx);
+		Vec8f p_ny = v8_from_arith_seq(tile.ny0, dnydx);
+		Vec8f p_nz = v8_from_arith_seq(tile.nz0, dnzdx);
 
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
@@ -219,17 +240,33 @@ struct TileRasterizer {
 					auto packedTxtrData = v8_TxtrIdMask | p_offset;
 					_mm256_maskstore_ps(span.txtr, *(__m256i*)(&p_mask), *(__m256*)(&packedTxtrData));
 
-					// TODO: Pack texture const(id, miplevel), uv in u32 and write to gbuffer
-					// Calculate normals
-					// Calculate world space position
-					// auto texture0_samples = gather(Vec8ui(p_offset), TextureAddr, p_mask);
-					// _mm256_maskstore_ps((float*)span, *(__m256i*)(&p_mask), *(__m256*)(&texture_samples));
+					// Per-pixel nlerp + octahedral pack. Scalar fallback for
+					// now — the encode has a couple of branches (sign tests
+					// in the z<0 fold) that are awkward to vectorize cleanly,
+					// and the pass is rare-pixel-rate compared to the texture
+					// fetch in the lighting pass. Vectorize once we can show
+					// it on a profile.
+					alignas(32) float nx_l[8], ny_l[8], nz_l[8];
+					p_nx.store_a(nx_l);
+					p_ny.store_a(ny_l);
+					p_nz.store_a(nz_l);
+					alignas(32) int32_t mask_l[8];
+					Vec8i(p_mask).store_a(mask_l);
+					for (int lane = 0; lane < 8; ++lane) {
+						if (!mask_l[lane]) continue;
+						float nx = nx_l[lane], ny = ny_l[lane], nz = nz_l[lane];
+						float invLen = 1.0f / std::sqrt(nx*nx + ny*ny + nz*nz);
+						span.normal[lane] = oct_encode_u16(nx*invLen, ny*invLen, nz*invLen);
+					}
 				}
 			}
 
 			p_rz += Vec8f(drzdy);
 			p_uz += Vec8f(duzdy);
 			p_vz += Vec8f(dvzdy);
+			p_nx += Vec8f(dnxdy);
+			p_ny += Vec8f(dnydy);
+			p_nz += Vec8f(dnzdy);
 
 			p_a += Vec8i(tile.dady);
 			p_b += Vec8i(tile.dbdy);
@@ -295,6 +332,8 @@ struct TileRasterizer {
 
 				if ((max_a | max_b | max_c) >= 0) {
 					// FIXME: define outside and maintain
+					const float dx = float(x) * TILE_SIZE - v1.PX;
+					const float dy = float(y) * TILE_SIZE - v1.PY;
 					Tile tile = {
 						.x = x,
 						.y = y,
@@ -307,9 +346,12 @@ struct TileRasterizer {
 						.c0 = c0,
 						.dcdx = dcdx,
 						.dcdy = dcdy,
-						.rz0 = (v1.RZ + (x * TILE_SIZE - v1.PX) * drzdx + (y * TILE_SIZE - v1.PY) * drzdy),
-						.uz0 = (v1.UZ + (x * TILE_SIZE - v1.PX) * duzdx + (y * TILE_SIZE - v1.PY) * duzdy),
-						.vz0 = (v1.VZ + (x * TILE_SIZE - v1.PX) * dvzdx + (y * TILE_SIZE - v1.PY) * dvzdy)
+						.rz0 = v1.RZ + dx * drzdx + dy * drzdy,
+						.uz0 = v1.UZ + dx * duzdx + dy * duzdy,
+						.vz0 = v1.VZ + dx * dvzdx + dy * dvzdy,
+						.nx0 = v1.N.x + dx * dnxdx + dy * dnxdy,
+						.ny0 = v1.N.y + dx * dnydx + dy * dnydy,
+						.nz0 = v1.N.z + dx * dnzdx + dy * dnzdy,
 					};
 					apply_exact(tile);
 				}
@@ -373,6 +415,15 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 		r.duzdy = im[2] * (v2.UZ - v1.UZ) + im[3] * (v3.UZ - v1.UZ);
 		r.dvzdx = im[0] * (v2.VZ - v1.VZ) + im[1] * (v3.VZ - v1.VZ);
 		r.dvzdy = im[2] * (v2.VZ - v1.VZ) + im[3] * (v3.VZ - v1.VZ);
+		// Per-vertex shading-normal gradients. Same screen-space
+		// inverse-Jacobian (`im`) as UV — the rasterizer interpolates
+		// linearly across the triangle and renormalizes per-pixel (nlerp).
+		r.dnxdx = im[0] * (v2.N.x - v1.N.x) + im[1] * (v3.N.x - v1.N.x);
+		r.dnxdy = im[2] * (v2.N.x - v1.N.x) + im[3] * (v3.N.x - v1.N.x);
+		r.dnydx = im[0] * (v2.N.y - v1.N.y) + im[1] * (v3.N.y - v1.N.y);
+		r.dnydy = im[2] * (v2.N.y - v1.N.y) + im[3] * (v3.N.y - v1.N.y);
+		r.dnzdx = im[0] * (v2.N.z - v1.N.z) + im[1] * (v3.N.z - v1.N.z);
+		r.dnzdy = im[2] * (v2.N.z - v1.N.z) + im[3] * (v3.N.z - v1.N.z);
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;

@@ -1171,7 +1171,6 @@ void FillerTest()
 	meka::GBuffer gbuffer;
 	{
 		size_t numPixels = XRes * YRes;
-		gbuffer.position.resize(numPixels);
 		gbuffer.normal.resize(numPixels);
 		gbuffer.txtr.resize(numPixels);
 	}
