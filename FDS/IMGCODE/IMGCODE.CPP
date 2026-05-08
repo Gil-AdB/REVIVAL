@@ -1288,6 +1288,30 @@ MatTable Scene_GetMatTable(Scene *Sc) {
 	return { it->second.data(), (dword)it->second.size() };
 }
 
+// Re-walk MatLib and reassign matIDs / rebuild the matTable. Idempotent;
+// safe to call multiple times. Used after scene-init code adds new
+// Materials to MatLib (e.g. CITY's per-building windows clones with
+// EnvTexture set) — Unify_Textures runs early and doesn't see them.
+// Faces store F->Txtr as a Material* pointer (not an ID), so reassigning
+// M->ID doesn't break face references — they just see the new ID via
+// F->Txtr->ID at the next render.
+void Scene_RebuildMatTable(Scene *Sc) {
+	auto &matTable = g_matTablesByScene[Sc];
+	matTable.clear();
+	dword id = 0;
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != Sc) continue;
+		if (!M->Txtr) continue;
+		M->ID = id++;
+		matTable.push_back(M);
+	}
+	if (id > 256) {
+		fprintf(stderr,
+			"[MAT] WARNING: scene=%p has %u matIDs after rebuild — over 8-bit budget\n",
+			(void *)Sc, id);
+	}
+}
+
 void Unify_Textures(Scene *Sc)
 {
 	Material *M,*Mat;

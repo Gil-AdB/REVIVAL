@@ -299,6 +299,9 @@ struct MatTable {
 	dword            count;
 };
 MatTable Scene_GetMatTable(Scene *Sc);
+// Re-walk MatLib for `Sc`, reassign sequential matIDs, rebuild the matTable.
+// Idempotent. Use after scene-init adds Materials to MatLib post-Unify_Textures.
+void Scene_RebuildMatTable(Scene *Sc);
 char Load_Image_PCX(Image *Img,	const char *FN);
 char Load_Image_GIF(Image *Img, const char *FN);
 char Load_Image_JPEG(Image *Img, const char *FN);

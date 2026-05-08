@@ -476,14 +476,16 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
-	// Mech-light bump. The FLD authoring sized omnis for the per-vertex
-	// Gouraud forward path which leans on per-mesh ambient + a couple of
-	// active lights; per-pixel deferred shows omni falloff more
-	// faithfully and the result is darker than expected. Bump IRange
-	// (reach) and ISize (intensity multiplier into L.Col) on omnis
-	// whose name suggests "mech"-themed lights, plus a diagnostic dump
-	// so we can refine by name once we see what Greets actually
-	// contains.
+	// Mech-light bump. The FLD authoring set IRange=0 / ISize=0 for
+	// every Greets omni (verified via the diagnostic dump below), so
+	// the runtime omni-culling check `len2 > L->Range²` rejects them
+	// all and forward Lighting() falls back to pure ambient — which
+	// the per-vertex Gouraud + StaticLighting cache + saturation-at-
+	// 250 hides well enough to look "lit". Per-pixel deferred sees the
+	// truth and looks flat. Fix: when IRange/ISize are zero, give them
+	// authored-style defaults (~30 units range, intensity 1.0). Then
+	// apply a per-name multiplier where appropriate. ISize multiplies
+	// L->Col so the per-omni intensity into Lighting()'s falloff math.
 	for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 		if (Obj->Type != Obj_Omni) continue;
 		Omni *O = (Omni *)Obj->Data;
@@ -491,13 +493,19 @@ void Initialize_Greets()
 		const bool isMech = (Obj->Name &&
 			(strstr(Obj->Name, "mech") || strstr(Obj->Name, "Mech") ||
 			 strstr(Obj->Name, "MECH")));
-		float oldRange = O->IRange;
-		float oldSize  = O->ISize;
+		const float oldRange = O->IRange;
+		const float oldSize  = O->ISize;
+		// Defaults for zero-authored omnis. Mech flares get a tighter,
+		// brighter spot than scene ambient lights.
+		if (O->IRange < 0.01f) O->IRange = isMech ? 30.0f : 60.0f;
+		if (O->ISize  < 0.01f) O->ISize  = isMech ? 2.0f  : 1.0f;
+		// Multiplicative bump on top, applies whether the FLD authored
+		// non-zero or we just set the default.
 		if (isMech) {
-			O->IRange *= 2.0f;
-			O->ISize  *= 1.75f;
-			O->rRange = 1.0f / O->IRange;
+			O->IRange *= 1.5f;
+			O->ISize  *= 1.5f;
 		}
+		O->rRange = 1.0f / O->IRange;
 		fprintf(stderr,
 			"[GREETS-OMNI] name=%-24s IRange=%.1f->%.1f ISize=%.2f->%.2f L=(%.0f,%.0f,%.0f)%s\n",
 			name, oldRange, O->IRange, oldSize, O->ISize,

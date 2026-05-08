@@ -1717,12 +1717,75 @@ static void Render_DeferredLighting() {
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
 
-			// Modulate texel by diffuse light, /256 (matches TheOtherBarry's
-			// colorize step). Specular is added AFTER, independent of
-			// texture color — keeps highlights white-ish on tinted surfaces.
-			int outB = (int(texB * lB) >> 8) + int(sB);
-			int outG = (int(texG * lG) >> 8) + int(sG);
-			int outR = (int(texR * lR) >> 8) + int(sR);
+			// Env-map sampling. When the material has an EnvTexture
+			// (City windows post-clone), reconstruct the world-space
+			// reflected ray, lat/lon project, sample the panorama, blend
+			// with the diffuse term per Mat->Reflection. Same lat/lon
+			// formula as the per-vertex EU/EV setup at RENDER.CPP:761
+			// — just done per pixel here against the (oct-decoded) view-
+			// space normal and (Z-reconstructed) view-space pixel pos.
+			float envB = 0, envG = 0, envR = 0;
+			float envBlend = 0.0f;
+			if (Mat->EnvTexture && Mat->EnvTexture->Mipmap[0] && Mat->Reflection > 0.0f) {
+				// Transform view-space pos and normal back into world space.
+				// View->Mat is rotation-only; transpose = inverse-rotation.
+				const float wpx = View->Mat[0][0]*x + View->Mat[1][0]*y + View->Mat[2][0]*z;
+				const float wpy = View->Mat[0][1]*x + View->Mat[1][1]*y + View->Mat[2][1]*z;
+				const float wpz = View->Mat[0][2]*x + View->Mat[1][2]*y + View->Mat[2][2]*z;
+				const float wnx = View->Mat[0][0]*nx + View->Mat[1][0]*ny + View->Mat[2][0]*nz;
+				const float wny = View->Mat[0][1]*nx + View->Mat[1][1]*ny + View->Mat[2][1]*nz;
+				const float wnz = View->Mat[0][2]*nx + View->Mat[1][2]*ny + View->Mat[2][2]*nz;
+				// Reflect view direction (camera->pixel = wp) around world normal.
+				const float dotDN = wpx*wnx + wpy*wny + wpz*wnz;
+				float drx = wpx - 2.0f*dotDN*wnx;
+				float dry = wpy - 2.0f*dotDN*wny;
+				float drz = wpz - 2.0f*dotDN*wnz;
+				const float drLen2 = drx*drx + dry*dry + drz*drz;
+				if (drLen2 > 0.0f) {
+					const float drInv = 1.0f / std::sqrt(drLen2);
+					drx *= drInv; dry *= drInv; drz *= drInv;
+					// Lat/lon projection (matches RENDER.CPP:761-765).
+					const float lat = std::asin(dry);
+					const float lon = std::atan2(-drz, -drx);
+					float eu = 0.5f + 0.5f * (lon + float(PI) * 0.5f) / float(PI);
+					float ev = 0.5f - 0.5f * lat / (float(PI) * 0.5f);
+					if (eu < 0) eu += 1.0f; else if (eu > 1) eu -= 1.0f;
+					if (ev < 0) ev = 0; else if (ev > 1) ev = 1;
+					Texture *ET = Mat->EnvTexture;
+					int tx2 = int(eu * ET->SizeX) & (ET->SizeX - 1);
+					int ty2 = int(ev * ET->SizeY) & (ET->SizeY - 1);
+					// Sachletz layout: 4×4 blocks, blocks stored column-by-
+					// column within rows of blocks (outer X, inner Y in
+					// the swizzle loop).
+					const int blocksY = ET->SizeY >> 2;
+					const int bX = tx2 >> 2;
+					const int bY = ty2 >> 2;
+					const int blockIdx = bX * blocksY + bY;
+					const int inBlock = (ty2 & 3) * 4 + (tx2 & 3);
+					const dword *envData = (const dword *)ET->Mipmap[0];
+					const dword envT = envData[blockIdx * 16 + inBlock];
+					envB = float(envT & 0xFF);
+					envG = float((envT >> 8) & 0xFF);
+					envR = float((envT >> 16) & 0xFF);
+					envBlend = Mat->Reflection;
+					if (envBlend > 1.0f) envBlend = 1.0f;
+				}
+			}
+
+			// Diffuse modulation. If env is active, mix texel*light with
+			// env*envBlend; otherwise just texel*light.
+			float fdB = (texB * lB) * (1.0f / 256.0f);
+			float fdG = (texG * lG) * (1.0f / 256.0f);
+			float fdR = (texR * lR) * (1.0f / 256.0f);
+			if (envBlend > 0.0f) {
+				const float keep = 1.0f - envBlend;
+				fdB = fdB * keep + envB * envBlend;
+				fdG = fdG * keep + envG * envBlend;
+				fdR = fdR * keep + envR * envBlend;
+			}
+			int outB = int(fdB) + int(sB);
+			int outG = int(fdG) + int(sG);
+			int outR = int(fdR) + int(sR);
 			if (outB > 255) outB = 255;
 			if (outG > 255) outG = 255;
 			if (outR > 255) outR = 255;

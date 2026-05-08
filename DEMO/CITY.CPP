@@ -1769,6 +1769,14 @@ void Initialize_City()
 		//}
 	}
 
+	// For deferred-path env-map dispatch: the lighting pass has only
+	// matID per-pixel (from mat32 in the G-buffer); per-building env
+	// textures need to live on the Material the matID resolves to.
+	// Clone the windows-base material per (building, base-mat), set
+	// EnvTexture = building's panorama, repoint F->Txtr to the clone.
+	// The forward path's TheOtherBarry uses F->ReflectionTexture (set
+	// alongside) and Face_Reflective so it keeps working unchanged.
+	int windowsCloned = 0;
 	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
@@ -1777,14 +1785,41 @@ void Initialize_City()
 		// or any other reason the bake didn't run.
 		if (!Obj->Reflection) continue;
 
+		// Per-building dedup: same windows-base-mat shared across multiple
+		// faces on this building reuses one clone.
+		std::map<Material *, Material *> baseToClone;
+
 		auto T = (TriMesh*)(Obj->Data);
 		for (Face* F = T->Faces, *FE = T->Faces + T->FIndex; F != FE; ++F) {
-			if (strstr(F->Txtr->Name, "windows")) {
-				F->Flags |= Face_Reflective;
-				F->ReflectionTexture = Obj->Reflection->Txtr;
+			if (!F->Txtr || !F->Txtr->Name) continue;
+			if (!strstr(F->Txtr->Name, "windows")) continue;
+
+			F->Flags |= Face_Reflective;
+			F->ReflectionTexture = Obj->Reflection->Txtr;
+
+			Material *base = F->Txtr;
+			Material *clone = baseToClone[base];
+			if (!clone) {
+				clone = getAlignedType<Material>(16);
+				std::memcpy(clone, base, sizeof(Material));
+				clone->EnvTexture = Obj->Reflection->Txtr;
+				clone->Reflection = 0.5f;       // 50% env blend (tunable)
+				clone->ID = 0;                  // re-assigned by Scene_RebuildMatTable
+				clone->Prev = nullptr;
+				clone->Next = MatLib;
+				if (MatLib) MatLib->Prev = clone;
+				MatLib = clone;
+				baseToClone[base] = clone;
+				++windowsCloned;
 			}
+			F->Txtr = clone;
 		}
 	}
+	fprintf(stderr, "[CITY] cloned %d windows-materials with EnvTexture set\n", windowsCloned);
+
+	// Pick up the new clones in matTable so the deferred lighting pass
+	// can resolve their matIDs.
+	Scene_RebuildMatTable(CitySc);
 	AspectRatio = oldAspectRatio;
 
 	for (auto O = CitySc->OmniHead; O; O = O->Next) {
