@@ -1783,7 +1783,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 {
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
-	const bool checker = deferredLightingCheckerboardEnabled();
+	// Hoist mode/global queries once per tile — a `getenv()`-backed
+	// cached bool still costs a function call + load + test that the
+	// compiler can't see through the std::function/lambda boundary.
+	// 2M function calls/frame adds up.
+	const bool checker        = deferredLightingCheckerboardEnabled();
+	const bool useVec         = deferredLightingVecEnabled();
+	const bool specGlobalOn   = Specular_Factor > 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -1853,7 +1859,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// deferred path was previously emitting Blinn-Phong even when
 			// the scene had explicitly disabled it, which over-brightened
 			// City windows + Greets marble against the forward reference.
-			const bool wantSpecular = (Mat->Specular > 0.0f) && (Specular_Factor > 0.0f);
+			const bool wantSpecular = specGlobalOn && (Mat->Specular > 0.0f);
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
 				: 32.0f;
@@ -1890,7 +1896,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const TileLights &tl = ctx.tileLights[tileIndex];
 
 			if (!isWater) {
-				if (deferredLightingVecEnabled()) {
+				if (useVec) {
 					// 8-wide SIMD inner loop — written directly against
 					// simde's _mm256_* intrinsics so we bypass
 					// vectorclass's Vec8fb byte-packed mask layout.
@@ -2139,6 +2145,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 {
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
+	const bool specGlobalOn = Specular_Factor > 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2214,7 +2221,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 
 			float sB = 0, sG = 0, sR = 0;
 			float vx = 0, vy = 0, vz = 0;
-			const bool wantSpecular = (Mat->Specular > 0.0f) && (Specular_Factor > 0.0f);
+			const bool wantSpecular = specGlobalOn && (Mat->Specular > 0.0f);
 			const float gloss = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
 			if (wantSpecular) {
 				const float vlen2 = x*x + y*y + z*z;
