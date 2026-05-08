@@ -1793,6 +1793,25 @@ static bool deferredLightingCheckerboardEnabled() {
 	return cached;
 }
 
+// FDS_DEFERRED_QUARTER=1 enables quarter-rate lighting: only pixels
+// where (px&1)==0 AND (py&1)==0 (one corner of every 2×2 block) get
+// the full kernel; the other 3 of each 2×2 are filled in wave 2 by
+// direction-specific interpolation:
+//   (odd, even) → horizontal: avg of left+right shaded neighbors
+//   (even, odd) → vertical:   avg of top+bottom shaded neighbors
+//   (odd,  odd) → diagonal:   avg of 4 corners (top-left, top-right,
+//                                              bottom-left, bottom-right)
+// matID-mismatch detection at each pattern → fall back to a full
+// shade for that pixel. ~75% of pixels skip the omni loop. Mutually
+// exclusive with checkerboard (this one wins when both are set).
+static bool deferredLightingQuarterEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED_QUARTER");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -1803,7 +1822,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// cached bool still costs a function call + load + test that the
 	// compiler can't see through the std::function/lambda boundary.
 	// 2M function calls/frame adds up.
-	const bool checker        = deferredLightingCheckerboardEnabled();
+	const bool quarter        = deferredLightingQuarterEnabled();
+	const bool checker        = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 
@@ -1812,6 +1832,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Wave-1 of checkerboard: skip odd cells (filled by the
 			// fill-pass after all wave-1 tiles complete).
 			if (checker && ((px ^ py) & 1)) continue;
+			if (quarter && ((px | py) & 1)) continue;  // shade only (even, even)
 
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
@@ -2165,7 +2186,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 {
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
-	const bool   checker      = deferredLightingCheckerboardEnabled();
+	const bool   quarter      = deferredLightingQuarterEnabled();
+	const bool   checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool   specGlobalOn = Specular_Factor > 0.0f;
 	const TileLights &tl = ctx.tileLights[tileIndex];
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
@@ -2218,6 +2240,15 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					_mm256_xor_si256(px_lane, _mm256_set1_epi32(py)),
 					_mm256_set1_epi32(1));
 				__m256i keep = _mm256_cmpeq_epi32(parity, _mm256_setzero_si256());
+				mask_alive = _mm256_and_si256(mask_alive, keep);
+			}
+			// Quarter-rate: keep only lanes where both px AND py even.
+			if (quarter) {
+				if (py & 1) continue;  // entire row skipped in wave-1
+				__m256i lane_idx = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+				__m256i px_lane  = _mm256_add_epi32(_mm256_set1_epi32(px), lane_idx);
+				__m256i parity_x = _mm256_and_si256(px_lane, _mm256_set1_epi32(1));
+				__m256i keep = _mm256_cmpeq_epi32(parity_x, _mm256_setzero_si256());
 				mask_alive = _mm256_and_si256(mask_alive, keep);
 			}
 
@@ -2552,37 +2583,104 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
+	const bool quarter      = deferredLightingQuarterEnabled();
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
-			if (((px ^ py) & 1) == 0) continue;  // wave-1 already shaded these
+			if (quarter) {
+				if (((px | py) & 1) == 0) continue;  // wave-1 shaded
+			} else {
+				if (((px ^ py) & 1) == 0) continue;
+			}
 
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;
 
-			// Need at least one valid horizontal neighbor.
-			const bool haveLeft  = (px > 0);
-			const bool haveRight = (px < XRes - 1);
-			if (!haveLeft && !haveRight) continue;
-
-			// Quick-path: average L/R when their matIDs match each other
-			// AND match this pixel's matID. Mismatch → fall back below.
 			const uint32_t mat32  = gb.txtr[i];
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
+
 			bool matched = false;
-			if (haveLeft && haveRight) {
-				const uint32_t matIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
-				const uint32_t matIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
-				if (matIDl == matIDc && matIDr == matIDc) {
-					const dword pl = out[i - 1];
-					const dword pr = out[i + 1];
-					// Per-channel average. (pl & 0xFEFEFEFE) >> 1 +
-					// (pr & 0xFEFEFEFE) >> 1 — branch-free, no overflow.
-					const dword avg = ((pl & 0xFEFEFEFEu) >> 1) +
-					                   ((pr & 0xFEFEFEFEu) >> 1);
-					out[i] = avg | 0xFF000000u;
-					matched = true;
+			if (quarter) {
+				// One of three patterns by parity:
+				//   (odd_x, even_y) → average left + right shaded
+				//   (even_x, odd_y) → average top + bottom shaded
+				//   (odd_x,  odd_y) → average 4 corner shaded
+				const bool odd_x = px & 1;
+				const bool odd_y = py & 1;
+				if (odd_x && !odd_y) {
+					// horizontal: -1 and +1
+					const bool haveL = (px > 0);
+					const bool haveR = (px < XRes - 1);
+					if (haveL && haveR) {
+						const uint32_t mIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
+						const uint32_t mIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
+						if (mIDl == matIDc && mIDr == matIDc) {
+							const dword avg = ((out[i - 1] & 0xFEFEFEFEu) >> 1) +
+							                   ((out[i + 1] & 0xFEFEFEFEu) >> 1);
+							out[i] = avg | 0xFF000000u;
+							matched = true;
+						}
+					}
+				} else if (!odd_x && odd_y) {
+					// vertical: -XRes and +XRes
+					const bool haveT = (py > 0);
+					const bool haveB = (py < YRes - 1);
+					if (haveT && haveB) {
+						const uint32_t mIDt = (gb.txtr[i - XRes] >> 20) & 0xFF;
+						const uint32_t mIDb = (gb.txtr[i + XRes] >> 20) & 0xFF;
+						if (mIDt == matIDc && mIDb == matIDc) {
+							const dword avg = ((out[i - XRes] & 0xFEFEFEFEu) >> 1) +
+							                   ((out[i + XRes] & 0xFEFEFEFEu) >> 1);
+							out[i] = avg | 0xFF000000u;
+							matched = true;
+						}
+					}
+				} else {
+					// diagonal: 4 corners
+					const bool haveTL = (px > 0)        && (py > 0);
+					const bool haveTR = (px < XRes - 1) && (py > 0);
+					const bool haveBL = (px > 0)        && (py < YRes - 1);
+					const bool haveBR = (px < XRes - 1) && (py < YRes - 1);
+					if (haveTL && haveTR && haveBL && haveBR) {
+						const uint32_t mTL = (gb.txtr[i - XRes - 1] >> 20) & 0xFF;
+						const uint32_t mTR = (gb.txtr[i - XRes + 1] >> 20) & 0xFF;
+						const uint32_t mBL = (gb.txtr[i + XRes - 1] >> 20) & 0xFF;
+						const uint32_t mBR = (gb.txtr[i + XRes + 1] >> 20) & 0xFF;
+						if (mTL == matIDc && mTR == matIDc && mBL == matIDc && mBR == matIDc) {
+							// 4-way avg via mask-and-shift-by-2: per-channel
+							// (a + b + c + d) / 4 with 2-bit precision loss
+							// per channel — well below the visible threshold.
+							const dword pTL = out[i - XRes - 1];
+							const dword pTR = out[i - XRes + 1];
+							const dword pBL = out[i + XRes - 1];
+							const dword pBR = out[i + XRes + 1];
+							const dword avg =
+								((pTL & 0xFCFCFCFCu) >> 2) +
+								((pTR & 0xFCFCFCFCu) >> 2) +
+								((pBL & 0xFCFCFCFCu) >> 2) +
+								((pBR & 0xFCFCFCFCu) >> 2);
+							out[i] = avg | 0xFF000000u;
+							matched = true;
+						}
+					}
+				}
+			} else {
+				// Checkerboard L/R interp (existing behaviour).
+				const bool haveLeft  = (px > 0);
+				const bool haveRight = (px < XRes - 1);
+				if (!haveLeft && !haveRight) continue;
+				if (haveLeft && haveRight) {
+					const uint32_t matIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
+					const uint32_t matIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
+					if (matIDl == matIDc && matIDr == matIDc) {
+						const dword pl = out[i - 1];
+						const dword pr = out[i + 1];
+						const dword avg = ((pl & 0xFEFEFEFEu) >> 1) +
+						                   ((pr & 0xFEFEFEFEu) >> 1);
+						out[i] = avg | 0xFF000000u;
+						matched = true;
+					}
 				}
 			}
 			if (matched) continue;
@@ -2830,7 +2928,7 @@ static void Render_DeferredLighting() {
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
 	// fallback at material edges). Skip entirely when checkerboard is
 	// off — wave 1 already covered everything.
-	if (deferredLightingCheckerboardEnabled()) {
+	if (deferredLightingCheckerboardEnabled() || deferredLightingQuarterEnabled()) {
 		renderns::tileCounter = 0;
 		for (int j = 0; j < numTilesY; ++j) {
 			const int y1 = tileSizeY * j;
