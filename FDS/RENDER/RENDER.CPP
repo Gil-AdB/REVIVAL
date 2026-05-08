@@ -2122,6 +2122,18 @@ static void Render_DeferredLighting() {
 
 	// Build view-space omni list once per frame.
 	static ViewLightsSoA lights;  // function-static; lifetime spans dispatch + wait
+	// Optional Range clamp — if FDS_DEFERRED_MAX_RANGE is set, any
+	// per-omni Range above that ceiling is clamped *for culling
+	// purposes only* (the falloff math still uses the real Range, so
+	// pixel brightness is barely affected — at the clamp boundary
+	// contribution is `1 - clamp/Range_real` ≈ 1, dropping to 0 at the
+	// clamp edge). Used to estimate the perf upside of dialing in
+	// effective ranges scene-wide.
+	float maxRange = 0.0f;
+	if (const char *s = std::getenv("FDS_DEFERRED_MAX_RANGE")) {
+		maxRange = float(std::atof(s));
+	}
+
 	std::memset(&lights, 0, sizeof(lights));
 	int numLights = 0;
 	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_LIGHTS; O = O->Next) {
@@ -2129,7 +2141,8 @@ static void Render_DeferredLighting() {
 		Vector u, w;
 		Vector_Sub(&O->IPos, &View->ISource, &u);
 		MatrixXVector(View->Mat, &u, &w);
-		const float Range = O->IRange;
+		float Range = O->IRange;
+		if (maxRange > 0.0f && Range > maxRange) Range = maxRange;
 		lights.posX[numLights]   = w.x;
 		lights.posY[numLights]   = w.y;
 		lights.posZ[numLights]   = w.z;
@@ -2137,7 +2150,10 @@ static void Render_DeferredLighting() {
 		lights.colG[numLights]   = O->L.G * O->ISize;
 		lights.colR[numLights]   = O->L.R * O->ISize;
 		lights.range2[numLights] = Range * Range;
-		lights.rRange[numLights] = (Range > 0.0f) ? 1.0f / Range : 0.0f;
+		// Note: rRange uses the *real* range so falloff math is
+		// preserved. Only the cull radius shrinks.
+		const float realRange = O->IRange;
+		lights.rRange[numLights] = (realRange > 0.0f) ? 1.0f / realRange : 0.0f;
 		++numLights;
 	}
 
