@@ -1893,7 +1893,10 @@ struct FountainScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		parallel_memset(VPage, 0, PageSize);
+		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+		prof.switchTo(PROF_SKY);
 		bool SkipCameraAnimation = false;
 		RenderSkyCube(SkySc, View, SkipCameraAnimation);
 
@@ -1977,14 +1980,11 @@ struct FountainScene : SceneDriver {
 
 		if (g_profilerActive) {
 			int scroll = 0;
-			// FPS printer
-			timerStack[timerIndex++] = Timer;
-			if (timerIndex == 20) {
-				timerIndex = 0;
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]));
-			} else {
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
-			}
+			// FPS printer — sourced from FrameProfiler (steady_clock) so it
+			// agrees with TOTL/mean_fps in the scene-end dump.
+			float meanMs = prof.meanFrameMs();
+			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 
 			double rndrMs = prof.cumulativeMs(PROF_RNDR);

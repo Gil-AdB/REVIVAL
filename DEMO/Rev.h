@@ -10,13 +10,14 @@
 enum
 {
 	PROF_ZCLR	=	0,
-	PROF_ANIM	=	1,
-	PROF_XFRM	=	2,
-	PROF_LGHT   =	3,
-	PROF_SORT	=	4,
-	PROF_RNDR	=	5,
-	PROF_FLIP	=	6,
-	PROF_NUM	=	7
+	PROF_SKY	=	1,  // RenderSkyCube — was inflating ZCLR in city/fountain
+	PROF_ANIM	=	2,
+	PROF_XFRM	=	3,
+	PROF_LGHT   =	4,
+	PROF_SORT	=	5,
+	PROF_RNDR	=	6,
+	PROF_FLIP	=	7,
+	PROF_NUM	=	8
 };
 
 extern ModplayerHandle g_RevModuleHandle;

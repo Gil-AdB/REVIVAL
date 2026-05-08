@@ -1934,6 +1934,15 @@ struct CityScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
+		// Clear framebuffer and Z-buffer.
+		parallel_memset(VPage, 0, PageSize);
+		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+		prof.switchTo(PROF_SKY);
+		RenderSkyCube(SkySc, View, false);
+
+		prof.switchTo(PROF_ANIM);
+
 		dTime = Timer - TTrd;
 		if (dTime > 300) dTime = 300;
 		// fast forward/rewind
@@ -1962,12 +1971,6 @@ struct CityScene : SceneDriver {
 				View = &FC;
 		}
 		Dynamic_Camera();
-
-		// Clear framebuffer and Z-buffer
-		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
-		RenderSkyCube(SkySc, View, false);
-
-		prof.switchTo(PROF_ANIM);
 
 		Reflective_AnimateTexture();
 
@@ -2028,17 +2031,14 @@ struct CityScene : SceneDriver {
 
 		prof.leave(PROF_RNDR);
 
-		// FPS printer
+		// FPS printer — use the profiler's mean frame total (steady_clock,
+		// us-resolution) so the on-screen number agrees with TOTL/mean_fps
+		// in the scene-end dump.
 		if (g_profilerActive) {
 			int scroll = 0;
-
-			timerStack[timerIndex++] = Timer;
-			if (timerIndex == 20) {
-				timerIndex = 0;
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
-			} else {
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
-			}
+			float meanMs = prof.meanFrameMs();
+			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
 			scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
 
 			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);

@@ -139,12 +139,18 @@ struct GreetsGenerator
 
 	struct GreetsEntry {
 		GreetsEntry(const char* text): text(text) {
-			OutTextXYExtents(12, 0, text, 256, 256, x, y);
-			// y -= 2;
+			// OutTextXYExtents signature is (.., out_height, out_width).
+			// The original call passed (x, y) — i.e. width-into-x, but
+			// that captured *height* into x and *width* into y. The
+			// centering math at line 249 then did
+			// (CodeImage.x - greet->x)/2 with x and y swapped, leaving
+			// every greet visibly off-center. Fix: pass (y, x) so the
+			// fields match their names.
+			OutTextXYExtents(12, 0, text, 256, 256, y, x);
 		}
 
 		const char* text;
-		int32_t x, y;
+		int32_t x, y;  // x = text width, y = text height
 	};
 
 	GreetsEntry ge0 { "Flood\nGreets" };
@@ -542,14 +548,10 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 		if (g_profilerActive) {
-			// FPS printer
-			timerStack[timerIndex++] = Timer;
-			if (timerIndex == 20) {
-				timerIndex = 0;
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[19]-timerStack[timerIndex]));
-			} else {
-				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0/(float)(timerStack[timerIndex-1]-timerStack[timerIndex]));
-			}
+			// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
+			float meanMs = prof.meanFrameMs();
+			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
 			int scroll = 0;
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);

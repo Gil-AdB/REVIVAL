@@ -6,15 +6,21 @@
     <style>
       html, body { margin: 0; padding: 0; background: #000; color: #ccc;
                    font: 14px/1.3 sans-serif; height: 100%; overflow: hidden; }
+      /* Center canvas inside the viewport. Black surroundings show as
+         letterbox bars whenever canvas AR != viewport AR. */
+      body { display: flex; align-items: center; justify-content: center; }
       #status { position: fixed; top: 0; left: 0; right: 0; padding: 6px 10px;
                 background: rgba(0,0,0,0.6); font-size: 12px;
                 pointer-events: none; }
       #status.hidden { display: none; }
-      /* Canvas fills the viewport; the wasm side handles aspect-preserving
-         letterbox via SDL_RenderCopy inside V_Flip, so we don't need
-         object-fit / centering tricks here. */
+      /* Canvas backing-store dims now equal the engine surface dims
+         (AR-clamped, /8-snapped) — V_Flip's RenderCopy is a 1:1 memcpy
+         instead of a scale-blit, and the bars come from CSS. width/height
+         auto + max-width/height let the browser preserve AR while fitting
+         the viewport. */
       canvas { background: #000; display: block; image-rendering: pixelated;
-               position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+               width: auto; height: auto;
+               max-width: 100vw; max-height: 100vh; }
       /* Bottom-right control bar: mute / HiDPI / fullscreen. Stays on top
          of the canvas (z-index) and ignores its own click events from
          reaching the demo (each button only flips its own state). */

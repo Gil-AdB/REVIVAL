@@ -46,6 +46,12 @@ public:
     // For overlay FPS line (caller may also want raw frame count).
     std::uint32_t frames() const { return numFrames_; }
 
+    // Mean per-frame total (ms), refreshed at endFrame(). Use this for the
+    // on-screen FPS overlay — the previous Timer-based formula quantized
+    // to 10 ms ticks and had an off-by-one over its 20-sample window, so
+    // it disagreed with TOTL/mean_fps in the scene-end dump.
+    float meanFrameMs() const { return overlayTotalMs_; }
+
     // Scene-cumulative ms in a section. Useful for derived stats like MPx/sec.
     double cumulativeMs(int section) const;
 
@@ -77,6 +83,6 @@ private:
     float overlayTotalMs_ = 0.0f;
 
     static constexpr const char* kNames[PROF_NUM] = {
-        "ZCLR", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"
+        "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"
     };
 };

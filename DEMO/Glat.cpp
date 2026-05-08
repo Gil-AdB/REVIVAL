@@ -701,21 +701,13 @@ struct GlatoScene : SceneDriver {
 		//{
 		//	_sleep((750 - Timer) / 5);
 		//}
-		// FPS printer
+		// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
 		if (g_profilerActive)
 		{
 			dword tm = Timer;
-			timerStack[timerIndex++] = tm;
-			{
-				if (timerIndex == 20)
-				{
-					timerIndex = 0;
-					snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[19] - timerStack[timerIndex]));
-				}
-				else {
-					snprintf(MSGStr, sizeof(MSGStr), "%f FPS", 2000.0 / (float)(timerStack[timerIndex - 1] - timerStack[timerIndex]));
-				}
-			}
+			float meanMs = prof.meanFrameMs();
+			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
 
 			if (skip) {
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", (float)(tm - TTrd));

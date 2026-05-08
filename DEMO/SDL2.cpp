@@ -355,8 +355,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
 extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 {
 	if (!sdl_window || w <= 0 || h <= 0) return;
-	fprintf(stderr, "[SDL] RequestSize %dx%d\n", w, h);
-	SDL_SetWindowSize(sdl_window, w, h);
+	// Pre-clamp to the engine surface dims (AR + /8 snap) so the canvas
+	// backing equals the engine output. That kills SDL_RenderCopy's
+	// scale-blit in V_Flip — the renderer output and the engine texture
+	// are now the same size, the copy is at most a 1:1 memcpy, and the
+	// letterbox bars come from CSS instead of an extra fill pass.
+	int engX = w, engY = h;
+	clampToDemoAR(w, h, engX, engY);
+	engX = snapEngineDim(engX);
+	engY = snapEngineDim(engY);
+	fprintf(stderr, "[SDL] RequestSize viewport %dx%d -> canvas %dx%d\n", w, h, engX, engY);
+	SDL_SetWindowSize(sdl_window, engX, engY);
 }
 
 static void wasm_audio_callback(void* userdata, Uint8* stream, int len)
