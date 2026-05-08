@@ -68,7 +68,7 @@ wasm:
 
 serve: wasm
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
-	cd $(WASM_BUILD_DIR)/DEMO && python3 -m http.server $(SERVE_PORT)
+	cd $(WASM_BUILD_DIR)/DEMO && python3 $(abspath scripts/serve_nocache.py) $(SERVE_PORT)
 
 # Optimized release wasm + full DWARF debug info. Larger binary (~3-5x);
 # use only for profiling sessions, not for shipping.
@@ -83,7 +83,7 @@ wasm-profile:
 serve-profile: wasm-profile
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
 	@echo "Make sure Chrome has the 'C/C++ DevTools Support (DWARF)' extension installed."
-	cd $(WASM_PROFILE_BUILD_DIR)/DEMO && python3 -m http.server $(SERVE_PORT)
+	cd $(WASM_PROFILE_BUILD_DIR)/DEMO && python3 $(abspath scripts/serve_nocache.py) $(SERVE_PORT)
 
 snapshot-city: install
 	cd $(RUNTIME_DIR) && ./DEMO --snapshot=city
