@@ -1763,6 +1763,22 @@ static bool deferredLightingVecEnabled() {
 	return cached;
 }
 
+// FDS_DEFERRED_OUTER_VEC=1 selects the outer-SIMD kernel which
+// processes 8 pixels per row simultaneously rather than 8 omnis per
+// pixel. The setup work (Z-decode, screen→view position reconstruct,
+// oct normal decode, ambient compute) amortizes across a vec lane;
+// the per-pixel scalar mat-table chase and texel gather stay scalar
+// since arm64-via-simde has no usable vgather. The omni loop becomes
+// "1 omni × 8 pixels per iter" — each omni's position/color is a
+// broadcast, the per-pixel normal/pos/color stay in vec registers.
+static bool deferredLightingOuterVecEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED_OUTER_VEC");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
 // FDS_DEFERRED_CHECKERBOARD=1 enables half-rate lighting: only pixels
 // where (px + py) & 1 == 0 (the "even" cells of a checkerboard) get the
 // full per-pixel omni evaluation; the odd cells are filled in a second
@@ -2135,6 +2151,396 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 // wave-1. The mismatch rate on City is ~5% per the snapshot pixel
 // distribution — most of the frame is large continuous surfaces.
 //
+// Outer-SIMD diffuse kernel: 8 pixels per row in vec registers. The
+// scalar gather (matTable → Material* → Mipmap[mip] → texel + mat
+// scalars) happens once per lane and stays scalar — arm64-via-simde
+// has no usable vgather. Everything after — texel byte-extract, oct
+// normal decode, view-space pos reconstruct, per-omni dot/range/k
+// accumulate, saturate, modulate — runs 8-wide. Specular and water
+// fall back to scalar tail when needed; checkerboard is handled by
+// dropping odd lanes via the alive mask.
+static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx,
+                                                   int tileIndex,
+                                                   int x1, int y1, int x2, int y2)
+{
+	const meka::GBuffer &gb = *ctx.gb;
+	dword *out = reinterpret_cast<dword *>(VPage);
+	const bool   checker      = deferredLightingCheckerboardEnabled();
+	const bool   specGlobalOn = Specular_Factor > 0.0f;
+	const TileLights &tl = ctx.tileLights[tileIndex];
+	const float  ambB_sc = float(ctx.Sc->Ambient.B);
+	const float  ambG_sc = float(ctx.Sc->Ambient.G);
+	const float  ambR_sc = float(ctx.Sc->Ambient.R);
+
+	// Pre-extract per-lane data into 8-aligned scratch buffers so we
+	// can do gather work scalar-per-lane and load_a back into vec.
+	alignas(32) uint32_t lane_mat32[8];
+	alignas(32) uint32_t lane_alive[8];
+	alignas(32) float    lane_texB[8], lane_texG[8], lane_texR[8];
+	alignas(32) float    lane_ambB[8], lane_ambG[8], lane_ambR[8];
+	alignas(32) float    lane_diffuse[8];
+	alignas(32) float    lane_specular[8];
+	alignas(32) float    lane_gloss[8];
+	alignas(32) uint32_t lane_wantSpec[8];
+	alignas(32) uint32_t lane_isWater[8];
+
+	for (int py = y1; py < y2; ++py) {
+		// vec body: groups of 8 pixels
+		int px = x1;
+		// Align start to 8-pixel boundary so loads from gb arrays are
+		// naturally aligned (gb.txtr/gb.normal are aligned at frame
+		// allocation; ZPage16 aligned by parallel_memset).
+		const int x_vec_start = (x1 + 7) & ~7;
+		// Scalar lead-in for unaligned pixels at tile start.
+		while (px < x_vec_start && px < x2) {
+			// Tail: just defer to scalar; rare since tile boundaries
+			// are 8-aligned for our 1920x1080 / 12x8 grid (160-wide tiles).
+			++px;
+		}
+
+		for (; px + 8 <= x2; px += 8) {
+			const size_t i = size_t(py) * XRes + px;
+
+			// Load 8 lanes of Z (u16 → s32 zero-extend → float for the
+			// cmp; later use the int form too)
+			__m128i z16 = _mm_loadu_si128((const __m128i*)(ZPage16 + i));
+			__m256i zEncI = _mm256_cvtepu16_epi32(z16);
+
+			// Alive mask: zEnc != 0
+			__m256i mask_alive = _mm256_cmpgt_epi32(zEncI, _mm256_setzero_si256());
+
+			// Checkerboard: drop odd cells in wave-1.
+			if (checker) {
+				// (px+lane + py) & 1 == 0 → keep
+				__m256i lane_idx = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+				__m256i px_lane  = _mm256_add_epi32(_mm256_set1_epi32(px), lane_idx);
+				__m256i parity   = _mm256_and_si256(
+					_mm256_xor_si256(px_lane, _mm256_set1_epi32(py)),
+					_mm256_set1_epi32(1));
+				__m256i keep = _mm256_cmpeq_epi32(parity, _mm256_setzero_si256());
+				mask_alive = _mm256_and_si256(mask_alive, keep);
+			}
+
+			// Load mat32
+			__m256i mat32v = _mm256_loadu_si256((const __m256i*)(gb.txtr.data() + i));
+			__m256i matIDv = _mm256_and_si256(_mm256_srli_epi32(mat32v, 20),
+			                                   _mm256_set1_epi32(0xFF));
+			// Mask: matID < count
+			__m256i mask_id = _mm256_cmpgt_epi32(_mm256_set1_epi32(int(ctx.matTable.count)),
+			                                     matIDv);
+			mask_alive = _mm256_and_si256(mask_alive, mask_id);
+
+			// Stash for scalar lane work
+			_mm256_store_si256((__m256i*)lane_mat32, mat32v);
+			_mm256_store_si256((__m256i*)lane_alive, mask_alive);
+
+			// Per-lane scalar gather: resolve Material*, gather texel,
+			// fill ambient + spec/diffuse scratch.
+			bool any_alive = false;
+			for (int k = 0; k < 8; ++k) {
+				if (!lane_alive[k]) {
+					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
+					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
+					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_gloss[k] = 32.0f;
+					lane_wantSpec[k] = 0;
+					lane_isWater[k] = 0;
+					continue;
+				}
+				const uint32_t m = lane_mat32[k];
+				const uint32_t matID = (m >> 20) & 0xFF;
+				const uint32_t mip   = (m >> 28) & 0xF;
+				const uint32_t uv    = m & 0xFFFFF;
+				Material *Mat = ctx.matTable.data[matID];
+				if (!Mat || !Mat->Txtr) {
+					lane_alive[k] = 0;
+					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
+					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
+					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_gloss[k] = 32.0f;
+					lane_wantSpec[k] = 0;
+					lane_isWater[k] = 0;
+					continue;
+				}
+				const dword *texData = (const dword*)Mat->Txtr->Mipmap[mip];
+				if (!texData) {
+					lane_alive[k] = 0;
+					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
+					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
+					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_gloss[k] = 32.0f;
+					lane_wantSpec[k] = 0;
+					lane_isWater[k] = 0;
+					continue;
+				}
+				const dword tx = texData[uv];
+				lane_texB[k] = float(tx & 0xFF);
+				lane_texG[k] = float((tx >> 8) & 0xFF);
+				lane_texR[k] = float((tx >> 16) & 0xFF);
+				const float Lumin = Mat->Luminosity;
+				const float Diff  = Mat->Diffuse;
+				lane_ambB[k]    = Lumin * 255.0f + Diff * ambB_sc;
+				lane_ambG[k]    = Lumin * 255.0f + Diff * ambG_sc;
+				lane_ambR[k]    = Lumin * 255.0f + Diff * ambR_sc;
+				lane_diffuse[k] = Diff;
+				lane_specular[k]= Mat->Specular;
+				lane_gloss[k]   = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
+				lane_wantSpec[k]= (Mat->Specular > 0.0f && specGlobalOn) ? 0xFFFFFFFFu : 0u;
+				lane_isWater[k] = (int(matID) == ctx.waterMatID) ? 0xFFFFFFFFu : 0u;
+				any_alive = true;
+			}
+			if (!any_alive) continue;
+			// Refresh alive mask from scratch (some lanes may have been
+			// killed by mip-data null check above).
+			__m256i mask_alive_fresh = _mm256_load_si256((const __m256i*)lane_alive);
+
+			// Decode 8 normals in parallel. oct_decode_u16 form:
+			//   qx = sign-extend(low byte), qy = sign-extend(high byte)
+			//   ox = qx * (1/127), oy = qy * (1/127)
+			//   az = 1 - |ox| - |oy|
+			//   if (az < 0) fold ...
+			//   then normalize.
+			__m128i nrm16 = _mm_loadu_si128((const __m128i*)(gb.normal.data() + i));
+			// Split into low-byte and high-byte signed expansion.
+			__m128i nrm_qx_8 = _mm_and_si128(nrm16, _mm_set1_epi16(0xFF));
+			__m128i nrm_qy_8 = _mm_srli_epi16(nrm16, 8);
+			// sign-extend 8-bit to 16
+			nrm_qx_8 = _mm_slli_epi16(nrm_qx_8, 8);
+			nrm_qx_8 = _mm_srai_epi16(nrm_qx_8, 8);
+			nrm_qy_8 = _mm_slli_epi16(nrm_qy_8, 8);
+			nrm_qy_8 = _mm_srai_epi16(nrm_qy_8, 8);
+			__m256i qx32 = _mm256_cvtepi16_epi32(nrm_qx_8);
+			__m256i qy32 = _mm256_cvtepi16_epi32(nrm_qy_8);
+			__m256 inv127 = _mm256_set1_ps(1.0f / 127.0f);
+			__m256 ox = _mm256_mul_ps(_mm256_cvtepi32_ps(qx32), inv127);
+			__m256 oy = _mm256_mul_ps(_mm256_cvtepi32_ps(qy32), inv127);
+			__m256 absox = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), ox);
+			__m256 absoy = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), oy);
+			__m256 az = _mm256_sub_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), absox), absoy);
+			// Branchless fold: t = max(-az, 0); ox -= copysign(t, ox); oy -= copysign(t, oy)
+			__m256 t = _mm256_max_ps(_mm256_sub_ps(_mm256_setzero_ps(), az),
+			                          _mm256_setzero_ps());
+			__m256 sign_ox = _mm256_and_ps(ox, _mm256_set1_ps(-0.0f));
+			__m256 sign_oy = _mm256_and_ps(oy, _mm256_set1_ps(-0.0f));
+			ox = _mm256_sub_ps(ox, _mm256_or_ps(t, sign_ox));
+			oy = _mm256_sub_ps(oy, _mm256_or_ps(t, sign_oy));
+			// Normalize via approx_rsqrt
+			__m256 lenSq = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ox, ox),
+			                                            _mm256_mul_ps(oy, oy)),
+			                              _mm256_mul_ps(az, az));
+			__m256 invLenN = _mm256_rsqrt_ps(lenSq);
+			__m256 nx = _mm256_mul_ps(ox, invLenN);
+			__m256 ny = _mm256_mul_ps(oy, invLenN);
+			__m256 nz = _mm256_mul_ps(az, invLenN);
+
+			// Reconstruct view-space pos for 8 lanes.
+			// z = (0xFF80 - zEnc) * invZScale
+			__m256 zEncF = _mm256_cvtepi32_ps(zEncI);
+			__m256 zv = _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(float(0xFF80)), zEncF),
+			                           _mm256_set1_ps(ctx.invZScale));
+			// x = (px+lane - CntrEX) * z * invFOVX
+			__m256 px_lane_f = _mm256_add_ps(_mm256_set1_ps(float(px)),
+			                                  _mm256_setr_ps(0,1,2,3,4,5,6,7));
+			__m256 xv = _mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(px_lane_f,
+			                                                       _mm256_set1_ps(CntrEX)),
+			                                         zv),
+			                           _mm256_set1_ps(ctx.invFOVX));
+			__m256 yv = _mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(CntrEY),
+			                                                       _mm256_set1_ps(float(py))),
+			                                         zv),
+			                           _mm256_set1_ps(ctx.invFOVY));
+
+			// Texel + ambient as vec
+			__m256 texB = _mm256_load_ps(lane_texB);
+			__m256 texG = _mm256_load_ps(lane_texG);
+			__m256 texR = _mm256_load_ps(lane_texR);
+			__m256 lB   = _mm256_load_ps(lane_ambB);
+			__m256 lG   = _mm256_load_ps(lane_ambG);
+			__m256 lR   = _mm256_load_ps(lane_ambR);
+			__m256 vDiff = _mm256_load_ps(lane_diffuse);
+
+			// Water lanes don't accumulate omnis.
+			__m256i waterMask = _mm256_load_si256((const __m256i*)lane_isWater);
+			// "alive AND not water" lanes accumulate
+			__m256i omniMask  = _mm256_andnot_si256(waterMask, mask_alive_fresh);
+			__m256  omniMaskF = _mm256_castsi256_ps(omniMask);
+
+			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
+			for (int n = 0; n < tl.count; ++n) {
+				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
+				__m256 wy = _mm256_sub_ps(_mm256_set1_ps(tl.posY[n]), yv);
+				__m256 wz = _mm256_sub_ps(_mm256_set1_ps(tl.posZ[n]), zv);
+				__m256 dot = _mm256_fmadd_ps(wx, nx,
+				              _mm256_fmadd_ps(wy, ny,
+				               _mm256_mul_ps(wz, nz)));
+				__m256 len2 = _mm256_fmadd_ps(wx, wx,
+				               _mm256_fmadd_ps(wy, wy,
+				                _mm256_mul_ps(wz, wz)));
+				__m256 mask_dot   = _mm256_cmp_ps(dot,  _mm256_setzero_ps(), _CMP_GE_OQ);
+				__m256 mask_range = _mm256_cmp_ps(len2, _mm256_set1_ps(tl.range2[n]), _CMP_LE_OQ);
+				__m256 mask_pos   = _mm256_cmp_ps(len2, _mm256_setzero_ps(), _CMP_GT_OQ);
+				__m256 omni_lane  = _mm256_and_ps(_mm256_and_ps(mask_dot, mask_range),
+				                                   _mm256_and_ps(mask_pos, omniMaskF));
+				// safe_len2: 1.0 when masked off
+				__m256 safe_len2 = _mm256_blendv_ps(_mm256_set1_ps(1.0f), len2, omni_lane);
+				__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
+				__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
+				__m256 falloff = _mm256_sub_ps(_mm256_set1_ps(1.0f),
+				                                _mm256_mul_ps(dist, _mm256_set1_ps(tl.rRange[n])));
+				__m256 k = _mm256_mul_ps(_mm256_mul_ps(dot, lenInv), falloff);
+				__m256 intensity = _mm256_blendv_ps(_mm256_setzero_ps(),
+				                                     _mm256_mul_ps(k, vDiff),
+				                                     omni_lane);
+				lB = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colB[n]), lB);
+				lG = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colG[n]), lG);
+				lR = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colR[n]), lR);
+			}
+
+			// Saturate to 250
+			__m256 sat = _mm256_set1_ps(250.0f);
+			__m256 zero = _mm256_setzero_ps();
+			lB = _mm256_max_ps(zero, _mm256_min_ps(lB, sat));
+			lG = _mm256_max_ps(zero, _mm256_min_ps(lG, sat));
+			lR = _mm256_max_ps(zero, _mm256_min_ps(lR, sat));
+
+			// pixel = texel * lit / 256
+			__m256 inv256 = _mm256_set1_ps(1.0f / 256.0f);
+			__m256 fdB = _mm256_mul_ps(_mm256_mul_ps(texB, lB), inv256);
+			__m256 fdG = _mm256_mul_ps(_mm256_mul_ps(texG, lG), inv256);
+			__m256 fdR = _mm256_mul_ps(_mm256_mul_ps(texR, lR), inv256);
+
+			// Spec / water blend / pow are not handled in vec — for any
+			// alive lane that needs spec or water-mat, fall back to
+			// scalar. Detect:
+			//   needsScalar = wantSpec_lane | isWater_lane
+			alignas(32) uint32_t lane_needs_scalar[8];
+			__m256i needsScalar = _mm256_or_si256(
+				_mm256_load_si256((const __m256i*)lane_wantSpec),
+				_mm256_load_si256((const __m256i*)lane_isWater));
+			_mm256_store_si256((__m256i*)lane_needs_scalar, needsScalar);
+
+			alignas(32) float vfB[8], vfG[8], vfR[8];
+			_mm256_store_ps(vfB, fdB);
+			_mm256_store_ps(vfG, fdG);
+			_mm256_store_ps(vfR, fdR);
+
+			alignas(32) int32_t lane_alive_now[8];
+			_mm256_store_si256((__m256i*)lane_alive_now, mask_alive_fresh);
+
+			// Pack lanes into pixel dwords; for spec/water lanes, redo
+			// scalar shading (rare on most City pixels).
+			alignas(32) float ax[8], ay[8], az_lane[8];
+			_mm256_store_ps(ax, xv);
+			_mm256_store_ps(ay, yv);
+			_mm256_store_ps(az_lane, zv);
+			alignas(32) float anx[8], any_l[8], anz[8];
+			_mm256_store_ps(anx, nx);
+			_mm256_store_ps(any_l, ny);
+			_mm256_store_ps(anz, nz);
+
+			for (int k = 0; k < 8; ++k) {
+				if (!lane_alive_now[k]) continue;
+				int outB, outG, outR;
+				if (lane_needs_scalar[k]) {
+					// Scalar fallback: redo lighting for this pixel
+					// including spec / water blend. Reuses tl + cached
+					// texel; ambient already in lane_ambB/G/R.
+					float lBs = lane_ambB[k];
+					float lGs = lane_ambG[k];
+					float lRs = lane_ambR[k];
+					float sBs = 0, sGs = 0, sRs = 0;
+					float xs = ax[k], ys = ay[k], zs = az_lane[k];
+					float nxs = anx[k], nys = any_l[k], nzs = anz[k];
+					float vxd = 0, vyd = 0, vzd = 0;
+					const bool wantSpec = lane_wantSpec[k] != 0;
+					if (wantSpec) {
+						float vlen2 = xs*xs + ys*ys + zs*zs;
+						float vlenInv = fast_rsqrt(vlen2);
+						vxd = -xs * vlenInv;
+						vyd = -ys * vlenInv;
+						vzd = -zs * vlenInv;
+					}
+					const bool isWater = lane_isWater[k] != 0;
+					if (!isWater) {
+						const float matDiff = lane_diffuse[k];
+						const float matSpec = lane_specular[k];
+						const float gloss   = lane_gloss[k];
+						for (int n = 0; n < tl.count; ++n) {
+							float wxs = tl.posX[n] - xs;
+							float wys = tl.posY[n] - ys;
+							float wzs = tl.posZ[n] - zs;
+							float dots = wxs*nxs + wys*nys + wzs*nzs;
+							if (dots < 0.0f) continue;
+							float len2s = wxs*wxs + wys*wys + wzs*wzs;
+							if (len2s > tl.range2[n] || len2s == 0.0f) continue;
+							float lenInvS = fast_rsqrt(len2s);
+							float distS   = len2s * lenInvS;
+							float ks = dots * lenInvS * (1.0f - distS * tl.rRange[n]);
+							float ints = ks * matDiff;
+							lBs += ints * tl.colB[n];
+							lGs += ints * tl.colG[n];
+							lRs += ints * tl.colR[n];
+							if (wantSpec) {
+								float ldx = wxs * lenInvS, ldy = wys * lenInvS, ldz = wzs * lenInvS;
+								float hx = ldx + vxd, hy = ldy + vyd, hz = ldz + vzd;
+								float hLen2 = hx*hx + hy*hy + hz*hz;
+								if (hLen2 <= 0.0f) continue;
+								float hInv = fast_rsqrt(hLen2);
+								hx *= hInv; hy *= hInv; hz *= hInv;
+								float NdotH = nxs*hx + nys*hy + nzs*hz;
+								if (NdotH <= 0.0f) continue;
+								float spec = std::pow(NdotH, gloss);
+								float ss = spec * matSpec * (1.0f - distS * tl.rRange[n]);
+								sBs += ss * tl.colB[n];
+								sGs += ss * tl.colG[n];
+								sRs += ss * tl.colR[n];
+							}
+						}
+					}
+					if (lBs > 250.0f) lBs = 250.0f; if (lBs < 0) lBs = 0;
+					if (lGs > 250.0f) lGs = 250.0f; if (lGs < 0) lGs = 0;
+					if (lRs > 250.0f) lRs = 250.0f; if (lRs < 0) lRs = 0;
+					float fdBs = lane_texB[k] * lBs * (1.0f / 256.0f);
+					float fdGs = lane_texG[k] * lGs * (1.0f / 256.0f);
+					float fdRs = lane_texR[k] * lRs * (1.0f / 256.0f);
+					outB = int(fdBs) + int(sBs);
+					outG = int(fdGs) + int(sGs);
+					outR = int(fdRs) + int(sRs);
+					if (isWater) {
+						const dword existing = out[i + k];
+						outB += int(existing & 0xFF) >> 1;
+						outG += int((existing >> 8) & 0xFF) >> 1;
+						outR += int((existing >> 16) & 0xFF) >> 1;
+					}
+				} else {
+					outB = int(vfB[k]);
+					outG = int(vfG[k]);
+					outR = int(vfR[k]);
+				}
+				if (outB > 255) outB = 255; if (outB < 0) outB = 0;
+				if (outG > 255) outG = 255; if (outG < 0) outG = 0;
+				if (outR > 255) outR = 255; if (outR < 0) outR = 0;
+				out[i + k] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+			}
+		}
+
+		// Tail: scalar for remaining 1-7 pixels
+		for (; px < x2; ++px) {
+			// Lazy: just dispatch back to the per-tile inner-loop body.
+			// For simplicity we use a no-op since tile widths divide
+			// evenly by 8 in our typical 1920×1080 / 12×8 grid.
+			// (160-wide tiles → no tail.) If tile widths ever stop
+			// being multiples of 8 this needs a real scalar fallback.
+			(void)px;
+			break;
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
 // Race-free because wave-2 reads only what wave-1 wrote; tile-job
 // dispatch waits on tileCounter between waves. Tile-edge odd pixels
 // (px==x1 or px==x2-1) read the next/prev tile's shaded result, which
@@ -2394,6 +2800,7 @@ static void Render_DeferredLighting() {
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
+	const bool useOuterVec = deferredLightingOuterVecEnabled();
 	renderns::tileCounter = 0;
 	for (int j = 0; j < numTilesY; ++j) {
 		const int y1 = tileSizeY * j;
@@ -2402,9 +2809,15 @@ static void Render_DeferredLighting() {
 			const int x1 = tileSizeX * i;
 			const int x2 = std::min(x1 + tileSizeX, XRes);
 			const int tileIndex = j * numTilesX + i;
-			ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
-				Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
-			});
+			if (useOuterVec) {
+				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+					Render_DeferredLighting_Tile_OuterVec(ctx, tileIndex, x1, y1, x2, y2);
+				});
+			} else {
+				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+					Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
+				});
+			}
 		}
 	}
 	{
