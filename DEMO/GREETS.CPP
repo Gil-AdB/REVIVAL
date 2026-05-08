@@ -476,6 +476,35 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
+	// Mech-light bump. The FLD authoring sized omnis for the per-vertex
+	// Gouraud forward path which leans on per-mesh ambient + a couple of
+	// active lights; per-pixel deferred shows omni falloff more
+	// faithfully and the result is darker than expected. Bump IRange
+	// (reach) and ISize (intensity multiplier into L.Col) on omnis
+	// whose name suggests "mech"-themed lights, plus a diagnostic dump
+	// so we can refine by name once we see what Greets actually
+	// contains.
+	for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_Omni) continue;
+		Omni *O = (Omni *)Obj->Data;
+		const char *name = Obj->Name ? Obj->Name : "(unnamed)";
+		const bool isMech = (Obj->Name &&
+			(strstr(Obj->Name, "mech") || strstr(Obj->Name, "Mech") ||
+			 strstr(Obj->Name, "MECH")));
+		float oldRange = O->IRange;
+		float oldSize  = O->ISize;
+		if (isMech) {
+			O->IRange *= 2.0f;
+			O->ISize  *= 1.75f;
+			O->rRange = 1.0f / O->IRange;
+		}
+		fprintf(stderr,
+			"[GREETS-OMNI] name=%-24s IRange=%.1f->%.1f ISize=%.2f->%.2f L=(%.0f,%.0f,%.0f)%s\n",
+			name, oldRange, O->IRange, oldSize, O->ISize,
+			O->L.R, O->L.G, O->L.B,
+			isMech ? "  *MECH (bumped)*" : "");
+	}
+
 	// Bump Specular on materials that should plausibly have shiny
 	// surfaces — marble stairs, marble pillars, stone floor, the mecha
 	// hull/cockpit. Most FLD materials authored Specular=0; deferred-
