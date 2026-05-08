@@ -2,6 +2,7 @@
 #include <Base/FDS_DECS.H>
 #include "SDL2.h"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -33,8 +34,42 @@ static SDL_Window *sdl_window;
 // (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
 static SDLTex s_engineTex;
 
+// Per-stage FLIP profiler. On wasm we're spending most of a frame in the
+// SDL present path; this accumulates ms across N frames and dumps to
+// stderr so we can see exactly which stage is the bottleneck. Gated on
+// g_profilerActive (the same flag that turns on the on-screen overlay).
+// Throwaway instrumentation — remove once the wasm FLIP rewrite lands.
+namespace {
+struct FlipStageProfiler {
+	using clock = std::chrono::steady_clock;
+	using ms_d  = std::chrono::duration<double, std::milli>;
+	double unlockMs = 0, barsMs = 0, copyMs = 0, presentMs = 0, lockMs = 0;
+	int frames = 0;
+	static constexpr int kDumpEvery = 60;
+	void tick(double u, double b, double c, double p, double l) {
+		unlockMs += u; barsMs += b; copyMs += c; presentMs += p; lockMs += l;
+		if (++frames < kDumpEvery) return;
+		double d = (double)frames;
+		fprintf(stderr,
+			"[FLIP] frames=%d  unlock=%.3f  bars=%.3f  copy=%.3f  present=%.3f  lock=%.3f  total=%.3f ms\n",
+			frames, unlockMs/d, barsMs/d, copyMs/d, presentMs/d, lockMs/d,
+			(unlockMs+barsMs+copyMs+presentMs+lockMs)/d);
+		unlockMs = barsMs = copyMs = presentMs = lockMs = 0;
+		frames = 0;
+	}
+};
+}
+
+extern "C" dword g_profilerActive;
+
 static void V_Flip(VESA_Surface *VS)
 {
+	using clock = std::chrono::steady_clock;
+	using ms_d  = std::chrono::duration<double, std::milli>;
+	static FlipStageProfiler s_flipProf;
+	const bool profileFlip = g_profilerActive != 0;
+	auto stamp = [&]() { return profileFlip ? clock::now() : clock::time_point{}; };
+
 	// Top-right resolution overlay. Draw into the surface's data buffer
 	// just before pushing to the SDL_Texture so it shows up regardless of
 	// which scene's surface is being flipped (MainSurf vs Glat's FinalSurf).
@@ -52,6 +87,8 @@ static void V_Flip(VESA_Surface *VS)
 	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
 	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
+
+	auto t0 = stamp();
 	if (lockMode) {
 		// Engine wrote directly into the texture's locked pixel buffer
 		// this frame. Unlock to commit (no-op for the SW renderer
@@ -64,6 +101,7 @@ static void V_Flip(VESA_Surface *VS)
 		// Engine surfaces use lockMode and skip this memcpy.
 		SDL_UpdateTexture(texture, NULL, VS->Data, VS->BPSL);
 	}
+	auto tUnlock = stamp();
 
 	// Letterbox: preserve the surface's aspect ratio inside the window.
 	// The source is VS->X * VS->Y (e.g. Glat snaps to /8 multiples while
@@ -73,13 +111,12 @@ static void V_Flip(VESA_Surface *VS)
 	// reduces to a full-window blit with no bars.
 	int rw = 0, rh = 0;
 	SDL_GetRendererOutputSize(renderer, &rw, &rh);
-	if (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0) {
-		SDL_RenderCopy(renderer, texture, NULL, NULL);
-	} else {
+	SDL_Rect dst{0, 0, rw, rh};
+	bool useFullDst = (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0);
+	if (!useFullDst) {
 		float sx = (float)rw / (float)VS->X;
 		float sy = (float)rh / (float)VS->Y;
 		float s  = sx < sy ? sx : sy;
-		SDL_Rect dst;
 		dst.w = (int)((float)VS->X * s);
 		dst.h = (int)((float)VS->Y * s);
 		dst.x = (rw - dst.w) / 2;
@@ -106,10 +143,12 @@ static void V_Flip(VESA_Surface *VS)
 			bars[n++] = SDL_Rect{dst.x + dst.w, dst.y, rw - (dst.x + dst.w), dst.h};
 		}
 		if (n > 0) SDL_RenderFillRects(renderer, bars, n);
-
-		SDL_RenderCopy(renderer, texture, NULL, &dst);
 	}
+	auto tBars = stamp();
+	SDL_RenderCopy(renderer, texture, NULL, useFullDst ? NULL : &dst);
+	auto tCopy = stamp();
 	SDL_RenderPresent(renderer);
+	auto tPresent = stamp();
 
 	if (lockMode) {
 		// Re-lock for the next frame's writes. Update VS->Data + engine
@@ -127,6 +166,15 @@ static void V_Flip(VESA_Surface *VS)
 		} else {
 			fprintf(stderr, "[SDL] LockTexture failed in V_Flip: %s\n", SDL_GetError());
 		}
+	}
+	if (profileFlip) {
+		auto tLock = stamp();
+		s_flipProf.tick(
+			ms_d(tUnlock  - t0       ).count(),
+			ms_d(tBars    - tUnlock  ).count(),
+			ms_d(tCopy    - tBars    ).count(),
+			ms_d(tPresent - tCopy    ).count(),
+			ms_d(tLock    - tPresent ).count());
 	}
 }
 
