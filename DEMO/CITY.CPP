@@ -1525,6 +1525,61 @@ Material* Materialize(void* data, int x, int y) {
 	return M;
 }
 
+// Replace vertex sharing across faces with per-face copies, then write the
+// face normal into all three of each face's new Vertex::N. Effect: the
+// rasterizer interpolates a constant normal across each triangle, giving
+// crisp creases at face boundaries instead of the area-weighted Phong
+// rounding that Compute_Vertex_Normals produces by default.
+//
+// Use only on meshes that genuinely want hard edges (City buildings,
+// rectangular blocks, anything with 90° corners between flat panels).
+// Curved geometry — fountain crystal, greets letters, chase mountains —
+// wants to keep the smooth interpolation, so don't call this on them.
+//
+// Allocates a new Vertex array sized 3*FIndex; old array (and any other
+// users of the original Verts pointer) becomes irrelevant. Run once at
+// scene init, before Lighting() so per-face Gouraud lighting also
+// becomes uniform across the triangle (faceted forward shading).
+// Per-mesh deduplicated-vertex storage. std::vector keeps the array
+// alive for the lifetime of the scene without raw new/delete, and the
+// std::map keys by TriMesh* so the storage is naturally scoped to the
+// scene that's holding the TriMesh.
+static std::map<TriMesh*, std::vector<Vertex>> g_independentVerts;
+
+static void MakeFacesIndependent(TriMesh *T) {
+	if (!T || T->FIndex == 0 || !T->Faces) return;
+
+	const int32_t newCount = T->FIndex * 3;
+	auto &storage = g_independentVerts[T];
+	storage.assign(size_t(newCount), Vertex{});
+	Vertex *newVerts = storage.data();
+
+	for (int32_t i = 0; i < T->FIndex; ++i) {
+		Face *F = &T->Faces[i];
+		if (!F->A || !F->B || !F->C) continue;
+		Vertex *na = &newVerts[3 * i + 0];
+		Vertex *nb = &newVerts[3 * i + 1];
+		Vertex *nc = &newVerts[3 * i + 2];
+		*na = *F->A;
+		*nb = *F->B;
+		*nc = *F->C;
+		na->N = F->N;
+		nb->N = F->N;
+		nc->N = F->N;
+		F->A = na;
+		F->B = nb;
+		F->C = nc;
+	}
+
+	// Old T->Verts is left orphaned (FLD_CONV.CPP allocated it with
+	// `new Vertex[N]` and the codebase doesn't delete[] it elsewhere
+	// either; per-scene-init leak comparable to other scene-data
+	// leaks). New storage is owned by g_independentVerts; lifetime
+	// extends to scene teardown.
+	T->Verts = newVerts;
+	T->VIndex = newCount;
+}
+
 using std::pair;
 using std::vector;
 using std::map;
@@ -1625,6 +1680,34 @@ void Initialize_City()
 	//EnvCam.PerspY = CUBE_MAP_YRES / 2;
 	FOVX = View->PerspX;
 	FOVY = View->PerspY;
+
+	// City buildings are rectangular blocks of flat panels; the default
+	// area-weighted vertex normals from Compute_Vertex_Normals smooth
+	// across the 90° corners and produce Phong-rounded edges (visible as
+	// red→green→blue gradients across the corner in the deferred normal
+	// viz). Switching those meshes to per-face vertex copies gives each
+	// face a constant normal across the triangle, which the rasterizer
+	// interpolates as a constant — crisp creases. Has to run before
+	// Lighting() so the forward-path Gouraud lighting also benefits.
+	for (Object *Obj = CitySc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) continue;
+		if (!Obj->Name) continue;
+		const bool isBuilding = (Obj->Name[0] == 'b'
+			&& '0' <= Obj->Name[1] && Obj->Name[1] <= '9'
+			&& 0 == strcmp(Obj->Name + 2, ".lwo"));
+		if (!isBuilding) continue;
+		// Disabled — see comment on MakeFacesIndependent. Allocating any
+		// fresh Vertex storage at this point reproducibly corrupts a
+		// TriMesh's Next pointer downstream (0x42800000 = float 64.0
+		// shows up in the upper 32 bits, lower bits look heap-ish).
+		// Survives across allocator choices (new[], getAlignedArray,
+		// std::vector::resize/assign) and the pack(1)-vs-natural-
+		// alignment swap, so it isn't the obvious suspect. Needs a
+		// dedicated investigation pass — for now City keeps the
+		// area-weighted vertex normals (visible Phong rounding on
+		// building corners in the deferred normal viz).
+		// MakeFacesIndependent((TriMesh *)Obj->Data);
+	}
 
 	Animate_Objects(CitySc, true);
 	Lighting(CitySc);
