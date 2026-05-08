@@ -14,31 +14,50 @@ by symbol if precision matters.
 `DEMO/REV.CPP:main()`
 
 1. Loads `rev.cfg` → globals `g_demoXRes`, `g_demoYRes`, `g_fullScreenMode`,
-   `g_playMusic`, `g_profilerActive`.
-2. `SDL_Init(SDL_INIT_VIDEO)`, `SDL_CreateWindow`, `SDL_RaiseWindow`.
+   `g_playMusic`, `g_profilerActive`, `g_HiDPI`.
+2. `SDL_Init(SDL_INIT_VIDEO)`, `SDL_CreateWindow` (with
+   `SDL_WINDOW_RESIZABLE`, plus `SDL_WINDOW_ALLOW_HIGHDPI` when `HiDPI=1`).
 3. `FDS_Init(x, y, 32)` — creates font table, message buffer, sets FPU to
-   low-precision, calls `VESA_InitExternal` (allocates the software
-   framebuffer + Z-buffer in the `VESA_Surface` struct).
-4. `SDL2_InitDisplay(window)` — wires `MainSurf->Flip` to an SDL-backed
-   routine that streams the VESA surface into an `SDL_Texture` and
-   `SDL_RenderCopy`s it.
-5. Spawns a worker thread running `StubbedThread` → `CodeEntry`.
+   low-precision, calls `VESA_InitExternal` (just sizes a stub
+   `VESA_Surface`; the actual framebuffer is allocated by the SDL backend).
+4. `SDL2_InitDisplay(window)` — creates the renderer, calls `V_Create`
+   (allocates the engine `SDL_Texture` and a separate `Z16` malloc),
+   installs `MainSurf->Flip = V_Flip`, locks the engine texture and points
+   `MainSurf->Data` straight at the lock pointer (zero-copy framebuffer
+   write). Calls `VESA_VPageExternal` → `VESA_Surface2Global` to publish
+   `XRes/YRes/PageSize/VPage/ZPage16/YOffs` etc.
+5. Spawns a worker thread running `CodeEntry`.
 6. Main thread enters `SDL_WaitEvent` loop: writes `Keyboard[scancode]` on
-   `SDL_KEYDOWN`/`UP`, exits on `SDL_QUIT`.
+   `SDL_KEYDOWN`/`UP`, captures `SDL_WINDOWEVENT_SIZE_CHANGED`/`RESIZED`
+   and publishes the new pixel size to `g_pendingResize` (atomic; see
+   "Resize" below), exits on `SDL_QUIT`.
 
 `DEMO/REV.CPP:CodeEntry()` (worker) is the demo director:
 
-1. Initializes the `ThreadPool` (Threads.h), starts music via
-   `Modplayer_*`.
-2. `Initialize_Glato()` synchronously.
-3. Spawns a second `std::thread` that pre-initializes the rest:
-   `Initialize_City/Chase/Fountain/Crash/Greets`.
-4. Runs scenes sequentially: `Run_Glato → Run_City → Run_Chase →
+1. Initializes the `ThreadPool` (FDS/Threads.h) — every worker runs an init
+   lambda that calls `FPU_LPrecision` + `InitPolyStats` and is QoS-hinted
+   to a P-core via `HintHighPerfThread` on macOS.
+2. Starts music via `Modplayer_*`.
+3. `Initialize_Glato()` synchronously.
+4. Spawns a second `std::thread` (`t1`) that pre-initializes the rest:
+   `Initialize_City/Chase/Fountain/Crash/Greets`. `Initialize_City` does
+   off-screen cube-map renders by temporarily swapping `MainSurf` to a
+   stack-local `TmpSurf` — that swap holds `g_engineSurfaceMutex` so a
+   resize landing on the demo thread can't `memcpy` the SDL surface back
+   into `MainSurf` mid-render.
+5. Runs scenes sequentially: `Run_Glato → Run_City → Run_Chase →
    Run_Fountain → Run_Crash → Run_Greets`.
 
-Each `Run_*` owns a **blocking** `while (!Keyboard[ScESC] && Timer<...)`
-loop. Some delegate to `RENDER.CPP:RunScene()`; others (e.g. `Run_Chase`)
-have bespoke loops with scene-specific effects setup.
+Each scene is now a `SceneDriver` (DEMO/SceneTick.h) with three phases —
+`init()`, `tick()` (returns `false` to stop), `cleanup()` — plus a virtual
+`on_resize(int newX, int newY)` for resolution-dependent state (CITY's
+`dispMap`, FOUNTAIN's TBR span buffer, GLAT's grid arrays). The `Run_*`
+functions are thin shims that allocate the driver and call
+`runSceneBlocking(*scene)`, which loops `poll_pending_resize` →
+`driver.tick()` until `tick()` returns `false`. `SceneSequence` is the
+multi-scene equivalent (one factory per scene, advances on tick boundary)
+and is the shape an emscripten `set_main_loop` driver would use; native
+currently still runs each `Run_*` blockingly back-to-back.
 
 ## Per-frame pipeline
 
@@ -46,7 +65,7 @@ The sequence inside a scene loop iteration is roughly:
 
 | Stage                 | Where                                      | What it does                                                                                                |
 |-----------------------|--------------------------------------------|-------------------------------------------------------------------------------------------------------------|
-| Clear framebuffer     | `memset(VPage, 0, PageSize)` or `FastWrite`| Zero color + Z-buffer (Z-buffer lives at `VPage + PageSize`).                                               |
+| Clear framebuffer     | `parallel_memset(VPage, …)` + `parallel_memset(ZPage16, …)` | Zero color + Z-buffer. Two **separate** allocations now (Z16 used to live at `VPage + PageSize`; split out so the engine can render straight into a locked `SDL_Texture`). Split across `ThreadPool` workers via `FDS/Threads.h:parallel_memset`. |
 | Advance time          | `CurFrame = lerp(StartFrame, EndFrame, t)` | Scene-local interpolated frame cursor. `Timer` is the global clock (atomic-ish `int32_t`).                  |
 | Animate               | `RENDER.CPP:Animate_Objects`               | Evaluates position/rotation/scale/FOV/roll tracks (splines from 3DS/FLD tracks) onto `Object`/`Camera`.     |
 | Transform             | `RENDER.CPP:Transform_Objects`             | 4×3 FP world→view→screen, per-vertex visibility flags, backface culling, bounding-sphere culling.           |
@@ -54,7 +73,7 @@ The sequence inside a scene loop iteration is roughly:
 | Sort                  | `RENDER.CPP:Radix_Sorting` (SORTS.H)       | 256-bucket 4-pass radix on `Face::SortZ`. Front-to-back (`FRONT_TO_BACK_SORTING`) to exploit the Z-buffer.  |
 | Render (tiled)        | `RENDER.CPP:Render`                        | Splits screen into 6×4 tiles, enqueues `RenderInner(x1,y1,x2,y2)` per tile onto `ThreadPool`, waits all.    |
 | Sprites/TBR           | `TBR_Render(CurScene)` if `Scn_SpriteTBR`  | Tile-Based-Rendering pass for sprites that weren't batched with the triangle faces. See "What's *not* done". |
-| Flip                  | `Flip(Screen)` → SDL `UpdateTexture+Copy`  | Present. Motion blur path (`ScM`) renders into a blurred copy first.                                        |
+| Flip                  | `Flip(Screen)` → `SDL_UnlockTexture` + `RenderCopy` (engine) or `UpdateTexture+RenderCopy` (child surfaces) | Present. Engine surface is dual-mode lock-render: writes go straight into the `SDL_Texture` lock pointer, V_Flip just unlocks/presents/re-locks for the next frame. See "Display backend". Motion blur path (`ScM`) renders into a blurred copy first. |
 
 ### `RenderInner` per-tile
 
@@ -110,7 +129,8 @@ Key characteristics:
 - **Edge function tests** (`orient2d`) on integer subpixel coordinates
   (8-bit subpixel, `SUBPIXEL_MULT = 256`). Sample mask = all three edges
   ≥ 0.
-- **Z-buffer** at `VPage + PageSize`, 16-bit encoded as
+- **Z-buffer** in its own allocation (`ZPage16`, separate `word*` malloc;
+  used to be the tail of `VPage`), 16-bit encoded as
   `0xFF80 - round(g_zscale * z)`, compared with SIMD `>`, blended via
   `_mm_blendv_epi8`.
 - **Perspective-correct texturing** via per-pixel reciprocal of
@@ -152,14 +172,22 @@ Other rasterizers in `FILLERS/`:
 - `FDS/Threads.h` provides `ThreadPool::instance()`. Workers each run
   the init lambda passed to `ThreadPool::instance().init(...)` — that
   lambda calls `FPU_LPrecision()` so every worker has low-precision FPU
-  and `InitPolyStats`.
+  and `InitPolyStats`. `HintHighPerfThread` runs in the worker prologue
+  to bias the macOS scheduler toward P-cores.
 - `Render()` enqueues 24 jobs (6×4 tiles) and waits on
   `renderns::tileCounter == numTilesX*numTilesY` with a
   condition variable in `renderns::condition`.
 - Each worker thread has a `thread_local FrustumClipper clipper;`
   (RENDER.CPP top), avoiding contention on the clip buffers.
-- SDL main thread only pumps events. All rendering runs on the worker
-  pool, driven from the `CodeEntry` thread.
+- `parallel_memset(p, v, n)` (FDS/Threads.h) splits across the pool above
+  a 256 KiB threshold and is used for per-frame color and Z clears (CITY
+  uses it directly; `SkyCube`'s clear path also routes through it). Sync
+  is a `shared_ptr<atomic<size_t>>` countdown — capturing by value so the
+  caller's stack can't be UAF'd if a worker notifies after the predicate
+  fires (regression seen in 60d0f46).
+- SDL main thread only pumps events (input + window-resize publish to
+  `g_pendingResize`). All rendering runs on the worker pool, driven from
+  the `CodeEntry` thread.
 
 ## Data model
 
@@ -190,10 +218,55 @@ Other rasterizers in `FILLERS/`:
 (`IMGGENR/IMGGENR.CPP`). `LSizeX`/`LSizeY` are log2 dimensions used by
 the tiled addressing functions.
 
-## Global state (audit-relevant for WASM refactor)
+### VESA_Surface
 
-The per-frame mutable globals that a tick-driven rewrite would need to
-either thread through a context struct or promote to TLS:
+`FDS/Base/FDS_VARS.H:352`. Holds the per-surface state — `Data`
+(framebuffer pointer; for the engine surface this is the SDL_Texture's
+locked pixel buffer, refreshed each frame in `V_Flip`), `Z16`
+(separate malloc for the 16-bit depth buffer; used to live at the tail
+of `Data`), `X/Y/BPP/CPP/BPSL/PageSize`, perspective ratios, the
+`Flip` callback (set to `V_Flip`), `YTable` (Y-offset lookup), and
+`Handle`/`Renderer` (the SDL_Texture and SDL_Renderer pointers).
+`Flags` carries `VSurf_LockRender` for the engine surface so `V_Flip`
+takes the lock-render branch and skips `SDL_UpdateTexture`.
+
+## Resize coordination
+
+Resize crosses three threads (SDL main / demo / pool worker), so it's
+buffered through an atomic and a mutex (DEMO/Resize.h, DEMO/Resize.cpp):
+
+- `std::atomic<uint64_t> g_pendingResize` — packed `(X, Y)`. SDL main
+  thread `store`s on `SDL_WINDOWEVENT_SIZE_CHANGED`/`RESIZED`. Demo
+  thread `exchange`s at frame top via `poll_pending_resize` (called from
+  inside `runSceneBlocking` and `SceneSequence::tick`).
+- `std::mutex g_engineSurfaceMutex` — held during the engine's surface
+  swap (`SDL2_HandleResize` and `Initialize_City`'s cube-map render).
+  `EngineResize` uses `try_lock` and re-publishes the size into
+  `g_pendingResize` if the lock is contended, so the demo thread never
+  blocks for the ~10 s of a wasm cube-map render.
+- Engine dimensions are clamped to the demo's authoring AR
+  (`g_demoXRes/g_demoYRes`) and snapped down to a multiple of
+  `TILE_SIZE` (8). `TheOtherBarry::apply_exact` walks 8 rows per tile
+  unconditionally — non-/8 height steps past the Z-buffer end. The
+  window itself can be any size; `V_Flip` letterboxes the 0–7 px slack
+  by filling only the bar regions (not a full-renderer clear, which was
+  ~20 MB/frame on the wasm software renderer).
+- `SDL2_HandleResize` (DEMO/SDL2.cpp) frees + reallocates the engine
+  `SDL_Texture`, `Z16`, and `MainSurf->YTable`, then calls
+  `VESA_VPageExternal` → `Build_YOffs_Table` + `VESA_Surface2Global` to
+  republish `XRes/YRes/PageSize/VPage/ZPage16/CntrX/CntrY/BPSL/g_fontScale`.
+- Each scene that owns resolution-dependent state overrides
+  `SceneDriver::on_resize`: CITY rebuilds `dispMap` (it bakes the
+  current `XRes` row stride) and `backBuffer`; FOUNTAIN rebuilds the
+  blur backing page and TBR `SBufferHead` (sized by `YRes / TILESIZE`);
+  GLAT rebuilds `Page1-4 / FinalPage / FinalSurf`'s child
+  `SDL_Texture`, reloads + re-Scales `LogoImage`, and rebuilds the
+  grid arrays.
+
+## Global state (audit-relevant for any future tick-context refactor)
+
+The per-frame mutable globals that a `FrameContext`/`RenderContext`
+rewrite would need to either thread through a struct or promote to TLS:
 
 - `Timer`, `Frames`, `CurFrame`, `dTime`, `g_FrameTime` — timing
 - `FList`, `SList`, `CAll`, `CPolys`, `COmnies`, `CPcls`, `Polys` — the
@@ -211,21 +284,54 @@ either thread through a context struct or promote to TLS:
   not the global, so the store itself is redundant for correctness but
   kept for debug introspection.
 
-Mostly-const-after-init (loaded once, not mutated per-frame):
+Surface globals — **mutate on resize**, and `VPage` additionally cycles
+each frame in lock-render mode:
+
+- `XRes`, `YRes`, `XRes_1`, `YRes_1`, `CntrX`, `CntrY`, `CntrEX`,
+  `CntrEY`, `BPP`, `CPP`, `BPP_Shift`, `VESA_BPSL`, `PageSize`,
+  `PageSizeW`, `PageSizeDW`, `YOffs` — re-published by
+  `VESA_Surface2Global` on every resize.
+- `VPage` (color framebuffer) — points at the SDL_Texture's locked
+  pixel buffer in lock-render mode; updated each frame in `V_Flip`'s
+  re-lock step (in practice the SW renderer returns the same pointer,
+  but the engine must not assume so).
+- `ZPage16` — 16-bit Z-buffer, separate `word*` malloc, freed +
+  reallocated on resize.
+- `g_fontScale` — auto-doubles to 2 at `XRes >= 1600` so HiDPI overlays
+  remain legible; per-line +15 advance in callers also multiplied.
+- `g_pendingResize`, `g_engineSurfaceMutex` — the cross-thread resize
+  channel itself (see "Resize coordination").
+
+Mostly-const-after-init:
 
 - `MatLib`, `Font1`, `Active_Font`, `MMXState`, scene trees themselves
   (meshes, materials, textures, mipmaps — only the *transformed* copies
   change per frame), identity matrices, `Phong_Mapping`
 - FPU control-word state
-- `XRes`, `YRes`, `BPP`, `PageSize`, `VPage` (allocation is fixed;
-  contents change every frame but the pointer is stable)
 
 ## Rendering backends
 
-`DEMO/SDL2.cpp` is the only active backend. It installs a `Flip` hook that
-streams `VPage` into a single streaming `SDL_Texture` (32-bit XRGB) and
-`SDL_RenderCopy`s it. The legacy DirectDraw / D3D8 / GDI backends were
-removed during Tier-1 cleanup.
+`DEMO/SDL2.cpp` is the only active backend. The legacy DirectDraw / D3D8 /
+GDI backends were removed during Tier-1 cleanup.
+
+`V_Flip` is dual-mode:
+
+- **Lock-render** (engine surface, `VSurf_LockRender` flag set in
+  `V_Create`): the engine writes directly into the `SDL_Texture`'s
+  locked pixel buffer for the duration of a frame. `V_Flip` only needs
+  to draw the resolution overlay, `SDL_UnlockTexture` (commit),
+  letterbox-fill the bar regions, `SDL_RenderCopy` + `Present`, then
+  `SDL_LockTexture` again and republish `VS->Data` + the surface
+  globals via `VESA_Surface2Global` for the next frame's writes. No
+  per-frame `SDL_UpdateTexture` memcpy. Saves ~8 ms/frame at HiDPI.
+- **Update-texture** (child surfaces — currently just GLAT's
+  `FinalSurf`): `VS->Data` is a separate malloc'd buffer that the
+  scene's compositing path writes to; `V_Flip` does
+  `SDL_UpdateTexture(handle, NULL, Data, BPSL)` and then
+  letterbox+RenderCopy. Child surfaces must **not** trigger
+  `VESA_Surface2Global` in `V_Flip` — that would clobber engine
+  globals with the child's dimensions (see commit 9668bae for the
+  regression that motivated the dual-mode split).
 
 ## What's *not* done
 
