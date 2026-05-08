@@ -475,6 +475,7 @@ material global ID or ptr
 #include <iostream>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include "MainLoop.h"
 #endif
 #ifndef __EMSCRIPTEN__
 #include <unistd.h>
@@ -1289,40 +1290,44 @@ int main(int argc, const char *argv[])
 	freopen("logfile.txt", "w+", stdout);
 
 #ifdef __EMSCRIPTEN__
-	// Browsers require a user gesture before AudioContext can start. To keep
-	// audio in lockstep with scene playback, defer the entire demo (CodeEntry)
-	// until the first input event arrives. Show a hint overlay until then.
-	// PROXY_TO_PTHREAD: main() runs on a pthread worker with no DOM access,
-	// so dispatch DOM work to the browser main thread via MAIN_THREAD_EM_ASM.
-	MAIN_THREAD_EM_ASM({
-		var hint = document.createElement('div');
-		hint.id = 'rev-click-hint';
-		hint.textContent = 'Click or press any key to start';
-		hint.style.cssText =
-			'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
-			'padding:1em 2em;background:rgba(0,0,0,0.75);color:#fff;' +
-			'font:18px/1.2 sans-serif;border-radius:4px;z-index:9999;' +
-			'pointer-events:none;';
-		document.body.appendChild(hint);
+	// Wasm: main() runs on the actual browser main thread. We can't block
+	// here — that'd freeze the page. Instead, set up audio + ThreadPool +
+	// modplayer synchronously (cheap), arm the user-gesture wait + spawn
+	// the background init thread via DemoBoot, register the rAF callback,
+	// and return. The runtime stays alive (EXIT_RUNTIME=0); DemoTick drives
+	// scenes one frame at a time on browser main where WebGL2 actually
+	// works (the OffscreenCanvas + commit_frame path from a pthread is
+	// known-broken — emscripten#17816 / #23806).
+	InitPolyStats(200);
+	ThreadPool::instance().init([]() {
+		InitPolyStats(200);
+		FPU_LPrecision();
 	});
-	while (1) {
-		SDL_Event event;
-		SDL_WaitEvent(&event);
-		if (event.type == SDL_QUIT) {
-			SDL_Quit();
-			return 0;
-		}
-		if (event.type == SDL_KEYDOWN ||
-		    event.type == SDL_MOUSEBUTTONDOWN ||
-		    event.type == SDL_FINGERDOWN) {
-			break;
-		}
+	Generate_RGBFlares();
+	ModplayerHandle sh = nullptr;
+	if (g_playMusic) {
+		sh = Modplayer_Create("REVIVAL.XM");
+		if (sh) Modplayer_SetDisplay(sh, false);
+		g_RevModuleHandle = sh;
 	}
-	MAIN_THREAD_EM_ASM({
-		var h = document.getElementById('rev-click-hint');
-		if (h) h.remove();
-	});
-	fprintf(stderr, "[DEMO] user gesture observed, starting demo\n");
+	Timer = 0;
+	DemoBoot(sh);
+	emscripten_set_main_loop(
+		[](){
+			if (!DemoTick()) {
+				emscripten_cancel_main_loop();
+			}
+		},
+		0,    // fps=0 -> use requestAnimationFrame
+		false // don't simulate-infinite-loop; let main() return cleanly.
+	);
+	// Leak the SDL window: main() is about to return and EXIT_RUNTIME=0
+	// keeps the runtime alive for rAF, but C++ destructors still fire on
+	// return. The window/renderer/etc. need to outlive main(). The OS
+	// reaps everything when the tab closes; emscripten_cancel_main_loop
+	// in DemoTick:DONE handles graceful teardown.
+	(void)window.release();
+	return 0;
 #endif
 
 	fprintf(stderr, "[DEMO] spawning CodeEntry thread\n");

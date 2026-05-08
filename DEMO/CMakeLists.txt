@@ -25,6 +25,8 @@ set(DEMO_SOURCES
     GLAT.H
     GREETS.CPP
     GREETS.H
+    MainLoop.cpp
+    MainLoop.h
     ImageCompression.cpp
     ImageCompression.h
     PhotonTracer.cpp
@@ -56,30 +58,36 @@ if(EMSCRIPTEN)
         FDS
         Modplayer)
 
-    # -pthread + PROXY_TO_PTHREAD: run main() on a pthread worker so the
-    # existing blocking patterns (ThreadPool condvar waits, SDL_WaitEvent)
-    # work unchanged without freezing the browser UI thread.
+    # main() runs on the actual browser main thread (no PROXY_TO_PTHREAD).
+    # The blocking demo loop has been replaced with a state machine in
+    # MainLoop.cpp driven by emscripten_set_main_loop. WebGL on browser-
+    # main works fine; the OffscreenCanvas + commit_frame path from a
+    # pthread does not (emscripten#17816 / #23806). Heavy init still
+    # happens off-main: MainLoop spawns a single std::thread that runs
+    # all Initialize_* in sequence, gating each scene's start on the
+    # corresponding atomic flag.
     # --preload-file Runtime: embed the asset tree so the demo can read
     # rev.cfg / SCENES / TEXTURES / FONTS relative to "/".
     target_compile_options(${PROJECT_NAME} PRIVATE -pthread)
     target_link_options(${PROJECT_NAME} PRIVATE
         -pthread
-        -sPROXY_TO_PTHREAD=1
-        # Pool size: main-proxy + CodeEntry + nested init thread + ThreadPool
-        # render workers. navigator.hardwareConcurrency alone isn't enough;
-        # add headroom and allow on-demand creation above the pool.
+        # Pool size: init thread + ThreadPool render workers + audio
+        # worker + a couple of headroom slots. Up from native concurrency
+        # because pthread workers are actual web workers — not free.
         -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+4
         # Emscripten's default pthread stack is 64KB which overflows during
         # XM module parsing (and probably elsewhere — the engine wasn't
         # written with such a tight stack in mind). Match a typical native
-        # default of ~4MB for both the proxy main thread and pthread workers.
+        # default of ~4MB.
         -sSTACK_SIZE=4MB
         -sDEFAULT_PTHREAD_STACK_SIZE=4MB
-        -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=128MB
         -sASSERTIONS=1
-        -sEXIT_RUNTIME=1
+        # EXIT_RUNTIME=0: main() returns immediately after registering the
+        # rAF callback; the runtime must stay alive for the callback to
+        # keep firing. emscripten_cancel_main_loop tears down at DONE.
+        -sEXIT_RUNTIME=0
         -sUSE_SDL=2
         # Emit a wasm name section so browser stack traces show function
         # names instead of wasm-function[N]. Cheap (no codegen impact) and
