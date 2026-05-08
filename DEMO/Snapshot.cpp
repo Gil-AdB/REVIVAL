@@ -124,12 +124,14 @@ bool initSnapshotEnvironment(int xres, int yres) {
     surf.BPSL = surf.CPP * surf.X;
     surf.PageSize = surf.BPSL * surf.Y;
     const std::size_t zSize = sizeof(word) * static_cast<std::size_t>(xres) * yres;
-    surf.Data = static_cast<byte*>(std::malloc(surf.PageSize + zSize));
-    if (!surf.Data) {
-        std::fprintf(stderr, "[SNAPSHOT] malloc framebuffer failed\n");
+    surf.Data = static_cast<byte*>(std::malloc(surf.PageSize));
+    surf.Z16  = static_cast<byte*>(std::malloc(zSize));
+    if (!surf.Data || !surf.Z16) {
+        std::fprintf(stderr, "[SNAPSHOT] malloc framebuffer / Z16 failed\n");
         return false;
     }
-    std::memset(surf.Data, 0, surf.PageSize + zSize);
+    std::memset(surf.Data, 0, surf.PageSize);
+    std::memset(surf.Z16,  0, zSize);
     surf.Flip = &noop_flip;
 
     VESA_VPageExternal(&surf);
@@ -235,7 +237,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         write_pgm16(zPath,
-                    reinterpret_cast<const word*>(MainSurf->Data + MainSurf->PageSize),
+                    reinterpret_cast<const word*>(MainSurf->Z16),
                     xres, yres);
         ++produced;
     }
@@ -330,7 +332,7 @@ int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         write_pgm16(zPath,
-                    reinterpret_cast<const word*>(MainSurf->Data + MainSurf->PageSize),
+                    reinterpret_cast<const word*>(MainSurf->Z16),
                     xres, yres);
         ++produced;
     }
