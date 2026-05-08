@@ -14,7 +14,11 @@
 #include <map>
 
 #define FRONT_TO_BACK_SORTING
-#define CITY_RAIN
+// Rain particles render through a dedicated mapper (`drawRainDrop`) outside
+// the regular tile rasterizer pipeline. Disabling for now while the
+// deferred path stabilizes — rain on top of the deferred-lit city was
+// distracting and the special-case rasterizer doesn't go through Mekalele.
+// #define CITY_RAIN
 
 static Scene *CitySc;
 Scene *SkySc;

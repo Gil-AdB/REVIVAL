@@ -1634,6 +1634,25 @@ static void Render_DeferredLighting() {
 				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * Sc->Ambient.R;
 			}
 
+			// View direction (pixel -> camera) in view space. Camera is at
+			// the view-space origin, so view_dir = -pos / |pos|. Used by
+			// the Blinn-Phong specular term below; cheap to skip for matte
+			// materials.
+			const bool wantSpecular = Mat->Specular > 0.0f && Mat->Glossiness > 0;
+			float vx = 0, vy = 0, vz = 0;
+			if (wantSpecular) {
+				const float vlen2 = x*x + y*y + z*z;
+				const float vlenInv = 1.0f / std::sqrt(vlen2);
+				vx = -x * vlenInv;
+				vy = -y * vlenInv;
+				vz = -z * vlenInv;
+			}
+
+			// Specular accumulator — kept separate from diffuse so it can
+			// be added AFTER texture modulation (highlights are independent
+			// of base-color tint, which is the standard model).
+			float sB = 0, sG = 0, sR = 0;
+
 			// Per-omni Lambertian + linear distance falloff. Same
 			// k = dot * len_inv * (1 - dist*rRange) shape as forward
 			// Lighting()'s `k = dot * len * (1 - rRange/len)` (where
@@ -1654,6 +1673,34 @@ static void Render_DeferredLighting() {
 				lB += intensity * L.Col.B;
 				lG += intensity * L.Col.G;
 				lR += intensity * L.Col.R;
+
+				// Blinn-Phong specular: H = normalize(L_dir + V_dir),
+				// spec = max(0, n·H)^Glossiness * Specular * light * falloff.
+				// Same falloff factor (1 - dist*rRange) so the highlight
+				// fades with distance like the diffuse term.
+				if (wantSpecular) {
+					// L_dir = w / dist (already have lenInv = 1/dist)
+					const float ldx = wx * lenInv;
+					const float ldy = wy * lenInv;
+					const float ldz = wz * lenInv;
+					float hx = ldx + vx;
+					float hy = ldy + vy;
+					float hz = ldz + vz;
+					const float hLen2 = hx*hx + hy*hy + hz*hz;
+					if (hLen2 > 0.0f) {
+						const float hLenInv = 1.0f / std::sqrt(hLen2);
+						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+						const float NdotH = nx*hx + ny*hy + nz*hz;
+						if (NdotH > 0.0f) {
+							const float spec = std::pow(NdotH, float(Mat->Glossiness));
+							const float specStrength = spec * Mat->Specular *
+								(1.0f - dist * L.rRange);
+							sB += specStrength * L.Col.B;
+							sG += specStrength * L.Col.G;
+							sR += specStrength * L.Col.R;
+						}
+					}
+				}
 			}
 
 			// Saturation cap (matches forward at 250).
@@ -1664,14 +1711,18 @@ static void Render_DeferredLighting() {
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
 
-			// Modulate texel by light, /256 (matches TheOtherBarry's
-			// colorize step).
-			int outB = int(texB * lB) >> 8;
-			int outG = int(texG * lG) >> 8;
-			int outR = int(texR * lR) >> 8;
+			// Modulate texel by diffuse light, /256 (matches TheOtherBarry's
+			// colorize step). Specular is added AFTER, independent of
+			// texture color — keeps highlights white-ish on tinted surfaces.
+			int outB = (int(texB * lB) >> 8) + int(sB);
+			int outG = (int(texG * lG) >> 8) + int(sG);
+			int outR = (int(texR * lR) >> 8) + int(sR);
 			if (outB > 255) outB = 255;
 			if (outG > 255) outG = 255;
 			if (outR > 255) outR = 255;
+			if (outB < 0)   outB = 0;
+			if (outG < 0)   outG = 0;
+			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
