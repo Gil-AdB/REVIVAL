@@ -1528,64 +1528,40 @@ bool deferredEnabled() {
 //   - View-space lighting (forward transforms each omni into the current
 //     mesh's object space; we transform once per frame into view space
 //     and reconstruct pixel positions there).
-// Skipped for phase A: env-map sampling (Material->EnvTexture; phase C),
-// specular (phase B), tile-based light culling.
 //
-// Scalar implementation; SIMD-vectorize once we have a profile.
+// Parallelism: same 6×4 tile-job model the rasterizer uses. Per-frame
+// setup (matTable, view-space omni list, screen-projection constants)
+// happens once on the demo thread; per-tile work is enqueued onto the
+// ThreadPool. Tiles are independent (each writes a disjoint slice of
+// VPage). Per-pixel work is scalar; SIMD is a future tighter pass.
 struct ViewLight {
 	Vector  Pos;     // view-space
 	Color   Col;     // (O->L * O->ISize) — material multiplier folded in per-pixel below
 	float   Range, Range2, rRange;
 };
 
-static void Render_DeferredLighting() {
-	if (!g_gbuffer || !ZPage16 || !VPage) return;
-	const meka::GBuffer &gb = *g_gbuffer;
-	const size_t numPixels = size_t(XRes) * size_t(YRes);
-	if (gb.normal.size() < numPixels || gb.txtr.size() < numPixels) return;
+// Per-frame setup shared across all tile jobs. Captured by reference
+// in the lambdas; lifetime ends when Render() returns (after the
+// tileCounter wait in Render_DeferredLighting).
+struct DeferredLightingCtx {
+	const meka::GBuffer *gb;
+	MatTable             matTable;
+	const ViewLight     *lights;
+	int                  numLights;
+	float                invFOVX;
+	float                invFOVY;
+	float                invZScale;
+	Scene               *Sc;
+};
 
-	Scene *Sc = CurScene;
-	if (!Sc) return;
-
-	MatTable matTable = Scene_GetMatTable(Sc);
-	if (!matTable.data || matTable.count == 0) return;
-
-	// Build view-space omni list once per frame. Lights stay in
-	// Sc->OmniHead (world space); we subtract View->ISource and rotate
-	// by View->Mat — same transform applied to T->IPos in
-	// Animate_Objects (after the bounding-sphere test there). No mesh
-	// scale to compensate for here.
-	constexpr int MAX_LIGHTS = 128;
-	ViewLight lights[MAX_LIGHTS];
-	int numLights = 0;
-	for (Omni *O = Sc->OmniHead; O && numLights < MAX_LIGHTS; O = O->Next) {
-		if (!(O->Flags & Omni_Active)) continue;
-		Vector u, w;
-		Vector_Sub(&O->IPos, &View->ISource, &u);
-		MatrixXVector(View->Mat, &u, &w);
-		ViewLight &L = lights[numLights++];
-		L.Pos    = w;
-		L.Col.B  = O->L.B * O->ISize;
-		L.Col.G  = O->L.G * O->ISize;
-		L.Col.R  = O->L.R * O->ISize;
-		L.Col.A  = O->L.A * O->ISize;
-		L.Range  = O->IRange;
-		L.Range2 = L.Range * L.Range;
-		L.rRange = 1.0f / L.Range;
-	}
-
-	// Camera-space reconstruction constants. Same shape as the inverse
-	// of Transform_Objects' projection: PX = CntrEX + FOVX * x_view/z_view
-	// gives x_view = (PX - CntrEX) * z_view / FOVX. PY is flipped
-	// (TPos.y is negated by the M[1] *= -PY scaling in setup).
-	const float invFOVX = 1.0f / FOVX;
-	const float invFOVY = 1.0f / FOVY;
-	const float invZScale = 1.0f / float(g_zscale);
-
+static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
+                                          int x1, int y1, int x2, int y2)
+{
+	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 
-	for (int py = 0; py < YRes; ++py) {
-		for (int px = 0; px < XRes; ++px) {
+	for (int py = y1; py < y2; ++py) {
+		for (int px = x1; px < x2; ++px) {
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;  // pixel not touched by Mekalele
@@ -1595,8 +1571,8 @@ static void Render_DeferredLighting() {
 			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
 			const uint32_t matID       = (mat32 >> 20) & 0xFF;
 			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
-			if (matID >= matTable.count) continue;
-			Material *Mat = matTable.data[matID];
+			if (matID >= ctx.matTable.count) continue;
+			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
 
 			// Texture sample: Mekalele's apply_exact already wrote a
@@ -1617,21 +1593,21 @@ static void Render_DeferredLighting() {
 			// Reconstruct view-space position. ZPage16 stores
 			// 0xFF80 - round(g_zscale * z), so:
 			//   z = (0xFF80 - zEnc) / g_zscale
-			const float z = float(0xFF80 - zEnc) * invZScale;
-			const float x = (float(px) - CntrEX) * z * invFOVX;
-			const float y = (CntrEY - float(py)) * z * invFOVY;
+			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
+			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
+			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
 
 			// Ambient. Same expression as forward Lighting() — except
 			// here Mat is per-pixel, not per-mesh-Mat[0].
 			float lB, lG, lR;
 			if (Mat->Txtr) {
-				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.B;
-				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.G;
-				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.R;
+				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
+				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
+				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
 			} else {
-				lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * Sc->Ambient.B;
-				lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * Sc->Ambient.G;
-				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * Sc->Ambient.R;
+				lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * ctx.Sc->Ambient.B;
+				lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * ctx.Sc->Ambient.G;
+				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * ctx.Sc->Ambient.R;
 			}
 
 			// View direction (pixel -> camera) in view space. Camera is at
@@ -1663,8 +1639,8 @@ static void Render_DeferredLighting() {
 			// k = dot * len_inv * (1 - dist*rRange) shape as forward
 			// Lighting()'s `k = dot * len * (1 - rRange/len)` (where
 			// len is rsqrt(len2) = 1/dist).
-			for (int li = 0; li < numLights; ++li) {
-				const ViewLight &L = lights[li];
+			for (int li = 0; li < ctx.numLights; ++li) {
+				const ViewLight &L = ctx.lights[li];
 				const float wx = L.Pos.x - x;
 				const float wy = L.Pos.y - y;
 				const float wz = L.Pos.z - z;
@@ -1795,6 +1771,83 @@ static void Render_DeferredLighting() {
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
+// Per-frame setup + dispatch tile jobs across the ThreadPool. Same 6×4
+// split the rasterizer uses; tiles are independent (each writes a
+// disjoint slice of VPage). Reuses the renderns::tileCounter +
+// condition variable that Render() already uses for the rasterizer
+// pass — fine because we wait synchronously between Render's tile
+// dispatch and our own.
+static void Render_DeferredLighting() {
+	if (!g_gbuffer || !ZPage16 || !VPage) return;
+	const meka::GBuffer &gb = *g_gbuffer;
+	const size_t numPixels = size_t(XRes) * size_t(YRes);
+	if (gb.normal.size() < numPixels || gb.txtr.size() < numPixels) return;
+
+	Scene *Sc = CurScene;
+	if (!Sc) return;
+
+	MatTable matTable = Scene_GetMatTable(Sc);
+	if (!matTable.data || matTable.count == 0) return;
+
+	// Build view-space omni list once per frame.
+	constexpr int MAX_LIGHTS = 128;
+	static ViewLight lights[MAX_LIGHTS];  // function-static; lifetime spans dispatch + wait
+	int numLights = 0;
+	for (Omni *O = Sc->OmniHead; O && numLights < MAX_LIGHTS; O = O->Next) {
+		if (!(O->Flags & Omni_Active)) continue;
+		Vector u, w;
+		Vector_Sub(&O->IPos, &View->ISource, &u);
+		MatrixXVector(View->Mat, &u, &w);
+		ViewLight &L = lights[numLights++];
+		L.Pos    = w;
+		L.Col.B  = O->L.B * O->ISize;
+		L.Col.G  = O->L.G * O->ISize;
+		L.Col.R  = O->L.R * O->ISize;
+		L.Col.A  = O->L.A * O->ISize;
+		L.Range  = O->IRange;
+		L.Range2 = L.Range * L.Range;
+		L.rRange = (L.Range > 0.0f) ? 1.0f / L.Range : 0.0f;
+	}
+
+	static DeferredLightingCtx ctx;  // function-static so the lambda captures by reference safely
+	ctx.gb        = &gb;
+	ctx.matTable  = matTable;
+	ctx.lights    = lights;
+	ctx.numLights = numLights;
+	ctx.invFOVX   = 1.0f / FOVX;
+	ctx.invFOVY   = 1.0f / FOVY;
+	ctx.invZScale = 1.0f / float(g_zscale);
+	ctx.Sc        = Sc;
+
+	constexpr int numTilesX = 6;
+	constexpr int numTilesY = 4;
+	const int tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
+	const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+
+	renderns::tileCounter = 0;
+	for (int j = 0; j < numTilesY; ++j) {
+		const int y1 = tileSizeY * j;
+		const int y2 = std::min(y1 + tileSizeY, YRes);
+		for (int i = 0; i < numTilesX; ++i) {
+			const int x1 = tileSizeX * i;
+			const int x2 = std::min(x1 + tileSizeX, XRes);
+			ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
+				Render_DeferredLighting_Tile(ctx, x1, y1, x2, y2);
+			});
+		}
+	}
+	{
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::condition.wait(lock, []{
+			return renderns::tileCounter == numTilesX * numTilesY;
+		});
 	}
 }
 
