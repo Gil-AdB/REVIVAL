@@ -314,7 +314,7 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 		// near-full brightness. Deferred lighting would re-shade against
 		// Mat->Diffuse / Sc->Ambient (both effectively zero on sky-cube
 		// materials) and produce a black backdrop.
-		Render(/*forceForward=*/true);
+		Render(RenderPath::ForceForward);
 		FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 	}
 	View->ISource = PrevViewPos;

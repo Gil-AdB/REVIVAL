@@ -1560,10 +1560,21 @@ void SetDeferredWaterMatID(int id) {
 // happens once on the demo thread; per-tile work is enqueued onto the
 // ThreadPool. Tiles are independent (each writes a disjoint slice of
 // VPage). Per-pixel work is scalar; SIMD is a future tighter pass.
-struct ViewLight {
-	Vector  Pos;     // view-space
-	Color   Col;     // (O->L * O->ISize) — material multiplier folded in per-pixel below
-	float   Range, Range2, rRange;
+// View-space omni storage. SoA layout so the per-pixel inner loop can
+// load 8 omnis at a time into Vec8f for the diffuse accumulation.
+// Padded entries (index >= numLights, up to MAX_LIGHTS) are zero so
+// they fail both the dot >= 0 and len2 <= range2 tests, contributing
+// zero — no need to round numLights up to a multiple of 8 explicitly.
+constexpr int DEFERRED_MAX_LIGHTS = 128;
+struct ViewLightsSoA {
+	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colB[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colG[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colR[DEFERRED_MAX_LIGHTS];
+	alignas(32) float range2[DEFERRED_MAX_LIGHTS];
+	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
 };
 
 // Per-frame setup shared across all tile jobs. Captured by reference
@@ -1572,7 +1583,7 @@ struct ViewLight {
 struct DeferredLightingCtx {
 	const meka::GBuffer *gb;
 	MatTable             matTable;
-	const ViewLight     *lights;
+	const ViewLightsSoA *lights;
 	int                  numLights;
 	float                invFOVX;
 	float                invFOVY;
@@ -1681,33 +1692,40 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// every water pixel and saturates lB at 250.
 			const bool isWater = (int(matID) == ctx.waterMatID);
 
-			// Per-omni Lambertian + linear distance falloff. Same
-			// k = dot * len_inv * (1 - dist*rRange) shape as forward
-			// Lighting()'s `k = dot * len * (1 - rRange/len)` (where
-			// len is rsqrt(len2) = 1/dist).
+			// Scalar omni loop with per-omni early-out on dot/range
+			// tests. Tried an 8-wide Vec8f variant against SoA-padded
+			// arrays; on arm64 it was 10-15% *slower* because simde maps
+			// Vec8f to a pair of 128-bit NEON ops with full per-lane
+			// work, while the scalar path's branch predictor learns the
+			// "most omnis are out of range" pattern and skips the
+			// full math entirely. The SoA storage is kept anyway: makes
+			// per-omni reads sequential per array and gives a fighting
+			// chance to a future native-NEON or true-AVX2 build.
 			for (int li = 0; !isWater && li < ctx.numLights; ++li) {
-				const ViewLight &L = ctx.lights[li];
-				const float wx = L.Pos.x - x;
-				const float wy = L.Pos.y - y;
-				const float wz = L.Pos.z - z;
+				const float Lpx = ctx.lights->posX[li];
+				const float Lpy = ctx.lights->posY[li];
+				const float Lpz = ctx.lights->posZ[li];
+				const float wx = Lpx - x;
+				const float wy = Lpy - y;
+				const float wz = Lpz - z;
 				const float dot = wx * nx + wy * ny + wz * nz;
 				if (dot < 0.0f) continue;
 				const float len2 = wx*wx + wy*wy + wz*wz;
-				if (len2 > L.Range2) continue;
+				const float r2 = ctx.lights->range2[li];
+				if (len2 > r2) continue;
 				const float lenInv = 1.0f / std::sqrt(len2);
 				const float dist   = 1.0f / lenInv;
-				const float k = dot * lenInv * (1.0f - dist * L.rRange);
+				const float rRange = ctx.lights->rRange[li];
+				const float k = dot * lenInv * (1.0f - dist * rRange);
 				const float intensity = k * Mat->Diffuse;
-				lB += intensity * L.Col.B;
-				lG += intensity * L.Col.G;
-				lR += intensity * L.Col.R;
+				const float Lcb = ctx.lights->colB[li];
+				const float Lcg = ctx.lights->colG[li];
+				const float Lcr = ctx.lights->colR[li];
+				lB += intensity * Lcb;
+				lG += intensity * Lcg;
+				lR += intensity * Lcr;
 
-				// Blinn-Phong specular: H = normalize(L_dir + V_dir),
-				// spec = max(0, n·H)^Glossiness * Specular * light * falloff.
-				// Same falloff factor (1 - dist*rRange) so the highlight
-				// fades with distance like the diffuse term.
 				if (wantSpecular) {
-					// L_dir = w / dist (already have lenInv = 1/dist)
 					const float ldx = wx * lenInv;
 					const float ldy = wy * lenInv;
 					const float ldz = wz * lenInv;
@@ -1722,10 +1740,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						if (NdotH > 0.0f) {
 							const float spec = std::pow(NdotH, gloss);
 							const float specStrength = spec * Mat->Specular *
-								(1.0f - dist * L.rRange);
-							sB += specStrength * L.Col.B;
-							sG += specStrength * L.Col.G;
-							sR += specStrength * L.Col.R;
+								(1.0f - dist * rRange);
+							sB += specStrength * Lcb;
+							sG += specStrength * Lcg;
+							sR += specStrength * Lcr;
 						}
 					}
 				}
@@ -1807,29 +1825,30 @@ static void Render_DeferredLighting() {
 	if (!matTable.data || matTable.count == 0) return;
 
 	// Build view-space omni list once per frame.
-	constexpr int MAX_LIGHTS = 128;
-	static ViewLight lights[MAX_LIGHTS];  // function-static; lifetime spans dispatch + wait
+	static ViewLightsSoA lights;  // function-static; lifetime spans dispatch + wait
+	std::memset(&lights, 0, sizeof(lights));
 	int numLights = 0;
-	for (Omni *O = Sc->OmniHead; O && numLights < MAX_LIGHTS; O = O->Next) {
+	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_LIGHTS; O = O->Next) {
 		if (!(O->Flags & Omni_Active)) continue;
 		Vector u, w;
 		Vector_Sub(&O->IPos, &View->ISource, &u);
 		MatrixXVector(View->Mat, &u, &w);
-		ViewLight &L = lights[numLights++];
-		L.Pos    = w;
-		L.Col.B  = O->L.B * O->ISize;
-		L.Col.G  = O->L.G * O->ISize;
-		L.Col.R  = O->L.R * O->ISize;
-		L.Col.A  = O->L.A * O->ISize;
-		L.Range  = O->IRange;
-		L.Range2 = L.Range * L.Range;
-		L.rRange = (L.Range > 0.0f) ? 1.0f / L.Range : 0.0f;
+		const float Range = O->IRange;
+		lights.posX[numLights]   = w.x;
+		lights.posY[numLights]   = w.y;
+		lights.posZ[numLights]   = w.z;
+		lights.colB[numLights]   = O->L.B * O->ISize;
+		lights.colG[numLights]   = O->L.G * O->ISize;
+		lights.colR[numLights]   = O->L.R * O->ISize;
+		lights.range2[numLights] = Range * Range;
+		lights.rRange[numLights] = (Range > 0.0f) ? 1.0f / Range : 0.0f;
+		++numLights;
 	}
 
 	static DeferredLightingCtx ctx;  // function-static so the lambda captures by reference safely
 	ctx.gb        = &gb;
 	ctx.matTable  = matTable;
-	ctx.lights    = lights;
+	ctx.lights    = &lights;
 	ctx.numLights = numLights;
 	ctx.invFOVX    = 1.0f / FOVX;
 	ctx.invFOVY    = 1.0f / FOVY;
@@ -1862,7 +1881,7 @@ static void Render_DeferredLighting() {
 	}
 }
 
-void Render(bool forceForward)
+void Render(RenderPath path)
 {
 	constexpr auto		numTilesX = 6;
 	constexpr auto		numTilesY = 4;
@@ -1877,12 +1896,10 @@ void Render(bool forceForward)
 	// vector. Safer to fall back to forward in that case (and any
 	// other ctx where storage hasn't been provisioned).
 	//
-	// forceForward bypasses the deferred dispatch — used by RenderSkyCube,
-	// whose vertex-stored LR/LG/LB=255 brightness pass-through is what
-	// the forward fillers consume; the deferred per-pixel lighting model
-	// would re-shade those faces against Mat->Diffuse / Sc->Ambient and
-	// (with sky-cube materials authoring neither) come out black.
-	bool deferred = deferredEnabled() && !forceForward;
+	// RenderPath::ForceForward bypasses the deferred dispatch — used by
+	// RenderSkyCube and the City cube-map bake, whose lighting models
+	// are unsuitable for the deferred per-pixel pass.
+	bool deferred = deferredEnabled() && (path != RenderPath::ForceForward);
 	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
 		deferred = false;
 	}

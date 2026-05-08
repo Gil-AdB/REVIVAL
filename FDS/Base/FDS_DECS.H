@@ -377,7 +377,11 @@ void Construct_FaceList(Scene *Sc);
 void StaticLighting(Scene *Sc);
 void Lighting(Scene *Sc);
 void Restore_Splines(Scene *Sc);
-void Render(bool forceForward = false);
+enum class RenderPath {
+	Default,        // honor FDS_DEFERRED env var
+	ForceForward,   // forward fillers regardless (sky cube, cube-map bake)
+};
+void Render(RenderPath path = RenderPath::Default);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
 #endif

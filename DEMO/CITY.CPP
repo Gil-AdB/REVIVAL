@@ -1716,12 +1716,17 @@ void Initialize_City()
 			Reflected_Transform(CitySc);
 			if (0 != CAll) {
 				Radix_SortingASM(FList, SList, CAll);
-				Render();
+				// Cube-map bake doesn't need deferred quality — and the
+				// G-buffer is sized for the engine framebuffer, not the
+				// 1024×1024 TmpSurf this loop uses, so deferred would
+				// fall back to forward anyway. Spelling it out skips
+				// the size-check + the otherwise-pointless mat32 clear.
+				Render(RenderPath::ForceForward);
 			}
 			Transform_Objects(CitySc);
 			if (0 != CAll) {
 				Radix_SortingASM(FList, SList, CAll);
-				Render();
+				Render(RenderPath::ForceForward);
 			}
 			//if (!bailout) {
 			//	if (Keyboard[ScESC]) {
