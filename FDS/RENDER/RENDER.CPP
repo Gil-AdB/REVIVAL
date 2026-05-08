@@ -1216,8 +1216,16 @@ void StaticLighting(Scene *Sc)
 
 
 
+// Deferred path computes lighting per-pixel in Render_DeferredLighting;
+// running per-vertex Lighting() too is wasted work whose output (Vtx->LR/
+// LG/LB/LA) the deferred path doesn't consume. Skip when the env var is
+// set. Forward path keeps running it as before.
+extern bool deferredEnabled();
+
 void Lighting(Scene *Sc)
 {
+	if (deferredEnabled()) return;
+
 	TriMesh *T;
 	Vertex *V, *VE;
 	Face *F, *FE;
@@ -1493,10 +1501,11 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 }
 
 // FDS_DEFERRED=1 in env enables the experimental G-buffer path: tiled
-// dispatch goes to RenderInnerMekalele instead of RenderInner, then a
-// post-pass decodes the G-buffer's octahedral normals into RGB pixels
-// for visual inspection (no real lighting yet).
-static bool deferredEnabled() {
+// dispatch goes to RenderInnerMekalele instead of RenderInner, then
+// Render_DeferredLighting consumes the G-buffer to produce final pixels.
+// Lighting() also early-returns when this is set — its per-vertex
+// output is unused on the deferred path.
+bool deferredEnabled() {
 	static bool cached = []{
 		const char *s = std::getenv("FDS_DEFERRED");
 		return s && s[0] == '1';
@@ -1504,26 +1513,168 @@ static bool deferredEnabled() {
 	return cached;
 }
 
-// Walk every pixel; where Mekalele wrote (ZPage16[i] != 0 — Z was cleared
-// to 0 at frame start), decode the oct-packed normal and map to RGB via
-// (n*0.5 + 0.5)*255. Visualization-only — no shading, just normal-as-color.
-static void Visualize_GBufferNormal() {
-	if (!g_gbuffer) return;
+// Phase A deferred lighting pass. Replaces the per-vertex Lighting() +
+// per-pixel colorize() pipeline with one per-pixel pass: decode mat32 →
+// Material*, sample texture, decode oct normal, reconstruct view-space
+// position from Z, ambient + Lambertian + linear distance falloff
+// per omni, modulate texel by light, write final pixel.
+//
+// Matches the forward Lighting() model 1:1 — same Lambert × linear
+// falloff, same 250-saturation, same Diffuse/Luminosity/BaseCol use.
+// Differences vs forward:
+//   - Per-pixel material (forward takes Mat[0] per mesh — incidental
+//     improvement, not a divergence).
+//   - Per-pixel position/normal (forward Gouraud-interpolates per vertex).
+//   - View-space lighting (forward transforms each omni into the current
+//     mesh's object space; we transform once per frame into view space
+//     and reconstruct pixel positions there).
+// Skipped for phase A: env-map sampling (Material->EnvTexture; phase C),
+// specular (phase B), tile-based light culling.
+//
+// Scalar implementation; SIMD-vectorize once we have a profile.
+struct ViewLight {
+	Vector  Pos;     // view-space
+	Color   Col;     // (O->L * O->ISize) — material multiplier folded in per-pixel below
+	float   Range, Range2, rRange;
+};
+
+static void Render_DeferredLighting() {
+	if (!g_gbuffer || !ZPage16 || !VPage) return;
 	const meka::GBuffer &gb = *g_gbuffer;
-	const size_t n = size_t(XRes) * size_t(YRes);
-	if (gb.normal.size() < n) return;
+	const size_t numPixels = size_t(XRes) * size_t(YRes);
+	if (gb.normal.size() < numPixels || gb.txtr.size() < numPixels) return;
+
+	Scene *Sc = CurScene;
+	if (!Sc) return;
+
+	MatTable matTable = Scene_GetMatTable(Sc);
+	if (!matTable.data || matTable.count == 0) return;
+
+	// Build view-space omni list once per frame. Lights stay in
+	// Sc->OmniHead (world space); we subtract View->ISource and rotate
+	// by View->Mat — same transform applied to T->IPos in
+	// Animate_Objects (after the bounding-sphere test there). No mesh
+	// scale to compensate for here.
+	constexpr int MAX_LIGHTS = 128;
+	ViewLight lights[MAX_LIGHTS];
+	int numLights = 0;
+	for (Omni *O = Sc->OmniHead; O && numLights < MAX_LIGHTS; O = O->Next) {
+		if (!(O->Flags & Omni_Active)) continue;
+		Vector u, w;
+		Vector_Sub(&O->IPos, &View->ISource, &u);
+		MatrixXVector(View->Mat, &u, &w);
+		ViewLight &L = lights[numLights++];
+		L.Pos    = w;
+		L.Col.B  = O->L.B * O->ISize;
+		L.Col.G  = O->L.G * O->ISize;
+		L.Col.R  = O->L.R * O->ISize;
+		L.Col.A  = O->L.A * O->ISize;
+		L.Range  = O->IRange;
+		L.Range2 = L.Range * L.Range;
+		L.rRange = 1.0f / L.Range;
+	}
+
+	// Camera-space reconstruction constants. Same shape as the inverse
+	// of Transform_Objects' projection: PX = CntrEX + FOVX * x_view/z_view
+	// gives x_view = (PX - CntrEX) * z_view / FOVX. PY is flipped
+	// (TPos.y is negated by the M[1] *= -PY scaling in setup).
+	const float invFOVX = 1.0f / FOVX;
+	const float invFOVY = 1.0f / FOVY;
+	const float invZScale = 1.0f / float(g_zscale);
+
 	dword *out = reinterpret_cast<dword *>(VPage);
-	for (size_t i = 0; i < n; ++i) {
-		if (ZPage16[i] == 0) continue;  // pixel not touched
-		float nx, ny, nz;
-		meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
-		int r = int((nx * 0.5f + 0.5f) * 255.0f);
-		int g = int((ny * 0.5f + 0.5f) * 255.0f);
-		int b = int((nz * 0.5f + 0.5f) * 255.0f);
-		if (r < 0) r = 0; if (r > 255) r = 255;
-		if (g < 0) g = 0; if (g > 255) g = 255;
-		if (b < 0) b = 0; if (b > 255) b = 255;
-		out[i] = dword(b) | (dword(g) << 8) | (dword(r) << 16);
+
+	for (int py = 0; py < YRes; ++py) {
+		for (int px = 0; px < XRes; ++px) {
+			const size_t i = size_t(py) * XRes + px;
+			const word zEnc = ZPage16[i];
+			if (zEnc == 0) continue;  // pixel not touched by Mekalele
+
+			// Decode mat32 → matID, miplevel, swizzledUV.
+			const uint32_t mat32 = gb.txtr[i];
+			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
+			const uint32_t matID       = (mat32 >> 20) & 0xFF;
+			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
+			if (matID >= matTable.count) continue;
+			Material *Mat = matTable.data[matID];
+			if (!Mat || !Mat->Txtr) continue;
+
+			// Texture sample: Mekalele's apply_exact already wrote a
+			// swizzled offset into mat32, so it's a direct lookup into
+			// the mip's tile-major data. Mipmap[k] is byte*; texels are
+			// dword (B,G,R,A in low→high bytes).
+			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
+			if (!texData) continue;
+			const dword texel = texData[swizzledUV];
+			const float texB = float(texel & 0xFF);
+			const float texG = float((texel >> 8) & 0xFF);
+			const float texR = float((texel >> 16) & 0xFF);
+
+			// Decode normal (view-space, unit-length).
+			float nx, ny, nz;
+			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+
+			// Reconstruct view-space position. ZPage16 stores
+			// 0xFF80 - round(g_zscale * z), so:
+			//   z = (0xFF80 - zEnc) / g_zscale
+			const float z = float(0xFF80 - zEnc) * invZScale;
+			const float x = (float(px) - CntrEX) * z * invFOVX;
+			const float y = (CntrEY - float(py)) * z * invFOVY;
+
+			// Ambient. Same expression as forward Lighting() — except
+			// here Mat is per-pixel, not per-mesh-Mat[0].
+			float lB, lG, lR;
+			if (Mat->Txtr) {
+				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.B;
+				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.G;
+				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * Sc->Ambient.R;
+			} else {
+				lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * Sc->Ambient.B;
+				lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * Sc->Ambient.G;
+				lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * Sc->Ambient.R;
+			}
+
+			// Per-omni Lambertian + linear distance falloff. Same
+			// k = dot * len_inv * (1 - dist*rRange) shape as forward
+			// Lighting()'s `k = dot * len * (1 - rRange/len)` (where
+			// len is rsqrt(len2) = 1/dist).
+			for (int li = 0; li < numLights; ++li) {
+				const ViewLight &L = lights[li];
+				const float wx = L.Pos.x - x;
+				const float wy = L.Pos.y - y;
+				const float wz = L.Pos.z - z;
+				const float dot = wx * nx + wy * ny + wz * nz;
+				if (dot < 0.0f) continue;
+				const float len2 = wx*wx + wy*wy + wz*wz;
+				if (len2 > L.Range2) continue;
+				const float lenInv = 1.0f / std::sqrt(len2);
+				const float dist   = 1.0f / lenInv;
+				const float k = dot * lenInv * (1.0f - dist * L.rRange);
+				const float intensity = k * Mat->Diffuse;
+				lB += intensity * L.Col.B;
+				lG += intensity * L.Col.G;
+				lR += intensity * L.Col.R;
+			}
+
+			// Saturation cap (matches forward at 250).
+			if (lB > 250.0f) lB = 250.0f;
+			if (lG > 250.0f) lG = 250.0f;
+			if (lR > 250.0f) lR = 250.0f;
+			if (lB < 0.0f)   lB = 0.0f;
+			if (lG < 0.0f)   lG = 0.0f;
+			if (lR < 0.0f)   lR = 0.0f;
+
+			// Modulate texel by light, /256 (matches TheOtherBarry's
+			// colorize step).
+			int outB = int(texB * lB) >> 8;
+			int outG = int(texG * lG) >> 8;
+			int outR = int(texR * lR) >> 8;
+			if (outB > 255) outB = 255;
+			if (outG > 255) outG = 255;
+			if (outR > 255) outR = 255;
+
+			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
 	}
 }
 
@@ -1568,12 +1719,12 @@ void Render()
 	}
 
 	if (deferred) {
-		// Debug pass — turn G-buffer normals into RGB into VPage.
-		// Replaces the lighting/composite pass entirely until that's
-		// designed. Texture, shading, and env-map sampling are all
-		// missing; this is purely "what does the normal field look
-		// like?" eyeball test.
-		Visualize_GBufferNormal();
+		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
+		// + linear falloff against the scene's omnis, modulated by the
+		// G-buffer's per-pixel texture sample. Replaces the per-vertex
+		// Lighting() (skipped on the deferred path) plus the rasterizer's
+		// colorize step in one go.
+		Render_DeferredLighting();
 	}
 
 	int32_t I = CAll;

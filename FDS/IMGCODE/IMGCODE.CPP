@@ -4,7 +4,9 @@
 //#include <dos.h>
 //#include <io.h>
 #include <string.h>
+#include <map>
 #include <string>
+#include <vector>
 
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
@@ -1275,10 +1277,24 @@ void View_Texture(Texture *T)
 	if (PX&&PY&&PBPP) InitGraphics(PX,PY,PBPP);*/
 }
 
+// Per-scene matID -> Material* lookup, populated by Unify_Textures and
+// consumed by the deferred lighting pass which has only matID at hand
+// (extracted from mat32 in the G-buffer). One-time-build, O(1) lookup.
+static std::map<Scene*, std::vector<Material*>> g_matTablesByScene;
+
+MatTable Scene_GetMatTable(Scene *Sc) {
+	auto it = g_matTablesByScene.find(Sc);
+	if (it == g_matTablesByScene.end()) return {nullptr, 0};
+	return { it->second.data(), (dword)it->second.size() };
+}
+
 void Unify_Textures(Scene *Sc)
 {
 	Material *M,*Mat;
 	char xBPP=0;
+
+	auto &matTable = g_matTablesByScene[Sc];
+	matTable.clear();
 
 	dword matID = 0;
 	dword txtrID = 0;
@@ -1290,6 +1306,7 @@ void Unify_Textures(Scene *Sc)
 		if (!M->Txtr) { ++skippedUntextured; continue; } //Ignore nontextured materials.
 
 		M->ID = matID++;
+		matTable.push_back(M);
 
 		for(Mat=MatLib;Mat!=M;Mat=Mat->Next) if (Mat->Txtr==M->Txtr) break;
 		if (Mat!=M) continue;

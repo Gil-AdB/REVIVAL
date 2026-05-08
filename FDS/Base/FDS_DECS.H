@@ -287,6 +287,18 @@ void View_Texture(Texture *Tx);
 void BPPConvert_Texture(Texture *Tx, byte TB);
 void FilterLSB_Texture(Texture *T);
 void Unify_Textures(Scene *Sc);
+
+// Per-scene matID -> Material* lookup table. Built by Unify_Textures
+// alongside the M->ID = matID++ assignment; consumed by the deferred
+// lighting pass which reads matID out of the G-buffer's mat32 packing
+// and needs the Material* to know which texture / lighting params to
+// apply. Returned data pointer is borrowed and stays alive until the
+// next Unify_Textures(Sc) call (i.e. for the lifetime of the scene).
+struct MatTable {
+	Material *const *data;
+	dword            count;
+};
+MatTable Scene_GetMatTable(Scene *Sc);
 char Load_Image_PCX(Image *Img,	const char *FN);
 char Load_Image_GIF(Image *Img, const char *FN);
 char Load_Image_JPEG(Image *Img, const char *FN);
