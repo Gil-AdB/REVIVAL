@@ -12,6 +12,7 @@
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
+#include "simde/x86/fma.h"
 
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
@@ -1871,53 +1872,84 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			if (!isWater) {
 				if (deferredLightingVecEnabled()) {
-					// Vec8f SoA inner loop. Reads contiguous 8-omni
-					// stripes from per-tile compacted SoA, so each
-					// `load_a` is a single 32-byte aligned read instead
-					// of 8 scalar gathers. On arm64-via-simde Vec8f
-					// still decomposes to 2× NEON ops (no perf gain
-					// from width), and Vec8fb mask handling needs ~6
-					// instructions per compare — those keep scalar
-					// ahead on arm64 even with this fix. On native
-					// AVX2 / native NEON this loop should leapfrog
-					// scalar.
-					Vec8f vx_v(x), vy_v(y), vz_v(z);
-					Vec8f vnx_v(nx), vny_v(ny), vnz_v(nz);
-					Vec8f vDiff(Mat->Diffuse);
-					Vec8f vZero(0.0f), vOne(1.0f);
-					Vec8f accB(0.0f), accG(0.0f), accR(0.0f);
+					// 8-wide SIMD inner loop — written directly against
+					// simde's _mm256_* intrinsics so we bypass
+					// vectorclass's Vec8fb byte-packed mask layout.
+					// vectorclass needs 6 NEON instructions per compare
+					// to coerce the natural uint32x4_t mask into its
+					// portable byte form (xtn → uzp1 → zip2 → ushll →
+					// shl → cmlt) plus cross-domain GPR roundtrips for
+					// `&`. simde's intrinsics produce masks in the
+					// native AVX2 layout (all-1s/all-0s lanes, same as
+					// what NEON `vcgeq_f32` returns), so `_mm256_and_ps`
+					// is a direct AND with no conversion. simde lowers
+					// each intrinsic to native NEON on arm64 / native
+					// AVX2 on x86, giving us a single cross-platform
+					// hot path.
+					__m256 vx_v   = _mm256_set1_ps(x);
+					__m256 vy_v   = _mm256_set1_ps(y);
+					__m256 vz_v   = _mm256_set1_ps(z);
+					__m256 vnx_v  = _mm256_set1_ps(nx);
+					__m256 vny_v  = _mm256_set1_ps(ny);
+					__m256 vnz_v  = _mm256_set1_ps(nz);
+					__m256 vDiff  = _mm256_set1_ps(Mat->Diffuse);
+					__m256 vZero  = _mm256_setzero_ps();
+					__m256 vOne   = _mm256_set1_ps(1.0f);
+					__m256 accB   = _mm256_setzero_ps();
+					__m256 accG   = _mm256_setzero_ps();
+					__m256 accR   = _mm256_setzero_ps();
 
 					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
-						Vec8f lpx, lpy, lpz, lcb, lcg, lcr, lr2, lrr;
-						lpx.load_a(tl.posX   + slot);
-						lpy.load_a(tl.posY   + slot);
-						lpz.load_a(tl.posZ   + slot);
-						lcb.load_a(tl.colB   + slot);
-						lcg.load_a(tl.colG   + slot);
-						lcr.load_a(tl.colR   + slot);
-						lr2.load_a(tl.range2 + slot);
-						lrr.load_a(tl.rRange + slot);
+						__m256 lpx = _mm256_load_ps(tl.posX   + slot);
+						__m256 lpy = _mm256_load_ps(tl.posY   + slot);
+						__m256 lpz = _mm256_load_ps(tl.posZ   + slot);
+						__m256 lcb = _mm256_load_ps(tl.colB   + slot);
+						__m256 lcg = _mm256_load_ps(tl.colG   + slot);
+						__m256 lcr = _mm256_load_ps(tl.colR   + slot);
+						__m256 lr2 = _mm256_load_ps(tl.range2 + slot);
+						__m256 lrr = _mm256_load_ps(tl.rRange + slot);
 
-						Vec8f wx = lpx - vx_v;
-						Vec8f wy = lpy - vy_v;
-						Vec8f wz = lpz - vz_v;
-						Vec8f dot  = wx*vnx_v + wy*vny_v + wz*vnz_v;
-						Vec8f len2 = wx*wx + wy*wy + wz*wz;
-						Vec8fb mask = (len2 <= lr2) & (dot >= vZero) & (len2 > vZero);
+						__m256 wx = _mm256_sub_ps(lpx, vx_v);
+						__m256 wy = _mm256_sub_ps(lpy, vy_v);
+						__m256 wz = _mm256_sub_ps(lpz, vz_v);
+						__m256 dot = _mm256_fmadd_ps(wx, vnx_v,
+						              _mm256_fmadd_ps(wy, vny_v,
+						               _mm256_mul_ps(wz, vnz_v)));
+						__m256 len2 = _mm256_fmadd_ps(wx, wx,
+						               _mm256_fmadd_ps(wy, wy,
+						                _mm256_mul_ps(wz, wz)));
 
-						Vec8f safe_len2 = select(mask, len2, vOne);
-						Vec8f lenInv = approx_rsqrt(safe_len2);
-						Vec8f dist   = safe_len2 * lenInv;
-						Vec8f k = dot * lenInv * (vOne - dist * lrr);
-						Vec8f intensity = select(mask, k * vDiff, vZero);
+						__m256 mask_range = _mm256_cmp_ps(len2, lr2,   _CMP_LE_OQ);
+						__m256 mask_dot   = _mm256_cmp_ps(dot,  vZero, _CMP_GE_OQ);
+						__m256 mask_pos   = _mm256_cmp_ps(len2, vZero, _CMP_GT_OQ);
+						__m256 mask = _mm256_and_ps(mask_range,
+						               _mm256_and_ps(mask_dot, mask_pos));
 
-						accB = mul_add(intensity, lcb, accB);
-						accG = mul_add(intensity, lcg, accG);
-						accR = mul_add(intensity, lcr, accR);
+						__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
+						__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
+						__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
+						__m256 falloff = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
+						__m256 k = _mm256_mul_ps(_mm256_mul_ps(dot, lenInv), falloff);
+						__m256 intensity = _mm256_blendv_ps(vZero,
+						                    _mm256_mul_ps(k, vDiff), mask);
+
+						accB = _mm256_fmadd_ps(intensity, lcb, accB);
+						accG = _mm256_fmadd_ps(intensity, lcg, accG);
+						accR = _mm256_fmadd_ps(intensity, lcr, accR);
 					}
-					lB += horizontal_add(accB);
-					lG += horizontal_add(accG);
-					lR += horizontal_add(accR);
+					// Horizontal reduction: AVX2 has no scalar reduce;
+					// store + scalar add is what vectorclass does
+					// internally too. 24 scalar adds total per pixel
+					// — negligible vs the omni loop body.
+					alignas(32) float bufB[8], bufG[8], bufR[8];
+					_mm256_store_ps(bufB, accB);
+					_mm256_store_ps(bufG, accG);
+					_mm256_store_ps(bufR, accR);
+					for (int i = 0; i < 8; ++i) {
+						lB += bufB[i];
+						lG += bufG[i];
+						lR += bufR[i];
+					}
 					// Vec path doesn't accumulate specular (would need
 					// pow on Vec8f, which dominates the loop on simde);
 					// fall through to scalar for spec materials.
