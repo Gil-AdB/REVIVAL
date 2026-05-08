@@ -45,10 +45,13 @@ enum DemoState {
 	RUN_FOUNTAIN,
 	RUN_CRASH,
 	RUN_GREETS,
-	BLACK_OUT,  // paint black + yield so the canvas isn't a frozen
-	            // greets frame while DONE blocks on audio/pool cleanup.
+	FADE_OUT,   // animate the final frame to black via shader uniform.
+	BLACK_OUT,  // one-tick yield so the black frame composites before
+	            // DONE blocks main on audio/pool teardown.
 	DONE,
 };
+static int g_fadeFrame = 0;
+static constexpr int kFadeFrames = 30;  // ~0.5s at 60 fps
 static DemoState g_state = WAIT_GESTURE;
 static std::unique_ptr<SceneDriver> g_currentDriver;
 static bool g_currentDriverInitialized = false;
@@ -318,24 +321,34 @@ bool DemoTick()
 		}
 		if (!tickCurrentScene()) {
 			cleanupCurrentScene();
-			// Final black frame. DONE will block main for a few seconds
-			// in audio + threadpool teardown; without this the canvas
-			// would freeze on whatever Greets last drew.
-			if (MainSurf && VPage) {
-				memset(VPage, 0, MainSurf->BPSL * YRes);
-				Flip(MainSurf);
-			}
+			g_fadeFrame = 0;
+			g_state = FADE_OUT;
+		}
+		break;
+	}
+
+	case FADE_OUT: {
+		// Re-Flip the last greets frame with a decreasing shader fade.
+		// The shader (SDL2.cpp Wasm_PresentGL) multiplies sampled RGB by
+		// uFade — 1.0 at frame 0, smoothly to 0 at frame kFadeFrames.
+		if (MainSurf && VPage) {
+			float t = (float)g_fadeFrame / (float)kFadeFrames;
+			float fade = 1.0f - t;
+			if (fade < 0.0f) fade = 0.0f;
+			SDL2_SetFade(fade);
+			Flip(MainSurf);
+		}
+		if (++g_fadeFrame >= kFadeFrames) {
+			SDL2_SetFade(0.0f);  // ensure final frame is exactly black.
+			if (MainSurf) Flip(MainSurf);
 			g_state = BLACK_OUT;
 		}
 		break;
 	}
 
 	case BLACK_OUT: {
-		// One-tick yield. The black Flip from the previous tick has been
-		// queued by the GL driver but the canvas only composites when our
-		// rAF callback returns. Returning here lets the browser paint the
-		// black frame; next tick falls into DONE which is allowed to
-		// block.
+		// One-tick yield so the final black frame composites before DONE
+		// blocks main on audio/pool teardown.
 		g_state = DONE;
 		break;
 	}

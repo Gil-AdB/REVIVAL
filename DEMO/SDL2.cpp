@@ -94,10 +94,11 @@ static int Wasm_InitGL()
 			'precision highp float;\n' +
 			'in vec2 vUV;\n' +
 			'uniform sampler2D uTex;\n' +
+			'uniform float uFade;\n' +
 			'out vec4 oColor;\n' +
 			'void main() {\n' +
 			'  vec4 c = texture(uTex, vUV);\n' +
-			'  oColor = vec4(c.b, c.g, c.r, 1.0);\n' +
+			'  oColor = vec4(c.b * uFade, c.g * uFade, c.r * uFade, 1.0);\n' +
 			'}';
 		function compile(type, src) {
 			var s = gl.createShader(type);
@@ -116,6 +117,7 @@ static int Wasm_InitGL()
 			console.error('flood gl link: ' + gl.getProgramInfoLog(prog));
 		}
 		Module.__floodProg = prog;
+		Module.__floodFadeLoc = gl.getUniformLocation(prog, 'uFade');
 		Module.__floodTex = gl.createTexture();
 		Module.__floodTexW = 0;
 		Module.__floodTexH = 0;
@@ -144,6 +146,10 @@ static int Wasm_InitGL()
 		return 0;
 	});
 }
+
+// Output multiplier for the fade-out at the end of Greets. 1.0 = passthrough,
+// 0.0 = solid black. Set via SDL2_SetFade from MainLoop's FADE_OUT state.
+static float s_fade = 1.0f;
 
 // Upload `pixels` (srcW x srcH, BGRA byte order) into the WebGL texture
 // and present a fullscreen quad letterboxed inside the canvas.
@@ -203,12 +209,16 @@ static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 		gl.clear(gl.COLOR_BUFFER_BIT);
 		gl.viewport(dx, dy, dw, dh);
 		gl.useProgram(Module.__floodProg);
+		gl.uniform1f(Module.__floodFadeLoc, $3);
 		gl.bindVertexArray(Module.__floodVAO);
 		gl.activeTexture(gl.TEXTURE0);
 		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
 		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-	}, (uintptr_t)pixels, srcW, srcH);
+	}, (uintptr_t)pixels, srcW, srcH, (double)s_fade);
 }
+
+// Public setter for the present-time fade (1.0 default; 0 = black).
+extern "C" void SDL2_SetFade(float fade) { s_fade = fade; }
 #endif
 
 static void V_Flip(VESA_Surface *VS)
