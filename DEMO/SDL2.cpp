@@ -62,6 +62,53 @@ struct FlipStageProfiler {
 
 extern "C" dword g_profilerActive;
 
+#ifdef __EMSCRIPTEN__
+// Acquire a 2D context on the canvas SDL is using and pre-allocate a
+// non-shared Uint8ClampedArray we can hand to ImageData each frame.
+// `new ImageData(view, w, h)` rejects views backed by SharedArrayBuffer
+// (which HEAPU8 is in pthread builds), so the per-frame copy from
+// HEAP into this scratch buffer is unavoidable. It's still a
+// typed-array memcpy (~2-3 GB/s) followed by one putImageData — far
+// less than the 27 ms SDL_RenderPresent was costing.
+static int Wasm_InitPresent(int w, int h)
+{
+	return MAIN_THREAD_EM_ASM_INT({
+		var canvas = Module.canvas;
+		if (!canvas) return 1;
+		// alpha:false lets the browser skip per-frame alpha compositing.
+		var ctx = canvas.getContext('2d', { alpha: false });
+		if (!ctx) return 2;
+		Module.__floodCtx = ctx;
+		Module.__floodW = $0;
+		Module.__floodH = $1;
+		var n = $0 * $1 * 4;
+		Module.__floodScratch = new Uint8ClampedArray(n);
+		Module.__floodImgData = new ImageData(Module.__floodScratch, $0, $1);
+		return 0;
+	}, w, h);
+}
+
+static void Wasm_Present(const uint8_t *pixels, int w, int h)
+{
+	MAIN_THREAD_EM_ASM({
+		var ctx = Module.__floodCtx;
+		if (!ctx) return;
+		// Recreate the scratch + ImageData if size changed (resize).
+		if (Module.__floodW !== $1 || Module.__floodH !== $2) {
+			Module.__floodW = $1;
+			Module.__floodH = $2;
+			Module.__floodScratch = new Uint8ClampedArray($1 * $2 * 4);
+			Module.__floodImgData = new ImageData(Module.__floodScratch, $1, $2);
+		}
+		// Copy from shared HEAP into the non-shared scratch (typed-array
+		// memcpy), then hand the ImageData straight to the canvas.
+		var src = HEAPU8.subarray($0, $0 + $1 * $2 * 4);
+		Module.__floodScratch.set(src);
+		ctx.putImageData(Module.__floodImgData, 0, 0);
+	}, (uintptr_t)pixels, w, h);
+}
+#endif
+
 static void V_Flip(VESA_Surface *VS)
 {
 	using clock = std::chrono::steady_clock;
@@ -89,6 +136,22 @@ static void V_Flip(VESA_Surface *VS)
 	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
 
 	auto t0 = stamp();
+#ifdef __EMSCRIPTEN__
+	// Wasm fast path: bypass SDL's present pipeline entirely for the
+	// engine surface and putImageData straight to the canvas 2D context.
+	// SDL_RenderPresent was costing ~27 ms here in software-renderer
+	// mode (its only viable mode under PROXY_TO_PTHREAD). The locked
+	// texture pointer stays valid across the bypass — we never Unlock,
+	// so VS->Data carries through to the next frame untouched.
+	if (lockMode) {
+		Wasm_Present(VS->Data, (int)VS->X, (int)VS->Y);
+		if (profileFlip) {
+			auto tEnd = stamp();
+			s_flipProf.tick(0.0, 0.0, 0.0, ms_d(tEnd - t0).count(), 0.0);
+		}
+		return;
+	}
+#endif
 	if (lockMode) {
 		// Engine wrote directly into the texture's locked pixel buffer
 		// this frame. Unlock to commit (no-op for the SW renderer
@@ -214,6 +277,15 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	VS->Data = static_cast<byte *>(pixels);
 	VS->BPSL = pitch;
 	memset(VS->Data, 0, pitch * VS->Y);
+
+#ifdef __EMSCRIPTEN__
+	// Set up the canvas 2D context + scratch buffer the wasm fast-path
+	// V_Flip writes into. Recreated on resize via the same path.
+	int initRc = Wasm_InitPresent((int)VS->X, (int)VS->Y);
+	if (initRc != 0) {
+		fprintf(stderr, "[SDL] Wasm_InitPresent failed rc=%d\n", initRc);
+	}
+#endif
 
 	return 0;
 }

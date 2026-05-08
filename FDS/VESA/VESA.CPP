@@ -152,7 +152,11 @@ void VESA_VPageExternal(VESA_Surface *ExtrnVS)//void *vPagePtr, void (*FlipperCa
 	VS->FOV = 0;
 
 	VS->PageSize = VS->BPSL * VS->Y;
-	VS->Flags = VSurf_EffScreen;
+	// |= rather than = — the SDL backend's V_Create may have already set
+	// VSurf_LockRender on this surface, and overwriting Flags wholesale
+	// here was silently demoting it back to the legacy SDL_UpdateTexture
+	// path (which on wasm costs ~28 ms per flip in SDL_RenderPresent).
+	VS->Flags |= VSurf_EffScreen;
 
 	//if (VS->YTable) Build_YOffs_Table(Screen);
 	//VESA_MainFlip();
