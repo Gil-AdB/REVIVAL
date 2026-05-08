@@ -81,6 +81,11 @@ if(EMSCRIPTEN)
         # default of ~4MB.
         -sSTACK_SIZE=4MB
         -sDEFAULT_PTHREAD_STACK_SIZE=4MB
+        # Rasterizer dispatches tile work to ThreadPool workers and waits
+        # on a condvar for them to finish — that's a sync block on main.
+        # Modern browsers tolerate it; emscripten still warns unless we
+        # opt in explicitly.
+        -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=128MB
         -sASSERTIONS=1

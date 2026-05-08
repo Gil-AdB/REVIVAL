@@ -45,6 +45,8 @@ enum DemoState {
 	RUN_FOUNTAIN,
 	RUN_CRASH,
 	RUN_GREETS,
+	BLACK_OUT,  // paint black + yield so the canvas isn't a frozen
+	            // greets frame while DONE blocks on audio/pool cleanup.
 	DONE,
 };
 static DemoState g_state = WAIT_GESTURE;
@@ -316,8 +318,25 @@ bool DemoTick()
 		}
 		if (!tickCurrentScene()) {
 			cleanupCurrentScene();
-			g_state = DONE;
+			// Final black frame. DONE will block main for a few seconds
+			// in audio + threadpool teardown; without this the canvas
+			// would freeze on whatever Greets last drew.
+			if (MainSurf && VPage) {
+				memset(VPage, 0, MainSurf->BPSL * YRes);
+				Flip(MainSurf);
+			}
+			g_state = BLACK_OUT;
 		}
+		break;
+	}
+
+	case BLACK_OUT: {
+		// One-tick yield. The black Flip from the previous tick has been
+		// queued by the GL driver but the canvas only composites when our
+		// rAF callback returns. Returning here lets the browser paint the
+		// black frame; next tick falls into DONE which is allowed to
+		// block.
+		g_state = DONE;
 		break;
 	}
 
