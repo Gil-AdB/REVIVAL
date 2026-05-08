@@ -476,68 +476,6 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
-	// Greets omni light bump. The FLD authoring sets small non-zero
-	// keyframe values on Omni->Range / Omni->Size — mech flares end
-	// up at ~6 units range / ~1.1 size after SceneCorrections()'s
-	// per-omni Spline_Scale multipliers. The omnis DO cast light in
-	// forward; the "no light" appearance under deferred earlier was
-	// from a different bug (matID mismatch, fixed in 6f4c751) — not
-	// from missing omni data. Earlier theories about all-zero FLD
-	// keyframes were wrong; the IRange=0 in the dump was the
-	// runtime field at scene-init time before Animate_Objects has
-	// run for any frame.
-	//
-	// What we actually want: bigger reach + brighter mech flares so
-	// the deferred-path linear-falloff produces a more pronounced
-	// pool of cyan light. Spline_Scale(&O->Range, k) multiplies the
-	// keyframes; per-frame Animate_Objects's Spline_Calc_1D then
-	// evaluates the scaled spline so the bump persists.
-	for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
-		if (Obj->Type != Obj_Omni) continue;
-		Omni *O = (Omni *)Obj->Data;
-		const char *name = Obj->Name ? Obj->Name : "(unnamed)";
-		const bool isMech = (Obj->Name &&
-			(strstr(Obj->Name, "mech") || strstr(Obj->Name, "Mech") ||
-			 strstr(Obj->Name, "MECH")));
-
-		if (isMech) {
-			Spline_Scale(&O->Range, 4.0f);  // ~6 → ~24 units reach
-			Spline_Scale(&O->Size,  2.0f);  // ~1.1 → ~2.2 intensity
-		}
-
-		fprintf(stderr,
-			"[GREETS-OMNI] name=%-24s L=(%.0f,%.0f,%.0f)%s "
-			"Range.NumKeys=%d ",
-			name,
-			O->L.R, O->L.G, O->L.B,
-			isMech ? "  *MECH (bumped)*" : "",
-			O->Range.NumKeys);
-		for (int k = 0; k < O->Range.NumKeys && k < 5; ++k)
-			fprintf(stderr, "[%d]=%.1f@f%.0f ", k, O->Range.Keys[k].Pos.x, O->Range.Keys[k].Frame);
-		fprintf(stderr, "Size.NumKeys=%d ", O->Size.NumKeys);
-		for (int k = 0; k < O->Size.NumKeys && k < 5; ++k)
-			fprintf(stderr, "[%d]=%.2f@f%.0f ", k, O->Size.Keys[k].Pos.x, O->Size.Keys[k].Frame);
-		fprintf(stderr, "\n");
-	}
-
-	// Bump Specular on materials that should plausibly have shiny
-	// surfaces — marble stairs, marble pillars, stone floor, the mecha
-	// hull/cockpit. Most FLD materials authored Specular=0; deferred-
-	// path Phong needs a non-zero value to draw a highlight, and
-	// Glossiness defaults to 32 in Render_DeferredLighting when the
-	// FLD didn't set one. Per-name match keeps the change targeted to
-	// surfaces where a highlight is sensible.
-	for (Material *M = MatLib; M; M = M->Next) {
-		if (M->RelScene != GreetSc || !M->Name) continue;
-		const char *n = M->Name;
-		if (strstr(n, "stairs") || strstr(n, "amudim") ||
-		    strstr(n, "floor")  || strstr(n, "marb")   || strstr(n, "MARB") ||
-		    strstr(n, "hull")   || strstr(n, "cockpit")) {
-			if (M->Specular < 0.4f) M->Specular = 0.4f;
-			if (M->Glossiness == 0) M->Glossiness = 48;
-		}
-	}
-
 	gg->Init();
 
 }
