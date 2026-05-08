@@ -1584,14 +1584,25 @@ struct ViewLightsSoA {
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
-// list of indices into the SoA arrays for omnis whose screen-space
-// bounding circle overlaps it. Inner loop iterates only those omnis
-// instead of all numLights, slashing the per-pixel × per-omni work
-// in proportion to spatial omni distribution.
+// **compacted** SoA copy of the omnis whose screen-space bounding
+// circle overlaps it. Inner loop reads tl.posX[n] etc. directly —
+// contiguous, prefetcher-friendly, and — for the vec path — lets a
+// single `load_a` pull 8 omnis with one 32-byte aligned read instead
+// of building a Vec4f via four `ld1.s {v}[lane]` scalar gathers.
+//
+// Memory: 24 tiles × 8 arrays × 128 floats × 4 bytes = 96 KiB total.
+// Easily fits in L2; per-tile slice stays warm in L1 across pixels.
 struct TileLights {
-	alignas(32) int indices[DEFERRED_MAX_LIGHTS];  // padded to 8 with -1
-	int             count;                          // actual count
-	int             paddedCount;                    // (count + 7) & ~7
+	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colB[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colG[DEFERRED_MAX_LIGHTS];
+	alignas(32) float colR[DEFERRED_MAX_LIGHTS];
+	alignas(32) float range2[DEFERRED_MAX_LIGHTS];
+	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
+	int             count;          // active entries
+	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 };
 
 // Per-frame setup shared across all tile jobs. Captured by reference
@@ -1610,11 +1621,17 @@ struct DeferredLightingCtx {
 	int                  waterMatID;  // -1 if no water blend
 };
 
-// Build per-tile light lists by projecting each omni's view-space
-// bounding sphere into screen space and finding which tile rects it
-// overlaps. Omnis whose center is behind the camera but whose radius
-// reaches forward are conservatively assigned to all tiles. Per-pixel
-// dot/range tests still cull within the list.
+// Build per-tile compacted SoA. For each omni: project its view-space
+// bounding sphere into screen space, find overlapping tile rects, then
+// **append the omni's values** (not its index) into each overlapping
+// tile's contiguous SoA arrays. Memory cost is O(omnis × overlapped
+// tiles × bytes-per-omni) which for City is ~30 × 4 × 32 ≈ 4 KiB; for
+// Greets ~10 × 4 × 32 ≈ 1.3 KiB. Negligible.
+//
+// The vec inner loop benefits because `tl.posX[slot..slot+8)` is now
+// 32-byte aligned and contiguous — one `load_a` instead of four
+// `ld1.s {v}[lane]` gathers per Vec4f. Scalar benefits too via
+// straight-line prefetchable access.
 static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
                                  const ViewLightsSoA &lights, int numLights)
@@ -1665,30 +1682,50 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const int tile_j_lo = sy_min / tileSizeY;
 		const int tile_j_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
 
+		const float Lpx = lights.posX[li];
+		const float Lpy = lights.posY[li];
+		const float Lpz = lights.posZ[li];
+		const float Lcb = lights.colB[li];
+		const float Lcg = lights.colG[li];
+		const float Lcr = lights.colR[li];
+		const float Lr2 = lights.range2[li];
+		const float Lrr = lights.rRange[li];
+
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
 				const int idx = j * numTilesX + i;
 				TileLights &tl = tileLights[idx];
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
-					tl.indices[tl.count++] = li;
+					const int s = tl.count++;
+					tl.posX[s]   = Lpx;
+					tl.posY[s]   = Lpy;
+					tl.posZ[s]   = Lpz;
+					tl.colB[s]   = Lcb;
+					tl.colG[s]   = Lcg;
+					tl.colR[s]   = Lcr;
+					tl.range2[s] = Lr2;
+					tl.rRange[s] = Lrr;
 				}
 			}
 		}
 	}
 
-	// Pad index lists to multiple of 8 with the last valid index
-	// (so a vec inner loop reading 8-at-a-time can do redundant work
-	// rather than out-of-bounds reads). Scalar variant ignores
-	// paddedCount and stops at count.
+	// Zero the padding slots (count..paddedCount) so the vec loop's
+	// over-read produces range2=0 entries that fail the per-pixel
+	// `len2 <= range2` mask and contribute nothing.
 	for (int t = 0; t < numTiles; ++t) {
 		TileLights &tl = tileLights[t];
 		const int padded = (tl.count + 7) & ~7;
 		const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
-		if (tl.count > 0) {
-			const int last = tl.indices[tl.count - 1];
-			for (int p = tl.count; p < pad_to; ++p) tl.indices[p] = last;
-		} else {
-			for (int p = 0; p < pad_to; ++p) tl.indices[p] = 0;
+		for (int p = tl.count; p < pad_to; ++p) {
+			tl.posX[p]   = 0.0f;
+			tl.posY[p]   = 0.0f;
+			tl.posZ[p]   = 0.0f;
+			tl.colB[p]   = 0.0f;
+			tl.colG[p]   = 0.0f;
+			tl.colR[p]   = 0.0f;
+			tl.range2[p] = 0.0f;
+			tl.rRange[p] = 0.0f;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -1834,13 +1871,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			if (!isWater) {
 				if (deferredLightingVecEnabled()) {
-					// Vec8f SoA inner loop. Kept for A/B benchmarking
-					// against the scalar fallback; on arm64-via-simde
-					// the scalar path wins (branch-predictor + early-
-					// out beat the full per-lane Vec8f work that simde
-					// decomposes to 2× NEON), but on a native AVX2 or
-					// NEON build this should pull ahead, and tile
-					// culling lowers the lane-utilization penalty.
+					// Vec8f SoA inner loop. Reads contiguous 8-omni
+					// stripes from per-tile compacted SoA, so each
+					// `load_a` is a single 32-byte aligned read instead
+					// of 8 scalar gathers. On arm64-via-simde Vec8f
+					// still decomposes to 2× NEON ops (no perf gain
+					// from width), and Vec8fb mask handling needs ~6
+					// instructions per compare — those keep scalar
+					// ahead on arm64 even with this fix. On native
+					// AVX2 / native NEON this loop should leapfrog
+					// scalar.
 					Vec8f vx_v(x), vy_v(y), vz_v(z);
 					Vec8f vnx_v(nx), vny_v(ny), vnz_v(nz);
 					Vec8f vDiff(Mat->Diffuse);
@@ -1848,24 +1888,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					Vec8f accB(0.0f), accG(0.0f), accR(0.0f);
 
 					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
-						alignas(32) float buf_px[8], buf_py[8], buf_pz[8];
-						alignas(32) float buf_cb[8], buf_cg[8], buf_cr[8];
-						alignas(32) float buf_r2[8], buf_rr[8];
-						for (int s = 0; s < 8; ++s) {
-							const int idx = tl.indices[slot + s];
-							buf_px[s] = ctx.lights->posX[idx];
-							buf_py[s] = ctx.lights->posY[idx];
-							buf_pz[s] = ctx.lights->posZ[idx];
-							buf_cb[s] = ctx.lights->colB[idx];
-							buf_cg[s] = ctx.lights->colG[idx];
-							buf_cr[s] = ctx.lights->colR[idx];
-							buf_r2[s] = ctx.lights->range2[idx];
-							buf_rr[s] = ctx.lights->rRange[idx];
-						}
 						Vec8f lpx, lpy, lpz, lcb, lcg, lcr, lr2, lrr;
-						lpx.load_a(buf_px); lpy.load_a(buf_py); lpz.load_a(buf_pz);
-						lcb.load_a(buf_cb); lcg.load_a(buf_cg); lcr.load_a(buf_cr);
-						lr2.load_a(buf_r2); lrr.load_a(buf_rr);
+						lpx.load_a(tl.posX   + slot);
+						lpy.load_a(tl.posY   + slot);
+						lpz.load_a(tl.posZ   + slot);
+						lcb.load_a(tl.colB   + slot);
+						lcg.load_a(tl.colG   + slot);
+						lcr.load_a(tl.colR   + slot);
+						lr2.load_a(tl.range2 + slot);
+						lrr.load_a(tl.rRange + slot);
 
 						Vec8f wx = lpx - vx_v;
 						Vec8f wy = lpy - vy_v;
@@ -1892,17 +1923,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// fall through to scalar for spec materials.
 					if (wantSpecular) {
 						for (int n = 0; n < tl.count; ++n) {
-							const int li = tl.indices[n];
-							const float Lpx = ctx.lights->posX[li];
-							const float Lpy = ctx.lights->posY[li];
-							const float Lpz = ctx.lights->posZ[li];
+							const float Lpx = tl.posX[n];
+							const float Lpy = tl.posY[n];
+							const float Lpz = tl.posZ[n];
 							const float wx = Lpx - x;
 							const float wy = Lpy - y;
 							const float wz = Lpz - z;
 							const float dot = wx*nx + wy*ny + wz*nz;
 							if (dot < 0.0f) continue;
 							const float len2 = wx*wx + wy*wy + wz*wz;
-							const float r2 = ctx.lights->range2[li];
+							const float r2 = tl.range2[n];
 							if (len2 > r2 || len2 == 0.0f) continue;
 							const float lenInv = fast_rsqrt(len2);
 							const float dist   = len2 * lenInv;
@@ -1917,12 +1947,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const float NdotH = nx*hx + ny*hy + nz*hz;
 							if (NdotH <= 0.0f) continue;
 							const float spec = std::pow(NdotH, gloss);
-							const float rRange = ctx.lights->rRange[li];
+							const float rRange = tl.rRange[n];
 							const float specStrength = spec * Mat->Specular *
 								(1.0f - dist * rRange);
-							sB += specStrength * ctx.lights->colB[li];
-							sG += specStrength * ctx.lights->colG[li];
-							sR += specStrength * ctx.lights->colR[li];
+							sB += specStrength * tl.colB[n];
+							sG += specStrength * tl.colG[n];
+							sR += specStrength * tl.colR[n];
 						}
 					}
 				} else {
@@ -1934,26 +1964,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// ~20 cycles vs fmul's 4. The compiler doesn't do
 					// this rewrite under strict FP, so spell it out.
 					for (int n = 0; n < tl.count; ++n) {
-						const int li = tl.indices[n];
-						const float Lpx = ctx.lights->posX[li];
-						const float Lpy = ctx.lights->posY[li];
-						const float Lpz = ctx.lights->posZ[li];
+						const float Lpx = tl.posX[n];
+						const float Lpy = tl.posY[n];
+						const float Lpz = tl.posZ[n];
 						const float wx = Lpx - x;
 						const float wy = Lpy - y;
 						const float wz = Lpz - z;
 						const float dot = wx * nx + wy * ny + wz * nz;
 						if (dot < 0.0f) continue;
 						const float len2 = wx*wx + wy*wy + wz*wz;
-						const float r2 = ctx.lights->range2[li];
+						const float r2 = tl.range2[n];
 						if (len2 > r2) continue;
 						const float lenInv = fast_rsqrt(len2);
 						const float dist   = len2 * lenInv;
-						const float rRange = ctx.lights->rRange[li];
+						const float rRange = tl.rRange[n];
 						const float k = dot * lenInv * (1.0f - dist * rRange);
 						const float intensity = k * Mat->Diffuse;
-						const float Lcb = ctx.lights->colB[li];
-						const float Lcg = ctx.lights->colG[li];
-						const float Lcr = ctx.lights->colR[li];
+						const float Lcb = tl.colB[n];
+						const float Lcg = tl.colG[n];
+						const float Lcr = tl.colR[n];
 						lB += intensity * Lcb;
 						lG += intensity * Lcg;
 						lR += intensity * Lcr;
