@@ -1822,6 +1822,22 @@ void Initialize_City()
 	Scene_RebuildMatTable(CitySc);
 	AspectRatio = oldAspectRatio;
 
+	// Locate the water material's post-rebuild matID so the deferred
+	// lighting pass can recognize water-mesh pixels and apply the
+	// transparent-blend with the dispMap-distorted reflection beneath.
+	{
+		int waterID = -1;
+		for (Material *M = MatLib; M; M = M->Next) {
+			if (M->RelScene != CitySc || !M->Name) continue;
+			if (strstr(M->Name, "water") || strstr(M->Name, "WATER")) {
+				waterID = (int)M->ID;
+				break;
+			}
+		}
+		SetDeferredWaterMatID(waterID);
+		fprintf(stderr, "[CITY] deferred water matID = %d\n", waterID);
+	}
+
 	for (auto O = CitySc->OmniHead; O; O = O->Next) {
 		O->ISize *= OmniFactor;
 	}
@@ -2085,6 +2101,19 @@ struct CityScene : SceneDriver {
 					}
 					ptr++;
 				}
+			}
+
+			// Deferred path needs Z cleared between passes so the pass-2
+			// deferred-lighting compositor doesn't re-shade pass-1 pixels
+			// with their (now stale) G-buffer entries — that would
+			// undo the dispMap distortion that just landed in VPage.
+			// Forward path keeps the pass-1 Z so its rasterizer can do
+			// proper depth occlusion against the mirrored world; we don't
+			// have that overlap problem because deferred shading is the
+			// only consumer of Z and we want pass-2 to write only on
+			// pixels actually covered by normal-world geometry.
+			if (deferredEnabled()) {
+				parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 			}
 
 			prof.leave(PROF_RNDR);

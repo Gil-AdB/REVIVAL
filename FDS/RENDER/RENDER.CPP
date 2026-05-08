@@ -1513,6 +1513,19 @@ bool deferredEnabled() {
 	return cached;
 }
 
+// Per-scene matID for the water material — when this matches the
+// G-buffer mat32 at a pixel, the deferred lighting compositor blends
+// the lit water texel over the existing VPage value (which holds the
+// dispMap-distorted reflection from the pass-1 mirrored-world draw),
+// matching forward's TheOtherBarry<TRANSPARENT> filler:
+//   pixel = saturate(lit_water + existing/2)
+// Set to -1 (default) to disable the water-blend special case.
+static int g_deferredWaterMatID = -1;
+
+void SetDeferredWaterMatID(int id) {
+	g_deferredWaterMatID = id;
+}
+
 // Phase A deferred lighting pass. Replaces the per-vertex Lighting() +
 // per-pixel colorize() pipeline with one per-pixel pass: decode mat32 →
 // Material*, sample texture, decode oct normal, reconstruct view-space
@@ -1552,6 +1565,7 @@ struct DeferredLightingCtx {
 	float                invFOVY;
 	float                invZScale;
 	Scene               *Sc;
+	int                  waterMatID;  // -1 if no water blend
 };
 
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
@@ -1642,11 +1656,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// of base-color tint, which is the standard model).
 			float sB = 0, sG = 0, sR = 0;
 
+			// Water gets ambient-only (no omni accumulation, no spec).
+			// Forward water mesh's BSphereRadius is tiny (Reflective_
+			// Surface_Setup tessellates and scales the verts but never
+			// recomputes the bsphere) and forward Lighting() skips any
+			// omni whose `BSphereRadius + Range < |omni-bsphere_ctr|` —
+			// which is basically all of them — so forward water vertex
+			// light is just `Mat->Diffuse * Sc->Ambient`. Per-pixel
+			// distance tests in the deferred path don't have that cull,
+			// so without this skip every nearby city light slams into
+			// every water pixel and saturates lB at 250.
+			const bool isWater = (int(matID) == ctx.waterMatID);
+
 			// Per-omni Lambertian + linear distance falloff. Same
 			// k = dot * len_inv * (1 - dist*rRange) shape as forward
 			// Lighting()'s `k = dot * len * (1 - rRange/len)` (where
 			// len is rsqrt(len2) = 1/dist).
-			for (int li = 0; li < ctx.numLights; ++li) {
+			for (int li = 0; !isWater && li < ctx.numLights; ++li) {
 				const ViewLight &L = ctx.lights[li];
 				const float wx = L.Pos.x - x;
 				const float wy = L.Pos.y - y;
@@ -1788,6 +1814,27 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
+
+			// Water-mesh transparent blend. Forward draws the water plane
+			// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
+			// draw + dispMap distortion has populated VPage with a wavy
+			// reflection of the city. The transparent filler does
+			//   pixel = saturate(lit_water_texel + existing_VPage/2)
+			// (TheOtherBarry.h:392). We reproduce the same blend here:
+			// the existing VPage value at this pixel is the reflection
+			// preserved across the inter-pass Z-clear (which lets pass-2
+			// deferred shading skip non-water-mesh pixels via zEnc check
+			// on the freshly-cleared depth buffer).
+			if (isWater) {
+				const dword existing = out[i];
+				const int rB = int(existing & 0xFF);
+				const int rG = int((existing >> 8) & 0xFF);
+				const int rR = int((existing >> 16) & 0xFF);
+				outB += rB >> 1;
+				outG += rG >> 1;
+				outR += rR >> 1;
+			}
+
 			if (outB > 255) outB = 255;
 			if (outG > 255) outG = 255;
 			if (outR > 255) outR = 255;
@@ -1847,10 +1894,11 @@ static void Render_DeferredLighting() {
 	ctx.matTable  = matTable;
 	ctx.lights    = lights;
 	ctx.numLights = numLights;
-	ctx.invFOVX   = 1.0f / FOVX;
-	ctx.invFOVY   = 1.0f / FOVY;
-	ctx.invZScale = 1.0f / float(g_zscale);
-	ctx.Sc        = Sc;
+	ctx.invFOVX    = 1.0f / FOVX;
+	ctx.invFOVY    = 1.0f / FOVY;
+	ctx.invZScale  = 1.0f / float(g_zscale);
+	ctx.Sc         = Sc;
+	ctx.waterMatID = g_deferredWaterMatID;
 
 	constexpr int numTilesX = 6;
 	constexpr int numTilesY = 4;

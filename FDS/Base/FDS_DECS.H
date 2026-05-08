@@ -378,6 +378,8 @@ void StaticLighting(Scene *Sc);
 void Lighting(Scene *Sc);
 void Restore_Splines(Scene *Sc);
 void Render(bool forceForward = false);
+void SetDeferredWaterMatID(int id);
+bool deferredEnabled();
 #endif
 
 #ifndef FrustrumIncluded
