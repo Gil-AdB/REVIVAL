@@ -19,6 +19,7 @@
 
 #include "GREETS.H"
 #include "FillerTest.h"
+#include "MeshOps.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
 #include "Scenes.h"
@@ -470,6 +471,10 @@ void Initialize_Greets()
 	GreetSc->Ambient.B = 32;
 
 	GreetSc->PathingMinVelocity = 0.01;
+
+	// Auto-detect creased meshes (e.g. wall panels) and switch them to
+	// per-face vertex normals; smooth meshes (curved letters) untouched.
+	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
 	gg->Init();
 

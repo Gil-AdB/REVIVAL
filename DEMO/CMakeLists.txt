@@ -27,6 +27,8 @@ set(DEMO_SOURCES
     GREETS.H
     ImageCompression.cpp
     ImageCompression.h
+    MeshOps.cpp
+    MeshOps.h
     PhotonTracer.cpp
     PhotonTracer.h
     Raytracer.cpp

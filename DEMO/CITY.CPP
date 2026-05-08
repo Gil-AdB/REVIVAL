@@ -3,6 +3,7 @@
 #include <Threads.h>
 #include "CITY.H"
 #include "FrameProfiler.h"
+#include "MeshOps.h"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <algorithm>
@@ -1525,74 +1526,6 @@ Material* Materialize(void* data, int x, int y) {
 	return M;
 }
 
-// Replace vertex sharing across faces with per-face copies, then write the
-// face normal into all three of each face's new Vertex::N. Effect: the
-// rasterizer interpolates a constant normal across each triangle, giving
-// crisp creases at face boundaries instead of the area-weighted Phong
-// rounding that Compute_Vertex_Normals produces by default.
-//
-// Use only on meshes that genuinely want hard edges (City buildings,
-// rectangular blocks, anything with 90° corners between flat panels).
-// Curved geometry — fountain crystal, greets letters, chase mountains —
-// wants to keep the smooth interpolation, so don't call this on them.
-//
-// Allocates a new Vertex array sized 3*FIndex; old array (and any other
-// users of the original Verts pointer) becomes irrelevant. Run once at
-// scene init, before Lighting() so per-face Gouraud lighting also
-// becomes uniform across the triangle (faceted forward shading).
-// Per-mesh deduplicated-vertex storage. std::vector keeps the array
-// alive for the lifetime of the scene without raw new/delete, and the
-// std::map keys by TriMesh* so the storage is naturally scoped to the
-// scene that's holding the TriMesh.
-static std::map<TriMesh*, std::vector<Vertex>> g_independentVerts;
-
-static void MakeFacesIndependent(TriMesh *T) {
-	if (!T || T->FIndex == 0 || !T->Faces) return;
-
-	const int32_t newCount = T->FIndex * 3;
-	auto &storage = g_independentVerts[T];
-	storage.assign(size_t(newCount), Vertex{});
-	Vertex *newVerts = storage.data();
-
-	for (int32_t i = 0; i < T->FIndex; ++i) {
-		Face *F = &T->Faces[i];
-		if (!F->A || !F->B || !F->C) continue;
-		Vertex *na = &newVerts[3 * i + 0];
-		Vertex *nb = &newVerts[3 * i + 1];
-		Vertex *nc = &newVerts[3 * i + 2];
-		*na = *F->A;
-		*nb = *F->B;
-		*nc = *F->C;
-		na->N = F->N;
-		nb->N = F->N;
-		nc->N = F->N;
-		F->A = na;
-		F->B = nb;
-		F->C = nc;
-	}
-
-	// Old T->Verts is left orphaned (FLD_CONV.CPP allocated it with
-	// `new Vertex[N]` and the codebase doesn't delete[] it elsewhere
-	// either; per-scene-init leak comparable to other scene-data
-	// leaks). New storage is owned by g_independentVerts; lifetime
-	// extends to scene teardown.
-	T->Verts = newVerts;
-	T->VIndex = newCount;
-
-	// T->SL (static-lighting cache) was sized for the original VIndex.
-	// StaticLighting iterates `for vi in [0, T->VIndex)` writing
-	// T->SL[vi] — without growing SL too, those writes overflow into
-	// neighbouring TriMesh structs (corruption manifests as
-	// 0x42800000xxxxxxxx in someone's Next pointer, where 0x42800000
-	// is float 64.0 = CitySc->Ambient.B). Found via ASan
-	// (heap-buffer-overflow at RENDER.CPP:1207). Reallocate to match
-	// the new VIndex.
-	if (T->Flags & Tri_Stationary) {
-		T->SL = (Color *)getAlignedBlock(sizeof(Color) * newCount, 16);
-		// Old SL is also leaked. Same per-scene-init story as Verts.
-	}
-}
-
 using std::pair;
 using std::vector;
 using std::map;
@@ -1694,23 +1627,14 @@ void Initialize_City()
 	FOVX = View->PerspX;
 	FOVY = View->PerspY;
 
-	// City buildings are rectangular blocks of flat panels; the default
-	// area-weighted vertex normals from Compute_Vertex_Normals smooth
-	// across the 90° corners and produce Phong-rounded edges (visible as
-	// red→green→blue gradients across the corner in the deferred normal
-	// viz). Switching those meshes to per-face vertex copies gives each
-	// face a constant normal across the triangle, which the rasterizer
-	// interpolates as a constant — crisp creases. Has to run before
-	// Lighting() so the forward-path Gouraud lighting also benefits.
-	for (Object *Obj = CitySc->ObjectHead; Obj; Obj = Obj->Next) {
-		if (Obj->Type != Obj_TriMesh) continue;
-		if (!Obj->Name) continue;
-		const bool isBuilding = (Obj->Name[0] == 'b'
-			&& '0' <= Obj->Name[1] && Obj->Name[1] <= '9'
-			&& 0 == strcmp(Obj->Name + 2, ".lwo"));
-		if (!isBuilding) continue;
-		MakeFacesIndependent((TriMesh *)Obj->Data);  // re-enabled for ASan
-	}
+	// Auto-detect creased meshes by face-normal angle threshold and
+	// duplicate vertices per-face on hits. Replaces the old building-
+	// name match (`b0.lwo`..`bN.lwo`) — the angle test is the
+	// systematic version and catches non-building creased geometry
+	// too. 30° matches common DCC tools' "auto-smooth angle" default.
+	// Run before Lighting() so the forward-path Gouraud lighting also
+	// sees the faceted normals.
+	MakeFacesIndependentByAngle(CitySc, 30.0f);
 
 	Animate_Objects(CitySc, true);
 	Lighting(CitySc);

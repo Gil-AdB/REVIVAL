@@ -3,6 +3,7 @@
 
 #include "CRASH.H"
 #include "FrameProfiler.h"
+#include "MeshOps.h"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <memory>
@@ -38,6 +39,10 @@ void Initialize_Crash()
 	}
 
 	Preprocess_Scene(CrashSc, "CRASH");
+
+	// Auto-detect creased meshes (laptop facade) and switch them to
+	// per-face vertex normals; smooth meshes (if any) untouched.
+	MakeFacesIndependentByAngle(CrashSc, 30.0f);
 }
 
 namespace {
