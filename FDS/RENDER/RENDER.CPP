@@ -9,6 +9,9 @@
 #include <memory>
 #include <vector>
 #include <algorithm>
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
@@ -1566,6 +1569,9 @@ void SetDeferredWaterMatID(int id) {
 // they fail both the dot >= 0 and len2 <= range2 tests, contributing
 // zero — no need to round numLights up to a multiple of 8 explicitly.
 constexpr int DEFERRED_MAX_LIGHTS = 128;
+constexpr int DEFERRED_NUM_TILES_X = 6;
+constexpr int DEFERRED_NUM_TILES_Y = 4;
+constexpr int DEFERRED_NUM_TILES   = DEFERRED_NUM_TILES_X * DEFERRED_NUM_TILES_Y;
 struct ViewLightsSoA {
 	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
 	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
@@ -1577,6 +1583,17 @@ struct ViewLightsSoA {
 	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
 };
 
+// Per-tile light culling. Each tile (a slice of the screen) keeps a
+// list of indices into the SoA arrays for omnis whose screen-space
+// bounding circle overlaps it. Inner loop iterates only those omnis
+// instead of all numLights, slashing the per-pixel × per-omni work
+// in proportion to spatial omni distribution.
+struct TileLights {
+	alignas(32) int indices[DEFERRED_MAX_LIGHTS];  // padded to 8 with -1
+	int             count;                          // actual count
+	int             paddedCount;                    // (count + 7) & ~7
+};
+
 // Per-frame setup shared across all tile jobs. Captured by reference
 // in the lambdas; lifetime ends when Render() returns (after the
 // tileCounter wait in Render_DeferredLighting).
@@ -1585,6 +1602,7 @@ struct DeferredLightingCtx {
 	MatTable             matTable;
 	const ViewLightsSoA *lights;
 	int                  numLights;
+	const TileLights    *tileLights;  // [DEFERRED_NUM_TILES]
 	float                invFOVX;
 	float                invFOVY;
 	float                invZScale;
@@ -1592,7 +1610,123 @@ struct DeferredLightingCtx {
 	int                  waterMatID;  // -1 if no water blend
 };
 
+// Build per-tile light lists by projecting each omni's view-space
+// bounding sphere into screen space and finding which tile rects it
+// overlaps. Omnis whose center is behind the camera but whose radius
+// reaches forward are conservatively assigned to all tiles. Per-pixel
+// dot/range tests still cull within the list.
+static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
+                                 int tileSizeX, int tileSizeY, int xres, int yres,
+                                 const ViewLightsSoA &lights, int numLights)
+{
+	const int numTiles = numTilesX * numTilesY;
+	for (int t = 0; t < numTiles; ++t) {
+		tileLights[t].count = 0;
+	}
+
+	for (int li = 0; li < numLights; ++li) {
+		const float vx = lights.posX[li];
+		const float vy = lights.posY[li];
+		const float vz = lights.posZ[li];
+		const float r2 = lights.range2[li];
+		const float r  = std::sqrt(r2);
+
+		// Sphere entirely behind camera: skip.
+		if (vz + r < 0.0f) continue;
+
+		int sx_min, sx_max, sy_min, sy_max;
+		if (vz - r < 1.0f) {
+			// Sphere straddles or is in front of near plane — be
+			// conservative and tag every tile. (This is rare for
+			// City; keeps the math simple.)
+			sx_min = 0;        sx_max = xres - 1;
+			sy_min = 0;        sy_max = yres - 1;
+		} else {
+			// Pinhole projection of bounding sphere — small-angle
+			// approximation. Center: (CntrEX + vx*FOVX/vz, CntrEY -
+			// vy*FOVY/vz). Radius on-screen: r * FOVX/vz (use FOVY for
+			// vertical). Slightly over-estimates near the edges of
+			// the FOV but that just lights tiles that miss the per-
+			// pixel cull, no correctness impact.
+			const float invZ = 1.0f / vz;
+			const float cx   = CntrEX + vx * FOVX * invZ;
+			const float cy   = CntrEY - vy * FOVY * invZ;
+			const float rx   = r * FOVX * invZ;
+			const float ry   = r * FOVY * invZ;
+			sx_min = std::max(0,        int(std::floor(cx - rx)));
+			sx_max = std::min(xres - 1, int(std::ceil (cx + rx)));
+			sy_min = std::max(0,        int(std::floor(cy - ry)));
+			sy_max = std::min(yres - 1, int(std::ceil (cy + ry)));
+			if (sx_min > sx_max || sy_min > sy_max) continue;
+		}
+
+		const int tile_i_lo = sx_min / tileSizeX;
+		const int tile_i_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
+		const int tile_j_lo = sy_min / tileSizeY;
+		const int tile_j_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
+
+		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
+			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
+				const int idx = j * numTilesX + i;
+				TileLights &tl = tileLights[idx];
+				if (tl.count < DEFERRED_MAX_LIGHTS) {
+					tl.indices[tl.count++] = li;
+				}
+			}
+		}
+	}
+
+	// Pad index lists to multiple of 8 with the last valid index
+	// (so a vec inner loop reading 8-at-a-time can do redundant work
+	// rather than out-of-bounds reads). Scalar variant ignores
+	// paddedCount and stops at count.
+	for (int t = 0; t < numTiles; ++t) {
+		TileLights &tl = tileLights[t];
+		const int padded = (tl.count + 7) & ~7;
+		const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
+		if (tl.count > 0) {
+			const int last = tl.indices[tl.count - 1];
+			for (int p = tl.count; p < pad_to; ++p) tl.indices[p] = last;
+		} else {
+			for (int p = 0; p < pad_to; ++p) tl.indices[p] = 0;
+		}
+		tl.paddedCount = pad_to;
+	}
+}
+
+// Fast scalar 1/sqrt(x) via NEON's frsqrte + one Newton-Raphson step.
+// arm64 fsqrt+fdiv is ~24 cycles serial; this is ~5. Accuracy is around
+// 12 bits — fine for diffuse shading, far below the visual threshold.
+// Falls back to portable 1.0f / sqrtf(x) on non-arm64 builds (Clang on
+// x86-64 with -msse will emit RSQRTSS + 1 NR for an equivalent cost).
+static inline float fast_rsqrt(float x) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	float32x2_t v = vdup_n_f32(x);
+	float32x2_t e = vrsqrte_f32(v);
+	// One NR step: e' = e * (3 - x*e^2)/2 (vrsqrts implements that)
+	e = vmul_f32(vrsqrts_f32(vmul_f32(e, e), v), e);
+	return vget_lane_f32(e, 0);
+#else
+	return 1.0f / std::sqrt(x);
+#endif
+}
+
+// FDS_DEFERRED_VEC=1 in env switches the per-pixel inner loop from the
+// scalar branch-predicted early-out to a Vec8f SoA accumulation. Stays
+// available for A/B benchmarking — on arm64-via-simde it's slower than
+// scalar (Vec8f decomposes to two 128-bit NEON ops with full per-lane
+// work, no early-out), but the scaffolding is in place to revisit on
+// AVX2 / native NEON / wider lanes.
+static bool deferredLightingVecEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED_VEC");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
+                                          int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
 	const meka::GBuffer &gb = *ctx.gb;
@@ -1692,58 +1826,159 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// every water pixel and saturates lB at 250.
 			const bool isWater = (int(matID) == ctx.waterMatID);
 
-			// Scalar omni loop with per-omni early-out on dot/range
-			// tests. Tried an 8-wide Vec8f variant against SoA-padded
-			// arrays; on arm64 it was 10-15% *slower* because simde maps
-			// Vec8f to a pair of 128-bit NEON ops with full per-lane
-			// work, while the scalar path's branch predictor learns the
-			// "most omnis are out of range" pattern and skips the
-			// full math entirely. The SoA storage is kept anyway: makes
-			// per-omni reads sequential per array and gives a fighting
-			// chance to a future native-NEON or true-AVX2 build.
-			for (int li = 0; !isWater && li < ctx.numLights; ++li) {
-				const float Lpx = ctx.lights->posX[li];
-				const float Lpy = ctx.lights->posY[li];
-				const float Lpz = ctx.lights->posZ[li];
-				const float wx = Lpx - x;
-				const float wy = Lpy - y;
-				const float wz = Lpz - z;
-				const float dot = wx * nx + wy * ny + wz * nz;
-				if (dot < 0.0f) continue;
-				const float len2 = wx*wx + wy*wy + wz*wz;
-				const float r2 = ctx.lights->range2[li];
-				if (len2 > r2) continue;
-				const float lenInv = 1.0f / std::sqrt(len2);
-				const float dist   = 1.0f / lenInv;
-				const float rRange = ctx.lights->rRange[li];
-				const float k = dot * lenInv * (1.0f - dist * rRange);
-				const float intensity = k * Mat->Diffuse;
-				const float Lcb = ctx.lights->colB[li];
-				const float Lcg = ctx.lights->colG[li];
-				const float Lcr = ctx.lights->colR[li];
-				lB += intensity * Lcb;
-				lG += intensity * Lcg;
-				lR += intensity * Lcr;
+			// Per-tile filtered light list — only omnis whose screen-
+			// space bounding sphere overlaps this tile. For City with
+			// ~100 omnis spread across the city, each tile typically
+			// sees 10-20.
+			const TileLights &tl = ctx.tileLights[tileIndex];
 
-				if (wantSpecular) {
-					const float ldx = wx * lenInv;
-					const float ldy = wy * lenInv;
-					const float ldz = wz * lenInv;
-					float hx = ldx + vx;
-					float hy = ldy + vy;
-					float hz = ldz + vz;
-					const float hLen2 = hx*hx + hy*hy + hz*hz;
-					if (hLen2 > 0.0f) {
-						const float hLenInv = 1.0f / std::sqrt(hLen2);
-						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
-						const float NdotH = nx*hx + ny*hy + nz*hz;
-						if (NdotH > 0.0f) {
+			if (!isWater) {
+				if (deferredLightingVecEnabled()) {
+					// Vec8f SoA inner loop. Kept for A/B benchmarking
+					// against the scalar fallback; on arm64-via-simde
+					// the scalar path wins (branch-predictor + early-
+					// out beat the full per-lane Vec8f work that simde
+					// decomposes to 2× NEON), but on a native AVX2 or
+					// NEON build this should pull ahead, and tile
+					// culling lowers the lane-utilization penalty.
+					Vec8f vx_v(x), vy_v(y), vz_v(z);
+					Vec8f vnx_v(nx), vny_v(ny), vnz_v(nz);
+					Vec8f vDiff(Mat->Diffuse);
+					Vec8f vZero(0.0f), vOne(1.0f);
+					Vec8f accB(0.0f), accG(0.0f), accR(0.0f);
+
+					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
+						alignas(32) float buf_px[8], buf_py[8], buf_pz[8];
+						alignas(32) float buf_cb[8], buf_cg[8], buf_cr[8];
+						alignas(32) float buf_r2[8], buf_rr[8];
+						for (int s = 0; s < 8; ++s) {
+							const int idx = tl.indices[slot + s];
+							buf_px[s] = ctx.lights->posX[idx];
+							buf_py[s] = ctx.lights->posY[idx];
+							buf_pz[s] = ctx.lights->posZ[idx];
+							buf_cb[s] = ctx.lights->colB[idx];
+							buf_cg[s] = ctx.lights->colG[idx];
+							buf_cr[s] = ctx.lights->colR[idx];
+							buf_r2[s] = ctx.lights->range2[idx];
+							buf_rr[s] = ctx.lights->rRange[idx];
+						}
+						Vec8f lpx, lpy, lpz, lcb, lcg, lcr, lr2, lrr;
+						lpx.load_a(buf_px); lpy.load_a(buf_py); lpz.load_a(buf_pz);
+						lcb.load_a(buf_cb); lcg.load_a(buf_cg); lcr.load_a(buf_cr);
+						lr2.load_a(buf_r2); lrr.load_a(buf_rr);
+
+						Vec8f wx = lpx - vx_v;
+						Vec8f wy = lpy - vy_v;
+						Vec8f wz = lpz - vz_v;
+						Vec8f dot  = wx*vnx_v + wy*vny_v + wz*vnz_v;
+						Vec8f len2 = wx*wx + wy*wy + wz*wz;
+						Vec8fb mask = (len2 <= lr2) & (dot >= vZero) & (len2 > vZero);
+
+						Vec8f safe_len2 = select(mask, len2, vOne);
+						Vec8f lenInv = approx_rsqrt(safe_len2);
+						Vec8f dist   = safe_len2 * lenInv;
+						Vec8f k = dot * lenInv * (vOne - dist * lrr);
+						Vec8f intensity = select(mask, k * vDiff, vZero);
+
+						accB = mul_add(intensity, lcb, accB);
+						accG = mul_add(intensity, lcg, accG);
+						accR = mul_add(intensity, lcr, accR);
+					}
+					lB += horizontal_add(accB);
+					lG += horizontal_add(accG);
+					lR += horizontal_add(accR);
+					// Vec path doesn't accumulate specular (would need
+					// pow on Vec8f, which dominates the loop on simde);
+					// fall through to scalar for spec materials.
+					if (wantSpecular) {
+						for (int n = 0; n < tl.count; ++n) {
+							const int li = tl.indices[n];
+							const float Lpx = ctx.lights->posX[li];
+							const float Lpy = ctx.lights->posY[li];
+							const float Lpz = ctx.lights->posZ[li];
+							const float wx = Lpx - x;
+							const float wy = Lpy - y;
+							const float wz = Lpz - z;
+							const float dot = wx*nx + wy*ny + wz*nz;
+							if (dot < 0.0f) continue;
+							const float len2 = wx*wx + wy*wy + wz*wz;
+							const float r2 = ctx.lights->range2[li];
+							if (len2 > r2 || len2 == 0.0f) continue;
+							const float lenInv = fast_rsqrt(len2);
+							const float dist   = len2 * lenInv;
+							const float ldx = wx * lenInv;
+							const float ldy = wy * lenInv;
+							const float ldz = wz * lenInv;
+							float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
+							const float hLen2 = hx*hx + hy*hy + hz*hz;
+							if (hLen2 <= 0.0f) continue;
+							const float hLenInv = fast_rsqrt(hLen2);
+							hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+							const float NdotH = nx*hx + ny*hy + nz*hz;
+							if (NdotH <= 0.0f) continue;
 							const float spec = std::pow(NdotH, gloss);
+							const float rRange = ctx.lights->rRange[li];
 							const float specStrength = spec * Mat->Specular *
 								(1.0f - dist * rRange);
-							sB += specStrength * Lcb;
-							sG += specStrength * Lcg;
-							sR += specStrength * Lcr;
+							sB += specStrength * ctx.lights->colB[li];
+							sG += specStrength * ctx.lights->colG[li];
+							sR += specStrength * ctx.lights->colR[li];
+						}
+					}
+				} else {
+					// Scalar path (default). Per-omni early-out on
+					// dot/range tests; branch predictor learns the
+					// "most filtered omnis still out of range" pattern.
+					// `dist = len2 * lenInv` (= sqrt(len2)) avoids a
+					// second fdiv vs `1/lenInv` — fdiv on arm64 is
+					// ~20 cycles vs fmul's 4. The compiler doesn't do
+					// this rewrite under strict FP, so spell it out.
+					for (int n = 0; n < tl.count; ++n) {
+						const int li = tl.indices[n];
+						const float Lpx = ctx.lights->posX[li];
+						const float Lpy = ctx.lights->posY[li];
+						const float Lpz = ctx.lights->posZ[li];
+						const float wx = Lpx - x;
+						const float wy = Lpy - y;
+						const float wz = Lpz - z;
+						const float dot = wx * nx + wy * ny + wz * nz;
+						if (dot < 0.0f) continue;
+						const float len2 = wx*wx + wy*wy + wz*wz;
+						const float r2 = ctx.lights->range2[li];
+						if (len2 > r2) continue;
+						const float lenInv = fast_rsqrt(len2);
+						const float dist   = len2 * lenInv;
+						const float rRange = ctx.lights->rRange[li];
+						const float k = dot * lenInv * (1.0f - dist * rRange);
+						const float intensity = k * Mat->Diffuse;
+						const float Lcb = ctx.lights->colB[li];
+						const float Lcg = ctx.lights->colG[li];
+						const float Lcr = ctx.lights->colR[li];
+						lB += intensity * Lcb;
+						lG += intensity * Lcg;
+						lR += intensity * Lcr;
+
+						if (wantSpecular) {
+							const float ldx = wx * lenInv;
+							const float ldy = wy * lenInv;
+							const float ldz = wz * lenInv;
+							float hx = ldx + vx;
+							float hy = ldy + vy;
+							float hz = ldz + vz;
+							const float hLen2 = hx*hx + hy*hy + hz*hz;
+							if (hLen2 > 0.0f) {
+								const float hLenInv = fast_rsqrt(hLen2);
+								hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+								const float NdotH = nx*hx + ny*hy + nz*hz;
+								if (NdotH > 0.0f) {
+									const float spec = std::pow(NdotH, gloss);
+									const float specStrength = spec * Mat->Specular *
+										(1.0f - dist * rRange);
+									sB += specStrength * Lcb;
+									sG += specStrength * Lcg;
+									sR += specStrength * Lcr;
+								}
+							}
 						}
 					}
 				}
@@ -1845,21 +2080,40 @@ static void Render_DeferredLighting() {
 		++numLights;
 	}
 
+	constexpr int numTilesX = DEFERRED_NUM_TILES_X;
+	constexpr int numTilesY = DEFERRED_NUM_TILES_Y;
+	const int tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
+	const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+
+	// Per-tile light culling: project each omni's bounding sphere
+	// into screen space, find which tiles it overlaps, populate
+	// indices[] per tile.
+	static TileLights tileLights[DEFERRED_NUM_TILES];
+	buildTileLightLists(tileLights, numTilesX, numTilesY,
+	                    tileSizeX, tileSizeY, XRes, YRes,
+	                    lights, numLights);
+	if (std::getenv("FDS_DEFERRED_TILE_STATS")) {
+		int total = 0, tmin = INT_MAX, tmax = 0;
+		for (int t = 0; t < DEFERRED_NUM_TILES; ++t) {
+			total += tileLights[t].count;
+			tmin = std::min(tmin, tileLights[t].count);
+			tmax = std::max(tmax, tileLights[t].count);
+		}
+		fprintf(stderr, "[TILE-LIGHTS] numLights=%d tiles avg=%.1f min=%d max=%d\n",
+			numLights, total / float(DEFERRED_NUM_TILES), tmin, tmax);
+	}
+
 	static DeferredLightingCtx ctx;  // function-static so the lambda captures by reference safely
-	ctx.gb        = &gb;
-	ctx.matTable  = matTable;
-	ctx.lights    = &lights;
-	ctx.numLights = numLights;
+	ctx.gb         = &gb;
+	ctx.matTable   = matTable;
+	ctx.lights     = &lights;
+	ctx.numLights  = numLights;
+	ctx.tileLights = tileLights;
 	ctx.invFOVX    = 1.0f / FOVX;
 	ctx.invFOVY    = 1.0f / FOVY;
 	ctx.invZScale  = 1.0f / float(g_zscale);
 	ctx.Sc         = Sc;
 	ctx.waterMatID = g_deferredWaterMatID;
-
-	constexpr int numTilesX = 6;
-	constexpr int numTilesY = 4;
-	const int tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
-	const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 
 	renderns::tileCounter = 0;
 	for (int j = 0; j < numTilesY; ++j) {
@@ -1868,8 +2122,9 @@ static void Render_DeferredLighting() {
 		for (int i = 0; i < numTilesX; ++i) {
 			const int x1 = tileSizeX * i;
 			const int x2 = std::min(x1 + tileSizeX, XRes);
-			ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
-				Render_DeferredLighting_Tile(ctx, x1, y1, x2, y2);
+			const int tileIndex = j * numTilesX + i;
+			ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+				Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
 			});
 		}
 	}
