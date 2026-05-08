@@ -10,6 +10,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Threads.h>
+#include <VESA/Vesa.h>
 
 #include <cerrno>
 #include <chrono>
@@ -26,6 +27,11 @@
 #endif
 
 extern dword g_profilerActive;
+
+// Test-harness hook implemented in GREETS.CPP. Computes centroids of
+// the greets generator's intermediate buffers (CodeImage, CodeBuf,
+// ScaledBuf, OldBuf) for diffing native vs wasm output.
+extern "C" void Greets_DumpStageCentroids(FILE *out, const char *tag);
 
 namespace {
 
@@ -452,8 +458,152 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
                  cfg.scene.c_str(), cfg.ts, cfg.iters, total_ms, mean_ms);
     std::fflush(stderr);
 
+    // For greets, dump centroid stats so native vs wasm runs can be
+    // compared exactly. Centered text + symmetric smear should put the
+    // centroid of every stage near (128.0, 128.0).
+    if (cfg.scene == "greets") {
+        Greets_DumpStageCentroids(stderr, "post-bench");
+    }
+
     driver->cleanup();
     driver.reset();
+
+    ThreadPool::instance().close();
+    return 0;
+}
+
+// Synthetic centered glyph stamp for the greets pipe bench. Center pixel
+// at (xc, yc), an `s`-pixel-radius square, all white, alpha 255. Fills a
+// 256x256 ARGB8888 buffer.
+static void fillCenteredStamp(uint32_t *buf, int w, int h, int xc, int yc, int s) {
+    std::memset(buf, 0, sizeof(uint32_t) * w * h);
+    for (int y = yc - s; y <= yc + s; ++y) {
+        if (y < 0 || y >= h) continue;
+        for (int x = xc - s; x <= xc + s; ++x) {
+            if (x < 0 || x >= w) continue;
+            buf[y * w + x] = 0xFFFFFFFF;
+        }
+    }
+}
+
+static void centroid256(const uint32_t *buf, double &cx, double &cy, double &mass) {
+    cx = 0; cy = 0; mass = 0;
+    for (int y = 0; y < 256; ++y) {
+        for (int x = 0; x < 256; ++x) {
+            uint32_t px = buf[y * 256 + x];
+            int b = px & 0xFF;
+            int g = (px >> 8) & 0xFF;
+            int r = (px >> 16) & 0xFF;
+            double lum = r + g + b;
+            cx += x * lum;
+            cy += y * lum;
+            mass += lum;
+        }
+    }
+    if (mass > 0) { cx /= mass; cy /= mass; }
+}
+
+int RunGreetsPipeBench(const BenchConfig& cfg, int /*xres*/, int /*yres*/) {
+    if (!initSnapshotEnvironment(256, 256)) return 3;
+
+    constexpr int W = 256;
+    constexpr int H = 256;
+    constexpr int GRID = 33;
+
+    auto allocAligned = [](size_t bytes) -> uint32_t* {
+        return static_cast<uint32_t*>(_aligned_malloc(bytes, 16));
+    };
+
+    uint32_t *codeImage = allocAligned(W * H * 4);
+    uint32_t *codeBuf   = allocAligned(W * H * 4);
+    uint32_t *oldBuf    = allocAligned(W * H * 4);
+    uint32_t *scaledBuf = allocAligned(W * H * 4);
+    GridPointT *codeGP  = new GridPointT[GRID * GRID];
+    GridPointT *smearGP = new GridPointT[GRID * GRID];
+
+    // Centered 16x16 stamp at exact center (124..139 covers center 128).
+    fillCenteredStamp(codeImage, W, H, 128, 128, 4);
+    std::memset(oldBuf,    0, W * H * 4);
+    std::memset(scaledBuf, 0, W * H * 4);
+
+    Image codeImg{};  codeImg.Data = (dword*)codeImage; codeImg.x = W; codeImg.y = H;
+    Image oldImg{};   oldImg.Data  = (dword*)oldBuf;    oldImg.x  = W; oldImg.y  = H;
+
+    int iters = cfg.iters > 0 ? cfg.iters : 100;
+
+    // Mirror the production wobbler exactly. scalex=scaley=0 to match the
+    // GREET3 phase where the formula reduces to (x/256 - 0.5) * 0.25 + 0.5
+    // for every grid point — every value is integer-exact in IEEE float.
+    const float scalex = 0.0f;
+    const float scaley = 0.0f;
+
+    auto fillGrid = [](GridPointT *out, float ax, float ay, float bx, float by) {
+        int j = 0;
+        for (int y = 0; y <= 256; y += 8) {
+            for (int x = 0; x <= 256; x += 8) {
+                float u = (x / 256.0f - 0.5f) * (ax) + bx;
+                float v = (y / 256.0f - 0.5f) * (ay) + by;
+                out[j].u = static_cast<int32_t>(u * 65536.0);
+                out[j].v = static_cast<int32_t>(v * 65536.0);
+                if (out[j].u > 65535) out[j].u = 65535;
+                if (out[j].v > 65535) out[j].v = 65535;
+                if (out[j].u < 0) out[j].u = 0;
+                if (out[j].v < 0) out[j].v = 0;
+                ++j;
+            }
+        }
+    };
+
+    std::fprintf(stderr,
+        "[GREETS-PIPE] iters=%d scalex=%.6f scaley=%.6f stamp@(128,128)\n",
+        iters, scalex, scaley);
+
+    // Print a 5x5 sample of the wobbler grid integers — deterministic
+    // across iterations since scalex/scaley are fixed. Diff this between
+    // native and wasm.
+    fillGrid(codeGP, 0.25f + scalex, 0.25f + scaley, 0.5f, 0.5f);
+    std::fprintf(stderr, "[GREETS-PIPE] Code_GP sample (gx,gy → u,v):\n");
+    for (int gy = 0; gy < GRID; gy += 8) {
+        for (int gx = 0; gx < GRID; gx += 8) {
+            int idx = gy * GRID + gx;
+            std::fprintf(stderr, "[GREETS-PIPE]   (%d,%d) u=%d v=%d\n",
+                         gx, gy, codeGP[idx].u, codeGP[idx].v);
+        }
+    }
+
+    // Constant alpha-blend ratios — keep them deterministic so the trail
+    // converges identically across runs.
+    DWord pSrc = 0xFFFFFFFFu;
+    DWord pDst = 0x80808080u;
+
+    for (int i = 0; i < iters; ++i) {
+        fillGrid(codeGP,  0.25f + scalex, 0.25f + scaley, 0.5f, 0.5f);
+        fillGrid(smearGP, 0.98f,           0.95f,          0.5f, 0.5f);
+
+        GridRendererT(codeGP,  &codeImg, (dword*)codeBuf,   W, H);
+        GridRendererT(smearGP, &oldImg,  (dword*)scaledBuf, W, H);
+
+        AlphaBlend((byte*)codeBuf, (byte*)scaledBuf, pSrc, pDst, W * H * 4);
+        std::memcpy(oldBuf, scaledBuf, W * H * 4);
+    }
+
+    double cx, cy, mass;
+    centroid256(codeImage, cx, cy, mass);
+    std::fprintf(stderr, "[GREETS-PIPE] CodeImage  cx=%9.4f cy=%9.4f mass=%.0f\n", cx, cy, mass);
+    centroid256(codeBuf, cx, cy, mass);
+    std::fprintf(stderr, "[GREETS-PIPE] CodeBuf    cx=%9.4f cy=%9.4f mass=%.0f\n", cx, cy, mass);
+    centroid256(scaledBuf, cx, cy, mass);
+    std::fprintf(stderr, "[GREETS-PIPE] ScaledBuf  cx=%9.4f cy=%9.4f mass=%.0f\n", cx, cy, mass);
+    centroid256(oldBuf, cx, cy, mass);
+    std::fprintf(stderr, "[GREETS-PIPE] OldBuf     cx=%9.4f cy=%9.4f mass=%.0f\n", cx, cy, mass);
+    std::fflush(stderr);
+
+    _aligned_free(codeImage);
+    _aligned_free(codeBuf);
+    _aligned_free(oldBuf);
+    _aligned_free(scaledBuf);
+    delete[] codeGP;
+    delete[] smearGP;
 
     ThreadPool::instance().close();
     return 0;

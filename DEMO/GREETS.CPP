@@ -14,8 +14,8 @@
 // DEBUG_GREETS_DUMP_GRID: stderr-dumps a few Code_GP[] values on every
 // new greet so native and wasm can be diff'd to byte-exact precision.
 // Only fires when the active greet pointer changes — no per-frame spam.
-#define DEBUG_GREETS_BYPASS_WOBBLER 1
-#define DEBUG_GREETS_DUMP_GRID 1
+#define DEBUG_GREETS_BYPASS_WOBBLER 0
+#define DEBUG_GREETS_DUMP_GRID 0
 
 #include "GREETS.H"
 #include "FillerTest.h"
@@ -390,6 +390,48 @@ struct GreetsGenerator
 };
 
 GreetsGenerator *gg;
+
+// Test-harness hook: compute centroids of the major intermediate buffers
+// and write them to `out`. Centered greets should put the centroid near
+// (128.0, 128.0) on every stage. Used by --bench=greets-stage to diff
+// native vs wasm.
+extern "C" void Greets_DumpStageCentroids(FILE *out, const char *tag) {
+	if (!gg) {
+		fprintf(out, "[GREETS-CENTROID %s] gg=null (Initialize_Greets not run)\n", tag);
+		return;
+	}
+	auto centroid = [](const dword *buf, int w, int h,
+	                   double &cx, double &cy, double &mass) {
+		cx = 0; cy = 0; mass = 0;
+		for (int y = 0; y < h; ++y) {
+			for (int x = 0; x < w; ++x) {
+				dword px = buf[y * w + x];
+				int b = px & 0xFF;
+				int g = (px >> 8) & 0xFF;
+				int r = (px >> 16) & 0xFF;
+				double lum = r + g + b;
+				cx += x * lum;
+				cy += y * lum;
+				mass += lum;
+			}
+		}
+		if (mass > 0) { cx /= mass; cy /= mass; }
+	};
+	double cx, cy, mass;
+	centroid((const dword *)gg->CodeImage.Data, 256, 256, cx, cy, mass);
+	fprintf(out, "[GREETS-CENTROID %s] CodeImage  cx=%9.4f cy=%9.4f mass=%.1f\n",
+	        tag, cx, cy, mass);
+	centroid((const dword *)gg->CodeBuf, 256, 256, cx, cy, mass);
+	fprintf(out, "[GREETS-CENTROID %s] CodeBuf    cx=%9.4f cy=%9.4f mass=%.1f\n",
+	        tag, cx, cy, mass);
+	centroid((const dword *)gg->ScaledBuf, 256, 256, cx, cy, mass);
+	fprintf(out, "[GREETS-CENTROID %s] ScaledBuf  cx=%9.4f cy=%9.4f mass=%.1f\n",
+	        tag, cx, cy, mass);
+	centroid((const dword *)gg->OldBuf, 256, 256, cx, cy, mass);
+	fprintf(out, "[GREETS-CENTROID %s] OldBuf     cx=%9.4f cy=%9.4f mass=%.1f\n",
+	        tag, cx, cy, mass);
+	fflush(out);
+}
 
 void Initialize_Greets()
 {	

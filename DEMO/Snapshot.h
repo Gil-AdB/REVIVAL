@@ -82,3 +82,17 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres);
 //   DEMO --bench=flip@iters=1000            -> 1000 iters
 //   DEMO --bench=flip@iters=500,xres=1920,yres=1080
 int RunFlipBench(const BenchConfig& cfg, int xres, int yres);
+
+// Greets dynamic-text-texture pipeline harness. Self-contained: doesn't
+// load SCENES/GREETS.FLD or any 3D state, just fills a 256x256 CodeImage
+// with a centered synthetic glyph, runs the wobbler (Code_GP) + smear
+// (Smear_GP) + AlphaBlend chain N times with fixed scalex/scaley, and
+// prints centroids of each intermediate buffer. Diff the output between
+// native and wasm — centered input + symmetric pipeline should give
+// centroids near (128.0, 128.0). Any deviation pinpoints which step
+// breaks symmetry.
+//
+// Invocation:
+//   DEMO --bench=greets-pipe              -> 100 iters, scalex=scaley=0
+//   DEMO --bench=greets-pipe@iters=200
+int RunGreetsPipeBench(const BenchConfig& cfg, int xres, int yres);

@@ -1164,6 +1164,9 @@ int main(int argc, const char *argv[])
 		if (bench.kind == "flip") {
 			return RunFlipBench(bench, g_demoXRes, g_demoYRes);
 		}
+		if (bench.kind == "greets-pipe") {
+			return RunGreetsPipeBench(bench, g_demoXRes, g_demoYRes);
+		}
 		fprintf(stderr, "[BENCH] unknown kind '%s' (try raster, scene)\n",
 		        bench.kind.c_str());
 		return 2;
