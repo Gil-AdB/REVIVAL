@@ -46,11 +46,13 @@ public:
     // For overlay FPS line (caller may also want raw frame count).
     std::uint32_t frames() const { return numFrames_; }
 
-    // Mean per-frame total (ms), refreshed at endFrame(). Use this for the
-    // on-screen FPS overlay — the previous Timer-based formula quantized
-    // to 10 ms ticks and had an off-by-one over its 20-sample window, so
-    // it disagreed with TOTL/mean_fps in the scene-end dump.
-    float meanFrameMs() const { return overlayTotalMs_; }
+    // Trailing-window mean (last ~60 frames). Use this for the on-screen
+    // FPS overlay so frame-rate dips show up immediately instead of being
+    // smoothed into the scene-cumulative average.
+    float meanFrameMs() const { return overlayWindowMs_; }
+    // Scene-cumulative mean — the historic value drawOverlay used to
+    // print as TOTL.
+    float cumulativeFrameMs() const { return overlayTotalMs_; }
 
     // Scene-cumulative ms in a section. Useful for derived stats like MPx/sec.
     double cumulativeMs(int section) const;
@@ -80,7 +82,13 @@ private:
     // Cached for overlay/dump. Computed at endFrame() so reads are cheap.
     float overlayMeanMs_[PROF_NUM] = {};
     float overlayPercent_[PROF_NUM] = {};
-    float overlayTotalMs_ = 0.0f;
+    float overlayTotalMs_ = 0.0f;       // scene-cumulative
+    float overlayWindowMs_ = 0.0f;      // trailing 60-frame window
+    static constexpr int kFpsWindow = 60;
+    std::int64_t fpsWindow_[kFpsWindow] = {};
+    int fpsWindowIdx_ = 0;
+    int fpsWindowCount_ = 0;
+    std::int64_t fpsWindowSum_ = 0;
 
     static constexpr const char* kNames[PROF_NUM] = {
         "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"

@@ -42,6 +42,10 @@ SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag);
 // AudioContext can start.
 void SDL2_StartMusic(void* modplayerHandle);
 void SDL2_StopMusic();
+
+// Output multiplier applied at present time. 1.0 = passthrough (default),
+// 0.0 = solid black. Used by MainLoop's FADE_OUT to animate end-of-demo.
+extern "C" void SDL2_SetFade(float fade);
 #endif
 
 

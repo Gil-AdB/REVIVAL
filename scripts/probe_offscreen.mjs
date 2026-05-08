@@ -53,8 +53,20 @@ try {
 // to trigger the user-gesture gate (the demo blocks on a click before
 // audio + scene start).
 await new Promise((r) => setTimeout(r, 1500));
-try { await page.click("#canvas", { force: true, timeout: 1500 }); } catch (_) {}
-try { await page.keyboard.press("Space"); } catch (_) {}
+// Focus the canvas first, then click coordinates inside it. Just calling
+// page.click("#canvas") doesn't reliably deliver mousedown/keydown to
+// emscripten's SDL2 in headless Chromium; explicit focus + mouse.click
+// at canvas-center coordinates works.
+try {
+	await page.evaluate(() => {
+		const c = document.getElementById("canvas");
+		if (c && c.focus) c.focus();
+	});
+	await page.mouse.move(640, 360);
+	await page.mouse.down();
+	await page.mouse.up();
+	await page.keyboard.press("Space");
+} catch (e) { console.log(`[probe] click: ${e.message}`); }
 await new Promise((r) => setTimeout(r, seconds * 1000));
 // Visual snapshot — useful for verifying the canvas actually renders
 // (FLIP timings alone don't catch an OffscreenCanvas-placeholder bridge

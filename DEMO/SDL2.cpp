@@ -2,7 +2,6 @@
 #include <Base/FDS_DECS.H>
 #include "SDL2.h"
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -34,34 +33,6 @@ static SDL_Window *sdl_window;
 // (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
 static SDLTex s_engineTex;
 
-// Per-stage FLIP profiler. On wasm we're spending most of a frame in the
-// SDL present path; this accumulates ms across N frames and dumps to
-// stderr so we can see exactly which stage is the bottleneck. Gated on
-// g_profilerActive (the same flag that turns on the on-screen overlay).
-// Throwaway instrumentation — remove once the wasm FLIP rewrite lands.
-namespace {
-struct FlipStageProfiler {
-	using clock = std::chrono::steady_clock;
-	using ms_d  = std::chrono::duration<double, std::milli>;
-	double unlockMs = 0, barsMs = 0, copyMs = 0, presentMs = 0, lockMs = 0;
-	int frames = 0;
-	static constexpr int kDumpEvery = 60;
-	void tick(double u, double b, double c, double p, double l) {
-		unlockMs += u; barsMs += b; copyMs += c; presentMs += p; lockMs += l;
-		if (++frames < kDumpEvery) return;
-		double d = (double)frames;
-		fprintf(stderr,
-			"[FLIP] frames=%d  unlock=%.3f  bars=%.3f  copy=%.3f  present=%.3f  lock=%.3f  total=%.3f ms\n",
-			frames, unlockMs/d, barsMs/d, copyMs/d, presentMs/d, lockMs/d,
-			(unlockMs+barsMs+copyMs+presentMs+lockMs)/d);
-		unlockMs = barsMs = copyMs = presentMs = lockMs = 0;
-		frames = 0;
-	}
-};
-}
-
-extern "C" dword g_profilerActive;
-
 #ifdef __EMSCRIPTEN__
 // One-time WebGL2 setup on the SDL canvas. Must run before any other
 // rendering context is requested on it (canvas allows only one type at a
@@ -76,11 +47,10 @@ extern "C" dword g_profilerActive;
 //      fully transparent. We force alpha = 1.0 in the shader.
 static int Wasm_InitGL()
 {
-	// Sync proxy to the browser main thread (where the canvas lives).
-	// The OffscreenCanvas-to-worker route deadlocks against main's
-	// SDL_WaitEvent loop, so we stay on the browser main thread for
-	// the WebGL work. Cost: ~5-7 ms cross-thread proxy per flip.
-	return MAIN_THREAD_EM_ASM_INT({
+	// V_Flip runs on the browser main thread (main() is no longer proxied
+	// to a pthread). WebGL state lives here too, so plain EM_ASM is fine
+	// — no cross-thread proxy.
+	return EM_ASM_INT({
 		var canvas = Module.canvas;
 		if (!canvas) return 1;
 		var gl = canvas.getContext('webgl2', {
@@ -97,6 +67,12 @@ static int Wasm_InitGL()
 
 		var vsSrc =
 			'#version 300 es\n' +
+			// Dummy attribute at location 0. Without an attribute bound
+			// to location 0, desktop GL drivers (Mac in particular) fall
+			// into a slow attrib-emulation path even when an unused VBO
+			// is bound. Declaring it in the shader makes the linker mark
+			// location 0 as "used" and silences the WebGL warning.
+			'layout(location=0) in float aDummy;\n' +
 			'out vec2 vUV;\n' +
 			'void main() {\n' +
 			'  vec2 corners[4];\n' +
@@ -110,17 +86,19 @@ static int Wasm_InitGL()
 			'  uvs[2] = vec2(0.0, 0.0);\n' +
 			'  uvs[3] = vec2(1.0, 0.0);\n' +
 			'  vUV = uvs[gl_VertexID];\n' +
-			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0);\n' +
+			'  // aDummy participates so the optimizer cannot strip it.\n' +
+			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0 + aDummy * 0.0);\n' +
 			'}';
 		var fsSrc =
 			'#version 300 es\n' +
 			'precision highp float;\n' +
 			'in vec2 vUV;\n' +
 			'uniform sampler2D uTex;\n' +
+			'uniform float uFade;\n' +
 			'out vec4 oColor;\n' +
 			'void main() {\n' +
 			'  vec4 c = texture(uTex, vUV);\n' +
-			'  oColor = vec4(c.b, c.g, c.r, 1.0);\n' +
+			'  oColor = vec4(c.b * uFade, c.g * uFade, c.r * uFade, 1.0);\n' +
 			'}';
 		function compile(type, src) {
 			var s = gl.createShader(type);
@@ -139,19 +117,23 @@ static int Wasm_InitGL()
 			console.error('flood gl link: ' + gl.getProgramInfoLog(prog));
 		}
 		Module.__floodProg = prog;
+		Module.__floodFadeLoc = gl.getUniformLocation(prog, 'uFade');
 		Module.__floodTex = gl.createTexture();
 		Module.__floodTexW = 0;
 		Module.__floodTexH = 0;
-		// VAO with a dummy attribute at location 0 — the vertex shader
-		// synthesizes the quad from gl_VertexID and uses no attributes,
-		// but desktop GL drivers (Mac in particular) fall into a slow
-		// emulation path if attribute 0 is unbound. A 4-byte buffer is
-		// enough to satisfy them; the shader never reads from it.
+		// VAO with a dummy attribute at location 0. The vertex shader
+		// declares aDummy at location 0 (silences the desktop-GL
+		// emulation warning) and multiplies it by 0 so the optimizer
+		// can't strip it. The buffer must hold enough data for the
+		// full draw — drawArrays(TRIANGLE_STRIP, 0, 4) reads 4 floats
+		// at this attribute, so a 4-element buffer; an undersized buffer
+		// triggers out-of-bounds reads that some drivers handle by
+		// dropping the entire draw call (= black canvas).
 		Module.__floodVAO = gl.createVertexArray();
 		gl.bindVertexArray(Module.__floodVAO);
 		var dummyVBO = gl.createBuffer();
 		gl.bindBuffer(gl.ARRAY_BUFFER, dummyVBO);
-		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0]), gl.STATIC_DRAW);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 0, 0]), gl.STATIC_DRAW);
 		gl.enableVertexAttribArray(0);
 		gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
 		gl.bindVertexArray(null);
@@ -164,6 +146,10 @@ static int Wasm_InitGL()
 		return 0;
 	});
 }
+
+// Output multiplier for the fade-out at the end of Greets. 1.0 = passthrough,
+// 0.0 = solid black. Set via SDL2_SetFade from MainLoop's FADE_OUT state.
+static float s_fade = 1.0f;
 
 // Upload `pixels` (srcW x srcH, BGRA byte order) into the WebGL texture
 // and present a fullscreen quad letterboxed inside the canvas.
@@ -182,7 +168,7 @@ static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 	}
 	if (s_initFailed) return;
 
-	MAIN_THREAD_EM_ASM({
+	EM_ASM({
 		var gl = Module.__floodGL;
 		if (!gl) return;
 		var canvas = Module.canvas;
@@ -223,22 +209,20 @@ static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 		gl.clear(gl.COLOR_BUFFER_BIT);
 		gl.viewport(dx, dy, dw, dh);
 		gl.useProgram(Module.__floodProg);
+		gl.uniform1f(Module.__floodFadeLoc, $3);
 		gl.bindVertexArray(Module.__floodVAO);
 		gl.activeTexture(gl.TEXTURE0);
 		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
 		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-	}, (uintptr_t)pixels, srcW, srcH);
+	}, (uintptr_t)pixels, srcW, srcH, (double)s_fade);
 }
+
+// Public setter for the present-time fade (1.0 default; 0 = black).
+extern "C" void SDL2_SetFade(float fade) { s_fade = fade; }
 #endif
 
 static void V_Flip(VESA_Surface *VS)
 {
-	using clock = std::chrono::steady_clock;
-	using ms_d  = std::chrono::duration<double, std::milli>;
-	static FlipStageProfiler s_flipProf;
-	const bool profileFlip = g_profilerActive != 0;
-	auto stamp = [&]() { return profileFlip ? clock::now() : clock::time_point{}; };
-
 	// Top-right resolution overlay. Draw into the surface's data buffer
 	// just before pushing to the SDL_Texture so it shows up regardless of
 	// which scene's surface is being flipped (MainSurf vs Glat's FinalSurf).
@@ -257,7 +241,6 @@ static void V_Flip(VESA_Surface *VS)
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
 	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
 
-	auto t0 = stamp();
 #ifdef __EMSCRIPTEN__
 	// Wasm path: SDL renderer is never created on this build, so we can't
 	// (and don't need to) touch SDL_RenderCopy / SDL_RenderPresent. The
@@ -267,10 +250,6 @@ static void V_Flip(VESA_Surface *VS)
 	// shader, just different src dims.
 	(void)lockMode;
 	Wasm_PresentGL(VS->Data, (int)VS->X, (int)VS->Y);
-	if (profileFlip) {
-		auto tEnd = stamp();
-		s_flipProf.tick(0.0, 0.0, 0.0, ms_d(tEnd - t0).count(), 0.0);
-	}
 	return;
 #endif
 	if (lockMode) {
@@ -285,7 +264,6 @@ static void V_Flip(VESA_Surface *VS)
 		// Engine surfaces use lockMode and skip this memcpy.
 		SDL_UpdateTexture(texture, NULL, VS->Data, VS->BPSL);
 	}
-	auto tUnlock = stamp();
 
 	// Letterbox: preserve the surface's aspect ratio inside the window.
 	// The source is VS->X * VS->Y (e.g. Glat snaps to /8 multiples while
@@ -328,11 +306,8 @@ static void V_Flip(VESA_Surface *VS)
 		}
 		if (n > 0) SDL_RenderFillRects(renderer, bars, n);
 	}
-	auto tBars = stamp();
 	SDL_RenderCopy(renderer, texture, NULL, useFullDst ? NULL : &dst);
-	auto tCopy = stamp();
 	SDL_RenderPresent(renderer);
-	auto tPresent = stamp();
 
 	if (lockMode) {
 		// Re-lock for the next frame's writes. Update VS->Data + engine
@@ -350,15 +325,6 @@ static void V_Flip(VESA_Surface *VS)
 		} else {
 			fprintf(stderr, "[SDL] LockTexture failed in V_Flip: %s\n", SDL_GetError());
 		}
-	}
-	if (profileFlip) {
-		auto tLock = stamp();
-		s_flipProf.tick(
-			ms_d(tUnlock  - t0       ).count(),
-			ms_d(tBars    - tUnlock  ).count(),
-			ms_d(tCopy    - tBars    ).count(),
-			ms_d(tPresent - tCopy    ).count(),
-			ms_d(tLock    - tPresent ).count());
 	}
 }
 

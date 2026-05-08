@@ -67,7 +67,22 @@ void FrameProfiler::endFrame() {
         samples_[i].push_back(currentFrame_[i]);
         frameTotal += currentFrame_[i];
     }
-    frameTotals_.push_back(std::chrono::duration_cast<ns>(now - frameStart_).count());
+    auto wallNs = std::chrono::duration_cast<ns>(now - frameStart_).count();
+    frameTotals_.push_back(wallNs);
+
+    // Trailing-window mean: kFpsWindow most recent frame totals.
+    // Update incrementally so it's O(1) per frame.
+    if (fpsWindowCount_ < kFpsWindow) {
+        fpsWindow_[fpsWindowIdx_] = wallNs;
+        fpsWindowSum_ += wallNs;
+        ++fpsWindowCount_;
+    } else {
+        fpsWindowSum_ += wallNs - fpsWindow_[fpsWindowIdx_];
+        fpsWindow_[fpsWindowIdx_] = wallNs;
+    }
+    fpsWindowIdx_ = (fpsWindowIdx_ + 1) % kFpsWindow;
+    overlayWindowMs_ = static_cast<float>(
+        nsToMs(fpsWindowSum_) / fpsWindowCount_);
 
     // Refresh overlay aggregates: cumulative mean per section.
     std::int64_t scenarioTotal = 0;
