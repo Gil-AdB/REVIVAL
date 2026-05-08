@@ -4892,7 +4892,21 @@ simde_mm256_rsqrt_ps (simde__m256 a) {
       r_,
       a_ = simde__m256_to_private(a);
 
-    #if defined(simde_math_sqrtf)
+    /* REVIVAL local patch: NEON fast path. Upstream simde only
+     * implements the m128 _mm_rsqrt_ps via vrsqrteq_f32 — the m256
+     * version dropped to a scalar 1.0f / sqrtf(x) loop, which on
+     * arm64 emits fsqrt + fdiv per lane (~24 cycles/lane, serial).
+     * vrsqrteq_f32 is ~2 cycles for 4 lanes and matches Intel's
+     * _mm256_rsqrt_ps documented ~12-bit accuracy spec exactly.
+     * Mirrors the wasm fallback patches we landed for
+     * _mm256_mullo_epi16 / _mm256_srli_epi16. Verified by objdump:
+     * before this, the deferred-lighting Vec8f inner loop emitted
+     * fsqrt.4s + fdiv.4s for each approx_rsqrt; after, frsqrte.4s
+     * × 2 with no fsqrt/fdiv in the hot loop. */
+    #if defined(SIMDE_ARM_NEON_A32V7_NATIVE)
+      r_.m128_private[0].neon_f32 = vrsqrteq_f32(a_.m128_private[0].neon_f32);
+      r_.m128_private[1].neon_f32 = vrsqrteq_f32(a_.m128_private[1].neon_f32);
+    #elif defined(simde_math_sqrtf)
       SIMDE_VECTORIZE
       for (size_t i = 0 ; i < (sizeof(r_.f32) / sizeof(r_.f32[0])) ; i++) {
         r_.f32[i] = 1.0f / simde_math_sqrtf(a_.f32[i]);
