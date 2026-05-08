@@ -1585,7 +1585,7 @@ void Initialize_City()
 	//SceneCorrections();
 
 
-	Preprocess_Scene(CitySc);
+	Preprocess_Scene(CitySc, "CITY");
 
 	//for(M = MatLib;M;M=M->Next)
 	//{

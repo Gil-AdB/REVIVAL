@@ -731,7 +731,7 @@ void Initialize_Chase()
 	Reflective_Surface_Setup();
 
 	SceneCorrections();
-	Preprocess_Scene(ChaseSc);
+	Preprocess_Scene(ChaseSc, "CHASE");
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 }
 

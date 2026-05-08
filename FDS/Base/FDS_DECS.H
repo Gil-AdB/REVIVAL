@@ -342,7 +342,7 @@ void FDS_End(void);
 void Init_Randomseed();
 
 
-void Preprocess_Scene(Scene *Sc);
+void Preprocess_Scene(Scene *Sc, const char *tag = nullptr);
 void Materials_Remap_Aligned();
 void Materials_Load(Scene *Sc);
 void Assign_Fillers(Scene *Sc);

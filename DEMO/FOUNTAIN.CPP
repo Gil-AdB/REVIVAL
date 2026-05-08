@@ -727,7 +727,7 @@ void Initialize_Fountain()
 	}
 
 	Initialize_Particles(FntSc);
-	Preprocess_Scene(FntSc);
+	Preprocess_Scene(FntSc, "FOUNTAIN");
 
 	Omni *O = FntSc->OmniHead->Next->Next;
 

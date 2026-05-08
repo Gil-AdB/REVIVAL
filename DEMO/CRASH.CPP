@@ -37,7 +37,7 @@ void Initialize_Crash()
 		M->Txtr->Flags |= Txtr_Tiled;
 	}
 
-	Preprocess_Scene(CrashSc);
+	Preprocess_Scene(CrashSc, "CRASH");
 }
 
 namespace {

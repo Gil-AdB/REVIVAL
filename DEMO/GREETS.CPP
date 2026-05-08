@@ -462,7 +462,7 @@ void Initialize_Greets()
 	GreetSc->NZP = 0.01f;
 	GreetSc->FZP = 150.0f;
 //	GreetSc->Flags |= Scn_Fogged;
-	Preprocess_Scene(GreetSc);
+	Preprocess_Scene(GreetSc, "GREETS");
 	// also make the appropriate Layer 2 fillers,
 
 	GreetSc->Ambient.R = 32;

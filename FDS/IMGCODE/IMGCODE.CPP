@@ -1282,10 +1282,12 @@ void Unify_Textures(Scene *Sc)
 
 	dword matID = 0;
 	dword txtrID = 0;
+	dword skippedOtherScene = 0;
+	dword skippedUntextured = 0;
 	for(M=MatLib;M;M=M->Next)
 	{
-		if (M->RelScene!=Sc) continue; //Ignore nonrelevant materials.
-		if (!M->Txtr) continue; //Ignore nontextured materials.
+		if (M->RelScene!=Sc) { ++skippedOtherScene; continue; } //Ignore nonrelevant materials.
+		if (!M->Txtr) { ++skippedUntextured; continue; } //Ignore nontextured materials.
 
 		M->ID = matID++;
 
@@ -1308,6 +1310,98 @@ void Unify_Textures(Scene *Sc)
 		}
 		M->Txtr->ID = txtrID++;
 	}
+
+	// Per-scene material/texture census. Mekalele.h's existing mat32
+	// packing reserves 8 bits for matID (Txtr->ID < 256 is asserted at
+	// rasterizer construction). The deferred G-buffer plan inherits that
+	// budget — log every scene's totals at init so we can size matID's
+	// bit width for real before wiring the deferred path. Warn (don't
+	// abort) when a scene exceeds 256 so census collection completes
+	// across all scenes; the rasterizer-side abort still fires the
+	// moment the deferred path actually executes.
+	fprintf(stderr,
+		"[MAT] scene=%p matID=%u txtrID=%u "
+		"(skipped: other_scene=%u untextured=%u)%s\n",
+		(void *)Sc, matID, txtrID, skippedOtherScene, skippedUntextured,
+		matID > 256 ? "  *** OVER 8-BIT BUDGET ***" : "");
+
+	// Histogram of materials per texture file for this scene. The 424:32
+	// mat:tex ratio in City means most textures are referenced by ~13
+	// distinct Material entries — useful to see which textures fan out
+	// the most (windows? walls?) before deciding how to pack matID.
+	if (matID > 0) {
+		struct TexBucket {
+			const char *file;
+			dword matCount;
+			dword reflectiveCount;
+		};
+		TexBucket *buckets = (TexBucket *)alloca(sizeof(TexBucket) * txtrID);
+		dword nBuckets = 0;
+		for (M = MatLib; M; M = M->Next) {
+			if (M->RelScene != Sc) continue;
+			if (!M->Txtr) continue;
+			const char *fn = M->Txtr->FileName ? M->Txtr->FileName : "(no-filename)";
+			TexBucket *b = nullptr;
+			for (dword i = 0; i < nBuckets; ++i)
+				if (buckets[i].file == fn || (buckets[i].file && fn && !strcmp(buckets[i].file, fn))) {
+					b = &buckets[i]; break;
+				}
+			if (!b && nBuckets < txtrID) {
+				b = &buckets[nBuckets++];
+				b->file = fn; b->matCount = 0; b->reflectiveCount = 0;
+			}
+			if (b) {
+				++b->matCount;
+				if (M->Name && strstr(M->Name, "window")) ++b->reflectiveCount;
+			}
+		}
+		// Print top buckets descending. txtrID is at most a few dozen, so
+		// O(n^2) selection-print is fine.
+		bool *printed = (bool *)alloca(sizeof(bool) * nBuckets);
+		memset(printed, 0, sizeof(bool) * nBuckets);
+		for (dword pass = 0; pass < nBuckets; ++pass) {
+			dword bestIdx = (dword)-1;
+			dword bestCount = 0;
+			for (dword i = 0; i < nBuckets; ++i) {
+				if (printed[i]) continue;
+				if (buckets[i].matCount >= bestCount) {
+					bestCount = buckets[i].matCount;
+					bestIdx = i;
+				}
+			}
+			if (bestIdx == (dword)-1) break;
+			printed[bestIdx] = true;
+			fprintf(stderr, "[MAT]   %5u mats (%u with 'window' name) -> %s\n",
+				buckets[bestIdx].matCount, buckets[bestIdx].reflectiveCount,
+				buckets[bestIdx].file ? buckets[bestIdx].file : "(null)");
+		}
+
+		// Per-material detail table. Emit the full per-Material listing
+		// so we can verify the matID assignments and see what each entry
+		// actually represents (name, texture, lighting params, flags).
+		// Disabled by default — 400+ lines per scene is a lot of output;
+		// flip the env var FDS_DUMP_MATS=1 to enable.
+		const char *dumpEnv = getenv("FDS_DUMP_MATS");
+		if (dumpEnv && dumpEnv[0] == '1') {
+			fprintf(stderr,
+				"[MAT-TABLE] scene=%p  matID  name                         "
+				"texture                              "
+				"diff  spec  refl  flags\n",
+				(void *)Sc);
+			for (M = MatLib; M; M = M->Next) {
+				if (M->RelScene != Sc) continue;
+				if (!M->Txtr) continue;
+				fprintf(stderr,
+					"[MAT-TABLE]            %4u  %-28s %-36s %4.2f  %4.2f  %4.2f  0x%08x\n",
+					M->ID,
+					M->Name ? M->Name : "(null)",
+					M->Txtr->FileName ? M->Txtr->FileName : "(no-file)",
+					M->Diffuse, M->Specular, M->Reflection,
+					M->Flags);
+			}
+		}
+	}
+
 	if (BPP==8&&xBPP)
 	{
 		Universal_Palette(Sc); //So much work for the Quantum unit,heh heh.

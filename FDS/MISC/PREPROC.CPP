@@ -1016,9 +1016,10 @@ void Force_Default_Mat(Scene *Sc)
 			/*     if (!T->Faces[I].Txtr) */T->Faces[I].Txtr = &Default_Mat;
 }
 
-void Preprocess_Scene(Scene *Sc)
+void Preprocess_Scene(Scene *Sc, const char *tag)
 {
 	//  printf("<PR> Preprocessing Scene #%d\n",EnumScene(Sc));
+	if (tag) fprintf(stderr, "[PREPROC] %s scene=%p\n", tag, (void *)Sc);
 	Init_Flares(Sc);
 	Materials_Load(Sc); //load ALL textures sequently.
 	//  Force_Default_Mat(Sc);
