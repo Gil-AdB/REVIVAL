@@ -1216,15 +1216,16 @@ void StaticLighting(Scene *Sc)
 
 
 
-// Deferred path computes lighting per-pixel in Render_DeferredLighting;
-// running per-vertex Lighting() too is wasted work whose output (Vtx->LR/
-// LG/LB/LA) the deferred path doesn't consume. Skip when the env var is
-// set. Forward path keeps running it as before.
+// Lighting() now runs unconditionally. The deferred path bypasses
+// Mekalele for Face_Reflective faces and dispatches them through the
+// forward TheOtherBarry<OVERWRITE, TEXTURETEXTURE> filler — which reads
+// Vtx->LR/LG/LB for its colorize step — so the per-vertex pass has to
+// populate those even when the rest of the frame is going through the
+// G-buffer compositor.
 extern bool deferredEnabled();
 
 void Lighting(Scene *Sc)
 {
-	if (deferredEnabled()) return;
 
 	TriMesh *T;
 	Vertex *V, *VE;
@@ -1488,10 +1489,22 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 			// in the future lighting pass needs a sentinel slot for
 			// "no texture; use BaseCol", which is the proper fix.
 			if (!F->Txtr || !F->Txtr->Txtr) continue;
-			clipper.Render(F, Mekalele, false);
-			//if (F->Flags & Face_Reflective) {
-			//	clipper.Render(F, IX_Prefiller_Reflective, true);
-			//}
+			// Reflective faces (City windows, etc.) want forward's
+			// per-vertex eu/ev interpolation across the panorama —
+			// per-pixel reflection-vector reconstruction in the
+			// deferred lighting pass produced wrong-scale, jittery
+			// reflections that didn't track the world the way
+			// Reflective_Mapper_Setup's per-face cv tweak does.
+			// Forward TheOtherBarry<OVERWRITE,TEXTURETEXTURE> writes
+			// directly to VPage and ZPage16 (skipping the G-buffer);
+			// the mat32 sentinel pre-clear ensures the deferred
+			// lighting pass treats those pixels as already-shaded
+			// and leaves them alone.
+			if (F->Flags & Face_Reflective) {
+				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false);
+			} else {
+				clipper.Render(F, Mekalele, false);
+			}
 		}
 	}
 
@@ -1726,91 +1739,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
 
-			// Env-map sampling. When the material has an EnvTexture
-			// (City windows post-clone), reconstruct the world-space
-			// reflected ray, lat/lon project, sample the panorama, blend
-			// with the diffuse term per Mat->Reflection. Same lat/lon
-			// formula as the per-vertex EU/EV setup at RENDER.CPP:761
-			// — just done per pixel here against the (oct-decoded) view-
-			// space normal and (Z-reconstructed) view-space pixel pos.
-			float envB = 0, envG = 0, envR = 0;
-			float envBlend = 0.0f;
-			if (Mat->EnvTexture && Mat->EnvTexture->Mipmap[0] && Mat->Reflection > 0.0f) {
-				// Transform view-space pos and normal back into world space.
-				// View->Mat is rotation-only; transpose = inverse-rotation.
-				const float wpx = View->Mat[0][0]*x + View->Mat[1][0]*y + View->Mat[2][0]*z;
-				const float wpy = View->Mat[0][1]*x + View->Mat[1][1]*y + View->Mat[2][1]*z;
-				const float wpz = View->Mat[0][2]*x + View->Mat[1][2]*y + View->Mat[2][2]*z;
-				const float wnx = View->Mat[0][0]*nx + View->Mat[1][0]*ny + View->Mat[2][0]*nz;
-				const float wny = View->Mat[0][1]*nx + View->Mat[1][1]*ny + View->Mat[2][1]*nz;
-				const float wnz = View->Mat[0][2]*nx + View->Mat[1][2]*ny + View->Mat[2][2]*nz;
-				// Reflect view direction (camera->pixel = wp) around world normal.
-				const float dotDN = wpx*wnx + wpy*wny + wpz*wnz;
-				float drx = wpx - 2.0f*dotDN*wnx;
-				float dry = wpy - 2.0f*dotDN*wny;
-				float drz = wpz - 2.0f*dotDN*wnz;
-				const float drLen2 = drx*drx + dry*dry + drz*drz;
-				if (drLen2 > 0.0f) {
-					const float drInv = 1.0f / std::sqrt(drLen2);
-					drx *= drInv; dry *= drInv; drz *= drInv;
-					// Lat/lon projection (matches RENDER.CPP:761-765).
-					const float lat = std::asin(dry);
-					const float lon = std::atan2(-drz, -drx);
-					float eu = 0.5f + 0.5f * (lon + float(PI) * 0.5f) / float(PI);
-					float ev = 0.5f - 0.5f * lat / (float(PI) * 0.5f);
-					if (eu < 0) eu += 1.0f; else if (eu > 1) eu -= 1.0f;
-					if (ev < 0) ev = 0; else if (ev > 1) ev = 1;
-					Texture *ET = Mat->EnvTexture;
-					int tx2 = int(eu * ET->SizeX) & (ET->SizeX - 1);
-					int ty2 = int(ev * ET->SizeY) & (ET->SizeY - 1);
-					// Sachletz layout: 4×4 blocks, blocks stored column-by-
-					// column within rows of blocks (outer X, inner Y in
-					// the swizzle loop).
-					const int blocksY = ET->SizeY >> 2;
-					const int bX = tx2 >> 2;
-					const int bY = ty2 >> 2;
-					const int blockIdx = bX * blocksY + bY;
-					const int inBlock = (ty2 & 3) * 4 + (tx2 & 3);
-					const dword *envData = (const dword *)ET->Mipmap[0];
-					const dword envT = envData[blockIdx * 16 + inBlock];
-					envB = float(envT & 0xFF);
-					envG = float((envT >> 8) & 0xFF);
-					envR = float((envT >> 16) & 0xFF);
-					envBlend = Mat->Reflection;
-					if (envBlend > 1.0f) envBlend = 1.0f;
-				}
-			}
-
-			// Diffuse modulation. Two paths:
-			//
-			//   non-reflective: pixel = texel * light / 256
-			//
-			//   reflective:     pixel = saturate(env + tex/2) * light / 256
-			//
-			// The reflective branch matches the forward path's
-			// TheOtherBarry<OVERWRITE, TEXTURETEXTURE> filler (FILLERS/
-			// TheOtherBarry.h:377): texture0 = add_saturated(env_texel,
-			// base_texel >> 1), then colorize() applies vertex light. The
-			// previous LERP-with-Mat->Reflection blend left too much of
-			// the lit base texel visible against forward's much darker
-			// composite, which read as "City windows are too bright" when
-			// the deferred path was sat next to a forward reference.
-			float fdB, fdG, fdR;
-			if (envBlend > 0.0f) {
-				float compositeB = envB + texB * 0.5f;
-				float compositeG = envG + texG * 0.5f;
-				float compositeR = envR + texR * 0.5f;
-				if (compositeB > 255.0f) compositeB = 255.0f;
-				if (compositeG > 255.0f) compositeG = 255.0f;
-				if (compositeR > 255.0f) compositeR = 255.0f;
-				fdB = compositeB * lB * (1.0f / 256.0f);
-				fdG = compositeG * lG * (1.0f / 256.0f);
-				fdR = compositeR * lR * (1.0f / 256.0f);
-			} else {
-				fdB = (texB * lB) * (1.0f / 256.0f);
-				fdG = (texG * lG) * (1.0f / 256.0f);
-				fdR = (texR * lR) * (1.0f / 256.0f);
-			}
+			// Diffuse modulation: pixel = texel * light / 256.
+			// Reflective faces are dispatched to TheOtherBarry<OVERWRITE,
+			// TEXTURETEXTURE> in RenderInnerMekalele and never reach this
+			// code path — they're rendered by the forward filler (which
+			// does the env+tex/2 composite using forward's per-vertex
+			// interpolated eu/ev) and skipped here via the mat32 sentinel.
+			float fdB = (texB * lB) * (1.0f / 256.0f);
+			float fdG = (texG * lG) * (1.0f / 256.0f);
+			float fdR = (texR * lR) * (1.0f / 256.0f);
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
@@ -1948,6 +1885,17 @@ void Render(bool forceForward)
 	bool deferred = deferredEnabled() && !forceForward;
 	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
 		deferred = false;
+	}
+
+	// Clear G-buffer mat32 to a sentinel pattern before each deferred
+	// raster pass. Mekalele writes mat32 only for the pixels it covers;
+	// any pixel rendered by a forward filler (sky cube, City reflective
+	// windows) leaves mat32 untouched. The deferred lighting pass then
+	// skips matID >= count via the existing range check, leaving those
+	// forward-rendered pixels alone.
+	if (deferred && g_gbuffer) {
+		const size_t numPixels = size_t(XRes) * size_t(YRes);
+		parallel_memset(g_gbuffer->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
 	}
 
 	for (auto j = 0; j < numTilesY; ++j) {
