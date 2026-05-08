@@ -2,6 +2,21 @@
 #include <Threads.h>
 #include "FrameProfiler.h"
 
+// ---- Greets centering diagnostics --------------------------------------
+// Two compile-time switches for narrowing where the native-vs-wasm
+// shift is coming from. Flip to 1 to engage. Recompile + run.
+//
+// DEBUG_GREETS_BYPASS_WOBBLER: replaces the GridRendererT pass with a
+// straight memcpy(CodeBuf, CodeImage.Data, ...). If text is centered
+// with this on, the wobbler is the source. If still shifted, look
+// further downstream (TexutreRemap, AlphaBlend, cube-map projection).
+//
+// DEBUG_GREETS_DUMP_GRID: stderr-dumps a few Code_GP[] values on every
+// new greet so native and wasm can be diff'd to byte-exact precision.
+// Only fires when the active greet pointer changes — no per-frame spam.
+#define DEBUG_GREETS_BYPASS_WOBBLER 1
+#define DEBUG_GREETS_DUMP_GRID 1
+
 #include "GREETS.H"
 #include "FillerTest.h"
 #include "MISC/PREPROC.H"
@@ -275,7 +290,38 @@ struct GreetsGenerator
 			}
 		}
 
+#if DEBUG_GREETS_DUMP_GRID
+		// One-shot dump per greet change. Diff between native and wasm to
+		// see if the wobbler grid points really differ.
+		{
+			static GreetsEntry* lastDumpedGreet = nullptr;
+			if (greet != lastDumpedGreet) {
+				lastDumpedGreet = greet;
+				fprintf(stderr, "[GREETS-GRID] greet=\"%s\" scalex=%.9f scaley=%.9f\n",
+				        greet->text, scalex, scaley);
+				const int gx = (TEXRES >> 3) + 1;
+				for (int gy = 0; gy < gx; gy += 8) {
+					for (int gxi = 0; gxi < gx; gxi += 8) {
+						int idx = gy * gx + gxi;
+						fprintf(stderr, "[GREETS-GRID]   GP[%d,%d] u=%d v=%d\n",
+						        gxi, gy, Code_GP[idx].u, Code_GP[idx].v);
+					}
+				}
+				fflush(stderr);
+			}
+		}
+#endif
+
+#if DEBUG_GREETS_BYPASS_WOBBLER
+		// Bypass the GridRendererT pass — straight copy CodeImage to CodeBuf.
+		// If centered text now appears centered in the rendered output, the
+		// wobbler is the source of the shift. If still shifted, look at
+		// TexutreRemap / AlphaBlend / cube-map projection.
+		memcpy(CodeBuf, CodeImage.Data,
+		       static_cast<size_t>(CodeImage.x) * CodeImage.y * sizeof(uint32_t));
+#else
 		GridRendererT(Code_GP, &CodeImage, CodeBuf, TEXRES, TEXRES);
+#endif
 
 		j = 0;
 		for (int y = 0; y <= TEXRES; y += 8) {
