@@ -161,11 +161,12 @@ void OutTextXYExtents(int32_t X, int32_t Y, const char* S, int xres, int yres, i
 		if (Ch == 13 || Ch == 10 || DX + FEnd + 2 >= xres) {
 			Y += F->Y + 2;
 			PgOffset = Y * xres;
-			// Match OutTextXY's newline behavior (DX = X). The previous
-			// `DX = Basic_FOffs` undercounted multi-line widths by X
-			// pixels, which surfaced after the GreetsEntry arg-order fix
-			// as multi-line greets shifted ~6 px to the right.
-			DX = X;
+			// Restore the original Basic_FOffs reset on newline. Changing
+			// it to `DX = X` to "match" OutTextXY actually broke the
+			// width-measurement that the greets centering math relied
+			// on — wasm was rendering centered with the original
+			// behavior. Leave it alone.
+			DX = Basic_FOffs;
 			if (Y >= yres - F->Y) {
 				out_width = width;
 				out_height = Y;
