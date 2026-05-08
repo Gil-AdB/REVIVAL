@@ -267,7 +267,10 @@ struct GreetsGenerator
 		}
 
 		memset(CodeImage.Data, 0, sizeof(uint32_t) * CodeImage.x * CodeImage.y);
-		OutTextXY((byte*)(CodeImage.Data), (CodeImage.x - greet->x) / 2, (CodeImage.y - greet->y) / 2, greet->text, 255, CodeImage.x, CodeImage.y);
+		// scale=1: CodeImage is a fixed-size off-screen texture buffer.
+		// Letting g_fontScale (HiDPI auto-double) leak in here doubles
+		// glyphs in a 256x256 buffer, overflowing/wrapping the text.
+		OutTextXY((byte*)(CodeImage.Data), (CodeImage.x - greet->x) / 2, (CodeImage.y - greet->y) / 2, greet->text, 255, CodeImage.x, CodeImage.y, 1);
 
 		int X, Y;
 		int j = 0;
