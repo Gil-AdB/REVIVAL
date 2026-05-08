@@ -1637,8 +1637,14 @@ static void Render_DeferredLighting() {
 			// View direction (pixel -> camera) in view space. Camera is at
 			// the view-space origin, so view_dir = -pos / |pos|. Used by
 			// the Blinn-Phong specular term below; cheap to skip for matte
-			// materials.
-			const bool wantSpecular = Mat->Specular > 0.0f && Mat->Glossiness > 0;
+			// materials. Glossiness == 0 + Specular > 0 means the FLD
+			// authored a specular value but didn't set a Phong exponent;
+			// fall back to a sensible mid-sharpness default so we still
+			// see a highlight rather than a no-op.
+			const bool wantSpecular = Mat->Specular > 0.0f;
+			const float gloss = Mat->Glossiness > 0
+				? float(Mat->Glossiness)
+				: 32.0f;
 			float vx = 0, vy = 0, vz = 0;
 			if (wantSpecular) {
 				const float vlen2 = x*x + y*y + z*z;
@@ -1692,7 +1698,7 @@ static void Render_DeferredLighting() {
 						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
 						const float NdotH = nx*hx + ny*hy + nz*hz;
 						if (NdotH > 0.0f) {
-							const float spec = std::pow(NdotH, float(Mat->Glossiness));
+							const float spec = std::pow(NdotH, gloss);
 							const float specStrength = spec * Mat->Specular *
 								(1.0f - dist * L.rRange);
 							sB += specStrength * L.Col.B;

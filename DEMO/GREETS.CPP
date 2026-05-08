@@ -476,6 +476,24 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
+	// Bump Specular on materials that should plausibly have shiny
+	// surfaces — marble stairs, marble pillars, stone floor, the mecha
+	// hull/cockpit. Most FLD materials authored Specular=0; deferred-
+	// path Phong needs a non-zero value to draw a highlight, and
+	// Glossiness defaults to 32 in Render_DeferredLighting when the
+	// FLD didn't set one. Per-name match keeps the change targeted to
+	// surfaces where a highlight is sensible.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->Name) continue;
+		const char *n = M->Name;
+		if (strstr(n, "stairs") || strstr(n, "amudim") ||
+		    strstr(n, "floor")  || strstr(n, "marb")   || strstr(n, "MARB") ||
+		    strstr(n, "hull")   || strstr(n, "cockpit")) {
+			if (M->Specular < 0.4f) M->Specular = 0.4f;
+			if (M->Glossiness == 0) M->Glossiness = 48;
+		}
+	}
+
 	gg->Init();
 
 }
