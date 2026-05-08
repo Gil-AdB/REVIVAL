@@ -63,49 +63,171 @@ struct FlipStageProfiler {
 extern "C" dword g_profilerActive;
 
 #ifdef __EMSCRIPTEN__
-// Acquire a 2D context on the canvas SDL is using and pre-allocate a
-// non-shared Uint8ClampedArray we can hand to ImageData each frame.
-// `new ImageData(view, w, h)` rejects views backed by SharedArrayBuffer
-// (which HEAPU8 is in pthread builds), so the per-frame copy from
-// HEAP into this scratch buffer is unavoidable. It's still a
-// typed-array memcpy (~2-3 GB/s) followed by one putImageData — far
-// less than the 27 ms SDL_RenderPresent was costing.
-static int Wasm_InitPresent(int w, int h)
+// One-time WebGL2 setup on the SDL canvas. Must run before any other
+// rendering context is requested on it (canvas allows only one type at a
+// time). On wasm we skip SDL_CreateRenderer entirely so the canvas is
+// free for WebGL2 here.
+//
+// The fragment shader handles two engine quirks:
+//   1. The framebuffer is laid out as ARGB8888 packed = bytes BGRA in LE.
+//      WebGL uploaded as gl.RGBA reads those bytes as R=B, G=G, B=R, A=A.
+//      We swizzle .bgra to undo it.
+//   2. The rasterizer never writes alpha (always 0), so canvas would be
+//      fully transparent. We force alpha = 1.0 in the shader.
+static int Wasm_InitGL()
 {
+	// Sync proxy to the browser main thread (where the canvas lives).
+	// The OffscreenCanvas-to-worker route deadlocks against main's
+	// SDL_WaitEvent loop, so we stay on the browser main thread for
+	// the WebGL work. Cost: ~5-7 ms cross-thread proxy per flip.
 	return MAIN_THREAD_EM_ASM_INT({
 		var canvas = Module.canvas;
 		if (!canvas) return 1;
-		// alpha:false lets the browser skip per-frame alpha compositing.
-		var ctx = canvas.getContext('2d', { alpha: false });
-		if (!ctx) return 2;
-		Module.__floodCtx = ctx;
-		Module.__floodW = $0;
-		Module.__floodH = $1;
-		var n = $0 * $1 * 4;
-		Module.__floodScratch = new Uint8ClampedArray(n);
-		Module.__floodImgData = new ImageData(Module.__floodScratch, $0, $1);
+		var gl = canvas.getContext('webgl2', {
+			alpha: false,
+			antialias: false,
+			depth: false,
+			stencil: false,
+			premultipliedAlpha: false,
+			preserveDrawingBuffer: false,
+			powerPreference: 'high-performance'
+		});
+		if (!gl) return 2;
+		Module.__floodGL = gl;
+
+		var vsSrc =
+			'#version 300 es\n' +
+			'out vec2 vUV;\n' +
+			'void main() {\n' +
+			'  vec2 corners[4];\n' +
+			'  corners[0] = vec2(-1.0, -1.0);\n' +
+			'  corners[1] = vec2( 1.0, -1.0);\n' +
+			'  corners[2] = vec2(-1.0,  1.0);\n' +
+			'  corners[3] = vec2( 1.0,  1.0);\n' +
+			'  vec2 uvs[4];\n' +
+			'  uvs[0] = vec2(0.0, 1.0);\n' +
+			'  uvs[1] = vec2(1.0, 1.0);\n' +
+			'  uvs[2] = vec2(0.0, 0.0);\n' +
+			'  uvs[3] = vec2(1.0, 0.0);\n' +
+			'  vUV = uvs[gl_VertexID];\n' +
+			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0);\n' +
+			'}';
+		var fsSrc =
+			'#version 300 es\n' +
+			'precision highp float;\n' +
+			'in vec2 vUV;\n' +
+			'uniform sampler2D uTex;\n' +
+			'out vec4 oColor;\n' +
+			'void main() {\n' +
+			'  vec4 c = texture(uTex, vUV);\n' +
+			'  oColor = vec4(c.b, c.g, c.r, 1.0);\n' +
+			'}';
+		function compile(type, src) {
+			var s = gl.createShader(type);
+			gl.shaderSource(s, src);
+			gl.compileShader(s);
+			if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+				console.error('flood gl shader: ' + gl.getShaderInfoLog(s));
+			}
+			return s;
+		}
+		var prog = gl.createProgram();
+		gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+		gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+		gl.linkProgram(prog);
+		if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+			console.error('flood gl link: ' + gl.getProgramInfoLog(prog));
+		}
+		Module.__floodProg = prog;
+		Module.__floodTex = gl.createTexture();
+		Module.__floodTexW = 0;
+		Module.__floodTexH = 0;
+		// VAO with a dummy attribute at location 0 — the vertex shader
+		// synthesizes the quad from gl_VertexID and uses no attributes,
+		// but desktop GL drivers (Mac in particular) fall into a slow
+		// emulation path if attribute 0 is unbound. A 4-byte buffer is
+		// enough to satisfy them; the shader never reads from it.
+		Module.__floodVAO = gl.createVertexArray();
+		gl.bindVertexArray(Module.__floodVAO);
+		var dummyVBO = gl.createBuffer();
+		gl.bindBuffer(gl.ARRAY_BUFFER, dummyVBO);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0]), gl.STATIC_DRAW);
+		gl.enableVertexAttribArray(0);
+		gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+		gl.bindVertexArray(null);
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		gl.disable(gl.DEPTH_TEST);
 		return 0;
-	}, w, h);
+	});
 }
 
-static void Wasm_Present(const uint8_t *pixels, int w, int h)
+// Upload `pixels` (srcW x srcH, BGRA byte order) into the WebGL texture
+// and present a fullscreen quad letterboxed inside the canvas.
+static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 {
-	MAIN_THREAD_EM_ASM({
-		var ctx = Module.__floodCtx;
-		if (!ctx) return;
-		// Recreate the scratch + ImageData if size changed (resize).
-		if (Module.__floodW !== $1 || Module.__floodH !== $2) {
-			Module.__floodW = $1;
-			Module.__floodH = $2;
-			Module.__floodScratch = new Uint8ClampedArray($1 * $2 * 4);
-			Module.__floodImgData = new ImageData(Module.__floodScratch, $1, $2);
+	static bool s_initialized = false;
+	static bool s_initFailed  = false;
+	if (!s_initialized && !s_initFailed) {
+		int rc = Wasm_InitGL();
+		if (rc != 0) {
+			fprintf(stderr, "[SDL] Wasm_InitGL failed rc=%d\n", rc);
+			s_initFailed = true;
+			return;
 		}
-		// Copy from shared HEAP into the non-shared scratch (typed-array
-		// memcpy), then hand the ImageData straight to the canvas.
-		var src = HEAPU8.subarray($0, $0 + $1 * $2 * 4);
-		Module.__floodScratch.set(src);
-		ctx.putImageData(Module.__floodImgData, 0, 0);
-	}, (uintptr_t)pixels, w, h);
+		s_initialized = true;
+	}
+	if (s_initFailed) return;
+
+	MAIN_THREAD_EM_ASM({
+		var gl = Module.__floodGL;
+		if (!gl) return;
+		var canvas = Module.canvas;
+		var cw = canvas.width;
+		var ch = canvas.height;
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		if (Module.__floodTexW !== $1 || Module.__floodTexH !== $2) {
+			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, $1, $2, 0,
+			              gl.RGBA, gl.UNSIGNED_BYTE, null);
+			Module.__floodTexW = $1;
+			Module.__floodTexH = $2;
+		}
+		// WebGL2 texSubImage2D accepts SAB-backed Uint8Array views directly,
+		// so this is a single GPU upload — no intermediate JS-side memcpy.
+		var view = new Uint8Array(HEAPU8.buffer, $0, $1 * $2 * 4);
+		gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, $1, $2,
+		                 gl.RGBA, gl.UNSIGNED_BYTE, view);
+
+		// Letterbox inside the canvas — preserve src aspect ratio. One var
+		// per line: the C preprocessor splits MAIN_THREAD_EM_ASM body args
+		// on top-level commas (parens protect, braces don't), so multi-var
+		// declarations get tokenized as separate macro arguments.
+		var srcAR = $1 / $2;
+		var canAR = cw / ch;
+		var dx = 0;
+		var dy = 0;
+		var dw = cw;
+		var dh = ch;
+		if (canAR > srcAR) {
+			dw = (ch * srcAR) | 0;
+			dx = (cw - dw) >> 1;
+		} else {
+			dh = (cw / srcAR) | 0;
+			dy = (ch - dh) >> 1;
+		}
+		gl.viewport(0, 0, cw, ch);
+		gl.clearColor(0, 0, 0, 1);
+		gl.clear(gl.COLOR_BUFFER_BIT);
+		gl.viewport(dx, dy, dw, dh);
+		gl.useProgram(Module.__floodProg);
+		gl.bindVertexArray(Module.__floodVAO);
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+	}, (uintptr_t)pixels, srcW, srcH);
 }
 #endif
 
@@ -137,20 +259,19 @@ static void V_Flip(VESA_Surface *VS)
 
 	auto t0 = stamp();
 #ifdef __EMSCRIPTEN__
-	// Wasm fast path: bypass SDL's present pipeline entirely for the
-	// engine surface and putImageData straight to the canvas 2D context.
-	// SDL_RenderPresent was costing ~27 ms here in software-renderer
-	// mode (its only viable mode under PROXY_TO_PTHREAD). The locked
-	// texture pointer stays valid across the bypass — we never Unlock,
-	// so VS->Data carries through to the next frame untouched.
-	if (lockMode) {
-		Wasm_Present(VS->Data, (int)VS->X, (int)VS->Y);
-		if (profileFlip) {
-			auto tEnd = stamp();
-			s_flipProf.tick(0.0, 0.0, 0.0, ms_d(tEnd - t0).count(), 0.0);
-		}
-		return;
+	// Wasm path: SDL renderer is never created on this build, so we can't
+	// (and don't need to) touch SDL_RenderCopy / SDL_RenderPresent. The
+	// pixel buffer at VS->Data is a plain malloc; ship it to WebGL2 via
+	// texSubImage2D + a fullscreen quad. Handles both lockMode (engine
+	// surface) and non-lockMode (Glat's FinalSurf) — same upload, same
+	// shader, just different src dims.
+	(void)lockMode;
+	Wasm_PresentGL(VS->Data, (int)VS->X, (int)VS->Y);
+	if (profileFlip) {
+		auto tEnd = stamp();
+		s_flipProf.tick(0.0, 0.0, 0.0, ms_d(tEnd - t0).count(), 0.0);
 	}
+	return;
 #endif
 	if (lockMode) {
 		// Engine wrote directly into the texture's locked pixel buffer
@@ -254,6 +375,17 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	if (!(VS->Z16 = (byte *)malloc(ZBufferSize))) return 1;
 	memset(VS->Z16, 0, ZBufferSize);
 
+#ifdef __EMSCRIPTEN__
+	// Wasm: don't go through SDL_CreateTexture / SDL_LockTexture — there's
+	// no SDL renderer on this build. Allocate the framebuffer ourselves;
+	// V_Flip uploads it via WebGL2 each frame.
+	(void)renderer;
+	VS->Data = (byte *)malloc(VS->BPSL * VS->Y);
+	if (!VS->Data) return 1;
+	memset(VS->Data, 0, VS->BPSL * VS->Y);
+	VS->Handle = nullptr;
+	VS->Flags |= VSurf_LockRender;
+#else
 	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
 	VS->Handle = static_cast<void *>(s_engineTex.get());
 
@@ -277,14 +409,6 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	VS->Data = static_cast<byte *>(pixels);
 	VS->BPSL = pitch;
 	memset(VS->Data, 0, pitch * VS->Y);
-
-#ifdef __EMSCRIPTEN__
-	// Set up the canvas 2D context + scratch buffer the wasm fast-path
-	// V_Flip writes into. Recreated on resize via the same path.
-	int initRc = Wasm_InitPresent((int)VS->X, (int)VS->Y);
-	if (initRc != 0) {
-		fprintf(stderr, "[SDL] Wasm_InitPresent failed rc=%d\n", initRc);
-	}
 #endif
 
 	return 0;
@@ -293,9 +417,17 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 
 SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag)
 {
+#ifdef __EMSCRIPTEN__
+	// Wasm has no SDL renderer; child surfaces (Glat's FinalSurf) get a
+	// null Handle and present through the same WebGL path as the engine
+	// surface (V_Flip uploads VS->Data regardless of lockMode).
+	(void)X; (void)Y;
+	return SDLTex(nullptr, SDLTexDeleter{tag});
+#else
 	// Same renderer the engine display uses; assumes SDL2_InitDisplay ran.
 	if (!SDL_MainSurf.Renderer || X <= 0 || Y <= 0) return SDLTex(nullptr, SDLTexDeleter{tag});
 	return SDL2_MakeTexture(static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer), X, Y, tag);
+#endif
 }
 
 // Tear down + reallocate the SDL-side framebuffer / Z-buffer / SDL_Texture
@@ -363,6 +495,15 @@ void SDL2_HandleResize(int newX, int newY)
 		MainSurf->YTable = nullptr;
 	}
 
+#ifdef __EMSCRIPTEN__
+	// Wasm: framebuffer is a plain malloc — free and zero. WebGL texture
+	// gets resized lazily on the next Wasm_PresentGL call.
+	if (SDL_MainSurf.Data) {
+		free(SDL_MainSurf.Data);
+		SDL_MainSurf.Data = nullptr;
+	}
+	SDL_MainSurf.Handle = nullptr;
+#else
 	// VS->Data is the texture's locked pixel buffer — unlock it before
 	// destroying the texture (SDL_DestroyTexture on a still-locked
 	// streaming texture is undefined). The deleter (RAII) actually frees;
@@ -373,6 +514,7 @@ void SDL2_HandleResize(int newX, int newY)
 	SDL_MainSurf.Data = nullptr;
 	s_engineTex.reset();
 	SDL_MainSurf.Handle = nullptr;
+#endif
 	// Z-buffer is its own allocation now.
 	if (SDL_MainSurf.Z16) {
 		free(SDL_MainSurf.Z16);
@@ -393,26 +535,25 @@ dword SDL2_InitDisplay(SDL_Window *window)
 
 	// Fill in the secondary surface VSurf structure
 
-	// Create a renderer with V-Sync enabled.
-	// On Emscripten with PROXY_TO_PTHREAD, WebGL contexts can't be cleanly
-	// created from a pthread worker (the canvas gets transferred to the
-	// worker for offscreen rendering and becomes inaccessible to the main
-	// thread's GL init path). Force the software renderer there — the
-	// final frame is just an SDL_UpdateTexture + SDL_RenderCopy anyway, so
-	// CPU vs WebGL for that last step is a minor perf detail.
 #ifdef __EMSCRIPTEN__
-	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_SOFTWARE);
+	// Wasm: skip SDL_CreateRenderer entirely. The SDL software renderer's
+	// SDL_RenderPresent was costing ~28 ms per flip; we present via
+	// WebGL2 + texSubImage2D + a fullscreen quad instead. WebGL must be
+	// the only context on the canvas, so don't let SDL grab a 2D one.
+	// Wasm_InitGL is deferred until the first V_Flip — by then the canvas
+	// has been transferred to the CodeEntry pthread, which is where the
+	// flip-side WebGL context needs to live.
+	SDL_Renderer *renderer = nullptr;
+	SDL_MainSurf.Renderer = nullptr;
+	int px = 0, py = 0;
+	SDL_GetWindowSize(sdl_window, &px, &py);
 #else
+	// Native: real SDL renderer with vsync; software fallback isn't needed.
 	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_PRESENTVSYNC);
-#endif
 	SDL_MainSurf.Renderer = renderer;
-
-	// Use renderer output size (in pixels) rather than window size (in
-	// points). With SDL_WINDOW_ALLOW_HIGHDPI on a retina display these
-	// differ by the DPI scale factor; we always want pixels because that's
-	// what the framebuffer + SDL_Texture are sized in.
-	int px, py;
+	int px = 0, py = 0;
 	SDL_GetRendererOutputSize(renderer, &px, &py);
+#endif
 	// Letterbox to demo AR + snap to TILE_SIZE — same as SDL2_HandleResize,
 	// just for the boot path.
 	int engX = px, engY = py;

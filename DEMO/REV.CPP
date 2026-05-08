@@ -1340,12 +1340,20 @@ int main(int argc, const char *argv[])
 		    (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
 		     event.window.event == SDL_WINDOWEVENT_RESIZED)) {
 			// event.window.data1/data2 are in window points (logical units);
-			// SDL_GetRendererOutputSize gives the actual backing-store pixel
-			// size, which is what we render in. With HiDPI off they're equal;
-			// with HiDPI on (retina) they differ by the OS scale factor.
+			// the actual backing-store pixel size is what we render in. With
+			// HiDPI off they're equal; with HiDPI on (retina) they differ by
+			// the OS scale factor.
 			int px = 0, py = 0;
 			SDL_Renderer *r = MainSurf ? static_cast<SDL_Renderer *>(MainSurf->Renderer) : nullptr;
-			if (r) SDL_GetRendererOutputSize(r, &px, &py);
+			if (r) {
+				SDL_GetRendererOutputSize(r, &px, &py);
+			} else {
+				// Wasm path has no SDL renderer (we present via WebGL2 directly).
+				// JS already pre-multiplies by devicePixelRatio when calling
+				// SDL2_RequestSize, so data1/data2 are in physical pixels.
+				px = event.window.data1;
+				py = event.window.data2;
+			}
 			fprintf(stderr, "[RESIZE-EVT] kind=%d points=%dx%d pixels=%dx%d\n",
 			        event.window.event, event.window.data1, event.window.data2, px, py);
 			if (px > 0 && py > 0) {
