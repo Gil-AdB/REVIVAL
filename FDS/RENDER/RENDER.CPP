@@ -1570,8 +1570,8 @@ void SetDeferredWaterMatID(int id) {
 // they fail both the dot >= 0 and len2 <= range2 tests, contributing
 // zero — no need to round numLights up to a multiple of 8 explicitly.
 constexpr int DEFERRED_MAX_LIGHTS = 128;
-constexpr int DEFERRED_NUM_TILES_X = 6;
-constexpr int DEFERRED_NUM_TILES_Y = 4;
+constexpr int DEFERRED_NUM_TILES_X = 12;
+constexpr int DEFERRED_NUM_TILES_Y = 8;
 constexpr int DEFERRED_NUM_TILES   = DEFERRED_NUM_TILES_X * DEFERRED_NUM_TILES_Y;
 struct ViewLightsSoA {
 	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
