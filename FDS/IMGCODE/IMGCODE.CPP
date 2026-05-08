@@ -1386,18 +1386,19 @@ void Unify_Textures(Scene *Sc)
 			fprintf(stderr,
 				"[MAT-TABLE] scene=%p  matID  name                         "
 				"texture                              "
-				"diff  spec  refl  flags\n",
+				"diff  spec  refl  flags     smoothAngle\n",
 				(void *)Sc);
 			for (M = MatLib; M; M = M->Next) {
 				if (M->RelScene != Sc) continue;
 				if (!M->Txtr) continue;
 				fprintf(stderr,
-					"[MAT-TABLE]            %4u  %-28s %-36s %4.2f  %4.2f  %4.2f  0x%08x\n",
+					"[MAT-TABLE]            %4u  %-28s %-36s %4.2f  %4.2f  %4.2f  0x%08x  %7.2f\n",
 					M->ID,
 					M->Name ? M->Name : "(null)",
 					M->Txtr->FileName ? M->Txtr->FileName : "(no-file)",
 					M->Diffuse, M->Specular, M->Reflection,
-					M->Flags);
+					M->Flags,
+					M->MaxSmoothingAngle);
 			}
 		}
 	}
