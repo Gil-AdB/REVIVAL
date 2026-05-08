@@ -150,9 +150,11 @@ typedef struct
 	FldEnv       *AmbientIntensity;
 } FldScene;
 
-extern Material *CurMat,*FirstMat;
-
 extern FldScene *ReadFLD(const char *FileName);
 extern Scene *ConvertFLD(FldScene *FLD);
-extern void AddMaterial(FldMat *OrgMat,Scene *SceneGroup);
+// Returns the canonical (deduplicated) Material* — multiple FldMats with
+// identical runtime-relevant fields collapse onto a single Material entry.
+// May return an existing pointer rather than a freshly-allocated one.
+extern Material *AddMaterial(FldMat *OrgMat, Scene *SceneGroup);
 extern void Get_Mapping(Face *F,FldMat *Mat);
+extern void DumpMaterialDedupStats();

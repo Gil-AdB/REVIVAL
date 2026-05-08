@@ -10,6 +10,9 @@
 #include <string.h>
 #include <math.h>
 
+#include <cstdint>
+#include <vector>
+
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
@@ -23,7 +26,10 @@
 
 const float Rad2Deg = PI/180.0;
 
-Material *CurMat,*FirstMat;
+// CurMat/FirstMat globals were removed when AddMaterial gained dedup — the
+// canonical Material* of each FldMat is now resolved per-Object into a
+// std::vector and passed explicitly to ConvertFace, so the linked-list
+// walk that depended on per-Object contiguity is gone.
 signed short CurParent;
 Scene *SceneGroup;
 
@@ -184,33 +190,22 @@ void ConvertKeyRot(FldKeyFrame *KF,SplineKey *Rot,float Scl)
 	Rot->Bias=KF->Bias;
 }
 
-void ConvertFace(FldFace *Org,Face *Dest,Vertex *V,int *Cur,FldMat *FM)
+void ConvertFace(FldFace *Org, Face *Dest, Vertex *V, int *Cur, FldMat *FM,
+                 Material* const* matsByIndex, uint32_t numMats)
 {
-	Material *FaceMat;
-	int i;
-
-	FaceMat = FirstMat;
-	for (i=0;i<Org->Surface;i++)
-	{
-		FaceMat=FaceMat->Next;
-		if (!FaceMat)
-		{
-			printf("Error! No material for current face!\n");
-			exit(200);
-		}
+	if ((uint32_t)Org->Surface >= numMats || !matsByIndex[Org->Surface]) {
+		printf("Error! No material for current face! (surface=%u, numMats=%u)\n",
+		       (unsigned)Org->Surface, numMats);
+		exit(200);
 	}
-	// Stupid fan triangulator
-	if(Org->FaceVerts>3)
-	{
-		int banana = 1;
-	}
-	for (i=Org->FaceVerts-2;i>0;i--)
-	{
-		Dest[*Cur].A=V+Org->Verts[Org->FaceVerts-1];
-		Dest[*Cur].B=V+Org->Verts[i];
-		Dest[*Cur].C=V+Org->Verts[i-1];
-		Dest[*Cur].Txtr=FaceMat;
-		Get_Mapping(&Dest[*Cur],FM+Org->Surface); // Get mapping for current face using FM
+	Material* FaceMat = matsByIndex[Org->Surface];
+	// Fan triangulator
+	for (int i = Org->FaceVerts - 2; i > 0; i--) {
+		Dest[*Cur].A = V + Org->Verts[Org->FaceVerts - 1];
+		Dest[*Cur].B = V + Org->Verts[i];
+		Dest[*Cur].C = V + Org->Verts[i - 1];
+		Dest[*Cur].Txtr = FaceMat;
+		Get_Mapping(&Dest[*Cur], FM + Org->Surface); // Get mapping for current face using FM
 		(*Cur)++;
 	}
 }
@@ -229,10 +224,13 @@ TriMesh *ConvertTriMesh(FldObject *Src)
 #ifdef DebugMode
 	printf("Loading materials...\n");
 #endif
-	AddMaterial(Src->Material,SceneGroup);
-  FirstMat = CurMat;
-  for (i=1;i<Src->NumOfMat;i++)
-		AddMaterial(&Src->Material[i],SceneGroup);
+	// Resolve each FldMat in this Object to its canonical (deduplicated)
+	// Material*. The vector is indexed by Org->Surface in ConvertFace —
+	// no more linked-list walks now that AddMaterial may share entries
+	// across Objects.
+	std::vector<Material*> objMats(Src->NumOfMat, nullptr);
+	for (uint32_t k = 0; k < Src->NumOfMat; ++k)
+		objMats[k] = AddMaterial(&Src->Material[k], SceneGroup);
 
 	T->VIndex=Src->NumOfVerts;
 	T->Verts=new Vertex[T->VIndex];
@@ -258,7 +256,8 @@ TriMesh *ConvertTriMesh(FldObject *Src)
 	printf("Trimesh name: %s\n",Src->Name);
 #endif
 	for (i=0;i<Src->NumOfFaces;i++)
-		ConvertFace(&Src->Faces[i],T->Faces,T->Verts,&j,Src->Material);
+		ConvertFace(&Src->Faces[i], T->Faces, T->Verts, &j, Src->Material,
+		            objMats.data(), (uint32_t)objMats.size());
 
 	T->Pos.NumKeys=T->Rotate.NumKeys=T->Scale.NumKeys=Src->Keys;
 	T->Pos.Keys=new SplineKey[Src->Keys];
@@ -558,10 +557,9 @@ Scene *ConvertFLD(FldScene *FLD)
 	Sc->StartFrame = FLD->FirstFrame;
 	Sc->EndFrame   = FLD->LastFrame;
 
-//  MatLib = NULL;
-	CurMat = NULL;
-	if (MatLib)
-		for(CurMat = MatLib;CurMat->Next;CurMat=CurMat->Next);
+	// Used to walk MatLib to seek to the tail so AddMaterial could append
+	// linearly. AddMaterial now head-inserts and dedupes via a hash map
+	// (FLD_MAT.CPP), so the prologue is a no-op.
 
 	for (SourceObj=FLD->Object;SourceObj;SourceObj=SourceObj->Next)
 	{
