@@ -210,6 +210,15 @@ void FrustumClipper::Near()
 		newVert->V = _IA->V + t * (_IB->V - _IA->V);
 		newVert->EU = _IA->EU + t * (_IB->EU - _IA->EU);
 		newVert->EV = _IA->EV + t * (_IB->EV - _IA->EV);
+		// Linear-in-screen interpolation of the per-vertex normal. This is
+		// the nlerp shape: the rasterizer interpolates linearly across the
+		// triangle and renormalizes per-pixel. Skip the perspective-correct
+		// (N*RZ) form — for shading normals the screen-space interpolation
+		// artifacts are imperceptible at typical poly densities and the
+		// extra divide isn't worth it.
+		newVert->N.x = _IA->N.x + t * (_IB->N.x - _IA->N.x);
+		newVert->N.y = _IA->N.y + t * (_IB->N.y - _IA->N.y);
+		newVert->N.z = _IA->N.z + t * (_IB->N.z - _IA->N.z);
 
 		newVert->PX = newVert->TPos.x * C_VP.iNearZ;
 		newVert->PY = newVert->TPos.y * C_VP.iNearZ;
@@ -261,6 +270,9 @@ void FrustumClipper::Far()
 		newVert->EV = _IA->EV + t * (_IB->EV - _IA->EV);
 		newVert->EUZ = C_VP.iFarZ * newVert->EU;
 		newVert->EVZ = C_VP.iFarZ * newVert->EV;
+		newVert->N.x = _IA->N.x + t * (_IB->N.x - _IA->N.x);
+		newVert->N.y = _IA->N.y + t * (_IB->N.y - _IA->N.y);
+		newVert->N.z = _IA->N.z + t * (_IB->N.z - _IA->N.z);
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
@@ -285,6 +297,13 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 	V->VZ = _IA->VZ + t * (_IB->VZ - _IA->VZ);
 	V->EUZ = _IA->EUZ + t * (_IB->EUZ - _IA->EUZ);
 	V->EVZ = _IA->EVZ + t * (_IB->EVZ - _IA->EVZ);
+	// Per-vertex shading normal — linear-in-screen interpolation; the
+	// rasterizer renormalizes per-pixel (nlerp). Carrying N here means
+	// post-clip n-gons get sensible normals at every newly-introduced
+	// vertex, just like UVs.
+	V->N.x = _IA->N.x + t * (_IB->N.x - _IA->N.x);
+	V->N.y = _IA->N.y + t * (_IB->N.y - _IA->N.y);
+	V->N.z = _IA->N.z + t * (_IB->N.z - _IA->N.z);
 	V->i = _IA->i;
 
 	// calculate (U,V)
