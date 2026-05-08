@@ -53,6 +53,10 @@ struct BenchConfig {
     // Used by --bench=scene: which scene driver + Timer value to drive.
     std::string scene;
     int32_t ts = 0;
+    // Optional override of resolution (otherwise rev.cfg's value is used).
+    // Used by --bench=flip to vary canvas size without editing rev.cfg.
+    int xres = 0;
+    int yres = 0;
 };
 bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg);
 int RunRasterBench(const BenchConfig& cfg, int xres, int yres);
@@ -66,3 +70,15 @@ int RunRasterBench(const BenchConfig& cfg, int xres, int yres);
 //   DEMO --bench=scene@scene=city,t=1961,iters=200
 //   DEMO --bench=scene@scene=greets,t=600,iters=200
 int RunSceneBench(const BenchConfig& cfg, int xres, int yres);
+
+// FLIP pipeline microbenchmark — isolates the per-frame SDL stages we
+// run inside V_Flip (unlock, bar fills, RenderCopy, RenderPresent, lock).
+// Forces SDL_RENDERER_SOFTWARE so native numbers track the wasm path's
+// cost model. Useful for iterating on the present path without rerunning
+// the full demo.
+//
+// Invocation:
+//   DEMO --bench=flip                       -> 3024x1696, 200 iters
+//   DEMO --bench=flip@iters=1000            -> 1000 iters
+//   DEMO --bench=flip@iters=500,xres=1920,yres=1080
+int RunFlipBench(const BenchConfig& cfg, int xres, int yres);

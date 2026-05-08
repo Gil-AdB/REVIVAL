@@ -158,15 +158,19 @@ void OutTextXYExtents(int32_t X, int32_t Y, const char* S, int xres, int yres, i
 	while ((Ch = *S++))
 	{
 		FEnd = F->Len[Ch];
-		if (Ch == 13 || Ch == 10 || DX + FEnd + 2 >= xres) { 
-			Y += F->Y + 2; 
-			PgOffset = Y * xres; 
-			DX = Basic_FOffs; 
-			if (Y >= yres - F->Y) { 
+		if (Ch == 13 || Ch == 10 || DX + FEnd + 2 >= xres) {
+			Y += F->Y + 2;
+			PgOffset = Y * xres;
+			// Match OutTextXY's newline behavior (DX = X). The previous
+			// `DX = Basic_FOffs` undercounted multi-line widths by X
+			// pixels, which surfaced after the GreetsEntry arg-order fix
+			// as multi-line greets shifted ~6 px to the right.
+			DX = X;
+			if (Y >= yres - F->Y) {
 				out_width = width;
-				out_height = Y;  
-				return; 
-			}; 
+				out_height = Y;
+				return;
+			};
 		}
 
 		POfs = (PgOffset + DX) * CPP;

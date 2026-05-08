@@ -20,6 +20,11 @@
 #include <string_view>
 #include <sys/stat.h>
 
+#ifndef __EMSCRIPTEN__
+#include <SDL.h>
+#include "SDL2.h"
+#endif
+
 extern dword g_profilerActive;
 
 namespace {
@@ -357,6 +362,8 @@ bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg) {
                         if (k == "iters") cfg.iters = static_cast<int>(lv);
                         else if (k == "seed") cfg.seed = static_cast<int>(lv);
                         else if (k == "t") cfg.ts = static_cast<int32_t>(lv);
+                        else if (k == "xres") cfg.xres = static_cast<int>(lv);
+                        else if (k == "yres") cfg.yres = static_cast<int>(lv);
                     }
                 }
                 tail = (comma == std::string_view::npos)
@@ -450,4 +457,130 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
 
     ThreadPool::instance().close();
     return 0;
+}
+
+int RunFlipBench(const BenchConfig& cfg, int xres, int yres) {
+#ifdef __EMSCRIPTEN__
+    (void)cfg; (void)xres; (void)yres;
+    std::fprintf(stderr, "[BENCH] flip is native-only — emscripten SDL2 needs a real canvas/DOM\n");
+    return 4;
+#else
+    if (cfg.xres > 0) xres = cfg.xres;
+    if (cfg.yres > 0) yres = cfg.yres;
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        std::fprintf(stderr, "[BENCH] SDL_Init: %s\n", SDL_GetError());
+        return 3;
+    }
+    SDL_Window *window = SDL_CreateWindow("flip-bench",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        xres, yres,
+        SDL_WINDOW_HIDDEN);
+    if (!window) {
+        std::fprintf(stderr, "[BENCH] SDL_CreateWindow: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 3;
+    }
+    // Force software renderer so native numbers track the wasm path's
+    // cost model (where SDL_RENDERER_ACCELERATED isn't usable).
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    if (!renderer) {
+        std::fprintf(stderr, "[BENCH] SDL_CreateRenderer: %s\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 3;
+    }
+    SDL_Texture *texture = SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+        xres, yres);
+    if (!texture) {
+        std::fprintf(stderr, "[BENCH] SDL_CreateTexture: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 3;
+    }
+
+    // dst rect = full renderer (canvas == engine size, matches the
+    // post-fix V_Flip path where letterbox bars come from CSS).
+    int rw = 0, rh = 0;
+    SDL_GetRendererOutputSize(renderer, &rw, &rh);
+    SDL_Rect dst{0, 0, rw, rh};
+
+    using clock = std::chrono::steady_clock;
+    using ms = std::chrono::duration<double, std::milli>;
+
+    double tUnlock = 0, tCopy = 0, tPresent = 0, tLock = 0;
+    int iters = cfg.iters > 0 ? cfg.iters : 200;
+
+    // Warmup — first iter pays first-touch cache + GPU/canvas-side
+    // first-frame work.
+    for (int i = 0; i < 3; ++i) {
+        void *pixels = nullptr;
+        int pitch = 0;
+        SDL_LockTexture(texture, NULL, &pixels, &pitch);
+        std::memset(pixels, 0xab, static_cast<std::size_t>(pitch) * rh);
+        SDL_UnlockTexture(texture);
+        SDL_RenderCopy(renderer, texture, NULL, &dst);
+        SDL_RenderPresent(renderer);
+    }
+
+    // Initial lock so the loop body can write before unlock-cycle starts.
+    void *lockedPixels = nullptr;
+    int lockedPitch = 0;
+    SDL_LockTexture(texture, NULL, &lockedPixels, &lockedPitch);
+
+    for (int i = 0; i < iters; ++i) {
+        // "render" — write a frame's worth of pattern. Same byte cost as
+        // an engine clear; we attribute this OUTSIDE the FLIP timings so
+        // the per-stage numbers reflect just the SDL pipeline.
+        std::memset(lockedPixels, static_cast<int>(i & 0xFF),
+                    static_cast<std::size_t>(lockedPitch) * rh);
+
+        auto t0 = clock::now();
+        SDL_UnlockTexture(texture);
+        auto t1 = clock::now();
+        SDL_RenderCopy(renderer, texture, NULL, &dst);
+        auto t2 = clock::now();
+        SDL_RenderPresent(renderer);
+        auto t3 = clock::now();
+        SDL_LockTexture(texture, NULL, &lockedPixels, &lockedPitch);
+        auto t4 = clock::now();
+
+        tUnlock  += ms(t1 - t0).count();
+        tCopy    += ms(t2 - t1).count();
+        tPresent += ms(t3 - t2).count();
+        tLock    += ms(t4 - t3).count();
+    }
+
+    SDL_UnlockTexture(texture);
+
+    double divIters = static_cast<double>(iters);
+    double mUnlock  = tUnlock  / divIters;
+    double mCopy    = tCopy    / divIters;
+    double mPresent = tPresent / divIters;
+    double mLock    = tLock    / divIters;
+    double mTotal   = mUnlock + mCopy + mPresent + mLock;
+
+    std::fprintf(stderr,
+        "[BENCH] flip: iters=%d  size=%dx%d  renderer=software\n"
+        "[BENCH] stage           mean_ms     %%\n"
+        "[BENCH] SDL_Unlock      %7.4f  %5.1f%%\n"
+        "[BENCH] SDL_RenderCopy  %7.4f  %5.1f%%\n"
+        "[BENCH] SDL_Present     %7.4f  %5.1f%%\n"
+        "[BENCH] SDL_Lock        %7.4f  %5.1f%%\n"
+        "[BENCH] TOTL            %7.4f\n",
+        iters, rw, rh,
+        mUnlock,  mTotal > 0 ? 100.0 * mUnlock  / mTotal : 0,
+        mCopy,    mTotal > 0 ? 100.0 * mCopy    / mTotal : 0,
+        mPresent, mTotal > 0 ? 100.0 * mPresent / mTotal : 0,
+        mLock,    mTotal > 0 ? 100.0 * mLock    / mTotal : 0,
+        mTotal);
+    std::fflush(stderr);
+
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+#endif
 }
