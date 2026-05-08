@@ -1617,7 +1617,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// authored a specular value but didn't set a Phong exponent;
 			// fall back to a sensible mid-sharpness default so we still
 			// see a highlight rather than a no-op.
-			const bool wantSpecular = Mat->Specular > 0.0f;
+			//
+			// Specular_Factor gates the entire highlight pass, mirroring
+			// forward's per-scene tone control (CITY/GREETS set it to 0
+			// to suppress specular; FOUNTAIN/CRASH leave it nonzero). The
+			// deferred path was previously emitting Blinn-Phong even when
+			// the scene had explicitly disabled it, which over-brightened
+			// City windows + Greets marble against the forward reference.
+			const bool wantSpecular = (Mat->Specular > 0.0f) && (Specular_Factor > 0.0f);
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
 				: 32.0f;
@@ -1748,16 +1755,35 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				}
 			}
 
-			// Diffuse modulation. If env is active, mix texel*light with
-			// env*envBlend; otherwise just texel*light.
-			float fdB = (texB * lB) * (1.0f / 256.0f);
-			float fdG = (texG * lG) * (1.0f / 256.0f);
-			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Diffuse modulation. Two paths:
+			//
+			//   non-reflective: pixel = texel * light / 256
+			//
+			//   reflective:     pixel = saturate(env + tex/2) * light / 256
+			//
+			// The reflective branch matches the forward path's
+			// TheOtherBarry<OVERWRITE, TEXTURETEXTURE> filler (FILLERS/
+			// TheOtherBarry.h:377): texture0 = add_saturated(env_texel,
+			// base_texel >> 1), then colorize() applies vertex light. The
+			// previous LERP-with-Mat->Reflection blend left too much of
+			// the lit base texel visible against forward's much darker
+			// composite, which read as "City windows are too bright" when
+			// the deferred path was sat next to a forward reference.
+			float fdB, fdG, fdR;
 			if (envBlend > 0.0f) {
-				const float keep = 1.0f - envBlend;
-				fdB = fdB * keep + envB * envBlend;
-				fdG = fdG * keep + envG * envBlend;
-				fdR = fdR * keep + envR * envBlend;
+				float compositeB = envB + texB * 0.5f;
+				float compositeG = envG + texG * 0.5f;
+				float compositeR = envR + texR * 0.5f;
+				if (compositeB > 255.0f) compositeB = 255.0f;
+				if (compositeG > 255.0f) compositeG = 255.0f;
+				if (compositeR > 255.0f) compositeR = 255.0f;
+				fdB = compositeB * lB * (1.0f / 256.0f);
+				fdG = compositeG * lG * (1.0f / 256.0f);
+				fdR = compositeR * lR * (1.0f / 256.0f);
+			} else {
+				fdB = (texB * lB) * (1.0f / 256.0f);
+				fdG = (texG * lG) * (1.0f / 256.0f);
+				fdR = (texR * lR) * (1.0f / 256.0f);
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);

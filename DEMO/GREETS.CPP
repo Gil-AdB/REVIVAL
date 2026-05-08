@@ -476,6 +476,26 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
+	// Bump Specular on materials that should plausibly have shiny
+	// surfaces — marble stairs, marble pillars, stone floor, the mecha
+	// hull/cockpit. Most FLD materials author Specular=0; deferred-path
+	// Phong needs a non-zero value to draw a highlight, and Glossiness
+	// defaults to 32 in Render_DeferredLighting when the FLD didn't set
+	// one. Per-name match keeps the change targeted to surfaces where a
+	// highlight is sensible. Greets sets Specular_Factor=0 in tick init,
+	// which gates the deferred Phong term off — to enable highlights here
+	// the per-scene tone bump that follows raises Specular_Factor too.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->Name) continue;
+		const char *n = M->Name;
+		if (strstr(n, "stairs") || strstr(n, "amudim") ||
+		    strstr(n, "floor")  || strstr(n, "marb")   || strstr(n, "MARB") ||
+		    strstr(n, "hull")   || strstr(n, "cockpit")) {
+			if (M->Specular < 0.4f) M->Specular = 0.4f;
+			if (M->Glossiness == 0) M->Glossiness = 48;
+		}
+	}
+
 	gg->Init();
 
 }
@@ -549,7 +569,11 @@ struct GreetsScene : SceneDriver {
 
 		Ambient_Factor = 0.25;
 		Diffusive_Factor = 1.0;
-		Specular_Factor = 0.0;
+		// Forward Lighting() ignores Specular_Factor on its active path, so
+		// raising it from the legacy 0.0 to 1.0 is a no-op for forward.
+		// Deferred uses it as the per-scene specular gate, so this enables
+		// the Mat->Specular bump above to draw highlights on marble/hull.
+		Specular_Factor = 1.0;
 		Range_Factor = 1.0;
 		ImageSize = 0.25;
 
