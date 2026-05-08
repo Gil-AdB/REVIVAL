@@ -1978,7 +1978,12 @@ struct CityScene : SceneDriver {
 
 		Ambient_Factor = 0.25;
 		Diffusive_Factor = 1.0;
-		Specular_Factor = 0.0;
+		// Forward Lighting() ignores Specular_Factor on its active path, so
+		// raising it from the legacy 0.0 to 1.0 is a no-op for forward.
+		// Deferred uses it as the per-scene specular gate; the City has
+		// many materials with authored Mat->Specular and we want them
+		// to draw highlights (windows glass, ship hulls, etc.).
+		Specular_Factor = 1.0;
 		Range_Factor = 1.3;
 
 		ImageSize = 200;

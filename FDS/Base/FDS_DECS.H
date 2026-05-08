@@ -377,7 +377,7 @@ void Construct_FaceList(Scene *Sc);
 void StaticLighting(Scene *Sc);
 void Lighting(Scene *Sc);
 void Restore_Splines(Scene *Sc);
-void Render();
+void Render(bool forceForward = false);
 #endif
 
 #ifndef FrustrumIncluded

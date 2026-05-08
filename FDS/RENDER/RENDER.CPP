@@ -1877,7 +1877,7 @@ static void Render_DeferredLighting() {
 	}
 }
 
-void Render()
+void Render(bool forceForward)
 {
 	constexpr auto		numTilesX = 6;
 	constexpr auto		numTilesY = 4;
@@ -1891,7 +1891,13 @@ void Render()
 	// engine-sized G-buffer being resized — so we'd write past the
 	// vector. Safer to fall back to forward in that case (and any
 	// other ctx where storage hasn't been provisioned).
-	bool deferred = deferredEnabled();
+	//
+	// forceForward bypasses the deferred dispatch — used by RenderSkyCube,
+	// whose vertex-stored LR/LG/LB=255 brightness pass-through is what
+	// the forward fillers consume; the deferred per-pixel lighting model
+	// would re-shade those faces against Mat->Diffuse / Sc->Ambient and
+	// (with sky-cube materials authoring neither) come out black.
+	bool deferred = deferredEnabled() && !forceForward;
 	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
 		deferred = false;
 	}

@@ -308,7 +308,13 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 	if (CAll)
 	{
 		Radix_SortingASM(FList,SList,CAll);
-		Render();
+		// Force forward render for the sky cube — the cube faces are
+		// authored with vertex-stored LR/LG/LB=255 (CreateSkyCube), which
+		// is what the forward fillers consume to pass texels through at
+		// near-full brightness. Deferred lighting would re-shade against
+		// Mat->Diffuse / Sc->Ambient (both effectively zero on sky-cube
+		// materials) and produce a black backdrop.
+		Render(/*forceForward=*/true);
 		FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 	}
 	View->ISource = PrevViewPos;
