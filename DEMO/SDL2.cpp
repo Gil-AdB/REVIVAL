@@ -67,6 +67,12 @@ static int Wasm_InitGL()
 
 		var vsSrc =
 			'#version 300 es\n' +
+			// Dummy attribute at location 0. Without an attribute bound
+			// to location 0, desktop GL drivers (Mac in particular) fall
+			// into a slow attrib-emulation path even when an unused VBO
+			// is bound. Declaring it in the shader makes the linker mark
+			// location 0 as "used" and silences the WebGL warning.
+			'layout(location=0) in float aDummy;\n' +
 			'out vec2 vUV;\n' +
 			'void main() {\n' +
 			'  vec2 corners[4];\n' +
@@ -80,7 +86,8 @@ static int Wasm_InitGL()
 			'  uvs[2] = vec2(0.0, 0.0);\n' +
 			'  uvs[3] = vec2(1.0, 0.0);\n' +
 			'  vUV = uvs[gl_VertexID];\n' +
-			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0);\n' +
+			'  // aDummy participates so the optimizer cannot strip it.\n' +
+			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0 + aDummy * 0.0);\n' +
 			'}';
 		var fsSrc =
 			'#version 300 es\n' +

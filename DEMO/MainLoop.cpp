@@ -213,6 +213,14 @@ static bool tickCurrentScene()
 static void cleanupCurrentScene()
 {
 	if (!g_currentDriver) return;
+	// Each scene's cleanup() ends with `while (Keyboard[ScESC]) continue;`
+	// — a DOS-era debounce so the next scene doesn't immediately exit on
+	// the same ESC press. On wasm main thread that loop blocks the rAF
+	// callback (no events drain), freezing the page until the user
+	// somehow makes Keyboard[ScESC] flip to 0 — which they can't, because
+	// the keyup event is also stuck. Clear it pre-cleanup; we get the
+	// debounce effect for free since the next scene's first tick sees 0.
+	Keyboard[ScESC] = 0;
 	g_currentDriver->cleanup();
 	g_currentDriver.reset();
 	g_currentDriverInitialized = false;
