@@ -1671,6 +1671,21 @@ void Initialize_City()
 	int building_count = 0;
 	bool bailout = false;
 
+	// Skip the cube-map bake when iterating the deferred path. The bake
+	// renders 6 cube faces × N buildings × Render() each — slow even on
+	// native, more so under ASan. Without it, City windows show their
+	// raw "windows" texture (the per-building reflection panorama is
+	// never built and Obj->Reflection stays null). Phase C work for
+	// deferred env-map will reproduce the reflection sampling per pixel
+	// from the panorama anyway, so skipping during dev is fine.
+	const bool skipCubeMap = []{
+		const char *s = std::getenv("FDS_SKIP_CUBEMAP");
+		return s && s[0] == '1';
+	}();
+	if (skipCubeMap) {
+		fprintf(stderr, "[CITY] FDS_SKIP_CUBEMAP=1 — skipping per-building cube-map bake\n");
+	}
+
 	std::vector<uint32_t> cubeMaps[6];
 	for (auto& cubeMap : cubeMaps) {
 		cubeMap.resize(CUBE_MAP_XRES * CUBE_MAP_YRES);
@@ -1678,7 +1693,7 @@ void Initialize_City()
 
 	std::vector<uint32_t> panorama(PANORAMA_XRES * PANORAMA_YRES);
 
-	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
+	for (Object* Obj = CitySc->ObjectHead; skipCubeMap ? false : Obj != nullptr; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
@@ -1754,6 +1769,9 @@ void Initialize_City()
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
+		// Obj->Reflection is set by the cube-map bake — null when SKIP_CUBEMAP=1
+		// or any other reason the bake didn't run.
+		if (!Obj->Reflection) continue;
 
 		auto T = (TriMesh*)(Obj->Data);
 		for (Face* F = T->Faces, *FE = T->Faces + T->FIndex; F != FE; ++F) {

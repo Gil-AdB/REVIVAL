@@ -92,7 +92,8 @@ struct Tile {
 struct TileRasterizerCtx {
 	Vertex** V;
 	i32 xres, yres;
-	Texture* Txtr;
+	Texture* Txtr;     // for LogWidth/LogHeight UV scaling math
+	dword matID;       // packed into mat32; what the deferred lighting pass uses to look up Material*. NOT Texture::ID — different per-scene number space.
 	dword miplevel;
 	u16 *zbuffer;
 };
@@ -170,11 +171,15 @@ struct TileRasterizer {
 		, ctx(ctx) {
 		LogWidth = ctx.Txtr->LSizeX - ctx.miplevel;
 		LogHeight = ctx.Txtr->LSizeY - ctx.miplevel;
-		if (ctx.Txtr->ID >= 256) {
-			std::cerr << "TxtrID out of range: " << ctx.Txtr->ID << std::endl;
+		if (ctx.matID >= 256) {
+			std::cerr << "matID out of range: " << ctx.matID << std::endl;
 			abort();
 		}
-		u32 TxtrIdMask = ((u32)ctx.miplevel << 28) | ((u32)ctx.Txtr->ID << 20);
+		// mat32: miplevel:4 | matID:8 | swizzledUV:20.
+		// matID indexes the per-scene Material* table (Scene_GetMatTable),
+		// NOT Texture::ID. The deferred lighting pass dereferences the
+		// material to get diffuse/luminosity/basecol AND its texture.
+		u32 TxtrIdMask = ((u32)ctx.miplevel << 28) | ((u32)ctx.matID << 20);
 		v8_TxtrIdMask = Vec8i((i32)TxtrIdMask);
 
 		UScaleFactor = (1 << LogWidth);
@@ -403,11 +408,12 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 	//	V[i]->V = V[i]->VZ * z;
 	//}
 	meka::TileRasterizerCtx ctx = {
-		.miplevel = miplevel,
-		.Txtr = F->Txtr->Txtr,
 		.V = V,
 		.xres = XRes,
 		.yres = YRes,
+		.Txtr = F->Txtr->Txtr,    // Texture* for UV math
+		.matID = F->Txtr->ID,     // Material::ID — what the deferred pass dereferences via Scene_GetMatTable
+		.miplevel = miplevel,
 		.zbuffer = ZPage16,
 	};
 	meka::TileRasterizer r(*g_gbuffer, ctx);
