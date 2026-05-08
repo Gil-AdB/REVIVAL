@@ -9,6 +9,7 @@
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <FILLERS/Mekalele.h>
 #include <Threads.h>
 #include <VESA/Vesa.h>
 
@@ -136,6 +137,10 @@ bool initSnapshotEnvironment(int xres, int yres) {
 
     VESA_VPageExternal(&surf);
     VESA_Surface2Global(MainSurf);
+
+    // Match V_Create's lifecycle: size the deferred G-buffer to the
+    // snapshot dimensions so RenderInnerMekalele has storage to write.
+    EngineGBuffer_Resize(xres, yres);
 
     Generate_RGBFlares();
     InitPolyStats(200);

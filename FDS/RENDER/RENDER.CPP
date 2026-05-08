@@ -1474,7 +1474,12 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 
 			auto flags = A->Flags & B->Flags & C->Flags;
 			if (flags & Vtx_Visible) continue;
-			RasterFunc filler;
+			// Mekalele dereferences F->Txtr->Txtr->LSizeX in its
+			// TileRasterizer constructor — untextured Materials would
+			// segfault. Skip them for now; the matID/Material dispatch
+			// in the future lighting pass needs a sentinel slot for
+			// "no texture; use BaseCol", which is the proper fix.
+			if (!F->Txtr || !F->Txtr->Txtr) continue;
 			clipper.Render(F, Mekalele, false);
 			//if (F->Flags & Face_Reflective) {
 			//	clipper.Render(F, IX_Prefiller_Reflective, true);
@@ -1487,6 +1492,41 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	renderns::condition.notify_one();
 }
 
+// FDS_DEFERRED=1 in env enables the experimental G-buffer path: tiled
+// dispatch goes to RenderInnerMekalele instead of RenderInner, then a
+// post-pass decodes the G-buffer's octahedral normals into RGB pixels
+// for visual inspection (no real lighting yet).
+static bool deferredEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
+// Walk every pixel; where Mekalele wrote (ZPage16[i] != 0 — Z was cleared
+// to 0 at frame start), decode the oct-packed normal and map to RGB via
+// (n*0.5 + 0.5)*255. Visualization-only — no shading, just normal-as-color.
+static void Visualize_GBufferNormal() {
+	if (!g_gbuffer) return;
+	const meka::GBuffer &gb = *g_gbuffer;
+	const size_t n = size_t(XRes) * size_t(YRes);
+	if (gb.normal.size() < n) return;
+	dword *out = reinterpret_cast<dword *>(VPage);
+	for (size_t i = 0; i < n; ++i) {
+		if (ZPage16[i] == 0) continue;  // pixel not touched
+		float nx, ny, nz;
+		meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+		int r = int((nx * 0.5f + 0.5f) * 255.0f);
+		int g = int((ny * 0.5f + 0.5f) * 255.0f);
+		int b = int((nz * 0.5f + 0.5f) * 255.0f);
+		if (r < 0) r = 0; if (r > 255) r = 255;
+		if (g < 0) g = 0; if (g > 255) g = 255;
+		if (b < 0) b = 0; if (b > 255) b = 255;
+		out[i] = dword(b) | (dword(g) << 8) | (dword(r) << 16);
+	}
+}
+
 void Render()
 {
 	constexpr auto		numTilesX = 6;
@@ -1495,6 +1535,16 @@ void Render()
 	const auto			tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 
 	renderns::tileCounter = 0;
+	// Deferred only if env var set AND the G-buffer is sized for the
+	// current framebuffer. The cube-map bake in Initialize_City swaps
+	// MainSurf to a 1024x1024 TmpSurf — XRes/YRes change without our
+	// engine-sized G-buffer being resized — so we'd write past the
+	// vector. Safer to fall back to forward in that case (and any
+	// other ctx where storage hasn't been provisioned).
+	bool deferred = deferredEnabled();
+	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
+		deferred = false;
+	}
 
 	for (auto j = 0; j < numTilesY; ++j) {
 		auto y1 = tileSizeY * j;
@@ -1503,7 +1553,11 @@ void Render()
 			auto x1 = tileSizeX * i;
 			auto x2 = std::min(x1 + tileSizeX, XRes);
 
-			ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInner(x1, y1, x2, y2); });
+			if (deferred) {
+				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInnerMekalele(x1, y1, x2, y2); });
+			} else {
+				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInner(x1, y1, x2, y2); });
+			}
 			// RenderInner(x1, y1, x2, y2);
 		}
 	}
@@ -1511,6 +1565,15 @@ void Render()
 	{
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::condition.wait(lock, [] {return renderns::tileCounter == numTilesX * numTilesY; });
+	}
+
+	if (deferred) {
+		// Debug pass — turn G-buffer normals into RGB into VPage.
+		// Replaces the lighting/composite pass entirely until that's
+		// designed. Texture, shading, and env-map sampling are all
+		// missing; this is purely "what does the normal field look
+		// like?" eyeball test.
+		Visualize_GBufferNormal();
 	}
 
 	int32_t I = CAll;

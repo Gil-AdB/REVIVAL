@@ -56,6 +56,25 @@ inline u16 oct_encode_u16(float nx, float ny, float nz) {
 	return u16((qx & 0xff) | ((qy & 0xff) << 8));
 }
 
+// Inverse of oct_encode_u16. Output is unit-length (mod quantization
+// error). Used by the lighting pass and the debug visualization.
+inline void oct_decode_u16(u16 packed, float &nx, float &ny, float &nz) {
+	int qx = int8_t(packed & 0xff);
+	int qy = int8_t((packed >> 8) & 0xff);
+	float ox = qx * (1.0f / 127.0f);
+	float oy = qy * (1.0f / 127.0f);
+	float az = 1.0f - std::fabs(ox) - std::fabs(oy);
+	if (az < 0.0f) {
+		float fx = (1.0f - std::fabs(oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
+		float fy = (1.0f - std::fabs(ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
+		ox = fx; oy = fy;
+	}
+	float invLen = 1.0f / std::sqrt(ox*ox + oy*oy + az*az);
+	nx = ox * invLen;
+	ny = oy * invLen;
+	nz = az * invLen;
+}
+
 struct Tile {
 	int x, y;
 
@@ -369,6 +388,13 @@ inline void SetGBuffer(meka::GBuffer *gbuffer) {
 	// Initalize GBuffer
 	g_gbuffer = gbuffer;
 }
+
+// Engine G-buffer lifecycle — sized to current framebuffer (in pixels) on
+// boot and every resize. Owns a single static meka::GBuffer; sets g_gbuffer
+// to point at it. Called from V_Create (DEMO/SDL2.cpp) for the live engine
+// surface, and from initSnapshotEnvironment (DEMO/Snapshot.cpp) for the
+// headless snapshot path.
+void EngineGBuffer_Resize(int X, int Y);
 
 inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 	//for (dword i = 0; i < numVerts; ++i) {

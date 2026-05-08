@@ -1,6 +1,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include "SDL2.h"
+#include "FILLERS/Mekalele.h"
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -32,6 +33,10 @@ static SDL_Window *sdl_window;
 // Owns the engine display texture. Reset (-> destroy) and reassigned
 // (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
 static SDLTex s_engineTex;
+
+// EngineGBuffer_Resize lives in FDS/FILLERS/Mekalele.cpp — owns the
+// static meka::GBuffer and updates g_gbuffer. V_Create calls it for
+// boot + resize so the deferred path's storage matches framebuffer dims.
 
 static void V_Flip(VESA_Surface *VS)
 {
@@ -145,6 +150,11 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 
 	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
 	VS->Handle = static_cast<void *>(s_engineTex.get());
+
+	// Engine G-buffer: matches framebuffer / Z16 lifecycle. Sized at V_Create
+	// time (boot + resize); resize is gated through EngineResize -> here so
+	// no rasterizer thread is observing stale data().
+	EngineGBuffer_Resize(VS->X, VS->Y);
 
 	// Mark this surface as lock-render so V_Flip writes the engine
 	// framebuffer directly into the texture's pixel buffer — child
