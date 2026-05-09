@@ -4,7 +4,10 @@
 #include <memory>
 #include <vector>
 
+#include <SDL.h>
+
 #include "Resize.h"
+#include "SDL2.h"
 
 // Scene driver interface for the tick-based scene loop.
 //
@@ -42,12 +45,33 @@ inline void poll_pending_resize(SceneDriver* driver) {
     if (driver) driver->on_resize(x, y);
 }
 
+// Re-Flips MainSurf with a decreasing fade for `frames` frames at ~60 fps.
+// Used between scenes on native to mirror the wasm FADE_OUT state.
+// Caller sets fade back to 1.0 implicitly (we end at 0.0; restore on the
+// next scene's first Flip).
+inline void runFadeOut(int frames) {
+    if (!MainSurf) return;
+    for (int i = 0; i < frames; ++i) {
+        float fade = 1.0f - (float)(i + 1) / (float)frames;
+        if (fade < 0.0f) fade = 0.0f;
+        SDL2_SetFade(fade);
+        Flip(MainSurf);
+        SDL_Delay(16);  // ~60 fps cadence; renderer's vsync absorbs jitter
+    }
+    SDL2_SetFade(1.0f);  // restore — next scene starts at full brightness
+}
+
 inline void runSceneBlocking(SceneDriver& driver) {
     driver.init();
     while (true) {
         poll_pending_resize(&driver);
         if (!driver.tick()) break;
     }
+    // Fade the last rendered frame to black before cleanup hands control
+    // back to the caller (which usually transitions to the next scene).
+    // Scenes write their last output into the engine surface during their
+    // final tick; we just keep re-presenting it with decreasing colour-mod.
+    runFadeOut(15);
     driver.cleanup();
 }
 
