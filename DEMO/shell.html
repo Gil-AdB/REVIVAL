@@ -46,6 +46,39 @@
          that don't support custom HTTP headers. No-op on emrun, which
          already sets the headers itself. -->
     <script src="coi-serviceworker.js"></script>
+    <script>
+      // Detect cross-origin isolation failure early and replace the
+      // about-to-explode emscripten output with a friendly explainer.
+      // We give the SW one auto-reload + a window of grace, then bail.
+      // Visible mostly on Firefox Mobile right now (some private-browsing
+      // / SW activation interaction); the emscripten stack trace from
+      // "WebAssembly.Memory cannot be serialized" is useless to most users.
+      (function() {
+        if (typeof window === 'undefined') return;  // SW context
+        // SAB / crossOriginIsolated check — runs after coi-serviceworker
+        // has had a chance to register + reload.
+        setTimeout(function() {
+          if (window.crossOriginIsolated) return;
+          var msg = (
+            "Couldn't enable cross-origin isolation in this browser. " +
+            "REVIVAL needs SharedArrayBuffer to run its render workers. " +
+            "Common causes:\n\n" +
+            "  - Private / incognito browsing (Firefox disables service workers there)\n" +
+            "  - Outdated browser (need Chrome 92+, Firefox 79+, Safari 15.2+)\n" +
+            "  - Some Firefox Mobile setups\n\n" +
+            "Try a regular (non-private) tab in an up-to-date Chrome or Firefox."
+          );
+          var div = document.createElement('div');
+          div.style.cssText =
+            'position:fixed;inset:0;background:#000;color:#ccc;' +
+            'font:14px/1.4 sans-serif;padding:2em;white-space:pre-wrap;' +
+            'z-index:99999;overflow:auto;';
+          div.textContent = msg;
+          document.body.appendChild(div);
+          console.error(msg);
+        }, 4000);
+      })();
+    </script>
     <div id="status">Downloading...</div>
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
     <div id="controls">
