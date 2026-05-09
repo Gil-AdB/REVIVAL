@@ -41,22 +41,60 @@
     </style>
   </head>
   <body>
+    <!-- COOP/COEP diagnostic: log enough state to figure out why
+         coi-serviceworker isn't activating on Firefox Mobile (where
+         all three of: no SW-registered log, not private browsing,
+         manual reload doesn't help). Runs BEFORE coi-serviceworker
+         so we capture the initial state cleanly, then again after
+         a delay to see what the SW did. -->
+    <script>
+      (function() {
+        if (typeof window === 'undefined') return;
+        function snap(label) {
+          var swCount = '?';
+          var swState = '?';
+          if (navigator.serviceWorker) {
+            try {
+              navigator.serviceWorker.getRegistrations().then(function(regs) {
+                console.log('[coop-diag] ' + label + ' regs=' + regs.length +
+                  regs.map(function(r){
+                    return ' [scope=' + r.scope +
+                      ' active=' + !!r.active +
+                      ' installing=' + !!r.installing +
+                      ' waiting=' + !!r.waiting + ']';
+                  }).join(''));
+              });
+            } catch (e) {
+              console.log('[coop-diag] ' + label + ' getRegistrations err: ' + e.message);
+            }
+          }
+          console.log('[coop-diag] ' + label +
+            ' isSecureContext=' + window.isSecureContext +
+            ' crossOriginIsolated=' + window.crossOriginIsolated +
+            ' UA=' + navigator.userAgent.slice(0, 80) +
+            ' hasNetscape=' + (typeof netscape !== 'undefined') +
+            ' hasChrome=' + (typeof chrome !== 'undefined') +
+            ' SW=' + !!navigator.serviceWorker +
+            ' SWController=' + !!(navigator.serviceWorker && navigator.serviceWorker.controller) +
+            ' SAB=' + (typeof SharedArrayBuffer !== 'undefined') +
+            ' sessionStorage=' + (function(){try{window.sessionStorage.length;return 'ok';}catch(e){return 'blocked:'+e.message;}})()
+          );
+        }
+        snap('initial');
+        // After SW has had time to register + reload (or fail).
+        setTimeout(function(){ snap('+1s'); }, 1000);
+        setTimeout(function(){ snap('+3s'); }, 3000);
+      })();
+    </script>
     <!-- coi-serviceworker injects COOP/COEP headers so SharedArrayBuffer
          (required for our pthread build) works on hosts like GitHub Pages
          that don't support custom HTTP headers. No-op on emrun, which
          already sets the headers itself. -->
     <script src="coi-serviceworker.js"></script>
     <script>
-      // Detect cross-origin isolation failure early and replace the
-      // about-to-explode emscripten output with a friendly explainer.
-      // We give the SW one auto-reload + a window of grace, then bail.
-      // Visible mostly on Firefox Mobile right now (some private-browsing
-      // / SW activation interaction); the emscripten stack trace from
-      // "WebAssembly.Memory cannot be serialized" is useless to most users.
+      // Friendly error if cross-origin isolation never activates.
       (function() {
-        if (typeof window === 'undefined') return;  // SW context
-        // SAB / crossOriginIsolated check — runs after coi-serviceworker
-        // has had a chance to register + reload.
+        if (typeof window === 'undefined') return;
         setTimeout(function() {
           if (window.crossOriginIsolated) return;
           var msg = (
