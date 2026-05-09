@@ -2140,8 +2140,17 @@ struct CityScene : SceneDriver {
 		// FPS printer — use the profiler's mean frame total (steady_clock,
 		// us-resolution) so the on-screen number agrees with TOTL/mean_fps
 		// in the scene-end dump.
+		// Always show a tiny frame indicator (top-left, single line) so
+		// the user can pinpoint a Timer value to feed --snapshot=city@t=N
+		// when reproducing a visual issue. Cheap; small; doesn't need
+		// the full profiler overlay.
+		{
+			snprintf(MSGStr, sizeof(MSGStr), "t=%d  CurFrame=%.1f", (int)Timer, CurFrame);
+			OutTextXY(VPage, 0, 0, MSGStr, 255);
+		}
+
 		if (g_profilerActive) {
-			int scroll = 0;
+			int scroll = 15 * g_fontScale;  // start below the always-on indicator
 			float meanMs = prof.meanFrameMs();
 			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
 			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
