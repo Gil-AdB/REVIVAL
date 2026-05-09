@@ -313,11 +313,28 @@
       // HD/SD button toggles it at runtime; ?hidpi=1 in the URL opts in
       // at boot.
       var hiDPI = /[?&]hidpi=1/.test(window.location.search);
+      // Mobile heuristic: coarse pointer + small viewport. On mobile we
+      // tweak the SD/HD effective DPR — naive 1× is too pixelated (CSS
+      // upscale to fill a phone screen looks blocky), naive full DPR
+      // tanks fps on heavy scenes. So:
+      //   SD on mobile = min(DPR, 1.5) — looks decent
+      //   HD on mobile = min(DPR, 2)   — sharp without tripling pixel work
+      // Desktop unaffected.
+      var isMobile = window.matchMedia &&
+                     window.matchMedia('(pointer:coarse)').matches &&
+                     Math.min(window.innerWidth, window.innerHeight) <= 900;
       // Becomes true once main() has returned — guards against late-firing
       // resize/orientation listeners trying to call into freed wasm.
       var runtimeExited = false;
+      function effectiveDpr() {
+        var dpr = window.devicePixelRatio || 1;
+        if (isMobile) {
+          return hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+        }
+        return hiDPI ? dpr : 1;
+      }
       function resizeCanvasToWindow() {
-        var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
+        var dpr = effectiveDpr();
         var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
         var h = Math.max(1, Math.floor(window.innerHeight * dpr));
         // Route through SDL_SetWindowSize once the wasm is ready — it
@@ -365,14 +382,11 @@
       function applyHidpi() {
         btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
         btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
-        // Tell the engine which font scale to use. In HD mode the canvas
-        // backing has devicePixelRatio× more pixels than the CSS box, so
-        // glyphs need a matching scale to keep the visual size constant.
-        // On mobile HD the canvas may still be < 2500 px wide (so the
-        // C-side threshold heuristic stays at 1×, making glyphs visually
-        // half-sized) — this is what fixes that.
+        // Match the font scale to the effective DPR — that way one
+        // glyph pixel maps to one CSS pixel regardless of HD/SD or
+        // mobile/desktop. Round up so we stay legible.
         if (Module._SDL2_SetFontScale) {
-          var scale = hiDPI ? Math.max(2, (window.devicePixelRatio || 1) | 0) : 1;
+          var scale = Math.max(1, Math.round(effectiveDpr()));
           Module._SDL2_SetFontScale(scale);
         }
         // resizeCanvasToWindow routes through Module._SDL2_RequestSize

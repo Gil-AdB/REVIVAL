@@ -52,6 +52,13 @@ jobs:
       - name: Build
         run: cmake --build build-wasm
 
+      - name: Smoke test (headless Chromium boots demo + verifies render)
+        run: |
+          cd scripts && npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          cd ..
+          node scripts/ci_smoke_test.mjs
+
       - name: Stage site
         run: |
           mkdir -p _site

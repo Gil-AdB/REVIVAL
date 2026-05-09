@@ -355,13 +355,25 @@ bool DemoTick()
 
 	case DONE: {
 		cleanupCurrentScene();
-		if (g_modHandle) {
-			SDL2_StopMusic();
-			Modplayer_Stop(g_modHandle);
-			g_modHandle = nullptr;
-		}
-		if (g_initThread.joinable()) g_initThread.join();
-		ThreadPool::instance().close();
+		// Audio + threadpool teardown is each ~few hundred ms (audio
+		// callback drain, worker join). Doing them on main blocks the
+		// rAF callback long enough for emscripten to log "Blocking on
+		// the main browser thread is very dangerous". Punt to a
+		// detached thread — the demo is over, no rendering needed,
+		// runtime will keep the wasm process alive until the worker
+		// finishes since EXIT_RUNTIME=0.
+		ModplayerHandle handleSnapshot = g_modHandle;
+		std::thread teardown([handleSnapshot]() {
+			if (handleSnapshot) {
+				SDL2_StopMusic();
+				Modplayer_Stop(handleSnapshot);
+			}
+			if (g_initThread.joinable()) g_initThread.join();
+			ThreadPool::instance().close();
+			fprintf(stderr, "[DEMO] teardown complete\n");
+		});
+		teardown.detach();
+		g_modHandle = nullptr;
 		return false;
 	}
 	}
