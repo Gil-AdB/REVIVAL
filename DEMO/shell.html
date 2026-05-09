@@ -185,7 +185,13 @@
         // (resize, mousemove, fullscreenchange) can't call into a torn-down
         // wasm runtime — that path used to throw "called after runtime
         // exit" assertions in the console.
-        onExit: function() { runtimeExited = true; }
+        onExit: function() { runtimeExited = true; },
+        // Once wasm exports are ready, re-apply the HD/SD font scale
+        // (the boot-time applyHidpi() ran before _SDL2_SetFontScale
+        // existed). Same for ?hidpi=1 in the URL.
+        onRuntimeInitialized: function() {
+          if (typeof applyHidpi === 'function') applyHidpi();
+        }
       };
 
       // ---- Audio: AudioWorklet pump ---------------------------------
@@ -359,7 +365,17 @@
       function applyHidpi() {
         btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
         btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
-        // resizeCanvasToWindow now routes through Module._SDL2_RequestSize
+        // Tell the engine which font scale to use. In HD mode the canvas
+        // backing has devicePixelRatio× more pixels than the CSS box, so
+        // glyphs need a matching scale to keep the visual size constant.
+        // On mobile HD the canvas may still be < 2500 px wide (so the
+        // C-side threshold heuristic stays at 1×, making glyphs visually
+        // half-sized) — this is what fixes that.
+        if (Module._SDL2_SetFontScale) {
+          var scale = hiDPI ? Math.max(2, (window.devicePixelRatio || 1) | 0) : 1;
+          Module._SDL2_SetFontScale(scale);
+        }
+        // resizeCanvasToWindow routes through Module._SDL2_RequestSize
         // → SDL_SetWindowSize, which both resizes the canvas DOM element
         // and fires SDL_WINDOWEVENT_SIZE_CHANGED so the demo thread
         // repaints at the new resolution.

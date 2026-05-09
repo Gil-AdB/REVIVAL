@@ -579,6 +579,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
 // SDL2 listens to window 'resize' but reads window.innerWidth/innerHeight,
 // not the canvas dims, so HiDPI toggles never reached SDL. Routing through
 // SDL_SetWindowSize is the canonical fix.
+// JS-driven font scale. Called from shell.html when HiDPI toggles
+// (and at boot). On wasm we ignore the XRes-threshold heuristic in
+// VESA_Surface2Global and let JS pick — it's the only place that
+// knows about devicePixelRatio + the HD/SD button state.
+extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetFontScale(int scale)
+{
+	if (scale < 1) scale = 1;
+	if (scale > 4) scale = 4;
+	g_fontScale = scale;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 {
 	if (!sdl_window || w <= 0 || h <= 0) return;

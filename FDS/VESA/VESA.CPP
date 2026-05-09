@@ -78,9 +78,16 @@ void VESA_Surface2Global(VESA_Surface *VS)
   ZPage16 = (word *)VS->Z16;
   Flip = VS->Flip;
   YOffs = VS->YTable;
+#ifndef __EMSCRIPTEN__
   // HiDPI font auto-scale. The bitmap font is ~8 px tall — only kick in
   // at retina-class resolutions (4K+). 1080p still gets 1× glyphs.
+  // On wasm the JS shell knows the visual context (devicePixelRatio + the
+  // HD/SD toggle) and sets g_fontScale via SDL2_SetFontScale, so don't
+  // overwrite it here — the threshold is wrong for mobile HD anyway
+  // (canvas backing under 2500 px but glyphs render at half visual size
+  // because of devicePixelRatio).
   g_fontScale = (XRes >= 2500) ? 2 : 1;
+#endif
 }
 
 void VESA_Warning(const char *Msg)
