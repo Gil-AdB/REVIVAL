@@ -40,6 +40,17 @@ namespace {
 // and never read at render time — confirmed by a tree-wide grep — so
 // excluding them from the key is safe and keeps dedup aggressive.
 struct MatKey {
+	std::string name;       // FLD surface name — kept in the key so that
+	                        // identically-parameterized materials with
+	                        // different surface names stay distinct.
+	                        // City has e.g. "b6 windows" and "b6 hull"
+	                        // both using B6.JPG with otherwise-identical
+	                        // params; without name in the key they
+	                        // collapse and the survivor's name leaks to
+	                        // the other's faces, breaking name-based
+	                        // post-load passes (e.g. Initialize_City's
+	                        // `if (strstr(F->Txtr->Name, "windows"))`
+	                        // then mis-marks the hull face Face_Reflective).
 	Texture* txtr;
 	Scene*   relScene;
 	Texture* envTexture;
@@ -50,7 +61,8 @@ struct MatKey {
 };
 
 inline bool operator==(const MatKey& a, const MatKey& b) noexcept {
-	return a.txtr == b.txtr
+	return a.name == b.name
+		&& a.txtr == b.txtr
 		&& a.relScene == b.relScene
 		&& a.envTexture == b.envTexture
 		&& a.flags == b.flags
@@ -74,7 +86,8 @@ struct MatKeyHash {
 		auto fbits = [](float f) {
 			uint32_t u; std::memcpy(&u, &f, sizeof(u)); return size_t(u);
 		};
-		size_t h = std::hash<const void*>{}(k.txtr);
+		size_t h = std::hash<std::string>{}(k.name);
+		h = mix(h, std::hash<const void*>{}(k.txtr));
 		h = mix(h, std::hash<const void*>{}(k.relScene));
 		h = mix(h, std::hash<const void*>{}(k.envTexture));
 		h = mix(h, k.flags);
@@ -104,6 +117,7 @@ std::unordered_map<Scene*, DedupStats> g_dedupStats;
 
 MatKey makeKey(const Material& M) {
 	return MatKey{
+		M.Name ? std::string(M.Name) : std::string(),
 		M.Txtr, M.RelScene, M.EnvTexture,
 		M.Flags,
 		M.Luminosity, M.Diffuse, M.Specular, M.Reflection, M.Transparency,
