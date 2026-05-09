@@ -106,6 +106,21 @@
         setTimeout(function(){ snap('+3s'); }, 3000);
       })();
     </script>
+    <!-- Browser-specific coi-serviceworker config. Firefox Android (UA
+         contains "Android" + "Firefox") has been observed not isolating
+         the top-level document under COEP credentialless even with
+         coi-serviceworker active and the SW controlling the page
+         (crossOriginIsolated=false despite SWController=true). Forcing
+         require-corp seems to fix it; same-origin assets get an explicit
+         CORP from the SW so require-corp's stricter rules are satisfied. -->
+    <script>
+      var ua = navigator.userAgent || '';
+      if (ua.indexOf('Android') >= 0 && ua.indexOf('Firefox') >= 0) {
+        window.coi = window.coi || {};
+        window.coi.coepCredentialless = function() { return false; };
+        console.log('[coop-diag] FF Android detected; forcing require-corp');
+      }
+    </script>
     <!-- coi-serviceworker injects COOP/COEP headers so SharedArrayBuffer
          (required for our pthread build) works on hosts like GitHub Pages
          that don't support custom HTTP headers. No-op on emrun, which
