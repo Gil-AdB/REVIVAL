@@ -41,18 +41,39 @@
     </style>
   </head>
   <body>
-    <!-- COOP/COEP diagnostic: log enough state to figure out why
-         coi-serviceworker isn't activating on Firefox Mobile (where
-         all three of: no SW-registered log, not private browsing,
-         manual reload doesn't help). Runs BEFORE coi-serviceworker
-         so we capture the initial state cleanly, then again after
-         a delay to see what the SW did. -->
+    <!-- Diagnostic-log capture. We also keep a buffered copy of every
+         [coop-diag] / [audio-diag] line so we can dump them into the
+         on-screen error panel when the demo can't start (mostly so
+         Firefox Mobile users — who can't readily inspect the JS console
+         — can copy useful info out of the page itself). Captures
+         console.log + console.error output that starts with one of our
+         tag prefixes. -->
     <script>
       (function() {
         if (typeof window === 'undefined') return;
+        var diagLog = [];
+        window.__diagLog = diagLog;
+        function tagged(args) {
+          var s = '';
+          for (var i = 0; i < args.length; ++i) {
+            s += (i ? ' ' : '') + args[i];
+          }
+          return /^\[(coop|audio)-diag\]/.test(s) ? s : null;
+        }
+        var origLog = console.log.bind(console);
+        var origErr = console.error.bind(console);
+        console.log = function() {
+          var t = tagged(arguments);
+          if (t) diagLog.push(t);
+          return origLog.apply(null, arguments);
+        };
+        console.error = function() {
+          var t = tagged(arguments);
+          if (t) diagLog.push(t);
+          return origErr.apply(null, arguments);
+        };
+
         function snap(label) {
-          var swCount = '?';
-          var swState = '?';
           if (navigator.serviceWorker) {
             try {
               navigator.serviceWorker.getRegistrations().then(function(regs) {
@@ -81,7 +102,6 @@
           );
         }
         snap('initial');
-        // After SW has had time to register + reload (or fail).
         setTimeout(function(){ snap('+1s'); }, 1000);
         setTimeout(function(){ snap('+3s'); }, 3000);
       })();
@@ -93,6 +113,9 @@
     <script src="coi-serviceworker.js"></script>
     <script>
       // Friendly error if cross-origin isolation never activates.
+      // Includes the captured [coop-diag] / [audio-diag] log so people
+      // diagnosing on a phone (or anyone without a JS console handy)
+      // can copy actionable info straight out of the page.
       (function() {
         if (typeof window === 'undefined') return;
         setTimeout(function() {
@@ -106,12 +129,13 @@
             "  - Some Firefox Mobile setups\n\n" +
             "Try a regular (non-private) tab in an up-to-date Chrome or Firefox."
           );
+          var diag = (window.__diagLog || []).join('\n');
           var div = document.createElement('div');
           div.style.cssText =
             'position:fixed;inset:0;background:#000;color:#ccc;' +
             'font:14px/1.4 sans-serif;padding:2em;white-space:pre-wrap;' +
             'z-index:99999;overflow:auto;';
-          div.textContent = msg;
+          div.textContent = msg + '\n\n--- diagnostic log ---\n' + diag;
           document.body.appendChild(div);
           console.error(msg);
         }, 4000);
