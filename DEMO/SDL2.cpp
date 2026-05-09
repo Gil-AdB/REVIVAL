@@ -613,7 +613,6 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 // Per-pump scratch. Sized to comfortably hold one 'needData' chunk
 // (default 2048 frames).
 static constexpr int kPumpFramesMax = 4096;
-static float s_audioInterleaved[kPumpFramesMax * 2];
 static float s_audioLeft [kPumpFramesMax];
 static float s_audioRight[kPumpFramesMax];
 
@@ -622,21 +621,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void Audio_FeedWorklet(int frames)
 	if (!g_RevModuleHandle) return;
 	if (frames <= 0) return;
 	if (frames > kPumpFramesMax) frames = kPumpFramesMax;
+	// Planar fill — modplayer-lib's PlanarBufferAdaptar writes each
+	// channel directly into the destination, no deinterleave needed.
+	Modplayer_FillBufferPlanar(g_RevModuleHandle, s_audioLeft, s_audioRight, frames);
 	if (g_mute.load(std::memory_order_relaxed)) {
-		// Still pull from modplayer so song position advances; we'll
-		// post zeros so the worklet keeps its ring level + the gain
-		// node in shell.html will be 0 anyway. (Belt + suspenders.)
-		Modplayer_FillBuffer(g_RevModuleHandle, s_audioInterleaved, frames);
+		// Still pulled samples so song position advances; just zero
+		// the audible side. (Belt + suspenders with shell.html's
+		// GainNode.)
 		memset(s_audioLeft,  0, frames * sizeof(float));
 		memset(s_audioRight, 0, frames * sizeof(float));
-	} else {
-		Modplayer_FillBuffer(g_RevModuleHandle, s_audioInterleaved, frames);
-		// Modplayer fills interleaved L/R; worklet expects separate
-		// channels. Deinterleave.
-		for (int i = 0; i < frames; ++i) {
-			s_audioLeft [i] = s_audioInterleaved[i * 2 + 0];
-			s_audioRight[i] = s_audioInterleaved[i * 2 + 1];
-		}
 	}
 	// Post a copy to the worklet. HEAPF32-backed views can't cross
 	// thread boundaries via postMessage (SAB), so we copy into fresh
