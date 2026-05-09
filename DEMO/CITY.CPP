@@ -1755,6 +1755,53 @@ void Initialize_City()
 			}
 		}
 
+		// FDS_DEBUG_PANORAMA=1 overwrites the per-building reflection
+		// panorama with a synthetic test image whose colors identify the
+		// (eu, ev) coordinates each world direction maps to. The
+		// panorama generator's lat/lon convention is (per
+		// CalcEquirectangularPanoramaTable):
+		//   eu = lon / (2π)        with d = (sin lon · cos lat, sin lat, cos lon · cos lat)
+		//   ev = (lat + π/2) / π
+		// So eu=0    ↔ lon=0       ↔ direction (0, _, +1)  → label YELLOW (+z, "fwd")
+		//    eu=0.25 ↔ lon=π/2     ↔ direction (+1, _, 0)  → label RED    (+x, "right")
+		//    eu=0.5  ↔ lon=π       ↔ direction (0, _, -1)  → label GREEN  (-z, "back")
+		//    eu=0.75 ↔ lon=3π/2    ↔ direction (-1, _, 0)  → label BLUE   (-x, "left")
+		//    ev=0    ↔ lat=-π/2    ↔ direction (0, -1, 0)  → label WHITE
+		//    ev=1    ↔ lat=+π/2    ↔ direction (0, +1, 0)  → label MAGENTA
+		// Each lat band also has a thin black gridline every 30° of
+		// lon and a thin white gridline every 30° of lat for measuring
+		// what landed where in the reflection.
+		if (std::getenv("FDS_DEBUG_PANORAMA")) {
+			for (int y = 0; y < PANORAMA_YRES; ++y) {
+				const float ev = float(y) / PANORAMA_YRES;
+				uint32_t band_color;
+				if (ev < 0.10f) band_color = 0x00FFFFFFu;        // WHITE  (ev=0 band)
+				else if (ev > 0.90f) band_color = 0x00FF00FFu;   // MAGENTA(ev=1 band)
+				else band_color = 0;                              // mid: pick by eu below
+				for (int x = 0; x < PANORAMA_XRES; ++x) {
+					const float eu = float(x) / PANORAMA_XRES;
+					uint32_t c;
+					if (band_color != 0) {
+						c = band_color;
+					} else {
+						// Quadrant by eu
+						if      (eu < 0.125f) c = 0x00FFFF00u;   // YELLOW (eu≈0)
+						else if (eu < 0.375f) c = 0x00FF0000u;   // RED    (eu≈0.25)
+						else if (eu < 0.625f) c = 0x0000FF00u;   // GREEN  (eu≈0.5)
+						else if (eu < 0.875f) c = 0x000000FFu;   // BLUE   (eu≈0.75)
+						else                  c = 0x00FFFF00u;   // YELLOW (eu≈1, wraps)
+					}
+					// Lat gridlines every 30° (every 1/6 of ev)
+					const float ev_frac = ev * 6.0f;
+					if (fabsf(ev_frac - roundf(ev_frac)) < 0.005f) c = 0x00FFFFFFu;
+					// Lon gridlines every 30° (every 1/12 of eu)
+					const float eu_frac = eu * 12.0f;
+					if (fabsf(eu_frac - roundf(eu_frac)) < 0.003f) c = 0x00000000u;
+					panorama[y * PANORAMA_XRES + x] = c | 0xFF000000u;
+				}
+			}
+		}
+
 		Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
 
 		// FDS_DUMP_PANORAMA=1 writes one .ppm per building's panorama

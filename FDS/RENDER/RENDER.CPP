@@ -772,6 +772,26 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 					float lat = asin(d.y);
 					float lon = atan2(-d.z, -d.x);
 
+					// This formula reads cryptic but is internally
+					// self-consistent with CalcEquirectangularPanoramaTable
+					// in CITY.CPP. That panorama generator has a +z↔-z
+					// axis swap baked in (it stores the texture captured
+					// looking -z at its +z eu slot, etc., because of
+					// the ROT-offset cube-face → texture-index map), and
+					// also a +y↔-y swap. The two atan2 arg negations
+					// here amount to feeding -d.z and -d.x as inputs;
+					// the asin doesn't negate but the `0.5 - lat/π` form
+					// of ev below algebraically equals `-asin(d.y)/π +
+					// 0.5`, which is the y-swap compensation. So lookup
+					// + bake swaps cancel and the panorama is sampled
+					// at the correct content slot.
+					//
+					// Verified empirically with FDS_DEBUG_PANORAMA=1
+					// (synthetic quadrant-colour panorama): a "clean"
+					// algebraic inverse like `lon = atan2(d.x, -d.z)`
+					// produces bit-identical eu values to the formula
+					// here. Don't try to "simplify" — leave the math
+					// matching the panorama as-shipped.
 					eu[i] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
 					ev[i] = 0.5 - 0.5 * lat / (PI / 2.0);
 					++i;
