@@ -622,7 +622,15 @@ static void open_audio_main_thread(void* modplayerHandle)
 	want.freq = 48000;
 	want.format = AUDIO_F32SYS;
 	want.channels = 2;
-	want.samples = 512;  // matches xmplayer's AUDIO_BUF_FRAMES
+	// Buffer size = audio underrun budget. emscripten SDL2 still uses
+	// ScriptProcessorNode (deprecated; runs the audio callback on the
+	// browser main thread). At 512 samples / 48 kHz that's a 10.6 ms
+	// budget — easy to blow past on a slow rAF tick (HD scenes can
+	// take 30 ms+), causing buffer underruns heard as choppy music.
+	// Bump to 2048 (42.6 ms) — a music demo doesn't care about the
+	// extra latency. The right long-term fix is AudioWorkletNode on
+	// its own thread, but SDL2's emscripten port doesn't support it.
+	want.samples = 2048;
 	want.callback = wasm_audio_callback;
 	want.userdata = modplayerHandle;
 	g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
