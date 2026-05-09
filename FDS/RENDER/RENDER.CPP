@@ -769,11 +769,26 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 					auto d = wsPos[i] - cv;
 					d -= (d * n) * 2.0f * n;
 					Vector_Norm(&d);
+					// Lat/lon to (eu, ev) — must invert the panorama
+					// generation in CITY.CPP CalcEquirectangularPanoramaTable:
+					//   d = (cos(lat)·sin(lon), sin(lat), cos(lat)·cos(lon))
+					// So lon = atan2(d.x, d.z), lat = asin(d.y), and the
+					// texture coords are
+					//   eu = lon / (2π),  wrap negatives to [0,1)
+					//   ev = lat / π + 0.5
+					// The previous formula used `atan2(-d.z, -d.x)` and a
+					// non-matching remap that worked out to a horizontal
+					// mirror around eu=0.25 plus a vertical flip, so
+					// reflective faces whose reflected ray ran along ±z
+					// showed the wrong hemisphere of the panorama (the
+					// "90° off" artifact). Forward-/right-facing rays
+					// happened to land near the mirror axis and looked
+					// approximately correct.
 					float lat = asin(d.y);
-					float lon = atan2(-d.z, -d.x);
-
-					eu[i] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
-					ev[i] = 0.5 - 0.5 * lat / (PI / 2.0);
+					float lon = atan2(d.x, d.z);
+					eu[i] = lon * (1.0f / (2.0f * float(PI)));
+					if (eu[i] < 0.0f) eu[i] += 1.0f;
+					ev[i] = lat * (1.0f / float(PI)) + 0.5f;
 					++i;
 				}
 
