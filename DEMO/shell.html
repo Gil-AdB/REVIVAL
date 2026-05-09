@@ -155,6 +155,22 @@
       // creates the AudioContext + worklet, hooks its 'needData' /
       // 'starve' messages back to a wasm-exported _Audio_FeedWorklet
       // function. Module._floodAudioStop() tears down at end of demo.
+      // Browsers gate AudioContext.resume() on a user-gesture call stack.
+      // The C-side state machine catches the click via SDL_PollEvent later,
+      // by which point the gesture context is gone — ctx.resume() then
+      // resolves but the context stays in "suspended" state and the worklet
+      // never produces audio. Listen for the first click/keydown directly
+      // in JS and kick off audio in that handler. The C side calls
+      // _floodAudioStart() too once it sees the gesture; the second call
+      // returns immediately because Module.__audioCtx is already set.
+      function preArmAudio() {
+        window.removeEventListener('pointerdown', preArmAudio);
+        window.removeEventListener('keydown',     preArmAudio);
+        if (Module._floodAudioStart) Module._floodAudioStart();
+      }
+      window.addEventListener('pointerdown', preArmAudio);
+      window.addEventListener('keydown',     preArmAudio);
+
       Module._floodAudioStart = async function() {
         if (Module.__audioCtx) return; // already started
         var ctx = new (window.AudioContext || window.webkitAudioContext)({
