@@ -1144,7 +1144,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "filler") {
 			return RunFillerTestSnapshot(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler)\n",
+		if (snap.scene == "refltest") {
+			return RunReflectionTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

@@ -2277,6 +2277,11 @@ int32_t getCityCTPartTime()
 	return CTPartTime;
 }
 
+Scene* getCityScene()
+{
+	return CitySc;
+}
+
 void Run_City()
 {
 	auto scene = createCityScene();

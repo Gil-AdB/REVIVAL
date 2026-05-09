@@ -35,6 +35,19 @@ int RunGlatTrace(const SnapshotConfig& cfg, int xres, int yres);
 // isolation from the city pipeline.
 int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 
+// Reflection-direction diagnostic. Initialises City (with FDS_DEBUG_PANORAMA
+// forced on so every per-building panorama is the synthetic quadrant-coloured
+// test image), then positions the camera at six fixed points around one
+// chosen building and renders one snapshot per camera pose. Each output PNG
+// is named by the camera's offset direction relative to the building's
+// centre. By reading off the colours that appear in the building's window
+// reflections, we can verify which (eu, ev) the lookup formula picks for a
+// given reflected ray, isolated from the (typically large) parallax errors
+// that come from sampling a static cube-map at unrelated camera positions.
+//
+//   DEMO --snapshot=refltest [--out=PATH]
+int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Synthetic rasterizer benchmark. Repeatedly renders the FillerTest fixture
 // and reports ms/iter + Mpx/s. Same fixture across native and wasm so the
 // numbers compare apples-to-apples.

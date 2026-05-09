@@ -347,6 +347,145 @@ int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// Helper for the reflection-test mode: build a row-major 3×3 rotation
+// matrix that maps a world point onto a camera looking from `eye` at
+// `target`. The engine convention is camera-z = world forward (Identity
+// camera looks at world +z) and +y is "down" (engine quirk discovered
+// during reflection debugging — sky cube faces +y up but the rendered
+// panorama has sky at top while panorama y=0 → d.y=−1, so the engine
+// is rendering with +y as the down direction). Pick a world-up that
+// avoids gimbal-lock for the top/bottom views.
+static void buildLookAt(const Vector& eye, const Vector& target, Matrix outM) {
+    Vector forward = target - eye;
+    Vector_Norm(&forward);
+    Vector worldUp(0.0f, -1.0f, 0.0f);
+    if (std::fabs(forward.y) > 0.95f) worldUp = Vector(0.0f, 0.0f, 1.0f);
+    Vector right;
+    Cross_Product(&worldUp, &forward, &right);
+    Vector_Norm(&right);
+    Vector up;
+    Cross_Product(&forward, &right, &up);
+    // Row-major: each row is the camera-axis direction in world coords.
+    // (Identity matches +x right, +y down, +z forward.)
+    outM[0][0] = right.x;   outM[0][1] = right.y;   outM[0][2] = right.z;
+    outM[1][0] = up.x;      outM[1][1] = up.y;      outM[1][2] = up.z;
+    outM[2][0] = forward.x; outM[2][1] = forward.y; outM[2][2] = forward.z;
+}
+
+int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres) {
+    // Force the synthetic quadrant-coloured panorama. The cube-map bake
+    // still runs; we just paint over its output with a known-direction
+    // image so each pixel of the eventual reflection has an unambiguous
+    // (eu, ev) → colour mapping.
+#ifdef _WIN32
+    _putenv_s("FDS_DEBUG_PANORAMA", "1");
+#else
+    setenv("FDS_DEBUG_PANORAMA", "1", 1);
+#endif
+
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    Initialize_City();
+    Scene* sc = getCityScene();
+    if (!sc) {
+        std::fprintf(stderr, "[REFLTEST] getCityScene() returned null\n");
+        return 4;
+    }
+
+    // Pick a target building. b1.lwo is the first numbered building in
+    // City; the bake puts a panorama on it. Fall back to any b<digit>.lwo
+    // if the loader renames things.
+    Object* target = nullptr;
+    for (Object* o = sc->ObjectHead; o; o = o->Next) {
+        if (o->Type != Obj_TriMesh || !o->Name) continue;
+        if (o->Name[0] == 'b' && '0' <= o->Name[1] && o->Name[1] <= '9'
+            && std::strcmp(o->Name + 2, ".lwo") == 0) {
+            target = o;
+            if (std::strcmp(o->Name, "b1.lwo") == 0) break;
+        }
+    }
+    if (!target) {
+        std::fprintf(stderr, "[REFLTEST] no target building found\n");
+        return 4;
+    }
+    TriMesh* T = (TriMesh*)target->Data;
+    Vector centerWorld;
+    {
+        Vector bsLocal;
+        MatrixXVector(T->RotMat, &T->BSphereCtr, &bsLocal);
+        centerWorld.x = T->IPos.x + bsLocal.x;
+        centerWorld.y = T->IPos.y + bsLocal.y;
+        centerWorld.z = T->IPos.z + bsLocal.z;
+    }
+    const float dist = std::sqrt(T->BSphereRad) * 4.0f + 50.0f;
+
+    std::fprintf(stderr,
+        "[REFLTEST] target=%s center=(%.1f,%.1f,%.1f) bsRad²=%.1f camDist=%.1f\n",
+        target->Name, centerWorld.x, centerWorld.y, centerWorld.z,
+        T->BSphereRad, dist);
+
+    // Animation state: drive one tick at t=0 to populate Vtx->LR/LG/LB
+    // and the omni splines. Subsequent renders use the camera we override
+    // and skip animation, so reflections won't change frame-to-frame.
+    Timer = 0;
+    auto driver = createCityScene();
+    driver->init();
+
+    // Use the first scene camera as our rendering View; we'll just
+    // overwrite ISource/Mat between snaps. Render() reads the global
+    // `View` (set by SetCurrentScene → done in driver->init() / tick()).
+    if (!View) View = sc->CameraHead;
+
+    // 6 camera positions: each `(name, offsetDir)` places the camera at
+    // centerWorld + offsetDir*dist looking back toward centerWorld. The
+    // building face most directly facing the camera reflects a known
+    // direction.
+    struct CamPose { const char* name; Vector dir; };
+    const CamPose poses[] = {
+        {"pos_x",   Vector( 1.0f,  0.0f,  0.0f)},
+        {"neg_x",   Vector(-1.0f,  0.0f,  0.0f)},
+        {"pos_z",   Vector( 0.0f,  0.0f,  1.0f)},
+        {"neg_z",   Vector( 0.0f,  0.0f, -1.0f)},
+        {"pos_y",   Vector( 0.0f,  1.0f,  0.0f)},
+        {"neg_y",   Vector( 0.0f, -1.0f,  0.0f)},
+    };
+
+    int produced = 0;
+    for (const CamPose& p : poses) {
+        // Position + look-at
+        View->ISource.x = centerWorld.x + p.dir.x * dist;
+        View->ISource.y = centerWorld.y + p.dir.y * dist;
+        View->ISource.z = centerWorld.z + p.dir.z * dist;
+        buildLookAt(View->ISource, centerWorld, View->Mat);
+        std::srand(0);
+
+        // Manual frame: clear, transform, sort, render.
+        std::memset(VPage,   0, PageSize);
+        std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+        Transform_Objects(sc);
+        if (CAll) {
+            Radix_SortingASM(FList, SList, CAll);
+            Render(RenderPath::ForceForward);
+        }
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath),
+                      "%s/refltest_%s_color.ppm", cfg.outDir.c_str(), p.name);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr,
+            "[REFLTEST] %s: cam=(%.1f,%.1f,%.1f) → %s\n",
+            p.name, View->ISource.x, View->ISource.y, View->ISource.z,
+            colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg) {
     bool found = false;
     for (int i = 1; i < argc; ++i) {
