@@ -1756,6 +1756,37 @@ void Initialize_City()
 		}
 
 		Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
+
+		// FDS_DUMP_PANORAMA=1 writes one .ppm per building's panorama
+		// at scene init, so we can see exactly which world direction
+		// lands at which (eu, ev) and derive a correct lookup formula
+		// against the actual data instead of the algebra.
+		if (std::getenv("FDS_DUMP_PANORAMA")) {
+			static int dumpIdx = 0;
+			char path[256];
+			snprintf(path, sizeof(path), "/tmp/city_panorama_%02d_%s.ppm",
+			         dumpIdx++, Obj->Name ? Obj->Name : "(noname)");
+			// Replace any '/' or spaces in name with '_'
+			for (char *p = path; *p; ++p) if (*p == '/' || *p == ' ') *p = '_';
+			// Restore the leading "/tmp/..." path prefix if stripped
+			path[0] = '/'; path[1] = 't'; path[2] = 'm'; path[3] = 'p'; path[4] = '/';
+			FILE *f = fopen(path, "wb");
+			if (f) {
+				fprintf(f, "P6\n%d %d\n255\n", PANORAMA_XRES, PANORAMA_YRES);
+				std::vector<unsigned char> row(PANORAMA_XRES * 3);
+				for (int y = 0; y < PANORAMA_YRES; ++y) {
+					for (int x = 0; x < PANORAMA_XRES; ++x) {
+						const uint32_t px = panorama[y * PANORAMA_XRES + x];
+						row[x*3 + 0] = (px >> 16) & 0xFF;
+						row[x*3 + 1] = (px >>  8) & 0xFF;
+						row[x*3 + 2] = (px      ) & 0xFF;
+					}
+					fwrite(row.data(), 1, row.size(), f);
+				}
+				fclose(f);
+				fprintf(stderr, "[PANORAMA] dumped %s\n", path);
+			}
+		}
 		// HACK: works because panorma size = cube
 		//memcpy(TmpSurf.Data, panorama.data(), PANORAMA_XRES * PANORAMA_YRES * 4);
 		//		
