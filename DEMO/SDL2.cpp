@@ -618,6 +618,12 @@ static float s_audioRight[kPumpFramesMax];
 
 extern "C" EMSCRIPTEN_KEEPALIVE void Audio_FeedWorklet(int frames)
 {
+	static int s_firstCall = 1;
+	if (s_firstCall) {
+		s_firstCall = 0;
+		fprintf(stderr, "[audio-diag] Audio_FeedWorklet first call frames=%d modHandle=%p\n",
+		        frames, g_RevModuleHandle);
+	}
 	if (!g_RevModuleHandle) return;
 	if (frames <= 0) return;
 	if (frames > kPumpFramesMax) frames = kPumpFramesMax;

@@ -163,24 +163,34 @@
       // in JS and kick off audio in that handler. The C side calls
       // _floodAudioStart() too once it sees the gesture; the second call
       // returns immediately because Module.__audioCtx is already set.
-      function preArmAudio() {
+      function preArmAudio(e) {
         window.removeEventListener('pointerdown', preArmAudio);
         window.removeEventListener('keydown',     preArmAudio);
+        console.log('[audio-diag] preArmAudio fired type=' + e.type +
+          ' _floodAudioStart=' + (typeof Module._floodAudioStart) +
+          ' _Audio_FeedWorklet=' + (typeof Module._Audio_FeedWorklet));
         if (Module._floodAudioStart) Module._floodAudioStart();
       }
       window.addEventListener('pointerdown', preArmAudio);
       window.addEventListener('keydown',     preArmAudio);
 
       Module._floodAudioStart = async function() {
-        if (Module.__audioCtx) return; // already started
+        if (Module.__audioCtx) {
+          console.log('[audio-diag] _floodAudioStart re-entry; already started');
+          return;
+        }
+        console.log('[audio-diag] _floodAudioStart: creating AudioContext');
         var ctx = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: 48000
         });
+        console.log('[audio-diag] AudioContext state=' + ctx.state);
         await ctx.resume();
+        console.log('[audio-diag] after resume() state=' + ctx.state);
         try {
           await ctx.audioWorklet.addModule('audio-worklet.js');
+          console.log('[audio-diag] addModule ok');
         } catch (e) {
-          console.error('[audio] addModule failed: ' + e.message);
+          console.error('[audio-diag] addModule failed: ' + e.message);
           return;
         }
         var node = new AudioWorkletNode(ctx, 'flood-modplayer-worklet', {
@@ -194,13 +204,14 @@
         node.connect(gain).connect(ctx.destination);
         Module.__audioGain = gain;
         node.port.onmessage = function(e) {
+          if (!Module.__audioMsgSeen) {
+            Module.__audioMsgSeen = 1;
+            console.log('[audio-diag] first port message from worklet: ' + (e.data && e.data.type));
+          }
           if (Module.__muted) return;
           if (Module.__feeding) return; // re-entry guard
           Module.__feeding = true;
           try {
-            // Ask wasm to pump 2048 frames into the worklet. The C side
-            // calls Modplayer_FillBuffer + posts via Module.__audioPort
-            // back to the worklet — see SDL2.cpp Audio_FeedWorklet.
             if (Module._Audio_FeedWorklet) Module._Audio_FeedWorklet(2048);
           } finally {
             Module.__feeding = false;
@@ -209,9 +220,16 @@
         Module.__audioCtx = ctx;
         Module.__audioNode = node;
         Module.__audioPort = node.port;
+        console.log('[audio-diag] worklet wired up, kicking initial pump; ctx.state=' + ctx.state);
         // Kick off the ring with one pump so the worklet has data before
         // it asks for more.
         if (Module._Audio_FeedWorklet) Module._Audio_FeedWorklet(2048);
+        // Re-check ctx state on the next tick — if it's still 'suspended'
+        // we have a gesture-context problem.
+        setTimeout(function(){
+          console.log('[audio-diag] +200ms ctx.state=' + ctx.state +
+            ' modHandle_known_to_C=via_wasm');
+        }, 200);
       };
       Module._floodAudioStop = function() {
         if (Module.__audioPort) Module.__audioPort.postMessage({ type: 'stop' });
