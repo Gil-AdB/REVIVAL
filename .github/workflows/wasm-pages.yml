@@ -60,6 +60,7 @@ jobs:
           cp build-wasm/DEMO/DEMO.wasm _site/
           cp build-wasm/DEMO/DEMO.data _site/
           cp build-wasm/DEMO/coi-serviceworker.js _site/
+          cp build-wasm/DEMO/audio-worklet.js _site/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
