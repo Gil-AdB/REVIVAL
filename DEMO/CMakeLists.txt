@@ -110,6 +110,14 @@ if(EMSCRIPTEN)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_CURRENT_SOURCE_DIR}/coi-serviceworker.js"
                 "$<TARGET_FILE_DIR:${PROJECT_NAME}>/coi-serviceworker.js")
+    # Audio worklet — fed by Modplayer_FillBuffer via Module.canvas's
+    # parent JS. Replaces SDL2's deprecated ScriptProcessorNode path on
+    # emscripten so audio playback runs on its own thread, immune to
+    # main-thread stalls.
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/audio-worklet.js"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/audio-worklet.js")
 
     # Headless wasm snapshot binary, runs under node:
     #   cd Runtime && node ../build-wasm/DEMO/DEMO_snapshot.js \

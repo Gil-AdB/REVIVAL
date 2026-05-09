@@ -7,6 +7,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include "../Modplayer/Modplayer.h"
+#include "Rev.h"  // g_RevModuleHandle for the audio pump
 #include <emscripten.h>
 #include <emscripten/threading.h>
 #endif
@@ -554,17 +555,16 @@ dword SDL2_InitDisplay(SDL_Window *window)
 }
 
 #ifdef __EMSCRIPTEN__
-static SDL_AudioDeviceID g_audio_dev = 0;
-static int g_audio_cb_count = 0;
-// Mute flag toggled from the JS shell's button. We still pull samples from
-// the modplayer (so position keeps advancing) and just silence the output —
-// that way unmute resumes mid-track instead of restarting.
+// Mute flag — read by Audio_FeedWorklet to silence pumped samples.
+// Audio playback in shell.html ALSO has a GainNode that we set to 0 on
+// mute; this is belt-and-suspenders, and keeps the song advancing
+// (Modplayer_FillBuffer is still called, just with zeros posted) so
+// unmute resumes mid-track instead of restarting.
 static std::atomic<bool> g_mute{false};
 
 extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
 {
 	g_mute.store(muted != 0);
-	fprintf(stderr, "[AUDIO] mute=%d\n", muted);
 }
 
 // Tell SDL the canvas backing size (in physical pixels) has changed.
@@ -595,67 +595,80 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 	SDL_SetWindowSize(sdl_window, engX, engY);
 }
 
-static void wasm_audio_callback(void* userdata, Uint8* stream, int len)
+// AudioWorklet pump. Replaces SDL2's emscripten audio backend (which
+// uses ScriptProcessorNode — deprecated, runs the audio callback on
+// browser main, gets starved by heavy rAF ticks at HD).
+//
+// Architecture:
+//   1. shell.html boots the AudioWorklet (audio-worklet.js) on user
+//      gesture and connects it to the audio context destination. It
+//      keeps a port reference at Module.__audioPort and gates the pump
+//      via Module.__feeding.
+//   2. Worklet maintains a 2 s ring buffer per channel; when below
+//      50 ms it postMessages 'needData' back to main.
+//   3. shell.html's onmessage handler calls _Audio_FeedWorklet here
+//      (we're on browser main now since main() is no longer proxied),
+//      which pulls samples from Modplayer + posts them to the worklet.
+
+// Per-pump scratch. Sized to comfortably hold one 'needData' chunk
+// (default 2048 frames).
+static constexpr int kPumpFramesMax = 4096;
+static float s_audioInterleaved[kPumpFramesMax * 2];
+static float s_audioLeft [kPumpFramesMax];
+static float s_audioRight[kPumpFramesMax];
+
+extern "C" EMSCRIPTEN_KEEPALIVE void Audio_FeedWorklet(int frames)
 {
-	if (g_audio_cb_count < 3) {
-		fprintf(stderr, "[AUDIO] callback #%d len=%d ud=%p\n",
-		        g_audio_cb_count, len, userdata);
-	}
-	g_audio_cb_count++;
-	// 512 frames × 2 channels × sizeof(float) = 4096 bytes per callback.
-	Modplayer_FillBuffer((ModplayerHandle)userdata,
-	                     reinterpret_cast<float*>(stream),
-	                     len / (2 * sizeof(float)));
+	if (!g_RevModuleHandle) return;
+	if (frames <= 0) return;
+	if (frames > kPumpFramesMax) frames = kPumpFramesMax;
 	if (g_mute.load(std::memory_order_relaxed)) {
-		memset(stream, 0, len);
+		// Still pull from modplayer so song position advances; we'll
+		// post zeros so the worklet keeps its ring level + the gain
+		// node in shell.html will be 0 anyway. (Belt + suspenders.)
+		Modplayer_FillBuffer(g_RevModuleHandle, s_audioInterleaved, frames);
+		memset(s_audioLeft,  0, frames * sizeof(float));
+		memset(s_audioRight, 0, frames * sizeof(float));
+	} else {
+		Modplayer_FillBuffer(g_RevModuleHandle, s_audioInterleaved, frames);
+		// Modplayer fills interleaved L/R; worklet expects separate
+		// channels. Deinterleave.
+		for (int i = 0; i < frames; ++i) {
+			s_audioLeft [i] = s_audioInterleaved[i * 2 + 0];
+			s_audioRight[i] = s_audioInterleaved[i * 2 + 1];
+		}
 	}
+	// Post a copy to the worklet. HEAPF32-backed views can't cross
+	// thread boundaries via postMessage (SAB), so we copy into fresh
+	// Float32Arrays. ~32 KB / pump @ 2048 frames; cheap.
+	EM_ASM({
+		if (!Module.__audioPort) return;
+		const left  = HEAPF32.subarray($0 / 4, $0 / 4 + $2);
+		const right = HEAPF32.subarray($1 / 4, $1 / 4 + $2);
+		Module.__audioPort.postMessage({
+			type: 'audio',
+			left:  new Float32Array(left),
+			right: new Float32Array(right),
+		});
+	}, (uintptr_t)s_audioLeft, (uintptr_t)s_audioRight, frames);
 }
 
-// Runs on the browser main thread (proxied via emscripten_sync_run_in_main_runtime_thread).
-// SDL2's emscripten audio implementation references a JS-side `SDL2` global
-// that only exists in the main thread's JS context, so the open call must
-// happen there.
-static void open_audio_main_thread(void* modplayerHandle)
+void SDL2_StartMusic(void* /*modplayerHandle*/)
 {
-	SDL_AudioSpec want = {};
-	SDL_AudioSpec have = {};
-	want.freq = 48000;
-	want.format = AUDIO_F32SYS;
-	want.channels = 2;
-	// Buffer size = audio underrun budget. emscripten SDL2 still uses
-	// ScriptProcessorNode (deprecated; runs the audio callback on the
-	// browser main thread). At 512 samples / 48 kHz that's a 10.6 ms
-	// budget — easy to blow past on a slow rAF tick (HD scenes can
-	// take 30 ms+), causing buffer underruns heard as choppy music.
-	// Bump to 2048 (42.6 ms) — a music demo doesn't care about the
-	// extra latency. The right long-term fix is AudioWorkletNode on
-	// its own thread, but SDL2's emscripten port doesn't support it.
-	want.samples = 2048;
-	want.callback = wasm_audio_callback;
-	want.userdata = modplayerHandle;
-	g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-	fprintf(stderr, "[AUDIO] OpenAudioDevice -> dev=%u (err=%s)\n",
-	        (unsigned)g_audio_dev, g_audio_dev ? "ok" : SDL_GetError());
-	if (g_audio_dev) {
-		fprintf(stderr, "[AUDIO] have: freq=%d fmt=%04x ch=%d samples=%d\n",
-		        have.freq, have.format, have.channels, have.samples);
-		SDL_PauseAudioDevice(g_audio_dev, 0);
-		fprintf(stderr, "[AUDIO] device unpaused\n");
-	}
-}
-
-void SDL2_StartMusic(void* modplayerHandle)
-{
-	if (g_audio_dev || !modplayerHandle) return;
-	emscripten_sync_run_in_main_runtime_thread(
-		EM_FUNC_SIG_VI, &open_audio_main_thread, modplayerHandle);
+	// Modplayer handle is read off g_RevModuleHandle in Audio_FeedWorklet;
+	// here we just kick the JS-side AudioWorklet setup. The shell.html
+	// handler is async (await ctx.audioWorklet.addModule), so we don't
+	// block — the worklet starts feeding once it's ready.
+	EM_ASM({
+		if (Module._floodAudioStart) Module._floodAudioStart();
+	});
 }
 
 void SDL2_StopMusic()
 {
-	if (!g_audio_dev) return;
-	SDL_CloseAudioDevice(g_audio_dev);
-	g_audio_dev = 0;
+	EM_ASM({
+		if (Module._floodAudioStop) Module._floodAudioStop();
+	});
 }
 #endif
 
