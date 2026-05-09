@@ -220,17 +220,27 @@
       window.addEventListener('keydown',     preArmAudio);
 
       Module._floodAudioStart = async function() {
-        if (Module.__audioCtx) {
-          console.log('[audio-diag] _floodAudioStart re-entry; already started');
+        // Re-entry: __audioCtx is set only AFTER the first await chain
+        // completes. Without a separate "starting" flag, two calls in
+        // rapid succession (preArm click handler + C-side SDL2_StartMusic
+        // from the next rAF tick) both pass the audioCtx guard, both
+        // proceed, both build a worklet, both pump. The C side then
+        // advances the song at 2× rate — sounds like fast-forwarding
+        // after the first few seconds.
+        if (Module.__audioStarting || Module.__audioCtx) {
+          console.log('[audio-diag] _floodAudioStart re-entry; already started or starting');
           return;
         }
+        Module.__audioStarting = true;
         console.log('[audio-diag] _floodAudioStart: creating AudioContext');
         var ctx = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: 48000
         });
-        console.log('[audio-diag] AudioContext state=' + ctx.state);
+        console.log('[audio-diag] AudioContext state=' + ctx.state +
+                    ' actualSampleRate=' + ctx.sampleRate);
         await ctx.resume();
-        console.log('[audio-diag] after resume() state=' + ctx.state);
+        console.log('[audio-diag] after resume() state=' + ctx.state +
+                    ' actualSampleRate=' + ctx.sampleRate);
         try {
           await ctx.audioWorklet.addModule('audio-worklet.js');
           console.log('[audio-diag] addModule ok');

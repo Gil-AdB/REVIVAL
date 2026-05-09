@@ -45,13 +45,19 @@ enum DemoState {
 	RUN_FOUNTAIN,
 	RUN_CRASH,
 	RUN_GREETS,
-	FADE_OUT,   // animate the final frame to black via shader uniform.
+	FADE_OUT,   // animate the last frame of the outgoing scene to black
+	            // via shader uniform; routes to g_postFadeState afterward.
 	BLACK_OUT,  // one-tick yield so the black frame composites before
-	            // DONE blocks main on audio/pool teardown.
+	            // DONE blocks main on audio/pool teardown. Only used
+	            // when transitioning to DONE.
 	DONE,
 };
 static int g_fadeFrame = 0;
-static constexpr int kFadeFrames = 30;  // ~0.5s at 60 fps
+static DemoState g_postFadeState = DONE;
+// Inter-scene fade duration (~0.25s). End-of-demo uses the same since
+// 0.25s is long enough to feel intentional but doesn't make ESC feel
+// laggy.
+static constexpr int kFadeFrames = 15;
 static DemoState g_state = WAIT_GESTURE;
 static std::unique_ptr<SceneDriver> g_currentDriver;
 static bool g_currentDriverInitialized = false;
@@ -254,15 +260,24 @@ bool DemoTick()
 		break;
 	}
 
+	// Helper: end-of-scene transition. Cleans up the current driver, then
+	// runs FADE_OUT for kFadeFrames before entering `next`. If next is
+	// DONE the routing falls through BLACK_OUT first to give the browser
+	// a chance to paint the all-black frame before the audio/pool
+	// teardown blocks main.
+	#define ADVANCE_AFTER_FADE(next) do {                              \
+			cleanupCurrentScene();                                     \
+			g_fadeFrame = 0;                                           \
+			g_postFadeState = (next);                                  \
+			g_state = FADE_OUT;                                        \
+		} while (0)
+
 	case RUN_GLATO: {
 		if (!g_currentDriver) {
 			if (!g_glatoReady.load()) break; // init thread still loading
 			startScene(createGlatoScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			advanceFromState(RUN_CITY, nullptr);
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(RUN_CITY);
 		break;
 	}
 
@@ -271,10 +286,7 @@ bool DemoTick()
 			if (!g_cityReady.load()) break;
 			startScene(createCityScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			advanceFromState(RUN_CHASE, nullptr);
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(RUN_CHASE);
 		break;
 	}
 
@@ -283,10 +295,7 @@ bool DemoTick()
 			if (!g_chaseReady.load()) break;
 			startScene(createChaseScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			advanceFromState(RUN_FOUNTAIN, nullptr);
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(RUN_FOUNTAIN);
 		break;
 	}
 
@@ -295,10 +304,7 @@ bool DemoTick()
 			if (!g_fountainReady.load()) break;
 			startScene(createFountainScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			advanceFromState(RUN_CRASH, nullptr);
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(RUN_CRASH);
 		break;
 	}
 
@@ -307,10 +313,7 @@ bool DemoTick()
 			if (!g_crashReady.load()) break;
 			startScene(createCrashScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			advanceFromState(RUN_GREETS, nullptr);
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(RUN_GREETS);
 		break;
 	}
 
@@ -319,18 +322,15 @@ bool DemoTick()
 			if (!g_greetsReady.load()) break;
 			startScene(createGreetsScene());
 		}
-		if (!tickCurrentScene()) {
-			cleanupCurrentScene();
-			g_fadeFrame = 0;
-			g_state = FADE_OUT;
-		}
+		if (!tickCurrentScene()) ADVANCE_AFTER_FADE(DONE);
 		break;
 	}
 
 	case FADE_OUT: {
-		// Re-Flip the last greets frame with a decreasing shader fade.
-		// The shader (SDL2.cpp Wasm_PresentGL) multiplies sampled RGB by
-		// uFade — 1.0 at frame 0, smoothly to 0 at frame kFadeFrames.
+		// Re-Flip the last frame of the outgoing scene with a decreasing
+		// shader fade. The shader (SDL2.cpp Wasm_PresentGL) multiplies
+		// sampled RGB by uFade — 1.0 at frame 0, smoothly to 0 at frame
+		// kFadeFrames.
 		if (MainSurf && VPage) {
 			float t = (float)g_fadeFrame / (float)kFadeFrames;
 			float fade = 1.0f - t;
@@ -339,9 +339,16 @@ bool DemoTick()
 			Flip(MainSurf);
 		}
 		if (++g_fadeFrame >= kFadeFrames) {
-			SDL2_SetFade(0.0f);  // ensure final frame is exactly black.
+			SDL2_SetFade(0.0f);  // ensure final frame is exactly black
 			if (MainSurf) Flip(MainSurf);
-			g_state = BLACK_OUT;
+			if (g_postFadeState == DONE) {
+				g_state = BLACK_OUT;
+			} else {
+				// Mid-demo transition: snap fade back to 1.0 so the
+				// next scene starts at full brightness, then enter it.
+				SDL2_SetFade(1.0f);
+				g_state = g_postFadeState;
+			}
 		}
 		break;
 	}
