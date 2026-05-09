@@ -362,19 +362,21 @@ bool DemoTick()
 
 	case DONE: {
 		cleanupCurrentScene();
-		// Audio + threadpool teardown is each ~few hundred ms (audio
-		// callback drain, worker join). Doing them on main blocks the
-		// rAF callback long enough for emscripten to log "Blocking on
-		// the main browser thread is very dangerous". Punt to a
-		// detached thread — the demo is over, no rendering needed,
-		// runtime will keep the wasm process alive until the worker
-		// finishes since EXIT_RUNTIME=0.
+		// Stop audio synchronously on main: SDL2_StopMusic on wasm is
+		// just a JS call that disconnects the AudioWorkletNode + closes
+		// the AudioContext. No proxy hop needed (we're already on
+		// browser-main), no measurable delay. Doing this in the
+		// detached teardown thread instead caused a window where
+		// emscripten_cancel_main_loop had already fired but the
+		// detached thread hadn't yet proxied the JS call back to main
+		// — and the user kept hearing audio after the demo ended.
+		if (g_modHandle) SDL2_StopMusic();
+		// The slower bits — modplayer's internal stop + ThreadPool join
+		// — go to a detached worker so they don't block main's rAF tick.
+		// EXIT_RUNTIME=0 keeps the runtime alive until they finish.
 		ModplayerHandle handleSnapshot = g_modHandle;
 		std::thread teardown([handleSnapshot]() {
-			if (handleSnapshot) {
-				SDL2_StopMusic();
-				Modplayer_Stop(handleSnapshot);
-			}
+			if (handleSnapshot) Modplayer_Stop(handleSnapshot);
 			if (g_initThread.joinable()) g_initThread.join();
 			ThreadPool::instance().close();
 			fprintf(stderr, "[DEMO] teardown complete\n");
