@@ -388,6 +388,9 @@ struct TileRasterizer {
 } // namespace meka
 
 extern meka::GBuffer *g_gbuffer;
+extern meka::GBuffer *g_gbufferTransparent;
+extern uint16_t      *g_xparZ;        // separate Z-buffer for closest-front transparent
+extern int            g_xparZCount;
 
 inline void SetGBuffer(meka::GBuffer *gbuffer) {
 	// Initalize GBuffer
@@ -395,10 +398,11 @@ inline void SetGBuffer(meka::GBuffer *gbuffer) {
 }
 
 // Engine G-buffer lifecycle — sized to current framebuffer (in pixels) on
-// boot and every resize. Owns a single static meka::GBuffer; sets g_gbuffer
-// to point at it. Called from V_Create (DEMO/SDL2.cpp) for the live engine
-// surface, and from initSnapshotEnvironment (DEMO/Snapshot.cpp) for the
-// headless snapshot path.
+// boot and every resize. Owns the static opaque + transparent GBuffers
+// and the transparent Z-buffer; sets g_gbuffer / g_gbufferTransparent /
+// g_xparZ to point at them. Called from V_Create (DEMO/SDL2.cpp) for the
+// live engine surface, and from initSnapshotEnvironment (DEMO/Snapshot.cpp)
+// for the headless snapshot path.
 void EngineGBuffer_Resize(int X, int Y);
 
 inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
@@ -450,6 +454,63 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 		// Per-vertex shading-normal gradients. Same screen-space
 		// inverse-Jacobian (`im`) as UV — the rasterizer interpolates
 		// linearly across the triangle and renormalizes per-pixel (nlerp).
+		r.dnxdx = im[0] * (v2.TN.x - v1.TN.x) + im[1] * (v3.TN.x - v1.TN.x);
+		r.dnxdy = im[2] * (v2.TN.x - v1.TN.x) + im[3] * (v3.TN.x - v1.TN.x);
+		r.dnydx = im[0] * (v2.TN.y - v1.TN.y) + im[1] * (v3.TN.y - v1.TN.y);
+		r.dnydy = im[2] * (v2.TN.y - v1.TN.y) + im[3] * (v3.TN.y - v1.TN.y);
+		r.dnzdx = im[0] * (v2.TN.z - v1.TN.z) + im[1] * (v3.TN.z - v1.TN.z);
+		r.dnzdy = im[2] * (v2.TN.z - v1.TN.z) + im[3] * (v3.TN.z - v1.TN.z);
+
+		r.umask = (1 << r.LogWidth) - 1;
+		r.vmask = (1 << r.LogHeight) - 1;
+
+		r.rasterize_triangle(v1, v2, v3);
+	}
+}
+
+// MekaleleTransparent: same rasterizer as Mekalele, but writes into the
+// TRANSPARENT G-buffer (mat32 + normal) and its own Z-buffer (g_xparZ)
+// instead of the opaque ZPage16. Front-facing transparent faces in
+// RenderInnerDeferredTransparent route here so closest-front wins per
+// pixel; Render_DeferredTransparentLighting then computes per-pixel light
+// for those pixels and alpha-blends onto VPage.
+inline void MekaleleTransparent(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+	meka::TileRasterizerCtx ctx = {
+		.V = V,
+		.xres = XRes,
+		.yres = YRes,
+		.Txtr = F->Txtr->Txtr,
+		.matID = F->Txtr->ID,
+		.miplevel = miplevel,
+		.zbuffer = g_xparZ,                  // transparent's own Z
+	};
+	meka::TileRasterizer r(*g_gbufferTransparent, ctx);
+
+	Vertex vc[12];
+	for (dword i = 0; i < numVerts; ++i) {
+		vc[i] = *V[i];
+	}
+	for (dword i = 2; i < numVerts; ++i) {
+		const auto& v1 = (vc[0]);
+		const auto& v2 = (vc[i - 1]);
+		const auto& v3 = (vc[i]);
+
+		float m[4] = {
+			v2.PX - v1.PX, v2.PY - v1.PY,
+			v3.PX - v1.PX, v3.PY - v1.PY
+		};
+		const float det = m[0] * m[3] - m[1] * m[2];
+		if (fabs(det) <= 0.01f) continue;
+		const float im[4] = {
+			 m[3] / det, -m[1] / det,
+			-m[2] / det,  m[0] / det
+		};
+		r.drzdx = im[0] * (v2.RZ - v1.RZ) + im[1] * (v3.RZ - v1.RZ);
+		r.drzdy = im[2] * (v2.RZ - v1.RZ) + im[3] * (v3.RZ - v1.RZ);
+		r.duzdx = im[0] * (v2.UZ - v1.UZ) + im[1] * (v3.UZ - v1.UZ);
+		r.duzdy = im[2] * (v2.UZ - v1.UZ) + im[3] * (v3.UZ - v1.UZ);
+		r.dvzdx = im[0] * (v2.VZ - v1.VZ) + im[1] * (v3.VZ - v1.VZ);
+		r.dvzdy = im[2] * (v2.VZ - v1.VZ) + im[3] * (v3.VZ - v1.VZ);
 		r.dnxdx = im[0] * (v2.TN.x - v1.TN.x) + im[1] * (v3.TN.x - v1.TN.x);
 		r.dnxdy = im[2] * (v2.TN.x - v1.TN.x) + im[3] * (v3.TN.x - v1.TN.x);
 		r.dnydx = im[0] * (v2.TN.y - v1.TN.y) + im[1] * (v3.TN.y - v1.TN.y);

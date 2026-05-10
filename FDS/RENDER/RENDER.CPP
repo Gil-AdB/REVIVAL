@@ -1579,7 +1579,26 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
 		if (!(txtrFlags & Mat_Transparent)) continue;
 		if (F->Flags & Face_Reflective) continue;  // handled in main pass
 
-		clipper.Render(F, F->Filler, false);
+		// Per-face front/back classify in view space. Front-facing
+		// transparents (the side the camera actually sees through) get
+		// per-pixel deferred lighting via MekaleleTransparent — closest
+		// wins per pixel in xpr-G-buffer; Render_DeferredTransparentLighting
+		// blends onto VPage afterwards. Back-facing transparents render
+		// here-and-now with vertex Gouraud (cheap, dominated visually
+		// by the front face anyway).
+		//
+		// Sort order is back-to-front, so back faces render first and
+		// blend into lit-opaque VPage; their Z (written by TheOtherBarry)
+		// is then visible to subsequent front faces.
+		const float vd = A->TN.x * A->TPos.x
+		               + A->TN.y * A->TPos.y
+		               + A->TN.z * A->TPos.z;
+		const bool frontFacing = vd < 0.0f;
+		if (frontFacing) {
+			clipper.Render(F, MekaleleTransparent, false);
+		} else {
+			clipper.Render(F, F->Filler, false);
+		}
 	}
 
 	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
@@ -1691,6 +1710,13 @@ struct DeferredLightingCtx {
 	Scene               *Sc;
 	int                  waterMatID;  // -1 if no water blend
 };
+
+// File-scope ctx, populated each frame by Render_DeferredLighting and
+// also read by Render_DeferredTransparentLighting_Tile. Both kernels
+// share the same per-frame setup (matTable, tileLights, view-space
+// projection params, scene); rebuilding it per pass would double the
+// per-frame setup cost.
+DeferredLightingCtx g_deferredCtx{};
 
 // Build per-tile compacted SoA. For each omni: project its view-space
 // bounding sphere into screen space, find overlapping tile rects, then
@@ -2240,6 +2266,112 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outG < 0)   outG = 0;
 			if (outR < 0)   outR = 0;
 
+			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
+// Per-pixel deferred lighting for transparent (front-facing) surfaces.
+// Reads the transparent G-buffer (mat32 + normal + xpr-Z, populated by
+// MekaleleTransparent in RenderInnerDeferredTransparent for the closest
+// front-facing transparent at each pixel). Computes per-pixel ambient
+// + Lambertian + fog, modulates the texture sample, alpha-blends 50/50
+// onto VPage (matches TheOtherBarry<TRANSPARENT>'s blend rule). Specular
+// + checkerboard / quarter-rate / vec paths omitted — transparent
+// coverage is small, scalar is fine until profiling says otherwise.
+static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &ctx,
+                                                     int tileIndex,
+                                                     int x1, int y1, int x2, int y2)
+{
+	if (!g_gbufferTransparent || !g_xparZ) return;
+	const meka::GBuffer &gbX = *g_gbufferTransparent;
+	dword *out = reinterpret_cast<dword *>(VPage);
+	const TileLights &tl = ctx.tileLights[tileIndex];
+
+	for (int py = y1; py < y2; ++py) {
+		for (int px = x1; px < x2; ++px) {
+			const size_t i = size_t(py) * XRes + px;
+			const uint32_t mat32 = gbX.txtr[i];
+			if (mat32 == 0xFFFFFFFFu) continue;  // no transparent front
+			const word zEnc = g_xparZ[i];
+			if (zEnc == 0) continue;
+
+			const uint32_t miplevel   = (mat32 >> 28) & 0xF;
+			const uint32_t matID      = (mat32 >> 20) & 0xFF;
+			const uint32_t swizzledUV = mat32 & 0xFFFFF;
+			if (matID >= ctx.matTable.count) continue;
+			Material *Mat = ctx.matTable.data[matID];
+			if (!Mat || !Mat->Txtr) continue;
+
+			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
+			if (!texData) continue;
+			const dword texel = texData[swizzledUV];
+			const float texB = float(texel & 0xFF);
+			const float texG = float((texel >> 8) & 0xFF);
+			const float texR = float((texel >> 16) & 0xFF);
+
+			float nx, ny, nz;
+			meka::oct_decode_u16(gbX.normal[i], nx, ny, nz);
+
+			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
+			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
+			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
+
+			float lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
+			float lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
+			float lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
+
+			for (int n = 0; n < tl.count; ++n) {
+				const float wx = tl.posX[n] - x;
+				const float wy = tl.posY[n] - y;
+				const float wz = tl.posZ[n] - z;
+				const float dot = wx * nx + wy * ny + wz * nz;
+				if (dot < 0.0f) continue;
+				const float len2 = wx*wx + wy*wy + wz*wz;
+				if (len2 > tl.range2[n]) continue;
+				const float lenInv = fast_rsqrt(len2);
+				const float dist   = len2 * lenInv;
+				const float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
+				const float intensity = k * Mat->Diffuse;
+				lB += intensity * tl.colB[n];
+				lG += intensity * tl.colG[n];
+				lR += intensity * tl.colR[n];
+			}
+
+			if (lB > 250.0f) lB = 250.0f;
+			if (lG > 250.0f) lG = 250.0f;
+			if (lR > 250.0f) lR = 250.0f;
+			if (lB < 0.0f) lB = 0.0f;
+			if (lG < 0.0f) lG = 0.0f;
+			if (lR < 0.0f) lR = 0.0f;
+
+			if (ctx.Sc->Flags & Scn_Fogged) {
+				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
+				lB = std::min(std::max(lB * fogRate, 10.0f), 253.0f);
+				lG = std::min(std::max(lG * fogRate, 10.0f), 253.0f);
+				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
+			}
+
+			int litB = int((texB * lB) * (1.0f / 256.0f));
+			int litG = int((texG * lG) * (1.0f / 256.0f));
+			int litR = int((texR * lR) * (1.0f / 256.0f));
+			if (litB > 255) litB = 255;
+			if (litG > 255) litG = 255;
+			if (litR > 255) litR = 255;
+
+			// Alpha-blend onto VPage: 50/50 add (matches TheOtherBarry
+			// <TRANSPARENT>'s `texel + dst >> 1`, saturated).
+			const dword existing = out[i];
+			int outB = litB + int((existing      ) & 0xFF) / 2;
+			int outG = litG + int((existing >> 8) & 0xFF) / 2;
+			int outR = litR + int((existing >> 16) & 0xFF) / 2;
+			if (outB > 255) outB = 255;
+			if (outG > 255) outG = 255;
+			if (outR > 255) outR = 255;
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
 	}
@@ -2990,7 +3122,12 @@ static void Render_DeferredLighting() {
 			numLights, total / float(DEFERRED_NUM_TILES), tmin, tmax);
 	}
 
-	static DeferredLightingCtx ctx;  // function-static so the lambda captures by reference safely
+	// File-scope static: also read by the transparent-lighting kernel
+	// (Render_DeferredTransparentLighting_Tile) — same per-frame setup,
+	// no point rebuilding it. The kernels never run concurrently with
+	// each other, so the single instance is safe.
+	extern DeferredLightingCtx g_deferredCtx;
+	DeferredLightingCtx &ctx = g_deferredCtx;
 	ctx.gb         = &gb;
 	ctx.matTable   = matTable;
 	ctx.lights     = &lights;
@@ -3087,6 +3224,15 @@ void Render(RenderPath path)
 	if (deferred && g_gbuffer) {
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
 		parallel_memset(g_gbuffer->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
+		// Transparent G-buffer: mat32=0xFFFFFFFF sentinel ("no transparent
+		// front face here"); xpr-Z=0 ("empty, anything passes Z-test").
+		if (g_gbufferTransparent) {
+			parallel_memset(g_gbufferTransparent->txtr.data(), 0xFF,
+			                numPixels * sizeof(uint32_t));
+		}
+		if (g_xparZ) {
+			parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
+		}
 	}
 
 	for (auto j = 0; j < numTilesY; ++j) {
@@ -3122,6 +3268,11 @@ void Render(RenderPath path)
 		// were skipped in the deferred raster pass; render them now in
 		// FList sort order (back-to-front for transparent — sorted by
 		// PREPROC's `2*fzp - dz` rule) over the lit opaque framebuffer.
+		// Within this pass:
+		//   front-facing transparents → MekaleleTransparent (writes
+		//     into xpr-G-buffer; closest wins per pixel via xpr-Z)
+		//   back-facing transparents  → forward TheOtherBarry (vertex
+		//     Gouraud + 50/50 blend onto VPage now)
 		renderns::tileCounter = 0;
 		for (auto j = 0; j < numTilesY; ++j) {
 			auto y1 = tileSizeY * j;
@@ -3134,8 +3285,33 @@ void Render(RenderPath path)
 				});
 			}
 		}
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
+		{
+			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
+		}
+
+		// Per-pixel deferred lighting for the closest front-facing
+		// transparent at each pixel. Reads xpr-G-buffer, computes
+		// per-pixel Lambertian, alpha-blends 50/50 onto VPage.
+		// Reuses the per-tile light list built by Render_DeferredLighting.
+		renderns::tileCounter = 0;
+		for (auto j = 0; j < numTilesY; ++j) {
+			auto y1 = tileSizeY * j;
+			auto y2 = std::min(y1 + tileSizeY, YRes);
+			for (auto i = 0; i < numTilesX; ++i) {
+				auto x1 = tileSizeX * i;
+				auto x2 = std::min(x1 + tileSizeX, XRes);
+				const int tileIdx = j * numTilesX + i;
+				ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx]() {
+					Render_DeferredTransparentLighting_Tile(
+						g_deferredCtx, tileIdx, x1, y1, x2, y2);
+				});
+			}
+		}
+		{
+			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
+		}
 	}
 
 	int32_t I = CAll;
