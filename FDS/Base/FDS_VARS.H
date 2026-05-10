@@ -512,6 +512,12 @@ struct Particle
 	float Radius = 0.0f;
 	float PRad = 0.0f;
 	DWord Flags = 0;
+	// Bumped each time the slot is reused (particle "spawned"). Lets
+	// follower omnis or other long-lived references detect when their
+	// slot was recycled with a different particle: store the gen at
+	// pickup time, compare each frame, treat mismatch as "particle
+	// died" so trackers don't silently teleport to a fresh comet.
+	DWord Generation = 0;
 
 	Vertex TrailV[4];
 	Face TrailF[2];

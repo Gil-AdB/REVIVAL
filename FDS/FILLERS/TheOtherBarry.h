@@ -271,7 +271,7 @@ struct TileRasterizer {
 
 		int32_t t1_umask = (1 << 10) - 1;
 		int32_t t1_vmask = (1 << 10) - 1;
-		int32_t t1_umask_swizzled = swizzle_umask(10, t0_umask);
+		int32_t t1_umask_swizzled = swizzle_umask(10, t1_umask);
 
 		Vec8f p_rz = v8_from_arith_seq(tile.rz0, drzdx);
 		Vec8f p_uz = v8_from_arith_seq(tile.t0.uz0, t0.du0zdx);
@@ -336,9 +336,12 @@ struct TileRasterizer {
 
 				if (any_lane_set(p_mask)) {
 
-//					if constexpr (BlendMode != TBlendMode::TRANSPARENT) {
-						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
-					//}
+					// Always write Z, including for transparent + additive.
+					// Forward path's pre-deferred behavior wrote Z for all
+					// blend modes; matching this so the fountain vortex
+					// (additive, SortPriorityBias=DrawFirst) writes Z and
+					// is correctly occluded by closer surfaces drawn after.
+					*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
 #endif
 
 #if BENCH_SKIP_PERSPECTIVE

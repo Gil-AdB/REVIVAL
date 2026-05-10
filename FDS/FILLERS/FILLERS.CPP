@@ -1649,40 +1649,20 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel)
 
 	// flare image size is written as a floating pt.
 	Size *= F->FlareSize;
-	
+
 	if (Size<=0) return;
 	if (F->Txtr&&F->Txtr->Txtr)
 	{
 		float edgeLen=2.0*Size;
 
-		dword R,G,B;
-		R = _A->LR;
-		G = _A->LG;
-		B = _A->LB;
-
-		dword Color = (R<<16)+(G<<8)+B;
-
-		// get color from vertex _A
-		dword Z = 0xFF80 - Fist(g_zscale * _A->TPos.z);
-		// Z compare on center only.
-		int32_t x = _A->PX;
-		if (x<0) x=0;
-		if (x>XRes-1) x=XRes-1;
-		int32_t y = _A->PY;
-		if (y<0) y=0;
-		if (y>YRes-1) y=YRes-1;
-		if (
-			(Z > ZPage16[XRes*y+x]) && // depth test
-			((_A->PX + edgeLen > 0) && (_A->PX - edgeLen < XRes)) // x-clipping
-			)
-		{
-			// Insertion routine - Add 'spans' to TBR data structure
-//			spriteClipY1 = 0;
-//			spriteClipY2 = YRes;
-//			Spriter32(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Color);
+		// X-clipping early-out: reject sprites that don't cross the
+		// screen at all. Per-pixel Z occlusion happens later in TBR_Render
+		// (Spriter<true>) — we don't want a coarse per-CENTER Z test
+		// here because it incorrectly rejects partially-occluded sprites
+		// (e.g. fountain particles behind near building edges).
+		if (_A->PX + edgeLen > 0 && _A->PX - edgeLen < XRes) {
 			InsertSpriteToTBR(F, _A->PY, edgeLen);
 		}
-
 	}
 }
 
@@ -1720,14 +1700,21 @@ void TBR_Render(Scene *Sc)
 				B = V->LB;
 				dword Color = (R << 16) + (G << 8) + B;
 
-				Spriter(V->PX,
+				// Encode view-space z the same way Mekalele / TheOtherBarry
+				// do (0xFF80 - z*scale; larger = closer). Spriter<true>
+				// then z-tests every pixel against ZPage16 so particles
+				// get correctly occluded by closer geometry instead of
+				// the previous per-CENTER all-or-nothing behaviour.
+				dword Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
+
+				Spriter<32, true>(V->PX,
 					V->PY,
 					edgeLen,
 					edgeLen,
 					F->Txtr->Txtr->Data,
 					VPage,
-					Color, 
-					0,
+					Color,
+					Z,
 					0,
 					spriteClipY1,
 					XRes,
