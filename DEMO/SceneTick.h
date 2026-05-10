@@ -6,6 +6,9 @@
 
 #include <SDL.h>
 
+#include "Base/FDS_VARS.H"
+#include "VESA/Vesa.h"
+
 #include "Resize.h"
 #include "SDL2.h"
 
@@ -45,20 +48,32 @@ inline void poll_pending_resize(SceneDriver* driver) {
     if (driver) driver->on_resize(x, y);
 }
 
-// Re-Flips MainSurf with a decreasing fade for `frames` frames at ~60 fps.
-// Used between scenes on native to mirror the wasm FADE_OUT state.
-// Caller sets fade back to 1.0 implicitly (we end at 0.0; restore on the
-// next scene's first Flip).
+// One frame of inter-scene fade: alpha-blend VPage in place toward black
+// using the engine's existing AlphaBlend primitive (same SIMD path Glat
+// uses for its smear/composite passes), then Flip. The cumulative
+// per-frame factor (totalFrames-frame-1)/(totalFrames-frame) gives a
+// linear fade from V_0 to 0 over `totalFrames` calls (frame=0..N-1).
+inline void engineFadeStep(int frame, int totalFrames) {
+    if (!MainSurf || !VPage || totalFrames <= 0) return;
+    int denom = totalFrames - frame;
+    if (denom <= 0) denom = 1;
+    int modValue = (totalFrames - frame - 1) * 255 / denom;
+    if (modValue < 0) modValue = 0;
+    DWord perSrc = (DWord)((modValue & 0xFF) * 0x01010101u);
+    DWord perDst = 0;
+    // Source==Target==VPage. Within a single 16-byte SIMD chunk, the
+    // reads happen before the writes, and chunks don't overlap, so the
+    // in-place modify is safe.
+    AlphaBlend(VPage, VPage, perSrc, perDst, PageSize);
+    Flip(MainSurf);
+}
+
+// Native: drive the fade as a blocking loop at ~60 fps.
 inline void runFadeOut(int frames) {
-    if (!MainSurf) return;
     for (int i = 0; i < frames; ++i) {
-        float fade = 1.0f - (float)(i + 1) / (float)frames;
-        if (fade < 0.0f) fade = 0.0f;
-        SDL2_SetFade(fade);
-        Flip(MainSurf);
+        engineFadeStep(i, frames);
         SDL_Delay(16);  // ~60 fps cadence; renderer's vsync absorbs jitter
     }
-    SDL2_SetFade(1.0f);  // restore — next scene starts at full brightness
 }
 
 inline void runSceneBlocking(SceneDriver& driver) {
@@ -69,8 +84,8 @@ inline void runSceneBlocking(SceneDriver& driver) {
     }
     // Fade the last rendered frame to black before cleanup hands control
     // back to the caller (which usually transitions to the next scene).
-    // Scenes write their last output into the engine surface during their
-    // final tick; we just keep re-presenting it with decreasing colour-mod.
+    // Scene's last tick left the final framebuffer in VPage; we just
+    // keep alpha-blending it in place.
     runFadeOut(15);
     driver.cleanup();
 }

@@ -327,26 +327,16 @@ bool DemoTick()
 	}
 
 	case FADE_OUT: {
-		// Re-Flip the last frame of the outgoing scene with a decreasing
-		// shader fade. The shader (SDL2.cpp Wasm_PresentGL) multiplies
-		// sampled RGB by uFade — 1.0 at frame 0, smoothly to 0 at frame
-		// kFadeFrames.
-		if (MainSurf && VPage) {
-			float t = (float)g_fadeFrame / (float)kFadeFrames;
-			float fade = 1.0f - t;
-			if (fade < 0.0f) fade = 0.0f;
-			SDL2_SetFade(fade);
-			Flip(MainSurf);
-		}
+		// One step of the engine's in-place alpha-blend fade. Same
+		// SIMD AlphaBlend primitive that Glat uses for its smear/
+		// composite passes — applied to VPage in place, then Flip.
+		// Cumulative per-frame factor gives a linear V_0→0 fade over
+		// kFadeFrames calls.
+		engineFadeStep(g_fadeFrame, kFadeFrames);
 		if (++g_fadeFrame >= kFadeFrames) {
-			SDL2_SetFade(0.0f);  // ensure final frame is exactly black
-			if (MainSurf) Flip(MainSurf);
 			if (g_postFadeState == DONE) {
 				g_state = BLACK_OUT;
 			} else {
-				// Mid-demo transition: snap fade back to 1.0 so the
-				// next scene starts at full brightness, then enter it.
-				SDL2_SetFade(1.0f);
 				g_state = g_postFadeState;
 			}
 		}

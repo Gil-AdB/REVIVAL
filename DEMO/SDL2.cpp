@@ -34,14 +34,6 @@ static SDL_Window *sdl_window;
 // (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
 static SDLTex s_engineTex;
 
-// Output multiplier applied at present time. 1.0 = passthrough (default),
-// 0.0 = solid black. Used for inter-scene fades. On wasm, read by
-// Wasm_PresentGL and passed to the present quad's fragment shader as
-// uFade. On native, read by V_Flip and applied via
-// SDL_SetTextureColorMod on the engine SDL_Texture before RenderCopy.
-static float s_fade = 1.0f;
-extern "C" void SDL2_SetFade(float fade) { s_fade = fade; }
-
 #ifdef __EMSCRIPTEN__
 // One-time WebGL2 setup on the SDL canvas. Must run before any other
 // rendering context is requested on it (canvas allows only one type at a
@@ -103,11 +95,10 @@ static int Wasm_InitGL()
 			'precision highp float;\n' +
 			'in vec2 vUV;\n' +
 			'uniform sampler2D uTex;\n' +
-			'uniform float uFade;\n' +
 			'out vec4 oColor;\n' +
 			'void main() {\n' +
 			'  vec4 c = texture(uTex, vUV);\n' +
-			'  oColor = vec4(c.b * uFade, c.g * uFade, c.r * uFade, 1.0);\n' +
+			'  oColor = vec4(c.b, c.g, c.r, 1.0);\n' +
 			'}';
 		function compile(type, src) {
 			var s = gl.createShader(type);
@@ -126,7 +117,6 @@ static int Wasm_InitGL()
 			console.error('flood gl link: ' + gl.getProgramInfoLog(prog));
 		}
 		Module.__floodProg = prog;
-		Module.__floodFadeLoc = gl.getUniformLocation(prog, 'uFade');
 		Module.__floodTex = gl.createTexture();
 		Module.__floodTexW = 0;
 		Module.__floodTexH = 0;
@@ -214,12 +204,11 @@ static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 		gl.clear(gl.COLOR_BUFFER_BIT);
 		gl.viewport(dx, dy, dw, dh);
 		gl.useProgram(Module.__floodProg);
-		gl.uniform1f(Module.__floodFadeLoc, $3);
 		gl.bindVertexArray(Module.__floodVAO);
 		gl.activeTexture(gl.TEXTURE0);
 		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
 		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-	}, (uintptr_t)pixels, srcW, srcH, (double)s_fade);
+	}, (uintptr_t)pixels, srcW, srcH);
 }
 
 #endif
@@ -308,13 +297,6 @@ static void V_Flip(VESA_Surface *VS)
 			bars[n++] = SDL_Rect{dst.x + dst.w, dst.y, rw - (dst.x + dst.w), dst.h};
 		}
 		if (n > 0) SDL_RenderFillRects(renderer, bars, n);
-	}
-	// Apply the fade as a colour modulator on the engine texture. The
-	// hardware renderer scales RGB at copy time — free per pixel,
-	// matches the wasm shader's uFade semantics. 1.0 = no change.
-	{
-		Uint8 mod = (Uint8)(s_fade < 0.0f ? 0 : s_fade > 1.0f ? 255 : s_fade * 255.0f);
-		SDL_SetTextureColorMod(texture, mod, mod, mod);
 	}
 	SDL_RenderCopy(renderer, texture, NULL, useFullDst ? NULL : &dst);
 	SDL_RenderPresent(renderer);

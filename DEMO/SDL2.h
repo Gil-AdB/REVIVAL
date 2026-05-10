@@ -44,12 +44,5 @@ void SDL2_StartMusic(void* modplayerHandle);
 void SDL2_StopMusic();
 #endif
 
-// Output multiplier applied at present time. 1.0 = passthrough (default),
-// 0.0 = solid black. Used by MainLoop's FADE_OUT to animate end-of-demo
-// on wasm, and by runSceneBlocking's inter-scene fade on native.
-// On wasm: shader uniform on the present quad. On native:
-// SDL_SetTextureColorMod on the engine SDL_Texture before RenderCopy.
-extern "C" void SDL2_SetFade(float fade);
-
 
 #endif
