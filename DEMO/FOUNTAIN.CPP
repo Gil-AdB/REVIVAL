@@ -10,6 +10,31 @@
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <memory>
+#include <cstdlib>
+#include <cstdio>
+#include <vector>
+
+namespace {
+void dbg_write_ppm(const char* path, const byte* bgra, int xres, int yres, int bpsl) {
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return;
+    std::fprintf(f, "P6\n%d %d\n255\n", xres, yres);
+    std::vector<unsigned char> row(xres * 3);
+    for (int y = 0; y < yres; ++y) {
+        const dword* src = reinterpret_cast<const dword*>(bgra + y * bpsl);
+        for (int x = 0; x < xres; ++x) {
+            dword px = src[x];
+            row[x * 3 + 0] = (px >> 16) & 0xFF;
+            row[x * 3 + 1] = (px >>  8) & 0xFF;
+            row[x * 3 + 2] = (px      ) & 0xFF;
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[FNT-DUMP] wrote %s\n", path);
+}
+}
+
 
 static Scene *FntSc;
 static Vector FntHead(-0.053f,43.381f, 0.251f);
@@ -37,6 +62,84 @@ static Vector Vortex_Center(-0.053f,343.381f, 0.251f);
 static int32_t LightningFlag = -1;
 
 static char MSGStr[160];
+
+// Stream HEAD omnis: 9 lights, one per (track, rotIdx) of the inner-
+// particle spiral arms. Position recomputed each frame from the same
+// emit math the spawn loop uses. No particle tracking.
+//
+// (Earlier attempts at PARTICLE-tracking lights — water-spray follower
+// omnis, inner mid/end-of-trail trackers — were dropped: pre-allocated
+// particle slots get recycled on respawn, and any "track-this-slot"
+// scheme either jumps wildly when slots recycle, or — with continuity
+// heuristics — has multiple omnis converging on the same low-index slot
+// over time. Particle::Generation was kept in case a future attempt
+// wants to revisit; the current scene works without it.)
+struct FollowerOmni {
+    Omni*   omni;
+    int32_t track;   // 0..2 = inner I-phase (matches inner-spawn switch)
+    int32_t rotIdx;  // 0..2 = xForm rotation copy
+};
+static constexpr int kNumStreamHeadOmnis = 9;
+static constexpr int kNumFollowerOmnis   = kNumStreamHeadOmnis;
+static FollowerOmni g_FntFollowerOmnis[kNumFollowerOmnis];
+
+// No-op filler for follower omnis: contribute light but don't draw a
+// sprite. Render() walks Sc->OmniHead and calls O->F.Filler unconditionally
+// for every omni in the visible Z range, so we MUST give it a valid
+// function pointer (PREPROC sets one for FLD-loaded omnis but our
+// programmatically appended ones miss that pass).
+static void NopOmniFiller(Face*, Vertex**, dword, dword) {}
+
+// Allocate a new Omni, initialise with single-key splines so
+// Animate_Objects produces stable IPos/ISize/IRange values, and append
+// it to the end of the scene's OmniHead chain (preserving existing
+// indices that other code walks via OmniHead->Next->...).
+static Omni* AppendFountainOmni(Scene* Sc, const Vector& pos,
+                                 float lr, float lg, float lb,
+                                 float intensity, float range)
+{
+    Omni* O = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+    std::memset(O, 0, sizeof(Omni));
+    O->IPos = pos;
+    O->IRange = range;
+    O->rRange = 1.0f / range;
+    O->ISize = intensity;
+    O->L.R = lr;
+    O->L.G = lg;
+    O->L.B = lb;
+    O->L.A = 1.0f;
+    O->Flags = Omni_Active | Omni_Stationary;
+    // Single-key splines — Animate_Objects calls Spline_Calc on these
+    // each frame, so they need at least one key to avoid OOB reads.
+    auto initSingleKey = [](Spline& sp, float val) {
+        sp.NumKeys = 1;
+        sp.Keys = new SplineKey;
+        std::memset(sp.Keys, 0, sizeof(SplineKey));
+        sp.Keys[0].Pos.x = val;
+        sp.Keys[0].Pos.y = val;
+        sp.Keys[0].Pos.z = val;
+        sp.Flags = 0;
+        sp.CurKey = 0;
+    };
+    initSingleKey(O->Pos, 0.0f);
+    O->Pos.Keys[0].Pos.x = pos.x;
+    O->Pos.Keys[0].Pos.y = pos.y;
+    O->Pos.Keys[0].Pos.z = pos.z;
+    initSingleKey(O->Size, intensity);
+    initSingleKey(O->Range, range);
+    O->F.A = O->F.B = O->F.C = &O->V;
+    O->F.Filler = NopOmniFiller;
+    // Append to end of OmniHead chain.
+    if (!Sc->OmniHead) {
+        Sc->OmniHead = O;
+    } else {
+        Omni* tail = Sc->OmniHead;
+        while (tail->Next) tail = tail->Next;
+        tail->Next = O;
+        O->Prev = tail;
+    }
+    return O;
+}
 
 static DWord Blaze[64*128];
 
@@ -343,13 +446,24 @@ void Particle_Kinematics(Scene *Sc)
 		// search for a place to insert
 		for(P=Sc->Pcl;P<PE;P++)
 			if (!P->Flags) break;
-		if (P==PE) 
+		if (P==PE)
 			break;
 		//insert
 		fpow *= 0.6;
 		Vector_Copy(&P->V.Pos,&FntSpring);
-		P->V.Pos.x += ((float)(RAND_15()-16384)/16384.0f)*FntSpawnOutDisp;
-		P->V.Pos.z += ((float)(RAND_15()-16384)/16384.0f)*FntSpawnOutDisp;
+		// Compute jitter into explicit locals before adding. The fully-
+		// inline form `Pos.x += ((float)(RAND_15()-16384)/16384.0f)*Disp;`
+		// produced a 262143-corruption pattern under ASan+Debug — the
+		// generated code somehow stored ~2^18 into Pos.x/z instead of
+		// the bounded ±1 jitter. Explicit locals sidestep it.
+		{
+			const int r_x = RAND_15();
+			const float jitter_x = ((float)(r_x - 16384) / 16384.0f) * FntSpawnOutDisp;
+			P->V.Pos.x += jitter_x;
+			const int r_z = RAND_15();
+			const float jitter_z = ((float)(r_z - 16384) / 16384.0f) * FntSpawnOutDisp;
+			P->V.Pos.z += jitter_z;
+		}
 		P->V.Pos.y -= 20.0;
 
 		u = ((float)RAND_15()/32768.0f)*PI_M2;
@@ -367,6 +481,7 @@ void Particle_Kinematics(Scene *Sc)
 		P->Color.G = 127*colorscale;
 		P->Color.B = 255*colorscale;
 
+		++P->Generation;
 		P->Flags = Particle_Active;
 	}
 	// Animate Particles
@@ -401,7 +516,6 @@ void Particle_Kinematics(Scene *Sc)
 		P->V.LR = P->Color.R;
 
 	}
-
 
 	/// INNER PARTICLES
 	for(PE += FntInnerPcls*3;P<PE;P++)
@@ -537,6 +651,7 @@ void Particle_Kinematics(Scene *Sc)
 				break;
 			}
 
+			++P->Generation;
 			P->Flags = Particle_Active;
 		}
 	}
@@ -728,6 +843,29 @@ void Initialize_Fountain()
 
 	Initialize_Particles(FntSc);
 	Preprocess_Scene(FntSc, "FOUNTAIN");
+
+	struct TrackProfile { float r, g, b; };
+	const TrackProfile trackColors[3] = {
+		{0.20f, 0.55f, 1.00f},   // track 0 — blue
+		{0.30f, 1.00f, 0.30f},   // track 1 — green
+		{1.00f, 0.50f, 0.20f},   // track 2 — red/orange
+	};
+
+	// 9 stream HEAD lights — one per (track, rotIdx) of the visible
+	// spiral arms. Position recomputed each tick from spawn emit math.
+	{
+		const float intensity = 400.0f;
+		const float range     = 50.0f;
+		for (int i = 0; i < kNumStreamHeadOmnis; ++i) {
+			const int track  = i / 3;
+			const int rotIdx = i % 3;
+			const auto& c    = trackColors[track];
+			g_FntFollowerOmnis[i].track  = track;
+			g_FntFollowerOmnis[i].rotIdx = rotIdx;
+			g_FntFollowerOmnis[i].omni = AppendFountainOmni(
+				FntSc, FntHead, c.r, c.g, c.b, intensity, range);
+		}
+	}
 
 	Omni *O = FntSc->OmniHead->Next->Next;
 
@@ -1886,7 +2024,8 @@ struct FountainScene : SceneDriver {
 	}
 
 	bool tick() override {
-		if (Keyboard[ScESC] || Timer >= FNTPartTime) return false;
+		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
+		if (Keyboard[ScBackSpace] || Timer >= FNTPartTime) return false;
 
 		numFrames++;
 
@@ -1931,6 +2070,39 @@ struct FountainScene : SceneDriver {
 				View = &FC;
 		}
 
+		// 'I' = info: print camera position + forward (rising edge only).
+		{
+			static bool prevI = false;
+			bool curI = Keyboard[ScI] != 0;
+			if (curI && !prevI) {
+				fprintf(stderr,
+					"[CAM] pos=(%.0f, %.0f, %.0f)  fwd=(%.3f, %.3f, %.3f)  IFOV=%.1f\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+					View->IFOV);
+			}
+			prevI = curI;
+		}
+
+		// 'O' = stream-head omni info dump (rising edge).
+		{
+			static bool prevO = false;
+			bool curO = Keyboard[ScO] != 0;
+			if (curO && !prevO) {
+				fprintf(stderr, "[OMNI] === stream-head dump (Timer=%d) ===\n", int(Timer));
+				for (int i = 0; i < kNumFollowerOmnis; ++i) {
+					const FollowerOmni& f = g_FntFollowerOmnis[i];
+					if (!f.omni) continue;
+					fprintf(stderr,
+					    "  [%2d] track=%d rotIdx=%d pos=(%.1f,%.1f,%.1f) ISize=%.1f L=(%.2f,%.2f,%.2f)\n",
+					    i, f.track, f.rotIdx,
+					    f.omni->IPos.x, f.omni->IPos.y, f.omni->IPos.z,
+					    f.omni->ISize, f.omni->L.R, f.omni->L.G, f.omni->L.B);
+				}
+			}
+			prevO = curO;
+		}
+
 		Handle_Lightning();
 
 		CurFrame = FntSc->StartFrame + (FntSc->EndFrame-FntSc->StartFrame) * (float)g_FrameTime / (float)FNTPartTime;
@@ -1952,6 +2124,43 @@ struct FountainScene : SceneDriver {
 		} else VortexTri.Flags &= 0xFFFFFFFF-HTrack_Visible;
 
 		Particle_Kinematics(FntSc);
+
+		// Update stream-head omnis from inner-spawn emit math.
+		{
+			const float magwav          = 55.0f;
+			const float angularVelocity = 0.008f;
+			const float t               = float(Timer);
+			const float ax              = std::cos(t * angularVelocity * 0.8f);
+			const float az              = std::sin(t * angularVelocity * 0.8f);
+			for (int i = 0; i < kNumFollowerOmnis; ++i) {
+				FollowerOmni& f = g_FntFollowerOmnis[i];
+				if (!f.omni) continue;
+				const float yPhase = std::cos(t * 0.01f * 0.8f
+					+ float(f.track) * (2.0f * float(PI) / 3.0f)) * 0.3f;
+				float x = ax * magwav;
+				float y = 35.0f + yPhase * 55.0f;
+				float z = az * magwav;
+				// xForm1/xForm2 are 120° rotations; spawn falls case-1
+				// into case-2 so:
+				//   rotIdx 0 -> identity
+				//   rotIdx 1 -> xForm1 then xForm2
+				//   rotIdx 2 -> xForm2 only
+				if (f.rotIdx == 1) {
+					float nx = x * xForm1x + z * xForm1z;
+					float nz = z * xForm1x - x * xForm1z;
+					x = nx; z = nz;
+				}
+				if (f.rotIdx >= 1) {
+					float nx = x * xForm2x + z * xForm2z;
+					float nz = z * xForm2x - x * xForm2z;
+					x = nx; z = nz;
+				}
+				f.omni->IPos.x = x;
+				f.omni->IPos.y = y;
+				f.omni->IPos.z = z;
+			}
+		}
+
 		prof.switchTo(PROF_XFRM);
 
 		Transform_Objects(FntSc);
@@ -1976,6 +2185,20 @@ struct FountainScene : SceneDriver {
 				Rsv_LState = 0;
 			}
 		}
+		// Debug labels at each stream-head omni's screen position.
+		for (int i = 0; i < kNumFollowerOmnis; ++i) {
+			const FollowerOmni& f = g_FntFollowerOmnis[i];
+			const Omni* O = f.omni;
+			if (!O) continue;
+			if (O->V.TPos.z < FntSc->NZP || O->V.TPos.z > FntSc->FZP) continue;
+			int px = int(O->V.PX);
+			int py = int(O->V.PY);
+			if (px < 0 || px >= XRes || py < 0 || py >= YRes) continue;
+			char label[32];
+			std::snprintf(label, sizeof(label), "H%d/%d", f.track, f.rotIdx);
+			OutTextXY(VPage, px, py, label, 255);
+		}
+
 		prof.leave(PROF_RNDR);
 
 		if (g_profilerActive) {
@@ -1995,6 +2218,19 @@ struct FountainScene : SceneDriver {
 		}
 		prof.enter(PROF_FLIP);
 
+		// Dump screenshots at specific timestamps for debugging
+		// transparent triangle hole. Set FNT_DUMP_DIR=/path env to enable.
+		if (const char* dumpDir = std::getenv("FNT_DUMP_DIR")) {
+			static int dumpCounter = 0;
+			++dumpCounter;
+			// Dump every 100 frames
+			if (dumpCounter % 100 == 0) {
+				char path[1024];
+				snprintf(path, sizeof(path), "%s/fnt_f%05d.ppm", dumpDir, dumpCounter);
+				dbg_write_ppm(path, MainSurf->Data, XRes, YRes, MainSurf->BPSL);
+			}
+		}
+
 		Flip(MainSurf);
 		prof.leave(PROF_FLIP);
 		prof.endFrame();
@@ -2004,7 +2240,7 @@ struct FountainScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= FNTPartTime;
-		while (Keyboard[ScESC]) continue;
+		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
 		if (Timer < 0) Timer = 0;
 	}
 };
