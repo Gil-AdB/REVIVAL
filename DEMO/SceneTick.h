@@ -1,10 +1,17 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
 
 #include "Resize.h"
+
+// Quit/skip flags live in Rev.h, but we forward-declare here to avoid
+// pulling the rest of Rev.h's transitive includes (FDS_VARS, Modplayer,
+// etc.) into every scene-tick consumer.
+extern std::atomic<bool> g_shouldQuit;
+extern std::atomic<bool> g_skipScene;
 
 // Scene driver interface for the tick-based scene loop.
 //
@@ -45,6 +52,13 @@ inline void poll_pending_resize(SceneDriver* driver) {
 inline void runSceneBlocking(SceneDriver& driver) {
     driver.init();
     while (true) {
+        // Quit (ESC, SDL_QUIT, Ctrl-C) wins over everything else: we don't
+        // even bother running another tick; just tear down and return so
+        // the orchestrator can short-circuit to the program exit.
+        if (g_shouldQuit.load(std::memory_order_relaxed)) break;
+        // "Skip to next scene" (Backspace): consume the flag so the next
+        // scene starts clean, then break out so this scene's cleanup runs.
+        if (g_skipScene.exchange(false, std::memory_order_relaxed)) break;
         poll_pending_resize(&driver);
         if (!driver.tick()) break;
     }
@@ -64,9 +78,26 @@ struct SceneSequence {
     bool tick() {
         if (index_ >= factories_.size()) return false;
 
+        // Same global-flag semantics as runSceneBlocking.
+        if (g_shouldQuit.load(std::memory_order_relaxed)) {
+            if (current_) {
+                current_->cleanup();
+                current_.reset();
+            }
+            index_ = factories_.size();
+            return false;
+        }
+
         if (!current_) {
             current_ = factories_[index_]();
             current_->init();
+        }
+
+        if (g_skipScene.exchange(false, std::memory_order_relaxed)) {
+            current_->cleanup();
+            current_.reset();
+            ++index_;
+            return index_ < factories_.size();
         }
 
         poll_pending_resize(current_.get());

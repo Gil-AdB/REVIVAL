@@ -471,6 +471,7 @@ material global ID or ptr
 #include "../Modplayer/Modplayer.h"
 #include "SDL2.h"
 #include <SDL.h>
+#include <csignal>
 #include <utility>
 #include <iostream>
 #ifdef __EMSCRIPTEN__
@@ -488,6 +489,10 @@ int32_t g_demoYRes;
 int32_t g_fullScreenMode;
 int32_t g_displayType;
 int32_t g_hiDPI;
+
+// See Rev.h for semantics.
+std::atomic<bool> g_shouldQuit{false};
+std::atomic<bool> g_skipScene{false};
 
 float dTime;
 
@@ -1071,32 +1076,43 @@ void CodeEntry(void *var)
 		//module.Start();
 	}
 	Timer = 0;
-		
+
+	bool skipToFountain = std::getenv("SKIP_TO_FOUNTAIN") != nullptr;
+	if (!skipToFountain) {
 	Run_Glato();
 
 	t1.join();
 
-	while (Timer<4000);
+	while (Timer<4000) { if (g_shouldQuit.load()) goto demo_exit; }
+	} else {
+	t1.join();
+	}
 
 
 	Timer = 0;
 	if (Timer<=0) Timer = 1;
-	Run_City();
+	if (g_shouldQuit.load()) goto demo_exit;
+	if (!skipToFountain) Run_City();
 //	SavePolyStats("City.stat");
 //
 	if (Timer <= 0) Timer = 1;
-	Run_Chase();
+	if (g_shouldQuit.load()) goto demo_exit;
+	if (!skipToFountain) Run_Chase();
 
 	if (Timer<=0) Timer = 1;
+	if (g_shouldQuit.load()) goto demo_exit;
 	Run_Fountain();
-	
+
 	if (Timer <= 0) Timer = 1;
 	Timer = 1;
+	if (g_shouldQuit.load()) goto demo_exit;
 	Run_Crash();
-//	
+//
 //	SavePolyStats("Fountain.stat");
 	if (Timer<=0) Timer = 1;
+	if (g_shouldQuit.load()) goto demo_exit;
 	Run_Greets();
+demo_exit:;
 //	
 
 	//	SavePolyStats("Greets.stat");
@@ -1147,7 +1163,16 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "refltest") {
 			return RunReflectionTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest)\n",
+		if (snap.scene == "cuberefl") {
+			return RunCubeReflTest(snap, g_demoXRes, g_demoYRes);
+		}
+		if (snap.scene == "seaside") {
+			return RunCitySeasideTest(snap, g_demoXRes, g_demoYRes);
+		}
+		if (snap.scene == "fountain") {
+			return RunFountainSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain)\n",
 		        snap.scene.c_str());
 		return 2;
 	}
@@ -1176,6 +1201,27 @@ int main(int argc, const char *argv[])
 	}
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+
+    // Ctrl-C handling. SDL2 installs its own SIGINT handler in some builds,
+    // but on this macOS configuration we observed SIGINT being silently
+    // swallowed (process kept running, SDL_WaitEvent never returned an
+    // SDL_QUIT). Install our own handler that flips g_shouldQuit and pushes
+    // a user-event to wake SDL_WaitEvent. The handler must be async-signal
+    // safe — std::atomic<bool>::store with relaxed order is, and
+    // SDL_PushEvent is documented as thread-safe (it takes an internal
+    // mutex; that's not strictly signal-safe but the SDL community ships
+    // demos doing exactly this and it works in practice on POSIX).
+    struct SigCtl {
+        static void handler(int) {
+            g_shouldQuit.store(true, std::memory_order_relaxed);
+            SDL_Event ev;
+            SDL_zero(ev);
+            ev.type = SDL_QUIT;
+            SDL_PushEvent(&ev);
+        }
+    };
+    std::signal(SIGINT, &SigCtl::handler);
+    std::signal(SIGTERM, &SigCtl::handler);
 
     Uint32 windowFlags = SDL_WINDOW_RESIZABLE;
 #ifndef __EMSCRIPTEN__
@@ -1277,6 +1323,10 @@ int main(int argc, const char *argv[])
         SDL_Event event;
         SDL_WaitEvent(&event);
 		if (event.type == SDL_QUIT) {
+			// Window close, OS shutdown, or SDL's default SIGINT/SIGTERM
+			// handler (it posts SDL_QUIT for us). Tell the worker to bail
+			// before we drop out of the event pump.
+			g_shouldQuit.store(true);
 			break;
 		}
 		if (event.type == SDL_WINDOWEVENT &&
@@ -1305,6 +1355,7 @@ int main(int argc, const char *argv[])
 			int legacy = -1;
 			switch (event.key.keysym.scancode) {
 				case SDL_SCANCODE_ESCAPE:    legacy = ScESC; break;
+				case SDL_SCANCODE_BACKSPACE: legacy = ScBackSpace; break;
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
@@ -1333,10 +1384,15 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_D:         legacy = ScD; break;
 				case SDL_SCANCODE_E:         legacy = ScE; break;
 				case SDL_SCANCODE_H:         legacy = ScH; break;
+				case SDL_SCANCODE_I:         legacy = ScI; break;
+				case SDL_SCANCODE_O:         legacy = ScO; break;
 				case SDL_SCANCODE_M:         legacy = ScM; break;
 				case SDL_SCANCODE_P:         legacy = ScP; break;
+				case SDL_SCANCODE_Q:         legacy = ScQ; break;
 				case SDL_SCANCODE_R:         legacy = ScR; break;
+				case SDL_SCANCODE_S:         legacy = ScS; break;
 				case SDL_SCANCODE_U:         legacy = ScU; break;
+				case SDL_SCANCODE_W:         legacy = ScW; break;
 				case SDL_SCANCODE_Y:         legacy = ScY; break;
 				case SDL_SCANCODE_Z:         legacy = ScZ; break;
 				default: break;
@@ -1344,9 +1400,28 @@ int main(int argc, const char *argv[])
 			if (legacy >= 0) {
 				Keyboard[legacy] = (event.type == SDL_KEYDOWN) ? 1 : 0;
 			}
+			// New key conventions (see CLAUDE.md / commit message):
+			//   ESC       = exit demo immediately (whole program)
+			//   Backspace = skip to next scene
+			// We still set Keyboard[ScESC] above so legacy poll sites that
+			// haven't been migrated keep getting an event, but the actual
+			// "exit" trigger is g_shouldQuit so we don't conflate it with
+			// "advance scene".
+			if (event.type == SDL_KEYDOWN) {
+				if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
+					g_shouldQuit.store(true);
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_BACKSPACE) {
+					g_skipScene.store(true);
+				}
+			}
 		}
     }
 
+	// Belt-and-suspenders: if we got here via SDL_QUIT (Ctrl-C, window close,
+	// OS shutdown) g_shouldQuit is already set by the event handler above. If
+	// we ever get here via some other path (future code), make sure the demo
+	// worker doesn't block us forever.
+	g_shouldQuit.store(true);
 	demoThread.join();
 	// SDL_DestroyRenderer walks the renderer's child-texture list and
 	// frees each. If any of those textures is in a corrupt state (the

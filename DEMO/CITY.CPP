@@ -2098,7 +2098,9 @@ struct CityScene : SceneDriver {
 	}
 
 	bool tick() override {
-		if (Keyboard[ScESC] || Timer >= CTPartTime) return false;
+		// ESC is now "exit demo" (handled by runSceneBlocking via
+		// g_shouldQuit); Backspace is "skip to next scene".
+		if (Keyboard[ScBackSpace] || Timer >= CTPartTime) return false;
 
 		numFrames++;
 
@@ -2146,6 +2148,22 @@ struct CityScene : SceneDriver {
 		Reflective_AnimateTexture();
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
+
+		// 'I' = info: print camera position + forward vector to stderr
+		// (rising edge only). Forward = row 2 of View->Mat (row-major,
+		// camera-z basis = look direction in world space).
+		{
+			static bool prevI = false;
+			bool curI = Keyboard[ScI] != 0;
+			if (curI && !prevI) {
+				fprintf(stderr,
+					"[CAM] pos=(%.0f, %.0f, %.0f)  fwd=(%.3f, %.3f, %.3f)  IFOV=%.1f\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+					View->IFOV);
+			}
+			prevI = curI;
+		}
 
 		Animate_Objects(CitySc);
 
@@ -2261,7 +2279,7 @@ struct CityScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CTPartTime;
-		while (Keyboard[ScESC]) continue;
+		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
 		if (Timer < 0) Timer = 0;
 	}
 };

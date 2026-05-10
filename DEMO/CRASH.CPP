@@ -84,7 +84,8 @@ struct CrashScene : SceneDriver {
 	}
 
 	bool tick() override {
-		if (Keyboard[ScESC] || Timer >= CrPartTime) return false;
+		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
+		if (Keyboard[ScBackSpace] || Timer >= CrPartTime) return false;
 
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
@@ -143,10 +144,11 @@ struct CrashScene : SceneDriver {
 		if (g_profilerActive) prof.dump();
 		Timer -= CrPartTime;
 
-		// Wait for the user to release ESC before returning, otherwise the
-		// next scene will immediately see Keyboard[ScESC] and bail. In the
-		// eventual Emscripten port this will need to become a tick state.
-		while (Keyboard[ScESC]) continue;
+		// Wait for the user to release Backspace before returning, otherwise
+		// the next scene will immediately see Keyboard[ScBackSpace] and bail.
+		// In the eventual Emscripten port this will need to become a tick
+		// state.
+		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
 		if (Timer < 0) Timer = 0;
 	}
 };

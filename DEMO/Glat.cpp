@@ -732,7 +732,10 @@ struct GlatoScene : SceneDriver {
 // bg  code      gfx sfx
 
 //		Flip(VSurface);
-		if (Keyboard[ScESC])
+		// ESC = exit demo (handled by runSceneBlocking via g_shouldQuit);
+		// Backspace = skip Glato. The original code abused Timer to trigger
+		// the scene-end branch; we keep that behaviour for Backspace.
+		if (Keyboard[ScBackSpace])
 			Timer = 1000000;
 
 		if (g_glatoTraceHook) {
@@ -752,7 +755,7 @@ struct GlatoScene : SceneDriver {
 
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
-		while (Keyboard[ScESC]) continue;
+		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
 
 		delete [] LenTable;
 		delete [] CosTable;

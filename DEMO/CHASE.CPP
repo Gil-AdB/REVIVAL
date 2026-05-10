@@ -766,7 +766,8 @@ struct ChaseScene : SceneDriver {
 	}
 
 	bool tick() override {
-		if (Keyboard[ScESC] || Timer >= CHPartTime) return false;
+		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
+		if (Keyboard[ScBackSpace] || Timer >= CHPartTime) return false;
 
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
@@ -827,7 +828,7 @@ struct ChaseScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
-		while (Keyboard[ScESC]) continue;
+		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
 		if (Timer < 0) Timer = 0;
 	}
 };

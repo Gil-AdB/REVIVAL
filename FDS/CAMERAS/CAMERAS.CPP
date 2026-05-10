@@ -610,37 +610,56 @@ void Dynamic_Camera()
   char str[100];
 	float temp_alias;
 
-  if (Keyboard[ScEnd])
+  // Translation. Each block moves the camera along one of its local axes.
+  // We support two layouts in parallel:
+  //   - the original (full-size keyboard / numpad-friendly): End/PgDn,
+  //     GrayPlus/GrayMinus, Z (forward) and historically A (backward)
+  //   - a modern FPS-style WASD/QE layout for laptops without a numpad
+  // To make A useful for strafe-left we drop A's legacy "backward" binding
+  // (S takes over backward); Z is still forward. The rest of the legacy
+  // bindings are unchanged so muscle-memory still works on full keyboards.
+  //
+  //   left   = End | A
+  //   right  = PgDn | D
+  //   up     = GrayMinus | E
+  //   down   = GrayPlus | Q
+  //   fwd    = Z | W
+  //   back   = S
+  if (Keyboard[ScEnd] || Keyboard[ScA])
   {
     FV.x-=FC.Mat[0][0]*Vel_Speed;
     FV.y-=FC.Mat[0][1]*Vel_Speed;
     FV.z-=FC.Mat[0][2]*Vel_Speed;
   }
-  if (Keyboard[ScPgDn])
+  if (Keyboard[ScPgDn] || Keyboard[ScD])
 	{
     FV.x+=FC.Mat[0][0]*Vel_Speed;
     FV.y+=FC.Mat[0][1]*Vel_Speed;
     FV.z+=FC.Mat[0][2]*Vel_Speed;
   }
-	if (Keyboard[ScGrayPlus])
+	if (Keyboard[ScGrayPlus] || Keyboard[ScQ])
 	{
     FV.x-=FC.Mat[1][0]*Vel_Speed;
 		FV.y-=FC.Mat[1][1]*Vel_Speed;
     FV.z-=FC.Mat[1][2]*Vel_Speed;
   }
-	if (Keyboard[ScGrayMinus])
+	if (Keyboard[ScGrayMinus] || Keyboard[ScE])
   {
     FV.x+=FC.Mat[1][0]*Vel_Speed;
     FV.y+=FC.Mat[1][1]*Vel_Speed;
     FV.z+=FC.Mat[1][2]*Vel_Speed;
   }
-  if (Keyboard[ScZ])
+  // W/S are swapped relative to the original Z/A bindings so they
+  // match modern FPS convention (W = forward toward look-at target,
+  // S = backward). The legacy Z key keeps its 1998 meaning so users
+  // with that muscle memory still get the same motion.
+  if (Keyboard[ScZ] || Keyboard[ScS])
   {
     FV.x-=FC.Mat[2][0]*Vel_Speed;
 		FV.y-=FC.Mat[2][1]*Vel_Speed;
     FV.z-=FC.Mat[2][2]*Vel_Speed;
   }
-  if (Keyboard[ScA])
+  if (Keyboard[ScW])
   {
 		FV.x+=FC.Mat[2][0]*Vel_Speed;
 		FV.y+=FC.Mat[2][1]*Vel_Speed;
