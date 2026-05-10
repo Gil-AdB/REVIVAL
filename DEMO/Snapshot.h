@@ -23,6 +23,7 @@ struct SnapshotConfig {
 bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);
 
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);
+int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 
 // Drives Glat through a deterministic Timer sweep and records per-tick
 // state to <outDir>/glat_trace.csv. Useful for cross-platform / cross-
@@ -47,6 +48,26 @@ int RunFillerTestSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 //
 //   DEMO --snapshot=refltest [--out=PATH]
 int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres);
+
+// Cleaner reflection diagnostic with NO city geometry — builds a single
+// outward-facing reflective cube programmatically (no FLD load, no bake)
+// with the synthetic quadrant-coloured panorama as ReflectionTexture,
+// then renders six snapshots from ±x/±y/±z. Each face has a known world-
+// space normal; the camera position is known; the reflected ray for the
+// face directly facing the camera is straightforwardly computable. The
+// colour shown on each face directly identifies the (eu, ev) the lookup
+// resolves to, with no other geometry to confuse the picture.
+//
+//   DEMO --snapshot=cuberefl [--out=PATH]
+int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres);
+
+// Reproduce the user-reported wrong-direction reflection: stand outside
+// the city over open water at four extremes, look back at the nearest
+// reflective building. The water-facing side reflects what's behind the
+// camera (sky/sea), so seeing buildings in the reflection is a bug.
+//
+//   DEMO --snapshot=seaside [--out=PATH]
+int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres);
 
 // Synthetic rasterizer benchmark. Repeatedly renders the FillerTest fixture
 // and reports ms/iter + Mpx/s. Same fixture across native and wasm so the
