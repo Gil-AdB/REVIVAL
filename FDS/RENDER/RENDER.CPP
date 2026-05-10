@@ -769,29 +769,18 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 					auto d = wsPos[i] - cv;
 					d -= (d * n) * 2.0f * n;
 					Vector_Norm(&d);
+					// Equirectangular panorama lookup. The convention
+					// matches CalcEquirectangularPanoramaTable's bake:
+					//   eu=0    → -z scenery     eu=0.5  → +z scenery
+					//   eu=0.25 → +x scenery     eu=0.75 → -x scenery
+					//   ev=0    → +y scenery     ev=1    → -y scenery
+					// so a reflected ray pointing in world direction d
+					// resolves to (eu, ev) where the bake stored that
+					// direction's content. Verified with --snapshot=
+					// cuberefl (synthetic painter follows the same
+					// convention).
 					float lat = asin(d.y);
 					float lon = atan2(-d.z, -d.x);
-
-					// This formula reads cryptic but is internally
-					// self-consistent with CalcEquirectangularPanoramaTable
-					// in CITY.CPP. That panorama generator has a +z↔-z
-					// axis swap baked in (it stores the texture captured
-					// looking -z at its +z eu slot, etc., because of
-					// the ROT-offset cube-face → texture-index map), and
-					// also a +y↔-y swap. The two atan2 arg negations
-					// here amount to feeding -d.z and -d.x as inputs;
-					// the asin doesn't negate but the `0.5 - lat/π` form
-					// of ev below algebraically equals `-asin(d.y)/π +
-					// 0.5`, which is the y-swap compensation. So lookup
-					// + bake swaps cancel and the panorama is sampled
-					// at the correct content slot.
-					//
-					// Verified empirically with FDS_DEBUG_PANORAMA=1
-					// (synthetic quadrant-colour panorama): a "clean"
-					// algebraic inverse like `lon = atan2(d.x, -d.z)`
-					// produces bit-identical eu values to the formula
-					// here. Don't try to "simplify" — leave the math
-					// matching the panorama as-shipped.
 					eu[i] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
 					ev[i] = 0.5 - 0.5 * lat / (PI / 2.0);
 					++i;
@@ -1524,12 +1513,73 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 			// the mat32 sentinel pre-clear ensures the deferred
 			// lighting pass treats those pixels as already-shaded
 			// and leaves them alone.
+			//
+			// Material classification:
+			//   Mat_Transparent: deferred — render AFTER lighting pass
+			//     so the alpha blend reads finished opaque pixels.
+			//     (water, glass, etc. — handled by RenderInnerDeferredTransparent.)
+			//   Mat_Additive: render NOW via forward filler (TheOtherBarry
+			//     <ADDITIVE>) so it Z-tests + writes Z alongside opaque
+			//     in the same tile pass. Most-prominent case is the
+			//     fountain vortex, which has SortPriorityBias=DrawFirst
+			//     (sorted to FList front) — drawing it first writes its
+			//     Z to the empty z-buffer; opaque Mekalele then overwrites
+			//     where opaque is closer. Render_DeferredLighting's mat32
+			//     sentinel skip preserves vortex's color where no opaque
+			//     covered. Particles + transparents drawn later Z-test
+			//     against vortex Z and get correctly occluded.
+			const dword txtrFlags = F->Txtr->Flags;
+			if (txtrFlags & Mat_Transparent) {
+				continue;
+			}
 			if (F->Flags & Face_Reflective) {
 				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false);
+			} else if (txtrFlags & Mat_Additive) {
+				clipper.Render(F, F->Filler, false);   // TheOtherBarry<ADDITIVE>
 			} else {
 				clipper.Render(F, Mekalele, false);
 			}
 		}
+	}
+
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	++renderns::tileCounter;
+	renderns::condition.notify_one();
+}
+
+// Deferred path's transparent + additive forward pass. Runs after the
+// deferred lighting pass has completed so the alpha blend reads finished
+// opaque pixels in VPage. Iterates FList in sort order (which puts
+// transparent faces back-to-front, after all opaque) and dispatches each
+// through F->Filler — preassigned in PREPROC.CPP to TheOtherBarry<TRANSPARENT>
+// or TheOtherBarry<ADDITIVE> per material flags.
+void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(CurScene);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+
+	int32_t I = CAll;
+	Face** FLS = FList;
+	Vertex *A, *B, *C;
+
+	while (I--) {
+		Face* F = *FLS++;
+
+		A = F->A; B = F->B;
+		if (A == B) continue;
+		C = F->C;
+		auto flags = A->Flags & B->Flags & C->Flags;
+		if (flags & Vtx_Visible) continue;
+		if (!F->Txtr) continue;
+		const dword txtrFlags = F->Txtr->Flags;
+		// Mat_Additive (e.g. fountain vortex) renders inside the main
+		// Mekalele tile pass via its forward filler, NOT here — that
+		// gives it forward-style Z integration with opaque. Only handle
+		// Mat_Transparent in this post-lighting pass.
+		if (!(txtrFlags & Mat_Transparent)) continue;
+		if (F->Flags & Face_Reflective) continue;  // handled in main pass
+
+		clipper.Render(F, F->Filler, false);
 	}
 
 	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
@@ -2135,6 +2185,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
 
+			// Fog: replicate forward TheOtherBarry's per-vertex distance
+			// falloff (TheOtherBarry.h:716-734). Forward applies it to
+			// LR/LG/LB at vertex shading time; deferred runs per-pixel
+			// using the reconstructed view-space z. Scn_Fogged scenes
+			// (City, etc.) need this or distant geometry stays vivid.
+			if (ctx.Sc->Flags & Scn_Fogged) {
+				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
+				lB = std::max(lB * fogRate, 10.0f);
+				lG = std::max(lG * fogRate, 10.0f);
+				lR = std::max(lR * fogRate, 10.0f);
+				lB = std::min(lB, 253.0f);
+				lG = std::min(lG, 253.0f);
+				lR = std::min(lR, 253.0f);
+			}
+
 			// Diffuse modulation: pixel = texel * light / 256.
 			// Reflective faces are dispatched to TheOtherBarry<OVERWRITE,
 			// TEXTURETEXTURE> in RenderInnerMekalele and never reach this
@@ -2453,6 +2518,19 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			lB = _mm256_max_ps(zero, _mm256_min_ps(lB, sat));
 			lG = _mm256_max_ps(zero, _mm256_min_ps(lG, sat));
 			lR = _mm256_max_ps(zero, _mm256_min_ps(lR, sat));
+
+			// Per-pixel fog (Scn_Fogged): same formula as scalar Tile.
+			if (ctx.Sc->Flags & Scn_Fogged) {
+				__m256 vOne   = _mm256_set1_ps(1.0f);
+				__m256 vRFZP  = _mm256_set1_ps(1.0f / ctx.Sc->FZP);
+				__m256 fogArg = _mm256_max_ps(zero, _mm256_sub_ps(vOne, _mm256_mul_ps(zv, vRFZP)));
+				__m256 fogRate = _mm256_sqrt_ps(fogArg);
+				__m256 vMin = _mm256_set1_ps(10.0f);
+				__m256 vMax = _mm256_set1_ps(253.0f);
+				lB = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lB, fogRate), vMin), vMax);
+				lG = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lG, fogRate), vMin), vMax);
+				lR = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lR, fogRate), vMin), vMax);
+			}
 
 			// pixel = texel * lit / 256
 			__m256 inv256 = _mm256_set1_ps(1.0f / 256.0f);
@@ -2799,6 +2877,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
 
+			// Per-pixel fog (Scn_Fogged): same formula as Tile.
+			if (ctx.Sc->Flags & Scn_Fogged) {
+				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
+				lB = std::min(std::max(lB * fogRate, 10.0f), 253.0f);
+				lG = std::min(std::max(lG * fogRate, 10.0f), 253.0f);
+				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
+			}
+
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
@@ -3031,6 +3117,25 @@ void Render(RenderPath path)
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
 		Render_DeferredLighting();
+
+		// Forward pass for Mat_Transparent / Mat_Additive faces. They
+		// were skipped in the deferred raster pass; render them now in
+		// FList sort order (back-to-front for transparent — sorted by
+		// PREPROC's `2*fzp - dz` rule) over the lit opaque framebuffer.
+		renderns::tileCounter = 0;
+		for (auto j = 0; j < numTilesY; ++j) {
+			auto y1 = tileSizeY * j;
+			auto y2 = std::min(y1 + tileSizeY, YRes);
+			for (auto i = 0; i < numTilesX; ++i) {
+				auto x1 = tileSizeX * i;
+				auto x2 = std::min(x1 + tileSizeX, XRes);
+				ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
+					RenderInnerDeferredTransparent(x1, y1, x2, y2);
+				});
+			}
+		}
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
 	}
 
 	int32_t I = CAll;
