@@ -2493,9 +2493,21 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			float lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
 			float lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
 
+			// Water gets ambient-only — forward Lighting() culls every omni
+			// (water mesh has a tiny BSphereRadius from Reflective_Surface_
+			// Setup's tessellation, so range+radius < |omni-bsphere| for all
+			// city omnis). Without skipping the omni loop here, every nearby
+			// city light slams into every water pixel and saturates the
+			// channel → cyan/turquoise water instead of forward's deep blue.
+			// Mirrors the same skip in Render_DeferredLighting_Tile.
+			const bool isWater = (int(matID) == ctx.waterMatID);
+
 			// Light loop. Default: per-tile compacted list. Diagnostic
 			// mode: full scene omni list (FDS_XPAR_LIGHT_ALL=1).
-			if (lightAll) {
+			if (isWater) {
+				// Skip omni accumulation — matches the opaque kernel's
+				// isWater guard.
+			} else if (lightAll) {
 				for (int n = 0; n < allCount; ++n) {
 					const float wx = vlAll->posX[n] - x;
 					const float wy = vlAll->posY[n] - y;
