@@ -1167,6 +1167,107 @@ static Scene* buildXparTestScene(int testCase) {
                                  barry::TTextureMode::NORMAL>);
     }
 
+    if (testCase == 2) {
+        // OPAQUE wall in front (z=+2), transparent panel behind (z=-2).
+        // Camera looking from +z sees the wall fully covering the panel;
+        // transparent panel should NOT show through. Camera from sides
+        // sees both with wall in front.
+        Material* matWall = makeSolidColorMat(Sc, "test_wall",
+                                              180, 180, 180, 255,
+                                              Mat_RGBInterp, 2);
+        matWall->Diffuse = 1.0f;
+        linkMatToLib(matWall);
+
+        // Opaque wall (centered, smaller than the transparent so the
+        // panel pokes out the sides — gives a clear "through wall" test).
+        TriMesh* wall = appendTriMesh(Sc, "wall", 4, 2);
+        QuadDef qw = {
+            { Vector(-2, 0.5f,  2), Vector( 2, 0.5f,  2),
+              Vector( 2, 4.5f,  2), Vector(-2, 4.5f,  2) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, wall, 0, 0, qw, matWall,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+
+        // Transparent panel BEHIND the wall (larger so it sticks out).
+        TriMesh* xpar = appendTriMesh(Sc, "xpar_behind", 4, 2);
+        QuadDef qx = {
+            { Vector(-4, 0.5f, -2), Vector( 4, 0.5f, -2),
+              Vector( 4, 5.5f, -2), Vector(-4, 5.5f, -2) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, xpar, 0, 0, qx, matXpar,
+                   TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    if (testCase == 3) {
+        // Two parallel transparent panels at different depths.
+        // Closer one (z=0), further one (z=-3). Both same material.
+        // Expected: from +z, both visible with closer blended over the
+        // further-blended-on-ground stack.
+        TriMesh* close = appendTriMesh(Sc, "xpar_close", 4, 2);
+        QuadDef qc = {
+            { Vector(-2, 0.5f, 0), Vector( 2, 0.5f, 0),
+              Vector( 2, 4.5f, 0), Vector(-2, 4.5f, 0) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, close, 0, 0, qc, matXpar,
+                   TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                 barry::TTextureMode::NORMAL>);
+
+        // A second transparent material so we can tell them apart.
+        Material* matXpar2 = makeSolidColorMat(Sc, "test_xpar2",
+                                               220, 100, 80, 255,
+                                               Mat_TwoSided | Mat_RGBInterp | Mat_Transparent, 3);
+        matXpar2->Diffuse = 1.0f;
+        linkMatToLib(matXpar2);
+
+        TriMesh* far = appendTriMesh(Sc, "xpar_far", 4, 2);
+        QuadDef qf = {
+            { Vector(-3, 0.5f, -3), Vector( 3, 0.5f, -3),
+              Vector( 3, 5.0f, -3), Vector(-3, 5.0f, -3) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, far, 0, 0, qf, matXpar2,
+                   TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    if (testCase == 4) {
+        // Glass cube — 6 Mat_TwoSided transparent faces. Tests front/back
+        // classification and missing-triangle behavior. Cube at origin
+        // sized so the camera (dist=10) sees it comfortably.
+        TriMesh* cube = appendTriMesh(Sc, "glass_cube", 24, 12);
+        constexpr float S = 1.5f;
+        const QuadDef quads[6] = {
+            { { Vector(-S, 0.5f+S*0, S), Vector( S, 0.5f+S*0, S),
+                Vector( S, 0.5f+S*2, S), Vector(-S, 0.5f+S*2, S) },
+              Vector(0, 0, 1) },   // +z
+            { { Vector( S, 0.5f+S*0, S), Vector( S, 0.5f+S*0,-S),
+                Vector( S, 0.5f+S*2,-S), Vector( S, 0.5f+S*2, S) },
+              Vector(1, 0, 0) },   // +x
+            { { Vector( S, 0.5f+S*0,-S), Vector(-S, 0.5f+S*0,-S),
+                Vector(-S, 0.5f+S*2,-S), Vector( S, 0.5f+S*2,-S) },
+              Vector(0, 0,-1) },   // -z
+            { { Vector(-S, 0.5f+S*0,-S), Vector(-S, 0.5f+S*0, S),
+                Vector(-S, 0.5f+S*2, S), Vector(-S, 0.5f+S*2,-S) },
+              Vector(-1, 0, 0) },  // -x
+            { { Vector(-S, 0.5f+S*2, S), Vector( S, 0.5f+S*2, S),
+                Vector( S, 0.5f+S*2,-S), Vector(-S, 0.5f+S*2,-S) },
+              Vector(0, 1, 0) },   // +y (top)
+            { { Vector(-S, 0.5f+S*0,-S), Vector( S, 0.5f+S*0,-S),
+                Vector( S, 0.5f+S*0, S), Vector(-S, 0.5f+S*0, S) },
+              Vector(0,-1, 0) },   // -y (bottom)
+        };
+        for (int fi = 0; fi < 6; ++fi) {
+            appendQuad(Sc, cube, fi * 4, fi * 2, quads[fi], matXpar,
+                       TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                     barry::TTextureMode::NORMAL>);
+        }
+    }
+
     return Sc;
 }
 
