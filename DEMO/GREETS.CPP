@@ -523,7 +523,7 @@ void Initialize_Greets()
 		std::memset(g_RobotSpot, 0, sizeof(Omni));
 		g_RobotSpot->L.B = 255.0f; g_RobotSpot->L.G = 255.0f; g_RobotSpot->L.R = 255.0f;
 		g_RobotSpot->L.A = 1.0f;
-		g_RobotSpot->ISize  = 250.0f;          // intensity
+		g_RobotSpot->ISize  = 60.0f;           // intensity
 		g_RobotSpot->IRange = 30.0f;
 		g_RobotSpot->rRange = 1.0f / 30.0f;
 		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
@@ -708,17 +708,37 @@ struct GreetsScene : SceneDriver {
 		Animate_Objects(GreetSc);
 
 		// Robot spotlight follow. Position the spot ~10 units above the
-		// robot's current position; point it straight down so it casts
-		// a pool of light on the marble floor as the robot moves.
-		// (Could later point along the robot's heading instead — for
-		// now overhead is the easiest spot to read visually.)
+		// robot, then point it 45° forward — so the cone hits the floor
+		// AHEAD of the robot rather than straight underneath. Forward
+		// direction comes from the robot's RotMat (column 2 = local +Z
+		// transformed into world), with the light cone axis tilted at
+		// 45° between -Y and that forward vector:
+		//   dir = sin(45°) * worldFwd + cos(45°) * (-Y)
 		if (g_RobotSpot && g_RobotMesh) {
 			g_RobotSpot->IPos.x = g_RobotMesh->IPos.x;
 			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + 10.0f;
 			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
-			g_RobotSpot->IDir.x = 0.0f;
-			g_RobotSpot->IDir.y = -1.0f;
-			g_RobotSpot->IDir.z = 0.0f;
+			Vector localFwd(0.0f, 0.0f, 1.0f);
+			Vector worldFwd;
+			MatrixXVector(g_RobotMesh->RotMat, &localFwd, &worldFwd);
+			worldFwd.y = 0.0f;  // project onto XZ plane so the 45° tilt math is well-defined
+			Vector_Norm(&worldFwd);
+			// Side-to-side sweep — rotate worldFwd around the world-up
+			// axis by a sine-modulated angle. Period and amplitude are
+			// hand-tuned for a "scanning" feel; Timer is in millisecond
+			// ticks so 0.003 rad/tick = ~3 s full cycle, ±35° sweep.
+			const float sweepRad = std::sin(float(Timer) * 0.003f) * (35.0f * float(PI) / 180.0f);
+			const float cs = std::cos(sweepRad);
+			const float sn = std::sin(sweepRad);
+			const float fwdX = cs * worldFwd.x + sn * worldFwd.z;
+			const float fwdZ = -sn * worldFwd.x + cs * worldFwd.z;
+			worldFwd.x = fwdX;
+			worldFwd.z = fwdZ;
+			constexpr float k = 0.70710678f;  // sin(45°) = cos(45°)
+			g_RobotSpot->IDir.x = k * worldFwd.x;
+			g_RobotSpot->IDir.y = -k;
+			g_RobotSpot->IDir.z = k * worldFwd.z;
+			Vector_Norm(&g_RobotSpot->IDir);
 		}
 
 		// PROFILER: XFRM phase.
