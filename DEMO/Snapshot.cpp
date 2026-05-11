@@ -1331,6 +1331,34 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
         Lighting(sc);
         if (CAll) {
             Radix_SortingASM(FList, SList, CAll);
+
+            // Post-sort cube-triangle limit (XPARTEST_TRI_COUNT). Walk the
+            // sorted FList, keep all non-cube faces (ground, markers, etc.)
+            // and the first N cube faces (identified by "tri_" material
+            // name prefix). Compacts in place so Render() iterates exactly
+            // those.
+            int triLimit = 12;
+            if (const char* env = std::getenv("XPARTEST_TRI_COUNT")) {
+                triLimit = std::atoi(env);
+                if (triLimit < 0) triLimit = 0;
+                if (triLimit > 12) triLimit = 12;
+            }
+            int cubeSeen = 0;
+            int kept = 0;
+            for (int i = 0; i < CAll; ++i) {
+                Face* F = FList[i];
+                const bool isCube = F && F->Txtr && F->Txtr->Name &&
+                                    std::strncmp(F->Txtr->Name, "tri_", 4) == 0;
+                if (isCube) {
+                    if (cubeSeen >= triLimit) continue;
+                    ++cubeSeen;
+                }
+                FList[kept++] = F;
+            }
+            std::fprintf(stderr, "[XPARTEST] triLimit=%d kept=%d/%d\n",
+                         triLimit, kept, CAll);
+            CAll = kept;
+
             Render();
         }
 

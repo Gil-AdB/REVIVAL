@@ -264,6 +264,14 @@ extern "C" float g_zscale256;
 
 extern int32_t g_FrameTime;
 
+// Runtime toggles for hiding specific transparent objects, used to
+// dissect "object inside object" rendering. Default off. Set via the
+// J / K keybindings in the SDL event loop (J = inner, K = outer); the
+// transparent-face filter in Transform_Objects checks F->Txtr->Name
+// against these strings.
+extern std::atomic<bool> g_HideInnerXpar;
+extern std::atomic<bool> g_HideOuterXpar;
+
 
 extern DWord Colors32[256];
 

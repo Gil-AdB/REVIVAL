@@ -1388,6 +1388,8 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_E:         legacy = ScE; break;
 				case SDL_SCANCODE_H:         legacy = ScH; break;
 				case SDL_SCANCODE_I:         legacy = ScI; break;
+				case SDL_SCANCODE_J:         legacy = ScJ; break;
+				case SDL_SCANCODE_K:         legacy = ScK; break;
 				case SDL_SCANCODE_O:         legacy = ScO; break;
 				case SDL_SCANCODE_M:         legacy = ScM; break;
 				case SDL_SCANCODE_P:         legacy = ScP; break;
@@ -1415,6 +1417,16 @@ int main(int argc, const char *argv[])
 					g_shouldQuit.store(true);
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_BACKSPACE) {
 					g_skipScene.store(true);
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_J) {
+					bool now = !g_HideInnerXpar.load();
+					g_HideInnerXpar.store(now);
+					std::fprintf(stderr, "[XPAR] inner (%s) %s\n",
+						"f in shpere", now ? "HIDDEN" : "shown");
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_K) {
+					bool now = !g_HideOuterXpar.load();
+					g_HideOuterXpar.store(now);
+					std::fprintf(stderr, "[XPAR] outer (%s) %s\n",
+						"f_sphere", now ? "HIDDEN" : "shown");
 				}
 			}
 		}

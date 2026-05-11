@@ -18,6 +18,8 @@ float FOVX,FOVY;
 float C_FZP,C_rFZP, C_NZP, C_rNZP;
 
 std::atomic<dword> g_renderedPolys;
+std::atomic<bool> g_HideInnerXpar{false};
+std::atomic<bool> g_HideOuterXpar{false};
 
 ///////////////////////////////////////////////////////////////////////////////
 // Third Generation Triangle -> Convex counterclockwise NGon Frustrum clipper.

@@ -380,6 +380,77 @@ void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Parti
 
 #define DEBUG_PARTICLES 0
 
+// Per-face front-facing test using view-space vertex positions. Computes
+// the triangle's face normal via edge cross-product, then sign-tests against
+// vertex A's view-space position. Same test the deferred transparent
+// classifier uses (see RenderInnerDeferredTransparent) — face-level, not
+// per-vertex, so coplanar triangles of the same quad classify identically.
+static bool IsFrontFacingInViewSpace(const Face* F)
+{
+	const float ex = F->B->TPos.x - F->A->TPos.x;
+	const float ey = F->B->TPos.y - F->A->TPos.y;
+	const float ez = F->B->TPos.z - F->A->TPos.z;
+	const float fx = F->C->TPos.x - F->A->TPos.x;
+	const float fy = F->C->TPos.y - F->A->TPos.y;
+	const float fz = F->C->TPos.z - F->A->TPos.z;
+	const float nx = ey * fz - ez * fy;
+	const float ny = ez * fx - ex * fz;
+	const float nz = ex * fy - ey * fx;
+	const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+	return vd < 0.0f;
+}
+
+// View-space max-Z for a transparent triangle, extended to include its quad
+// sibling's unshared vertex when present. Without this, the two coplanar
+// triangles of a quad get sort keys based on different vertex subsets,
+// splitting them across the back-to-front render order so other faces draw
+// between them. On a convex transparent mesh (a glass cube) this caused the
+// bottom face's two tris to render at positions 4 and 12 in a 12-triangle
+// sort, with front walls drawn over the first half and back walls overdrawing
+// the second.
+//
+// "Sibling" = adjacent Face in the same TriMesh with the same Face normal
+// sharing ≥2 vertex pointers. Quads built via appendQuad-style code always
+// emit their two tris adjacently, so we only need to check F-1 and F+1.
+static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
+{
+	float dz = F->A->TPos.z;
+	if (F->B->TPos.z > dz) dz = F->B->TPos.z;
+	if (F->C->TPos.z > dz) dz = F->C->TPos.z;
+
+	// Env-var escape hatch for A/B testing the sibling-unification fix.
+	static const bool disabled = []{
+		const char* s = std::getenv("FDS_NO_QUAD_SORT");
+		return s && s[0] == '1';
+	}();
+	if (disabled) return dz;
+
+	auto sameNormal = [](const Face* x, const Face* y) {
+		return x->N.x == y->N.x && x->N.y == y->N.y && x->N.z == y->N.z;
+	};
+	auto sharedCount = [](const Face* x, const Face* y) {
+		int n = 0;
+		if (y->A == x->A || y->A == x->B || y->A == x->C) ++n;
+		if (y->B == x->A || y->B == x->B || y->B == x->C) ++n;
+		if (y->C == x->A || y->C == x->B || y->C == x->C) ++n;
+		return n;
+	};
+	auto extendWithSibling = [&](const Face* sib) {
+		Vertex* unshared = nullptr;
+		if      (sib->A != F->A && sib->A != F->B && sib->A != F->C) unshared = sib->A;
+		else if (sib->B != F->A && sib->B != F->B && sib->B != F->C) unshared = sib->B;
+		else if (sib->C != F->A && sib->C != F->B && sib->C != F->C) unshared = sib->C;
+		if (unshared && unshared->TPos.z > dz) dz = unshared->TPos.z;
+	};
+
+	const Face* prev = (F > T->Faces)                ? F - 1 : nullptr;
+	const Face* next = (F + 1 < T->Faces + T->FIndex) ? F + 1 : nullptr;
+	if      (prev && sameNormal(F, prev) && sharedCount(F, prev) >= 2) extendWithSibling(prev);
+	else if (next && sameNormal(F, next) && sharedCount(F, next) >= 2) extendWithSibling(next);
+
+	return dz;
+}
+
 void Transform_Objects(Scene *Sc)
 {
 	TriMesh *T;
@@ -433,6 +504,10 @@ void Transform_Objects(Scene *Sc)
 		// make a corrected sphere center vector
 		MatrixXVector(IM,&T->BSphereCtr,&AP);
 		Vector_SelfAdd(&S,&AP);
+		// Cache the view-space z and radius for the transparent sort's
+		// object-level grouping (used in the Mat_Transparent branch below).
+		const float objBSphereViewZ = S.z;
+		const float objBSphereRadius = T->BSphereRadius;
 
 		Vector_Copy(&OS, &S);
 
@@ -728,9 +803,34 @@ ERegular:
 			
 		}
 AfterXForm:FEnd=T->Faces+T->FIndex;
-	for (F=T->Faces;F<FEnd;F++)
+	// Runtime debug: hide specific nested-transparent objects (fountain's
+	// f_sphere outer and "f in shpere" inner). Toggled by J / K keys —
+	// useful for isolating which face contributes to a rendering bug.
+	const bool hideInner = g_HideInnerXpar.load(std::memory_order_relaxed);
+	const bool hideOuter = g_HideOuterXpar.load(std::memory_order_relaxed);
+	// FDS_XPAR_FORCE_TWOSIDED=1 treats the nested-sphere materials as
+	// TwoSided regardless of their actual flag. The fountain meshes ship
+	// single-sided, so without this we only see their camera-facing half
+	// — which makes "inner is hidden by outer" worse since the inner's
+	// far half doesn't even render. Quick experiment to gauge whether
+	// the deferred path's missing-inner-objects symptom improves when
+	// both halves are present.
+	static const bool forceXparTwoSided = []{
+		const char* s = std::getenv("FDS_XPAR_FORCE_TWOSIDED");
+		return s && s[0] == '1';
+	}();
+	for (F=T->Faces;F<FEnd;F++) {
+		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
+			const char* mn = F->Txtr->Name;
+			if (hideInner && std::strstr(mn, "in shpere")) continue;
+			if (hideOuter && std::strcmp(mn, "f_sphere") == 0) continue;
+		}
+		const bool forceTS = forceXparTwoSided && F->Txtr && F->Txtr->Name &&
+			(std::strstr(F->Txtr->Name, "in shpere") ||
+			 std::strcmp(F->Txtr->Name, "f_sphere") == 0);
 		if ((!F->VisibilityFlagsAll())
-			&&((F->Txtr->Flags&Mat_TwoSided)
+			&&(forceTS
+			||(F->Txtr->Flags&Mat_TwoSided)
 			||(AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) // Backface culling
 			//||(1) // no backface culling
 			))
@@ -814,13 +914,58 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 			// the same texture.
 			if (M->Flags & Mat_Transparent)
 			{
-				dz = F->A->TPos.z;
-				if (F->B->TPos.z>dz) dz=F->B->TPos.z;
-				if (F->C->TPos.z>dz) dz=F->C->TPos.z;
-				if (dz > fzp)
-					F->SortZ.F = fzp;
-				else
-					F->SortZ.F = 2*fzp - dz;
+				dz = QuadAwareMaxViewZ(F, T);
+				const bool frontFacing = IsFrontFacingInViewSpace(F);
+
+				// Object-level back-to-front grouping. Without this, nested
+				// transparent meshes (fountain's f_sphere outer + "f in
+				// shpere" inner, both concentric) interleave by per-face
+				// max-z. Using the bsphere extent in view-space depth
+				// instead:
+				//
+				//   BACK partition: extent = bsphere_z + radius (farthest
+				//     surface). Larger extent → renders first → outer
+				//     before inner.
+				//   FRONT partition: extent = bsphere_z - radius (nearest
+				//     surface). Larger extent → renders first → inner
+				//     before outer (inner-front is farther from camera
+				//     than outer-front in a concentric pair).
+				//
+				// Sort key layout (smaller renders first):
+				//   bit-high: front-or-back partition (front gets 4*fzp
+				//             offset, larger than any object/face score)
+				//   bit-mid:  object score (2*fzp - extent, range 0..4*fzp)
+				//   bit-low:  face fine sort (in [0, 1.0], used as fraction
+				//             so adjacent faces of the same object still
+				//             back-to-front)
+				static const bool xparFrontBackDisabled = []{
+					const char* s = std::getenv("FDS_NO_XPAR_FRONTBACK");
+					return s && s[0] == '1';
+				}();
+				static const bool xparObjGroupDisabled = []{
+					const char* s = std::getenv("FDS_NO_XPAR_OBJGROUP");
+					return s && s[0] == '1';
+				}();
+
+				if (xparObjGroupDisabled) {
+					// Legacy face-only sort, used for A/B comparison.
+					if (dz > fzp) F->SortZ.F = fzp;
+					else          F->SortZ.F = 2.0f * fzp - dz;
+					if (!xparFrontBackDisabled && frontFacing)
+						F->SortZ.F += 2.0f * fzp;
+				} else {
+					const float extent = frontFacing
+						? (objBSphereViewZ - objBSphereRadius)
+						: (objBSphereViewZ + objBSphereRadius);
+					const float objScore = 2.0f * fzp - extent;
+					const float faceFine = (dz > 0.0f && fzp > 0.0f)
+						? std::max(0.0f, std::min(1.0f, (fzp - dz) / fzp))
+						: 0.0f;
+					float key = objScore + faceFine;
+					if (!xparFrontBackDisabled && frontFacing)
+						key += 4.0f * fzp;
+					F->SortZ.F = key;
+				}
 
 //				F->SortZ.DW >>= 8;
 //				F->SortZ.DW += 255 << 24;
@@ -844,8 +989,9 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 			if (F->C->TPos.z>dz) dz=F->C->TPos.z;
 			F->SortZ.F = fzp-dz;
 #endif
-			
+
 		}
+	}  // close per-face loop body opened above
 	}
 	CPolys = Ins-FList;
 
@@ -1579,9 +1725,23 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
 		if (!(txtrFlags & Mat_Transparent)) continue;
 		if (F->Flags & Face_Reflective) continue;  // handled in main pass
 
-		const float vd = A->TN.x * A->TPos.x
-		               + A->TN.y * A->TPos.y
-		               + A->TN.z * A->TPos.z;
+		// Per-face front/back test: compute the triangle's view-space face
+		// normal from its three vertex positions, then sign-test against any
+		// point on the face. Using A->TN (a per-vertex normal that the engine
+		// smooths across adjacent faces) splits coplanar triangles of the
+		// same quad into different code paths when the averaged vertex
+		// normals diverge slightly — caused the "panel renders as a frame"
+		// bug in xpartest case 3.
+		const float ex = B->TPos.x - A->TPos.x;
+		const float ey = B->TPos.y - A->TPos.y;
+		const float ez = B->TPos.z - A->TPos.z;
+		const float fx = C->TPos.x - A->TPos.x;
+		const float fy = C->TPos.y - A->TPos.y;
+		const float fz = C->TPos.z - A->TPos.z;
+		const float nx = ey * fz - ez * fy;
+		const float ny = ez * fx - ex * fz;
+		const float nz = ex * fy - ey * fx;
+		const float vd = nx * A->TPos.x + ny * A->TPos.y + nz * A->TPos.z;
 		const bool frontFacing = vd < 0.0f;
 		if (frontFacing) {
 			clipper.Render(F, MekaleleTransparent, false);
@@ -2279,7 +2439,17 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	if (!g_gbufferTransparent || !g_xparZ) return;
 	const meka::GBuffer &gbX = *g_gbufferTransparent;
 	dword *out = reinterpret_cast<dword *>(VPage);
-	const TileLights &tl = ctx.tileLights[tileIndex];
+	// FDS_XPAR_LIGHT_ALL=1: bypass per-tile light culling for transparents;
+	// iterate the full scene omni list per pixel. Conservatively-correct
+	// (no false omits at tile seams) but slower. Useful for diagnosing
+	// whether observed lighting steps come from culling drift.
+	static const bool lightAll = []{
+		const char *s = std::getenv("FDS_XPAR_LIGHT_ALL");
+		return s && s[0] == '1';
+	}();
+	const TileLights &tlTile = ctx.tileLights[tileIndex];
+	const ViewLightsSoA *vlAll = ctx.lights;
+	const int allCount = ctx.numLights;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2323,21 +2493,42 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			float lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
 			float lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
 
-			for (int n = 0; n < tl.count; ++n) {
-				const float wx = tl.posX[n] - x;
-				const float wy = tl.posY[n] - y;
-				const float wz = tl.posZ[n] - z;
-				const float dot = wx * nx + wy * ny + wz * nz;
-				if (dot < 0.0f) continue;
-				const float len2 = wx*wx + wy*wy + wz*wz;
-				if (len2 > tl.range2[n]) continue;
-				const float lenInv = fast_rsqrt(len2);
-				const float dist   = len2 * lenInv;
-				const float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
-				const float intensity = k * Mat->Diffuse;
-				lB += intensity * tl.colB[n];
-				lG += intensity * tl.colG[n];
-				lR += intensity * tl.colR[n];
+			// Light loop. Default: per-tile compacted list. Diagnostic
+			// mode: full scene omni list (FDS_XPAR_LIGHT_ALL=1).
+			if (lightAll) {
+				for (int n = 0; n < allCount; ++n) {
+					const float wx = vlAll->posX[n] - x;
+					const float wy = vlAll->posY[n] - y;
+					const float wz = vlAll->posZ[n] - z;
+					const float dot = wx * nx + wy * ny + wz * nz;
+					if (dot < 0.0f) continue;
+					const float len2 = wx*wx + wy*wy + wz*wz;
+					if (len2 > vlAll->range2[n]) continue;
+					const float lenInv = fast_rsqrt(len2);
+					const float dist   = len2 * lenInv;
+					const float k = dot * lenInv * (1.0f - dist * vlAll->rRange[n]);
+					const float intensity = k * Mat->Diffuse;
+					lB += intensity * vlAll->colB[n];
+					lG += intensity * vlAll->colG[n];
+					lR += intensity * vlAll->colR[n];
+				}
+			} else {
+				for (int n = 0; n < tlTile.count; ++n) {
+					const float wx = tlTile.posX[n] - x;
+					const float wy = tlTile.posY[n] - y;
+					const float wz = tlTile.posZ[n] - z;
+					const float dot = wx * nx + wy * ny + wz * nz;
+					if (dot < 0.0f) continue;
+					const float len2 = wx*wx + wy*wy + wz*wz;
+					if (len2 > tlTile.range2[n]) continue;
+					const float lenInv = fast_rsqrt(len2);
+					const float dist   = len2 * lenInv;
+					const float k = dot * lenInv * (1.0f - dist * tlTile.rRange[n]);
+					const float intensity = k * Mat->Diffuse;
+					lB += intensity * tlTile.colB[n];
+					lG += intensity * tlTile.colG[n];
+					lR += intensity * tlTile.colR[n];
+				}
 			}
 
 			if (lB > 250.0f) lB = 250.0f;
@@ -3381,7 +3572,47 @@ void Render(RenderPath path)
 	if (Tri->Verts[I].Flags==Vtx_Spike)
 	VP[YOffs[(int)Tri->Verts[I].PY]+(int)Tri->Verts[I].PX] = 0xFFFFFFFF;
 }*/
-	
+
+	// FDS_DEBUG_XPAR_IDS=1 overlays each transparent face's render-order
+	// index and SortZ at its screen centroid. Lets you read the actual sort
+	// values that drove rendering — useful for diagnosing back-to-front
+	// ordering on real scenes.
+	static const bool debugXparIds = []{
+		const char* s = std::getenv("FDS_DEBUG_XPAR_IDS");
+		return s && s[0] == '1';
+	}();
+	if (debugXparIds) {
+		// Min screen area threshold (px²) — skips tiny particles. Override
+		// with FDS_DEBUG_XPAR_MIN_AREA. Also dumps the full list to stderr
+		// regardless of the visual filter.
+		float minArea = 500.0f;
+		if (const char* s = std::getenv("FDS_DEBUG_XPAR_MIN_AREA")) {
+			minArea = float(std::atof(s));
+		}
+		std::fprintf(stderr, "[XPAR-IDS] (all transparent faces in render order)\n");
+		for (int32_t i = 0; i < CAll; ++i) {
+			Face* F = FList[i];
+			if (!F || !F->Txtr) continue;
+			if (!(F->Txtr->Flags & Mat_Transparent)) continue;
+			const float ax = F->A->PX, ay = F->A->PY;
+			const float bx = F->B->PX, by = F->B->PY;
+			const float cxv = F->C->PX, cyv = F->C->PY;
+			const float area = 0.5f * std::fabs(ax*(by-cyv) + bx*(cyv-ay) + cxv*(ay-by));
+			const float cx = (ax + bx + cxv) * (1.0f/3.0f);
+			const float cy = (ay + by + cyv) * (1.0f/3.0f);
+			const float azv = F->A->TPos.z, bzv = F->B->TPos.z, czv = F->C->TPos.z;
+			std::fprintf(stderr,
+				"  [%4d] sortZ=%8.2f  tri-zs=(%.2f,%.2f,%.2f)  area=%6.0f  "
+				"centroid=(%.0f,%.0f)  mat=%s\n",
+				int(i), F->SortZ.F, azv, bzv, czv, area, cx, cy,
+				(F->Txtr->Name ? F->Txtr->Name : "?"));
+			if (area < minArea) continue;
+			if (cx < 0 || cy < 0 || cx >= XRes || cy >= YRes) continue;
+			char text[64];
+			std::snprintf(text, sizeof(text), "%d z=%.1f", int(i), F->SortZ.F);
+			OutTextXY(VPage, int(cx), int(cy), text, 255);
+		}
+	}
 }
 
 // yeah
