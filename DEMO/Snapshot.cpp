@@ -903,6 +903,352 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// ============================================================
+// XPAR-TEST: isolated transparent-rendering harness
+// ============================================================
+//
+// Minimal programmatic scenes designed to test transparent rendering
+// behavior independent of any FLD-loaded scene's quirks. Each case is
+// a self-contained set of opaque + transparent surfaces with a single
+// known omni light. The harness renders each case from 6 fixed camera
+// poses around the scene; comparing across poses surfaces lighting
+// drift, missing triangles, Z-occlusion failures, and double-blend
+// errors.
+//
+// Cases (selected via @case=N):
+//   1 = single transparent quad in front of opaque ground + one omni
+//   2 = opaque wall blocking a transparent panel behind it
+//   3 = two transparent panels at different depths (layered blend)
+//   4 = glass cube (6 transparent faces, Mat_TwoSided)
+//
+// Run with FDS_DEFERRED=0/1 to compare forward vs deferred paths.
+namespace {
+
+// Link a Material into the global MatLib chain. The deferred path's
+// Scene_GetMatTable scans MatLib filtered by RelScene — orphan materials
+// (not in MatLib) won't appear in the per-scene matTable and the lighting
+// kernel will skip every pixel that references them.
+static void linkMatToLib(Material* M) {
+    if (!MatLib) { MatLib = M; M->Prev = nullptr; M->Next = nullptr; return; }
+    Material* tail = MatLib;
+    while (tail->Next) tail = tail->Next;
+    tail->Next = M;
+    M->Prev = tail;
+    M->Next = nullptr;
+}
+
+// Small helper: allocate + initialise a Material with a single 16x16
+// solid-colour texture and the requested material flags.
+static Material* makeSolidColorMat(Scene* Sc, const char* name,
+                                    byte r, byte g, byte bb, byte a,
+                                    dword flags, byte matID)
+{
+    constexpr int SZ = 16;
+    Texture* T = new Texture;
+    std::memset(T, 0, sizeof(Texture));
+    uint32_t* data = (uint32_t*)_aligned_malloc(SZ * SZ * 4, 16);
+    const uint32_t packed = (uint32_t(a) << 24) | (uint32_t(r) << 16)
+                          | (uint32_t(g) << 8) | uint32_t(bb);
+    for (int i = 0; i < SZ * SZ; ++i) data[i] = packed;
+    T->Data   = (byte*)data;
+    T->BPP    = 32;
+    T->SizeX  = SZ; T->LSizeX = 4;
+    T->SizeY  = SZ; T->LSizeY = 4;
+    T->Flags  = Txtr_Nomip | Txtr_Tiled;
+    Sachletz((dword*)T->Data, SZ, SZ);
+    T->Mipmap[0]   = T->Data;
+    T->numMipmaps  = 1;
+
+    Material* M = getAlignedType<Material>(16);
+    M->Txtr        = T;
+    M->BaseCol.R   = r; M->BaseCol.G = g; M->BaseCol.B = bb; M->BaseCol.A = a;
+    M->Diffuse     = 1.0f;
+    M->Luminosity  = 0.0f;
+    M->Flags       = flags;
+    M->RelScene    = Sc;
+    M->ID          = matID;
+    M->Name        = strdup(name);
+    return M;
+}
+
+// Append a programmatically-created quad to a scene.
+// `n` should be the outward (winding-derived) normal; vertices are CCW.
+struct QuadDef { Vector p[4]; Vector n; };
+static void appendQuad(Scene* Sc, TriMesh* T, int vBase, int fBase,
+                        const QuadDef& q, Material* mat, RasterFunc filler)
+{
+    for (int k = 0; k < 4; ++k) {
+        Vertex* V = &T->Verts[vBase + k];
+        V->Pos = q.p[k];
+        V->N   = q.n;
+        V->TN  = q.n; // placeholder; Transform_Objects will update
+        V->LR  = V->LG = V->LB = 200;
+        V->LA  = 255;
+        V->U = (k == 1 || k == 2) ? 1.0f - 1.0f/16.0f : 1.0f/16.0f;
+        V->V = (k == 2 || k == 3) ? 1.0f - 1.0f/16.0f : 1.0f/16.0f;
+    }
+    for (int tri = 0; tri < 2; ++tri) {
+        Face* F = &T->Faces[fBase + tri];
+        int idx[3] = { 0, (tri == 0 ? 1 : 2), (tri == 0 ? 2 : 3) };
+        F->A = &T->Verts[vBase + idx[0]];
+        F->B = &T->Verts[vBase + idx[1]];
+        F->C = &T->Verts[vBase + idx[2]];
+        F->N = q.n;
+        F->NormProd = -Dot_Product(&F->A->Pos, &F->N);
+        F->Txtr   = mat;
+        F->Filler = filler;
+        F->Flags  = 0;
+        F->uvFromVertices();
+    }
+}
+
+// Allocate + append a stationary point omni to a scene's OmniHead chain.
+static Omni* appendTestOmni(Scene* Sc, const Vector& pos,
+                             float r, float g, float bb,
+                             float intensity, float range)
+{
+    Omni* O = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+    std::memset(O, 0, sizeof(Omni));
+    O->IPos   = pos;
+    O->IRange = range;
+    O->rRange = 1.0f / range;
+    O->ISize  = intensity;
+    O->L.R = r; O->L.G = g; O->L.B = bb; O->L.A = 1.0f;
+    O->Flags  = Omni_Active | Omni_Stationary;
+    auto initSingleKey = [](Spline& sp, float val) {
+        sp.NumKeys = 1;
+        sp.Keys = new SplineKey;
+        std::memset(sp.Keys, 0, sizeof(SplineKey));
+        sp.Keys[0].Pos.x = val;
+        sp.Keys[0].Pos.y = val;
+        sp.Keys[0].Pos.z = val;
+        sp.Flags = 0;
+        sp.CurKey = 0;
+    };
+    initSingleKey(O->Pos, 0.0f);
+    O->Pos.Keys[0].Pos.x = pos.x;
+    O->Pos.Keys[0].Pos.y = pos.y;
+    O->Pos.Keys[0].Pos.z = pos.z;
+    initSingleKey(O->Size, intensity);
+    initSingleKey(O->Range, range);
+    O->F.A = O->F.B = O->F.C = &O->V;
+    // Render()'s post-FList sprite loop calls F->Filler unconditionally
+    // for any face whose A==B (treated as particle/omni flare). We don't
+    // want the flare rendered — install a no-op so the loop doesn't
+    // dereference a null pointer.
+    O->F.Filler = [](Face*, Vertex**, dword, dword) {};
+
+    if (!Sc->OmniHead) {
+        Sc->OmniHead = O;
+    } else {
+        Omni* tail = Sc->OmniHead;
+        while (tail->Next) tail = tail->Next;
+        tail->Next = O;
+        O->Prev = tail;
+    }
+    return O;
+}
+
+// Make a TriMesh + Object pair attached to the scene; you fill in
+// Verts and Faces after.
+static TriMesh* appendTriMesh(Scene* Sc, const char* name,
+                               int numVerts, int numFaces)
+{
+    TriMesh* T = (TriMesh*)getAlignedBlock(sizeof(TriMesh), 16);
+    std::memset(T, 0, sizeof(TriMesh));
+    T->VIndex = numVerts;
+    T->Verts  = new Vertex[numVerts];
+    std::memset(T->Verts, 0, sizeof(Vertex) * numVerts);
+    T->FIndex = numFaces;
+    T->Faces  = new Face[numFaces];
+    std::memset(T->Faces, 0, sizeof(Face) * numFaces);
+    Matrix_Identity(T->RotMat);
+    Vector_Form(&T->IPos, 0, 0, 0);
+    Vector_Form(&T->IScale, 1, 1, 1);
+    Vector_Form(&T->BSphereCtr, 0, 0, 0);
+    T->BSphereRad    = 10000.0f;
+    T->BSphereRadius = 100.0f;
+    T->Flags = HTrack_Visible;
+    auto initKey1 = [](Spline& sp, float a, float b, float c, float d) {
+        sp.CurKey = 0;
+        sp.NumKeys = 1;
+        sp.Keys = new SplineKey[1];
+        std::memset(sp.Keys, 0, sizeof(SplineKey));
+        Quaternion_Form(&sp.Keys->Pos, a, b, c, d);
+    };
+    initKey1(T->Pos,    0, 0, 0, 0);
+    initKey1(T->Scale,  1, 1, 1, 0);
+    initKey1(T->Rotate, 0, 0, 0, 1);
+
+    Object* Obj = new Object;
+    std::memset(Obj, 0, sizeof(Object));
+    Obj->Name = strdup(name);
+    Obj->Type = Obj_TriMesh;
+    Obj->Data = T;
+    Obj->Rot  = &T->RotMat;
+    Obj->Pos  = &T->IPos;
+    Vector_Form(&Obj->Pivot, 0, 0, 0);
+
+    if (!Sc->ObjectHead) Sc->ObjectHead = Obj;
+    else {
+        Object* tail = Sc->ObjectHead;
+        while (tail->Next) tail = tail->Next;
+        tail->Next = Obj; Obj->Prev = tail;
+    }
+    if (!Sc->TriMeshHead) Sc->TriMeshHead = T;
+    else {
+        TriMesh* tail = Sc->TriMeshHead;
+        while (tail->Next) tail = tail->Next;
+        tail->Next = T; T->Prev = tail;
+    }
+    return T;
+}
+
+// Build a per-case scene: returns the scene + a short name string.
+static Scene* buildXparTestScene(int testCase) {
+    Scene* Sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(Sc, 0, sizeof(Scene));
+    Sc->NZP   = 1.0f;
+    Sc->FZP   = 200.0f;
+    Sc->Flags = Scn_ZBuffer;
+    Sc->Ambient.R = Sc->Ambient.G = Sc->Ambient.B = 40;
+    Sc->Ambient.A = 255;
+
+    // Camera placeholder. Harness rewrites ISource/Mat per pose.
+    Camera* Cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(Cam, 0, sizeof(Camera));
+    Vector_Form(&Cam->ISource, 0, 0, -5);
+    Matrix_Identity(Cam->Mat);
+    Cam->IFOV = 60.0f;
+    Sc->CameraHead = Cam;
+
+    // One bright omni above the scene. Position chosen so it lights
+    // both the ground and any front-of-quad surfaces.
+    appendTestOmni(Sc, Vector(0, 5, 0), 1.0f, 1.0f, 0.6f, 200.0f, 30.0f);
+
+    Material* matGround = makeSolidColorMat(Sc, "test_ground",
+                                            120, 80, 80, 255,
+                                            Mat_RGBInterp, 0);
+    matGround->Diffuse = 1.0f;
+    Material* matXpar = makeSolidColorMat(Sc, "test_xpar",
+                                          80, 180, 220, 255,
+                                          Mat_TwoSided | Mat_RGBInterp | Mat_Transparent, 1);
+    matXpar->Diffuse = 1.0f;
+    linkMatToLib(matGround);
+    linkMatToLib(matXpar);
+
+    // All cases include an opaque ground plane.
+    {
+        TriMesh* ground = appendTriMesh(Sc, "xpar_ground", 4, 2);
+        QuadDef q = {
+            { Vector(-10, 0, -10), Vector( 10, 0, -10),
+              Vector( 10, 0,  10), Vector(-10, 0,  10) },
+            Vector(0, 1, 0)
+        };
+        // Filler set in PREPROC normally; for snapshot we hand-pick
+        // an opaque textured filler. TheOtherBarry<OVERWRITE,NORMAL>
+        // works for opaque base.
+        appendQuad(Sc, ground, 0, 0, q, matGround,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    if (testCase == 1) {
+        // Single upright transparent quad at center, facing toward camera
+        // approaches. Two-sided so both sides render.
+        TriMesh* xpar = appendTriMesh(Sc, "xpar_quad", 4, 2);
+        QuadDef q = {
+            { Vector(-2, 0.5f, 0), Vector( 2, 0.5f, 0),
+              Vector( 2, 4.5f, 0), Vector(-2, 4.5f, 0) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, xpar, 0, 0, q, matXpar,
+                   TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    return Sc;
+}
+
+} // namespace
+
+int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    // Parse @case= via the existing timestamps slot: --snapshot=xpartest@t=1
+    // (re-using the t= field; default = 1)
+    int testCase = 1;
+    if (!cfg.timestamps.empty()) testCase = cfg.timestamps[0];
+
+    std::fprintf(stderr, "[XPARTEST] case=%d\n", testCase);
+    Scene* sc = buildXparTestScene(testCase);
+    SetCurrentScene(sc);
+    View = sc->CameraHead;
+    // Deferred path looks up Material* by matID via the per-scene matTable
+    // built from MatLib filtered by RelScene. Our test materials are
+    // already linked into MatLib (linkMatToLib in buildXparTestScene);
+    // this rebuild assigns Material::ID and registers them with the scene.
+    Scene_RebuildMatTable(sc);
+
+    static std::unique_ptr<Face*[]> fListStorage =
+        std::make_unique<Face*[]>(256);
+    static std::unique_ptr<Face*[]> sListStorage =
+        std::make_unique<Face*[]>(256);
+    FList = fListStorage.get();
+    SList = sListStorage.get();
+
+    struct CamPose { const char* name; Vector dir; };
+    const CamPose poses[] = {
+        {"pos_z",   Vector( 0.0f,  0.3f,  1.0f)},
+        {"pos_xz",  Vector( 0.7f,  0.3f,  0.7f)},
+        {"pos_x",   Vector( 1.0f,  0.3f,  0.0f)},
+        {"neg_xz",  Vector(-0.7f,  0.3f,  0.7f)},
+        {"neg_x",   Vector(-1.0f,  0.3f,  0.0f)},
+        {"high",    Vector( 0.0f,  1.0f,  0.5f)},
+    };
+
+    const Vector center = Vector(0, 2, 0);
+    const float dist = 10.0f;
+
+    int produced = 0;
+    for (const CamPose& p : poses) {
+        Vector dir = p.dir;
+        Vector_Norm(&dir);
+        View->ISource.x = center.x + dir.x * dist;
+        View->ISource.y = center.y + dir.y * dist;
+        View->ISource.z = center.z + dir.z * dist;
+        buildLookAt(View->ISource, center, View->Mat);
+        CalcPersp(View);
+        FOVX = View->PerspX;
+        FOVY = View->PerspY;
+
+        std::memset(VPage,   0, PageSize);
+        std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+        Transform_Objects(sc);
+        Lighting(sc);
+        if (CAll) {
+            Radix_SortingASM(FList, SList, CAll);
+            Render();
+        }
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath),
+                      "%s/xpartest_c%d_%s.ppm", cfg.outDir.c_str(),
+                      testCase, p.name);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[XPARTEST] case=%d %s cam=(%.1f,%.1f,%.1f) -> %s\n",
+            testCase, p.name,
+            View->ISource.x, View->ISource.y, View->ISource.z,
+            colorPath);
+        ++produced;
+    }
+
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 // Reproduce the user-reported seaside-view bug: stand outside the city
 // over open water, look back at the coastline. The reflective windows on
 // the water-facing side of the nearest building should reflect SKY/SEA

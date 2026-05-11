@@ -61,6 +61,18 @@ int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres);
 //   DEMO --snapshot=cuberefl [--out=PATH]
 int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres);
 
+// Transparent-rendering test harness. Programmatic scenes (no FLD load)
+// for isolating per-pixel deferred transparent issues: lighting drift,
+// missing triangles, Z-occlusion failures, multi-layer blend.
+//
+//   DEMO --snapshot=xpartest@t=1   case 1: single transparent quad
+//   DEMO --snapshot=xpartest@t=2   case 2: wall blocks transparent behind
+//   DEMO --snapshot=xpartest@t=3   case 3: two layered transparents
+//   DEMO --snapshot=xpartest@t=4   case 4: glass cube (TwoSided)
+//
+// Run with FDS_DEFERRED=0/1 to compare forward vs deferred.
+int RunXparTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Reproduce the user-reported wrong-direction reflection: stand outside
 // the city over open water at four extremes, look back at the nearest
 // reflective building. The water-facing side reflects what's behind the
