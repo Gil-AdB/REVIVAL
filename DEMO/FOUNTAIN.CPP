@@ -810,6 +810,17 @@ void Initialize_Fountain()
 	{
 		if (M->RelScene != FntSc) continue;
 		M->Flags |= Mat_RGBInterp;
+		// Spire orbs (outer "f_sphere" / inner "f in shpere") ship from
+		// the FLD as single-sided transparent. With the 2-deep xpar
+		// G-buffer the back-facing half is what fills the back layer —
+		// without TwoSided those back-facing tris get culled before
+		// reaching the deferred dispatch, so the back layer stays empty
+		// and the orbs render as a thin shell. Forcing TwoSided lets
+		// both halves through and the orbs look like full glass spheres.
+		if (M->Name && (std::strcmp(M->Name, "f_sphere") == 0 ||
+		                std::strstr(M->Name, "in shpere"))) {
+			M->Flags |= Mat_TwoSided;
+		}
 	}
 	Add_Vortex_ToScene();
 
