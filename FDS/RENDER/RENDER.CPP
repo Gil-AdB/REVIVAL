@@ -1746,7 +1746,12 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
 		if (frontFacing) {
 			clipper.Render(F, MekaleleTransparent, false);
 		} else {
-			clipper.Render(F, F->Filler, false);
+			// 2-deep transparent G-buffer: back-facing tris of convex
+			// transparents (the exit surface along the view ray) go to
+			// the back layer. The composite pass lights the back layer
+			// onto VPage first, then the front layer on top — so a
+			// glass cube shows both its near and far walls.
+			clipper.Render(F, MekaleleTransparentBack, false);
 		}
 	}
 
@@ -2432,12 +2437,29 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 // onto VPage (matches TheOtherBarry<TRANSPARENT>'s blend rule). Specular
 // + checkerboard / quarter-rate / vec paths omitted — transparent
 // coverage is small, scalar is fine until profiling says otherwise.
+// Templated on which transparent layer to light: Front reads
+// g_gbufferTransparent + g_xparZ; Back reads g_gbufferTransparentBack +
+// g_xparZBack. Both kernels are identical apart from the buffer pointers
+// — kept as one function body so they don't drift.
+enum class XparLayer { Front, Back };
+
+template <XparLayer Layer>
 static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &ctx,
                                                      int tileIndex,
                                                      int x1, int y1, int x2, int y2)
 {
-	if (!g_gbufferTransparent || !g_xparZ) return;
-	const meka::GBuffer &gbX = *g_gbufferTransparent;
+	meka::GBuffer *gbPtr;
+	uint16_t      *zPtr;
+	if constexpr (Layer == XparLayer::Front) {
+		gbPtr = g_gbufferTransparent;
+		zPtr  = g_xparZ;
+	} else {
+		gbPtr = g_gbufferTransparentBack;
+		zPtr  = g_xparZBack;
+	}
+	if (!gbPtr || !zPtr) return;
+	const meka::GBuffer &gbX = *gbPtr;
+	uint16_t *xparZ = zPtr;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	// FDS_XPAR_LIGHT_ALL=1: bypass per-tile light culling for transparents;
 	// iterate the full scene omni list per pixel. Conservatively-correct
@@ -2456,7 +2478,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			const size_t i = size_t(py) * XRes + px;
 			const uint32_t mat32 = gbX.txtr[i];
 			if (mat32 == 0xFFFFFFFFu) continue;  // no transparent front
-			const word zEnc = g_xparZ[i];
+			const word zEnc = xparZ[i];
 			if (zEnc == 0) continue;
 			// Opaque-Z occlusion: if opaque ZPage16 has a larger z_candidate
 			// at this pixel, the opaque surface is CLOSER to camera than
@@ -3434,6 +3456,14 @@ void Render(RenderPath path)
 		if (g_xparZ) {
 			parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
 		}
+		// Back layer (depth-peel slot for back-facing transparents).
+		if (g_gbufferTransparentBack) {
+			parallel_memset(g_gbufferTransparentBack->txtr.data(), 0xFF,
+			                numPixels * sizeof(uint32_t));
+		}
+		if (g_xparZBack) {
+			parallel_memset(g_xparZBack, 0, numPixels * sizeof(uint16_t));
+		}
 	}
 
 	for (auto j = 0; j < numTilesY; ++j) {
@@ -3491,28 +3521,39 @@ void Render(RenderPath path)
 			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
 		}
 
-		// Per-pixel deferred lighting for the closest front-facing
-		// transparent at each pixel. Reads xpr-G-buffer, computes
-		// per-pixel Lambertian, alpha-blends 50/50 onto VPage.
-		// Reuses the per-tile light list built by Render_DeferredLighting.
-		renderns::tileCounter = 0;
-		for (auto j = 0; j < numTilesY; ++j) {
-			auto y1 = tileSizeY * j;
-			auto y2 = std::min(y1 + tileSizeY, YRes);
-			for (auto i = 0; i < numTilesX; ++i) {
-				auto x1 = tileSizeX * i;
-				auto x2 = std::min(x1 + tileSizeX, XRes);
-				const int tileIdx = j * numTilesX + i;
-				ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx]() {
-					Render_DeferredTransparentLighting_Tile(
-						g_deferredCtx, tileIdx, x1, y1, x2, y2);
-				});
+		// 2-deep transparent composite. Two passes, both reuse the
+		// per-tile light list from the opaque deferred lighting pass.
+		//
+		//   1. BACK layer first — back-facing transparent surface per
+		//      pixel (the exit point along a viewing ray through a
+		//      convex transparent object). Alpha-blends onto VPage,
+		//      which already has the lit opaque scene.
+		//   2. FRONT layer on top — closest front-facing transparent
+		//      surface per pixel (the entry point). Alpha-blends onto
+		//      VPage, which now has opaque + back composited beneath.
+		//
+		// For a glass cube viewed from outside, this renders both its
+		// near and far walls (back wall tinted dimmer through the near
+		// wall) instead of just the near wall.
+		auto runXparPass = [&](auto kernelFn) {
+			renderns::tileCounter = 0;
+			for (auto j = 0; j < numTilesY; ++j) {
+				auto y1 = tileSizeY * j;
+				auto y2 = std::min(y1 + tileSizeY, YRes);
+				for (auto i = 0; i < numTilesX; ++i) {
+					auto x1 = tileSizeX * i;
+					auto x2 = std::min(x1 + tileSizeX, XRes);
+					const int tileIdx = j * numTilesX + i;
+					ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx, kernelFn]() {
+						kernelFn(g_deferredCtx, tileIdx, x1, y1, x2, y2);
+					});
+				}
 			}
-		}
-		{
 			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
-		}
+		};
+		runXparPass(Render_DeferredTransparentLighting_Tile<XparLayer::Back>);
+		runXparPass(Render_DeferredTransparentLighting_Tile<XparLayer::Front>);
 	}
 
 	int32_t I = CAll;

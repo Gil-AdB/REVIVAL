@@ -405,32 +405,59 @@ inline void SetGBuffer(meka::GBuffer *gbuffer) {
 // for the headless snapshot path.
 void EngineGBuffer_Resize(int X, int Y);
 
-inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
-	//for (dword i = 0; i < numVerts; ++i) {
-	//	float z = 1.0f / V[i]->RZ;
-	//	V[i]->U = V[i]->UZ * z;
-	//	V[i]->V = V[i]->VZ * z;
-	//}
+// Which deferred buffer set a Mekalele dispatch writes into.
+//   Opaque           — opaque G-buffer + ZPage16
+//   TransparentFront — front-layer xpar G-buffer + g_xparZ; the closest
+//                      front-facing transparent surface per pixel.
+//   TransparentBack  — back-layer xpar G-buffer + g_xparZBack; the
+//                      back-facing surface paired with TransparentFront
+//                      for 2-deep transparent rendering of convex
+//                      transparent objects (glass cube entry+exit).
+enum class MekaleleTarget {
+	Opaque,
+	TransparentFront,
+	TransparentBack,
+};
+
+extern meka::GBuffer *g_gbufferTransparentBack;
+extern uint16_t      *g_xparZBack;
+
+// Mekalele rasterizer entry point, templated on which buffer set to
+// write into. Body is identical across targets — only the G-buffer
+// pointer and zbuffer pointer differ. Three instantiations below
+// provide the concrete `RasterFunc`-compatible function pointers
+// `Mekalele`, `MekaleleTransparent`, `MekaleleTransparentBack` that
+// the rest of the engine references.
+template <MekaleleTarget Target>
+inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+	meka::GBuffer *gb;
+	uint16_t *zbuf;
+	if constexpr (Target == MekaleleTarget::Opaque) {
+		gb   = g_gbuffer;
+		zbuf = ZPage16;
+	} else if constexpr (Target == MekaleleTarget::TransparentFront) {
+		gb   = g_gbufferTransparent;
+		zbuf = g_xparZ;
+	} else {  // TransparentBack
+		gb   = g_gbufferTransparentBack;
+		zbuf = g_xparZBack;
+	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = XRes,
 		.yres = YRes,
-		.Txtr = F->Txtr->Txtr,    // Texture* for UV math
-		.matID = F->Txtr->ID,     // Material::ID — what the deferred pass dereferences via Scene_GetMatTable
+		.Txtr = F->Txtr->Txtr,
+		.matID = F->Txtr->ID,
 		.miplevel = miplevel,
-		.zbuffer = ZPage16,
+		.zbuffer = zbuf,
 	};
-	meka::TileRasterizer r(*g_gbuffer, ctx);
+	meka::TileRasterizer r(*gb, ctx);
 
 	Vertex vc[12];
-
 	for (dword i = 0; i < numVerts; ++i) {
 		vc[i] = *V[i];
 	}
-
 	for (dword i = 2; i < numVerts; ++i) {
-		//r.setVertexIndexes(0, i - 1, i);
-
 		const auto& v1 = (vc[0]);
 		const auto& v2 = (vc[i - 1]);
 		const auto& v3 = (vc[i]);
@@ -468,59 +495,12 @@ inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 	}
 }
 
-// MekaleleTransparent: same rasterizer as Mekalele, but writes into the
-// TRANSPARENT G-buffer (mat32 + normal) and its own Z-buffer (g_xparZ)
-// instead of the opaque ZPage16. Front-facing transparent faces in
-// RenderInnerDeferredTransparent route here so closest-front wins per
-// pixel; Render_DeferredTransparentLighting then computes per-pixel light
-// for those pixels and alpha-blends onto VPage.
+inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+	MekaleleImpl<MekaleleTarget::Opaque>(F, V, numVerts, miplevel);
+}
 inline void MekaleleTransparent(Face* F, Vertex** V, dword numVerts, dword miplevel) {
-	meka::TileRasterizerCtx ctx = {
-		.V = V,
-		.xres = XRes,
-		.yres = YRes,
-		.Txtr = F->Txtr->Txtr,
-		.matID = F->Txtr->ID,
-		.miplevel = miplevel,
-		.zbuffer = g_xparZ,                  // transparent's own Z
-	};
-	meka::TileRasterizer r(*g_gbufferTransparent, ctx);
-
-	Vertex vc[12];
-	for (dword i = 0; i < numVerts; ++i) {
-		vc[i] = *V[i];
-	}
-	for (dword i = 2; i < numVerts; ++i) {
-		const auto& v1 = (vc[0]);
-		const auto& v2 = (vc[i - 1]);
-		const auto& v3 = (vc[i]);
-
-		float m[4] = {
-			v2.PX - v1.PX, v2.PY - v1.PY,
-			v3.PX - v1.PX, v3.PY - v1.PY
-		};
-		const float det = m[0] * m[3] - m[1] * m[2];
-		if (fabs(det) <= 0.01f) continue;
-		const float im[4] = {
-			 m[3] / det, -m[1] / det,
-			-m[2] / det,  m[0] / det
-		};
-		r.drzdx = im[0] * (v2.RZ - v1.RZ) + im[1] * (v3.RZ - v1.RZ);
-		r.drzdy = im[2] * (v2.RZ - v1.RZ) + im[3] * (v3.RZ - v1.RZ);
-		r.duzdx = im[0] * (v2.UZ - v1.UZ) + im[1] * (v3.UZ - v1.UZ);
-		r.duzdy = im[2] * (v2.UZ - v1.UZ) + im[3] * (v3.UZ - v1.UZ);
-		r.dvzdx = im[0] * (v2.VZ - v1.VZ) + im[1] * (v3.VZ - v1.VZ);
-		r.dvzdy = im[2] * (v2.VZ - v1.VZ) + im[3] * (v3.VZ - v1.VZ);
-		r.dnxdx = im[0] * (v2.TN.x - v1.TN.x) + im[1] * (v3.TN.x - v1.TN.x);
-		r.dnxdy = im[2] * (v2.TN.x - v1.TN.x) + im[3] * (v3.TN.x - v1.TN.x);
-		r.dnydx = im[0] * (v2.TN.y - v1.TN.y) + im[1] * (v3.TN.y - v1.TN.y);
-		r.dnydy = im[2] * (v2.TN.y - v1.TN.y) + im[3] * (v3.TN.y - v1.TN.y);
-		r.dnzdx = im[0] * (v2.TN.z - v1.TN.z) + im[1] * (v3.TN.z - v1.TN.z);
-		r.dnzdy = im[2] * (v2.TN.z - v1.TN.z) + im[3] * (v3.TN.z - v1.TN.z);
-
-		r.umask = (1 << r.LogWidth) - 1;
-		r.vmask = (1 << r.LogHeight) - 1;
-
-		r.rasterize_triangle(v1, v2, v3);
-	}
+	MekaleleImpl<MekaleleTarget::TransparentFront>(F, V, numVerts, miplevel);
+}
+inline void MekaleleTransparentBack(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+	MekaleleImpl<MekaleleTarget::TransparentBack>(F, V, numVerts, miplevel);
 }
