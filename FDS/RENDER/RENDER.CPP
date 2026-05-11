@@ -1289,13 +1289,13 @@ void StaticLighting(Scene *Sc)
 
 		for(O=Sc->OmniHead, L=LA;O;O=O->Next)
 		{
-			if (!(O->Flags & Omni_Active)) 
+			if (!(O->Flags & Omni_Active))
 				continue;
-			if (!(O->Flags & Omni_Stationary)) 
+			if (!(O->Flags & Omni_Stationary))
 				continue;
 			Vector_Sub(&O->IPos, &T->IPos, &u);
 			MatrixTXVector(T->RotMat, &u, &w);
-			Vector *wp = (Vector *)(T->RotMat);			
+			Vector *wp = (Vector *)(T->RotMat);
 			float rScale = 1.0/Vector_Length(wp);
 			Vector_SelfScale(&w, rScale*rScale);
 			Vector_Copy(&L->Pos, &w);
@@ -1304,10 +1304,26 @@ void StaticLighting(Scene *Sc)
 			L->Range2 = L->Range * L->Range;
 			L->rRange = 1.0/L->Range;
 
-			
+			// Spot light: rotate the cone axis into the mesh's local
+			// space so the per-vertex `dot(L->Dir, vertex_to_light)`
+			// matches the same coordinate system as the rest of this
+			// loop. cosInner/cosOuter come from the Omni unchanged
+			// (they're cosines, no scaling needed).
+			L->isSpot = (O->Type == Light_SpotLight) ? 1 : 0;
+			if (L->isSpot) {
+				MatrixTXVector(T->RotMat, (Vector*)&O->IDir, &L->Dir);
+				Vector_Norm(&L->Dir);
+				L->cosInner = O->HotSpot;
+				L->cosOuter = O->FallOff;
+			} else {
+				L->Dir.x = L->Dir.y = L->Dir.z = 0.0f;
+				L->cosInner = -2.0f;  // sentinel: "always inside"
+				L->cosOuter = -2.0f;
+			}
+
 			if (Mat->Txtr)
 			{
-				float intensity = O->ISize * Mat->Diffuse;	
+				float intensity = O->ISize * Mat->Diffuse;
 				L->Col.B = O->L.B * intensity;
 				L->Col.G = O->L.G * intensity;
 				L->Col.R = O->L.R * intensity;
@@ -1347,6 +1363,23 @@ void StaticLighting(Scene *Sc)
 				float len = SQRT(len2);
 				float k = dot / len * (1.0-len*L->rRange);
 
+				// Spot cone attenuation: cosTheta = dot(-Dir, light_to_vertex_unit).
+				// w runs vertex→light, so the light's outgoing direction
+				// at the vertex is -w/|w| relative to the vertex but +w/|w|
+				// relative to the light. We want angle between L->Dir
+				// (cone axis) and the vector FROM the light TO the vertex
+				// (= -w/|w|). Equivalently: cosTheta = dot(L->Dir, -w/|w|)
+				//                                   = -dot(L->Dir, w)/|w|.
+				if (L->isSpot) {
+					float invLen = 1.0f / len;
+					float cosTheta = -(L->Dir.x*w.x + L->Dir.y*w.y + L->Dir.z*w.z) * invLen;
+					if (cosTheta <= L->cosOuter) continue;  // outside outer cone
+					if (cosTheta < L->cosInner) {
+						float t = (cosTheta - L->cosOuter) / (L->cosInner - L->cosOuter);
+						k *= t * t * (3.0f - 2.0f * t);  // smoothstep edge falloff
+					}
+					// (cosTheta >= cosInner: inside inner cone, no attenuation)
+				}
 
 				l.B += k*L->Col.B;
 				l.G += k*L->Col.G;
@@ -1464,6 +1497,19 @@ void Lighting(Scene *Sc)
 			if (T->BSphereRadius + L->Range < Vector_Length(&u))
 				continue;
 
+			// Spot params (mirrors the other Lighting() loop above).
+			L->isSpot = (O->Type == Light_SpotLight) ? 1 : 0;
+			if (L->isSpot) {
+				MatrixTXVector(T->RotMat, (Vector*)&O->IDir, &L->Dir);
+				Vector_Norm(&L->Dir);
+				L->cosInner = O->HotSpot;
+				L->cosOuter = O->FallOff;
+			} else {
+				L->Dir.x = L->Dir.y = L->Dir.z = 0.0f;
+				L->cosInner = -2.0f;
+				L->cosOuter = -2.0f;
+			}
+
 			if (Mat->Txtr)
 			{
 				float intensity = O->ISize * Mat->Diffuse;
@@ -1518,6 +1564,19 @@ void Lighting(Scene *Sc)
 
 				float len = RSQRT(len2);
 				float k = dot * len * (1.0-L->rRange/len);
+
+				// Spot cone — same shape as the other Lighting() loop. RSQRT
+				// here returns 1/sqrt, so `len` is actually the inverse
+				// length. cosTheta = -dot(L->Dir, w) * (1/|w|).
+				if (L->isSpot) {
+					float cosTheta = -(L->Dir.x*w.x + L->Dir.y*w.y + L->Dir.z*w.z) * len;
+					if (cosTheta <= L->cosOuter) continue;
+					if (cosTheta < L->cosInner) {
+						float t = (cosTheta - L->cosOuter) / (L->cosInner - L->cosOuter);
+						k *= t * t * (3.0f - 2.0f * t);
+					}
+				}
+
 				pl->B += k*L->Col.B;
 				pl->G += k*L->Col.G;
 				pl->R += k*L->Col.R;
@@ -1836,6 +1895,15 @@ struct ViewLightsSoA {
 	alignas(32) float colR[DEFERRED_MAX_LIGHTS];
 	alignas(32) float range2[DEFERRED_MAX_LIGHTS];
 	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
+	// Spot light cone (Light_SpotLight). dirX/Y/Z is the cone axis in
+	// view space (unit vector). cosInner / cosOuter are the cone half
+	// angles in cosine form. isSpot=0 means omni (cone params ignored).
+	alignas(32) float dirX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float cosInner[DEFERRED_MAX_LIGHTS];
+	alignas(32) float cosOuter[DEFERRED_MAX_LIGHTS];
+	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -1856,6 +1924,12 @@ struct TileLights {
 	alignas(32) float colR[DEFERRED_MAX_LIGHTS];
 	alignas(32) float range2[DEFERRED_MAX_LIGHTS];
 	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float cosInner[DEFERRED_MAX_LIGHTS];
+	alignas(32) float cosOuter[DEFERRED_MAX_LIGHTS];
+	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 };
@@ -1952,6 +2026,12 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float Lcr = lights.colR[li];
 		const float Lr2 = lights.range2[li];
 		const float Lrr = lights.rRange[li];
+		const float Ldx = lights.dirX[li];
+		const float Ldy = lights.dirY[li];
+		const float Ldz = lights.dirZ[li];
+		const float Lci = lights.cosInner[li];
+		const float Lco = lights.cosOuter[li];
+		const uint32_t Lis = lights.isSpot[li];
 
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
@@ -1967,6 +2047,12 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 					tl.colR[s]   = Lcr;
 					tl.range2[s] = Lr2;
 					tl.rRange[s] = Lrr;
+					tl.dirX[s]     = Ldx;
+					tl.dirY[s]     = Ldy;
+					tl.dirZ[s]     = Ldz;
+					tl.cosInner[s] = Lci;
+					tl.cosOuter[s] = Lco;
+					tl.isSpot[s]   = Lis;
 				}
 			}
 		}
@@ -1988,6 +2074,12 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			tl.colR[p]   = 0.0f;
 			tl.range2[p] = 0.0f;
 			tl.rRange[p] = 0.0f;
+			tl.dirX[p]     = 0.0f;
+			tl.dirY[p]     = 0.0f;
+			tl.dirZ[p]     = 0.0f;
+			tl.cosInner[p] = -2.0f;
+			tl.cosOuter[p] = -2.0f;
+			tl.isSpot[p]   = 0u;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -2253,6 +2345,37 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
 						__m256 falloff = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
 						__m256 k = _mm256_mul_ps(_mm256_mul_ps(dot, lenInv), falloff);
+
+						// Spot cone attenuation. For lanes where isSpot==0
+						// coneAtten=1 (omni). For spot lanes: smoothstep
+						// from cosOuter→cosInner of cosTheta=-dot(Dir,w)/|w|.
+						__m256 ldx = _mm256_load_ps(tl.dirX     + slot);
+						__m256 ldy = _mm256_load_ps(tl.dirY     + slot);
+						__m256 ldz = _mm256_load_ps(tl.dirZ     + slot);
+						__m256 lci = _mm256_load_ps(tl.cosInner + slot);
+						__m256 lco = _mm256_load_ps(tl.cosOuter + slot);
+						__m256i lis = _mm256_load_si256((const __m256i*)(tl.isSpot + slot));
+						__m256 dirDotW = _mm256_fmadd_ps(ldx, wx,
+						                  _mm256_fmadd_ps(ldy, wy,
+						                   _mm256_mul_ps(ldz, wz)));
+						__m256 cosTheta = _mm256_mul_ps(
+						                    _mm256_sub_ps(vZero, dirDotW),
+						                    lenInv);
+						__m256 maskInside = _mm256_cmp_ps(cosTheta, lco, _CMP_GT_OQ);
+						__m256 rangeRcp = _mm256_div_ps(vOne, _mm256_sub_ps(lci, lco));
+						__m256 t = _mm256_mul_ps(_mm256_sub_ps(cosTheta, lco), rangeRcp);
+						t = _mm256_min_ps(_mm256_max_ps(t, vZero), vOne);
+						// smoothstep(t) = t*t*(3-2t)
+						__m256 smooth = _mm256_mul_ps(_mm256_mul_ps(t, t),
+						                  _mm256_sub_ps(_mm256_set1_ps(3.0f),
+						                                _mm256_mul_ps(_mm256_set1_ps(2.0f), t)));
+						// coneAtten = isSpot ? (maskInside ? smooth : 0) : 1
+						__m256 spotAtten = _mm256_and_ps(maskInside, smooth);
+						__m256 isSpotMask = _mm256_castsi256_ps(
+						                     _mm256_cmpgt_epi32(lis, _mm256_setzero_si256()));
+						__m256 coneAtten = _mm256_blendv_ps(vOne, spotAtten, isSpotMask);
+						k = _mm256_mul_ps(k, coneAtten);
+
 						__m256 intensity = _mm256_blendv_ps(vZero,
 						                    _mm256_mul_ps(k, vDiff), mask);
 
@@ -2551,7 +2674,15 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					if (len2 > vlAll->range2[n]) continue;
 					const float lenInv = fast_rsqrt(len2);
 					const float dist   = len2 * lenInv;
-					const float k = dot * lenInv * (1.0f - dist * vlAll->rRange[n]);
+					float k = dot * lenInv * (1.0f - dist * vlAll->rRange[n]);
+					if (vlAll->isSpot[n]) {
+						const float cosTheta = -(vlAll->dirX[n]*wx + vlAll->dirY[n]*wy + vlAll->dirZ[n]*wz) * lenInv;
+						if (cosTheta <= vlAll->cosOuter[n]) continue;
+						if (cosTheta < vlAll->cosInner[n]) {
+							float t = (cosTheta - vlAll->cosOuter[n]) / (vlAll->cosInner[n] - vlAll->cosOuter[n]);
+							k *= t * t * (3.0f - 2.0f * t);
+						}
+					}
 					const float intensity = k * Mat->Diffuse;
 					lB += intensity * vlAll->colB[n];
 					lG += intensity * vlAll->colG[n];
@@ -2568,7 +2699,15 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					if (len2 > tlTile.range2[n]) continue;
 					const float lenInv = fast_rsqrt(len2);
 					const float dist   = len2 * lenInv;
-					const float k = dot * lenInv * (1.0f - dist * tlTile.rRange[n]);
+					float k = dot * lenInv * (1.0f - dist * tlTile.rRange[n]);
+					if (tlTile.isSpot[n]) {
+						const float cosTheta = -(tlTile.dirX[n]*wx + tlTile.dirY[n]*wy + tlTile.dirZ[n]*wz) * lenInv;
+						if (cosTheta <= tlTile.cosOuter[n]) continue;
+						if (cosTheta < tlTile.cosInner[n]) {
+							float t = (cosTheta - tlTile.cosOuter[n]) / (tlTile.cosInner[n] - tlTile.cosOuter[n]);
+							k *= t * t * (3.0f - 2.0f * t);
+						}
+					}
 					const float intensity = k * Mat->Diffuse;
 					lB += intensity * tlTile.colB[n];
 					lG += intensity * tlTile.colG[n];
@@ -3209,7 +3348,21 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (len2 > tl.range2[n]) continue;
 				const float lenInv = fast_rsqrt(len2);
 				const float dist   = len2 * lenInv;
-				const float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
+				float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
+				// Spot cone gate. coneAtten in [0,1] modulates BOTH diffuse
+				// and specular contributions so they stay coherent — the
+				// spot just darkens the light past the inner cone, not
+				// just its diffuse channel.
+				float coneAtten = 1.0f;
+				if (tl.isSpot[n]) {
+					const float cosTheta = -(tl.dirX[n]*wx + tl.dirY[n]*wy + tl.dirZ[n]*wz) * lenInv;
+					if (cosTheta <= tl.cosOuter[n]) continue;
+					if (cosTheta < tl.cosInner[n]) {
+						float t = (cosTheta - tl.cosOuter[n]) / (tl.cosInner[n] - tl.cosOuter[n]);
+						coneAtten = t * t * (3.0f - 2.0f * t);
+						k *= coneAtten;
+					}
+				}
 				const float intensity = k * Mat->Diffuse;
 				lB += intensity * tl.colB[n];
 				lG += intensity * tl.colG[n];
@@ -3227,7 +3380,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const float NdotH = nx*hx + ny*hy + nz*hz;
 						if (NdotH > 0.0f) {
 							const float spec = std::pow(NdotH, gloss);
-							const float specStrength = spec * Mat->Specular * (1.0f - dist * tl.rRange[n]);
+							const float specStrength = spec * Mat->Specular * (1.0f - dist * tl.rRange[n]) * coneAtten;
 							sB += specStrength * tl.colB[n];
 							sG += specStrength * tl.colG[n];
 							sR += specStrength * tl.colR[n];
@@ -3330,6 +3483,27 @@ static void Render_DeferredLighting() {
 		// preserved. Only the cull radius shrinks.
 		const float realRange = O->IRange;
 		lights.rRange[numLights] = (realRange > 0.0f) ? 1.0f / realRange : 0.0f;
+		// Spot light: rotate the cone axis (world space) into view space
+		// using the same View->Mat that placed posX/Y/Z. Pure rotation,
+		// no translation — IDir is a direction not a point.
+		if (O->Type == Light_SpotLight) {
+			Vector dirView;
+			MatrixXVector(View->Mat, (Vector*)&O->IDir, &dirView);
+			Vector_Norm(&dirView);
+			lights.dirX[numLights] = dirView.x;
+			lights.dirY[numLights] = dirView.y;
+			lights.dirZ[numLights] = dirView.z;
+			lights.cosInner[numLights] = O->HotSpot;
+			lights.cosOuter[numLights] = O->FallOff;
+			lights.isSpot[numLights] = 1u;
+		} else {
+			lights.dirX[numLights] = 0.0f;
+			lights.dirY[numLights] = 0.0f;
+			lights.dirZ[numLights] = 0.0f;
+			lights.cosInner[numLights] = -2.0f;
+			lights.cosOuter[numLights] = -2.0f;
+			lights.isSpot[numLights] = 0u;
+		}
 		++numLights;
 	}
 
@@ -3444,7 +3618,13 @@ void Render(RenderPath path)
 	// RenderPath::ForceForward bypasses the deferred dispatch — used by
 	// RenderSkyCube and the City cube-map bake, whose lighting models
 	// are unsuitable for the deferred per-pixel pass.
-	bool deferred = deferredEnabled() && (path != RenderPath::ForceForward);
+	// RenderPath::ForceDeferred takes the deferred path regardless of
+	// the FDS_DEFERRED env var (which is read-once-and-cached) so
+	// snapshot harnesses can render both modes in a single process.
+	bool deferred;
+	if (path == RenderPath::ForceForward)       deferred = false;
+	else if (path == RenderPath::ForceDeferred) deferred = true;
+	else                                        deferred = deferredEnabled();
 	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
 		deferred = false;
 	}

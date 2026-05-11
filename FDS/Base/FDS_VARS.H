@@ -201,7 +201,16 @@ struct CurLight
 	float Range; // light range (before mesh scaling)
 	float Range2;
 	float rRange;
-	dword	dummy1,dummy2;
+	// Spot light: when isSpot != 0, vertex must lie inside the cone for
+	// any light to accumulate. Dir is the cone axis in mesh-local space
+	// (rotated through T->RotMat so the per-vertex dot product is
+	// directly usable). cosInner / cosOuter are the inner/outer cone
+	// half-angles in cosine form — light is full inside cosInner,
+	// smoothstep'd to zero between cosInner and cosOuter, zero outside.
+	uint32_t isSpot;
+	Vector   Dir;
+	float    cosInner;
+	float    cosOuter;
 };
 
 struct MusicModuleInfo
