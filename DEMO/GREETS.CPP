@@ -533,6 +533,17 @@ void Initialize_Greets()
 		g_RobotSpot->HotSpot = std::cos(25.0f * 3.14159f / 180.0f);
 		g_RobotSpot->FallOff = std::cos(40.0f * 3.14159f / 180.0f);
 		g_RobotSpot->Flags = Omni_Active;
+		// Flare-pass plumbing. Transform_Objects unconditionally adds
+		// every Omni's F to FList (treats it as a flare sprite). With
+		// F.A/B/C left at the memset zeros, the flare pass at
+		// RENDER.CPP:3796 dereferences a null Vertex and crashes. Point
+		// A/B/C at the omni's own V so the A==B sprite branch sees a
+		// valid (degenerate) face, then install a no-op filler so no
+		// flare sprite actually gets drawn.
+		g_RobotSpot->F.A = &g_RobotSpot->V;
+		g_RobotSpot->F.B = &g_RobotSpot->V;
+		g_RobotSpot->F.C = &g_RobotSpot->V;
+		g_RobotSpot->F.Filler = [](Face*, Vertex**, dword, dword) {};
 		// Single-key splines so Animate_Objects doesn't crash when it
 		// walks them. The keys evaluate to constant zeros — our per-
 		// frame update in the tick loop overrides IPos / IDir after
