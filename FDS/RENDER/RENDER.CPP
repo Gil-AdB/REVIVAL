@@ -902,6 +902,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 				F->EU3 = eu[2];
 				F->EV3 = ev[2];
 			}
+			F->ParentTri = T;
 			*Ins++ = F;
 
 #ifdef FRONT_TO_BACK_SORTING
@@ -1699,17 +1700,27 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 // transparent faces back-to-front, after all opaque) and dispatches each
 // through F->Filler — preassigned in PREPROC.CPP to TheOtherBarry<TRANSPARENT>
 // or TheOtherBarry<ADDITIVE> per material flags.
-void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
+void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
+                                     int firstIdx, int countIdx,
+                                     TriMesh* parentFilter) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 
-	int32_t I = CAll;
-	Face** FLS = FList;
+	int32_t I = countIdx;
+	Face** FLS = FList + firstIdx;
 	Vertex *A, *B, *C;
 
 	while (I--) {
 		Face* F = *FLS++;
+
+		// Per-object peeling: when parentFilter is non-null, skip any
+		// face that didn't come from that TriMesh. Lets the caller
+		// process one transparent object at a time so nested objects
+		// (concentric outer+inner) each get their own 2-deep render
+		// + composite cycle instead of fighting for the shared back
+		// layer.
+		if (parentFilter && F->ParentTri != parentFilter) continue;
 
 		A = F->A; B = F->B;
 		if (A == B) continue;
@@ -3495,47 +3506,47 @@ void Render(RenderPath path)
 		// colorize step in one go.
 		Render_DeferredLighting();
 
-		// Forward pass for Mat_Transparent / Mat_Additive faces. They
-		// were skipped in the deferred raster pass; render them now in
-		// FList sort order (back-to-front for transparent — sorted by
-		// PREPROC's `2*fzp - dz` rule) over the lit opaque framebuffer.
-		// Within this pass:
-		//   front-facing transparents → MekaleleTransparent (writes
-		//     into xpr-G-buffer; closest wins per pixel via xpr-Z)
-		//   back-facing transparents  → forward TheOtherBarry (vertex
-		//     Gouraud + 50/50 blend onto VPage now)
-		renderns::tileCounter = 0;
-		for (auto j = 0; j < numTilesY; ++j) {
-			auto y1 = tileSizeY * j;
-			auto y2 = std::min(y1 + tileSizeY, YRes);
-			for (auto i = 0; i < numTilesX; ++i) {
-				auto x1 = tileSizeX * i;
-				auto x2 = std::min(x1 + tileSizeX, XRes);
-				ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
-					RenderInnerDeferredTransparent(x1, y1, x2, y2);
-				});
+		// Per-object peeled transparent rendering. We process each
+		// transparent TriMesh independently — clear the xpar G-buffers,
+		// render that mesh's transparent faces (back-facing → back
+		// layer, front-facing → front layer), light the back layer
+		// onto VPage, light the front layer onto VPage — before moving
+		// on to the next mesh. Object order is each mesh's FIRST
+		// appearance in the sorted FList, which is back-to-front by
+		// the object-grouping sort key, so outer/farther meshes
+		// composite before inner/closer ones.
+		//
+		// This is what makes nested transparent meshes work (fountain
+		// outer + inner spire spheres). With a single shared pass the
+		// inner mesh's back-facing tris would Z-compete with the
+		// outer mesh's back-facing tris in the back layer and one of
+		// them would lose. Per-object peeling gives each mesh a fresh
+		// xpar G-buffer.
+
+		// Build the list of unique transparent-bearing TriMeshes, in
+		// FList sort order. One scan over FList.
+		auto* xparOrder = (TriMesh**)alloca(sizeof(TriMesh*) * size_t(CAll));
+		int   xparOrderCount = 0;
+		{
+			// O(N) dedup via per-TriMesh "seen this frame" stamp.
+			// Use a static frame counter; mesh's seen-stamp is reset
+			// when stale.
+			static uint32_t g_xparPeelFrame = 0;
+			++g_xparPeelFrame;
+			for (int32_t k = 0; k < CAll; ++k) {
+				Face* F = FList[k];
+				if (!F || !F->Txtr) continue;
+				if (!(F->Txtr->Flags & Mat_Transparent)) continue;
+				if (F->Flags & Face_Reflective) continue;  // forward handles
+				TriMesh* T = F->ParentTri;
+				if (!T) continue;
+				if (T->XparSeenFrame == g_xparPeelFrame) continue;
+				T->XparSeenFrame = g_xparPeelFrame;
+				xparOrder[xparOrderCount++] = T;
 			}
 		}
-		{
-			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
-		}
 
-		// 2-deep transparent composite. Two passes, both reuse the
-		// per-tile light list from the opaque deferred lighting pass.
-		//
-		//   1. BACK layer first — back-facing transparent surface per
-		//      pixel (the exit point along a viewing ray through a
-		//      convex transparent object). Alpha-blends onto VPage,
-		//      which already has the lit opaque scene.
-		//   2. FRONT layer on top — closest front-facing transparent
-		//      surface per pixel (the entry point). Alpha-blends onto
-		//      VPage, which now has opaque + back composited beneath.
-		//
-		// For a glass cube viewed from outside, this renders both its
-		// near and far walls (back wall tinted dimmer through the near
-		// wall) instead of just the near wall.
-		auto runXparPass = [&](auto kernelFn) {
+		auto runTilePass = [&](auto workFn) {
 			renderns::tileCounter = 0;
 			for (auto j = 0; j < numTilesY; ++j) {
 				auto y1 = tileSizeY * j;
@@ -3544,16 +3555,47 @@ void Render(RenderPath path)
 					auto x1 = tileSizeX * i;
 					auto x2 = std::min(x1 + tileSizeX, XRes);
 					const int tileIdx = j * numTilesX + i;
-					ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx, kernelFn]() {
-						kernelFn(g_deferredCtx, tileIdx, x1, y1, x2, y2);
+					ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx, workFn]() {
+						workFn(x1, y1, x2, y2, tileIdx);
 					});
 				}
 			}
 			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
 		};
-		runXparPass(Render_DeferredTransparentLighting_Tile<XparLayer::Back>);
-		runXparPass(Render_DeferredTransparentLighting_Tile<XparLayer::Front>);
+
+		const size_t numPixels = size_t(XRes) * size_t(YRes);
+		for (int oi = 0; oi < xparOrderCount; ++oi) {
+			TriMesh* T = xparOrder[oi];
+			// 1. Clear both xpar G-buffer layers (mat32 sentinel + Z=0).
+			if (g_gbufferTransparent) {
+				parallel_memset(g_gbufferTransparent->txtr.data(), 0xFF,
+				                numPixels * sizeof(uint32_t));
+			}
+			if (g_xparZ) parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
+			if (g_gbufferTransparentBack) {
+				parallel_memset(g_gbufferTransparentBack->txtr.data(), 0xFF,
+				                numPixels * sizeof(uint32_t));
+			}
+			if (g_xparZBack) parallel_memset(g_xparZBack, 0, numPixels * sizeof(uint16_t));
+
+			// 2. Raster this mesh's transparent faces into the layers.
+			runTilePass([T](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
+				RenderInnerDeferredTransparent(float(x1), float(y1),
+				                                float(x2), float(y2),
+				                                0, CAll, T);
+			});
+
+			// 3. Composite back, then front. Back-to-front per object.
+			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+				Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
+					g_deferredCtx, tileIdx, x1, y1, x2, y2);
+			});
+			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+				Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
+					g_deferredCtx, tileIdx, x1, y1, x2, y2);
+			});
+		}
 	}
 
 	int32_t I = CAll;

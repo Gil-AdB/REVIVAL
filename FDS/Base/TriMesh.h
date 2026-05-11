@@ -47,6 +47,13 @@ struct TriMesh
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
 
+    // Per-frame "seen this mesh in the deferred transparent peel order"
+    // stamp. Compared against a frame counter to dedup TriMesh* entries
+    // when building the per-object peel list from FList. Stale leftover
+    // value across frames is fine — counter increments each frame, so
+    // never collides.
+    uint32_t         XparSeenFrame      = 0;
+
     TriMesh      * Next             = nullptr;
     TriMesh      * Prev             = nullptr;
 };

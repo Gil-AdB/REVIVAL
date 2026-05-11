@@ -46,6 +46,14 @@ struct Face
 	RasterFunc		Filler = nullptr;
 	Material      * Txtr = nullptr;
 	Texture		  *	ReflectionTexture = nullptr;
+	// Owning TriMesh — set per-frame in Transform_Objects when this Face
+	// is added to FList. Used by the deferred transparent pass to walk
+	// FList in TriMesh-grouped segments, so per-object depth-peeling can
+	// composite each transparent object independently (handles nested
+	// objects like the fountain's outer+inner spire spheres, which
+	// otherwise lose their inner layer to the outer in the 2-deep
+	// xpar G-buffer).
+	struct TriMesh * ParentTri = nullptr;
 	//	Surface       * Surf; // For T-Caching. (what??!)
 
 	void uvFromVertices() {
