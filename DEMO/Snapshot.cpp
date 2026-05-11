@@ -191,9 +191,15 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
     return found;
 }
 
+static void buildLookAt(const Vector& eye, const Vector& target, Matrix outM);
+
 int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
+    // Fountain's tick uses RenderSkyCube(SkySc, ...) but SkySc is created
+    // inside Initialize_City. Snapshot harness has to init both — the
+    // interactive demo goes through Initialize_City first naturally.
+    Initialize_City();
     Initialize_Fountain();
 
     std::vector<int32_t> timestamps = cfg.timestamps;
@@ -201,6 +207,33 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // Default sweep: a few well-spaced moments across the fountain
         // scene's run.
         timestamps = {500, 1500, 2500, 3500, 4500};
+    }
+
+    // Optional camera override via env vars. Set FNTSNAP_POS / FNTSNAP_FWD
+    // / FNTSNAP_FOV as comma-separated triples / scalar to pin the camera
+    // to a known position regardless of where the scripted spline would
+    // place it. Useful for reproducing user-reported view issues.
+    bool overrideCam = false;
+    Vector camPos(0,0,0), camFwd(0,0,1);
+    float  camFOV = 60.0f;
+    auto parseVec = [](const char* s, Vector& out) -> bool {
+        float a, b, c;
+        return s && std::sscanf(s, "%f,%f,%f", &a, &b, &c) == 3
+            && (out = Vector(a, b, c), true);
+    };
+    if (const char* s = std::getenv("FNTSNAP_POS")) {
+        if (parseVec(s, camPos)) overrideCam = true;
+    }
+    if (const char* s = std::getenv("FNTSNAP_FWD")) {
+        parseVec(s, camFwd);
+    }
+    if (const char* s = std::getenv("FNTSNAP_FOV")) {
+        camFOV = float(std::atof(s));
+    }
+    if (overrideCam) {
+        std::fprintf(stderr,
+            "[FNTSNAP] override cam pos=(%.1f,%.1f,%.1f) fwd=(%.3f,%.3f,%.3f) fov=%.1f\n",
+            camPos.x, camPos.y, camPos.z, camFwd.x, camFwd.y, camFwd.z, camFOV);
     }
 
     auto driver = createFountainScene();
@@ -214,6 +247,31 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        if (overrideCam) {
+            View->ISource = camPos;
+            Vector_Norm(&camFwd);
+            buildLookAt(camPos, Vector(camPos.x + camFwd.x,
+                                        camPos.y + camFwd.y,
+                                        camPos.z + camFwd.z), View->Mat);
+            View->IFOV = camFOV;
+            CalcPersp(View);
+            FOVX = View->PerspX;
+            FOVY = View->PerspY;
+            std::fprintf(stderr,
+                "[FNTSNAP] post-override View->Mat row 2 = (%.3f, %.3f, %.3f) ISource=(%.1f,%.1f,%.1f)\n",
+                View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+                View->ISource.x, View->ISource.y, View->ISource.z);
+            std::memset(VPage,   0, PageSize);
+            std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+            Transform_Objects(CurScene);
+            std::fprintf(stderr, "[FNTSNAP] post-Transform CAll=%d CurScene=%p\n",
+                int(CAll), (void*)CurScene);
+            if (CAll) {
+                Radix_SortingASM(FList, SList, CAll);
+                Render();
+            }
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/fountain_t%06d_color.ppm",

@@ -1579,17 +1579,6 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2) {
 		if (!(txtrFlags & Mat_Transparent)) continue;
 		if (F->Flags & Face_Reflective) continue;  // handled in main pass
 
-		// Per-face front/back classify in view space. Front-facing
-		// transparents (the side the camera actually sees through) get
-		// per-pixel deferred lighting via MekaleleTransparent — closest
-		// wins per pixel in xpr-G-buffer; Render_DeferredTransparentLighting
-		// blends onto VPage afterwards. Back-facing transparents render
-		// here-and-now with vertex Gouraud (cheap, dominated visually
-		// by the front face anyway).
-		//
-		// Sort order is back-to-front, so back faces render first and
-		// blend into lit-opaque VPage; their Z (written by TheOtherBarry)
-		// is then visible to subsequent front faces.
 		const float vd = A->TN.x * A->TPos.x
 		               + A->TN.y * A->TPos.y
 		               + A->TN.z * A->TPos.z;
@@ -2299,6 +2288,15 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (mat32 == 0xFFFFFFFFu) continue;  // no transparent front
 			const word zEnc = g_xparZ[i];
 			if (zEnc == 0) continue;
+			// Opaque-Z occlusion: if opaque ZPage16 has a larger z_candidate
+			// at this pixel, the opaque surface is CLOSER to camera than
+			// the transparent we wrote into xpr. Reject the transparent —
+			// it's hidden behind opaque. MekaleleTransparent doesn't see
+			// opaque Z during raster (its zbuffer points at xpr-Z) so we
+			// have to gate here. Without this, transparent surfaces show
+			// through opaque walls (Greets banding behind marble).
+			const word zOpaque = ZPage16[i];
+			if (zOpaque > zEnc) continue;
 
 			const uint32_t miplevel   = (mat32 >> 28) & 0xF;
 			const uint32_t matID      = (mat32 >> 20) & 0xFF;
