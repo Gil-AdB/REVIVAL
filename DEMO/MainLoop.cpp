@@ -198,6 +198,9 @@ static void startScene(std::unique_ptr<SceneDriver> driver)
 	g_currentDriver = std::move(driver);
 	g_currentDriverInitialized = false;
 	Timer = 0;
+	// Symmetric with the FADE_OUT state: the next kFadeFrames V_Flip
+	// calls will fade VPage up from black.
+	EngineStartFadeIn(kFadeFrames);
 }
 
 static void advanceFromState(DemoState newState,

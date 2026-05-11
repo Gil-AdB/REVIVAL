@@ -1,6 +1,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include "SDL2.h"
+#include <VESA/Vesa.h>  // AlphaBlend
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -33,6 +34,20 @@ static SDL_Window *sdl_window;
 // Owns the engine display texture. Reset (-> destroy) and reassigned
 // (-> create) on every resize. SDL_MainSurf.Handle is just s_engineTex.get().
 static SDLTex s_engineTex;
+
+// Fade-in counters. Set via EngineStartFadeIn(N); V_Flip applies an
+// in-place AlphaBlend on the engine surface for the next N flips with
+// an increasing factor, so each scene fades up from black. Counterpart
+// to engineFadeStep (SceneTick.h) which does the symmetric fade-out.
+static int s_fadeInTotal     = 0;
+static int s_fadeInRemaining = 0;
+
+extern "C" void EngineStartFadeIn(int frames)
+{
+	if (frames <= 0) { s_fadeInRemaining = s_fadeInTotal = 0; return; }
+	s_fadeInTotal     = frames;
+	s_fadeInRemaining = frames;
+}
 
 #ifdef __EMSCRIPTEN__
 // One-time WebGL2 setup on the SDL canvas. Must run before any other
@@ -232,6 +247,20 @@ static void V_Flip(VESA_Surface *VS)
 	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
 	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
+
+	// Fade-in pass: while EngineStartFadeIn-armed, scale VPage in place
+	// by an increasing factor before presenting. Only on the engine
+	// surface (lockMode) — Glat's FinalSurf is its own buffer with its
+	// own composite pipeline.
+	if (s_fadeInRemaining > 0 && lockMode && VS->Data && s_fadeInTotal > 0) {
+		int step = s_fadeInTotal - s_fadeInRemaining;  // 0..N-1
+		int modValue = (step + 1) * 255 / s_fadeInTotal;
+		if (modValue > 255) modValue = 255;
+		DWord perSrc = (DWord)((modValue & 0xFF) * 0x01010101u);
+		DWord perDst = 0;
+		AlphaBlend(VS->Data, VS->Data, perSrc, perDst, VS->PageSize);
+		--s_fadeInRemaining;
+	}
 
 #ifdef __EMSCRIPTEN__
 	// Wasm path: SDL renderer is never created on this build, so we can't

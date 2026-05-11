@@ -78,14 +78,16 @@ inline void runFadeOut(int frames) {
 
 inline void runSceneBlocking(SceneDriver& driver) {
     driver.init();
+    // Arm a fade-in: V_Flip will scale VPage in place by an increasing
+    // factor for the first N flips, so the scene comes up from black.
+    // Symmetric with the runFadeOut at scene end.
+    EngineStartFadeIn(15);
     while (true) {
         poll_pending_resize(&driver);
         if (!driver.tick()) break;
     }
     // Fade the last rendered frame to black before cleanup hands control
     // back to the caller (which usually transitions to the next scene).
-    // Scene's last tick left the final framebuffer in VPage; we just
-    // keep alpha-blending it in place.
     runFadeOut(15);
     driver.cleanup();
 }
