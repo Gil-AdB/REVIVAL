@@ -35,6 +35,12 @@ static float frand() {
 
 static Scene *GreetSc;
 
+// Robot spotlight — created in Initialize_Greets if the robot mesh is
+// found, updated each frame in the tick loop after Animate_Objects so
+// the spot follows the robot's world position.
+static TriMesh *g_RobotMesh = nullptr;
+static Omni    *g_RobotSpot = nullptr;
+
 static int32_t CHPartTime = 20.0f*100;
 
 // This function is called to alter parameters within scene objects after loading from FLD.
@@ -498,6 +504,58 @@ void Initialize_Greets()
 
 	gg->Init();
 
+	// Experimental robot spotlight. A SpotLight follows the mech/Hull
+	// mesh — positioned a few units above and pointing down — so the
+	// robot drags a pool of light around as it moves through the scene.
+	// Updated each frame in the tick loop after Animate_Objects.
+	g_RobotMesh = nullptr;
+	for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) continue;
+		if (!Obj->Name) continue;
+		if (strstr(Obj->Name, "Hull") || strstr(Obj->Name, "hull") ||
+		    strstr(Obj->Name, "mech")) {
+			g_RobotMesh = (TriMesh*)Obj->Data;
+			break;
+		}
+	}
+	if (g_RobotMesh) {
+		g_RobotSpot = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+		std::memset(g_RobotSpot, 0, sizeof(Omni));
+		g_RobotSpot->L.B = 255.0f; g_RobotSpot->L.G = 255.0f; g_RobotSpot->L.R = 255.0f;
+		g_RobotSpot->L.A = 1.0f;
+		g_RobotSpot->ISize  = 250.0f;          // intensity
+		g_RobotSpot->IRange = 30.0f;
+		g_RobotSpot->rRange = 1.0f / 30.0f;
+		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
+		g_RobotSpot->IDir = Vector(0.0f, -1.0f, 0.0f);
+		g_RobotSpot->Type = Light_SpotLight;
+		// Cone: ~25° inner, ~40° outer. Cosines.
+		g_RobotSpot->HotSpot = std::cos(25.0f * 3.14159f / 180.0f);
+		g_RobotSpot->FallOff = std::cos(40.0f * 3.14159f / 180.0f);
+		g_RobotSpot->Flags = Omni_Active;
+		// Single-key splines so Animate_Objects doesn't crash when it
+		// walks them. The keys evaluate to constant zeros — our per-
+		// frame update in the tick loop overrides IPos / IDir after
+		// Animate_Objects runs, so the spline-driven values get
+		// stomped immediately.
+		auto initSingleKey = [](Spline& sp, float val) {
+			sp.NumKeys = 1;
+			sp.Keys = new SplineKey;
+			std::memset(sp.Keys, 0, sizeof(SplineKey));
+			sp.Keys[0].Pos.x = val;
+			sp.Keys[0].Pos.y = val;
+			sp.Keys[0].Pos.z = val;
+			sp.Flags = 0;
+			sp.CurKey = 0;
+		};
+		initSingleKey(g_RobotSpot->Pos, 0.0f);
+		initSingleKey(g_RobotSpot->Size, g_RobotSpot->ISize);
+		initSingleKey(g_RobotSpot->Range, g_RobotSpot->IRange);
+		// Link into the scene's omni chain.
+		g_RobotSpot->Next = GreetSc->OmniHead;
+		if (GreetSc->OmniHead) GreetSc->OmniHead->Prev = g_RobotSpot;
+		GreetSc->OmniHead = g_RobotSpot;
+	}
 }
 
 //void MMXClear(void *Page, dword Len)
@@ -637,6 +695,20 @@ struct GreetsScene : SceneDriver {
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
 
 		Animate_Objects(GreetSc);
+
+		// Robot spotlight follow. Position the spot ~10 units above the
+		// robot's current position; point it straight down so it casts
+		// a pool of light on the marble floor as the robot moves.
+		// (Could later point along the robot's heading instead — for
+		// now overhead is the easiest spot to read visually.)
+		if (g_RobotSpot && g_RobotMesh) {
+			g_RobotSpot->IPos.x = g_RobotMesh->IPos.x;
+			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + 10.0f;
+			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
+			g_RobotSpot->IDir.x = 0.0f;
+			g_RobotSpot->IDir.y = -1.0f;
+			g_RobotSpot->IDir.z = 0.0f;
+		}
 
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
