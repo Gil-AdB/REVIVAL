@@ -52,6 +52,16 @@ struct Material
     float                 AAStrength            = 0.0f; //Antialiasing Strength
     float                 Opacity               = 0.0f; //?? gotta learn some physics
     Texture				* EnvTexture            = nullptr;
+    // Object/world-space normal map. Optional. When non-null the
+    // deferred lighting kernel samples this by the same swizzled UV as
+    // the diffuse Txtr, decodes (R,G,B)/255 * 2 - 1 → unit normal in
+    // world space, and uses it in place of the G-buffer's interpolated
+    // geometric normal for the Lambertian + Blinn-Phong calculation.
+    // Per-pixel highlight detail without per-vertex tangents.
+    // For dynamic meshes this would need a per-mesh world transform
+    // applied — for now the kernel assumes the map is already in world
+    // space (good for static City buildings, fountain spires, etc.).
+    Texture				* NormalMap             = nullptr;
     float				  TFP0                  = 0.0f;
     float				  TFP1                  = 0.0f;
     bool                  ZBufferWrite          = true;

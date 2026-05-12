@@ -2215,6 +2215,34 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float nx, ny, nz;
 			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
 
+			// Object-space normal map: if the material ships one, sample
+			// it via the same swizzled UV the diffuse uses, decode the
+			// (R,G,B) bytes to a unit vector in world space, and replace
+			// the geometric N with it. Static meshes only — for dynamic
+			// meshes we'd need to transform from mesh-local to world via
+			// a per-mesh RotMat, which we don't have at lighting time.
+			if (Mat->NormalMap) {
+				const dword *nmData = (const dword *)Mat->NormalMap->Mipmap[miplevel];
+				if (nmData) {
+					const dword nmTexel = nmData[swizzledUV];
+					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					// Transform world → view: View->Mat is row-major
+					// (rows = camera-axis basis vectors in world coords).
+					// Same matrix that posX/Y/Z used to bring lights from
+					// world to view space, applied as a pure rotation
+					// (normal is a direction).
+					float vnx = View->Mat[0][0]*nmX + View->Mat[0][1]*nmY + View->Mat[0][2]*nmZ;
+					float vny = View->Mat[1][0]*nmX + View->Mat[1][1]*nmY + View->Mat[1][2]*nmZ;
+					float vnz = View->Mat[2][0]*nmX + View->Mat[2][1]*nmY + View->Mat[2][2]*nmZ;
+					float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+					nx = vnx * invLen;
+					ny = vny * invLen;
+					nz = vnz * invLen;
+				}
+			}
+
 			// Reconstruct view-space position. ZPage16 stores
 			// 0xFF80 - round(g_zscale * z), so:
 			//   z = (0xFF80 - zEnc) / g_zscale
