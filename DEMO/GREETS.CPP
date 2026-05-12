@@ -494,22 +494,26 @@ void Initialize_Greets()
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != GreetSc || !M->Name) continue;
 		const char *n = M->Name;
-		if (strstr(n, "stairs") || strstr(n, "amudim") ||
-		    strstr(n, "floor")  || strstr(n, "marb")   || strstr(n, "MARB") ||
-		    strstr(n, "hull")   || strstr(n, "cockpit")) {
+		const bool isShiny = strstr(n, "stairs") || strstr(n, "amudim") ||
+		                     strstr(n, "floor")  || strstr(n, "marb")   ||
+		                     strstr(n, "MARB")   || strstr(n, "hull")   ||
+		                     strstr(n, "cockpit");
+		if (isShiny) {
 			if (M->Specular < 0.4f) M->Specular = 0.4f;
 			if (M->Glossiness == 0) M->Glossiness = 48;
-			// Bake a normal map from the diffuse luminance gradient
-			// so per-pixel Blinn-Phong gets some N variation across
-			// the surface (otherwise the rasterizer interpolates a
-			// near-constant N from the vertex normals on a flat-ish
-			// face and the highlight collapses to a single bright
-			// brightness across the whole polygon). One-shot at init.
-			if (M->Txtr && !M->NormalMap) {
-				M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
-				if (M->NormalMap) {
-					std::fprintf(stderr, "[GREETS] baked normal map for '%s'\n", n);
-				}
+		}
+		// Object-space normal maps are baked assuming the surface base
+		// normal points along +Y. Only apply to materials known to live
+		// on +Y surfaces (floors). Walls (amudim, marb pillars) point
+		// along ±X / ±Z so the perturbation comes out at the wrong
+		// angle; robot meshes (hull, cockpit) are dynamic, curved, and
+		// would need tangent-space maps. Stairs have mixed orientation
+		// (horizontal treads + vertical risers) — punt for now.
+		const bool isYUp = strstr(n, "floor");
+		if (isYUp && M->Txtr && !M->NormalMap) {
+			M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
+			if (M->NormalMap) {
+				std::fprintf(stderr, "[GREETS] baked +Y normal map for '%s'\n", n);
 			}
 		}
 	}

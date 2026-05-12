@@ -223,6 +223,75 @@ Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 			dst[SwizzledOffset(x, y, blockX, blockY, H)] = packed;
 		}
 	}
+
+	// Mip levels 1..N — downsample by averaging each 2x2 block of
+	// normals from the previous level, then renormalize. Without
+	// this, far pixels at mip > 0 see Mipmap[miplevel]==null and the
+	// lighting kernel falls back to the geometric normal, producing
+	// a visible discontinuity at the mip-switch distance.
+	nm->numMipmaps = diffuse->numMipmaps > 0 ? diffuse->numMipmaps : 1;
+	int prevW = W, prevH = H;
+	int prevX = X, prevY = Y;
+	const uint32_t *prevData = dst;
+	size_t mipDataOffset = numPixels;  // we'll allocate one big block after counting
+
+	// First count total pixels across all mip levels (matches Generate_Mipmaps).
+	{
+		size_t total = numPixels;
+		int curX = X, curY = Y;
+		for (uint32_t i = 1; i < nm->numMipmaps; ++i) {
+			curX = (curX + 1) >> 1;
+			curY = (curY + 1) >> 1;
+			total += size_t(curX) * size_t(curY) * size_t(BX) * size_t(BY);
+		}
+		// Resize the data buffer to hold all levels. Re-alloc + copy
+		// the mip-0 we already populated.
+		byte *newBuf = (byte*)getAlignedBlock(total * sizeof(uint32_t));
+		std::memcpy(newBuf, nm->Data, numPixels * sizeof(uint32_t));
+		nm->Data = newBuf;
+		nm->Mipmap[0] = newBuf;
+		prevData = reinterpret_cast<const uint32_t*>(nm->Mipmap[0]);
+	}
+
+	for (uint32_t mi = 1; mi < nm->numMipmaps; ++mi) {
+		const int curX = (prevX + 1) >> 1;
+		const int curY = (prevY + 1) >> 1;
+		const int curW = curX << blockX;
+		const int curH = curY << blockY;
+		uint32_t *curData = reinterpret_cast<uint32_t*>(nm->Data) + mipDataOffset;
+		nm->Mipmap[mi] = reinterpret_cast<byte*>(curData);
+
+		for (int y = 0; y < curH; ++y) {
+			for (int x = 0; x < curW; ++x) {
+				// Sample 2x2 in previous level.
+				float ax = 0, ay = 0, az = 0;
+				for (int dy = 0; dy < 2; ++dy) {
+					for (int dx = 0; dx < 2; ++dx) {
+						const int sx = std::min(2*x + dx, prevW - 1);
+						const int sy = std::min(2*y + dy, prevH - 1);
+						const uint32_t px = prevData[SwizzledOffset(sx, sy, blockX, blockY, prevH)];
+						const float r = (float((px >> 16) & 0xFF) * (1.0f/127.5f)) - 1.0f;
+						const float g = (float((px >>  8) & 0xFF) * (1.0f/127.5f)) - 1.0f;
+						const float b = (float( px        & 0xFF) * (1.0f/127.5f)) - 1.0f;
+						ax += r; ay += g; az += b;
+					}
+				}
+				const float invLen = 1.0f / std::sqrt(ax*ax + ay*ay + az*az);
+				ax *= invLen; ay *= invLen; az *= invLen;
+				const uint8_t r8 = uint8_t((ax + 1.0f) * 127.5f);
+				const uint8_t g8 = uint8_t((ay + 1.0f) * 127.5f);
+				const uint8_t b8 = uint8_t((az + 1.0f) * 127.5f);
+				curData[SwizzledOffset(x, y, blockX, blockY, curH)] =
+					uint32_t(b8) | (uint32_t(g8) << 8) | (uint32_t(r8) << 16) | 0xFF000000u;
+			}
+		}
+
+		prevW = curW; prevH = curH;
+		prevX = curX; prevY = curY;
+		prevData = curData;
+		mipDataOffset += size_t(curX) * size_t(curY) * size_t(BX) * size_t(BY);
+	}
+
 	return nm;
 }
 
