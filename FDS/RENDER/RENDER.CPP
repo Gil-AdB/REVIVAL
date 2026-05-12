@@ -2358,12 +2358,28 @@ static bool deferredLightingVecEnabled() {
 // since arm64-via-simde has no usable vgather. The omni loop becomes
 // "1 omni × 8 pixels per iter" — each omni's position/color is a
 // broadcast, the per-pixel normal/pos/color stay in vec registers.
-static bool deferredLightingOuterVecEnabled() {
-	static bool cached = []{
+// Env override: FDS_DEFERRED_OUTER_VEC=1 forces on, =0 forces off,
+// unset = follow the per-scene Scene::PreferOuterVec policy. Each
+// Initialize_<scene> sets the flag based on whether the scene is
+// dominated by matte materials (city, fountain, crash) or by spec/nmap
+// shiny ones (greets — outer kernel pays per-lane nmap + scalar
+// fallback for most pixels).
+static int outerVecEnvSetting() {
+	// 0 = follow scene policy, 1 = force on, -1 = force off.
+	static int cached = []{
 		const char *s = std::getenv("FDS_DEFERRED_OUTER_VEC");
-		return s && s[0] == '1';
+		if (!s) return 0;
+		if (s[0] == '0') return -1;
+		if (s[0] == '1') return 1;
+		return 0;
 	}();
 	return cached;
+}
+
+static bool deferredLightingOuterVecEnabled() {
+	const int env = outerVecEnvSetting();
+	if (env != 0) return env > 0;
+	return CurScene && CurScene->PreferOuterVec != 0;
 }
 
 // FDS_DEFERRED_CHECKERBOARD=1 enables half-rate lighting: only pixels

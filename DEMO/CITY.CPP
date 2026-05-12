@@ -1571,6 +1571,8 @@ void Initialize_City()
 	CitySc->NZP = 20.0;
 	CitySc->FZP = 7500.0f;
 	CitySc->Flags |= Scn_Fogged|Scn_ZBuffer;
+	// Matte-dominated scene — OuterVec's outer-SIMD wins by ~3 ms.
+	CitySc->PreferOuterVec = 1;
 	CitySc->Ambient.B = 32*2;
 	CitySc->Ambient.G = 48*2;
 	CitySc->Ambient.R = 64*2;

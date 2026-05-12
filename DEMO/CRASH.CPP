@@ -24,6 +24,8 @@ void Initialize_Crash()
 	CrashSc->FZP = 2000.0f;
 	CrashSc->NZP = 10.0f;
 	CrashSc->Flags |= Scn_ZBuffer;
+	// Matte-dominated crash scene — OuterVec is the better fit.
+	CrashSc->PreferOuterVec = 1;
 	
 	CrashSc->Ambient.R = 64;
 	CrashSc->Ambient.G = 64;

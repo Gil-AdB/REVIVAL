@@ -47,6 +47,15 @@ struct Scene
     dword			 SBufferSize;
     sdword			*SBufferHead;
     dword			 NumTiles;
+
+    // Per-scene policy for the deferred lighting kernel. The OuterVec
+    // kernel wins on scenes dominated by matte (non-spec, non-water)
+    // materials because the outer 8-wide vec lighting body fires for
+    // most pixels. On spec/nmap-heavy scenes (greets), pixels bail to
+    // the scalar fallback and the vec body is wasted. Initialize_<scene>
+    // sets this; runtime can still override with FDS_DEFERRED_OUTER_VEC.
+    // Default false = use the standard kernel.
+    dword            PreferOuterVec;
 };
 
 #pragma pack(pop)

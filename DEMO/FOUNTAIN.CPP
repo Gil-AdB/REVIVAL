@@ -806,6 +806,10 @@ void Initialize_Fountain()
 
 	LoadFLD(FntSc,"SCENES/FOUNTAIN.FLD");
 
+	// Particle-heavy with mostly matte fountain surfaces — OuterVec
+	// wins on the non-spec majority of pixels.
+	FntSc->PreferOuterVec = 1;
+
 	for(M = MatLib;M;M=M->Next)
 	{
 		if (M->RelScene != FntSc) continue;
