@@ -35,8 +35,12 @@ int            g_xparZCount             = 0;
 void EngineGBuffer_Resize(int X, int Y) {
     size_t numPixels = size_t(X) * size_t(Y);
     s_engineGBuffer.normal.assign(numPixels, 0);
+    s_engineGBuffer.tangent.assign(numPixels, 0);
     s_engineGBuffer.txtr.assign(numPixels, 0);
     g_gbuffer = &s_engineGBuffer;
+    // Transparent layers don't currently use tangent — leaving those
+    // empty so GBufferSpan's nullptr-tangent path keeps the rasterizer
+    // from writing.
     s_engineGBufferTransparent.normal.assign(numPixels, 0);
     s_engineGBufferTransparent.txtr.assign(numPixels, 0xFFFFFFFFu);
     g_gbufferTransparent = &s_engineGBufferTransparent;

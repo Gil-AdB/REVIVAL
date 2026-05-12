@@ -380,6 +380,7 @@ void Restore_Splines(Scene *Sc);
 enum class RenderPath {
 	Default,        // honor FDS_DEFERRED env var
 	ForceForward,   // forward fillers regardless (sky cube, cube-map bake)
+	ForceDeferred,  // deferred path regardless of env (snapshot harnesses)
 };
 void Render(RenderPath path = RenderPath::Default);
 void SetDeferredWaterMatID(int id);

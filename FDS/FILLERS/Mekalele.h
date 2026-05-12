@@ -32,6 +32,12 @@ struct GBuffer {
 	// pass reconstructs view-space position from ZPage16 + screen XY,
 	// so we don't carry position here.
 	std::vector<u16> normal;
+	// Octahedral-packed view-space tangent (Tier B normal map support).
+	// Same encoding as `normal`. The lighting kernel reads tangent only
+	// for normal-mapped materials; everything else ignores it. Optional
+	// — buffer is allocated to `numPixels` but a renderer that doesn't
+	// care about tangent-space maps can leave the data as garbage.
+	std::vector<u16> tangent;
 	// packed: miplevel:4 | matID:8 | swizzled UV:20
 	std::vector<u32> txtr;
 };
@@ -100,11 +106,13 @@ struct TileRasterizerCtx {
 
 struct GBufferSpan {
 	u16 *normal;
+	u16 *tangent;
 	u32 *txtr;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
 		normal += offset;
+		tangent += offset;
 		txtr += offset;
 		zbuffer += offset;
 		return *this;
@@ -112,8 +120,15 @@ struct GBufferSpan {
 
 	static GBufferSpan of(GBuffer &gbuffer, const TileRasterizerCtx &ctx, u32 x, u32 y) {
 		u32 offset = x + y * ctx.xres;
+		// tangent buffer is optional (may be empty for renderers that
+		// don't care). Return nullptr in that case; the rasterizer
+		// inner loop checks before writing.
+		u16 *tangentPtr = gbuffer.tangent.empty()
+			? nullptr
+			: gbuffer.tangent.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
+			tangentPtr,
 			gbuffer.txtr.data() + offset,
 			ctx.zbuffer + offset
 		};

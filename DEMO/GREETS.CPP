@@ -502,18 +502,14 @@ void Initialize_Greets()
 			if (M->Specular < 0.4f) M->Specular = 0.4f;
 			if (M->Glossiness == 0) M->Glossiness = 48;
 		}
-		// Object-space normal maps are baked assuming the surface base
-		// normal points along +Y. Only apply to materials known to live
-		// on +Y surfaces (floors). Walls (amudim, marb pillars) point
-		// along ±X / ±Z so the perturbation comes out at the wrong
-		// angle; robot meshes (hull, cockpit) are dynamic, curved, and
-		// would need tangent-space maps. Stairs have mixed orientation
-		// (horizontal treads + vertical risers) — punt for now.
-		const bool isYUp = strstr(n, "floor");
-		if (isYUp && M->Txtr && !M->NormalMap) {
+		// Tangent-space normal maps work on any face orientation —
+		// the perturbation lives in the surface's own tangent plane
+		// and the lighting kernel multiplies by per-pixel TBN to bring
+		// it into view space. Apply to every shiny material.
+		if (isShiny && M->Txtr && !M->NormalMap) {
 			M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
 			if (M->NormalMap) {
-				std::fprintf(stderr, "[GREETS] baked +Y normal map for '%s'\n", n);
+				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
 			}
 		}
 	}

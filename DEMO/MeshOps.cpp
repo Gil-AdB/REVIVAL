@@ -203,13 +203,15 @@ Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 			const float gx = (lTR + 2.0f*lR + lBR) - (lTL + 2.0f*lL + lBL);
 			const float gy = (lBL + 2.0f*lB + lBR) - (lTL + 2.0f*lT + lTR);
 
-			// World-space normal — assumes the surface base normal
-			// points along +Y. (gx, gy) is the heightmap gradient in
-			// texture (u, v) space; mapped to world (x, z) for a
-			// horizontal surface.
+			// Tangent-space normal map. Perturbation lives in the
+			// surface tangent plane; +Z (the surface normal) carries
+			// the unperturbed component. Lighting kernel multiplies
+			// by per-pixel TBN to bring it into view space — works
+			// on any face orientation (Tier B), unlike the previous
+			// world-space encoding which only worked for +Y surfaces.
 			float nx = -gx * invStrength;
-			float ny =  1.0f;
-			float nz = -gy * invStrength;
+			float ny = -gy * invStrength;
+			float nz =  1.0f;
 			const float invLen = 1.0f / std::sqrt(nx*nx + ny*ny + nz*nz);
 			nx *= invLen; ny *= invLen; nz *= invLen;
 

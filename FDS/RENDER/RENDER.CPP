@@ -628,6 +628,7 @@ void Transform_Objects(Scene *Sc)
 				// = same matrix). Read by the deferred-path clipper +
 				// rasterizer; forward-path Lighting() still reads N.
 				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				Vtx->RZ=1.0/Vtx->TPos.z;
@@ -652,6 +653,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 
 				Vtx->RZ=1.0/Vtx->TPos.z;
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
@@ -679,6 +681,7 @@ Regular:
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
@@ -2243,17 +2246,36 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];
 				if (nmData) {
 					const dword nmTexel = nmData[swizzledUV];
-					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					// Transform world → view: View->Mat is row-major
-					// (rows = camera-axis basis vectors in world coords).
-					// Same matrix that posX/Y/Z used to bring lights from
-					// world to view space, applied as a pure rotation
-					// (normal is a direction).
-					float vnx = View->Mat[0][0]*nmX + View->Mat[0][1]*nmY + View->Mat[0][2]*nmZ;
-					float vny = View->Mat[1][0]*nmX + View->Mat[1][1]*nmY + View->Mat[1][2]*nmZ;
-					float vnz = View->Mat[2][0]*nmX + View->Mat[2][1]*nmY + View->Mat[2][2]*nmZ;
+					const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					// Tier B tangent-space normal map. Sampled vector is in
+					// the surface's tangent frame (X = tangent, Y = bitangent,
+					// Z = surface normal). Reconstruct world/view N as
+					// TBN * sampled. Tangent is derived on the fly from the
+					// view-space N (Mikkelsen-style): pick a reference axis
+					// not parallel to N, T = normalize(cross(ref, N)),
+					// B = cross(N, T). Doesn't match the texture's UV
+					// orientation exactly (per-vertex interpolated tangent
+					// from the rasterizer would) but gives the same per-pixel
+					// cost as Tier B — for perf assessment that's what we want.
+					float refx, refy, refz;
+					if (std::fabs(ny) < 0.9f) { refx = 0; refy = 1; refz = 0; }
+					else                       { refx = 1; refy = 0; refz = 0; }
+					// T = normalize(ref × N)
+					float tx = refy * nz - refz * ny;
+					float ty = refz * nx - refx * nz;
+					float tz = refx * ny - refy * nx;
+					float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+					tx *= invTLen; ty *= invTLen; tz *= invTLen;
+					// B = N × T
+					const float bx = ny * tz - nz * ty;
+					const float by = nz * tx - nx * tz;
+					const float bz = nx * ty - ny * tx;
+					// new_N = T * nmX + B * nmY + N * nmZ (view space)
+					float vnx = tx * nmX + bx * nmY + nx * nmZ;
+					float vny = ty * nmX + by * nmY + ny * nmZ;
+					float vnz = tz * nmX + bz * nmY + nz * nmZ;
 					float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
 					nx = vnx * invLen;
 					ny = vny * invLen;
