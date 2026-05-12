@@ -2050,13 +2050,14 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		tileLights[t].count = 0;
 	}
 
-	// FDS_DEFERRED_ZCULL=1: enable per-tile depth-bounded light culling.
-	// Computed by computeTileDepthBounds (caller fills tileLights[].zMin
-	// /zMax); we reject lights whose view-space z extent doesn't overlap
-	// the tile's pixel depth range.
+	// Per-tile depth-bounded light culling. Computed by
+	// computeTileDepthBounds (caller fills tileLights[].zMin / zMax);
+	// we reject lights whose view-space z extent doesn't overlap the
+	// tile's pixel depth range. Default on; set FDS_DEFERRED_ZCULL=0
+	// to disable.
 	static const bool zCullEnabled = []{
 		const char *s = std::getenv("FDS_DEFERRED_ZCULL");
-		return s && s[0] == '1';
+		return !s || s[0] != '0';
 	}();
 
 	for (int li = 0; li < numLights; ++li) {
@@ -3697,6 +3698,58 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 
 			float nx, ny, nz;
 			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+
+			// Normal map sampling — mirrors the wave-1 kernel exactly so
+			// nmap materials that fall through the surface-similar test
+			// produce the same result as if they'd been shaded in wave-1.
+			// Without this the fallback's geometric N differed from
+			// surrounding interpolated pixels and broke quarter mode
+			// silently. Tier B per-vertex tangent + Mikkelsen fallback.
+			if (Mat->NormalMap) {
+				const dword *nmData = (const dword *)Mat->NormalMap->Mipmap[miplevel];
+				if (nmData) {
+					const dword nmTexel = nmData[swizzledUV];
+					const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					float tx = 0, ty = 0, tz = 0;
+					bool tangentValid = false;
+					if (!gb.tangent.empty()) {
+						const meka::u16 packedT = gb.tangent[i];
+						if (packedT != 0) {
+							meka::oct_decode_u16(packedT, tx, ty, tz);
+							const float tDotN = tx*nx + ty*ny + tz*nz;
+							tx -= nx * tDotN; ty -= ny * tDotN; tz -= nz * tDotN;
+							const float tLen2 = tx*tx + ty*ty + tz*tz;
+							if (tLen2 > 1e-12f) {
+								const float invTLen = 1.0f / std::sqrt(tLen2);
+								tx *= invTLen; ty *= invTLen; tz *= invTLen;
+								tangentValid = true;
+							}
+						}
+					}
+					if (!tangentValid) {
+						float refx, refy, refz;
+						if (std::fabs(ny) < 0.9f) { refx = 0; refy = 1; refz = 0; }
+						else                       { refx = 1; refy = 0; refz = 0; }
+						tx = refy * nz - refz * ny;
+						ty = refz * nx - refx * nz;
+						tz = refx * ny - refy * nx;
+						const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+						tx *= invTLen; ty *= invTLen; tz *= invTLen;
+					}
+					const float bx = ny * tz - nz * ty;
+					const float by = nz * tx - nx * tz;
+					const float bz = nx * ty - ny * tx;
+					float vnx = tx * nmX + bx * nmY + nx * nmZ;
+					float vny = ty * nmX + by * nmY + ny * nmZ;
+					float vnz = tz * nmX + bz * nmY + nz * nmZ;
+					float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+					nx = vnx * invLen;
+					ny = vny * invLen;
+					nz = vnz * invLen;
+				}
+			}
 
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
 			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
