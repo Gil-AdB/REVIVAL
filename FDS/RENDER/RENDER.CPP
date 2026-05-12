@@ -3205,7 +3205,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			++px;
 		}
 
-		for (; px + 8 <= x2; px += 8) {
+		for (; px < x2; px += 8) {
 			const size_t i = size_t(py) * XRes + px;
 
 			// Load 8 lanes of Z (u16 → s32 zero-extend → float for the
@@ -3215,6 +3215,22 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 
 			// Alive mask: zEnc != 0
 			__m256i mask_alive = _mm256_cmpgt_epi32(zEncI, _mm256_setzero_si256());
+
+			// Lane-in-range mask: when this iteration straddles the
+			// right tile edge (x2 - px < 8), lanes that fall in the
+			// NEXT tile must be masked off so we don't write past x2.
+			// For full groups (x2 - px >= 8) every lane is in range
+			// and the AND is a no-op. Tile widths at non-multiple-of-8
+			// resolutions (e.g., HiDPI 1512/12 = 126) would otherwise
+			// leave the trailing 6 columns of each tile-column
+			// unrendered — visible as vertical dark bands at every
+			// tile-X boundary.
+			{
+				__m256i lane_idx2 = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+				__m256i in_range  = _mm256_cmpgt_epi32(
+					_mm256_set1_epi32(x2 - px), lane_idx2);
+				mask_alive = _mm256_and_si256(mask_alive, in_range);
+			}
 
 			// Checkerboard: drop odd cells in wave-1.
 			if (checker) {
@@ -4110,7 +4126,15 @@ static void Render_DeferredLighting() {
 
 	constexpr int numTilesX = DEFERRED_NUM_TILES_X;
 	constexpr int numTilesY = DEFERRED_NUM_TILES_Y;
-	const int tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
+	// Round tileSizeX up to the next multiple of 8 so the OuterVec
+	// kernel's 8-wide vec loop sees aligned tiles for all-but-the-last
+	// tile column. The last tile width can still be unaligned at non-
+	// multiple-of-8 XRes (rare on real displays — most are 8-aligned)
+	// — handled by the lane-in-range mask inside OuterVec.
+	// tileSizeY doesn't need this because the kernels iterate rows one
+	// at a time, not in 8-tall groups.
+	const int rawTileX  = (XRes + (numTilesX - 1)) / numTilesX;
+	const int tileSizeX = (rawTileX + 7) & ~7;
 	const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 
 	// Per-tile light culling: project each omni's bounding sphere
