@@ -3,6 +3,8 @@
 #include <stdlib.h>
 //#include <conio.h>
 #include <math.h>
+#include <vector>
+#include <algorithm>
 #include <Base/Omni.h>
 #include <Base/Scene.h>
 
@@ -1601,7 +1603,7 @@ void TBR_Init(Scene *Sc, mword size)
 		Sc->SBufferHead[i] = -1;
 }
 
-void InsertSpanToTBR(Face *F, dword tile)
+void InsertSpanToTBR(Face *F, dword tile, float renderZ)
 {
 	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
 	// of the *average* tile-coverage per particle. Particles near the
@@ -1614,6 +1616,7 @@ void InsertSpanToTBR(Face *F, dword tile)
 	mword  n = CurScene->SBufferCur;
 	CurScene->SBuffer[n].F = F;
 	CurScene->SBuffer[n].next = h;
+	CurScene->SBuffer[n].renderZ = renderZ;
 	CurScene->SBufferHead[tile] = n;
 	CurScene->SBufferCur++;
 }
@@ -1637,10 +1640,13 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	if (y1 < 0) y1=0;
 	if (y2 >= numTiles) y2 = numTiles-1;
 
+	// Sprite renderZ: the particle's view-space Z. All strips this sprite
+	// inserts into get the same renderZ.
+	const float renderZ = F->A->TPos.z;
 	for (int i = y1; i <= y2; i++)
 	{
-		InsertSpanToTBR(F, i);
-	}	
+		InsertSpanToTBR(F, i, renderZ);
+	}
 }
 
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel)
@@ -1673,6 +1679,13 @@ namespace tbr {
 }
 
 // Execute/Clear sprite buffer
+//
+// Per-strip walk: each Y-strip (8 rows) is processed by one worker
+// thread. The linked list at SBufferHead[i] holds all sprite entries
+// that overlap this strip (and, once unified, transparent face
+// fragments too). At flush time we collect entries into a scratch
+// array, sort descending by renderZ (back-to-front), and walk the
+// sorted array dispatching each item.
 void TBR_Render(Scene *Sc)
 {
 	dword numTiles = Sc->NumTiles;
@@ -1683,43 +1696,50 @@ void TBR_Render(Scene *Sc)
 	{
 
 		ThreadPool::instance().enqueue([i, Sc]() {
-			Face* F;
-			Vertex* V;
-
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
 			if (spriteClipY2 > YRes) spriteClipY2 = YRes;
+
+			// Collect the strip's linked-list entries into a scratch
+			// array so we can sort them. Each entry holds Face* + renderZ
+			// + next pointer (set by InsertSpanToTBR at insertion time).
+			thread_local std::vector<TBREntry> scratch;
+			scratch.clear();
 			sdword n = Sc->SBufferHead[i];
 			while (n != -1) {
-				F = Sc->SBuffer[n].F;
-				V = F->A;
-				float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0;
-				dword R, G, B;
-				R = V->LR;
-				G = V->LG;
-				B = V->LB;
-				dword Color = (R << 16) + (G << 8) + B;
-
-				// Encode view-space z the same way Mekalele / TheOtherBarry
-				// do (0xFF80 - z*scale; larger = closer). Spriter<true>
-				// then z-tests every pixel against ZPage16 so particles
-				// get correctly occluded by closer geometry instead of
-				// the previous per-CENTER all-or-nothing behaviour.
-				dword Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
-
-				Spriter<32, true>(V->PX,
-					V->PY,
-					edgeLen,
-					edgeLen,
-					F->Txtr->Txtr->Data,
-					VPage,
-					Color,
-					Z,
-					0,
-					spriteClipY1,
-					XRes,
-					spriteClipY2);
+				scratch.push_back(Sc->SBuffer[n]);
 				n = Sc->SBuffer[n].next;
+			}
+			// Descending: largest renderZ (farthest) first.
+			std::stable_sort(scratch.begin(), scratch.end(),
+				[](const TBREntry& a, const TBREntry& b) {
+					return a.renderZ > b.renderZ;
+				});
+
+			for (const TBREntry& e : scratch) {
+				Face*   F = e.F;
+				Vertex* V = F->A;
+				// Sprite path (existing): A==B means degenerate
+				// triangle / billboard. Per-pixel Z-test via
+				// Spriter<32, true>'s EnableZTest=true.
+				if (F->A == F->B) {
+					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
+					dword R = V->LR, G = V->LG, B = V->LB;
+					dword Color = (R << 16) + (G << 8) + B;
+					// Encode view-space z the same way Mekalele /
+					// TheOtherBarry do (0xFF80 - z*scale; larger =
+					// closer). Spriter<true> Z-tests every pixel
+					// against ZPage16 so particles get correctly
+					// occluded by closer opaque geometry.
+					dword Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
+					Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
+						F->Txtr->Txtr->Data, VPage, Color, Z,
+						0, spriteClipY1, XRes, spriteClipY2);
+					continue;
+				}
+				// Transparent face path: not yet wired (will land in
+				// a follow-up commit). For now anything that's not a
+				// sprite in the TBR is silently skipped.
 			}
 			Sc->SBufferHead[i] = -1;
 
@@ -1727,8 +1747,6 @@ void TBR_Render(Scene *Sc)
 			++tbr::tileCounter;
 			tbr::condition.notify_one();
 		});
-		// LEAAAAAAT LEAAAAAAAT
-//		Flip(MainSurf);
 	}
 
 	{
@@ -1736,7 +1754,7 @@ void TBR_Render(Scene *Sc)
 		tbr::condition.wait(lock, [numTiles] {return tbr::tileCounter == numTiles; });
 	}
 
-	Sc->SBufferCur = 0;	
+	Sc->SBufferCur = 0;
 }
 
 
