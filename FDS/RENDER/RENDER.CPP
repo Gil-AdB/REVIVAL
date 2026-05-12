@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <limits>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -1936,6 +1937,9 @@ struct TileLights {
 	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
+	float           zMin;           // view-space z of closest pixel in tile
+	float           zMax;           // view-space z of farthest pixel in tile
+	                                // (+inf / -inf when tile has no geometry)
 };
 
 // Per-frame setup shared across all tile jobs. Captured by reference
@@ -1972,6 +1976,71 @@ DeferredLightingCtx g_deferredCtx{};
 // 32-byte aligned and contiguous — one `load_a` instead of four
 // `ld1.s {v}[lane]` gathers per Vec4f. Scalar benefits too via
 // straight-line prefetchable access.
+// Per-tile depth bounds. Scans ZPage16 once per tile (already populated
+// by the G-buffer pass), finds the closest and farthest zEnc with
+// geometry, and converts back to view-space z. Tiles with no geometry
+// get zMin=+inf / zMax=-inf so all lights are culled for them.
+//
+// Encoding reminder: zEnc = 0xFF80 - g_zscale*z, so larger zEnc means
+// closer pixel. zEnc == 0 means the pixel was never touched.
+static void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY,
+                                   int tileSizeX, int tileSizeY, int xres, int yres,
+                                   float invZScale)
+{
+	const uint16_t *zp = reinterpret_cast<const uint16_t*>(ZPage16);
+	for (int j = 0; j < numTilesY; ++j) {
+		const int y_lo = j * tileSizeY;
+		const int y_hi = std::min(y_lo + tileSizeY, yres);
+		for (int i = 0; i < numTilesX; ++i) {
+			const int x_lo = i * tileSizeX;
+			const int x_hi = std::min(x_lo + tileSizeX, xres);
+			const int idx = j * numTilesX + i;
+
+			__m128i vMaxZ = _mm_setzero_si128();           // chasing max
+			__m128i vMinZ = _mm_set1_epi16(int16_t(0xFFFF)); // chasing min (zeros mapped up)
+			uint16_t maxZ = 0;
+			uint16_t minZ = 0xFFFF;
+
+			for (int py = y_lo; py < y_hi; ++py) {
+				const uint16_t *row = zp + size_t(py) * xres + x_lo;
+				const int width = x_hi - x_lo;
+				int px = 0;
+				for (; px + 8 <= width; px += 8) {
+					__m128i v = _mm_loadu_si128((const __m128i*)(row + px));
+					// For min-tracking, replace 0 with 0xFFFF so untouched
+					// pixels don't pull the minimum down.
+					__m128i isZero = _mm_cmpeq_epi16(v, _mm_setzero_si128());
+					__m128i vForMin = _mm_or_si128(v, isZero);
+					vMaxZ = _mm_max_epu16(vMaxZ, v);
+					vMinZ = _mm_min_epu16(vMinZ, vForMin);
+				}
+				for (; px < width; ++px) {
+					uint16_t z = row[px];
+					if (z > maxZ) maxZ = z;
+					if (z != 0 && z < minZ) minZ = z;
+				}
+			}
+			// Horizontal reduce the SIMD halves.
+			alignas(16) uint16_t mx[8], mn[8];
+			_mm_store_si128((__m128i*)mx, vMaxZ);
+			_mm_store_si128((__m128i*)mn, vMinZ);
+			for (int k = 0; k < 8; ++k) {
+				if (mx[k] > maxZ) maxZ = mx[k];
+				if (mn[k] < minZ) minZ = mn[k];
+			}
+
+			if (maxZ == 0) {
+				tileLights[idx].zMin = std::numeric_limits<float>::infinity();
+				tileLights[idx].zMax = -std::numeric_limits<float>::infinity();
+			} else {
+				// Larger zEnc → closer, so maxZ-zEnc maps to zMin-view.
+				tileLights[idx].zMin = float(0xFF80 - maxZ) * invZScale;
+				tileLights[idx].zMax = float(0xFF80 - minZ) * invZScale;
+			}
+		}
+	}
+}
+
 static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
                                  const ViewLightsSoA &lights, int numLights)
@@ -1981,12 +2050,23 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		tileLights[t].count = 0;
 	}
 
+	// FDS_DEFERRED_ZCULL=1: enable per-tile depth-bounded light culling.
+	// Computed by computeTileDepthBounds (caller fills tileLights[].zMin
+	// /zMax); we reject lights whose view-space z extent doesn't overlap
+	// the tile's pixel depth range.
+	static const bool zCullEnabled = []{
+		const char *s = std::getenv("FDS_DEFERRED_ZCULL");
+		return s && s[0] == '1';
+	}();
+
 	for (int li = 0; li < numLights; ++li) {
 		const float vx = lights.posX[li];
 		const float vy = lights.posY[li];
 		const float vz = lights.posZ[li];
 		const float r2 = lights.range2[li];
 		const float r  = std::sqrt(r2);
+		const float vz_minus_r = vz - r;
+		const float vz_plus_r  = vz + r;
 
 		// Sphere entirely behind camera: skip.
 		if (vz + r < 0.0f) continue;
@@ -2041,6 +2121,13 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
 				const int idx = j * numTilesX + i;
 				TileLights &tl = tileLights[idx];
+				// Depth cull: skip if light's z-extent doesn't overlap
+				// the tile's pixel depth range. Empty tiles have
+				// zMin=+inf and zMax=-inf so this rejects everything.
+				if (zCullEnabled &&
+				    (vz_plus_r < tl.zMin || vz_minus_r > tl.zMax)) {
+					continue;
+				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
 					tl.posX[s]   = Lpx;
@@ -3847,6 +3934,10 @@ static void Render_DeferredLighting() {
 	// into screen space, find which tiles it overlaps, populate
 	// indices[] per tile.
 	static TileLights tileLights[DEFERRED_NUM_TILES];
+	const float invZScale = 1.0f / float(g_zscale);
+	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
+	                       tileSizeX, tileSizeY, XRes, YRes,
+	                       invZScale);
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights);
