@@ -2230,7 +2230,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const char* s = std::getenv("FDS_NMAP_FROM_DIFFUSE");
 				return s && s[0] == '1';
 			}();
-			Texture* nmTex = Mat->NormalMap;
+			// FDS_NO_NMAP=1 forces the kernel to ignore Mat->NormalMap and
+			// fall back to the geometric N — useful for A/B comparing
+			// the normal-map effect on its own without rebuilding.
+			static const bool nmapDisabled = []{
+				const char* s = std::getenv("FDS_NO_NMAP");
+				return s && s[0] == '1';
+			}();
+			Texture* nmTex = nmapDisabled ? nullptr : Mat->NormalMap;
 			if (!nmTex && nmapFromDiffuse) nmTex = Mat->Txtr;
 			if (nmTex) {
 				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];

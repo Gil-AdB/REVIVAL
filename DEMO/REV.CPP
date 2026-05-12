@@ -1172,10 +1172,16 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "fountain") {
 			return RunFountainSnapshot(snap, g_demoXRes, g_demoYRes);
 		}
+		if (snap.scene == "greets") {
+			return RunGreetsSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
 		if (snap.scene == "xpartest") {
 			return RunXparTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, xpartest)\n",
+		if (snap.scene == "spectest") {
+			return RunSpecTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

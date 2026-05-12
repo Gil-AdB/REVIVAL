@@ -286,6 +286,48 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    // Greets's tick uses textures + skycube state set up by City init.
+    Initialize_City();
+    Initialize_Greets();
+
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) {
+        // Default sweep: one frame from each greet round so the harness
+        // catches lighting issues across the full scene timeline.
+        // Greets uses CurFrame which is derived from Timer; round boundaries
+        // live around 350 / 730 / 900 / 1200 / 2000 / 2500 frames.
+        timestamps = {100, 600, 1000, 1500, 2100};
+    }
+
+    auto driver = createGreetsScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+
+        bool more = driver->tick();
+        (void)more;
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/greets_t%06d_color.ppm",
+                      cfg.outDir.c_str(), ts);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -1271,6 +1313,269 @@ static Scene* buildXparTestScene(int testCase) {
     return Sc;
 }
 
+// Build a programmatic specular-test scene. The goal is to compare
+// forward (per-vertex) vs deferred (per-pixel) specular highlight
+// rendering on simple, repeatable geometry. The scene contains:
+//
+//   * an opaque ground plane (matte; no specular contribution),
+//   * a high-poly UV sphere centred at (0, 2, 0) with a shiny material
+//     (Specular > 0, Glossiness sharp) — canonical surface for
+//     observing a moving highlight,
+//   * a tessellated upright quad ("wall") with the same shiny material
+//     so we can also see the highlight on a flat surface (where
+//     interpolation artefacts are easiest to spot),
+//   * two stationary omnis: a bright warm key light positioned off to
+//     the side / above so the highlight sits OFF-CENTRE on each
+//     object, plus a dim cool fill from the opposite side.
+//
+// `case` selects highlight sharpness (Glossiness):
+//   1 = broad lobe   (Glossiness =  4)
+//   2 = medium lobe  (Glossiness = 32)
+//   3 = sharp lobe   (Glossiness = 128)
+static Scene* buildSpecTestScene(int glossCase) {
+    Scene* Sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(Sc, 0, sizeof(Scene));
+    Sc->NZP   = 1.0f;
+    Sc->FZP   = 200.0f;
+    Sc->Flags = Scn_ZBuffer;
+    // Low ambient so the specular lobe is unambiguous against the
+    // background diffuse term.
+    Sc->Ambient.R = Sc->Ambient.G = Sc->Ambient.B = 30;
+    Sc->Ambient.A = 255;
+
+    // Camera placeholder. Harness rewrites ISource/Mat per pose.
+    Camera* Cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(Cam, 0, sizeof(Camera));
+    Vector_Form(&Cam->ISource, 0, 0, -5);
+    Matrix_Identity(Cam->Mat);
+    Cam->IFOV = 60.0f;
+    Sc->CameraHead = Cam;
+
+    // Key light: above + to the +x side. Placement chosen so the
+    // mirror reflection of this light off the (0, 2, 0) sphere is
+    // visible from a +z camera but NOT centred on the sphere — gives
+    // a clearly off-centre highlight that should slide predictably as
+    // the camera orbits.
+    appendTestOmni(Sc, Vector( 6.0f, 7.0f, -2.0f),
+                   1.0f, 0.95f, 0.85f,    // warm white
+                   500.0f, 40.0f);
+    // Fill: opposite side, dimmer, cool. Gives a second highlight to
+    // verify multi-omni accumulation, also lifts the unlit hemisphere
+    // so the sphere reads as 3D even outside the key lobe.
+    appendTestOmni(Sc, Vector(-6.0f, 5.0f,  3.0f),
+                   0.6f, 0.7f, 1.0f,
+                   200.0f, 35.0f);
+
+    // Materials.
+    Material* matGround = makeSolidColorMat(Sc, "spec_ground",
+                                            110, 90, 70, 255,
+                                            Mat_RGBInterp, 0);
+    matGround->Diffuse    = 1.0f;
+    matGround->Specular   = 0.0f;  // matte
+    matGround->Glossiness = 0;
+
+    // Pick a Phong exponent per case. Glossiness == 0 ⇒ deferred falls
+    // back to 32, but we want the case-1 broad lobe to actually look
+    // broader, so we authoritative-set the value (always nonzero here).
+    unsigned short gloss = 32;
+    if (glossCase == 1) gloss = 4;
+    if (glossCase == 2) gloss = 32;
+    if (glossCase == 3) gloss = 128;
+
+    // Sphere material: mid-tone neutral grey base so the highlight
+    // (added on top of the texture-modulated diffuse) is easy to see.
+    Material* matSphere = makeSolidColorMat(Sc, "spec_shiny_sphere",
+                                            120, 120, 120, 255,
+                                            Mat_RGBInterp, 1);
+    matSphere->Diffuse    = 1.0f;
+    matSphere->Specular   = 1.0f;
+    matSphere->Glossiness = gloss;
+
+    // Wall material: same params, different base colour so we can tell
+    // the two surfaces apart in the dump.
+    Material* matWall = makeSolidColorMat(Sc, "spec_shiny_wall",
+                                          80, 110, 160, 255,
+                                          Mat_RGBInterp, 2);
+    matWall->Diffuse    = 1.0f;
+    matWall->Specular   = 1.0f;
+    matWall->Glossiness = gloss;
+
+    linkMatToLib(matGround);
+    linkMatToLib(matSphere);
+    linkMatToLib(matWall);
+
+    // Ground plane.
+    {
+        TriMesh* ground = appendTriMesh(Sc, "spec_ground", 4, 2);
+        QuadDef q = {
+            { Vector(-15, 0, -15), Vector( 15, 0, -15),
+              Vector( 15, 0,  15), Vector(-15, 0,  15) },
+            Vector(0, 1, 0)
+        };
+        appendQuad(Sc, ground, 0, 0, q, matGround,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    // UV sphere centred at (0, 2, 0), radius 1.5. Tessellation chosen
+    // to be dense enough that per-vertex Blinn-Phong (forward, were it
+    // implemented) would show a recognisable highlight; per-pixel
+    // (deferred) will be smoother either way. nLat × nLon vertices on
+    // the body + two pole verts; (nLat-1) × nLon × 2 triangles between
+    // adjacent latitude rings (cap rings use degenerate / strip tris).
+    {
+        const int nLat = 24;  // exclusive of poles
+        const int nLon = 32;
+        const int numVerts = nLat * nLon + 2;          // +2 poles
+        const int numFaces = 2 * nLon * nLat;          // body + 2 cap rings
+        const float R = 1.5f;
+        const Vector C = Vector(0, 2, 0);
+
+        TriMesh* sph = appendTriMesh(Sc, "spec_sphere", numVerts, numFaces);
+
+        auto setVert = [&](int idx, const Vector& n) {
+            Vertex* V = &sph->Verts[idx];
+            V->Pos.x = C.x + R * n.x;
+            V->Pos.y = C.y + R * n.y;
+            V->Pos.z = C.z + R * n.z;
+            V->N  = n;       // outward unit normal
+            V->TN = n;       // placeholder; Transform_Objects rewrites
+            // Solid ambient lighting baseline; Lighting() rewrites
+            // each frame (forward path) or it's irrelevant (deferred).
+            V->LR = V->LG = V->LB = 30;
+            V->LA = 255;
+            // Spherical UV — irrelevant for solid-colour texture but
+            // populated to avoid garbage.
+            const float pi = 3.14159265358979f;
+            float lon = std::atan2(n.z, n.x);
+            float lat = std::asin(n.y);
+            V->U = 0.5f + lon / (2.0f * pi);
+            V->V = 0.5f - lat / pi;
+        };
+
+        // Body verts: row-major (lat, lon).
+        for (int li = 0; li < nLat; ++li) {
+            // latitude from just-below-north-pole down to just-above-south.
+            const float pi = 3.14159265358979f;
+            float t = float(li + 1) / float(nLat + 1);  // (0, 1)
+            float theta = t * pi;                       // (0, pi)
+            float sinT = std::sin(theta);
+            float cosT = std::cos(theta);  // y from +1 down to -1
+            for (int lo = 0; lo < nLon; ++lo) {
+                float phi = 2.0f * pi * float(lo) / float(nLon);
+                Vector n(sinT * std::cos(phi), cosT, sinT * std::sin(phi));
+                setVert(li * nLon + lo, n);
+            }
+        }
+        // Poles.
+        const int northIdx = nLat * nLon + 0;
+        const int southIdx = nLat * nLon + 1;
+        setVert(northIdx, Vector(0,  1, 0));
+        setVert(southIdx, Vector(0, -1, 0));
+
+        // Faces. Body: two triangles per (lat, lon) quad spanning rings
+        // li and li+1. Caps: fan from each pole to the adjacent ring.
+        int fi = 0;
+        auto fillTri = [&](int v0, int v1, int v2) {
+            Face* F = &sph->Faces[fi++];
+            F->A = &sph->Verts[v0];
+            F->B = &sph->Verts[v1];
+            F->C = &sph->Verts[v2];
+            // Face normal from cross product of edges (outward).
+            Vector e1, e2, fn;
+            Vector_Sub(&F->B->Pos, &F->A->Pos, &e1);
+            Vector_Sub(&F->C->Pos, &F->A->Pos, &e2);
+            Cross_Product(&e1, &e2, &fn);
+            Vector_Norm(&fn);
+            F->N = fn;
+            F->NormProd = -Dot_Product(&F->A->Pos, &F->N);
+            F->Txtr   = matSphere;
+            F->Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                      barry::TTextureMode::NORMAL>;
+            F->Flags  = 0;
+            F->uvFromVertices();
+        };
+        for (int li = 0; li < nLat - 1; ++li) {
+            for (int lo = 0; lo < nLon; ++lo) {
+                int lo2 = (lo + 1) % nLon;
+                int a = (li    ) * nLon + lo;
+                int b = (li    ) * nLon + lo2;
+                int c = (li + 1) * nLon + lo2;
+                int d = (li + 1) * nLon + lo;
+                // CCW outward winding.
+                fillTri(a, d, c);
+                fillTri(a, c, b);
+            }
+        }
+        // North cap fan (pole connects to ring 0).
+        for (int lo = 0; lo < nLon; ++lo) {
+            int lo2 = (lo + 1) % nLon;
+            fillTri(northIdx, lo, lo2);
+        }
+        // South cap fan.
+        for (int lo = 0; lo < nLon; ++lo) {
+            int lo2 = (lo + 1) % nLon;
+            fillTri(southIdx,
+                    (nLat - 1) * nLon + lo2,
+                    (nLat - 1) * nLon + lo);
+        }
+        sph->FIndex = fi;  // exact count
+    }
+
+    // Tessellated upright wall behind the sphere — a 6x4 grid of quads.
+    // Per-vertex interpolation will show banding/diamond artefacts on
+    // forward IF it ever does specular at the vertex level; per-pixel
+    // deferred should show a clean smooth lobe.
+    {
+        const int nx = 6, ny = 4;
+        const int numVerts = (nx + 1) * (ny + 1);
+        const int numFaces = nx * ny * 2;
+        const float w = 8.0f, h = 5.0f;
+        const float z = -5.0f;
+        const float y0 = 0.5f;
+
+        TriMesh* wall = appendTriMesh(Sc, "spec_wall", numVerts, numFaces);
+        for (int j = 0; j <= ny; ++j) {
+            for (int i = 0; i <= nx; ++i) {
+                Vertex* V = &wall->Verts[j * (nx + 1) + i];
+                float u = float(i) / float(nx);
+                float v = float(j) / float(ny);
+                V->Pos = Vector(-w * 0.5f + u * w, y0 + v * h, z);
+                V->N   = Vector(0, 0, 1);
+                V->TN  = V->N;
+                V->LR  = V->LG = V->LB = 30;
+                V->LA  = 255;
+                V->U = u; V->V = v;
+            }
+        }
+        int fi = 0;
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                int v0 = (j    ) * (nx + 1) + i;
+                int v1 = (j    ) * (nx + 1) + i + 1;
+                int v2 = (j + 1) * (nx + 1) + i + 1;
+                int v3 = (j + 1) * (nx + 1) + i;
+                int idx[2][3] = {{v0, v1, v2}, {v0, v2, v3}};
+                for (int t = 0; t < 2; ++t) {
+                    Face* F = &wall->Faces[fi++];
+                    F->A = &wall->Verts[idx[t][0]];
+                    F->B = &wall->Verts[idx[t][1]];
+                    F->C = &wall->Verts[idx[t][2]];
+                    F->N = Vector(0, 0, 1);
+                    F->NormProd = -Dot_Product(&F->A->Pos, &F->N);
+                    F->Txtr   = matWall;
+                    F->Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                              barry::TTextureMode::NORMAL>;
+                    F->Flags  = 0;
+                    F->uvFromVertices();
+                }
+            }
+        }
+    }
+
+    return Sc;
+}
+
 } // namespace
 
 int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
@@ -1372,6 +1677,141 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
             View->ISource.x, View->ISource.y, View->ISource.z,
             colorPath);
         ++produced;
+    }
+
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
+// Specular-highlight isolation harness. Builds a self-contained scene
+// (ground + tessellated sphere + tessellated wall, all opaque) lit by a
+// bright off-axis omni so the highlight sits OFF-CENTRE and slides
+// predictably as the camera orbits. For each camera pose we render
+// TWICE — once with the deferred path forced off (forward filler) and
+// once with the deferred path enabled — and dump both PPMs side by
+// side, so any divergence in highlight position / size / intensity is
+// directly observable as a pair of files.
+//
+// Usage:
+//   DEMO --snapshot=spectest          (default: gloss case 2, all 3 cases)
+//   DEMO --snapshot=spectest@t=1      (only gloss case 1: broad lobe)
+//   DEMO --snapshot=spectest@t=2      (only gloss case 2: medium lobe)
+//   DEMO --snapshot=spectest@t=3      (only gloss case 3: sharp lobe)
+//
+// FDS_DEFERRED is set per-pose internally; the env var the user passes
+// is irrelevant (we run both paths regardless).
+//
+// Outputs: <outDir>/spec_g<gloss>_<pose>_<mode>.ppm
+//   gloss: 4 / 32 / 128
+//   pose:  pos_z, pos_xz, pos_x, neg_xz, neg_x, high, low_z
+//   mode:  fwd / def
+int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    // Tone factors. Forward Lighting() ignores Specular_Factor (vertex
+    // shader is Lambertian-only), so this only matters for the
+    // deferred path — we enable it so deferred actually computes the
+    // Blinn-Phong term.
+    Ambient_Factor   = 0.25f;
+    Diffusive_Factor = 1.0f;
+    Specular_Factor  = 1.0f;
+    Range_Factor     = 1.0f;
+
+    // Cases to render: t=N selects a single case, no t=  means all.
+    std::vector<int> cases;
+    if (cfg.timestamps.empty()) {
+        cases = {1, 2, 3};
+    } else {
+        for (int32_t t : cfg.timestamps) {
+            if (t >= 1 && t <= 3) cases.push_back(int(t));
+        }
+        if (cases.empty()) cases = {2};
+    }
+
+    static std::unique_ptr<Face*[]> fListStorage =
+        std::make_unique<Face*[]>(8192);
+    static std::unique_ptr<Face*[]> sListStorage =
+        std::make_unique<Face*[]>(8192);
+    FList = fListStorage.get();
+    SList = sListStorage.get();
+
+    struct CamPose { const char* name; Vector dir; };
+    // Camera orbits around the sphere centre at (0, 2, 0). Six off-axis
+    // directions plus two pure-axis poses. The key omni at (6, 7, -2)
+    // means the highlight on the sphere should appear roughly along
+    // the +x / +y / -z hemisphere; from a +z camera it should sit
+    // slightly above and to the +x side of the sphere centre.
+    const CamPose poses[] = {
+        {"pos_z",  Vector( 0.0f,  0.2f,  1.0f)},  // straight on
+        {"pos_xz", Vector( 0.7f,  0.2f,  0.7f)},  // 45° to +x
+        {"pos_x",  Vector( 1.0f,  0.2f,  0.0f)},  // looking down -x
+        {"neg_xz", Vector(-0.7f,  0.2f,  0.7f)},  // 45° to -x
+        {"neg_x",  Vector(-1.0f,  0.2f,  0.0f)},  // looking down +x
+        {"neg_z",  Vector( 0.0f,  0.2f, -1.0f)},  // looking down +z
+        {"high",   Vector( 0.0f,  0.95f, 0.3f)},  // looking down
+        {"low_z",  Vector( 0.0f, -0.2f,  1.0f)},  // looking up slightly
+    };
+
+    const Vector center = Vector(0, 2, 0);
+    const float dist = 8.0f;
+
+    int produced = 0;
+    for (int gc : cases) {
+        unsigned short glossVal =
+            (gc == 1) ? 4 : (gc == 3) ? 128 : 32;
+        std::fprintf(stderr, "[SPECTEST] gloss case=%d (Glossiness=%u)\n",
+                     gc, unsigned(glossVal));
+        Scene* sc = buildSpecTestScene(gc);
+        SetCurrentScene(sc);
+        View = sc->CameraHead;
+        Scene_RebuildMatTable(sc);
+
+        for (const CamPose& p : poses) {
+            Vector dir = p.dir;
+            Vector_Norm(&dir);
+            View->ISource.x = center.x + dir.x * dist;
+            View->ISource.y = center.y + dir.y * dist;
+            View->ISource.z = center.z + dir.z * dist;
+            buildLookAt(View->ISource, center, View->Mat);
+            CalcPersp(View);
+            FOVX = View->PerspX;
+            FOVY = View->PerspY;
+
+            // Render both modes per pose. deferredEnabled() reads
+            // FDS_DEFERRED once and caches, so a single-process toggle
+            // can't go via the env var; instead we pass an explicit
+            // RenderPath override on each call.
+            for (int mode = 0; mode < 2; ++mode) {
+                const bool wantDef = (mode == 1);
+
+                std::memset(VPage,   0, PageSize);
+                std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+                Transform_Objects(sc);
+                Lighting(sc);
+                if (CAll) {
+                    Radix_SortingASM(FList, SList, CAll);
+                    Render(wantDef ? RenderPath::ForceDeferred
+                                   : RenderPath::ForceForward);
+                }
+
+                char colorPath[1024];
+                std::snprintf(colorPath, sizeof(colorPath),
+                              "%s/spec_g%u_%s_%s.ppm",
+                              cfg.outDir.c_str(), unsigned(glossVal),
+                              p.name, wantDef ? "def" : "fwd");
+                write_ppm(colorPath, MainSurf->Data, xres, yres,
+                          MainSurf->BPSL);
+                std::fprintf(stderr,
+                    "[SPECTEST] gloss=%u %-7s %s cam=(%.2f,%.2f,%.2f) -> %s\n",
+                    unsigned(glossVal), p.name,
+                    wantDef ? "def" : "fwd",
+                    View->ISource.x, View->ISource.y, View->ISource.z,
+                    colorPath);
+                ++produced;
+            }
+        }
     }
 
     ThreadPool::instance().close();

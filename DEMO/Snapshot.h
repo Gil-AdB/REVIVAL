@@ -25,6 +25,20 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres);
 int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres);
 
+// Drives the greets scene through a Timer sweep and dumps one PPM per
+// timestamp. Mirrors RunFountainSnapshot's structure — initializes City
+// first (greets shares textures + SkyCube setup), then Initialize_Greets,
+// then ticks the GreetsScene driver at each requested Timer value.
+// Stderr trace of which materials get a baked normal map (the
+// `[GREETS] baked +Y normal map for 'xxx'` lines) lands here so we can
+// confirm what the scene init touched.
+//
+//   DEMO --snapshot=greets@t=100,500,1000,2000
+//
+// Default timestamp sweep covers the four greet rounds (intro, round1,
+// round2, round3).
+int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres);
+
 // Drives Glat through a deterministic Timer sweep and records per-tick
 // state to <outDir>/glat_trace.csv. Useful for cross-platform / cross-
 // commit comparison of animation behaviour.
@@ -72,6 +86,22 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres);
 //
 // Run with FDS_DEFERRED=0/1 to compare forward vs deferred.
 int RunXparTest(const SnapshotConfig& cfg, int xres, int yres);
+
+// Specular-highlight isolation harness. Programmatic scene (no FLD
+// load): ground plane + UV sphere + tessellated wall with shiny
+// materials (Specular > 0), one off-axis key omni so the highlight
+// sits off-centre and slides predictably as the camera orbits. For
+// each pose we render BOTH forward and deferred and dump both, so
+// any per-pixel vs per-vertex divergence is observable directly in
+// the file list. Glossiness sweeps via t=:
+//
+//   DEMO --snapshot=spectest          all three gloss cases
+//   DEMO --snapshot=spectest@t=1      broad lobe   (Glossiness =   4)
+//   DEMO --snapshot=spectest@t=2      medium lobe  (Glossiness =  32)
+//   DEMO --snapshot=spectest@t=3      sharp lobe   (Glossiness = 128)
+//
+// Output: <outDir>/spec_g<gloss>_<pose>_<mode>.ppm
+int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres);
 
 // Reproduce the user-reported wrong-direction reflection: stand outside
 // the city over open water at four extremes, look back at the nearest
