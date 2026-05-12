@@ -212,14 +212,18 @@ void FrustumClipper::Near()
 		newVert->V = _IA->V + t * (_IB->V - _IA->V);
 		newVert->EU = _IA->EU + t * (_IB->EU - _IA->EU);
 		newVert->EV = _IA->EV + t * (_IB->EV - _IA->EV);
-		// View-space shading normal. Linear-in-screen interpolation —
-		// nlerp shape: rasterizer renormalizes per-pixel. Object-space
-		// N stays untouched on source vertices (read by forward-path
-		// Lighting() pre-clip); the clipped n-gon vertices only need
-		// the view-space TN that the deferred rasterizer reads.
+		// View-space shading normal + tangent. Linear-in-screen
+		// interpolation — nlerp shape: rasterizer renormalizes
+		// per-pixel. Object-space N stays untouched on source
+		// vertices (read by forward-path Lighting() pre-clip); the
+		// clipped n-gon vertices only need the view-space TN/TTangent
+		// that the deferred rasterizer reads.
 		newVert->TN.x = _IA->TN.x + t * (_IB->TN.x - _IA->TN.x);
 		newVert->TN.y = _IA->TN.y + t * (_IB->TN.y - _IA->TN.y);
 		newVert->TN.z = _IA->TN.z + t * (_IB->TN.z - _IA->TN.z);
+		newVert->TTangent.x = _IA->TTangent.x + t * (_IB->TTangent.x - _IA->TTangent.x);
+		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
+		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
 
 		newVert->PX = newVert->TPos.x * C_VP.iNearZ;
 		newVert->PY = newVert->TPos.y * C_VP.iNearZ;
@@ -274,6 +278,9 @@ void FrustumClipper::Far()
 		newVert->TN.x = _IA->TN.x + t * (_IB->TN.x - _IA->TN.x);
 		newVert->TN.y = _IA->TN.y + t * (_IB->TN.y - _IA->TN.y);
 		newVert->TN.z = _IA->TN.z + t * (_IB->TN.z - _IA->TN.z);
+		newVert->TTangent.x = _IA->TTangent.x + t * (_IB->TTangent.x - _IA->TTangent.x);
+		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
+		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
@@ -298,13 +305,16 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 	V->VZ = _IA->VZ + t * (_IB->VZ - _IA->VZ);
 	V->EUZ = _IA->EUZ + t * (_IB->EUZ - _IA->EUZ);
 	V->EVZ = _IA->EVZ + t * (_IB->EVZ - _IA->EVZ);
-	// View-space shading normal — linear-in-screen interpolation; the
-	// rasterizer renormalizes per-pixel (nlerp). Carrying TN here means
-	// post-clip n-gons get sensible normals at every newly-introduced
-	// vertex, just like UVs.
+	// View-space shading normal + tangent — linear-in-screen
+	// interpolation; the rasterizer renormalizes per-pixel (nlerp).
+	// Carrying TN/TTangent here means post-clip n-gons get sensible
+	// normals at every newly-introduced vertex, just like UVs.
 	V->TN.x = _IA->TN.x + t * (_IB->TN.x - _IA->TN.x);
 	V->TN.y = _IA->TN.y + t * (_IB->TN.y - _IA->TN.y);
 	V->TN.z = _IA->TN.z + t * (_IB->TN.z - _IA->TN.z);
+	V->TTangent.x = _IA->TTangent.x + t * (_IB->TTangent.x - _IA->TTangent.x);
+	V->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
+	V->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
 	V->i = _IA->i;
 
 	// calculate (U,V)

@@ -2249,25 +2249,46 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					// Tier B tangent-space normal map. Sampled vector is in
-					// the surface's tangent frame (X = tangent, Y = bitangent,
-					// Z = surface normal). Reconstruct world/view N as
-					// TBN * sampled. Tangent is derived on the fly from the
-					// view-space N (Mikkelsen-style): pick a reference axis
-					// not parallel to N, T = normalize(cross(ref, N)),
-					// B = cross(N, T). Doesn't match the texture's UV
-					// orientation exactly (per-vertex interpolated tangent
-					// from the rasterizer would) but gives the same per-pixel
-					// cost as Tier B — for perf assessment that's what we want.
-					float refx, refy, refz;
-					if (std::fabs(ny) < 0.9f) { refx = 0; refy = 1; refz = 0; }
-					else                       { refx = 1; refy = 0; refz = 0; }
-					// T = normalize(ref × N)
-					float tx = refy * nz - refz * ny;
-					float ty = refz * nx - refx * nz;
-					float tz = refx * ny - refy * nx;
-					float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
-					tx *= invTLen; ty *= invTLen; tz *= invTLen;
+					// Tier B tangent-space normal map. Reconstruct view-space
+					// N from TBN where T is the per-pixel interpolated tangent
+					// from the rasterizer's tangent G-buffer (Gram-Schmidt'd
+					// vs N at write time; we re-orthogonalize defensively after
+					// nlerp + oct-quant round-trip). When the tangent slot is
+					// empty (transparent layers, or vertex tangent collapsed)
+					// fall back to a Mikkelsen-style on-the-fly tangent so the
+					// effect is still visible — visually wrong rotation but
+					// the right per-pixel cost.
+					float tx = 0, ty = 0, tz = 0;
+					bool tangentValid = false;
+					if (!gb.tangent.empty()) {
+						const meka::u16 packedT = gb.tangent[i];
+						if (packedT != 0) {
+							meka::oct_decode_u16(packedT, tx, ty, tz);
+							// Re-orthogonalize after the lossy oct round-trip.
+							const float tDotN = tx*nx + ty*ny + tz*nz;
+							tx -= nx * tDotN;
+							ty -= ny * tDotN;
+							tz -= nz * tDotN;
+							const float tLen2 = tx*tx + ty*ty + tz*tz;
+							if (tLen2 > 1e-12f) {
+								const float invTLen = 1.0f / std::sqrt(tLen2);
+								tx *= invTLen; ty *= invTLen; tz *= invTLen;
+								tangentValid = true;
+							}
+						}
+					}
+					if (!tangentValid) {
+						// Mikkelsen fallback: pick a reference axis not
+						// parallel to N, T = normalize(cross(ref, N)).
+						float refx, refy, refz;
+						if (std::fabs(ny) < 0.9f) { refx = 0; refy = 1; refz = 0; }
+						else                       { refx = 1; refy = 0; refz = 0; }
+						tx = refy * nz - refz * ny;
+						ty = refz * nx - refx * nz;
+						tz = refx * ny - refy * nx;
+						const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+						tx *= invTLen; ty *= invTLen; tz *= invTLen;
+					}
 					// B = N × T
 					const float bx = ny * tz - nz * ty;
 					const float by = nz * tx - nx * tz;

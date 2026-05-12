@@ -93,6 +93,10 @@ struct Tile {
 	// adds dnxdx/dnydx etc. across the 8 lanes of a row and dnxdy/.. down
 	// the rows; per-pixel we renormalize via rsqrt to recover unit length.
 	float nx0, ny0, nz0;
+	// Per-tile origin of the interpolated view-space tangent. Same nlerp
+	// treatment as the shading normal — the lighting pass Gram-Schmidts
+	// it against the (also-interpolated) N before building TBN.
+	float tx0, ty0, tz0;
 };
 
 struct TileRasterizerCtx {
@@ -215,6 +219,12 @@ struct TileRasterizer {
 	float dnxdx, dnxdy;
 	float dnydx, dnydy;
 	float dnzdx, dnzdy;
+	// Per-pixel view-space tangent gradients (Tier B tangent-space normal
+	// maps). Same linear-in-screen interpolation as the shading normal —
+	// the lighting kernel handles renormalization + Gram-Schmidt vs N.
+	float dtxdx, dtxdy;
+	float dtydx, dtydy;
+	float dtzdx, dtzdy;
 
 	uint32_t umask;// = (1 << LogWidth) - 1);
 	uint32_t vmask;// = (1 << LogHeight) - 1);
@@ -252,6 +262,10 @@ struct TileRasterizer {
 		Vec8f p_nx = v8_from_arith_seq(tile.nx0, dnxdx);
 		Vec8f p_ny = v8_from_arith_seq(tile.ny0, dnydx);
 		Vec8f p_nz = v8_from_arith_seq(tile.nz0, dnzdx);
+		const bool wantTangent = (span.tangent != nullptr);
+		Vec8f p_tx = wantTangent ? v8_from_arith_seq(tile.tx0, dtxdx) : Vec8f(0.0f);
+		Vec8f p_ty = wantTangent ? v8_from_arith_seq(tile.ty0, dtydx) : Vec8f(0.0f);
+		Vec8f p_tz = wantTangent ? v8_from_arith_seq(tile.tz0, dtzdx) : Vec8f(0.0f);
 
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
@@ -289,13 +303,43 @@ struct TileRasterizer {
 					p_nx.store_a(nx_l);
 					p_ny.store_a(ny_l);
 					p_nz.store_a(nz_l);
+					alignas(32) float tx_l[8], ty_l[8], tz_l[8];
+					if (wantTangent) {
+						p_tx.store_a(tx_l);
+						p_ty.store_a(ty_l);
+						p_tz.store_a(tz_l);
+					}
 					alignas(32) int32_t mask_l[8];
 					Vec8i(p_mask).store_a(mask_l);
 					for (int lane = 0; lane < 8; ++lane) {
 						if (!mask_l[lane]) continue;
 						float nx = nx_l[lane], ny = ny_l[lane], nz = nz_l[lane];
 						float invLen = 1.0f / std::sqrt(nx*nx + ny*ny + nz*nz);
-						span.normal[lane] = oct_encode_u16(nx*invLen, ny*invLen, nz*invLen);
+						nx *= invLen; ny *= invLen; nz *= invLen;
+						span.normal[lane] = oct_encode_u16(nx, ny, nz);
+						if (wantTangent) {
+							// Gram-Schmidt the interpolated tangent against the
+							// per-pixel renormalized N. Without this the TBN
+							// frame skews near triangle interior pixels where
+							// nlerp doesn't preserve the original ⟂(N,T)
+							// relationship from the vertex shader.
+							float tx = tx_l[lane], ty = ty_l[lane], tz = tz_l[lane];
+							const float tDotN = tx*nx + ty*ny + tz*nz;
+							tx -= nx * tDotN;
+							ty -= ny * tDotN;
+							tz -= nz * tDotN;
+							const float tLen2 = tx*tx + ty*ty + tz*tz;
+							if (tLen2 > 1e-12f) {
+								const float invTLen = 1.0f / std::sqrt(tLen2);
+								span.tangent[lane] = oct_encode_u16(tx*invTLen, ty*invTLen, tz*invTLen);
+							} else {
+								// Degenerate tangent (parallel to N after
+								// interpolation). Fall back to an arbitrary
+								// ⟂N reference — the lighting kernel will
+								// still produce a sane TBN frame.
+								span.tangent[lane] = 0;
+							}
+						}
 					}
 				}
 			}
@@ -306,6 +350,11 @@ struct TileRasterizer {
 			p_nx += Vec8f(dnxdy);
 			p_ny += Vec8f(dnydy);
 			p_nz += Vec8f(dnzdy);
+			if (wantTangent) {
+				p_tx += Vec8f(dtxdy);
+				p_ty += Vec8f(dtydy);
+				p_tz += Vec8f(dtzdy);
+			}
 
 			p_a += Vec8i(tile.dady);
 			p_b += Vec8i(tile.dbdy);
@@ -391,6 +440,9 @@ struct TileRasterizer {
 						.nx0 = v1.TN.x + dx * dnxdx + dy * dnxdy,
 						.ny0 = v1.TN.y + dx * dnydx + dy * dnydy,
 						.nz0 = v1.TN.z + dx * dnzdx + dy * dnzdy,
+						.tx0 = v1.TTangent.x + dx * dtxdx + dy * dtxdy,
+						.ty0 = v1.TTangent.y + dx * dtydx + dy * dtydy,
+						.tz0 = v1.TTangent.z + dx * dtzdx + dy * dtzdy,
 					};
 					apply_exact(tile);
 				}
@@ -502,6 +554,16 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 		r.dnydy = im[2] * (v2.TN.y - v1.TN.y) + im[3] * (v3.TN.y - v1.TN.y);
 		r.dnzdx = im[0] * (v2.TN.z - v1.TN.z) + im[1] * (v3.TN.z - v1.TN.z);
 		r.dnzdy = im[2] * (v2.TN.z - v1.TN.z) + im[3] * (v3.TN.z - v1.TN.z);
+		// Per-vertex view-space tangent gradients (Tier B). Same im[]
+		// inverse-Jacobian as N/UV. Used by the inner loop only when
+		// span.tangent != nullptr — the transparent G-buffer paths
+		// leave it null and skip the tangent write entirely.
+		r.dtxdx = im[0] * (v2.TTangent.x - v1.TTangent.x) + im[1] * (v3.TTangent.x - v1.TTangent.x);
+		r.dtxdy = im[2] * (v2.TTangent.x - v1.TTangent.x) + im[3] * (v3.TTangent.x - v1.TTangent.x);
+		r.dtydx = im[0] * (v2.TTangent.y - v1.TTangent.y) + im[1] * (v3.TTangent.y - v1.TTangent.y);
+		r.dtydy = im[2] * (v2.TTangent.y - v1.TTangent.y) + im[3] * (v3.TTangent.y - v1.TTangent.y);
+		r.dtzdx = im[0] * (v2.TTangent.z - v1.TTangent.z) + im[1] * (v3.TTangent.z - v1.TTangent.z);
+		r.dtzdy = im[2] * (v2.TTangent.z - v1.TTangent.z) + im[3] * (v3.TTangent.z - v1.TTangent.z);
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;
