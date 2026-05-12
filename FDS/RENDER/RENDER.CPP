@@ -3200,11 +3200,6 @@ bool deferredUnifiedTbrEnabled() {
 void RenderXparClumpInStrip(Face** faces, int count, bool front,
                              int strip_y, int strip_h)
 {
-	if (count <= 0 || !g_deferredCtx.gb) return;
-	if (strip_y < 0 || strip_y >= YRes) return;
-	if (strip_y + strip_h > YRes) strip_h = YRes - strip_y;
-	if (strip_h <= 0) return;
-
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
 	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
 
@@ -4444,6 +4439,30 @@ void Render(RenderPath path)
 		// them would lose. Per-object peeling gives each mesh a fresh
 		// xpar G-buffer.
 
+		const bool unifiedTbr = deferredUnifiedTbrEnabled();
+
+		// Unified-TBR path (task #9): insert every transparent face into
+		// the per-strip TBR linked lists. Sprites are still inserted in
+		// the standalone post-loop further below — TBR_Render at the
+		// end of Render() flushes everything together per-strip in
+		// back-to-front render-Z order. The 2-deep xpar G-buffer is
+		// kept (used in strip-scoped form by RenderXparClumpInStrip per
+		// clump of consecutive same-(mesh, frontFacing) entries).
+		if (unifiedTbr) {
+			for (int32_t k = 0; k < CAll; ++k) {
+				Face* F = FList[k];
+				if (!F || !F->Txtr) continue;
+				if (F->A == F->B) continue;  // sprite, handled by post-loop
+				if (!(F->Txtr->Flags & Mat_Transparent)) continue;
+				if (F->Flags & Face_Reflective) continue;  // forward handles
+				if (!F->ParentTri) continue;
+				InsertTransparentToTBR(F);
+			}
+			// Skip the legacy per-mesh xpar peel below.
+			goto xpar_done;
+		}
+
+		{
 		auto runTilePass = [&](auto workFn) {
 			renderns::tileCounter = 0;
 			for (auto j = 0; j < numTilesY; ++j) {
@@ -4545,6 +4564,8 @@ void Render(RenderPath path)
 			batchLastEnd = k + 1;
 		}
 		flushBatch();
+		}  // close unifiedTbr=false legacy block
+xpar_done: ;
 	}
 
 	int32_t I = CAll;
