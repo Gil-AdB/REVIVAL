@@ -2183,6 +2183,26 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 
+	// Per-stage ablation gates. Read-once env vars; set one to '1' to
+	// short-circuit that stage so a bench harness can measure its cost
+	// from the frame-time delta (see `--bench=scene@...`).
+	static const bool profNoTex = []{
+		const char *s = std::getenv("FDS_PROF_NO_TEX");
+		return s && s[0] == '1';
+	}();
+	static const bool profNoLights = []{
+		const char *s = std::getenv("FDS_PROF_NO_LIGHTS");
+		return s && s[0] == '1';
+	}();
+	static const bool profNoSpec = []{
+		const char *s = std::getenv("FDS_PROF_NO_SPEC");
+		return s && s[0] == '1';
+	}();
+	static const bool profNoFog = []{
+		const char *s = std::getenv("FDS_PROF_NO_FOG");
+		return s && s[0] == '1';
+	}();
+
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
@@ -2207,12 +2227,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// swizzled offset into mat32, so it's a direct lookup into
 			// the mip's tile-major data. Mipmap[k] is byte*; texels are
 			// dword (B,G,R,A in low→high bytes).
-			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
-			if (!texData) continue;
-			const dword texel = texData[swizzledUV];
-			const float texB = float(texel & 0xFF);
-			const float texG = float((texel >> 8) & 0xFF);
-			const float texR = float((texel >> 16) & 0xFF);
+			float texB, texG, texR;
+			if (profNoTex) {
+				texB = texG = texR = 128.0f;
+			} else {
+				const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
+				if (!texData) continue;
+				const dword texel = texData[swizzledUV];
+				texB = float(texel & 0xFF);
+				texG = float((texel >> 8) & 0xFF);
+				texR = float((texel >> 16) & 0xFF);
+			}
 
 			// Decode normal (view-space, unit-length).
 			float nx, ny, nz;
@@ -2338,7 +2363,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// deferred path was previously emitting Blinn-Phong even when
 			// the scene had explicitly disabled it, which over-brightened
 			// City windows + Greets marble against the forward reference.
-			const bool wantSpecular = specGlobalOn && (Mat->Specular > 0.0f);
+			const bool wantSpecular = specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
 				: 32.0f;
@@ -2388,7 +2413,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				(nmapFromDiffuse_useVec && Mat->Txtr);
 			const bool useVecHere = useVec && !hasNormalMap;
 
-			if (!isWater) {
+			if (!isWater && !profNoLights) {
 				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
 					// simde's _mm256_* intrinsics so we bypass
@@ -2607,7 +2632,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// LR/LG/LB at vertex shading time; deferred runs per-pixel
 			// using the reconstructed view-space z. Scn_Fogged scenes
 			// (City, etc.) need this or distant geometry stays vivid.
-			if (ctx.Sc->Flags & Scn_Fogged) {
+			if ((ctx.Sc->Flags & Scn_Fogged) && !profNoFog) {
 				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
 				lB = std::max(lB * fogRate, 10.0f);
 				lG = std::max(lG * fogRate, 10.0f);
@@ -3090,7 +3115,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256  omniMaskF = _mm256_castsi256_ps(omniMask);
 
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
-			for (int n = 0; n < tl.count; ++n) {
+			// FDS_PROF_NO_LIGHTS gate: skip the loop entirely so the
+			// bench harness can isolate non-light kernel cost.
+			static const bool profNoLights = []{
+				const char *s = std::getenv("FDS_PROF_NO_LIGHTS");
+				return s && s[0] == '1';
+			}();
+			const int omniLoopN = profNoLights ? 0 : tl.count;
+			for (int n = 0; n < omniLoopN; ++n) {
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
 				__m256 wy = _mm256_sub_ps(_mm256_set1_ps(tl.posY[n]), yv);
 				__m256 wz = _mm256_sub_ps(_mm256_set1_ps(tl.posZ[n]), zv);
