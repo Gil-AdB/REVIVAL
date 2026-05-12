@@ -2186,6 +2186,117 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 	}
 }
 
+// Strip-flavored light list builder (1D, Y-only) for the unified TBR
+// path's transparent strip rendering. Mirrors buildTileLightLists but
+// over 8-row Y-strips matching the TBR tile shape. Each strip's list
+// is consumed by RenderXparClumpInStrip via a DeferredLightingCtx
+// variant whose `tileLights` points at this array.
+//
+// MAX strips at any reasonable display: 4096/8 = 512. We size for
+// that ceiling so reallocation isn't needed at runtime resize.
+constexpr int DEFERRED_MAX_STRIPS = 512;
+static TileLights g_stripLights[DEFERRED_MAX_STRIPS];
+static int        g_numStripLights = 0;
+
+static void buildStripLightLists(int numStrips, int stripHeight, int yres,
+                                  const ViewLightsSoA &lights, int numLights)
+{
+	if (numStrips > DEFERRED_MAX_STRIPS) numStrips = DEFERRED_MAX_STRIPS;
+	for (int s = 0; s < numStrips; ++s) {
+		g_stripLights[s].count = 0;
+	}
+
+	for (int li = 0; li < numLights; ++li) {
+		const float vx = lights.posX[li];
+		const float vy = lights.posY[li];
+		const float vz = lights.posZ[li];
+		const float r  = std::sqrt(lights.range2[li]);
+
+		if (vz + r < 0.0f) continue;
+
+		int sy_min, sy_max;
+		if (vz - r < 1.0f) {
+			sy_min = 0;        sy_max = yres - 1;
+		} else {
+			const float invZ = 1.0f / vz;
+			const float cy   = CntrEY - vy * FOVY * invZ;
+			const float ry   = r * FOVY * invZ;
+			sy_min = std::max(0,       int(std::floor(cy - ry)));
+			sy_max = std::min(yres - 1, int(std::ceil (cy + ry)));
+			if (sy_min > sy_max) continue;
+		}
+
+		const int strip_lo = sy_min / stripHeight;
+		const int strip_hi = std::min(numStrips - 1, sy_max / stripHeight);
+
+		const float Lpx = lights.posX[li];
+		const float Lpy = lights.posY[li];
+		const float Lpz = lights.posZ[li];
+		const float Lcb = lights.colB[li];
+		const float Lcg = lights.colG[li];
+		const float Lcr = lights.colR[li];
+		const float Lr2 = lights.range2[li];
+		const float Lrr = lights.rRange[li];
+		const float Ldx = lights.dirX[li];
+		const float Ldy = lights.dirY[li];
+		const float Ldz = lights.dirZ[li];
+		const float Lci = lights.cosInner[li];
+		const float Lco = lights.cosOuter[li];
+		const uint32_t Lis = lights.isSpot[li];
+
+		for (int s = strip_lo; s <= strip_hi; ++s) {
+			TileLights &tl = g_stripLights[s];
+			if (tl.count < DEFERRED_MAX_LIGHTS) {
+				const int idx = tl.count++;
+				tl.posX[idx]   = Lpx;
+				tl.posY[idx]   = Lpy;
+				tl.posZ[idx]   = Lpz;
+				tl.colB[idx]   = Lcb;
+				tl.colG[idx]   = Lcg;
+				tl.colR[idx]   = Lcr;
+				tl.range2[idx] = Lr2;
+				tl.rRange[idx] = Lrr;
+				tl.dirX[idx]     = Ldx;
+				tl.dirY[idx]     = Ldy;
+				tl.dirZ[idx]     = Ldz;
+				tl.cosInner[idx] = Lci;
+				tl.cosOuter[idx] = Lco;
+				tl.isSpot[idx]   = Lis;
+			}
+		}
+	}
+
+	// Zero the padding slots so the vec loop's overread is benign
+	// (range2=0 lanes fail the per-pixel `len2 <= range2` mask).
+	for (int s = 0; s < numStrips; ++s) {
+		TileLights &tl = g_stripLights[s];
+		const int padded = (tl.count + 7) & ~7;
+		const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
+		for (int p = tl.count; p < pad_to; ++p) {
+			tl.posX[p]   = 0.0f;
+			tl.posY[p]   = 0.0f;
+			tl.posZ[p]   = 0.0f;
+			tl.colB[p]   = 0.0f;
+			tl.colG[p]   = 0.0f;
+			tl.colR[p]   = 0.0f;
+			tl.range2[p] = 0.0f;
+			tl.rRange[p] = 0.0f;
+			tl.dirX[p]     = 0.0f;
+			tl.dirY[p]     = 0.0f;
+			tl.dirZ[p]     = 0.0f;
+			tl.cosInner[p] = -2.0f;
+			tl.cosOuter[p] = -2.0f;
+			tl.isSpot[p]   = 0u;
+		}
+		tl.paddedCount = pad_to;
+		// Strip Z bounds: not used by transparent kernel (depth is
+		// already in the xpar G-buffer). Set sentinels.
+		tl.zMin = -std::numeric_limits<float>::infinity();
+		tl.zMax =  std::numeric_limits<float>::infinity();
+	}
+	g_numStripLights = numStrips;
+}
+
 // Fast scalar 1/sqrt(x) via NEON's frsqrte + one Newton-Raphson step.
 // arm64 fsqrt+fdiv is ~24 cycles serial; this is ~5. Accuracy is around
 // 12 bits — fine for diffuse shading, far below the visual threshold.
@@ -3236,22 +3347,23 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 		else       clipper.Render(F, MekaleleTransparentBack, false);
 	}
 
-	// Composite the strip rows onto VPage via the existing transparent
-	// lighting kernel. We pass tileIndex=0 (so the per-pixel inner loop
-	// iterates tile-0's tile-cull light list); a per-strip light list
-	// would be tighter but requires building it. Per-pixel correctness
-	// only suffers if the actual lights reaching this strip aren't in
-	// tile-0's list — for typical scenes most lights are tile-overlap-
-	// heavy, so this is a reasonable first cut. TODO: build per-strip
-	// light lists.
-	const int tileIndexHack = 0;
+	// Composite the strip rows onto VPage via the transparent lighting
+	// kernel, with a ctx variant whose `tileLights` points at the
+	// per-strip light array (built by buildStripLightLists in
+	// Render_DeferredLighting). The kernel reads ctx.tileLights[
+	// tileIndex] for its per-pixel light loop; with tileLights ->
+	// g_stripLights and tileIndex = strip_y/TILESIZE the strip gets
+	// exactly the lights overlapping its 8 rows.
+	const int stripIdx = strip_y >> 3;  // TILELOG=3
+	DeferredLightingCtx stripCtx = g_deferredCtx;
+	stripCtx.tileLights = g_stripLights;
 	if (front) {
 		Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-			g_deferredCtx, tileIndexHack,
+			stripCtx, stripIdx,
 			0, strip_y, XRes, strip_y + strip_h);
 	} else {
 		Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-			g_deferredCtx, tileIndexHack,
+			stripCtx, stripIdx,
 			0, strip_y, XRes, strip_y + strip_h);
 	}
 }
@@ -4255,6 +4367,17 @@ static void Render_DeferredLighting() {
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights);
+
+	// Per-strip light lists for the unified-TBR transparent path's
+	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
+	// when the unified path is active to avoid the per-frame cost on
+	// the legacy path. (Strip count = ceil(YRes / TILESIZE), capped at
+	// DEFERRED_MAX_STRIPS=512.)
+	if (deferredUnifiedTbrEnabled()) {
+		constexpr int STRIP_H = 1 << 3;  // TILESIZE from FILLERS.CPP
+		const int numStrips = (YRes + STRIP_H - 1) >> 3;
+		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights);
+	}
 	if (std::getenv("FDS_DEFERRED_TILE_STATS")) {
 		int total = 0, tmin = INT_MAX, tmax = 0;
 		for (int t = 0; t < DEFERRED_NUM_TILES; ++t) {
