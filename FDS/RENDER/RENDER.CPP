@@ -2221,8 +2221,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// the geometric N with it. Static meshes only — for dynamic
 			// meshes we'd need to transform from mesh-local to world via
 			// a per-mesh RotMat, which we don't have at lighting time.
-			if (Mat->NormalMap) {
-				const dword *nmData = (const dword *)Mat->NormalMap->Mipmap[miplevel];
+			//
+			// FDS_NMAP_FROM_DIFFUSE=1: re-purposes the diffuse texel as
+			// the normal map. Visually wrong but lets us measure the
+			// per-pixel cost of the normal-map code path on existing
+			// scenes without authoring or baking any new textures.
+			static const bool nmapFromDiffuse = []{
+				const char* s = std::getenv("FDS_NMAP_FROM_DIFFUSE");
+				return s && s[0] == '1';
+			}();
+			Texture* nmTex = Mat->NormalMap;
+			if (!nmTex && nmapFromDiffuse) nmTex = Mat->Txtr;
+			if (nmTex) {
+				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];
 				if (nmData) {
 					const dword nmTexel = nmData[swizzledUV];
 					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
@@ -2313,8 +2324,22 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// sees 10-20.
 			const TileLights &tl = ctx.tileLights[tileIndex];
 
+			// Per-pixel normal-map sampling lives only in the scalar
+			// path. Force scalar for any pixel whose material has a
+			// normal map (or when FDS_NMAP_FROM_DIFFUSE forces it for
+			// every textured material). The geometric N from the
+			// G-buffer would otherwise drive vec lighting and the
+			// normal-map perturbation would be lost.
+			static const bool nmapFromDiffuse_useVec = []{
+				const char* s = std::getenv("FDS_NMAP_FROM_DIFFUSE");
+				return s && s[0] == '1';
+			}();
+			const bool hasNormalMap = Mat->NormalMap ||
+				(nmapFromDiffuse_useVec && Mat->Txtr);
+			const bool useVecHere = useVec && !hasNormalMap;
+
 			if (!isWater) {
-				if (useVec) {
+				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
 					// simde's _mm256_* intrinsics so we bypass
 					// vectorclass's Vec8fb byte-packed mask layout.
