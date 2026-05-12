@@ -432,6 +432,18 @@ void IX_Prefiller_Reflective(Face* F, Vertex** V, dword numVerts, dword miplevel
 void TBR_Init(Scene *Sc, mword size);
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel);
 void TBR_Render(Scene *Sc);
+void InsertTransparentToTBR(Face *F);
+
+// Per-strip transparent rendering. Called from TBR_Render's per-strip
+// walk for each clump of consecutive same-(mesh, frontFacing) transparent
+// faces. Clears the strip's slice of the xpar G-buffer (back if !front,
+// front layer if front), rasterizes the clump's faces with clipper rect
+// limited to the strip, then composites that layer onto VPage strip rows
+// via the existing transparent lighting kernel.
+void RenderXparClumpInStrip(class Face** faces, int count, bool front,
+                             int strip_y, int strip_h);
+
+bool deferredUnifiedTbrEnabled();
 
 #endif
 

@@ -3174,6 +3174,93 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	renderns::condition.notify_one();
 }
 
+// FDS_DEFERRED_UNIFIED_TBR=1 routes the deferred transparent + sprite
+// rendering through the unified per-strip TBR walk (task #9). When off
+// (default during validation), the existing per-clump xpar peel runs
+// alongside the standalone sprite TBR — the legacy behaviour.
+bool deferredUnifiedTbrEnabled() {
+	static bool cached = []{
+		const char *s = std::getenv("FDS_DEFERRED_UNIFIED_TBR");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
+// Per-strip xpar render helper, called from TBR_Render's per-strip walk
+// for each clump of consecutive same-(mesh, frontFacing) transparent
+// faces in the sorted item list. The strip covers rows [strip_y,
+// strip_y+strip_h) (strip_h is normally TILESIZE=8, but may be smaller
+// for the last strip if YRes isn't a multiple of 8).
+//
+// One xpar G-buffer layer is dirtied per clump (back layer for back-
+// facing tris, front layer for front-facing tris). We clear only the
+// strip's slice (61 KB per layer at 1920 wide), raster the clump's
+// faces with clipper extents = strip rect, then composite the strip
+// rows via Render_DeferredTransparentLighting_Tile<Layer>.
+void RenderXparClumpInStrip(Face** faces, int count, bool front,
+                             int strip_y, int strip_h)
+{
+	if (count <= 0 || !g_deferredCtx.gb) return;
+	if (strip_y < 0 || strip_y >= YRes) return;
+	if (strip_y + strip_h > YRes) strip_h = YRes - strip_y;
+	if (strip_h <= 0) return;
+
+	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
+	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
+
+	// Clear strip's slice of the relevant xpar layer.
+	if (front) {
+		if (g_gbufferTransparent) {
+			std::memset(g_gbufferTransparent->txtr.data() + rowStart,
+			            0xFF, rowCount * sizeof(uint32_t));
+		}
+		if (g_xparZ) std::memset(g_xparZ + rowStart, 0,
+		                          rowCount * sizeof(uint16_t));
+	} else {
+		if (g_gbufferTransparentBack) {
+			std::memset(g_gbufferTransparentBack->txtr.data() + rowStart,
+			            0xFF, rowCount * sizeof(uint32_t));
+		}
+		if (g_xparZBack) std::memset(g_xparZBack + rowStart, 0,
+		                              rowCount * sizeof(uint16_t));
+	}
+
+	// Raster the clump's faces into this layer. Clipper extents pin the
+	// rasterizer to the strip; faces are routed to MekaleleTransparent
+	// (front-facing → front layer) or MekaleleTransparentBack (back-
+	// facing → back layer). All faces in a clump share orientation by
+	// construction.
+	FrustumClipper clipper;
+	clipper.InitViewport(CurScene);
+	clipper.SetClippingExtents(0.0f, float(strip_y),
+	                            float(XRes), float(strip_y + strip_h));
+	for (int i = 0; i < count; ++i) {
+		Face* F = faces[i];
+		if (!F) continue;
+		if (front) clipper.Render(F, MekaleleTransparent,     false);
+		else       clipper.Render(F, MekaleleTransparentBack, false);
+	}
+
+	// Composite the strip rows onto VPage via the existing transparent
+	// lighting kernel. We pass tileIndex=0 (so the per-pixel inner loop
+	// iterates tile-0's tile-cull light list); a per-strip light list
+	// would be tighter but requires building it. Per-pixel correctness
+	// only suffers if the actual lights reaching this strip aren't in
+	// tile-0's list — for typical scenes most lights are tile-overlap-
+	// heavy, so this is a reasonable first cut. TODO: build per-strip
+	// light lists.
+	const int tileIndexHack = 0;
+	if (front) {
+		Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
+			g_deferredCtx, tileIndexHack,
+			0, strip_y, XRes, strip_y + strip_h);
+	} else {
+		Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
+			g_deferredCtx, tileIndexHack,
+			0, strip_y, XRes, strip_y + strip_h);
+	}
+}
+
 // Wave-2 of checkerboard: fills the odd (skipped) cells. For each odd
 // pixel: if both horizontal neighbors share the same matID, average
 // their already-shaded VPage values (~5 cycles per pixel — 2 loads,

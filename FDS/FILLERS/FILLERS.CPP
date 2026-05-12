@@ -1649,6 +1649,67 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	}
 }
 
+// Insert a transparent face fragment into every Y-strip its screen
+// bounding box overlaps. Each strip's linked list (Sc->SBufferHead[i])
+// is the unified back-to-front list TBR_Render walks. Entry renderZ
+// is the tri's far surface for back-facing (max vertex Z) and the near
+// surface for front-facing (min vertex Z) — sorted descending at flush
+// time, this naturally interleaves with sprites whose renderZ is the
+// particle's view-space Z, producing the correct per-strip back-to-
+// front order across both types.
+void InsertTransparentToTBR(Face *F)
+{
+	// Screen-Y bounds from projected vertex coords (set by
+	// Transform_Objects).
+	float y_min = F->A->PY;
+	float y_max = F->A->PY;
+	if (F->B->PY < y_min) y_min = F->B->PY;
+	if (F->B->PY > y_max) y_max = F->B->PY;
+	if (F->C->PY < y_min) y_min = F->C->PY;
+	if (F->C->PY > y_max) y_max = F->C->PY;
+
+	if (y_min >= YRes || y_max < 0) return;
+
+	int32_t numTiles = CurScene->NumTiles;
+	int s_lo = Fist(y_min * rTILESIZE - 0.999999f);
+	int s_hi = Fist(y_max * rTILESIZE);
+	if (s_lo < 0) s_lo = 0;
+	if (s_hi >= numTiles) s_hi = numTiles - 1;
+	if (s_lo > s_hi) return;
+
+	// Per-face front-facing test (matches the rest of the xpar pipeline).
+	const float ex = F->B->TPos.x - F->A->TPos.x;
+	const float ey = F->B->TPos.y - F->A->TPos.y;
+	const float ez = F->B->TPos.z - F->A->TPos.z;
+	const float fx = F->C->TPos.x - F->A->TPos.x;
+	const float fy = F->C->TPos.y - F->A->TPos.y;
+	const float fz = F->C->TPos.z - F->A->TPos.z;
+	const float nx = ey * fz - ez * fy;
+	const float ny = ez * fx - ex * fz;
+	const float nz = ex * fy - ey * fx;
+	const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+	const bool front = vd < 0.0f;
+
+	float renderZ;
+	if (front) {
+		// Near surface — min vertex Z. Sorts later (= rendered LATER
+		// = on top of farther stuff).
+		renderZ = F->A->TPos.z;
+		if (F->B->TPos.z < renderZ) renderZ = F->B->TPos.z;
+		if (F->C->TPos.z < renderZ) renderZ = F->C->TPos.z;
+	} else {
+		// Far surface — max vertex Z. Sorts earlier (= rendered FIRST
+		// = the back-most surface in the per-strip back-to-front walk).
+		renderZ = F->A->TPos.z;
+		if (F->B->TPos.z > renderZ) renderZ = F->B->TPos.z;
+		if (F->C->TPos.z > renderZ) renderZ = F->C->TPos.z;
+	}
+
+	for (int s = s_lo; s <= s_hi; s++) {
+		InsertSpanToTBR(F, s, renderZ);
+	}
+}
+
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel)
 {
 	float Size = ImageSize*_A->RZ*View->PerspX;
@@ -1716,31 +1777,81 @@ void TBR_Render(Scene *Sc)
 					return a.renderZ > b.renderZ;
 				});
 
+			// Walk the sorted strip items in back-to-front order. Two
+			// item types share the list:
+			//   sprite (F->A == F->B): rendered directly via
+			//                          Spriter<32, true> (per-pixel Z).
+			//   transparent: accumulated into a clump of consecutive
+			//                same-(ParentTri, frontFacing) entries.
+			//                On a bucket change (or end-of-strip), the
+			//                clump flushes via RenderXparClumpInStrip
+			//                which clears the strip's xpar layer slice,
+			//                rasters the clump's faces, and composites
+			//                that layer onto VPage strip rows.
+			thread_local std::vector<Face*> xparClump;
+			xparClump.clear();
+			TriMesh* clumpMesh   = nullptr;
+			bool     clumpFront  = false;
+			const int strip_y_i  = int(i) << TILELOG;
+			const int strip_h    = int(spriteClipY2) - strip_y_i;
+
+			auto computeFront = [](Face* F) -> bool {
+				const float ex = F->B->TPos.x - F->A->TPos.x;
+				const float ey = F->B->TPos.y - F->A->TPos.y;
+				const float ez = F->B->TPos.z - F->A->TPos.z;
+				const float fx = F->C->TPos.x - F->A->TPos.x;
+				const float fy = F->C->TPos.y - F->A->TPos.y;
+				const float fz = F->C->TPos.z - F->A->TPos.z;
+				const float nx = ey * fz - ez * fy;
+				const float ny = ez * fx - ex * fz;
+				const float nz = ex * fy - ey * fx;
+				const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+				return vd < 0.0f;
+			};
+			auto flushXparClump = [&]() {
+				if (xparClump.empty()) return;
+				RenderXparClumpInStrip(xparClump.data(),
+				                       int(xparClump.size()),
+				                       clumpFront, strip_y_i, strip_h);
+				xparClump.clear();
+			};
+
 			for (const TBREntry& e : scratch) {
 				Face*   F = e.F;
-				Vertex* V = F->A;
-				// Sprite path (existing): A==B means degenerate
-				// triangle / billboard. Per-pixel Z-test via
-				// Spriter<32, true>'s EnableZTest=true.
-				if (F->A == F->B) {
+				const bool isSprite = (F->A == F->B);
+
+				if (isSprite) {
+					// Flush any open transparent clump first so it
+					// composites BEFORE this (closer) sprite.
+					flushXparClump();
+
+					Vertex* V = F->A;
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
 					dword R = V->LR, G = V->LG, B = V->LB;
 					dword Color = (R << 16) + (G << 8) + B;
-					// Encode view-space z the same way Mekalele /
-					// TheOtherBarry do (0xFF80 - z*scale; larger =
-					// closer). Spriter<true> Z-tests every pixel
-					// against ZPage16 so particles get correctly
-					// occluded by closer opaque geometry.
 					dword Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
 					Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
 						F->Txtr->Txtr->Data, VPage, Color, Z,
 						0, spriteClipY1, XRes, spriteClipY2);
 					continue;
 				}
-				// Transparent face path: not yet wired (will land in
-				// a follow-up commit). For now anything that's not a
-				// sprite in the TBR is silently skipped.
+
+				// Transparent face. Open / extend / flush+restart a
+				// clump based on (ParentTri, frontFacing).
+				TriMesh*  meshHere = F->ParentTri;
+				const bool frontHere = computeFront(F);
+				if (!xparClump.empty() &&
+				    (meshHere != clumpMesh || frontHere != clumpFront)) {
+					flushXparClump();
+				}
+				if (xparClump.empty()) {
+					clumpMesh  = meshHere;
+					clumpFront = frontHere;
+				}
+				xparClump.push_back(F);
 			}
+			// Trailing flush.
+			flushXparClump();
 			Sc->SBufferHead[i] = -1;
 
 			std::unique_lock<std::mutex> lock(tbr::tileCounterMutex);
