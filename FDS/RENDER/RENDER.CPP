@@ -2106,108 +2106,61 @@ static inline float fast_rsqrt(float x) {
 #endif
 }
 
-// Scalar pow via repeated squaring. Same gloss-class dispatch the
-// vec path uses — runtime int → squaring sequence at compile time
-// through template specialization. Bit-exact vs std::pow for integer
-// N. Used by the scalar lighting path (pixels with normal maps, which
-// the SIMD body bails on). Returns 0 outside the supported set so the
-// caller knows to fall back; in practice every gloss we ship is here.
-template<int N> static inline float pow_squaring_scalar(float x);
-template<> inline float pow_squaring_scalar<4>(float x) {
-	float x2 = x*x; return x2*x2;
+// x^N via repeated squaring. Bit-exact vs std::pow for integer N
+// (within float precision; each squaring loses ~½ ULP). The set of
+// supported N covers every Glossiness value our FLDs actually author
+// — verified via FDS_DEFERRED_GLOSS_STATS = {48, 64} for greets+city.
+// Other small powers included defensively.
+//
+// Each specialization is one operation built on the next-smaller one;
+// the compiler inlines `sq()` and the recursive call so codegen ends
+// up as the flat squaring chain. For 48 we explicitly reuse x16 so
+// the multiplier doesn't require CSE through opaque intrinsic calls.
+//
+// Scalar and SIMD versions are templated on the same N — the caller
+// picks the right overload via parameter type.
+
+static inline float  sq(float  x) { return x * x; }
+static inline __m256 sq(__m256 x) { return _mm256_mul_ps(x, x); }
+
+template<int N, typename T> static inline T pow_squaring(T x);
+template<> inline float  pow_squaring<2,   float >(float  x) { return sq(x); }
+template<> inline __m256 pow_squaring<2,   __m256>(__m256 x) { return sq(x); }
+template<> inline float  pow_squaring<4,   float >(float  x) { return sq(pow_squaring<2, float >(x)); }
+template<> inline __m256 pow_squaring<4,   __m256>(__m256 x) { return sq(pow_squaring<2, __m256>(x)); }
+template<> inline float  pow_squaring<8,   float >(float  x) { return sq(pow_squaring<4, float >(x)); }
+template<> inline __m256 pow_squaring<8,   __m256>(__m256 x) { return sq(pow_squaring<4, __m256>(x)); }
+template<> inline float  pow_squaring<16,  float >(float  x) { return sq(pow_squaring<8, float >(x)); }
+template<> inline __m256 pow_squaring<16,  __m256>(__m256 x) { return sq(pow_squaring<8, __m256>(x)); }
+template<> inline float  pow_squaring<32,  float >(float  x) { return sq(pow_squaring<16, float >(x)); }
+template<> inline __m256 pow_squaring<32,  __m256>(__m256 x) { return sq(pow_squaring<16, __m256>(x)); }
+template<> inline float  pow_squaring<64,  float >(float  x) { return sq(pow_squaring<32, float >(x)); }
+template<> inline __m256 pow_squaring<64,  __m256>(__m256 x) { return sq(pow_squaring<32, __m256>(x)); }
+template<> inline float  pow_squaring<128, float >(float  x) { return sq(pow_squaring<64, float >(x)); }
+template<> inline __m256 pow_squaring<128, __m256>(__m256 x) { return sq(pow_squaring<64, __m256>(x)); }
+// 48 = 32 + 16 = x^32 · x^16 — bind x16 once so we don't recompute it.
+template<> inline float  pow_squaring<48, float >(float  x) {
+	float  x16 = pow_squaring<16, float >(x);
+	return sq(x16) * x16;
 }
-template<> inline float pow_squaring_scalar<8>(float x) {
-	float x2 = x*x; float x4 = x2*x2; return x4*x4;
-}
-template<> inline float pow_squaring_scalar<16>(float x) {
-	float x2 = x*x; float x4 = x2*x2; float x8 = x4*x4; return x8*x8;
-}
-template<> inline float pow_squaring_scalar<32>(float x) {
-	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8; return x16*x16;
-}
-template<> inline float pow_squaring_scalar<48>(float x) {
-	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
-	float x32=x16*x16; return x32*x16;
-}
-template<> inline float pow_squaring_scalar<64>(float x) {
-	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
-	float x32=x16*x16; return x32*x32;
-}
-template<> inline float pow_squaring_scalar<128>(float x) {
-	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
-	float x32=x16*x16; float x64=x32*x32; return x64*x64;
-}
-// Runtime dispatch: returns NaN for unsupported gloss so callers can
-// fall back to std::pow. (We never use NaN values for spec strength
-// elsewhere, so signaling via NaN is safe and one-cycle to check.)
-static inline float pow_glossClass(float x, unsigned gloss) {
-	switch (gloss) {
-		case 4:   return pow_squaring_scalar<4>  (x);
-		case 8:   return pow_squaring_scalar<8>  (x);
-		case 16:  return pow_squaring_scalar<16> (x);
-		case 32:  return pow_squaring_scalar<32> (x);
-		case 48:  return pow_squaring_scalar<48> (x);
-		case 64:  return pow_squaring_scalar<64> (x);
-		case 128: return pow_squaring_scalar<128>(x);
-		default:  return std::pow(x, float(gloss));
-	}
+template<> inline __m256 pow_squaring<48, __m256>(__m256 x) {
+	__m256 x16 = pow_squaring<16, __m256>(x);
+	return _mm256_mul_ps(sq(x16), x16);
 }
 
-// x^N via repeated squaring, 8-wide SIMD. Bit-exact vs std::pow for
-// integer N (within float precision; each squaring loses ~½ ULP). The
-// specializations cover the gloss values our FLDs actually author
-// (verified via FDS_DEFERRED_GLOSS_STATS = {48, 64} for greets+city).
-// Other small powers added defensively. For any gloss outside this set
-// the calling code falls back to scalar libm pow().
-template<int N> static inline __m256 pow_squaring(__m256 x);
-template<> inline __m256 pow_squaring<4>(__m256 x) {
-	__m256 x2 = _mm256_mul_ps(x, x);
-	return _mm256_mul_ps(x2, x2);
-}
-template<> inline __m256 pow_squaring<8>(__m256 x) {
-	__m256 x2 = _mm256_mul_ps(x, x);
-	__m256 x4 = _mm256_mul_ps(x2, x2);
-	return _mm256_mul_ps(x4, x4);
-}
-template<> inline __m256 pow_squaring<16>(__m256 x) {
-	__m256 x2 = _mm256_mul_ps(x, x);
-	__m256 x4 = _mm256_mul_ps(x2, x2);
-	__m256 x8 = _mm256_mul_ps(x4, x4);
-	return _mm256_mul_ps(x8, x8);
-}
-template<> inline __m256 pow_squaring<32>(__m256 x) {
-	__m256 x2  = _mm256_mul_ps(x, x);
-	__m256 x4  = _mm256_mul_ps(x2, x2);
-	__m256 x8  = _mm256_mul_ps(x4, x4);
-	__m256 x16 = _mm256_mul_ps(x8, x8);
-	return _mm256_mul_ps(x16, x16);
-}
-// 48 = 32 + 16 = x^32 * x^16
-// 48 = 32 + 16 = x^32 * x^16
-template<> inline __m256 pow_squaring<48>(__m256 x) {
-	__m256 x2  = _mm256_mul_ps(x, x);
-	__m256 x4  = _mm256_mul_ps(x2, x2);
-	__m256 x8  = _mm256_mul_ps(x4, x4);
-	__m256 x16 = _mm256_mul_ps(x8, x8);
-	__m256 x32 = _mm256_mul_ps(x16, x16);
-	return _mm256_mul_ps(x32, x16);
-}
-template<> inline __m256 pow_squaring<64>(__m256 x) {
-	__m256 x2  = _mm256_mul_ps(x, x);
-	__m256 x4  = _mm256_mul_ps(x2, x2);
-	__m256 x8  = _mm256_mul_ps(x4, x4);
-	__m256 x16 = _mm256_mul_ps(x8, x8);
-	__m256 x32 = _mm256_mul_ps(x16, x16);
-	return _mm256_mul_ps(x32, x32);
-}
-template<> inline __m256 pow_squaring<128>(__m256 x) {
-	__m256 x2  = _mm256_mul_ps(x, x);
-	__m256 x4  = _mm256_mul_ps(x2, x2);
-	__m256 x8  = _mm256_mul_ps(x4, x4);
-	__m256 x16 = _mm256_mul_ps(x8, x8);
-	__m256 x32 = _mm256_mul_ps(x16, x16);
-	__m256 x64 = _mm256_mul_ps(x32, x32);
-	return _mm256_mul_ps(x64, x64);
+// Runtime dispatch on Glossiness. Falls back to std::pow for unknown
+// values (FDS_DEFERRED_GLOSS_STATS will flag any FLD that ships one).
+static inline float pow_glossClass(float x, unsigned gloss) {
+	switch (gloss) {
+		case 4:   return pow_squaring<4,   float>(x);
+		case 8:   return pow_squaring<8,   float>(x);
+		case 16:  return pow_squaring<16,  float>(x);
+		case 32:  return pow_squaring<32,  float>(x);
+		case 48:  return pow_squaring<48,  float>(x);
+		case 64:  return pow_squaring<64,  float>(x);
+		case 128: return pow_squaring<128, float>(x);
+		default:  return std::pow(x, float(gloss));
+	}
 }
 
 // Vec8f spec accumulator: walks the per-tile light list, computes
@@ -2295,7 +2248,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		// even for masked-out lanes.
 		__m256 safeNH = _mm256_max_ps(NdotH, vZero);
 		safeNH        = _mm256_min_ps(safeNH, vOne);
-		__m256 spec   = pow_squaring<Gloss>(safeNH);
+		__m256 spec   = pow_squaring<Gloss, __m256>(safeNH);
 		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
 		// Apply combined mask (range + dot ≥ 0 + h positive + NdotH > 0)
 		__m256 fullMask = _mm256_and_ps(mask, _mm256_and_ps(mask_hpos, mask_nh));
