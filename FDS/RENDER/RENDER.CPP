@@ -4357,29 +4357,6 @@ void Render(RenderPath path)
 		// them would lose. Per-object peeling gives each mesh a fresh
 		// xpar G-buffer.
 
-		// Build the list of unique transparent-bearing TriMeshes, in
-		// FList sort order. One scan over FList.
-		auto* xparOrder = (TriMesh**)alloca(sizeof(TriMesh*) * size_t(CAll));
-		int   xparOrderCount = 0;
-		{
-			// O(N) dedup via per-TriMesh "seen this frame" stamp.
-			// Use a static frame counter; mesh's seen-stamp is reset
-			// when stale.
-			static uint32_t g_xparPeelFrame = 0;
-			++g_xparPeelFrame;
-			for (int32_t k = 0; k < CAll; ++k) {
-				Face* F = FList[k];
-				if (!F || !F->Txtr) continue;
-				if (!(F->Txtr->Flags & Mat_Transparent)) continue;
-				if (F->Flags & Face_Reflective) continue;  // forward handles
-				TriMesh* T = F->ParentTri;
-				if (!T) continue;
-				if (T->XparSeenFrame == g_xparPeelFrame) continue;
-				T->XparSeenFrame = g_xparPeelFrame;
-				xparOrder[xparOrderCount++] = T;
-			}
-		}
-
 		auto runTilePass = [&](auto workFn) {
 			renderns::tileCounter = 0;
 			for (auto j = 0; j < numTilesY; ++j) {
@@ -4399,22 +4376,6 @@ void Render(RenderPath path)
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
-
-		// Two-phase processing for correct back-to-front interleaving
-		// of nested concentric transparents. For outer+inner sphere the
-		// correct face sequence is:
-		//   outer_back, inner_back, inner_front, outer_front
-		// The old code did per-mesh "back+front, back+front" which gave
-		// outer_back, outer_front, inner_back, inner_front — inner ended
-		// up composited ON TOP of outer's front, hiding the outer's
-		// near surface (visible in fountain spire orbs).
-		//
-		// Phase 1: each mesh in xparOrder (back-to-front), raster + composite
-		// only the BACK-facing tris. After this VPage has opaque + all
-		// back-half transparency in correct order.
-		// Phase 2: iterate xparOrder REVERSED (front-to-back), raster +
-		// composite only the FRONT-facing tris. Closest meshes' front
-		// surfaces composite LAST, on top of everything.
 		auto clearBack = [&]() {
 			if (g_gbufferTransparentBack) {
 				parallel_memset(g_gbufferTransparentBack->txtr.data(), 0xFF,
@@ -4430,37 +4391,73 @@ void Render(RenderPath path)
 			if (g_xparZ) parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
 		};
 
-		// Phase 1: BACK-facing tris, outer→inner.
-		for (int oi = 0; oi < xparOrderCount; ++oi) {
-			TriMesh* T = xparOrder[oi];
-			clearBack();
-			runTilePass([T](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
+		// One walk through FList in sort order. The xpar sort key (built
+		// in Transform_Objects) already encodes the correct back-to-front
+		// order for concentric meshes via a per-object extent bias —
+		// outer.back, inner.back, inner.front, outer.front for a nested
+		// pair. We just need to render each face in that order without
+		// regrouping by mesh.
+		//
+		// To keep the 2-deep G-buffer's pixel budget (one back-layer
+		// slot + one front-layer slot per screen pixel), batch
+		// consecutive faces that share BOTH (mesh, side). When the
+		// bucket changes, flush: clear the side's layer, raster the
+		// batch with parentFilter + faceSel, composite the side.
+		// Consecutive same-(mesh,side) faces naturally co-cluster in
+		// the sorted list because the sort key has a high-bit partition
+		// per side and a per-mesh score within.
+		TriMesh* batchMesh    = nullptr;
+		bool     batchFront   = false;
+		bool     batchOpen    = false;
+		int      batchFirst   = 0;
+		int      batchLastEnd = 0;
+		auto flushBatch = [&]() {
+			if (!batchOpen) return;
+			TriMesh*    T   = batchMesh;
+			XparFaceSel sel = batchFront ? XparFaceSel::FrontOnly
+			                              : XparFaceSel::BackOnly;
+			const int first = batchFirst;
+			const int count = batchLastEnd - batchFirst;
+			if (batchFront) clearFront();
+			else            clearBack();
+			runTilePass([first, count, T, sel](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
 				RenderInnerDeferredTransparent(float(x1), float(y1),
 				                                float(x2), float(y2),
-				                                0, CAll, T,
-				                                XparFaceSel::BackOnly);
+				                                first, count, T, sel);
 			});
-			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-				Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-					g_deferredCtx, tileIdx, x1, y1, x2, y2);
-			});
-		}
+			if (batchFront) {
+				runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+					Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
+						g_deferredCtx, tileIdx, x1, y1, x2, y2);
+				});
+			} else {
+				runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+					Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
+						g_deferredCtx, tileIdx, x1, y1, x2, y2);
+				});
+			}
+			batchOpen = false;
+		};
 
-		// Phase 2: FRONT-facing tris, inner→outer (reverse).
-		for (int oi = xparOrderCount - 1; oi >= 0; --oi) {
-			TriMesh* T = xparOrder[oi];
-			clearFront();
-			runTilePass([T](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
-				RenderInnerDeferredTransparent(float(x1), float(y1),
-				                                float(x2), float(y2),
-				                                0, CAll, T,
-				                                XparFaceSel::FrontOnly);
-			});
-			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-				Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-					g_deferredCtx, tileIdx, x1, y1, x2, y2);
-			});
+		for (int32_t k = 0; k < CAll; ++k) {
+			Face* F = FList[k];
+			if (!F || !F->Txtr) continue;
+			if (!(F->Txtr->Flags & Mat_Transparent)) continue;
+			if (F->Flags & Face_Reflective) continue;  // forward handles
+			TriMesh* T = F->ParentTri;
+			if (!T) continue;
+
+			const bool front = IsFrontFacingInViewSpace(F);
+			if (!batchOpen || T != batchMesh || front != batchFront) {
+				flushBatch();
+				batchMesh    = T;
+				batchFront   = front;
+				batchFirst   = k;
+				batchOpen    = true;
+			}
+			batchLastEnd = k + 1;
 		}
+		flushBatch();
 	}
 
 	int32_t I = CAll;
