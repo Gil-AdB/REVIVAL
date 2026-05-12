@@ -513,9 +513,17 @@ void Initialize_Greets()
 		if (Obj->Type != Obj_TriMesh) continue;
 		if (!Obj->Name) continue;
 		if (strstr(Obj->Name, "Hull") || strstr(Obj->Name, "hull") ||
-		    strstr(Obj->Name, "mech")) {
+		    strstr(Obj->Name, "mech") || strstr(Obj->Name, "Mech") ||
+		    strstr(Obj->Name, "MECH")) {
 			g_RobotMesh = (TriMesh*)Obj->Data;
+			std::fprintf(stderr, "[GREETS] robot spotlight target = '%s'\n", Obj->Name);
 			break;
+		}
+	}
+	if (!g_RobotMesh) {
+		std::fprintf(stderr, "[GREETS] robot spotlight target NOT FOUND. ObjectHead names:\n");
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Name) std::fprintf(stderr, "  %s\n", Obj->Name);
 		}
 	}
 	if (g_RobotMesh) {
@@ -523,7 +531,7 @@ void Initialize_Greets()
 		std::memset(g_RobotSpot, 0, sizeof(Omni));
 		g_RobotSpot->L.B = 255.0f; g_RobotSpot->L.G = 255.0f; g_RobotSpot->L.R = 255.0f;
 		g_RobotSpot->L.A = 1.0f;
-		g_RobotSpot->ISize  = 60.0f;           // intensity
+		g_RobotSpot->ISize  = 15.0f;           // intensity
 		g_RobotSpot->IRange = 30.0f;
 		g_RobotSpot->rRange = 1.0f / 30.0f;
 		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
@@ -718,16 +726,19 @@ struct GreetsScene : SceneDriver {
 			g_RobotSpot->IPos.x = g_RobotMesh->IPos.x;
 			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + 10.0f;
 			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
-			Vector localFwd(0.0f, 0.0f, 1.0f);
+			// LightWave (FLD source) convention: local -Z is the mesh's
+			// forward axis. Use (0, 0, -1) so the spot points where the
+			// robot is facing rather than backwards.
+			Vector localFwd(0.0f, 0.0f, -1.0f);
 			Vector worldFwd;
 			MatrixXVector(g_RobotMesh->RotMat, &localFwd, &worldFwd);
 			worldFwd.y = 0.0f;  // project onto XZ plane so the 45° tilt math is well-defined
 			Vector_Norm(&worldFwd);
 			// Side-to-side sweep — rotate worldFwd around the world-up
-			// axis by a sine-modulated angle. Period and amplitude are
-			// hand-tuned for a "scanning" feel; Timer is in millisecond
-			// ticks so 0.003 rad/tick = ~3 s full cycle, ±35° sweep.
-			const float sweepRad = std::sin(float(Timer) * 0.003f) * (35.0f * float(PI) / 180.0f);
+			// axis by a sine-modulated angle. CurFrame moves with scene
+			// playback (Timer can stall at scene boundaries); 0.05
+			// rad/frame at 30 fps is a ~4-second full cycle, ±35°.
+			const float sweepRad = std::sin(CurFrame * 0.05f) * (35.0f * float(PI) / 180.0f);
 			const float cs = std::cos(sweepRad);
 			const float sn = std::sin(sweepRad);
 			const float fwdX = cs * worldFwd.x + sn * worldFwd.z;
