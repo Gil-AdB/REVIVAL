@@ -498,6 +498,13 @@ void Initialize_Greets()
 		                     strstr(n, "floor")  || strstr(n, "marb")   ||
 		                     strstr(n, "MARB")   || strstr(n, "hull")   ||
 		                     strstr(n, "cockpit");
+		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
+		// big brick wall texture in the back of the greets scene) and
+		// 'siling' (the ceiling that uses the same brick atlas). Not
+		// "shiny" — we don't bump Specular here — but they show enough
+		// surface detail in the diffuse to benefit from a Sobel-baked
+		// tangent-space map.
+		const bool isWall = !strcmp(n, "rooms") || !strcmp(n, "siling");
 		if (isShiny) {
 			if (M->Specular < 0.4f) M->Specular = 0.4f;
 			if (M->Glossiness == 0) M->Glossiness = 48;
@@ -505,8 +512,9 @@ void Initialize_Greets()
 		// Tangent-space normal maps work on any face orientation —
 		// the perturbation lives in the surface's own tangent plane
 		// and the lighting kernel multiplies by per-pixel TBN to bring
-		// it into view space. Apply to every shiny material.
-		if (isShiny && M->Txtr && !M->NormalMap) {
+		// it into view space. Apply to every shiny material + the
+		// wall/ceiling materials.
+		if ((isShiny || isWall) && M->Txtr && !M->NormalMap) {
 			M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
 			if (M->NormalMap) {
 				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
