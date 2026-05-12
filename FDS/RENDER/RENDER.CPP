@@ -1758,15 +1758,22 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	renderns::condition.notify_one();
 }
 
-// Deferred path's transparent + additive forward pass. Runs after the
-// deferred lighting pass has completed so the alpha blend reads finished
-// opaque pixels in VPage. Iterates FList in sort order (which puts
-// transparent faces back-to-front, after all opaque) and dispatches each
-// through F->Filler — preassigned in PREPROC.CPP to TheOtherBarry<TRANSPARENT>
-// or TheOtherBarry<ADDITIVE> per material flags.
+// Which face orientation to raster in this pass. Concentric transparent
+// meshes need their back-facing tris of OUTER composited BEFORE the
+// back-facing tris of INNER, but their front-facing tris in the REVERSE
+// order — back-to-front face sequence for two nested spheres is:
+//   outer_back, inner_back, inner_front, outer_front
+// The caller drives this by issuing two phases: phase 1 raster+composite
+// of back faces (outer→inner), phase 2 raster+composite of front faces
+// (inner→outer). With XparFaceSel::Both you get the old behaviour where
+// each mesh handles both face orientations in one pass (broken for
+// concentric, kept for legacy paths).
+enum class XparFaceSel { Both, BackOnly, FrontOnly };
+
 void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
                                      int firstIdx, int countIdx,
-                                     TriMesh* parentFilter) {
+                                     TriMesh* parentFilter,
+                                     XparFaceSel faceSel = XparFaceSel::Both) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
@@ -1819,8 +1826,10 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 		const float vd = nx * A->TPos.x + ny * A->TPos.y + nz * A->TPos.z;
 		const bool frontFacing = vd < 0.0f;
 		if (frontFacing) {
+			if (faceSel == XparFaceSel::BackOnly) continue;
 			clipper.Render(F, MekaleleTransparent, false);
 		} else {
+			if (faceSel == XparFaceSel::FrontOnly) continue;
 			// 2-deep transparent G-buffer: back-facing tris of convex
 			// transparents (the exit surface along the view ray) go to
 			// the back layer. The composite pass lights the back layer
@@ -4390,31 +4399,62 @@ void Render(RenderPath path)
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
-		for (int oi = 0; oi < xparOrderCount; ++oi) {
-			TriMesh* T = xparOrder[oi];
-			// 1. Clear both xpar G-buffer layers (mat32 sentinel + Z=0).
-			if (g_gbufferTransparent) {
-				parallel_memset(g_gbufferTransparent->txtr.data(), 0xFF,
-				                numPixels * sizeof(uint32_t));
-			}
-			if (g_xparZ) parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
+
+		// Two-phase processing for correct back-to-front interleaving
+		// of nested concentric transparents. For outer+inner sphere the
+		// correct face sequence is:
+		//   outer_back, inner_back, inner_front, outer_front
+		// The old code did per-mesh "back+front, back+front" which gave
+		// outer_back, outer_front, inner_back, inner_front — inner ended
+		// up composited ON TOP of outer's front, hiding the outer's
+		// near surface (visible in fountain spire orbs).
+		//
+		// Phase 1: each mesh in xparOrder (back-to-front), raster + composite
+		// only the BACK-facing tris. After this VPage has opaque + all
+		// back-half transparency in correct order.
+		// Phase 2: iterate xparOrder REVERSED (front-to-back), raster +
+		// composite only the FRONT-facing tris. Closest meshes' front
+		// surfaces composite LAST, on top of everything.
+		auto clearBack = [&]() {
 			if (g_gbufferTransparentBack) {
 				parallel_memset(g_gbufferTransparentBack->txtr.data(), 0xFF,
 				                numPixels * sizeof(uint32_t));
 			}
 			if (g_xparZBack) parallel_memset(g_xparZBack, 0, numPixels * sizeof(uint16_t));
+		};
+		auto clearFront = [&]() {
+			if (g_gbufferTransparent) {
+				parallel_memset(g_gbufferTransparent->txtr.data(), 0xFF,
+				                numPixels * sizeof(uint32_t));
+			}
+			if (g_xparZ) parallel_memset(g_xparZ, 0, numPixels * sizeof(uint16_t));
+		};
 
-			// 2. Raster this mesh's transparent faces into the layers.
+		// Phase 1: BACK-facing tris, outer→inner.
+		for (int oi = 0; oi < xparOrderCount; ++oi) {
+			TriMesh* T = xparOrder[oi];
+			clearBack();
 			runTilePass([T](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
 				RenderInnerDeferredTransparent(float(x1), float(y1),
 				                                float(x2), float(y2),
-				                                0, CAll, T);
+				                                0, CAll, T,
+				                                XparFaceSel::BackOnly);
 			});
-
-			// 3. Composite back, then front. Back-to-front per object.
 			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
 				Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
 					g_deferredCtx, tileIdx, x1, y1, x2, y2);
+			});
+		}
+
+		// Phase 2: FRONT-facing tris, inner→outer (reverse).
+		for (int oi = xparOrderCount - 1; oi >= 0; --oi) {
+			TriMesh* T = xparOrder[oi];
+			clearFront();
+			runTilePass([T](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
+				RenderInnerDeferredTransparent(float(x1), float(y1),
+				                                float(x2), float(y2),
+				                                0, CAll, T,
+				                                XparFaceSel::FrontOnly);
 			});
 			runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
 				Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
