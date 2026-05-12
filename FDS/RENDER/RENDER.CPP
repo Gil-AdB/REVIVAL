@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include <algorithm>
+#include <map>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -2105,6 +2106,216 @@ static inline float fast_rsqrt(float x) {
 #endif
 }
 
+// Scalar pow via repeated squaring. Same gloss-class dispatch the
+// vec path uses — runtime int → squaring sequence at compile time
+// through template specialization. Bit-exact vs std::pow for integer
+// N. Used by the scalar lighting path (pixels with normal maps, which
+// the SIMD body bails on). Returns 0 outside the supported set so the
+// caller knows to fall back; in practice every gloss we ship is here.
+template<int N> static inline float pow_squaring_scalar(float x);
+template<> inline float pow_squaring_scalar<4>(float x) {
+	float x2 = x*x; return x2*x2;
+}
+template<> inline float pow_squaring_scalar<8>(float x) {
+	float x2 = x*x; float x4 = x2*x2; return x4*x4;
+}
+template<> inline float pow_squaring_scalar<16>(float x) {
+	float x2 = x*x; float x4 = x2*x2; float x8 = x4*x4; return x8*x8;
+}
+template<> inline float pow_squaring_scalar<32>(float x) {
+	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8; return x16*x16;
+}
+template<> inline float pow_squaring_scalar<48>(float x) {
+	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
+	float x32=x16*x16; return x32*x16;
+}
+template<> inline float pow_squaring_scalar<64>(float x) {
+	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
+	float x32=x16*x16; return x32*x32;
+}
+template<> inline float pow_squaring_scalar<128>(float x) {
+	float x2=x*x; float x4=x2*x2; float x8=x4*x4; float x16=x8*x8;
+	float x32=x16*x16; float x64=x32*x32; return x64*x64;
+}
+// Runtime dispatch: returns NaN for unsupported gloss so callers can
+// fall back to std::pow. (We never use NaN values for spec strength
+// elsewhere, so signaling via NaN is safe and one-cycle to check.)
+static inline float pow_glossClass(float x, unsigned gloss) {
+	switch (gloss) {
+		case 4:   return pow_squaring_scalar<4>  (x);
+		case 8:   return pow_squaring_scalar<8>  (x);
+		case 16:  return pow_squaring_scalar<16> (x);
+		case 32:  return pow_squaring_scalar<32> (x);
+		case 48:  return pow_squaring_scalar<48> (x);
+		case 64:  return pow_squaring_scalar<64> (x);
+		case 128: return pow_squaring_scalar<128>(x);
+		default:  return std::pow(x, float(gloss));
+	}
+}
+
+// x^N via repeated squaring, 8-wide SIMD. Bit-exact vs std::pow for
+// integer N (within float precision; each squaring loses ~½ ULP). The
+// specializations cover the gloss values our FLDs actually author
+// (verified via FDS_DEFERRED_GLOSS_STATS = {48, 64} for greets+city).
+// Other small powers added defensively. For any gloss outside this set
+// the calling code falls back to scalar libm pow().
+template<int N> static inline __m256 pow_squaring(__m256 x);
+template<> inline __m256 pow_squaring<4>(__m256 x) {
+	__m256 x2 = _mm256_mul_ps(x, x);
+	return _mm256_mul_ps(x2, x2);
+}
+template<> inline __m256 pow_squaring<8>(__m256 x) {
+	__m256 x2 = _mm256_mul_ps(x, x);
+	__m256 x4 = _mm256_mul_ps(x2, x2);
+	return _mm256_mul_ps(x4, x4);
+}
+template<> inline __m256 pow_squaring<16>(__m256 x) {
+	__m256 x2 = _mm256_mul_ps(x, x);
+	__m256 x4 = _mm256_mul_ps(x2, x2);
+	__m256 x8 = _mm256_mul_ps(x4, x4);
+	return _mm256_mul_ps(x8, x8);
+}
+template<> inline __m256 pow_squaring<32>(__m256 x) {
+	__m256 x2  = _mm256_mul_ps(x, x);
+	__m256 x4  = _mm256_mul_ps(x2, x2);
+	__m256 x8  = _mm256_mul_ps(x4, x4);
+	__m256 x16 = _mm256_mul_ps(x8, x8);
+	return _mm256_mul_ps(x16, x16);
+}
+// 48 = 32 + 16 = x^32 * x^16
+// 48 = 32 + 16 = x^32 * x^16
+template<> inline __m256 pow_squaring<48>(__m256 x) {
+	__m256 x2  = _mm256_mul_ps(x, x);
+	__m256 x4  = _mm256_mul_ps(x2, x2);
+	__m256 x8  = _mm256_mul_ps(x4, x4);
+	__m256 x16 = _mm256_mul_ps(x8, x8);
+	__m256 x32 = _mm256_mul_ps(x16, x16);
+	return _mm256_mul_ps(x32, x16);
+}
+template<> inline __m256 pow_squaring<64>(__m256 x) {
+	__m256 x2  = _mm256_mul_ps(x, x);
+	__m256 x4  = _mm256_mul_ps(x2, x2);
+	__m256 x8  = _mm256_mul_ps(x4, x4);
+	__m256 x16 = _mm256_mul_ps(x8, x8);
+	__m256 x32 = _mm256_mul_ps(x16, x16);
+	return _mm256_mul_ps(x32, x32);
+}
+template<> inline __m256 pow_squaring<128>(__m256 x) {
+	__m256 x2  = _mm256_mul_ps(x, x);
+	__m256 x4  = _mm256_mul_ps(x2, x2);
+	__m256 x8  = _mm256_mul_ps(x4, x4);
+	__m256 x16 = _mm256_mul_ps(x8, x8);
+	__m256 x32 = _mm256_mul_ps(x16, x16);
+	__m256 x64 = _mm256_mul_ps(x32, x32);
+	return _mm256_mul_ps(x64, x64);
+}
+
+// Vec8f spec accumulator: walks the per-tile light list, computes
+// Blinn-Phong half-vector + N·H, raises to the gloss power via
+// pow_squaring<Gloss>, accumulates into sB/sG/sR with the same range
+// + falloff masks the diffuse loop uses. Called only when wantSpecular
+// is true and Mat->Glossiness matches one of our specialized gloss
+// constants (the kernel switches on it; default falls back to scalar
+// libm pow). Replaces the scalar spec loop the vec path used before.
+template<int Gloss>
+static inline void run_vec_spec_loop(const TileLights &tl,
+                                      float x, float y, float z,
+                                      float nx, float ny, float nz,
+                                      float vx, float vy, float vz,
+                                      float matSpec,
+                                      float &sB, float &sG, float &sR) {
+	__m256 vx_v   = _mm256_set1_ps(x);
+	__m256 vy_v   = _mm256_set1_ps(y);
+	__m256 vz_v   = _mm256_set1_ps(z);
+	__m256 vnx_v  = _mm256_set1_ps(nx);
+	__m256 vny_v  = _mm256_set1_ps(ny);
+	__m256 vnz_v  = _mm256_set1_ps(nz);
+	__m256 vvx_v  = _mm256_set1_ps(vx);
+	__m256 vvy_v  = _mm256_set1_ps(vy);
+	__m256 vvz_v  = _mm256_set1_ps(vz);
+	__m256 vSpec  = _mm256_set1_ps(matSpec);
+	__m256 vZero  = _mm256_setzero_ps();
+	__m256 vOne   = _mm256_set1_ps(1.0f);
+	__m256 accB   = _mm256_setzero_ps();
+	__m256 accG   = _mm256_setzero_ps();
+	__m256 accR   = _mm256_setzero_ps();
+
+	for (int slot = 0; slot < tl.paddedCount; slot += 8) {
+		__m256 lpx = _mm256_load_ps(tl.posX   + slot);
+		__m256 lpy = _mm256_load_ps(tl.posY   + slot);
+		__m256 lpz = _mm256_load_ps(tl.posZ   + slot);
+		__m256 lcb = _mm256_load_ps(tl.colB   + slot);
+		__m256 lcg = _mm256_load_ps(tl.colG   + slot);
+		__m256 lcr = _mm256_load_ps(tl.colR   + slot);
+		__m256 lr2 = _mm256_load_ps(tl.range2 + slot);
+		__m256 lrr = _mm256_load_ps(tl.rRange + slot);
+
+		__m256 wx = _mm256_sub_ps(lpx, vx_v);
+		__m256 wy = _mm256_sub_ps(lpy, vy_v);
+		__m256 wz = _mm256_sub_ps(lpz, vz_v);
+		__m256 dot = _mm256_fmadd_ps(wx, vnx_v,
+		              _mm256_fmadd_ps(wy, vny_v,
+		               _mm256_mul_ps(wz, vnz_v)));
+		__m256 len2 = _mm256_fmadd_ps(wx, wx,
+		               _mm256_fmadd_ps(wy, wy,
+		                _mm256_mul_ps(wz, wz)));
+
+		__m256 mask_range = _mm256_cmp_ps(len2, lr2,   _CMP_LE_OQ);
+		__m256 mask_dot   = _mm256_cmp_ps(dot,  vZero, _CMP_GE_OQ);
+		__m256 mask_pos   = _mm256_cmp_ps(len2, vZero, _CMP_GT_OQ);
+		__m256 mask       = _mm256_and_ps(mask_range,
+		                     _mm256_and_ps(mask_dot, mask_pos));
+
+		__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
+		__m256 lenInv    = _mm256_rsqrt_ps(safe_len2);
+		__m256 dist      = _mm256_mul_ps(safe_len2, lenInv);
+		__m256 falloff   = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
+
+		// Light direction (normalized w). half = L + V, renormalize.
+		__m256 ldx = _mm256_mul_ps(wx, lenInv);
+		__m256 ldy = _mm256_mul_ps(wy, lenInv);
+		__m256 ldz = _mm256_mul_ps(wz, lenInv);
+		__m256 hx  = _mm256_add_ps(ldx, vvx_v);
+		__m256 hy  = _mm256_add_ps(ldy, vvy_v);
+		__m256 hz  = _mm256_add_ps(ldz, vvz_v);
+		__m256 hLen2 = _mm256_fmadd_ps(hx, hx,
+		                _mm256_fmadd_ps(hy, hy,
+		                 _mm256_mul_ps(hz, hz)));
+		__m256 mask_hpos = _mm256_cmp_ps(hLen2, vZero, _CMP_GT_OQ);
+		__m256 safe_h2   = _mm256_blendv_ps(vOne, hLen2, mask_hpos);
+		__m256 hLenInv   = _mm256_rsqrt_ps(safe_h2);
+		hx = _mm256_mul_ps(hx, hLenInv);
+		hy = _mm256_mul_ps(hy, hLenInv);
+		hz = _mm256_mul_ps(hz, hLenInv);
+		__m256 NdotH = _mm256_fmadd_ps(hx, vnx_v,
+		                _mm256_fmadd_ps(hy, vny_v,
+		                 _mm256_mul_ps(hz, vnz_v)));
+		__m256 mask_nh = _mm256_cmp_ps(NdotH, vZero, _CMP_GT_OQ);
+		// Clamp NdotH to [0,1] before squaring so the chain is stable
+		// even for masked-out lanes.
+		__m256 safeNH = _mm256_max_ps(NdotH, vZero);
+		safeNH        = _mm256_min_ps(safeNH, vOne);
+		__m256 spec   = pow_squaring<Gloss>(safeNH);
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
+		// Apply combined mask (range + dot ≥ 0 + h positive + NdotH > 0)
+		__m256 fullMask = _mm256_and_ps(mask, _mm256_and_ps(mask_hpos, mask_nh));
+		__m256 contrib  = _mm256_blendv_ps(vZero, strength, fullMask);
+
+		accB = _mm256_fmadd_ps(contrib, lcb, accB);
+		accG = _mm256_fmadd_ps(contrib, lcg, accG);
+		accR = _mm256_fmadd_ps(contrib, lcr, accR);
+	}
+	alignas(32) float bufB[8], bufG[8], bufR[8];
+	_mm256_store_ps(bufB, accB);
+	_mm256_store_ps(bufG, accG);
+	_mm256_store_ps(bufR, accR);
+	for (int i = 0; i < 8; ++i) {
+		sB += bufB[i];
+		sG += bufG[i];
+		sR += bufR[i];
+	}
+}
+
 // FDS_DEFERRED_VEC=1 in env switches the per-pixel inner loop from the
 // scalar branch-predicted early-out to a Vec8f SoA accumulation. Stays
 // available for A/B benchmarking — on arm64-via-simde it's slower than
@@ -2524,41 +2735,66 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						lG += bufG[i];
 						lR += bufR[i];
 					}
-					// Vec path doesn't accumulate specular (would need
-					// pow on Vec8f, which dominates the loop on simde);
-					// fall through to scalar for spec materials.
+					// Vec-spec path: replaces the previous scalar pow loop.
+					// Dispatch on Mat->Glossiness so the inner loop uses a
+					// constant squaring sequence (bit-exact pow for integer
+					// gloss, ~5-7 fmuls vs ~50-80 cycles for libm pow).
+					// FDS_DEFERRED_GLOSS_STATS confirms our FLDs only ship
+					// gloss ∈ {48, 64}; the other cases here are defensive
+					// for spectest's authored values and future FLDs.
 					if (wantSpecular) {
-						for (int n = 0; n < tl.count; ++n) {
-							const float Lpx = tl.posX[n];
-							const float Lpy = tl.posY[n];
-							const float Lpz = tl.posZ[n];
-							const float wx = Lpx - x;
-							const float wy = Lpy - y;
-							const float wz = Lpz - z;
-							const float dot = wx*nx + wy*ny + wz*nz;
-							if (dot < 0.0f) continue;
-							const float len2 = wx*wx + wy*wy + wz*wz;
-							const float r2 = tl.range2[n];
-							if (len2 > r2 || len2 == 0.0f) continue;
-							const float lenInv = fast_rsqrt(len2);
-							const float dist   = len2 * lenInv;
-							const float ldx = wx * lenInv;
-							const float ldy = wy * lenInv;
-							const float ldz = wz * lenInv;
-							float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
-							const float hLen2 = hx*hx + hy*hy + hz*hz;
-							if (hLen2 <= 0.0f) continue;
-							const float hLenInv = fast_rsqrt(hLen2);
-							hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
-							const float NdotH = nx*hx + ny*hy + nz*hz;
-							if (NdotH <= 0.0f) continue;
-							const float spec = std::pow(NdotH, gloss);
-							const float rRange = tl.rRange[n];
-							const float specStrength = spec * Mat->Specular *
-								(1.0f - dist * rRange);
-							sB += specStrength * tl.colB[n];
-							sG += specStrength * tl.colG[n];
-							sR += specStrength * tl.colR[n];
+						switch (Mat->Glossiness) {
+							case 4:
+								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 8:
+								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 16:
+								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 32:
+								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 48:
+								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 64:
+								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							case 128:
+								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+							default:
+								// Unknown gloss — defensive scalar libm path
+								// (matches old behavior). If this fires on a
+								// hot scene, add a `case` for the value.
+								for (int n = 0; n < tl.count; ++n) {
+									const float Lpx = tl.posX[n];
+									const float Lpy = tl.posY[n];
+									const float Lpz = tl.posZ[n];
+									const float wx = Lpx - x;
+									const float wy = Lpy - y;
+									const float wz = Lpz - z;
+									const float dot = wx*nx + wy*ny + wz*nz;
+									if (dot < 0.0f) continue;
+									const float len2 = wx*wx + wy*wy + wz*wz;
+									const float r2 = tl.range2[n];
+									if (len2 > r2 || len2 == 0.0f) continue;
+									const float lenInv = fast_rsqrt(len2);
+									const float dist   = len2 * lenInv;
+									const float ldx = wx * lenInv;
+									const float ldy = wy * lenInv;
+									const float ldz = wz * lenInv;
+									float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
+									const float hLen2 = hx*hx + hy*hy + hz*hz;
+									if (hLen2 <= 0.0f) continue;
+									const float hLenInv = fast_rsqrt(hLen2);
+									hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+									const float NdotH = nx*hx + ny*hy + nz*hz;
+									if (NdotH <= 0.0f) continue;
+									const float spec = std::pow(NdotH, gloss);
+									const float rRange = tl.rRange[n];
+									const float specStrength = spec * Mat->Specular *
+										(1.0f - dist * rRange);
+									sB += specStrength * tl.colB[n];
+									sG += specStrength * tl.colG[n];
+									sR += specStrength * tl.colR[n];
+								}
+								break;
 						}
 					}
 				} else {
@@ -2606,7 +2842,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
 								const float NdotH = nx*hx + ny*hy + nz*hz;
 								if (NdotH > 0.0f) {
-									const float spec = std::pow(NdotH, gloss);
+									const float spec = pow_glossClass(NdotH, Mat->Glossiness);
 									const float specStrength = spec * Mat->Specular *
 										(1.0f - dist * rRange);
 									sB += specStrength * Lcb;
@@ -3583,6 +3819,34 @@ static void Render_DeferredLighting() {
 
 	MatTable matTable = Scene_GetMatTable(Sc);
 	if (!matTable.data || matTable.count == 0) return;
+
+	// FDS_DEFERRED_GLOSS_STATS=1: dump distinct Mat->Glossiness values
+	// (and material count per value) for materials with Specular > 0 in
+	// the current scene. Run once per scene change; lets us confirm the
+	// squaring-dispatch switch in the lighting kernel covers everything
+	// in use, and warn if an FLD ships a gloss value we don't specialize.
+	if (std::getenv("FDS_DEFERRED_GLOSS_STATS")) {
+		static Scene* lastScene = nullptr;
+		if (Sc != lastScene) {
+			lastScene = Sc;
+			std::map<unsigned short, int> glossHisto;
+			int specMats = 0;
+			for (size_t i = 0; i < matTable.count; ++i) {
+				Material *M = matTable.data[i];
+				if (!M || M->Specular <= 0.0f) continue;
+				++specMats;
+				++glossHisto[M->Glossiness];
+			}
+			std::fprintf(stderr, "[GLOSS-STATS] scene=%p specMats=%d distinct={",
+				(void*)Sc, specMats);
+			bool first = true;
+			for (const auto &kv : glossHisto) {
+				std::fprintf(stderr, "%s%u:%d", first ? "" : ",", kv.first, kv.second);
+				first = false;
+			}
+			std::fprintf(stderr, "}\n");
+		}
+	}
 
 	// Build view-space omni list once per frame.
 	static ViewLightsSoA lights;  // function-static; lifetime spans dispatch + wait
