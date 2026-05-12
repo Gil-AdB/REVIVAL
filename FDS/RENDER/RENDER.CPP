@@ -3349,6 +3349,75 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256 ny = _mm256_mul_ps(oy, invLenN);
 			__m256 nz = _mm256_mul_ps(az, invLenN);
 
+			// Per-lane normal-map sampling. Stores the geometric N back
+			// to scratch, then re-runs the wave-1 kernel's Tier-B nmap +
+			// TBN reconstruction for each lane whose material has a
+			// normal map. Loads the perturbed N back to nx/ny/nz so the
+			// vec light loop and the scalar fallback both pick it up.
+			// Without this, OuterVec rendered nmap surfaces flat, which
+			// looked like horizontal banding on greets's hex floor.
+			alignas(32) float nx_lane[8], ny_lane[8], nz_lane[8];
+			_mm256_store_ps(nx_lane, nx);
+			_mm256_store_ps(ny_lane, ny);
+			_mm256_store_ps(nz_lane, nz);
+			for (int k = 0; k < 8; ++k) {
+				if (!lane_alive[k]) continue;
+				const uint32_t m = lane_mat32[k];
+				const uint32_t mid  = (m >> 20) & 0xFF;
+				const uint32_t mipL = (m >> 28) & 0xF;
+				const uint32_t uvL  = m & 0xFFFFF;
+				Material *MatN = ctx.matTable.data[mid];
+				if (!MatN || !MatN->NormalMap) continue;
+				const dword *nmData = (const dword*)MatN->NormalMap->Mipmap[mipL];
+				if (!nmData) continue;
+				const dword nmTexel = nmData[uvL];
+				const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				float lnx = nx_lane[k], lny = ny_lane[k], lnz = nz_lane[k];
+				float tx = 0, ty = 0, tz = 0;
+				bool tangentValid = false;
+				if (!gb.tangent.empty()) {
+					const meka::u16 packedT = gb.tangent[i + k];
+					if (packedT != 0) {
+						meka::oct_decode_u16(packedT, tx, ty, tz);
+						const float tDotN = tx*lnx + ty*lny + tz*lnz;
+						tx -= lnx * tDotN;
+						ty -= lny * tDotN;
+						tz -= lnz * tDotN;
+						const float tLen2 = tx*tx + ty*ty + tz*tz;
+						if (tLen2 > 1e-12f) {
+							const float invTLen = 1.0f / std::sqrt(tLen2);
+							tx *= invTLen; ty *= invTLen; tz *= invTLen;
+							tangentValid = true;
+						}
+					}
+				}
+				if (!tangentValid) {
+					float refx, refy, refz;
+					if (std::fabs(lny) < 0.9f) { refx = 0; refy = 1; refz = 0; }
+					else                        { refx = 1; refy = 0; refz = 0; }
+					tx = refy * lnz - refz * lny;
+					ty = refz * lnx - refx * lnz;
+					tz = refx * lny - refy * lnx;
+					const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+					tx *= invTLen; ty *= invTLen; tz *= invTLen;
+				}
+				const float bx = lny * tz - lnz * ty;
+				const float by = lnz * tx - lnx * tz;
+				const float bz = lnx * ty - lny * tx;
+				float vnx = tx * nmX + bx * nmY + lnx * nmZ;
+				float vny = ty * nmX + by * nmY + lny * nmZ;
+				float vnz = tz * nmX + bz * nmY + lnz * nmZ;
+				float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+				nx_lane[k] = vnx * invLen;
+				ny_lane[k] = vny * invLen;
+				nz_lane[k] = vnz * invLen;
+			}
+			nx = _mm256_load_ps(nx_lane);
+			ny = _mm256_load_ps(ny_lane);
+			nz = _mm256_load_ps(nz_lane);
+
 			// Reconstruct view-space pos for 8 lanes.
 			// z = (0xFF80 - zEnc) * invZScale
 			__m256 zEncF = _mm256_cvtepi32_ps(zEncI);
@@ -3381,6 +3450,19 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256i omniMask  = _mm256_andnot_si256(waterMask, mask_alive_fresh);
 			__m256  omniMaskF = _mm256_castsi256_ps(omniMask);
 
+			// Early-out optimization: if every alive lane needs the
+			// scalar fallback (wantSpec or isWater), the vec omni loop
+			// is wasted — the fallback redoes the lighting with full
+			// spec accumulation, and vfB/vfG/vfR get overridden lane-by-
+			// lane in the pack loop. Skip the body entirely. For greets
+			// the floor + walls are mostly spec/nmap, so this fires
+			// often and recovers the regression introduced by adding
+			// nmap sampling above.
+			__m256i wantSpecMask = _mm256_load_si256((const __m256i*)lane_wantSpec);
+			__m256i needScalar   = _mm256_or_si256(wantSpecMask, waterMask);
+			__m256i needVec      = _mm256_andnot_si256(needScalar, mask_alive_fresh);
+			const bool anyVecLane = !_mm256_testz_si256(needVec, needVec);
+
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
 			// FDS_PROF_NO_LIGHTS gate: skip the loop entirely so the
 			// bench harness can isolate non-light kernel cost.
@@ -3388,7 +3470,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				const char *s = std::getenv("FDS_PROF_NO_LIGHTS");
 				return s && s[0] == '1';
 			}();
-			const int omniLoopN = profNoLights ? 0 : tl.count;
+			const int omniLoopN = (profNoLights || !anyVecLane) ? 0 : tl.count;
 			for (int n = 0; n < omniLoopN; ++n) {
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
 				__m256 wy = _mm256_sub_ps(_mm256_set1_ps(tl.posY[n]), yv);
