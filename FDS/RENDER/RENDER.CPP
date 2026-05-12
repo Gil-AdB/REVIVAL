@@ -2106,50 +2106,29 @@ static inline float fast_rsqrt(float x) {
 #endif
 }
 
-// x^N via repeated squaring. Bit-exact vs std::pow for integer N
-// (within float precision; each squaring loses ~½ ULP). The set of
-// supported N covers every Glossiness value our FLDs actually author
-// — verified via FDS_DEFERRED_GLOSS_STATS = {48, 64} for greets+city.
-// Other small powers included defensively.
-//
-// Each specialization is one operation built on the next-smaller one;
-// the compiler inlines `sq()` and the recursive call so codegen ends
-// up as the flat squaring chain. For 48 we explicitly reuse x16 so
-// the multiplier doesn't require CSE through opaque intrinsic calls.
-//
-// Scalar and SIMD versions are templated on the same N — the caller
-// picks the right overload via parameter type.
-
+// x^N via binary exponentiation, resolved at compile time. Bit-exact
+// vs std::pow for integer N (within float precision; each squaring
+// loses ~½ ULP). Optimal op count: 5 squarings + 1 mul for N=48, 6
+// squarings for N=64, 7 for N=128, etc. — TMP unrolls the recursion
+// into a flat sequence of fmuls. Works for any N ≥ 1; the scalar and
+// SIMD overloads of sq()/fmul() let one template body cover both
+// float and __m256.
 static inline float  sq(float  x) { return x * x; }
 static inline __m256 sq(__m256 x) { return _mm256_mul_ps(x, x); }
+static inline float  fmul(float  a, float  b) { return a * b; }
+static inline __m256 fmul(__m256 a, __m256 b) { return _mm256_mul_ps(a, b); }
 
-template<int N, typename T> static inline T pow_squaring(T x);
-template<> inline float  pow_squaring<2,   float >(float  x) { return sq(x); }
-template<> inline __m256 pow_squaring<2,   __m256>(__m256 x) { return sq(x); }
-template<> inline float  pow_squaring<4,   float >(float  x) { return sq(pow_squaring<2, float >(x)); }
-template<> inline __m256 pow_squaring<4,   __m256>(__m256 x) { return sq(pow_squaring<2, __m256>(x)); }
-template<> inline float  pow_squaring<8,   float >(float  x) { return sq(pow_squaring<4, float >(x)); }
-template<> inline __m256 pow_squaring<8,   __m256>(__m256 x) { return sq(pow_squaring<4, __m256>(x)); }
-template<> inline float  pow_squaring<16,  float >(float  x) { return sq(pow_squaring<8, float >(x)); }
-template<> inline __m256 pow_squaring<16,  __m256>(__m256 x) { return sq(pow_squaring<8, __m256>(x)); }
-template<> inline float  pow_squaring<32,  float >(float  x) { return sq(pow_squaring<16, float >(x)); }
-template<> inline __m256 pow_squaring<32,  __m256>(__m256 x) { return sq(pow_squaring<16, __m256>(x)); }
-template<> inline float  pow_squaring<64,  float >(float  x) { return sq(pow_squaring<32, float >(x)); }
-template<> inline __m256 pow_squaring<64,  __m256>(__m256 x) { return sq(pow_squaring<32, __m256>(x)); }
-template<> inline float  pow_squaring<128, float >(float  x) { return sq(pow_squaring<64, float >(x)); }
-template<> inline __m256 pow_squaring<128, __m256>(__m256 x) { return sq(pow_squaring<64, __m256>(x)); }
-// 48 = 32 + 16 = x^32 · x^16 — bind x16 once so we don't recompute it.
-template<> inline float  pow_squaring<48, float >(float  x) {
-	float  x16 = pow_squaring<16, float >(x);
-	return sq(x16) * x16;
-}
-template<> inline __m256 pow_squaring<48, __m256>(__m256 x) {
-	__m256 x16 = pow_squaring<16, __m256>(x);
-	return _mm256_mul_ps(sq(x16), x16);
+template<int N, typename T>
+static inline T pow_squaring(T x) {
+	static_assert(N >= 1, "pow_squaring: N must be a positive integer");
+	if constexpr (N == 1)         return x;
+	else if constexpr (N % 2 == 0) return sq(pow_squaring<N/2,   T>(x));
+	else                           return fmul(x, pow_squaring<N-1, T>(x));
 }
 
-// Runtime dispatch on Glossiness. Falls back to std::pow for unknown
-// values (FDS_DEFERRED_GLOSS_STATS will flag any FLD that ships one).
+// Runtime dispatch on Glossiness. The TMP template makes adding a new
+// case trivial: just list the gloss value here. Falls back to std::pow
+// for anything unlisted (FDS_DEFERRED_GLOSS_STATS will flag it).
 static inline float pow_glossClass(float x, unsigned gloss) {
 	switch (gloss) {
 		case 4:   return pow_squaring<4,   float>(x);
