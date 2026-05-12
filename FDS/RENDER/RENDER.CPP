@@ -2840,7 +2840,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float lenInv = fast_rsqrt(len2);
 						const float dist   = len2 * lenInv;
 						const float rRange = tl.rRange[n];
-						const float k = dot * lenInv * (1.0f - dist * rRange);
+						float k = dot * lenInv * (1.0f - dist * rRange);
+						// Spot cone: matches the vec body's coneAtten so nmap
+						// pixels (which all flow through this scalar path)
+						// don't render the robot spotlight as an omni.
+						if (tl.isSpot[n]) {
+							const float cosTheta = -(tl.dirX[n]*wx + tl.dirY[n]*wy + tl.dirZ[n]*wz) * lenInv;
+							if (cosTheta <= tl.cosOuter[n]) continue;
+							if (cosTheta < tl.cosInner[n]) {
+								const float ct = (cosTheta - tl.cosOuter[n]) / (tl.cosInner[n] - tl.cosOuter[n]);
+								k *= ct * ct * (3.0f - 2.0f * ct);
+							}
+						}
 						const float intensity = k * Mat->Diffuse;
 						const float Lcb = tl.colB[n];
 						const float Lcg = tl.colG[n];
@@ -3400,6 +3411,34 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				__m256 falloff = _mm256_sub_ps(_mm256_set1_ps(1.0f),
 				                                _mm256_mul_ps(dist, _mm256_set1_ps(tl.rRange[n])));
 				__m256 k = _mm256_mul_ps(_mm256_mul_ps(dot, lenInv), falloff);
+
+				// Spot cone attenuation (only fires when isSpot[n] is set).
+				// Matches the standard kernel exactly so omni pixels under
+				// greets's robot spotlight get the same cone falloff.
+				if (tl.isSpot[n]) {
+					__m256 ldx = _mm256_set1_ps(tl.dirX[n]);
+					__m256 ldy = _mm256_set1_ps(tl.dirY[n]);
+					__m256 ldz = _mm256_set1_ps(tl.dirZ[n]);
+					__m256 lci = _mm256_set1_ps(tl.cosInner[n]);
+					__m256 lco = _mm256_set1_ps(tl.cosOuter[n]);
+					__m256 dirDotW = _mm256_fmadd_ps(ldx, wx,
+					                  _mm256_fmadd_ps(ldy, wy,
+					                   _mm256_mul_ps(ldz, wz)));
+					__m256 cosTheta = _mm256_mul_ps(_mm256_sub_ps(_mm256_setzero_ps(), dirDotW),
+					                                 lenInv);
+					__m256 maskInside = _mm256_cmp_ps(cosTheta, lco, _CMP_GT_OQ);
+					__m256 rangeRcp = _mm256_div_ps(_mm256_set1_ps(1.0f),
+					                                 _mm256_sub_ps(lci, lco));
+					__m256 t = _mm256_mul_ps(_mm256_sub_ps(cosTheta, lco), rangeRcp);
+					t = _mm256_min_ps(_mm256_max_ps(t, _mm256_setzero_ps()),
+					                  _mm256_set1_ps(1.0f));
+					__m256 smooth = _mm256_mul_ps(_mm256_mul_ps(t, t),
+					                  _mm256_sub_ps(_mm256_set1_ps(3.0f),
+					                                _mm256_mul_ps(_mm256_set1_ps(2.0f), t)));
+					__m256 coneAtten = _mm256_blendv_ps(_mm256_setzero_ps(), smooth, maskInside);
+					k = _mm256_mul_ps(k, coneAtten);
+				}
+
 				__m256 intensity = _mm256_blendv_ps(_mm256_setzero_ps(),
 				                                     _mm256_mul_ps(k, vDiff),
 				                                     omni_lane);
@@ -3501,6 +3540,15 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 							float lenInvS = fast_rsqrt(len2s);
 							float distS   = len2s * lenInvS;
 							float ks = dots * lenInvS * (1.0f - distS * tl.rRange[n]);
+							// Spot cone (matches std vec body + std scalar fix).
+							if (tl.isSpot[n]) {
+								float cosTheta = -(tl.dirX[n]*wxs + tl.dirY[n]*wys + tl.dirZ[n]*wzs) * lenInvS;
+								if (cosTheta <= tl.cosOuter[n]) continue;
+								if (cosTheta < tl.cosInner[n]) {
+									float ct = (cosTheta - tl.cosOuter[n]) / (tl.cosInner[n] - tl.cosOuter[n]);
+									ks *= ct * ct * (3.0f - 2.0f * ct);
+								}
+							}
 							float ints = ks * matDiff;
 							lBs += ints * tl.colB[n];
 							lGs += ints * tl.colG[n];
