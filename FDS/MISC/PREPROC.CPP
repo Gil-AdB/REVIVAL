@@ -364,16 +364,79 @@ void Compute_Edges(TriMesh *T)
 	delete Nodebuf;
 }
 
+// Per-vertex tangent vector from triangle UV gradients. Lengyel's
+// method: for each face, derive the world-space ∂P/∂u using the
+// face's two edges and their UV deltas, weight by face area, sum
+// into each vertex's Tangent. After all faces, normalize +
+// Gram-Schmidt orthogonalize against N (= T - (T·N)*N, renormalized).
+// Mirrors Compute_Vertex_Normals's accumulation pattern so shared
+// vertices get a smooth averaged tangent.
+void Compute_Vertex_Tangents(TriMesh *T)
+{
+	Vertex *Vtx, *VEnd = T->Verts + T->VIndex;
+	Face   *F,   *FEnd = T->Faces + T->FIndex;
+
+	for (Vtx = T->Verts; Vtx < VEnd; Vtx++) {
+		Vector_Form(&Vtx->Tangent, 0, 0, 0);
+	}
+
+	for (F = T->Faces; F < FEnd; F++) {
+		Vector p0 = F->A->Pos;
+		Vector p1 = F->B->Pos;
+		Vector p2 = F->C->Pos;
+		Vector e1, e2;
+		Vector_Sub(&p1, &p0, &e1);
+		Vector_Sub(&p2, &p0, &e2);
+		const float du1 = F->B->U - F->A->U;
+		const float dv1 = F->B->V - F->A->V;
+		const float du2 = F->C->U - F->A->U;
+		const float dv2 = F->C->V - F->A->V;
+		const float denom = du1 * dv2 - du2 * dv1;
+		if (std::fabs(denom) < 1e-8f) continue;  // degenerate UVs
+		const float r = 1.0f / denom;
+		Vector tan;
+		tan.x = (e1.x * dv2 - e2.x * dv1) * r;
+		tan.y = (e1.y * dv2 - e2.y * dv1) * r;
+		tan.z = (e1.z * dv2 - e2.z * dv1) * r;
+		// Area weight, same as Compute_Vertex_Normals.
+		Vector w;
+		Vector_Scale(&tan, Tri_Surface(&p0, &p1, &p2), &w);
+		Vector_SelfAdd(&F->A->Tangent, &w);
+		Vector_SelfAdd(&F->B->Tangent, &w);
+		Vector_SelfAdd(&F->C->Tangent, &w);
+	}
+
+	for (Vtx = T->Verts; Vtx < VEnd; Vtx++) {
+		// Gram-Schmidt: subtract the normal component so T ⟂ N.
+		const float TdotN = Dot_Product(&Vtx->Tangent, &Vtx->N);
+		Vtx->Tangent.x -= TdotN * Vtx->N.x;
+		Vtx->Tangent.y -= TdotN * Vtx->N.y;
+		Vtx->Tangent.z -= TdotN * Vtx->N.z;
+		if (Vector_Length(&Vtx->Tangent) > EPSILON) {
+			Vector_Norm(&Vtx->Tangent);
+		} else {
+			// Fallback when the vertex has no usable UV gradient — pick
+			// any vector perpendicular to N. Choose the cross of N with
+			// whichever world axis is least parallel.
+			Vector ref = (std::fabs(Vtx->N.y) < 0.9f)
+				? Vector(0, 1, 0) : Vector(1, 0, 0);
+			Cross_Product(&Vtx->N, &ref, &Vtx->Tangent);
+			Vector_Norm(&Vtx->Tangent);
+		}
+	}
+}
+
 // Update Trimesh T to contain The following Information:
 // Face plane Normals,Vertex Pseudo Normals,Face Normal products,
 // Bounding Sphere,Correct UV Wrapping Flags,Lighting module validity.
 void Process_TriMesh(TriMesh *T)
 {
 	//  if (T->Flags&Tri_Processed) continue;
-	
+
 	//  Compute_Optimized_Indices(T);
 	Compute_Face_Normals(T);
 	Compute_Vertex_Normals(T);
+	Compute_Vertex_Tangents(T);
 	Compute_Normal_Products(T);
 	Compute_Bounding_Sphere(T);
 	Compute_Lighting_Flag(T);

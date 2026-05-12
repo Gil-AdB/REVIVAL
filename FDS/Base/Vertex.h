@@ -40,6 +40,12 @@ struct  Vertex
 	                            // unscaled View*RotMat. Read by the deferred-path
 	                            // clipper + rasterizer; the forward-path Lighting()
 	                            // still reads N in object space.
+	// Per-vertex tangent vector for tangent-space normal map support.
+	// Computed in object space at scene init from triangle UV deltas
+	// (Lengyel's method, then averaged + Gram-Schmidt'd against N).
+	// Bitangent is reconstructed at lighting time as N × T.
+	Vector			Tangent;    // Object-space tangent (unit; ⟂ N)
+	Vector			TTangent;   // Transformed tangent (view space; mirrors TN)
 //	float			EU,EV;      // Environment mapping coordinates
 //	float			REU,REV;    // EU/Z, EV/Z.
 	float			EUZ = 0.0f, EVZ = 0.0f;
