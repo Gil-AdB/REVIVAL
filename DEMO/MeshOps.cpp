@@ -128,6 +128,104 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	}
 }
 
+// Translate linear (x, y) pixel coordinate into the swizzled byte
+// offset used by Generate_Mipmaps' block-tiled layout. Outer loop is
+// block columns (x), inner is block rows (y); within each block,
+// rows then columns. Mirrors IMGCODE.CPP:1547-1562.
+static inline size_t SwizzledOffset(int x, int y, int blockSizeX, int blockSizeY,
+                                     int SizeY) {
+	const int BX = 1 << blockSizeX;
+	const int BY = 1 << blockSizeY;
+	const int blockRowsPerCol = SizeY >> blockSizeY;
+	const int bx = x >> blockSizeX;
+	const int by = y >> blockSizeY;
+	const int k  = x & (BX - 1);
+	const int j  = y & (BY - 1);
+	return (size_t(bx) * blockRowsPerCol + by) * size_t(BX * BY)
+	       + size_t(j) * BX + k;
+}
+
+Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
+	if (!diffuse || diffuse->BPP != 32 || !diffuse->Mipmap[0]) return nullptr;
+	const int W = diffuse->SizeX;
+	const int H = diffuse->SizeY;
+	if (W <= 0 || H <= 0) return nullptr;
+
+	Texture *nm = new Texture;
+	*nm = *diffuse;  // copy basic fields (BPP, SizeX/Y, LSizeX/Y, blockSizeX/Y, OptClass)
+	nm->Pal       = nullptr;
+	nm->FileName  = nullptr;
+	nm->ID        = 0;
+	nm->Flags     = 0;
+	for (int i = 0; i < 16; ++i) nm->Mipmap[i] = nullptr;
+
+	// Allocate level-0 storage matching the diffuse's layout. We only
+	// populate mip 0 — the rasterizer's miplevel value will index into
+	// nm->Mipmap[miplevel], which is null past 0; the kernel already
+	// null-checks `nmData` before sampling, so far-mip pixels just
+	// fall back to the geometric normal.
+	const int blockX = diffuse->blockSizeX;
+	const int blockY = diffuse->blockSizeY;
+	const int BX     = 1 << blockX;
+	const int BY     = 1 << blockY;
+	const int X      = W >> blockX;  // block columns
+	const int Y      = H >> blockY;  // block rows
+	const size_t numPixels = size_t(X) * size_t(Y) * size_t(BX) * size_t(BY);
+	nm->Data       = (byte*)getAlignedBlock(numPixels * sizeof(uint32_t));
+	nm->Mipmap[0]  = nm->Data;
+	nm->numMipmaps = 1;
+
+	const uint32_t *src = reinterpret_cast<const uint32_t*>(diffuse->Mipmap[0]);
+	uint32_t       *dst = reinterpret_cast<uint32_t*>(nm->Data);
+
+	auto fetchLum = [&](int x, int y) -> float {
+		x = ((x % W) + W) % W;  // wrap
+		y = ((y % H) + H) % H;
+		const uint32_t px = src[SwizzledOffset(x, y, blockX, blockY, H)];
+		const float b = float(px & 0xFF);
+		const float g = float((px >> 8) & 0xFF);
+		const float r = float((px >> 16) & 0xFF);
+		return 0.299f * r + 0.587f * g + 0.114f * b;
+	};
+
+	const float invStrength = strength * (1.0f / 255.0f);
+	for (int y = 0; y < H; ++y) {
+		for (int x = 0; x < W; ++x) {
+			// Sobel-X / Sobel-Y of luminance over the 3x3 neighborhood.
+			const float lTL = fetchLum(x-1, y-1);
+			const float lT  = fetchLum(x  , y-1);
+			const float lTR = fetchLum(x+1, y-1);
+			const float lL  = fetchLum(x-1, y  );
+			const float lR  = fetchLum(x+1, y  );
+			const float lBL = fetchLum(x-1, y+1);
+			const float lB  = fetchLum(x  , y+1);
+			const float lBR = fetchLum(x+1, y+1);
+			const float gx = (lTR + 2.0f*lR + lBR) - (lTL + 2.0f*lL + lBL);
+			const float gy = (lBL + 2.0f*lB + lBR) - (lTL + 2.0f*lT + lTR);
+
+			// World-space normal — assumes the surface base normal
+			// points along +Y. (gx, gy) is the heightmap gradient in
+			// texture (u, v) space; mapped to world (x, z) for a
+			// horizontal surface.
+			float nx = -gx * invStrength;
+			float ny =  1.0f;
+			float nz = -gy * invStrength;
+			const float invLen = 1.0f / std::sqrt(nx*nx + ny*ny + nz*nz);
+			nx *= invLen; ny *= invLen; nz *= invLen;
+
+			const uint8_t r = uint8_t((nx + 1.0f) * 127.5f);
+			const uint8_t g = uint8_t((ny + 1.0f) * 127.5f);
+			const uint8_t b = uint8_t((nz + 1.0f) * 127.5f);
+			const uint32_t packed = uint32_t(b)
+			                      | (uint32_t(g) << 8)
+			                      | (uint32_t(r) << 16)
+			                      | 0xFF000000u;
+			dst[SwizzledOffset(x, y, blockX, blockY, H)] = packed;
+		}
+	}
+	return nm;
+}
+
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 	if (!Sc) return;
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {

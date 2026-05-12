@@ -30,3 +30,24 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees = 30.0f);
 // creases (City buildings, Greets walls, Crash laptop facade) without
 // breaking smooth meshes (Fountain crystal, Greets curved letters).
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees);
+
+struct Texture;
+
+// Bake an object-space normal map from a 32-bpp diffuse texture's
+// luminance gradient. Output is a freshly-allocated Texture* with the
+// SAME dimensions and SAME block-tile layout as the input, so the
+// existing rasterizer-computed swizzledUV indexes both consistently.
+//
+// Sobel-style gradient of luminance → perturbation in the surface
+// tangent plane → encoded as a world-space normal assuming the
+// surface's base normal points along +Y. Good for ground-like surfaces
+// (floors, water). For walls (whose base normal points along ±X or
+// ±Z) the resulting bumps point in the wrong direction; production
+// use would need a per-orientation bake or tangent-space maps.
+//
+// strength controls the bump amplitude (0 = flat, large = very
+// bumpy). 4.0f is a sensible starting point.
+//
+// Caller owns the returned Texture and its buffers. Returns nullptr
+// if the input isn't 32-bpp or has no Mipmap[0].
+Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength = 4.0f);

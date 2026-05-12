@@ -499,6 +499,18 @@ void Initialize_Greets()
 		    strstr(n, "hull")   || strstr(n, "cockpit")) {
 			if (M->Specular < 0.4f) M->Specular = 0.4f;
 			if (M->Glossiness == 0) M->Glossiness = 48;
+			// Bake a normal map from the diffuse luminance gradient
+			// so per-pixel Blinn-Phong gets some N variation across
+			// the surface (otherwise the rasterizer interpolates a
+			// near-constant N from the vertex normals on a flat-ish
+			// face and the highlight collapses to a single bright
+			// brightness across the whole polygon). One-shot at init.
+			if (M->Txtr && !M->NormalMap) {
+				M->NormalMap = BakeNormalMapFromDiffuse(M->Txtr, 4.0f);
+				if (M->NormalMap) {
+					std::fprintf(stderr, "[GREETS] baked normal map for '%s'\n", n);
+				}
+			}
 		}
 	}
 
@@ -531,7 +543,7 @@ void Initialize_Greets()
 		std::memset(g_RobotSpot, 0, sizeof(Omni));
 		g_RobotSpot->L.B = 255.0f; g_RobotSpot->L.G = 255.0f; g_RobotSpot->L.R = 255.0f;
 		g_RobotSpot->L.A = 1.0f;
-		g_RobotSpot->ISize  = 15.0f;           // intensity
+		g_RobotSpot->ISize  = 10.0f;           // intensity
 		g_RobotSpot->IRange = 30.0f;
 		g_RobotSpot->rRange = 1.0f / 30.0f;
 		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
