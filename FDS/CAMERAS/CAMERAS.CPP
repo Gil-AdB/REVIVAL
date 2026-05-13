@@ -639,15 +639,15 @@ void Dynamic_Camera()
   }
 	if (Keyboard[ScGrayPlus] || Keyboard[ScQ])
 	{
-    FV.x-=FC.Mat[1][0]*Vel_Speed;
-		FV.y-=FC.Mat[1][1]*Vel_Speed;
-    FV.z-=FC.Mat[1][2]*Vel_Speed;
+    FV.x+=FC.Mat[1][0]*Vel_Speed;
+		FV.y+=FC.Mat[1][1]*Vel_Speed;
+    FV.z+=FC.Mat[1][2]*Vel_Speed;
   }
 	if (Keyboard[ScGrayMinus] || Keyboard[ScE])
   {
-    FV.x+=FC.Mat[1][0]*Vel_Speed;
-    FV.y+=FC.Mat[1][1]*Vel_Speed;
-    FV.z+=FC.Mat[1][2]*Vel_Speed;
+    FV.x-=FC.Mat[1][0]*Vel_Speed;
+    FV.y-=FC.Mat[1][1]*Vel_Speed;
+    FV.z-=FC.Mat[1][2]*Vel_Speed;
   }
   // W/S are swapped relative to the original Z/A bindings so they
   // match modern FPS convention (W = forward toward look-at target,
@@ -711,8 +711,31 @@ void Dynamic_Camera()
 		}
 	}*/
 
-	if (FT.x*FT.x+FT.y*FT.y+FT.z*FT.z>EPSILON)
-		Matrix_Rotation(FC.Mat,FT.x*dTime,FT.y*dTime,FT.z*dTime);
+	// Yaw in WORLD frame (around world-Y axis), pitch + roll in camera-
+	// local frame. The original `Matrix_Rotation(Mat, RX, RY, RZ)` did
+	// Euler composition in view space — fine when the camera stayed
+	// upright, but pitching past 90° flips the camera's local-Y to point
+	// at -world-Y, which then reverses the direction of yaw. Users read
+	// that as "controls broke / gimbal lock". Decoupling yaw into a
+	// world-Y rotation keeps Right always meaning right regardless of
+	// pitch state. Pitch and roll remain camera-local (composed via
+	// Matrix_Rotation with RY=0) so rolling the camera still feels like
+	// rolling, not pivoting off-axis.
+	if (FT.y * FT.y > EPSILON) {
+		const float theta = FT.y * dTime;
+		const float c = cosf(theta), s = sinf(theta);
+		// Rotate each row of Mat (camera basis in world coords) around
+		// world-Y. R_y(theta) acts on a row's (x,z) components.
+		for (int i = 0; i < 3; ++i) {
+			const float x = FC.Mat[i][0];
+			const float z = FC.Mat[i][2];
+			FC.Mat[i][0] =  c*x + s*z;
+			FC.Mat[i][2] = -s*x + c*z;
+		}
+	}
+	if (FT.x * FT.x + FT.z * FT.z > EPSILON) {
+		Matrix_Rotation(FC.Mat, FT.x*dTime, 0.0f, FT.z*dTime);
+	}
 	// apply gravitic force
 /*  Vector_Scale(&Grav,dTime,&V);
 	Vector_SelfAdd(&FV,&V);*/

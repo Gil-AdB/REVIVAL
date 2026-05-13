@@ -1468,27 +1468,32 @@ std::vector<CubeMapCoord> CalcEquirectangularPanoramaTable(int xRes, int yRes) {
 			d.x = xzFactor * sin(lon);
 			d.z = xzFactor * cos(lon);
 			const int ROT = 2;
-			if (d.z > max(fabs(d.x), fabs(d.y))) {
+			// >= / <= so directions exactly on a cube-face boundary
+			// (two |components| equal) always land in some branch.
+			// With strict >, a direction like d=(1,0,1) failed every
+			// test and left the output pixel uninitialized — manifested
+			// as "missing chunks" at cube-edge directions.
+			if (d.z >= max(fabs(d.x), fabs(d.y))) {
 				const float u = ((d.x / d.z) + 1.0) / 2.0;
 				const float v = ((d.y / d.z) + 1.0) / 2.0;
 				it->set(ROT % 4,1-u, v);
-			} else if (d.x > max(fabs(d.y), fabs(d.z))) {
+			} else if (d.x >= max(fabs(d.y), fabs(d.z))) {
 				const float u = ((d.z / d.x) + 1.0) / 2.0;
 				const float v = ((d.y / d.x) + 1.0) / 2.0;
 				it->set((ROT + 1) % 4, u, v);
-			} else if (d.z < -max(fabs(d.x), fabs(d.y))) {
+			} else if (d.z <= -max(fabs(d.x), fabs(d.y))) {
 				const float u = ((d.x / d.z) + 1.0) / 2.0;
 				const float v = ((d.y / d.z) + 1.0) / 2.0;
 				it->set((ROT + 2) % 4,1-u,1-v);
-			} else if (d.x < -max(fabs(d.y), fabs(d.z))) {
+			} else if (d.x <= -max(fabs(d.y), fabs(d.z))) {
 				const float u = ((d.z / d.x) + 1.0) / 2.0;
 				const float v = ((d.y / d.x) + 1.0) / 2.0;
 				it->set((ROT + 3) % 4,u,1-v);
-			} else if (d.y > max(fabs(d.x), fabs(d.z))) {
+			} else if (d.y >= max(fabs(d.x), fabs(d.z))) {
 				const float u = ((d.x / d.y) + 1.0) / 2.0;
 				const float v = ((d.z / d.y) + 1.0) / 2.0;
 				it->set(4, u, v);
-			} else if (d.y < -max(fabs(d.x), fabs(d.z))) {
+			} else if (d.y <= -max(fabs(d.x), fabs(d.z))) {
 				const float u = ((d.x / d.y) + 1.0) / 2.0;
 				const float v = ((d.z / d.y) + 1.0) / 2.0;
 				it->set(5, 1 - u, v);
@@ -1622,7 +1627,12 @@ void Initialize_City()
 	// render env maps for a few select objects
 	FList_Allocate(CitySc);
 	auto oldAspectRatio = AspectRatio;
-	// HACK: using exactly 1 triggers frustrum clipper bugs
+	// HACK: using exactly 1 triggers frustrum clipper bugs (instability /
+	// freezes on certain angles). The all-`>=` lookup change in
+	// CalcEquirectangularPanoramaTable wasn't enough to make 1.0 safe —
+	// the residual cause is in the render side (Reflected_Transform's
+	// asymmetric `>=XRes` for VisRight/Down vs the clipper's strict `>`
+	// in viewportCalcFlags). Leaving 0.999 until that's fixed.
 	AspectRatio = 0.999;
 	Camera EnvCam = { 0 };
 	View = &EnvCam;
@@ -2139,11 +2149,15 @@ struct CityScene : SceneDriver {
 		}
 		g_FrameTime = TTrd = Timer;
 		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
-		if (Keyboard[ScTab]) {
-			if (View == &FC)
-				View = CitySc->CameraHead;
-			else
-				View = &FC;
+		{
+			static bool sTabPrev = false;
+			const bool tabNow = Keyboard[ScTab] != 0;
+			if (tabNow && !sTabPrev) {
+				View = (View == &FC) ? CitySc->CameraHead : &FC;
+				std::fprintf(stderr, "[TAB city] toggled → View=%s\n",
+					(View == &FC) ? "FC" : "scene");
+			}
+			sTabPrev = tabNow;
 		}
 		Dynamic_Camera();
 
