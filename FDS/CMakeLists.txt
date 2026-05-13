@@ -193,4 +193,13 @@ if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time
     # for the PROXY_TO_PTHREAD mode we use in DEMO.
     target_compile_options(${PROJECT_NAME} PUBLIC -pthread)
+    # getenv() is unreliable in the browser, so bake the experimental
+    # rendering toggles ON at compile time for WASM. The env var still
+    # wins when set (e.g. when running DEMO_snapshot under node, which
+    # has a real process environment), so FDS_DEFERRED=0 / FDS_SHADOWS=0
+    # can still disable them for snapshot comparisons.
+    target_compile_definitions(${PROJECT_NAME} PUBLIC
+        FDS_DEFERRED_DEFAULT_ON=1
+        FDS_SHADOWS_DEFAULT_ON=1
+        FDS_SHADOW_POLYID_DEFAULT_ON=1)
 endif()

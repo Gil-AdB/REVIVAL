@@ -1893,10 +1893,7 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 // Lighting() also early-returns when this is set — its per-vertex
 // output is unused on the deferred path.
 bool deferredEnabled() {
-	static bool cached = []{
-		const char *s = std::getenv("FDS_DEFERRED");
-		return s && s[0] == '1';
-	}();
+	static bool cached = fdsEnvBool("FDS_DEFERRED", FDS_DEFERRED_DEFAULT_ON);
 	return cached;
 }
 
@@ -4608,10 +4605,7 @@ static void Render_DeferredLighting() {
 		// shadows are enabled — otherwise the kernel must skip the
 		// shadow test (and the shadow maps are stale-empty anyway).
 		int32_t smIdx = -1;
-		static const bool sShadowsOn = []{
-			const char *s = std::getenv("FDS_SHADOWS");
-			return s && s[0] == '1';
-		}();
+		static const bool sShadowsOn = fdsEnvBool("FDS_SHADOWS", FDS_SHADOWS_DEFAULT_ON);
 		if (sShadowsOn && (O->Flags & Omni_CastsShadow)) {
 			for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
 				if (g_shadowMaps[i].omni == O) { smIdx = int32_t(i); break; }
@@ -4877,21 +4871,19 @@ static void Render_DeferredFogPass() {
 //
 // Gate: env `FDS_SHADOWS=1`. Off by default while wiring.
 static bool shadowsEnabled() {
-	static const bool cached = []{
-		const char *s = std::getenv("FDS_SHADOWS");
-		return s && s[0] == '1';
-	}();
+	static const bool cached = fdsEnvBool("FDS_SHADOWS", FDS_SHADOWS_DEFAULT_ON);
 	return cached;
 }
 
 thread_local bool g_inShadowPass = false;
 
 // PolyId is the production default. FDS_SHADOW_POLYID=0 forces back to
-// Depth at startup (F3 still toggles at runtime).
-std::atomic<ShadowMode> g_shadowMode{[]{
-	const char *s = std::getenv("FDS_SHADOW_POLYID");
-	return (s && s[0] == '0') ? ShadowMode::Depth : ShadowMode::PolyId;
-}()};
+// Depth at startup (F3 still toggles at runtime). The compile-time
+// FDS_SHADOW_POLYID_DEFAULT_ON applies when the env var is unset —
+// keeps the WASM build on PolyId without needing browser env vars.
+std::atomic<ShadowMode> g_shadowMode{
+	fdsEnvBool("FDS_SHADOW_POLYID", FDS_SHADOW_POLYID_DEFAULT_ON)
+		? ShadowMode::PolyId : ShadowMode::Depth};
 
 
 void Render_DeferredShadowMaps(Scene *Sc)
