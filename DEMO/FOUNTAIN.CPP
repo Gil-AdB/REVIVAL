@@ -825,6 +825,18 @@ void Initialize_Fountain()
 		                std::strstr(M->Name, "in shpere"))) {
 			M->Flags |= Mat_TwoSided;
 		}
+		// Center "mizraka glass" sphere: crystal-like.
+		//   XparBlendAlpha=0.4 → 40% source + 60% destination, linear
+		//     no-cap, more see-through than the default saturated formula.
+		//   Specular=1.0 + Glossiness=128 → sharp Blinn-Phong highlight
+		//     in the xpar compositor for a glassy/crystal look.
+		// Spire orbs (f_sphere / in shpere) keep XparBlendAlpha=0 and
+		// Specular=0 from the FLD — legacy formula, no highlight.
+		if (M->Name && std::strcmp(M->Name, "mizraka glass") == 0) {
+			M->XparBlendAlpha = 0.4f;
+			M->Specular   = 1.0f;
+			M->Glossiness = 128;
+		}
 	}
 	Add_Vortex_ToScene();
 
@@ -906,6 +918,111 @@ void Initialize_Fountain()
 	endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0, 0.0 });
 
 	g_LnMat = Generate_Gradient(endpoints, 256, 0.01, false);
+
+	// Runtime stress knob: FDS_FOUNTAIN_PARTICLE_OMNI_PCT (float in [0..100],
+	// default 0). Attaches a stationary Omni to that percentage of fountain
+	// particles, spread evenly across Sc->Pcl[]. Used to probe how the
+	// deferred lighting kernel handles huge omni counts. Default 0 → no
+	// extra omnis spawned, behaviour identical to before this knob existed.
+	//
+	// Hard cap below: forward Lighting() in RENDER.CPP uses a static LA[128]
+	// per-vertex light buffer and overruns it once an *active* omni count
+	// passes ~128 for any non-stationary trimesh in the scene. The deferred
+	// path itself caps at DEFERRED_MAX_LIGHTS=128 too, so values beyond that
+	// don't actually stress the deferred kernel further. We clamp the
+	// stress-omni count to a safe budget that keeps total active omnis
+	// (existing FLD + 9 stream-head followers + stress) below the LA[128]
+	// limit with comfortable headroom.
+	{
+		float pct = 0.0f;
+		if (const char* env = std::getenv("FDS_FOUNTAIN_PARTICLE_OMNI_PCT")) {
+			char* endp = nullptr;
+			float parsed = std::strtof(env, &endp);
+			if (endp != env && parsed > 0.0f) {
+				pct = parsed;
+				if (pct > 100.0f) pct = 100.0f;
+			}
+		}
+		int numAdded = 0;
+		if (pct > 0.0f && FntSc->NumOfParticles > 0) {
+			// Count omnis already in the chain (FLD-loaded + 9 stream-heads).
+			int existingActive = 0;
+			for (Omni* eo = FntSc->OmniHead; eo; eo = eo->Next) {
+				if (eo->Flags & Omni_Active) ++existingActive;
+			}
+			constexpr int kForwardLA = 128;
+			constexpr int kHeadroom  = 8;
+			int budget = kForwardLA - existingActive - kHeadroom;
+			if (budget < 0) budget = 0;
+
+			// Desired count by pct.
+			int desired = (int)(FntSc->NumOfParticles * (pct / 100.0f));
+			if (desired < 1) desired = 1;
+
+			int actual = desired;
+			if (actual > budget) actual = budget;
+
+			if (actual > 0) {
+				// Match the 9 stream-head omnis (intensity=400) — scene omnis
+				// use ISize≈127..400, so anything below ~100 is invisible
+				// against the rasterizer's existing illumination. 400 lines
+				// us up with the strategic particle-path lights overhead.
+				const float omniIntensity = 400.0f;
+				const float omniRange     = 75.0f;
+				// Spread along the same helical spiral arc the 9 stream-head
+				// omnis trace (radius=magwav=55, y in [35-0.3*55, 35+0.3*55]
+				// = [18.5, 51.5], with 3 tracks rotated 120° around Y via
+				// xForm1/xForm2). We stitch the 3 arms into one continuous
+				// parametric curve over theta in [0, 6π): each arm covers
+				// a 2π sweep, and across arms we lift y from bottom to top
+				// of the visible range so the lights trace the visible
+				// spiral instead of all stacking on the same ring.
+				const float magwav = 55.0f;
+				const float yMid   = 35.0f;
+				const float yAmp   = 0.3f * 55.0f;  // matches yPhase scale
+				const float kArms  = 3.0f;
+				for (int i = 0; i < actual; ++i) {
+					// u in [0,1) — fraction along the combined arc.
+					const float u = (float)i / (float)actual;
+					// Angle: kArms full turns end-to-end.
+					const float theta = u * kArms * 2.0f * float(PI);
+					// y rises linearly across the full helix.
+					const float y = (yMid - yAmp) + 2.0f * yAmp * u;
+					float x = std::cos(theta) * magwav;
+					float z = std::sin(theta) * magwav;
+					// Apply the same arm rotation the stream-head omnis use:
+					// rotIdx selected so consecutive omnis cycle 0,1,2,0,1,2…
+					// to populate all 3 visible arms.
+					const int rotIdx = i % 3;
+					if (rotIdx == 1) {
+						float nx = x * xForm1x + z * xForm1z;
+						float nz = z * xForm1x - x * xForm1z;
+						x = nx; z = nz;
+					}
+					if (rotIdx >= 1) {
+						float nx = x * xForm2x + z * xForm2z;
+						float nz = z * xForm2x - x * xForm2z;
+						x = nx; z = nz;
+					}
+					Vector p; p.x = x; p.y = y; p.z = z;
+					AppendFountainOmni(FntSc, p,
+					                   1.0f, 1.0f, 1.0f,
+					                   omniIntensity, omniRange);
+					++numAdded;
+				}
+			}
+			if (numAdded < desired) {
+				std::fprintf(stderr,
+					"[FOUNTAIN] particle-omni stress: clamped %d -> %d"
+					" (LA[128] budget = %d, %d already active)\n",
+					desired, numAdded, budget, existingActive);
+			}
+		}
+		std::fprintf(stderr,
+			"[FOUNTAIN] particle-omni stress: N=%d omnis"
+			" (FDS_FOUNTAIN_PARTICLE_OMNI_PCT=%.3f)\n",
+			numAdded, pct);
+	}
 
 //	Noise_Sample();
 
@@ -2078,11 +2195,15 @@ struct FountainScene : SceneDriver {
 
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
-		if (Keyboard[ScTab]) {
-			if (View == &FC)
-				View = FntSc->CameraHead;
-			else
-				View = &FC;
+		{
+			static bool sTabPrev = false;
+			const bool tabNow = Keyboard[ScTab] != 0;
+			if (tabNow && !sTabPrev) {
+				View = (View == &FC) ? FntSc->CameraHead : &FC;
+				std::fprintf(stderr, "[TAB fountain] toggled → View=%s\n",
+					(View == &FC) ? "FC" : "scene");
+			}
+			sTabPrev = tabNow;
 		}
 
 		// 'I' = info: print camera position + forward (rising edge only).
@@ -2097,25 +2218,6 @@ struct FountainScene : SceneDriver {
 					View->IFOV);
 			}
 			prevI = curI;
-		}
-
-		// 'O' = stream-head omni info dump (rising edge).
-		{
-			static bool prevO = false;
-			bool curO = Keyboard[ScO] != 0;
-			if (curO && !prevO) {
-				fprintf(stderr, "[OMNI] === stream-head dump (Timer=%d) ===\n", int(Timer));
-				for (int i = 0; i < kNumFollowerOmnis; ++i) {
-					const FollowerOmni& f = g_FntFollowerOmnis[i];
-					if (!f.omni) continue;
-					fprintf(stderr,
-					    "  [%2d] track=%d rotIdx=%d pos=(%.1f,%.1f,%.1f) ISize=%.1f L=(%.2f,%.2f,%.2f)\n",
-					    i, f.track, f.rotIdx,
-					    f.omni->IPos.x, f.omni->IPos.y, f.omni->IPos.z,
-					    f.omni->ISize, f.omni->L.R, f.omni->L.G, f.omni->L.B);
-				}
-			}
-			prevO = curO;
 		}
 
 		Handle_Lightning();

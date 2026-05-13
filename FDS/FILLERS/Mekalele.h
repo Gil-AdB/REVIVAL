@@ -111,6 +111,19 @@ struct TileRasterizerCtx {
 	u16 *zbuffer;
 };
 
+// Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
+// the rasterizer further clamps tile_my/tile_My to [tileYMin, tileYMax]
+// (inclusive, tile-row indices), so a clipped triangle whose max PY
+// snapped to the strip's bottom edge can't iterate INTO the next
+// strip's tile row and write a pixel that the next strip will then
+// clear. Default (-1, INT32_MAX) is "no clamp" — every non-strip
+// raster path leaves it unset.
+struct RasterStripClamp {
+	int tileYMin = -1;
+	int tileYMax = INT32_MAX;
+};
+inline thread_local RasterStripClamp g_rasterStripClamp;
+
 struct GBufferSpan {
 	u16 *normal;
 	u16 *tangent;
@@ -370,8 +383,20 @@ struct TileRasterizer {
 		// FIXME: raster conventions (it is doing floor right now)
 		const int tile_mx = clampedX(std::min({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE;
 		const int tile_Mx = clampedX(std::max({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE;
-		const int tile_my = clampedY(std::min({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
-		const int tile_My = clampedY(std::max({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
+		int tile_my = clampedY(std::min({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
+		int tile_My = clampedY(std::max({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
+		// Strip clamp (unified TBR): keep this rasterization within the
+		// strip's tile row. Without it, a triangle clipped to PY=strip_y_max
+		// computes tile_My one row past the strip — the rasterizer writes
+		// those out-of-strip pixels (bary hits zero on the bottom edge,
+		// passes >= 0), then the neighbouring strip's clear (concurrent
+		// in the threadpool) wipes them. Result: 1-row horizontal stripe
+		// every TILE_SIZE rows, exactly at strip boundaries.
+		if (g_rasterStripClamp.tileYMax < INT32_MAX) {
+			if (tile_My > g_rasterStripClamp.tileYMax) tile_My = g_rasterStripClamp.tileYMax;
+			if (tile_my < g_rasterStripClamp.tileYMin) tile_my = g_rasterStripClamp.tileYMin;
+			if (tile_my > tile_My) return;
+		}
 
 		TScreenCoord v1x = TScreenCoord(v1.PX * SUBPIXEL_MULT + 0.5);
 		TScreenCoord v1y = TScreenCoord(v1.PY * SUBPIXEL_MULT + 0.5);

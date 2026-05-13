@@ -26,6 +26,11 @@ struct Material
     float                 Specular              = 0.0f; //Specular reflection
     float                 Reflection            = 0.0f; //Rebounded light Reflection
     float                 Transparency          = 0.0f; //Transparency ratio
+    // Per-material override for the deferred transparent compositor's blend
+    // formula. 0 (default) = legacy `litRGB + dst/2` saturated; >0 = linear
+    // `litRGB*α + dst*(1-α)` no cap. Initialize_<scene> sets on opt-in
+    // materials (e.g. fountain orb glass).
+    float                 XparBlendAlpha        = 0.0f;
     unsigned short        Glossiness            = 0; //unknown parameter
     unsigned short        ReflectionMode        = 0; //unknown parameter
     char                * ReflectionImage       = nullptr; //Reflection detail
