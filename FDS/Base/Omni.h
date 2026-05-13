@@ -47,7 +47,11 @@ struct Omni
 	LightType        Type;
 	Omni           * Next;
 	Omni           * Prev;
-	dword			 dummy1,dummy2;
+	// Shadow-map resolution hint, consumed by ShadowMaps_Rebuild. 0 =
+	// use the global default passed to Rebuild. Set to e.g. 256 on
+	// short-range lights to dramatically cut rasterization cost.
+	dword            shadowMapRes;
+	dword            dummy2;
 };
 
 #pragma pack(pop)

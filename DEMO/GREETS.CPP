@@ -23,7 +23,10 @@
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "FILLERS/Mekalele.h"
+#include <map>
 #include "Base/FDS_DECS.H"
+#include "FILLERS/ShadowMap.h"
 #include <memory>
 #include <vector>
 #include <VESA/Vesa.h>
@@ -40,6 +43,10 @@ static Scene *GreetSc;
 // the spot follows the robot's world position.
 static TriMesh *g_RobotMesh = nullptr;
 static Omni    *g_RobotSpot = nullptr;
+// Three colored orbit spots circling the robot at 120° offsets. Same cone
+// shape as g_RobotSpot but oriented to point inward/down at the robot.
+static constexpr int kOrbitSpotCount = 3;
+static Omni    *g_OrbitSpots[kOrbitSpotCount] = { nullptr, nullptr, nullptr };
 
 static int32_t CHPartTime = 20.0f*100;
 
@@ -540,6 +547,84 @@ void Initialize_Greets()
 			break;
 		}
 	}
+
+	// Per-sub-mesh material cloning for the robot. Each robot TriMesh
+	// (Hull, Hull2, L_leg1/2, R_leg1/2) gets its own private clones of
+	// every material it uses, so each sub-mesh ends up with distinct
+	// matIDs. Hull.lwo additionally splits each material into K bins
+	// along the local Y axis (upper / body for K=2) so the cockpit area
+	// can self-shadow the body within the same TriMesh — PolyId needs
+	// distinct matIDs for the comparison to register a shadow.
+	auto isRobotSubMesh = [](const char *n) {
+		return n && (strstr(n, "Hull") || strstr(n, "hull") ||
+		             strstr(n, "leg")  || strstr(n, "Leg") ||
+		             strstr(n, "LEG"));
+	};
+	int totalClones = 0;
+	for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+		if (!isRobotSubMesh(Obj->Name)) continue;
+		TriMesh *T = (TriMesh*)Obj->Data;
+
+		// Hull.lwo splits into 2 Y bins; smaller meshes (Hull2, legs)
+		// use 1 bin (just per-mesh isolation).
+		const int kBins = strstr(Obj->Name, "Hull.lwo") ? 2 : 1;
+
+		// Local-Y range of face centroids (mesh-local; animation moves
+		// the whole mesh but face centroids' local Y stays constant).
+		float ymin =  1e30f, ymax = -1e30f;
+		if (kBins > 1) {
+			for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+				const float fy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) / 3.0f;
+				if (fy < ymin) ymin = fy;
+				if (fy > ymax) ymax = fy;
+			}
+		}
+		const float invSpan = (ymax > ymin) ? float(kBins) / (ymax - ymin) : 0.0f;
+
+		// Key: (source material, Y bin). Same source + same bin → reuse
+		// clone.
+		std::map<std::pair<Material*, int>, Material*> clones;
+		for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+			Material *src = F->Txtr;
+			if (!src) continue;
+			int bin = 0;
+			if (kBins > 1) {
+				const float fy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) / 3.0f;
+				bin = int((fy - ymin) * invSpan);
+				if (bin < 0)        bin = 0;
+				if (bin >= kBins)   bin = kBins - 1;
+			}
+			auto key = std::make_pair(src, bin);
+			auto it = clones.find(key);
+			if (it == clones.end()) {
+				Material *clone = (Material*)getAlignedBlock(sizeof(Material), 16);
+				std::memcpy(clone, src, sizeof(Material));
+				char *nameBuf = new char[96];
+				if (kBins > 1) {
+					const char *binName = (bin == 0) ? "body" : "upper";
+					std::snprintf(nameBuf, 96, "%s::%s_%s", Obj->Name,
+						src->Name ? src->Name : "?", binName);
+				} else {
+					std::snprintf(nameBuf, 96, "%s::%s", Obj->Name,
+						src->Name ? src->Name : "?");
+				}
+				clone->Name = nameBuf;
+				Material *tail = MatLib;
+				while (tail->Next) tail = tail->Next;
+				clone->Next = nullptr;
+				tail->Next = clone;
+				it = clones.emplace(key, clone).first;
+				++totalClones;
+			}
+			F->Txtr = it->second;
+		}
+		std::fprintf(stderr, "[ROBOT-MAT] mesh '%s' bins=%d cloned %zu materials\n",
+			Obj->Name, kBins, clones.size());
+	}
+	Scene_RebuildMatTable(GreetSc);
+	std::fprintf(stderr, "[ROBOT-MAT] total clones: %d\n", totalClones);
+	std::fflush(stderr);
 	if (!g_RobotMesh) {
 		std::fprintf(stderr, "[GREETS] robot spotlight target NOT FOUND. ObjectHead names:\n");
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -557,10 +642,13 @@ void Initialize_Greets()
 		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
 		g_RobotSpot->IDir = Vector(0.0f, -1.0f, 0.0f);
 		g_RobotSpot->Type = Light_SpotLight;
-		// Cone: ~25° inner, ~40° outer. Cosines.
-		g_RobotSpot->HotSpot = std::cos(25.0f * 3.14159f / 180.0f);
-		g_RobotSpot->FallOff = std::cos(40.0f * 3.14159f / 180.0f);
-		g_RobotSpot->Flags = Omni_Active;
+		// Cone: ~10° inner (small hotspot), ~55° outer (wide falloff).
+		// Wider outer cone means the spot illuminates a larger area
+		// of floor under the robot; the shrunk hotspot keeps the
+		// bright core narrow so the falloff dominates visually.
+		g_RobotSpot->HotSpot = std::cos(10.0f * 3.14159f / 180.0f);
+		g_RobotSpot->FallOff = std::cos(55.0f * 3.14159f / 180.0f);
+		g_RobotSpot->Flags = Omni_Active | Omni_CastsShadow;
 		// Flare-pass plumbing. Transform_Objects unconditionally adds
 		// every Omni's F to FList (treats it as a flare sprite). With
 		// F.A/B/C left at the memset zeros, the flare pass at
@@ -594,6 +682,56 @@ void Initialize_Greets()
 		g_RobotSpot->Next = GreetSc->OmniHead;
 		if (GreetSc->OmniHead) GreetSc->OmniHead->Prev = g_RobotSpot;
 		GreetSc->OmniHead = g_RobotSpot;
+
+		// Three orbit spots — red, green, blue — at 120° phase offsets
+		// around the robot. Cone aimed roughly inward/down at the robot
+		// from a height slightly above. Updated each frame in the tick.
+		struct OrbitInit {
+			float r, g, b;
+			const char *tag;
+		};
+		const OrbitInit init[kOrbitSpotCount] = {
+			{ 255.0f,  60.0f,  60.0f, "red"   },
+			{  60.0f, 255.0f,  60.0f, "green" },
+			{  60.0f,  80.0f, 255.0f, "blue"  },
+		};
+		for (int i = 0; i < kOrbitSpotCount; ++i) {
+			Omni *o = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+			std::memset(o, 0, sizeof(Omni));
+			o->L.R = init[i].r;
+			o->L.G = init[i].g;
+			o->L.B = init[i].b;
+			o->L.A = 1.0f;
+			o->ISize  = 8.0f;
+			o->IRange = 30.0f;
+			o->rRange = 1.0f / 30.0f;
+			o->IPos = Vector(0.0f, 0.0f, 0.0f);
+			o->IDir = Vector(0.0f, -1.0f, 0.0f);
+			o->Type = Light_SpotLight;
+			// Narrower cone than the main spot so each orbit light makes
+			// a visibly distinct colored patch.
+			o->HotSpot = std::cos(15.0f * 3.14159f / 180.0f);
+			o->FallOff = std::cos(35.0f * 3.14159f / 180.0f);
+			o->Flags = Omni_Active | Omni_CastsShadow;
+			// Short-range orbits → 256² shadow map (16× cheaper raster
+			// than the main spot's 1024²).
+			o->shadowMapRes = 256;
+			// Same flare-pass plumbing as g_RobotSpot.
+			o->F.A = &o->V;
+			o->F.B = &o->V;
+			o->F.C = &o->V;
+			o->F.Filler = [](Face*, Vertex**, dword, dword) {};
+			initSingleKey(o->Pos, 0.0f);
+			initSingleKey(o->Size, o->ISize);
+			initSingleKey(o->Range, o->IRange);
+			// Link into the scene's omni chain.
+			o->Next = GreetSc->OmniHead;
+			if (GreetSc->OmniHead) GreetSc->OmniHead->Prev = o;
+			GreetSc->OmniHead = o;
+			g_OrbitSpots[i] = o;
+			std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
+				i, init[i].tag);
+		}
 	}
 }
 
@@ -674,6 +812,11 @@ struct GreetsScene : SceneDriver {
 		Range_Factor = 1.0;
 		ImageSize = 0.25;
 
+		// Shadow-map storage for every Omni_CastsShadow light in this
+		// scene. Today: just the robot spotlight (flagged in
+		// Initialize_Greets). 1024² per light = 2 MB.
+		ShadowMaps_Rebuild(GreetSc, 1024);
+
 		// this scene messes up at time zero
 		Timer++;
 
@@ -692,30 +835,65 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: ZClear phase. also includes control keys handling
 		prof.enter(PROF_ZCLR);
 
-		if (Keyboard[ScTab]) {
-			if (View == &FC)
-				View = GreetSc->CameraHead;
-			else
-				View = &FC;
+		// Shadow-map debug view toggle (M). Hoisted up so the
+		// spotlight-snap and C-key handlers below can gate on it.
+		static bool sShadowMapView = false;
+		{
+			static bool sMPrev = false;
+			const bool mNow = Keyboard[ScM] != 0;
+			if (mNow && !sMPrev) sShadowMapView = !sShadowMapView;
+			sMPrev = mNow;
+		}
+
+		// F3: toggle shadow technique (depth ↔ poly-ID). Runtime A/B.
+		{
+			static bool sF3Prev = false;
+			const bool f3Now = Keyboard[ScF3] != 0;
+			if (f3Now && !sF3Prev) {
+				const ShadowMode cur = g_shadowMode.load();
+				const ShadowMode next = (cur == ShadowMode::Depth)
+				                        ? ShadowMode::PolyId
+				                        : ShadowMode::Depth;
+				g_shadowMode.store(next);
+				std::fprintf(stderr, "[SHADOW-MODE] %s\n",
+					next == ShadowMode::Depth ? "Depth" : "PolyId");
+				std::fflush(stderr);
+			}
+			sF3Prev = f3Now;
+		}
+
+		// Edge-detect Tab so a single press toggles cameras (was held-fire,
+		// which made the free camera flap on/off every frame the key was
+		// down).
+		{
+			static bool sTabPrev = false;
+			const bool tabNow = Keyboard[ScTab] != 0;
+			if (tabNow && !sTabPrev) {
+				View = (View == &FC) ? GreetSc->CameraHead : &FC;
+				std::fprintf(stderr, "[TAB greets] toggled → View=%s\n",
+					(View == &FC) ? "FC" : "scene");
+			}
+			sTabPrev = tabNow;
 		}
 
 		dTime = Timer - TTrd;
-		// fast forward/rewind
-		if (Keyboard[ScF2]) {
-			Timer += dTime * 8;
-		}
-		if (Keyboard[ScF1]) {
-			if (dTime * 8 > Timer)
-				Timer = 0;
-			else
-				Timer -= dTime * 8;
-		}
-		if (Keyboard[ScP])
-			pause_mode = true;
-		if (Keyboard[ScU])
-			pause_mode = false;
+		if (Keyboard[ScP]) pause_mode = true;
+		if (Keyboard[ScU]) pause_mode = false;
 		if (pause_mode) {
 			Timer = TTrd;
+		}
+		// Fast forward / rewind. In normal play, scrub at 8× the
+		// frame's dTime. In pause, dTime is 0 (Timer pinned above) so
+		// we'd never advance — fall back to a small per-tick step so
+		// F1/F2 still scrubs while paused (10 ms ≈ 0.3 frames at 30 fps,
+		// fine-grained enough to step single anim frames).
+		const int32_t scrubStep = pause_mode ? 10 : (dTime * 8);
+		if (Keyboard[ScF2]) {
+			Timer += scrubStep;
+		}
+		if (Keyboard[ScF1]) {
+			if (scrubStep > Timer) Timer = 0;
+			else                   Timer -= scrubStep;
 		}
 		g_FrameTime = TTrd = Timer;
 
@@ -731,45 +909,128 @@ struct GreetsScene : SceneDriver {
 			CurFrame = GreetSc->EndFrame;
 
 		Dynamic_Camera();
-		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
+		// C-key: snap FC to a useful starting pose. In normal view, copy
+		// current View. In shadow view, copy the spot light's pose so the
+		// user can Tab into FC, see from the light's perspective, then fly
+		// around (with the spot following FC) for shadow-map inspection.
+		// C-key edge-detect. Held-fire would re-snap FC every frame the
+		// key is down, overriding Dynamic_Camera's per-frame rotation —
+		// which would look exactly like the camera being "stuck".
+		static bool sCPrev = false;
+		const bool cNow = Keyboard[ScC] != 0;
+		const bool cFire = cNow && !sCPrev;
+		sCPrev = cNow;
+		if (cFire) {
+			if (sShadowMapView && g_RobotSpot) {
+				// Snap FC to the spot's pose. Spot is an Omni (IPos+IDir
+				// only, no Mat), so we reconstruct an orientation matrix
+				// via Kick_Camera. Tiny nudge if IDir is exactly along
+				// world-up to avoid the basis singularity (N = (V.z, 0,
+				// -V.x) normalizes to 0/0 when V is parallel to world-up);
+				// world-Y yaw in Dynamic_Camera handles flying from any
+				// orientation, including near-vertical, so no pre-tilt
+				// needed.
+				FC.ISource = g_RobotSpot->IPos;
+				Vector d = g_RobotSpot->IDir;
+				if (std::fabs(d.x) < 1e-3f && std::fabs(d.z) < 1e-3f) {
+					d.x = 0.01f;
+				}
+				Vector targ = { FC.ISource.x + d.x,
+				                FC.ISource.y + d.y,
+				                FC.ISource.z + d.z };
+				Kick_Camera(&FC.ISource, &targ, 0.0f, FC.Mat);
+				FC.IFOV = View->IFOV;
+			} else {
+				FC.ISource = View->ISource;
+				Matrix_Copy(FC.Mat, View->Mat);
+				FC.IFOV = View->IFOV;
+			}
+		}
 
 		Animate_Objects(GreetSc);
 
-		// Robot spotlight follow. Position the spot ~10 units above the
-		// robot, then point it 45° forward — so the cone hits the floor
-		// AHEAD of the robot rather than straight underneath. Forward
-		// direction comes from the robot's RotMat (column 2 = local +Z
-		// transformed into world), with the light cone axis tilted at
-		// 45° between -Y and that forward vector:
-		//   dir = sin(45°) * worldFwd + cos(45°) * (-Y)
-		if (g_RobotSpot && g_RobotMesh) {
-			g_RobotSpot->IPos.x = g_RobotMesh->IPos.x;
-			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + 10.0f;
-			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
-			// LightWave (FLD source) convention: local -Z is the mesh's
-			// forward axis. Use (0, 0, -1) so the spot points where the
-			// robot is facing rather than backwards.
-			Vector localFwd(0.0f, 0.0f, -1.0f);
-			Vector worldFwd;
-			MatrixXVector(g_RobotMesh->RotMat, &localFwd, &worldFwd);
-			worldFwd.y = 0.0f;  // project onto XZ plane so the 45° tilt math is well-defined
-			Vector_Norm(&worldFwd);
-			// Side-to-side sweep — rotate worldFwd around the world-up
-			// axis by a sine-modulated angle. CurFrame moves with scene
-			// playback (Timer can stall at scene boundaries); 0.05
-			// rad/frame at 30 fps is a ~4-second full cycle, ±35°.
-			const float sweepRad = std::sin(CurFrame * 0.05f) * (35.0f * float(PI) / 180.0f);
-			const float cs = std::cos(sweepRad);
-			const float sn = std::sin(sweepRad);
-			const float fwdX = cs * worldFwd.x + sn * worldFwd.z;
-			const float fwdZ = -sn * worldFwd.x + cs * worldFwd.z;
-			worldFwd.x = fwdX;
-			worldFwd.z = fwdZ;
-			constexpr float k = 0.70710678f;  // sin(45°) = cos(45°)
-			g_RobotSpot->IDir.x = k * worldFwd.x;
-			g_RobotSpot->IDir.y = -k;
-			g_RobotSpot->IDir.z = k * worldFwd.z;
+		// Free-camera shadow override: when in shadow-view mode AND FC is
+		// active, the spotlight tracks FC's pose. Lets you fly with Tab
+		// and inspect the shadow map from arbitrary vantage points.
+		// Restricted to shadow-view so normal lit playback isn't hijacked
+		// when the user toggles FC for unrelated reasons.
+		if (sShadowMapView && g_RobotSpot && View == &FC) {
+			g_RobotSpot->IPos = FC.ISource;
+			// Camera "forward" = row 2 of Mat (Kick_Camera convention).
+			g_RobotSpot->IDir.x = FC.Mat[2][0];
+			g_RobotSpot->IDir.y = FC.Mat[2][1];
+			g_RobotSpot->IDir.z = FC.Mat[2][2];
 			Vector_Norm(&g_RobotSpot->IDir);
+		}
+		// Robot spotlight follow. Position the spot ~10 units above the
+		// robot, pointing nearly straight down through it with a slow
+		// Lissajous sweep so the cone footprint drifts ±~12° from
+		// vertical. The drift makes the shadow visibly move under the
+		// robot. CurFrame ticks with scene playback so the rate stays
+		// stable across timer stalls.
+		//
+		// IDir is never exactly (0,±1,0): Kick_Camera's basis math
+		// (N=(V.z,0,-V.x) then normalize) divides by sqrt(0) at
+		// world-up. Our sweep amplitude keeps |IDir.x| ≥ ~0.2 most of
+		// the time and ≥ 0.005 even at the sweep zero-crossing.
+		else if (g_RobotSpot && g_RobotMesh) {
+			g_RobotSpot->IPos.x = g_RobotMesh->IPos.x;
+			// Spot height above the robot. Above ~+10 sits above the
+			// ceiling (cone fires into the ceiling top, corridors stay
+			// dark); too low sits on the robot itself (no shadow lever
+			// arm). +5 is a reasonable middle. Tunable via env.
+			static const float kSpotHeight = []{
+				const char *s = std::getenv("FDS_GREETS_SPOT_HEIGHT");
+				return s ? float(std::atof(s)) : 4.0f;
+			}();
+			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + kSpotHeight;
+			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
+			const float t = float(CurFrame) * 0.02f;
+			const float maxOff = std::sin(12.0f * float(PI) / 180.0f);  // ~0.21
+			const float dx = std::sin(t)       * maxOff + 0.005f;       // never 0
+			const float dz = std::cos(t * 0.7f) * maxOff;
+			const float dy = -std::sqrt(std::max(0.0f, 1.0f - dx*dx - dz*dz));
+			g_RobotSpot->IDir.x = dx;
+			g_RobotSpot->IDir.y = dy;
+			g_RobotSpot->IDir.z = dz;
+		}
+
+		// Orbit spots — three colored lights moving around the robot at
+		// 120° phase offsets. Position on a horizontal circle at radius
+		// kOrbitRadius around the robot, height kOrbitHeight above its
+		// feet, pointing inward/down toward the robot. Each light's
+		// shadow map is rendered into its own ShadowMap by the per-
+		// frame orchestrator (Render_DeferredShadowMaps walks
+		// g_shadowMaps), so colored shadows from each light overlap
+		// independently on the floor and walls.
+		if (g_RobotMesh) {
+			constexpr float kOrbitRadius = 8.0f;
+			constexpr float kOrbitHeight = 6.0f;
+			constexpr float kOrbitSpeed  = 0.015f;
+			const float baseAngle = float(CurFrame) * kOrbitSpeed;
+			for (int i = 0; i < kOrbitSpotCount; ++i) {
+				Omni *o = g_OrbitSpots[i];
+				if (!o) continue;
+				const float phase = baseAngle
+					+ float(i) * (2.0f * float(PI) / float(kOrbitSpotCount));
+				const float cs = std::cos(phase);
+				const float sn = std::sin(phase);
+				const Vector target = g_RobotMesh->IPos;
+				o->IPos.x = target.x + cs * kOrbitRadius;
+				o->IPos.y = target.y + kOrbitHeight;
+				o->IPos.z = target.z + sn * kOrbitRadius;
+				// Aim at the robot from the light's position; keep the
+				// IDir off the world-up axis (Kick_Camera would
+				// singularize) by mixing horizontal direction with the
+				// downward component.
+				const float dxw = target.x - o->IPos.x;
+				const float dyw = (target.y + 1.0f) - o->IPos.y;  // aim slightly above feet
+				const float dzw = target.z - o->IPos.z;
+				const float invLen = 1.0f / std::sqrt(dxw*dxw + dyw*dyw + dzw*dzw);
+				o->IDir.x = dxw * invLen;
+				o->IDir.y = dyw * invLen;
+				o->IDir.z = dzw * invLen;
+			}
 		}
 
 		// PROFILER: XFRM phase.
@@ -795,10 +1056,279 @@ struct GreetsScene : SceneDriver {
 		gg->Render();
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
+		// Per-frame shadow-map depth pre-pass (Omni_CastsShadow lights).
+		// Gated on env FDS_SHADOWS=1. No-op when off. Must run BEFORE
+		// Render() because it swaps view globals and re-runs
+		// Transform_Objects internally — Render()'s post-restore
+		// transform leaves the main view in shape.
+		Render_DeferredShadowMaps(GreetSc);
 		Render();
 
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
+
+		// Persistent render-mode indicator (top-right). Always visible
+		// outside shadow-viz mode so the active F3 mode is obvious.
+		if (!sShadowMapView) {
+			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
+			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
+				inPolyId ? "PolyId" : "Depth");
+			OutTextXY(VPage, XRes - 220, 5, MSGStr, 255);
+		}
+
+		// Spotlight cone volumetric glow. For each shadow-casting spot,
+		// build a 16-segment fan cone with apex at the light and rim at
+		// the cone's outer edge. Each fan triangle is 3D-clipped against
+		// the near plane (z=NZP) so that when the camera is inside the
+		// cone — apex behind camera — the triangle becomes a clipped
+		// polygon with new verts on the near plane instead of being
+		// discarded. Then project + rasterize each (sub-)triangle with
+		// additive blend and vertex-alpha falloff (apex bright → rim
+		// transparent). Z-tests against ZPage16 so walls correctly
+		// occlude the glow.
+		//
+		// Two-sided by construction: bary test fills the screen-space
+		// triangle regardless of winding (signs of area and w_i match),
+		// so the cone surface is visible from both inside and outside.
+		if (!sShadowMapView) {
+			struct ConeVtx { float vx, vy, vz; float alpha; };
+			const float kNearZ = std::max(0.01f, GreetSc->NZP);
+			auto worldToView = [&](const Vector &world) -> Vector {
+				const Vector d = {
+					world.x - View->ISource.x,
+					world.y - View->ISource.y,
+					world.z - View->ISource.z };
+				Vector v;
+				MatrixXVector(View->Mat, &d, &v);
+				return v;
+			};
+			// Project to float screen coords. Near-plane-clipped verts
+			// have vz = kNearZ (~0.01) so projected x/y can reach ~1e6.
+			// That's fine in float — the bbox is clamped to the viewport
+			// below, and the bary math stays in float throughout. Do NOT
+			// clamp the projected coords themselves: clamping creates
+			// fake degenerate triangles (collapsing multiple off-screen
+			// verts to the same corner, or producing a screen-corner
+			// vertex that yields a viewport-sized "phantom" triangle).
+			auto projectViewVtx = [&](float vx, float vy, float vz,
+			                          float &outX, float &outY) {
+				const float invZ = 1.0f / vz;
+				outX = CntrX + FOVX * vx * invZ;
+				outY = CntrY - FOVY * vy * invZ;
+			};
+			// Sutherland-Hodgman near-plane clip of a triangle. Up to 4
+			// output verts (when one of the input verts is behind, the
+			// triangle becomes a quad).
+			auto clipTriNear = [&](const ConeVtx in[3], ConeVtx out[4]) -> int {
+				int outCount = 0;
+				ConeVtx prev = in[2];
+				bool prevIn = prev.vz > kNearZ;
+				for (int i = 0; i < 3; ++i) {
+					const ConeVtx &cur = in[i];
+					const bool curIn = cur.vz > kNearZ;
+					if (prevIn != curIn) {
+						const float t = (kNearZ - prev.vz) / (cur.vz - prev.vz);
+						out[outCount].vx    = prev.vx    + t * (cur.vx    - prev.vx);
+						out[outCount].vy    = prev.vy    + t * (cur.vy    - prev.vy);
+						out[outCount].vz    = kNearZ;
+						out[outCount].alpha = prev.alpha + t * (cur.alpha - prev.alpha);
+						++outCount;
+					}
+					if (curIn) out[outCount++] = cur;
+					prev = cur;
+					prevIn = curIn;
+				}
+				return outCount;
+			};
+			// Additive fan triangle with perspective-correct Z-test +
+			// vertex-alpha falloff. View-z is interpolated as 1/z (which
+			// IS linear in screen-space under perspective), then
+			// inverted at the pixel to recover view-z and encode it for
+			// the ZPage16 compare. Linear-in-z bary lerp would be wrong
+			// for varying-z triangles and produces flickering occlusion
+			// as the camera moves.
+			auto addTri = [&](float x0, float y0, float z0, float a0,
+			                  float x1, float y1, float z1, float a1,
+			                  float x2, float y2, float z2, float a2,
+			                  uint8_t cr, uint8_t cg, uint8_t cb) {
+				if (z0 <= 0.0f || z1 <= 0.0f || z2 <= 0.0f) return;
+				const float area = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0);
+				if (std::fabs(area) < 1.0f) return;
+				const float invArea = 1.0f / area;
+				const float rz0 = 1.0f / z0;
+				const float rz1 = 1.0f / z1;
+				const float rz2 = 1.0f / z2;
+				float fxmin = std::min({x0,x1,x2});
+				float fxmax = std::max({x0,x1,x2});
+				float fymin = std::min({y0,y1,y2});
+				float fymax = std::max({y0,y1,y2});
+				if (fxmin < 0.0f)         fxmin = 0.0f;
+				if (fymin < 0.0f)         fymin = 0.0f;
+				if (fxmax > float(XRes-1)) fxmax = float(XRes-1);
+				if (fymax > float(YRes-1)) fymax = float(YRes-1);
+				const int xmin = int(fxmin);
+				const int xmax = int(fxmax);
+				const int ymin = int(fymin);
+				const int ymax = int(fymax);
+				if (xmin > xmax || ymin > ymax) return;
+				dword *fb = (dword*)VPage;
+				const word *zb = ZPage16;
+				for (int y = ymin; y <= ymax; ++y) {
+					const float fy = float(y);
+					for (int x = xmin; x <= xmax; ++x) {
+						const float fx = float(x);
+						const float w0 = ((x1-fx)*(y2-fy) - (x2-fx)*(y1-fy)) * invArea;
+						const float w1 = ((x2-fx)*(y0-fy) - (x0-fx)*(y2-fy)) * invArea;
+						const float w2 = 1.0f - w0 - w1;
+						// Two-sided: when winding flips, area and W_i flip
+						// sign together so w_i = W_i/area stays positive
+						// when the point is inside the triangle.
+						if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+						// Perspective-correct view-z: lerp 1/z linearly,
+						// then invert. Z-test against scene depth so
+						// walls occlude.
+						const float prz = w0*rz0 + w1*rz1 + w2*rz2;
+						if (prz <= 0.0f) continue;
+						const float pz = 1.0f / prz;
+						int penc = 0xFF80 - int(pz * g_zscale);
+						if (penc < 0) penc = 0;
+						if (penc > 0xFFFF) penc = 0xFFFF;
+						const size_t i = size_t(y) * size_t(XRes) + size_t(x);
+						const int zexist = int(zb[i]);
+						if (penc < zexist) continue;  // cone is behind opaque
+						// Vertex-alpha falloff. apex (a=1) → rim (a=0).
+						float alpha = w0*a0 + w1*a1 + w2*a2;
+						if (alpha <= 0.0f) continue;
+						// Soft falloff curve so the rim is much darker
+						// than the apex (linear bary alpha looks flat).
+						alpha = alpha * alpha;
+						const int addR = int(float(cr) * alpha);
+						const int addG = int(float(cg) * alpha);
+						const int addB = int(float(cb) * alpha);
+						const dword pix = fb[i];
+						int oldR = int((pix >> 16) & 0xFF);
+						int oldG = int((pix >>  8) & 0xFF);
+						int oldB = int( pix        & 0xFF);
+						int newR = oldR + addR; if (newR > 255) newR = 255;
+						int newG = oldG + addG; if (newG > 255) newG = 255;
+						int newB = oldB + addB; if (newB > 255) newB = 255;
+						fb[i] = (dword(newR) << 16) | (dword(newG) << 8)
+						      |  dword(newB)        | 0xFF000000u;
+					}
+				}
+			};
+			constexpr int N_SEGMENTS = 16;
+			for (Omni *o = GreetSc->OmniHead; o; o = o->Next) {
+				if (o->Type != Light_SpotLight) continue;
+				if (!(o->Flags & Omni_Active)) continue;
+				const float cosOuter = std::max(0.01f, o->FallOff);
+				const float outerAng = std::acos(cosOuter);
+				Vector axis = o->IDir;
+				Vector_Norm(&axis);
+				Vector ref = (std::fabs(axis.y) < 0.9f)
+					? Vector(0.0f, 1.0f, 0.0f)
+					: Vector(1.0f, 0.0f, 0.0f);
+				Vector right;
+				Cross_Product(&axis, &ref, &right);
+				Vector_Norm(&right);
+				Vector up;
+				Cross_Product(&right, &axis, &up);
+				Vector_Norm(&up);
+				const float L = o->IRange;
+				const float rimAxis = L * std::cos(outerAng);
+				const float rimRad  = L * std::sin(outerAng);
+
+				// Transform apex + rim verts to view space ONCE, keep
+				// the original (vx, vy, vz) so we can 3D-clip each fan
+				// triangle against the near plane before projecting.
+				const Vector apexV = worldToView(o->IPos);
+				ConeVtx rimV[N_SEGMENTS + 1];
+				for (int s = 0; s <= N_SEGMENTS; ++s) {
+					const float theta = float(s) * (2.0f * float(PI) / float(N_SEGMENTS));
+					const float cs = std::cos(theta), sn = std::sin(theta);
+					const Vector rim = {
+						o->IPos.x + axis.x * rimAxis + (right.x * cs + up.x * sn) * rimRad,
+						o->IPos.y + axis.y * rimAxis + (right.y * cs + up.y * sn) * rimRad,
+						o->IPos.z + axis.z * rimAxis + (right.z * cs + up.z * sn) * rimRad,
+					};
+					const Vector rimVw = worldToView(rim);
+					rimV[s].vx = rimVw.x;
+					rimV[s].vy = rimVw.y;
+					rimV[s].vz = rimVw.z;
+					rimV[s].alpha = 0.0f;
+				}
+
+				// Scale the per-spot glow intensity. Additive blending
+				// blows out white-ish cones much faster than saturated
+				// colors (R+G+B all sum into the framebuffer), so we
+				// dim achromatic cones by their chroma — pure white
+				// drops to ~30% of color-channel intensity, fully
+				// saturated colors stay at full strength.
+				const float maxC = std::max({o->L.R, o->L.G, o->L.B});
+				const float minC = std::min({o->L.R, o->L.G, o->L.B});
+				const float chroma = (maxC > 1.0f) ? (maxC - minC) / maxC : 0.0f;
+				const float whitenessScale = 0.3f + 0.7f * chroma;
+				const float intensity = std::min(1.0f, o->ISize * 0.1f) * whitenessScale;
+				const uint8_t cr = uint8_t(std::min(255.0f, o->L.R * intensity));
+				const uint8_t cg = uint8_t(std::min(255.0f, o->L.G * intensity));
+				const uint8_t cb = uint8_t(std::min(255.0f, o->L.B * intensity));
+
+				const ConeVtx apexCV = { apexV.x, apexV.y, apexV.z, 1.0f };
+				for (int s = 0; s < N_SEGMENTS; ++s) {
+					const ConeVtx tri[3] = { apexCV, rimV[s], rimV[s + 1] };
+					ConeVtx clipped[4];
+					const int n = clipTriNear(tri, clipped);
+					if (n < 3) continue;
+					float sx[4], sy[4];
+					for (int k = 0; k < n; ++k) {
+						projectViewVtx(clipped[k].vx, clipped[k].vy, clipped[k].vz,
+						               sx[k], sy[k]);
+					}
+					// Fan triangulate the clipped polygon (3 or 4 verts).
+					for (int k = 2; k < n; ++k) {
+						addTri(sx[0],   sy[0],   clipped[0].vz,   clipped[0].alpha,
+						       sx[k-1], sy[k-1], clipped[k-1].vz, clipped[k-1].alpha,
+						       sx[k],   sy[k],   clipped[k].vz,   clipped[k].alpha,
+						       cr, cg, cb);
+					}
+				}
+			}
+		}
+
+		// Live matID readout at screen center. Reads the G-buffer's
+		// packed mat32 at the center pixel, extracts the matID byte,
+		// looks up Material* via the scene's matTable, prints id + name.
+		// Updates every frame so the value follows whatever's under the
+		// crosshair as the camera moves. Suppressed in shadow-viz mode
+		// where M overwrites the framebuffer.
+		if (g_gbuffer && !sShadowMapView) {
+			const int cx = XRes / 2;
+			const int cy = YRes / 2;
+			const size_t ci = size_t(cy) * size_t(XRes) + size_t(cx);
+			if (ci < g_gbuffer->txtr.size()) {
+				const uint32_t mat32 = g_gbuffer->txtr[ci];
+				const uint32_t matID = (mat32 >> 20) & 0xFF;
+				const MatTable mt = Scene_GetMatTable(GreetSc);
+				const char *name = "?";
+				if (matID < mt.count && mt.data && mt.data[matID] && mt.data[matID]->Name) {
+					name = mt.data[matID]->Name;
+				}
+				snprintf(MSGStr, sizeof(MSGStr),
+					"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
+				OutTextXY(VPage, 0, YRes - 30, MSGStr, 255);
+			}
+			// Crosshair so user can see what pixel the readout reflects.
+			dword *fb = (dword*)VPage;
+			const dword crossColor = 0xFFFFFFFFu;
+			for (int dx = -6; dx <= 6; ++dx) {
+				int x = cx + dx;
+				if (x >= 0 && x < XRes) fb[size_t(cy) * size_t(XRes) + size_t(x)] = crossColor;
+			}
+			for (int dy = -6; dy <= 6; ++dy) {
+				int y = cy + dy;
+				if (y >= 0 && y < YRes) fb[size_t(y) * size_t(XRes) + size_t(cx)] = crossColor;
+			}
+		}
 		if (g_profilerActive) {
 			// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
 			float meanMs = prof.meanFrameMs();
@@ -814,6 +1344,71 @@ struct GreetsScene : SceneDriver {
 			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
 			double polysPerFrame = (double)g_renderedPolys / numFrames;
 			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
+		}
+
+		// Shadow-map debug view. sShadowMapView is toggled at the top of
+		// tick() (M key, edge-detect). Grayscale: higher = closer to
+		// light. The actual scene rendered this frame is discarded when
+		// the toggle is on — pure debug view.
+		if (sShadowMapView && !g_shadowMaps.empty()) {
+			const ShadowMap& sm = g_shadowMaps[0];
+			// Viz follows the active render mode so what you see is what
+			// the kernel is using. F3 toggles both at once.
+			const bool sVizPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
+			// For depth-mode viz, encoded z lives in a narrow upper band
+			// (typically 0xB000-0xFF80 — light pulls everything close in
+			// encoded space). Raw `>>8` collapses to a tight gray band
+			// that's nearly indistinguishable. Auto-stretch min..max of
+			// the actual data each frame.
+			uint16_t zMin = 0xFFFF, zMax = 0;
+			if (!sVizPolyId) {
+				for (uint16_t e : sm.depth) {
+					if (e == 0) continue;  // skip unwritten
+					if (e < zMin) zMin = e;
+					if (e > zMax) zMax = e;
+				}
+				if (zMin >= zMax) { zMin = 0; zMax = 0xFFFF; }
+			}
+			const float invRange = sVizPolyId ? 0.0f : 255.0f / float(zMax - zMin);
+			dword *out = (dword*)VPage;
+			for (int py = 0; py < YRes; ++py) {
+				const int smY = (py * sm.yres) / YRes;
+				const uint16_t *zRow = sm.depth.data() + size_t(smY) * size_t(sm.xres);
+				const uint8_t *idRow = sm.polyId.data() + size_t(smY) * size_t(sm.xres);
+				for (int px = 0; px < XRes; ++px) {
+					const int smX = (px * sm.xres) / XRes;
+					uint32_t pixel;
+					if (sVizPolyId) {
+						const uint32_t v = idRow[smX];
+						if (v == 0) {
+							pixel = 0xFF000000u;
+						} else {
+							uint32_t h = v * 2654435761u;
+							uint8_t r = uint8_t(h);
+							uint8_t g = uint8_t(h >> 8);
+							uint8_t b = uint8_t(h >> 16);
+							pixel = uint32_t(b) | (uint32_t(g) << 8)
+							      | (uint32_t(r) << 16) | 0xFF000000u;
+						}
+					} else {
+						const uint16_t z = zRow[smX];
+						uint8_t g;
+						if (z == 0) {
+							g = 0;
+						} else {
+							float t = float(z - zMin) * invRange;
+							if (t < 0.0f) t = 0.0f;
+							if (t > 255.0f) t = 255.0f;
+							g = uint8_t(t);
+						}
+						pixel = dword(g) | (dword(g) << 8) | (dword(g) << 16) | 0xFF000000u;
+					}
+					out[size_t(py) * size_t(XRes) + size_t(px)] = pixel;
+				}
+			}
+			OutTextXY(VPage, 0, 0,
+				sVizPolyId ? "SHADOWMAP[0] (PolyId)" : "SHADOWMAP[0] (Depth)",
+				255);
 		}
 
 		prof.enter(PROF_FLIP);

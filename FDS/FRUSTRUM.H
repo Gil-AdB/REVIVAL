@@ -9,7 +9,12 @@ public:
 	}
 
 	void InitViewport(Scene* Sc);
-	void Render(Face *F, RasterFunc filler, bool isEnvCoords);
+	// skipMipLevel: bypass MiplevelClipper for textured faces. Used by
+	// the shadow-map pass — depth-only rendering doesn't need mipmap
+	// subdivision and MiplevelClipper's polygon traversal has bugs that
+	// manifest under square-aspect (FOVX==FOVY) light cameras.
+	void Render(Face *F, RasterFunc filler, bool isEnvCoords,
+	            bool skipMipLevel = false);
 	void SetClippingExtents(float x1, float y1, float x2, float y2) {
 		C_VP.ClipX1 = x1;
 		C_VP.ClipY1 = y1;

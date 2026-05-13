@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <map>
 #include <limits>
+#include <chrono>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -97,6 +98,7 @@ VESA_Surface Layer2;
 #include <Threads.h>
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/Mekalele.h>
+#include <FILLERS/ShadowMap.h>
 
 // RULEZ
 void DO_NOP()
@@ -453,8 +455,17 @@ static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
 	return dz;
 }
 
-void Transform_Objects(Scene *Sc)
+// xresOverride / yresOverride: when >= 0, use these instead of the
+// global XRes / YRes for vertex visibility flags + face-level
+// VisibilityFlagsAll() culling. Lets a caller (e.g. the shadow-map
+// orchestrator) project to a different screen rect than the main
+// framebuffer without globally mutating XRes/YRes mid-frame. Default
+// (-1, -1) preserves legacy behavior.
+void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 {
+	extern thread_local bool g_inShadowPass;
+	const int32_t xr = (xresOverride >= 0) ? xresOverride : XRes;
+	const int32_t yr = (yresOverride >= 0) ? yresOverride : YRes;
 	TriMesh *T;
 	Omni *O;
 	Matrix M,IM;
@@ -629,8 +640,12 @@ void Transform_Objects(Scene *Sc)
 				// View*RotMat (orthogonal rotation, so inverse-transpose
 				// = same matrix). Read by the deferred-path clipper +
 				// rasterizer; forward-path Lighting() still reads N.
-				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				// Shadow pass doesn't read TN or TTangent — skip the two
+				// matrix-vector mults to halve per-vertex cost there.
+				if (!g_inShadowPass) {
+					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				}
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				Vtx->RZ=1.0/Vtx->TPos.z;
@@ -654,22 +669,33 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				// Shadow pass doesn't read TN or TTangent — skip the two
+				// matrix-vector mults to halve per-vertex cost there.
+				if (!g_inShadowPass) {
+					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				}
 
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
-				Vtx->UZ=Vtx->U*Vtx->RZ;
-				Vtx->VZ=Vtx->V*Vtx->RZ;
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
-				if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
-				if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-				if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
-				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				// Ahead path: BSphere is theoretically fully past NZP, but
+				// float precision can let individual verts slip below.
+				// Defensively flag those so the clipper's Near() handles
+				// them (otherwise RZ would go negative and PX/PY would be
+				// flipped, producing ghost polygons at the cone edges).
+				if (Vtx->TPos.z > Sc->NZP) {
+					Vtx->RZ=1.0/Vtx->TPos.z;
+					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
+					Vtx->UZ=Vtx->U*Vtx->RZ;
+					Vtx->VZ=Vtx->V*Vtx->RZ;
+					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
+					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
+					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
+					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
+					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				} else {
+					Vtx->Flags|=Vtx_VisNear;
+				}
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			goto AfterXForm;
@@ -682,8 +708,12 @@ Regular:
 				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-				MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				// Shadow pass doesn't read TN or TTangent — skip the two
+				// matrix-vector mults to halve per-vertex cost there.
+				if (!g_inShadowPass) {
+					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
+					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+				}
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
@@ -697,9 +727,9 @@ Regular:
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
-					if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
+					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
-					if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
+					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
 					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				//      printf("Regular shit!\n");
@@ -763,9 +793,9 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
-				if (Vtx->PX>=XRes) Vtx->Flags+=Vtx_VisRight;
+				if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
-				if (Vtx->PY>=YRes) Vtx->Flags+=Vtx_VisDown;
+				if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
 				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
@@ -797,9 +827,9 @@ ERegular:
 //					Vtx->REU=Vtx->EU*Vtx->RZ;
 //					Vtx->REV=Vtx->EV*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft;
-					if (Vtx->PX>=XRes) Vtx->Flags+=Vtx_VisRight;
+					if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
-					if (Vtx->PY>=YRes) Vtx->Flags+=Vtx_VisDown;
+					if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
 					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags=Vtx_VisNear;
 				
@@ -824,6 +854,18 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		const char* s = std::getenv("FDS_XPAR_FORCE_TWOSIDED");
 		return s && s[0] == '1';
 	}();
+	// Shadow pass: treat all faces as two-sided. Single-quad walls have
+	// no back-side polygon to take over when the light's on their "back",
+	// yet they still occlude light. Backface-culling for shadow rendering
+	// is geometry-dependent (correct for sealed convex meshes, wrong for
+	// single-sided walls/sheets) — easier to just skip it. Toggle this off
+	// via FDS_SHADOW_BACKFACE_CULL=1 if you want to A/B.
+	extern thread_local bool g_inShadowPass;
+	static const bool sShadowBackface = []{
+		const char *s = std::getenv("FDS_SHADOW_BACKFACE_CULL");
+		return s && s[0] == '1';
+	}();
+	const bool shadowNoBackface = g_inShadowPass && !sShadowBackface;
 	for (F=T->Faces;F<FEnd;F++) {
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;
@@ -835,6 +877,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 			 std::strcmp(F->Txtr->Name, "f_sphere") == 0);
 		if ((!F->VisibilityFlagsAll())
 			&&(forceTS
+			|| shadowNoBackface
 			||(F->Txtr->Flags&Mat_TwoSided)
 			||(AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z<F->NormProd) // Backface culling
 			//||(1) // no backface culling
@@ -1918,6 +1961,10 @@ struct ViewLightsSoA {
 	alignas(32) float cosInner[DEFERRED_MAX_LIGHTS];
 	alignas(32) float cosOuter[DEFERRED_MAX_LIGHTS];
 	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
+	// Index into g_shadowMaps for this light's shadow map, or -1 if
+	// not a shadow-caster (most omnis). Filled per frame in
+	// Render_DeferredLighting alongside the other per-light fields.
+	alignas(32) int32_t  shadowMapIdx[DEFERRED_MAX_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -1944,6 +1991,11 @@ struct TileLights {
 	alignas(32) float cosInner[DEFERRED_MAX_LIGHTS];
 	alignas(32) float cosOuter[DEFERRED_MAX_LIGHTS];
 	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
+	// Shadow-map index in g_shadowMaps for this light's shadow (or -1).
+	// Filled by buildTileLightLists when FDS_SHADOWS=1 and the omni
+	// has Omni_CastsShadow. Lighting kernel uses it to gate the light's
+	// contribution per pixel.
+	alignas(32) int32_t shadowMapIdx[DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
@@ -2126,6 +2178,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float Lci = lights.cosInner[li];
 		const float Lco = lights.cosOuter[li];
 		const uint32_t Lis = lights.isSpot[li];
+		const int32_t  Lsi = lights.shadowMapIdx[li];
 
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
@@ -2154,6 +2207,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 					tl.cosInner[s] = Lci;
 					tl.cosOuter[s] = Lco;
 					tl.isSpot[s]   = Lis;
+					tl.shadowMapIdx[s] = Lsi;
 				}
 			}
 		}
@@ -2181,6 +2235,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			tl.cosInner[p] = -2.0f;
 			tl.cosOuter[p] = -2.0f;
 			tl.isSpot[p]   = 0u;
+			tl.shadowMapIdx[p] = -1;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -2609,6 +2664,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Decode normal (view-space, unit-length).
 			float nx, ny, nz;
 			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+			// Save the geometric (vertex-interpolated, un-perturbed)
+			// normal before the normal-map block below mutates nx/ny/nz.
+			// Used by the shadow slope-bias so per-pixel bump-induced
+			// N·L variance doesn't pollute the slope decision (which is
+			// about the underlying surface geometry, not the apparent
+			// micro-roughness from the bump map).
+			const float nGeoX = nx, nGeoY = ny, nGeoZ = nz;
 
 			// Object-space normal map: if the material ships one, sample
 			// it via the same swizzled UV the diffuse uses, decode the
@@ -2730,7 +2792,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// deferred path was previously emitting Blinn-Phong even when
 			// the scene had explicitly disabled it, which over-brightened
 			// City windows + Greets marble against the forward reference.
-			const bool wantSpecular = specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
+			// FDS_DEFERRED_NO_SPEC=1: force-disable all deferred specular,
+			// regardless of per-material Mat->Specular. Diagnostic for
+			// specular firefly / bump-map speckle isolation.
+			static const bool sNoSpec = []{
+				const char *s = std::getenv("FDS_DEFERRED_NO_SPEC");
+				return s && s[0] == '1';
+			}();
+			const bool wantSpecular = !sNoSpec && specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
 				: 32.0f;
@@ -2988,7 +3057,117 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								k *= ct * ct * (3.0f - 2.0f * ct);
 							}
 						}
-						const float intensity = k * Mat->Diffuse;
+						// Shadow test. Project pixel view-space pos to the
+						// shadow map's screen+depth; attenuate the light
+						// by the occlusion fraction. Cheap branch when
+						// smIdx<0 (no shadow).
+						//
+						// PCF with bilinear-weighted 2×2: sample 4 neighbouring
+						// shadow-map texels and blend the per-texel
+						// occlusion by fractional (smX, smY) — continuous
+						// in light-space position, no integer-snap when
+						// the light camera moves a sub-texel between
+						// frames. Without bilinear weighting whole
+						// polygons that project to a single texel flicker
+						// in/out as the texel-grid shifts under them.
+						// Cost: 4 loads + 4 compares + 4 muls + 4 adds.
+						const int32_t smIdx = tl.shadowMapIdx[n];
+						float shadowAtten = 1.0f;
+						if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
+							const ShadowMap& sm = g_shadowMaps[smIdx];
+							const float lx = sm.viewToLight[0][0] * x +
+							                 sm.viewToLight[0][1] * y +
+							                 sm.viewToLight[0][2] * z +
+							                 sm.viewToLightOffset.x;
+							const float ly = sm.viewToLight[1][0] * x +
+							                 sm.viewToLight[1][1] * y +
+							                 sm.viewToLight[1][2] * z +
+							                 sm.viewToLightOffset.y;
+							const float lz = sm.viewToLight[2][0] * x +
+							                 sm.viewToLight[2][1] * y +
+							                 sm.viewToLight[2][2] * z +
+							                 sm.viewToLightOffset.z;
+							if (lz > 0.0f) {
+								const float invLZ = 1.0f / lz;
+								const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+								const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+								const int iX = int(smX);
+								const int iY = int(smY);
+								if (iX >= 0 && iX + 1 < sm.xres &&
+								    iY >= 0 && iY + 1 < sm.yres) {
+									const uint16_t *zRow0 = sm.depth.data() +
+										size_t(iY) * size_t(sm.xres);
+									const uint16_t *zRow1 = zRow0 + sm.xres;
+									const float fx = smX - float(iX);
+									const float fy = smY - float(iY);
+									const float w00 = (1.0f - fx) * (1.0f - fy);
+									const float w10 =         fx  * (1.0f - fy);
+									const float w01 = (1.0f - fx) *         fy;
+									const float w11 =         fx  *         fy;
+									const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
+									float occ = 0.0f;
+									if (mode == ShadowMode::PolyId) {
+										const uint8_t *idRow0 = sm.polyId.data() +
+											size_t(iY) * size_t(sm.xres);
+										const uint8_t *idRow1 = idRow0 + sm.xres;
+										// Surface matID extracted from gb.txtr's
+										// packed (miplevel:4 | matID:8 | swizzledUV:20).
+										// Shadow buffer stores matID+1 of the closest
+										// occluder; +1 here too so the comparison
+										// uses the same offset, and 0 stays as the
+										// "no occluder" sentinel.
+										const uint8_t surfaceId = uint8_t(matID + 1);
+										if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
+										if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
+										if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
+										if (idRow1[iX + 1] != surfaceId && idRow1[iX + 1] != 0) occ += w11;
+									} else {
+										int pixZenc = 0xFF80 - int(lz * sm.zScale);
+										if (pixZenc < 0) pixZenc = 0;
+										if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+										// Constant + slope-scale bias. The constant
+										// handles front-facing self-shadow acne. The
+										// slope term grows as the surface meets the
+										// light at shallow angles — a wall almost
+										// parallel to the light direction has a steep
+										// depth gradient across one shadow texel, so
+										// the constant bias alone leaves grazing
+										// surfaces with banded "acne" patterns. We
+										// scale by 1/(N·L) - 1 so front-facing surfaces
+										// get no extra; grazing surfaces get a lot.
+										// Tunable via FDS_SHADOW_BIAS / SLOPE_BIAS.
+										static const int kShadowBias = []{
+											const char *s = std::getenv("FDS_SHADOW_BIAS");
+											return s ? std::atoi(s) : 512;
+										}();
+										static const int kSlopeBias = []{
+											const char *s = std::getenv("FDS_SHADOW_SLOPE_BIAS");
+											return s ? std::atoi(s) : 1024;
+										}();
+										// Use the GEOMETRIC normal (saved before normal-
+										// map perturbation) for slope calc — the slope
+										// is about the underlying surface, not the
+										// bumpy micro-detail. Without this, bump-mapped
+										// floors show patchy shadow following the bumps,
+										// and grazing-angle bumps explode the slope.
+										// Clamp at 0.2 so very steep angles plateau
+										// rather than blowing past nearby occluders.
+										const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+										const float nDotL = dotGeo * lenInv;
+										const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+										const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
+										const int biased = pixZenc + kShadowBias + slopeBias;
+										if (biased < int(zRow0[iX    ])) occ += w00;
+										if (biased < int(zRow0[iX + 1])) occ += w10;
+										if (biased < int(zRow1[iX    ])) occ += w01;
+										if (biased < int(zRow1[iX + 1])) occ += w11;
+									}
+									if (occ >= 1.0f) continue;       // fully shadowed
+									shadowAtten = 1.0f - occ;
+								}
+							}
+						}
+						const float intensity = k * Mat->Diffuse * shadowAtten;
 						const float Lcb = tl.colB[n];
 						const float Lcg = tl.colG[n];
 						const float Lcr = tl.colR[n];
@@ -3030,20 +3209,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
 
-			// Fog: replicate forward TheOtherBarry's per-vertex distance
-			// falloff (TheOtherBarry.h:716-734). Forward applies it to
-			// LR/LG/LB at vertex shading time; deferred runs per-pixel
-			// using the reconstructed view-space z. Scn_Fogged scenes
-			// (City, etc.) need this or distant geometry stays vivid.
-			if ((ctx.Sc->Flags & Scn_Fogged) && !profNoFog) {
-				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
-				lB = std::max(lB * fogRate, 10.0f);
-				lG = std::max(lG * fogRate, 10.0f);
-				lR = std::max(lR * fogRate, 10.0f);
-				lB = std::min(lB, 253.0f);
-				lG = std::min(lG, 253.0f);
-				lR = std::min(lR, 253.0f);
-			}
+			// Fog moved to Render_DeferredFogPass — a single post-lighting
+			// full-screen pass keeps the lighting kernel SIMD-clean and
+			// drops the per-pixel sqrt. Forward TheOtherBarry still
+			// applies its own per-vertex fog (TheOtherBarry.h:716-734)
+			// for reflective windows / additive fountain vortex; those
+			// pixels are skipped by the fog pass via the mat32 sentinel.
 
 			// Diffuse modulation: pixel = texel * light / 256.
 			// Reflective faces are dispatched to TheOtherBarry<OVERWRITE,
@@ -3180,6 +3351,25 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			float lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
 			float lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
 
+			// Crystal specular for transparent surfaces (e.g. fountain
+			// mizraka glass). Same Blinn-Phong as the opaque kernel; gated
+			// on Mat->Specular > 0 so non-spec transparents (water, spire
+			// orbs) pay zero. Accumulated into sB/sG/sR alongside diffuse
+			// and added on top of the texture-modulated lit color (spec
+			// highlights aren't tinted by the base texture — standard
+			// model).
+			const bool wantSpecular = (Mat->Specular > 0.0f);
+			const float gloss = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
+			float vx_v = 0, vy_v = 0, vz_v = 0;
+			if (wantSpecular) {
+				const float vlen2 = x*x + y*y + z*z;
+				const float vlenInv = 1.0f / std::sqrt(vlen2);
+				vx_v = -x * vlenInv;
+				vy_v = -y * vlenInv;
+				vz_v = -z * vlenInv;
+			}
+			float sB = 0, sG = 0, sR = 0;
+
 			// Water gets ambient-only — forward Lighting() culls every omni
 			// (water mesh has a tiny BSphereRadius from Reflective_Surface_
 			// Setup's tessellation, so range+radius < |omni-bsphere| for all
@@ -3205,7 +3395,8 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					if (len2 > vlAll->range2[n]) continue;
 					const float lenInv = fast_rsqrt(len2);
 					const float dist   = len2 * lenInv;
-					float k = dot * lenInv * (1.0f - dist * vlAll->rRange[n]);
+					const float falloff = (1.0f - dist * vlAll->rRange[n]);
+					float k = dot * lenInv * falloff;
 					if (vlAll->isSpot[n]) {
 						const float cosTheta = -(vlAll->dirX[n]*wx + vlAll->dirY[n]*wy + vlAll->dirZ[n]*wz) * lenInv;
 						if (cosTheta <= vlAll->cosOuter[n]) continue;
@@ -3218,6 +3409,24 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					lB += intensity * vlAll->colB[n];
 					lG += intensity * vlAll->colG[n];
 					lR += intensity * vlAll->colR[n];
+
+					if (wantSpecular) {
+						const float ldx = wx * lenInv;
+						const float ldy = wy * lenInv;
+						const float ldz = wz * lenInv;
+						float hx = ldx + vx_v, hy = ldy + vy_v, hz = ldz + vz_v;
+						const float hLen2 = hx*hx + hy*hy + hz*hz;
+						if (hLen2 <= 0.0f) continue;
+						const float hLenInv = fast_rsqrt(hLen2);
+						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+						const float NdotH = nx*hx + ny*hy + nz*hz;
+						if (NdotH <= 0.0f) continue;
+						const float specStrength = std::pow(NdotH, gloss) *
+							Mat->Specular * falloff;
+						sB += specStrength * vlAll->colB[n];
+						sG += specStrength * vlAll->colG[n];
+						sR += specStrength * vlAll->colR[n];
+					}
 				}
 			} else {
 				for (int n = 0; n < tlTile.count; ++n) {
@@ -3230,7 +3439,8 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					if (len2 > tlTile.range2[n]) continue;
 					const float lenInv = fast_rsqrt(len2);
 					const float dist   = len2 * lenInv;
-					float k = dot * lenInv * (1.0f - dist * tlTile.rRange[n]);
+					const float falloff = (1.0f - dist * tlTile.rRange[n]);
+					float k = dot * lenInv * falloff;
 					if (tlTile.isSpot[n]) {
 						const float cosTheta = -(tlTile.dirX[n]*wx + tlTile.dirY[n]*wy + tlTile.dirZ[n]*wz) * lenInv;
 						if (cosTheta <= tlTile.cosOuter[n]) continue;
@@ -3243,6 +3453,24 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					lB += intensity * tlTile.colB[n];
 					lG += intensity * tlTile.colG[n];
 					lR += intensity * tlTile.colR[n];
+
+					if (wantSpecular) {
+						const float ldx = wx * lenInv;
+						const float ldy = wy * lenInv;
+						const float ldz = wz * lenInv;
+						float hx = ldx + vx_v, hy = ldy + vy_v, hz = ldz + vz_v;
+						const float hLen2 = hx*hx + hy*hy + hz*hz;
+						if (hLen2 <= 0.0f) continue;
+						const float hLenInv = fast_rsqrt(hLen2);
+						hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
+						const float NdotH = nx*hx + ny*hy + nz*hz;
+						if (NdotH <= 0.0f) continue;
+						const float specStrength = std::pow(NdotH, gloss) *
+							Mat->Specular * falloff;
+						sB += specStrength * tlTile.colB[n];
+						sG += specStrength * tlTile.colG[n];
+						sR += specStrength * tlTile.colR[n];
+					}
 				}
 			}
 
@@ -3254,7 +3482,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (lR < 0.0f) lR = 0.0f;
 
 			if (ctx.Sc->Flags & Scn_Fogged) {
-				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
+				// sqrt(t) via fast_rsqrt: sqrt(t) = t * rsqrt(t).
+				// Guarded against t<=0 (rsqrt undefined at 0).
+				const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
+				const float fogRate = t > 0.0f ? t * fast_rsqrt(t) : 0.0f;
 				lB = std::min(std::max(lB * fogRate, 10.0f), 253.0f);
 				lG = std::min(std::max(lG * fogRate, 10.0f), 253.0f);
 				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
@@ -3263,19 +3494,51 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			int litB = int((texB * lB) * (1.0f / 256.0f));
 			int litG = int((texG * lG) * (1.0f / 256.0f));
 			int litR = int((texR * lR) * (1.0f / 256.0f));
+			// Specular added on top — independent of base color tint.
+			if (wantSpecular) {
+				float fogScale = 1.0f;
+				if (ctx.Sc->Flags & Scn_Fogged) {
+					const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
+					fogScale = t > 0.0f ? t * fast_rsqrt(t) : 0.0f;
+				}
+				litB += int(sB * fogScale);
+				litG += int(sG * fogScale);
+				litR += int(sR * fogScale);
+			}
 			if (litB > 255) litB = 255;
 			if (litG > 255) litG = 255;
 			if (litR > 255) litR = 255;
+			if (litB < 0) litB = 0;
+			if (litG < 0) litG = 0;
+			if (litR < 0) litR = 0;
 
-			// Alpha-blend onto VPage: 50/50 add (matches TheOtherBarry
-			// <TRANSPARENT>'s `texel + dst >> 1`, saturated).
+			// Alpha-blend onto VPage. Default: `litRGB + dst/2`
+			// saturated — matches forward TheOtherBarry<TRANSPARENT>
+			// (source-full + dest-halved, NOT 50/50).
+			// Opt-in per-material (Mat->XparBlendAlpha > 0): linear
+			// interpolate `litRGB * α + dst * (1-α)`, no saturation
+			// cap. Fountain orb glass uses α=0.4 for a more
+			// see-through look; other transparents in the same scene
+			// (e.g. fountain spires) keep the legacy formula.
 			const dword existing = out[i];
-			int outB = litB + int((existing      ) & 0xFF) / 2;
-			int outG = litG + int((existing >> 8) & 0xFF) / 2;
-			int outR = litR + int((existing >> 16) & 0xFF) / 2;
-			if (outB > 255) outB = 255;
-			if (outG > 255) outG = 255;
-			if (outR > 255) outR = 255;
+			const int dB = int((existing      ) & 0xFF);
+			const int dG = int((existing >>  8) & 0xFF);
+			const int dR = int((existing >> 16) & 0xFF);
+			int outB, outG, outR;
+			if (Mat->XparBlendAlpha > 0.0f) {
+				const float a = Mat->XparBlendAlpha;
+				const float ia = 1.0f - a;
+				outB = int(float(litB) * a + float(dB) * ia);
+				outG = int(float(litG) * a + float(dG) * ia);
+				outR = int(float(litR) * a + float(dR) * ia);
+			} else {
+				outB = litB + dB / 2;
+				outG = litG + dG / 2;
+				outR = litR + dR / 2;
+				if (outB > 255) outB = 255;
+				if (outG > 255) outG = 255;
+				if (outR > 255) outR = 255;
+			}
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
 	}
@@ -3289,12 +3552,22 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 // rendering through the unified per-strip TBR walk (task #9). When off
 // (default during validation), the existing per-clump xpar peel runs
 // alongside the standalone sprite TBR — the legacy behaviour.
+//
+// Also requires the current scene to have called TBR_Init (so the per-
+// strip linked-list storage exists). Scenes without a TBR — city,
+// greets — fall back to the legacy peel; the unified path with no
+// SBufferHead would silently drop every transparent face, since
+// InsertTransparentToTBR bails when NumTiles==0. Only fountain
+// currently calls TBR_Init.
 bool deferredUnifiedTbrEnabled() {
-	static bool cached = []{
+	static bool flagCached = []{
 		const char *s = std::getenv("FDS_DEFERRED_UNIFIED_TBR");
 		return s && s[0] == '1';
 	}();
-	return cached;
+	if (!flagCached) return false;
+	if (!CurScene) return false;
+	if (!CurScene->SBufferHead || CurScene->NumTiles == 0) return false;
+	return true;
 }
 
 // Per-strip xpar render helper, called from TBR_Render's per-strip walk
@@ -3340,12 +3613,20 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(0.0f, float(strip_y),
 	                            float(XRes), float(strip_y + strip_h));
+	// Strip-clamp the rasterizer: a clipped tri whose max PY snapped to
+	// strip_y + strip_h would compute tile_My one tile-row past the strip
+	// and write pixels that the neighbouring strip's clear (concurrent)
+	// then wipes — visible as 1-row dark stripes every TILE_SIZE rows.
+	const int stripTileRow = strip_y >> 3;  // TILELOG=3
+	const meka::RasterStripClamp savedClamp = meka::g_rasterStripClamp;
+	meka::g_rasterStripClamp = { stripTileRow, stripTileRow };
 	for (int i = 0; i < count; ++i) {
 		Face* F = faces[i];
 		if (!F) continue;
 		if (front) clipper.Render(F, MekaleleTransparent,     false);
 		else       clipper.Render(F, MekaleleTransparentBack, false);
 	}
+	meka::g_rasterStripClamp = savedClamp;
 
 	// Composite the strip rows onto VPage via the transparent lighting
 	// kernel, with a ctx variant whose `tileLights` points at the
@@ -3771,18 +4052,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			lG = _mm256_max_ps(zero, _mm256_min_ps(lG, sat));
 			lR = _mm256_max_ps(zero, _mm256_min_ps(lR, sat));
 
-			// Per-pixel fog (Scn_Fogged): same formula as scalar Tile.
-			if (ctx.Sc->Flags & Scn_Fogged) {
-				__m256 vOne   = _mm256_set1_ps(1.0f);
-				__m256 vRFZP  = _mm256_set1_ps(1.0f / ctx.Sc->FZP);
-				__m256 fogArg = _mm256_max_ps(zero, _mm256_sub_ps(vOne, _mm256_mul_ps(zv, vRFZP)));
-				__m256 fogRate = _mm256_sqrt_ps(fogArg);
-				__m256 vMin = _mm256_set1_ps(10.0f);
-				__m256 vMax = _mm256_set1_ps(253.0f);
-				lB = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lB, fogRate), vMin), vMax);
-				lG = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lG, fogRate), vMin), vMax);
-				lR = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(lR, fogRate), vMin), vMax);
-			}
+			// Fog moved to Render_DeferredFogPass (post-lighting).
 
 			// pixel = texel * lit / 256
 			__m256 inv256 = _mm256_set1_ps(1.0f / 256.0f);
@@ -4204,13 +4474,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
 
-			// Per-pixel fog (Scn_Fogged): same formula as Tile.
-			if (ctx.Sc->Flags & Scn_Fogged) {
-				float fogRate = std::sqrt(std::max(0.0f, 1.0f - z * (1.0f / ctx.Sc->FZP)));
-				lB = std::min(std::max(lB * fogRate, 10.0f), 253.0f);
-				lG = std::min(std::max(lG * fogRate, 10.0f), 253.0f);
-				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
-			}
+			// Fog moved to Render_DeferredFogPass (post-lighting).
 
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
@@ -4340,6 +4604,20 @@ static void Render_DeferredLighting() {
 			lights.cosOuter[numLights] = -2.0f;
 			lights.isSpot[numLights] = 0u;
 		}
+		// Map this light to its shadow map (or -1). Only set when
+		// shadows are enabled — otherwise the kernel must skip the
+		// shadow test (and the shadow maps are stale-empty anyway).
+		int32_t smIdx = -1;
+		static const bool sShadowsOn = []{
+			const char *s = std::getenv("FDS_SHADOWS");
+			return s && s[0] == '1';
+		}();
+		if (sShadowsOn && (O->Flags & Omni_CastsShadow)) {
+			for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+				if (g_shadowMaps[i].omni == O) { smIdx = int32_t(i); break; }
+			}
+		}
+		lights.shadowMapIdx[numLights] = smIdx;
 		++numLights;
 	}
 
@@ -4459,6 +4737,433 @@ static void Render_DeferredLighting() {
 	}
 }
 
+// Full-screen distance fog over opaque pixels. Runs after
+// Render_DeferredLighting writes finished colors to VPage; before the
+// transparent peel composites. 1998 used `sqrt(1 - z/FZP)` per VERTEX;
+// we keep the sqrt curve (the linear curve makes mid-range too thick)
+// but compute it per-pixel via approx rsqrt: `sqrt(t) = t * rsqrt(t)`.
+// On arm64 this maps to vrsqrteq_f32 (4-5 cycles) and on x86 to
+// _mm256_rsqrt_ps. With the simde arm64 m256 rsqrt patch, both lanes
+// hit native NEON / AVX2 directly.
+//
+// Skipped pixels:
+//   mat32 == 0xFFFFFFFF — forward filler wrote here (reflective windows,
+//     additive fountain vortex, sky-cube). Those have their own
+//     per-vertex fog from TheOtherBarry and would double-fog otherwise.
+//   zEnc == 0 — no opaque pixel (sky-cube background, or empty Z).
+//     Sky already represents infinite distance; don't fog it.
+static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
+                                         float invFZP)
+{
+	dword *out = reinterpret_cast<dword*>(VPage);
+	const uint32_t *mat = g_gbuffer->txtr.data();
+	const uint16_t *zEnc = ZPage16;
+	const float invZScale = 1.0f / float(g_zscale);
+	const Vec8f vInvZScale(invZScale);
+	const Vec8f vInvFZP(invFZP);
+	const Vec8f vOne(1.0f);
+	const Vec8f vZero(0.0f);
+	const Vec8i vSentinel(int(0xFFFFFFFF));
+	const Vec8i vZEncZero(0);
+	const Vec8f vZBase(float(0xFF80));
+	const Vec8i vFFu(0xFF);
+	const Vec8i vTen(10);
+	const Vec8i vAlpha(int(0xFF000000));
+
+	for (int py = y1; py < y2; ++py) {
+		int px = x1;
+		const size_t row = size_t(py) * XRes;
+		// 8-pixel SIMD body.
+		for (; px + 8 <= x2; px += 8) {
+			const size_t i = row + px;
+
+			Vec8i v8;
+			v8.load(out + i);
+			Vec8i m8;
+			m8.load(mat + i);
+			// 8x u16 → 8x i32 (no sign-extension needed: zEnc is unsigned).
+			alignas(16) uint16_t z16buf[8];
+			std::memcpy(z16buf, zEnc + i, 16);
+			alignas(32) int32_t z32buf[8];
+			for (int k = 0; k < 8; ++k) z32buf[k] = int32_t(z16buf[k]);
+			Vec8i z8;
+			z8.load_a(z32buf);
+
+			// Pixel-valid mask: mat != sentinel AND zEnc != 0.
+			Vec8ib maskValid = (m8 != vSentinel) & (z8 != vZEncZero);
+
+			// Decode z, fog rate, sqrt-via-rsqrt.
+			Vec8f zf  = (vZBase - to_float(z8)) * vInvZScale;
+			Vec8f t   = max(vZero, vOne - zf * vInvFZP);
+			Vec8f rs  = approx_rsqrt(t);
+			Vec8f fog = t * rs;          // sqrt(t)
+			// At t==0, rsqrt yields garbage; mask the result.
+			Vec8fb tPositive = t > vZero;
+			fog = select(tPositive, fog, vZero);
+			fog = min(fog, vOne);
+
+			// Channel split, fog-multiply, floor-at-10, re-pack.
+			Vec8i bB = v8        & vFFu;
+			Vec8i bG = (v8 >>  8) & vFFu;
+			Vec8i bR = (v8 >> 16) & vFFu;
+			Vec8i nB = max(vTen, truncatei(to_float(bB) * fog));
+			Vec8i nG = max(vTen, truncatei(to_float(bG) * fog));
+			Vec8i nR = max(vTen, truncatei(to_float(bR) * fog));
+			Vec8i packed = nB | (nG << 8) | (nR << 16) | vAlpha;
+			Vec8i result = select(Vec8ib(maskValid), packed, v8);
+			result.store(out + i);
+		}
+		// Scalar tail (≤7 pixels).
+		for (; px < x2; ++px) {
+			const size_t i = row + px;
+			if (mat[i] == 0xFFFFFFFFu) continue;
+			const word z16 = zEnc[i];
+			if (z16 == 0) continue;
+			const float z = float(0xFF80 - z16) * invZScale;
+			const float t = 1.0f - z * invFZP;
+			const float fog = t > 0.0f ? t * fast_rsqrt(t) : 0.0f;
+			const dword v = out[i];
+			int B = std::max(10, int(((v      ) & 0xFF) * fog));
+			int G = std::max(10, int(((v >>  8) & 0xFF) * fog));
+			int R = std::max(10, int(((v >> 16) & 0xFF) * fog));
+			out[i] = dword(B) | (dword(G) << 8) | (dword(R) << 16) | 0xFF000000u;
+		}
+	}
+}
+
+static void Render_DeferredFogPass() {
+	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
+	if (!g_gbuffer || !ZPage16 || !VPage) return;
+	const float invFZP = 1.0f / CurScene->FZP;
+	constexpr auto numTilesX = 6;
+	constexpr auto numTilesY = 4;
+	const auto tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
+	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+	renderns::tileCounter = 0;
+	for (int j = 0; j < numTilesY; ++j) {
+		const int y1 = tileSizeY * j;
+		const int y2 = std::min(y1 + tileSizeY, YRes);
+		for (int i = 0; i < numTilesX; ++i) {
+			const int x1 = tileSizeX * i;
+			const int x2 = std::min(x1 + tileSizeX, XRes);
+			ThreadPool::instance().enqueue([x1, y1, x2, y2, invFZP]() {
+				Render_DeferredFogPass_Tile(x1, y1, x2, y2, invFZP);
+				std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+				++renderns::tileCounter;
+				renderns::condition.notify_one();
+			});
+		}
+	}
+	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+	renderns::condition.wait(lock, []{
+		return renderns::tileCounter == numTilesX * numTilesY;
+	});
+}
+
+// Per-frame depth pre-pass over every Omni_CastsShadow light. For each
+// such light we build a temporary Camera (look down IDir, FOV = spot
+// outer cone), swap the engine's view globals to it, re-run
+// Transform_Objects to project every visible face into the light's
+// view+screen space, then walk FList and rasterize depth-only into the
+// light's ShadowMap. Globals are saved/restored around the whole
+// thing — when this returns the main view + perspective + clipper are
+// untouched.
+//
+// Re-uses the main FList buffer. Transform_Objects overwrites it
+// with this light's CAll faces; the caller (Render()) re-runs
+// Transform_Objects with the main camera after this returns to
+// repopulate FList for the main pass. (One extra Transform_Objects per
+// shadow light per frame — acceptable until we profile.)
+//
+// Gate: env `FDS_SHADOWS=1`. Off by default while wiring.
+static bool shadowsEnabled() {
+	static const bool cached = []{
+		const char *s = std::getenv("FDS_SHADOWS");
+		return s && s[0] == '1';
+	}();
+	return cached;
+}
+
+thread_local bool g_inShadowPass = false;
+
+// PolyId is the production default. FDS_SHADOW_POLYID=0 forces back to
+// Depth at startup (F3 still toggles at runtime).
+std::atomic<ShadowMode> g_shadowMode{[]{
+	const char *s = std::getenv("FDS_SHADOW_POLYID");
+	return (s && s[0] == '0') ? ShadowMode::Depth : ShadowMode::PolyId;
+}()};
+
+
+void Render_DeferredShadowMaps(Scene *Sc)
+{
+	if (!shadowsEnabled()) return;
+	if (!Sc || g_shadowMaps.empty()) return;
+
+	// FDS_SHADOW_PROF=1: per-shadow-pass timing breakdown of Transform vs
+	// Rasterize cost, averaged over a rolling window and printed every N
+	// frames. Tells us where to focus optimization — if Transform >> Raster,
+	// cross-light parallelism is moot and Transform itself needs work.
+	static const bool sProfShadow = []{
+		const char *s = std::getenv("FDS_SHADOW_PROF");
+		return s && s[0] == '1';
+	}();
+	using clk = std::chrono::high_resolution_clock;
+	static thread_local int sFrameIdx = 0;
+	static thread_local double sXformAcc = 0.0;
+	static thread_local double sRasterAcc = 0.0;
+	static thread_local int sLightCount = 0;
+
+	// Save engine state.
+	Camera *savedView   = View;
+	const float savedFOVX  = FOVX;
+	const float savedFOVY  = FOVY;
+	const float savedCntrEX = CntrEX;
+	const float savedCntrEY = CntrEY;
+
+	Camera lightCam = {};
+
+	for (ShadowMap& sm : g_shadowMaps) {
+		Omni *O = sm.omni;
+		if (!O) continue;
+		if (!(O->Flags & Omni_Active)) continue;
+		if (O->Type != Light_SpotLight) continue;  // omni cube maps deferred
+
+		// Light camera. Look from O->IPos toward IPos+IDir, world-up=Y.
+		// Roll=0. FOV = 2 * acos(cosOuter) so the outer cone fits in
+		// the shadow map. Pad a bit so silhouettes near the cone edge
+		// have a few pixels of context (otherwise floating-point in
+		// the lighting kernel's cone test lands pixels just past the
+		// shadow map edge that read as "lit").
+		// Kick_Camera has a singularity at IDir=(0,±1,0) — it builds the
+		// horizontal basis as N=(V.z,0,-V.x) and normalizes, which goes
+		// 0/0 when the look direction is exactly world-up. Nudge by a
+		// tiny X bias if the caller handed us a perfectly-vertical IDir.
+		Vector idir = O->IDir;
+		if (std::fabs(idir.x) < 1e-4f && std::fabs(idir.z) < 1e-4f) {
+			idir.x = 0.01f;
+		}
+		Vector targ = O->IPos;
+		targ.x += idir.x;
+		targ.y += idir.y;
+		targ.z += idir.z;
+		Kick_Camera(&O->IPos, &targ, 0.0f, lightCam.Mat);
+		lightCam.ISource = O->IPos;
+		const float cosOuter = std::max(0.01f, O->FallOff);
+		const float fovHalfRad = std::acos(cosOuter) * 1.10f;  // 10% pad
+		const float perspXY = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
+		lightCam.PerspX = perspXY;
+		lightCam.PerspY = perspXY;
+		lightCam.IFOV   = (fovHalfRad * 2.0f) * (180.0f / PI);
+
+		// Stash the light camera's pose onto the ShadowMap so the
+		// lighting kernel can sample later without rebuilding it.
+		Matrix_Copy(sm.lightViewMat, lightCam.Mat);
+		sm.lightISource = O->IPos;
+		sm.perspX = perspXY;
+		sm.perspY = perspXY;
+		sm.cntrX  = float(sm.xres) * 0.5f - 0.5f;
+		sm.cntrY  = float(sm.yres) * 0.5f - 0.5f;
+
+		// Swap globals to the shadow camera. XRes/YRes are passed via
+		// Transform_Objects(Sc, xres, yres) override instead of mutating
+		// the globals — Transform_Objects's visibility-flag math (incl.
+		// the F->VisibilityFlagsAll face filter) needs to use the shadow
+		// rect, not the main screen, otherwise hex tiles near the cone
+		// edge get all-3-verts-VisDown and the face filter drops them.
+		View   = &lightCam;
+		FOVX   = perspXY;
+		FOVY   = perspXY;
+		CntrEX = sm.cntrX;
+		CntrEY = sm.cntrY;
+
+		// Patch the scene's FZP for the duration so Transform_Objects
+		// clips against the light's range, not the camera's. We restore
+		// it inside the loop because the next shadow light may have a
+		// different range. Final restore happens via SetCurrentScene at
+		// the bottom.
+		const float savedSceneFZP = Sc->FZP;
+		Sc->FZP = sm.fzp;
+
+		// Refresh sm.zScale to match what the rasterizer expects.
+		sm.zScale = float(0xFF00) / (sm.fzp * 1.1f);
+
+		// Clear shadow map.
+		std::fill(sm.depth.begin(), sm.depth.end(), uint16_t(0));
+		std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
+
+		// Transform from the light's POV. Overwrites FList + per-vertex
+		// PX/PY/RZ — main pass re-transforms after we return.
+		// Skip Animate_Objects: the scene driver already animated this
+		// frame's object poses before calling us. We just re-project
+		// those poses through the light camera; calling Animate_Objects
+		// again would re-tick per-frame state (object splines,
+		// particles, anything its TriMesh-walk touches) and diverge
+		// the main pass.
+		const auto tXformStart = clk::now();
+		g_inShadowPass = true;
+		Transform_Objects(Sc, sm.xres, sm.yres);
+		g_inShadowPass = false;
+		const auto tXformEnd = clk::now();
+		if (sProfShadow) {
+			sXformAcc += std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count();
+		}
+
+		const auto tRasterStart = clk::now();
+		// Depth-only raster every visible face into sm.depth + sm.polyId.
+		// Tile-parallel: split the shadow map into 6×4 tiles, dispatch
+		// one job per tile to the engine threadpool. Each worker runs
+		// its own FrustumClipper bounded to its tile rect — the clipper
+		// trims each face down to the tile, and tiles never overlap, so
+		// there's no contention on sm.depth/polyId between workers.
+		// Same dispatch pattern as RenderInnerMekalele for the main pass.
+		{
+			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+			renderns::tileCounter = 0;
+		}
+		const int numTilesX = 6;
+		const int numTilesY = 4;
+		const int totalTiles = numTilesX * numTilesY;
+		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
+		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
+		ShadowMap * const smPtr = &sm;
+		for (int ty = 0; ty < numTilesY; ++ty) {
+			const float y1f = float(ty * tileSizeY);
+			const float y2f = float(std::min((ty + 1) * tileSizeY, sm.yres));
+			for (int tx = 0; tx < numTilesX; ++tx) {
+				const float x1f = float(tx * tileSizeX);
+				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
+				ThreadPool::instance().enqueue(
+					[Sc, smPtr, x1f, y1f, x2f, y2f]() {
+						g_currentShadowMap = smPtr;
+						FrustumClipper clipper;
+						clipper.InitViewport(Sc);
+						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
+						for (int i = 0; i < CAll; ++i) {
+							Face *F = FList[i];
+							if (!F) continue;
+							if (!F->Txtr) continue;
+							if (F->A == F->B) continue;
+							if (F->A->TPos.z <= 0.0f &&
+							    F->B->TPos.z <= 0.0f &&
+							    F->C->TPos.z <= 0.0f) {
+								continue;
+							}
+							clipper.Render(F, MekaleleShadowDepth, false,
+							               /*skipMipLevel=*/true);
+						}
+						g_currentShadowMap = nullptr;
+						std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+						++renderns::tileCounter;
+						renderns::condition.notify_one();
+					});
+			}
+		}
+		{
+			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+			renderns::condition.wait(lock,
+				[totalTiles]{ return renderns::tileCounter >= totalTiles; });
+		}
+		const auto tRasterEnd = clk::now();
+		if (sProfShadow) {
+			sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
+			++sLightCount;
+		}
+
+		Sc->FZP = savedSceneFZP;
+	}
+
+	if (sProfShadow) {
+		++sFrameIdx;
+		// Print every 60 frames (~2s at 30 fps).
+		if (sFrameIdx % 60 == 0) {
+			const double xformAvg  = sXformAcc  / 60.0;
+			const double rasterAvg = sRasterAcc / 60.0;
+			const double perLightX = sLightCount ? sXformAcc / sLightCount : 0.0;
+			const double perLightR = sLightCount ? sRasterAcc / sLightCount : 0.0;
+			std::fprintf(stderr,
+				"[SHADOW-PROF] last 60 frames: total/frame: xform=%.2fms raster=%.2fms "
+				"sum=%.2fms  per-light: xform=%.2fms raster=%.2fms  "
+				"(N=%d lights/frame)\n",
+				xformAvg, rasterAvg, xformAvg + rasterAvg,
+				perLightX, perLightR,
+				int(sLightCount / 60));
+			std::fflush(stderr);
+			sXformAcc = 0.0;
+			sRasterAcc = 0.0;
+			sLightCount = 0;
+		}
+	}
+
+	// Restore engine state. SetCurrentScene refreshes C_FZP / g_zscale
+	// from the un-patched scene FZP so the main pass uses the right
+	// depth-encoding constants again.
+	View   = savedView;
+	FOVX   = savedFOVX;
+	FOVY   = savedFOVY;
+	CntrEX = savedCntrEX;
+	CntrEY = savedCntrEY;
+	SetCurrentScene(Sc);
+
+	// Each shadow pass overwrote per-vertex PX/PY/RZ + FList/CAll with
+	// the light-camera projection. Re-run Transform_Objects with the
+	// main camera so the subsequent Render() sees a consistent scene
+	// state. Cost: one extra Transform_Objects per frame on scenes
+	// that have any shadow-casting lights. Acceptable until we
+	// rewrite Transform_Objects to write into a thread-local Vertex
+	// scratch. Animate_Objects not re-run (see comment inside the
+	// per-light loop above).
+	Transform_Objects(Sc);
+
+	// Precompute the per-shadow-map "view-space → light-view-space"
+	// affine, with the main camera now restored on View. Derivation:
+	//     pixelWorld     = mainView->Mat^T * pixelView + mainView->ISource
+	//     pixelLightView = sm.lightViewMat * (pixelWorld - sm.lightISource)
+	//   ⇒ pixelLightView = (sm.lightViewMat * mainView->Mat^T) * pixelView
+	//                      + sm.lightViewMat * (mainView->ISource - sm.lightISource)
+	// The kernel reads `viewToLight` (3×3) and `viewToLightOffset` (vec)
+	// per pixel — no per-pixel world-space round-trip.
+	for (ShadowMap& sm : g_shadowMaps) {
+		if (!sm.omni) continue;
+		// Build sm.lightViewMat * mainView->Mat^T. MatrixXMatrix(A, B, R)
+		// gives R = A * B. Need the transpose of mainView->Mat first.
+		Matrix mvT;
+		for (int r = 0; r < 3; ++r)
+			for (int c = 0; c < 3; ++c)
+				mvT[r][c] = View->Mat[c][r];
+		MatrixXMatrix(sm.lightViewMat, mvT, sm.viewToLight);
+
+		// Offset: sm.lightViewMat * (mainView->ISource - sm.lightISource).
+		Vector d;
+		Vector_Sub(&View->ISource, &sm.lightISource, &d);
+		MatrixXVector(sm.lightViewMat, &d, &sm.viewToLightOffset);
+	}
+
+	// FDS_DUMP_SHADOWMAP=1: write each shadow map as a .pgm under
+	// /tmp/shadowmap_<N>.pgm. One-shot per process — only dumps on
+	// the first call.
+	static bool dumpedShadowMap = false;
+	if (!dumpedShadowMap && std::getenv("FDS_DUMP_SHADOWMAP")) {
+		dumpedShadowMap = true;
+		for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+			const ShadowMap& sm = g_shadowMaps[i];
+			char path[256];
+			std::snprintf(path, sizeof(path), "/tmp/shadowmap_%zu.pgm", i);
+			FILE *f = std::fopen(path, "wb");
+			if (!f) continue;
+			std::fprintf(f, "P5\n%d %d\n255\n", sm.xres, sm.yres);
+			for (uint16_t e : sm.depth) {
+				// e in [0..0xFFFF]; 0 = empty, 0xFFFF = closest. Scale
+				// to 0..255 for the PGM viewer. Empty/background pixels
+				// render as black.
+				uint8_t b = uint8_t(e >> 8);
+				std::fwrite(&b, 1, 1, f);
+			}
+			std::fclose(f);
+			std::fprintf(stderr, "[SHADOWMAP] dumped %s\n", path);
+		}
+	}
+}
+
 void Render(RenderPath path)
 {
 	constexpr auto		numTilesX = 6;
@@ -4544,6 +5249,11 @@ void Render(RenderPath path)
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
 		Render_DeferredLighting();
+
+		// Full-screen linear distance fog over deferred-lit opaque pixels.
+		// Runs BEFORE the transparent peel so xpar surfaces composite onto
+		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
+		Render_DeferredFogPass();
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,

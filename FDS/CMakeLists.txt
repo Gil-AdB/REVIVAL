@@ -75,6 +75,8 @@ set(Fillers
     FILLERS/IXTGZ.cpp
     FILLERS/IXTZ.cpp
     FILLERS/Mekalele.cpp
+    FILLERS/ShadowMap.cpp
+    FILLERS/ShadowMap.h
     FILLERS/SimdHelpers.h
     FILLERS/TheOtherBarry.h)
 source_group("Fillers" FILES ${Fillers})

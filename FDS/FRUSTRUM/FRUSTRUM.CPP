@@ -724,7 +724,8 @@ float FrustumClipper::PolyArea()
 }
 
 
-void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords)
+void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
+                             bool skipMipLevel)
 {
 	mword i, j;
 
@@ -756,7 +757,21 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords)
 		C->EUZ = C->EU * C->RZ; C->EVZ = C->EV * C->RZ;
 	}
 
-	auto [Af, Bf, Cf] = std::tuple(A->Flags, B->Flags, C->Flags);
+	// Preserve only Vtx_VisNear / Vtx_VisFar from Transform_Objects'
+	// flags — those are the Z-axis flags the clipper's Calc_Flags
+	// doesn't compute (it only handles 2D PX/PY). The 2D flags from
+	// Transform_Objects use XRes/YRes globals which only match the
+	// clipper's ClipX2/Y2 for the main render. For off-screen
+	// rasterization (shadow maps, cube-map bake) the rects differ:
+	// e.g. shadow map ClipY2=1024 but YRes=800 means Transform_Objects
+	// sets VisDown for any vert with PY≥800, which is fine for the main
+	// pass but causes the clipper to extrapolate edges to PY=1024 for
+	// verts that are actually inside the shadow map's bounds, producing
+	// ghost polygons.
+	constexpr dword kZFlags = Vtx_VisNear | Vtx_VisFar;
+	const dword Af = A->Flags & kZFlags;
+	const dword Bf = B->Flags & kZFlags;
+	const dword Cf = C->Flags & kZFlags;
 	Calc_Flags(A);
 	Calc_Flags(B);
 	Calc_Flags(C);
@@ -798,7 +813,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords)
 	// triangulate result NGon and sort triangle vertices by Y
 	// to conform to legacy rasterizer convension
 
-	if (F->Txtr->Txtr)
+	if (F->Txtr->Txtr && !skipMipLevel)
 	{
 		Swap();
 		MiplevelClipper(F, filler);
@@ -808,8 +823,10 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords)
 #endif
 #ifdef COUNT_POLYS
 		g_renderedPolys++;
-#endif		
-		filler(F, C_Scnd, C_numVerts, g_MipLevel);
+#endif
+		// skipMipLevel callers (shadow rasterizer) don't care about the
+		// mip level — pass 0. The texture wouldn't be sampled anyway.
+		filler(F, C_Scnd, C_numVerts, skipMipLevel ? 0u : g_MipLevel);
 	}
 	/*for(i=2; i<C_numVerts; i++)
 	{

@@ -1465,6 +1465,7 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_BACKSPACE: legacy = ScBackSpace; break;
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
+				case SDL_SCANCODE_F3:        legacy = ScF3; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
 				case SDL_SCANCODE_TAB:       legacy = ScTab; break;
 				case SDL_SCANCODE_SPACE:     legacy = ScSpace; break;
@@ -1496,6 +1497,7 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_K:         legacy = ScK; break;
 				case SDL_SCANCODE_O:         legacy = ScO; break;
 				case SDL_SCANCODE_M:         legacy = ScM; break;
+				case SDL_SCANCODE_N:         legacy = ScN; break;
 				case SDL_SCANCODE_P:         legacy = ScP; break;
 				case SDL_SCANCODE_Q:         legacy = ScQ; break;
 				case SDL_SCANCODE_R:         legacy = ScR; break;

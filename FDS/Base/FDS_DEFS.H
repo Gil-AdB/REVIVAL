@@ -353,6 +353,12 @@ enum OmniFlags
 	Omni_Stationary = 1<<5,
 
 	Omni_Rand = 1 << 6,
+
+	// Light casts shadows. The deferred path renders a depth pre-pass
+	// from this light's POV into a per-light shadow map; the lighting
+	// kernel samples it to gate the light's contribution per pixel.
+	// Only consulted in deferred mode. Set by Initialize_<scene>.
+	Omni_CastsShadow = 1 << 7,
 };
 
 //MACROS

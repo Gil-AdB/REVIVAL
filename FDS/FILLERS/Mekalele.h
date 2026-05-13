@@ -38,7 +38,10 @@ struct GBuffer {
 	// — buffer is allocated to `numPixels` but a renderer that doesn't
 	// care about tangent-space maps can leave the data as garbage.
 	std::vector<u16> tangent;
-	// packed: miplevel:4 | matID:8 | swizzled UV:20
+	// packed: miplevel:4 | matID:8 | swizzled UV:20.
+	// The matID byte doubles as the per-pixel surface ID for poly-ID
+	// shadow mode (compared against ShadowMap::polyId, which stores
+	// matID+1 of the closest occluder).
 	std::vector<u32> txtr;
 };
 

@@ -2,6 +2,7 @@
 #define FDS_DECS_H_INCLUDED
 #include "FDS_VARS.H"
 #include "Vector.h"
+#include <atomic>
 // Math declarations
 
 #ifndef MathIncluded
@@ -370,7 +371,13 @@ void Radix_Sorting();
 void SetCurrentScene(Scene *Sc);
 
 void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
-void Transform_Objects(Scene *Sc);
+// xresOverride / yresOverride: alternate screen rect for visibility-flag
+// computation (>= 0 to override, -1 to use XRes/YRes globals). The
+// shadow-map orchestrator passes its shadow-map dimensions so faces
+// near the cone edge aren't dropped by the F->VisibilityFlagsAll
+// face-filter, which would otherwise compare PX/PY against the main
+// framebuffer XRes/YRes instead of the shadow rect.
+void Transform_Objects(Scene *Sc, int xresOverride = -1, int yresOverride = -1);
 char BFC(Face *F);
 char BOC(Face *F);
 void Construct_FaceList(Scene *Sc);
@@ -385,6 +392,19 @@ enum class RenderPath {
 void Render(RenderPath path = RenderPath::Default);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
+// Per-frame shadow-map depth pre-pass. Walks Omni_CastsShadow lights,
+// builds a temp camera per light, re-transforms the scene into the
+// light's POV, depth-rasters into ShadowMap::depth. Globals saved &
+// restored; safe to call before the main Render(). Gated on env
+// FDS_SHADOWS=1. See FILLERS/ShadowMap.h.
+void Render_DeferredShadowMaps(class Scene *Sc);
+
+// Shadow technique. Toggleable at runtime.
+enum class ShadowMode {
+	Depth,    // z-compare with bias and PCF
+	PolyId,   // material-ID equality (per-material shadow grouping)
+};
+extern std::atomic<ShadowMode> g_shadowMode;
 #endif
 
 #ifndef FrustrumIncluded
