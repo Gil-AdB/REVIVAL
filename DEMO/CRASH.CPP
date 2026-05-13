@@ -94,11 +94,15 @@ struct CrashScene : SceneDriver {
 
 		g_FrameTime = Timer;
 
-		if (Keyboard[ScTab]) {
-			if (View == &FC)
-				View = CrashSc->CameraHead;
-			else
-				View = &FC;
+		{
+			static bool sTabPrev = false;
+			const bool tabNow = Keyboard[ScTab] != 0;
+			if (tabNow && !sTabPrev) {
+				View = (View == &FC) ? CrashSc->CameraHead : &FC;
+				std::fprintf(stderr, "[TAB crash] toggled → View=%s\n",
+					(View == &FC) ? "FC" : "scene");
+			}
+			sTabPrev = tabNow;
 		}
 
 		//memset(VPage,0,PageSize);

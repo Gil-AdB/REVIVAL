@@ -777,11 +777,15 @@ struct ChaseScene : SceneDriver {
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 
-		if (Keyboard[ScTab]) {
-			if (View == &FC)
-				View = ChaseSc->CameraHead;
-			else
-				View = &FC;
+		{
+			static bool sTabPrev = false;
+			const bool tabNow = Keyboard[ScTab] != 0;
+			if (tabNow && !sTabPrev) {
+				View = (View == &FC) ? ChaseSc->CameraHead : &FC;
+				std::fprintf(stderr, "[TAB chase] toggled → View=%s\n",
+					(View == &FC) ? "FC" : "scene");
+			}
+			sTabPrev = tabNow;
 		}
 
 		prof.switchTo(PROF_ANIM);
