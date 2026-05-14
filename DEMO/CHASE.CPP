@@ -704,11 +704,8 @@ static void Reflective_Surface_Setup()
 
 void Initialize_Chase()
 {
-	ChaseSc = (Scene *)getAlignedBlock(sizeof(Scene), 16); 
-	memset(ChaseSc,0,sizeof(Scene));
-	LoadFLD(ChaseSc,"SCENES/CHASE.FLD");
+	ChaseSc = loadSceneAligned("SCENES/CHASE.FLD");
 	CHPartTime = 25.0*(ChaseSc->EndFrame-ChaseSc->StartFrame)/25.0f;
-//	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
 	ChaseSc->FZP = 50000.0f;
 	ChaseSc->NZP = 2.0f;
 	ChaseSc->Flags |= Scn_Fogged | Scn_ZBuffer;
@@ -717,16 +714,7 @@ void Initialize_Chase()
 	ChaseSc->Ambient.G = 4 * 2;
 	ChaseSc->Ambient.B = 64 * 2;
 
-	// also make the appropriate Layer 2 fillers.
-
-	Material *M;
-	for (M = MatLib; M; M = M->Next)
-	{
-		if (M->RelScene != ChaseSc) continue;
-		if (!M->Txtr) continue;
-		M->Flags |= Mat_RGBInterp;
-		M->Txtr->Flags |= Txtr_Tiled;
-	}
+	tagSceneMaterials(ChaseSc, /*restrictToScene=*/true);
 
 	Reflective_Surface_Setup();
 
@@ -737,32 +725,15 @@ void Initialize_Chase()
 
 namespace {
 struct ChaseScene : SceneDriver {
-	std::unique_ptr<Face*[]> fListStorage;
-	std::unique_ptr<Face*[]> sListStorage;
 	FrameProfiler prof{"chase"};
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
 	void init() override {
-		int32_t Polys = 0;
-		TriMesh *T;
-
 		SetCurrentScene(ChaseSc);
-
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
-
-		for(T = ChaseSc->TriMeshHead; T; T = T->Next)
-			Polys += T->FIndex;
-		fListStorage = std::make_unique<Face*[]>(Polys);
-		sListStorage = std::make_unique<Face*[]>(Polys);
-		FList = fListStorage.get();
-		SList = sListStorage.get();
-
-		View = ChaseSc->CameraHead;
-
-		C_FZP = ChaseSc->FZP;
-		C_rFZP = 1.0f / C_FZP;
+		setupFaceLists(ChaseSc, /*includeOmnisInCount=*/false);
 	}
 
 	bool tick() override {
@@ -773,20 +744,11 @@ struct ChaseScene : SceneDriver {
 		prof.enter(PROF_ZCLR);
 
 		g_FrameTime = Timer;
-		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		clearFrame();
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;
 
-		{
-			static bool sTabPrev = false;
-			const bool tabNow = Keyboard[ScTab] != 0;
-			if (tabNow && !sTabPrev) {
-				View = (View == &FC) ? ChaseSc->CameraHead : &FC;
-				std::fprintf(stderr, "[TAB chase] toggled → View=%s\n",
-					(View == &FC) ? "FC" : "scene");
-			}
-			sTabPrev = tabNow;
-		}
+		tickTabToggle(ChaseSc, "chase");
 
 		prof.switchTo(PROF_ANIM);
 		Dynamic_Camera();
@@ -832,7 +794,7 @@ struct ChaseScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 		if (Timer < 0) Timer = 0;
 	}
 };

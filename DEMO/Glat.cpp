@@ -755,7 +755,7 @@ struct GlatoScene : SceneDriver {
 
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 
 		delete [] LenTable;
 		delete [] CosTable;

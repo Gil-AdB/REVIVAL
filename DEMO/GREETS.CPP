@@ -448,11 +448,8 @@ extern "C" void Greets_DumpStageCentroids(FILE *out, const char *tag) {
 }
 
 void Initialize_Greets()
-{	
-	GreetSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
-	memset(GreetSc,0,sizeof(Scene));
-	
-	LoadFLD(GreetSc,"SCENES/GREETS.FLD");
+{
+	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
 
 	gg = new GreetsGenerator;
 
@@ -461,14 +458,7 @@ void Initialize_Greets()
 	// 5 seconds ending time
 	CHPartTime = 500.0 + 100.0f*(GreetSc->EndFrame-GreetSc->StartFrame)/30.0f;
 
-
-	for(Material *M = MatLib;M;M=M->Next)
-	{
-		if (M->RelScene != GreetSc) continue;
-		if (!M->Txtr) continue;
-		M->Flags |= Mat_RGBInterp;
-		M->Txtr->Flags |= Txtr_Tiled;
-	}
+	tagSceneMaterials(GreetSc, /*restrictToScene=*/true);
 
 
 //	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
@@ -766,8 +756,6 @@ void Initialize_Greets()
 namespace {
 struct GreetsScene : SceneDriver {
 	char MSGStr[128];
-	std::unique_ptr<Face*[]> fListStorage;
-	std::unique_ptr<Face*[]> sListStorage;
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -1083,19 +1071,7 @@ struct GreetsScene : SceneDriver {
 			sF3Prev = f3Now;
 		}
 
-		// Edge-detect Tab so a single press toggles cameras (was held-fire,
-		// which made the free camera flap on/off every frame the key was
-		// down).
-		{
-			static bool sTabPrev = false;
-			const bool tabNow = Keyboard[ScTab] != 0;
-			if (tabNow && !sTabPrev) {
-				View = (View == &FC) ? GreetSc->CameraHead : &FC;
-				std::fprintf(stderr, "[TAB greets] toggled → View=%s\n",
-					(View == &FC) ? "FC" : "scene");
-			}
-			sTabPrev = tabNow;
-		}
+		tickTabToggle(GreetSc, "greets");
 
 		dTime = Timer - TTrd;
 		if (Keyboard[ScP]) pause_mode = true;
@@ -1118,8 +1094,7 @@ struct GreetsScene : SceneDriver {
 		}
 		g_FrameTime = TTrd = Timer;
 
-		// Clear Framebuffer and ZBuffer
-		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		clearFrame();
 
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		prof.switchTo(PROF_ANIM);
@@ -1425,7 +1400,7 @@ struct GreetsScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CHPartTime;
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 		if (Timer < 0) Timer = 0;
 	}
 };

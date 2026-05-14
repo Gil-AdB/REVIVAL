@@ -14,31 +14,19 @@ static int32_t CrPartTime = 0;// 10.0f * 100;
 
 void Initialize_Crash()
 {
-	CrashSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
-	memset(CrashSc,0,sizeof(Scene));
-	LoadFLD(CrashSc,"SCENES/CRASH.FLD");
+	CrashSc = loadSceneAligned("SCENES/CRASH.FLD");
 	CrPartTime = 1.5f*100.0f*(CrashSc->EndFrame-CrashSc->StartFrame)/30.0f;
 
-//	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
-//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 	CrashSc->FZP = 2000.0f;
 	CrashSc->NZP = 10.0f;
 	CrashSc->Flags |= Scn_ZBuffer;
 	// Matte-dominated crash scene — OuterVec is the better fit.
 	CrashSc->PreferOuterVec = 1;
-	
+
 	CrashSc->Ambient.R = 64;
 	CrashSc->Ambient.G = 64;
 	CrashSc->Ambient.B = 64;
-	// also make the appropriate Layer 2 fillers,
-	Material *M;
-	for (M = MatLib; M; M = M->Next)
-	{
-		//if (M->RelScene != CrashSc) continue;
-		if (!M->Txtr) continue;
-		M->Flags |= Mat_RGBInterp;
-		M->Txtr->Flags |= Txtr_Tiled;
-	}
+	tagSceneMaterials(CrashSc, /*restrictToScene=*/false);
 
 	Preprocess_Scene(CrashSc, "CRASH");
 
@@ -50,35 +38,15 @@ void Initialize_Crash()
 namespace {
 struct CrashScene : SceneDriver {
 	char MSGStr[128];
-	std::unique_ptr<Face*[]> fListStorage;
-	std::unique_ptr<Face*[]> sListStorage;
 	FrameProfiler prof{"crash"};
 
 	~CrashScene() override { Destroy_Scene(CrashSc); }
 
 	void init() override {
-		int32_t Polys = 0;
-		TriMesh *T;
-		Omni *O;
-
 		SetCurrentScene(CrashSc);
-
-		for(T = CrashSc->TriMeshHead; T; T=T->Next)
-			Polys += T->FIndex;
-		for (O = CrashSc->OmniHead; O; O = O->Next) {
+		for (Omni *O = CrashSc->OmniHead; O; O = O->Next)
 			O->IRange = 2000.0f;
-			Polys++;
-		}
-
-		fListStorage = std::make_unique<Face*[]>(Polys);
-		sListStorage = std::make_unique<Face*[]>(Polys);
-		FList = fListStorage.get();
-		SList = sListStorage.get();
-
-		View = CrashSc->CameraHead;
-
-		C_FZP = CrashSc->FZP;
-		C_rFZP = 1.0f / C_FZP;
+		setupFaceLists(CrashSc, /*includeOmnisInCount=*/true);
 
 		Ambient_Factor = 1;
 		Diffusive_Factor = 1;
@@ -94,19 +62,8 @@ struct CrashScene : SceneDriver {
 
 		g_FrameTime = Timer;
 
-		{
-			static bool sTabPrev = false;
-			const bool tabNow = Keyboard[ScTab] != 0;
-			if (tabNow && !sTabPrev) {
-				View = (View == &FC) ? CrashSc->CameraHead : &FC;
-				std::fprintf(stderr, "[TAB crash] toggled → View=%s\n",
-					(View == &FC) ? "FC" : "scene");
-			}
-			sTabPrev = tabNow;
-		}
-
-		//memset(VPage,0,PageSize);
-		parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		tickTabToggle(CrashSc, "crash");
+		clearFrame();
 
 		CurFrame = CrashSc->StartFrame + (CrashSc->EndFrame-CrashSc->StartFrame) * ((float)g_FrameTime / (float)CrPartTime);
 
@@ -149,12 +106,7 @@ struct CrashScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CrPartTime;
-
-		// Wait for the user to release Backspace before returning, otherwise
-		// the next scene will immediately see Keyboard[ScBackSpace] and bail.
-		// In the eventual Emscripten port this will need to become a tick
-		// state.
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 		if (Timer < 0) Timer = 0;
 	}
 };

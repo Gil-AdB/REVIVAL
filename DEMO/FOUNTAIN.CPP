@@ -801,11 +801,7 @@ void Initialize_Fountain()
 //	Stars = new Vector [200];
 
 	Material *M;
-//	FntSc = new Scene; memset(FntSc,0,sizeof(Scene));
-	FntSc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
-	memset(FntSc,0,sizeof(Scene));
-
-	LoadFLD(FntSc,"SCENES/FOUNTAIN.FLD");
+	FntSc = loadSceneAligned("SCENES/FOUNTAIN.FLD");
 
 	// Particle-heavy with mostly matte fountain surfaces — OuterVec
 	// wins on the non-spec majority of pixels.
@@ -849,25 +845,7 @@ void Initialize_Fountain()
 	FntSc->FZP = 5000.0f;
 	FntSc->Flags |= Scn_SpriteTBR;
 
-	Image Img;
-	for(M = MatLib;M;M=M->Next)
-	{
-		if (M->RelScene != FntSc) continue;
-/*		if (!M->Txtr) continue;
-		for(Material *Mat = MatLib;Mat!=M;Mat=Mat->Next)
-			if (M->Txtr==Mat->Txtr) break;
-		if (M!=Mat) continue;
-
-		Convert_Texture2Image(M->Txtr,&Img);
-		delete [] M->Txtr->Data; M->Txtr->Data = NULL;
-		Gamma_Correction(&Img,1.2f);
-		Convert_Image2Texture(&Img,M->Txtr);
-		FilterLSB_Texture(M->Txtr);
-		delete Img.Data;*/
-		M->Flags |= Mat_RGBInterp;
-		if (M->Txtr)
-			M->Txtr->Flags |= Txtr_Tiled;
-	}
+	tagSceneMaterials(FntSc, /*restrictToScene=*/true);
 
 	Initialize_Particles(FntSc);
 	Preprocess_Scene(FntSc, "FOUNTAIN");
@@ -2078,8 +2056,6 @@ extern Scene* SkySc;
 namespace {
 struct FountainScene : SceneDriver {
 	std::unique_ptr<byte[]> BPage;
-	std::unique_ptr<Face*[]> fListStorage;
-	std::unique_ptr<Face*[]> sListStorage;
 	VESA_Surface Blur = {};
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -2158,8 +2134,7 @@ struct FountainScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		parallel_memset(VPage, 0, PageSize);
-		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		clearFrame();
 
 		prof.switchTo(PROF_SKY);
 		bool SkipCameraAnimation = false;
@@ -2189,16 +2164,7 @@ struct FountainScene : SceneDriver {
 
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
-		{
-			static bool sTabPrev = false;
-			const bool tabNow = Keyboard[ScTab] != 0;
-			if (tabNow && !sTabPrev) {
-				View = (View == &FC) ? FntSc->CameraHead : &FC;
-				std::fprintf(stderr, "[TAB fountain] toggled → View=%s\n",
-					(View == &FC) ? "FC" : "scene");
-			}
-			sTabPrev = tabNow;
-		}
+		tickTabToggle(FntSc, "fountain");
 
 		// 'I' = info: print camera position + forward (rising edge only).
 		{
@@ -2351,7 +2317,7 @@ struct FountainScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= FNTPartTime;
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 		if (Timer < 0) Timer = 0;
 	}
 };

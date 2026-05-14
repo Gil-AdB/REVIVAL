@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -12,6 +13,9 @@
 // etc.) into every scene-tick consumer.
 extern std::atomic<bool> g_shouldQuit;
 extern std::atomic<bool> g_skipScene;
+
+struct Scene;
+struct Face;
 
 // Scene driver interface for the tick-based scene loop.
 //
@@ -35,7 +39,46 @@ struct SceneDriver {
     // TBR span buffer, ...). Engine globals (XRes, YRes, PageSize, VPage,
     // YOffs, ...) have already been updated by the time this fires.
     virtual void on_resize(int /*newX*/, int /*newY*/) {}
+
+protected:
+    // Count polys + omnis in `sc`, allocate FList/SList sized for that count
+    // (stored in fListStorage / sListStorage on this driver), and wire up the
+    // engine-side globals: FList, SList, View = sc->CameraHead, C_FZP, C_rFZP.
+    // includeOmnisInCount=true matches CITY/CRASH semantics (each omni counts
+    // as 1 face for budgeting). The other scenes pass false.
+    void setupFaceLists(Scene *sc, bool includeOmnisInCount);
+
+    // Rising-edge Tab key handler — toggles `View` between `sc->CameraHead`
+    // and the engine free-cam (`FC`), logging the switch. Per-driver state in
+    // tabPrev_ so two scenes don't collide.
+    void tickTabToggle(Scene *sc, const char *sceneName);
+
+    // parallel_memset of VPage + ZPage16 to zero. Same pattern as every
+    // scene's per-frame clear.
+    void clearFrame();
+
+    // Cleanup helper: spins until the user releases Backspace, otherwise the
+    // next scene's tick would immediately see Keyboard[ScBackSpace] and skip.
+    // Honours g_shouldQuit so ESC/Ctrl-C still exits.
+    void waitBackspaceRelease();
+
+    std::unique_ptr<Face*[]> fListStorage;
+    std::unique_ptr<Face*[]> sListStorage;
+    bool tabPrev_ = false;
 };
+
+// Initialize_X helpers — used by each scene's free Initialize function.
+//
+// Allocate a 16-byte-aligned Scene, zero it, and load the FLD into it. The
+// pointer is returned to the caller; ownership stays with whoever called us
+// (typically a file-scope static, freed by the matching Destroy_Scene later).
+Scene *loadSceneAligned(const char *fldPath);
+
+// Walk MatLib and stamp Mat_RGBInterp + Txtr_Tiled on every textured material.
+// Restricted to materials belonging to `sc` when restrictToScene=true (the
+// CITY/FOUNTAIN/GREETS pattern); set false to apply to every material in the
+// library (CRASH historically does this).
+void tagSceneMaterials(Scene *sc, bool restrictToScene);
 
 // Drain g_pendingResize: if a resize is pending, apply it engine-side and
 // notify the active driver. Called at frame top so the upcoming tick()

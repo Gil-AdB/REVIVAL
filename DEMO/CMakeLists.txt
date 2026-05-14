@@ -38,6 +38,7 @@ set(DEMO_SOURCES
     REV.CPP
     Rev.h
     Scenes.h
+    SceneDriver.cpp
     SceneTick.h
     SDL2.cpp
     SDL2.h

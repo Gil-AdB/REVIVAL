@@ -1568,12 +1568,8 @@ Vector ComputeFaceNormal(Vertex *A, Vertex* B, Vertex *C) {
 
 void Initialize_City()
 {
-	CitySc = (Scene *)getAlignedBlock(sizeof(Scene), 16);
-	memset(CitySc,0,sizeof(Scene));
-	LoadFLD(CitySc,"SCENES/CITY.FLD");
-//	CitySc->EndFrame = 1046.0f;
+	CitySc = loadSceneAligned("SCENES/CITY.FLD");
 	CTPartTime = 100.0f*(CitySc->EndFrame-CitySc->StartFrame)/50.0f;
-//	printf("FLD-loaded MEM = %d\n",DPMI_Free_Memory());
 	CitySc->NZP = 20.0;
 	CitySc->FZP = 7500.0f;
 	CitySc->Flags |= Scn_Fogged|Scn_ZBuffer;
@@ -1582,15 +1578,8 @@ void Initialize_City()
 	CitySc->Ambient.B = 32*2;
 	CitySc->Ambient.G = 48*2;
 	CitySc->Ambient.R = 64*2;
-	
-	Material *M;
-	for(M = MatLib;M;M=M->Next)
-	{
-		if (M->RelScene != CitySc) continue;
-		if (!M->Txtr) continue;
-		M->Flags |= Mat_RGBInterp;
-		M->Txtr->Flags |= Txtr_Tiled;
-	}
+
+	tagSceneMaterials(CitySc, /*restrictToScene=*/true);
 
 	Reflective_Surface_Setup();
 	AddCameraOmni(); 
@@ -2015,8 +2004,6 @@ std::vector<debug_outtext> DebugStrs;
 namespace {
 struct CityScene : SceneDriver {
 	char MSGStr[128];
-	std::unique_ptr<Face*[]> fListStorage;
-	std::unique_ptr<Face*[]> sListStorage;
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
@@ -2055,33 +2042,16 @@ struct CityScene : SceneDriver {
 	}
 
 	void init() override {
-		int32_t Polys = 0;
-		TriMesh *T;
-		Omni *O;
-
 		SetCurrentScene(CitySc);
 
 		// get the reflective water surface object
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 
-		for(T = CitySc->TriMeshHead; T; T = T->Next)
-			Polys += T->FIndex;
-		for(O = CitySc->OmniHead; O; O = O->Next)
-			Polys++;
-
-		fListStorage = std::make_unique<Face*[]>(Polys);
-		sListStorage = std::make_unique<Face*[]>(Polys);
-		FList = fListStorage.get();
-		SList = sListStorage.get();
-
-		View = CitySc->CameraHead;
+		setupFaceLists(CitySc, /*includeOmnisInCount=*/true);
 
 		for(int32_t i = 0; i < 20; i++)
 			timerStack[i] = Timer;
-
-		C_FZP = CitySc->FZP;
-		C_rFZP = 1.0f / C_FZP;
 
 		g_FrameTime = TTrd = Timer;
 
@@ -2117,9 +2087,7 @@ struct CityScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		// Clear framebuffer and Z-buffer.
-		parallel_memset(VPage, 0, PageSize);
-		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		clearFrame();
 
 		prof.switchTo(PROF_SKY);
 		RenderSkyCube(SkySc, View, false);
@@ -2147,16 +2115,7 @@ struct CityScene : SceneDriver {
 		}
 		g_FrameTime = TTrd = Timer;
 		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
-		{
-			static bool sTabPrev = false;
-			const bool tabNow = Keyboard[ScTab] != 0;
-			if (tabNow && !sTabPrev) {
-				View = (View == &FC) ? CitySc->CameraHead : &FC;
-				std::fprintf(stderr, "[TAB city] toggled → View=%s\n",
-					(View == &FC) ? "FC" : "scene");
-			}
-			sTabPrev = tabNow;
-		}
+		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
 
 		Reflective_AnimateTexture();
@@ -2293,7 +2252,7 @@ struct CityScene : SceneDriver {
 	void cleanup() override {
 		if (g_profilerActive) prof.dump();
 		Timer -= CTPartTime;
-		while (Keyboard[ScBackSpace] && !g_shouldQuit.load()) continue;
+		waitBackspaceRelease();
 		if (Timer < 0) Timer = 0;
 	}
 };
