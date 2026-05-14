@@ -1,6 +1,7 @@
 
 #include "Rev.h"
 #include <Threads.h>
+#include <Base/FeatureFlags.h>
 #include "CITY.H"
 #include "FrameProfiler.h"
 #include "MeshOps.h"
@@ -1694,12 +1695,9 @@ void Initialize_City()
 	// never built and Obj->Reflection stays null). Phase C work for
 	// deferred env-map will reproduce the reflection sampling per pixel
 	// from the panorama anyway, so skipping during dev is fine.
-	const bool skipCubeMap = []{
-		const char *s = std::getenv("FDS_SKIP_CUBEMAP");
-		return s && s[0] == '1';
-	}();
+	const bool skipCubeMap = fds::FeatureFlags::skip_cubemap();
 	if (skipCubeMap) {
-		fprintf(stderr, "[CITY] FDS_SKIP_CUBEMAP=1 — skipping per-building cube-map bake\n");
+		fprintf(stderr, "[CITY] --skip_cubemap on — skipping per-building cube-map bake\n");
 	}
 
 	std::vector<uint32_t> cubeMaps[6];
@@ -1783,7 +1781,7 @@ void Initialize_City()
 		// Each lat band also has a thin black gridline every 30° of
 		// lon and a thin white gridline every 30° of lat for measuring
 		// what landed where in the reflection.
-		if (std::getenv("FDS_DEBUG_PANORAMA")) {
+		if (fds::FeatureFlags::debug_panorama()) {
 			for (int y = 0; y < PANORAMA_YRES; ++y) {
 				const float ev = float(y) / PANORAMA_YRES;
 				uint32_t band_color;
@@ -1820,7 +1818,7 @@ void Initialize_City()
 		// at scene init, so we can see exactly which world direction
 		// lands at which (eu, ev) and derive a correct lookup formula
 		// against the actual data instead of the algebra.
-		if (std::getenv("FDS_DUMP_PANORAMA")) {
+		if (fds::FeatureFlags::dump_panorama()) {
 			static int dumpIdx = 0;
 			char path[256];
 			snprintf(path, sizeof(path), "/tmp/city_panorama_%02d_%s.ppm",

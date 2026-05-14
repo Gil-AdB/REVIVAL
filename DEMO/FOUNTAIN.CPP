@@ -1,5 +1,6 @@
 #include "Rev.h"
 #include <Threads.h>
+#include <Base/FeatureFlags.h>
 #include "FrameProfiler.h"
 
 #include "FOUNTAIN.H"
@@ -934,15 +935,8 @@ void Initialize_Fountain()
 	// (existing FLD + 9 stream-head followers + stress) below the LA[128]
 	// limit with comfortable headroom.
 	{
-		float pct = 0.0f;
-		if (const char* env = std::getenv("FDS_FOUNTAIN_PARTICLE_OMNI_PCT")) {
-			char* endp = nullptr;
-			float parsed = std::strtof(env, &endp);
-			if (endp != env && parsed > 0.0f) {
-				pct = parsed;
-				if (pct > 100.0f) pct = 100.0f;
-			}
-		}
+		float pct = fds::FeatureFlags::fountain_particle_omni_pct();
+		if (pct > 100.0f) pct = 100.0f;
 		int numAdded = 0;
 		if (pct > 0.0f && FntSc->NumOfParticles > 0) {
 			// Count omnis already in the chain (FLD-loaded + 9 stream-heads).

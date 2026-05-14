@@ -1,5 +1,6 @@
 #include "Rev.h"
 #include <Threads.h>
+#include <Base/FeatureFlags.h>
 #include "FrameProfiler.h"
 
 // ---- Greets centering diagnostics --------------------------------------
@@ -34,7 +35,6 @@
 static float frand() {
 	return static_cast <float> (RAND_15()) / static_cast <float> (RAND_15_MAX);
 }
-
 
 static Scene *GreetSc;
 
@@ -825,6 +825,227 @@ struct GreetsScene : SceneDriver {
 		FillerPixelcount = 0;
 	}
 
+	static void draw_cones(bool sShadowMapView) {
+		// Spotlight cone volumetric glow. For each shadow-casting spot,
+		// build a 16-segment fan cone with apex at the light and rim at
+		// the cone's outer edge. Each fan triangle is 3D-clipped against
+		// the near plane (z=NZP) so that when the camera is inside the
+		// cone — apex behind camera — the triangle becomes a clipped
+		// polygon with new verts on the near plane instead of being
+		// discarded. Then project + rasterize each (sub-)triangle with
+		// additive blend and vertex-alpha falloff (apex bright → rim
+		// transparent). Z-tests against ZPage16 so walls correctly
+		// occlude the glow.
+		//
+		// Two-sided by construction: bary test fills the screen-space
+		// triangle regardless of winding (signs of area and w_i match),
+		// so the cone surface is visible from both inside and outside.
+		if (!sShadowMapView) {
+			struct ConeVtx { float vx, vy, vz; float alpha; };
+			const float kNearZ = std::max(0.01f, GreetSc->NZP);
+			auto worldToView = [&](const Vector &world) -> Vector {
+				const Vector d = {
+					world.x - View->ISource.x,
+					world.y - View->ISource.y,
+					world.z - View->ISource.z };
+				Vector v;
+				MatrixXVector(View->Mat, &d, &v);
+				return v;
+			};
+			// Project to float screen coords. Near-plane-clipped verts
+			// have vz = kNearZ (~0.01) so projected x/y can reach ~1e6.
+			// That's fine in float — the bbox is clamped to the viewport
+			// below, and the bary math stays in float throughout. Do NOT
+			// clamp the projected coords themselves: clamping creates
+			// fake degenerate triangles (collapsing multiple off-screen
+			// verts to the same corner, or producing a screen-corner
+			// vertex that yields a viewport-sized "phantom" triangle).
+			auto projectViewVtx = [&](float vx, float vy, float vz,
+			                          float &outX, float &outY) {
+				const float invZ = 1.0f / vz;
+				outX = CntrX + FOVX * vx * invZ;
+				outY = CntrY - FOVY * vy * invZ;
+			};
+			// Sutherland-Hodgman near-plane clip of a triangle. Up to 4
+			// output verts (when one of the input verts is behind, the
+			// triangle becomes a quad).
+			auto clipTriNear = [&](const ConeVtx in[3], ConeVtx out[4]) -> int {
+				int outCount = 0;
+				ConeVtx prev = in[2];
+				bool prevIn = prev.vz > kNearZ;
+				for (int i = 0; i < 3; ++i) {
+					const ConeVtx &cur = in[i];
+					const bool curIn = cur.vz > kNearZ;
+					if (prevIn != curIn) {
+						const float t = (kNearZ - prev.vz) / (cur.vz - prev.vz);
+						out[outCount].vx    = prev.vx    + t * (cur.vx    - prev.vx);
+						out[outCount].vy    = prev.vy    + t * (cur.vy    - prev.vy);
+						out[outCount].vz    = kNearZ;
+						out[outCount].alpha = prev.alpha + t * (cur.alpha - prev.alpha);
+						++outCount;
+					}
+					if (curIn) out[outCount++] = cur;
+					prev = cur;
+					prevIn = curIn;
+				}
+				return outCount;
+			};
+			// Additive fan triangle with perspective-correct Z-test +
+			// vertex-alpha falloff. View-z is interpolated as 1/z (which
+			// IS linear in screen-space under perspective), then
+			// inverted at the pixel to recover view-z and encode it for
+			// the ZPage16 compare. Linear-in-z bary lerp would be wrong
+			// for varying-z triangles and produces flickering occlusion
+			// as the camera moves.
+			auto addTri = [&](float x0, float y0, float z0, float a0,
+			                  float x1, float y1, float z1, float a1,
+			                  float x2, float y2, float z2, float a2,
+			                  uint8_t cr, uint8_t cg, uint8_t cb) {
+				if (z0 <= 0.0f || z1 <= 0.0f || z2 <= 0.0f) return;
+				const float area = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0);
+				if (std::fabs(area) < 1.0f) return;
+				const float invArea = 1.0f / area;
+				const float rz0 = 1.0f / z0;
+				const float rz1 = 1.0f / z1;
+				const float rz2 = 1.0f / z2;
+				float fxmin = std::min({x0,x1,x2});
+				float fxmax = std::max({x0,x1,x2});
+				float fymin = std::min({y0,y1,y2});
+				float fymax = std::max({y0,y1,y2});
+				if (fxmin < 0.0f)         fxmin = 0.0f;
+				if (fymin < 0.0f)         fymin = 0.0f;
+				if (fxmax > float(XRes-1)) fxmax = float(XRes-1);
+				if (fymax > float(YRes-1)) fymax = float(YRes-1);
+				const int xmin = int(fxmin);
+				const int xmax = int(fxmax);
+				const int ymin = int(fymin);
+				const int ymax = int(fymax);
+				if (xmin > xmax || ymin > ymax) return;
+				dword *fb = (dword*)VPage;
+				const word *zb = ZPage16;
+				for (int y = ymin; y <= ymax; ++y) {
+					const float fy = float(y);
+					for (int x = xmin; x <= xmax; ++x) {
+						const float fx = float(x);
+						const float w0 = ((x1-fx)*(y2-fy) - (x2-fx)*(y1-fy)) * invArea;
+						const float w1 = ((x2-fx)*(y0-fy) - (x0-fx)*(y2-fy)) * invArea;
+						const float w2 = 1.0f - w0 - w1;
+						// Two-sided: when winding flips, area and W_i flip
+						// sign together so w_i = W_i/area stays positive
+						// when the point is inside the triangle.
+						if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+						// Perspective-correct view-z: lerp 1/z linearly,
+						// then invert. Z-test against scene depth so
+						// walls occlude.
+						const float prz = w0*rz0 + w1*rz1 + w2*rz2;
+						if (prz <= 0.0f) continue;
+						const float pz = 1.0f / prz;
+						int penc = 0xFF80 - int(pz * g_zscale);
+						if (penc < 0) penc = 0;
+						if (penc > 0xFFFF) penc = 0xFFFF;
+						const size_t i = size_t(y) * size_t(XRes) + size_t(x);
+						const int zexist = int(zb[i]);
+						if (penc < zexist) continue;  // cone is behind opaque
+						// Vertex-alpha falloff. apex (a=1) → rim (a=0).
+						float alpha = w0*a0 + w1*a1 + w2*a2;
+						if (alpha <= 0.0f) continue;
+						// Soft falloff curve so the rim is much darker
+						// than the apex (linear bary alpha looks flat).
+						alpha = alpha * alpha;
+						const int addR = int(float(cr) * alpha);
+						const int addG = int(float(cg) * alpha);
+						const int addB = int(float(cb) * alpha);
+						const dword pix = fb[i];
+						int oldR = int((pix >> 16) & 0xFF);
+						int oldG = int((pix >>  8) & 0xFF);
+						int oldB = int( pix        & 0xFF);
+						int newR = oldR + addR; if (newR > 255) newR = 255;
+						int newG = oldG + addG; if (newG > 255) newG = 255;
+						int newB = oldB + addB; if (newB > 255) newB = 255;
+						fb[i] = (dword(newR) << 16) | (dword(newG) << 8)
+						        |  dword(newB)        | 0xFF000000u;
+					}
+				}
+			};
+			constexpr int N_SEGMENTS = 16;
+			for (Omni *o = GreetSc->OmniHead; o; o = o->Next) {
+				if (o->Type != Light_SpotLight) continue;
+				if (!(o->Flags & Omni_Active)) continue;
+				const float cosOuter = std::max(0.01f, o->FallOff);
+				const float outerAng = std::acos(cosOuter);
+				Vector axis = o->IDir;
+				Vector_Norm(&axis);
+				Vector ref = (std::fabs(axis.y) < 0.9f)
+					             ? Vector(0.0f, 1.0f, 0.0f)
+					             : Vector(1.0f, 0.0f, 0.0f);
+				Vector right;
+				Cross_Product(&axis, &ref, &right);
+				Vector_Norm(&right);
+				Vector up;
+				Cross_Product(&right, &axis, &up);
+				Vector_Norm(&up);
+				const float L = o->IRange;
+				const float rimAxis = L * std::cos(outerAng);
+				const float rimRad  = L * std::sin(outerAng);
+
+				// Transform apex + rim verts to view space ONCE, keep
+				// the original (vx, vy, vz) so we can 3D-clip each fan
+				// triangle against the near plane before projecting.
+				const Vector apexV = worldToView(o->IPos);
+				ConeVtx rimV[N_SEGMENTS + 1];
+				for (int s = 0; s <= N_SEGMENTS; ++s) {
+					const float theta = float(s) * (2.0f * float(PI) / float(N_SEGMENTS));
+					const float cs = std::cos(theta), sn = std::sin(theta);
+					const Vector rim = {
+						o->IPos.x + axis.x * rimAxis + (right.x * cs + up.x * sn) * rimRad,
+						o->IPos.y + axis.y * rimAxis + (right.y * cs + up.y * sn) * rimRad,
+						o->IPos.z + axis.z * rimAxis + (right.z * cs + up.z * sn) * rimRad,
+					};
+					const Vector rimVw = worldToView(rim);
+					rimV[s].vx = rimVw.x;
+					rimV[s].vy = rimVw.y;
+					rimV[s].vz = rimVw.z;
+					rimV[s].alpha = 0.0f;
+				}
+
+				// Scale the per-spot glow intensity. Additive blending
+				// blows out white-ish cones much faster than saturated
+				// colors (R+G+B all sum into the framebuffer), so we
+				// dim achromatic cones by their chroma — pure white
+				// drops to ~30% of color-channel intensity, fully
+				// saturated colors stay at full strength.
+				const float maxC = std::max({o->L.R, o->L.G, o->L.B});
+				const float minC = std::min({o->L.R, o->L.G, o->L.B});
+				const float chroma = (maxC > 1.0f) ? (maxC - minC) / maxC : 0.0f;
+				const float whitenessScale = 0.3f + 0.7f * chroma;
+				const float intensity = std::min(1.0f, o->ISize * 0.1f) * whitenessScale;
+				const uint8_t cr = uint8_t(std::min(255.0f, o->L.R * intensity));
+				const uint8_t cg = uint8_t(std::min(255.0f, o->L.G * intensity));
+				const uint8_t cb = uint8_t(std::min(255.0f, o->L.B * intensity));
+
+				const ConeVtx apexCV = { apexV.x, apexV.y, apexV.z, 1.0f };
+				for (int s = 0; s < N_SEGMENTS; ++s) {
+					const ConeVtx tri[3] = { apexCV, rimV[s], rimV[s + 1] };
+					ConeVtx clipped[4];
+					const int n = clipTriNear(tri, clipped);
+					if (n < 3) continue;
+					float sx[4], sy[4];
+					for (int k = 0; k < n; ++k) {
+						projectViewVtx(clipped[k].vx, clipped[k].vy, clipped[k].vz,
+						               sx[k], sy[k]);
+					}
+					// Fan triangulate the clipped polygon (3 or 4 verts).
+					for (int k = 2; k < n; ++k) {
+						addTri(sx[0],   sy[0],   clipped[0].vz,   clipped[0].alpha,
+						       sx[k-1], sy[k-1], clipped[k-1].vz, clipped[k-1].alpha,
+						       sx[k],   sy[k],   clipped[k].vz,   clipped[k].alpha,
+						       cr, cg, cb);
+					}
+				}
+			}
+		}
+	}
+
 	bool tick() override {
 		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
 		if (Keyboard[ScBackSpace] || Timer >= CHPartTime) return false;
@@ -978,11 +1199,9 @@ struct GreetsScene : SceneDriver {
 			// Spot height above the robot. Above ~+10 sits above the
 			// ceiling (cone fires into the ceiling top, corridors stay
 			// dark); too low sits on the robot itself (no shadow lever
-			// arm). +5 is a reasonable middle. Tunable via env.
-			static const float kSpotHeight = []{
-				const char *s = std::getenv("FDS_GREETS_SPOT_HEIGHT");
-				return s ? float(std::atof(s)) : 4.0f;
-			}();
+			// arm). +5 is a reasonable middle.
+			const float envSpotHeight = fds::FeatureFlags::greets_spot_height();
+			const float kSpotHeight = envSpotHeight > 0.0f ? envSpotHeight : 4.0f;
 			g_RobotSpot->IPos.y = g_RobotMesh->IPos.y + kSpotHeight;
 			g_RobotSpot->IPos.z = g_RobotMesh->IPos.z;
 			const float t = float(CurFrame) * 0.02f;
@@ -1076,224 +1295,7 @@ struct GreetsScene : SceneDriver {
 			OutTextXY(VPage, XRes - 220, 5, MSGStr, 255);
 		}
 
-		// Spotlight cone volumetric glow. For each shadow-casting spot,
-		// build a 16-segment fan cone with apex at the light and rim at
-		// the cone's outer edge. Each fan triangle is 3D-clipped against
-		// the near plane (z=NZP) so that when the camera is inside the
-		// cone — apex behind camera — the triangle becomes a clipped
-		// polygon with new verts on the near plane instead of being
-		// discarded. Then project + rasterize each (sub-)triangle with
-		// additive blend and vertex-alpha falloff (apex bright → rim
-		// transparent). Z-tests against ZPage16 so walls correctly
-		// occlude the glow.
-		//
-		// Two-sided by construction: bary test fills the screen-space
-		// triangle regardless of winding (signs of area and w_i match),
-		// so the cone surface is visible from both inside and outside.
-		if (!sShadowMapView) {
-			struct ConeVtx { float vx, vy, vz; float alpha; };
-			const float kNearZ = std::max(0.01f, GreetSc->NZP);
-			auto worldToView = [&](const Vector &world) -> Vector {
-				const Vector d = {
-					world.x - View->ISource.x,
-					world.y - View->ISource.y,
-					world.z - View->ISource.z };
-				Vector v;
-				MatrixXVector(View->Mat, &d, &v);
-				return v;
-			};
-			// Project to float screen coords. Near-plane-clipped verts
-			// have vz = kNearZ (~0.01) so projected x/y can reach ~1e6.
-			// That's fine in float — the bbox is clamped to the viewport
-			// below, and the bary math stays in float throughout. Do NOT
-			// clamp the projected coords themselves: clamping creates
-			// fake degenerate triangles (collapsing multiple off-screen
-			// verts to the same corner, or producing a screen-corner
-			// vertex that yields a viewport-sized "phantom" triangle).
-			auto projectViewVtx = [&](float vx, float vy, float vz,
-			                          float &outX, float &outY) {
-				const float invZ = 1.0f / vz;
-				outX = CntrX + FOVX * vx * invZ;
-				outY = CntrY - FOVY * vy * invZ;
-			};
-			// Sutherland-Hodgman near-plane clip of a triangle. Up to 4
-			// output verts (when one of the input verts is behind, the
-			// triangle becomes a quad).
-			auto clipTriNear = [&](const ConeVtx in[3], ConeVtx out[4]) -> int {
-				int outCount = 0;
-				ConeVtx prev = in[2];
-				bool prevIn = prev.vz > kNearZ;
-				for (int i = 0; i < 3; ++i) {
-					const ConeVtx &cur = in[i];
-					const bool curIn = cur.vz > kNearZ;
-					if (prevIn != curIn) {
-						const float t = (kNearZ - prev.vz) / (cur.vz - prev.vz);
-						out[outCount].vx    = prev.vx    + t * (cur.vx    - prev.vx);
-						out[outCount].vy    = prev.vy    + t * (cur.vy    - prev.vy);
-						out[outCount].vz    = kNearZ;
-						out[outCount].alpha = prev.alpha + t * (cur.alpha - prev.alpha);
-						++outCount;
-					}
-					if (curIn) out[outCount++] = cur;
-					prev = cur;
-					prevIn = curIn;
-				}
-				return outCount;
-			};
-			// Additive fan triangle with perspective-correct Z-test +
-			// vertex-alpha falloff. View-z is interpolated as 1/z (which
-			// IS linear in screen-space under perspective), then
-			// inverted at the pixel to recover view-z and encode it for
-			// the ZPage16 compare. Linear-in-z bary lerp would be wrong
-			// for varying-z triangles and produces flickering occlusion
-			// as the camera moves.
-			auto addTri = [&](float x0, float y0, float z0, float a0,
-			                  float x1, float y1, float z1, float a1,
-			                  float x2, float y2, float z2, float a2,
-			                  uint8_t cr, uint8_t cg, uint8_t cb) {
-				if (z0 <= 0.0f || z1 <= 0.0f || z2 <= 0.0f) return;
-				const float area = (x1-x0)*(y2-y0) - (x2-x0)*(y1-y0);
-				if (std::fabs(area) < 1.0f) return;
-				const float invArea = 1.0f / area;
-				const float rz0 = 1.0f / z0;
-				const float rz1 = 1.0f / z1;
-				const float rz2 = 1.0f / z2;
-				float fxmin = std::min({x0,x1,x2});
-				float fxmax = std::max({x0,x1,x2});
-				float fymin = std::min({y0,y1,y2});
-				float fymax = std::max({y0,y1,y2});
-				if (fxmin < 0.0f)         fxmin = 0.0f;
-				if (fymin < 0.0f)         fymin = 0.0f;
-				if (fxmax > float(XRes-1)) fxmax = float(XRes-1);
-				if (fymax > float(YRes-1)) fymax = float(YRes-1);
-				const int xmin = int(fxmin);
-				const int xmax = int(fxmax);
-				const int ymin = int(fymin);
-				const int ymax = int(fymax);
-				if (xmin > xmax || ymin > ymax) return;
-				dword *fb = (dword*)VPage;
-				const word *zb = ZPage16;
-				for (int y = ymin; y <= ymax; ++y) {
-					const float fy = float(y);
-					for (int x = xmin; x <= xmax; ++x) {
-						const float fx = float(x);
-						const float w0 = ((x1-fx)*(y2-fy) - (x2-fx)*(y1-fy)) * invArea;
-						const float w1 = ((x2-fx)*(y0-fy) - (x0-fx)*(y2-fy)) * invArea;
-						const float w2 = 1.0f - w0 - w1;
-						// Two-sided: when winding flips, area and W_i flip
-						// sign together so w_i = W_i/area stays positive
-						// when the point is inside the triangle.
-						if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
-						// Perspective-correct view-z: lerp 1/z linearly,
-						// then invert. Z-test against scene depth so
-						// walls occlude.
-						const float prz = w0*rz0 + w1*rz1 + w2*rz2;
-						if (prz <= 0.0f) continue;
-						const float pz = 1.0f / prz;
-						int penc = 0xFF80 - int(pz * g_zscale);
-						if (penc < 0) penc = 0;
-						if (penc > 0xFFFF) penc = 0xFFFF;
-						const size_t i = size_t(y) * size_t(XRes) + size_t(x);
-						const int zexist = int(zb[i]);
-						if (penc < zexist) continue;  // cone is behind opaque
-						// Vertex-alpha falloff. apex (a=1) → rim (a=0).
-						float alpha = w0*a0 + w1*a1 + w2*a2;
-						if (alpha <= 0.0f) continue;
-						// Soft falloff curve so the rim is much darker
-						// than the apex (linear bary alpha looks flat).
-						alpha = alpha * alpha;
-						const int addR = int(float(cr) * alpha);
-						const int addG = int(float(cg) * alpha);
-						const int addB = int(float(cb) * alpha);
-						const dword pix = fb[i];
-						int oldR = int((pix >> 16) & 0xFF);
-						int oldG = int((pix >>  8) & 0xFF);
-						int oldB = int( pix        & 0xFF);
-						int newR = oldR + addR; if (newR > 255) newR = 255;
-						int newG = oldG + addG; if (newG > 255) newG = 255;
-						int newB = oldB + addB; if (newB > 255) newB = 255;
-						fb[i] = (dword(newR) << 16) | (dword(newG) << 8)
-						      |  dword(newB)        | 0xFF000000u;
-					}
-				}
-			};
-			constexpr int N_SEGMENTS = 16;
-			for (Omni *o = GreetSc->OmniHead; o; o = o->Next) {
-				if (o->Type != Light_SpotLight) continue;
-				if (!(o->Flags & Omni_Active)) continue;
-				const float cosOuter = std::max(0.01f, o->FallOff);
-				const float outerAng = std::acos(cosOuter);
-				Vector axis = o->IDir;
-				Vector_Norm(&axis);
-				Vector ref = (std::fabs(axis.y) < 0.9f)
-					? Vector(0.0f, 1.0f, 0.0f)
-					: Vector(1.0f, 0.0f, 0.0f);
-				Vector right;
-				Cross_Product(&axis, &ref, &right);
-				Vector_Norm(&right);
-				Vector up;
-				Cross_Product(&right, &axis, &up);
-				Vector_Norm(&up);
-				const float L = o->IRange;
-				const float rimAxis = L * std::cos(outerAng);
-				const float rimRad  = L * std::sin(outerAng);
-
-				// Transform apex + rim verts to view space ONCE, keep
-				// the original (vx, vy, vz) so we can 3D-clip each fan
-				// triangle against the near plane before projecting.
-				const Vector apexV = worldToView(o->IPos);
-				ConeVtx rimV[N_SEGMENTS + 1];
-				for (int s = 0; s <= N_SEGMENTS; ++s) {
-					const float theta = float(s) * (2.0f * float(PI) / float(N_SEGMENTS));
-					const float cs = std::cos(theta), sn = std::sin(theta);
-					const Vector rim = {
-						o->IPos.x + axis.x * rimAxis + (right.x * cs + up.x * sn) * rimRad,
-						o->IPos.y + axis.y * rimAxis + (right.y * cs + up.y * sn) * rimRad,
-						o->IPos.z + axis.z * rimAxis + (right.z * cs + up.z * sn) * rimRad,
-					};
-					const Vector rimVw = worldToView(rim);
-					rimV[s].vx = rimVw.x;
-					rimV[s].vy = rimVw.y;
-					rimV[s].vz = rimVw.z;
-					rimV[s].alpha = 0.0f;
-				}
-
-				// Scale the per-spot glow intensity. Additive blending
-				// blows out white-ish cones much faster than saturated
-				// colors (R+G+B all sum into the framebuffer), so we
-				// dim achromatic cones by their chroma — pure white
-				// drops to ~30% of color-channel intensity, fully
-				// saturated colors stay at full strength.
-				const float maxC = std::max({o->L.R, o->L.G, o->L.B});
-				const float minC = std::min({o->L.R, o->L.G, o->L.B});
-				const float chroma = (maxC > 1.0f) ? (maxC - minC) / maxC : 0.0f;
-				const float whitenessScale = 0.3f + 0.7f * chroma;
-				const float intensity = std::min(1.0f, o->ISize * 0.1f) * whitenessScale;
-				const uint8_t cr = uint8_t(std::min(255.0f, o->L.R * intensity));
-				const uint8_t cg = uint8_t(std::min(255.0f, o->L.G * intensity));
-				const uint8_t cb = uint8_t(std::min(255.0f, o->L.B * intensity));
-
-				const ConeVtx apexCV = { apexV.x, apexV.y, apexV.z, 1.0f };
-				for (int s = 0; s < N_SEGMENTS; ++s) {
-					const ConeVtx tri[3] = { apexCV, rimV[s], rimV[s + 1] };
-					ConeVtx clipped[4];
-					const int n = clipTriNear(tri, clipped);
-					if (n < 3) continue;
-					float sx[4], sy[4];
-					for (int k = 0; k < n; ++k) {
-						projectViewVtx(clipped[k].vx, clipped[k].vy, clipped[k].vz,
-						               sx[k], sy[k]);
-					}
-					// Fan triangulate the clipped polygon (3 or 4 verts).
-					for (int k = 2; k < n; ++k) {
-						addTri(sx[0],   sy[0],   clipped[0].vz,   clipped[0].alpha,
-						       sx[k-1], sy[k-1], clipped[k-1].vz, clipped[k-1].alpha,
-						       sx[k],   sy[k],   clipped[k].vz,   clipped[k].alpha,
-						       cr, cg, cb);
-					}
-				}
-			}
-		}
+		//draw_cones(sShadowMapView);
 
 		// Live matID readout at screen center. Reads the G-buffer's
 		// packed mat32 at the center pixel, extracts the matID byte,

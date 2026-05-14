@@ -1,0 +1,69 @@
+// Single source of truth for FDS feature flags.
+//
+// Three macros, each with the same signature:
+//   FDS_FLAG_BOOL (NAME, ENV, DEFAULT, CATEGORY, HELP)
+//   FDS_FLAG_FLOAT(NAME, ENV, DEFAULT, CATEGORY, HELP)
+//   FDS_FLAG_INT  (NAME, ENV, DEFAULT, CATEGORY, HELP)
+//
+// NAME    — C identifier; also the CLI form ("--<name>" / "--no-<name>" / "--<name>=value").
+// ENV     — environment variable name (existing FDS_* names preserved).
+// DEFAULT — compile-time default. Some defaults reference macros (FDS_*_DEFAULT_ON)
+//           so the WASM build can flip them via -DFDS_DEFERRED_DEFAULT_ON=1.
+// CATEGORY — short string used to group output of --help.
+// HELP    — one-line description shown in --help.
+//
+// Adding a flag is a single line in this file.
+
+// ─── deferred pipeline ───────────────────────────────────────────────────
+FDS_FLAG_BOOL(deferred,                 "FDS_DEFERRED",                 FDS_DEFERRED_DEFAULT_ON,        "deferred", "Deferred G-buffer pipeline")
+FDS_FLAG_BOOL(deferred_zcull,           "FDS_DEFERRED_ZCULL",           1,                              "deferred", "Cull G-buffer ROP writes against existing Z (default on)")
+FDS_FLAG_BOOL(deferred_vec,             "FDS_DEFERRED_VEC",             0,                              "deferred", "SIMD lighting tile kernel (slower on arm64-via-simde)")
+FDS_FLAG_BOOL(deferred_outer_vec,       "FDS_DEFERRED_OUTER_VEC",       0,                              "deferred", "Outer-vec kernel (8 px x 1 omni); when unset, falls back to Scene::PreferOuterVec")
+FDS_FLAG_BOOL(deferred_checkerboard,    "FDS_DEFERRED_CHECKERBOARD",    0,                              "deferred", "Half-rate lighting on a checkerboard pattern")
+FDS_FLAG_BOOL(deferred_quarter,         "FDS_DEFERRED_QUARTER",         0,                              "deferred", "Quarter-rate lighting (one of every 2x2 pixels)")
+FDS_FLAG_BOOL(deferred_no_spec,         "FDS_DEFERRED_NO_SPEC",         0,                              "deferred", "Skip specular term in tile kernel")
+FDS_FLAG_BOOL(deferred_unified_tbr,     "FDS_DEFERRED_UNIFIED_TBR",     0,                              "deferred", "Unified transparent + particle TBR")
+FDS_FLAG_BOOL(deferred_gloss_stats,     "FDS_DEFERRED_GLOSS_STATS",     0,                              "deferred", "Dump per-frame glossiness histogram")
+FDS_FLAG_BOOL(deferred_tile_stats,      "FDS_DEFERRED_TILE_STATS",      0,                              "deferred", "Dump per-tile lighting cost stats")
+FDS_FLAG_FLOAT(deferred_max_range,      "FDS_DEFERRED_MAX_RANGE",       0.0f,                           "deferred", "Optional Range cap used for culling only (0 = disabled)")
+
+// ─── shadows ─────────────────────────────────────────────────────────────
+FDS_FLAG_BOOL(shadows,                  "FDS_SHADOWS",                  FDS_SHADOWS_DEFAULT_ON,         "shadows",  "Shadow mapping (requires deferred)")
+FDS_FLAG_BOOL(shadow_polyid,            "FDS_SHADOW_POLYID",            FDS_SHADOW_POLYID_DEFAULT_ON,   "shadows",  "Use PolyId equality test instead of depth comparison")
+FDS_FLAG_BOOL(shadow_backface_cull,     "FDS_SHADOW_BACKFACE_CULL",     0,                              "shadows",  "Cull back-facing tris from shadow maps")
+FDS_FLAG_BOOL(shadow_validate,          "FDS_SHADOW_VALIDATE",          0,                              "shadows",  "Capture clipper outputs outside the input triangle hull")
+FDS_FLAG_BOOL(shadow_prof,              "FDS_SHADOW_PROF",              0,                              "shadows",  "Per-light shadow timing")
+FDS_FLAG_BOOL(dump_shadowmap,           "FDS_DUMP_SHADOWMAP",           0,                              "shadows",  "Dump shadow map to PGM on first frame")
+FDS_FLAG_FLOAT(shadow_fzp_mult,         "FDS_SHADOW_FZP_MULT",          3.0f,                           "shadows",  "Shadow camera FZP multiplier over light IRange")
+FDS_FLAG_INT(shadow_bias,               "FDS_SHADOW_BIAS",              512,                            "shadows",  "Constant Z bias for shadow comparison")
+FDS_FLAG_INT(shadow_slope_bias,         "FDS_SHADOW_SLOPE_BIAS",        1024,                           "shadows",  "Slope-scale Z bias for shadow comparison")
+
+// ─── transparency ────────────────────────────────────────────────────────
+FDS_FLAG_BOOL(no_quad_sort,             "FDS_NO_QUAD_SORT",             0,                              "xpar",     "Skip quad reorder during sort")
+FDS_FLAG_BOOL(xpar_force_twosided,      "FDS_XPAR_FORCE_TWOSIDED",      0,                              "xpar",     "Force transparent fills to be two-sided")
+FDS_FLAG_BOOL(no_xpar_frontback,        "FDS_NO_XPAR_FRONTBACK",        0,                              "xpar",     "Skip front/back separation for two-sided xpar")
+FDS_FLAG_BOOL(no_xpar_objgroup,         "FDS_NO_XPAR_OBJGROUP",         0,                              "xpar",     "Skip per-object grouping of xpar faces")
+FDS_FLAG_BOOL(xpar_light_all,           "FDS_XPAR_LIGHT_ALL",           0,                              "xpar",     "Run every omni on every xpar pixel (vs per-strip)")
+FDS_FLAG_BOOL(debug_xpar_ids,           "FDS_DEBUG_XPAR_IDS",           0,                              "xpar",     "Colorize transparent fills by object id")
+FDS_FLAG_FLOAT(debug_xpar_min_area,     "FDS_DEBUG_XPAR_MIN_AREA",      0.0f,                           "xpar",     "Min triangle area for xpar debug coloring")
+
+// ─── profiling ablation gates ────────────────────────────────────────────
+FDS_FLAG_BOOL(prof_no_tex,              "FDS_PROF_NO_TEX",              0,                              "prof",     "Skip texture sample in deferred kernel")
+FDS_FLAG_BOOL(prof_no_lights,           "FDS_PROF_NO_LIGHTS",           0,                              "prof",     "Skip omni loop in deferred kernel")
+FDS_FLAG_BOOL(prof_no_spec,             "FDS_PROF_NO_SPEC",             0,                              "prof",     "Skip specular in deferred kernel")
+FDS_FLAG_BOOL(prof_no_fog,              "FDS_PROF_NO_FOG",              0,                              "prof",     "Skip fog pass")
+
+// ─── normals / textures ──────────────────────────────────────────────────
+FDS_FLAG_BOOL(nmap_from_diffuse,        "FDS_NMAP_FROM_DIFFUSE",        0,                              "nmap",     "Derive normal map from diffuse (debug)")
+FDS_FLAG_BOOL(no_nmap,                  "FDS_NO_NMAP",                  0,                              "nmap",     "Force flat normals everywhere")
+
+// ─── scene-specific ──────────────────────────────────────────────────────
+FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
+FDS_FLAG_BOOL(debug_panorama,           "FDS_DEBUG_PANORAMA",           0,                              "city",     "City: synthesize debug panoramas with gridlines")
+FDS_FLAG_BOOL(dump_panorama,            "FDS_DUMP_PANORAMA",            0,                              "city",     "City: dump baked panoramas to PPM")
+FDS_FLAG_FLOAT(greets_spot_height,      "FDS_GREETS_SPOT_HEIGHT",       0.0f,                           "greets",   "Greets: override robot spotlight height (0 = scene default)")
+FDS_FLAG_FLOAT(fountain_particle_omni_pct, "FDS_FOUNTAIN_PARTICLE_OMNI_PCT", 0.0f,                      "fountain", "Fountain: percentage of particles spawning omnis")
+
+// ─── demo / debug ────────────────────────────────────────────────────────
+FDS_FLAG_BOOL(skip_to_fountain,         "SKIP_TO_FOUNTAIN",             0,                              "demo",     "Skip Glato + City and jump straight to Fountain")
+FDS_FLAG_BOOL(dump_mats,                "FDS_DUMP_MATS",                0,                              "debug",    "Dump material info on load")

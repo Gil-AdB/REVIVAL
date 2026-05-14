@@ -11,6 +11,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_DEFS.H"
+#include "Base/FeatureFlags.h"
 
 #include "Base/Scene.h"
 
@@ -1419,11 +1420,8 @@ void Unify_Textures(Scene *Sc)
 
 		// Per-material detail table. Emit the full per-Material listing
 		// so we can verify the matID assignments and see what each entry
-		// actually represents (name, texture, lighting params, flags).
-		// Disabled by default — 400+ lines per scene is a lot of output;
-		// flip the env var FDS_DUMP_MATS=1 to enable.
-		const char *dumpEnv = getenv("FDS_DUMP_MATS");
-		if (dumpEnv && dumpEnv[0] == '1') {
+		// actually represents. Disabled by default — 400+ lines per scene.
+		if (fds::FeatureFlags::dump_mats()) {
 			fprintf(stderr,
 				"[MAT-TABLE] scene=%p  matID  name                         "
 				"texture                              "

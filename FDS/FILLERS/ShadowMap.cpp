@@ -6,6 +6,7 @@
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
+#include "Base/FeatureFlags.h"
 #include "F4Vec.h"
 #include "TheOtherBarry.h"
 
@@ -27,11 +28,7 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 	// light only LIGHTS within IRange, but geometry between IRange and
 	// FZP must still be in the depth buffer because it can occlude lit
 	// receivers near the cone edge. Multiplier is tunable via env.
-	static const float sFzpMult = []{
-		const char *s = std::getenv("FDS_SHADOW_FZP_MULT");
-		float v = (s ? std::atof(s) : 0.0f);
-		return (v > 0.0f) ? v : 3.0f;
-	}();
+	const float sFzpMult = fds::FeatureFlags::shadow_fzp_mult();
 	for (Omni *O = Sc->OmniHead; O; O = O->Next) {
 		if (!(O->Flags & Omni_CastsShadow)) continue;
 		ShadowMap sm;
@@ -462,13 +459,10 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 	if (!sm) return;
 	if (numVerts < 3) return;
 
-	// FDS_SHADOW_VALIDATE=1: capture clipper outputs that aren't within
-	// the input triangle's convex hull. Used to find clipper edge cases
-	// the near-skip in the orchestrator missed. Capped to first 8 events.
-	static const bool sValidate = []{
-		const char *s = std::getenv("FDS_SHADOW_VALIDATE");
-		return s && s[0] == '1';
-	}();
+	// Capture clipper outputs that aren't within the input triangle's
+	// convex hull, to find clipper edge cases the near-skip in the
+	// orchestrator missed. Capped to first 8 events.
+	const bool sValidate = fds::FeatureFlags::shadow_validate();
 	if (sValidate && F) {
 		static std::atomic<int> sLogged{0};
 		const float Ax = F->A->PX, Ay = F->A->PY;

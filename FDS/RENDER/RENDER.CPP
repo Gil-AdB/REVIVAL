@@ -20,6 +20,7 @@
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
+#include "Base/FeatureFlags.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
 
@@ -422,12 +423,7 @@ static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
 	if (F->B->TPos.z > dz) dz = F->B->TPos.z;
 	if (F->C->TPos.z > dz) dz = F->C->TPos.z;
 
-	// Env-var escape hatch for A/B testing the sibling-unification fix.
-	static const bool disabled = []{
-		const char* s = std::getenv("FDS_NO_QUAD_SORT");
-		return s && s[0] == '1';
-	}();
-	if (disabled) return dz;
+	if (fds::FeatureFlags::no_quad_sort()) return dz;
 
 	auto sameNormal = [](const Face* x, const Face* y) {
 		return x->N.x == y->N.x && x->N.y == y->N.y && x->N.z == y->N.z;
@@ -850,22 +846,14 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 	// far half doesn't even render. Quick experiment to gauge whether
 	// the deferred path's missing-inner-objects symptom improves when
 	// both halves are present.
-	static const bool forceXparTwoSided = []{
-		const char* s = std::getenv("FDS_XPAR_FORCE_TWOSIDED");
-		return s && s[0] == '1';
-	}();
+	const bool forceXparTwoSided = fds::FeatureFlags::xpar_force_twosided();
 	// Shadow pass: treat all faces as two-sided. Single-quad walls have
 	// no back-side polygon to take over when the light's on their "back",
 	// yet they still occlude light. Backface-culling for shadow rendering
 	// is geometry-dependent (correct for sealed convex meshes, wrong for
-	// single-sided walls/sheets) — easier to just skip it. Toggle this off
-	// via FDS_SHADOW_BACKFACE_CULL=1 if you want to A/B.
+	// single-sided walls/sheets) — easier to just skip it.
 	extern thread_local bool g_inShadowPass;
-	static const bool sShadowBackface = []{
-		const char *s = std::getenv("FDS_SHADOW_BACKFACE_CULL");
-		return s && s[0] == '1';
-	}();
-	const bool shadowNoBackface = g_inShadowPass && !sShadowBackface;
+	const bool shadowNoBackface = g_inShadowPass && !fds::FeatureFlags::shadow_backface_cull();
 	for (F=T->Faces;F<FEnd;F++) {
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;
@@ -987,14 +975,8 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 				//   bit-low:  face fine sort (in [0, 1.0], used as fraction
 				//             so adjacent faces of the same object still
 				//             back-to-front)
-				static const bool xparFrontBackDisabled = []{
-					const char* s = std::getenv("FDS_NO_XPAR_FRONTBACK");
-					return s && s[0] == '1';
-				}();
-				static const bool xparObjGroupDisabled = []{
-					const char* s = std::getenv("FDS_NO_XPAR_OBJGROUP");
-					return s && s[0] == '1';
-				}();
+				const bool xparFrontBackDisabled = fds::FeatureFlags::no_xpar_frontback();
+				const bool xparObjGroupDisabled = fds::FeatureFlags::no_xpar_objgroup();
 
 				if (xparObjGroupDisabled) {
 					// Legacy face-only sort, used for A/B comparison.
@@ -1893,8 +1875,7 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 // Lighting() also early-returns when this is set — its per-vertex
 // output is unused on the deferred path.
 bool deferredEnabled() {
-	static bool cached = fdsEnvBool("FDS_DEFERRED", FDS_DEFERRED_DEFAULT_ON);
-	return cached;
+	return fds::FeatureFlags::deferred();
 }
 
 // Per-scene matID for the water material — when this matches the
@@ -2111,12 +2092,8 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 	// Per-tile depth-bounded light culling. Computed by
 	// computeTileDepthBounds (caller fills tileLights[].zMin / zMax);
 	// we reject lights whose view-space z extent doesn't overlap the
-	// tile's pixel depth range. Default on; set FDS_DEFERRED_ZCULL=0
-	// to disable.
-	static const bool zCullEnabled = []{
-		const char *s = std::getenv("FDS_DEFERRED_ZCULL");
-		return !s || s[0] != '0';
-	}();
+	// tile's pixel depth range. Default on.
+	const bool zCullEnabled = fds::FeatureFlags::deferred_zcull();
 
 	for (int li = 0; li < numLights; ++li) {
 		const float vx = lights.posX[li];
@@ -2515,11 +2492,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 // work, no early-out), but the scaffolding is in place to revisit on
 // AVX2 / native NEON / wider lanes.
 static bool deferredLightingVecEnabled() {
-	static bool cached = []{
-		const char *s = std::getenv("FDS_DEFERRED_VEC");
-		return s && s[0] == '1';
-	}();
-	return cached;
+	return fds::FeatureFlags::deferred_vec();
 }
 
 // FDS_DEFERRED_OUTER_VEC=1 selects the outer-SIMD kernel which
@@ -2536,21 +2509,12 @@ static bool deferredLightingVecEnabled() {
 // dominated by matte materials (city, fountain, crash) or by spec/nmap
 // shiny ones (greets — outer kernel pays per-lane nmap + scalar
 // fallback for most pixels).
-static int outerVecEnvSetting() {
-	// 0 = follow scene policy, 1 = force on, -1 = force off.
-	static int cached = []{
-		const char *s = std::getenv("FDS_DEFERRED_OUTER_VEC");
-		if (!s) return 0;
-		if (s[0] == '0') return -1;
-		if (s[0] == '1') return 1;
-		return 0;
-	}();
-	return cached;
-}
-
 static bool deferredLightingOuterVecEnabled() {
-	const int env = outerVecEnvSetting();
-	if (env != 0) return env > 0;
+	// Tri-state: when set explicitly (CLI or env), the flag wins; otherwise
+	// fall back to the scene's PreferOuterVec policy. Greets sets it off
+	// because the outer kernel's per-lane nmap costs dominate most pixels.
+	if (fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::deferred_outer_vec))
+		return fds::FeatureFlags::deferred_outer_vec();
 	return CurScene && CurScene->PreferOuterVec != 0;
 }
 
@@ -2561,11 +2525,7 @@ static bool deferredLightingOuterVecEnabled() {
 // share matID, falling back to full shade when they don't (e.g. across
 // material edges). ~50% of pixels skip the omni loop entirely.
 static bool deferredLightingCheckerboardEnabled() {
-	static bool cached = []{
-		const char *s = std::getenv("FDS_DEFERRED_CHECKERBOARD");
-		return s && s[0] == '1';
-	}();
-	return cached;
+	return fds::FeatureFlags::deferred_checkerboard();
 }
 
 // FDS_DEFERRED_QUARTER=1 enables quarter-rate lighting: only pixels
@@ -2580,11 +2540,7 @@ static bool deferredLightingCheckerboardEnabled() {
 // shade for that pixel. ~75% of pixels skip the omni loop. Mutually
 // exclusive with checkerboard (this one wins when both are set).
 static bool deferredLightingQuarterEnabled() {
-	static bool cached = []{
-		const char *s = std::getenv("FDS_DEFERRED_QUARTER");
-		return s && s[0] == '1';
-	}();
-	return cached;
+	return fds::FeatureFlags::deferred_quarter();
 }
 
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
@@ -2602,25 +2558,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 
-	// Per-stage ablation gates. Read-once env vars; set one to '1' to
-	// short-circuit that stage so a bench harness can measure its cost
-	// from the frame-time delta (see `--bench=scene@...`).
-	static const bool profNoTex = []{
-		const char *s = std::getenv("FDS_PROF_NO_TEX");
-		return s && s[0] == '1';
-	}();
-	static const bool profNoLights = []{
-		const char *s = std::getenv("FDS_PROF_NO_LIGHTS");
-		return s && s[0] == '1';
-	}();
-	static const bool profNoSpec = []{
-		const char *s = std::getenv("FDS_PROF_NO_SPEC");
-		return s && s[0] == '1';
-	}();
-	static const bool profNoFog = []{
-		const char *s = std::getenv("FDS_PROF_NO_FOG");
-		return s && s[0] == '1';
-	}();
+	// Per-stage ablation gates. Set one of these on to short-circuit the
+	// stage so a bench harness can measure its cost from the frame-time
+	// delta (see `--bench=scene@...`).
+	const bool profNoTex    = fds::FeatureFlags::prof_no_tex();
+	const bool profNoLights = fds::FeatureFlags::prof_no_lights();
+	const bool profNoSpec   = fds::FeatureFlags::prof_no_spec();
+	const bool profNoFog    = fds::FeatureFlags::prof_no_fog();
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2680,17 +2624,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// the normal map. Visually wrong but lets us measure the
 			// per-pixel cost of the normal-map code path on existing
 			// scenes without authoring or baking any new textures.
-			static const bool nmapFromDiffuse = []{
-				const char* s = std::getenv("FDS_NMAP_FROM_DIFFUSE");
-				return s && s[0] == '1';
-			}();
-			// FDS_NO_NMAP=1 forces the kernel to ignore Mat->NormalMap and
-			// fall back to the geometric N — useful for A/B comparing
-			// the normal-map effect on its own without rebuilding.
-			static const bool nmapDisabled = []{
-				const char* s = std::getenv("FDS_NO_NMAP");
-				return s && s[0] == '1';
-			}();
+			const bool nmapFromDiffuse = fds::FeatureFlags::nmap_from_diffuse();
+			const bool nmapDisabled = fds::FeatureFlags::no_nmap();
 			Texture* nmTex = nmapDisabled ? nullptr : Mat->NormalMap;
 			if (!nmTex && nmapFromDiffuse) nmTex = Mat->Txtr;
 			if (nmTex) {
@@ -2792,11 +2727,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// FDS_DEFERRED_NO_SPEC=1: force-disable all deferred specular,
 			// regardless of per-material Mat->Specular. Diagnostic for
 			// specular firefly / bump-map speckle isolation.
-			static const bool sNoSpec = []{
-				const char *s = std::getenv("FDS_DEFERRED_NO_SPEC");
-				return s && s[0] == '1';
-			}();
-			const bool wantSpecular = !sNoSpec && specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
+			const bool wantSpecular = !fds::FeatureFlags::deferred_no_spec()
+				&& specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
 				: 32.0f;
@@ -2838,10 +2770,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// every textured material). The geometric N from the
 			// G-buffer would otherwise drive vec lighting and the
 			// normal-map perturbation would be lost.
-			static const bool nmapFromDiffuse_useVec = []{
-				const char* s = std::getenv("FDS_NMAP_FROM_DIFFUSE");
-				return s && s[0] == '1';
-			}();
+			const bool nmapFromDiffuse_useVec = fds::FeatureFlags::nmap_from_diffuse();
 			const bool hasNormalMap = Mat->NormalMap ||
 				(nmapFromDiffuse_useVec && Mat->Txtr);
 			const bool useVecHere = useVec && !hasNormalMap;
@@ -3133,14 +3062,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 										// scale by 1/(N·L) - 1 so front-facing surfaces
 										// get no extra; grazing surfaces get a lot.
 										// Tunable via FDS_SHADOW_BIAS / SLOPE_BIAS.
-										static const int kShadowBias = []{
-											const char *s = std::getenv("FDS_SHADOW_BIAS");
-											return s ? std::atoi(s) : 512;
-										}();
-										static const int kSlopeBias = []{
-											const char *s = std::getenv("FDS_SHADOW_SLOPE_BIAS");
-											return s ? std::atoi(s) : 1024;
-										}();
+										const int kShadowBias = fds::FeatureFlags::shadow_bias();
+										const int kSlopeBias  = fds::FeatureFlags::shadow_slope_bias();
 										// Use the GEOMETRIC normal (saved before normal-
 										// map perturbation) for slope calc — the slope
 										// is about the underlying surface, not the
@@ -3294,14 +3217,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const meka::GBuffer &gbX = *gbPtr;
 	uint16_t *xparZ = zPtr;
 	dword *out = reinterpret_cast<dword *>(VPage);
-	// FDS_XPAR_LIGHT_ALL=1: bypass per-tile light culling for transparents;
-	// iterate the full scene omni list per pixel. Conservatively-correct
-	// (no false omits at tile seams) but slower. Useful for diagnosing
-	// whether observed lighting steps come from culling drift.
-	static const bool lightAll = []{
-		const char *s = std::getenv("FDS_XPAR_LIGHT_ALL");
-		return s && s[0] == '1';
-	}();
+	// Conservative per-pixel light cull: bypasses the per-tile filter,
+	// useful for diagnosing whether observed lighting steps come from
+	// culling drift at tile seams.
+	const bool lightAll = fds::FeatureFlags::xpar_light_all();
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -3557,11 +3476,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 // InsertTransparentToTBR bails when NumTiles==0. Only fountain
 // currently calls TBR_Init.
 bool deferredUnifiedTbrEnabled() {
-	static bool flagCached = []{
-		const char *s = std::getenv("FDS_DEFERRED_UNIFIED_TBR");
-		return s && s[0] == '1';
-	}();
-	if (!flagCached) return false;
+	if (!fds::FeatureFlags::deferred_unified_tbr()) return false;
 	if (!CurScene) return false;
 	if (!CurScene->SBufferHead || CurScene->NumTiles == 0) return false;
 	return true;
@@ -3977,12 +3892,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			const bool anyVecLane = !_mm256_testz_si256(needVec, needVec);
 
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
-			// FDS_PROF_NO_LIGHTS gate: skip the loop entirely so the
-			// bench harness can isolate non-light kernel cost.
-			static const bool profNoLights = []{
-				const char *s = std::getenv("FDS_PROF_NO_LIGHTS");
-				return s && s[0] == '1';
-			}();
+			const bool profNoLights = fds::FeatureFlags::prof_no_lights();
 			const int omniLoopN = (profNoLights || !anyVecLane) ? 0 : tl.count;
 			for (int n = 0; n < omniLoopN; ++n) {
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
@@ -4523,7 +4433,7 @@ static void Render_DeferredLighting() {
 	// the current scene. Run once per scene change; lets us confirm the
 	// squaring-dispatch switch in the lighting kernel covers everything
 	// in use, and warn if an FLD ships a gloss value we don't specialize.
-	if (std::getenv("FDS_DEFERRED_GLOSS_STATS")) {
+	if (fds::FeatureFlags::deferred_gloss_stats()) {
 		static Scene* lastScene = nullptr;
 		if (Sc != lastScene) {
 			lastScene = Sc;
@@ -4555,10 +4465,7 @@ static void Render_DeferredLighting() {
 	// contribution is `1 - clamp/Range_real` ≈ 1, dropping to 0 at the
 	// clamp edge). Used to estimate the perf upside of dialing in
 	// effective ranges scene-wide.
-	float maxRange = 0.0f;
-	if (const char *s = std::getenv("FDS_DEFERRED_MAX_RANGE")) {
-		maxRange = float(std::atof(s));
-	}
+	const float maxRange = fds::FeatureFlags::deferred_max_range();
 
 	std::memset(&lights, 0, sizeof(lights));
 	int numLights = 0;
@@ -4605,8 +4512,7 @@ static void Render_DeferredLighting() {
 		// shadows are enabled — otherwise the kernel must skip the
 		// shadow test (and the shadow maps are stale-empty anyway).
 		int32_t smIdx = -1;
-		static const bool sShadowsOn = fdsEnvBool("FDS_SHADOWS", FDS_SHADOWS_DEFAULT_ON);
-		if (sShadowsOn && (O->Flags & Omni_CastsShadow)) {
+		if (fds::FeatureFlags::shadows() && (O->Flags & Omni_CastsShadow)) {
 			for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
 				if (g_shadowMaps[i].omni == O) { smIdx = int32_t(i); break; }
 			}
@@ -4650,7 +4556,7 @@ static void Render_DeferredLighting() {
 		const int numStrips = (YRes + STRIP_H - 1) >> 3;
 		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights);
 	}
-	if (std::getenv("FDS_DEFERRED_TILE_STATS")) {
+	if (fds::FeatureFlags::deferred_tile_stats()) {
 		int total = 0, tmin = INT_MAX, tmax = 0;
 		for (int t = 0; t < DEFERRED_NUM_TILES; ++t) {
 			total += tileLights[t].count;
@@ -4869,21 +4775,16 @@ static void Render_DeferredFogPass() {
 // repopulate FList for the main pass. (One extra Transform_Objects per
 // shadow light per frame — acceptable until we profile.)
 //
-// Gate: env `FDS_SHADOWS=1`. Off by default while wiring.
+// Off by default while wiring; flip via --shadows.
 static bool shadowsEnabled() {
-	static const bool cached = fdsEnvBool("FDS_SHADOWS", FDS_SHADOWS_DEFAULT_ON);
-	return cached;
+	return fds::FeatureFlags::shadows();
 }
 
 thread_local bool g_inShadowPass = false;
 
-// PolyId is the production default. FDS_SHADOW_POLYID=0 forces back to
-// Depth at startup (F3 still toggles at runtime). The compile-time
-// FDS_SHADOW_POLYID_DEFAULT_ON applies when the env var is unset —
-// keeps the WASM build on PolyId without needing browser env vars.
+// PolyId is the production default. F3 still toggles at runtime.
 std::atomic<ShadowMode> g_shadowMode{
-	fdsEnvBool("FDS_SHADOW_POLYID", FDS_SHADOW_POLYID_DEFAULT_ON)
-		? ShadowMode::PolyId : ShadowMode::Depth};
+	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
 
 void Render_DeferredShadowMaps(Scene *Sc)
@@ -4891,14 +4792,10 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	if (!shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
 
-	// FDS_SHADOW_PROF=1: per-shadow-pass timing breakdown of Transform vs
-	// Rasterize cost, averaged over a rolling window and printed every N
-	// frames. Tells us where to focus optimization — if Transform >> Raster,
-	// cross-light parallelism is moot and Transform itself needs work.
-	static const bool sProfShadow = []{
-		const char *s = std::getenv("FDS_SHADOW_PROF");
-		return s && s[0] == '1';
-	}();
+	// Per-shadow-pass timing breakdown of Transform vs Rasterize cost,
+	// averaged over a rolling window. Tells us where to focus optimization
+	// — if Transform >> Raster, cross-light parallelism is moot.
+	const bool sProfShadow = fds::FeatureFlags::shadow_prof();
 	using clk = std::chrono::high_resolution_clock;
 	static thread_local int sFrameIdx = 0;
 	static thread_local double sXformAcc = 0.0;
@@ -5134,7 +5031,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	// /tmp/shadowmap_<N>.pgm. One-shot per process — only dumps on
 	// the first call.
 	static bool dumpedShadowMap = false;
-	if (!dumpedShadowMap && std::getenv("FDS_DUMP_SHADOWMAP")) {
+	if (!dumpedShadowMap && fds::FeatureFlags::dump_shadowmap()) {
 		dumpedShadowMap = true;
 		for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
 			const ShadowMap& sm = g_shadowMaps[i];
@@ -5467,18 +5364,10 @@ xpar_done: ;
 	// index and SortZ at its screen centroid. Lets you read the actual sort
 	// values that drove rendering — useful for diagnosing back-to-front
 	// ordering on real scenes.
-	static const bool debugXparIds = []{
-		const char* s = std::getenv("FDS_DEBUG_XPAR_IDS");
-		return s && s[0] == '1';
-	}();
-	if (debugXparIds) {
-		// Min screen area threshold (px²) — skips tiny particles. Override
-		// with FDS_DEBUG_XPAR_MIN_AREA. Also dumps the full list to stderr
-		// regardless of the visual filter.
-		float minArea = 500.0f;
-		if (const char* s = std::getenv("FDS_DEBUG_XPAR_MIN_AREA")) {
-			minArea = float(std::atof(s));
-		}
+	if (fds::FeatureFlags::debug_xpar_ids()) {
+		// Min screen area threshold (px²) — skips tiny particles.
+		const float setArea = fds::FeatureFlags::debug_xpar_min_area();
+		const float minArea = setArea > 0.0f ? setArea : 500.0f;
 		std::fprintf(stderr, "[XPAR-IDS] (all transparent faces in render order)\n");
 		for (int32_t i = 0; i < CAll; ++i) {
 			Face* F = FList[i];

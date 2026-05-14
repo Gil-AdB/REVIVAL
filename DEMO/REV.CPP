@@ -465,6 +465,7 @@ material global ID or ptr
 #include "Resize.h"
 #include <float.h>
 #include <Base/TriMesh.h>
+#include <Base/FeatureFlags.h>
 #include "Config.h"
 #include "FILLERS/IX.h"
 #include "Threads.h"
@@ -1077,7 +1078,7 @@ void CodeEntry(void *var)
 	}
 	Timer = 0;
 
-	bool skipToFountain = std::getenv("SKIP_TO_FOUNTAIN") != nullptr;
+	bool skipToFountain = fds::FeatureFlags::skip_to_fountain();
 	if (!skipToFountain) {
 	Run_Glato();
 
@@ -1147,16 +1148,23 @@ int main(int argc, const char *argv[])
 	// load on 2× scale). Default 0 keeps the cheap point-sized render.
 	g_hiDPI = cfg.extractInteger("HiDPI");
 
+	bool helpRequested = false;
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--help") == 0 ||
 		    std::strcmp(argv[i], "-h")     == 0) {
-			std::printf(
+			helpRequested = true;
+			break;
+		}
+	}
+	if (helpRequested) {
+		std::printf(
 "REVIVAL / FLOOD demo\n"
 "\n"
 "USAGE\n"
 "  ./DEMO                                   run the demo interactively\n"
 "  ./DEMO --snapshot=<scene>[@t=T1,T2,...] [--out=DIR]\n"
 "  ./DEMO --bench=<kind>[@iters=N,seed=N,...]\n"
+"  ./DEMO [--<flag> | --no-<flag> | --<flag>=VALUE]...\n"
 "  ./DEMO --help | -h                       this message\n"
 "\n"
 "SNAPSHOT SCENES (headless deterministic PPM dump, no SDL window)\n"
@@ -1178,47 +1186,6 @@ int main(int argc, const char *argv[])
 "  flip           SDL present-path microbench\n"
 "  greets-pipe    Greets dynamic-text-texture pipeline harness\n"
 "\n"
-"RENDER PATH\n"
-"  FDS_DEFERRED=0|1                         Forward (0, default) or deferred path\n"
-"  FDS_DEFERRED_VEC=0|1                     SIMD vec body in deferred lighting (default 1)\n"
-"  FDS_DEFERRED_OUTER_VEC=0|1               Outer-vec experimental kernel\n"
-"  FDS_DEFERRED_CHECKERBOARD=0|1            Checkerboard 2-tap interpolation\n"
-"  FDS_DEFERRED_QUARTER=0|1                 Quarter-rate shading (every other row+col)\n"
-"  FDS_DEFERRED_MAX_RANGE=R                 Clamp light range to R for culling perf test\n"
-"  FDS_DEFERRED_TILE_STATS=1                Print per-tile omni-count stats\n"
-"  FDS_PROF_NO_TEX=1                        Skip diffuse texel fetch (constant gray)\n"
-"  FDS_PROF_NO_LIGHTS=1                     Skip per-omni loop (ambient + nmap only)\n"
-"  FDS_PROF_NO_SPEC=1                       Force wantSpecular=false in deferred kernel\n"
-"  FDS_PROF_NO_FOG=1                        Skip fog/depth-falloff math\n"
-"\n"
-"TRANSPARENT SORT & RENDERING\n"
-"  FDS_NO_QUAD_SORT=1          Disable quad-aware sibling tri max-z unification\n"
-"  FDS_NO_XPAR_FRONTBACK=1     Disable back/front-facing partition in xpar sort\n"
-"  FDS_NO_XPAR_OBJGROUP=1      Disable object-level grouping in xpar sort\n"
-"  FDS_XPAR_FORCE_TWOSIDED=1   Force TwoSided on fountain f_sphere / f_in_shpere\n"
-"  FDS_XPAR_LIGHT_ALL=1        Bypass per-tile light cull on transparents\n"
-"  FDS_DEBUG_XPAR_IDS=1        Overlay xpar face IDs + sortZ at screen centroid\n"
-"  FDS_DEBUG_XPAR_MIN_AREA=A   Min screen area (px^2) for the overlay (default 500)\n"
-"\n"
-"NORMAL MAPS (Tier B, tangent-space)\n"
-"  FDS_NO_NMAP=1               Disable Mat->NormalMap sampling (force geometric N)\n"
-"  FDS_NMAP_FROM_DIFFUSE=1     Treat every textured material's diffuse as its\n"
-"                              normal map (perf-test path; visuals wrong)\n"
-"\n"
-"WATER / REFLECTION\n"
-"  FDS_DEBUG_PANORAMA=1        Synthetic quadrant panorama on every reflective bldg\n"
-"  FDS_SKIP_CUBEMAP=1          Skip the per-building cube-map bake\n"
-"  FDS_DUMP_PANORAMA=1         Dump baked panoramas to PPM at city init\n"
-"  FDS_DUMP_MATS=1             Stderr-dump every loaded Material's tone factors\n"
-"\n"
-"FOUNTAIN SNAPSHOT CAMERA OVERRIDE\n"
-"  FNTSNAP_POS=X,Y,Z           Pin camera position\n"
-"  FNTSNAP_FWD=X,Y,Z           Pin camera forward vector\n"
-"  FNTSNAP_FOV=F               Pin field-of-view (degrees)\n"
-"\n"
-"XPARTEST\n"
-"  XPARTEST_TRI_COUNT=N        Limit cube-glass test to first N sorted triangles\n"
-"\n"
 "INTERACTIVE KEYS\n"
 "  ESC                exit demo immediately\n"
 "  Backspace          skip to next scene\n"
@@ -1234,16 +1201,28 @@ int main(int argc, const char *argv[])
 "\n"
 "COMMON RECIPES\n"
 "  Deferred snapshot of greets:\n"
-"    FDS_DEFERRED=1 ./DEMO --snapshot=greets --out=/tmp/g\n"
+"    ./DEMO --deferred --snapshot=greets --out=/tmp/g\n"
 "  A/B normal-map effect:\n"
-"    FDS_DEFERRED=1 ./DEMO --snapshot=greets --out=/tmp/with\n"
-"    FDS_NO_NMAP=1 FDS_DEFERRED=1 ./DEMO --snapshot=greets --out=/tmp/without\n"
+"    ./DEMO --deferred --snapshot=greets --out=/tmp/with\n"
+"    ./DEMO --deferred --no-nmap --snapshot=greets --out=/tmp/without\n"
 "  Glass cube test, deferred 2-deep:\n"
-"    FDS_DEFERRED=1 ./DEMO --snapshot=xpartest@t=4 --out=/tmp/cube\n"
-);
-			return 0;
-		}
+"    ./DEMO --deferred --snapshot=xpartest@t=4 --out=/tmp/cube\n"
+"\n"
+"SNAPSHOT / TEST ENV (not feature flags)\n"
+"  FNTSNAP_POS=X,Y,Z           Pin fountain snapshot camera position\n"
+"  FNTSNAP_FWD=X,Y,Z           Pin fountain snapshot camera forward vector\n"
+"  FNTSNAP_FOV=F               Pin fountain snapshot field-of-view\n"
+"  XPARTEST_TRI_COUNT=N        Limit cube-glass test to first N sorted tris\n"
+"\n"
+		);
+		fds::FeatureFlags::printHelp(stdout);
+		return 0;
 	}
+
+	// Consume feature-flag args (--flag / --no-flag / --flag=value). Unknown
+	// flags fall through to snapshot/bench parsing; those parsers ignore
+	// anything they don't recognise.
+	fds::FeatureFlags::parseArgs(argc, argv);
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {

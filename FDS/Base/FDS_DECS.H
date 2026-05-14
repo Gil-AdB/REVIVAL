@@ -3,28 +3,6 @@
 #include "FDS_VARS.H"
 #include "Vector.h"
 #include <atomic>
-#include <cstdlib>
-
-// Boolean env flag with a compile-time default. When the env var is
-// set, '1' = on and anything else = off (matches legacy behaviour).
-// The default applies only when the env var is unset — used so the
-// WASM build (where getenv is unreliable in the browser) can bake in
-// "deferred + shadows on" via -DFDS_*_DEFAULT_ON=1 without losing the
-// runtime env-var override on native.
-inline bool fdsEnvBool(const char *name, bool def) {
-    const char *s = std::getenv(name);
-    return s ? (s[0] == '1') : def;
-}
-
-#ifndef FDS_DEFERRED_DEFAULT_ON
-#define FDS_DEFERRED_DEFAULT_ON 0
-#endif
-#ifndef FDS_SHADOWS_DEFAULT_ON
-#define FDS_SHADOWS_DEFAULT_ON 0
-#endif
-#ifndef FDS_SHADOW_POLYID_DEFAULT_ON
-#define FDS_SHADOW_POLYID_DEFAULT_ON 1
-#endif
 
 // Math declarations
 
