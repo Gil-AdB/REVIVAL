@@ -250,19 +250,25 @@ void Render_DeferredShadowMaps(Scene *Sc)
 
 	if (sProfShadow) {
 		++sFrameIdx;
-		// Print every 60 frames (~2s at 30 fps).
-		if (sFrameIdx % 60 == 0) {
-			const double xformAvg  = sXformAcc  / 60.0;
-			const double rasterAvg = sRasterAcc / 60.0;
+		// Print interval — env override SHADOW_PROF_INTERVAL=N (default 60
+		// for live runs to keep stderr quiet; snapshot harness uses N=1
+		// since each invocation only renders a handful of frames).
+		static const int sInterval = []() {
+			const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
+			return (e && *e) ? std::max(1, std::atoi(e)) : 60;
+		}();
+		if (sFrameIdx % sInterval == 0) {
+			const double xformAvg  = sXformAcc  / sInterval;
+			const double rasterAvg = sRasterAcc / sInterval;
 			const double perLightX = sLightCount ? sXformAcc / sLightCount : 0.0;
 			const double perLightR = sLightCount ? sRasterAcc / sLightCount : 0.0;
 			std::fprintf(stderr,
-				"[SHADOW-PROF] last 60 frames: total/frame: xform=%.2fms raster=%.2fms "
+				"[SHADOW-PROF] last %d frame(s): total/frame: xform=%.2fms raster=%.2fms "
 				"sum=%.2fms  per-light: xform=%.2fms raster=%.2fms  "
 				"(N=%d lights/frame)\n",
-				xformAvg, rasterAvg, xformAvg + rasterAvg,
+				sInterval, xformAvg, rasterAvg, xformAvg + rasterAvg,
 				perLightX, perLightR,
-				int(sLightCount / 60));
+				int(sLightCount / sInterval));
 			std::fflush(stderr);
 			sXformAcc = 0.0;
 			sRasterAcc = 0.0;
