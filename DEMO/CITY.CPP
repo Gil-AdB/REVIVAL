@@ -193,182 +193,132 @@ void Run_Distort(void)
 
 
 
-// sets required properties and modifies the object 'water.lwo' which acts like
-// a mirror for the rest of the scene.
+// Compute the reflective surface's plane (normal + offset) from the first
+// face of the water mesh, force-scale the mesh and its UVs to a quarter
+// of authored size, and pin Pos.Keys[0] to the origin. Caller is
+// Reflective_Surface_Setup; populates RflObj/RflSurfNorm/RflSurfOfs.
+static void prepareWaterSurface(Object *waterObj, TriMesh *T)
+{
+	Vector U, V;
+	RflObj = waterObj;
+	// patch: modify keys to position zero
+	Quaternion &P = T->Pos.Keys[0].Pos;
+	P.x = P.y = P.z = 0.0f;
+
+	Face *F = T->Faces;
+	Vector_Sub(&F->B->Pos, &F->A->Pos, &U);
+	Vector_Sub(&F->C->Pos, &F->A->Pos, &V);
+	Cross_Product(&U, &V, &RflSurfNorm);
+	Vector_Norm(&RflSurfNorm);
+
+	Vector tmp = T->Pos.Keys[0].Pos.im();
+	Vector_Add(&F->A->Pos, &tmp, &U);
+	RflSurfOfs = -Dot_Product(&RflSurfNorm, &U);
+
+	// Tint the UVs to a quarter (texture tiles 4x across the surface) and
+	// mark the material transparent so the reflected pass blends in.
+	Face *FE = T->Faces + T->FIndex;
+	for (F = T->Faces; F < FE; ++F) {
+		F->U1 *= 0.25; F->V1 *= 0.25;
+		F->U2 *= 0.25; F->V2 *= 0.25;
+		F->U3 *= 0.25; F->V3 *= 0.25;
+		F->Txtr->Flags |= Mat_Transparent;
+	}
+	// Quarter-scale the vertex positions to match the UV scale.
+	Vertex *VE = T->Verts + T->VIndex;
+	for (Vertex *Vtx = T->Verts; Vtx < VE; ++Vtx)
+		Vector_SelfScale(&Vtx->Pos, 0.25);
+}
+
+// Replace the water mesh's authored geometry with a regular NumSections x
+// NumSections grid spanning its bounding rectangle in the XZ plane. Helps
+// the affine gouraud / xpar shader produce smooth interpolation. Assumes
+// RflSurfNorm = (0, 1, 0) — i.e. the water surface is aligned to XZ and
+// the UV mapping is a scalar transform onto XZ with no rotation.
+static void tessellateWaterGrid(TriMesh *T, dword NumSections)
+{
+	// Extract coverage (range) over the XZ plane and over texture UV
+	// (texture coords come off vertices, not faces).
+	float mx = T->Verts[0].Pos.x, Mx = mx;
+	float mz = T->Verts[0].Pos.z, Mz = mz;
+	float mu = T->Verts[0].U,      Mu = mu;
+	float mv = T->Verts[0].V,      Mv = mv;
+	const float y = T->Verts[0].Pos.y;
+	Material *RMat = T->Faces[0].Txtr;
+	for (dword i = 1; i < T->VIndex; ++i) {
+		const float x = T->Verts[i].Pos.x;
+		const float z = T->Verts[i].Pos.z;
+		if (x < mx) mx = x; if (x > Mx) Mx = x;
+		if (z < mz) mz = z; if (z > Mz) Mz = z;
+		const float u = T->Verts[i].U;
+		const float v = T->Verts[i].V;
+		if (u < mu) mu = u; if (u > Mu) Mu = u;
+		if (v < mv) mv = v; if (v > Mv) Mv = v;
+	}
+
+	delete [] T->Verts;
+	delete [] T->Faces;
+	T->VIndex = (NumSections + 1) * (NumSections + 1);
+	T->FIndex = NumSections * NumSections * 2;
+	T->Verts  = new Vertex [T->VIndex];
+	T->Faces  = new Face   [T->FIndex];
+	memset(T->Verts, 0, sizeof(Vertex) * T->VIndex);
+	memset(T->Faces, 0, sizeof(Face)   * T->FIndex);
+
+	const float dx = (Mx - mx) / float(NumSections);
+	const float dz = (Mz - mz) / float(NumSections);
+	const float du = (Mu - mu) / float(NumSections);
+	const float dv = (Mv - mv) / float(NumSections);
+
+	Vertex *Vtx = T->Verts;
+	float v = mv, z = mz;
+	for (dword j = 0; j <= NumSections; ++j, v += dv, z += dz) {
+		float u = mu, x = mx;
+		for (dword i = 0; i <= NumSections; ++i, u += du, x += dx) {
+			Vtx->Pos.x = x;
+			Vtx->Pos.y = y;
+			Vtx->Pos.z = z;
+			Vtx->U = u / 2.5;
+			Vtx->V = v / 2.5;
+			++Vtx;
+		}
+	}
+
+	Face *F = T->Faces;
+	Vtx = T->Verts;
+	for (dword j = 0; j < NumSections; ++j, Vtx += NumSections + 1) {
+		for (dword i = 0; i < NumSections; ++i) {
+			F->A = Vtx + i;
+			F->B = Vtx + i + 1;
+			F->C = Vtx + i + NumSections + 2;
+			F->Txtr = RMat;
+			F->U1 = F->A->U; F->V1 = F->A->V;
+			F->U2 = F->B->U; F->V2 = F->B->V;
+			F->U3 = F->C->U; F->V3 = F->C->V;
+			++F;
+			F->A = Vtx + i;
+			F->B = Vtx + i + NumSections + 2;
+			F->C = Vtx + i + NumSections + 1;
+			F->Txtr = RMat;
+			F->U1 = F->A->U; F->V1 = F->A->V;
+			F->U2 = F->B->U; F->V2 = F->B->V;
+			F->U3 = F->C->U; F->V3 = F->C->V;
+			++F;
+		}
+	}
+}
+
+// Sets required properties and modifies the object 'water.lwo' which acts
+// like a mirror for the rest of the scene.
 static void Reflective_Surface_Setup()
 {
-	TriMesh *T;
-	Vertex *Vtx, *VE;
-	Face *F,*FE;
-	Vector U,V;
+	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
+		if (O->Type != Obj_TriMesh) continue;
+		TriMesh *T = (TriMesh *)O->Data;
+		if (std::strcmp(O->Name, "water.lwo") != 0) continue;
 
-	Object *O;
-	int32_t IID = 0;
-	for(O = CitySc->ObjectHead;O;O=O->Next)
-	{
-		if (O->Type!=Obj_TriMesh) continue;
-//		printf("[%d] Trimesh %s with %d Polygons\n",IID,O->Name,((TriMesh *)O->Data)->FIndex);
-		T = (TriMesh *)(O->Data);
-
-		if (!strcmp(O->Name,"water.lwo"))
-		{
-			RflObj = O;
-			//T->SortPriorityBias = SP_DrawLast;
-			F = T->Faces;
-			Vector_Sub(&F->B->Pos,&F->A->Pos,&U);
-			Vector_Sub(&F->C->Pos,&F->A->Pos,&V);
-			Cross_Product(&U,&V,&RflSurfNorm);
-			Vector_Norm(&RflSurfNorm);
-			
-			// patch: modify keys to position zero
-			//Vector_Zero(&T->Pos.Keys[0].Pos.im());
-			Quaternion &P = T->Pos.Keys[0].Pos;
-			P.x = P.y = P.z = 0.0f;
-
-			Vector tmp = T->Pos.Keys[0].Pos.im();
-			Vector_Add(&F->A->Pos, &tmp, &U);
-			RflSurfOfs =-Dot_Product(&RflSurfNorm,&U);
-
-			F = T->Faces;
-			FE = F+T->FIndex;
-
-			// should write a transparent texture/gouraud to enable fog.
-			for(;F<FE;F++)
-			{
-				F->U1 *= 0.25;
-				F->V1 *= 0.25;
-				F->U2 *= 0.25;
-				F->V2 *= 0.25;
-				F->U3 *= 0.25;
-				F->V3 *= 0.25;
-				F->Txtr->Flags |= Mat_Transparent;
-			}
-
-			// force scale
-			Vtx = T->Verts;
-			VE = Vtx+T->VIndex;
-			for(;Vtx<VE;Vtx++)
-			{
-				Vector_SelfScale(&Vtx->Pos, 0.25);
-				//int banana=1;
-			}
-
-			// Tesselate reflective surface (helps affine gouraud/ shader work nicely)
-
-			// This code section assumes rflSurfNorm = (0, 1, 0)
-			// which means the surface is aligned to the XZ plane
-			// furthermore it is assumed UV space maps onto XZ with only a scalar transformation
-			// (no rotation)
-
-			// Extract coverage (range) over XZ plane and over texture
-			// (notice: this reads texture coords. from vertices, not faces).
-			float mx, Mx, mz, Mz, y;
-			float mu, Mu, mv, Mv;
-			dword i, j;
-			mx = Mx = T->Verts[0].Pos.x;
-			mz = Mz = T->Verts[0].Pos.z;
-			mu = Mu = T->Verts[0].U;
-			mv = Mv = T->Verts[0].V;
-			y = T->Verts[0].Pos.y;
-
-			Material *RMat = T->Faces[0].Txtr;
-			for(i=1; i<T->VIndex; i++)
-			{
-				float x = T->Verts[i].Pos.x;
-				float z = T->Verts[i].Pos.z;
-				if (x<mx) mx = x;
-				if (x>Mx) Mx = x;
-				if (z<mz) mz = z;
-				if (z>Mz) Mz = z;
-
-				float u = T->Verts[i].U;
-				float v = T->Verts[i].V;
-				if (u<mu) mu = u;
-				if (u>Mu) Mu = u;
-				if (v<mv) mv = v;
-				if (v>Mv) Mv = v;
-				
-			}
-			
-			// replace vertices / polygons with a regular planar mesh
-			delete [] T->Verts;
-			delete [] T->Faces;
-			const dword NumSections = 64;
-
-			T->VIndex = (NumSections+1)*(NumSections+1);
-			T->FIndex = NumSections*NumSections*2;
-
-			T->Verts = new Vertex [T->VIndex];
-			T->Faces = new Face [T->FIndex];
-
-			memset(T->Verts, 0, sizeof(Vertex) * T->VIndex);
-			memset(T->Faces, 0, sizeof(Face) * T->FIndex);
-
-			Vtx = T->Verts;
-
-			float dx = (Mx-mx) / (float)NumSections;
-			float dz = (Mz-mz) / (float)NumSections;
-
-			float du = (Mu-mu) / (float)NumSections;
-			float dv = (Mv-mv) / (float)NumSections;
-
-			float u, v, x, z;
-			for(j=0, v = mv, z = mz; j<=NumSections; j++, v += dv, z += dz)
-			{
-				for(i=0, u = mu, x = mx; i<=NumSections; i++, u += du, x += dx)
-				{
-					Vtx->Pos.x = x;
-					Vtx->Pos.y = y;
-					Vtx->Pos.z = z;
-					Vtx->U = u / 2.5;
-					Vtx->V = v / 2.5;
-					Vtx++;
-				}
-			}
-
-			F = T->Faces;
-			Vtx = T->Verts;
-			for(j=0; j < NumSections; j++, Vtx += NumSections+1)
-			{
-				for(i=0; i < NumSections; i++)
-				{
-					F->A = Vtx+i;
-					F->B = Vtx+i+1;
-					F->C = Vtx+i+NumSections+2;
-					F->Txtr = RMat;
-					F->U1 = F->A->U;
-					F->V1 = F->A->V;
-					F->U2 = F->B->U;
-					F->V2 = F->B->V;
-					F->U3 = F->C->U;
-					F->V3 = F->C->V;
-					F++;
-					F->A = Vtx+i;
-					F->B = Vtx+i+NumSections+2;
-					F->C = Vtx+i+NumSections+1;
-					F->Txtr = RMat;
-					F->U1 = F->A->U;
-					F->V1 = F->A->V;
-					F->U2 = F->B->U;
-					F->V2 = F->B->V;
-					F->U3 = F->C->U;
-					F->V3 = F->C->V;
-					F++;
-				}
-			}
-
-//			break;
-		} else {
-//			T->Flags &=~HTrack_Visible;
-		}
-		if (strstr(O->Name,"pas"))
-		{
-			// attach rail tracks to ground
-//			T->Pos.Keys[0].Pos.y = 0.0;
-
-		}
-
-		IID++;
+		prepareWaterSurface(O, T);
+		tessellateWaterGrid(T, /*NumSections=*/64);
 	}
 }
 
@@ -1566,6 +1516,132 @@ Vector ComputeFaceNormal(Vertex *A, Vertex* B, Vertex *C) {
 
 
 
+constexpr int PANORAMA_XRES = 1024;
+constexpr int PANORAMA_YRES = 1024;
+constexpr int CUBE_MAP_XRES = 1024;
+constexpr int CUBE_MAP_YRES = 1024;
+
+// Synthetic test panorama: paints quadrant labels + lat/lon gridlines.
+// Decodes which world direction the equirectangular generator maps to
+// which (eu, ev) when overlaid on a real building's reflection.
+// CalcEquirectangularPanoramaTable's convention:
+//   eu = lon / (2π)   with d = (sin lon · cos lat, sin lat, cos lon · cos lat)
+//   ev = (lat + π/2) / π
+// Quadrants by eu: 0=YELLOW(+z), 0.25=RED(+x), 0.5=GREEN(-z), 0.75=BLUE(-x).
+// Pole bands by ev: 0=WHITE(-y), 1=MAGENTA(+y).
+static void paintDebugPanorama(std::vector<uint32_t>& panorama)
+{
+	for (int y = 0; y < PANORAMA_YRES; ++y) {
+		const float ev = float(y) / PANORAMA_YRES;
+		uint32_t band_color;
+		if (ev < 0.10f) band_color = 0x00FFFFFFu;        // WHITE  (ev=0 band)
+		else if (ev > 0.90f) band_color = 0x00FF00FFu;   // MAGENTA(ev=1 band)
+		else band_color = 0;                              // mid: pick by eu below
+		for (int x = 0; x < PANORAMA_XRES; ++x) {
+			const float eu = float(x) / PANORAMA_XRES;
+			uint32_t c;
+			if (band_color != 0) {
+				c = band_color;
+			} else {
+				if      (eu < 0.125f) c = 0x00FFFF00u;   // YELLOW (eu≈0)
+				else if (eu < 0.375f) c = 0x00FF0000u;   // RED    (eu≈0.25)
+				else if (eu < 0.625f) c = 0x0000FF00u;   // GREEN  (eu≈0.5)
+				else if (eu < 0.875f) c = 0x000000FFu;   // BLUE   (eu≈0.75)
+				else                  c = 0x00FFFF00u;   // YELLOW (eu≈1, wraps)
+			}
+			const float ev_frac = ev * 6.0f;
+			if (fabsf(ev_frac - roundf(ev_frac)) < 0.005f) c = 0x00FFFFFFu;
+			const float eu_frac = eu * 12.0f;
+			if (fabsf(eu_frac - roundf(eu_frac)) < 0.003f) c = 0x00000000u;
+			panorama[y * PANORAMA_XRES + x] = c | 0xFF000000u;
+		}
+	}
+}
+
+// Dumps a panorama to /tmp/city_panorama_NN_<objName>.ppm. One-shot per
+// process; the static index makes the filename unique across calls.
+static void savePanoramaPPM(const std::vector<uint32_t>& panorama, const char* objName)
+{
+	static int dumpIdx = 0;
+	char path[256];
+	snprintf(path, sizeof(path), "/tmp/city_panorama_%02d_%s.ppm",
+	         dumpIdx++, objName ? objName : "(noname)");
+	for (char *p = path; *p; ++p) if (*p == '/' || *p == ' ') *p = '_';
+	path[0] = '/'; path[1] = 't'; path[2] = 'm'; path[3] = 'p'; path[4] = '/';
+	FILE *f = fopen(path, "wb");
+	if (!f) return;
+	fprintf(f, "P6\n%d %d\n255\n", PANORAMA_XRES, PANORAMA_YRES);
+	std::vector<unsigned char> row(PANORAMA_XRES * 3);
+	for (int y = 0; y < PANORAMA_YRES; ++y) {
+		for (int x = 0; x < PANORAMA_XRES; ++x) {
+			const uint32_t px = panorama[y * PANORAMA_XRES + x];
+			row[x*3 + 0] = (px >> 16) & 0xFF;
+			row[x*3 + 1] = (px >>  8) & 0xFF;
+			row[x*3 + 2] = (px      ) & 0xFF;
+		}
+		fwrite(row.data(), 1, row.size(), f);
+	}
+	fclose(f);
+	fprintf(stderr, "[PANORAMA] dumped %s\n", path);
+}
+
+// Render the 6 axis-aligned cube faces for one building, remap to an
+// equirectangular panorama, and attach it as Obj->Reflection. Optionally
+// overlays the debug panorama or dumps a PPM (per FeatureFlags).
+// `cubeMaps` is caller-owned scratch (sized to 6 × CUBE_MAP_XRES * YRES);
+// passed in to avoid reallocating per building.
+static void bakeBuildingPanorama(Object* Obj,
+                                  Camera& envCam,
+                                  const VESA_Surface& tmpSurf,
+                                  const std::vector<CubeMapCoord>& cubeMapper,
+                                  std::vector<uint32_t> cubeMaps[6],
+                                  std::vector<uint32_t>& panorama)
+{
+	TriMesh* T = (TriMesh*)Obj->Data;
+	const dword flags = T->Flags;
+	T->Flags &= ~HTrack_Visible;
+
+	envCam.ISource = T->IPos + T->BSphereCtr;
+	for (int i = 0; i != 6; ++i) {
+		parallel_memset(VPage, 0, PageSize);
+		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		memcpy(envCam.Mat, AxisAlignedViews[i], sizeof(envCam.Mat));
+
+		RenderSkyCube(SkySc, View, true);
+		Reflected_Transform(CitySc);
+		if (0 != CAll) {
+			Radix_SortingASM(FList, SList, CAll);
+			// Cube-map bake doesn't need deferred quality, and the
+			// G-buffer is sized for the engine framebuffer not the
+			// 1024x1024 TmpSurf — deferred would fall back to forward
+			// anyway. Spell it out to skip the size-check + mat32 clear.
+			Render(RenderPath::ForceForward);
+		}
+		Transform_Objects(CitySc);
+		if (0 != CAll) {
+			Radix_SortingASM(FList, SList, CAll);
+			Render(RenderPath::ForceForward);
+		}
+		memcpy(cubeMaps[i].data(), tmpSurf.Data, CUBE_MAP_XRES * CUBE_MAP_YRES * 4);
+	}
+	T->Flags = flags;
+
+	// Cube faces -> equirectangular panorama via the precomputed table.
+	auto outputIt = panorama.begin();
+	auto mapperIt = cubeMapper.begin();
+	for (int y = 0; y != PANORAMA_YRES; ++y) {
+		for (int x = 0; x != PANORAMA_XRES; ++x, ++mapperIt, ++outputIt) {
+			const int u = int(mapperIt->getU() * CUBE_MAP_XRES);
+			const int v = int(mapperIt->getV() * CUBE_MAP_YRES);
+			*outputIt = cubeMaps[mapperIt->getTextureIdx()][u + v * CUBE_MAP_XRES];
+		}
+	}
+
+	if (fds::FeatureFlags::debug_panorama()) paintDebugPanorama(panorama);
+	Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
+	if (fds::FeatureFlags::dump_panorama())  savePanoramaPPM(panorama, Obj->Name);
+}
+
 void Initialize_City()
 {
 	CitySc = loadSceneAligned("SCENES/CITY.FLD");
@@ -1595,9 +1671,6 @@ void Initialize_City()
 	//	if (!M->Txtr) continue;
 	//}
 
-	const auto PANORAMA_XRES = 1024;
-	const auto PANORAMA_YRES = 1024;
-
 	auto cubeMapper = CalcEquirectangularPanoramaTable(PANORAMA_XRES, PANORAMA_YRES);
 	
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
@@ -1610,9 +1683,6 @@ void Initialize_City()
 	// TODO: should animate the object to the frame where the camera is nearest to it
 	CurFrame = 0;
 	View = CitySc->CameraHead;
-
-	const auto CUBE_MAP_XRES = 1024;
-	const auto CUBE_MAP_YRES = 1024;
 
 	// render env maps for a few select objects
 	FList_Allocate(CitySc);
@@ -1693,162 +1763,14 @@ void Initialize_City()
 	for (auto& cubeMap : cubeMaps) {
 		cubeMap.resize(CUBE_MAP_XRES * CUBE_MAP_YRES);
 	}
-
 	std::vector<uint32_t> panorama(PANORAMA_XRES * PANORAMA_YRES);
 
 	for (Object* Obj = CitySc->ObjectHead; skipCubeMap ? false : Obj != nullptr; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
-
 		building_count++;
-		auto T = (TriMesh*)(Obj->Data);
-		auto flags = T->Flags;
-		T->Flags &= ~HTrack_Visible;
-
-		EnvCam.ISource = T->IPos + T->BSphereCtr;
-		for (int i = 0; i != 6; ++i) {
-			parallel_memset(VPage, 0, PageSize); parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
-			memcpy(EnvCam.Mat, AxisAlignedViews[i], sizeof(EnvCam.Mat));
-
-			RenderSkyCube(SkySc, View, true);
-			Reflected_Transform(CitySc);
-			if (0 != CAll) {
-				Radix_SortingASM(FList, SList, CAll);
-				// Cube-map bake doesn't need deferred quality — and the
-				// G-buffer is sized for the engine framebuffer, not the
-				// 1024×1024 TmpSurf this loop uses, so deferred would
-				// fall back to forward anyway. Spelling it out skips
-				// the size-check + the otherwise-pointless mat32 clear.
-				Render(RenderPath::ForceForward);
-			}
-			Transform_Objects(CitySc);
-			if (0 != CAll) {
-				Radix_SortingASM(FList, SList, CAll);
-				Render(RenderPath::ForceForward);
-			}
-			//if (!bailout) {
-			//	if (Keyboard[ScESC]) {
-			//		bailout = true;
-			//	}
-			//	Flip(&TmpSurf);
-			//	while (!Keyboard[ScSpace]) {
-			//	}
-			//	while (Keyboard[ScSpace]) {
-			//	}
-			//	if (Keyboard[ScESC]) {
-			//		bailout = true;
-			//	}
-			//}
-			memcpy(cubeMaps[i].data(), TmpSurf.Data, CUBE_MAP_XRES * CUBE_MAP_YRES * 4);
-		}
-		T->Flags = flags;
-
-		auto outputIt = panorama.begin();
-		auto mapperIt = cubeMapper.begin();
-		for (int y = 0; y != PANORAMA_YRES; ++y) {
-			for (int x = 0; x != PANORAMA_XRES; ++x, ++mapperIt, ++outputIt) {
-				const int u = int(mapperIt->getU() * CUBE_MAP_XRES);
-				const int v = int(mapperIt->getV() * CUBE_MAP_YRES);
-				*outputIt = cubeMaps[mapperIt->getTextureIdx()][u + v * CUBE_MAP_XRES];
-			}
-		}
-
-		// FDS_DEBUG_PANORAMA=1 overwrites the per-building reflection
-		// panorama with a synthetic test image whose colors identify the
-		// (eu, ev) coordinates each world direction maps to. The
-		// panorama generator's lat/lon convention is (per
-		// CalcEquirectangularPanoramaTable):
-		//   eu = lon / (2π)        with d = (sin lon · cos lat, sin lat, cos lon · cos lat)
-		//   ev = (lat + π/2) / π
-		// So eu=0    ↔ lon=0       ↔ direction (0, _, +1)  → label YELLOW (+z, "fwd")
-		//    eu=0.25 ↔ lon=π/2     ↔ direction (+1, _, 0)  → label RED    (+x, "right")
-		//    eu=0.5  ↔ lon=π       ↔ direction (0, _, -1)  → label GREEN  (-z, "back")
-		//    eu=0.75 ↔ lon=3π/2    ↔ direction (-1, _, 0)  → label BLUE   (-x, "left")
-		//    ev=0    ↔ lat=-π/2    ↔ direction (0, -1, 0)  → label WHITE
-		//    ev=1    ↔ lat=+π/2    ↔ direction (0, +1, 0)  → label MAGENTA
-		// Each lat band also has a thin black gridline every 30° of
-		// lon and a thin white gridline every 30° of lat for measuring
-		// what landed where in the reflection.
-		if (fds::FeatureFlags::debug_panorama()) {
-			for (int y = 0; y < PANORAMA_YRES; ++y) {
-				const float ev = float(y) / PANORAMA_YRES;
-				uint32_t band_color;
-				if (ev < 0.10f) band_color = 0x00FFFFFFu;        // WHITE  (ev=0 band)
-				else if (ev > 0.90f) band_color = 0x00FF00FFu;   // MAGENTA(ev=1 band)
-				else band_color = 0;                              // mid: pick by eu below
-				for (int x = 0; x < PANORAMA_XRES; ++x) {
-					const float eu = float(x) / PANORAMA_XRES;
-					uint32_t c;
-					if (band_color != 0) {
-						c = band_color;
-					} else {
-						// Quadrant by eu
-						if      (eu < 0.125f) c = 0x00FFFF00u;   // YELLOW (eu≈0)
-						else if (eu < 0.375f) c = 0x00FF0000u;   // RED    (eu≈0.25)
-						else if (eu < 0.625f) c = 0x0000FF00u;   // GREEN  (eu≈0.5)
-						else if (eu < 0.875f) c = 0x000000FFu;   // BLUE   (eu≈0.75)
-						else                  c = 0x00FFFF00u;   // YELLOW (eu≈1, wraps)
-					}
-					// Lat gridlines every 30° (every 1/6 of ev)
-					const float ev_frac = ev * 6.0f;
-					if (fabsf(ev_frac - roundf(ev_frac)) < 0.005f) c = 0x00FFFFFFu;
-					// Lon gridlines every 30° (every 1/12 of eu)
-					const float eu_frac = eu * 12.0f;
-					if (fabsf(eu_frac - roundf(eu_frac)) < 0.003f) c = 0x00000000u;
-					panorama[y * PANORAMA_XRES + x] = c | 0xFF000000u;
-				}
-			}
-		}
-
-		Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
-
-		// FDS_DUMP_PANORAMA=1 writes one .ppm per building's panorama
-		// at scene init, so we can see exactly which world direction
-		// lands at which (eu, ev) and derive a correct lookup formula
-		// against the actual data instead of the algebra.
-		if (fds::FeatureFlags::dump_panorama()) {
-			static int dumpIdx = 0;
-			char path[256];
-			snprintf(path, sizeof(path), "/tmp/city_panorama_%02d_%s.ppm",
-			         dumpIdx++, Obj->Name ? Obj->Name : "(noname)");
-			// Replace any '/' or spaces in name with '_'
-			for (char *p = path; *p; ++p) if (*p == '/' || *p == ' ') *p = '_';
-			// Restore the leading "/tmp/..." path prefix if stripped
-			path[0] = '/'; path[1] = 't'; path[2] = 'm'; path[3] = 'p'; path[4] = '/';
-			FILE *f = fopen(path, "wb");
-			if (f) {
-				fprintf(f, "P6\n%d %d\n255\n", PANORAMA_XRES, PANORAMA_YRES);
-				std::vector<unsigned char> row(PANORAMA_XRES * 3);
-				for (int y = 0; y < PANORAMA_YRES; ++y) {
-					for (int x = 0; x < PANORAMA_XRES; ++x) {
-						const uint32_t px = panorama[y * PANORAMA_XRES + x];
-						row[x*3 + 0] = (px >> 16) & 0xFF;
-						row[x*3 + 1] = (px >>  8) & 0xFF;
-						row[x*3 + 2] = (px      ) & 0xFF;
-					}
-					fwrite(row.data(), 1, row.size(), f);
-				}
-				fclose(f);
-				fprintf(stderr, "[PANORAMA] dumped %s\n", path);
-			}
-		}
-		// HACK: works because panorma size = cube
-		//memcpy(TmpSurf.Data, panorama.data(), PANORAMA_XRES * PANORAMA_YRES * 4);
-		//		
-		//if (!bailout) {
-		//	if (Keyboard[ScESC]) {
-		//		bailout = true;
-		//	}
-		//	Flip(&TmpSurf);
-		//	while (!Keyboard[ScSpace]) {
-		//	}
-		//	while (Keyboard[ScSpace]) {
-		//	}
-		//	if (Keyboard[ScESC]) {
-		//		bailout = true;
-		//	}
-		//}
+		bakeBuildingPanorama(Obj, EnvCam, TmpSurf, cubeMapper, cubeMaps, panorama);
 	}
 
 	// For deferred-path env-map dispatch: the lighting pass has only
