@@ -257,10 +257,10 @@ void Vertex_Loop1(Vertex *Vert,Vertex *VEnd,Matrix M,Vector *V)
 	}
 }
 
-void calcVisibilityFlags(Scene* Sc, Vertex* Vtx) {
+void calcVisibilityFlags(Scene* Sc, Vertex* Vtx, fds::FrameState &fs) {
 	Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
 	//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
-	if (Vtx->TPos.z > Sc->NZP) {
+	if (Vtx->TPos.z > fs.C_NZP) {
 		Vtx->RZ = 1.0 / Vtx->TPos.z;
 		Vtx->PX = Vtx->TPos.x * Vtx->RZ;
 		Vtx->PY = Vtx->TPos.y * Vtx->RZ;
@@ -272,11 +272,11 @@ void calcVisibilityFlags(Scene* Sc, Vertex* Vtx) {
 		if (Vtx->PX >= XRes) Vtx->Flags |= Vtx_VisRight;
 		if (Vtx->PY < 0) Vtx->Flags |= Vtx_VisUp;
 		if (Vtx->PY >= YRes) Vtx->Flags |= Vtx_VisDown;
-		if (Vtx->TPos.z > Sc->FZP) Vtx->Flags |= Vtx_VisFar;
+		if (Vtx->TPos.z > fs.C_FZP) Vtx->Flags |= Vtx_VisFar;
 	} else Vtx->Flags |= Vtx_VisNear;
 }
 
-void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Particle& p) {
+void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Particle& p, fds::FrameState &fs) {
 	Vector V;
 
 	Vector VelDir = p.Vel;
@@ -285,7 +285,7 @@ void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Parti
 	Vector src = p.V.Pos - p.TrailLength * VelDir;
 	Vector targ = p.V.Pos;
 
-	Vector d1 = (src - View->ISource).cross(targ - View->ISource);
+	Vector d1 = (src - fs.View->ISource).cross(targ - fs.View->ISource);
 	Vector_Norm(&d1);
 
 	int quad_uvs[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
@@ -298,26 +298,26 @@ void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Parti
 
 		const Vector& tmp = *(centerPoints[v]);
 		Vertex& A = *quad;
-		V = tmp + d1 * (u - 0.5f) * p.TrailWidth - View->ISource;
-		MatrixXVector(View->Mat, &V, &A.TPos);
+		V = tmp + d1 * (u - 0.5f) * p.TrailWidth - fs.View->ISource;
+		MatrixXVector(fs.View->Mat, &V, &A.TPos);
 
-		A.TPos.x = A.TPos.z * CntrX + A.TPos.x * FOVX;
-		A.TPos.y = A.TPos.z * CntrY - A.TPos.y * FOVY;
+		A.TPos.x = A.TPos.z * fs.CntrX + A.TPos.x * fs.FOVX;
+		A.TPos.y = A.TPos.z * fs.CntrY - A.TPos.y * fs.FOVY;
 		A.RZ = 1.0f / A.TPos.z;
 		A.PX = A.TPos.x * A.RZ;
 		A.PY = A.TPos.y * A.RZ;
 
 		A.LA = A.LR = A.LG = A.LB = 255.0;
 
-		calcVisibilityFlags(Sc, &A);
+		calcVisibilityFlags(Sc, &A, fs);
 		++quad;
 	}
 
 	for (size_t i = 0; i != 2; ++i) {
 #ifdef FRONT_TO_BACK_SORTING
-		p.TrailF[i].SortZ.F = 2 * Sc->FZP - p.V.TPos.z;
+		p.TrailF[i].SortZ.F = 2 * fs.C_FZP - p.V.TPos.z;
 #else
-		p.TrailF[i].SortZ.F = Sc->FZP - p.V.TPos.z;
+		p.TrailF[i].SortZ.F = fs.C_FZP - p.V.TPos.z;
 #endif
 	}
 	*Ins++ = &p.TrailF[0];
@@ -439,7 +439,7 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride,
 	float *f = (float *)(&M);
 	float *fv;
 
-	float fzp = Sc->FZP;
+	float fzp = fs.C_FZP;
 
 #if not(DEBUG_PARTICLES)
 	Object *Obj; 
@@ -524,7 +524,7 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride,
 		T->Flags |= Tri_Inside;
 
 		// Out by depth
-		dz = S.z - Sc->NZP;
+		dz = S.z - fs.C_NZP;
 		if (dz*dz>L2*T->BSphereRad)
 		{
 			if (dz<0.0f)
@@ -537,7 +537,7 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride,
 			T->Flags &=~Tri_Inside;
 		}
 		
-		dz = S.z - Sc->FZP;
+		dz = S.z - fs.C_FZP;
 		if (dz*dz>L2*T->BSphereRad)
 		{
 			if (dz>0.0f)
@@ -629,7 +629,7 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride,
 				//        Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
-				//if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				//if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			
 			goto AfterXForm;
@@ -656,7 +656,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				// Defensively flag those so the clipper's Near() handles
 				// them (otherwise RZ would go negative and PX/PY would be
 				// flipped, producing ghost polygons at the cone edges).
-				if (Vtx->TPos.z > Sc->NZP) {
+				if (Vtx->TPos.z > fs.C_NZP) {
 					Vtx->RZ=1.0/Vtx->TPos.z;
 					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
@@ -666,7 +666,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
-					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 				} else {
 					Vtx->Flags|=Vtx_VisNear;
 				}
@@ -691,7 +691,7 @@ Regular:
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
 				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
-				if (Vtx->TPos.z>Sc->NZP)
+				if (Vtx->TPos.z>fs.C_NZP)
 				{
 					Vtx->RZ=1.0/Vtx->TPos.z;
 					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
@@ -704,7 +704,7 @@ Regular:
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
-					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				//      printf("Regular shit!\n");
 			}
@@ -741,7 +741,7 @@ Regular:
 //				Vtx->REV=Vtx->EV*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
-				//if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				//if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
@@ -770,7 +770,7 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
 				if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
-				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			
@@ -789,7 +789,7 @@ ERegular:
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->EV=128.0+95.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 				
-				if (Vtx->TPos.z>Sc->NZP)
+				if (Vtx->TPos.z>fs.C_NZP)
 				{
 					Vtx->RZ=1.0/Vtx->TPos.z;
 					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
@@ -804,7 +804,7 @@ ERegular:
 					if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
-					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos.z>fs.C_FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags=Vtx_VisNear;
 				
 				//      printf("Regular shit!\n");
@@ -1019,7 +1019,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		//	Vector_Add(&V, &Rand, &V);
 		//}
 		MatrixXVector(fs.View->Mat,&V,&Vtx->TPos);
-		if (Vtx->TPos.z>Sc->NZP&&Vtx->TPos.z<Sc->FZP)
+		if (Vtx->TPos.z>fs.C_NZP&&Vtx->TPos.z<fs.C_FZP)
 		{
 			Vtx->RZ=1.0/Vtx->TPos.z;
 			Vtx->PX=fs.CntrEX+Vtx->TPos.x*PX*Vtx->RZ;
@@ -1054,7 +1054,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		
 		p.V.TPos = fs.View->Mat * v;
 
-		if (p.V.TPos.z >= Sc->NZP)
+		if (p.V.TPos.z >= fs.C_NZP)
 		{
 			p.V.RZ = 1.0 / p.V.TPos.z;
 			p.V.PX = fs.CntrX + fs.FOVX * p.V.TPos.x * p.V.RZ;
@@ -1066,7 +1066,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 
 
 		if (p.Flags & Particle_Active) {
-			if ((dz = p.V.TPos.z) >= Sc->NZP) {
+			if ((dz = p.V.TPos.z) >= fs.C_NZP) {
 				if (p.TrailLength == 0) {
 					F = &Sc->Pcl[I].F;
 #ifdef FRONT_TO_BACK_SORTING
@@ -1076,7 +1076,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 #endif
 					*Ins++ = F;
 				} else {
-					addParticleTrail(Sc, Ins, p);
+					addParticleTrail(Sc, Ins, p, fs);
 				}
 			}
 		}
