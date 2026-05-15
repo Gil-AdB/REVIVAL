@@ -70,6 +70,20 @@ constexpr int DEFERRED_MAX_LIGHTS = 128;
 constexpr int DEFERRED_NUM_TILES_X = 12;
 constexpr int DEFERRED_NUM_TILES_Y = 8;
 constexpr int DEFERRED_NUM_TILES   = DEFERRED_NUM_TILES_X * DEFERRED_NUM_TILES_Y;
+
+// Cache-line transition stats for shadow-map sampling (gated on
+// --shadow_prof_cache). Atomic accumulation across tile workers with
+// relaxed ordering; a thread-local tracks the last sample's cache-line
+// address so we can count cross-line transitions. Reset and dumped in
+// Render_DeferredLighting after the tile barrier.
+//
+// A "transition" is when the next shadow sample lands on a different
+// 64-byte cache line than the previous one on the same thread. Compared
+// to total samples this approximates spatial locality: low ratio = most
+// samples reuse a recently-touched line; high ratio = lots of misses.
+static std::atomic<uint64_t> g_shadowProfSamples{0};
+static std::atomic<uint64_t> g_shadowProfLineTransitions{0};
+thread_local uintptr_t s_shadowProfLastLine = 0;
 struct ViewLightsSoA {
 	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
 	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
@@ -706,6 +720,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool checker        = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
+	const bool profShadowCache = fds::FeatureFlags::shadow_prof_cache();
 
 	// Per-stage ablation gates. Set one of these on to short-circuit the
 	// stage so a bench harness can measure its cost from the frame-time
@@ -1173,6 +1188,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const uint16_t *zRow0 = sm.depth.data() +
 										size_t(iY) * size_t(sm.xres);
 									const uint16_t *zRow1 = zRow0 + sm.xres;
+									if (profShadowCache) {
+										// One PCF check = one tracked sample.
+										// Use the (00) tap's cache-line address
+										// — adjacent shadow checks on the same
+										// thread that share this line are hits.
+										const uintptr_t line =
+											reinterpret_cast<uintptr_t>(&zRow0[iX]) >> 6;
+										if (s_shadowProfLastLine != line) {
+											g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
+											s_shadowProfLastLine = line;
+										}
+										g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
+									}
 									const float fx = smX - float(iX);
 									const float fy = smY - float(iY);
 									const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -2783,6 +2811,17 @@ void Render_DeferredLighting() {
 		renderns::condition.wait(lock, []{
 			return renderns::tileCounter == numTilesX * numTilesY;
 		});
+	}
+
+	// Dump cache-line transition stats accumulated by shadow sampling
+	// during this frame's tile work. Reset to zero for the next frame.
+	if (fds::FeatureFlags::shadow_prof_cache()) {
+		const uint64_t s = g_shadowProfSamples.exchange(0, std::memory_order_relaxed);
+		const uint64_t t = g_shadowProfLineTransitions.exchange(0, std::memory_order_relaxed);
+		const double pct = s ? 100.0 * double(t) / double(s) : 0.0;
+		std::fprintf(stderr,
+			"[SHADOW-CACHE] samples=%llu line-transitions=%llu (%.2f%%)\n",
+			(unsigned long long)s, (unsigned long long)t, pct);
 	}
 }
 

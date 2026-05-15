@@ -73,12 +73,11 @@ float frand() {
 
 
 Scene *CurScene;
-Face **FList = nullptr;
-Face **SList = nullptr;
-//Face *DoFace; // mar gamish, ta'ase partsuf!
-int32_t CPolys,COmnies,CPcls,CAll,Polys;
-//char *TxtrBuf,*TxtrAlign;
-//float Exec_FPS;
+// FList / SList / CPolys / COmnies / CPcls / CAll / Polys / g_zscale /
+// g_zscale256 / FOVX / FOVY / CntrX / CntrY / CntrEX / CntrEY / C_FZP /
+// C_rFZP / C_NZP / C_rNZP are now fields of fds::g_mainFrame (see
+// FDS/Base/FrameState.h); the legacy names are reference aliases
+// defined in FrameState.cpp.
 Material Default_Mat;
 unsigned int OldFPUCW, FPUCW;
 
@@ -88,8 +87,6 @@ int32_t *MsgClock;
 DWord *MsgID;
 char Cam_HeadLight;
 float CurFrame;
-float g_zscale;
-float g_zscale256;
 
 
 int32_t g_FrameTime;

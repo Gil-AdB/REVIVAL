@@ -14,8 +14,9 @@
 #define COUNT_POLYS
 #define NO_MIPMAPS
 
-float FOVX,FOVY;
-float C_FZP,C_rFZP, C_NZP, C_rNZP;
+// FOVX, FOVY, C_FZP, C_rFZP, C_NZP, C_rNZP now live as fields of
+// fds::g_mainFrame (see FrameState.h). Legacy names defined as
+// reference aliases in FrameState.cpp.
 
 std::atomic<dword> g_renderedPolys;
 std::atomic<bool> g_HideInnerXpar{false};

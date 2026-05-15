@@ -253,23 +253,35 @@ extern DWord *MsgID;
 
 extern char *TxtrBuf,*TxtrAlign;
 // Face List. Allocate before use.
-extern Face **FList;
-extern Face **SList;
-extern float FOVX,FOVY;
-//extern Face *DoFace; //Currently rendered face. Used for further mapper info.
+// Legacy global names. These are reference aliases into the singleton
+// fds::g_mainFrame; new code should take fds::FrameState& explicitly.
+// See FDS/Base/FrameState.h. The references-not-values shape means
+// reads/writes through these names continue to hit the same memory as
+// fds::g_mainFrame.<field>.
+extern Face   **&FList;
+extern Face   **&SList;
+extern float    &FOVX;
+extern float    &FOVY;
 extern float dTime;
 extern float Exec_FPS;
-extern int32_t Polys,Frames;
-extern int32_t CPolys,COmnies,CPcls,CAll,Polys;
+extern int32_t Frames;
+extern int32_t &Polys;
+extern int32_t &CPolys;
+extern int32_t &COmnies;
+extern int32_t &CPcls;
+extern int32_t &CAll;
 extern int32_t Bytes1[257];
 extern int32_t Bytes2[257];
 extern int32_t Bytes3[257];
 extern int32_t Bytes4[257];
-extern float C_rFZP,C_FZP, C_rNZP, C_NZP;
+extern float &C_FZP;
+extern float &C_rFZP;
+extern float &C_NZP;
+extern float &C_rNZP;
 extern std::atomic<dword> g_renderedPolys;
 
-extern "C" float g_zscale;
-extern "C" float g_zscale256;
+extern "C" float &g_zscale;
+extern "C" float &g_zscale256;
 
 extern int32_t g_FrameTime;
 
@@ -450,7 +462,9 @@ extern int32_t VESA_Ver;
 extern char Direct_FLIP;
 
 // Global Surface Scalar variables (Fastest access)
-extern "C" int32_t XRes,YRes,XRes_1,YRes_1,CntrX,CntrY,BPP,CPP;
+extern "C" int32_t XRes,YRes,XRes_1,YRes_1,BPP,CPP;
+extern "C" int32_t &CntrX;
+extern "C" int32_t &CntrY;
 // Integer pixel-replication factor for OutTextXY. 1 = native bitmap-font
 // size; 2 = each font pixel becomes a 2×2 block (used at HiDPI resolutions
 // so the FPS / profiler / resolution overlays stay legible). Updated by
@@ -460,7 +474,8 @@ extern int32_t g_fontScale;
 // separate allocation so VPage can be the SDL_Texture's locked pixel
 // buffer. Set by VESA_Surface2Global from VS->Z16.
 extern word *ZPage16;
-extern float CntrEX,CntrEY;
+extern float &CntrEX;
+extern float &CntrEY;
 extern int32_t PageSize,PageSizeW,PageSizeDW;
 
 extern VideoMode VMode;
@@ -491,8 +506,8 @@ extern Material Flare;
 // Span buffer variables
 //extern char *Bitmap;
 
-// Frustrum variables
-extern float FOVX,FOVY;
+// Frustrum variables — FOVX/FOVY are now reference aliases declared
+// near the top of this header (alongside the other frame-state fields).
 extern std::atomic<double> FillerPixelcount;
 extern float AspectRatio;
 

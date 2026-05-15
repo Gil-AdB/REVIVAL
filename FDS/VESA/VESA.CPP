@@ -29,9 +29,11 @@ int32_t VESA_Ver = 0;
 
 char Direct_FLIP = 0;
 
-// Global Surface Scalar variables (Fastest access)
-int32_t XRes,YRes,XRes_1,YRes_1,CntrX,CntrY,BPP,CPP;
-float CntrEX,CntrEY;
+// Global Surface Scalar variables (Fastest access). CntrX/CntrY/
+// CntrEX/CntrEY now live as fields of fds::g_mainFrame (see
+// FrameState.h); legacy names defined as reference aliases in
+// FrameState.cpp.
+int32_t XRes,YRes,XRes_1,YRes_1,BPP,CPP;
 int32_t PageSize,PageSizeW,PageSizeDW;
 short CurrentGraphicsMode;
 char Palette_Reserved = 0;

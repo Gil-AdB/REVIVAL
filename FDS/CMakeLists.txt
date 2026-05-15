@@ -28,6 +28,8 @@ set(Base
     Base/FeatureFlags.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
+    Base/FrameState.cpp
+    Base/FrameState.h
     Base/KeyFrame.h
     Base/Material.h
     Base/Matrix.h
