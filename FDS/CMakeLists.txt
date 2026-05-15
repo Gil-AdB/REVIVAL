@@ -119,7 +119,8 @@ set(RENDER
     RENDER/RENDER.CPP
     RENDER/RenderPipeline.h
     RENDER/SORTS.H
-    RENDER/SQRTTBL.H)
+    RENDER/SQRTTBL.H
+    RENDER/Transform.cpp)
 source_group("RENDER" FILES ${RENDER})
 
 set(SIMD
