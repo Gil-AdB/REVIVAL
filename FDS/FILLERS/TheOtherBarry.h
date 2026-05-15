@@ -188,12 +188,16 @@ inline uint32_t tile_du(uint32_t u, uint32_t vbits, uint32_t umask) {
 
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode>
 struct TileRasterizer {
-	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres, Texture* Txtr, int miplevel)
+	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres,
+	               uint16_t* zpage16, float zScale,
+	               Texture* Txtr, int miplevel)
 		: V(V)
 		, dstSurface(dstSurface)
 		, bpsl(bpsl)
 		, xres(xres)
-		, yres(yres) {
+		, yres(yres)
+		, zpage16(zpage16)
+		, zScale(zScale) {
 
 		if constexpr (TextureMode != barry::TTextureMode::NONE) {
 			t0.LogWidth = Txtr->LSizeX - miplevel;
@@ -210,6 +214,8 @@ struct TileRasterizer {
 	int32_t bpsl;
 	int32_t xres;
 	int32_t yres;
+	uint16_t* zpage16;   // was: ZPage16 global
+	float zScale;        // was: g_zscale global
 	struct TextureInfo {
 		const dword* TextureAddr;
 		const dword* TextureAddr1;
@@ -257,9 +263,10 @@ struct TileRasterizer {
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
 		auto scanline = dstSurface + tile.y * TILE_SIZE * bpsl;
-		// Z-buffer lives in its own allocation now (ZPage16 global). Was
-		// previously contiguous at dstSurface + PageSize.
-		auto zspan = ZPage16 + tile.y * TILE_SIZE * XRes + tile.x * TILE_SIZE;
+		// Z-buffer lives in its own allocation now (was: ZPage16 global,
+		// passed through from the per-pass RenderTarget). Color stride
+		// `bpsl` is in bytes; Z stride is `xres` u16 elements per row.
+		auto zspan = zpage16 + tile.y * TILE_SIZE * xres + tile.x * TILE_SIZE;
 		auto span = ((uint32_t*)scanline) + tile.x * TILE_SIZE;
 		auto bpsl_u32 = bpsl / sizeof(uint32_t);
 
@@ -305,7 +312,7 @@ struct TileRasterizer {
 			{ FixedPoint(drdx),	   FixedPoint(dgdx),		FixedPoint(dbdx),		 FixedPoint(dadx) });
 
 		//Vec16s rg
-		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += XRes) {
+		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += xres) {
 			Vec8ib p_mask;
 			bool row_has_pixels;
 			if constexpr (Coverage == barry::TCoverage::FULL) {
@@ -335,7 +342,7 @@ struct TileRasterizer {
 				// still runs so we keep gather/maskstore in the timing.
 				if (any_lane_set(p_mask)) {
 #else
-				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
+				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(zScale * p_z)));
 				Vec8us z_existing_c;
 				z_existing_c.load_a(zspan);
 				auto z_existing = extend(z_existing_c);
@@ -718,14 +725,19 @@ struct TileRasterizer {
 
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode = barry::TTextureMode::NORMAL>
 void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
-                   const fds::RenderTarget& /*rt*/,
-                   const fds::CameraContext& /*cam*/) {
+                   const fds::RenderTarget& rt,
+                   const fds::CameraContext& cam) {
 	//for (dword i = 0; i < numVerts; ++i) {
 	//	float z = 1.0f / V[i]->RZ;
 	//	V[i]->U = V[i]->UZ * z;
 	//	V[i]->V = V[i]->VZ * z;
 	//}
-	barry::TileRasterizer<BlendMode, TextureMode> r(V, VPage, VESA_BPSL, XRes, YRes, F->Txtr->Txtr, miplevel);
+	barry::TileRasterizer<BlendMode, TextureMode> r(V,
+	                                                 reinterpret_cast<byte*>(rt.vpage),
+	                                                 rt.bytesPerScanline,
+	                                                 rt.xres, rt.yres,
+	                                                 rt.zpage16, cam.zScale,
+	                                                 F->Txtr->Txtr, miplevel);
 
 	if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
 		r.t0.TextureAddr1 = (dword*)F->ReflectionTexture->Data;
@@ -736,10 +748,13 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	for (dword i = 0; i < numVerts; ++i) {
 		vc[i] = *V[i];
 
+		// Scene fog flag is global — CurScene is set by the orchestrator
+		// and is per-frame, not per-pass. Leave as global read; phase 4
+		// only migrates render-target + camera context.
 		if (CurScene->Flags & Scn_Fogged)
 		{
 			float fogRate;
-			fogRate = sqrtf(1.0 - C_rFZP * V[i]->TPos.z);
+			fogRate = sqrtf(1.0 - cam.invFarZ * V[i]->TPos.z);
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;
