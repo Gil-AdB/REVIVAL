@@ -2,13 +2,21 @@
 
 #define CLIPPER_MAXVERTS 48
 
+namespace fds { struct CameraContext; }
+
 class FrustumClipper {
 public:
 	FrustumClipper() {
 		Init();
 	}
 
+	// Pulls NearZ/FarZ from Sc->NZP/FZP and clip extents from XRes/YRes.
 	void InitViewport(Scene* Sc);
+	// New form: pulls NearZ/FarZ from the per-pass CameraContext (so a
+	// shadow pass can use its light's range without mutating Sc->FZP).
+	// Caller still calls SetClippingExtents to override the X/Y rect
+	// when rendering into a tile or a non-engine surface.
+	void InitViewport(const fds::CameraContext& cam);
 	// skipMipLevel: bypass MiplevelClipper for textured faces. Used by
 	// the shadow-map pass — depth-only rendering doesn't need mipmap
 	// subdivision and MiplevelClipper's polygon traversal has bugs that
@@ -63,5 +71,6 @@ private:
 
 
 void viewportInit(Viewport& vp, const Scene* Sc);
+void viewportInit(Viewport& vp, const fds::CameraContext& cam);
 void viewportCalcFlags(const Viewport& vp, Vertex* v);
 void viewportCalcYFlags(const Viewport& vp, Vertex* v);

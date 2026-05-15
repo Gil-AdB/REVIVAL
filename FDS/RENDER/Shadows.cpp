@@ -95,17 +95,8 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	static thread_local double sRasterAcc = 0.0;
 	static thread_local int sLightCount = 0;
 
-	// Save engine state.
-	Camera *savedView   = View;
-	const float savedFOVX  = FOVX;
-	const float savedFOVY  = FOVY;
-	const float savedCntrEX = CntrEX;
-	const float savedCntrEY = CntrEY;
-
-	Camera lightCam = {};
-
 	for (ShadowMap& sm : g_shadowMaps) {
-		Omni *O = sm.omni;
+		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
 		if (O->Type != Light_SpotLight) continue;  // omni cube maps deferred
@@ -124,15 +115,15 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		if (std::fabs(idir.x) < 1e-4f && std::fabs(idir.z) < 1e-4f) {
 			idir.x = 0.01f;
 		}
-		Vector targ = O->IPos;
-		targ.x += idir.x;
-		targ.y += idir.y;
-		targ.z += idir.z;
+		Vector targ{ O->IPos.x + idir.x,
+		             O->IPos.y + idir.y,
+		             O->IPos.z + idir.z };
+		Camera lightCam{};
 		Kick_Camera(&O->IPos, &targ, 0.0f, lightCam.Mat);
 		lightCam.ISource = O->IPos;
-		const float cosOuter = std::max(0.01f, O->FallOff);
+		const float cosOuter   = std::max(0.01f, O->FallOff);
 		const float fovHalfRad = std::acos(cosOuter) * 1.10f;  // 10% pad
-		const float perspXY = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
+		const float perspXY    = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
 		lightCam.PerspX = perspXY;
 		lightCam.PerspY = perspXY;
 		lightCam.IFOV   = (fovHalfRad * 2.0f) * (180.0f / PI);
@@ -145,32 +136,32 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		sm.perspY = perspXY;
 		sm.cntrX  = float(sm.xres) * 0.5f - 0.5f;
 		sm.cntrY  = float(sm.yres) * 0.5f - 0.5f;
-
-		// Swap globals to the shadow camera. XRes/YRes are passed via
-		// Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces, xres, yres) override instead of mutating
-		// the globals — Transform_Objects's visibility-flag math (incl.
-		// the F->VisibilityFlagsAll face filter) needs to use the shadow
-		// rect, not the main screen, otherwise hex tiles near the cone
-		// edge get all-3-verts-VisDown and the face filter drops them.
-		View   = &lightCam;
-		FOVX   = perspXY;
-		FOVY   = perspXY;
-		CntrEX = sm.cntrX;
-		CntrEY = sm.cntrY;
-
-		// Patch the scene's FZP for the duration so Transform_Objects
-		// clips against the light's range, not the camera's. We restore
-		// it inside the loop because the next shadow light may have a
-		// different range. Final restore happens via SetCurrentScene at
-		// the bottom.
-		const float savedSceneFZP = Sc->FZP;
-		Sc->FZP = sm.fzp;
-
-		// Refresh sm.zScale to match what the rasterizer expects.
 		sm.zScale = float(0xFF00) / (sm.fzp * 1.1f);
 
+		// Build a stack-local CameraContext for this light. No engine
+		// globals get mutated; Transform_Objects + the tile-worker
+		// clippers read everything (perspective, near/far plane, depth
+		// scale) from this struct. The faces context still uses
+		// fds::g_mainFaces — phase 6 (per-light vertex projection
+		// scratch) is what enables per-light face buffers and the
+		// cross-light parallelism that needs them.
+		fds::CameraContext lightCtx{};
+		lightCtx.view       = &lightCam;
+		lightCtx.fovX       = perspXY;
+		lightCtx.fovY       = perspXY;
+		lightCtx.cntrX      = int32_t(sm.cntrX);
+		lightCtx.cntrY      = int32_t(sm.cntrY);
+		lightCtx.cntrEX     = sm.cntrX;
+		lightCtx.cntrEY     = sm.cntrY;
+		lightCtx.nearZ      = Sc->NZP;
+		lightCtx.invNearZ   = 1.0f / Sc->NZP;
+		lightCtx.farZ       = sm.fzp;
+		lightCtx.invFarZ    = 1.0f / sm.fzp;
+		lightCtx.zScale     = sm.zScale;
+		lightCtx.zScale256  = sm.zScale / 256.0f;
+
 		// Clear shadow map.
-		std::fill(sm.depth.begin(), sm.depth.end(), uint16_t(0));
+		std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
 		std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
 
 		// Transform from the light's POV. Overwrites FList + per-vertex
@@ -184,7 +175,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		const auto tXformStart = clk::now();
 		g_inShadowPass = true;
 		g_currentShadowOmni = sm.omni;
-		Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces, sm.xres, sm.yres);
+		Transform_Objects(Sc, lightCtx, fds::g_mainFaces, sm.xres, sm.yres);
 		g_currentShadowOmni = nullptr;
 		g_inShadowPass = false;
 		const auto tXformEnd = clk::now();
@@ -204,12 +195,13 @@ void Render_DeferredShadowMaps(Scene *Sc)
 			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 			renderns::tileCounter = 0;
 		}
-		const int numTilesX = 6;
-		const int numTilesY = 4;
-		const int totalTiles = numTilesX * numTilesY;
+		constexpr int numTilesX = 6;
+		constexpr int numTilesY = 4;
+		constexpr int totalTiles = numTilesX * numTilesY;
 		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
 		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
-		ShadowMap * const smPtr = &sm;
+		ShadowMap *const                   smPtr   = &sm;
+		const fds::CameraContext *const    camPtr  = &lightCtx;
 		for (int ty = 0; ty < numTilesY; ++ty) {
 			const float y1f = float(ty * tileSizeY);
 			const float y2f = float(std::min((ty + 1) * tileSizeY, sm.yres));
@@ -217,13 +209,13 @@ void Render_DeferredShadowMaps(Scene *Sc)
 				const float x1f = float(tx * tileSizeX);
 				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
 				ThreadPool::instance().enqueue(
-					[Sc, smPtr, x1f, y1f, x2f, y2f]() {
+					[smPtr, camPtr, x1f, y1f, x2f, y2f]() {
 						g_currentShadowMap = smPtr;
 						FrustumClipper clipper;
-						clipper.InitViewport(Sc);
+						clipper.InitViewport(*camPtr);  // light's near/far
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						for (int i = 0; i < CAll; ++i) {
-							Face *F = FList[i];
+							Face *const F = FList[i];
 							if (!F) continue;
 							if (!F->Txtr) continue;
 							if (F->A == F->B) continue;
@@ -245,15 +237,15 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		{
 			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 			renderns::condition.wait(lock,
-				[totalTiles]{ return renderns::tileCounter >= totalTiles; });
+				[]{ return renderns::tileCounter >= totalTiles; });
 		}
 		const auto tRasterEnd = clk::now();
 		if (sProfShadow) {
 			sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
 			++sLightCount;
 		}
-
-		Sc->FZP = savedSceneFZP;
+		// (No Sc->FZP restore — we never mutated it; clipper picks up
+		// the per-light far plane from lightCtx via InitViewport.)
 	}
 
 	if (sProfShadow) {
@@ -278,24 +270,16 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		}
 	}
 
-	// Restore engine state. SetCurrentScene refreshes C_FZP / g_zscale
-	// from the un-patched scene FZP so the main pass uses the right
-	// depth-encoding constants again.
-	View   = savedView;
-	FOVX   = savedFOVX;
-	FOVY   = savedFOVY;
-	CntrEX = savedCntrEX;
-	CntrEY = savedCntrEY;
-	SetCurrentScene(Sc);
-
 	// Each shadow pass overwrote per-vertex PX/PY/RZ + FList/CAll with
 	// the light-camera projection. Re-run Transform_Objects with the
 	// main camera so the subsequent Render() sees a consistent scene
 	// state. Cost: one extra Transform_Objects per frame on scenes
-	// that have any shadow-casting lights. Acceptable until we
-	// rewrite Transform_Objects to write into a thread-local Vertex
-	// scratch. Animate_Objects not re-run (see comment inside the
-	// per-light loop above).
+	// that have any shadow-casting lights. Acceptable until phase 6
+	// rewrites Transform_Objects to write into per-light Vertex scratch.
+	// Animate_Objects not re-run (see comment inside the per-light
+	// loop above). No engine globals to restore — every per-light
+	// camera setup now happens through the local lightCtx, never
+	// mutating fds::g_mainCamera or Sc.
 	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
 
 	// Precompute the per-shadow-map "view-space → light-view-space"

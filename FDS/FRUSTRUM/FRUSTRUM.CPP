@@ -6,6 +6,7 @@
 #include <Base/FDS_DEFS.H>
 
 #include <Base/Scene.h>
+#include <Base/CameraContext.h>
 
 #include "FRUSTRUM.H"
 #include <atomic>
@@ -160,6 +161,26 @@ void viewportCalcYFlags(const Viewport& vp, Vertex* v) {
 void FrustumClipper::InitViewport(Scene *Sc)
 {
 	viewportInit(C_VP, Sc);
+}
+
+void viewportInit(Viewport& vp, const fds::CameraContext& cam) {
+	// Per-pass projection — pulls near/far from the active CameraContext
+	// instead of Sc->NZP/Sc->FZP. Used by the shadow tile workers so
+	// each light's clipper test against its own range without the
+	// orchestrator mutating Sc.
+	vp.NearZ  = cam.nearZ;
+	vp.iNearZ = cam.invNearZ;
+	vp.FarZ   = cam.farZ;
+	vp.iFarZ  = cam.invFarZ;
+	vp.ClipX1 = 0.0f;
+	vp.ClipX2 = float(XRes);
+	vp.ClipY1 = 0.0f;
+	vp.ClipY2 = float(YRes);
+}
+
+void FrustumClipper::InitViewport(const fds::CameraContext& cam)
+{
+	viewportInit(C_VP, cam);
 }
 
 void FrustumClipper::Calc_Flags(Vertex *V)
