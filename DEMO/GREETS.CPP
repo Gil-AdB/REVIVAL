@@ -447,6 +447,110 @@ extern "C" void Greets_DumpStageCentroids(FILE *out, const char *tag) {
 	fflush(out);
 }
 
+// Animate_Objects walks every Omni's Pos/Size/Range splines and crashes
+// if NumKeys is 0; the robot spots aren't authored in the FLD, so we
+// install a single zero-valued key. The per-frame tick overrides
+// IPos/IDir directly after Animate_Objects runs, so the spline values
+// get stomped immediately.
+static void initSpotlightSingleKeySplines(Omni* o)
+{
+	auto initSingleKey = [](Spline& sp, float val) {
+		sp.NumKeys = 1;
+		sp.Keys = new SplineKey;
+		std::memset(sp.Keys, 0, sizeof(SplineKey));
+		sp.Keys[0].Pos.x = val;
+		sp.Keys[0].Pos.y = val;
+		sp.Keys[0].Pos.z = val;
+		sp.Flags = 0;
+		sp.CurKey = 0;
+	};
+	initSingleKey(o->Pos,   0.0f);
+	initSingleKey(o->Size,  o->ISize);
+	initSingleKey(o->Range, o->IRange);
+}
+
+// Builds a fully-initialised spot omni, prepended to the scene's omni
+// chain. Encapsulates all the shared init the robot's main + orbit
+// spots need:
+//   - colour, intensity, range, position, direction
+//   - cone angles (HotSpot/FallOff stored as cosines of inner/outer degrees)
+//   - active + shadow-casting flags
+//   - flare-pass plumbing (F.A/B/C wired to self.V + no-op filler, otherwise
+//     Transform_Objects's flare pass would dereference null Vertex pointers)
+//   - single-key splines so Animate_Objects doesn't crash
+//   - optional per-light shadow-map resolution override
+static Omni* makeSpotLight(Scene* sc,
+                            float R, float G, float B,
+                            float intensity, float range,
+                            const Vector& pos, const Vector& dir,
+                            float hotInnerDeg, float fallOuterDeg,
+                            uint16_t shadowMapRes = 0)
+{
+	Omni* o = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+	std::memset(o, 0, sizeof(Omni));
+	o->L.R = R; o->L.G = G; o->L.B = B; o->L.A = 1.0f;
+	o->ISize  = intensity;
+	o->IRange = range;
+	o->rRange = 1.0f / range;
+	o->IPos   = pos;
+	o->IDir   = dir;
+	o->Type   = Light_SpotLight;
+	o->HotSpot = std::cos(hotInnerDeg  * 3.14159f / 180.0f);
+	o->FallOff = std::cos(fallOuterDeg * 3.14159f / 180.0f);
+	o->Flags   = Omni_Active | Omni_CastsShadow;
+	if (shadowMapRes) o->shadowMapRes = shadowMapRes;
+
+	o->F.A = &o->V;
+	o->F.B = &o->V;
+	o->F.C = &o->V;
+	o->F.Filler = [](Face*, Vertex**, dword, dword) {};
+
+	initSpotlightSingleKeySplines(o);
+
+	// Prepend into the scene's doubly-linked omni chain.
+	o->Next = sc->OmniHead;
+	if (sc->OmniHead) sc->OmniHead->Prev = o;
+	sc->OmniHead = o;
+	return o;
+}
+
+// Main robot spot + three orbit spots (red/green/blue at 120° phase).
+// Per-frame tick overrides positions; this just lands the lights in
+// the scene chain so Lighting / shadow passes pick them up.
+static void initializeRobotSpotlights()
+{
+	g_RobotSpot = makeSpotLight(
+		GreetSc,
+		/*R*/255, /*G*/255, /*B*/255,
+		/*intensity*/10.0f, /*range*/30.0f,
+		/*pos*/Vector(0.0f, 10.0f, 0.0f),
+		/*dir*/Vector(0.0f, -1.0f, 0.0f),
+		// ~10° inner (narrow hotspot) / ~55° outer (wide falloff): a wide
+		// pool of floor with a small bright core, falloff dominates.
+		/*hotDeg*/10.0f, /*fallDeg*/55.0f);
+
+	// Orbit spots: narrower cone for distinct colored patches; short-range
+	// shadow maps at 256x256 (16x cheaper raster than the main 1024²).
+	struct OrbitInit { float r, g, b; const char* tag; };
+	const OrbitInit init[kOrbitSpotCount] = {
+		{ 255.0f,  60.0f,  60.0f, "red"   },
+		{  60.0f, 255.0f,  60.0f, "green" },
+		{  60.0f,  80.0f, 255.0f, "blue"  },
+	};
+	for (int i = 0; i < kOrbitSpotCount; ++i) {
+		g_OrbitSpots[i] = makeSpotLight(
+			GreetSc,
+			init[i].r, init[i].g, init[i].b,
+			/*intensity*/8.0f, /*range*/30.0f,
+			/*pos*/Vector(0.0f, 0.0f, 0.0f),
+			/*dir*/Vector(0.0f, -1.0f, 0.0f),
+			/*hotDeg*/15.0f, /*fallDeg*/35.0f,
+			/*shadowMapRes*/256);
+		std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
+			i, init[i].tag);
+	}
+}
+
 void Initialize_Greets()
 {
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
@@ -622,106 +726,7 @@ void Initialize_Greets()
 		}
 	}
 	if (g_RobotMesh) {
-		g_RobotSpot = (Omni*)getAlignedBlock(sizeof(Omni), 16);
-		std::memset(g_RobotSpot, 0, sizeof(Omni));
-		g_RobotSpot->L.B = 255.0f; g_RobotSpot->L.G = 255.0f; g_RobotSpot->L.R = 255.0f;
-		g_RobotSpot->L.A = 1.0f;
-		g_RobotSpot->ISize  = 10.0f;           // intensity
-		g_RobotSpot->IRange = 30.0f;
-		g_RobotSpot->rRange = 1.0f / 30.0f;
-		g_RobotSpot->IPos = Vector(0.0f, 10.0f, 0.0f);
-		g_RobotSpot->IDir = Vector(0.0f, -1.0f, 0.0f);
-		g_RobotSpot->Type = Light_SpotLight;
-		// Cone: ~10° inner (small hotspot), ~55° outer (wide falloff).
-		// Wider outer cone means the spot illuminates a larger area
-		// of floor under the robot; the shrunk hotspot keeps the
-		// bright core narrow so the falloff dominates visually.
-		g_RobotSpot->HotSpot = std::cos(10.0f * 3.14159f / 180.0f);
-		g_RobotSpot->FallOff = std::cos(55.0f * 3.14159f / 180.0f);
-		g_RobotSpot->Flags = Omni_Active | Omni_CastsShadow;
-		// Flare-pass plumbing. Transform_Objects unconditionally adds
-		// every Omni's F to FList (treats it as a flare sprite). With
-		// F.A/B/C left at the memset zeros, the flare pass at
-		// RENDER.CPP:3796 dereferences a null Vertex and crashes. Point
-		// A/B/C at the omni's own V so the A==B sprite branch sees a
-		// valid (degenerate) face, then install a no-op filler so no
-		// flare sprite actually gets drawn.
-		g_RobotSpot->F.A = &g_RobotSpot->V;
-		g_RobotSpot->F.B = &g_RobotSpot->V;
-		g_RobotSpot->F.C = &g_RobotSpot->V;
-		g_RobotSpot->F.Filler = [](Face*, Vertex**, dword, dword) {};
-		// Single-key splines so Animate_Objects doesn't crash when it
-		// walks them. The keys evaluate to constant zeros — our per-
-		// frame update in the tick loop overrides IPos / IDir after
-		// Animate_Objects runs, so the spline-driven values get
-		// stomped immediately.
-		auto initSingleKey = [](Spline& sp, float val) {
-			sp.NumKeys = 1;
-			sp.Keys = new SplineKey;
-			std::memset(sp.Keys, 0, sizeof(SplineKey));
-			sp.Keys[0].Pos.x = val;
-			sp.Keys[0].Pos.y = val;
-			sp.Keys[0].Pos.z = val;
-			sp.Flags = 0;
-			sp.CurKey = 0;
-		};
-		initSingleKey(g_RobotSpot->Pos, 0.0f);
-		initSingleKey(g_RobotSpot->Size, g_RobotSpot->ISize);
-		initSingleKey(g_RobotSpot->Range, g_RobotSpot->IRange);
-		// Link into the scene's omni chain.
-		g_RobotSpot->Next = GreetSc->OmniHead;
-		if (GreetSc->OmniHead) GreetSc->OmniHead->Prev = g_RobotSpot;
-		GreetSc->OmniHead = g_RobotSpot;
-
-		// Three orbit spots — red, green, blue — at 120° phase offsets
-		// around the robot. Cone aimed roughly inward/down at the robot
-		// from a height slightly above. Updated each frame in the tick.
-		struct OrbitInit {
-			float r, g, b;
-			const char *tag;
-		};
-		const OrbitInit init[kOrbitSpotCount] = {
-			{ 255.0f,  60.0f,  60.0f, "red"   },
-			{  60.0f, 255.0f,  60.0f, "green" },
-			{  60.0f,  80.0f, 255.0f, "blue"  },
-		};
-		for (int i = 0; i < kOrbitSpotCount; ++i) {
-			Omni *o = (Omni*)getAlignedBlock(sizeof(Omni), 16);
-			std::memset(o, 0, sizeof(Omni));
-			o->L.R = init[i].r;
-			o->L.G = init[i].g;
-			o->L.B = init[i].b;
-			o->L.A = 1.0f;
-			o->ISize  = 8.0f;
-			o->IRange = 30.0f;
-			o->rRange = 1.0f / 30.0f;
-			o->IPos = Vector(0.0f, 0.0f, 0.0f);
-			o->IDir = Vector(0.0f, -1.0f, 0.0f);
-			o->Type = Light_SpotLight;
-			// Narrower cone than the main spot so each orbit light makes
-			// a visibly distinct colored patch.
-			o->HotSpot = std::cos(15.0f * 3.14159f / 180.0f);
-			o->FallOff = std::cos(35.0f * 3.14159f / 180.0f);
-			o->Flags = Omni_Active | Omni_CastsShadow;
-			// Short-range orbits → 256² shadow map (16× cheaper raster
-			// than the main spot's 1024²).
-			o->shadowMapRes = 256;
-			// Same flare-pass plumbing as g_RobotSpot.
-			o->F.A = &o->V;
-			o->F.B = &o->V;
-			o->F.C = &o->V;
-			o->F.Filler = [](Face*, Vertex**, dword, dword) {};
-			initSingleKey(o->Pos, 0.0f);
-			initSingleKey(o->Size, o->ISize);
-			initSingleKey(o->Range, o->IRange);
-			// Link into the scene's omni chain.
-			o->Next = GreetSc->OmniHead;
-			if (GreetSc->OmniHead) GreetSc->OmniHead->Prev = o;
-			GreetSc->OmniHead = o;
-			g_OrbitSpots[i] = o;
-			std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
-				i, init[i].tag);
-		}
+		initializeRobotSpotlights();
 	}
 }
 
