@@ -45,6 +45,51 @@
 #include "Base/Material.h"
 #include "Base/Object.h"
 #include "Base/Spline.h"
+#include "Base/FrameState.h"
+
+// Defined in Shadows.cpp; the shadow orchestrator sets this to the
+// current shadow light before calling Transform_Objects, so the per-mesh
+// loop below can read its cone params for the bsphere-vs-cone cull.
+extern thread_local Omni* g_currentShadowOmni;
+
+// Return true when the world-space sphere (center C, radius r) lies
+// fully outside the spot cone (apex P, normalized axis D, outer cosine
+// cosOuter, max range). Conservative — false-negatives (keeps a sphere
+// it could safely cull) are fine; false-positives (culls a sphere that
+// should contribute) cause missing shadows, so the test is widened by
+// the sphere radius along the cone surface (r/cosOuter at any depth)
+// and clamped near the apex.
+static inline bool sphereOutsideSpotCone(const Vector& C, float r,
+                                          const Vector& P, const Vector& D,
+                                          float cosOuter, float maxRange)
+{
+	const float vx = C.x - P.x;
+	const float vy = C.y - P.y;
+	const float vz = C.z - P.z;
+	const float v2 = vx*vx + vy*vy + vz*vz;
+
+	// Range: a sphere centre farther than (range + r) from the apex
+	// can't fall inside the cone within `maxRange` of the apex.
+	const float rMax = maxRange + r;
+	if (v2 > rMax * rMax) return true;
+
+	// Project onto axis. If the sphere is entirely behind the apex by
+	// more than its radius, it can't reach the cone.
+	const float distAlongAxis = vx*D.x + vy*D.y + vz*D.z;
+	if (distAlongAxis < -r) return true;
+
+	// Cone-vs-sphere at the sphere's depth. Defensively skip the cull
+	// for very wide cones (cosOuter near 0) — the math goes wonky and
+	// the cull buys little there anyway.
+	if (cosOuter < 1e-3f) return false;
+	const float sinOuter = std::sqrt(std::max(0.0f, 1.0f - cosOuter * cosOuter));
+	const float tanOuter = sinOuter / cosOuter;
+
+	const float depth = distAlongAxis > 0.0f ? distAlongAxis : 0.0f;
+	const float coneRadiusAtDepth = depth * tanOuter + r / cosOuter;
+	const float perpSq = v2 - distAlongAxis * distAlongAxis;
+	return perpSq > coneRadiusAtDepth * coneRadiusAtDepth;
+}
 
 // Defined in RENDER.CPP. Forward-declare to avoid pulling the rest of
 // RENDER.CPP's prelude in here.
@@ -353,9 +398,29 @@ static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
 // orchestrator) project to a different screen rect than the main
 // framebuffer without globally mutating XRes/YRes mid-frame. Default
 // (-1, -1) preserves legacy behavior.
-void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
+void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride,
+                        fds::FrameState *fsPtr)
 {
+	fds::FrameState &fs = fsPtr ? *fsPtr : fds::g_mainFrame;
 	extern thread_local bool g_inShadowPass;
+	const bool coneCull = g_inShadowPass
+		&& fds::FeatureFlags::shadow_cone_cull()
+		&& g_currentShadowOmni
+		&& g_currentShadowOmni->Type == Light_SpotLight;
+	// Normalize the cone axis once: the shadow lighting kernel does the
+	// same for its per-pixel cone test (see StaticLighting), so the
+	// authored IDir is not guaranteed unit-length in world space.
+	Vector coneDir = { 0.0f, 0.0f, 0.0f };
+	Vector conePos = { 0.0f, 0.0f, 0.0f };
+	float  coneCosOuter = 0.0f;
+	float  coneRange    = 0.0f;
+	if (coneCull) {
+		coneDir = g_currentShadowOmni->IDir;
+		Vector_Norm(&coneDir);
+		conePos      = g_currentShadowOmni->IPos;
+		coneCosOuter = g_currentShadowOmni->FallOff;
+		coneRange    = g_currentShadowOmni->IRange;
+	}
 	const int32_t xr = (xresOverride >= 0) ? xresOverride : XRes;
 	const int32_t yr = (yresOverride >= 0) ? yresOverride : YRes;
 	TriMesh *T;
@@ -366,11 +431,11 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 	float L1,L2,L3;
 	Vertex *Vtx,*VEnd;
 	Face *F,*FEnd;
-	float PX=FOVX,PY=FOVY,Temp;
+	float PX=fs.FOVX,PY=fs.FOVY,Temp;
 	float dz;
 	int32_t *pdz = (int32_t *)(&dz);
 	int32_t I;
-	Face **Ins = FList;
+	Face **Ins = fs.FList;
 	float *f = (float *)(&M);
 	float *fv;
 
@@ -387,23 +452,40 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 		T = (TriMesh *)(Obj->Data);
 
 		if (!(T->Flags&HTrack_Visible)) {T->Flags|=Tri_Invisible; continue;}
-		MatrixXMatrix(View->Mat,T->RotMat,M);
+
+		// Mesh-bsphere-vs-cone cull during shadow-pass Transform_Objects.
+		// Cheap pre-test that lets us skip the matrix work + vertex
+		// transform + face fs.FList submission for any mesh whose bsphere
+		// can't contribute to this light's shadow map. Saves both the
+		// per-vertex xform and the per-face raster work downstream.
+		if (coneCull) {
+			Vector wsBsphereCtr;
+			MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
+			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			if (sphereOutsideSpotCone(wsBsphereCtr, T->BSphereRadius,
+			                          conePos, coneDir, coneCosOuter, coneRange)) {
+				T->Flags |= Tri_Invisible;
+				continue;
+			}
+		}
+
+		MatrixXMatrix(fs.View->Mat,T->RotMat,M);
 		Matrix_Copy(IM,M);
 		// Advanced Matrix...(watch this)
 		Vector_Scale(W,PX,W);
 		Vector_Scale(W+1,-PY,W+1);
-		Vector_Scale(W+2,CntrEX,&V);
+		Vector_Scale(W+2,fs.CntrEX,&V);
 		Vector_SelfAdd(W,&V);
-		Vector_Scale(W+2,CntrEY,&V);
+		Vector_Scale(W+2,fs.CntrEY,&V);
 		Vector_SelfAdd(W+1,&V);
 		// Supermatrix ready.
 		
 		// postrioric Offset Vector.
-		Vector_Sub(&T->IPos,&View->ISource,&U);
-		MatrixXVector(View->Mat,&U,&S);
+		Vector_Sub(&T->IPos,&fs.View->ISource,&U);
+		MatrixXVector(fs.View->Mat,&U,&S);
 
-		V.x = CntrEX*S.z+PX*S.x;
-		V.y = CntrEY*S.z-PY*S.y;
+		V.x = fs.CntrEX*S.z+PX*S.x;
+		V.y = fs.CntrEY*S.z-PY*S.y;
 		V.z = S.z;
 
 		// make a corrected sphere center vector
@@ -468,10 +550,10 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 		}
 		// Out by left/right
 		S.x=fabs(S.x);
-		L1 = PX*S.x - CntrEX*S.z;
-		if (L1*L1>L2*T->BSphereRad*(PX*PX+CntrEX*CntrEX))
+		L1 = PX*S.x - fs.CntrEX*S.z;
+		if (L1*L1>L2*T->BSphereRad*(PX*PX+fs.CntrEX*fs.CntrEX))
 		{
-			if (S.x*PX>S.z*CntrEX)
+			if (S.x*PX>S.z*fs.CntrEX)
 			{
 				T->Flags |= Tri_Invisible;
 				continue;
@@ -481,10 +563,10 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 		}
 		// Out by up/down
 		S.y = fabs(S.y);
-		L1 = PY*S.y - CntrEY*S.z;
-		if (L1*L1>L2*T->BSphereRad*(PY*PY+CntrEY*CntrEY))
+		L1 = PY*S.y - fs.CntrEY*S.z;
+		if (L1*L1>L2*T->BSphereRad*(PY*PY+fs.CntrEY*fs.CntrEY))
 		{
-			if (S.y*PY>S.z*CntrEY)
+			if (S.y*PY>S.z*fs.CntrEY)
 			{
 				T->Flags |= Tri_Invisible;
 				continue;
@@ -529,7 +611,7 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				// Object-space N -> view-space TN. IM is the un-scaled
-				// View*RotMat (orthogonal rotation, so inverse-transpose
+				// fs.View*RotMat (orthogonal rotation, so inverse-transpose
 				// = same matrix). Read by the deferred-path clipper +
 				// rasterizer; forward-path Lighting() still reads N.
 				// Shadow pass doesn't read TN or TTangent — skip the two
@@ -543,8 +625,8 @@ void Transform_Objects(Scene *Sc, int xresOverride, int yresOverride)
 				Vtx->RZ=1.0/Vtx->TPos.z;
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				//        Vtx->PX=fs.CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+				//        Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
 				//if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
@@ -614,8 +696,8 @@ Regular:
 					Vtx->RZ=1.0/Vtx->TPos.z;
 					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					//          Vtx->PX=fs.CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+					//          Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
@@ -649,8 +731,8 @@ Regular:
 				Vtx->RZ=1.0/Vtx->TPos.z;
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				//        Vtx->PX=fs.CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+				//        Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
@@ -680,8 +762,8 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				
 				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				//        Vtx->PX=fs.CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+				//        Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
@@ -712,8 +794,8 @@ ERegular:
 					Vtx->RZ=1.0/Vtx->TPos.z;
 					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
 					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					//          Vtx->PX=fs.CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
+					//          Vtx->PY=fs.CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 //					Vtx->REU=Vtx->EU*Vtx->RZ;
@@ -780,8 +862,8 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 					++i;
 				}
 
-				// auto cv = (T->BSphereCtr - View->ISource) * 0.9 + View->ISource;
-				auto cv = View->ISource;
+				// auto cv = (T->BSphereCtr - fs.View->ISource) * 0.9 + fs.View->ISource;
+				auto cv = fs.View->ISource;
 				float optimalDistFromPlane = fabs(T->BSphereCtr * F->N - F->NormProd);
 				float viewDistFromPlane = fabs(AP * F->N - F->NormProd);
 				if (viewDistFromPlane > optimalDistFromPlane) {
@@ -790,7 +872,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 					MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorldPos);
 					bsWorldPos += T->IPos;
 
-					auto pullDir = bsWorldPos - View->ISource;
+					auto pullDir = bsWorldPos - fs.View->ISource;
 					float step = pullDir * F->N;
 					cv += (hackDistFromPlane - viewDistFromPlane) / step * pullDir;
 				}
@@ -920,7 +1002,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		}
 	}  // close per-face loop body opened above
 	}
-	CPolys = Ins-FList;
+	fs.CPolys = Ins-fs.FList;
 
 	FDW omniFlareSize;
 	for(O=Sc->OmniHead;O;O=O->Next)
@@ -928,7 +1010,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 
 
 		Vtx=&O->V;
-		Vector_Sub(&O->IPos,&View->ISource,&V);
+		Vector_Sub(&O->IPos,&fs.View->ISource,&V);
 		//if (O->Flags & Omni_Rand) {
 		//	Vector Rand;
 		//	Rand.x = (frand() - 0.5) * 2.0f;
@@ -936,12 +1018,12 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		//	Rand.z = (frand() - 0.5) * 2.0f;
 		//	Vector_Add(&V, &Rand, &V);
 		//}
-		MatrixXVector(View->Mat,&V,&Vtx->TPos);
+		MatrixXVector(fs.View->Mat,&V,&Vtx->TPos);
 		if (Vtx->TPos.z>Sc->NZP&&Vtx->TPos.z<Sc->FZP)
 		{
 			Vtx->RZ=1.0/Vtx->TPos.z;
-			Vtx->PX=CntrEX+Vtx->TPos.x*PX*Vtx->RZ;
-			Vtx->PY=CntrEY-Vtx->TPos.y*PY*Vtx->RZ;
+			Vtx->PX=fs.CntrEX+Vtx->TPos.x*PX*Vtx->RZ;
+			Vtx->PY=fs.CntrEY-Vtx->TPos.y*PY*Vtx->RZ;
 			// Insert to List
 			dz = Vtx->TPos.z;
 			//dz *=-16384;
@@ -963,20 +1045,20 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		}
 	}
 
-	COmnies = (Ins-FList)-CPolys;
+	fs.COmnies = (Ins-fs.FList)-fs.CPolys;
 #endif
 	for (I = 0; I < Sc->NumOfParticles; I++) {
 		Particle& p = Sc->Pcl[I];
 
-		auto v = p.V.Pos - View->ISource;
+		auto v = p.V.Pos - fs.View->ISource;
 		
-		p.V.TPos = View->Mat * v;
+		p.V.TPos = fs.View->Mat * v;
 
 		if (p.V.TPos.z >= Sc->NZP)
 		{
 			p.V.RZ = 1.0 / p.V.TPos.z;
-			p.V.PX = CntrX + FOVX * p.V.TPos.x * p.V.RZ;
-			p.V.PY = CntrY - FOVY * p.V.TPos.y * p.V.RZ;
+			p.V.PX = fs.CntrX + fs.FOVX * p.V.TPos.x * p.V.RZ;
+			p.V.PY = fs.CntrY - fs.FOVY * p.V.TPos.y * p.V.RZ;
 			p.V.Flags = 0;
 		} else {
 			p.V.Flags |= Vtx_VisNear;
@@ -1000,6 +1082,6 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 		}
 	}
 
-	CAll = Ins-FList;
-	CPcls = CAll-COmnies-CPolys;
+	fs.CAll = Ins-fs.FList;
+	fs.CPcls = fs.CAll-fs.COmnies-fs.CPolys;
 }

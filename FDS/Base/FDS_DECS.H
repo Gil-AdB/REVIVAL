@@ -378,7 +378,12 @@ void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
 // near the cone edge aren't dropped by the F->VisibilityFlagsAll
 // face-filter, which would otherwise compare PX/PY against the main
 // framebuffer XRes/YRes instead of the shadow rect.
-void Transform_Objects(Scene *Sc, int xresOverride = -1, int yresOverride = -1);
+namespace fds { struct FrameState; }
+// fs=nullptr (default) routes writes to fds::g_mainFrame via the legacy
+// global aliases. Pass an explicit FrameState* to populate a per-light
+// scratch buffer instead (used by the parallel shadow-map orchestrator).
+void Transform_Objects(Scene *Sc, int xresOverride = -1, int yresOverride = -1,
+                        fds::FrameState *fs = nullptr);
 char BFC(Face *F);
 char BOC(Face *F);
 void Construct_FaceList(Scene *Sc);
