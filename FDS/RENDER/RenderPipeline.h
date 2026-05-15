@@ -9,6 +9,11 @@
 struct Scene;
 enum class RenderPath;
 
+// Subset selector for the deferred-transparent tile dispatcher. Used by
+// renderFrame to peel front-facing and back-facing halves of the same
+// mesh into separate G-buffer layers when both contribute pixels.
+enum class XparFaceSel { Both, BackOnly, FrontOnly };
+
 namespace fds {
 
 // Owns the per-frame render orchestration. Today this is a thin class

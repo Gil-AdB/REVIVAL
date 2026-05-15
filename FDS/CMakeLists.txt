@@ -118,6 +118,7 @@ set(RENDER
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
     RENDER/RENDER.CPP
+    RENDER/RenderInner.cpp
     RENDER/RenderPipeline.h
     RENDER/Shadows.cpp
     RENDER/SORTS.H
