@@ -25,11 +25,14 @@ set(Base
     Base/FDS_DECS.H
     Base/FDS_DEFS.H
     Base/FDS_VARS.H
+    Base/CameraContext.h
+    Base/FaceListContext.h
     Base/FeatureFlags.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
     Base/FrameState.cpp
     Base/FrameState.h
+    Base/RenderTarget.h
     Base/KeyFrame.h
     Base/Material.h
     Base/Matrix.h
