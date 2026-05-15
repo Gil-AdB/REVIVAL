@@ -1,44 +1,67 @@
-// Definition of g_mainFrame + the legacy-name reference aliases.
+// Singleton render-context instances for the main pass, plus the
+// legacy-name reference aliases that older code reads/writes through.
 //
-// Putting both in the same TU pins their static-initialization order:
-// g_mainFrame is constructed first (POD with =0 defaults), then each
-// reference binds to a field address in it.
+// Two phases of state evolution coexist here while phase 2 of the
+// re-entrant refactor is in flight:
+//
+//   - fds::g_mainCamera + fds::g_mainFaces (new shape — what new code
+//     and the shadow orchestrator will eventually pass explicitly).
+//   - fds::g_mainFrame (legacy aggregate; deprecated, retained as a
+//     small wrapper so existing FrameState* parameters still resolve).
+//
+// All three live in the same TU so their static-initialization order is
+// deterministic — the alias references at the bottom of this file bind
+// to fields inside g_mainCamera / g_mainFaces (not g_mainFrame), which
+// is what makes the new context types the true source of truth.
 
 #include "FrameState.h"
+#include "CameraContext.h"
+#include "FaceListContext.h"
 #include "FDS_VARS.H"
+#include "FDS_DECS.H"
 
 namespace fds {
+
+CameraContext   g_mainCamera;
+FaceListContext g_mainFaces;
+
+// Legacy struct kept while phase 2 lands. Its fields are no longer the
+// canonical home for the per-frame state — they're transitional and
+// will be removed once every site moves to CameraContext / FaceListContext.
 FrameState g_mainFrame;
+
 } // namespace fds
 
-// Legacy-name reference aliases for backwards compatibility. Old code
-// referring to `CAll`, `FList`, etc. transparently reads/writes the
-// corresponding field of fds::g_mainFrame. As call sites migrate to
-// take FrameState& explicitly, these stay in place — they're free at
-// runtime (a reference is a compile-time alias on the same memory).
-int32_t  &CPolys  = fds::g_mainFrame.CPolys;
-int32_t  &COmnies = fds::g_mainFrame.COmnies;
-int32_t  &CPcls   = fds::g_mainFrame.CPcls;
-int32_t  &CAll    = fds::g_mainFrame.CAll;
-int32_t  &Polys   = fds::g_mainFrame.Polys;
-Face   ** &FList  = fds::g_mainFrame.FList;
-Face   ** &SList  = fds::g_mainFrame.SList;
-float     &FOVX   = fds::g_mainFrame.FOVX;
-float     &FOVY   = fds::g_mainFrame.FOVY;
+// Legacy-name reference aliases. Bind to the new context singletons so
+// existing C-style globals (CAll, FList, FOVX, …) and the new struct
+// fields share the same memory. Migration is gradual: each call site
+// that takes CameraContext& / FaceListContext& reads/writes through the
+// struct; sites still using the bare names hit the same bytes through
+// the alias.
+int32_t   &CPolys  = fds::g_mainFaces.cPolys;
+int32_t   &COmnies = fds::g_mainFaces.cOmnies;
+int32_t   &CPcls   = fds::g_mainFaces.cPcls;
+int32_t   &CAll    = fds::g_mainFaces.cAll;
+int32_t   &Polys   = fds::g_mainFaces.polys;
+Face   ** &FList   = fds::g_mainFaces.fList;
+Face   ** &SList   = fds::g_mainFaces.sList;
+
+float     &FOVX    = fds::g_mainCamera.fovX;
+float     &FOVY    = fds::g_mainCamera.fovY;
 extern "C" {
-    int32_t &CntrX  = fds::g_mainFrame.CntrX;
-    int32_t &CntrY  = fds::g_mainFrame.CntrY;
+    int32_t &CntrX = fds::g_mainCamera.cntrX;
+    int32_t &CntrY = fds::g_mainCamera.cntrY;
 }
-float     &CntrEX = fds::g_mainFrame.CntrEX;
-float     &CntrEY = fds::g_mainFrame.CntrEY;
-float     &C_FZP  = fds::g_mainFrame.C_FZP;
-float     &C_rFZP = fds::g_mainFrame.C_rFZP;
-float     &C_NZP  = fds::g_mainFrame.C_NZP;
-float     &C_rNZP = fds::g_mainFrame.C_rNZP;
+float     &CntrEX  = fds::g_mainCamera.cntrEX;
+float     &CntrEY  = fds::g_mainCamera.cntrEY;
+float     &C_FZP   = fds::g_mainCamera.farZ;
+float     &C_rFZP  = fds::g_mainCamera.invFarZ;
+float     &C_NZP   = fds::g_mainCamera.nearZ;
+float     &C_rNZP  = fds::g_mainCamera.invNearZ;
 
 extern "C" {
-    float &g_zscale    = fds::g_mainFrame.g_zscale;
-    float &g_zscale256 = fds::g_mainFrame.g_zscale256;
+    float &g_zscale    = fds::g_mainCamera.zScale;
+    float &g_zscale256 = fds::g_mainCamera.zScale256;
 }
 
 // Were defined in the now-deleted FDS/FILLERS/IX.cpp; the legacy IX
@@ -46,3 +69,4 @@ extern "C" {
 // zero them; precisePixelCount is referenced by a declaration only.
 dword   zReject = 0, zPass = 0;
 int64_t precisePixelCount = 0;
+

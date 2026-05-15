@@ -2,6 +2,11 @@
 #define FDS_DECS_H_INCLUDED
 #include "FDS_VARS.H"
 #include "Vector.h"
+// FrameState.h pulls in CameraContext + FaceListContext + defines the
+// convenience inline overload of Transform_Objects that routes through
+// fds::g_mainCamera / fds::g_mainFaces. Including it here means every
+// FDS_DECS.H consumer sees the simple `Transform_Objects(Sc)` form.
+#include "FrameState.h"
 #include <atomic>
 
 // Math declarations
@@ -378,12 +383,21 @@ void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
 // near the cone edge aren't dropped by the F->VisibilityFlagsAll
 // face-filter, which would otherwise compare PX/PY against the main
 // framebuffer XRes/YRes instead of the shadow rect.
-namespace fds { struct FrameState; }
-// fs=nullptr (default) routes writes to fds::g_mainFrame via the legacy
-// global aliases. Pass an explicit FrameState* to populate a per-light
-// scratch buffer instead (used by the parallel shadow-map orchestrator).
-void Transform_Objects(Scene *Sc, int xresOverride = -1, int yresOverride = -1,
-                        fds::FrameState *fs = nullptr);
+// `cam` and `faces` carry the per-pass projection + face-list state.
+// Convenience overload (defined in FrameState.h to avoid a header
+// dependency cycle) routes through fds::g_mainCamera / fds::g_mainFaces
+// — same memory as the legacy CAll / FList / FOVX aliases, so existing
+// one-arg call sites need no further changes. The parallel shadow
+// orchestrator will pass per-light instances explicitly.
+// Primary form: explicit per-pass camera + face-list contexts. Default
+// args at the end let callers say `Transform_Objects(Sc, cam, faces)`
+// for the common main-pass case (xres/yres overrides only matter when
+// rendering into a different surface than the engine framebuffer —
+// e.g. shadow maps).
+void Transform_Objects(Scene *Sc,
+                        fds::CameraContext &cam,
+                        fds::FaceListContext &faces,
+                        int xresOverride = -1, int yresOverride = -1);
 char BFC(Face *F);
 char BOC(Face *F);
 void Construct_FaceList(Scene *Sc);

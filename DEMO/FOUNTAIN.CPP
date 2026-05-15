@@ -2219,7 +2219,7 @@ struct FountainScene : SceneDriver {
 
 		prof.switchTo(PROF_XFRM);
 
-		Transform_Objects(FntSc);
+		Transform_Objects(FntSc, fds::g_mainCamera, fds::g_mainFaces);
 
 		prof.switchTo(PROF_LGHT);
 

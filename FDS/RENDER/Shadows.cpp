@@ -47,6 +47,12 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
+// Set by the shadow orchestrator around each per-light Transform_Objects
+// so the mesh-bsphere-vs-cone cull in Transform.cpp can read the active
+// light's pose without an explicit parameter. nullptr outside the
+// shadow pass.
+thread_local Omni* g_currentShadowOmni = nullptr;
+
 // Per-frame depth pre-pass over every Omni_CastsShadow light. For each
 // such light we build a temporary Camera (look down IDir, FOV = spot
 // outer cone), swap the engine's view globals to it, re-run
@@ -141,7 +147,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		sm.cntrY  = float(sm.yres) * 0.5f - 0.5f;
 
 		// Swap globals to the shadow camera. XRes/YRes are passed via
-		// Transform_Objects(Sc, xres, yres) override instead of mutating
+		// Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces, xres, yres) override instead of mutating
 		// the globals — Transform_Objects's visibility-flag math (incl.
 		// the F->VisibilityFlagsAll face filter) needs to use the shadow
 		// rect, not the main screen, otherwise hex tiles near the cone
@@ -177,7 +183,9 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		// the main pass.
 		const auto tXformStart = clk::now();
 		g_inShadowPass = true;
-		Transform_Objects(Sc, sm.xres, sm.yres);
+		g_currentShadowOmni = sm.omni;
+		Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces, sm.xres, sm.yres);
+		g_currentShadowOmni = nullptr;
 		g_inShadowPass = false;
 		const auto tXformEnd = clk::now();
 		if (sProfShadow) {
@@ -288,7 +296,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	// rewrite Transform_Objects to write into a thread-local Vertex
 	// scratch. Animate_Objects not re-run (see comment inside the
 	// per-light loop above).
-	Transform_Objects(Sc);
+	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
 
 	// Precompute the per-shadow-map "view-space → light-view-space"
 	// affine, with the main camera now restored on View. Derivation:

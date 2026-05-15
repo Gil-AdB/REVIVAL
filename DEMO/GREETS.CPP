@@ -1235,7 +1235,7 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
 
-		Transform_Objects(GreetSc);
+		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
 
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);

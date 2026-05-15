@@ -775,7 +775,7 @@ struct ChaseScene : SceneDriver {
 
 		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
-		Transform_Objects(ChaseSc);
+		Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces);
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);

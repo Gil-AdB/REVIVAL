@@ -74,7 +74,7 @@ struct CrashScene : SceneDriver {
 		Animate_Objects(CrashSc);
 
 		prof.switchTo(PROF_XFRM);
-		Transform_Objects(CrashSc);
+		Transform_Objects(CrashSc, fds::g_mainCamera, fds::g_mainFaces);
 
 		prof.switchTo(PROF_LGHT);
 		Lighting(CrashSc);

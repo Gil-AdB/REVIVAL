@@ -264,7 +264,7 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 View->ISource.x, View->ISource.y, View->ISource.z);
             std::memset(VPage,   0, PageSize);
             std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
-            Transform_Objects(CurScene);
+            Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
             std::fprintf(stderr, "[FNTSNAP] post-Transform CAll=%d CurScene=%p\n",
                 int(CAll), (void*)CurScene);
             if (CAll) {
@@ -603,7 +603,7 @@ int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres) {
         // Manual frame: clear, transform, sort, render.
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
-        Transform_Objects(sc);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         if (CAll) {
             Radix_SortingASM(FList, SList, CAll);
             Render(RenderPath::ForceForward);
@@ -924,7 +924,7 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres) {
         // Manual frame: clear, transform, sort, render.
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
-        Transform_Objects(sc);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         if (CAll) {
             Radix_SortingASM(FList, SList, CAll);
             Render(RenderPath::ForceForward);
@@ -1632,7 +1632,7 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
-        Transform_Objects(sc);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         Lighting(sc);
         if (CAll) {
             Radix_SortingASM(FList, SList, CAll);
@@ -1788,7 +1788,7 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
                 std::memset(VPage,   0, PageSize);
                 std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
-                Transform_Objects(sc);
+                Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
                 Lighting(sc);
                 if (CAll) {
                     Radix_SortingASM(FList, SList, CAll);
@@ -2010,7 +2010,7 @@ int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres) {
             buildLookAt(View->ISource, lookAt, View->Mat);
             std::memset(VPage,   0, PageSize);
             std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
-            Transform_Objects(sc);
+            Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
             if (CAll) {
                 Radix_SortingASM(FList, SList, CAll);
                 Render(RenderPath::ForceForward);
@@ -2099,7 +2099,7 @@ int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::srand(0);
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
-        Transform_Objects(sc);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         // Diagnostic: walk the target building's faces. For each
         // reflective face that's both front-facing and visible (i.e.,
         // not all 3 verts share a frustum-cull bit), print its post-

@@ -1618,7 +1618,7 @@ static void bakeBuildingPanorama(Object* Obj,
 			// anyway. Spell it out to skip the size-check + mat32 clear.
 			Render(RenderPath::ForceForward);
 		}
-		Transform_Objects(CitySc);
+		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		if (0 != CAll) {
 			Radix_SortingASM(FList, SList, CAll);
 			Render(RenderPath::ForceForward);
@@ -2119,7 +2119,7 @@ struct CityScene : SceneDriver {
 		// render all objects normally
 		prof.enter(PROF_XFRM);
 		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
-		Transform_Objects(CitySc);
+		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);

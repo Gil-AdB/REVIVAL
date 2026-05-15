@@ -304,7 +304,7 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 	Vector PrevViewPos = View->ISource;
 	Vector_Zero(&View->ISource);
 
-	Transform_Objects(Sc);
+	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
 	if (CAll)
 	{
 		Radix_SortingASM(FList,SList,CAll);

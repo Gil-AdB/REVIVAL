@@ -721,7 +721,7 @@ void fds::RenderPipeline::runScene(Scene *Sc,float Seconds)
 			dTime *= 0.25;
 		} else {AfterFirstFrame=1; TTrd = Timer; dTime = 0;}
 		Animate_Objects(Sc);
-		Transform_Objects(Sc); Par1 = Timer;
+		Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces); Par1 = Timer;
 		if (!(Sc->Flags&Scn_Nolighting)) Lighting(Sc); Par4 = Timer;
 		
 		//if (Sc->PclExec) Sc->PclExec(); Par2 = Timer;
