@@ -1767,6 +1767,10 @@ void Initialize_City()
 	std::vector<uint32_t> panorama(PANORAMA_XRES * PANORAMA_YRES);
 
 	for (Object* Obj = CitySc->ObjectHead; skipCubeMap ? false : Obj != nullptr; Obj = Obj->Next) {
+		// Bake runs on the init worker; ESC during Glato sets g_shouldQuit
+		// but is otherwise stuck behind t1.join() until the bake finishes.
+		// Bail early so the user gets sub-second quit response.
+		if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
