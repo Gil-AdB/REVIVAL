@@ -21,6 +21,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
 
@@ -1108,525 +1109,11 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 	CPcls = CAll-COmnies-CPolys;
 }
 
-float Vector_CosAngleFAST(Vector *U,Vector *V)
-{
-	return (U->x*V->x+U->y*V->y+U->z*V->z)*
-		RSQRT((U->x*U->x+U->y*U->y+U->z*U->z)*(V->x*V->x+V->y*V->y+V->z*V->z));
-}
+// Forward (per-vertex) lighting pass now lives in Lighting.cpp:
+//   Vector_CosAngleFAST, LightingOld, StaticLighting, Lighting.
 
 
 
-// Able to operate before Transformation Module
-// based on a 
-void LightingOld(Scene *Sc)
-{
-	TriMesh *T;
-	Vertex *Vtx,*VEnd;
-	Face *Face,*FEnd;
-	Omni *O;
-	float R,G,B,Dot,Dot2,Its,Color,Distance;
-	const float Ka=Ambient_Factor/*255.0*/,Kd=Diffusive_Factor,Ks=Specular_Factor,n=4.0;
-	Vector L,U,V,W,TN,CU,CV;
-	Matrix M;
-	float rLen,Len,Len2;
-	float ir;
-	float illumFactor;
-	
-		
-	for(T=Sc->TriMeshHead;T;T=T->Next)
-	{
-		if (T->Flags&Tri_Invisible) continue;
-		if (T->Flags&Tri_Noshading) continue;		
-
-		Material *M;
-		float Lumin;
-
-		if (T->FIndex)
-		{
-			M = T->Faces[0].Txtr;
-			Lumin = M->Luminosity;
-			if (!(M->Flags & Mat_RGBInterp))
-			{
-				int banana = 1;
-			}
-		} else Lumin = 1.0;
-		VEnd=T->Verts+T->VIndex;
-		FEnd=T->Faces+T->FIndex;
-		Vector_Sub(&T->IPos,&View->ISource,&U);
-		MatrixTXVector(T->RotMat,&U,&W);
-		// Camera Illumination model (Lambertian)
-		if (Cam_HeadLight)
-		{
-			for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
-			{
-			/*        Its = fabs(Dot_Product(&Vtx->N,(Vector *)(M)+2)*30000000.0);
-				Its /= Dot_Product(&Vtx->TPos,&Vtx->TPos);*/
-				Vector_Add(&Vtx->Pos,&W,&V);
-				Its = 350000.0/Dot_Product(&V,&V);
-				if (Its<1.0) Its=0.5;
-				if (Its>229.0) Its=229.0;
-				Vtx->LR = Its+Sc->Ambient.R;
-				Vtx->LG = Its+Sc->Ambient.G;
-				Vtx->LB = Its+Sc->Ambient.B;
-				//      Vtx->LR=Vtx->LG=Vtx->LB = 0.5;
-			}
-		} else {
-			for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
-			{
-				Vtx->LR = Sc->Ambient.R * Lumin;
-				Vtx->LG = Sc->Ambient.G * Lumin;
-				Vtx->LB = Sc->Ambient.B * Lumin;
-			}
-		}
-		// Lightsource based Illumination model
-		/*    for(O=Sc->OmniHead;O;O=O->Next)
-		if(O->Flags&Flare_LightSource)
-		{
-		Vector_Sub(&T->IPos,&O->IPos,&U);
-		MatrixTXVector(T->RotMat,&U,&W);
-		for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
-		{
-		Vector_Add(&Vtx->Pos,&W,&L);
-		Dot=1.0/Dot_Product(&L,&L);
-		Vtx->LR += O->L.R * Dot;
-		Vtx->LG += O->L.G * Dot;
-		Vtx->LB += O->L.B * Dot;
-		}
-	}*/
-	/*
-	N = surface normal
-	L     = unit vector between point and light
-	V = unit vector between point and view
-		*/
-		//    Ka + Kd * (N dot L) + Ks * (N dot ( L + V / 2))^n
-		//int OmniCounter = 0;
-		for(O=Sc->OmniHead;O;O=O->Next)
-		{
-			// HACK: omni disabling code
-			//if (OmniCounter < NumOmniDisable && OmniDisable[OmniCounter++]) continue;
-			// HACK: move omni to camera
-			//Vector_Copy(&O->IPos, &View->ISource);
-			if(O->Flags&Omni_Active)
-			{
-				Vector_Sub(&T->IPos,&O->IPos,&U);
-				MatrixTXVector(T->RotMat,&U,&W);
-				Vector *WP = (Vector *)(T->RotMat);
-				float Scale = Vector_Length(WP);
-				float rScale = 1.0/Scale;
-				Vector_SelfScale(&W, rScale*rScale);
-				
-				//				Vector_Sub(&View->ISource,&O->IPos,&CU);
-				//				MatrixTXVector(View->Mat,&CU,&CV);
-				float effRange = Range_Factor * O->IRange;
-				if (!effRange) effRange = O->ISize; // lousy default
-				
-				// Hack: hardcoded range modifier
-				//effRange *= OmniRangeMult[OmniCounter-1]; 
-				
-				// check the lousy b-sphere
-				if (Vector_Length(&U)>sqrt(T->BSphereRad)*Scale+effRange*8.0) continue;
-				
-				for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
-				{
-					Vector_Add(&Vtx->Pos,&W,&L);
-					//						if (Vector_SelfDot(&L)>ir) continue;
-					rLen = RSQRT(L.x*L.x+L.y*L.y+L.z*L.z);					
-					Dot=-Dot_Product(&L,&Vtx->N)*rLen;
-					
-					rLen *=rScale; // Copo-cabana
-					
-					illumFactor = effRange * rLen;
-					if (illumFactor > 1.0/8.0)
-					{
-						illumFactor *= illumFactor; 
-						
-						if (Dot>0.0f)
-						{
-							Color=(Ka+Dot*(Kd+Ks*Dot*Dot))*illumFactor;
-						} else Color=Ka*illumFactor;
-						Vtx->LR += O->L.R * Color;
-						Vtx->LG += O->L.G * Color;
-						Vtx->LB += O->L.B * Color;
-					}
-				}
-			}
-			
-			// Saturation.
-			for(Vtx=T->Verts;Vtx<VEnd;Vtx++)
-			{
-				if (Vtx->LR>245.0) Vtx->LR=245.0;
-				if (Vtx->LG>245.0) Vtx->LG=245.0;
-				if (Vtx->LB>245.0) Vtx->LB=245.0;
-			}
-		}
-	}
-}
-
-
-// This lighting module is complient with LightWave 3D, and should be optimized using
-// SSE assembly code
-//#define LIGHTING_CALC_ALPHA
-void StaticLighting(Scene *Sc)
-{
-	TriMesh *T;
-	Vertex *V,*VE;
-	Face *F,*FE;
-	Omni *O;
-
-	Vector u, v, w;
-	dword n;
-
-	Matrix M;
-	Material *Mat;
-	float Lumin;
-
-	// hopefully, paragraph aligned
-	static Color l;
-	static Color Ambient;
-
-	// light position vector
-	static CurLight LA[128], *L, *LE;
-
-	for(T=Sc->TriMeshHead;T;T=T->Next)
-	{
-		if (T->Flags&Tri_Noshading) continue;
-		if (!(T->Flags & Tri_Stationary)) continue;
-
-		if (T->FIndex)
-		{
-			Mat = T->Faces[0].Txtr;
-			Lumin = Mat->Luminosity;
-		} else Lumin = 0.0;
-		
-		// Calculate ambient factor
-		// LW3D: Luminosity * base color + scene Ambient * diffuse level
-		if (Mat->Txtr)
-		{
-			Ambient.B = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.B;
-			Ambient.G = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.G;
-			Ambient.R = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.R;
-#ifdef LIGHTING_CALC_ALPHA
-			Ambient.A = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.A;
-#endif
-		} else {
-			Ambient.B = Lumin * Mat->BaseCol.B + Mat->Diffuse * Sc->Ambient.B;
-			Ambient.G = Lumin * Mat->BaseCol.G + Mat->Diffuse * Sc->Ambient.G;
-			Ambient.R = Lumin * Mat->BaseCol.R + Mat->Diffuse * Sc->Ambient.R;
-#ifdef LIGHTING_CALC_ALPHA
-			Ambient.A = Lumin * Mat->BaseCol.A + Mat->Diffuse * Sc->Ambient.A;
-#endif
-		}
-
-		for(O=Sc->OmniHead, L=LA;O;O=O->Next)
-		{
-			if (!(O->Flags & Omni_Active))
-				continue;
-			if (!(O->Flags & Omni_Stationary))
-				continue;
-			Vector_Sub(&O->IPos, &T->IPos, &u);
-			MatrixTXVector(T->RotMat, &u, &w);
-			Vector *wp = (Vector *)(T->RotMat);
-			float rScale = 1.0/Vector_Length(wp);
-			Vector_SelfScale(&w, rScale*rScale);
-			Vector_Copy(&L->Pos, &w);
-
-			L->Range = O->IRange * rScale;
-			L->Range2 = L->Range * L->Range;
-			L->rRange = 1.0/L->Range;
-
-			// Spot light: rotate the cone axis into the mesh's local
-			// space so the per-vertex `dot(L->Dir, vertex_to_light)`
-			// matches the same coordinate system as the rest of this
-			// loop. cosInner/cosOuter come from the Omni unchanged
-			// (they're cosines, no scaling needed).
-			L->isSpot = (O->Type == Light_SpotLight) ? 1 : 0;
-			if (L->isSpot) {
-				MatrixTXVector(T->RotMat, (Vector*)&O->IDir, &L->Dir);
-				Vector_Norm(&L->Dir);
-				L->cosInner = O->HotSpot;
-				L->cosOuter = O->FallOff;
-			} else {
-				L->Dir.x = L->Dir.y = L->Dir.z = 0.0f;
-				L->cosInner = -2.0f;  // sentinel: "always inside"
-				L->cosOuter = -2.0f;
-			}
-
-			if (Mat->Txtr)
-			{
-				float intensity = O->ISize * Mat->Diffuse;
-				L->Col.B = O->L.B * intensity;
-				L->Col.G = O->L.G * intensity;
-				L->Col.R = O->L.R * intensity;
-#ifdef LIGHTING_CALC_ALPHA
-				L->Col.A = O->L.A * intensity;
-#endif
-			} else {
-				float intensity = O->ISize * Mat->Diffuse / 256.0;
-				L->Col.B = O->L.B * Mat->BaseCol.B * intensity;
-				L->Col.G = O->L.G * Mat->BaseCol.G * intensity;
-				L->Col.R = O->L.R * Mat->BaseCol.R * intensity;
-#ifdef LIGHTING_CALC_ALPHA
-				L->Col.A = O->L.A * Mat->BaseCol.A * intensity;
-#endif
-			}
-			L++;
-		}
-		LE = L;
-
-		mword vi=0;
-		for(V=T->Verts, VE = V+T->VIndex; V<VE; V++,vi++)
-		{
-			l.B = Ambient.B;
-			l.G = Ambient.G;
-			l.R = Ambient.R;
-#ifdef LIGHTING_CALC_ALPHA
-			l.A = Ambient.A;
-#endif			
-			for(L=LA; L<LE; L++)
-			{
-				Vector_Sub(&L->Pos, &V->Pos, &w);
-				float dot = Dot_Product(&w, &V->N);
-				if (dot < 0.0) continue;
-				float v = Vector_Length(&w);
-				float len2 = w.x*w.x+w.y*w.y+w.z*w.z;
-				if (len2 > L->Range2) continue;
-				float len = SQRT(len2);
-				float k = dot / len * (1.0-len*L->rRange);
-
-				// Spot cone attenuation: cosTheta = dot(-Dir, light_to_vertex_unit).
-				// w runs vertex→light, so the light's outgoing direction
-				// at the vertex is -w/|w| relative to the vertex but +w/|w|
-				// relative to the light. We want angle between L->Dir
-				// (cone axis) and the vector FROM the light TO the vertex
-				// (= -w/|w|). Equivalently: cosTheta = dot(L->Dir, -w/|w|)
-				//                                   = -dot(L->Dir, w)/|w|.
-				if (L->isSpot) {
-					float invLen = 1.0f / len;
-					float cosTheta = -(L->Dir.x*w.x + L->Dir.y*w.y + L->Dir.z*w.z) * invLen;
-					if (cosTheta <= L->cosOuter) continue;  // outside outer cone
-					if (cosTheta < L->cosInner) {
-						float t = (cosTheta - L->cosOuter) / (L->cosInner - L->cosOuter);
-						k *= t * t * (3.0f - 2.0f * t);  // smoothstep edge falloff
-					}
-					// (cosTheta >= cosInner: inside inner cone, no attenuation)
-				}
-
-				l.B += k*L->Col.B;
-				l.G += k*L->Col.G;
-				l.R += k*L->Col.R;
-#ifdef LIGHTING_CALC_ALPHA
-				l.A += k*L->Col.A;
-#endif
-			}
-
-			// saturation
-			if (l.B > 250.0) l.B = 250.0;
-			if (l.G > 250.0) l.G = 250.0;
-			if (l.R > 250.0) l.R = 250.0;
-#ifdef LIGHTING_CALC_ALPHA
-			if (l.A > 250.0) l.A = 250.0;
-#endif
-			
-			T->SL[vi].B = l.B;
-			T->SL[vi].G = l.G;
-			T->SL[vi].R = l.R;
-#ifdef LIGHTING_CALC_ALPHA
-			T->SL[vi].A = l.A;
-#endif
-		}
-	}
-}
-
-
-
-// Lighting() now runs unconditionally. The deferred path bypasses
-// Mekalele for Face_Reflective faces and dispatches them through the
-// forward TheOtherBarry<OVERWRITE, TEXTURETEXTURE> filler — which reads
-// Vtx->LR/LG/LB for its colorize step — so the per-vertex pass has to
-// populate those even when the rest of the frame is going through the
-// G-buffer compositor.
-extern bool deferredEnabled();
-
-void Lighting(Scene *Sc)
-{
-
-	TriMesh *T;
-	Vertex *V, *VE;
-	Face *F, *FE;
-	Omni *O;
-
-	Vector u, v, w;
-	dword n;
-
-	Matrix M;
-	Material *Mat;
-	float Lumin;
-
-	// hopefully, paragraph aligned
-	static Color *pl = (Color *)getAlignedBlock(sizeof(Color), 16);
-	static Color Ambient;
-
-	// light position vector
-	static CurLight *LA = (CurLight *)getAlignedBlock(sizeof(CurLight) * 128, 16);
-	static CurLight *L, *LE;
-
-	if (!(Sc->Flags & Scn_StaticLighting))
-	{
-		Sc->Flags |= Scn_StaticLighting;
-		StaticLighting(Sc);
-	}
-
-	for (T = Sc->TriMeshHead; T; T = T->Next)
-	{
-		if (T->Flags&(Tri_Invisible | Tri_Noshading)) continue;
-
-		if (T->FIndex)
-		{
-			Mat = T->Faces[0].Txtr;
-			Lumin = Mat->Luminosity;
-		}
-		else Lumin = 0.0;
-
-
-		// Calculate ambient factor
-		// LW3D: Luminosity * base color + scene Ambient * diffuse level
-		if (Mat->Txtr)
-		{
-			Ambient.B = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.B;
-			Ambient.G = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.G;
-			Ambient.R = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.R;
-			Ambient.A = Lumin * 255.0 + Mat->Diffuse * Sc->Ambient.A;
-		} else {
-			Ambient.B = Lumin * Mat->BaseCol.B + Mat->Diffuse * Sc->Ambient.B;
-			Ambient.G = Lumin * Mat->BaseCol.G + Mat->Diffuse * Sc->Ambient.G;
-			Ambient.R = Lumin * Mat->BaseCol.R + Mat->Diffuse * Sc->Ambient.R;
-			Ambient.A = Lumin * Mat->BaseCol.A + Mat->Diffuse * Sc->Ambient.A;
-
-		}
-
-		for (O = Sc->OmniHead, L = LA; O; O = O->Next)
-		{
-			if (!(O->Flags & Omni_Active))
-				continue;
-			if ((T->Flags & Tri_Stationary) && (O->Flags & Omni_Stationary))
-				continue;
-			Vector_Sub(&O->IPos, &T->IPos, &u);
-			MatrixTXVector(T->RotMat, &u, &w);
-			Vector *wp = (Vector *)(T->RotMat);
-			//			float rScale = 1.0/Vector_Length(wp);
-			float rScale = Vector_Length(wp);
-			Vector_SelfScale(&w, rScale*rScale);
-			Vector_Copy(&L->Pos, &w);
-
-			L->Range = O->IRange * rScale;
-			L->Range2 = L->Range * L->Range;
-			L->rRange = 1.0/L->Range;
-
-			// bounding sphere check
-			Vector_Sub(&L->Pos, &T->BSphereCtr, &u);
-			if (T->BSphereRadius + L->Range < Vector_Length(&u))
-				continue;
-
-			// Spot params (mirrors the other Lighting() loop above).
-			L->isSpot = (O->Type == Light_SpotLight) ? 1 : 0;
-			if (L->isSpot) {
-				MatrixTXVector(T->RotMat, (Vector*)&O->IDir, &L->Dir);
-				Vector_Norm(&L->Dir);
-				L->cosInner = O->HotSpot;
-				L->cosOuter = O->FallOff;
-			} else {
-				L->Dir.x = L->Dir.y = L->Dir.z = 0.0f;
-				L->cosInner = -2.0f;
-				L->cosOuter = -2.0f;
-			}
-
-			if (Mat->Txtr)
-			{
-				float intensity = O->ISize * Mat->Diffuse;
-				L->Col.B = O->L.B * intensity;
-				L->Col.G = O->L.G * intensity;
-				L->Col.R = O->L.R * intensity;
-				L->Col.A = O->L.A * intensity;
-			}
-			else {
-				float intensity = O->ISize * Mat->Diffuse / 256.0;
-				L->Col.B = O->L.B * Mat->BaseCol.B * intensity;
-				L->Col.G = O->L.G * Mat->BaseCol.G * intensity;
-				L->Col.R = O->L.R * Mat->BaseCol.R * intensity;
-				L->Col.A = O->L.A * Mat->BaseCol.A * intensity;
-
-			}
-			L++;
-		}
-		LE = L;
-
-		bool stat = false;
-		if (T->Flags & Tri_Stationary)
-			stat = true;
-
-		Color *sl = T->SL;
-		for (V = T->Verts, VE = V + T->VIndex; V < VE; V++, sl++)
-		{
-			// this compare isn't so bad as soon as it gets into the BTB.
-			if (stat)
-			{
-				pl->B = sl->B;
-				pl->G = sl->G;
-				pl->R = sl->R;
-				pl->A = sl->A;
-			} else {
-				pl->B = Ambient.B;
-				pl->G = Ambient.G;
-				pl->R = Ambient.R;
-				pl->A = Ambient.A;
-			}
-
-			for (L = LA; L < LE; L++)
-			{
-				Vector_Sub(&L->Pos, &V->Pos, &w);
-				float dot = Dot_Product(&w, &V->N);
-				if (dot < 0.0) continue;
-				float v = Vector_Length(&w);
-				float len2 = w.x*w.x + w.y*w.y + w.z*w.z;
-				if (len2 > L->Range2) continue;
-				/*				float len = SQRT(len2);
-								float k = dot / len * (1.0-len*L->rRange);*/
-
-				float len = RSQRT(len2);
-				float k = dot * len * (1.0-L->rRange/len);
-
-				// Spot cone — same shape as the other Lighting() loop. RSQRT
-				// here returns 1/sqrt, so `len` is actually the inverse
-				// length. cosTheta = -dot(L->Dir, w) * (1/|w|).
-				if (L->isSpot) {
-					float cosTheta = -(L->Dir.x*w.x + L->Dir.y*w.y + L->Dir.z*w.z) * len;
-					if (cosTheta <= L->cosOuter) continue;
-					if (cosTheta < L->cosInner) {
-						float t = (cosTheta - L->cosOuter) / (L->cosInner - L->cosOuter);
-						k *= t * t * (3.0f - 2.0f * t);
-					}
-				}
-
-				pl->B += k*L->Col.B;
-				pl->G += k*L->Col.G;
-				pl->R += k*L->Col.R;
-				pl->A += k*L->Col.A;
-
-			}
-
-			// saturation
-			if (pl->B > 250.0) pl->B = 250.0;
-			if (pl->G > 250.0) pl->G = 250.0;
-			if (pl->R > 250.0) pl->R = 250.0;
-			if (pl->A > 250.0) pl->A = 250.0;
-
-			V->LB = pl->B;
-			V->LG = pl->G;
-			V->LR = pl->R;
-			V->LA = pl->A;
-		}
-	}
-}
 
 void Restore_Splines(Scene *Sc)
 {
@@ -1887,7 +1374,8 @@ bool deferredEnabled() {
 // Set to -1 (default) to disable the water-blend special case.
 static int g_deferredWaterMatID = -1;
 
-void SetDeferredWaterMatID(int id) {
+void fds::RenderPipeline::setDeferredWaterMatID(int id) {
+	waterMatID_ = id;
 	g_deferredWaterMatID = id;
 }
 
@@ -5053,7 +4541,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	}
 }
 
-void Render(RenderPath path)
+void fds::RenderPipeline::renderFrame(RenderPath path)
 {
 	constexpr auto		numTilesX = 6;
 	constexpr auto		numTilesY = 4;
@@ -5426,7 +4914,7 @@ char Check_Texture_Memory_Range(Scene *Sc)
 	return 1;
 }
 
-void SetCurrentScene(Scene *Sc)
+void fds::RenderPipeline::setCurrentScene(Scene *Sc)
 {
 	clipper.InitViewport(Sc);
 	CurScene = Sc;
@@ -5440,7 +4928,7 @@ void SetCurrentScene(Scene *Sc)
 
 }
 
-void RunScene(Scene *Sc,float Seconds)
+void fds::RenderPipeline::runScene(Scene *Sc,float Seconds)
 {
 	float t;
 	int32_t TTrd=0;
@@ -5635,3 +5123,19 @@ Away:Tot = Timer-TTrd;
 	delete [] BPage;
 	delete Layer2.Data;
 }
+
+// ─── RenderPipeline singleton + legacy free-function forwarders ────────
+// The free functions are still declared in FDS_DECS.H; DEMO scenes and
+// snapshot harnesses call them by name. They forward into the singleton
+// so internal pipeline state can migrate onto the class over time
+// without touching every call site.
+
+fds::RenderPipeline &fds::RenderPipeline::instance() {
+	static RenderPipeline s_instance;
+	return s_instance;
+}
+
+void Render(RenderPath path)         { fds::RenderPipeline::instance().renderFrame(path); }
+void RunScene(Scene *Sc, float Sec)  { fds::RenderPipeline::instance().runScene(Sc, Sec); }
+void SetCurrentScene(Scene *Sc)      { fds::RenderPipeline::instance().setCurrentScene(Sc); }
+void SetDeferredWaterMatID(int id)   { fds::RenderPipeline::instance().setDeferredWaterMatID(id); }

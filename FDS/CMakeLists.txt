@@ -115,7 +115,9 @@ source_group("RADIO" FILES ${RADIO})
 
 set(RENDER
     RENDER/GENERAL.H
+    RENDER/Lighting.cpp
     RENDER/RENDER.CPP
+    RENDER/RenderPipeline.h
     RENDER/SORTS.H
     RENDER/SQRTTBL.H)
 source_group("RENDER" FILES ${RENDER})
