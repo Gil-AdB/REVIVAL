@@ -114,6 +114,7 @@ set(RADIO RADIO/RADIO.CPP)
 source_group("RADIO" FILES ${RADIO})
 
 set(RENDER
+    RENDER/DeferredLighting.cpp
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
     RENDER/RENDER.CPP
