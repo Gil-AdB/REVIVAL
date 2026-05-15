@@ -236,7 +236,7 @@ extern float ImageSize;
 extern Scene            * CurScene;       // Globally referenced scene.
 
 extern float           CurFrame;       // Current frame
-extern Camera           * View;           // Main active camera
+extern Camera           *&View;           // alias to fds::g_mainCamera.view
 extern Camera             FC;             // Free Camera..(Future Crew rulez)
 extern Material           Default_Mat;    // Default Material...
 extern Material         * MatLib;         // yosi

@@ -46,6 +46,7 @@ int32_t   &Polys   = fds::g_mainFaces.polys;
 Face   ** &FList   = fds::g_mainFaces.fList;
 Face   ** &SList   = fds::g_mainFaces.sList;
 
+Camera *&View      = fds::g_mainCamera.view;
 float     &FOVX    = fds::g_mainCamera.fovX;
 float     &FOVY    = fds::g_mainCamera.fovY;
 extern "C" {

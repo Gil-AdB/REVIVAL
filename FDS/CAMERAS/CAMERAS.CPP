@@ -4,7 +4,10 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 
-Camera      * View;
+// View is now a reference alias to fds::g_mainCamera.view, defined in
+// FrameState.cpp. The legacy `Camera *View` definition that lived here
+// was a separate global — assignments missed g_mainCamera and
+// Transform_Objects (which now reads cam.view) saw a stale nullptr.
 
 Camera FC;
 Vector FV,FT,ColN,OldIS;
