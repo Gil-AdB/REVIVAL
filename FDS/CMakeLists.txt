@@ -119,6 +119,7 @@ set(RENDER
     RENDER/Lighting.cpp
     RENDER/RENDER.CPP
     RENDER/RenderPipeline.h
+    RENDER/Shadows.cpp
     RENDER/SORTS.H
     RENDER/SQRTTBL.H
     RENDER/Transform.cpp)
