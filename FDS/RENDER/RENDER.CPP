@@ -493,20 +493,23 @@ xpar_done: ;
 	int32_t I = CAll;
 	Face **FLS = FList;//+CAll-1;
 	Vertex *A,*B;
-	
+
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
+
 	while (I--)
 	{
 		Face *F = *FLS++;
-		
+
 		// Get Mapping Coordinates from the rendered face.
-		A=F->A; B=F->B; 
-				
+		A=F->A; B=F->B;
+
 		// TODO: change this into a flag check
 		if (A == B)
 		{
 			// Particle/Sprite - no far-Z clipping
 			if (A->TPos.z < C_NZP) continue;
-			F->Filler(F, &A, 1, 0);
+			F->Filler(F, &A, 1, 0, rt, cam);
 		}
 	}
 

@@ -50,6 +50,8 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = CAll;
 	Face** FLS = FList;//+CAll-1;
@@ -75,9 +77,9 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 			if (flags & Vtx_Visible) continue;
 			RasterFunc filler;
 			if (F->Flags & Face_Reflective) {
-				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false);
+				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
 			} else {
-				clipper.Render(F, F->Filler, false);
+				clipper.Render(F, F->Filler, false, rt, cam);
 			}
 			//if (F->Flags & Face_Reflective) {
 			//	clipper.Render(F, IX_Prefiller_Reflective, true);
@@ -95,6 +97,8 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = CAll;
 	Face** FLS = FList;//+CAll-1;
@@ -155,11 +159,11 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 				continue;
 			}
 			if (F->Flags & Face_Reflective) {
-				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false);
+				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
 			} else if (txtrFlags & Mat_Additive) {
-				clipper.Render(F, F->Filler, false);   // TheOtherBarry<ADDITIVE>
+				clipper.Render(F, F->Filler, false, rt, cam);   // TheOtherBarry<ADDITIVE>
 			} else {
-				clipper.Render(F, Mekalele, false);
+				clipper.Render(F, Mekalele, false, rt, cam);
 			}
 		}
 	}
@@ -187,6 +191,8 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = countIdx;
 	Face** FLS = FList + firstIdx;
@@ -237,7 +243,7 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 		const bool frontFacing = vd < 0.0f;
 		if (frontFacing) {
 			if (faceSel == XparFaceSel::BackOnly) continue;
-			clipper.Render(F, MekaleleTransparent, false);
+			clipper.Render(F, MekaleleTransparent, false, rt, cam);
 		} else {
 			if (faceSel == XparFaceSel::FrontOnly) continue;
 			// 2-deep transparent G-buffer: back-facing tris of convex
@@ -245,7 +251,7 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 			// the back layer. The composite pass lights the back layer
 			// onto VPage first, then the front layer on top — so a
 			// glass cube shows both its near and far walls.
-			clipper.Render(F, MekaleleTransparentBack, false);
+			clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 		}
 	}
 

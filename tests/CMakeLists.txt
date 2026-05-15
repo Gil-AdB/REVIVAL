@@ -1,0 +1,3 @@
+add_executable(clipper_test clipper_test.cpp)
+target_link_libraries(clipper_test PRIVATE FDS)
+target_compile_definitions(clipper_test PRIVATE SIMDE_ENABLE_NATIVE_ALIASES)

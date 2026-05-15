@@ -17,8 +17,10 @@
 #include "FrameState.h"
 #include "CameraContext.h"
 #include "FaceListContext.h"
+#include "RenderTarget.h"
 #include "FDS_VARS.H"
 #include "FDS_DECS.H"
+#include "FILLERS/Mekalele.h"   // g_gbuffer / g_gbufferTransparent / g_xparZ
 
 namespace fds {
 
@@ -29,6 +31,21 @@ FaceListContext g_mainFaces;
 // canonical home for the per-frame state — they're transitional and
 // will be removed once every site moves to CameraContext / FaceListContext.
 FrameState g_mainFrame;
+
+RenderTarget MainRenderTargetFromGlobals() {
+    RenderTarget rt;
+    rt.vpage              = reinterpret_cast<uint32_t*>(VPage);
+    rt.bytesPerScanline   = VESA_BPSL;
+    rt.zpage16            = ZPage16;
+    rt.xres               = XRes;
+    rt.yres               = YRes;
+    rt.gbuffer                = g_gbuffer;
+    rt.gbufferTransparent     = g_gbufferTransparent;
+    rt.gbufferTransparentBack = g_gbufferTransparentBack;
+    rt.xparZ                  = g_xparZ;
+    rt.xparZBack              = g_xparZBack;
+    return rt;
+}
 
 } // namespace fds
 

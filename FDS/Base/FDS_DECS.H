@@ -448,7 +448,9 @@ void GridRendererTG(GridPointTG *GP, Image *Img, dword *page, dword XRes, dword 
 // Sprite scalers
 void The_Seven_UP(Vertex **V, dword numVerts);
 void The_Seven_UP_64(int32_t X,int32_t Y,int32_t SX,int32_t SY,dword *Bitmap,byte *Page);
-void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
+                    const fds::RenderTarget& rt,
+                    const fds::CameraContext& cam);
 
 // Legacy "IX" software fillers deleted 2026-05-15 after a snapshot
 // trace across every demo scene confirmed none were ever called.
@@ -463,7 +465,9 @@ inline void SavePolyStats(const char * /*fileName*/) {}
 
 // Tile based rendering
 void TBR_Init(Scene *Sc, mword size);
-void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel);
+void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
+                const fds::RenderTarget& rt,
+                const fds::CameraContext& cam);
 void TBR_Render(Scene *Sc);
 void InsertTransparentToTBR(Face *F);
 

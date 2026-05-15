@@ -1078,7 +1078,9 @@ static Omni* appendTestOmni(Scene* Sc, const Vector& pos,
     // for any face whose A==B (treated as particle/omni flare). We don't
     // want the flare rendered — install a no-op so the loop doesn't
     // dereference a null pointer.
-    O->F.Filler = [](Face*, Vertex**, dword, dword) {};
+    O->F.Filler = [](Face*, Vertex**, dword, dword,
+                     const fds::RenderTarget&,
+                     const fds::CameraContext&) {};
 
     if (!Sc->OmniHead) {
         Sc->OmniHead = O;

@@ -1074,12 +1074,12 @@ static void drawPoly(float DT)
 		F.A = &V[0];
 		F.B = &V[1];
 		F.C = &V[2];
-		_2DClipper::getInstance()->clip(vp, F);
+		_2DClipper::getInstance()->clip(vp, F, fds::MainRenderTargetFromGlobals(), fds::g_mainCamera);
 
 		F.A = &V[0];
 		F.B = &V[2];
 		F.C = &V[3];
-		_2DClipper::getInstance()->clip(vp, F);
+		_2DClipper::getInstance()->clip(vp, F, fds::MainRenderTargetFromGlobals(), fds::g_mainCamera);
 
 		std::unique_lock<std::mutex> lock(mut);
 		++counter;
@@ -1458,9 +1458,9 @@ static void drawPolyOtherBarry(int32_t seed)
 		for (int q = 0; q < numQuads; ++q) {
 			Vertex* Q = const_cast<Vertex*>(V) + q * 4;
 			F.A = &Q[0]; F.B = &Q[1]; F.C = &Q[2];
-			_2DClipper::getInstance()->clip(vp, F);
+			_2DClipper::getInstance()->clip(vp, F, fds::MainRenderTargetFromGlobals(), fds::g_mainCamera);
 			F.A = &Q[0]; F.B = &Q[2]; F.C = &Q[3];
-			_2DClipper::getInstance()->clip(vp, F);
+			_2DClipper::getInstance()->clip(vp, F, fds::MainRenderTargetFromGlobals(), fds::g_mainCamera);
 		}
 
 		std::unique_lock<std::mutex> lock(mut);

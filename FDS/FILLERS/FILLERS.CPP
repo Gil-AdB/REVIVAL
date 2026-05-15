@@ -1388,7 +1388,9 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 	}
 }
 
-void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel)
+void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
+                    const fds::RenderTarget& /*rt*/,
+                    const fds::CameraContext& /*cam*/)
 {
 //	int32_t Size = ImageSize*_A->RZ;
 	float Size = ImageSize*_A->RZ*View->PerspX;
@@ -1710,7 +1712,9 @@ void InsertTransparentToTBR(Face *F)
 	}
 }
 
-void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel)
+void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
+                const fds::RenderTarget& /*rt*/,
+                const fds::CameraContext& /*cam*/)
 {
 	float Size = ImageSize*_A->RZ*View->PerspX;
 

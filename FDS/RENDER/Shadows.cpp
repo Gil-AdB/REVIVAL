@@ -211,6 +211,13 @@ void Render_DeferredShadowMaps(Scene *Sc)
 				ThreadPool::instance().enqueue(
 					[smPtr, camPtr, x1f, y1f, x2f, y2f]() {
 						g_currentShadowMap = smPtr;
+						// MekaleleShadowDepth ignores rt + cam (reads
+						// g_currentShadowMap thread_local + sm fields).
+						// We pass them anyway to satisfy the post-phase-4
+						// signature; phase 6 will plumb a real per-light
+						// shadow RenderTarget through.
+						const auto rt  = fds::MainRenderTargetFromGlobals();
+						const auto& cam = *camPtr;
 						FrustumClipper clipper;
 						clipper.InitViewport(*camPtr);  // light's near/far
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
@@ -224,8 +231,8 @@ void Render_DeferredShadowMaps(Scene *Sc)
 							    F->C->TPos.z <= 0.0f) {
 								continue;
 							}
-							clipper.Render(F, MekaleleShadowDepth, false,
-							               /*skipMipLevel=*/true);
+							clipper.Render(F, MekaleleShadowDepth, false, rt, cam,
+                                          /*skipMipLevel=*/true);
 						}
 						g_currentShadowMap = nullptr;
 						std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);

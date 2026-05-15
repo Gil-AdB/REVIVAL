@@ -4,6 +4,8 @@
 #include <cmath>
 
 #include "Base/FDS_DECS.H"
+#include "Base/RenderTarget.h"
+#include "Base/CameraContext.h"
 #include "F4Vec.h"
 
 #include "TheOtherBarry.h"
@@ -715,7 +717,9 @@ struct TileRasterizer {
 } // namespace barry
 
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode = barry::TTextureMode::NORMAL>
-void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                   const fds::RenderTarget& /*rt*/,
+                   const fds::CameraContext& /*cam*/) {
 	//for (dword i = 0; i < numVerts; ++i) {
 	//	float z = 1.0f / V[i]->RZ;
 	//	V[i]->U = V[i]->UZ * z;

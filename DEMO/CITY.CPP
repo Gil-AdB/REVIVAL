@@ -1017,7 +1017,9 @@ static void getRadialRandomHeight(Vector& c, Vector& v)
 
 
 static dword numDropsRendered;
-static void drawRainDrop(Face* F, Vertex **VA, mword numVerts, dword miplevel)
+static void drawRainDrop(Face* F, Vertex **VA, mword numVerts, dword miplevel,
+                         const fds::RenderTarget& /*rt*/,
+                         const fds::CameraContext& /*cam*/)
 {
 	Vertex *V = VA[0];
 

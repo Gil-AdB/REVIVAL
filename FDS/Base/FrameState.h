@@ -11,6 +11,7 @@
 
 #include "CameraContext.h"
 #include "FaceListContext.h"
+#include "RenderTarget.h"
 
 namespace fds {
 
@@ -19,6 +20,14 @@ namespace fds {
 // reference aliases into the fields of these two structs.
 extern CameraContext   g_mainCamera;
 extern FaceListContext g_mainFaces;
+
+// Snapshot of the current main-pass render target globals (VPage,
+// ZPage16, XRes, YRes, VESA_BPSL, g_gbuffer*, g_xparZ*) into a
+// RenderTarget. Phase 4 dispatch sites use this to bridge the
+// signature change while filler bodies still read globals; once the
+// bodies migrate to read from the arg, the dispatcher can stop
+// rebuilding from globals and pass an explicit per-pass target.
+RenderTarget MainRenderTargetFromGlobals();
 
 // Legacy aggregate. No longer the source of truth — kept as a thin
 // compatibility shim so any code that still names `FrameState` keeps

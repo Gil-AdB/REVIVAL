@@ -2,7 +2,7 @@
 
 #define CLIPPER_MAXVERTS 48
 
-namespace fds { struct CameraContext; }
+namespace fds { struct CameraContext; struct RenderTarget; }
 
 class FrustumClipper {
 public:
@@ -22,6 +22,8 @@ public:
 	// subdivision and MiplevelClipper's polygon traversal has bugs that
 	// manifest under square-aspect (FOVX==FOVY) light cameras.
 	void Render(Face *F, RasterFunc filler, bool isEnvCoords,
+	            const fds::RenderTarget& rt,
+	            const fds::CameraContext& cam,
 	            bool skipMipLevel = false);
 	void SetClippingExtents(float x1, float y1, float x2, float y2) {
 		C_VP.ClipX1 = x1;
@@ -52,7 +54,9 @@ private:
 	void Down();
 	void CorrectCWOrder();
 	void YSort(Vertex** Prim, Vertex** Scnd, mword nVerts);
-	void MiplevelClipper(Face *F, RasterFunc filler);
+	void MiplevelClipper(Face *F, RasterFunc filler,
+	                     const fds::RenderTarget& rt,
+	                     const fds::CameraContext& cam);
 	float PolyArea();
 
 	dword g_MipLevel;

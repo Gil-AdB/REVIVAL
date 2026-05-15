@@ -453,7 +453,9 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 	}
 }
 
-void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/)
+void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/,
+                          const fds::RenderTarget& /*rt*/,
+                          const fds::CameraContext& /*cam*/)
 {
 	ShadowMap *sm = g_currentShadowMap;
 	if (!sm) return;

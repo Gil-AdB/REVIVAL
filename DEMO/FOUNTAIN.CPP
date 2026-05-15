@@ -90,7 +90,9 @@ static FollowerOmni g_FntFollowerOmnis[kNumFollowerOmnis];
 // for every omni in the visible Z range, so we MUST give it a valid
 // function pointer (PREPROC sets one for FLD-loaded omnis but our
 // programmatically appended ones miss that pass).
-static void NopOmniFiller(Face*, Vertex**, dword, dword) {}
+static void NopOmniFiller(Face*, Vertex**, dword, dword,
+                          const fds::RenderTarget&,
+                          const fds::CameraContext&) {}
 
 // Allocate a new Omni, initialise with single-key splines so
 // Animate_Objects produces stable IPos/ISize/IRange values, and append
@@ -1448,8 +1450,10 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 	f[1].Filler = (TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>);
 	f[1].Txtr = LnMat;
 
-	_2DClipper::getInstance()->clip(vp, f[0]);
-	_2DClipper::getInstance()->clip(vp, f[1]);
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
+	_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
+	_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
 
 /*	if (POW>1)
 		Bivex_Frustrum_Perspective(&A,&B,Lightning_Line);

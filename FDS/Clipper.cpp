@@ -8,7 +8,8 @@ _2DClipper::_2DClipper() {
 	C_Scnd = C_Ptr[1];
 }
 
-void _2DClipper::clip(const Viewport& vp, Face& f) {
+void _2DClipper::clip(const Viewport& vp, Face& f,
+                      const fds::RenderTarget& rt, const fds::CameraContext& cam) {
 	C_VP = vp;
 	C_numVerts = 3;
 	C_Prim[0] = f.A;
@@ -30,7 +31,7 @@ void _2DClipper::clip(const Viewport& vp, Face& f) {
 	ySort(C_Prim, C_Scnd, C_numVerts);
 
 	//DoFace = &f;
-	f.Filler(&f, C_Prim, C_numVerts, 0);
+	f.Filler(&f, C_Prim, C_numVerts, 0, rt, cam);
 }
 void _2DClipper::left() {
 	dword i, j = 0;

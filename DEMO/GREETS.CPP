@@ -503,7 +503,9 @@ static Omni* makeSpotLight(Scene* sc,
 	o->F.A = &o->V;
 	o->F.B = &o->V;
 	o->F.C = &o->V;
-	o->F.Filler = [](Face*, Vertex**, dword, dword) {};
+	o->F.Filler = [](Face*, Vertex**, dword, dword,
+	                 const fds::RenderTarget&,
+	                 const fds::CameraContext&) {};
 
 	initSpotlightSingleKeySplines(o);
 

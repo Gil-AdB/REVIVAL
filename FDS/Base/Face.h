@@ -7,11 +7,23 @@
 #include "Vertex.h"
 #include "FDS_DEFS.H"
 
+namespace fds {
+    struct RenderTarget;    // FDS/Base/RenderTarget.h
+    struct CameraContext;   // FDS/Base/CameraContext.h
+}
+
 #pragma pack(push, 1)
 
 struct Face;
 
-typedef void (*RasterFunc)(Face* F, Vertex** V, dword numVerts, dword miplevel);
+// Per-tile rasterizer entry. Phase 4 of the re-entrant refactor passes
+// the render target + camera context explicitly so the body doesn't need
+// to read VPage / ZPage16 / XRes / YRes / g_zscale / etc. as file-scope
+// globals. Migration is incremental: signatures land first; bodies
+// migrate in follow-up commits and currently still read from globals.
+typedef void (*RasterFunc)(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                           const fds::RenderTarget& rt,
+                           const fds::CameraContext& cam);
 
 // [4 Bytes]
 union FDW

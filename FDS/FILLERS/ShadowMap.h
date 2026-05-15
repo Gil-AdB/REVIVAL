@@ -66,7 +66,9 @@ struct ShadowMap {
 // pointer set by the orchestrator just before invoking the clipper.
 // Writes only the Z byte to `g_currentShadowMap->depth`; no color, no
 // G-buffer, no texture.
-void MekaleleShadowDepth(Face* F, struct Vertex** V, unsigned int numVerts, unsigned int miplevel);
+void MekaleleShadowDepth(Face* F, struct Vertex** V, unsigned int numVerts, unsigned int miplevel,
+                          const fds::RenderTarget& rt,
+                          const fds::CameraContext& cam);
 
 // Per-thread pointer to the shadow map currently being rasterized.
 // Set by the orchestrator around clipper.Render() calls.

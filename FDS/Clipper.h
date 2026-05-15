@@ -4,10 +4,13 @@
 #include "Base/FDS_DECS.H"
 #include "FRUSTRUM.H"
 
+namespace fds { struct RenderTarget; struct CameraContext; }
+
 class _2DClipper {
 public:
 	_2DClipper();
-	void clip(const Viewport& vp, Face& f);
+	void clip(const Viewport& vp, Face& f,
+	          const fds::RenderTarget& rt, const fds::CameraContext& cam);
 	static _2DClipper* getInstance();
 private:
 	void left();

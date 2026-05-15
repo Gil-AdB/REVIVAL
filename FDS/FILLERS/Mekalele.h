@@ -4,6 +4,8 @@
 
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
+#include "Base/RenderTarget.h"
+#include "Base/CameraContext.h"
 #include "F4Vec.h"
 
 #include "TheOtherBarry.h"
@@ -524,7 +526,9 @@ extern uint16_t      *g_xparZBack;
 // `Mekalele`, `MekaleleTransparent`, `MekaleleTransparentBack` that
 // the rest of the engine references.
 template <MekaleleTarget Target>
-inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel) {
+inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                         const fds::RenderTarget& /*rt*/,
+                         const fds::CameraContext& /*cam*/) {
 	meka::GBuffer *gb;
 	uint16_t *zbuf;
 	if constexpr (Target == MekaleleTarget::Opaque) {
@@ -600,12 +604,18 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel) {
 	}
 }
 
-inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel) {
-	MekaleleImpl<MekaleleTarget::Opaque>(F, V, numVerts, miplevel);
+inline void Mekalele(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                     const fds::RenderTarget& rt,
+                     const fds::CameraContext& cam) {
+	MekaleleImpl<MekaleleTarget::Opaque>(F, V, numVerts, miplevel, rt, cam);
 }
-inline void MekaleleTransparent(Face* F, Vertex** V, dword numVerts, dword miplevel) {
-	MekaleleImpl<MekaleleTarget::TransparentFront>(F, V, numVerts, miplevel);
+inline void MekaleleTransparent(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                                const fds::RenderTarget& rt,
+                                const fds::CameraContext& cam) {
+	MekaleleImpl<MekaleleTarget::TransparentFront>(F, V, numVerts, miplevel, rt, cam);
 }
-inline void MekaleleTransparentBack(Face* F, Vertex** V, dword numVerts, dword miplevel) {
-	MekaleleImpl<MekaleleTarget::TransparentBack>(F, V, numVerts, miplevel);
+inline void MekaleleTransparentBack(Face* F, Vertex** V, dword numVerts, dword miplevel,
+                                    const fds::RenderTarget& rt,
+                                    const fds::CameraContext& cam) {
+	MekaleleImpl<MekaleleTarget::TransparentBack>(F, V, numVerts, miplevel, rt, cam);
 }

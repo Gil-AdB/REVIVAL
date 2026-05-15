@@ -1702,6 +1702,8 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(0.0f, float(strip_y),
 	                            float(XRes), float(strip_y + strip_h));
+	const auto rt  = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
 	// Strip-clamp the rasterizer: a clipped tri whose max PY snapped to
 	// strip_y + strip_h would compute tile_My one tile-row past the strip
 	// and write pixels that the neighbouring strip's clear (concurrent)
@@ -1712,8 +1714,8 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 	for (int i = 0; i < count; ++i) {
 		Face* F = faces[i];
 		if (!F) continue;
-		if (front) clipper.Render(F, MekaleleTransparent,     false);
-		else       clipper.Render(F, MekaleleTransparentBack, false);
+		if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
+		else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 	}
 	meka::g_rasterStripClamp = savedClamp;
 

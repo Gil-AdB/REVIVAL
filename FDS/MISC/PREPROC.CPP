@@ -1019,7 +1019,9 @@ void Assign_Fillers(Scene *Sc)
 			//   [7]  txtr  RGB  xpar       → forward transparent
 			//   [8]  ...    SrcAlpha       → forward transparent
 			//   [9]  ...    Additive       → forward additive
-			using fwd_opaque         = void(*)(Face*, Vertex**, dword, dword);
+			using fwd_opaque         = void(*)(Face*, Vertex**, dword, dword,
+			                                    const fds::RenderTarget&,
+			                                    const fds::CameraContext&);
 			constexpr fwd_opaque FwdOpaque         = TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode::NORMAL>;
 			constexpr fwd_opaque FwdOpaqueFlat     = TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode::NONE>;
 			constexpr fwd_opaque FwdXpar           = TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>;

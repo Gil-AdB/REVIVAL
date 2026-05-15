@@ -503,7 +503,9 @@ void FrustumClipper::YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
 
 }
 
-void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
+void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
+                                      const fds::RenderTarget& rt,
+                                      const fds::CameraContext& cam)
 {
 	const float mipBias = 0.5;
 
@@ -548,7 +550,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		filler(F, C_Prim, C_numVerts, g_MipLevel);
+		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
 
@@ -608,7 +610,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		filler(F, C_Prim, C_numVerts, g_MipLevel);
+		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
 
@@ -685,7 +687,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		filler(F, C_Tetr, numSectionVerts, g_MipLevel);
+		filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 
 		// prepare new section - add last two intersection points
 		numRight = 1; // vertex #0 is ignored
@@ -707,7 +709,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
 #endif
-		filler(F, C_Prim, C_numVerts, g_MipLevel);
+		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
 	while (left != right)
@@ -724,7 +726,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler)
 #ifdef NO_MIPMAPS
 	g_MipLevel = 0;
 #endif
-	filler(F, C_Tetr, numSectionVerts, g_MipLevel);
+	filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 }
 
 float FrustumClipper::PolyArea()
@@ -747,6 +749,8 @@ float FrustumClipper::PolyArea()
 
 
 void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
+                             const fds::RenderTarget& rt,
+                             const fds::CameraContext& cam,
                              bool skipMipLevel)
 {
 	mword i, j;
@@ -838,7 +842,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 	if (F->Txtr->Txtr && !skipMipLevel)
 	{
 		Swap();
-		MiplevelClipper(F, filler);
+		MiplevelClipper(F, filler, rt, cam);
 	} else {
 #ifdef ENABLE_PIXELCOUNT
 		FillerPixelcount = FillerPixelcount + PolyArea();
@@ -848,7 +852,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 #endif
 		// skipMipLevel callers (shadow rasterizer) don't care about the
 		// mip level — pass 0. The texture wouldn't be sampled anyway.
-		filler(F, C_Scnd, C_numVerts, skipMipLevel ? 0u : g_MipLevel);
+		filler(F, C_Scnd, C_numVerts, skipMipLevel ? 0u : g_MipLevel, rt, cam);
 	}
 	/*for(i=2; i<C_numVerts; i++)
 	{
