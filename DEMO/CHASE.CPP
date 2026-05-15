@@ -79,7 +79,7 @@ static void Reflected_Transform(Scene *Sc)
 	float dz;
 	int32_t *pdz = (int32_t *)(&dz);
 	int32_t I;
-	Face **Ins = FList;
+	fds::FListEntry *Ins = FList;
 	float *f = (float *)(&M);
 	float *fv;
 
@@ -414,7 +414,6 @@ static void Reflected_Transform(Scene *Sc)
 
 					))
 			{
-				*Ins++ = F;
 				dz = F->A->TPos.z;
 				if (F->B->TPos.z > dz) dz = F->B->TPos.z;
 				if (F->C->TPos.z > dz) dz = F->C->TPos.z;
@@ -423,6 +422,7 @@ static void Reflected_Transform(Scene *Sc)
 #else
 				F->SortZ.F = fzp - dz;
 #endif
+				*Ins++ = { F->SortZ.DW, F };
 			}
 	}
 	CPolys = Ins - FList;
@@ -443,15 +443,16 @@ static void Reflected_Transform(Scene *Sc)
 			//dz *=-16384;
 			//dz +=0x7FFFFFFF;
 			//RoundToInt(&O->Face.SortZ.DW,dz);
-			*Ins++ = &O->F; // no insertion : flares are not reflected for now
 
 			O->F.FlareSize = O->ISize;
 #ifdef FRONT_TO_BACK_SORTING
 			O->F.SortZ.F = 2 * fzp - dz;
 #else
 			O->F.SortZ.F = fzp - dz;
-#endif			
-			*Ins++ = &O->F;
+#endif
+			// no reflection of flares; single push with sortKey now
+			// that SortZ.F has been computed above.
+			*Ins++ = { O->F.SortZ.DW, &O->F };
 		}
 	}
 	COmnies = (Ins - FList) - CPolys;

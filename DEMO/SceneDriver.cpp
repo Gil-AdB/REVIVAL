@@ -27,8 +27,8 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
             ++polys;
         }
     }
-    fListStorage = std::make_unique<Face *[]>(polys);
-    sListStorage = std::make_unique<Face *[]>(polys);
+    fListStorage = std::make_unique<fds::FListEntry[]>(polys);
+    sListStorage = std::make_unique<fds::FListEntry[]>(polys);
     FList = fListStorage.get();
     SList = sListStorage.get();
     View  = sc->CameraHead;

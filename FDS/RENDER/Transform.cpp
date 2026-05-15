@@ -277,7 +277,7 @@ void calcVisibilityFlags(Scene* Sc, Vertex* Vtx, fds::CameraContext &cam) {
 	} else Vtx->Flags |= Vtx_VisNear;
 }
 
-void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Particle& p, fds::CameraContext &cam) {
+void addParticleTrail(Scene* Sc, fds::FListEntry*& Ins, Particle& p, fds::CameraContext &cam) {
 	Vector V;
 
 	Vector VelDir = p.Vel;
@@ -321,8 +321,8 @@ void addParticleTrail(Scene* Sc, Face**& Ins /* Three star programming */, Parti
 		p.TrailF[i].SortZ.F = cam.farZ - p.V.TPos.z;
 #endif
 	}
-	*Ins++ = &p.TrailF[0];
-	*Ins++ = &p.TrailF[1];
+	*Ins++ = { p.TrailF[0].SortZ.DW, &p.TrailF[0] };
+	*Ins++ = { p.TrailF[1].SortZ.DW, &p.TrailF[1] };
 }
 
 #define DEBUG_PARTICLES 0
@@ -435,7 +435,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	float dz;
 	int32_t *pdz = (int32_t *)(&dz);
 	int32_t I;
-	Face **Ins = faces.fList;
+	fds::FListEntry *Ins = faces.fList;
 	float *f = (float *)(&M);
 	float *fv;
 
@@ -917,7 +917,6 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 				F->EV3 = ev[2];
 			}
 			F->ParentTri = T;
-			*Ins++ = F;
 
 #ifdef FRONT_TO_BACK_SORTING
 			Material *M = F->Txtr;
@@ -999,6 +998,11 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 			F->SortZ.F = fzp-dz;
 #endif
 
+			// Push AFTER SortZ is computed so FListEntry.sortKey
+			// captures the final value (legacy layout could push
+			// the Face* first since the radix sort dereffed back
+			// through it; the new FListEntry has sortKey inline).
+			*Ins++ = { F->SortZ.DW, F };
 		}
 	}  // close per-face loop body opened above
 	}
@@ -1041,7 +1045,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 #else
 			O->F.SortZ.F = fzp-dz;
 #endif			
-			*Ins++ = &O->F;
+			*Ins++ = { O->F.SortZ.DW, &O->F };
 		}
 	}
 
@@ -1074,7 +1078,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 #else
 					F->SortZ.F = fzp - dz;
 #endif
-					*Ins++ = F;
+					*Ins++ = { F->SortZ.DW, F };
 				} else {
 					addParticleTrail(Sc, Ins, p, cam);
 				}

@@ -60,8 +60,8 @@ int32_t   &COmnies = fds::g_mainFaces.cOmnies;
 int32_t   &CPcls   = fds::g_mainFaces.cPcls;
 int32_t   &CAll    = fds::g_mainFaces.cAll;
 int32_t   &Polys   = fds::g_mainFaces.polys;
-Face   ** &FList   = fds::g_mainFaces.fList;
-Face   ** &SList   = fds::g_mainFaces.sList;
+fds::FListEntry *&FList = fds::g_mainFaces.fList;
+fds::FListEntry *&SList = fds::g_mainFaces.sList;
 
 Camera *&View      = fds::g_mainCamera.view;
 float     &FOVX    = fds::g_mainCamera.fovX;

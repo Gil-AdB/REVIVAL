@@ -1,17 +1,20 @@
 // Sorting stuff
+// Operates on `fds::FListEntry`. The radix sort reads `entry.sortKey`
+// directly (was: deref through entry.face->SortZ.DW), so each pass
+// streams 16-byte contiguous slots instead of pointer-chasing into
+// random Face structs.
 void Quick_Sorting(long L,long R)
 {
   long I,J;
-//  float Av;
-  long Av;
-  Face *Swapper;
+  uint32_t Av;
+  fds::FListEntry Swapper;
   I=L;
   J=R;
-  Av=FList[(L+R)>>1]->SortZ.DW;
+  Av=FList[(L+R)>>1].sortKey;
   while(I<=J)
   {
-    while (FList[I]->SortZ.DW<Av) I++;
-    while (Av<FList[J]->SortZ.DW) J--;
+    while (FList[I].sortKey<Av) I++;
+    while (Av<FList[J].sortKey) J--;
     if (I<=J) {
       Swapper=FList[I];
       FList[I]=FList[J];
@@ -36,10 +39,8 @@ int32_t Bytes4[257];
 void Radix_Sorting()
 {
   uint32_t Z;
-//  char *ZC1 = (char *)(&Z),*ZC2 = ZC1+1,*ZC3 = ZC2+1,*ZC4 = ZC3+1;
   long I;
-  long *P;
-  Face **F,**FEnd;
+  fds::FListEntry *F, *FEnd;
 
   memset(Bytes1,0,257*4);
   memset(Bytes2,0,257*4);
@@ -48,7 +49,7 @@ void Radix_Sorting()
 
   for(I=0;I<CAll;I++)
   {
-    Z = FList[I]->SortZ.DW;
+    Z = FList[I].sortKey;
     Bytes1[ (Z & 0x000000FF)+1]++;
     Bytes2[((Z & 0x0000FF00)>>8)+1]++;
     Bytes3[((Z & 0x00FF0000)>>16)+1]++;
@@ -67,7 +68,7 @@ void Radix_Sorting()
   FEnd = F+CAll;
   for(;F<FEnd;F++)
   {
-    Z=Bytes1[(*F)->SortZ.DW & 0x000000FF]++;
+    Z=Bytes1[F->sortKey & 0x000000FF]++;
     SList[Z] = *F;
   }
 
@@ -75,7 +76,7 @@ void Radix_Sorting()
   FEnd = F+CAll;
   for(;F<FEnd;F++)
   {
-    Z=Bytes2[((*F)->SortZ.DW & 0x0000FF00) >> 8]++;
+    Z=Bytes2[(F->sortKey & 0x0000FF00) >> 8]++;
     FList[Z] = *F;
   }
 
@@ -83,7 +84,7 @@ void Radix_Sorting()
   FEnd = F+CAll;
   for(;F<FEnd;F++)
   {
-    Z=Bytes3[((*F)->SortZ.DW & 0x00FF0000) >> 16]++;
+    Z=Bytes3[(F->sortKey & 0x00FF0000) >> 16]++;
     SList[Z] = *F;
   }
 
@@ -91,12 +92,12 @@ void Radix_Sorting()
   FEnd = F+CAll;
   for(;F<FEnd;F++)
   {
-    Z=Bytes4[(*F)->SortZ.DW >> 24]++;
+    Z=Bytes4[F->sortKey >> 24]++;
     FList[Z] = *F;
   }
 }
 
-void Radix_SortingASM(Face **f,Face **s,unsigned int n)
+void Radix_SortingASM(fds::FListEntry *f, fds::FListEntry *s, unsigned int n)
 {
-	Radix_Sorting();
+  Radix_Sorting();
 }

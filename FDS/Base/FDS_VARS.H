@@ -2,6 +2,7 @@
 #define FDS_VARS_H_INCLUDED
 #include "FDS_DEFS.H"
 #include "BaseDefs.h"
+#include "FaceListContext.h"
 #include <stdexcept>
 #include <atomic>
 #include <float.h>
@@ -258,8 +259,8 @@ extern char *TxtrBuf,*TxtrAlign;
 // See FDS/Base/FrameState.h. The references-not-values shape means
 // reads/writes through these names continue to hit the same memory as
 // fds::g_mainFrame.<field>.
-extern Face   **&FList;
-extern Face   **&SList;
+extern fds::FListEntry *&FList;
+extern fds::FListEntry *&SList;
 extern float    &FOVX;
 extern float    &FOVY;
 extern float dTime;

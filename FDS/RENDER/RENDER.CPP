@@ -374,7 +374,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		// clump of consecutive same-(mesh, frontFacing) entries).
 		if (unifiedTbr) {
 			for (int32_t k = 0; k < CAll; ++k) {
-				Face* F = FList[k];
+				Face* F = FList[k].face;
 				if (!F || !F->Txtr) continue;
 				if (F->A == F->B) continue;  // sprite, handled by post-loop
 				if (!(F->Txtr->Flags & Mat_Transparent)) continue;
@@ -468,7 +468,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		};
 
 		for (int32_t k = 0; k < CAll; ++k) {
-			Face* F = FList[k];
+			Face* F = FList[k].face;
 			if (!F || !F->Txtr) continue;
 			if (!(F->Txtr->Flags & Mat_Transparent)) continue;
 			if (F->Flags & Face_Reflective) continue;  // forward handles
@@ -491,7 +491,7 @@ xpar_done: ;
 	}
 
 	int32_t I = CAll;
-	Face **FLS = FList;//+CAll-1;
+	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex *A,*B;
 
 	const auto rt  = fds::MainRenderTargetFromGlobals();
@@ -499,7 +499,7 @@ xpar_done: ;
 
 	while (I--)
 	{
-		Face *F = *FLS++;
+		Face* F = (FLS++)->face;
 
 		// Get Mapping Coordinates from the rendered face.
 		A=F->A; B=F->B;
@@ -573,7 +573,7 @@ xpar_done: ;
 		const float minArea = setArea > 0.0f ? setArea : 500.0f;
 		std::fprintf(stderr, "[XPAR-IDS] (all transparent faces in render order)\n");
 		for (int32_t i = 0; i < CAll; ++i) {
-			Face* F = FList[i];
+			Face* F = FList[i].face;
 			if (!F || !F->Txtr) continue;
 			if (!(F->Txtr->Flags & Mat_Transparent)) continue;
 			const float ax = F->A->PX, ay = F->A->PY;

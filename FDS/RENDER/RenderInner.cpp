@@ -54,13 +54,13 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = CAll;
-	Face** FLS = FList;//+CAll-1;
+	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex* A, * B, * C;
 
 	Vertex* V[4];
 
 	while (I--) {
-		Face* F = *FLS++;
+		Face* F = (FLS++)->face;
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;
@@ -101,13 +101,13 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = CAll;
-	Face** FLS = FList;//+CAll-1;
+	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex* A, * B, * C;
 
 	Vertex* V[4];
 
 	while (I--) {
-		Face* F = *FLS++;
+		Face* F = (FLS++)->face;
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;
@@ -195,11 +195,11 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = countIdx;
-	Face** FLS = FList + firstIdx;
+	fds::FListEntry* FLS = FList + firstIdx;
 	Vertex *A, *B, *C;
 
 	while (I--) {
-		Face* F = *FLS++;
+		Face* F = (FLS++)->face;
 
 		// Per-object peeling: when parentFilter is non-null, skip any
 		// face that didn't come from that TriMesh. Lets the caller

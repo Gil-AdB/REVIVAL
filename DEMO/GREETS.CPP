@@ -790,8 +790,8 @@ struct GreetsScene : SceneDriver {
 		for(O = GreetSc->OmniHead; O; O = O->Next)
 			Polys++;
 
-		fListStorage = std::make_unique<Face*[]>(Polys);
-		sListStorage = std::make_unique<Face*[]>(Polys);
+		fListStorage = std::make_unique<fds::FListEntry[]>(Polys);
+		sListStorage = std::make_unique<fds::FListEntry[]>(Polys);
 		FList = fListStorage.get();
 		SList = sListStorage.get();
 

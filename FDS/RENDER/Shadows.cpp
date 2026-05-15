@@ -222,7 +222,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 						clipper.InitViewport(*camPtr);  // light's near/far
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						for (int i = 0; i < CAll; ++i) {
-							Face *const F = FList[i];
+							Face *const F = FList[i].face;
 							if (!F) continue;
 							if (!F->Txtr) continue;
 							if (F->A == F->B) continue;

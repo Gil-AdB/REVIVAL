@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Resize.h"
+#include "Base/FaceListContext.h"
 
 // Quit/skip flags live in Rev.h, but we forward-declare here to avoid
 // pulling the rest of Rev.h's transitive includes (FDS_VARS, Modplayer,
@@ -62,8 +63,8 @@ protected:
     // Honours g_shouldQuit so ESC/Ctrl-C still exits.
     void waitBackspaceRelease();
 
-    std::unique_ptr<Face*[]> fListStorage;
-    std::unique_ptr<Face*[]> sListStorage;
+    std::unique_ptr<fds::FListEntry[]> fListStorage;
+    std::unique_ptr<fds::FListEntry[]> sListStorage;
     bool tabPrev_ = false;
 };
 

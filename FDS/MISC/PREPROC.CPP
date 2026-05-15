@@ -604,8 +604,8 @@ void FList_Allocate(Scene *Sc)
 	Polys += Sc->NumOfParticles;
 	delete[] FList;
 	delete[] SList;
-	FList = new Face * [Polys];
-	SList = new Face * [Polys];
+	FList = new fds::FListEntry[Polys];
+	SList = new fds::FListEntry[Polys];
 }
 
 void Init_Default_Material()

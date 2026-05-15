@@ -375,7 +375,7 @@ static void Reflected_Transform(Scene *Sc)
 	float dz;
 	int32_t *pdz = (int32_t *)(&dz);
 	int32_t I;
-	Face **Ins = FList;
+	fds::FListEntry *Ins = FList;
 	float *f = (float *)(&M);
 	float *fv;
 
@@ -702,7 +702,6 @@ OUT:FEnd=T->Faces+T->FIndex;
 					(AP.x * F->N.x + AP.y * F->N.y + AP.z * F->N.z < F->NormProd) //backface culling
 
 					)) {
-				*Ins++ = F;
 				dz = F->A->TPos.z;
 				if (F->B->TPos.z > dz) dz = F->B->TPos.z;
 				if (F->C->TPos.z > dz) dz = F->C->TPos.z;
@@ -711,6 +710,7 @@ OUT:FEnd=T->Faces+T->FIndex;
 #else
 				F->SortZ.F = fzp - dz;
 #endif
+				*Ins++ = { F->SortZ.DW, F };
 			}
 		}
 	}
@@ -733,8 +733,8 @@ OUT:FEnd=T->Faces+T->FIndex;
 			//dz +=0x7FFFFFFF;
 			//RoundToInt((int32_t *)&O->F.SortZ.DW,dz);
 			dz = Vtx->TPos.z;
-			*Ins++ = &O->F; // no insertion : flares are not reflected for now
 			O->F.SortZ.F = 2 * fzp - dz;
+			*Ins++ = { O->F.SortZ.DW, &O->F }; // no insertion : flares are not reflected for now
 		}
 	}
 	COmnies = (Ins-FList)-CPolys;

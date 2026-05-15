@@ -885,10 +885,10 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres) {
     // into. CityScene::init does this; without an FLD scene driver we
     // need to do it ourselves. Cube has 12 faces + headroom for omnis
     // (none in our test).
-    static std::unique_ptr<Face*[]> fListStorage =
-        std::make_unique<Face*[]>(64);
-    static std::unique_ptr<Face*[]> sListStorage =
-        std::make_unique<Face*[]>(64);
+    static std::unique_ptr<fds::FListEntry[]> fListStorage =
+        std::make_unique<fds::FListEntry[]>(64);
+    static std::unique_ptr<fds::FListEntry[]> sListStorage =
+        std::make_unique<fds::FListEntry[]>(64);
     FList = fListStorage.get();
     SList = sListStorage.get();
 
@@ -1599,10 +1599,10 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
     // this rebuild assigns Material::ID and registers them with the scene.
     Scene_RebuildMatTable(sc);
 
-    static std::unique_ptr<Face*[]> fListStorage =
-        std::make_unique<Face*[]>(256);
-    static std::unique_ptr<Face*[]> sListStorage =
-        std::make_unique<Face*[]>(256);
+    static std::unique_ptr<fds::FListEntry[]> fListStorage =
+        std::make_unique<fds::FListEntry[]>(256);
+    static std::unique_ptr<fds::FListEntry[]> sListStorage =
+        std::make_unique<fds::FListEntry[]>(256);
     FList = fListStorage.get();
     SList = sListStorage.get();
 
@@ -1653,14 +1653,14 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
             int cubeSeen = 0;
             int kept = 0;
             for (int i = 0; i < CAll; ++i) {
-                Face* F = FList[i];
+                Face* F = FList[i].face;
                 const bool isCube = F && F->Txtr && F->Txtr->Name &&
                                     std::strncmp(F->Txtr->Name, "tri_", 4) == 0;
                 if (isCube) {
                     if (cubeSeen >= triLimit) continue;
                     ++cubeSeen;
                 }
-                FList[kept++] = F;
+                FList[kept++] = FList[i];
             }
             std::fprintf(stderr, "[XPARTEST] triLimit=%d kept=%d/%d\n",
                          triLimit, kept, CAll);
@@ -1731,10 +1731,10 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
         if (cases.empty()) cases = {2};
     }
 
-    static std::unique_ptr<Face*[]> fListStorage =
-        std::make_unique<Face*[]>(8192);
-    static std::unique_ptr<Face*[]> sListStorage =
-        std::make_unique<Face*[]>(8192);
+    static std::unique_ptr<fds::FListEntry[]> fListStorage =
+        std::make_unique<fds::FListEntry[]>(8192);
+    static std::unique_ptr<fds::FListEntry[]> sListStorage =
+        std::make_unique<fds::FListEntry[]>(8192);
     FList = fListStorage.get();
     SList = sListStorage.get();
 
