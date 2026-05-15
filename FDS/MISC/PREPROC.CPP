@@ -1002,37 +1002,40 @@ void Assign_Fillers(Scene *Sc)
 			if (F->Txtr->Flags & Mat_Additive) rasterFlags = 9;
 			//			F->Txtr->ZBufferWrite = !(F->Txtr->Flags & Mat_SkipZ);
 
-			// rasterFlags slot map. Indices unused in practice (the
-			// "no texture" combinations [0]/[2]/[4]) routed to the same
-			// TheOtherBarry variant as their textured siblings — confirmed
-			// dead by snapshot tracing across every demo scene. If a
-			// future scene introduces an untextured material the cases
-			// will land on a sane forward filler instead of crashing.
-			//   [0] !txtr !RGB !xpar       → forward opaque
-			//   [1]  txtr !RGB !xpar       → forward transparent (legacy)
-			//   [2] !txtr  RGB !xpar       → forward opaque (Gouraud)
-			//   [3]  txtr  RGB !xpar       → forward opaque (Gouraud)
-			//   [4] !txtr !RGB  xpar       → forward transparent
+			// rasterFlags slot map. Both textured and untextured slots route
+			// to TheOtherBarry; the untextured combinations ([0]/[2]/[4]/[6])
+			// pick the NONE TextureMode variant, which skips texture setup
+			// in the TileRasterizer constructor (no null-Txtr deref) and
+			// substitutes a constant-white sample in the per-pixel kernel
+			// so colorize() reduces to the interpolated Gouraud color.
+			// Restores the original IX_Prefiller_FZ/GZ flat-shaded semantics.
+			//   [0] !txtr !RGB !xpar       → forward opaque   (untextured)
+			//   [1]  txtr !RGB !xpar       → forward opaque
+			//   [2] !txtr  RGB !xpar       → forward opaque   (untextured Gouraud)
+			//   [3]  txtr  RGB !xpar       → forward opaque
+			//   [4] !txtr !RGB  xpar       → forward transparent (untextured)
 			//   [5]  txtr !RGB  xpar       → forward transparent
-			//   [6] !txtr  RGB  xpar       → forward transparent
+			//   [6] !txtr  RGB  xpar       → forward transparent (untextured Gouraud)
 			//   [7]  txtr  RGB  xpar       → forward transparent
 			//   [8]  ...    SrcAlpha       → forward transparent
 			//   [9]  ...    Additive       → forward additive
-			using fwd_opaque       = void(*)(Face*, Vertex**, dword, dword);
-			constexpr fwd_opaque   FwdOpaque = TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode::NORMAL>;
-			constexpr fwd_opaque   FwdXpar   = TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>;
-			constexpr fwd_opaque   FwdAdd    = TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL>;
+			using fwd_opaque         = void(*)(Face*, Vertex**, dword, dword);
+			constexpr fwd_opaque FwdOpaque         = TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode::NORMAL>;
+			constexpr fwd_opaque FwdOpaqueFlat     = TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode::NONE>;
+			constexpr fwd_opaque FwdXpar           = TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>;
+			constexpr fwd_opaque FwdXparFlat       = TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NONE>;
+			constexpr fwd_opaque FwdAdd            = TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL>;
 			RasterFunc stdFillers[10] = {
-				FwdOpaque,  // [0] untextured opaque   (was IX_Prefiller_FZ)
-				FwdXpar,    // [1]
-				FwdOpaque,  // [2] untextured Gouraud  (was IX_Prefiller_GZ)
-				FwdOpaque,  // [3]
-				FwdXpar,    // [4] untextured xpar     (was IX_Prefiller_FAcZ)
-				FwdXpar,    // [5]
-				FwdXpar,    // [6]
-				FwdXpar,    // [7]
-				FwdXpar,    // [8] SrcAlpha
-				FwdAdd,     // [9] Additive
+				FwdOpaqueFlat,  // [0] untextured opaque
+				FwdOpaque,      // [1]
+				FwdOpaqueFlat,  // [2] untextured Gouraud
+				FwdOpaque,      // [3]
+				FwdXparFlat,    // [4] untextured xpar
+				FwdXpar,        // [5]
+				FwdXparFlat,    // [6] untextured xpar Gouraud
+				FwdXpar,        // [7]
+				FwdXpar,        // [8] SrcAlpha
+				FwdAdd,         // [9] Additive
 			};
 
 			//if (rasterFlags > 0 && rasterFlags < 3) {
