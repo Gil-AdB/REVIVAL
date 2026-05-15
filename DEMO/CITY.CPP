@@ -2,6 +2,7 @@
 #include "Rev.h"
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
+#include <FILLERS/TheOtherBarry.h>
 #include "CITY.H"
 #include "FrameProfiler.h"
 #include "MeshOps.h"
@@ -1264,7 +1265,7 @@ static void initRain(Scene *Sc)
 		p.F.Filler = drawRainDrop;
 		p.F.Txtr = M;
 
-		p.InitTrail(M, IX_Prefiller_TGZTAM, 50.0f, 5.0f);
+		p.InitTrail(M, TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, 50.0f, 5.0f);
 
 		// NOTE: consider adding some randomization (per particle and over time)
 		p.Vel.x = rainVel.x;

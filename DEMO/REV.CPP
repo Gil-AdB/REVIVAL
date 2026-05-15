@@ -467,7 +467,6 @@ material global ID or ptr
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
 #include "Config.h"
-#include "FILLERS/IX.h"
 #include "Threads.h"
 #include "../Modplayer/Modplayer.h"
 #include "SDL2.h"

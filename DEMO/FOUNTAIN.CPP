@@ -1,6 +1,7 @@
 #include "Rev.h"
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
+#include <FILLERS/TheOtherBarry.h>
 #include "FrameProfiler.h"
 
 #include "FOUNTAIN.H"
@@ -1438,13 +1439,13 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 	f[0].A = &quad[0];
 	f[0].B = &quad[1];
 	f[0].C = &quad[2];
-	f[0].Filler = IX_Prefiller_TGZSAM;
+	f[0].Filler = (TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>);
 	f[0].Txtr = LnMat;
 
 	f[1].A = &quad[0];
 	f[1].B = &quad[2];
 	f[1].C = &quad[3];
-	f[1].Filler = IX_Prefiller_TGZSAM;
+	f[1].Filler = (TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>);
 	f[1].Txtr = LnMat;
 
 	_2DClipper::getInstance()->clip(vp, f[0]);

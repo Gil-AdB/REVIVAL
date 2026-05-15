@@ -40,3 +40,9 @@ extern "C" {
     float &g_zscale    = fds::g_mainFrame.g_zscale;
     float &g_zscale256 = fds::g_mainFrame.g_zscale256;
 }
+
+// Were defined in the now-deleted FDS/FILLERS/IX.cpp; the legacy IX
+// fillers wrote to them as ROP stats. Surviving callers (GREETS) just
+// zero them; precisePixelCount is referenced by a declaration only.
+dword   zReject = 0, zPass = 0;
+int64_t precisePixelCount = 0;

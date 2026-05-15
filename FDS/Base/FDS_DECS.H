@@ -436,22 +436,15 @@ void The_Seven_UP(Vertex **V, dword numVerts);
 void The_Seven_UP_64(int32_t X,int32_t Y,int32_t SX,int32_t SY,dword *Bitmap,byte *Page);
 void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel);
 
-// House IX technology
-void InitPolyStats(int32_t cells);
-void SavePolyStats(const char *fileName);
-void IX_Prefiller_FZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_FAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_GZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_GAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGAcZ(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGZM(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGZTM(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGZTAM(Face* F, Vertex **V, dword numVerts, dword miplevel);
-void IX_Prefiller_TGZSAM(Face* F, Vertex** V, dword numVerts, dword miplevel);
-void IX_Prefiller_Reflective(Face* F, Vertex** V, dword numVerts, dword miplevel);
+// Legacy "IX" software fillers deleted 2026-05-15 after a snapshot
+// trace across every demo scene confirmed none were ever called.
+// PREPROC's stdFillers[] now routes to TheOtherBarry variants for every
+// rasterFlags slot. The poly-stats helpers below were defined in the
+// same translation unit and gated on the un-defined MEASURE_POLYSTATS;
+// kept as inline no-ops so the (also-disabled) callers in REV / Snapshot
+// keep compiling.
+inline void InitPolyStats(int32_t /*cells*/) {}
+inline void SavePolyStats(const char * /*fileName*/) {}
 
 
 // Tile based rendering

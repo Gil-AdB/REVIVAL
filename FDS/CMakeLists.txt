@@ -73,12 +73,6 @@ set(Fillers
     FILLERS/F4Vec.h
     FILLERS/FILLERS.CPP
     FILLERS/FILLERS.H
-    FILLERS/IX.cpp
-    FILLERS/IX.h
-    FILLERS/IXFZ.cpp
-    FILLERS/IXGZ.cpp
-    FILLERS/IXTGZ.cpp
-    FILLERS/IXTZ.cpp
     FILLERS/Mekalele.cpp
     FILLERS/ShadowMap.cpp
     FILLERS/ShadowMap.h

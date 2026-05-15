@@ -34,7 +34,6 @@
 #include "Base/Material.h"
 #include "Base/Vertex.h"
 #include "FILLERS/FILLERS.H"
-#include "FILLERS/IX.h"
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/TheOtherBarry.h"
 #include "FRUSTRUM.H"
