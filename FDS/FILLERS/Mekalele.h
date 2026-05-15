@@ -111,6 +111,7 @@ struct TileRasterizerCtx {
 	dword matID;       // packed into mat32; what the deferred lighting pass uses to look up Material*. NOT Texture::ID — different per-scene number space.
 	dword miplevel;
 	u16 *zbuffer;
+	float zScale;      // was: g_zscale global. Per-pass depth scalar.
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -290,7 +291,7 @@ struct TileRasterizer {
 			if (barry::any_lane_set(p_mask)) {
 				Vec8f p_z = approx_recipr(p_rz);
 
-				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(g_zscale * p_z)));
+				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(ctx.zScale * p_z)));
 				Vec8us z_existing_c;
 				z_existing_c.load_a(span.zbuffer);
 				auto z_existing = extend(z_existing_c);
@@ -527,28 +528,29 @@ extern uint16_t      *g_xparZBack;
 // the rest of the engine references.
 template <MekaleleTarget Target>
 inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
-                         const fds::RenderTarget& /*rt*/,
-                         const fds::CameraContext& /*cam*/) {
+                         const fds::RenderTarget& rt,
+                         const fds::CameraContext& cam) {
 	meka::GBuffer *gb;
 	uint16_t *zbuf;
 	if constexpr (Target == MekaleleTarget::Opaque) {
-		gb   = g_gbuffer;
-		zbuf = ZPage16;
+		gb   = rt.gbuffer;
+		zbuf = rt.zpage16;
 	} else if constexpr (Target == MekaleleTarget::TransparentFront) {
-		gb   = g_gbufferTransparent;
-		zbuf = g_xparZ;
+		gb   = rt.gbufferTransparent;
+		zbuf = rt.xparZ;
 	} else {  // TransparentBack
-		gb   = g_gbufferTransparentBack;
-		zbuf = g_xparZBack;
+		gb   = rt.gbufferTransparentBack;
+		zbuf = rt.xparZBack;
 	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
-		.xres = XRes,
-		.yres = YRes,
+		.xres = rt.xres,
+		.yres = rt.yres,
 		.Txtr = F->Txtr->Txtr,
 		.matID = F->Txtr->ID,
 		.miplevel = miplevel,
 		.zbuffer = zbuf,
+		.zScale = cam.zScale,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
