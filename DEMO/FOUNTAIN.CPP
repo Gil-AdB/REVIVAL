@@ -1008,146 +1008,124 @@ void Initialize_Fountain()
 ///////////////////////////
 // LINE CLIPPER
 ///////////////////////
+// Chained per-boundary 2D viewport clipper for Lightning_Line / etc:
+//   Bivex_Frustrum_Perspective  near-Z, project to screen, hand to UFP1
+//   UFP1   left edge   (PX = 0)        → UFP2
+//   UFP2   right edge  (PX = XRes_1)   → UFP3
+//   UFP3   top edge    (PY = 0)        → UFP4
+//   UFP4   bottom edge (PY = YRes_1)   → Filler
+//
+// Each stage trivially rejects if both endpoints are outside its half-
+// plane, interpolates the in/out endpoint at the boundary, and recurses.
+// Left/top use `L = A/(A-B)`; right/bottom use the symmetric
+// `R = (B-bound)/(B-A)` for numerical symmetry around the boundary.
 void UFP1(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2));
 void UFP2(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2));
 void UFP3(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2));
 void UFP4(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2));
 
+// Set out = A * (1-t) + B * t for the screen attributes the clipper
+// carries through: PX, PY, LR. Each stage overrides one of PX/PY
+// afterwards to pin the new vertex exactly on its boundary plane.
+static inline void lerpClippedVertex(Vertex& out, const Vertex* A, const Vertex* B, float t)
+{
+	const float R = 1.0f - t;
+	out.PX = A->PX * R + B->PX * t;
+	out.PY = A->PY * R + B->PY * t;
+	out.LR = A->LR * R + B->LR * t;
+}
+
+// Sanity check on the interpolation parameter. ZOL = "if this fires, the
+// caller's bounds-test logic is broken and we'd produce garbage geometry
+// — bail loudly rather than silently clip outside the line segment."
+static inline void assertClipParam(float t, int stage)
+{
+	if (t < -0.01f || t > 1.01f) {
+		std::fprintf(stderr, "UFC%d: abnormal interpolation rate %f\n", stage, t);
+		std::exit(1);
+	}
+}
+
 void Bivex_Frustrum_Perspective(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	Vertex *T;
-	Vertex Vtx1;
-	float L,R;
-
-	if (A->TPos.z>B->TPos.z) {T=A; A=B; B=T;}
-
-	if (B->TPos.z<1) return;
-	if (A->TPos.z<1)
-	{
-		L=(A->TPos.z-1)/(A->TPos.z-B->TPos.z);
-		R=1-L;
-		Vtx1.PX = CntrX+FOVX*(A->TPos.x*R + B->TPos.x*L);
-		Vtx1.PY = CntrY-FOVY*(A->TPos.y*R + B->TPos.y*L);
-
-		Vtx1.LR = A->LR*R + B->LR*L;
-
-		UFP1(&Vtx1,B,Filler);
+	if (A->TPos.z > B->TPos.z) { Vertex* T = A; A = B; B = T; }
+	if (B->TPos.z < 1) return;
+	if (A->TPos.z < 1) {
+		const float t = (A->TPos.z - 1) / (A->TPos.z - B->TPos.z);
+		const float R = 1.0f - t;
+		Vertex Vtx1;
+		Vtx1.PX = CntrX + FOVX * (A->TPos.x*R + B->TPos.x*t);
+		Vtx1.PY = CntrY - FOVY * (A->TPos.y*R + B->TPos.y*t);
+		Vtx1.LR = A->LR * R + B->LR * t;
+		UFP1(&Vtx1, B, Filler);
 		return;
 	}
-	UFP1(A,B,Filler);
+	UFP1(A, B, Filler);
 }
 
 // heh heh, ZOL.
 void UFP1(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	Vertex *T;
-	Vertex Vtx1;
-	float Y1,Y2;
-	float L,R;
-	float FDiv;
-
-	if (A->PX>B->PX) {T=A; A=B; B=T;}
-	if (B->PX<0) return;
-	if (A->PX<0)
-	{
-		L = A->PX/(A->PX-B->PX);   //ZOL
-		if (L<-0.01||L>1.01) {
-//			printf("UFC1:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos.x,A->TPos.z,A->TPos.y,B->TPos.x,B->TPos.z,B->TPos.y,Y1,Y2,L);
-			exit(1);
-		}
-		R = 1-L;
-		Vtx1.PX = 0; // CntrX + FOVX*Vtx1.TPos.x/Vtx1.TPos.z;
-		Vtx1.PY = A->PY*R + B->PY*L;
-		Vtx1.LR = A->LR*R + B->LR*L;
-
-		UFP2(&Vtx1,B,Filler);
+	if (A->PX > B->PX) { Vertex* T = A; A = B; B = T; }
+	if (B->PX < 0) return;
+	if (A->PX < 0) {
+		const float t = A->PX / (A->PX - B->PX);
+		assertClipParam(t, 1);
+		Vertex Vtx1;
+		lerpClippedVertex(Vtx1, A, B, t);
+		Vtx1.PX = 0;
+		UFP2(&Vtx1, B, Filler);
 		return;
 	}
-	UFP2(A,B,Filler);
+	UFP2(A, B, Filler);
 }
 
 void UFP2(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	Vertex *T;
-	Vertex Vtx1;
-	float Y1,Y2;
-	float L,R;
-	float XClip = XRes_1;
-
-	if (A->PX>XClip) return;
-	if (B->PX>XClip)
-	{
-		R = (B->PX-XClip)/(B->PX-A->PX);  // ZOL
-		if (R<-0.01||R>1.01) {
-//			printf("UFC2:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos.x,A->TPos.z,A->TPos.y,B->TPos.x,B->TPos.z,B->TPos.y,Y1,Y2,R);
-			exit(1);
-		}
-		L = 1-R;
-		Vtx1.PX = XClip; // CntrX + FOVX*Vtx1.TPos.x/Vtx1.TPos.z;
-		Vtx1.PY = A->PY*R + B->PY*L; //Vtx1.TPos.y/Vtx1.TPos.z;
-		Vtx1.LR = A->LR*R + B->LR*L;
-
-		UFP3(A,&Vtx1,Filler);
+	const float XClip = XRes_1;
+	if (A->PX > XClip) return;
+	if (B->PX > XClip) {
+		const float R = (B->PX - XClip) / (B->PX - A->PX);
+		assertClipParam(R, 2);
+		Vertex Vtx1;
+		lerpClippedVertex(Vtx1, A, B, 1.0f - R);
+		Vtx1.PX = XClip;
+		UFP3(A, &Vtx1, Filler);
 		return;
 	}
-	UFP3(A,B,Filler);
+	UFP3(A, B, Filler);
 }
 
 void UFP3(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	Vertex *T;
-	Vertex Vtx1;
-	float Y1,Y2;
-	float L,R;
-	float FDiv;
-
-	if (A->PY>B->PY) {T=A; A=B; B=T;}
-	if (B->PY<0) return;
-	if (A->PY<0)
-	{
-		L = A->PY/(A->PY-B->PY);   //  ZOL
-		if (L<-0.01||L>1.01) {
-//			printf("UFC3:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos.x,A->TPos.z,A->TPos.y,A->PX,A->PY,B->TPos.x,B->TPos.z,B->TPos.y,B->PX,B->PY,Y1,Y2,L);
-			exit(1);
-		}
-		R = 1-L;
-		Vtx1.PX = A->PX*R + B->PX*L;//Vtx1.TPos.x/Vtx1.TPos.z;
-		Vtx1.PY = 0;//CntrY - FOVY*Vtx1.TPos.y/Vtx1.TPos.z;
-
-		Vtx1.LR = A->LR*R + B->LR*L;
-
-		UFP4(&Vtx1,B,Filler);
+	if (A->PY > B->PY) { Vertex* T = A; A = B; B = T; }
+	if (B->PY < 0) return;
+	if (A->PY < 0) {
+		const float t = A->PY / (A->PY - B->PY);
+		assertClipParam(t, 3);
+		Vertex Vtx1;
+		lerpClippedVertex(Vtx1, A, B, t);
+		Vtx1.PY = 0;
+		UFP4(&Vtx1, B, Filler);
 		return;
 	}
-	UFP4(A,B,Filler);
+	UFP4(A, B, Filler);
 }
 
 void UFP4(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	Vertex *T;
-	Vertex Vtx1;
-	float Y1,Y2;
-	float L,R;
-	float YClip = YRes_1;
-
-	if (A->PY>YClip) return;
-	if (B->PY>YClip)
-	{
-		R = (B->PY-YClip)/(B->PY-A->PY);   //ZOL
-		if (R<-0.01||R>1.01) {
-//			printf("UFC4:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos.x,A->TPos.z,A->TPos.y,A->PX,A->PY,B->TPos.x,B->TPos.z,B->TPos.y,B->PX,B->PY,Y1,Y2,R);
-			exit(1);
-		}
-		L = 1-R;
-		Vtx1.PX = A->PX*R + B->PX*L;
-		Vtx1.PY = YClip;// CntrY - FOVY*Vtx1.TPos.y/Vtx1.TPos.z;
-
-		Vtx1.LR = A->LR*R + B->LR*L;
-
-		Filler(A,&Vtx1);
+	const float YClip = YRes_1;
+	if (A->PY > YClip) return;
+	if (B->PY > YClip) {
+		const float R = (B->PY - YClip) / (B->PY - A->PY);
+		assertClipParam(R, 4);
+		Vertex Vtx1;
+		lerpClippedVertex(Vtx1, A, B, 1.0f - R);
+		Vtx1.PY = YClip;
+		Filler(A, &Vtx1);
 		return;
 	}
-	Filler(A,B);
+	Filler(A, B);
 }
 
 
