@@ -1271,9 +1271,15 @@ struct GreetsScene : SceneDriver {
 			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
 			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
 				inPolyId ? "PolyId" : "Depth");
+			// Right-justify against the right edge — variable string
+			// length (PolyId vs Depth) shouldn't shift the indicator.
 			// One line below the resolution overlay drawn in V_Flip
 			// (SDL2.cpp:48) at y≈4*scale with ~16*scale glyph height.
-			OutTextXY(VPage, XRes - 220 * g_fontScale, 5 + 20 * g_fontScale, MSGStr, 255);
+			const int kCharPx = 10;  // approx per-glyph width at 1x, scales with g_fontScale
+			const int textPx = int(strlen(MSGStr)) * kCharPx * g_fontScale;
+			int xJustified = XRes - textPx - 8 * g_fontScale;
+			if (xJustified < 0) xJustified = 0;
+			OutTextXY(VPage, xJustified, 5 + 20 * g_fontScale, MSGStr, 255);
 		}
 
 		//draw_cones(sShadowMapView);
