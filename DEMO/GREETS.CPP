@@ -1271,7 +1271,7 @@ struct GreetsScene : SceneDriver {
 			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
 			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
 				inPolyId ? "PolyId" : "Depth");
-			OutTextXY(VPage, XRes - 220, 5, MSGStr, 255);
+			OutTextXY(VPage, XRes - 220 * g_fontScale, 5, MSGStr, 255);
 		}
 
 		//draw_cones(sShadowMapView);
