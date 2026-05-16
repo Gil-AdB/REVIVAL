@@ -485,8 +485,8 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			tVerts = clone.verts.data();
 			tFaces = clone.faces.data();
 		} else {
-			tVerts = tVerts;
-			tFaces = tFaces;
+			tVerts = T->Verts;
+			tFaces = T->Faces;
 		}
 
 		// Mesh-bsphere-vs-cone cull during shadow-pass Transform_Objects.
