@@ -495,20 +495,7 @@ static void buildStripLightLists(int numStrips, int stripHeight, int yres,
 
 // Fast scalar 1/sqrt(x) via NEON's frsqrte + one Newton-Raphson step.
 // arm64 fsqrt+fdiv is ~24 cycles serial; this is ~5. Accuracy is around
-// 12 bits — fine for diffuse shading, far below the visual threshold.
-// Falls back to portable 1.0f / sqrtf(x) on non-arm64 builds (Clang on
-// x86-64 with -msse will emit RSQRTSS + 1 NR for an equivalent cost).
-static inline float fast_rsqrt(float x) {
-#if defined(__ARM_NEON) || defined(__aarch64__)
-	float32x2_t v = vdup_n_f32(x);
-	float32x2_t e = vrsqrte_f32(v);
-	// One NR step: e' = e * (3 - x*e^2)/2 (vrsqrts implements that)
-	e = vmul_f32(vrsqrts_f32(vmul_f32(e, e), v), e);
-	return vget_lane_f32(e, 0);
-#else
-	return 1.0f / std::sqrt(x);
-#endif
-}
+// fast_rsqrt moved to FDS/FILLERS/SimdHelpers.h (shared with Mekalele).
 
 // x^N via binary exponentiation, resolved at compile time. Bit-exact
 // vs std::pow for integer N (within float precision; each squaring
@@ -842,7 +829,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							tz -= nz * tDotN;
 							const float tLen2 = tx*tx + ty*ty + tz*tz;
 							if (tLen2 > 1e-12f) {
-								const float invTLen = 1.0f / std::sqrt(tLen2);
+								const float invTLen = fast_rsqrt(tLen2);
 								tx *= invTLen; ty *= invTLen; tz *= invTLen;
 								tangentValid = true;
 							}
@@ -857,7 +844,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						tx = refy * nz - refz * ny;
 						ty = refz * nx - refx * nz;
 						tz = refx * ny - refy * nx;
-						const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+						const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 						tx *= invTLen; ty *= invTLen; tz *= invTLen;
 					}
 					// B = N × T
@@ -868,7 +855,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					float vnx = tx * nmX + bx * nmY + nx * nmZ;
 					float vny = ty * nmX + by * nmY + ny * nmZ;
 					float vnz = tz * nmX + bz * nmY + nz * nmZ;
-					float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+					float invLen = fast_rsqrt(vnx*vnx + vny*vny + vnz*vnz);
 					nx = vnx * invLen;
 					ny = vny * invLen;
 					nz = vnz * invLen;
@@ -920,7 +907,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float vx = 0, vy = 0, vz = 0;
 			if (wantSpecular) {
 				const float vlen2 = x*x + y*y + z*z;
-				const float vlenInv = 1.0f / std::sqrt(vlen2);
+				const float vlenInv = fast_rsqrt(vlen2);
 				vx = -x * vlenInv;
 				vy = -y * vlenInv;
 				vz = -z * vlenInv;
@@ -1517,7 +1504,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			float vx_v = 0, vy_v = 0, vz_v = 0;
 			if (wantSpecular) {
 				const float vlen2 = x*x + y*y + z*z;
-				const float vlenInv = 1.0f / std::sqrt(vlen2);
+				const float vlenInv = fast_rsqrt(vlen2);
 				vx_v = -x * vlenInv;
 				vy_v = -y * vlenInv;
 				vz_v = -z * vlenInv;
@@ -2055,7 +2042,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						tz -= lnz * tDotN;
 						const float tLen2 = tx*tx + ty*ty + tz*tz;
 						if (tLen2 > 1e-12f) {
-							const float invTLen = 1.0f / std::sqrt(tLen2);
+							const float invTLen = fast_rsqrt(tLen2);
 							tx *= invTLen; ty *= invTLen; tz *= invTLen;
 							tangentValid = true;
 						}
@@ -2068,7 +2055,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					tx = refy * lnz - refz * lny;
 					ty = refz * lnx - refx * lnz;
 					tz = refx * lny - refy * lnx;
-					const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+					const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 					tx *= invTLen; ty *= invTLen; tz *= invTLen;
 				}
 				const float bx = lny * tz - lnz * ty;
@@ -2077,7 +2064,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				float vnx = tx * nmX + bx * nmY + lnx * nmZ;
 				float vny = ty * nmX + by * nmY + lny * nmZ;
 				float vnz = tz * nmX + bz * nmY + lnz * nmZ;
-				float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+				float invLen = fast_rsqrt(vnx*vnx + vny*vny + vnz*vnz);
 				nx_lane[k] = vnx * invLen;
 				ny_lane[k] = vny * invLen;
 				nz_lane[k] = vnz * invLen;
@@ -2504,7 +2491,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 							tx -= nx * tDotN; ty -= ny * tDotN; tz -= nz * tDotN;
 							const float tLen2 = tx*tx + ty*ty + tz*tz;
 							if (tLen2 > 1e-12f) {
-								const float invTLen = 1.0f / std::sqrt(tLen2);
+								const float invTLen = fast_rsqrt(tLen2);
 								tx *= invTLen; ty *= invTLen; tz *= invTLen;
 								tangentValid = true;
 							}
@@ -2517,7 +2504,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						tx = refy * nz - refz * ny;
 						ty = refz * nx - refx * nz;
 						tz = refx * ny - refy * nx;
-						const float invTLen = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+						const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 						tx *= invTLen; ty *= invTLen; tz *= invTLen;
 					}
 					const float bx = ny * tz - nz * ty;
@@ -2526,7 +2513,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					float vnx = tx * nmX + bx * nmY + nx * nmZ;
 					float vny = ty * nmX + by * nmY + ny * nmZ;
 					float vnz = tz * nmX + bz * nmY + nz * nmZ;
-					float invLen = 1.0f / std::sqrt(vnx*vnx + vny*vny + vnz*vnz);
+					float invLen = fast_rsqrt(vnx*vnx + vny*vny + vnz*vnz);
 					nx = vnx * invLen;
 					ny = vny * invLen;
 					nz = vnz * invLen;

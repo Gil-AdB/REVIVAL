@@ -1,6 +1,26 @@
 #pragma once
 #include <simd/vectorclass.h>
 #include <array>
+#include <cmath>
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+// Scalar approximate rsqrt — ~12 bits via 1 NR step. Far below visible
+// threshold for shading math. Roughly 3-5 cycles vs ~24 for 1.0f/sqrtf
+// on arm64. Falls back to 1.0f/sqrtf on non-arm64 (Clang on x86-64 with
+// -msse will emit RSQRTSS + 1 NR for equivalent cost).
+static inline float fast_rsqrt(float x) {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	float32x2_t v = vdup_n_f32(x);
+	float32x2_t e = vrsqrte_f32(v);
+	e = vmul_f32(vrsqrts_f32(vmul_f32(e, e), v), e);
+	return vget_lane_f32(e, 0);
+#else
+	return 1.0f / std::sqrt(x);
+#endif
+}
 
 // block-tiling adjustment functions, V2
 // Example for 256x256 texture

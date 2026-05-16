@@ -80,7 +80,7 @@ inline void oct_decode_u16(u16 packed, float &nx, float &ny, float &nz) {
 		float fy = (1.0f - std::fabs(ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
 		ox = fx; oy = fy;
 	}
-	float invLen = 1.0f / std::sqrt(ox*ox + oy*oy + az*az);
+	float invLen = fast_rsqrt(ox*ox + oy*oy + az*az);
 	nx = ox * invLen;
 	ny = oy * invLen;
 	nz = az * invLen;
@@ -333,7 +333,7 @@ struct TileRasterizer {
 					for (int lane = 0; lane < 8; ++lane) {
 						if (!mask_l[lane]) continue;
 						float nx = nx_l[lane], ny = ny_l[lane], nz = nz_l[lane];
-						float invLen = 1.0f / std::sqrt(nx*nx + ny*ny + nz*nz);
+						float invLen = fast_rsqrt(nx*nx + ny*ny + nz*nz);
 						nx *= invLen; ny *= invLen; nz *= invLen;
 						span.normal[lane] = oct_encode_u16(nx, ny, nz);
 						if (wantTangent) {
@@ -349,7 +349,7 @@ struct TileRasterizer {
 							tz -= nz * tDotN;
 							const float tLen2 = tx*tx + ty*ty + tz*tz;
 							if (tLen2 > 1e-12f) {
-								const float invTLen = 1.0f / std::sqrt(tLen2);
+								const float invTLen = fast_rsqrt(tLen2);
 								span.tangent[lane] = oct_encode_u16(tx*invTLen, ty*invTLen, tz*invTLen);
 							} else {
 								// Degenerate tangent (parallel to N after
