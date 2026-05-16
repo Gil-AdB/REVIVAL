@@ -10,6 +10,7 @@
 
 #include "FRUSTRUM.H"
 #include <atomic>
+#include <mutex>
 
 #define ClipAccurate
 #define COUNT_POLYS
@@ -47,8 +48,11 @@ std::atomic<bool> g_HideOuterXpar{false};
 #define EXPTABLEPREC 8
 #define EXPTABLEMASK 0x000000FF
 
-thread_local static float LogTable[1<<LOGTABLEPREC];
-thread_local static float ExpTable[(1<<EXPTABLEPREC)+1];
+// Read-only across the whole process — shared by all worker threads
+// so each core's L1 can warm a single copy. Initialized once via
+// std::call_once from FrustumClipper::Init().
+static float LogTable[1<<LOGTABLEPREC];
+static float ExpTable[(1<<EXPTABLEPREC)+1];
 
 float fastLog2(float x)
 {
@@ -97,37 +101,31 @@ void FrustumClipper::Init()
 	C_Scnd = C_Ptr[1];
 	C_Tetr = C_Ptr[2];
 
-	// LogTable / ExpTable are thread_local but otherwise constant across
-	// the whole process. Construct lazily, once per thread. Without this
-	// every per-tile FrustumClipper rebuilt the tables, racking up ~60k
-	// logf/expf calls per frame in greets (5 lights × 24 shadow tiles ×
-	// 256 + 257 transcendentals = 61.5k).
-	thread_local static bool sLutReady = false;
-	if (sLutReady) return;
-	sLutReady = true;
-
-	dword i;
-	const float rl2 = 1.0f / logf(2.0f);
-	union
-	{
-		float x;
-		dword ix;
-	};
-	// generate log2 LUT
-	for (i = 0; i < 1 << LOGTABLEPREC; i++)
-	{
-		ix = (127 << 23) + (i << (23-LOGTABLEPREC));
-		LogTable[i] = logf(x) * rl2;
-	}
-
-	const float b2 = logf(2.0f);
-	const float rETP = 1.0f / (1 << EXPTABLEPREC);
-	// generate pow2 LUT
-	for (i = 0; i <= 1 << EXPTABLEPREC; i++)
-	{
-		x = i * rETP;
-		ExpTable[i] = expf(b2*x);
-	}
+	// LogTable / ExpTable are read-only across the whole process. Init
+	// once via std::call_once — all worker threads share one copy, so
+	// each core's L1 warms the same lines and we avoid per-thread TLS
+	// duplication + lookup cost. Without this gate, every per-tile
+	// FrustumClipper rebuilt the tables, racking up ~60k logf/expf
+	// calls per frame in greets (5 lights × 24 shadow tiles × 513
+	// transcendentals).
+	static std::once_flag sLutOnce;
+	std::call_once(sLutOnce, []{
+		dword i;
+		const float rl2 = 1.0f / logf(2.0f);
+		union { float x; dword ix; };
+		for (i = 0; i < 1 << LOGTABLEPREC; i++)
+		{
+			ix = (127 << 23) + (i << (23-LOGTABLEPREC));
+			LogTable[i] = logf(x) * rl2;
+		}
+		const float b2 = logf(2.0f);
+		const float rETP = 1.0f / (1 << EXPTABLEPREC);
+		for (i = 0; i <= 1 << EXPTABLEPREC; i++)
+		{
+			x = i * rETP;
+			ExpTable[i] = expf(b2*x);
+		}
+	});
 	
 	//for(i=0;i<10; i++)
 	//{
