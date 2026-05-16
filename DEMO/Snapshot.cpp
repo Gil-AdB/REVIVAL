@@ -2235,6 +2235,9 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         Initialize_City();
         driver = createCityScene();
     } else if (cfg.scene == "greets") {
+        // Greets depends on textures + skycube state set up by Initialize_City
+        // (same dependency that RunGreetsSnapshot handles at line 306).
+        Initialize_City();
         Initialize_Greets();
         driver = createGreetsScene();
     } else {
