@@ -1271,7 +1271,9 @@ struct GreetsScene : SceneDriver {
 			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
 			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
 				inPolyId ? "PolyId" : "Depth");
-			OutTextXY(VPage, XRes - 220 * g_fontScale, 5, MSGStr, 255);
+			// One line below the resolution overlay drawn in V_Flip
+			// (SDL2.cpp:48) at y≈4*scale with ~16*scale glyph height.
+			OutTextXY(VPage, XRes - 220 * g_fontScale, 5 + 20 * g_fontScale, MSGStr, 255);
 		}
 
 		//draw_cones(sShadowMapView);
