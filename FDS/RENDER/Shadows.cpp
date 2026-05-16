@@ -36,6 +36,7 @@
 #include "Base/Material.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/Mekalele.h"
+#include "Base/VertexScratch.h"
 #include "FRUSTRUM.H"
 #include "Threads.h"
 
@@ -94,6 +95,13 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	static thread_local double sXformAcc = 0.0;
 	static thread_local double sRasterAcc = 0.0;
 	static thread_local int sLightCount = 0;
+
+	// Per-pass vertex scratch — kept across frames so the clone storage
+	// stays warm (the per-vertex arrays grow once to TriMesh::VIndex and
+	// then Transform_Objects rewrites the projection fields in place each
+	// frame). Sequential shadow loop still shares one scratch; phase 6's
+	// cross-light parallelism will hold one per concurrent light.
+	static thread_local fds::VertexScratch shadowScratch;
 
 	for (ShadowMap& sm : g_shadowMaps) {
 		Omni *const O = sm.omni;
@@ -175,7 +183,8 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		const auto tXformStart = clk::now();
 		g_inShadowPass = true;
 		g_currentShadowOmni = sm.omni;
-		Transform_Objects(Sc, lightCtx, fds::g_mainFaces, sm.xres, sm.yres);
+		Transform_Objects(Sc, lightCtx, fds::g_mainFaces, sm.xres, sm.yres,
+		                  &shadowScratch);
 		g_currentShadowOmni = nullptr;
 		g_inShadowPass = false;
 		const auto tXformEnd = clk::now();
