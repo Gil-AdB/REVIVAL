@@ -3,6 +3,10 @@
 // directly (was: deref through entry.face->SortZ.DW), so each pass
 // streams 16-byte contiguous slots instead of pointer-chasing into
 // random Face structs.
+
+#pragma once
+#include "Base/FaceListContext.h"
+#include "Base/FeatureFlags.h"
 //
 // Both arrays (f and s) must hold at least n entries. The sort is
 // out-of-place and leaves the sorted result in `f`; `s` ends in an

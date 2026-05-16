@@ -1,5 +1,8 @@
 #pragma once
 
+#include "Base/Face.h"     // RasterFunc, Face, Vertex, Viewport, dword, mword
+struct Scene;
+
 #define CLIPPER_MAXVERTS 48
 
 namespace fds { struct CameraContext; struct RenderTarget; }
