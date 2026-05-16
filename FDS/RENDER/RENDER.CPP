@@ -108,6 +108,9 @@ Font *Font1;
 char G_String[256];
 
 VESA_Surface Layer2;
+// Backing storage for Layer2.Data. Owned here so RAII handles cleanup;
+// Layer2.Data is just a non-owning view set up in Render() below.
+static std::vector<byte> s_Layer2Storage;
 
 #include "GENERAL.H"
 #include "SORTS.H"
@@ -665,9 +668,9 @@ void fds::RenderPipeline::runScene(Scene *Sc,float Seconds)
 	Blurred.Flags = VSurf_Noalloc;
 	Blurred.Targ = VGAPtr;
 	
-	Layer2.Data = new byte [PageSize];
+	s_Layer2Storage.assign(PageSize, 0);
+	Layer2.Data = s_Layer2Storage.data();
 	Layer2.BPP = 32;
-	memset(Layer2.Data,0,sizeof(PageSize));
 	Layer2.Flags = VSurf_Noalloc;
 	Layer2.Targ = VGAPtr;
 	
@@ -835,9 +838,11 @@ Away:Tot = Timer-TTrd;
 	// FList / SList storage lives in fds::g_mainFaces; its dtor cleans
 	// up (previously a buggy `delete` without `[]` here that raced with
 	// the unique_ptr-based scene drivers — see FaceListContext.h).
+	// Layer2.Data is a view into s_Layer2Storage, owned at file scope;
+	// std::vector dtor cleans it up. (Was: `delete Layer2.Data;` without
+	// `[]` — UB on what new[] returned.)
 	delete [] Str;
 	delete [] BPage;
-	delete Layer2.Data;
 }
 
 // ─── RenderPipeline singleton + legacy free-function forwarders ────────
