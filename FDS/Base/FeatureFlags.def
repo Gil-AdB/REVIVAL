@@ -40,6 +40,9 @@ FDS_FLAG_FLOAT(shadow_fzp_mult,         "FDS_SHADOW_FZP_MULT",          3.0f,   
 FDS_FLAG_INT(shadow_bias,               "FDS_SHADOW_BIAS",              512,                            "shadows",  "Constant Z bias for shadow comparison")
 FDS_FLAG_INT(shadow_slope_bias,         "FDS_SHADOW_SLOPE_BIAS",        1024,                           "shadows",  "Slope-scale Z bias for shadow comparison")
 
+// ─── sort ────────────────────────────────────────────────────────────────
+FDS_FLAG_BOOL(no_sort,                  "FDS_NO_SORT",                  0,                              "sort",     "Bypass Radix_SortingASM — dispatch FList in transform order (correctness depends on the rasterizer being order-independent)")
+
 // ─── transparency ────────────────────────────────────────────────────────
 FDS_FLAG_BOOL(no_quad_sort,             "FDS_NO_QUAD_SORT",             0,                              "xpar",     "Skip quad reorder during sort")
 FDS_FLAG_BOOL(xpar_force_twosided,      "FDS_XPAR_FORCE_TWOSIDED",      0,                              "xpar",     "Force transparent fills to be two-sided")

@@ -1,5 +1,12 @@
 #include "Mekalele.h"
 
+namespace meka {
+// See TheOtherBarry.h fwd-decl. Defined here where GBuffer is complete.
+uint32_t* gbuffer_mat32_plane(GBuffer* gb) {
+	return gb ? gb->txtr.data() : nullptr;
+}
+}
+
 // Engine-side G-buffers. Three of them:
 //   g_gbuffer                — opaque surfaces. Mekalele writes here in
 //                              the deferred raster pass;

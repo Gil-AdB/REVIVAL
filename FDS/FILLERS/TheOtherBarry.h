@@ -10,6 +10,16 @@
 
 #include "TheOtherBarry.h"
 
+// Forward declaration — defined in Mekalele.cpp. Returns the txtr
+// (mat32) plane pointer of `gb`, or nullptr if `gb` is null. Used by
+// TheOtherBarry's outer entry to stamp the deferred-lighting sentinel
+// without dragging the full meka::GBuffer definition into this header
+// (which would create a circular include with Mekalele.h).
+namespace meka {
+	struct GBuffer;
+	uint32_t* gbuffer_mat32_plane(GBuffer* gb);
+}
+
 //#include <intrin.h>
 #include "simde/x86/avx2.h"
 #include <simd/vectorclass.h>
@@ -190,6 +200,7 @@ template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode>
 struct TileRasterizer {
 	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres,
 	               uint16_t* zpage16, float zScale,
+	               uint32_t* gbufferMat32,
 	               Texture* Txtr, int miplevel)
 		: V(V)
 		, dstSurface(dstSurface)
@@ -197,7 +208,8 @@ struct TileRasterizer {
 		, xres(xres)
 		, yres(yres)
 		, zpage16(zpage16)
-		, zScale(zScale) {
+		, zScale(zScale)
+		, gbufferMat32(gbufferMat32) {
 
 		if constexpr (TextureMode != barry::TTextureMode::NONE) {
 			t0.LogWidth = Txtr->LSizeX - miplevel;
@@ -214,8 +226,17 @@ struct TileRasterizer {
 	int32_t bpsl;
 	int32_t xres;
 	int32_t yres;
-	uint16_t* zpage16;   // was: ZPage16 global
-	float zScale;        // was: g_zscale global
+	uint16_t* zpage16;     // was: ZPage16 global
+	float zScale;          // was: g_zscale global
+	// G-buffer mat32 plane (== rt.gbuffer->txtr.data() when running in a
+	// deferred context; nullptr in forward-only runs). When non-null we
+	// stamp 0xFFFFFFFF (sentinel = "forward filler wrote here, skip in
+	// lighting kernel") into mat32 for every Z-winning pixel. Without
+	// this stamp the deferred path's correctness depended on FList sort
+	// order — a Mekalele-rendered surface behind us (rendered first)
+	// would leave its real matID in mat32 and the lighting kernel would
+	// re-shade it over our color. With the stamp, order doesn't matter.
+	uint32_t* gbufferMat32;
 	struct TextureInfo {
 		const dword* TextureAddr;
 		const dword* TextureAddr1;
@@ -268,6 +289,12 @@ struct TileRasterizer {
 		// `bpsl` is in bytes; Z stride is `xres` u16 elements per row.
 		auto zspan = zpage16 + tile.y * TILE_SIZE * xres + tile.x * TILE_SIZE;
 		auto span = ((uint32_t*)scanline) + tile.x * TILE_SIZE;
+		// G-buffer mat32 stamp plane — same xres stride as span. Null
+		// outside the deferred path; checked once per tile, branched
+		// per row at near-zero cost.
+		uint32_t *mat32_span = gbufferMat32
+			? gbufferMat32 + tile.y * TILE_SIZE * xres + tile.x * TILE_SIZE
+			: nullptr;
 		auto bpsl_u32 = bpsl / sizeof(uint32_t);
 
 		TScreenCoord a0 = tile.a0;
@@ -312,7 +339,7 @@ struct TileRasterizer {
 			{ FixedPoint(drdx),	   FixedPoint(dgdx),		FixedPoint(dbdx),		 FixedPoint(dadx) });
 
 		//Vec16s rg
-		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += xres) {
+		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += xres, mat32_span += (mat32_span ? xres : 0)) {
 			Vec8ib p_mask;
 			bool row_has_pixels;
 			if constexpr (Coverage == barry::TCoverage::FULL) {
@@ -434,6 +461,18 @@ struct TileRasterizer {
 #else
 					_mm256_maskstore_ps((float*)span, *(__m256i*)(&p_mask), *(__m256*)(&texture_samples));
 #endif
+					// In deferred mode, stamp mat32 = 0xFFFFFFFF (sentinel)
+					// for the lanes we just wrote. The deferred lighting
+					// kernel checks `matID >= matTable.count` (sentinel
+					// matID=255 typically out of range) and skips — so the
+					// forward filler's color survives, regardless of FList
+					// dispatch order.
+					if (mat32_span) {
+						_mm256_maskstore_epi32(
+							reinterpret_cast<int*>(mat32_span),
+							*(__m256i*)(&p_mask),
+							_mm256_set1_epi32(int(0xFFFFFFFF)));
+					}
 				}
 			}
 
@@ -732,11 +771,22 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	//	V[i]->U = V[i]->UZ * z;
 	//	V[i]->V = V[i]->VZ * z;
 	//}
+	// rt.gbuffer is non-null only on the deferred path; we pass its
+	// txtr plane to the rasterizer so it can stamp the mat32 sentinel
+	// for the lighting kernel. Null in forward — the rasterizer skips
+	// the stamp without paying a per-pixel cost.
+	//
+	// Helper is defined in Mekalele.cpp (where meka::GBuffer is fully
+	// visible) and forward-declared at the top of this header — keeps
+	// the include graph straight (Mekalele.h includes TheOtherBarry.h,
+	// not the other way round).
+	uint32_t *gbufferMat32 = meka::gbuffer_mat32_plane(rt.gbuffer);
 	barry::TileRasterizer<BlendMode, TextureMode> r(V,
 	                                                 reinterpret_cast<byte*>(rt.vpage),
 	                                                 rt.bytesPerScanline,
 	                                                 rt.xres, rt.yres,
 	                                                 rt.zpage16, cam.zScale,
+	                                                 gbufferMat32,
 	                                                 F->Txtr->Txtr, miplevel);
 
 	if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {

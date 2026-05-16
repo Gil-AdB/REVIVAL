@@ -99,5 +99,10 @@ void Radix_Sorting()
 
 void Radix_SortingASM(fds::FListEntry *f, fds::FListEntry *s, unsigned int n)
 {
+  // FDS_NO_SORT=1 skips the radix entirely — used to bench whether the
+  // rasterizer pipeline is sort-order-independent (it should be, given
+  // a Z-buffer). Cached once: the flag is process-lifetime.
+  static const bool sNoSort = fds::FeatureFlags::no_sort();
+  if (sNoSort) return;
   Radix_Sorting();
 }

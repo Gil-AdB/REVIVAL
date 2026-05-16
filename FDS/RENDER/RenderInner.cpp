@@ -50,7 +50,16 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;
 	clipper.InitViewport(CurScene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
-	const auto rt  = fds::MainRenderTargetFromGlobals();
+	auto rt  = fds::MainRenderTargetFromGlobals();
+	// Forward dispatcher: the deferred lighting kernel won't read the
+	// G-buffer this frame, so we don't want TheOtherBarry stamping its
+	// mat32 sentinel into it. Also relevant during the cube-map bake:
+	// rt.xres there reflects TmpSurf (1024) but g_gbuffer is sized to
+	// the engine framebuffer (1920×…), so a stamp would write at the
+	// wrong row stride and corrupt the next deferred frame's mat32.
+	rt.gbuffer                = nullptr;
+	rt.gbufferTransparent     = nullptr;
+	rt.gbufferTransparentBack = nullptr;
 	const auto& cam = fds::g_mainCamera;
 
 	int32_t I = CAll;

@@ -32,13 +32,19 @@
 #include <memory>
 #include <algorithm>
 
-// Front-to-back face sort. Lives at TU scope so the SortZ-write
-// branches inside Transform_Objects pick the closer-renders-first
-// path. The original RENDER.CPP defined this at line 38; the 415fd16
-// extraction to Transform.cpp dropped it, silently selecting the
-// back-to-front branch — visible only on deferred-mode reflective
-// windows, where wall-renders-before-window left wall mat32 in the
-// G-buffer for the lighting kernel to over-shade.
+// Front-to-back face sort. Closer faces dispatch first so subsequent
+// farther faces fail Z and skip the rasterizer's per-pixel work — a
+// pure perf optimization. The original RENDER.CPP defined this at
+// line 38; the 415fd16 extraction to Transform.cpp accidentally
+// dropped it, silently selecting the back-to-front branch. That
+// surfaced as a deferred-reflective-window regression: the order
+// reversal interacted badly with TheOtherBarry's forward filler
+// running inside Mekalele's tile pass — Mekalele wrote wall mat32
+// before TheOtherBarry overdrew the window, and the lighting kernel
+// then re-shaded the wall over the window's reflection. That
+// correctness issue is fixed in the rasterizer (TheOtherBarry now
+// stamps the mat32 sentinel for every pixel it writes in deferred
+// mode); this define stays in place purely for the perf win.
 #define FRONT_TO_BACK_SORTING
 
 #include "Base/FDS_DEFS.H"
