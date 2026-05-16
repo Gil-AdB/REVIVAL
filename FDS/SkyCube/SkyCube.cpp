@@ -307,7 +307,7 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
 	if (CAll)
 	{
-		Radix_SortingASM(FList,SList,CAll);
+		Radix_Sort(FList,SList,CAll);
 		// Force forward render for the sky cube — the cube faces are
 		// authored with vertex-stored LR/LG/LB=255 (CreateSkyCube), which
 		// is what the forward fillers consume to pass texels through at

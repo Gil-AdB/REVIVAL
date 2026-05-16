@@ -15,7 +15,7 @@
 // Histograms are stack-local so concurrent per-light shadow sorts
 // don't race on them.
 
-void Radix_SortingASM(fds::FListEntry *f, fds::FListEntry *s, unsigned int n)
+void Radix_Sort(fds::FListEntry *f, fds::FListEntry *s, unsigned int n)
 {
   // FDS_NO_SORT=1 skips the radix entirely — used to bench whether the
   // rasterizer pipeline is sort-order-independent (it should be, given

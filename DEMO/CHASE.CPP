@@ -768,7 +768,7 @@ struct ChaseScene : SceneDriver {
 
 		if (CAll) {
 			prof.enter(PROF_SORT);
-			Radix_SortingASM(FList, SList, CAll);
+			Radix_Sort(FList, SList, CAll);
 			prof.switchTo(PROF_RNDR);
 			Render();
 			prof.leave(PROF_RNDR);
@@ -780,7 +780,7 @@ struct ChaseScene : SceneDriver {
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);
-		Radix_SortingASM(FList, SList, CAll);
+		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
 		prof.leave(PROF_RNDR);

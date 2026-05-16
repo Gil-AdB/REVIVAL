@@ -281,7 +281,7 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             std::fprintf(stderr, "[FNTSNAP] post-Transform CAll=%d CurScene=%p\n",
                 int(CAll), (void*)CurScene);
             if (CAll) {
-                Radix_SortingASM(FList, SList, CAll);
+                Radix_Sort(FList, SList, CAll);
                 Render();
             }
         }
@@ -618,7 +618,7 @@ int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         if (CAll) {
-            Radix_SortingASM(FList, SList, CAll);
+            Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);
         }
 
@@ -939,7 +939,7 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         if (CAll) {
-            Radix_SortingASM(FList, SList, CAll);
+            Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);
         }
 
@@ -1650,7 +1650,7 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         Lighting(sc);
         if (CAll) {
-            Radix_SortingASM(FList, SList, CAll);
+            Radix_Sort(FList, SList, CAll);
 
             // Post-sort cube-triangle limit (XPARTEST_TRI_COUNT). Walk the
             // sorted FList, keep all non-cube faces (ground, markers, etc.)
@@ -1806,7 +1806,7 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
                 Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
                 Lighting(sc);
                 if (CAll) {
-                    Radix_SortingASM(FList, SList, CAll);
+                    Radix_Sort(FList, SList, CAll);
                     Render(wantDef ? RenderPath::ForceDeferred
                                    : RenderPath::ForceForward);
                 }
@@ -2027,7 +2027,7 @@ int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres) {
             std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
             Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
             if (CAll) {
-                Radix_SortingASM(FList, SList, CAll);
+                Radix_Sort(FList, SList, CAll);
                 Render(RenderPath::ForceForward);
             }
             std::snprintf(buf, sizeof(buf), "%s/distsweep_%+05d.ppm",
@@ -2151,7 +2151,7 @@ int RunCitySeasideTest(const SnapshotConfig& cfg, int xres, int yres) {
             }
         }
         if (CAll) {
-            Radix_SortingASM(FList, SList, CAll);
+            Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);
         }
         char colorPath[1024];

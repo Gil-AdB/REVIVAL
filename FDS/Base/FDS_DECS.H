@@ -371,8 +371,7 @@ void Assign_Fillers(Scene *Sc);
 void FList_Allocate(Scene *Sc);
 void Scene_Computations(Scene *Sc);
 
-void Radix_SortingASM(fds::FListEntry *f, fds::FListEntry *s, unsigned int n);
-void Radix_Sorting();
+void Radix_Sort(fds::FListEntry *f, fds::FListEntry *s, unsigned int n);
 
 void SetCurrentScene(Scene *Sc);
 

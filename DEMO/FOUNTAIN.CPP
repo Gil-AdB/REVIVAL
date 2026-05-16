@@ -2233,7 +2233,7 @@ struct FountainScene : SceneDriver {
 
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);
-		Radix_SortingASM(FList, SList, CAll);
+		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
 

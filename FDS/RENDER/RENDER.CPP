@@ -729,7 +729,7 @@ void fds::RenderPipeline::runScene(Scene *Sc,float Seconds)
 		
 		//if (Sc->PclExec) Sc->PclExec(); Par2 = Timer;
 		if (!CAll) goto Away;
-		Radix_SortingASM(FList, SList, CAll);
+		Radix_Sort(FList, SList, CAll);
 		//    Quick_Sorting(0,CAll-1);
 		if (!Keyboard[ScE]) Render();     Par5 = Timer;
 Away:Tot = Timer-TTrd;

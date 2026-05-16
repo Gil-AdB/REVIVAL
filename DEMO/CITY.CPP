@@ -1613,7 +1613,7 @@ static void bakeBuildingPanorama(Object* Obj,
 		RenderSkyCube(SkySc, View, true);
 		Reflected_Transform(CitySc);
 		if (0 != CAll) {
-			Radix_SortingASM(FList, SList, CAll);
+			Radix_Sort(FList, SList, CAll);
 			// Cube-map bake doesn't need deferred quality, and the
 			// G-buffer is sized for the engine framebuffer not the
 			// 1024x1024 TmpSurf — deferred would fall back to forward
@@ -1622,7 +1622,7 @@ static void bakeBuildingPanorama(Object* Obj,
 		}
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		if (0 != CAll) {
-			Radix_SortingASM(FList, SList, CAll);
+			Radix_Sort(FList, SList, CAll);
 			Render(RenderPath::ForceForward);
 		}
 		memcpy(cubeMaps[i].data(), tmpSurf.Data, CUBE_MAP_XRES * CUBE_MAP_YRES * 4);
@@ -2089,7 +2089,7 @@ struct CityScene : SceneDriver {
 		if (CAll) {
 			prof.enter(PROF_SORT);
 
-			Radix_SortingASM(FList, SList, CAll);
+			Radix_Sort(FList, SList, CAll);
 
 			prof.switchTo(PROF_RNDR);
 
@@ -2129,7 +2129,7 @@ struct CityScene : SceneDriver {
 		prof.leave(PROF_XFRM);
 		if (!CAll) return true;
 		prof.enter(PROF_SORT);
-		Radix_SortingASM(FList, SList, CAll);
+		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
 
