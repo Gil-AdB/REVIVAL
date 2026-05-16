@@ -1,0 +1,37 @@
+name: Native build + smoke tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Modplayer/modplayer/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('Modplayer/modplayer/**/Cargo.lock') }}
+
+      - name: Install build deps (SDL2 + ninja)
+        run: brew install sdl2 ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run ctest smoke tests
+        run: ctest --test-dir build --output-on-failure

@@ -199,6 +199,22 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     _MBCS
     SIMDE_ENABLE_NATIVE_ALIASES)
 
+# Targeted bug-catcher warnings — promoted to errors on the bug class
+# we hit during phase 6 (self-assign in a mechanical sed pass turning
+# `x = y` into `x = x`, leaving x uninitialized; missing return in a
+# control-flow branch). Project-wide `-Wall` would surface ~90
+# mostly-cosmetic warnings (unused-var, missing-braces, mismatched-tags)
+# that we don't have appetite to triage yet — punt that to a follow-up.
+# `-Wno-parentheses` silences ~200 vendored-simd warnings (the
+# `& has lower precedence than >` shape inside vectorclass) that we
+# don't own; without this the bug-catcher warnings drown in noise.
+target_compile_options(${PROJECT_NAME} PUBLIC
+    -Wself-assign
+    -Wuninitialized
+    -Wsometimes-uninitialized
+    -Werror=return-type
+    -Wno-parentheses)
+
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time
     # for the PROXY_TO_PTHREAD mode we use in DEMO.

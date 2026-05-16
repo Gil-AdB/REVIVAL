@@ -79,7 +79,41 @@ endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# CTest entry points — populated by tests/CMakeLists.txt + smoke checks
+# below. Skip on emscripten (DEMO is a wasm artifact, not a runnable
+# native binary, and the snapshot CLI doesn't make sense in the
+# browser).
+if(NOT EMSCRIPTEN)
+    enable_testing()
+endif()
+
 add_subdirectory(Modplayer)
 add_subdirectory(FDS)
 add_subdirectory(DEMO)
 add_subdirectory(tests)
+
+# Smoke test: exercise the engine init path (FLD load, material census,
+# cube-map bake, deferred + shadow rendering) via the existing snapshot
+# CLI. Catches regressions that snapshot byte-identity misses — for
+# instance the phase-6 `tVerts = tVerts;` self-assign that crashed
+# RenderSkyCube but produced the expected PPM at city@t=1500.
+#
+# Each test writes its output to a unique CTest-managed temp dir, then
+# asserts the PPM landed. A crash / hang during init fails the test.
+if(NOT EMSCRIPTEN)
+    set(SMOKE_OUTDIR "${CMAKE_BINARY_DIR}/smoke-out")
+    add_test(NAME smoke_city_forward
+        COMMAND DEMO --snapshot=city@t=1500 --out=${SMOKE_OUTDIR}/city_fwd
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/Runtime)
+    set_tests_properties(smoke_city_forward PROPERTIES
+        TIMEOUT 60
+        PASS_REGULAR_EXPRESSION "wrote.*city_t001500_color\\.ppm")
+
+    add_test(NAME smoke_greets_deferred_shadows
+        COMMAND DEMO --snapshot=greets@t=2500 --out=${SMOKE_OUTDIR}/greets_def
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/Runtime)
+    set_tests_properties(smoke_greets_deferred_shadows PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "FDS_DEFERRED=1;FDS_SHADOWS=1"
+        PASS_REGULAR_EXPRESSION "GREETSSNAP.*greets_t002500_color\\.ppm")
+endif()

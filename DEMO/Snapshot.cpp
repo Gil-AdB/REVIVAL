@@ -156,11 +156,24 @@ bool initSnapshotEnvironment(int xres, int yres) {
 
 void ensureOutDir(const std::string& outDir) {
     if (outDir.empty() || outDir == ".") return;
+    // Recursive mkdir -p: walk the path creating each component. Plain
+    // mkdir() fails if any ancestor is missing, which broke ctest paths
+    // like build/smoke-out/city_fwd where the intermediate dir didn't
+    // exist yet.
+    std::string acc;
+    acc.reserve(outDir.size());
+    for (size_t i = 0; i <= outDir.size(); ++i) {
+        if (i == outDir.size() || outDir[i] == '/') {
+            if (!acc.empty() && acc != ".") {
 #ifdef _WIN32
-    _mkdir(outDir.c_str());
+                _mkdir(acc.c_str());
 #else
-    mkdir(outDir.c_str(), 0755);
+                mkdir(acc.c_str(), 0755);
 #endif
+            }
+        }
+        if (i < outDir.size()) acc.push_back(outDir[i]);
+    }
 }
 
 } // namespace
