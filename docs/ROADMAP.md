@@ -318,6 +318,51 @@ similarity test (disocclusion).
 
 ---
 
+## 9b. SDL V_Flip overhead
+
+**Goal**: greets bench at ~33 ms/iter has ~2.5 ms of V_Flip
+overhead per frame. The wasm port previously got V_Flip to ~0.1 ms
+through SDL configuration tweaks (lockTexture vs UpdateTexture
+pattern, software-renderer hint, etc.). Same optimizations may apply
+natively.
+
+**Current state**: V_Flip in DEMO/SDL2.cpp does texture
+update + RenderCopy + Present. The resolution-overlay we
+just hit (top-right `WxH` string) is drawn inside V_Flip.
+
+**Approach**: walk the wasm-port's V_Flip path (likely on master or
+a wasm branch) for the techniques used. Candidates:
+- Replace `SDL_UpdateTexture` with `SDL_LockTexture` + direct write.
+- Drop intermediate texture if rendering to an offscreen render
+  target.
+- Force `SDL_RENDERER_SOFTWARE` if the GPU upload is the bottleneck.
+
+**Effort**: S. Mostly investigation — the wasm port's commit history
+should show the techniques.
+
+**Open questions**: which branch/commit captured the wasm
+V_Flip work? Need to find that first.
+
+---
+
+## 9c. Initialize_City / Initialize_Greets coupling
+
+**Goal**: untangle the hidden dependency where `Initialize_Greets()`
+silently relies on `Initialize_City()` having run first (textures,
+skycube, material library).
+
+**Current state**: snapshot harness and bench mode both call both.
+A `// must call Initialize_City first` comment at Snapshot.cpp:213
+acknowledges the issue. Sub-agent investigation ongoing.
+
+**Approach**: identify the exact global state, extract a
+shared `Engine_Init()` function, decouple. See
+agent report for the dependency table.
+
+**Effort**: M.
+
+---
+
 ## 10. Tracked bugs / cleanups
 
 Not feature work; flagged so they don't get lost.
@@ -337,7 +382,15 @@ Not feature work; flagged so they don't get lost.
 
 Ranked by (visual impact × ROI / risk):
 
-1. **Profile first (§4)** — small effort, unblocks the perf debate.
+1. ~~**Profile first (§4)** — small effort, unblocks the perf debate.~~
+   DONE (2026-05-17): greets@t=2500 is 33 ms/iter, top costs are
+   Render_DeferredLighting tile lambda (52%), psynch_cvwait (24%),
+   meka::TileRasterizer (10%), FrustumClipper::Render (5.5%).
+   FeatureFlags::get was 1.5% per-pixel — hoisted out, gone from
+   top symbols.
+1b. **V_Flip overhead investigation (§9b)** — ~2.5 ms/frame on
+   native, the wasm port hit ~0.1 ms. Likely SDL UpdateTexture vs
+   LockTexture. Almost-free perf if it transfers.
 2. **City cv-pull stability fix (§1A)** — bug repro exists,
    moderate visual impact, removes a known annoyance.
 3. **Vec-path shadow attenuation (§5 / §10)** — known correctness
