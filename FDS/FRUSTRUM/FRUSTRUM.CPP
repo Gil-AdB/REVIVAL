@@ -91,15 +91,23 @@ static float invTable[32] = {0.0,
 
 void FrustumClipper::Init()
 {
-	dword i;
-	const float rl2 = 1.0f / logf(2.0f);
-
 	memset(C_Verts, 0, sizeof(C_Verts));
 
 	C_Prim = C_Ptr[0];
 	C_Scnd = C_Ptr[1];
 	C_Tetr = C_Ptr[2];
 
+	// LogTable / ExpTable are thread_local but otherwise constant across
+	// the whole process. Construct lazily, once per thread. Without this
+	// every per-tile FrustumClipper rebuilt the tables, racking up ~60k
+	// logf/expf calls per frame in greets (5 lights × 24 shadow tiles ×
+	// 256 + 257 transcendentals = 61.5k).
+	thread_local static bool sLutReady = false;
+	if (sLutReady) return;
+	sLutReady = true;
+
+	dword i;
+	const float rl2 = 1.0f / logf(2.0f);
 	union
 	{
 		float x;
