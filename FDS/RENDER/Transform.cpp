@@ -1044,8 +1044,13 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	}
 	faces.cPolys = Ins-faces.fList;
 
+	// Shadow pass (scratch != nullptr) skips omnis: this loop mutates
+	// O->V.TPos / RZ / PX / PY in place on the source Omni (no clone
+	// equivalent exists for omnis). Running it for each light would
+	// leave omni screen positions stuck on the last light's camera,
+	// breaking the flare draw on the main pass.
 	FDW omniFlareSize;
-	for(O=Sc->OmniHead;O;O=O->Next)
+	if (!scratch) for(O=Sc->OmniHead;O;O=O->Next)
 	{
 
 
@@ -1087,7 +1092,9 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 	faces.cOmnies = (Ins-faces.fList)-faces.cPolys;
 #endif
-	for (I = 0; I < Sc->NumOfParticles; I++) {
+	// Shadow pass skips particles for the same reason as omnis: the
+	// projection writes to Sc->Pcl[I].V.* directly, no clone storage.
+	if (!scratch) for (I = 0; I < Sc->NumOfParticles; I++) {
 		Particle& p = Sc->Pcl[I];
 
 		auto v = p.V.Pos - cam.view->ISource;
