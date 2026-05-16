@@ -754,11 +754,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// swizzled offset into mat32, so it's a direct lookup into
 			// the mip's tile-major data. Mipmap[k] is byte*; texels are
 			// dword (B,G,R,A in low→high bytes).
+			// Cached-once-per-frame debug viz switches (FeatureFlags reads
+			// env at startup; per-pixel cost is one bool load each).
+			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
+			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
+			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
 			float texB, texG, texR;
 			if (profNoTex) {
 				texB = texG = texR = 128.0f;
 			} else {
-				const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
+				const Texture *srcTex = Mat->Txtr;
+				if (sNmapAsDiffuse && Mat->NormalMap) srcTex = Mat->NormalMap;
+				const dword *texData = (const dword *)srcTex->Mipmap[miplevel];
 				if (!texData) continue;
 				const dword texel = texData[swizzledUV];
 				texB = float(texel & 0xFF);
@@ -1349,6 +1356,32 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				outB += rB >> 1;
 				outG += rG >> 1;
 				outR += rR >> 1;
+			}
+
+			// FDS_VIZ_NORMAL / FDS_VIZ_TANGENT: stomp final output with
+			// a (vec+1)*127.5 visualization. nx/ny/nz here is post-TBN
+			// (perturbed by the normal map); per-pixel tangent is decoded
+			// fresh from the G-buffer (the in-kernel `tx`/`ty`/`tz` is
+			// scoped inside the nmap branch). Use to verify the per-vertex
+			// / per-pixel tangent path produces a coherent field.
+			if (sVizNormal) {
+				outR = int((nx + 1.0f) * 127.5f);
+				outG = int((ny + 1.0f) * 127.5f);
+				outB = int((nz + 1.0f) * 127.5f);
+			}
+			if (sVizTangent) {
+				if (!gb.tangent.empty()) {
+					const meka::u16 packedT = gb.tangent[i];
+					if (packedT != 0) {
+						float vtx, vty, vtz;
+						meka::oct_decode_u16(packedT, vtx, vty, vtz);
+						outR = int((vtx + 1.0f) * 127.5f);
+						outG = int((vty + 1.0f) * 127.5f);
+						outB = int((vtz + 1.0f) * 127.5f);
+					} else {
+						outR = outG = outB = 0;   // degenerate tangent → black
+					}
+				}
 			}
 
 			if (outB > 255) outB = 255;
