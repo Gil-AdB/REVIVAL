@@ -2090,10 +2090,7 @@ struct FountainScene : SceneDriver {
 		for(O = FntSc->OmniHead; O; O = O->Next)
 			Polys++;
 		Polys += FntSc->NumOfParticles;
-		fListStorage = std::make_unique<fds::FListEntry[]>(Polys);
-		sListStorage = std::make_unique<fds::FListEntry[]>(Polys);
-		FList = fListStorage.get();
-		SList = sListStorage.get();
+		fds::g_mainFaces.resize(Polys);
 
 		View = FntSc->CameraHead;
 

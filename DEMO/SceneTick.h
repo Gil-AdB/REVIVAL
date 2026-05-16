@@ -42,11 +42,10 @@ struct SceneDriver {
     virtual void on_resize(int /*newX*/, int /*newY*/) {}
 
 protected:
-    // Count polys + omnis in `sc`, allocate FList/SList sized for that count
-    // (stored in fListStorage / sListStorage on this driver), and wire up the
-    // engine-side globals: FList, SList, View = sc->CameraHead, C_FZP, C_rFZP.
-    // includeOmnisInCount=true matches CITY/CRASH semantics (each omni counts
-    // as 1 face for budgeting). The other scenes pass false.
+    // Count polys + omnis in `sc`, resize fds::g_mainFaces sort buffers to
+    // match, and wire up the engine-side camera globals: View = sc->CameraHead,
+    // C_FZP, C_rFZP. includeOmnisInCount=true matches CITY/CRASH semantics
+    // (each omni counts as 1 face for budgeting). The other scenes pass false.
     void setupFaceLists(Scene *sc, bool includeOmnisInCount);
 
     // Rising-edge Tab key handler — toggles `View` between `sc->CameraHead`
@@ -63,8 +62,6 @@ protected:
     // Honours g_shouldQuit so ESC/Ctrl-C still exits.
     void waitBackspaceRelease();
 
-    std::unique_ptr<fds::FListEntry[]> fListStorage;
-    std::unique_ptr<fds::FListEntry[]> sListStorage;
     bool tabPrev_ = false;
 };
 

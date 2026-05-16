@@ -898,12 +898,7 @@ int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres) {
     // into. CityScene::init does this; without an FLD scene driver we
     // need to do it ourselves. Cube has 12 faces + headroom for omnis
     // (none in our test).
-    static std::unique_ptr<fds::FListEntry[]> fListStorage =
-        std::make_unique<fds::FListEntry[]>(64);
-    static std::unique_ptr<fds::FListEntry[]> sListStorage =
-        std::make_unique<fds::FListEntry[]>(64);
-    FList = fListStorage.get();
-    SList = sListStorage.get();
+    fds::g_mainFaces.resize(64);
 
     // 6 camera poses around the cube
     struct CamPose { const char* name; Vector dir; };
@@ -1612,12 +1607,7 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres) {
     // this rebuild assigns Material::ID and registers them with the scene.
     Scene_RebuildMatTable(sc);
 
-    static std::unique_ptr<fds::FListEntry[]> fListStorage =
-        std::make_unique<fds::FListEntry[]>(256);
-    static std::unique_ptr<fds::FListEntry[]> sListStorage =
-        std::make_unique<fds::FListEntry[]>(256);
-    FList = fListStorage.get();
-    SList = sListStorage.get();
+    fds::g_mainFaces.resize(256);
 
     struct CamPose { const char* name; Vector dir; };
     const CamPose poses[] = {
@@ -1744,12 +1734,7 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
         if (cases.empty()) cases = {2};
     }
 
-    static std::unique_ptr<fds::FListEntry[]> fListStorage =
-        std::make_unique<fds::FListEntry[]>(8192);
-    static std::unique_ptr<fds::FListEntry[]> sListStorage =
-        std::make_unique<fds::FListEntry[]>(8192);
-    FList = fListStorage.get();
-    SList = sListStorage.get();
+    fds::g_mainFaces.resize(8192);
 
     struct CamPose { const char* name; Vector dir; };
     // Camera orbits around the sphere centre at (0, 2, 0). Six off-axis

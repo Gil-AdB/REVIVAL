@@ -832,8 +832,9 @@ Away:Tot = Timer-TTrd;
 	while (!Keyboard[ScESC]) DO_NOP();
 	while (Keyboard[ScESC]) DO_NOP();*/
 	Restore_Splines(Sc);
-	delete FList;
-	delete SList;
+	// FList / SList storage lives in fds::g_mainFaces; its dtor cleans
+	// up (previously a buggy `delete` without `[]` here that raced with
+	// the unique_ptr-based scene drivers — see FaceListContext.h).
 	delete [] Str;
 	delete [] BPage;
 	delete Layer2.Data;

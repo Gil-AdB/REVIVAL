@@ -2,6 +2,7 @@
 #define FDS_FACE_LIST_CONTEXT_H_INCLUDED
 
 #include <cstdint>
+#include <vector>
 
 struct Face;
 
@@ -32,9 +33,14 @@ struct FListEntry {
 //   FList, SList                                 (sort buffers)
 //   CAll, CPolys, COmnies, CPcls, Polys          (per-pass counts)
 //
-// fList / sList are non-owning views; the orchestrator allocates the
-// backing storage (currently `std::unique_ptr<FListEntry[]>`).
+// Storage is owned by fStorage / sStorage; fList / sList are raw views
+// kept in sync with storage.data() so legacy code reading the bare
+// `FList`/`SList` reference aliases still works. Call resize(n) to
+// (re)allocate both buffers; existing call sites that used to call
+// FList_Allocate / new[] / make_unique now collapse to one method.
 struct FaceListContext {
+    std::vector<FListEntry> fStorage;
+    std::vector<FListEntry> sStorage;
     FListEntry *fList = nullptr;
     FListEntry *sList = nullptr;     // scratch for radix sort
     int32_t  cAll    = 0;          // total slots used in fList
@@ -42,6 +48,13 @@ struct FaceListContext {
     int32_t  cOmnies = 0;          // omni flare entries
     int32_t  cPcls   = 0;          // particle face entries
     int32_t  polys   = 0;          // total polys in the scene (informational)
+
+    void resize(size_t n) {
+        fStorage.resize(n);
+        sStorage.resize(n);
+        fList = fStorage.data();
+        sList = sStorage.data();
+    }
 };
 
 } // namespace fds

@@ -27,10 +27,7 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
             ++polys;
         }
     }
-    fListStorage = std::make_unique<fds::FListEntry[]>(polys);
-    sListStorage = std::make_unique<fds::FListEntry[]>(polys);
-    FList = fListStorage.get();
-    SList = sListStorage.get();
+    fds::g_mainFaces.resize(polys);
     View  = sc->CameraHead;
     C_FZP  = sc->FZP;
     C_rFZP = 1.0f / C_FZP;
