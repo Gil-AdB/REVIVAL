@@ -96,14 +96,21 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	static thread_local double sRasterAcc = 0.0;
 	static thread_local int sLightCount = 0;
 
-	// Per-pass vertex scratch — kept across frames so the clone storage
-	// stays warm (the per-vertex arrays grow once to TriMesh::VIndex and
-	// then Transform_Objects rewrites the projection fields in place each
-	// frame). Sequential shadow loop still shares one scratch; phase 6's
-	// cross-light parallelism will hold one per concurrent light.
-	static thread_local fds::VertexScratch shadowScratch;
+	// Per-light scratch: one FaceListContext + one VertexScratch per
+	// shadow-casting light. Kept across frames so the per-vertex clone
+	// arrays + face buffers stay warm — Transform_Objects rewrites the
+	// projected fields in place each frame instead of reallocating.
+	// Sizing once per frame (in case the shadow-map set grew between
+	// frames).
+	static thread_local std::vector<fds::FaceListContext> perLightFaces;
+	static thread_local std::vector<fds::VertexScratch>   perLightScratch;
+	if (perLightFaces.size() != g_shadowMaps.size()) {
+		perLightFaces.resize(g_shadowMaps.size());
+		perLightScratch.resize(g_shadowMaps.size());
+	}
 
-	for (ShadowMap& sm : g_shadowMaps) {
+	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
+		ShadowMap& sm = g_shadowMaps[lightIdx];
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
@@ -172,19 +179,27 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
 		std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
 
-		// Transform from the light's POV. Overwrites FList + per-vertex
-		// PX/PY/RZ — main pass re-transforms after we return.
+		// Transform from the light's POV into this light's own
+		// FaceListContext + VertexScratch. Doesn't touch fds::g_mainFaces
+		// or any other light's state — that's what unlocks cross-light
+		// parallelism. (Per-vertex projection still mutates the original
+		// TriMesh vertices via VertexScratch's per-TriMesh clone; that
+		// clone is per-light, so two lights project the same source
+		// vertices into different clone buffers without racing.)
 		// Skip Animate_Objects: the scene driver already animated this
-		// frame's object poses before calling us. We just re-project
-		// those poses through the light camera; calling Animate_Objects
-		// again would re-tick per-frame state (object splines,
-		// particles, anything its TriMesh-walk touches) and diverge
-		// the main pass.
+		// frame's object poses before calling us. Re-running it would
+		// double-tick splines / particles and diverge the main pass.
+		fds::FaceListContext& faces  = perLightFaces[lightIdx];
+		fds::VertexScratch&   scratch = perLightScratch[lightIdx];
+		// Size this light's FList to match the main-pass capacity. Polys
+		// is the worst case (every mesh face + every omni + every
+		// particle); shadow geometry is a subset, so this is safe to
+		// reuse across frames. resize() is a no-op when already sized.
+		faces.resize(static_cast<size_t>(Polys));
 		const auto tXformStart = clk::now();
 		g_inShadowPass = true;
 		g_currentShadowOmni = sm.omni;
-		Transform_Objects(Sc, lightCtx, fds::g_mainFaces, sm.xres, sm.yres,
-		                  &shadowScratch);
+		Transform_Objects(Sc, lightCtx, faces, sm.xres, sm.yres, &scratch);
 		g_currentShadowOmni = nullptr;
 		g_inShadowPass = false;
 		const auto tXformEnd = clk::now();
@@ -209,8 +224,9 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		constexpr int totalTiles = numTilesX * numTilesY;
 		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
 		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
-		ShadowMap *const                   smPtr   = &sm;
-		const fds::CameraContext *const    camPtr  = &lightCtx;
+		ShadowMap *const                   smPtr     = &sm;
+		const fds::CameraContext *const    camPtr    = &lightCtx;
+		const fds::FaceListContext *const  facesPtr  = &faces;
 		for (int ty = 0; ty < numTilesY; ++ty) {
 			const float y1f = float(ty * tileSizeY);
 			const float y2f = float(std::min((ty + 1) * tileSizeY, sm.yres));
@@ -218,7 +234,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 				const float x1f = float(tx * tileSizeX);
 				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
 				ThreadPool::instance().enqueue(
-					[smPtr, camPtr, x1f, y1f, x2f, y2f]() {
+					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f]() {
 						g_currentShadowMap = smPtr;
 						// MekaleleShadowDepth ignores rt + cam (reads
 						// g_currentShadowMap thread_local + sm fields).
@@ -230,8 +246,9 @@ void Render_DeferredShadowMaps(Scene *Sc)
 						FrustumClipper clipper;
 						clipper.InitViewport(*camPtr);  // light's near/far
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
-						for (int i = 0; i < CAll; ++i) {
-							Face *const F = FList[i].face;
+						const auto& f = *facesPtr;
+						for (int i = 0; i < f.cAll; ++i) {
+							Face *const F = f.fList[i].face;
 							if (!F) continue;
 							if (!F->Txtr) continue;
 							if (F->A == F->B) continue;
