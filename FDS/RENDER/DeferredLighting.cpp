@@ -616,12 +616,13 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		__m256 mask_hpos = _mm256_cmp_ps(hLen2, vZero, _CMP_GT_OQ);
 		__m256 safe_h2   = _mm256_blendv_ps(vOne, hLen2, mask_hpos);
 		__m256 hLenInv   = _mm256_rsqrt_ps(safe_h2);
-		hx = _mm256_mul_ps(hx, hLenInv);
-		hy = _mm256_mul_ps(hy, hLenInv);
-		hz = _mm256_mul_ps(hz, hLenInv);
-		__m256 NdotH = _mm256_fmadd_ps(hx, vnx_v,
-		                _mm256_fmadd_ps(hy, vny_v,
-		                 _mm256_mul_ps(hz, vnz_v)));
+		// Fold renorm into the N·H dot — 3 fewer fmuls per 8-pixel batch
+		// vs scaling H component-wise then dotting. Matches the scalar
+		// path's identical fold below.
+		__m256 NdotH_raw = _mm256_fmadd_ps(hx, vnx_v,
+		                    _mm256_fmadd_ps(hy, vny_v,
+		                     _mm256_mul_ps(hz, vnz_v)));
+		__m256 NdotH = _mm256_mul_ps(NdotH_raw, hLenInv);
 		__m256 mask_nh = _mm256_cmp_ps(NdotH, vZero, _CMP_GT_OQ);
 		// Clamp NdotH to [0,1] before squaring so the chain is stable
 		// even for masked-out lanes.
@@ -1109,13 +1110,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const float ldx = wx * lenInv;
 									const float ldy = wy * lenInv;
 									const float ldz = wz * lenInv;
-									float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
+									const float hx = ldx + vx, hy = ldy + vy, hz = ldz + vz;
 									const float hLen2 = hx*hx + hy*hy + hz*hz;
 									if (hLen2 <= 0.0f) continue;
-									const float hLenInv = fast_rsqrt(hLen2);
-									hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
-									const float NdotH = nx*hx + ny*hy + nz*hz;
-									if (NdotH <= 0.0f) continue;
+									// Fold renorm into the dot (same trick as
+									// the nmap path + vec spec loop).
+									const float NdotH_raw = nx*hx + ny*hy + nz*hz;
+									if (NdotH_raw <= 0.0f) continue;
+									const float NdotH = NdotH_raw * fast_rsqrt(hLen2);
 									const float spec = std::pow(NdotH, gloss);
 									const float rRange = tl.rRange[n];
 									const float specStrength = spec * Mat->Specular *

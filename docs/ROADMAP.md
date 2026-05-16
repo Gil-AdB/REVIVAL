@@ -343,6 +343,16 @@ should show the techniques.
 **Open questions**: which branch/commit captured the wasm
 V_Flip work? Need to find that first.
 
+**Status (2026-05-17)**: confirmed via `--no_vsync` flag that the
+~2.7ms PROF_FLIP is NOT vsync — bench numbers unchanged whether
+vsync is on or off (28ms render > vblank period, so Present
+returns immediately either way). The 2.7ms is real Metal upload +
+submit work. Wasm port's WebGL2 bypass (commit `436f29b`) is
+specific to the browser canvas path and doesn't transfer to native
+(SDL2 already uses Metal here). Native-specific win would require
+either a smaller upload (lower-res framebuffer with GPU upscale) or
+some other Metal-side micro-opt. ~2ms still up for grabs.
+
 ---
 
 ## 9c. Initialize_City / Initialize_Greets coupling
