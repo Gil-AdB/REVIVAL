@@ -1,0 +1,19 @@
+# clangd configuration.
+#
+# CMake exports compile_commands.json into the build dir (see root
+# CMakeLists.txt: CMAKE_EXPORT_COMPILE_COMMANDS ON). Point clangd at
+# it so .cpp files get the exact compile flags CMake/Ninja used.
+#
+# For headers that don't have their own entry in compile_commands.json
+# (e.g. SORTS.H, FRUSTRUM.H — these are zero-include headers that rely
+# on the includer to have already pulled in fds::FListEntry / RasterFunc
+# / Vertex via FDS_VARS.H), clangd picks a TU that #includes the header
+# and reuses that TU's flags + preamble. Without this config, clangd
+# parses the header standalone and emits cascading "undeclared
+# identifier" / "unknown type name" diagnostics.
+
+CompileFlags:
+  CompilationDatabase: build
+
+Index:
+  Background: Build
