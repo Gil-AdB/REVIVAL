@@ -233,13 +233,20 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		sLightCount += xformsEnqueued;
 	}
 
-	// ─── Phase B: per-light tile rasterization ───────────────────────────
-	// Same active-light filter as phase A. Tile fanout is unchanged from
-	// the serial version — each light's 6×4 tiles dispatch onto the
-	// threadpool, barrier between lights to keep the dispatch shape
-	// simple. (Commit 3 will flatten this into one (light × tile) batch
-	// across the entire phase.)
+	// ─── Phase B: flat (light × tile) tile rasterization ────────────────
+	// All active lights' 6×4 tiles dispatch into a single threadpool
+	// batch — the pool load-balances across lights, so a stragglering
+	// light's tile no longer holds up the next light's transforms (those
+	// already happened in phase A) or its tile work. Single barrier
+	// covers all N×24 tiles.
+	constexpr int numTilesX = 6;
+	constexpr int numTilesY = 4;
 	const auto tRasterStart = clk::now();
+	{
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::tileCounter = 0;
+	}
+	int tilesEnqueued = 0;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
 		Omni *const O = sm.omni;
@@ -247,13 +254,6 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		if (!(O->Flags & Omni_Active)) continue;
 		if (O->Type != Light_SpotLight) continue;
 
-		{
-			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-			renderns::tileCounter = 0;
-		}
-		constexpr int numTilesX = 6;
-		constexpr int numTilesY = 4;
-		constexpr int totalTiles = numTilesX * numTilesY;
 		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
 		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
 		ShadowMap *const                   smPtr     = &sm;
@@ -265,6 +265,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 			for (int tx = 0; tx < numTilesX; ++tx) {
 				const float x1f = float(tx * tileSizeX);
 				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
+				++tilesEnqueued;
 				ThreadPool::instance().enqueue(
 					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f]() {
 						g_currentShadowMap = smPtr;
@@ -294,11 +295,11 @@ void Render_DeferredShadowMaps(Scene *Sc)
 					});
 			}
 		}
-		{
-			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-			renderns::condition.wait(lock,
-				[]{ return renderns::tileCounter >= totalTiles; });
-		}
+	}
+	{
+		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+		renderns::condition.wait(lock,
+			[tilesEnqueued]{ return renderns::tileCounter >= tilesEnqueued; });
 	}
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {
