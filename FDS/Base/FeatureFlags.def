@@ -67,6 +67,9 @@ FDS_FLAG_BOOL(nmap_as_diffuse,          "FDS_NMAP_AS_DIFFUSE",          0,      
 FDS_FLAG_FLOAT(nmap_strength,           "FDS_NMAP_STRENGTH",            1.5f,                           "nmap",     "Sobel-bake strength: higher = more pronounced bump")
 FDS_FLAG_INT(nmap_blur,                 "FDS_NMAP_BLUR",                4,                              "nmap",     "Box-blur passes (3x3) applied to luminance before Sobel (0 = no blur)")
 
+// ─── display / present ───────────────────────────────────────────────────
+FDS_FLAG_BOOL(no_vsync,                 "FDS_NO_VSYNC",                 0,                              "display",  "Disable SDL_RENDERER_PRESENTVSYNC — lets SDL_RenderPresent return immediately for benching real flip cost")
+
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
 FDS_FLAG_BOOL(debug_panorama,           "FDS_DEBUG_PANORAMA",           0,                              "city",     "City: synthesize debug panoramas with gridlines")

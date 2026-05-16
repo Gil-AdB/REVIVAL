@@ -1,5 +1,6 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 #include "SDL2.h"
 #include "FILLERS/Mekalele.h"
 #include <atomic>
@@ -293,7 +294,10 @@ dword SDL2_InitDisplay(SDL_Window *window)
 #ifdef __EMSCRIPTEN__
 	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_SOFTWARE);
 #else
-	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_PRESENTVSYNC);
+	const uint32_t rendererFlags = fds::FeatureFlags::no_vsync()
+		? SDL_RENDERER_ACCELERATED
+		: SDL_RENDERER_PRESENTVSYNC;
+	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, rendererFlags);
 #endif
 	SDL_MainSurf.Renderer = renderer;
 
