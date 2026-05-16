@@ -334,17 +334,12 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		}
 	}
 
-	// Each shadow pass overwrote per-vertex PX/PY/RZ + FList/CAll with
-	// the light-camera projection. Re-run Transform_Objects with the
-	// main camera so the subsequent Render() sees a consistent scene
-	// state. Cost: one extra Transform_Objects per frame on scenes
-	// that have any shadow-casting lights. Acceptable until phase 6
-	// rewrites Transform_Objects to write into per-light Vertex scratch.
-	// Animate_Objects not re-run (see comment inside the per-light
-	// loop above). No engine globals to restore — every per-light
-	// camera setup now happens through the local lightCtx, never
-	// mutating fds::g_mainCamera or Sc.
-	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
+	// (Previously: re-ran Transform_Objects with the main camera here
+	// to restore fds::g_mainFaces + per-vertex PX/PY/RZ that the
+	// shadow loop had clobbered. Phase 6 made the shadow loop write
+	// into per-light VertexScratch clones instead, so T->Verts /
+	// T->Faces / fds::g_mainFaces are untouched and the restore is
+	// dead. Saves one full main-camera Transform_Objects per frame.)
 
 	// Precompute the per-shadow-map "view-space → light-view-space"
 	// affine, with the main camera now restored on View. Derivation:
