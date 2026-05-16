@@ -64,8 +64,8 @@ FDS_FLAG_BOOL(no_nmap,                  "FDS_NO_NMAP",                  0,      
 FDS_FLAG_BOOL(viz_tangent,              "FDS_VIZ_TANGENT",              0,                              "nmap",     "Visualize per-pixel view-space tangent as diffuse color (debug)")
 FDS_FLAG_BOOL(viz_normal,               "FDS_VIZ_NORMAL",               0,                              "nmap",     "Visualize per-pixel view-space normal as diffuse color (debug)")
 FDS_FLAG_BOOL(nmap_as_diffuse,          "FDS_NMAP_AS_DIFFUSE",          0,                              "nmap",     "Paint baked normal map directly as diffuse — confirms swizzle round-trip")
-FDS_FLAG_FLOAT(nmap_strength,           "FDS_NMAP_STRENGTH",            4.0f,                           "nmap",     "Sobel-bake strength: higher = more pronounced bump")
-FDS_FLAG_INT(nmap_blur,                 "FDS_NMAP_BLUR",                0,                              "nmap",     "Box-blur passes (3x3) applied to luminance before Sobel (0 = no blur)")
+FDS_FLAG_FLOAT(nmap_strength,           "FDS_NMAP_STRENGTH",            1.5f,                           "nmap",     "Sobel-bake strength: higher = more pronounced bump")
+FDS_FLAG_INT(nmap_blur,                 "FDS_NMAP_BLUR",                4,                              "nmap",     "Box-blur passes (3x3) applied to luminance before Sobel (0 = no blur)")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
