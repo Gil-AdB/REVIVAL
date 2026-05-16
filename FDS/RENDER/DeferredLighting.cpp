@@ -36,6 +36,10 @@
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
+
+// FRUSTRUM.CPP — file-scope; forward declare for libm-pow fallback.
+extern float fastLog2(float x);
+extern float fastPow2(float x);
 #include "Base/FeatureFlags.h"
 #include "Base/Scene.h"
 #include "Base/TriMesh.h"
@@ -1118,7 +1122,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const float NdotH_raw = nx*hx + ny*hy + nz*hz;
 									if (NdotH_raw <= 0.0f) continue;
 									const float NdotH = NdotH_raw * fast_rsqrt(hLen2);
-									const float spec = std::pow(NdotH, gloss);
+									// pow(NdotH, gloss) via LUT-based log2/exp2.
+									// std::pow on arm64 libm = ~50-100 cycles
+									// per call; fastPow2(gloss*fastLog2(NdotH))
+									// is ~10. Used only when Mat->Glossiness
+									// falls outside the templated values {4,
+									// 8, 16, 32, 48, 64, 128}.
+									const float spec = fastPow2(gloss * fastLog2(NdotH));
 									const float rRange = tl.rRange[n];
 									const float specStrength = spec * Mat->Specular *
 										(1.0f - dist * rRange);
