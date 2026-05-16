@@ -43,10 +43,10 @@ static Scene *GreetSc;
 // the spot follows the robot's world position.
 static TriMesh *g_RobotMesh = nullptr;
 static Omni    *g_RobotSpot = nullptr;
-// Three colored orbit spots circling the robot at 120° offsets. Same cone
+// Four colored orbit spots circling the robot at 90° offsets. Same cone
 // shape as g_RobotSpot but oriented to point inward/down at the robot.
-static constexpr int kOrbitSpotCount = 3;
-static Omni    *g_OrbitSpots[kOrbitSpotCount] = { nullptr, nullptr, nullptr };
+static constexpr int kOrbitSpotCount = 4;
+static Omni    *g_OrbitSpots[kOrbitSpotCount] = { nullptr, nullptr, nullptr, nullptr };
 
 static int32_t CHPartTime = 20.0f*100;
 
@@ -62,7 +62,7 @@ static void SceneCorrections()
 	float OmniSizeMult[] =
 	//	ent1  ent2  ctr1  ctr2  crd1  hal1  hal2  rbtl  rbtr  rbth
 		{1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.5,  1.5,  1.5};
-	int OmniDisable[] = 
+	int OmniDisable[] =
 		{  0,    0,    0,    0,    0,    0,    0,    0,    0,    0};
 
 	int OmniPointFlare[] =
@@ -535,9 +535,10 @@ static void initializeRobotSpotlights()
 	// shadow maps at 256x256 (16x cheaper raster than the main 1024²).
 	struct OrbitInit { float r, g, b; const char* tag; };
 	const OrbitInit init[kOrbitSpotCount] = {
-		{ 255.0f,  60.0f,  60.0f, "red"   },
-		{  60.0f, 255.0f,  60.0f, "green" },
-		{  60.0f,  80.0f, 255.0f, "blue"  },
+		{ 255.0f,  60.0f,  60.0f, "red"    },
+		{  60.0f, 255.0f,  60.0f, "green"  },
+		{  60.0f,  80.0f, 255.0f, "blue"   },
+		{ 255.0f, 220.0f,  80.0f, "yellow" },
 	};
 	for (int i = 0; i < kOrbitSpotCount; ++i) {
 		g_OrbitSpots[i] = makeSpotLight(
@@ -1203,7 +1204,13 @@ struct GreetsScene : SceneDriver {
 		// independently on the floor and walls.
 		if (g_RobotMesh) {
 			constexpr float kOrbitRadius = 8.0f;
-			constexpr float kOrbitHeight = 6.0f;
+			// Capped at +4 above the robot so the spots stay below the
+			// ceiling (light pointing straight down from beyond the
+			// ceiling would shadow nothing useful + fire the spot cone
+			// into the wrong volume). Matches the main g_RobotSpot
+			// height (kSpotHeight=4 above the robot, also tuned to fit
+			// under the ceiling).
+			constexpr float kOrbitHeight = 4.0f;
 			constexpr float kOrbitSpeed  = 0.015f;
 			const float baseAngle = float(CurFrame) * kOrbitSpeed;
 			for (int i = 0; i < kOrbitSpotCount; ++i) {
