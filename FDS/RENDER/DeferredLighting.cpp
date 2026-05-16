@@ -1286,8 +1286,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								const float NdotH = nx*hx + ny*hy + nz*hz;
 								if (NdotH > 0.0f) {
 									const float spec = pow_glossClass(NdotH, Mat->Glossiness);
+									// Multiply by shadowAtten so shadowed pixels don't
+									// leak specular highlights — was a visible bug at
+									// bumped-mortar pixels inside shadow regions, where
+									// the bumped N satisfies the sharp Gloss=48 lobe
+									// while diffuse was correctly killed.
 									const float specStrength = spec * Mat->Specular *
-										(1.0f - dist * rRange);
+										(1.0f - dist * rRange) * shadowAtten;
 									sB += specStrength * Lcb;
 									sG += specStrength * Lcg;
 									sR += specStrength * Lcr;
