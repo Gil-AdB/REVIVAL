@@ -62,6 +62,7 @@
 #include "Base/Spline.h"
 #include "Base/CameraContext.h"
 #include "Base/FaceListContext.h"
+#include "Base/VertexScratch.h"
 
 // Defined in Shadows.cpp; the shadow orchestrator sets this to the
 // current shadow light before calling Transform_Objects, so the per-mesh
@@ -415,7 +416,8 @@ static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
 // framebuffer without globally mutating XRes/YRes mid-frame. Default
 // (-1, -1) preserves legacy behavior.
 void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext &faces,
-                        int xresOverride, int yresOverride)
+                        int xresOverride, int yresOverride,
+                        fds::VertexScratch *scratch)
 {
 	extern thread_local bool g_inShadowPass;
 	const bool coneCull = g_inShadowPass
@@ -467,6 +469,25 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		T = (TriMesh *)(Obj->Data);
 
 		if (!(T->Flags&HTrack_Visible)) {T->Flags|=Tri_Invisible; continue;}
+
+		// Per-pass clone redirection. With scratch non-null, all
+		// reads/writes of this TriMesh's per-vertex projection state
+		// (Vertex::PX, PY, RZ, TPos, TN, TTangent, UZ, VZ, Flags…)
+		// land in scratch's clone instead of T's own Verts. Face
+		// pushes also use the clone's Face* (whose A/B/C point into
+		// the clone's Verts), so downstream code sees a coherent
+		// per-pass snapshot. Nullptr → in-place writes to tVerts
+		// (main pass keeps the no-allocation fast path).
+		Vertex *tVerts;
+		Face   *tFaces;
+		if (scratch) {
+			auto& clone = scratch->cloneOf(T);
+			tVerts = clone.verts.data();
+			tFaces = clone.faces.data();
+		} else {
+			tVerts = tVerts;
+			tFaces = tFaces;
+		}
 
 		// Mesh-bsphere-vs-cone cull during shadow-pass Transform_Objects.
 		// Cheap pre-test that lets us skip the matrix work + vertex
@@ -589,7 +610,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		} else {
 			if (T->Flags&Tri_Ahead) T->Flags &=~Tri_Inside;
 		}
-		VEnd=T->Verts+T->VIndex;
+		VEnd=tVerts+T->VIndex;
 		
 		/*    FEnd=T->Face+T->NumOfFaces;
 		for (F=T->Face;F<FEnd;F++)
@@ -617,7 +638,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				else goto Ahead;
 			}
 			// Intel inside...this rulez,all object completely inside frustrum.
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				//        MatrixXVector(M,&Vtx->Pos,&U);
 				//        Vector_Add(&U,&V,&Vtx->TPos);
@@ -650,7 +671,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
 Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				//    if (!Vtx->FRem) continue;
 				//        MatrixXVector(M,&Vtx->Pos,&U);
@@ -689,7 +710,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			//    printf("Ahead VGA/Wizard.\n");
 			goto AfterXForm;
 Regular:
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				//    if (!Vtx->FRem) continue;
 				//        MatrixXVector(M,&Vtx->Pos,&U);
@@ -737,7 +758,7 @@ Regular:
 				else goto EAhead;
 			}
 			// Intel inside...this rulez,all object completely inside frustrum.
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				MatrixXVector(M,&Vtx->Pos,&U);
 				Vector_Add(&U,&V,&Vtx->TPos);
@@ -761,7 +782,7 @@ Regular:
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
 EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
@@ -791,7 +812,7 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			
 			goto AfterXForm;
 ERegular:
-			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
+			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
@@ -826,7 +847,7 @@ ERegular:
 			}
 			
 		}
-AfterXForm:FEnd=T->Faces+T->FIndex;
+AfterXForm:FEnd=tFaces+T->FIndex;
 	// Runtime debug: hide specific nested-transparent objects (fountain's
 	// f_sphere outer and "f in shpere" inner). Toggled by J / K keys —
 	// useful for isolating which face contributes to a rendering bug.
@@ -847,7 +868,7 @@ AfterXForm:FEnd=T->Faces+T->FIndex;
 	// single-sided walls/sheets) — easier to just skip it.
 	extern thread_local bool g_inShadowPass;
 	const bool shadowNoBackface = g_inShadowPass && !fds::FeatureFlags::shadow_backface_cull();
-	for (F=T->Faces;F<FEnd;F++) {
+	for (F=tFaces;F<FEnd;F++) {
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;
 			if (hideInner && std::strstr(mn, "in shpere")) continue;

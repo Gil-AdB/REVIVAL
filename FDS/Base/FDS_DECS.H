@@ -394,10 +394,12 @@ void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
 // for the common main-pass case (xres/yres overrides only matter when
 // rendering into a different surface than the engine framebuffer —
 // e.g. shadow maps).
+namespace fds { struct VertexScratch; }
 void Transform_Objects(Scene *Sc,
                         fds::CameraContext &cam,
                         fds::FaceListContext &faces,
-                        int xresOverride = -1, int yresOverride = -1);
+                        int xresOverride = -1, int yresOverride = -1,
+                        fds::VertexScratch *scratch = nullptr);
 char BFC(Face *F);
 char BOC(Face *F);
 void Construct_FaceList(Scene *Sc);
