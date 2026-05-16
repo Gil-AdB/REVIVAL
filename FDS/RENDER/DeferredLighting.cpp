@@ -730,6 +730,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool profNoSpec   = fds::FeatureFlags::prof_no_spec();
 	const bool profNoFog    = fds::FeatureFlags::prof_no_fog();
 
+	// Hot-loop flag cache. These flags were being queried per-pixel +
+	// per-light + per-PCF-tap, racking up ~1.5% CPU in profile data on
+	// greets@t=2500. FeatureFlags::get is a cached load each, but a
+	// per-pixel load × 1920×1080 × 4 lights × 4 PCF taps adds up. Hoist
+	// to function entry.
+	const bool nmapFromDiffuseG = fds::FeatureFlags::nmap_from_diffuse();
+	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
+	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
+	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
+	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
+
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
@@ -795,10 +806,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// the normal map. Visually wrong but lets us measure the
 			// per-pixel cost of the normal-map code path on existing
 			// scenes without authoring or baking any new textures.
-			const bool nmapFromDiffuse = fds::FeatureFlags::nmap_from_diffuse();
-			const bool nmapDisabled = fds::FeatureFlags::no_nmap();
-			Texture* nmTex = nmapDisabled ? nullptr : Mat->NormalMap;
-			if (!nmTex && nmapFromDiffuse) nmTex = Mat->Txtr;
+			Texture* nmTex = nmapDisabledG ? nullptr : Mat->NormalMap;
+			if (!nmTex && nmapFromDiffuseG) nmTex = Mat->Txtr;
 			if (nmTex) {
 				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];
 				if (nmData) {
@@ -898,7 +907,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// FDS_DEFERRED_NO_SPEC=1: force-disable all deferred specular,
 			// regardless of per-material Mat->Specular. Diagnostic for
 			// specular firefly / bump-map speckle isolation.
-			const bool wantSpecular = !fds::FeatureFlags::deferred_no_spec()
+			const bool wantSpecular = !deferredNoSpecG
 				&& specGlobalOn && (Mat->Specular > 0.0f) && !profNoSpec;
 			const float gloss = Mat->Glossiness > 0
 				? float(Mat->Glossiness)
@@ -941,9 +950,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// every textured material). The geometric N from the
 			// G-buffer would otherwise drive vec lighting and the
 			// normal-map perturbation would be lost.
-			const bool nmapFromDiffuse_useVec = fds::FeatureFlags::nmap_from_diffuse();
 			const bool hasNormalMap = Mat->NormalMap ||
-				(nmapFromDiffuse_useVec && Mat->Txtr);
+				(nmapFromDiffuseG && Mat->Txtr);
 			const bool useVecHere = useVec && !hasNormalMap;
 
 			if (!isWater && !profNoLights) {
@@ -1246,8 +1254,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 										// scale by 1/(N·L) - 1 so front-facing surfaces
 										// get no extra; grazing surfaces get a lot.
 										// Tunable via FDS_SHADOW_BIAS / SLOPE_BIAS.
-										const int kShadowBias = fds::FeatureFlags::shadow_bias();
-										const int kSlopeBias  = fds::FeatureFlags::shadow_slope_bias();
+										const int kShadowBias = kShadowBiasG;
+										const int kSlopeBias  = kSlopeBiasG;
 										// Use the GEOMETRIC normal (saved before normal-
 										// map perturbation) for slope calc — the slope
 										// is about the underlying surface, not the
