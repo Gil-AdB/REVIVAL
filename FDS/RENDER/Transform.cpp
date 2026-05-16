@@ -32,6 +32,15 @@
 #include <memory>
 #include <algorithm>
 
+// Front-to-back face sort. Lives at TU scope so the SortZ-write
+// branches inside Transform_Objects pick the closer-renders-first
+// path. The original RENDER.CPP defined this at line 38; the 415fd16
+// extraction to Transform.cpp dropped it, silently selecting the
+// back-to-front branch — visible only on deferred-mode reflective
+// windows, where wall-renders-before-window left wall mat32 in the
+// G-buffer for the lighting kernel to over-shade.
+#define FRONT_TO_BACK_SORTING
+
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
