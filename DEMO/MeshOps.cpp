@@ -2,6 +2,7 @@
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 #include <Base/Scene.h>
 
 #include <cmath>
@@ -9,6 +10,10 @@
 #include <map>
 #include <unordered_map>
 #include <vector>
+
+// PREPROC.CPP — recompute per-vertex tangents from the current Faces +
+// per-vertex N. Not declared in FDS_DECS.H, so forward-declare locally.
+void Compute_Vertex_Tangents(TriMesh *T);
 
 namespace {
 
@@ -119,6 +124,16 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	T->Verts = newVerts;
 	T->VIndex = newCount;
 
+	// Recompute per-vertex tangents against the new (per-face-cloned)
+	// normals. Without this, each clone keeps the original shared
+	// vertex's Tangent — which was computed against the old smooth
+	// normal — and the deferred kernel's TBN frame is wrong at crease
+	// boundaries (the same orig vertex's clones now have different N
+	// but the same Tangent → post-Gram-Schmidt tangents diverge sharply
+	// across the seam, producing stable patchy noise on bump-mapped
+	// surfaces). Cheap: one pass over T->Faces + T->Verts.
+	Compute_Vertex_Tangents(T);
+
 	// T->SL (static-lighting cache) was sized for the original VIndex.
 	// StaticLighting iterates [0, T->VIndex) writing T->SL[vi] — without
 	// growing SL too, those writes overflow into neighbouring TriMesh
@@ -178,17 +193,59 @@ Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	const uint32_t *src = reinterpret_cast<const uint32_t*>(diffuse->Mipmap[0]);
 	uint32_t       *dst = reinterpret_cast<uint32_t*>(nm->Data);
 
+	// Precompute luminance into a linear (row-major) buffer. Lets us
+	// optionally box-blur before Sobel without re-walking the swizzled
+	// layout, and removes the per-pixel `% W` cost from Sobel's 8
+	// neighbour lookups.
+	std::vector<float> lum(size_t(W) * size_t(H));
+	for (int y = 0; y < H; ++y) {
+		for (int x = 0; x < W; ++x) {
+			const uint32_t px = src[SwizzledOffset(x, y, blockX, blockY, H)];
+			const float b = float(px & 0xFF);
+			const float g = float((px >> 8) & 0xFF);
+			const float r = float((px >> 16) & 0xFF);
+			lum[size_t(y) * size_t(W) + size_t(x)] = 0.299f * r + 0.587f * g + 0.114f * b;
+		}
+	}
+
+	// FDS_NMAP_BLUR: N passes of 3x3 box blur on luminance before
+	// Sobel. Suppresses high-frequency texture content (per-stone
+	// grain in brick textures) so the Sobel response concentrates on
+	// the big features (mortar lines, tile seams). Two ping-pong
+	// buffers; wrap-around at edges to match Sobel's wrap.
+	const int blurPasses = std::max(0, fds::FeatureFlags::nmap_blur());
+	if (blurPasses > 0) {
+		std::vector<float> tmp(lum.size());
+		auto idx = [&](int x, int y) {
+			x = ((x % W) + W) % W;
+			y = ((y % H) + H) % H;
+			return size_t(y) * size_t(W) + size_t(x);
+		};
+		for (int pass = 0; pass < blurPasses; ++pass) {
+			for (int y = 0; y < H; ++y) {
+				for (int x = 0; x < W; ++x) {
+					float s = 0.0f;
+					for (int dy = -1; dy <= 1; ++dy)
+						for (int dx = -1; dx <= 1; ++dx)
+							s += lum[idx(x + dx, y + dy)];
+					tmp[size_t(y) * size_t(W) + size_t(x)] = s * (1.0f / 9.0f);
+				}
+			}
+			lum.swap(tmp);
+		}
+	}
+
 	auto fetchLum = [&](int x, int y) -> float {
-		x = ((x % W) + W) % W;  // wrap
+		x = ((x % W) + W) % W;
 		y = ((y % H) + H) % H;
-		const uint32_t px = src[SwizzledOffset(x, y, blockX, blockY, H)];
-		const float b = float(px & 0xFF);
-		const float g = float((px >> 8) & 0xFF);
-		const float r = float((px >> 16) & 0xFF);
-		return 0.299f * r + 0.587f * g + 0.114f * b;
+		return lum[size_t(y) * size_t(W) + size_t(x)];
 	};
 
-	const float invStrength = strength * (1.0f / 255.0f);
+	// FDS_NMAP_STRENGTH overrides the caller's strength arg so we can
+	// sweep tuning values from the CLI without rebuilding callers.
+	const float effStrength = fds::FeatureFlags::nmap_strength();
+	const float invStrength = effStrength * (1.0f / 255.0f);
+	(void)strength;
 	for (int y = 0; y < H; ++y) {
 		for (int x = 0; x < W; ++x) {
 			// Sobel-X / Sobel-Y of luminance over the 3x3 neighborhood.

@@ -549,11 +549,12 @@ void Scene_Computations(Scene *Sc)
 		//    Compute_Optimized_Indices(T);
 		Compute_Face_Normals(T);
 		Compute_Vertex_Normals(T);
+		Compute_Vertex_Tangents(T);   // Tier B tangent-space normal maps need this
 		Compute_Normal_Products(T);
 		Compute_Bounding_Sphere(T);
 		Compute_Lighting_Flag(T);
 		//    Compute_Edges(T);
-		//    Compute_Spikes(T);		
+		//    Compute_Spikes(T);
 		T->Flags |= Tri_Processed;
 		obj_no++;
 	}
