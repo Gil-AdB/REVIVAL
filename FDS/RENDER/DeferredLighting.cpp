@@ -1291,15 +1291,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const float ldx = wx * lenInv;
 							const float ldy = wy * lenInv;
 							const float ldz = wz * lenInv;
-							float hx = ldx + vx;
-							float hy = ldy + vy;
-							float hz = ldz + vz;
+							const float hx = ldx + vx;
+							const float hy = ldy + vy;
+							const float hz = ldz + vz;
 							const float hLen2 = hx*hx + hy*hy + hz*hz;
-							if (hLen2 > 0.0f) {
-								const float hLenInv = fast_rsqrt(hLen2);
-								hx *= hLenInv; hy *= hLenInv; hz *= hLenInv;
-								const float NdotH = nx*hx + ny*hy + nz*hz;
-								if (NdotH > 0.0f) {
+							// dot(N, H_unit) = dot(N, H_raw) * rsqrt(|H_raw|²).
+							// Saves 3 muls per lit pixel vs renormalizing H
+							// first; positive rsqrt preserves NdotH's sign so
+							// the > 0 cull still works.
+							const float NdotH_raw = nx*hx + ny*hy + nz*hz;
+							if (hLen2 > 0.0f && NdotH_raw > 0.0f) {
+								const float NdotH = NdotH_raw * fast_rsqrt(hLen2);
+								{
 									const float spec = pow_glossClass(NdotH, Mat->Glossiness);
 									// Multiply by shadowAtten so shadowed pixels don't
 									// leak specular highlights — was a visible bug at
