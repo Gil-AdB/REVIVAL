@@ -302,8 +302,12 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
-    // Greets's tick uses textures + skycube state set up by City init.
-    Initialize_City();
+    // Greets is self-contained — loads its own FLD, walks MatLib filtered
+    // by RelScene==GreetSc, no SkySc references. (The earlier "needs
+    // Initialize_City" comment was Fountain-pasted. The real hidden
+    // coupling — global ::Polys not being set, breaking shadow per-light
+    // face buffer sizing in Shadows.cpp — was fixed by removing the
+    // local ::Polys shadow in GREETS.CPP:777.)
     Initialize_Greets();
 
     std::vector<int32_t> timestamps = cfg.timestamps;
@@ -2235,9 +2239,6 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         Initialize_City();
         driver = createCityScene();
     } else if (cfg.scene == "greets") {
-        // Greets depends on textures + skycube state set up by Initialize_City
-        // (same dependency that RunGreetsSnapshot handles at line 306).
-        Initialize_City();
         Initialize_Greets();
         driver = createGreetsScene();
     } else {

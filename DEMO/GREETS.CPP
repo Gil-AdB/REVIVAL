@@ -774,7 +774,13 @@ struct GreetsScene : SceneDriver {
 	~GreetsScene() override { Destroy_Scene(GreetSc); }
 
 	void init() override {
-		int32_t Polys = 0;
+		// Use the global ::Polys (alias for fds::g_mainFaces.polys) — was
+		// previously a local that shadowed the global, leaving ::Polys at
+		// its previous value. Read downstream by Shadows.cpp when sizing
+		// per-light face buffers — when greets runs without a prior scene
+		// having populated the global, ::Polys stays 0 → shadow per-light
+		// resize(0) → null fList → SEGV at Transform.cpp:1041.
+		Polys = 0;
 		TriMesh *T;
 		Omni *O;
 
