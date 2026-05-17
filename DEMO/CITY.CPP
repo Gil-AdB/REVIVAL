@@ -2173,13 +2173,9 @@ struct CityScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
-		// Volumetric spotlight cone overlay: additive glow primitive
-		// drawn AFTER the main pass so it composites on top of lit
-		// pixels, with Z-test against the freshly-written ZPage16.
-		// Gated by FDS_DRAW_CONES (off by default).
-		if (fds::FeatureFlags::draw_cones()) {
-			fds::SpotlightConeOverlay::render(CitySc);
-		}
+		// Note: volumetric spotlight cones run inside renderFrame's
+		// post-lighting passes (Render_VolumetricCones), so no per-scene
+		// hook needed here.
 
 		prof.leave(PROF_RNDR);
 

@@ -73,9 +73,7 @@ FDS_FLAG_BOOL(no_vsync,                 "FDS_NO_VSYNC",                 0,      
 // ─── volumetric / atmospheric ────────────────────────────────────────────
 FDS_FLAG_BOOL(draw_cones,               "FDS_DRAW_CONES",               0,                              "atmos",    "Draw volumetric spotlight cones (additive). Off by default; scene driver opts in.")
 FDS_FLAG_BOOL(city_test_spots,          "FDS_CITY_TEST_SPOTS",          0,                              "atmos",    "Install 6 test spotlights in city for cone-overlay experimentation")
-FDS_FLAG_FLOAT(cone_strength,           "FDS_CONE_STRENGTH",            0.35f,                          "atmos",    "Apex alpha multiplier for cone glow (0 invisible, 1 overpowering)")
-FDS_FLAG_FLOAT(cone_falloff_exp,        "FDS_CONE_FALLOFF_EXP",         2.0f,                           "atmos",    "Alpha falloff curve exponent (1 linear, 2 quadratic, 3 cubic; higher = darker rim, sharper core)")
-FDS_FLAG_INT(cone_dist_falloff,         "FDS_CONE_DIST_FALLOFF",        1,                              "atmos",    "Fade cone glow with view distance so distant streetlights aren't visual noise")
+FDS_FLAG_FLOAT(cone_strength,           "FDS_CONE_STRENGTH",            0.05f,                          "atmos",    "Volumetric cone density (per-step contribution × 1e-3). 0.05 = subtle shafts, 0.5 = pea-soup fog")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")

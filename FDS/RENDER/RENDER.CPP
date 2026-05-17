@@ -32,6 +32,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // Defined in DeferredLighting.cpp.
 void Render_DeferredLighting();
 void Render_DeferredFogPass();
+void Render_VolumetricCones();
 void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2);
 void renderDeferredTransparentTile_Back (int tileIdx, int x1, int y1, int x2, int y2);
 
@@ -343,6 +344,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
 		Render_DeferredLighting();
+
+		// Volumetric spotlight cones (post-lighting, pre-fog). Ray-marches
+		// each visible spotlight per pixel, integrating density along the
+		// segment inside the cone. Gated by FDS_DRAW_CONES; no-op when off.
+		Render_VolumetricCones();
 
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto

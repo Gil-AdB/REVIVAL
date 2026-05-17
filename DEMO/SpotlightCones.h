@@ -1,19 +1,13 @@
 #pragma once
 
-// Scene-agnostic volumetric spotlight cone overlay. Extracted from
-// GREETS.CPP's draw_cones; for each Light_SpotLight + Omni_Active omni
-// in the scene, build a fan cone (apex at light → rim at cos(outer)
-// boundary), 3D-clip each fan triangle against the near plane, project
-// + rasterize with additive blend, per-pixel Z test against ZPage16
-// (so walls correctly occlude the glow). Two-sided.
+// Scene-agnostic helper for authoring runtime spotlights (not present
+// in the FLD). The actual cone rendering is the screen-space
+// ray-march pass in FDS/RENDER/DeferredLighting.cpp (Render_VolumetricCones).
 //
-// Gated by FeatureFlags::draw_cones at the call site.
-//
-// Tuning flags:
-//   FDS_CONE_STRENGTH      apex-alpha multiplier (0..1, default 0.35)
-//   FDS_CONE_FALLOFF_EXP   alpha curve exponent (1=linear, 2=square,
-//                          higher = darker rim; default 2.0)
-//   FDS_CONE_DIST_FALLOFF  fade with view distance (0=off, 1=on; default 1)
+// Earlier this file also defined a triangle-rasterized cone overlay;
+// that has been replaced by the volumetric ray-march which integrates
+// correctly across the cone-ray segment, looks better, and runs in
+// the tile-parallel infrastructure.
 
 #include <Base/Vector.h>
 #include <cstdint>
@@ -22,10 +16,6 @@ struct Scene;
 struct Omni;
 
 namespace fds {
-
-struct SpotlightConeOverlay {
-    static void render(Scene *sc);
-};
 
 // Allocate + link a fully-initialised Light_SpotLight Omni into `sc`'s
 // OmniHead chain. Used by scenes that author runtime spotlights not

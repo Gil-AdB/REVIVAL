@@ -2979,6 +2979,215 @@ static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
 	}
 }
 
+// ─── Volumetric spotlight cones (screen-space ray-march) ────────────────
+//
+// Per-pixel: for each spotlight visible in the tile, find the segment of
+// the view ray that's both inside the cone and in front of the surface,
+// then integrate density × distance falloff × cone falloff along it.
+// Uses the same per-tile spot SoA the lighting kernel already builds —
+// no separate culling required.
+//
+// Math (view-space, ray origin = camera):
+//   Pixel ray direction: V = (X, Y, 1) where X=(px-CntrEX)*invFOVX,
+//                                            Y=(CntrEY-py)*invFOVY.
+//   Cone (apex P, axis D, half-angle cosα²=c²): point Q is inside iff
+//     (D·(Q-P))² ≥ c²|Q-P|² AND D·(Q-P) ≥ 0.
+//   Substituting Q = z_s · V gives a quadratic in z_s with
+//     a = (D·V)² - c²(V·V),  b = 2(c²(V·P) - (D·V)(D·P)),
+//     c_q = (D·P)² - c²|P|².
+//   Real roots → ray crosses cone boundary; clamp interval to
+//     [NearZ, min(z_surf, z_at_range)] and integrate.
+static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
+                                         const TileLights *tileLights,
+                                         int tileIndex,
+                                         float invFOVX, float invFOVY,
+                                         float invZScale, float density) {
+    const TileLights &tl = tileLights[tileIndex];
+    if (tl.count == 0) return;
+    // Pre-filter to spotlight indices once (cheap).
+    int spotIdx[DEFERRED_MAX_LIGHTS];
+    int spotCount = 0;
+    for (int i = 0; i < tl.count; ++i) {
+        if (tl.isSpot[i]) spotIdx[spotCount++] = i;
+    }
+    if (spotCount == 0) return;
+
+    dword *out = reinterpret_cast<dword*>(VPage);
+    const uint16_t *zEnc = ZPage16;
+    constexpr int N_SAMPLES = 6;
+    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+
+    for (int py = y1; py < y2; ++py) {
+        const float Y = (CntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(XRes);
+        for (int px = x1; px < x2; ++px) {
+            const float X = (float(px) - CntrEX) * invFOVX;
+            const float uV = X*X + Y*Y + 1.0f;
+
+            // Surface depth: 0xFF80 - enc = z*zscale. enc=0 means "sky"
+            // (no surface) → use far plane.
+            const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+            const float zMax = (zSurf > 0.0f) ? zSurf : 1e30f;
+            constexpr float zMin = 0.05f;
+            if (zMax <= zMin) continue;
+
+            float accB = 0.0f, accG = 0.0f, accR = 0.0f;
+            for (int s = 0; s < spotCount; ++s) {
+                const int li = spotIdx[s];
+                const float Px = tl.posX[li], Py = tl.posY[li], Pz = tl.posZ[li];
+                const float Dx = tl.dirX[li], Dy = tl.dirY[li], Dz = tl.dirZ[li];
+                const float cosO = tl.cosOuter[li];
+                const float cosI = tl.cosInner[li];
+                const float r2   = tl.range2[li];
+                const float rr   = tl.rRange[li];
+
+                const float DV = Dx*X + Dy*Y + Dz;
+                const float DP = Dx*Px + Dy*Py + Dz*Pz;
+                const float VP = X*Px + Y*Py + Pz;
+                const float PP = Px*Px + Py*Py + Pz*Pz;
+                const float c2 = cosO * cosO;
+
+                const float a = DV*DV - c2 * uV;
+                const float b = 2.0f * (c2 * VP - DV * DP);
+                const float cq = DP*DP - c2 * PP;
+
+                // Solve a*z² + b*z + c = 0. Inside-cone region depends
+                // on sign(a): a<0 → between roots; a>0 → outside roots.
+                // (a≈0: linear; treat as outside-cone, rare edge.)
+                float zLo, zHi;
+                if (a < -1e-8f) {
+                    const float disc = b*b - 4.0f*a*cq;
+                    if (disc < 0.0f) continue;
+                    const float sq = std::sqrt(disc);
+                    const float inv2a = 1.0f / (2.0f * a);
+                    const float r1 = (-b - sq) * inv2a;
+                    const float r2_ = (-b + sq) * inv2a;
+                    zLo = std::min(r1, r2_);
+                    zHi = std::max(r1, r2_);
+                } else if (a > 1e-8f) {
+                    // Inside is outside roots [outside-quadratic case];
+                    // intersect with [zMin, zMax] = up to two intervals,
+                    // simplified to the single interval that intersects
+                    // forward ray most. Rare for typical spots; skip for
+                    // simplicity.
+                    continue;
+                } else {
+                    continue;
+                }
+
+                // Clamp to visible forward segment.
+                if (zHi <= zMin || zLo >= zMax) continue;
+                if (zLo < zMin) zLo = zMin;
+                if (zHi > zMax) zHi = zMax;
+
+                // Forward-cone-half constraint: need D·W ≥ 0 i.e.
+                //   z * DV - DP ≥ 0. Resolves to z ≥ DP/DV (if DV>0)
+                // or z ≤ DP/DV (if DV<0). Skip if entire segment violates.
+                if (std::fabs(DV) > 1e-6f) {
+                    const float zFwd = DP / DV;
+                    if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
+                    else           { if (zHi > zFwd) zHi = zFwd; }
+                    if (zLo >= zHi) continue;
+                }
+
+                // Integrate N samples uniformly along [zLo, zHi].
+                const float dz = (zHi - zLo) * inv_N;
+                const float zStart = zLo + 0.5f * dz;
+                float acc = 0.0f;
+                for (int k = 0; k < N_SAMPLES; ++k) {
+                    const float z = zStart + float(k) * dz;
+                    // Sample point Q = z*V.
+                    const float Wx = z*X - Px;
+                    const float Wy = z*Y - Py;
+                    const float Wz = z    - Pz;
+                    const float W2 = Wx*Wx + Wy*Wy + Wz*Wz;
+                    if (W2 > r2) continue;       // outside light range
+                    if (W2 < 1e-6f) continue;
+                    const float DW = Dx*Wx + Dy*Wy + Dz*Wz;
+                    if (DW <= 0.0f) continue;    // behind cone apex
+                    const float invLen = fast_rsqrt(W2);
+                    const float dist = W2 * invLen;
+                    const float cosT = DW * invLen;
+                    if (cosT < cosO) continue;
+                    // Cone falloff: smoothstep cosOuter→cosInner.
+                    float coneAtten = 1.0f;
+                    if (cosT < cosI) {
+                        const float t = (cosT - cosO) / (cosI - cosO);
+                        coneAtten = t * t * (3.0f - 2.0f * t);
+                    }
+                    // Distance falloff: linear 1→0 across range.
+                    const float distAtten = 1.0f - dist * rr;
+                    acc += coneAtten * distAtten;
+                }
+                if (acc <= 0.0f) continue;
+                // Per-sample weight scaled by integration step (so 6 vs
+                // 12 samples give similar overall intensity), plus the
+                // tunable scene-wide density.
+                const float w = acc * dz * density;
+                accB += w * tl.colB[li];
+                accG += w * tl.colG[li];
+                accR += w * tl.colR[li];
+            }
+            if (accB <= 0.0f && accG <= 0.0f && accR <= 0.0f) continue;
+            const size_t i = row + size_t(px);
+            const dword pix = out[i];
+            int newR = int((pix >> 16) & 0xFF) + int(accR);
+            int newG = int((pix >>  8) & 0xFF) + int(accG);
+            int newB = int( pix        & 0xFF) + int(accB);
+            if (newR > 255) newR = 255;
+            if (newG > 255) newG = 255;
+            if (newB > 255) newB = 255;
+            out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                     |  dword(newB)        | 0xFF000000u;
+        }
+    }
+}
+
+void Render_VolumetricCones() {
+    if (!CurScene || !ZPage16 || !VPage) return;
+    if (!fds::FeatureFlags::draw_cones()) return;
+    const float invFOVX = 1.0f / FOVX;
+    const float invFOVY = 1.0f / FOVY;
+    const float invZScale = 1.0f / float(g_zscale);
+    // Density: per-step contribution coefficient. Tunable via existing
+    // FDS_CONE_STRENGTH. Empirical: 0.0005-0.002 for City-scale (range
+    // in thousands).
+    const float density = fds::FeatureFlags::cone_strength() * 0.001f;
+
+    // Reuse the same per-tile spot SoA the deferred-lighting kernel built
+    // this frame. Live in g_deferredCtx (file-scope static).
+    extern DeferredLightingCtx g_deferredCtx;
+    const TileLights *const tl = g_deferredCtx.tileLights;
+    if (!tl) return;
+
+    constexpr int numTilesX = 6;
+    constexpr int numTilesY = 4;
+    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    renderns::tileCounter = 0;
+    for (int j = 0; j < numTilesY; ++j) {
+        const int y1 = tileSizeY * j;
+        const int y2 = std::min(y1 + tileSizeY, YRes);
+        for (int i = 0; i < numTilesX; ++i) {
+            const int x1 = tileSizeX * i;
+            const int x2 = std::min(x1 + tileSizeX, XRes);
+            const int tileIdx = j * numTilesX + i;
+            ThreadPool::instance().enqueue([x1,y1,x2,y2,tl,tileIdx,
+                                            invFOVX,invFOVY,invZScale,density]() {
+                Render_VolumetricCones_Tile(x1,y1,x2,y2, tl,tileIdx,
+                                             invFOVX,invFOVY,invZScale,density);
+                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+                ++renderns::tileCounter;
+                renderns::condition.notify_one();
+            });
+        }
+    }
+    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+    renderns::condition.wait(lock, []{
+        return renderns::tileCounter == numTilesX * numTilesY;
+    });
+}
+
 void Render_DeferredFogPass() {
 	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
 	if (!g_gbuffer || !ZPage16 || !VPage) return;
