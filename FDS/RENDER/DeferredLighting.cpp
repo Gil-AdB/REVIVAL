@@ -540,6 +540,16 @@ static inline float pow_glossClass(float x, unsigned gloss) {
 // is true and Mat->Glossiness matches one of our specialized gloss
 // constants (the kernel switches on it; default falls back to scalar
 // libm pow). Replaces the scalar spec loop the vec path used before.
+//
+// KNOWN GAP: this vec loop does NOT apply tl.shadowMapIdx[n] / PCF
+// shadow attenuation per-light — the scalar lighting body does, but
+// the SIMD body short-circuits the per-light shadow tap. The deferred
+// vec path is off by default (FDS_DEFERRED_VEC=0, slower than scalar
+// on arm64-via-simde anyway), so this never fires in production —
+// but if vec is ever turned on for non-bumped scenes, shadowed
+// surfaces will leak specular highlights through shadows. Mirror the
+// scalar fix at DeferredLighting.cpp:1312 (multiply specStrength by
+// shadowAtten) when that day comes.
 template<int Gloss>
 static inline void run_vec_spec_loop(const TileLights &tl,
                                       float x, float y, float z,
