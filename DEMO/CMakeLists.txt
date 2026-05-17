@@ -40,6 +40,8 @@ set(DEMO_SOURCES
     Scenes.h
     SceneDriver.cpp
     SceneTick.h
+    SpotlightCones.cpp
+    SpotlightCones.h
     SDL2.cpp
     SDL2.h
     Snapshot.cpp

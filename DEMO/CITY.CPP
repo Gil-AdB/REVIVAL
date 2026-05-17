@@ -8,6 +8,7 @@
 #include "MeshOps.h"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "SpotlightCones.h"
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -1918,6 +1919,46 @@ void Initialize_City()
 #ifdef CITY_RAIN
 	initRain(CitySc);
 #endif
+
+	// Test spotlights for volumetric-cone overlay experimentation.
+	// City coordinate scale is roughly 1-unit-per-cm (existing FLD omnis
+	// are at y=1314 ≈ 13m, range 7000 ≈ 70m). Cones cast no shadows
+	// (Omni_Active only) — we just want the volumetric primitive to
+	// read off them. Gated on FDS_CITY_TEST_SPOTS so production runs
+	// aren't polluted with the placeholder lights.
+	if (fds::FeatureFlags::city_test_spots()) {
+		auto streetlight = [&](float x, float y, float z,
+		                       float dx, float dy, float dz,
+		                       float r, float g, float b,
+		                       float range) {
+			fds::MakeSpotLight(
+				CitySc,
+				r, g, b,
+				/*intensity*/3.0f, range,
+				Vector(x, y, z),
+				Vector(dx, dy, dz),
+				/*hot=*/12.0f, /*outer=*/35.0f,
+				/*shadowMapRes=*/0,
+				/*castsShadow=*/false);
+		};
+		// Lamppost spread, scaled to city's ~1cm/unit. Streetlights at
+		// y=2000 (above road). Angled inward-and-down so cones cross
+		// the road space in front of the camera — straight-down would
+		// be a thin sliver from camera height (~291) and never cross
+		// the view. Mostly sodium-orange, one cool-blue pair at depth.
+		const float Y = 2000.0f;
+		const float R = 4000.0f;  // range
+		// dir vectors: inward (-sign(x)) + downward (-1 y). normalize-ish.
+		// Right-side cones at +X point in -X, +Y stays -1. Length doesn't
+		// matter here — MakeSpotLight calls Vector_Norm at render time.
+		streetlight( 1500.0f, Y,  -1500.0f, -0.6f, -1.0f,  0.0f, 255.0f, 180.0f,  60.0f, R);
+		streetlight(-1500.0f, Y,  -1500.0f,  0.6f, -1.0f,  0.0f, 255.0f, 180.0f,  60.0f, R);
+		streetlight( 1500.0f, Y,    500.0f, -0.6f, -1.0f,  0.0f, 255.0f, 180.0f,  60.0f, R);
+		streetlight(-1500.0f, Y,    500.0f,  0.6f, -1.0f,  0.0f, 255.0f, 180.0f,  60.0f, R);
+		streetlight( 1500.0f, Y,   2500.0f, -0.6f, -1.0f,  0.0f, 120.0f, 180.0f, 255.0f, R);
+		streetlight(-1500.0f, Y,   2500.0f,  0.6f, -1.0f,  0.0f, 120.0f, 180.0f, 255.0f, R);
+		fprintf(stderr, "[CITY] installed 6 test streetlight cones\n");
+	}
 }
 
 #ifdef TRACE_OBJECTS
@@ -2132,6 +2173,13 @@ struct CityScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
+		// Volumetric spotlight cone overlay: additive glow primitive
+		// drawn AFTER the main pass so it composites on top of lit
+		// pixels, with Z-test against the freshly-written ZPage16.
+		// Gated by FDS_DRAW_CONES (off by default).
+		if (fds::FeatureFlags::draw_cones()) {
+			fds::SpotlightConeOverlay::render(CitySc);
+		}
 
 		prof.leave(PROF_RNDR);
 
