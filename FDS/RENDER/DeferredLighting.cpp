@@ -3123,13 +3123,18 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     }
                     // Distance falloff: linear 1→0 across range.
                     const float distAtten = 1.0f - dist * rr;
-                    // Fog attenuation: matches the surface fog pass's
-                    // (1 - z/FZP) factor so cones fade with depth into
-                    // the fog instead of floating past the cutoff.
+                    // Fog attenuation, squared. Round-trip model: spot→fog
+                    // →scatter→fog→camera. Linear (1-z/FZP) wasn't aggressive
+                    // enough — horizon rays travel long paths through cones
+                    // and accumulate brightness even with per-sample fade.
+                    // Squaring drops far-distance contribution sharply
+                    // (0.5→0.25, 0.1→0.01) so cones fade in line with how
+                    // the world reads at distance.
                     float fogAtten = 1.0f;
                     if (invFogZ > 0.0f) {
                         fogAtten = 1.0f - z * invFogZ;
                         if (fogAtten < 0.0f) fogAtten = 0.0f;
+                        fogAtten *= fogAtten;
                     }
                     acc += coneAtten * distAtten * fogAtten;
                 }
@@ -3193,8 +3198,58 @@ void Render_VolumetricCones() {
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
+    constexpr int numTiles  = numTilesX * numTilesY;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+
+    // Per-tile spot filtering. Mirror buildTileLightLists's screen-space
+    // sphere projection but WITHOUT the z-cull (which caused the
+    // tile-stripe artifact fixed in the prior commit). For sparse scenes
+    // most tiles will see 0 spots — the per-pixel inner loop short-
+    // circuits via spotCount==0.
+    static int tileSpotIdx  [numTiles][DEFERRED_MAX_LIGHTS];
+    static int tileSpotCount[numTiles];
+    for (int t = 0; t < numTiles; ++t) tileSpotCount[t] = 0;
+
+    for (int s = 0; s < spotCount; ++s) {
+        const int li = spotIdx[s];
+        const float vx = lights->posX[li];
+        const float vy = lights->posY[li];
+        const float vz = lights->posZ[li];
+        const float r  = std::sqrt(lights->range2[li]);
+        if (vz + r < 0.0f) continue;  // entirely behind camera
+
+        int ti_lo, ti_hi, tj_lo, tj_hi;
+        if (vz - r < 1.0f) {
+            // Sphere straddles near plane: be conservative, tag every tile.
+            ti_lo = 0; ti_hi = numTilesX - 1;
+            tj_lo = 0; tj_hi = numTilesY - 1;
+        } else {
+            const float invZ = 1.0f / vz;
+            const float cx = CntrEX + vx * FOVX * invZ;
+            const float cy = CntrEY - vy * FOVY * invZ;
+            const float rx = r * FOVX * invZ;
+            const float ry = r * FOVY * invZ;
+            const int sx_min = std::max(0,        int(std::floor(cx - rx)));
+            const int sx_max = std::min(XRes - 1, int(std::ceil (cx + rx)));
+            const int sy_min = std::max(0,        int(std::floor(cy - ry)));
+            const int sy_max = std::min(YRes - 1, int(std::ceil (cy + ry)));
+            if (sx_min > sx_max || sy_min > sy_max) continue;
+            ti_lo = sx_min / tileSizeX;
+            ti_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
+            tj_lo = sy_min / tileSizeY;
+            tj_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
+        }
+        for (int j = tj_lo; j <= tj_hi; ++j) {
+            for (int i = ti_lo; i <= ti_hi; ++i) {
+                const int t = j * numTilesX + i;
+                if (tileSpotCount[t] < DEFERRED_MAX_LIGHTS) {
+                    tileSpotIdx[t][tileSpotCount[t]++] = li;
+                }
+            }
+        }
+    }
+
     renderns::tileCounter = 0;
     for (int j = 0; j < numTilesY; ++j) {
         const int y1 = tileSizeY * j;
@@ -3202,10 +3257,13 @@ void Render_VolumetricCones() {
         for (int i = 0; i < numTilesX; ++i) {
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,spotCount,
+            const int tileIdx = j * numTilesX + i;
+            const int *ts = tileSpotIdx[tileIdx];
+            const int  tc = tileSpotCount[tileIdx];
+            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,ts,tc,
                                             invFOVX,invFOVY,invZScale,density,
                                             fogZ,invFogZ]() {
-                Render_VolumetricCones_Tile(x1,y1,x2,y2, lights, spotIdx, spotCount,
+                Render_VolumetricCones_Tile(x1,y1,x2,y2, lights, ts, tc,
                                              invFOVX,invFOVY,invZScale,density,
                                              fogZ,invFogZ);
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
@@ -3216,7 +3274,7 @@ void Render_VolumetricCones() {
     }
     std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
     renderns::condition.wait(lock, []{
-        return renderns::tileCounter == numTilesX * numTilesY;
+        return renderns::tileCounter == numTiles;
     });
 }
 
