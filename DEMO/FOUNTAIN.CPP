@@ -2116,9 +2116,7 @@ struct FountainScene : SceneDriver {
 
 		clearFrame();
 
-		prof.switchTo(PROF_SKY);
-		bool SkipCameraAnimation = false;
-		RenderSkyCube(SkySc, View, SkipCameraAnimation);
+		prof.switchTo(PROF_ANIM);
 
 		dTime = Timer - TTrd;
 		// fast forward/rewind
@@ -2140,11 +2138,17 @@ struct FountainScene : SceneDriver {
 		}
 		g_FrameTime = TTrd = Timer;
 
-		prof.switchTo(PROF_ANIM);
-
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}
 		tickTabToggle(FntSc, "fountain");
+
+		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
+		// so it tracks the current frame's view (previously was rendered
+		// one frame stale because it ran before camera update).
+		prof.switchTo(PROF_SKY);
+		bool SkipCameraAnimation = false;
+		RenderSkyCube(SkySc, View, SkipCameraAnimation);
+		prof.switchTo(PROF_ANIM);
 
 		// 'I' = info: print camera position + forward (rising edge only).
 		{

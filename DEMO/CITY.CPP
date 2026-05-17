@@ -2059,9 +2059,6 @@ struct CityScene : SceneDriver {
 
 		clearFrame();
 
-		prof.switchTo(PROF_SKY);
-		RenderSkyCube(SkySc, View, false);
-
 		prof.switchTo(PROF_ANIM);
 
 		dTime = Timer - TTrd;
@@ -2087,6 +2084,13 @@ struct CityScene : SceneDriver {
 		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
+
+		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
+		// so it tracks the current frame's view (previously was rendered
+		// one frame stale because it ran before camera update).
+		prof.switchTo(PROF_SKY);
+		RenderSkyCube(SkySc, View, false);
+		prof.switchTo(PROF_ANIM);
 
 		Reflective_AnimateTexture();
 
