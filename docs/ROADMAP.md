@@ -382,6 +382,32 @@ greets paths. Bench harness now clean.
 
 ---
 
+## 9d. City first-frame screen-wide jump (intermittent)
+
+**Goal**: figure out why City's first few frames show a visible
+screen-wide flash/jump that never reproduces afterward. F1 rewind
+doesn't trigger it — only the very first cold-start.
+
+**Status**: not investigated yet. User noted after the cv-pull fix
+landed. Might or might not be reflection-related (cv-pull triggers at
+first frame for sure; building cube-map bake also runs at startup).
+
+**Suspects**:
+- Cube-map bake leaving stale state in the framebuffer / depth
+  buffer that the first real render reads.
+- Reflective cube panorama LUT not fully populated when the first
+  reflective face is drawn.
+- Static lighting bake (`StaticLighting`) writing to T->SL while
+  the first frame already started rendering.
+
+**Approach**: snapshot frames 0/1/2/3 with `--snapshot=city@t=0,1,2,3`,
+diff against frame 100; the differing channels point at which buffer
+got the wrong content.
+
+**Effort**: S (investigation), M (fix depending on root cause).
+
+---
+
 ## 10. Tracked bugs / cleanups
 
 Not feature work; flagged so they don't get lost.
