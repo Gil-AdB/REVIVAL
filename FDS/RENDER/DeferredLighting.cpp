@@ -2998,19 +2998,23 @@ static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
 //   Real roots → ray crosses cone boundary; clamp interval to
 //     [NearZ, min(z_surf, z_at_range)] and integrate.
 static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
-                                         const TileLights *tileLights,
-                                         int tileIndex,
+                                         const ViewLightsSoA *lights,
+                                         const int *spotIdx, int spotCount,
                                          float invFOVX, float invFOVY,
-                                         float invZScale, float density) {
-    const TileLights &tl = tileLights[tileIndex];
-    if (tl.count == 0) return;
-    // Pre-filter to spotlight indices once (cheap).
-    int spotIdx[DEFERRED_MAX_LIGHTS];
-    int spotCount = 0;
-    for (int i = 0; i < tl.count; ++i) {
-        if (tl.isSpot[i]) spotIdx[spotCount++] = i;
-    }
+                                         float invZScale, float density,
+                                         float fogZ, float invFogZ) {
     if (spotCount == 0) return;
+    // fogZ > 0 means scene is fogged: clamp ray to FZP and attenuate each
+    // sample by the same (1 - z/FZP) the surface fog pass uses, so the
+    // cone fades with depth instead of floating in the cleared backdrop
+    // past the fog cutoff. fogZ <= 0 means no fog: no clamp/attenuation.
+    // NOTE: iterate the frame-global ViewLightsSoA (not per-tile
+    // TileLights). The per-tile lists apply a depth cull that's correct
+    // for surface lighting but wrong for volumetric integration — a
+    // tile whose surface is past a spot's z-extent is excluded, even
+    // though the camera→surface ray can still cross the spot's cone
+    // volume. Using the unfiltered list keeps cones consistent across
+    // tile boundaries; the per-pixel quadratic test culls per-pixel.
 
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
@@ -3025,21 +3029,23 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
             const float uV = X*X + Y*Y + 1.0f;
 
             // Surface depth: 0xFF80 - enc = z*zscale. enc=0 means "sky"
-            // (no surface) → use far plane.
+            // (no surface) → cap at fogZ if fogged, else far.
             const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
-            const float zMax = (zSurf > 0.0f) ? zSurf : 1e30f;
+            const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+            float zMax = (zSurf > 0.0f) ? zSurf : zSky;
+            if (fogZ > 0.0f && zMax > fogZ) zMax = fogZ;
             constexpr float zMin = 0.05f;
             if (zMax <= zMin) continue;
 
             float accB = 0.0f, accG = 0.0f, accR = 0.0f;
             for (int s = 0; s < spotCount; ++s) {
                 const int li = spotIdx[s];
-                const float Px = tl.posX[li], Py = tl.posY[li], Pz = tl.posZ[li];
-                const float Dx = tl.dirX[li], Dy = tl.dirY[li], Dz = tl.dirZ[li];
-                const float cosO = tl.cosOuter[li];
-                const float cosI = tl.cosInner[li];
-                const float r2   = tl.range2[li];
-                const float rr   = tl.rRange[li];
+                const float Px = lights->posX[li], Py = lights->posY[li], Pz = lights->posZ[li];
+                const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
+                const float cosO = lights->cosOuter[li];
+                const float cosI = lights->cosInner[li];
+                const float r2   = lights->range2[li];
+                const float rr   = lights->rRange[li];
 
                 const float DV = Dx*X + Dy*Y + Dz;
                 const float DP = Dx*Px + Dy*Py + Dz*Pz;
@@ -3117,16 +3123,24 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     }
                     // Distance falloff: linear 1→0 across range.
                     const float distAtten = 1.0f - dist * rr;
-                    acc += coneAtten * distAtten;
+                    // Fog attenuation: matches the surface fog pass's
+                    // (1 - z/FZP) factor so cones fade with depth into
+                    // the fog instead of floating past the cutoff.
+                    float fogAtten = 1.0f;
+                    if (invFogZ > 0.0f) {
+                        fogAtten = 1.0f - z * invFogZ;
+                        if (fogAtten < 0.0f) fogAtten = 0.0f;
+                    }
+                    acc += coneAtten * distAtten * fogAtten;
                 }
                 if (acc <= 0.0f) continue;
                 // Per-sample weight scaled by integration step (so 6 vs
                 // 12 samples give similar overall intensity), plus the
                 // tunable scene-wide density.
                 const float w = acc * dz * density;
-                accB += w * tl.colB[li];
-                accG += w * tl.colG[li];
-                accR += w * tl.colR[li];
+                accB += w * lights->colB[li];
+                accG += w * lights->colG[li];
+                accR += w * lights->colR[li];
             }
             if (accB <= 0.0f && accG <= 0.0f && accR <= 0.0f) continue;
             const size_t i = row + size_t(px);
@@ -3154,11 +3168,28 @@ void Render_VolumetricCones() {
     // in thousands).
     const float density = fds::FeatureFlags::cone_strength() * 0.001f;
 
-    // Reuse the same per-tile spot SoA the deferred-lighting kernel built
-    // this frame. Live in g_deferredCtx (file-scope static).
+    // Fog cutoff + per-sample attenuation. Matches Render_DeferredFogPass:
+    // cones fade by (1 - z/FZP) so they don't extend past where geometry
+    // already fully fogged out. fogZ <= 0 disables (unfogged scenes).
+    const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
+    const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
+
+    // Iterate the frame-global ViewLightsSoA built by Render_DeferredLighting
+    // (g_deferredCtx.lights / .numLights). The per-tile TileLights apply a
+    // surface-z cull that's incorrect for volumetric integration — see the
+    // note inside Render_VolumetricCones_Tile.
     extern DeferredLightingCtx g_deferredCtx;
-    const TileLights *const tl = g_deferredCtx.tileLights;
-    if (!tl) return;
+    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    if (!lights) return;
+    const int numLights = g_deferredCtx.numLights;
+
+    // Pre-filter spotlight indices once per frame; tiles share the result.
+    static int spotIdx[DEFERRED_MAX_LIGHTS];
+    int spotCount = 0;
+    for (int i = 0; i < numLights; ++i) {
+        if (lights->isSpot[i]) spotIdx[spotCount++] = i;
+    }
+    if (spotCount == 0) return;
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
@@ -3171,11 +3202,12 @@ void Render_VolumetricCones() {
         for (int i = 0; i < numTilesX; ++i) {
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            const int tileIdx = j * numTilesX + i;
-            ThreadPool::instance().enqueue([x1,y1,x2,y2,tl,tileIdx,
-                                            invFOVX,invFOVY,invZScale,density]() {
-                Render_VolumetricCones_Tile(x1,y1,x2,y2, tl,tileIdx,
-                                             invFOVX,invFOVY,invZScale,density);
+            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,spotCount,
+                                            invFOVX,invFOVY,invZScale,density,
+                                            fogZ,invFogZ]() {
+                Render_VolumetricCones_Tile(x1,y1,x2,y2, lights, spotIdx, spotCount,
+                                             invFOVX,invFOVY,invZScale,density,
+                                             fogZ,invFogZ);
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
                 ++renderns::tileCounter;
                 renderns::condition.notify_one();

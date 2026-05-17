@@ -4,7 +4,7 @@
 what's open, what's broken, and which commands reproduce each state
 so we can resume cleanly after context compaction.
 
-Last updated: 2026-05-17
+Last updated: 2026-05-17 (post-tile-stripe-fix)
 
 ---
 
@@ -12,7 +12,7 @@ Last updated: 2026-05-17
 
 - Branch: `refactor/frame-state-shadow`
 - Pushed to: `origin/refactor/frame-state-shadow`
-- HEAD: `be13e17` (deferred: replace triangle cone overlay with screen-space ray-march)
+- HEAD: volumetric cones tile-stripe + fog-clamp fix (this commit)
 - **Not merging to master** — all dev work continues on side branches per user
   direction (2026-05-17).
 - ctest: both smoke tests pass (`smoke_city_forward`, `smoke_greets_deferred_shadows`)
@@ -30,6 +30,17 @@ Last updated: 2026-05-17
    Runs after `Render_DeferredLighting`, reuses per-tile spot SoA,
    integrates N=6 samples along ray-cone intersection segment.
    Triangle code deleted; `MakeSpotLight` helper kept.
+3. **(this commit)** — two fixes after visual review:
+   - **Tile-stripe bug**: was using per-tile `TileLights` whose
+     z-cull is correct for surfaces but wrong for ray integration
+     (a tile whose surface sits past a spot's z-extent gets the
+     spot culled, even if the camera→surface ray crosses the cone
+     volume). Now iterates the frame-global `ViewLightsSoA` directly
+     — no z-cull, per-pixel quadratic test does the culling.
+   - **Fog cutoff**: cones used to extend past FZP and float in the
+     cleared backdrop where geometry already fogged out. Now clamps
+     ray `zMax` to `min(zSurf, FZP)` and scales each integration
+     sample by `(1 - z/FZP)`, matching the surface fog pass.
 
 ### Earlier this session
 
@@ -71,60 +82,28 @@ Greets@t=2500 bench: started ~30.9 ms/iter, currently ~26.3 ms/iter.
 
 ## What's broken / in progress
 
-### 🐛 Volumetric cone tile-stripe artifact (user-reported, NEXT TO DEBUG)
+### ⏱ Volumetric cone perf (user-reported, NEXT)
 
-User reported (2026-05-17): "some tiles have it and some don't". The
-volumetric cone pass shows visible per-tile stripes — cones appear in
-some tiles, missing from adjacent tiles, producing a 6x4 tile-boundary
-checker.
+User after visual review: "4 fps... really needs some kind of
+optimization — probably some kind of light map / something else.
+But really really promising." Defer for now; will tackle after
+broader pipeline work.
 
-**Likely root cause**: each tile's per-tile spot SoA is built from the
-*spot's screen-space bounding sphere* overlapping the tile (existing
-deferred-lighting culling). But the cone *volume* (the 3D cone of the
-spotlight) can extend through tiles whose sphere-check excluded the
-apex. So: cone visible in tiles where the apex's bounding sphere
-overlapped → missing from tiles where it didn't, even when the cone's
-3D volume crosses both.
+Current pass is N pixels × N spots × N=6 samples of scalar quadratic
+math. Cheap per-sample, but high pixel count + every spot iterated
+every pixel (no per-tile screen-rect cull since the z-cull-correct
+fix had to switch off per-tile filtering entirely — see commit).
 
-**Fix candidates**:
-1. Per-tile cone culling that uses the cone's screen-space bounding
-   rect (extends across all tiles the cone volume could cover), not
-   the apex's bounding circle.
-2. Cheapest hack: iterate ALL spots per tile for the volumetric pass,
-   skip the per-tile cull entirely. Fine if N < 10.
-3. Add cone screen-rect to TileLights as a second pass over the
-   light list during build, gated on isSpot.
-
-**Where**: `FDS/RENDER/DeferredLighting.cpp` — `Render_VolumetricCones`
-reads from `g_deferredCtx.tileLights[tileIndex]`. The per-tile build
-is in `buildTileLightLists` (~line 250); spots are flagged with
-`isSpot`. Need to widen what gets into each tile's spotlight subset.
-
-**Reproduce**:
-```sh
-cd Runtime
-./DEMO --deferred --draw_cones --city_test_spots
-# fly the city with --no_vsync if not pressed for time
-# or snapshot: --snapshot=city@t=1500 --out=/tmp
-```
-Open the output and look for tile-aligned discontinuities.
-
-### Performance impact (user-reported)
-
-Same session: "Really affects performance in City". The ray-march pass
-is N pixels × N spots × N=6 samples × scalar math per sample. Cheap
-per-sample but high pixel count + iterating all in-tile spots per
-pixel. Profile pending. Likely candidates for optimization:
-1. Early-out by tile-cone bbox (only iterate spots whose 2D bbox
-   overlaps the actual pixel).
-2. Vectorize the inner per-sample loop (similar to the deferred
-   lighting kernel's per-pixel-vec path).
-3. Lower N_SAMPLES for distant spots.
-4. Quarter-rate render: only ray-march every 2x2 pixel, dilate.
-
-Worth profiling FIRST with `sample` (see `memory/reference_asan_build`
-and earlier session profile output) to find the actual hot spot
-before guessing.
+**Profile FIRST** (per `feedback_bench_when_idle` — ask user first).
+Candidates after profile:
+1. Per-tile screen-rect cull *without* z-cull (compute spot's 2D
+   bounding rect once per frame, intersect with tile rect — avoids
+   iterating spots whose volume can't intersect the tile).
+2. Lower N_SAMPLES for far spots (distance-adaptive sample count).
+3. Quarter-rate render with dilation (one sample per 2×2 block).
+4. Vectorize the per-sample inner loop (8-wide ray-march).
+5. Bigger-picture: precomputed light map / volume texture (user's
+   hint — would offload the per-pixel ray-march to a lookup).
 
 ### Per-spotlight density / shape tuning
 
