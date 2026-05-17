@@ -345,11 +345,6 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		// colorize step in one go.
 		Render_DeferredLighting();
 
-		// Volumetric spotlight cones (post-lighting, pre-fog). Ray-marches
-		// each visible spotlight per pixel, integrating density along the
-		// segment inside the cone. Gated by FDS_DRAW_CONES; no-op when off.
-		Render_VolumetricCones();
-
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto
 		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
@@ -526,7 +521,16 @@ xpar_done: ;
 	{
 		TBR_Render(CurScene);
 	}
-	
+
+	// Volumetric spotlight cones — final additive pass after all opaque,
+	// transparent, sprite, and TBR work. Z-tests against ZPage16 (opaque
+	// depth) per ray sample, never writes depth. Done last so cone glow
+	// composites on top of transparent surfaces and particles, matching
+	// the additive-flare ordering (z-test, no z-write, drawn last).
+	// Gated by FDS_DRAW_CONES; no-op when off.
+	Render_VolumetricCones();
+
+
 
 #ifdef TRACE_OBJECTS
 	//printf("frame: %f\n\t", CurFrame);
