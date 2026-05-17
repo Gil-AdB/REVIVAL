@@ -3121,15 +3121,20 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         const float t = (cosT - cosO) / (cosI - cosO);
                         coneAtten = t * t * (3.0f - 2.0f * t);
                     }
-                    // Distance falloff: linear 1→0 across range.
-                    const float distAtten = 1.0f - dist * rr;
+                    // Distance falloff: smooth range cutoff × inverse-square.
+                    // Smooth (1-dist/R)² → 0 at range; `1/((dist/R)² + ε)`
+                    // models physical 1/d² scatter so samples close to the
+                    // spot apex dominate. Without inverse-square, far-cone
+                    // rays accumulated too much (long ray segments inside
+                    // the cone integrate uniformly) and close cones were
+                    // dim (short segments + uniform weight). ε=0.05 caps
+                    // peak intensity at ~20× near the apex.
+                    const float dr = dist * rr;
+                    const float cutoff = 1.0f - dr;
+                    const float invSq  = 1.0f / (dr * dr + 0.05f);
+                    const float distAtten = cutoff * cutoff * invSq;
                     // Fog attenuation, squared. Round-trip model: spot→fog
-                    // →scatter→fog→camera. Linear (1-z/FZP) wasn't aggressive
-                    // enough — horizon rays travel long paths through cones
-                    // and accumulate brightness even with per-sample fade.
-                    // Squaring drops far-distance contribution sharply
-                    // (0.5→0.25, 0.1→0.01) so cones fade in line with how
-                    // the world reads at distance.
+                    // →scatter→fog→camera.
                     float fogAtten = 1.0f;
                     if (invFogZ > 0.0f) {
                         fogAtten = 1.0f - z * invFogZ;
@@ -3139,10 +3144,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     acc += coneAtten * distAtten * fogAtten;
                 }
                 if (acc <= 0.0f) continue;
-                // Per-sample weight scaled by integration step (so 6 vs
-                // 12 samples give similar overall intensity), plus the
-                // tunable scene-wide density.
-                const float w = acc * dz * density;
+                // No dz scaling — the path-integral form (acc × dz) gave
+                // shallow-angle rays through far cones much brighter results
+                // than close cones (where each pixel's ray-cone segment is
+                // short). Using per-sample-sum (acc only) combined with the
+                // inverse-square distAtten above gives roughly position-
+                // invariant brightness, biased toward close cones — matches
+                // the "flashlight in fog" mental model.
+                const float w = acc * density;
                 accB += w * lights->colB[li];
                 accG += w * lights->colG[li];
                 accR += w * lights->colR[li];
