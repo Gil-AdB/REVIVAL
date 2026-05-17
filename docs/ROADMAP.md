@@ -371,21 +371,14 @@ agent report for the dependency table.
 
 **Effort**: M.
 
-**Status (2026-05-17 PM)**: Removing `Initialize_City()` from
-`RunGreetsSnapshot`+`RunSceneBench` reproduces a SEGFAULT under
-`FDS_DEFERRED=1 FDS_SHADOWS=1` (works fine with shadows OFF). lldb
-catches all 5 shadow worker threads crashing at
-`Transform.cpp:1041` (`*Ins++ = { F->SortZ.DW, F }`, F is null). So
-the coupling is real and lives somewhere in the parallel-shadow
-Transform_Objects path even though static analysis says greets
-doesn't read SkySc / RenderSkyCube / etc. directly. Suspects:
-- Some global mesh/face linked-list state (`MatLib` Default_Mat
-  chain, `MatTable` indexing) that Initialize_City builds.
-- A per-process scene side-effect in Preprocess_Scene / Scene_Computations
-  that the shadow path expects.
+**Status (2026-05-17 PM, RESOLVED)**: Fixed in commit cd6a7ca.
+GreetsScene::init had a local `int32_t Polys = 0` shadowing the
+global ::Polys (alias for fds::g_mainFaces.polys). Shadow per-light
+buffer sizing read the (stale) global → resize(0) → null fList →
+SEGV. ASan caught the trace in seconds; bug found in 2 minutes.
 
-Not worth chasing right now (low ROI; bench harness clutters but
-works). Documented + tagged for future work.
+Snapshot.cpp + RunSceneBench no longer call Initialize_City() before
+greets paths. Bench harness now clean.
 
 ---
 
