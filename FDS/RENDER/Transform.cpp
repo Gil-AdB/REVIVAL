@@ -910,7 +910,21 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 					auto pullDir = bsWorldPos - cam.view->ISource;
 					float step = pullDir * F->N;
-					cv += (hackDistFromPlane - viewDistFromPlane) / step * pullDir;
+					// Skip the cv pull when pullDir is nearly parallel to
+					// the face plane (step → 0). Dividing by a tiny step
+					// otherwise blows cv out to infinity → wildly wrong
+					// reflections that swing with small camera motions
+					// (see [[project_cv_pull_instability]]).
+					// Threshold: 0.1 × |pullDir| corresponds to ~5.7° tilt
+					// between pullDir and the plane. Below that the pull
+					// is geometrically ill-conditioned anyway — leaving
+					// cv = camera ISource gives a slightly-wider FOV than
+					// authored, which is a much less jarring artifact than
+					// the swing.
+					const float pullLen2 = pullDir * pullDir;
+					if (step * step > 0.01f * pullLen2) {
+						cv += (hackDistFromPlane - viewDistFromPlane) / step * pullDir;
+					}
 				}
 				auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
 				Vector_Norm(&n);
