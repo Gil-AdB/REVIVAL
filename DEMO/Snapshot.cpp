@@ -1923,9 +1923,10 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
 
     // Each pose names a geometric relationship to the cone (spot at
     // (0,400,0), dir (0,-1,0), range 800, outer half-angle 35°).
-    // The lookTarget is what the camera aims at (typically the cone's
-    // mid-shaft or apex). Together, eye/target define the ray geometry
-    // and let me check each branch of the integration math.
+    // The lookTarget is what the camera aims at; buildLookAt uses
+    // world UP=(0,1,0), so any pose whose forward vector is parallel
+    // to UP (looking straight down) is degenerate — every pose here
+    // has a non-trivial horizontal component.
     struct ConePose {
         const char* name;
         Vector      eye;
@@ -1933,49 +1934,53 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
         const char* desc;
     };
     const ConePose poses[] = {
-        // Side-on, ray perpendicular to cone direction. Most common
-        // a < 0 case; should show a clean triangular cone.
+        // Side-on at spot height. Most common a < 0 chord case; should
+        // show a clean triangular cone landing on the ground.
         {"side_h",        Vector( 1200, 400,    0), Vector( 0, 400,  0),
             "side view at spot height (a<0 chord)"},
-        {"side_low",      Vector( 1200,  50,    0), Vector( 0, 100,  0),
-            "side view at ground level, ray angled up"},
 
-        // Above the apex looking down — ray along cone direction (a>0).
-        // Camera is OUTSIDE the cone, but ray going DOWN passes through
-        // apex, then into the cone interior. This is the "looking down
-        // the spot from above" case the user flagged.
-        {"above_apex",    Vector(  0,  900,    0), Vector( 0, 100,  0),
-            "above apex looking down through cone (a>0)"},
+        // Side-on at ground level, tilted up. The camera ray angle
+        // varies across the screen so a switches sign mid-frame.
+        {"side_low",      Vector( 1200,  50,    0), Vector( 0, 200,  0),
+            "side view at ground level, ray angled up across cone"},
 
-        // Camera inside the cone looking down (a > 0) — should see the
-        // full cone shaft on the ground. Previously this was the dark
-        // elliptical hole.
-        {"inside_down",   Vector(  0,  250,    0), Vector( 0,   0,  0),
-            "inside cone looking along cone direction (a>0)"},
+        // Above the apex, looking down at it from a slight offset (so
+        // the lookAt UP isn't parallel to forward). Camera ray points
+        // mostly along the cone direction → a > 0 case. The whole
+        // cone interior should be visible.
+        {"above_apex",    Vector( 200,  900,  200), Vector( 0, 200,  0),
+            "above + offset, looking down through cone (a>0)"},
 
-        // Camera inside cone, off-axis, looking forward (mixed). The
-        // edge between the dark ellipse and bright surroundings was
-        // most visible here.
-        {"inside_offset", Vector(150, 250,  150), Vector(-1, -0.5f, -1),
-            "inside cone, off-axis forward look"},
+        // Camera inside the cone, looking down its axis with a small
+        // forward tilt. a > 0; tests the previously-skipped branch.
+        {"inside_down",   Vector(  0,  250,   50), Vector( 0,   0,  0),
+            "inside cone looking along axis with forward tilt (a>0)"},
 
-        // Camera BEHIND the apex, looking through the spot toward the
-        // ground. Ray goes against cone direction first (DW<0), then
-        // (if extended) past the apex into cone region. Should be dark
-        // — cone shouldn't be visible from behind the apex.
+        // Camera inside cone (at y=250 inside the 35° cone of a spot
+        // at y=400), looking sideways toward the cone wall. a should
+        // switch sign across the screen as rays leave the cone half-
+        // angle. Was the dark-ellipse case the user originally flagged.
+        {"inside_side",   Vector(  0,  250,    0), Vector( 400, 250, 0),
+            "inside cone, looking sideways (a sign sweep)"},
+
+        // Camera BEHIND the apex (above + behind), looking AT the
+        // spot. Ray reaches the apex with DW≈0; samples past apex
+        // are filtered out by the forward-half check. Cone should
+        // appear small around the projected apex, fading away.
         {"behind_apex",   Vector(  0,  600,  600), Vector( 0, 400,  0),
-            "behind apex (above + behind), looking down at spot"},
+            "behind + above apex, looking at spot"},
 
-        // Camera below ground (impossible IRL but exercises math).
-        // Ray going up encounters apex from below. DV² >> c²·uV → a>0
-        // but DW<0 forward, samples skipped.
-        {"below_apex",    Vector(  0, -200,    0), Vector( 0, 400,  0),
-            "below ground looking up at spot (DW<0 case)"},
+        // Camera below the ground plane (impossible in normal scenes
+        // but exercises the case where the apex is past the surface).
+        // Ground occludes the cone for most pixels.
+        {"below_apex",    Vector(  0, -200,  100), Vector( 0, 400,  0),
+            "below ground looking up at spot (surface occludes cone)"},
 
-        // Camera looking THROUGH cone wall from outside. Ray grazes
-        // cone surface: a transitions sign across the screen.
-        {"grazing",       Vector( 800,  400,    0), Vector(-1, -0.3f, 0),
-            "outside cone, grazing the wall"},
+        // Camera off to the side, ray grazes the cone wall — a sign
+        // changes across the screen, exercises the cone-wall boundary
+        // smoothness.
+        {"grazing",       Vector( 800,  400,    0), Vector( 0, 200, 200),
+            "outside cone, ray grazes cone wall (a sign change)"},
     };
 
     int produced = 0;
