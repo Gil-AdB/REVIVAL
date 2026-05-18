@@ -3,6 +3,7 @@
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/TheOtherBarry.h>
+#include <FILLERS/ShadowMap.h>
 #include "CITY.H"
 #include "FrameProfiler.h"
 #include "MeshOps.h"
@@ -1938,8 +1939,8 @@ void Initialize_City()
 				Vector(x, y, z),
 				Vector(dx, dy, dz),
 				/*hot=*/12.0f, /*outer=*/35.0f,
-				/*shadowMapRes=*/0,
-				/*castsShadow=*/false);
+				/*shadowMapRes=*/512,
+				/*castsShadow=*/true);
 		};
 		// Lamppost spread, scaled to city's ~1cm/unit. Streetlights at
 		// y=2000 (above road). Angled inward-and-down so cones cross
@@ -1958,6 +1959,15 @@ void Initialize_City()
 		streetlight( 1500.0f, Y,   2500.0f, -0.6f, -1.0f,  0.0f, 120.0f, 180.0f, 255.0f, R);
 		streetlight(-1500.0f, Y,   2500.0f,  0.6f, -1.0f,  0.0f, 120.0f, 180.0f, 255.0f, R);
 		fprintf(stderr, "[CITY] installed 6 test streetlight cones\n");
+
+		// Allocate shadow maps for the spots we just installed (they
+		// claim castsShadow=true with shadowMapRes=512). The per-frame
+		// shadow-render pass in Render_DeferredShadowMaps will populate
+		// them. Required so the cone pass can sample shadow per
+		// integration sample → cones get occluded by buildings.
+		if (fds::FeatureFlags::shadows()) {
+			ShadowMaps_Rebuild(CitySc, 512);
+		}
 	}
 }
 
@@ -2138,6 +2148,11 @@ struct CityScene : SceneDriver {
 
 			prof.switchTo(PROF_RNDR);
 
+			// Per-frame shadow-map depth pre-pass for Omni_CastsShadow
+			// lights (currently the test streetlights when
+			// FDS_CITY_TEST_SPOTS=1). No-op when no spot has the flag.
+			// Must run before Render() since it swaps view globals.
+			Render_DeferredShadowMaps(CitySc);
 			Render();
 			{
 				memcpy(backBuffer.data(), VPage, PageSize);

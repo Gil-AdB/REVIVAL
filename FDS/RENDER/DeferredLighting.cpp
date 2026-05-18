@@ -3245,7 +3245,55 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         if (fogAtten < 0.0f) fogAtten = 0.0f;
                         fogAtten *= fogAtten;
                     }
-                    acc += coneAtten * distAtten * fogAtten * surfaceFade;
+                    // Shadow sample: project the sample point into the
+                    // spot's shadow camera, compare depth. Fog scatter
+                    // behind an occluder doesn't reach the eye → cone
+                    // light is blocked by geometry between spot and
+                    // sample point. The matrix mul + depth fetch
+                    // doubles the per-sample cost but turns flat cones
+                    // into proper "god rays through gaps".
+                    float shadowAtten = 1.0f;
+                    const int32_t smIdx = lights->shadowMapIdx[li];
+                    if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
+                        const ShadowMap& sm = g_shadowMaps[smIdx];
+                        // Sample world-space position in view space is
+                        // (z*X, z*Y, z). Transform to light camera.
+                        const float lx = sm.viewToLight[0][0] * (z*X) +
+                                         sm.viewToLight[0][1] * (z*Y) +
+                                         sm.viewToLight[0][2] * z +
+                                         sm.viewToLightOffset.x;
+                        const float ly = sm.viewToLight[1][0] * (z*X) +
+                                         sm.viewToLight[1][1] * (z*Y) +
+                                         sm.viewToLight[1][2] * z +
+                                         sm.viewToLightOffset.y;
+                        const float lz = sm.viewToLight[2][0] * (z*X) +
+                                         sm.viewToLight[2][1] * (z*Y) +
+                                         sm.viewToLight[2][2] * z +
+                                         sm.viewToLightOffset.z;
+                        if (lz > 0.0f) {
+                            const float invLZ = 1.0f / lz;
+                            const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+                            const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+                            const int iX = int(smX);
+                            const int iY = int(smY);
+                            if (iX >= 0 && iX < sm.xres &&
+                                iY >= 0 && iY < sm.yres) {
+                                int pixZ = 0xFF80 - int(lz * sm.zScale);
+                                if (pixZ < 0) pixZ = 0;
+                                if (pixZ > 0xFFFF) pixZ = 0xFFFF;
+                                // No slope bias here — volumetric
+                                // samples are in air, not on a surface,
+                                // so no acne. Small const bias for
+                                // numerical safety.
+                                const int biased = pixZ + 128;
+                                const uint16_t shadowZ =
+                                    sm.depth[size_t(iY) * size_t(sm.xres) + size_t(iX)];
+                                if (biased < int(shadowZ)) shadowAtten = 0.0f;
+                            }
+                        }
+                    }
+                    if (shadowAtten <= 0.0f) continue;
+                    acc += coneAtten * distAtten * fogAtten * surfaceFade * shadowAtten;
                 }
                 if (acc <= 0.0f) continue;
                 // No dz scaling — the path-integral form (acc × dz) gave
