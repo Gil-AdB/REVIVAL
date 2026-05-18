@@ -3057,9 +3057,21 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 const float b = 2.0f * (c2 * VP - DV * DP);
                 const float cq = DP*DP - c2 * PP;
 
-                // Solve a*z² + b*z + c = 0. Inside-cone region depends
-                // on sign(a): a<0 → between roots; a>0 → outside roots.
-                // (a≈0: linear; treat as outside-cone, rare edge.)
+                // Solve a*z² + b*z + cq = 0. Inside-cone region depends
+                // on sign(a):
+                //   a<0 → ray crosses cone direction (most common, e.g.
+                //         viewing the cone from the side). Inside-cone
+                //         is between the two roots [r1, r2].
+                //   a>0 → ray within the cone half-angle (camera inside
+                //         the cone, or looking along the cone direction).
+                //         Inside-cone is OUTSIDE [r1, r2]; the forward-
+                //         visible segment is [zMin, r1] (before the ray
+                //         crosses the cone wall on its way past the apex).
+                //         Per-sample DW > 0 filter handles the behind-apex
+                //         section in the disc<0 case (entire ray inside
+                //         cone) and within the forward [zMin, r1] window.
+                //   a≈0 → ray exactly on the cone wall, no volume to
+                //         integrate.
                 float zLo, zHi;
                 if (a < -1e-8f) {
                     const float disc = b*b - 4.0f*a*cq;
@@ -3071,12 +3083,25 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     zLo = std::min(r1, r2_);
                     zHi = std::max(r1, r2_);
                 } else if (a > 1e-8f) {
-                    // Inside is outside roots [outside-quadratic case];
-                    // intersect with [zMin, zMax] = up to two intervals,
-                    // simplified to the single interval that intersects
-                    // forward ray most. Rare for typical spots; skip for
-                    // simplicity.
-                    continue;
+                    const float disc = b*b - 4.0f*a*cq;
+                    if (disc < 0.0f) {
+                        // Quadratic always positive → ray entirely inside
+                        // cone (forward-half filtered per-sample).
+                        zLo = zMin;
+                        zHi = zMax;
+                    } else {
+                        const float sq = std::sqrt(disc);
+                        const float inv2a = 1.0f / (2.0f * a);
+                        const float root1 = (-b - sq) * inv2a;
+                        const float root2 = (-b + sq) * inv2a;
+                        const float zRootLo = std::min(root1, root2);
+                        // Camera-before-apex case (the common one).
+                        // [zMin, zRootLo] is the in-cone segment before
+                        // the ray exits cone-side to head past the apex.
+                        if (zRootLo <= zMin) continue;
+                        zLo = zMin;
+                        zHi = std::min(zRootLo, zMax);
+                    }
                 } else {
                     continue;
                 }
