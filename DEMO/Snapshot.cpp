@@ -1921,12 +1921,25 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
     View = sc->CameraHead;
     Scene_RebuildMatTable(sc);
 
-    // Each pose names a geometric relationship to the cone (spot at
-    // (0,400,0), dir (0,-1,0), range 800, outer half-angle 35°).
-    // The lookTarget is what the camera aims at; buildLookAt uses
-    // world UP=(0,1,0), so any pose whose forward vector is parallel
-    // to UP (looking straight down) is degenerate — every pose here
-    // has a non-trivial horizontal component.
+    // Six canonical viewpoints A–F. Spot apex at world (0,400,0)
+    // shining DOWN (cone direction = -Y world). All cameras look in
+    // the cone direction (-Y); a small forward offset on the target
+    // avoids buildLookAt's degenerate up×forward case (world UP=+Y).
+    //
+    // Predictions (assuming 35° half-angle, range=800):
+    //   A in-front   inside cone, apex behind → uniform bright (was
+    //                the circle-hole bug)
+    //   B behind     ground at y=0 is 600 below apex (within 800 range),
+    //                expect to see the cone column going down past us
+    //   C side       above ground, off to side → cone visible past
+    //                lateral_offset × cot(35°) along ray
+    //   D above      camera above apex height → see cone passing below
+    //   E inside     identical kinematics to A; included as the
+    //                explicit "inside, looking down" test
+    //   F inside_up  camera in beam, looking BACK at apex → see cone
+    //                converging upward at the apex on screen
+    // plus G/H/I a "behind, varying distance" sweep so we can watch
+    // the cone-cuts-off-as-you-back-up behavior the user described.
     struct ConePose {
         const char* name;
         Vector      eye;
@@ -1934,53 +1947,56 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
         const char* desc;
     };
     const ConePose poses[] = {
-        // Side-on at spot height. Most common a < 0 chord case; should
-        // show a clean triangular cone landing on the ground.
-        {"side_h",        Vector( 1200, 400,    0), Vector( 0, 400,  0),
-            "side view at spot height (a<0 chord)"},
+        // (A) In front of cone (inside beam, ahead of apex along D=-Y).
+        // Camera at y=200 inside cone (apex at y=400, beam goes down).
+        // Looking down with small forward tilt for non-degenerate lookAt.
+        {"A_in_front",     Vector(  0, 200,  10), Vector( 0, 100, 11),
+            "in front (inside beam), looking down beam direction"},
 
-        // Side-on at ground level, tilted up. The camera ray angle
-        // varies across the screen so a switches sign mid-frame.
-        {"side_low",      Vector( 1200,  50,    0), Vector( 0, 200,  0),
-            "side view at ground level, ray angled up across cone"},
+        // (B) Behind cone (behind apex, opposite to D). Camera at y=700
+        // ABOVE apex. Looking down. Apex is in front of us, cone
+        // extends past apex toward ground at y=0.
+        {"B_behind",       Vector(  0, 700,  10), Vector( 0,   0, 11),
+            "behind apex, looking forward into beam direction"},
 
-        // Above the apex, looking down at it from a slight offset (so
-        // the lookAt UP isn't parallel to forward). Camera ray points
-        // mostly along the cone direction → a > 0 case. The whole
-        // cone interior should be visible.
-        {"above_apex",    Vector( 200,  900,  200), Vector( 0, 200,  0),
-            "above + offset, looking down through cone (a>0)"},
+        // (C) Side of cone, looking with beam. Camera at x=600 offset
+        // (beyond beam radius), at apex height. Looking straight down.
+        // Per math: cone visible past d·cot(35°) ≈ 856 below.
+        {"C_side",         Vector(600, 400,  10), Vector(600,   0, 11),
+            "side (perpendicular offset), looking down beam direction"},
 
-        // Camera inside the cone, looking down its axis with a small
-        // forward tilt. a > 0; tests the previously-skipped branch.
-        {"inside_down",   Vector(  0,  250,   50), Vector( 0,   0,  0),
-            "inside cone looking along axis with forward tilt (a>0)"},
+        // (D) Above cone, looking with beam. Camera at y=900 well above
+        // apex, perpendicular offset 200. Looking down. Same family
+        // as (C) but offset is in y instead of x.
+        {"D_above",        Vector(200, 900,  10), Vector(200,   0, 11),
+            "above + offset, looking down (sweep through cone)"},
 
-        // Camera inside cone (at y=250 inside the 35° cone of a spot
-        // at y=400), looking sideways toward the cone wall. a should
-        // switch sign across the screen as rays leave the cone half-
-        // angle. Was the dark-ellipse case the user originally flagged.
-        {"inside_side",   Vector(  0,  250,    0), Vector( 400, 250, 0),
-            "inside cone, looking sideways (a sign sweep)"},
+        // (E) Inside cone, looking with beam. Same as (A) explicitly
+        // for the test-name "inside_down" the user has been referencing.
+        // (kept distinct to make it obvious the math equates them)
+        {"E_inside",       Vector(  0, 300,  10), Vector( 0, 100, 11),
+            "inside cone (deeper than A), looking down beam direction"},
 
-        // Camera BEHIND the apex (above + behind), looking AT the
-        // spot. Ray reaches the apex with DW≈0; samples past apex
-        // are filtered out by the forward-half check. Cone should
-        // appear small around the projected apex, fading away.
-        {"behind_apex",   Vector(  0,  600,  600), Vector( 0, 400,  0),
-            "behind + above apex, looking at spot"},
+        // (F) Inside cone, looking AGAINST beam direction. Camera at
+        // y=200, looking UP at the apex. Apex above. Cone is between
+        // camera and apex; should be visible converging at the apex
+        // projected on screen.
+        {"F_inside_up",    Vector(  0, 200,  10), Vector( 0, 700,  9),
+            "inside cone, looking BACK at apex (against beam)"},
 
-        // Camera below the ground plane (impossible in normal scenes
-        // but exercises the case where the apex is past the surface).
-        // Ground occludes the cone for most pixels.
-        {"below_apex",    Vector(  0, -200,  100), Vector( 0, 400,  0),
-            "below ground looking up at spot (surface occludes cone)"},
-
-        // Camera off to the side, ray grazes the cone wall — a sign
-        // changes across the screen, exercises the cone-wall boundary
-        // smoothness.
-        {"grazing",       Vector( 800,  400,    0), Vector( 0, 200, 200),
-            "outside cone, ray grazes cone wall (a sign change)"},
+        // Sweep "behind apex" at increasing distance to reproduce the
+        // user-reported "cone cuts off as we back up" behavior.
+        // Apex at y=400; with range=800, cone reaches down to y=-400.
+        // Ground at y=0 caps the visible cone, so as the camera moves
+        // higher above the apex the camera→ground rays for the lower
+        // half of the cone start exceeding the range sphere → cone
+        // shrinks from the bottom up.
+        {"G_behind_near",  Vector(  0, 500,  10), Vector( 0,   0, 11),
+            "behind apex, close (y=500): full cone visible"},
+        {"H_behind_mid",   Vector(  0, 900,  10), Vector( 0,   0, 11),
+            "behind apex, mid  (y=900): top of cone visible, bottom cut"},
+        {"I_behind_far",   Vector(  0,1400,  10), Vector( 0,   0, 11),
+            "behind apex, far  (y=1400): cone shrinking, mostly gone"},
     };
 
     int produced = 0;

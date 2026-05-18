@@ -3074,26 +3074,25 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 const float b = 2.0f * (c2 * VP - DV * DP);
                 const float cq = DP*DP - c2 * PP;
 
-                // Solve a*z² + b*z + cq = 0. Inside-cone region depends
-                // on sign(a):
-                //   a<0 → ray crosses cone direction (most common, e.g.
-                //         viewing the cone from the side). Inside-cone
-                //         is between the two roots [r1, r2].
-                //   a>0 → ray within the cone half-angle (camera inside
-                //         the cone, or looking along the cone direction).
-                //         Inside-cone is OUTSIDE [r1, r2]; the forward-
-                //         visible segment is [zMin, r1] (before the ray
-                //         crosses the cone wall on its way past the apex).
-                //         Per-sample DW > 0 filter handles the behind-apex
-                //         section in the disc<0 case (entire ray inside
-                //         cone) and within the forward [zMin, r1] window.
-                //   a≈0 → ray exactly on the cone wall, no volume to
-                //         integrate.
-                // Bound the integration by the range sphere (regardless of
-                // a sign). Decouples sample positions from the quantized
-                // surface depth — zMax/zSurf is only used as a per-sample
-                // visibility cull below (smoothly faded) so depth quanta
-                // don't translate into visible brightness bands.
+                // Solve a*z² + b*z + cq = 0 (the "ray inside cone half-
+                // angle" quadratic). The sign of a controls which side
+                // of the roots is "inside-cone":
+                //   a<0 → ray crosses the cone direction broadside.
+                //         Inside-cone is BETWEEN [r1, r2]. (Looking AT
+                //         the cone from outside.)
+                //   a>0 → ray fits within the cone half-angle (looking
+                //         ALONG the cone direction, from any position).
+                //         Inside-cone is OUTSIDE [r1, r2] (z ≤ r1 OR
+                //         z ≥ r2). Classify by where the visible
+                //         interval [zMin, zMax] sits and either
+                //         integrate it fully or skip entirely. Per-
+                //         sample DW>0 + cosT≥cosO filters cull the
+                //         outside-cone middle when visible straddles.
+                //   a≈0 → ray exactly parallel to cone wall, no volume.
+                //
+                // Sphere bounds (the spot's range sphere) also clamp the
+                // interval below — and decouple sample positions from
+                // the quantized surface depth (zMax fades per-sample).
                 const float sphereC = PP - r2;
                 const float sphereDisc = VP*VP - uV * sphereC;
                 if (sphereDisc < 0.0f) continue;  // ray misses range sphere
@@ -3115,17 +3114,33 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 } else if (a > 1e-8f) {
                     const float disc = b*b - 4.0f*a*cq;
                     if (disc < 0.0f) {
+                        // Q always positive → ray entirely inside cone.
                         zLo = zMin;
-                        zHi = zSphHi;
+                        zHi = zMax;
                     } else {
                         const float sq = std::sqrt(disc);
                         const float inv2a = 1.0f / (2.0f * a);
                         const float root1 = (-b - sq) * inv2a;
                         const float root2 = (-b + sq) * inv2a;
-                        const float zRootLo = std::min(root1, root2);
-                        if (zRootLo <= zMin) continue;
+                        const float r1Q = std::min(root1, root2);
+                        const float r2Q = std::max(root1, root2);
+                        if (r1Q <= zMin && r2Q >= zMax) {
+                            // Visible interval fits entirely between
+                            // the roots → visible ray is outside cone.
+                            continue;
+                        }
+                        // Otherwise visible interval is past both roots,
+                        // before both roots, or straddles one/both. In
+                        // every case the simplest correct thing is to
+                        // integrate the full visible interval; per-sample
+                        // DW>0 + cosT≥cosO filter does the cone-shape
+                        // culling for straddle cases. This is what
+                        // restores the cone for "camera inside cone
+                        // looking along direction" (the circle-hole bug)
+                        // and "camera behind apex looking forward"
+                        // (cone-shrinks-as-you-back-up bug).
                         zLo = zMin;
-                        zHi = zRootLo;
+                        zHi = zMax;
                     }
                 } else {
                     continue;
