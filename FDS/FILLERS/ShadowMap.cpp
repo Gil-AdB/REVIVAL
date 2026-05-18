@@ -87,8 +87,8 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 			sm.yres = faceRes;
 			sm.depth.assign(size_t(faceRes) * size_t(faceRes), 0);
 			sm.polyId.assign(size_t(faceRes) * size_t(faceRes), 0);
-			sm.omni = O;  // shared across all 6 faces; per-frame render
-			              // pass distinguishes faces by index in g_shadowMaps
+			sm.omni = O;  // shared across all 6 faces
+			sm.cubeFace = int8_t(f);  // tells render pass which axis to face
 			sm.fzp    = O->IRange * sFzpMult;
 			sm.rFZP   = 1.0f / sm.fzp;
 			sm.zScale = float(0xFF00) / (sm.fzp * 1.1f);

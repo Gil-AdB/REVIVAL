@@ -49,6 +49,13 @@ struct ShadowMap {
 	// when iterating its per-pixel light list.
 	struct Omni *omni = nullptr;
 
+	// -1 = spot/standalone 2D shadow map; 0-5 = one face of a cube
+	// shadow (in CubeShadowRef::faceIdx order +X,-X,+Y,-Y,+Z,-Z).
+	// Tells Render_DeferredShadowMaps how to orient the camera for
+	// this entry (standalone uses the omni's IDir; cube face uses
+	// a fixed ±axis basis).
+	int8_t cubeFace = -1;
+
 	// Precomputed per-frame "view-space → light-view-space" affine.
 	// Fills the role of:
 	//     lightPos = lightViewMat * (mainView^T * pixelViewSpace

@@ -131,35 +131,78 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
-		if (O->Type != Light_SpotLight) continue;  // omni cube maps deferred
-
-		// Light camera. Look from O->IPos toward IPos+IDir, world-up=Y.
-		// Roll=0. FOV = 2 * acos(cosOuter) so the outer cone fits in
-		// the shadow map. Pad a bit so silhouettes near the cone edge
-		// have a few pixels of context (otherwise floating-point in
-		// the lighting kernel's cone test lands pixels just past the
-		// shadow map edge that read as "lit").
-		// Kick_Camera has a singularity at IDir=(0,±1,0) — it builds the
-		// horizontal basis as N=(V.z,0,-V.x) and normalizes, which goes
-		// 0/0 when the look direction is exactly world-up. Nudge by a
-		// tiny X bias if the caller handed us a perfectly-vertical IDir.
-		Vector idir = O->IDir;
-		if (std::fabs(idir.x) < 1e-4f && std::fabs(idir.z) < 1e-4f) {
-			idir.x = 0.01f;
+		// Accept Light_SpotLight as before, plus Light_Omni entries that
+		// are CubeShadowRef faces (sm.cubeFace >= 0). Plain Light_Omni
+		// without cubeFace tagged (=-1) is skipped — those omnis didn't
+		// opt into cube shadows.
+		if (O->Type == Light_SpotLight) {
+			// spot path falls through unchanged
+		} else if (O->Type == Light_Omni && sm.cubeFace >= 0) {
+			// cube-face path handled below
+		} else {
+			continue;
 		}
-		Vector targ{ O->IPos.x + idir.x,
-		             O->IPos.y + idir.y,
-		             O->IPos.z + idir.z };
+
+		// Build the per-light camera. Spot path: existing IDir-based
+		// lookAt + cone-FOV. Cube-face path: fixed axis-aligned camera
+		// looking along ±X/±Y/±Z, 90° FOV (each face covers one
+		// hemisphere of the omni's volume).
 		Camera& lightCam = perLightCam[lightIdx];
 		lightCam = Camera{};
-		Kick_Camera(&O->IPos, &targ, 0.0f, lightCam.Mat);
+		float perspXY;
+		if (sm.cubeFace < 0) {
+			// Spot path. Look from O->IPos toward IPos+IDir, world-up=Y.
+			// FOV = 2 * acos(cosOuter) so the outer cone fits in the
+			// shadow map, padded so silhouettes near the cone edge get
+			// a few pixels of context.
+			// Kick_Camera has a singularity at IDir=(0,±1,0) — nudge
+			// by a tiny X bias if the caller handed us a perfectly-
+			// vertical IDir.
+			Vector idir = O->IDir;
+			if (std::fabs(idir.x) < 1e-4f && std::fabs(idir.z) < 1e-4f) {
+				idir.x = 0.01f;
+			}
+			Vector targ{ O->IPos.x + idir.x,
+			             O->IPos.y + idir.y,
+			             O->IPos.z + idir.z };
+			Kick_Camera(&O->IPos, &targ, 0.0f, lightCam.Mat);
+			const float cosOuter   = std::max(0.01f, O->FallOff);
+			const float fovHalfRad = std::acos(cosOuter) * 1.10f;
+			perspXY = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
+			lightCam.IFOV = (fovHalfRad * 2.0f) * (180.0f / PI);
+		} else {
+			// Cube-face path. Face order: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+			// Build a look-target one unit along the chosen axis from
+			// the omni. World-up for ±Y faces flips to +Z to avoid the
+			// Kick_Camera singularity at look ‖ world-up.
+			Vector tDir{0,0,0};
+			switch (sm.cubeFace) {
+				case 0: tDir.x =  1.0f; break;
+				case 1: tDir.x = -1.0f; break;
+				case 2: tDir.y =  1.0f; break;
+				case 3: tDir.y = -1.0f; break;
+				case 4: tDir.z =  1.0f; break;
+				case 5: tDir.z = -1.0f; break;
+			}
+			Vector targ{ O->IPos.x + tDir.x,
+			             O->IPos.y + tDir.y,
+			             O->IPos.z + tDir.z };
+			// ±Y faces would hit Kick_Camera's vertical singularity;
+			// nudge target slightly horizontally so the basis builds OK.
+			if (sm.cubeFace == 2 || sm.cubeFace == 3) {
+				targ.x += 0.01f;
+			}
+			Kick_Camera(&O->IPos, &targ, 0.0f, lightCam.Mat);
+			// 90° FOV per face → fovHalfRad = PI/4 → tan = 1. With
+			// 10% pad to keep silhouettes a few pixels inside the
+			// next face's domain.
+			const float fovHalfRad = float(PI) * 0.25f * 1.10f;
+			perspXY = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
+			lightCam.IFOV = 90.0f;
+		}
 		lightCam.ISource = O->IPos;
-		const float cosOuter   = std::max(0.01f, O->FallOff);
-		const float fovHalfRad = std::acos(cosOuter) * 1.10f;  // 10% pad
-		const float perspXY    = (float(sm.xres) * 0.5f) / std::tan(fovHalfRad);
 		lightCam.PerspX = perspXY;
 		lightCam.PerspY = perspXY;
-		lightCam.IFOV   = (fovHalfRad * 2.0f) * (180.0f / PI);
 
 		// Stash the light camera's pose onto the ShadowMap so the
 		// lighting kernel can sample later without rebuilding it.
@@ -252,7 +295,14 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
-		if (O->Type != Light_SpotLight) continue;
+		// Same filter as Phase A: spots, and cube-face entries.
+		if (O->Type == Light_SpotLight) {
+			// ok
+		} else if (O->Type == Light_Omni && sm.cubeFace >= 0) {
+			// ok — cube face entry
+		} else {
+			continue;
+		}
 
 		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
 		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
