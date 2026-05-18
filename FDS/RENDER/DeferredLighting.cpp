@@ -3018,7 +3018,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
 
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
-    constexpr int N_SAMPLES = 6;
+    constexpr int N_SAMPLES = 8;
     constexpr float inv_N = 1.0f / float(N_SAMPLES);
 
     for (int py = y1; py < y2; ++py) {
@@ -3027,6 +3027,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
         for (int px = x1; px < x2; ++px) {
             const float X = (float(px) - CntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
+
+            // Stratified per-pixel jitter offset, in [0,1). Used inside the
+            // per-spot integration to randomize sample positions within
+            // each bin so the bright apex region (where distAtten peaks
+            // sharply) doesn't alias into visible bands across neighbours.
+            // Hash pixel coords for stability frame-to-frame (no flicker).
+            const uint32_t pxHash =
+                uint32_t(px) * 1664525u + uint32_t(py) * 1013904223u + 0xCAFEu;
 
             // Surface depth: 0xFF80 - enc = z*zscale. enc=0 means "sky"
             // (no surface) → cap at fogZ if fogged, else far.
@@ -3072,6 +3080,19 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 //         cone) and within the forward [zMin, r1] window.
                 //   a≈0 → ray exactly on the cone wall, no volume to
                 //         integrate.
+                // Bound the integration by the range sphere (regardless of
+                // a sign). Decouples sample positions from the quantized
+                // surface depth — zMax/zSurf is only used as a per-sample
+                // visibility cull below (smoothly faded) so depth quanta
+                // don't translate into visible brightness bands.
+                const float sphereC = PP - r2;
+                const float sphereDisc = VP*VP - uV * sphereC;
+                if (sphereDisc < 0.0f) continue;  // ray misses range sphere
+                const float sphereSq = std::sqrt(sphereDisc);
+                const float invUV    = 1.0f / uV;
+                const float zSphLo   = (VP - sphereSq) * invUV;
+                const float zSphHi   = (VP + sphereSq) * invUV;
+
                 float zLo, zHi;
                 if (a < -1e-8f) {
                     const float disc = b*b - 4.0f*a*cq;
@@ -3085,31 +3106,34 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 } else if (a > 1e-8f) {
                     const float disc = b*b - 4.0f*a*cq;
                     if (disc < 0.0f) {
-                        // Quadratic always positive → ray entirely inside
-                        // cone (forward-half filtered per-sample).
                         zLo = zMin;
-                        zHi = zMax;
+                        zHi = zSphHi;
                     } else {
                         const float sq = std::sqrt(disc);
                         const float inv2a = 1.0f / (2.0f * a);
                         const float root1 = (-b - sq) * inv2a;
                         const float root2 = (-b + sq) * inv2a;
                         const float zRootLo = std::min(root1, root2);
-                        // Camera-before-apex case (the common one).
-                        // [zMin, zRootLo] is the in-cone segment before
-                        // the ray exits cone-side to head past the apex.
                         if (zRootLo <= zMin) continue;
                         zLo = zMin;
-                        zHi = std::min(zRootLo, zMax);
+                        zHi = zRootLo;
                     }
                 } else {
                     continue;
                 }
 
-                // Clamp to visible forward segment.
-                if (zHi <= zMin || zLo >= zMax) continue;
-                if (zLo < zMin) zLo = zMin;
-                if (zHi > zMax) zHi = zMax;
+                // Intersect with sphere bounds (NOT with zMax — that goes
+                // into the per-sample fade below). zMin keeps us forward
+                // of the near plane.
+                if (zLo < zSphLo) zLo = zSphLo;
+                if (zHi > zSphHi) zHi = zSphHi;
+                if (zLo < zMin)   zLo = zMin;
+                if (zHi <= zLo)   continue;
+                // Early-out: entire cone interval past the visible surface
+                // (zMax is the surface/sky cap; everything past it is fully
+                // occluded). Without this we'd still loop N samples for no
+                // contribution.
+                if (zLo >= zMax)  continue;
 
                 // Forward-cone-half constraint: need D·W ≥ 0 i.e.
                 //   z * DV - DP ≥ 0. Resolves to z ≥ DP/DV (if DV>0)
@@ -3121,12 +3145,33 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     if (zLo >= zHi) continue;
                 }
 
-                // Integrate N samples uniformly along [zLo, zHi].
+                // Integrate N stratified-jittered samples along [zLo, zHi].
+                // Each bin gets one sample placed at a random offset within
+                // it — randomization breaks the periodic alignment with
+                // the bright apex region that produced visible stripe
+                // artifacts at fixed-position sampling. The per-spot salt
+                // (s * 0x6F...) avoids correlated noise when multiple spots
+                // contribute to the same pixel.
                 const float dz = (zHi - zLo) * inv_N;
-                const float zStart = zLo + 0.5f * dz;
                 float acc = 0.0f;
                 for (int k = 0; k < N_SAMPLES; ++k) {
-                    const float z = zStart + float(k) * dz;
+                    const uint32_t h = pxHash
+                        + uint32_t(k) * 0x9E3779B9u
+                        + uint32_t(s) * 0x6F4A7531u;
+                    const float frac = float(h >> 16) * (1.0f / 65536.0f);
+                    const float z = zLo + (float(k) + frac) * dz;
+                    // Smooth surface-occlusion fade. The integration
+                    // interval is bounded by the sphere (not zMax) so
+                    // sample positions don't quantize with the depth
+                    // buffer; surface visibility is folded in as a per-
+                    // sample weight that fades over one bin width.
+                    // This eliminates the visible bands caused by uint16
+                    // depth steps clipping the interval.
+                    if (z >= zMax) break;
+                    float surfaceFade = 1.0f;
+                    if (z > zMax - dz) {
+                        surfaceFade = (zMax - z) * (1.0f / dz);
+                    }
                     // Sample point Q = z*V.
                     const float Wx = z*X - Px;
                     const float Wy = z*Y - Py;
@@ -3166,7 +3211,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         if (fogAtten < 0.0f) fogAtten = 0.0f;
                         fogAtten *= fogAtten;
                     }
-                    acc += coneAtten * distAtten * fogAtten;
+                    acc += coneAtten * distAtten * fogAtten * surfaceFade;
                 }
                 if (acc <= 0.0f) continue;
                 // No dz scaling — the path-integral form (acc × dz) gave
