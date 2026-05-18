@@ -1176,6 +1176,8 @@ int main(int argc, const char *argv[])
 "  xpartest@t=N   Transparent test cases: 1 single panel, 2 z-occlusion,\n"
 "                 3 multi-layer, 4 glass cube\n"
 "  spectest@t=N   Specular lobe test: case 1=gloss4, 2=gloss32, 3=gloss128\n"
+"  conetest       Volumetric-cone test: spot + ground, multi-pose snapshots\n"
+"                 (requires --deferred --draw_cones)\n"
 "  filler         Rasterizer edge / mask fixture\n"
 "  glat-trace     Glat scene Timer sweep -> CSV\n"
 "\n"
@@ -1257,7 +1259,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "spectest") {
 			return RunSpecTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest)\n",
+		if (snap.scene == "conetest") {
+			return RunConeTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

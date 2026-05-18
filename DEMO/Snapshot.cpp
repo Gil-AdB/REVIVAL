@@ -6,9 +6,11 @@
 #include "Rev.h"
 #include "Scenes.h"
 #include "SceneTick.h"
+#include "SpotlightCones.h"
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h>
 #include <Threads.h>
 #include <VESA/Vesa.h>
@@ -1816,6 +1818,195 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres) {
                 ++produced;
             }
         }
+    }
+
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
+// Volumetric-cone test scene: one downward-pointing spot + a ground
+// plane + a wall behind. Coordinate scale matches city (units in ~cm)
+// so cone_strength default tunings transfer.
+//
+// Layout:
+//   Spot at (0, 400, 0), dir (0,-1,0), range 800, hot 12°, outer 35°,
+//   warm orange. Cone shaft extends from y=400 down to ~y=-400 (the
+//   range sphere). Ground at y=0 catches the cone's "footprint".
+//   A wall at z=-600 gives a reflective backdrop for cone bleed.
+static Scene* buildConeTestScene() {
+    Scene* Sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(Sc, 0, sizeof(Scene));
+    Sc->NZP   = 5.0f;
+    Sc->FZP   = 4000.0f;
+    Sc->Flags = Scn_ZBuffer;
+    Sc->Ambient.R = Sc->Ambient.G = Sc->Ambient.B = 20;
+    Sc->Ambient.A = 255;
+
+    Camera* Cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(Cam, 0, sizeof(Camera));
+    Vector_Form(&Cam->ISource, 0, 200, -800);
+    Matrix_Identity(Cam->Mat);
+    Cam->IFOV = 60.0f;
+    Sc->CameraHead = Cam;
+
+    // The cone — uses production MakeSpotLight so the splines + flags
+    // match what the demo actually authors. Cone direction normalized
+    // inside the volumetric pass.
+    fds::MakeSpotLight(Sc,
+        /*R*/255, /*G*/200, /*B*/100,
+        /*intensity*/3.0f, /*range*/800.0f,
+        /*pos*/Vector(0, 400, 0),
+        /*dir*/Vector(0, -1, 0),
+        /*hot*/12.0f, /*outer*/35.0f,
+        /*shadowMapRes*/0,
+        /*castsShadow*/false);
+
+    Material* matGround = makeSolidColorMat(Sc, "cone_ground",
+                                            80, 80, 90, 255,
+                                            Mat_RGBInterp, 0);
+    matGround->Diffuse  = 1.0f;
+    matGround->Specular = 0.0f;
+    Material* matWall = makeSolidColorMat(Sc, "cone_wall",
+                                          50, 50, 60, 255,
+                                          Mat_RGBInterp, 1);
+    matWall->Diffuse  = 1.0f;
+    matWall->Specular = 0.0f;
+    linkMatToLib(matGround);
+    linkMatToLib(matWall);
+
+    {
+        TriMesh* ground = appendTriMesh(Sc, "cone_ground", 4, 2);
+        QuadDef q = {
+            { Vector(-2000, 0, -2000), Vector( 2000, 0, -2000),
+              Vector( 2000, 0,  2000), Vector(-2000, 0,  2000) },
+            Vector(0, 1, 0)
+        };
+        appendQuad(Sc, ground, 0, 0, q, matGround,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+    {
+        TriMesh* wall = appendTriMesh(Sc, "cone_wall", 4, 2);
+        QuadDef q = {
+            { Vector(-1500, 1500, -600), Vector( 1500, 1500, -600),
+              Vector( 1500,    0, -600), Vector(-1500,    0, -600) },
+            Vector(0, 0, 1)
+        };
+        appendQuad(Sc, wall, 0, 0, q, matWall,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+    return Sc;
+}
+
+int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    if (!fds::FeatureFlags::draw_cones()) {
+        std::fprintf(stderr,
+            "[CONETEST] WARNING: --draw_cones is not set; the cone pass\n"
+            "[CONETEST] will be a no-op. Re-run with --deferred --draw_cones.\n");
+    }
+
+    Ambient_Factor   = 0.25f;
+    Diffusive_Factor = 1.0f;
+    Specular_Factor  = 1.0f;
+    Range_Factor     = 1.0f;
+
+    fds::g_mainFaces.resize(8192);
+
+    Scene* sc = buildConeTestScene();
+    SetCurrentScene(sc);
+    View = sc->CameraHead;
+    Scene_RebuildMatTable(sc);
+
+    // Each pose names a geometric relationship to the cone (spot at
+    // (0,400,0), dir (0,-1,0), range 800, outer half-angle 35°).
+    // The lookTarget is what the camera aims at (typically the cone's
+    // mid-shaft or apex). Together, eye/target define the ray geometry
+    // and let me check each branch of the integration math.
+    struct ConePose {
+        const char* name;
+        Vector      eye;
+        Vector      target;
+        const char* desc;
+    };
+    const ConePose poses[] = {
+        // Side-on, ray perpendicular to cone direction. Most common
+        // a < 0 case; should show a clean triangular cone.
+        {"side_h",        Vector( 1200, 400,    0), Vector( 0, 400,  0),
+            "side view at spot height (a<0 chord)"},
+        {"side_low",      Vector( 1200,  50,    0), Vector( 0, 100,  0),
+            "side view at ground level, ray angled up"},
+
+        // Above the apex looking down — ray along cone direction (a>0).
+        // Camera is OUTSIDE the cone, but ray going DOWN passes through
+        // apex, then into the cone interior. This is the "looking down
+        // the spot from above" case the user flagged.
+        {"above_apex",    Vector(  0,  900,    0), Vector( 0, 100,  0),
+            "above apex looking down through cone (a>0)"},
+
+        // Camera inside the cone looking down (a > 0) — should see the
+        // full cone shaft on the ground. Previously this was the dark
+        // elliptical hole.
+        {"inside_down",   Vector(  0,  250,    0), Vector( 0,   0,  0),
+            "inside cone looking along cone direction (a>0)"},
+
+        // Camera inside cone, off-axis, looking forward (mixed). The
+        // edge between the dark ellipse and bright surroundings was
+        // most visible here.
+        {"inside_offset", Vector(150, 250,  150), Vector(-1, -0.5f, -1),
+            "inside cone, off-axis forward look"},
+
+        // Camera BEHIND the apex, looking through the spot toward the
+        // ground. Ray goes against cone direction first (DW<0), then
+        // (if extended) past the apex into cone region. Should be dark
+        // — cone shouldn't be visible from behind the apex.
+        {"behind_apex",   Vector(  0,  600,  600), Vector( 0, 400,  0),
+            "behind apex (above + behind), looking down at spot"},
+
+        // Camera below ground (impossible IRL but exercises math).
+        // Ray going up encounters apex from below. DV² >> c²·uV → a>0
+        // but DW<0 forward, samples skipped.
+        {"below_apex",    Vector(  0, -200,    0), Vector( 0, 400,  0),
+            "below ground looking up at spot (DW<0 case)"},
+
+        // Camera looking THROUGH cone wall from outside. Ray grazes
+        // cone surface: a transitions sign across the screen.
+        {"grazing",       Vector( 800,  400,    0), Vector(-1, -0.3f, 0),
+            "outside cone, grazing the wall"},
+    };
+
+    int produced = 0;
+    for (const ConePose& p : poses) {
+        View->ISource = p.eye;
+        buildLookAt(View->ISource, p.target, View->Mat);
+        CalcPersp(View);
+        FOVX = View->PerspX;
+        FOVY = View->PerspY;
+
+        std::memset(VPage,   0, PageSize);
+        std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);
+        }
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath),
+                      "%s/conetest_%s.ppm", cfg.outDir.c_str(), p.name);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr,
+            "[CONETEST] %-13s eye=(%5.0f,%4.0f,%5.0f) tgt=(%5.0f,%4.0f,%5.0f)  %s -> %s\n",
+            p.name,
+            p.eye.x, p.eye.y, p.eye.z,
+            p.target.x, p.target.y, p.target.z,
+            p.desc, colorPath);
+        ++produced;
     }
 
     ThreadPool::instance().close();

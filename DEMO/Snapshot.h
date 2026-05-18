@@ -103,6 +103,23 @@ int RunXparTest(const SnapshotConfig& cfg, int xres, int yres);
 // Output: <outDir>/spec_g<gloss>_<pose>_<mode>.ppm
 int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres);
 
+// Volumetric-cone isolation harness. Programmatic scene (no FLD load):
+// one downward-pointing spotlight + a ground plane + a wall behind, so
+// cones land on real geometry. Renders the same scene from a fixed set
+// of camera poses around / inside the cone — side, above-apex, inside-
+// looking-along, inside-looking-back, etc. — and dumps one PPM per pose
+// so the ray-march math can be inspected from every angle the user has
+// reported artifacts in (the dark elliptical cutoff inside the cone, the
+// brightness drop at the surface boundary).
+//
+// REQUIRES: `--deferred --draw_cones` on the CLI (the harness uses the
+// production Render() path; without those the cone pass is a no-op).
+//
+//   DEMO --deferred --draw_cones --snapshot=conetest [--out=PATH]
+//
+// Output: <outDir>/conetest_<pose>.ppm
+int RunConeTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Reproduce the user-reported wrong-direction reflection: stand outside
 // the city over open water at four extremes, look back at the nearest
 // reflective building. The water-facing side reflects what's behind the
