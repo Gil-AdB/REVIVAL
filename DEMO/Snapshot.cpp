@@ -1885,17 +1885,8 @@ static Scene* buildConeTestScene() {
                    TheOtherBarry<barry::TBlendMode::OVERWRITE,
                                  barry::TTextureMode::NORMAL>);
     }
-    {
-        TriMesh* wall = appendTriMesh(Sc, "cone_wall", 4, 2);
-        QuadDef q = {
-            { Vector(-1500, 1500, -600), Vector( 1500, 1500, -600),
-              Vector( 1500,    0, -600), Vector(-1500,    0, -600) },
-            Vector(0, 0, 1)
-        };
-        appendQuad(Sc, wall, 0, 0, q, matWall,
-                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
-                                 barry::TTextureMode::NORMAL>);
-    }
+    // (back wall geometry intentionally omitted while diagnosing the
+    // banding artifact — see the conetest comments above)
     return Sc;
 }
 
