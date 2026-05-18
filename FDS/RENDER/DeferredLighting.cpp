@@ -3033,8 +3033,17 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
             // each bin so the bright apex region (where distAtten peaks
             // sharply) doesn't alias into visible bands across neighbours.
             // Hash pixel coords for stability frame-to-frame (no flicker).
-            const uint32_t pxHash =
-                uint32_t(px) * 1664525u + uint32_t(py) * 1013904223u + 0xCAFEu;
+            // Use a proper avalanching hash (PCG-style multiply + xor-shift):
+            // a plain `px*MUL + py*MUL` left adjacent pixels with nearly
+            // identical high-16 bits, which manifested as horizontal bands
+            // because `frac` (computed from h>>16) was nearly constant in
+            // each row.
+            uint32_t pxHash = uint32_t(px) * 0x9E3779B9u
+                            + uint32_t(py) * 0x85EBCA6Bu
+                            + 0xCAFEBABEu;
+            pxHash ^= pxHash >> 13;
+            pxHash *= 0xC2B2AE35u;
+            pxHash ^= pxHash >> 16;
 
             // Surface depth: 0xFF80 - enc = z*zscale. enc=0 means "sky"
             // (no surface) → cap at fogZ if fogged, else far.
