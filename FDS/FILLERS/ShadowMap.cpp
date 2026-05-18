@@ -19,6 +19,7 @@
 
 thread_local ShadowMap *g_currentShadowMap = nullptr;
 std::vector<ShadowMap> g_shadowMaps;
+std::vector<CubeShadowRef> g_cubeShadowRefs;
 
 void ShadowMaps_Rebuild(Scene *Sc, int res)
 {
@@ -61,6 +62,53 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 			s.omni ? s.omni->IRange : 0.0f);
 	}
 	std::fflush(stderr);
+}
+
+// Cube shadow map setup for omnis. Each omni gets 6 ShadowMap entries
+// appended to g_shadowMaps (treated as 90°-FOV "spotlights" for the
+// existing render pass) plus a CubeShadowRef that groups them.
+void CubeShadowMaps_Rebuild(Scene *Sc, int res)
+{
+	g_cubeShadowRefs.clear();
+	if (!Sc) return;
+	const float sFzpMult = fds::FeatureFlags::shadow_fzp_mult();
+	for (Omni *O = Sc->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_CastsShadow)) continue;
+		if (O->Type != Light_Omni) continue;  // spots handled by ShadowMaps_Rebuild
+
+		CubeShadowRef ref;
+		ref.omni = O;
+		ref.lightISource = O->IPos;
+		const int faceRes = (O->shadowMapRes > 0) ? int(O->shadowMapRes) : res;
+
+		for (int f = 0; f < 6; ++f) {
+			ShadowMap sm;
+			sm.xres = faceRes;
+			sm.yres = faceRes;
+			sm.depth.assign(size_t(faceRes) * size_t(faceRes), 0);
+			sm.polyId.assign(size_t(faceRes) * size_t(faceRes), 0);
+			sm.omni = O;  // shared across all 6 faces; per-frame render
+			              // pass distinguishes faces by index in g_shadowMaps
+			sm.fzp    = O->IRange * sFzpMult;
+			sm.rFZP   = 1.0f / sm.fzp;
+			sm.zScale = float(0xFF00) / (sm.fzp * 1.1f);
+			ref.faceIdx[f] = int32_t(g_shadowMaps.size());
+			g_shadowMaps.push_back(std::move(sm));
+		}
+		g_cubeShadowRefs.push_back(std::move(ref));
+	}
+	if (!g_cubeShadowRefs.empty()) {
+		std::fprintf(stderr, "[SHADOW] CubeShadowMaps_Rebuild: %zu cube maps "
+			"(6 faces each):\n", g_cubeShadowRefs.size());
+		for (const auto& cr : g_cubeShadowRefs) {
+			std::fprintf(stderr, "  res=%dx%d  R=%.0f G=%.0f B=%.0f  IRange=%.1f\n",
+				g_shadowMaps[cr.faceIdx[0]].xres,
+				g_shadowMaps[cr.faceIdx[0]].yres,
+				cr.omni->L.R, cr.omni->L.G, cr.omni->L.B,
+				cr.omni->IRange);
+		}
+		std::fflush(stderr);
+	}
 }
 
 // ShadowBarry: tile-based AVX2 depth+polyId rasterizer modeled on

@@ -83,3 +83,41 @@ extern std::vector<ShadowMap> g_shadowMaps;
 // (after omnis are flagged with Omni_CastsShadow) and on engine
 // resize. `res` is the square edge length (e.g. 512).
 void ShadowMaps_Rebuild(struct Scene *Sc, int res);
+
+// ─── Cube shadow maps (for Light_Omni shadow casters) ────────────────
+//
+// An omnidirectional light radiates in all directions, so a single
+// view-frustum shadow map can't cover it. Implementation: 6 ordinary
+// ShadowMap entries (one per ±X/±Y/±Z face) in the existing
+// g_shadowMaps vector, plus a CubeShadowRef that groups them. The
+// shadow render pass treats each face as a 90°-FOV "spotlight" and
+// rasterizes it with the existing infrastructure.
+//
+// Face order (matches sampling axis-select code):
+//   0 = +X    1 = -X    2 = +Y    3 = -Y    4 = +Z    5 = -Z
+//
+// Memory: 6 × res² × (4 depth + 1 polyId) per shadow-casting omni.
+// At 256² per face: ~1.5MB/omni. Fine for handful of static omnis;
+// don't enable for many dynamic omnis (fountain particles).
+//
+// Per-pixel sampling (in deferred kernel / volumetric pass): take
+// world-space point P, compute D = P - lightISource, find dominant
+// axis (max |D.x|, |D.y|, |D.z|), index into the cube ref to get
+// the right face's ShadowMap, then use the existing 2D shadow sample
+// code on that face.
+struct CubeShadowRef {
+    // Indices into g_shadowMaps of the 6 face maps (in face-order above).
+    int32_t faceIdx[6];
+    Vector  lightISource;     // omni world position, shared by all faces
+    struct Omni *omni = nullptr;
+};
+
+// Parallel to g_shadowMaps but grouped by omni. The 6 entries
+// `g_shadowMaps[faceIdx[k]]` belong to this cube.
+extern std::vector<CubeShadowRef> g_cubeShadowRefs;
+
+// Append 6 ShadowMap entries to g_shadowMaps and a CubeShadowRef to
+// g_cubeShadowRefs for any omni whose flags include Omni_CastsShadow
+// AND whose Type is Light_Omni. Called by ShadowMaps_Rebuild after
+// handling spotlights. `res` is per-face edge length.
+void CubeShadowMaps_Rebuild(struct Scene *Sc, int res);
