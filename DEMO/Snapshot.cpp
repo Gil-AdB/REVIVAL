@@ -1997,6 +1997,19 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
             "behind apex, mid  (y=900): top of cone visible, bottom cut"},
         {"I_behind_far",   Vector(  0,1400,  10), Vector( 0,   0, 11),
             "behind apex, far  (y=1400): cone shrinking, mostly gone"},
+
+        // Look down AT the cone target (the ground spot the spotlight
+        // illuminates). User asked for these — they're the poses where
+        // the "bottom circle brighter than cone shaft" discontinuity
+        // is most visible.
+        // Target = (0, 0, 0) — directly under the spot apex on the
+        // ground. Camera placed above/behind/beside, looking at target.
+        {"J_above_target", Vector(   0, 1200,  10), Vector( 0,   0,  0),
+            "above the cone, looking down at its ground target"},
+        {"K_behind_target",Vector(   0,  800,  900), Vector( 0,   0,  0),
+            "behind+above, looking down at the cone's ground target"},
+        {"L_beside_target",Vector( 900,  800,    0), Vector( 0,   0,  0),
+            "beside+above, looking down at the cone's ground target"},
     };
 
     int produced = 0;

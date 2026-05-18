@@ -3114,7 +3114,8 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 } else if (a > 1e-8f) {
                     const float disc = b*b - 4.0f*a*cq;
                     if (disc < 0.0f) {
-                        // Q always positive → ray entirely inside cone.
+                        // Q always positive → ray entirely inside cone
+                        // (forward half filtered per-sample).
                         zLo = zMin;
                         zHi = zMax;
                     } else {
@@ -3124,23 +3125,32 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         const float root2 = (-b + sq) * inv2a;
                         const float r1Q = std::min(root1, root2);
                         const float r2Q = std::max(root1, root2);
-                        if (r1Q <= zMin && r2Q >= zMax) {
-                            // Visible interval fits entirely between
-                            // the roots → visible ray is outside cone.
+                        // For a>0, inside-cone is z ≤ r1 OR z ≥ r2.
+                        // The forward filter zFwd = DP/DV lies between
+                        // r1 and r2 (zFwd is the apex projection along
+                        // the ray; for a>0 the apex projection sits in
+                        // the outside-cone middle between cone-wall
+                        // crossings). So the forward-inside-cone
+                        // region is one side:
+                        //   DV > 0 → forward is z > zFwd → take z ≥ r2
+                        //   DV < 0 → forward is z < zFwd → take z ≤ r1
+                        //   DV ≈ 0 → ray perpendicular to cone dir,
+                        //            no meaningful forward direction.
+                        // This is tighter than integrating [zMin, zMax]
+                        // and skipping wrong-side samples per-sample:
+                        // sample positions stay entirely inside the
+                        // cone, eliminating the cone-wall-sweep stripe
+                        // artifact that the wider interval produced.
+                        if (DV > 1e-6f) {
+                            zLo = std::max(r2Q, zMin);
+                            zHi = zMax;
+                        } else if (DV < -1e-6f) {
+                            zLo = zMin;
+                            zHi = std::min(r1Q, zMax);
+                        } else {
                             continue;
                         }
-                        // Otherwise visible interval is past both roots,
-                        // before both roots, or straddles one/both. In
-                        // every case the simplest correct thing is to
-                        // integrate the full visible interval; per-sample
-                        // DW>0 + cosT≥cosO filter does the cone-shape
-                        // culling for straddle cases. This is what
-                        // restores the cone for "camera inside cone
-                        // looking along direction" (the circle-hole bug)
-                        // and "camera behind apex looking forward"
-                        // (cone-shrinks-as-you-back-up bug).
-                        zLo = zMin;
-                        zHi = zMax;
+                        if (zHi <= zLo) continue;
                     }
                 } else {
                     continue;
