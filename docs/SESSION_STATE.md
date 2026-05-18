@@ -4,7 +4,7 @@
 what's open, what's broken, and which commands reproduce each state
 so we can resume cleanly after context compaction.
 
-Last updated: 2026-05-17 (post-tile-stripe-fix)
+Last updated: 2026-05-18 (post-conetest-harness + jitter fix)
 
 ---
 
@@ -12,7 +12,18 @@ Last updated: 2026-05-17 (post-tile-stripe-fix)
 
 - Branch: `refactor/frame-state-shadow`
 - Pushed to: `origin/refactor/frame-state-shadow`
-- HEAD: volumetric cones tile-stripe + fog-clamp fix (this commit)
+- HEAD: `c6b32b4` (cone test harness pose revisions)
+- Latest cone work:
+  - `c6b32b4` revised conetest poses to avoid degenerate lookAt
+  - `2f8129f` PCG avalanching pxHash — fixed jitter that wasn't
+    actually decorrelating adjacent pixels (the real cause of bands)
+  - `e77f19a` decouple cone integration from depth quantization
+    (sphere bounds + smooth surface fade + stratified jitter)
+  - `1803be7` added `--snapshot=conetest` harness with 8 named poses
+  - `6a396ab` handle a>0 in cone quadratic (was being skipped → dark ellipse)
+  - `bf81fc7` move Render_VolumetricCones to final additive pass
+  - `0fb2022` tile-cull spots + squared fog
+  - `865c77c` inverted close/far cone brightness with inverse-square distAtten
 - **Not merging to master** — all dev work continues on side branches per user
   direction (2026-05-17).
 - ctest: both smoke tests pass (`smoke_city_forward`, `smoke_greets_deferred_shadows`)
