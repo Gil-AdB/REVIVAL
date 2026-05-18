@@ -128,3 +128,16 @@ extern std::vector<CubeShadowRef> g_cubeShadowRefs;
 // AND whose Type is Light_Omni. Called by ShadowMaps_Rebuild after
 // handling spotlights. `res` is per-face edge length.
 void CubeShadowMaps_Rebuild(struct Scene *Sc, int res);
+
+// Cube face selection: direction → face index in CubeShadowRef::faceIdx.
+// Standard "find dominant axis" — ~6 ops, no branches we care about
+// (CMOV-friendly). Returns 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+inline int CubeShadow_SelectFace(float dx, float dy, float dz)
+{
+    const float ax = dx < 0 ? -dx : dx;
+    const float ay = dy < 0 ? -dy : dy;
+    const float az = dz < 0 ? -dz : dz;
+    if (ax >= ay && ax >= az) return dx >= 0 ? 0 : 1;
+    if (ay >= az)              return dy >= 0 ? 2 : 3;
+    return                            dz >= 0 ? 4 : 5;
+}
