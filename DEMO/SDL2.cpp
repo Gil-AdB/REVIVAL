@@ -43,10 +43,11 @@ static void V_Flip(VESA_Surface *VS)
 {
 	// Shadow-map debug viewer thumbnail. No-op when g_shadowViewIdx < 0
 	// (cycled by 'V' key in REV.CPP). Writes into VS->Data so the SDL
-	// path below picks it up on the same blit.
+	// path below picks it up on the same blit. Pass BPSL — SDL locked
+	// textures pad scanlines past xres*4 on some configurations.
 	if (VS->Data && VS->X > 0 && VS->Y > 0) {
-		extern void ShadowMap_Overlay(byte *, int, int);
-		ShadowMap_Overlay(VS->Data, int(VS->X), int(VS->Y));
+		extern void ShadowMap_Overlay(byte *, int, int, int);
+		ShadowMap_Overlay(VS->Data, int(VS->X), int(VS->Y), int(VS->BPSL));
 	}
 	// Top-right resolution overlay. Draw into the surface's data buffer
 	// just before pushing to the SDL_Texture so it shows up regardless of

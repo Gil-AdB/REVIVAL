@@ -92,7 +92,9 @@ extern std::vector<ShadowMap> g_shadowMaps;
 // SDL_KEYDOWN handler cycles the index on each 'V' press: -1 -> 0 ->
 // 1 -> ... -> N-1 -> -1.
 extern int g_shadowViewIdx;
-void ShadowMap_Overlay(byte *vpage, int xres, int yres);
+// pitchBytes is the surface's BPSL (may exceed xres*4 on locked SDL
+// textures with alignment padding — caller passes VS->BPSL).
+void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes);
 void ShadowMap_ViewCycle();  // advances g_shadowViewIdx, prints status
 
 // Resize / re-build the shadow-map collection. Called at scene init

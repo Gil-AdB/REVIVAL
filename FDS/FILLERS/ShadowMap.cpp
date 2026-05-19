@@ -46,18 +46,15 @@ void ShadowMap_ViewCycle()
     }
 }
 
-void ShadowMap_Overlay(byte *vpage, int xres, int yres)
+void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
 {
     if (g_shadowViewIdx < 0) return;
     if (g_shadowViewIdx >= int(g_shadowMaps.size())) return;
-    if (!vpage || xres <= 0 || yres <= 0) return;
+    if (!vpage || xres <= 0 || yres <= 0 || pitchBytes <= 0) return;
 
     const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
-    if (sm.xres <= 0 || sm.yres <= 0 || sm.depth.empty()) return;
+    if (sm.xres <= 0 || sm.yres <= 0 || sm.polyId.empty()) return;
 
-    // Thumbnail: scale shadow map to ~1/4 of the framebuffer's smaller
-    // dimension. Drawn into the top-left corner with a 1-px white
-    // border so it's distinguishable from the rendered scene.
     int thumbSize = std::min(xres, yres) / 4;
     if (thumbSize < 64)   thumbSize = 64;
     if (thumbSize > sm.xres) thumbSize = sm.xres;
@@ -66,34 +63,49 @@ void ShadowMap_Overlay(byte *vpage, int xres, int yres)
     const int dstH = thumbSize;
     if (dstW + 4 >= xres || dstH + 4 >= yres) return;
 
+    // Row stride in dwords. SDL locked textures may pad scanlines past
+    // xres*4 bytes — use the surface's BPSL (passed as pitchBytes).
+    const ptrdiff_t pitchD = ptrdiff_t(pitchBytes) / 4;
     dword *out = reinterpret_cast<dword*>(vpage);
     const int ox = 4;
     const int oy = 4;
 
-    // Nearest-neighbour downsample (cheap). depth is uint16 — top 8
-    // bits give an 8-bit grayscale. 0 = empty (rendered black).
+    // PolyId visualization: each unique polyId hashes to a unique
+    // color. 0 = empty (no surface) → black so you can see the cube
+    // face coverage instead of just a uniform splat.
+    auto hashPolyColor = [](uint8_t pid) -> dword {
+        if (pid == 0) return 0xFF000000u;
+        uint32_t h = uint32_t(pid) * 0x9E3779B9u;
+        h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+        const uint8_t r = uint8_t((h >> 16) & 0xFF);
+        const uint8_t g = uint8_t((h >>  8) & 0xFF);
+        const uint8_t b = uint8_t( h        & 0xFF);
+        return 0xFF000000u | (dword(r) << 16) | (dword(g) << 8) | dword(b);
+    };
     for (int dy = 0; dy < dstH; ++dy) {
         const int sy = (dy * sm.yres) / dstH;
-        const uint16_t *row = &sm.depth[size_t(sy) * size_t(sm.xres)];
-        dword *dstRow = out + size_t(oy + dy) * size_t(xres) + size_t(ox);
+        const uint8_t *row = &sm.polyId[size_t(sy) * size_t(sm.xres)];
+        dword *dstRow = out + ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox);
         for (int dx = 0; dx < dstW; ++dx) {
             const int sx = (dx * sm.xres) / dstW;
-            const uint8_t g = uint8_t(row[sx] >> 8);
-            dstRow[dx] = 0xFF000000u | (dword(g) << 16) | (dword(g) << 8) | dword(g);
+            dstRow[dx] = hashPolyColor(row[sx]);
         }
     }
     // White 1-px border.
     for (int dx = -1; dx <= dstW; ++dx) {
-        if (oy - 1 >= 0)   out[size_t(oy - 1) * xres + size_t(ox + dx)]   = 0xFFFFFFFFu;
-        if (oy + dstH < yres) out[size_t(oy + dstH) * xres + size_t(ox + dx)] = 0xFFFFFFFFu;
+        if (oy - 1 >= 0)
+            out[ptrdiff_t(oy - 1) * pitchD + ptrdiff_t(ox + dx)] = 0xFFFFFFFFu;
+        if (oy + dstH < yres)
+            out[ptrdiff_t(oy + dstH) * pitchD + ptrdiff_t(ox + dx)] = 0xFFFFFFFFu;
     }
     for (int dy = -1; dy <= dstH; ++dy) {
-        if (ox - 1 >= 0)   out[size_t(oy + dy) * xres + size_t(ox - 1)]   = 0xFFFFFFFFu;
-        if (ox + dstW < xres) out[size_t(oy + dy) * xres + size_t(ox + dstW)] = 0xFFFFFFFFu;
+        if (ox - 1 >= 0)
+            out[ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox - 1)] = 0xFFFFFFFFu;
+        if (ox + dstW < xres)
+            out[ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox + dstW)] = 0xFFFFFFFFu;
     }
-    // Caption: index / N.
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "SM %d/%zu  %dx%d  face=%d",
+    std::snprintf(buf, sizeof(buf), "SM %d/%zu  %dx%d  face=%d  (polyId)",
                   g_shadowViewIdx, g_shadowMaps.size(),
                   sm.xres, sm.yres, int(sm.cubeFace));
     OutTextXY(vpage, ox + 4, oy + dstH + 4, buf, 255, xres, yres);
