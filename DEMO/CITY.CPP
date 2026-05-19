@@ -1989,6 +1989,13 @@ void Initialize_City()
 			O->Type   = Light_Omni;
 			O->Flags  = Omni_Active | Omni_CastsShadow | Omni_StaticShadow;
 			O->shadowMapRes = 256;  // 256² per face × 6 = 1.5 MB total
+			// Halo controls decoupled from surface lighting: halo is a
+			// soft volumetric glow that reads best when it extends past
+			// the surface-lit sphere, and at lower density than the
+			// brilliant cube interior. Without these, the halo inherits
+			// IRange=800 / density=1.0 and overpowers the streetlights.
+			O->HaloIntensity = 0.4f;     // 40% density vs default 1.0
+			O->HaloRange     = 1800.0f;  // 2.25× wider than IRange
 			// Splines so Animate_Objects doesn't crash. Single-key
 			// constants for static position/size/range.
 			auto initKey = [](Spline& sp, float a, float b, float c) {

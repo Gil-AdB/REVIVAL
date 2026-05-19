@@ -1154,6 +1154,14 @@ int main(int argc, const char *argv[])
 			helpRequested = true;
 			break;
 		}
+		// `--print-completion[=bash|=zsh]` emits a shell completion script
+		// to stdout. The intent is `source <(./DEMO --print-completion)`
+		// once per shell session, after which `./DEMO --<TAB>` works.
+		if (std::strncmp(argv[i], "--print-completion", 18) == 0) {
+			const char *eq = std::strchr(argv[i], '=');
+			fds::FeatureFlags::printCompletion(stdout, eq ? eq + 1 : "bash");
+			return 0;
+		}
 	}
 	if (helpRequested) {
 		std::printf(
@@ -1165,6 +1173,7 @@ int main(int argc, const char *argv[])
 "  ./DEMO --bench=<kind>[@iters=N,seed=N,...]\n"
 "  ./DEMO [--<flag> | --no-<flag> | --<flag>=VALUE]...\n"
 "  ./DEMO --help | -h                       this message\n"
+"  ./DEMO --print-completion[=bash|zsh]     emit shell completion script\n"
 "\n"
 "SNAPSHOT SCENES (headless deterministic PPM dump, no SDL window)\n"
 "  city           City scene driver at specified Timer values\n"

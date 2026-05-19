@@ -70,6 +70,13 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
+// Cone-tile path counters: incremented once per (tile × spot × 8-pixel
+// batch). Reset and reported by VolProf_Tick when vol_prof is on. Sit
+// at file scope so the cone tile fn (which is above the VolProf struct)
+// can reach them.
+static std::atomic<int> g_coneAnalyticHits{0};
+static std::atomic<int> g_coneRaymarchHits{0};
+
 constexpr int DEFERRED_MAX_LIGHTS = 128;
 constexpr int DEFERRED_NUM_TILES_X = 12;
 constexpr int DEFERRED_NUM_TILES_Y = 8;
@@ -130,6 +137,7 @@ struct ViewLightsSoA {
 	// haloRange2[] / haloRRange[] override range2[] / rRange[] for
 	// the halo sphere bounds (falling back to those when HaloRange=0).
 	alignas(32) float    haloDensityMul[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    haloRange     [DEFERRED_MAX_LIGHTS];
 	alignas(32) float    haloRange2    [DEFERRED_MAX_LIGHTS];
 	alignas(32) float    haloRRange    [DEFERRED_MAX_LIGHTS];
 };
@@ -2897,9 +2905,21 @@ void Render_DeferredLighting() {
 		// Per-omni halo controls. 0 → "use legacy default":
 		//   HaloIntensity = 0 → 1.0 (multiplier no-op)
 		//   HaloRange     = 0 → IRange (same as surface lighting)
-		const float haloMul   = (O->HaloIntensity > 0.0f) ? O->HaloIntensity : 1.0f;
-		const float haloRange = (O->HaloRange     > 0.0f) ? O->HaloRange     : O->IRange;
+		// Range resolution chain (later overrides earlier):
+		//   IRange  ->  HaloRange  ->  × omni_halo_range_mult
+		//                          OR  omni_halo_force_range (hard set)
+		const float haloMul    = (O->HaloIntensity > 0.0f) ? O->HaloIntensity : 1.0f;
+		const float forceRange = fds::FeatureFlags::omni_halo_force_range();
+		float       haloRange;
+		if (forceRange > 0.0f) {
+			haloRange = forceRange;
+		} else {
+			const float baseRange = (O->HaloRange > 0.0f) ? O->HaloRange : O->IRange;
+			const float rangeMult = fds::FeatureFlags::omni_halo_range_mult();
+			haloRange = baseRange * (rangeMult > 0.0f ? rangeMult : 1.0f);
+		}
 		lights.haloDensityMul[numLights] = haloMul;
+		lights.haloRange     [numLights] = haloRange;
 		lights.haloRange2    [numLights] = haloRange * haloRange;
 		lights.haloRRange    [numLights] = (haloRange > 0.0f) ? 1.0f / haloRange : 0.0f;
 		++numLights;
@@ -3178,6 +3198,21 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
+    const bool analyticCone = fds::FeatureFlags::vol_cone_analytic();
+    // Path-counter bump — once per tile call, not per (spot × batch).
+    // useAnalytic is constant within a call (depends only on the cone-
+    // analytic flag), so a single increment per call is the right
+    // granularity. The previous per-batch fetch_add was dragging ~3M
+    // atomic ops/frame in city. Fog is handled inside the analytic path
+    // via a midpoint (1 - z·invFogZ)² evaluation — same trade as the
+    // midpoint coneAtten / shadow tap.
+    const bool useAnalytic = analyticCone;
+    const float noiseStrength = fds::FeatureFlags::vol_analytic_noise();
+    if (fds::FeatureFlags::vol_prof()) {
+        (useAnalytic ? g_coneAnalyticHits
+                     : g_coneRaymarchHits)
+            .fetch_add(1, std::memory_order_relaxed);
+    }
 
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
@@ -3375,6 +3410,183 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     const __m256 mAlive      = _mm256_cmp_ps(vAlive_v, vZero_v, _CMP_GT_OQ);
                     __m256 accV = vZero_v;
 
+                    // ─── Analytic cone branch ────────────────────────
+                    // Closed-form arctan integral of inverse-square dist
+                    // attenuation over the cone-clipped segment, with
+                    // coneAtten (smoothstep cosO→cosI) approximated at
+                    // segment midpoint. Drops the (1-rr·d)² near-edge
+                    // cutoff (same trade as omni analytic).
+                    //
+                    // Approximations vs ray-march:
+                    //   (a) coneAtten / surfaceFade / fogAtten —
+                    //       evaluated at the segment midpoint.
+                    //   (b) shadow occupancy — a single shadow-map tap
+                    //       at z=zMid. Whole segment in or out (binary).
+                    //       Stair-steps at shadow boundaries; tolerable
+                    //       because halos are inherently diffuse.
+                    if (useAnalytic) {
+                        // α z² + β z + γ = rr²·d²(z) + 0.05
+                        const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
+                        // Per-lane uV (= X²+Y²+1, varies per pixel).
+                        const __m256 vUv_v    = _mm256_load_ps(uVarr);
+                        // VP = X·Px + Y·Py + Pz per lane.
+                        const __m256 vVP_v    = _mm256_fmadd_ps(vX_v, vPx_v,
+                                                _mm256_fmadd_ps(vY_v, vPy_v, vPz_v));
+                        const __m256 vPP_v    = _mm256_set1_ps(PP);
+                        const __m256 vAlpha   = _mm256_mul_ps(vRR2_v, vUv_v);
+                        const __m256 vBeta    = _mm256_mul_ps(
+                                                _mm256_set1_ps(-2.0f),
+                                                _mm256_mul_ps(vRR2_v, vVP_v));
+                        const __m256 vGamma   = _mm256_fmadd_ps(vRR2_v, vPP_v, vPt05_v);
+                        const __m256 vDiscQ   = _mm256_fmsub_ps(
+                                                _mm256_mul_ps(_mm256_set1_ps(4.0f), vAlpha), vGamma,
+                                                _mm256_mul_ps(vBeta, vBeta));
+                        const __m256 mDisc    = _mm256_cmp_ps(vDiscQ, vZero_v, _CMP_GT_OQ);
+                        const __m256 vSafeDisc = _mm256_blendv_ps(vOne_v, vDiscQ, mDisc);
+                        const __m256 vInvD    = _mm256_rsqrt_ps(vSafeDisc);
+
+                        const __m256 vTwoA    = _mm256_add_ps(vAlpha, vAlpha);
+                        const __m256 vZHi_v   = _mm256_load_ps(zHiArr);
+                        const __m256 vArgHi   = _mm256_mul_ps(vInvD,
+                                                _mm256_fmadd_ps(vTwoA, vZHi_v, vBeta));
+                        const __m256 vArgLo   = _mm256_mul_ps(vInvD,
+                                                _mm256_fmadd_ps(vTwoA, vZLo_v, vBeta));
+                        const __m256 vAtanHi  = atan_approx_x8(vArgHi);
+                        const __m256 vAtanLo  = atan_approx_x8(vArgLo);
+                        const __m256 vIntegral = _mm256_mul_ps(
+                                                 _mm256_add_ps(vInvD, vInvD),
+                                                 _mm256_sub_ps(vAtanHi, vAtanLo));
+
+                        // Midpoint sample: cosT_mid and surfaceFade_mid
+                        // approximate the otherwise-z-dependent factors.
+                        const __m256 vZMid    = _mm256_mul_ps(
+                                                _mm256_add_ps(vZLo_v, vZHi_v),
+                                                _mm256_set1_ps(0.5f));
+                        const __m256 Wx_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vX_v), vPx_v);
+                        const __m256 Wy_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vY_v), vPy_v);
+                        const __m256 Wz_m = _mm256_sub_ps(vZMid, vPz_v);
+                        const __m256 W2_m = _mm256_fmadd_ps(Wx_m, Wx_m,
+                                            _mm256_fmadd_ps(Wy_m, Wy_m,
+                                             _mm256_mul_ps(Wz_m, Wz_m)));
+                        const __m256 DW_m = _mm256_fmadd_ps(vDx_v, Wx_m,
+                                            _mm256_fmadd_ps(vDy_v, Wy_m,
+                                             _mm256_mul_ps(vDz_dir_v, Wz_m)));
+                        const __m256 safeW2_m = _mm256_blendv_ps(vOne_v, W2_m, mAlive);
+                        const __m256 invLen_m = _mm256_rsqrt_ps(safeW2_m);
+                        const __m256 cosT_m   = _mm256_mul_ps(DW_m, invLen_m);
+                        // Near-edge softness: ray-march multiplies by
+                        // (1 - rr·d)² to fade the integrand at the
+                        // sphere surface. Reintroduce that as a midpoint
+                        // factor so the analytic doesn't show a hard
+                        // boundary where the halo ends. dist_mid =
+                        // W²·invLen (rsqrt identity).
+                        const __m256 dist_m   = _mm256_mul_ps(W2_m, invLen_m);
+                        __m256 softEdge_m     = _mm256_sub_ps(vOne_v,
+                                                _mm256_mul_ps(vRR_v, dist_m));
+                        softEdge_m = _mm256_max_ps(vZero_v, softEdge_m);
+                        softEdge_m = _mm256_mul_ps(softEdge_m, softEdge_m);
+                        // coneAtten at midpoint: smoothstep(cosO→cosI).
+                        __m256 t_m = _mm256_mul_ps(_mm256_sub_ps(cosT_m, vCosO_v), vInvCIO_v);
+                        t_m = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_m));
+                        const __m256 smooth_m = _mm256_mul_ps(
+                                                _mm256_mul_ps(t_m, t_m),
+                                                _mm256_sub_ps(vThree_v,
+                                                  _mm256_mul_ps(vTwo_v, t_m)));
+                        const __m256 mInner_m = _mm256_cmp_ps(cosT_m, vCosI_v, _CMP_GE_OQ);
+                        const __m256 coneAtten_m = _mm256_blendv_ps(smooth_m, vOne_v, mInner_m);
+                        // surfaceFade at midpoint.
+                        const __m256 mFade_m  = _mm256_cmp_ps(vZMid, vFadeStart_v, _CMP_GT_OQ);
+                        const __m256 fadeVal_m = _mm256_mul_ps(
+                                                 _mm256_sub_ps(vZMax_v, vZMid), vInvDz_v);
+                        const __m256 surfaceFade_m = _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
+
+                        // Match ray-march brightness scaling: N × mean.
+                        const __m256 vIntervalLen = _mm256_sub_ps(vZHi_v, vZLo_v);
+                        const __m256 vSafeLen  = _mm256_blendv_ps(vOne_v, vIntervalLen, mAlive);
+                        const __m256 vN        = _mm256_set1_ps(float(N_SAMPLES));
+                        // mean per lane: integral / interval; final
+                        // contribution per "sample-unit": mean × N ×
+                        // coneAtten_mid × surfaceFade_mid.
+                        __m256 vAcc = _mm256_mul_ps(vIntegral, _mm256_rcp_ps(vSafeLen));
+                        vAcc = _mm256_mul_ps(vAcc, vN);
+                        vAcc = _mm256_mul_ps(vAcc, coneAtten_m);
+                        vAcc = _mm256_mul_ps(vAcc, surfaceFade_m);
+                        vAcc = _mm256_mul_ps(vAcc, softEdge_m);
+
+                        // Midpoint fog: ray-march path uses (1-z·invFogZ)²
+                        // per sample; here we sample once at z=zMid. Same
+                        // approximation strategy as midpoint cone/shadow.
+                        if (invFogZ > 0.0f) {
+                            __m256 fog_m = _mm256_sub_ps(vOne_v,
+                                            _mm256_mul_ps(vZMid, vInvFogZ_v));
+                            fog_m = _mm256_max_ps(vZero_v, fog_m);
+                            fog_m = _mm256_mul_ps(fog_m, fog_m);
+                            vAcc = _mm256_mul_ps(vAcc, fog_m);
+                        }
+
+                        // Per-pixel multiplicative noise: replicates the
+                        // visual texture of the ray-march path (whose
+                        // stochastic sample offsets produce inter-pixel
+                        // variation) without sacrificing the analytic
+                        // smoothness. Hash from existing pxHashArr.
+                        if (noiseStrength > 0.0f) {
+                            alignas(32) float noiseBuf[8];
+                            for (int lane = 0; lane < 8; ++lane) {
+                                // pxHashArr is already stable per pixel.
+                                // Map to [-0.5, +0.5) then scale.
+                                const float u =
+                                    float(pxHashArr[lane] >> 16) * (1.0f/65536.0f);
+                                noiseBuf[lane] = 1.0f + noiseStrength * (u - 0.5f);
+                            }
+                            vAcc = _mm256_mul_ps(vAcc, _mm256_load_ps(noiseBuf));
+                        }
+                        // Mask out lanes where: discQ<=0, cone-axis test
+                        // fails (cosT<cosO at midpoint), or lane dead.
+                        const __m256 mAng = _mm256_cmp_ps(cosT_m, vCosO_v, _CMP_GE_OQ);
+                        __m256 m          = _mm256_and_ps(mAlive,
+                                            _mm256_and_ps(mDisc, mAng));
+
+                        // Midpoint shadow tap — one sample at z=zMid
+                        // gates the whole segment. Stair-steps at
+                        // shadow boundaries; tolerated because halos
+                        // are diffuse. Mirrors the in-loop sm path
+                        // above but uses zMid instead of per-sample z.
+                        if (sm) {
+                            alignas(32) float maskArr_s[8], zArr_s[8];
+                            _mm256_store_ps(maskArr_s, m);
+                            _mm256_store_ps(zArr_s, vZMid);
+                            alignas(32) float shadowMul_s[8] =
+                                {1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f};
+                            for (int lane = 0; lane < 8; ++lane) {
+                                if (maskArr_s[lane] == 0) continue;
+                                const float zL = zArr_s[lane];
+                                const float Xl = Xarr[lane];
+                                const float zX = zL * Xl, zY = zL * Y;
+                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zL + sm_ox;
+                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zL + sm_oy;
+                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zL + sm_oz;
+                                if (lz <= 0.0f) continue;
+                                const float invLZ = 1.0f / lz;
+                                const float smX = sm_cntrX + sm_perspX * lx * invLZ;
+                                const float smY = sm_cntrY - sm_perspY * ly * invLZ;
+                                const int iX = int(smX), iY = int(smY);
+                                if (uint32_t(iX) >= uint32_t(sm_xres) ||
+                                    uint32_t(iY) >= uint32_t(sm_yres)) continue;
+                                int pixZ = 0xFF80 - int(lz * sm_zScale);
+                                if (pixZ < 0) pixZ = 0;
+                                if (pixZ > 0xFFFF) pixZ = 0xFFFF;
+                                const int biased = pixZ + 128;
+                                const uint16_t shadowZ =
+                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                if (biased < int(shadowZ)) shadowMul_s[lane] = 0.0f;
+                            }
+                            const __m256 vShad_s = _mm256_load_ps(shadowMul_s);
+                            m = _mm256_and_ps(m,
+                                _mm256_cmp_ps(vShad_s, _mm256_set1_ps(0.5f), _CMP_GT_OQ));
+                        }
+
+                        accV = _mm256_and_ps(vAcc, m);
+                    } else {
                     for (int k = 0; k < N_SAMPLES; ++k) {
                         alignas(32) float fracBuf[8];
                         for (int lane = 0; lane < 8; ++lane) {
@@ -3476,6 +3688,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                             _mm256_mul_ps(fogAtten, surfaceFade));
                         contrib = _mm256_and_ps(contrib, mask);
                         accV = _mm256_add_ps(accV, contrib);
+                    }
                     }
 
                     alignas(32) float accArr[8];
@@ -3831,16 +4044,21 @@ static void VolProf_Tick_impl() {
     if (!fds::FeatureFlags::vol_prof()) return;
     if (++g_volProf.framesSeen < g_volProf.interval) return;
     const int N = g_volProf.framesSeen;
+    const int cAnalytic = g_coneAnalyticHits.load(std::memory_order_relaxed);
+    const int cRaymarch = g_coneRaymarchHits.load(std::memory_order_relaxed);
     std::fprintf(stderr,
         "[VOL-PROF] last %d frame(s) avg per-frame: cones=%.2fms halos=%.2fms "
-        "unified=%.2fms (calls c=%d h=%d u=%d / %d frames)\n",
+        "unified=%.2fms (calls c=%d h=%d u=%d) cone-path: analytic=%d raymarch=%d\n",
         N,
         g_volProf.ms_cones   / N,
         g_volProf.ms_halos   / N,
         g_volProf.ms_unified / N,
-        g_volProf.n_cones, g_volProf.n_halos, g_volProf.n_unified, N);
+        g_volProf.n_cones, g_volProf.n_halos, g_volProf.n_unified,
+        cAnalytic, cRaymarch);
     std::fflush(stderr);
     g_volProf = VolProf{};
+    g_coneAnalyticHits.store(0, std::memory_order_relaxed);
+    g_coneRaymarchHits.store(0, std::memory_order_relaxed);
 }
 
 void VolProf_Tick() { VolProf_Tick_impl(); }
@@ -3996,6 +4214,7 @@ static void Render_OmniHalos_Tile(
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
     const bool analyticHalo = fds::FeatureFlags::vol_halo_analytic();
+    const float noiseStrength = fds::FeatureFlags::vol_analytic_noise();
 
     // ─── Analytic halo path ────────────────────────────────────────────
     // For each pixel/omni, the in-sphere line integral of inverse-square
@@ -4023,6 +4242,7 @@ static void Render_OmniHalos_Tile(
                 const int laneCount = pxEnd - pxBase;
 
                 alignas(32) float Xarr[8] = {}, uVarr[8] = {}, zMaxArr[8] = {};
+                alignas(32) float noiseBuf[8] = {1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f};
                 bool anyAlive = false;
                 for (int lane = 0; lane < laneCount; ++lane) {
                     const int px = pxBase + lane;
@@ -4035,8 +4255,20 @@ static void Render_OmniHalos_Tile(
                     if (fogZ > 0.0f && zM > fogZ) zM = fogZ;
                     constexpr float zMin = 0.05f;
                     if (zM > zMin) { zMaxArr[lane] = zM; anyAlive = true; }
+                    if (noiseStrength > 0.0f) {
+                        // Same avalanching hash the ray-march path uses
+                        // (PCG-style xor-shift + multiply) so analytic +
+                        // ray-march visually agree if you toggle between.
+                        uint32_t h = uint32_t(px) * 0x9E3779B9u
+                                   + uint32_t(py) * 0x85EBCA6Bu
+                                   + 0xCAFEBABEu;
+                        h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+                        const float u = float(h >> 16) * (1.0f/65536.0f);
+                        noiseBuf[lane] = 1.0f + noiseStrength * (u - 0.5f);
+                    }
                 }
                 if (!anyAlive) continue;
+                const __m256 vNoise = _mm256_load_ps(noiseBuf);
 
                 alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
 
@@ -4134,16 +4366,41 @@ static void Render_OmniHalos_Tile(
                         _mm256_add_ps(vInvD, vInvD),
                         _mm256_sub_ps(vAtanHi, vAtanLo));
 
-                    // w = integral · perOmniDensity · N / interval — rcp
-                    // is fine for halo (visual effect, not precision-
+                    // Near-edge softness: replicate ray-march's (1-rr·d)²
+                    // fade at the midpoint so analytic halos don't show
+                    // a hard sphere boundary. Compute W² at z=zMid, then
+                    // dist = √W², softEdge = max(0,1-rr·dist)².
+                    const __m256 vZMid = _mm256_mul_ps(
+                        _mm256_add_ps(vZLo, vZHi), _mm256_set1_ps(0.5f));
+                    const __m256 Wx_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vX_v), vPx);
+                    const __m256 Wy_m = _mm256_sub_ps(_mm256_mul_ps(vZMid, vY),  vPy);
+                    const __m256 Wz_m = _mm256_sub_ps(vZMid, vPz);
+                    const __m256 W2_m = _mm256_fmadd_ps(Wx_m, Wx_m,
+                                        _mm256_fmadd_ps(Wy_m, Wy_m,
+                                         _mm256_mul_ps(Wz_m, Wz_m)));
+                    const __m256 safeW2_m = _mm256_blendv_ps(vOne, W2_m, vMask);
+                    const __m256 invLen_m = _mm256_rsqrt_ps(safeW2_m);
+                    const __m256 dist_m   = _mm256_mul_ps(W2_m, invLen_m);
+                    const __m256 vRR      = _mm256_set1_ps(rr);
+                    __m256 softEdge_m     = _mm256_sub_ps(vOne,
+                                            _mm256_mul_ps(vRR, dist_m));
+                    softEdge_m = _mm256_max_ps(vZero, softEdge_m);
+                    softEdge_m = _mm256_mul_ps(softEdge_m, softEdge_m);
+
+                    // w = integral · perOmniDensity · N / interval · softEdge —
+                    // rcp is fine for halo (visual effect, not precision-
                     // critical). perOmniDensity folds in HaloIntensity.
                     const __m256 vIntervalLen = _mm256_sub_ps(vZHi, vZLo);
                     const __m256 vDensityN    = _mm256_set1_ps(perOmniDensity * float(N_SAMPLES));
                     const __m256 vSafeLen     = _mm256_blendv_ps(vOne, vIntervalLen, vMask);
                     const __m256 vW = _mm256_mul_ps(
-                        _mm256_mul_ps(vIntegral, vDensityN),
+                        _mm256_mul_ps(
+                            _mm256_mul_ps(vIntegral, vDensityN),
+                            softEdge_m),
                         _mm256_rcp_ps(vSafeLen));
-                    const __m256 vWMasked = _mm256_and_ps(vW, vMask);
+                    // Per-pixel noise (vNoise = 1.0 when noiseStrength=0).
+                    const __m256 vWNoised = _mm256_mul_ps(vW, vNoise);
+                    const __m256 vWMasked = _mm256_and_ps(vWNoised, vMask);
 
                     alignas(32) float wArr[8];
                     _mm256_store_ps(wArr, vWMasked);
@@ -4591,7 +4848,14 @@ void Render_OmniHalos() {
         const float vx = lights->posX[li];
         const float vy = lights->posY[li];
         const float vz = lights->posZ[li];
-        const float r  = std::sqrt(lights->range2[li]);
+        // Cull against the *halo* radius, not the surface IRange.
+        // omni_halo_force_range / range_mult / per-omni HaloRange can all
+        // make the halo extend well past the surface-lit sphere — using
+        // range2 here was rejecting tiles where the halo should render,
+        // and was also responsible for sharp tile-edge transitions when
+        // adjacent tiles disagreed on whether the (small) surface sphere
+        // crossed them.
+        const float r  = lights->haloRange[li];
         if (vz + r < 0.0f) continue;
         int ti_lo, ti_hi, tj_lo, tj_hi;
         if (vz - r < 1.0f) {

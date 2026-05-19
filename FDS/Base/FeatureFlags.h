@@ -74,6 +74,11 @@ public:
     // Prints flags that differ from compile-time defaults (set via env or CLI).
     static void printActive(std::FILE *out = stderr);
 
+    // Emits a bash/zsh completion script listing every --flag and --no-<bool>
+    // form. `shell` is "bash" or "zsh" (others fall back to bash syntax).
+    // Source the output once per session: `source <(./DEMO --print-completion)`.
+    static void printCompletion(std::FILE *out, const char *shell);
+
     static bool  get(BoolId  id);
     static float get(FloatId id);
     static int   get(IntId   id);
