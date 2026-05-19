@@ -424,14 +424,15 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
 		&& g_currentShadowOmni->Type == Light_SpotLight;
-	// When baking a *static* shadow, skip meshes whose Pos / Rotate /
-	// Scale splines have more than one key — baking their t=0 silhouette
-	// into a never-rebaked map freezes their shape in the shadow as they
-	// move at runtime. Dynamic meshes will be picked up by a per-frame
-	// dynamic shadow pass (separate, future work).
+	// When baking a *static* shadow, optionally skip meshes whose Pos
+	// spline has more than one key — baking their t=0 silhouette into
+	// a never-rebaked map freezes their shape in the shadow as they
+	// move at runtime. Off by default since some scenes (greets) have
+	// *every* mesh animated and would end up with empty shadow maps.
 	const bool inStaticBake = g_inShadowPass
 		&& g_currentShadowOmni
-		&& (g_currentShadowOmni->Flags & Omni_StaticShadow);
+		&& (g_currentShadowOmni->Flags & Omni_StaticShadow)
+		&& fds::FeatureFlags::shadow_skip_animated();
 	// Normalize the cone axis once: the shadow lighting kernel does the
 	// same for its per-pixel cone test (see StaticLighting), so the
 	// authored IDir is not guaranteed unit-length in world space.
