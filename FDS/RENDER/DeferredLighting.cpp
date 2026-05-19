@@ -4925,12 +4925,20 @@ void Render_OmniHalos() {
     });
 }
 
-// Skybox-from-G-buffer pass (option B scaffold). Walks every pixel,
-// paints the ones the rasterizer didn't touch (zEnc == 0 — sky) with
-// a solid debug color. Confirms the dispatch fires + the pixel-set
-// selection is right before we wire real cubemap sampling.
+// Skybox-from-G-buffer pass (option B scaffold). Paints "no deferred
+// surface here" pixels with a magenta debug color. Confirms dispatch
+// + pixel-set selection before real cubemap sampling lands.
+//
+// IMPORTANT: check mat32 sentinel (0xFFFFFFFF), not ZPage16. The
+// forward sky cube DOES write Z (so zEnc != 0 for sky pixels), but
+// leaves mat32 at its cleared sentinel value. ZPage16==0 means
+// "rasterizer never touched"; mat32==0xFFFFFFFF means "no deferred
+// material here" which is what we actually want.
 void Render_DeferredSkybox() {
-    if (!CurScene || !ZPage16 || !VPage) return;
+    if (!CurScene || !VPage) return;
+    if (!g_gbuffer) return;
+    const uint32_t *txtr = g_gbuffer->txtr.data();
+    if (!txtr) return;
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
@@ -4942,14 +4950,14 @@ void Render_DeferredSkybox() {
         for (int i = 0; i < numTilesX; ++i) {
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
+            ThreadPool::instance().enqueue([x1, y1, x2, y2, txtr]() {
                 dword *out = reinterpret_cast<dword *>(VPage);
                 for (int py = y1; py < y2; ++py) {
                     const size_t row = size_t(py) * size_t(XRes);
                     for (int px = x1; px < x2; ++px) {
-                        if (ZPage16[row + px] != 0) continue;
-                        // Debug: solid red (BGRA8888 — B=0,G=0,R=255,A=255).
-                        out[row + px] = 0xFF0000FFu;
+                        if (txtr[row + px] != 0xFFFFFFFFu) continue;
+                        // Debug: magenta (A=FF, R=FF, G=00, B=FF).
+                        out[row + px] = 0xFFFF00FFu;
                     }
                 }
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);

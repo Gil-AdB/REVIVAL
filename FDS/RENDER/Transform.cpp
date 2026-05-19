@@ -489,9 +489,24 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// but won't disappear; pure translation is the bigger artifact.
 		if (inStaticBake && T->Pos.NumKeys > 1) {
 			static std::atomic<int> sSkipLogged{0};
-			if (sSkipLogged.fetch_add(1) < 32) {
-				std::fprintf(stderr, "[STATIC-BAKE-SKIP-MESH] '%s' Pos.NumKeys=%u\n",
-					(Obj->Name ? Obj->Name : "?"), unsigned(T->Pos.NumKeys));
+			if (sSkipLogged.fetch_add(1) < 32 && T->Pos.Keys) {
+				const auto& k0 = T->Pos.Keys[0].Pos;
+				const auto& kN = T->Pos.Keys[T->Pos.NumKeys - 1].Pos;
+				// Extent across all keys — small extent = effectively
+				// static (envelope present but values barely change).
+				float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+				for (DWord i = 1; i < T->Pos.NumKeys; ++i) {
+					const auto& k = T->Pos.Keys[i].Pos;
+					if (k.x < xmin) xmin = k.x; if (k.x > xmax) xmax = k.x;
+					if (k.y < ymin) ymin = k.y; if (k.y > ymax) ymax = k.y;
+					if (k.z < zmin) zmin = k.z; if (k.z > zmax) zmax = k.z;
+				}
+				std::fprintf(stderr,
+				    "[STATIC-BAKE-SKIP-MESH] '%s' Pos.NumKeys=%u "
+				    "k0=(%g,%g,%g) kN=(%g,%g,%g) extent=(%g,%g,%g)\n",
+				    (Obj->Name ? Obj->Name : "?"), unsigned(T->Pos.NumKeys),
+				    k0.x, k0.y, k0.z, kN.x, kN.y, kN.z,
+				    xmax-xmin, ymax-ymin, zmax-zmin);
 			}
 			continue;
 		}
