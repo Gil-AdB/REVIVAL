@@ -486,7 +486,22 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// values) on otherwise-static meshes, which would over-filter.
 		// A rotating-in-place mesh will have a slightly wrong shadow
 		// but won't disappear; pure translation is the bigger artifact.
-		if (inStaticBake && T->Pos.NumKeys > 1) continue;
+		if (inStaticBake && T->Pos.NumKeys > 1) {
+			static std::atomic<int> sSkipLogged{0};
+			if (sSkipLogged.fetch_add(1) < 32) {
+				std::fprintf(stderr, "[STATIC-BAKE-SKIP-MESH] '%s' Pos.NumKeys=%u\n",
+					(Obj->Name ? Obj->Name : "?"), unsigned(T->Pos.NumKeys));
+			}
+			continue;
+		}
+		if (inStaticBake) {
+			static std::atomic<int> sKeepLogged{0};
+			if (sKeepLogged.fetch_add(1) < 32) {
+				std::fprintf(stderr, "[STATIC-BAKE-KEEP-MESH] '%s' Pos.NumKeys=%u Rot.NumKeys=%u Faces=%u\n",
+					(Obj->Name ? Obj->Name : "?"), unsigned(T->Pos.NumKeys),
+					unsigned(T->Rotate.NumKeys), unsigned(T->FIndex));
+			}
+		}
 
 		// Per-pass clone redirection. With scratch non-null, all
 		// reads/writes of this TriMesh's per-vertex projection state

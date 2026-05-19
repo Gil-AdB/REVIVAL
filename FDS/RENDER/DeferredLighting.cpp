@@ -4925,6 +4925,45 @@ void Render_OmniHalos() {
     });
 }
 
+// Skybox-from-G-buffer pass (option B scaffold). Walks every pixel,
+// paints the ones the rasterizer didn't touch (zEnc == 0 — sky) with
+// a solid debug color. Confirms the dispatch fires + the pixel-set
+// selection is right before we wire real cubemap sampling.
+void Render_DeferredSkybox() {
+    if (!CurScene || !ZPage16 || !VPage) return;
+    constexpr int numTilesX = 6;
+    constexpr int numTilesY = 4;
+    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    renderns::tileCounter = 0;
+    for (int j = 0; j < numTilesY; ++j) {
+        const int y1 = tileSizeY * j;
+        const int y2 = std::min(y1 + tileSizeY, YRes);
+        for (int i = 0; i < numTilesX; ++i) {
+            const int x1 = tileSizeX * i;
+            const int x2 = std::min(x1 + tileSizeX, XRes);
+            ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
+                dword *out = reinterpret_cast<dword *>(VPage);
+                for (int py = y1; py < y2; ++py) {
+                    const size_t row = size_t(py) * size_t(XRes);
+                    for (int px = x1; px < x2; ++px) {
+                        if (ZPage16[row + px] != 0) continue;
+                        // Debug: solid red (BGRA8888 — B=0,G=0,R=255,A=255).
+                        out[row + px] = 0xFF0000FFu;
+                    }
+                }
+                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+                ++renderns::tileCounter;
+                renderns::condition.notify_one();
+            });
+        }
+    }
+    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+    renderns::condition.wait(lock, []{
+        return renderns::tileCounter == numTilesX * numTilesY;
+    });
+}
+
 void Render_DeferredFogPass() {
 	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
 	if (!g_gbuffer || !ZPage16 || !VPage) return;

@@ -36,6 +36,7 @@ void Render_DeferredFogPass();
 void Render_VolumetricCones();
 void Render_OmniHalos();
 void Render_DeferredVolumetric();
+void Render_DeferredSkybox();
 void VolProf_Tick();
 
 // Resolve the unified-pass preference tri-state:
@@ -357,6 +358,15 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
 		Render_DeferredLighting();
+
+		// Deferred skybox: paint pixels the rasterizer didn't touch
+		// (zEnc == 0) by sampling the sky cube directly from the G-
+		// buffer. Replaces the forward RenderSkyCube draw and removes
+		// its overdraw. Gated on --deferred-skybox; off by default
+		// until visually validated.
+		if (fds::FeatureFlags::deferred_skybox()) {
+			Render_DeferredSkybox();
+		}
 
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto

@@ -333,23 +333,36 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 						clipper.InitViewport(*camPtr);
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						const auto& f = *facesPtr;
+						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
 						for (int i = 0; i < f.cAll; ++i) {
 							Face *const F = f.fList[i].face;
 							if (!F) continue;
-							if (!F->Txtr) continue;
+							if (!F->Txtr) { ++skNoTxtr; continue; }
 							// Transparent surfaces (windows / glass / particle
 							// sprites) shouldn't write solid depth into the
 							// shadow map — they'd cast a full-occluder shadow.
 							// Skip them; only opaque casters belong here.
-							if (F->Txtr->Flags & Mat_Transparent) continue;
-							if (F->A == F->B) continue;
+							if (F->Txtr->Flags & Mat_Transparent) { ++skXpar; continue; }
+							if (F->A == F->B) { ++skDegen; continue; }
 							if (F->A->TPos.z <= 0.0f &&
 							    F->B->TPos.z <= 0.0f &&
 							    F->C->TPos.z <= 0.0f) {
-								continue;
+								++skBack; continue;
 							}
 							clipper.Render(F, MekaleleShadowDepth, false, rt, cam,
                                           /*skipMipLevel=*/true);
+							++kept;
+						}
+						// One stderr line per "completely empty tile" (the
+						// black-map signal) so we can see *why* — first 16
+						// per process to keep output bounded.
+						if (kept == 0 && f.cAll > 0) {
+							static std::atomic<int> sLogged{0};
+							if (sLogged.fetch_add(1) < 16) {
+								std::fprintf(stderr,
+								    "[SHADOW-TILE-EMPTY] cAll=%d  skNoTxtr=%d skXpar=%d skDegen=%d skBack=%d\n",
+								    f.cAll, skNoTxtr, skXpar, skDegen, skBack);
+							}
 						}
 						g_currentShadowMap = nullptr;
 						std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
