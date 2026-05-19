@@ -40,9 +40,35 @@ void ShadowMap_ViewCycle()
         const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
         const char *omniName = (sm.omni && sm.omni->Type == Light_Omni) ? "omni" :
                                (sm.omni && sm.omni->Type == Light_SpotLight) ? "spot" : "?";
+        // Stats so we can see whether the actual data differs across maps
+        // (vs an overlay rendering bug). Sample some unique polyIds + the
+        // depth extent and non-empty pixel count.
+        const size_t total = sm.polyId.size();
+        size_t nonZeroP = 0;
+        bool seen[256] = {};
+        int uniqueP = 0;
+        for (uint8_t p : sm.polyId) {
+            if (p) ++nonZeroP;
+            if (!seen[p]) { seen[p] = true; ++uniqueP; }
+        }
+        uint16_t dmin = 0xFFFF, dmax = 0;
+        size_t nonZeroD = 0;
+        for (uint16_t d : sm.depth) {
+            if (d) ++nonZeroD;
+            if (d < dmin) dmin = d;
+            if (d > dmax) dmax = d;
+        }
         std::fprintf(stderr,
-            "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d\n",
-            g_shadowViewIdx, n, omniName, sm.xres, sm.yres, int(sm.cubeFace));
+            "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d  "
+            "polyId: %zu/%zu nonzero, %d unique  depth: %zu/%zu nonzero, [%u..%u]\n",
+            g_shadowViewIdx, n, omniName, sm.xres, sm.yres, int(sm.cubeFace),
+            nonZeroP, total, uniqueP,
+            nonZeroD, sm.depth.size(), unsigned(dmin), unsigned(dmax));
+        if (sm.omni) {
+            std::fprintf(stderr,
+                "              pos=(%g,%g,%g) IRange=%g\n",
+                sm.omni->IPos.x, sm.omni->IPos.y, sm.omni->IPos.z, sm.omni->IRange);
+        }
     }
 }
 
