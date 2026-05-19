@@ -141,3 +141,54 @@ inline int CubeShadow_SelectFace(float dx, float dy, float dz)
     if (ay >= az)              return dy >= 0 ? 2 : 3;
     return                            dz >= 0 ? 4 : 5;
 }
+
+// Sample a cube shadow at the given view-space sample point. Returns
+// shadow attenuation in [0, 1] — 1.0 fully lit, 0.0 fully shadowed.
+// Bias parameters match the spot-shadow path; slopeBiasFactor accepts
+// a precomputed (1/N·L - 1) factor since the caller has the normals
+// handy. Caller computes the world-space sample pos once per pixel.
+inline float CubeShadow_Sample(int cubeIdx,
+                                float worldX, float worldY, float worldZ,
+                                float viewX,  float viewY,  float viewZ,
+                                int   constBias, int slopeBiasInt)
+{
+    if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 1.0f;
+    const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
+    const float dwx = worldX - cr.lightISource.x;
+    const float dwy = worldY - cr.lightISource.y;
+    const float dwz = worldZ - cr.lightISource.z;
+    const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
+    const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
+    // Project view-space sample point into face-view space.
+    const float lx = sm.viewToLight[0][0] * viewX + sm.viewToLight[0][1] * viewY +
+                     sm.viewToLight[0][2] * viewZ + sm.viewToLightOffset.x;
+    const float ly = sm.viewToLight[1][0] * viewX + sm.viewToLight[1][1] * viewY +
+                     sm.viewToLight[1][2] * viewZ + sm.viewToLightOffset.y;
+    const float lz = sm.viewToLight[2][0] * viewX + sm.viewToLight[2][1] * viewY +
+                     sm.viewToLight[2][2] * viewZ + sm.viewToLightOffset.z;
+    if (lz <= 0.0f) return 1.0f;
+    const float invLZ = 1.0f / lz;
+    const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+    const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+    const int iX = int(smX);
+    const int iY = int(smY);
+    if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
+    const uint16_t *zRow0 = sm.depth.data() + size_t(iY) * size_t(sm.xres);
+    const uint16_t *zRow1 = zRow0 + sm.xres;
+    const float fx = smX - float(iX);
+    const float fy = smY - float(iY);
+    const float w00 = (1.0f - fx) * (1.0f - fy);
+    const float w10 =         fx  * (1.0f - fy);
+    const float w01 = (1.0f - fx) *         fy;
+    const float w11 =         fx  *         fy;
+    int pixZenc = 0xFF80 - int(lz * sm.zScale);
+    if (pixZenc < 0) pixZenc = 0;
+    if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+    const int biased = pixZenc + constBias + slopeBiasInt;
+    float occ = 0.0f;
+    if (biased < int(zRow0[iX    ])) occ += w00;
+    if (biased < int(zRow0[iX + 1])) occ += w10;
+    if (biased < int(zRow1[iX    ])) occ += w01;
+    if (biased < int(zRow1[iX + 1])) occ += w11;
+    return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
+}

@@ -998,6 +998,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				(nmapFromDiffuseG && Mat->Txtr);
 			const bool useVecHere = useVec && !hasNormalMap;
 
+			// Sample's world-space position. Computed here (outside the
+			// vec/scalar split) so both light paths can use it for cube
+			// shadow lookup. One 3×3 transform + 3 adds per pixel; cached
+			// across all light evaluations for this pixel.
+			const float sampleWorldX =
+				ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y +
+				ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+			const float sampleWorldY =
+				ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y +
+				ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+			const float sampleWorldZ =
+				ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
+				ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+
 			if (!isWater && !profNoLights) {
 				if (useVecHere) {
 					// 8-wide SIMD inner loop — written directly against
@@ -1088,6 +1102,44 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						                     _mm256_cmpgt_epi32(lis, _mm256_setzero_si256()));
 						__m256 coneAtten = _mm256_blendv_ps(vOne, spotAtten, isSpotMask);
 						k = _mm256_mul_ps(k, coneAtten);
+
+						// Cube shadow attenuation per lane (scalarized).
+						// Most lanes have cubeShadowIdx < 0 (no shadow);
+						// quick-check the SoA before paying the lookup cost.
+						// Per-pixel sampleWorld is already computed for the
+						// scalar path; bring it here too via a sibling
+						// computation in the vec branch's setup.
+						__m256i cubeIdxV = _mm256_load_si256(
+							(const __m256i*)(tl.cubeShadowIdx + slot));
+						__m256i anyCube = _mm256_cmpgt_epi32(cubeIdxV,
+							_mm256_set1_epi32(-1));
+						if (_mm256_movemask_epi8(anyCube) != 0) {
+							alignas(32) int32_t idxArr[8];
+							_mm256_store_si256((__m256i*)idxArr, cubeIdxV);
+							alignas(32) float kArr[8];
+							_mm256_store_ps(kArr, k);
+							alignas(32) float wxArr[8], wyArr[8], wzArr[8], liArr[8];
+							_mm256_store_ps(wxArr, wx);
+							_mm256_store_ps(wyArr, wy);
+							_mm256_store_ps(wzArr, wz);
+							_mm256_store_ps(liArr, lenInv);
+							const int kSB = kShadowBiasG;
+							const int kSL = kSlopeBiasG;
+							for (int lane = 0; lane < 8; ++lane) {
+								if (idxArr[lane] < 0) continue;
+								if (kArr[lane] <= 0.0f) continue;
+								const float dotGeo =
+									wxArr[lane]*nGeoX + wyArr[lane]*nGeoY + wzArr[lane]*nGeoZ;
+								const float nDotL = dotGeo * liArr[lane];
+								const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+								const int slopeBias = int(float(kSL) * (invNdotL - 1.0f));
+								const float cubeAtten = CubeShadow_Sample(
+									idxArr[lane], sampleWorldX, sampleWorldY, sampleWorldZ,
+									x, y, z, kSB, slopeBias);
+								kArr[lane] *= cubeAtten;
+							}
+							k = _mm256_load_ps(kArr);
+						}
 
 						__m256 intensity = _mm256_blendv_ps(vZero,
 						                    _mm256_mul_ps(k, vDiff), mask);
@@ -1186,20 +1238,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// second fdiv vs `1/lenInv` — fdiv on arm64 is
 					// ~20 cycles vs fmul's 4. The compiler doesn't do
 					// this rewrite under strict FP, so spell it out.
-					//
-					// Sample's world-space position for cube-shadow
-					// face selection. One 3×3 transform + 3 adds per
-					// pixel; the result is reused across every cube-
-					// shadow omni in this pixel's tile.
-					const float sampleWorldX =
-						ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y +
-						ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
-					const float sampleWorldY =
-						ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y +
-						ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
-					const float sampleWorldZ =
-						ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
-						ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+					// sampleWorldX/Y/Z hoisted to the parent scope —
+					// used by cube shadow sampling for any omni with
+					// cubeShadowIdx >= 0.
 					for (int n = 0; n < tl.count; ++n) {
 						const float Lpx = tl.posX[n];
 						const float Lpy = tl.posY[n];
@@ -1345,68 +1386,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							}
 						}
 
-						// Cube shadow (omni shadow caster). Mutually
-						// exclusive with the spot path above — cubeIdx<0
-						// when this light isn't a cube-shadow omni.
-						// Per-pixel: world-space sample pos is computed
-						// once for this pixel below at sampleWorldX/Y/Z;
-						// direction to omni picks the cube face, then we
-						// sample that face's 2D ShadowMap with the same
-						// PCF / bias code as spots.
+						// Cube shadow (omni shadow caster). Inline helper
+						// in ShadowMap.h returns shadowAtten directly.
 						const int32_t cubeIdx = tl.cubeShadowIdx[n];
-						if (cubeIdx >= 0 && size_t(cubeIdx) < g_cubeShadowRefs.size()) {
-							const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
-							const float dwx = sampleWorldX - cr.lightISource.x;
-							const float dwy = sampleWorldY - cr.lightISource.y;
-							const float dwz = sampleWorldZ - cr.lightISource.z;
-							const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
-							const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
-							const float lx = sm.viewToLight[0][0] * x +
-							                 sm.viewToLight[0][1] * y +
-							                 sm.viewToLight[0][2] * z +
-							                 sm.viewToLightOffset.x;
-							const float ly = sm.viewToLight[1][0] * x +
-							                 sm.viewToLight[1][1] * y +
-							                 sm.viewToLight[1][2] * z +
-							                 sm.viewToLightOffset.y;
-							const float lz = sm.viewToLight[2][0] * x +
-							                 sm.viewToLight[2][1] * y +
-							                 sm.viewToLight[2][2] * z +
-							                 sm.viewToLightOffset.z;
-							if (lz > 0.0f) {
-								const float invLZ = 1.0f / lz;
-								const float smX = sm.cntrX + sm.perspX * lx * invLZ;
-								const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-								const int iX = int(smX);
-								const int iY = int(smY);
-								if (iX >= 0 && iX + 1 < sm.xres &&
-								    iY >= 0 && iY + 1 < sm.yres) {
-									const uint16_t *zRow0 = sm.depth.data() +
-										size_t(iY) * size_t(sm.xres);
-									const uint16_t *zRow1 = zRow0 + sm.xres;
-									const float fx = smX - float(iX);
-									const float fy = smY - float(iY);
-									const float w00 = (1.0f - fx) * (1.0f - fy);
-									const float w10 =         fx  * (1.0f - fy);
-									const float w01 = (1.0f - fx) *         fy;
-									const float w11 =         fx  *         fy;
-									int pixZenc = 0xFF80 - int(lz * sm.zScale);
-									if (pixZenc < 0) pixZenc = 0;
-									if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-									const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
-									const float nDotL = dotGeo * lenInv;
-									const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
-									const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
-									const int biased = pixZenc + kShadowBiasG + slopeBias;
-									float occ = 0.0f;
-									if (biased < int(zRow0[iX    ])) occ += w00;
-									if (biased < int(zRow0[iX + 1])) occ += w10;
-									if (biased < int(zRow1[iX    ])) occ += w01;
-									if (biased < int(zRow1[iX + 1])) occ += w11;
-									if (occ >= 1.0f) continue;
-									shadowAtten *= 1.0f - occ;
-								}
-							}
+						if (cubeIdx >= 0) {
+							const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+							const float nDotL = dotGeo * lenInv;
+							const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+							const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
+							const float cubeAtten = CubeShadow_Sample(
+								cubeIdx, sampleWorldX, sampleWorldY, sampleWorldZ,
+								x, y, z, kShadowBiasG, slopeBias);
+							if (cubeAtten <= 0.0f) continue;
+							shadowAtten *= cubeAtten;
 						}
 						const float intensity = k * Mat->Diffuse * shadowAtten;
 						const float Lcb = tl.colB[n];
