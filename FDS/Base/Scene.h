@@ -56,6 +56,14 @@ struct Scene
     // sets this; runtime can still override with FDS_DEFERRED_OUTER_VEC.
     // Default false = use the standard kernel.
     dword            PreferOuterVec;
+
+    // Scene's preference for the unified volumetric pass (one Beer-
+    // Lambert ray-march for fog + cones + halos vs three separate
+    // passes). Default 0 = legacy multi-pass. Scenes with strong fog
+    // aesthetic (fountain, greets) set 1; bright-and-clear scenes
+    // (city) leave 0 to preserve the 1998-era look. Runtime can
+    // still override with FDS_VOLUMETRIC_UNIFIED.
+    dword            PreferVolumetricUnified;
 };
 
 #pragma pack(pop)

@@ -21,6 +21,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/Scene.h"
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -33,7 +34,17 @@ bool IsFrontFacingInViewSpace(const Face* F);
 void Render_DeferredLighting();
 void Render_DeferredFogPass();
 void Render_VolumetricCones();
+void Render_OmniHalos();
 void Render_DeferredVolumetric();
+
+// Resolve the unified-pass preference tri-state:
+//   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
+//   otherwise → scene's PreferVolumetricUnified
+static bool useUnifiedVolumetric() {
+	if (fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::volumetric_unified))
+		return fds::FeatureFlags::volumetric_unified();
+	return CurScene && CurScene->PreferVolumetricUnified != 0;
+}
 void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2);
 void renderDeferredTransparentTile_Back (int tileIdx, int x1, int y1, int x2, int y2);
 
@@ -350,7 +361,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto
 		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
 		// Disabled when the unified volumetric pass is on (folds fog in).
-		if (!fds::FeatureFlags::volumetric_unified()) {
+		if (!useUnifiedVolumetric()) {
 			Render_DeferredFogPass();
 		}
 
@@ -526,18 +537,24 @@ xpar_done: ;
 		TBR_Render(CurScene);
 	}
 
-	// Volumetric pass — final pass over all opaque + transparent. Two
-	// implementations behind a flag:
-	//   volumetric_unified=1: Render_DeferredVolumetric — folds fog
-	//     (Beer-Lambert) + cone scatter + omni halo into ONE per-pixel
-	//     ray-march. Composites surface × T + emit.
-	//   volumetric_unified=0 (default): legacy two-pass —
-	//     Render_DeferredFogPass earlier in the pipeline + this
-	//     Render_VolumetricCones additive after transparent.
-	if (fds::FeatureFlags::volumetric_unified()) {
+	// Volumetric pass(es). Tri-state dispatch:
+	//   useUnifiedVolumetric()=true: one Beer-Lambert pass that does
+	//     fog + cones + halos in one ray-march. Used by scenes whose
+	//     aesthetic benefits from physically-coupled atmospheric depth
+	//     (fountain, greets). Render_DeferredFogPass earlier in the
+	//     pipeline was skipped when this is on.
+	//   useUnifiedVolumetric()=false (default): three separate additive
+	//     passes — the earlier Render_DeferredFogPass for surface
+	//     attenuation, plus Render_VolumetricCones + Render_OmniHalos
+	//     here as the final additive composites. Each is independently
+	//     gated (draw_cones / omni_halo_strength); scenes can keep
+	//     bright-clear look (city) while still getting cone shafts
+	//     or halos if enabled.
+	if (useUnifiedVolumetric()) {
 		Render_DeferredVolumetric();
 	} else {
 		Render_VolumetricCones();
+		Render_OmniHalos();
 	}
 
 

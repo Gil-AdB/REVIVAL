@@ -3580,6 +3580,232 @@ void Render_VolumetricCones() {
     });
 }
 
+// ─── Omni halos — standalone additive pass for legacy mode ───────────
+//
+// Same idea as Render_VolumetricCones but for omnidirectional lights:
+// ray-march each omni's range sphere, accumulate inverse-square
+// in-scatter contribution per sample, composite additively. No fog
+// integration (legacy mode keeps fog in Render_DeferredFogPass).
+//
+// Per pixel:
+//   for each omni in tile:
+//     [zLo, zHi] = ray ∩ sphere(omni.center, omni.range)
+//     clamp by [zMin, zMax=zSurf]
+//     ∫ samples: density × 1/(1+(d/R)²) × color
+//     add to pixel
+//
+// Gated by FDS_OMNI_HALO_STRENGTH > 0. Replaces the omni-halo block
+// that previously only existed inside the unified pass; called from
+// the legacy dispatch (volumetric_unified=0) so City + other scenes
+// that stay on legacy passes can still get omni halos.
+static void Render_OmniHalos_Tile(
+    int x1, int y1, int x2, int y2,
+    const ViewLightsSoA *lights,
+    const int *omniIdx, int omniCount,
+    float invFOVX, float invFOVY,
+    float invZScale,
+    float fogZ, float invFogZ,
+    float density)
+{
+    if (omniCount == 0) return;
+    dword *out = reinterpret_cast<dword*>(VPage);
+    const uint16_t *zEnc = ZPage16;
+    constexpr int N_SAMPLES = 8;
+    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+
+    for (int py = y1; py < y2; ++py) {
+        const float Y = (CntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(XRes);
+        for (int px = x1; px < x2; ++px) {
+            const float X = (float(px) - CntrEX) * invFOVX;
+            const float uV = X*X + Y*Y + 1.0f;
+
+            uint32_t pxHash = uint32_t(px) * 0x9E3779B9u
+                            + uint32_t(py) * 0x85EBCA6Bu
+                            + 0xDEC0DE51u;  // different salt from cones
+            pxHash ^= pxHash >> 13;
+            pxHash *= 0xC2B2AE35u;
+            pxHash ^= pxHash >> 16;
+
+            const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+            const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+            float zMax = (zSurf > 0.0f) ? zSurf : zSky;
+            if (fogZ > 0.0f && zMax > fogZ) zMax = fogZ;
+            constexpr float zMin = 0.05f;
+            if (zMax <= zMin) continue;
+
+            float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+            for (int o = 0; o < omniCount; ++o) {
+                const int li = omniIdx[o];
+                const float Px = lights->posX[li], Py = lights->posY[li], Pz = lights->posZ[li];
+                const float r2 = lights->range2[li];
+                const float rr = lights->rRange[li];
+                const float VP = X*Px + Y*Py + Pz;
+                const float PP = Px*Px + Py*Py + Pz*Pz;
+
+                // Ray-sphere intersection bounds the integration.
+                const float sphereC = PP - r2;
+                const float sphereDisc = VP*VP - uV * sphereC;
+                if (sphereDisc < 0.0f) continue;
+                const float sphereSq = std::sqrt(sphereDisc);
+                const float invUV    = 1.0f / uV;
+                float zLo = (VP - sphereSq) * invUV;
+                float zHi = (VP + sphereSq) * invUV;
+                if (zLo < zMin) zLo = zMin;
+                if (zHi > zMax) zHi = zMax;
+                if (zHi <= zLo) continue;
+
+                const float dz = (zHi - zLo) * inv_N;
+                float acc = 0.0f;
+                for (int k = 0; k < N_SAMPLES; ++k) {
+                    const uint32_t h = pxHash
+                        + uint32_t(k) * 0x9E3779B9u
+                        + uint32_t(o) * 0x517CC1B7u;
+                    const float frac = float(h >> 16) * (1.0f / 65536.0f);
+                    const float z = zLo + (float(k) + frac) * dz;
+                    const float Wx = z*X - Px;
+                    const float Wy = z*Y - Py;
+                    const float Wz = z    - Pz;
+                    const float W2 = Wx*Wx + Wy*Wy + Wz*Wz;
+                    if (W2 > r2 || W2 < 1e-6f) continue;
+                    const float invLen = fast_rsqrt(W2);
+                    const float dist = W2 * invLen;
+                    const float dr = dist * rr;
+                    const float cutoff = 1.0f - dr;
+                    const float invSq  = 1.0f / (dr * dr + 0.05f);
+                    const float distAtten = cutoff * cutoff * invSq;
+                    // Match the legacy fog pass's per-sample squared
+                    // attenuation so halos fade consistently with
+                    // surface fog in fogged scenes.
+                    float fogAtten = 1.0f;
+                    if (invFogZ > 0.0f) {
+                        fogAtten = 1.0f - z * invFogZ;
+                        if (fogAtten < 0.0f) fogAtten = 0.0f;
+                        fogAtten *= fogAtten;
+                    }
+                    acc += distAtten * fogAtten;
+                }
+                if (acc <= 0.0f) continue;
+                const float w = acc * density;
+                accR += w * lights->colR[li];
+                accG += w * lights->colG[li];
+                accB += w * lights->colB[li];
+            }
+            if (accR <= 0.0f && accG <= 0.0f && accB <= 0.0f) continue;
+            const size_t i = row + size_t(px);
+            const dword pix = out[i];
+            int newR = int((pix >> 16) & 0xFF) + int(accR);
+            int newG = int((pix >>  8) & 0xFF) + int(accG);
+            int newB = int( pix        & 0xFF) + int(accB);
+            if (newR > 255) newR = 255;
+            if (newG > 255) newG = 255;
+            if (newB > 255) newB = 255;
+            out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                   |  dword(newB)        | 0xFF000000u;
+        }
+    }
+}
+
+void Render_OmniHalos() {
+    if (!CurScene || !ZPage16 || !VPage) return;
+    if (fds::FeatureFlags::omni_halo_strength() <= 0.0f) return;
+    const float invFOVX = 1.0f / FOVX;
+    const float invFOVY = 1.0f / FOVY;
+    const float invZScale = 1.0f / float(g_zscale);
+    const float density = fds::FeatureFlags::omni_halo_strength() * 0.001f;
+    const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
+    const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
+
+    extern DeferredLightingCtx g_deferredCtx;
+    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    if (!lights) return;
+    const int numLights = g_deferredCtx.numLights;
+
+    static int omniIdx[DEFERRED_MAX_LIGHTS];
+    int omniCount = 0;
+    for (int i = 0; i < numLights; ++i) {
+        if (!lights->isSpot[i]) omniIdx[omniCount++] = i;
+    }
+    if (omniCount == 0) return;
+
+    constexpr int numTilesX = 6;
+    constexpr int numTilesY = 4;
+    constexpr int numTiles  = numTilesX * numTilesY;
+    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+
+    // Per-tile omni cull — same sphere-projection math as cones, but
+    // no z-cull (omni halo is volumetric, surface-z occlusion is per-
+    // pixel via zSurf clamp inside the kernel).
+    static int tileOmniIdx  [numTiles][DEFERRED_MAX_LIGHTS];
+    static int tileOmniCount[numTiles];
+    for (int t = 0; t < numTiles; ++t) tileOmniCount[t] = 0;
+
+    for (int o = 0; o < omniCount; ++o) {
+        const int li = omniIdx[o];
+        const float vx = lights->posX[li];
+        const float vy = lights->posY[li];
+        const float vz = lights->posZ[li];
+        const float r  = std::sqrt(lights->range2[li]);
+        if (vz + r < 0.0f) continue;
+        int ti_lo, ti_hi, tj_lo, tj_hi;
+        if (vz - r < 1.0f) {
+            ti_lo = 0; ti_hi = numTilesX - 1;
+            tj_lo = 0; tj_hi = numTilesY - 1;
+        } else {
+            const float invZ = 1.0f / vz;
+            const float cx = CntrEX + vx * FOVX * invZ;
+            const float cy = CntrEY - vy * FOVY * invZ;
+            const float rx = r * FOVX * invZ;
+            const float ry = r * FOVY * invZ;
+            const int sx_min = std::max(0,        int(std::floor(cx - rx)));
+            const int sx_max = std::min(XRes - 1, int(std::ceil (cx + rx)));
+            const int sy_min = std::max(0,        int(std::floor(cy - ry)));
+            const int sy_max = std::min(YRes - 1, int(std::ceil (cy + ry)));
+            if (sx_min > sx_max || sy_min > sy_max) continue;
+            ti_lo = sx_min / tileSizeX;
+            ti_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
+            tj_lo = sy_min / tileSizeY;
+            tj_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
+        }
+        for (int j = tj_lo; j <= tj_hi; ++j) {
+            for (int i = ti_lo; i <= ti_hi; ++i) {
+                const int t = j * numTilesX + i;
+                if (tileOmniCount[t] < DEFERRED_MAX_LIGHTS) {
+                    tileOmniIdx[t][tileOmniCount[t]++] = li;
+                }
+            }
+        }
+    }
+
+    renderns::tileCounter = 0;
+    for (int j = 0; j < numTilesY; ++j) {
+        const int y1 = tileSizeY * j;
+        const int y2 = std::min(y1 + tileSizeY, YRes);
+        for (int i = 0; i < numTilesX; ++i) {
+            const int x1 = tileSizeX * i;
+            const int x2 = std::min(x1 + tileSizeX, XRes);
+            const int tileIdx = j * numTilesX + i;
+            const int *ts = tileOmniIdx[tileIdx];
+            const int  tc = tileOmniCount[tileIdx];
+            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,ts,tc,
+                                            invFOVX,invFOVY,invZScale,
+                                            fogZ,invFogZ,density]() {
+                Render_OmniHalos_Tile(x1,y1,x2,y2, lights, ts, tc,
+                                       invFOVX,invFOVY,invZScale,
+                                       fogZ,invFogZ,density);
+                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+                ++renderns::tileCounter;
+                renderns::condition.notify_one();
+            });
+        }
+    }
+    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+    renderns::condition.wait(lock, []{
+        return renderns::tileCounter == numTiles;
+    });
+}
+
 void Render_DeferredFogPass() {
 	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
 	if (!g_gbuffer || !ZPage16 || !VPage) return;
