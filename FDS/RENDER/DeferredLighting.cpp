@@ -4115,8 +4115,10 @@ static void Render_OmniHalos_Tile(
                     const __m256 mDisc = _mm256_cmp_ps(vDiscQ, vZero, _CMP_GT_OQ);
                     const __m256 vMask = _mm256_and_ps(mAlive, mDisc);
                     const __m256 vSafeDisc = _mm256_blendv_ps(vOne, vDiscQ, vMask);
-                    const __m256 vSqrtDisc = _mm256_sqrt_ps(vSafeDisc);
-                    const __m256 vInvD = _mm256_div_ps(vOne, vSqrtDisc);
+                    // rsqrt collapses sqrt + reciprocal into one ~3-cycle
+                    // op (12-bit precision; ample for halo brightness vs
+                    // div_ps's 10-20 cycles).
+                    const __m256 vInvD = _mm256_rsqrt_ps(vSafeDisc);
 
                     // argHi = (2α·zHi + β) · invD, similarly argLo
                     const __m256 vTwoA = _mm256_add_ps(vAlpha, vAlpha);
@@ -4132,13 +4134,15 @@ static void Render_OmniHalos_Tile(
                         _mm256_add_ps(vInvD, vInvD),
                         _mm256_sub_ps(vAtanHi, vAtanLo));
 
-                    // w = integral · density · N / interval
+                    // w = integral · perOmniDensity · N / interval — rcp
+                    // is fine for halo (visual effect, not precision-
+                    // critical). perOmniDensity folds in HaloIntensity.
                     const __m256 vIntervalLen = _mm256_sub_ps(vZHi, vZLo);
-                    const __m256 vDensityN    = _mm256_set1_ps(density * float(N_SAMPLES));
+                    const __m256 vDensityN    = _mm256_set1_ps(perOmniDensity * float(N_SAMPLES));
                     const __m256 vSafeLen     = _mm256_blendv_ps(vOne, vIntervalLen, vMask);
                     const __m256 vW = _mm256_mul_ps(
                         _mm256_mul_ps(vIntegral, vDensityN),
-                        _mm256_div_ps(vOne, vSafeLen));
+                        _mm256_rcp_ps(vSafeLen));
                     const __m256 vWMasked = _mm256_and_ps(vW, vMask);
 
                     alignas(32) float wArr[8];
@@ -4251,8 +4255,8 @@ static void Render_OmniHalos_Tile(
                     // (acc ≈ N × mean_distAtten). For the analytic
                     // integral we get the integrated value directly, so
                     // scale by N_SAMPLES to keep the visual intensity
-                    // comparable across the two paths.
-                    const float w = integral * density * float(N_SAMPLES);
+                    // comparable. perOmniDensity folds in HaloIntensity.
+                    const float w = integral * perOmniDensity * float(N_SAMPLES);
                     accR += w * lights->colR[li];
                     accG += w * lights->colG[li];
                     accB += w * lights->colB[li];
