@@ -1642,9 +1642,13 @@ static void bakeBuildingPanorama(Object* Obj,
 		}
 	}
 
+#if FDS_DEV
 	if (fds::FeatureFlags::debug_panorama()) paintDebugPanorama(panorama);
+#endif
 	Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
+#if FDS_DEV
 	if (fds::FeatureFlags::dump_panorama())  savePanoramaPPM(panorama, Obj->Name);
+#endif
 }
 
 void Initialize_City()

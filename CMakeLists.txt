@@ -21,6 +21,22 @@ endif()
 
 option(WASM_PROFILE "Emit DWARF debug info in the wasm build for Chrome DevTools profiling" OFF)
 
+# FDS_DEV gates dev-only flags and their call sites (viz/dump/debug helpers).
+# Independent of CMAKE_BUILD_TYPE — release-with-FDS_DEV is the intended dev
+# workflow (optimized + helpers); release-without-FDS_DEV is the stripped
+# ship build. Default ON for Debug / RelWithDebInfo, OFF for Release.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(_FDS_DEV_DEFAULT OFF)
+else()
+    set(_FDS_DEV_DEFAULT ON)
+endif()
+option(FDS_DEV "Compile dev-only flags and their call sites" ${_FDS_DEV_DEFAULT})
+if(FDS_DEV)
+    add_compile_definitions(FDS_DEV=1)
+else()
+    add_compile_definitions(FDS_DEV=0)
+endif()
+
 # Selects a stubbed variant of TheOtherBarry::apply_exact for the synthetic
 # rasterizer bench. `full` (default) is the production rasterizer; the others
 # stub one inner-loop op so we can isolate its cost via `make bench-...`.

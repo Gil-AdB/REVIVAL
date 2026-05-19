@@ -427,6 +427,7 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 	// FDS_DUMP_SHADOWMAP=1: write each shadow map as a .pgm under
 	// /tmp/shadowmap_<N>.pgm. One-shot per process — only dumps on
 	// the first call.
+#if FDS_DEV
 	static bool dumpedShadowMap = false;
 	if (!dumpedShadowMap && fds::FeatureFlags::dump_shadowmap()) {
 		dumpedShadowMap = true;
@@ -448,4 +449,5 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 			std::fprintf(stderr, "[SHADOWMAP] dumped %s\n", path);
 		}
 	}
+#endif
 }

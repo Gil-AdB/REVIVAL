@@ -795,7 +795,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// greets@t=2500. FeatureFlags::get is a cached load each, but a
 	// per-pixel load × 1920×1080 × 4 lights × 4 PCF taps adds up. Hoist
 	// to function entry.
+#if FDS_DEV
 	const bool nmapFromDiffuseG = fds::FeatureFlags::nmap_from_diffuse();
+#else
+	constexpr bool nmapFromDiffuseG = false;
+#endif
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
@@ -827,9 +831,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// dword (B,G,R,A in low→high bytes).
 			// Cached-once-per-frame debug viz switches (FeatureFlags reads
 			// env at startup; per-pixel cost is one bool load each).
+#if FDS_DEV
 			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
 			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
 			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
+#else
+			constexpr bool sVizTangent    = false;
+			constexpr bool sVizNormal     = false;
+			constexpr bool sNmapAsDiffuse = false;
+#endif
 			float texB, texG, texR;
 			if (profNoTex) {
 				texB = texG = texR = 128.0f;

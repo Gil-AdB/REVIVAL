@@ -611,6 +611,7 @@ xpar_done: ;
 	// index and SortZ at its screen centroid. Lets you read the actual sort
 	// values that drove rendering — useful for diagnosing back-to-front
 	// ordering on real scenes.
+#if FDS_DEV
 	if (fds::FeatureFlags::debug_xpar_ids()) {
 		// Min screen area threshold (px²) — skips tiny particles.
 		const float setArea = fds::FeatureFlags::debug_xpar_min_area();
@@ -639,6 +640,7 @@ xpar_done: ;
 			OutTextXY(VPage, int(cx), int(cy), text, 255);
 		}
 	}
+#endif
 }
 
 // yeah
