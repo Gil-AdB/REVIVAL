@@ -424,6 +424,14 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
 		&& g_currentShadowOmni->Type == Light_SpotLight;
+	// When baking a *static* shadow, skip meshes whose Pos / Rotate /
+	// Scale splines have more than one key — baking their t=0 silhouette
+	// into a never-rebaked map freezes their shape in the shadow as they
+	// move at runtime. Dynamic meshes will be picked up by a per-frame
+	// dynamic shadow pass (separate, future work).
+	const bool inStaticBake = g_inShadowPass
+		&& g_currentShadowOmni
+		&& (g_currentShadowOmni->Flags & Omni_StaticShadow);
 	// Normalize the cone axis once: the shadow lighting kernel does the
 	// same for its per-pixel cone test (see StaticLighting), so the
 	// authored IDir is not guaranteed unit-length in world space.
@@ -469,6 +477,16 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		T = (TriMesh *)(Obj->Data);
 
 		if (!(T->Flags&HTrack_Visible)) {T->Flags|=Tri_Invisible; continue;}
+
+		// Static-bake filter: skip meshes that animate (Pos / Rotate /
+		// Scale envelope has more than 1 key). Their t=0 silhouette
+		// otherwise gets frozen in a never-rebaked shadow map.
+		if (inStaticBake) {
+			const bool isAnimated = T->Pos.NumKeys    > 1
+			                     || T->Rotate.NumKeys > 1
+			                     || T->Scale.NumKeys  > 1;
+			if (isAnimated) continue;
+		}
 
 		// Per-pass clone redirection. With scratch non-null, all
 		// reads/writes of this TriMesh's per-vertex projection state

@@ -337,6 +337,11 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 							Face *const F = f.fList[i].face;
 							if (!F) continue;
 							if (!F->Txtr) continue;
+							// Transparent surfaces (windows / glass / particle
+							// sprites) shouldn't write solid depth into the
+							// shadow map — they'd cast a full-occluder shadow.
+							// Skip them; only opaque casters belong here.
+							if (F->Txtr->Flags & Mat_Transparent) continue;
 							if (F->A == F->B) continue;
 							if (F->A->TPos.z <= 0.0f &&
 							    F->B->TPos.z <= 0.0f &&
