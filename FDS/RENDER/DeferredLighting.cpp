@@ -3427,7 +3427,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
                         const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
                         const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
-                        const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                        const __m256 invSq     = _mm256_rcp_ps(invSqDen);
                         const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
 
                         __m256 fogAtten = vOne_v;
@@ -4414,7 +4414,7 @@ static void Render_OmniHalos_Tile(
                         const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
                         const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
                         const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
-                        const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                        const __m256 invSq     = _mm256_rcp_ps(invSqDen);
                         const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
 
                         __m256 fogAtten = vOne_v;
@@ -4955,7 +4955,7 @@ static void Render_DeferredVolumetric_Tile(
                             const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
                             const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
                             const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
-                            const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                            const __m256 invSq     = _mm256_rcp_ps(invSqDen);
                             const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
 
                             // Per-lane scalar fastPow2 for T_sample.
@@ -5078,7 +5078,7 @@ static void Render_DeferredVolumetric_Tile(
                             const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
                             const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
                             const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
-                            const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                            const __m256 invSq     = _mm256_rcp_ps(invSqDen);
                             const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
 
                             __m256 vTsample = vOne_v;
