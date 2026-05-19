@@ -4,7 +4,7 @@
 what's open, what's broken, and which commands reproduce each state
 so we can resume cleanly after context compaction.
 
-Last updated: 2026-05-18 (post-conetest-harness + jitter fix)
+Last updated: 2026-05-19 (cube shadow infrastructure end-to-end + static bake)
 
 ---
 
@@ -12,8 +12,38 @@ Last updated: 2026-05-18 (post-conetest-harness + jitter fix)
 
 - Branch: `refactor/frame-state-shadow`
 - Pushed to: `origin/refactor/frame-state-shadow`
-- HEAD: `c6b32b4` (cone test harness pose revisions)
-- Latest cone work:
+- HEAD: `dac3d5f` (bake-once static shadow maps)
+- **Not merging to master** — all dev work continues on side branches per user
+  direction (2026-05-17).
+- ctest: both smoke tests pass
+
+## Cube shadow infrastructure (task #53) — substantially complete
+
+End-to-end working: per-omni cube shadow maps (6 face entries per
+Light_Omni with Omni_CastsShadow), per-frame render dispatch unified
+with spot path, per-pixel sampling in both scalar AND vec deferred
+kernel paths, static-bake-at-init for `Omni_StaticShadow` lights.
+
+  - `c01c470` CubeShadowRef + cubeFace marker + allocator
+  - `b2dcd6b` per-frame render of 6 face cameras per cube
+  - `47ed1f1` CubeShadow_SelectFace inline helper
+  - `e31314b` ViewLightsSoA world-pos + cubeShadowIdx
+  - `5cdee28` scalar kernel wire-in (view→world per pixel, lookup per omni)
+  - `823460e` city test omni at (0,600,500) to exercise the path
+  - `b6a426a` vec kernel wire-in (scalarized per-lane, cheap early-out)
+  - `dac3d5f` Omni_StaticShadow flag + ShadowMaps_BakeStatic() — bake at
+    scene init alongside reflection bake, per-frame pass skips static
+    lights entirely. City streetlights + test cube omni all baked once.
+
+Still open for task #53:
+  - Switch deferred reflection from lat-long panorama → real cube map.
+    Bigger refactor: deferred currently SKIPS reflective faces entirely
+    (RENDER.CPP:385, 478 — forward handles them). Need to enable
+    deferred-path reflection rendering first, then add cube sampling
+    in Mekalele for reflective materials.
+
+## Earlier cone work (this branch)
+
   - `c6b32b4` revised conetest poses to avoid degenerate lookAt
   - `2f8129f` PCG avalanching pxHash — fixed jitter that wasn't
     actually decorrelating adjacent pixels (the real cause of bands)
@@ -24,10 +54,7 @@ Last updated: 2026-05-18 (post-conetest-harness + jitter fix)
   - `bf81fc7` move Render_VolumetricCones to final additive pass
   - `0fb2022` tile-cull spots + squared fog
   - `865c77c` inverted close/far cone brightness with inverse-square distAtten
-- **Not merging to master** — all dev work continues on side branches per user
-  direction (2026-05-17).
-- ctest: both smoke tests pass (`smoke_city_forward`, `smoke_greets_deferred_shadows`)
-- 162+ commits ahead of master.
+  - `852dd44` shadow-occluded volumetric cones in city test spots
 
 ## What just landed (recent → older)
 
