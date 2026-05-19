@@ -167,12 +167,7 @@ bool FeatureFlags::parseArgs(int argc, const char *const *argv) {
             helpRequested = true;
             continue;
         }
-        bool negate = false;
         const char *name = body;
-        if (std::strncmp(name, "no-", 3) == 0) {
-            negate = true;
-            name += 3;
-        }
         const char *eq = std::strchr(name, '=');
         char nameBuf[128];
         const char *value = nullptr;
@@ -190,7 +185,18 @@ bool FeatureFlags::parseArgs(int argc, const char *const *argv) {
             name = nameBuf;
             if (eq) value = eq + 1;
         }
+        // Lookup-first / strip-no-second: handle ambiguity between
+        // `--no-foo` as the negation of `foo`, and `--no-foo` as the
+        // literal flag `no_foo`. Direct lookup wins so `--no-sort` /
+        // `--no-greets-spots` find their literally-named flags before
+        // the strip-prefix path runs.
+        bool negate = false;
         int bi = findBoolByCliName(name);
+        if (bi < 0 && std::strncmp(name, "no_", 3) == 0) {
+            negate = true;
+            name += 3;
+            bi = findBoolByCliName(name);
+        }
         if (bi >= 0) {
             bool v = cliBoolValue(value);
             if (negate) v = !v;

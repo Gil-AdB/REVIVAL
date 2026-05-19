@@ -816,20 +816,26 @@ struct GreetsScene : SceneDriver {
 		// makeSpotLight. With --greets-omni-shadows, also flag every
 		// FLD-loaded Light_Omni so CubeShadowMaps_Rebuild bakes a 6-face
 		// cube per omni.
+		const int omniCubeRes = std::max(16,
+		    fds::FeatureFlags::greets_omni_shadow_res());
+		int totalOmnis = 0;
 		if (fds::FeatureFlags::greets_omni_shadows()) {
 			int marked = 0;
 			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+				++totalOmnis;
 				if (O->Type != Light_Omni) continue;
 				if (O->Flags & Omni_CastsShadow) continue;
 				O->Flags |= (Omni_CastsShadow | Omni_StaticShadow);
-				if (O->shadowMapRes == 0) O->shadowMapRes = 256;
+				O->shadowMapRes = dword(omniCubeRes);
 				++marked;
 			}
-			std::fprintf(stderr, "[GREETS] greets_omni_shadows: marked %d "
-			             "Light_Omni for cube shadow bake\n", marked);
+			std::fprintf(stderr,
+			    "[GREETS] greets_omni_shadows: marked %d / %d Light_Omni "
+			    "for cube shadow bake at %dx%d per face\n",
+			    marked, totalOmnis, omniCubeRes, omniCubeRes);
 		}
 		ShadowMaps_Rebuild(GreetSc, 1024);
-		CubeShadowMaps_Rebuild(GreetSc, 256);
+		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
 		ShadowMaps_BakeStatic(GreetSc);
 
 		// this scene messes up at time zero
