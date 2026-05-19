@@ -110,6 +110,20 @@ struct ViewLightsSoA {
 	// not a shadow-caster (most omnis). Filled per frame in
 	// Render_DeferredLighting alongside the other per-light fields.
 	alignas(32) int32_t  shadowMapIdx[DEFERRED_MAX_LIGHTS];
+	// World-space position of the light. Required for cube shadow
+	// face selection (option 3 in the cube infra design): the per-
+	// pixel sample's world position is computed once from the view-
+	// space sample, then `D_world = sample_world - omni_world` picks
+	// the cube face. Populated for all lights so the kernel doesn't
+	// branch on light type to read it; only used by cube-shadow path.
+	alignas(32) float posWorldX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posWorldY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posWorldZ[DEFERRED_MAX_LIGHTS];
+	// Index into g_cubeShadowRefs for omnis with cube shadow, or -1.
+	// Mutually exclusive with shadowMapIdx (which is only meaningful
+	// for Light_SpotLight). Populated by Render_DeferredLighting from
+	// the omni's Type + CastsShadow flag + cube allocation.
+	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -2716,6 +2730,9 @@ void Render_DeferredLighting() {
 		lights.posX[numLights]   = w.x;
 		lights.posY[numLights]   = w.y;
 		lights.posZ[numLights]   = w.z;
+		lights.posWorldX[numLights] = O->IPos.x;
+		lights.posWorldY[numLights] = O->IPos.y;
+		lights.posWorldZ[numLights] = O->IPos.z;
 		lights.colB[numLights]   = O->L.B * O->ISize;
 		lights.colG[numLights]   = O->L.G * O->ISize;
 		lights.colR[numLights]   = O->L.R * O->ISize;
@@ -2748,13 +2765,29 @@ void Render_DeferredLighting() {
 		// Map this light to its shadow map (or -1). Only set when
 		// shadows are enabled — otherwise the kernel must skip the
 		// shadow test (and the shadow maps are stale-empty anyway).
-		int32_t smIdx = -1;
+		// Spot path: scan g_shadowMaps for a 2D entry (cubeFace<0).
+		// Cube-omni path: scan g_cubeShadowRefs for the matching omni.
+		int32_t smIdx     = -1;
+		int32_t cubeIdx   = -1;
 		if (fds::FeatureFlags::shadows() && (O->Flags & Omni_CastsShadow)) {
-			for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
-				if (g_shadowMaps[i].omni == O) { smIdx = int32_t(i); break; }
+			if (O->Type == Light_SpotLight) {
+				for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+					if (g_shadowMaps[i].omni == O && g_shadowMaps[i].cubeFace < 0) {
+						smIdx = int32_t(i);
+						break;
+					}
+				}
+			} else if (O->Type == Light_Omni) {
+				for (size_t i = 0; i < g_cubeShadowRefs.size(); ++i) {
+					if (g_cubeShadowRefs[i].omni == O) {
+						cubeIdx = int32_t(i);
+						break;
+					}
+				}
 			}
 		}
-		lights.shadowMapIdx[numLights] = smIdx;
+		lights.shadowMapIdx[numLights]  = smIdx;
+		lights.cubeShadowIdx[numLights] = cubeIdx;
 		++numLights;
 	}
 
