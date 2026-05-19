@@ -81,7 +81,7 @@ std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
 
-void Render_DeferredShadowMaps(Scene *Sc)
+void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 {
 	if (!shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
@@ -131,6 +131,11 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
+		// staticOnly inverts the filter:
+		//   false (per-frame): skip static lights (already baked)
+		//   true  (one-shot bake): skip dynamic lights
+		const bool isStatic = (O->Flags & Omni_StaticShadow) != 0;
+		if (isStatic != staticOnly) continue;
 		// Accept Light_SpotLight as before, plus Light_Omni entries that
 		// are CubeShadowRef faces (sm.cubeFace >= 0). Plain Light_Omni
 		// without cubeFace tagged (=-1) is skipped — those omnis didn't
@@ -295,6 +300,9 @@ void Render_DeferredShadowMaps(Scene *Sc)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
+		// Same staticOnly filter as Phase A.
+		const bool isStaticB = (O->Flags & Omni_StaticShadow) != 0;
+		if (isStaticB != staticOnly) continue;
 		// Same filter as Phase A: spots, and cube-face entries.
 		if (O->Type == Light_SpotLight) {
 			// ok
@@ -355,6 +363,7 @@ void Render_DeferredShadowMaps(Scene *Sc)
 	if (sProfShadow) {
 		sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
 	}
+
 
 	if (sProfShadow) {
 		++sFrameIdx;

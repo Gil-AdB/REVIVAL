@@ -1932,7 +1932,7 @@ void Initialize_City()
 		                       float dx, float dy, float dz,
 		                       float r, float g, float b,
 		                       float range) {
-			fds::MakeSpotLight(
+			Omni *O = fds::MakeSpotLight(
 				CitySc,
 				r, g, b,
 				/*intensity*/3.0f, range,
@@ -1941,6 +1941,10 @@ void Initialize_City()
 				/*hot=*/12.0f, /*outer=*/35.0f,
 				/*shadowMapRes=*/512,
 				/*castsShadow=*/true);
+			// Streetlights are static — shadow map can be baked once
+			// at init and reused every frame (skips per-frame depth
+			// pass for this light).
+			O->Flags |= Omni_StaticShadow;
 		};
 		// Lamppost spread, scaled to city's ~1cm/unit. Streetlights at
 		// y=2000 (above road). Angled inward-and-down so cones cross
@@ -1975,7 +1979,7 @@ void Initialize_City()
 			O->rRange = 1.0f / O->IRange;
 			O->IPos   = Vector(0, 600, 500);
 			O->Type   = Light_Omni;
-			O->Flags  = Omni_Active | Omni_CastsShadow;
+			O->Flags  = Omni_Active | Omni_CastsShadow | Omni_StaticShadow;
 			O->shadowMapRes = 256;  // 256² per face × 6 = 1.5 MB total
 			// Splines so Animate_Objects doesn't crash. Single-key
 			// constants for static position/size/range.
@@ -1996,7 +2000,7 @@ void Initialize_City()
 			O->Next = CitySc->OmniHead;
 			if (CitySc->OmniHead) CitySc->OmniHead->Prev = O;
 			CitySc->OmniHead = O;
-			fprintf(stderr, "[CITY] installed 1 shadow-casting cube omni at (0,1500,500)\n");
+			fprintf(stderr, "[CITY] installed 1 shadow-casting cube omni at (0,600,500)\n");
 		}
 
 		// Allocate shadow maps for the spots we just installed (they
@@ -2010,6 +2014,10 @@ void Initialize_City()
 		if (fds::FeatureFlags::shadows()) {
 			ShadowMaps_Rebuild(CitySc, 512);
 			CubeShadowMaps_Rebuild(CitySc, 256);
+			// Static lights baked here, alongside the reflection bake
+			// hidden behind Glato — no demo-start delay. Per-frame
+			// Render_DeferredShadowMaps skips Omni_StaticShadow.
+			ShadowMaps_BakeStatic(CitySc);
 		}
 	}
 }

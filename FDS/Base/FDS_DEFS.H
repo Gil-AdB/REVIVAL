@@ -359,6 +359,15 @@ enum OmniFlags
 	// kernel samples it to gate the light's contribution per pixel.
 	// Only consulted in deferred mode. Set by Initialize_<scene>.
 	Omni_CastsShadow = 1 << 7,
+
+	// Light is static — its position, direction, and the world geometry
+	// around it never change. The shadow map can be rendered ONCE at
+	// scene init (or first-frame) and reused for every subsequent frame,
+	// skipping the per-frame depth pre-pass for this light. Big perf
+	// win for city's streetlights (which don't move) and ambient
+	// shadow-casting omnis. Don't set for animated lights (greets
+	// robot spots, vehicle headlights — they need per-frame re-bake).
+	Omni_StaticShadow = 1 << 8,
 };
 
 //MACROS

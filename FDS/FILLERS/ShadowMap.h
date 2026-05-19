@@ -91,6 +91,17 @@ extern std::vector<ShadowMap> g_shadowMaps;
 // resize. `res` is the square edge length (e.g. 512).
 void ShadowMaps_Rebuild(struct Scene *Sc, int res);
 
+// One-shot shadow-map bake for Omni_StaticShadow lights. Renders
+// each static shadow map exactly once into g_shadowMaps. Called
+// from scene init (after ShadowMaps_Rebuild + CubeShadowMaps_Rebuild)
+// so the per-frame Render_DeferredShadowMaps can skip these lights
+// entirely. Hides in the existing scene-init bake window (city's
+// Glato cube-map bake, etc.) so it doesn't delay the demo start.
+//
+// Dynamic lights (no Omni_StaticShadow flag) are unaffected — they
+// continue to rebake every frame via Render_DeferredShadowMaps.
+void ShadowMaps_BakeStatic(struct Scene *Sc);
+
 // ─── Cube shadow maps (for Light_Omni shadow casters) ────────────────
 //
 // An omnidirectional light radiates in all directions, so a single

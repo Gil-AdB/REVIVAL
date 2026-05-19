@@ -114,6 +114,24 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 	}
 }
 
+// Forward decl — defined in RENDER/Shadows.cpp.
+void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly);
+
+void ShadowMaps_BakeStatic(Scene *Sc)
+{
+	// One-shot: render shadow maps for Omni_StaticShadow lights. After
+	// this returns, Render_DeferredShadowMaps's per-frame skip filter
+	// avoids re-rendering them. Intended to be called from scene init,
+	// hiding inside the existing init bake window (city's Glato cube
+	// bake, etc.) so the demo start time is unaffected.
+	Render_DeferredShadowMaps(Sc, /*staticOnly=*/true);
+	int n = 0;
+	for (Omni *O = Sc ? Sc->OmniHead : nullptr; O; O = O->Next) {
+		if ((O->Flags & Omni_CastsShadow) && (O->Flags & Omni_StaticShadow)) ++n;
+	}
+	std::fprintf(stderr, "[SHADOW] ShadowMaps_BakeStatic: %d static light(s) baked\n", n);
+}
+
 // ShadowBarry: tile-based AVX2 depth+polyId rasterizer modeled on
 // TheOtherBarry. Walks 8×8 tiles via super-tile (4 tiles per side =
 // 32px) hierarchical coverage culling. Per-tile fast path skips edge

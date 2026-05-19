@@ -413,12 +413,19 @@ enum class RenderPath {
 void Render(RenderPath path = RenderPath::Default);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
-// Per-frame shadow-map depth pre-pass. Walks Omni_CastsShadow lights,
-// builds a temp camera per light, re-transforms the scene into the
-// light's POV, depth-rasters into ShadowMap::depth. Globals saved &
-// restored; safe to call before the main Render(). Gated on env
-// FDS_SHADOWS=1. See FILLERS/ShadowMap.h.
-void Render_DeferredShadowMaps(class Scene *Sc);
+// Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a
+// temp camera per light, re-transforms the scene into the light's POV,
+// depth-rasters into ShadowMap::depth. Globals saved & restored; safe
+// to call before the main Render(). Gated on env FDS_SHADOWS=1.
+//
+// staticOnly=false (default): per-frame pass — renders dynamic shadow
+// maps (Omni_CastsShadow without Omni_StaticShadow). Static lights
+// are skipped (already baked).
+// staticOnly=true: one-shot bake of Omni_StaticShadow lights, called
+// from ShadowMaps_BakeStatic during scene init.
+//
+// See FILLERS/ShadowMap.h.
+void Render_DeferredShadowMaps(class Scene *Sc, bool staticOnly = false);
 
 // Shadow technique. Toggleable at runtime.
 enum class ShadowMode {
