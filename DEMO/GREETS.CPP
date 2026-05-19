@@ -866,6 +866,11 @@ struct GreetsScene : SceneDriver {
 		}
 		ShadowMaps_Rebuild(GreetSc, 1024);
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
+		// FLD omnis only get their final IPos via Spline_Calc_3D inside
+		// Animate_Objects (Transform.cpp:192). Without an animate tick
+		// before bake, every FLD omni has IPos=(0,0,0) — every cube map
+		// then renders from the world origin and looks identical.
+		Animate_Objects(GreetSc);
 		ShadowMaps_BakeStatic(GreetSc);
 
 		// this scene messes up at time zero
