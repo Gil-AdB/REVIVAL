@@ -67,12 +67,25 @@ void ShadowMap_ViewCycle()
             if (d < dmin) dmin = d;
             if (d > dmax) dmax = d;
         }
+        // Two cheap FNV-1a-ish content hashes — if these match across
+        // maps with the same nonzero-count, the buffers are literally
+        // byte-for-byte identical (storage bug), not just statistically
+        // similar (real geometry).
+        uint64_t pHash = 0xcbf29ce484222325ull;
+        for (uint8_t v : sm.polyId) {
+            pHash ^= v; pHash *= 0x100000001b3ull;
+        }
+        uint64_t dHash = 0xcbf29ce484222325ull;
+        for (uint16_t v : sm.depth) {
+            dHash ^= v; dHash *= 0x100000001b3ull;
+        }
         std::fprintf(stderr,
             "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d  "
-            "polyId: %zu/%zu nonzero, %d unique  depth: %zu/%zu nonzero, [%u..%u]\n",
+            "polyId: %zu/%zu nz, %d uniq, h=%016llx  depth: %zu/%zu nz, [%u..%u], h=%016llx\n",
             g_shadowViewIdx, n, omniName, sm.xres, sm.yres, int(sm.cubeFace),
-            nonZeroP, total, uniqueP,
-            nonZeroD, sm.depth.size(), unsigned(dmin), unsigned(dmax));
+            nonZeroP, total, uniqueP, (unsigned long long)pHash,
+            nonZeroD, sm.depth.size(), unsigned(dmin), unsigned(dmax),
+            (unsigned long long)dHash);
         if (sm.omni) {
             std::fprintf(stderr,
                 "              pos=(%g,%g,%g) IRange=%g\n",
