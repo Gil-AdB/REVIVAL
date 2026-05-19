@@ -816,6 +816,31 @@ struct GreetsScene : SceneDriver {
 		// makeSpotLight. With --greets-omni-shadows, also flag every
 		// FLD-loaded Light_Omni so CubeShadowMaps_Rebuild bakes a 6-face
 		// cube per omni.
+		// FLD-loaded omnis in greets all ship with IRange=0 (the FLD
+		// Range envelope is optional; FLD_CONV.CPP defaults it to a
+		// 1-key spline at 0). That kills surface lighting (range2=0 →
+		// rejects every pixel), halo bounds, and shadow FZP. Patch to
+		// the flag-controlled default so they actually contribute.
+		const float omniDefRange = fds::FeatureFlags::greets_omni_default_range();
+		if (omniDefRange > 0.0f) {
+			int patched = 0;
+			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+				if (O->Type != Light_Omni) continue;
+				if (O->IRange > 0.0f) continue;
+				O->IRange = omniDefRange;
+				O->rRange = 1.0f / omniDefRange;
+				if (O->Range.NumKeys >= 1 && O->Range.Keys) {
+					O->Range.Keys[0].Pos.x = omniDefRange;
+				}
+				++patched;
+			}
+			if (patched > 0) {
+				std::fprintf(stderr,
+				    "[GREETS] patched IRange=%g on %d FLD omnis (had 0)\n",
+				    omniDefRange, patched);
+			}
+		}
+
 		const int omniCubeRes = std::max(16,
 		    fds::FeatureFlags::greets_omni_shadow_res());
 		int totalOmnis = 0;
