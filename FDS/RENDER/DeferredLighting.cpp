@@ -155,6 +155,13 @@ struct TileLights {
 	// has Omni_CastsShadow. Lighting kernel uses it to gate the light's
 	// contribution per pixel.
 	alignas(32) int32_t shadowMapIdx[DEFERRED_MAX_LIGHTS];
+	// World-space position of the light + cube-shadow index. Mirrors
+	// the same fields in ViewLightsSoA; see comments there. Per-tile
+	// copy so the inner pixel loop has all light state in one SoA.
+	alignas(32) float    posWorldX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    posWorldY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    posWorldZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
@@ -176,6 +183,15 @@ struct DeferredLightingCtx {
 	float                invZScale;
 	Scene               *Sc;
 	int                  waterMatID;  // -1 if no water blend
+	// view→world transform: world = viewToWorld·viewPos + cameraWorldPos.
+	// For a rotation View.Mat, viewToWorld == transpose(View.Mat).
+	// Filled once per frame in Render_DeferredLighting from View. Used
+	// by per-pixel cube-shadow sampling to compute the sample's world-
+	// space position (which then picks the cube face).
+	float                viewToWorld[3][3];
+	float                cameraWorldX;
+	float                cameraWorldY;
+	float                cameraWorldZ;
 };
 
 // File-scope ctx, populated each frame by Render_DeferredLighting and
@@ -334,6 +350,10 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float Lco = lights.cosOuter[li];
 		const uint32_t Lis = lights.isSpot[li];
 		const int32_t  Lsi = lights.shadowMapIdx[li];
+		const float    Lwx = lights.posWorldX[li];
+		const float    Lwy = lights.posWorldY[li];
+		const float    Lwz = lights.posWorldZ[li];
+		const int32_t  Lci2 = lights.cubeShadowIdx[li];
 
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
@@ -363,6 +383,10 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 					tl.cosOuter[s] = Lco;
 					tl.isSpot[s]   = Lis;
 					tl.shadowMapIdx[s] = Lsi;
+					tl.posWorldX[s] = Lwx;
+					tl.posWorldY[s] = Lwy;
+					tl.posWorldZ[s] = Lwz;
+					tl.cubeShadowIdx[s] = Lci2;
 				}
 			}
 		}
@@ -391,6 +415,10 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			tl.cosOuter[p] = -2.0f;
 			tl.isSpot[p]   = 0u;
 			tl.shadowMapIdx[p] = -1;
+			tl.posWorldX[p] = 0.0f;
+			tl.posWorldY[p] = 0.0f;
+			tl.posWorldZ[p] = 0.0f;
+			tl.cubeShadowIdx[p] = -1;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -1158,6 +1186,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// second fdiv vs `1/lenInv` — fdiv on arm64 is
 					// ~20 cycles vs fmul's 4. The compiler doesn't do
 					// this rewrite under strict FP, so spell it out.
+					//
+					// Sample's world-space position for cube-shadow
+					// face selection. One 3×3 transform + 3 adds per
+					// pixel; the result is reused across every cube-
+					// shadow omni in this pixel's tile.
+					const float sampleWorldX =
+						ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y +
+						ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+					const float sampleWorldY =
+						ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y +
+						ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+					const float sampleWorldZ =
+						ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
+						ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
 					for (int n = 0; n < tl.count; ++n) {
 						const float Lpx = tl.posX[n];
 						const float Lpy = tl.posY[n];
@@ -1299,6 +1341,70 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									}
 									if (occ >= 1.0f) continue;       // fully shadowed
 									shadowAtten = 1.0f - occ;
+								}
+							}
+						}
+
+						// Cube shadow (omni shadow caster). Mutually
+						// exclusive with the spot path above — cubeIdx<0
+						// when this light isn't a cube-shadow omni.
+						// Per-pixel: world-space sample pos is computed
+						// once for this pixel below at sampleWorldX/Y/Z;
+						// direction to omni picks the cube face, then we
+						// sample that face's 2D ShadowMap with the same
+						// PCF / bias code as spots.
+						const int32_t cubeIdx = tl.cubeShadowIdx[n];
+						if (cubeIdx >= 0 && size_t(cubeIdx) < g_cubeShadowRefs.size()) {
+							const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
+							const float dwx = sampleWorldX - cr.lightISource.x;
+							const float dwy = sampleWorldY - cr.lightISource.y;
+							const float dwz = sampleWorldZ - cr.lightISource.z;
+							const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
+							const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
+							const float lx = sm.viewToLight[0][0] * x +
+							                 sm.viewToLight[0][1] * y +
+							                 sm.viewToLight[0][2] * z +
+							                 sm.viewToLightOffset.x;
+							const float ly = sm.viewToLight[1][0] * x +
+							                 sm.viewToLight[1][1] * y +
+							                 sm.viewToLight[1][2] * z +
+							                 sm.viewToLightOffset.y;
+							const float lz = sm.viewToLight[2][0] * x +
+							                 sm.viewToLight[2][1] * y +
+							                 sm.viewToLight[2][2] * z +
+							                 sm.viewToLightOffset.z;
+							if (lz > 0.0f) {
+								const float invLZ = 1.0f / lz;
+								const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+								const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+								const int iX = int(smX);
+								const int iY = int(smY);
+								if (iX >= 0 && iX + 1 < sm.xres &&
+								    iY >= 0 && iY + 1 < sm.yres) {
+									const uint16_t *zRow0 = sm.depth.data() +
+										size_t(iY) * size_t(sm.xres);
+									const uint16_t *zRow1 = zRow0 + sm.xres;
+									const float fx = smX - float(iX);
+									const float fy = smY - float(iY);
+									const float w00 = (1.0f - fx) * (1.0f - fy);
+									const float w10 =         fx  * (1.0f - fy);
+									const float w01 = (1.0f - fx) *         fy;
+									const float w11 =         fx  *         fy;
+									int pixZenc = 0xFF80 - int(lz * sm.zScale);
+									if (pixZenc < 0) pixZenc = 0;
+									if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+									const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+									const float nDotL = dotGeo * lenInv;
+									const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+									const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
+									const int biased = pixZenc + kShadowBiasG + slopeBias;
+									float occ = 0.0f;
+									if (biased < int(zRow0[iX    ])) occ += w00;
+									if (biased < int(zRow0[iX + 1])) occ += w10;
+									if (biased < int(zRow1[iX    ])) occ += w01;
+									if (biased < int(zRow1[iX + 1])) occ += w11;
+									if (occ >= 1.0f) continue;
+									shadowAtten *= 1.0f - occ;
 								}
 							}
 						}
@@ -2853,6 +2959,16 @@ void Render_DeferredLighting() {
 	ctx.invZScale  = 1.0f / float(g_zscale);
 	ctx.Sc         = Sc;
 	ctx.waterMatID = g_deferredWaterMatID;
+	// View → world (transpose of view rotation + camera origin). Used
+	// per pixel for cube shadow sampling to convert view-space sample
+	// to world for face selection. View.Mat is a pure rotation, so
+	// transpose == inverse.
+	for (int r = 0; r < 3; ++r)
+		for (int c = 0; c < 3; ++c)
+			ctx.viewToWorld[r][c] = View->Mat[c][r];
+	ctx.cameraWorldX = View->ISource.x;
+	ctx.cameraWorldY = View->ISource.y;
+	ctx.cameraWorldZ = View->ISource.z;
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
