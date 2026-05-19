@@ -124,6 +124,14 @@ struct ViewLightsSoA {
 	// for Light_SpotLight). Populated by Render_DeferredLighting from
 	// the omni's Type + CastsShadow flag + cube allocation.
 	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_LIGHTS];
+	// Per-omni halo controls, decoupled from surface lighting. See
+	// Omni::HaloIntensity / Omni::HaloRange comments. haloDensityMul[]
+	// is the per-omni density multiplier (1.0 for legacy behavior);
+	// haloRange2[] / haloRRange[] override range2[] / rRange[] for
+	// the halo sphere bounds (falling back to those when HaloRange=0).
+	alignas(32) float    haloDensityMul[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    haloRange2    [DEFERRED_MAX_LIGHTS];
+	alignas(32) float    haloRRange    [DEFERRED_MAX_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -2886,6 +2894,14 @@ void Render_DeferredLighting() {
 		}
 		lights.shadowMapIdx[numLights]  = smIdx;
 		lights.cubeShadowIdx[numLights] = cubeIdx;
+		// Per-omni halo controls. 0 → "use legacy default":
+		//   HaloIntensity = 0 → 1.0 (multiplier no-op)
+		//   HaloRange     = 0 → IRange (same as surface lighting)
+		const float haloMul   = (O->HaloIntensity > 0.0f) ? O->HaloIntensity : 1.0f;
+		const float haloRange = (O->HaloRange     > 0.0f) ? O->HaloRange     : O->IRange;
+		lights.haloDensityMul[numLights] = haloMul;
+		lights.haloRange2    [numLights] = haloRange * haloRange;
+		lights.haloRRange    [numLights] = (haloRange > 0.0f) ? 1.0f / haloRange : 0.0f;
 		++numLights;
 	}
 
@@ -3161,10 +3177,337 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
     const uint16_t *zEnc = ZPage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
+    const bool vecPath = fds::FeatureFlags::vol_vec();
 
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
+        if (vecPath) {
+            // ─── Pixel-major SIMD ──────────────────────────────────────
+            // 8 lanes = 8 independent rays. Per-pixel setup and per-spot
+            // scalar quadratic solve are scalar (the a-sign branching is
+            // too hairy to vectorize cleanly); per-sample integration
+            // runs 8-wide across pixels. Wins via no wasted lanes at
+            // low N, independent dependency chains per lane (better
+            // OoO than 8-samples-of-one-ray batching), and per-spot
+            // setup amortized across 8 pixels. Shadow lookup stays
+            // scalar per-lane — texture gather is too expensive on CPU.
+            for (int pxBase = x1; pxBase < x2; pxBase += 8) {
+                const int pxEnd     = std::min(pxBase + 8, x2);
+                const int laneCount = pxEnd - pxBase;
+
+                alignas(32) float    Xarr[8] = {};
+                alignas(32) float    uVarr[8] = {};
+                alignas(32) uint32_t pxHashArr[8] = {};
+                alignas(32) float    zMaxArr[8] = {};
+                bool anyAlive = false;
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    const int px = pxBase + lane;
+                    const float X = (float(px) - CntrEX) * invFOVX;
+                    Xarr[lane]  = X;
+                    uVarr[lane] = X*X + Y*Y + 1.0f;
+                    uint32_t h = uint32_t(px) * 0x9E3779B9u
+                               + uint32_t(py) * 0x85EBCA6Bu
+                               + 0xCAFEBABEu;
+                    h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+                    pxHashArr[lane] = h;
+                    const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+                    const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+                    float zM = (zSurf > 0.0f) ? zSurf : zSky;
+                    if (fogZ > 0.0f && zM > fogZ) zM = fogZ;
+                    constexpr float zMin = 0.05f;
+                    if (zM > zMin) { zMaxArr[lane] = zM; anyAlive = true; }
+                }
+                if (!anyAlive) continue;
+
+                alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
+
+                for (int s = 0; s < spotCount; ++s) {
+                    const int li = spotIdx[s];
+                    // Per-batch rect cull: skip if the 8-pixel batch
+                    // (per-batch rect-cull experiment was reverted —
+                    // per-tile cull at dispatcher already does screen-
+                    // rect check; per-batch overhead didn't pay across
+                    // the city sweep.)
+                    const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+                    const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
+                    const float cosO = lights->cosOuter[li];
+                    const float cosI = lights->cosInner[li];
+                    const float r2   = lights->range2[li];
+                    const float rr   = lights->rRange[li];
+                    const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
+                    const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
+                    const float c2   = cosO * cosO;
+                    const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+
+                    alignas(32) float zLoArr[8] = {};
+                    alignas(32) float zHiArr[8] = {};
+                    alignas(32) float aliveLane[8] = {};
+                    bool spotAlive = false;
+                    for (int lane = 0; lane < laneCount; ++lane) {
+                        if (zMaxArr[lane] <= 0.0f) continue;
+                        const float X = Xarr[lane];
+                        const float uV = uVarr[lane];
+                        const float zMax = zMaxArr[lane];
+                        constexpr float zMin = 0.05f;
+                        const float DV = Dx*X + Dy*Y + Dz;
+                        const float VP = X*Px + Y*Py_l + Pz;
+                        const float a  = DV*DV - c2 * uV;
+                        const float b  = 2.0f * (c2 * VP - DV * DP);
+                        const float cq = DP*DP - c2 * PP;
+                        const float sphereC    = PP - r2;
+                        const float sphereDisc = VP*VP - uV * sphereC;
+                        if (sphereDisc < 0.0f) continue;
+                        const float sphereSq = std::sqrt(sphereDisc);
+                        const float invUV    = 1.0f / uV;
+                        const float zSphLo   = (VP - sphereSq) * invUV;
+                        const float zSphHi   = (VP + sphereSq) * invUV;
+                        float zLo, zHi;
+                        if (a < -1e-8f) {
+                            const float disc = b*b - 4.0f*a*cq;
+                            if (disc < 0.0f) continue;
+                            const float sq = std::sqrt(disc);
+                            const float inv2a = 1.0f / (2.0f * a);
+                            const float r1 = (-b - sq) * inv2a;
+                            const float r2_ = (-b + sq) * inv2a;
+                            zLo = std::min(r1, r2_);
+                            zHi = std::max(r1, r2_);
+                        } else if (a > 1e-8f) {
+                            const float disc = b*b - 4.0f*a*cq;
+                            if (disc < 0.0f) {
+                                zLo = zMin;
+                                zHi = zMax;
+                            } else {
+                                const float sq = std::sqrt(disc);
+                                const float inv2a = 1.0f / (2.0f * a);
+                                const float root1 = (-b - sq) * inv2a;
+                                const float root2 = (-b + sq) * inv2a;
+                                const float r1Q = std::min(root1, root2);
+                                const float r2Q = std::max(root1, root2);
+                                if (DV > 1e-6f) {
+                                    zLo = std::max(r2Q, zMin);
+                                    zHi = zMax;
+                                } else if (DV < -1e-6f) {
+                                    zLo = zMin;
+                                    zHi = std::min(r1Q, zMax);
+                                } else {
+                                    continue;
+                                }
+                                if (zHi <= zLo) continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                        if (zLo < zSphLo) zLo = zSphLo;
+                        if (zHi > zSphHi) zHi = zSphHi;
+                        if (zLo < zMin)   zLo = zMin;
+                        if (zHi <= zLo)   continue;
+                        if (zLo >= zMax)  continue;
+                        if (std::fabs(DV) > 1e-6f) {
+                            const float zFwd = DP / DV;
+                            if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
+                            else           { if (zHi > zFwd) zHi = zFwd; }
+                            if (zLo >= zHi) continue;
+                        }
+                        zLoArr[lane]    = zLo;
+                        zHiArr[lane]    = zHi;
+                        aliveLane[lane] = 1.0f;
+                        spotAlive = true;
+                    }
+                    if (!spotAlive) continue;
+
+                    const int32_t smIdx = lights->shadowMapIdx[li];
+                    const ShadowMap *sm = (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size())
+                                          ? &g_shadowMaps[smIdx] : nullptr;
+                    float sm_m00=0, sm_m01=0, sm_m02=0, sm_ox=0;
+                    float sm_m10=0, sm_m11=0, sm_m12=0, sm_oy=0;
+                    float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
+                    float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
+                    float sm_zScale=0;
+                    const uint16_t *sm_depth = nullptr;
+                    int sm_xres=0, sm_yres=0;
+                    if (sm) {
+                        sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
+                        sm_m10=sm->viewToLight[1][0]; sm_m11=sm->viewToLight[1][1]; sm_m12=sm->viewToLight[1][2]; sm_oy=sm->viewToLightOffset.y;
+                        sm_m20=sm->viewToLight[2][0]; sm_m21=sm->viewToLight[2][1]; sm_m22=sm->viewToLight[2][2]; sm_oz=sm->viewToLightOffset.z;
+                        sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
+                        sm_perspX=sm->perspX; sm_perspY=sm->perspY;
+                        sm_zScale=sm->zScale;
+                        sm_depth=sm->depth.data();
+                        sm_xres=sm->xres; sm_yres=sm->yres;
+                    }
+
+                    alignas(32) float dzArr[8] = {}, invDzArr[8] = {}, fadeStartArr[8] = {};
+                    for (int lane = 0; lane < 8; ++lane) {
+                        if (aliveLane[lane] == 0.0f) continue;
+                        const float d = (zHiArr[lane] - zLoArr[lane]) * inv_N;
+                        dzArr[lane]        = d;
+                        invDzArr[lane]     = 1.0f / d;
+                        fadeStartArr[lane] = zMaxArr[lane] - d;
+                    }
+
+                    const __m256 vX_v        = _mm256_load_ps(Xarr);
+                    const __m256 vY_v        = _mm256_set1_ps(Y);
+                    const __m256 vZMax_v     = _mm256_load_ps(zMaxArr);
+                    const __m256 vZLo_v      = _mm256_load_ps(zLoArr);
+                    const __m256 vDz_v       = _mm256_load_ps(dzArr);
+                    const __m256 vInvDz_v    = _mm256_load_ps(invDzArr);
+                    const __m256 vFadeStart_v= _mm256_load_ps(fadeStartArr);
+                    const __m256 vAlive_v    = _mm256_load_ps(aliveLane);
+                    const __m256 vPx_v       = _mm256_set1_ps(Px);
+                    const __m256 vPy_v       = _mm256_set1_ps(Py_l);
+                    const __m256 vPz_v       = _mm256_set1_ps(Pz);
+                    const __m256 vDx_v       = _mm256_set1_ps(Dx);
+                    const __m256 vDy_v       = _mm256_set1_ps(Dy);
+                    const __m256 vDz_dir_v   = _mm256_set1_ps(Dz);
+                    const __m256 vR2_v       = _mm256_set1_ps(r2);
+                    const __m256 vRR_v       = _mm256_set1_ps(rr);
+                    const __m256 vCosO_v     = _mm256_set1_ps(cosO);
+                    const __m256 vCosI_v     = _mm256_set1_ps(cosI);
+                    const __m256 vInvCIO_v   = _mm256_set1_ps(inv_cosI_minus_cosO);
+                    const __m256 vInvFogZ_v  = _mm256_set1_ps(invFogZ);
+                    const __m256 vZero_v     = _mm256_setzero_ps();
+                    const __m256 vOne_v      = _mm256_set1_ps(1.0f);
+                    const __m256 vTwo_v      = _mm256_set1_ps(2.0f);
+                    const __m256 vThree_v    = _mm256_set1_ps(3.0f);
+                    const __m256 vEps_v      = _mm256_set1_ps(1e-6f);
+                    const __m256 vPt05_v     = _mm256_set1_ps(0.05f);
+                    const __m256 mAlive      = _mm256_cmp_ps(vAlive_v, vZero_v, _CMP_GT_OQ);
+                    __m256 accV = vZero_v;
+
+                    for (int k = 0; k < N_SAMPLES; ++k) {
+                        alignas(32) float fracBuf[8];
+                        for (int lane = 0; lane < 8; ++lane) {
+                            const uint32_t h = pxHashArr[lane]
+                                + uint32_t(k) * 0x9E3779B9u
+                                + uint32_t(s) * 0x6F4A7531u;
+                            fracBuf[lane] = float(h >> 16) * (1.0f / 65536.0f);
+                        }
+                        const __m256 vFrac = _mm256_load_ps(fracBuf);
+
+                        const __m256 vKf = _mm256_set1_ps(float(k));
+                        const __m256 vZ  = _mm256_fmadd_ps(
+                            _mm256_add_ps(vKf, vFrac), vDz_v, vZLo_v);
+
+                        __m256 mask = _mm256_and_ps(mAlive,
+                            _mm256_cmp_ps(vZ, vZMax_v, _CMP_LT_OQ));
+
+                        const __m256 mFade   = _mm256_cmp_ps(vZ, vFadeStart_v, _CMP_GT_OQ);
+                        const __m256 fadeVal = _mm256_mul_ps(_mm256_sub_ps(vZMax_v, vZ), vInvDz_v);
+                        const __m256 surfaceFade = _mm256_blendv_ps(vOne_v, fadeVal, mFade);
+
+                        const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(vZ, vX_v), vPx_v);
+                        const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(vZ, vY_v), vPy_v);
+                        const __m256 Wz = _mm256_sub_ps(vZ, vPz_v);
+                        const __m256 W2 = _mm256_fmadd_ps(Wx, Wx,
+                                           _mm256_fmadd_ps(Wy, Wy,
+                                            _mm256_mul_ps(Wz, Wz)));
+                        mask = _mm256_and_ps(mask, _mm256_cmp_ps(W2, vR2_v, _CMP_LE_OQ));
+                        mask = _mm256_and_ps(mask, _mm256_cmp_ps(W2, vEps_v, _CMP_GT_OQ));
+
+                        const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
+                                           _mm256_fmadd_ps(vDy_v, Wy,
+                                            _mm256_mul_ps(vDz_dir_v, Wz)));
+                        mask = _mm256_and_ps(mask, _mm256_cmp_ps(DW, vZero_v, _CMP_GT_OQ));
+
+                        const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
+                        const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                        const __m256 dist   = _mm256_mul_ps(W2, invLen);
+                        const __m256 cosT   = _mm256_mul_ps(DW, invLen);
+                        mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
+
+                        __m256 t_v = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
+                        t_v = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_v));
+                        const __m256 smooth = _mm256_mul_ps(
+                            _mm256_mul_ps(t_v, t_v),
+                            _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t_v)));
+                        const __m256 mInner    = _mm256_cmp_ps(cosT, vCosI_v, _CMP_GE_OQ);
+                        const __m256 coneAtten = _mm256_blendv_ps(smooth, vOne_v, mInner);
+
+                        const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
+                        const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
+                        const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
+                        const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                        const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
+
+                        __m256 fogAtten = vOne_v;
+                        if (invFogZ > 0.0f) {
+                            fogAtten = _mm256_sub_ps(vOne_v, _mm256_mul_ps(vZ, vInvFogZ_v));
+                            fogAtten = _mm256_max_ps(vZero_v, fogAtten);
+                            fogAtten = _mm256_mul_ps(fogAtten, fogAtten);
+                        }
+
+                        if (sm) {
+                            alignas(32) float maskArr[8], zArr[8];
+                            _mm256_store_ps(maskArr, mask);
+                            _mm256_store_ps(zArr, vZ);
+                            alignas(32) float shadowMul[8] =
+                                {1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f};
+                            for (int lane = 0; lane < 8; ++lane) {
+                                if (maskArr[lane] == 0) continue;
+                                const float zL = zArr[lane];
+                                const float Xl = Xarr[lane];
+                                const float zX = zL * Xl, zY = zL * Y;
+                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zL + sm_ox;
+                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zL + sm_oy;
+                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zL + sm_oz;
+                                if (lz <= 0.0f) continue;
+                                const float invLZ = 1.0f / lz;
+                                const float smX = sm_cntrX + sm_perspX * lx * invLZ;
+                                const float smY = sm_cntrY - sm_perspY * ly * invLZ;
+                                const int iX = int(smX), iY = int(smY);
+                                if (uint32_t(iX) >= uint32_t(sm_xres) ||
+                                    uint32_t(iY) >= uint32_t(sm_yres)) continue;
+                                int pixZ = 0xFF80 - int(lz * sm_zScale);
+                                if (pixZ < 0) pixZ = 0;
+                                if (pixZ > 0xFFFF) pixZ = 0xFFFF;
+                                const int biased = pixZ + 128;
+                                const uint16_t shadowZ =
+                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                if (biased < int(shadowZ)) shadowMul[lane] = 0.0f;
+                            }
+                            const __m256 vShad = _mm256_load_ps(shadowMul);
+                            mask = _mm256_and_ps(mask,
+                                _mm256_cmp_ps(vShad, _mm256_set1_ps(0.5f), _CMP_GT_OQ));
+                        }
+
+                        __m256 contrib = _mm256_mul_ps(
+                            _mm256_mul_ps(coneAtten, distAtten),
+                            _mm256_mul_ps(fogAtten, surfaceFade));
+                        contrib = _mm256_and_ps(contrib, mask);
+                        accV = _mm256_add_ps(accV, contrib);
+                    }
+
+                    alignas(32) float accArr[8];
+                    _mm256_store_ps(accArr, accV);
+                    const float colB = lights->colB[li];
+                    const float colG = lights->colG[li];
+                    const float colR = lights->colR[li];
+                    for (int lane = 0; lane < 8; ++lane) {
+                        if (accArr[lane] <= 0.0f) continue;
+                        const float w = accArr[lane] * density;
+                        accB[lane] += w * colB;
+                        accG[lane] += w * colG;
+                        accR[lane] += w * colR;
+                    }
+                }
+
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    if (accB[lane] <= 0.0f && accG[lane] <= 0.0f && accR[lane] <= 0.0f) continue;
+                    const int px = pxBase + lane;
+                    const size_t i = row + size_t(px);
+                    const dword pix = out[i];
+                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane]);
+                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane]);
+                    int newB = int( pix        & 0xFF) + int(accB[lane]);
+                    if (newR > 255) newR = 255;
+                    if (newG > 255) newG = 255;
+                    if (newB > 255) newB = 255;
+                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                             |  dword(newB)        | 0xFF000000u;
+                }
+            }
+        } else {
         for (int px = x1; px < x2; ++px) {
             const float X = (float(px) - CntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
@@ -3446,6 +3789,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
             out[i] = (dword(newR) << 16) | (dword(newG) << 8)
                      |  dword(newB)        | 0xFF000000u;
         }
+        }
     }
 }
 
@@ -3650,10 +3994,467 @@ static void Render_OmniHalos_Tile(
     const uint16_t *zEnc = ZPage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
+    const bool vecPath = fds::FeatureFlags::vol_vec();
+    const bool analyticHalo = fds::FeatureFlags::vol_halo_analytic();
+
+    // ─── Analytic halo path ────────────────────────────────────────────
+    // For each pixel/omni, the in-sphere line integral of inverse-square
+    // attenuation has a closed form: ∫1/(αz²+βz+γ)dz = (2/D)·arctan
+    // ((2αz+β)/D) where D = sqrt(4αγ−β²). We drop the original (1-d/r)²
+    // cutoff term (which would require integrating √(quadratic) and has
+    // no elementary form) — visually this means a sharper boundary at
+    // the omni's range edge instead of a soft fade. For a glow effect
+    // it's acceptable; for accurate medium-density attenuation use the
+    // ray-march path (--no-vol_halo_analytic).
+    //
+    // Cost per pixel/omni: ~10 fmuls + 1 atan + 1 sqrt + 1 div instead
+    // of N×30 ops. Scalar atan is ~10ns on M-series; that's still <1ns
+    // per useful pixel-pass after the per-pixel setup.
+    if (analyticHalo && vecPath) {
+        // ── Pixel-major SIMD analytic halo ──────────────────────────
+        // Outer: per 8-pixel batch. Per-lane scalar sphere intersection
+        // (has a sphereDisc<0 reject branch), then 8-wide vec analytic
+        // integral via atan_approx_x8.
+        for (int py = y1; py < y2; ++py) {
+            const float Y = (CntrEY - float(py)) * invFOVY;
+            const size_t row = size_t(py) * size_t(XRes);
+            for (int pxBase = x1; pxBase < x2; pxBase += 8) {
+                const int pxEnd     = std::min(pxBase + 8, x2);
+                const int laneCount = pxEnd - pxBase;
+
+                alignas(32) float Xarr[8] = {}, uVarr[8] = {}, zMaxArr[8] = {};
+                bool anyAlive = false;
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    const int px = pxBase + lane;
+                    const float X = (float(px) - CntrEX) * invFOVX;
+                    Xarr[lane]  = X;
+                    uVarr[lane] = X*X + Y*Y + 1.0f;
+                    const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+                    const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+                    float zM = (zSurf > 0.0f) ? zSurf : zSky;
+                    if (fogZ > 0.0f && zM > fogZ) zM = fogZ;
+                    constexpr float zMin = 0.05f;
+                    if (zM > zMin) { zMaxArr[lane] = zM; anyAlive = true; }
+                }
+                if (!anyAlive) continue;
+
+                alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
+
+                for (int o = 0; o < omniCount; ++o) {
+                    const int li = omniIdx[o];
+                    const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+                    // Halo uses per-omni halo*[] (decoupled from surface
+                    // range/rRange). HaloRange=0 in the Omni struct
+                    // falls back to IRange — handled at SoA build time.
+                    const float r2 = lights->haloRange2[li];
+                    const float rr = lights->haloRRange[li];
+                    const float perOmniDensity = density * lights->haloDensityMul[li];
+                    const float PP = Px*Px + Py_l*Py_l + Pz*Pz;
+                    const float rr2 = rr * rr;
+
+                    // Per-lane scalar sphere bounds → zLoArr, zHiArr.
+                    alignas(32) float zLoArr[8] = {}, zHiArr[8] = {};
+                    alignas(32) float aliveLane[8] = {};
+                    bool omniAlive = false;
+                    for (int lane = 0; lane < laneCount; ++lane) {
+                        if (zMaxArr[lane] <= 0.0f) continue;
+                        const float X = Xarr[lane];
+                        const float uV = uVarr[lane];
+                        const float zMax = zMaxArr[lane];
+                        constexpr float zMin = 0.05f;
+                        const float VP = X*Px + Y*Py_l + Pz;
+                        const float sphereC    = PP - r2;
+                        const float sphereDisc = VP*VP - uV * sphereC;
+                        if (sphereDisc < 0.0f) continue;
+                        const float sphereSq = std::sqrt(sphereDisc);
+                        const float invUV = 1.0f / uV;
+                        float zLo = (VP - sphereSq) * invUV;
+                        float zHi = (VP + sphereSq) * invUV;
+                        if (zLo < zMin) zLo = zMin;
+                        if (zHi > zMax) zHi = zMax;
+                        if (zHi <= zLo) continue;
+                        zLoArr[lane] = zLo;
+                        zHiArr[lane] = zHi;
+                        aliveLane[lane] = 1.0f;
+                        omniAlive = true;
+                    }
+                    if (!omniAlive) continue;
+
+                    // 8-wide vec: alpha, beta, gamma → D, invD → arg → atan.
+                    const __m256 vY        = _mm256_set1_ps(Y);
+                    const __m256 vX_v      = _mm256_load_ps(Xarr);
+                    const __m256 vUv       = _mm256_load_ps(uVarr);
+                    const __m256 vZLo      = _mm256_load_ps(zLoArr);
+                    const __m256 vZHi      = _mm256_load_ps(zHiArr);
+                    const __m256 vAlive_v  = _mm256_load_ps(aliveLane);
+                    const __m256 vPx       = _mm256_set1_ps(Px);
+                    const __m256 vPy       = _mm256_set1_ps(Py_l);
+                    const __m256 vPz       = _mm256_set1_ps(Pz);
+                    const __m256 vRR2      = _mm256_set1_ps(rr2);
+                    const __m256 vPP       = _mm256_set1_ps(PP);
+                    const __m256 vZero     = _mm256_setzero_ps();
+                    const __m256 vOne      = _mm256_set1_ps(1.0f);
+                    const __m256 vNegTwo   = _mm256_set1_ps(-2.0f);
+                    const __m256 vFour     = _mm256_set1_ps(4.0f);
+                    const __m256 vPt05     = _mm256_set1_ps(0.05f);
+                    const __m256 mAlive    = _mm256_cmp_ps(vAlive_v, vZero, _CMP_GT_OQ);
+
+                    // VP = X·Px + Y·Py + Pz, per lane (X varies)
+                    const __m256 vVP = _mm256_fmadd_ps(vX_v, vPx,
+                                       _mm256_fmadd_ps(vY, vPy, vPz));
+
+                    // α = rr²·uV, β = -2·rr²·VP, γ = rr²·PP + 0.05
+                    const __m256 vAlpha = _mm256_mul_ps(vRR2, vUv);
+                    const __m256 vBeta  = _mm256_mul_ps(_mm256_mul_ps(vNegTwo, vRR2), vVP);
+                    const __m256 vGamma = _mm256_fmadd_ps(vRR2, vPP, vPt05);
+                    // discQ = 4αγ − β²
+                    const __m256 vDiscQ = _mm256_fmsub_ps(_mm256_mul_ps(vFour, vAlpha), vGamma,
+                                                          _mm256_mul_ps(vBeta, vBeta));
+                    // Mask out lanes where discQ ≤ 0 (defensive — should be
+                    // positive since sphere intersects ray).
+                    const __m256 mDisc = _mm256_cmp_ps(vDiscQ, vZero, _CMP_GT_OQ);
+                    const __m256 vMask = _mm256_and_ps(mAlive, mDisc);
+                    const __m256 vSafeDisc = _mm256_blendv_ps(vOne, vDiscQ, vMask);
+                    const __m256 vSqrtDisc = _mm256_sqrt_ps(vSafeDisc);
+                    const __m256 vInvD = _mm256_div_ps(vOne, vSqrtDisc);
+
+                    // argHi = (2α·zHi + β) · invD, similarly argLo
+                    const __m256 vTwoA = _mm256_add_ps(vAlpha, vAlpha);
+                    const __m256 vArgHi = _mm256_mul_ps(vInvD,
+                                          _mm256_fmadd_ps(vTwoA, vZHi, vBeta));
+                    const __m256 vArgLo = _mm256_mul_ps(vInvD,
+                                          _mm256_fmadd_ps(vTwoA, vZLo, vBeta));
+
+                    // integral = 2·invD · (atan(argHi) − atan(argLo))
+                    const __m256 vAtanHi = atan_approx_x8(vArgHi);
+                    const __m256 vAtanLo = atan_approx_x8(vArgLo);
+                    const __m256 vIntegral = _mm256_mul_ps(
+                        _mm256_add_ps(vInvD, vInvD),
+                        _mm256_sub_ps(vAtanHi, vAtanLo));
+
+                    // w = integral · density · N / interval
+                    const __m256 vIntervalLen = _mm256_sub_ps(vZHi, vZLo);
+                    const __m256 vDensityN    = _mm256_set1_ps(density * float(N_SAMPLES));
+                    const __m256 vSafeLen     = _mm256_blendv_ps(vOne, vIntervalLen, vMask);
+                    const __m256 vW = _mm256_mul_ps(
+                        _mm256_mul_ps(vIntegral, vDensityN),
+                        _mm256_div_ps(vOne, vSafeLen));
+                    const __m256 vWMasked = _mm256_and_ps(vW, vMask);
+
+                    alignas(32) float wArr[8];
+                    _mm256_store_ps(wArr, vWMasked);
+                    const float colR = lights->colR[li];
+                    const float colG = lights->colG[li];
+                    const float colB = lights->colB[li];
+                    for (int lane = 0; lane < 8; ++lane) {
+                        const float w = wArr[lane];
+                        if (w <= 0.0f) continue;
+                        accR[lane] += w * colR;
+                        accG[lane] += w * colG;
+                        accB[lane] += w * colB;
+                    }
+                }
+
+                // Bayer-4x4 dither pattern (in [-0.5, +0.5)) — breaks
+                // the visible color-banding that the smooth analytic
+                // integral otherwise quantizes into when int-truncating
+                // small floating-point contributions to 8-bit channels.
+                // 16 stable per-pixel offsets (cheap, deterministic, no
+                // flicker). Same pattern reused below for the scalar
+                // analytic path.
+                static constexpr float kBayer4[16] = {
+                    -0.46875f, +0.03125f, -0.34375f, +0.15625f,
+                    +0.28125f, -0.21875f, +0.40625f, -0.09375f,
+                    -0.28125f, +0.21875f, -0.40625f, +0.09375f,
+                    +0.46875f, -0.03125f, +0.34375f, -0.15625f,
+                };
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    if (accR[lane] <= 0.0f && accG[lane] <= 0.0f && accB[lane] <= 0.0f) continue;
+                    const int px = pxBase + lane;
+                    const float d = kBayer4[(py & 3) * 4 + (px & 3)];
+                    const size_t i = row + size_t(px);
+                    const dword pix = out[i];
+                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane] + 0.5f + d);
+                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane] + 0.5f + d);
+                    int newB = int( pix        & 0xFF) + int(accB[lane] + 0.5f + d);
+                    if (newR > 255) newR = 255;
+                    if (newG > 255) newG = 255;
+                    if (newB > 255) newB = 255;
+                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                           |  dword(newB)        | 0xFF000000u;
+                }
+            }
+        }
+        return;
+    }
+
+    if (analyticHalo) {
+        // Scalar fallback (analytic + scalar atan_approx).
+        for (int py = y1; py < y2; ++py) {
+            const float Y = (CntrEY - float(py)) * invFOVY;
+            const size_t row = size_t(py) * size_t(XRes);
+            for (int px = x1; px < x2; ++px) {
+                const float X = (float(px) - CntrEX) * invFOVX;
+                const float uV = X*X + Y*Y + 1.0f;
+
+                const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+                const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+                float zMax = (zSurf > 0.0f) ? zSurf : zSky;
+                if (fogZ > 0.0f && zMax > fogZ) zMax = fogZ;
+                constexpr float zMin = 0.05f;
+                if (zMax <= zMin) continue;
+
+                float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+                for (int o = 0; o < omniCount; ++o) {
+                    const int li = omniIdx[o];
+                    const float Px = lights->posX[li], Py = lights->posY[li], Pz = lights->posZ[li];
+                    const float r2 = lights->haloRange2[li];
+                    const float rr = lights->haloRRange[li];
+                    const float perOmniDensity = density * lights->haloDensityMul[li];
+                    const float VP = X*Px + Y*Py + Pz;
+                    const float PP = Px*Px + Py*Py + Pz*Pz;
+
+                    // Sphere bounds (same as ray-march path).
+                    const float sphereC    = PP - r2;
+                    const float sphereDisc = VP*VP - uV * sphereC;
+                    if (sphereDisc < 0.0f) continue;
+                    const float sphereSq = std::sqrt(sphereDisc);
+                    const float invUV    = 1.0f / uV;
+                    float zLo = (VP - sphereSq) * invUV;
+                    float zHi = (VP + sphereSq) * invUV;
+                    if (zLo < zMin) zLo = zMin;
+                    if (zHi > zMax) zHi = zMax;
+                    if (zHi <= zLo) continue;
+
+                    // Quadratic d²(z) = (zV - P)·(zV - P) = uV·z² - 2·VP·z + PP.
+                    // Inverse-square attenuation: 1/((rr·d)² + 0.05)
+                    //   = 1/(rr²·d² + 0.05) = 1/(α·z² + β·z + γ)
+                    // with α = rr²·uV, β = -2·rr²·VP, γ = rr²·PP + 0.05.
+                    // Discriminant 4αγ − β² simplifies via 4·rr²·(rr²·uV·PP + 0.05·uV − rr²·VP²).
+                    // Since the omni range sphere intersects the ray, the
+                    // discriminant is positive (else sphereDisc<0 would
+                    // have fired above).
+                    const float rr2  = rr * rr;
+                    const float alpha = rr2 * uV;
+                    const float beta  = -2.0f * rr2 * VP;
+                    const float gamma = rr2 * PP + 0.05f;
+                    const float discQ = 4.0f * alpha * gamma - beta * beta;
+                    if (discQ <= 0.0f) continue;
+                    const float D    = std::sqrt(discQ);
+                    const float invD = 1.0f / D;
+                    const float argHi = (2.0f * alpha * zHi + beta) * invD;
+                    const float argLo = (2.0f * alpha * zLo + beta) * invD;
+                    const float integral = 2.0f * invD * (std::atan(argHi) - std::atan(argLo));
+                    if (integral <= 0.0f) continue;
+                    // Tile fn density is already premultiplied by N_SAMPLES
+                    // for the ray-march path's per-sample-sum semantics
+                    // (acc ≈ N × mean_distAtten). For the analytic
+                    // integral we get the integrated value directly, so
+                    // scale by N_SAMPLES to keep the visual intensity
+                    // comparable across the two paths.
+                    const float w = integral * density * float(N_SAMPLES);
+                    accR += w * lights->colR[li];
+                    accG += w * lights->colG[li];
+                    accB += w * lights->colB[li];
+                }
+                if (accR <= 0.0f && accG <= 0.0f && accB <= 0.0f) continue;
+                // Bayer-4x4 dither (same pattern as SIMD path above).
+                static constexpr float kBayer4[16] = {
+                    -0.46875f, +0.03125f, -0.34375f, +0.15625f,
+                    +0.28125f, -0.21875f, +0.40625f, -0.09375f,
+                    -0.28125f, +0.21875f, -0.40625f, +0.09375f,
+                    +0.46875f, -0.03125f, +0.34375f, -0.15625f,
+                };
+                const float d = kBayer4[(py & 3) * 4 + (px & 3)];
+                const size_t i = row + size_t(px);
+                const dword pix = out[i];
+                int newR = int((pix >> 16) & 0xFF) + int(accR + 0.5f + d);
+                int newG = int((pix >>  8) & 0xFF) + int(accG + 0.5f + d);
+                int newB = int( pix        & 0xFF) + int(accB + 0.5f + d);
+                if (newR > 255) newR = 255;
+                if (newG > 255) newG = 255;
+                if (newB > 255) newB = 255;
+                out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                       |  dword(newB)        | 0xFF000000u;
+            }
+        }
+        return;
+    }
 
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
+        if (vecPath) {
+            // Pixel-major SIMD — see Render_VolumetricCones_Tile for
+            // rationale. Halo is simpler: only sphere intersection
+            // (no cone quadratic) and no shadow lookup.
+            for (int pxBase = x1; pxBase < x2; pxBase += 8) {
+                const int pxEnd     = std::min(pxBase + 8, x2);
+                const int laneCount = pxEnd - pxBase;
+
+                alignas(32) float    Xarr[8] = {};
+                alignas(32) float    uVarr[8] = {};
+                alignas(32) uint32_t pxHashArr[8] = {};
+                alignas(32) float    zMaxArr[8] = {};
+                bool anyAlive = false;
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    const int px = pxBase + lane;
+                    const float X = (float(px) - CntrEX) * invFOVX;
+                    Xarr[lane]  = X;
+                    uVarr[lane] = X*X + Y*Y + 1.0f;
+                    uint32_t h = uint32_t(px) * 0x9E3779B9u
+                               + uint32_t(py) * 0x85EBCA6Bu
+                               + 0xDEC0DE51u;
+                    h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+                    pxHashArr[lane] = h;
+                    const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+                    const float zSky  = (fogZ > 0.0f) ? fogZ : 1e30f;
+                    float zM = (zSurf > 0.0f) ? zSurf : zSky;
+                    if (fogZ > 0.0f && zM > fogZ) zM = fogZ;
+                    constexpr float zMin = 0.05f;
+                    if (zM > zMin) { zMaxArr[lane] = zM; anyAlive = true; }
+                }
+                if (!anyAlive) continue;
+
+                alignas(32) float accB[8] = {}, accG[8] = {}, accR[8] = {};
+
+                for (int o = 0; o < omniCount; ++o) {
+                    const int li = omniIdx[o];
+                    const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+                    const float r2 = lights->range2[li];
+                    const float rr = lights->rRange[li];
+                    const float PP = Px*Px + Py_l*Py_l + Pz*Pz;
+
+                    // Per-lane scalar sphere-bounds solve.
+                    alignas(32) float zLoArr[8] = {};
+                    alignas(32) float zHiArr[8] = {};
+                    alignas(32) float aliveLane[8] = {};
+                    bool omniAlive = false;
+                    for (int lane = 0; lane < laneCount; ++lane) {
+                        if (zMaxArr[lane] <= 0.0f) continue;
+                        const float X = Xarr[lane];
+                        const float uV = uVarr[lane];
+                        const float zMax = zMaxArr[lane];
+                        constexpr float zMin = 0.05f;
+                        const float VP = X*Px + Y*Py_l + Pz;
+                        const float sphereC    = PP - r2;
+                        const float sphereDisc = VP*VP - uV * sphereC;
+                        if (sphereDisc < 0.0f) continue;
+                        const float sphereSq = std::sqrt(sphereDisc);
+                        const float invUV    = 1.0f / uV;
+                        float zLo = (VP - sphereSq) * invUV;
+                        float zHi = (VP + sphereSq) * invUV;
+                        if (zLo < zMin) zLo = zMin;
+                        if (zHi > zMax) zHi = zMax;
+                        if (zHi <= zLo) continue;
+                        zLoArr[lane]    = zLo;
+                        zHiArr[lane]    = zHi;
+                        aliveLane[lane] = 1.0f;
+                        omniAlive = true;
+                    }
+                    if (!omniAlive) continue;
+
+                    alignas(32) float dzArr[8] = {};
+                    for (int lane = 0; lane < 8; ++lane) {
+                        if (aliveLane[lane] == 0.0f) continue;
+                        dzArr[lane] = (zHiArr[lane] - zLoArr[lane]) * inv_N;
+                    }
+
+                    const __m256 vX_v       = _mm256_load_ps(Xarr);
+                    const __m256 vY_v       = _mm256_set1_ps(Y);
+                    const __m256 vZLo_v     = _mm256_load_ps(zLoArr);
+                    const __m256 vDz_v      = _mm256_load_ps(dzArr);
+                    const __m256 vAlive_v   = _mm256_load_ps(aliveLane);
+                    const __m256 vPx_v      = _mm256_set1_ps(Px);
+                    const __m256 vPy_v      = _mm256_set1_ps(Py_l);
+                    const __m256 vPz_v      = _mm256_set1_ps(Pz);
+                    const __m256 vR2_v      = _mm256_set1_ps(r2);
+                    const __m256 vRR_v      = _mm256_set1_ps(rr);
+                    const __m256 vInvFogZ_v = _mm256_set1_ps(invFogZ);
+                    const __m256 vZero_v    = _mm256_setzero_ps();
+                    const __m256 vOne_v     = _mm256_set1_ps(1.0f);
+                    const __m256 vEps_v     = _mm256_set1_ps(1e-6f);
+                    const __m256 vPt05_v    = _mm256_set1_ps(0.05f);
+                    const __m256 mAlive     = _mm256_cmp_ps(vAlive_v, vZero_v, _CMP_GT_OQ);
+                    __m256 accV = vZero_v;
+
+                    for (int k = 0; k < N_SAMPLES; ++k) {
+                        alignas(32) float fracBuf[8];
+                        for (int lane = 0; lane < 8; ++lane) {
+                            const uint32_t h = pxHashArr[lane]
+                                + uint32_t(k) * 0x9E3779B9u
+                                + uint32_t(o) * 0x517CC1B7u;
+                            fracBuf[lane] = float(h >> 16) * (1.0f / 65536.0f);
+                        }
+                        const __m256 vFrac = _mm256_load_ps(fracBuf);
+
+                        const __m256 vKf = _mm256_set1_ps(float(k));
+                        const __m256 vZ  = _mm256_fmadd_ps(
+                            _mm256_add_ps(vKf, vFrac), vDz_v, vZLo_v);
+
+                        const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(vZ, vX_v), vPx_v);
+                        const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(vZ, vY_v), vPy_v);
+                        const __m256 Wz = _mm256_sub_ps(vZ, vPz_v);
+                        const __m256 W2 = _mm256_fmadd_ps(Wx, Wx,
+                                           _mm256_fmadd_ps(Wy, Wy,
+                                            _mm256_mul_ps(Wz, Wz)));
+
+                        __m256 mask = _mm256_and_ps(mAlive,
+                            _mm256_cmp_ps(W2, vR2_v, _CMP_LE_OQ));
+                        mask = _mm256_and_ps(mask, _mm256_cmp_ps(W2, vEps_v, _CMP_GT_OQ));
+
+                        const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
+                        const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                        const __m256 dist   = _mm256_mul_ps(W2, invLen);
+
+                        const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
+                        const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
+                        const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
+                        const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                        const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
+
+                        __m256 fogAtten = vOne_v;
+                        if (invFogZ > 0.0f) {
+                            fogAtten = _mm256_sub_ps(vOne_v, _mm256_mul_ps(vZ, vInvFogZ_v));
+                            fogAtten = _mm256_max_ps(vZero_v, fogAtten);
+                            fogAtten = _mm256_mul_ps(fogAtten, fogAtten);
+                        }
+
+                        __m256 contrib = _mm256_mul_ps(distAtten, fogAtten);
+                        contrib = _mm256_and_ps(contrib, mask);
+                        accV = _mm256_add_ps(accV, contrib);
+                    }
+
+                    alignas(32) float accArr[8];
+                    _mm256_store_ps(accArr, accV);
+                    const float colB = lights->colB[li];
+                    const float colG = lights->colG[li];
+                    const float colR = lights->colR[li];
+                    for (int lane = 0; lane < 8; ++lane) {
+                        if (accArr[lane] <= 0.0f) continue;
+                        const float w = accArr[lane] * density;
+                        accB[lane] += w * colB;
+                        accG[lane] += w * colG;
+                        accR[lane] += w * colR;
+                    }
+                }
+
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    if (accR[lane] <= 0.0f && accG[lane] <= 0.0f && accB[lane] <= 0.0f) continue;
+                    const int px = pxBase + lane;
+                    const size_t i = row + size_t(px);
+                    const dword pix = out[i];
+                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane]);
+                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane]);
+                    int newB = int( pix        & 0xFF) + int(accB[lane]);
+                    if (newR > 255) newR = 255;
+                    if (newG > 255) newG = 255;
+                    if (newB > 255) newB = 255;
+                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
+                           |  dword(newB)        | 0xFF000000u;
+                }
+            }
+        } else {
         for (int px = x1; px < x2; ++px) {
             const float X = (float(px) - CntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
@@ -3740,6 +4541,7 @@ static void Render_OmniHalos_Tile(
             if (newB > 255) newB = 255;
             out[i] = (dword(newR) << 16) | (dword(newG) << 8)
                    |  dword(newB)        | 0xFF000000u;
+        }
         }
     }
 }
@@ -3922,6 +4724,7 @@ static void Render_DeferredVolumetric_Tile(
     const uint16_t *zEnc = ZPage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
+    const bool vecPath = fds::FeatureFlags::vol_vec();
 
     const bool hasFog  = (sigma > 0.0f);
     // Beer-Lambert transmittance uses exp(-σ·z). LUT-based fastPow2
@@ -3937,6 +4740,398 @@ static void Render_DeferredVolumetric_Tile(
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
+        if (vecPath) {
+            // Pixel-major SIMD — see Render_VolumetricCones_Tile for
+            // rationale. Unified pass adds analytic Beer-Lambert fog
+            // composite. fastPow2 stays scalar per-lane (no SIMD
+            // implementation; called once per sample per lane in the
+            // hot path).
+            for (int pxBase = x1; pxBase < x2; pxBase += 8) {
+                const int pxEnd     = std::min(pxBase + 8, x2);
+                const int laneCount = pxEnd - pxBase;
+
+                alignas(32) float    Xarr[8] = {};
+                alignas(32) float    uVarr[8] = {};
+                alignas(32) uint32_t pxHashArr[8] = {};
+                alignas(32) float    zMaxArr[8] = {};
+                // T_surf defaults to 1.0 (no fog → surface unattenuated);
+                // fog_emit defaults to 0. Must initialize before the
+                // conditional `if (hasFog)` writes below.
+                alignas(32) float    TSurfArr[8] = {1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f};
+                alignas(32) float    fogEmitR_arr[8] = {};
+                alignas(32) float    fogEmitG_arr[8] = {};
+                alignas(32) float    fogEmitB_arr[8] = {};
+                bool anyAlive = false;
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    const int px = pxBase + lane;
+                    const float X = (float(px) - CntrEX) * invFOVX;
+                    Xarr[lane]  = X;
+                    uVarr[lane] = X*X + Y*Y + 1.0f;
+                    uint32_t h = uint32_t(px) * 0x9E3779B9u
+                               + uint32_t(py) * 0x85EBCA6Bu
+                               + 0xCAFEBABEu;
+                    h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+                    pxHashArr[lane] = h;
+                    const float zSurfRaw = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+                    const bool isSky = (zSurfRaw <= 0.0f);
+                    const float zM = isSky
+                        ? (hasFog ? fogFar : 1e30f)
+                        : (hasFog ? std::min(zSurfRaw, fogFar) : zSurfRaw);
+                    constexpr float zMin = 0.05f;
+                    if (zM > zMin) {
+                        zMaxArr[lane] = zM;
+                        anyAlive = true;
+                        if (hasFog) {
+                            const float TS = fastPow2(fogPowK * zM);
+                            const float fogFrac = 1.0f - TS;
+                            fogEmitR_arr[lane] = fogR * fogFrac;
+                            fogEmitG_arr[lane] = fogG * fogFrac;
+                            fogEmitB_arr[lane] = fogB * fogFrac;
+                            TSurfArr[lane] = TS;
+                        }
+                    }
+                }
+                if (!anyAlive) continue;
+
+                alignas(32) float lightR[8] = {}, lightG[8] = {}, lightB[8] = {};
+
+                if (hasCone) {
+                    for (int s = 0; s < spotCount; ++s) {
+                        const int li = spotIdx[s];
+                        const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+                        const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
+                        const float cosO = lights->cosOuter[li];
+                        const float cosI = lights->cosInner[li];
+                        const float r2   = lights->range2[li];
+                        const float rr   = lights->rRange[li];
+                        const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
+                        const float PP   = Px*Px + Py_l*Py_l + Pz*Pz;
+                        const float c2   = cosO * cosO;
+                        const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
+
+                        alignas(32) float zLoArr[8] = {};
+                        alignas(32) float zHiArr[8] = {};
+                        alignas(32) float aliveLane[8] = {};
+                        bool spotAlive = false;
+                        for (int lane = 0; lane < laneCount; ++lane) {
+                            if (zMaxArr[lane] <= 0.0f) continue;
+                            const float X = Xarr[lane];
+                            const float uV = uVarr[lane];
+                            const float zMax = zMaxArr[lane];
+                            constexpr float zMin = 0.05f;
+                            const float DV = Dx*X + Dy*Y + Dz;
+                            const float VP = X*Px + Y*Py_l + Pz;
+                            const float a  = DV*DV - c2 * uV;
+                            const float b  = 2.0f * (c2 * VP - DV * DP);
+                            const float cq = DP*DP - c2 * PP;
+                            const float sphereC    = PP - r2;
+                            const float sphereDisc = VP*VP - uV * sphereC;
+                            if (sphereDisc < 0.0f) continue;
+                            const float sphereSq = std::sqrt(sphereDisc);
+                            const float invUV    = 1.0f / uV;
+                            const float zSphLo   = (VP - sphereSq) * invUV;
+                            const float zSphHi   = (VP + sphereSq) * invUV;
+                            float zLo, zHi;
+                            if (a < -1e-8f) {
+                                const float disc = b*b - 4.0f*a*cq;
+                                if (disc < 0.0f) continue;
+                                const float sq = std::sqrt(disc);
+                                const float inv2a = 1.0f / (2.0f * a);
+                                const float r1 = (-b - sq) * inv2a;
+                                const float r2_ = (-b + sq) * inv2a;
+                                zLo = std::min(r1, r2_);
+                                zHi = std::max(r1, r2_);
+                            } else if (a > 1e-8f) {
+                                const float disc = b*b - 4.0f*a*cq;
+                                if (disc < 0.0f) {
+                                    zLo = zMin;
+                                    zHi = zMax;
+                                } else {
+                                    const float sq = std::sqrt(disc);
+                                    const float inv2a = 1.0f / (2.0f * a);
+                                    const float root1 = (-b - sq) * inv2a;
+                                    const float root2 = (-b + sq) * inv2a;
+                                    const float r1Q = std::min(root1, root2);
+                                    const float r2Q = std::max(root1, root2);
+                                    if (DV > 1e-6f) {
+                                        zLo = std::max(r2Q, zMin);
+                                        zHi = zMax;
+                                    } else if (DV < -1e-6f) {
+                                        zLo = zMin;
+                                        zHi = std::min(r1Q, zMax);
+                                    } else continue;
+                                    if (zHi <= zLo) continue;
+                                }
+                            } else continue;
+                            if (zLo < zSphLo) zLo = zSphLo;
+                            if (zHi > zSphHi) zHi = zSphHi;
+                            if (zLo < zMin)   zLo = zMin;
+                            if (zHi > zMax)   zHi = zMax;
+                            if (zHi <= zLo)   continue;
+                            zLoArr[lane]    = zLo;
+                            zHiArr[lane]    = zHi;
+                            aliveLane[lane] = 1.0f;
+                            spotAlive = true;
+                        }
+                        if (!spotAlive) continue;
+
+                        alignas(32) float dzArr[8] = {};
+                        for (int lane = 0; lane < 8; ++lane) {
+                            if (aliveLane[lane] == 0.0f) continue;
+                            dzArr[lane] = (zHiArr[lane] - zLoArr[lane]) * inv_N;
+                        }
+
+                        const __m256 vX_v       = _mm256_load_ps(Xarr);
+                        const __m256 vY_v       = _mm256_set1_ps(Y);
+                        const __m256 vZLo_v     = _mm256_load_ps(zLoArr);
+                        const __m256 vDz_v      = _mm256_load_ps(dzArr);
+                        const __m256 vAlive_v   = _mm256_load_ps(aliveLane);
+                        const __m256 vPx_v      = _mm256_set1_ps(Px);
+                        const __m256 vPy_v      = _mm256_set1_ps(Py_l);
+                        const __m256 vPz_v      = _mm256_set1_ps(Pz);
+                        const __m256 vDx_v      = _mm256_set1_ps(Dx);
+                        const __m256 vDy_v      = _mm256_set1_ps(Dy);
+                        const __m256 vDz_dir_v  = _mm256_set1_ps(Dz);
+                        const __m256 vR2_v      = _mm256_set1_ps(r2);
+                        const __m256 vRR_v      = _mm256_set1_ps(rr);
+                        const __m256 vCosO_v    = _mm256_set1_ps(cosO);
+                        const __m256 vCosI_v    = _mm256_set1_ps(cosI);
+                        const __m256 vInvCIO_v  = _mm256_set1_ps(inv_cosI_minus_cosO);
+                        const __m256 vZero_v    = _mm256_setzero_ps();
+                        const __m256 vOne_v     = _mm256_set1_ps(1.0f);
+                        const __m256 vTwo_v     = _mm256_set1_ps(2.0f);
+                        const __m256 vThree_v   = _mm256_set1_ps(3.0f);
+                        const __m256 vEps_v     = _mm256_set1_ps(1e-6f);
+                        const __m256 vPt05_v    = _mm256_set1_ps(0.05f);
+                        const __m256 mAlive     = _mm256_cmp_ps(vAlive_v, vZero_v, _CMP_GT_OQ);
+                        __m256 accV = vZero_v;
+
+                        for (int k = 0; k < N_SAMPLES; ++k) {
+                            alignas(32) float fracBuf[8];
+                            for (int lane = 0; lane < 8; ++lane) {
+                                const uint32_t h = pxHashArr[lane]
+                                    + uint32_t(k) * 0x9E3779B9u
+                                    + uint32_t(s) * 0x6F4A7531u;
+                                fracBuf[lane] = float(h >> 16) * (1.0f / 65536.0f);
+                            }
+                            const __m256 vFrac = _mm256_load_ps(fracBuf);
+                            const __m256 vKf = _mm256_set1_ps(float(k));
+                            const __m256 vZ  = _mm256_fmadd_ps(
+                                _mm256_add_ps(vKf, vFrac), vDz_v, vZLo_v);
+
+                            const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(vZ, vX_v), vPx_v);
+                            const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(vZ, vY_v), vPy_v);
+                            const __m256 Wz = _mm256_sub_ps(vZ, vPz_v);
+                            const __m256 W2 = _mm256_fmadd_ps(Wx, Wx,
+                                               _mm256_fmadd_ps(Wy, Wy,
+                                                _mm256_mul_ps(Wz, Wz)));
+                            __m256 mask = _mm256_and_ps(mAlive,
+                                _mm256_cmp_ps(W2, vR2_v, _CMP_LE_OQ));
+                            mask = _mm256_and_ps(mask, _mm256_cmp_ps(W2, vEps_v, _CMP_GT_OQ));
+
+                            const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
+                                               _mm256_fmadd_ps(vDy_v, Wy,
+                                                _mm256_mul_ps(vDz_dir_v, Wz)));
+                            mask = _mm256_and_ps(mask, _mm256_cmp_ps(DW, vZero_v, _CMP_GT_OQ));
+
+                            const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
+                            const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                            const __m256 dist   = _mm256_mul_ps(W2, invLen);
+                            const __m256 cosT   = _mm256_mul_ps(DW, invLen);
+                            mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
+
+                            __m256 t_v = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
+                            t_v = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t_v));
+                            const __m256 smooth = _mm256_mul_ps(
+                                _mm256_mul_ps(t_v, t_v),
+                                _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t_v)));
+                            const __m256 mInner    = _mm256_cmp_ps(cosT, vCosI_v, _CMP_GE_OQ);
+                            const __m256 coneAtten = _mm256_blendv_ps(smooth, vOne_v, mInner);
+
+                            const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
+                            const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
+                            const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
+                            const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                            const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
+
+                            // Per-lane scalar fastPow2 for T_sample.
+                            __m256 vTsample = vOne_v;
+                            if (hasFog) {
+                                alignas(32) float zArr[8], tsArr[8];
+                                _mm256_store_ps(zArr, vZ);
+                                for (int lane = 0; lane < 8; ++lane)
+                                    tsArr[lane] = fastPow2(fogPowK * zArr[lane]);
+                                vTsample = _mm256_load_ps(tsArr);
+                            }
+
+                            __m256 contrib = _mm256_mul_ps(
+                                _mm256_mul_ps(coneAtten, distAtten), vTsample);
+                            contrib = _mm256_and_ps(contrib, mask);
+                            accV = _mm256_add_ps(accV, contrib);
+                        }
+
+                        alignas(32) float accArr[8];
+                        _mm256_store_ps(accArr, accV);
+                        const float colR = lights->colR[li];
+                        const float colG = lights->colG[li];
+                        const float colB = lights->colB[li];
+                        for (int lane = 0; lane < 8; ++lane) {
+                            if (accArr[lane] <= 0.0f) continue;
+                            const float w = accArr[lane] * coneDensity;
+                            lightR[lane] += w * colR;
+                            lightG[lane] += w * colG;
+                            lightB[lane] += w * colB;
+                        }
+                    }
+                }
+
+                if (hasHalo) {
+                    for (int o = 0; o < omniCount; ++o) {
+                        const int li = omniIdx[o];
+                        const float Px = lights->posX[li], Py_l = lights->posY[li], Pz = lights->posZ[li];
+                        const float r2 = lights->range2[li];
+                        const float rr = lights->rRange[li];
+                        const float PP = Px*Px + Py_l*Py_l + Pz*Pz;
+
+                        alignas(32) float zLoArr[8] = {};
+                        alignas(32) float zHiArr[8] = {};
+                        alignas(32) float aliveLane[8] = {};
+                        bool omniAlive = false;
+                        for (int lane = 0; lane < laneCount; ++lane) {
+                            if (zMaxArr[lane] <= 0.0f) continue;
+                            const float X = Xarr[lane];
+                            const float uV = uVarr[lane];
+                            const float zMax = zMaxArr[lane];
+                            constexpr float zMin = 0.05f;
+                            const float VP = X*Px + Y*Py_l + Pz;
+                            const float sphereC    = PP - r2;
+                            const float sphereDisc = VP*VP - uV * sphereC;
+                            if (sphereDisc < 0.0f) continue;
+                            const float sphereSq = std::sqrt(sphereDisc);
+                            const float invUV    = 1.0f / uV;
+                            float zLo = (VP - sphereSq) * invUV;
+                            float zHi = (VP + sphereSq) * invUV;
+                            if (zLo < zMin) zLo = zMin;
+                            if (zHi > zMax) zHi = zMax;
+                            if (zHi <= zLo) continue;
+                            zLoArr[lane]    = zLo;
+                            zHiArr[lane]    = zHi;
+                            aliveLane[lane] = 1.0f;
+                            omniAlive = true;
+                        }
+                        if (!omniAlive) continue;
+
+                        alignas(32) float dzArr[8] = {};
+                        for (int lane = 0; lane < 8; ++lane) {
+                            if (aliveLane[lane] == 0.0f) continue;
+                            dzArr[lane] = (zHiArr[lane] - zLoArr[lane]) * inv_N;
+                        }
+
+                        const __m256 vX_v       = _mm256_load_ps(Xarr);
+                        const __m256 vY_v       = _mm256_set1_ps(Y);
+                        const __m256 vZLo_v     = _mm256_load_ps(zLoArr);
+                        const __m256 vDz_v      = _mm256_load_ps(dzArr);
+                        const __m256 vAlive_v   = _mm256_load_ps(aliveLane);
+                        const __m256 vPx_v      = _mm256_set1_ps(Px);
+                        const __m256 vPy_v      = _mm256_set1_ps(Py_l);
+                        const __m256 vPz_v      = _mm256_set1_ps(Pz);
+                        const __m256 vR2_v      = _mm256_set1_ps(r2);
+                        const __m256 vRR_v      = _mm256_set1_ps(rr);
+                        const __m256 vZero_v    = _mm256_setzero_ps();
+                        const __m256 vOne_v     = _mm256_set1_ps(1.0f);
+                        const __m256 vEps_v     = _mm256_set1_ps(1e-6f);
+                        const __m256 vPt05_v    = _mm256_set1_ps(0.05f);
+                        const __m256 mAlive     = _mm256_cmp_ps(vAlive_v, vZero_v, _CMP_GT_OQ);
+                        __m256 accV = vZero_v;
+
+                        for (int k = 0; k < N_SAMPLES; ++k) {
+                            alignas(32) float fracBuf[8];
+                            for (int lane = 0; lane < 8; ++lane) {
+                                const uint32_t h = pxHashArr[lane]
+                                    + uint32_t(k) * 0x9E3779B9u
+                                    + uint32_t(o) * 0x517CC1B7u;
+                                fracBuf[lane] = float(h >> 16) * (1.0f / 65536.0f);
+                            }
+                            const __m256 vFrac = _mm256_load_ps(fracBuf);
+                            const __m256 vKf = _mm256_set1_ps(float(k));
+                            const __m256 vZ  = _mm256_fmadd_ps(
+                                _mm256_add_ps(vKf, vFrac), vDz_v, vZLo_v);
+
+                            const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(vZ, vX_v), vPx_v);
+                            const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(vZ, vY_v), vPy_v);
+                            const __m256 Wz = _mm256_sub_ps(vZ, vPz_v);
+                            const __m256 W2 = _mm256_fmadd_ps(Wx, Wx,
+                                               _mm256_fmadd_ps(Wy, Wy,
+                                                _mm256_mul_ps(Wz, Wz)));
+                            __m256 mask = _mm256_and_ps(mAlive,
+                                _mm256_cmp_ps(W2, vR2_v, _CMP_LE_OQ));
+                            mask = _mm256_and_ps(mask, _mm256_cmp_ps(W2, vEps_v, _CMP_GT_OQ));
+
+                            const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
+                            const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                            const __m256 dist   = _mm256_mul_ps(W2, invLen);
+
+                            const __m256 dr        = _mm256_mul_ps(dist, vRR_v);
+                            const __m256 cutoff    = _mm256_sub_ps(vOne_v, dr);
+                            const __m256 invSqDen  = _mm256_fmadd_ps(dr, dr, vPt05_v);
+                            const __m256 invSq     = _mm256_div_ps(vOne_v, invSqDen);
+                            const __m256 distAtten = _mm256_mul_ps(_mm256_mul_ps(cutoff, cutoff), invSq);
+
+                            __m256 vTsample = vOne_v;
+                            if (hasFog) {
+                                alignas(32) float zArr[8], tsArr[8];
+                                _mm256_store_ps(zArr, vZ);
+                                for (int lane = 0; lane < 8; ++lane)
+                                    tsArr[lane] = fastPow2(fogPowK * zArr[lane]);
+                                vTsample = _mm256_load_ps(tsArr);
+                            }
+
+                            __m256 contrib = _mm256_mul_ps(distAtten, vTsample);
+                            contrib = _mm256_and_ps(contrib, mask);
+                            accV = _mm256_add_ps(accV, contrib);
+                        }
+
+                        alignas(32) float accArr[8];
+                        _mm256_store_ps(accArr, accV);
+                        const float colR = lights->colR[li];
+                        const float colG = lights->colG[li];
+                        const float colB = lights->colB[li];
+                        for (int lane = 0; lane < 8; ++lane) {
+                            if (accArr[lane] <= 0.0f) continue;
+                            const float w = accArr[lane] * omniHaloDensity;
+                            lightR[lane] += w * colR;
+                            lightG[lane] += w * colG;
+                            lightB[lane] += w * colB;
+                        }
+                    }
+                }
+
+                // Composite per lane.
+                for (int lane = 0; lane < laneCount; ++lane) {
+                    if (zMaxArr[lane] <= 0.0f) continue;
+                    const int px = pxBase + lane;
+                    const size_t i = row + size_t(px);
+                    const dword pix = out[i];
+                    const float surfR = float((pix >> 16) & 0xFFu);
+                    const float surfG = float((pix >>  8) & 0xFFu);
+                    const float surfB = float( pix        & 0xFFu);
+                    const float TS = TSurfArr[lane];
+                    const float newR = surfR * TS + fogEmitR_arr[lane] + lightR[lane];
+                    const float newG = surfG * TS + fogEmitG_arr[lane] + lightG[lane];
+                    const float newB = surfB * TS + fogEmitB_arr[lane] + lightB[lane];
+                    int nR = int(newR), nG = int(newG), nB = int(newB);
+                    if (nR > 255) nR = 255;
+                    if (nG > 255) nG = 255;
+                    if (nB > 255) nB = 255;
+                    if (nR <   0) nR =   0;
+                    if (nG <   0) nG =   0;
+                    if (nB <   0) nB =   0;
+                    out[i] = (dword(nR) << 16) | (dword(nG) << 8)
+                           |  dword(nB)        | 0xFF000000u;
+                }
+            }
+            continue;
+        }
         for (int px = x1; px < x2; ++px) {
             const float X = (float(px) - CntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
