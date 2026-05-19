@@ -3328,6 +3328,34 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 // (s * 0x6F...) avoids correlated noise when multiple spots
                 // contribute to the same pixel.
                 const float dz = (zHi - zLo) * inv_N;
+                const float inv_dz = 1.0f / dz;
+                const float zFadeStart = zMax - dz;
+                // Hoist per-spot shadow-map state out of the per-sample
+                // loop. smIdx is per-light, not per-sample.
+                const int32_t smIdx = lights->shadowMapIdx[li];
+                const ShadowMap *sm = (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size())
+                                       ? &g_shadowMaps[smIdx] : nullptr;
+                // Per-spot precomputed shadow matrix rows (when sm != null).
+                // Lets the per-sample shadow code use cached scalars instead
+                // of indexing sm->viewToLight[r][c] each sample.
+                float sm_m00=0, sm_m01=0, sm_m02=0, sm_ox=0;
+                float sm_m10=0, sm_m11=0, sm_m12=0, sm_oy=0;
+                float sm_m20=0, sm_m21=0, sm_m22=0, sm_oz=0;
+                float sm_cntrX=0, sm_cntrY=0, sm_perspX=0, sm_perspY=0;
+                float sm_zScale=0;
+                const uint16_t *sm_depth = nullptr;
+                int sm_xres=0, sm_yres=0;
+                if (sm) {
+                    sm_m00=sm->viewToLight[0][0]; sm_m01=sm->viewToLight[0][1]; sm_m02=sm->viewToLight[0][2]; sm_ox=sm->viewToLightOffset.x;
+                    sm_m10=sm->viewToLight[1][0]; sm_m11=sm->viewToLight[1][1]; sm_m12=sm->viewToLight[1][2]; sm_oy=sm->viewToLightOffset.y;
+                    sm_m20=sm->viewToLight[2][0]; sm_m21=sm->viewToLight[2][1]; sm_m22=sm->viewToLight[2][2]; sm_oz=sm->viewToLightOffset.z;
+                    sm_cntrX=sm->cntrX; sm_cntrY=sm->cntrY;
+                    sm_perspX=sm->perspX; sm_perspY=sm->perspY;
+                    sm_zScale=sm->zScale;
+                    sm_depth=sm->depth.data();
+                    sm_xres=sm->xres; sm_yres=sm->yres;
+                }
+                const float inv_cosI_minus_cosO = 1.0f / (cosI - cosO);
                 float acc = 0.0f;
                 for (int k = 0; k < N_SAMPLES; ++k) {
                     const uint32_t h = pxHash
@@ -3335,106 +3363,63 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         + uint32_t(s) * 0x6F4A7531u;
                     const float frac = float(h >> 16) * (1.0f / 65536.0f);
                     const float z = zLo + (float(k) + frac) * dz;
-                    // Smooth surface-occlusion fade. The integration
-                    // interval is bounded by the sphere (not zMax) so
-                    // sample positions don't quantize with the depth
-                    // buffer; surface visibility is folded in as a per-
-                    // sample weight that fades over one bin width.
-                    // This eliminates the visible bands caused by uint16
-                    // depth steps clipping the interval.
                     if (z >= zMax) break;
                     float surfaceFade = 1.0f;
-                    if (z > zMax - dz) {
-                        surfaceFade = (zMax - z) * (1.0f / dz);
+                    if (z > zFadeStart) {
+                        surfaceFade = (zMax - z) * inv_dz;
                     }
-                    // Sample point Q = z*V.
                     const float Wx = z*X - Px;
                     const float Wy = z*Y - Py;
                     const float Wz = z    - Pz;
                     const float W2 = Wx*Wx + Wy*Wy + Wz*Wz;
-                    if (W2 > r2) continue;       // outside light range
-                    if (W2 < 1e-6f) continue;
+                    if (W2 > r2 || W2 < 1e-6f) continue;
                     const float DW = Dx*Wx + Dy*Wy + Dz*Wz;
-                    if (DW <= 0.0f) continue;    // behind cone apex
+                    if (DW <= 0.0f) continue;
                     const float invLen = fast_rsqrt(W2);
                     const float dist = W2 * invLen;
                     const float cosT = DW * invLen;
                     if (cosT < cosO) continue;
-                    // Cone falloff: smoothstep cosOuter→cosInner.
                     float coneAtten = 1.0f;
                     if (cosT < cosI) {
-                        const float t = (cosT - cosO) / (cosI - cosO);
+                        const float t = (cosT - cosO) * inv_cosI_minus_cosO;
                         coneAtten = t * t * (3.0f - 2.0f * t);
                     }
-                    // Distance falloff: smooth range cutoff × inverse-square.
-                    // Smooth (1-dist/R)² → 0 at range; `1/((dist/R)² + ε)`
-                    // models physical 1/d² scatter so samples close to the
-                    // spot apex dominate. Without inverse-square, far-cone
-                    // rays accumulated too much (long ray segments inside
-                    // the cone integrate uniformly) and close cones were
-                    // dim (short segments + uniform weight). ε=0.05 caps
-                    // peak intensity at ~20× near the apex.
                     const float dr = dist * rr;
                     const float cutoff = 1.0f - dr;
                     const float invSq  = 1.0f / (dr * dr + 0.05f);
                     const float distAtten = cutoff * cutoff * invSq;
-                    // Fog attenuation, squared. Round-trip model: spot→fog
-                    // →scatter→fog→camera.
                     float fogAtten = 1.0f;
                     if (invFogZ > 0.0f) {
                         fogAtten = 1.0f - z * invFogZ;
                         if (fogAtten < 0.0f) fogAtten = 0.0f;
                         fogAtten *= fogAtten;
                     }
-                    // Shadow sample: project the sample point into the
-                    // spot's shadow camera, compare depth. Fog scatter
-                    // behind an occluder doesn't reach the eye → cone
-                    // light is blocked by geometry between spot and
-                    // sample point. The matrix mul + depth fetch
-                    // doubles the per-sample cost but turns flat cones
-                    // into proper "god rays through gaps".
-                    float shadowAtten = 1.0f;
-                    const int32_t smIdx = lights->shadowMapIdx[li];
-                    if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
-                        const ShadowMap& sm = g_shadowMaps[smIdx];
-                        // Sample world-space position in view space is
-                        // (z*X, z*Y, z). Transform to light camera.
-                        const float lx = sm.viewToLight[0][0] * (z*X) +
-                                         sm.viewToLight[0][1] * (z*Y) +
-                                         sm.viewToLight[0][2] * z +
-                                         sm.viewToLightOffset.x;
-                        const float ly = sm.viewToLight[1][0] * (z*X) +
-                                         sm.viewToLight[1][1] * (z*Y) +
-                                         sm.viewToLight[1][2] * z +
-                                         sm.viewToLightOffset.y;
-                        const float lz = sm.viewToLight[2][0] * (z*X) +
-                                         sm.viewToLight[2][1] * (z*Y) +
-                                         sm.viewToLight[2][2] * z +
-                                         sm.viewToLightOffset.z;
+                    // Shadow sample. sm != null fast-checked once per spot;
+                    // matrix rows + map metadata cached as scalars above.
+                    if (sm) {
+                        const float zX = z*X, zY = z*Y;
+                        const float lx = sm_m00*zX + sm_m01*zY + sm_m02*z + sm_ox;
+                        const float ly = sm_m10*zX + sm_m11*zY + sm_m12*z + sm_oy;
+                        const float lz = sm_m20*zX + sm_m21*zY + sm_m22*z + sm_oz;
                         if (lz > 0.0f) {
                             const float invLZ = 1.0f / lz;
-                            const float smX = sm.cntrX + sm.perspX * lx * invLZ;
-                            const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+                            const float smX = sm_cntrX + sm_perspX * lx * invLZ;
+                            const float smY = sm_cntrY - sm_perspY * ly * invLZ;
                             const int iX = int(smX);
                             const int iY = int(smY);
-                            if (iX >= 0 && iX < sm.xres &&
-                                iY >= 0 && iY < sm.yres) {
-                                int pixZ = 0xFF80 - int(lz * sm.zScale);
+                            if (uint32_t(iX) < uint32_t(sm_xres) &&
+                                uint32_t(iY) < uint32_t(sm_yres)) {
+                                int pixZ = 0xFF80 - int(lz * sm_zScale);
                                 if (pixZ < 0) pixZ = 0;
                                 if (pixZ > 0xFFFF) pixZ = 0xFFFF;
-                                // No slope bias here — volumetric
-                                // samples are in air, not on a surface,
-                                // so no acne. Small const bias for
-                                // numerical safety.
                                 const int biased = pixZ + 128;
                                 const uint16_t shadowZ =
-                                    sm.depth[size_t(iY) * size_t(sm.xres) + size_t(iX)];
-                                if (biased < int(shadowZ)) shadowAtten = 0.0f;
+                                    sm_depth[size_t(iY) * size_t(sm_xres) + size_t(iX)];
+                                if (biased < int(shadowZ)) continue;  // shadowed
                             }
                         }
                     }
-                    if (shadowAtten <= 0.0f) continue;
-                    acc += coneAtten * distAtten * fogAtten * surfaceFade * shadowAtten;
+                    acc += coneAtten * distAtten * fogAtten * surfaceFade;
                 }
                 if (acc <= 0.0f) continue;
                 // No dz scaling — the path-integral form (acc × dz) gave

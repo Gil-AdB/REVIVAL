@@ -79,6 +79,7 @@ FDS_FLAG_FLOAT(fog_sigma_mult,          "FDS_FOG_SIGMA_MULT",           3.0f,   
 FDS_FLAG_FLOAT(omni_halo_strength,      "FDS_OMNI_HALO_STRENGTH",       0.0f,                           "atmos",    "Volumetric halo brightness scale for omnis (0 = no halos; 0.05 = subtle; 0.5 = strong). Only applies in unified pass.")
 FDS_FLAG_BOOL(vol_prof,                 "FDS_VOL_PROF",                 0,                              "atmos",    "Per-frame timing for volumetric passes (cones/halos/unified). Prints averaged ms every FDS_VOL_PROF_INTERVAL frames.")
 FDS_FLAG_INT(vol_n_samples,             "FDS_VOL_N_SAMPLES",            4,                              "atmos",    "Samples per pixel for volumetric ray-march. Lower = faster but noisier; 4 default (2× faster than 8 with only √2 more noise — best perf/quality knee per profiling).")
+FDS_FLAG_BOOL(vol_vec,                  "FDS_VOL_VEC",                  1,                              "atmos",    "Vectorize the per-sample inner loop in the cone/halo/unified passes (8-wide SIMD). Default on; --no-vol_vec falls back to scalar for A/B.")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
