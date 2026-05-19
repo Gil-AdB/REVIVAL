@@ -36,6 +36,7 @@ void Render_DeferredFogPass();
 void Render_VolumetricCones();
 void Render_OmniHalos();
 void Render_DeferredVolumetric();
+void VolProf_Tick();
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -556,6 +557,7 @@ xpar_done: ;
 		Render_VolumetricCones();
 		Render_OmniHalos();
 	}
+	VolProf_Tick();
 
 
 

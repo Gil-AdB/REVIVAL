@@ -77,6 +77,8 @@ FDS_FLAG_FLOAT(cone_strength,           "FDS_CONE_STRENGTH",            0.05f,  
 FDS_FLAG_BOOL(volumetric_unified,       "FDS_VOLUMETRIC_UNIFIED",       0,                              "atmos",    "Use unified Beer-Lambert volumetric pass (replaces separate fog + cone passes; adds omni halos)")
 FDS_FLAG_FLOAT(fog_sigma_mult,          "FDS_FOG_SIGMA_MULT",           3.0f,                           "atmos",    "Beer-Lambert extinction coefficient as multiple of 1/FZP. σ=mult/FZP → T(FZP)=exp(-mult). Default 3 = ~5% transmittance at FZP")
 FDS_FLAG_FLOAT(omni_halo_strength,      "FDS_OMNI_HALO_STRENGTH",       0.0f,                           "atmos",    "Volumetric halo brightness scale for omnis (0 = no halos; 0.05 = subtle; 0.5 = strong). Only applies in unified pass.")
+FDS_FLAG_BOOL(vol_prof,                 "FDS_VOL_PROF",                 0,                              "atmos",    "Per-frame timing for volumetric passes (cones/halos/unified). Prints averaged ms every FDS_VOL_PROF_INTERVAL frames.")
+FDS_FLAG_INT(vol_n_samples,             "FDS_VOL_N_SAMPLES",            8,                              "atmos",    "Samples per pixel for volumetric ray-march. Lower = faster but noisier; 4-12 useful range.")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")

@@ -3159,8 +3159,8 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
 
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
-    constexpr int N_SAMPLES = 8;
-    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+    const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
+    const float inv_N = 1.0f / float(N_SAMPLES);
 
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
@@ -3464,7 +3464,60 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
     }
 }
 
+// Volumetric-pass timing accumulators (one set per process; updated
+// from the main thread that owns the pass dispatch). Printed every
+// FDS_VOL_PROF_INTERVAL frames (default 60) by VolProf_Tick.
+namespace {
+    using volclk = std::chrono::high_resolution_clock;
+    struct VolProf {
+        double ms_cones   = 0.0;
+        double ms_halos   = 0.0;
+        double ms_unified = 0.0;
+        int    n_cones    = 0;
+        int    n_halos    = 0;
+        int    n_unified  = 0;
+        int    interval   = 60;
+        int    framesSeen = 0;
+    };
+    VolProf g_volProf;
+
+    struct VolProfScope {
+        double *acc;
+        int    *cnt;
+        volclk::time_point t0;
+        VolProfScope(double *a, int *c) : acc(a), cnt(c), t0(volclk::now()) {}
+        ~VolProfScope() {
+            if (!fds::FeatureFlags::vol_prof()) return;
+            *acc += std::chrono::duration<double, std::milli>(volclk::now() - t0).count();
+            ++*cnt;
+        }
+    };
+}
+
+// Called once per frame after all volumetric passes complete to maybe
+// flush the timing summary. No-op when vol_prof flag is off.
+void VolProf_Tick();
+
+static void VolProf_Tick_impl() {
+    if (!fds::FeatureFlags::vol_prof()) return;
+    if (++g_volProf.framesSeen < g_volProf.interval) return;
+    const int N = g_volProf.framesSeen;
+    std::fprintf(stderr,
+        "[VOL-PROF] last %d frame(s) avg per-frame: cones=%.2fms halos=%.2fms "
+        "unified=%.2fms (calls c=%d h=%d u=%d / %d frames)\n",
+        N,
+        g_volProf.ms_cones   / N,
+        g_volProf.ms_halos   / N,
+        g_volProf.ms_unified / N,
+        g_volProf.n_cones, g_volProf.n_halos, g_volProf.n_unified, N);
+    std::fflush(stderr);
+    g_volProf = VolProf{};
+}
+
+void VolProf_Tick() { VolProf_Tick_impl(); }
+
 void Render_VolumetricCones() {
+    VolProfScope _vp(&g_volProf.ms_cones, &g_volProf.n_cones);
     if (!CurScene || !ZPage16 || !VPage) return;
     if (!fds::FeatureFlags::draw_cones()) return;
     const float invFOVX = 1.0f / FOVX;
@@ -3610,8 +3663,8 @@ static void Render_OmniHalos_Tile(
     if (omniCount == 0) return;
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
-    constexpr int N_SAMPLES = 8;
-    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+    const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
+    const float inv_N = 1.0f / float(N_SAMPLES);
 
     for (int py = y1; py < y2; ++py) {
         const float Y = (CntrEY - float(py)) * invFOVY;
@@ -3707,6 +3760,7 @@ static void Render_OmniHalos_Tile(
 }
 
 void Render_OmniHalos() {
+    VolProfScope _vp(&g_volProf.ms_halos, &g_volProf.n_halos);
     if (!CurScene || !ZPage16 || !VPage) return;
     if (fds::FeatureFlags::omni_halo_strength() <= 0.0f) return;
     const float invFOVX = 1.0f / FOVX;
@@ -3881,8 +3935,8 @@ static void Render_DeferredVolumetric_Tile(
 {
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
-    constexpr int N_SAMPLES = 8;
-    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+    const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
+    const float inv_N = 1.0f / float(N_SAMPLES);
 
     const bool hasFog  = (sigma > 0.0f);
     const bool hasCone = (spotCount > 0 && coneDensity > 0.0f);
@@ -4125,8 +4179,8 @@ static void Render_DeferredVolumetric_Tile(
 }
 
 void Render_DeferredVolumetric() {
+    VolProfScope _vp(&g_volProf.ms_unified, &g_volProf.n_unified);
     if (!CurScene || !ZPage16 || !VPage) return;
-    if (!fds::FeatureFlags::volumetric_unified()) return;
 
     extern DeferredLightingCtx g_deferredCtx;
     const ViewLightsSoA *const lights = g_deferredCtx.lights;
