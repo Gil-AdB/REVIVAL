@@ -21,6 +21,84 @@ thread_local ShadowMap *g_currentShadowMap = nullptr;
 std::vector<ShadowMap> g_shadowMaps;
 std::vector<CubeShadowRef> g_cubeShadowRefs;
 
+// Shadow-map debug viewer state. See ShadowMap.h for protocol.
+int g_shadowViewIdx = -1;
+
+void ShadowMap_ViewCycle()
+{
+    // -1 -> 0 -> 1 -> ... -> N-1 -> -1.
+    const int n = int(g_shadowMaps.size());
+    if (n == 0) {
+        std::fprintf(stderr, "[SHADOW-VIEW] no shadow maps registered\n");
+        g_shadowViewIdx = -1;
+        return;
+    }
+    g_shadowViewIdx = (g_shadowViewIdx >= n - 1) ? -1 : g_shadowViewIdx + 1;
+    if (g_shadowViewIdx < 0) {
+        std::fprintf(stderr, "[SHADOW-VIEW] off (cycled past last of %d)\n", n);
+    } else {
+        const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
+        const char *omniName = (sm.omni && sm.omni->Type == Light_Omni) ? "omni" :
+                               (sm.omni && sm.omni->Type == Light_SpotLight) ? "spot" : "?";
+        std::fprintf(stderr,
+            "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d\n",
+            g_shadowViewIdx, n, omniName, sm.xres, sm.yres, int(sm.cubeFace));
+    }
+}
+
+void ShadowMap_Overlay(byte *vpage, int xres, int yres)
+{
+    if (g_shadowViewIdx < 0) return;
+    if (g_shadowViewIdx >= int(g_shadowMaps.size())) return;
+    if (!vpage || xres <= 0 || yres <= 0) return;
+
+    const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
+    if (sm.xres <= 0 || sm.yres <= 0 || sm.depth.empty()) return;
+
+    // Thumbnail: scale shadow map to ~1/4 of the framebuffer's smaller
+    // dimension. Drawn into the top-left corner with a 1-px white
+    // border so it's distinguishable from the rendered scene.
+    int thumbSize = std::min(xres, yres) / 4;
+    if (thumbSize < 64)   thumbSize = 64;
+    if (thumbSize > sm.xres) thumbSize = sm.xres;
+    if (thumbSize > 512)  thumbSize = 512;
+    const int dstW = thumbSize;
+    const int dstH = thumbSize;
+    if (dstW + 4 >= xres || dstH + 4 >= yres) return;
+
+    dword *out = reinterpret_cast<dword*>(vpage);
+    const int ox = 4;
+    const int oy = 4;
+
+    // Nearest-neighbour downsample (cheap). depth is uint16 — top 8
+    // bits give an 8-bit grayscale. 0 = empty (rendered black).
+    for (int dy = 0; dy < dstH; ++dy) {
+        const int sy = (dy * sm.yres) / dstH;
+        const uint16_t *row = &sm.depth[size_t(sy) * size_t(sm.xres)];
+        dword *dstRow = out + size_t(oy + dy) * size_t(xres) + size_t(ox);
+        for (int dx = 0; dx < dstW; ++dx) {
+            const int sx = (dx * sm.xres) / dstW;
+            const uint8_t g = uint8_t(row[sx] >> 8);
+            dstRow[dx] = 0xFF000000u | (dword(g) << 16) | (dword(g) << 8) | dword(g);
+        }
+    }
+    // White 1-px border.
+    for (int dx = -1; dx <= dstW; ++dx) {
+        if (oy - 1 >= 0)   out[size_t(oy - 1) * xres + size_t(ox + dx)]   = 0xFFFFFFFFu;
+        if (oy + dstH < yres) out[size_t(oy + dstH) * xres + size_t(ox + dx)] = 0xFFFFFFFFu;
+    }
+    for (int dy = -1; dy <= dstH; ++dy) {
+        if (ox - 1 >= 0)   out[size_t(oy + dy) * xres + size_t(ox - 1)]   = 0xFFFFFFFFu;
+        if (ox + dstW < xres) out[size_t(oy + dy) * xres + size_t(ox + dstW)] = 0xFFFFFFFFu;
+    }
+    // Caption: index / N.
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "SM %d/%zu  %dx%d  face=%d",
+                  g_shadowViewIdx, g_shadowMaps.size(),
+                  sm.xres, sm.yres, int(sm.cubeFace));
+    OutTextXY(vpage, ox + 4, oy + dstH + 4, buf, 255, xres, yres);
+}
+
 void ShadowMaps_Rebuild(Scene *Sc, int res)
 {
 	g_shadowMaps.clear();

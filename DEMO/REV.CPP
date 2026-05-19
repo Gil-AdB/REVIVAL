@@ -1208,6 +1208,7 @@ int main(int argc, const char *argv[])
 "  Q / E              free-cam zoom\n"
 "  P                  pause Timer (city / greets / fountain)\n"
 "  U                  reverse Timer flow (city / greets / fountain)\n"
+"  V                  cycle shadow-map debug thumbnail (off -> sm0 -> sm1 -> ...)\n"
 "\n"
 "COMMON RECIPES\n"
 "  Deferred snapshot of greets:\n"
@@ -1528,6 +1529,12 @@ int main(int argc, const char *argv[])
 					g_HideOuterXpar.store(now);
 					std::fprintf(stderr, "[XPAR] outer (%s) %s\n",
 						"f_sphere", now ? "HIDDEN" : "shown");
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_V) {
+					// Cycle the shadow-map viewer thumbnail through
+					// every registered map. -1 hides; SDL2's V_Flip
+					// paints the active one as a thumbnail before push.
+					extern void ShadowMap_ViewCycle();
+					ShadowMap_ViewCycle();
 				}
 			}
 		}

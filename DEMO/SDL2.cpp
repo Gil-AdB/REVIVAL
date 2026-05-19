@@ -41,6 +41,13 @@ static SDLTex s_engineTex;
 
 static void V_Flip(VESA_Surface *VS)
 {
+	// Shadow-map debug viewer thumbnail. No-op when g_shadowViewIdx < 0
+	// (cycled by 'V' key in REV.CPP). Writes into VS->Data so the SDL
+	// path below picks it up on the same blit.
+	if (VS->Data && VS->X > 0 && VS->Y > 0) {
+		extern void ShadowMap_Overlay(byte *, int, int);
+		ShadowMap_Overlay(VS->Data, int(VS->X), int(VS->Y));
+	}
 	// Top-right resolution overlay. Draw into the surface's data buffer
 	// just before pushing to the SDL_Texture so it shows up regardless of
 	// which scene's surface is being flipped (MainSurf vs Glat's FinalSurf).

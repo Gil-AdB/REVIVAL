@@ -86,6 +86,15 @@ extern thread_local ShadowMap *g_currentShadowMap;
 // kernel matches by `ShadowMap::omni == Omni*`.
 extern std::vector<ShadowMap> g_shadowMaps;
 
+// Debug overlay state. SDL2 V_Flip calls ShadowMap_Overlay(VS) at end
+// of frame, which paints the indexed shadow map as a thumbnail in the
+// top-left of the framebuffer when index >= 0. -1 = hidden. REV.CPP's
+// SDL_KEYDOWN handler cycles the index on each 'V' press: -1 -> 0 ->
+// 1 -> ... -> N-1 -> -1.
+extern int g_shadowViewIdx;
+void ShadowMap_Overlay(byte *vpage, int xres, int yres);
+void ShadowMap_ViewCycle();  // advances g_shadowViewIdx, prints status
+
 // Resize / re-build the shadow-map collection. Called at scene init
 // (after omnis are flagged with Omni_CastsShadow) and on engine
 // resize. `res` is the square edge length (e.g. 512).
