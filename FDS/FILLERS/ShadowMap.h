@@ -198,16 +198,9 @@ inline float CubeShadow_Sample(int cubeIdx,
     const float invLZ = 1.0f / lz;
     const float smX = sm.cntrX + sm.perspX * lx * invLZ;
     const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-    // smX / smY can come out as NaN or huge if the per-omni
-    // viewToLight matrix was set up wrong (e.g. bake before
-    // Animate_Objects). int() on NaN is UB, and int+1 then signed-
-    // overflows past the "iX+1 >= xres" check, producing wild
-    // (iY * xres) offsets that segfault zRow0[iX]. Unsigned-cast
-    // comparison catches negative *and* huge in one shot.
     const int iX = int(smX);
     const int iY = int(smY);
-    if (uint32_t(iX) >= uint32_t(sm.xres - 1)) return 1.0f;
-    if (uint32_t(iY) >= uint32_t(sm.yres - 1)) return 1.0f;
+    if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
     const uint16_t *zRow0 = sm.depth.data() + size_t(iY) * size_t(sm.xres);
     const uint16_t *zRow1 = zRow0 + sm.xres;
     const float fx = smX - float(iX);
