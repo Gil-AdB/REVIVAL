@@ -478,15 +478,15 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 		if (!(T->Flags&HTrack_Visible)) {T->Flags|=Tri_Invisible; continue;}
 
-		// Static-bake filter: skip meshes that animate (Pos / Rotate /
-		// Scale envelope has more than 1 key). Their t=0 silhouette
-		// otherwise gets frozen in a never-rebaked shadow map.
-		if (inStaticBake) {
-			const bool isAnimated = T->Pos.NumKeys    > 1
-			                     || T->Rotate.NumKeys > 1
-			                     || T->Scale.NumKeys  > 1;
-			if (isAnimated) continue;
-		}
+		// Static-bake filter: skip meshes whose *position* animates
+		// (Pos spline has more than 1 key). Their t=0 silhouette would
+		// otherwise be frozen in the never-rebaked shadow as they move.
+		// We deliberately don't check Rotate/Scale — many FLD scenes
+		// author no-op rotate/scale envelopes (NumKeys=2 with identical
+		// values) on otherwise-static meshes, which would over-filter.
+		// A rotating-in-place mesh will have a slightly wrong shadow
+		// but won't disappear; pure translation is the bigger artifact.
+		if (inStaticBake && T->Pos.NumKeys > 1) continue;
 
 		// Per-pass clone redirection. With scratch non-null, all
 		// reads/writes of this TriMesh's per-vertex projection state
