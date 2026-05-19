@@ -3939,6 +3939,13 @@ static void Render_DeferredVolumetric_Tile(
     const float inv_N = 1.0f / float(N_SAMPLES);
 
     const bool hasFog  = (sigma > 0.0f);
+    // Beer-Lambert transmittance uses exp(-σ·z). LUT-based fastPow2
+    // is ~5× faster than std::exp on arm64; per-sample math runs
+    // hot enough that this matters. Precompute -σ·log2(e) so the
+    // per-sample lookup is one mul + one fastPow2.
+    //   exp(-σ·z) = pow2(-σ·z · log2(e))
+    constexpr float kLog2e = 1.4426950408889634f;
+    const float fogPowK = -sigma * kLog2e;
     const bool hasCone = (spotCount > 0 && coneDensity > 0.0f);
     const bool hasHalo = (omniCount > 0 && omniHaloDensity > 0.0f);
 
@@ -3970,7 +3977,7 @@ static void Render_DeferredVolumetric_Tile(
             float T_surf = 1.0f;
             float fog_emit_R = 0.0f, fog_emit_G = 0.0f, fog_emit_B = 0.0f;
             if (hasFog) {
-                T_surf = std::exp(-sigma * zMax);
+                T_surf = fastPow2(fogPowK * zMax);
                 const float fogFrac = 1.0f - T_surf;
                 fog_emit_R = fogR * fogFrac;
                 fog_emit_G = fogG * fogFrac;
@@ -4080,7 +4087,7 @@ static void Render_DeferredVolumetric_Tile(
                         const float distAtten = cutoff * cutoff * invSq;
                         // Beer-Lambert: per-sample transmittance from
                         // sample point z to camera = exp(-σ·z).
-                        const float T_sample = hasFog ? std::exp(-sigma * z) : 1.0f;
+                        const float T_sample = hasFog ? fastPow2(fogPowK * z) : 1.0f;
                         acc_attenuated += coneAtten * distAtten * T_sample;
                     }
                     if (acc_attenuated <= 0.0f) continue;
@@ -4133,7 +4140,7 @@ static void Render_DeferredVolumetric_Tile(
                         const float cutoff = 1.0f - dr;
                         const float invSq  = 1.0f / (dr * dr + 0.05f);
                         const float distAtten = cutoff * cutoff * invSq;
-                        const float T_sample = hasFog ? std::exp(-sigma * z) : 1.0f;
+                        const float T_sample = hasFog ? fastPow2(fogPowK * z) : 1.0f;
                         acc_attenuated += distAtten * T_sample;
                         // (Cube shadow lookup could go here per sample;
                         // for the initial MVP we skip it — halos look
