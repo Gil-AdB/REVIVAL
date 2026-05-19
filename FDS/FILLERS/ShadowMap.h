@@ -4,6 +4,7 @@
 #include "Base/Matrix.h"
 #include "Base/Camera.h"
 #include "Base/Face.h"
+#include <atomic>
 #include <vector>
 #include <cstdint>
 
@@ -92,6 +93,11 @@ extern std::vector<ShadowMap> g_shadowMaps;
 // SDL_KEYDOWN handler cycles the index on each 'V' press: -1 -> 0 ->
 // 1 -> ... -> N-1 -> -1.
 extern int g_shadowViewIdx;
+// Set by scene tick when the user has the full-screen shadow viz on
+// (greets M key). When true, ShadowMap_Overlay skips the thumbnail —
+// the full-screen viz already shows the map, and V just cycles which
+// map is displayed instead of stacking a thumbnail on top.
+extern std::atomic<bool> g_shadowFullscreenView;
 // pitchBytes is the surface's BPSL (may exceed xres*4 on locked SDL
 // textures with alignment padding — caller passes VS->BPSL).
 void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes);

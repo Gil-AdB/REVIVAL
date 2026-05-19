@@ -1109,11 +1109,17 @@ struct GreetsScene : SceneDriver {
 
 		// Shadow-map debug view toggle (M). Hoisted up so the
 		// spotlight-snap and C-key handlers below can gate on it.
+		// Also publishes the state to g_shadowFullscreenView so the
+		// SDL2 V_Flip thumbnail suppresses itself while M-view is on.
 		static bool sShadowMapView = false;
 		{
 			static bool sMPrev = false;
 			const bool mNow = Keyboard[ScM] != 0;
-			if (mNow && !sMPrev) sShadowMapView = !sShadowMapView;
+			if (mNow && !sMPrev) {
+				sShadowMapView = !sShadowMapView;
+				g_shadowFullscreenView.store(sShadowMapView,
+				                             std::memory_order_relaxed);
+			}
 			sMPrev = mNow;
 		}
 
@@ -1403,9 +1409,14 @@ struct GreetsScene : SceneDriver {
 		// Shadow-map debug view. sShadowMapView is toggled at the top of
 		// tick() (M key, edge-detect). Grayscale: higher = closer to
 		// light. The actual scene rendered this frame is discarded when
-		// the toggle is on — pure debug view.
+		// the toggle is on — pure debug view. g_shadowViewIdx (V key)
+		// picks which map; clamp to [0, N-1] since in full-screen mode
+		// the cycle skips the -1 hide state.
 		if (sShadowMapView && !g_shadowMaps.empty()) {
-			const ShadowMap& sm = g_shadowMaps[0];
+			int idx = g_shadowViewIdx;
+			if (idx < 0) idx = 0;
+			if (idx >= int(g_shadowMaps.size())) idx = int(g_shadowMaps.size()) - 1;
+			const ShadowMap& sm = g_shadowMaps[idx];
 			// Viz follows the active render mode so what you see is what
 			// the kernel is using. F3 toggles both at once.
 			const bool sVizPolyId = (g_shadowMode.load() == ShadowMode::PolyId);

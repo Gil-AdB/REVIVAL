@@ -23,6 +23,7 @@ std::vector<CubeShadowRef> g_cubeShadowRefs;
 
 // Shadow-map debug viewer state. See ShadowMap.h for protocol.
 int g_shadowViewIdx = -1;
+std::atomic<bool> g_shadowFullscreenView{false};
 
 void ShadowMap_ViewCycle()
 {
@@ -33,7 +34,15 @@ void ShadowMap_ViewCycle()
         g_shadowViewIdx = -1;
         return;
     }
-    g_shadowViewIdx = (g_shadowViewIdx >= n - 1) ? -1 : g_shadowViewIdx + 1;
+    // In full-screen mode (greets M), -1 (= "off") would clear the
+    // viz; instead wrap 0..N-1. Outside full-screen mode keep the
+    // -1 sentinel so V can hide the thumbnail.
+    const bool fullscreen = g_shadowFullscreenView.load(std::memory_order_relaxed);
+    if (fullscreen) {
+        g_shadowViewIdx = (g_shadowViewIdx + 1) % n;
+    } else {
+        g_shadowViewIdx = (g_shadowViewIdx >= n - 1) ? -1 : g_shadowViewIdx + 1;
+    }
     if (g_shadowViewIdx < 0) {
         std::fprintf(stderr, "[SHADOW-VIEW] off (cycled past last of %d)\n", n);
     } else {
@@ -74,6 +83,10 @@ void ShadowMap_ViewCycle()
 
 void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
 {
+    // When the user is in the full-screen shadow viz (greets M),
+    // the entire framebuffer is already showing the current map —
+    // skip the thumbnail so it doesn't stack on top.
+    if (g_shadowFullscreenView.load(std::memory_order_relaxed)) return;
     if (g_shadowViewIdx < 0) return;
     if (g_shadowViewIdx >= int(g_shadowMaps.size())) return;
     if (!vpage || xres <= 0 || yres <= 0 || pitchBytes <= 0) return;
