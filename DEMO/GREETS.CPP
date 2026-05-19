@@ -728,7 +728,7 @@ void Initialize_Greets()
 			if (Obj->Name) std::fprintf(stderr, "  %s\n", Obj->Name);
 		}
 	}
-	if (g_RobotMesh) {
+	if (g_RobotMesh && !fds::FeatureFlags::no_greets_spots()) {
 		initializeRobotSpotlights();
 	}
 }
@@ -812,9 +812,25 @@ struct GreetsScene : SceneDriver {
 		ImageSize = 0.25;
 
 		// Shadow-map storage for every Omni_CastsShadow light in this
-		// scene. Today: just the robot spotlight (flagged in
-		// Initialize_Greets). 1024² per light = 2 MB.
+		// scene. Spotlights (robot + orbits) are flagged at install in
+		// makeSpotLight. With --greets-omni-shadows, also flag every
+		// FLD-loaded Light_Omni so CubeShadowMaps_Rebuild bakes a 6-face
+		// cube per omni.
+		if (fds::FeatureFlags::greets_omni_shadows()) {
+			int marked = 0;
+			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+				if (O->Type != Light_Omni) continue;
+				if (O->Flags & Omni_CastsShadow) continue;
+				O->Flags |= (Omni_CastsShadow | Omni_StaticShadow);
+				if (O->shadowMapRes == 0) O->shadowMapRes = 256;
+				++marked;
+			}
+			std::fprintf(stderr, "[GREETS] greets_omni_shadows: marked %d "
+			             "Light_Omni for cube shadow bake\n", marked);
+		}
 		ShadowMaps_Rebuild(GreetSc, 1024);
+		CubeShadowMaps_Rebuild(GreetSc, 256);
+		ShadowMaps_BakeStatic(GreetSc);
 
 		// this scene messes up at time zero
 		Timer++;
