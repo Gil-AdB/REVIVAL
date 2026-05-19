@@ -32,6 +32,9 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 	const float sFzpMult = fds::FeatureFlags::shadow_fzp_mult();
 	for (Omni *O = Sc->OmniHead; O; O = O->Next) {
 		if (!(O->Flags & Omni_CastsShadow)) continue;
+		// Light_Omni shadow casters use cube shadow maps via
+		// CubeShadowMaps_Rebuild — not a single 2D entry here.
+		if (O->Type != Light_SpotLight) continue;
 		ShadowMap sm;
 		// Per-light resolution: Omni.shadowMapRes overrides the global
 		// default. Lets short-range orbit lights use 256² (16× less

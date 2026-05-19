@@ -1960,13 +1960,56 @@ void Initialize_City()
 		streetlight(-1500.0f, Y,   2500.0f,  0.6f, -1.0f,  0.0f, 120.0f, 180.0f, 255.0f, R);
 		fprintf(stderr, "[CITY] installed 6 test streetlight cones\n");
 
+		// One shadow-casting Light_Omni at city ground level between
+		// buildings, exercising the cube-shadow path (6 face shadow
+		// maps). Buildings cast shadows in all directions from this
+		// position so shadowed regions are clearly visible. Bright
+		// cool-white so the shadowed regions read against the existing
+		// orange streetlight pools.
+		{
+			Omni *O = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+			std::memset(O, 0, sizeof(Omni));
+			O->L.R = 220.0f; O->L.G = 240.0f; O->L.B = 255.0f; O->L.A = 1.0f;
+			O->ISize  = 2.5f;
+			O->IRange = 2500.0f;
+			O->rRange = 1.0f / O->IRange;
+			O->IPos   = Vector(0, 600, 500);
+			O->Type   = Light_Omni;
+			O->Flags  = Omni_Active | Omni_CastsShadow;
+			O->shadowMapRes = 256;  // 256² per face × 6 = 1.5 MB total
+			// Splines so Animate_Objects doesn't crash. Single-key
+			// constants for static position/size/range.
+			auto initKey = [](Spline& sp, float a, float b, float c) {
+				sp.NumKeys = 1; sp.Keys = new SplineKey;
+				std::memset(sp.Keys, 0, sizeof(SplineKey));
+				sp.Keys[0].Pos.x = a; sp.Keys[0].Pos.y = b; sp.Keys[0].Pos.z = c;
+				sp.Flags = 0; sp.CurKey = 0;
+			};
+			initKey(O->Pos,   O->IPos.x, O->IPos.y, O->IPos.z);
+			initKey(O->Size,  O->ISize,  O->ISize,  O->ISize);
+			initKey(O->Range, O->IRange, O->IRange, O->IRange);
+			// Flare-pass plumbing (filler is no-op for non-flares).
+			O->F.A = &O->V; O->F.B = &O->V; O->F.C = &O->V;
+			O->F.Filler = [](Face*, Vertex**, dword, dword,
+			                 const fds::RenderTarget&,
+			                 const fds::CameraContext&) {};
+			O->Next = CitySc->OmniHead;
+			if (CitySc->OmniHead) CitySc->OmniHead->Prev = O;
+			CitySc->OmniHead = O;
+			fprintf(stderr, "[CITY] installed 1 shadow-casting cube omni at (0,1500,500)\n");
+		}
+
 		// Allocate shadow maps for the spots we just installed (they
 		// claim castsShadow=true with shadowMapRes=512). The per-frame
 		// shadow-render pass in Render_DeferredShadowMaps will populate
 		// them. Required so the cone pass can sample shadow per
 		// integration sample → cones get occluded by buildings.
+		// CubeShadowMaps_Rebuild handles Light_Omni cube faces (must
+		// come AFTER ShadowMaps_Rebuild since both push into the same
+		// g_shadowMaps vector).
 		if (fds::FeatureFlags::shadows()) {
 			ShadowMaps_Rebuild(CitySc, 512);
+			CubeShadowMaps_Rebuild(CitySc, 256);
 		}
 	}
 }
