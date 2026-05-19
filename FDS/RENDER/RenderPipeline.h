@@ -30,7 +30,10 @@ public:
     // Stage entry: full per-frame render. Consumes the per-frame globals
     // populated by Transform_Objects / Lighting and writes VPage + the
     // deferred G-buffer / shadow maps as configured.
-    void renderFrame(RenderPath path);
+    // skipVolumetric=true bypasses cones/halos/unified passes (used by
+    // City's pass-1 reflection bake where the result gets distorted
+    // through dispMap and volumetric work would be largely wasted).
+    void renderFrame(RenderPath path, bool skipVolumetric = false);
 
     // One-shot helpers for the snapshot/test harnesses — drive a scene
     // through `seconds` of Timer ticks and render the final frame, or

@@ -120,6 +120,22 @@ int RunSpecTest(const SnapshotConfig& cfg, int xres, int yres);
 // Output: <outDir>/conetest_<pose>.ppm
 int RunConeTest(const SnapshotConfig& cfg, int xres, int yres);
 
+// Omni-halo test harness — single omnidirectional light with several
+// camera poses (inside the range sphere, outside-close, outside-far,
+// side-offset). Lets the halo math be inspected at the cases that
+// matter: full screen coverage (camera inside sphere, where sphereDisc
+// cull doesn't fire), small projected sphere (camera far, halo as a
+// tight ball), edge-grazing rays.
+//
+// REQUIRES: `--deferred --omni_halo_strength=0.5` (or any non-zero
+// value). Add `--no-vol_halo_analytic` to compare the ray-march
+// fallback against the analytic atan integral.
+//
+//   DEMO --deferred --omni_halo_strength=0.5 --snapshot=halotest [--out=PATH]
+//
+// Output: <outDir>/halotest_<pose>.ppm
+int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Reproduce the user-reported wrong-direction reflection: stand outside
 // the city over open water at four extremes, look back at the nearest
 // reflective building. The water-facing side reflects what's behind the
@@ -146,6 +162,13 @@ struct BenchConfig {
     // Used by --bench=scene: which scene driver + Timer value to drive.
     std::string scene;
     int32_t ts = 0;
+    // For --bench=scene: when tend > 0, the bench advances Timer from
+    // ts to tend (inclusive) over `iters` iterations — useful for
+    // measuring averaged frame cost across a stretch of scene playback
+    // (e.g. ts=500, tend=2500, iters=200 → ~10ms per timer step across
+    // ~2 sec of city). When tend == 0 (default), behaves like before
+    // (repeats the same frame `iters` times).
+    int32_t tend = 0;
     // Optional override of resolution (otherwise rev.cfg's value is used).
     // Used by --bench=flip to vary canvas size without editing rev.cfg.
     int xres = 0;

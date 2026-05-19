@@ -67,6 +67,64 @@ inline u16 oct_encode_u16(float nx, float ny, float nz) {
 	return u16((qx & 0xff) | ((qy & 0xff) << 8));
 }
 
+// 8-wide oct_encode. Mirrors the scalar oct_encode_u16 exactly (same
+// L1 normalize, z<0 fold, ×127 quantize, [-128,127] clamp). Output is
+// 8 packed u16 values in the low 16 bits of each 32-bit lane; callers
+// store via `_mm256_store_si256` then cast/copy to u16 per lane (or
+// pack down further if writing densely is needed).
+//
+// Replaces the per-lane scalar call from Mekalele's apply_exact hot
+// loop — that scalar fallback was the #1 hot line in the rasterizer
+// profile (~10% of total CPU on default city; ~30% of Mekalele).
+inline __m256i oct_encode_u16_x8(__m256 nx, __m256 ny, __m256 nz) {
+    const __m256 vSignMask = _mm256_set1_ps(-0.0f);
+    const __m256 vZero     = _mm256_setzero_ps();
+    const __m256 vOne      = _mm256_set1_ps(1.0f);
+    const __m256 vNegOne   = _mm256_set1_ps(-1.0f);
+    const __m256 v127      = _mm256_set1_ps(127.0f);
+
+    const __m256 absX = _mm256_andnot_ps(vSignMask, nx);
+    const __m256 absY = _mm256_andnot_ps(vSignMask, ny);
+    const __m256 absZ = _mm256_andnot_ps(vSignMask, nz);
+    const __m256 sumAbs = _mm256_add_ps(absX, _mm256_add_ps(absY, absZ));
+    const __m256 invL1  = _mm256_div_ps(vOne, sumAbs);
+    __m256 ox = _mm256_mul_ps(nx, invL1);
+    __m256 oy = _mm256_mul_ps(ny, invL1);
+
+    // z<0 fold: ox/oy reshuffled into the "outside" octant pattern.
+    const __m256 zNeg   = _mm256_cmp_ps(nz, vZero, _CMP_LT_OQ);
+    const __m256 absOX  = _mm256_andnot_ps(vSignMask, ox);
+    const __m256 absOY  = _mm256_andnot_ps(vSignMask, oy);
+    const __m256 sgnX   = _mm256_blendv_ps(vNegOne, vOne,
+                            _mm256_cmp_ps(ox, vZero, _CMP_GE_OQ));
+    const __m256 sgnY   = _mm256_blendv_ps(vNegOne, vOne,
+                            _mm256_cmp_ps(oy, vZero, _CMP_GE_OQ));
+    const __m256 fx = _mm256_mul_ps(_mm256_sub_ps(vOne, absOY), sgnX);
+    const __m256 fy = _mm256_mul_ps(_mm256_sub_ps(vOne, absOX), sgnY);
+    ox = _mm256_blendv_ps(ox, fx, zNeg);
+    oy = _mm256_blendv_ps(oy, fy, zNeg);
+
+    // Quantize: _mm256_cvtps_epi32 rounds to nearest under default
+    // MXCSR (matches std::round-via-int for the values produced here:
+    // ox/oy ∈ [-1,1] × 127 → [-127, 127], well below int32 round-half
+    // ambiguity). Then clamp into the signed byte range.
+    __m256i qx = _mm256_cvtps_epi32(_mm256_mul_ps(ox, v127));
+    __m256i qy = _mm256_cvtps_epi32(_mm256_mul_ps(oy, v127));
+    const __m256i cmin = _mm256_set1_epi32(-128);
+    const __m256i cmax = _mm256_set1_epi32(127);
+    qx = _mm256_max_epi32(qx, cmin);
+    qx = _mm256_min_epi32(qx, cmax);
+    qy = _mm256_max_epi32(qy, cmin);
+    qy = _mm256_min_epi32(qy, cmax);
+
+    // Pack: u16((qx & 0xff) | ((qy & 0xff) << 8)) per lane, kept in
+    // the low 16 bits of each 32-bit lane for easy scalar extract.
+    const __m256i mask8 = _mm256_set1_epi32(0xFF);
+    qx = _mm256_and_si256(qx, mask8);
+    qy = _mm256_and_si256(qy, mask8);
+    return _mm256_or_si256(qx, _mm256_slli_epi32(qy, 8));
+}
+
 // Inverse of oct_encode_u16. Output is unit-length (mod quantization
 // error). Used by the lighting pass and the debug visualization.
 inline void oct_decode_u16(u16 packed, float &nx, float &ny, float &nz) {
@@ -312,52 +370,51 @@ struct TileRasterizer {
 					auto packedTxtrData = v8_TxtrIdMask | p_offset;
 					_mm256_maskstore_ps(span.txtr, *(__m256i*)(&p_mask), *(__m256*)(&packedTxtrData));
 
-					// Per-pixel nlerp + octahedral pack. Scalar fallback for
-					// now — the encode has a couple of branches (sign tests
-					// in the z<0 fold) that are awkward to vectorize cleanly,
-					// and the pass is rare-pixel-rate compared to the texture
-					// fetch in the lighting pass. Vectorize once we can show
-					// it on a profile.
-					alignas(32) float nx_l[8], ny_l[8], nz_l[8];
-					p_nx.store_a(nx_l);
-					p_ny.store_a(ny_l);
-					p_nz.store_a(nz_l);
-					alignas(32) float tx_l[8], ty_l[8], tz_l[8];
+					// Per-pixel nlerp + octahedral pack. Vec normalize +
+					// vec oct_encode_u16_x8 — formerly scalar per-lane.
+					// Tangent: vec Gram-Schmidt + vec encode, with a
+					// degenerate-lane mask that zeros tangent for lanes
+					// where T became parallel to N after interpolation.
+					const Vec8f n2 = p_nx*p_nx + p_ny*p_ny + p_nz*p_nz;
+					const Vec8f vInvN = approx_rsqrt(n2);
+					const Vec8f vnx = p_nx * vInvN;
+					const Vec8f vny = p_ny * vInvN;
+					const Vec8f vnz = p_nz * vInvN;
+					alignas(32) uint32_t normalEnc[8];
+					_mm256_store_si256((__m256i*)normalEnc,
+						oct_encode_u16_x8(*(const __m256*)&vnx,
+						                  *(const __m256*)&vny,
+						                  *(const __m256*)&vnz));
+					alignas(32) uint32_t tangentEnc[8];
+					alignas(32) int32_t  tValid[8];
 					if (wantTangent) {
-						p_tx.store_a(tx_l);
-						p_ty.store_a(ty_l);
-						p_tz.store_a(tz_l);
+						const Vec8f tDotN = p_tx*vnx + p_ty*vny + p_tz*vnz;
+						Vec8f vtx = p_tx - vnx * tDotN;
+						Vec8f vty = p_ty - vny * tDotN;
+						Vec8f vtz = p_tz - vnz * tDotN;
+						const Vec8f tLen2 = vtx*vtx + vty*vty + vtz*vtz;
+						const Vec8f vInvT = approx_rsqrt(tLen2);
+						vtx = vtx * vInvT;
+						vty = vty * vInvT;
+						vtz = vtz * vInvT;
+						_mm256_store_si256((__m256i*)tangentEnc,
+							oct_encode_u16_x8(*(const __m256*)&vtx,
+							                  *(const __m256*)&vty,
+							                  *(const __m256*)&vtz));
+						// Lane-valid mask: tLen2 > 1e-12. Degenerate lanes
+						// get tangent = 0 (lighting kernel falls back to
+						// an arbitrary ⟂N reference).
+						const Vec8f vEps = 1e-12f;
+						Vec8i(tLen2 > vEps).store_a(tValid);
 					}
 					alignas(32) int32_t mask_l[8];
 					Vec8i(p_mask).store_a(mask_l);
 					for (int lane = 0; lane < 8; ++lane) {
 						if (!mask_l[lane]) continue;
-						float nx = nx_l[lane], ny = ny_l[lane], nz = nz_l[lane];
-						float invLen = fast_rsqrt(nx*nx + ny*ny + nz*nz);
-						nx *= invLen; ny *= invLen; nz *= invLen;
-						span.normal[lane] = oct_encode_u16(nx, ny, nz);
+						span.normal[lane] = uint16_t(normalEnc[lane]);
 						if (wantTangent) {
-							// Gram-Schmidt the interpolated tangent against the
-							// per-pixel renormalized N. Without this the TBN
-							// frame skews near triangle interior pixels where
-							// nlerp doesn't preserve the original ⟂(N,T)
-							// relationship from the vertex shader.
-							float tx = tx_l[lane], ty = ty_l[lane], tz = tz_l[lane];
-							const float tDotN = tx*nx + ty*ny + tz*nz;
-							tx -= nx * tDotN;
-							ty -= ny * tDotN;
-							tz -= nz * tDotN;
-							const float tLen2 = tx*tx + ty*ty + tz*tz;
-							if (tLen2 > 1e-12f) {
-								const float invTLen = fast_rsqrt(tLen2);
-								span.tangent[lane] = oct_encode_u16(tx*invTLen, ty*invTLen, tz*invTLen);
-							} else {
-								// Degenerate tangent (parallel to N after
-								// interpolation). Fall back to an arbitrary
-								// ⟂N reference — the lighting kernel will
-								// still produce a sane TBN frame.
-								span.tangent[lane] = 0;
-							}
+							span.tangent[lane] = tValid[lane]
+								? uint16_t(tangentEnc[lane]) : uint16_t(0);
 						}
 					}
 				}

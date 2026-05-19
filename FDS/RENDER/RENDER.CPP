@@ -272,7 +272,7 @@ void fds::RenderPipeline::setDeferredWaterMatID(int id) {
 // zero — no need to round numLights up to a multiple of 8 explicitly.
 
 
-void fds::RenderPipeline::renderFrame(RenderPath path)
+void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 {
 	constexpr auto		numTilesX = 6;
 	constexpr auto		numTilesY = 4;
@@ -551,11 +551,13 @@ xpar_done: ;
 	//     gated (draw_cones / omni_halo_strength); scenes can keep
 	//     bright-clear look (city) while still getting cone shafts
 	//     or halos if enabled.
-	if (useUnifiedVolumetric()) {
-		Render_DeferredVolumetric();
-	} else {
-		Render_VolumetricCones();
-		Render_OmniHalos();
+	if (!skipVolumetric) {
+		if (useUnifiedVolumetric()) {
+			Render_DeferredVolumetric();
+		} else {
+			Render_VolumetricCones();
+			Render_OmniHalos();
+		}
 	}
 	VolProf_Tick();
 
@@ -895,7 +897,7 @@ fds::RenderPipeline &fds::RenderPipeline::instance() {
 	return s_instance;
 }
 
-void Render(RenderPath path)         { fds::RenderPipeline::instance().renderFrame(path); }
+void Render(RenderPath path, bool skipVolumetric) { fds::RenderPipeline::instance().renderFrame(path, skipVolumetric); }
 void RunScene(Scene *Sc, float Sec)  { fds::RenderPipeline::instance().runScene(Sc, Sec); }
 void SetCurrentScene(Scene *Sc)      { fds::RenderPipeline::instance().setCurrentScene(Sc); }
 void SetDeferredWaterMatID(int id)   { fds::RenderPipeline::instance().setDeferredWaterMatID(id); }

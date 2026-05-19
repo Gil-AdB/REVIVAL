@@ -52,6 +52,16 @@ struct Omni
 	// short-range lights to dramatically cut rasterization cost.
 	dword            shadowMapRes;
 	dword            dummy2;
+	// Per-omni halo controls (decouple halo brightness/extent from the
+	// omni's surface-lighting parameters L*ISize and IRange). Render_-
+	// OmniHalos and Render_DeferredVolumetric multiply the per-omni
+	// halo density by HaloIntensity and use HaloRange in place of
+	// IRange for the halo sphere bounds. Both default to 0 →
+	// "use legacy behavior" (HaloIntensity=0 → treat as 1.0;
+	// HaloRange=0 → fall back to IRange). Surface lighting kernel
+	// still reads L*ISize and IRange unchanged.
+	float            HaloIntensity;
+	float            HaloRange;
 };
 
 #pragma pack(pop)

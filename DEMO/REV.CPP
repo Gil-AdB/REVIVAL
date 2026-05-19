@@ -1262,7 +1262,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "conetest") {
 			return RunConeTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest)\n",
+		if (snap.scene == "halotest") {
+			return RunHaloTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest, halotest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

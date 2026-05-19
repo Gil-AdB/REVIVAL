@@ -1975,7 +1975,15 @@ void Initialize_City()
 			std::memset(O, 0, sizeof(Omni));
 			O->L.R = 220.0f; O->L.G = 240.0f; O->L.B = 255.0f; O->L.A = 1.0f;
 			O->ISize  = 2.5f;
-			O->IRange = 2500.0f;
+			// Range was 2500: too large — it's an omnidirectional sphere,
+			// not a directional cone, so range 2500 from a near-camera
+			// position covers nearly every screen pixel → the halo pass
+			// does per-sample math for every pixel (no sphere-cull early
+			// out fires). 800 gives a halo footprint similar to the spot
+			// cones; surface lighting falls off more sharply but still
+			// reads visually as the "cool blue accent" against the orange
+			// streetlight pools.
+			O->IRange = 800.0f;
 			O->rRange = 1.0f / O->IRange;
 			O->IPos   = Vector(0, 600, 500);
 			O->Type   = Light_Omni;
@@ -2204,7 +2212,10 @@ struct CityScene : SceneDriver {
 			// FDS_CITY_TEST_SPOTS=1). No-op when no spot has the flag.
 			// Must run before Render() since it swaps view globals.
 			Render_DeferredShadowMaps(CitySc);
-			Render();
+			// skipVolumetric=true — the pass-1 output is consumed by the
+			// dispMap distortion below, so volumetric work (cones/halos)
+			// here is wasted CPU (≈60ms/frame on the cube omni halo).
+			Render(RenderPath::Default, /*skipVolumetric=*/true);
 			{
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;

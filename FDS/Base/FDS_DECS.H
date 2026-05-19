@@ -410,7 +410,13 @@ enum class RenderPath {
 	ForceForward,   // forward fillers regardless (sky cube, cube-map bake)
 	ForceDeferred,  // deferred path regardless of env (snapshot harnesses)
 };
-void Render(RenderPath path = RenderPath::Default);
+// skipVolumetric=true bypasses the per-frame volumetric passes (cones,
+// halos, unified). Used by scenes that issue a subordinate Render()
+// call whose output is consumed by post-processing (e.g. City's pass-1
+// reflection bake into dispMap-distorted backbuffer): the volumetric
+// work in that pass is largely wasted because the result is distorted/
+// composited beyond recognition.
+void Render(RenderPath path = RenderPath::Default, bool skipVolumetric = false);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
 // Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a

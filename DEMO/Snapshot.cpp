@@ -1890,6 +1890,197 @@ static Scene* buildConeTestScene() {
     return Sc;
 }
 
+// ─── Halo test scene ──────────────────────────────────────────────────
+// Single omni at world (0, 200, 0), range 600, on top of a dark ground
+// plane. The poses below cover the cases that matter for halo math:
+// camera inside the range sphere (where sphereDisc cull never fires
+// and every pixel does the per-sample/analytic math), camera just
+// outside (sphere fills most of view), and far outside (sphere as a
+// small projected ball). Each pose is rendered with whichever halo
+// path the runtime flags select (default analytic; --no-vol_halo_analytic
+// for the ray-march fallback). Run twice for A/B.
+static Scene* buildHaloTestScene() {
+    Scene* Sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(Sc, 0, sizeof(Scene));
+    Sc->NZP   = 5.0f;
+    Sc->FZP   = 8000.0f;
+    Sc->Flags = Scn_ZBuffer;
+    Sc->Ambient.R = Sc->Ambient.G = Sc->Ambient.B = 10;
+    Sc->Ambient.A = 255;
+
+    Camera* Cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(Cam, 0, sizeof(Camera));
+    Vector_Form(&Cam->ISource, 0, 200, -1500);
+    Matrix_Identity(Cam->Mat);
+    Cam->IFOV = 60.0f;
+    Sc->CameraHead = Cam;
+
+    // Single cool-blue omni — wide enough to give meaningful halo,
+    // narrow enough that the camera can clearly be outside the sphere
+    // for the far poses. Range 600 → sphere ⌀1200 centered at (0,200,0).
+    Omni* O = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+    std::memset(O, 0, sizeof(Omni));
+    O->L.R = 180.0f; O->L.G = 220.0f; O->L.B = 255.0f; O->L.A = 1.0f;
+    O->ISize  = 8.0f;       // boosted from 2.5 so halo is visible at
+                            // default halo_strength=0.5 (small-range
+                            // omni needs higher ISize to compensate
+                            // for the smaller integration interval).
+    O->IRange = 600.0f;
+    O->rRange = 1.0f / O->IRange;
+    O->IPos   = Vector(0, 200, 0);
+    O->Type   = Light_Omni;
+    O->Flags  = Omni_Active;
+    // Flare-pass plumbing — Transform_Objects's flare pass dereferences
+    // F.A/B/C and calls F.Filler unconditionally, even for non-flare
+    // lights. Without this it hangs/crashes silently. (Cribbed from
+    // MakeSpotLight in DEMO/SpotlightCones.cpp.)
+    O->F.A = &O->V;
+    O->F.B = &O->V;
+    O->F.C = &O->V;
+    O->F.Filler = [](Face*, Vertex**, dword, dword,
+                     const fds::RenderTarget&,
+                     const fds::CameraContext&) {};
+    auto initKey = [](Spline& sp, float a, float b, float c) {
+        sp.NumKeys = 1; sp.Keys = new SplineKey;
+        std::memset(sp.Keys, 0, sizeof(SplineKey));
+        sp.Keys[0].Pos.x = a; sp.Keys[0].Pos.y = b; sp.Keys[0].Pos.z = c;
+        sp.Flags = 0; sp.CurKey = 0;
+    };
+    initKey(O->Pos,   O->IPos.x, O->IPos.y, O->IPos.z);
+    initKey(O->Size,  O->ISize,  O->ISize,  O->ISize);
+    initKey(O->Range, O->IRange, O->IRange, O->IRange);
+    O->Next = Sc->OmniHead;
+    Sc->OmniHead = O;
+
+    // Ground + back wall so the halo has surfaces to composite against.
+    Material* matGround = makeSolidColorMat(Sc, "halo_ground",
+                                            60, 60, 70, 255,
+                                            Mat_RGBInterp, 0);
+    matGround->Diffuse  = 1.0f;
+    matGround->Specular = 0.0f;
+    Material* matWall = makeSolidColorMat(Sc, "halo_wall",
+                                          40, 40, 50, 255,
+                                          Mat_RGBInterp, 1);
+    matWall->Diffuse  = 1.0f;
+    matWall->Specular = 0.0f;
+    linkMatToLib(matGround);
+    linkMatToLib(matWall);
+
+    {
+        // Ground at ±1500 — small enough that the single 2-triangle quad
+        // doesn't span huge near-far depth in view space (which produces
+        // non-monotone z / dropped coverage from the rasterizer's
+        // perspective interpolation, manifesting as horizontal black
+        // bands in the halo composite — see agent diagnosis 2026-05-19).
+        TriMesh* ground = appendTriMesh(Sc, "halo_ground", 4, 2);
+        QuadDef q = {
+            { Vector(-1500, 0, -1500), Vector( 1500, 0, -1500),
+              Vector( 1500, 0,  1500), Vector(-1500, 0,  1500) },
+            Vector(0, 1, 0)
+        };
+        appendQuad(Sc, ground, 0, 0, q, matGround,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+    (void)matWall;  // unused without back wall (caused hang separately)
+    return Sc;
+}
+
+int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    if (fds::FeatureFlags::omni_halo_strength() <= 0.0f) {
+        std::fprintf(stderr,
+            "[HALOTEST] WARNING: --omni_halo_strength is 0; halo pass\n"
+            "[HALOTEST] will be a no-op. Re-run with --deferred "
+            "--omni_halo_strength=0.5.\n");
+    }
+
+    Ambient_Factor   = 0.25f;
+    Diffusive_Factor = 1.0f;
+    Specular_Factor  = 1.0f;
+    Range_Factor     = 1.0f;
+
+    fds::g_mainFaces.resize(8192);
+
+    Scene* sc = buildHaloTestScene();
+    SetCurrentScene(sc);
+    View = sc->CameraHead;
+    Scene_RebuildMatTable(sc);
+
+    // Omni at world (0, 200, 0), range 600 → sphere ⌀1200.
+    // Poses chosen to exercise:
+    //   A inside_center     — camera at omni center: every pixel inside
+    //                         sphere, sphereDisc cull never fires
+    //   B inside_offset     — inside sphere, off-center: typical "near
+    //                         the light" camera position
+    //   C inside_edge       — just inside sphere: near-edge cases for
+    //                         the analytic atan args (large |arg|)
+    //   D outside_close     — just outside sphere: sphere fills most of
+    //                         view, but the bottom edge starts to clip
+    //   E outside_mid       — outside, sphere ≈ 1/4 of view
+    //   F outside_far       — far outside, sphere a small ball
+    //   G outside_side      — sphere off-screen-center
+    //   H outside_below     — looking up at the sphere (omni above camera)
+    struct HaloPose {
+        const char* name;
+        Vector      eye;
+        Vector      target;
+        const char* desc;
+    };
+    const HaloPose poses[] = {
+        {"A_inside_offset", Vector( 200,  200, -200), Vector(  0, 200,    0),
+            "inside sphere, off-center, looking at omni"},
+        {"B_inside_edge",   Vector( 550,  200,    0), Vector(  0, 200,    0),
+            "just inside sphere boundary, looking at omni"},
+        {"C_outside_close", Vector( 700,  200,    0), Vector(  0, 200,    0),
+            "just outside sphere (~100 units), sphere fills view"},
+        {"D_outside_mid",   Vector(1500,  400,    0), Vector(  0, 200,    0),
+            "outside (~900 units off), sphere ≈ 1/4 of view"},
+        {"E_outside_far",   Vector(3000,  600,    0), Vector(  0, 200,    0),
+            "far outside, sphere is a small ball in view"},
+        {"F_outside_side",  Vector(1500,  400, 1000), Vector(800, 200, 1000),
+            "outside, sphere off-screen-center (lateral)"},
+        {"G_outside_below", Vector(   0, -400,  -1200), Vector(  0, 200,    0),
+            "below+behind, looking up at the omni"},
+    };
+
+    int produced = 0;
+    for (const HaloPose& p : poses) {
+        View->ISource = p.eye;
+        buildLookAt(View->ISource, p.target, View->Mat);
+        CalcPersp(View);
+        FOVX = View->PerspX;
+        FOVY = View->PerspY;
+
+        std::memset(VPage,   0, PageSize);
+        std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);
+        }
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath),
+                      "%s/halotest_%s.ppm", cfg.outDir.c_str(), p.name);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr,
+            "[HALOTEST] %-16s eye=(%5.0f,%5.0f,%6.0f) tgt=(%5.0f,%5.0f,%5.0f)  %s -> %s\n",
+            p.name,
+            p.eye.x, p.eye.y, p.eye.z,
+            p.target.x, p.target.y, p.target.z,
+            p.desc, colorPath);
+        ++produced;
+    }
+
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -2400,6 +2591,7 @@ bool ParseBenchArgs(int argc, const char* argv[], BenchConfig& cfg) {
                         if (k == "iters") cfg.iters = static_cast<int>(lv);
                         else if (k == "seed") cfg.seed = static_cast<int>(lv);
                         else if (k == "t") cfg.ts = static_cast<int32_t>(lv);
+                        else if (k == "tend") cfg.tend = static_cast<int32_t>(lv);
                         else if (k == "xres") cfg.xres = static_cast<int>(lv);
                         else if (k == "yres") cfg.yres = static_cast<int>(lv);
                     }
@@ -2474,10 +2666,17 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
     driver->tick();
 
     using clock = std::chrono::high_resolution_clock;
+    const bool sweep = (cfg.tend > cfg.ts);
     auto t0 = clock::now();
     for (int i = 0; i < cfg.iters; ++i) {
         std::srand(0);
-        Timer = cfg.ts;
+        if (sweep) {
+            // Linearly map iter i ∈ [0, iters-1] → Timer ∈ [ts, tend].
+            const int32_t span = cfg.tend - cfg.ts;
+            Timer = cfg.ts + int32_t((int64_t(span) * i) / std::max(1, cfg.iters - 1));
+        } else {
+            Timer = cfg.ts;
+        }
         driver->tick();
     }
     auto t1 = clock::now();
@@ -2485,9 +2684,15 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
     double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double mean_ms = cfg.iters > 0 ? total_ms / cfg.iters : 0.0;
 
-    std::fprintf(stderr,
-                 "[BENCH] scene=%s t=%d iters=%d total=%.2f ms  mean=%.3f ms/iter\n",
-                 cfg.scene.c_str(), cfg.ts, cfg.iters, total_ms, mean_ms);
+    if (sweep) {
+        std::fprintf(stderr,
+                     "[BENCH] scene=%s t=%d..%d iters=%d total=%.2f ms  mean=%.3f ms/iter\n",
+                     cfg.scene.c_str(), cfg.ts, cfg.tend, cfg.iters, total_ms, mean_ms);
+    } else {
+        std::fprintf(stderr,
+                     "[BENCH] scene=%s t=%d iters=%d total=%.2f ms  mean=%.3f ms/iter\n",
+                     cfg.scene.c_str(), cfg.ts, cfg.iters, total_ms, mean_ms);
+    }
     std::fflush(stderr);
 
     // For greets, dump centroid stats so native vs wasm runs can be

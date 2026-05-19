@@ -1,5 +1,7 @@
 #pragma once
 #include <simd/vectorclass.h>
+#include <simde/x86/avx2.h>
+#include <simde/x86/fma.h>
 #include <array>
 #include <cmath>
 
@@ -21,6 +23,67 @@ static inline float fast_rsqrt(float x) {
 	return 1.0f / std::sqrt(x);
 #endif
 }
+
+// atan polynomial approximation — ~10 vec ops, ~0.001 rad max error.
+// Used by the analytic halo path (FDS_VOL_HALO_ANALYTIC) to compute
+// ∫1/(αz²+βz+γ)dz = (2/D)·arctan(...) in closed form without paying
+// libm's scalar atan cost (~30 cycles per call × millions of calls/frame).
+//
+// Range reduction via atan(x) = sign(x)·π/2 − atan(1/x) for |x|>1, all
+// branchless via blendv. Polynomial coefficients are a 5-term minimax
+// fit to atan over [-1,1] (Chebyshev-derived, ~0.001 rad worst-case;
+// well below visible threshold for a glow effect).
+inline float atan_approx_unit(float x) {
+    // x ∈ [-1, 1]. 4 muls + 4 adds via FMA.
+    const float x2 = x * x;
+    return x * (1.0f + x2 * (-0.330299f + x2 * (0.180142f
+              + x2 * (-0.085133f + x2 * 0.020835f))));
+}
+
+inline float atan_approx(float x) {
+    const float ax = std::fabs(x);
+    if (ax <= 1.0f) return atan_approx_unit(x);
+    const float inv = 1.0f / x;
+    const float halfPi = 1.5707963267948966f;
+    return (x > 0 ? halfPi : -halfPi) - atan_approx_unit(inv);
+}
+
+#if INSTRSET >= 8
+// 8-wide branchless variant. Per lane: 1 abs, 1 cmp, 1 div, 1 mul,
+// 5 fmadd (polynomial), 1 fmadd (range-reduce subtract), 2 blendv.
+// ~12 vec ops total — vs scalar libm atan at ~30 cycles per call,
+// 8× lane speedup ≈ 20× wall-clock improvement at full SIMD width.
+inline __m256 atan_approx_x8(__m256 x) {
+    const __m256 vSign   = _mm256_set1_ps(-0.0f);
+    const __m256 vOne    = _mm256_set1_ps(1.0f);
+    const __m256 vHalfPi = _mm256_set1_ps(1.5707963267948966f);
+    const __m256 vNegHalfPi = _mm256_set1_ps(-1.5707963267948966f);
+
+    const __m256 absX = _mm256_andnot_ps(vSign, x);
+    const __m256 big  = _mm256_cmp_ps(absX, vOne, _CMP_GT_OQ);
+
+    // For |x|>1 lanes: use 1/x instead. rcp_ps is ~3 cycles, 12-bit
+    // precision — plenty for atan (~0.001 rad polynomial error already
+    // dominates). div_ps would be 10-20 cycles per lane.
+    const __m256 invX = _mm256_rcp_ps(x);
+    const __m256 t    = _mm256_blendv_ps(x, invX, big);
+
+    // Polynomial: t * (1 + t²·(c1 + t²·(c2 + t²·(c3 + t²·c4))))
+    const __m256 t2 = _mm256_mul_ps(t, t);
+    __m256 poly = _mm256_set1_ps(0.020835f);
+    poly = _mm256_fmadd_ps(poly, t2, _mm256_set1_ps(-0.085133f));
+    poly = _mm256_fmadd_ps(poly, t2, _mm256_set1_ps(0.180142f));
+    poly = _mm256_fmadd_ps(poly, t2, _mm256_set1_ps(-0.330299f));
+    poly = _mm256_fmadd_ps(poly, t2, vOne);
+    poly = _mm256_mul_ps(poly, t);
+
+    // For |x|>1 lanes: result = sign(x)·π/2 − poly.
+    const __m256 xPositive = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_GE_OQ);
+    const __m256 signedHalfPi = _mm256_blendv_ps(vNegHalfPi, vHalfPi, xPositive);
+    const __m256 reduced = _mm256_sub_ps(signedHalfPi, poly);
+    return _mm256_blendv_ps(poly, reduced, big);
+}
+#endif
 
 // block-tiling adjustment functions, V2
 // Example for 256x256 texture
