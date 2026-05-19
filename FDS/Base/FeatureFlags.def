@@ -74,6 +74,9 @@ FDS_FLAG_BOOL(no_vsync,                 "FDS_NO_VSYNC",                 0,      
 FDS_FLAG_BOOL(draw_cones,               "FDS_DRAW_CONES",               0,                              "atmos",    "Draw volumetric spotlight cones (additive). Off by default; scene driver opts in.")
 FDS_FLAG_BOOL(city_test_spots,          "FDS_CITY_TEST_SPOTS",          0,                              "atmos",    "Install 6 test spotlights in city for cone-overlay experimentation")
 FDS_FLAG_FLOAT(cone_strength,           "FDS_CONE_STRENGTH",            0.05f,                          "atmos",    "Volumetric cone density (per-step contribution × 1e-3). 0.05 = subtle shafts, 0.5 = pea-soup fog")
+FDS_FLAG_BOOL(volumetric_unified,       "FDS_VOLUMETRIC_UNIFIED",       0,                              "atmos",    "Use unified Beer-Lambert volumetric pass (replaces separate fog + cone passes; adds omni halos)")
+FDS_FLAG_FLOAT(fog_sigma_mult,          "FDS_FOG_SIGMA_MULT",           3.0f,                           "atmos",    "Beer-Lambert extinction coefficient as multiple of 1/FZP. σ=mult/FZP → T(FZP)=exp(-mult). Default 3 = ~5% transmittance at FZP")
+FDS_FLAG_FLOAT(omni_halo_strength,      "FDS_OMNI_HALO_STRENGTH",       0.0f,                           "atmos",    "Volumetric halo brightness scale for omnis (0 = no halos; 0.05 = subtle; 0.5 = strong). Only applies in unified pass.")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")

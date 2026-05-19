@@ -33,6 +33,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 void Render_DeferredLighting();
 void Render_DeferredFogPass();
 void Render_VolumetricCones();
+void Render_DeferredVolumetric();
 void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2);
 void renderDeferredTransparentTile_Back (int tileIdx, int x1, int y1, int x2, int y2);
 
@@ -348,7 +349,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path)
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto
 		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
-		Render_DeferredFogPass();
+		// Disabled when the unified volumetric pass is on (folds fog in).
+		if (!fds::FeatureFlags::volumetric_unified()) {
+			Render_DeferredFogPass();
+		}
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,
@@ -522,13 +526,19 @@ xpar_done: ;
 		TBR_Render(CurScene);
 	}
 
-	// Volumetric spotlight cones — final additive pass after all opaque,
-	// transparent, sprite, and TBR work. Z-tests against ZPage16 (opaque
-	// depth) per ray sample, never writes depth. Done last so cone glow
-	// composites on top of transparent surfaces and particles, matching
-	// the additive-flare ordering (z-test, no z-write, drawn last).
-	// Gated by FDS_DRAW_CONES; no-op when off.
-	Render_VolumetricCones();
+	// Volumetric pass — final pass over all opaque + transparent. Two
+	// implementations behind a flag:
+	//   volumetric_unified=1: Render_DeferredVolumetric — folds fog
+	//     (Beer-Lambert) + cone scatter + omni halo into ONE per-pixel
+	//     ray-march. Composites surface × T + emit.
+	//   volumetric_unified=0 (default): legacy two-pass —
+	//     Render_DeferredFogPass earlier in the pipeline + this
+	//     Render_VolumetricCones additive after transparent.
+	if (fds::FeatureFlags::volumetric_unified()) {
+		Render_DeferredVolumetric();
+	} else {
+		Render_VolumetricCones();
+	}
 
 
 

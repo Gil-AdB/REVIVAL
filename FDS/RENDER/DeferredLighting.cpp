@@ -3622,3 +3622,344 @@ void renderDeferredTransparentTile_Back(int tileIdx, int x1, int y1, int x2, int
 	Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
 		g_deferredCtx, tileIdx, x1, y1, x2, y2);
 }
+
+// ─── Unified Beer-Lambert volumetric pass ────────────────────────────
+//
+// Replaces Render_DeferredFogPass + Render_VolumetricCones with one
+// physically motivated pass. Per pixel:
+//   out = surface × T_fog + fog_emit + light_emit
+//
+// where T_fog and fog_emit come from an ANALYTIC Beer-Lambert
+// formulation (uniform fog σ → closed form, no ray-march needed),
+// and light_emit is a ray-marched sum of cone scatter + omni halo
+// contributions weighted by the same Beer-Lambert transmittance.
+//
+// Scene's FZP controls the "far plane" feel via σ = mult/FZP, where
+// mult is fog_sigma_mult (default 3). T(z) = exp(-σ·z), so at z=FZP
+// we get T = exp(-3) ≈ 0.05 (95% fogged at the far plane).
+//
+// Sky pixels (zSurf=0, treated as ∞ in clear scenes / zMax=fogFar in
+// fogged scenes) get only ambient fog + light scatter; no surface
+// contribution.
+
+static void Render_DeferredVolumetric_Tile(
+    int x1, int y1, int x2, int y2,
+    const ViewLightsSoA *lights,
+    const int *spotIdx, int spotCount,
+    const int *omniIdx, int omniCount,
+    float invFOVX, float invFOVY,
+    float invZScale,
+    float sigma, float fogFar,
+    float fogR, float fogG, float fogB,
+    float coneDensity, float omniHaloDensity)
+{
+    dword *out = reinterpret_cast<dword*>(VPage);
+    const uint16_t *zEnc = ZPage16;
+    constexpr int N_SAMPLES = 8;
+    constexpr float inv_N = 1.0f / float(N_SAMPLES);
+
+    const bool hasFog  = (sigma > 0.0f);
+    const bool hasCone = (spotCount > 0 && coneDensity > 0.0f);
+    const bool hasHalo = (omniCount > 0 && omniHaloDensity > 0.0f);
+
+    for (int py = y1; py < y2; ++py) {
+        const float Y = (CntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(XRes);
+        for (int px = x1; px < x2; ++px) {
+            const float X = (float(px) - CntrEX) * invFOVX;
+            const float uV = X*X + Y*Y + 1.0f;
+
+            uint32_t pxHash = uint32_t(px) * 0x9E3779B9u
+                            + uint32_t(py) * 0x85EBCA6Bu
+                            + 0xCAFEBABEu;
+            pxHash ^= pxHash >> 13;
+            pxHash *= 0xC2B2AE35u;
+            pxHash ^= pxHash >> 16;
+
+            const float zSurfRaw = float(0xFF80 - int(zEnc[row + px])) * invZScale;
+            const bool isSky = (zSurfRaw <= 0.0f);
+            const float zMax = isSky
+                ? (hasFog ? fogFar : 1e30f)
+                : (hasFog ? std::min(zSurfRaw, fogFar) : zSurfRaw);
+            constexpr float zMin = 0.05f;
+            if (zMax <= zMin) continue;
+
+            // ─── Analytic ambient fog (Beer-Lambert closed form) ────
+            // T_surf = transmittance from surface back to camera.
+            // fog_emit = ambient_color × (1 - T_surf) per channel.
+            float T_surf = 1.0f;
+            float fog_emit_R = 0.0f, fog_emit_G = 0.0f, fog_emit_B = 0.0f;
+            if (hasFog) {
+                T_surf = std::exp(-sigma * zMax);
+                const float fogFrac = 1.0f - T_surf;
+                fog_emit_R = fogR * fogFrac;
+                fog_emit_G = fogG * fogFrac;
+                fog_emit_B = fogB * fogFrac;
+            }
+
+            // ─── Per-light volumetric scatter ───────────────────────
+            float light_R = 0.0f, light_G = 0.0f, light_B = 0.0f;
+
+            // Cones (existing math, kept as-is per spot; each sample's
+            // contribution weighted by exp(-σ·z) for proper attenuation).
+            if (hasCone) {
+                for (int s = 0; s < spotCount; ++s) {
+                    const int li = spotIdx[s];
+                    const float Px = lights->posX[li], Py = lights->posY[li], Pz = lights->posZ[li];
+                    const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
+                    const float cosO = lights->cosOuter[li];
+                    const float cosI = lights->cosInner[li];
+                    const float r2   = lights->range2[li];
+                    const float rr   = lights->rRange[li];
+
+                    const float DV = Dx*X + Dy*Y + Dz;
+                    const float DP = Dx*Px + Dy*Py + Dz*Pz;
+                    const float VP = X*Px + Y*Py + Pz;
+                    const float PP = Px*Px + Py*Py + Pz*Pz;
+                    const float c2 = cosO * cosO;
+
+                    // Sphere bounds.
+                    const float sphereC = PP - r2;
+                    const float sphereDisc = VP*VP - uV * sphereC;
+                    if (sphereDisc < 0.0f) continue;
+                    const float sphereSq = std::sqrt(sphereDisc);
+                    const float invUV    = 1.0f / uV;
+                    const float zSphLo   = (VP - sphereSq) * invUV;
+                    const float zSphHi   = (VP + sphereSq) * invUV;
+
+                    // Cone quadratic.
+                    const float a = DV*DV - c2 * uV;
+                    const float b = 2.0f * (c2 * VP - DV * DP);
+                    const float cq = DP*DP - c2 * PP;
+                    float zLo, zHi;
+                    if (a < -1e-8f) {
+                        const float disc = b*b - 4.0f*a*cq;
+                        if (disc < 0.0f) continue;
+                        const float sq = std::sqrt(disc);
+                        const float inv2a = 1.0f / (2.0f * a);
+                        const float r1 = (-b - sq) * inv2a;
+                        const float r2_ = (-b + sq) * inv2a;
+                        zLo = std::min(r1, r2_);
+                        zHi = std::max(r1, r2_);
+                    } else if (a > 1e-8f) {
+                        const float disc = b*b - 4.0f*a*cq;
+                        if (disc < 0.0f) {
+                            zLo = zMin;
+                            zHi = zMax;
+                        } else {
+                            const float sq = std::sqrt(disc);
+                            const float inv2a = 1.0f / (2.0f * a);
+                            const float root1 = (-b - sq) * inv2a;
+                            const float root2 = (-b + sq) * inv2a;
+                            const float r1Q = std::min(root1, root2);
+                            const float r2Q = std::max(root1, root2);
+                            if (DV > 1e-6f) {
+                                zLo = std::max(r2Q, zMin);
+                                zHi = zMax;
+                            } else if (DV < -1e-6f) {
+                                zLo = zMin;
+                                zHi = std::min(r1Q, zMax);
+                            } else continue;
+                            if (zHi <= zLo) continue;
+                        }
+                    } else continue;
+
+                    if (zLo < zSphLo) zLo = zSphLo;
+                    if (zHi > zSphHi) zHi = zSphHi;
+                    if (zLo < zMin)   zLo = zMin;
+                    if (zHi > zMax)   zHi = zMax;
+                    if (zHi <= zLo)   continue;
+
+                    const float dz = (zHi - zLo) * inv_N;
+                    float acc_attenuated = 0.0f;
+                    for (int k = 0; k < N_SAMPLES; ++k) {
+                        const uint32_t h = pxHash
+                            + uint32_t(k) * 0x9E3779B9u
+                            + uint32_t(s) * 0x6F4A7531u;
+                        const float frac = float(h >> 16) * (1.0f / 65536.0f);
+                        const float z = zLo + (float(k) + frac) * dz;
+                        const float Wx = z*X - Px;
+                        const float Wy = z*Y - Py;
+                        const float Wz = z    - Pz;
+                        const float W2 = Wx*Wx + Wy*Wy + Wz*Wz;
+                        if (W2 > r2 || W2 < 1e-6f) continue;
+                        const float DW = Dx*Wx + Dy*Wy + Dz*Wz;
+                        if (DW <= 0.0f) continue;
+                        const float invLen = fast_rsqrt(W2);
+                        const float dist = W2 * invLen;
+                        const float cosT = DW * invLen;
+                        if (cosT < cosO) continue;
+                        float coneAtten = 1.0f;
+                        if (cosT < cosI) {
+                            const float t = (cosT - cosO) / (cosI - cosO);
+                            coneAtten = t * t * (3.0f - 2.0f * t);
+                        }
+                        const float dr = dist * rr;
+                        const float cutoff = 1.0f - dr;
+                        const float invSq  = 1.0f / (dr * dr + 0.05f);
+                        const float distAtten = cutoff * cutoff * invSq;
+                        // Beer-Lambert: per-sample transmittance from
+                        // sample point z to camera = exp(-σ·z).
+                        const float T_sample = hasFog ? std::exp(-sigma * z) : 1.0f;
+                        acc_attenuated += coneAtten * distAtten * T_sample;
+                    }
+                    if (acc_attenuated <= 0.0f) continue;
+                    const float w = acc_attenuated * coneDensity;
+                    light_R += w * lights->colR[li];
+                    light_G += w * lights->colG[li];
+                    light_B += w * lights->colB[li];
+                }
+            }
+
+            // Omni halos. Sphere-bounded integration, inverse-square
+            // intensity falloff from omni center, weighted by Beer-
+            // Lambert per sample. Cube shadow attenuation if present.
+            if (hasHalo) {
+                for (int o = 0; o < omniCount; ++o) {
+                    const int li = omniIdx[o];
+                    const float Px = lights->posX[li], Py = lights->posY[li], Pz = lights->posZ[li];
+                    const float r2 = lights->range2[li];
+                    const float rr = lights->rRange[li];
+                    const float VP = X*Px + Y*Py + Pz;
+                    const float PP = Px*Px + Py*Py + Pz*Pz;
+
+                    const float sphereC = PP - r2;
+                    const float sphereDisc = VP*VP - uV * sphereC;
+                    if (sphereDisc < 0.0f) continue;
+                    const float sphereSq = std::sqrt(sphereDisc);
+                    const float invUV    = 1.0f / uV;
+                    float zLo = (VP - sphereSq) * invUV;
+                    float zHi = (VP + sphereSq) * invUV;
+                    if (zLo < zMin) zLo = zMin;
+                    if (zHi > zMax) zHi = zMax;
+                    if (zHi <= zLo) continue;
+
+                    const float dz = (zHi - zLo) * inv_N;
+                    float acc_attenuated = 0.0f;
+                    for (int k = 0; k < N_SAMPLES; ++k) {
+                        const uint32_t h = pxHash
+                            + uint32_t(k) * 0x9E3779B9u
+                            + uint32_t(o) * 0x517CC1B7u;
+                        const float frac = float(h >> 16) * (1.0f / 65536.0f);
+                        const float z = zLo + (float(k) + frac) * dz;
+                        const float Wx = z*X - Px;
+                        const float Wy = z*Y - Py;
+                        const float Wz = z    - Pz;
+                        const float W2 = Wx*Wx + Wy*Wy + Wz*Wz;
+                        if (W2 > r2 || W2 < 1e-6f) continue;
+                        const float invLen = fast_rsqrt(W2);
+                        const float dist = W2 * invLen;
+                        const float dr = dist * rr;
+                        const float cutoff = 1.0f - dr;
+                        const float invSq  = 1.0f / (dr * dr + 0.05f);
+                        const float distAtten = cutoff * cutoff * invSq;
+                        const float T_sample = hasFog ? std::exp(-sigma * z) : 1.0f;
+                        acc_attenuated += distAtten * T_sample;
+                        // (Cube shadow lookup could go here per sample;
+                        // for the initial MVP we skip it — halos look
+                        // reasonable without per-sample shadow, and
+                        // adding it doubles the per-sample cost.)
+                    }
+                    if (acc_attenuated <= 0.0f) continue;
+                    const float w = acc_attenuated * omniHaloDensity;
+                    light_R += w * lights->colR[li];
+                    light_G += w * lights->colG[li];
+                    light_B += w * lights->colB[li];
+                }
+            }
+
+            // ─── Composite ──────────────────────────────────────────
+            // out = surface × T_surf + fog_emit + light_emit
+            // Works uniformly for sky and opaque: for sky pixels in
+            // fogged scenes, zMax=fogFar so T_surf is small and the
+            // sky-cube color fades into the fog ambient — correct
+            // horizon behaviour. For non-fogged scenes T_surf=1 and
+            // fog_emit=0, so out = surface + light_emit (additive
+            // cone/halo with no attenuation).
+            const size_t i = row + size_t(px);
+            const dword pix = out[i];
+            const float surfR = float((pix >> 16) & 0xFFu);
+            const float surfG = float((pix >>  8) & 0xFFu);
+            const float surfB = float( pix        & 0xFFu);
+            const float newR = surfR * T_surf + fog_emit_R + light_R;
+            const float newG = surfG * T_surf + fog_emit_G + light_G;
+            const float newB = surfB * T_surf + fog_emit_B + light_B;
+            (void)isSky;
+            int nR = int(newR), nG = int(newG), nB = int(newB);
+            if (nR > 255) nR = 255;
+            if (nG > 255) nG = 255;
+            if (nB > 255) nB = 255;
+            if (nR <   0) nR =   0;
+            if (nG <   0) nG =   0;
+            if (nB <   0) nB =   0;
+            out[i] = (dword(nR) << 16) | (dword(nG) << 8)
+                   |  dword(nB)        | 0xFF000000u;
+        }
+    }
+}
+
+void Render_DeferredVolumetric() {
+    if (!CurScene || !ZPage16 || !VPage) return;
+    if (!fds::FeatureFlags::volumetric_unified()) return;
+
+    extern DeferredLightingCtx g_deferredCtx;
+    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    if (!lights) return;
+    const int numLights = g_deferredCtx.numLights;
+
+    // Pre-filter spot vs omni index lists.
+    static int spotIdx[DEFERRED_MAX_LIGHTS];
+    static int omniIdx[DEFERRED_MAX_LIGHTS];
+    int spotCount = 0, omniCount = 0;
+    for (int i = 0; i < numLights; ++i) {
+        if (lights->isSpot[i]) spotIdx[spotCount++] = i;
+        else                   omniIdx[omniCount++] = i;
+    }
+
+    const float invFOVX  = 1.0f / FOVX;
+    const float invFOVY  = 1.0f / FOVY;
+    const float invZScale= 1.0f / float(g_zscale);
+    const bool  fogged   = (CurScene->Flags & Scn_Fogged) != 0;
+    const float fogFar   = fogged ? CurScene->FZP : 1e30f;
+    const float sigma    = fogged
+        ? fds::FeatureFlags::fog_sigma_mult() / CurScene->FZP
+        : 0.0f;
+    const float fogR     = float(CurScene->Ambient.R);
+    const float fogG     = float(CurScene->Ambient.G);
+    const float fogB     = float(CurScene->Ambient.B);
+    const float coneDens = fds::FeatureFlags::draw_cones()
+        ? fds::FeatureFlags::cone_strength() * 0.001f
+        : 0.0f;
+    const float haloDens = fds::FeatureFlags::omni_halo_strength() * 0.001f;
+
+    constexpr int numTilesX = 6;
+    constexpr int numTilesY = 4;
+    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+
+    renderns::tileCounter = 0;
+    for (int j = 0; j < numTilesY; ++j) {
+        const int y1 = tileSizeY * j;
+        const int y2 = std::min(y1 + tileSizeY, YRes);
+        for (int i = 0; i < numTilesX; ++i) {
+            const int x1 = tileSizeX * i;
+            const int x2 = std::min(x1 + tileSizeX, XRes);
+            const int *sP = spotIdx; const int sC = spotCount;
+            const int *oP = omniIdx; const int oC = omniCount;
+            ThreadPool::instance().enqueue([=]() {
+                Render_DeferredVolumetric_Tile(
+                    x1, y1, x2, y2, lights, sP, sC, oP, oC,
+                    invFOVX, invFOVY, invZScale,
+                    sigma, fogFar, fogR, fogG, fogB,
+                    coneDens, haloDens);
+                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+                ++renderns::tileCounter;
+                renderns::condition.notify_one();
+            });
+        }
+    }
+    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
+    renderns::condition.wait(lock, []{
+        return renderns::tileCounter == numTilesX * numTilesY;
+    });
+}
