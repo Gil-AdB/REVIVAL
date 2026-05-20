@@ -4945,8 +4945,30 @@ void Render_OmniHalos() {
 //   5 = +Y (SBUP / "up")
 // Per-face UV math derived from vertex/UV layout in InitSkyCube — see
 // the (face, vertex, UV) table next to that function if extending.
+// Deferred sky elapsed-ns accumulator. Always-on (cheap atomic add),
+// distinct from the vol_prof flag-gated VolProfScope. Per-scene
+// drivers consume this in their PROF_SKY section so the on-screen
+// overlay reflects the deferred path the same way it used to
+// reflect RenderSkyCube.
+namespace {
+    std::atomic<std::int64_t> g_deferredSkyNs{0};
+}
+std::int64_t DeferredSkybox_TakeFrameNs() {
+    return g_deferredSkyNs.exchange(0, std::memory_order_relaxed);
+}
+
 void Render_DeferredSkybox() {
     VolProfScope _vp(&g_volProf.ms_skybox, &g_volProf.n_skybox);
+    using clk = std::chrono::steady_clock;
+    const auto t0 = clk::now();
+    struct AccumOnExit {
+        clk::time_point t0;
+        ~AccumOnExit() {
+            const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clk::now() - t0).count();
+            g_deferredSkyNs.fetch_add(dt, std::memory_order_relaxed);
+        }
+    } _accum{t0};
     if (!CurScene || !VPage || !ZPage16) return;
     extern const dword *SkyCube_GetFaceMip(int, int, int&, int&);
     extern int SkyCube_NumMips();
@@ -4980,8 +5002,6 @@ void Render_DeferredSkybox() {
     // Per-pixel angular size in view space. Used to estimate the
     // cubemap UV change between adjacent pixels for mip selection.
     const float pixelAngle = (invFOVX_l > invFOVY_l) ? invFOVX_l : invFOVY_l;
-    const float face0WLog2 =
-        std::log2(std::max(1.0f, float(faceW[0][0])));
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
@@ -5028,19 +5048,23 @@ void Render_DeferredSkybox() {
                             if (dy > 0) { face = 5; u = 0.5f + dx*s; v = 0.5f - dz*s; }
                             else        { face = 4; u = 0.5f + dx*s; v = 0.5f + dz*s; }
                         }
-                        // Mip selection: per-pixel angular step pixelAngle
-                        // maps to a UV step of roughly pixelAngle/(2·maxAbs)
-                        // on the dominant-axis face (the /maxAbs accounts
-                        // for the projection cosine). Texel step then =
-                        // uvStep × faceSize. miplevel = log2(texelStep)
-                        // clamped to [0, mipCount-1]. Cheap closed-form
-                        // alternative to per-pixel finite differences.
+                        // Mip selection. texelStep ≈ pixelAngle·0.5/|dom|·faceW.
+                        // Integer log2 via the IEEE-754 exponent — no
+                        // call into libm. `(bits>>23)&0xFF` is the
+                        // biased exponent; subtract 127 → unbiased.
+                        // (negative result = texelStep<1 → mip 0.)
                         const float invMaxAbs = 1.0f / maxAbs;
                         const float texelStep = pixelAngle * invMaxAbs * 0.5f
                                               * float(faceW[face][0]);
-                        int mip = int(std::log2(std::max(1.0f, texelStep)));
-                        if (mip < 0) mip = 0;
-                        if (mip >= mipCount) mip = mipCount - 1;
+                        int mip;
+                        if (texelStep < 1.0f) {
+                            mip = 0;
+                        } else {
+                            union { float f; uint32_t i; } u{texelStep};
+                            mip = int((u.i >> 23) & 0xFFu) - 127;
+                            if (mip < 0) mip = 0;
+                            if (mip >= mipCount) mip = mipCount - 1;
+                        }
                         const int w = faceW[face][mip];
                         const int h = faceH[face][mip];
                         const dword *tex = facePix[face][mip];
@@ -5083,7 +5107,6 @@ void Render_DeferredSkybox() {
                         const dword G = dword(gF) & 0xFFu;
                         const dword R = dword(rF) & 0xFFu;
                         out[row + px] = 0xFF000000u | (R << 16) | (G << 8) | B;
-                        (void)face0WLog2;
                     }
                 }
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);

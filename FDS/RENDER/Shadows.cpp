@@ -334,6 +334,35 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						const auto& f = *facesPtr;
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
+						// Material flag census — one-shot dump of (Name,
+						// Flags) for the first 64 distinct material
+						// addresses we see during any static bake. Used
+						// to chase "lamps still cast shadows": shows what
+						// the lamp-material bits actually look like, in
+						// case we need to widen the skip mask beyond
+						// Transparent/Additive/SkipZ.
+						{
+							static std::atomic<int> sLogged{0};
+							static std::atomic<Material*> sSeen[64] = {};
+							for (int i = 0; i < f.cAll && sLogged.load() < 64; ++i) {
+								Face *const F = f.fList[i].face;
+								if (!F || !F->Txtr) continue;
+								bool already = false;
+								const int seenN = sLogged.load();
+								for (int k = 0; k < seenN; ++k) {
+									if (sSeen[k].load() == F->Txtr) { already = true; break; }
+								}
+								if (already) continue;
+								const int idx = sLogged.fetch_add(1);
+								if (idx < 64) {
+									sSeen[idx].store(F->Txtr);
+									std::fprintf(stderr,
+									    "[SHADOW-MAT] '%s' flags=0x%08x\n",
+									    (F->Txtr->Name ? F->Txtr->Name : "?"),
+									    unsigned(F->Txtr->Flags));
+								}
+							}
+						}
 						for (int i = 0; i < f.cAll; ++i) {
 							Face *const F = f.fList[i].face;
 							if (!F) continue;

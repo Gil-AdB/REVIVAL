@@ -26,6 +26,13 @@ public:
     void leave(int section);
     void switchTo(int section);
 
+    // External-source contribution. For work that doesn't run inside an
+    // enter()/leave() bracket on the caller's thread (e.g. the deferred
+    // skybox dispatched from Render(), which threads its tile work).
+    // Adds to both scene-cumulative and current-frame totals so the on-
+    // screen overlay and end-of-scene stats stay consistent.
+    void addExternalNs(int section, std::int64_t ns);
+
     // Frame boundaries. beginFrame() before any enter(); endFrame() after the
     // last leave(). endFrame() rolls per-frame deltas into the sample arrays
     // and refreshes the cached overlay aggregates.
@@ -86,3 +93,10 @@ private:
         "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"
     };
 };
+
+// Drain + reset the deferred-skybox accumulator (DeferredLighting.cpp).
+// Returns elapsed ns since the previous drain. Scene drivers call this
+// once per frame to feed PROF_SKY when --deferred-skybox is on; the
+// existing PROF_SKY hooks around RenderSkyCube show 0 ms in that mode
+// because RenderSkyCube becomes a no-op.
+std::int64_t DeferredSkybox_TakeFrameNs();

@@ -42,6 +42,12 @@ void FrameProfiler::leave(int section) {
     activeSection_ = -1;
 }
 
+void FrameProfiler::addExternalNs(int section, std::int64_t deltaNs) {
+    if (section < 0 || section >= PROF_NUM || deltaNs <= 0) return;
+    sectionTotal_[section] += deltaNs;
+    currentFrame_[section] += deltaNs;
+}
+
 void FrameProfiler::switchTo(int section) {
     auto now = clock::now();
     if (activeSection_ >= 0) {

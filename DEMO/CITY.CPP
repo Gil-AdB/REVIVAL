@@ -2270,6 +2270,10 @@ struct CityScene : SceneDriver {
 		// hook needed here.
 
 		prof.leave(PROF_RNDR);
+		// Deferred sky cost timed inside Render_DeferredSkybox; attribute
+		// it back to PROF_SKY (which would otherwise show 0 ms while
+		// --deferred-skybox is on, since RenderSkyCube early-returns).
+		prof.addExternalNs(PROF_SKY, DeferredSkybox_TakeFrameNs());
 
 		// FPS printer — use the profiler's mean frame total (steady_clock,
 		// us-resolution) so the on-screen number agrees with TOTL/mean_fps

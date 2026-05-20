@@ -2237,6 +2237,11 @@ struct FountainScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
+		// Attribute the deferred-skybox tile cost (timed inside
+		// Render_DeferredSkybox via an atomic) back to PROF_SKY so
+		// the on-screen overlay matches what the forward path used
+		// to show. No-op when --deferred-skybox is off.
+		prof.addExternalNs(PROF_SKY, DeferredSkybox_TakeFrameNs());
 
 		if (Rsv_LState) {
 			if (Rsv_LPow > -1) {
