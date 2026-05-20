@@ -1337,24 +1337,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const uint16_t *zsRow1 = zsRow0 + sm.xres;
 									const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
 									const uint16_t *zdRow1 = zdRow0 + sm.xres;
-									// max(static, dynamic) = closest occluder.
-									// Dynamic buffer is all-zero when
-									// --shadow-dynamic is off; max() collapses.
-									const uint16_t zRow0[2] = {
-										std::max(zsRow0[iX  ], zdRow0[iX  ]),
-										std::max(zsRow0[iX+1], zdRow0[iX+1]),
-									};
-									const uint16_t zRow1[2] = {
-										std::max(zsRow1[iX  ], zdRow1[iX  ]),
-										std::max(zsRow1[iX+1], zdRow1[iX+1]),
-									};
+									// Per-tap closest-occluder. Static buffer
+									// holds the once-baked statics; dynamic
+									// holds animated meshes (zero when off).
+									// max() wins on whichever caster is closer.
+									const uint16_t z00 = std::max(zsRow0[iX  ], zdRow0[iX  ]);
+									const uint16_t z10 = std::max(zsRow0[iX+1], zdRow0[iX+1]);
+									const uint16_t z01 = std::max(zsRow1[iX  ], zdRow1[iX  ]);
+									const uint16_t z11 = std::max(zsRow1[iX+1], zdRow1[iX+1]);
 									if (profShadowCache) {
 										// One PCF check = one tracked sample.
 										// Use the (00) tap's cache-line address
 										// — adjacent shadow checks on the same
 										// thread that share this line are hits.
 										const uintptr_t line =
-											reinterpret_cast<uintptr_t>(&zRow0[iX]) >> 6;
+											reinterpret_cast<uintptr_t>(&zsRow0[iX]) >> 6;
 										if (s_shadowProfLastLine != line) {
 											g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
 											s_shadowProfLastLine = line;
@@ -1414,10 +1411,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 										const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
 										const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
 										const int biased = pixZenc + kShadowBias + slopeBias;
-										if (biased < int(zRow0[iX    ])) occ += w00;
-										if (biased < int(zRow0[iX + 1])) occ += w10;
-										if (biased < int(zRow1[iX    ])) occ += w01;
-										if (biased < int(zRow1[iX + 1])) occ += w11;
+										if (biased < int(z00)) occ += w00;
+										if (biased < int(z10)) occ += w10;
+										if (biased < int(z01)) occ += w01;
+										if (biased < int(z11)) occ += w11;
 									}
 									if (occ >= 1.0f) continue;       // fully shadowed
 									shadowAtten = 1.0f - occ;
