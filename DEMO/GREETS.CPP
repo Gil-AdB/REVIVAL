@@ -859,23 +859,40 @@ struct GreetsScene : SceneDriver {
 		    fds::FeatureFlags::greets_omni_shadow_res());
 		int totalOmnis = 0;
 		if (fds::FeatureFlags::greets_omni_shadows()) {
+			// Extent-based "is this omni actually static" check —
+			// matches the mesh-filter logic in Transform.cpp. NumKeys
+			// alone is too strict (greets authors no-op 2-key splines
+			// on static lamps); spline extent < 0.1 in scene units is
+			// the real signal. Animated omnis without this guard would
+			// bake their t=0 shadow then drift at runtime, producing
+			// the "shadows jump wildly" symptom.
+			auto omniIsStatic = [](Omni *O) -> bool {
+				if (O->Pos.NumKeys <= 1 || !O->Pos.Keys) return true;
+				const auto& k0 = O->Pos.Keys[0].Pos;
+				float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+				for (DWord i = 1; i < O->Pos.NumKeys; ++i) {
+					const auto& k = O->Pos.Keys[i].Pos;
+					if (k.x < xmin) xmin=k.x; if (k.x > xmax) xmax=k.x;
+					if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
+					if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
+				}
+				constexpr float kEps = 0.1f;
+				return (xmax-xmin) < kEps && (ymax-ymin) < kEps && (zmax-zmin) < kEps;
+			};
 			int marked = 0, skippedDynamic = 0;
 			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
 				++totalOmnis;
 				if (O->Type != Light_Omni) continue;
 				if (O->Flags & Omni_CastsShadow) continue;
-				// Only mark *static* omnis — the bake fires once per
-				// scene, so an animated Pos spline would freeze the
-				// shadow at the t=0 position and look wrong as the
-				// light moves. NumKeys > 1 = animated.
-				if (O->Pos.NumKeys > 1) { ++skippedDynamic; continue; }
+				if (!omniIsStatic(O)) { ++skippedDynamic; continue; }
 				O->Flags |= (Omni_CastsShadow | Omni_StaticShadow);
 				O->shadowMapRes = dword(omniCubeRes);
 				++marked;
 			}
 			std::fprintf(stderr,
 			    "[GREETS] greets_omni_shadows: marked %d / %d Light_Omni "
-			    "(skipped %d animated) for cube shadow bake at %dx%d per face\n",
+			    "(skipped %d as effectively dynamic) for cube shadow bake "
+			    "at %dx%d per face\n",
 			    marked, totalOmnis, skippedDynamic, omniCubeRes, omniCubeRes);
 		}
 		ShadowMaps_Rebuild(GreetSc, 1024);
