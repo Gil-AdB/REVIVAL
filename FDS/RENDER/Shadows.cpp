@@ -99,6 +99,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	const bool wantStaticOmnis = (mode == ShadowBakeMode::StaticOnce)
 	                          || (mode == ShadowBakeMode::DynamicMeshesPerFrame);
 	const bool writeDynamicBuf = (mode == ShadowBakeMode::DynamicMeshesPerFrame);
+	// One-shot entry log per mode — confirms the dispatch is firing
+	// at all. Capped per mode so we don't spam per-frame.
+	if (mode == ShadowBakeMode::DynamicMeshesPerFrame) {
+		static std::atomic<int> sLogged{0};
+		if (sLogged.fetch_add(1) < 4) {
+			std::fprintf(stderr,
+			    "[SHADOW-PASS] mode=DynamicMeshesPerFrame  "
+			    "g_shadowMaps.size=%zu\n", g_shadowMaps.size());
+		}
+	}
 
 	// Per-shadow-pass timing breakdown of Transform vs Rasterize cost,
 	// averaged over a rolling window. Tells us where to focus optimization

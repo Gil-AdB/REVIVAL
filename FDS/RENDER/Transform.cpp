@@ -546,7 +546,24 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// Symmetric counterpart for the dynamic per-frame bake: skip
 		// meshes whose Pos/Rotate splines are effectively static —
 		// those already live in the once-baked static map.
-		if (inDynamicBake && !isDynamicForBake(Obj)) continue;
+		if (inDynamicBake && !isDynamicForBake(Obj)) {
+			static std::atomic<int> sDynSkip{0};
+			if (sDynSkip.fetch_add(1) < 32) {
+				std::fprintf(stderr,
+				    "[DYN-BAKE-SKIP-MESH] '%s' (static)\n",
+				    (Obj->Name ? Obj->Name : "?"));
+			}
+			continue;
+		}
+		if (inDynamicBake) {
+			static std::atomic<int> sDynKeep{0};
+			if (sDynKeep.fetch_add(1) < 32) {
+				std::fprintf(stderr,
+				    "[DYN-BAKE-KEEP-MESH] '%s' Pos.NumKeys=%u Faces=%u\n",
+				    (Obj->Name ? Obj->Name : "?"),
+				    unsigned(T->Pos.NumKeys), unsigned(T->FIndex));
+			}
+		}
 		if (inStaticBake && isDynamicForBake(Obj)) {
 			static std::atomic<int> sSkipLogged{0};
 			if (sSkipLogged.fetch_add(1) < 32) {
