@@ -5016,17 +5016,65 @@ void Render_DeferredSkybox() {
             const int x2 = std::min(x1 + tileSizeX, XRes);
             ThreadPool::instance().enqueue([=]() {
                 dword *out = reinterpret_cast<dword *>(VPage);
+                // Hoisted broadcasts for the 8-wide view→world FMAs.
+                const __m256 vm00 = _mm256_set1_ps(m00);
+                const __m256 vm10 = _mm256_set1_ps(m10);
+                const __m256 vm20 = _mm256_set1_ps(m20);
+                const __m256 vm01 = _mm256_set1_ps(m01);
+                const __m256 vm11 = _mm256_set1_ps(m11);
+                const __m256 vm21 = _mm256_set1_ps(m21);
+                const __m256 vm02 = _mm256_set1_ps(m02);
+                const __m256 vm12 = _mm256_set1_ps(m12);
+                const __m256 vm22 = _mm256_set1_ps(m22);
+                const __m256 vCntrX = _mm256_set1_ps(cntrX_l);
+                const __m256 vInvFOVX = _mm256_set1_ps(invFOVX_l);
+                // 0..7 lane offset for vx generation.
+                const __m256 vLaneOfs = _mm256_setr_ps(0,1,2,3,4,5,6,7);
                 for (int py = y1; py < y2; ++py) {
                     const float vy = -((float(py) - cntrY_l) * invFOVY_l);
+                    const __m256 vvy = _mm256_set1_ps(vy);
+                    // m1*vy + m2*1 = fmadd(m1, vy, m2). Hoisted per row.
+                    const __m256 dxY = _mm256_fmadd_ps(vm10, vvy, vm20);
+                    const __m256 dyY = _mm256_fmadd_ps(vm11, vvy, vm21);
+                    const __m256 dzY = _mm256_fmadd_ps(vm12, vvy, vm22);
                     const size_t row = size_t(py) * size_t(XRes);
-                    for (int px = x1; px < x2; ++px) {
-                        if (ZPage16[row + px] != 0) continue;
-                        const float vx = (float(px) - cntrX_l) * invFOVX_l;
-                        const float vz = 1.0f;
-                        // World direction = View->Mat^T · (vx,vy,vz).
-                        const float dx = m00*vx + m10*vy + m20*vz;
-                        const float dy = m01*vx + m11*vy + m21*vz;
-                        const float dz = m02*vx + m12*vy + m22*vz;
+                    for (int pxBase = x1; pxBase < x2; pxBase += 8) {
+                        const int pxEnd = std::min(pxBase + 8, x2);
+                        const int laneCount = pxEnd - pxBase;
+                        // Early-skip batches with no sky pixels — most
+                        // tiles in opaque-heavy scenes look like this.
+                        // Avoid touching the per-pixel math at all.
+                        bool anySky = false;
+                        alignas(32) uint32_t skyMask[8] = {};
+                        for (int l = 0; l < laneCount; ++l) {
+                            if (ZPage16[row + pxBase + l] == 0) {
+                                skyMask[l] = 0xFFFFFFFFu; anySky = true;
+                            }
+                        }
+                        if (!anySky) continue;
+                        // vx = (pxBase + lane - cntrX) * invFOVX
+                        const __m256 vxBase = _mm256_set1_ps(float(pxBase));
+                        const __m256 vPx = _mm256_add_ps(vxBase, vLaneOfs);
+                        const __m256 vvx = _mm256_mul_ps(
+                            _mm256_sub_ps(vPx, vCntrX), vInvFOVX);
+                        // D = M^T · v  (vz = 1 folded into dxY/dyY/dzY).
+                        const __m256 dxv = _mm256_fmadd_ps(vm00, vvx, dxY);
+                        const __m256 dyv = _mm256_fmadd_ps(vm01, vvx, dyY);
+                        const __m256 dzv = _mm256_fmadd_ps(vm02, vvx, dzY);
+                        alignas(32) float dxArr[8], dyArr[8], dzArr[8];
+                        _mm256_store_ps(dxArr, dxv);
+                        _mm256_store_ps(dyArr, dyv);
+                        _mm256_store_ps(dzArr, dzv);
+                        // Per-lane scalar tail: face select + sample.
+                        // (Different lanes pick different faces and
+                        // textures — vectorizing the sampler would need
+                        // gather/scatter; not worth the complexity.)
+                        for (int l = 0; l < laneCount; ++l) {
+                            if (skyMask[l] == 0) continue;
+                            const int px = pxBase + l;
+                            const float dx = dxArr[l];
+                            const float dy = dyArr[l];
+                            const float dz = dzArr[l];
                         const float ax = dx < 0 ? -dx : dx;
                         const float ay = dy < 0 ? -dy : dy;
                         const float az = dz < 0 ? -dz : dz;
@@ -5107,8 +5155,9 @@ void Render_DeferredSkybox() {
                         const dword G = dword(gF) & 0xFFu;
                         const dword R = dword(rF) & 0xFFu;
                         out[row + px] = 0xFF000000u | (R << 16) | (G << 8) | B;
-                    }
-                }
+                        }  // per-lane for-l
+                    }      // per-batch for-pxBase
+                }          // per-row for-py
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
                 ++renderns::tileCounter;
                 renderns::condition.notify_one();
