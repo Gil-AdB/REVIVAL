@@ -4925,20 +4925,17 @@ void Render_OmniHalos() {
     });
 }
 
-// Skybox-from-G-buffer pass (option B scaffold). Paints "no deferred
-// surface here" pixels with a magenta debug color. Confirms dispatch
-// + pixel-set selection before real cubemap sampling lands.
+// Skybox-from-G-buffer pass (option B scaffold). Paints pixels with
+// zEnc == 0 (= no rasterizer touched them) with a magenta debug
+// color. Pre-req: the forward RenderSkyCube must be suppressed when
+// this pass runs (see SkyCube.cpp early-return), otherwise sky
+// pixels would have zEnc != 0 from the forward draw and never paint.
 //
-// IMPORTANT: check mat32 sentinel (0xFFFFFFFF), not ZPage16. The
-// forward sky cube DOES write Z (so zEnc != 0 for sky pixels), but
-// leaves mat32 at its cleared sentinel value. ZPage16==0 means
-// "rasterizer never touched"; mat32==0xFFFFFFFF means "no deferred
-// material here" which is what we actually want.
+// We deliberately don't gate on mat32==sentinel — reflective windows
+// also have mat32==sentinel (forward-rendered), and we don't want
+// to overwrite their already-painted reflection.
 void Render_DeferredSkybox() {
-    if (!CurScene || !VPage) return;
-    if (!g_gbuffer) return;
-    const uint32_t *txtr = g_gbuffer->txtr.data();
-    if (!txtr) return;
+    if (!CurScene || !VPage || !ZPage16) return;
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
@@ -4950,12 +4947,12 @@ void Render_DeferredSkybox() {
         for (int i = 0; i < numTilesX; ++i) {
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            ThreadPool::instance().enqueue([x1, y1, x2, y2, txtr]() {
+            ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
                 dword *out = reinterpret_cast<dword *>(VPage);
                 for (int py = y1; py < y2; ++py) {
                     const size_t row = size_t(py) * size_t(XRes);
                     for (int px = x1; px < x2; ++px) {
-                        if (txtr[row + px] != 0xFFFFFFFFu) continue;
+                        if (ZPage16[row + px] != 0) continue;
                         // Debug: magenta (A=FF, R=FF, G=00, B=FF).
                         out[row + px] = 0xFFFF00FFu;
                     }

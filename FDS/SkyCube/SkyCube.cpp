@@ -2,6 +2,7 @@
 #include "Base/Object.h"
 #include "Base/TriMesh.h"
 #include "Base/Scene.h"
+#include "Base/FeatureFlags.h"
 
 static void GenerateSkyTexture(Texture *Tx, int32_t numStars)
 {
@@ -294,6 +295,12 @@ Scene * CreateSkyCube(dword skyType)
 
 void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
 {
+	// When the deferred skybox pass is on, it paints sky pixels from
+	// the G-buffer — skip the overdrawn forward draw entirely. Both
+	// running would have the forward draw write Z, then the deferred
+	// pass would either overwrite reflective windows (if it checked
+	// mat32) or skip everything (if it checked zEnc).
+	if (fds::FeatureFlags::deferred_skybox()) return;
 	Scene *PrevCurScene = CurScene;
 	Camera *PrevView = View;
 	View = Cm;
