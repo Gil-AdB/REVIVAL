@@ -54,6 +54,12 @@ namespace renderns {
 // shadow pass.
 thread_local Omni* g_currentShadowOmni = nullptr;
 
+// True only inside Render_DeferredShadowMaps_Dynamic's per-frame bake.
+// Inverts the Transform_Objects mesh filter (keep animated, skip static)
+// and routes MekaleleShadowDepth writes to sm.depth_dynamic / polyId_dynamic
+// instead of the static buffers.
+thread_local bool g_inDynamicShadowBake = false;
+
 // Per-frame depth pre-pass over every Omni_CastsShadow light. For each
 // such light we build a temporary Camera (look down IDir, FOV = spot
 // outer cone), swap the engine's view globals to it, re-run

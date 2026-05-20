@@ -31,6 +31,15 @@ struct ShadowMap {
 	// engine-side matID is shifted by +1. Lighting kernel reads this
 	// for material equality in PolyId mode; ignored in Depth mode.
 	std::vector<uint8_t> polyId;
+
+	// Parallel buffers populated per-frame by the dynamic-objects bake
+	// (BakeDynamicForStaticOmnis). Only animated meshes are rendered
+	// here. Static-omni lighting samples min(depth, depth_dynamic) so
+	// moving objects cast moving shadows even though the static bake
+	// only fires once. Allocated lazily by ShadowMaps_Rebuild +
+	// CubeShadowMaps_Rebuild — same size as `depth` / `polyId`.
+	std::vector<uint16_t> depth_dynamic;
+	std::vector<uint8_t>  polyId_dynamic;
 	int    xres = 0;
 	int    yres = 0;
 

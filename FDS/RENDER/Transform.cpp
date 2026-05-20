@@ -424,15 +424,20 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
 		&& g_currentShadowOmni->Type == Light_SpotLight;
-	// When baking a *static* shadow, optionally skip meshes whose Pos
-	// spline has more than one key — baking their t=0 silhouette into
-	// a never-rebaked map freezes their shape in the shadow as they
-	// move at runtime. Off by default since some scenes (greets) have
-	// *every* mesh animated and would end up with empty shadow maps.
+	extern thread_local bool g_inDynamicShadowBake;
+	// Two shadow-bake mesh filters:
+	//   inStaticBake : skip dynamic meshes (their t=0 silhouette would
+	//                  freeze in the once-baked static map).
+	//   inDynamicBake: skip static meshes (the static bake already has
+	//                  them; the per-frame dynamic pass only contains
+	//                  the moving parts).
+	// Same isDynamicForBake() predicate decides both.
 	const bool inStaticBake = g_inShadowPass
 		&& g_currentShadowOmni
 		&& (g_currentShadowOmni->Flags & Omni_StaticShadow)
+		&& !g_inDynamicShadowBake
 		&& fds::FeatureFlags::shadow_skip_animated();
+	const bool inDynamicBake = g_inShadowPass && g_inDynamicShadowBake;
 	// Normalize the cone axis once: the shadow lighting kernel does the
 	// same for its per-pixel cone test (see StaticLighting), so the
 	// authored IDir is not guaranteed unit-length in world space.
@@ -538,6 +543,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 			return false;
 		};
+		// Symmetric counterpart for the dynamic per-frame bake: skip
+		// meshes whose Pos/Rotate splines are effectively static —
+		// those already live in the once-baked static map.
+		if (inDynamicBake && !isDynamicForBake(Obj)) continue;
 		if (inStaticBake && isDynamicForBake(Obj)) {
 			static std::atomic<int> sSkipLogged{0};
 			if (sSkipLogged.fetch_add(1) < 32) {

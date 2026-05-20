@@ -184,8 +184,11 @@ void ShadowMaps_Rebuild(Scene *Sc, int res)
 		const int lightRes = (O->shadowMapRes > 0) ? int(O->shadowMapRes) : res;
 		sm.xres = lightRes;
 		sm.yres = lightRes;
-		sm.depth.assign(size_t(lightRes) * size_t(lightRes), 0);
-		sm.polyId.assign(size_t(lightRes) * size_t(lightRes), 0);
+		const size_t n = size_t(lightRes) * size_t(lightRes);
+		sm.depth.assign(n, 0);
+		sm.polyId.assign(n, 0);
+		sm.depth_dynamic.assign(n, 0);
+		sm.polyId_dynamic.assign(n, 0);
 		sm.omni = O;
 		// Camera basis + FOV / z-scale are computed each frame in
 		// Render_DeferredShadowMaps from the omni's pose. zScale here
@@ -230,8 +233,11 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 			ShadowMap sm;
 			sm.xres = faceRes;
 			sm.yres = faceRes;
-			sm.depth.assign(size_t(faceRes) * size_t(faceRes), 0);
-			sm.polyId.assign(size_t(faceRes) * size_t(faceRes), 0);
+			const size_t n = size_t(faceRes) * size_t(faceRes);
+			sm.depth.assign(n, 0);
+			sm.polyId.assign(n, 0);
+			sm.depth_dynamic.assign(n, 0);
+			sm.polyId_dynamic.assign(n, 0);
 			sm.omni = O;  // shared across all 6 faces
 			sm.cubeFace = int8_t(f);  // tells render pass which axis to face
 			sm.fzp    = O->IRange * sFzpMult;
@@ -287,19 +293,24 @@ void ShadowMaps_BakeStatic(Scene *Sc)
 // the same Z-pass mask so the closest-occluder polyId wins.
 struct ShadowBarry {
 	ShadowMap *sm;
+	uint16_t *zArr;   // sm->depth or sm->depth_dynamic
+	uint8_t  *idArr;  // sm->polyId or sm->polyId_dynamic
 	float drzdx, drzdy;
 	uint8_t idByte;
 
-	ShadowBarry(ShadowMap *smIn, uint16_t idIn)
-		: sm(smIn), drzdx(0), drzdy(0), idByte(uint8_t(idIn)) {}
+	ShadowBarry(ShadowMap *smIn, uint16_t idIn, bool useDynamic)
+		: sm(smIn),
+		  zArr (useDynamic ? smIn->depth_dynamic.data()  : smIn->depth.data()),
+		  idArr(useDynamic ? smIn->polyId_dynamic.data() : smIn->polyId.data()),
+		  drzdx(0), drzdy(0), idByte(uint8_t(idIn)) {}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
 		const int xres = sm->xres;
-		uint16_t * const zRowBase  = sm->depth.data()
+		uint16_t * const zRowBase  = zArr
 			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
 			+ size_t(tile.x) * barry::TILE_SIZE;
-		uint8_t  * const idRowBase = sm->polyId.data()
+		uint8_t  * const idRowBase = idArr
 			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
 			+ size_t(tile.x) * barry::TILE_SIZE;
 
@@ -533,7 +544,8 @@ struct ShadowBarry {
 
 static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex& v2,
                                  ShadowMap& sm,
-                                 uint16_t idOverride = 0)
+                                 uint16_t idOverride = 0,
+                                 bool useDynamic = false)
 {
 	const float x0 = v0.PX, y0 = v0.PY;
 	const float x1 = v1.PX, y1 = v1.PY;
@@ -581,9 +593,11 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 	const Vec8f vZScale(zScale);
 	const uint8_t idByte = uint8_t(idOverride);
 
+	uint16_t * const zBase  = useDynamic ? sm.depth_dynamic.data()  : sm.depth.data();
+	uint8_t  * const idBase = useDynamic ? sm.polyId_dynamic.data() : sm.polyId.data();
 	for (int y = iymin; y <= iymax; ++y) {
-		uint16_t *zRow = sm.depth.data() + size_t(y) * size_t(sm.xres);
-		uint8_t  *idRow = sm.polyId.data() + size_t(y) * size_t(sm.xres);
+		uint16_t *zRow = zBase  + size_t(y) * size_t(sm.xres);
+		uint8_t  *idRow = idBase + size_t(y) * size_t(sm.xres);
 		const float py = float(y) + 0.5f;
 		const float px0 = float(ixmin) + 0.5f;
 		const float w0Row = ((x1 - px0) * (y2 - py) - (x2 - px0) * (y1 - py)) * invArea;
@@ -731,7 +745,9 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 	// gradient via the affine inverse of the (v2-v1, v3-v1) screen
 	// matrix, then hand off to ShadowBarry which does tile-hierarchical
 	// AVX2 rasterization.
-	ShadowBarry r(sm, idOverride);
+	extern thread_local bool g_inDynamicShadowBake;
+	const bool useDynamic = g_inDynamicShadowBake;
+	ShadowBarry r(sm, idOverride, useDynamic);
 	for (dword i = 2; i < numVerts; ++i) {
 		const Vertex& v1 = *V[0];
 		const Vertex& v2 = *V[i - 1];
