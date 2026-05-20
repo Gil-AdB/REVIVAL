@@ -338,11 +338,16 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 							Face *const F = f.fList[i].face;
 							if (!F) continue;
 							if (!F->Txtr) { ++skNoTxtr; continue; }
-							// Transparent surfaces (windows / glass / particle
-							// sprites) shouldn't write solid depth into the
-							// shadow map — they'd cast a full-occluder shadow.
-							// Skip them; only opaque casters belong here.
-							if (F->Txtr->Flags & Mat_Transparent) { ++skXpar; continue; }
+							// Skip materials that don't act as solid occluders:
+							//   Mat_Transparent  — windows / glass / sprites
+							//   Mat_Additive     — lamps / glows / emissive
+							//   Mat_SkipZ        — explicitly Z-skipping (sky-
+							//                      style passthroughs)
+							// Each would cast a full-occluder shadow otherwise.
+							if (F->Txtr->Flags &
+							    (Mat_Transparent | Mat_Additive | Mat_SkipZ)) {
+								++skXpar; continue;
+							}
 							if (F->A == F->B) { ++skDegen; continue; }
 							if (F->A->TPos.z <= 0.0f &&
 							    F->B->TPos.z <= 0.0f &&

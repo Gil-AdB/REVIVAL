@@ -4025,9 +4025,11 @@ namespace {
         double ms_cones   = 0.0;
         double ms_halos   = 0.0;
         double ms_unified = 0.0;
+        double ms_skybox  = 0.0;
         int    n_cones    = 0;
         int    n_halos    = 0;
         int    n_unified  = 0;
+        int    n_skybox   = 0;
         int    interval   = 60;
         int    framesSeen = 0;
     };
@@ -4058,12 +4060,15 @@ static void VolProf_Tick_impl() {
     const int cRaymarch = g_coneRaymarchHits.load(std::memory_order_relaxed);
     std::fprintf(stderr,
         "[VOL-PROF] last %d frame(s) avg per-frame: cones=%.2fms halos=%.2fms "
-        "unified=%.2fms (calls c=%d h=%d u=%d) cone-path: analytic=%d raymarch=%d\n",
+        "unified=%.2fms sky=%.2fms (calls c=%d h=%d u=%d s=%d) "
+        "cone-path: analytic=%d raymarch=%d\n",
         N,
         g_volProf.ms_cones   / N,
         g_volProf.ms_halos   / N,
         g_volProf.ms_unified / N,
+        g_volProf.ms_skybox  / N,
         g_volProf.n_cones, g_volProf.n_halos, g_volProf.n_unified,
+        g_volProf.n_skybox,
         cAnalytic, cRaymarch);
     std::fflush(stderr);
     g_volProf = VolProf{};
@@ -4941,14 +4946,27 @@ void Render_OmniHalos() {
 // Per-face UV math derived from vertex/UV layout in InitSkyCube — see
 // the (face, vertex, UV) table next to that function if extending.
 void Render_DeferredSkybox() {
+    VolProfScope _vp(&g_volProf.ms_skybox, &g_volProf.n_skybox);
     if (!CurScene || !VPage || !ZPage16) return;
-    extern const dword *SkyCube_GetFaceLinear(int, int&, int&);
-    const dword *facePix[6] = {};
-    int faceW[6] = {}, faceH[6] = {};
-    for (int i = 0; i < 6; ++i) {
-        facePix[i] = SkyCube_GetFaceLinear(i, faceW[i], faceH[i]);
-        if (!facePix[i]) return;  // No sky cube installed for this scene.
+    extern const dword *SkyCube_GetFaceMip(int, int, int&, int&);
+    extern int SkyCube_NumMips();
+    const int numMips = SkyCube_NumMips();
+    if (numMips <= 0) return;
+
+    // Cache every mip of every face — bounded by 2048² → 12 levels.
+    // Per-pixel sampling does 6×kMaxMips=72 entries lookup-free.
+    constexpr int kMaxMips = 12;
+    const int mipCount = std::min(numMips, kMaxMips);
+    const dword *facePix[6][kMaxMips] = {};
+    int faceW [6][kMaxMips] = {};
+    int faceH [6][kMaxMips] = {};
+    for (int f = 0; f < 6; ++f) {
+        for (int m = 0; m < mipCount; ++m) {
+            facePix[f][m] = SkyCube_GetFaceMip(f, m, faceW[f][m], faceH[f][m]);
+            if (!facePix[f][m]) return;
+        }
     }
+
     // View basis. View->Mat is world→view (orthonormal), so view→world
     // for a *direction* is the transpose. Cache the 9 floats so the
     // per-pixel multiply is just nine flops + adds.
@@ -4959,6 +4977,11 @@ void Render_DeferredSkybox() {
     const float invFOVY_l = 1.0f / FOVY;
     const float cntrX_l = CntrEX;
     const float cntrY_l = CntrEY;
+    // Per-pixel angular size in view space. Used to estimate the
+    // cubemap UV change between adjacent pixels for mip selection.
+    const float pixelAngle = (invFOVX_l > invFOVY_l) ? invFOVX_l : invFOVY_l;
+    const float face0WLog2 =
+        std::log2(std::max(1.0f, float(faceW[0][0])));
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
@@ -4974,14 +4997,13 @@ void Render_DeferredSkybox() {
             ThreadPool::instance().enqueue([=]() {
                 dword *out = reinterpret_cast<dword *>(VPage);
                 for (int py = y1; py < y2; ++py) {
-                    // vy flip: screen Y grows downward; view Y grows upward.
                     const float vy = -((float(py) - cntrY_l) * invFOVY_l);
                     const size_t row = size_t(py) * size_t(XRes);
                     for (int px = x1; px < x2; ++px) {
                         if (ZPage16[row + px] != 0) continue;
                         const float vx = (float(px) - cntrX_l) * invFOVX_l;
                         const float vz = 1.0f;
-                        // World direction = View->Mat^T * (vx,vy,vz).
+                        // World direction = View->Mat^T · (vx,vy,vz).
                         const float dx = m00*vx + m10*vy + m20*vz;
                         const float dy = m01*vx + m11*vy + m21*vz;
                         const float dz = m02*vx + m12*vy + m22*vz;
@@ -4989,48 +5011,79 @@ void Render_DeferredSkybox() {
                         const float ay = dy < 0 ? -dy : dy;
                         const float az = dz < 0 ? -dz : dz;
                         int face;
-                        float u, v;
+                        float u, v, maxAbs;
                         if (az >= ax && az >= ay) {
+                            maxAbs = az;
                             const float s = 0.5f / az;
-                            if (dz > 0) {
-                                face = 0;
-                                u = 0.5f - dx * s;
-                                v = 0.5f - dy * s;
-                            } else {
-                                face = 2;
-                                u = 0.5f + dx * s;
-                                v = 0.5f - dy * s;
-                            }
+                            if (dz > 0) { face = 0; u = 0.5f - dx*s; v = 0.5f - dy*s; }
+                            else        { face = 2; u = 0.5f + dx*s; v = 0.5f - dy*s; }
                         } else if (ax >= ay) {
+                            maxAbs = ax;
                             const float s = 0.5f / ax;
-                            if (dx > 0) {
-                                face = 1;
-                                u = 0.5f + dz * s;
-                                v = 0.5f - dy * s;
-                            } else {
-                                face = 3;
-                                u = 0.5f - dz * s;
-                                v = 0.5f - dy * s;
-                            }
+                            if (dx > 0) { face = 1; u = 0.5f + dz*s; v = 0.5f - dy*s; }
+                            else        { face = 3; u = 0.5f - dz*s; v = 0.5f - dy*s; }
                         } else {
+                            maxAbs = ay;
                             const float s = 0.5f / ay;
-                            if (dy > 0) {
-                                face = 5;
-                                u = 0.5f + dx * s;
-                                v = 0.5f - dz * s;
-                            } else {
-                                face = 4;
-                                u = 0.5f + dx * s;
-                                v = 0.5f + dz * s;
-                            }
+                            if (dy > 0) { face = 5; u = 0.5f + dx*s; v = 0.5f - dz*s; }
+                            else        { face = 4; u = 0.5f + dx*s; v = 0.5f + dz*s; }
                         }
-                        int tx = int(u * float(faceW[face]));
-                        int ty = int(v * float(faceH[face]));
-                        if (tx < 0) tx = 0;
-                        else if (tx >= faceW[face]) tx = faceW[face] - 1;
-                        if (ty < 0) ty = 0;
-                        else if (ty >= faceH[face]) ty = faceH[face] - 1;
-                        out[row + px] = facePix[face][ty * faceW[face] + tx];
+                        // Mip selection: per-pixel angular step pixelAngle
+                        // maps to a UV step of roughly pixelAngle/(2·maxAbs)
+                        // on the dominant-axis face (the /maxAbs accounts
+                        // for the projection cosine). Texel step then =
+                        // uvStep × faceSize. miplevel = log2(texelStep)
+                        // clamped to [0, mipCount-1]. Cheap closed-form
+                        // alternative to per-pixel finite differences.
+                        const float invMaxAbs = 1.0f / maxAbs;
+                        const float texelStep = pixelAngle * invMaxAbs * 0.5f
+                                              * float(faceW[face][0]);
+                        int mip = int(std::log2(std::max(1.0f, texelStep)));
+                        if (mip < 0) mip = 0;
+                        if (mip >= mipCount) mip = mipCount - 1;
+                        const int w = faceW[face][mip];
+                        const int h = faceH[face][mip];
+                        const dword *tex = facePix[face][mip];
+
+                        // Bilinear sample. fu/fv in [0,1); clamp at edges
+                        // so we don't sample across face seams (which
+                        // would show up as cube-edge bands).
+                        float fx = u * float(w) - 0.5f;
+                        float fy = v * float(h) - 0.5f;
+                        if (fx < 0) fx = 0; else if (fx > float(w - 1)) fx = float(w - 1);
+                        if (fy < 0) fy = 0; else if (fy > float(h - 1)) fy = float(h - 1);
+                        const int tx0 = int(fx);
+                        const int ty0 = int(fy);
+                        const int tx1 = (tx0 + 1 < w) ? tx0 + 1 : tx0;
+                        const int ty1 = (ty0 + 1 < h) ? ty0 + 1 : ty0;
+                        const float fxr = fx - float(tx0);
+                        const float fyr = fy - float(ty0);
+                        const dword p00 = tex[size_t(ty0) * size_t(w) + size_t(tx0)];
+                        const dword p10 = tex[size_t(ty0) * size_t(w) + size_t(tx1)];
+                        const dword p01 = tex[size_t(ty1) * size_t(w) + size_t(tx0)];
+                        const dword p11 = tex[size_t(ty1) * size_t(w) + size_t(tx1)];
+                        const float w00 = (1.f - fxr) * (1.f - fyr);
+                        const float w10 = fxr        * (1.f - fyr);
+                        const float w01 = (1.f - fxr) * fyr;
+                        const float w11 = fxr        * fyr;
+                        // Per-channel blend on ARGB8888.
+                        const float bF = float((p00      ) & 0xFFu) * w00
+                                       + float((p10      ) & 0xFFu) * w10
+                                       + float((p01      ) & 0xFFu) * w01
+                                       + float((p11      ) & 0xFFu) * w11;
+                        const float gF = float((p00 >>  8) & 0xFFu) * w00
+                                       + float((p10 >>  8) & 0xFFu) * w10
+                                       + float((p01 >>  8) & 0xFFu) * w01
+                                       + float((p11 >>  8) & 0xFFu) * w11;
+                        const float rF = float((p00 >> 16) & 0xFFu) * w00
+                                       + float((p10 >> 16) & 0xFFu) * w10
+                                       + float((p01 >> 16) & 0xFFu) * w01
+                                       + float((p11 >> 16) & 0xFFu) * w11;
+                        const dword B = dword(bF) & 0xFFu;
+                        const dword G = dword(gF) & 0xFFu;
+                        const dword R = dword(rF) & 0xFFu;
+                        out[row + px] = 0xFF000000u | (R << 16) | (G << 8) | B;
+                        (void)face0WLog2;
                     }
                 }
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);

@@ -11,20 +11,76 @@
 // deferred-skybox pass samples from these directly. ~6 × 1024² × 4
 // bytes ≈ 24 MB worst case; smaller for lower-res sky textures.
 namespace {
-    struct SkyboxFaceLinear {
+    struct SkyboxFaceMip {
         int width = 0, height = 0;
-        std::vector<dword> data;
+        std::vector<dword> data;   // row-major ARGB8888
     };
-    SkyboxFaceLinear s_skyboxLinear[6];
+    struct SkyboxFace {
+        std::vector<SkyboxFaceMip> mips;  // mips[0] = full res, halves each step to 1×1
+    };
+    SkyboxFace s_skyboxFaces[6];
+
+    // 2× box-filter downsample (4 ARGB texels → 1 averaged texel).
+    // Per-channel averaging on uint8 components.
+    void boxDownsample(const dword *src, int sw, int sh,
+                       std::vector<dword> &dst, int &dw, int &dh)
+    {
+        dw = std::max(1, sw / 2);
+        dh = std::max(1, sh / 2);
+        dst.assign(size_t(dw) * size_t(dh), 0);
+        for (int y = 0; y < dh; ++y) {
+            const int sy0 = std::min(sh - 1, y * 2);
+            const int sy1 = std::min(sh - 1, sy0 + 1);
+            const dword *r0 = src + size_t(sy0) * size_t(sw);
+            const dword *r1 = src + size_t(sy1) * size_t(sw);
+            dword *out = dst.data() + size_t(y) * size_t(dw);
+            for (int x = 0; x < dw; ++x) {
+                const int sx0 = std::min(sw - 1, x * 2);
+                const int sx1 = std::min(sw - 1, sx0 + 1);
+                const dword a = r0[sx0], b = r0[sx1], c = r1[sx0], d = r1[sx1];
+                const unsigned aB = (a      ) & 0xFFu, aG = (a >> 8) & 0xFFu,
+                               aR = (a >> 16) & 0xFFu, aA = (a >> 24) & 0xFFu;
+                const unsigned bB = (b      ) & 0xFFu, bG = (b >> 8) & 0xFFu,
+                               bR = (b >> 16) & 0xFFu, bA = (b >> 24) & 0xFFu;
+                const unsigned cB = (c      ) & 0xFFu, cG = (c >> 8) & 0xFFu,
+                               cR = (c >> 16) & 0xFFu, cA = (c >> 24) & 0xFFu;
+                const unsigned dB = (d      ) & 0xFFu, dG = (d >> 8) & 0xFFu,
+                               dR = (d >> 16) & 0xFFu, dA = (d >> 24) & 0xFFu;
+                const unsigned avgB = (aB + bB + cB + dB) >> 2;
+                const unsigned avgG = (aG + bG + cG + dG) >> 2;
+                const unsigned avgR = (aR + bR + cR + dR) >> 2;
+                const unsigned avgA = (aA + bA + cA + dA) >> 2;
+                out[x] = (avgA << 24) | (avgR << 16) | (avgG << 8) | avgB;
+            }
+        }
+    }
+
+    void buildMipPyramid(SkyboxFace &face) {
+        if (face.mips.empty()) return;
+        while (face.mips.back().width > 1 || face.mips.back().height > 1) {
+            const SkyboxFaceMip &src = face.mips.back();
+            SkyboxFaceMip dst;
+            boxDownsample(src.data.data(), src.width, src.height,
+                          dst.data, dst.width, dst.height);
+            face.mips.push_back(std::move(dst));
+        }
+    }
 }
 
-const dword *SkyCube_GetFaceLinear(int face, int &outW, int &outH)
+const dword *SkyCube_GetFaceMip(int face, int mip, int &outW, int &outH)
 {
     if (face < 0 || face >= 6) { outW = outH = 0; return nullptr; }
-    const SkyboxFaceLinear &f = s_skyboxLinear[face];
-    outW = f.width;
-    outH = f.height;
-    return f.data.empty() ? nullptr : f.data.data();
+    const SkyboxFace &f = s_skyboxFaces[face];
+    if (mip < 0 || size_t(mip) >= f.mips.size()) { outW = outH = 0; return nullptr; }
+    const SkyboxFaceMip &m = f.mips[mip];
+    outW = m.width;
+    outH = m.height;
+    return m.data.empty() ? nullptr : m.data.data();
+}
+
+int SkyCube_NumMips()
+{
+    return int(s_skyboxFaces[0].mips.size());
 }
 
 static void GenerateSkyTexture(Texture *Tx, int32_t numStars)
@@ -232,12 +288,18 @@ Scene * CreateSkyCube(dword skyType)
 		// Snapshot the linear/row-major data *before* Sachletz tile-
 		// shuffles Tx[i]->Data in place. Deferred-skybox samples from
 		// this copy; forward path keeps using the Sachletz layout.
+		// Build a box-filtered mip pyramid for free here so the
+		// deferred pass can pick a sensible LOD per pixel.
 		{
-			SkyboxFaceLinear &f = s_skyboxLinear[i];
-			f.width  = Tx[i]->SizeX;
-			f.height = Tx[i]->SizeY;
-			const size_t n = size_t(f.width) * size_t(f.height);
-			f.data.assign((dword *)Tx[i]->Data, (dword *)Tx[i]->Data + n);
+			SkyboxFace &face = s_skyboxFaces[i];
+			face.mips.clear();
+			SkyboxFaceMip m0;
+			m0.width  = Tx[i]->SizeX;
+			m0.height = Tx[i]->SizeY;
+			const size_t n = size_t(m0.width) * size_t(m0.height);
+			m0.data.assign((dword *)Tx[i]->Data, (dword *)Tx[i]->Data + n);
+			face.mips.push_back(std::move(m0));
+			buildMipPyramid(face);
 		}
 		//for (int y = 0; y < 1024; y++) {
 		//	for (int x = 0; x < 1024; x++) {
