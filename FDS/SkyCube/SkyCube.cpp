@@ -4,6 +4,29 @@
 #include "Base/Scene.h"
 #include "Base/FeatureFlags.h"
 
+#include <vector>
+
+// Linear (row-major, ARGB8888) copies of the 6 sky-cube face textures,
+// captured in InitSkyCube *before* Sachletz tile-shuffles them. The
+// deferred-skybox pass samples from these directly. ~6 × 1024² × 4
+// bytes ≈ 24 MB worst case; smaller for lower-res sky textures.
+namespace {
+    struct SkyboxFaceLinear {
+        int width = 0, height = 0;
+        std::vector<dword> data;
+    };
+    SkyboxFaceLinear s_skyboxLinear[6];
+}
+
+const dword *SkyCube_GetFaceLinear(int face, int &outW, int &outH)
+{
+    if (face < 0 || face >= 6) { outW = outH = 0; return nullptr; }
+    const SkyboxFaceLinear &f = s_skyboxLinear[face];
+    outW = f.width;
+    outH = f.height;
+    return f.data.empty() ? nullptr : f.data.data();
+}
+
 static void GenerateSkyTexture(Texture *Tx, int32_t numStars)
 {
 /*	Vector V;
@@ -205,6 +228,17 @@ Scene * CreateSkyCube(dword skyType)
 		Tx[i]->Flags |= Txtr_Nomip | Txtr_Tiled;
 		Tx[i]->Mipmap[0] = (byte*)Tx[i]->Data;
 		Tx[i]->numMipmaps = 1;
+
+		// Snapshot the linear/row-major data *before* Sachletz tile-
+		// shuffles Tx[i]->Data in place. Deferred-skybox samples from
+		// this copy; forward path keeps using the Sachletz layout.
+		{
+			SkyboxFaceLinear &f = s_skyboxLinear[i];
+			f.width  = Tx[i]->SizeX;
+			f.height = Tx[i]->SizeY;
+			const size_t n = size_t(f.width) * size_t(f.height);
+			f.data.assign((dword *)Tx[i]->Data, (dword *)Tx[i]->Data + n);
+		}
 		//for (int y = 0; y < 1024; y++) {
 		//	for (int x = 0; x < 1024; x++) {
 		//		((DWord *)Tx[i]->Data)[y * 1024 + x] =  ((x^y) & 32) ? 0xffffffff: 0;

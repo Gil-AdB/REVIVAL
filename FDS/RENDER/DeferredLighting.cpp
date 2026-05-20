@@ -4925,17 +4925,41 @@ void Render_OmniHalos() {
     });
 }
 
-// Skybox-from-G-buffer pass (option B scaffold). Paints pixels with
-// zEnc == 0 (= no rasterizer touched them) with a magenta debug
-// color. Pre-req: the forward RenderSkyCube must be suppressed when
-// this pass runs (see SkyCube.cpp early-return), otherwise sky
-// pixels would have zEnc != 0 from the forward draw and never paint.
+// Skybox-from-G-buffer pass. Paints sky pixels (zEnc == 0) by
+// reconstructing the world-space view direction per pixel and
+// sampling the cubemap. Pre-req: the forward RenderSkyCube must be
+// suppressed when this pass runs (see SkyCube.cpp early-return),
+// otherwise sky pixels would have zEnc != 0 from the forward draw.
 //
-// We deliberately don't gate on mat32==sentinel — reflective windows
-// also have mat32==sentinel (forward-rendered), and we don't want
-// to overwrite their already-painted reflection.
+// Cube face indexing matches SkyCube.cpp's normal convention:
+//   0 = +Z (SBBK / "back")
+//   1 = +X (SBRT / "right")
+//   2 = -Z (SBFT / "front")
+//   3 = -X (SBLF / "left")
+//   4 = -Y (SBDN / "down")    [Y is up; -Y face is the floor]
+//   5 = +Y (SBUP / "up")
+// Per-face UV math derived from vertex/UV layout in InitSkyCube — see
+// the (face, vertex, UV) table next to that function if extending.
 void Render_DeferredSkybox() {
     if (!CurScene || !VPage || !ZPage16) return;
+    extern const dword *SkyCube_GetFaceLinear(int, int&, int&);
+    const dword *facePix[6] = {};
+    int faceW[6] = {}, faceH[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        facePix[i] = SkyCube_GetFaceLinear(i, faceW[i], faceH[i]);
+        if (!facePix[i]) return;  // No sky cube installed for this scene.
+    }
+    // View basis. View->Mat is world→view (orthonormal), so view→world
+    // for a *direction* is the transpose. Cache the 9 floats so the
+    // per-pixel multiply is just nine flops + adds.
+    const float m00 = View->Mat[0][0], m01 = View->Mat[0][1], m02 = View->Mat[0][2];
+    const float m10 = View->Mat[1][0], m11 = View->Mat[1][1], m12 = View->Mat[1][2];
+    const float m20 = View->Mat[2][0], m21 = View->Mat[2][1], m22 = View->Mat[2][2];
+    const float invFOVX_l = 1.0f / FOVX;
+    const float invFOVY_l = 1.0f / FOVY;
+    const float cntrX_l = CntrEX;
+    const float cntrY_l = CntrEY;
+
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
@@ -4947,14 +4971,66 @@ void Render_DeferredSkybox() {
         for (int i = 0; i < numTilesX; ++i) {
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            ThreadPool::instance().enqueue([x1, y1, x2, y2]() {
+            ThreadPool::instance().enqueue([=]() {
                 dword *out = reinterpret_cast<dword *>(VPage);
                 for (int py = y1; py < y2; ++py) {
+                    // vy flip: screen Y grows downward; view Y grows upward.
+                    const float vy = -((float(py) - cntrY_l) * invFOVY_l);
                     const size_t row = size_t(py) * size_t(XRes);
                     for (int px = x1; px < x2; ++px) {
                         if (ZPage16[row + px] != 0) continue;
-                        // Debug: magenta (A=FF, R=FF, G=00, B=FF).
-                        out[row + px] = 0xFFFF00FFu;
+                        const float vx = (float(px) - cntrX_l) * invFOVX_l;
+                        const float vz = 1.0f;
+                        // World direction = View->Mat^T * (vx,vy,vz).
+                        const float dx = m00*vx + m10*vy + m20*vz;
+                        const float dy = m01*vx + m11*vy + m21*vz;
+                        const float dz = m02*vx + m12*vy + m22*vz;
+                        const float ax = dx < 0 ? -dx : dx;
+                        const float ay = dy < 0 ? -dy : dy;
+                        const float az = dz < 0 ? -dz : dz;
+                        int face;
+                        float u, v;
+                        if (az >= ax && az >= ay) {
+                            const float s = 0.5f / az;
+                            if (dz > 0) {
+                                face = 0;
+                                u = 0.5f - dx * s;
+                                v = 0.5f - dy * s;
+                            } else {
+                                face = 2;
+                                u = 0.5f + dx * s;
+                                v = 0.5f - dy * s;
+                            }
+                        } else if (ax >= ay) {
+                            const float s = 0.5f / ax;
+                            if (dx > 0) {
+                                face = 1;
+                                u = 0.5f + dz * s;
+                                v = 0.5f - dy * s;
+                            } else {
+                                face = 3;
+                                u = 0.5f - dz * s;
+                                v = 0.5f - dy * s;
+                            }
+                        } else {
+                            const float s = 0.5f / ay;
+                            if (dy > 0) {
+                                face = 5;
+                                u = 0.5f + dx * s;
+                                v = 0.5f - dz * s;
+                            } else {
+                                face = 4;
+                                u = 0.5f + dx * s;
+                                v = 0.5f + dz * s;
+                            }
+                        }
+                        int tx = int(u * float(faceW[face]));
+                        int ty = int(v * float(faceH[face]));
+                        if (tx < 0) tx = 0;
+                        else if (tx >= faceW[face]) tx = faceW[face] - 1;
+                        if (ty < 0) ty = 0;
+                        else if (ty >= faceH[face]) ty = faceH[face] - 1;
+                        out[row + px] = facePix[face][ty * faceW[face] + tx];
                     }
                 }
                 std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);

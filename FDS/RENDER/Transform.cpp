@@ -497,11 +497,11 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// meshes (e.g. Piramid.lwo in greets).
 		auto isDynamicForBake = [](Object *obj) -> bool {
 			constexpr float kPosExtentEps = 0.1f;
+			constexpr float kRotExtentEps = 0.01f;   // unit-quat delta
 			for (Object *o = obj; o; o = o->Parent) {
 				if (o->Type != Obj_TriMesh) continue;
 				TriMesh *tm = (TriMesh *)o->Data;
 				if (!tm) continue;
-				if (tm->Rotate.NumKeys > 1) return true;
 				if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
 					const auto& k0 = tm->Pos.Keys[0].Pos;
 					float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
@@ -511,9 +511,29 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 						if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
 						if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
 					}
-					if ((xmax - xmin) > kPosExtentEps ||
-					    (ymax - ymin) > kPosExtentEps ||
-					    (zmax - zmin) > kPosExtentEps) return true;
+					if ((xmax-xmin) > kPosExtentEps ||
+					    (ymax-ymin) > kPosExtentEps ||
+					    (zmax-zmin) > kPosExtentEps) return true;
+				}
+				// Rotate spline stores a Quaternion in Keys[i].Pos
+				// (x,y,z,W). Many FLD scenes author no-op 2-key Rotate
+				// envelopes — extent-check on all four components to
+				// keep those classified as static.
+				if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+					const auto& q0 = tm->Rotate.Keys[0].Pos;
+					float xmin=q0.x, xmax=q0.x, ymin=q0.y, ymax=q0.y;
+					float zmin=q0.z, zmax=q0.z, wmin=q0.W, wmax=q0.W;
+					for (DWord i = 1; i < tm->Rotate.NumKeys; ++i) {
+						const auto& q = tm->Rotate.Keys[i].Pos;
+						if (q.x < xmin) xmin=q.x; if (q.x > xmax) xmax=q.x;
+						if (q.y < ymin) ymin=q.y; if (q.y > ymax) ymax=q.y;
+						if (q.z < zmin) zmin=q.z; if (q.z > zmax) zmax=q.z;
+						if (q.W < wmin) wmin=q.W; if (q.W > wmax) wmax=q.W;
+					}
+					if ((xmax-xmin) > kRotExtentEps ||
+					    (ymax-ymin) > kRotExtentEps ||
+					    (zmax-zmin) > kRotExtentEps ||
+					    (wmax-wmin) > kRotExtentEps) return true;
 				}
 			}
 			return false;
