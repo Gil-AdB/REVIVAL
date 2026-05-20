@@ -333,6 +333,40 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 						clipper.InitViewport(*camPtr);
 						clipper.SetClippingExtents(x1f, y1f, x2f, y2f);
 						const auto& f = *facesPtr;
+						// Per-Material "skip in shadow bake" cache. The FLD
+						// doesn't tag lamps / emitters with any flag bit,
+						// so we infer from material name (lowercase ASCII
+						// substring match) on first encounter and reuse
+						// thereafter. Bounded LRU is overkill — scenes
+						// have O(50) distinct materials; a flat 256-entry
+						// hash-keyed-by-pointer is plenty.
+						struct MatShadowCache {
+							std::atomic<Material*> mat[256] = {};
+							std::atomic<uint8_t>   skip[256] = {};
+						};
+						static MatShadowCache sCache;
+						auto looksEmissive = [](const char *n) -> bool {
+							if (!n) return false;
+							for (const char *p = n; *p; ++p) {
+								if ((p[0]=='l'||p[0]=='L') && (p[1]=='a'||p[1]=='A') &&
+								    (p[2]=='m'||p[2]=='M') && (p[3]=='p'||p[3]=='P')) return true;
+								if ((p[0]=='e'||p[0]=='E') && (p[1]=='m'||p[1]=='M') &&
+								    (p[2]=='i'||p[2]=='I')) return true;  // emit/emiter/emitter
+							}
+							return false;
+						};
+						auto shouldSkip = [&](Material *m) -> bool {
+							if (!m) return true;
+							const uintptr_t k = (uintptr_t(m) >> 4) & 255;
+							if (sCache.mat[k].load(std::memory_order_relaxed) == m) {
+								return sCache.skip[k].load(std::memory_order_relaxed) != 0;
+							}
+							const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
+							                 || looksEmissive(m->Name);
+							sCache.mat[k].store(m, std::memory_order_relaxed);
+							sCache.skip[k].store(uint8_t(skip ? 1 : 0), std::memory_order_relaxed);
+							return skip;
+						};
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;
 						// Material flag census — one-shot dump of (Name,
 						// Flags) for the first 64 distinct material
@@ -367,16 +401,12 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 							Face *const F = f.fList[i].face;
 							if (!F) continue;
 							if (!F->Txtr) { ++skNoTxtr; continue; }
-							// Skip materials that don't act as solid occluders:
-							//   Mat_Transparent  — windows / glass / sprites
-							//   Mat_Additive     — lamps / glows / emissive
-							//   Mat_SkipZ        — explicitly Z-skipping (sky-
-							//                      style passthroughs)
-							// Each would cast a full-occluder shadow otherwise.
-							if (F->Txtr->Flags &
-							    (Mat_Transparent | Mat_Additive | Mat_SkipZ)) {
-								++skXpar; continue;
-							}
+							// Skip materials that don't act as solid occluders.
+							// Flag-based (Transparent/Additive/SkipZ) + name-
+							// based (lamp/emit/emitter — FLD doesn't flag
+							// emissives, so we infer from name). Cached per-
+							// Material* so the strstr only runs once.
+							if (shouldSkip(F->Txtr)) { ++skXpar; continue; }
 							if (F->A == F->B) { ++skDegen; continue; }
 							if (F->A->TPos.z <= 0.0f &&
 							    F->B->TPos.z <= 0.0f &&
