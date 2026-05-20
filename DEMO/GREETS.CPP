@@ -1361,7 +1361,14 @@ struct GreetsScene : SceneDriver {
 		// Render() because it swaps view globals and re-runs
 		// Transform_Objects internally — Render()'s post-restore
 		// transform leaves the main view in shape.
-		Render_DeferredShadowMaps(GreetSc);
+		Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicOmnisPerFrame);
+		// Per-frame dynamic-mesh bake into the dynamic shadow buffer
+		// of each static omni. Lighting kernel samples max(static,
+		// dynamic) so moving meshes cast moving shadows on static
+		// receivers. No-op when --shadow-dynamic is off.
+		if (fds::FeatureFlags::shadow_dynamic()) {
+			Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicMeshesPerFrame);
+		}
 		Render();
 
 		// PROFILER: FLIP phase. also contains display of runtime stats
