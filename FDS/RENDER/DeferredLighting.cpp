@@ -1332,9 +1332,22 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								const int iY = int(smY);
 								if (iX >= 0 && iX + 1 < sm.xres &&
 								    iY >= 0 && iY + 1 < sm.yres) {
-									const uint16_t *zRow0 = sm.depth.data() +
-										size_t(iY) * size_t(sm.xres);
-									const uint16_t *zRow1 = zRow0 + sm.xres;
+									const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+									const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
+									const uint16_t *zsRow1 = zsRow0 + sm.xres;
+									const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
+									const uint16_t *zdRow1 = zdRow0 + sm.xres;
+									// max(static, dynamic) = closest occluder.
+									// Dynamic buffer is all-zero when
+									// --shadow-dynamic is off; max() collapses.
+									const uint16_t zRow0[2] = {
+										std::max(zsRow0[iX  ], zdRow0[iX  ]),
+										std::max(zsRow0[iX+1], zdRow0[iX+1]),
+									};
+									const uint16_t zRow1[2] = {
+										std::max(zsRow1[iX  ], zdRow1[iX  ]),
+										std::max(zsRow1[iX+1], zdRow1[iX+1]),
+									};
 									if (profShadowCache) {
 										// One PCF check = one tracked sample.
 										// Use the (00) tap's cache-line address

@@ -210,8 +210,15 @@ inline float CubeShadow_Sample(int cubeIdx,
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
-    const uint16_t *zRow0 = sm.depth.data() + size_t(iY) * size_t(sm.xres);
-    const uint16_t *zRow1 = zRow0 + sm.xres;
+    const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+    const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
+    const uint16_t *zsRow1 = zsRow0 + sm.xres;
+    // Dynamic buffer — populated only when --shadow-dynamic on. When
+    // off it's still allocated but all-zero, so max() falls through
+    // to the static value with no behavior change. (Cache cost of
+    // touching it is the real penalty; gate at scene level if needed.)
+    const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
+    const uint16_t *zdRow1 = zdRow0 + sm.xres;
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -222,10 +229,15 @@ inline float CubeShadow_Sample(int cubeIdx,
     if (pixZenc < 0) pixZenc = 0;
     if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
     const int biased = pixZenc + constBias + slopeBiasInt;
+    // Per-tap "closest occluder" = max(static, dynamic). Higher zEnc
+    // = closer to light = more occluding; the closer of the two wins.
+    auto closest = [](uint16_t a, uint16_t b) -> int {
+        return int(a > b ? a : b);
+    };
     float occ = 0.0f;
-    if (biased < int(zRow0[iX    ])) occ += w00;
-    if (biased < int(zRow0[iX + 1])) occ += w10;
-    if (biased < int(zRow1[iX    ])) occ += w01;
-    if (biased < int(zRow1[iX + 1])) occ += w11;
+    if (biased < closest(zsRow0[iX    ], zdRow0[iX    ])) occ += w00;
+    if (biased < closest(zsRow0[iX + 1], zdRow0[iX + 1])) occ += w10;
+    if (biased < closest(zsRow1[iX    ], zdRow1[iX    ])) occ += w01;
+    if (biased < closest(zsRow1[iX + 1], zdRow1[iX + 1])) occ += w11;
     return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
 }

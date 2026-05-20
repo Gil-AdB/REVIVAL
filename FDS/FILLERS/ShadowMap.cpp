@@ -263,7 +263,7 @@ void CubeShadowMaps_Rebuild(Scene *Sc, int res)
 }
 
 // Forward decl — defined in RENDER/Shadows.cpp.
-void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly);
+void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode);
 
 void ShadowMaps_BakeStatic(Scene *Sc)
 {
@@ -272,7 +272,7 @@ void ShadowMaps_BakeStatic(Scene *Sc)
 	// avoids re-rendering them. Intended to be called from scene init,
 	// hiding inside the existing init bake window (city's Glato cube
 	// bake, etc.) so the demo start time is unaffected.
-	Render_DeferredShadowMaps(Sc, /*staticOnly=*/true);
+	Render_DeferredShadowMaps(Sc, ShadowBakeMode::StaticOnce);
 	int n = 0;
 	for (Omni *O = Sc ? Sc->OmniHead : nullptr; O; O = O->Next) {
 		if ((O->Flags & Omni_CastsShadow) && (O->Flags & Omni_StaticShadow)) ++n;

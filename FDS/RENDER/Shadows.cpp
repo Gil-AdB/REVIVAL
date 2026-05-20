@@ -87,10 +87,18 @@ std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
 
-void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
+void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 {
 	if (!shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
+	// Convenience predicates over the mode. Three behaviors fold
+	// cleanly onto two bools (omni-target × buffer-target):
+	//   StaticOnce            wantStatic=true  writeDynamic=false
+	//   DynamicOmnisPerFrame  wantStatic=false writeDynamic=false
+	//   DynamicMeshesPerFrame wantStatic=true  writeDynamic=true   ← new
+	const bool wantStaticOmnis = (mode == ShadowBakeMode::StaticOnce)
+	                          || (mode == ShadowBakeMode::DynamicMeshesPerFrame);
+	const bool writeDynamicBuf = (mode == ShadowBakeMode::DynamicMeshesPerFrame);
 
 	// Per-shadow-pass timing breakdown of Transform vs Rasterize cost,
 	// averaged over a rolling window. Tells us where to focus optimization
@@ -137,11 +145,11 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
-		// staticOnly inverts the filter:
-		//   false (per-frame): skip static lights (already baked)
-		//   true  (one-shot bake): skip dynamic lights
+		// Mode-driven filter:
+		//   StaticOnce / DynamicMeshesPerFrame → only static omnis
+		//   DynamicOmnisPerFrame               → only dynamic omnis
 		const bool isStatic = (O->Flags & Omni_StaticShadow) != 0;
-		if (isStatic != staticOnly) continue;
+		if (isStatic != wantStaticOmnis) continue;
 		// Accept Light_SpotLight as before, plus Light_Omni entries that
 		// are CubeShadowRef faces (sm.cubeFace >= 0). Plain Light_Omni
 		// without cubeFace tagged (=-1) is skipped — those omnis didn't
@@ -243,9 +251,14 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 		lightCtx.zScale     = sm.zScale;
 		lightCtx.zScale256  = sm.zScale / 256.0f;
 
-		// Clear shadow map.
-		std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
-		std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
+		// Clear the buffer we're about to write into.
+		if (writeDynamicBuf) {
+			std::fill(sm.depth_dynamic.begin(),  sm.depth_dynamic.end(),  uint16_t(0));
+			std::fill(sm.polyId_dynamic.begin(), sm.polyId_dynamic.end(), uint8_t(0));
+		} else {
+			std::fill(sm.depth.begin(),  sm.depth.end(),  uint16_t(0));
+			std::fill(sm.polyId.begin(), sm.polyId.end(), uint8_t(0));
+		}
 
 		// Size this light's FList to match the main-pass capacity. Polys
 		// is the worst case (every mesh face + every omni + every
@@ -263,13 +276,16 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 		fds::FaceListContext *const  facesPtr   = &perLightFaces[lightIdx];
 		fds::VertexScratch *const    scratchPtr = &perLightScratch[lightIdx];
 		++xformsEnqueued;
+		const bool dynBakeForLambda = writeDynamicBuf;
 		ThreadPool::instance().enqueue(
-			[ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr]() {
+			[ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr, dynBakeForLambda]() {
 				g_inShadowPass = true;
+				g_inDynamicShadowBake = dynBakeForLambda;
 				g_currentShadowOmni = smPtr->omni;
 				Transform_Objects(ScPtr, *ctxPtr, *facesPtr,
 				                  smPtr->xres, smPtr->yres, scratchPtr);
 				g_currentShadowOmni = nullptr;
+				g_inDynamicShadowBake = false;
 				g_inShadowPass = false;
 				std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 				++renderns::tileCounter;
@@ -306,9 +322,9 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 		Omni *const O = sm.omni;
 		if (!O) continue;
 		if (!(O->Flags & Omni_Active)) continue;
-		// Same staticOnly filter as Phase A.
+		// Same mode-driven omni filter as Phase A.
 		const bool isStaticB = (O->Flags & Omni_StaticShadow) != 0;
-		if (isStaticB != staticOnly) continue;
+		if (isStaticB != wantStaticOmnis) continue;
 		// Same filter as Phase A: spots, and cube-face entries.
 		if (O->Type == Light_SpotLight) {
 			// ok
@@ -330,9 +346,11 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 				const float x1f = float(tx * tileSizeX);
 				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
 				++tilesEnqueued;
+				const bool dynBakeForLambda = writeDynamicBuf;
 				ThreadPool::instance().enqueue(
-					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f]() {
+					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f, dynBakeForLambda]() {
 						g_currentShadowMap = smPtr;
+						g_inDynamicShadowBake = dynBakeForLambda;
 						const auto rt  = fds::MainRenderTargetFromGlobals();
 						const auto& cam = *camPtr;
 						FrustumClipper clipper;
@@ -435,6 +453,7 @@ void Render_DeferredShadowMaps(Scene *Sc, bool staticOnly)
 							}
 						}
 						g_currentShadowMap = nullptr;
+						g_inDynamicShadowBake = false;
 						std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 						++renderns::tileCounter;
 						renderns::condition.notify_one();

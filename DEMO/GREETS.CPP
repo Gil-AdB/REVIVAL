@@ -548,7 +548,7 @@ static void initializeRobotSpotlights()
 			/*pos*/Vector(0.0f, 0.0f, 0.0f),
 			/*dir*/Vector(0.0f, -1.0f, 0.0f),
 			/*hotDeg*/15.0f, /*fallDeg*/35.0f,
-			/*shadowMapRes*/256);
+			/*shadowMapRes*/1024);
 		std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
 			i, init[i].tag);
 	}

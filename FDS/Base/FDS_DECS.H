@@ -431,7 +431,14 @@ bool deferredEnabled();
 // from ShadowMaps_BakeStatic during scene init.
 //
 // See FILLERS/ShadowMap.h.
-void Render_DeferredShadowMaps(class Scene *Sc, bool staticOnly = false);
+// Bake mode selector. See Shadows.cpp for behavioral details.
+enum class ShadowBakeMode {
+	StaticOnce,           // ShadowMaps_BakeStatic — static omnis + static meshes, write to depth/polyId
+	DynamicOmnisPerFrame, // dynamic omnis + all meshes, write to depth/polyId (legacy per-frame)
+	DynamicMeshesPerFrame // static omnis + dynamic meshes only, write to depth_dynamic/polyId_dynamic
+};
+void Render_DeferredShadowMaps(class Scene *Sc,
+                               ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame);
 
 // Shadow technique. Toggleable at runtime.
 enum class ShadowMode {

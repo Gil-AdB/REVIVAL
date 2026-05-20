@@ -2227,7 +2227,13 @@ struct CityScene : SceneDriver {
 			// lights (currently the test streetlights when
 			// FDS_CITY_TEST_SPOTS=1). No-op when no spot has the flag.
 			// Must run before Render() since it swaps view globals.
-			Render_DeferredShadowMaps(CitySc);
+			Render_DeferredShadowMaps(CitySc, ShadowBakeMode::DynamicOmnisPerFrame);
+			// Re-bake just the moving meshes into the dynamic shadow
+			// buffer of each STATIC omni (no-op when --shadow-dynamic
+			// is off). Lighting kernel samples min(static, dynamic).
+			if (fds::FeatureFlags::shadow_dynamic()) {
+				Render_DeferredShadowMaps(CitySc, ShadowBakeMode::DynamicMeshesPerFrame);
+			}
 			// skipVolumetric=true — the pass-1 output is consumed by the
 			// dispMap distortion below, so volumetric work (cones/halos)
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).
