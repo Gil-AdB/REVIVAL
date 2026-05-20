@@ -561,7 +561,7 @@ extern dword New_SCache(dword Size);
 
 // Skycube generation routine
 Scene * CreateSkyCube(dword skyType);
-void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation);
+void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation, bool ForceForward = false);
 
 void Sachletz(dword* data, dword xres, dword yres);
 

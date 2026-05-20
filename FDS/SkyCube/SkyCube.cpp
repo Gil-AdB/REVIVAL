@@ -389,14 +389,15 @@ Scene * CreateSkyCube(dword skyType)
 }
 
 
-void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation)
+void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation, bool ForceForward)
 {
-	// When the deferred skybox pass is on, it paints sky pixels from
-	// the G-buffer — skip the overdrawn forward draw entirely. Both
-	// running would have the forward draw write Z, then the deferred
-	// pass would either overwrite reflective windows (if it checked
-	// mat32) or skip everything (if it checked zEnc).
-	if (fds::FeatureFlags::deferred_skybox()) return;
+	// When the deferred skybox pass is on, the main-view sky is
+	// painted from the G-buffer — skip the overdrawn forward draw
+	// here. Exception: per-building env-map bakes (CITY.CPP:1615)
+	// pass ForceForward=true because their target is a temp surface
+	// that the deferred pipeline doesn't render to, so the sky needs
+	// to land via the forward path for reflections to see it.
+	if (!ForceForward && fds::FeatureFlags::deferred_skybox()) return;
 	Scene *PrevCurScene = CurScene;
 	Camera *PrevView = View;
 	View = Cm;

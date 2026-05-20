@@ -1612,7 +1612,12 @@ static void bakeBuildingPanorama(Object* Obj,
 		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
 		memcpy(envCam.Mat, AxisAlignedViews[i], sizeof(envCam.Mat));
 
-		RenderSkyCube(SkySc, View, true);
+		// ForceForward: this is the per-building env-map bake into a
+		// temp surface. The deferred-skybox pass won't fire here
+		// (cube-map bake uses the forward path explicitly), so the
+		// sky has to land via RenderSkyCube or the reflective faces
+		// would sample empty backgrounds.
+		RenderSkyCube(SkySc, View, true, /*ForceForward=*/true);
 		Reflected_Transform(CitySc);
 		if (0 != CAll) {
 			Radix_Sort(FList, SList, CAll);
