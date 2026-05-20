@@ -487,26 +487,45 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// values) on otherwise-static meshes, which would over-filter.
 		// A rotating-in-place mesh will have a slightly wrong shadow
 		// but won't disappear; pure translation is the bigger artifact.
-		if (inStaticBake && T->Pos.NumKeys > 1) {
-			static std::atomic<int> sSkipLogged{0};
-			if (sSkipLogged.fetch_add(1) < 32 && T->Pos.Keys) {
-				const auto& k0 = T->Pos.Keys[0].Pos;
-				const auto& kN = T->Pos.Keys[T->Pos.NumKeys - 1].Pos;
-				// Extent across all keys — small extent = effectively
-				// static (envelope present but values barely change).
-				float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
-				for (DWord i = 1; i < T->Pos.NumKeys; ++i) {
-					const auto& k = T->Pos.Keys[i].Pos;
-					if (k.x < xmin) xmin = k.x; if (k.x > xmax) xmax = k.x;
-					if (k.y < ymin) ymin = k.y; if (k.y > ymax) ymax = k.y;
-					if (k.z < zmin) zmin = k.z; if (k.z > zmax) zmax = k.z;
+		// Per-mesh "is dynamic" decision:
+		//   1. Own Pos spline extent > ε (mesh translates)
+		//   2. Own Rotate spline has more than 1 key (mesh rotates;
+		//      we don't compute quaternion extent — just trust NumKeys)
+		//   3. Any ancestor moves (parent's IPos changes drive ours)
+		// Threshold of 0.1 in scene units handles the (~0.005) noise
+		// that FLD often authors as 2-key Pos envelopes for static
+		// meshes (e.g. Piramid.lwo in greets).
+		auto isDynamicForBake = [](Object *obj) -> bool {
+			constexpr float kPosExtentEps = 0.1f;
+			for (Object *o = obj; o; o = o->Parent) {
+				if (o->Type != Obj_TriMesh) continue;
+				TriMesh *tm = (TriMesh *)o->Data;
+				if (!tm) continue;
+				if (tm->Rotate.NumKeys > 1) return true;
+				if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+					const auto& k0 = tm->Pos.Keys[0].Pos;
+					float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+					for (DWord i = 1; i < tm->Pos.NumKeys; ++i) {
+						const auto& k = tm->Pos.Keys[i].Pos;
+						if (k.x < xmin) xmin=k.x; if (k.x > xmax) xmax=k.x;
+						if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
+						if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
+					}
+					if ((xmax - xmin) > kPosExtentEps ||
+					    (ymax - ymin) > kPosExtentEps ||
+					    (zmax - zmin) > kPosExtentEps) return true;
 				}
+			}
+			return false;
+		};
+		if (inStaticBake && isDynamicForBake(Obj)) {
+			static std::atomic<int> sSkipLogged{0};
+			if (sSkipLogged.fetch_add(1) < 32) {
 				std::fprintf(stderr,
-				    "[STATIC-BAKE-SKIP-MESH] '%s' Pos.NumKeys=%u "
-				    "k0=(%g,%g,%g) kN=(%g,%g,%g) extent=(%g,%g,%g)\n",
-				    (Obj->Name ? Obj->Name : "?"), unsigned(T->Pos.NumKeys),
-				    k0.x, k0.y, k0.z, kN.x, kN.y, kN.z,
-				    xmax-xmin, ymax-ymin, zmax-zmin);
+				    "[STATIC-BAKE-SKIP-MESH] '%s' Pos.NumKeys=%u Rot.NumKeys=%u parent='%s'\n",
+				    (Obj->Name ? Obj->Name : "?"),
+				    unsigned(T->Pos.NumKeys), unsigned(T->Rotate.NumKeys),
+				    (Obj->Parent && Obj->Parent->Name) ? Obj->Parent->Name : "(none)");
 			}
 			continue;
 		}
