@@ -203,17 +203,23 @@ inline float CubeShadow_Sample(int cubeIdx,
                      sm.viewToLight[1][2] * viewZ + sm.viewToLightOffset.y;
     const float lz = sm.viewToLight[2][0] * viewX + sm.viewToLight[2][1] * viewY +
                      sm.viewToLight[2][2] * viewZ + sm.viewToLightOffset.z;
-    if (lz <= 0.0f) return 1.0f;
+    // lz is the pixel's depth into light-space. lz<=0 = behind light;
+    // lz~0 = at-the-light. Both produce a meaningless shadow lookup
+    // and the latter explodes invLZ = 1/lz, making smX/smY saturate to
+    // INT_MAX and walk off the shadow map. Reject anything closer than
+    // 0.05 world units (matches the engine-wide zMin / near-plane).
+    if (lz <= 0.05f) return 1.0f;
     const float invLZ = 1.0f / lz;
     const float smX = sm.cntrX + sm.perspX * lx * invLZ;
     const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-    // Diagnostic: smX / smY should be finite if upstream matrix
-    // setup is consistent. NaN / inf here means viewToLight or
-    // viewToLightOffset has bad data — usually a sign that a per-
-    // frame bake left the matrix in a partial state. Print all
-    // inputs and abort (NOT a silent fallback — see [[feedback-no-
-    // defensive-backstops]]) so the root cause is visible.
-    if (!std::isfinite(smX) || !std::isfinite(smY)) {
+    // Diagnostic: smX/smY should land in [0, sm.xres] / [0, sm.yres]
+    // if upstream is consistent. NaN/inf or huge-but-finite (typically
+    // from tiny-positive lz before the new threshold landed) means a
+    // pre-projection input went bad. Print all inputs and abort
+    // (NOT a silent fallback — see [[feedback-no-defensive-backstops]]).
+    const float kSaneAbs = 4.0f * float(sm.xres > sm.yres ? sm.xres : sm.yres);
+    if (!std::isfinite(smX) || !std::isfinite(smY) ||
+        std::fabs(smX) > kSaneAbs || std::fabs(smY) > kSaneAbs) {
         static std::atomic<int> sLogged{0};
         if (sLogged.fetch_add(1) < 4) {
             std::fprintf(stderr,
