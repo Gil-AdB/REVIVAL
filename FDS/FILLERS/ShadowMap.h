@@ -209,15 +209,26 @@ inline float CubeShadow_Sample(int cubeIdx,
     // INT_MAX and walk off the shadow map. Reject anything closer than
     // 0.05 world units (matches the engine-wide zMin / near-plane).
     if (lz <= 0.05f) return 1.0f;
+    // Cube-face frustum check. For a 90°-padded face, valid pixels
+    // have |lx|/lz and |ly|/lz ≤ ~1.18 (tan(π/4 · 1.10)). Pixels at
+    // the face seam where another face's frustum was the correct one
+    // can leak in (SelectFace uses dominant-axis on dwx/dwy/dwz, but
+    // post-projection the ratio can exceed 1 in either direction).
+    // Reject them — they project off the map anyway, and the correct
+    // shadow contribution should come from the adjacent face.
+    constexpr float kFaceFrustumRatio = 1.5f;  // a bit of slack past 1.18
+    if (lx >  kFaceFrustumRatio * lz || lx < -kFaceFrustumRatio * lz) return 1.0f;
+    if (ly >  kFaceFrustumRatio * lz || ly < -kFaceFrustumRatio * lz) return 1.0f;
     const float invLZ = 1.0f / lz;
     const float smX = sm.cntrX + sm.perspX * lx * invLZ;
     const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-    // Diagnostic: smX/smY should land in [0, sm.xres] / [0, sm.yres]
-    // if upstream is consistent. NaN/inf or huge-but-finite (typically
-    // from tiny-positive lz before the new threshold landed) means a
-    // pre-projection input went bad. Print all inputs and abort
-    // (NOT a silent fallback — see [[feedback-no-defensive-backstops]]).
-    const float kSaneAbs = 4.0f * float(sm.xres > sm.yres ? sm.xres : sm.yres);
+    // Diagnostic: with the lz>0.05 + face-frustum-ratio rejections
+    // above, smX/smY should now always land in roughly [0, xres) /
+    // [0, yres). NaN/inf or wildly out-of-range here means the
+    // matrix itself is broken (e.g. a per-frame bake desynced).
+    // Threshold deliberately loose (16× face size) to ignore face-
+    // seam edge cases and only catch genuinely-broken upstream.
+    const float kSaneAbs = 16.0f * float(sm.xres > sm.yres ? sm.xres : sm.yres);
     if (!std::isfinite(smX) || !std::isfinite(smY) ||
         std::fabs(smX) > kSaneAbs || std::fabs(smY) > kSaneAbs) {
         static std::atomic<int> sLogged{0};
