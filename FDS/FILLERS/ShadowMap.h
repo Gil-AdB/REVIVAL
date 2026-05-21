@@ -207,6 +207,30 @@ inline float CubeShadow_Sample(int cubeIdx,
     const float invLZ = 1.0f / lz;
     const float smX = sm.cntrX + sm.perspX * lx * invLZ;
     const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+    // Diagnostic: smX / smY should be finite if upstream matrix
+    // setup is consistent. NaN / inf here means viewToLight or
+    // viewToLightOffset has bad data — usually a sign that a per-
+    // frame bake left the matrix in a partial state. Print all
+    // inputs and abort (NOT a silent fallback — see [[feedback-no-
+    // defensive-backstops]]) so the root cause is visible.
+    if (!std::isfinite(smX) || !std::isfinite(smY)) {
+        static std::atomic<int> sLogged{0};
+        if (sLogged.fetch_add(1) < 4) {
+            std::fprintf(stderr,
+                "[CUBE-SAMPLE-BAD] cubeIdx=%d face=%d  smX=%g smY=%g\n"
+                "  worldD=(%g,%g,%g)  view=(%g,%g,%g)\n"
+                "  cr.lightISource=(%g,%g,%g)\n"
+                "  viewToLight row0=(%g,%g,%g) off=(%g,%g,%g) lz=%g\n",
+                cubeIdx, face, smX, smY,
+                dwx, dwy, dwz, viewX, viewY, viewZ,
+                cr.lightISource.x, cr.lightISource.y, cr.lightISource.z,
+                sm.viewToLight[0][0], sm.viewToLight[0][1], sm.viewToLight[0][2],
+                sm.viewToLightOffset.x, sm.viewToLightOffset.y, sm.viewToLightOffset.z,
+                lz);
+            std::fflush(stderr);
+        }
+        std::abort();
+    }
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
