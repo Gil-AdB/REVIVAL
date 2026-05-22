@@ -314,6 +314,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	if (deferred && g_gbuffer) {
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
 		parallel_memset(g_gbuffer->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
+		// Lightmap planes: clear to 0 each frame (sentinel = "no
+		// lightmap for this pixel"). Mekalele only writes them for
+		// static-mesh faces, so without this clear, robot pixels
+		// would inherit the static mesh data from previous frames.
+		if (!g_gbuffer->lightmapMF.empty()) {
+			parallel_memset(g_gbuffer->lightmapMF.data(), 0,
+			                numPixels * sizeof(uint32_t));
+		}
 		// Transparent G-buffer: mat32=0xFFFFFFFF sentinel ("no transparent
 		// front face here"); xpr-Z=0 ("empty, anything passes Z-test").
 		if (g_gbufferTransparent) {

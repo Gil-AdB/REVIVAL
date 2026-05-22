@@ -668,18 +668,11 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	}
 	// Per-face static-shadow lightmap addressing. ParentTri is set in
 	// Transform_Objects when the face hits FList; staticLMMeshId is set
-	// by LightmapBake_Static (0 = dynamic mesh, no lightmap).
-	uint16_t lmMeshId  = 0;
-	uint16_t lmFaceIdx = 0;
-	if (F->ParentTri && F->ParentTri->staticLMMeshId != 0) {
-		lmMeshId  = F->ParentTri->staticLMMeshId;
-		const ptrdiff_t fidx = F - F->ParentTri->Faces;
-		if (fidx >= 0 && fidx < ptrdiff_t(F->ParentTri->FIndex) && fidx <= 0xFFFF) {
-			lmFaceIdx = uint16_t(fidx);
-		} else {
-			lmMeshId = 0;  // out-of-range face — disable lightmap for this face
-		}
-	}
+	// by LightmapBake_Static (0 = dynamic mesh, no lightmap). The face
+	// index is stamped on F itself (F->MeshFaceIdx) because the F we
+	// see here is the FList clone, not the original T->Faces[i].
+	const uint16_t lmMeshId  = (F->ParentTri ? F->ParentTri->staticLMMeshId : 0);
+	const uint16_t lmFaceIdx = (lmMeshId != 0) ? F->MeshFaceIdx : 0;
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,

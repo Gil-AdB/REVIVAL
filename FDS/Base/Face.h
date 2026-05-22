@@ -66,6 +66,14 @@ struct Face
 	// otherwise lose their inner layer to the outer in the 2-deep
 	// xpar G-buffer).
 	struct TriMesh * ParentTri = nullptr;
+	// Index of this face within ParentTri->Faces[]. Populated by
+	// LightmapBake_Static at scene init (only for meshes with a
+	// lightmap; left 0 for everything else, which is fine because
+	// dynamic-mesh pixels skip the lightmap planes anyway). Survives
+	// VertexScratch::cloneOf since clone is element-wise assign().
+	// Necessary because the Mekalele dispatcher receives F from FList
+	// (cloned), so `F - F->ParentTri->Faces` is invalid.
+	uint16_t         MeshFaceIdx = 0;
 	//	Surface       * Surf; // For T-Caching. (what??!)
 
 	void uvFromVertices() {

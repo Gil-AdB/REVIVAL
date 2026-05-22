@@ -224,6 +224,12 @@ void LightmapBake_Static(Scene *Sc)
         }
         T->staticLMMeshId = uint16_t(Sc->staticLMTable->size() - 1);
 
+        // Stamp the face's own index so Mekalele can recover it from
+        // FList (where Face pointers no longer point into T->Faces).
+        for (DWord fi = 0; fi < T->FIndex && fi <= 0xFFFF; ++fi) {
+            T->Faces[fi].MeshFaceIdx = uint16_t(fi);
+        }
+
         ++meshCount;
         const Vector &IP = T->IPos;
         auto toWorld = [&](const Vector &objPos, Vector &out) {
