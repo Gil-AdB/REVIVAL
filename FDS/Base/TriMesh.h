@@ -10,6 +10,8 @@
 #include "Object.h"
 #include "Matrix.h"
 
+struct StaticShadowLightmap;  // FDS/Base/StaticShadowLightmap.h
+
 #pragma pack(push, 1)
 
 // [172 Bytes]
@@ -43,6 +45,13 @@ struct TriMesh
     float			 BSphereRadius  = 0.0f; // Bounding Sphere Radius.
     float            BSphereRad     = 0.0f; // Bounding Sphere Radius, squared. kept for backward compatibility until pipeline code is updated
     DWord            Flags          = 0;
+
+    // Pre-baked per-face shadow factor for static omnis. Allocated by
+    // LightmapBake_Static at scene init when --shadow-lightmap is on
+    // and this mesh is "effectively static" (Pos/Rotate splines have
+    // extent < threshold or NumKeys <= 1). nullptr → mesh runs the
+    // legacy per-pixel cube-shadow tap path. See StaticShadowLightmap.h.
+    StaticShadowLightmap *staticShadowLM = nullptr;
 
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
