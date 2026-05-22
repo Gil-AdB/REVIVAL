@@ -8,6 +8,7 @@
 #include "Base/Scene.h"
 #include "Base/StaticShadowLightmap.h"
 #include "Base/TriMesh.h"
+#include "Base/Object.h"
 #include "Base/Omni.h"
 #include "Base/Vector.h"
 #include "Base/Matrix.h"
@@ -88,31 +89,65 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     return uint8_t(factor);
 }
 
-// "Effectively static for bake purposes" — Pos/Rotate splines have ≤1 key,
-// or the key extent is below a small threshold. Matches the predicate used
-// by the dynamic-mesh shadow pass (Transform.cpp isDynamicForBake) so the
-// two stay in lockstep: lightmap covers the meshes the dynamic pass
-// excludes, and vice-versa.
-bool isEffectivelyStatic(const TriMesh *T)
+// Mirrors Transform.cpp isDynamicForBake — walks the parent Object chain
+// and checks each ancestor's Pos/Rotate spline min/max extent. A mesh
+// whose own splines are flat but whose parent is animated is *dynamic*
+// in world space, so we must NOT bake a static shadow for it. The
+// thresholds (0.1 world units for Pos, 0.01 unit-quat delta for Rotate)
+// match Transform.cpp exactly so the two passes stay in lockstep.
+//
+// reasonOut: if non-null, populated with a short string explaining the
+// verdict (for the diagnostic dump).
+bool isMeshDynamic(Object *obj, char *reasonOut = nullptr, size_t reasonCap = 0)
 {
-    if (!T) return false;
-    auto splineMoves = [](const Spline &s, float thresh) {
-        if (s.NumKeys <= 1) return false;
-        // SplineKey::Pos is a Quaternion-typed storage slot the engine
-        // also uses for raw 3D vectors (Pos/Rotate-as-Euler). Read .x/.y/.z
-        // directly; the runtime dynamic-bake predicate does the same.
-        const Quaternion &q0 = s.Keys[0].Pos;
-        for (DWord i = 1; i < s.NumKeys; ++i) {
-            const Quaternion &q = s.Keys[i].Pos;
-            if (std::fabs(q.x - q0.x) > thresh) return true;
-            if (std::fabs(q.y - q0.y) > thresh) return true;
-            if (std::fabs(q.z - q0.z) > thresh) return true;
-        }
-        return false;
+    auto setReason = [&](const char *s, Object *culprit) {
+        if (!reasonOut || reasonCap == 0) return;
+        std::snprintf(reasonOut, reasonCap, "%s @ '%s'",
+                      s, (culprit && culprit->Name) ? culprit->Name : "?");
     };
-    if (splineMoves(T->Pos,    0.1f))   return false;
-    if (splineMoves(T->Rotate, 0.01f))  return false;
-    return true;
+    constexpr float kPosExtentEps = 0.1f;
+    constexpr float kRotExtentEps = 0.01f;
+    for (Object *o = obj; o; o = o->Parent) {
+        if (o->Type != Obj_TriMesh) continue;
+        TriMesh *tm = (TriMesh *)o->Data;
+        if (!tm) continue;
+        if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+            const auto& k0 = tm->Pos.Keys[0].Pos;
+            float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+            for (DWord i = 1; i < tm->Pos.NumKeys; ++i) {
+                const auto& k = tm->Pos.Keys[i].Pos;
+                if (k.x < xmin) xmin=k.x; if (k.x > xmax) xmax=k.x;
+                if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
+                if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
+            }
+            if ((xmax-xmin) > kPosExtentEps ||
+                (ymax-ymin) > kPosExtentEps ||
+                (zmax-zmin) > kPosExtentEps) {
+                setReason("Pos extent", o);
+                return true;
+            }
+        }
+        if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+            const auto& q0 = tm->Rotate.Keys[0].Pos;
+            float xmin=q0.x, xmax=q0.x, ymin=q0.y, ymax=q0.y;
+            float zmin=q0.z, zmax=q0.z, wmin=q0.W, wmax=q0.W;
+            for (DWord i = 1; i < tm->Rotate.NumKeys; ++i) {
+                const auto& q = tm->Rotate.Keys[i].Pos;
+                if (q.x < xmin) xmin=q.x; if (q.x > xmax) xmax=q.x;
+                if (q.y < ymin) ymin=q.y; if (q.y > ymax) ymax=q.y;
+                if (q.z < zmin) zmin=q.z; if (q.z > zmax) zmax=q.z;
+                if (q.W < wmin) wmin=q.W; if (q.W > wmax) wmax=q.W;
+            }
+            if ((xmax-xmin) > kRotExtentEps ||
+                (ymax-ymin) > kRotExtentEps ||
+                (zmax-zmin) > kRotExtentEps ||
+                (wmax-wmin) > kRotExtentEps) {
+                setReason("Rotate extent", o);
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -135,10 +170,30 @@ void LightmapBake_Static(Scene *Sc)
     const auto t0 = std::chrono::steady_clock::now();
     size_t meshCount = 0, faceCount = 0;
     size_t texelsBaked = 0, texelsCovered = 0;
+    size_t skippedDynamic = 0, considered = 0;
 
-    for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
-        if (T->FIndex == 0) continue;
-        if (!isEffectivelyStatic(T)) continue;
+    // Iterate Objects (not TriMeshHead directly) so we can walk the parent
+    // chain — a mesh whose own splines are flat but whose parent moves is
+    // still dynamic in world space and must NOT be baked.
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh *)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        ++considered;
+
+        char reason[64] = {0};
+        const bool dyn = isMeshDynamic(Obj, reason, sizeof(reason));
+        const char *name = Obj->Name ? Obj->Name : "?";
+        if (dyn) {
+            ++skippedDynamic;
+            if (skippedDynamic <= 32) {
+                std::fprintf(stderr, "[LM-SKIP] '%s' (%u faces) — %s\n",
+                             name, unsigned(T->FIndex), reason);
+            }
+            continue;
+        }
+        std::fprintf(stderr, "[LM-KEEP] '%s' (%u faces)\n",
+                     name, unsigned(T->FIndex));
 
         // Allocate / reset lightmap on this mesh.
         if (T->staticShadowLM) { T->staticShadowLM->clear(); }
@@ -243,9 +298,10 @@ void LightmapBake_Static(Scene *Sc)
     const auto t1 = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     std::fprintf(stderr,
-        "[LM] LightmapBake_Static: %zu meshes / %zu faces / %d omnis × %d² texels "
-        "→ %zu baked, %zu lit (%.1f%%) in %.1f ms\n",
-        meshCount, faceCount, numCubeOmnis, lmRes,
+        "[LM] LightmapBake_Static: %zu/%zu meshes kept (%zu skipped dynamic) / "
+        "%zu faces / %d omnis × %d² texels → %zu baked, %zu lit (%.1f%%) in %.1f ms\n",
+        meshCount, considered, skippedDynamic,
+        faceCount, numCubeOmnis, lmRes,
         texelsBaked, texelsCovered,
         texelsBaked ? 100.0 * double(texelsCovered) / double(texelsBaked) : 0.0,
         ms);
