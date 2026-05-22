@@ -118,6 +118,8 @@ set(RENDER
     RENDER/DeferredLighting.cpp
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
+    RENDER/LightmapBake.cpp
+    RENDER/LightmapBake.h
     RENDER/RENDER.CPP
     RENDER/RenderInner.cpp
     RENDER/RenderPipeline.h

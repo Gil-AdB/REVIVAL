@@ -28,6 +28,7 @@
 #include <map>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
+#include "RENDER/LightmapBake.h"
 #include <memory>
 #include <vector>
 #include <VESA/Vesa.h>
@@ -898,6 +899,7 @@ struct GreetsScene : SceneDriver {
 		ShadowMaps_Rebuild(GreetSc, 1024);
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
 		ShadowMaps_BakeStatic(GreetSc);
+		fds::LightmapBake_Static(GreetSc);
 
 		// this scene messes up at time zero
 		Timer++;
