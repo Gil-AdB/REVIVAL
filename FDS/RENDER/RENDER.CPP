@@ -39,6 +39,9 @@ void Render_DeferredVolumetric();
 void Render_DeferredSkybox();
 void VolProf_Tick();
 
+// Defined in LightmapBake.cpp.
+namespace fds { void Render_LightmapViz(struct Scene *Sc); }
+
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
 //   otherwise → scene's PreferVolumetricUnified
@@ -367,6 +370,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		if (fds::FeatureFlags::deferred_skybox()) {
 			Render_DeferredSkybox();
 		}
+
+		// Lightmap debug viz — paints VPage with mesh/face/bary/factor
+		// data when --shadow-lightmap-viz != 0. No-op otherwise.
+		fds::Render_LightmapViz(CurScene);
 
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto

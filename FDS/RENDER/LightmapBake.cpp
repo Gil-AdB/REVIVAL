@@ -13,6 +13,7 @@
 #include "Base/Vector.h"
 #include "Base/Matrix.h"
 #include "FILLERS/ShadowMap.h"
+#include "FILLERS/Mekalele.h"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"  // MatrixXVector template
 
@@ -172,6 +173,17 @@ void LightmapBake_Static(Scene *Sc)
     size_t texelsBaked = 0, texelsCovered = 0;
     size_t skippedDynamic = 0, considered = 0;
 
+    // Reset the scene's lightmap mesh table. Index 0 reserved as sentinel
+    // (nullptr); kept-mesh indices start at 1.
+    if (!Sc->staticLMTable) Sc->staticLMTable = new std::vector<TriMesh*>();
+    Sc->staticLMTable->clear();
+    Sc->staticLMTable->push_back(nullptr);
+    // Clear every mesh's staticLMMeshId so faces from dynamic meshes (or
+    // meshes left over from a prior bake) end up with the sentinel 0.
+    for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+        T->staticLMMeshId = 0;
+    }
+
     // Iterate Objects (not TriMeshHead directly) so we can walk the parent
     // chain — a mesh whose own splines are flat but whose parent moves is
     // still dynamic in world space and must NOT be baked.
@@ -201,6 +213,16 @@ void LightmapBake_Static(Scene *Sc)
         StaticShadowLightmap &lm = *T->staticShadowLM;
         lm.allocate(int(T->FIndex), numCubeOmnis, lmRes);
         for (int oi = 0; oi < numCubeOmnis; ++oi) lm.omniSceneIdx[oi] = oi;
+
+        // Assign this mesh's lightmap-table index (1-based; 0 = none).
+        Sc->staticLMTable->push_back(T);
+        if (Sc->staticLMTable->size() > 0xFFFF) {
+            std::fprintf(stderr,
+                "[LM] more than 65535 static meshes — table overflow, "
+                "skipping further bakes\n");
+            return;
+        }
+        T->staticLMMeshId = uint16_t(Sc->staticLMTable->size() - 1);
 
         ++meshCount;
         const Vector &IP = T->IPos;
@@ -305,6 +327,82 @@ void LightmapBake_Static(Scene *Sc)
         texelsBaked, texelsCovered,
         texelsBaked ? 100.0 * double(texelsCovered) / double(texelsBaked) : 0.0,
         ms);
+}
+
+void Render_LightmapViz(Scene *Sc)
+{
+    const int mode = fds::FeatureFlags::shadow_lightmap_viz();
+    if (mode == 0) return;
+    if (!Sc || !Sc->staticLMTable) return;
+    meka::GBuffer *gb = g_gbuffer;
+    if (!gb || gb->lightmapMF.empty() || gb->lightmapST.empty()) return;
+    const uint32_t *plMF = gb->lightmapMF.data();
+    const uint16_t *plST = gb->lightmapST.data();
+    const auto &table = *Sc->staticLMTable;
+
+    auto packRGB = [](int R, int G, int B) -> uint32_t {
+        if (R < 0) R = 0; if (R > 255) R = 255;
+        if (G < 0) G = 0; if (G > 255) G = 255;
+        if (B < 0) B = 0; if (B > 255) B = 255;
+        return uint32_t(B) | (uint32_t(G) << 8) | (uint32_t(R) << 16) | 0xFF000000u;
+    };
+
+    uint32_t *out = reinterpret_cast<uint32_t*>(VPage);
+    for (int y = 0; y < YRes; ++y) {
+        const size_t row = size_t(y) * size_t(XRes);
+        for (int x = 0; x < XRes; ++x) {
+            const size_t i = row + size_t(x);
+            const uint32_t mf = plMF[i];
+            const uint16_t meshLMId = uint16_t(mf >> 16);
+            if (meshLMId == 0) {
+                if (mode == 1) {
+                    // Mark no-lightmap pixels in dim red so we can see
+                    // coverage at a glance.
+                    out[i] = packRGB(60, 0, 0);
+                }
+                continue;
+            }
+            const uint16_t faceIdx = uint16_t(mf & 0xFFFF);
+            const uint16_t st = plST[i];
+            const int sB = int(st & 0xFF);
+            const int tB = int((st >> 8) & 0xFF);
+
+            switch (mode) {
+              case 1: { // mesh ID greyscale
+                const int g = std::min(255, 60 + meshLMId * 40);
+                out[i] = packRGB(g, g, g);
+                break;
+              }
+              case 2: { // face ID color hash
+                const uint32_t h = uint32_t(faceIdx) * 2654435761u;
+                out[i] = packRGB(int((h >> 24) & 0xFF),
+                                 int((h >> 16) & 0xFF),
+                                 int((h >>  8) & 0xFF));
+                break;
+              }
+              case 3: out[i] = packRGB(255 - sB, sB, 0); break;
+              case 4: out[i] = packRGB(255 - tB, 0, tB); break;
+              case 5: { // lightmap factor for omni 0
+                if (size_t(meshLMId) >= table.size()) { out[i] = packRGB(255, 0, 255); break; }
+                TriMesh *T = table[meshLMId];
+                if (!T || !T->staticShadowLM) { out[i] = packRGB(255, 0, 255); break; }
+                StaticShadowLightmap &lm = *T->staticShadowLM;
+                if (lm.numOmnis == 0 || faceIdx >= lm.numFaces) { out[i] = packRGB(255, 128, 0); break; }
+                // Map s,t (8-bit) → texel coord [0, lmRes). Truncate; the
+                // kernel will eventually do bilinear, but this is just viz.
+                int tx = (sB * lm.lmRes) >> 8;
+                int ty = (tB * lm.lmRes) >> 8;
+                if (tx >= lm.lmRes) tx = lm.lmRes - 1;
+                if (ty >= lm.lmRes) ty = lm.lmRes - 1;
+                const uint8_t *p = lm.texel(faceIdx, tx, ty);
+                const int factor = int(p[0]);
+                out[i] = packRGB(factor, factor, factor);
+                break;
+              }
+              default: break;
+            }
+        }
+    }
 }
 
 }  // namespace fds

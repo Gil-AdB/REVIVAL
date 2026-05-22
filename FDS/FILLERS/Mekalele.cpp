@@ -1,5 +1,7 @@
 #include "Mekalele.h"
 
+#include "Base/FeatureFlags.h"
+
 namespace meka {
 // See TheOtherBarry.h fwd-decl. Defined here where GBuffer is complete.
 uint32_t* gbuffer_mat32_plane(GBuffer* gb) {
@@ -44,6 +46,17 @@ void EngineGBuffer_Resize(int X, int Y) {
     s_engineGBuffer.normal.assign(numPixels, 0);
     s_engineGBuffer.tangent.assign(numPixels, 0);
     s_engineGBuffer.txtr.assign(numPixels, 0);
+    // Static-shadow lightmap planes — only allocated when the feature is
+    // on (saves ~6 bytes per pixel × W*H + the per-pixel write cost in
+    // the Mekalele hot loop). Mekalele's wantLm check picks up
+    // span.lightmapMF == nullptr as "off".
+    if (fds::FeatureFlags::shadow_lightmap()) {
+        s_engineGBuffer.lightmapMF.assign(numPixels, 0);
+        s_engineGBuffer.lightmapST.assign(numPixels, 0);
+    } else {
+        s_engineGBuffer.lightmapMF.clear();
+        s_engineGBuffer.lightmapST.clear();
+    }
     g_gbuffer = &s_engineGBuffer;
     // Transparent layers don't currently use tangent — leaving those
     // empty so GBufferSpan's nullptr-tangent path keeps the rasterizer

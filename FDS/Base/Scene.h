@@ -11,6 +11,8 @@
 #include "Camera.h"
 #include "Omni.h"
 
+#include <vector>
+
 // [56 Bytes]
 // Total: [(56 + 16 * Objects + (220 + 84 * Vertices + 56 * Faces + 16 *
 //         (Spline + Hide Keys)) per TriMesh + 216 + (16 * Spline Keys) per
@@ -64,6 +66,18 @@ struct Scene
     // (city) leave 0 to preserve the 1998-era look. Runtime can
     // still override with FDS_VOLUMETRIC_UNIFIED.
     dword            PreferVolumetricUnified;
+
+    // Static-shadow lightmap table populated by LightmapBake_Static.
+    // Index 0 is reserved sentinel (nullptr) so Mekalele's per-pixel
+    // staticLMMeshId == 0 means "no lightmap for this pixel". Indices
+    // 1..N correspond to TriMeshes whose Pos/Rotate splines are flat
+    // through the parent chain. The deferred kernel uses this to look
+    // up the lightmap for the pixel's owning mesh.
+    //
+    // Pointer (not in-place vector) so Scene remains a trivially-zeroable
+    // struct — Snapshot.cpp memset()s fresh Scenes before the loader
+    // fills them in.
+    std::vector<struct TriMesh*> *staticLMTable = nullptr;
 };
 
 #pragma pack(pop)

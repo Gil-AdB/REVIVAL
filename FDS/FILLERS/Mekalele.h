@@ -45,6 +45,16 @@ struct GBuffer {
 	// shadow mode (compared against ShadowMap::polyId, which stores
 	// matID+1 of the closest occluder).
 	std::vector<u32> txtr;
+	// Static-shadow lightmap address: meshLMId(16) | faceIdx(16).
+	// meshLMId is an index into Scene::staticLMTable (0 = no lightmap,
+	// sentinel; the deferred kernel falls back to per-pixel cube tap).
+	// Mekalele writes a constant value per face (same meshLMId & faceIdx
+	// for every pixel in the triangle).
+	std::vector<u32> lightmapMF;
+	// Static-shadow lightmap barycentric (s, t): s(8) | t(8). Encoded as
+	// fixed-point fraction of barycentric weight on vertex B (s) and C
+	// (t). Per-pixel; kernel does bilinear lookup into the lightmap.
+	std::vector<u16> lightmapST;
 };
 
 // Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
@@ -170,6 +180,14 @@ struct TileRasterizerCtx {
 	dword miplevel;
 	u16 *zbuffer;
 	float zScale;      // was: g_zscale global. Per-pass depth scalar.
+
+	// Static-shadow lightmap addressing (zero = no lightmap → skip the
+	// G-buffer plane writes; deferred kernel falls back to per-pixel
+	// cube shadow tap). Set per-face by the Mekalele dispatcher:
+	//   lmMeshId  = F->ParentTri->staticLMMeshId       (0..65535)
+	//   lmFaceIdx = (F - F->ParentTri->Faces)          (0..65535)
+	u16 lmMeshId  = 0;
+	u16 lmFaceIdx = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -189,12 +207,16 @@ struct GBufferSpan {
 	u16 *normal;
 	u16 *tangent;
 	u32 *txtr;
+	u32 *lightmapMF;
+	u16 *lightmapST;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
 		normal += offset;
 		tangent += offset;
 		txtr += offset;
+		if (lightmapMF) lightmapMF += offset;
+		if (lightmapST) lightmapST += offset;
 		zbuffer += offset;
 		return *this;
 	}
@@ -207,10 +229,21 @@ struct GBufferSpan {
 		u16 *tangentPtr = gbuffer.tangent.empty()
 			? nullptr
 			: gbuffer.tangent.data() + offset;
+		// Lightmap planes are also optional — allocated only when
+		// --shadow-lightmap is on (or when any scene has populated a
+		// staticLMTable). Inner loop checks before writing.
+		u32 *lmMFPtr = gbuffer.lightmapMF.empty()
+			? nullptr
+			: gbuffer.lightmapMF.data() + offset;
+		u16 *lmSTPtr = gbuffer.lightmapST.empty()
+			? nullptr
+			: gbuffer.lightmapST.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
 			gbuffer.txtr.data() + offset,
+			lmMFPtr,
+			lmSTPtr,
 			ctx.zbuffer + offset
 		};
 	}
@@ -325,6 +358,17 @@ struct TileRasterizer {
 		TScreenCoord b0 = tile.b0;
 		TScreenCoord c0 = tile.c0;
 
+		// Pre-compute reciprocal of the per-triangle barycentric sum
+		// (= 2A in subpixel units; constant across the whole triangle,
+		// so any pixel works — tile origin used here for convenience).
+		// Pixels' barycentric weights are p_a/sum (A), p_b/sum (B),
+		// p_c/sum (C). s, t map to weights of B and C respectively.
+		const int32_t triSum = int32_t(a0) + int32_t(b0) + int32_t(c0);
+		const float invTriSum = (triSum != 0) ? (1.0f / float(triSum)) : 0.0f;
+		const u32 packedLmMF = (u32(ctx.lmMeshId) << 16) | u32(ctx.lmFaceIdx);
+		const bool wantLm = (ctx.lmMeshId != 0) && (span.lightmapMF != nullptr)
+		                    && (span.lightmapST != nullptr);
+
 		Vec8i p_a = v8_from_arith_seq(a0, tile.dadx);
 		Vec8i p_b = v8_from_arith_seq(b0, tile.dbdx);
 		Vec8i p_c = v8_from_arith_seq(c0, tile.dcdx);
@@ -409,12 +453,35 @@ struct TileRasterizer {
 					}
 					alignas(32) int32_t mask_l[8];
 					Vec8i(p_mask).store_a(mask_l);
+					// Lightmap (s, t) per-lane: bary weight of B and C as
+					// fractions of the triangle's bary sum (precomputed
+					// per triangle as invTriSum). Constant lmMeshId/face
+					// part is `packedLmMF`. Static-mesh pixels get a real
+					// address + bary coords; dynamic-mesh pixels skip.
+					alignas(32) int32_t pb_v[8];
+					alignas(32) int32_t pc_v[8];
+					if (wantLm) {
+						Vec8i(p_b).store_a(pb_v);
+						Vec8i(p_c).store_a(pc_v);
+					}
 					for (int lane = 0; lane < 8; ++lane) {
 						if (!mask_l[lane]) continue;
 						span.normal[lane] = uint16_t(normalEnc[lane]);
 						if (wantTangent) {
 							span.tangent[lane] = tValid[lane]
 								? uint16_t(tangentEnc[lane]) : uint16_t(0);
+						}
+						if (wantLm) {
+							float s = float(pb_v[lane]) * invTriSum;
+							float t = float(pc_v[lane]) * invTriSum;
+							int sB = int(s * 255.0f + 0.5f);
+							int tB = int(t * 255.0f + 0.5f);
+							if (sB < 0)   sB = 0;
+							if (sB > 255) sB = 255;
+							if (tB < 0)   tB = 0;
+							if (tB > 255) tB = 255;
+							span.lightmapMF[lane] = packedLmMF;
+							span.lightmapST[lane] = uint16_t(sB | (tB << 8));
 						}
 					}
 				}
@@ -599,6 +666,20 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		gb   = rt.gbufferTransparentBack;
 		zbuf = rt.xparZBack;
 	}
+	// Per-face static-shadow lightmap addressing. ParentTri is set in
+	// Transform_Objects when the face hits FList; staticLMMeshId is set
+	// by LightmapBake_Static (0 = dynamic mesh, no lightmap).
+	uint16_t lmMeshId  = 0;
+	uint16_t lmFaceIdx = 0;
+	if (F->ParentTri && F->ParentTri->staticLMMeshId != 0) {
+		lmMeshId  = F->ParentTri->staticLMMeshId;
+		const ptrdiff_t fidx = F - F->ParentTri->Faces;
+		if (fidx >= 0 && fidx < ptrdiff_t(F->ParentTri->FIndex) && fidx <= 0xFFFF) {
+			lmFaceIdx = uint16_t(fidx);
+		} else {
+			lmMeshId = 0;  // out-of-range face — disable lightmap for this face
+		}
+	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
@@ -608,6 +689,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.miplevel = miplevel,
 		.zbuffer = zbuf,
 		.zScale = cam.zScale,
+		.lmMeshId  = lmMeshId,
+		.lmFaceIdx = lmFaceIdx,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

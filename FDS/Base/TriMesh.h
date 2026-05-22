@@ -53,6 +53,12 @@ struct TriMesh
     // legacy per-pixel cube-shadow tap path. See StaticShadowLightmap.h.
     StaticShadowLightmap *staticShadowLM = nullptr;
 
+    // Index into Scene::staticLMTable. 0 = no lightmap (default). 1..N
+    // = position of this mesh's lightmap pointer in the scene table.
+    // Set by LightmapBake_Static; written by Mekalele into the G-buffer
+    // per-pixel so the deferred kernel can look up the lightmap.
+    uint16_t         staticLMMeshId = 0;
+
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
 

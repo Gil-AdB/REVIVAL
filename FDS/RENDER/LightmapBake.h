@@ -22,6 +22,17 @@ namespace fds {
 
 void LightmapBake_Static(Scene *Sc);
 
+// Post-deferred-lighting debug viz. Reads the new G-buffer lightmap
+// planes (lightmapMF, lightmapST) plus the scene's staticLMTable and
+// overrides VPage according to --shadow-lightmap-viz:
+//   1 = mesh ID (greyscale; 0 = red overlay for "no lightmap")
+//   2 = face ID (color hash)
+//   3 = bary s in red→green
+//   4 = bary t in red→blue
+//   5 = baked shadow factor for omni 0 (greyscale)
+// 0 (default) = no-op.
+void Render_LightmapViz(Scene *Sc);
+
 }  // namespace fds
 
 #endif  // REVIVAL_LIGHTMAP_BAKE_H
