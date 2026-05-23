@@ -379,10 +379,6 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			Render_DeferredSkybox();
 		}
 
-		// Lightmap debug viz — paints VPage with mesh/face/bary/factor
-		// data when --shadow-lightmap-viz != 0. No-op otherwise.
-		fds::Render_LightmapViz(CurScene);
-
 		// Full-screen linear distance fog over deferred-lit opaque pixels.
 		// Runs BEFORE the transparent peel so xpar surfaces composite onto
 		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
@@ -585,6 +581,11 @@ xpar_done: ;
 		}
 	}
 	VolProf_Tick();
+
+	// Lightmap debug viz — paints VPage with mesh/face/bary/factor
+	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last
+	// so cones/halos/fog/xpar can't overwrite the diagnostic display.
+	fds::Render_LightmapViz(CurScene);
 
 
 
