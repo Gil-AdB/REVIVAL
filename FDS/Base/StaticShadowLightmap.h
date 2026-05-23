@@ -76,6 +76,40 @@ struct StaticShadowLightmap {
         omniSceneIdx.clear();
         numFaces = numOmnis = 0;
     }
+
+    // Bilinear sample at fractional texel coord. Input is the G-buffer-
+    // encoded barycentric pair (s, t) as 8-bit fractions in [0, 255]. The
+    // omni index is the position in this lightmap's omni table (which the
+    // baker initializes 1:1 with g_cubeShadowRefs, so the lighting kernel
+    // passes its cubeIdx directly). Returns shadow factor in [0, 1]:
+    // 1.0 = fully lit, 0.0 = fully shadowed.
+    inline float sampleBilinear(int faceIdx, int omniIdx,
+                                uint8_t sB, uint8_t tB) const {
+        if (data.empty() || lmRes < 2 || numOmnis <= 0 ||
+            faceIdx < 0 || faceIdx >= numFaces ||
+            omniIdx < 0 || omniIdx >= numOmnis) {
+            return 1.0f;
+        }
+        const float gridMax = float(lmRes - 1);
+        const float sf = (float(sB) * (1.0f / 255.0f)) * gridMax;
+        const float tf = (float(tB) * (1.0f / 255.0f)) * gridMax;
+        int tx = int(sf), ty = int(tf);
+        if (tx < 0) tx = 0; if (tx > lmRes - 2) tx = lmRes - 2;
+        if (ty < 0) ty = 0; if (ty > lmRes - 2) ty = lmRes - 2;
+        const float fx = sf - float(tx);
+        const float fy = tf - float(ty);
+        const uint8_t *p00 = texel(faceIdx, tx,     ty)     + omniIdx;
+        const uint8_t *p10 = texel(faceIdx, tx + 1, ty)     + omniIdx;
+        const uint8_t *p01 = texel(faceIdx, tx,     ty + 1) + omniIdx;
+        const uint8_t *p11 = texel(faceIdx, tx + 1, ty + 1) + omniIdx;
+        const float v00 = float(*p00);
+        const float v10 = float(*p10);
+        const float v01 = float(*p01);
+        const float v11 = float(*p11);
+        const float v0 = v00 + (v10 - v00) * fx;
+        const float v1 = v01 + (v11 - v01) * fx;
+        return (v0 + (v1 - v0) * fy) * (1.0f / 255.0f);
+    }
 };
 
 #endif // REVIVAL_STATIC_SHADOW_LIGHTMAP_H

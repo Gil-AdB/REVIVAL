@@ -42,6 +42,7 @@ extern float fastLog2(float x);
 extern float fastPow2(float x);
 #include "Base/FeatureFlags.h"
 #include "Base/Scene.h"
+#include "Base/StaticShadowLightmap.h"
 #include "Base/TriMesh.h"
 #include "Base/Vertex.h"
 #include "Base/Face.h"
@@ -766,6 +767,68 @@ static bool deferredLightingQuarterEnabled() {
 	return fds::FeatureFlags::deferred_quarter();
 }
 
+// Per-pixel lightmap address resolved once at top of the per-pixel loop.
+// `lm == nullptr` ⇒ legacy path (per-pixel cube shadow tap). Otherwise:
+// bilinear sample from the cached lightmap. Two writers populate `lm`:
+//   1. Mekalele wrote a non-zero meshLMId for this pixel (static mesh).
+//   2. Scene has a populated staticLMTable for that meshLMId.
+struct PixelLightmap {
+	const StaticShadowLightmap *lm = nullptr;
+	int     faceIdx = 0;
+	uint8_t sB = 0, tB = 0;
+};
+
+// One read of the lightmap G-buffer planes + scene table lookup per pixel.
+// Returns a zero-filled PixelLightmap when off / dynamic / out-of-range —
+// callers test `pl.lm == nullptr` to decide which shadow path runs.
+static inline PixelLightmap resolvePixelLightmap(const meka::GBuffer &gb,
+                                                  size_t i,
+                                                  const Scene *Sc)
+{
+	PixelLightmap pl;
+	if (gb.lightmapMF.empty() || !Sc || !Sc->staticLMTable) return pl;
+	const uint32_t mf  = gb.lightmapMF[i];
+	const uint16_t mid = uint16_t(mf >> 16);
+	if (mid == 0 || size_t(mid) >= Sc->staticLMTable->size()) return pl;
+	TriMesh *T = (*Sc->staticLMTable)[mid];
+	if (!T || !T->staticShadowLM) return pl;
+	const uint16_t fidx = uint16_t(mf & 0xFFFF);
+	if (fidx >= T->staticShadowLM->numFaces) return pl;
+	pl.lm        = T->staticShadowLM;
+	pl.faceIdx   = int(fidx);
+	const uint16_t st = gb.lightmapST[i];
+	pl.sB = uint8_t(st & 0xFF);
+	pl.tB = uint8_t(st >> 8);
+	return pl;
+}
+
+// Single point of choice for "which cube-shadow path runs this pixel".
+// When the pixel has a lightmap address AND we're not in dynamic-shadow
+// mode, sample the lightmap. Otherwise run the per-pixel cube tap.
+// (Dynamic mode falls back because the lightmap only encodes static
+// occluders; the runtime cube tap reads max(static, dynamic) depth.)
+static inline float resolveCubeAtten(const PixelLightmap &pl,
+                                      int32_t cubeIdx,
+                                      bool useLightmap,
+                                      // cube-tap fallback inputs:
+                                      float wx, float wy, float wz, float lenInv,
+                                      float nGeoX, float nGeoY, float nGeoZ,
+                                      float sampleWorldX, float sampleWorldY, float sampleWorldZ,
+                                      float vx, float vy, float vz,
+                                      int kShadowBiasG, int kSlopeBiasG)
+{
+	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis) {
+		return pl.lm->sampleBilinear(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
+	}
+	const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+	const float nDotL = dotGeo * lenInv;
+	const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+	const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
+	return CubeShadow_Sample(cubeIdx,
+	                          sampleWorldX, sampleWorldY, sampleWorldZ,
+	                          vx, vy, vz, kShadowBiasG, slopeBias);
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -804,6 +867,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
+	// Lightmap kernel branch is gated off when --shadow-dynamic is on
+	// (see resolveCubeAtten's contract above). Hoisted to tile-level
+	// so the per-pixel + per-omni hot path doesn't re-query.
+	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic();
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -853,6 +920,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				texG = float((texel >> 8) & 0xFF);
 				texR = float((texel >> 16) & 0xFF);
 			}
+
+			// Static-shadow lightmap address for this pixel — resolved
+			// once, used by all cube-shadow taps in the per-omni loops
+			// below via resolveCubeAtten().
+			const PixelLightmap pixelLM = resolvePixelLightmap(gb, i, ctx.Sc);
+			// Lightmap kernel branch is disabled when the dynamic-mesh
+			// shadow pass is on: the lightmap only encodes the static-
+			// occluder polyId, but `--shadow-dynamic` puts moving meshes
+			// into a parallel buffer that only the runtime cube tap
+			// reads. Until we composite both, fall back to cube tap
+			// when dynamic is on so robot shadows on the floor still
+			// render. (Set once per tile, see lmKernelEnabled below.)
 
 			// Decode normal (view-space, unit-length).
 			float nx, ny, nz;
@@ -1154,14 +1233,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							for (int lane = 0; lane < 8; ++lane) {
 								if (idxArr[lane] < 0) continue;
 								if (kArr[lane] <= 0.0f) continue;
-								const float dotGeo =
-									wxArr[lane]*nGeoX + wyArr[lane]*nGeoY + wzArr[lane]*nGeoZ;
-								const float nDotL = dotGeo * liArr[lane];
-								const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
-								const int slopeBias = int(float(kSL) * (invNdotL - 1.0f));
-								const float cubeAtten = CubeShadow_Sample(
-									idxArr[lane], sampleWorldX, sampleWorldY, sampleWorldZ,
-									x, y, z, kSB, slopeBias);
+								const float cubeAtten = resolveCubeAtten(
+									pixelLM, idxArr[lane], lmKernelEnabled,
+									wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
+									nGeoX, nGeoY, nGeoZ,
+									sampleWorldX, sampleWorldY, sampleWorldZ,
+									x, y, z, kSB, kSL);
 								kArr[lane] *= cubeAtten;
 							}
 							k = _mm256_load_ps(kArr);
@@ -1422,17 +1499,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							}
 						}
 
-						// Cube shadow (omni shadow caster). Inline helper
-						// in ShadowMap.h returns shadowAtten directly.
+						// Cube shadow (omni shadow caster). Two paths:
+						//  - Static-mesh pixel + lightmap baked for this
+						//    cubeIdx → bilinear sample from the lightmap.
+						//  - Otherwise → per-pixel cube tap.
 						const int32_t cubeIdx = tl.cubeShadowIdx[n];
 						if (cubeIdx >= 0) {
-							const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
-							const float nDotL = dotGeo * lenInv;
-							const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
-							const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
-							const float cubeAtten = CubeShadow_Sample(
-								cubeIdx, sampleWorldX, sampleWorldY, sampleWorldZ,
-								x, y, z, kShadowBiasG, slopeBias);
+							const float cubeAtten = resolveCubeAtten(
+								pixelLM, cubeIdx, lmKernelEnabled,
+								wx, wy, wz, lenInv,
+								nGeoX, nGeoY, nGeoZ,
+								sampleWorldX, sampleWorldY, sampleWorldZ,
+								x, y, z, kShadowBiasG, kSlopeBiasG);
 							if (cubeAtten <= 0.0f) continue;
 							shadowAtten *= cubeAtten;
 						}
