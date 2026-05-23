@@ -458,10 +458,19 @@ struct TileRasterizer {
 					// per triangle as invTriSum). Constant lmMeshId/face
 					// part is `packedLmMF`. Static-mesh pixels get a real
 					// address + bary coords; dynamic-mesh pixels skip.
-					alignas(32) int32_t pb_v[8];
+					//
+					// Bary convention in this rasterizer (see
+					// rasterize_triangle): the half-plane functions are
+					// oriented for CW triangles —
+					//   p_a = orient2d(v2, v1, P)  ∝ weight of v3 (= C)
+					//   p_b = orient2d(v3, v2, P)  ∝ weight of v1 (= A)
+					//   p_c = orient2d(v1, v3, P)  ∝ weight of v2 (= B)
+					// So s (weight of B) = p_c / triSum, and
+					//    t (weight of C) = p_a / triSum.
+					alignas(32) int32_t pa_v[8];
 					alignas(32) int32_t pc_v[8];
 					if (wantLm) {
-						Vec8i(p_b).store_a(pb_v);
+						Vec8i(p_a).store_a(pa_v);
 						Vec8i(p_c).store_a(pc_v);
 					}
 					for (int lane = 0; lane < 8; ++lane) {
@@ -472,8 +481,8 @@ struct TileRasterizer {
 								? uint16_t(tangentEnc[lane]) : uint16_t(0);
 						}
 						if (wantLm) {
-							float s = float(pb_v[lane]) * invTriSum;
-							float t = float(pc_v[lane]) * invTriSum;
+							float s = float(pc_v[lane]) * invTriSum;  // weight of B
+							float t = float(pa_v[lane]) * invTriSum;  // weight of C
 							int sB = int(s * 255.0f + 0.5f);
 							int tB = int(t * 255.0f + 0.5f);
 							if (sB < 0)   sB = 0;
