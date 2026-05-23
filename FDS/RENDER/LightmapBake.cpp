@@ -4,6 +4,15 @@
 
 #include "RENDER/LightmapBake.h"
 
+// Match DeferredLighting.cpp's include order: legacy `.H` headers first
+// (they push/pop pack(1) in subtly-unbalanced ways across the chain),
+// then StaticShadowLightmap.h so its std::vector members land at the
+// same offsets as everywhere else. Mismatched include order produced a
+// silent ODR violation: this TU saw a 84-byte struct, DeferredLighting
+// saw 88 bytes, the data-vector header was at different offsets, and
+// the 14 MB lightmap bake read as empty at runtime.
+#include "Base/FDS_DECS.H"
+#include "Base/FDS_VARS.H"  // MatrixXVector template
 #include "Base/FeatureFlags.h"
 #include "Base/Scene.h"
 #include "Base/StaticShadowLightmap.h"
@@ -14,10 +23,9 @@
 #include "Base/Matrix.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/Mekalele.h"
-#include "Base/FDS_DECS.H"
-#include "Base/FDS_VARS.H"  // MatrixXVector template
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -35,7 +43,6 @@ namespace {
 // is fully lit and 0 is fully shadowed.
 uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
                                  const Vector &worldPos,
-                                 uint8_t faceMatId,
                                  int constBias, int slopeBiasInt)
 {
     const float dwx = worldPos.x - cr.lightISource.x;
@@ -64,6 +71,8 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 255;
 
     const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+    const uint16_t *z0 = sm.depth.data() + rowOfs;
+    const uint16_t *z1 = z0 + sm.xres;
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -71,21 +80,20 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     const float w01 = (1.0f - fx) *         fy;
     const float w11 =         fx  *         fy;
 
-    // PolyId mode mirrors DeferredLighting's per-pixel cube tap (which is
-    // the default — depth mode has issues with the bias overflowing the
-    // 16-bit enc range for nearby occluders, see runtime kernel comment).
-    // Shadow buffer stores matID+1 of the closest occluder. A texel is
-    // occluded iff the stored ID is non-zero AND differs from this face's
-    // own (matID+1). Bias is unused in this mode.
-    (void)constBias; (void)slopeBiasInt;
-    const uint8_t *id0 = sm.polyId.data() + rowOfs;
-    const uint8_t *id1 = id0 + sm.xres;
-    const uint8_t surfaceId = uint8_t(faceMatId + 1);
+    // Depth comparison — matches the runtime CubeShadow_Sample exactly
+    // (ShadowMap.h). Cube shadows always use depth, never PolyId,
+    // regardless of g_shadowMode (that only switches the spot-shadow
+    // path). slopeBiasInt is computed by the caller from this texel's
+    // (N · L) so grazing-angle faces don't acne under the constant bias.
+    int pixZenc = 0xFF80 - int(lz * sm.zScale);
+    if (pixZenc < 0) pixZenc = 0;
+    if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+    const int biased = pixZenc + constBias + slopeBiasInt;
     float occ = 0.0f;
-    if (id0[iX  ] != surfaceId && id0[iX  ] != 0) occ += w00;
-    if (id0[iX+1] != surfaceId && id0[iX+1] != 0) occ += w10;
-    if (id1[iX  ] != surfaceId && id1[iX  ] != 0) occ += w01;
-    if (id1[iX+1] != surfaceId && id1[iX+1] != 0) occ += w11;
+    if (biased < int(z0[iX  ])) occ += w00;
+    if (biased < int(z0[iX+1])) occ += w10;
+    if (biased < int(z1[iX  ])) occ += w01;
+    if (biased < int(z1[iX+1])) occ += w11;
 
     const float lit = 1.0f - occ;
     int factor = int(lit * 255.0f + 0.5f);
@@ -245,7 +253,6 @@ void LightmapBake_Static(Scene *Sc)
             const Face &F = T->Faces[fi];
             if (!F.A || !F.B || !F.C) continue;
             ++faceCount;
-            const uint8_t faceMatId = uint8_t(F.Txtr ? F.Txtr->ID : 0);
 
             // Vertex world positions for this face.
             Vector wA, wB, wC;
@@ -291,6 +298,20 @@ void LightmapBake_Static(Scene *Sc)
                                        (OP.z - centroid.z)*wN.z;
                 if (toLight <= 0.0f) continue;
 
+                // Per-(face, omni) slope-scaled bias: matches the
+                // runtime per-pixel calculation (DeferredLighting:1399)
+                // but done once per face/omni pair instead of per-
+                // pixel. N·L = (toLight / |toOmni|). 0.2 clamp guards
+                // grazing angles from exploding invNdotL.
+                const float cxOL = OP.x - centroid.x;
+                const float cyOL = OP.y - centroid.y;
+                const float czOL = OP.z - centroid.z;
+                const float ldist2 = cxOL*cxOL + cyOL*cyOL + czOL*czOL;
+                const float lenInv = (ldist2 > 0.0f) ? 1.0f / std::sqrt(ldist2) : 0.0f;
+                const float nDotL = toLight * lenInv;
+                const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+                const int faceSlopeBias = int(float(slopeBiasInt) * (invNdotL - 1.0f));
+
                 bool anyCovered = false;
 
                 // Texel grid: (s, t) in [0, 1]^2 with s+t <= 1 = triangle
@@ -316,7 +337,7 @@ void LightmapBake_Static(Scene *Sc)
                         const float dxp = wp.x - OP.x, dyp = wp.y - OP.y, dzp = wp.z - OP.z;
                         if (dxp*dxp + dyp*dyp + dzp*dzp > r2) continue;
 
-                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, faceMatId, constBias, slopeBiasInt);
+                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, constBias, faceSlopeBias);
                         uint8_t *dst = lm.texel(int(fi), tx, ty) + oi;
                         *dst = lit;
                         ++texelsBaked;

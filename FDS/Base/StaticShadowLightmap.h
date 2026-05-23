@@ -3,6 +3,7 @@
 
 #include "BaseDefs.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -16,6 +17,16 @@
 // Memory layout: data[face][y * N + x][omni]  — omnis stored adjacent so
 // the deferred kernel reads K consecutive bytes per pixel (one cache
 // line for K ≤ 64).
+//
+// Pack-state hardening: TriMesh.h is included in a `#pragma pack(push, 1)`
+// region, and some other headers in the tree leave pack(1) active in
+// subtly-transitive ways. We force default alignment here so the std::
+// vector members keep their natural 8-byte alignment regardless of
+// caller include order — otherwise different TUs see different struct
+// sizes (84 vs 88 bytes), the `data` vector's metadata lives at a
+// different offset, and the lighting kernel reads zeros where the
+// bake wrote 14 MB of texels.
+#pragma pack(push, 8)
 struct StaticShadowLightmap {
     int lmRes    = 16;   // N per-face edge length (default 16 → 16×16 atlas per face)
     int numFaces = 0;    // M, matches the mesh's face count at bake time
@@ -111,5 +122,6 @@ struct StaticShadowLightmap {
         return (v0 + (v1 - v0) * fy) * (1.0f / 255.0f);
     }
 };
+#pragma pack(pop)
 
 #endif // REVIVAL_STATIC_SHADOW_LIGHTMAP_H
