@@ -35,6 +35,7 @@ namespace {
 // is fully lit and 0 is fully shadowed.
 uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
                                  const Vector &worldPos,
+                                 uint8_t faceMatId,
                                  int constBias, int slopeBiasInt)
 {
     const float dwx = worldPos.x - cr.lightISource.x;
@@ -63,8 +64,6 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 255;
 
     const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-    const uint16_t *z0 = sm.depth.data() + rowOfs;
-    const uint16_t *z1 = z0 + sm.xres;
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -72,16 +71,21 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     const float w01 = (1.0f - fx) *         fy;
     const float w11 =         fx  *         fy;
 
-    int pixZenc = 0xFF80 - int(lz * sm.zScale);
-    if (pixZenc < 0) pixZenc = 0;
-    if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-    const int biased = pixZenc + constBias + slopeBiasInt;
-
+    // PolyId mode mirrors DeferredLighting's per-pixel cube tap (which is
+    // the default — depth mode has issues with the bias overflowing the
+    // 16-bit enc range for nearby occluders, see runtime kernel comment).
+    // Shadow buffer stores matID+1 of the closest occluder. A texel is
+    // occluded iff the stored ID is non-zero AND differs from this face's
+    // own (matID+1). Bias is unused in this mode.
+    (void)constBias; (void)slopeBiasInt;
+    const uint8_t *id0 = sm.polyId.data() + rowOfs;
+    const uint8_t *id1 = id0 + sm.xres;
+    const uint8_t surfaceId = uint8_t(faceMatId + 1);
     float occ = 0.0f;
-    if (biased < int(z0[iX  ])) occ += w00;
-    if (biased < int(z0[iX+1])) occ += w10;
-    if (biased < int(z1[iX  ])) occ += w01;
-    if (biased < int(z1[iX+1])) occ += w11;
+    if (id0[iX  ] != surfaceId && id0[iX  ] != 0) occ += w00;
+    if (id0[iX+1] != surfaceId && id0[iX+1] != 0) occ += w10;
+    if (id1[iX  ] != surfaceId && id1[iX  ] != 0) occ += w01;
+    if (id1[iX+1] != surfaceId && id1[iX+1] != 0) occ += w11;
 
     const float lit = 1.0f - occ;
     int factor = int(lit * 255.0f + 0.5f);
@@ -241,6 +245,7 @@ void LightmapBake_Static(Scene *Sc)
             const Face &F = T->Faces[fi];
             if (!F.A || !F.B || !F.C) continue;
             ++faceCount;
+            const uint8_t faceMatId = uint8_t(F.Txtr ? F.Txtr->ID : 0);
 
             // Vertex world positions for this face.
             Vector wA, wB, wC;
@@ -311,7 +316,7 @@ void LightmapBake_Static(Scene *Sc)
                         const float dxp = wp.x - OP.x, dyp = wp.y - OP.y, dzp = wp.z - OP.z;
                         if (dxp*dxp + dyp*dyp + dzp*dzp > r2) continue;
 
-                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, constBias, slopeBiasInt);
+                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, faceMatId, constBias, slopeBiasInt);
                         uint8_t *dst = lm.texel(int(fi), tx, ty) + oi;
                         *dst = lit;
                         ++texelsBaked;
