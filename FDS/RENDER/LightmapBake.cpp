@@ -349,6 +349,9 @@ void LightmapBake_Static(Scene *Sc)
         }
     }
 
+    // Diagnostic atlas/continuity dumps removed after they localized the
+    // clipper-bary root cause; see commit log for the evidence.
+
     const auto t1 = std::chrono::steady_clock::now();
     const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     std::fprintf(stderr,

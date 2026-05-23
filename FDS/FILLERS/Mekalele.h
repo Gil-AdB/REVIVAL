@@ -20,6 +20,7 @@
 #include "SimdHelpers.h"
 
 #include "Base/Scene.h"
+#include "Base/FeatureFlags.h"
 
 namespace meka {
 using u16 = uint16_t;
@@ -680,8 +681,25 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// by LightmapBake_Static (0 = dynamic mesh, no lightmap). The face
 	// index is stamped on F itself (F->MeshFaceIdx) because the F we
 	// see here is the FList clone, not the original T->Faces[i].
-	const uint16_t lmMeshId  = (F->ParentTri ? F->ParentTri->staticLMMeshId : 0);
-	const uint16_t lmFaceIdx = (lmMeshId != 0) ? F->MeshFaceIdx : 0;
+	//
+	// Clipping caveat: when numVerts > 3, the polygon was clipped against
+	// the frustum and the sub-triangles below use bary coords relative to
+	// the clip-generated vertices, NOT the face's original (A, B, C). The
+	// lightmap atlas is keyed by the original bary, so the lookup would
+	// be invalid for clipped pixels. --shadow-lightmap-no-clipped leaves
+	// lightmapMF=0 in that case → kernel falls back to per-pixel cube
+	// tap, which is correct (just slower) on clipped pixels.
+	uint16_t lmMeshId = 0;
+	uint16_t lmFaceIdx = 0;
+	if (F->ParentTri && F->ParentTri->staticLMMeshId != 0) {
+		const bool clipped = (numVerts > 3);
+		const bool skipForClipped = clipped &&
+			fds::FeatureFlags::shadow_lightmap_no_clipped();
+		if (!skipForClipped) {
+			lmMeshId  = F->ParentTri->staticLMMeshId;
+			lmFaceIdx = F->MeshFaceIdx;
+		}
+	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
