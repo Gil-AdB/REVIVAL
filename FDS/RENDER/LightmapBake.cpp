@@ -165,6 +165,28 @@ bool isMeshDynamic(Object *obj, char *reasonOut = nullptr, size_t reasonCap = 0)
 
 }  // namespace
 
+void LightmapStampOrigBary(Scene *Sc)
+{
+    if (!fds::FeatureFlags::shadow_lightmap()) return;
+    if (!Sc) return;
+    // Walk every static mesh, stamp (A, B, C) of each face with its bary
+    // coordinate on its own (A, B, C): A is (0, 0), B is (1, 0), C is
+    // (0, 1). Same isMeshDynamic predicate as LightmapBake_Static so the
+    // stamp set matches the bake set 1:1.
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh *)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (isMeshDynamic(Obj, nullptr, 0)) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            const Face &F = T->Faces[fi];
+            if (F.A) { F.A->OrigBaryB = 0.0f; F.A->OrigBaryC = 0.0f; }
+            if (F.B) { F.B->OrigBaryB = 1.0f; F.B->OrigBaryC = 0.0f; }
+            if (F.C) { F.C->OrigBaryB = 0.0f; F.C->OrigBaryC = 1.0f; }
+        }
+    }
+}
+
 void LightmapBake_Static(Scene *Sc)
 {
     if (!fds::FeatureFlags::shadow_lightmap()) return;
@@ -432,6 +454,52 @@ void Render_LightmapViz(Scene *Sc)
                 const uint8_t *p = lm.texel(faceIdx, tx, ty);
                 const int factor = int(p[0]);
                 out[i] = packRGB(factor, factor, factor);
+                break;
+              }
+              case 9: { // #66: bary world delta. For each lightmap pixel,
+                // compute the world position the runtime bary points to
+                // (interp F.A/B/C->Pos by (1-s-t, s, t), then mesh-to-world)
+                // and compare to the pixel's actual world (from depth +
+                // camera). Color-code |delta| in world units: green (≤0.1),
+                // yellow (≤0.5), orange (≤1.0), red (>1.0).
+                if (size_t(meshLMId) >= table.size()) { out[i] = packRGB(255, 0, 255); break; }
+                TriMesh *T = table[meshLMId];
+                if (!T || faceIdx >= T->FIndex) { out[i] = packRGB(255, 0, 255); break; }
+                const Face &F = T->Faces[faceIdx];
+                if (!F.A || !F.B || !F.C) { out[i] = packRGB(255, 0, 255); break; }
+                const float sf = float(sB) * (1.0f / 255.0f);
+                const float tf = float(tB) * (1.0f / 255.0f);
+                const float wAf = 1.0f - sf - tf;
+                Vector op{
+                    wAf*F.A->Pos.x + sf*F.B->Pos.x + tf*F.C->Pos.x,
+                    wAf*F.A->Pos.y + sf*F.B->Pos.y + tf*F.C->Pos.y,
+                    wAf*F.A->Pos.z + sf*F.B->Pos.z + tf*F.C->Pos.z,
+                };
+                Vector baryWorld;
+                MatrixXVector(T->RotMat, &op, &baryWorld);
+                baryWorld.x += T->IPos.x;
+                baryWorld.y += T->IPos.y;
+                baryWorld.z += T->IPos.z;
+                const word z16 = ZPage16[i];
+                if (z16 == 0 || !View) { out[i] = packRGB(255, 0, 255); break; }
+                const float invZS = (g_zscale != 0.0f) ? 1.0f / g_zscale : 0.0f;
+                const float zv = float(0xFF80 - z16) * invZS;
+                const float invFOVX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+                const float invFOVY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+                const float xv = (float(x) - CntrEX) * zv * invFOVX;
+                const float yv = (CntrEY - float(y)) * zv * invFOVY;
+                Vector pixelWorld;
+                pixelWorld.x = View->Mat[0][0]*xv + View->Mat[1][0]*yv + View->Mat[2][0]*zv + View->ISource.x;
+                pixelWorld.y = View->Mat[0][1]*xv + View->Mat[1][1]*yv + View->Mat[2][1]*zv + View->ISource.y;
+                pixelWorld.z = View->Mat[0][2]*xv + View->Mat[1][2]*yv + View->Mat[2][2]*zv + View->ISource.z;
+                const float ddx = baryWorld.x - pixelWorld.x;
+                const float ddy = baryWorld.y - pixelWorld.y;
+                const float ddz = baryWorld.z - pixelWorld.z;
+                const float delta = std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+                if      (delta <= 0.1f) out[i] = packRGB(  0, 255,   0);
+                else if (delta <= 0.5f) out[i] = packRGB(255, 255,   0);
+                else if (delta <= 1.0f) out[i] = packRGB(255, 128,   0);
+                else                    out[i] = packRGB(255,   0,   0);
                 break;
               }
               default: break;

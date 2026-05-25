@@ -171,6 +171,10 @@ struct Tile {
 	// treatment as the shading normal — the lighting pass Gram-Schmidts
 	// it against the (also-interpolated) N before building TBN.
 	float tx0, ty0, tz0;
+	// Per-tile origin of OrigBary*RZ (lightmap path). Same family as uz0/vz0:
+	// linearly interpolated across the tile then divided by per-pixel Z to
+	// recover object-space bary on the original face's (A, B, C).
+	float obBZ0, obCZ0;
 };
 
 struct TileRasterizerCtx {
@@ -189,22 +193,6 @@ struct TileRasterizerCtx {
 	//   lmFaceIdx = (F - F->ParentTri->Faces)          (0..65535)
 	u16 lmMeshId  = 0;
 	u16 lmFaceIdx = 0;
-
-	// Face-basis bary plumbing (only set when lmMeshId != 0). Used by
-	// the --shadow-lightmap-bary-from-face debug path: instead of the
-	// rasterizer's screen-affine bary derived from v1/v2/v3 (which the
-	// clipper's CW-correction may have permuted away from F->A/B/C),
-	// recompute bary per pixel using F->A/B/C as the gradient basis.
-	// Tests whether the 2D clipper's vertex reorder is the source of
-	// the runtime bary pointing at the wrong A/B/C weights.
-	bool   lmFaceBasisValid = false;
-	float  lmFaceA_PX = 0.0f, lmFaceA_PY = 0.0f;
-	float  lmFaceA_RZ = 0.0f, lmFaceB_RZ = 0.0f, lmFaceC_RZ = 0.0f;
-	// Inverse-Jacobian rows for screen-space → bary (sB, tB) using F->A
-	// as origin and (F->B - F->A), (F->C - F->A) as basis. sB = weight
-	// of F->B in screen space; tB = weight of F->C in screen space.
-	float  lmInvJ_sBdx = 0.0f, lmInvJ_sBdy = 0.0f;
-	float  lmInvJ_tBdx = 0.0f, lmInvJ_tBdy = 0.0f;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -352,6 +340,15 @@ struct TileRasterizer {
 	float dtxdx, dtxdy;
 	float dtydx, dtydy;
 	float dtzdx, dtzdy;
+	// Per-pixel OrigBary*RZ gradients (lightmap path). Same perspective-
+	// correct interpolation as UZ/VZ: transport (OrigBary * RZ) linearly
+	// in screen space, divide by per-pixel RZ to recover object-space
+	// bary on the original face. Stamped at scene init + interpolated by
+	// the clipper, so for any post-clip triangle the rasterizer recovers
+	// the correct bary on the face's (A, B, C) without needing F's screen
+	// positions (which can be junk if a vertex is behind the camera).
+	float dobBdx, dobBdy;
+	float dobCdx, dobCdy;
 
 	uint32_t umask;// = (1 << LogWidth) - 1);
 	uint32_t vmask;// = (1 << LogHeight) - 1);
@@ -404,6 +401,11 @@ struct TileRasterizer {
 		Vec8f p_tx = wantTangent ? v8_from_arith_seq(tile.tx0, dtxdx) : Vec8f(0.0f);
 		Vec8f p_ty = wantTangent ? v8_from_arith_seq(tile.ty0, dtydx) : Vec8f(0.0f);
 		Vec8f p_tz = wantTangent ? v8_from_arith_seq(tile.tz0, dtzdx) : Vec8f(0.0f);
+		// OrigBary*RZ across the tile row. Divided by per-pixel Z below
+		// (reusing p_z computed for UV) to recover object-space bary on
+		// the original face. Zero-init when not in lightmap path.
+		Vec8f p_obBZ = wantLm ? v8_from_arith_seq(tile.obBZ0, dobBdx) : Vec8f(0.0f);
+		Vec8f p_obCZ = wantLm ? v8_from_arith_seq(tile.obCZ0, dobCdx) : Vec8f(0.0f);
 
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
 			auto p_mask = (p_a | p_b | p_c) >= 0;
@@ -470,20 +472,20 @@ struct TileRasterizer {
 					}
 					alignas(32) int32_t mask_l[8];
 					Vec8i(p_mask).store_a(mask_l);
-					// Lightmap (s, t) per-lane: perspective-correct bary on
-					// F->A/B/C basis. Stamp = packedLmMF. Dynamic-mesh pixels
-					// (wantLm false) skip both writes; clipped pixels also
-					// have wantLm false because lmMeshId was left 0 by the
-					// dispatcher when the clip-detection check fired.
-					//
-					// Why face-basis (not v1/v2/v3 from orient2d): the 2D
-					// clipper's correctCWOrder cyclically permutes V[], so
-					// "weight of v2/v3" is sometimes weight-of-F->C / F->B
-					// (axes swapped). The bake's atlas is keyed by weight-
-					// of-F->B / F->C, so face-basis is the only way to keep
-					// the contract intact across CW-reordered triangles.
-					// Inverse-Jacobian was precomputed once per Mekalele
-					// dispatch; per-pixel cost is dot product + 1 reciprocal.
+					// Lightmap (s, t) per-lane: divide the perspective-correct
+					// transport (OrigBary*RZ) by per-pixel Z to recover the
+					// object-space bary on the original face. Same machinery
+					// as UV (UZ/VZ + per-pixel /Z), so the per-pixel cost is
+					// 8-wide SIMD across the lanes. OrigBary is stamped at
+					// scene init + clipper-interpolated perspective-correctly,
+					// so this is correct for clipped sub-triangles too — no
+					// dependency on F->A/B/C screen positions (which can be
+					// junk when a face vertex sits behind the camera).
+					alignas(32) float obBLane[8], obCLane[8];
+					if (wantLm) {
+						(p_obBZ * p_z).store_a(obBLane);
+						(p_obCZ * p_z).store_a(obCLane);
+					}
 					for (int lane = 0; lane < 8; ++lane) {
 						if (!mask_l[lane]) continue;
 						span.normal[lane] = uint16_t(normalEnc[lane]);
@@ -491,22 +493,9 @@ struct TileRasterizer {
 							span.tangent[lane] = tValid[lane]
 								? uint16_t(tangentEnc[lane]) : uint16_t(0);
 						}
-						if (wantLm && ctx.lmFaceBasisValid) {
-							const float pxw = float(tile.x * TILE_SIZE + lane);
-							const float pyw = float(tile.y * TILE_SIZE + y);
-							const float dx = pxw - ctx.lmFaceA_PX;
-							const float dy = pyw - ctx.lmFaceA_PY;
-							const float sScA = ctx.lmInvJ_sBdx * dx + ctx.lmInvJ_sBdy * dy;
-							const float tScA = ctx.lmInvJ_tBdx * dx + ctx.lmInvJ_tBdy * dy;
-							const float wA_sc = 1.0f - sScA - tScA;
-							const float denom = wA_sc * ctx.lmFaceA_RZ
-							                  + sScA  * ctx.lmFaceB_RZ
-							                  + tScA  * ctx.lmFaceC_RZ;
-							const float invDp = (denom > 0.0f) ? 1.0f / denom : 0.0f;
-							const float s = sScA * ctx.lmFaceB_RZ * invDp;
-							const float t = tScA * ctx.lmFaceC_RZ * invDp;
-							int sB = int(s * 255.0f + 0.5f);
-							int tB = int(t * 255.0f + 0.5f);
+						if (wantLm) {
+							int sB = int(obBLane[lane] * 255.0f + 0.5f);
+							int tB = int(obCLane[lane] * 255.0f + 0.5f);
 							if (sB < 0)   sB = 0;
 							if (sB > 255) sB = 255;
 							if (tB < 0)   tB = 0;
@@ -528,6 +517,10 @@ struct TileRasterizer {
 				p_tx += Vec8f(dtxdy);
 				p_ty += Vec8f(dtydy);
 				p_tz += Vec8f(dtzdy);
+			}
+			if (wantLm) {
+				p_obBZ += Vec8f(dobBdy);
+				p_obCZ += Vec8f(dobCdy);
 			}
 
 			p_a += Vec8i(tile.dady);
@@ -629,6 +622,8 @@ struct TileRasterizer {
 						.tx0 = v1.TTangent.x + dx * dtxdx + dy * dtxdy,
 						.ty0 = v1.TTangent.y + dx * dtydx + dy * dtydy,
 						.tz0 = v1.TTangent.z + dx * dtzdx + dy * dtzdy,
+						.obBZ0 = v1.OrigBaryB * v1.RZ + dx * dobBdx + dy * dobBdy,
+						.obCZ0 = v1.OrigBaryC * v1.RZ + dx * dobCdx + dy * dobCdy,
 					};
 					apply_exact(tile);
 				}
@@ -703,41 +698,12 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// index is stamped on F itself (F->MeshFaceIdx) because the F we
 	// see here is the FList clone, not the original T->Faces[i].
 	//
-	// Clipping: face-basis bary in the rasterizer can extrapolate outside
-	// F's screen-space triangle, but in practice that produces wrong
-	// lookups for large clipped polys (#66 expansion). For now, leave
-	// lightmapMF=0 on any triangle whose V[] doesn't fully match
-	// F->A/B/C — the kernel falls back to per-pixel cube tap on those
-	// (correct, just slower).
-	uint16_t lmMeshId = 0;
-	uint16_t lmFaceIdx = 0;
-	if (F->ParentTri && F->ParentTri->staticLMMeshId != 0) {
-		// A triangle is "clipped" if any V[i] is a clip-generated vertex
-		// not present in F->A/B/C. numVerts > 3 catches the easy case
-		// (quad/n-gon clip result), but a triangle with 1 vertex inside
-		// the frustum and 2 outside clips down to a 3-vertex triangle
-		// with TWO new clip-generated vertices on the screen edges —
-		// numVerts==3 alone misses those. Detect via positional match:
-		// FList clones V[i] from F's original vertices with memcpy, so
-		// truly-unclipped vc[i].PX/PY equals F->A/B/C->PX/PY exactly.
-		bool clipped = (numVerts > 3);
-		if (!clipped && F->A && F->B && F->C) {
-			auto matchesFace = [&](const Vertex *v) -> bool {
-				return (v->PX == F->A->PX && v->PY == F->A->PY) ||
-				       (v->PX == F->B->PX && v->PY == F->B->PY) ||
-				       (v->PX == F->C->PX && v->PY == F->C->PY);
-			};
-			if (!matchesFace(V[0]) || !matchesFace(V[1]) || !matchesFace(V[2])) {
-				clipped = true;
-			}
-		}
-		const bool skipForClipped = clipped &&
-			fds::FeatureFlags::shadow_lightmap_no_clipped();
-		if (!skipForClipped) {
-			lmMeshId  = F->ParentTri->staticLMMeshId;
-			lmFaceIdx = F->MeshFaceIdx;
-		}
-	}
+	// Clip handling: OrigBary is stamped per-vertex at scene init and
+	// interpolated perspective-correctly by the clipper, so the rasterizer
+	// recovers correct per-pixel bary on the original face for ANY
+	// post-clip vertex set. No clipped/unclipped distinction needed here.
+	const uint16_t lmMeshId  = F->ParentTri ? F->ParentTri->staticLMMeshId : uint16_t(0);
+	const uint16_t lmFaceIdx = F->MeshFaceIdx;
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
@@ -750,31 +716,6 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.lmMeshId  = lmMeshId,
 		.lmFaceIdx = lmFaceIdx,
 	};
-	// Face-basis bary plumbing (consumed by --shadow-lightmap-bary-from-face).
-	// Computes the inverse Jacobian once per Mekalele call using F->A/B/C
-	// directly as the basis — bypasses any vertex-reorder the clipper did
-	// when it built V[]. Skipped if F->A/B/C are degenerate.
-	if (lmMeshId != 0 && F->A && F->B && F->C) {
-		const float ax = F->A->PX, ay = F->A->PY;
-		const float bx = F->B->PX - ax, by = F->B->PY - ay;
-		const float cx = F->C->PX - ax, cy = F->C->PY - ay;
-		const float det = bx * cy - by * cx;
-		if (std::fabs(det) > 0.01f) {
-			const float invD = 1.0f / det;
-			ctx.lmFaceBasisValid = true;
-			ctx.lmFaceA_PX = ax;
-			ctx.lmFaceA_PY = ay;
-			ctx.lmFaceA_RZ = F->A->RZ;
-			ctx.lmFaceB_RZ = F->B->RZ;
-			ctx.lmFaceC_RZ = F->C->RZ;
-			// inverse of [[bx, cx],[by, cy]] gives screen-space bary
-			// rows for (weight-of-B, weight-of-C) from (dx, dy).
-			ctx.lmInvJ_sBdx =  cy * invD;
-			ctx.lmInvJ_sBdy = -cx * invD;
-			ctx.lmInvJ_tBdx = -by * invD;
-			ctx.lmInvJ_tBdy =  bx * invD;
-		}
-	}
 	meka::TileRasterizer r(*gb, ctx);
 
 	Vertex vc[12];
@@ -821,6 +762,22 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		r.dtydy = im[2] * (v2.TTangent.y - v1.TTangent.y) + im[3] * (v3.TTangent.y - v1.TTangent.y);
 		r.dtzdx = im[0] * (v2.TTangent.z - v1.TTangent.z) + im[1] * (v3.TTangent.z - v1.TTangent.z);
 		r.dtzdy = im[2] * (v2.TTangent.z - v1.TTangent.z) + im[3] * (v3.TTangent.z - v1.TTangent.z);
+		// OrigBary*RZ gradient — same im[] solve as UZ/VZ. OrigBary is
+		// stamped at scene init (A→(0,0), B→(1,0), C→(0,1)) and clip-
+		// interpolated perspective-correctly, so for any (v1, v2, v3)
+		// triangle the rasterizer sees post-clipping, the linear function
+		// (OrigBary*RZ)(x, y) is exact. Divide by per-pixel RZ to get
+		// object-space bary on the original face.
+		const float obBZ1 = v1.OrigBaryB * v1.RZ;
+		const float obBZ2 = v2.OrigBaryB * v2.RZ;
+		const float obBZ3 = v3.OrigBaryB * v3.RZ;
+		const float obCZ1 = v1.OrigBaryC * v1.RZ;
+		const float obCZ2 = v2.OrigBaryC * v2.RZ;
+		const float obCZ3 = v3.OrigBaryC * v3.RZ;
+		r.dobBdx = im[0] * (obBZ2 - obBZ1) + im[1] * (obBZ3 - obBZ1);
+		r.dobBdy = im[2] * (obBZ2 - obBZ1) + im[3] * (obBZ3 - obBZ1);
+		r.dobCdx = im[0] * (obCZ2 - obCZ1) + im[1] * (obCZ3 - obCZ1);
+		r.dobCdy = im[2] * (obCZ2 - obCZ1) + im[3] * (obCZ3 - obCZ1);
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;

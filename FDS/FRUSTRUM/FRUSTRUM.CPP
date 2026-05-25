@@ -252,6 +252,14 @@ void FrustumClipper::Near()
 		newVert->TTangent.x = _IA->TTangent.x + t * (_IB->TTangent.x - _IA->TTangent.x);
 		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
 		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
+		// Static-shadow lightmap bary on F. Same linear-in-object-space
+		// interp as U/V here (t comes from TPos.z, which is the object-
+		// space parameter — Z is linear in world coords along the edge).
+		// Linear is correct for object-space attributes; the perspective-
+		// correct FInterpolator path used by Left/Right/Up/Down handles
+		// screen-affine t separately.
+		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
+		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
 
 		newVert->PX = newVert->TPos.x * C_VP.iNearZ;
 		newVert->PY = newVert->TPos.y * C_VP.iNearZ;
@@ -309,6 +317,10 @@ void FrustumClipper::Far()
 		newVert->TTangent.x = _IA->TTangent.x + t * (_IB->TTangent.x - _IA->TTangent.x);
 		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
 		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
+		// Static-shadow lightmap bary on F (linear-in-object-space; t
+		// is the object-space parameter from TPos.z).
+		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
+		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
@@ -351,6 +363,22 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 	V->V = V->VZ * V->TPos.z;
 	V->EU = V->EUZ * V->TPos.z;
 	V->EV = V->EVZ * V->TPos.z;
+	// Static-shadow lightmap bary on the original face (A, B, C).
+	// Same perspective-correct interpolation as UV: lerp OrigBary*RZ
+	// screen-affinely, then divide by the new vertex's RZ at the
+	// clip point. Stamped at scene init in LightmapStampOrigBary;
+	// read per-pixel by Mekalele for the atlas lookup. Cost: 4 muls
+	// + 2 adds + 2 multiplies (uses TPos.z already computed above).
+	{
+		const float aBZ = _IA->OrigBaryB * _IA->RZ;
+		const float bBZ = _IB->OrigBaryB * _IB->RZ;
+		const float aCZ = _IA->OrigBaryC * _IA->RZ;
+		const float bCZ = _IB->OrigBaryC * _IB->RZ;
+		const float obBZ = aBZ + t * (bBZ - aBZ);
+		const float obCZ = aCZ + t * (bCZ - aCZ);
+		V->OrigBaryB = float(obBZ * V->TPos.z);
+		V->OrigBaryC = float(obCZ * V->TPos.z);
+	}
 }
 
 void FrustumClipper::Left()

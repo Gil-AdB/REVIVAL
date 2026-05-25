@@ -899,6 +899,12 @@ struct GreetsScene : SceneDriver {
 		ShadowMaps_Rebuild(GreetSc, 1024);
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
 		ShadowMaps_BakeStatic(GreetSc);
+		// Stamp OrigBary on every static face's (A, B, C) BEFORE the bake
+		// so any FList vertex clones made during the first frame's
+		// Transform inherit the stamped values via memcpy. Clipper
+		// interpolates them perspective-correctly for clip-generated
+		// vertices; rasterizer reads per-pixel for atlas lookup.
+		fds::LightmapStampOrigBary(GreetSc);
 		fds::LightmapBake_Static(GreetSc);
 
 		// this scene messes up at time zero

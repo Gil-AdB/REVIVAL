@@ -26,6 +26,16 @@ namespace fds {
 
 void LightmapBake_Static(Scene *Sc);
 
+// Stamp every static-mesh face's (A, B, C) vertices with their object-
+// space barycentric weight on the face itself: A→(0,0), B→(1,0), C→(0,1).
+// The clipper then interpolates these perspective-correctly to any
+// clip-generated vertex, and the rasterizer reads per-pixel bary as a
+// standard perspective-correct attribute (same machinery as UV). Must
+// be called once per scene at init, before the first frame transforms
+// vertices (so the stamps land on the actual Vertex objects the runtime
+// will see, not on stale copies). No-op when --shadow-lightmap is off.
+void LightmapStampOrigBary(Scene *Sc);
+
 // Debug: bake-time sampler exposed for runtime comparison via the
 // --shadow-lightmap-recompute-bake flag. Replaces sampleBilinear in
 // resolveCubeAtten with a fresh per-pixel call to the same code path

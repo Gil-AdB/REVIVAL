@@ -160,6 +160,20 @@ void _2DClipper::lerp(const Vertex& IA, const Vertex& IB, Vertex& V, float t) co
 	V.RZ = IA.RZ + t * (IB.RZ - IA.RZ);
 	V.UZ = IA.UZ + t * (IB.UZ - IA.UZ);
 	V.VZ = IA.VZ + t * (IB.VZ - IA.VZ);
+	// Static-shadow lightmap bary on the original face (A, B, C).
+	// Perspective-correct interpolation: lerp OrigBary*RZ screen-affinely,
+	// then divide by the new vertex's RZ. Mirrors FRUSTRUM.CPP::FInterpolator.
+	{
+		const float aBZ = IA.OrigBaryB * IA.RZ;
+		const float bBZ = IB.OrigBaryB * IB.RZ;
+		const float aCZ = IA.OrigBaryC * IA.RZ;
+		const float bCZ = IB.OrigBaryC * IB.RZ;
+		const float obBZ = aBZ + t * (bBZ - aBZ);
+		const float obCZ = aCZ + t * (bCZ - aCZ);
+		const float invRZ = (V.RZ != 0.0f) ? 1.0f / V.RZ : 0.0f;
+		V.OrigBaryB = obBZ * invRZ;
+		V.OrigBaryC = obCZ * invRZ;
+	}
 }
 
 void _2DClipper::ySort(Vertex** Prim, Vertex** Scnd, mword nVerts)

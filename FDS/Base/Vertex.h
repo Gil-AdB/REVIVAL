@@ -53,6 +53,16 @@ struct  Vertex
 	float			EU = 0.0f, EV = 0.0f;        // Original mapping coordinates
 	DWord			Flags = 0;
 	int i = -1;
+	// Object-space barycentric weight of this vertex on its owning face's
+	// (A, B, C) vertices. Stamped at scene init for static-mesh faces by
+	// LightmapStampOrigBary: A->(0,0), B->(1,0), C->(0,1). The two clippers
+	// (Clipper.cpp + FRUSTRUM.CPP::FInterpolator) interpolate these
+	// perspective-correctly when generating clip vertices, so the values
+	// remain valid object-space bary-on-F at every visible vertex of every
+	// clipped sub-polygon. The rasterizer then interpolates them per-pixel
+	// (same perspective-correct machinery as UV) to recover the lightmap
+	// atlas address. Read-only outside of scene init + clipper.
+	float			OrigBaryB = 0.0f, OrigBaryC = 0.0f;
 
 //	dword			align16[3]; // this structure requires 16-byte alignment
 	//  Word           Faces,FRem; // Faces = How many faces share that perticular
