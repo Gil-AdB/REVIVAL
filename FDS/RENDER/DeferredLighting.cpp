@@ -51,6 +51,7 @@ extern float fastPow2(float x);
 #include "Base/Material.h"
 #include "Base/SpotLight.h"
 #include "RenderPipeline.h"
+#include "RENDER/LightmapBake.h"
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/FILLERS.H"
@@ -774,6 +775,7 @@ static bool deferredLightingQuarterEnabled() {
 //   2. Scene has a populated staticLMTable for that meshLMId.
 struct PixelLightmap {
 	const StaticShadowLightmap *lm = nullptr;
+	TriMesh *mesh = nullptr;  // only set when shadow_lightmap_recompute_at_bary is on
 	int     faceIdx = 0;
 	uint8_t sB = 0, tB = 0;
 };
@@ -795,6 +797,7 @@ static inline PixelLightmap resolvePixelLightmap(const meka::GBuffer &gb,
 	const uint16_t fidx = uint16_t(mf & 0xFFFF);
 	if (fidx >= T->staticShadowLM->numFaces) return pl;
 	pl.lm        = T->staticShadowLM;
+	pl.mesh      = T;
 	pl.faceIdx   = int(fidx);
 	const uint16_t st = gb.lightmapST[i];
 	pl.sB = uint8_t(st & 0xFF);
@@ -818,6 +821,59 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
                                       int kShadowBiasG, int kSlopeBiasG)
 {
 	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis) {
+		// Debug: --shadow-lightmap-recompute-bake replaces the atlas
+		// bilinear lookup with a fresh per-pixel call to the bake-time
+		// sampler (SampleStaticCubeAtWorld). Same flow as the bake, but
+		// at the runtime pixel's world position. Isolates bake-function
+		// correctness from atlas/bary: if the rendered output matches
+		// what cube-tap produces, the bake function is fine; if it
+		// matches the broken lightmap path, the bake function itself
+		// is wrong (differs from CubeShadow_Sample).
+		if (fds::FeatureFlags::shadow_lightmap_recompute_bake()) {
+			const float dotGeoR = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+			const float nDotLR = dotGeoR * lenInv;
+			const float invNdotLR = 1.0f / (nDotLR > 0.2f ? nDotLR : 0.2f);
+			const int slopeBiasR = int(float(kSlopeBiasG) * (invNdotLR - 1.0f));
+			const uint8_t lit = fds::LightmapBake_DebugSampleAtWorld(
+			    cubeIdx, sampleWorldX, sampleWorldY, sampleWorldZ,
+			    kShadowBiasG, slopeBiasR);
+			return float(lit) * (1.0f / 255.0f);
+		}
+		// Debug: --shadow-lightmap-recompute-at-bary takes the runtime-stored
+		// (sB, tB) for this pixel, interpolates face A/B/C world positions
+		// using those barys to reconstruct "where the runtime thinks this
+		// pixel is on the face", then calls SampleStaticCubeAtWorld at THAT
+		// reconstructed point. If the result matches the cube-tap reference,
+		// the bary points to the right physical place and the lightmap bug
+		// is in atlas resolution. If it diverges, the bary itself is wrong.
+		if (fds::FeatureFlags::shadow_lightmap_recompute_at_bary() && pl.mesh) {
+			TriMesh *T = pl.mesh;
+			if (pl.faceIdx >= 0 && DWord(pl.faceIdx) < T->FIndex) {
+				const Face &F = T->Faces[pl.faceIdx];
+				if (F.A && F.B && F.C) {
+					Vector wA, wB, wC;
+					MatrixXVector(T->RotMat, &F.A->Pos, &wA);
+					MatrixXVector(T->RotMat, &F.B->Pos, &wB);
+					MatrixXVector(T->RotMat, &F.C->Pos, &wC);
+					wA.x += T->IPos.x; wA.y += T->IPos.y; wA.z += T->IPos.z;
+					wB.x += T->IPos.x; wB.y += T->IPos.y; wB.z += T->IPos.z;
+					wC.x += T->IPos.x; wC.y += T->IPos.y; wC.z += T->IPos.z;
+					const float sBf = float(pl.sB) * (1.0f / 255.0f);
+					const float tBf = float(pl.tB) * (1.0f / 255.0f);
+					const float wA_w = 1.0f - sBf - tBf;
+					const float wpx = wA_w*wA.x + sBf*wB.x + tBf*wC.x;
+					const float wpy = wA_w*wA.y + sBf*wB.y + tBf*wC.y;
+					const float wpz = wA_w*wA.z + sBf*wB.z + tBf*wC.z;
+					const float dotGeoR = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+					const float nDotLR = dotGeoR * lenInv;
+					const float invNdotLR = 1.0f / (nDotLR > 0.2f ? nDotLR : 0.2f);
+					const int slopeBiasR = int(float(kSlopeBiasG) * (invNdotLR - 1.0f));
+					const uint8_t lit = fds::LightmapBake_DebugSampleAtWorld(
+					    cubeIdx, wpx, wpy, wpz, kShadowBiasG, slopeBiasR);
+					return float(lit) * (1.0f / 255.0f);
+				}
+			}
+		}
 		return pl.lm->sampleBilinear(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
 	}
 	const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;

@@ -440,4 +440,21 @@ void Render_LightmapViz(Scene *Sc)
     }
 }
 
+// Debug entry — reaches into the anonymous-namespace SampleStaticCubeAtWorld
+// via a sibling re-open. Reaches the runtime per-pixel deferred path via
+// LightmapBake.h. Used only when --shadow-lightmap-recompute-bake is set,
+// to verify whether the bake function itself agrees with CubeShadow_Sample
+// at the same world point. If output looks correct with this flag, the
+// bake function is fine and the bug is downstream in atlas / bary; if it
+// matches the existing broken lightmap output, the bake function is wrong.
+namespace { uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &, const Vector &, int, int); }
+uint8_t LightmapBake_DebugSampleAtWorld(int cubeIdx, float wx, float wy, float wz,
+                                          int constBias, int slopeBiasInt)
+{
+    if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 255;
+    const CubeShadowRef &cr = g_cubeShadowRefs[cubeIdx];
+    Vector wp{wx, wy, wz};
+    return SampleStaticCubeAtWorld(cr, wp, constBias, slopeBiasInt);
+}
+
 }  // namespace fds
