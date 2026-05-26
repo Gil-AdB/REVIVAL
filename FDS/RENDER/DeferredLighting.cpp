@@ -874,6 +874,9 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 				}
 			}
 		}
+		if (fds::FeatureFlags::shadow_lightmap_nearest()) {
+			return pl.lm->sampleNearest(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
+		}
 		return pl.lm->sampleBilinear(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
 	}
 	const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;

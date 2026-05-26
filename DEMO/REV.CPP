@@ -1187,6 +1187,11 @@ int main(int argc, const char *argv[])
 "  spectest@t=N   Specular lobe test: case 1=gloss4, 2=gloss32, 3=gloss128\n"
 "  conetest       Volumetric-cone test: spot + ground, multi-pose snapshots\n"
 "                 (requires --deferred --draw_cones)\n"
+"  lightmaptest@t=N1,N2,...  Shadow-lightmap reproducer: ground subdivided\n"
+"                 NxN, occluder above, static omni. Subdiv=1 is 2 big\n"
+"                 triangles; subdiv=64 is 8192 small ones. Run twice and\n"
+"                 diff: once without --shadow-lightmap (cube tap), once\n"
+"                 with (atlas lookup).\n"
 "  filler         Rasterizer edge / mask fixture\n"
 "  glat-trace     Glat scene Timer sweep -> CSV\n"
 "\n"
@@ -1275,7 +1280,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "halotest") {
 			return RunHaloTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest, halotest)\n",
+		if (snap.scene == "lightmaptest") {
+			return RunLightmapTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest, halotest, lightmaptest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

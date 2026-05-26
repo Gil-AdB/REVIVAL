@@ -136,6 +136,28 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres);
 // Output: <outDir>/halotest_<pose>.ppm
 int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres);
 
+// Shadow-lightmap reproducer. Programmatic scene (no FLD load):
+//   - Ground quad in [-1500, 1500]² at y=0, subdivided NxN where N is
+//     the @t parameter (so @t=1 is 2 big triangles, @t=64 is 8192 small
+//     ones).
+//   - A small horizontal occluder at y=400 above the center casting a
+//     square shadow on the ground.
+//   - One static omni at (0, 800, 0) marked CastsShadow+StaticShadow.
+//
+// Harness is single-mode and honors --shadow-lightmap on the CLI: it
+// produces one PPM per subdiv with the active path's name in the
+// filename. Run twice (once without, once with --shadow-lightmap) and
+// diff /tmp/lm_cube vs /tmp/lm_lm to compare cube-tap vs lightmap on
+// the same scene at varying tessellation.
+//
+//   ./DEMO --deferred --shadows --snapshot=lightmaptest@t=1,4,16,64 \
+//          --out=/tmp/lm_cube
+//   ./DEMO --deferred --shadows --shadow-lightmap \
+//          --snapshot=lightmaptest@t=1,4,16,64 --out=/tmp/lm_lm
+//
+// Output: <outDir>/lmtest_{cube,lm}_subdiv<NNN>.ppm
+int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Reproduce the user-reported wrong-direction reflection: stand outside
 // the city over open water at four extremes, look back at the nearest
 // reflective building. The water-facing side reflects what's behind the

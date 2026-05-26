@@ -121,6 +121,28 @@ struct StaticShadowLightmap {
         const float v1 = v01 + (v11 - v01) * fx;
         return (v0 + (v1 - v0) * fy) * (1.0f / 255.0f);
     }
+
+    // Nearest-neighbor sample at fractional texel coord. Same indexing
+    // as sampleBilinear but picks the closest texel, no blend across
+    // neighbors. Used by --shadow-lightmap-nearest to isolate whether
+    // visible seam artifacts come from bilinear's cross-edge blend (then
+    // nearest fixes them, just blockier) or from the atlas itself (then
+    // nearest reproduces the same artifacts).
+    inline float sampleNearest(int faceIdx, int omniIdx,
+                               uint8_t sB, uint8_t tB) const {
+        if (data.empty() || lmRes < 1 || numOmnis <= 0 ||
+            faceIdx < 0 || faceIdx >= numFaces ||
+            omniIdx < 0 || omniIdx >= numOmnis) {
+            return 1.0f;
+        }
+        const float gridMax = float(lmRes - 1);
+        int tx = int((float(sB) * (1.0f / 255.0f)) * gridMax + 0.5f);
+        int ty = int((float(tB) * (1.0f / 255.0f)) * gridMax + 0.5f);
+        if (tx < 0) tx = 0; if (tx > lmRes - 1) tx = lmRes - 1;
+        if (ty < 0) ty = 0; if (ty > lmRes - 1) ty = lmRes - 1;
+        const uint8_t *p = texel(faceIdx, tx, ty) + omniIdx;
+        return float(*p) * (1.0f / 255.0f);
+    }
 };
 #pragma pack(pop)
 

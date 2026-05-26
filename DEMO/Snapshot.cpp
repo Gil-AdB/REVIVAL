@@ -12,6 +12,8 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h>
+#include <FILLERS/ShadowMap.h>
+#include <RENDER/LightmapBake.h>
 #include <Threads.h>
 #include <VESA/Vesa.h>
 
@@ -2970,4 +2972,312 @@ int RunFlipBench(const BenchConfig& cfg, int xres, int yres) {
     SDL_Quit();
     return 0;
 #endif
+}
+
+// ─── Lightmap test scene ────────────────────────────────────────────────────
+// Synthetic shadow lightmap reproducer. One ground quad tessellated to
+// subdiv × subdiv cells, one small occluder above casting a shadow, one
+// static omni. Subdiv is the @t parameter so the same harness sweeps
+// "2 big faces" → "many small faces" in one invocation.
+//
+// Harness is single-mode: it honors --shadow-lightmap on the CLI and
+// produces one PPM per subdiv. Run twice (without and with the flag) and
+// diff the output dirs to compare cube-tap vs lightmap on the same scene.
+
+static Scene* buildLightmapTestScene(int subdiv) {
+    if (subdiv < 1) subdiv = 1;
+    if (subdiv > 128) subdiv = 128;  // cap so we don't allocate millions of verts
+
+    Scene* Sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(Sc, 0, sizeof(Scene));
+    Sc->NZP   = 5.0f;
+    Sc->FZP   = 8000.0f;
+    Sc->Flags = Scn_ZBuffer;
+    Sc->Ambient.R = Sc->Ambient.G = Sc->Ambient.B = 20;
+    Sc->Ambient.A = 255;
+
+    Camera* Cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(Cam, 0, sizeof(Camera));
+    Vector_Form(&Cam->ISource, 0, 1400, -2200);
+    Matrix_Identity(Cam->Mat);
+    Cam->IFOV = 60.0f;
+    Sc->CameraHead = Cam;
+
+    // Per-face hue via a single 256x256 texture containing a 16×16 grid
+    // of solid-color tiles. Each tile is 16x16 px and a unique hue at
+    // constant luminance (V=200/255, S=1). Face index k maps to tile
+    // (k%16, (k/16)%16) — wraps after 256 faces, which is plenty for
+    // debug subdivs (1..16 has ≤512 faces; the hue just repeats above).
+    //
+    // The deferred path stores matID + UV per pixel; lighting kernel
+    // samples texture[matID] at UV. By giving each face a UV inside
+    // its own tile, we get per-face color without needing per-face
+    // materials. Lighting darkens the hue uniformly in shadow.
+    constexpr int kHueTexSize = 256;
+    constexpr int kHueTile    = 16;        // 16 tiles per axis, 16px each
+    constexpr int kNumTiles   = kHueTile * kHueTile;
+    Texture* hueTex = new Texture;
+    std::memset(hueTex, 0, sizeof(Texture));
+    uint32_t* hueData = (uint32_t*)_aligned_malloc(kHueTexSize * kHueTexSize * 4, 16);
+    auto hsvToBgra = [](float h) -> uint32_t {
+        const float V = 240.0f;
+        float hh = h - std::floor(h);
+        float f = hh * 6.0f; int i = int(f); float frac = f - float(i);
+        float q = V * (1.0f - frac);
+        float t = V * frac;
+        float rr=0, gg=0, bb=0;
+        switch (i % 6) {
+            case 0: rr=V; gg=t; break;
+            case 1: rr=q; gg=V; break;
+            case 2: gg=V; bb=t; break;
+            case 3: gg=q; bb=V; break;
+            case 4: rr=t; bb=V; break;
+            case 5: rr=V; bb=q; break;
+        }
+        return (uint32_t(255) << 24) | (uint32_t(byte(rr)) << 16)
+             | (uint32_t(byte(gg)) << 8) | uint32_t(byte(bb));
+    };
+    for (int ty = 0; ty < kHueTile; ++ty) {
+        for (int tx = 0; tx < kHueTile; ++tx) {
+            const int tile = ty * kHueTile + tx;
+            const uint32_t c = hsvToBgra(float(tile) / float(kNumTiles));
+            for (int yy = 0; yy < kHueTile; ++yy) {
+                for (int xx = 0; xx < kHueTile; ++xx) {
+                    const int px = (ty * kHueTile + yy) * kHueTexSize
+                                 + (tx * kHueTile + xx);
+                    hueData[px] = c;
+                }
+            }
+        }
+    }
+    hueTex->Data   = (byte*)hueData;
+    hueTex->BPP    = 32;
+    hueTex->SizeX  = kHueTexSize; hueTex->LSizeX = 8;
+    hueTex->SizeY  = kHueTexSize; hueTex->LSizeY = 8;
+    hueTex->Flags  = Txtr_Nomip | Txtr_Tiled;
+    Sachletz((dword*)hueTex->Data, kHueTexSize, kHueTexSize);
+    hueTex->Mipmap[0]  = hueTex->Data;
+    hueTex->numMipmaps = 1;
+
+    Material* matGround = getAlignedType<Material>(16);
+    matGround->Txtr        = hueTex;
+    matGround->BaseCol.R   = 255; matGround->BaseCol.G = 255;
+    matGround->BaseCol.B   = 255; matGround->BaseCol.A = 255;
+    matGround->Diffuse     = 1.0f;
+    matGround->Luminosity  = 0.0f;
+    matGround->Specular    = 0.0f;
+    matGround->Flags       = Mat_RGBInterp;
+    matGround->RelScene    = Sc;
+    matGround->ID          = 0;
+    matGround->Name        = strdup("lm_ground");
+
+    // Occluder is mid-gray so it's visually distinct from the rainbow.
+    Material* matOcc = makeSolidColorMat(Sc, "lm_occluder",
+                                         80, 80, 80, 255,
+                                         Mat_RGBInterp, 1);
+    matOcc->Diffuse  = 1.0f;
+    matOcc->Specular = 0.0f;
+    linkMatToLib(matGround);
+    linkMatToLib(matOcc);
+
+    // Ground subdivided N×N. Spans [-1500, 1500] in X/Z at y=0.
+    // subdiv=1 → 6 verts, 2 triangles (the "polys are too big" case).
+    // subdiv=64 → 24576 verts, 8192 triangles.
+    //
+    // VERTEX DUPLICATION: each face gets its own 3 vertices (not shared
+    // across faces), so we can stamp a face-unique vertex color and
+    // visually see which triangle owns each pixel. Without this, any
+    // per-face shadow artifact looks like a generic dark patch.
+    //
+    // Color scheme: HSV(hue = faceIdx/totalFaces, S=1, V=200/255). All
+    // triangles share the same luminance ~200/255, so shading darkens
+    // them uniformly — what changes is only the *hue*, not the brightness.
+    // The shadow factor shows up as a luminance drop on top of the hue.
+    {
+        const float halfExtent = 1500.0f;
+        const int   N = subdiv;
+        const int   numFaces = N * N * 2;
+        const int   numVerts = numFaces * 3;
+        char name[32];
+        std::snprintf(name, sizeof(name), "lm_ground_s%d", subdiv);
+        TriMesh* ground = appendTriMesh(Sc, name, numVerts, numFaces);
+
+        const Vector nrm(0, 1, 0);
+        for (int iz = 0; iz < N; ++iz) {
+            for (int ix = 0; ix < N; ++ix) {
+                // Corner positions of this cell.
+                const float u0 = float(ix    ) / float(N);
+                const float u1 = float(ix + 1) / float(N);
+                const float v0 = float(iz    ) / float(N);
+                const float v1 = float(iz + 1) / float(N);
+                Vector p00(-halfExtent + 2*halfExtent*u0, 0, -halfExtent + 2*halfExtent*v0);
+                Vector p10(-halfExtent + 2*halfExtent*u1, 0, -halfExtent + 2*halfExtent*v0);
+                Vector p01(-halfExtent + 2*halfExtent*u0, 0, -halfExtent + 2*halfExtent*v1);
+                Vector p11(-halfExtent + 2*halfExtent*u1, 0, -halfExtent + 2*halfExtent*v1);
+
+                const int cellIdx = iz * N + ix;
+
+                // Two triangles per cell, each with 3 unique verts.
+                for (int tri = 0; tri < 2; ++tri) {
+                    const int faceIdx = cellIdx * 2 + tri;
+                    const int vBase   = faceIdx * 3;
+                    Vector vp[3];
+                    if (tri == 0) { vp[0] = p00; vp[1] = p10; vp[2] = p11; }
+                    else          { vp[0] = p00; vp[1] = p11; vp[2] = p01; }
+
+                    // Spread hues across the whole tile grid based on this
+                    // mesh's face count — otherwise at low subdiv all
+                    // faces land in the first few tiles (all reds).
+                    // tileIdx ≈ faceIdx * 256 / numFaces.
+                    const int tileIdx = (faceIdx * kNumTiles) / std::max(numFaces, 1);
+                    const int tileX = tileIdx % kHueTile;
+                    const int tileY = (tileIdx / kHueTile) % kHueTile;
+                    const float uMid = (float(tileX) + 0.5f) / float(kHueTile);
+                    const float vMid = (float(tileY) + 0.5f) / float(kHueTile);
+
+                    for (int k = 0; k < 3; ++k) {
+                        Vertex* V = &ground->Verts[vBase + k];
+                        V->Pos = vp[k];
+                        V->N   = nrm;
+                        V->TN  = nrm;
+                        V->LR  = 255;  // unused in deferred — Mekalele
+                        V->LG  = 255;  // reads texture, not vertex color
+                        V->LB  = 255;
+                        V->LA  = 255;
+                        V->U   = uMid;  // all 3 verts → same tile center
+                        V->V   = vMid;
+                    }
+
+                    Face* F = &ground->Faces[faceIdx];
+                    F->A = &ground->Verts[vBase + 0];
+                    F->B = &ground->Verts[vBase + 1];
+                    F->C = &ground->Verts[vBase + 2];
+                    F->N = nrm;
+                    F->NormProd = -Dot_Product(&F->A->Pos, &F->N);
+                    F->Txtr   = matGround;
+                    F->Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                               barry::TTextureMode::NORMAL>;
+                    F->Flags  = 0;
+                    F->uvFromVertices();
+                }
+            }
+        }
+    }
+
+    // Occluder — a horizontal quad floating at y=400, [-300, 300]² in X/Z,
+    // facing -Y (down). The omni above casts a clear square shadow onto
+    // the ground below. Always 2 triangles regardless of ground subdiv —
+    // we want the *ground* tessellation as the variable, not the occluder.
+    {
+        TriMesh* occ = appendTriMesh(Sc, "lm_occluder", 4, 2);
+        QuadDef q = {
+            // Wound so the normal faces -Y (down toward ground).
+            { Vector(-300, 400,  300), Vector( 300, 400,  300),
+              Vector( 300, 400, -300), Vector(-300, 400, -300) },
+            Vector(0, -1, 0)
+        };
+        appendQuad(Sc, occ, 0, 0, q, matOcc,
+                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                 barry::TTextureMode::NORMAL>);
+    }
+
+    // Static omni high up at (0, 1500, 0) so falloff across the
+    // 3000×3000 ground is gentler — at y=800 the corners are ~2x
+    // farther than the center, which dims the rainbow at the edges.
+    // Range 4000, intensity 50.
+    Omni* O = appendTestOmni(Sc, Vector(0, 1500, 0),
+                              /*r,g,b=*/ 1.0f, 1.0f, 1.0f,
+                              /*intensity*/ 50.0f,
+                              /*range*/ 4000.0f);
+    O->Flags |= Omni_CastsShadow | Omni_StaticShadow;
+    O->shadowMapRes = 512;
+
+    return Sc;
+}
+
+int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    if (!fds::FeatureFlags::deferred()) {
+        std::fprintf(stderr,
+            "[LMTEST] WARNING: --deferred is not set; lightmap path won't\n"
+            "[LMTEST] run. Re-run with --deferred --shadows [--shadow-lightmap].\n");
+    }
+    if (!fds::FeatureFlags::shadows()) {
+        std::fprintf(stderr,
+            "[LMTEST] WARNING: --shadows is not set; cube shadow bake skipped.\n");
+    }
+    const bool lmOn = fds::FeatureFlags::shadow_lightmap();
+    std::fprintf(stderr,
+        "[LMTEST] mode = %s (toggle with --shadow-lightmap; run twice and diff)\n",
+        lmOn ? "LIGHTMAP" : "CUBE-TAP");
+
+    // Low ambient so shadows aren't washed out; high diffuse so lit
+    // pixels read at full color. The whole point is to make the shadow
+    // boundary obvious against each triangle's distinct hue.
+    Ambient_Factor   = 0.10f;
+    Diffusive_Factor = 2.0f;
+    Specular_Factor  = 0.0f;
+    Range_Factor     = 1.0f;
+
+    fds::g_mainFaces.resize(32768);
+
+    std::vector<int32_t> subdivs = cfg.timestamps;
+    if (subdivs.empty()) { subdivs = {1, 4, 16, 64}; }
+
+    int produced = 0;
+    for (int32_t subdiv : subdivs) {
+        Scene* sc = buildLightmapTestScene(int(subdiv));
+        SetCurrentScene(sc);
+        View = sc->CameraHead;
+        buildLookAt(View->ISource, Vector(0, 0, 0), View->Mat);
+        CalcPersp(View);
+        FOVX = View->PerspX;
+        FOVY = View->PerspY;
+        Scene_RebuildMatTable(sc);
+
+        // Populate the global Polys (worst-case face count) and resize
+        // g_mainFaces accordingly. Render_DeferredShadowMaps sizes its
+        // per-light FList to Polys and SEGVs if that's still 0.
+        // City calls FList_Allocate during Initialize_City; harness
+        // scenes that don't run shadows can get away without it, but
+        // the bake path needs it.
+        FList_Allocate(sc);
+        Animate_Objects(sc, true);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+
+        // Shadow init — mirror GREETS.CPP ordering exactly so the
+        // reproducer exercises the same code path the real scene hits.
+        ShadowMaps_Rebuild(sc, 1024);
+        CubeShadowMaps_Rebuild(sc, 512);
+        ShadowMaps_BakeStatic(sc);
+        fds::LightmapStampOrigBary(sc);  // no-op if --shadow-lightmap off
+        fds::LightmapBake_Static(sc);    // no-op if --shadow-lightmap off
+
+        std::memset(VPage,   0, PageSize);
+        std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
+
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);
+        }
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath),
+                      "%s/lmtest_%s_subdiv%03d.ppm",
+                      cfg.outDir.c_str(),
+                      lmOn ? "lm" : "cube",
+                      int(subdiv));
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr,
+            "[LMTEST] subdiv=%-4d  ground=%d tris  -> %s\n",
+            int(subdiv), int(subdiv) * int(subdiv) * 2, colorPath);
+        ++produced;
+    }
+
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
 }
