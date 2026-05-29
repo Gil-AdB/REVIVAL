@@ -2815,24 +2815,28 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool quarter      = deferredLightingQuarterEnabled();
+	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved
 	// surface gives wildly different shading at adjacent pixels, and
 	// the average produces the "cartoonish" robot look. Require neighbor
 	// normals to be within ~18° (cos > 0.95 default) before averaging.
 	// Center normal decoded once per pixel and reused.
-	const float quarterNormalCos = quarter
+	// Wave-2 fill predicate flags. Used by BOTH quarter and checkerboard
+	// paths (same adaptive partial averaging shape). Flag name kept as
+	// `quarter_normal_cos` for back-compat.
+	const float quarterNormalCos = (quarter || checker)
 	    ? fds::FeatureFlags::quarter_normal_cos() : 0.0f;
-	const bool  quarterNormalCheck = quarter && quarterNormalCos > 0.0f;
+	const bool  quarterNormalCheck = (quarter || checker) && quarterNormalCos > 0.0f;
 	// Z-discontinuity threshold. Catches silhouettes / creases that
 	// share matID + normal but have an actual depth step (e.g. a hull
 	// panel meeting another panel at a sharp angle: same matID, same
 	// material normal-map base normal, but the *geometric* surfaces
 	// are angled — and at distance even small angle gives a measurable
 	// per-pixel Z jump). Without this, those edges blur in quarter.
-	const float quarterZJump  = quarter
+	const float quarterZJump  = (quarter || checker)
 	    ? fds::FeatureFlags::quarter_z_jump() : 0.0f;
-	const bool  quarterZCheck = quarter && quarterZJump > 0.0f;
+	const bool  quarterZCheck = (quarter || checker) && quarterZJump > 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2942,21 +2946,32 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					matched = true;
 				}
 			} else {
-				// Checkerboard L/R interp (existing behaviour).
-				const bool haveLeft  = (px > 0);
-				const bool haveRight = (px < XRes - 1);
-				if (!haveLeft && !haveRight) continue;
-				if (haveLeft && haveRight) {
-					const uint32_t matIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
-					const uint32_t matIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
-					if (matIDl == matIDc && matIDr == matIDc) {
-						const dword pl = out[i - 1];
-						const dword pr = out[i + 1];
-						const dword avg = ((pl & 0xFEFEFEFEu) >> 1) +
-						                   ((pr & 0xFEFEFEFEu) >> 1);
-						out[i] = avg | 0xFF000000u;
-						matched = true;
-					}
+				// Checkerboard: same adaptive partial averaging shape as
+				// quarter's horizontal pattern. Neighbors are L and R; each
+				// individually tested for matID + normal + Z compatibility.
+				// Average passers only; fall back to full shading when both
+				// fail. Same fix as quarter for face-edge outlines.
+				size_t nidx[2];
+				int    nc = 0;
+				if (px > 0)        nidx[nc++] = i - 1;
+				if (px < XRes - 1) nidx[nc++] = i + 1;
+				if (nc == 0) continue;
+				int sumR = 0, sumG = 0, sumB = 0;
+				int n = 0;
+				for (int k = 0; k < nc; ++k) {
+					if (!neighborCompatible(nidx[k], matIDc)) continue;
+					const dword p = out[nidx[k]];
+					sumB += int(p & 0xFF);
+					sumG += int((p >> 8) & 0xFF);
+					sumR += int((p >> 16) & 0xFF);
+					++n;
+				}
+				if (n > 0) {
+					int aR, aG, aB;
+					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+					else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
+					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					matched = true;
 				}
 			}
 			if (matched) continue;
