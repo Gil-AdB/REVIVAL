@@ -1131,11 +1131,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					// LOD-aware bump fade: scale (nmX, nmY) at high mip.
-					// fade = 1 below start_mip, drops by step per mip past.
+					// LOD-aware bump fade: scale (nmX, nmY) toward zero at
+					// high mip. Fade starts AT nmapFadeStart so picking
+					// start=0 actually starts cutting bump at mip 0 (1-step).
+					// Earlier formula used (miplevel - start) which gave 0
+					// at start → no visible change for the user's
+					// --nmap-lod-fade-start=0 test. Shift by +1.
 					if (int(miplevel) >= nmapFadeStart) {
-						const float over = float(int(miplevel) - nmapFadeStart);
-						const float fade = 1.0f - over * nmapFadeStep;
+						const int   over = int(miplevel) - nmapFadeStart + 1;
+						const float fade = 1.0f - float(over) * nmapFadeStep;
 						const float s = fade > 0.0f ? fade : 0.0f;
 						nmX *= s; nmY *= s;
 					}
@@ -2836,89 +2840,71 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				const int absDiff = diff < 0 ? -diff : diff;
 				return float(absDiff) <= quarterZJump * float(zEnc);
 			};
+			// Combined predicate: same matID + normal-similar + Z-similar.
+			// Adaptive partial averaging uses this to pick which neighbors
+			// to blend; unmatched neighbors are dropped from the average
+			// (instead of falling back to full shading for the whole
+			// pixel). Eliminates the per-face-edge outline artifact —
+			// previously when 1 of 4 corners failed the cos check, the
+			// whole pixel switched to full shading and looked visibly
+			// different from surrounding interpolated pixels.
+			auto neighborCompatible = [&](size_t ni, uint32_t matIDc_) -> bool {
+				const uint32_t mID = (gb.txtr[ni] >> 20) & 0xFF;
+				if (mID != matIDc_) return false;
+				if (!neighborNormalOk(ni)) return false;
+				if (!neighborZOk(ni)) return false;
+				return true;
+			};
 
 			bool matched = false;
 			if (quarter) {
-				// One of three patterns by parity:
-				//   (odd_x, even_y) → average left + right shaded
-				//   (even_x, odd_y) → average top + bottom shaded
-				//   (odd_x,  odd_y) → average 4 corner shaded
+				// Adaptive partial averaging: per-neighbor compatibility
+				// test (matID + normal + Z), then average ONLY the passing
+				// neighbors. Avoids the per-face-edge outline that the
+				// all-or-nothing fallback produces: when 1 of 4 corners
+				// (or 1 of 2 sides) fails the test, that pixel previously
+				// switched to full shading and looked visibly different
+				// from surrounding averaged pixels — that visible step IS
+				// the outline. Partial averaging blends smoothly instead.
+				//
+				// Per-channel sum + division by N. N is 0..4; division by
+				// 3 isn't bit-shiftable but at most 25% of pixels hit it
+				// and the rest use shift fast paths. Still cheaper by ~5×
+				// than the full-shading fallback per pixel.
 				const bool odd_x = px & 1;
 				const bool odd_y = py & 1;
+				size_t nidx[4];
+				int    nc = 0;
 				if (odd_x && !odd_y) {
-					// horizontal: -1 and +1
-					const bool haveL = (px > 0);
-					const bool haveR = (px < XRes - 1);
-					if (haveL && haveR) {
-						const uint32_t mIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
-						const uint32_t mIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
-						if (mIDl == matIDc && mIDr == matIDc
-						    && neighborNormalOk(i - 1)
-						    && neighborNormalOk(i + 1)
-						    && neighborZOk(i - 1)
-						    && neighborZOk(i + 1)) {
-							const dword avg = ((out[i - 1] & 0xFEFEFEFEu) >> 1) +
-							                   ((out[i + 1] & 0xFEFEFEFEu) >> 1);
-							out[i] = avg | 0xFF000000u;
-							matched = true;
-						}
-					}
+					if (px > 0)        nidx[nc++] = i - 1;
+					if (px < XRes - 1) nidx[nc++] = i + 1;
 				} else if (!odd_x && odd_y) {
-					// vertical: -XRes and +XRes
-					const bool haveT = (py > 0);
-					const bool haveB = (py < YRes - 1);
-					if (haveT && haveB) {
-						const uint32_t mIDt = (gb.txtr[i - XRes] >> 20) & 0xFF;
-						const uint32_t mIDb = (gb.txtr[i + XRes] >> 20) & 0xFF;
-						if (mIDt == matIDc && mIDb == matIDc
-						    && neighborNormalOk(i - XRes)
-						    && neighborNormalOk(i + XRes)
-						    && neighborZOk(i - XRes)
-						    && neighborZOk(i + XRes)) {
-							const dword avg = ((out[i - XRes] & 0xFEFEFEFEu) >> 1) +
-							                   ((out[i + XRes] & 0xFEFEFEFEu) >> 1);
-							out[i] = avg | 0xFF000000u;
-							matched = true;
-						}
-					}
+					if (py > 0)        nidx[nc++] = i - XRes;
+					if (py < YRes - 1) nidx[nc++] = i + XRes;
 				} else {
-					// diagonal: 4 corners
-					const bool haveTL = (px > 0)        && (py > 0);
-					const bool haveTR = (px < XRes - 1) && (py > 0);
-					const bool haveBL = (px > 0)        && (py < YRes - 1);
-					const bool haveBR = (px < XRes - 1) && (py < YRes - 1);
-					if (haveTL && haveTR && haveBL && haveBR) {
-						const uint32_t mTL = (gb.txtr[i - XRes - 1] >> 20) & 0xFF;
-						const uint32_t mTR = (gb.txtr[i - XRes + 1] >> 20) & 0xFF;
-						const uint32_t mBL = (gb.txtr[i + XRes - 1] >> 20) & 0xFF;
-						const uint32_t mBR = (gb.txtr[i + XRes + 1] >> 20) & 0xFF;
-						const bool matIDok = (mTL == matIDc && mTR == matIDc
-						                      && mBL == matIDc && mBR == matIDc);
-						if (matIDok
-						    && neighborNormalOk(i - XRes - 1)
-						    && neighborNormalOk(i - XRes + 1)
-						    && neighborNormalOk(i + XRes - 1)
-						    && neighborNormalOk(i + XRes + 1)
-						    && neighborZOk(i - XRes - 1)
-						    && neighborZOk(i - XRes + 1)
-						    && neighborZOk(i + XRes - 1)
-						    && neighborZOk(i + XRes + 1)) {
-							// 4-way avg via mask-and-shift-by-2: per-channel
-							// (a + b + c + d) / 4 with 2-bit precision loss
-							// per channel — well below the visible threshold.
-							const dword pTL = out[i - XRes - 1];
-							const dword pTR = out[i - XRes + 1];
-							const dword pBL = out[i + XRes - 1];
-							const dword pBR = out[i + XRes + 1];
-							const dword avg =
-								((pTL & 0xFCFCFCFCu) >> 2) +
-								((pTR & 0xFCFCFCFCu) >> 2) +
-								((pBL & 0xFCFCFCFCu) >> 2) +
-								((pBR & 0xFCFCFCFCu) >> 2);
-							out[i] = avg | 0xFF000000u;
-							matched = true;
-						}
-					}
+					if (px > 0 && py > 0)               nidx[nc++] = i - XRes - 1;
+					if (px < XRes - 1 && py > 0)        nidx[nc++] = i - XRes + 1;
+					if (px > 0 && py < YRes - 1)        nidx[nc++] = i + XRes - 1;
+					if (px < XRes - 1 && py < YRes - 1) nidx[nc++] = i + XRes + 1;
+				}
+				int sumR = 0, sumG = 0, sumB = 0;
+				int n = 0;
+				for (int k = 0; k < nc; ++k) {
+					if (!neighborCompatible(nidx[k], matIDc)) continue;
+					const dword p = out[nidx[k]];
+					sumB += int(p & 0xFF);
+					sumG += int((p >> 8) & 0xFF);
+					sumR += int((p >> 16) & 0xFF);
+					++n;
+				}
+				if (n > 0) {
+					int aR, aG, aB;
+					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+					else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
+					else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
+					else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
+					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					matched = true;
 				}
 			} else {
 				// Checkerboard L/R interp (existing behaviour).
