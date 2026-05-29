@@ -99,7 +99,13 @@ Scene *CurScene;
 Material Default_Mat;
 unsigned int OldFPUCW, FPUCW;
 
-dword OldMXCSR, CurMXCSR;
+// thread_local: each worker thread calls FPU_LPrecision/NormalState
+// independently to set its own FPCR, and they must save/restore their
+// own original. Was racing on shared backup via the threadpool init
+// (TSan-confirmed). FPCR itself IS per-thread (ARM A64 saves it at
+// context switch); the backup needs to track that.
+thread_local dword OldMXCSR;
+thread_local dword CurMXCSR;
 char **MsgStr;
 int32_t *MsgClock;
 DWord *MsgID;
@@ -278,10 +284,18 @@ void fds::RenderPipeline::setDeferredWaterMatID(int id) {
 
 void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 {
+	// Tile counts chosen so tile sizes are multiples of 8 (Mekalele's
+	// SIMD tile). At 1920×1080: 6×5 → 320×216, both 8-aligned. Otherwise
+	// adjacent clipper tile workers race on the 16-byte aligned blendv
+	// RMW at apply_exact:459 — TSan-confirmed flicker source. Round
+	// tileSize down to mult-of-8; the last tile in each row/col absorbs
+	// the remainder.
 	constexpr auto		numTilesX = 6;
-	constexpr auto		numTilesY = 4;
-	const auto			tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
-	const auto			tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+	constexpr auto		numTilesY = 5;
+	const int rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
+	const int rawTileY = (YRes + (numTilesY - 1)) / numTilesY;
+	const auto			tileSizeX = rawTileX & ~7;
+	const auto			tileSizeY = rawTileY & ~7;
 
 	renderns::tileCounter = 0;
 	// Deferred only if env var set AND the G-buffer is sized for the

@@ -330,12 +330,18 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	}
 
 	// ─── Phase B: flat (light × tile) tile rasterization ────────────────
-	// All active lights' 6×4 tiles dispatch into a single threadpool
-	// batch — the pool load-balances across lights, so a stragglering
-	// light's tile no longer holds up the next light's transforms (those
-	// already happened in phase A) or its tile work. Single barrier
-	// covers all N×24 tiles.
-	constexpr int numTilesX = 6;
+	// All active lights' tiles dispatch into a single threadpool batch —
+	// the pool load-balances across lights, so a straggler light's tile
+	// no longer holds up the next light's transforms or its tile work.
+	// Single barrier covers all N × numTilesX*numTilesY tiles.
+	//
+	// 4×4 chosen so that for a 512² shadow map, tileSizeX = tileSizeY =
+	// 128 — both multiples of the rasterizer's 8×8 SIMD tile so adjacent
+	// clipper tile workers never share a 16-byte aligned word in
+	// apply_exact's blendv RMW. Was 6×4 → 86×128 → race at every column
+	// seam, flicker patches in the shadow viz even with input paused
+	// (TSan-confirmed).
+	constexpr int numTilesX = 4;
 	constexpr int numTilesY = 4;
 	const auto tRasterStart = clk::now();
 	{
@@ -360,8 +366,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			continue;
 		}
 
-		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
-		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
+		// Tile size must be a multiple of 8 (see numTilesX comment for
+		// why). At shadow res = 4*N*8 (e.g. 128, 256, 512, 1024) this is
+		// naturally clean. For arbitrary res, round down to mult-of-8 and
+		// let the last tile absorb the remainder.
+		const int rawTX = (sm.xres + numTilesX - 1) / numTilesX;
+		const int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
+		const int tileSizeX = rawTX & ~7;
+		const int tileSizeY = rawTY & ~7;
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];

@@ -244,7 +244,8 @@ extern Material         * MatLib;         // yosi
 
 extern unsigned int OldFPUCW, FPUCW;
 
-extern dword OldMXCSR, CurMXCSR;
+extern thread_local dword OldMXCSR;
+extern thread_local dword CurMXCSR;
 extern int32_t Timer_Freq;
 
 extern char **MsgStr;
