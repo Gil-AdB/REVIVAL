@@ -143,11 +143,19 @@ else()
             RUNTIME DESTINATION "${CMAKE_SOURCE_DIR}/Runtime")
 
     # Auto-install on every native rebuild so `cd Runtime && ./DEMO` always
-    # picks up the freshly-linked binary. Saves a class of "ran a stale
-    # exe" debugging — the build/Runtime split bit us repeatedly today.
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:${PROJECT_NAME}>"
-                "${CMAKE_SOURCE_DIR}/Runtime/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
-        COMMENT "Updating Runtime/DEMO with the freshly-linked binary")
+    # picks up the freshly-linked binary. ONLY for the canonical `build/`
+    # tree — secondary trees (build-asan, build-tsan, build-strip) MUST NOT
+    # clobber Runtime/DEMO, since users tend to run from Runtime and would
+    # silently end up on an ASan/TSan-instrumented exe that's 100× slower
+    # and prints sanitizer races at exit. Bit us repeatedly during the
+    # gbuffer perf push.
+    if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_SOURCE_DIR}/build")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:${PROJECT_NAME}>"
+                    "${CMAKE_SOURCE_DIR}/Runtime/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
+            COMMENT "Updating Runtime/DEMO with the freshly-linked binary")
+    else()
+        message(STATUS "Skipping Runtime/DEMO auto-copy (binary dir is ${CMAKE_BINARY_DIR}, not the canonical build/)")
+    endif()
 endif()
