@@ -24,6 +24,108 @@ std::vector<CubeShadowRef> g_cubeShadowRefs;
 // Shadow-map debug viewer state. See ShadowMap.h for protocol.
 int g_shadowViewIdx = -1;
 std::atomic<bool> g_shadowFullscreenView{false};
+// 0 = static (sm.polyId / sm.depth), 1 = dynamic (sm.polyId_dynamic /
+// sm.depth_dynamic), 2 = combined (per-texel closest-by-depth pick of
+// the two — matches what CubeShadow_Sample's PolyId path actually reads).
+// Cycled by ShadowMap_ViewModeCycle (bound to B in REV.CPP).
+std::atomic<int> g_shadowViewMode{0};
+
+void ShadowMap_ViewModeCycle()
+{
+    int cur = g_shadowViewMode.load(std::memory_order_relaxed);
+    cur = (cur + 1) % 3;
+    g_shadowViewMode.store(cur, std::memory_order_relaxed);
+    const char *name = (cur == 0) ? "static"
+                     : (cur == 1) ? "dynamic"
+                                  : "combined (closest-by-depth)";
+    std::fprintf(stderr, "[SHADOW-VIEW] mode = %s\n", name);
+}
+
+// Per-frame staleness tracker for the dynamic cube buffers. When on,
+// computes an FNV-1a hash of every shadow map's polyId_dynamic each
+// frame and reports either:
+//   - "alive" indices whose hash changed since last frame, or
+//   - "stale" indices whose hash didn't change (suggests dynamic bake
+//     isn't reaching this map — the bug we're hunting).
+// Verbose; throttled to once every 60 frames. Toggled by T key.
+std::atomic<bool> g_shadowStalenessTrack{false};
+void ShadowMap_StalenessToggle()
+{
+    const bool was = g_shadowStalenessTrack.exchange(
+        !g_shadowStalenessTrack.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    std::fprintf(stderr, "[SHADOW-STALE] tracking %s\n", was ? "OFF" : "ON");
+}
+
+void ShadowMap_TickStalenessTracker()
+{
+    if (!g_shadowStalenessTrack.load(std::memory_order_relaxed)) return;
+    static std::vector<uint64_t> sLastHash;
+    static int sFrame = 0;
+    ++sFrame;
+    if (sLastHash.size() != g_shadowMaps.size()) {
+        sLastHash.assign(g_shadowMaps.size(), 0);
+    }
+    bool report = (sFrame % 60 == 0);
+    std::vector<int> stale;
+    stale.reserve(g_shadowMaps.size());
+    for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+        const ShadowMap &sm = g_shadowMaps[i];
+        uint64_t h = 0xcbf29ce484222325ull;
+        for (uint8_t v : sm.polyId_dynamic) {
+            h ^= v; h *= 0x100000001b3ull;
+        }
+        if (report && h == sLastHash[i]) {
+            stale.push_back(int(i));
+        }
+        sLastHash[i] = h;
+    }
+    if (report) {
+        std::fprintf(stderr,
+            "[SHADOW-STALE] frame=%d  %zu/%zu shadow maps have UNCHANGED "
+            "dynamic polyId hash since last 60-frame check:\n",
+            sFrame, stale.size(), g_shadowMaps.size());
+        for (int i : stale) {
+            const ShadowMap &sm = g_shadowMaps[i];
+            const Omni *O = sm.omni;
+            std::fprintf(stderr,
+                "  [%d] cubeFace=%d  pos=(%g,%g,%g)  flags=0x%x\n",
+                i, int(sm.cubeFace),
+                O ? O->IPos.x : 0.0f, O ? O->IPos.y : 0.0f,
+                O ? O->IPos.z : 0.0f, O ? unsigned(O->Flags) : 0u);
+        }
+    }
+}
+
+void ShadowMap_ViewCycleBack()
+{
+    // Mirror of ShadowMap_ViewCycle that steps backward through the
+    // registered shadow maps. Bound to Shift+V in REV.CPP. Same
+    // fullscreen-vs-thumbnail wrap semantics.
+    const int n = int(g_shadowMaps.size());
+    if (n == 0) {
+        std::fprintf(stderr, "[SHADOW-VIEW] no shadow maps registered\n");
+        g_shadowViewIdx = -1;
+        return;
+    }
+    const bool fullscreen = g_shadowFullscreenView.load(std::memory_order_relaxed);
+    if (fullscreen) {
+        g_shadowViewIdx = (g_shadowViewIdx <= 0) ? (n - 1) : (g_shadowViewIdx - 1);
+    } else {
+        g_shadowViewIdx = (g_shadowViewIdx <= 0) ? (n - 1)
+                                                 : (g_shadowViewIdx - 1);
+    }
+    // Forward to the existing logger so the SHADOW-VIEW line still fires
+    // (decremented once already; the forward will print without further
+    // change because the cycle index logic above already advanced).
+    // Simplest: replicate the print stanza from ShadowMap_ViewCycle.
+    if (g_shadowViewIdx >= 0 && g_shadowViewIdx < n) {
+        const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
+        std::fprintf(stderr,
+            "[SHADOW-VIEW] (back) %d / %d  cubeFace=%d\n",
+            g_shadowViewIdx, n, int(sm.cubeFace));
+    }
+}
 
 void ShadowMap_ViewCycle()
 {
@@ -51,55 +153,66 @@ void ShadowMap_ViewCycle()
                                (sm.omni && sm.omni->Type == Light_SpotLight) ? "spot" : "?";
         // Stats so we can see whether the actual data differs across maps
         // (vs an overlay rendering bug). Sample some unique polyIds + the
-        // depth extent and non-empty pixel count.
+        // depth extent and non-empty pixel count. Reported for both
+        // STATIC and DYNAMIC buffers so we can spot per-omni issues like
+        // "dynamic buffer stuck at t=0" (one omni's dynamic count stays
+        // constant while others change across frames).
+        auto polyStats = [](const std::vector<uint16_t> &arr,
+                            size_t &nonZeroOut, int &uniqOut,
+                            uint64_t &hashOut) {
+            // Switched to 16-bit polyId (Material::ShadowMatID widen).
+            // Unique-ID estimate uses bottom 12 bits modulo 4096; close
+            // enough for the diag.
+            nonZeroOut = 0; uniqOut = 0; hashOut = 0xcbf29ce484222325ull;
+            bool seen[4096] = {};
+            for (uint16_t p : arr) {
+                if (p) ++nonZeroOut;
+                const int idx = p & 0xFFF;
+                if (!seen[idx]) { seen[idx] = true; ++uniqOut; }
+                hashOut ^= p; hashOut *= 0x100000001b3ull;
+            }
+        };
+        auto depthStats = [](const std::vector<uint16_t> &arr,
+                             size_t &nonZeroOut, uint16_t &dminOut,
+                             uint16_t &dmaxOut, uint64_t &hashOut) {
+            nonZeroOut = 0; dminOut = 0xFFFF; dmaxOut = 0;
+            hashOut = 0xcbf29ce484222325ull;
+            for (uint16_t d : arr) {
+                if (d) ++nonZeroOut;
+                if (d < dminOut) dminOut = d;
+                if (d > dmaxOut) dmaxOut = d;
+                hashOut ^= d; hashOut *= 0x100000001b3ull;
+            }
+        };
+        size_t nzPs = 0, nzPd = 0, nzZs = 0, nzZd = 0;
+        int uPs = 0, uPd = 0;
+        uint16_t dmin_s = 0, dmax_s = 0, dmin_d = 0, dmax_d = 0;
+        uint64_t pHs = 0, pHd = 0, dHs = 0, dHd = 0;
+        polyStats(sm.polyId,         nzPs, uPs, pHs);
+        polyStats(sm.polyId_dynamic, nzPd, uPd, pHd);
+        depthStats(sm.depth,         nzZs, dmin_s, dmax_s, dHs);
+        depthStats(sm.depth_dynamic, nzZd, dmin_d, dmax_d, dHd);
         const size_t total = sm.polyId.size();
-        size_t nonZeroP = 0;
-        bool seen[256] = {};
-        int uniqueP = 0;
-        for (uint8_t p : sm.polyId) {
-            if (p) ++nonZeroP;
-            if (!seen[p]) { seen[p] = true; ++uniqueP; }
-        }
-        uint16_t dmin = 0xFFFF, dmax = 0;
-        size_t nonZeroD = 0;
-        for (uint16_t d : sm.depth) {
-            if (d) ++nonZeroD;
-            if (d < dmin) dmin = d;
-            if (d > dmax) dmax = d;
-        }
-        // Two cheap FNV-1a-ish content hashes — if these match across
-        // maps with the same nonzero-count, the buffers are literally
-        // byte-for-byte identical (storage bug), not just statistically
-        // similar (real geometry).
-        uint64_t pHash = 0xcbf29ce484222325ull;
-        for (uint8_t v : sm.polyId) {
-            pHash ^= v; pHash *= 0x100000001b3ull;
-        }
-        uint64_t dHash = 0xcbf29ce484222325ull;
-        for (uint16_t v : sm.depth) {
-            dHash ^= v; dHash *= 0x100000001b3ull;
-        }
         std::fprintf(stderr,
-            "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d  "
-            "polyId: %zu/%zu nz, %d uniq, h=%016llx  depth: %zu/%zu nz, [%u..%u], h=%016llx\n",
+            "[SHADOW-VIEW] %d / %d  %s  %dx%d  cubeFace=%d\n"
+            "  STATIC : polyId %zu/%zu nz (%d uniq) h=%016llx | depth %zu nz [%u..%u] h=%016llx\n"
+            "  DYNAMIC: polyId %zu/%zu nz (%d uniq) h=%016llx | depth %zu nz [%u..%u] h=%016llx\n",
             g_shadowViewIdx, n, omniName, sm.xres, sm.yres, int(sm.cubeFace),
-            nonZeroP, total, uniqueP, (unsigned long long)pHash,
-            nonZeroD, sm.depth.size(), unsigned(dmin), unsigned(dmax),
-            (unsigned long long)dHash);
+            nzPs, total, uPs, (unsigned long long)pHs,
+            nzZs, unsigned(dmin_s), unsigned(dmax_s), (unsigned long long)dHs,
+            nzPd, total, uPd, (unsigned long long)pHd,
+            nzZd, unsigned(dmin_d), unsigned(dmax_d), (unsigned long long)dHd);
         if (sm.omni) {
             std::fprintf(stderr,
-                "              pos=(%g,%g,%g) IRange=%g\n",
-                sm.omni->IPos.x, sm.omni->IPos.y, sm.omni->IPos.z, sm.omni->IRange);
+                "              pos=(%g,%g,%g) IRange=%g  flags=0x%x\n",
+                sm.omni->IPos.x, sm.omni->IPos.y, sm.omni->IPos.z,
+                sm.omni->IRange, unsigned(sm.omni->Flags));
         }
     }
 }
 
 void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
 {
-    // When the user is in the full-screen shadow viz (greets M),
-    // the entire framebuffer is already showing the current map —
-    // skip the thumbnail so it doesn't stack on top.
-    if (g_shadowFullscreenView.load(std::memory_order_relaxed)) return;
     if (g_shadowViewIdx < 0) return;
     if (g_shadowViewIdx >= int(g_shadowMaps.size())) return;
     if (!vpage || xres <= 0 || yres <= 0 || pitchBytes <= 0) return;
@@ -107,20 +220,34 @@ void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
     const ShadowMap &sm = g_shadowMaps[g_shadowViewIdx];
     if (sm.xres <= 0 || sm.yres <= 0 || sm.polyId.empty()) return;
 
-    int thumbSize = std::min(xres, yres) / 4;
-    if (thumbSize < 64)   thumbSize = 64;
-    if (thumbSize > sm.xres) thumbSize = sm.xres;
-    if (thumbSize > 512)  thumbSize = 512;
-    const int dstW = thumbSize;
-    const int dstH = thumbSize;
-    if (dstW + 4 >= xres || dstH + 4 >= yres) return;
+    // Fullscreen mode (greets M-key sets g_shadowFullscreenView): paint
+    // the shadow map across the whole framebuffer instead of a corner
+    // thumbnail. Same content + mode (B-key) as the thumbnail, just
+    // sized up. Letterbox the larger axis so the cube face stays square.
+    const bool fullscreen = g_shadowFullscreenView.load(std::memory_order_relaxed);
+    int dstW, dstH, ox, oy;
+    if (fullscreen) {
+        const int side = std::min(xres, yres);
+        dstW = side;
+        dstH = side;
+        ox = (xres - side) / 2;
+        oy = (yres - side) / 2;
+    } else {
+        int thumbSize = std::min(xres, yres) / 4;
+        if (thumbSize < 64)   thumbSize = 64;
+        if (thumbSize > sm.xres) thumbSize = sm.xres;
+        if (thumbSize > 512)  thumbSize = 512;
+        dstW = thumbSize;
+        dstH = thumbSize;
+        if (dstW + 4 >= xres || dstH + 4 >= yres) return;
+        ox = 4;
+        oy = 4;
+    }
 
     // Row stride in dwords. SDL locked textures may pad scanlines past
     // xres*4 bytes — use the surface's BPSL (passed as pitchBytes).
     const ptrdiff_t pitchD = ptrdiff_t(pitchBytes) / 4;
     dword *out = reinterpret_cast<dword*>(vpage);
-    const int ox = 4;
-    const int oy = 4;
 
     // PolyId visualization: each unique polyId hashes to a unique
     // color. 0 = empty (no surface) → black so you can see the cube
@@ -134,33 +261,80 @@ void ShadowMap_Overlay(byte *vpage, int xres, int yres, int pitchBytes)
         const uint8_t b = uint8_t( h        & 0xFF);
         return 0xFF000000u | (dword(r) << 16) | (dword(g) << 8) | dword(b);
     };
+    const int mode = g_shadowViewMode.load(std::memory_order_relaxed);
     for (int dy = 0; dy < dstH; ++dy) {
         const int sy = (dy * sm.yres) / dstH;
-        const uint8_t *row = &sm.polyId[size_t(sy) * size_t(sm.xres)];
+        const uint16_t *idS = &sm.polyId[size_t(sy) * size_t(sm.xres)];
+        const uint16_t *idD = sm.polyId_dynamic.empty() ? nullptr
+                            : &sm.polyId_dynamic[size_t(sy) * size_t(sm.xres)];
+        const uint16_t *zS  = &sm.depth[size_t(sy) * size_t(sm.xres)];
+        const uint16_t *zD  = sm.depth_dynamic.empty() ? nullptr
+                           : &sm.depth_dynamic[size_t(sy) * size_t(sm.xres)];
         dword *dstRow = out + ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox);
         for (int dx = 0; dx < dstW; ++dx) {
             const int sx = (dx * sm.xres) / dstW;
-            dstRow[dx] = hashPolyColor(row[sx]);
+            uint16_t pick;
+            if (mode == 1) {
+                pick = idD ? idD[sx] : uint16_t(0);
+            } else if (mode == 2) {
+                const uint16_t s = idS[sx];
+                const uint16_t d = idD ? idD[sx] : uint16_t(0);
+                if (s == 0) pick = d;
+                else if (d == 0) pick = s;
+                else {
+                    // Closest-by-depth (larger zEnc wins; matches the
+                    // sampler's logic in ShadowMap.h CubeShadow_Sample).
+                    const uint16_t zs = zS[sx];
+                    const uint16_t zd = zD ? zD[sx] : uint16_t(0);
+                    pick = (zd > zs) ? d : s;
+                }
+            } else {
+                pick = idS[sx];
+            }
+            // Hash the full 16-bit polyId into RGB for the viz.
+            dstRow[dx] = hashPolyColor(uint8_t(pick ^ (pick >> 8)));
         }
     }
-    // White 1-px border.
-    for (int dx = -1; dx <= dstW; ++dx) {
-        if (oy - 1 >= 0)
-            out[ptrdiff_t(oy - 1) * pitchD + ptrdiff_t(ox + dx)] = 0xFFFFFFFFu;
-        if (oy + dstH < yres)
-            out[ptrdiff_t(oy + dstH) * pitchD + ptrdiff_t(ox + dx)] = 0xFFFFFFFFu;
+    // Mode-colored border, 3 px thick so the mode is obvious at a glance.
+    // static=cyan, dynamic=magenta, combined=yellow. Wide enough to read
+    // when the overlay is fullscreen letterboxed and the label below the
+    // viz might fall off the bottom of the framebuffer.
+    const dword borderC = (mode == 0) ? 0xFF00FFFFu   // cyan = static
+                       : (mode == 1) ? 0xFFFF00FFu   // magenta = dynamic
+                                     : 0xFFFFFF00u;  // yellow = combined
+    constexpr int kBorderT = 3;
+    for (int t = 1; t <= kBorderT; ++t) {
+        for (int dx = -t; dx <= dstW + t - 1; ++dx) {
+            const int xx = ox + dx;
+            if (xx < 0 || xx >= xres) continue;
+            if (oy - t >= 0)
+                out[ptrdiff_t(oy - t) * pitchD + ptrdiff_t(xx)] = borderC;
+            if (oy + dstH + t - 1 < yres)
+                out[ptrdiff_t(oy + dstH + t - 1) * pitchD + ptrdiff_t(xx)] = borderC;
+        }
+        for (int dy = -t; dy <= dstH + t - 1; ++dy) {
+            const int yy = oy + dy;
+            if (yy < 0 || yy >= yres) continue;
+            if (ox - t >= 0)
+                out[ptrdiff_t(yy) * pitchD + ptrdiff_t(ox - t)] = borderC;
+            if (ox + dstW + t - 1 < xres)
+                out[ptrdiff_t(yy) * pitchD + ptrdiff_t(ox + dstW + t - 1)] = borderC;
+        }
     }
-    for (int dy = -1; dy <= dstH; ++dy) {
-        if (ox - 1 >= 0)
-            out[ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox - 1)] = 0xFFFFFFFFu;
-        if (ox + dstW < xres)
-            out[ptrdiff_t(oy + dy) * pitchD + ptrdiff_t(ox + dstW)] = 0xFFFFFFFFu;
-    }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "SM %d/%zu  %dx%d  face=%d  (polyId)",
-                  g_shadowViewIdx, g_shadowMaps.size(),
+    char buf[96];
+    const char *modeName = (mode == 0) ? "STATIC"
+                         : (mode == 1) ? "DYNAMIC"
+                                       : "COMBINED";
+    std::snprintf(buf, sizeof(buf), "[%s]  SM %d/%zu  %dx%d  face=%d",
+                  modeName, g_shadowViewIdx, g_shadowMaps.size(),
                   sm.xres, sm.yres, int(sm.cubeFace));
-    OutTextXY(vpage, ox + 4, oy + dstH + 4, buf, 255, xres, yres);
+    // Label both above (always on-screen if overlay fits) and below
+    // (works for the small-thumbnail case where there's vertical room).
+    const int labelYAbove = std::max(0, oy - kBorderT - 14);
+    OutTextXY(vpage, ox + 4, labelYAbove, buf, 255, xres, yres);
+    if (oy + dstH + kBorderT + 4 + 14 < yres) {
+        OutTextXY(vpage, ox + 4, oy + dstH + kBorderT + 4, buf, 255, xres, yres);
+    }
 }
 
 void ShadowMaps_Rebuild(Scene *Sc, int res)
@@ -294,15 +468,15 @@ void ShadowMaps_BakeStatic(Scene *Sc)
 struct ShadowBarry {
 	ShadowMap *sm;
 	uint16_t *zArr;   // sm->depth or sm->depth_dynamic
-	uint8_t  *idArr;  // sm->polyId or sm->polyId_dynamic
+	uint16_t *idArr;  // sm->polyId or sm->polyId_dynamic (widened to uint16 for ShadowMatID)
 	float drzdx, drzdy;
-	uint8_t idByte;
+	uint16_t idByte;  // legacy name; now a 16-bit ShadowMatID
 
 	ShadowBarry(ShadowMap *smIn, uint16_t idIn, bool useDynamic)
 		: sm(smIn),
 		  zArr (useDynamic ? smIn->depth_dynamic.data()  : smIn->depth.data()),
 		  idArr(useDynamic ? smIn->polyId_dynamic.data() : smIn->polyId.data()),
-		  drzdx(0), drzdy(0), idByte(uint8_t(idIn)) {}
+		  drzdx(0), drzdy(0), idByte(idIn) {}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
@@ -310,7 +484,7 @@ struct ShadowBarry {
 		uint16_t * const zRowBase  = zArr
 			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
 			+ size_t(tile.x) * barry::TILE_SIZE;
-		uint8_t  * const idRowBase = idArr
+		uint16_t * const idRowBase = idArr
 			+ size_t(tile.y) * barry::TILE_SIZE * size_t(xres)
 			+ size_t(tile.x) * barry::TILE_SIZE;
 
@@ -329,7 +503,7 @@ struct ShadowBarry {
 		const Vec8f vZScale(zScale);
 
 		uint16_t *zRow = zRowBase;
-		uint8_t  *idRow = idRowBase;
+		uint16_t *idRow = idRowBase;
 		for (int row = 0; row < barry::TILE_SIZE; ++row,
 				zRow += xres, idRow += xres) {
 			Vec8ib p_mask;
@@ -591,13 +765,13 @@ static void rasterize_depth_tri(const Vertex& v0, const Vertex& v1, const Vertex
 	const Vec8f vDw1dx8 = vDw1dx * 8.0f;
 	const Vec8f vDrzdx8 = vDrzdx * 8.0f;
 	const Vec8f vZScale(zScale);
-	const uint8_t idByte = uint8_t(idOverride);
+	const uint16_t idByte = idOverride;  // 16-bit ShadowMatID now
 
 	uint16_t * const zBase  = useDynamic ? sm.depth_dynamic.data()  : sm.depth.data();
-	uint8_t  * const idBase = useDynamic ? sm.polyId_dynamic.data() : sm.polyId.data();
+	uint16_t * const idBase = useDynamic ? sm.polyId_dynamic.data() : sm.polyId.data();
 	for (int y = iymin; y <= iymax; ++y) {
 		uint16_t *zRow = zBase  + size_t(y) * size_t(sm.xres);
-		uint8_t  *idRow = idBase + size_t(y) * size_t(sm.xres);
+		uint16_t *idRow = idBase + size_t(y) * size_t(sm.xres);
 		const float py = float(y) + 0.5f;
 		const float px0 = float(ixmin) + 0.5f;
 		const float w0Row = ((x1 - px0) * (y2 - py) - (x2 - px0) * (y1 - py)) * invArea;
@@ -738,7 +912,26 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 	// lighting kernel decides whether to USE it (PolyId mode) or
 	// ignore it (Depth mode) via g_shadowMode. Unconditional write
 	// lets the M-key viz read polyId even while rendering in Depth.
-	uint16_t idOverride = (F && F->Txtr) ? uint16_t(F->Txtr->ID + 1) : 0;
+	// Resolve the 16-bit ShadowMatID stamp this face writes into
+	// sm.polyId. Priority (high to low):
+	//   1. Material::ShadowMatID — scene-init group override (e.g.
+	//      greets's per-wall split assigns a unique ShadowMatID per
+	//      coplanar cluster; hull-merge assigns one shared ShadowMatID
+	//      to all hull/hull2 faces).
+	//   2. Per-face F->ShadowMatID — 16-bit per-face override (used by
+	//      greets wall split to give each coplanar cluster its own ID
+	//      without inflating matTable past the 8-bit matID cap).
+	//   3. Fallback: uint16_t(Txtr->ID + 1) — matches the historic
+	//      matID-based polyId, with +1 so 0 stays as the unassigned
+	//      sentinel.
+	uint16_t idOverride;
+	if (F && F->ShadowMatID != 0) {
+		idOverride = F->ShadowMatID;
+	} else if (F && F->Txtr && F->Txtr->ShadowMatID != 0) {
+		idOverride = F->Txtr->ShadowMatID;
+	} else {
+		idOverride = (F && F->Txtr) ? uint16_t(F->Txtr->ID + 1) : 0;
+	}
 
 	// Triangulate the clipped n-gon as a fan from V[0] — same shape as
 	// Mekalele's tri loop. Per-triangle: compute the RZ screen-space

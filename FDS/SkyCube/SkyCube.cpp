@@ -403,7 +403,7 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation, bool ForceFo
 	View = Cm;
 	SetCurrentScene(Sc);
 
-	Animate_Objects(Sc, SkipCameraAnimation);
+	Animate_Objects(Sc, SkipCameraAnimation ? nullptr : View);
 
 	Vector PrevViewPos = View->ISource;
 	Vector_Zero(&View->ISource);

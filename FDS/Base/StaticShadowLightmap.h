@@ -26,11 +26,36 @@
 // sizes (84 vs 88 bytes), the `data` vector's metadata lives at a
 // different offset, and the lighting kernel reads zeros where the
 // bake wrote 14 MB of texels.
+// Per-face planar-projection basis. When --shadow-lightmap-planar is on,
+// each face's atlas (s, t) axes are picked from the world axes orthogonal
+// to the face's dominant cardinal direction (chosen by max |N.x|, |N.y|,
+// |N.z|), instead of from B−A / C−A. This keeps the atlas grid orthogonal
+// in world space, killing the "sheared-lattice" zig-zag on shadow edges
+// that hits per-triangle bary atlases when the triangle isn't right-
+// isoceles with axis-aligned legs (Quake/idTech lightmap projection trick).
+//
+// dominantAxis: 0=X, 1=Y, 2=Z. (u, v) are the two remaining axes in fixed
+// order so bake and runtime agree:
+//   dominantAxis = 0 (X) → (u, v) = (Y, Z)
+//   dominantAxis = 1 (Y) → (u, v) = (X, Z)
+//   dominantAxis = 2 (Z) → (u, v) = (X, Y)
+// (uMin, vMin) + (uExt, vExt) span the face's projected bbox; atlas
+// (s, t) ∈ [0, 1]² map linearly to (uMin + s*uExt, vMin + t*vExt).
+struct FacePlanarBasis {
+    float uMin = 0.0f, uExt = 0.0f;
+    float vMin = 0.0f, vExt = 0.0f;
+    uint8_t dominantAxis = 1;  // default Y (ground-like)
+};
+
 #pragma pack(push, 8)
 struct StaticShadowLightmap {
     int lmRes    = 16;   // N per-face edge length (default 16 → 16×16 atlas per face)
     int numFaces = 0;    // M, matches the mesh's face count at bake time
     int numOmnis = 0;    // K, # static-omni shadow casters baked for this mesh
+
+    // Per-face planar basis. Populated iff baked under --shadow-lightmap-planar.
+    // Empty for the legacy bary atlas. Indexed by face.
+    std::vector<FacePlanarBasis> planarBases;
 
     // Per-(face, omni) "any non-trivially-lit texel?" coverage bit. Set
     // by the bake whenever a texel for this (face, omni) pair came out
@@ -72,11 +97,21 @@ struct StaticShadowLightmap {
 
     // Sized allocation. Re-callable if scene contents change; existing
     // data is dropped. `omniSceneIdx` is left -1 — baker fills it.
+    //
+    // Atlas is initialized to 255 (= fully lit) so the bake's per-face
+    // back-face / range culls and per-texel range cull can `continue`
+    // without writing — unwritten texels return "no occluder seen, let
+    // the lighting kernel's falloff + N·L decide." If the atlas were
+    // zero-init, every culled (face, omni) pair would multiply that
+    // omni's diffuse contribution to zero on this face, leaving static
+    // surfaces dim wherever a face's centroid happened to be on the
+    // wrong side of an in-range omni. The bake explicitly writes the
+    // shadow byte (0..254) for any texel it actually samples.
     void allocate(int faces, int omnis, int res = 16) {
         lmRes    = res;
         numFaces = faces;
         numOmnis = omnis;
-        data.assign(size_t(faces) * size_t(res) * size_t(res) * size_t(omnis), 0);
+        data.assign(size_t(faces) * size_t(res) * size_t(res) * size_t(omnis), 255);
         coverageBits.assign((size_t(faces) * size_t(omnis) + 7u) / 8u, 0);
         omniSceneIdx.assign(size_t(omnis), -1);
     }
@@ -85,7 +120,54 @@ struct StaticShadowLightmap {
         data.clear();
         coverageBits.clear();
         omniSceneIdx.clear();
+        planarBases.clear();
         numFaces = numOmnis = 0;
+    }
+
+    // Bilinear sample against the planar (world-axis-aligned) atlas. Caller
+    // passes the pixel's *world* position; this function projects to the
+    // face's dominant cardinal plane, maps into [0, 1]² via the face's
+    // pre-computed (uMin, uExt, vMin, vExt), and bilinear-samples the atlas.
+    // Returns 1.0 (fully lit) on any out-of-range / disabled state — same
+    // contract as sampleBilinear above.
+    inline float sampleBilinearPlanar(int faceIdx, int omniIdx,
+                                      float wx, float wy, float wz) const {
+        if (data.empty() || lmRes < 2 || numOmnis <= 0 ||
+            faceIdx < 0 || faceIdx >= numFaces ||
+            omniIdx < 0 || omniIdx >= numOmnis ||
+            planarBases.empty()) {
+            return 1.0f;
+        }
+        const FacePlanarBasis &pb = planarBases[size_t(faceIdx)];
+        float wu, wv;
+        if      (pb.dominantAxis == 0) { wu = wy; wv = wz; }
+        else if (pb.dominantAxis == 1) { wu = wx; wv = wz; }
+        else                            { wu = wx; wv = wy; }
+        const float uExt = (pb.uExt > 1.0e-6f) ? pb.uExt : 1.0e-6f;
+        const float vExt = (pb.vExt > 1.0e-6f) ? pb.vExt : 1.0e-6f;
+        const float sNorm = (wu - pb.uMin) / uExt;
+        const float tNorm = (wv - pb.vMin) / vExt;
+        const float gridMax = float(lmRes - 1);
+        float sf = sNorm * gridMax;
+        float tf = tNorm * gridMax;
+        if (sf < 0.0f) sf = 0.0f; if (sf > gridMax) sf = gridMax;
+        if (tf < 0.0f) tf = 0.0f; if (tf > gridMax) tf = gridMax;
+        int tx = int(sf), ty = int(tf);
+        if (tx > lmRes - 2) tx = lmRes - 2;
+        if (ty > lmRes - 2) ty = lmRes - 2;
+        const float fx = sf - float(tx);
+        const float fy = tf - float(ty);
+        const uint8_t *p00 = texel(faceIdx, tx,     ty)     + omniIdx;
+        const uint8_t *p10 = texel(faceIdx, tx + 1, ty)     + omniIdx;
+        const uint8_t *p01 = texel(faceIdx, tx,     ty + 1) + omniIdx;
+        const uint8_t *p11 = texel(faceIdx, tx + 1, ty + 1) + omniIdx;
+        const float v00 = float(*p00);
+        const float v10 = float(*p10);
+        const float v01 = float(*p01);
+        const float v11 = float(*p11);
+        const float v0 = v00 + (v10 - v00) * fx;
+        const float v1 = v01 + (v11 - v01) * fx;
+        return (v0 + (v1 - v0) * fy) * (1.0f / 255.0f);
     }
 
     // Bilinear sample at fractional texel coord. Input is the G-buffer-

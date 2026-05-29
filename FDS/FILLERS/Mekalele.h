@@ -56,6 +56,14 @@ struct GBuffer {
 	// fixed-point fraction of barycentric weight on vertex B (s) and C
 	// (t). Per-pixel; kernel does bilinear lookup into the lightmap.
 	std::vector<u16> lightmapST;
+	// Per-pixel 16-bit ShadowMatID — the receiver identity the deferred
+	// kernel feeds to CubeShadow_Sample's PolyId path. Mekalele stamps
+	// the same value across every pixel of one face (resolved per-face
+	// from F->ShadowMatID / F->Txtr->ShadowMatID / Txtr->ID+1). Lets
+	// greets's wall split push ~2600 distinct shadow groups through
+	// without exceeding the 8-bit matID encoded in `txtr`. Optional —
+	// when empty, the receiver falls back to `uint16_t(matID + 1)`.
+	std::vector<u16> shadowMatID;
 };
 
 // Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
@@ -193,6 +201,17 @@ struct TileRasterizerCtx {
 	//   lmFaceIdx = (F - F->ParentTri->Faces)          (0..65535)
 	u16 lmMeshId  = 0;
 	u16 lmFaceIdx = 0;
+
+	// Per-face resolved 16-bit ShadowMatID. Stamped into every pixel of
+	// this face's GBuffer::shadowMatID plane so the deferred lighting
+	// kernel's PolyId cube-shadow path can compare receiver identity
+	// without bouncing through the 8-bit matID in `txtr`. Resolved by
+	// the Mekalele dispatcher with priority:
+	//   1. F->ShadowMatID  (per-face override — greets wall split)
+	//   2. F->Txtr->ShadowMatID (per-material override — greets hull
+	//      merge)
+	//   3. uint16_t(F->Txtr->ID + 1) (legacy matID+1 fallback)
+	u16 shadowMatId = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -214,6 +233,7 @@ struct GBufferSpan {
 	u32 *txtr;
 	u32 *lightmapMF;
 	u16 *lightmapST;
+	u16 *shadowMatID;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
@@ -222,6 +242,7 @@ struct GBufferSpan {
 		txtr += offset;
 		if (lightmapMF) lightmapMF += offset;
 		if (lightmapST) lightmapST += offset;
+		if (shadowMatID) shadowMatID += offset;
 		zbuffer += offset;
 		return *this;
 	}
@@ -243,12 +264,19 @@ struct GBufferSpan {
 		u16 *lmSTPtr = gbuffer.lightmapST.empty()
 			? nullptr
 			: gbuffer.lightmapST.data() + offset;
+		// shadowMatID plane is optional (allocated when shadows or
+		// lightmaps are on). When null, the deferred kernel falls back
+		// to `uint16_t(matID + 1)` decoded from `txtr`.
+		u16 *shadowMatIDPtr = gbuffer.shadowMatID.empty()
+			? nullptr
+			: gbuffer.shadowMatID.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
 			gbuffer.txtr.data() + offset,
 			lmMFPtr,
 			lmSTPtr,
+			shadowMatIDPtr,
 			ctx.zbuffer + offset
 		};
 	}
@@ -382,6 +410,12 @@ struct TileRasterizer {
 		const u32 packedLmMF = (u32(ctx.lmMeshId) << 16) | u32(ctx.lmFaceIdx);
 		const bool wantLm = (ctx.lmMeshId != 0) && (span.lightmapMF != nullptr)
 		                    && (span.lightmapST != nullptr);
+		// Per-face shadow mat id stamp. Same value across every pixel
+		// of this face — precomputed once in the Mekalele dispatcher
+		// (see MekaleleImpl) and broadcast here. Plane is optional;
+		// kernel falls back to matID+1 when the plane is empty.
+		const u16 packedShadowMatId = ctx.shadowMatId;
+		const bool wantShadowMatId = (span.shadowMatID != nullptr);
 
 		Vec8i p_a = v8_from_arith_seq(a0, tile.dadx);
 		Vec8i p_b = v8_from_arith_seq(b0, tile.dbdx);
@@ -502,6 +536,9 @@ struct TileRasterizer {
 							if (tB > 255) tB = 255;
 							span.lightmapMF[lane] = packedLmMF;
 							span.lightmapST[lane] = uint16_t(sB | (tB << 8));
+						}
+						if (wantShadowMatId) {
+							span.shadowMatID[lane] = packedShadowMatId;
 						}
 					}
 				}
@@ -704,6 +741,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// post-clip vertex set. No clipped/unclipped distinction needed here.
 	const uint16_t lmMeshId  = F->ParentTri ? F->ParentTri->staticLMMeshId : uint16_t(0);
 	const uint16_t lmFaceIdx = F->MeshFaceIdx;
+	// Per-face shadow mat id — priority mirrors ShadowMap's resolution
+	// (F->ShadowMatID > F->Txtr->ShadowMatID > Txtr->ID+1). Stamped
+	// into gb.shadowMatID across every pixel of this face so the
+	// deferred PolyId cube-shadow path reads it without going through
+	// the 8-bit matID encoded in `txtr`.
+	uint16_t shadowMatId;
+	if (F->ShadowMatID != 0) {
+		shadowMatId = F->ShadowMatID;
+	} else if (F->Txtr->ShadowMatID != 0) {
+		shadowMatId = F->Txtr->ShadowMatID;
+	} else {
+		shadowMatId = uint16_t(F->Txtr->ID + 1);
+	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
@@ -715,6 +765,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.zScale = cam.zScale,
 		.lmMeshId  = lmMeshId,
 		.lmFaceIdx = lmFaceIdx,
+		.shadowMatId = shadowMatId,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

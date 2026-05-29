@@ -4,6 +4,7 @@
 #include "Base/Matrix.h"
 #include "Base/Camera.h"
 #include "Base/Face.h"
+#include "Base/FeatureFlags.h"
 #include <atomic>
 #include <vector>
 #include <cstdint>
@@ -30,7 +31,13 @@ struct ShadowMap {
 	// otherwise). 0 = "unwritten / no occluder" sentinel, so the
 	// engine-side matID is shifted by +1. Lighting kernel reads this
 	// for material equality in PolyId mode; ignored in Depth mode.
-	std::vector<uint8_t> polyId;
+	// Widened to uint16_t so per-Material::ShadowMatID overrides (e.g.
+	// greets wall split) can exceed the 8-bit cap. 0 = "no occluder";
+	// non-zero = ShadowMatID (which itself defaults to `Txtr->ID + 1`
+	// when the Material hasn't been assigned a custom group). Memory:
+	// 2 bytes/texel × 6 cube faces × N omnis, e.g. 10 omnis × 6 × 512² =
+	// 30 MB per buffer pair, still well within budget.
+	std::vector<uint16_t> polyId;
 
 	// Parallel buffers populated per-frame by the dynamic-objects bake
 	// (BakeDynamicForStaticOmnis). Only animated meshes are rendered
@@ -39,7 +46,7 @@ struct ShadowMap {
 	// only fires once. Allocated lazily by ShadowMaps_Rebuild +
 	// CubeShadowMaps_Rebuild — same size as `depth` / `polyId`.
 	std::vector<uint16_t> depth_dynamic;
-	std::vector<uint8_t>  polyId_dynamic;
+	std::vector<uint16_t> polyId_dynamic;
 	int    xres = 0;
 	int    yres = 0;
 
@@ -181,13 +188,31 @@ inline int CubeShadow_SelectFace(float dx, float dy, float dz)
 
 // Sample a cube shadow at the given view-space sample point. Returns
 // shadow attenuation in [0, 1] — 1.0 fully lit, 0.0 fully shadowed.
-// Bias parameters match the spot-shadow path; slopeBiasFactor accepts
-// a precomputed (1/N·L - 1) factor since the caller has the normals
-// handy. Caller computes the world-space sample pos once per pixel.
+//
+// `surfaceMatId` ∈ [-1, 65535] — the receiver's resolved 16-bit
+// ShadowMatID for direct comparison against sm.polyId (NO +1 offset
+// added inside; callers pass the literal value the bake stamped).
+//   -1 = legacy Depth mode: compare biased pixel-z against sm.depth.
+//        constBias + slopeBiasInt control the comparison bias.
+//   0..65535 = PolyId mode: identity test of sm.polyId[texel] against
+//        surfaceMatId. Caller is responsible for resolving the receiver's
+//        ShadowMatID first (Material::ShadowMatID if non-zero, else
+//        fallback uint16_t(matID + 1)). Bias parameters ignored.
+//
+// `dynamicOnly`: when true, only the dynamic buffers (sm.depth_dynamic,
+//   sm.polyId_dynamic) are sampled — the static buffers are ignored.
+//   Used by the static-lightmap composite path: the lightmap atlas
+//   already encodes the static-cube shadow factor for the pixel, so
+//   adding the static buffer here would double-count. dynamicOnly
+//   layers per-frame dynamic-mesh shadows on top of the static atlas.
+//
+// Caller computes the world-space sample pos once per pixel.
 inline float CubeShadow_Sample(int cubeIdx,
                                 float worldX, float worldY, float worldZ,
                                 float viewX,  float viewY,  float viewZ,
-                                int   constBias, int slopeBiasInt)
+                                int   constBias, int slopeBiasInt,
+                                int   surfaceMatId = -1,
+                                bool  dynamicOnly  = false)
 {
     if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 1.0f;
     const CubeShadowRef& cr = g_cubeShadowRefs[cubeIdx];
@@ -252,33 +277,98 @@ inline float CubeShadow_Sample(int cubeIdx,
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
     const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-    const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-    const uint16_t *zsRow1 = zsRow0 + sm.xres;
-    // Dynamic buffer — populated only when --shadow-dynamic on. When
-    // off it's still allocated but all-zero, so max() falls through
-    // to the static value with no behavior change. (Cache cost of
-    // touching it is the real penalty; gate at scene level if needed.)
-    const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-    const uint16_t *zdRow1 = zdRow0 + sm.xres;
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
     const float w10 =         fx  * (1.0f - fy);
     const float w01 = (1.0f - fx) *         fy;
     const float w11 =         fx  *         fy;
-    int pixZenc = 0xFF80 - int(lz * sm.zScale);
-    if (pixZenc < 0) pixZenc = 0;
-    if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-    const int biased = pixZenc + constBias + slopeBiasInt;
-    // Per-tap "closest occluder" = max(static, dynamic). Higher zEnc
-    // = closer to light = more occluding; the closer of the two wins.
-    auto closest = [](uint16_t a, uint16_t b) -> int {
-        return int(a > b ? a : b);
-    };
     float occ = 0.0f;
-    if (biased < closest(zsRow0[iX    ], zdRow0[iX    ])) occ += w00;
-    if (biased < closest(zsRow0[iX + 1], zdRow0[iX + 1])) occ += w10;
-    if (biased < closest(zsRow1[iX    ], zdRow1[iX    ])) occ += w01;
-    if (biased < closest(zsRow1[iX + 1], zdRow1[iX + 1])) occ += w11;
+    if (surfaceMatId >= 0) {
+        // PolyId mode: identity test. The ShadowBarry rasterizer writes
+        // matID+1 into polyId (0 = unwritten); receiver's matID+1 at a
+        // tap = "same material wrote there, not occluded". Anything
+        // else nonzero = different-material occluder → occluded.
+        //
+        // Closest-occluder selection when both static AND dynamic wrote
+        // to the tap: pick the polyId whose buffer has the LARGER zEnc
+        // (larger = closer to the light, wins as occluder). This mirrors
+        // the depth-mode `closest = max(static, dynamic)` logic. The
+        // earlier "dynamic always wins if non-zero" shortcut was wrong:
+        // it caused dynamic meshes to project spurious shadows onto
+        // static surfaces that were actually closer to the light than
+        // the dynamic mesh.
+        //
+        // Reads: 4 polyId + 4 depth bytes per buffer (static + dynamic)
+        // = 24 bytes/tap × 4 taps = 96 bytes vs depth-only's 64 bytes.
+        // Slightly more memory than pure depth, but still identity-test
+        // semantics (no bias acne).
+        const uint16_t *idsRow0 = sm.polyId.data() + rowOfs;
+        const uint16_t *idsRow1 = idsRow0 + sm.xres;
+        const uint16_t *iddRow0 = sm.polyId_dynamic.data() + rowOfs;
+        const uint16_t *iddRow1 = iddRow0 + sm.xres;
+        const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
+        const uint16_t *zsRow1 = zsRow0 + sm.xres;
+        const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
+        const uint16_t *zdRow1 = zdRow0 + sm.xres;
+        // Direct 16-bit comparison: caller already resolved ShadowMatID.
+        const uint16_t receiverId = uint16_t(surfaceMatId);
+        auto closestPoly = [&](uint16_t sId, uint16_t dId,
+                                uint16_t sZ, uint16_t dZ) -> uint16_t {
+            // Empty buffer (id == 0) loses regardless of depth, because
+            // unwritten texels have zEnc = 0 anyway. Otherwise pick the
+            // one whose occluder is closer to the light.
+            if (sId == 0) return dId;
+            if (dId == 0) return sId;
+            return (dZ > sZ) ? dId : sId;
+        };
+        // dynamicOnly: zero out the static side so closestPoly always
+        // returns the dynamic id (or 0 if dynamic is also empty).
+        const uint16_t s00 = dynamicOnly ? uint16_t(0) : idsRow0[iX  ];
+        const uint16_t s10 = dynamicOnly ? uint16_t(0) : idsRow0[iX+1];
+        const uint16_t s01 = dynamicOnly ? uint16_t(0) : idsRow1[iX  ];
+        const uint16_t s11 = dynamicOnly ? uint16_t(0) : idsRow1[iX+1];
+        const uint16_t zs00 = dynamicOnly ? uint16_t(0) : zsRow0[iX  ];
+        const uint16_t zs10 = dynamicOnly ? uint16_t(0) : zsRow0[iX+1];
+        const uint16_t zs01 = dynamicOnly ? uint16_t(0) : zsRow1[iX  ];
+        const uint16_t zs11 = dynamicOnly ? uint16_t(0) : zsRow1[iX+1];
+        if (fds::FeatureFlags::shadow_polyid_no_pcf()) {
+            const uint16_t c = closestPoly(s00, iddRow0[iX], zs00, zdRow0[iX]);
+            if (c != 0 && c != receiverId) occ = 1.0f;
+        } else {
+            const uint16_t c00 = closestPoly(s00, iddRow0[iX  ], zs00, zdRow0[iX  ]);
+            const uint16_t c10 = closestPoly(s10, iddRow0[iX+1], zs10, zdRow0[iX+1]);
+            const uint16_t c01 = closestPoly(s01, iddRow1[iX  ], zs01, zdRow1[iX  ]);
+            const uint16_t c11 = closestPoly(s11, iddRow1[iX+1], zs11, zdRow1[iX+1]);
+            if (c00 != 0 && c00 != receiverId) occ += w00;
+            if (c10 != 0 && c10 != receiverId) occ += w10;
+            if (c01 != 0 && c01 != receiverId) occ += w01;
+            if (c11 != 0 && c11 != receiverId) occ += w11;
+        }
+    } else {
+        // Depth mode: legacy biased depth comparison.
+        const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
+        const uint16_t *zsRow1 = zsRow0 + sm.xres;
+        // Dynamic buffer — populated only when --shadow-dynamic on. When
+        // off it's still allocated but all-zero, so max() falls through
+        // to the static value with no behavior change. (Cache cost of
+        // touching it is the real penalty; gate at scene level if needed.)
+        const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
+        const uint16_t *zdRow1 = zdRow0 + sm.xres;
+        int pixZenc = 0xFF80 - int(lz * sm.zScale);
+        if (pixZenc < 0) pixZenc = 0;
+        if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+        const int biased = pixZenc + constBias + slopeBiasInt;
+        // dynamicOnly: ignore static buffer (its contribution is already
+        // baked into the lightmap atlas the caller multiplied us into).
+        auto closest = [&](uint16_t a, uint16_t b) -> int {
+            return int((dynamicOnly ? uint16_t(0) : a) > b
+                       ? (dynamicOnly ? uint16_t(0) : a) : b);
+        };
+        if (biased < closest(zsRow0[iX    ], zdRow0[iX    ])) occ += w00;
+        if (biased < closest(zsRow0[iX + 1], zdRow0[iX + 1])) occ += w10;
+        if (biased < closest(zsRow1[iX    ], zdRow1[iX    ])) occ += w01;
+        if (biased < closest(zsRow1[iX + 1], zdRow1[iX + 1])) occ += w11;
+    }
     return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
 }

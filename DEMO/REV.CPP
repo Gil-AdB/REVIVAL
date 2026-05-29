@@ -1058,11 +1058,18 @@ void CodeEntry(void *var)
 		// _control87(_PC_24 | _RC_UP, _MCW_PC | _MCW_RC);
 		FPU_LPrecision();
 
+		// Greets first so its slow lightmap bake spawns early — the
+		// bake itself runs on its own thread inside Initialize_Greets
+		// and parallelizes with the remaining inits + glat playback.
+		// Reordering instead of running on a separate thread because
+		// LoadFLD reads through a global FILE* (FLD_READ.CPP:25); two
+		// concurrent LoadFLD calls would race + corrupt the version
+		// check and exit(1).
+		Initialize_Greets(); //5.6
 		Initialize_City();
 		Initialize_Chase();
 		Initialize_Fountain(); //8.3
 		Initialize_Crash();
-		Initialize_Greets(); //5.6
 	});// (); //9.3
 
 //	Initialize_Koch();
@@ -1113,7 +1120,12 @@ void CodeEntry(void *var)
 	if (g_shouldQuit.load()) goto demo_exit;
 	Run_Greets();
 demo_exit:;
-//	
+	// Join the greets lightmap bake thread before global destructors fire.
+	// If we got here via SDL_QUIT/ESC before Run_Greets joined it, the
+	// static std::thread is still joinable and ~thread() would call
+	// std::terminate at process exit.
+	Greets_ShutdownBakeThread();
+//
 
 	//	SavePolyStats("Greets.stat");
 //	Run_RainFX();
@@ -1541,8 +1553,28 @@ int main(int argc, const char *argv[])
 					// Cycle the shadow-map viewer thumbnail through
 					// every registered map. -1 hides; SDL2's V_Flip
 					// paints the active one as a thumbnail before push.
+					// Shift+V steps backward.
+					const Uint16 mod = event.key.keysym.mod;
+					const bool back = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
 					extern void ShadowMap_ViewCycle();
-					ShadowMap_ViewCycle();
+					extern void ShadowMap_ViewCycleBack();
+					if (back) ShadowMap_ViewCycleBack();
+					else      ShadowMap_ViewCycle();
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_B) {
+					// Cycle the shadow-map debug view's buffer mode:
+					// static → dynamic → combined (closest-by-depth).
+					// Applies to both thumbnail (V) and fullscreen (M).
+					extern void ShadowMap_ViewModeCycle();
+					ShadowMap_ViewModeCycle();
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_T) {
+					// Toggle per-frame staleness tracker for the dynamic
+					// cube buffers. When on, logs every 60 frames any
+					// shadow maps whose polyId_dynamic hash hasn't changed
+					// since the last check — those are the ones whose
+					// dynamic bake isn't actually writing fresh content
+					// (the "frozen at t=0" symptom).
+					extern void ShadowMap_StalenessToggle();
+					ShadowMap_StalenessToggle();
 				}
 			}
 		}

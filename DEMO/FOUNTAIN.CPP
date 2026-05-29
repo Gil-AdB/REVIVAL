@@ -2178,7 +2178,7 @@ struct FountainScene : SceneDriver {
 			Quaternion_Form(&VortexTri.Scale.Keys->Pos, scl, scl, scl, 0.0f);
 		}
 
-		Animate_Objects(FntSc);
+		Animate_Objects(FntSc, View);
 
 		if (Timer > FntVortexStart) {
 			VortexTri.Flags |= HTrack_Visible;

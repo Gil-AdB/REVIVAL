@@ -59,6 +59,20 @@ struct TriMesh
     // per-pixel so the deferred kernel can look up the lightmap.
     uint16_t         staticLMMeshId = 0;
 
+    // Optional pre-computed world-space vertex positions, aligned with
+    // Verts[0..VIndex-1]. When non-null AND the mesh is static (Animate_
+    // Objects skips it, e.g. via Tri_Possessed), the cube-face shadow
+    // xform can:
+    //   1. Per-vertex pyramid cull in world space (one dot product + a
+    //      few compares; no matmul). Outside-vertices skip the view xform.
+    //   2. Inside-vertices: view-space TPos = view.Mat × (worldPos - cam.ISource).
+    //      Same number of mul/add as the legacy M34 × Vtx->Pos path, but
+    //      without the per-face object→world step baked into M.
+    // Allocated by scene init for static chunks (e.g. greets's split
+    // Piramid). Other meshes leave this null; xform falls back to the
+    // legacy per-face matrix path.
+    Vector         * worldVerts    = nullptr;
+
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
 

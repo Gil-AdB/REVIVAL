@@ -57,6 +57,13 @@ void EngineGBuffer_Resize(int X, int Y) {
         s_engineGBuffer.lightmapMF.clear();
         s_engineGBuffer.lightmapST.clear();
     }
+    // Per-pixel ShadowMatID — same lifecycle as the lightmap planes
+    // (used by the deferred PolyId cube-shadow path to read receiver
+    // identity without bouncing through the 8-bit matID in `txtr`).
+    // Allocated unconditionally on the opaque g-buffer so non-lightmap
+    // scenes still benefit when their materials set Material::ShadowMatID
+    // (greets hull merge) or per-face F->ShadowMatID (greets wall split).
+    s_engineGBuffer.shadowMatID.assign(numPixels, 0);
     g_gbuffer = &s_engineGBuffer;
     // Transparent layers don't currently use tangent — leaving those
     // empty so GBufferSpan's nullptr-tangent path keeps the rasterizer

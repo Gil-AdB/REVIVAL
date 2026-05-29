@@ -38,12 +38,18 @@ namespace {
 // ─── World-space static-cube sampler ─────────────────────────────────────
 // Bake-time parallel to CubeShadow_Sample (FDS/FILLERS/ShadowMap.h), but
 // takes a world-space sample point instead of view-space. Reads only the
-// static-occluder depth buffer (`sm.depth`), since the lightmap caches the
-// static-scene contribution. Returns shadow factor in [0, 255] where 255
-// is fully lit and 0 is fully shadowed.
+// static-occluder buffer (sm.depth or sm.polyId depending on mode), since
+// the lightmap caches the static-scene contribution. Returns shadow factor
+// in [0, 255] where 255 is fully lit and 0 is fully shadowed.
+//
+// `surfaceMatId`: -1 = legacy Depth mode (biased z-compare against sm.depth).
+//                 0..255 = PolyId mode (identity test against sm.polyId,
+//                          same convention as runtime CubeShadow_Sample).
+//                          Bias arguments ignored in PolyId mode.
 uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
                                  const Vector &worldPos,
-                                 int constBias, int slopeBiasInt)
+                                 int constBias, int slopeBiasInt,
+                                 int surfaceMatId = -1)
 {
     const float dwx = worldPos.x - cr.lightISource.x;
     const float dwy = worldPos.y - cr.lightISource.y;
@@ -71,8 +77,6 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 255;
 
     const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-    const uint16_t *z0 = sm.depth.data() + rowOfs;
-    const uint16_t *z1 = z0 + sm.xres;
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -80,20 +84,40 @@ uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &cr,
     const float w01 = (1.0f - fx) *         fy;
     const float w11 =         fx  *         fy;
 
-    // Depth comparison — matches the runtime CubeShadow_Sample exactly
-    // (ShadowMap.h). Cube shadows always use depth, never PolyId,
-    // regardless of g_shadowMode (that only switches the spot-shadow
-    // path). slopeBiasInt is computed by the caller from this texel's
-    // (N · L) so grazing-angle faces don't acne under the constant bias.
-    int pixZenc = 0xFF80 - int(lz * sm.zScale);
-    if (pixZenc < 0) pixZenc = 0;
-    if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-    const int biased = pixZenc + constBias + slopeBiasInt;
     float occ = 0.0f;
-    if (biased < int(z0[iX  ])) occ += w00;
-    if (biased < int(z0[iX+1])) occ += w10;
-    if (biased < int(z1[iX  ])) occ += w01;
-    if (biased < int(z1[iX+1])) occ += w11;
+    if (surfaceMatId >= 0) {
+        // PolyId mode: identity test against sm.polyId. Matches the
+        // runtime CubeShadow_Sample PolyId branch (ShadowMap.h). 0
+        // sentinel = "no occluder wrote here." Receiver's matID+1 means
+        // "this texel was written by my own (or a same-matID) face" =
+        // not occluded. Anything else nonzero = occluder of a different
+        // material = occluded. No bias needed.
+        const uint16_t *p0 = sm.polyId.data() + rowOfs;
+        const uint16_t *p1 = p0 + sm.xres;
+        // 16-bit ShadowMatID direct compare (no +1 offset added here;
+        // bake-time caller resolves Material::ShadowMatID upstream).
+        const uint16_t receiverId = uint16_t(surfaceMatId);
+        auto isOccluded = [&](uint16_t v) -> bool {
+            return v != 0 && v != receiverId;
+        };
+        if (isOccluded(p0[iX  ])) occ += w00;
+        if (isOccluded(p0[iX+1])) occ += w10;
+        if (isOccluded(p1[iX  ])) occ += w01;
+        if (isOccluded(p1[iX+1])) occ += w11;
+    } else {
+        // Depth mode: biased z-compare. slopeBiasInt computed by caller
+        // from this texel's (N · L) so grazing-angle faces don't acne.
+        const uint16_t *z0 = sm.depth.data() + rowOfs;
+        const uint16_t *z1 = z0 + sm.xres;
+        int pixZenc = 0xFF80 - int(lz * sm.zScale);
+        if (pixZenc < 0) pixZenc = 0;
+        if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+        const int biased = pixZenc + constBias + slopeBiasInt;
+        if (biased < int(z0[iX  ])) occ += w00;
+        if (biased < int(z0[iX+1])) occ += w10;
+        if (biased < int(z1[iX  ])) occ += w01;
+        if (biased < int(z1[iX+1])) occ += w11;
+    }
 
     const float lit = 1.0f - occ;
     int factor = int(lit * 255.0f + 0.5f);
@@ -271,6 +295,11 @@ void LightmapBake_Static(Scene *Sc)
             out.x += IP.x; out.y += IP.y; out.z += IP.z;
         };
 
+        const bool planar = fds::FeatureFlags::shadow_lightmap_planar();
+        if (planar) {
+            lm.planarBases.assign(size_t(T->FIndex), FacePlanarBasis{});
+        }
+
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             const Face &F = T->Faces[fi];
             if (!F.A || !F.B || !F.C) continue;
@@ -289,11 +318,68 @@ void LightmapBake_Static(Scene *Sc)
                 MatrixXVector(T->RotMat, &localN, &wN);
             }
 
+            // Receiver's resolved 16-bit ShadowMatID for the PolyId bake.
+            // Direct value (no +1 offset) that matches what ShadowBarry
+            // stamped. Priority (high to low) mirrors Mekalele's per-face
+            // resolution in MekaleleImpl:
+            //   1. F.ShadowMatID  (per-face — greets wall split)
+            //   2. F.Txtr->ShadowMatID (per-material — greets hull merge)
+            //   3. uint16_t(Txtr->ID + 1) (legacy matID+1 fallback)
+            // -1 = depth mode (skip PolyId entirely).
+            int bakeMatId = -1;
+            if (g_shadowMode.load(std::memory_order_relaxed) == ShadowMode::PolyId
+                && F.Txtr) {
+                if (F.ShadowMatID != 0) {
+                    bakeMatId = int(F.ShadowMatID);
+                } else if (F.Txtr->ShadowMatID != 0) {
+                    bakeMatId = int(F.Txtr->ShadowMatID);
+                } else {
+                    bakeMatId = int(F.Txtr->ID + 1);
+                }
+            }
+
+            // Planar mode: pick dominant cardinal axis from |wN|, compute
+            // the face's projected bbox on the orthogonal plane, store
+            // basis for runtime sampling. Skip degenerate faces (zero ext
+            // along either axis would zero-divide the runtime mapper).
+            uint8_t domAxis = 1;
+            float uMin = 0, uExt = 0, vMin = 0, vExt = 0;
+            if (planar) {
+                const float aX = std::fabs(wN.x);
+                const float aY = std::fabs(wN.y);
+                const float aZ = std::fabs(wN.z);
+                if      (aY >= aX && aY >= aZ) domAxis = 1;
+                else if (aX >= aZ)             domAxis = 0;
+                else                            domAxis = 2;
+                auto proj = [&](const Vector &p, float &u, float &v) {
+                    if      (domAxis == 0) { u = p.y; v = p.z; }
+                    else if (domAxis == 1) { u = p.x; v = p.z; }
+                    else                    { u = p.x; v = p.y; }
+                };
+                float uA, vA, uB, vB, uC, vC;
+                proj(wA, uA, vA);
+                proj(wB, uB, vB);
+                proj(wC, uC, vC);
+                uMin = std::min({uA, uB, uC});
+                vMin = std::min({vA, vB, vC});
+                uExt = std::max({uA, uB, uC}) - uMin;
+                vExt = std::max({vA, vB, vC}) - vMin;
+                FacePlanarBasis &pb = lm.planarBases[size_t(fi)];
+                pb.dominantAxis = domAxis;
+                pb.uMin = uMin; pb.uExt = uExt;
+                pb.vMin = vMin; pb.vExt = vExt;
+            }
+
             // Per cube omni: face-level culls then per-texel bake.
             for (int oi = 0; oi < numCubeOmnis; ++oi) {
                 const CubeShadowRef &cr = g_cubeShadowRefs[oi];
                 Omni *O = cr.omni;
                 if (!O) continue;
+                // Skip moving omnis (Omni_CastsShadow without Omni_StaticShadow):
+                // their cube is re-rendered every frame from current IPos by
+                // DynamicOmnisPerFrame, so a static lightmap baked at t=0 from
+                // a position the omni is no longer at would just be wrong.
+                if (!(O->Flags & Omni_StaticShadow)) continue;
                 const float range = O->IRange > 0.0f ? O->IRange : 1.0e30f;
                 const Vector &OP = cr.lightISource;
 
@@ -336,30 +422,58 @@ void LightmapBake_Static(Scene *Sc)
 
                 bool anyCovered = false;
 
-                // Texel grid: (s, t) in [0, 1]^2 with s+t <= 1 = triangle
-                // interior; texels with s+t > 1 are mirrored to (1-s, 1-t)
-                // so edge dilation doesn't bleed wrong shadow values.
+                // Texel grid. Bary mode: (s, t) in [0, 1]² with s+t ≤ 1 =
+                // triangle interior; texels with s+t > 1 are mirrored to
+                // (1-s, 1-t) so edge dilation doesn't bleed wrong shadow
+                // values. Planar mode: (s, t) maps linearly to the face's
+                // pre-computed (uMin + s*uExt, vMin + t*vExt); the third
+                // coordinate is solved from the face plane equation
+                // (N·P = -NormProd, world-space, using wN computed above).
                 const float invN1 = 1.0f / float(lmRes - 1);
+                // Pre-solve world-space plane offset once per face: N·P = -d.
+                const float planeD = -(wN.x * wA.x + wN.y * wA.y + wN.z * wA.z);
+                const float invDomN = planar
+                    ? (domAxis == 0 ? (std::fabs(wN.x) > 1.0e-6f ? 1.0f / wN.x : 0.0f)
+                       : domAxis == 1 ? (std::fabs(wN.y) > 1.0e-6f ? 1.0f / wN.y : 0.0f)
+                                      : (std::fabs(wN.z) > 1.0e-6f ? 1.0f / wN.z : 0.0f))
+                    : 0.0f;
                 for (int ty = 0; ty < lmRes; ++ty) {
                     float t = float(ty) * invN1;
                     for (int tx = 0; tx < lmRes; ++tx) {
                         float s = float(tx) * invN1;
-                        float ss = s, tt = t;
-                        if (ss + tt > 1.0f) { ss = 1.0f - ss; tt = 1.0f - tt; }
-                        const float w1 = 1.0f - ss - tt;  // weight of A
-                        const float w2 = ss;              // weight of B
-                        const float w3 = tt;              // weight of C
-                        const Vector wp = {
-                            w1*wA.x + w2*wB.x + w3*wC.x,
-                            w1*wA.y + w2*wB.y + w3*wC.y,
-                            w1*wA.z + w2*wB.z + w3*wC.z,
-                        };
+                        Vector wp;
+                        if (planar) {
+                            // (s, t) → projected (u, v) → 3D point on face plane.
+                            const float wu = uMin + s * uExt;
+                            const float wv = vMin + t * vExt;
+                            if      (domAxis == 0) {
+                                wp.y = wu; wp.z = wv;
+                                wp.x = -(wN.y * wu + wN.z * wv + planeD) * invDomN;
+                            } else if (domAxis == 1) {
+                                wp.x = wu; wp.z = wv;
+                                wp.y = -(wN.x * wu + wN.z * wv + planeD) * invDomN;
+                            } else {
+                                wp.x = wu; wp.y = wv;
+                                wp.z = -(wN.x * wu + wN.y * wv + planeD) * invDomN;
+                            }
+                        } else {
+                            float ss = s, tt = t;
+                            if (ss + tt > 1.0f) { ss = 1.0f - ss; tt = 1.0f - tt; }
+                            const float w1 = 1.0f - ss - tt;
+                            const float w2 = ss;
+                            const float w3 = tt;
+                            wp = {
+                                w1*wA.x + w2*wB.x + w3*wC.x,
+                                w1*wA.y + w2*wB.y + w3*wC.y,
+                                w1*wA.z + w2*wB.z + w3*wC.z,
+                            };
+                        }
 
                         // Per-texel range cull.
                         const float dxp = wp.x - OP.x, dyp = wp.y - OP.y, dzp = wp.z - OP.z;
                         if (dxp*dxp + dyp*dyp + dzp*dzp > r2) continue;
 
-                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, constBias, faceSlopeBias);
+                        uint8_t lit = SampleStaticCubeAtWorld(cr, wp, constBias, faceSlopeBias, bakeMatId);
                         uint8_t *dst = lm.texel(int(fi), tx, ty) + oi;
                         *dst = lit;
                         ++texelsBaked;
@@ -515,14 +629,18 @@ void Render_LightmapViz(Scene *Sc)
 // at the same world point. If output looks correct with this flag, the
 // bake function is fine and the bug is downstream in atlas / bary; if it
 // matches the existing broken lightmap output, the bake function is wrong.
-namespace { uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &, const Vector &, int, int); }
+namespace { uint8_t SampleStaticCubeAtWorld(const CubeShadowRef &, const Vector &, int, int, int); }
 uint8_t LightmapBake_DebugSampleAtWorld(int cubeIdx, float wx, float wy, float wz,
                                           int constBias, int slopeBiasInt)
 {
     if (cubeIdx < 0 || size_t(cubeIdx) >= g_cubeShadowRefs.size()) return 255;
     const CubeShadowRef &cr = g_cubeShadowRefs[cubeIdx];
     Vector wp{wx, wy, wz};
-    return SampleStaticCubeAtWorld(cr, wp, constBias, slopeBiasInt);
+    // Debug entry: no face context here, so always use Depth mode for
+    // a clean apples-to-apples against the runtime CubeShadow_Sample
+    // depth path. (Runtime --shadow-lightmap-recompute-bake comparison
+    // is only meaningful in Depth mode anyway.)
+    return SampleStaticCubeAtWorld(cr, wp, constBias, slopeBiasInt, -1);
 }
 
 }  // namespace fds

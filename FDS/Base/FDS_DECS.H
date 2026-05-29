@@ -375,7 +375,14 @@ void Radix_Sort(fds::FListEntry *f, fds::FListEntry *s, unsigned int n);
 
 void SetCurrentScene(Scene *Sc);
 
-void Animate_Objects(Scene *Sc, bool SkipCameraAnimation = false);
+// Animate the scene's meshes + omnis from their splines at CurFrame.
+// `cam`: if non-null, also re-animate that camera's pose + perspective
+// and update the global FOVX/FOVY for the active render loop. If null,
+// no camera work happens — safe to call from off-render-loop threads
+// (Initialize_X bake prep) without touching the global `View`.
+// Old `bool SkipCameraAnimation` API removed; render loops pass `View`,
+// init-time bake prep passes `nullptr`.
+void Animate_Objects(Scene *Sc, Camera *cam);
 // xresOverride / yresOverride: alternate screen rect for visibility-flag
 // computation (>= 0 to override, -1 to use XRes/YRes globals). The
 // shadow-map orchestrator passes its shadow-map dimensions so faces

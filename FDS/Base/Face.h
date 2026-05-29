@@ -74,6 +74,18 @@ struct Face
 	// Necessary because the Mekalele dispatcher receives F from FList
 	// (cloned), so `F - F->ParentTri->Faces` is invalid.
 	uint16_t         MeshFaceIdx = 0;
+	// Per-face 16-bit ShadowMatID override for the shadow rasterizer.
+	// 0 = use `Txtr->ShadowMatID` if set, else `uint16_t(Txtr->ID + 1)`
+	// (default — matID-based identity, what ShadowBarry historically
+	// wrote). Non-zero = use this value directly. Lets scene-init code
+	// merge faces into shadow groups beyond their material (greets
+	// hull+hull2 share a polyId so the cube PolyId path doesn't fire
+	// spurious "occluded" between them; greets walls split into
+	// per-coplanar-cluster groups so distinct walls cross-shadow while
+	// same-wall faces self-match — 16-bit space supports the ~2600
+	// distinct clusters greets needs without inflating matTable past
+	// the 8-bit matID cap).
+	uint16_t         ShadowMatID = 0;
 	//	Surface       * Surf; // For T-Caching. (what??!)
 
 	void uvFromVertices() {

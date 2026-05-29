@@ -37,6 +37,16 @@ struct Material
     // ─── WARM: scene-tagging, identification ─────────────────────────
     Scene               * RelScene              = nullptr; // This should be nuked from orbit. Just keep a scene id instead of a pointer
     dword                 ID                    = 0;
+    // 16-bit shadow-group identity. Cube/spot PolyId paths compare this
+    // (not `ID`) so distinct materials can share one shadow group, or
+    // one material can be split into many. Set by scene-init code (e.g.
+    // greets's hull-merge: hull/hull2 → same ShadowMatID; greets wall
+    // split: per-plane-cluster gets a unique ShadowMatID). Default 0 =
+    // "unassigned" — ShadowBarry + Mekalele then fall back to
+    // `uint16_t(ID + 1)` (the legacy matID-based behavior). 16 bits
+    // accommodates ~65 k distinct shadow groups (wall split for greets
+    // tops out near 600).
+    unsigned short        ShadowMatID           = 0;
     Texture             * EnvTexture            = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;

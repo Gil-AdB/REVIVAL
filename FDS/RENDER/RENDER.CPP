@@ -280,8 +280,20 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 {
 	constexpr auto		numTilesX = 6;
 	constexpr auto		numTilesY = 4;
-	const auto			tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
-	const auto			tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+	// Tile sizes MUST be multiples of Mekalele's 8×8 tile to avoid races
+	// at clipper-tile boundaries. The rasterizer's apply_exact does a
+	// 16-byte aligned RMW on the G-buffer; if two clipper tiles
+	// straddle the same 8-pixel-wide Mekalele tile, adjacent workers
+	// race on the same 16-byte word (READ X → A masks A's bits → write,
+	// B masks B's bits → write LOSES A's update). At 1920×1080 with
+	// 6×4 tiles the unaligned y size (270) cut through Mekalele's 8-row
+	// boundaries and produced flicker patches in the main render. Same
+	// fix as Shadows.cpp dispatch.
+	constexpr int kMekaTile = 8;
+	const auto rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
+	const auto rawTileY = (YRes + (numTilesY - 1)) / numTilesY;
+	const auto tileSizeX = (rawTileX + kMekaTile - 1) & ~(kMekaTile - 1);
+	const auto tileSizeY = (rawTileY + kMekaTile - 1) & ~(kMekaTile - 1);
 
 	renderns::tileCounter = 0;
 	// Deferred only if env var set AND the G-buffer is sized for the
@@ -795,7 +807,7 @@ void fds::RenderPipeline::runScene(Scene *Sc,float Seconds)
 			if (View==&FC) Dynamic_Camera();
 			dTime *= 0.25;
 		} else {AfterFirstFrame=1; TTrd = Timer; dTime = 0;}
-		Animate_Objects(Sc);
+		Animate_Objects(Sc, View);
 		Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces); Par1 = Timer;
 		if (!(Sc->Flags&Scn_Nolighting)) Lighting(Sc); Par4 = Timer;
 		

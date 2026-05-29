@@ -1726,7 +1726,7 @@ void Initialize_City()
 	// sees the faceted normals.
 	MakeFacesIndependentByAngle(CitySc, 30.0f);
 
-	Animate_Objects(CitySc, true);
+	Animate_Objects(CitySc, /*cam=*/nullptr);
 	Lighting(CitySc);
 
 	// MainSurf swap to a CUBE_MAP_XRES x CUBE_MAP_YRES TmpSurf for the
@@ -2197,7 +2197,7 @@ struct CityScene : SceneDriver {
 			prevI = curI;
 		}
 
-		Animate_Objects(CitySc);
+		Animate_Objects(CitySc, View);
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 

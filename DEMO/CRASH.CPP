@@ -71,7 +71,7 @@ struct CrashScene : SceneDriver {
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
-		Animate_Objects(CrashSc);
+		Animate_Objects(CrashSc, View);
 
 		prof.switchTo(PROF_XFRM);
 		Transform_Objects(CrashSc, fds::g_mainCamera, fds::g_mainFaces);

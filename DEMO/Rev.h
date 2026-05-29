@@ -62,6 +62,11 @@ void Run_Fountain();
 
 void Initialize_Greets();
 void Run_Greets();
+// Quit-time cleanup: if the user exits before Run_Greets has joined the
+// background lightmap-bake thread, the std::thread destructor would call
+// std::terminate. Call this at every demo_exit path to join whichever
+// state the thread is in. Safe to call when no bake was ever spawned.
+void Greets_ShutdownBakeThread();
 
 void Initialize_Crash();
 void Run_Crash();

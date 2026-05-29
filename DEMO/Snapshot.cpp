@@ -2642,7 +2642,14 @@ int RunRasterBench(const BenchConfig& cfg, int xres, int yres) {
 }
 
 int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
+    // Per-bench resolution override via @xres=,yres= takes precedence
+    // over rev.cfg's ResolutionX/Y (passed in via g_demoXRes/Y). Lets us
+    // bench a single scene at multiple resolutions in one shell session.
+    if (cfg.xres > 0) xres = cfg.xres;
+    if (cfg.yres > 0) yres = cfg.yres;
     if (!initSnapshotEnvironment(xres, yres)) return 3;
+    std::fprintf(stderr, "[BENCH] scene=%s res=%dx%d\n",
+                 cfg.scene.c_str(), xres, yres);
 
     std::unique_ptr<SceneDriver> driver;
     if (cfg.scene == "city") {
@@ -3244,7 +3251,7 @@ int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres) {
         // scenes that don't run shadows can get away without it, but
         // the bake path needs it.
         FList_Allocate(sc);
-        Animate_Objects(sc, true);
+        Animate_Objects(sc, /*cam=*/nullptr);
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
 
         // Shadow init — mirror GREETS.CPP ordering exactly so the

@@ -755,7 +755,7 @@ struct ChaseScene : SceneDriver {
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
-		Animate_Objects(ChaseSc);
+		Animate_Objects(ChaseSc, View);
 
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 

@@ -63,6 +63,7 @@
 #include "Base/CameraContext.h"
 #include "Base/FaceListContext.h"
 #include "Base/VertexScratch.h"
+#include "FILLERS/ShadowMap.h"
 
 // Defined in Shadows.cpp; the shadow orchestrator sets this to the
 // current shadow light before calling Transform_Objects, so the per-mesh
@@ -112,8 +113,14 @@ static inline bool sphereOutsideSpotCone(const Vector& C, float r,
 // RENDER.CPP's prelude in here.
 float frand();
 
-void Animate_Objects(Scene *Sc, bool SkipCameraAnimation)
+void Animate_Objects(Scene *Sc, Camera *cam)
 {
+	// `cam` is the explicit camera to animate (replaces the old global
+	// `View` read + SkipCameraAnimation bool). nullptr = no camera ops,
+	// safe to call from off-render-loop threads (e.g. Initialize_X bake
+	// prep) without touching globals.
+	const bool SkipCameraAnimation = (cam == nullptr);
+	Camera *const View = cam;  // alias so the legacy body still reads `View`
 	TriMesh *T;
 	Omni *Om;
 	Object *Obj;
@@ -211,10 +218,18 @@ void Animate_Objects(Scene *Sc, bool SkipCameraAnimation)
 			Kick_Camera(&View->ISource, &View->ITarget, View->IRoll, View->Mat);
 		}
 	}
-	
-	CalcPersp(View);
-	FOVX = View->PerspX;
-	FOVY = View->PerspY;
+
+	// Skip the global-View ops entirely when SkipCameraAnimation is set.
+	// Callers like Initialize_Greets's bake-prep run on the t1 init thread
+	// before any scene's render loop sets the global `View` — touching it
+	// here would either crash on null or stomp on whichever scene happens
+	// to have set it last. The bake doesn't need PerspX/PerspY or the
+	// FOVX/FOVY globals; those are render-loop concerns.
+	if (!SkipCameraAnimation && View) {
+		CalcPersp(View);
+		FOVX = View->PerspX;
+		FOVY = View->PerspY;
+	}
 	
 	
 	// lalala, HARARCHIA , Ver 3, it now rulati
@@ -237,8 +252,18 @@ void Animate_Objects(Scene *Sc, bool SkipCameraAnimation)
 		{
 			MatrixXVector(*Obj->Parent->Rot,Obj->Pos,&U);
 			Vector_Add(Obj->Parent->Pos,&U,Obj->Pos);
-			MatrixXMatrix(*Obj->Parent->Rot,*Obj->Rot,M);
-			Matrix_Copy(*Obj->Rot,M);
+			// Skip the rotation compose for omnis. Omni Objects alias
+			// `Obj->Rot` to the SHARED global identity matrix `Mat_ID`
+			// (FLD_CONV.CPP:114), so `Matrix_Copy(*Obj->Rot, M)` here
+			// would write parent.Rot into Mat_ID — corrupting every
+			// other reader of the global identity matrix until the
+			// next omni iteration's line-224 reset. Omnis have no
+			// meaningful rotation anyway; the position composition
+			// above is the only piece they need.
+			if (Obj->Type != Obj_Omni) {
+				MatrixXMatrix(*Obj->Parent->Rot,*Obj->Rot,M);
+				Matrix_Copy(*Obj->Rot,M);
+			}
 		}
 	}
 }
@@ -424,6 +449,47 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
 		&& g_currentShadowOmni->Type == Light_SpotLight;
+	extern thread_local ShadowMap *g_currentShadowMap;
+	// Per-cube-face bsphere cull: when xforming geometry into one of the
+	// 6 cube faces of an Omni shadow, the face only sees a 90°-FOV pyramid
+	// along one cardinal axis. Most meshes are outside that pyramid (an
+	// omni's 6 faces partition the world into 6 disjoint hemispheres, so
+	// the average mesh is visible to ~1 face out of 6). Skip the per-vertex
+	// transform + face submission for meshes whose bsphere is entirely
+	// outside this face's pyramid. Reuses sphereOutsideSpotCone with the
+	// CIRCUMSCRIBED cone of the 90° pyramid (half-angle ≈ 54.7°, cos ≈
+	// 0.577) so we never cull a sphere that could be visible at a corner.
+	const bool cubeFaceCull = g_inShadowPass
+		&& fds::FeatureFlags::shadow_cube_face_cull()
+		&& g_currentShadowOmni
+		&& g_currentShadowOmni->Type == Light_Omni
+		&& g_currentShadowMap
+		&& g_currentShadowMap->cubeFace >= 0;
+	Vector cubeFaceDir = { 0.0f, 0.0f, 0.0f };
+	Vector cubeFacePos = { 0.0f, 0.0f, 0.0f };
+	float  cubeFaceCos = 0.0f;
+	float  cubeFaceRange = 0.0f;
+	if (cubeFaceCull) {
+		// Cube face order matches CubeShadowMaps_Rebuild + the per-face
+		// camera setup in Render_DeferredShadowMaps:
+		// 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+		switch (g_currentShadowMap->cubeFace) {
+			case 0: cubeFaceDir.x =  1.0f; break;
+			case 1: cubeFaceDir.x = -1.0f; break;
+			case 2: cubeFaceDir.y =  1.0f; break;
+			case 3: cubeFaceDir.y = -1.0f; break;
+			case 4: cubeFaceDir.z =  1.0f; break;
+			case 5: cubeFaceDir.z = -1.0f; break;
+		}
+		cubeFacePos = g_currentShadowOmni->IPos;
+		// Circumscribed cone of the 90° square pyramid: half-angle =
+		// atan(sqrt(2)) ≈ 54.7°, so cos ≈ 0.577. Conservative (lets
+		// through more spheres than a tight pyramid test); never under-
+		// culls. Tight 4-plane pyramid test would be ~2× the math for
+		// maybe ~30% tighter cull; not worth it at this granularity.
+		cubeFaceCos = 0.577f;
+		cubeFaceRange = g_currentShadowOmni->IRange;
+	}
 	extern thread_local bool g_inDynamicShadowBake;
 	// Two shadow-bake mesh filters:
 	//   inStaticBake : skip dynamic meshes (their t=0 silhouette would
@@ -618,6 +684,20 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				continue;
 			}
 		}
+		// Per-cube-face cull. Same shape of test as the spot-cone cull,
+		// but the "cone" is the 90°-FOV pyramid of one of 6 cube faces.
+		// No T->Flags write — multiple cube-face xform tasks run in
+		// parallel on the same TriMesh; flipping a shared bit would race
+		// (each task wants a per-face decision, not a global one).
+		if (cubeFaceCull) {
+			Vector wsBsphereCtr;
+			MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
+			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			if (sphereOutsideSpotCone(wsBsphereCtr, T->BSphereRadius,
+			                          cubeFacePos, cubeFaceDir, cubeFaceCos, cubeFaceRange)) {
+				continue;
+			}
+		}
 
 		MatrixXMatrix(cam.view->Mat,T->RotMat,M);
 		Matrix_Copy(IM,M);
@@ -742,6 +822,75 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 		BSC->x /= BSC->z;
 		BSC->y /= BSC->z;
+		// Alternate vertex loop for cube-face shadow xform: when the mesh
+		// has a pre-computed world-space vertex cache, do a per-vertex
+		// pyramid test in world space and skip the view matmul for
+		// vertices that fall outside the face frustum. The mesh-level
+		// cube cull (cubeFaceCull above) already rejected meshes whose
+		// whole bsphere is outside; this is for meshes that straddle a
+		// face boundary (e.g. greets's split Piramid chunks). Out-of-
+		// pyramid vertices get TPos = (out-of-frame, out-of-frame, +1):
+		// face submission later AND's the per-vertex Vtx_Visible bits,
+		// so a face whose 3 vertices all share an out direction culls
+		// cleanly. Faces straddling the boundary still process normally.
+		if (cubeFaceCull && T->worldVerts
+		    && fds::FeatureFlags::shadow_cube_vert_cull()) {
+			// Circumscribed cone (matches mesh-level cull): half-angle
+			// 54.7°, tan²(54.7°) = 2. So perp² > 2 × axisDist² → outside.
+			constexpr float kTan2 = 2.0f;
+			const float ckX = cubeFacePos.x, ckY = cubeFacePos.y, ckZ = cubeFacePos.z;
+			const float cdX = cubeFaceDir.x, cdY = cubeFaceDir.y, cdZ = cubeFaceDir.z;
+			// View transform reads `cam.view->Mat` directly (no perspective
+			// pre-mul; we'll apply PX/PY/cntr scaling here, matching what
+			// M34 × Pos produces in the legacy path).
+			const float (*VM)[3] = cam.view->Mat;
+			for (Vtx = tVerts; Vtx < VEnd; Vtx++) {
+				const DWord vi = DWord(Vtx - tVerts);
+				const Vector &wp = T->worldVerts[vi];
+				const float wdx = wp.x - ckX;
+				const float wdy = wp.y - ckY;
+				const float wdz = wp.z - ckZ;
+				const float axisDist = wdx*cdX + wdy*cdY + wdz*cdZ;
+				const float d2 = wdx*wdx + wdy*wdy + wdz*wdz;
+				const bool outside = (axisDist < 0.0f)
+				    || ((d2 - axisDist*axisDist) > kTan2 * axisDist*axisDist);
+				if (outside) {
+					// Mark all-out so face cull eats the straddler-edge
+					// faces whose 3 verts all agreed on being out.
+					Vtx->TPos.x = 0.0f;
+					Vtx->TPos.y = 0.0f;
+					Vtx->TPos.z = 1.0f;
+					Vtx->RZ = 1.0f;
+					Vtx->PX = -1.0f;
+					Vtx->PY = -1.0f;
+					Vtx->UZ = 0.0f;
+					Vtx->VZ = 0.0f;
+					Vtx->Flags |= Vtx_Visible;  // all 6 frustum-out bits set
+					continue;
+				}
+				// In-pyramid: full view xform + perspective scaling.
+				// view_* = view.Mat · (worldPos - cam.ISource). Cube-face
+				// camera's ISource == omni IPos == cubeFacePos, so wdX/Y/Z
+				// already equal world delta from camera.
+				const float vx = VM[0][0]*wdx + VM[0][1]*wdy + VM[0][2]*wdz;
+				const float vy = VM[1][0]*wdx + VM[1][1]*wdy + VM[1][2]*wdz;
+				const float vz = VM[2][0]*wdx + VM[2][1]*wdy + VM[2][2]*wdz;
+				Vtx->TPos.x = PX * vx + cam.cntrEX * vz;
+				Vtx->TPos.y = -PY * vy + cam.cntrEY * vz;
+				Vtx->TPos.z = vz;
+				Vtx->Flags &= ~Vtx_Visible;
+				Vtx->RZ = 1.0f / vz;
+				Vtx->PX = Vtx->TPos.x * Vtx->RZ;
+				Vtx->PY = Vtx->TPos.y * Vtx->RZ;
+				Vtx->UZ = Vtx->U * Vtx->RZ;
+				Vtx->VZ = Vtx->V * Vtx->RZ;
+				if (Vtx->PX < 0.0f) Vtx->Flags |= Vtx_VisLeft;
+				if (Vtx->PX >= float(xr)) Vtx->Flags |= Vtx_VisRight;
+				if (Vtx->PY < 0.0f) Vtx->Flags |= Vtx_VisUp;
+				if (Vtx->PY >= float(yr)) Vtx->Flags |= Vtx_VisDown;
+			}
+			goto AfterXForm;
+		}
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))
 		{

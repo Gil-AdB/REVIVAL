@@ -29,7 +29,9 @@
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/LightmapBake.h"
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <vector>
 #include <VESA/Vesa.h>
 
@@ -38,6 +40,22 @@ static float frand() {
 }
 
 static Scene *GreetSc;
+
+// Forward-declared at namespace scope (the rest of this TU is in an
+// anonymous namespace where `extern` would silently get internal
+// linkage and the linker would fail to find the real definition in
+// FDS/FILLERS/ShadowMap.cpp).
+void ShadowMap_TickStalenessTracker();
+
+// Background thread for the LightmapStampOrigBary + LightmapBake_Static
+// pair. Spawned from Initialize_Greets as soon as the cube shadow maps
+// are populated (these are the bake's inputs). Joined at Run_Greets
+// entry. Lets the slow (~1-2 s) atlas bake run during glat in parallel
+// with Run_Glato + the rest of the t1 init chain, instead of stalling
+// the demo at the glat → city handoff. City's bake is already small
+// and synchronous in Initialize_City; this matches its "during glat"
+// timing for greets.
+static std::thread g_greetsBakeThread;
 
 // Robot spotlight — created in Initialize_Greets if the robot mesh is
 // found, updated each frame in the tick loop after Animate_Objects so
@@ -664,21 +682,36 @@ void Initialize_Greets()
 		if (!isRobotSubMesh(Obj->Name)) continue;
 		TriMesh *T = (TriMesh*)Obj->Data;
 
-		// Hull.lwo splits into 2 Y bins; smaller meshes (Hull2, legs)
-		// use 1 bin (just per-mesh isolation).
-		const int kBins = strstr(Obj->Name, "Hull.lwo") ? 2 : 1;
+		// Hull.lwo bin-splits per source material (2 = body/upper for
+		// cockpit-vs-body self-shadow); other meshes use 1 bin.
+		const int kBinsHullDefault = strstr(Obj->Name, "Hull.lwo") ? 2 : 1;
+		// Per-source override: the source material named "hull"
+		// specifically is collapsed back to 1 bin — its body/upper
+		// boundary fires the cube PolyId path's intra-mesh identity
+		// mismatch and produces spurious dark patches at the seam.
+		// Other sources (cockpit, canons, sing, linght, hull-not-smooth,
+		// in-canons) keep their split.
+		auto effectiveBins = [&](Material *src) -> int {
+			if (kBinsHullDefault <= 1) return 1;
+			if (src && src->Name && std::strcmp(src->Name, "hull") == 0) {
+				return 1;
+			}
+			return kBinsHullDefault;
+		};
 
 		// Local-Y range of face centroids (mesh-local; animation moves
 		// the whole mesh but face centroids' local Y stays constant).
+		// Always scan when any per-source override could use >1 bin
+		// (some sources keep the split even when "hull" doesn't).
 		float ymin =  1e30f, ymax = -1e30f;
-		if (kBins > 1) {
+		if (kBinsHullDefault > 1) {
 			for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
 				const float fy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) / 3.0f;
 				if (fy < ymin) ymin = fy;
 				if (fy > ymax) ymax = fy;
 			}
 		}
-		const float invSpan = (ymax > ymin) ? float(kBins) / (ymax - ymin) : 0.0f;
+		const float ySpan = (ymax > ymin) ? (ymax - ymin) : 1.0f;
 
 		// Key: (source material, Y bin). Same source + same bin → reuse
 		// clone.
@@ -686,12 +719,13 @@ void Initialize_Greets()
 		for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
 			Material *src = F->Txtr;
 			if (!src) continue;
+			const int srcBins = effectiveBins(src);
 			int bin = 0;
-			if (kBins > 1) {
+			if (srcBins > 1) {
 				const float fy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) / 3.0f;
-				bin = int((fy - ymin) * invSpan);
-				if (bin < 0)        bin = 0;
-				if (bin >= kBins)   bin = kBins - 1;
+				bin = int((fy - ymin) * float(srcBins) / ySpan);
+				if (bin < 0)         bin = 0;
+				if (bin >= srcBins)  bin = srcBins - 1;
 			}
 			auto key = std::make_pair(src, bin);
 			auto it = clones.find(key);
@@ -699,7 +733,7 @@ void Initialize_Greets()
 				Material *clone = (Material*)getAlignedBlock(sizeof(Material), 16);
 				std::memcpy(clone, src, sizeof(Material));
 				char *nameBuf = new char[96];
-				if (kBins > 1) {
+				if (srcBins > 1) {
 					const char *binName = (bin == 0) ? "body" : "upper";
 					std::snprintf(nameBuf, 96, "%s::%s_%s", Obj->Name,
 						src->Name ? src->Name : "?", binName);
@@ -708,6 +742,14 @@ void Initialize_Greets()
 						src->Name ? src->Name : "?");
 				}
 				clone->Name = nameBuf;
+				// 16-bit ShadowMatID lifted into a unique-per-clone slot
+				// (offset 0x800 to stay clear of the legacy uint16(matID+1)
+				// fallback range used by un-overridden materials). Robot
+				// sub-mesh clones each get distinct ShadowMatIDs so cube
+				// PolyId catches cross-sub-mesh occlusion; the explicit
+				// Hull2→Hull merge below overwrites Hull2's faces' Txtr
+				// to point at the same clone, sharing the ID.
+				clone->ShadowMatID = (unsigned short)(0x800 + totalClones);
 				Material *tail = MatLib;
 				while (tail->Next) tail = tail->Next;
 				clone->Next = nullptr;
@@ -717,8 +759,346 @@ void Initialize_Greets()
 			}
 			F->Txtr = it->second;
 		}
-		std::fprintf(stderr, "[ROBOT-MAT] mesh '%s' bins=%d cloned %zu materials\n",
-			Obj->Name, kBins, clones.size());
+		std::fprintf(stderr,
+			"[ROBOT-MAT] mesh '%s' default-bins=%d cloned %zu materials\n",
+			Obj->Name, kBinsHullDefault, clones.size());
+	}
+
+	// Hull2 → Hull merge: redirect every Hull2 face to Hull's "hull"
+	// source-material clone (no bin suffix now that "hull" runs at 1 bin).
+	// Eliminates the cube PolyId intra-mesh identity mismatch across the
+	// hull/hull2 seam. Hull keeps its other per-source (cockpit, canons,
+	// sing, linght, hull-not-smooth, in-canons) bin-split clones intact;
+	// Hull2 loses its variety in exchange. User explicitly scoped this
+	// to hull+hull2 + the hull-body/upper merge.
+	{
+		Material *hullClone = nullptr;
+		for (Material *M = MatLib; M; M = M->Next) {
+			// Match the exact clone name produced above for srcBins==1.
+			if (M->Name && std::strcmp(M->Name, "Hull.lwo::hull") == 0) {
+				hullClone = M;
+				break;
+			}
+		}
+		if (hullClone) {
+			int redirected = 0;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+				if (!std::strstr(Obj->Name, "Hull2")) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+					F->Txtr = hullClone;
+					++redirected;
+				}
+			}
+			std::fprintf(stderr,
+				"[ROBOT-MAT] Hull2 → 'Hull.lwo::hull' merge: %d faces redirected\n",
+				redirected);
+		} else {
+			std::fprintf(stderr,
+				"[ROBOT-MAT] WARNING: 'Hull.lwo::hull' clone not found — "
+				"Hull2 merge skipped, hull/hull2 boundary artifact will persist\n");
+		}
+	}
+	// Piramid wall split: cluster Piramid.lwo faces by (source material,
+	// coplanar group). Each cluster gets a unique 16-bit per-face
+	// ShadowMatID so distinct walls cross-shadow while same-wall faces
+	// self-match. Materials are NOT cloned — the per-face F->ShadowMatID
+	// flows through the new `gb.shadowMatID` G-buffer plane to the
+	// deferred PolyId cube-shadow path, sidestepping the 8-bit matID cap
+	// (256 entries) in the mat32 packing. With no cloning the cluster
+	// count is bounded only by the 16-bit ShadowMatID space (~65 k),
+	// well above greets's ~2600 distinct clusters.
+	{
+		// Quantization. `kFooQ` is 1 / grid_size in the `floor(v*Q + 0.5)`
+		// formula below. Normal: 16 → ~3.5° tolerance. Distance: 2.0 →
+		// 0.5-unit grid (per-room walls separate; only walls within
+		// half a world-unit of the same plane collapse).
+		constexpr float kNormalQ   = 16.0f;
+		constexpr float kDistanceQ = 2.0f;
+		auto quantize = [](float v, float q) -> int {
+			return int(std::floor(v * q + 0.5f));
+		};
+		struct PlaneKey {
+			int nx, ny, nz, d;
+			bool operator<(const PlaneKey &o) const {
+				if (nx != o.nx) return nx < o.nx;
+				if (ny != o.ny) return ny < o.ny;
+				if (nz != o.nz) return nz < o.nz;
+				return d < o.d;
+			}
+		};
+		int totalClusters = 0;
+		int totalTaggedFaces = 0;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+			if (!std::strstr(Obj->Name, "Piramid")) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			// (source mat, plane key) → assigned ShadowMatID. Same key →
+			// same id. Faces with degenerate normals keep ShadowMatID=0
+			// and fall back to per-material / matID+1 default.
+			std::map<std::pair<Material*, PlaneKey>, uint16_t> clusters;
+			int meshTaggedFaces = 0;
+			int degenFaceCount  = 0;
+			for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+				Material *src = F->Txtr;
+				if (!src) continue;
+				// Normalize the face normal so the quantization key is
+				// stable regardless of source normal magnitude. The
+				// authoring tool sometimes leaves them unnormalized.
+				const float len = std::sqrt(F->N.x*F->N.x + F->N.y*F->N.y + F->N.z*F->N.z);
+				if (!(len > 1e-4f)) { ++degenFaceCount; continue; }
+				const float invLen = 1.0f / len;
+				const float nx = F->N.x * invLen;
+				const float ny = F->N.y * invLen;
+				const float nz = F->N.z * invLen;
+				// Plane distance from origin: any point on the face dotted
+				// with the unit normal. Use centroid for stability.
+				const float cx = (F->A->Pos.x + F->B->Pos.x + F->C->Pos.x) * (1.0f/3.0f);
+				const float cy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) * (1.0f/3.0f);
+				const float cz = (F->A->Pos.z + F->B->Pos.z + F->C->Pos.z) * (1.0f/3.0f);
+				const float d  = nx*cx + ny*cy + nz*cz;
+				PlaneKey key{ quantize(nx, kNormalQ),
+				              quantize(ny, kNormalQ),
+				              quantize(nz, kNormalQ),
+				              quantize(d,  kDistanceQ) };
+				auto mk = std::make_pair(src, key);
+				auto it = clusters.find(mk);
+				if (it == clusters.end()) {
+					// Assign next ShadowMatID. Offset by 0x1000 so per-face
+					// ids can't collide with the legacy `Txtr->ID + 1`
+					// fallback range (~256) used by un-overridden faces.
+					// 16-bit space has plenty of room (65 k - 0x1000 ≈ 61 k).
+					const uint16_t newId = uint16_t(0x1000 + totalClusters);
+					it = clusters.emplace(mk, newId).first;
+					++totalClusters;
+				}
+				F->ShadowMatID = it->second;
+				++meshTaggedFaces;
+				++totalTaggedFaces;
+			}
+			std::fprintf(stderr,
+				"[PIRAMID-SPLIT] mesh '%s' %u faces → %zu wall clusters "
+				"(%d tagged, %d degen skipped)\n",
+				Obj->Name, unsigned(T->FIndex), clusters.size(),
+				meshTaggedFaces, degenFaceCount);
+		}
+		std::fprintf(stderr,
+			"[PIRAMID-SPLIT] total clusters: %d  tagged faces: %d  "
+			"(per-face F->ShadowMatID; no Material clones)\n",
+			totalClusters, totalTaggedFaces);
+	}
+	// Piramid spatial chunk split: partition Piramid.lwo's faces into a
+	// 3D spatial grid; each non-empty cell becomes its own TriMesh + Object
+	// with a tight bsphere. The original Piramid is "retired" (FIndex=0)
+	// but kept in the chains so its Material pointers (still referenced
+	// by chunk faces via shallow-copy of F->Txtr) remain valid.
+	//
+	// Why: greets's mesh-level cube-face cull (Transform.cpp:cubeFaceCull)
+	// can't reject Piramid as a single mesh — its bsphere has r≈60,
+	// containing the mech omnis at distance ~14. With chunking, each
+	// cell is ~5-10 units across and the cull rejects most chunks per
+	// cube face → ~5× reduction in mech-omni xform cost.
+	{
+		const int chunkGrid = fds::FeatureFlags::greets_piramid_chunk_grid();
+		if (chunkGrid > 0) {
+			// Find Piramid.lwo
+			Object *piramidObj = nullptr;
+			TriMesh *piramid = nullptr;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+				if (!std::strstr(Obj->Name, "Piramid")) continue;
+				piramidObj = Obj;
+				piramid = (TriMesh*)Obj->Data;
+				break;
+			}
+			if (piramid && piramid->FIndex > 0) {
+				const DWord origFaces = piramid->FIndex;
+				// AABB over all referenced vertices.
+				float xmin=FLT_MAX, xmax=-FLT_MAX;
+				float ymin=FLT_MAX, ymax=-FLT_MAX;
+				float zmin=FLT_MAX, zmax=-FLT_MAX;
+				for (DWord i = 0; i < piramid->FIndex; ++i) {
+					const Face &f = piramid->Faces[i];
+					for (Vertex *v : {f.A, f.B, f.C}) {
+						if (!v) continue;
+						if (v->Pos.x < xmin) xmin = v->Pos.x;
+						if (v->Pos.x > xmax) xmax = v->Pos.x;
+						if (v->Pos.y < ymin) ymin = v->Pos.y;
+						if (v->Pos.y > ymax) ymax = v->Pos.y;
+						if (v->Pos.z < zmin) zmin = v->Pos.z;
+						if (v->Pos.z > zmax) zmax = v->Pos.z;
+					}
+				}
+				const float spanX = std::max(0.001f, xmax - xmin);
+				const float spanY = std::max(0.001f, ymax - ymin);
+				const float spanZ = std::max(0.001f, zmax - zmin);
+				auto cellOf = [&](float fx, float fy, float fz) -> int64_t {
+					int ix = std::clamp(int((fx - xmin) / spanX * float(chunkGrid)),
+					                    0, chunkGrid - 1);
+					int iy = std::clamp(int((fy - ymin) / spanY * float(chunkGrid)),
+					                    0, chunkGrid - 1);
+					int iz = std::clamp(int((fz - zmin) / spanZ * float(chunkGrid)),
+					                    0, chunkGrid - 1);
+					return (int64_t(iz) * chunkGrid + iy) * chunkGrid + ix;
+				};
+				// Bucket faces by cell (face centroid).
+				std::map<int64_t, std::vector<DWord>> cellFaces;
+				DWord degen = 0;
+				for (DWord i = 0; i < piramid->FIndex; ++i) {
+					const Face &f = piramid->Faces[i];
+					if (!f.A || !f.B || !f.C) { ++degen; continue; }
+					const float cx = (f.A->Pos.x + f.B->Pos.x + f.C->Pos.x) * (1.0f/3.0f);
+					const float cy = (f.A->Pos.y + f.B->Pos.y + f.C->Pos.y) * (1.0f/3.0f);
+					const float cz = (f.A->Pos.z + f.B->Pos.z + f.C->Pos.z) * (1.0f/3.0f);
+					cellFaces[cellOf(cx, cy, cz)].push_back(i);
+				}
+				// Build per-cell chunks.
+				int chunksCreated = 0;
+				DWord totalChunkVerts = 0;
+				for (const auto& kv : cellFaces) {
+					const auto &faceIndices = kv.second;
+					if (faceIndices.empty()) continue;
+					// Vertex map for this chunk: old Vertex* → new index.
+					std::map<Vertex*, DWord> vertMap;
+					for (DWord fi : faceIndices) {
+						const Face &f = piramid->Faces[fi];
+						for (Vertex *v : {f.A, f.B, f.C}) {
+							if (!v) continue;
+							if (vertMap.find(v) == vertMap.end()) {
+								const DWord idx = DWord(vertMap.size());
+								vertMap[v] = idx;
+							}
+						}
+					}
+					const DWord chunkVerts = DWord(vertMap.size());
+					const DWord chunkFaces = DWord(faceIndices.size());
+					TriMesh *chunk = new TriMesh();
+					chunk->VIndex = chunkVerts;
+					chunk->FIndex = chunkFaces;
+					chunk->Verts = new Vertex[chunkVerts];
+					chunk->Faces = new Face[chunkFaces];
+					// Per-vertex static-lighting buffer — written by Lighting.cpp
+					// StaticLighting (gated on Tri_Stationary, which the chunk
+					// inherits from Piramid). Crash at runtime if null.
+					chunk->SL = new Color[chunkVerts]();
+					// Copy vertices.
+					for (const auto& vm : vertMap) {
+						chunk->Verts[vm.second] = *vm.first;
+					}
+					// Copy faces; re-point A/B/C; track AABB for bsphere.
+					float cxmin=FLT_MAX, cxmax=-FLT_MAX;
+					float cymin=FLT_MAX, cymax=-FLT_MAX;
+					float czmin=FLT_MAX, czmax=-FLT_MAX;
+					for (DWord i = 0; i < chunkFaces; ++i) {
+						const Face &srcF = piramid->Faces[faceIndices[i]];
+						Face &dstF = chunk->Faces[i];
+						dstF = srcF;
+						dstF.A = srcF.A ? &chunk->Verts[vertMap[srcF.A]] : nullptr;
+						dstF.B = srcF.B ? &chunk->Verts[vertMap[srcF.B]] : nullptr;
+						dstF.C = srcF.C ? &chunk->Verts[vertMap[srcF.C]] : nullptr;
+						dstF.ParentTri = chunk;
+						for (Vertex *v : {dstF.A, dstF.B, dstF.C}) {
+							if (v->Pos.x < cxmin) cxmin = v->Pos.x;
+							if (v->Pos.x > cxmax) cxmax = v->Pos.x;
+							if (v->Pos.y < cymin) cymin = v->Pos.y;
+							if (v->Pos.y > cymax) cymax = v->Pos.y;
+							if (v->Pos.z < czmin) czmin = v->Pos.z;
+							if (v->Pos.z > czmax) czmax = v->Pos.z;
+						}
+					}
+					// Bsphere: AABB center, radius = max vertex distance.
+					chunk->BSphereCtr.x = (cxmin + cxmax) * 0.5f;
+					chunk->BSphereCtr.y = (cymin + cymax) * 0.5f;
+					chunk->BSphereCtr.z = (czmin + czmax) * 0.5f;
+					float r2max = 0.0f;
+					for (DWord i = 0; i < chunkVerts; ++i) {
+						const float dx = chunk->Verts[i].Pos.x - chunk->BSphereCtr.x;
+						const float dy = chunk->Verts[i].Pos.y - chunk->BSphereCtr.y;
+						const float dz = chunk->Verts[i].Pos.z - chunk->BSphereCtr.z;
+						const float r2 = dx*dx + dy*dy + dz*dz;
+						if (r2 > r2max) r2max = r2;
+					}
+					chunk->BSphereRadius = std::sqrt(r2max);
+					chunk->BSphereRad = r2max;
+					// Inherit transform state from Piramid (static, identity).
+					chunk->IPos = piramid->IPos;
+					chunk->IScale = piramid->IScale;
+					chunk->IRot = piramid->IRot;
+					Matrix_Copy(chunk->RotMat, piramid->RotMat);
+					Matrix_Copy(chunk->UnscaledRotMat, piramid->UnscaledRotMat);
+					// Pre-compute world-space vertex cache (depends on
+					// RotMat + IPos set above). Used by the cube-face
+					// vertex cull in Transform_Objects: lets the per-vertex
+					// pyramid test run on world space (cheap) and the
+					// survivor view xform skip the object→world step
+					// (already baked in). Safe because chunk is
+					// Tri_Possessed (RotMat / IPos won't change per frame).
+					chunk->worldVerts = new Vector[chunkVerts];
+					for (DWord i = 0; i < chunkVerts; ++i) {
+						MatrixXVector(chunk->RotMat, &chunk->Verts[i].Pos,
+						              &chunk->worldVerts[i]);
+						Vector_SelfAdd(&chunk->worldVerts[i], &chunk->IPos);
+					}
+					chunk->Flags = piramid->Flags;
+					// Tri_Possessed: skip TriMeshHead loop in Animate_Objects.
+					// Without it, Spline_Calc_3D on the chunk's empty
+					// (NumKeys=0) Pos spline derefs null Keys and hangs.
+					chunk->Flags |= Tri_Possessed;
+					// Wrap in Object. Allocate per-chunk Pos vector + Rot
+					// matrix — Animate_Objects's Object loop writes to
+					// Obj->Pos when reconciling parent transforms; sharing
+					// Piramid's allocations with N chunks would race / drift.
+					Object *chunkObj = new Object();
+					chunkObj->Type = Obj_TriMesh;
+					chunkObj->Data = chunk;
+					chunkObj->Pos = new Vector(*piramidObj->Pos);
+					// Matrix is `float[3][3]`; can't `new Matrix()` because
+					// that's a `float(*)[3]` not a Matrix*. Allocate a 3x3
+					// float buffer via the holder type.
+					struct MatrixHolder { Matrix m; };
+					MatrixHolder *holder = new MatrixHolder();
+					chunkObj->Rot = &holder->m;
+					Matrix_Copy(*chunkObj->Rot, *piramidObj->Rot);
+					chunkObj->Pivot = piramidObj->Pivot;
+					chunkObj->Parent = piramidObj->Parent;
+					chunkObj->ParentID = piramidObj->ParentID;
+					char nameBuf[80];
+					std::snprintf(nameBuf, sizeof(nameBuf),
+					    "Piramid.lwo:c%d", chunksCreated);
+					chunkObj->Name = strdup(nameBuf);
+					// Splice chunkObj just after piramidObj in ObjectHead.
+					chunkObj->Next = piramidObj->Next;
+					chunkObj->Prev = piramidObj;
+					if (piramidObj->Next) piramidObj->Next->Prev = chunkObj;
+					piramidObj->Next = chunkObj;
+					// Add chunk to TriMeshHead (consumers like Lighting.cpp
+					// walk TriMeshHead directly).
+					chunk->Next = GreetSc->TriMeshHead;
+					chunk->Prev = nullptr;
+					if (GreetSc->TriMeshHead) GreetSc->TriMeshHead->Prev = chunk;
+					GreetSc->TriMeshHead = chunk;
+					totalChunkVerts += chunkVerts;
+					++chunksCreated;
+				}
+				// Retire the original Piramid by zeroing its face count.
+				// Don't delete its arrays — chunk faces shallow-copied F->Txtr
+				// (Material*) pointers; the Materials themselves live in
+				// MatLib so they're fine, but if Piramid's Faces array were
+				// freed and the deferred kernel were ever to call back into
+				// it, we'd UAF. Cheaper to keep alive than to audit every
+				// reader.
+				const DWord origVerts = piramid->VIndex;
+				piramid->FIndex = 0;
+				std::fprintf(stderr,
+				    "[PIRAMID-CHUNKS] grid=%d³ → %d chunks  "
+				    "(orig %u faces / %u verts → %u total chunk verts; "
+				    "%u faces with null vertex skipped)\n",
+				    chunkGrid, chunksCreated,
+				    unsigned(origFaces), unsigned(origVerts),
+				    unsigned(totalChunkVerts), unsigned(degen));
+			}
+		}
 	}
 	Scene_RebuildMatTable(GreetSc);
 	std::fprintf(stderr, "[ROBOT-MAT] total clones: %d\n", totalClones);
@@ -731,6 +1111,187 @@ void Initialize_Greets()
 	}
 	if (g_RobotMesh && !fds::FeatureFlags::no_greets_spots()) {
 		initializeRobotSpotlights();
+	}
+
+	// Shadow-map allocation + static cube bake + lightmap bake spawn.
+	// MOVED here from GreetsScene::init() so it runs during glat (via
+	// t1's Initialize_Greets) instead of waiting until the user reaches
+	// the greets scene (which is after city/chase/fountain/crash playback).
+	// The bake itself spawns its own thread and parallelizes with the
+	// remaining scene playback.
+	{
+		// FLD-loaded omnis in greets all ship with IRange=0 (the FLD
+		// Range envelope is optional; FLD_CONV.CPP defaults it to a
+		// 1-key spline at 0). That kills surface lighting (range2=0 →
+		// rejects every pixel), halo bounds, and shadow FZP. Patch to
+		// the flag-controlled default so they actually contribute.
+		const float omniDefRange = fds::FeatureFlags::greets_omni_default_range();
+		if (omniDefRange > 0.0f) {
+			int patched = 0;
+			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+				if (O->Type != Light_Omni) continue;
+				if (O->IRange > 0.0f) continue;
+				O->IRange = omniDefRange;
+				O->rRange = 1.0f / omniDefRange;
+				if (O->Range.NumKeys >= 1 && O->Range.Keys) {
+					O->Range.Keys[0].Pos.x = omniDefRange;
+				}
+				++patched;
+			}
+			if (patched > 0) {
+				std::fprintf(stderr,
+				    "[GREETS] patched IRange=%g on %d FLD omnis (had 0)\n",
+				    omniDefRange, patched);
+			}
+		}
+
+		// Animate_Objects fills in every FLD omni's IPos / IDir from
+		// its splines (Transform.cpp:192). The cube-shadow setup below
+		// needs the resolved IPos for both CubeShadowMaps_Rebuild's
+		// cr.lightISource and Render_DeferredShadowMaps' bake camera.
+		// cam=nullptr so Animate_Objects doesn't touch the global View.
+		Animate_Objects(GreetSc, /*cam=*/nullptr);
+
+		// Initialize the global `Polys` to greets's per-frame worst-case
+		// face count. Render_DeferredShadowMaps's per-light Transform
+		// sizes perLightFaces[lightIdx] from this global; without it,
+		// the lambda hits a null fList in Transform.cpp:1193. Normally
+		// done in GreetsScene::init() right before playback, but the
+		// bake setup now runs earlier (during glat) so we redo it here.
+		// init() will set Polys again when greets actually plays — that's
+		// idempotent.
+		Polys = 0;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
+			TriMesh *T = (TriMesh *)Obj->Data;
+			Polys += T->FIndex;
+		}
+		for (Omni *O = GreetSc->OmniHead; O; O = O->Next) Polys++;
+		fds::g_mainFaces.resize(Polys);
+
+		const int omniCubeRes = std::max(16,
+		    fds::FeatureFlags::greets_omni_shadow_res());
+		int totalOmnis = 0;
+		if (fds::FeatureFlags::greets_omni_shadows()) {
+			// Build a map from Omni* → wrapping Object* so we can walk the
+			// FLD parent chain. The Omni's own Pos spline can be a single
+			// key (static) while world position is computed every frame
+			// from `parent_transform * local_offset` in Animate_Objects
+			// — meaning the omni IS moving even though O->Pos is static.
+			// Without consulting parents we mis-flag mech-attached omnis
+			// as static, bake them into the static cube, and never re-bake
+			// dynamically.
+			std::map<Omni*, Object*> omniOwner;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type == Obj_Omni && Obj->Data) {
+					omniOwner[(Omni*)Obj->Data] = Obj;
+				}
+			}
+			auto meshAncestorIsDynamic = [](Object *o) -> bool {
+				constexpr float kPosEps = 0.1f, kRotEps = 0.01f;
+				for (Object *p = o ? o->Parent : nullptr; p; p = p->Parent) {
+					if (p->Type != Obj_TriMesh) continue;
+					TriMesh *tm = (TriMesh*)p->Data;
+					if (!tm) continue;
+					if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+						const auto& k0 = tm->Pos.Keys[0].Pos;
+						float xmn=k0.x,xmx=k0.x,ymn=k0.y,ymx=k0.y,zmn=k0.z,zmx=k0.z;
+						for (DWord i=1;i<tm->Pos.NumKeys;++i) {
+							const auto& k = tm->Pos.Keys[i].Pos;
+							if (k.x<xmn) xmn=k.x; if (k.x>xmx) xmx=k.x;
+							if (k.y<ymn) ymn=k.y; if (k.y>ymx) ymx=k.y;
+							if (k.z<zmn) zmn=k.z; if (k.z>zmx) zmx=k.z;
+						}
+						if ((xmx-xmn)>kPosEps || (ymx-ymn)>kPosEps || (zmx-zmn)>kPosEps)
+							return true;
+					}
+					if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+						const auto& q0 = tm->Rotate.Keys[0].Pos;
+						for (DWord i=1;i<tm->Rotate.NumKeys;++i) {
+							const auto& q = tm->Rotate.Keys[i].Pos;
+							const float dx=q.x-q0.x, dy=q.y-q0.y, dz=q.z-q0.z, dw=q.W-q0.W;
+							if (dx*dx+dy*dy+dz*dz+dw*dw > kRotEps*kRotEps) return true;
+						}
+					}
+				}
+				return false;
+			};
+			auto omniIsStatic = [&](Omni *O) -> bool {
+				// First check the omni's own Pos spline — if it animates,
+				// it's dynamic regardless of parent.
+				if (O->Pos.NumKeys > 1 && O->Pos.Keys) {
+					const auto& k0 = O->Pos.Keys[0].Pos;
+					float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
+					for (DWord i = 1; i < O->Pos.NumKeys; ++i) {
+						const auto& k = O->Pos.Keys[i].Pos;
+						if (k.x < xmin) xmin=k.x; if (k.x > xmax) xmax=k.x;
+						if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
+						if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
+					}
+					constexpr float kEps = 0.1f;
+					if ((xmax-xmin) >= kEps || (ymax-ymin) >= kEps || (zmax-zmin) >= kEps)
+						return false;
+				}
+				// Local pose is static; now check the parent chain via the
+				// wrapping Object. If any ancestor mesh animates, the omni
+				// moves in world space and must NOT be flagged static.
+				auto it = omniOwner.find(O);
+				Object *wrap = (it != omniOwner.end()) ? it->second : nullptr;
+				return !meshAncestorIsDynamic(wrap);
+			};
+			const int movingOmniResRaw = fds::FeatureFlags::greets_moving_omni_shadow_res();
+			const int movingOmniRes = (movingOmniResRaw > 0)
+			    ? std::max(16, movingOmniResRaw) : omniCubeRes;
+			int markedStatic = 0, markedMoving = 0;
+			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+				++totalOmnis;
+				if (O->Type != Light_Omni) continue;
+				if (O->Flags & Omni_CastsShadow) continue;
+				O->Flags |= Omni_CastsShadow;
+				if (omniIsStatic(O)) {
+					// World position fixed → static cube, baked once,
+					// re-used every frame. Cheap.
+					O->Flags |= Omni_StaticShadow;
+					O->shadowMapRes = dword(omniCubeRes);
+					++markedStatic;
+				} else {
+					// World position changes per frame (e.g. parented to
+					// animated mesh). NO static bake — the cube would be
+					// projected from the wrong center. Render_DeferredShadow
+					// Maps's DynamicOmnisPerFrame mode re-renders all
+					// geometry from current IPos into the (static) buffer
+					// every frame. Lightmap bake skips these too
+					// (LightmapBake.cpp filter on Omni_StaticShadow).
+					// Separate res knob: full per-frame raster cost makes
+					// these the most expensive omnis in the scene; dropping
+					// res here costs less visual quality than dropping the
+					// static omnis' res (which only pay once at bake time).
+					O->shadowMapRes = dword(movingOmniRes);
+					++markedMoving;
+				}
+			}
+			std::fprintf(stderr,
+			    "[GREETS] greets_omni_shadows: marked %d static @ %d² + %d moving @ %d² "
+			    "/ %d Light_Omni "
+			    "(moving = per-frame full re-bake; no static bake or lightmap)\n",
+			    markedStatic, omniCubeRes, markedMoving, movingOmniRes, totalOmnis);
+		}
+		ShadowMaps_Rebuild(GreetSc, 1024);
+		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
+		ShadowMaps_BakeStatic(GreetSc);
+		fds::LightmapStampOrigBary(GreetSc);
+		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
+		const auto bakeSpawnT = std::chrono::steady_clock::now();
+		Scene * const greetScForBake = GreetSc;
+		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
+			fds::LightmapBake_Static(greetScForBake);
+			const auto bakeDoneT = std::chrono::steady_clock::now();
+			const double ms = std::chrono::duration<double, std::milli>(
+				bakeDoneT - bakeSpawnT).count();
+			std::fprintf(stderr,
+				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
+				ms);
+		});
 	}
 }
 
@@ -820,92 +1381,9 @@ struct GreetsScene : SceneDriver {
 		// FLD-loaded omnis in greets all ship with IRange=0 (the FLD
 		// Range envelope is optional; FLD_CONV.CPP defaults it to a
 		// 1-key spline at 0). That kills surface lighting (range2=0 →
-		// rejects every pixel), halo bounds, and shadow FZP. Patch to
-		// the flag-controlled default so they actually contribute.
-		const float omniDefRange = fds::FeatureFlags::greets_omni_default_range();
-		if (omniDefRange > 0.0f) {
-			int patched = 0;
-			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
-				if (O->Type != Light_Omni) continue;
-				if (O->IRange > 0.0f) continue;
-				O->IRange = omniDefRange;
-				O->rRange = 1.0f / omniDefRange;
-				if (O->Range.NumKeys >= 1 && O->Range.Keys) {
-					O->Range.Keys[0].Pos.x = omniDefRange;
-				}
-				++patched;
-			}
-			if (patched > 0) {
-				std::fprintf(stderr,
-				    "[GREETS] patched IRange=%g on %d FLD omnis (had 0)\n",
-				    omniDefRange, patched);
-			}
-		}
-
-		// Animate_Objects fills in every FLD omni's IPos / IDir from
-		// its splines (Transform.cpp:192). The cube-shadow setup below
-		// needs the resolved IPos in *two* places:
-		//   (1) CubeShadowMaps_Rebuild stashes cr.lightISource = O->IPos
-		//       (used by CubeShadow_Sample for per-pixel face selection)
-		//   (2) Render_DeferredShadowMaps' bake camera is at O->IPos
-		// Without this pre-tick, both see IPos=(0,0,0) → wrong face
-		// dispatch + identical cube maps + later a NaN smX in the
-		// kernel and a wild-pointer segfault when the bounds check
-		// signed-overflows. SkipCameraAnimation=true to avoid
-		// double-ticking the scene camera (the scene driver does that
-		// itself in the regular frame loop).
-		Animate_Objects(GreetSc, /*SkipCameraAnimation=*/true);
-
-		const int omniCubeRes = std::max(16,
-		    fds::FeatureFlags::greets_omni_shadow_res());
-		int totalOmnis = 0;
-		if (fds::FeatureFlags::greets_omni_shadows()) {
-			// Extent-based "is this omni actually static" check —
-			// matches the mesh-filter logic in Transform.cpp. NumKeys
-			// alone is too strict (greets authors no-op 2-key splines
-			// on static lamps); spline extent < 0.1 in scene units is
-			// the real signal. Animated omnis without this guard would
-			// bake their t=0 shadow then drift at runtime, producing
-			// the "shadows jump wildly" symptom.
-			auto omniIsStatic = [](Omni *O) -> bool {
-				if (O->Pos.NumKeys <= 1 || !O->Pos.Keys) return true;
-				const auto& k0 = O->Pos.Keys[0].Pos;
-				float xmin=k0.x, xmax=k0.x, ymin=k0.y, ymax=k0.y, zmin=k0.z, zmax=k0.z;
-				for (DWord i = 1; i < O->Pos.NumKeys; ++i) {
-					const auto& k = O->Pos.Keys[i].Pos;
-					if (k.x < xmin) xmin=k.x; if (k.x > xmax) xmax=k.x;
-					if (k.y < ymin) ymin=k.y; if (k.y > ymax) ymax=k.y;
-					if (k.z < zmin) zmin=k.z; if (k.z > zmax) zmax=k.z;
-				}
-				constexpr float kEps = 0.1f;
-				return (xmax-xmin) < kEps && (ymax-ymin) < kEps && (zmax-zmin) < kEps;
-			};
-			int marked = 0, skippedDynamic = 0;
-			for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
-				++totalOmnis;
-				if (O->Type != Light_Omni) continue;
-				if (O->Flags & Omni_CastsShadow) continue;
-				if (!omniIsStatic(O)) { ++skippedDynamic; continue; }
-				O->Flags |= (Omni_CastsShadow | Omni_StaticShadow);
-				O->shadowMapRes = dword(omniCubeRes);
-				++marked;
-			}
-			std::fprintf(stderr,
-			    "[GREETS] greets_omni_shadows: marked %d / %d Light_Omni "
-			    "(skipped %d as effectively dynamic) for cube shadow bake "
-			    "at %dx%d per face\n",
-			    marked, totalOmnis, skippedDynamic, omniCubeRes, omniCubeRes);
-		}
-		ShadowMaps_Rebuild(GreetSc, 1024);
-		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
-		ShadowMaps_BakeStatic(GreetSc);
-		// Stamp OrigBary on every static face's (A, B, C) BEFORE the bake
-		// so any FList vertex clones made during the first frame's
-		// Transform inherit the stamped values via memcpy. Clipper
-		// interpolates them perspective-correctly for clip-generated
-		// vertices; rasterizer reads per-pixel for atlas lookup.
-		fds::LightmapStampOrigBary(GreetSc);
-		fds::LightmapBake_Static(GreetSc);
+		// Shadow-map allocation + cube bake + lightmap-bake-spawn was
+		// here; moved into Initialize_Greets so it runs during glat
+		// instead of waiting until greets scene starts (after crash).
 
 		// this scene messes up at time zero
 		Timer++;
@@ -1251,7 +1729,7 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 
-		Animate_Objects(GreetSc);
+		Animate_Objects(GreetSc, View);
 
 		// Free-camera shadow override: when in shadow-view mode AND FC is
 		// active, the spotlight tracks FC's pose. Lets you fly with Tab
@@ -1361,14 +1839,14 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: RNDR phase.
 		prof.switchTo(PROF_RNDR);
 
-		gg->Render();
-		// reset per-frame zbuffer statistics
-		zPass = zReject = 0;
 		// Per-frame shadow-map depth pre-pass (Omni_CastsShadow lights).
-		// Gated on env FDS_SHADOWS=1. No-op when off. Must run BEFORE
-		// Render() because it swaps view globals and re-runs
-		// Transform_Objects internally — Render()'s post-restore
-		// transform leaves the main view in shape.
+		// MUST run before gg->Render(): Render() invokes the deferred
+		// lighting kernel, which samples shadow maps. If shadow render
+		// runs after, the kernel reads PREVIOUS frame's shadow maps
+		// (one-frame lag → flicker patches during motion and at startup,
+		// frame 0 reads all-zero buffers → no shadows that frame).
+		// City does it in this order (CITY.CPP:2230-2235 then Render at
+		// :2278). Gated on env FDS_SHADOWS=1; no-op when off.
 		Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicOmnisPerFrame);
 		// Per-frame dynamic-mesh bake into the dynamic shadow buffer
 		// of each static omni. Lighting kernel samples max(static,
@@ -1376,6 +1854,47 @@ struct GreetsScene : SceneDriver {
 		// receivers. No-op when --shadow-dynamic is off.
 		if (fds::FeatureFlags::shadow_dynamic()) {
 			Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicMeshesPerFrame);
+		}
+		gg->Render();
+		// reset per-frame zbuffer statistics
+		zPass = zReject = 0;
+		// Diagnostic: identify shadow maps whose dynamic polyId hash isn't
+		// changing across frames (= dynamic bake not reaching that map).
+		// No-op unless toggled by T key in REV.CPP.
+		::ShadowMap_TickStalenessTracker();
+
+		// One-shot-per-N-frames log of all omnis' IPos so we can verify
+		// whether the parented "mech flare" omnis actually track Hull.lwo's
+		// world position (as the agent's analysis claims) or stay constant
+		// (suggesting the parent-compose hypothesis is wrong).
+		{
+			static int sFrame = 0;
+			if ((sFrame++ % 60) == 0) {
+				int omniIdx = 0;
+				for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
+					if (O->Type != Light_Omni) continue;
+					std::fprintf(stderr,
+						"[OMNI-POS] frame=%d  #%d  pos=(%g,%g,%g)  flags=0x%x\n",
+						sFrame - 1, omniIdx,
+						O->IPos.x, O->IPos.y, O->IPos.z, unsigned(O->Flags));
+					++omniIdx;
+				}
+				// Hull.lwo + parent chain for cross-reference. Name lives
+				// on the parent Object, not the TriMesh.
+				for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+					if (Obj->Type != Obj_TriMesh) continue;
+					if (!Obj->Name) continue;
+					if (std::strstr(Obj->Name, "Hull") ||
+					    std::strstr(Obj->Name, "mech")) {
+						TriMesh *T = (TriMesh*)Obj->Data;
+						if (!T) continue;
+						std::fprintf(stderr,
+							"[MESH-POS] frame=%d  '%s'  pos=(%g,%g,%g)\n",
+							sFrame - 1, Obj->Name,
+							T->IPos.x, T->IPos.y, T->IPos.z);
+					}
+				}
+			}
 		}
 		Render();
 
@@ -1485,7 +2004,7 @@ struct GreetsScene : SceneDriver {
 			for (int py = 0; py < YRes; ++py) {
 				const int smY = (py * sm.yres) / YRes;
 				const uint16_t *zRow = sm.depth.data() + size_t(smY) * size_t(sm.xres);
-				const uint8_t *idRow = sm.polyId.data() + size_t(smY) * size_t(sm.xres);
+				const uint16_t *idRow = sm.polyId.data() + size_t(smY) * size_t(sm.xres);
 				for (int px = 0; px < XRes; ++px) {
 					const int smX = (px * sm.xres) / XRes;
 					uint32_t pixel;
@@ -1547,6 +2066,37 @@ std::unique_ptr<SceneDriver> createGreetsScene()
 
 void Run_Greets()
 {
+	// Block until the background lightmap bake started in Initialize_Greets
+	// has finished writing TriMesh::staticShadowLM. The first rendered
+	// frame's deferred kernel samples it; sampling unwritten memory =
+	// garbage or full-shadow.
+	if (g_greetsBakeThread.joinable()) {
+		const auto t0 = std::chrono::steady_clock::now();
+		g_greetsBakeThread.join();
+		const auto t1 = std::chrono::steady_clock::now();
+		const double waitedMs = std::chrono::duration<double, std::milli>(
+			t1 - t0).count();
+		std::fprintf(stderr,
+			"[GREETS-BAKE] Run_Greets waited %.1f ms for bake thread to join\n",
+			waitedMs);
+	}
 	auto scene = createGreetsScene();
 	runSceneBlocking(*scene);
+}
+
+void Greets_ShutdownBakeThread()
+{
+	// Called from CodeEntry's demo_exit. Without this the static
+	// std::thread is still joinable at process teardown and ~thread()
+	// calls std::terminate. We DETACH (not join) so ESC exits immediately
+	// without waiting for the bake to finish. The bake reads from the
+	// scene + writes to per-mesh atlases; once the process is exiting
+	// nobody reads either side, and the OS reclaims everything when
+	// main() returns. Safe because we don't run further engine code
+	// that depends on the bake's output after this point.
+	if (g_greetsBakeThread.joinable()) {
+		std::fprintf(stderr,
+			"[GREETS-BAKE] shutdown: detaching bake thread (fast exit)\n");
+		g_greetsBakeThread.detach();
+	}
 }

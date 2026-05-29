@@ -91,6 +91,16 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 {
 	if (!shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
+	// Refresh each CubeShadowRef's lightISource from the omni's current
+	// IPos. Set once at CubeShadowMaps_Rebuild time; for FLD-animated
+	// omnis (e.g. greets robot-following lights) the omni's IPos drifts
+	// every frame via Animate_Objects but the ref's copy stayed at t=0,
+	// which CubeShadow_Sample uses for cube-face selection. Cheap (one
+	// vec copy per omni) and safe (sm.lightISource is also refreshed
+	// at line 239 below for the same reason).
+	for (auto &cr : g_cubeShadowRefs) {
+		if (cr.omni) cr.lightISource = cr.omni->IPos;
+	}
 	// Convenience predicates over the mode. Three behaviors fold
 	// cleanly onto two bools (omni-target × buffer-target):
 	//   StaticOnce            wantStatic=true  writeDynamic=false
@@ -292,8 +302,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				g_inShadowPass = true;
 				g_inDynamicShadowBake = dynBakeForLambda;
 				g_currentShadowOmni = smPtr->omni;
+				// Set the active shadow map too — Transform_Objects's
+				// per-cube-face bsphere cull needs sm->cubeFace to pick
+				// the face axis. (raster lambda already sets this; mirror
+				// it here so the xform task has the same context.)
+				g_currentShadowMap = smPtr;
 				Transform_Objects(ScPtr, *ctxPtr, *facesPtr,
 				                  smPtr->xres, smPtr->yres, scratchPtr);
+				g_currentShadowMap = nullptr;
 				g_currentShadowOmni = nullptr;
 				g_inDynamicShadowBake = false;
 				g_inShadowPass = false;
@@ -344,8 +360,21 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			continue;
 		}
 
-		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
-		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
+		// CRITICAL: tile sizes must be multiples of ShadowBarry's TILE_SIZE
+		// (8). Otherwise clipper tile rects bisect ShadowBarry's 8×8 SIMD
+		// tiles at seams, where apply_exact does a 16-byte aligned
+		// _mm_blendv_epi8 RMW on depth + scalar polyId stores keyed off
+		// the global tile origin. Adjacent workers then race on the same
+		// 16-byte word → texel race winners flip with thread scheduling →
+		// flicker patches in the shadow viz even when the scene is paused.
+		// Symptom shows up most on greets because the wall-split assigns
+		// distinct ShadowMatIDs per cluster, so race winners produce
+		// visibly different polyIds at every cluster seam.
+		constexpr int kBarryTile = 8;
+		int rawTX = (sm.xres + numTilesX - 1) / numTilesX;
+		int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
+		const int tileSizeX = (rawTX + kBarryTile - 1) & ~(kBarryTile - 1);
+		const int tileSizeY = (rawTY + kBarryTile - 1) & ~(kBarryTile - 1);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
@@ -525,20 +554,27 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	//                      + sm.lightViewMat * (mainView->ISource - sm.lightISource)
 	// The kernel reads `viewToLight` (3×3) and `viewToLightOffset` (vec)
 	// per pixel — no per-pixel world-space round-trip.
-	for (ShadowMap& sm : g_shadowMaps) {
-		if (!sm.omni) continue;
-		// Build sm.lightViewMat * mainView->Mat^T. MatrixXMatrix(A, B, R)
-		// gives R = A * B. Need the transpose of mainView->Mat first.
-		Matrix mvT;
-		for (int r = 0; r < 3; ++r)
-			for (int c = 0; c < 3; ++c)
-				mvT[r][c] = View->Mat[c][r];
-		MatrixXMatrix(sm.lightViewMat, mvT, sm.viewToLight);
+	// Skip the view-space → light-view-space precompute when there's
+	// no main camera. Happens during the StaticOnce bake called from
+	// Initialize_X (off-render-loop thread, before any scene set the
+	// global View). The values would be junk anyway, and every per-
+	// frame render call recomputes them against the correct View.
+	if (View) {
+		for (ShadowMap& sm : g_shadowMaps) {
+			if (!sm.omni) continue;
+			// Build sm.lightViewMat * mainView->Mat^T. MatrixXMatrix(A, B, R)
+			// gives R = A * B. Need the transpose of mainView->Mat first.
+			Matrix mvT;
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+					mvT[r][c] = View->Mat[c][r];
+			MatrixXMatrix(sm.lightViewMat, mvT, sm.viewToLight);
 
-		// Offset: sm.lightViewMat * (mainView->ISource - sm.lightISource).
-		Vector d;
-		Vector_Sub(&View->ISource, &sm.lightISource, &d);
-		MatrixXVector(sm.lightViewMat, &d, &sm.viewToLightOffset);
+			// Offset: sm.lightViewMat * (mainView->ISource - sm.lightISource).
+			Vector d;
+			Vector_Sub(&View->ISource, &sm.lightISource, &d);
+			MatrixXVector(sm.lightViewMat, &d, &sm.viewToLightOffset);
+		}
 	}
 
 	// FDS_DUMP_SHADOWMAP=1: write each shadow map as a .pgm under

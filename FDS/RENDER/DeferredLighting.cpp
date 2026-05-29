@@ -810,17 +810,47 @@ static inline PixelLightmap resolvePixelLightmap(const meka::GBuffer &gb,
 // mode, sample the lightmap. Otherwise run the per-pixel cube tap.
 // (Dynamic mode falls back because the lightmap only encodes static
 // occluders; the runtime cube tap reads max(static, dynamic) depth.)
+// Bundle of cube-tap-related flags. Read ONCE per tile worker and passed
+// into resolveCubeAtten so the per-pixel + per-omni hot loop never re-
+// queries FeatureFlags::* or g_shadowMode for state that's constant for
+// the duration of the tile.
+struct CubeAttenFlags {
+	bool      shadowDynamicOn;
+	bool      lightmapPlanar;
+	bool      lightmapNearest;
+	bool      lightmapRecomputeBake;
+	bool      lightmapRecomputeBary;
+	bool      profNoCubeTap;
+	ShadowMode shadowMode;
+};
+
 static inline float resolveCubeAtten(const PixelLightmap &pl,
                                       int32_t cubeIdx,
                                       bool useLightmap,
+                                      const CubeAttenFlags &caFlags,
                                       // cube-tap fallback inputs:
                                       float wx, float wy, float wz, float lenInv,
                                       float nGeoX, float nGeoY, float nGeoZ,
                                       float sampleWorldX, float sampleWorldY, float sampleWorldZ,
                                       float vx, float vy, float vz,
-                                      int kShadowBiasG, int kSlopeBiasG)
+                                      int kShadowBiasG, int kSlopeBiasG,
+                                      // Receiver's matID for PolyId cube tap. Pass -1
+                                      // to force Depth mode; otherwise caFlags.shadowMode
+                                      // selects.
+                                      int surfaceMatId)
 {
-	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis) {
+	// Diagnostic: short-circuit to "fully lit" so we can A/B-bench the
+	// pure tap cost vs the rest of the kernel. See --prof-no-cube-tap.
+	if (caFlags.profNoCubeTap) return 1.0f;
+	// Moving omnis (Omni_CastsShadow without Omni_StaticShadow) skip the
+	// lightmap path — their cube is re-baked every frame from current
+	// IPos, so the t=0 static lightmap is invalid. Fall through to the
+	// per-pixel cube tap below, which reads the freshly-baked cube.
+	const bool cubeOmniStatic = (cubeIdx >= 0
+	    && size_t(cubeIdx) < g_cubeShadowRefs.size()
+	    && g_cubeShadowRefs[cubeIdx].omni
+	    && (g_cubeShadowRefs[cubeIdx].omni->Flags & Omni_StaticShadow));
+	if (useLightmap && pl.lm && cubeIdx >= 0 && cubeIdx < pl.lm->numOmnis && cubeOmniStatic) {
 		// Debug: --shadow-lightmap-recompute-bake replaces the atlas
 		// bilinear lookup with a fresh per-pixel call to the bake-time
 		// sampler (SampleStaticCubeAtWorld). Same flow as the bake, but
@@ -829,7 +859,7 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 		// what cube-tap produces, the bake function is fine; if it
 		// matches the broken lightmap path, the bake function itself
 		// is wrong (differs from CubeShadow_Sample).
-		if (fds::FeatureFlags::shadow_lightmap_recompute_bake()) {
+		if (caFlags.lightmapRecomputeBake) {
 			const float dotGeoR = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
 			const float nDotLR = dotGeoR * lenInv;
 			const float invNdotLR = 1.0f / (nDotLR > 0.2f ? nDotLR : 0.2f);
@@ -846,7 +876,7 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 		// reconstructed point. If the result matches the cube-tap reference,
 		// the bary points to the right physical place and the lightmap bug
 		// is in atlas resolution. If it diverges, the bary itself is wrong.
-		if (fds::FeatureFlags::shadow_lightmap_recompute_at_bary() && pl.mesh) {
+		if (caFlags.lightmapRecomputeBary && pl.mesh) {
 			TriMesh *T = pl.mesh;
 			if (pl.faceIdx >= 0 && DWord(pl.faceIdx) < T->FIndex) {
 				const Face &F = T->Faces[pl.faceIdx];
@@ -874,10 +904,54 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 				}
 			}
 		}
-		if (fds::FeatureFlags::shadow_lightmap_nearest()) {
-			return pl.lm->sampleNearest(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
+		float staticAtten;
+		if (caFlags.lightmapPlanar && !pl.lm->planarBases.empty()) {
+			staticAtten = pl.lm->sampleBilinearPlanar(pl.faceIdx, cubeIdx,
+			                                          sampleWorldX, sampleWorldY, sampleWorldZ);
+		} else if (caFlags.lightmapNearest) {
+			staticAtten = pl.lm->sampleNearest(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
+		} else {
+			staticAtten = pl.lm->sampleBilinear(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
 		}
-		return pl.lm->sampleBilinear(pl.faceIdx, cubeIdx, pl.sB, pl.tB);
+		// Composite static × dynamic for --shadow-dynamic. The lightmap
+		// atlas only encodes static-occluder shadow factor (baked once at
+		// scene init from sm.depth / sm.polyId). To get dynamic mesh
+		// shadows on static surfaces, layer a per-pixel cube tap against
+		// the DYNAMIC buffers only (sm.depth_dynamic / sm.polyId_dynamic
+		// — re-baked each frame by Render_DeferredShadowMaps in
+		// DynamicMeshesPerFrame mode). Multiply: the surface must pass
+		// both the static and dynamic occlusion tests to receive light.
+		// Skip when --shadow-dynamic is off — the dynamic buffers are
+		// all-zero and the call would be a no-op multiply by 1.0.
+		if (caFlags.shadowDynamicOn) {
+			float dynAtten;
+			if (caFlags.shadowMode == ShadowMode::PolyId) {
+				dynAtten = CubeShadow_Sample(cubeIdx,
+				                              sampleWorldX, sampleWorldY, sampleWorldZ,
+				                              vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,
+				                              surfaceMatId, /*dynamicOnly=*/true);
+			} else {
+				const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+				const float nDotL = dotGeo * lenInv;
+				const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+				const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
+				dynAtten = CubeShadow_Sample(cubeIdx,
+				                              sampleWorldX, sampleWorldY, sampleWorldZ,
+				                              vx, vy, vz, kShadowBiasG, slopeBias,
+				                              /*surfaceMatId=*/-1, /*dynamicOnly=*/true);
+			}
+			return staticAtten * dynAtten;
+		}
+		return staticAtten;
+	}
+	// PolyId path skips bias arithmetic entirely (identity test, no
+	// depth comparison) — hoist the mode check above the slope-bias
+	// math so PolyId mode pays nothing for slope it never uses.
+	if (caFlags.shadowMode == ShadowMode::PolyId) {
+		return CubeShadow_Sample(cubeIdx,
+		                          sampleWorldX, sampleWorldY, sampleWorldZ,
+		                          vx, vy, vz, /*constBias=*/0, /*slopeBias=*/0,
+		                          surfaceMatId);
 	}
 	const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
 	const float nDotL = dotGeo * lenInv;
@@ -885,7 +959,8 @@ static inline float resolveCubeAtten(const PixelLightmap &pl,
 	const int slopeBias = int(float(kSlopeBiasG) * (invNdotL - 1.0f));
 	return CubeShadow_Sample(cubeIdx,
 	                          sampleWorldX, sampleWorldY, sampleWorldZ,
-	                          vx, vy, vz, kShadowBiasG, slopeBias);
+	                          vx, vy, vz, kShadowBiasG, slopeBias,
+	                          /*surfaceMatId=*/-1);
 }
 
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
@@ -930,6 +1005,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// (see resolveCubeAtten's contract above). Hoisted to tile-level
 	// so the per-pixel + per-omni hot path doesn't re-query.
 	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic();
+	// Cube-tap flag bundle. resolveCubeAtten was reading 6 flags + 1
+	// atomic per cube tap (1.44M taps/frame at greets t=500). Hoist to
+	// tile-level: ~10 micros/frame back across all tile workers, and
+	// removes a tail of L1 cold reads from the inner loop.
+	const CubeAttenFlags caFlags{
+	    /*shadowDynamicOn      */ fds::FeatureFlags::shadow_dynamic(),
+	    /*lightmapPlanar       */ fds::FeatureFlags::shadow_lightmap_planar(),
+	    /*lightmapNearest      */ fds::FeatureFlags::shadow_lightmap_nearest(),
+	    /*lightmapRecomputeBake*/ fds::FeatureFlags::shadow_lightmap_recompute_bake(),
+	    /*lightmapRecomputeBary*/ fds::FeatureFlags::shadow_lightmap_recompute_at_bary(),
+	    /*profNoCubeTap        */ fds::FeatureFlags::prof_no_cube_tap(),
+	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
+	};
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -950,6 +1038,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (matID >= ctx.matTable.count) continue;
 			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
+
+			// Resolved 16-bit ShadowMatID for the cube polyId path.
+			// Source of truth is the per-pixel `gb.shadowMatID` plane
+			// stamped by Mekalele (per-face resolution of
+			// F->ShadowMatID / F->Txtr->ShadowMatID / Txtr->ID+1).
+			// When the plane is empty (non-opaque renderers, or scenes
+			// where the plane wasn't allocated), fall back to the
+			// legacy uint16_t(matID+1) decoded from `txtr`.
+			const int surfaceShadowId = gb.shadowMatID.empty()
+			    ? int(matID + 1)
+			    : int(gb.shadowMatID[i]);
 
 			// Texture sample: Mekalele's apply_exact already wrote a
 			// swizzled offset into mat32, so it's a direct lookup into
@@ -1293,11 +1392,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								if (idxArr[lane] < 0) continue;
 								if (kArr[lane] <= 0.0f) continue;
 								const float cubeAtten = resolveCubeAtten(
-									pixelLM, idxArr[lane], lmKernelEnabled,
+									pixelLM, idxArr[lane], lmKernelEnabled, caFlags,
 									wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
 									nGeoX, nGeoY, nGeoZ,
 									sampleWorldX, sampleWorldY, sampleWorldZ,
-									x, y, z, kSB, kSL);
+									x, y, z, kSB, kSL,
+									surfaceShadowId);
 								kArr[lane] *= cubeAtten;
 							}
 							k = _mm256_load_ps(kArr);
@@ -1503,16 +1603,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
 									float occ = 0.0f;
 									if (mode == ShadowMode::PolyId) {
-										const uint8_t *idRow0 = sm.polyId.data() +
+										const uint16_t *idRow0 = sm.polyId.data() +
 											size_t(iY) * size_t(sm.xres);
-										const uint8_t *idRow1 = idRow0 + sm.xres;
+										const uint16_t *idRow1 = idRow0 + sm.xres;
 										// Surface matID extracted from gb.txtr's
 										// packed (miplevel:4 | matID:8 | swizzledUV:20).
 										// Shadow buffer stores matID+1 of the closest
 										// occluder; +1 here too so the comparison
 										// uses the same offset, and 0 stays as the
 										// "no occluder" sentinel.
-										const uint8_t surfaceId = uint8_t(matID + 1);
+										// Receiver identity: read the per-pixel
+										// `gb.shadowMatID` plane (stamped by
+										// Mekalele with the full resolution
+										// chain). Falls back to uint16_t(matID+1)
+										// when the plane wasn't allocated.
+										// Mirrors the scalar surfaceShadowId
+										// resolution above.
+										const uint16_t surfaceId = uint16_t(surfaceShadowId);
 										if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
 										if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
 										if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
@@ -1565,11 +1672,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const int32_t cubeIdx = tl.cubeShadowIdx[n];
 						if (cubeIdx >= 0) {
 							const float cubeAtten = resolveCubeAtten(
-								pixelLM, cubeIdx, lmKernelEnabled,
+								pixelLM, cubeIdx, lmKernelEnabled, caFlags,
 								wx, wy, wz, lenInv,
 								nGeoX, nGeoY, nGeoZ,
 								sampleWorldX, sampleWorldY, sampleWorldZ,
-								x, y, z, kShadowBiasG, kSlopeBiasG);
+								x, y, z, kShadowBiasG, kSlopeBiasG,
+								surfaceShadowId);
 							if (cubeAtten <= 0.0f) continue;
 							shadowAtten *= cubeAtten;
 						}
@@ -1768,6 +1876,15 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (matID >= ctx.matTable.count) continue;
 			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
+
+			// Resolved 16-bit ShadowMatID — see scalar path comment above.
+			// The xpar G-buffer (gbX) does not currently allocate the
+			// shadowMatID plane (xpar surfaces don't participate in
+			// PolyId shadows much), so this falls through to the
+			// matID+1 path unless someone adds the plane later.
+			const int surfaceShadowId = gbX.shadowMatID.empty()
+			    ? int(matID + 1)
+			    : int(gbX.shadowMatID[i]);
 
 			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
 			if (!texData) continue;
@@ -2642,6 +2759,15 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool quarter      = deferredLightingQuarterEnabled();
+	// Normal-similarity threshold for the quarter fill predicate. matID
+	// equality alone is too loose — same hull material on a curved
+	// surface gives wildly different shading at adjacent pixels, and
+	// the average produces the "cartoonish" robot look. Require neighbor
+	// normals to be within ~18° (cos > 0.95 default) before averaging.
+	// Center normal decoded once per pixel and reused.
+	const float quarterNormalCos = quarter
+	    ? fds::FeatureFlags::quarter_normal_cos() : 0.0f;
+	const bool  quarterNormalCheck = quarter && quarterNormalCos > 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2658,6 +2784,20 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const uint32_t mat32  = gb.txtr[i];
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
 
+			// Center normal decoded once; reused by every fill pattern's
+			// neighbor-similarity test below. Cheap enough vs the avoided
+			// full shading that we always decode (even if matID fails).
+			float ncX = 0, ncY = 0, ncZ = 0;
+			if (quarterNormalCheck) {
+				meka::oct_decode_u16(gb.normal[i], ncX, ncY, ncZ);
+			}
+			auto neighborNormalOk = [&](size_t ni) -> bool {
+				if (!quarterNormalCheck) return true;
+				float nx, ny, nz;
+				meka::oct_decode_u16(gb.normal[ni], nx, ny, nz);
+				return (ncX*nx + ncY*ny + ncZ*nz) >= quarterNormalCos;
+			};
+
 			bool matched = false;
 			if (quarter) {
 				// One of three patterns by parity:
@@ -2673,7 +2813,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (haveL && haveR) {
 						const uint32_t mIDl = (gb.txtr[i - 1] >> 20) & 0xFF;
 						const uint32_t mIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
-						if (mIDl == matIDc && mIDr == matIDc) {
+						if (mIDl == matIDc && mIDr == matIDc
+						    && neighborNormalOk(i - 1)
+						    && neighborNormalOk(i + 1)) {
 							const dword avg = ((out[i - 1] & 0xFEFEFEFEu) >> 1) +
 							                   ((out[i + 1] & 0xFEFEFEFEu) >> 1);
 							out[i] = avg | 0xFF000000u;
@@ -2687,7 +2829,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (haveT && haveB) {
 						const uint32_t mIDt = (gb.txtr[i - XRes] >> 20) & 0xFF;
 						const uint32_t mIDb = (gb.txtr[i + XRes] >> 20) & 0xFF;
-						if (mIDt == matIDc && mIDb == matIDc) {
+						if (mIDt == matIDc && mIDb == matIDc
+						    && neighborNormalOk(i - XRes)
+						    && neighborNormalOk(i + XRes)) {
 							const dword avg = ((out[i - XRes] & 0xFEFEFEFEu) >> 1) +
 							                   ((out[i + XRes] & 0xFEFEFEFEu) >> 1);
 							out[i] = avg | 0xFF000000u;
@@ -2705,7 +2849,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const uint32_t mTR = (gb.txtr[i - XRes + 1] >> 20) & 0xFF;
 						const uint32_t mBL = (gb.txtr[i + XRes - 1] >> 20) & 0xFF;
 						const uint32_t mBR = (gb.txtr[i + XRes + 1] >> 20) & 0xFF;
-						if (mTL == matIDc && mTR == matIDc && mBL == matIDc && mBR == matIDc) {
+						const bool matIDok = (mTL == matIDc && mTR == matIDc
+						                      && mBL == matIDc && mBR == matIDc);
+						if (matIDok
+						    && neighborNormalOk(i - XRes - 1)
+						    && neighborNormalOk(i - XRes + 1)
+						    && neighborNormalOk(i + XRes - 1)
+						    && neighborNormalOk(i + XRes + 1)) {
 							// 4-way avg via mask-and-shift-by-2: per-channel
 							// (a + b + c + d) / 4 with 2-bit precision loss
 							// per channel — well below the visible threshold.
