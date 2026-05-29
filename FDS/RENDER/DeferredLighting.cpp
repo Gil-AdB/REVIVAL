@@ -1051,18 +1051,24 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			// Decode mat32 → matID, miplevel, swizzledUV.
 			const uint32_t mat32 = gb.txtr[i];
-			const uint32_t miplevelRaw = (mat32 >> 28) & 0xF;
-			// Runtime override (N key): -1 = auto. Clamp to [0, 7] when set.
-			const uint32_t miplevel    = (forceMipLevel >= 0)
-			    ? uint32_t(forceMipLevel & 7) : miplevelRaw;
+			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
 			const uint32_t matID       = (mat32 >> 20) & 0xFF;
 			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
 			if (matID >= ctx.matTable.count) continue;
 			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
+			// Force-mip (N key): override the value used for nmap-fade
+			// math only. Texture sampling still uses the rasterizer-chosen
+			// mip — overriding it there would break swizzledUV (which is
+			// encoded against the chosen mip's dimensions) and produce
+			// garbage. This way, the user can verify whether the nmap LOD
+			// fade is wired correctly by forcing "as if mip 5" and seeing
+			// whether the bump effect drops to zero on screen.
+			const uint32_t miplevelForFade = (forceMipLevel >= 0)
+			    ? uint32_t(forceMipLevel & 7) : miplevel;
 			// Mip-level viz (Shift+N): paint each pixel by its raw
-			// (unforced) miplevel. Suppresses texturing + lighting; pure
-			// color = mip indicator.
+			// (rasterizer-chosen) miplevel. Suppresses texturing +
+			// lighting; pure color = mip indicator.
 			if (vizMipLevel) {
 				static constexpr dword kMipPalette[8] = {
 				    0xFFFF0000u, // 0 red
@@ -1074,7 +1080,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				    0xFF8000FFu, // 6 violet
 				    0xFFFFFFFFu, // 7 white
 				};
-				out[i] = kMipPalette[miplevelRaw & 7];
+				out[i] = kMipPalette[miplevel & 7];
 				continue;
 			}
 
@@ -1162,13 +1168,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					// LOD-aware bump fade: scale (nmX, nmY) toward zero at
-					// high mip. Fade starts AT nmapFadeStart so picking
-					// start=0 actually starts cutting bump at mip 0 (1-step).
-					// Earlier formula used (miplevel - start) which gave 0
-					// at start → no visible change for the user's
-					// --nmap-lod-fade-start=0 test. Shift by +1.
-					if (int(miplevel) >= nmapFadeStart) {
-						const int   over = int(miplevel) - nmapFadeStart + 1;
+					// high mip. Uses miplevelForFade so the N-key override
+					// can simulate "as if at higher mip" without touching
+					// texture sampling. Fade starts AT nmapFadeStart so
+					// picking start=0 starts cutting at mip 0 (1-step).
+					if (int(miplevelForFade) >= nmapFadeStart) {
+						const int   over = int(miplevelForFade) - nmapFadeStart + 1;
 						const float fade = 1.0f - float(over) * nmapFadeStep;
 						const float s = fade > 0.0f ? fade : 0.0f;
 						nmX *= s; nmY *= s;
