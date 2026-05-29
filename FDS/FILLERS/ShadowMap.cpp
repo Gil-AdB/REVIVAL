@@ -470,6 +470,13 @@ struct ShadowBarry {
 	ShadowMap *sm;
 	uint16_t *zArr;   // sm->depth or sm->depth_dynamic
 	uint16_t *idArr;  // sm->polyId or sm->polyId_dynamic (widened to uint16 for ShadowMatID)
+	// Static-z cull source: non-null ONLY when we're writing the dynamic
+	// buffer (so apply_exact can mask out lanes already occluded by closer
+	// static geometry). The runtime cube tap's closestPoly() picks the
+	// buffer with larger zEnc anyway, so any dynamic write where the
+	// static buffer is already closer would be ignored at sample time —
+	// we skip the write here to save the blendv RMW + polyId store.
+	const uint16_t *zStaticArr;
 	float drzdx, drzdy;
 	uint16_t idByte;  // legacy name; now a 16-bit ShadowMatID
 
@@ -477,6 +484,7 @@ struct ShadowBarry {
 		: sm(smIn),
 		  zArr (useDynamic ? smIn->depth_dynamic.data()  : smIn->depth.data()),
 		  idArr(useDynamic ? smIn->polyId_dynamic.data() : smIn->polyId.data()),
+		  zStaticArr(useDynamic ? smIn->depth.data() : nullptr),
 		  drzdx(0), drzdy(0), idByte(idIn) {}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
@@ -505,8 +513,12 @@ struct ShadowBarry {
 
 		uint16_t *zRow = zRowBase;
 		uint16_t *idRow = idRowBase;
+		const uint16_t * const zStaticRowBase = zStaticArr
+		    ? (zStaticArr + (zRowBase - zArr)) : nullptr;
+		const uint16_t *zStaticRow = zStaticRowBase;
 		for (int row = 0; row < barry::TILE_SIZE; ++row,
-				zRow += xres, idRow += xres) {
+				zRow += xres, idRow += xres,
+				zStaticRow = zStaticRow ? (zStaticRow + xres) : nullptr) {
 			Vec8ib p_mask;
 			bool row_has_pixels;
 			if constexpr (Coverage == barry::TCoverage::FULL) {
@@ -526,6 +538,19 @@ struct ShadowBarry {
 				z_existing_c.load(zRow);
 				const Vec8i z_existing = extend(z_existing_c);
 				p_mask &= Vec8ib(enc > z_existing);
+
+				// Static-z cull: when writing the dynamic buffer, mask
+				// off lanes where the STATIC buffer already has a closer
+				// occluder (zs > enc). closestPoly() at sample time would
+				// pick the static buffer anyway, so writing them here is
+				// wasted RMW + polyId store. zStaticArr non-null only on
+				// the dynamic write path.
+				if (zStaticArr) {
+					Vec8us zs_existing_c;
+					zs_existing_c.load(zStaticRow);
+					const Vec8i zs_existing = extend(zs_existing_c);
+					p_mask &= Vec8ib(enc > zs_existing);
+				}
 
 				if (barry::any_lane_set(p_mask)) {
 					*(__m128i*)zRow = _mm_blendv_epi8(
