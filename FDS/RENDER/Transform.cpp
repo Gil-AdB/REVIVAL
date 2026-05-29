@@ -109,6 +109,29 @@ static inline bool sphereOutsideSpotCone(const Vector& C, float r,
 	return perpSq > coneRadiusAtDepth * coneRadiusAtDepth;
 }
 
+// Specialized test for the 90°-FOV cube-face pyramid's circumscribed
+// cone (cos = 1/√3 = 0.5774). Called per mesh per cube face per frame
+// — at greets's chunked Piramid this is ~10k+ ops, so we sqrt+div
+// inline once-deduplicate the trig out. Same conservative shape as
+// sphereOutsideSpotCone with cosOuter=0.577; just constant-folded.
+static inline bool sphereOutsidePyramidCone(const Vector& C, float r,
+                                             const Vector& P, const Vector& D,
+                                             float maxRange)
+{
+	constexpr float kTanOuter = 1.4142135623730951f;  // √2
+	constexpr float kInvCos   = 1.7320508075688772f;  // √3 = 1 / (1/√3)
+	const float vx = C.x - P.x, vy = C.y - P.y, vz = C.z - P.z;
+	const float v2 = vx*vx + vy*vy + vz*vz;
+	const float rMax = maxRange + r;
+	if (v2 > rMax * rMax) return true;
+	const float distAlongAxis = vx*D.x + vy*D.y + vz*D.z;
+	if (distAlongAxis < -r) return true;
+	const float depth = distAlongAxis > 0.0f ? distAlongAxis : 0.0f;
+	const float coneRAtDepth = depth * kTanOuter + r * kInvCos;
+	const float perpSq = v2 - distAlongAxis * distAlongAxis;
+	return perpSq > coneRAtDepth * coneRAtDepth;
+}
+
 // Defined in RENDER.CPP. Forward-declare to avoid pulling the rest of
 // RENDER.CPP's prelude in here.
 float frand();
@@ -702,8 +725,10 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			Vector wsBsphereCtr;
 			MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
 			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
-			if (sphereOutsideSpotCone(wsBsphereCtr, T->BSphereRadius,
-			                          cubeFacePos, cubeFaceDir, cubeFaceCos, cubeFaceRange)) {
+			// cubeFaceCos = 0.577 by construction; use the constant-
+			// folded variant to skip the sqrt + divide per call.
+			if (sphereOutsidePyramidCone(wsBsphereCtr, T->BSphereRadius,
+			                             cubeFacePos, cubeFaceDir, cubeFaceRange)) {
 				continue;
 			}
 		}
