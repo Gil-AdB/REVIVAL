@@ -27,6 +27,18 @@ extern std::atomic<bool> g_shouldQuit;
 // "skip" doesn't accidentally exit the program.
 extern std::atomic<bool> g_skipScene;
 
+// Runtime mip-level debug knobs (toggled via N / Shift+N in REV.CPP).
+//   g_forceMipLevel: -1 = auto (rasterizer-chosen), 0..7 = override.
+//     When >= 0, every per-pixel kernel uses this value instead of the
+//     miplevel bits from gb.mat32. Lets you A/B-compare a forced mip
+//     against the auto path to see whether the rasterizer is actually
+//     reaching high mips at distance.
+//   g_vizMipLevel: when true, the deferred kernel paints each pixel
+//     with a palette-indexed color by miplevel (mip0=red, mip1=orange,
+//     ..., mip7=white). Texturing + lighting suppressed.
+extern std::atomic<int>  g_forceMipLevel;
+extern std::atomic<bool> g_vizMipLevel;
+
 enum
 {
 	PROF_ZCLR	=	0,

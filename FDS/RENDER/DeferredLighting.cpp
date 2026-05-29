@@ -219,6 +219,11 @@ struct DeferredLightingCtx {
 // per-frame setup cost.
 DeferredLightingCtx g_deferredCtx{};
 
+// Runtime mip-level debug knobs. Defined here so FDS doesn't need a
+// symbol from DEMO. Declared in Rev.h; toggled by N / Shift+N keys.
+std::atomic<int>  g_forceMipLevel{-1};
+std::atomic<bool> g_vizMipLevel{false};
+
 // Build per-tile compacted SoA. For each omni: project its view-space
 // bounding sphere into screen space, find overlapping tile rects, then
 // **append the omni's values** (not its index) into each overlapping
@@ -1014,6 +1019,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// one float mul + one max — cheap vs the full TBN block.
 	const int   nmapFadeStart = fds::FeatureFlags::nmap_lod_fade_start();
 	const float nmapFadeStep  = fds::FeatureFlags::nmap_lod_fade_step();
+	// Runtime mip-level debug knobs (toggled via N / Shift+N in REV.CPP).
+	// Defined here and declared extern in Rev.h. Read once per tile entry
+	// to avoid the atomic load on every pixel.
+	const int  forceMipLevel = ::g_forceMipLevel.load(std::memory_order_relaxed);
+	const bool vizMipLevel   = ::g_vizMipLevel.load(std::memory_order_relaxed);
 	// Cube-tap flag bundle. resolveCubeAtten was reading 6 flags + 1
 	// atomic per cube tap (1.44M taps/frame at greets t=500). Hoist to
 	// tile-level: ~10 micros/frame back across all tile workers, and
@@ -1041,12 +1051,32 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			// Decode mat32 → matID, miplevel, swizzledUV.
 			const uint32_t mat32 = gb.txtr[i];
-			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
+			const uint32_t miplevelRaw = (mat32 >> 28) & 0xF;
+			// Runtime override (N key): -1 = auto. Clamp to [0, 7] when set.
+			const uint32_t miplevel    = (forceMipLevel >= 0)
+			    ? uint32_t(forceMipLevel & 7) : miplevelRaw;
 			const uint32_t matID       = (mat32 >> 20) & 0xFF;
 			const uint32_t swizzledUV  = mat32 & 0xFFFFF;
 			if (matID >= ctx.matTable.count) continue;
 			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
+			// Mip-level viz (Shift+N): paint each pixel by its raw
+			// (unforced) miplevel. Suppresses texturing + lighting; pure
+			// color = mip indicator.
+			if (vizMipLevel) {
+				static constexpr dword kMipPalette[8] = {
+				    0xFFFF0000u, // 0 red
+				    0xFFFF8000u, // 1 orange
+				    0xFFFFFF00u, // 2 yellow
+				    0xFF00FF00u, // 3 green
+				    0xFF0080FFu, // 4 blue
+				    0xFF4B00FFu, // 5 indigo
+				    0xFF8000FFu, // 6 violet
+				    0xFFFFFFFFu, // 7 white
+				};
+				out[i] = kMipPalette[miplevelRaw & 7];
+				continue;
+			}
 
 			// Resolved 16-bit ShadowMatID for the cube polyId path.
 			// Source of truth is the per-pixel `gb.shadowMatID` plane

@@ -493,6 +493,9 @@ int32_t g_hiDPI;
 // See Rev.h for semantics.
 std::atomic<bool> g_shouldQuit{false};
 std::atomic<bool> g_skipScene{false};
+// g_forceMipLevel / g_vizMipLevel are defined in FDS/RENDER/DeferredLighting.cpp
+// (so the FDS library doesn't have an unresolved symbol from DEMO/).
+// Declared in Rev.h.
 
 float dTime;
 
@@ -1566,6 +1569,29 @@ int main(int argc, const char *argv[])
 					// Applies to both thumbnail (V) and fullscreen (M).
 					extern void ShadowMap_ViewModeCycle();
 					ShadowMap_ViewModeCycle();
+				} else if (event.key.keysym.scancode == SDL_SCANCODE_N) {
+					// N: cycle force-miplevel through -1 (auto) → 0..7 → -1.
+					// Shift+N: toggle the per-pixel mip-viz palette.
+					// Both wired to the deferred kernel's per-pixel path
+					// (see DeferredLighting.cpp; reads g_forceMipLevel /
+					// g_vizMipLevel atomically once per tile).
+					const Uint16 mod = event.key.keysym.mod;
+					const bool shift = (mod & (KMOD_LSHIFT | KMOD_RSHIFT)) != 0;
+					if (shift) {
+						const bool now = !g_vizMipLevel.load();
+						g_vizMipLevel.store(now);
+						std::fprintf(stderr, "[MIP-VIZ] %s "
+						    "(mip0=red mip1=orange mip2=yellow mip3=green "
+						    "mip4=blue mip5=indigo mip6=violet mip7=white)\n",
+						    now ? "ON" : "off");
+					} else {
+						const int prev = g_forceMipLevel.load();
+						const int next = (prev < 0) ? 0
+						               : (prev >= 7 ? -1 : prev + 1);
+						g_forceMipLevel.store(next);
+						if (next < 0) std::fprintf(stderr, "[MIP-FORCE] AUTO (rasterizer chooses)\n");
+						else          std::fprintf(stderr, "[MIP-FORCE] forced mip = %d\n", next);
+					}
 				} else if (event.key.keysym.scancode == SDL_SCANCODE_T) {
 					// Toggle per-frame staleness tracker for the dynamic
 					// cube buffers. When on, logs every 60 frames any
