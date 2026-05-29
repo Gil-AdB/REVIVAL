@@ -1005,6 +1005,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// (see resolveCubeAtten's contract above). Hoisted to tile-level
 	// so the per-pixel + per-omni hot path doesn't re-query.
 	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic();
+	// Normal-map LOD fade. The texture mip-chain averages cleanly, but
+	// averaged normals shorten + rotate toward the surface average, so
+	// at distance the bump's perturbation becomes high-frequency lighting
+	// noise (hard edges on the floor especially). Fade nmX/nmY linearly
+	// toward zero at high mips; nmZ unchanged so perturbed N smoothly
+	// converges to the geometric N. Per-pixel cost: one int compare +
+	// one float mul + one max — cheap vs the full TBN block.
+	const int   nmapFadeStart = fds::FeatureFlags::nmap_lod_fade_start();
+	const float nmapFadeStep  = fds::FeatureFlags::nmap_lod_fade_step();
 	// Cube-tap flag bundle. resolveCubeAtten was reading 6 flags + 1
 	// atomic per cube tap (1.44M taps/frame at greets t=500). Hoist to
 	// tile-level: ~10 micros/frame back across all tile workers, and
@@ -1119,9 +1128,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];
 				if (nmData) {
 					const dword nmTexel = nmData[swizzledUV];
-					const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
 					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+					// LOD-aware bump fade: scale (nmX, nmY) at high mip.
+					// fade = 1 below start_mip, drops by step per mip past.
+					if (int(miplevel) >= nmapFadeStart) {
+						const float over = float(int(miplevel) - nmapFadeStart);
+						const float fade = 1.0f - over * nmapFadeStep;
+						const float s = fade > 0.0f ? fade : 0.0f;
+						nmX *= s; nmY *= s;
+					}
 					// Tier B tangent-space normal map. Reconstruct view-space
 					// N from TBN where T is the per-pixel interpolated tangent
 					// from the rasterizer's tangent G-buffer (Gram-Schmidt'd
@@ -2768,6 +2785,15 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float quarterNormalCos = quarter
 	    ? fds::FeatureFlags::quarter_normal_cos() : 0.0f;
 	const bool  quarterNormalCheck = quarter && quarterNormalCos > 0.0f;
+	// Z-discontinuity threshold. Catches silhouettes / creases that
+	// share matID + normal but have an actual depth step (e.g. a hull
+	// panel meeting another panel at a sharp angle: same matID, same
+	// material normal-map base normal, but the *geometric* surfaces
+	// are angled — and at distance even small angle gives a measurable
+	// per-pixel Z jump). Without this, those edges blur in quarter.
+	const float quarterZJump  = quarter
+	    ? fds::FeatureFlags::quarter_z_jump() : 0.0f;
+	const bool  quarterZCheck = quarter && quarterZJump > 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -2797,6 +2823,19 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				meka::oct_decode_u16(gb.normal[ni], nx, ny, nz);
 				return (ncX*nx + ncY*ny + ncZ*nz) >= quarterNormalCos;
 			};
+			// Z-discontinuity check: relative depth diff vs center.
+			// Center zEnc loaded above (`zEnc`). Compared against neighbor
+			// zEnc via a single signed compare and bound. Zero neighbor
+			// zEnc (= sky/empty) always fails — averaging in sky pixels
+			// would smear edges.
+			auto neighborZOk = [&](size_t ni) -> bool {
+				if (!quarterZCheck) return true;
+				const word zN = ZPage16[ni];
+				if (zN == 0) return false;
+				const int diff = int(zN) - int(zEnc);
+				const int absDiff = diff < 0 ? -diff : diff;
+				return float(absDiff) <= quarterZJump * float(zEnc);
+			};
 
 			bool matched = false;
 			if (quarter) {
@@ -2815,7 +2854,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const uint32_t mIDr = (gb.txtr[i + 1] >> 20) & 0xFF;
 						if (mIDl == matIDc && mIDr == matIDc
 						    && neighborNormalOk(i - 1)
-						    && neighborNormalOk(i + 1)) {
+						    && neighborNormalOk(i + 1)
+						    && neighborZOk(i - 1)
+						    && neighborZOk(i + 1)) {
 							const dword avg = ((out[i - 1] & 0xFEFEFEFEu) >> 1) +
 							                   ((out[i + 1] & 0xFEFEFEFEu) >> 1);
 							out[i] = avg | 0xFF000000u;
@@ -2831,7 +2872,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const uint32_t mIDb = (gb.txtr[i + XRes] >> 20) & 0xFF;
 						if (mIDt == matIDc && mIDb == matIDc
 						    && neighborNormalOk(i - XRes)
-						    && neighborNormalOk(i + XRes)) {
+						    && neighborNormalOk(i + XRes)
+						    && neighborZOk(i - XRes)
+						    && neighborZOk(i + XRes)) {
 							const dword avg = ((out[i - XRes] & 0xFEFEFEFEu) >> 1) +
 							                   ((out[i + XRes] & 0xFEFEFEFEu) >> 1);
 							out[i] = avg | 0xFF000000u;
@@ -2855,7 +2898,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						    && neighborNormalOk(i - XRes - 1)
 						    && neighborNormalOk(i - XRes + 1)
 						    && neighborNormalOk(i + XRes - 1)
-						    && neighborNormalOk(i + XRes + 1)) {
+						    && neighborNormalOk(i + XRes + 1)
+						    && neighborZOk(i - XRes - 1)
+						    && neighborZOk(i - XRes + 1)
+						    && neighborZOk(i + XRes - 1)
+						    && neighborZOk(i + XRes + 1)) {
 							// 4-way avg via mask-and-shift-by-2: per-channel
 							// (a + b + c + d) / 4 with 2-bit precision loss
 							// per channel — well below the visible threshold.

@@ -400,7 +400,12 @@ bool IsFrontFacingInViewSpace(const Face* F)
 // "Sibling" = adjacent Face in the same TriMesh with the same Face normal
 // sharing ≥2 vertex pointers. Quads built via appendQuad-style code always
 // emit their two tris adjacently, so we only need to check F-1 and F+1.
-static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
+// `facesBase` is the array F was iterated from — which is the per-pass
+// CLONE array (tFaces) when VertexScratch is in use, NOT T->Faces. Using
+// T->Faces here was a heap-buffer-overflow waiting for ASan: clone arrays
+// are separate allocations with different bounds. ASan caught it within
+// the first transparent frame of greets.
+static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord facesCount)
 {
 	float dz = F->A->TPos.z;
 	if (F->B->TPos.z > dz) dz = F->B->TPos.z;
@@ -426,8 +431,8 @@ static float QuadAwareMaxViewZ(const Face* F, const TriMesh* T)
 		if (unshared && unshared->TPos.z > dz) dz = unshared->TPos.z;
 	};
 
-	const Face* prev = (F > T->Faces)                ? F - 1 : nullptr;
-	const Face* next = (F + 1 < T->Faces + T->FIndex) ? F + 1 : nullptr;
+	const Face* prev = (F > facesBase)                  ? F - 1 : nullptr;
+	const Face* next = (F + 1 < facesBase + facesCount) ? F + 1 : nullptr;
 	if      (prev && sameNormal(F, prev) && sharedCount(F, prev) >= 2) extendWithSibling(prev);
 	else if (next && sameNormal(F, next) && sharedCount(F, next) >= 2) extendWithSibling(next);
 
@@ -1241,7 +1246,10 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			// the same texture.
 			if (M->Flags & Mat_Transparent)
 			{
-				dz = QuadAwareMaxViewZ(F, T);
+				// Pass the array F was iterated from (tFaces — clone when
+				// VertexScratch is in use, else T->Faces) so the prev/next
+				// bounds check is correct. The CLONE has its own bounds.
+				dz = QuadAwareMaxViewZ(F, tFaces, T->FIndex);
 				const bool frontFacing = IsFrontFacingInViewSpace(F);
 
 				// Object-level back-to-front grouping. Without this, nested

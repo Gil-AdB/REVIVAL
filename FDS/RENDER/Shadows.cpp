@@ -360,21 +360,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			continue;
 		}
 
-		// CRITICAL: tile sizes must be multiples of ShadowBarry's TILE_SIZE
-		// (8). Otherwise clipper tile rects bisect ShadowBarry's 8×8 SIMD
-		// tiles at seams, where apply_exact does a 16-byte aligned
-		// _mm_blendv_epi8 RMW on depth + scalar polyId stores keyed off
-		// the global tile origin. Adjacent workers then race on the same
-		// 16-byte word → texel race winners flip with thread scheduling →
-		// flicker patches in the shadow viz even when the scene is paused.
-		// Symptom shows up most on greets because the wall-split assigns
-		// distinct ShadowMatIDs per cluster, so race winners produce
-		// visibly different polyIds at every cluster seam.
-		constexpr int kBarryTile = 8;
-		int rawTX = (sm.xres + numTilesX - 1) / numTilesX;
-		int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
-		const int tileSizeX = (rawTX + kBarryTile - 1) & ~(kBarryTile - 1);
-		const int tileSizeY = (rawTY + kBarryTile - 1) & ~(kBarryTile - 1);
+		const int tileSizeX = (sm.xres + numTilesX - 1) / numTilesX;
+		const int tileSizeY = (sm.yres + numTilesY - 1) / numTilesY;
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
