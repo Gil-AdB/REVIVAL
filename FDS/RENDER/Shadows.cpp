@@ -147,6 +147,115 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		perLightCtx.resize(g_shadowMaps.size());
 	}
 
+	// Per-omni cube-face cull for DynamicMeshesPerFrame mode. The robot
+	// (or other dynamic mesh) occupies a small angular region of each
+	// static omni's cube — typically only 1-2 of the 6 cube faces have
+	// any dynamic mesh visible. Pre-compute a per-shadow-map "any dyn
+	// mesh visible" bit; skip phase A + phase B for faces where it's
+	// false. Saves ~3 ms on greets (7 static omnis × ~4 culled faces =
+	// 28 skipped per-face transforms + raster batches).
+	//
+	// Only the DynamicMeshesPerFrame path benefits: StaticOnce baked at
+	// init (one-shot) and DynamicOmnisPerFrame re-bakes ALL geometry
+	// for moving omnis (mech), where there's no "dyn only" subset.
+	static thread_local std::vector<bool> hasDynMeshVisible;
+	if (mode == ShadowBakeMode::DynamicMeshesPerFrame) {
+		hasDynMeshVisible.assign(g_shadowMaps.size(), false);
+		// Gather dynamic meshes' world-space bsphere centers + radii.
+		// "Dynamic" mirrors Transform_Objects's isDynamicForBake (walks
+		// parent chain looking for non-trivial Pos / Rotate spline
+		// extents). Cheap — single pass over ObjectHead with O(few)
+		// meshes per spline.
+		struct DynBSphere { Vector center; float radius; };
+		std::vector<DynBSphere> dynMeshes;
+		auto isMeshDynamic = [](Object *o) -> bool {
+			constexpr float kPosEps = 0.1f, kRotEps = 0.01f;
+			for (Object *p = o; p; p = p->Parent) {
+				if (p->Type != Obj_TriMesh) continue;
+				TriMesh *tm = (TriMesh*)p->Data;
+				if (!tm) continue;
+				if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+					const auto& k0 = tm->Pos.Keys[0].Pos;
+					float xmn=k0.x,xmx=k0.x,ymn=k0.y,ymx=k0.y,zmn=k0.z,zmx=k0.z;
+					for (DWord i=1;i<tm->Pos.NumKeys;++i) {
+						const auto& k = tm->Pos.Keys[i].Pos;
+						if (k.x<xmn) xmn=k.x; if (k.x>xmx) xmx=k.x;
+						if (k.y<ymn) ymn=k.y; if (k.y>ymx) ymx=k.y;
+						if (k.z<zmn) zmn=k.z; if (k.z>zmx) zmx=k.z;
+					}
+					if ((xmx-xmn)>kPosEps||(ymx-ymn)>kPosEps||(zmx-zmn)>kPosEps) return true;
+				}
+				if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+					const auto& q0 = tm->Rotate.Keys[0].Pos;
+					for (DWord i=1;i<tm->Rotate.NumKeys;++i) {
+						const auto& q = tm->Rotate.Keys[i].Pos;
+						const float dx=q.x-q0.x, dy=q.y-q0.y, dz=q.z-q0.z, dw=q.W-q0.W;
+						if (dx*dx+dy*dy+dz*dz+dw*dw > kRotEps*kRotEps) return true;
+					}
+				}
+			}
+			return false;
+		};
+		for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
+			if (!isMeshDynamic(Obj)) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			if (!T || T->FIndex == 0) continue;
+			Vector wc;
+			MatrixXVector(T->RotMat, &T->BSphereCtr, &wc);
+			Vector_SelfAdd(&wc, &T->IPos);
+			dynMeshes.push_back({wc, T->BSphereRadius});
+		}
+		// Per shadow map: is any dyn mesh visible from this cube face?
+		// Inlined sphere-vs-cone test (duplicates the one in Transform.cpp;
+		// the helper there is static-inline, not exported. Few lines —
+		// not worth refactoring into a shared header for this one site).
+		// Conservative — false-negatives (keeps a sphere it could safely
+		// cull) are fine; false-positives (culls a sphere that should
+		// contribute) cause missing shadows. Widened by sphere radius
+		// along the cone surface.
+		auto sphereOutsideCone = [](const Vector& C, float r,
+		                            const Vector& P, const Vector& D,
+		                            float cosOuter, float maxRange) -> bool {
+			const float vx = C.x - P.x, vy = C.y - P.y, vz = C.z - P.z;
+			const float v2 = vx*vx + vy*vy + vz*vz;
+			const float rMax = maxRange + r;
+			if (v2 > rMax * rMax) return true;
+			const float distAlongAxis = vx*D.x + vy*D.y + vz*D.z;
+			if (distAlongAxis < -r) return true;
+			if (cosOuter < 1e-3f) return false;
+			const float sinOuter = std::sqrt(std::max(0.0f, 1.0f - cosOuter*cosOuter));
+			const float tanOuter = sinOuter / cosOuter;
+			const float depth = distAlongAxis > 0.0f ? distAlongAxis : 0.0f;
+			const float coneRAtDepth = depth * tanOuter + r / cosOuter;
+			const float perpSq = v2 - distAlongAxis * distAlongAxis;
+			return perpSq > coneRAtDepth * coneRAtDepth;
+		};
+		for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+			const ShadowMap &sm = g_shadowMaps[i];
+			Omni *const O = sm.omni;
+			if (!O) continue;
+			if (!(O->Flags & Omni_StaticShadow)) continue;  // mode filter
+			if (sm.cubeFace < 0) continue;  // spot lights handled separately
+			Vector faceDir{0,0,0};
+			switch (sm.cubeFace) {
+				case 0: faceDir.x =  1.0f; break;
+				case 1: faceDir.x = -1.0f; break;
+				case 2: faceDir.y =  1.0f; break;
+				case 3: faceDir.y = -1.0f; break;
+				case 4: faceDir.z =  1.0f; break;
+				case 5: faceDir.z = -1.0f; break;
+			}
+			for (const auto& dm : dynMeshes) {
+				if (!sphereOutsideCone(dm.center, dm.radius,
+				                        O->IPos, faceDir, 0.577f, O->IRange)) {
+					hasDynMeshVisible[i] = true;
+					break;
+				}
+			}
+		}
+	}
+
 	// ─── Phase A: per-light setup + parallel Transform_Objects ──────────
 	// Per-light camera, CameraContext, shadow-map stash, depth/polyId
 	// clear, FList sizing — all cheap, all touch this light's slot only.
@@ -181,6 +290,11 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		} else {
 			continue;
 		}
+		// DynamicMeshesPerFrame cube-face cull: skip faces where no
+		// dynamic mesh would be visible. Pre-computed above.
+		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
+		    && sm.cubeFace >= 0
+		    && !hasDynMeshVisible[lightIdx]) continue;
 
 		// Build the per-light camera. Spot path: existing IDir-based
 		// lookAt + cone-FOV. Cube-face path: fixed axis-aligned camera
@@ -365,6 +479,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		} else {
 			continue;
 		}
+		// Same cube-face cull as Phase A. Must match — otherwise we
+		// enqueue tile workers for a face we skipped in phase A, and
+		// they'd read uninitialized perLightFaces / perLightCtx state.
+		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
+		    && sm.cubeFace >= 0
+		    && !hasDynMeshVisible[lightIdx]) continue;
 
 		// Tile size must be a multiple of 8 (see numTilesX comment for
 		// why). At shadow res = 4*N*8 (e.g. 128, 256, 512, 1024) this is
