@@ -9,6 +9,7 @@
 #include "Base/FeatureFlags.h"
 #include "F4Vec.h"
 #include "TheOtherBarry.h"
+#include "ClipperTileRect.h"
 
 #include <simd/vectorclass.h>
 
@@ -563,10 +564,19 @@ struct ShadowBarry {
 		auto clampX = [xres](int v) { return std::min(std::max(v, 0), xres - 1); };
 		auto clampY = [yres](int v) { return std::min(std::max(v, 0), yres - 1); };
 
-		const int tile_mx = clampX(int(std::min({v1.PX, v2.PX, v3.PX}))) / TILE_SIZE;
-		const int tile_Mx = clampX(int(std::max({v1.PX, v2.PX, v3.PX}))) / TILE_SIZE;
-		const int tile_my = clampY(int(std::min({v1.PY, v2.PY, v3.PY}))) / TILE_SIZE;
-		const int tile_My = clampY(int(std::max({v1.PY, v2.PY, v3.PY}))) / TILE_SIZE;
+		// Clamp to the OWNING clipper tile's range — see ClipperTileRect.h.
+		// Without this, two adjacent clipper workers can both rasterize the
+		// same 8x8 SIMD tile when a clipped vertex lands exactly on the
+		// shared tile boundary -> blendv RMW race in apply_exact.
+		const fds::ClipperTileRect& _ctr = fds::g_clipperTileRect;
+		const int tile_mx = std::max(_ctr.tile_mx_lo,
+			clampX(int(std::min({v1.PX, v2.PX, v3.PX}))) / TILE_SIZE);
+		const int tile_Mx = std::min(_ctr.tile_mx_hi,
+			clampX(int(std::max({v1.PX, v2.PX, v3.PX}))) / TILE_SIZE);
+		const int tile_my = std::max(_ctr.tile_my_lo,
+			clampY(int(std::min({v1.PY, v2.PY, v3.PY}))) / TILE_SIZE);
+		const int tile_My = std::min(_ctr.tile_my_hi,
+			clampY(int(std::max({v1.PY, v2.PY, v3.PY}))) / TILE_SIZE);
 		if (tile_mx > tile_Mx || tile_my > tile_My) return;
 
 		// Subpixel-precise vertex coords.

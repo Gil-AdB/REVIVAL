@@ -9,7 +9,9 @@
 #include <Base/CameraContext.h>
 
 #include "FRUSTRUM.H"
+#include "ClipperTileRect.h"
 #include <atomic>
+#include <climits>
 #include <mutex>
 
 #define ClipAccurate
@@ -23,6 +25,13 @@
 std::atomic<dword> g_renderedPolys;
 std::atomic<bool> g_HideInnerXpar{false};
 std::atomic<bool> g_HideOuterXpar{false};
+
+// Per-thread clipper-tile ownership rect — see ClipperTileRect.h.
+// Defaults to "no clamp" so rasterizer callers outside a clipper
+// Render() (none today, but defensive) don't lose pixels.
+thread_local fds::ClipperTileRect fds::g_clipperTileRect = {
+    INT_MIN, INT_MAX, INT_MIN, INT_MAX
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 // Third Generation Triangle -> Convex counterclockwise NGon Frustrum clipper.
@@ -787,6 +796,31 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
                              const fds::CameraContext& cam,
                              bool skipMipLevel)
 {
+	// Publish this clipper's tile ownership to the rasterizers so a
+	// vertex landing exactly on a shared 8x8 SIMD-tile boundary
+	// between adjacent parallel clipper workers can't get rasterized
+	// twice. For a clipper rect owning pixels [ClipX1, ClipX2), the
+	// owned tile.x range is [ClipX1/8, (ClipX2-1)/8] inclusive. The
+	// -1 on the upper bound is the key: when ClipX2 sits on an
+	// 8-boundary, the last owned tile is one below ClipX2/8 (that
+	// tile is owned by the next worker).
+	struct ClipperTileRectGuard {
+		fds::ClipperTileRect saved;
+		ClipperTileRectGuard(const Viewport& vp) {
+			saved = fds::g_clipperTileRect;
+			constexpr int TS = 8;
+			fds::g_clipperTileRect = {
+				int(vp.ClipX1) / TS,
+				(int(vp.ClipX2) - 1) / TS,
+				int(vp.ClipY1) / TS,
+				(int(vp.ClipY2) - 1) / TS,
+			};
+		}
+		~ClipperTileRectGuard() {
+			fds::g_clipperTileRect = saved;
+		}
+	} _tileRectGuard(C_VP);
+
 	mword i, j;
 
 	Vertex* A = &C_Verts[0];

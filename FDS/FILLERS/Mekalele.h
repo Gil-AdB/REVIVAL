@@ -9,6 +9,7 @@
 #include "F4Vec.h"
 
 #include "TheOtherBarry.h"
+#include "ClipperTileRect.h"
 
 //#include <intrin.h>
 #include "simde/x86/avx2.h"
@@ -569,10 +570,19 @@ struct TileRasterizer {
 	
 	void rasterize_triangle(const Vertex& v1, const Vertex& v2, const Vertex& v3) {
 		// FIXME: raster conventions (it is doing floor right now)
-		const int tile_mx = clampedX(std::min({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE;
-		const int tile_Mx = clampedX(std::max({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE;
-		int tile_my = clampedY(std::min({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
-		int tile_My = clampedY(std::max({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE;
+		// Clamp to the OWNING clipper tile's range — see ClipperTileRect.h.
+		// Without this, two adjacent clipper workers can both rasterize the
+		// same 8x8 SIMD tile when a clipped vertex lands exactly on the
+		// shared tile boundary -> blendv RMW race in apply_exact.
+		const fds::ClipperTileRect& _ctr = fds::g_clipperTileRect;
+		const int tile_mx = std::max(_ctr.tile_mx_lo,
+			clampedX(std::min({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE);
+		const int tile_Mx = std::min(_ctr.tile_mx_hi,
+			clampedX(std::max({ v1.PX, v2.PX, v3.PX })) / TILE_SIZE);
+		int tile_my = std::max(_ctr.tile_my_lo,
+			clampedY(std::min({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE);
+		int tile_My = std::min(_ctr.tile_my_hi,
+			clampedY(std::max({ v1.PY, v2.PY, v3.PY })) / TILE_SIZE);
 		// Strip clamp (unified TBR): keep this rasterization within the
 		// strip's tile row. Without it, a triangle clipped to PY=strip_y_max
 		// computes tile_My one row past the strip — the rasterizer writes
