@@ -553,7 +553,11 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		//if (stricmp(Obj->Name, "water.lwo")) continue;
 		T = (TriMesh *)(Obj->Data);
 
-		if (!(T->Flags&HTrack_Visible)) {T->Flags|=Tri_Invisible; continue;}
+		uint32_t frustumFlags = 0;  // Tri_Invisible | Tri_Ahead | Tri_Inside, racy
+		                            // when T->Flags is shared across N parallel
+		                            // shadow-render tasks. Hold locally per call.
+
+		if (!(T->Flags&HTrack_Visible)) {frustumFlags|=Tri_Invisible; continue;}
 
 		// Static-bake filter: skip meshes whose *position* animates
 		// (Pos spline has more than 1 key). Their t=0 silhouette would
@@ -685,7 +689,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
 			if (sphereOutsideSpotCone(wsBsphereCtr, T->BSphereRadius,
 			                          conePos, coneDir, coneCosOuter, coneRange)) {
-				T->Flags |= Tri_Invisible;
+				frustumFlags |= Tri_Invisible;
 				continue;
 			}
 		}
@@ -754,9 +758,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		if ((L1 = Dot_Product(W2+1,W2+1))>L2) L2=L1;
 		if ((L1 = Dot_Product(W2+2,W2+2))>L2) L2=L1;
 		
-		T->Flags&=0xFFFFFFFF-Tri_Invisible-Tri_Ahead-Tri_Inside;
-	
-		T->Flags |= Tri_Inside;
+		frustumFlags = 0;
+
+		frustumFlags |= Tri_Inside;
 
 		// Out by depth
 		dz = S.z - cam.nearZ;
@@ -764,24 +768,24 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		{
 			if (dz<0.0f)
 			{
-				T->Flags |= Tri_Invisible;
+				frustumFlags |= Tri_Invisible;
 				continue;
 			}
-			T->Flags |= Tri_Ahead;
+			frustumFlags |= Tri_Ahead;
 		} else {
-			T->Flags &=~Tri_Inside;
+			frustumFlags &=~Tri_Inside;
 		}
-		
+
 		dz = S.z - cam.farZ;
 		if (dz*dz>L2*T->BSphereRad)
 		{
 			if (dz>0.0f)
 			{
-				T->Flags |= Tri_Invisible;
+				frustumFlags |= Tri_Invisible;
 				continue;
 			}
 		} else {
-			T->Flags &=~Tri_Inside;
+			frustumFlags &=~Tri_Inside;
 		}
 		// Out by left/right
 		S.x=fabs(S.x);
@@ -790,11 +794,11 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		{
 			if (S.x*PX>S.z*cam.cntrEX)
 			{
-				T->Flags |= Tri_Invisible;
+				frustumFlags |= Tri_Invisible;
 				continue;
-			}			
+			}
 		} else {
-			if (T->Flags&Tri_Ahead) T->Flags &=~Tri_Inside;
+			if (frustumFlags&Tri_Ahead) frustumFlags &=~Tri_Inside;
 		}
 		// Out by up/down
 		S.y = fabs(S.y);
@@ -803,11 +807,11 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		{
 			if (S.y*PY>S.z*cam.cntrEY)
 			{
-				T->Flags |= Tri_Invisible;
+				frustumFlags |= Tri_Invisible;
 				continue;
 			}
 		} else {
-			if (T->Flags&Tri_Ahead) T->Flags &=~Tri_Inside;
+			if (frustumFlags&Tri_Ahead) frustumFlags &=~Tri_Inside;
 		}
 		VEnd=tVerts+T->VIndex;
 		
@@ -899,9 +903,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))
 		{
-			if (!(T->Flags&Tri_Inside))
+			if (!(frustumFlags&Tri_Inside))
 			{
-				if (!(T->Flags&Tri_Ahead))
+				if (!(frustumFlags&Tri_Ahead))
 					goto Regular;
 				else goto Ahead;
 			}
@@ -1019,9 +1023,9 @@ Regular:
 			// if necessary. back to the good old Avatar engine techniques ;)
 			// at this section, the code also calculates environment mapping
 			// coordinates to (EU,EV) by rotating the v. normals accordingly. slow.
-			if (!(T->Flags&Tri_Inside))
+			if (!(frustumFlags&Tri_Inside))
 			{
-				if (!(T->Flags&Tri_Ahead))
+				if (!(frustumFlags&Tri_Ahead))
 					goto ERegular;
 				else goto EAhead;
 			}
