@@ -207,29 +207,27 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			dynMeshes.push_back({wc, T->BSphereRadius});
 		}
 		// Per shadow map: is any dyn mesh visible from this cube face?
-		// Inlined sphere-vs-cone test (duplicates the one in Transform.cpp;
-		// the helper there is static-inline, not exported. Few lines —
-		// not worth refactoring into a shared header for this one site).
-		// Conservative — false-negatives (keeps a sphere it could safely
-		// cull) are fine; false-positives (culls a sphere that should
-		// contribute) cause missing shadows. Widened by sphere radius
-		// along the cone surface.
-		auto sphereOutsideCone = [](const Vector& C, float r,
-		                            const Vector& P, const Vector& D,
-		                            float cosOuter, float maxRange) -> bool {
+		// Specialized sphere-vs-cone for the 90°-pyramid's CIRCUMSCRIBED
+		// cone (half-angle 54.7°, cos = 0.577). All trig derived from
+		// cosOuter is constexpr. The perpendicular-vs-cone-radius test
+		// compares squared values to avoid the extra sqrt. Only sqrt-free
+		// transcendental work in the entire test.
+		constexpr float kCosOuter = 0.5773502691896258f;  // 1/√3 = cos(atan(√2))
+		constexpr float kTanOuter = 1.4142135623730951f;  // √2 = tan(atan(√2))
+		constexpr float kInvCos   = 1.7320508075688772f;  // √3 = 1/kCosOuter
+		auto sphereOutsideCone = [&](const Vector& C, float r,
+		                              const Vector& P, const Vector& D,
+		                              float maxRange) -> bool {
 			const float vx = C.x - P.x, vy = C.y - P.y, vz = C.z - P.z;
 			const float v2 = vx*vx + vy*vy + vz*vz;
 			const float rMax = maxRange + r;
-			if (v2 > rMax * rMax) return true;
+			if (v2 > rMax * rMax) return true;                       // squared
 			const float distAlongAxis = vx*D.x + vy*D.y + vz*D.z;
 			if (distAlongAxis < -r) return true;
-			if (cosOuter < 1e-3f) return false;
-			const float sinOuter = std::sqrt(std::max(0.0f, 1.0f - cosOuter*cosOuter));
-			const float tanOuter = sinOuter / cosOuter;
 			const float depth = distAlongAxis > 0.0f ? distAlongAxis : 0.0f;
-			const float coneRAtDepth = depth * tanOuter + r / cosOuter;
+			const float coneRAtDepth = depth * kTanOuter + r * kInvCos;
 			const float perpSq = v2 - distAlongAxis * distAlongAxis;
-			return perpSq > coneRAtDepth * coneRAtDepth;
+			return perpSq > coneRAtDepth * coneRAtDepth;             // squared
 		};
 		for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
 			const ShadowMap &sm = g_shadowMaps[i];
@@ -248,7 +246,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			}
 			for (const auto& dm : dynMeshes) {
 				if (!sphereOutsideCone(dm.center, dm.radius,
-				                        O->IPos, faceDir, 0.577f, O->IRange)) {
+				                        O->IPos, faceDir, O->IRange)) {
 					hasDynMeshVisible[i] = true;
 					break;
 				}
