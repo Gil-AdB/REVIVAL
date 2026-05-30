@@ -79,6 +79,7 @@
 #include "Base/FaceListContext.h"
 #include "Base/VertexScratch.h"
 #include "FILLERS/ShadowMap.h"
+#include "FRUSTRUM.H"  // fds::g_clipperFrameSourceValid
 
 // Defined in Shadows.cpp; the shadow orchestrator sets this to the
 // current shadow light before calling Transform_Objects, so the per-mesh
@@ -1642,4 +1643,10 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 	faces.cAll = Ins-faces.fList;
 	faces.cPcls = faces.cAll-faces.cOmnies-faces.cPolys;
+
+	// SoA Phase 6.1: T->frame is now in lockstep with T->Verts's AoS
+	// transformed fields for every mesh we touched. Re-enable the
+	// clipper's TPos-from-frame override (Reflected_Transform may have
+	// set this false earlier in the same frame).
+	fds::g_clipperFrameSourceValid = true;
 }

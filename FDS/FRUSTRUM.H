@@ -7,6 +7,23 @@ struct Scene;
 
 namespace fds { struct CameraContext; struct RenderTarget; }
 
+namespace fds {
+// SoA Phase 6.1 gate. True when T->frame (and clone.frame) is in
+// lockstep with T->Verts's AoS transformed fields — the normal state
+// right after Transform_Objects' dual-write loop. False when an
+// alternative transform path (e.g. CITY/CHASE's Reflected_Transform)
+// has overwritten T->Verts.PX/PY/RZ/TPos in place WITHOUT touching
+// T->frame. Read by FrustumClipper::Render to gate the per-triangle
+// TPos-from-frame override Phase 6.1 introduced.
+//
+// Default true (matches the normal main-pass + shadow-scratch path).
+// Reflected_Transform sets false; Transform_Objects sets true at the
+// end of its dual-write. thread_local so each render worker sees its
+// own state (shadow scratch workers keep =true because they write
+// clone.frame in lockstep with clone.verts).
+extern thread_local bool g_clipperFrameSourceValid;
+}
+
 class FrustumClipper {
 public:
 	FrustumClipper() {

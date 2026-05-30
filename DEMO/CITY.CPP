@@ -365,6 +365,15 @@ void Reflective_Mapper_Setup()
 // PRIMARY TRANSFORMATION PIPELINE, FOR USE WITH REFLECTIONS
 static void Reflected_Transform(Scene *Sc)
 {
+	// SoA Phase 6.1: this path writes T->Verts.PX/PY/RZ/TPos in place
+	// for the reflection camera but never touches T->frame. Tell the
+	// clipper to skip the frame-sourced TPos override until the next
+	// Transform_Objects re-syncs the two. Without this, the clipper
+	// pulls stale main-camera TPos from F->frame and overwrites the
+	// reflection-camera AoS values → triangles smeared across the
+	// screen, flickering. See docs/SOA_VERTEX_REFACTOR.md Phase 6.2.
+	fds::g_clipperFrameSourceValid = false;
+
 	TriMesh *T;
 	Omni *O;
 	Matrix M,IM, ReflMat;
