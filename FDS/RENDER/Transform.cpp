@@ -1234,19 +1234,27 @@ ERegular:
 			
 		}
 AfterXForm:FEnd=tFaces+T->FIndex;
-		// SoA refactor Phase 1: dual-write the transformed-vertex
-		// outputs into the per-mesh VertexFrame SoA arrays. Only on
-		// the main render pass (scratch == nullptr) — shadow per-light
-		// passes use cloned vertices that aren't aliased into T->frame.
+		// SoA refactor Phase 1+4: dual-write the transformed-vertex
+		// outputs into the per-mesh OR per-clone VertexFrame SoA
+		// arrays. Main pass writes T->frame; shadow per-light scratch
+		// writes clone.frame (so concurrent shadow lights don't race
+		// on shared storage — that's why Phase 1 originally skipped
+		// the scratch path).
 		// One sequential sweep over tVerts; the AoS layout we're
 		// reading from is cache-friendly (sequential reads at pack(1)
-		// stride). Phase 2 will eliminate this sweep by writing SoA
-		// directly from the wide-SIMD compute path.
-		if (!scratch) {
-			if (!T->frame) T->frame = new VertexFrame();
-			T->frame->ensureSized(int(T->VIndex));
-			if (T->frame->capacity >= int(T->VIndex)) {
-				VertexFrame *F_ = T->frame;
+		// stride). Eventually Transform's per-vert loops will write
+		// SoA directly and this sweep goes away.
+		{
+			VertexFrame *F_ = nullptr;
+			if (scratch) {
+				// cloneOf already ensureSized'd clone.frame.
+				F_ = &scratch->cloneOf(T).frame;
+			} else {
+				if (!T->frame) T->frame = new VertexFrame();
+				T->frame->ensureSized(int(T->VIndex));
+				if (T->frame->capacity >= int(T->VIndex)) F_ = T->frame;
+			}
+			if (F_) {
 				const uint32_t nv = T->VIndex;
 				for (uint32_t i = 0; i < nv; ++i) {
 					const Vertex *v = &tVerts[i];
@@ -1417,6 +1425,14 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				F->EV3 = ev[2];
 			}
 			F->ParentTri = T;
+			// SoA Phase 4: stamp the active VertexFrame on F so
+			// consumers (SortZ / clipper / rasterizer) can read
+			// `F->frame->TPos_z[F->A_idx]` etc. without needing to
+			// know whether this is the main pass or a per-light
+			// shadow scratch. F here is from tFaces (clone-owned in
+			// scratch mode, T->Faces in main mode), so stamping is
+			// always per-frame-state-isolated.
+			F->frame = scratch ? &scratch->cloneOf(T).frame : T->frame;
 
 #ifdef FRONT_TO_BACK_SORTING
 			Material *M = F->Txtr;
@@ -1478,9 +1494,15 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 //				F->SortZ.DW >>= 8;
 //				F->SortZ.DW += 255 << 24;
 			} else {
-				dz = F->A->TPos.z;
-				if (F->B->TPos.z>dz) dz=F->B->TPos.z;
-				if (F->C->TPos.z>dz) dz=F->C->TPos.z;
+				// SoA Phase 4: SortZ read migrated. F->frame was
+				// stamped on the FList push above (T->frame for main,
+				// clone.frame for shadow scratch). Same dz value as the
+				// AoS read; will diverge only after Phase 5 removes the
+				// AoS TPos field.
+				const float *fzp = F->frame->TPos_z;
+				dz = fzp[F->A_idx];
+				if (fzp[F->B_idx] > dz) dz = fzp[F->B_idx];
+				if (fzp[F->C_idx] > dz) dz = fzp[F->C_idx];
 				F->SortZ.F = dz;
 
 //				F->SortZ.DW >>= 8;
@@ -1492,10 +1514,12 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			if (T->SortPriorityBias)
 				F->SortZ.F = BiasedSortValues[T->SortPriorityBias];
 #else
-			dz = F->A->TPos.z;
-			if (F->B->TPos.z>dz) dz=F->B->TPos.z;
-			if (F->C->TPos.z>dz) dz=F->C->TPos.z;
-			F->SortZ.F = fzp-dz;
+			// SoA Phase 4: SortZ read migrated. See Phase 4 note above.
+			const float *fzpArr = F->frame->TPos_z;
+			dz = fzpArr[F->A_idx];
+			if (fzpArr[F->B_idx] > dz) dz = fzpArr[F->B_idx];
+			if (fzpArr[F->C_idx] > dz) dz = fzpArr[F->C_idx];
+			F->SortZ.F = fzp - dz;
 #endif
 
 			// Push AFTER SortZ is computed so FListEntry.sortKey

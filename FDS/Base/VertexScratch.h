@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "VertexFrame.h"
+
 struct Face;
 struct TriMesh;
 struct Vertex;
@@ -36,6 +38,17 @@ namespace fds {
 struct PerTriMeshClone {
     std::vector<Vertex> verts;
     std::vector<Face>   faces;
+    // SoA refactor (Phase 4): per-light SoA companion of this clone's
+    // transformed-vertex output fields. Mirrors TriMesh::frame but
+    // isolated to this per-light scratch so concurrent shadow passes
+    // don't race. Sized to T->VIndex in cloneOf; written alongside the
+    // AoS clone.verts in Transform_Objects' shadow path. Indexed by
+    // Face::A_idx/B_idx/C_idx (same indices as the main path — clone
+    // preserves the original index ordering). Held by value: the
+    // unordered_map's node-based storage keeps the address stable;
+    // VertexFrame is non-copyable but its default ctor + ensureSized
+    // are enough for default-emplace use.
+    VertexFrame         frame;
 
     // True once verts/faces have been populated for this TriMesh. The
     // first request for a TriMesh's clone copies + remaps; subsequent

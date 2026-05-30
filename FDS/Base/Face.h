@@ -96,6 +96,14 @@ struct Face
 	uint32_t         A_idx = 0;
 	uint32_t         B_idx = 0;
 	uint32_t         C_idx = 0;
+
+	// SoA refactor Phase 4. The per-frame VertexFrame this Face's
+	// transformed-vertex values live in. nullptr until Transform_Objects
+	// sets it during FList build. For main pass: ParentTri->frame.
+	// For shadow per-light scratch: clone.frame (so concurrent shadow
+	// lights don't share storage). Consumers read
+	// `F->frame->TPos_z[F->A_idx]` etc.
+	struct VertexFrame *frame = nullptr;
 	//	Surface       * Surf; // For T-Caching. (what??!)
 
 	void uvFromVertices() {
