@@ -75,15 +75,36 @@ void FrameProfiler::endFrame() {
     }
     frameTotals_.push_back(std::chrono::duration_cast<ns>(now - frameStart_).count());
 
-    // Refresh overlay aggregates: cumulative mean per section.
-    std::int64_t scenarioTotal = 0;
-    for (int i = 0; i < PROF_NUM; ++i) scenarioTotal += sectionTotal_[i];
-    overlayTotalMs_ = static_cast<float>(nsToMs(scenarioTotal) / numFrames_);
-    for (int i = 0; i < PROF_NUM; ++i) {
-        overlayMeanMs_[i] = static_cast<float>(nsToMs(sectionTotal_[i]) / numFrames_);
-        overlayPercent_[i] = scenarioTotal
-            ? static_cast<float>(100.0 * sectionTotal_[i] / scenarioTotal)
-            : 0.0f;
+    // Refresh overlay aggregates as EMA over recent frames (was a
+    // since-profiler-start cumulative mean — that lagged badly when the
+    // frame rate dropped because thousands of "good" historical frames
+    // diluted the spike). α = 0.1 gives a half-life of ~7 frames
+    // (~115 ms at 60 fps): responsive to real drops without single-
+    // frame jitter dominating the readout. First-frame seeded directly.
+    constexpr float kEmaAlpha = 0.1f;
+    const float thisFrameTotalMs = static_cast<float>(nsToMs(frameTotal));
+    if (numFrames_ <= 1) {
+        overlayTotalMs_ = thisFrameTotalMs;
+        for (int i = 0; i < PROF_NUM; ++i) {
+            overlayMeanMs_[i] = static_cast<float>(nsToMs(currentFrame_[i]));
+        }
+    } else {
+        overlayTotalMs_ = kEmaAlpha * thisFrameTotalMs
+                        + (1.0f - kEmaAlpha) * overlayTotalMs_;
+        for (int i = 0; i < PROF_NUM; ++i) {
+            const float sample = static_cast<float>(nsToMs(currentFrame_[i]));
+            overlayMeanMs_[i] = kEmaAlpha * sample
+                              + (1.0f - kEmaAlpha) * overlayMeanMs_[i];
+        }
+    }
+    // Percent breakdown over the same EMA snapshot, so the bars add to
+    // ~100%. Guard division on the unlikely zero-total transient.
+    if (overlayTotalMs_ > 0.0f) {
+        for (int i = 0; i < PROF_NUM; ++i) {
+            overlayPercent_[i] = 100.0f * overlayMeanMs_[i] / overlayTotalMs_;
+        }
+    } else {
+        for (int i = 0; i < PROF_NUM; ++i) overlayPercent_[i] = 0.0f;
     }
 }
 
