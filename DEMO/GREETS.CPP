@@ -998,6 +998,16 @@ void Initialize_Greets()
 						dstF.B = srcF.B ? &chunk->Verts[vertMap[srcF.B]] : nullptr;
 						dstF.C = srcF.C ? &chunk->Verts[vertMap[srcF.C]] : nullptr;
 						dstF.ParentTri = chunk;
+						// SoA Phase 3 indices were inherited from srcF and
+						// indexed into the PARENT piramid's Verts (16596
+						// entries). The chunk holds a subset, so restamp
+						// the indices to point into chunk->Verts; otherwise
+						// the per-mesh VertexFrame SoA arrays (sized to
+						// chunk->VIndex ≈ 64-some) get out-of-bounds reads
+						// during Phase 4+ migrated consumers / Phase 6.
+						if (dstF.A) dstF.A_idx = uint32_t(dstF.A - chunk->Verts);
+						if (dstF.B) dstF.B_idx = uint32_t(dstF.B - chunk->Verts);
+						if (dstF.C) dstF.C_idx = uint32_t(dstF.C - chunk->Verts);
 						for (Vertex *v : {dstF.A, dstF.B, dstF.C}) {
 							if (v->Pos.x < cxmin) cxmin = v->Pos.x;
 							if (v->Pos.x > cxmax) cxmax = v->Pos.x;
