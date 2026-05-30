@@ -10,7 +10,6 @@
 
 #include "FRUSTRUM.H"
 #include "ClipperTileRect.h"
-#include "Base/VertexFrame.h"  // SoA Phase 6.1: re-populate working buffer from F->frame
 #include <atomic>
 #include <climits>
 #include <mutex>
@@ -866,32 +865,6 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 	*B = *F->B;
 	*C = *F->C;
 	newVert = &C_Verts[3];
-
-	// SoA Phase 6.1: re-populate TPos in the clipper's working buffer
-	// from F->frame (per-mesh / per-clone SoA). This decouples the
-	// clipper's TPos reads from T->Verts's AoS state — a stepping stone
-	// for Phase 5b (delete Vertex::TPos_AOS) which would require every
-	// internal A->TPos_AOS read to source from somewhere other than the
-	// AoS struct copy.
-	//
-	// Only TPos overrides for now. PX/PY/RZ overrides caused a
-	// pathological slowdown — Calc_Flags computes Vtx_VisLeft/Right/etc.
-	// from PX/PY, and any 1-ULP difference (FMA precision drift between
-	// the AoS write in Transform and the frame copy) flips border-pixel
-	// visibility, which the clipper then has to subdivide into many more
-	// sub-polygons. Keep PX/PY/RZ on the AoS path until those reads are
-	// also migrated to frame (or stop being precision-sensitive).
-	//
-	// Particle Faces (F->frame == nullptr) keep their AoS TPos from the
-	// copy above — particle Vertex has its TPos written directly by the
-	// per-particle projection in Transform_Objects.
-	if (F->frame) {
-		const VertexFrame *ff = F->frame;
-		const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
-		A->TPos_AOS.x = ff->TPos_x[ai]; A->TPos_AOS.y = ff->TPos_y[ai]; A->TPos_AOS.z = ff->TPos_z[ai];
-		B->TPos_AOS.x = ff->TPos_x[bi]; B->TPos_AOS.y = ff->TPos_y[bi]; B->TPos_AOS.z = ff->TPos_z[bi];
-		C->TPos_AOS.x = ff->TPos_x[ci]; C->TPos_AOS.y = ff->TPos_y[ci]; C->TPos_AOS.z = ff->TPos_z[ci];
-	}
 
 	// U/V/UZ/VZ stamped + perspective-projected in one block — interleaves
 	// the * RZ FMA with its inputs while they're still in registers, and

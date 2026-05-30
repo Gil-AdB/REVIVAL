@@ -220,7 +220,7 @@ Note: this is the clipper's TRANSIENT working buffer (`C_Verts`), not the
 mesh's input AoS. Mesh inputs stay AoS — see Phase 7 footnote for the
 "convert mesh inputs to SoA too" non-goal.
 
-#### Phase 6.1 — TPos override (LANDED, commit `eb50b2f`)
+#### Phase 6.1 — TPos override (LANDED eb50b2f, REVERTED 2026-05-30)
 
 After `*A = *F->A` (memcpy of the AoS Vertex from the mesh into the
 clipper's `C_Verts[0..2]`), override `A/B/C->TPos_AOS.x/y/z` from
@@ -249,6 +249,34 @@ that re-stamps indices on remapped Faces) works end-to-end across all
    in `Transform_Objects`, not by the SoA Transform. The Phase 6.1
    override gates on `F->frame != nullptr` so particles keep working.
    `InsertSpriteToTBR` itself reverted to pure AoS in Phase 4.3.
+
+**Why reverted (2026-05-30):** Phase 6.1 was zero-perf-benefit (it's
+a no-op when working, harmful when wrong) but kept surfacing latent
+A_idx mismatches and frame-staleness bugs across many code paths:
+
+- `MakeFacesIndependent` rebuilt T->Verts without restamping A_idx
+  → fixed in 203c14b.
+- `BuildSkyCube` hand-wired Faces without stamping A_idx → fixed in
+  203c14b.
+- `Reflected_Transform` (CITY/CHASE cube-map bake + reflection
+  passes) wrote T->Verts.PX/PY/RZ/TPos without dual-writing T->frame
+  → fixed by Reflected_Transform dual-write in ae5b023 +
+  VertexFrame_DumpFromAoS helper.
+- `tessellateWaterGrid` rebuilt water mesh without restamping A_idx
+  → fixed in 0c06930.
+- Greets forward-mode wall fragments still missing after all those
+  fixes — there's at least one more transform path not yet found.
+
+Cost-benefit: chasing the rest of the alternative-transform paths
+buys us nothing today (the override is a no-op against fresh frame)
+and we keep introducing visual regressions. The path to Phase 5b
+runs through Phase 6.3 (ClipperSoAScratch) anyway — that work
+naturally requires migrating every transform path because deleting
+TPos_AOS from Vertex forces all writers to use frame instead.
+
+**Kept landed:** the A_idx restamp fixes (genuine bugs even without
+Phase 6.1) and the VertexFrame_DumpFromAoS helper + Reflected_
+Transform dual-write (infrastructure Phase 6.3 will need anyway).
 
 #### Phase 6.2 — PX/PY/RZ override (BLOCKED on alternative transform paths)
 
