@@ -8,6 +8,7 @@
 #include "CHASE.H"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <memory>
 
 #define FRONT_TO_BACK_SORTING
@@ -405,7 +406,16 @@ static void Reflected_Transform(Scene *Sc)
 			}
 
 		}
-	OUT:FEnd = T->Faces + T->FIndex;
+	OUT:
+		// SoA Phase 6.1: dual-write T->Verts → T->frame. Without this,
+		// the clipper's TPos-from-frame override reads stale main-camera
+		// values during reflection rendering. Mirror of CITY's
+		// Reflected_Transform — see that comment + Phase 6.2 docs.
+		if (!T->frame) T->frame = new VertexFrame();
+		T->frame->ensureSized(int(T->VIndex));
+		VertexFrame_DumpFromAoS(T->frame, T->Verts, T->VIndex);
+
+		FEnd = T->Faces + T->FIndex;
 		for (F = T->Faces; F < FEnd; F++)
 			if ((!(F->A->Flags&F->B->Flags&F->C->Flags&Vtx_Visible))
 				&& ((F->Txtr->Flags&Mat_TwoSided) ||

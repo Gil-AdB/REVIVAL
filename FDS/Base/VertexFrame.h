@@ -104,3 +104,17 @@ struct VertexFrame {
     VertexFrame(VertexFrame &&) = delete;
     VertexFrame &operator=(VertexFrame &&) = delete;
 };
+
+struct Vertex;  // for the helper below
+
+// Dual-write helper. Mirrors Transform_Objects' end-of-mesh dump loop
+// at FDS/RENDER/Transform.cpp:1280+ so any alternative transform path
+// (CITY/CHASE Reflected_Transform, future hand-written transforms) can
+// keep T->frame in lockstep with T->Verts after writing AoS. Without
+// this, the clipper's Phase 6.1 TPos-from-frame override (FRUSTRUM.CPP)
+// reads stale main-camera values during reflection rendering.
+//
+// `F_` must already be ensureSized(nv). Inline so Transform.cpp keeps
+// the inlined per-mesh loop it had, and Reflected_Transform pays the
+// same per-mesh cost without an extra call.
+void VertexFrame_DumpFromAoS(VertexFrame *F_, const struct Vertex *verts, uint32_t nv);

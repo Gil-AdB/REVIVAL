@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 #include "FRUSTRUM.H"
+#include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include "Gradient.h"
 #include <map>
 
@@ -696,7 +697,18 @@ ERegular:
 			}
 			
 		}
-OUT:FEnd=T->Faces+T->FIndex;
+OUT:
+		// SoA Phase 6.1: dual-write T->Verts → T->frame. Without this,
+		// the clipper's TPos-from-frame override (FRUSTRUM.CPP:870)
+		// reads stale main-camera values during reflection rendering →
+		// triangles smeared across screen. Reflected_Transform is the
+		// known alternative transform path that writes T->Verts.PX/PY/
+		// RZ/TPos in place; see docs/SOA_VERTEX_REFACTOR.md Phase 6.2.
+		if (!T->frame) T->frame = new VertexFrame();
+		T->frame->ensureSized(int(T->VIndex));
+		VertexFrame_DumpFromAoS(T->frame, T->Verts, T->VIndex);
+
+		FEnd=T->Faces+T->FIndex;
 		for (F = T->Faces; F < FEnd; F++) {
 			if (!F->VisibilityFlagsAll()
 				&& ((F->Txtr->Flags & Mat_TwoSided) ||
@@ -2148,22 +2160,23 @@ struct CityScene : SceneDriver {
 
 		dTime = Timer - TTrd;
 		if (dTime > 300) dTime = 300;
-		// fast forward/rewind
-		if (Keyboard[ScF2]) {
-			Timer += dTime * 8;
-		}
-		if (Keyboard[ScF1]) {
-			if (dTime * 8 > Timer)
-				Timer = 0;
-			else
-				Timer -= dTime * 8;
-		}
 		if (Keyboard[ScP])
 			pause_mode = true;
 		if (Keyboard[ScU])
 			pause_mode = false;
 		if (pause_mode) {
 			Timer = TTrd;
+		}
+		// fast forward/rewind. In pause, dTime is 0 (Timer pinned above),
+		// so fall back to a small per-tick step so F1/F2 still scrubs
+		// while paused (matches GREETS df918e77).
+		const int32_t scrubStep = pause_mode ? 10 : (dTime * 8);
+		if (Keyboard[ScF2]) {
+			Timer += scrubStep;
+		}
+		if (Keyboard[ScF1]) {
+			if (scrubStep > Timer) Timer = 0;
+			else                   Timer -= scrubStep;
 		}
 		g_FrameTime = TTrd = Timer;
 		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;

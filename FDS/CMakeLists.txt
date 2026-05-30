@@ -47,6 +47,8 @@ set(Base
     Base/Texture.h
     Base/TriMesh.h
     Base/Vector.h
+    Base/VertexFrame.cpp
+    Base/VertexFrame.h
     Base/VertexScratch.cpp
     Base/VertexScratch.h
     Base/Vertex.h
