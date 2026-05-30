@@ -8,7 +8,6 @@
 #include "CHASE.H"
 #include "SceneTick.h"
 #include "Scenes.h"
-#include "FRUSTRUM.H"  // fds::g_clipperFrameSourceValid
 #include <memory>
 
 #define FRONT_TO_BACK_SORTING
@@ -68,12 +67,6 @@ static void Reflective_Mapper_Setup()
 // PRIMARY TRANSFORMATION PIPELINE, FOR USE WITH REFLECTIONS
 static void Reflected_Transform(Scene *Sc)
 {
-	// SoA Phase 6.1: this writes T->Verts in place without dual-writing
-	// T->frame. Tell the clipper to skip the frame-sourced TPos override
-	// until the next Transform_Objects re-syncs. Mirror of CITY.CPP's
-	// Reflected_Transform — see that comment + Phase 6.2 docs.
-	fds::g_clipperFrameSourceValid = false;
-
 	TriMesh *T;
 	Omni *O;
 	Matrix M, IM, ReflMat;

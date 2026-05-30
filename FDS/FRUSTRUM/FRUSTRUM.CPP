@@ -41,9 +41,6 @@ thread_local fds::ClipperTileRect fds::g_clipperTileRect = {
     INT_MIN, INT_MAX, INT_MIN, INT_MAX
 };
 
-// SoA Phase 6.1 gate — see FRUSTRUM.H for semantics. Default true.
-thread_local bool fds::g_clipperFrameSourceValid = true;
-
 ///////////////////////////////////////////////////////////////////////////////
 // Third Generation Triangle -> Convex counterclockwise NGon Frustrum clipper.
 // Features:
@@ -888,7 +885,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 	// Particle Faces (F->frame == nullptr) keep their AoS TPos from the
 	// copy above — particle Vertex has its TPos written directly by the
 	// per-particle projection in Transform_Objects.
-	if (F->frame && fds::g_clipperFrameSourceValid) {
+	if (F->frame) {
 		const VertexFrame *ff = F->frame;
 		const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
 		A->TPos_AOS.x = ff->TPos_x[ai]; A->TPos_AOS.y = ff->TPos_y[ai]; A->TPos_AOS.z = ff->TPos_z[ai];
