@@ -473,6 +473,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
                         fds::VertexScratch *scratch)
 {
 	extern thread_local bool g_inShadowPass;
+	// Hoist the thread_local load out of the per-vertex hot loops below
+	// (Aft / Ahead / Regular paths). macOS TLS access goes through
+	// __tls_get_addr or an emutls trampoline — multiple cycles each, and
+	// the compiler can't CSE the load across the `MatrixXVector` calls
+	// in the body. Caching here turns it into a register read inside the
+	// per-vertex `if (!_inShadowPass)` checks at the three sites below.
+	const bool _inShadowPass = g_inShadowPass;
 	const bool coneCull = g_inShadowPass
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
@@ -949,7 +956,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				// rasterizer; forward-path Lighting() still reads N.
 				// Shadow pass doesn't read TN or TTangent — skip the two
 				// matrix-vector mults to halve per-vertex cost there.
-				if (!g_inShadowPass) {
+				if (!_inShadowPass) {
 					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
 					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 				}
@@ -978,7 +985,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				// Shadow pass doesn't read TN or TTangent — skip the two
 				// matrix-vector mults to halve per-vertex cost there.
-				if (!g_inShadowPass) {
+				if (!_inShadowPass) {
 					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
 					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 				}
@@ -1017,7 +1024,7 @@ Regular:
 				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				// Shadow pass doesn't read TN or TTangent — skip the two
 				// matrix-vector mults to halve per-vertex cost there.
-				if (!g_inShadowPass) {
+				if (!_inShadowPass) {
 					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
 					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
 				}
@@ -1158,6 +1165,11 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	// the deferred path's missing-inner-objects symptom improves when
 	// both halves are present.
 	const bool forceXparTwoSided = fds::FeatureFlags::xpar_force_twosided();
+	// Per-face xpar sort flags hoisted to per-mesh — the registry read
+	// is a memory load + offset and called once per xpar face was ~25
+	// leaf samples across greets' xpar walls.
+	const bool xparFrontBackDisabled = fds::FeatureFlags::no_xpar_frontback();
+	const bool xparObjGroupDisabled  = fds::FeatureFlags::no_xpar_objgroup();
 	// Shadow pass: treat all faces as two-sided. Single-quad walls have
 	// no back-side polygon to take over when the light's on their "back",
 	// yet they still occlude light. Backface-culling for shadow rendering
@@ -1302,9 +1314,6 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				//   bit-low:  face fine sort (in [0, 1.0], used as fraction
 				//             so adjacent faces of the same object still
 				//             back-to-front)
-				const bool xparFrontBackDisabled = fds::FeatureFlags::no_xpar_frontback();
-				const bool xparObjGroupDisabled = fds::FeatureFlags::no_xpar_objgroup();
-
 				if (xparObjGroupDisabled) {
 					// Legacy face-only sort, used for A/B comparison.
 					if (dz > fzp) F->SortZ.F = fzp;
