@@ -1644,8 +1644,14 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	if (y2 >= numTiles) y2 = numTiles-1;
 
 	// Sprite renderZ: the particle's view-space Z. All strips this sprite
-	// inserts into get the same renderZ. SoA Phase 4.
-	const float renderZ = F->frame->TPos_z[F->A_idx];
+	// inserts into get the same renderZ.
+	// NOTE: kept on the AoS path (F->A->TPos.z) deliberately. Particle
+	// Faces (Sc->Pcl[I].F) live outside any TriMesh, so they don't get
+	// the F->frame stamping that Compute_FaceVertexIndices /
+	// Transform_Objects do for mesh faces — F->frame is null here.
+	// SoA migration of this single read would gain nothing and would
+	// need a per-particle VertexFrame, which isn't worth the bookkeeping.
+	const float renderZ = F->A->TPos.z;
 	for (int i = y1; i <= y2; i++)
 	{
 		InsertSpanToTBR(F, i, renderZ);
