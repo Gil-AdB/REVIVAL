@@ -1,0 +1,266 @@
+# SoA Vertex Refactor — Design
+
+Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
+
+## Goal
+
+Convert the per-vertex transformed-state from AoS (pack(1) `Vertex` struct,
+136 bytes/vert) to per-mesh SoA arrays, so:
+- `Transform_Objects` can do true 4-wide (Vec4f) or 8-wide (Vec8f) SIMD
+  batches without paying gather/scatter cost on every field access
+- The rasterizer's per-triangle vertex reads stay cache-coherent within
+  each accessed plane
+- 1/x divides and matrix-vector products amortize across 4-8 verts per
+  instruction instead of broadcast-once-per-vert
+
+Current 1-wide-broadcast SIMD inside `Transform_Objects` (committed as
+`cda338e`) lands ~1 ms on greets. True wide SIMD with SoA layout is
+estimated **3-5 ms additional** on greets transform, plus secondary wins
+in rasterizer-side reads of transformed fields.
+
+## What stays AoS, what goes SoA
+
+**Stays in current `Vertex` (AoS, read-only across a frame):**
+- `Pos` (object-space position)
+- `N` (object-space normal)
+- `Tangent` (object-space tangent)
+- `U, V, EU, EV` (texture coords)
+- `OrigBaryB, OrigBaryC` (lightmap bary, scene-init constants)
+- `i` (vertex index)
+
+**Moves to per-mesh SoA (per-frame writable):**
+- `TPos.x/y/z` (view-space position)
+- `TN.x/y/z` (view-space normal)
+- `TTangent.x/y/z` (view-space tangent)
+- `PX, PY` (projected pixel coords)
+- `RZ, UZ, VZ, EUZ, EVZ` (perspective-divided)
+- `Flags` (visibility bits)
+- `BGRA / LR/LG/LB/LA` (per-vertex lit color, when computed)
+
+This split is the **B/C hybrid** discussed earlier: input fields stay
+AoS (rare per-vert writes; cache-friendly for clipper's `*A = *F->A`
+style copies), output fields go SoA (per-frame mass-write target).
+
+## Per-mesh storage
+
+Each `TriMesh` gets a `VertexFrame` companion struct:
+
+```cpp
+struct VertexFrame {
+    // SoA arrays, all of length T->VIndex, aligned to 32 bytes for
+    // Vec8f load/store. Allocated once at scene init; reused across
+    // frames. Per-thread is not needed — Transform_Objects runs
+    // per-mesh on one thread at a time (the parallelism is at the
+    // tile-job level downstream of Transform).
+    float *TPos_x, *TPos_y, *TPos_z;
+    float *TN_x,   *TN_y,   *TN_z;
+    float *TTangent_x, *TTangent_y, *TTangent_z;
+    float *PX, *PY, *RZ, *UZ, *VZ, *EUZ, *EVZ;
+    uint32_t *Flags;
+    uint32_t *BGRA;
+    int      capacity;  // == T->VIndex; tracked for realloc safety
+};
+```
+
+Allocation: one big slab per mesh in `Scene_RebuildMatTable` (or
+wherever VIndex first stabilizes). Free in mesh dtor. The 32-byte
+alignment lets the wide-SIMD Transform loop use aligned loads/stores
+(`vld1q_f32`-aligned variants) — material perf delta vs unaligned on
+arm64.
+
+## Face dispatch
+
+Today `Face` holds three `Vertex*` (A/B/C). With SoA outputs, those
+pointers need to either stay (rasterizer reads the AoS read-only
+fields via them) or get replaced by indices (so SoA outputs are
+addressable via `T->frame.TPos_x[A_idx]`).
+
+**Two paths:**
+
+1. **Keep `Vertex*` for the static input fields.** Add three
+   `uint32_t A_idx/B_idx/C_idx` to `Face` so the SoA output arrays
+   are addressable. ~8 extra bytes per face. Migration is purely
+   additive — existing `F->A->Pos` etc. still works.
+
+2. **Replace `Vertex*` with indices entirely.** Saves 16 B/face vs
+   path 1 (pointer is 8B, idx is 4B; 3 pointers → 3 indices = 24 B
+   → 12 B). Requires either a per-mesh pointer to the input AoS
+   array (the rasterizer needs to know which TriMesh to dereference
+   for `Pos/N/Tangent`) or a global `VertexInput` registry.
+
+**Path 1 is the safe migration vehicle.** Path 2 is a follow-up
+optimization once Path 1 is verified.
+
+## Clipper's transient buffer
+
+`FrustumClipper::C_Verts[CLIPPER_MAXVERTS]` holds the clipper's
+working set: 3 input verts copied from `F->A/B/C`, plus up to 45 new
+verts created during Near/Far/Left/Right/Up/Down clipping. These are
+NOT in any mesh's SoA arrays — they're transient scratch.
+
+Two options:
+
+1. **Keep clipper as AoS internally.** Convert mesh SoA → AoS at
+   `Render()` entry (3 vertices), do clipping in AoS as today, hand
+   clipped output to rasterizer as AoS. Adds 3-50 vertex-converts
+   per `Render()` call (~250 bytes copied per call); rasterizer
+   continues to read via `Vertex*`.
+
+2. **Convert clipper to SoA scratch.** New `ClipperSoAScratch` with
+   the same field set, sized to CLIPPER_MAXVERTS. `FInterpolator`
+   becomes SIMD-friendly (Vec4f lerp across PX/PY/UZ/VZ + etc.).
+   More invasive but unlocks `FInterpolator` wins on top of the
+   transform wins.
+
+**Phase the work — option 1 first**, since it preserves the existing
+clipper/rasterizer code unchanged. Option 2 becomes a follow-up.
+
+## Phased migration
+
+Each phase is independently shippable + benchable.
+
+### Phase 0 — Branch setup + plan
+
+- Branch off `feature/static-shadow-lightmaps`.
+- This document committed as the design reference.
+- No code changes.
+
+### Phase 1 — Allocate per-mesh `VertexFrame`, populate alongside AoS
+
+- Add `VertexFrame` struct + per-`TriMesh` instance.
+- Alloc on scene init (`Scene_RebuildMatTable` or mesh load).
+- Free in mesh dtor.
+- `Transform_Objects` writes to BOTH the existing AoS fields AND the
+  new SoA arrays each frame (duplicated writes).
+- Add a runtime assertion in DEBUG that the SoA and AoS values match
+  bit-for-bit after each frame's Transform.
+- No consumer changes. Bench: ~0 (slight regression from duplicated
+  writes).
+
+**Validates:** alloc/free hygiene, parallel write safety, the
+"transform writes the right thing to SoA" basic correctness.
+
+### Phase 2 — Switch `Transform_Objects` to wide-SIMD over SoA
+
+- Rewrite the three per-vertex loops (Inside / Ahead / Regular) to:
+  - Read AoS input fields (Pos, N, Tangent, U, V) sequentially as
+    today — this is fine, the AoS layout for inputs is cache-coherent
+    for sequential vertex iteration since pack(1) packs them all
+    contiguously.
+  - Compute via Vec4f or Vec8f wide SIMD over chunks of 4 or 8 verts.
+  - Write outputs to SoA via aligned `vst1q_f32` (4-wide) or 8-wide.
+- Keep the AoS output writes for now (Phase 3 removes them).
+- Bench: ~1-2 ms savings on Transform.
+
+**Validates:** wide SIMD compute correctness, alignment, mask-based
+flag computation for the Ahead/Regular near-clip branch.
+
+### Phase 3 — Add `A_idx/B_idx/C_idx` to `Face` (additive)
+
+- New `uint32_t A_idx, B_idx, C_idx` fields on `Face`, populated at
+  scene init (alongside the existing A/B/C pointers).
+- All existing consumers continue using `Vertex*`. New consumers can
+  use the indices.
+- ~12 bytes/face overhead. Probably not measurable.
+
+### Phase 4 — Migrate hot consumers to SoA-aware reads
+
+Each consumer migration is independent + benchable. Order by ease:
+
+1. **SortZ** (`Transform.cpp:1338+`): reads `F->A/B/C->TPos.z`. Switch
+   to `T->frame.TPos_z[A_idx/B_idx/C_idx]`. One file. Verify sort
+   order matches.
+2. **Backface cull / visibility flags**: similar.
+3. **`Rasterize_triangle` setup** in TheOtherBarry / Mekalele /
+   ShadowBarry: each reads `V[i]->PX/PY/RZ/UZ/VZ/etc`. Local change
+   to use indices into the mesh's SoA arrays.
+4. **`FrustumClipper::Render`** entry: instead of `*A = *F->A`, read
+   per-field from SoA outputs + AoS inputs into the clipper's
+   working set (still AoS internally per "Option 1" above).
+5. **Deferred lighting `IsFrontFacingInViewSpace`** and similar
+   per-face TPos reads.
+
+After each migration, the corresponding AoS write in `Transform_Objects`
+becomes dead — remove it, bench, confirm.
+
+### Phase 5 — Remove AoS transformed fields from `Vertex`
+
+- Delete `TPos, TN, TTangent, PX, PY, RZ, UZ, VZ, EUZ, EVZ, Flags,
+  BGRA, LR/LG/LB/LA` from the `Vertex` struct.
+- Verify no remaining references.
+- `Vertex` shrinks from 136 B to ~60 B. Better cache density on the
+  AoS read-only side, helps clipper's `*A = *F->A` copy.
+
+### Phase 6 — (Optional) SoA-ify the clipper's transient buffer
+
+- New `ClipperSoAScratch` with the same field set.
+- `FInterpolator` rewritten as wide-SIMD lerp.
+- `C_Verts` deleted; `newVert` becomes an index allocator into the
+  scratch.
+- Adds ~0.5-1 ms savings on clipper-heavy scenes (greets has many
+  per-mesh clipper invocations).
+
+## Validation strategy
+
+Per phase:
+1. Build clean (no new warnings).
+2. Run smoke-test snapshots: `city@t=1500`, `greets@t=2500`,
+   `fountain`, `chase`.
+3. Pixel-diff each against `master` baseline (or against the Phase 0
+   baseline if FP determinism shifts from `-ffp-contract=fast` show
+   up). Tolerance: 1 LSB per channel; fail on >1.
+4. Bench greets + city (default + halos-on). Variance band ~1 ms;
+   expect each phase to either be neutral or move in the expected
+   direction.
+5. TSan run at Phase 1, 2, 4-end, 5-end (catches the parallel write
+   bugs from the dual-write SoA/AoS period).
+
+## Risks
+
+- **Mesh dtor reach.** Some mesh allocation paths in 3DS / FLD /
+  V3D loaders may not call the standard dtor — VertexFrame's slab
+  could leak. Mitigate: RAII-wrap the slab in a unique_ptr inside
+  TriMesh.
+- **Clipper's `*A = *F->A` doesn't have a clean SoA alternative.**
+  In Phase 4 we copy field-by-field from SoA (outputs) + AoS (inputs)
+  into the clipper's working AoS Vertex. Slightly slower per-Render
+  setup than the current memcpy. Net win still expected from the
+  Transform side.
+- **VertexScratch interaction.** The shadow pass uses its own
+  `VertexScratch` for per-light parallel transforms. Each scratch
+  needs its own SoA pair (the per-mesh SoA arrays are shared across
+  all consumers, which conflicts with the per-light parallel writes
+  the shadow path does). Solution: per-light shadow path uses
+  per-light SoA scratch, not the per-mesh SoA. To be designed in
+  Phase 1.
+- **-ffp-contract=fast** is enabled globally on this base branch
+  (commit `7e4c2ac`). SoA refactor may need to verify the same
+  numerical outputs hold under the slightly-different SIMD code
+  paths. Pixel-diff tolerance addresses this.
+
+## Estimated effort
+
+- Phase 0: ½ day (design + branch setup)
+- Phase 1: 1 day (alloc + dual-write + verify)
+- Phase 2: 1-2 days (wide-SIMD Transform; tricky near-clip mask)
+- Phase 3: ½ day (additive Face fields)
+- Phase 4: 2-3 days (per-consumer migration; risk-bearing)
+- Phase 5: ½ day (struct shrink + cleanup)
+- Phase 6 (optional): 2-3 days
+- Validation throughout: 1-2 days
+
+**Total: ~2 weeks for Phases 0-5, +3-4 days for Phase 6.**
+
+## Open questions
+
+- Should `VertexFrame` slabs be allocated per-`TriMesh` or pooled
+  globally with offset-per-mesh indexing? Pooling improves cache
+  density across meshes but complicates per-mesh resizing. Per-mesh
+  alloc is simpler; revisit if profiling shows mesh-boundary cache
+  misses.
+- Is there appetite for changing `Face` size? Adding 12 B/face has a
+  measurable cost for scenes with many faces (greets has ~tens of
+  thousands). Could go index-only and recover the bytes after Phase 5.
+- Does the lightmap atlas baker (`LightmapBake.cpp`) need SoA-aware
+  reads? It runs at scene init, not per-frame — probably fine to
+  keep reading AoS.
