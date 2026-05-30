@@ -23,6 +23,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in xpar-ids debug path
 #include "Base/Scene.h"
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
@@ -700,13 +701,16 @@ xpar_done: ;
 			Face* F = FList[i].face;
 			if (!F || !F->Txtr) continue;
 			if (!(F->Txtr->Flags & Mat_Transparent)) continue;
-			const float ax = F->A->PX, ay = F->A->PY;
-			const float bx = F->B->PX, by = F->B->PY;
-			const float cxv = F->C->PX, cyv = F->C->PY;
+			// SoA Phase 4 (debug-xpar-ids dev path): read via F->frame.
+			const VertexFrame *ff = F->frame;
+			const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+			const float ax = ff->PX[ai], ay = ff->PY[ai];
+			const float bx = ff->PX[bi], by = ff->PY[bi];
+			const float cxv = ff->PX[ci], cyv = ff->PY[ci];
 			const float area = 0.5f * std::fabs(ax*(by-cyv) + bx*(cyv-ay) + cxv*(ay-by));
 			const float cx = (ax + bx + cxv) * (1.0f/3.0f);
 			const float cy = (ay + by + cyv) * (1.0f/3.0f);
-			const float azv = F->A->TPos.z, bzv = F->B->TPos.z, czv = F->C->TPos.z;
+			const float azv = ff->TPos_z[ai], bzv = ff->TPos_z[bi], czv = ff->TPos_z[ci];
 			std::fprintf(stderr,
 				"  [%4d] sortZ=%8.2f  tri-zs=(%.2f,%.2f,%.2f)  area=%6.0f  "
 				"centroid=(%.0f,%.0f)  mat=%s\n",

@@ -3,6 +3,7 @@
 #include "Base/Scene.h"
 #include "Base/Omni.h"
 #include "Base/Vertex.h"
+#include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in shadow-validate dev path
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
@@ -918,9 +919,12 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 	const bool sValidate = fds::FeatureFlags::shadow_validate();
 	if (sValidate && F) {
 		static std::atomic<int> sLogged{0};
-		const float Ax = F->A->PX, Ay = F->A->PY;
-		const float Bx = F->B->PX, By = F->B->PY;
-		const float Cx = F->C->PX, Cy = F->C->PY;
+		// SoA Phase 4: read via F->frame (dev-only validation path).
+		const VertexFrame *ff = F->frame;
+		const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+		const float Ax = ff->PX[ai], Ay = ff->PY[ai];
+		const float Bx = ff->PX[bi], By = ff->PY[bi];
+		const float Cx = ff->PX[ci], Cy = ff->PY[ci];
 		const float denom = (Ax - Cx) * (By - Cy) - (Bx - Cx) * (Ay - Cy);
 		// Skip degenerate inputs: |denom| < 10 means triangle area < 5
 		// pixels² in 2D — bary math gives wild values from float noise.
@@ -945,10 +949,10 @@ void MekaleleShadowDepth(Face *F, Vertex** V, dword numVerts, dword /*miplevel*/
 					"Az=%.3g Bz=%.3g Cz=%.3g  "
 					"in: A(%.1f,%.1f)F%x B(%.1f,%.1f)F%x C(%.1f,%.1f)F%x  out:",
 					int(Timer.load()), CurFrame, numVerts, (void*)F,
-					F->A->TPos.z, F->B->TPos.z, F->C->TPos.z,
-					Ax, Ay, (unsigned)F->A->Flags,
-					Bx, By, (unsigned)F->B->Flags,
-					Cx, Cy, (unsigned)F->C->Flags);
+					ff->TPos_z[ai], ff->TPos_z[bi], ff->TPos_z[ci],
+					Ax, Ay, (unsigned)ff->Flags[ai],
+					Bx, By, (unsigned)ff->Flags[bi],
+					Cx, Cy, (unsigned)ff->Flags[ci]);
 				for (dword i = 0; i < numVerts; ++i) {
 					std::fprintf(stderr, " (%.1f,%.1f)",
 						V[i]->PX, V[i]->PY);
