@@ -21,7 +21,7 @@ void Compute_Face_Normals(TriMesh *T)
 {
 	Face *F = T->Faces, *FEnd = F+T->FIndex;
 	Vector U,V;
-	
+
 	for(;F<FEnd;F++)
 	{
 		Vector_Sub(&F->B->Pos,&F->A->Pos,&U);
@@ -34,6 +34,28 @@ void Compute_Face_Normals(TriMesh *T)
 		}
 		else
 			Vector_Norm(&F->N);
+	}
+}
+
+// SoA refactor Phase 3 — see docs/SOA_VERTEX_REFACTOR.md.
+// Stamp A_idx/B_idx/C_idx on every face as the offsets of A/B/C into
+// T->Verts[]. These mirror the vertex indices in the per-mesh
+// VertexFrame SoA arrays, so consumers can switch from `F->A->TPos.x`
+// (AoS) to `T->frame->TPos_x[F->A_idx]` (SoA) one site at a time
+// during Phase 4 migration.
+//
+// Skips sprite/flare faces (A == B convention) — for those, B and C
+// don't point to real vertices (C is FlareSize, a float in a union),
+// and sprite rendering doesn't read SoA. Leaves their indices at 0.
+void Compute_FaceVertexIndices(TriMesh *T)
+{
+	Face *F = T->Faces, *FEnd = F + T->FIndex;
+	Vertex *base = T->Verts;
+	for (; F < FEnd; ++F) {
+		if (F->A == F->B) continue;  // sprite — skip
+		F->A_idx = uint32_t(F->A - base);
+		F->B_idx = uint32_t(F->B - base);
+		F->C_idx = uint32_t(F->C - base);
 	}
 }
 
@@ -553,6 +575,7 @@ void Scene_Computations(Scene *Sc)
 		Compute_Normal_Products(T);
 		Compute_Bounding_Sphere(T);
 		Compute_Lighting_Flag(T);
+		Compute_FaceVertexIndices(T); // SoA Phase 3: stamp A/B/C indices for SoA consumers
 		//    Compute_Edges(T);
 		//    Compute_Spikes(T);
 		T->Flags |= Tri_Processed;

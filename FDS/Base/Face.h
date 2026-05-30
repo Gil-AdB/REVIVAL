@@ -86,6 +86,16 @@ struct Face
 	// distinct clusters greets needs without inflating matTable past
 	// the 8-bit matID cap).
 	uint16_t         ShadowMatID = 0;
+	// SoA refactor Phase 3 (see docs/SOA_VERTEX_REFACTOR.md). Indices
+	// of A/B/C into ParentTri->Verts[] (and equivalently into the
+	// per-mesh VertexFrame SoA arrays). Populated by
+	// Compute_FaceVertexIndices in Scene_Computations at scene init.
+	// 0 for sprite/flare faces (where A == B and C is FlareSize,
+	// not a vertex pointer — sprite rendering uses a different path
+	// that doesn't read these indices).
+	uint32_t         A_idx = 0;
+	uint32_t         B_idx = 0;
+	uint32_t         C_idx = 0;
 	//	Surface       * Surf; // For T-Caching. (what??!)
 
 	void uvFromVertices() {
