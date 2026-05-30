@@ -93,6 +93,18 @@ if(EMSCRIPTEN)
     endif()
 endif()
 
+# Aggressive FMA fusion across statements (vs the default -ffp-contract=on
+# which only fuses within a single expression). Unlocks vector FMLA on
+# arm64 NEON for mul_add() chains that the default form treats as
+# separate mul+add. Tradeoff: slightly different LSB-level FP results
+# (the FMA path retains full precision through the multiply, where the
+# unfused mul+add rounds twice). Bit-exact snapshot/lightmap-bake diffs
+# may shift by 1 ULP per chain — acceptable for the rendering pipeline;
+# the existing shadow-lightmap-recompute-bake diagnostics measure
+# functional equivalence at the per-byte atlas level rather than per-
+# instruction reproducibility.
+add_compile_options(-ffp-contract=fast)
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # CTest entry points — populated by tests/CMakeLists.txt + smoke checks

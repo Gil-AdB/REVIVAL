@@ -217,16 +217,7 @@ target_compile_options(${PROJECT_NAME} PUBLIC
     -Werror=return-type
     -Wno-parentheses)
 
-# Enable cross-statement FMA contraction on the per-vertex transform
-# hot loops. mul_add() in vectorclass falls back to plain mul+add on
-# arm64 (the __FMA__ macro it gates on is x86-specific), and the
-# default -ffp-contract=on only fuses within a single expression — not
-# across the staged-store form used in the column-major matrix-vector.
-# Scoped to Transform.cpp only because some other files (notably the
-# shadow-lightmap baker) have bit-exact comparison tests that would
-# fail under the slightly-different FMA rounding.
-set_source_files_properties(RENDER/Transform.cpp PROPERTIES
-    COMPILE_OPTIONS "-ffp-contract=fast")
+# -ffp-contract=fast is set globally in the top-level CMakeLists.txt.
 
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time
