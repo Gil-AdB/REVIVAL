@@ -915,7 +915,7 @@ static void PrefillerCommon(Face *F, Vertex **V, dword numVerts)
 			//Fist(l_IXArray[i].G, V[i]->LG * 256.0f);
 			//Fist(l_IXArray[i].B, V[i]->LB * 256.0f);
 			float fogRate;
-			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos.z;
+			fogRate = 1.0 - 1.0 * C_rFZP * V[i]->TPos_AOS.z;
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;
@@ -994,7 +994,7 @@ static void drawPoly(float DT)
 	V[i].PY = 400.1 + W * s - H * c;
 	//	V[i].PX = 200.0;
 	//	V[i].PY = 100.0;
-	V[i].TPos.z = 1.0;
+	V[i].TPos_AOS.z = 1.0;
 	V[i].U =-1.0 / 512.0;
 	V[i].V =-1.0 / 512.0;
 	V[i].LA = 255;
@@ -1007,7 +1007,7 @@ static void drawPoly(float DT)
 	V[i].PY = 400.1 - W * s - H * c;
 	//	V[i].PX = 130.0;
 	//	V[i].PY = 200.0;
-	V[i].TPos.z = 1.0;
+	V[i].TPos_AOS.z = 1.0;
 	V[i].U = 511.0 / 512.0;
 	V[i].V =-1.0 / 512.0;
 	V[i].LA = 255;
@@ -1020,7 +1020,7 @@ static void drawPoly(float DT)
 	V[i].PY = 400.1 - W * s + H * c;
 	//	V[i].PX = 100.0;
 	//	V[i].PY = 100.0;
-	V[i].TPos.z = 1.0;
+	V[i].TPos_AOS.z = 1.0;
 	V[i].U = 511.0 / 512.0;
 	V[i].V = 511.0 / 512.0;
 	V[i].LA = 255;
@@ -1031,7 +1031,7 @@ static void drawPoly(float DT)
 	i = 3;
 	V[i].PX = 900.1 - W * c + H * s;
 	V[i].PY = 400.1 + W * s + H * c;
-	V[i].TPos.z = 1.0;
+	V[i].TPos_AOS.z = 1.0;
 	V[i].U =-1.0 / 512.0;
 	V[i].V = 511.0 / 512.0;
 	V[i].LA = 255;
@@ -1063,7 +1063,7 @@ static void drawPoly(float DT)
 	vp.ClipY2 = YRes_1;
 
 	for (i = 0; i < 4; i++) {
-		V[i].RZ = 1.0 / V[i].TPos.z;
+		V[i].RZ = 1.0 / V[i].TPos_AOS.z;
 		V[i].UZ = V[i].U * V[i].RZ;
 		V[i].VZ = V[i].V * V[i].RZ;
 		viewportCalcFlags(vp, &V[i]);
@@ -1354,11 +1354,11 @@ static void drawPolyOtherBarry(int32_t seed)
 
 	// seed==0 uses axis-aligned integer-valued vertices so vertex coords
 	// are bit-identical across platforms (no sinf/cosf, no libm noise).
-	// All vertices share TPos.z=1, so per-pixel p_z is also 1 — perspective
+	// All vertices share TPos_AOS.z=1, so per-pixel p_z is also 1 — perspective
 	// division is a no-op. Any native-vs-wasm diff here is purely a
 	// rasterizer-side bug (mask gating, edge coverage, etc).
 	//
-	// seed==1 keeps the original rotation path, also TPos.z=1.
+	// seed==1 keeps the original rotation path, also TPos_AOS.z=1.
 	//
 	// seed==2 is the *adjacent-quad seam test*: two side-by-side quads
 	// sharing a vertical edge at screen x=900, each with independent
@@ -1379,7 +1379,7 @@ static void drawPolyOtherBarry(int32_t seed)
 		V[1].U = 511.0f / 512.0f; V[1].V = -1.0f / 512.0f;
 		V[2].U = 511.0f / 512.0f; V[2].V = 511.0f / 512.0f;
 		V[3].U = -1.0f / 512.0f;  V[3].V = 511.0f / 512.0f;
-		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
+		for (int i = 0; i < 4; ++i) V[i].TPos_AOS.z = 1.0f;
 	} else if (seed == 2) {
 		// Left quad: V[0..3] cover x=600..900, U=0..0.5
 		V[0].PX = 600.0f; V[0].PY = 200.0f; V[0].U = 0.0f;  V[0].V = 0.0f;
@@ -1394,10 +1394,10 @@ static void drawPolyOtherBarry(int32_t seed)
 		V[6].PX = 1200.0f;V[6].PY = 800.0f; V[6].U = 1.0f;  V[6].V = 1.0f;
 		V[7].PX = 900.0f; V[7].PY = 800.0f; V[7].U = 0.5f;  V[7].V = 1.0f;
 		// 4x perspective ratio. Top edge close (z=1), bottom edge far (z=4).
-		V[0].TPos.z = 1.0f; V[1].TPos.z = 1.0f;
-		V[2].TPos.z = 4.0f; V[3].TPos.z = 4.0f;
-		V[4].TPos.z = 1.0f; V[5].TPos.z = 1.0f;
-		V[6].TPos.z = 4.0f; V[7].TPos.z = 4.0f;
+		V[0].TPos_AOS.z = 1.0f; V[1].TPos_AOS.z = 1.0f;
+		V[2].TPos_AOS.z = 4.0f; V[3].TPos_AOS.z = 4.0f;
+		V[4].TPos_AOS.z = 1.0f; V[5].TPos_AOS.z = 1.0f;
+		V[6].TPos_AOS.z = 4.0f; V[7].TPos_AOS.z = 4.0f;
 		numQuads = 2;
 	} else {
 		float a = (T_in + DT) * 0.003f;
@@ -1423,7 +1423,7 @@ static void drawPolyOtherBarry(int32_t seed)
 		V[3].PY = 400.1f + W * s + H * c;
 		V[3].U = -1.0f / 512.0f; V[3].V = 511.0f / 512.0f;
 
-		for (int i = 0; i < 4; ++i) V[i].TPos.z = 1.0f;
+		for (int i = 0; i < 4; ++i) V[i].TPos_AOS.z = 1.0f;
 	}
 
 	const int numVerts = numQuads * 4;
@@ -1447,7 +1447,7 @@ static void drawPolyOtherBarry(int32_t seed)
 	vp.ClipY2 = YRes_1;
 
 	for (int i = 0; i < numVerts; i++) {
-		V[i].RZ = 1.0f / V[i].TPos.z;
+		V[i].RZ = 1.0f / V[i].TPos_AOS.z;
 		V[i].UZ = V[i].U * V[i].RZ;
 		V[i].VZ = V[i].V * V[i].RZ;
 		viewportCalcFlags(vp, &V[i]);

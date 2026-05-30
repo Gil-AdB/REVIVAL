@@ -12,7 +12,7 @@ struct Vertex;
 
 namespace fds {
 
-// Per-pass clone of the scene's mutable per-vertex state (Vertex::TPos,
+// Per-pass clone of the scene's mutable per-vertex state (Vertex::TPos_AOS,
 // PX, PY, RZ, UZ, VZ, Flags, TN, TTangent, EUZ, EVZ, BGRA).
 //
 // Transform_Objects writes ~10 fields per vertex into TriMesh::Verts[i]

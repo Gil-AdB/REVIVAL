@@ -1415,14 +1415,14 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 		dword Col = 0xFFFFFF;
 		if (CurScene->Flags & Scn_Fogged)
 		{
-			float FogRate = 1.0 - _A->TPos.z * C_rFZP;
+			float FogRate = 1.0 - _A->TPos_AOS.z * C_rFZP;
 			int32_t iFog = Fist(255.0 * FogRate);
 			Col = iFog + (iFog<<8) +(iFog<<16);
 		}
 		// support no far clipping on omnilights
 		dword Z;
-		if (_A->TPos.z < C_FZP)
-			Z = 0xFF80 - Fist(g_zscale * _A->TPos.z);
+		if (_A->TPos_AOS.z < C_FZP)
+			Z = 0xFF80 - Fist(g_zscale * _A->TPos_AOS.z);
 		else
 			Z = 1;
 
@@ -1551,7 +1551,7 @@ void The_MMX_Scalar_32(Vertex **V, dword numVerts)
 		G = _A->LG;
 		B = _A->LB;
 		dword Color = (R<<16)+(G<<8)+B;
-		dword Z = 0xFF80 - Fist(g_zscale * _A->TPos.z);
+		dword Z = 0xFF80 - Fist(g_zscale * _A->TPos_AOS.z);
 		// Z compare on center only.
 		int32_t x = _A->PX;
 		if (x<0) x=0;
@@ -1645,13 +1645,13 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 
 	// Sprite renderZ: the particle's view-space Z. All strips this sprite
 	// inserts into get the same renderZ.
-	// NOTE: kept on the AoS path (F->A->TPos.z) deliberately. Particle
+	// NOTE: kept on the AoS path (F->A->TPos_AOS.z) deliberately. Particle
 	// Faces (Sc->Pcl[I].F) live outside any TriMesh, so they don't get
 	// the F->frame stamping that Compute_FaceVertexIndices /
 	// Transform_Objects do for mesh faces — F->frame is null here.
 	// SoA migration of this single read would gain nothing and would
 	// need a per-particle VertexFrame, which isn't worth the bookkeeping.
-	const float renderZ = F->A->TPos.z;
+	const float renderZ = F->A->TPos_AOS.z;
 	for (int i = y1; i <= y2; i++)
 	{
 		InsertSpanToTBR(F, i, renderZ);
@@ -1851,7 +1851,7 @@ void TBR_Render(Scene *Sc)
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
 					dword R = V->LR, G = V->LG, B = V->LB;
 					dword Color = (R << 16) + (G << 8) + B;
-					dword Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
+					dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
 					Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
 						F->Txtr->Txtr->Data, VPage, Color, Z,
 						0, spriteClipY1, XRes, spriteClipY2);

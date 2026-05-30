@@ -593,7 +593,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 							// Material* so the strstr only runs once.
 							if (shouldSkip(F->Txtr)) { ++skXpar; continue; }
 							if (F->A == F->B) { ++skDegen; continue; }
-							// SoA Phase 4: read TPos.z via F->frame.
+							// SoA Phase 4: read TPos_AOS.z via F->frame.
 							// F here is from a shadow per-light clone; its
 							// frame is the per-clone scratch frame
 							// (Transform stamps it during FList build).

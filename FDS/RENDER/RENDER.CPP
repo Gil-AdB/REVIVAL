@@ -603,7 +603,7 @@ xpar_done: ;
 		if (A == B)
 		{
 			// Particle/Sprite - no far-Z clipping
-			if (A->TPos.z < C_NZP) continue;
+			if (A->TPos_AOS.z < C_NZP) continue;
 			F->Filler(F, &A, 1, 0, rt, cam);
 		}
 	}

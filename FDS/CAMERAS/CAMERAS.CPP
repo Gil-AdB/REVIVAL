@@ -121,7 +121,7 @@ void Sphere2FaceIntersection(Vector *Ray,Face *F)
                                     //prod, unless length=1 is important
 
   // Tests Plane Intersection.
-  float D = -Dot_Product(CVV,&F->A->TPos); //Plane's offset/dist. from Origin
+  float D = -Dot_Product(CVV,&F->A->TPos_AOS); //Plane's offset/dist. from Origin
   float D2 = Dot_Product(CVV,Ray)+D;  //Ray's end distance from plane
   if (D2<0||D2>=Camera_SphereTINY) return;
 
@@ -129,9 +129,9 @@ void Sphere2FaceIntersection(Vector *Ray,Face *F)
   Vector_Scale(CVV,D2,&V);
   Vector_Sub(Ray,&V,&P);
 
-  Vector_SelfSub(&P,&F->A->TPos);
-  Vector_Sub(&F->B->TPos,&F->A->TPos,&U);
-  Vector_Sub(&F->C->TPos,&F->A->TPos,&V);
+  Vector_SelfSub(&P,&F->A->TPos_AOS);
+  Vector_Sub(&F->B->TPos_AOS,&F->A->TPos_AOS,&U);
+  Vector_Sub(&F->C->TPos_AOS,&F->A->TPos_AOS,&V);
 
   //Face bound test.
   Cross_Product(&U,CVV,&N1);
@@ -161,8 +161,8 @@ void Sphere2EdgeIntersection(Vector *Ray,Edge *E)
   Vector U,V,W;
   float Len,dot;
 
-  Vector_Sub(Ray,&E->A->TPos,&U);
-  Vector_Sub(&E->B->TPos,&E->A->TPos,&V);
+  Vector_Sub(Ray,&E->A->TPos_AOS,&U);
+  Vector_Sub(&E->B->TPos_AOS,&E->A->TPos_AOS,&V);
   Cross_Product(&U,&V,&W);
   Len = Vector_SelfDot(&V);
   dot = Dot_Product(&U,&V);
@@ -189,7 +189,7 @@ void Sphere2EdgeIntersection(Vector *Ray,Edge *E)
 void Sphere2VertexIntersection(Vector *Ray,Vertex *Vtx)
 {
   Vector V;
-  Vector_Sub(Ray,&Vtx->TPos,&V);
+  Vector_Sub(Ray,&Vtx->TPos_AOS,&V);
   if (Vector_SelfDot(&V)<Camera_Sphere2TINY)
   {
     Vector_Norm(&V);
@@ -255,7 +255,7 @@ void Advanced_Collision_Detection()
     {
       if (Dot_Product(VP,&TV)>0) continue;
       //Update Position.
-      d = Dot_Product(&TV,VP)-Dot_Product(VP,&FP[0]->A->TPos); //distance
+      d = Dot_Product(&TV,VP)-Dot_Product(VP,&FP[0]->A->TPos_AOS); //distance
       if (d>Camera_Sphere) continue;
       MatrixTXVector(FC.Mat,VP,&V); //camera rel >> absolute normal
       Vector_SAdd(&FC.ISource,Camera_Sphere-d,&V);
@@ -313,7 +313,7 @@ void Advanced_Collision_Detection()
   {
     if (Dot_Product(VP,&TV)>0) continue;
     //Update Position.
-    d = Dot_Product(&TV,VP)-Dot_Product(VP,&EP[0]->A->TPos); //distance (gotcha!!!)
+    d = Dot_Product(&TV,VP)-Dot_Product(VP,&EP[0]->A->TPos_AOS); //distance (gotcha!!!)
     if (d>Camera_SphereTINY) continue;
     MatrixTXVector(FC.Mat,VP,&V); //camera rel >> absolute normal
     Vector_SAdd(&FC.ISource,Camera_Sphere-d,&V);
@@ -348,7 +348,7 @@ void Advanced_Collision_Detection()
   for(VtP = ColVtx_Stack;VtP<CVS;VtP++,VP++)
   {
     if (Dot_Product(VP,&TV)>0) continue;
-		d = Dot_Product(&TV,VP)-Dot_Product(VP,&VtP[0]->TPos); //distance
+		d = Dot_Product(&TV,VP)-Dot_Product(VP,&VtP[0]->TPos_AOS); //distance
 		if (d>Camera_Sphere) continue;
     MatrixTXVector(FC.Mat,VP,&V); //camera rel >> absolute normal
     Vector_SAdd(&FC.ISource,Camera_Sphere-d,&V);

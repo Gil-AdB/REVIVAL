@@ -40,7 +40,7 @@ void Compute_Face_Normals(TriMesh *T)
 // SoA refactor Phase 3 — see docs/SOA_VERTEX_REFACTOR.md.
 // Stamp A_idx/B_idx/C_idx on every face as the offsets of A/B/C into
 // T->Verts[]. These mirror the vertex indices in the per-mesh
-// VertexFrame SoA arrays, so consumers can switch from `F->A->TPos.x`
+// VertexFrame SoA arrays, so consumers can switch from `F->A->TPos_AOS.x`
 // (AoS) to `T->frame->TPos_x[F->A_idx]` (SoA) one site at a time
 // during Phase 4 migration.
 //

@@ -48,17 +48,17 @@ void capturing_filler(Face*, Vertex** V, dword numVerts, dword,
 }
 
 // Build a Vertex from screen-space (PX, PY) + 1/z (RZ). Re-derives
-// TPos so the clipper's Near/Far checks have valid view-space z.
-//   TPos.z = 1/RZ;  TPos.x = PX/RZ;  TPos.y = PY/RZ
-// (matches the engine's perspective-baked storage: PX = TPos.x * RZ.)
+// TPos_AOS so the clipper's Near/Far checks have valid view-space z.
+//   TPos_AOS.z = 1/RZ;  TPos_AOS.x = PX/RZ;  TPos_AOS.y = PY/RZ
+// (matches the engine's perspective-baked storage: PX = TPos_AOS.x * RZ.)
 Vertex makeVertex(float PX, float PY, float RZ) {
 	Vertex v{};
 	v.PX = PX;
 	v.PY = PY;
 	v.RZ = RZ;
-	v.TPos.z = 1.0f / RZ;
-	v.TPos.x = PX / RZ;
-	v.TPos.y = PY / RZ;
+	v.TPos_AOS.z = 1.0f / RZ;
+	v.TPos_AOS.x = PX / RZ;
+	v.TPos_AOS.y = PY / RZ;
 	v.UZ = 0; v.VZ = 0; v.EUZ = 0; v.EVZ = 0;
 	v.U = 0;  v.V = 0;  v.EU = 0;  v.EV = 0;
 	v.Flags = 0;

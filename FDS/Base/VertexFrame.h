@@ -13,7 +13,7 @@
 //
 // Phase 1 (this commit): allocated alongside the AoS Vertex output
 // fields, written in parallel. Phase 2: Transform converts to wide-SIMD
-// writing only SoA. Phase 4-5: consumers migrate from `Vtx->TPos.x`
+// writing only SoA. Phase 4-5: consumers migrate from `Vtx->TPos_AOS.x`
 // (AoS) to `T->frame->TPos_x[idx]` (SoA), then the AoS fields drop.
 //
 // Allocation: lazy via ensureSized() in Transform_Objects on first

@@ -31,9 +31,16 @@ struct  Vertex
 
 	float			PX = 0.0f, PY = 0.0f;      // Projected X and Y
 
-	// 17.04.02 consider replacing PX, PY and TPos with x, y, and z.
+	// 17.04.02 consider replacing PX, PY and TPos_AOS with x, y, and z.
 	float			UZ = 0.0f, VZ = 0.0f, RZ = 0.0f; // U/Z, V/Z and 1/Z. (should be called UZ, VZ, RZ)
-	Vector			Pos,TPos;   // Position and transformed position
+	// SoA Phase 5 rename: TPos_AOS has moved to per-mesh / per-clone
+	// VertexFrame SoA arrays (frame->TPos_x/_y/_z, indexed by
+	// F->A_idx etc.). The AoS slot is kept for the clipper's
+	// transient C_Verts working buffer + particle Faces that don't
+	// have a frame; both will get cleaned up in Phase 6. Renamed to
+	// TPos_AOS to surface every remaining reader at compile time
+	// (per "rename-first" technique in docs/SOA_VERTEX_REFACTOR.md).
+	Vector			Pos,TPos_AOS;
 	Vector			N;          // PseudoNormal (object space; computed at scene init)
 	Vector			TN;         // Transformed normal (view space; populated per frame
 	                            // in Transform_Objects from N * IM, where IM is the

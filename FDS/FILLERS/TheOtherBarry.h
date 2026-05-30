@@ -832,7 +832,7 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		if (CurScene->Flags & Scn_Fogged)
 		{
 			float fogRate;
-			fogRate = sqrtf(1.0 - cam.invFarZ * V[i]->TPos.z);
+			fogRate = sqrtf(1.0 - cam.invFarZ * V[i]->TPos_AOS.z);
 			if (fogRate < 0.0)
 			{
 				fogRate = 0.0;

@@ -245,16 +245,16 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 		// same quad into different code paths when the averaged vertex
 		// normals diverge slightly — caused the "panel renders as a frame"
 		// bug in xpartest case 3.
-		const float ex = B->TPos.x - A->TPos.x;
-		const float ey = B->TPos.y - A->TPos.y;
-		const float ez = B->TPos.z - A->TPos.z;
-		const float fx = C->TPos.x - A->TPos.x;
-		const float fy = C->TPos.y - A->TPos.y;
-		const float fz = C->TPos.z - A->TPos.z;
+		const float ex = B->TPos_AOS.x - A->TPos_AOS.x;
+		const float ey = B->TPos_AOS.y - A->TPos_AOS.y;
+		const float ez = B->TPos_AOS.z - A->TPos_AOS.z;
+		const float fx = C->TPos_AOS.x - A->TPos_AOS.x;
+		const float fy = C->TPos_AOS.y - A->TPos_AOS.y;
+		const float fz = C->TPos_AOS.z - A->TPos_AOS.z;
 		const float nx = ey * fz - ez * fy;
 		const float ny = ez * fx - ex * fz;
 		const float nz = ex * fy - ey * fx;
-		const float vd = nx * A->TPos.x + ny * A->TPos.y + nz * A->TPos.z;
+		const float vd = nx * A->TPos_AOS.x + ny * A->TPos_AOS.y + nz * A->TPos_AOS.z;
 		const bool frontFacing = vd < 0.0f;
 		if (frontFacing) {
 			if (faceSel == XparFaceSel::BackOnly) continue;

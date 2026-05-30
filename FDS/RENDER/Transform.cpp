@@ -315,18 +315,18 @@ void Vertex_Loop1(Vertex *Vert,Vertex *VEnd,Matrix M,Vector *V)
 	{
 		//    if (!Vtx->FRem) continue;
 		//    MatrixXVector(M,&Vtx->Pos,&U);
-		//    Vector_Add(&U,V,&Vtx->TPos);
-		//    Vtx->TPos.x = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f++)*Vtx->Pos.z+V->x;
-		//    Vtx->TPos.y = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f++)*Vtx->Pos.z+V->y;
-		//    Vtx->TPos.z = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f)*Vtx->Pos.z+V->z;
+		//    Vector_Add(&U,V,&Vtx->TPos_AOS);
+		//    Vtx->TPos_AOS.x = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f++)*Vtx->Pos.z+V->x;
+		//    Vtx->TPos_AOS.y = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f++)*Vtx->Pos.z+V->y;
+		//    Vtx->TPos_AOS.z = (*f++)*Vtx->Pos.x+(*f++)*Vtx->Pos.y+(*f)*Vtx->Pos.z+V->z;
 		//    f-=8;
-		MatrixXVector(M,&Vtx->Pos,&Vtx->TPos);
-		Vector_SelfAdd(&Vtx->TPos,V);
+		MatrixXVector(M,&Vtx->Pos,&Vtx->TPos_AOS);
+		Vector_SelfAdd(&Vtx->TPos_AOS,V);
 		
 		
-		Vtx->RZ=1.0/Vtx->TPos.z;
-		Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-		Vtx->PY=Vtx->TPos.y*Vtx->RZ;
+		Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+		Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+		Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 		Vtx->UZ=Vtx->U*Vtx->RZ;
 		Vtx->VZ=Vtx->V*Vtx->RZ;
 		Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
@@ -339,20 +339,20 @@ void Vertex_Loop1(Vertex *Vert,Vertex *VEnd,Matrix M,Vector *V)
 
 void calcVisibilityFlags(Scene* Sc, Vertex* Vtx, fds::CameraContext &cam) {
 	Vtx->Flags &= 0xFFFFFFFF - Vtx_Visible;
-	//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
-	if (Vtx->TPos.z > cam.nearZ) {
-		Vtx->RZ = 1.0 / Vtx->TPos.z;
-		Vtx->PX = Vtx->TPos.x * Vtx->RZ;
-		Vtx->PY = Vtx->TPos.y * Vtx->RZ;
-		//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-		//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+	//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
+	if (Vtx->TPos_AOS.z > cam.nearZ) {
+		Vtx->RZ = 1.0 / Vtx->TPos_AOS.z;
+		Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
+		Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
+		//          Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+		//          Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 		Vtx->UZ = Vtx->U * Vtx->RZ;
 		Vtx->VZ = Vtx->V * Vtx->RZ;
 		if (Vtx->PX < 0) Vtx->Flags |= Vtx_VisLeft;
 		if (Vtx->PX >= XRes) Vtx->Flags |= Vtx_VisRight;
 		if (Vtx->PY < 0) Vtx->Flags |= Vtx_VisUp;
 		if (Vtx->PY >= YRes) Vtx->Flags |= Vtx_VisDown;
-		if (Vtx->TPos.z > cam.farZ) Vtx->Flags |= Vtx_VisFar;
+		if (Vtx->TPos_AOS.z > cam.farZ) Vtx->Flags |= Vtx_VisFar;
 	} else Vtx->Flags |= Vtx_VisNear;
 }
 
@@ -379,13 +379,13 @@ void addParticleTrail(Scene* Sc, fds::FListEntry*& Ins, Particle& p, fds::Camera
 		const Vector& tmp = *(centerPoints[v]);
 		Vertex& A = *quad;
 		V = tmp + d1 * (u - 0.5f) * p.TrailWidth - cam.view->ISource;
-		MatrixXVector(cam.view->Mat, &V, &A.TPos);
+		MatrixXVector(cam.view->Mat, &V, &A.TPos_AOS);
 
-		A.TPos.x = A.TPos.z * cam.cntrX + A.TPos.x * cam.fovX;
-		A.TPos.y = A.TPos.z * cam.cntrY - A.TPos.y * cam.fovY;
-		A.RZ = 1.0f / A.TPos.z;
-		A.PX = A.TPos.x * A.RZ;
-		A.PY = A.TPos.y * A.RZ;
+		A.TPos_AOS.x = A.TPos_AOS.z * cam.cntrX + A.TPos_AOS.x * cam.fovX;
+		A.TPos_AOS.y = A.TPos_AOS.z * cam.cntrY - A.TPos_AOS.y * cam.fovY;
+		A.RZ = 1.0f / A.TPos_AOS.z;
+		A.PX = A.TPos_AOS.x * A.RZ;
+		A.PY = A.TPos_AOS.y * A.RZ;
 
 		A.LA = A.LR = A.LG = A.LB = 255.0;
 
@@ -395,9 +395,9 @@ void addParticleTrail(Scene* Sc, fds::FListEntry*& Ins, Particle& p, fds::Camera
 
 	for (size_t i = 0; i != 2; ++i) {
 #ifdef FRONT_TO_BACK_SORTING
-		p.TrailF[i].SortZ.F = 2 * cam.farZ - p.V.TPos.z;
+		p.TrailF[i].SortZ.F = 2 * cam.farZ - p.V.TPos_AOS.z;
 #else
-		p.TrailF[i].SortZ.F = cam.farZ - p.V.TPos.z;
+		p.TrailF[i].SortZ.F = cam.farZ - p.V.TPos_AOS.z;
 #endif
 	}
 	*Ins++ = { p.TrailF[0].SortZ.DW, &p.TrailF[0] };
@@ -413,9 +413,9 @@ void addParticleTrail(Scene* Sc, fds::FListEntry*& Ins, Particle& p, fds::Camera
 // per-vertex, so coplanar triangles of the same quad classify identically.
 bool IsFrontFacingInViewSpace(const Face* F)
 {
-	// SoA Phase 4: read TPos via F->frame's SoA arrays. Same value as
+	// SoA Phase 4: read TPos_AOS via F->frame's SoA arrays. Same value as
 	// the AoS reads during the dual-write period; will diverge only
-	// when Phase 5 drops the AoS TPos field. F->frame stamped during
+	// when Phase 5 drops the AoS TPos_AOS field. F->frame stamped during
 	// FList build in Transform_Objects (main: T->frame; shadow:
 	// per-clone scratch frame).
 	const float *tpos_x = F->frame->TPos_x;
@@ -729,7 +729,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 
 		// Per-pass clone redirection. With scratch non-null, all
 		// reads/writes of this TriMesh's per-vertex projection state
-		// (Vertex::PX, PY, RZ, TPos, TN, TTangent, UZ, VZ, Flags…)
+		// (Vertex::PX, PY, RZ, TPos_AOS, TN, TTangent, UZ, VZ, Flags…)
 		// land in scratch's clone instead of T's own Verts. Face
 		// pushes also use the clone's Face* (whose A/B/C point into
 		// the clone's Verts), so downstream code sees a coherent
@@ -820,7 +820,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// Each column is loaded once into a Vec4f; per-vertex compute
 		// becomes 3 broadcast-FMAs (vfmaq_n_f32-equivalent) instead of
 		// the 9 scalar muls + 9 scalar adds the row-major form requires.
-		// 4th lane is unused (kept 0); it falls out when storing TPos.
+		// 4th lane is unused (kept 0); it falls out when storing TPos_AOS.
 		alignas(16) const float m34_col_x_arr[4] = { M[0][0], M[1][0], M[2][0], 0.0f };
 		alignas(16) const float m34_col_y_arr[4] = { M[0][1], M[1][1], M[2][1], 0.0f };
 		alignas(16) const float m34_col_z_arr[4] = { M[0][2], M[1][2], M[2][2], 0.0f };
@@ -930,7 +930,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// cube cull (cubeFaceCull above) already rejected meshes whose
 		// whole bsphere is outside; this is for meshes that straddle a
 		// face boundary (e.g. greets's split Piramid chunks). Out-of-
-		// pyramid vertices get TPos = (out-of-frame, out-of-frame, +1):
+		// pyramid vertices get TPos_AOS = (out-of-frame, out-of-frame, +1):
 		// face submission later AND's the per-vertex Vtx_Visible bits,
 		// so a face whose 3 vertices all share an out direction culls
 		// cleanly. Faces straddling the boundary still process normally.
@@ -958,9 +958,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				if (outside) {
 					// Mark all-out so face cull eats the straddler-edge
 					// faces whose 3 verts all agreed on being out.
-					Vtx->TPos.x = 0.0f;
-					Vtx->TPos.y = 0.0f;
-					Vtx->TPos.z = 1.0f;
+					Vtx->TPos_AOS.x = 0.0f;
+					Vtx->TPos_AOS.y = 0.0f;
+					Vtx->TPos_AOS.z = 1.0f;
 					Vtx->RZ = 1.0f;
 					Vtx->PX = -1.0f;
 					Vtx->PY = -1.0f;
@@ -976,13 +976,13 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				const float vx = VM[0][0]*wdx + VM[0][1]*wdy + VM[0][2]*wdz;
 				const float vy = VM[1][0]*wdx + VM[1][1]*wdy + VM[1][2]*wdz;
 				const float vz = VM[2][0]*wdx + VM[2][1]*wdy + VM[2][2]*wdz;
-				Vtx->TPos.x = PX * vx + cam.cntrEX * vz;
-				Vtx->TPos.y = -PY * vy + cam.cntrEY * vz;
-				Vtx->TPos.z = vz;
+				Vtx->TPos_AOS.x = PX * vx + cam.cntrEX * vz;
+				Vtx->TPos_AOS.y = -PY * vy + cam.cntrEY * vz;
+				Vtx->TPos_AOS.z = vz;
 				Vtx->Flags &= ~Vtx_Visible;
 				Vtx->RZ = 1.0f / vz;
-				Vtx->PX = Vtx->TPos.x * Vtx->RZ;
-				Vtx->PY = Vtx->TPos.y * Vtx->RZ;
+				Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
+				Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
 				Vtx->UZ = Vtx->U * Vtx->RZ;
 				Vtx->VZ = Vtx->V * Vtx->RZ;
 				if (Vtx->PX < 0.0f) Vtx->Flags |= Vtx_VisLeft;
@@ -1018,9 +1018,9 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
 				alignas(16) float tposArr[4];
 				tpos.store_a(tposArr);
-				Vtx->TPos.x = tposArr[0];
-				Vtx->TPos.y = tposArr[1];
-				Vtx->TPos.z = tposArr[2];
+				Vtx->TPos_AOS.x = tposArr[0];
+				Vtx->TPos_AOS.y = tposArr[1];
+				Vtx->TPos_AOS.z = tposArr[2];
 				if (!_inShadowPass) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
@@ -1053,7 +1053,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				// SIMD matrix prefix (see Inside path for the column-major
-				// staging). Stores TPos via lane-extracts to avoid touching
+				// staging). Stores TPos_AOS via lane-extracts to avoid touching
 				// N.x (next field) with the unused 4th lane.
 				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
 				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
@@ -1061,9 +1061,9 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
 				alignas(16) float tposArr[4];
 				tpos.store_a(tposArr);
-				Vtx->TPos.x = tposArr[0];
-				Vtx->TPos.y = tposArr[1];
-				Vtx->TPos.z = tposArr[2];
+				Vtx->TPos_AOS.x = tposArr[0];
+				Vtx->TPos_AOS.y = tposArr[1];
+				Vtx->TPos_AOS.z = tposArr[2];
 				if (!_inShadowPass) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
@@ -1087,17 +1087,17 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				// Defensively flag those so the clipper's Near() handles
 				// them (otherwise RZ would go negative and PX/PY would be
 				// flipped, producing ghost polygons at the cone edges).
-				if (Vtx->TPos.z > cam.nearZ) {
-					Vtx->RZ=1.0/Vtx->TPos.z;
-					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
+				if (Vtx->TPos_AOS.z > cam.nearZ) {
+					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
-					if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				} else {
 					Vtx->Flags|=Vtx_VisNear;
 				}
@@ -1114,9 +1114,9 @@ Regular:
 				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
 				alignas(16) float tposArr[4];
 				tpos.store_a(tposArr);
-				Vtx->TPos.x = tposArr[0];
-				Vtx->TPos.y = tposArr[1];
-				Vtx->TPos.z = tposArr[2];
+				Vtx->TPos_AOS.x = tposArr[0];
+				Vtx->TPos_AOS.y = tposArr[1];
+				Vtx->TPos_AOS.z = tposArr[2];
 				if (!_inShadowPass) {
 					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
 					Vec4f tn = im_col_x * Vec4f(nx);
@@ -1135,21 +1135,21 @@ Regular:
 				}
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
-				if (Vtx->TPos.z>cam.nearZ)
+				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
+				if (Vtx->TPos_AOS.z>cam.nearZ)
 				{
-					Vtx->RZ=1.0/Vtx->TPos.z;
-					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=xr) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags|=Vtx_VisDown;
-					if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				//      printf("Regular shit!\n");
 			}
@@ -1170,14 +1170,14 @@ Regular:
 			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
 				Vtx->Flags=0;
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
@@ -1186,7 +1186,7 @@ Regular:
 //				Vtx->REV=Vtx->EV*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
-				//if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+				//if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 			}
 			goto AfterXForm;
 			// This is in case 100% of trimesh AHEAD of camera. this saves some chks
@@ -1195,9 +1195,9 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
-				Vtx->RZ=1.0/Vtx->TPos.z;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
@@ -1205,17 +1205,17 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 //				Vtx->EV=128.0+95.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 //				Vtx->REV=Vtx->EV*Vtx->RZ;
 				
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 				Vtx->UZ=Vtx->U*Vtx->RZ;
 				Vtx->VZ=Vtx->V*Vtx->RZ;
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
 				if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
 				if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
-				if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+				if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			
@@ -1225,22 +1225,22 @@ ERegular:
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
 				Vtx->Flags = 0;
-				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->EV=128.0+95.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 				
-				if (Vtx->TPos.z>cam.nearZ)
+				if (Vtx->TPos_AOS.z>cam.nearZ)
 				{
-					Vtx->RZ=1.0/Vtx->TPos.z;
-					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+					//          Vtx->PX=cam.cntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+					//          Vtx->PY=cam.cntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 					Vtx->UZ=Vtx->U*Vtx->RZ;
 					Vtx->VZ=Vtx->V*Vtx->RZ;
 //					Vtx->REU=Vtx->EU*Vtx->RZ;
@@ -1249,7 +1249,7 @@ ERegular:
 					if (Vtx->PX>=xr) Vtx->Flags+=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags+=Vtx_VisUp;
 					if (Vtx->PY>=yr) Vtx->Flags+=Vtx_VisDown;
-					if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos_AOS.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags=Vtx_VisNear;
 				
 				//      printf("Regular shit!\n");
@@ -1281,9 +1281,9 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				const uint32_t nv = T->VIndex;
 				for (uint32_t i = 0; i < nv; ++i) {
 					const Vertex *v = &tVerts[i];
-					F_->TPos_x[i]     = v->TPos.x;
-					F_->TPos_y[i]     = v->TPos.y;
-					F_->TPos_z[i]     = v->TPos.z;
+					F_->TPos_x[i]     = v->TPos_AOS.x;
+					F_->TPos_y[i]     = v->TPos_AOS.y;
+					F_->TPos_z[i]     = v->TPos_AOS.z;
 					F_->TN_x[i]       = v->TN.x;
 					F_->TN_y[i]       = v->TN.y;
 					F_->TN_z[i]       = v->TN.z;
@@ -1307,7 +1307,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 					for (uint32_t i = 0; i < nv; ++i) {
 						const Vertex *v = &tVerts[i];
 						const bool ok =
-							F_->TPos_x[i] == v->TPos.x && F_->TPos_y[i] == v->TPos.y && F_->TPos_z[i] == v->TPos.z &&
+							F_->TPos_x[i] == v->TPos_AOS.x && F_->TPos_y[i] == v->TPos_AOS.y && F_->TPos_z[i] == v->TPos_AOS.z &&
 							F_->TN_x[i] == v->TN.x && F_->TN_y[i] == v->TN.y && F_->TN_z[i] == v->TN.z &&
 							F_->PX[i] == v->PX && F_->PY[i] == v->PY && F_->RZ[i] == v->RZ &&
 							F_->UZ[i] == v->UZ && F_->VZ[i] == v->VZ && F_->Flags[i] == v->Flags;
@@ -1521,7 +1521,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				// stamped on the FList push above (T->frame for main,
 				// clone.frame for shadow scratch). Same dz value as the
 				// AoS read; will diverge only after Phase 5 removes the
-				// AoS TPos field.
+				// AoS TPos_AOS field.
 				const float *fzp = F->frame->TPos_z;
 				dz = fzp[F->A_idx];
 				if (fzp[F->B_idx] > dz) dz = fzp[F->B_idx];
@@ -1556,7 +1556,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	faces.cPolys = Ins-faces.fList;
 
 	// Shadow pass (scratch != nullptr) skips omnis: this loop mutates
-	// O->V.TPos / RZ / PX / PY in place on the source Omni (no clone
+	// O->V.TPos_AOS / RZ / PX / PY in place on the source Omni (no clone
 	// equivalent exists for omnis). Running it for each light would
 	// leave omni screen positions stuck on the last light's camera,
 	// breaking the flare draw on the main pass.
@@ -1574,14 +1574,14 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 		//	Rand.z = (frand() - 0.5) * 2.0f;
 		//	Vector_Add(&V, &Rand, &V);
 		//}
-		MatrixXVector(cam.view->Mat,&V,&Vtx->TPos);
-		if (Vtx->TPos.z>cam.nearZ&&Vtx->TPos.z<cam.farZ)
+		MatrixXVector(cam.view->Mat,&V,&Vtx->TPos_AOS);
+		if (Vtx->TPos_AOS.z>cam.nearZ&&Vtx->TPos_AOS.z<cam.farZ)
 		{
-			Vtx->RZ=1.0/Vtx->TPos.z;
-			Vtx->PX=cam.cntrEX+Vtx->TPos.x*PX*Vtx->RZ;
-			Vtx->PY=cam.cntrEY-Vtx->TPos.y*PY*Vtx->RZ;
+			Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+			Vtx->PX=cam.cntrEX+Vtx->TPos_AOS.x*PX*Vtx->RZ;
+			Vtx->PY=cam.cntrEY-Vtx->TPos_AOS.y*PY*Vtx->RZ;
 			// Insert to List
-			dz = Vtx->TPos.z;
+			dz = Vtx->TPos_AOS.z;
 			//dz *=-16384;
 			//dz +=0x7FFFFFFF;
 			//RoundToInt(&O->Face.SortZ.DW,dz);
@@ -1610,13 +1610,13 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 		auto v = p.V.Pos - cam.view->ISource;
 		
-		p.V.TPos = cam.view->Mat * v;
+		p.V.TPos_AOS = cam.view->Mat * v;
 
-		if (p.V.TPos.z >= cam.nearZ)
+		if (p.V.TPos_AOS.z >= cam.nearZ)
 		{
-			p.V.RZ = 1.0 / p.V.TPos.z;
-			p.V.PX = cam.cntrX + cam.fovX * p.V.TPos.x * p.V.RZ;
-			p.V.PY = cam.cntrY - cam.fovY * p.V.TPos.y * p.V.RZ;
+			p.V.RZ = 1.0 / p.V.TPos_AOS.z;
+			p.V.PX = cam.cntrX + cam.fovX * p.V.TPos_AOS.x * p.V.RZ;
+			p.V.PY = cam.cntrY - cam.fovY * p.V.TPos_AOS.y * p.V.RZ;
 			p.V.Flags = 0;
 		} else {
 			p.V.Flags |= Vtx_VisNear;
@@ -1624,7 +1624,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 
 		if (p.Flags & Particle_Active) {
-			if ((dz = p.V.TPos.z) >= cam.nearZ) {
+			if ((dz = p.V.TPos_AOS.z) >= cam.nearZ) {
 				if (p.TrailLength == 0) {
 					F = &Sc->Pcl[I].F;
 #ifdef FRONT_TO_BACK_SORTING

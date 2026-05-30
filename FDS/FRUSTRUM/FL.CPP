@@ -10,15 +10,15 @@ void Bivex_Frustrum_Perspective(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Ve
   Vertex Vtx1;
   float L,R;
 
-  if (A->TPos.Z>B->TPos.Z) {T=A; A=B; B=T;}
+  if (A->TPos_AOS.Z>B->TPos_AOS.Z) {T=A; A=B; B=T;}
 
-  if (B->TPos.Z<1) return;
-  if (A->TPos.Z<1)
+  if (B->TPos_AOS.Z<1) return;
+  if (A->TPos_AOS.Z<1)
   {
-    L=(A->TPos.Z-1)/(A->TPos.Z-B->TPos.Z);
+    L=(A->TPos_AOS.Z-1)/(A->TPos_AOS.Z-B->TPos_AOS.Z);
     R=1-L;
-    Vtx1.PX = CntrX+FOVX*(A->TPos.X*R + B->TPos.X*L);
-    Vtx1.PY = CntrY-FOVY*(A->TPos.Y*R + B->TPos.Y*L);
+    Vtx1.PX = CntrX+FOVX*(A->TPos_AOS.X*R + B->TPos_AOS.X*L);
+    Vtx1.PY = CntrY-FOVY*(A->TPos_AOS.Y*R + B->TPos_AOS.Y*L);
 
     Vtx1.LR = A->LR*R + B->LR*L;
 
@@ -44,11 +44,11 @@ void UFP1(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
     L = A->PX/(A->PX-B->PX);   //ZOL
     if (L<-0.01||L>1.01) {
       Deinitialize_VESA();
-      printf("UFC1:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos.X,A->TPos.Z,A->TPos.Y,B->TPos.X,B->TPos.Z,B->TPos.Y,Y1,Y2,L);
+      printf("UFC1:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos_AOS.X,A->TPos_AOS.Z,A->TPos_AOS.Y,B->TPos_AOS.X,B->TPos_AOS.Z,B->TPos_AOS.Y,Y1,Y2,L);
       exit(1);
     }
     R = 1-L;
-    Vtx1.PX = 0; // CntrX + FOVX*Vtx1.TPos.X/Vtx1.TPos.Z;
+    Vtx1.PX = 0; // CntrX + FOVX*Vtx1.TPos_AOS.X/Vtx1.TPos_AOS.Z;
     Vtx1.PY = A->PY*R + B->PY*L;
     Vtx1.LR = A->LR*R + B->LR*L;
 
@@ -72,12 +72,12 @@ void UFP2(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
     R = (B->PX-XClip)/(B->PX-A->PX);  // ZOL
     if (R<-0.01||R>1.01) {
       Deinitialize_VESA();
-      printf("UFC2:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos.X,A->TPos.Z,A->TPos.Y,B->TPos.X,B->TPos.Z,B->TPos.Y,Y1,Y2,R);
+      printf("UFC2:Abnormal Interpolation rate (A=(%f,%f,%f),B=(%f,%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos_AOS.X,A->TPos_AOS.Z,A->TPos_AOS.Y,B->TPos_AOS.X,B->TPos_AOS.Z,B->TPos_AOS.Y,Y1,Y2,R);
       exit(1);
     }
     L = 1-R;
-    Vtx1.PX = XClip; // CntrX + FOVX*Vtx1.TPos.X/Vtx1.TPos.Z;
-    Vtx1.PY = A->PY*R + B->PY*L; //Vtx1.TPos.Y/Vtx1.TPos.Z;
+    Vtx1.PX = XClip; // CntrX + FOVX*Vtx1.TPos_AOS.X/Vtx1.TPos_AOS.Z;
+    Vtx1.PY = A->PY*R + B->PY*L; //Vtx1.TPos_AOS.Y/Vtx1.TPos_AOS.Z;
     Vtx1.LR = A->LR*R + B->LR*L;
 
     UFP3(A,&Vtx1,Filler);
@@ -101,12 +101,12 @@ void UFP3(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
     L = A->PY/(A->PY-B->PY);   //  ZOL
     if (L<-0.01||L>1.01) {
       Deinitialize_VESA();
-      printf("UFC3:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos.X,A->TPos.Z,A->TPos.Y,A->PX,A->PY,B->TPos.X,B->TPos.Z,B->TPos.Y,B->PX,B->PY,Y1,Y2,L);
+      printf("UFC3:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,L=%f)",A->TPos_AOS.X,A->TPos_AOS.Z,A->TPos_AOS.Y,A->PX,A->PY,B->TPos_AOS.X,B->TPos_AOS.Z,B->TPos_AOS.Y,B->PX,B->PY,Y1,Y2,L);
       exit(1);
     }
     R = 1-L;
-    Vtx1.PX = A->PX*R + B->PX*L;//Vtx1.TPos.X/Vtx1.TPos.Z;
-    Vtx1.PY = 0;//CntrY - FOVY*Vtx1.TPos.Y/Vtx1.TPos.Z;
+    Vtx1.PX = A->PX*R + B->PX*L;//Vtx1.TPos_AOS.X/Vtx1.TPos_AOS.Z;
+    Vtx1.PY = 0;//CntrY - FOVY*Vtx1.TPos_AOS.Y/Vtx1.TPos_AOS.Z;
 
     Vtx1.LR = A->LR*R + B->LR*L;
 
@@ -130,12 +130,12 @@ void UFP4(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
     R = (B->PY-YClip)/(B->PY-A->PY);   //ZOL
     if (R<-0.01||R>1.01) {
       Deinitialize_VESA();
-      printf("UFC4:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos.X,A->TPos.Z,A->TPos.Y,A->PX,A->PY,B->TPos.X,B->TPos.Z,B->TPos.Y,B->PX,B->PY,Y1,Y2,R);
+      printf("UFC4:Abnormal Interpolation rate (A=(%f,%f,%f)|(%f,%f),B=(%f,%f,%f)|(%f,%f),Y1=%f,Y2=%f,R=%f)",A->TPos_AOS.X,A->TPos_AOS.Z,A->TPos_AOS.Y,A->PX,A->PY,B->TPos_AOS.X,B->TPos_AOS.Z,B->TPos_AOS.Y,B->PX,B->PY,Y1,Y2,R);
       exit(1);
     }
     L = 1-R;
     Vtx1.PX = A->PX*R + B->PX*L;
-    Vtx1.PY = YClip;// CntrY - FOVY*Vtx1.TPos.Y/Vtx1.TPos.Z;
+    Vtx1.PY = YClip;// CntrY - FOVY*Vtx1.TPos_AOS.Y/Vtx1.TPos_AOS.Z;
 
     Vtx1.LR = A->LR*R + B->LR*L;
 

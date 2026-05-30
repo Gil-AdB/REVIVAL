@@ -525,21 +525,21 @@ static void Reflected_Transform(Scene *Sc)
 			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
 			{
 				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
+				//        Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				// 4x3 xform
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
+				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
+				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 				//        Vtx->RU=Vtx->U*Vtx->RZ;
 				//        Vtx->RV=Vtx->V*Vtx->RZ;
-				//if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				//if (Vtx->TPos_AOS.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			
 			goto OUT;
@@ -549,16 +549,16 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			{
 				//    if (!Vtx->FRem) continue;
 				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				//        Vector_Add(&U,&V,&Vtx->TPos_AOS);
+				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
+				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
+				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 				//        Vtx->RU=Vtx->U*Vtx->RZ;
 				//        Vtx->RV=Vtx->V*Vtx->RZ;
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
@@ -566,7 +566,7 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 				if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 				if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 				if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
-				if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+				if (Vtx->TPos_AOS.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 			}
 			//    printf("Ahead VGA/Wizard.\n");
 			goto OUT;
@@ -575,27 +575,27 @@ Regular:
 			{
 				//    if (!Vtx->FRem) continue;
 				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
+				//        Vector_Add(&U,&V,&Vtx->TPos_AOS);
+				Vtx->TPos_AOS.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
+				Vtx->TPos_AOS.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
+				Vtx->TPos_AOS.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
 				
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
-				if (Vtx->TPos.z>Sc->NZP)
+				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
+				if (Vtx->TPos_AOS.z>Sc->NZP)
 				{
-					Vtx->RZ=1.0/Vtx->TPos.z;
-					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+					//          Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+					//          Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 					//          Vtx->RU=Vtx->U*Vtx->RZ;
 					//          Vtx->RV=Vtx->V*Vtx->RZ;
 					if (Vtx->PX<0) Vtx->Flags|=Vtx_VisLeft;
 					if (Vtx->PX>=XRes) Vtx->Flags|=Vtx_VisRight;
 					if (Vtx->PY<0) Vtx->Flags|=Vtx_VisUp;
 					if (Vtx->PY>=YRes) Vtx->Flags|=Vtx_VisDown;
-					if (Vtx->TPos.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
+					if (Vtx->TPos_AOS.z>Sc->FZP) Vtx->Flags|=Vtx_VisFar;
 				} else Vtx->Flags|=Vtx_VisNear;
 				
 				//      printf("Regular shit!\n");
@@ -617,14 +617,14 @@ Regular:
 			for (Vtx=T->Verts;Vtx<VEnd;Vtx++)
 			{
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
 				Vtx->Flags=0;
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->REU=Vtx->EU*Vtx->RZ;
@@ -640,9 +640,9 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
-				Vtx->RZ=1.0/Vtx->TPos.z;
+				Vtx->RZ=1.0/Vtx->TPos_AOS.z;
 
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+95.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
@@ -650,10 +650,10 @@ EAhead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 //				Vtx->EV=128.0+95.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 //				Vtx->REV=Vtx->EV*Vtx->RZ;
 				
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+				Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+				Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+				//        Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+				//        Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
 				//        Vtx->RU=Vtx->U*Vtx->RZ;
 				//        Vtx->RV=Vtx->V*Vtx->RZ;
 				if (Vtx->PX<0) Vtx->Flags=Vtx_VisLeft; else Vtx->Flags=0;
@@ -668,21 +668,21 @@ ERegular:
 			{
 				//    if (!Vtx->FRem) continue;
 				MatrixXVector(M,&Vtx->Pos,&U);
-				Vector_Add(&U,&V,&Vtx->TPos);
+				Vector_Add(&U,&V,&Vtx->TPos_AOS);
 				
 				Vtx->Flags = 0;
-				//      if (*(int32_t *)(&Vtx->TPos.z)>0x3F800000) // 1.0 in floating point rep.
+				//      if (*(int32_t *)(&Vtx->TPos_AOS.z)>0x3F800000) // 1.0 in floating point rep.
 				// Environment mapping support removed at 11.04.02
 //				Vtx->EU=128.0+127.0*(Vtx->N.x*IM[0][0]+Vtx->N.y*IM[0][1]+Vtx->N.z*IM[0][2]);
 //				Vtx->EV=128.0+127.0*(Vtx->N.x*IM[1][0]+Vtx->N.y*IM[1][1]+Vtx->N.z*IM[1][2]);
 				
-				if (Vtx->TPos.z>Sc->NZP)
+				if (Vtx->TPos_AOS.z>Sc->NZP)
 				{
-					Vtx->RZ=1.0/Vtx->TPos.z;
-					Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-					Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-					//          Vtx->PX=CntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-					//          Vtx->PY=CntrEY-PY*Vtx->TPos.y*Vtx->RZ;
+					Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+					Vtx->PX=Vtx->TPos_AOS.x*Vtx->RZ;
+					Vtx->PY=Vtx->TPos_AOS.y*Vtx->RZ;
+					//          Vtx->PX=CntrEX+PX*Vtx->TPos_AOS.x*Vtx->RZ;
+					//          Vtx->PY=CntrEY-PY*Vtx->TPos_AOS.y*Vtx->RZ;
  					//          Vtx->RU=Vtx->U*Vtx->RZ;
 					//          Vtx->RV=Vtx->V*Vtx->RZ;
 //					Vtx->REU=Vtx->EU*Vtx->RZ;
@@ -704,9 +704,9 @@ OUT:FEnd=T->Faces+T->FIndex;
 					(AP.x * F->N.x + AP.y * F->N.y + AP.z * F->N.z < F->NormProd) //backface culling
 
 					)) {
-				dz = F->A->TPos.z;
-				if (F->B->TPos.z > dz) dz = F->B->TPos.z;
-				if (F->C->TPos.z > dz) dz = F->C->TPos.z;
+				dz = F->A->TPos_AOS.z;
+				if (F->B->TPos_AOS.z > dz) dz = F->B->TPos_AOS.z;
+				if (F->C->TPos_AOS.z > dz) dz = F->C->TPos_AOS.z;
 #ifdef FRONT_TO_BACK_SORTING
 				F->SortZ.F = dz;
 #else
@@ -723,18 +723,18 @@ OUT:FEnd=T->Faces+T->FIndex;
 		Vector ReflectedPos = O->IPos;
 		ReflectedPos.y = -ReflectedPos.y;
 		Vector_Sub(&ReflectedPos,&View->ISource,&V);
-		MatrixXVector(View->Mat,&V,&Vtx->TPos);
-		if (Vtx->TPos.z>Sc->NZP&&Vtx->TPos.z<Sc->FZP)
+		MatrixXVector(View->Mat,&V,&Vtx->TPos_AOS);
+		if (Vtx->TPos_AOS.z>Sc->NZP&&Vtx->TPos_AOS.z<Sc->FZP)
 		{
-			Vtx->RZ=1.0/Vtx->TPos.z;
-			Vtx->PX=CntrEX+Vtx->TPos.x*PX*Vtx->RZ;
-			Vtx->PY=CntrEY-Vtx->TPos.y*PY*Vtx->RZ;
+			Vtx->RZ=1.0/Vtx->TPos_AOS.z;
+			Vtx->PX=CntrEX+Vtx->TPos_AOS.x*PX*Vtx->RZ;
+			Vtx->PY=CntrEY-Vtx->TPos_AOS.y*PY*Vtx->RZ;
 			// Insert to List
-			//dz = Vtx->TPos.z;
+			//dz = Vtx->TPos_AOS.z;
 			//dz *=-16384;
 			//dz +=0x7FFFFFFF;
 			//RoundToInt((int32_t *)&O->F.SortZ.DW,dz);
-			dz = Vtx->TPos.z;
+			dz = Vtx->TPos_AOS.z;
 			O->F.SortZ.F = 2 * fzp - dz;
 			*Ins++ = { O->F.SortZ.DW, &O->F }; // no insertion : flares are not reflected for now
 		}
@@ -744,7 +744,7 @@ OUT:FEnd=T->Faces+T->FIndex;
 	{
 		if (Sc->Pcl[I].Flags&Particle_Active)
 		{
-			if ((dz=Sc->Pcl[I].V.TPos.z)>=Sc->NZP) {
+			if ((dz=Sc->Pcl[I].V.TPos_AOS.z)>=Sc->NZP) {
 				F = &Sc->Pcl[I].F;
 				dz *=-16384;
 				dz +=0x7FFFFFFF;
@@ -945,7 +945,7 @@ void City_Lighting()
 			for(;Vtx<VEnd;Vtx++)
 			{
 				//apply fog
-				Color = Vtx->TPos.z*CitySc->FZP;
+				Color = Vtx->TPos_AOS.z*CitySc->FZP;
 
 //				Vtx->LR = Vtx->LR + (128.0f-Vtx->LR) * Color;
 //				Vtx->LG = Vtx->LG + (128.0f-Vtx->LG) * Color;
@@ -1031,8 +1031,8 @@ static void drawRainDrop(Face* F, Vertex **VA, mword numVerts, dword miplevel,
 	if (x>=0&&x<XRes&&y>=0&&y<YRes)
 	{
 		dword Z;
-		if (V->TPos.z < C_FZP)
-			Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
+		if (V->TPos_AOS.z < C_FZP)
+			Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
 		else
 			Z = 1;
 		dword offset = x + y*XRes;
@@ -1180,7 +1180,7 @@ static void drawRainDropV2(Vertex **VA, mword numVerts)
 	int32_t x = Fist(V->PX);
 	int32_t y = Fist(V->PY);
 
-	float ahead_z = V->TPos.z;
+	float ahead_z = V->TPos_AOS.z;
 
 //	float raz = 1.0 / ahead_z;
 	float ahead_x = x - 3;
@@ -1190,8 +1190,8 @@ static void drawRainDropV2(Vertex **VA, mword numVerts)
 	{
 	
 		dword Z;
-		if (V->TPos.z < C_FZP)
-			Z = 0xFF80 - Fist(g_zscale * V->TPos.z);
+		if (V->TPos_AOS.z < C_FZP)
+			Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
 		else
 			Z = 1;
 		dword offset = x + y*XRes;
@@ -1350,13 +1350,13 @@ BailOut:;
 		}
 
 		Vector_Sub(&P->V.Pos,&View->ISource,&v);
-		MatrixXVector(View->Mat, &v, &P->V.TPos);
+		MatrixXVector(View->Mat, &v, &P->V.TPos_AOS);
 
-		if (P->V.TPos.z>=Sc->NZP)
+		if (P->V.TPos_AOS.z>=Sc->NZP)
 		{
-			P->V.RZ = 1.0/P->V.TPos.z;
-			P->V.PX = CntrX+FOVX*P->V.TPos.x*P->V.RZ;
-			P->V.PY = CntrY-FOVY*P->V.TPos.y*P->V.RZ;
+			P->V.RZ = 1.0/P->V.TPos_AOS.z;
+			P->V.PX = CntrX+FOVX*P->V.TPos_AOS.x*P->V.RZ;
+			P->V.PY = CntrY-FOVY*P->V.TPos_AOS.y*P->V.RZ;
 //      P->PRad = 0;//FOVX*P->Radius*RZ;
 			P->V.Flags = 0;
 		} else P->V.Flags |= Vtx_VisNear;

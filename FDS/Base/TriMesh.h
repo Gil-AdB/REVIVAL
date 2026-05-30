@@ -66,7 +66,7 @@ struct TriMesh
     // xform can:
     //   1. Per-vertex pyramid cull in world space (one dot product + a
     //      few compares; no matmul). Outside-vertices skip the view xform.
-    //   2. Inside-vertices: view-space TPos = view.Mat × (worldPos - cam.ISource).
+    //   2. Inside-vertices: view-space TPos_AOS = view.Mat × (worldPos - cam.ISource).
     //      Same number of mul/add as the legacy M34 × Vtx->Pos path, but
     //      without the per-face object→world step baked into M.
     // Allocated by scene init for static chunks (e.g. greets's split

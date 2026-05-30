@@ -274,11 +274,11 @@ void FrustumClipper::Near()
 			C_Scnd[j++] = _IA;
 			if (!(_IB->Flags & Vtx_VisNear)) continue;
 		}
-		t = (C_VP.NearZ - _IA->TPos.z) / (_IB->TPos.z - _IA->TPos.z);
+		t = (C_VP.NearZ - _IA->TPos_AOS.z) / (_IB->TPos_AOS.z - _IA->TPos_AOS.z);
 		
-		newVert->TPos.x = _IA->TPos.x + t * (_IB->TPos.x - _IA->TPos.x);
-		newVert->TPos.y = _IA->TPos.y + t * (_IB->TPos.y - _IA->TPos.y);
-		newVert->TPos.z = C_VP.NearZ;
+		newVert->TPos_AOS.x = _IA->TPos_AOS.x + t * (_IB->TPos_AOS.x - _IA->TPos_AOS.x);
+		newVert->TPos_AOS.y = _IA->TPos_AOS.y + t * (_IB->TPos_AOS.y - _IA->TPos_AOS.y);
+		newVert->TPos_AOS.z = C_VP.NearZ;
 		newVert->LR = _IA->LR + t * (_IB->LR - _IA->LR);
 		newVert->LG = _IA->LG + t * (_IB->LG - _IA->LG);
 		newVert->LB = _IA->LB + t * (_IB->LB - _IA->LB);
@@ -299,7 +299,7 @@ void FrustumClipper::Near()
 		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
 		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
 		// Static-shadow lightmap bary on F. Same linear-in-object-space
-		// interp as U/V here (t comes from TPos.z, which is the object-
+		// interp as U/V here (t comes from TPos_AOS.z, which is the object-
 		// space parameter — Z is linear in world coords along the edge).
 		// Linear is correct for object-space attributes; the perspective-
 		// correct FInterpolator path used by Left/Right/Up/Down handles
@@ -307,8 +307,8 @@ void FrustumClipper::Near()
 		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
 		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
 
-		newVert->PX = newVert->TPos.x * C_VP.iNearZ;
-		newVert->PY = newVert->TPos.y * C_VP.iNearZ;
+		newVert->PX = newVert->TPos_AOS.x * C_VP.iNearZ;
+		newVert->PY = newVert->TPos_AOS.y * C_VP.iNearZ;
 		newVert->RZ = C_VP.iNearZ;
 		newVert->UZ = newVert->U * C_VP.iNearZ;
 		newVert->VZ = newVert->V * C_VP.iNearZ;
@@ -341,13 +341,13 @@ void FrustumClipper::Far()
 			C_Scnd[j++] = _IA;
 			if (!(_IB->Flags & Vtx_VisFar)) continue;
 		}
-		t = (C_VP.FarZ-_IA->TPos.z)/(_IB->TPos.z-_IA->TPos.z);		
-		newVert->PX = C_VP.iFarZ * (_IA->TPos.x + t * (_IB->TPos.x-_IA->TPos.x) );
-		newVert->PY = C_VP.iFarZ * (_IA->TPos.y + t * (_IB->TPos.y-_IA->TPos.y) );			
+		t = (C_VP.FarZ-_IA->TPos_AOS.z)/(_IB->TPos_AOS.z-_IA->TPos_AOS.z);		
+		newVert->PX = C_VP.iFarZ * (_IA->TPos_AOS.x + t * (_IB->TPos_AOS.x-_IA->TPos_AOS.x) );
+		newVert->PY = C_VP.iFarZ * (_IA->TPos_AOS.y + t * (_IB->TPos_AOS.y-_IA->TPos_AOS.y) );			
 		newVert->LR = _IA->LR + t * (_IB->LR-_IA->LR);
 		newVert->LG = _IA->LG + t * (_IB->LG-_IA->LG);
 		newVert->LB = _IA->LB + t * (_IB->LB-_IA->LB);
-		newVert->TPos.z = C_VP.FarZ;
+		newVert->TPos_AOS.z = C_VP.FarZ;
 		newVert->RZ = C_VP.iFarZ;
 		newVert->U = _IA->U + t * (_IB->U-_IA->U);
 		newVert->V = _IA->V + t * (_IB->V-_IA->V);
@@ -364,7 +364,7 @@ void FrustumClipper::Far()
 		newVert->TTangent.y = _IA->TTangent.y + t * (_IB->TTangent.y - _IA->TTangent.y);
 		newVert->TTangent.z = _IA->TTangent.z + t * (_IB->TTangent.z - _IA->TTangent.z);
 		// Static-shadow lightmap bary on F (linear-in-object-space; t
-		// is the object-space parameter from TPos.z).
+		// is the object-space parameter from TPos_AOS.z).
 		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
 		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
 		Calc_Flags(newVert);
@@ -420,17 +420,17 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 	V->i = _IA->i;
 
 	// calculate (U,V)
-	V->TPos.z = 1.0 / V->RZ;
-	V->U = V->UZ * V->TPos.z;
-	V->V = V->VZ * V->TPos.z;
-	V->EU = V->EUZ * V->TPos.z;
-	V->EV = V->EVZ * V->TPos.z;
+	V->TPos_AOS.z = 1.0 / V->RZ;
+	V->U = V->UZ * V->TPos_AOS.z;
+	V->V = V->VZ * V->TPos_AOS.z;
+	V->EU = V->EUZ * V->TPos_AOS.z;
+	V->EV = V->EVZ * V->TPos_AOS.z;
 	// Static-shadow lightmap bary on the original face (A, B, C).
 	// Same perspective-correct interpolation as UV: lerp OrigBary*RZ
 	// screen-affinely, then divide by the new vertex's RZ at the
 	// clip point. Stamped at scene init in LightmapStampOrigBary;
 	// read per-pixel by Mekalele for the atlas lookup. Cost: 4 muls
-	// + 2 adds + 2 multiplies (uses TPos.z already computed above).
+	// + 2 adds + 2 multiplies (uses TPos_AOS.z already computed above).
 	{
 		const float aBZ = _IA->OrigBaryB * _IA->RZ;
 		const float bBZ = _IB->OrigBaryB * _IB->RZ;
@@ -438,8 +438,8 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 		const float bCZ = _IB->OrigBaryC * _IB->RZ;
 		const float obBZ = aBZ + t * (bBZ - aBZ);
 		const float obCZ = aCZ + t * (bCZ - aCZ);
-		V->OrigBaryB = float(obBZ * V->TPos.z);
-		V->OrigBaryC = float(obCZ * V->TPos.z);
+		V->OrigBaryB = float(obBZ * V->TPos_AOS.z);
+		V->OrigBaryC = float(obCZ * V->TPos_AOS.z);
 	}
 }
 

@@ -503,13 +503,13 @@ void Particle_Kinematics(Scene *Sc)
 		}
 
 		Vector_Sub(&P->V.Pos,&View->ISource,&V);
-		MatrixXVector(View->Mat,&V,&P->V.TPos);
+		MatrixXVector(View->Mat,&V,&P->V.TPos_AOS);
 
-		if (P->V.TPos.z>=1.0)
+		if (P->V.TPos_AOS.z>=1.0)
 		{
-			P->V.RZ = 1.0/P->V.TPos.z;
-			P->V.PX = CntrX+FOVX*P->V.TPos.x*P->V.RZ;
-			P->V.PY = CntrY-FOVY*P->V.TPos.y*P->V.RZ;
+			P->V.RZ = 1.0/P->V.TPos_AOS.z;
+			P->V.PX = CntrX+FOVX*P->V.TPos_AOS.x*P->V.RZ;
+			P->V.PY = CntrY-FOVY*P->V.TPos_AOS.y*P->V.RZ;
 //      P->PRad = 0;//FOVX*P->Radius*RZ;
 			P->V.Flags = 0;
 		} else P->V.Flags |= Vtx_VisNear;
@@ -667,13 +667,13 @@ void Particle_Kinematics(Scene *Sc)
 		Vector_SelfAdd(&P->V.Pos,&V);
 
 		Vector_Sub(&P->V.Pos,&View->ISource,&V);
-		MatrixXVector(View->Mat,&V,&P->V.TPos);
+		MatrixXVector(View->Mat,&V,&P->V.TPos_AOS);
 
-		if (P->V.TPos.z>=1.0)
+		if (P->V.TPos_AOS.z>=1.0)
 		{
-			P->V.RZ = 1.0/P->V.TPos.z;
-			P->V.PX = CntrX+FOVX*P->V.TPos.x*P->V.RZ;
-			P->V.PY = CntrY-FOVY*P->V.TPos.y*P->V.RZ;
+			P->V.RZ = 1.0/P->V.TPos_AOS.z;
+			P->V.PX = CntrX+FOVX*P->V.TPos_AOS.x*P->V.RZ;
+			P->V.PY = CntrY-FOVY*P->V.TPos_AOS.y*P->V.RZ;
 //      P->PRad = 0;//FOVX*P->Radius*RZ;
 			P->V.Flags = 0;
 		} else P->V.Flags |= Vtx_VisNear;
@@ -742,13 +742,13 @@ void Particle_Kinematics(Scene *Sc)
 			P->V.Pos.z = dcx * ty - dsx * tx + Vortex_Center.z;
 
 			Vector_Sub(&P->V.Pos,&View->ISource,&V);
-			MatrixXVector(View->Mat,&V,&P->V.TPos);
+			MatrixXVector(View->Mat,&V,&P->V.TPos_AOS);
 
-			if (P->V.TPos.z>=1.0)
+			if (P->V.TPos_AOS.z>=1.0)
 			{
-				P->V.RZ = 1.0/P->V.TPos.z;
-				P->V.PX = CntrX+FOVX*P->V.TPos.x*P->V.RZ;
-				P->V.PY = CntrY-FOVY*P->V.TPos.y*P->V.RZ;
+				P->V.RZ = 1.0/P->V.TPos_AOS.z;
+				P->V.PX = CntrX+FOVX*P->V.TPos_AOS.x*P->V.RZ;
+				P->V.PY = CntrY-FOVY*P->V.TPos_AOS.y*P->V.RZ;
 //      P->PRad = 0;//FOVX*P->Radius*RZ;
 				P->V.Flags = 0;
 			} else P->V.Flags |= Vtx_VisNear;
@@ -1051,14 +1051,14 @@ static inline void assertClipParam(float t, int stage)
 
 void Bivex_Frustrum_Perspective(Vertex *A,Vertex *B,void (*Filler)(Vertex *V1,Vertex *V2))
 {
-	if (A->TPos.z > B->TPos.z) { Vertex* T = A; A = B; B = T; }
-	if (B->TPos.z < 1) return;
-	if (A->TPos.z < 1) {
-		const float t = (A->TPos.z - 1) / (A->TPos.z - B->TPos.z);
+	if (A->TPos_AOS.z > B->TPos_AOS.z) { Vertex* T = A; A = B; B = T; }
+	if (B->TPos_AOS.z < 1) return;
+	if (A->TPos_AOS.z < 1) {
+		const float t = (A->TPos_AOS.z - 1) / (A->TPos_AOS.z - B->TPos_AOS.z);
 		const float R = 1.0f - t;
 		Vertex Vtx1;
-		Vtx1.PX = CntrX + FOVX * (A->TPos.x*R + B->TPos.x*t);
-		Vtx1.PY = CntrY - FOVY * (A->TPos.y*R + B->TPos.y*t);
+		Vtx1.PX = CntrX + FOVX * (A->TPos_AOS.x*R + B->TPos_AOS.x*t);
+		Vtx1.PY = CntrY - FOVY * (A->TPos_AOS.y*R + B->TPos_AOS.y*t);
 		Vtx1.LR = A->LR * R + B->LR * t;
 		UFP1(&Vtx1, B, Filler);
 		return;
@@ -1375,22 +1375,22 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 	Vector V;
 
 	Vector_Sub(Src,&View->ISource,&V);
-	MatrixXVector(View->Mat,&V,&A.TPos);
-	A.TPos.x = A.TPos.z * CntrX + A.TPos.x * FOVX;
-	A.TPos.y = A.TPos.z * CntrY - A.TPos.y * FOVY;
-	A.RZ = 1.0f/A.TPos.z;
-	A.PX = A.TPos.x * A.RZ;
-	A.PY = A.TPos.y * A.RZ;
+	MatrixXVector(View->Mat,&V,&A.TPos_AOS);
+	A.TPos_AOS.x = A.TPos_AOS.z * CntrX + A.TPos_AOS.x * FOVX;
+	A.TPos_AOS.y = A.TPos_AOS.z * CntrY - A.TPos_AOS.y * FOVY;
+	A.RZ = 1.0f/A.TPos_AOS.z;
+	A.PX = A.TPos_AOS.x * A.RZ;
+	A.PY = A.TPos_AOS.y * A.RZ;
 
 	Vector_Sub(Targ,&View->ISource,&V);
-	MatrixXVector(View->Mat,&V,&B.TPos);
-	B.TPos.x = B.TPos.z * CntrX + B.TPos.x * FOVX;
-	B.TPos.y = B.TPos.z * CntrY - B.TPos.y * FOVY;
-	B.RZ = 1.0f/B.TPos.z;
-	B.PX = B.TPos.x * B.RZ;
-	B.PY = B.TPos.y * B.RZ;
+	MatrixXVector(View->Mat,&V,&B.TPos_AOS);
+	B.TPos_AOS.x = B.TPos_AOS.z * CntrX + B.TPos_AOS.x * FOVX;
+	B.TPos_AOS.y = B.TPos_AOS.z * CntrY - B.TPos_AOS.y * FOVY;
+	B.RZ = 1.0f/B.TPos_AOS.z;
+	B.PX = B.TPos_AOS.x * B.RZ;
+	B.PY = B.TPos_AOS.y * B.RZ;
 
-	if (A.TPos.z < C_NZP || B.TPos.z < C_NZP) {
+	if (A.TPos_AOS.z < C_NZP || B.TPos_AOS.z < C_NZP) {
 		return;
 	}
 
@@ -1496,13 +1496,13 @@ void Lightning_Particles()
 		Vector_SelfAdd(&P->V.Pos,&V);
 
 		Vector_Sub(&P->V.Pos,&View->ISource,&V);
-		MatrixXVector(View->Mat,&V,&P->V.TPos);
+		MatrixXVector(View->Mat,&V,&P->V.TPos_AOS);
 
-		if (P->V.TPos.z>=1.0)
+		if (P->V.TPos_AOS.z>=1.0)
 		{
-			P->V.RZ = 1.0/P->V.TPos.z;
-			P->V.PX = CntrX+FOVX*P->V.TPos.x*P->V.RZ;
-			P->V.PY = CntrY-FOVY*P->V.TPos.y*P->V.RZ;
+			P->V.RZ = 1.0/P->V.TPos_AOS.z;
+			P->V.PX = CntrX+FOVX*P->V.TPos_AOS.x*P->V.RZ;
+			P->V.PY = CntrY-FOVY*P->V.TPos_AOS.y*P->V.RZ;
 //      P->PRad = 0;//FOVX*P->Radius*RZ;
 			P->V.Flags = 0;
 		} else P->V.Flags |= Vtx_VisNear;
@@ -1844,20 +1844,20 @@ void Fire_Photon_Beam(Vector *Source,Vector *Target)
 	Vector V;
 
 	Vector_Sub(Source,&View->ISource,&V);
-	MatrixXVector(View->Mat,&V,&A.TPos);
-	A.TPos.x = A.TPos.z * CntrX + A.TPos.x * FOVX;
-	A.TPos.y = A.TPos.z * CntrY - A.TPos.y * FOVY;
-	A.RZ = 1.0f/A.TPos.z;
-	A.PX = A.TPos.x * A.RZ;
-	A.PY = A.TPos.y * A.RZ;
+	MatrixXVector(View->Mat,&V,&A.TPos_AOS);
+	A.TPos_AOS.x = A.TPos_AOS.z * CntrX + A.TPos_AOS.x * FOVX;
+	A.TPos_AOS.y = A.TPos_AOS.z * CntrY - A.TPos_AOS.y * FOVY;
+	A.RZ = 1.0f/A.TPos_AOS.z;
+	A.PX = A.TPos_AOS.x * A.RZ;
+	A.PY = A.TPos_AOS.y * A.RZ;
 
 	Vector_Sub(Target,&View->ISource,&V);
-	MatrixXVector(View->Mat,&V,&B.TPos);
-	B.TPos.x = B.TPos.z * CntrX + B.TPos.x * FOVX;
-	B.TPos.y = B.TPos.z * CntrY - B.TPos.y * FOVY;
-	B.RZ = 1.0f/B.TPos.z;
-	B.PX = B.TPos.x * B.RZ;
-	B.PY = B.TPos.y * B.RZ;
+	MatrixXVector(View->Mat,&V,&B.TPos_AOS);
+	B.TPos_AOS.x = B.TPos_AOS.z * CntrX + B.TPos_AOS.x * FOVX;
+	B.TPos_AOS.y = B.TPos_AOS.z * CntrY - B.TPos_AOS.y * FOVY;
+	B.RZ = 1.0f/B.TPos_AOS.z;
+	B.PX = B.TPos_AOS.x * B.RZ;
+	B.PY = B.TPos_AOS.y * B.RZ;
 
 //	Iterate_Photonbeam_Texture();
 //	Iterate_Photonbeam_Texture();
@@ -2256,7 +2256,7 @@ struct FountainScene : SceneDriver {
 			const FollowerOmni& f = g_FntFollowerOmnis[i];
 			const Omni* O = f.omni;
 			if (!O) continue;
-			if (O->V.TPos.z < FntSc->NZP || O->V.TPos.z > FntSc->FZP) continue;
+			if (O->V.TPos_AOS.z < FntSc->NZP || O->V.TPos_AOS.z > FntSc->FZP) continue;
 			int px = int(O->V.PX);
 			int py = int(O->V.PY);
 			if (px < 0 || px >= XRes || py < 0 || py >= YRes) continue;
