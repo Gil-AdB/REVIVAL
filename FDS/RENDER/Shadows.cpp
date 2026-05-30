@@ -42,7 +42,10 @@
 
 #include <mutex>
 #include <condition_variable>
+#include <semaphore>
+#include <climits>
 namespace renderns {
+	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
@@ -425,15 +428,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				g_currentShadowOmni = nullptr;
 				g_inDynamicShadowBake = false;
 				g_inShadowPass = false;
-				std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-				++renderns::tileCounter;
-				renderns::condition.notify_one();
+				// One permit per completed task (see renderns::tileDone).
+				renderns::tileDone.release();
 			});
 	}
-	{
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock,
-			[xformsEnqueued]{ return renderns::tileCounter >= xformsEnqueued; });
+	for (int _i = 0; _i < xformsEnqueued; ++_i) {
+		renderns::tileDone.acquire();
 	}
 	const auto tXformEnd = clk::now();
 	if (sProfShadow) {
@@ -487,7 +487,11 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		// Tile size must be a multiple of 8 (see numTilesX comment for
 		// why). At shadow res = 4*N*8 (e.g. 128, 256, 512, 1024) this is
 		// naturally clean. For arbitrary res, round down to mult-of-8 and
-		// let the last tile absorb the remainder.
+		// let the last tile absorb the remainder — matching the main
+		// renderFrame tiler (see RENDER.CPP). The `(ty == numTilesY - 1)`
+		// branch is what actually makes the remainder strip render;
+		// without it, the last column / row of `sm.xres/yres` would stay
+		// at the pre-clear value.
 		const int rawTX = (sm.xres + numTilesX - 1) / numTilesX;
 		const int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
 		const int tileSizeX = rawTX & ~7;
@@ -497,10 +501,10 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
 		for (int ty = 0; ty < numTilesY; ++ty) {
 			const float y1f = float(ty * tileSizeY);
-			const float y2f = float(std::min((ty + 1) * tileSizeY, sm.yres));
+			const float y2f = float((ty == numTilesY - 1) ? sm.yres : ((ty + 1) * tileSizeY));
 			for (int tx = 0; tx < numTilesX; ++tx) {
 				const float x1f = float(tx * tileSizeX);
-				const float x2f = float(std::min((tx + 1) * tileSizeX, sm.xres));
+				const float x2f = float((tx == numTilesX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
 				++tilesEnqueued;
 				const bool dynBakeForLambda = writeDynamicBuf;
 				ThreadPool::instance().enqueue(
@@ -610,17 +614,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						}
 						g_currentShadowMap = nullptr;
 						g_inDynamicShadowBake = false;
-						std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-						++renderns::tileCounter;
-						renderns::condition.notify_one();
+						// One permit per completed task (see renderns::tileDone).
+						renderns::tileDone.release();
 					});
 			}
 		}
 	}
-	{
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock,
-			[tilesEnqueued]{ return renderns::tileCounter >= tilesEnqueued; });
+	for (int _i = 0; _i < tilesEnqueued; ++_i) {
+		renderns::tileDone.acquire();
 	}
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {

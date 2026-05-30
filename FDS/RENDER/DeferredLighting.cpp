@@ -66,7 +66,10 @@ extern int g_deferredWaterMatID;
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <semaphore>
+#include <climits>
 namespace renderns {
+	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
@@ -1864,9 +1867,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
+	renderns::tileDone.release();
 }
 
 // Per-pixel deferred lighting for transparent (front-facing) surfaces.
@@ -2151,10 +2153,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
 		}
 	}
-
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// See the Front-layer variant above for why no release() here.
 }
 
 // FDS_DEFERRED_UNIFIED_TBR=1 routes the deferred transparent + sprite
@@ -2798,9 +2797,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
+	renderns::tileDone.release();
 }
 
 // Race-free because wave-2 reads only what wave-1 wrote; tile-job
@@ -3160,9 +3158,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile (see renderns::tileDone in RENDER.CPP).
+	renderns::tileDone.release();
 }
 
 // Per-frame setup + dispatch tile jobs across the ThreadPool. Same 6×4
@@ -3410,11 +3407,8 @@ void Render_DeferredLighting() {
 			}
 		}
 	}
-	{
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock, []{
-			return renderns::tileCounter == numTilesX * numTilesY;
-		});
+	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+		renderns::tileDone.acquire();
 	}
 
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
@@ -3434,10 +3428,9 @@ void Render_DeferredLighting() {
 				});
 			}
 		}
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock, []{
-			return renderns::tileCounter == numTilesX * numTilesY;
-		});
+		for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+			renderns::tileDone.acquire();
+		}
 	}
 
 	// Dump cache-line transition stats accumulated by shadow sampling
@@ -4563,16 +4556,14 @@ void Render_VolumetricCones() {
                 Render_VolumetricCones_Tile(x1,y1,x2,y2, lights, ts, tc,
                                              invFOVX,invFOVY,invZScale,density,
                                              fogZ,invFogZ);
-                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-                ++renderns::tileCounter;
-                renderns::condition.notify_one();
+                // One permit per completed tile (see renderns::tileDone).
+                renderns::tileDone.release();
             });
         }
     }
-    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-    renderns::condition.wait(lock, []{
-        return renderns::tileCounter == numTiles;
-    });
+    for (int _i = 0; _i < numTiles; ++_i) {
+        renderns::tileDone.acquire();
+    }
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
@@ -5298,16 +5289,14 @@ void Render_OmniHalos() {
                 Render_OmniHalos_Tile(x1,y1,x2,y2, lights, ts, tc,
                                        invFOVX,invFOVY,invZScale,
                                        fogZ,invFogZ,density);
-                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-                ++renderns::tileCounter;
-                renderns::condition.notify_one();
+                // One permit per completed tile (see renderns::tileDone).
+                renderns::tileDone.release();
             });
         }
     }
-    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-    renderns::condition.wait(lock, []{
-        return renderns::tileCounter == numTiles;
-    });
+    for (int _i = 0; _i < numTiles; ++_i) {
+        renderns::tileDone.acquire();
+    }
 }
 
 // Skybox-from-G-buffer pass. Paints sky pixels (zEnc == 0) by
@@ -5538,16 +5527,14 @@ void Render_DeferredSkybox() {
                         }  // per-lane for-l
                     }      // per-batch for-pxBase
                 }          // per-row for-py
-                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-                ++renderns::tileCounter;
-                renderns::condition.notify_one();
+                // One permit per completed tile (see renderns::tileDone).
+                renderns::tileDone.release();
             });
         }
     }
-    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-    renderns::condition.wait(lock, []{
-        return renderns::tileCounter == numTilesX * numTilesY;
-    });
+    for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+        renderns::tileDone.acquire();
+    }
 }
 
 void Render_DeferredFogPass() {
@@ -5567,16 +5554,14 @@ void Render_DeferredFogPass() {
 			const int x2 = std::min(x1 + tileSizeX, XRes);
 			ThreadPool::instance().enqueue([x1, y1, x2, y2, invFZP]() {
 				Render_DeferredFogPass_Tile(x1, y1, x2, y2, invFZP);
-				std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-				++renderns::tileCounter;
-				renderns::condition.notify_one();
+				// One permit per completed tile (see renderns::tileDone).
+				renderns::tileDone.release();
 			});
 		}
 	}
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	renderns::condition.wait(lock, []{
-		return renderns::tileCounter == numTilesX * numTilesY;
-	});
+	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+		renderns::tileDone.acquire();
+	}
 }
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
@@ -5587,10 +5572,15 @@ void Render_DeferredFogPass() {
 void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
 		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+	// Release the renderns::tileDone permit on behalf of the inner
+	// template — see the comment in that template's body for why the
+	// release lives here instead of inside.
+	renderns::tileDone.release();
 }
 void renderDeferredTransparentTile_Back(int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
 		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+	renderns::tileDone.release();
 }
 
 // ─── Unified Beer-Lambert volumetric pass ────────────────────────────
@@ -6322,14 +6312,12 @@ void Render_DeferredVolumetric() {
                     invFOVX, invFOVY, invZScale,
                     sigma, fogFar, fogR, fogG, fogB,
                     coneDens, haloDens);
-                std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-                ++renderns::tileCounter;
-                renderns::condition.notify_one();
+                // One permit per completed tile (see renderns::tileDone).
+                renderns::tileDone.release();
             });
         }
     }
-    std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-    renderns::condition.wait(lock, []{
-        return renderns::tileCounter == numTilesX * numTilesY;
-    });
+    for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+        renderns::tileDone.acquire();
+    }
 }

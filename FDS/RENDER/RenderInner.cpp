@@ -40,7 +40,11 @@
 #include "Threads.h"
 #include "RenderPipeline.h"
 
+#include <semaphore>
+#include <climits>
+
 namespace renderns {
+	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
@@ -96,9 +100,10 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile. Lock-free; drained by the
+	// orchestrator's `for(i<N) tileDone.acquire()` loop. Replaces the
+	// prior lock+increment+notify pattern (see RENDER.CPP renderns).
+	renderns::tileDone.release();
 }
 
 
@@ -177,9 +182,10 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile. Lock-free; drained by the
+	// orchestrator's `for(i<N) tileDone.acquire()` loop. Replaces the
+	// prior lock+increment+notify pattern (see RENDER.CPP renderns).
+	renderns::tileDone.release();
 }
 
 // XparFaceSel selects which face orientation to raster in this pass.
@@ -264,9 +270,10 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 		}
 	}
 
-	std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-	++renderns::tileCounter;
-	renderns::condition.notify_one();
+	// One permit per completed tile. Lock-free; drained by the
+	// orchestrator's `for(i<N) tileDone.acquire()` loop. Replaces the
+	// prior lock+increment+notify pattern (see RENDER.CPP renderns).
+	renderns::tileDone.release();
 }
 
 // FDS_DEFERRED=1 in env enables the experimental G-buffer path: tiled

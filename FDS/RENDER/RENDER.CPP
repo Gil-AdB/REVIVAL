@@ -12,6 +12,8 @@
 #include <map>
 #include <limits>
 #include <chrono>
+#include <climits>
+#include <semaphore>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -230,9 +232,26 @@ void Restore_Splines(Scene *Sc)
 }
 
 namespace renderns {
-	std::mutex					tileCounterMutex;
-	std::atomic<int>			tileCounter;
-	std::condition_variable		condition;
+	// Per-pass tile-completion signal. Producer workers call
+	// tileDone.release() when their tile is finished; the orchestrator
+	// drains N permits via tileDone.acquire() loops. Replaces the prior
+	// mutex+condvar+counter trio — counting_semaphore provides the same
+	// "wait for N tasks" semantics with a lock-free producer and no
+	// risk of the lost-wakeup race condition_variable has when the
+	// shared variable is modified outside the mutex.
+	//
+	// LeastMaxValue = INT_MAX so the same semaphore can absorb any
+	// dispatch size (per-pass tile counts up to ~30, but the shadow
+	// orchestrator may enqueue hundreds of Transform_Objects tasks).
+	std::counting_semaphore<INT_MAX> tileDone{0};
+
+	// Legacy mutex+condvar trio: still referenced by a few non-hot
+	// setup paths (e.g. shadow-orchestrator pre-dispatch counter reset)
+	// that haven't been migrated yet. Safe to keep alongside the
+	// semaphore — the two systems are independent.
+	std::mutex                  tileCounterMutex;
+	std::atomic<int>            tileCounter;
+	std::condition_variable     condition;
 };
 
 // output is unused on the deferred path.
@@ -297,7 +316,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	const auto			tileSizeX = rawTileX & ~7;
 	const auto			tileSizeY = rawTileY & ~7;
 
-	renderns::tileCounter = 0;
+	// Tile-completion semaphore needs no reset — by construction every
+	// pass enqueues N tasks and drains N permits, so the resting value
+	// between passes is always 0.
 	// Deferred only if env var set AND the G-buffer is sized for the
 	// current framebuffer. The cube-map bake in Initialize_City swaps
 	// MainSurf to a 1024x1024 TmpSurf — XRes/YRes change without our
@@ -355,12 +376,25 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 	}
 
+	// The last tile in each row / column absorbs the rounding remainder so
+	// the union covers ALL of [0, XRes) × [0, YRes). Without this, when
+	// XRes / numTilesX doesn't divide cleanly into 8, the right strip
+	// (XRes - numTilesX*tileSizeX columns) was dropped — no worker ever
+	// rasterized it, so it stayed at the pre-clear value. Same on the
+	// bottom. Visible as black bars on right/bottom at non-1920×1080
+	// resolutions, and as right/bottom-edge discontinuities in the
+	// City cube-map bake (which uses the engine XRes/YRes).
+	//
+	// Safe vs the tile-boundary race: the boundary between tiles N-2 and
+	// N-1 stays 8-aligned (tileSizeX is masked & ~7), so the existing
+	// ClipperTileRect ownership split works as before. The right/bottom
+	// edge of the last tile has no neighbour to race with.
 	for (auto j = 0; j < numTilesY; ++j) {
 		auto y1 = tileSizeY * j;
-		auto y2 = std::min(y1 + tileSizeY, YRes);
+		auto y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
 		for (auto i = 0; i < numTilesX; ++i) {
 			auto x1 = tileSizeX * i;
-			auto x2 = std::min(x1 + tileSizeX, XRes);
+			auto x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
 
 			if (deferred) {
 				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInnerMekalele(x1, y1, x2, y2); });
@@ -371,9 +405,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 	}
 
-	{
-		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-		renderns::condition.wait(lock, [] {return renderns::tileCounter == numTilesX * numTilesY; });
+	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+		renderns::tileDone.acquire();
 	}
 
 	if (deferred) {
@@ -442,22 +475,28 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 
 		{
+		// Last tile in each row/col absorbs the rounding remainder so the
+		// union covers [0, XRes) × [0, YRes). Mirrors the opaque tiler
+		// (see comment in renderFrame's main tile loop); without this,
+		// the right/bottom remainder strip skipped every xpar pass and
+		// transparent surfaces (e.g. city water) failed to render in
+		// those bands.
 		auto runTilePass = [&](auto workFn) {
-			renderns::tileCounter = 0;
 			for (auto j = 0; j < numTilesY; ++j) {
 				auto y1 = tileSizeY * j;
-				auto y2 = std::min(y1 + tileSizeY, YRes);
+				auto y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
 				for (auto i = 0; i < numTilesX; ++i) {
 					auto x1 = tileSizeX * i;
-					auto x2 = std::min(x1 + tileSizeX, XRes);
+					auto x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
 					const int tileIdx = j * numTilesX + i;
 					ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx, workFn]() {
 						workFn(x1, y1, x2, y2, tileIdx);
 					});
 				}
 			}
-			std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
-			renderns::condition.wait(lock, []{ return renderns::tileCounter == numTilesX * numTilesY; });
+			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+				renderns::tileDone.acquire();
+			}
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
