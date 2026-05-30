@@ -32,6 +32,13 @@
 #include <memory>
 #include <algorithm>
 
+// 4-wide SIMD for the per-vertex transform inner loops below. Loads/stores
+// are on the fly via vectorclass Vec4f; the per-vertex matrix-vector is
+// rewritten as 3 broadcast-FMAs against column-major matrices instead of
+// 9 scalar muls + 9 scalar adds. See Transform_Objects for the staging.
+#include "simde/x86/sse.h"
+#include <simd/vectorclass.h>
+
 // Front-to-back face sort. Closer faces dispatch first so subsequent
 // farther faces fail Z and skip the rasterizer's per-pixel work — a
 // pure perf optimization. The original RENDER.CPP defined this at
@@ -777,6 +784,28 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		M34[1][0] = M[1][0]; M34[1][1] = M[1][1]; M34[1][2] = M[1][2]; M34[1][3] = V.y;
 		M34[2][0] = M[2][0]; M34[2][1] = M[2][1]; M34[2][2] = M[2][2]; M34[2][3] = V.z;
 		// ready
+
+		// Column-major SIMD staging for the per-vertex M34 * (Pos, 1).
+		// Each column is loaded once into a Vec4f; per-vertex compute
+		// becomes 3 broadcast-FMAs (vfmaq_n_f32-equivalent) instead of
+		// the 9 scalar muls + 9 scalar adds the row-major form requires.
+		// 4th lane is unused (kept 0); it falls out when storing TPos.
+		alignas(16) const float m34_col_x_arr[4] = { M[0][0], M[1][0], M[2][0], 0.0f };
+		alignas(16) const float m34_col_y_arr[4] = { M[0][1], M[1][1], M[2][1], 0.0f };
+		alignas(16) const float m34_col_z_arr[4] = { M[0][2], M[1][2], M[2][2], 0.0f };
+		alignas(16) const float m34_col_w_arr[4] = { V.x,     V.y,     V.z,     0.0f };
+		const Vec4f m34_col_x = Vec4f().load_a(m34_col_x_arr);
+		const Vec4f m34_col_y = Vec4f().load_a(m34_col_y_arr);
+		const Vec4f m34_col_z = Vec4f().load_a(m34_col_z_arr);
+		const Vec4f m34_col_w = Vec4f().load_a(m34_col_w_arr);
+		// IM is 3x3 (no translation). Used by the !_inShadowPass branch to
+		// transform N and Tangent into view space.
+		alignas(16) const float im_col_x_arr[4] = { IM[0][0], IM[1][0], IM[2][0], 0.0f };
+		alignas(16) const float im_col_y_arr[4] = { IM[0][1], IM[1][1], IM[2][1], 0.0f };
+		alignas(16) const float im_col_z_arr[4] = { IM[0][2], IM[1][2], IM[2][2], 0.0f };
+		const Vec4f im_col_x = Vec4f().load_a(im_col_x_arr);
+		const Vec4f im_col_y = Vec4f().load_a(im_col_y_arr);
+		const Vec4f im_col_z = Vec4f().load_a(im_col_z_arr);
 		
 		
 		// aprioric Offset Vector.
@@ -942,34 +971,49 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				else goto Ahead;
 			}
 			// Intel inside...this rulez,all object completely inside frustrum.
+			// SIMD per-vertex transform via column-major matrices (see
+			// staging block above the Inside/Ahead/Regular dispatch).
+			// Each broadcast-FMA collapses what was 3 scalar muls + 3
+			// scalar adds into one Vec4f op; the 4th lane is unused.
 			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
-				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
-				// 4x3 xform
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				// Object-space N -> view-space TN. IM is the un-scaled
-				// cam.view*RotMat (orthogonal rotation, so inverse-transpose
-				// = same matrix). Read by the deferred-path clipper +
-				// rasterizer; forward-path Lighting() still reads N.
-				// Shadow pass doesn't read TN or TTangent — skip the two
-				// matrix-vector mults to halve per-vertex cost there.
+				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
+				// Explicit mul_add chain so the compiler emits FMLA
+				// instead of separate vmul+vadd. clang without
+				// -ffp-contract=fast won't fuse `a + b*c` written as
+				// a normal expression.
+				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
+				tpos       = mul_add(m34_col_y, Vec4f(vpy), tpos);
+				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
+				alignas(16) float tposArr[4];
+				tpos.store_a(tposArr);
+				Vtx->TPos.x = tposArr[0];
+				Vtx->TPos.y = tposArr[1];
+				Vtx->TPos.z = tposArr[2];
 				if (!_inShadowPass) {
-					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
+					Vec4f tn = im_col_x * Vec4f(nx);
+					tn       = mul_add(im_col_y, Vec4f(ny), tn);
+					tn       = mul_add(im_col_z, Vec4f(nz), tn);
+					alignas(16) float tnArr[4];
+					tn.store_a(tnArr);
+					Vtx->TN.x = tnArr[0]; Vtx->TN.y = tnArr[1]; Vtx->TN.z = tnArr[2];
+					const float gx = Vtx->Tangent.x, gy = Vtx->Tangent.y, gz = Vtx->Tangent.z;
+					Vec4f tt = im_col_x * Vec4f(gx);
+					tt       = mul_add(im_col_y, Vec4f(gy), tt);
+					tt       = mul_add(im_col_z, Vec4f(gz), tt);
+					alignas(16) float ttArr[4];
+					tt.store_a(ttArr);
+					Vtx->TTangent.x = ttArr[0]; Vtx->TTangent.y = ttArr[1]; Vtx->TTangent.z = ttArr[2];
 				}
 
-				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
-				Vtx->RZ=1.0/Vtx->TPos.z;
-				Vtx->PX=Vtx->TPos.x*Vtx->RZ;
-				Vtx->PY=Vtx->TPos.y*Vtx->RZ;
-				//        Vtx->PX=cam.cntrEX+PX*Vtx->TPos.x*Vtx->RZ;
-				//        Vtx->PY=cam.cntrEY-PY*Vtx->TPos.y*Vtx->RZ;
-				Vtx->UZ=Vtx->U*Vtx->RZ;
-				Vtx->VZ=Vtx->V*Vtx->RZ;
-				//if (Vtx->TPos.z>cam.farZ) Vtx->Flags|=Vtx_VisFar;
+				Vtx->Flags &= ~Vtx_Visible;
+				const float rz = 1.0f / tposArr[2];
+				Vtx->RZ = rz;
+				Vtx->PX = tposArr[0] * rz;
+				Vtx->PY = tposArr[1] * rz;
+				Vtx->UZ = Vtx->U * rz;
+				Vtx->VZ = Vtx->V * rz;
 			}
 			
 			goto AfterXForm;
@@ -977,17 +1021,33 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
-				//    if (!Vtx->FRem) continue;
-				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				// Shadow pass doesn't read TN or TTangent — skip the two
-				// matrix-vector mults to halve per-vertex cost there.
+				// SIMD matrix prefix (see Inside path for the column-major
+				// staging). Stores TPos via lane-extracts to avoid touching
+				// N.x (next field) with the unused 4th lane.
+				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
+				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
+				tpos       = mul_add(m34_col_y, Vec4f(vpy), tpos);
+				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
+				alignas(16) float tposArr[4];
+				tpos.store_a(tposArr);
+				Vtx->TPos.x = tposArr[0];
+				Vtx->TPos.y = tposArr[1];
+				Vtx->TPos.z = tposArr[2];
 				if (!_inShadowPass) {
-					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
+					Vec4f tn = im_col_x * Vec4f(nx);
+					tn       = mul_add(im_col_y, Vec4f(ny), tn);
+					tn       = mul_add(im_col_z, Vec4f(nz), tn);
+					alignas(16) float tnArr[4];
+					tn.store_a(tnArr);
+					Vtx->TN.x = tnArr[0]; Vtx->TN.y = tnArr[1]; Vtx->TN.z = tnArr[2];
+					const float gx = Vtx->Tangent.x, gy = Vtx->Tangent.y, gz = Vtx->Tangent.z;
+					Vec4f tt = im_col_x * Vec4f(gx);
+					tt       = mul_add(im_col_y, Vec4f(gy), tt);
+					tt       = mul_add(im_col_z, Vec4f(gz), tt);
+					alignas(16) float ttArr[4];
+					tt.store_a(ttArr);
+					Vtx->TTangent.x = ttArr[0]; Vtx->TTangent.y = ttArr[1]; Vtx->TTangent.z = ttArr[2];
 				}
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
@@ -1016,17 +1076,31 @@ Ahead://Vertex_Loop1(T->Vertex,VEnd,M,&V);
 Regular:
 			for (Vtx=tVerts;Vtx<VEnd;Vtx++)
 			{
-				//    if (!Vtx->FRem) continue;
-				//        MatrixXVector(M,&Vtx->Pos,&U);
-				//        Vector_Add(&U,&V,&Vtx->TPos);
-				Vtx->TPos.x = M34[0][0]*Vtx->Pos.x+M34[0][1]*Vtx->Pos.y+M34[0][2]*Vtx->Pos.z+M34[0][3];
-				Vtx->TPos.y = M34[1][0]*Vtx->Pos.x+M34[1][1]*Vtx->Pos.y+M34[1][2]*Vtx->Pos.z+M34[1][3];
-				Vtx->TPos.z = M34[2][0]*Vtx->Pos.x+M34[2][1]*Vtx->Pos.y+M34[2][2]*Vtx->Pos.z+M34[2][3];
-				// Shadow pass doesn't read TN or TTangent — skip the two
-				// matrix-vector mults to halve per-vertex cost there.
+				// SIMD matrix prefix (see Inside path for the staging).
+				const float vpx = Vtx->Pos.x, vpy = Vtx->Pos.y, vpz = Vtx->Pos.z;
+				Vec4f tpos = mul_add(m34_col_x, Vec4f(vpx), m34_col_w);
+				tpos       = mul_add(m34_col_y, Vec4f(vpy), tpos);
+				tpos       = mul_add(m34_col_z, Vec4f(vpz), tpos);
+				alignas(16) float tposArr[4];
+				tpos.store_a(tposArr);
+				Vtx->TPos.x = tposArr[0];
+				Vtx->TPos.y = tposArr[1];
+				Vtx->TPos.z = tposArr[2];
 				if (!_inShadowPass) {
-					MatrixXVector(IM, &Vtx->N, &Vtx->TN);
-					MatrixXVector(IM, &Vtx->Tangent, &Vtx->TTangent);
+					const float nx = Vtx->N.x, ny = Vtx->N.y, nz = Vtx->N.z;
+					Vec4f tn = im_col_x * Vec4f(nx);
+					tn       = mul_add(im_col_y, Vec4f(ny), tn);
+					tn       = mul_add(im_col_z, Vec4f(nz), tn);
+					alignas(16) float tnArr[4];
+					tn.store_a(tnArr);
+					Vtx->TN.x = tnArr[0]; Vtx->TN.y = tnArr[1]; Vtx->TN.z = tnArr[2];
+					const float gx = Vtx->Tangent.x, gy = Vtx->Tangent.y, gz = Vtx->Tangent.z;
+					Vec4f tt = im_col_x * Vec4f(gx);
+					tt       = mul_add(im_col_y, Vec4f(gy), tt);
+					tt       = mul_add(im_col_z, Vec4f(gz), tt);
+					alignas(16) float ttArr[4];
+					tt.store_a(ttArr);
+					Vtx->TTangent.x = ttArr[0]; Vtx->TTangent.y = ttArr[1]; Vtx->TTangent.z = ttArr[2];
 				}
 
 				Vtx->Flags&=0xFFFFFFFF-Vtx_Visible;
