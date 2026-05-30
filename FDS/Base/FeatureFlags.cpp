@@ -87,37 +87,6 @@ bool cliBoolValue(const char *v) {
     return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F' || v[0] == 'n' || v[0] == 'N');
 }
 
-State &state() {
-    static State s = []{
-        State init;
-        for (int i = 0; i < kNumBool;  ++i) init.boolVals[i]  = kBoolDefs[i].defaultValue;
-        for (int i = 0; i < kNumFloat; ++i) init.floatVals[i] = kFloatDefs[i].defaultValue;
-        for (int i = 0; i < kNumInt;   ++i) init.intVals[i]   = kIntDefs[i].defaultValue;
-        // Eager env scan so flag accessors invoked before parseArgs() still
-        // see the env overrides — many callers fire from static initialisers.
-        for (int i = 0; i < kNumBool; ++i) {
-            if (const char *e = std::getenv(kBoolDefs[i].envVar)) {
-                init.boolVals[i] = envIsTruthy(e);
-                init.boolSet[i]  = true;
-            }
-        }
-        for (int i = 0; i < kNumFloat; ++i) {
-            if (const char *e = std::getenv(kFloatDefs[i].envVar)) {
-                init.floatVals[i] = float(std::atof(e));
-                init.floatSet[i]  = true;
-            }
-        }
-        for (int i = 0; i < kNumInt; ++i) {
-            if (const char *e = std::getenv(kIntDefs[i].envVar)) {
-                init.intVals[i] = std::atoi(e);
-                init.intSet[i]  = true;
-            }
-        }
-        return init;
-    }();
-    return s;
-}
-
 int findBoolByCliName(const char *cli) {
     for (int i = 0; i < kNumBool; ++i)
         if (std::strcmp(kBoolDefs[i].name, cli) == 0) return i;
@@ -153,79 +122,142 @@ void printRow(std::FILE *out, const char *cliName, const char *envVar,
                  envVar, defaultStr, category, help);
 }
 
+// Apply a single `--foo` / `--foo=value` / `--no-foo` token to the State.
+// Returns true if the token requested --help / -h; the public parseArgs
+// uses that to forward to printHelp. Unknown tokens are silently ignored
+// so this parser composes with the snapshot / bench parsers.
+bool applyOneToken(State &s, const char *arg) {
+    if (!arg || arg[0] != '-' || arg[1] != '-') return false;
+    const char *body = arg + 2;
+    if (*body == '\0') return false; // bare "--"
+    if (std::strcmp(body, "help") == 0 || std::strcmp(body, "h") == 0) return true;
+    const char *name = body;
+    const char *eq = std::strchr(name, '=');
+    char nameBuf[128];
+    const char *value = nullptr;
+    // Always copy + dash→underscore so both `--vol-cone-analytic`
+    // and `--vol_cone_analytic` resolve to the same registry entry.
+    // Stored canonical form is underscore (C identifier), but every
+    // user-facing surface emits dashes — see printHelp / completion.
+    {
+        const size_t nameLen = eq ? size_t(eq - name) : std::strlen(name);
+        size_t n = nameLen >= sizeof(nameBuf) ? sizeof(nameBuf) - 1 : nameLen;
+        for (size_t i = 0; i < n; ++i) {
+            nameBuf[i] = (name[i] == '-') ? '_' : name[i];
+        }
+        nameBuf[n] = '\0';
+        name = nameBuf;
+        if (eq) value = eq + 1;
+    }
+    // Lookup-first / strip-no-second: handle ambiguity between
+    // `--no-foo` as the negation of `foo`, and `--no-foo` as the
+    // literal flag `no_foo`. Direct lookup wins so `--no-sort` /
+    // `--no-greets-spots` find their literally-named flags before
+    // the strip-prefix path runs.
+    bool negate = false;
+    int bi = findBoolByCliName(name);
+    if (bi < 0 && std::strncmp(name, "no_", 3) == 0) {
+        negate = true;
+        name += 3;
+        bi = findBoolByCliName(name);
+    }
+    if (bi >= 0) {
+        bool v = cliBoolValue(value);
+        if (negate) v = !v;
+        s.boolVals[bi] = v;
+        s.boolSet[bi]  = true;
+        return false;
+    }
+    int fi = findFloatByCliName(name);
+    if (fi >= 0) {
+        if (!value) {
+            std::fprintf(stderr, "flag --%s requires a value\n", name);
+            return false;
+        }
+        s.floatVals[fi] = float(std::atof(value));
+        s.floatSet[fi]  = true;
+        return false;
+    }
+    int ii = findIntByCliName(name);
+    if (ii >= 0) {
+        if (!value) {
+            std::fprintf(stderr, "flag --%s requires a value\n", name);
+            return false;
+        }
+        s.intVals[ii] = std::atoi(value);
+        s.intSet[ii]  = true;
+        return false;
+    }
+    // Unknown --foo: silently skipped (see header comment).
+    return false;
+}
+
+// Tokenize a space/tab-separated string in-place and feed each token through
+// applyOneToken. Buffer must be writable; tokens are NUL-terminated as the
+// scan advances. Used for the FDS_BAKED_ARGS compile-time-baked CLI string
+// (mainly for wasm builds where getenv / argv aren't routinely available),
+// and reusable for any future "apply a CLI string" caller.
+void applyTokenString(State &s, char *buf) {
+    char *p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p) break;
+        char *tok = p;
+        while (*p && *p != ' ' && *p != '\t') ++p;
+        if (*p) *p++ = '\0';
+        applyOneToken(s, tok);
+    }
+}
+
+State &state() {
+    static State s = []{
+        State init;
+        for (int i = 0; i < kNumBool;  ++i) init.boolVals[i]  = kBoolDefs[i].defaultValue;
+        for (int i = 0; i < kNumFloat; ++i) init.floatVals[i] = kFloatDefs[i].defaultValue;
+        for (int i = 0; i < kNumInt;   ++i) init.intVals[i]   = kIntDefs[i].defaultValue;
+        // Eager env scan so flag accessors invoked before parseArgs() still
+        // see the env overrides — many callers fire from static initialisers.
+        for (int i = 0; i < kNumBool; ++i) {
+            if (const char *e = std::getenv(kBoolDefs[i].envVar)) {
+                init.boolVals[i] = envIsTruthy(e);
+                init.boolSet[i]  = true;
+            }
+        }
+        for (int i = 0; i < kNumFloat; ++i) {
+            if (const char *e = std::getenv(kFloatDefs[i].envVar)) {
+                init.floatVals[i] = float(std::atof(e));
+                init.floatSet[i]  = true;
+            }
+        }
+        for (int i = 0; i < kNumInt; ++i) {
+            if (const char *e = std::getenv(kIntDefs[i].envVar)) {
+                init.intVals[i] = std::atoi(e);
+                init.intSet[i]  = true;
+            }
+        }
+        // Compile-time-baked CLI string (mainly for wasm builds where
+        // argv and getenv aren't routinely available). Set at CMake
+        // configure time via -DFDS_BAKED_ARGS="..." or the env var of
+        // the same name; runs through the same parser as parseArgs so
+        // anything valid on the CLI works here. Runtime parseArgs runs
+        // AFTER this and wins on conflicts.
+#ifdef FDS_BAKED_ARGS
+        {
+            static char kBaked[] = FDS_BAKED_ARGS;
+            applyTokenString(init, kBaked);
+        }
+#endif
+        return init;
+    }();
+    return s;
+}
 } // namespace
 
 bool FeatureFlags::parseArgs(int argc, const char *const *argv) {
     State &s = state();
     bool helpRequested = false;
     for (int i = 1; i < argc; ++i) {
-        const char *arg = argv[i];
-        if (!arg || arg[0] != '-' || arg[1] != '-') continue;
-        const char *body = arg + 2;
-        if (*body == '\0') continue; // bare "--"
-        if (std::strcmp(body, "help") == 0 || std::strcmp(body, "h") == 0) {
-            helpRequested = true;
-            continue;
-        }
-        const char *name = body;
-        const char *eq = std::strchr(name, '=');
-        char nameBuf[128];
-        const char *value = nullptr;
-        // Always copy + dash→underscore so both `--vol-cone-analytic`
-        // and `--vol_cone_analytic` resolve to the same registry entry.
-        // Stored canonical form is underscore (C identifier), but every
-        // user-facing surface emits dashes — see printHelp / completion.
-        {
-            const size_t nameLen = eq ? size_t(eq - name) : std::strlen(name);
-            size_t n = nameLen >= sizeof(nameBuf) ? sizeof(nameBuf) - 1 : nameLen;
-            for (size_t i = 0; i < n; ++i) {
-                nameBuf[i] = (name[i] == '-') ? '_' : name[i];
-            }
-            nameBuf[n] = '\0';
-            name = nameBuf;
-            if (eq) value = eq + 1;
-        }
-        // Lookup-first / strip-no-second: handle ambiguity between
-        // `--no-foo` as the negation of `foo`, and `--no-foo` as the
-        // literal flag `no_foo`. Direct lookup wins so `--no-sort` /
-        // `--no-greets-spots` find their literally-named flags before
-        // the strip-prefix path runs.
-        bool negate = false;
-        int bi = findBoolByCliName(name);
-        if (bi < 0 && std::strncmp(name, "no_", 3) == 0) {
-            negate = true;
-            name += 3;
-            bi = findBoolByCliName(name);
-        }
-        if (bi >= 0) {
-            bool v = cliBoolValue(value);
-            if (negate) v = !v;
-            s.boolVals[bi] = v;
-            s.boolSet[bi]  = true;
-            continue;
-        }
-        int fi = findFloatByCliName(name);
-        if (fi >= 0) {
-            if (!value) {
-                std::fprintf(stderr, "flag --%s requires a value\n", name);
-                continue;
-            }
-            s.floatVals[fi] = float(std::atof(value));
-            s.floatSet[fi]  = true;
-            continue;
-        }
-        int ii = findIntByCliName(name);
-        if (ii >= 0) {
-            if (!value) {
-                std::fprintf(stderr, "flag --%s requires a value\n", name);
-                continue;
-            }
-            s.intVals[ii] = std::atoi(value);
-            s.intSet[ii]  = true;
-            continue;
-        }
-        // Unknown --foo: silently skipped so this parser composes with the
-        // snapshot / bench parsers (each owns its own set of long options).
+        if (applyOneToken(s, argv[i])) helpRequested = true;
     }
     if (helpRequested) {
         printHelp(stderr);

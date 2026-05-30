@@ -231,3 +231,24 @@ if(EMSCRIPTEN)
         FDS_SHADOWS_DEFAULT_ON=1
         FDS_SHADOW_POLYID_DEFAULT_ON=1)
 endif()
+
+# Compile-time-baked CLI args. Settable from the configure-time environment
+# (`FDS_BAKED_ARGS="--deferred --shadows ..." cmake ...`) or as a CMake cache
+# variable (`-DFDS_BAKED_ARGS="..."`). The string runs through the normal
+# parseArgs path at startup (see FeatureFlags.cpp state() initializer), so
+# anything valid on the CLI works here — bools, --no-foo negations, and
+# --flag=value for floats/ints. Mainly for wasm builds where argv and getenv
+# aren't routinely available, but works on native too. Runtime parseArgs
+# fires AFTER the baked args, so command-line flags still override.
+if(NOT DEFINED FDS_BAKED_ARGS AND DEFINED ENV{FDS_BAKED_ARGS})
+    set(FDS_BAKED_ARGS "$ENV{FDS_BAKED_ARGS}" CACHE STRING
+        "CLI args baked into the build (see FDS/CMakeLists.txt)")
+else()
+    set(FDS_BAKED_ARGS "${FDS_BAKED_ARGS}" CACHE STRING
+        "CLI args baked into the build (see FDS/CMakeLists.txt)")
+endif()
+if(FDS_BAKED_ARGS)
+    message(STATUS "FDS_BAKED_ARGS = ${FDS_BAKED_ARGS}")
+    target_compile_definitions(${PROJECT_NAME} PUBLIC
+        "FDS_BAKED_ARGS=\"${FDS_BAKED_ARGS}\"")
+endif()
