@@ -18,6 +18,31 @@ Current 1-wide-broadcast SIMD inside `Transform_Objects` (committed as
 estimated **3-5 ms additional** on greets transform, plus secondary wins
 in rasterizer-side reads of transformed fields.
 
+## Naming: this is option **B**, not "hybrid B/C"
+
+An earlier framing of this refactor (from the menu in chat) called full
+SoA "option C" and presented C as strictly more aggressive than B. That
+framing was misleading. C is more aggressive but **architecturally worse
+for the clipper**:
+
+- Clipper's `*A = *F->A` whole-Vertex copy IS the access pattern — it
+  consumes EVERY input field of A in a single contiguous memcpy. With
+  inputs as AoS that's one cache-line-friendly copy; with inputs as SoA
+  it's 12+ gather loads. Strict regression for the clipper hot path.
+- Inputs are read by Transform sequentially per-vert: AoS @ ~60 B/vert
+  (after the transformed fields move out in Phase 5) is fine for
+  sequential cache prefetch.
+- Inputs are not read by the rasterizer at all.
+
+So input fields (Pos/N/Tangent/U/V/OrigBary) stay AoS as the **end
+state**, not as a stepping stone. Only the per-frame-written transformed
+fields move to SoA. That's option B, and B is the destination.
+
+A theoretical Phase 7 could push inputs to SoA too (full C), but the
+clipper-side hit is real and the rasterizer-side win is speculative.
+Defer unless concrete post-Phase-5 profiling shows input-SoA would
+help — see "Open questions" at the end.
+
 ## What stays AoS, what goes SoA
 
 **Stays in current `Vertex` (AoS, read-only across a frame):**
@@ -37,9 +62,7 @@ in rasterizer-side reads of transformed fields.
 - `Flags` (visibility bits)
 - `BGRA / LR/LG/LB/LA` (per-vertex lit color, when computed)
 
-This split is the **B/C hybrid** discussed earlier: input fields stay
-AoS (rare per-vert writes; cache-friendly for clipper's `*A = *F->A`
-style copies), output fields go SoA (per-frame mass-write target).
+This is option B (see "Naming" above): inputs AoS, outputs SoA.
 
 ## Per-mesh storage
 
@@ -193,6 +216,12 @@ becomes dead — remove it, bench, confirm.
 
 ### Phase 6 — (Optional) SoA-ify the clipper's transient buffer
 
+Note: this is the clipper's TRANSIENT working buffer (`C_Verts`), not the
+mesh's input AoS. Mesh inputs stay AoS — see Phase 7 footnote for the
+"convert mesh inputs to SoA too" non-goal.
+
+
+
 - New `ClipperSoAScratch` with the same field set.
 - `FInterpolator` rewritten as wide-SIMD lerp.
 - `C_Verts` deleted; `newVert` becomes an index allocator into the
@@ -250,6 +279,29 @@ Per phase:
 - Validation throughout: 1-2 days
 
 **Total: ~2 weeks for Phases 0-5, +3-4 days for Phase 6.**
+
+### Phase 7 (footnote — deferred, possibly-not-worth-doing)
+
+Convert input fields (Pos/N/Tangent/U/V/OrigBary) to per-mesh SoA too,
+landing at "full C" — every Vertex field in arrays per mesh.
+
+**Why it might be worth doing:**
+- Wide-SIMD per-face setup in the rasterizer: gather PX/PY of A/B/C
+  across mesh SoA arrays into one Vec3 per axis, do the orient2d /
+  edge-function setup wide.
+
+**Why it might NOT be worth doing:**
+- Clipper's `*A = *F->A` whole-Vertex copy regresses to 12+ gather
+  loads (today: one cache-line-friendly memcpy).
+- Inputs are read sequentially by Transform — AoS at the reduced
+  (~60 B/vert) post-Phase-5 size is already cache-friendly.
+- Rasterizer doesn't read inputs.
+
+**Decision criterion:** evaluate after Phase 5 with concrete profiling.
+If `*A = *F->A` (clipper input copy) is significantly hot and the
+rasterizer face-setup is significantly cold, skip Phase 7. If both
+are roughly equal, Phase 7 might be net-positive — but the work
+should not be planned ahead of that profile data.
 
 ## Open questions
 
