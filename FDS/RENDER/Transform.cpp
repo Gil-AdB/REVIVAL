@@ -43,6 +43,10 @@
 // equirectangular EU/EV per-vertex stamp (used heavily by city windows).
 #include "FILLERS/SimdHelpers.h"
 
+// SoA Vertex refactor — Phase 1: per-mesh SoA companion of the AoS
+// transformed-vertex output fields. See docs/SOA_VERTEX_REFACTOR.md.
+#include "Base/VertexFrame.h"
+
 // Front-to-back face sort. Closer faces dispatch first so subsequent
 // farther faces fail Z and skip the rasterizer's per-pixel work — a
 // pure perf optimization. The original RENDER.CPP defined this at
@@ -1230,6 +1234,60 @@ ERegular:
 			
 		}
 AfterXForm:FEnd=tFaces+T->FIndex;
+		// SoA refactor Phase 1: dual-write the transformed-vertex
+		// outputs into the per-mesh VertexFrame SoA arrays. Only on
+		// the main render pass (scratch == nullptr) — shadow per-light
+		// passes use cloned vertices that aren't aliased into T->frame.
+		// One sequential sweep over tVerts; the AoS layout we're
+		// reading from is cache-friendly (sequential reads at pack(1)
+		// stride). Phase 2 will eliminate this sweep by writing SoA
+		// directly from the wide-SIMD compute path.
+		if (!scratch) {
+			if (!T->frame) T->frame = new VertexFrame();
+			T->frame->ensureSized(int(T->VIndex));
+			if (T->frame->capacity >= int(T->VIndex)) {
+				VertexFrame *F_ = T->frame;
+				const uint32_t nv = T->VIndex;
+				for (uint32_t i = 0; i < nv; ++i) {
+					const Vertex *v = &tVerts[i];
+					F_->TPos_x[i]     = v->TPos.x;
+					F_->TPos_y[i]     = v->TPos.y;
+					F_->TPos_z[i]     = v->TPos.z;
+					F_->TN_x[i]       = v->TN.x;
+					F_->TN_y[i]       = v->TN.y;
+					F_->TN_z[i]       = v->TN.z;
+					F_->TTangent_x[i] = v->TTangent.x;
+					F_->TTangent_y[i] = v->TTangent.y;
+					F_->TTangent_z[i] = v->TTangent.z;
+					F_->PX[i]         = v->PX;
+					F_->PY[i]         = v->PY;
+					F_->RZ[i]         = v->RZ;
+					F_->UZ[i]         = v->UZ;
+					F_->VZ[i]         = v->VZ;
+					F_->EUZ[i]        = v->EUZ;
+					F_->EVZ[i]        = v->EVZ;
+					F_->Flags[i]      = v->Flags;
+					F_->BGRA[i]       = v->BGRA;
+				}
+				// Verification gate — off by default; turn on with
+				// --soa-verify during migration to catch any future
+				// divergence between AoS and SoA paths bit-for-bit.
+				if (fds::FeatureFlags::soa_verify()) {
+					for (uint32_t i = 0; i < nv; ++i) {
+						const Vertex *v = &tVerts[i];
+						const bool ok =
+							F_->TPos_x[i] == v->TPos.x && F_->TPos_y[i] == v->TPos.y && F_->TPos_z[i] == v->TPos.z &&
+							F_->TN_x[i] == v->TN.x && F_->TN_y[i] == v->TN.y && F_->TN_z[i] == v->TN.z &&
+							F_->PX[i] == v->PX && F_->PY[i] == v->PY && F_->RZ[i] == v->RZ &&
+							F_->UZ[i] == v->UZ && F_->VZ[i] == v->VZ && F_->Flags[i] == v->Flags;
+						if (!ok) {
+							std::fprintf(stderr, "[SOA-VERIFY] mismatch vert %u mesh %p\n", i, (void*)T);
+							std::abort();
+						}
+					}
+				}
+			}
+		}
 	// Runtime debug: hide specific nested-transparent objects (fountain's
 	// f_sphere outer and "f in shpere" inner). Toggled by J / K keys —
 	// useful for isolating which face contributes to a rendering bug.

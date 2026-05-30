@@ -11,6 +11,7 @@
 #include "Matrix.h"
 
 struct StaticShadowLightmap;  // FDS/Base/StaticShadowLightmap.h
+struct VertexFrame;           // FDS/Base/VertexFrame.h
 
 #pragma pack(push, 1)
 
@@ -72,6 +73,14 @@ struct TriMesh
     // Piramid). Other meshes leave this null; xform falls back to the
     // legacy per-face matrix path.
     Vector         * worldVerts    = nullptr;
+
+    // SoA refactor (Phase 1+ — see docs/SOA_VERTEX_REFACTOR.md). Per-
+    // frame writable transformed-vertex state as SoA arrays. nullptr
+    // until Transform_Objects first touches the mesh (lazy-alloc via
+    // ensureSized). Phase 1 dual-writes (AoS + SoA); Phase 2 switches
+    // Transform to wide-SIMD writing only SoA; Phases 4-5 migrate
+    // consumers off the AoS Vertex transformed fields.
+    VertexFrame     *frame              = nullptr;
 
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
