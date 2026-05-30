@@ -146,6 +146,24 @@ inline bool any_lane_set(Vec8ib m) {
 #endif
 }
 
+// True iff every lane of m has its sign bit set. Used as the FULL-coverage
+// fast-path detector in Mekalele's apply_exact: when all 8 lanes pass edge
+// + Z, the per-lane scatter store can be replaced by unconditional vector
+// stores into the G-buffer planes (~2-4 ms on city, dominant hot lines).
+inline bool all_lanes_set(Vec8ib m) {
+#if defined(__EMSCRIPTEN__)
+	// AND-collapse the two 128-bit halves then all-true. Mirrors
+	// any_lane_set's wasm fallback shape; sidesteps any simde 256-bit
+	// horizontal_and gotcha by going through native v128 helpers.
+	__m256i v = *(const __m256i*)(&m);
+	v128_t lo = (v128_t)_mm256_castsi256_si128(v);
+	v128_t hi = (v128_t)_mm256_extracti128_si256(v, 1);
+	return wasm_i32x4_all_true(wasm_v128_and(lo, hi));
+#else
+	return horizontal_and(m);
+#endif
+}
+
 // block-tiling adjustment functions
 // Example for 256x256 texture
 //    3         2         1         0

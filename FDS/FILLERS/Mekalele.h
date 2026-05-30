@@ -145,6 +145,19 @@ inline __m256i oct_encode_u16_x8(__m256 nx, __m256 ny, __m256 nz) {
     return _mm256_or_si256(qx, _mm256_slli_epi32(qy, 8));
 }
 
+// Pack the low 16 bits of 8 lanes of a __m256i (uint32-per-lane) into 8
+// contiguous uint16s in a __m128i. Used in the FULL-coverage store path
+// of apply_exact: oct-encoded normals / tangents and packed lightmap ST
+// all live in the low 16 bits of an 8-wide uint32 lane, and the G-buffer
+// planes they target are uint16[]. _mm_packus_epi32 saturates to uint16
+// which is fine here — every producer already clamps to its valid range
+// before this packs.
+inline __m128i pack_lo16_x8(__m256i v) {
+    __m128i lo = _mm256_castsi256_si128(v);
+    __m128i hi = _mm256_extracti128_si256(v, 1);
+    return _mm_packus_epi32(lo, hi);
+}
+
 // Inverse of oct_encode_u16. Output is unit-length (mod quantization
 // error). Used by the lighting pass and the debug visualization.
 inline void oct_decode_u16(u16 packed, float &nx, float &ny, float &nz) {
@@ -394,6 +407,14 @@ struct TileRasterizer {
 	int32_t clampedY(int32_t y) {
 		return std::min(std::max(y, 0), ctx.yres - 1);
 	}
+	// Inside=true: dispatcher proved that every pixel in this 8x8 tile is
+	// strictly inside the triangle — no need for the per-row edge mask, and
+	// the per-pixel p_a/p_b/p_c counters can be skipped entirely. The Z test
+	// still runs (it depends on the depth buffer); when Z passes for every
+	// lane we additionally take a FULL-row vector-store path that replaces
+	// the per-lane scatter into the G-buffer planes with one 128-bit (u16
+	// planes) or 256-bit (lightmapMF u32 plane) store per plane.
+	template<bool Inside>
 	void apply_exact(const meka::Tile& tile) {
 		auto span = GBufferSpan::of(gbuffer, ctx, tile.x * TILE_SIZE, tile.y * TILE_SIZE);
 
@@ -417,10 +438,19 @@ struct TileRasterizer {
 		// kernel falls back to matID+1 when the plane is empty.
 		const u16 packedShadowMatId = ctx.shadowMatId;
 		const bool wantShadowMatId = (span.shadowMatID != nullptr);
+		// Diagnostic gates. Cached once at function entry so the per-row
+		// hot loop reads a register, not the flag registry. See
+		// FeatureFlags.def for the on/off contract.
+		const bool useFullStore = fds::FeatureFlags::rast_full_store();
 
-		Vec8i p_a = v8_from_arith_seq(a0, tile.dadx);
-		Vec8i p_b = v8_from_arith_seq(b0, tile.dbdx);
-		Vec8i p_c = v8_from_arith_seq(c0, tile.dcdx);
+		// Edge counters are only used for the per-row mask. Inside=true
+		// skips them entirely; the compiler removes the increments below.
+		Vec8i p_a, p_b, p_c;
+		if constexpr (!Inside) {
+			p_a = v8_from_arith_seq(a0, tile.dadx);
+			p_b = v8_from_arith_seq(b0, tile.dbdx);
+			p_c = v8_from_arith_seq(c0, tile.dcdx);
+		}
 
 		int32_t t_umask = (1 << LogWidth) - 1;
 		int32_t t_vmask = (1 << LogHeight) - 1;
@@ -443,8 +473,16 @@ struct TileRasterizer {
 		Vec8f p_obCZ = wantLm ? v8_from_arith_seq(tile.obCZ0, dobCdx) : Vec8f(0.0f);
 
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += ctx.xres) {
-			auto p_mask = (p_a | p_b | p_c) >= 0;
-			if (barry::any_lane_set(p_mask)) {
+			// Inside=true skips the edge mask entirely. p_mask seeded
+			// all-ones; subsequent `&= zmask` does the work.
+			Vec8ib p_mask;
+			if constexpr (Inside) {
+				p_mask = Vec8ib(true);
+			} else {
+				p_mask = (p_a | p_b | p_c) >= 0;
+			}
+			const bool entered_row = Inside ? true : barry::any_lane_set(p_mask);
+			if (entered_row) {
 				Vec8f p_z = approx_recipr(p_rz);
 
 				auto z_candidate = (Vec8ui(0xFF80) - static_cast<Vec8ui>(roundi(ctx.zScale * p_z)));
@@ -505,8 +543,6 @@ struct TileRasterizer {
 						const Vec8f vEps = 1e-12f;
 						Vec8i(tLen2 > vEps).store_a(tValid);
 					}
-					alignas(32) int32_t mask_l[8];
-					Vec8i(p_mask).store_a(mask_l);
 					// Lightmap (s, t) per-lane: divide the perspective-correct
 					// transport (OrigBary*RZ) by per-pixel Z to recover the
 					// object-space bary on the original face. Same machinery
@@ -516,30 +552,78 @@ struct TileRasterizer {
 					// so this is correct for clipped sub-triangles too — no
 					// dependency on F->A/B/C screen positions (which can be
 					// junk when a face vertex sits behind the camera).
-					alignas(32) float obBLane[8], obCLane[8];
-					if (wantLm) {
-						(p_obBZ * p_z).store_a(obBLane);
-						(p_obCZ * p_z).store_a(obCLane);
-					}
-					for (int lane = 0; lane < 8; ++lane) {
-						if (!mask_l[lane]) continue;
-						span.normal[lane] = uint16_t(normalEnc[lane]);
+					if (useFullStore && barry::all_lanes_set(p_mask)) {
+						// FULL-coverage row: replace 8x per-lane scatter
+						// with one vector store per G-buffer plane. This is
+						// the dominant body of any tile that covers a wall
+						// or floor; partial-coverage stays on the scatter
+						// path below.
+						const __m128i n16 = pack_lo16_x8(
+							_mm256_load_si256((const __m256i*)normalEnc));
+						_mm_storeu_si128((__m128i*)span.normal, n16);
 						if (wantTangent) {
-							span.tangent[lane] = tValid[lane]
-								? uint16_t(tangentEnc[lane]) : uint16_t(0);
+							const __m128i t16Raw = pack_lo16_x8(
+								_mm256_load_si256((const __m256i*)tangentEnc));
+							// tValid is Vec8i (32-bit per lane); sign-saturate
+							// pack to 8x16 — true (-1) -> 0xFFFF, false -> 0.
+							const __m256i tValid32 =
+								_mm256_load_si256((const __m256i*)tValid);
+							const __m128i tValid16 = _mm_packs_epi32(
+								_mm256_castsi256_si128(tValid32),
+								_mm256_extracti128_si256(tValid32, 1));
+							_mm_storeu_si128((__m128i*)span.tangent,
+								_mm_and_si128(t16Raw, tValid16));
 						}
 						if (wantLm) {
-							int sB = int(obBLane[lane] * 255.0f + 0.5f);
-							int tB = int(obCLane[lane] * 255.0f + 0.5f);
-							if (sB < 0)   sB = 0;
-							if (sB > 255) sB = 255;
-							if (tB < 0)   tB = 0;
-							if (tB > 255) tB = 255;
-							span.lightmapMF[lane] = packedLmMF;
-							span.lightmapST[lane] = uint16_t(sB | (tB << 8));
+							// SIMD version of the per-lane sB/tB clamp +
+							// pack. roundi rounds to nearest under the
+							// engine-wide RTNE mode (mode is fixed in
+							// FPU_LPrecision); diverges from the scalar
+							// `int(x*255 + 0.5)` only at exact .5 cases.
+							const Vec8i v255(255);
+							const Vec8i v0(0);
+							Vec8i sBv = roundi(p_obBZ * p_z * 255.0f);
+							Vec8i tBv = roundi(p_obCZ * p_z * 255.0f);
+							sBv = max(v0, min(v255, sBv));
+							tBv = max(v0, min(v255, tBv));
+							const Vec8i stv = sBv | (tBv << 8);
+							_mm_storeu_si128((__m128i*)span.lightmapST,
+								pack_lo16_x8(stv));
+							_mm256_storeu_si256((__m256i*)span.lightmapMF,
+								_mm256_set1_epi32(int32_t(packedLmMF)));
 						}
 						if (wantShadowMatId) {
-							span.shadowMatID[lane] = packedShadowMatId;
+							_mm_storeu_si128((__m128i*)span.shadowMatID,
+								_mm_set1_epi16(int16_t(packedShadowMatId)));
+						}
+					} else {
+						alignas(32) int32_t mask_l[8];
+						Vec8i(p_mask).store_a(mask_l);
+						alignas(32) float obBLane[8], obCLane[8];
+						if (wantLm) {
+							(p_obBZ * p_z).store_a(obBLane);
+							(p_obCZ * p_z).store_a(obCLane);
+						}
+						for (int lane = 0; lane < 8; ++lane) {
+							if (!mask_l[lane]) continue;
+							span.normal[lane] = uint16_t(normalEnc[lane]);
+							if (wantTangent) {
+								span.tangent[lane] = tValid[lane]
+									? uint16_t(tangentEnc[lane]) : uint16_t(0);
+							}
+							if (wantLm) {
+								int sB = int(obBLane[lane] * 255.0f + 0.5f);
+								int tB = int(obCLane[lane] * 255.0f + 0.5f);
+								if (sB < 0)   sB = 0;
+								if (sB > 255) sB = 255;
+								if (tB < 0)   tB = 0;
+								if (tB > 255) tB = 255;
+								span.lightmapMF[lane] = packedLmMF;
+								span.lightmapST[lane] = uint16_t(sB | (tB << 8));
+							}
+							if (wantShadowMatId) {
+								span.shadowMatID[lane] = packedShadowMatId;
+							}
 						}
 					}
 				}
@@ -561,9 +645,11 @@ struct TileRasterizer {
 				p_obCZ += Vec8f(dobCdy);
 			}
 
-			p_a += Vec8i(tile.dady);
-			p_b += Vec8i(tile.dbdy);
-			p_c += Vec8i(tile.dcdy);
+			if constexpr (!Inside) {
+				p_a += Vec8i(tile.dady);
+				p_b += Vec8i(tile.dbdy);
+				p_c += Vec8i(tile.dcdy);
+			}
 		}
 	}
 
@@ -645,6 +731,24 @@ struct TileRasterizer {
 				TScreenCoord max_c = c0 + ((dcdx > 0) ? dcdx * TILE_SIZE : 0) + ((dcdy > 0) ? dcdy * TILE_SIZE : 0);
 
 				if ((max_a | max_b | max_c) >= 0) {
+					// Conservative tile-inside test: take the corner that
+					// minimises each edge function over the 8x8 tile and
+					// check all three are non-negative. Uses TILE_SIZE
+					// (not TILE_SIZE-1) for symmetry with max_*; the only
+					// cost is a few extra Inside=false specializations on
+					// near-edge tiles — never a correctness risk.
+					//
+					// Sign-bit pack via OR (mirror of the max_* check):
+					// `(x | y | z) >= 0` ⟺ all three sign bits are zero
+					// ⟺ all three are non-negative. AND would only fire
+					// when ALL THREE are negative, which is the wrong
+					// direction (it would silently flag boundary tiles
+					// — where only one edge is partially crossed — as
+					// Inside and skip their per-row edge mask).
+					TScreenCoord min_a = a0 + ((dadx < 0) ? dadx * TILE_SIZE : 0) + ((dady < 0) ? dady * TILE_SIZE : 0);
+					TScreenCoord min_b = b0 + ((dbdx < 0) ? dbdx * TILE_SIZE : 0) + ((dbdy < 0) ? dbdy * TILE_SIZE : 0);
+					TScreenCoord min_c = c0 + ((dcdx < 0) ? dcdx * TILE_SIZE : 0) + ((dcdy < 0) ? dcdy * TILE_SIZE : 0);
+					const bool tile_inside = (min_a | min_b | min_c) >= 0;
 					// FIXME: define outside and maintain
 					const float dx = float(x) * TILE_SIZE - v1.PX;
 					const float dy = float(y) * TILE_SIZE - v1.PY;
@@ -672,7 +776,9 @@ struct TileRasterizer {
 						.obBZ0 = v1.OrigBaryB * v1.RZ + dx * dobBdx + dy * dobBdy,
 						.obCZ0 = v1.OrigBaryC * v1.RZ + dx * dobCdx + dy * dobCdy,
 					};
-					apply_exact(tile);
+					const bool useInsideTpl = fds::FeatureFlags::rast_inside_template();
+					if (tile_inside && useInsideTpl) apply_exact<true>(tile);
+					else                              apply_exact<false>(tile);
 				}
 			}
 		}

@@ -479,13 +479,15 @@ struct ShadowBarry {
 	const uint16_t *zStaticArr;
 	float drzdx, drzdy;
 	uint16_t idByte;  // legacy name; now a 16-bit ShadowMatID
+	bool g_useFullStore;  // cached once per ShadowBarry, read per row inside apply_exact.
 
 	ShadowBarry(ShadowMap *smIn, uint16_t idIn, bool useDynamic)
 		: sm(smIn),
 		  zArr (useDynamic ? smIn->depth_dynamic.data()  : smIn->depth.data()),
 		  idArr(useDynamic ? smIn->polyId_dynamic.data() : smIn->polyId.data()),
 		  zStaticArr(useDynamic ? smIn->depth.data() : nullptr),
-		  drzdx(0), drzdy(0), idByte(idIn) {}
+		  drzdx(0), drzdy(0), idByte(idIn),
+		  g_useFullStore(fds::FeatureFlags::rast_full_store()) {}
 
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
@@ -553,16 +555,31 @@ struct ShadowBarry {
 				}
 
 				if (barry::any_lane_set(p_mask)) {
-					*(__m128i*)zRow = _mm_blendv_epi8(
-						*(__m128i*)zRow,
-						compress(Vec8ui(enc)),
-						compress(Vec8ui(Vec8i(p_mask))));
+					// FULL row: when all 8 lanes survived edge+Z+static-Z,
+					// the blendv RMW is wasted (it overwrites every byte
+					// anyway) and the per-lane polyId scatter collapses to
+					// one broadcast store. Mirrors Mekalele's FULL store
+					// optimization at TileRasterizer::apply_exact. Gated by
+					// FDS_RAST_FULL_STORE since the optimization spans
+					// rasterizers.
+					if (g_useFullStore && barry::all_lanes_set(p_mask)) {
+						compress(Vec8ui(enc)).store(zRow);
+						if (idByte) {
+							_mm_store_si128((__m128i*)idRow,
+								_mm_set1_epi16(int16_t(idByte)));
+						}
+					} else {
+						*(__m128i*)zRow = _mm_blendv_epi8(
+							*(__m128i*)zRow,
+							compress(Vec8ui(enc)),
+							compress(Vec8ui(Vec8i(p_mask))));
 
-					if (idByte) {
-						alignas(32) int mask_l[8];
-						Vec8i(p_mask).store_a(mask_l);
-						for (int lane = 0; lane < 8; ++lane) {
-							if (mask_l[lane]) idRow[lane] = idByte;
+						if (idByte) {
+							alignas(32) int mask_l[8];
+							Vec8i(p_mask).store_a(mask_l);
+							for (int lane = 0; lane < 8; ++lane) {
+								if (mask_l[lane]) idRow[lane] = idByte;
+							}
 						}
 					}
 				}
