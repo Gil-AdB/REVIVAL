@@ -250,54 +250,87 @@ that re-stamps indices on remapped Faces) works end-to-end across all
    override gates on `F->frame != nullptr` so particles keep working.
    `InsertSpriteToTBR` itself reverted to pure AoS in Phase 4.3.
 
-#### Phase 6.2 — PX/PY/RZ override (BLOCKED on FP precision drift)
+#### Phase 6.2 — PX/PY/RZ override (BLOCKED on alternative transform paths)
 
 The next step would be: override `A/B/C->PX/PY/RZ` from frame as
 well, decoupling the clipper's vertex-visibility classification
 (`Vtx_VisLeft/Right/Up/Down`) from the AoS PX/PY.
 
-**Tried and reverted.** Pathological slowdown: greets-scene barely
-finished one tick in 60 s when the override was active.
+**Tried 2026-05-30. Reverted.** Two bugs uncovered, one fixable, one
+genuinely blocking:
 
-Root cause: `Calc_Flags` reads `V->PX`/`V->PY` and classifies each
-vertex against `ClipX1/X2/ClipY1/Y2` (right at the screen edges).
-Border-grazing vertices (PX very close to 0 or to XRes) flip
-classification with 1-ULP changes. Under `-ffp-contract=fast`, the
-AoS write in `Transform_Objects` and the frame copy in the override
-path generate *different* fused-multiply-add fusions — both compute
-the same projection algebraically, but the rounding differs. Result:
-some vertices are classified `Vtx_VisLeft` via one path and
-"on-screen" via the other → the clipper subdivides aggressively where
-it didn't need to → 10-100× more sub-polygons → slowdown.
+**Bug 1 (fixable; fixed): wrong A_idx in two mesh-rebuild paths.**
+
+- `MakeFacesIndependent` (DEMO/MeshOps.cpp) — per-face crease pass
+  reallocates T->Verts and repoints F->A/B/C, but never re-stamped
+  F->A/B/C_idx. Fix: call `Compute_FaceVertexIndices(T)` after the
+  rewire. Called from CITY/CHASE/GREETS at scene init.
+- `BuildSkyCube` (FDS/SkyCube/SkyCube.cpp) — hand-wires SkyCube Faces
+  bypassing `Scene_Computations`; A/B/C_idx stayed at default 0. Fix:
+  same — call `Compute_FaceVertexIndices(T)` after the loop.
+
+Both bugs were *latent* (TPos override happened to alias correctly
+in Phase 6.1 because vertices with the same TPos values existed at
+the wrong-index slots). The PX/PY/RZ override surfaced them via a
+diagnostic that crashes on AoS vs frame value divergence.
+
+**Bug 2 (the real blocker): stale frame after `Reflected_Transform`.**
+
+CITY (and CHASE) reflection cube-map bake runs:
+```
+Reflected_Transform(CitySc);    // writes T->Verts.PX/PY/RZ/TPos
+Radix_Sort(FList, SList, CAll);
+Render(RenderPath::ForceForward);  // forward-path clipper render
+Transform_Objects(CitySc, ...);  // writes BOTH T->Verts AND T->frame
+Render(...);
+```
+
+`Reflected_Transform` is a wholly separate transform pipeline
+(DEMO/CITY.CPP:367) — own matrices, own per-vertex loop, writes
+Vtx->PX/PY/RZ/TPos in place. **It never touches T->frame.** So
+between Reflected_Transform and the next Transform_Objects, T->Verts
+holds reflection-camera values while T->frame still holds the prior
+frame's main-camera values.
+
+F->frame remains set to T->frame (stamped during the LAST
+Transform_Objects's FList build), so the Phase 6.2 override sources
+PX/PY/RZ from stale main-camera frame data into reflection's AoS
+slot → garbage clipper math → visible breakage.
+
+The TPos-only Phase 6.1 override hit this too but the bug was hidden:
+when reflection rendered with stale frame TPos, the clipper still
+projected reasonable-looking pixels (TPos magnitudes are usually in
+the same ballpark across frames). PX (post-perspective-divide) is
+much more sensitive — values can swing thousands of pixels.
 
 **Options for Phase 6.2:**
 
-a. **Defer PX/PY/RZ migration entirely.** Acceptable if Phase 5b
-   can be reached without it — i.e. all internal `A->PX/PY/RZ` reads
-   inside the clipper still touch the AoS slot, and we just leave
-   those slots alive in `Vertex`. But this defeats most of the
-   memory-density win of Phase 5.
+a. **Patch every alternative transform path to dual-write frame.**
+   Reflected_Transform (CITY/CHASE) is the known offender; there may
+   be others (RenderSkyCube uses Transform_Objects directly, fine;
+   particle-projection branch in Transform_Objects already covered).
+   Adds 1 SoA dump loop per alternative path. Mechanical.
 
-b. **Make Transform_Objects write SoA-first, then mirror back to AoS
-   bit-identically.** Requires the AoS write to read from the SoA
-   array (round-trip through memory) instead of re-computing. Adds a
-   touch of load latency per vertex but guarantees the AoS Vertex
-   field is the same bits as the frame array.
+b. **Reset F->frame to nullptr after Reflected_Transform.** Cheaper
+   patch — just makes the override skip on those Faces. But this
+   means the reflection render can never benefit from SoA reads.
+   And Phase 5b (delete TPos_AOS from Vertex) becomes impossible
+   for the reflection path since there'd be nowhere to read TPos
+   from.
 
-c. **Eliminate the AoS write entirely; clipper sources PX/PY/RZ
-   exclusively from frame.** No mismatch possible because there is
-   only one source of truth. But every internal `A->PX` read (and
-   there are many — Calc_Flags, Near/Far/Left/Right/Up/Down lerp,
-   FInterpolator, the rasterizer setup) needs to be rewritten to
-   index into a separate per-clipper SoA scratch, since the clipper
-   creates NEW vertices during clipping that aren't in the mesh's
-   frame. This is the original "Phase 6 option 2" design — a real
-   `ClipperSoAScratch` with `newVert` as an index allocator.
+c. **Build ClipperSoAScratch (Phase 6.3, below) first.** This shifts
+   the clipper's internal reads off the AoS Vertex copy entirely,
+   sourcing from per-clipper SoA scratch instead of F->frame. The
+   `Render()` entry would copy AoS Vertex's PX/PY/RZ (which are
+   always correct, regardless of frame staleness) into the scratch,
+   bypassing the frame-staleness issue. Then Phase 5b deletes the
+   AoS slots and *forces* every transform-writer to write somewhere
+   else (likely frame), at which point option (a) becomes mandatory.
 
-**Recommended path: c.** Option b is a half-measure (we'd still pay
-the AoS write cost), and option a leaves Phase 5b unreachable. The
-real Phase 6 work is building `ClipperSoAScratch` and rewriting
-`FInterpolator` against it.
+**Recommended sequencing: (c) then (a).** Build ClipperSoAScratch
+first (unblocks the work without depending on every transform path
+being fixed), then migrate transform-writer paths to dual-write frame
+(unblocks deleting the AoS slots).
 
 #### Phase 6.3 — ClipperSoAScratch (DESIGN)
 

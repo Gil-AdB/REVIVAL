@@ -4,6 +4,11 @@
 #include "Base/Scene.h"
 #include "Base/FeatureFlags.h"
 
+// PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
+// T->Verts. Forward-declared locally; SkyCube wires up its own Faces
+// without running through Scene_Computations.
+void Compute_FaceVertexIndices(TriMesh *T);
+
 #include <vector>
 
 // Linear (row-major, ARGB8888) copies of the 6 sky-cube face textures,
@@ -361,6 +366,11 @@ Scene * CreateSkyCube(dword skyType)
 		F->V3 = F->C->V;
 		F++;
 	}
+
+	// SoA Phase 6.2 fix: stamp A/B/C_idx for the SkyCube's hand-wired
+	// Faces; otherwise indices default to 0 and the deferred clipper's
+	// frame-sourced PX/PY/RZ reads alias to vertex 0 for every Face.
+	Compute_FaceVertexIndices(T);
 
 	T->Pos.CurKey = 0;
 	T->Pos.NumKeys = 1;

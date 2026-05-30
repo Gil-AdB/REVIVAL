@@ -14,6 +14,7 @@
 // PREPROC.CPP — recompute per-vertex tangents from the current Faces +
 // per-vertex N. Not declared in FDS_DECS.H, so forward-declare locally.
 void Compute_Vertex_Tangents(TriMesh *T);
+void Compute_FaceVertexIndices(TriMesh *T);
 
 namespace {
 
@@ -123,6 +124,15 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 
 	T->Verts = newVerts;
 	T->VIndex = newCount;
+
+	// SoA Phase 6.2 fix: A_idx/B_idx/C_idx were stamped at scene init
+	// (PREPROC.CPP:Scene_Computations) against the OLD T->Verts; the
+	// loop above repointed F->A/B/C into per-face-cloned newVerts but
+	// left A_idx pointing at the original shared-vertex indices. Without
+	// this restamp, F->A - T->Verts no longer equals F->A_idx — every
+	// SoA consumer (T->frame->TPos_x[A_idx], etc.) reads the wrong slot.
+	// Re-stamp now that the new Verts is committed.
+	Compute_FaceVertexIndices(T);
 
 	// Recompute per-vertex tangents against the new (per-face-cloned)
 	// normals. Without this, each clone keeps the original shared
