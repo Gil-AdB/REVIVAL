@@ -39,6 +39,10 @@
 #include "simde/x86/sse.h"
 #include <simd/vectorclass.h>
 
+// Scalar polynomial atan2/asin approximations for the reflective-face
+// equirectangular EU/EV per-vertex stamp (used heavily by city windows).
+#include "FILLERS/SimdHelpers.h"
+
 // Front-to-back face sort. Closer faces dispatch first so subsequent
 // farther faces fail Z and skip the rasterizer's per-pixel work — a
 // pure perf optimization. The original RENDER.CPP defined this at
@@ -1326,8 +1330,13 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 					// direction's content. Verified with --snapshot=
 					// cuberefl (synthetic painter follows the same
 					// convention).
-					float lat = asin(d.y);
-					float lon = atan2(-d.z, -d.x);
+					// Polynomial asin / atan2 — libm versions are
+					// ~100-200 cycles each. The polynomial pair is
+					// ~25 cycles total at ~0.001 rad max error, well
+					// below the per-pixel panorama discretization for
+					// city windows.
+					float lat = asin_approx(d.y);
+					float lon = atan2_approx(-d.z, -d.x);
 					eu[i] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
 					ev[i] = 0.5 - 0.5 * lat / (PI / 2.0);
 					++i;

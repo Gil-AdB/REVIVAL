@@ -48,6 +48,48 @@ inline float atan_approx(float x) {
     return (x > 0 ? halfPi : -halfPi) - atan_approx_unit(inv);
 }
 
+// atan2(y, x) — quadrant-corrected polynomial atan. Reduces to
+// atan(t) on the smaller-magnitude side so |t| ≤ 1 (no range-reduce
+// inside atan_approx_unit) and adds the quadrant offset. Used in
+// Transform.cpp's reflective-face equirectangular EU/EV stamp where
+// libm atan2 is the per-vertex dominator on city's windows.
+inline float atan2_approx(float y, float x) {
+    constexpr float kPi     = 3.14159265358979323846f;
+    constexpr float kHalfPi = 1.57079632679489661923f;
+    const float ax = std::fabs(x);
+    const float ay = std::fabs(y);
+    float r;
+    if (ax >= ay) {
+        // |y| ≤ |x| → atan(y/x), in (-π/2, π/2). Then adjust for x<0.
+        const float a = (ax > 0.0f) ? (y / x) : 0.0f;
+        r = atan_approx_unit(a);
+        if (x < 0.0f) {
+            // x<0: result is in upper / lower half. Add ±π depending
+            // on sign of y to get the full atan2 result in (-π, π].
+            r += (y >= 0.0f) ? kPi : -kPi;
+        }
+    } else {
+        // |y| > |x| → π/2 − atan(x/y), avoiding the y=0 division.
+        const float a = x / y;
+        r = (y >= 0.0f ? kHalfPi : -kHalfPi) - atan_approx_unit(a);
+    }
+    return r;
+}
+
+// asin(x) for |x| ≤ 1 via the identity asin(x) = atan(x / sqrt(1−x²)).
+// 1/sqrt(1−x²) becomes fast_rsqrt(eps + 1−x²). Adds an epsilon so
+// |x|→1 doesn't blow up rsqrt (and the boundary mirrors libm's
+// asin(±1) = ±π/2 within polynomial error). For |x|>1 returns the
+// boundary value — callers normalize their input direction first.
+inline float asin_approx(float x) {
+    constexpr float kHalfPi = 1.57079632679489661923f;
+    if (x >=  1.0f) return  kHalfPi;
+    if (x <= -1.0f) return -kHalfPi;
+    const float s    = 1.0f - x * x + 1e-12f;
+    const float invR = fast_rsqrt(s);
+    return atan_approx(x * invR);
+}
+
 #if INSTRSET >= 8
 // 8-wide branchless variant. Per lane: 1 abs, 1 cmp, 1 div, 1 mul,
 // 5 fmadd (polynomial), 1 fmadd (range-reduce subtract), 2 blendv.

@@ -4887,11 +4887,17 @@ static void Render_OmniHalos_Tile(
                     const float gamma = rr2 * PP + 0.05f;
                     const float discQ = 4.0f * alpha * gamma - beta * beta;
                     if (discQ <= 0.0f) continue;
-                    const float D    = std::sqrt(discQ);
-                    const float invD = 1.0f / D;
+                    // fast_rsqrt computes 1/sqrt(discQ) directly via NEON
+                    // frsqrte + 1 NR step (~5 cycles vs ~24 for the
+                    // std::sqrt + std::div pair). Recover D from invD by
+                    // mul-back, then both atans via the polynomial approx
+                    // (~10 ops/call vs ~30 cycles per libm atan).
+                    const float invD = fast_rsqrt(discQ);
+                    const float D    = discQ * invD;
+                    (void)D;  // kept for parity with the legacy comment; argHi/Lo only need invD
                     const float argHi = (2.0f * alpha * zHi + beta) * invD;
                     const float argLo = (2.0f * alpha * zLo + beta) * invD;
-                    const float integral = 2.0f * invD * (std::atan(argHi) - std::atan(argLo));
+                    const float integral = 2.0f * invD * (atan_approx(argHi) - atan_approx(argLo));
                     if (integral <= 0.0f) continue;
                     // Tile fn density is already premultiplied by N_SAMPLES
                     // for the ray-march path's per-sample-sum semantics
