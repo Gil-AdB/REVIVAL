@@ -214,20 +214,123 @@ becomes dead — remove it, bench, confirm.
 - `Vertex` shrinks from 136 B to ~60 B. Better cache density on the
   AoS read-only side, helps clipper's `*A = *F->A` copy.
 
-### Phase 6 — (Optional) SoA-ify the clipper's transient buffer
+### Phase 6 — SoA-ify the clipper's transient buffer
 
 Note: this is the clipper's TRANSIENT working buffer (`C_Verts`), not the
 mesh's input AoS. Mesh inputs stay AoS — see Phase 7 footnote for the
 "convert mesh inputs to SoA too" non-goal.
 
+#### Phase 6.1 — TPos override (LANDED, commit `eb50b2f`)
 
+After `*A = *F->A` (memcpy of the AoS Vertex from the mesh into the
+clipper's `C_Verts[0..2]`), override `A/B/C->TPos_AOS.x/y/z` from
+`F->frame->TPos_x/_y/_z[F->A_idx/B_idx/C_idx]`. This decouples the
+clipper's TPos source from the AoS struct on the mesh — every
+subsequent internal `A->TPos_AOS` read inside the clipper still reads
+from the *AoS copy*, but the values came from the SoA arrays.
 
-- New `ClipperSoAScratch` with the same field set.
-- `FInterpolator` rewritten as wide-SIMD lerp.
-- `C_Verts` deleted; `newVert` becomes an index allocator into the
-  scratch.
-- Adds ~0.5-1 ms savings on clipper-heavy scenes (greets has many
-  per-mesh clipper invocations).
+This is the smallest possible step toward Phase 5b: it proves the
+machinery (F->frame, F->A/B/C_idx, the chunk-rebuild path in GREETS
+that re-stamps indices on remapped Faces) works end-to-end across all
+6 scenes.
+
+**Two bugs found via instrumentation:**
+
+1. Greets pyramid-chunk Faces inherited stale A/B/C_idx from the
+   parent piramid mesh (`Compute_FaceVertexIndices` ran before
+   chunking, stamping 1276-style indices that pointed into the parent's
+   16596-vert frame). After chunking, `chunk->Verts` capacity was ~64
+   per chunk but A_idx was still 1276 → would have segfaulted as soon
+   as anything read from chunk->frame->TPos_x[1276]. Fix: re-stamp
+   A/B/C_idx after the chunk pointer remap. See GREETS.CPP:993+.
+
+2. Particle Faces (`Sc->Pcl[I].F` in `InsertSpriteToTBR`) have no
+   `F->frame` — their TPos is written by the per-particle projection
+   in `Transform_Objects`, not by the SoA Transform. The Phase 6.1
+   override gates on `F->frame != nullptr` so particles keep working.
+   `InsertSpriteToTBR` itself reverted to pure AoS in Phase 4.3.
+
+#### Phase 6.2 — PX/PY/RZ override (BLOCKED on FP precision drift)
+
+The next step would be: override `A/B/C->PX/PY/RZ` from frame as
+well, decoupling the clipper's vertex-visibility classification
+(`Vtx_VisLeft/Right/Up/Down`) from the AoS PX/PY.
+
+**Tried and reverted.** Pathological slowdown: greets-scene barely
+finished one tick in 60 s when the override was active.
+
+Root cause: `Calc_Flags` reads `V->PX`/`V->PY` and classifies each
+vertex against `ClipX1/X2/ClipY1/Y2` (right at the screen edges).
+Border-grazing vertices (PX very close to 0 or to XRes) flip
+classification with 1-ULP changes. Under `-ffp-contract=fast`, the
+AoS write in `Transform_Objects` and the frame copy in the override
+path generate *different* fused-multiply-add fusions — both compute
+the same projection algebraically, but the rounding differs. Result:
+some vertices are classified `Vtx_VisLeft` via one path and
+"on-screen" via the other → the clipper subdivides aggressively where
+it didn't need to → 10-100× more sub-polygons → slowdown.
+
+**Options for Phase 6.2:**
+
+a. **Defer PX/PY/RZ migration entirely.** Acceptable if Phase 5b
+   can be reached without it — i.e. all internal `A->PX/PY/RZ` reads
+   inside the clipper still touch the AoS slot, and we just leave
+   those slots alive in `Vertex`. But this defeats most of the
+   memory-density win of Phase 5.
+
+b. **Make Transform_Objects write SoA-first, then mirror back to AoS
+   bit-identically.** Requires the AoS write to read from the SoA
+   array (round-trip through memory) instead of re-computing. Adds a
+   touch of load latency per vertex but guarantees the AoS Vertex
+   field is the same bits as the frame array.
+
+c. **Eliminate the AoS write entirely; clipper sources PX/PY/RZ
+   exclusively from frame.** No mismatch possible because there is
+   only one source of truth. But every internal `A->PX` read (and
+   there are many — Calc_Flags, Near/Far/Left/Right/Up/Down lerp,
+   FInterpolator, the rasterizer setup) needs to be rewritten to
+   index into a separate per-clipper SoA scratch, since the clipper
+   creates NEW vertices during clipping that aren't in the mesh's
+   frame. This is the original "Phase 6 option 2" design — a real
+   `ClipperSoAScratch` with `newVert` as an index allocator.
+
+**Recommended path: c.** Option b is a half-measure (we'd still pay
+the AoS write cost), and option a leaves Phase 5b unreachable. The
+real Phase 6 work is building `ClipperSoAScratch` and rewriting
+`FInterpolator` against it.
+
+#### Phase 6.3 — ClipperSoAScratch (DESIGN)
+
+- New `ClipperSoAScratch` struct with the field set
+  (PX/PY/RZ/UZ/VZ/TPos_xyz/TN_xyz/TTangent_xyz/EUZ/EVZ/U/V/EU/EV/
+  OrigBaryB/C/Flags/BGRA), sized to `CLIPPER_MAXVERTS=48`, owned
+  per-thread (matches the existing `C_Verts` lifetime: per
+  FrustumClipper instance, which is per-thread).
+- `C_Verts` deleted. `C_Prim/Scnd/Tetr` become `uint8_t[]` index
+  arrays (max 48 indices each, so 6×48=288 bytes vs today's
+  3*48*sizeof(Vertex*) = ~1152 bytes of pointers).
+- `Render()` entry: instead of `*A = *F->A`, read PX/PY/RZ etc from
+  `F->frame` directly into `ClipperSoAScratch[0/1/2]`; copy
+  inputs (Pos/N/Tangent/U/V/OrigBary) from AoS — those stay in
+  Vertex.
+- `FInterpolator` becomes a wide-SIMD lerp across the SoA fields.
+  Currently it's 4-lane SIMD across PX/PY/UZ/VZ + 4-lane across
+  TTangent/EUZ; SoA layout lets us do 8-lane across more fields at
+  once.
+- Rasterizer dispatch: today `rasterize_triangle(Vertex* A, Vertex*
+  B, Vertex* C)`. New signature reads from
+  `ClipperSoAScratch + 3 indices`. Each rasterizer (`IX.cpp`,
+  `Mekalele.cpp`, `TheOtherBarry.cpp`, `IXFZ.cpp`, etc.) needs
+  this change.
+
+**Estimated effort: 2-3 days.** Touches ~10 files but the surface
+is well-scoped (FrustumClipper internals + rasterizer call sites).
+
+**Wins:** unblocks Phase 5b (delete TPos_AOS / TN / TTangent / PX /
+PY / RZ / UZ / VZ / Flags / BGRA from `Vertex`, shrinking it from
+136 B to ~60 B), saves the per-Render `*A = *F->A` memcpy
+(replaced with 9 SIMD loads + indexed scatter), and gives
+`FInterpolator` a 2× lane-width upgrade.
 
 ## Migration technique for Phase 5 (compiler-catch reads)
 
