@@ -15,6 +15,11 @@
 #include <vector>
 #include "FRUSTRUM.H"
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+
+// PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
+// T->Verts. Forward-declared locally; called after any post-init Face
+// rebuild (tessellateWaterGrid) so SoA consumers index the right slot.
+void Compute_FaceVertexIndices(TriMesh *T);
 #include "Gradient.h"
 #include <map>
 
@@ -310,6 +315,14 @@ static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 			++F;
 		}
 	}
+
+	// SoA Phase 6.1: tessellateWaterGrid replaces T->Verts and rewires
+	// F->A/B/C — A/B/C_idx default to 0 → every face aliases vertex 0
+	// in T->frame. Without this restamp, the Phase 6.1 clipper TPos
+	// override reads frame->TPos_x[0] for all water faces and the
+	// surface degenerates. Same shape as the MakeFacesIndependent fix
+	// in 203c14b.
+	Compute_FaceVertexIndices(T);
 }
 
 // Sets required properties and modifies the object 'water.lwo' which acts
