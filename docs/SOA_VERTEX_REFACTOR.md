@@ -229,6 +229,25 @@ mesh's input AoS. Mesh inputs stay AoS — see Phase 7 footnote for the
 - Adds ~0.5-1 ms savings on clipper-heavy scenes (greets has many
   per-mesh clipper invocations).
 
+## Migration technique for Phase 5 (compiler-catch reads)
+
+When removing AoS fields in Phase 5, **rename the fields first** (e.g.
+`Vertex::TPos` → `Vertex::TPos_deprecated_use_frame`) before deletion.
+The compiler then catches every remaining reader at build time, instead
+of having migration gaps segfault at runtime on code paths the test
+matrix didn't cover.
+
+Lesson from Phase 4.x: a sprite-Face migration (`InsertSpriteToTBR`)
+slipped through grep because the surface looked like the mesh case but
+the underlying Faces (particles) don't have `F->frame` stamped. Crashed
+on fountain at offset 0x10 (= `VertexFrame::TPos_z`). A rename-first
+pass would have made the compiler list every site that needed manual
+attention.
+
+Plan for Phase 5: do the rename in a prep commit, fix every site the
+compiler flags, only then drop the renamed field. Build (not just
+bench) is the validation step.
+
 ## Validation strategy
 
 Per phase:
