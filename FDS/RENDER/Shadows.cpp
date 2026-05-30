@@ -33,6 +33,7 @@
 #include "Base/Omni.h"
 #include "Base/SpotLight.h"
 #include "Base/TriMesh.h"
+#include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in backface skip
 #include "Base/Material.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/Mekalele.h"
@@ -592,10 +593,17 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 							// Material* so the strstr only runs once.
 							if (shouldSkip(F->Txtr)) { ++skXpar; continue; }
 							if (F->A == F->B) { ++skDegen; continue; }
-							if (F->A->TPos.z <= 0.0f &&
-							    F->B->TPos.z <= 0.0f &&
-							    F->C->TPos.z <= 0.0f) {
-								++skBack; continue;
+							// SoA Phase 4: read TPos.z via F->frame.
+							// F here is from a shadow per-light clone; its
+							// frame is the per-clone scratch frame
+							// (Transform stamps it during FList build).
+							{
+								const float *tz = F->frame->TPos_z;
+								if (tz[F->A_idx] <= 0.0f &&
+								    tz[F->B_idx] <= 0.0f &&
+								    tz[F->C_idx] <= 0.0f) {
+									++skBack; continue;
+								}
 							}
 							clipper.Render(F, MekaleleShadowDepth, false, rt, cam,
                                           /*skipMipLevel=*/true);

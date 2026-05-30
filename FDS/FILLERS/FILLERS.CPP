@@ -11,6 +11,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_DEFS.H"
+#include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in TBR helpers
 #include "SimdHelpers.h"
 #include <Threads.h>
 // #define SIMDE_ENABLE_NATIVE_ALIASES
@@ -1643,8 +1644,8 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	if (y2 >= numTiles) y2 = numTiles-1;
 
 	// Sprite renderZ: the particle's view-space Z. All strips this sprite
-	// inserts into get the same renderZ.
-	const float renderZ = F->A->TPos.z;
+	// inserts into get the same renderZ. SoA Phase 4.
+	const float renderZ = F->frame->TPos_z[F->A_idx];
 	for (int i = y1; i <= y2; i++)
 	{
 		InsertSpanToTBR(F, i, renderZ);
@@ -1661,14 +1662,23 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 // front order across both types.
 void InsertTransparentToTBR(Face *F)
 {
-	// Screen-Y bounds from projected vertex coords (set by
-	// Transform_Objects).
-	float y_min = F->A->PY;
-	float y_max = F->A->PY;
-	if (F->B->PY < y_min) y_min = F->B->PY;
-	if (F->B->PY > y_max) y_max = F->B->PY;
-	if (F->C->PY < y_min) y_min = F->C->PY;
-	if (F->C->PY > y_max) y_max = F->C->PY;
+	// SoA Phase 4: all transformed-vertex reads via F->frame's SoA
+	// arrays. Same indices as the original Vertex* loads.
+	const VertexFrame *ff  = F->frame;
+	const float *PY        = ff->PY;
+	const float *tpos_x    = ff->TPos_x;
+	const float *tpos_y    = ff->TPos_y;
+	const float *tpos_z    = ff->TPos_z;
+	const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+
+	// Screen-Y bounds from projected vertex coords.
+	const float pyA = PY[ai], pyB = PY[bi], pyC = PY[ci];
+	float y_min = pyA;
+	float y_max = pyA;
+	if (pyB < y_min) y_min = pyB;
+	if (pyB > y_max) y_max = pyB;
+	if (pyC < y_min) y_min = pyC;
+	if (pyC > y_max) y_max = pyC;
 
 	if (y_min >= YRes || y_max < 0) return;
 
@@ -1680,31 +1690,30 @@ void InsertTransparentToTBR(Face *F)
 	if (s_lo > s_hi) return;
 
 	// Per-face front-facing test (matches the rest of the xpar pipeline).
-	const float ex = F->B->TPos.x - F->A->TPos.x;
-	const float ey = F->B->TPos.y - F->A->TPos.y;
-	const float ez = F->B->TPos.z - F->A->TPos.z;
-	const float fx = F->C->TPos.x - F->A->TPos.x;
-	const float fy = F->C->TPos.y - F->A->TPos.y;
-	const float fz = F->C->TPos.z - F->A->TPos.z;
+	const float Ax = tpos_x[ai], Ay = tpos_y[ai], Az = tpos_z[ai];
+	const float Bx = tpos_x[bi], By = tpos_y[bi], Bz = tpos_z[bi];
+	const float Cx = tpos_x[ci], Cy = tpos_y[ci], Cz = tpos_z[ci];
+	const float ex = Bx - Ax, ey = By - Ay, ez = Bz - Az;
+	const float fx = Cx - Ax, fy = Cy - Ay, fz = Cz - Az;
 	const float nx = ey * fz - ez * fy;
 	const float ny = ez * fx - ex * fz;
 	const float nz = ex * fy - ey * fx;
-	const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+	const float vd = nx * Ax + ny * Ay + nz * Az;
 	const bool front = vd < 0.0f;
 
 	float renderZ;
 	if (front) {
 		// Near surface — min vertex Z. Sorts later (= rendered LATER
 		// = on top of farther stuff).
-		renderZ = F->A->TPos.z;
-		if (F->B->TPos.z < renderZ) renderZ = F->B->TPos.z;
-		if (F->C->TPos.z < renderZ) renderZ = F->C->TPos.z;
+		renderZ = Az;
+		if (Bz < renderZ) renderZ = Bz;
+		if (Cz < renderZ) renderZ = Cz;
 	} else {
 		// Far surface — max vertex Z. Sorts earlier (= rendered FIRST
 		// = the back-most surface in the per-strip back-to-front walk).
-		renderZ = F->A->TPos.z;
-		if (F->B->TPos.z > renderZ) renderZ = F->B->TPos.z;
-		if (F->C->TPos.z > renderZ) renderZ = F->C->TPos.z;
+		renderZ = Az;
+		if (Bz > renderZ) renderZ = Bz;
+		if (Cz > renderZ) renderZ = Cz;
 	}
 
 	for (int s = s_lo; s <= s_hi; s++) {
@@ -1800,16 +1809,19 @@ void TBR_Render(Scene *Sc)
 			const int strip_h    = int(spriteClipY2) - strip_y_i;
 
 			auto computeFront = [](Face* F) -> bool {
-				const float ex = F->B->TPos.x - F->A->TPos.x;
-				const float ey = F->B->TPos.y - F->A->TPos.y;
-				const float ez = F->B->TPos.z - F->A->TPos.z;
-				const float fx = F->C->TPos.x - F->A->TPos.x;
-				const float fy = F->C->TPos.y - F->A->TPos.y;
-				const float fz = F->C->TPos.z - F->A->TPos.z;
+				// SoA Phase 4: same math as IsFrontFacingInViewSpace,
+				// kept inline here as a hot per-clump helper in the
+				// unified-TBR strip walk.
+				const VertexFrame *ff = F->frame;
+				const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
+				const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+				const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
+				const float ex = tx[bi] - Ax, ey = ty[bi] - Ay, ez = tz[bi] - Az;
+				const float fx = tx[ci] - Ax, fy = ty[ci] - Ay, fz = tz[ci] - Az;
 				const float nx = ey * fz - ez * fy;
 				const float ny = ez * fx - ex * fz;
 				const float nz = ex * fy - ey * fx;
-				const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+				const float vd = nx * Ax + ny * Ay + nz * Az;
 				return vd < 0.0f;
 			};
 			auto flushXparClump = [&]() {
