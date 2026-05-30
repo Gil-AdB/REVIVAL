@@ -413,16 +413,26 @@ void addParticleTrail(Scene* Sc, fds::FListEntry*& Ins, Particle& p, fds::Camera
 // per-vertex, so coplanar triangles of the same quad classify identically.
 bool IsFrontFacingInViewSpace(const Face* F)
 {
-	const float ex = F->B->TPos.x - F->A->TPos.x;
-	const float ey = F->B->TPos.y - F->A->TPos.y;
-	const float ez = F->B->TPos.z - F->A->TPos.z;
-	const float fx = F->C->TPos.x - F->A->TPos.x;
-	const float fy = F->C->TPos.y - F->A->TPos.y;
-	const float fz = F->C->TPos.z - F->A->TPos.z;
+	// SoA Phase 4: read TPos via F->frame's SoA arrays. Same value as
+	// the AoS reads during the dual-write period; will diverge only
+	// when Phase 5 drops the AoS TPos field. F->frame stamped during
+	// FList build in Transform_Objects (main: T->frame; shadow:
+	// per-clone scratch frame).
+	const float *tpos_x = F->frame->TPos_x;
+	const float *tpos_y = F->frame->TPos_y;
+	const float *tpos_z = F->frame->TPos_z;
+	const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+	const float Ax = tpos_x[ai], Ay = tpos_y[ai], Az = tpos_z[ai];
+	const float ex = tpos_x[bi] - Ax;
+	const float ey = tpos_y[bi] - Ay;
+	const float ez = tpos_z[bi] - Az;
+	const float fx = tpos_x[ci] - Ax;
+	const float fy = tpos_y[ci] - Ay;
+	const float fz = tpos_z[ci] - Az;
 	const float nx = ey * fz - ez * fy;
 	const float ny = ez * fx - ex * fz;
 	const float nz = ex * fy - ey * fx;
-	const float vd = nx * F->A->TPos.x + ny * F->A->TPos.y + nz * F->A->TPos.z;
+	const float vd = nx * Ax + ny * Ay + nz * Az;
 	return vd < 0.0f;
 }
 
@@ -445,9 +455,16 @@ bool IsFrontFacingInViewSpace(const Face* F)
 // the first transparent frame of greets.
 static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord facesCount)
 {
-	float dz = F->A->TPos.z;
-	if (F->B->TPos.z > dz) dz = F->B->TPos.z;
-	if (F->C->TPos.z > dz) dz = F->C->TPos.z;
+	// SoA Phase 4: dz read via F->frame's SoA arrays. Sibling search
+	// still uses Vertex* identity (the only thing it needs is to
+	// detect shared/unshared vertices); when the unshared vert is
+	// found, its index is computed via pointer offset off F->A, then
+	// looked up in the same frame (sibling is in the same mesh as F
+	// by construction — facesBase is one mesh's faces).
+	const float *tpos_z = F->frame->TPos_z;
+	float dz = tpos_z[F->A_idx];
+	if (tpos_z[F->B_idx] > dz) dz = tpos_z[F->B_idx];
+	if (tpos_z[F->C_idx] > dz) dz = tpos_z[F->C_idx];
 
 	if (fds::FeatureFlags::no_quad_sort()) return dz;
 
@@ -466,7 +483,13 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 		if      (sib->A != F->A && sib->A != F->B && sib->A != F->C) unshared = sib->A;
 		else if (sib->B != F->A && sib->B != F->B && sib->B != F->C) unshared = sib->B;
 		else if (sib->C != F->A && sib->C != F->B && sib->C != F->C) unshared = sib->C;
-		if (unshared && unshared->TPos.z > dz) dz = unshared->TPos.z;
+		if (unshared) {
+			// Convert the unshared Vertex* into an index by offset
+			// from F->A in the same vertex array. Sibling shares F's
+			// mesh (facesBase scope), so same SoA frame applies.
+			const uint32_t u_idx = F->A_idx + uint32_t(unshared - F->A);
+			if (tpos_z[u_idx] > dz) dz = tpos_z[u_idx];
+		}
 	};
 
 	const Face* prev = (F > facesBase)                  ? F - 1 : nullptr;
