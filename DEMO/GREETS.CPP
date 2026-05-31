@@ -1326,9 +1326,14 @@ void Initialize_Greets()
 	}
 
 	// Mirror Phase 1: locate the teleporter wall and compute its plane.
-	// Logged only for now — Phase 2 will use it for the reflected-camera
-	// render, Phase 3 for per-pixel screen-projected UV sampling.
 	g_greetsMirrorPlane = fds::FindTeleporterMirrorPlane(GreetSc);
+	// Mirror Phase 2: build a one-shot world-mirrored clone of every
+	// mesh and hide the wall faces. Z-buffer + the surrounding Piramid
+	// walls form the visual portal frame so the mirror only shows in
+	// the teleporter rectangle. Gated by --greets-mirror (opt-in).
+	if (fds::FeatureFlags::greets_mirror()) {
+		fds::BuildMirrorMeshAndHideWall(GreetSc, g_greetsMirrorPlane);
+	}
 }
 
 //void MMXClear(void *Page, dword Len)

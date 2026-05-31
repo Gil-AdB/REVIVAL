@@ -30,4 +30,20 @@ struct MirrorPlane {
 // the mirror plane askew.
 MirrorPlane FindTeleporterMirrorPlane(Scene *sc);
 
+// Build one consolidated "mirror" TriMesh that contains every face of
+// every existing mesh (except faces with the "teleporter" material —
+// the wall itself), with world-space vertex positions reflected across
+// `plane`, face winding swapped (B↔C) to keep them outward-facing for
+// the real camera, and normals reflected. Wraps the new mesh in an
+// Object named "mirror_clone" and inserts at scene->ObjectHead /
+// TriMeshHead. Returns the count of cloned faces (0 → no-op).
+//
+// Static-only: dynamic per-frame mesh updates (e.g., a moving robot)
+// snapshot at init time. Iterate later if needed.
+//
+// Also stamps F->Filler = no-op on the original teleporter faces so
+// the wall becomes a "hole" — the mirror geometry behind it shows
+// through the Z-buffer, surrounded by the unchanged Piramid walls.
+int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane);
+
 }  // namespace fds
