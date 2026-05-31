@@ -37,7 +37,19 @@ void SceneDriver::tickTabToggle(Scene *sc, const char *sceneName)
 {
     const bool tabNow = Keyboard[ScTab] != 0;
     if (tabNow && !tabPrev_) {
-        View = (View == &FC) ? sc->CameraHead : &FC;
+        const bool switchingToFC = (View != &FC);
+        if (switchingToFC) {
+            // Capture the scripted cam's CURRENT pose into FC so you
+            // always land where you were watching. Init-time capture
+            // gets stale once Animate_Objects walks the camera spline.
+            // Without this, FC could be at a default sentinel or a
+            // stale init pose → frozen frame, feels stuck.
+            FC.ISource = View->ISource;
+            Matrix_Copy(FC.Mat, View->Mat);
+            FC.IFOV    = View->IFOV;
+            CalcPersp(&FC);
+        }
+        View = switchingToFC ? &FC : sc->CameraHead;
         std::fprintf(stderr, "[TAB %s] toggled -> View=%s\n",
                      sceneName, (View == &FC) ? "FC" : "scene");
     }
