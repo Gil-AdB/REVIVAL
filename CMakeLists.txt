@@ -32,10 +32,11 @@ if(NOT EMSCRIPTEN)
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    # Default to RelWithDebInfo (-O2 -g) so native crashes give actionable
-    # lldb stack traces while we hunt the SDL teardown / rasterizer bugs.
-    # Switch back to Release once we're stable.
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+    # Default to Release (-O3 -DNDEBUG) for max perf. Pair with thin LTO
+    # (enabled above) and optional PGO (PGO_PHASE cache var). Pass
+    # -DCMAKE_BUILD_TYPE=RelWithDebInfo at configure time when you need
+    # debug info for lldb / sample / instruction-level profiling.
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
