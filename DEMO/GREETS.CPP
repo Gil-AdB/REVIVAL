@@ -1375,6 +1375,7 @@ struct GreetsScene : SceneDriver {
 			timerStack[i] = Timer;
 
 		SetCurrentScene(GreetSc);
+		Calibrate_FreeCamera_ForScene(GreetSc->FZP);
 		for(Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
 			T = (TriMesh *)Obj->Data;
@@ -1957,14 +1958,23 @@ struct GreetsScene : SceneDriver {
 			const size_t ci = size_t(cy) * size_t(XRes) + size_t(cx);
 			if (ci < g_gbuffer->txtr.size()) {
 				const uint32_t mat32 = g_gbuffer->txtr[ci];
-				const uint32_t matID = (mat32 >> 20) & 0xFF;
-				const MatTable mt = Scene_GetMatTable(GreetSc);
-				const char *name = "?";
-				if (matID < mt.count && mt.data && mt.data[matID] && mt.data[matID]->Name) {
-					name = mt.data[matID]->Name;
+				if (mat32 == 0xFFFFFFFFu) {
+					// Forward-rasterizer sentinel (TheOtherBarry stamps
+					// 0xFFFFFFFF to tell the deferred pass "I already
+					// shaded this pixel; skip me"). Decodes to matID=255
+					// but that's not a real material.
+					snprintf(MSGStr, sizeof(MSGStr),
+						"[MAT@(%d,%d)] forward-rendered (sentinel)", cx, cy);
+				} else {
+					const uint32_t matID = (mat32 >> 20) & 0xFF;
+					const MatTable mt = Scene_GetMatTable(GreetSc);
+					const char *name = "?";
+					if (matID < mt.count && mt.data && mt.data[matID] && mt.data[matID]->Name) {
+						name = mt.data[matID]->Name;
+					}
+					snprintf(MSGStr, sizeof(MSGStr),
+						"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
 				}
-				snprintf(MSGStr, sizeof(MSGStr),
-					"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
 				OutTextXY(VPage, 0, YRes - 30, MSGStr, 255);
 			}
 			// Crosshair so user can see what pixel the readout reflects.
@@ -1977,6 +1987,42 @@ struct GreetsScene : SceneDriver {
 			for (int dy = -6; dy <= 6; ++dy) {
 				int y = cy + dy;
 				if (y >= 0 && y < YRes) fb[size_t(y) * size_t(XRes) + size_t(cx)] = crossColor;
+			}
+		}
+		// Per-material labels — one label per Material* at the centroid of
+		// its closest-to-camera on-screen face. Lets you scrub the scene
+		// and read every material's id+name at once, vs single-pixel
+		// crosshair readout above. Mirrors the fountain follower-omni
+		// label pattern (FOUNTAIN.CPP:2256-2268).
+		if (fds::FeatureFlags::greets_mat_labels() && !sShadowMapView) {
+			struct Best { Face *face; float z; };
+			std::map<Material*, Best> bestByMat;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				if (!T || !T->Faces) continue;
+				Face *F = T->Faces, *FE = F + T->FIndex;
+				for (; F < FE; ++F) {
+					if (!F->A || !F->B || !F->C || !F->Txtr) continue;
+					const float zc = (F->A->TPos_AOS.z + F->B->TPos_AOS.z + F->C->TPos_AOS.z) * (1.0f/3.0f);
+					if (zc < GreetSc->NZP || zc > GreetSc->FZP) continue;
+					auto it = bestByMat.find(F->Txtr);
+					if (it == bestByMat.end() || zc < it->second.z) {
+						bestByMat[F->Txtr] = {F, zc};
+					}
+				}
+			}
+			for (auto &kv : bestByMat) {
+				Material *M = kv.first;
+				Face *F = kv.second.face;
+				const float px = (F->A->PX + F->B->PX + F->C->PX) * (1.0f/3.0f);
+				const float py = (F->A->PY + F->B->PY + F->C->PY) * (1.0f/3.0f);
+				const int ix = int(px), iy = int(py);
+				if (ix < 0 || ix >= XRes || iy < 0 || iy >= YRes) continue;
+				char label[80];
+				std::snprintf(label, sizeof(label), "%u:%s",
+					(unsigned)M->ID, M->Name ? M->Name : "?");
+				OutTextXY(VPage, ix, iy, label, 255);
 			}
 		}
 		if (g_profilerActive) {

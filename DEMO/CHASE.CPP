@@ -742,6 +742,7 @@ struct ChaseScene : SceneDriver {
 
 	void init() override {
 		SetCurrentScene(ChaseSc);
+		Calibrate_FreeCamera_ForScene(ChaseSc->FZP);
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 		setupFaceLists(ChaseSc, /*includeOmnisInCount=*/false);

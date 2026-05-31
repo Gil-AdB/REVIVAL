@@ -601,10 +601,28 @@ void Init_FreeCamera()
 
 float Vel_Speed   = 0.080;
 
+// Per-scene auto-calibration. Call when switching scenes so the free-cam
+// feels equally responsive whether you're in greets (FZP ~50) or city
+// (FZP 7500). Picks a base translation step from scene depth range — the
+// constant was tuned so the original Vel_Speed=0.080 still falls out for
+// scenes with FZP around 200. `, .` from there scales the chosen value.
+// Rotation speed is derived from Vel_Speed at use site (constant ratio),
+// so it auto-scales too.
+void Calibrate_FreeCamera_ForScene(float sceneFZP)
+{
+  if (sceneFZP <= 0.0f) return;
+  Vel_Speed = sceneFZP / 2500.0f;
+  if (Vel_Speed < 1e-4f) Vel_Speed = 1e-4f;
+}
+
 void Dynamic_Camera()
 {
 
-  const float Rot_Speed   = 0.004;
+  // Rotation rate tracks translation rate at a constant ratio, so the
+  // `, .` keys (which scale Vel_Speed) and per-scene auto-calibration
+  // both feed through to rotation. The 0.05 factor preserves the
+  // original hardcoded ratio (0.004 / 0.080 = 0.05).
+  const float Rot_Speed   = Vel_Speed * 0.05f;
 	const float Vel_FallOff = 0.02;
   const float Rot_FallOff = 0.05;
   Vector U,V;

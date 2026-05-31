@@ -123,6 +123,7 @@ FDS_FLAG_BOOL(city_envmap_cache,        "FDS_CITY_ENVMAP_CACHE",        1,      
 FDS_FLAG_BOOL(debug_panorama,           "FDS_DEBUG_PANORAMA",           0,                              "city-dev", "[dev] City: synthesize debug panoramas with gridlines")
 FDS_FLAG_BOOL(dump_panorama,            "FDS_DUMP_PANORAMA",            0,                              "city-dev", "[dev] City: dump baked panoramas to PPM")
 #endif
+FDS_FLAG_BOOL(greets_mat_labels,        "FDS_GREETS_MAT_LABELS",        0,                              "greets",   "Greets: overlay one '<matID>:<name>' label per material at the centroid of its closest-to-camera on-screen face. Diagnostic for picking mirror/effect target materials by name.")
 FDS_FLAG_FLOAT(greets_spot_height,      "FDS_GREETS_SPOT_HEIGHT",       0.0f,                           "greets",   "Greets: override robot spotlight height (0 = scene default)")
 FDS_FLAG_BOOL(no_greets_spots,          "FDS_NO_GREETS_SPOTS",          0,                              "greets",   "Greets: skip the code-installed robot spotlights (g_RobotSpot + orbit lights). FLD omnis still load.")
 FDS_FLAG_BOOL(greets_omni_shadows,      "FDS_GREETS_OMNI_SHADOWS",      0,                              "greets",   "Greets: mark every FLD-loaded Light_Omni as Omni_CastsShadow|StaticShadow so CubeShadowMaps_Rebuild bakes 6-face shadow cubes for them. Disabled by default — N omnis × 6 faces × shadowMapRes² adds up quickly.")

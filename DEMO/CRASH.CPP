@@ -44,6 +44,7 @@ struct CrashScene : SceneDriver {
 
 	void init() override {
 		SetCurrentScene(CrashSc);
+		Calibrate_FreeCamera_ForScene(CrashSc->FZP);
 		for (Omni *O = CrashSc->OmniHead; O; O = O->Next)
 			O->IRange = 2000.0f;
 		setupFaceLists(CrashSc, /*includeOmnisInCount=*/true);
