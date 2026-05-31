@@ -901,7 +901,20 @@ void Initialize_Greets()
 	// cube face → ~5× reduction in mech-omni xform cost.
 	{
 		const int chunkGrid = fds::FeatureFlags::greets_piramid_chunk_grid();
-		if (chunkGrid > 0) {
+		// Chunking is a deferred-path optimization — splits the Piramid
+		// into smaller TriMeshes so the per-cube-face bsphere cull in
+		// shadow Transform_Objects can reject most cells per face. The
+		// forward path doesn't generate cube shadows and gets nothing
+		// from the split, but it DOES hit a per-mesh ambient bug:
+		// Lighting() + StaticLighting compute ambient from
+		// T->Faces[0].Txtr — with ~150 chunks, each chunk's first-arrived
+		// face determines its ambient, and chunks that happen to land
+		// on the transparent display material (low Diffuse / zero
+		// ambient) render every vertex near-black. Bisected to 205b119,
+		// reproduces at grid≥4 on greets fwd (2026-05-30). Until
+		// Lighting() is rewritten to use per-face ambient, skip chunking
+		// entirely in forward mode.
+		if (chunkGrid > 0 && fds::FeatureFlags::deferred()) {
 			// Find Piramid.lwo
 			Object *piramidObj = nullptr;
 			TriMesh *piramid = nullptr;
