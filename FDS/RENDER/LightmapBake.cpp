@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <unistd.h>  // isatty for progress-bar carriage-return gating
 #include <vector>
 
 namespace fds {
@@ -231,6 +232,39 @@ void LightmapBake_Static(Scene *Sc)
     size_t texelsBaked = 0, texelsCovered = 0;
     size_t skippedDynamic = 0, considered = 0;
 
+    // Pre-walk: count meshes we will actually bake so the progress bar
+    // has a denominator. Same predicate the main loop uses; no allocation.
+    size_t plannedMeshes = 0;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh *)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (isMeshDynamic(Obj, nullptr, 0)) continue;
+        ++plannedMeshes;
+    }
+    auto lastTick = t0;
+    const bool toTty = ::isatty(::fileno(stderr));
+    auto reportProgress = [&](size_t done, const char *meshName, bool force) {
+        const auto now = std::chrono::steady_clock::now();
+        const double sinceLast = std::chrono::duration<double, std::milli>(now - lastTick).count();
+        if (!force && sinceLast < 200.0) return;
+        lastTick = now;
+        const double elapsed = std::chrono::duration<double>(now - t0).count();
+        const double frac = plannedMeshes ? double(done) / double(plannedMeshes) : 1.0;
+        // 30-cell bar
+        char bar[33];
+        const int filled = int(frac * 30.0 + 0.5);
+        for (int i = 0; i < 30; ++i) bar[i] = (i < filled) ? '#' : '.';
+        bar[30] = '\0';
+        std::fprintf(stderr, "%c[LM-BAKE] [%s] %zu/%zu mesh (%.0f%%)  %.1fs  %-24.24s%s",
+                     toTty ? '\r' : ' ',
+                     bar, done, plannedMeshes, frac * 100.0, elapsed,
+                     meshName ? meshName : "",
+                     toTty ? "" : "\n");
+        std::fflush(stderr);
+    };
+    reportProgress(0, "", true);
+
     // Reset the scene's lightmap mesh table. Index 0 reserved as sentinel
     // (nullptr); kept-mesh indices start at 1.
     if (!Sc->staticLMTable) Sc->staticLMTable = new std::vector<TriMesh*>();
@@ -262,8 +296,6 @@ void LightmapBake_Static(Scene *Sc)
             }
             continue;
         }
-        std::fprintf(stderr, "[LM-KEEP] '%s' (%u faces)\n",
-                     name, unsigned(T->FIndex));
 
         // Allocate / reset lightmap on this mesh.
         if (T->staticShadowLM) { T->staticShadowLM->clear(); }
@@ -483,7 +515,12 @@ void LightmapBake_Static(Scene *Sc)
                 if (anyCovered) lm.setCovers(int(fi), oi);
             }
         }
+        reportProgress(meshCount, name, false);
     }
+    // Force a final progress tick + newline so the summary line below
+    // doesn't land on top of the in-place bar.
+    reportProgress(meshCount, "", true);
+    if (toTty) { std::fputc('\n', stderr); std::fflush(stderr); }
 
     // Diagnostic atlas/continuity dumps removed after they localized the
     // clipper-bary root cause; see commit log for the evidence.
