@@ -2341,6 +2341,21 @@ struct CityScene : SceneDriver {
 			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
 			double polysPerFrame = (double)g_renderedPolys / numFrames;
 			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
+			// Clipper bucket breakdown — what % of polys take which path.
+			// Lets us estimate the savings from skipping non-essential
+			// clipper work for triangles that don't need it.
+			if (fds_stats::g_clipperEntered) {
+				snprintf(MSGStr, sizeof MSGStr,
+					"clip: tot=%u Z=%u 2D=%u mip=%u(uniform=%u split=%u)",
+					fds_stats::g_clipperEntered,
+					fds_stats::g_clipNeedZ,
+					fds_stats::g_clipNeed2D,
+					fds_stats::g_mipEntered,
+					fds_stats::g_mipFastUniform,
+					fds_stats::g_mipSplit);
+				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+				fprintf(stderr, "[CITY-CLIP] %s\n", MSGStr);
+			}
 		}
 		prof.enter(PROF_FLIP);
 

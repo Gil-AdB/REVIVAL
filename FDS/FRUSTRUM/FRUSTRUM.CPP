@@ -579,6 +579,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
                                       const fds::RenderTarget& rt,
                                       const fds::CameraContext& cam)
 {
+	FDS_STATS_INC(mipEntered);
 	const float mipBias = 0.5;
 
 	Texture *Tx = F->Txtr->Txtr;
@@ -607,6 +608,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 
 	if ((Tx->Flags & Txtr_Nomip) ||  pixArea < MinSize)
 	{
+		FDS_STATS_INC(mipFastUniform);
 		if (Tx->Flags & Txtr_Nomip) {
 			g_MipLevel = 0;
 		} else {
@@ -674,6 +676,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	// polysplitting is REALLY slow.
 	if (iml == iMl)
 	{
+		FDS_STATS_INC(mipFastUniform);
 		g_MipLevel = iml;
 		if (g_MipLevel < 0) g_MipLevel = 0;
 #ifdef COUNT_POLYS
@@ -685,6 +688,8 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
+
+	FDS_STATS_INC(mipSplit);
 
 	// scanconversion
 	int32_t left, right, limit;
@@ -825,6 +830,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
                              const fds::CameraContext& cam,
                              bool skipMipLevel)
 {
+	FDS_STATS_INC(clipperEntered);
 	// g_clipperTileRect was published once at InitViewport /
 	// SetClippingExtents time and stays valid for the duration of this
 	// worker's clipper. The FrustumClipper destructor resets to
@@ -902,6 +908,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 	// rect" case, this trims ~3 branches off the per-triangle path; for
 	// partial clip the inner tests use a register-cached sub-mask.
 	if (C_Flags & kZFlags) {
+		FDS_STATS_INC(clipNeedZ);
 		if (C_Flags & Vtx_VisNear) Near();
 		if (C_Flags & Vtx_VisFar)  Far();
 	}
@@ -917,6 +924,7 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 
 	constexpr dword kClipFlags2D = Vtx_VisLeft | Vtx_VisRight | Vtx_VisUp | Vtx_VisDown;
 	if (const dword vis2D = C_Flags & kClipFlags2D) {
+		FDS_STATS_INC(clipNeed2D);
 		if (vis2D & Vtx_VisLeft)  Left();
 		if (vis2D & Vtx_VisRight) Right();
 		if (vis2D & Vtx_VisUp)    Up();

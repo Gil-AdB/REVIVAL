@@ -1,11 +1,35 @@
 cmake_minimum_required(VERSION 3.16)
 
+# CMP0069 NEW: honor CMAKE_INTERPROCEDURAL_OPTIMIZATION on all generators /
+# compilers (clang/AppleClang/GCC), not just Intel. Required for the
+# check_ipo_supported() probe + LTO enable below to actually take effect.
+cmake_policy(SET CMP0069 NEW)
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+
 project(REVIVAL CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Thin LTO for Release / RelWithDebInfo only. Cross-TU inlining matters for
+# the rasterizer + deferred lighting kernels that span FDS and DEMO. Skip
+# Debug (LTO debug experience is poor) and Emscripten (wasm LTO has been
+# finicky in this tree; enable later once we have a reason). Use the
+# per-config CMAKE_INTERPROCEDURAL_OPTIMIZATION_<CONFIG> variables so a
+# single-config Debug build never picks LTO up by accident.
+if(NOT EMSCRIPTEN)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
+    if(_ipo_supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+        message(STATUS "IPO/LTO enabled for Release / RelWithDebInfo")
+    else()
+        message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_error}")
+    endif()
+endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     # Default to RelWithDebInfo (-O2 -g) so native crashes give actionable

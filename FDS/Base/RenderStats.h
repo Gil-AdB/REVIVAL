@@ -30,11 +30,33 @@
 // Threads that exit before flush get their counts captured by the
 // destructor.
 
+// Aggregated bucket totals — flushed-and-reset by RenderStats_Flush.
+// Defined in RenderStats.cpp; readers (scene-end overlay) reference them
+// after calling Flush(). Use the FDS_STATS_INC(field) macro to bump
+// the matching per-thread field at insertion sites.
+namespace fds_stats {
+extern dword g_clipperEntered;
+extern dword g_clipNeedZ;
+extern dword g_clipNeed2D;
+extern dword g_mipEntered;
+extern dword g_mipFastUniform;
+extern dword g_mipSplit;
+}
+
 namespace fds {
 
 struct PerThreadRenderStats {
     dword  polysRendered    = 0;
     double fillerPixelcount = 0.0;
+    // Clipper bucket counters — see FrustumClipper::Render. Used to
+    // estimate the perf opportunity of skipping clipper work for polys
+    // that don't need it (e.g. fully-inside, single-mip, etc.).
+    dword  clipperEntered   = 0;  // every poly that enters Render()
+    dword  clipNeedZ        = 0;  // had any Vtx_VisNear or Vtx_VisFar
+    dword  clipNeed2D       = 0;  // had any Vtx_VisLeft/Right/Up/Down
+    dword  mipEntered       = 0;  // entered MiplevelClipper (textured non-shadow)
+    dword  mipFastUniform   = 0;  // exited via small-area / uniform-mip fast path
+    dword  mipSplit         = 0;  // multi-mip split into sub-polys
 };
 
 // Returns the calling thread's TLS counter. Registers on first call.
@@ -54,9 +76,11 @@ void RenderStats_Flush();
 #if FDS_RENDER_STATS_ENABLED
   #define FDS_STATS_INC_POLYS()        (::fds::stats_tls().polysRendered++)
   #define FDS_STATS_ADD_PIXELS(area)   (::fds::stats_tls().fillerPixelcount += (area))
+  #define FDS_STATS_INC(field)         (::fds::stats_tls().field++)
 #else
   #define FDS_STATS_INC_POLYS()        ((void)0)
   #define FDS_STATS_ADD_PIXELS(area)   ((void)(area))
+  #define FDS_STATS_INC(field)         ((void)0)
 #endif
 
 } // namespace fds

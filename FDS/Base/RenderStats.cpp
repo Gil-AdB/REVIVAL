@@ -11,6 +11,18 @@
 extern std::atomic<dword>  g_renderedPolys;
 extern std::atomic<double> FillerPixelcount;
 
+// Clipper bucket totals — summed across all worker threads on flush.
+// Exposed for scene-end overlay (header declares them in fds_stats).
+// Race-free under the same flush-mutex used for the TLS sum.
+namespace fds_stats {
+dword g_clipperEntered = 0;
+dword g_clipNeedZ      = 0;
+dword g_clipNeed2D     = 0;
+dword g_mipEntered     = 0;
+dword g_mipFastUniform = 0;
+dword g_mipSplit       = 0;
+}
+
 namespace fds {
 
 namespace {
@@ -52,6 +64,10 @@ PerThreadRenderStats& stats_tls() {
 
 void RenderStats_Flush() {
     std::lock_guard<std::mutex> g(s_regMutex);
+    // Reset bucket totals; readers sum the per-thread contributions
+    // accumulated since the last flush.
+    fds_stats::g_clipperEntered = fds_stats::g_clipNeedZ = fds_stats::g_clipNeed2D = 0;
+    fds_stats::g_mipEntered = fds_stats::g_mipFastUniform = fds_stats::g_mipSplit = 0;
     for (auto* c : s_registry) {
         if (c->polysRendered) {
             g_renderedPolys.fetch_add(c->polysRendered, std::memory_order_relaxed);
@@ -64,6 +80,12 @@ void RenderStats_Flush() {
                        std::memory_order_relaxed)) {}
             c->fillerPixelcount = 0.0;
         }
+        fds_stats::g_clipperEntered += c->clipperEntered;   c->clipperEntered = 0;
+        fds_stats::g_clipNeedZ      += c->clipNeedZ;        c->clipNeedZ      = 0;
+        fds_stats::g_clipNeed2D     += c->clipNeed2D;       c->clipNeed2D     = 0;
+        fds_stats::g_mipEntered     += c->mipEntered;       c->mipEntered     = 0;
+        fds_stats::g_mipFastUniform += c->mipFastUniform;   c->mipFastUniform = 0;
+        fds_stats::g_mipSplit       += c->mipSplit;         c->mipSplit       = 0;
     }
 }
 
