@@ -1336,8 +1336,9 @@ void Initialize_Greets()
 		g_greetsMirrors.clear();
 		const char *kMirrorMats[] = {
 			"teleporter",   // back wall
-			"floor",        // mirror floor — classic
-			"siling",       // ceiling (sic — typo in the FLD)
+			"screen 3",     // panel — cluster finder picks the front face
+			"screen 4",
+			"screen2",
 		};
 		for (const char *matName : kMirrorMats) {
 			fds::Mirror m = fds::BuildMirror(GreetSc, matName);
