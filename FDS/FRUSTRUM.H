@@ -7,6 +7,13 @@ struct Scene;
 
 namespace fds { struct CameraContext; struct RenderTarget; }
 
+// Free-function helpers — declared up front so the inline class
+// members below (Calc_Flags / Calc_YFlags) can call them.
+void viewportInit(Viewport& vp, const Scene* Sc);
+void viewportInit(Viewport& vp, const fds::CameraContext& cam);
+void viewportCalcFlags(const Viewport& vp, Vertex* v);
+void viewportCalcYFlags(const Viewport& vp, Vertex* v);
+
 class FrustumClipper {
 public:
 	FrustumClipper() {
@@ -58,9 +65,22 @@ private:
 	// SetClippingExtents + both InitViewport variants — once per worker,
 	// not per Render.
 	void publishClipperTileRect();
-	void Calc_Flags(Vertex* V);
+	// Calc_Flags / Swap / CorrectCWOrder are defined inline here so the
+	// hot Render() body in FRUSTRUM.CPP sees their bodies and elides the
+	// call boundary. Standard-C++ `inline`; no compiler attribute. The
+	// bodies are <20 lines each and touch only private members already
+	// declared above.
+	inline void Calc_Flags(Vertex* V) {
+		viewportCalcFlags(C_VP, V);
+		C_Flags |= V->Flags;
+	}
 	void Calc_YFlags(Vertex* V);
-	void Swap();
+	inline void Swap() {
+		C_Scnd[C_numVerts] = C_Scnd[0];
+		Vertex **tmp = C_Prim;
+		C_Prim = C_Scnd;
+		C_Scnd = tmp;
+	}
 	void Near();
 	void Far();
 	void FInterpolator(Vertex* V, float t);
@@ -68,7 +88,16 @@ private:
 	void Right();
 	void Up();
 	void Down();
-	void CorrectCWOrder();
+	inline void CorrectCWOrder() {
+		Vertex *A = C_Prim[0], *B = C_Prim[1], *C = C_Prim[2];
+		float area = (B->PX - A->PX) * (C->PY - A->PY) - (C->PX - A->PX) * (B->PY - A->PY);
+		if (area > 0.0f) {
+			for (mword i = 0; i < C_numVerts; i++) {
+				C_Scnd[i] = C_Prim[C_numVerts - i];
+			}
+			Swap();
+		}
+	}
 	void YSort(Vertex** Prim, Vertex** Scnd, mword nVerts);
 	void MiplevelClipper(Face *F, RasterFunc filler,
 	                     const fds::RenderTarget& rt,
@@ -88,9 +117,3 @@ private:
 	float _IVal;
 	dword C_Flags;
 };
-
-
-void viewportInit(Viewport& vp, const Scene* Sc);
-void viewportInit(Viewport& vp, const fds::CameraContext& cam);
-void viewportCalcFlags(const Viewport& vp, Vertex* v);
-void viewportCalcYFlags(const Viewport& vp, Vertex* v);

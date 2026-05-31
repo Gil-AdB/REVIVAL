@@ -236,27 +236,14 @@ void FrustumClipper::InitViewport(const fds::CameraContext& cam)
 	publishClipperTileRect();
 }
 
-[[gnu::always_inline]] inline
-void FrustumClipper::Calc_Flags(Vertex *V)
-{
-	viewportCalcFlags(C_VP, V);
-	C_Flags |= V->Flags;
-}
+// Calc_Flags / Swap / CorrectCWOrder moved to header as standard `inline`
+// member functions (FRUSTRUM.H) so the hot Render() body sees their bodies
+// and elides the call boundary.
 
 void FrustumClipper::Calc_YFlags(Vertex *V)
 {
 	viewportCalcYFlags(C_VP, V);
 	C_Flags |= V->Flags;
-}
-
-[[gnu::always_inline]] inline
-void FrustumClipper::Swap()
-{
-	C_Scnd[C_numVerts] = C_Scnd[0];
-
-	Vertex **Swap = C_Prim;
-	C_Prim = C_Scnd;
-	C_Scnd = Swap;
 }
 
 void FrustumClipper::Near()
@@ -556,22 +543,7 @@ void FrustumClipper::Down()
 }
 
 
-[[gnu::always_inline]] inline
-void FrustumClipper::CorrectCWOrder()
-{
-	Vertex *A = C_Prim[0], *B = C_Prim[1], *C = C_Prim[2];
-
-	float area = (B->PX - A->PX) * (C->PY - A->PY) - (C->PX - A->PX) * (B->PY - A->PY);
-
-	if (area > 0.0)
-	{
-		for(mword i=0; i<C_numVerts; i++)
-		{
-			C_Scnd[i] = C_Prim[C_numVerts-i];
-		}
-		Swap();
-	}
-}
+// CorrectCWOrder moved to header (FRUSTRUM.H) as inline member.
 
 void FrustumClipper::YSort(Vertex **Prim, Vertex **Scnd, mword nVerts)
 {
