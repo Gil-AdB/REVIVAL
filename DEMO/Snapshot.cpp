@@ -2776,6 +2776,7 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
     driver.reset();
 
     ThreadPool::instance().close();
+
     return 0;
 }
 
