@@ -7,7 +7,14 @@
 namespace fds {
 
 PerTriMeshClone& VertexScratch::cloneOf(TriMesh* T) {
+    // Fast path: same T as the previous call (hits during Transform_
+    // Objects' tight per-mesh loop). One pointer compare vs ~30-50
+    // cycles for the unordered_map hash + bucket walk.
+    if (T == lastT) return *lastClone;
+
     auto& c = clones[T];
+    lastT     = T;
+    lastClone = &c;
     if (c.initialized) return c;
     c.verts.assign(T->Verts, T->Verts + T->VIndex);
     c.faces.assign(T->Faces, T->Faces + T->FIndex);

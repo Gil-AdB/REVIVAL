@@ -60,6 +60,15 @@ struct PerTriMeshClone {
 struct VertexScratch {
     std::unordered_map<TriMesh*, PerTriMeshClone> clones;
 
+    // One-entry cache for the most-recent (T, clone) pair. Transform_
+    // Objects iterates TriMeshHead and submits all faces of one mesh
+    // before moving on, so consecutive cloneOf() calls from the same
+    // pass usually hit the same T → 99%+ cache hit rate. The hit path
+    // is one pointer compare; miss falls through to the unordered_map
+    // lookup. ~30-50 cycles → ~2 cycles per consecutive same-T call.
+    TriMesh         *lastT     = nullptr;
+    PerTriMeshClone *lastClone = nullptr;
+
     // Lazily build (or reuse) the clone for `T`. Returns a reference
     // valid until this VertexScratch is destroyed.
     PerTriMeshClone& cloneOf(TriMesh* T);
