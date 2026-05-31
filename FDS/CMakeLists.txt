@@ -236,16 +236,18 @@ target_compile_options(${PROJECT_NAME} PUBLIC
 # elsewhere — then any file can opt in independently.
 set(FFP_FAST_FILES
     RENDER/Transform.cpp
-    # RasterizerInst.cpp (now the single canonical TU for TheOtherBarry
-    # + MekaleleImpl template instantiations) is intentionally NOT in
-    # this list. Testing 2026-05-31 confirmed that compiling those
-    # templates with -ffp-contract=fast still produces the city horizon
-    # smear even after ODR cleanup — the FMA-fused edge-function math
-    # in apply_exact flips classification of grazing pixels regardless
-    # of how the symbol is shared. To safely re-enable -fast here, the
-    # next step is identifying which specific math (likely orient2d or
-    # the slope setup) needs `#pragma STDC FP_CONTRACT OFF` around it,
-    # then -fast can be applied to the rest of the file.
+    # RasterizerInst.cpp intentionally NOT here. Per-pixel diagnostic
+    # 2026-05-31 (city@t=38, fwd vs def, baseline vs RasterizerInst
+    # compiled -fast) showed:
+    #   - Forward:  1390 pixels differ (0.07% of 1920x1080), edge-only
+    #   - Deferred:  462 pixels differ (0.02%), edge-only, smaller cluster
+    #   - Z almost unchanged (~45 bytes diff): same triangles visible
+    #   - Differences cluster along high-contrast triangle edges where
+    #     1-ULP UV shifts under FMA land on different texels
+    # Result: smear is per-pixel attribute interp inside apply_exact,
+    # not coverage / clipper / setup. Fix path: targeted std::fma at
+    # specific a*b+c chains inside the per-pixel loop (Option A from
+    # the discussion). Don't apply -fast wholesale here.
 )
 set_source_files_properties(${FFP_FAST_FILES} PROPERTIES
     COMPILE_OPTIONS "-ffp-contract=fast")
