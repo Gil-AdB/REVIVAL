@@ -41,9 +41,13 @@ struct Vector
 	}
 
 	inline Vector& normalize() {
-
-		*this *= length();
-
+		// Bug fix 2026-06-01: original was `*this *= length()` which is
+		// "denormalize"; the one existing production caller
+		// (CITY.CPP ComputeFaceNormal feeding a sign-only N·N test) is
+		// invariant to scale so the bug went unnoticed. New users of
+		// normalize() (greets mirror plane) need actual unit length.
+		const float len = length();
+		if (len > 1e-20f) *this *= (1.0f / len);
 		return *this;
 	}
 
