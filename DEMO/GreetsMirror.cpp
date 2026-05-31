@@ -339,11 +339,20 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
 
     // Turn the wall semi-transparent: clone the teleporter material with
     // Mat_Transparent + XparBlendAlpha so the deferred transparency pass
-    // blends the wall's color over the mirror geometry beneath. Without
-    // the clone we'd modify the source material and any non-teleporter
-    // face that shared it would also go transparent.
-    int wallFacesRetargeted = 0;
+    // blends the wall's color over the mirror geometry beneath.
+    //
+    // Caveat: the deferred transparent rasterizer (MekaleleImpl<Transparent
+    // Front>) unconditionally derefs F->Txtr->Txtr (the Texture* inside
+    // the Material) at offset 0x28 (LSizeX/LSizeY) and crashes on null.
+    // Flat-shaded materials like greets's teleporter have a null Texture.
+    // For those we fall back to no-op Filler — the wall vanishes
+    // completely and the mirror shows through unobstructed, with the
+    // frame outline supplying the visual boundary.
+    int wallFacesRetargeted = 0, wallFacesHidden = 0;
     Material *teleporterMirrorMat = nullptr;
+    auto noopFiller = [](Face*, Vertex**, DWord, DWord,
+                         const fds::RenderTarget&,
+                         const fds::CameraContext&) {};
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;  // don't touch the clone
@@ -352,6 +361,12 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isTeleporter(F)) continue;
+            const bool hasTexture = F.Txtr && F.Txtr->Txtr != nullptr;
+            if (!hasTexture) {
+                F.Filler = noopFiller;
+                ++wallFacesHidden;
+                continue;
+            }
             if (!teleporterMirrorMat) {
                 teleporterMirrorMat = getAlignedType<Material>(16);
                 std::memcpy(teleporterMirrorMat, F.Txtr, sizeof(Material));
@@ -396,9 +411,10 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
 
     std::fprintf(stderr,
         "[MIRROR] cloned %u verts / %u faces into 'mirror_clone'; "
-        "retargeted %d teleporter wall faces to 30%% transparent mirror mat; "
+        "wall faces: %d retargeted to transparent mat, %d no-op'd (no texture); "
         "cloned %d omnis (mirror bbox z=[%.1f..%.1f])\n",
-        unsigned(vOfs), unsigned(fOfs), wallFacesRetargeted, omniCount,
+        unsigned(vOfs), unsigned(fOfs), wallFacesRetargeted,
+        wallFacesHidden, omniCount,
         bbMin.z, bbMax.z);
     return int(fOfs);
 }
