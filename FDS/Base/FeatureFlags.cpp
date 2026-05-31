@@ -400,11 +400,19 @@ void FeatureFlags::printCompletion(std::FILE *out, const char *shell) {
     }
 }
 
-bool  FeatureFlags::get(BoolId  id) { return state().boolVals[int(id)]; }
-float FeatureFlags::get(FloatId id) { return state().floatVals[int(id)]; }
-int   FeatureFlags::get(IntId   id) { return state().intVals[int(id)]; }
-bool  FeatureFlags::isSet(BoolId  id) { return state().boolSet[int(id)]; }
-bool  FeatureFlags::isSet(FloatId id) { return state().floatSet[int(id)]; }
-bool  FeatureFlags::isSet(IntId   id) { return state().intSet[int(id)]; }
+// Bind the inline-accessor pointer globals to the singleton State's
+// arrays. Initialized at namespace-scope dynamic-init time, AFTER the
+// State lambda completes (same TU, declared after state() above).
+// The cross-TU init-order trap doesn't bite because all current
+// callers of FeatureFlags::get() are either function-scope (lazy,
+// called after main()) or member-function bodies (called per render
+// pass, well after dynamic init). No file-scope static initializer
+// elsewhere reads from these — verified 2026-05-31.
+bool  * const FeatureFlags::g_boolVals  = state().boolVals.data();
+float * const FeatureFlags::g_floatVals = state().floatVals.data();
+int   * const FeatureFlags::g_intVals   = state().intVals.data();
+bool  * const FeatureFlags::g_boolSet   = state().boolSet.data();
+bool  * const FeatureFlags::g_floatSet  = state().floatSet.data();
+bool  * const FeatureFlags::g_intSet    = state().intSet.data();
 
 } // namespace fds

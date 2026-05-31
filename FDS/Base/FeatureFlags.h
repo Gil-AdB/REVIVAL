@@ -79,15 +79,32 @@ public:
     // Source the output once per session: `source <(./DEMO --print-completion)`.
     static void printCompletion(std::FILE *out, const char *shell);
 
-    static bool  get(BoolId  id);
-    static float get(FloatId id);
-    static int   get(IntId   id);
+    // Hot-path accessors: inline reads from process-lifetime globals.
+    // Flag state is set at startup (env scan + parseArgs) and frozen
+    // after that — no per-call function-static guard needed. See
+    // FeatureFlags.cpp for the globals' definition and one-time init.
+    //
+    // The arrays are accessed by index; static_cast<int>(id) is the
+    // enum value. kNum* dimensions are not exposed in the header to
+    // avoid leaking the per-category sizes; the arrays are dynamically
+    // sized in the cpp but accessed by index here. The id values are
+    // bounded by the enum's Count, which the cpp asserts at init.
+    static bool * const g_boolVals;
+    static float * const g_floatVals;
+    static int   * const g_intVals;
+    static bool * const g_boolSet;
+    static bool * const g_floatSet;
+    static bool * const g_intSet;
+
+    static inline bool  get(BoolId  id) { return g_boolVals [static_cast<int>(id)]; }
+    static inline float get(FloatId id) { return g_floatVals[static_cast<int>(id)]; }
+    static inline int   get(IntId   id) { return g_intVals  [static_cast<int>(id)]; }
 
     // True if the flag was explicitly set on the CLI or in the environment
     // (i.e. its value is not the compile-time default).
-    static bool isSet(BoolId  id);
-    static bool isSet(FloatId id);
-    static bool isSet(IntId   id);
+    static inline bool isSet(BoolId  id) { return g_boolSet [static_cast<int>(id)]; }
+    static inline bool isSet(FloatId id) { return g_floatSet[static_cast<int>(id)]; }
+    static inline bool isSet(IntId   id) { return g_intSet  [static_cast<int>(id)]; }
 
     // Generated per-flag convenience accessors. Usage: FeatureFlags::deferred().
     #define FDS_FLAG_BOOL(name, env, def, cat, help) \
