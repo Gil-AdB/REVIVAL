@@ -268,13 +268,16 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
             // Reflect the face normal so lighting / culling sees the
             // correct outward direction for the mirrored geometry.
             CF.N = reflectDir(OF.N);
-            // Recompute NormProd (N·A in clone's frame). Mekalele/
-            // backface uses N·P >= NormProd as the back-facing test;
-            // reflection doesn't preserve N·A — re-derive from clone
-            // verts so the test stays consistent.
-            CF.NormProd = CF.N.x * CF.A->Pos.x +
-                          CF.N.y * CF.A->Pos.y +
-                          CF.N.z * CF.A->Pos.z;
+            // Recompute NormProd. Engine convention is `NormProd = -(N·A)`
+            // (PREPROC.CPP:113 + all other init sites), and the
+            // backface test in Transform.cpp:1340 reads
+            // `AP·N < NormProd` against that signed convention. Using
+            // the positive form makes every clone face evaluate as
+            // back-facing for typical camera positions and the
+            // mirror's outward-facing surfaces disappear. Negate.
+            CF.NormProd = -(CF.N.x * CF.A->Pos.x +
+                            CF.N.y * CF.A->Pos.y +
+                            CF.N.z * CF.A->Pos.z);
             ++fOfs;
         }
         // Track this mesh's clone-vert range so UpdateMirrorPerFrame
