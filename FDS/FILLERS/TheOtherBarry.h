@@ -443,6 +443,16 @@ struct TileRasterizer {
 						Vec8i u1 = roundi(p_u1z * p_z * 1024.0f);
 						Vec8i v1 = roundi(p_v1z * p_z * 1024.0f);
 
+						// Sparse env sample (lane-pair UV dedup via permute8) was
+						// tested 2026-05-31 expecting cache-line win on the
+						// 2nd gather. Result: no measurable bench win (within
+						// ±1ms noise on city deferred) AND visible
+						// horizontal blur on every env-mapped surface (48k
+						// pixels differ, 2.3% of frame). The 8-lane gather
+						// already hits adjacent cache lines effectively for
+						// most surfaces, and M-series L2 (16MB) trivially
+						// holds the 4MB env tex. Removed.
+
 						Vec8i tu1 = packed_tile_u(u1, 10, t1_umask_swizzled);
 						Vec8i tv1 = packed_tile_v(v1, t1_vmask);
 
