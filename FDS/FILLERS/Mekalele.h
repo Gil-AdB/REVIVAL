@@ -968,3 +968,11 @@ inline void MekaleleTransparentBack(Face* F, Vertex** V, dword numVerts, dword m
                                     const fds::CameraContext& cam) {
 	MekaleleImpl<MekaleleTarget::TransparentBack>(F, V, numVerts, miplevel, rt, cam);
 }
+
+// Explicit-instantiation declarations — see RasterizerInst.cpp for the
+// canonical TU and the bug-history comment. Forces consumers to link
+// against the one centrally-emitted body instead of generating per-TU
+// copies that can diverge under per-file -ffp-contract differences.
+extern template void MekaleleImpl<MekaleleTarget::Opaque>           (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void MekaleleImpl<MekaleleTarget::TransparentFront> (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void MekaleleImpl<MekaleleTarget::TransparentBack>  (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);

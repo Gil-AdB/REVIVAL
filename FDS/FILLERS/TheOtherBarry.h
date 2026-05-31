@@ -897,3 +897,21 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		r.rasterize_triangle(v1, v2, v3);
 	}
 }
+
+// Explicit-instantiation declarations: prevent every TU that includes
+// this header from implicitly instantiating these template variants.
+// The actual emitted bodies live in FDS/FILLERS/RasterizerInst.cpp,
+// which is the single canonical TU that owns the symbol. This is what
+// lets us safely compile RasterizerInst.cpp with -ffp-contract=fast
+// (perf win in apply_exact) without creating an ODR mismatch with
+// other TUs (FOUNTAIN.CPP, Snapshot.cpp, PREPROC.CPP, RenderInner.cpp,
+// FillerTest.cpp) that historically would have emitted their own
+// implicit instantiation with whatever -ffp-contract they were
+// compiled under. See the long CMake comment in DEMO/CMakeLists.txt
+// for the bug history.
+extern template void TheOtherBarry<barry::TBlendMode::OVERWRITE,    barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::OVERWRITE,    barry::TTextureMode::TEXTURETEXTURE>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::OVERWRITE,    barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::TRANSPARENT,  barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::TRANSPARENT,  barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
