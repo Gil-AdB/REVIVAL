@@ -246,6 +246,13 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
     std::memset(MObj, 0, sizeof(Object));
     MObj->Type   = Obj_TriMesh;
     MObj->Data   = MM;
+    // Animate_Objects (Transform.cpp:274-306) derefs Obj->Pos and Obj->Rot
+    // unconditionally for every Object in the chain — alias them onto the
+    // mesh's IPos/RotMat the way the FLD loader does for normal objects.
+    // Pivot stays at (0,0,0) (calloc'd) so the pivot-subtract on line 288
+    // is a no-op for our static clone.
+    MObj->Pos = &MM->IPos;
+    MObj->Rot = &MM->RotMat;
     // Strdup a copyable name so the engine's Object_Free won't choke on
     // it (other Objects own char* with similar lifetime expectations).
     const char *nm = "mirror_clone";
