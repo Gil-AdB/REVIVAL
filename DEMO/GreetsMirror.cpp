@@ -39,6 +39,14 @@ struct ClonedMeshRange {
 struct ClonedOmniRef {
     Omni *sourceOmni;
     Omni *mirrorOmni;
+    // Original IRange values captured at clone time. Per-frame
+    // UpdateMirrorPerFrame clamps both omnis' IRange to their
+    // distance-to-plane so neither omni's lighting sphere can cross
+    // the mirror plane — soft compartmentalization without a per-pixel
+    // filter in the deferred kernel. Re-applied each frame so dynamic
+    // omnis (Hull-parented robot spot) recompute on every motion.
+    float    origSourceRange = 0.0f;
+    float    origMirrorRange = 0.0f;
 };
 
 static TriMesh *g_mirrorMesh = nullptr;
@@ -329,14 +337,13 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
     if (sc->TriMeshHead) sc->TriMeshHead->Prev = MM;
     sc->TriMeshHead = MM;
 
-    // Hide the wall: stamp a no-op Filler on every teleporter face. With
-    // the wall pixels never written, the mirror geometry behind shows
-    // through; the surrounding Piramid walls (still rendered) provide
-    // the visual frame so the mirror only shows in the wall's footprint.
-    auto noopFiller = [](Face*, Vertex**, DWord, DWord,
-                         const fds::RenderTarget&,
-                         const fds::CameraContext&) {};
-    int wallFacesHidden = 0;
+    // Turn the wall semi-transparent: clone the teleporter material with
+    // Mat_Transparent + XparBlendAlpha so the deferred transparency pass
+    // blends the wall's color over the mirror geometry beneath. Without
+    // the clone we'd modify the source material and any non-teleporter
+    // face that shared it would also go transparent.
+    int wallFacesRetargeted = 0;
+    Material *teleporterMirrorMat = nullptr;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;  // don't touch the clone
@@ -345,8 +352,18 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isTeleporter(F)) continue;
-            F.Filler = noopFiller;
-            ++wallFacesHidden;
+            if (!teleporterMirrorMat) {
+                teleporterMirrorMat = getAlignedType<Material>(16);
+                std::memcpy(teleporterMirrorMat, F.Txtr, sizeof(Material));
+                teleporterMirrorMat->Flags |= Mat_Transparent;
+                teleporterMirrorMat->XparBlendAlpha = 0.30f;  // 30% wall, 70% mirror beneath
+                teleporterMirrorMat->Prev = nullptr;
+                teleporterMirrorMat->Next = MatLib;
+                if (MatLib) MatLib->Prev = teleporterMirrorMat;
+                MatLib = teleporterMirrorMat;
+            }
+            F.Txtr = teleporterMirrorMat;
+            ++wallFacesRetargeted;
         }
     }
 
@@ -373,16 +390,82 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
         sc->OmniHead = clone;
-        g_clonedOmnis.push_back({srcO, clone});
+        g_clonedOmnis.push_back({srcO, clone, srcO->IRange, srcO->IRange});
         ++omniCount;
     }
 
     std::fprintf(stderr,
         "[MIRROR] cloned %u verts / %u faces into 'mirror_clone'; "
-        "hid %d teleporter wall faces; cloned %d omnis (mirror bbox z=[%.1f..%.1f])\n",
-        unsigned(vOfs), unsigned(fOfs), wallFacesHidden, omniCount,
+        "retargeted %d teleporter wall faces to 30%% transparent mirror mat; "
+        "cloned %d omnis (mirror bbox z=[%.1f..%.1f])\n",
+        unsigned(vOfs), unsigned(fOfs), wallFacesRetargeted, omniCount,
         bbMin.z, bbMax.z);
     return int(fOfs);
+}
+
+// Bresenham line into the active framebuffer. VPage / XRes / YRes are
+// engine-global; they live at the file root (declared in FDS_VARS / DECS)
+// so we reference them via the ::-rooted name to dodge the surrounding
+// `namespace fds` lookup scope.
+static void DrawFramebufferLine(int x0, int y0, int x1, int y1, uint32_t color)
+{
+    dword *fb = (dword*)::VPage;
+    const int W = int(::XRes), H = int(::YRes);
+    auto plot = [&](int x, int y) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return;
+        fb[size_t(y) * size_t(W) + size_t(x)] = color;
+    };
+    int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        plot(x0, y0);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void DrawMirrorFrame(Scene *sc)
+{
+    if (!sc) return;
+    const uint32_t kFrameColor = 0xFFFFC080u;  // soft warm white (BGRA)
+    auto isTeleporter = [](const Face &F) -> bool {
+        // After BuildMirror the wall mat was retargeted to a transparent
+        // clone, so match by Filler/UV-pointing into the original
+        // material name isn't reliable. Track by the per-face property
+        // we know stays stable: ShadowMatID (greets's Piramid wall
+        // split stamped a per-cluster ID and teleporter faces never get
+        // ShadowMatID assigned). Cheaper match: just compare against
+        // the cloned mat name "teleporter" — names survived the
+        // material clone via memcpy.
+        return F.Txtr && F.Txtr->Name &&
+               std::strcmp(F.Txtr->Name, "teleporter") == 0;
+    };
+    int edgesDrawn = 0;
+    for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh *T = (TriMesh*)Obj->Data;
+        if (!T || !T->Faces) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            Face &F = T->Faces[fi];
+            if (!isTeleporter(F)) continue;
+            if (!F.A || !F.B || !F.C) continue;
+            // Skip if any vert behind near plane (.RZ <= 0 = z too small).
+            if (F.A->TPos_AOS.z <= sc->NZP ||
+                F.B->TPos_AOS.z <= sc->NZP ||
+                F.C->TPos_AOS.z <= sc->NZP) continue;
+            const int ax = int(F.A->PX), ay = int(F.A->PY);
+            const int bx = int(F.B->PX), by = int(F.B->PY);
+            const int cx = int(F.C->PX), cy = int(F.C->PY);
+            DrawFramebufferLine(ax, ay, bx, by, kFrameColor);
+            DrawFramebufferLine(bx, by, cx, cy, kFrameColor);
+            DrawFramebufferLine(cx, cy, ax, ay, kFrameColor);
+            edgesDrawn += 3;
+        }
+    }
+    (void)edgesDrawn;
 }
 
 void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane)
@@ -419,11 +502,24 @@ void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane)
             g_mirrorMesh->Verts[r.vStart + vi].N = reflectDir(worldN);
         }
     }
-    // Per-omni: re-mirror source's CURRENT IPos / IDir. Cheap.
-    for (const auto &c : g_clonedOmnis) {
+    // Per-omni: re-mirror source's CURRENT IPos / IDir, and clamp each
+    // omni's IRange to its distance-from-plane so the lighting sphere
+    // can't cross the mirror plane (soft compartment). This prevents
+    // the cloned omnis from double-lighting the real side and the
+    // source omnis from leaking into the mirror side.
+    auto distToPlane = [&](const Vector &P) -> float {
+        return std::fabs(N.x*P.x + N.y*P.y + N.z*P.z + d);
+    };
+    for (auto &c : g_clonedOmnis) {
         if (!c.sourceOmni || !c.mirrorOmni) continue;
         c.mirrorOmni->IPos = reflectPt(c.sourceOmni->IPos);
         c.mirrorOmni->IDir = reflectDir(c.sourceOmni->IDir);
+        const float srcLimit = distToPlane(c.sourceOmni->IPos);
+        const float mirLimit = distToPlane(c.mirrorOmni->IPos);
+        c.sourceOmni->IRange = std::min(c.origSourceRange, srcLimit);
+        c.mirrorOmni->IRange = std::min(c.origMirrorRange, mirLimit);
+        c.sourceOmni->rRange = c.sourceOmni->IRange > 0.0f ? 1.0f / c.sourceOmni->IRange : 0.0f;
+        c.mirrorOmni->rRange = c.mirrorOmni->IRange > 0.0f ? 1.0f / c.mirrorOmni->IRange : 0.0f;
     }
 }
 

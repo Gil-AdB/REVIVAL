@@ -55,6 +55,13 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane);
 // been run.
 void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane);
 
+// Draws a bright outline around every teleporter wall edge in screen
+// space — gives the mirror a "defined transition" so it doesn't look
+// like a featureless hole. Reads vertex .PX/.PY computed by the
+// preceding Transform_Objects. Call AFTER Render so the lines land
+// on top of the framebuffer.
+void DrawMirrorFrame(Scene *sc);
+
 // Dumps mirror mesh state + first few vert/face pointers to stderr,
 // tagged so we can locate it in a call sequence (e.g. "post-init",
 // "post-tick0"). Used to triage why the clone renders wrong.
