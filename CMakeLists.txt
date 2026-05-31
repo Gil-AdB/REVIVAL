@@ -93,18 +93,23 @@ if(EMSCRIPTEN)
     endif()
 endif()
 
-# Cross-statement FMA contraction. Enabled globally — unlocks vector
+# Cross-statement FMA contraction enabled globally. Unlocks vector
 # FMLA on arm64 NEON for `a*b+c` chains in hot loops (per-vertex
-# transform, lighting kernels, deferred shading). Saves ~1.5 ms on
-# greets bench at 1080p (7e4c2ac, validated 2026-05-31).
+# transform, lighting kernels, deferred shading, rasterizers).
+# Saves ~1.5ms on greets bench at 1080p (originally 7e4c2ac).
 #
-# History: 7e4c2ac promoted this from per-file (Transform.cpp only) to
-# global — uncovered a city horizon edge-pixel shimmer because the
-# rasterizer's per-pixel attribute interp produced 1-ULP UV shifts at
-# triangle edges that landed on neighboring texels. Fixed by wrapping
-# apply_exact bodies in TheOtherBarry.h + Mekalele.h with
-# FP_CONTRACT_OFF (block-level opt-out, see FDS/Base/FPContract.h).
-# Other code paths use FAST via this global setting.
+# History: 7e4c2ac originally produced a city horizon shimmer that
+# was misattributed to FMA-fused rasterizer per-pixel math. The real
+# cause was a latent NaN bug in TheOtherBarry's forward fog code —
+# `sqrtf(1 - invFarZ * z)` of a slightly-negative argument returns
+# NaN (not negative), the `if (fogRate < 0)` check is a no-op against
+# NaN, and the NaN propagates into vertex color → garbage at the
+# horizon (where z ≈ farZ). FMA shifted the argument by 1 ULP at
+# exactly that boundary, which is why it appeared FMA-related. Fixed
+# in TheOtherBarry.h by gating the argument before sqrt (mirrors
+# DeferredLighting.cpp:2099). Block-scoped FP_CONTRACT_OFF macros
+# in FDS/Base/FPContract.h are preserved as infrastructure for any
+# future real-FMA-sensitive site that's properly identified first.
 add_compile_options(-ffp-contract=fast)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)

@@ -221,14 +221,12 @@ target_compile_options(${PROJECT_NAME} PUBLIC
     -Werror=return-type
     -Wno-parentheses)
 
-# -ffp-contract=fast is enabled globally at the top-level CMakeLists.txt.
-# Per-file opt-out is via FP_CONTRACT_OFF inside the source (see
-# FDS/Base/FPContract.h). Currently scoped opt-outs live in
-# TheOtherBarry::apply_exact + Mekalele::apply_exact (per-pixel
-# attribute interp — FMA-fused UV/Z produces 1-ULP shifts that pick
-# neighboring texels at high-contrast triangle edges, visible as
-# horizon edge shimmer). Everything else picks up cross-statement FMA
-# fusion (vector lighting kernels, transform, deferred shading).
+# -ffp-contract=fast is enabled GLOBALLY at the top-level CMakeLists.
+# No per-file pinning needed. FDS/Base/FPContract.h provides
+# block-scoped opt-out macros (FP_CONTRACT_OFF) for any future code
+# that's genuinely FMA-sensitive — but no such site exists today
+# (the previously suspected rasterizer issue traced to a NaN bug in
+# TheOtherBarry's fog code, fixed at the source).
 
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time

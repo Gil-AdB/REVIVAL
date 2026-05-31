@@ -4,7 +4,6 @@
 
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_VARS.H"
-#include "Base/FPContract.h"
 #include "Base/RenderTarget.h"
 #include "Base/CameraContext.h"
 #include "F4Vec.h"
@@ -417,10 +416,6 @@ struct TileRasterizer {
 	// planes) or 256-bit (lightmapMF u32 plane) store per plane.
 	template<bool Inside>
 	void apply_exact(const meka::Tile& tile) {
-		// Same FMA opt-out rationale as TheOtherBarry::apply_exact — see
-		// FDS/Base/FPContract.h. Per-pixel attribute interp shifts under
-		// -fast cause edge shimmer on G-buffer mat boundaries.
-		FP_CONTRACT_OFF
 		auto span = GBufferSpan::of(gbuffer, ctx, tile.x * TILE_SIZE, tile.y * TILE_SIZE);
 
 		TScreenCoord a0 = tile.a0;
@@ -660,9 +655,6 @@ struct TileRasterizer {
 
 	
 	void rasterize_triangle(const Vertex& v1, const Vertex& v2, const Vertex& v3) {
-		// FMA opt-out: tile.rz0/uz0/vz0/etc. setup chains here feed
-		// apply_exact downstream; 1-ULP shifts produce edge shimmer.
-		FP_CONTRACT_OFF
 		// FIXME: raster conventions (it is doing floor right now)
 		// Clamp to the OWNING clipper tile's range — see ClipperTileRect.h.
 		// Without this, two adjacent clipper workers can both rasterize the
