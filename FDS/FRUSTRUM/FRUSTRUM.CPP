@@ -236,6 +236,7 @@ void FrustumClipper::InitViewport(const fds::CameraContext& cam)
 	publishClipperTileRect();
 }
 
+[[gnu::always_inline]] inline
 void FrustumClipper::Calc_Flags(Vertex *V)
 {
 	viewportCalcFlags(C_VP, V);
@@ -248,6 +249,7 @@ void FrustumClipper::Calc_YFlags(Vertex *V)
 	C_Flags |= V->Flags;
 }
 
+[[gnu::always_inline]] inline
 void FrustumClipper::Swap()
 {
 	C_Scnd[C_numVerts] = C_Scnd[0];
@@ -554,10 +556,11 @@ void FrustumClipper::Down()
 }
 
 
+[[gnu::always_inline]] inline
 void FrustumClipper::CorrectCWOrder()
 {
 	Vertex *A = C_Prim[0], *B = C_Prim[1], *C = C_Prim[2];
-	
+
 	float area = (B->PX - A->PX) * (C->PY - A->PY) - (C->PX - A->PX) * (B->PY - A->PY);
 
 	if (area > 0.0)
