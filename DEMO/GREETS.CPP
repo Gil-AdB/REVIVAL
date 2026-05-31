@@ -1375,7 +1375,7 @@ struct GreetsScene : SceneDriver {
 			timerStack[i] = Timer;
 
 		SetCurrentScene(GreetSc);
-		Calibrate_FreeCamera_ForScene(GreetSc->FZP);
+		Calibrate_FreeCamera_ForScene(GreetSc->FZP, GreetSc->CameraHead);
 		for(Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
 			T = (TriMesh *)Obj->Data;

@@ -600,33 +600,51 @@ void Init_FreeCamera()
 }
 
 float Vel_Speed   = 0.080;
+// Base rotation rate. Stays fixed across scenes — rotation is angular
+// (rad/key-tick) and shouldn't auto-scale with world size. Both
+// Vel_Speed and Rot_Speed_Base are multiplied by CamSpeedMult at use
+// site so the `, .` keys scale BOTH proportionally.
+static float Rot_Speed_Base = 0.004f;
+static float CamSpeedMult   = 1.0f;
 
-// Per-scene auto-calibration. Call when switching scenes so the free-cam
-// feels equally responsive whether you're in greets (FZP ~50) or city
-// (FZP 7500). sqrt scaling so big scenes don't get 40x speed jump from
-// linear FZP — perceived "speed" tracks angular extent more than linear
-// world span. Constant 180 was picked so FZP=200 reproduces the legacy
-// hardcoded 0.080.
+// Per-scene auto-calibration. Sets Vel_Speed from scene depth range and
+// (optionally) copies the scene camera into FC so a TAB into free-cam
+// doesn't drop you at the default (0,0,-100) sentinel outside the scene
+// — previously you'd see a frozen frame and feel "stuck". sqrt scaling
+// so big scenes don't get 40x speed jump from linear FZP; constant 180
+// picked so FZP=200 reproduces the legacy hardcoded 0.080.
 //   FZP=  50 → 0.039 (greets, slow indoor)
 //   FZP= 200 → 0.079 (legacy default)
 //   FZP=7500 → 0.481 (city, fast open)
-// `, .` keys still scale the chosen value at runtime. Rot_Speed is
-// derived at use site (constant ratio) so it tracks Vel_Speed.
-void Calibrate_FreeCamera_ForScene(float sceneFZP)
+// CamSpeedMult reset to 1.0 so per-scene tuning starts fresh.
+void Calibrate_FreeCamera_ForScene(float sceneFZP, Camera *sceneCamera)
 {
-  if (sceneFZP <= 0.0f) return;
-  Vel_Speed = sqrtf(sceneFZP) / 180.0f;
-  if (Vel_Speed < 1e-4f) Vel_Speed = 1e-4f;
+  if (sceneFZP > 0.0f) {
+    Vel_Speed = sqrtf(sceneFZP) / 180.0f;
+    if (Vel_Speed < 1e-4f) Vel_Speed = 1e-4f;
+  }
+  CamSpeedMult = 1.0f;
+  if (sceneCamera) {
+    FC.ISource = sceneCamera->ISource;
+    Matrix_Copy(FC.Mat, sceneCamera->Mat);
+    FC.IFOV    = sceneCamera->IFOV;
+    CalcPersp(&FC);
+  }
 }
 
 void Dynamic_Camera()
 {
 
-  // Rotation rate tracks translation rate at a constant ratio, so the
-  // `, .` keys (which scale Vel_Speed) and per-scene auto-calibration
-  // both feed through to rotation. The 0.05 factor preserves the
-  // original hardcoded ratio (0.004 / 0.080 = 0.05).
-  const float Rot_Speed   = Vel_Speed * 0.05f;
+  // Effective per-tick speeds. CamSpeedMult is the user-controlled `, .`
+  // dial that scales both translation and rotation together; the bases
+  // come from per-scene auto-cal (Vel_Speed) and the fixed Rot_Speed_Base.
+  const float Vel_Step    = Vel_Speed     * CamSpeedMult;
+  const float Rot_Step    = Rot_Speed_Base * CamSpeedMult;
+  // Aliases so the existing per-key Vel_Speed / Rot_Speed references
+  // below keep reading from the effective per-tick value with no
+  // mass-rename — local const shadows the file-scope global.
+  const float Vel_Speed = Vel_Step;
+  const float Rot_Speed = Rot_Step;
 	const float Vel_FallOff = 0.02;
   const float Rot_FallOff = 0.05;
   Vector U,V;
@@ -696,8 +714,11 @@ void Dynamic_Camera()
   if (Keyboard[ScRight]) FT.y+=Rot_Speed;
   if (Keyboard[ScDown]) FT.x-=Rot_Speed;
   if (Keyboard[ScUp]) FT.x+=Rot_Speed;
-  if (Keyboard[ScComma]) Vel_Speed/=1.1;
-  if (Keyboard[ScPeriod]) Vel_Speed*=1.1;
+  // `, .` scales the runtime multiplier shared by translation + rotation.
+  // Auto-cal modifies Vel_Speed (base) only, so leaving a scene resets
+  // the dial via CamSpeedMult=1.0 in Calibrate_FreeCamera_ForScene.
+  if (Keyboard[ScComma])  CamSpeedMult /= 1.1f;
+  if (Keyboard[ScPeriod]) CamSpeedMult *= 1.1f;
 
 /*  if (Keyboard[ScCtrl])
     Fire_LASER();*/

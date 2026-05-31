@@ -274,7 +274,7 @@ float LensToFOV(float lens);
 void  Shatter_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat);
 void  Kick_Camera(Vector *Source,Vector *Target,float Roll,Matrix CamMat);
 void  Init_FreeCamera();
-void  Calibrate_FreeCamera_ForScene(float sceneFZP);
+void  Calibrate_FreeCamera_ForScene(float sceneFZP, Camera *sceneCamera);
 void  Dynamic_Camera();
 #endif
 

@@ -2087,7 +2087,7 @@ struct FountainScene : SceneDriver {
 			timerStack[i] = Timer;
 
 		SetCurrentScene(FntSc);
-		Calibrate_FreeCamera_ForScene(FntSc->FZP);
+		Calibrate_FreeCamera_ForScene(FntSc->FZP, FntSc->CameraHead);
 		for(T = FntSc->TriMeshHead; T; T = T->Next)
 			Polys += T->FIndex;
 		for(O = FntSc->OmniHead; O; O = O->Next)

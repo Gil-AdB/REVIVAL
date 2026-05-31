@@ -2180,7 +2180,7 @@ struct CityScene : SceneDriver {
 
 	void init() override {
 		SetCurrentScene(CitySc);
-		Calibrate_FreeCamera_ForScene(CitySc->FZP);
+		Calibrate_FreeCamera_ForScene(CitySc->FZP, CitySc->CameraHead);
 
 		// get the reflective water surface object
 		Reflective_Mapper_Setup();
