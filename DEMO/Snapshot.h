@@ -18,6 +18,10 @@ struct SnapshotConfig {
     std::string scene;
     std::vector<int32_t> timestamps;
     std::string outDir = ".";
+    // Bench mode for snapshot scenes with multiple poses (halotest /
+    // conetest). When > 0, each pose is re-rendered N times for timing
+    // averaging and no PPMs are written. Default 0 = legacy snapshot.
+    int iters = 0;
 };
 
 bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg);

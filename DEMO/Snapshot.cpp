@@ -194,8 +194,20 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
             } else {
                 cfg.scene = std::string(rest.substr(0, at));
                 std::string_view tail = rest.substr(at + 1);
-                if (starts_with(tail, "t=")) {
-                    parse_timestamps(tail.substr(2), cfg.timestamps);
+                // tail may be comma-separated key=value pairs (key in
+                // {t, iters}). Plain `t=...` (no comma) preserves the
+                // legacy timestamp-list shorthand.
+                while (!tail.empty()) {
+                    auto comma = tail.find(',');
+                    std::string_view kv = (comma == std::string_view::npos)
+                        ? tail : tail.substr(0, comma);
+                    if (starts_with(kv, "t=")) {
+                        parse_timestamps(kv.substr(2), cfg.timestamps);
+                    } else if (starts_with(kv, "iters=")) {
+                        cfg.iters = std::atoi(std::string(kv.substr(6)).c_str());
+                    }
+                    tail = (comma == std::string_view::npos)
+                        ? std::string_view{} : tail.substr(comma + 1);
                 }
             }
             found = true;
@@ -2048,6 +2060,12 @@ int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres) {
             "below+behind, looking up at the omni"},
     };
 
+    // Bench mode: when cfg.iters > 0, loop each pose N times for
+    // averaging; skip the PPM writes. iters=0 keeps the legacy
+    // single-snapshot-per-pose behavior. Useful for tuning halo
+    // kernel perf without scene-level noise.
+    const int benchIters = cfg.iters;
+
     int produced = 0;
     for (const HaloPose& p : poses) {
         View->ISource = p.eye;
@@ -2059,11 +2077,32 @@ int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
+        // Warm-up render so first-touch isn't in the timing
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceDeferred);
+        }
+
+        if (benchIters > 0) {
+            using clock = std::chrono::high_resolution_clock;
+            auto t0 = clock::now();
+            for (int i = 0; i < benchIters; ++i) {
+                Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+                Lighting(sc);
+                if (CAll) {
+                    Radix_Sort(FList, SList, CAll);
+                    Render(RenderPath::ForceDeferred);
+                }
+            }
+            auto t1 = clock::now();
+            double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::fprintf(stderr,
+                "[HALOBENCH] %-16s %d iters total=%.2f ms  mean=%.3f ms/iter  (%s)\n",
+                p.name, benchIters, total_ms, total_ms / benchIters, p.desc);
+            ++produced;
+            continue;
         }
 
         char colorPath[1024];
@@ -2196,6 +2235,7 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
             "beside+above, looking down at the cone's ground target"},
     };
 
+    const int benchIters = cfg.iters;
     int produced = 0;
     for (const ConePose& p : poses) {
         View->ISource = p.eye;
@@ -2207,11 +2247,32 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset(VPage,   0, PageSize);
         std::memset(ZPage16, 0, XRes * YRes * sizeof(word));
 
+        // Warm-up render so first-touch isn't in the timing
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceDeferred);
+        }
+
+        if (benchIters > 0) {
+            using clock = std::chrono::high_resolution_clock;
+            auto t0 = clock::now();
+            for (int i = 0; i < benchIters; ++i) {
+                Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+                Lighting(sc);
+                if (CAll) {
+                    Radix_Sort(FList, SList, CAll);
+                    Render(RenderPath::ForceDeferred);
+                }
+            }
+            auto t1 = clock::now();
+            double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::fprintf(stderr,
+                "[CONEBENCH] %-13s %d iters total=%.2f ms  mean=%.3f ms/iter  (%s)\n",
+                p.name, benchIters, total_ms, total_ms / benchIters, p.desc);
+            ++produced;
+            continue;
         }
 
         char colorPath[1024];
