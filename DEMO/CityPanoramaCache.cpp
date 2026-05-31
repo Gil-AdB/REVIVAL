@@ -1,8 +1,6 @@
 #include "CityPanoramaCache.h"
 
-#include <Base/Material.h>
 #include <Base/Object.h>
-#include <Base/Texture.h>
 
 #include <cstdio>
 #include <cstdint>
@@ -12,16 +10,15 @@
 #include <string>
 #include <vector>
 
-// Defined in DEMO/CITY.CPP; reused so cache-load goes through the same
-// Texture/Material init path as the live bake (tiling, mipmap setup,
-// Sachletz call). Keep the signature in sync there.
-extern struct Material* Materialize(void* data, int x, int y);
-
 namespace fds {
 namespace {
 
 constexpr char     kMagic[8]      = {'C','I','T','Y','E','N','V','M'};
-constexpr uint32_t kFormatVersion = 2;
+// v2 stored post-Sachletz tiled bytes — re-running them through Materialize
+// on load double-tiled the texture and scrambled reflections. v3 stores
+// raw (pre-tile) RGBA and the caller Materializes once. Old v2 files
+// automatically invalidate via the version mismatch in TryLoad.
+constexpr uint32_t kFormatVersion = 3;
 constexpr const char* kCacheDir   = "cache";
 constexpr const char* kCachePath  = "cache/city_envmap.bin";
 
@@ -82,7 +79,7 @@ uint64_t ComputeCityPanoramaCacheKey(const char* fldPath,
 
 bool TryLoadCityPanoramaCache(uint64_t key,
                                int panoramaX, int panoramaY,
-                               const std::vector<BuildingPanoramaEntry>& buildings)
+                               std::vector<BuildingPanoramaEntry>& buildings)
 {
     std::ifstream f(kCachePath, std::ios::binary);
     if (!f) return false;
@@ -97,10 +94,9 @@ bool TryLoadCityPanoramaCache(uint64_t key,
     if (hdr.buildingCount != buildings.size()) return false;
 
     const size_t panoramaBytes = size_t(panoramaX) * size_t(panoramaY) * 4;
-    std::vector<uint8_t> scratch(panoramaBytes);
 
     for (size_t i = 0; i < buildings.size(); ++i) {
-        // Per-entry: name length (u16), name bytes, panorama bytes.
+        // Per-entry: name length (u16), name bytes, raw panorama bytes.
         uint16_t nameLen = 0;
         f.read((char*)&nameLen, sizeof(nameLen));
         if (!f) return false;
@@ -108,11 +104,13 @@ bool TryLoadCityPanoramaCache(uint64_t key,
         f.read(name.data(), nameLen);
         if (!f) return false;
         if (name != buildings[i].name) return false;
-        f.read((char*)scratch.data(), std::streamsize(panoramaBytes));
-        if (!f) return false;
-
-        Object* obj = buildings[i].obj;
-        obj->Reflection = ::Materialize(scratch.data(), panoramaX, panoramaY);
+        buildings[i].rawPanorama.resize(panoramaBytes);
+        f.read((char*)buildings[i].rawPanorama.data(), std::streamsize(panoramaBytes));
+        if (!f) {
+            // Wipe partial fills so the caller doesn't see junk.
+            for (auto &b : buildings) b.rawPanorama.clear();
+            return false;
+        }
     }
 
     std::fprintf(stderr,
@@ -152,16 +150,13 @@ void WriteCityPanoramaCache(uint64_t key,
         const uint16_t nameLen = uint16_t(b.name.size());
         f.write((const char*)&nameLen, sizeof(nameLen));
         f.write(b.name.data(), nameLen);
-        // Pull the live panorama back out of the Material we just baked.
-        // Obj->Reflection was set by bakeBuildingPanorama → Materialize.
-        Object* obj = b.obj;
-        if (!obj->Reflection || !obj->Reflection->Txtr || !obj->Reflection->Txtr->Data) {
+        if (b.rawPanorama.size() != panoramaBytes) {
             std::fprintf(stderr,
-                "[CITY-CACHE] WARN: building '%s' has no baked panorama; cache aborted\n",
-                b.name.c_str());
+                "[CITY-CACHE] WARN: building '%s' has rawPanorama=%zu bytes (expected %zu); cache aborted\n",
+                b.name.c_str(), b.rawPanorama.size(), panoramaBytes);
             return;
         }
-        f.write((const char*)obj->Reflection->Txtr->Data, std::streamsize(panoramaBytes));
+        f.write((const char*)b.rawPanorama.data(), std::streamsize(panoramaBytes));
     }
     if (!f) {
         std::fprintf(stderr,

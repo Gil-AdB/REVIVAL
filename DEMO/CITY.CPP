@@ -1677,7 +1677,10 @@ static void bakeBuildingPanorama(Object* Obj,
 #if FDS_DEV
 	if (fds::FeatureFlags::debug_panorama()) paintDebugPanorama(panorama);
 #endif
-	Obj->Reflection = Materialize(panorama.data(), PANORAMA_XRES, PANORAMA_YRES);
+	// Caller installs Obj->Reflection via Materialize on the *raw*
+	// panorama (the disk cache stores raw too — Materialize one-way
+	// Sachletz-tiles in place, so round-tripping through Txtr->Data
+	// would tile twice).
 #if FDS_DEV
 	if (fds::FeatureFlags::dump_panorama())  savePanoramaPPM(panorama, Obj->Name);
 #endif
@@ -1832,16 +1835,22 @@ void Initialize_City()
 		&& fds::TryLoadCityPanoramaCache(envCacheKey,
 		                                  PANORAMA_XRES, PANORAMA_YRES,
 		                                  buildings);
+	const size_t panoramaBytes = size_t(PANORAMA_XRES) * size_t(PANORAMA_YRES) * 4;
 	if (cacheHit) {
 		building_count = int(buildings.size());
 	} else {
-		for (const auto& b : buildings) {
+		for (auto& b : buildings) {
 			// Bake runs on the init worker; ESC during Glato sets g_shouldQuit
 			// but is otherwise stuck behind t1.join() until the bake finishes.
 			// Bail early so the user gets sub-second quit response.
 			if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
 			building_count++;
 			bakeBuildingPanorama(b.obj, EnvCam, TmpSurf, cubeMapper, cubeMaps, panorama);
+			// Snapshot the raw (pre-Sachletz) panorama so the cache writer
+			// can persist it; Materialize one-way-tiles below.
+			b.rawPanorama.assign(
+				(const uint8_t*)panorama.data(),
+				(const uint8_t*)panorama.data() + panoramaBytes);
 		}
 		if (envCacheEnabled && envCacheKey != 0
 		    && !g_shouldQuit.load(std::memory_order_relaxed)
@@ -1850,6 +1859,18 @@ void Initialize_City()
 			                             PANORAMA_XRES, PANORAMA_YRES,
 			                             buildings);
 		}
+	}
+	// Materialize each building's raw panorama into Obj->Reflection. Done
+	// here (not inside bakeBuildingPanorama) so the cache-hit path can
+	// reuse the same call without re-tiling already-tiled bytes.
+	for (auto& b : buildings) {
+		if (b.rawPanorama.size() != panoramaBytes) continue;
+		b.obj->Reflection = Materialize(b.rawPanorama.data(),
+		                                 PANORAMA_XRES, PANORAMA_YRES);
+		// rawPanorama no longer needed after Materialize copies it into
+		// the Texture; release to free ~4 MB per building.
+		b.rawPanorama.clear();
+		b.rawPanorama.shrink_to_fit();
 	}
 
 	// For deferred-path env-map dispatch: the lighting pass has only

@@ -23,7 +23,13 @@ namespace fds {
 
 struct BuildingPanoramaEntry {
     Object*  obj;
-    std::string name;        // copy of obj->Name for the cache record
+    std::string name;            // copy of obj->Name for the cache record
+    // Raw RGBA panorama BEFORE Sachletz tiling. The cache stores this
+    // (not the post-Materialize Txtr->Data) because Materialize/Sachletz
+    // is one-way: round-tripping through it would tile twice and scramble
+    // the texture. Caller fills this from the bake or from the cache,
+    // then runs Materialize once to install Obj->Reflection.
+    std::vector<uint8_t> rawPanorama;
 };
 
 // Compute the cache key from CITY.FLD bytes + panorama/cube dims +
@@ -33,15 +39,15 @@ uint64_t ComputeCityPanoramaCacheKey(const char* fldPath,
                                      int cubeMapX, int cubeMapY,
                                      const std::vector<BuildingPanoramaEntry>& buildings);
 
-// Try to populate each entry's Obj->Reflection from the disk cache.
-// Returns true iff every requested building was found and loaded.
-// On false return the caller must run the live bake.
+// Try to fill each entry's rawPanorama from the disk cache. Returns true
+// iff every requested building was found and loaded. On true return,
+// the caller should Materialize each entry to install Obj->Reflection.
 bool TryLoadCityPanoramaCache(uint64_t key,
                                int panoramaX, int panoramaY,
-                               const std::vector<BuildingPanoramaEntry>& buildings);
+                               std::vector<BuildingPanoramaEntry>& buildings);
 
-// Write the panorama for every entry to the cache file. Caller must have
-// already populated Obj->Reflection->Txtr->Data via the live bake.
+// Write every entry's rawPanorama to the cache file. Caller must have
+// filled rawPanorama via the live bake first.
 void WriteCityPanoramaCache(uint64_t key,
                              int panoramaX, int panoramaY,
                              const std::vector<BuildingPanoramaEntry>& buildings);
