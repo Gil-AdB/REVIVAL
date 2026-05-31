@@ -10,15 +10,43 @@
 #include <Base/TriMesh.h>
 #include <Base/Vertex.h>
 
+#include <Base/Omni.h>
+
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // Provided by MISC/PREPROC.CPP — stamps F->A_idx/B_idx/C_idx for SoA.
 extern void Compute_FaceVertexIndices(TriMesh *T);
 
 // getAlignedBlock / getAlignedType come in via FDS_DECS.H above.
+
+namespace fds {
+namespace {
+
+// Per-frame motion state: remember where each source mesh's verts
+// landed inside the mirror clone so we can re-mirror them every frame
+// without rebuilding the mesh. Populated by BuildMirrorMeshAndHideWall,
+// drained by UpdateMirrorPerFrame.
+struct ClonedMeshRange {
+    TriMesh *sourceMesh;
+    DWord    vStart;       // offset into g_mirrorMesh->Verts
+    DWord    vCount;
+};
+struct ClonedOmniRef {
+    Omni *sourceOmni;
+    Omni *mirrorOmni;
+};
+
+static TriMesh *g_mirrorMesh = nullptr;
+static std::vector<ClonedMeshRange> g_clonedRanges;
+static std::vector<ClonedOmniRef>   g_clonedOmnis;
+
+}  // namespace
+}  // namespace fds
 
 namespace fds {
 
@@ -107,6 +135,9 @@ MirrorPlane FindTeleporterMirrorPlane(Scene *sc)
 int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
 {
     if (!sc || !plane.valid) return 0;
+    g_clonedRanges.clear();
+    g_clonedOmnis.clear();
+    g_mirrorMesh = nullptr;
     const Vector &N = plane.N;
     const float d = plane.d;
     auto reflectPt = [&](const Vector &p) -> Vector {
@@ -157,21 +188,30 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
     MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
     MM->Flags |= HTrack_Visible;
 
-    // Animate_Objects expects a Pos/Rotate spline to evaluate even for
-    // a static mesh. Allocate single-key splines parked at zero / identity
-    // so Spline_Calc_3D fills IPos=(0,0,0) and IRot=identity every frame.
-    auto stampSingleKey = [](Spline &sp, const Quaternion &val) {
+    // Animate_Objects evaluates Pos/Scale/Rotate splines every frame.
+    // Build single-key splines parked at (0,0,0) / (1,1,1) / identity-quat
+    // so per-frame Spline_Calc_3D yields IPos=0, IScale=1, IRot=identity.
+    //
+    // CRITICAL: Quaternion field order is {W, x, y, z} — W FIRST. An
+    // earlier version used aggregate-init `{x,y,z,W}` which yielded
+    // IScale=(1,1,0) and RotMat row 2 *= 0 → every clone vert collapsed
+    // to a single Z plane (the visible smear bug). Set fields explicitly
+    // to avoid the trap.
+    auto stampSingleKey = [](Spline &sp, float x, float y, float z, float w) {
         sp.NumKeys = 1;
         sp.CurKey  = 0;
         sp.Flags   = 0;
         sp.Keys    = (SplineKey*)std::calloc(1, sizeof(SplineKey));
         sp.Keys[0].Frame = 0.0f;
-        sp.Keys[0].Pos   = val;
-        sp.Keys[0].AA    = val;
+        sp.Keys[0].Pos.x = x; sp.Keys[0].Pos.y = y; sp.Keys[0].Pos.z = z; sp.Keys[0].Pos.W = w;
+        sp.Keys[0].AA.x  = x; sp.Keys[0].AA.y  = y; sp.Keys[0].AA.z  = z; sp.Keys[0].AA.W  = w;
     };
-    stampSingleKey(MM->Pos,    {0.0f, 0.0f, 0.0f, 0.0f});
-    stampSingleKey(MM->Scale,  {1.0f, 1.0f, 1.0f, 0.0f});
-    stampSingleKey(MM->Rotate, {0.0f, 0.0f, 0.0f, 1.0f});
+    // Spline_Calc_3D reads (x,y,z) → Pos / Scale Vector. Spline_Calc_4D_Alt
+    // reads full quat → Rotate quat. Pick W=1 for the identity rotation
+    // quaternion (zero x/y/z); W doesn't matter for Pos/Scale.
+    stampSingleKey(MM->Pos,    /*x*/0.0f, /*y*/0.0f, /*z*/0.0f, /*W*/0.0f);
+    stampSingleKey(MM->Scale,  /*x*/1.0f, /*y*/1.0f, /*z*/1.0f, /*W*/0.0f);
+    stampSingleKey(MM->Rotate, /*x*/0.0f, /*y*/0.0f, /*z*/0.0f, /*W*/1.0f);
 
     // Fill verts (world-mirrored) and faces (winding swapped, normal
     // reflected). Walk every source mesh; each gets a contiguous block
@@ -217,13 +257,31 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
             CF.A = MM->Verts + vStart + (OF.A - T->Verts);
             CF.B = MM->Verts + vStart + (OF.C - T->Verts);  // swap
             CF.C = MM->Verts + vStart + (OF.B - T->Verts);  // swap
-            // Reflect the face normal so deferred/lighting see the right
-            // direction. NormProd will be recomputed by Compute_FaceNormals
-            // (or stays the original — Mekalele recomputes from F.A->Pos).
+            // The per-face UV slots U2/V2 and EU2/EV2 belong to B; U3/V3
+            // and EU3/EV3 belong to C. Since we swapped the vertex
+            // pointers we must swap their UVs too — otherwise B samples
+            // C's texel and the texture coords come out fragged.
+            std::swap(CF.U2, CF.U3);
+            std::swap(CF.V2, CF.V3);
+            std::swap(CF.EU2, CF.EU3);
+            std::swap(CF.EV2, CF.EV3);
+            // Reflect the face normal so lighting / culling sees the
+            // correct outward direction for the mirrored geometry.
             CF.N = reflectDir(OF.N);
+            // Recompute NormProd (N·A in clone's frame). Mekalele/
+            // backface uses N·P >= NormProd as the back-facing test;
+            // reflection doesn't preserve N·A — re-derive from clone
+            // verts so the test stays consistent.
+            CF.NormProd = CF.N.x * CF.A->Pos.x +
+                          CF.N.y * CF.A->Pos.y +
+                          CF.N.z * CF.A->Pos.z;
             ++fOfs;
         }
+        // Track this mesh's clone-vert range so UpdateMirrorPerFrame
+        // can re-mirror its world-space verts after animation each frame.
+        g_clonedRanges.push_back({T, vStart, T->VIndex});
     }
+    g_mirrorMesh = MM;
 
     // Bounding sphere from the mirrored bbox. Loose but safe — better
     // than leaving it at zero (would frustum-cull every frame).
@@ -235,7 +293,8 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
     const float dz = bbMax.z - bbMin.z;
     const float radSq = 0.25f * (dx*dx + dy*dy + dz*dz);
     MM->BSphereCtr        = ctr;
-    MM->BSphereRad        = radSq;     // engine convention: radius squared
+    MM->BSphereRad        = radSq;          // legacy field: radius squared
+    MM->BSphereRadius     = std::sqrt(radSq);  // new field: linear radius
     MM->BSphereScreenPos  = {0.0f, 0.0f, 0.0f};
 
     // SoA stamping so frame-based vertex consumers see correct A/B/C indices.
@@ -288,12 +347,125 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
         }
     }
 
+    // Clone every omni in the scene. Mirrored omni sits at the reflected
+    // world position with reflected direction (for spots), so the
+    // mirror-side geometry gets lit consistently with what the user
+    // sees through the wall. Cloned omnis share the source's Pos/Range
+    // splines — Animate_Objects will fill their IPos from those each
+    // frame and UpdateMirrorPerFrame then overrides with the reflected
+    // SOURCE IPos so dynamic / parented omnis track correctly.
+    int omniCount = 0;
+    for (Omni *srcO = sc->OmniHead; srcO; srcO = srcO->Next) {
+        // Don't re-clone clones if BuildMirror is called twice.
+        bool isAlreadyClone = false;
+        for (const auto &c : g_clonedOmnis) {
+            if (c.mirrorOmni == srcO) { isAlreadyClone = true; break; }
+        }
+        if (isAlreadyClone) continue;
+        Omni *clone = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+        std::memcpy(clone, srcO, sizeof(Omni));
+        clone->IPos = reflectPt(srcO->IPos);
+        clone->IDir = reflectDir(srcO->IDir);
+        clone->Prev = nullptr;
+        clone->Next = sc->OmniHead;
+        if (sc->OmniHead) sc->OmniHead->Prev = clone;
+        sc->OmniHead = clone;
+        g_clonedOmnis.push_back({srcO, clone});
+        ++omniCount;
+    }
+
     std::fprintf(stderr,
         "[MIRROR] cloned %u verts / %u faces into 'mirror_clone'; "
-        "hid %d teleporter wall faces (bsphere ctr=(%.1f,%.1f,%.1f) rad²=%.1f)\n",
-        unsigned(vOfs), unsigned(fOfs), wallFacesHidden,
-        ctr.x, ctr.y, ctr.z, radSq);
+        "hid %d teleporter wall faces; cloned %d omnis (mirror bbox z=[%.1f..%.1f])\n",
+        unsigned(vOfs), unsigned(fOfs), wallFacesHidden, omniCount,
+        bbMin.z, bbMax.z);
     return int(fOfs);
+}
+
+void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane)
+{
+    if (!sc || !plane.valid || !g_mirrorMesh) return;
+    const Vector &N = plane.N;
+    const float d = plane.d;
+    auto reflectPt = [&](const Vector &p) -> Vector {
+        const float k = 2.0f * (N.x*p.x + N.y*p.y + N.z*p.z + d);
+        return { p.x - k*N.x, p.y - k*N.y, p.z - k*N.z };
+    };
+    auto reflectDir = [&](const Vector &v) -> Vector {
+        const float k = 2.0f * (N.x*v.x + N.y*v.y + N.z*v.z);
+        return { v.x - k*N.x, v.y - k*N.y, v.z - k*N.z };
+    };
+
+    // Per-mesh: re-mirror the source's CURRENT world-space verts into
+    // the clone's vert range. Source's IPos / RotMat came from this
+    // frame's Animate_Objects, so dynamic and parented meshes (Hull,
+    // legs, etc.) end up with up-to-date reflections.
+    for (const auto &r : g_clonedRanges) {
+        TriMesh *T = r.sourceMesh;
+        if (!T || !T->Verts) continue;
+        const DWord n = std::min(r.vCount, T->VIndex);
+        for (DWord vi = 0; vi < n; ++vi) {
+            Vector localP = T->Verts[vi].Pos;
+            Vector worldP;
+            MatrixXVector(T->RotMat, &localP, &worldP);
+            worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
+            g_mirrorMesh->Verts[r.vStart + vi].Pos = reflectPt(worldP);
+            Vector localN = T->Verts[vi].N;
+            Vector worldN;
+            MatrixXVector(T->RotMat, &localN, &worldN);
+            g_mirrorMesh->Verts[r.vStart + vi].N = reflectDir(worldN);
+        }
+    }
+    // Per-omni: re-mirror source's CURRENT IPos / IDir. Cheap.
+    for (const auto &c : g_clonedOmnis) {
+        if (!c.sourceOmni || !c.mirrorOmni) continue;
+        c.mirrorOmni->IPos = reflectPt(c.sourceOmni->IPos);
+        c.mirrorOmni->IDir = reflectDir(c.sourceOmni->IDir);
+    }
+}
+
+void DumpMirrorState(Scene *sc, const char *tag)
+{
+    if (!sc) return;
+    TriMesh *MM = nullptr;
+    // Find via ObjectHead since I named the Object "mirror_clone".
+    int objTriMeshCount = 0;
+    for (Object *O = sc->ObjectHead; O; O = O->Next) {
+        if (O->Type != Obj_TriMesh) continue;
+        ++objTriMeshCount;
+        if (O->Name && std::strcmp(O->Name, "mirror_clone") == 0) {
+            MM = (TriMesh*)O->Data;
+            break;
+        }
+    }
+    int triMeshHeadCount = 0;
+    for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) ++triMeshHeadCount;
+    std::fprintf(stderr, "[MIRROR-DUMP %s] ObjectHead-TriMeshes=%d TriMeshHead-count=%d MM=%p\n",
+                 tag, objTriMeshCount, triMeshHeadCount, (void*)MM);
+    if (!MM) return;
+    std::fprintf(stderr,
+        "[MIRROR-DUMP %s] MM->IPos=(%.2f,%.2f,%.2f) RotMat[0]=(%.2f,%.2f,%.2f) RotMat[1]=(%.2f,%.2f,%.2f) RotMat[2]=(%.2f,%.2f,%.2f) VIndex=%u FIndex=%u\n",
+        tag, MM->IPos.x, MM->IPos.y, MM->IPos.z,
+        MM->RotMat[0][0], MM->RotMat[0][1], MM->RotMat[0][2],
+        MM->RotMat[1][0], MM->RotMat[1][1], MM->RotMat[1][2],
+        MM->RotMat[2][0], MM->RotMat[2][1], MM->RotMat[2][2],
+        MM->VIndex, MM->FIndex);
+    for (int i = 0; i < 3 && DWord(i) < MM->VIndex; ++i) {
+        Vertex &V = MM->Verts[i];
+        std::fprintf(stderr,
+            "[MIRROR-DUMP %s]  v%d Pos=(%.2f,%.2f,%.2f) TPos=(%.2f,%.2f,%.2f) PX=%.2f PY=%.2f RZ=%.4f Flags=0x%x\n",
+            tag, i, V.Pos.x, V.Pos.y, V.Pos.z,
+            V.TPos_AOS.x, V.TPos_AOS.y, V.TPos_AOS.z,
+            V.PX, V.PY, V.RZ, V.Flags);
+    }
+    for (int i = 0; i < 3 && DWord(i) < MM->FIndex; ++i) {
+        Face &F = MM->Faces[i];
+        std::fprintf(stderr,
+            "[MIRROR-DUMP %s]  f%d A_idx=%u B_idx=%u C_idx=%u A=%p B=%p C=%p (MM->Verts=%p, range=[%p,%p))\n",
+            tag, i, F.A_idx, F.B_idx, F.C_idx,
+            (void*)F.A, (void*)F.B, (void*)F.C,
+            (void*)MM->Verts, (void*)MM->Verts, (void*)(MM->Verts + MM->VIndex));
+    }
 }
 
 }  // namespace fds

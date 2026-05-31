@@ -46,4 +46,18 @@ MirrorPlane FindTeleporterMirrorPlane(Scene *sc);
 // through the Z-buffer, surrounded by the unchanged Piramid walls.
 int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane);
 
+// Per-frame update of the mirror clone: re-mirrors every source mesh's
+// current world vertex positions across `plane` and overwrites the
+// matching clone verts. Also re-mirrors every cloned omni's IPos / IDir
+// so dynamic lights track their source per frame. Call AFTER
+// Animate_Objects (which advances source splines) and BEFORE
+// Transform_Objects (which reads positions). No-op if Build hasn't
+// been run.
+void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane);
+
+// Dumps mirror mesh state + first few vert/face pointers to stderr,
+// tagged so we can locate it in a call sequence (e.g. "post-init",
+// "post-tick0"). Used to triage why the clone renders wrong.
+void DumpMirrorState(Scene *sc, const char *tag);
+
 }  // namespace fds

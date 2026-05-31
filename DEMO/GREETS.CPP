@@ -1773,6 +1773,14 @@ struct GreetsScene : SceneDriver {
 
 		Animate_Objects(GreetSc, View);
 
+		// Mirror clone tracking: re-mirror dynamic meshes (Hull / legs)
+		// and cloned omnis after Animate_Objects refreshes the source
+		// poses, before Transform_Objects reads positions. No-op when
+		// --greets-mirror is off.
+		if (fds::FeatureFlags::greets_mirror()) {
+			fds::UpdateMirrorPerFrame(GreetSc, g_greetsMirrorPlane);
+		}
+
 		// Free-camera shadow override: when in shadow-view mode AND FC is
 		// active, the spotlight tracks FC's pose. Lets you fly with Tab
 		// and inspect the shadow map from arbitrary vantage points.
