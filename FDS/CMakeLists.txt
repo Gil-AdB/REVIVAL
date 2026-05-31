@@ -33,6 +33,8 @@ set(Base
     Base/FPContract.h
     Base/FrameState.cpp
     Base/FrameState.h
+    Base/RenderStats.cpp
+    Base/RenderStats.h
     Base/RenderTarget.h
     Base/KeyFrame.h
     Base/Material.h

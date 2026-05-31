@@ -7,6 +7,7 @@
 
 #include <Base/Scene.h>
 #include <Base/CameraContext.h>
+#include <Base/RenderStats.h>
 
 #include "FRUSTRUM.H"
 #include "ClipperTileRect.h"
@@ -623,7 +624,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	}
 
 #ifdef ENABLE_PIXELCOUNT
-	FillerPixelcount = FillerPixelcount + 0.5f * fabs(pixArea);
+	FDS_STATS_ADD_PIXELS(0.5f * fabs(pixArea));
 #endif
 	// Simple miplevel calculation
 	//if (!Keyboard[ScY])
@@ -641,7 +642,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		}
 
 #ifdef COUNT_POLYS
-		g_renderedPolys++;
+		FDS_STATS_INC_POLYS();
 #endif
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
@@ -701,7 +702,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		g_MipLevel = iml;
 		if (g_MipLevel < 0) g_MipLevel = 0;
 #ifdef COUNT_POLYS
-		g_renderedPolys++;
+		FDS_STATS_INC_POLYS();
 #endif
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
@@ -778,7 +779,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		g_MipLevel = limit-1;
 		YSort(C_Scnd, C_Tetr, numSectionVerts);
 #ifdef COUNT_POLYS
-		g_renderedPolys++;
+		FDS_STATS_INC_POLYS();
 #endif
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
@@ -800,7 +801,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	if (left == mlindex)
 	{
 #ifdef COUNT_POLYS
-		g_renderedPolys++;
+		FDS_STATS_INC_POLYS();
 #endif
 #ifdef NO_MIPMAPS
 		g_MipLevel = 0;
@@ -817,7 +818,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	C_Scnd[numSectionVerts++] = C_Prim[left];
 	YSort(C_Scnd, C_Tetr, numSectionVerts);
 #ifdef COUNT_POLYS
-	g_renderedPolys++;
+	FDS_STATS_INC_POLYS();
 #endif
 #ifdef NO_MIPMAPS
 	g_MipLevel = 0;
@@ -961,10 +962,10 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 		MiplevelClipper(F, filler, rt, cam);
 	} else {
 #ifdef ENABLE_PIXELCOUNT
-		FillerPixelcount = FillerPixelcount + PolyArea();
+		FDS_STATS_ADD_PIXELS(PolyArea());
 #endif
 #ifdef COUNT_POLYS
-		g_renderedPolys++;
+		FDS_STATS_INC_POLYS();
 #endif
 		// skipMipLevel callers (shadow rasterizer) don't care about the
 		// mip level — pass 0. The texture wouldn't be sampled anyway.

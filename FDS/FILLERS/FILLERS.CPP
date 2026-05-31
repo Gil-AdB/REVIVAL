@@ -11,6 +11,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_DEFS.H"
+#include "Base/RenderStats.h"
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in TBR helpers
 #include "SimdHelpers.h"
 #include <Threads.h>
@@ -348,7 +349,7 @@ void Draw_Line_32Bit_ForKids(Vertex *V1,Vertex *V2)
 //void Flat_Poly_ManyBits(Vertex **V, dword numVerts)
 //{	
 //#ifdef ENABLE_PIXELCOUNT
-//	FillerPixelcount += 0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX));
+//	FDS_STATS_ADD_PIXELS(0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX)));
 //#endif
 //
 //	int32_t X1,Y1,X2,Y2,X3,Y3; //Pixelled projected vertex position
@@ -786,7 +787,7 @@ void The_BiHi(Vertex **V, dword numVerts)
 void The_BiTrue(Vertex **V, dword numVerts)
 {
 #ifdef ENABLE_PIXELCOUNT
-	FillerPixelcount += 0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX));
+	FDS_STATS_ADD_PIXELS(0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX)));
 #endif
   Bi_Triangle BT[3];
   BT[0].x=_A->PX;
@@ -816,7 +817,7 @@ void The_BiTrue(Vertex **V, dword numVerts)
 void The_BiTTrue(Vertex **V, dword numVerts)
 {
 #ifdef ENABLE_PIXELCOUNT
-	FillerPixelcount += 0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX));
+	FDS_STATS_ADD_PIXELS(0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX)));
 #endif
 	Bi_Triangle BT[3];
 	BT[0].x=_A->PX;
@@ -1014,7 +1015,7 @@ void The_BiGTrue(Vertex **V, dword numVerts)
 void The_BiGMMXTrue(Vertex **V, dword numVerts)
 {
 #ifdef ENABLE_PIXELCOUNT
-	FillerPixelcount += 0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX));
+	FDS_STATS_ADD_PIXELS(0.5*fabs((_A->PX - _C->PX)*(_B->PY - _C->PY) - (_A->PY - _C->PY)*(_B->PX - _C->PX)));
 #endif
 	Bi_Triangle BT[3];
 	BT[0].x=_A->PX;
@@ -1067,7 +1068,7 @@ void The_BiGMMXTrue_Fogged(Vertex **V, dword numVerts)
 			C = V[i-1];
 		}
 #ifdef ENABLE_PIXELCOUNT
-		FillerPixelcount += 0.5*fabs((A->PX - C->PX)*(B->PY - C->PY) - (A->PY - C->PY)*(B->PX - C->PX));
+		FDS_STATS_ADD_PIXELS(0.5*fabs((A->PX - C->PX)*(B->PY - C->PY) - (A->PY - C->PY)*(B->PX - C->PX)));
 #endif
 		
 		Bi_Triangle BT[3];
@@ -1125,7 +1126,7 @@ void The_BiMMXTTrue_Fogged(Vertex **V, dword numVerts)
 			C = V[i-1];
 		}
 #ifdef ENABLE_PIXELCOUNT
-		FillerPixelcount += 0.5*fabs((A->PX - C->PX)*(B->PY - C->PY) - (A->PY - C->PY)*(B->PX - C->PX));
+		FDS_STATS_ADD_PIXELS(0.5*fabs((A->PX - C->PX)*(B->PY - C->PY) - (A->PY - C->PY)*(B->PX - C->PX)));
 #endif
 		Bi_Triangle BT[3];
 		BT[0].x=A->PX;
@@ -1410,7 +1411,7 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 
 		// this size should undergo 2d clipping before being added.
 #ifdef ENABLE_PIXELCOUNT
-//		FillerPixelcount += edgeLen*edgeLen;
+//		FDS_STATS_ADD_PIXELS(edgeLen*edgeLen);
 #endif
 		dword Col = 0xFFFFFF;
 		if (CurScene->Flags & Scn_Fogged)
@@ -1507,7 +1508,7 @@ void Spriter32(float x, float y,float width,float height,void *txtr,void *VPage,
 	dword v = iv;
 
 	if (Height <= 0 || LineWidth <= 0) return;
-	FillerPixelcount = FillerPixelcount + Height * LineWidth;
+	FDS_STATS_ADD_PIXELS(Height * LineWidth);
 	__m64 mm4 { (int32_t)Color };
 	__m64 mm1 = {};
 	

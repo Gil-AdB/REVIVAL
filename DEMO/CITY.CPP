@@ -1,5 +1,6 @@
 
 #include "Rev.h"
+#include <Base/RenderStats.h>
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/TheOtherBarry.h>
@@ -2334,6 +2335,7 @@ struct CityScene : SceneDriver {
 			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
 			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
+			fds::RenderStats_Flush();
 			double rndrMs = prof.cumulativeMs(PROF_RNDR);
 			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
 			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
