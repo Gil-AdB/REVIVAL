@@ -341,18 +341,33 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
     // Mat_Transparent + XparBlendAlpha so the deferred transparency pass
     // blends the wall's color over the mirror geometry beneath.
     //
-    // Caveat: the deferred transparent rasterizer (MekaleleImpl<Transparent
-    // Front>) unconditionally derefs F->Txtr->Txtr (the Texture* inside
-    // the Material) at offset 0x28 (LSizeX/LSizeY) and crashes on null.
-    // Flat-shaded materials like greets's teleporter have a null Texture.
-    // For those we fall back to no-op Filler — the wall vanishes
-    // completely and the mirror shows through unobstructed, with the
-    // frame outline supplying the visual boundary.
-    int wallFacesRetargeted = 0, wallFacesHidden = 0;
+    // MekaleleImpl<TransparentFront> unconditionally derefs F->Txtr->Txtr
+    // (the Texture*) at LSizeX/LSizeY, so flat-shaded mats with no
+    // Texture crash. Workaround: synthesize a 1×1 BGRA Texture from
+    // Mat->BaseCol so the rasterizer gets a valid (constant-color) tap.
+    // Cheaper + more correct than a null-guard in the hot rasterizer
+    // path. Visual: wall renders as a solid-color tint over the mirror,
+    // same as a real flat-color transparent panel.
+    auto synthesizeFlatTexture = [](const Color &col) -> Texture* {
+        Texture *T = new Texture();
+        std::memset(T, 0, sizeof(Texture));
+        T->BPP    = 32;
+        T->SizeX  = 1; T->SizeY  = 1;
+        T->LSizeX = 0; T->LSizeY = 0;
+        T->Data   = (byte*)_aligned_malloc(4, 16);
+        const dword bgra =
+            (dword(uint8_t(std::min(std::max(col.B, 0.0f), 255.0f))) << 0)  |
+            (dword(uint8_t(std::min(std::max(col.G, 0.0f), 255.0f))) << 8)  |
+            (dword(uint8_t(std::min(std::max(col.R, 0.0f), 255.0f))) << 16) |
+            (dword(0xFFu) << 24);
+        ((dword*)T->Data)[0] = bgra;
+        T->Mipmap[0]    = T->Data;
+        T->numMipmaps   = 1;
+        T->Flags        = Txtr_Nomip | Txtr_Tiled;
+        return T;
+    };
+    int wallFacesRetargeted = 0;
     Material *teleporterMirrorMat = nullptr;
-    auto noopFiller = [](Face*, Vertex**, DWord, DWord,
-                         const fds::RenderTarget&,
-                         const fds::CameraContext&) {};
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;  // don't touch the clone
@@ -361,17 +376,17 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isTeleporter(F)) continue;
-            const bool hasTexture = F.Txtr && F.Txtr->Txtr != nullptr;
-            if (!hasTexture) {
-                F.Filler = noopFiller;
-                ++wallFacesHidden;
-                continue;
-            }
             if (!teleporterMirrorMat) {
                 teleporterMirrorMat = getAlignedType<Material>(16);
                 std::memcpy(teleporterMirrorMat, F.Txtr, sizeof(Material));
                 teleporterMirrorMat->Flags |= Mat_Transparent;
                 teleporterMirrorMat->XparBlendAlpha = 0.30f;  // 30% wall, 70% mirror beneath
+                // Provide a 1×1 stub texture so MekaleleImpl<Transparent>
+                // doesn't crash on the missing-Texture path. Uses the
+                // source material's BaseCol as the single texel.
+                if (!teleporterMirrorMat->Txtr) {
+                    teleporterMirrorMat->Txtr = synthesizeFlatTexture(F.Txtr->BaseCol);
+                }
                 teleporterMirrorMat->Prev = nullptr;
                 teleporterMirrorMat->Next = MatLib;
                 if (MatLib) MatLib->Prev = teleporterMirrorMat;
@@ -411,77 +426,11 @@ int BuildMirrorMeshAndHideWall(Scene *sc, const MirrorPlane &plane)
 
     std::fprintf(stderr,
         "[MIRROR] cloned %u verts / %u faces into 'mirror_clone'; "
-        "wall faces: %d retargeted to transparent mat, %d no-op'd (no texture); "
+        "retargeted %d wall faces to transparent mat; "
         "cloned %d omnis (mirror bbox z=[%.1f..%.1f])\n",
-        unsigned(vOfs), unsigned(fOfs), wallFacesRetargeted,
-        wallFacesHidden, omniCount,
+        unsigned(vOfs), unsigned(fOfs), wallFacesRetargeted, omniCount,
         bbMin.z, bbMax.z);
     return int(fOfs);
-}
-
-// Bresenham line into the active framebuffer. VPage / XRes / YRes are
-// engine-global; they live at the file root (declared in FDS_VARS / DECS)
-// so we reference them via the ::-rooted name to dodge the surrounding
-// `namespace fds` lookup scope.
-static void DrawFramebufferLine(int x0, int y0, int x1, int y1, uint32_t color)
-{
-    dword *fb = (dword*)::VPage;
-    const int W = int(::XRes), H = int(::YRes);
-    auto plot = [&](int x, int y) {
-        if (x < 0 || x >= W || y < 0 || y >= H) return;
-        fb[size_t(y) * size_t(W) + size_t(x)] = color;
-    };
-    int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    while (true) {
-        plot(x0, y0);
-        if (x0 == x1 && y0 == y1) break;
-        const int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
-    }
-}
-
-void DrawMirrorFrame(Scene *sc)
-{
-    if (!sc) return;
-    const uint32_t kFrameColor = 0xFFFFC080u;  // soft warm white (BGRA)
-    auto isTeleporter = [](const Face &F) -> bool {
-        // After BuildMirror the wall mat was retargeted to a transparent
-        // clone, so match by Filler/UV-pointing into the original
-        // material name isn't reliable. Track by the per-face property
-        // we know stays stable: ShadowMatID (greets's Piramid wall
-        // split stamped a per-cluster ID and teleporter faces never get
-        // ShadowMatID assigned). Cheaper match: just compare against
-        // the cloned mat name "teleporter" — names survived the
-        // material clone via memcpy.
-        return F.Txtr && F.Txtr->Name &&
-               std::strcmp(F.Txtr->Name, "teleporter") == 0;
-    };
-    int edgesDrawn = 0;
-    for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
-        if (Obj->Type != Obj_TriMesh) continue;
-        TriMesh *T = (TriMesh*)Obj->Data;
-        if (!T || !T->Faces) continue;
-        for (DWord fi = 0; fi < T->FIndex; ++fi) {
-            Face &F = T->Faces[fi];
-            if (!isTeleporter(F)) continue;
-            if (!F.A || !F.B || !F.C) continue;
-            // Skip if any vert behind near plane (.RZ <= 0 = z too small).
-            if (F.A->TPos_AOS.z <= sc->NZP ||
-                F.B->TPos_AOS.z <= sc->NZP ||
-                F.C->TPos_AOS.z <= sc->NZP) continue;
-            const int ax = int(F.A->PX), ay = int(F.A->PY);
-            const int bx = int(F.B->PX), by = int(F.B->PY);
-            const int cx = int(F.C->PX), cy = int(F.C->PY);
-            DrawFramebufferLine(ax, ay, bx, by, kFrameColor);
-            DrawFramebufferLine(bx, by, cx, cy, kFrameColor);
-            DrawFramebufferLine(cx, cy, ax, ay, kFrameColor);
-            edgesDrawn += 3;
-        }
-    }
-    (void)edgesDrawn;
 }
 
 void UpdateMirrorPerFrame(Scene *sc, const MirrorPlane &plane)

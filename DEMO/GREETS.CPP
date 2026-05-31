@@ -1948,13 +1948,6 @@ struct GreetsScene : SceneDriver {
 		}
 		Render();
 
-		// Frame outline around the mirror — runs after Render so the
-		// lines land on top of the composited deferred frame, before
-		// the on-screen HUD/diagnostics get drawn.
-		if (fds::FeatureFlags::greets_mirror()) {
-			fds::DrawMirrorFrame(GreetSc);
-		}
-
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 
