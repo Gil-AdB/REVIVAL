@@ -201,6 +201,11 @@ add_library(${PROJECT_NAME} STATIC ${ALL_FILES})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Optional PGO flags (no-op when -DPGO_PHASE=OFF). Defined at top-level
+# CMakeLists.txt; we explicitly link Modplayer's Rust archive elsewhere
+# and don't pull these flags into the cargo build.
+target_link_libraries(${PROJECT_NAME} PUBLIC pgo_flags)
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     _CRT_SECURE_NO_WARNINGS
     _LIB

@@ -137,6 +137,65 @@ endif()
 # future real-FMA-sensitive site that's properly identified first.
 add_compile_options(-ffp-contract=fast)
 
+# ----------------------------------------------------------------------------
+# Profile-Guided Optimization (PGO) — clang frontend-based, 2-build flow.
+#
+# Drive via the PGO_PHASE cache variable:
+#   -DPGO_PHASE=OFF                   (default — no PGO flags)
+#   -DPGO_PHASE=INSTRUMENT            (build an instrumented binary)
+#   -DPGO_PHASE=USE=<merged.profdata> (rebuild with profile feedback)
+#
+# Composes with the thin LTO setup above (LTO is enabled per-config and we
+# don't touch it here). PGO flags are applied to compile + link via the
+# `pgo_flags` INTERFACE target — DEMO and FDS link it; Modplayer (Rust)
+# does not, so cargo's link is unaffected.
+#
+# Usage example:
+#   cmake -S . -B build-pgo-instrument -G Ninja -DPGO_PHASE=INSTRUMENT
+#   cmake --build build-pgo-instrument
+#   cd Runtime && LLVM_PROFILE_FILE='../build-pgo-instrument/pgo-prof/run-%p-%m.profraw' \
+#       ../build-pgo-instrument/DEMO/DEMO --bench=...
+#   xcrun llvm-profdata merge -o build-pgo-instrument/pgo-prof/merged.profdata \
+#       build-pgo-instrument/pgo-prof/*.profraw
+#   cmake -S . -B build-pgo-use -G Ninja \
+#       -DPGO_PHASE=USE=$(pwd)/build-pgo-instrument/pgo-prof/merged.profdata
+#   cmake --build build-pgo-use
+# ----------------------------------------------------------------------------
+set(PGO_PHASE "OFF" CACHE STRING
+    "PGO phase: OFF | INSTRUMENT | USE=<abs-path-to-merged.profdata>")
+
+add_library(pgo_flags INTERFACE)
+
+if(PGO_PHASE STREQUAL "OFF")
+    # Nothing to do.
+elseif(PGO_PHASE STREQUAL "INSTRUMENT")
+    set(_pgo_profdir "${CMAKE_BINARY_DIR}/pgo-prof")
+    file(MAKE_DIRECTORY "${_pgo_profdir}")
+    # The %p (pid) + %m (binary signature) placeholders let one run produce
+    # multiple .profraw files without clobbering each other. LLVM_PROFILE_FILE
+    # at run-time can override the path; the baked-in path is the fallback.
+    set(_pgo_instr_pattern "${_pgo_profdir}/profile-%p-%m.profraw")
+    message(STATUS "PGO: INSTRUMENT phase, raw profiles -> ${_pgo_instr_pattern}")
+    target_compile_options(pgo_flags INTERFACE
+        "-fprofile-instr-generate=${_pgo_instr_pattern}")
+    target_link_options(pgo_flags INTERFACE
+        "-fprofile-instr-generate=${_pgo_instr_pattern}")
+elseif(PGO_PHASE MATCHES "^USE=(.+)$")
+    set(_pgo_profdata "${CMAKE_MATCH_1}")
+    if(NOT IS_ABSOLUTE "${_pgo_profdata}")
+        message(FATAL_ERROR "PGO_PHASE=USE=<path> requires an ABSOLUTE path to merged.profdata (got '${_pgo_profdata}')")
+    endif()
+    if(NOT EXISTS "${_pgo_profdata}")
+        message(FATAL_ERROR "PGO_PHASE=USE: profdata file does not exist: ${_pgo_profdata}")
+    endif()
+    message(STATUS "PGO: USE phase, feeding back ${_pgo_profdata}")
+    target_compile_options(pgo_flags INTERFACE
+        "-fprofile-instr-use=${_pgo_profdata}")
+    # No link-time PGO flag needed for the USE phase with frontend profiling.
+else()
+    message(FATAL_ERROR "PGO_PHASE must be OFF | INSTRUMENT | USE=<abs-path-to-merged.profdata> (got '${PGO_PHASE}')")
+endif()
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # CTest entry points — populated by tests/CMakeLists.txt + smoke checks
