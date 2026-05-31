@@ -86,6 +86,17 @@ struct Face
 	// distinct clusters greets needs without inflating matTable past
 	// the 8-bit matID cap).
 	uint16_t         ShadowMatID = 0;
+	// Planar-mirror identity (DEMO/GreetsMirror.cpp). Per Mirror, a unique
+	// 1..255 id assigned at scene init. Two distinct roles depending on
+	// the face's purpose in the mirror system:
+	//   * Mirror SURFACE face (the wall): mask-only pre-pass stamps this
+	//     value into GBuffer::mirrorId at the face's screen-space pixels.
+	//   * Cloned reflected face: Mekalele's per-pixel inner loop tests
+	//     gb.mirrorId[pixel] == F->mirrorMaskTag and skips the write
+	//     when mismatched — so clone pixels can only land where their
+	//     owning mirror's wall covered.
+	// 0 = not a mirror face, no mask write or check.
+	uint8_t          mirrorMaskTag = 0;
 	// SoA refactor Phase 3 (see docs/SOA_VERTEX_REFACTOR.md). Indices
 	// of A/B/C into ParentTri->Verts[] (and equivalently into the
 	// per-mesh VertexFrame SoA arrays). Populated by

@@ -10,6 +10,7 @@
 #include <Base/Scene.h>
 #include <Base/TriMesh.h>
 #include <Base/Vertex.h>
+#include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
 
 #include <algorithm>
 #include <cmath>
@@ -159,6 +160,14 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
     return out;
 }
 
+// Monotonic mirror id counter. Each successful BuildMirror call grabs
+// the next id (1..255); the value gets written into Face::mirrorMaskTag
+// on every face that participates in this mirror (walls + clones), and
+// the per-pixel mask check in Mekalele compares against it. Wrap-around
+// past 255 is treated as a hard error — at that point the encoding is
+// out of u8 space and we'd need to widen the plane.
+static uint8_t s_nextMirrorId = 1;
+
 Mirror BuildMirror(Scene *sc, const char *wallMatName)
 {
     Mirror m{};
@@ -166,6 +175,12 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     m.wallMaterialName = wallMatName;
     m.plane = FindMirrorPlaneByMatName(sc, wallMatName);
     if (!m.plane.valid) return m;
+    if (s_nextMirrorId == 0) {
+        std::fprintf(stderr, "[MIRROR '%s'] all 255 mirror ids in use — skipping\n",
+                     wallMatName);
+        return m;
+    }
+    m.id = s_nextMirrorId++;
 
     const Vector &N = m.plane.N;
     const float   d = m.plane.d;
@@ -282,6 +297,11 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
             CF.NormProd = -(CF.N.x * CF.A->Pos.x +
                             CF.N.y * CF.A->Pos.y +
                             CF.N.z * CF.A->Pos.z);
+            // Tag every clone face with the owning mirror's id. Mekalele
+            // reads this into ctx.mirrorTag and rejects any pixel whose
+            // gb.mirrorId doesn't match — so clones can only paint inside
+            // their own mirror's screen-space footprint.
+            CF.mirrorMaskTag = m.id;
             ++fOfs;
         }
         m.meshRanges.push_back({T, vStart, T->VIndex});
@@ -361,7 +381,20 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
                 MatLib = m.wallMatClone;
             }
             F.Txtr = m.wallMatClone;
+            // Wall face also tagged with the mirror id. The mask pre-pass
+            // (StampMirrorMasks) reads this to know which value to stamp
+            // into gb.mirrorId for the face's screen-space pixels.
+            F.mirrorMaskTag = m.id;
+            m.wallFaces.push_back(&F);
             ++m.wallFacesRetargeted;
+        }
+    }
+    // Allocate gb.mirrorId plane on first mirror in the scene. Sized
+    // to match the engine surface; 1 byte per pixel = 2 MB at 1080p.
+    if (g_gbuffer) {
+        const size_t needed = g_gbuffer->normal.size();
+        if (g_gbuffer->mirrorId.size() < needed) {
+            g_gbuffer->mirrorId.assign(needed, 0);
         }
     }
 
@@ -452,6 +485,92 @@ void UpdateMirror(Scene *sc, Mirror &m)
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
 {
     for (auto &m : mirrors) UpdateMirror(sc, m);
+}
+
+namespace {
+
+using u8 = uint8_t;
+
+// Minimal 2D scanline triangle fill, writes a single u8 value per
+// covered pixel. Used for the per-frame mask pre-pass — we don't need
+// Z, perspective interpolation, edge subpixel precision, anything
+// else; just "where does this triangle cover in screen space."
+//
+// Coordinates expected in PX/PY pixel-space (what Transform_Objects
+// already produced). Clipped to [0, w) × [0, h).
+inline void StampTri2D(u8 *plane, int w, int h,
+                       float ax, float ay,
+                       float bx, float by,
+                       float cx, float cy,
+                       u8 value)
+{
+    // Sort vertices by Y so we can split the triangle into a flat-top
+    // and flat-bottom half and scan each between two edges per row.
+    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); }
+    if (by > cy) { std::swap(bx, cx); std::swap(by, cy); }
+    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); }
+    const int yTop = std::max(0, int(std::ceil(ay)));
+    const int yMid = std::clamp(int(std::ceil(by)), 0, h);
+    const int yBot = std::min(h, int(std::ceil(cy)));
+    if (yTop >= yBot) return;
+    // Edge slopes (dx / dy) for the three edges. Guard against 1-pixel
+    // tall triangles to avoid divide-by-zero.
+    auto slope = [](float x0, float y0, float x1, float y1) -> float {
+        const float dy = y1 - y0;
+        return dy > 1e-6f ? (x1 - x0) / dy : 0.0f;
+    };
+    const float dxLong  = slope(ax, ay, cx, cy);
+    const float dxUpper = slope(ax, ay, bx, by);
+    const float dxLower = slope(bx, by, cx, cy);
+    // Upper half: edges (A→C, A→B). Lower half: edges (A→C, B→C).
+    for (int y = yTop; y < yBot; ++y) {
+        const float yf = float(y);
+        const float xLong = ax + dxLong * (yf - ay);
+        float xOther;
+        if (y < yMid) {
+            xOther = ax + dxUpper * (yf - ay);
+        } else {
+            xOther = bx + dxLower * (yf - by);
+        }
+        int xL = int(std::ceil(std::min(xLong, xOther)));
+        int xR = int(std::ceil(std::max(xLong, xOther)));
+        if (xL < 0) xL = 0;
+        if (xR > w) xR = w;
+        if (xL >= xR) continue;
+        std::memset(plane + size_t(y) * size_t(w) + size_t(xL), value, size_t(xR - xL));
+    }
+}
+
+}  // namespace
+
+void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
+{
+    if (!sc || !g_gbuffer) return;
+    auto &plane = g_gbuffer->mirrorId;
+    if (plane.empty()) return;  // no mirror has activated the plane
+    // Clear last frame's coverage. Cheap memset — 2 MB at 1080p.
+    std::memset(plane.data(), 0, plane.size());
+    // Use the engine surface size that matches the gbuffer plane.
+    const int w = int(::XRes);
+    const int h = int(::YRes);
+    if (size_t(w) * size_t(h) > plane.size()) return;
+    for (const auto &m : mirrors) {
+        if (m.id == 0 || m.wallFaces.empty()) continue;
+        for (const Face *F : m.wallFaces) {
+            if (!F || !F->A || !F->B || !F->C) continue;
+            // Skip faces with any vert behind the near plane — PX/PY
+            // would be projection-blowups, and the wall isn't visible
+            // through that pixel anyway.
+            if (F->A->TPos_AOS.z <= sc->NZP ||
+                F->B->TPos_AOS.z <= sc->NZP ||
+                F->C->TPos_AOS.z <= sc->NZP) continue;
+            StampTri2D(plane.data(), w, h,
+                       F->A->PX, F->A->PY,
+                       F->B->PX, F->B->PY,
+                       F->C->PX, F->C->PY,
+                       m.id);
+        }
+    }
 }
 
 }  // namespace fds

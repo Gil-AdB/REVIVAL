@@ -73,6 +73,16 @@ struct Mirror {
     Material   *wallMatClone = nullptr;
     std::vector<ClonedMeshRange> meshRanges;
     std::vector<ClonedOmniRef>   omniClones;
+    // Wall face pointers — the actual mirror SURFACE faces in the live
+    // scene meshes (NOT in cloneMesh). Used by StampMirrorMasks to
+    // rasterize each wall triangle's screen footprint into the gb.mirrorId
+    // plane every frame, so the clone-rasterizer's per-pixel check can
+    // gate writes to "inside this mirror's wall footprint only".
+    std::vector<Face*> wallFaces;
+    // Unique 1..255 mirror id. Assigned at BuildMirror time, written to
+    // gb.mirrorId by the per-frame mask pre-pass and matched against
+    // Face::mirrorMaskTag in Mekalele's inner loop.
+    uint8_t     id = 0;
     int         wallFacesRetargeted = 0;
     int         clonedFaces  = 0;
     int         clonedVerts  = 0;
@@ -101,5 +111,14 @@ void UpdateMirror(Scene *sc, Mirror &m);
 
 // Convenience: update every mirror in a list. Empty list = no-op.
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
+
+// Per-frame mask pre-pass: walks every mirror's wall faces, projects
+// each triangle to screen space using already-transformed PX/PY, and
+// scanline-fills gb.mirrorId with the mirror's id at each covered
+// pixel. Cleared to 0 at entry so previous-frame coverage doesn't
+// leak. Call AFTER Transform_Objects (which populates PX/PY on the
+// wall verts) and BEFORE Render() (so the stamp is in place when
+// clone faces rasterize).
+void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors);
 
 }  // namespace fds

@@ -1957,6 +1957,14 @@ struct GreetsScene : SceneDriver {
 				}
 			}
 		}
+		// Stamp gb.mirrorId with each mirror's id at its wall faces'
+		// screen-space pixels — Mekalele's clone path tests this per
+		// pixel and only commits writes where the matching mirror's
+		// wall covers. Without this clones spill outside the mirror
+		// surface footprint (worked for teleporter only because the
+		// surrounding Piramid walls were the de facto occluder mask).
+		fds::StampMirrorMasks(GreetSc, g_greetsMirrors);
+
 		Render();
 
 		// PROFILER: FLIP phase. also contains display of runtime stats

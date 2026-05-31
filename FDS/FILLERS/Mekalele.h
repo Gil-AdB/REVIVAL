@@ -24,6 +24,7 @@
 #include "Base/FeatureFlags.h"
 
 namespace meka {
+using u8  = uint8_t;
 using u16 = uint16_t;
 using i32 = int32_t;
 using u32 = uint32_t;
@@ -65,6 +66,13 @@ struct GBuffer {
 	// without exceeding the 8-bit matID encoded in `txtr`. Optional —
 	// when empty, the receiver falls back to `uint16_t(matID + 1)`.
 	std::vector<u16> shadowMatID;
+	// Per-pixel 8-bit planar-mirror identity. Used by DEMO/GreetsMirror's
+	// per-mirror clipping: a mask-only pre-pass stamps mirror walls'
+	// IDs here; the per-pixel Mekalele inner loop tests this against
+	// each clone face's F->mirrorMaskTag and rejects writes that don't
+	// match. 0 = not a mirror pixel (default). Optional — when empty,
+	// the inner-loop check is a no-op and clone faces commit normally.
+	std::vector<u8> mirrorId;
 };
 
 // Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
@@ -226,6 +234,20 @@ struct TileRasterizerCtx {
 	//      merge)
 	//   3. uint16_t(F->Txtr->ID + 1) (legacy matID+1 fallback)
 	u16 shadowMatId = 0;
+
+	// Per-face planar-mirror tag, broadcast from Face::mirrorMaskTag.
+	// Roles depending on how the face was dispatched:
+	//   * 0  → not a mirror face. Inner loop ignores the mirrorId plane
+	//          entirely; rasterizer writes normally.
+	//   * 1..255, face is a CLONE face: inner loop tests
+	//          gb.mirrorId[pixel] == mirrorTag and masks off any pixel
+	//          where the owning mirror's wall hasn't been stamped.
+	//   * 1..255, face is the mirror SURFACE (stamped by the mask-only
+	//          pre-pass dispatcher): inner loop WRITES this value into
+	//          gb.mirrorId[pixel] instead of doing the masked-write
+	//          normal path. Controlled by the rasterizer dispatch (see
+	//          MekaleleMaskOnly), not by a separate field on the ctx.
+	u8 mirrorTag = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -248,6 +270,7 @@ struct GBufferSpan {
 	u32 *lightmapMF;
 	u16 *lightmapST;
 	u16 *shadowMatID;
+	u8  *mirrorId;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
@@ -257,6 +280,7 @@ struct GBufferSpan {
 		if (lightmapMF) lightmapMF += offset;
 		if (lightmapST) lightmapST += offset;
 		if (shadowMatID) shadowMatID += offset;
+		if (mirrorId) mirrorId += offset;
 		zbuffer += offset;
 		return *this;
 	}
@@ -284,6 +308,13 @@ struct GBufferSpan {
 		u16 *shadowMatIDPtr = gbuffer.shadowMatID.empty()
 			? nullptr
 			: gbuffer.shadowMatID.data() + offset;
+		// mirrorId plane: allocated only when a scene actually uses
+		// planar mirrors (DEMO/GreetsMirror's allocator). When null,
+		// the inner-loop mask check below short-circuits and clone
+		// faces commit normally.
+		u8 *mirrorIdPtr = gbuffer.mirrorId.empty()
+			? nullptr
+			: gbuffer.mirrorId.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
@@ -291,6 +322,7 @@ struct GBufferSpan {
 			lmMFPtr,
 			lmSTPtr,
 			shadowMatIDPtr,
+			mirrorIdPtr,
 			ctx.zbuffer + offset
 		};
 	}
@@ -493,6 +525,27 @@ struct TileRasterizer {
 				auto zmask = z_candidate > z_existing;
 
 				p_mask &= zmask;
+
+				// Planar-mirror per-pixel clip. When this face is a
+				// clone tagged with a mirror id, mask off any lane
+				// whose gb.mirrorId doesn't match — the wall pre-pass
+				// only stamped IDs at pixels covered by that mirror's
+				// wall, so clone pixels outside the wall's screen
+				// footprint get rejected here. Compiled into the same
+				// p_mask the rest of the path already respects; no
+				// extra branch needed downstream.
+				if (ctx.mirrorTag != 0 && span.mirrorId != nullptr) {
+					alignas(8) u8 mirrorIdBytes[8];
+					std::memcpy(mirrorIdBytes, span.mirrorId, 8);
+					// Widen 8 u8 → 8 i32 lanes for SIMD compare. The
+					// _mm_loadl + cvtepu8 dance keeps the load aligned
+					// and lets the compiler fold the compare into
+					// the existing p_mask register.
+					const __m128i packed = _mm_loadl_epi64((const __m128i*)mirrorIdBytes);
+					const Vec8i pixelIds = Vec8i(_mm256_cvtepu8_epi32(packed));
+					const Vec8ib mirrorMask = (pixelIds == Vec8i(int(ctx.mirrorTag)));
+					p_mask &= mirrorMask;
+				}
 
 				if (barry::any_lane_set(p_mask)) {
 					*(__m128i*)span.zbuffer = _mm_blendv_epi8(*(__m128i*)span.zbuffer, compress(z_candidate), compress(Vec8ui(p_mask)));
@@ -882,6 +935,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.lmMeshId  = lmMeshId,
 		.lmFaceIdx = lmFaceIdx,
 		.shadowMatId = shadowMatId,
+		.mirrorTag = F->mirrorMaskTag,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
