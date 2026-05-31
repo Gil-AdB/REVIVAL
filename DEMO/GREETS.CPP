@@ -44,10 +44,10 @@ static float frand() {
 
 static Scene *GreetSc;
 
-// Mirror plane (teleporter wall). Populated at the tail of
-// Initialize_Greets via FindTeleporterMirrorPlane. Phases 2-3 of the
-// mirror feature read this; Phase 1 only logs it for verification.
-static fds::MirrorPlane g_greetsMirrorPlane;
+// Mirrors active in greets. One entry per `BuildMirror(wallMatName)`
+// call at scene init; per-frame `UpdateAllMirrors` re-mirrors every
+// dynamic source mesh + cloned omni for each.
+static std::vector<fds::Mirror> g_greetsMirrors;
 
 // Forward-declared at namespace scope (the rest of this TU is in an
 // anonymous namespace where `extern` would silently get internal
@@ -1325,14 +1325,16 @@ void Initialize_Greets()
 		});
 	}
 
-	// Mirror Phase 1: locate the teleporter wall and compute its plane.
-	g_greetsMirrorPlane = fds::FindTeleporterMirrorPlane(GreetSc);
-	// Mirror Phase 2: build a one-shot world-mirrored clone of every
-	// mesh and hide the wall faces. Z-buffer + the surrounding Piramid
-	// walls form the visual portal frame so the mirror only shows in
-	// the teleporter rectangle. Gated by --greets-mirror (opt-in).
+	// Build per-mirror clones. Each material name passed to BuildMirror
+	// produces an independent Mirror (own plane, own clone mesh, own
+	// cloned omnis). Extend this list to add more mirrors in greets.
 	if (fds::FeatureFlags::greets_mirror()) {
-		fds::BuildMirrorMeshAndHideWall(GreetSc, g_greetsMirrorPlane);
+		g_greetsMirrors.clear();
+		const char *kMirrorMats[] = { "teleporter" };
+		for (const char *matName : kMirrorMats) {
+			fds::Mirror m = fds::BuildMirror(GreetSc, matName);
+			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
+		}
 	}
 }
 
@@ -1775,11 +1777,10 @@ struct GreetsScene : SceneDriver {
 
 		// Mirror clone tracking: re-mirror dynamic meshes (Hull / legs)
 		// and cloned omnis after Animate_Objects refreshes the source
-		// poses, before Transform_Objects reads positions. No-op when
+		// poses, before Transform_Objects reads positions. Iterates
+		// every mirror in g_greetsMirrors. No-op list when
 		// --greets-mirror is off.
-		if (fds::FeatureFlags::greets_mirror()) {
-			fds::UpdateMirrorPerFrame(GreetSc, g_greetsMirrorPlane);
-		}
+		fds::UpdateAllMirrors(GreetSc, g_greetsMirrors);
 
 		// Free-camera shadow override: when in shadow-view mode AND FC is
 		// active, the spotlight tracks FC's pose. Lets you fly with Tab
