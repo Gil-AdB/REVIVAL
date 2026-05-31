@@ -220,6 +220,20 @@ target_compile_options(${PROJECT_NAME} PUBLIC
     -Wno-parentheses)
 
 # -ffp-contract=fast is set globally in the top-level CMakeLists.txt.
+# Per-file override: the clipper's vertex visibility tests (Calc_Flags:
+# PX < ClipX1, PX > ClipX2, etc.) and edge interpolation (Near/Far/
+# Left/Right/Up/Down) are extremely sensitive to 1-ULP shifts in PX/PY
+# at frustum boundaries. With FMA fusion enabled globally, the slightly-
+# different rounding in projection/interpolation flips classification
+# for grazing vertices → clipper emits stretched triangles ("smeared
+# sliver across the horizon" in city, bisected to 7e4c2ac promoting
+# the per-file Transform.cpp setting to global). Pin this file back to
+# the default contraction (-ffp-contract=on) which only fuses within a
+# single expression — eliminates the cross-statement FMA divergence
+# that confuses the clipper, while letting rasterizer + lighting
+# kernels keep the global -fast.
+set_source_files_properties(FRUSTRUM/FRUSTRUM.CPP PROPERTIES
+    COMPILE_OPTIONS "-ffp-contract=on")
 
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time
