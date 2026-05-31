@@ -221,14 +221,22 @@ target_compile_options(${PROJECT_NAME} PUBLIC
 
 # Enable cross-statement FMA contraction on the per-vertex transform
 # hot loops. mul_add() in vectorclass falls back to plain mul+add on
-# arm64 (the __FMA__ macro it gates on is x86-specific), and the
-# default -ffp-contract=on only fuses within a single expression — not
-# across the staged-store form used in the column-major matrix-vector.
-# Scoped to Transform.cpp only: promoting -fast globally (7e4c2ac)
-# introduced a city-horizon stretched-triangle artifact from 1-ULP
-# shifts at frustum boundaries (bisected 2026-05-31, see top-level
-# CMakeLists.txt comment).
-set_source_files_properties(RENDER/Transform.cpp PROPERTIES
+# arm64, and the default -ffp-contract=on only fuses within a single
+# expression — not across the staged-store form used in the column-
+# major matrix-vector. Scoped to Transform.cpp only.
+#
+# Why not globally / on more files: see DEMO/CMakeLists.txt long
+# comment. Short version: TheOtherBarry / Mekalele template
+# instantiations are shared across TUs; an FMA mismatch between any
+# two instantiating TUs triggers an ODR violation that surfaces as a
+# city-horizon smear (bisected 2026-05-31). To safely add -fast to
+# more files, convert the shared rasterizer templates to explicit
+# instantiation in one TU with `extern template` declarations
+# elsewhere — then any file can opt in independently.
+set(FFP_FAST_FILES
+    RENDER/Transform.cpp
+)
+set_source_files_properties(${FFP_FAST_FILES} PROPERTIES
     COMPILE_OPTIONS "-ffp-contract=fast")
 
 if(EMSCRIPTEN)

@@ -54,6 +54,25 @@ add_executable(${PROJECT_NAME} ${DEMO_SOURCES})
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     SIMDE_ENABLE_NATIVE_ALIASES)
 
+# -ffp-contract=fast: NOT applied to any DEMO file.
+#
+# Bisect on 2026-05-31 traced the city-horizon smear artifact to
+# FOUNTAIN.CPP getting -fast. Root cause is a template-instantiation
+# ODR issue: FOUNTAIN.CPP, Snapshot.cpp, PREPROC.CPP, RenderInner.cpp,
+# and FillerTest.cpp each instantiate TheOtherBarry<TBlendMode, TTextureMode>
+# variants (forward rasterizer template). When one TU is built with
+# -fast and others with -on, the linker silently picks one — if it
+# picks the -fast version, every caller (including city) ends up using
+# the FMA-fused edge functions whose 1-ULP shifts cause stretched-
+# triangle artifacts at frustum boundaries.
+#
+# Re-enabling -fast for the perf-relevant hot-loop files (FILLERS.CPP,
+# Mekalele.cpp, DeferredLighting.cpp) requires either making ALL
+# TheOtherBarry/Mekalele template instantiators -fast together, or
+# converting to explicit template instantiation in one TU with
+# `extern template` declarations elsewhere. Tracked as follow-up;
+# meanwhile only RENDER/Transform.cpp gets -fast (see FDS/CMakeLists).
+
 if(EMSCRIPTEN)
     # Emscripten brings its own SDL2 via -sUSE_SDL=2; don't require
     # find_package(SDL2) on this target.
