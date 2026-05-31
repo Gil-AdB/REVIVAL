@@ -9,6 +9,8 @@ set(DEMO_SOURCES
     CHASE.H
     CITY.CPP
     CITY.H
+    CityPanoramaCache.cpp
+    CityPanoramaCache.h
     Config.cpp
     Config.h
     CRASH.CPP

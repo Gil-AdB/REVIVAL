@@ -312,6 +312,7 @@ DEMO.exe
 /Runtime/snapshots-*/
 /Runtime/snap-*/
 /Runtime/glat-*/
+/Runtime/cache/
 /libpng16/libpng16.lib
 /libpng16/zlib.lib
 /build-wasm/

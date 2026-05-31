@@ -6,6 +6,7 @@
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/ShadowMap.h>
 #include "CITY.H"
+#include "CityPanoramaCache.h"
 #include "FrameProfiler.h"
 #include "MeshOps.h"
 #include "SceneTick.h"
@@ -1805,16 +1806,50 @@ void Initialize_City()
 	}
 	std::vector<uint32_t> panorama(PANORAMA_XRES * PANORAMA_YRES);
 
-	for (Object* Obj = CitySc->ObjectHead; skipCubeMap ? false : Obj != nullptr; Obj = Obj->Next) {
-		// Bake runs on the init worker; ESC during Glato sets g_shouldQuit
-		// but is otherwise stuck behind t1.join() until the bake finishes.
-		// Bail early so the user gets sub-second quit response.
-		if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
-		if (Obj->Type != Obj_TriMesh) { continue; }
-		if (Obj->Name == nullptr) { continue; }
-		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
-		building_count++;
-		bakeBuildingPanorama(Obj, EnvCam, TmpSurf, cubeMapper, cubeMaps, panorama);
+	// Collect the buildings up front so the disk cache can key off a
+	// stable name list (and skip the bake loop entirely on a cache hit).
+	std::vector<fds::BuildingPanoramaEntry> buildings;
+	if (!skipCubeMap) {
+		for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) { continue; }
+			if (Obj->Name == nullptr) { continue; }
+			if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9'
+			      && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
+			buildings.push_back({Obj, std::string(Obj->Name)});
+		}
+	}
+
+	const bool envCacheEnabled = !skipCubeMap && fds::FeatureFlags::city_envmap_cache();
+	uint64_t envCacheKey = 0;
+	if (envCacheEnabled) {
+		envCacheKey = fds::ComputeCityPanoramaCacheKey(
+			"SCENES/CITY.FLD",
+			PANORAMA_XRES, PANORAMA_YRES,
+			CUBE_MAP_XRES, CUBE_MAP_YRES,
+			buildings);
+	}
+	const bool cacheHit = envCacheEnabled && envCacheKey != 0
+		&& fds::TryLoadCityPanoramaCache(envCacheKey,
+		                                  PANORAMA_XRES, PANORAMA_YRES,
+		                                  buildings);
+	if (cacheHit) {
+		building_count = int(buildings.size());
+	} else {
+		for (const auto& b : buildings) {
+			// Bake runs on the init worker; ESC during Glato sets g_shouldQuit
+			// but is otherwise stuck behind t1.join() until the bake finishes.
+			// Bail early so the user gets sub-second quit response.
+			if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
+			building_count++;
+			bakeBuildingPanorama(b.obj, EnvCam, TmpSurf, cubeMapper, cubeMaps, panorama);
+		}
+		if (envCacheEnabled && envCacheKey != 0
+		    && !g_shouldQuit.load(std::memory_order_relaxed)
+		    && building_count == int(buildings.size())) {
+			fds::WriteCityPanoramaCache(envCacheKey,
+			                             PANORAMA_XRES, PANORAMA_YRES,
+			                             buildings);
+		}
 	}
 
 	// For deferred-path env-map dispatch: the lighting pass has only

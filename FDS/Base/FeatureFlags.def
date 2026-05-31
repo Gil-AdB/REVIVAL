@@ -118,6 +118,7 @@ FDS_FLAG_BOOL(deferred_skybox,          "FDS_DEFERRED_SKYBOX",          0,      
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
+FDS_FLAG_BOOL(city_envmap_cache,        "FDS_CITY_ENVMAP_CACHE",        1,                              "city",     "Cache per-building env-map panoramas to Runtime/cache/city_envmap.bin keyed by CITY.FLD + panorama dims. Default on — slashes city bench/PGO init from ~4.8s to ~0.4s. --no-city-envmap-cache forces a fresh bake (and rewrites the cache).")
 #if FDS_DEV
 FDS_FLAG_BOOL(debug_panorama,           "FDS_DEBUG_PANORAMA",           0,                              "city-dev", "[dev] City: synthesize debug panoramas with gridlines")
 FDS_FLAG_BOOL(dump_panorama,            "FDS_DUMP_PANORAMA",            0,                              "city-dev", "[dev] City: dump baked panoramas to PPM")
