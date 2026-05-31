@@ -219,21 +219,17 @@ target_compile_options(${PROJECT_NAME} PUBLIC
     -Werror=return-type
     -Wno-parentheses)
 
-# -ffp-contract=fast is set globally in the top-level CMakeLists.txt.
-# Per-file override: the clipper's vertex visibility tests (Calc_Flags:
-# PX < ClipX1, PX > ClipX2, etc.) and edge interpolation (Near/Far/
-# Left/Right/Up/Down) are extremely sensitive to 1-ULP shifts in PX/PY
-# at frustum boundaries. With FMA fusion enabled globally, the slightly-
-# different rounding in projection/interpolation flips classification
-# for grazing vertices → clipper emits stretched triangles ("smeared
-# sliver across the horizon" in city, bisected to 7e4c2ac promoting
-# the per-file Transform.cpp setting to global). Pin this file back to
-# the default contraction (-ffp-contract=on) which only fuses within a
-# single expression — eliminates the cross-statement FMA divergence
-# that confuses the clipper, while letting rasterizer + lighting
-# kernels keep the global -fast.
-set_source_files_properties(FRUSTRUM/FRUSTRUM.CPP PROPERTIES
-    COMPILE_OPTIONS "-ffp-contract=on")
+# Enable cross-statement FMA contraction on the per-vertex transform
+# hot loops. mul_add() in vectorclass falls back to plain mul+add on
+# arm64 (the __FMA__ macro it gates on is x86-specific), and the
+# default -ffp-contract=on only fuses within a single expression — not
+# across the staged-store form used in the column-major matrix-vector.
+# Scoped to Transform.cpp only: promoting -fast globally (7e4c2ac)
+# introduced a city-horizon stretched-triangle artifact from 1-ULP
+# shifts at frustum boundaries (bisected 2026-05-31, see top-level
+# CMakeLists.txt comment).
+set_source_files_properties(RENDER/Transform.cpp PROPERTIES
+    COMPILE_OPTIONS "-ffp-contract=fast")
 
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time

@@ -93,17 +93,13 @@ if(EMSCRIPTEN)
     endif()
 endif()
 
-# Aggressive FMA fusion across statements (vs the default -ffp-contract=on
-# which only fuses within a single expression). Unlocks vector FMLA on
-# arm64 NEON for mul_add() chains that the default form treats as
-# separate mul+add. Tradeoff: slightly different LSB-level FP results
-# (the FMA path retains full precision through the multiply, where the
-# unfused mul+add rounds twice). Bit-exact snapshot/lightmap-bake diffs
-# may shift by 1 ULP per chain — acceptable for the rendering pipeline;
-# the existing shadow-lightmap-recompute-bake diagnostics measure
-# functional equivalence at the per-byte atlas level rather than per-
-# instruction reproducibility.
-add_compile_options(-ffp-contract=fast)
+# -ffp-contract=fast: NOT applied globally. Promoting it from per-file
+# (Transform.cpp) to global in 7e4c2ac introduced a city horizon smear
+# (stretched-triangle artifact from 1-ULP shifts at frustum/clipper
+# boundaries). Bisected on 2026-05-31. Re-add per-file in FDS/
+# CMakeLists.txt for the hot loops where the FMA win is large
+# (Transform.cpp, Mekalele/lighting kernels) once each addition has
+# been confirmed not to break visual output.
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
