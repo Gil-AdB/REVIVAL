@@ -396,6 +396,10 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         if (g_gbuffer->mirrorId.size() < needed) {
             g_gbuffer->mirrorId.assign(needed, 0);
         }
+    } else {
+        std::fprintf(stderr,
+            "[MIRROR '%s'] WARN: g_gbuffer null at BuildMirror — mask plane not allocated\n",
+            wallMatName);
     }
 
     // Clone every omni in the scene. Mirror-side geometry sees the
@@ -543,6 +547,51 @@ inline void StampTri2D(u8 *plane, int w, int h,
 
 }  // namespace
 
+void DebugOverlayMirrorMask(Scene *sc)
+{
+    (void)sc;
+    if (!g_gbuffer || g_gbuffer->mirrorId.empty()) return;
+    const u8 *plane = g_gbuffer->mirrorId.data();
+    dword *fb = (dword*)::VPage;
+    const int w = int(::XRes);
+    const int h = int(::YRes);
+    if (size_t(w) * size_t(h) > g_gbuffer->mirrorId.size()) return;
+    // Distinct color per mirror id. Saturate at full channel so the
+    // overlay is visible regardless of underlying pixel.
+    auto idToColor = [](u8 id) -> dword {
+        if (id == 0) return 0;
+        const dword channel = 200u;  // strong but not white-out
+        switch (id % 6) {
+            case 1: return (channel << 16);                // red
+            case 2: return (channel << 8);                 // green
+            case 3: return channel;                        // blue
+            case 4: return (channel << 16) | (channel << 8);  // yellow
+            case 5: return (channel << 8)  | channel;      // cyan
+            default: return (channel << 16) | channel;     // magenta
+        }
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const u8 id = plane[size_t(y) * size_t(w) + size_t(x)];
+            if (id == 0) continue;
+            const dword color = idToColor(id);
+            const dword existing = fb[size_t(y) * size_t(w) + size_t(x)];
+            // Blend ~50/50 so we can still see the underlying scene.
+            const dword bExist = (existing      ) & 0xFF;
+            const dword gExist = (existing >>  8) & 0xFF;
+            const dword rExist = (existing >> 16) & 0xFF;
+            const dword bNew = (color      ) & 0xFF;
+            const dword gNew = (color >>  8) & 0xFF;
+            const dword rNew = (color >> 16) & 0xFF;
+            const dword bOut = (bExist + bNew) / 2;
+            const dword gOut = (gExist + gNew) / 2;
+            const dword rOut = (rExist + rNew) / 2;
+            fb[size_t(y) * size_t(w) + size_t(x)] =
+                bOut | (gOut << 8) | (rOut << 16) | 0xFF000000u;
+        }
+    }
+}
+
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
 {
     if (!sc || !g_gbuffer) return;
@@ -554,21 +603,55 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     const int w = int(::XRes);
     const int h = int(::YRes);
     if (size_t(w) * size_t(h) > plane.size()) return;
+    // Use a Z threshold safely above NZP so the per-vertex divide
+    // doesn't blow up screen coords for verts grazing the near plane
+    // (greets's NZP is 0.01, but z=0.18 still yields PX values >10×
+    // screen width). Sutherland-Hodgman clips each wall triangle in
+    // PROJECTION-PRE-DIVIDE space (TPos_AOS.x/.y already have FOVX/
+    // CntrX baked in by Transform_Objects's M34; only the /z is
+    // pending) against z >= kClipZ, then divides the clipped verts'
+    // (x, y) by z to get screen coords.
+    const float kClipZ = std::max(0.5f, sc->NZP * 5.0f);
+    auto projectPreDivideToScreen = [](const Vector &vp, float &sx, float &sy) {
+        const float invZ = 1.0f / vp.z;
+        sx = vp.x * invZ;
+        sy = vp.y * invZ;
+    };
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
         for (const Face *F : m.wallFaces) {
             if (!F || !F->A || !F->B || !F->C) continue;
-            // Skip faces with any vert behind the near plane — PX/PY
-            // would be projection-blowups, and the wall isn't visible
-            // through that pixel anyway.
-            if (F->A->TPos_AOS.z <= sc->NZP ||
-                F->B->TPos_AOS.z <= sc->NZP ||
-                F->C->TPos_AOS.z <= sc->NZP) continue;
-            StampTri2D(plane.data(), w, h,
-                       F->A->PX, F->A->PY,
-                       F->B->PX, F->B->PY,
-                       F->C->PX, F->C->PY,
-                       m.id);
+            // Clip the (A,B,C) triangle in view-space against z >= kClipZ.
+            // Up to 4 verts after a single-plane clip of a triangle.
+            Vector clipped[4];
+            int nc = 0;
+            const Vector tri[3] = {
+                F->A->TPos_AOS, F->B->TPos_AOS, F->C->TPos_AOS
+            };
+            for (int e = 0; e < 3; ++e) {
+                const Vector &v0 = tri[e];
+                const Vector &v1 = tri[(e + 1) % 3];
+                const bool in0 = v0.z >= kClipZ;
+                const bool in1 = v1.z >= kClipZ;
+                if (in0) clipped[nc++] = v0;
+                if (in0 != in1 && nc < 4) {
+                    const float t = (kClipZ - v0.z) / (v1.z - v0.z);
+                    clipped[nc++] = {
+                        v0.x + t * (v1.x - v0.x),
+                        v0.y + t * (v1.y - v0.y),
+                        kClipZ
+                    };
+                }
+            }
+            if (nc < 3) continue;
+            // Project clipped polygon verts to screen + fan-triangulate.
+            float sx[4], sy[4];
+            for (int i = 0; i < nc; ++i) projectPreDivideToScreen(clipped[i], sx[i], sy[i]);
+            for (int i = 1; i + 1 < nc; ++i) {
+                StampTri2D(plane.data(), w, h,
+                           sx[0], sy[0], sx[i], sy[i], sx[i+1], sy[i+1],
+                           m.id);
+            }
         }
     }
 }

@@ -112,6 +112,12 @@ void UpdateMirror(Scene *sc, Mirror &m);
 // Convenience: update every mirror in a list. Empty list = no-op.
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 
+// Debug viz — overlays gb.mirrorId onto the framebuffer so we can see
+// exactly which pixels each mirror's wall pre-pass stamped (and where
+// the clone-rasterizer's per-pixel check is consequently keeping vs
+// rejecting writes). Gated by --greets-mirror-debug-mask.
+void DebugOverlayMirrorMask(Scene *sc);
+
 // Per-frame mask pre-pass: walks every mirror's wall faces, projects
 // each triangle to screen space using already-transformed PX/PY, and
 // scanline-fills gb.mirrorId with the mirror's id at each covered

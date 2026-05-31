@@ -1967,6 +1967,11 @@ struct GreetsScene : SceneDriver {
 
 		Render();
 
+		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
+		if (fds::FeatureFlags::greets_mirror_debug_mask()) {
+			fds::DebugOverlayMirrorMask(GreetSc);
+		}
+
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 
