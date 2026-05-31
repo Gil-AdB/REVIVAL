@@ -21,6 +21,7 @@
 #define DEBUG_GREETS_DUMP_GRID 0
 
 #include "GREETS.H"
+#include "GreetsMirror.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
 #include "MISC/PREPROC.H"
@@ -42,6 +43,11 @@ static float frand() {
 }
 
 static Scene *GreetSc;
+
+// Mirror plane (teleporter wall). Populated at the tail of
+// Initialize_Greets via FindTeleporterMirrorPlane. Phases 2-3 of the
+// mirror feature read this; Phase 1 only logs it for verification.
+static fds::MirrorPlane g_greetsMirrorPlane;
 
 // Forward-declared at namespace scope (the rest of this TU is in an
 // anonymous namespace where `extern` would silently get internal
@@ -1318,6 +1324,11 @@ void Initialize_Greets()
 				ms);
 		});
 	}
+
+	// Mirror Phase 1: locate the teleporter wall and compute its plane.
+	// Logged only for now — Phase 2 will use it for the reflected-camera
+	// render, Phase 3 for per-pixel screen-projected UV sampling.
+	g_greetsMirrorPlane = fds::FindTeleporterMirrorPlane(GreetSc);
 }
 
 //void MMXClear(void *Page, dword Len)
