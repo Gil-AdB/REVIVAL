@@ -93,13 +93,19 @@ if(EMSCRIPTEN)
     endif()
 endif()
 
-# -ffp-contract=fast: NOT applied globally. Promoting it from per-file
-# (Transform.cpp) to global in 7e4c2ac introduced a city horizon smear
-# (stretched-triangle artifact from 1-ULP shifts at frustum/clipper
-# boundaries). Bisected on 2026-05-31. Re-add per-file in FDS/
-# CMakeLists.txt for the hot loops where the FMA win is large
-# (Transform.cpp, Mekalele/lighting kernels) once each addition has
-# been confirmed not to break visual output.
+# Cross-statement FMA contraction. Enabled globally — unlocks vector
+# FMLA on arm64 NEON for `a*b+c` chains in hot loops (per-vertex
+# transform, lighting kernels, deferred shading). Saves ~1.5 ms on
+# greets bench at 1080p (7e4c2ac, validated 2026-05-31).
+#
+# History: 7e4c2ac promoted this from per-file (Transform.cpp only) to
+# global — uncovered a city horizon edge-pixel shimmer because the
+# rasterizer's per-pixel attribute interp produced 1-ULP UV shifts at
+# triangle edges that landed on neighboring texels. Fixed by wrapping
+# apply_exact bodies in TheOtherBarry.h + Mekalele.h with
+# FP_CONTRACT_OFF (block-level opt-out, see FDS/Base/FPContract.h).
+# Other code paths use FAST via this global setting.
+add_compile_options(-ffp-contract=fast)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 

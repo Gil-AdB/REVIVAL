@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "Base/FDS_DECS.H"
+#include "Base/FPContract.h"
 #include "Base/RenderTarget.h"
 #include "Base/CameraContext.h"
 #include "F4Vec.h"
@@ -302,6 +303,15 @@ struct TileRasterizer {
 	// gated only by Z-test. ~9 SIMD ops/row × 8 rows = 72 ops saved per tile.
 	template <barry::TCoverage Coverage = barry::TCoverage::PARTIAL>
 	void apply_exact(const barry::Tile& tile) {
+		// Opt out of cross-statement FMA fusion for the per-pixel attribute
+		// interp body below. Build defaults to -ffp-contract=fast for the
+		// rasterizer perf win, but FMA-fused UV/Z interpolation produces
+		// 1-ULP shifts that land on neighboring texels at high-contrast
+		// triangle edges → visible color shimmer along edges (city horizon
+		// in motion). Diagnosed 2026-05-31; see FDS/Base/FPContract.h and
+		// the CMake comments. The OFF scope ends at the closing brace via
+		// the FP_CONTRACT_ON line below.
+		FP_CONTRACT_OFF
 		auto scanline = dstSurface + tile.y * TILE_SIZE * bpsl;
 		// Z-buffer lives in its own allocation now (was: ZPage16 global,
 		// passed through from the per-pass RenderTarget). Color stride
@@ -514,6 +524,11 @@ struct TileRasterizer {
 
 	
 	void rasterize_triangle(const Vertex& v1, const Vertex& v2, const Vertex& v3) {
+		// Same FMA opt-out as apply_exact. The per-tile setup math here
+		// (tile.rz0/uz0/vz0 = v1.* + dx*d_dx + dy*d_dy chains) feeds
+		// apply_exact's per-pixel loop — 1-ULP shifts in the starting
+		// values cascade to wrong-texel samples at edges.
+		FP_CONTRACT_OFF
 		// FIXME: raster conventions (it is doing floor right now)
 		// Clamp to the OWNING clipper tile's range — see ClipperTileRect.h.
 		// Without this, two adjacent clipper workers can both rasterize the
@@ -784,7 +799,7 @@ struct TileRasterizer {
 				}
 			}
 		}
-	}
+	}  // apply_exact: FP_CONTRACT_OFF auto-scopes to this block
 
 };
 

@@ -30,6 +30,7 @@ set(Base
     Base/FeatureFlags.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
+    Base/FPContract.h
     Base/FrameState.cpp
     Base/FrameState.h
     Base/RenderTarget.h
@@ -220,37 +221,14 @@ target_compile_options(${PROJECT_NAME} PUBLIC
     -Werror=return-type
     -Wno-parentheses)
 
-# Enable cross-statement FMA contraction on the per-vertex transform
-# hot loops. mul_add() in vectorclass falls back to plain mul+add on
-# arm64, and the default -ffp-contract=on only fuses within a single
-# expression — not across the staged-store form used in the column-
-# major matrix-vector. Scoped to Transform.cpp only.
-#
-# Why not globally / on more files: see DEMO/CMakeLists.txt long
-# comment. Short version: TheOtherBarry / Mekalele template
-# instantiations are shared across TUs; an FMA mismatch between any
-# two instantiating TUs triggers an ODR violation that surfaces as a
-# city-horizon smear (bisected 2026-05-31). To safely add -fast to
-# more files, convert the shared rasterizer templates to explicit
-# instantiation in one TU with `extern template` declarations
-# elsewhere — then any file can opt in independently.
-set(FFP_FAST_FILES
-    RENDER/Transform.cpp
-    # RasterizerInst.cpp intentionally NOT here. Per-pixel diagnostic
-    # 2026-05-31 (city@t=38, fwd vs def, baseline vs RasterizerInst
-    # compiled -fast) showed:
-    #   - Forward:  1390 pixels differ (0.07% of 1920x1080), edge-only
-    #   - Deferred:  462 pixels differ (0.02%), edge-only, smaller cluster
-    #   - Z almost unchanged (~45 bytes diff): same triangles visible
-    #   - Differences cluster along high-contrast triangle edges where
-    #     1-ULP UV shifts under FMA land on different texels
-    # Result: smear is per-pixel attribute interp inside apply_exact,
-    # not coverage / clipper / setup. Fix path: targeted std::fma at
-    # specific a*b+c chains inside the per-pixel loop (Option A from
-    # the discussion). Don't apply -fast wholesale here.
-)
-set_source_files_properties(${FFP_FAST_FILES} PROPERTIES
-    COMPILE_OPTIONS "-ffp-contract=fast")
+# -ffp-contract=fast is enabled globally at the top-level CMakeLists.txt.
+# Per-file opt-out is via FP_CONTRACT_OFF inside the source (see
+# FDS/Base/FPContract.h). Currently scoped opt-outs live in
+# TheOtherBarry::apply_exact + Mekalele::apply_exact (per-pixel
+# attribute interp — FMA-fused UV/Z produces 1-ULP shifts that pick
+# neighboring texels at high-contrast triangle edges, visible as
+# horizon edge shimmer). Everything else picks up cross-statement FMA
+# fusion (vector lighting kernels, transform, deferred shading).
 
 if(EMSCRIPTEN)
     # std::thread / mutex / condition_variable need -pthread at compile time
