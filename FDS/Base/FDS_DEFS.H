@@ -360,6 +360,13 @@ enum OmniFlags
 	// Only consulted in deferred mode. Set by Initialize_<scene>.
 	Omni_CastsShadow = 1 << 7,
 
+	// Marked on cloned omnis produced by the planar-mirror system
+	// (DEMO/GreetsMirror.cpp). Subsequent BuildMirror passes skip omnis
+	// with this bit so multi-mirror scenes don't end up cloning each
+	// mirror's clones N times. Set ONLY by mirror code; never touched
+	// by FLD load or scene init.
+	Omni_MirrorClone = 1 << 9,
+
 	// Light is static — its position, direction, and the world geometry
 	// around it never change. The shadow map can be rendered ONCE at
 	// scene init (or first-frame) and reused for every subsequent frame,

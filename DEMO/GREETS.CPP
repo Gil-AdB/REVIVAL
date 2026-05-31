@@ -1327,14 +1327,23 @@ void Initialize_Greets()
 
 	// Build per-mirror clones. Each material name passed to BuildMirror
 	// produces an independent Mirror (own plane, own clone mesh, own
-	// cloned omnis). Extend this list to add more mirrors in greets.
+	// cloned omnis). Multiple mirror surfaces share no state — the
+	// Z-buffer + surrounding occluders sort out which mirror's
+	// reflection shows at each pixel. Mirror-in-mirror (two facing)
+	// would currently produce empty recursion past depth 1; if greets
+	// ever needs that we'll add a depth cap.
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
-		const char *kMirrorMats[] = { "teleporter" };
+		const char *kMirrorMats[] = {
+			"teleporter",   // back wall
+			"floor",        // mirror floor — classic
+			"siling",       // ceiling (sic — typo in the FLD)
+		};
 		for (const char *matName : kMirrorMats) {
 			fds::Mirror m = fds::BuildMirror(GreetSc, matName);
 			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
 		}
+		std::fprintf(stderr, "[GREETS-MIRROR] active mirrors: %zu\n", g_greetsMirrors.size());
 	}
 }
 

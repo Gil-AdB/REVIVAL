@@ -88,43 +88,62 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
     MirrorPlane out{};
     if (!sc || !wallMatName) return out;
 
-    // Pass 1: dominant normal direction (sum of every matching face's
-    // world-space N). Used to reject outliers in pass 2.
-    Vector dominant = {0.0f, 0.0f, 0.0f};
-    int rawCount = 0;
-    walkWallFaces(sc, wallMatName, [&](TriMesh*, Face&, const Vector &wN) {
-        dominant += wN;
-        ++rawCount;
+    // Collect every wall face's unit-length world normal up-front. We
+    // then pick the seed face as the one with the LARGEST coplanar
+    // neighborhood — averaging all normals fails when the wall is part
+    // of a 3D mesh whose other sides cancel out the "real" surface
+    // direction (e.g. a screen box has front + back + 4 edges; the
+    // average is ~0 so every face looked like an outlier).
+    struct Sample {
+        TriMesh *T;
+        Face    *F;
+        Vector   wN;       // unit-length world normal
+    };
+    std::vector<Sample> samples;
+    walkWallFaces(sc, wallMatName, [&](TriMesh *T, Face &F, const Vector &wN) {
+        Vector u = wN;
+        u.normalize();
+        samples.push_back({T, &F, u});
     });
-    if (rawCount == 0) {
+    if (samples.empty()) {
         std::fprintf(stderr, "[MIRROR] no '%s' faces found\n", wallMatName);
         return out;
     }
-    dominant.normalize();
 
-    // Pass 2: average unit normal + plane offset. Drop faces > ~30° off
-    // dominant so a stray decal doesn't tilt the plane.
+    // Pick seed: the face whose normal has the most neighbors within
+    // 30° (dot ≥ 0.866). For small N this O(N²) walk is trivially
+    // cheap; we never see more than a few hundred faces per material.
+    int bestSeed = 0, bestCount = 0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        int count = 0;
+        for (const auto &s : samples) {
+            const float dot = samples[i].wN.x*s.wN.x + samples[i].wN.y*s.wN.y + samples[i].wN.z*s.wN.z;
+            if (dot >= 0.866f) ++count;
+        }
+        if (count > bestCount) { bestCount = count; bestSeed = int(i); }
+    }
+    const Vector seedN = samples[bestSeed].wN;
+
+    // Average unit normal + plane offset over the seed's coplanar cluster.
     Vector accN = {0.0f, 0.0f, 0.0f};
     float accD = 0.0f;
     int keptCount = 0, droppedOutlier = 0;
-    walkWallFaces(sc, wallMatName, [&](TriMesh *T, Face &F, const Vector &wN) {
-        const float dot = wN.x*dominant.x + wN.y*dominant.y + wN.z*dominant.z;
-        if (dot < 0.866f) { ++droppedOutlier; return; }
-        Vector localA = F.A->Pos;
+    for (const auto &s : samples) {
+        const float dot = s.wN.x*seedN.x + s.wN.y*seedN.y + s.wN.z*seedN.z;
+        if (dot < 0.866f) { ++droppedOutlier; continue; }
+        Vector localA = s.F->A->Pos;
         Vector wA;
-        MatrixXVector(T->RotMat, &localA, &wA);
-        wA += T->IPos;
-        Vector unitN = wN;
-        unitN.normalize();
-        const float d = -(unitN.x*wA.x + unitN.y*wA.y + unitN.z*wA.z);
-        accN += unitN;
+        MatrixXVector(s.T->RotMat, &localA, &wA);
+        wA += s.T->IPos;
+        const float d = -(s.wN.x*wA.x + s.wN.y*wA.y + s.wN.z*wA.z);
+        accN += s.wN;
         accD += d;
         ++keptCount;
-    });
+    }
     if (keptCount == 0) {
         std::fprintf(stderr,
-            "[MIRROR '%s'] all %d wall faces dropped as outliers\n",
-            wallMatName, rawCount);
+            "[MIRROR '%s'] all %zu wall faces dropped as outliers\n",
+            wallMatName, samples.size());
         return out;
     }
     out.N = accN;
@@ -133,10 +152,10 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
     out.faceCount = keptCount;
     out.valid = true;
     std::fprintf(stderr,
-        "[MIRROR '%s'] plane N=(%.3f,%.3f,%.3f) d=%.3f from %d/%d faces "
+        "[MIRROR '%s'] plane N=(%.3f,%.3f,%.3f) d=%.3f from %d/%zu faces "
         "(%d outliers)\n",
         wallMatName, out.N.x, out.N.y, out.N.z, out.d,
-        keptCount, rawCount, droppedOutlier);
+        keptCount, samples.size(), droppedOutlier);
     return out;
 }
 
@@ -154,9 +173,23 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         return F.Txtr && F.Txtr->Name &&
                std::strcmp(F.Txtr->Name, wallMatName) == 0;
     };
+    // A wall face is the actual mirror SURFACE iff it's also coplanar
+    // with the mirror plane. For a flat wall every wall face qualifies;
+    // for a 3D mesh wall (screen box) only the front face does, and
+    // we should clone the back/sides like any other geometry.
+    auto isMirrorSurface = [&](const Face &F, TriMesh *T) -> bool {
+        if (!isWall(F)) return false;
+        Vector localN = F.N;
+        Vector wN;
+        MatrixXVector(T->RotMat, &localN, &wN);
+        wN.normalize();
+        const float dot = wN.x*N.x + wN.y*N.y + wN.z*N.z;
+        return dot >= 0.866f;
+    };
 
-    // Count total verts/faces (excluding wall faces — we want a hole
-    // where the wall is, not a mirror image of the wall).
+    // Count total verts/faces (excluding mirror-surface faces — we
+    // want a hole where the mirror is, not a mirror image of the
+    // mirror itself).
     DWord totalVerts = 0, totalFaces = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
@@ -164,7 +197,7 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         if (!T || !T->Verts || !T->Faces) continue;
         totalVerts += T->VIndex;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
-            if (isWall(T->Faces[fi])) continue;
+            if (isMirrorSurface(T->Faces[fi], T)) continue;
             if (!T->Faces[fi].A) continue;
             ++totalFaces;
         }
@@ -233,7 +266,7 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         }
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &OF = T->Faces[fi];
-            if (isWall(OF)) continue;
+            if (isMirrorSurface(OF, T)) continue;
             if (!OF.A || !OF.B || !OF.C) continue;
             Face &CF = MM->Faces[fOfs];
             CF = OF;
@@ -293,9 +326,16 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     if (sc->TriMeshHead) sc->TriMeshHead->Prev = MM;
     sc->TriMeshHead = MM;
 
-    // Retarget wall faces to a transparent material clone. 1×1 stub
-    // texture from BaseCol so the deferred transparent path has
-    // something valid to sample.
+    // Retarget mirror-surface wall faces to a transparent silvered mat.
+    // The visible appearance: low base alpha (mirror dominates) + a
+    // silver stub texture + cranked Specular so the deferred lighting
+    // kernel paints highlights along the wall's specular angle —
+    // sells "polished metal surface" rather than "tinted glass". For
+    // already-textured wall mats we keep the source texture; only
+    // BaseCol-only (flat-shaded) walls get the silver stub.
+    constexpr float kMirrorAlpha     = 0.15f;   // 15% wall tint, 85% mirror beneath
+    constexpr float kMirrorSpecular  = 32.0f;   // pronounced spec lobe
+    const Color     kMirrorSilver    = { 180.0f, 180.0f, 200.0f, 255.0f };  // BGRA, cool silver
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;
@@ -303,14 +343,17 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         if (!T || !T->Faces) continue;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
-            if (!isWall(F)) continue;
+            if (!isMirrorSurface(F, T)) continue;
             if (!m.wallMatClone) {
                 m.wallMatClone = getAlignedType<Material>(16);
                 std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
                 m.wallMatClone->Flags |= Mat_Transparent;
-                m.wallMatClone->XparBlendAlpha = 0.30f;
+                m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
+                m.wallMatClone->Specular       = kMirrorSpecular;
+                m.wallMatClone->BaseCol        = kMirrorSilver;
                 if (!m.wallMatClone->Txtr) {
-                    m.wallMatClone->Txtr = synthesizeFlatTexture(F.Txtr->BaseCol);
+                    // Flat-shaded source — use silver stub directly.
+                    m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
                 }
                 m.wallMatClone->Prev = nullptr;
                 m.wallMatClone->Next = MatLib;
@@ -327,16 +370,16 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     // distance for soft compartmentalization.
     int omniCount = 0;
     for (Omni *srcO = sc->OmniHead; srcO; srcO = srcO->Next) {
-        // Skip omnis we've already cloned (defensive — Build called twice).
-        bool isAlreadyClone = false;
-        for (const auto &c : m.omniClones) {
-            if (c.mirrorOmni == srcO) { isAlreadyClone = true; break; }
-        }
-        if (isAlreadyClone) continue;
+        // Skip omnis already cloned by ANY mirror (including earlier
+        // BuildMirror calls on this scene). Without this, mirror N
+        // sees mirror N-1's clones in OmniHead and clones them again,
+        // doubling the omni count per added mirror.
+        if (srcO->Flags & Omni_MirrorClone) continue;
         Omni *clone = (Omni*)getAlignedBlock(sizeof(Omni), 16);
         std::memcpy(clone, srcO, sizeof(Omni));
         clone->IPos = reflectPointAcross(srcO->IPos, N, d);
         clone->IDir = reflectDirAcross(srcO->IDir, N);
+        clone->Flags |= Omni_MirrorClone;
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
