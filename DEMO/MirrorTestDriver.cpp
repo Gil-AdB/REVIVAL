@@ -98,7 +98,13 @@ struct MirrorTestScene : SceneDriver {
         fds::Mirror m = fds::BuildMirror(sc, "mirror_mat");
         if (m.cloneMesh) mirrors.push_back(std::move(m));
 
-        // Size FList for source mesh faces + clone mesh faces + omnis.
+        // setupFaceLists wires the global View alias to sc->CameraHead
+        // (Transform_Objects derefs view->Mat through that), sizes the
+        // FList container, and stamps the scene's near/far for the
+        // engine-wide C_FZP / C_rFZP. Without it Transform_Objects
+        // crashes on a null view at MatrixXMatrix.
+        setupFaceLists(sc, /*includeOmnisInCount=*/true);
+        // Bump the FList capacity to also cover the mirror clone mesh.
         DWord polys = 0;
         for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
         for (Omni *O = sc->OmniHead; O; O = O->Next) ++polys;
