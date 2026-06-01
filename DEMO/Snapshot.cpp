@@ -3468,8 +3468,24 @@ MT_Quad MT_addQuad(Scene *sc, const char *name,
     T->VIndex = 4;
     T->Verts  = new Vertex[4];
     std::memset(T->Verts, 0, sizeof(Vertex) * 4);
+    // Compute the quad's outward normal from the first triangle so
+    // every vertex of the quad has a sane non-zero N (the rasterizer
+    // normalizes view-space normals and zero-length N produces NaN).
+    Vector qe1 = { v[1].x - v[0].x, v[1].y - v[0].y, v[1].z - v[0].z };
+    Vector qe2 = { v[2].x - v[0].x, v[2].y - v[0].y, v[2].z - v[0].z };
+    Vector qn  = { qe1.y*qe2.z - qe1.z*qe2.y,
+                   qe1.z*qe2.x - qe1.x*qe2.z,
+                   qe1.x*qe2.y - qe1.y*qe2.x };
+    qn.normalize();
     for (int i = 0; i < 4; ++i) {
         T->Verts[i].Pos = v[i];
+        T->Verts[i].N   = qn;
+        T->Verts[i].TN  = qn;
+        // Per-vertex light intensity — base level so the rasterizer's
+        // Gouraud path has non-zero L*. Lighting() will override but
+        // some inner loops read these before Lighting runs.
+        T->Verts[i].LR  = T->Verts[i].LG = T->Verts[i].LB = 200;
+        T->Verts[i].LA  = 255;
         T->Verts[i].U = (i == 1 || i == 2) ? 1.0f : 0.0f;
         T->Verts[i].V = (i >= 2) ? 1.0f : 0.0f;
     }
@@ -3490,6 +3506,17 @@ MT_Quad MT_addQuad(Scene *sc, const char *name,
         n.normalize();
         F.N = n;
         F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+        // Hand-pick the rasterizer. Assign_Fillers can pick handlers
+        // that hang on simple synthetic materials; XparTest sidesteps
+        // by setting Filler directly. Transparent → TRANSPARENT blend
+        // mode + NORMAL texture lookup. Opaque → OVERWRITE.
+        if (mat->Flags & Mat_Transparent) {
+            F.Filler = TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                     barry::TTextureMode::NORMAL>;
+        } else {
+            F.Filler = TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                     barry::TTextureMode::NORMAL>;
+        }
     };
     setupTri(T->Faces[0], 0, 1, 2);
     setupTri(T->Faces[1], 0, 2, 3);
@@ -3602,19 +3629,10 @@ Scene *MT_buildScene(bool transparentMirror) {
     };
     MT_addQuad(sc, "test_object", cubeFront, matCube);
 
-    // Single omni light in front, slightly to the left.
-    Omni *omni = (Omni*)getAlignedBlock(sizeof(Omni), 16);
-    std::memset(omni, 0, sizeof(Omni));
-    omni->IPos = Vector(-2.0f, 4.0f, -1.0f);
-    omni->Flags = Omni_Active;
-    omni->L.R = 255; omni->L.G = 255; omni->L.B = 255;
-    omni->ISize = 1.0f;
-    omni->IRange = 50.0f;
-    omni->rRange = 1.0f / 50.0f;
-    omni->Type = Light_Omni;
-    omni->Next = sc->OmniHead;
-    if (sc->OmniHead) sc->OmniHead->Prev = omni;
-    sc->OmniHead = omni;
+    // No omni — ambient lighting only. A naked Omni without proper
+    // Pos/Range/Size single-key splines crashes Animate / Lighting; we
+    // pick up that helper in step 3a's filler-assignment helpers.
+    sc->Ambient.R = sc->Ambient.G = sc->Ambient.B = 220;
 
     // Single camera looking at the mirror panel from front and slightly
     // angled so we can see the cube AND its reflection in the mirror.
@@ -3636,10 +3654,9 @@ void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, i
     // matTable. Without rebuilding, matTable.count==0 and the deferred
     // kernel's matID lookup walks off the end. (XparTest does this.)
     Scene_RebuildMatTable(sc);
-    // Full scene preprocessing: assigns Filler per face, computes
-    // BSphere/face indices, sets up the deferred matTable etc.
-    // Without this F->Filler is nullptr and Render crashes.
-    Preprocess_Scene(sc, "MIRRORTEST");
+    // Skip Preprocess_Scene — its Assign_Fillers picks rasterizer
+    // variants that hang on these synthetic materials. We hand-set
+    // F.Filler in MT_addQuad's setupTri, matching XparTest's pattern.
     View = sc->CameraHead;
     CalcPersp(View);
     FOVX = View->PerspX;
@@ -3661,39 +3678,44 @@ void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, i
     // on the empty camera splines.
     fds::g_mainCamera.view = View;
 
-    // Build mirror BEFORE the first Transform so the clone mesh joins
-    // the scene's face count. Try the opaque material name first; fall
-    // back to the transparent material name for case 1.
+    // Step-by-step build / render with logs at each stage so the next
+    // pass can pinpoint which step hangs. Currently Render() is the
+    // suspect even after Preprocess_Scene.
     std::vector<fds::Mirror> mirrors;
-    fds::Mirror mm = fds::BuildMirror(sc, "mirror_opaque_mat");
-    if (!mm.cloneMesh) mm = fds::BuildMirror(sc, "mirror_xpar_mat");
-    if (mm.cloneMesh) mirrors.push_back(std::move(mm));
-    polys = 0;
-    for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
-    fds::g_mainFaces.resize(polys * 2 + 16);
-    // BuildMirror cloned the wall material; register it with the matTable
-    // so the deferred kernel's matID lookup finds it.
-    Scene_RebuildMatTable(sc);
+    if (!fds::FeatureFlags::mirrortest_skip_mirror()) {
+        std::fprintf(stderr, "[MT-RENDER %s] BuildMirror...\n", label);
+        fds::Mirror mm = fds::BuildMirror(sc, "mirror_opaque_mat");
+        if (!mm.cloneMesh) mm = fds::BuildMirror(sc, "mirror_xpar_mat");
+        if (mm.cloneMesh) mirrors.push_back(std::move(mm));
+        polys = 0;
+        for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
+        fds::g_mainFaces.resize(polys * 2 + 16);
+        Scene_RebuildMatTable(sc);
+        // Don't re-run Preprocess_Scene — Assign_Fillers would overwrite
+        // the clone faces' explicitly-set Fillers and the test render
+        // goes black. Clone faces inherit Filler via memcpy in BuildMirror.
+    }
 
-    std::fprintf(stderr, "[MT-RENDER %s] Transform...\n", label);
+    std::fprintf(stderr, "[MT-RENDER %s] Transform_Objects...\n", label);
     Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
-    std::fprintf(stderr, "[MT-RENDER %s] Update+Stamp mirror masks...\n", label);
-    fds::UpdateAllMirrors(sc, mirrors);
-    fds::StampMirrorMasks(sc, mirrors);
+    std::fprintf(stderr, "[MT-RENDER %s] CAll=%d after transform\n", label, CAll);
+
+    if (!mirrors.empty()) {
+        std::fprintf(stderr, "[MT-RENDER %s] UpdateAllMirrors...\n", label);
+        fds::UpdateAllMirrors(sc, mirrors);
+        std::fprintf(stderr, "[MT-RENDER %s] StampMirrorMasks...\n", label);
+        fds::StampMirrorMasks(sc, mirrors);
+    }
     std::fprintf(stderr, "[MT-RENDER %s] Lighting...\n", label);
     Lighting(sc);
     if (CAll) {
-        std::fprintf(stderr, "[MT-RENDER %s] Sort (CAll=%d)...\n", label, CAll);
+        std::fprintf(stderr, "[MT-RENDER %s] Radix_Sort (CAll=%d)...\n", label, CAll);
         Radix_Sort(FList, SList, CAll);
-        std::fprintf(stderr, "[MT-RENDER %s] Render...\n", label);
-        // Force forward for the test scene — the deferred path's tile
-        // setup requires more frame-state plumbing than a snapshot
-        // harness can supply, and the mirror's per-pixel Mekalele check
-        // can be exercised separately in greets.
+        std::fprintf(stderr, "[MT-RENDER %s] Render forward...\n", label);
         Render(RenderPath::ForceForward);
         std::fprintf(stderr, "[MT-RENDER %s] Render returned\n", label);
     } else {
-        std::fprintf(stderr, "[MT-RENDER %s] WARN: CAll=0, nothing to render\n", label);
+        std::fprintf(stderr, "[MT-RENDER %s] CAll=0 — nothing to render\n", label);
     }
 
     write_ppm(outPath, MainSurf->Data, xres, yres, MainSurf->BPSL);

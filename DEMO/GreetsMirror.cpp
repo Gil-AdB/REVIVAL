@@ -401,9 +401,13 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     //     low alpha so the mirror clone beneath dominates. Flat-shaded
     //     sources also get a 1×1 silver stub texture for the deferred
     //     transparent rasterizer's LSizeX/LSizeY read.
-    constexpr float kMirrorAlpha     = 0.15f;
-    constexpr float kMirrorSpecular  = 32.0f;
-    const Color     kMirrorSilver    = { 180.0f, 180.0f, 200.0f, 255.0f };
+    // Specular cranked too high blew out yellow on greets's warm-omni
+    // teleporter — the spec lobe at 32 saturated through the 15%
+    // wall blend and drowned the reflection. Pull both back so the
+    // mirror reads as a faint silvered surface, not a flashlight.
+    constexpr float kMirrorAlpha     = 0.05f;
+    constexpr float kMirrorSpecular  = 2.0f;
+    const Color     kMirrorSilver    = { 160.0f, 160.0f, 180.0f, 255.0f };
     int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
