@@ -1088,6 +1088,15 @@ void CodeEntry(void *var)
 	Timer = 0;
 
 	bool skipToFountain = fds::FeatureFlags::skip_to_fountain();
+	// Single-scene dispatch: if the user passed --scene-mirrortest,
+	// skip the whole demo sequence and run only that scene. Useful
+	// for poking at the mirror system with free-cam.
+	if (fds::FeatureFlags::scene_mirrortest()) {
+		extern void Run_MirrorTest();
+		Run_MirrorTest();
+		if (t1.joinable()) t1.join();
+		goto demo_exit;
+	}
 	if (!skipToFountain) {
 	Run_Glato();
 

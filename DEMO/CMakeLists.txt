@@ -33,6 +33,8 @@ set(DEMO_SOURCES
     ImageCompression.h
     MeshOps.cpp
     MeshOps.h
+    MirrorTestDriver.cpp
+    MirrorTestDriver.h
     PhotonTracer.cpp
     PhotonTracer.h
     Raytracer.cpp

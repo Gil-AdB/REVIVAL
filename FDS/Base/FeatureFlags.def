@@ -140,4 +140,5 @@ FDS_FLAG_FLOAT(fountain_particle_omni_pct, "FDS_FOUNTAIN_PARTICLE_OMNI_PCT", 0.0
 
 // ─── demo / debug ────────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_to_fountain,         "SKIP_TO_FOUNTAIN",             0,                              "demo",     "Skip Glato + City and jump straight to Fountain")
+FDS_FLAG_BOOL(scene_mirrortest,         "FDS_SCENE_MIRRORTEST",         0,                              "demo",     "Run the interactive mirror-test scene instead of the demo sequence. Floor + back wall + reflective panel + a test cube; uses the SceneBuilder API + the planar mirror system. TAB/WASD for free-cam, ESC/Backspace to exit. Run: ./DEMO --scene-mirrortest")
 FDS_FLAG_BOOL(dump_mats,                "FDS_DUMP_MATS",                0,                              "debug",    "Dump material info on load")
