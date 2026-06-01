@@ -42,6 +42,8 @@ set(DEMO_SOURCES
     REV.CPP
     Rev.h
     Scenes.h
+    SceneBuilder.cpp
+    SceneBuilder.h
     SceneDriver.cpp
     SceneTick.h
     SpotlightCones.cpp

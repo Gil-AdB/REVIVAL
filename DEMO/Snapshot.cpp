@@ -3370,6 +3370,7 @@ int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres) {
 // ============================================================
 
 #include "GreetsMirror.h"
+#include "SceneBuilder.h"
 
 extern void Compute_FaceVertexIndices(TriMesh *T);
 
@@ -3553,7 +3554,10 @@ MT_Quad MT_addQuad(Scene *sc, const char *name,
     return { Obj, T };
 }
 
-Scene *MT_buildScene(bool transparentMirror) {
+// Old hand-rolled MT_buildScene replaced by the SceneBuilder-based
+// version below. Kept temporarily as a reference; remove once the
+// new path is validated.
+[[maybe_unused]] Scene *MT_buildScene_legacy(bool transparentMirror) {
     Scene *sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
     std::memset(sc, 0, sizeof(Scene));
     sc->NZP = 0.5f;
@@ -3645,6 +3649,65 @@ Scene *MT_buildScene(bool transparentMirror) {
     sc->CameraHead = cam;
 
     return sc;
+}
+
+// New SceneBuilder-based mirrortest scene. Same geometry as the
+// legacy MT_buildScene above but exercised through the public
+// SceneBuilder API so any breakage points at the helper rather than
+// the scene config.
+Scene *MT_buildScene(bool transparentMirror) {
+    using namespace fds::scene_builder;
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 100.0f);
+    b.SetAmbient(160, 160, 160);
+
+    // Materials.
+    Texture *floorTex = b.AddSolidColorTexture(8, 8, 0xFF606060u);
+    Material *matFloor = b.AddMaterial("floor_mat", floorTex,
+                                       {96, 96, 96, 255}, 0);
+    Texture *wallTex = b.AddSolidColorTexture(8, 8, 0xFF2030C0u);
+    Material *matWall = b.AddMaterial("wall_mat", wallTex,
+                                      {192, 48, 32, 255}, 0);
+    Material *matMirror = nullptr;
+    if (transparentMirror) {
+        Texture *mirTex = b.AddAlphaTextTexture("MIRRORTEST_TEXT.JPG");
+        matMirror = b.AddMaterial("mirror_xpar_mat", mirTex,
+                                   {220, 220, 240, 255},
+                                   Mat_Transparent | Mat_TwoSided);
+        matMirror->XparBlendAlpha = 0.6f;
+    } else {
+        Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC0C0C0u);
+        matMirror = b.AddMaterial("mirror_opaque_mat", mirTex,
+                                   {180, 180, 180, 255}, 0);
+    }
+    Texture *cubeTex = b.AddSolidColorTexture(8, 8, 0xFF20E0E0u);
+    Material *matCube = b.AddMaterial("cube_mat", cubeTex,
+                                       {224, 224, 32, 255}, 0);
+
+    const Vector floorV[4] = {
+        Vector(-10.0f, 0.0f, -10.0f), Vector( 10.0f, 0.0f, -10.0f),
+        Vector( 10.0f, 0.0f,  10.0f), Vector(-10.0f, 0.0f,  10.0f),
+    };
+    b.AddQuad("floor", floorV, matFloor);
+    const Vector wallV[4] = {
+        Vector( 10.0f, 0.0f, 6.0f), Vector(-10.0f, 0.0f, 6.0f),
+        Vector(-10.0f, 8.0f, 6.0f), Vector( 10.0f, 8.0f, 6.0f),
+    };
+    b.AddQuad("back_wall", wallV, matWall);
+    const Vector mirrorV[4] = {
+        Vector( 2.0f, 1.0f, 5.0f), Vector(-2.0f, 1.0f, 5.0f),
+        Vector(-2.0f, 6.0f, 5.0f), Vector( 2.0f, 6.0f, 5.0f),
+    };
+    b.AddQuad("mirror_panel", mirrorV, matMirror);
+    // Small test cube between camera and mirror so its reflection
+    // should appear inside the mirror's screen-space footprint.
+    b.AddCube("test_cube", Vector(0.0f, 1.6f, 2.0f), 0.8f, matCube);
+
+    b.SetCamera(Vector(-3.5f, 3.0f, -3.0f),
+                Vector(0.0f, 3.0f, 3.0f),
+                60.0f);
+    b.Finalize();
+    return b.scene();
 }
 
 void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, int yres) {
