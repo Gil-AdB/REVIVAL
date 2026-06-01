@@ -1298,7 +1298,10 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "lightmaptest") {
 			return RunLightmapTest(snap, g_demoXRes, g_demoYRes);
 		}
-		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest, halotest, lightmaptest)\n",
+		if (snap.scene == "mirrortest") {
+			return RunMirrorTest(snap, g_demoXRes, g_demoYRes);
+		}
+		fprintf(stderr, "[SNAPSHOT] unknown scene '%s' (try city, glat-trace, filler, refltest, cuberefl, seaside, fountain, greets, xpartest, spectest, conetest, halotest, lightmaptest, mirrortest)\n",
 		        snap.scene.c_str());
 		return 2;
 	}

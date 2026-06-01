@@ -79,6 +79,15 @@ int RunReflectionTest(const SnapshotConfig& cfg, int xres, int yres);
 //   DEMO --snapshot=cuberefl [--out=PATH]
 int RunCubeReflTest(const SnapshotConfig& cfg, int xres, int yres);
 
+// Programmatic mirror test scene. Builds a flat back wall, a small
+// opaque-mirror panel in front of it, a cube as a test reflectable,
+// and a transparent-mirror panel to validate the half-silvered-glass
+// path. Calls fds::BuildMirror so the per-pixel mask + clone path
+// is exercised end-to-end.
+//
+//   DEMO --deferred --snapshot=mirrortest [--out=PATH]
+int RunMirrorTest(const SnapshotConfig& cfg, int xres, int yres);
+
 // Transparent-rendering test harness. Programmatic scenes (no FLD load)
 // for isolating per-pixel deferred transparent issues: lighting drift,
 // missing triangles, Z-occlusion failures, multi-layer blend.

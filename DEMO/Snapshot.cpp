@@ -3350,3 +3350,385 @@ int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres) {
     ThreadPool::instance().close();
     return produced > 0 ? 0 : 5;
 }
+
+// ============================================================
+// MIRRORTEST: minimal programmatic mirror scene
+// ============================================================
+//
+// One simple scene exercising the planar-mirror system end-to-end:
+//   - Floor (large grey quad below).
+//   - Back wall (large red quad behind).
+//   - Mirror panel (small quad floating in front of the back wall) —
+//     this is the surface BuildMirror gets asked to mirror across.
+//   - Test cube (small textured cube between camera and mirror) — its
+//     reflection should appear inside the mirror panel's screen-space
+//     footprint and nowhere else.
+//
+// Two passes: case 0 = opaque silver mirror (BuildMirror by material
+// name), case 1 = transparent-textured mirror (BuildMirror via texture
+// filename, half-silvered-glass path).
+// ============================================================
+
+#include "GreetsMirror.h"
+
+extern void Compute_FaceVertexIndices(TriMesh *T);
+
+namespace {
+
+Texture *MT_makeFlatTexture(dword bgra) {
+    Texture *T = new Texture();
+    std::memset(T, 0, sizeof(Texture));
+    T->BPP = 32;
+    T->SizeX = T->SizeY = 1;
+    T->LSizeX = T->LSizeY = 0;
+    T->Data = (byte*)_aligned_malloc(4, 16);
+    ((dword*)T->Data)[0] = bgra;
+    T->Mipmap[0] = T->Data;
+    T->numMipmaps = 1;
+    T->Flags = Txtr_Nomip | Txtr_Tiled;
+    return T;
+}
+
+// 16×16 alpha-text texture: 'M' shape in the center, transparent
+// elsewhere. Used as a half-silvered surface in mirrortest case 1
+// so the reflection blends behind the visible letter.
+Texture *MT_makeTextAlphaTexture(const char *fileName) {
+    constexpr int W = 16, H = 16;
+    Texture *T = new Texture();
+    std::memset(T, 0, sizeof(Texture));
+    T->BPP = 32;
+    T->SizeX = W; T->SizeY = H;
+    T->LSizeX = 4; T->LSizeY = 4;  // log2(16)
+    T->Data = (byte*)_aligned_malloc(W * H * 4, 16);
+    dword *px = (dword*)T->Data;
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        // Solid 'M' in the middle: vertical bars at columns 3 and 12,
+        // diagonal strokes at rows 4..7. Outside the letter: alpha=0.
+        const bool onLetter =
+            (x == 3 && y >= 3 && y <= 12) ||
+            (x == 12 && y >= 3 && y <= 12) ||
+            ((x == 4 || x == 5) && y >= 4 && y <= 7) ||
+            ((x == 10 || x == 11) && y >= 4 && y <= 7) ||
+            ((x == 6 || x == 7) && y >= 5 && y <= 7) ||
+            ((x == 8 || x == 9) && y >= 5 && y <= 7);
+        px[y * W + x] = onLetter ? 0xFFFFFFFFu : 0x00000000u;
+    }
+    Sachletz((dword*)T->Data, W, H);
+    T->Mipmap[0] = T->Data;
+    T->numMipmaps = 1;
+    T->Flags = Txtr_Nomip | Txtr_Tiled;
+    T->FileName = strdup(fileName);
+    return T;
+}
+
+Material *MT_makeMaterial(Scene *sc, const char *name, Texture *texture,
+                          float r, float g, float b, dword flags) {
+    Material *M = getAlignedType<Material>(16);
+    std::memset(M, 0, sizeof(Material));
+    M->Txtr = texture;
+    M->BaseCol.R = r; M->BaseCol.G = g; M->BaseCol.B = b; M->BaseCol.A = 255;
+    M->Diffuse = 1.0f;
+    M->Luminosity = 0.0f;
+    M->Flags = flags | Mat_RGBInterp;
+    M->RelScene = sc;
+    M->ID = 0;
+    M->Name = strdup(name);
+    M->Prev = nullptr;
+    M->Next = MatLib;
+    if (MatLib) MatLib->Prev = M;
+    MatLib = M;
+    return M;
+}
+
+// Build one quad as a 2-tri mesh + Object. Returns the Object for the
+// caller to link into the Scene chain.
+struct MT_Quad {
+    Object *obj;
+    TriMesh *mesh;
+};
+MT_Quad MT_addQuad(Scene *sc, const char *name,
+                   const Vector v[4], Material *mat) {
+    TriMesh *T = (TriMesh*)getAlignedBlock(sizeof(TriMesh), 16);
+    std::memset(T, 0, sizeof(TriMesh));
+    Matrix_Copy(T->RotMat, Mat_ID);
+    Matrix_Copy(T->UnscaledRotMat, Mat_ID);
+    T->IPos   = {0.0f, 0.0f, 0.0f};
+    T->IScale = {1.0f, 1.0f, 1.0f};
+    T->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
+    T->Flags  = HTrack_Visible;
+    auto stampSingleKey = [](Spline &sp, float x, float y, float z, float w) {
+        sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
+        sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
+        sp.Keys[0].Pos.x = x; sp.Keys[0].Pos.y = y; sp.Keys[0].Pos.z = z; sp.Keys[0].Pos.W = w;
+        sp.Keys[0].AA.x  = x; sp.Keys[0].AA.y  = y; sp.Keys[0].AA.z  = z; sp.Keys[0].AA.W  = w;
+    };
+    stampSingleKey(T->Pos,    0.0f, 0.0f, 0.0f, 0.0f);
+    stampSingleKey(T->Scale,  1.0f, 1.0f, 1.0f, 0.0f);
+    stampSingleKey(T->Rotate, 0.0f, 0.0f, 0.0f, 1.0f);
+    T->VIndex = 4;
+    T->Verts  = new Vertex[4];
+    std::memset(T->Verts, 0, sizeof(Vertex) * 4);
+    for (int i = 0; i < 4; ++i) {
+        T->Verts[i].Pos = v[i];
+        T->Verts[i].U = (i == 1 || i == 2) ? 1.0f : 0.0f;
+        T->Verts[i].V = (i >= 2) ? 1.0f : 0.0f;
+    }
+    T->FIndex = 2;
+    T->Faces  = new Face[2];
+    std::memset(T->Faces, 0, sizeof(Face) * 2);
+    auto setupTri = [&](Face &F, int ai, int bi, int ci) {
+        F.A = T->Verts + ai;
+        F.B = T->Verts + bi;
+        F.C = T->Verts + ci;
+        F.Txtr = mat;
+        F.U1 = F.A->U; F.V1 = F.A->V;
+        F.U2 = F.B->U; F.V2 = F.B->V;
+        F.U3 = F.C->U; F.V3 = F.C->V;
+        Vector e1 = { F.B->Pos.x - F.A->Pos.x, F.B->Pos.y - F.A->Pos.y, F.B->Pos.z - F.A->Pos.z };
+        Vector e2 = { F.C->Pos.x - F.A->Pos.x, F.C->Pos.y - F.A->Pos.y, F.C->Pos.z - F.A->Pos.z };
+        Vector n  = { e1.y*e2.z - e1.z*e2.y, e1.z*e2.x - e1.x*e2.z, e1.x*e2.y - e1.y*e2.x };
+        n.normalize();
+        F.N = n;
+        F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+    };
+    setupTri(T->Faces[0], 0, 1, 2);
+    setupTri(T->Faces[1], 0, 2, 3);
+    // Bounding sphere — loose, covering all 4 verts.
+    Vector ctr = {0,0,0};
+    for (int i = 0; i < 4; ++i) { ctr.x += v[i].x; ctr.y += v[i].y; ctr.z += v[i].z; }
+    ctr.x *= 0.25f; ctr.y *= 0.25f; ctr.z *= 0.25f;
+    float radSq = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const float dx = v[i].x - ctr.x;
+        const float dy = v[i].y - ctr.y;
+        const float dz = v[i].z - ctr.z;
+        const float r = dx*dx + dy*dy + dz*dz;
+        if (r > radSq) radSq = r;
+    }
+    T->BSphereCtr = ctr;
+    T->BSphereRad = radSq;
+    T->BSphereRadius = std::sqrt(radSq);
+    Compute_FaceVertexIndices(T);
+
+    Object *Obj = new Object();
+    std::memset(Obj, 0, sizeof(Object));
+    Obj->Type = Obj_TriMesh;
+    Obj->Data = T;
+    Obj->Pos  = &T->IPos;
+    Obj->Rot  = &T->RotMat;
+    Obj->Name = strdup(name);
+    Obj->Next = sc->ObjectHead;
+    if (sc->ObjectHead) sc->ObjectHead->Prev = Obj;
+    sc->ObjectHead = Obj;
+    T->Next = sc->TriMeshHead;
+    if (sc->TriMeshHead) sc->TriMeshHead->Prev = T;
+    sc->TriMeshHead = T;
+    return { Obj, T };
+}
+
+Scene *MT_buildScene(bool transparentMirror) {
+    Scene *sc = (Scene*)getAlignedBlock(sizeof(Scene), 16);
+    std::memset(sc, 0, sizeof(Scene));
+    sc->NZP = 0.5f;
+    sc->FZP = 100.0f;
+    sc->Flags = Scn_ZBuffer;
+    sc->Ambient.R = sc->Ambient.G = sc->Ambient.B = 96;
+
+    // Materials.
+    auto matFloor = MT_makeMaterial(sc, "floor_mat",
+                                     MT_makeFlatTexture(0xFF606060u),
+                                     96, 96, 96, 0);
+    auto matWall  = MT_makeMaterial(sc, "wall_mat",
+                                     MT_makeFlatTexture(0xFF2030C0u),
+                                     192, 48, 32, 0);
+    Material *matMirror = nullptr;
+    if (transparentMirror) {
+        // Half-silvered path: transparent material with the M-shape
+        // alpha texture so BuildMirror's (A) branch fires.
+        matMirror = MT_makeMaterial(sc, "mirror_xpar_mat",
+                                     MT_makeTextAlphaTexture("MIRRORTEST_TEXT.JPG"),
+                                     220, 220, 240,
+                                     Mat_Transparent | Mat_TwoSided);
+        matMirror->XparBlendAlpha = 0.6f;
+    } else {
+        // Opaque path: flat color, BuildMirror's (B) branch synthesizes
+        // the silver transparent clone.
+        matMirror = MT_makeMaterial(sc, "mirror_opaque_mat",
+                                     MT_makeFlatTexture(0xFFC0C0C0u),
+                                     180, 180, 180, 0);
+    }
+    auto matCube  = MT_makeMaterial(sc, "cube_mat",
+                                     MT_makeFlatTexture(0xFF20E0E0u),
+                                     224, 224, 32, 0);
+
+    // Floor: y=0, z from -10 to +10, x from -10 to +10. Normal up.
+    Vector floorV[4] = {
+        Vector(-10.0f, 0.0f, -10.0f),
+        Vector( 10.0f, 0.0f, -10.0f),
+        Vector( 10.0f, 0.0f,  10.0f),
+        Vector(-10.0f, 0.0f,  10.0f),
+    };
+    MT_addQuad(sc, "floor", floorV, matFloor);
+
+    // Back wall at z = +6, y from 0 to 8, x from -10 to +10. Normal -z.
+    Vector wallV[4] = {
+        Vector( 10.0f, 0.0f,  6.0f),
+        Vector(-10.0f, 0.0f,  6.0f),
+        Vector(-10.0f, 8.0f,  6.0f),
+        Vector( 10.0f, 8.0f,  6.0f),
+    };
+    MT_addQuad(sc, "back_wall", wallV, matWall);
+
+    // Mirror panel at z = +5, centered in y=3..5, x=-2..2. Normal -z.
+    Vector mirrorV[4] = {
+        Vector( 2.0f, 1.0f, 5.0f),
+        Vector(-2.0f, 1.0f, 5.0f),
+        Vector(-2.0f, 6.0f, 5.0f),
+        Vector( 2.0f, 6.0f, 5.0f),
+    };
+    MT_addQuad(sc, "mirror_panel", mirrorV, matMirror);
+
+    // Test cube at z = +2 (between camera at z=-3 and mirror at z=5),
+    // small (0.8 half-edge), centered at (0, 1.5, 2). 6 faces ×2 tris
+    // would be ideal but for simplicity here we use 1 quad per face.
+    // Cube would be ~150 lines; for this first cut we use just a single
+    // quad standing in for the test object. Replace with a real cube
+    // when the basic mirror case is validated.
+    Vector cubeFront[4] = {
+        Vector(-0.7f, 0.8f, 2.0f),
+        Vector( 0.7f, 0.8f, 2.0f),
+        Vector( 0.7f, 2.4f, 2.0f),
+        Vector(-0.7f, 2.4f, 2.0f),
+    };
+    MT_addQuad(sc, "test_object", cubeFront, matCube);
+
+    // Single omni light in front, slightly to the left.
+    Omni *omni = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+    std::memset(omni, 0, sizeof(Omni));
+    omni->IPos = Vector(-2.0f, 4.0f, -1.0f);
+    omni->Flags = Omni_Active;
+    omni->L.R = 255; omni->L.G = 255; omni->L.B = 255;
+    omni->ISize = 1.0f;
+    omni->IRange = 50.0f;
+    omni->rRange = 1.0f / 50.0f;
+    omni->Type = Light_Omni;
+    omni->Next = sc->OmniHead;
+    if (sc->OmniHead) sc->OmniHead->Prev = omni;
+    sc->OmniHead = omni;
+
+    // Single camera looking at the mirror panel from front and slightly
+    // angled so we can see the cube AND its reflection in the mirror.
+    Camera *cam = (Camera*)getAlignedBlock(sizeof(Camera), 16);
+    std::memset(cam, 0, sizeof(Camera));
+    cam->ISource = Vector(-3.5f, 3.0f, -3.0f);
+    cam->IFOV = 60.0f;
+    Vector lookAt(0.0f, 3.0f, 3.0f);
+    buildLookAt(cam->ISource, lookAt, cam->Mat);
+    sc->CameraHead = cam;
+
+    return sc;
+}
+
+void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, int yres) {
+    std::fprintf(stderr, "[MT-RENDER %s] setting scene/view...\n", label);
+    SetCurrentScene(sc);
+    // Deferred path looks up Material* by matID via the per-scene
+    // matTable. Without rebuilding, matTable.count==0 and the deferred
+    // kernel's matID lookup walks off the end. (XparTest does this.)
+    Scene_RebuildMatTable(sc);
+    // Full scene preprocessing: assigns Filler per face, computes
+    // BSphere/face indices, sets up the deferred matTable etc.
+    // Without this F->Filler is nullptr and Render crashes.
+    Preprocess_Scene(sc, "MIRRORTEST");
+    View = sc->CameraHead;
+    CalcPersp(View);
+    FOVX = View->PerspX;
+    FOVY = View->PerspY;
+    std::fprintf(stderr, "[MT-RENDER %s] persp=(%.2f,%.2f) cam=(%.1f,%.1f,%.1f)\n",
+                 label, FOVX, FOVY, View->ISource.x, View->ISource.y, View->ISource.z);
+
+    // FList sized for the scene's face budget + clone mesh (cloning
+    // doubles the face count) + omnis.
+    DWord polys = 0;
+    for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
+    for (Omni *O = sc->OmniHead; O; O = O->Next) ++polys;
+    fds::g_mainFaces.resize(polys * 2 + 16);
+
+    std::memset(VPage,   0, PageSize);
+    std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+    // Skip Animate_Objects — our static meshes / camera have pre-set
+    // IPos/RotMat/View state and Animate's Spline_Calc_3D would crash
+    // on the empty camera splines.
+    fds::g_mainCamera.view = View;
+
+    // Build mirror BEFORE the first Transform so the clone mesh joins
+    // the scene's face count. Try the opaque material name first; fall
+    // back to the transparent material name for case 1.
+    std::vector<fds::Mirror> mirrors;
+    fds::Mirror mm = fds::BuildMirror(sc, "mirror_opaque_mat");
+    if (!mm.cloneMesh) mm = fds::BuildMirror(sc, "mirror_xpar_mat");
+    if (mm.cloneMesh) mirrors.push_back(std::move(mm));
+    polys = 0;
+    for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
+    fds::g_mainFaces.resize(polys * 2 + 16);
+    // BuildMirror cloned the wall material; register it with the matTable
+    // so the deferred kernel's matID lookup finds it.
+    Scene_RebuildMatTable(sc);
+
+    std::fprintf(stderr, "[MT-RENDER %s] Transform...\n", label);
+    Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+    std::fprintf(stderr, "[MT-RENDER %s] Update+Stamp mirror masks...\n", label);
+    fds::UpdateAllMirrors(sc, mirrors);
+    fds::StampMirrorMasks(sc, mirrors);
+    std::fprintf(stderr, "[MT-RENDER %s] Lighting...\n", label);
+    Lighting(sc);
+    if (CAll) {
+        std::fprintf(stderr, "[MT-RENDER %s] Sort (CAll=%d)...\n", label, CAll);
+        Radix_Sort(FList, SList, CAll);
+        std::fprintf(stderr, "[MT-RENDER %s] Render...\n", label);
+        // Force forward for the test scene — the deferred path's tile
+        // setup requires more frame-state plumbing than a snapshot
+        // harness can supply, and the mirror's per-pixel Mekalele check
+        // can be exercised separately in greets.
+        Render(RenderPath::ForceForward);
+        std::fprintf(stderr, "[MT-RENDER %s] Render returned\n", label);
+    } else {
+        std::fprintf(stderr, "[MT-RENDER %s] WARN: CAll=0, nothing to render\n", label);
+    }
+
+    write_ppm(outPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+    std::fprintf(stderr, "[MIRRORTEST] %s -> %s\n", label, outPath);
+}
+
+}  // namespace
+
+int RunMirrorTest(const SnapshotConfig& cfg, int xres, int yres) {
+    // STATUS (WIP): scene + mirror build succeed; Render() hangs even
+    // after Preprocess_Scene. Suspect the rasterizer dispatch needs
+    // more state (probably the deferred RenderTarget / FrameState
+    // plumbing the live scene driver sets up via its profiler glue).
+    // Leaving the harness here so the next session can pick up
+    // debugging from the [MT-RENDER ...] trace.
+    std::fprintf(stderr, "[MIRRORTEST] starting, out=%s xres=%d yres=%d\n",
+                 cfg.outDir.c_str(), xres, yres);
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+
+    // Case 0: opaque silver mirror panel.
+    {
+        Scene *sc = MT_buildScene(/*transparentMirror=*/false);
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/mirrortest_opaque.ppm", cfg.outDir.c_str());
+        MT_renderOne(sc, "opaque", path, xres, yres);
+    }
+    // Case 1: half-silvered transparent mirror panel.
+    {
+        Scene *sc = MT_buildScene(/*transparentMirror=*/true);
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/mirrortest_xpar.ppm", cfg.outDir.c_str());
+        MT_renderOne(sc, "transparent", path, xres, yres);
+    }
+
+    ThreadPool::instance().close();
+    return 0;
+}
