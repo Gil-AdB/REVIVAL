@@ -95,6 +95,12 @@ struct Mirror {
 // if no matching faces found.
 MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMaterialName);
 
+// Same plane finder, but selects wall faces by Texture::FileName
+// substring match. Useful when many distinct Materials share one
+// texture (greets's text-display screens all use TEXTURES/P_TEXT.JPG
+// regardless of material name).
+MirrorPlane FindMirrorPlaneByTextureName(Scene *sc, const char *textureFileName);
+
 // Pass 2: build the mirror — clone every other mesh's geometry with
 // world positions reflected across `plane.plane`, swap winding, clone
 // every omni with reflected position, retarget the wall faces to a
@@ -102,6 +108,12 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMaterialName);
 // the per-frame update. Mirror is invalid (cloneMesh==nullptr) if
 // the plane isn't valid.
 Mirror BuildMirror(Scene *sc, const char *wallMaterialName);
+
+// Parallel entry — picks wall faces by Texture::FileName substring
+// match. Use this when you want to mirror a *texture* (e.g. all
+// surfaces sharing the dynamic greets text texture) without needing
+// to enumerate all the material-name variants.
+Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 
 // Per-frame: re-mirror dynamic source meshes' world verts + cloned
 // omnis' positions across this mirror's plane. Clamps omni IRange to

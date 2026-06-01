@@ -39,10 +39,12 @@ inline float distToPlane(const Vector &P, const Vector &N, float d) {
     return std::fabs(N.x*P.x + N.y*P.y + N.z*P.z + d);
 }
 
-// Generic walker over faces whose Material name matches `wallMatName`.
-// Visitor receives (T, F, wN) where wN is the face's world-space normal.
-template <class Visit>
-void walkWallFaces(Scene *sc, const char *wallMatName, Visit &&visit) {
+// Generic walker over faces matching a predicate. Visitor receives
+// (T, F, wN) where wN is the face's world-space normal. Predicate is
+// (const Face&) -> bool; lets us pick wall surfaces by material name,
+// texture filename, or any custom rule without changing the walker.
+template <class Pred, class Visit>
+void walkWallFacesIf(Scene *sc, Pred &&pred, Visit &&visit) {
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         TriMesh *T = (TriMesh*)Obj->Data;
@@ -50,14 +52,29 @@ void walkWallFaces(Scene *sc, const char *wallMatName, Visit &&visit) {
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!F.A || !F.B || !F.C) continue;
-            if (!F.Txtr || !F.Txtr->Name) continue;
-            if (std::strcmp(F.Txtr->Name, wallMatName) != 0) continue;
+            if (!pred(F)) continue;
             Vector localN = F.N;
             Vector wN;
             MatrixXVector(T->RotMat, &localN, &wN);
             visit(T, F, wN);
         }
     }
+}
+
+// Built-in selectors. Used by the by-name and by-texture-filename
+// public entry points. Predicates are dirt-cheap lambdas the compiler
+// will fully inline through the templated walker.
+inline auto matNameSelector(const char *name) {
+    return [name](const Face &F) -> bool {
+        return F.Txtr && F.Txtr->Name &&
+               std::strcmp(F.Txtr->Name, name) == 0;
+    };
+}
+inline auto textureNameSelector(const char *fileName) {
+    return [fileName](const Face &F) -> bool {
+        return F.Txtr && F.Txtr->Txtr && F.Txtr->Txtr->FileName &&
+               std::strstr(F.Txtr->Txtr->FileName, fileName) != nullptr;
+    };
 }
 
 // Build a 1x1 BGRA Texture from a Material BaseCol so the deferred
@@ -84,10 +101,12 @@ Texture *synthesizeFlatTexture(const Color &col) {
 
 }  // namespace
 
-MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
+namespace {
+template <class Pred>
+MirrorPlane FindMirrorPlaneImpl(Scene *sc, Pred &&pred, const char *label)
 {
     MirrorPlane out{};
-    if (!sc || !wallMatName) return out;
+    if (!sc) return out;
 
     // Collect every wall face's unit-length world normal up-front. We
     // then pick the seed face as the one with the LARGEST coplanar
@@ -101,13 +120,13 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
         Vector   wN;       // unit-length world normal
     };
     std::vector<Sample> samples;
-    walkWallFaces(sc, wallMatName, [&](TriMesh *T, Face &F, const Vector &wN) {
+    walkWallFacesIf(sc, pred, [&](TriMesh *T, Face &F, const Vector &wN) {
         Vector u = wN;
         u.normalize();
         samples.push_back({T, &F, u});
     });
     if (samples.empty()) {
-        std::fprintf(stderr, "[MIRROR] no '%s' faces found\n", wallMatName);
+        std::fprintf(stderr, "[MIRROR] no '%s' faces found\n", label);
         return out;
     }
 
@@ -144,7 +163,7 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
     if (keptCount == 0) {
         std::fprintf(stderr,
             "[MIRROR '%s'] all %zu wall faces dropped as outliers\n",
-            wallMatName, samples.size());
+            label, samples.size());
         return out;
     }
     out.N = accN;
@@ -155,9 +174,28 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
     std::fprintf(stderr,
         "[MIRROR '%s'] plane N=(%.3f,%.3f,%.3f) d=%.3f from %d/%zu faces "
         "(%d outliers)\n",
-        wallMatName, out.N.x, out.N.y, out.N.z, out.d,
+        label, out.N.x, out.N.y, out.N.z, out.d,
         keptCount, samples.size(), droppedOutlier);
     return out;
+}
+
+}  // namespace (FindMirrorPlaneImpl template)
+
+// Public wrapper retained for back-compat — selects by material name.
+MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
+{
+    if (!sc || !wallMatName) return MirrorPlane{};
+    return FindMirrorPlaneImpl(sc, matNameSelector(wallMatName), wallMatName);
+}
+
+// Public entry — pick wall faces by Texture::FileName substring match.
+// Lets greets target the real text-display panels (TEXTURES/P_TEXT.JPG)
+// rather than guessing material names — multiple distinct Materials
+// share the same dynamic-text texture there.
+MirrorPlane FindMirrorPlaneByTextureName(Scene *sc, const char *textureFileName)
+{
+    if (!sc || !textureFileName) return MirrorPlane{};
+    return FindMirrorPlaneImpl(sc, textureNameSelector(textureFileName), textureFileName);
 }
 
 // Monotonic mirror id counter. Each successful BuildMirror call grabs
@@ -168,26 +206,24 @@ MirrorPlane FindMirrorPlaneByMatName(Scene *sc, const char *wallMatName)
 // out of u8 space and we'd need to widen the plane.
 static uint8_t s_nextMirrorId = 1;
 
-Mirror BuildMirror(Scene *sc, const char *wallMatName)
+namespace {
+template <class Pred>
+Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
 {
     Mirror m{};
-    if (!sc || !wallMatName) return m;
-    m.wallMaterialName = wallMatName;
-    m.plane = FindMirrorPlaneByMatName(sc, wallMatName);
+    if (!sc) return m;
+    m.wallMaterialName = label ? label : "";
+    m.plane = FindMirrorPlaneImpl(sc, isWall, label);
     if (!m.plane.valid) return m;
     if (s_nextMirrorId == 0) {
         std::fprintf(stderr, "[MIRROR '%s'] all 255 mirror ids in use — skipping\n",
-                     wallMatName);
+                     label);
         return m;
     }
     m.id = s_nextMirrorId++;
 
     const Vector &N = m.plane.N;
     const float   d = m.plane.d;
-    auto isWall = [&](const Face &F) -> bool {
-        return F.Txtr && F.Txtr->Name &&
-               std::strcmp(F.Txtr->Name, wallMatName) == 0;
-    };
     // A wall face is the actual mirror SURFACE iff it's also coplanar
     // with the mirror plane. For a flat wall every wall face qualifies;
     // for a 3D mesh wall (screen box) only the front face does, and
@@ -219,7 +255,7 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     }
     if (totalFaces == 0) {
         std::fprintf(stderr,
-            "[MIRROR '%s'] nothing to clone (0 non-wall faces)\n", wallMatName);
+            "[MIRROR '%s'] nothing to clone (0 non-wall faces)\n", label);
         return m;
     }
 
@@ -335,7 +371,7 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     {
         // Name suffix from the wall material so multiple mirrors get
         // distinct names in diagnostics ("mirror_teleporter" etc.).
-        std::string nm = std::string("mirror_") + wallMatName;
+        std::string nm = std::string("mirror_") + (label?label:"x");
         MObj->Name = (char*)std::malloc(nm.size() + 1);
         std::strcpy(MObj->Name, nm.c_str());
     }
@@ -346,16 +382,29 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     if (sc->TriMeshHead) sc->TriMeshHead->Prev = MM;
     sc->TriMeshHead = MM;
 
-    // Retarget mirror-surface wall faces to a transparent silvered mat.
-    // The visible appearance: low base alpha (mirror dominates) + a
-    // silver stub texture + cranked Specular so the deferred lighting
-    // kernel paints highlights along the wall's specular angle —
-    // sells "polished metal surface" rather than "tinted glass". For
-    // already-textured wall mats we keep the source texture; only
-    // BaseCol-only (flat-shaded) walls get the silver stub.
-    constexpr float kMirrorAlpha     = 0.15f;   // 15% wall tint, 85% mirror beneath
-    constexpr float kMirrorSpecular  = 32.0f;   // pronounced spec lobe
-    const Color     kMirrorSilver    = { 180.0f, 180.0f, 200.0f, 255.0f };  // BGRA, cool silver
+    // Retarget mirror-surface wall faces. Two distinct treatments based
+    // on whether the source material is already transparent with a
+    // real texture:
+    //
+    // (A) Source is Mat_Transparent + textured (greets's P_TEXT screens):
+    //     half-silvered-glass behavior. KEEP the source material as-is
+    //     — the existing transparent blend `litRGB*α + dst*(1-α)`
+    //     already does the right thing: the screen's text shows where
+    //     its alpha is opaque, and the cloned mirror geometry (rendered
+    //     into the opaque G-buffer beneath the wall) shows through
+    //     where alpha is transparent. No material clone needed; just
+    //     tag the face for the mask pre-pass.
+    //
+    // (B) Source is opaque (teleporter-style flat walls): synthesize
+    //     a silvery transparent material clone so the surface visually
+    //     reads as a mirror. Cool silver BaseCol, cranked Specular,
+    //     low alpha so the mirror clone beneath dominates. Flat-shaded
+    //     sources also get a 1×1 silver stub texture for the deferred
+    //     transparent rasterizer's LSizeX/LSizeY read.
+    constexpr float kMirrorAlpha     = 0.15f;
+    constexpr float kMirrorSpecular  = 32.0f;
+    const Color     kMirrorSilver    = { 180.0f, 180.0f, 200.0f, 255.0f };
+    int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;
@@ -364,30 +413,40 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isMirrorSurface(F, T)) continue;
-            if (!m.wallMatClone) {
-                m.wallMatClone = getAlignedType<Material>(16);
-                std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
-                m.wallMatClone->Flags |= Mat_Transparent;
-                m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
-                m.wallMatClone->Specular       = kMirrorSpecular;
-                m.wallMatClone->BaseCol        = kMirrorSilver;
-                if (!m.wallMatClone->Txtr) {
-                    // Flat-shaded source — use silver stub directly.
-                    m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
+            const bool sourceIsHalfSilvered =
+                F.Txtr && (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
+            if (sourceIsHalfSilvered) {
+                // (A): keep original material untouched.
+                ++wallTransparentKept;
+            } else {
+                // (B): synthesize silver transparent mat on first hit.
+                if (!m.wallMatClone) {
+                    m.wallMatClone = getAlignedType<Material>(16);
+                    std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
+                    m.wallMatClone->Flags |= Mat_Transparent;
+                    m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
+                    m.wallMatClone->Specular       = kMirrorSpecular;
+                    m.wallMatClone->BaseCol        = kMirrorSilver;
+                    if (!m.wallMatClone->Txtr) {
+                        m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
+                    }
+                    m.wallMatClone->Prev = nullptr;
+                    m.wallMatClone->Next = MatLib;
+                    if (MatLib) MatLib->Prev = m.wallMatClone;
+                    MatLib = m.wallMatClone;
                 }
-                m.wallMatClone->Prev = nullptr;
-                m.wallMatClone->Next = MatLib;
-                if (MatLib) MatLib->Prev = m.wallMatClone;
-                MatLib = m.wallMatClone;
+                F.Txtr = m.wallMatClone;
             }
-            F.Txtr = m.wallMatClone;
-            // Wall face also tagged with the mirror id. The mask pre-pass
-            // (StampMirrorMasks) reads this to know which value to stamp
-            // into gb.mirrorId for the face's screen-space pixels.
             F.mirrorMaskTag = m.id;
             m.wallFaces.push_back(&F);
             ++m.wallFacesRetargeted;
         }
+    }
+    if (wallTransparentKept > 0) {
+        std::fprintf(stderr,
+            "[MIRROR '%s'] kept %d transparent-textured wall faces as-is "
+            "(half-silvered-glass path)\n",
+            label, wallTransparentKept);
     }
     // Allocate gb.mirrorId plane on first mirror in the scene. Sized
     // to match the engine surface; 1 byte per pixel = 2 MB at 1080p.
@@ -399,7 +458,7 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     } else {
         std::fprintf(stderr,
             "[MIRROR '%s'] WARN: g_gbuffer null at BuildMirror — mask plane not allocated\n",
-            wallMatName);
+            label);
     }
 
     // Clone every omni in the scene. Mirror-side geometry sees the
@@ -428,9 +487,23 @@ Mirror BuildMirror(Scene *sc, const char *wallMatName)
     std::fprintf(stderr,
         "[MIRROR '%s'] cloned %u verts / %u faces (mirror bbox z=[%.1f..%.1f]); "
         "retargeted %d wall faces to transparent mat; cloned %d omnis\n",
-        wallMatName, unsigned(vOfs), unsigned(fOfs),
+        label, unsigned(vOfs), unsigned(fOfs),
         bbMin.z, bbMax.z, m.wallFacesRetargeted, omniCount);
     return m;
+}
+
+}  // namespace (BuildMirrorImpl template)
+
+// Public wrappers.
+Mirror BuildMirror(Scene *sc, const char *wallMatName)
+{
+    if (!sc || !wallMatName) return Mirror{};
+    return BuildMirrorImpl(sc, matNameSelector(wallMatName), wallMatName);
+}
+Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName)
+{
+    if (!sc || !textureFileName) return Mirror{};
+    return BuildMirrorImpl(sc, textureNameSelector(textureFileName), textureFileName);
 }
 
 void UpdateMirror(Scene *sc, Mirror &m)
