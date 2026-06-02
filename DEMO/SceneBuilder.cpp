@@ -310,6 +310,15 @@ Omni *SceneBuilder::AddOmni(Vector pos, Color color, float intensity,
     O->L      = color;
     O->Type   = Light_Omni;
     O->Flags  = Omni_Active | Omni_Stationary;
+    // Flare-pass plumbing: F.A/B/C must point at O->V or Transform_Objects's
+    // sprite pass (RENDER.CPP:600 `A=F->A; B=F->B; if (A==B) A->TPos_AOS.z`)
+    // derefs nulls. Filler is a no-op since omni flares don't fill triangles.
+    O->F.A = &O->V;
+    O->F.B = &O->V;
+    O->F.C = &O->V;
+    O->F.Filler = [](Face*, Vertex**, dword, dword,
+                     const fds::RenderTarget&,
+                     const fds::CameraContext&) {};
     // Single-key splines so Animate_Objects / Lighting don't crash
     // on empty Keys.
     StampSingleKey(O->Pos,    pos.x, pos.y, pos.z, 0.0f);
@@ -334,7 +343,20 @@ void SceneBuilder::SetCamera(Vector eye, Vector lookAt, float fov) {
     }
     cam->ISource = eye;
     cam->IFOV    = fov;
+    cam->IRoll   = 0.0f;
+    cam->ITarget = lookAt;
     Kick_Camera(&cam->ISource, &lookAt, 0.0f, cam->Mat);
+
+    // Stamp single-key Source / Target / Roll / FOV splines so a later
+    // Animate_Objects(sc, view) doesn't crash on empty Keys. The values
+    // are constants — Spline_Calc returns them unchanged at every frame
+    // — so the camera stays at its set pose until user input moves it
+    // through Dynamic_Camera. (Real scenes drive these from FLD anim
+    // tracks; the builder is meant for static initial poses.)
+    StampSingleKey(cam->Source, eye.x,    eye.y,    eye.z,    0.0f);
+    StampSingleKey(cam->Target, lookAt.x, lookAt.y, lookAt.z, 0.0f);
+    StampSingleKey(cam->Roll,   0.0f,     0.0f,     0.0f,     0.0f);
+    StampSingleKey(cam->FOV,    fov,      fov,      fov,      0.0f);
 }
 
 // ── Finalize ───────────────────────────────────────────────────────

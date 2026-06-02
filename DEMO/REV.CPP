@@ -1093,8 +1093,15 @@ void CodeEntry(void *var)
 	// for poking at the mirror system with free-cam.
 	if (fds::FeatureFlags::scene_mirrortest()) {
 		extern void Run_MirrorTest();
-		Run_MirrorTest();
+		// Join the init thread BEFORE running the mirror test scene.
+		// Initialize_Greets / _City / etc each call
+		// fds::g_mainFaces.resize(...), which reallocates the global
+		// FList storage. If the mirror-test scene's tick is rendering
+		// against that vector concurrently, the realloc frees its
+		// FListEntry array out from under the active render — ASan
+		// flagged it as heap-use-after-free in RenderInner.cpp:76.
 		if (t1.joinable()) t1.join();
+		Run_MirrorTest();
 		goto demo_exit;
 	}
 	if (!skipToFountain) {
