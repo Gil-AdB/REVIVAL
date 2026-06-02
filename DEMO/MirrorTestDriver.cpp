@@ -29,15 +29,18 @@ Scene *BuildInteractiveMirrorTestScene() {
     Texture *floorTex = b.AddSolidColorTexture(8, 8, 0xFF606060u);
     Material *matFloor = b.AddMaterial("floor_mat", floorTex,
                                         {96, 96, 96, 255}, 0);
-    Texture *wallTex = b.AddSolidColorTexture(8, 8, 0xFF2030C0u);
-    Material *matWall = b.AddMaterial("wall_mat", wallTex,
-                                       {192, 48, 32, 255}, 0);
     Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC0C0C0u);
     Material *matMirror = b.AddMaterial("mirror_mat", mirTex,
                                          {180, 180, 180, 255}, 0);
-    Texture *cubeTex = b.AddSolidColorTexture(8, 8, 0xFF20E0E0u);
-    Material *matCube = b.AddMaterial("cube_mat", cubeTex,
-                                       {224, 224, 32, 255}, 0);
+    Texture *redTex = b.AddSolidColorTexture(8, 8, 0xFFE03030u);
+    Material *matRed = b.AddMaterial("red_mat", redTex,
+                                      {224, 32, 32, 255}, 0);
+    Texture *greenTex = b.AddSolidColorTexture(8, 8, 0xFF30E030u);
+    Material *matGreen = b.AddMaterial("green_mat", greenTex,
+                                        {32, 224, 32, 255}, 0);
+    Texture *yellowTex = b.AddSolidColorTexture(8, 8, 0xFFE0E020u);
+    Material *matYellow = b.AddMaterial("yellow_mat", yellowTex,
+                                         {224, 224, 32, 255}, 0);
 
     // Floor: y=0, 20x20.
     const Vector floorV[4] = {
@@ -46,31 +49,32 @@ Scene *BuildInteractiveMirrorTestScene() {
     };
     b.AddQuad("floor", floorV, matFloor);
 
-    // Back wall at z=+6, 20 wide × 8 tall.
-    const Vector wallV[4] = {
-        Vector( 10.0f, 0.0f, 6.0f), Vector(-10.0f, 0.0f, 6.0f),
-        Vector(-10.0f, 8.0f, 6.0f), Vector( 10.0f, 8.0f, 6.0f),
-    };
-    b.AddQuad("back_wall", wallV, matWall);
-
-    // Mirror panel at z=+5, 4 wide × 5 tall.
+    // Mirror panel IS the back wall at z=+5, 20 wide × 8 tall. No separate
+    // back wall behind — the mirror system's clone faces sit BEHIND the
+    // mirror plane (z>5) and would Z-fail against anything closer to
+    // the camera at the same screen pixels.
     const Vector mirrorV[4] = {
-        Vector( 2.0f, 1.0f, 5.0f), Vector(-2.0f, 1.0f, 5.0f),
-        Vector(-2.0f, 6.0f, 5.0f), Vector( 2.0f, 6.0f, 5.0f),
+        Vector( 10.0f, 0.0f, 5.0f), Vector(-10.0f, 0.0f, 5.0f),
+        Vector(-10.0f, 8.0f, 5.0f), Vector( 10.0f, 8.0f, 5.0f),
     };
     b.AddQuad("mirror_panel", mirrorV, matMirror);
 
-    // Test cube centered between camera and the mirror.
-    b.AddCube("test_cube", Vector(0.0f, 1.6f, 2.0f), 0.8f, matCube);
+    // Three distinct objects in front of the mirror so the reflection is
+    // visually unambiguous: a red cube on the left, a green cube on the
+    // right at different depth, a tall yellow pillar centered close.
+    b.AddCube("red_cube",    Vector(-1.8f, 1.0f, 1.5f), 0.6f, matRed);
+    b.AddCube("green_cube",  Vector( 1.8f, 1.0f, 3.0f), 0.6f, matGreen);
+    b.AddCube("yellow_post", Vector( 0.0f, 1.5f, 2.0f), 0.3f, matYellow);
 
-    // Single omni in front + above so the cube + walls light up.
+    // Single omni high in front so the cube faces are clearly lit and
+    // the reflected cube faces in the mirror are clearly lit too.
     b.AddOmni(Vector(-2.0f, 5.0f, -1.0f),
               {255.0f, 240.0f, 220.0f, 255.0f},
-              /*intensity=*/1.5f, /*range=*/30.0f);
+              /*intensity=*/2.0f, /*range=*/30.0f);
 
     // Starting camera looking at the mirror panel.
     b.SetCamera(Vector(-3.5f, 3.0f, -3.0f),
-                Vector(0.0f, 3.0f, 3.0f),
+                Vector(0.0f, 3.0f, 5.0f),
                 60.0f);
     b.Finalize();
     return b.scene();
@@ -80,7 +84,8 @@ struct MirrorTestScene : SceneDriver {
     Scene *sc = nullptr;
     std::vector<fds::Mirror> mirrors;
     FrameProfiler prof{"mirrortest"};
-    char MSGStr[128] = {0};
+    char MSGStr[192] = {0};
+    float TTrd_ = -1.0f;
 
     ~MirrorTestScene() override {
         // The builder-allocated scene contains a mix of new[]/aligned-
@@ -117,9 +122,21 @@ struct MirrorTestScene : SceneDriver {
         Specular_Factor = 1.0f;
         ImageSize = 1;
 
+        // Start in free-cam. The whole point of an interactive mirror test is
+        // to fly around the panel; defaulting to the scripted camera (no
+        // splines) leaves the user wondering why WASD doesn't move them.
+        // Seed FC from the scripted camera's pose so we start where the
+        // scene was authored to look.
+        FC.ISource = sc->CameraHead->ISource;
+        FC.IFOV    = sc->CameraHead->IFOV;
+        Matrix_Copy(FC.Mat, sc->CameraHead->Mat);
+        CalcPersp(&FC);
+        View = &FC;
+
         std::fprintf(stderr,
-            "[MIRRORTEST] interactive scene ready — TAB to free-cam, "
-            "WASD/QE to move, arrows to look. ESC to exit.\n");
+            "[MIRRORTEST] interactive scene ready — starting in FREE-CAM. "
+            "WASD/QE to move, arrows to look, TAB to toggle scripted cam, "
+            "ESC to exit.\n");
     }
 
     bool tick() override {
@@ -134,7 +151,17 @@ struct MirrorTestScene : SceneDriver {
         clearFrame();
 
         prof.switchTo(PROF_ANIM);
-        Dynamic_Camera();
+        // Dynamic_Camera needs a sane dTime — it scales FV (free-cam
+        // velocity vector) by dTime. Mimic RENDER.CPP:850's pattern:
+        // delta since last tick * 0.25 (the legacy fudge that makes
+        // every scene's WASD feel consistent).
+        if (TTrd_ > 0) {
+            dTime = (Timer - TTrd_) * 0.25f;
+        } else {
+            dTime = 0;
+        }
+        TTrd_ = Timer;
+        if (View == &FC) Dynamic_Camera();
         if (Keyboard[ScC]) {
             FC.ISource = View->ISource;
             Matrix_Copy(FC.Mat, View->Mat);
@@ -155,13 +182,24 @@ struct MirrorTestScene : SceneDriver {
             prof.enter(PROF_SORT);
             Radix_Sort(FList, SList, CAll);
             prof.switchTo(PROF_RNDR);
-            Render();
+            // Force deferred: the mirror system's clone-mask (Mekalele's
+            // per-pixel gb.mirrorId == mirrorTag) only fires on the
+            // deferred path. Forward renders the clone faces into the
+            // opaque pass without any mask, then the back wall (closer
+            // Z) overwrites them — the user sees solid wall instead of
+            // a reflection. Native default for FDS_DEFERRED is OFF
+            // (FDS_DEFERRED_DEFAULT_ON=1 is only set in the EMSCRIPTEN
+            // branch of FDS/CMakeLists.txt), so we force it here rather
+            // than asking the user to remember --deferred.
+            Render(RenderPath::ForceDeferred);
             prof.leave(PROF_RNDR);
         }
 
-        // Cheap on-screen HUD: camera pose + active mirror count.
+        // Cheap on-screen HUD: camera mode + pose + active mirror count.
         std::snprintf(MSGStr, sizeof(MSGStr),
-                      "Mirrors: %zu  Cam=(%.1f,%.1f,%.1f)",
+                      "[%s]  Mirrors:%zu  Cam=(%.1f,%.1f,%.1f)  "
+                      "WASD/QE move, arrows look, TAB toggle, ESC exit",
+                      (View == &FC) ? "FREE" : "SCRIPTED",
                       mirrors.size(),
                       View->ISource.x, View->ISource.y, View->ISource.z);
         OutTextXY(VPage, 0, 0, MSGStr, 255);
