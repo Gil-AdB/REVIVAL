@@ -33,6 +33,18 @@ Scene *BuildInteractiveMirrorTestScene() {
     Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC0C0C0u);
     Material *matMirror = b.AddMaterial("mirror_mat", mirTex,
                                          {180, 180, 180, 255}, 0);
+    // Half-silvered side mirror — material is transparent FROM THE
+    // START so BuildMirror takes path A (keep material untouched).
+    // This is the case that broke greets's P_TEXT mirror: clones of
+    // transparent source faces dispatch through Mekalele's transparent
+    // target, and the transparent gbuffers' mirrorId planes were
+    // never allocated, so the mask short-circuited and clones drew
+    // anywhere on screen.
+    Texture *xparTex = b.AddSolidColorTexture(8, 8, 0xFFB0B0FFu);
+    Material *matXparMirror = b.AddMaterial("xpar_mirror_mat", xparTex,
+                                             {160, 160, 220, 255},
+                                             Mat_Transparent | Mat_TwoSided);
+    matXparMirror->XparBlendAlpha = 0.3f;
     Texture *redTex = b.AddSolidColorTexture(8, 8, 0xFFE03030u);
     Material *matRed = b.AddMaterial("red_mat", redTex,
                                       {224, 32, 32, 255}, 0);
@@ -59,6 +71,15 @@ Scene *BuildInteractiveMirrorTestScene() {
         Vector(-10.0f, 8.0f, 5.0f), Vector( 10.0f, 8.0f, 5.0f),
     };
     b.AddQuad("mirror_panel", mirrorV, matMirror);
+
+    // Half-silvered side mirror panel at x=-7 (left wall). The room is
+    // bigger than the mirror so the side mirror has space to live.
+    // Uses Mat_Transparent + textured material → BuildMirror path A.
+    const Vector xparMirrorV[4] = {
+        Vector(-7.0f, 0.0f,  5.0f), Vector(-7.0f, 0.0f, -5.0f),
+        Vector(-7.0f, 7.0f, -5.0f), Vector(-7.0f, 7.0f,  5.0f),
+    };
+    b.AddQuad("xpar_mirror_panel", xparMirrorV, matXparMirror);
 
     // Three distinct objects in front of the mirror so the reflection is
     // visually unambiguous: a red cube on the left, a green cube on the
@@ -100,9 +121,13 @@ struct MirrorTestScene : SceneDriver {
         SetCurrentScene(sc);
         Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
 
-        // Build the mirror across the mirror panel.
+        // Build the back-wall mirror (path B — opaque source synthesised
+        // into transparent silver) and the side mirror (path A — already
+        // transparent material, kept as half-silvered glass).
         fds::Mirror m = fds::BuildMirror(sc, "mirror_mat");
         if (m.cloneMesh) mirrors.push_back(std::move(m));
+        fds::Mirror m2 = fds::BuildMirror(sc, "xpar_mirror_mat");
+        if (m2.cloneMesh) mirrors.push_back(std::move(m2));
 
         // setupFaceLists wires the global View alias to sc->CameraHead
         // (Transform_Objects derefs view->Mat through that), sizes the
@@ -202,6 +227,10 @@ struct MirrorTestScene : SceneDriver {
                 // suppresses the mask entirely so Mekalele rejects every
                 // clone pixel for this mirror.
                 { Vector( 0.0f, 3.0f,  9.0f), Vector( 0.0f, 3.0f, -2.0f), "behind" },
+                // Look at the half-silvered SIDE mirror from inside the
+                // room. Side mirror is at x=-7 with N=(1,0,0); standing
+                // at x=0 puts the viewer firmly in front of it.
+                { Vector( 0.0f, 3.0f,  0.0f), Vector(-7.0f, 3.0f,  0.0f), "side-xpar" },
             };
             for (const Pose &p : poses) {
                 char path[64];

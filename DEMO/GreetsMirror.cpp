@@ -462,11 +462,24 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     }
     // Allocate gb.mirrorId plane on first mirror in the scene. Sized
     // to match the engine surface; 1 byte per pixel = 2 MB at 1080p.
+    // We allocate on all three engine gbuffers — opaque, transparent
+    // front-peel, transparent back-peel — because clones of
+    // transparent source faces (e.g. clones of greets's other P_TEXT
+    // screens) go through Mekalele's TransparentFront/Back targets
+    // and their GBufferSpan reads mirrorId from the matching gbuffer.
+    // Leaving the transparent planes empty made the mask short-circuit
+    // to "no mask," so cloned transparent geometry was drawing
+    // anywhere on screen (= "screens in random places").
+    auto ensureMirrorIdSized = [](meka::GBuffer *gb, const char *which) {
+        if (!gb) return;
+        const size_t needed = gb->normal.size();
+        if (gb->mirrorId.size() < needed) gb->mirrorId.assign(needed, 0);
+        (void)which;
+    };
     if (g_gbuffer) {
-        const size_t needed = g_gbuffer->normal.size();
-        if (g_gbuffer->mirrorId.size() < needed) {
-            g_gbuffer->mirrorId.assign(needed, 0);
-        }
+        ensureMirrorIdSized(g_gbuffer,                "opaque");
+        ensureMirrorIdSized(g_gbufferTransparent,     "xpar-front");
+        ensureMirrorIdSized(g_gbufferTransparentBack, "xpar-back");
     } else {
         std::fprintf(stderr,
             "[MIRROR '%s'] WARN: g_gbuffer null at BuildMirror — mask plane not allocated\n",
@@ -758,6 +771,22 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
                            m.id);
             }
         }
+    }
+    // Mirror the stamped mask onto the transparent gbuffers so clones
+    // of transparent source faces (which Mekalele dispatches via the
+    // TransparentFront / TransparentBack targets) see the same per-
+    // pixel id and get masked against ctx.mirrorTag identically.
+    // Without this, transparent-source clones bypass the mask
+    // entirely and render across the whole screen.
+    if (g_gbufferTransparent
+        && g_gbufferTransparent->mirrorId.size() == plane.size()) {
+        std::memcpy(g_gbufferTransparent->mirrorId.data(),
+                    plane.data(), plane.size());
+    }
+    if (g_gbufferTransparentBack
+        && g_gbufferTransparentBack->mirrorId.size() == plane.size()) {
+        std::memcpy(g_gbufferTransparentBack->mirrorId.data(),
+                    plane.data(), plane.size());
     }
 }
 
