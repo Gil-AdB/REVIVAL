@@ -426,15 +426,21 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     //     sources also get a 1×1 silver stub texture for the deferred
     //     transparent rasterizer's LSizeX/LSizeY read.
     // Wall material is meant as a passive gateway to the reflected
-    // world, not a lit surface in its own right. Keep Specular = 0
-    // so the warm greets omni doesn't blow a saturated spec lobe
-    // through the low-alpha blend (the previous Spec=2 read as a
-    // yellow flashlight rather than a mirror — pre-existing tuning
-    // for Spec=32 → 2 was still picking up the warm-omni highlight).
-    // Alpha kept low so the reflection dominates.
+    // world, not a lit surface in its own right. Three knobs keep it
+    // from bleeding through:
+    //   - Specular = 0 so warm omnis don't write a spec lobe.
+    //   - Diffuse cut to 0.1 so the deferred lighting kernel's
+    //     accumulator doesn't saturate from 15 nearby greets omnis
+    //     (each contributing diffuse * lightCol * BaseCol; total can
+    //     exceed 255 per channel and clamp into a bright yellow).
+    //   - BaseCol cut to ~40 instead of 180 so even with saturation
+    //     the 5% alpha-blend onto VPage barely tints the underlying
+    //     reflection. Picks the same neutral hue but at a magnitude
+    //     where the reflection beneath wins by a wide margin.
     constexpr float kMirrorAlpha     = 0.05f;
     constexpr float kMirrorSpecular  = 0.0f;
-    const Color     kMirrorSilver    = { 160.0f, 160.0f, 180.0f, 255.0f };
+    constexpr float kMirrorDiffuse   = 0.1f;
+    const Color     kMirrorSilver    = { 40.0f, 40.0f, 45.0f, 255.0f };
     int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
@@ -459,6 +465,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                     m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
                     m.wallMatClone->Specular       = kMirrorSpecular;
                     m.wallMatClone->BaseCol        = kMirrorSilver;
+                    m.wallMatClone->Diffuse        = kMirrorDiffuse;
                     // Source's Luminosity (self-emission) bleeds through the
                     // low-alpha blend and over-brightens the mirror — wash
                     // it out so the silvered wall behaves like a passive
