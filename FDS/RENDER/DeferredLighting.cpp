@@ -1146,11 +1146,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
 			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
 			static const bool sVizMatID       = fds::FeatureFlags::viz_matid();
+			static const bool sVizPmid        = fds::FeatureFlags::viz_pmid();
 			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
 #else
 			constexpr bool sVizTangent    = false;
 			constexpr bool sVizNormal     = false;
 			constexpr bool sVizMatID      = false;
+			constexpr bool sVizPmid       = false;
 			constexpr bool sNmapAsDiffuse = false;
 #endif
 			float texB, texG, texR;
@@ -1902,6 +1904,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				outR = int((h * 73u + 41u) & 0xFFu);
 				outG = int((h * 151u + 13u) & 0xFFu);
 				outB = int((h * 211u + 97u) & 0xFFu);
+			}
+			if (sVizPmid) {
+				// Hash pmid (gb.mirrorId post-commit, = which mirror
+				// context owns this pixel). pmid==0 → black (originals);
+				// nonzero → per-mirror colour. Lets us distinguish the
+				// reflected floor (pmid > 0) from the original floor
+				// (pmid == 0) — matID can't, since clones share Mat.
+				const uint32_t h = uint32_t(pmid);
+				if (h == 0u) {
+					outR = outG = outB = 0;
+				} else {
+					outR = int((h * 73u + 41u) & 0xFFu);
+					outG = int((h * 151u + 13u) & 0xFFu);
+					outB = int((h * 211u + 97u) & 0xFFu);
+				}
 			}
 			if (sVizTangent) {
 				if (!gb.tangent.empty()) {
