@@ -702,8 +702,28 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
         sx = vp.x * invZ;
         sy = vp.y * invZ;
     };
+    // Camera position used to gate per-mirror rendering: when the
+    // viewer crosses to the back side of a mirror plane, the wall
+    // faces are back-facing (culled by Transform_Objects) but the
+    // clone mesh's faces stay in the FList — some clones happen to
+    // be front-facing from the back-side viewpoint and were
+    // rendering anyway, since Mekalele's per-pixel mask only rejects
+    // pixels outside the wall's screen footprint. The cure is to
+    // skip stamping the mask for any mirror whose viewer is on the
+    // back side (plane sign N·C + d <= 0); with no mask, Mekalele
+    // rejects every clone pixel for that mirror.
+    const Vector *camPos = nullptr;
+    if (sc->CameraHead) camPos = &sc->CameraHead->ISource;
+    if (::View) camPos = &::View->ISource;  // FrameState alias; active camera
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
+        if (camPos && m.plane.valid) {
+            const float side = m.plane.N.x * camPos->x
+                             + m.plane.N.y * camPos->y
+                             + m.plane.N.z * camPos->z
+                             + m.plane.d;
+            if (side <= 0.0f) continue;  // viewer behind mirror
+        }
         for (const Face *F : m.wallFaces) {
             if (!F || !F->A || !F->B || !F->C) continue;
             // Clip the (A,B,C) triangle in view-space against z >= kClipZ.

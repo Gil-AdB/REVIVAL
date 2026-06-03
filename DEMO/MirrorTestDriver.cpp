@@ -196,6 +196,12 @@ struct MirrorTestScene : SceneDriver {
                 { Vector( 0.0f, 6.5f, -3.0f), Vector( 0.0f, 2.0f,  5.0f), "high" },
                 { Vector( 0.0f, 1.0f, -3.0f), Vector( 0.0f, 4.0f,  5.0f), "low" },
                 { Vector(-1.5f, 3.0f,  2.0f), Vector( 0.0f, 3.0f,  5.0f), "close" },
+                // Camera crossed to the back side of the mirror (z > 5).
+                // Reflections should NOT be visible here — the wall is
+                // back-facing, and StampMirrorMasks's side-of-plane test
+                // suppresses the mask entirely so Mekalele rejects every
+                // clone pixel for this mirror.
+                { Vector( 0.0f, 3.0f,  9.0f), Vector( 0.0f, 3.0f, -2.0f), "behind" },
             };
             for (const Pose &p : poses) {
                 char path[64];
