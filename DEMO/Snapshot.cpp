@@ -3754,6 +3754,7 @@ void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, i
         fds::Mirror mm = fds::BuildMirror(sc, "mirror_opaque_mat");
         if (!mm.cloneMesh) mm = fds::BuildMirror(sc, "mirror_xpar_mat");
         if (mm.cloneMesh) mirrors.push_back(std::move(mm));
+        fds::TagFacesBehindMirrors(sc, mirrors);
         polys = 0;
         for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
         fds::g_mainFaces.resize(polys * 2 + 16);

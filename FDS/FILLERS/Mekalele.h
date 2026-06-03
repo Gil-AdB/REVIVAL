@@ -270,6 +270,12 @@ struct TileRasterizerCtx {
 	// their m.id. Read by the deferred lighting kernel's per-pixel
 	// light filter.
 	u8 faceOwnerMirrorId = 0;
+	// Bitmask of mirror ids this face is BEHIND (Face::behindMirrorMask).
+	// The commit rejects any lane whose gb.mirrorMask id has its bit set
+	// here, so behind-mirror real geometry can't leak through a
+	// (transparent, no-opaque-Z) mirror's footprint. 0 for the common
+	// case (face not behind any mirror) → the gate is a no-op.
+	u32 faceBehindMirrorMask = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -574,6 +580,30 @@ struct TileRasterizer {
 					const Vec8i pixelIds = Vec8i(_mm256_cvtepu8_epi32(packed));
 					const Vec8ib mirrorMask = (pixelIds == Vec8i(int(ctx.mirrorTag)));
 					p_mask &= mirrorMask;
+				}
+				// Behind-mirror clip for ORIGINAL faces. If this face is
+				// behind one or more mirror planes (faceBehindMirrorMask
+				// bits set), reject any lane sitting inside one of those
+				// mirrors' screen footprints — the (transparent, no-
+				// opaque-Z) mirror surface can't occlude it, so without
+				// this it leaks through and beats the reflected clones
+				// on Z. Per lane: bit[pixelMirrorId] of the face's mask.
+				// _mm256_srlv_epi32 variable-shifts the broadcast mask by
+				// each lane's id; for ids ≥ 32 the shift yields 0 (never
+				// rejected), and id 0 (no mirror) tests bit 0 which is
+				// never set since mirror ids start at 1.
+				if (ctx.faceBehindMirrorMask != 0 && span.mirrorMask != nullptr) {
+					alignas(8) u8 maskBytes[8];
+					std::memcpy(maskBytes, span.mirrorMask, 8);
+					const __m128i packed = _mm_loadl_epi64((const __m128i*)maskBytes);
+					const Vec8i pixelIds = Vec8i(_mm256_cvtepu8_epi32(packed));
+					const __m256i bcast = _mm256_set1_epi32(int(ctx.faceBehindMirrorMask));
+					const __m256i bit   = _mm256_and_si256(
+						_mm256_srlv_epi32(bcast, __m256i(pixelIds)),
+						_mm256_set1_epi32(1));
+					// behind == (bit != 0); keep lanes where bit == 0.
+					const Vec8ib keep = (Vec8i(bit) == Vec8i(0));
+					p_mask &= keep;
 				}
 
 				if (barry::any_lane_set(p_mask)) {
@@ -978,6 +1008,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.shadowMatId = shadowMatId,
 		.mirrorTag = F->mirrorMaskTag,
 		.faceOwnerMirrorId = F->ownerMirrorId,
+		.faceBehindMirrorMask = F->behindMirrorMask,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

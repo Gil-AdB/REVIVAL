@@ -209,6 +209,11 @@ struct MirrorTestScene : SceneDriver {
         // The Compound builder + StampMirrorMasks parent-gate path are
         // kept ready for that work.
 
+        // Tag original faces behind each mirror plane so the (transparent)
+        // mirror surface doesn't let real geometry leak through and beat
+        // the reflected clones on Z. Static scene → tag once at init.
+        fds::TagFacesBehindMirrors(sc, mirrors);
+
         // setupFaceLists wires the global View alias to sc->CameraHead
         // (Transform_Objects derefs view->Mat through that), sizes the
         // FList container, and stamps the scene's near/far for the

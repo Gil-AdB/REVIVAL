@@ -973,6 +973,53 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
     for (auto &m : mirrors) UpdateMirror(sc, m);
 }
 
+void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors)
+{
+    if (!sc) return;
+    // Epsilon in world units: faces coplanar with a mirror (its own wall,
+    // the frame strips) must NOT be tagged as "behind." A small negative
+    // threshold means a vertex has to be clearly on the back side.
+    constexpr float kBehindEps = 1e-3f;
+    for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        if (isCloneMesh(Obj)) continue;          // clones gate via mirrorTag
+        TriMesh *T = (TriMesh*)Obj->Data;
+        if (!T || !T->Verts || !T->Faces) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            Face &F = T->Faces[fi];
+            if (!F.A || !F.B || !F.C) continue;
+            // World-space positions of the three verts.
+            const Vertex *vs[3] = { F.A, F.B, F.C };
+            Vector wp[3];
+            for (int k = 0; k < 3; ++k) {
+                Vector lp = vs[k]->Pos;
+                MatrixXVector(T->RotMat, &lp, &wp[k]);
+                wp[k].x += T->IPos.x; wp[k].y += T->IPos.y; wp[k].z += T->IPos.z;
+            }
+            uint32_t mask = 0;
+            for (const Mirror &m : mirrors) {
+                if (m.id == 0 || m.id > 31 || !m.plane.valid) continue;
+                // Skip the mirror's own wall faces — they're coplanar and
+                // would self-tag under jitter. wallFaces holds pointers
+                // into the live mesh, so an identity check is exact.
+                bool isOwnWall = false;
+                for (const Face *WF : m.wallFaces) {
+                    if (WF == &F) { isOwnWall = true; break; }
+                }
+                if (isOwnWall) continue;
+                const Vector &N = m.plane.N;
+                const float   d = m.plane.d;
+                // Behind = any vertex on the back side (N·P + d < -eps).
+                for (int k = 0; k < 3; ++k) {
+                    const float sd = N.x*wp[k].x + N.y*wp[k].y + N.z*wp[k].z + d;
+                    if (sd < -kBehindEps) { mask |= (1u << m.id); break; }
+                }
+            }
+            F.behindMirrorMask = mask;
+        }
+    }
+}
+
 namespace {
 
 using u8 = uint8_t;

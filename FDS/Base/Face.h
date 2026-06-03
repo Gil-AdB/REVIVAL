@@ -113,6 +113,22 @@ struct Face
 	// previously pre-stamped 2D mask cell — that mask was only
 	// authoritative for clone gating, not for surface ownership).
 	uint8_t          ownerMirrorId = 0;
+	// Bitmask of mirror ids this ORIGINAL face sits behind. Bit (id) is
+	// set if any vertex of the face is on the back side of mirror `id`'s
+	// plane (N·P + d < 0). The mirror surface is transparent (it doesn't
+	// write opaque Z), so without this gate the real-world geometry
+	// behind the mirror rasterises straight through the mirror's screen
+	// footprint and beats the reflected clones on Z — the "room leaking
+	// through the mirror" bug. Mekalele's commit rejects any pixel where
+	// gb.mirrorMask[pixel] == M and bit M is set here, so behind-mirror
+	// geometry is suppressed exactly inside that mirror's footprint and
+	// the clones (or empty backdrop) win. Cheap, conservative tag: a
+	// face straddling the plane is suppressed entirely inside the
+	// footprint (its front part vanishes there too) — the full fix is
+	// to clip the geometry against each plane at scene init. Covers
+	// mirror ids 1..31; ids ≥32 are silently ignored (variable shift
+	// returns 0). 0 = not behind any mirror (the common case).
+	uint32_t         behindMirrorMask = 0;
 	// SoA refactor Phase 3 (see docs/SOA_VERTEX_REFACTOR.md). Indices
 	// of A/B/C into ParentTri->Verts[] (and equivalently into the
 	// per-mesh VertexFrame SoA arrays). Populated by

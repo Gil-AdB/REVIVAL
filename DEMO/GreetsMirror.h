@@ -146,6 +146,16 @@ void UpdateMirror(Scene *sc, Mirror &m);
 // Convenience: update every mirror in a list. Empty list = no-op.
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 
+// Tag every original (non-clone) face with a bitmask of which mirrors
+// it sits behind (Face::behindMirrorMask). Mekalele's opaque commit
+// then rejects those faces' pixels inside the matching mirror's screen
+// footprint, so real-world geometry behind a (transparent) mirror can't
+// leak through and beat the reflected clones on Z. Call ONCE after all
+// mirrors are built (BuildMirror / BuildCompoundMirrors) and before the
+// first render. Static geometry only — re-call if a mirror plane or
+// mesh transform changes.
+void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
+
 // Debug viz — overlays gb.mirrorId onto the framebuffer so we can see
 // exactly which pixels each mirror's wall pre-pass stamped (and where
 // the clone-rasterizer's per-pixel check is consequently keeping vs

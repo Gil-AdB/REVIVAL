@@ -1354,6 +1354,10 @@ void Initialize_Greets()
 			fds::Mirror m = fds::BuildMirrorByTextureName(GreetSc, txtrName);
 			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
 		}
+		// Tag original faces behind each mirror plane so room geometry
+		// behind a (transparent) mirror can't leak through its footprint
+		// and beat the reflected clones on Z.
+		fds::TagFacesBehindMirrors(GreetSc, g_greetsMirrors);
 		std::fprintf(stderr, "[GREETS-MIRROR] active mirrors: %zu\n", g_greetsMirrors.size());
 	}
 }
