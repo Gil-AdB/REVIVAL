@@ -4608,10 +4608,12 @@ void Render_VolumetricCones() {
     const int numLights = g_deferredCtx.numLights;
 
     // Pre-filter spotlight indices once per frame; tiles share the result.
+    // Mirror-clone spots are excluded (additive cone glow would wash
+    // across the reflection — see Render_OmniHalos).
     static int spotIdx[DEFERRED_MAX_LIGHTS];
     int spotCount = 0;
     for (int i = 0; i < numLights; ++i) {
-        if (lights->isSpot[i]) spotIdx[spotCount++] = i;
+        if (lights->isSpot[i] && lights->mirrorId[i] == 0) spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
 
@@ -5347,6 +5349,13 @@ void Render_OmniHalos() {
     static int omniIdx[DEFERRED_MAX_LIGHTS];
     int omniCount = 0;
     for (int i = 0; i < numLights; ++i) {
+        // Skip mirror-clone omnis. Their halo is an ADDITIVE screen-space
+        // glow with no per-pixel mirror gating, so 15 cloned warm greets
+        // omnis bloom a flat yellow wash over the reflection (and over
+        // real geometry). A mirror should show reflected glows only
+        // inside its footprint — until the halo kernel gains a per-pixel
+        // gb.mirrorId gate, the clean fix is to not glow clones at all.
+        if (lights->mirrorId[i] != 0) continue;
         if (!lights->isSpot[i]) omniIdx[omniCount++] = i;
     }
     if (omniCount == 0) return;
@@ -6407,6 +6416,9 @@ void Render_DeferredVolumetric() {
     static int omniIdx[DEFERRED_MAX_LIGHTS];
     int spotCount = 0, omniCount = 0;
     for (int i = 0; i < numLights; ++i) {
+        // Mirror clones don't cast volumetric glow — same additive-wash
+        // reasoning as the halo pass (see Render_OmniHalos).
+        if (lights->mirrorId[i] != 0) continue;
         if (lights->isSpot[i]) spotIdx[spotCount++] = i;
         else                   omniIdx[omniCount++] = i;
     }

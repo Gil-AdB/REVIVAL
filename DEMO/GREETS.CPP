@@ -2170,7 +2170,8 @@ struct GreetsScene : SceneDriver {
 					fds_stats::g_mipFastUniform,
 					fds_stats::g_mipSplit);
 				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-				fprintf(stderr, "[GREETS-CLIP] %s\n", MSGStr);
+				// (clip stats shown on the on-screen overlay above; the
+				// per-frame stderr echo was just spam.)
 			}
 		}
 
