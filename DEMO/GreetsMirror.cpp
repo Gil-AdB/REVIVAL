@@ -166,10 +166,27 @@ MirrorPlane FindMirrorPlaneImpl(Scene *sc, Pred &&pred, const char *label)
     // Average unit normal + plane offset over the seed's coplanar cluster.
     Vector accN = {0.0f, 0.0f, 0.0f};
     float accD = 0.0f;
+    Vector accCtr = {0.0f, 0.0f, 0.0f};   // world-space wall centroid
     int keptCount = 0, droppedOutlier = 0;
     for (const auto &s : samples) {
         const float dot = s.wN.x*seedN.x + s.wN.y*seedN.y + s.wN.z*seedN.z;
         if (dot < 0.866f) { ++droppedOutlier; continue; }
+        // World-space centroid of this face (A,B,C transformed by the
+        // owning mesh's RotMat + IPos), accumulated for the wall's
+        // overall centroid. Used by the snapshot debug camera to aim
+        // squarely at the mirror; the per-face Pos alone is mesh-local
+        // and would point the camera at the wrong world location.
+        const Vertex *vtx[3] = { s.F->A, s.F->B, s.F->C };
+        Vector wSum = {0,0,0};
+        for (int k = 0; k < 3; ++k) {
+            Vector lp = vtx[k]->Pos, wp;
+            MatrixXVector(s.T->RotMat, &lp, &wp);
+            wp += s.T->IPos;
+            wSum += wp;
+        }
+        accCtr.x += wSum.x / 3.0f;
+        accCtr.y += wSum.y / 3.0f;
+        accCtr.z += wSum.z / 3.0f;
         Vector localA = s.F->A->Pos;
         Vector wA;
         MatrixXVector(s.T->RotMat, &localA, &wA);
@@ -188,6 +205,7 @@ MirrorPlane FindMirrorPlaneImpl(Scene *sc, Pred &&pred, const char *label)
     out.N = accN;
     out.N.normalize();
     out.d = accD / float(keptCount);
+    out.centroid = { accCtr.x / keptCount, accCtr.y / keptCount, accCtr.z / keptCount };
     out.faceCount = keptCount;
     out.valid = true;
     std::fprintf(stderr,

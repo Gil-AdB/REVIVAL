@@ -40,6 +40,7 @@ namespace fds {
 struct MirrorPlane {
     Vector  N;            // world-space unit normal (face-side outward)
     float   d;            // plane offset: N·P + d = 0 for P on the plane
+    Vector  centroid{};   // world-space centroid of the wall faces
     int     faceCount;    // number of wall faces averaged in
     bool    valid;        // false if no wall faces found
 };

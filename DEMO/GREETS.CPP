@@ -1431,6 +1431,38 @@ struct GreetsScene : SceneDriver {
 
 		View = GreetSc->CameraHead;
 
+		// Debug camera for headless snapshots. Two ways to aim it
+		// (after View = CameraHead above, else it gets clobbered):
+		//   * FDS_GREETS_CAM="px,py,pz,fx,fy,fz" — exact pose captured
+		//     interactively via the F9 button ([GREETS-CAM] line).
+		//   * else --greets-mirror-cam parks the camera in front of the
+		//     first mirror's wall centroid (fallback).
+		if (fds::FeatureFlags::greets_mirror_cam() || std::getenv("FDS_GREETS_CAM")) {
+			const char *camEnv = std::getenv("FDS_GREETS_CAM");
+			float px, py, pz, fx, fy, fz;
+			bool posed = camEnv && std::sscanf(camEnv, "%f,%f,%f,%f,%f,%f",
+			                                   &px, &py, &pz, &fx, &fy, &fz) == 6;
+			if (posed) {
+				FC.ISource = { px, py, pz };
+				Vector look = { px + fx, py + fy, pz + fz };
+				Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+				FC.IFOV = GreetSc->CameraHead->IFOV;
+				CalcPersp(&FC);
+				View = &FC;
+			} else if (!g_greetsMirrors.empty()) {
+				const fds::Mirror &m = g_greetsMirrors.front();
+				const Vector c = m.plane.centroid;
+				const Vector &N = m.plane.N;
+				const float dist = 14.0f;
+				FC.ISource = { c.x + N.x*dist, c.y + N.y*dist, c.z + N.z*dist };
+				Vector look = c;
+				Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+				FC.IFOV = GreetSc->CameraHead->IFOV;
+				CalcPersp(&FC);
+				View = &FC;
+			}
+		}
+
 		Ambient_Factor = 0.25;
 		Diffusive_Factor = 1.0;
 		// Forward Lighting() ignores Specular_Factor on its active path, so
@@ -1938,39 +1970,6 @@ struct GreetsScene : SceneDriver {
 		// No-op unless toggled by T key in REV.CPP.
 		::ShadowMap_TickStalenessTracker();
 
-		// One-shot-per-N-frames log of all omnis' IPos so we can verify
-		// whether the parented "mech flare" omnis actually track Hull.lwo's
-		// world position (as the agent's analysis claims) or stay constant
-		// (suggesting the parent-compose hypothesis is wrong).
-		{
-			static int sFrame = 0;
-			if ((sFrame++ % 60) == 0) {
-				int omniIdx = 0;
-				for (Omni *O = GreetSc->OmniHead; O; O = O->Next) {
-					if (O->Type != Light_Omni) continue;
-					std::fprintf(stderr,
-						"[OMNI-POS] frame=%d  #%d  pos=(%g,%g,%g)  flags=0x%x\n",
-						sFrame - 1, omniIdx,
-						O->IPos.x, O->IPos.y, O->IPos.z, unsigned(O->Flags));
-					++omniIdx;
-				}
-				// Hull.lwo + parent chain for cross-reference. Name lives
-				// on the parent Object, not the TriMesh.
-				for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
-					if (Obj->Type != Obj_TriMesh) continue;
-					if (!Obj->Name) continue;
-					if (std::strstr(Obj->Name, "Hull") ||
-					    std::strstr(Obj->Name, "mech")) {
-						TriMesh *T = (TriMesh*)Obj->Data;
-						if (!T) continue;
-						std::fprintf(stderr,
-							"[MESH-POS] frame=%d  '%s'  pos=(%g,%g,%g)\n",
-							sFrame - 1, Obj->Name,
-							T->IPos.x, T->IPos.y, T->IPos.z);
-					}
-				}
-			}
-		}
 		// Stamp gb.mirrorId with each mirror's id at its wall faces'
 		// screen-space pixels — Mekalele's clone path tests this per
 		// pixel and only commits writes where the matching mirror's
@@ -2027,6 +2026,14 @@ struct GreetsScene : SceneDriver {
 					std::fclose(f);
 					std::fprintf(stderr, "[GREETS] dumped %s\n", path);
 				}
+				// Also print the current camera pose so the user can
+				// reproduce this exact view in a headless snapshot:
+				//   FDS_GREETS_CAM="px,py,pz,fx,fy,fz" ./DEMO --snapshot=...
+				// pos = eye; fwd = the camera's forward (Mat row 2).
+				std::fprintf(stderr,
+					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\"\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
 			}
 			sF9Prev = f9Now;
 		}

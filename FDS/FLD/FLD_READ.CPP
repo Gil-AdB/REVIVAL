@@ -17,6 +17,19 @@ Flood Demo System - Flood scene file reader
 #include "LWREAD.H"
 #include "FLD_READ.H"
 
+// Verbose FLD-loader tracing (per-object/material/light tree dump) is
+// off by default — it spammed hundreds of lines per scene load. Set
+// FDS_FLD_VERBOSE=1 to restore it. Error lines stay on `printf`.
+static bool fld_verbose() {
+	static int v = -1;
+	if (v < 0) {
+		const char *e = getenv("FDS_FLD_VERBOSE");
+		v = (e && *e && *e != '0') ? 1 : 0;
+	}
+	return v;
+}
+#define FLDLOG(...) do { if (fld_verbose()) printf(__VA_ARGS__); } while (0)
+
 
 #define DebugMode
 
@@ -102,7 +115,7 @@ void ReadMaterial(FldMat *Mat)
 	{
 		ReadString(&Mat->Name);
 #ifdef DebugMode
-		printf("-----|Material name: \"%s\"\n",Mat->Name);
+		FLDLOG("-----|Material name: \"%s\"\n",Mat->Name);
 #endif
 	}
 	fread(&Mat->Color,1,sizeof(FldColor),FLD);
@@ -144,13 +157,13 @@ void ReadMaterial(FldMat *Mat)
 	fread(&Mat->TFP0,1,4,FLD);
 	fread(&Mat->TFP1,1,4,FLD);
 #ifdef DebugMode
-	printf("---S---|Color texture = %s\n",Mat->ColorTexture);
-	printf("---u---|Diffuse texture = %s\n",Mat->DiffuseTexture);
-	printf("---r---|Specular texture = %s\n",Mat->SpecularTexture);
-	printf("---f---|Reflection texture = %s\n",Mat->ReflectionTexture);
-	printf("---a---|Trans texture = %s\n",Mat->TransparencyTexture);
-	printf("---c---|Bump texture = %s\n",Mat->BumpTexture);
-	printf("---e---|Texture image = %s\n",Mat->TextureImage);
+	FLDLOG("---S---|Color texture = %s\n",Mat->ColorTexture);
+	FLDLOG("---u---|Diffuse texture = %s\n",Mat->DiffuseTexture);
+	FLDLOG("---r---|Specular texture = %s\n",Mat->SpecularTexture);
+	FLDLOG("---f---|Reflection texture = %s\n",Mat->ReflectionTexture);
+	FLDLOG("---a---|Trans texture = %s\n",Mat->TransparencyTexture);
+	FLDLOG("---c---|Bump texture = %s\n",Mat->BumpTexture);
+	FLDLOG("---e---|Texture image = %s\n",Mat->TextureImage);
 #endif
 }
 
@@ -159,13 +172,13 @@ void ReadObject(FldObject *Obj)
 	uint32_t i,j;
 	
 #ifdef DebugMode
-	printf("-|Loading object...\n");
+	FLDLOG("-|Loading object...\n");
 #endif
 	if (ReadObjectNames)
 	{
 		ReadString(&Obj->Name);
 #ifdef DebugMode
-		printf("---|Object name: \"%s\"\n",Obj->Name);
+		FLDLOG("---|Object name: \"%s\"\n",Obj->Name);
 #endif
 	}
 	if (strstr(Obj->Name, "pas"))
@@ -175,12 +188,12 @@ void ReadObject(FldObject *Obj)
 	fread(&Obj->Flags,1,4,FLD);
 	fread(&Obj->NumOfMat,1,4,FLD);
 #ifdef DebugMode
-	printf("---|Loading %ul materials...\n",Obj->NumOfMat);
+	FLDLOG("---|Loading %ul materials...\n",Obj->NumOfMat);
 #endif
 	if (Obj->NumOfMat) Obj->Material=new FldMat[Obj->NumOfMat];
 	for (i=0;i<Obj->NumOfMat;i++) ReadMaterial(&Obj->Material[i]);
 #ifdef DebugMode
-	printf("---|Loading modeller info(faces/vertices)...\n");
+	FLDLOG("---|Loading modeller info(faces/vertices)...\n");
 #endif
 	fread(&Obj->NumOfVerts,1,4,FLD);
 	if (Obj->NumOfVerts) { Obj->Verts = (Vector *)_aligned_malloc(sizeof(Vector) * Obj->NumOfVerts, 16); }
@@ -200,12 +213,12 @@ void ReadObject(FldObject *Obj)
 		fread(&Obj->Faces[i].Surface,1,2,FLD);
 	}
 #ifdef DebugMode
-	printf("---|Loading keyframer info...\n");
+	FLDLOG("---|Loading keyframer info...\n");
 #endif
 	fread(&Obj->Keys,1,4,FLD);
 	Obj->KF=new FldKeyFrame[Obj->Keys];
 #ifdef DebugMode
-	printf("-----|Loading %ul keys...\n",Obj->Keys);
+	FLDLOG("-----|Loading %ul keys...\n",Obj->Keys);
 #endif
 	for (i = 0; i < Obj->Keys; i++) { Obj->KF[i].Read(FLD); }//fread(&Obj->KF[i],1,sizeof(FldKeyFrame),FLD);
 	if (Obj->Flags&1) fread(&Obj->Parent,1,4,FLD);
@@ -218,18 +231,18 @@ void ReadLight(FldLight *Light)
 	uint32_t i;
 	
 #ifdef DebugMode
-	printf("-|Loading light...\n");
+	FLDLOG("-|Loading light...\n");
 #endif
 	if (ReadLightNames)
 	{
 		ReadString(&Light->Name);
 #ifdef DebugMode
-		printf("---|Light name: \"%s\"\n",Light->Name);
+		FLDLOG("---|Light name: \"%s\"\n",Light->Name);
 #endif
 	}
 	fread(&Light->Flags,1,4,FLD);
 #ifdef DebugMode
-	printf("---|Loading keyframer info...\n");
+	FLDLOG("---|Loading keyframer info...\n");
 #endif
 	fread(&Light->Keys,1,4,FLD);
 	Light->KF=new FldKeyFrame[Light->Keys];
@@ -252,11 +265,11 @@ void ReadCamera(FldCamera *Cam)
 	int i;
 	
 #ifdef DebugMode
-	printf("-|Loading Camera....\n");
+	FLDLOG("-|Loading Camera....\n");
 #endif
 	fread(&Cam->Flags,1,4,FLD);
 #ifdef DebugMode
-	printf("---|Loading keyframer info...\n");
+	FLDLOG("---|Loading keyframer info...\n");
 #endif
 	fread(&Cam->Keys,1,4,FLD);
 	Cam->KF=new FldKeyFrame[Cam->Keys];
@@ -283,17 +296,17 @@ FldScene *ReadFLD(const char *FileName)
 	FldScene  *Sc;
 	unsigned short Chunk;
 	
-	printf("Loading FLD file: \"%s\" (version %.3f)...\n",FileName,FldVersion);
+	FLDLOG("Loading FLD file: \"%s\" (version %.3f)...\n",FileName,FldVersion);
 	
 	OpenFLD(FileName);
 	Sc=new FldScene;
 	memset(Sc,0,sizeof(FldScene));
 #ifdef DebugMode
-	printf("Loading general scene data...\n");
+	FLDLOG("Loading general scene data...\n");
 #endif
 	ReadGeneralSceneData(Sc);
 #ifdef ReadDebugMode
-	printf("Loading object information:\n");
+	FLDLOG("Loading object information:\n");
 #endif
 	while (!feof(FLD))
 	{
@@ -338,11 +351,11 @@ FldScene *ReadFLD(const char *FileName)
 	}
 CloseFile:
 #ifdef DebugMode
-	printf("Closing file...\n");
+	FLDLOG("Closing file...\n");
 #endif
 	fclose(FLD);
 #ifdef DebugMode
-	printf("FLD Reading complete!\n");
+	FLDLOG("FLD Reading complete!\n");
 #endif
 	
 	return Sc;
