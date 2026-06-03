@@ -201,6 +201,14 @@ struct MirrorTestScene : SceneDriver {
         fds::Mirror m2 = fds::BuildMirror(sc, "xpar_mirror_mat");
         if (m2.cloneMesh) mirrors.push_back(std::move(m2));
 
+        // Depth-1 recursive: for each ordered pair (A, B) of the base
+        // mirrors above, create a compound mirror so looking at the
+        // back-wall (m1) shows m2 with the 2-bounce reflected scene
+        // inside it (and vice versa).
+        const int compoundAdded = fds::BuildCompoundMirrors(sc, mirrors);
+        std::fprintf(stderr, "[MIRRORTEST] %d compound mirrors built\n",
+                     compoundAdded);
+
         // setupFaceLists wires the global View alias to sc->CameraHead
         // (Transform_Objects derefs view->Mat through that), sizes the
         // FList container, and stamps the scene's near/far for the

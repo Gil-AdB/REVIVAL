@@ -83,6 +83,18 @@ struct Mirror {
     // gb.mirrorId by the per-frame mask pre-pass and matched against
     // Face::mirrorMaskTag in Mekalele's inner loop.
     uint8_t     id = 0;
+    // Compound (depth-1 recursive) mirror: id of the PARENT mirror
+    // whose reflected world this compound lives in. 0 = base mirror.
+    // For compound A→B (= "looking at B through A"), parentMirrorId =
+    // A.id. The compound's `plane` carries the composed reflection's
+    // primary plane (= B.plane, the inner reflection), and
+    // `parentPlane` carries A.plane so UpdateMirror can re-apply the
+    // composed reflection_A∘reflection_B transform for dynamic verts.
+    // StampMirrorMasks uses parentPlane for the viewer-side gate so a
+    // compound mirror is suppressed when its parent's wall is not in
+    // front of the camera.
+    uint8_t     parentMirrorId = 0;
+    MirrorPlane parentPlane = {};
     int         wallFacesRetargeted = 0;
     int         clonedFaces  = 0;
     int         clonedVerts  = 0;
@@ -114,6 +126,16 @@ Mirror BuildMirror(Scene *sc, const char *wallMaterialName);
 // surfaces sharing the dynamic greets text texture) without needing
 // to enumerate all the material-name variants.
 Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
+
+// Depth-1 recursive: for each ordered pair (A, B) of already-built
+// base mirrors, append a compound mirror representing "looking at B
+// through A". The compound's wall surface is A's existing clone of
+// B's wall (faces in A.cloneMesh whose Txtr matches B.wallMatClone —
+// they get retagged with the new compound id); its clone geometry is
+// the scene reflected across reflect_A ∘ reflect_B, and its omnis are
+// tagged so the deferred light filter routes them only to the
+// compound's pixels. Returns count of compound mirrors appended.
+int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 
 // Per-frame: re-mirror dynamic source meshes' world verts + cloned
 // omnis' positions across this mirror's plane. Clamps omni IRange to

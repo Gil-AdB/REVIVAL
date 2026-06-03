@@ -676,6 +676,261 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName)
     return BuildMirrorImpl(sc, textureNameSelector(textureFileName), textureFileName);
 }
 
+int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
+{
+    if (!sc) return 0;
+    const int baseCount = int(mirrors.size());
+    if (baseCount < 2) return 0;  // need ≥2 mirrors for any compound
+
+    // Snapshot the set of base wall materials. Compound clone geometry
+    // skips any face whose material is one of these — the wall faces
+    // themselves are already part of the BASE mirrors' clone meshes
+    // (and the compound's surface IS one of those clones, retagged).
+    std::vector<Material*> wallMats;
+    wallMats.reserve(baseCount);
+    for (int i = 0; i < baseCount; ++i) {
+        if (mirrors[i].wallMatClone) wallMats.push_back(mirrors[i].wallMatClone);
+    }
+    auto isAnyBaseWallMat = [&](Material *M) -> bool {
+        for (Material *W : wallMats) if (W && M == W) return true;
+        return false;
+    };
+
+    int added = 0;
+    for (int aIdx = 0; aIdx < baseCount; ++aIdx) {
+        Mirror &A = mirrors[aIdx];
+        if (!A.cloneMesh || !A.plane.valid) continue;
+        for (int bIdx = 0; bIdx < baseCount; ++bIdx) {
+            if (aIdx == bIdx) continue;
+            Mirror &B = mirrors[bIdx];
+            if (!B.wallMatClone || !B.plane.valid) continue;
+
+            // 1) Find A's clone-of-B's-wall faces inside A.cloneMesh.
+            std::vector<Face*> compoundWalls;
+            for (DWord fi = 0; fi < A.cloneMesh->FIndex; ++fi) {
+                Face &F = A.cloneMesh->Faces[fi];
+                if (F.Txtr == B.wallMatClone) compoundWalls.push_back(&F);
+            }
+            if (compoundWalls.empty()) continue;
+            if (s_nextMirrorId == 0) {
+                std::fprintf(stderr, "[COMPOUND] mirror id space exhausted\n");
+                return added;
+            }
+            const uint8_t compoundId = s_nextMirrorId++;
+
+            // 2) Retag the surface faces — gated by the compound's
+            //    pre-stamp (parent A's pre-stamp covers them with
+            //    A.id; StampMirrorMasks runs compound mirrors AFTER
+            //    base, so compound id overwrites in the sub-area
+            //    and these wall faces gate on it instead of A's id).
+            for (Face *F : compoundWalls) {
+                F->mirrorMaskTag = compoundId;
+                F->ownerMirrorId = compoundId;
+            }
+
+            // 3) Count clone capacity: every non-wall face in every
+            //    non-clone scene mesh contributes one compound clone.
+            DWord totalV = 0, totalF = 0;
+            for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+                if (Obj->Type != Obj_TriMesh) continue;
+                if (isCloneMesh(Obj)) continue;
+                TriMesh *T = (TriMesh*)Obj->Data;
+                if (!T || !T->Verts || !T->Faces) continue;
+                totalV += T->VIndex;
+                for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                    if (!T->Faces[fi].A) continue;
+                    if (isAnyBaseWallMat(T->Faces[fi].Txtr)) continue;
+                    ++totalF;
+                }
+            }
+            if (totalF == 0) continue;
+
+            // 4) Allocate compound clone mesh + splines.
+            TriMesh *MM = getAlignedType<TriMesh>(16);
+            std::memset(MM, 0, sizeof(TriMesh));
+            MM->Verts = (Vertex*)getAlignedBlock(sizeof(Vertex)*size_t(totalV), 16);
+            MM->Faces = (Face*)getAlignedBlock(sizeof(Face)*size_t(totalF), 16);
+            MM->VIndex = totalV;
+            MM->FIndex = totalF;
+            Matrix_Copy(MM->RotMat, Mat_ID);
+            Matrix_Copy(MM->UnscaledRotMat, Mat_ID);
+            MM->IPos   = {0.0f, 0.0f, 0.0f};
+            MM->IScale = {1.0f, 1.0f, 1.0f};
+            MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
+            MM->Flags |= HTrack_Visible;
+            auto stampSingle = [](Spline &sp, float x, float y, float z, float w) {
+                sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
+                sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
+                sp.Keys[0].Frame = 0.0f;
+                sp.Keys[0].Pos = {x,y,z,w}; sp.Keys[0].AA = {x,y,z,w};
+            };
+            stampSingle(MM->Pos,    0,0,0,0);
+            stampSingle(MM->Scale,  1,1,1,0);
+            stampSingle(MM->Rotate, 0,0,0,1);
+
+            // 5) Compose the clone transform: reflect across B then A,
+            //    so a world point P maps to reflect_A(reflect_B(P)) —
+            //    this is the position where, when viewed back through
+            //    mirror A, the user perceives the 2-bounce reflection
+            //    at the geometrically-correct reflect_B(P) spot
+            //    (matches [R2 m%d>m%d] label math in MirrorTestDriver).
+            const Vector &An = A.plane.N; const float Ad = A.plane.d;
+            const Vector &Bn = B.plane.N; const float Bd = B.plane.d;
+            auto composedPoint = [&](const Vector &P) -> Vector {
+                Vector via = reflectPointAcross(P, Bn, Bd);
+                return reflectPointAcross(via, An, Ad);
+            };
+            auto composedDir = [&](const Vector &V) -> Vector {
+                Vector via = reflectDirAcross(V, Bn);
+                return reflectDirAcross(via, An);
+            };
+
+            // 6) Fill compound clone verts + faces. Winding is
+            //    UNCHANGED — each single reflection swaps, so two
+            //    reflections leave it as-is. Face normals do go
+            //    through the composed dir transform.
+            Vector bbMin = { 1e30f, 1e30f, 1e30f};
+            Vector bbMax = {-1e30f,-1e30f,-1e30f};
+            DWord vOfs = 0, fOfs = 0;
+            for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+                if (Obj->Type != Obj_TriMesh) continue;
+                if (isCloneMesh(Obj)) continue;
+                TriMesh *T = (TriMesh*)Obj->Data;
+                if (!T || !T->Verts || !T->Faces) continue;
+                const DWord vStart = vOfs;
+                for (DWord vi = 0; vi < T->VIndex; ++vi) {
+                    MM->Verts[vOfs] = T->Verts[vi];
+                    Vector localP = T->Verts[vi].Pos;
+                    Vector worldP;
+                    MatrixXVector(T->RotMat, &localP, &worldP);
+                    worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
+                    const Vector mP = composedPoint(worldP);
+                    MM->Verts[vOfs].Pos = mP;
+                    Vector localN = T->Verts[vi].N;
+                    Vector worldN;
+                    MatrixXVector(T->RotMat, &localN, &worldN);
+                    MM->Verts[vOfs].N = composedDir(worldN);
+                    bbMin.x = std::min(bbMin.x, mP.x);
+                    bbMin.y = std::min(bbMin.y, mP.y);
+                    bbMin.z = std::min(bbMin.z, mP.z);
+                    bbMax.x = std::max(bbMax.x, mP.x);
+                    bbMax.y = std::max(bbMax.y, mP.y);
+                    bbMax.z = std::max(bbMax.z, mP.z);
+                    ++vOfs;
+                }
+                for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                    Face &OF = T->Faces[fi];
+                    if (!OF.A || !OF.B || !OF.C) continue;
+                    if (isAnyBaseWallMat(OF.Txtr)) continue;
+                    Face &CF = MM->Faces[fOfs];
+                    CF = OF;
+                    // Winding unchanged: two reflections preserve it.
+                    CF.A = MM->Verts + vStart + (OF.A - T->Verts);
+                    CF.B = MM->Verts + vStart + (OF.B - T->Verts);
+                    CF.C = MM->Verts + vStart + (OF.C - T->Verts);
+                    CF.N = composedDir(OF.N);
+                    CF.NormProd = -(CF.N.x*CF.A->Pos.x +
+                                    CF.N.y*CF.A->Pos.y +
+                                    CF.N.z*CF.A->Pos.z);
+                    CF.mirrorMaskTag = compoundId;
+                    CF.ownerMirrorId = compoundId;
+                    ++fOfs;
+                }
+            }
+
+            // Loose bsphere from bbox.
+            Vector ctr = {(bbMin.x+bbMax.x)*0.5f,
+                          (bbMin.y+bbMax.y)*0.5f,
+                          (bbMin.z+bbMax.z)*0.5f};
+            const float dx = bbMax.x-bbMin.x, dy = bbMax.y-bbMin.y, dz = bbMax.z-bbMin.z;
+            const float radSq = 0.25f*(dx*dx + dy*dy + dz*dz);
+            MM->BSphereCtr = ctr;
+            MM->BSphereRad = radSq;
+            MM->BSphereRadius = std::sqrt(radSq);
+            MM->BSphereScreenPos = {0,0,0};
+            Compute_FaceVertexIndices(MM);
+
+            // 7) Link the compound mesh into the scene with a clone-
+            //    prefix name so subsequent BuildMirror calls (if any)
+            //    won't recursively clone it.
+            Object *MObj = getAlignedType<Object>(16);
+            std::memset(MObj, 0, sizeof(Object));
+            MObj->Type = Obj_TriMesh;
+            MObj->Data = MM;
+            MObj->Pos  = &MM->IPos;
+            MObj->Rot  = &MM->RotMat;
+            {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "__mirrorClone_compound_%u_%u",
+                              unsigned(A.id), unsigned(B.id));
+                MObj->Name = (char*)std::malloc(std::strlen(buf)+1);
+                std::strcpy(MObj->Name, buf);
+            }
+            MObj->Next = sc->ObjectHead;
+            if (sc->ObjectHead) sc->ObjectHead->Prev = MObj;
+            sc->ObjectHead = MObj;
+            MM->Next = sc->TriMeshHead;
+            if (sc->TriMeshHead) sc->TriMeshHead->Prev = MM;
+            sc->TriMeshHead = MM;
+
+            // 8) Clone omnis across composed transform; tag with id.
+            int omniCount = 0;
+            for (Omni *srcO = sc->OmniHead; srcO; srcO = srcO->Next) {
+                if (srcO->Flags & Omni_MirrorClone) continue;  // skip prior clones
+                Omni *clone = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+                std::memcpy(clone, srcO, sizeof(Omni));
+                clone->IPos = composedPoint(srcO->IPos);
+                clone->IDir = composedDir(srcO->IDir);
+                clone->Flags |= Omni_MirrorClone;
+                clone->mirrorId = compoundId;
+                // Quarter intensity at depth 2: each bounce halves
+                // (base clones already use 0.5x); compound is the
+                // product of two bounces.
+                clone->L.R *= 0.5f;
+                clone->L.G *= 0.5f;
+                clone->L.B *= 0.5f;
+                clone->Prev = nullptr;
+                clone->Next = sc->OmniHead;
+                if (sc->OmniHead) sc->OmniHead->Prev = clone;
+                sc->OmniHead = clone;
+                ++omniCount;
+            }
+
+            // 9) Build the Mirror struct entry.
+            Mirror compound{};
+            compound.id = compoundId;
+            compound.parentMirrorId = A.id;
+            compound.parentPlane = A.plane;
+            // The compound's effective inner plane is B's plane, so
+            // viewer-side tests downstream that care about the inner
+            // reflection (UpdateMirror's omni range clamp, future
+            // recursion gates) read this. StampMirrorMasks's viewer
+            // gate uses parentPlane so the compound only renders
+            // when the camera is on A's front side.
+            compound.plane = B.plane;
+            compound.cloneMesh = MM;
+            compound.wallFaces = std::move(compoundWalls);
+            compound.clonedVerts = int(vOfs);
+            compound.clonedFaces = int(fOfs);
+            {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "compound_%u_%u",
+                              unsigned(A.id), unsigned(B.id));
+                compound.wallMaterialName = buf;
+            }
+            std::fprintf(stderr,
+                "[COMPOUND m%u (parent m%u, inner m%u)] %d wall faces, "
+                "%u/%u clone verts/faces, %d omnis\n",
+                unsigned(compoundId), unsigned(A.id), unsigned(B.id),
+                int(compound.wallFaces.size()),
+                unsigned(vOfs), unsigned(fOfs), omniCount);
+            mirrors.push_back(std::move(compound));
+            ++added;
+        }
+    }
+    return added;
+}
+
 void UpdateMirror(Scene *sc, Mirror &m)
 {
     if (!sc || !m.plane.valid || !m.cloneMesh) return;
@@ -875,12 +1130,22 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     if (::View) camPos = &::View->ISource;  // FrameState alias; active camera
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
-        if (camPos && m.plane.valid) {
-            const float side = m.plane.N.x * camPos->x
-                             + m.plane.N.y * camPos->y
-                             + m.plane.N.z * camPos->z
-                             + m.plane.d;
-            if (side <= 0.0f) continue;  // viewer behind mirror
+        if (camPos) {
+            // Base mirror: viewer must be in front of the mirror's
+            // own plane. Compound mirror: viewer must be in front of
+            // the PARENT (outer) mirror's plane — the compound only
+            // exists inside the parent's reflected view, so if the
+            // parent isn't visible neither is the compound.
+            const MirrorPlane &gate =
+                (m.parentMirrorId != 0 && m.parentPlane.valid)
+                ? m.parentPlane : m.plane;
+            if (gate.valid) {
+                const float side = gate.N.x * camPos->x
+                                 + gate.N.y * camPos->y
+                                 + gate.N.z * camPos->z
+                                 + gate.d;
+                if (side <= 0.0f) continue;  // viewer behind gate
+            }
         }
         for (const Face *F : m.wallFaces) {
             if (!F || !F->A || !F->B || !F->C) continue;
