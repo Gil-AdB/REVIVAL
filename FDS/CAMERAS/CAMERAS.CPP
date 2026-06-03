@@ -604,7 +604,7 @@ float Vel_Speed   = 0.080;
 // (rad/key-tick) and shouldn't auto-scale with world size. Both
 // Vel_Speed and Rot_Speed_Base are multiplied by CamSpeedMult at use
 // site so the `, .` keys scale BOTH proportionally.
-static float Rot_Speed_Base = 0.004f;
+static float Rot_Speed_Base = 0.002f;
 static float CamSpeedMult   = 1.0f;
 
 // Per-scene auto-calibration. Sets Vel_Speed from scene depth range and
