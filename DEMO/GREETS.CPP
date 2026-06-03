@@ -1975,7 +1975,21 @@ struct GreetsScene : SceneDriver {
 		// surrounding Piramid walls were the de facto occluder mask).
 		fds::StampMirrorMasks(GreetSc, g_greetsMirrors);
 
-		Render();
+		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==
+		// ctx.mirrorTag) only runs on the deferred path. Forward sends
+		// clone faces to the opaque pass un-masked and the surrounding
+		// occluders Z-fail them — the user sees the silvered wall but
+		// no reflection. Native default for FDS_DEFERRED is OFF
+		// (FDS_DEFERRED_DEFAULT_ON=1 is only set in the EMSCRIPTEN
+		// branch of FDS/CMakeLists.txt), so the explicit choice to
+		// pass --greets-mirror implies "I want to see reflections" —
+		// force the deferred path here rather than requiring the user
+		// to also remember --deferred / FDS_DEFERRED=1.
+		if (fds::FeatureFlags::greets_mirror()) {
+			Render(RenderPath::ForceDeferred);
+		} else {
+			Render();
+		}
 
 		// F9: one-shot PPM frame dump to /tmp/greets_dump_N.ppm. Edge-
 		// triggered so a held key only fires once. Lets the user fly
