@@ -596,7 +596,8 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     auto ensureMirrorIdSized = [](meka::GBuffer *gb, const char *which) {
         if (!gb) return;
         const size_t needed = gb->normal.size();
-        if (gb->mirrorId.size() < needed) gb->mirrorId.assign(needed, 0);
+        if (gb->mirrorId.size()   < needed) gb->mirrorId.assign  (needed, 0);
+        if (gb->mirrorMask.size() < needed) gb->mirrorMask.assign(needed, 0);
         (void)which;
     };
     if (g_gbuffer) {
@@ -1126,10 +1127,28 @@ void DebugOverlayMirrorMask(Scene *sc)
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
 {
     if (!sc || !g_gbuffer) return;
-    auto &plane = g_gbuffer->mirrorId;
+    // The pre-stamp lives in the gate plane (mirrorMask), NOT the
+    // ownership plane (mirrorId). Mekalele's commit mutates mirrorId
+    // during raster; mirrorMask stays immutable so the per-pixel gate
+    // test reads the same value for every face that targets a pixel.
+    auto &plane = g_gbuffer->mirrorMask;
     if (plane.empty()) return;  // no mirror has activated the plane
     // Clear last frame's coverage. Cheap memset — 2 MB at 1080p.
     std::memset(plane.data(), 0, plane.size());
+    // Also clear the ownership plane each frame so foreground commits
+    // (which write ownerMirrorId = 0) start from a known baseline; the
+    // deferred lighting reads it as pmid per pixel.
+    if (!g_gbuffer->mirrorId.empty()) {
+        std::memset(g_gbuffer->mirrorId.data(), 0, g_gbuffer->mirrorId.size());
+    }
+    if (g_gbufferTransparent && !g_gbufferTransparent->mirrorId.empty()) {
+        std::memset(g_gbufferTransparent->mirrorId.data(), 0,
+                    g_gbufferTransparent->mirrorId.size());
+    }
+    if (g_gbufferTransparentBack && !g_gbufferTransparentBack->mirrorId.empty()) {
+        std::memset(g_gbufferTransparentBack->mirrorId.data(), 0,
+                    g_gbufferTransparentBack->mirrorId.size());
+    }
     // Use the engine surface size that matches the gbuffer plane.
     const int w = int(::XRes);
     const int h = int(::YRes);
@@ -1229,18 +1248,17 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     }
     // Mirror the stamped mask onto the transparent gbuffers so clones
     // of transparent source faces (which Mekalele dispatches via the
-    // TransparentFront / TransparentBack targets) see the same per-
-    // pixel id and get masked against ctx.mirrorTag identically.
-    // Without this, transparent-source clones bypass the mask
-    // entirely and render across the whole screen.
+    // TransparentFront / TransparentBack targets) gate against the
+    // same per-pixel id. Without this, transparent-source clones
+    // bypass the mask entirely and render across the whole screen.
     if (g_gbufferTransparent
-        && g_gbufferTransparent->mirrorId.size() == plane.size()) {
-        std::memcpy(g_gbufferTransparent->mirrorId.data(),
+        && g_gbufferTransparent->mirrorMask.size() == plane.size()) {
+        std::memcpy(g_gbufferTransparent->mirrorMask.data(),
                     plane.data(), plane.size());
     }
     if (g_gbufferTransparentBack
-        && g_gbufferTransparentBack->mirrorId.size() == plane.size()) {
-        std::memcpy(g_gbufferTransparentBack->mirrorId.data(),
+        && g_gbufferTransparentBack->mirrorMask.size() == plane.size()) {
+        std::memcpy(g_gbufferTransparentBack->mirrorMask.data(),
                     plane.data(), plane.size());
     }
 }

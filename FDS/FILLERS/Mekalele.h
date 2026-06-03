@@ -67,12 +67,26 @@ struct GBuffer {
 	// when empty, the receiver falls back to `uint16_t(matID + 1)`.
 	std::vector<u16> shadowMatID;
 	// Per-pixel 8-bit planar-mirror identity. Used by DEMO/GreetsMirror's
-	// per-mirror clipping: a mask-only pre-pass stamps mirror walls'
-	// IDs here; the per-pixel Mekalele inner loop tests this against
-	// each clone face's F->mirrorMaskTag and rejects writes that don't
-	// match. 0 = not a mirror pixel (default). Optional — when empty,
-	// the inner-loop check is a no-op and clone faces commit normally.
+	// Per-pixel mirror ownership, WRITTEN by Mekalele's commit path
+	// from ctx.faceOwnerMirrorId. Read by the deferred lighting pass
+	// to gate omnis per pixel (originals only light pmid=0, base
+	// clones only light pmid=baseId, compound clones only light
+	// pmid=compoundId). Foreground geometry committing inside a
+	// mirror's projected mask overrides this back to 0 so it's lit
+	// normally — that's the z-correct way to fix occluded mirror
+	// walls. Optional plane (empty on scenes with no mirrors).
 	std::vector<u8> mirrorId;
+	// Per-pixel mirror GATE mask. Filled by the pre-pass (StampMirror-
+	// Masks) and held IMMUTABLE during rasterization — the per-pixel
+	// inner loop tests gb.mirrorMask against Face::mirrorMaskTag to
+	// decide whether a clone face is allowed to commit at this pixel.
+	// Kept separate from mirrorId because the commit path mutates
+	// mirrorId; if the gate read mirrorId we'd get order-dependent
+	// behaviour where a later face's gate test sees an earlier face's
+	// ownerMirrorId instead of the original pre-stamp, and A's clones
+	// could fail their gate after a compound clone committed there
+	// (visible as "objects in mirror disappear, but floor remains").
+	std::vector<u8> mirrorMask;
 };
 
 // Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
@@ -279,6 +293,7 @@ struct GBufferSpan {
 	u16 *lightmapST;
 	u16 *shadowMatID;
 	u8  *mirrorId;
+	const u8 *mirrorMask;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
@@ -289,6 +304,7 @@ struct GBufferSpan {
 		if (lightmapST) lightmapST += offset;
 		if (shadowMatID) shadowMatID += offset;
 		if (mirrorId) mirrorId += offset;
+		if (mirrorMask) mirrorMask += offset;
 		zbuffer += offset;
 		return *this;
 	}
@@ -323,6 +339,9 @@ struct GBufferSpan {
 		u8 *mirrorIdPtr = gbuffer.mirrorId.empty()
 			? nullptr
 			: gbuffer.mirrorId.data() + offset;
+		const u8 *mirrorMaskPtr = gbuffer.mirrorMask.empty()
+			? nullptr
+			: gbuffer.mirrorMask.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
@@ -331,6 +350,7 @@ struct GBufferSpan {
 			lmSTPtr,
 			shadowMatIDPtr,
 			mirrorIdPtr,
+			mirrorMaskPtr,
 			ctx.zbuffer + offset
 		};
 	}
@@ -542,14 +562,15 @@ struct TileRasterizer {
 				// footprint get rejected here. Compiled into the same
 				// p_mask the rest of the path already respects; no
 				// extra branch needed downstream.
-				if (ctx.mirrorTag != 0 && span.mirrorId != nullptr) {
-					alignas(8) u8 mirrorIdBytes[8];
-					std::memcpy(mirrorIdBytes, span.mirrorId, 8);
-					// Widen 8 u8 → 8 i32 lanes for SIMD compare. The
-					// _mm_loadl + cvtepu8 dance keeps the load aligned
-					// and lets the compiler fold the compare into
-					// the existing p_mask register.
-					const __m128i packed = _mm_loadl_epi64((const __m128i*)mirrorIdBytes);
+				if (ctx.mirrorTag != 0 && span.mirrorMask != nullptr) {
+					// Gate against the IMMUTABLE pre-stamp plane, not
+					// the mutable ownership plane: a previously-
+					// committed face's ownerMirrorId on mirrorId would
+					// flip the gate on us mid-tile and reject A's
+					// clones after a compound clone committed first.
+					alignas(8) u8 maskBytes[8];
+					std::memcpy(maskBytes, span.mirrorMask, 8);
+					const __m128i packed = _mm_loadl_epi64((const __m128i*)maskBytes);
 					const Vec8i pixelIds = Vec8i(_mm256_cvtepu8_epi32(packed));
 					const Vec8ib mirrorMask = (pixelIds == Vec8i(int(ctx.mirrorTag)));
 					p_mask &= mirrorMask;

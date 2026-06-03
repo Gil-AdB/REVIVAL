@@ -604,7 +604,14 @@ float Vel_Speed   = 0.080;
 // (rad/key-tick) and shouldn't auto-scale with world size. Both
 // Vel_Speed and Rot_Speed_Base are multiplied by CamSpeedMult at use
 // site so the `, .` keys scale BOTH proportionally.
-static float Rot_Speed_Base = 0.004f;
+// Per-keypress angular velocity increment, in radians per tick. Paired
+// with Rot_FallOff = 5: under a held key, exp decay leaves FT at
+// 1/(1-exp(-5*dTime)) ≈ 1.4× this value (steady state). At dTime≈0.25
+// per frame that's ~0.32 rad/tick * 0.25 ≈ 0.08 rad applied per frame
+// = ~4.6°/frame ≈ matches the prior tuned feel from Rot_Speed=0.004 +
+// near-zero falloff (which accumulated to the same steady-state but
+// drifted forever after key release).
+static float Rot_Speed_Base = 0.23f;
 // Independent rotation-speed dial — adjusted by `K` (slower) / `L`
 // (faster) inside Dynamic_Camera. Multiplies Rot_Speed_Base on top of
 // the shared `, .` CamSpeedMult, letting you slow rotation without
@@ -662,14 +669,14 @@ void Dynamic_Camera()
   // angular velocity doesn't have an analogous "scene scale"
   // interpretation.
   const float Vel_FallOff = 5.0f * Vel_Speed;
-  // Rotation key-release dampening. Empirically tuned: velocity
-  // decays via 5*Vel_Speed which is scene-scale-aware (~0.5-1.0 in
-  // practice); rotation has no scene-scale analogue so we need a
-  // direct per-second rate. 30/sec gives ~80% decay per frame at
-  // 60fps and lets the rotStopThresh hard stop fire within a couple
-  // frames after key release. Previous values (0.05, 5.0) felt
-  // glued.
-  const float Rot_FallOff = 30.0f;
+  // Rotation falloff. The old 0.05 left FT accumulating to ~80× the
+  // per-keypress amount (steady state under a held key), which made
+  // turn rate snappy but meant rotation drifted for ~9s after key
+  // release. We compensate by combining a moderate decay rate with a
+  // proportionally larger Rot_Step below — held-key steady state stays
+  // close to the old snappy rate, but the rotStopThresh hard stop
+  // fires within a handful of frames after release.
+  const float Rot_FallOff = 5.0f;
   Vector U,V;
 	float dot;
   CAttempt = 1;
