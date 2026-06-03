@@ -806,7 +806,20 @@ void Dynamic_Camera()
 /*  Vector_Scale(&Grav,dTime,&V);
 	Vector_SelfAdd(&FV,&V);*/
 
-	// falloff
+	// Exponential falloff for smoothing, then a hard stop at small
+	// velocity. expf alone never reaches zero: at decay rate ~0.4 per
+	// tick the camera technically still drifts a sub-pixel for many
+	// frames after release. Snap to zero below a per-scene threshold
+	// (proportional to Vel_Speed so big scenes have a proportionally
+	// larger deadzone) so the camera comes to a definite stop.
   Vector_SelfScale(&FV,expf(-Vel_FallOff*dTime));
   Vector_SelfScale(&FT,expf(-Rot_FallOff*dTime));
+  const float velStopThresh = Vel_Speed * 0.05f;
+  if (FV.x*FV.x + FV.y*FV.y + FV.z*FV.z < velStopThresh * velStopThresh) {
+    FV.x = FV.y = FV.z = 0.0f;
+  }
+  const float rotStopThresh = Rot_Speed_Base * 0.10f;
+  if (FT.x*FT.x + FT.y*FT.y + FT.z*FT.z < rotStopThresh * rotStopThresh) {
+    FT.x = FT.y = FT.z = 0.0f;
+  }
 }

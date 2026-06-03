@@ -579,6 +579,19 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         clone->IPos = reflectPointAcross(srcO->IPos, N, d);
         clone->IDir = reflectDirAcross(srcO->IDir, N);
         clone->Flags |= Omni_MirrorClone;
+        // Dim the clone omni so the reflected world isn't lit to
+        // saturation. Greets has 15 nearby warm omnis; cloning all
+        // of them with their original intensity makes every clone
+        // surface receive the same full diffuse hit as the original
+        // and the deferred lighting kernel clamps to 250 per channel
+        // — the reflection reads as flat bright yellow instead of a
+        // recognisable image. Halving the intensity (via L.A which
+        // the lighting kernel multiplies into colour) gives enough
+        // dynamic range that surfaces in the reflected world differ
+        // by lighting.
+        clone->L.R *= 0.5f;
+        clone->L.G *= 0.5f;
+        clone->L.B *= 0.5f;
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
