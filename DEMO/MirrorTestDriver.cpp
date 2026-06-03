@@ -171,6 +171,14 @@ struct MirrorTestScene : SceneDriver {
     FrameProfiler prof{"mirrortest"};
     char MSGStr[192] = {0};
     float TTrd_ = -1.0f;
+    // Labeled world positions — drawn each frame as "[O] name" at the
+    // original position and "[R1 m<id>] name" at the position the
+    // object reflects to through each mirror's plane. Lets us see at
+    // a glance which clone on screen corresponds to which original,
+    // and whether any clone lands outside its mirror's frame (which
+    // would indicate a mask/projection bug).
+    struct LabeledPos { Vector pos; const char *name; };
+    std::vector<LabeledPos> labels;
 
     ~MirrorTestScene() override {
         // The builder-allocated scene contains a mix of new[]/aligned-
@@ -211,6 +219,16 @@ struct MirrorTestScene : SceneDriver {
         Specular_Factor = 1.0f;
         ImageSize = 1;
 
+        // Seed labeled positions matching the cubes added in
+        // BuildInteractiveMirrorTestScene. Each gets an [O] label at
+        // its original position and a [R1 m<id>] label at each
+        // mirror's reflected position. (The current planar-mirror
+        // system is single-bounce, so reflection count is always 0
+        // or 1.)
+        labels.push_back({Vector(-1.8f, 1.0f, 1.5f), "red"});
+        labels.push_back({Vector( 1.8f, 1.0f, 3.0f), "green"});
+        labels.push_back({Vector( 0.0f, 1.5f, 2.0f), "yellow"});
+
         // Start in free-cam. The whole point of an interactive mirror test is
         // to fly around the panel; defaulting to the scripted camera (no
         // splines) leaves the user wondering why WASD doesn't move them.
@@ -226,6 +244,51 @@ struct MirrorTestScene : SceneDriver {
             "[MIRRORTEST] interactive scene ready — starting in FREE-CAM. "
             "WASD/QE to move, arrows to look, TAB to toggle scripted cam, "
             "ESC to exit.\n");
+    }
+
+    // Project a world point to screen, returns false if behind near
+    // plane or off-screen.
+    bool worldToScreen(const Vector &world, int &px, int &py) {
+        const Vector rel = {world.x - View->ISource.x,
+                            world.y - View->ISource.y,
+                            world.z - View->ISource.z};
+        Vector v;
+        MatrixXVector(View->Mat, &rel, &v);
+        if (v.z <= sc->NZP) return false;
+        const float fx = v.x / v.z * FOVX + CntrEX;
+        const float fy = -v.y / v.z * FOVY + CntrEY;
+        if (fx < 0 || fx >= float(XRes) || fy < 0 || fy >= float(YRes))
+            return false;
+        px = int(fx); py = int(fy);
+        return true;
+    }
+
+    // World-space label overlay. Draws "[O] name" at each labeled
+    // object's actual position and "[R1 m<id>] name" at the position
+    // it reflects to through each mirror's plane. Single-bounce, so
+    // reflection count is always 0 or 1; the [R1 ...] prefix leaves
+    // room for a future recursive-mirror pass to bump it to R2/R3.
+    void drawLabels() {
+        char lbl[64];
+        int sx = 0, sy = 0;
+        for (const auto &L : labels) {
+            std::snprintf(lbl, sizeof(lbl), "[O] %s", L.name);
+            if (worldToScreen(L.pos, sx, sy)) OutTextXY(VPage, sx, sy, lbl, 255);
+            for (const auto &m : mirrors) {
+                if (!m.plane.valid) continue;
+                const float k = 2.0f * (m.plane.N.x * L.pos.x
+                                      + m.plane.N.y * L.pos.y
+                                      + m.plane.N.z * L.pos.z
+                                      + m.plane.d);
+                const Vector refl = {L.pos.x - k * m.plane.N.x,
+                                     L.pos.y - k * m.plane.N.y,
+                                     L.pos.z - k * m.plane.N.z};
+                std::snprintf(lbl, sizeof(lbl), "[R1 m%d] %s",
+                              (int)m.id, L.name);
+                if (worldToScreen(refl, sx, sy))
+                    OutTextXY(VPage, sx, sy, lbl, 255);
+            }
+        }
     }
 
     // Render the scene one frame at the given camera pose, then dump
@@ -247,6 +310,7 @@ struct MirrorTestScene : SceneDriver {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceDeferred);
         }
+        drawLabels();
         std::FILE *f = std::fopen(path, "wb");
         if (!f) return;
         const int xr = (int)XRes, yr = (int)YRes;
@@ -364,6 +428,7 @@ struct MirrorTestScene : SceneDriver {
                       mirrors.size(),
                       View->ISource.x, View->ISource.y, View->ISource.z);
         OutTextXY(VPage, 0, 0, MSGStr, 255);
+        drawLabels();
 
         prof.enter(PROF_FLIP);
         Flip(MainSurf);
