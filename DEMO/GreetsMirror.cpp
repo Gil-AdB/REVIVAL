@@ -939,30 +939,27 @@ void UpdateMirror(Scene *sc, Mirror &m)
             m.cloneMesh->Verts[r.vStart + vi].N = reflectDirAcross(worldN, N);
         }
     }
-    // Per-omni: re-mirror IPos / IDir + clamp IRange to plane distance
-    // so the lighting sphere can't leak to the wrong side.
+    // Per-omni: re-mirror IPos / IDir, restore both source and clone
+    // to their FULL original ranges every frame.
     //
-    // Floor on IRange: the deferred tile binner projects each omni's
-    // bsphere to screen and lists per-tile contributors; tiles outside
-    // the projected bsphere skip the omni. If we let IRange shrink
-    // below ~10% of the source's range, omnis sitting near the plane
-    // get a tile bbox so small that adjacent tiles flicker (some
-    // include the omni, some don't, near the bsphere edge) and the
-    // 1/range falloff math degenerates. Keep a 10% floor so omnis
-    // close to the mirror plane still light reasonably even if their
-    // contribution leaks slightly across.
-    auto clampedRange = [](float orig, float limit) {
-        const float floor = orig * 0.10f;
-        return std::max(floor, std::min(orig, limit));
-    };
+    // We used to clamp each omni's IRange down to its distance-to-the-
+    // mirror-plane ("soft compartmentalization", so a light near the
+    // mirror couldn't bleed to the wrong side). That predated the
+    // per-pixel mirror filter (Omni::mirrorId vs gb.mirrorId): the
+    // filter now guarantees clone omnis light only clone pixels and
+    // source omnis light only source pixels, so the range clamp is
+    // redundant — and actively harmful, because it clamped the SHARED
+    // SOURCE omni. With two mirrors the source omni got clamped to the
+    // NEARER plane's distance (~5 units in the test scene), so the real
+    // floor beyond that went ambient-only while the reflected floor —
+    // lit by the clone omni — stayed bright. That asymmetry read as a
+    // phantom "specular highlight that's only in the mirror."
     for (auto &c : m.omniClones) {
         if (!c.sourceOmni || !c.mirrorOmni) continue;
         c.mirrorOmni->IPos = reflectPointAcross(c.sourceOmni->IPos, N, d);
         c.mirrorOmni->IDir = reflectDirAcross(c.sourceOmni->IDir, N);
-        const float srcLimit = distToPlane(c.sourceOmni->IPos, N, d);
-        const float mirLimit = distToPlane(c.mirrorOmni->IPos, N, d);
-        c.sourceOmni->IRange = clampedRange(c.origSourceRange, srcLimit);
-        c.mirrorOmni->IRange = clampedRange(c.origMirrorRange, mirLimit);
+        c.sourceOmni->IRange = c.origSourceRange;
+        c.mirrorOmni->IRange = c.origMirrorRange;
         c.sourceOmni->rRange = c.sourceOmni->IRange > 0.0f ? 1.0f / c.sourceOmni->IRange : 0.0f;
         c.mirrorOmni->rRange = c.mirrorOmni->IRange > 0.0f ? 1.0f / c.mirrorOmni->IRange : 0.0f;
     }
