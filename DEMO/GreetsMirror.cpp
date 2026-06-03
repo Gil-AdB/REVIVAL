@@ -1145,6 +1145,9 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     // skip stamping the mask for any mirror whose viewer is on the
     // back side (plane sign N·C + d <= 0); with no mask, Mekalele
     // rejects every clone pixel for that mirror.
+    const Vector *camPos = nullptr;
+    if (sc->CameraHead) camPos = &sc->CameraHead->ISource;
+    if (::View) camPos = &::View->ISource;
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
         // Compound mirrors do not stamp their own pre-mask. Their wall
@@ -1155,18 +1158,36 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
         // sub-area (the bug that hid objects "behind" the in-mirror
         // mirror).
         if (m.parentMirrorId != 0) continue;
-        // (We used to gate stamping on `camPos · plane.N + plane.d > 0`
-        // to suppress mirrors whose plane the viewer was behind, since
-        // back-side clones were leaking through Mekalele's screen-
-        // footprint mask. Greets's P_TEXT screens cluster around an
-        // AVERAGED plane whose normal disagrees with most individual
-        // screens, so this gate was failing for ~every P_TEXT screen
-        // and the user only got a reflection on the one screen
-        // coplanar with the cluster average — and even then only
-        // when the camera crossed outside the room bounds. Dropping
-        // the gate lets all of greets's P_TEXT clones stamp; back-
-        // side ghost-reflections need a different fix (per-cluster
-        // mirrors, or back-face culling on clone meshes).)
+        // Per-wall-face viewer-side gate. The old single-plane test
+        // used the AVERAGED cluster normal — greets's P_TEXT screens
+        // disagree with the average, so it killed reflections on
+        // every screen but one. Loop over the actual wall faces
+        // instead: if NO face is front-facing from the camera, skip
+        // the mirror entirely. For greets's multi-orientation
+        // clusters at least one screen is always facing the viewer
+        // when any of them is visible; for the test scene's single
+        // back-mirror panel, moving the camera behind z=5 turns
+        // every wall face back-facing and the mirror falls silent
+        // — which is the desired "no leak from the back side".
+        bool anyFrontFacing = (camPos == nullptr);
+        if (!anyFrontFacing) {
+            for (const Face *F : m.wallFaces) {
+                if (!F || !F->A) continue;
+                // Wall face normal in WORLD space, plus its NormProd
+                // (= -N·A_world). Mesh-local→world transform isn't
+                // needed: BuildMirror's wallFaces are pointers into
+                // live source meshes whose RotMat is identity in
+                // practice (mirror walls are static room geometry),
+                // so F->N is already world-space. If a scene ever
+                // animates a mirror wall, walk T->RotMat * F->N.
+                const float dot = F->N.x * camPos->x
+                                + F->N.y * camPos->y
+                                + F->N.z * camPos->z
+                                + F->NormProd;
+                if (dot > 0.0f) { anyFrontFacing = true; break; }
+            }
+        }
+        if (!anyFrontFacing) continue;
         for (const Face *F : m.wallFaces) {
             if (!F || !F->A || !F->B || !F->C) continue;
             // Clip the (A,B,C) triangle in view-space against z >= kClipZ.
