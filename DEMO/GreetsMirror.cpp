@@ -1000,11 +1000,19 @@ using u8 = uint8_t;
 //
 // Coordinates expected in PX/PY pixel-space (what Transform_Objects
 // already produced). Clipped to [0, w) × [0, h).
+// requireExisting == 0xFF means "unconditional write" (the base-mirror
+// path). For compound mirrors we pass requireExisting = parent's id so
+// the compound stamp only overrides pixels the parent already claimed
+// — without this clip, the compound wall (which is a CLONE face that
+// projects to wherever its world-space mirror-of-mirror position lands)
+// bleeds outside the parent's actual screen footprint and we end up
+// with silver tint over real-world geometry.
 inline void StampTri2D(u8 *plane, int w, int h,
                        float ax, float ay,
                        float bx, float by,
                        float cx, float cy,
-                       u8 value)
+                       u8 value,
+                       u8 requireExisting = 0xFF)
 {
     // Sort vertices by Y so we can split the triangle into a flat-top
     // and flat-bottom half and scan each between two edges per row.
@@ -1039,7 +1047,17 @@ inline void StampTri2D(u8 *plane, int w, int h,
         if (xL < 0) xL = 0;
         if (xR > w) xR = w;
         if (xL >= xR) continue;
-        std::memset(plane + size_t(y) * size_t(w) + size_t(xL), value, size_t(xR - xL));
+        u8 *row = plane + size_t(y) * size_t(w);
+        if (requireExisting == 0xFF) {
+            std::memset(row + size_t(xL), value, size_t(xR - xL));
+        } else {
+            // Clip pass: only override pixels the parent already
+            // stamped. Compound mirrors use this so their wall mask
+            // can't bleed onto pixels the parent's wall doesn't cover.
+            for (int x = xL; x < xR; ++x) {
+                if (row[x] == requireExisting) row[x] = value;
+            }
+        }
     }
 }
 
@@ -1175,10 +1193,14 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
             // Project clipped polygon verts to screen + fan-triangulate.
             float sx[4], sy[4];
             for (int i = 0; i < nc; ++i) projectPreDivideToScreen(clipped[i], sx[i], sy[i]);
+            // Compound mirrors stamp only into pixels their parent
+            // already owns. 0xFF means "unconditional" for base mirrors.
+            const u8 requireExisting = (m.parentMirrorId != 0)
+                ? m.parentMirrorId : u8(0xFF);
             for (int i = 1; i + 1 < nc; ++i) {
                 StampTri2D(plane.data(), w, h,
                            sx[0], sy[0], sx[i], sy[i], sx[i+1], sy[i+1],
-                           m.id);
+                           m.id, requireExisting);
             }
         }
     }

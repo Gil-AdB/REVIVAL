@@ -662,7 +662,11 @@ void Dynamic_Camera()
   // angular velocity doesn't have an analogous "scene scale"
   // interpretation.
   const float Vel_FallOff = 5.0f * Vel_Speed;
-  const float Rot_FallOff = 0.05f;
+  // Rotation key-release dampening: matches the velocity exp-decay so
+  // arrow-key spins coast to rest at a similar feel as WASD/QE motion
+  // instead of the previous near-stagnant 0.05 coefficient (which left
+  // the camera slowly drifting in rotation forever).
+  const float Rot_FallOff = 5.0f;
   Vector U,V;
 	float dot;
   CAttempt = 1;
