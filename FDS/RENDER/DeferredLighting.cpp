@@ -1145,10 +1145,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 #if FDS_DEV
 			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
 			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
+			static const bool sVizMatID       = fds::FeatureFlags::viz_matid();
 			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
 #else
 			constexpr bool sVizTangent    = false;
 			constexpr bool sVizNormal     = false;
+			constexpr bool sVizMatID      = false;
 			constexpr bool sNmapAsDiffuse = false;
 #endif
 			float texB, texG, texR;
@@ -1889,6 +1891,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				outR = int((nx + 1.0f) * 127.5f);
 				outG = int((ny + 1.0f) * 127.5f);
 				outB = int((nz + 1.0f) * 127.5f);
+			}
+			if (sVizMatID) {
+				// Hash matID to a distinct colour. matID is already in
+				// scope from the mat32 unpack above; for matID==0 we
+				// keep pure black so untouched/sentinel pixels read
+				// distinctly. Multiplication by 3 large primes mixes
+				// adjacent ids into clearly different colours.
+				const uint32_t h = uint32_t(matID);
+				outR = int((h * 73u + 41u) & 0xFFu);
+				outG = int((h * 151u + 13u) & 0xFFu);
+				outB = int((h * 211u + 97u) & 0xFFu);
 			}
 			if (sVizTangent) {
 				if (!gb.tangent.empty()) {

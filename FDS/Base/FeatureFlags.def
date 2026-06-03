@@ -92,6 +92,7 @@ FDS_FLAG_INT(nmap_blur,                 "FDS_NMAP_BLUR",                4,      
 FDS_FLAG_BOOL(nmap_from_diffuse,        "FDS_NMAP_FROM_DIFFUSE",        0,                              "nmap-dev", "[dev] Derive normal map from diffuse")
 FDS_FLAG_BOOL(viz_tangent,              "FDS_VIZ_TANGENT",              0,                              "nmap-dev", "[dev] Visualize per-pixel view-space tangent as diffuse color")
 FDS_FLAG_BOOL(viz_normal,               "FDS_VIZ_NORMAL",               0,                              "nmap-dev", "[dev] Visualize per-pixel view-space normal as diffuse color")
+FDS_FLAG_BOOL(viz_matid,                "FDS_VIZ_MATID",                0,                              "nmap-dev", "[dev] Visualize per-pixel matID as a deterministic colour (8-bit id hashed to BGRA) so you can see which face won z at each pixel. Use to verify reflected-floor pixels are actually the floor clone (and not some other face that happens to z-fight there).")
 FDS_FLAG_BOOL(nmap_as_diffuse,          "FDS_NMAP_AS_DIFFUSE",          0,                              "nmap-dev", "[dev] Paint baked normal map directly as diffuse — confirms swizzle round-trip")
 #endif
 
