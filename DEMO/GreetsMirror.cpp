@@ -634,19 +634,14 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // root cause of greets's persistent yellow saturation inside
         // the teleporter mirror.
         clone->mirrorId = m.id;
-        // Dim the clone omni so the reflected world isn't lit to
-        // saturation. Greets has 15 nearby warm omnis; cloning all
-        // of them with their original intensity makes every clone
-        // surface receive the same full diffuse hit as the original
-        // and the deferred lighting kernel clamps to 250 per channel
-        // — the reflection reads as flat bright yellow instead of a
-        // recognisable image. Halving the intensity (via L.A which
-        // the lighting kernel multiplies into colour) gives enough
-        // dynamic range that surfaces in the reflected world differ
-        // by lighting.
-        clone->L.R *= 0.5f;
-        clone->L.G *= 0.5f;
-        clone->L.B *= 0.5f;
+        // (The old 0.5x dim was a pre-filter hack against double-
+        // lighting saturation: clone surfaces saw both originals AND
+        // clones at full intensity, so halving brought the totals back
+        // to ~1x. With the per-pixel mirror filter the clone pixel
+        // only sees clone omnis, so the original intensity is the
+        // correct intensity — keeping the halving made test-scene
+        // reflections look ~25% as bright as the originals and the
+        // back-mirror was nearly black.)
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
@@ -899,12 +894,13 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 clone->IDir = composedDir(srcO->IDir);
                 clone->Flags |= Omni_MirrorClone;
                 clone->mirrorId = compoundId;
-                // Quarter intensity at depth 2: each bounce halves
-                // (base clones already use 0.5x); compound is the
-                // product of two bounces.
-                clone->L.R *= 0.5f;
-                clone->L.G *= 0.5f;
-                clone->L.B *= 0.5f;
+                // No intensity attenuation: the per-pixel filter
+                // routes only this compound's omnis to compoundId
+                // pixels, so the once-physical light gets one full
+                // contribution (the actual world light energy doesn't
+                // halve at every bounce in a real mirror system — only
+                // the visible reflectance does, which is handled by
+                // the wall's silver tint blend).
                 clone->Prev = nullptr;
                 clone->Next = sc->OmniHead;
                 if (sc->OmniHead) sc->OmniHead->Prev = clone;
