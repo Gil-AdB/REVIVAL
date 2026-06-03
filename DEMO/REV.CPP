@@ -1511,6 +1511,7 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_F1:        legacy = ScF1; break;
 				case SDL_SCANCODE_F2:        legacy = ScF2; break;
 				case SDL_SCANCODE_F3:        legacy = ScF3; break;
+				case SDL_SCANCODE_F9:        legacy = ScF9; break;
 				case SDL_SCANCODE_F11:       legacy = ScF11; break;
 				case SDL_SCANCODE_TAB:       legacy = ScTab; break;
 				case SDL_SCANCODE_SPACE:     legacy = ScSpace; break;
