@@ -455,12 +455,18 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // and the user sees through. Luminosity > 1 saturates the lit
     // value at the kernel's 250 clamp, giving full BaseCol×0.98 per
     // pixel — stable across strips since Diff=0.
-    constexpr float kMirrorAlpha       = 0.15f;
+    // No tint: alpha=0 so the wall contributes nothing on top of the
+    // reflected backdrop. Luminosity/Diffuse/Specular all 0 so the
+    // wall's surface lighting can't bleed in either. The wall face
+    // still rasterizes (it has to, for the mask stamp + xpar-Z bound)
+    // but its composition contribution is zero — what the viewer sees
+    // is whatever clones rendered behind it through the mirrorMask
+    // gate.
+    constexpr float kMirrorAlpha       = 0.0f;
     constexpr float kMirrorSpecular    = 0.0f;
     constexpr float kMirrorDiffuse     = 0.0f;
-    constexpr float kMirrorLuminosity  = 2.0f;
-    const Color     kMirrorSilver      = { 140.0f, 140.0f, 170.0f, 255.0f };
-    int wallTransparentKept = 0;
+    constexpr float kMirrorLuminosity  = 0.0f;
+    const Color     kMirrorSilver      = { 0.0f, 0.0f, 0.0f, 0.0f };
     // Capture the original wall-face material pointer the first time
     // we see one. After the retarget loop we use this to fix up any
     // EARLIER mirror's clone mesh that already cloned this material
@@ -480,59 +486,34 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             Face &F = T->Faces[fi];
             if (!isMirrorSurface(F, T)) continue;
             if (!sourceWallMat) sourceWallMat = F.Txtr;
-            const bool sourceIsHalfSilvered =
-                F.Txtr && (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
-            if (sourceIsHalfSilvered) {
-                // (A): half-silvered glass — keep the source's
-                // texture (so the authored content, e.g. P_TEXT,
-                // still shows) but clone the Material so we can
-                // pin Diffuse=0 / Luminosity stable. The shared
-                // source material's Diff=1.0 would otherwise leave
-                // the wall sensitive to per-strip omni coverage and
-                // produce visible tile-edge popping inside mirrors
-                // that reflect it. The clone is per-mirror; other
-                // walls using the source material are unaffected.
-                ++wallTransparentKept;
-                if (!m.wallMatClone) {
-                    m.wallMatClone = getAlignedType<Material>(16);
-                    std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
-                    m.wallMatClone->Specular   = kMirrorSpecular;
-                    m.wallMatClone->Diffuse    = kMirrorDiffuse;
-                    m.wallMatClone->Luminosity = kMirrorLuminosity;
-                    // BaseCol and Txtr kept from source — the
-                    // authored content (P_TEXT etc.) needs to render
-                    // its own colour at the wall pixels. Alpha is
-                    // also left at whatever the source authored.
-                    m.wallMatClone->Prev = nullptr;
-                    m.wallMatClone->Next = MatLib;
-                    if (MatLib) MatLib->Prev = m.wallMatClone;
-                    MatLib = m.wallMatClone;
-                }
-                F.Txtr = m.wallMatClone;
-            } else {
-                // (B): synthesize silver transparent mat on first hit.
-                if (!m.wallMatClone) {
-                    m.wallMatClone = getAlignedType<Material>(16);
-                    std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
-                    m.wallMatClone->Flags |= Mat_Transparent;
-                    m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
-                    m.wallMatClone->Specular       = kMirrorSpecular;
-                    m.wallMatClone->BaseCol        = kMirrorSilver;
-                    m.wallMatClone->Diffuse        = kMirrorDiffuse;
-                    // Small self-luminosity keeps the wall stable
-                    // across strips with sparse omni coverage (see
-                    // header note above).
-                    m.wallMatClone->Luminosity     = kMirrorLuminosity;
-                    if (!m.wallMatClone->Txtr) {
-                        m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
-                    }
-                    m.wallMatClone->Prev = nullptr;
-                    m.wallMatClone->Next = MatLib;
-                    if (MatLib) MatLib->Prev = m.wallMatClone;
-                    MatLib = m.wallMatClone;
-                }
-                F.Txtr = m.wallMatClone;
+            // ONE path for both originally-opaque and originally-
+            // transparent (P_TEXT, etc.) wall sources: synthesize a
+            // fresh fully-transparent material with alpha=0 — the wall
+            // contributes no colour, no text overlay, no silver tint.
+            // The reflected clones rendered behind the wall through
+            // the mirrorMask gate are what shows. The source's
+            // original look (P_TEXT text on the screen, opaque silver,
+            // etc.) is intentionally discarded.
+            if (!m.wallMatClone) {
+                m.wallMatClone = getAlignedType<Material>(16);
+                std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
+                m.wallMatClone->Flags |= Mat_Transparent;
+                m.wallMatClone->XparBlendAlpha = kMirrorAlpha;     // 0
+                m.wallMatClone->Specular       = kMirrorSpecular;  // 0
+                m.wallMatClone->Diffuse        = kMirrorDiffuse;   // 0
+                m.wallMatClone->Luminosity     = kMirrorLuminosity;// 0
+                m.wallMatClone->BaseCol        = kMirrorSilver;    // all 0
+                // Force a tiny synth texture so the rasterizer's
+                // F.Txtr->Txtr deref still has a valid pointer; the
+                // sampled colour doesn't matter because alpha=0 zeros
+                // the whole composition contribution.
+                m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
+                m.wallMatClone->Prev = nullptr;
+                m.wallMatClone->Next = MatLib;
+                if (MatLib) MatLib->Prev = m.wallMatClone;
+                MatLib = m.wallMatClone;
             }
+            F.Txtr = m.wallMatClone;
             // Wall face itself is NOT tagged. We used to set
             // F.mirrorMaskTag = m.id here, but Mekalele's per-pixel
             // gb.mirrorId == ctx.mirrorTag test would then apply to
@@ -549,12 +530,6 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             m.wallFaces.push_back(&F);
             ++m.wallFacesRetargeted;
         }
-    }
-    if (wallTransparentKept > 0) {
-        std::fprintf(stderr,
-            "[MIRROR '%s'] kept %d transparent-textured wall faces as-is "
-            "(half-silvered-glass path)\n",
-            label, wallTransparentKept);
     }
     // Fix up faces in previously-built mirrors' clone meshes that
     // still reference the original wall material. Without this, an
@@ -634,20 +609,11 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // root cause of greets's persistent yellow saturation inside
         // the teleporter mirror.
         clone->mirrorId = m.id;
-        // Halve the clone omni intensity. Although the per-pixel
-        // mirror filter is in place (so clones aren't getting BOTH
-        // original + clone omni contributions anymore), greets has
-        // ~15 nearby warm omnis and per-pixel diffuse + specular
-        // accumulations saturate the lB/sB channels at 250 — the
-        // teleporter mirror reads as flat bright silver instead of
-        // a recognisable reflection. The 0.5x leaves headroom for
-        // many simultaneous omnis and matches the previously-tuned
-        // greets look. Scenes with one or two omnis (test scene)
-        // get visibly dimmer reflections; a per-scene knob or HDR
-        // accumulator is the proper long-term fix.
-        clone->L.R *= 0.5f;
-        clone->L.G *= 0.5f;
-        clone->L.B *= 0.5f;
+        // Full intensity. The per-pixel filter routes only this
+        // mirror's clone omnis to clone pixels, so a clone surface
+        // sees the same incident-light budget as the original surface
+        // would. Per-scene tuning can ride on RotSpeed-style runtime
+        // knobs, not on a fixed dim.
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
