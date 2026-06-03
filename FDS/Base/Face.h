@@ -97,6 +97,22 @@ struct Face
 	//     owning mirror's wall covered.
 	// 0 = not a mirror face, no mask write or check.
 	uint8_t          mirrorMaskTag = 0;
+	// Per-face mirror identity, written into gb.mirrorId by Mekalele's
+	// commit path for every rasterized pixel (z-correct because the
+	// write only happens past p_mask, which already folds in zmask and
+	// the existing 2D mask gate). Distinct from mirrorMaskTag:
+	//   * mirrorMaskTag gates which pixels a CLONE face is allowed to
+	//     commit to (the 2D pre-stamped mask is sloppy on z but only
+	//     errs on the side of permitting too much; the per-face
+	//     opaque z-test then rejects clones occluded by foreground).
+	//   * ownerMirrorId tags the committed pixel so the deferred
+	//     lighting kernel can filter per-pixel by mirror context.
+	// Set on clone faces by BuildMirror (= mirror's m.id). Stays 0 on
+	// originals so the deferred filter treats their committed pixels
+	// as original-world (which is correct even where they overdraw a
+	// previously pre-stamped 2D mask cell — that mask was only
+	// authoritative for clone gating, not for surface ownership).
+	uint8_t          ownerMirrorId = 0;
 	// SoA refactor Phase 3 (see docs/SOA_VERTEX_REFACTOR.md). Indices
 	// of A/B/C into ParentTri->Verts[] (and equivalently into the
 	// per-mesh VertexFrame SoA arrays). Populated by

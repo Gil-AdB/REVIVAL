@@ -51,7 +51,14 @@ struct Omni
 	// use the global default passed to Rebuild. Set to e.g. 256 on
 	// short-range lights to dramatically cut rasterization cost.
 	dword            shadowMapRes;
-	dword            dummy2;
+	// 0 = original-world omni, lights any non-mirror pixel.
+	// >0 = clone omni belonging to mirror with this id; lights only
+	// pixels whose gb.mirrorId matches. Set by GreetsMirror's
+	// BuildMirror when the omni is cloned across the plane; original
+	// omnis stay at 0. The deferred lighting kernel reads this when
+	// building per-tile light lists and skips omnis whose mirrorId
+	// disagrees with the pixel's gb.mirrorId byte.
+	dword            mirrorId;
 	// Per-omni halo controls (decouple halo brightness/extent from the
 	// omni's surface-lighting parameters L*ISize and IRange). Render_-
 	// OmniHalos and Render_DeferredVolumetric multiply the per-omni

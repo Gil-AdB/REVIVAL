@@ -359,6 +359,14 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             // gb.mirrorId doesn't match — so clones can only paint inside
             // their own mirror's screen-space footprint.
             CF.mirrorMaskTag = m.id;
+            // ownerMirrorId tags every pixel this clone face commits
+            // (Mekalele writes it into gb.mirrorId past the p_mask
+            // commit gate). The deferred lighting kernel filters omnis
+            // by this byte, so clone pixels see only their own
+            // mirror's cloned omnis — and crucially, foreground
+            // geometry occluding the mirror gets ownerMirrorId=0 from
+            // its own commit, overriding the z-ignorant 2D stamp.
+            CF.ownerMirrorId = m.id;
             ++fOfs;
         }
         m.meshRanges.push_back({T, vStart, T->VIndex});
@@ -453,6 +461,15 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     constexpr float kMirrorLuminosity  = 2.0f;
     const Color     kMirrorSilver      = { 140.0f, 140.0f, 170.0f, 255.0f };
     int wallTransparentKept = 0;
+    // Capture the original wall-face material pointer the first time
+    // we see one. After the retarget loop we use this to fix up any
+    // EARLIER mirror's clone mesh that already cloned this material
+    // before we replaced it — without that fix-up the previous
+    // mirror's clones of this mirror's panel still reference the
+    // source material with its full Diffuse, so the back-mirror's
+    // view of the side-mirror panel was lit per-strip and the silver
+    // tint flickered tile-by-tile inside the back mirror's image.
+    Material *sourceWallMat = nullptr;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;
@@ -462,6 +479,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isMirrorSurface(F, T)) continue;
+            if (!sourceWallMat) sourceWallMat = F.Txtr;
             const bool sourceIsHalfSilvered =
                 F.Txtr && (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
             if (sourceIsHalfSilvered) {
@@ -538,6 +556,33 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             "(half-silvered-glass path)\n",
             label, wallTransparentKept);
     }
+    // Fix up faces in previously-built mirrors' clone meshes that
+    // still reference the original wall material. Without this, an
+    // earlier mirror's reflection of THIS mirror's panel renders the
+    // panel through the source material (Diff=1, no XparBlendAlpha)
+    // and the wall pixels are lit per-strip, producing tile-by-tile
+    // popping inside the earlier mirror's image.
+    if (sourceWallMat && m.wallMatClone && sourceWallMat != m.wallMatClone) {
+        int patched = 0;
+        for (Object *Obj2 = sc->ObjectHead; Obj2; Obj2 = Obj2->Next) {
+            if (Obj2->Type != Obj_TriMesh) continue;
+            if (!isCloneMesh(Obj2)) continue;
+            TriMesh *T2 = (TriMesh*)Obj2->Data;
+            if (!T2 || !T2->Faces) continue;
+            for (DWord fi = 0; fi < T2->FIndex; ++fi) {
+                if (T2->Faces[fi].Txtr == sourceWallMat) {
+                    T2->Faces[fi].Txtr = m.wallMatClone;
+                    ++patched;
+                }
+            }
+        }
+        if (patched > 0) {
+            std::fprintf(stderr,
+                "[MIRROR '%s'] retargeted %d faces in prior clone meshes "
+                "to wallMatClone (cross-mirror panel fix)\n",
+                label, patched);
+        }
+    }
     // Allocate gb.mirrorId plane on first mirror in the scene. Sized
     // to match the engine surface; 1 byte per pixel = 2 MB at 1080p.
     // We allocate on all three engine gbuffers — opaque, transparent
@@ -579,6 +624,15 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         clone->IPos = reflectPointAcross(srcO->IPos, N, d);
         clone->IDir = reflectDirAcross(srcO->IDir, N);
         clone->Flags |= Omni_MirrorClone;
+        // Tag this clone with its mirror id. The deferred lighting
+        // kernel filters per-pixel against gb.mirrorId, so clones of
+        // mirror N's reflected world only receive light from mirror
+        // N's omnis (not from originals or from other mirrors'
+        // clones). Without this filter the reflected world received
+        // 2x the omni population (original + clone), which is the
+        // root cause of greets's persistent yellow saturation inside
+        // the teleporter mirror.
+        clone->mirrorId = m.id;
         // Dim the clone omni so the reflected world isn't lit to
         // saturation. Greets has 15 nearby warm omnis; cloning all
         // of them with their original intensity makes every clone

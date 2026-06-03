@@ -9,6 +9,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
+#include <FILLERS/Mekalele.h>  // g_gbuffer for label pmid readback
 
 #include <cstdio>
 
@@ -269,7 +270,7 @@ struct MirrorTestScene : SceneDriver {
     // reflection count is always 0 or 1; the [R1 ...] prefix leaves
     // room for a future recursive-mirror pass to bump it to R2/R3.
     void drawLabels() {
-        char lbl[64];
+        char lbl[80];
         int sx = 0, sy = 0;
         auto reflect = [](const Vector &p, const fds::Mirror &m) -> Vector {
             const float k = 2.0f * (m.plane.N.x * p.x + m.plane.N.y * p.y
@@ -278,15 +279,30 @@ struct MirrorTestScene : SceneDriver {
                      p.y - k * m.plane.N.y,
                      p.z - k * m.plane.N.z };
         };
+        // Sample gb.mirrorId at the on-screen pixel where each label
+        // lands, so the printed pmid matches what the deferred kernel's
+        // per-pixel light filter will actually see for the object at
+        // that position. Falls back to expectedMid (the geometric
+        // bucket the label belongs to: 0 for [O], m.id for [R1 m..]).
+        auto pmidAt = [](int x, int y) -> int {
+            if (!g_gbuffer) return -1;
+            const auto &plane = g_gbuffer->mirrorId;
+            if (plane.empty()) return -1;
+            if (x < 0 || y < 0 || x >= int(::XRes) || y >= int(::YRes))
+                return -1;
+            return int(plane[size_t(y) * size_t(::XRes) + size_t(x)]);
+        };
         for (const auto &L : labels) {
-            std::snprintf(lbl, sizeof(lbl), "[O] %s", L.name);
+            const int pmid = worldToScreen(L.pos, sx, sy) ? pmidAt(sx, sy) : -1;
+            std::snprintf(lbl, sizeof(lbl), "[O pmid=%d] %s", pmid, L.name);
             if (worldToScreen(L.pos, sx, sy)) OutTextXY(VPage, sx, sy, lbl, 255);
             for (const auto &mA : mirrors) {
                 if (!mA.plane.valid) continue;
                 // Single bounce: reflect L through mA.
                 const Vector r1 = reflect(L.pos, mA);
-                std::snprintf(lbl, sizeof(lbl), "[R1 m%d] %s",
-                              (int)mA.id, L.name);
+                const int pmid1 = worldToScreen(r1, sx, sy) ? pmidAt(sx, sy) : -1;
+                std::snprintf(lbl, sizeof(lbl), "[R1 m%d pmid=%d] %s",
+                              (int)mA.id, pmid1, L.name);
                 if (worldToScreen(r1, sx, sy))
                     OutTextXY(VPage, sx, sy, lbl, 255);
                 // Two-bounce: reflect through mB then through mA — the

@@ -145,6 +145,14 @@ struct ViewLightsSoA {
 	alignas(32) float    haloRange     [DEFERRED_MAX_LIGHTS];
 	alignas(32) float    haloRange2    [DEFERRED_MAX_LIGHTS];
 	alignas(32) float    haloRRange    [DEFERRED_MAX_LIGHTS];
+	// Per-light mirror id (0 = original world; >0 = clone of mirror
+	// with that id). The kernels read gb.mirrorId[pixel] once per
+	// pixel and skip any light whose mirrorId disagrees, so original-
+	// world surfaces are lit only by original omnis and each mirror's
+	// clone surfaces only by that mirror's cloned omnis. Without this
+	// filter clone pixels receive the union of both light sets and
+	// saturate (greets teleporter mirror went uniformly yellow).
+	alignas(32) uint32_t mirrorId      [DEFERRED_MAX_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -183,6 +191,9 @@ struct TileLights {
 	alignas(32) float    posWorldY[DEFERRED_MAX_LIGHTS];
 	alignas(32) float    posWorldZ[DEFERRED_MAX_LIGHTS];
 	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_LIGHTS];
+	// See ViewLightsSoA::mirrorId. Mirrored into the per-tile/per-
+	// strip light list so the inner pixel loop reads tl.mirrorId[n].
+	alignas(32) uint32_t mirrorId  [DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
@@ -380,6 +391,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float    Lwy = lights.posWorldY[li];
 		const float    Lwz = lights.posWorldZ[li];
 		const int32_t  Lci2 = lights.cubeShadowIdx[li];
+		const uint32_t Lmid = lights.mirrorId[li];
 
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
@@ -413,6 +425,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 					tl.posWorldY[s] = Lwy;
 					tl.posWorldZ[s] = Lwz;
 					tl.cubeShadowIdx[s] = Lci2;
+					tl.mirrorId[s]      = Lmid;
 				}
 			}
 		}
@@ -445,6 +458,11 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			tl.posWorldY[p] = 0.0f;
 			tl.posWorldZ[p] = 0.0f;
 			tl.cubeShadowIdx[p] = -1;
+			// 0xffffffff in the padding slot so the per-pixel `==`
+			// test against pixelMirrorId (always < 256) is always
+			// false; the padded slots contribute nothing whatever
+			// the pixel's mirror id.
+			tl.mirrorId[p]      = 0xffffffffu;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -507,6 +525,7 @@ static void buildStripLightLists(int numStrips, int stripHeight, int yres,
 		const float Lci = lights.cosInner[li];
 		const float Lco = lights.cosOuter[li];
 		const uint32_t Lis = lights.isSpot[li];
+		const uint32_t Lmid = lights.mirrorId[li];
 
 		for (int s = strip_lo; s <= strip_hi; ++s) {
 			TileLights &tl = g_stripLights[s];
@@ -526,6 +545,7 @@ static void buildStripLightLists(int numStrips, int stripHeight, int yres,
 				tl.cosInner[idx] = Lci;
 				tl.cosOuter[idx] = Lco;
 				tl.isSpot[idx]   = Lis;
+				tl.mirrorId[idx] = Lmid;
 			}
 		}
 	}
@@ -551,6 +571,7 @@ static void buildStripLightLists(int numStrips, int stripHeight, int yres,
 			tl.cosInner[p] = -2.0f;
 			tl.cosOuter[p] = -2.0f;
 			tl.isSpot[p]   = 0u;
+			tl.mirrorId[p] = 0xffffffffu;
 		}
 		tl.paddedCount = pad_to;
 		// Strip Z bounds: not used by transparent kernel (depth is
@@ -624,6 +645,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
                                       float nx, float ny, float nz,
                                       float vx, float vy, float vz,
                                       float matSpec,
+                                      uint32_t pmid,
                                       float &sB, float &sG, float &sR) {
 	__m256 vx_v   = _mm256_set1_ps(x);
 	__m256 vy_v   = _mm256_set1_ps(y);
@@ -637,6 +659,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 	__m256 vSpec  = _mm256_set1_ps(matSpec);
 	__m256 vZero  = _mm256_setzero_ps();
 	__m256 vOne   = _mm256_set1_ps(1.0f);
+	__m256i pmid_v = _mm256_set1_epi32((int)pmid);
 	__m256 accB   = _mm256_setzero_ps();
 	__m256 accG   = _mm256_setzero_ps();
 	__m256 accR   = _mm256_setzero_ps();
@@ -650,6 +673,11 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		__m256 lcr = _mm256_load_ps(tl.colR   + slot);
 		__m256 lr2 = _mm256_load_ps(tl.range2 + slot);
 		__m256 lrr = _mm256_load_ps(tl.rRange + slot);
+		// Mirror filter: contrib only lights whose mirrorId matches.
+		__m256i lmid = _mm256_load_si256(
+			(const __m256i*)(tl.mirrorId + slot));
+		__m256 mirrorMask = _mm256_castsi256_ps(
+			_mm256_cmpeq_epi32(lmid, pmid_v));
 
 		__m256 wx = _mm256_sub_ps(lpx, vx_v);
 		__m256 wy = _mm256_sub_ps(lpy, vy_v);
@@ -665,7 +693,8 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		__m256 mask_dot   = _mm256_cmp_ps(dot,  vZero, _CMP_GE_OQ);
 		__m256 mask_pos   = _mm256_cmp_ps(len2, vZero, _CMP_GT_OQ);
 		__m256 mask       = _mm256_and_ps(mask_range,
-		                     _mm256_and_ps(mask_dot, mask_pos));
+		                     _mm256_and_ps(mask_dot,
+		                      _mm256_and_ps(mask_pos, mirrorMask)));
 
 		__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
 		__m256 lenInv    = _mm256_rsqrt_ps(safe_len2);
@@ -1052,6 +1081,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;  // pixel not touched by Mekalele
 
+			// Per-pixel mirror id (0 = original world, >0 = mirror N's
+			// reflected world). The light-loop filters below skip any
+			// omni whose mirrorId disagrees, so clone surfaces only
+			// receive light from their own cloned omnis. If the mirror
+			// id plane was never allocated (no mirrors in the scene),
+			// pmid stays 0 and the filter is a no-op for the originals.
+			const uint32_t pmid = gb.mirrorId.empty()
+			    ? 0u : uint32_t(gb.mirrorId[i]);
+
 			// Decode mat32 → matID, miplevel, swizzledUV.
 			const uint32_t mat32 = gb.txtr[i];
 			const uint32_t miplevel    = (mat32 >> 28) & 0xF;
@@ -1363,6 +1401,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					__m256 accG   = _mm256_setzero_ps();
 					__m256 accR   = _mm256_setzero_ps();
 
+					__m256i pmid_v_main = _mm256_set1_epi32((int)pmid);
 					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
 						__m256 lpx = _mm256_load_ps(tl.posX   + slot);
 						__m256 lpy = _mm256_load_ps(tl.posY   + slot);
@@ -1372,6 +1411,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						__m256 lcr = _mm256_load_ps(tl.colR   + slot);
 						__m256 lr2 = _mm256_load_ps(tl.range2 + slot);
 						__m256 lrr = _mm256_load_ps(tl.rRange + slot);
+						// Mirror filter: only lights whose mirrorId matches
+						// the pixel's contribute. Padded slots carry
+						// 0xffffffff so they never match (pmid is < 256).
+						__m256i lmid = _mm256_load_si256(
+							(const __m256i*)(tl.mirrorId + slot));
+						__m256 mirrorMask = _mm256_castsi256_ps(
+							_mm256_cmpeq_epi32(lmid, pmid_v_main));
 
 						__m256 wx = _mm256_sub_ps(lpx, vx_v);
 						__m256 wy = _mm256_sub_ps(lpy, vy_v);
@@ -1387,7 +1433,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						__m256 mask_dot   = _mm256_cmp_ps(dot,  vZero, _CMP_GE_OQ);
 						__m256 mask_pos   = _mm256_cmp_ps(len2, vZero, _CMP_GT_OQ);
 						__m256 mask = _mm256_and_ps(mask_range,
-						               _mm256_and_ps(mask_dot, mask_pos));
+						               _mm256_and_ps(mask_dot,
+						                _mm256_and_ps(mask_pos, mirrorMask)));
 
 						__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
 						__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
@@ -1492,24 +1539,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					if (wantSpecular) {
 						switch (Mat->Glossiness) {
 							case 4:
-								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 8:
-								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 16:
-								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 32:
-								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 48:
-								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 64:
-								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							case 128:
-								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, sB,sG,sR); break;
+								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
 							default:
 								// Unknown gloss — defensive scalar libm path
 								// (matches old behavior). If this fires on a
 								// hot scene, add a `case` for the value.
 								for (int n = 0; n < tl.count; ++n) {
+									if (tl.mirrorId[n] != pmid) continue;
 									const float Lpx = tl.posX[n];
 									const float Lpy = tl.posY[n];
 									const float Lpz = tl.posZ[n];
@@ -1563,6 +1611,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// used by cube shadow sampling for any omni with
 					// cubeShadowIdx >= 0.
 					for (int n = 0; n < tl.count; ++n) {
+						if (tl.mirrorId[n] != pmid) continue;
 						const float Lpx = tl.posX[n];
 						const float Lpy = tl.posY[n];
 						const float Lpz = tl.posZ[n];
@@ -1918,6 +1967,11 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (mat32 == 0xFFFFFFFFu) continue;  // no transparent front
 			const word zEnc = xparZ[i];
 			if (zEnc == 0) continue;
+			// Per-pixel mirror id from the transparent layer's plane.
+			// Used to gate the light loops below (clone surfaces should
+			// see only their own mirror's omnis).
+			const uint32_t pmid = gbX.mirrorId.empty()
+			    ? 0u : uint32_t(gbX.mirrorId[i]);
 			// Opaque-Z occlusion: if opaque ZPage16 has a larger z_candidate
 			// at this pixel, the opaque surface is CLOSER to camera than
 			// the transparent we wrote into xpr. Reject the transparent —
@@ -1997,6 +2051,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				// isWater guard.
 			} else if (lightAll) {
 				for (int n = 0; n < allCount; ++n) {
+					if (vlAll->mirrorId[n] != pmid) continue;
 					const float wx = vlAll->posX[n] - x;
 					const float wy = vlAll->posY[n] - y;
 					const float wz = vlAll->posZ[n] - z;
@@ -2041,6 +2096,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				}
 			} else {
 				for (int n = 0; n < tlTile.count; ++n) {
+					if (tlTile.mirrorId[n] != pmid) continue;
 					const float wx = tlTile.posX[n] - x;
 					const float wy = tlTile.posY[n] - y;
 					const float wz = tlTile.posZ[n] - z;
@@ -2296,6 +2352,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	alignas(32) float    lane_gloss[8];
 	alignas(32) uint32_t lane_wantSpec[8];
 	alignas(32) uint32_t lane_isWater[8];
+	// Per-lane mirror id, widened uint8→uint32 once per 8-pixel block.
+	// The omni loop builds a per-lane mask against broadcast(tl.mirrorId[n]).
+	alignas(32) uint32_t lane_mirrorId[8];
 
 	for (int py = y1; py < y2; ++py) {
 		// vec body: groups of 8 pixels
@@ -2313,6 +2372,16 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 
 		for (; px < x2; px += 8) {
 			const size_t i = size_t(py) * XRes + px;
+			// Per-lane mirror id snapshot for this 8-pixel block. Used
+			// by the omni loop below to mask off lights whose mirrorId
+			// disagrees with the lane's. Plane is byte-sized, widened
+			// to uint32 here so cmpeq lines up with tl.mirrorId.
+			if (gb.mirrorId.empty()) {
+				for (int k = 0; k < 8; ++k) lane_mirrorId[k] = 0u;
+			} else {
+				for (int k = 0; k < 8; ++k)
+					lane_mirrorId[k] = uint32_t(gb.mirrorId[i + k]);
+			}
 
 			// Load 8 lanes of Z (u16 → s32 zero-extend → float for the
 			// cmp; later use the int form too)
@@ -2588,6 +2657,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// Per-omni accumulate. Each omni broadcast, 8 pixels in vec.
 			const bool profNoLights = fds::FeatureFlags::prof_no_lights();
 			const int omniLoopN = (profNoLights || !anyVecLane) ? 0 : tl.count;
+			__m256i lane_mirror_v = _mm256_load_si256((const __m256i*)lane_mirrorId);
 			for (int n = 0; n < omniLoopN; ++n) {
 				__m256 wx = _mm256_sub_ps(_mm256_set1_ps(tl.posX[n]), xv);
 				__m256 wy = _mm256_sub_ps(_mm256_set1_ps(tl.posY[n]), yv);
@@ -2601,8 +2671,15 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				__m256 mask_dot   = _mm256_cmp_ps(dot,  _mm256_setzero_ps(), _CMP_GE_OQ);
 				__m256 mask_range = _mm256_cmp_ps(len2, _mm256_set1_ps(tl.range2[n]), _CMP_LE_OQ);
 				__m256 mask_pos   = _mm256_cmp_ps(len2, _mm256_setzero_ps(), _CMP_GT_OQ);
+				// Per-lane mirror filter: light's mirrorId must equal
+				// the pixel's. tl.mirrorId[n] is the light's id; lane_
+				// mirror_v holds the 8 lanes' pixel ids.
+				__m256 mirrorMask = _mm256_castsi256_ps(
+					_mm256_cmpeq_epi32(lane_mirror_v,
+					                    _mm256_set1_epi32((int)tl.mirrorId[n])));
 				__m256 omni_lane  = _mm256_and_ps(_mm256_and_ps(mask_dot, mask_range),
-				                                   _mm256_and_ps(mask_pos, omniMaskF));
+				                                   _mm256_and_ps(_mm256_and_ps(mask_pos, omniMaskF),
+				                                                  mirrorMask));
 				// safe_len2: 1.0 when masked off
 				__m256 safe_len2 = _mm256_blendv_ps(_mm256_set1_ps(1.0f), len2, omni_lane);
 				__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
@@ -2713,11 +2790,16 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						vzd = -zs * vlenInv;
 					}
 					const bool isWater = lane_isWater[k] != 0;
+					// Per-lane mirror id: skip lights belonging to a
+					// different mirror context than this pixel's.
+					const uint32_t pmid_s = gb.mirrorId.empty()
+					    ? 0u : uint32_t(gb.mirrorId[i + k]);
 					if (!isWater) {
 						const float matDiff = lane_diffuse[k];
 						const float matSpec = lane_specular[k];
 						const float gloss   = lane_gloss[k];
 						for (int n = 0; n < tl.count; ++n) {
+							if (tl.mirrorId[n] != pmid_s) continue;
 							float wxs = tl.posX[n] - xs;
 							float wys = tl.posY[n] - ys;
 							float wzs = tl.posZ[n] - zs;
@@ -2847,6 +2929,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const size_t i = size_t(py) * XRes + px;
 			const word zEnc = ZPage16[i];
 			if (zEnc == 0) continue;
+
+			// Per-pixel mirror id — used by the wave-2 fallback shading
+			// to filter lights matching the pixel's mirror context.
+			const uint32_t pmid = gb.mirrorId.empty()
+			    ? 0u : uint32_t(gb.mirrorId[i]);
 
 			const uint32_t mat32  = gb.txtr[i];
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
@@ -3077,6 +3164,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			}
 
 			for (int n = 0; !isWater && n < tl.count; ++n) {
+				if (tl.mirrorId[n] != pmid) continue;
 				const float wx = tl.posX[n] - x;
 				const float wy = tl.posY[n] - y;
 				const float wz = tl.posZ[n] - z;
@@ -3309,6 +3397,9 @@ void Render_DeferredLighting() {
 		lights.haloRange     [numLights] = haloRange;
 		lights.haloRange2    [numLights] = haloRange * haloRange;
 		lights.haloRRange    [numLights] = (haloRange > 0.0f) ? 1.0f / haloRange : 0.0f;
+		// Mirror id: 0 for originals, 1..N for clones from GreetsMirror.
+		// Surface lighting kernels gate per pixel against gb.mirrorId.
+		lights.mirrorId      [numLights] = O->mirrorId;
 		++numLights;
 	}
 

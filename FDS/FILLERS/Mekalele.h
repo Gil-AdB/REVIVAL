@@ -248,6 +248,14 @@ struct TileRasterizerCtx {
 	//          normal path. Controlled by the rasterizer dispatch (see
 	//          MekaleleMaskOnly), not by a separate field on the ctx.
 	u8 mirrorTag = 0;
+	// Per-face mirror owner id, broadcast from Face::ownerMirrorId.
+	// The commit path writes this byte into gb.mirrorId for every
+	// pixel that survives p_mask, so the post-rasterization plane
+	// reflects which mirror context actually won at each pixel —
+	// foreground commits land 0 over the 2D pre-stamp, clones land
+	// their m.id. Read by the deferred lighting kernel's per-pixel
+	// light filter.
+	u8 faceOwnerMirrorId = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -649,6 +657,15 @@ struct TileRasterizer {
 							_mm_storeu_si128((__m128i*)span.shadowMatID,
 								_mm_set1_epi16(int16_t(packedShadowMatId)));
 						}
+						if (span.mirrorId) {
+							// 8 bytes (one per lane). The committed value
+							// overrides the 2D pre-stamped mask at every
+							// pixel Mekalele actually rasterizes, so the
+							// post-raster plane is z-correct face
+							// ownership for the deferred light filter.
+							_mm_storel_epi64((__m128i*)span.mirrorId,
+								_mm_set1_epi8((char)ctx.faceOwnerMirrorId));
+						}
 					} else {
 						alignas(32) int32_t mask_l[8];
 						Vec8i(p_mask).store_a(mask_l);
@@ -676,6 +693,9 @@ struct TileRasterizer {
 							}
 							if (wantShadowMatId) {
 								span.shadowMatID[lane] = packedShadowMatId;
+							}
+							if (span.mirrorId) {
+								span.mirrorId[lane] = ctx.faceOwnerMirrorId;
 							}
 						}
 					}
@@ -936,6 +956,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.lmFaceIdx = lmFaceIdx,
 		.shadowMatId = shadowMatId,
 		.mirrorTag = F->mirrorMaskTag,
+		.faceOwnerMirrorId = F->ownerMirrorId,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
