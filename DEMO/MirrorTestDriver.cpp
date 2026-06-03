@@ -55,10 +55,16 @@ Scene *BuildInteractiveMirrorTestScene() {
     Material *matYellow = b.AddMaterial("yellow_mat", yellowTex,
                                          {224, 224, 32, 255}, 0);
 
-    // Floor: y=0, 20x20.
+    // Floor: y=0, 20x20. Winding wraps CCW as viewed from ABOVE so the
+    // cross-product points +Y (up). The previous winding had it pointing
+    // -Y, which made the floor back-facing for any camera above y=0 —
+    // invisible in the actual scene, and visible AS A REFLECTED PLANE
+    // in the mirror because the clone's normal kept the same sign and
+    // the mirror viewpoint happened to put the camera on the visible
+    // side.
     const Vector floorV[4] = {
-        Vector(-10.0f, 0.0f, -10.0f), Vector( 10.0f, 0.0f, -10.0f),
-        Vector( 10.0f, 0.0f,  10.0f), Vector(-10.0f, 0.0f,  10.0f),
+        Vector(-10.0f, 0.0f, -10.0f), Vector(-10.0f, 0.0f,  10.0f),
+        Vector( 10.0f, 0.0f,  10.0f), Vector( 10.0f, 0.0f, -10.0f),
     };
     b.AddQuad("floor", floorV, matFloor);
 

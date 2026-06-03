@@ -636,10 +636,16 @@ void Dynamic_Camera()
 {
 
   // Effective per-tick speeds. CamSpeedMult is the user-controlled `, .`
-  // dial that scales both translation and rotation together; the bases
-  // come from per-scene auto-cal (Vel_Speed) and the fixed Rot_Speed_Base.
-  const float Vel_Step    = Vel_Speed     * CamSpeedMult;
-  const float Rot_Step    = Rot_Speed_Base * CamSpeedMult;
+  // dial that scales both translation and rotation together.
+  // Translation comes from per-scene auto-cal (Vel_Speed); rotation is
+  // tied to it via a fixed scalar so that big scenes (city, far FZP)
+  // don't end up with fast translation + the old hardcoded slow turn
+  // rate. 0.05 reproduces the legacy default (~0.004 rad/tick) at
+  // FZP=200 (Vel_Speed ≈ 0.079), so existing scene feel is preserved
+  // while big scenes get proportionally faster rotation.
+  const float Vel_Step    = Vel_Speed       * CamSpeedMult;
+  const float Rot_Step    = Vel_Speed * 0.05f * CamSpeedMult;
+  (void)Rot_Speed_Base;  // legacy fixed base, kept as a fallback constant.
   // Aliases so the existing per-key Vel_Speed / Rot_Speed references
   // below keep reading from the effective per-tick value with no
   // mass-rename — local const shadows the file-scope global.
