@@ -455,14 +455,14 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // and the user sees through. Luminosity > 1 saturates the lit
     // value at the kernel's 250 clamp, giving full BaseCol×0.98 per
     // pixel — stable across strips since Diff=0.
-    // No tint: alpha=0 so the wall contributes nothing on top of the
-    // reflected backdrop. Luminosity/Diffuse/Specular all 0 so the
-    // wall's surface lighting can't bleed in either. The wall face
-    // still rasterizes (it has to, for the mask stamp + xpar-Z bound)
-    // but its composition contribution is zero — what the viewer sees
-    // is whatever clones rendered behind it through the mirrorMask
-    // gate.
-    constexpr float kMirrorAlpha       = 0.0f;
+    // No tint. The wall face still rasterises into xpar (for the
+    // mask stamp + xparZ bound) but the deferred transparent kernel
+    // skips its composition: kMirrorAlpha = -1 is the sentinel for
+    // "preserve dst, contribute nothing." Plain XparBlendAlpha = 0
+    // would NOT work because the kernel routes alpha==0 to the
+    // legacy `litRGB + dst/2` formula and ends up halving the
+    // reflected clones behind the wall.
+    constexpr float kMirrorAlpha       = -1.0f;
     constexpr float kMirrorSpecular    = 0.0f;
     constexpr float kMirrorDiffuse     = 0.0f;
     constexpr float kMirrorLuminosity  = 0.0f;

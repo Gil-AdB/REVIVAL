@@ -1988,6 +1988,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (matID >= ctx.matTable.count) continue;
 			Material *Mat = ctx.matTable.data[matID];
 			if (!Mat || !Mat->Txtr) continue;
+			// Negative XparBlendAlpha sentinel: skip this pixel
+			// entirely so out[i] (= the opaque shading already written
+			// by the opaque pass) is preserved. Used by mirror walls
+			// — the wall rasterised into xpar only to bound the mask
+			// + xparZ, but contributes no colour and must NOT pass
+			// through the legacy `litRGB + dst/2` composition (which
+			// halves the reflected clones behind it).
+			if (Mat->XparBlendAlpha < 0.0f) continue;
 
 			// Resolved 16-bit ShadowMatID — see scalar path comment above.
 			// The xpar G-buffer (gbX) does not currently allocate the
