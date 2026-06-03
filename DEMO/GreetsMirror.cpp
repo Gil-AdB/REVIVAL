@@ -441,11 +441,17 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     //     VPage is ~2 units — a faint cool tint over the reflection).
     //   - BaseCol picked cool/neutral; the magnitude doesn't matter
     //     much since we're at 5% alpha + Diff=0.
-    constexpr float kMirrorAlpha       = 0.05f;
+    // Alpha is high enough that the silver tint is visible over a
+    // black/empty backdrop and obviously dims a bright reflection,
+    // but still low enough that the underlying reflection dominates
+    // and the user sees through. Luminosity > 1 saturates the lit
+    // value at the kernel's 250 clamp, giving full BaseCol×0.98 per
+    // pixel — stable across strips since Diff=0.
+    constexpr float kMirrorAlpha       = 0.15f;
     constexpr float kMirrorSpecular    = 0.0f;
     constexpr float kMirrorDiffuse     = 0.0f;
-    constexpr float kMirrorLuminosity  = 0.15f;
-    const Color     kMirrorSilver      = { 60.0f, 60.0f, 70.0f, 255.0f };
+    constexpr float kMirrorLuminosity  = 2.0f;
+    const Color     kMirrorSilver      = { 140.0f, 140.0f, 170.0f, 255.0f };
     int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
