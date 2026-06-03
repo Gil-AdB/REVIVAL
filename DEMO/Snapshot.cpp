@@ -3747,22 +3747,13 @@ void MT_renderOne(Scene *sc, const char *label, const char *outPath, int xres, i
     std::vector<fds::Mirror> mirrors;
     if (!fds::FeatureFlags::mirrortest_skip_mirror()) {
         std::fprintf(stderr, "[MT-RENDER %s] BuildMirror...\n", label);
-        // Both materials may exist when the scene was built with two
-        // mirrors (recursive-mirror snapshot). Try both, then run
-        // BuildCompoundMirrors so depth-1 recursive reflections appear
-        // in the rendered PPM the same way they do in the interactive
-        // --scene-mirrortest path.
-        fds::Mirror mmA = fds::BuildMirror(sc, "mirror_opaque_mat");
-        if (mmA.cloneMesh) mirrors.push_back(std::move(mmA));
-        fds::Mirror mmB = fds::BuildMirror(sc, "mirror_xpar_mat");
-        if (mmB.cloneMesh) mirrors.push_back(std::move(mmB));
-        if (!mirrors.empty()) {
-            const int compoundAdded = fds::BuildCompoundMirrors(sc, mirrors);
-            if (compoundAdded > 0) {
-                std::fprintf(stderr, "[MT-RENDER %s] %d compound mirror(s)\n",
-                             label, compoundAdded);
-            }
-        }
+        // Single mirror per snapshot run — original behaviour. (Depth-1
+        // recursive via BuildCompoundMirrors needs portal/peel
+        // rendering before it lands; the unused builder is kept for
+        // that work.)
+        fds::Mirror mm = fds::BuildMirror(sc, "mirror_opaque_mat");
+        if (!mm.cloneMesh) mm = fds::BuildMirror(sc, "mirror_xpar_mat");
+        if (mm.cloneMesh) mirrors.push_back(std::move(mm));
         polys = 0;
         for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) polys += T->FIndex;
         fds::g_mainFaces.resize(polys * 2 + 16);

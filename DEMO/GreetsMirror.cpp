@@ -634,14 +634,20 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // root cause of greets's persistent yellow saturation inside
         // the teleporter mirror.
         clone->mirrorId = m.id;
-        // (The old 0.5x dim was a pre-filter hack against double-
-        // lighting saturation: clone surfaces saw both originals AND
-        // clones at full intensity, so halving brought the totals back
-        // to ~1x. With the per-pixel mirror filter the clone pixel
-        // only sees clone omnis, so the original intensity is the
-        // correct intensity — keeping the halving made test-scene
-        // reflections look ~25% as bright as the originals and the
-        // back-mirror was nearly black.)
+        // Halve the clone omni intensity. Although the per-pixel
+        // mirror filter is in place (so clones aren't getting BOTH
+        // original + clone omni contributions anymore), greets has
+        // ~15 nearby warm omnis and per-pixel diffuse + specular
+        // accumulations saturate the lB/sB channels at 250 — the
+        // teleporter mirror reads as flat bright silver instead of
+        // a recognisable reflection. The 0.5x leaves headroom for
+        // many simultaneous omnis and matches the previously-tuned
+        // greets look. Scenes with one or two omnis (test scene)
+        // get visibly dimmer reflections; a per-scene knob or HDR
+        // accumulator is the proper long-term fix.
+        clone->L.R *= 0.5f;
+        clone->L.G *= 0.5f;
+        clone->L.B *= 0.5f;
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;
@@ -1173,9 +1179,6 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     // skip stamping the mask for any mirror whose viewer is on the
     // back side (plane sign N·C + d <= 0); with no mask, Mekalele
     // rejects every clone pixel for that mirror.
-    const Vector *camPos = nullptr;
-    if (sc->CameraHead) camPos = &sc->CameraHead->ISource;
-    if (::View) camPos = &::View->ISource;  // FrameState alias; active camera
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
         // Compound mirrors do not stamp their own pre-mask. Their wall
@@ -1186,23 +1189,18 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
         // sub-area (the bug that hid objects "behind" the in-mirror
         // mirror).
         if (m.parentMirrorId != 0) continue;
-        if (camPos) {
-            // Base mirror: viewer must be in front of the mirror's
-            // own plane. Compound mirror: viewer must be in front of
-            // the PARENT (outer) mirror's plane — the compound only
-            // exists inside the parent's reflected view, so if the
-            // parent isn't visible neither is the compound.
-            const MirrorPlane &gate =
-                (m.parentMirrorId != 0 && m.parentPlane.valid)
-                ? m.parentPlane : m.plane;
-            if (gate.valid) {
-                const float side = gate.N.x * camPos->x
-                                 + gate.N.y * camPos->y
-                                 + gate.N.z * camPos->z
-                                 + gate.d;
-                if (side <= 0.0f) continue;  // viewer behind gate
-            }
-        }
+        // (We used to gate stamping on `camPos · plane.N + plane.d > 0`
+        // to suppress mirrors whose plane the viewer was behind, since
+        // back-side clones were leaking through Mekalele's screen-
+        // footprint mask. Greets's P_TEXT screens cluster around an
+        // AVERAGED plane whose normal disagrees with most individual
+        // screens, so this gate was failing for ~every P_TEXT screen
+        // and the user only got a reflection on the one screen
+        // coplanar with the cluster average — and even then only
+        // when the camera crossed outside the room bounds. Dropping
+        // the gate lets all of greets's P_TEXT clones stamp; back-
+        // side ghost-reflections need a different fix (per-cluster
+        // mirrors, or back-face culling on clone meshes).)
         for (const Face *F : m.wallFaces) {
             if (!F || !F->A || !F->B || !F->C) continue;
             // Clip the (A,B,C) triangle in view-space against z >= kClipZ.
