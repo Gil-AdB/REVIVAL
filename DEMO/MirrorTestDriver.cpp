@@ -370,10 +370,11 @@ struct MirrorTestScene : SceneDriver {
                 // suppresses the mask entirely so Mekalele rejects every
                 // clone pixel for this mirror.
                 { Vector( 0.0f, 3.0f,  9.0f), Vector( 0.0f, 3.0f, -2.0f), "behind" },
-                // Look at the half-silvered SIDE mirror from inside the
+                // Look at the half-silvered SIDE mirror from across the
                 // room. Side mirror is at x=-7 with N=(1,0,0); standing
-                // at x=0 puts the viewer firmly in front of it.
-                { Vector( 0.0f, 3.0f,  0.0f), Vector(-7.0f, 3.0f,  0.0f), "side-xpar" },
+                // at x=+5 keeps the frame well inside the field of view
+                // so you can see what's clone vs what's room.
+                { Vector( 5.0f, 3.0f,  0.0f), Vector(-7.0f, 3.0f,  0.0f), "side-xpar" },
             };
             for (const Pose &p : poses) {
                 char path[64];

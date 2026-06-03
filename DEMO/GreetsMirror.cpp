@@ -26,6 +26,25 @@ extern void Compute_FaceVertexIndices(TriMesh *T);
 namespace fds {
 namespace {
 
+// A previous BuildMirror call leaves its clone mesh wired into
+// sc->ObjectHead with Obj->Name starting "__mirrorClone_". Any later
+// BuildMirror call must skip those:
+// - Cloning them would produce "reflections of reflections" that
+//   don't correspond to any physical geometry and end up rendering
+//   at unexpected screen positions (the user's "objects appearing
+//   out of bounds" complaint).
+// - The wall-detection loop would match the cloned mirror panels
+//   (same material name, same normal after reflection through a
+//   parallel plane) and stamp the mirrorId mask at the CLONED
+//   panel's screen position — covering pixels far outside the
+//   actual wall's footprint.
+inline bool isCloneMesh(Object *Obj) {
+    constexpr const char *kPrefix = "__mirrorClone_";
+    constexpr size_t kPrefixLen = 14;
+    return Obj && Obj->Name
+        && std::strncmp(Obj->Name, kPrefix, kPrefixLen) == 0;
+}
+
 // Local reflection helpers. Captured by lambdas that need them.
 inline Vector reflectPointAcross(const Vector &p, const Vector &N, float d) {
     const float k = 2.0f * (N.x*p.x + N.y*p.y + N.z*p.z + d);
@@ -244,6 +263,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     DWord totalVerts = 0, totalFaces = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
+        if (isCloneMesh(Obj)) continue;
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Verts || !T->Faces) continue;
         totalVerts += T->VIndex;
@@ -292,6 +312,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     Vector bbMax = {-1e30f,-1e30f,-1e30f};
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
+        if (isCloneMesh(Obj)) continue;  // skip prior mirror clones
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Verts || !T->Faces) continue;
         const DWord vStart = vOfs;
@@ -371,7 +392,10 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     {
         // Name suffix from the wall material so multiple mirrors get
         // distinct names in diagnostics ("mirror_teleporter" etc.).
-        std::string nm = std::string("mirror_") + (label?label:"x");
+        // Prefix is matched by isCloneMesh() to skip prior clones in
+        // subsequent BuildMirror calls. Use an underscore + bracket
+        // prefix that's unlikely to collide with user-authored names.
+        std::string nm = std::string("__mirrorClone_") + (label?label:"x");
         MObj->Name = (char*)std::malloc(nm.size() + 1);
         std::strcpy(MObj->Name, nm.c_str());
     }
@@ -415,6 +439,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;
+        if (isCloneMesh(Obj)) continue;  // skip prior mirror clones
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Faces) continue;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
