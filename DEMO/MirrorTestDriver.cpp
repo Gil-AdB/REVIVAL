@@ -8,6 +8,7 @@
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 
 #include <cstdio>
 
@@ -139,8 +140,70 @@ struct MirrorTestScene : SceneDriver {
             "ESC to exit.\n");
     }
 
+    // Render the scene one frame at the given camera pose, then dump
+    // VPage to a PPM. Used by the multi-view sanity dump path.
+    void renderPoseToPPM(Vector eye, Vector lookAt, const char *path) {
+        FC.ISource = eye;
+        Vector lookCopy = lookAt;
+        Kick_Camera(&eye, &lookCopy, 0.0f, FC.Mat);
+        CalcPersp(&FC);
+        View = &FC;
+        std::memset(VPage, 0, PageSize);
+        std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+        Animate_Objects(sc, View);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        fds::UpdateAllMirrors(sc, mirrors);
+        fds::StampMirrorMasks(sc, mirrors);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);
+        }
+        std::FILE *f = std::fopen(path, "wb");
+        if (!f) return;
+        const int xr = (int)XRes, yr = (int)YRes;
+        std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+        std::vector<unsigned char> row(xr * 3);
+        for (int y = 0; y < yr; ++y) {
+            const dword *src = (const dword*)((const byte*)VPage
+                              + y * (int)VESA_BPSL);
+            for (int x = 0; x < xr; ++x) {
+                dword px = src[x];
+                row[x*3+0] = (px >> 16) & 0xFF;
+                row[x*3+1] = (px >>  8) & 0xFF;
+                row[x*3+2] = (px      ) & 0xFF;
+            }
+            std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
+        std::fprintf(stderr,
+            "[MIRRORTEST multi-dump] eye=(%.1f,%.1f,%.1f) -> %s\n",
+            eye.x, eye.y, eye.z, path);
+    }
+
     bool tick() override {
         if (Keyboard[ScESC] || Keyboard[ScBackSpace]) return false;
+        // Multi-view sanity dump: ignores keyboard, renders 6 preset poses,
+        // exits. Pose set chosen so the mirror panel is in view from
+        // distinct angles (front, side, high, low, close, far) — eyeball
+        // each to confirm the reflection lands sensibly.
+        if (fds::FeatureFlags::mirrortest_multi_dump()) {
+            struct Pose { Vector eye, lookAt; const char *tag; };
+            const Pose poses[] = {
+                { Vector(-3.5f, 3.0f, -3.0f), Vector( 0.0f, 3.0f,  5.0f), "default" },
+                { Vector( 0.0f, 3.0f, -4.0f), Vector( 0.0f, 3.0f,  5.0f), "front" },
+                { Vector(-7.0f, 3.0f,  1.0f), Vector( 0.0f, 3.0f,  5.0f), "left-side" },
+                { Vector( 0.0f, 6.5f, -3.0f), Vector( 0.0f, 2.0f,  5.0f), "high" },
+                { Vector( 0.0f, 1.0f, -3.0f), Vector( 0.0f, 4.0f,  5.0f), "low" },
+                { Vector(-1.5f, 3.0f,  2.0f), Vector( 0.0f, 3.0f,  5.0f), "close" },
+            };
+            for (const Pose &p : poses) {
+                char path[64];
+                std::snprintf(path, sizeof(path), "/tmp/mt_view_%s.ppm", p.tag);
+                renderPoseToPPM(p.eye, p.lookAt, path);
+            }
+            return false;
+        }
 
         prof.beginFrame();
         prof.enter(PROF_ZCLR);

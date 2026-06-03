@@ -1104,6 +1104,13 @@ void CodeEntry(void *var)
 		Run_MirrorTest();
 		goto demo_exit;
 	}
+	if (fds::FeatureFlags::scene_greets()) {
+		// Same join-first ordering as scene_mirrortest — Initialize_Greets
+		// must finish before Run_Greets's render loop touches g_mainFaces.
+		if (t1.joinable()) t1.join();
+		Run_Greets();
+		goto demo_exit;
+	}
 	if (!skipToFountain) {
 	Run_Glato();
 
