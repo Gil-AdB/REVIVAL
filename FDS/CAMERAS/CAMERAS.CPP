@@ -604,7 +604,13 @@ float Vel_Speed   = 0.080;
 // (rad/key-tick) and shouldn't auto-scale with world size. Both
 // Vel_Speed and Rot_Speed_Base are multiplied by CamSpeedMult at use
 // site so the `, .` keys scale BOTH proportionally.
-static float Rot_Speed_Base = 0.002f;
+static float Rot_Speed_Base = 0.004f;
+// Independent rotation-speed dial — adjusted by `K` (slower) / `L`
+// (faster) inside Dynamic_Camera. Multiplies Rot_Speed_Base on top of
+// the shared `, .` CamSpeedMult, letting you slow rotation without
+// also slowing translation when a scene's auto-cal makes the default
+// rotation feel too fast.
+static float RotSpeedMult   = 1.0f;
 static float CamSpeedMult   = 1.0f;
 
 // Per-scene auto-calibration. Sets Vel_Speed from scene depth range and
@@ -624,6 +630,7 @@ void Calibrate_FreeCamera_ForScene(float sceneFZP, Camera *sceneCamera)
     if (Vel_Speed < 1e-4f) Vel_Speed = 1e-4f;
   }
   CamSpeedMult = 1.0f;
+  RotSpeedMult = 1.0f;
   if (sceneCamera) {
     FC.ISource = sceneCamera->ISource;
     Matrix_Copy(FC.Mat, sceneCamera->Mat);
@@ -639,7 +646,7 @@ void Dynamic_Camera()
   // dial that scales both translation and rotation together; the bases
   // come from per-scene auto-cal (Vel_Speed) and the fixed Rot_Speed_Base.
   const float Vel_Step    = Vel_Speed     * CamSpeedMult;
-  const float Rot_Step    = Rot_Speed_Base * CamSpeedMult;
+  const float Rot_Step    = Rot_Speed_Base * CamSpeedMult * RotSpeedMult;
   // Aliases so the existing per-key Vel_Speed / Rot_Speed references
   // below keep reading from the effective per-tick value with no
   // mass-rename — local const shadows the file-scope global.
@@ -719,6 +726,10 @@ void Dynamic_Camera()
   // the dial via CamSpeedMult=1.0 in Calibrate_FreeCamera_ForScene.
   if (Keyboard[ScComma])  CamSpeedMult /= 1.1f;
   if (Keyboard[ScPeriod]) CamSpeedMult *= 1.1f;
+  // Rotation-only dial: K slows rotation, L speeds it up. Independent
+  // of the , . dial so you can keep flying fast while taming turn rate.
+  if (Keyboard[ScK]) RotSpeedMult /= 1.1f;
+  if (Keyboard[ScL]) RotSpeedMult *= 1.1f;
 
 /*  if (Keyboard[ScCtrl])
     Fire_LASER();*/

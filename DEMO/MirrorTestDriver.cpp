@@ -54,6 +54,13 @@ Scene *BuildInteractiveMirrorTestScene() {
     Texture *yellowTex = b.AddSolidColorTexture(8, 8, 0xFFE0E020u);
     Material *matYellow = b.AddMaterial("yellow_mat", yellowTex,
                                          {224, 224, 32, 255}, 0);
+    // Frame material — opaque bright orange. Used for the visual
+    // border around each mirror panel so the mirror boundaries are
+    // unmistakable; whatever's inside the frame is mirror surface,
+    // everything outside is room.
+    Texture *frameTex = b.AddSolidColorTexture(8, 8, 0xFFFF8000u);
+    Material *matFrame = b.AddMaterial("frame_mat", frameTex,
+                                        {255, 128, 0, 255}, 0);
 
     // Floor: y=0, 20x20. Winding wraps CCW as viewed from ABOVE so the
     // cross-product points +Y (up). The previous winding had it pointing
@@ -78,6 +85,31 @@ Scene *BuildInteractiveMirrorTestScene() {
         Vector(-3.0f, 6.0f, 5.0f), Vector( 3.0f, 6.0f, 5.0f),
     };
     b.AddQuad("mirror_panel", mirrorV, matMirror);
+    // Orange frame around the back mirror. Four thin coplanar strips at
+    // z=5 surrounding the mirror quad. Same CCW winding as the mirror
+    // panel so the frame's outward normal matches (N=(0,0,-1) toward the
+    // room).
+    constexpr float bF = 0.3f;  // back-mirror frame thickness
+    const Vector bm_top[4] = {
+        Vector( 3.0f+bF, 6.0f, 5.0f), Vector(-3.0f-bF, 6.0f, 5.0f),
+        Vector(-3.0f-bF, 6.0f+bF, 5.0f), Vector( 3.0f+bF, 6.0f+bF, 5.0f),
+    };
+    const Vector bm_bot[4] = {
+        Vector( 3.0f+bF, -bF, 5.0f), Vector(-3.0f-bF, -bF, 5.0f),
+        Vector(-3.0f-bF, 0.0f, 5.0f), Vector( 3.0f+bF, 0.0f, 5.0f),
+    };
+    const Vector bm_left[4] = {
+        Vector(-3.0f,    0.0f, 5.0f), Vector(-3.0f-bF, 0.0f, 5.0f),
+        Vector(-3.0f-bF, 6.0f, 5.0f), Vector(-3.0f,    6.0f, 5.0f),
+    };
+    const Vector bm_right[4] = {
+        Vector( 3.0f+bF, 0.0f, 5.0f), Vector( 3.0f,    0.0f, 5.0f),
+        Vector( 3.0f,    6.0f, 5.0f), Vector( 3.0f+bF, 6.0f, 5.0f),
+    };
+    b.AddQuad("bm_frame_top",   bm_top,   matFrame);
+    b.AddQuad("bm_frame_bot",   bm_bot,   matFrame);
+    b.AddQuad("bm_frame_left",  bm_left,  matFrame);
+    b.AddQuad("bm_frame_right", bm_right, matFrame);
 
     // Half-silvered side mirror panel at x=-7 (left wall). Uses
     // Mat_Transparent + textured material → BuildMirror path A
@@ -88,6 +120,29 @@ Scene *BuildInteractiveMirrorTestScene() {
         Vector(-7.0f, 7.0f, -5.0f), Vector(-7.0f, 7.0f,  5.0f),
     };
     b.AddQuad("xpar_mirror_panel", xparMirrorV, matXparMirror);
+    // Orange frame around the side mirror. Same x=-7 plane, same CCW
+    // winding pattern (N=(1,0,0) toward the room).
+    constexpr float sF = 0.3f;  // side-mirror frame thickness
+    const Vector sm_top[4] = {
+        Vector(-7.0f, 7.0f,    5.0f+sF), Vector(-7.0f, 7.0f,   -5.0f-sF),
+        Vector(-7.0f, 7.0f+sF,-5.0f-sF), Vector(-7.0f, 7.0f+sF, 5.0f+sF),
+    };
+    const Vector sm_bot[4] = {
+        Vector(-7.0f, -sF, 5.0f+sF), Vector(-7.0f, -sF, -5.0f-sF),
+        Vector(-7.0f, 0.0f,-5.0f-sF), Vector(-7.0f, 0.0f, 5.0f+sF),
+    };
+    const Vector sm_front[4] = {  // z>+5 strip
+        Vector(-7.0f, 0.0f, 5.0f+sF), Vector(-7.0f, 0.0f, 5.0f),
+        Vector(-7.0f, 7.0f, 5.0f),    Vector(-7.0f, 7.0f, 5.0f+sF),
+    };
+    const Vector sm_back[4] = {   // z<-5 strip
+        Vector(-7.0f, 0.0f, -5.0f), Vector(-7.0f, 0.0f, -5.0f-sF),
+        Vector(-7.0f, 7.0f, -5.0f-sF), Vector(-7.0f, 7.0f, -5.0f),
+    };
+    b.AddQuad("sm_frame_top",   sm_top,   matFrame);
+    b.AddQuad("sm_frame_bot",   sm_bot,   matFrame);
+    b.AddQuad("sm_frame_front", sm_front, matFrame);
+    b.AddQuad("sm_frame_back",  sm_back,  matFrame);
 
     // Three distinct objects in front of the mirror so the reflection is
     // visually unambiguous: a red cube on the left, a green cube on the
