@@ -662,11 +662,14 @@ void Dynamic_Camera()
   // angular velocity doesn't have an analogous "scene scale"
   // interpretation.
   const float Vel_FallOff = 5.0f * Vel_Speed;
-  // Rotation key-release dampening: matches the velocity exp-decay so
-  // arrow-key spins coast to rest at a similar feel as WASD/QE motion
-  // instead of the previous near-stagnant 0.05 coefficient (which left
-  // the camera slowly drifting in rotation forever).
-  const float Rot_FallOff = 5.0f;
+  // Rotation key-release dampening. Empirically tuned: velocity
+  // decays via 5*Vel_Speed which is scene-scale-aware (~0.5-1.0 in
+  // practice); rotation has no scene-scale analogue so we need a
+  // direct per-second rate. 30/sec gives ~80% decay per frame at
+  // 60fps and lets the rotStopThresh hard stop fire within a couple
+  // frames after key release. Previous values (0.05, 5.0) felt
+  // glued.
+  const float Rot_FallOff = 30.0f;
   Vector U,V;
 	float dot;
   CAttempt = 1;

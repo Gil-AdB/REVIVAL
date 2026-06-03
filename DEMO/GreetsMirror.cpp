@@ -718,13 +718,21 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             }
             const uint8_t compoundId = s_nextMirrorId++;
 
-            // 2) Retag the surface faces — gated by the compound's
-            //    pre-stamp (parent A's pre-stamp covers them with
-            //    A.id; StampMirrorMasks runs compound mirrors AFTER
-            //    base, so compound id overwrites in the sub-area
-            //    and these wall faces gate on it instead of A's id).
+            // 2) Compound surface faces ride on the parent's stamp.
+            //    Mekalele's per-pixel mask check passes anywhere the
+            //    parent already covers, then Mekalele's z-test picks
+            //    between this face, A's regular clones, and compound
+            //    clones (also gated on parent). ownerMirrorId stays
+            //    compoundId so post-commit pmid is correct for the
+            //    deferred light filter.
+            //
+            //    Gating on compoundId instead would have blocked A's
+            //    clones IN FRONT of the compound wall from rendering
+            //    inside the wall's screen footprint — they'd be lost
+            //    to the empty backdrop and the wall would visibly
+            //    "occlude" geometry it shouldn't.
             for (Face *F : compoundWalls) {
-                F->mirrorMaskTag = compoundId;
+                F->mirrorMaskTag = A.id;
                 F->ownerMirrorId = compoundId;
             }
 
@@ -832,7 +840,14 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                     CF.NormProd = -(CF.N.x*CF.A->Pos.x +
                                     CF.N.y*CF.A->Pos.y +
                                     CF.N.z*CF.A->Pos.z);
-                    CF.mirrorMaskTag = compoundId;
+                    // Same gating rationale as the compound surface
+                    // faces above: ride on the parent's stamp so the
+                    // z-test decides between this compound clone, A's
+                    // regular clones, and the compound wall surface
+                    // per pixel. ownerMirrorId keeps compoundId so the
+                    // deferred filter sees compound-omni lighting at
+                    // pixels this clone wins.
+                    CF.mirrorMaskTag = A.id;
                     CF.ownerMirrorId = compoundId;
                     ++fOfs;
                 }
@@ -1148,6 +1163,14 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     if (::View) camPos = &::View->ISource;  // FrameState alias; active camera
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
+        // Compound mirrors do not stamp their own pre-mask. Their wall
+        // surface and clone faces gate on the PARENT mirror's stamp so
+        // Mekalele's z-test resolves "compound wall vs A's clone vs
+        // compound clone" naturally per pixel. Stamping a compoundId
+        // here would overwrite A.id and gate A's clones out of the
+        // sub-area (the bug that hid objects "behind" the in-mirror
+        // mirror).
+        if (m.parentMirrorId != 0) continue;
         if (camPos) {
             // Base mirror: viewer must be in front of the mirror's
             // own plane. Compound mirror: viewer must be in front of
