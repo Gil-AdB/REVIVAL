@@ -652,8 +652,15 @@ void Dynamic_Camera()
   // mass-rename — local const shadows the file-scope global.
   const float Vel_Speed = Vel_Step;
   const float Rot_Speed = Rot_Step;
-	const float Vel_FallOff = 0.02;
-  const float Rot_FallOff = 0.05;
+  // Fall-off rates: tie translation decay to Vel_Speed so a big scene
+  // (city, large FZP) doesn't end up with the camera coasting
+  // forever after a tap of W. 0.02/0.0786 ≈ 0.254 reproduces the
+  // legacy decay at the default FZP=200 (Vel_Speed ≈ 0.0786);
+  // bigger scenes get proportionally faster falloff. Rotation stays
+  // a fixed constant — angular velocity doesn't have an analogous
+  // "scene scale" interpretation.
+  const float Vel_FallOff = 0.254f * Vel_Speed;
+  const float Rot_FallOff = 0.05f;
   Vector U,V;
 	float dot;
   CAttempt = 1;

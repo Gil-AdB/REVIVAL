@@ -271,22 +271,38 @@ struct MirrorTestScene : SceneDriver {
     void drawLabels() {
         char lbl[64];
         int sx = 0, sy = 0;
+        auto reflect = [](const Vector &p, const fds::Mirror &m) -> Vector {
+            const float k = 2.0f * (m.plane.N.x * p.x + m.plane.N.y * p.y
+                                  + m.plane.N.z * p.z + m.plane.d);
+            return { p.x - k * m.plane.N.x,
+                     p.y - k * m.plane.N.y,
+                     p.z - k * m.plane.N.z };
+        };
         for (const auto &L : labels) {
             std::snprintf(lbl, sizeof(lbl), "[O] %s", L.name);
             if (worldToScreen(L.pos, sx, sy)) OutTextXY(VPage, sx, sy, lbl, 255);
-            for (const auto &m : mirrors) {
-                if (!m.plane.valid) continue;
-                const float k = 2.0f * (m.plane.N.x * L.pos.x
-                                      + m.plane.N.y * L.pos.y
-                                      + m.plane.N.z * L.pos.z
-                                      + m.plane.d);
-                const Vector refl = {L.pos.x - k * m.plane.N.x,
-                                     L.pos.y - k * m.plane.N.y,
-                                     L.pos.z - k * m.plane.N.z};
+            for (const auto &mA : mirrors) {
+                if (!mA.plane.valid) continue;
+                // Single bounce: reflect L through mA.
+                const Vector r1 = reflect(L.pos, mA);
                 std::snprintf(lbl, sizeof(lbl), "[R1 m%d] %s",
-                              (int)m.id, L.name);
-                if (worldToScreen(refl, sx, sy))
+                              (int)mA.id, L.name);
+                if (worldToScreen(r1, sx, sy))
                     OutTextXY(VPage, sx, sy, lbl, 255);
+                // Two-bounce: reflect through mB then through mA — the
+                // position the object would appear at "inside the
+                // reflected mirror" if the system did recursive
+                // reflections. Useful for spotting where you'd expect
+                // a 2nd-order reflection if the engine supported it.
+                for (const auto &mB : mirrors) {
+                    if (!mB.plane.valid || mB.id == mA.id) continue;
+                    const Vector via = reflect(L.pos, mB);
+                    const Vector r2 = reflect(via, mA);
+                    std::snprintf(lbl, sizeof(lbl), "[R2 m%d>m%d] %s",
+                                  (int)mB.id, (int)mA.id, L.name);
+                    if (worldToScreen(r2, sx, sy))
+                        OutTextXY(VPage, sx, sy, lbl, 255);
+                }
             }
         }
     }
@@ -429,6 +445,18 @@ struct MirrorTestScene : SceneDriver {
                       View->ISource.x, View->ISource.y, View->ISource.z);
         OutTextXY(VPage, 0, 0, MSGStr, 255);
         drawLabels();
+        // F2 toggles the mirrorId mask overlay. Lets you see exactly
+        // which screen pixels belong to which mirror — when the frame
+        // goes off-screen at close camera distances the mirror's
+        // screen footprint isn't otherwise visible.
+        {
+            static bool sF2Prev = false;
+            static bool sMaskOn = false;
+            const bool f2Now = Keyboard[ScF2] != 0;
+            if (f2Now && !sF2Prev) sMaskOn = !sMaskOn;
+            sF2Prev = f2Now;
+            if (sMaskOn) fds::DebugOverlayMirrorMask(sc);
+        }
 
         prof.enter(PROF_FLIP);
         Flip(MainSurf);
