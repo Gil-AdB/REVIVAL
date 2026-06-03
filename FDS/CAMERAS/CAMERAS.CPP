@@ -654,13 +654,14 @@ void Dynamic_Camera()
   const float Rot_Speed = Rot_Step;
   // Fall-off rates: tie translation decay to Vel_Speed so a big scene
   // (city, large FZP) doesn't end up with the camera coasting
-  // forever after a tap of W. Coefficient picked empirically — the
-  // legacy value (0.254 → 0.02 at the default FZP=200) felt too
-  // floaty for short taps; 1.0 (~4x faster decay) feels much more
-  // responsive while still smoothing micro-inputs. Rotation stays a
-  // fixed constant — angular velocity doesn't have an analogous
-  // "scene scale" interpretation.
-  const float Vel_FallOff = 1.0f * Vel_Speed;
+  // forever after a tap of W. The exponential decay is
+  // exp(-FallOff * dTime); a coefficient of 5.0 multiplied by
+  // Vel_Speed gives a half-life around 35ms at the default FZP=200,
+  // so the camera comes to rest in two to three frames instead of
+  // gliding for half a second. Rotation stays a fixed constant —
+  // angular velocity doesn't have an analogous "scene scale"
+  // interpretation.
+  const float Vel_FallOff = 5.0f * Vel_Speed;
   const float Rot_FallOff = 0.05f;
   Vector U,V;
 	float dot;
