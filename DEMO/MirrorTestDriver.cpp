@@ -189,6 +189,17 @@ struct MirrorTestScene : SceneDriver {
     }
 
     void init() override {
+        // Present a black frame BEFORE the (slow) scene + mirror build
+        // below. Without this the SDL streaming texture shows its
+        // uninitialised content — a bright white flash — for the whole
+        // duration of BuildInteractiveMirrorTestScene + BuildMirror +
+        // clone-mesh construction, which is the "annoying white screen
+        // at startup."
+        if (VPage && PageSize) {
+            std::memset(VPage, 0, PageSize);
+            if (MainSurf) Flip(MainSurf);
+        }
+
         sc = BuildInteractiveMirrorTestScene();
         SetCurrentScene(sc);
         Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
