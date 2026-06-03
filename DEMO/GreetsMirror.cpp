@@ -449,7 +449,19 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                 }
                 F.Txtr = m.wallMatClone;
             }
-            F.mirrorMaskTag = m.id;
+            // Wall face itself is NOT tagged. We used to set
+            // F.mirrorMaskTag = m.id here, but Mekalele's per-pixel
+            // gb.mirrorId == ctx.mirrorTag test would then apply to
+            // the wall face's own rasterization — and StampMirrorMasks
+            // fills the mask with its own 2D scanline routine whose
+            // sub-pixel coverage doesn't exactly match Mekalele's
+            // rasterizer. The mismatch left occasional wall pixels
+            // outside the stamped mask, so the check rejected them
+            // (whole screens vanishing in greets's P_TEXT mirror was
+            // the visible symptom after the transparent gbuffer was
+            // added to the mask plane). m.wallFaces still owns these
+            // faces so StampMirrorMasks can read them — it doesn't
+            // need the tag on the face itself.
             m.wallFaces.push_back(&F);
             ++m.wallFacesRetargeted;
         }
