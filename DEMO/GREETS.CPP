@@ -1977,6 +1977,42 @@ struct GreetsScene : SceneDriver {
 
 		Render();
 
+		// F9: one-shot PPM frame dump to /tmp/greets_dump_N.ppm. Edge-
+		// triggered so a held key only fires once. Lets the user fly
+		// around in TAB free-cam, line up the teleporter or text
+		// screens, and capture a frame for off-line inspection of the
+		// mirror system.
+		{
+			static bool sF9Prev = false;
+			static int  sDumpN  = 0;
+			const bool  f9Now   = Keyboard[ScF9] != 0;
+			if (f9Now && !sF9Prev) {
+				char path[64];
+				std::snprintf(path, sizeof(path),
+				              "/tmp/greets_dump_%d.ppm", sDumpN++);
+				std::FILE *f = std::fopen(path, "wb");
+				if (f) {
+					const int xr = (int)XRes, yr = (int)YRes;
+					std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+					std::vector<unsigned char> row(xr * 3);
+					for (int y = 0; y < yr; ++y) {
+						const dword *src = (const dword*)((const byte*)VPage
+						                  + y * (int)VESA_BPSL);
+						for (int x = 0; x < xr; ++x) {
+							dword px = src[x];
+							row[x*3+0] = (px >> 16) & 0xFF;
+							row[x*3+1] = (px >>  8) & 0xFF;
+							row[x*3+2] = (px      ) & 0xFF;
+						}
+						std::fwrite(row.data(), 1, row.size(), f);
+					}
+					std::fclose(f);
+					std::fprintf(stderr, "[GREETS] dumped %s\n", path);
+				}
+			}
+			sF9Prev = f9Now;
+		}
+
 		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {
 			fds::DebugOverlayMirrorMask(GreetSc);

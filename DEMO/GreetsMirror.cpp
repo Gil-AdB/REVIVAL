@@ -401,12 +401,15 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     //     low alpha so the mirror clone beneath dominates. Flat-shaded
     //     sources also get a 1×1 silver stub texture for the deferred
     //     transparent rasterizer's LSizeX/LSizeY read.
-    // Specular cranked too high blew out yellow on greets's warm-omni
-    // teleporter — the spec lobe at 32 saturated through the 15%
-    // wall blend and drowned the reflection. Pull both back so the
-    // mirror reads as a faint silvered surface, not a flashlight.
+    // Wall material is meant as a passive gateway to the reflected
+    // world, not a lit surface in its own right. Keep Specular = 0
+    // so the warm greets omni doesn't blow a saturated spec lobe
+    // through the low-alpha blend (the previous Spec=2 read as a
+    // yellow flashlight rather than a mirror — pre-existing tuning
+    // for Spec=32 → 2 was still picking up the warm-omni highlight).
+    // Alpha kept low so the reflection dominates.
     constexpr float kMirrorAlpha     = 0.05f;
-    constexpr float kMirrorSpecular  = 2.0f;
+    constexpr float kMirrorSpecular  = 0.0f;
     const Color     kMirrorSilver    = { 160.0f, 160.0f, 180.0f, 255.0f };
     int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -431,6 +434,11 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                     m.wallMatClone->XparBlendAlpha = kMirrorAlpha;
                     m.wallMatClone->Specular       = kMirrorSpecular;
                     m.wallMatClone->BaseCol        = kMirrorSilver;
+                    // Source's Luminosity (self-emission) bleeds through the
+                    // low-alpha blend and over-brightens the mirror — wash
+                    // it out so the silvered wall behaves like a passive
+                    // mirror surface rather than a self-lit panel.
+                    m.wallMatClone->Luminosity     = 0.0f;
                     if (!m.wallMatClone->Txtr) {
                         m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
                     }
