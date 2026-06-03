@@ -62,19 +62,21 @@ Scene *BuildInteractiveMirrorTestScene() {
     };
     b.AddQuad("floor", floorV, matFloor);
 
-    // Mirror panel IS the back wall at z=+5, 20 wide × 8 tall. No separate
-    // back wall behind — the mirror system's clone faces sit BEHIND the
-    // mirror plane (z>5) and would Z-fail against anything closer to
-    // the camera at the same screen pixels.
+    // Back wall: opaque-source mirror at z=+5. BuildMirror path B —
+    // synthesise a transparent silver material and retarget the wall
+    // faces to it. Smaller than the room so the half-silvered side
+    // mirror (below) is the dominant reflection from the default pose
+    // and the overlap between the two mirrors' masks is minimal.
     const Vector mirrorV[4] = {
-        Vector( 10.0f, 0.0f, 5.0f), Vector(-10.0f, 0.0f, 5.0f),
-        Vector(-10.0f, 8.0f, 5.0f), Vector( 10.0f, 8.0f, 5.0f),
+        Vector( 3.0f, 0.0f, 5.0f), Vector(-3.0f, 0.0f, 5.0f),
+        Vector(-3.0f, 6.0f, 5.0f), Vector( 3.0f, 6.0f, 5.0f),
     };
     b.AddQuad("mirror_panel", mirrorV, matMirror);
 
-    // Half-silvered side mirror panel at x=-7 (left wall). The room is
-    // bigger than the mirror so the side mirror has space to live.
-    // Uses Mat_Transparent + textured material → BuildMirror path A.
+    // Half-silvered side mirror panel at x=-7 (left wall). Uses
+    // Mat_Transparent + textured material → BuildMirror path A
+    // (source kept as-is). This is the path greets's P_TEXT screens
+    // take, so verifying it here keeps the test honest.
     const Vector xparMirrorV[4] = {
         Vector(-7.0f, 0.0f,  5.0f), Vector(-7.0f, 0.0f, -5.0f),
         Vector(-7.0f, 7.0f, -5.0f), Vector(-7.0f, 7.0f,  5.0f),
