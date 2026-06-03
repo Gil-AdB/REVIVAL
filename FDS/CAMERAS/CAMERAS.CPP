@@ -607,11 +607,12 @@ float Vel_Speed   = 0.080;
 // Per-keypress angular velocity increment, in radians per tick. Paired
 // with Rot_FallOff = 5: under a held key, exp decay leaves FT at
 // 1/(1-exp(-5*dTime)) ≈ 1.4× this value (steady state). At dTime≈0.25
-// per frame that's ~0.32 rad/tick * 0.25 ≈ 0.08 rad applied per frame
-// = ~4.6°/frame ≈ matches the prior tuned feel from Rot_Speed=0.004 +
-// near-zero falloff (which accumulated to the same steady-state but
-// drifted forever after key release).
-static float Rot_Speed_Base = 0.23f;
+// per frame that gives a per-frame rotation feel matching the old
+// Rot_Speed=0.004 + near-zero-decay accumulation (snappy turn) but
+// with the key-release stop fired in ~3 frames instead of drifting.
+// Tuned at 0.06 → ~70°/sec sustained which feels right for arrow-key
+// nav; K/L still scale via RotSpeedMult for users who want more.
+static float Rot_Speed_Base = 0.06f;
 // Independent rotation-speed dial — adjusted by `K` (slower) / `L`
 // (faster) inside Dynamic_Camera. Multiplies Rot_Speed_Base on top of
 // the shared `, .` CamSpeedMult, letting you slow rotation without
