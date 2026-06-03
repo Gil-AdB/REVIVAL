@@ -459,8 +459,32 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             const bool sourceIsHalfSilvered =
                 F.Txtr && (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
             if (sourceIsHalfSilvered) {
-                // (A): keep original material untouched.
+                // (A): half-silvered glass — keep the source's
+                // texture (so the authored content, e.g. P_TEXT,
+                // still shows) but clone the Material so we can
+                // pin Diffuse=0 / Luminosity stable. The shared
+                // source material's Diff=1.0 would otherwise leave
+                // the wall sensitive to per-strip omni coverage and
+                // produce visible tile-edge popping inside mirrors
+                // that reflect it. The clone is per-mirror; other
+                // walls using the source material are unaffected.
                 ++wallTransparentKept;
+                if (!m.wallMatClone) {
+                    m.wallMatClone = getAlignedType<Material>(16);
+                    std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
+                    m.wallMatClone->Specular   = kMirrorSpecular;
+                    m.wallMatClone->Diffuse    = kMirrorDiffuse;
+                    m.wallMatClone->Luminosity = kMirrorLuminosity;
+                    // BaseCol and Txtr kept from source — the
+                    // authored content (P_TEXT etc.) needs to render
+                    // its own colour at the wall pixels. Alpha is
+                    // also left at whatever the source authored.
+                    m.wallMatClone->Prev = nullptr;
+                    m.wallMatClone->Next = MatLib;
+                    if (MatLib) MatLib->Prev = m.wallMatClone;
+                    MatLib = m.wallMatClone;
+                }
+                F.Txtr = m.wallMatClone;
             } else {
                 // (B): synthesize silver transparent mat on first hit.
                 if (!m.wallMatClone) {
