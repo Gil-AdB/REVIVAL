@@ -425,22 +425,27 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     //     low alpha so the mirror clone beneath dominates. Flat-shaded
     //     sources also get a 1×1 silver stub texture for the deferred
     //     transparent rasterizer's LSizeX/LSizeY read.
-    // Wall material is meant as a passive gateway to the reflected
-    // world, not a lit surface in its own right. Three knobs keep it
-    // from bleeding through:
+    // Wall material is a passive gateway to the reflected world, not
+    // a lit surface in its own right. Knobs:
     //   - Specular = 0 so warm omnis don't write a spec lobe.
-    //   - Diffuse cut to 0.1 so the deferred lighting kernel's
-    //     accumulator doesn't saturate from 15 nearby greets omnis
-    //     (each contributing diffuse * lightCol * BaseCol; total can
-    //     exceed 255 per channel and clamp into a bright yellow).
-    //   - BaseCol cut to ~40 instead of 180 so even with saturation
-    //     the 5% alpha-blend onto VPage barely tints the underlying
-    //     reflection. Picks the same neutral hue but at a magnitude
-    //     where the reflection beneath wins by a wide margin.
-    constexpr float kMirrorAlpha     = 0.05f;
-    constexpr float kMirrorSpecular  = 0.0f;
-    constexpr float kMirrorDiffuse   = 0.1f;
-    const Color     kMirrorSilver    = { 40.0f, 40.0f, 45.0f, 255.0f };
+    //   - Diffuse = 0 makes the lit color INDEPENDENT of per-strip
+    //     omni coverage. The deferred transparent kernel uses
+    //     per-strip light lists, so a wall pixel in a strip without
+    //     nearby omnis (because greets's lights are clustered) would
+    //     light differently from one in a strip with omnis — visible
+    //     as tile-by-tile popping of the silver tint. With Diff=0,
+    //     omnis contribute nothing to lit; the wall reads the same
+    //     per-pixel no matter which strip processes it.
+    //   - Luminosity gives the wall a small fixed self-color so it's
+    //     still visibly silvery (lit = Lum*255 = 38; 5% alpha onto
+    //     VPage is ~2 units — a faint cool tint over the reflection).
+    //   - BaseCol picked cool/neutral; the magnitude doesn't matter
+    //     much since we're at 5% alpha + Diff=0.
+    constexpr float kMirrorAlpha       = 0.05f;
+    constexpr float kMirrorSpecular    = 0.0f;
+    constexpr float kMirrorDiffuse     = 0.0f;
+    constexpr float kMirrorLuminosity  = 0.15f;
+    const Color     kMirrorSilver      = { 60.0f, 60.0f, 70.0f, 255.0f };
     int wallTransparentKept = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
@@ -466,11 +471,10 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                     m.wallMatClone->Specular       = kMirrorSpecular;
                     m.wallMatClone->BaseCol        = kMirrorSilver;
                     m.wallMatClone->Diffuse        = kMirrorDiffuse;
-                    // Source's Luminosity (self-emission) bleeds through the
-                    // low-alpha blend and over-brightens the mirror — wash
-                    // it out so the silvered wall behaves like a passive
-                    // mirror surface rather than a self-lit panel.
-                    m.wallMatClone->Luminosity     = 0.0f;
+                    // Small self-luminosity keeps the wall stable
+                    // across strips with sparse omni coverage (see
+                    // header note above).
+                    m.wallMatClone->Luminosity     = kMirrorLuminosity;
                     if (!m.wallMatClone->Txtr) {
                         m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
                     }
