@@ -2002,7 +2002,9 @@ struct GreetsScene : SceneDriver {
 		{
 			static bool sF9Prev = false;
 			static int  sDumpN  = 0;
-			const bool  f9Now   = Keyboard[ScF9] != 0;
+			// 'G' (grab) as well as F9 — on macOS F9 is a system key
+			// (Mission Control) and never reaches the app.
+			const bool  f9Now   = Keyboard[ScF9] != 0 || Keyboard[ScG] != 0;
 			if (f9Now && !sF9Prev) {
 				char path[64];
 				std::snprintf(path, sizeof(path),
@@ -2034,6 +2036,7 @@ struct GreetsScene : SceneDriver {
 					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\"\n",
 					View->ISource.x, View->ISource.y, View->ISource.z,
 					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
+				std::fflush(stderr);
 			}
 			sF9Prev = f9Now;
 		}
@@ -2160,19 +2163,7 @@ struct GreetsScene : SceneDriver {
 			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
 			double polysPerFrame = (double)g_renderedPolys / numFrames;
 			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
-			if (fds_stats::g_clipperEntered) {
-				snprintf(MSGStr, sizeof MSGStr,
-					"clip: tot=%u Z=%u 2D=%u mip=%u(uniform=%u split=%u)",
-					fds_stats::g_clipperEntered,
-					fds_stats::g_clipNeedZ,
-					fds_stats::g_clipNeed2D,
-					fds_stats::g_mipEntered,
-					fds_stats::g_mipFastUniform,
-					fds_stats::g_mipSplit);
-				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-				// (clip stats shown on the on-screen overlay above; the
-				// per-frame stderr echo was just spam.)
-			}
+			// (clip stats overlay removed — just noise.)
 		}
 
 		// Shadow-map debug view. sShadowMapView is toggled at the top of
