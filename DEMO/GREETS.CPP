@@ -1442,13 +1442,23 @@ struct GreetsScene : SceneDriver {
 			float px, py, pz, fx, fy, fz;
 			bool posed = camEnv && std::sscanf(camEnv, "%f,%f,%f,%f,%f,%f",
 			                                   &px, &py, &pz, &fx, &fy, &fz) == 6;
+			// The scripted camera's IFOV is 0 at init (its FOV spline
+			// hasn't been evaluated yet) — copying it gives CalcPersp a
+			// degenerate (PerspX=inf) projection and a black frame. Use
+			// the FOV spline's first key, fallback 75°.
+			float fov = GreetSc->CameraHead->IFOV;
+			if (fov < 1.0f && GreetSc->CameraHead->FOV.NumKeys > 0)
+				fov = GreetSc->CameraHead->FOV.Keys[0].Pos.x;
+			if (fov < 1.0f) fov = 75.0f;
 			if (posed) {
 				FC.ISource = { px, py, pz };
 				Vector look = { px + fx, py + fy, pz + fz };
 				Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
-				FC.IFOV = GreetSc->CameraHead->IFOV;
+				FC.IFOV = fov;
 				CalcPersp(&FC);
 				View = &FC;
+				std::fprintf(stderr, "[GREETS-CAM] applied pose src=(%.2f,%.2f,%.2f)\n",
+					px, py, pz);
 			} else if (!g_greetsMirrors.empty()) {
 				const fds::Mirror &m = g_greetsMirrors.front();
 				const Vector c = m.plane.centroid;
@@ -1457,7 +1467,7 @@ struct GreetsScene : SceneDriver {
 				FC.ISource = { c.x + N.x*dist, c.y + N.y*dist, c.z + N.z*dist };
 				Vector look = c;
 				Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
-				FC.IFOV = GreetSc->CameraHead->IFOV;
+				FC.IFOV = fov;
 				CalcPersp(&FC);
 				View = &FC;
 			}

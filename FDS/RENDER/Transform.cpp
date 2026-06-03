@@ -1543,7 +1543,13 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	FDW omniFlareSize;
 	if (!scratch) for(O=Sc->OmniHead;O;O=O->Next)
 	{
-
+		// Mirror-clone omnis must not draw their flare billboard: 15
+		// cloned warm greets omnis behind the teleporter rendered a
+		// wall of bright yellow sprites that filled the mirror — the
+		// "yellow tint" obscuring the reflection. Clones still light
+		// (the deferred kernel reads them from OmniHead directly);
+		// they just don't get a visible flare sprite.
+		if (O->Flags & Omni_MirrorClone) continue;
 
 		Vtx=&O->V;
 		Vector_Sub(&O->IPos,&cam.view->ISource,&V);

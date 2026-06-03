@@ -1536,6 +1536,7 @@ int main(int argc, const char *argv[])
 				case SDL_SCANCODE_C:         legacy = ScC; break;
 				case SDL_SCANCODE_D:         legacy = ScD; break;
 				case SDL_SCANCODE_E:         legacy = ScE; break;
+				case SDL_SCANCODE_G:         legacy = ScG; break;
 				case SDL_SCANCODE_H:         legacy = ScH; break;
 				case SDL_SCANCODE_I:         legacy = ScI; break;
 				case SDL_SCANCODE_J:         legacy = ScJ; break;

@@ -358,6 +358,27 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             Face &OF = T->Faces[fi];
             if (isMirrorSurface(OF, T)) continue;
             if (!OF.A || !OF.B || !OF.C) continue;
+            // Only reflect faces IN FRONT of the mirror plane. A real
+            // mirror reflects what's in front of it; faces on the plane
+            // (the teleporter's coplanar emissive "screen emiter" glow)
+            // or behind it (the room behind the wall) produce a
+            // degenerate/wrong reflection that lands on top of the
+            // mirror panel. The coplanar yellow emitter clone was the
+            // flat yellow wash filling the greets teleporter.
+            {
+                auto worldPos = [&](const Vertex *v) {
+                    Vector lp = v->Pos, wp;
+                    MatrixXVector(T->RotMat, &lp, &wp);
+                    wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+                    return wp;
+                };
+                const Vector a = worldPos(OF.A), b = worldPos(OF.B), c = worldPos(OF.C);
+                const float cx = (a.x+b.x+c.x)/3.0f;
+                const float cy = (a.y+b.y+c.y)/3.0f;
+                const float cz = (a.z+b.z+c.z)/3.0f;
+                const float sd = N.x*cx + N.y*cy + N.z*cz + d;
+                if (sd <= 0.05f) continue;  // on/behind the plane → no reflection
+            }
             Face &CF = MM->Faces[fOfs];
             CF = OF;
             CF.A = MM->Verts + vStart + (OF.A - T->Verts);
@@ -392,6 +413,10 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     m.cloneMesh  = MM;
     m.clonedVerts = int(vOfs);
     m.clonedFaces = int(fOfs);
+    // The front-side skip can leave fewer faces than pre-counted, so
+    // shrink FIndex to what we actually wrote — otherwise the tail
+    // slots are uninitialised garbage that the rasterizer would draw.
+    MM->FIndex = fOfs;
 
     // Loose bsphere from the mirrored bbox.
     Vector ctr = { (bbMin.x + bbMax.x) * 0.5f,
@@ -627,11 +652,6 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // root cause of greets's persistent yellow saturation inside
         // the teleporter mirror.
         clone->mirrorId = m.id;
-        // Full intensity. The per-pixel filter routes only this
-        // mirror's clone omnis to clone pixels, so a clone surface
-        // sees the same incident-light budget as the original surface
-        // would. Per-scene tuning can ride on RotSpeed-style runtime
-        // knobs, not on a fixed dim.
         clone->Prev = nullptr;
         clone->Next = sc->OmniHead;
         if (sc->OmniHead) sc->OmniHead->Prev = clone;

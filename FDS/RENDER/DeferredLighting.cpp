@@ -3306,6 +3306,21 @@ void Render_DeferredLighting() {
 	MatTable matTable = Scene_GetMatTable(Sc);
 	if (!matTable.data || matTable.count == 0) return;
 
+	if (std::getenv("FDS_DUMP_MATS")) {
+		static bool dumped = false;
+		if (!dumped) {
+			dumped = true;
+			for (dword mi = 0; mi < matTable.count; ++mi) {
+				Material *M = matTable.data[mi];
+				std::fprintf(stderr, "[MAT %u] '%s' Lum=%.2f Diff=%.2f flags=0x%x tex=%s\n",
+					mi, M && M->Name ? M->Name : "?",
+					M ? M->Luminosity : -1.f, M ? M->Diffuse : -1.f,
+					M ? unsigned(M->Flags) : 0u,
+					(M && M->Txtr && M->Txtr->FileName) ? M->Txtr->FileName : "-");
+			}
+		}
+	}
+
 	// FDS_DEFERRED_GLOSS_STATS=1: dump distinct Mat->Glossiness values
 	// (and material count per value) for materials with Specular > 0 in
 	// the current scene. Run once per scene change; lets us confirm the
