@@ -650,11 +650,14 @@ void Calibrate_FreeCamera_ForScene(float sceneFZP, Camera *sceneCamera)
 void Dynamic_Camera()
 {
 
-  // Effective per-tick speeds. CamSpeedMult is the user-controlled `, .`
-  // dial that scales both translation and rotation together; the bases
-  // come from per-scene auto-cal (Vel_Speed) and the fixed Rot_Speed_Base.
+  // Effective per-tick speeds. Translation and rotation are on separate
+  // dials so cranking up fly speed doesn't also whip the view around:
+  //   translation = Vel_Speed (per-scene auto-cal) × CamSpeedMult (`, .`)
+  //   rotation    = Rot_Speed_Base (fixed)         × RotSpeedMult  (`K L`)
+  // CamSpeedMult deliberately does NOT feed rotation — turn rate stays
+  // constant regardless of move speed; use K/L to dial turning.
   const float Vel_Step    = Vel_Speed     * CamSpeedMult;
-  const float Rot_Step    = Rot_Speed_Base * CamSpeedMult * RotSpeedMult;
+  const float Rot_Step    = Rot_Speed_Base * RotSpeedMult;
   // Aliases so the existing per-key Vel_Speed / Rot_Speed references
   // below keep reading from the effective per-tick value with no
   // mass-rename — local const shadows the file-scope global.
