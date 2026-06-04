@@ -1111,6 +1111,14 @@ void CodeEntry(void *var)
 		Run_Greets();
 		goto demo_exit;
 	}
+	if (fds::FeatureFlags::scene_conetest()) {
+		// Interactive volumetric-cone / fog / in-scatter test rig. Join the
+		// init thread first (same g_mainFaces realloc race as the others).
+		extern void Run_ConeTest();
+		if (t1.joinable()) t1.join();
+		Run_ConeTest();
+		goto demo_exit;
+	}
 	if (!skipToFountain) {
 	Run_Glato();
 
@@ -1305,6 +1313,9 @@ int main(int argc, const char *argv[])
 		}
 		if (snap.scene == "greets") {
 			return RunGreetsSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
+		if (snap.scene == "crash") {
+			return RunCrashSnapshot(snap, g_demoXRes, g_demoYRes);
 		}
 		if (snap.scene == "xpartest") {
 			return RunXparTest(snap, g_demoXRes, g_demoYRes);

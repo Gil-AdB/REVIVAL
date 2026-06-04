@@ -361,6 +361,41 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_Crash();
+
+    // For crash, --snapshot=crash@t=N takes N as a FRAME number, not a raw
+    // Timer. CurFrame = StartFrame + Timer/5 (CrPartTime = 5·(End-Start)),
+    // so Timer = frame·5. Handier than back-solving the Timer by hand.
+    std::vector<int32_t> frames = cfg.timestamps;
+    if (frames.empty()) frames = {40, 82, 120, 160};
+
+    auto driver = createCrashScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t fr : frames) {
+        std::srand(0);
+        Timer = fr * 5;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();   // on-screen "Frame N/M" confirms the mapping
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/crash_f%04d_color.ppm",
+                      cfg.outDir.c_str(), fr);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[CRASHSNAP] frame=%d (Timer=%d) -> %s\n", fr, fr*5, colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -1902,6 +1937,70 @@ static Scene* buildConeTestScene() {
     // (back wall geometry intentionally omitted while diagnosing the
     // banding artifact — see the conetest comments above)
     return Sc;
+}
+
+// ─── Interactive cone-test driver ─────────────────────────────────────────
+// Live free-cam version of the conetest scene (--scene-conetest). The rig
+// for tuning the volumetric cone, fast_fog (value-noise blobs), and the
+// in-scatter glow without flying through the whole demo. Forces deferred so
+// the volumetric/fog passes run regardless of rev.cfg.
+namespace {
+struct ConeTestScene : SceneDriver {
+    Scene *sc = nullptr;
+    char MSGStr[160] = {0};
+    float lastTimer = -1.0f;
+
+    void init() override {
+        if (VPage && PageSize) { std::memset(VPage, 0, PageSize); if (MainSurf) Flip(MainSurf); }
+        Ambient_Factor = 0.25f; Diffusive_Factor = 1.0f;
+        Specular_Factor = 1.0f; Range_Factor = 1.0f;
+        fds::g_mainFaces.resize(8192);
+        sc = buildConeTestScene();
+        SetCurrentScene(sc);
+        Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
+        setupFaceLists(sc, /*includeOmnisInCount=*/true);
+        Scene_RebuildMatTable(sc);
+        // Start in free-cam, seeded from the scene's authored camera.
+        FC.ISource = sc->CameraHead->ISource;
+        FC.IFOV    = sc->CameraHead->IFOV;
+        Matrix_Copy(FC.Mat, sc->CameraHead->Mat);
+        CalcPersp(&FC);
+        View = &FC;
+        std::fprintf(stderr, "[CONETEST] interactive — FREE-CAM. WASD/QE move, arrows look, ESC exit.\n");
+    }
+
+    bool tick() override {
+        if (Keyboard[ScESC] || Keyboard[ScBackSpace]) return false;
+        g_FrameTime = Timer;
+        tickTabToggle(sc, "conetest");
+        clearFrame();
+        dTime = (lastTimer > 0) ? (Timer - lastTimer) * 0.25f : 0.0f;
+        lastTimer = Timer;
+        if (View == &FC) Dynamic_Camera();
+        if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
+        Animate_Objects(sc, View);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);
+        }
+        std::snprintf(MSGStr, sizeof(MSGStr),
+                      "[%s] Cam=(%.0f,%.0f,%.0f)  WASD/QE move, arrows look, ,/. speed, ESC exit",
+                      (View == &FC) ? "FREE" : "SCRIPTED",
+                      View->ISource.x, View->ISource.y, View->ISource.z);
+        OutTextXY(VPage, 0, 0, MSGStr, 255);
+        Flip(MainSurf);
+        return true;
+    }
+
+    void cleanup() override { waitBackspaceRelease(); }
+};
+} // namespace
+
+void Run_ConeTest() {
+    ConeTestScene scene;
+    runSceneBlocking(scene);
 }
 
 // ─── Halo test scene ──────────────────────────────────────────────────
