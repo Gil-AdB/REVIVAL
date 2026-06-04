@@ -1940,7 +1940,10 @@ static Scene* buildConeTestScene() {
     // ray blocking (cone shadow, fog occlusion).
     {
         TriMesh* occ = appendTriMesh(Sc, "cone_occluder", 24, 12);
-        const Vector c(90, 230, 0);
+        // Centered on the cone axis (apex 0,400,0 shining -Y) so it casts a
+        // shadow column straight down the middle of the shaft — the clean
+        // ray-blocking test case.
+        const Vector c(0, 250, 0);
         constexpr float h = 45.0f;
         const QuadDef quads[6] = {
             {{ Vector(c.x-h,c.y-h,c.z+h), Vector(c.x+h,c.y-h,c.z+h),
