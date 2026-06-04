@@ -2021,6 +2021,22 @@ struct ConeTestScene : SceneDriver {
                       (View == &FC) ? "FREE" : "SCRIPTED",
                       View->ISource.x, View->ISource.y, View->ISource.z);
         OutTextXY(VPage, 0, 0, MSGStr, 255);
+
+        // 'G' (grab): print the current camera pose so it can be reproduced
+        // headlessly via FDS_CONETEST_CAM="px,py,pz,fx,fy,fz". fwd = Mat row 2.
+        // Edge-triggered. (F9 is a macOS system key, hence 'G'.)
+        {
+            static bool sGPrev = false;
+            const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
+            if (gNow && !sGPrev) {
+                std::fprintf(stderr,
+                    "[CONETEST-CAM] FDS_CONETEST_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\"\n",
+                    View->ISource.x, View->ISource.y, View->ISource.z,
+                    View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
+                std::fflush(stderr);
+            }
+            sGPrev = gNow;
+        }
         Flip(MainSurf);
         return true;
     }
@@ -2368,7 +2384,20 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
 
     const int benchIters = cfg.iters;
     int produced = 0;
-    for (const ConePose& p : poses) {
+
+    // FDS_CONETEST_CAM="px,py,pz,fx,fy,fz" (printed by the interactive 'G'
+    // grab) overrides the canonical poses with that one captured view, so a
+    // user-reported artifact angle can be reproduced headlessly.
+    std::vector<ConePose> active(poses, poses + (sizeof(poses)/sizeof(poses[0])));
+    if (const char* e = std::getenv("FDS_CONETEST_CAM")) {
+        float px,py,pz,fx,fy,fz;
+        if (std::sscanf(e, "%f,%f,%f,%f,%f,%f", &px,&py,&pz,&fx,&fy,&fz) == 6) {
+            static ConePose cam{"cam", Vector(px,py,pz), Vector(px+fx,py+fy,pz+fz), "FDS_CONETEST_CAM"};
+            active.assign(1, cam);
+            std::fprintf(stderr, "[CONETEST] using FDS_CONETEST_CAM pose\n");
+        }
+    }
+    for (const ConePose& p : active) {
         View->ISource = p.eye;
         buildLookAt(View->ISource, p.target, View->Mat);
         CalcPersp(View);
