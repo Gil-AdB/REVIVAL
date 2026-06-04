@@ -5887,10 +5887,34 @@ static float blobFieldTau(const FastFogParams& P,
 	return tau;
 }
 
+// Binary shadow test for a view-space point against a spot's shadow map.
+// Single tap (no PCF), constant bias only (a volume point has no surface
+// normal for slope bias). Returns 1.0 lit, 0.0 occluded.
+static inline float volSpotShadow(int smIdx, float x, float y, float z) {
+	if (smIdx < 0 || size_t(smIdx) >= g_shadowMaps.size()) return 1.0f;
+	const ShadowMap& sm = g_shadowMaps[smIdx];
+	const float lx = sm.viewToLight[0][0]*x + sm.viewToLight[0][1]*y + sm.viewToLight[0][2]*z + sm.viewToLightOffset.x;
+	const float ly = sm.viewToLight[1][0]*x + sm.viewToLight[1][1]*y + sm.viewToLight[1][2]*z + sm.viewToLightOffset.y;
+	const float lz = sm.viewToLight[2][0]*x + sm.viewToLight[2][1]*y + sm.viewToLight[2][2]*z + sm.viewToLightOffset.z;
+	if (lz <= 0.0f) return 1.0f;
+	const float invLZ = 1.0f / lz;
+	const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
+	const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
+	if (iX < 0 || iX >= sm.xres || iY < 0 || iY >= sm.yres) return 1.0f;
+	const size_t idx = size_t(iY) * size_t(sm.xres) + size_t(iX);
+	uint16_t occ = sm.depth[idx];
+	if (!sm.depth_dynamic.empty()) occ = std::max(occ, sm.depth_dynamic[idx]);
+	int pixZ = 0xFF80 - int(lz * sm.zScale);
+	constexpr int kVolShadowBias = 80;
+	return (pixZ + kVolShadowBias < int(occ)) ? 0.0f : 1.0f;
+}
+
 // In-scatter glow at a view-space point Pv = (zMid·X, zMid·Y, zMid): sum the
 // scene lights reaching that point (distance + cone falloff, same shape as the
 // halo/cone passes), so the fog medium glows near lamps. Single-sample at the
 // fog segment midpoint — cheap; scaled by fog amount + strength by the caller.
+// Shadow-casting spots get a shadow-map tap so the glow respects occluders
+// (no leaking through walls); omnis / cube-shadow casters are unshadowed.
 static inline void fogInscatter(const FastFogParams& P, float Px, float Py, float Pz,
                                 float& gR, float& gG, float& gB)
 {
@@ -5914,6 +5938,10 @@ static inline void fogInscatter(const FastFogParams& P, float Px, float Py, floa
 			if (cosT < cosI) {
 				const float tt = (cosT - cosO) / (cosI - cosO);
 				atten *= tt * tt * (3.0f - 2.0f * tt);
+			}
+			if (L->shadowMapIdx[li] >= 0) {
+				atten *= volSpotShadow(L->shadowMapIdx[li], Px, Py, Pz);
+				if (atten <= 0.0f) continue;
 			}
 		}
 		gR += L->colR[li] * atten;
