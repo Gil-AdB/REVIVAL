@@ -5831,6 +5831,21 @@ static float blobFieldTau(const FastFogParams& P,
 			const float c010 = h01(cx,   cy+1, cz  ), c110 = h01(cx+1, cy+1, cz  );
 			const float c001 = h01(cx,   cy,   cz+1), c101 = h01(cx+1, cy,   cz+1);
 			const float c011 = h01(cx,   cy+1, cz+1), c111 = h01(cx+1, cy+1, cz+1);
+
+			// Empty-cell skip: trilinear interpolation is bounded by its 8
+			// corners, so if every corner is below the gap threshold the
+			// density is 0 throughout the cell — skip the Gauss trilerps
+			// (still hop the cell; the traversal itself is unavoidable).
+			constexpr float kGap = 0.45f;
+			const float cmax = std::max(std::max(std::max(c000,c100), std::max(c010,c110)),
+			                            std::max(std::max(c001,c101), std::max(c011,c111)));
+			if (cmax < kGap) {
+				if (tMaxX <= tMaxY && tMaxX <= tMaxZ)      { cx += sx; t = tMaxX; tMaxX += tDx; }
+				else if (tMaxY <= tMaxZ)                   { cy += sy; t = tMaxY; tMaxY += tDy; }
+				else                                       { cz += sz; t = tMaxZ; tMaxZ += tDz; }
+				continue;
+			}
+
 			const float cmx = float(cx)*cell, cmy = float(cy)*cell, cmz = float(cz)*cell;
 
 			auto sample = [&](float s) -> float {
