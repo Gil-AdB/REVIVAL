@@ -39,6 +39,7 @@ void Render_DeferredFogPass();
 void Render_VolumetricCones();
 void Render_OmniHalos();
 void Render_DeferredVolumetric();
+void Render_DeferredFastFog();
 void Render_DeferredSkybox();
 void VolProf_Tick();
 
@@ -427,12 +428,19 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			Render_DeferredSkybox();
 		}
 
-		// Full-screen linear distance fog over deferred-lit opaque pixels.
-		// Runs BEFORE the transparent peel so xpar surfaces composite onto
-		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
-		// Disabled when the unified volumetric pass is on (folds fog in).
+		// Full-screen distance fog over deferred-lit opaque pixels. Runs
+		// BEFORE the transparent peel AND before the cone/halo volumetric
+		// scatter, so god-ray shafts add on top of the fogged surfaces
+		// and stay bright (mixing them away afterward kills their
+		// contrast). Disabled when the unified pass is on (folds fog in).
+		//   fast_fog on  → analytic exponential model (iquilezles), any
+		//                  scene, mixes toward Ambient.
+		//   fast_fog off → legacy sqrt-to-black ramp, Scn_Fogged only.
 		if (!useUnifiedVolumetric()) {
-			Render_DeferredFogPass();
+			if (fds::FeatureFlags::fast_fog())
+				Render_DeferredFastFog();
+			else
+				Render_DeferredFogPass();
 		}
 
 		// Per-object peeled transparent rendering. We process each

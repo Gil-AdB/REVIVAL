@@ -5708,6 +5708,457 @@ void Render_DeferredFogPass() {
 	}
 }
 
+// ─── Fast analytic fog (iquilezles model) ───────────────────────────────
+//
+// A cheap closed-form atmospheric fog post-pass that composes with the
+// analytic cone/halo passes (it runs after them, so god-ray shafts fog
+// out with distance like everything else). Unlike Render_DeferredFogPass
+// — which is a sqrt distance ramp toward black, gated on Scn_Fogged —
+// this is gated on the `fast_fog` flag alone so it can be toggled on
+// clear scenes, and uses Beer-Lambert transmittance toward the scene's
+// Ambient color (the atmosphere tint).
+//
+// Per pixel, view-space ray V=(X,Y,1), surface at view depth z=zMax:
+//   optical depth  τ = σ·|V|·e^{-k·camY}·∫₀^{zMax} e^{-k·gY·z} dz
+//   fog amount       = 1 - e^{-τ}        (clamp 0..1)
+//   out              = lerp(surf, fogColor, fogAmount)
+// where σ = density/FZP (per true-distance extinction), k = height
+// falloff (denser low), gY = world-Y change per unit view-z =
+// viewToWorld[1]·(X,Y,1), |V| = sqrt(X²+Y²+1) maps view-z to true
+// distance. k=0 collapses to uniform Beer-Lambert τ = σ·(true distance).
+// fastPow2 (FRUSTRUM.CPP) builds the result by shifting the integer part
+// straight into the float exponent field with no saturation, so a large
+// |argument| yields garbage rather than 0/∞. These helpers keep the
+// exponent in a safe band: e^{±50} is already far past visual relevance
+// (e^{-50}≈2e-22 → fully transparent; e^{50}≈5e21 → fully opaque once
+// scaled), so clamping there avoids NaN pixels without changing the look.
+static inline float fastExpNeg(float x) {
+	constexpr float kLog2e = 1.4426950408889634f;
+	if (x > 50.0f)  x = 50.0f;
+	if (x < -50.0f) x = -50.0f;
+	return fastPow2(-x * kLog2e);
+}
+static inline float fastExpPos(float x) {
+	constexpr float kLog2e = 1.4426950408889634f;
+	if (x > 50.0f) x = 50.0f;
+	if (x < 0.0f)  x = 0.0f;
+	return fastPow2(x * kLog2e);
+}
+
+// ∫₀^z e^{-m·z'} dz'. The Taylor series for small |m·z| dodges the
+// 1-e^{-mz} catastrophic cancellation (fastPow2 is only an 8-bit LUT, so
+// e^{-mz}≈1 can't be resolved near the horizon); closed form otherwise,
+// with fastExpPos clamping the growth on descending rays (m<0).
+static inline float fogAntiderivG(float z, float m) {
+	const float mz = m * z;
+	if (mz > 0.1f)  return (1.0f - fastExpNeg(mz)) / m;
+	if (mz < -0.1f) return (fastExpPos(-mz) - 1.0f) / (-m);
+	return z * (1.0f - mz*(0.5f - mz*(1.0f/6.0f - mz*(1.0f/24.0f))));
+}
+
+struct FastFogParams {
+	float invFOVX, invFOVY, invZScale;
+	float sigma, fogFar, kHeight, heightBase;
+	// viewToWorld rows (rotation): world ray dir = w·(X,Y,1).
+	float w00, w01, w02, w10, w11, w12, w20, w21, w22;
+	float camX, camY, camZ;
+	float slabY0, slabY1;
+	float fogR, fogG, fogB;
+	bool  blobs;
+	float cell, invCell, jitter;
+	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
+	// In-scatter glow: scene lights lighting the fog medium.
+	const ViewLightsSoA *lights;
+	int   numLights;
+	float inscatter;   // 0 = off
+};
+
+// Hash a 3D integer cell index → 32 random bits. One call yields all
+// three jitter offsets (10 bits each) to keep the per-cell DDA cost low.
+static inline uint32_t cellHash(int ix, int iy, int iz) {
+	uint32_t h = uint32_t(ix) * 0x8DA6B343u ^ uint32_t(iy) * 0xD8163841u
+	           ^ uint32_t(iz) * 0xCB1AB31Fu;
+	h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+	h *= 0x297A2D39u; h ^= h >> 15;
+	return h;
+}
+
+// Optical depth of the procedural fog field along the world ray
+// O + t·D over t ∈ [tA,tB]. The density is trilinear VALUE NOISE on the
+// world grid: each lattice corner gets a hashed random value, and the
+// density at a point is the trilinear blend of its 8 cell corners. Because
+// neighbouring cells SHARE corner values, the field is continuous across
+// cell walls — no cube slices and no hard cell-boundary rectangles (the
+// failure modes of per-cell owned spheres). A 3D-DDA walks the cells the
+// ray crosses; within each cell the density along the ray is a cubic in t
+// (three linear interpolants multiplied), so 2-point Gauss integrates the
+// cell's z-segment EXACTLY. Front-to-back with a Beer-Lambert early-out.
+static float blobFieldTau(const FastFogParams& P,
+                          float Ox, float Oy, float Oz,
+                          float Dx, float Dy, float Dz,
+                          float /*a*/, float Vlen, float tA, float tB)
+{
+	const float cell = P.cell, invCell = P.invCell;
+
+	const float ex = Ox + tA*Dx, ey = Oy + tA*Dy, ez = Oz + tA*Dz;
+	int cx = int(std::floor(ex * invCell));
+	int cy = int(std::floor(ey * invCell));
+	int cz = int(std::floor(ez * invCell));
+
+	auto setup = [&](float d, float o, int c, int& step, float& tMax, float& tDelta){
+		if (d > 1e-12f || d < -1e-12f) {
+			step = d > 0.0f ? 1 : -1;
+			const float boundary = (d > 0.0f ? float(c + 1) : float(c)) * cell;
+			tMax   = (boundary - o) / d;
+			tDelta = cell / (d > 0.0f ? d : -d);
+		} else { step = 0; tMax = 1e30f; tDelta = 1e30f; }
+	};
+	int sx, sy, sz; float tMaxX, tMaxY, tMaxZ, tDx, tDy, tDz;
+	setup(Dx, Ox, cx, sx, tMaxX, tDx);
+	setup(Dy, Oy, cy, sy, tMaxY, tDy);
+	setup(Dz, Oz, cz, sz, tMaxZ, tDz);
+
+	auto h01 = [](int x, int y, int z){ return float(cellHash(x, y, z)) * (1.0f/4294967296.0f); };
+
+	float t = tA, tau = 0.0f;
+	for (int guard = 0; t < tB && guard < 96; ++guard) {
+		const float tNext  = std::min(tMaxX, std::min(tMaxY, tMaxZ));
+		const float segEnd = std::min(tNext, tB);
+
+		if (segEnd > t) {
+			// 8 shared lattice-corner randoms for this cell.
+			const float c000 = h01(cx,   cy,   cz  ), c100 = h01(cx+1, cy,   cz  );
+			const float c010 = h01(cx,   cy+1, cz  ), c110 = h01(cx+1, cy+1, cz  );
+			const float c001 = h01(cx,   cy,   cz+1), c101 = h01(cx+1, cy,   cz+1);
+			const float c011 = h01(cx,   cy+1, cz+1), c111 = h01(cx+1, cy+1, cz+1);
+			const float cmx = float(cx)*cell, cmy = float(cy)*cell, cmz = float(cz)*cell;
+
+			auto sample = [&](float s) -> float {
+				float u = (Ox + s*Dx - cmx) * invCell;
+				float v = (Oy + s*Dy - cmy) * invCell;
+				float w = (Oz + s*Dz - cmz) * invCell;
+				u = u < 0.f ? 0.f : (u > 1.f ? 1.f : u);
+				v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+				w = w < 0.f ? 0.f : (w > 1.f ? 1.f : w);
+				const float x00 = c000 + (c100-c000)*u, x01 = c001 + (c101-c001)*u;
+				const float x10 = c010 + (c110-c010)*u, x11 = c011 + (c111-c011)*u;
+				const float y0  = x00 + (x10-x00)*v,     y1  = x01 + (x11-x01)*v;
+				const float val = y0 + (y1-y0)*w;
+				// Remap to carve gaps (clear air) and dense cores so the
+				// field reads as discrete masses, not uniform haze.
+				const float d = (val - 0.45f) * 1.8f;
+				return d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
+			};
+
+			// 2-point Gauss over [t, segEnd] — exact for the cubic density.
+			const float mid = 0.5f*(t + segEnd), hlen = 0.5f*(segEnd - t);
+			constexpr float gq = 0.5773502692f;
+			float dens = hlen * (sample(mid - hlen*gq) + sample(mid + hlen*gq));
+			if (dens > 0.0f) {
+				if (P.invRf > 0.0f) dens *= fastExpNeg(mid * P.invRf);
+				tau += P.sigma * Vlen * dens;
+				if (tau > 12.0f) return tau;   // opaque — stop walking
+			}
+		}
+
+		if (tMaxX <= tMaxY && tMaxX <= tMaxZ)      { cx += sx; t = tMaxX; tMaxX += tDx; }
+		else if (tMaxY <= tMaxZ)                   { cy += sy; t = tMaxY; tMaxY += tDy; }
+		else                                       { cz += sz; t = tMaxZ; tMaxZ += tDz; }
+	}
+	return tau;
+}
+
+// In-scatter glow at a view-space point Pv = (zMid·X, zMid·Y, zMid): sum the
+// scene lights reaching that point (distance + cone falloff, same shape as the
+// halo/cone passes), so the fog medium glows near lamps. Single-sample at the
+// fog segment midpoint — cheap; scaled by fog amount + strength by the caller.
+static inline void fogInscatter(const FastFogParams& P, float Px, float Py, float Pz,
+                                float& gR, float& gG, float& gB)
+{
+	const ViewLightsSoA *L = P.lights;
+	for (int li = 0; li < P.numLights; ++li) {
+		if (L->mirrorId[li] != 0) continue;            // clones don't glow
+		const float Wx = Px - L->posX[li], Wy = Py - L->posY[li], Wz = Pz - L->posZ[li];
+		const float d2 = Wx*Wx + Wy*Wy + Wz*Wz;
+		if (d2 >= L->range2[li] || d2 < 1e-6f) continue;
+		const float dist = std::sqrt(d2);
+		const float dr   = dist * L->rRange[li];
+		const float cutoff = 1.0f - dr;
+		float atten = cutoff * cutoff / (dr*dr + 0.05f);
+		if (L->isSpot[li]) {
+			const float DW = L->dirX[li]*Wx + L->dirY[li]*Wy + L->dirZ[li]*Wz;
+			if (DW <= 0.0f) continue;
+			const float cosT = DW / dist;
+			const float cosO = L->cosOuter[li];
+			if (cosT < cosO) continue;
+			const float cosI = L->cosInner[li];
+			if (cosT < cosI) {
+				const float tt = (cosT - cosO) / (cosI - cosO);
+				atten *= tt * tt * (3.0f - 2.0f * tt);
+			}
+		}
+		gR += L->colR[li] * atten;
+		gG += L->colG[li] * atten;
+		gB += L->colB[li] * atten;
+	}
+}
+
+// Fog amount [0,1] for one pixel, plus the surface distance used (for the
+// half-res bilateral upsample) and the in-scatter glow RGB (premultiplied by
+// fog amount). Returns 0 amount where the ray doesn't fog.
+static inline float fogAtPixel(const FastFogParams& P, int px, int py,
+                               float& outZ, float& glowR, float& glowG, float& glowB)
+{
+	glowR = glowG = glowB = 0.0f;
+	const uint16_t *zEnc = ZPage16;
+	const size_t i = size_t(py) * size_t(XRes) + size_t(px);
+	const float Y  = (CntrEY - float(py)) * P.invFOVY;
+	const float X  = (float(px) - CntrEX) * P.invFOVX;
+	const float uV = X*X + Y*Y + 1.0f;
+
+	// Sky (no surface) fogs at the far plane so the horizon fades into the
+	// fog color; opaque surfaces clamp to FZP so fog saturates.
+	const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
+	const float zMax  = (zSurf <= 0.0f) ? P.fogFar : std::min(zSurf, P.fogFar);
+	outZ = zMax;
+	if (zMax <= 0.0f) return 0.0f;
+
+	const float Vlen = std::sqrt(uV);
+	const float gY = P.w10 * X + P.w11 * Y + P.w12;
+
+	// Clamp integration to the ray's segment inside the slab [slabY0,slabY1].
+	float zA = 0.0f, zB = zMax;
+	if (gY > 1e-9f || gY < -1e-9f) {
+		float za = (P.slabY0 - P.camY) / gY;
+		float zb = (P.slabY1 - P.camY) / gY;
+		if (za > zb) { const float t = za; za = zb; zb = t; }
+		zA = za > 0.0f ? za : 0.0f;
+		zB = zb < zMax ? zb : zMax;
+	} else if (P.camY < P.slabY0 || P.camY > P.slabY1) {
+		return 0.0f;   // level ray entirely outside the slab
+	}
+	if (zB <= zA) return 0.0f;
+
+	float tau;
+	if (P.blobs) {
+		const float Dx = P.w00*X + P.w01*Y + P.w02;
+		const float Dz = P.w20*X + P.w21*Y + P.w22;
+		tau = blobFieldTau(P, P.camX, P.camY, P.camZ, Dx, gY, Dz, uV, Vlen, zA, zB);
+	} else {
+		// Height falloff exp(-(k·gY)z) and distance falloff exp(-z·invRf)
+		// are both exponentials in z → one rate m, one closed form.
+		float dens;
+		if (P.kHeight != 0.0f || P.invRf > 0.0f) {
+			const float m = P.kHeight * gY + P.invRf;
+			dens = P.heightBase * (fogAntiderivG(zB, m) - fogAntiderivG(zA, m));
+		} else {
+			dens = zB - zA;
+		}
+		tau = P.sigma * Vlen * dens;
+	}
+	if (tau <= 0.0f) return 0.0f;
+	if (tau > 50.0f) tau = 50.0f;
+	float amt = 1.0f - fastExpNeg(tau);
+	if (amt < 0.0f) amt = 0.0f;
+	if (amt > 1.0f) amt = 1.0f;
+
+	// In-scatter glow: lights reaching the fog-segment midpoint, scaled by
+	// how much fog is along the ray. Premultiplied so the compositor just
+	// adds it. (Single midpoint sample — option 1; cheap.)
+	if (P.inscatter > 0.0f && P.lights && amt > 0.0f) {
+		const float zMid = 0.5f * (zA + zB);
+		float gR = 0.0f, gG = 0.0f, gB = 0.0f;
+		fogInscatter(P, zMid * X, zMid * Y, zMid, gR, gG, gB);
+		const float s = amt * P.inscatter;
+		glowR = gR * s; glowG = gG * s; glowB = gB * s;
+	}
+	return amt;
+}
+
+// Composite a fog amount (mix toward fog color) plus additive in-scatter
+// glow onto VPage pixel i.
+static inline void fogComposite(const FastFogParams& P, size_t i, float amt,
+                                float gR, float gG, float gB)
+{
+	if (amt <= 0.0f && gR <= 0.0f && gG <= 0.0f && gB <= 0.0f) return;
+	dword *out = reinterpret_cast<dword*>(VPage);
+	const float keep = 1.0f - amt;
+	const dword pix = out[i];
+	int nR = int(float((pix >> 16) & 0xFFu) * keep + P.fogR * amt + gR);
+	int nG = int(float((pix >>  8) & 0xFFu) * keep + P.fogG * amt + gG);
+	int nB = int(float( pix        & 0xFFu) * keep + P.fogB * amt + gB);
+	if (nR > 255) nR = 255; if (nR < 0) nR = 0;
+	if (nG > 255) nG = 255; if (nG < 0) nG = 0;
+	if (nB > 255) nB = 255; if (nB < 0) nB = 0;
+	out[i] = (dword(nR) << 16) | (dword(nG) << 8) | dword(nB) | 0xFF000000u;
+}
+
+// Full-res path: compute and composite per pixel.
+static void Render_DeferredFastFog_Tile(int x1, int y1, int x2, int y2,
+                                        const FastFogParams& P)
+{
+	for (int py = y1; py < y2; ++py) {
+		const size_t row = size_t(py) * size_t(XRes);
+		for (int px = x1; px < x2; ++px) {
+			float z, gR, gG, gB;
+			const float amt = fogAtPixel(P, px, py, z, gR, gG, gB);
+			fogComposite(P, row + size_t(px), amt, gR, gG, gB);
+		}
+	}
+}
+
+// Half-res producer: fog amount, surface distance, and in-scatter glow RGB
+// for each half-res texel (sampling the full-res pixel at 2·hx, 2·hy). Buffers
+// are sized to hw×hh by the dispatcher before this runs.
+namespace {
+	std::vector<float> gFogAmt, gFogZ, gFogGR, gFogGG, gFogGB;
+	int gFogHW = 0, gFogHH = 0;
+}
+static void Render_DeferredFastFog_HalfTile(int hx1, int hy1, int hx2, int hy2,
+                                            const FastFogParams& P)
+{
+	for (int hy = hy1; hy < hy2; ++hy) {
+		const int py = std::min(2 * hy, YRes - 1);
+		const size_t base = size_t(hy) * gFogHW;
+		for (int hx = hx1; hx < hx2; ++hx) {
+			const int px = std::min(2 * hx, XRes - 1);
+			float z, gR, gG, gB;
+			gFogAmt[base + hx] = fogAtPixel(P, px, py, z, gR, gG, gB);
+			gFogZ [base + hx] = z;
+			gFogGR[base + hx] = gR; gFogGG[base + hx] = gG; gFogGB[base + hx] = gB;
+		}
+	}
+}
+
+// Full-res compositor: bilateral (depth-weighted) upsample of the half-res
+// fog amount, so the soft fog reads at full res without bleeding across
+// surface silhouettes.
+static void Render_DeferredFastFog_CompositeTile(int x1, int y1, int x2, int y2,
+                                                 const FastFogParams& P)
+{
+	const uint16_t *zEnc = ZPage16;
+	const int hw = gFogHW, hh = gFogHH;
+	for (int py = y1; py < y2; ++py) {
+		const size_t row = size_t(py) * size_t(XRes);
+		const int hy0 = std::min(py >> 1, hh - 1);
+		const int hy1 = std::min(hy0 + 1, hh - 1);
+		const float fy = (py & 1) ? 0.5f : 0.0f;
+		for (int px = x1; px < x2; ++px) {
+			const size_t i = row + size_t(px);
+			const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
+			const float zf = (zSurf <= 0.0f) ? P.fogFar : std::min(zSurf, P.fogFar);
+
+			const int hx0 = std::min(px >> 1, hw - 1);
+			const int hx1 = std::min(hx0 + 1, hw - 1);
+			const float fx = (px & 1) ? 0.5f : 0.0f;
+
+			// Bilinear weights × depth-similarity (bilateral) weights.
+			const float bw[4] = { (1-fx)*(1-fy), fx*(1-fy), (1-fx)*fy, fx*fy };
+			const int   hxs[4] = { hx0, hx1, hx0, hx1 };
+			const int   hys[4] = { hy0, hy0, hy1, hy1 };
+			const float zscale = 1.0f / (zf * 0.10f + 1.0f);
+			float wsum = 0.0f, asum = 0.0f, grS = 0.0f, ggS = 0.0f, gbS = 0.0f;
+			for (int k = 0; k < 4; ++k) {
+				const size_t h = size_t(hys[k]) * hw + hxs[k];
+				const float dz = (gFogZ[h] - zf) * zscale;
+				const float w  = bw[k] / (1.0f + dz*dz);
+				wsum += w;
+				asum += w * gFogAmt[h];
+				grS  += w * gFogGR[h]; ggS += w * gFogGG[h]; gbS += w * gFogGB[h];
+			}
+			if (wsum > 0.0f) {
+				const float iw = 1.0f / wsum;
+				fogComposite(P, i, asum*iw, grS*iw, ggS*iw, gbS*iw);
+			}
+		}
+	}
+}
+
+void Render_DeferredFastFog() {
+	if (!fds::FeatureFlags::fast_fog()) return;
+	if (!CurScene || !ZPage16 || !VPage) return;
+
+	// FZP is the fog "far plane" reference for σ. Non-fogged scenes still
+	// carry an FZP (the clip plane), so this works on clear scenes too.
+	const float fogFar = CurScene->FZP;
+	if (fogFar <= 0.0f) return;
+	const float kHeight = fds::FeatureFlags::fast_fog_height();
+
+	extern DeferredLightingCtx g_deferredCtx;
+	const float (*w2)[3] = g_deferredCtx.viewToWorld;
+	const float camY = g_deferredCtx.cameraWorldY;
+
+	FastFogParams P{};
+	P.invFOVX   = 1.0f / FOVX;
+	P.invFOVY   = 1.0f / FOVY;
+	P.invZScale = 1.0f / float(g_zscale);
+	P.sigma     = fds::FeatureFlags::fast_fog_density() / fogFar;
+	P.fogFar    = fogFar;
+	P.kHeight   = kHeight;
+	// exp(-k·y) referenced to world y=0; heightBase folds in the camera term.
+	P.heightBase = (kHeight != 0.0f) ? fastExpNeg(kHeight * camY) : 1.0f;
+	// viewToWorld rows — world ray dir = w·(X,Y,1). Row 1 (w1*) is gY.
+	P.w00 = w2[0][0]; P.w01 = w2[0][1]; P.w02 = w2[0][2];
+	P.w10 = w2[1][0]; P.w11 = w2[1][1]; P.w12 = w2[1][2];
+	P.w20 = w2[2][0]; P.w21 = w2[2][1]; P.w22 = w2[2][2];
+	P.camX = g_deferredCtx.cameraWorldX;
+	P.camY = camY;
+	P.camZ = g_deferredCtx.cameraWorldZ;
+	// Slab bounds in world Y. Defaults (±1e9) → unbounded → plain height fog.
+	P.slabY0 = fds::FeatureFlags::fast_fog_bottom();
+	P.slabY1 = fds::FeatureFlags::fast_fog_top();
+	P.fogR   = float(CurScene->Ambient.R);
+	P.fogG   = float(CurScene->Ambient.G);
+	P.fogB   = float(CurScene->Ambient.B);
+	P.blobs  = fds::FeatureFlags::fast_fog_blobs();
+	P.cell   = std::max(1.0f, fds::FeatureFlags::fast_fog_cell());
+	P.invCell= 1.0f / P.cell;
+	P.jitter = fds::FeatureFlags::fast_fog_blob_jitter();
+	// Distance falloff: density *= exp(-z/Rf). 0 = auto (= FZP), so fog
+	// thins toward the far plane instead of forming a wall there.
+	const float Rf = fds::FeatureFlags::fast_fog_falloff();
+	P.invRf  = 1.0f / (Rf > 0.0f ? Rf : fogFar);
+	// In-scatter glow reuses the deferred light SoA (view-space positions,
+	// colors, ranges, cone params already set up for the frame).
+	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
+	P.lights    = g_deferredCtx.lights;
+	P.numLights = g_deferredCtx.numLights;
+
+	constexpr int numTilesX = 6;
+	constexpr int numTilesY = 4;
+
+	auto runTiles = [&](int w, int h, auto&& body) {
+		const int tsx = (w + numTilesX - 1) / numTilesX;
+		const int tsy = (h + numTilesY - 1) / numTilesY;
+		renderns::tileCounter = 0;
+		for (int j = 0; j < numTilesY; ++j) {
+			const int y1 = tsy * j, y2 = std::min(y1 + tsy, h);
+			for (int i = 0; i < numTilesX; ++i) {
+				const int x1 = tsx * i, x2 = std::min(x1 + tsx, w);
+				ThreadPool::instance().enqueue([=]() { body(x1, y1, x2, y2); renderns::tileDone.release(); });
+			}
+		}
+		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+	};
+
+	if (fds::FeatureFlags::fast_fog_halfres()) {
+		// Compute fog at half resolution, then bilaterally upsample +
+		// composite at full res. Fog is low-frequency, so ¼ the fog work
+		// for a near-imperceptible quality loss.
+		const int hw = (XRes + 1) / 2, hh = (YRes + 1) / 2;
+		if (gFogHW != hw || gFogHH != hh) {
+			gFogHW = hw; gFogHH = hh;
+			const size_t n = size_t(hw) * hh;
+			gFogAmt.assign(n, 0.0f); gFogZ.assign(n, 0.0f);
+			gFogGR.assign(n, 0.0f); gFogGG.assign(n, 0.0f); gFogGB.assign(n, 0.0f);
+		}
+		runTiles(hw, hh, [&](int a,int b,int c,int d){ Render_DeferredFastFog_HalfTile(a,b,c,d,P); });
+		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
+	} else {
+		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_Tile(a,b,c,d,P); });
+	}
+}
+
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
 // renderFrame in RENDER.CPP dispatches transparent-layer composites in a
 // tile-job lambda; the template + g_deferredCtx live here, so we expose
