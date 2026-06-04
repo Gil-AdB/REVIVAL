@@ -5771,6 +5771,10 @@ struct FastFogParams {
 	const ViewLightsSoA *lights;
 	int   numLights;
 	float inscatter;   // 0 = off
+	// Downsample: coarseStep px between computed samples (2 = half-res).
+	// adaptThresh > 0 enables the adaptive refine (recompute edges).
+	int   coarseStep;
+	float adaptThresh;
 };
 
 // Hash a 3D integer cell index → 32 random bits. One call yields all
@@ -6032,15 +6036,69 @@ namespace {
 static void Render_DeferredFastFog_HalfTile(int hx1, int hy1, int hx2, int hy2,
                                             const FastFogParams& P)
 {
+	const int S = P.coarseStep;
 	for (int hy = hy1; hy < hy2; ++hy) {
-		const int py = std::min(2 * hy, YRes - 1);
+		const int py = std::min(S * hy, YRes - 1);
 		const size_t base = size_t(hy) * gFogHW;
 		for (int hx = hx1; hx < hx2; ++hx) {
-			const int px = std::min(2 * hx, XRes - 1);
+			const int px = std::min(S * hx, XRes - 1);
 			float z, gR, gG, gB;
 			gFogAmt[base + hx] = fogAtPixel(P, px, py, z, gR, gG, gB);
 			gFogZ [base + hx] = z;
 			gFogGR[base + hx] = gR; gFogGG[base + hx] = gG; gFogGB[base + hx] = gB;
+		}
+	}
+}
+
+// Adaptive refine compositor: per full-res pixel, gather the 2x2 coarse
+// samples; if they agree (fog-amount spread and depth both small) bilinearly
+// interpolate, otherwise recompute the pixel exactly. Cheap in smooth regions,
+// full-res-sharp at occluder/shadow/depth edges.
+static void Render_DeferredFastFog_RefineTile(int x1, int y1, int x2, int y2,
+                                              const FastFogParams& P)
+{
+	const uint16_t *zEnc = ZPage16;
+	const int cw = gFogHW, ch = gFogHH, S = P.coarseStep;
+	const float invS = 1.0f / float(S);
+	for (int py = y1; py < y2; ++py) {
+		const size_t row = size_t(py) * size_t(XRes);
+		const int cy0 = std::min(py / S, ch - 1);
+		const int cy1 = std::min(cy0 + 1, ch - 1);
+		const float fy = float(py - cy0 * S) * invS;
+		for (int px = x1; px < x2; ++px) {
+			const size_t i = row + size_t(px);
+			const int cx0 = std::min(px / S, cw - 1);
+			const int cx1 = std::min(cx0 + 1, cw - 1);
+			const float fx = float(px - cx0 * S) * invS;
+
+			const size_t h00 = size_t(cy0)*cw + cx0, h10 = size_t(cy0)*cw + cx1;
+			const size_t h01 = size_t(cy1)*cw + cx0, h11 = size_t(cy1)*cw + cx1;
+			const float a00 = gFogAmt[h00], a10 = gFogAmt[h10],
+			            a01 = gFogAmt[h01], a11 = gFogAmt[h11];
+			const float aMin = std::min(std::min(a00,a10), std::min(a01,a11));
+			const float aMax = std::max(std::max(a00,a10), std::max(a01,a11));
+
+			const float zf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
+			const float zSurf = (zf <= 0.0f) ? P.fogFar : std::min(zf, P.fogFar);
+			const float zMin = std::min(std::min(gFogZ[h00],gFogZ[h10]), std::min(gFogZ[h01],gFogZ[h11]));
+			const float zMax = std::max(std::max(gFogZ[h00],gFogZ[h10]), std::max(gFogZ[h01],gFogZ[h11]));
+			const bool depthOK = (zMax - zMin) < 0.05f * (zSurf + 1.0f)
+			                   && std::min(std::abs(zSurf - zMin), std::abs(zSurf - zMax)) < 0.10f * (zSurf + 1.0f);
+
+			if ((aMax - aMin) <= P.adaptThresh && depthOK) {
+				// Smooth region: bilinear interpolate amt + glow.
+				const float w00=(1-fx)*(1-fy), w10=fx*(1-fy), w01=(1-fx)*fy, w11=fx*fy;
+				const float amt = a00*w00 + a10*w10 + a01*w01 + a11*w11;
+				const float gR = gFogGR[h00]*w00 + gFogGR[h10]*w10 + gFogGR[h01]*w01 + gFogGR[h11]*w11;
+				const float gG = gFogGG[h00]*w00 + gFogGG[h10]*w10 + gFogGG[h01]*w01 + gFogGG[h11]*w11;
+				const float gB = gFogGB[h00]*w00 + gFogGB[h10]*w10 + gFogGB[h01]*w01 + gFogGB[h11]*w11;
+				fogComposite(P, i, amt, gR, gG, gB);
+			} else {
+				// Edge: recompute this pixel exactly.
+				float z, gR, gG, gB;
+				const float amt = fogAtPixel(P, px, py, z, gR, gG, gB);
+				fogComposite(P, i, amt, gR, gG, gB);
+			}
 		}
 	}
 }
@@ -6138,6 +6196,9 @@ void Render_DeferredFastFog() {
 	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
 	P.lights    = g_deferredCtx.lights;
 	P.numLights = g_deferredCtx.numLights;
+	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
+	P.coarseStep  = adaptive ? std::max(2, fds::FeatureFlags::fast_fog_adaptive_step()) : 2;
+	P.adaptThresh = adaptive ? fds::FeatureFlags::fast_fog_adaptive_thresh() : 0.0f;
 
 	constexpr int numTilesX = 6;
 	constexpr int numTilesY = 4;
@@ -6156,19 +6217,23 @@ void Render_DeferredFastFog() {
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	};
 
-	if (fds::FeatureFlags::fast_fog_halfres()) {
-		// Compute fog at half resolution, then bilaterally upsample +
-		// composite at full res. Fog is low-frequency, so ¼ the fog work
-		// for a near-imperceptible quality loss.
-		const int hw = (XRes + 1) / 2, hh = (YRes + 1) / 2;
-		if (gFogHW != hw || gFogHH != hh) {
-			gFogHW = hw; gFogHH = hh;
-			const size_t n = size_t(hw) * hh;
+	if (adaptive || fds::FeatureFlags::fast_fog_halfres()) {
+		// Downsampled compute on a coarse grid (step = coarseStep), then
+		// either bilateral upsample (half-res) or adaptive refine (recompute
+		// only at edges). Fog is low-frequency, so this is near-free quality.
+		const int S = P.coarseStep;
+		const int cw = (XRes + S - 1) / S + 1, ch = (YRes + S - 1) / S + 1;
+		if (gFogHW != cw || gFogHH != ch) {
+			gFogHW = cw; gFogHH = ch;
+			const size_t n = size_t(cw) * ch;
 			gFogAmt.assign(n, 0.0f); gFogZ.assign(n, 0.0f);
 			gFogGR.assign(n, 0.0f); gFogGG.assign(n, 0.0f); gFogGB.assign(n, 0.0f);
 		}
-		runTiles(hw, hh, [&](int a,int b,int c,int d){ Render_DeferredFastFog_HalfTile(a,b,c,d,P); });
-		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
+		runTiles(cw, ch, [&](int a,int b,int c,int d){ Render_DeferredFastFog_HalfTile(a,b,c,d,P); });
+		if (adaptive)
+			runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_RefineTile(a,b,c,d,P); });
+		else
+			runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
 	} else {
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_Tile(a,b,c,d,P); });
 	}
