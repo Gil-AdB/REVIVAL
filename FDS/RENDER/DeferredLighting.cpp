@@ -5776,6 +5776,7 @@ struct FastFogParams {
 	int   coarseStep;
 	float adaptThresh;
 	float ditherAmp;   // triangular dither (levels) to break 8-bit banding
+	float feather;     // slab Y-edge feather (world units); 0 = hard cutoff
 };
 
 // Hash a 3D integer cell index → 32 random bits. One call yields all
@@ -6005,6 +6006,21 @@ static inline float fogAtPixel(const FastFogParams& P, int px, int py,
 		tau = P.sigma * Vlen * dens;
 	}
 	if (tau <= 0.0f) return 0.0f;
+
+	// Feather the slab's hard Y-cutoff: smoothstep ramp over `feather` world
+	// units at the top and bottom so the boundary isn't a razor edge at
+	// grazing angles. Evaluated at the slab segment's world-Y midpoint (for
+	// grazing rays Y is ~constant along the segment, so this is accurate
+	// where it matters). Unbounded slab → feather huge → profile ~1, no-op.
+	if (P.feather > 0.0f) {
+		const float wy = P.camY + gY * (0.5f * (zA + zB));
+		const float invF = 1.0f / P.feather;
+		float lo = (wy - P.slabY0) * invF; lo = lo < 0.f ? 0.f : (lo > 1.f ? 1.f : lo);
+		float hi = (P.slabY1 - wy) * invF; hi = hi < 0.f ? 0.f : (hi > 1.f ? 1.f : hi);
+		const float prof = lo*lo*(3.0f-2.0f*lo) * hi*hi*(3.0f-2.0f*hi);
+		tau *= prof;
+		if (tau <= 0.0f) return 0.0f;
+	}
 	if (tau > 50.0f) tau = 50.0f;
 	float amt = 1.0f - fastExpNeg(tau);
 	if (amt < 0.0f) amt = 0.0f;
@@ -6240,6 +6256,10 @@ void Render_DeferredFastFog() {
 	P.coarseStep  = adaptive ? std::max(2, fds::FeatureFlags::fast_fog_adaptive_step()) : 2;
 	P.adaptThresh = adaptive ? fds::FeatureFlags::fast_fog_adaptive_thresh() : 0.0f;
 	P.ditherAmp   = fds::FeatureFlags::fast_fog_dither();
+	// Slab edge feather: 0 = auto (20% of slab thickness). Unbounded slab →
+	// huge thickness → huge feather → profile stays ~1 (no-op), as intended.
+	const float fth = fds::FeatureFlags::fast_fog_feather();
+	P.feather = (fth > 0.0f) ? fth : 0.2f * (P.slabY1 - P.slabY0);
 
 	constexpr int numTilesX = 6;
 	constexpr int numTilesY = 4;
