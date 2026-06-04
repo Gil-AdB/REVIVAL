@@ -5775,6 +5775,7 @@ struct FastFogParams {
 	// adaptThresh > 0 enables the adaptive refine (recompute edges).
 	int   coarseStep;
 	float adaptThresh;
+	float ditherAmp;   // triangular dither (levels) to break 8-bit banding
 };
 
 // Hash a 3D integer cell index → 32 random bits. One call yields all
@@ -6031,9 +6032,20 @@ static inline void fogComposite(const FastFogParams& P, size_t i, float amt,
 	dword *out = reinterpret_cast<dword*>(VPage);
 	const float keep = 1.0f - amt;
 	const dword pix = out[i];
-	int nR = int(float((pix >> 16) & 0xFFu) * keep + P.fogR * amt + gR);
-	int nG = int(float((pix >>  8) & 0xFFu) * keep + P.fogG * amt + gG);
-	int nB = int(float( pix        & 0xFFu) * keep + P.fogB * amt + gB);
+	// Triangular dither (sum of two hashed uniforms) added before the 8-bit
+	// truncate, to dissolve the contour banding that quantizing a smooth
+	// low-contrast fog gradient produces. Stable per screen pixel (hash of i)
+	// so it doesn't shimmer. Same offset on all channels = a luminance dither.
+	float dith = 0.0f;
+	if (P.ditherAmp > 0.0f) {
+		uint32_t h = uint32_t(i) * 0x9E3779B9u; h ^= h >> 15; h *= 0x85EBCA6Bu; h ^= h >> 13;
+		const float r1 = float( h        & 0xFFFFu) * (1.0f/65536.0f);
+		const float r2 = float((h >> 16) & 0xFFFFu) * (1.0f/65536.0f);
+		dith = (r1 + r2 - 1.0f) * P.ditherAmp;   // triangular, [-amp, +amp]
+	}
+	int nR = int(float((pix >> 16) & 0xFFu) * keep + P.fogR * amt + gR + dith);
+	int nG = int(float((pix >>  8) & 0xFFu) * keep + P.fogG * amt + gG + dith);
+	int nB = int(float( pix        & 0xFFu) * keep + P.fogB * amt + gB + dith);
 	if (nR > 255) nR = 255; if (nR < 0) nR = 0;
 	if (nG > 255) nG = 255; if (nG < 0) nG = 0;
 	if (nB > 255) nB = 255; if (nB < 0) nB = 0;
@@ -6227,6 +6239,7 @@ void Render_DeferredFastFog() {
 	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
 	P.coarseStep  = adaptive ? std::max(2, fds::FeatureFlags::fast_fog_adaptive_step()) : 2;
 	P.adaptThresh = adaptive ? fds::FeatureFlags::fast_fog_adaptive_thresh() : 0.0f;
+	P.ditherAmp   = fds::FeatureFlags::fast_fog_dither();
 
 	constexpr int numTilesX = 6;
 	constexpr int numTilesY = 4;
