@@ -1907,8 +1907,8 @@ static Scene* buildConeTestScene() {
         /*pos*/Vector(0, 400, 0),
         /*dir*/Vector(0, -1, 0),
         /*hot*/12.0f, /*outer*/35.0f,
-        /*shadowMapRes*/0,
-        /*castsShadow*/false);
+        /*shadowMapRes*/512,
+        /*castsShadow*/true);
 
     Material* matGround = makeSolidColorMat(Sc, "cone_ground",
                                             80, 80, 90, 255,
@@ -1934,8 +1934,33 @@ static Scene* buildConeTestScene() {
                    TheOtherBarry<barry::TBlendMode::OVERWRITE,
                                  barry::TTextureMode::NORMAL>);
     }
-    // (back wall geometry intentionally omitted while diagnosing the
-    // banding artifact — see the conetest comments above)
+    // Opaque occluder cube floating inside the cone, offset to one side so
+    // it casts a shadow notch into the volumetric shaft / ground spot and
+    // clips the fog behind it. Without an occluder there's no way to test
+    // ray blocking (cone shadow, fog occlusion).
+    {
+        TriMesh* occ = appendTriMesh(Sc, "cone_occluder", 24, 12);
+        const Vector c(90, 230, 0);
+        constexpr float h = 45.0f;
+        const QuadDef quads[6] = {
+            {{ Vector(c.x-h,c.y-h,c.z+h), Vector(c.x+h,c.y-h,c.z+h),
+               Vector(c.x+h,c.y+h,c.z+h), Vector(c.x-h,c.y+h,c.z+h) }, Vector(0,0,1)},
+            {{ Vector(c.x+h,c.y-h,c.z+h), Vector(c.x+h,c.y-h,c.z-h),
+               Vector(c.x+h,c.y+h,c.z-h), Vector(c.x+h,c.y+h,c.z+h) }, Vector(1,0,0)},
+            {{ Vector(c.x+h,c.y-h,c.z-h), Vector(c.x-h,c.y-h,c.z-h),
+               Vector(c.x-h,c.y+h,c.z-h), Vector(c.x+h,c.y+h,c.z-h) }, Vector(0,0,-1)},
+            {{ Vector(c.x-h,c.y-h,c.z-h), Vector(c.x-h,c.y-h,c.z+h),
+               Vector(c.x-h,c.y+h,c.z+h), Vector(c.x-h,c.y+h,c.z-h) }, Vector(-1,0,0)},
+            {{ Vector(c.x-h,c.y+h,c.z+h), Vector(c.x+h,c.y+h,c.z+h),
+               Vector(c.x+h,c.y+h,c.z-h), Vector(c.x-h,c.y+h,c.z-h) }, Vector(0,1,0)},
+            {{ Vector(c.x-h,c.y-h,c.z-h), Vector(c.x+h,c.y-h,c.z-h),
+               Vector(c.x+h,c.y-h,c.z+h), Vector(c.x-h,c.y-h,c.z+h) }, Vector(0,-1,0)},
+        };
+        for (int fi = 0; fi < 6; ++fi)
+            appendQuad(Sc, occ, fi * 4, fi * 2, quads[fi], matWall,
+                       TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                     barry::TTextureMode::NORMAL>);
+    }
     return Sc;
 }
 
@@ -1983,6 +2008,9 @@ struct ConeTestScene : SceneDriver {
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
+            // Bake the spot's shadow map (occluder casts into the cone) —
+            // swaps view globals, so it must run before the main Render.
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
             Render(RenderPath::ForceDeferred);
         }
         std::snprintf(MSGStr, sizeof(MSGStr),
@@ -2181,6 +2209,7 @@ int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres) {
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
             Render(RenderPath::ForceDeferred);
         }
 
@@ -2351,6 +2380,7 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
             Render(RenderPath::ForceDeferred);
         }
 
