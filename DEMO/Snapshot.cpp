@@ -438,6 +438,29 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         bool more = driver->tick();
         (void)more;
 
+        // Optional level-camera override (CITYSNAP_POS / CITYSNAP_FWD) to
+        // probe the near-plane/rasterizer degeneracy seen in conetest at
+        // perfectly level views. Re-renders the city geometry from the
+        // pinned pose (no reflections/dispMap — just enough to see whether
+        // the ground/water wedges like conetest's giant quad does).
+        if (const char* s = std::getenv("CITYSNAP_POS")) {
+            float px,py,pz, fx=0,fy=0,fz=1;
+            if (std::sscanf(s, "%f,%f,%f", &px,&py,&pz) == 3) {
+                if (const char* sf = std::getenv("CITYSNAP_FWD"))
+                    std::sscanf(sf, "%f,%f,%f", &fx,&fy,&fz);
+                View->ISource = Vector(px,py,pz);
+                Vector fwd(fx,fy,fz); Vector_Norm(&fwd);
+                buildLookAt(View->ISource, Vector(px+fwd.x,py+fwd.y,pz+fwd.z), View->Mat);
+                CalcPersp(View); FOVX = View->PerspX; FOVY = View->PerspY;
+                std::memset(VPage, 0, PageSize);
+                std::memset(ZPage16, 0, size_t(XRes)*size_t(YRes)*sizeof(word));
+                Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+                if (CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceDeferred); }
+                std::fprintf(stderr, "[CITYSNAP] override pos=(%.0f,%.0f,%.0f) fwd=(%.2f,%.2f,%.2f)\n",
+                             px,py,pz, fwd.x,fwd.y,fwd.z);
+            }
+        }
+
         char colorPath[1024];
         char zPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/city_t%06d_color.ppm",
@@ -1924,15 +1947,30 @@ static Scene* buildConeTestScene() {
     linkMatToLib(matWall);
 
     {
-        TriMesh* ground = appendTriMesh(Sc, "cone_ground", 4, 2);
-        QuadDef q = {
-            { Vector(-2000, 0, -2000), Vector( 2000, 0, -2000),
-              Vector( 2000, 0,  2000), Vector(-2000, 0,  2000) },
-            Vector(0, 1, 0)
-        };
-        appendQuad(Sc, ground, 0, 0, q, matGround,
-                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
-                                 barry::TTextureMode::NORMAL>);
+        // Tiled ground: a grid of small quads instead of one 4000-unit
+        // quad. A single giant quad that straddles the camera in z hits a
+        // near-plane clipper/rasterizer degeneracy at perfectly-level
+        // views (renders as a sheared wedge; flips with ~1px of camera Y).
+        // Real scenes tile their ground so they never hit it — this makes
+        // conetest match. NxN quads over [-2000,2000].
+        constexpr int N = 20;
+        constexpr float EXT = 2000.0f, STEP = (2.0f * EXT) / N;
+        TriMesh* ground = appendTriMesh(Sc, "cone_ground", 4 * N * N, 2 * N * N);
+        int qi = 0;
+        for (int iz = 0; iz < N; ++iz) {
+            for (int ix = 0; ix < N; ++ix, ++qi) {
+                const float x0 = -EXT + ix * STEP, x1 = x0 + STEP;
+                const float z0 = -EXT + iz * STEP, z1 = z0 + STEP;
+                QuadDef q = {
+                    { Vector(x0, 0, z0), Vector(x1, 0, z0),
+                      Vector(x1, 0, z1), Vector(x0, 0, z1) },
+                    Vector(0, 1, 0)
+                };
+                appendQuad(Sc, ground, qi * 4, qi * 2, q, matGround,
+                           TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                         barry::TTextureMode::NORMAL>);
+            }
+        }
     }
     // Opaque occluder cube floating inside the cone, offset to one side so
     // it casts a shadow notch into the volumetric shaft / ground spot and
