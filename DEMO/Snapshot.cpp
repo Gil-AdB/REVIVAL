@@ -1130,6 +1130,34 @@ static void appendQuad(Scene* Sc, TriMesh* T, int vBase, int fBase,
     }
 }
 
+// Compute a TriMesh's bounding sphere from its actual vertices. appendTriMesh
+// installs a bogus default (centre origin, radius 100); without recomputing,
+// the per-object frustum cull in Transform_Objects tests a phantom sphere at
+// the wrong place/size and drops the whole mesh at certain camera angles even
+// when the geometry is on-screen (this is what made conetest's cube/ground
+// vanish mid-screen at a knife-edge view). FLD meshes get this from the
+// loader; hand-built meshes must call this after filling Verts.
+static void finalizeBSphere(TriMesh* T) {
+    if (T->VIndex <= 0) return;
+    Vector mn = T->Verts[0].Pos, mx = mn;
+    for (int i = 1; i < T->VIndex; ++i) {
+        const Vector& p = T->Verts[i].Pos;
+        mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
+        mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
+    }
+    const Vector c = { 0.5f*(mn.x+mx.x), 0.5f*(mn.y+mx.y), 0.5f*(mn.z+mx.z) };
+    float r2 = 0.0f;
+    for (int i = 0; i < T->VIndex; ++i) {
+        const Vector& p = T->Verts[i].Pos;
+        const float dx = p.x-c.x, dy = p.y-c.y, dz = p.z-c.z;
+        const float d = dx*dx + dy*dy + dz*dz;
+        if (d > r2) r2 = d;
+    }
+    T->BSphereCtr    = c;
+    T->BSphereRad    = r2 * 1.01f;              // radius² (tiny pad)
+    T->BSphereRadius = std::sqrt(r2) * 1.005f;  // radius
+}
+
 // Allocate + append a stationary point omni to a scene's OmniHead chain.
 static Omni* appendTestOmni(Scene* Sc, const Vector& pos,
                              float r, float g, float bb,
@@ -1971,6 +1999,7 @@ static Scene* buildConeTestScene() {
                                          barry::TTextureMode::NORMAL>);
             }
         }
+        finalizeBSphere(ground);
     }
     // Opaque occluder cube floating inside the cone, offset to one side so
     // it casts a shadow notch into the volumetric shaft / ground spot and
@@ -2001,6 +2030,7 @@ static Scene* buildConeTestScene() {
             appendQuad(Sc, occ, fi * 4, fi * 2, quads[fi], matWall,
                        TheOtherBarry<barry::TBlendMode::OVERWRITE,
                                      barry::TTextureMode::NORMAL>);
+        finalizeBSphere(occ);
     }
     return Sc;
 }
