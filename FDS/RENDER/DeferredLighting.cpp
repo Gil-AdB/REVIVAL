@@ -5782,8 +5782,19 @@ struct FastFogParams {
 // Hash a 3D integer cell index → 32 random bits. One call yields all
 // three jitter offsets (10 bits each) to keep the per-cell DDA cost low.
 static inline uint32_t cellHash(int ix, int iy, int iz) {
-	uint32_t h = uint32_t(ix) * 0x8DA6B343u ^ uint32_t(iy) * 0xD8163841u
-	           ^ uint32_t(iz) * 0xCB1AB31Fu;
+	// Nonzero seed + rotate-between-terms. A plain XOR of per-axis products
+	// degenerates at the world origin (hash(0,0,0)==0, which survives the whole
+	// finalizer) and on the coordinate planes (a zero coord drops its term, so
+	// the lattice gains a fixed structural feature aligned to the axes). Anchored
+	// at world (0,0,0) that feature lands exactly where origin-centered scene
+	// content sits (e.g. a spot at the origin) and reads as a deliberate disc in
+	// the blob fog rather than honest noise. The seed kills the 0->0 fixed point
+	// and the rotations make the three axis contributions non-commuting so no
+	// coordinate plane collapses the entropy.
+	uint32_t h = 0x9E3779B9u;
+	h ^= uint32_t(ix) * 0x8DA6B343u; h = (h << 13) | (h >> 19);
+	h ^= uint32_t(iy) * 0xD8163841u; h = (h << 13) | (h >> 19);
+	h ^= uint32_t(iz) * 0xCB1AB31Fu; h = (h << 13) | (h >> 19);
 	h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
 	h *= 0x297A2D39u; h ^= h >> 15;
 	return h;
