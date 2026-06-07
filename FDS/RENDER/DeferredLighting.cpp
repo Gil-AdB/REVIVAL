@@ -5774,6 +5774,7 @@ struct FastFogParams {
 	int   inscatterSamples;   // sample count for the sampled/fallback integral (>=1)
 	bool  inscatterAnalytic;  // closed-form arctan integral for unshadowed lights
 	bool  inscatterJitter;    // Bayer per-pixel sample-offset (breaks shadow terraces); off = centered samples
+	bool  shadowEarlyOut;     // skip the per-sample integral where the segment probes fully lit
 	int   shadowPcf;          // PCF radius (texels) for the sampled shadow tap; 0 = single tap
 	// Downsample: coarseStep px between computed samples (2 = half-res).
 	// adaptThresh > 0 enables the adaptive refine (recompute edges).
@@ -6093,44 +6094,82 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 			const float meanRadial = (2.0f * invD * (aHi - aLo)) * invSeg;
 			if (meanRadial <= 0.0f) continue;
 
-			float atten;
-			if (!shadowed) {
-				// cutoff²·cone (slowly varying) at the integrand's peak z* =
-				// closest approach VP/uV, clamped into the in-light interval.
-				float zStar = VP / uV;
-				zStar = zStar < zLo ? zLo : (zStar > zHi ? zHi : zStar);
-				const float aStar = lightAttenAt(L, li, zStar*X, zStar*Y, zStar);
-				if (aStar <= 0.0f) continue;
-				const float ddx = zStar*X - Lx, ddy = zStar*Y - Ly, ddz = zStar - Lz;
-				const float drS2 = (ddx*ddx + ddy*ddy + ddz*ddz) * rr2;   // dr(z*)²
-				atten = aStar * (drS2 + 0.05f) * meanRadial;
-			} else {
-				// Shadowed: the exact coupled integral invSeg·∫kernel·vis, by
-				// IMPORTANCE-sampling z by the RADIAL kernel's own CDF (the atan
-				// is invertible: z(u) = (tan(aLo+u·span)/invD − β)/2α, span=aHi−aLo).
-				// The 1/dist² spike is carried by the importance distribution
-				// (samples cluster at z*), so the Monte-Carlo summand reduces to
-				// shaping(z)·vis(z) — cutoff²·cone (slowly varying) times the
-				// PCF-smoothed visibility, both smooth → tiny variance → no
-				// terraces / no jitter pattern even at a handful of samples, and
-				// UNBIASED (matches the brute-force coupled integral, unlike a
-				// mean-visibility or single-z* approximation).
-				//   glow = invSeg · (∫radial) · mean[ shaping(z_k)·vis(z_k) ]
-				//   ∫radial = 2·invD·span ;  shaping = lightAtten·(dr²+0.05)
-				const float span  = aHi - aLo;
-				const float invNs = 1.0f / float(ns);
-				const float Rint  = 2.0f * invD * span;
-				float acc = 0.0f;
-				for (int k = 0; k < ns; ++k) {
-					const float u = (float(k) + jitter) * invNs;
-					const float z = (std::tan(aLo + u*span) / invD - beta) / twoA;
-					const float att = lightAttenAt(L, li, z*X, z*Y, z);
-					if (att <= 0.0f) continue;
-					const float ddx = z*X - Lx, ddy = z*Y - Ly, ddz = z - Lz;
-					const float shaping = att * ((ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f);
-					acc += shaping * volSpotShadow(L->shadowMapIdx[li], z*X, z*Y, z, P.shadowPcf);
+			// cutoff²·cone (slowly varying) at the integrand's peak z* = closest
+			// approach VP/uV, clamped into the in-light interval. This is the
+			// UNSHADOWED / fully-lit glow.
+			float zStar = VP / uV;
+			zStar = zStar < zLo ? zLo : (zStar > zHi ? zHi : zStar);
+			const float aStar = lightAttenAt(L, li, zStar*X, zStar*Y, zStar);
+			if (aStar <= 0.0f) continue;
+			const float ddxS = zStar*X - Lx, ddyS = zStar*Y - Ly, ddzS = zStar - Lz;
+			const float drS2 = (ddxS*ddxS + ddyS*ddyS + ddzS*ddzS) * rr2;   // dr(z*)²
+			float atten = aStar * (drS2 + 0.05f) * meanRadial;
+
+			if (shadowed) {
+				const int smi = L->shadowMapIdx[li];
+				// Optional fully-lit early-out (flag, lit-heavy views): if PCF
+				// visibility reads 1 at z* and 5 points across the segment, the
+				// ray is unoccluded → the analytic brightness above is exact.
+				bool doLoop = true;
+				if (P.shadowEarlyOut) {
+					bool lit = volSpotShadow(smi, zStar*X, zStar*Y, zStar, P.shadowPcf) >= 1.0f;
+					const float seg4 = (zHi - zLo) * 0.25f;
+					for (int t = 0; t <= 4 && lit; ++t) {
+						const float z = zLo + seg4 * float(t);
+						if (volSpotShadow(smi, z*X, z*Y, z, P.shadowPcf) < 1.0f) lit = false;
+					}
+					doLoop = !lit;
 				}
-				atten = invSeg * Rint * acc * invNs;
+				if (doLoop) {
+					// Exact coupled integral invSeg·∫kernel·vis, IMPORTANCE-sampling
+					// z by the RADIAL kernel's own CDF (atan invertible: z(u) =
+					// (tan(aLo+u·span)/invD − β)/2α). The 1/dist² spike rides the
+					// importance distribution, so the summand is shaping(z)·vis(z)
+					// — cutoff²·cone (slowly varying) × PCF visibility, both smooth
+					// → tiny variance, UNBIASED (matches brute-force coupled), no
+					// terraces / jitter pattern at a handful of samples.
+					//   glow = invSeg · (∫radial) · mean[ shaping(z_k)·vis(z_k) ]
+					// tan of the evenly-spaced angles θ_k = aLo+(k+jitter)·dAng is
+					// advanced by the addition formula tan(θ+dAng) = (t+tD)/(1−t·tD),
+					// so ns tan() calls collapse to two. shaping is cutoff²·cone
+					// computed directly (the radial divide cancels the importance
+					// weight — no lightAttenAt divide-then-remultiply).
+					const float span  = aHi - aLo;
+					const float invNs = 1.0f / float(ns);
+					const float dAng  = span * invNs;
+					const float Rint  = 2.0f * invD * span;
+					const float invDr = 1.0f / invD;          // = √disc
+					const float invTwoA = 1.0f / twoA;
+					const float tD = std::tan(dAng);
+					float t = std::tan(aLo + jitter * dAng);  // tan θ_0
+					const float rR = L->rRange[li], range2 = L->range2[li];
+					const bool  isSpot = L->isSpot[li];
+					const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
+					const float cosO = L->cosOuter[li], cosI = L->cosInner[li];
+					float acc = 0.0f;
+					for (int k = 0; k < ns; ++k) {
+						const float z = (t * invDr - beta) * invTwoA;
+						t = (t + tD) / (1.0f - t * tD);        // advance to θ_{k+1}
+						const float Wx = z*X - Lx, Wy = z*Y - Ly, Wz = z - Lz;
+						const float d2 = Wx*Wx + Wy*Wy + Wz*Wz;
+						if (d2 >= range2 || d2 < 1e-6f) continue;
+						const float dist = std::sqrt(d2);
+						const float cutoff = 1.0f - dist * rR;
+						float shaping = cutoff * cutoff;       // = cutoff²·cone
+						if (isSpot) {
+							const float DW = Dx*Wx + Dy*Wy + Dz*Wz;
+							if (DW <= 0.0f) continue;
+							const float cosT = DW / dist;
+							if (cosT < cosO) continue;
+							if (cosT < cosI) {
+								const float tt = (cosT - cosO) / (cosI - cosO);
+								shaping *= tt * tt * (3.0f - 2.0f * tt);
+							}
+						}
+						acc += shaping * volSpotShadow(smi, z*X, z*Y, z, P.shadowPcf);
+					}
+					atten = invSeg * Rint * acc * invNs;
+				}
 				if (atten <= 0.0f) continue;
 			}
 			gR += L->colR[li] * atten;
@@ -6484,6 +6523,7 @@ void Render_DeferredFastFog() {
 	P.inscatterSamples  = std::max(1, fds::FeatureFlags::fast_fog_inscatter_samples());
 	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
 	P.inscatterJitter   = fds::FeatureFlags::fast_fog_inscatter_jitter();
+	P.shadowEarlyOut    = fds::FeatureFlags::fast_fog_shadow_earlyout();
 	P.shadowPcf         = std::max(0, fds::FeatureFlags::fast_fog_shadow_pcf());
 	P.lights    = g_deferredCtx.lights;
 	P.numLights = g_deferredCtx.numLights;
