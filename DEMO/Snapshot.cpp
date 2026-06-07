@@ -2053,6 +2053,11 @@ struct ConeTestScene : SceneDriver {
         fds::g_mainFaces.resize(8192);
         sc = buildConeTestScene();
         SetCurrentScene(sc);
+        // Allocate the spot's 2D shadow map. Without this g_shadowMaps stays
+        // empty and Render_DeferredShadowMaps early-returns → the spot's
+        // castsShadow flag never produces a map → no shadows (and the in-scatter
+        // glow has nothing to occlude). Needs --shadows (default on).
+        ShadowMaps_Rebuild(sc, 512);
         Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
         setupFaceLists(sc, /*includeOmnisInCount=*/true);
         Scene_RebuildMatTable(sc);
@@ -2358,6 +2363,9 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
     SetCurrentScene(sc);
     View = sc->CameraHead;
     Scene_RebuildMatTable(sc);
+    // Allocate the spot's 2D shadow map (see ConeTestScene::init) so the bake
+    // below has something to fill — otherwise the spot casts no shadow.
+    ShadowMaps_Rebuild(sc, 512);
 
     // Six canonical viewpoints A–F. Spot apex at world (0,400,0)
     // shining DOWN (cone direction = -Y world). All cameras look in
