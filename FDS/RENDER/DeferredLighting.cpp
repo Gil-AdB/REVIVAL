@@ -5773,6 +5773,8 @@ struct FastFogParams {
 	float inscatter;   // 0 = off
 	int   inscatterSamples;   // sample count for the sampled/fallback integral (>=1)
 	bool  inscatterAnalytic;  // closed-form arctan integral for unshadowed lights
+	bool  inscatterJitter;    // Bayer per-pixel sample-offset (breaks shadow terraces); off = centered samples
+	int   shadowPcf;          // PCF radius (texels) for the sampled shadow tap; 0 = single tap
 	// Downsample: coarseStep px between computed samples (2 = half-res).
 	// adaptThresh > 0 enables the adaptive refine (recompute edges).
 	int   coarseStep;
@@ -5874,6 +5876,14 @@ static float blobFieldTau(const FastFogParams& P,
 				u = u < 0.f ? 0.f : (u > 1.f ? 1.f : u);
 				v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
 				w = w < 0.f ? 0.f : (w > 1.f ? 1.f : w);
+				// Quintic fade (Perlin): C2-continuous interpolation weights so
+				// the field has no slope kinks at cell faces. Plain trilinear is
+				// only C0 — its per-face kinks line up along the world-aligned
+				// lattice into visible facet/chevron bands once amplified by the
+				// in-scatter glow. The quintic curves them away.
+				u = u*u*u*(u*(u*6.f - 15.f) + 10.f);
+				v = v*v*v*(v*(v*6.f - 15.f) + 10.f);
+				w = w*w*w*(w*(w*6.f - 15.f) + 10.f);
 				const float x00 = c000 + (c100-c000)*u, x01 = c001 + (c101-c001)*u;
 				const float x10 = c010 + (c110-c010)*u, x11 = c011 + (c111-c011)*u;
 				const float y0  = x00 + (x10-x00)*v,     y1  = x01 + (x11-x01)*v;
@@ -5884,7 +5894,10 @@ static float blobFieldTau(const FastFogParams& P,
 				return d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
 			};
 
-			// 2-point Gauss over [t, segEnd] — exact for the cubic density.
+			// 2-point Gauss over [t, segEnd]. Exact for trilinear (cubic along
+			// the ray); the quintic fade in sample() lifts the degree, but the
+			// per-cell segment is short enough that 2-point matches a 16-point
+			// composite midpoint to <1 level (verified) — keep it cheap.
 			const float mid = 0.5f*(t + segEnd), hlen = 0.5f*(segEnd - t);
 			constexpr float gq = 0.5773502692f;
 			float dens = hlen * (sample(mid - hlen*gq) + sample(mid + hlen*gq));
@@ -5902,10 +5915,15 @@ static float blobFieldTau(const FastFogParams& P,
 	return tau;
 }
 
-// Binary shadow test for a view-space point against a spot's shadow map.
-// Single tap (no PCF), constant bias only (a volume point has no surface
-// normal for slope bias). Returns 1.0 lit, 0.0 occluded.
-static inline float volSpotShadow(int smIdx, float x, float y, float z) {
+// Shadow test for a view-space point against a spot's shadow map. Returns
+// visibility in [0,1] (1 lit, 0 occluded). Constant bias only (a volume point
+// has no surface normal for slope bias). pcf=0 → single binary tap; pcf>0 → a
+// (2·pcf+1)² PCF box, returning FRACTIONAL visibility. The fraction is what
+// kills the along-ray terracing cheaply: with a binary tap, neighbouring
+// in-scatter samples flip 0→1 at the shadow edge in one step (→ 1/ns bands),
+// so you need huge ns to hide it; PCF spreads the edge over a soft penumbra
+// so a handful of samples already read smooth.
+static inline float volSpotShadow(int smIdx, float x, float y, float z, int pcf) {
 	if (smIdx < 0 || size_t(smIdx) >= g_shadowMaps.size()) return 1.0f;
 	const ShadowMap& sm = g_shadowMaps[smIdx];
 	const float lx = sm.viewToLight[0][0]*x + sm.viewToLight[0][1]*y + sm.viewToLight[0][2]*z + sm.viewToLightOffset.x;
@@ -5913,15 +5931,33 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z) {
 	const float lz = sm.viewToLight[2][0]*x + sm.viewToLight[2][1]*y + sm.viewToLight[2][2]*z + sm.viewToLightOffset.z;
 	if (lz <= 0.0f) return 1.0f;
 	const float invLZ = 1.0f / lz;
-	const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
-	const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
-	if (iX < 0 || iX >= sm.xres || iY < 0 || iY >= sm.yres) return 1.0f;
-	const size_t idx = size_t(iY) * size_t(sm.xres) + size_t(iX);
-	uint16_t occ = sm.depth[idx];
-	if (!sm.depth_dynamic.empty()) occ = std::max(occ, sm.depth_dynamic[idx]);
-	int pixZ = 0xFF80 - int(lz * sm.zScale);
-	constexpr int kVolShadowBias = 80;
-	return (pixZ + kVolShadowBias < int(occ)) ? 0.0f : 1.0f;
+	const int cX = int(sm.cntrX + sm.perspX * lx * invLZ);
+	const int cY = int(sm.cntrY - sm.perspY * ly * invLZ);
+	if (cX < 0 || cX >= sm.xres || cY < 0 || cY >= sm.yres) return 1.0f;
+	const int pixZ = (0xFF80 - int(lz * sm.zScale)) + 80;   // +kVolShadowBias
+	const bool hasDyn = !sm.depth_dynamic.empty();
+	if (pcf <= 0) {
+		const size_t idx = size_t(cY) * size_t(sm.xres) + size_t(cX);
+		uint16_t occ = sm.depth[idx];
+		if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+		return (pixZ < int(occ)) ? 0.0f : 1.0f;
+	}
+	int lit = 0, total = 0;
+	for (int dy = -pcf; dy <= pcf; ++dy) {
+		const int sy = cY + dy;
+		if (sy < 0 || sy >= sm.yres) continue;
+		const size_t row = size_t(sy) * size_t(sm.xres);
+		for (int dx = -pcf; dx <= pcf; ++dx) {
+			const int sx = cX + dx;
+			if (sx < 0 || sx >= sm.xres) continue;
+			const size_t idx = row + size_t(sx);
+			uint16_t occ = sm.depth[idx];
+			if (hasDyn) occ = std::max(occ, sm.depth_dynamic[idx]);
+			lit += (pixZ < int(occ)) ? 0 : 1;
+			++total;
+		}
+	}
+	return total ? float(lit) / float(total) : 1.0f;
 }
 
 // Attenuation of one light at a view-space point Pv (distance + cone falloff,
@@ -5968,7 +6004,7 @@ static inline float lightAttenAt(const ViewLightsSoA *L, int li,
 //     closed form (same reason vol_cone_analytic ray-marches shadowed spots), so
 //     fall back to ns stratified samples with the shadow tap per sample.
 static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
-                                       float zA, float zB,
+                                       float zA, float zB, float jitter,
                                        float& gR, float& gG, float& gB)
 {
 	const ViewLightsSoA *L = P.lights;
@@ -5981,63 +6017,68 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 	for (int li = 0; li < P.numLights; ++li) {
 		if (L->mirrorId[li] != 0) continue;            // clones don't glow
 
-		const bool shadowed = L->shadowMapIdx[li] >= 0;
-		if (P.inscatterAnalytic && !shadowed) {
-			const float rr  = L->rRange[li], rr2 = rr*rr;
-			const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
-			const float VP = X*Lx + Y*Ly + Lz;        // <Pv(z),L>/z linear term
-			const float PP = Lx*Lx + Ly*Ly + Lz*Lz;   // |L|²
+		const float rr  = L->rRange[li], rr2 = rr*rr;
+		const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+		const float VP = X*Lx + Y*Ly + Lz;            // <Pv(z),L>/z linear term
+		const float PP = Lx*Lx + Ly*Ly + Lz*Lz;       // |L|²
 
-			// Clip the integration interval [zLo,zHi] to the light's actual
-			// passage through (range sphere) ∩ (spot cone, forward half) — the
-			// integrand has compact support there. Integrating the radial kernel
-			// over the WHOLE [zA,zB] (cone factor pinned at one point) over-
-			// counts; this matches what vol_cone_analytic does (its [zLo,zHi]).
-			float zLo = zA, zHi = zB;
-			// Range sphere: |Pv-L|² = r². uV z² - 2 VP z + (PP-r²) = 0.
-			const float sphereC    = PP - L->range2[li];
-			const float sphereDisc = VP*VP - uV*sphereC;
-			if (sphereDisc <= 0.0f) continue;          // ray misses the sphere
-			const float sphereSq = std::sqrt(sphereDisc);
-			const float zSphLo = (VP - sphereSq) / uV, zSphHi = (VP + sphereSq) / uV;
-			if (zLo < zSphLo) zLo = zSphLo;
-			if (zHi > zSphHi) zHi = zSphHi;
-			if (L->isSpot[li]) {
-				// Cone: (D·W)² = cosO²|W|². a z² + b z + cq = 0 in z.
-				const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
-				const float DV = Dx*X + Dy*Y + Dz, DP = Dx*Lx + Dy*Ly + Dz*Lz;
-				const float c2 = L->cosOuter[li] * L->cosOuter[li];
-				const float a  = DV*DV - c2*uV;
-				const float b  = 2.0f*(c2*VP - DV*DP);
-				const float cq = DP*DP - c2*PP;
-				if (a < -1e-8f) {                       // ray enters & exits cone
-					const float d = b*b - 4.0f*a*cq;
-					if (d < 0.0f) continue;
+		// Clip the integration interval [zLo,zHi] to the light's actual passage
+		// through (range sphere) ∩ (spot cone, forward half) — the integrand has
+		// compact support there. BOTH paths use this: the analytic path needs it
+		// so the cone factor isn't over-counted (matches vol_cone_analytic); the
+		// SAMPLED path needs it so all ns samples land inside the support instead
+		// of being spread over the whole [zA,zB] fog span — otherwise the few
+		// samples that happen to hit the ~1/dist² near-field spike quantise it
+		// into concentric rings (the "distinct circles" under shadow-cast spots).
+		float zLo = zA, zHi = zB;
+		// Range sphere: |Pv-L|² = r². uV z² - 2 VP z + (PP-r²) = 0.
+		const float sphereC    = PP - L->range2[li];
+		const float sphereDisc = VP*VP - uV*sphereC;
+		if (sphereDisc <= 0.0f) continue;             // ray misses the sphere
+		const float sphereSq = std::sqrt(sphereDisc);
+		const float zSphLo = (VP - sphereSq) / uV, zSphHi = (VP + sphereSq) / uV;
+		if (zLo < zSphLo) zLo = zSphLo;
+		if (zHi > zSphHi) zHi = zSphHi;
+		if (L->isSpot[li]) {
+			// Cone: (D·W)² = cosO²|W|². a z² + b z + cq = 0 in z.
+			const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
+			const float DV = Dx*X + Dy*Y + Dz, DP = Dx*Lx + Dy*Ly + Dz*Lz;
+			const float c2 = L->cosOuter[li] * L->cosOuter[li];
+			const float a  = DV*DV - c2*uV;
+			const float b  = 2.0f*(c2*VP - DV*DP);
+			const float cq = DP*DP - c2*PP;
+			if (a < -1e-8f) {                          // ray enters & exits cone
+				const float d = b*b - 4.0f*a*cq;
+				if (d < 0.0f) continue;
+				const float sq = std::sqrt(d), inv2a = 0.5f / a;
+				const float r1 = (-b - sq)*inv2a, r2 = (-b + sq)*inv2a;
+				if (zLo < std::min(r1,r2)) zLo = std::min(r1,r2);
+				if (zHi > std::max(r1,r2)) zHi = std::max(r1,r2);
+			} else if (a > 1e-8f) {                    // cone opens the other way
+				const float d = b*b - 4.0f*a*cq;
+				if (d >= 0.0f) {
 					const float sq = std::sqrt(d), inv2a = 0.5f / a;
-					const float r1 = (-b - sq)*inv2a, r2 = (-b + sq)*inv2a;
-					if (zLo < std::min(r1,r2)) zLo = std::min(r1,r2);
-					if (zHi > std::max(r1,r2)) zHi = std::max(r1,r2);
-				} else if (a > 1e-8f) {                 // cone opens the other way
-					const float d = b*b - 4.0f*a*cq;
-					if (d >= 0.0f) {
-						const float sq = std::sqrt(d), inv2a = 0.5f / a;
-						const float r1 = std::min((-b-sq)*inv2a,(-b+sq)*inv2a);
-						const float r2 = std::max((-b-sq)*inv2a,(-b+sq)*inv2a);
-						if (DV > 1e-6f)      { if (zLo < r2) zLo = r2; }
-						else if (DV < -1e-6f){ if (zHi > r1) zHi = r1; }
-						else continue;
-					}
-				} else continue;
-				// Forward half (D·W ≥ 0): the cone is single-sheeted.
-				if (std::fabs(DV) > 1e-6f) {
-					const float zFwd = DP / DV;
-					if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
-					else           { if (zHi > zFwd) zHi = zFwd; }
+					const float r1 = std::min((-b-sq)*inv2a,(-b+sq)*inv2a);
+					const float r2 = std::max((-b-sq)*inv2a,(-b+sq)*inv2a);
+					if (DV > 1e-6f)      { if (zLo < r2) zLo = r2; }
+					else if (DV < -1e-6f){ if (zHi > r1) zHi = r1; }
+					else continue;
 				}
+			} else continue;
+			// Forward half (D·W ≥ 0): the cone is single-sheeted.
+			if (std::fabs(DV) > 1e-6f) {
+				const float zFwd = DP / DV;
+				if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
+				else           { if (zHi > zFwd) zHi = zFwd; }
 			}
-			if (zHi <= zLo) continue;                  // segment never in-light
+		}
+		if (zHi <= zLo) continue;                      // segment never in-light
 
-			// ∫[zLo,zHi] dz/(αz²+βz+γ) = 2/√disc·Δatan, αz²+βz+γ = dr²+0.05.
+		const bool shadowed = L->shadowMapIdx[li] >= 0;
+		if (P.inscatterAnalytic) {
+			// ── Brightness: exact analytic integral (no 1/dist² spike noise,
+			// no sampling bias). ∫[zLo,zHi] dz/(αz²+βz+γ)=2/√disc·Δatan, with
+			// αz²+βz+γ = dr²+0.05.
 			const float alpha = rr2 * uV;
 			const float beta  = -2.0f * rr2 * VP;
 			const float gamma = rr2 * PP + 0.05f;
@@ -6052,31 +6093,64 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 			const float meanRadial = (2.0f * invD * (aHi - aLo)) * invSeg;
 			if (meanRadial <= 0.0f) continue;
 
-			// cutoff² and cone smoothstep (slowly varying) at the integrand's
-			// peak z* = closest approach VP/uV, clamped into the in-light interval.
-			float zStar = VP / uV;
-			zStar = zStar < zLo ? zLo : (zStar > zHi ? zHi : zStar);
-			const float aStar = lightAttenAt(L, li, zStar*X, zStar*Y, zStar);
-			if (aStar <= 0.0f) continue;
-			// aStar = cutoff²·cone/(dr²+0.05); recover cutoff²·cone by ×(dr²+0.05).
-			const float ddx = zStar*X - Lx, ddy = zStar*Y - Ly, ddz = zStar - Lz;
-			const float drS2 = (ddx*ddx + ddy*ddy + ddz*ddz) * rr2;   // = dr(z*)²
-			const float atten = aStar * (drS2 + 0.05f) * meanRadial;
+			float atten;
+			if (!shadowed) {
+				// cutoff²·cone (slowly varying) at the integrand's peak z* =
+				// closest approach VP/uV, clamped into the in-light interval.
+				float zStar = VP / uV;
+				zStar = zStar < zLo ? zLo : (zStar > zHi ? zHi : zStar);
+				const float aStar = lightAttenAt(L, li, zStar*X, zStar*Y, zStar);
+				if (aStar <= 0.0f) continue;
+				const float ddx = zStar*X - Lx, ddy = zStar*Y - Ly, ddz = zStar - Lz;
+				const float drS2 = (ddx*ddx + ddy*ddy + ddz*ddz) * rr2;   // dr(z*)²
+				atten = aStar * (drS2 + 0.05f) * meanRadial;
+			} else {
+				// Shadowed: the exact coupled integral invSeg·∫kernel·vis, by
+				// IMPORTANCE-sampling z by the RADIAL kernel's own CDF (the atan
+				// is invertible: z(u) = (tan(aLo+u·span)/invD − β)/2α, span=aHi−aLo).
+				// The 1/dist² spike is carried by the importance distribution
+				// (samples cluster at z*), so the Monte-Carlo summand reduces to
+				// shaping(z)·vis(z) — cutoff²·cone (slowly varying) times the
+				// PCF-smoothed visibility, both smooth → tiny variance → no
+				// terraces / no jitter pattern even at a handful of samples, and
+				// UNBIASED (matches the brute-force coupled integral, unlike a
+				// mean-visibility or single-z* approximation).
+				//   glow = invSeg · (∫radial) · mean[ shaping(z_k)·vis(z_k) ]
+				//   ∫radial = 2·invD·span ;  shaping = lightAtten·(dr²+0.05)
+				const float span  = aHi - aLo;
+				const float invNs = 1.0f / float(ns);
+				const float Rint  = 2.0f * invD * span;
+				float acc = 0.0f;
+				for (int k = 0; k < ns; ++k) {
+					const float u = (float(k) + jitter) * invNs;
+					const float z = (std::tan(aLo + u*span) / invD - beta) / twoA;
+					const float att = lightAttenAt(L, li, z*X, z*Y, z);
+					if (att <= 0.0f) continue;
+					const float ddx = z*X - Lx, ddy = z*Y - Ly, ddz = z - Lz;
+					const float shaping = att * ((ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f);
+					acc += shaping * volSpotShadow(L->shadowMapIdx[li], z*X, z*Y, z, P.shadowPcf);
+				}
+				atten = invSeg * Rint * acc * invNs;
+				if (atten <= 0.0f) continue;
+			}
 			gR += L->colR[li] * atten;
 			gG += L->colG[li] * atten;
 			gB += L->colB[li] * atten;
 		} else {
-			// Sampled fallback (shadowed spots, or analytic disabled).
-			const float dz = seg / float(ns);
+			// Fully-sampled path (--no-fast_fog_inscatter_analytic): kernel×shadow
+			// per sample, normalised by the FULL segment. Placed across the CLIPPED
+			// [zLo,zHi] so all ns samples land in the support. Jitter decorrelates
+			// the binary shadow tap's 1/ns terracing into dither.
+			const float dz = (zHi - zLo) / float(ns);
 			float acc = 0.0f;
 			for (int k = 0; k < ns; ++k) {
-				const float z = zA + (float(k) + 0.5f) * dz;
+				const float z = zLo + (float(k) + jitter) * dz;
 				float a = lightAttenAt(L, li, z*X, z*Y, z);
 				if (a > 0.0f && shadowed)
-					a *= volSpotShadow(L->shadowMapIdx[li], z*X, z*Y, z);
+					a *= volSpotShadow(L->shadowMapIdx[li], z*X, z*Y, z, P.shadowPcf);
 				acc += a;
 			}
-			const float atten = acc / float(ns);       // mean over the segment
+			const float atten = acc * dz * invSeg;     // ∫[zLo,zHi]/seg
 			gR += L->colR[li] * atten;
 			gG += L->colG[li] * atten;
 			gB += L->colB[li] * atten;
@@ -6166,7 +6240,19 @@ static inline float fogAtPixel(const FastFogParams& P, int px, int py,
 	// disc/shell a single midpoint sample produces.
 	if (P.inscatter > 0.0f && P.lights && amt > 0.0f) {
 		float gR = 0.0f, gG = 0.0f, gB = 0.0f;
-		fogInscatterSegment(P, X, Y, zA, zB, gR, gG, gB);
+		// Per-pixel sample-offset in [0,1) for the sampled in-scatter path,
+		// breaking up the binary shadow tap's 1/ns terracing. Interleaved
+		// Gradient Noise (Jimenez): a low-discrepancy hash that spreads offsets
+		// like an ordered dither (so the shadow edge reconstructs smoothly) but
+		// WITHOUT a Bayer tile's visible regular crosshatch — and far less
+		// grainy than a white-noise hash. Degrades gracefully under the half-res
+		// upsample where a Bayer tile would alias into a coarse weave.
+		float ign = 0.06711056f * float(px) + 0.00583715f * float(py);
+		ign = 52.9829189f * (ign - std::floor(ign));
+		ign = ign - std::floor(ign);                       // [0,1)
+		const float jitter = P.inscatterJitter ? ign
+		    : 0.5f;   // off → centered (k+0.5) samples (terraces unless PCF/high ns)
+		fogInscatterSegment(P, X, Y, zA, zB, jitter, gR, gG, gB);
 		const float s = amt * P.inscatter;
 		glowR = gR * s; glowG = gG * s; glowB = gB * s;
 	}
@@ -6182,20 +6268,31 @@ static inline void fogComposite(const FastFogParams& P, size_t i, float amt,
 	dword *out = reinterpret_cast<dword*>(VPage);
 	const float keep = 1.0f - amt;
 	const dword pix = out[i];
-	// Triangular dither (sum of two hashed uniforms) added before the 8-bit
-	// truncate, to dissolve the contour banding that quantizing a smooth
-	// low-contrast fog gradient produces. Stable per screen pixel (hash of i)
-	// so it doesn't shimmer. Same offset on all channels = a luminance dither.
-	float dith = 0.0f;
+	// Triangular (TPDF) dither added before the 8-bit truncate, to dissolve the
+	// contour banding that quantizing a smooth low-contrast fog gradient produces.
+	// Stable per screen pixel (hash of i) so it doesn't shimmer. INDEPENDENT
+	// offset per channel: a single shared offset only dithers luminance and
+	// leaves chroma bands in the colored in-scatter glow (every channel's
+	// quantization contour lands at the same pixel); decorrelating the three
+	// breaks the colored rings too. Grey fog is unaffected (the means cancel).
+	float dR = 0.0f, dG = 0.0f, dB = 0.0f;
 	if (P.ditherAmp > 0.0f) {
-		uint32_t h = uint32_t(i) * 0x9E3779B9u; h ^= h >> 15; h *= 0x85EBCA6Bu; h ^= h >> 13;
-		const float r1 = float( h        & 0xFFFFu) * (1.0f/65536.0f);
-		const float r2 = float((h >> 16) & 0xFFFFu) * (1.0f/65536.0f);
-		dith = (r1 + r2 - 1.0f) * P.ditherAmp;   // triangular, [-amp, +amp]
+		// One TPDF sample per channel from a hash; each channel gets its own
+		// seed so the three offsets are uncorrelated.
+		auto tpdf = [&](uint32_t seed) -> float {
+			uint32_t h = seed * 0x9E3779B9u; h ^= h >> 15; h *= 0x85EBCA6Bu; h ^= h >> 13;
+			const float r1 = float( h        & 0xFFFFu) * (1.0f/65536.0f);
+			const float r2 = float((h >> 16) & 0xFFFFu) * (1.0f/65536.0f);
+			return (r1 + r2 - 1.0f) * P.ditherAmp;   // triangular, [-amp, +amp]
+		};
+		const uint32_t s = uint32_t(i);
+		dR = tpdf(s);
+		dG = tpdf(s ^ 0x68E31DA4u);
+		dB = tpdf(s ^ 0xB5297A4Du);
 	}
-	int nR = int(float((pix >> 16) & 0xFFu) * keep + P.fogR * amt + gR + dith);
-	int nG = int(float((pix >>  8) & 0xFFu) * keep + P.fogG * amt + gG + dith);
-	int nB = int(float( pix        & 0xFFu) * keep + P.fogB * amt + gB + dith);
+	int nR = int(float((pix >> 16) & 0xFFu) * keep + P.fogR * amt + gR + dR);
+	int nG = int(float((pix >>  8) & 0xFFu) * keep + P.fogG * amt + gG + dG);
+	int nB = int(float( pix        & 0xFFu) * keep + P.fogB * amt + gB + dB);
 	if (nR > 255) nR = 255; if (nR < 0) nR = 0;
 	if (nG > 255) nG = 255; if (nG < 0) nG = 0;
 	if (nB > 255) nB = 255; if (nB < 0) nB = 0;
@@ -6386,6 +6483,8 @@ void Render_DeferredFastFog() {
 	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
 	P.inscatterSamples  = std::max(1, fds::FeatureFlags::fast_fog_inscatter_samples());
 	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
+	P.inscatterJitter   = fds::FeatureFlags::fast_fog_inscatter_jitter();
+	P.shadowPcf         = std::max(0, fds::FeatureFlags::fast_fog_shadow_pcf());
 	P.lights    = g_deferredCtx.lights;
 	P.numLights = g_deferredCtx.numLights;
 	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
