@@ -5771,6 +5771,8 @@ struct FastFogParams {
 	const ViewLightsSoA *lights;
 	int   numLights;
 	float inscatter;   // 0 = off
+	int   inscatterSamples;   // sample count for the sampled/fallback integral (>=1)
+	bool  inscatterAnalytic;  // closed-form arctan integral for unshadowed lights
 	// Downsample: coarseStep px between computed samples (2 = half-res).
 	// adaptThresh > 0 enables the adaptive refine (recompute edges).
 	int   coarseStep;
@@ -5922,44 +5924,163 @@ static inline float volSpotShadow(int smIdx, float x, float y, float z) {
 	return (pixZ + kVolShadowBias < int(occ)) ? 0.0f : 1.0f;
 }
 
-// In-scatter glow at a view-space point Pv = (zMid·X, zMid·Y, zMid): sum the
-// scene lights reaching that point (distance + cone falloff, same shape as the
-// halo/cone passes), so the fog medium glows near lamps. Single-sample at the
-// fog segment midpoint — cheap; scaled by fog amount + strength by the caller.
-// Shadow-casting spots get a shadow-map tap so the glow respects occluders
-// (no leaking through walls); omnis / cube-shadow casters are unshadowed.
-static inline void fogInscatter(const FastFogParams& P, float Px, float Py, float Pz,
-                                float& gR, float& gG, float& gB)
+// Attenuation of one light at a view-space point Pv (distance + cone falloff,
+// same shape as the halo/cone surface passes). Returns 0 outside range / behind
+// the cone. No shadow tap (the caller adds it where needed) and no colour.
+static inline float lightAttenAt(const ViewLightsSoA *L, int li,
+                                 float Px, float Py, float Pz)
+{
+	const float Wx = Px - L->posX[li], Wy = Py - L->posY[li], Wz = Pz - L->posZ[li];
+	const float d2 = Wx*Wx + Wy*Wy + Wz*Wz;
+	if (d2 >= L->range2[li] || d2 < 1e-6f) return 0.0f;
+	const float dist = std::sqrt(d2);
+	const float dr   = dist * L->rRange[li];
+	const float cutoff = 1.0f - dr;
+	float atten = cutoff * cutoff / (dr*dr + 0.05f);
+	if (L->isSpot[li]) {
+		const float DW = L->dirX[li]*Wx + L->dirY[li]*Wy + L->dirZ[li]*Wz;
+		if (DW <= 0.0f) return 0.0f;
+		const float cosT = DW / dist;
+		const float cosO = L->cosOuter[li];
+		if (cosT < cosO) return 0.0f;
+		const float cosI = L->cosInner[li];
+		if (cosT < cosI) {
+			const float tt = (cosT - cosO) / (cosI - cosO);
+			atten *= tt * tt * (3.0f - 2.0f * tt);
+		}
+	}
+	return atten;
+}
+
+// In-scatter glow integrated over the view-ray fog segment [zA,zB] (ray point
+// Pv(z) = (z·X, z·Y, z)): the MEAN attenuation × colour over the segment, summed
+// over lights, into gR/gG/gB (the caller scales by fog amount × strength).
+//
+// The radial kernel is cutoff²/(dr²+0.05) — a near-1/dist² term that spikes in a
+// lamp's near field. A single midpoint sample of it prints a bright disc/shell
+// wherever the midpoint locus crosses a lamp. We instead INTEGRATE it:
+//   • Unshadowed lights (inscatterAnalytic): closed form. dr²+0.05 = αz²+βz+γ,
+//     so ∫dz/(αz²+βz+γ) = 2/√disc·Δatan — the same arctan integral the cone/halo
+//     analytic passes use. cutoff² and the cone smoothstep (slowly varying) are
+//     taken at the segment's closest-approach point z* = clamp(VP/uV, zA, zB),
+//     where the integrand peaks. Finite and smooth → no disc.
+//   • Shadow-casting spots: the per-point shadow tap can't be integrated in
+//     closed form (same reason vol_cone_analytic ray-marches shadowed spots), so
+//     fall back to ns stratified samples with the shadow tap per sample.
+static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
+                                       float zA, float zB,
+                                       float& gR, float& gG, float& gB)
 {
 	const ViewLightsSoA *L = P.lights;
+	const float seg = zB - zA;
+	if (seg <= 0.0f) return;
+	const float invSeg = 1.0f / seg;
+	const float uV = X*X + Y*Y + 1.0f;
+	const int   ns = P.inscatterSamples > 0 ? P.inscatterSamples : 1;
+
 	for (int li = 0; li < P.numLights; ++li) {
 		if (L->mirrorId[li] != 0) continue;            // clones don't glow
-		const float Wx = Px - L->posX[li], Wy = Py - L->posY[li], Wz = Pz - L->posZ[li];
-		const float d2 = Wx*Wx + Wy*Wy + Wz*Wz;
-		if (d2 >= L->range2[li] || d2 < 1e-6f) continue;
-		const float dist = std::sqrt(d2);
-		const float dr   = dist * L->rRange[li];
-		const float cutoff = 1.0f - dr;
-		float atten = cutoff * cutoff / (dr*dr + 0.05f);
-		if (L->isSpot[li]) {
-			const float DW = L->dirX[li]*Wx + L->dirY[li]*Wy + L->dirZ[li]*Wz;
-			if (DW <= 0.0f) continue;
-			const float cosT = DW / dist;
-			const float cosO = L->cosOuter[li];
-			if (cosT < cosO) continue;
-			const float cosI = L->cosInner[li];
-			if (cosT < cosI) {
-				const float tt = (cosT - cosO) / (cosI - cosO);
-				atten *= tt * tt * (3.0f - 2.0f * tt);
+
+		const bool shadowed = L->shadowMapIdx[li] >= 0;
+		if (P.inscatterAnalytic && !shadowed) {
+			const float rr  = L->rRange[li], rr2 = rr*rr;
+			const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+			const float VP = X*Lx + Y*Ly + Lz;        // <Pv(z),L>/z linear term
+			const float PP = Lx*Lx + Ly*Ly + Lz*Lz;   // |L|²
+
+			// Clip the integration interval [zLo,zHi] to the light's actual
+			// passage through (range sphere) ∩ (spot cone, forward half) — the
+			// integrand has compact support there. Integrating the radial kernel
+			// over the WHOLE [zA,zB] (cone factor pinned at one point) over-
+			// counts; this matches what vol_cone_analytic does (its [zLo,zHi]).
+			float zLo = zA, zHi = zB;
+			// Range sphere: |Pv-L|² = r². uV z² - 2 VP z + (PP-r²) = 0.
+			const float sphereC    = PP - L->range2[li];
+			const float sphereDisc = VP*VP - uV*sphereC;
+			if (sphereDisc <= 0.0f) continue;          // ray misses the sphere
+			const float sphereSq = std::sqrt(sphereDisc);
+			const float zSphLo = (VP - sphereSq) / uV, zSphHi = (VP + sphereSq) / uV;
+			if (zLo < zSphLo) zLo = zSphLo;
+			if (zHi > zSphHi) zHi = zSphHi;
+			if (L->isSpot[li]) {
+				// Cone: (D·W)² = cosO²|W|². a z² + b z + cq = 0 in z.
+				const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
+				const float DV = Dx*X + Dy*Y + Dz, DP = Dx*Lx + Dy*Ly + Dz*Lz;
+				const float c2 = L->cosOuter[li] * L->cosOuter[li];
+				const float a  = DV*DV - c2*uV;
+				const float b  = 2.0f*(c2*VP - DV*DP);
+				const float cq = DP*DP - c2*PP;
+				if (a < -1e-8f) {                       // ray enters & exits cone
+					const float d = b*b - 4.0f*a*cq;
+					if (d < 0.0f) continue;
+					const float sq = std::sqrt(d), inv2a = 0.5f / a;
+					const float r1 = (-b - sq)*inv2a, r2 = (-b + sq)*inv2a;
+					if (zLo < std::min(r1,r2)) zLo = std::min(r1,r2);
+					if (zHi > std::max(r1,r2)) zHi = std::max(r1,r2);
+				} else if (a > 1e-8f) {                 // cone opens the other way
+					const float d = b*b - 4.0f*a*cq;
+					if (d >= 0.0f) {
+						const float sq = std::sqrt(d), inv2a = 0.5f / a;
+						const float r1 = std::min((-b-sq)*inv2a,(-b+sq)*inv2a);
+						const float r2 = std::max((-b-sq)*inv2a,(-b+sq)*inv2a);
+						if (DV > 1e-6f)      { if (zLo < r2) zLo = r2; }
+						else if (DV < -1e-6f){ if (zHi > r1) zHi = r1; }
+						else continue;
+					}
+				} else continue;
+				// Forward half (D·W ≥ 0): the cone is single-sheeted.
+				if (std::fabs(DV) > 1e-6f) {
+					const float zFwd = DP / DV;
+					if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
+					else           { if (zHi > zFwd) zHi = zFwd; }
+				}
 			}
-			if (L->shadowMapIdx[li] >= 0) {
-				atten *= volSpotShadow(L->shadowMapIdx[li], Px, Py, Pz);
-				if (atten <= 0.0f) continue;
+			if (zHi <= zLo) continue;                  // segment never in-light
+
+			// ∫[zLo,zHi] dz/(αz²+βz+γ) = 2/√disc·Δatan, αz²+βz+γ = dr²+0.05.
+			const float alpha = rr2 * uV;
+			const float beta  = -2.0f * rr2 * VP;
+			const float gamma = rr2 * PP + 0.05f;
+			const float disc  = 4.0f*alpha*gamma - beta*beta;   // > 0 (the +0.05)
+			if (disc <= 0.0f) continue;
+			const float invD  = 1.0f / std::sqrt(disc);
+			const float twoA  = alpha + alpha;
+			const float aHi   = std::atan((twoA*zHi + beta) * invD);
+			const float aLo   = std::atan((twoA*zLo + beta) * invD);
+			// Normalise by the FULL segment (zB-zA): glow is the mean attenuation
+			// over the ray's fog span, with the out-of-light part contributing 0.
+			const float meanRadial = (2.0f * invD * (aHi - aLo)) * invSeg;
+			if (meanRadial <= 0.0f) continue;
+
+			// cutoff² and cone smoothstep (slowly varying) at the integrand's
+			// peak z* = closest approach VP/uV, clamped into the in-light interval.
+			float zStar = VP / uV;
+			zStar = zStar < zLo ? zLo : (zStar > zHi ? zHi : zStar);
+			const float aStar = lightAttenAt(L, li, zStar*X, zStar*Y, zStar);
+			if (aStar <= 0.0f) continue;
+			// aStar = cutoff²·cone/(dr²+0.05); recover cutoff²·cone by ×(dr²+0.05).
+			const float ddx = zStar*X - Lx, ddy = zStar*Y - Ly, ddz = zStar - Lz;
+			const float drS2 = (ddx*ddx + ddy*ddy + ddz*ddz) * rr2;   // = dr(z*)²
+			const float atten = aStar * (drS2 + 0.05f) * meanRadial;
+			gR += L->colR[li] * atten;
+			gG += L->colG[li] * atten;
+			gB += L->colB[li] * atten;
+		} else {
+			// Sampled fallback (shadowed spots, or analytic disabled).
+			const float dz = seg / float(ns);
+			float acc = 0.0f;
+			for (int k = 0; k < ns; ++k) {
+				const float z = zA + (float(k) + 0.5f) * dz;
+				float a = lightAttenAt(L, li, z*X, z*Y, z);
+				if (a > 0.0f && shadowed)
+					a *= volSpotShadow(L->shadowMapIdx[li], z*X, z*Y, z);
+				acc += a;
 			}
+			const float atten = acc / float(ns);       // mean over the segment
+			gR += L->colR[li] * atten;
+			gG += L->colG[li] * atten;
+			gB += L->colB[li] * atten;
 		}
-		gR += L->colR[li] * atten;
-		gG += L->colG[li] * atten;
-		gB += L->colB[li] * atten;
 	}
 }
 
@@ -6037,13 +6158,15 @@ static inline float fogAtPixel(const FastFogParams& P, int px, int py,
 	if (amt < 0.0f) amt = 0.0f;
 	if (amt > 1.0f) amt = 1.0f;
 
-	// In-scatter glow: lights reaching the fog-segment midpoint, scaled by
-	// how much fog is along the ray. Premultiplied so the compositor just
-	// adds it. (Single midpoint sample — option 1; cheap.)
+	// In-scatter glow: lights reaching the fog segment, scaled by how much fog
+	// is along the ray. Premultiplied so the compositor just adds it. The
+	// segment integrator returns the mean attenuation over [zA,zB] (closed-form
+	// arctan for unshadowed lights, sampled for shadowed) — integrating the
+	// 1/dist² near-field instead of point-sampling it dissolves the bright
+	// disc/shell a single midpoint sample produces.
 	if (P.inscatter > 0.0f && P.lights && amt > 0.0f) {
-		const float zMid = 0.5f * (zA + zB);
 		float gR = 0.0f, gG = 0.0f, gB = 0.0f;
-		fogInscatter(P, zMid * X, zMid * Y, zMid, gR, gG, gB);
+		fogInscatterSegment(P, X, Y, zA, zB, gR, gG, gB);
 		const float s = amt * P.inscatter;
 		glowR = gR * s; glowG = gG * s; glowB = gB * s;
 	}
@@ -6261,6 +6384,8 @@ void Render_DeferredFastFog() {
 	// In-scatter glow reuses the deferred light SoA (view-space positions,
 	// colors, ranges, cone params already set up for the frame).
 	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
+	P.inscatterSamples  = std::max(1, fds::FeatureFlags::fast_fog_inscatter_samples());
+	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
 	P.lights    = g_deferredCtx.lights;
 	P.numLights = g_deferredCtx.numLights;
 	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
