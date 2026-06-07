@@ -2357,12 +2357,17 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
     Specular_Factor  = 1.0f;
     Range_Factor     = 1.0f;
 
-    fds::g_mainFaces.resize(8192);
-
     Scene* sc = buildConeTestScene();
     SetCurrentScene(sc);
     View = sc->CameraHead;
     Scene_RebuildMatTable(sc);
+    // FList_Allocate sizes g_mainFaces AND sets the global ::Polys (= the scene
+    // face/omni/particle count). The interactive path gets this from the normal
+    // render loop; the snapshot must call it explicitly. A bare
+    // g_mainFaces.resize() would size the buffer but leave ::Polys at 0 — which
+    // makes the per-light shadow bake do perLightFaces.resize(0) → null fList →
+    // a crash inside Transform_Objects on a worker thread (only with --shadows).
+    FList_Allocate(sc);
     // Allocate the spot's 2D shadow map (see ConeTestScene::init) so the bake
     // below has something to fill — otherwise the spot casts no shadow.
     ShadowMaps_Rebuild(sc, 512);
