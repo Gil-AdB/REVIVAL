@@ -5775,6 +5775,7 @@ struct FastFogParams {
 	bool  inscatterAnalytic;  // closed-form arctan integral for unshadowed lights
 	bool  inscatterJitter;    // Bayer per-pixel sample-offset (breaks shadow terraces); off = centered samples
 	bool  shadowEarlyOut;     // skip the per-sample integral where the segment probes fully lit
+	bool  shadowAnalytic;     // bisection + per-interval analytic lit integral instead of the sample loop
 	int   shadowPcf;          // PCF radius (texels) for the sampled shadow tap; 0 = single tap
 	// Downsample: coarseStep px between computed samples (2 = half-res).
 	// adaptThresh > 0 enables the adaptive refine (recompute edges).
@@ -6107,6 +6108,72 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 
 			if (shadowed) {
 				const int smi = L->shadowMapIdx[li];
+				// Analytic shadow (experimental flag): bisect the shadow map for the
+				// lit/shadowed transitions, sum the analytic radial integral over LIT
+				// sub-intervals with cutoff²·cone pinned per interval at clamp(z*,a,b).
+				//   glow = invSeg · 2·invD · Σ_lit shaping(clamp(z*,a,b))·Δatan
+				// >4 transitions → fall through to the robust importance loop.
+				if (P.shadowAnalytic) {
+					auto visB   = [&](float z){ return volSpotShadow(smi, z*X, z*Y, z, 0) >= 0.5f; };
+					auto atanAt = [&](float z){ return std::atan((twoA*z + beta) * invD); };
+					auto shapingAt = [&](float z) -> float {
+						const float Wx = z*X-Lx, Wy = z*Y-Ly, Wz = z-Lz;
+						const float d2 = Wx*Wx + Wy*Wy + Wz*Wz;
+						if (d2 >= L->range2[li] || d2 < 1e-6f) return 0.0f;
+						const float dist = std::sqrt(d2);
+						const float cutoff = 1.0f - dist * L->rRange[li];
+						float s = cutoff * cutoff;
+						if (L->isSpot[li]) {
+							const float DW = L->dirX[li]*Wx + L->dirY[li]*Wy + L->dirZ[li]*Wz;
+							if (DW <= 0.0f) return 0.0f;
+							const float cosT = DW / dist;
+							if (cosT < L->cosOuter[li]) return 0.0f;
+							if (cosT < L->cosInner[li]) {
+								const float tt = (cosT - L->cosOuter[li]) / (L->cosInner[li] - L->cosOuter[li]);
+								s *= tt * tt * (3.0f - 2.0f * tt);
+							}
+						}
+						return s;
+					};
+					constexpr int M = 8;
+					const float dzc = (zHi - zLo) / float(M - 1);
+					bool  prevLit = visB(zLo);
+					float zRunLo = zLo, aRun = aLo;
+					float glowAcc = 0.0f;
+					int   trans = 0;
+					bool  ok = true;
+					float zprev = zLo;
+					auto closeLit = [&](float zEnd, float aEnd){
+						float zc = zStar < zRunLo ? zRunLo : (zStar > zEnd ? zEnd : zStar);
+						glowAcc += shapingAt(zc) * (aEnd - aRun);
+					};
+					for (int i = 1; i < M; ++i) {
+						const float z = (i == M-1) ? zHi : (zLo + dzc*float(i));
+						const bool  lit = visB(z);
+						if (lit != prevLit) {
+							float lo = zprev, hi = z;
+							for (int b = 0; b < 6; ++b) {
+								const float mid = 0.5f*(lo+hi);
+								if (visB(mid) == prevLit) lo = mid; else hi = mid;
+							}
+							const float zt = 0.5f*(lo+hi);
+							if (prevLit) closeLit(zt, atanAt(zt));
+							else { zRunLo = zt; aRun = atanAt(zt); }
+							prevLit = lit;
+							if (++trans > 4) { ok = false; break; }
+						}
+						zprev = z;
+					}
+					if (ok) {
+						if (prevLit) closeLit(zHi, aHi);
+						atten = invSeg * 2.0f * invD * glowAcc;
+						if (atten <= 0.0f) continue;
+						gR += L->colR[li] * atten;
+						gG += L->colG[li] * atten;
+						gB += L->colB[li] * atten;
+						continue;
+					}
+				}
 				// Optional fully-lit early-out (flag, lit-heavy views): if PCF
 				// visibility reads 1 at z* and 5 points across the segment, the
 				// ray is unoccluded → the analytic brightness above is exact.
@@ -6524,6 +6591,7 @@ void Render_DeferredFastFog() {
 	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
 	P.inscatterJitter   = fds::FeatureFlags::fast_fog_inscatter_jitter();
 	P.shadowEarlyOut    = fds::FeatureFlags::fast_fog_shadow_earlyout();
+	P.shadowAnalytic    = fds::FeatureFlags::fast_fog_shadow_analytic();
 	P.shadowPcf         = std::max(0, fds::FeatureFlags::fast_fog_shadow_pcf());
 	P.lights    = g_deferredCtx.lights;
 	P.numLights = g_deferredCtx.numLights;
