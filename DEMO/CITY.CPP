@@ -2257,17 +2257,9 @@ struct CityScene : SceneDriver {
 		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
 		// so it tracks the current frame's view (previously was rendered
 		// one frame stale because it ran before camera update).
-		//
-		// Clear the canvas first: the frame otherwise builds on whatever
-		// VPage already holds — on the scene's first frame that's the
-		// PREVIOUS SCENE's last image. Pass-1 pixels the mirrored geometry
-		// doesn't cover ("mirrored sky") leak that stale content into the
-		// water reflection via the dispMap copy, and nothing repaints them
-		// until camera motion happens to cover each one once — the "white
-		// below the water at city start that a free-cam 360 cures
-		// permanently" bug. After the clear, those pixels are the freshly
-		// drawn skybox: the water reflects actual sky, deterministically.
-		parallel_memset(VPage, 0, PageSize);
+		// (VPage is already cleared by clearFrame() at tick start, so the
+		// mirrored-sky pixels pass-1 leaves uncovered are black+skybox —
+		// never stale content.)
 		prof.switchTo(PROF_SKY);
 		RenderSkyCube(SkySc, View, false);
 		prof.switchTo(PROF_ANIM);

@@ -6913,10 +6913,20 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 								const float a1 = a10 + (a11-a10)*tx;
 								h4[c] = a0 + (a1-a0)*ty;
 							}
-							scR += (h4[0] - scR) * blend;
-							scG += (h4[1] - scG) * blend;
-							scB += (h4[2] - scB) * blend;
-							ext += (h4[3] - ext) * blend;
+							// History must be finite to blend: NaN/Inf are
+							// ABSORBING under the lerp (lerp(cur,NaN,b)=NaN,
+							// forever) — one bad populate frame would stick
+							// in the grid until an out-of-frustum flush (the
+							// "white water cured permanently by a 360" bug
+							// signature). Rejecting it here bounds any bad
+							// value's lifetime to ONE frame; the injection
+							// itself stays visible to fast_fog_froxel_validate.
+							if (std::isfinite(h4[0]+h4[1]+h4[2]+h4[3])) {
+								scR += (h4[0] - scR) * blend;
+								scG += (h4[1] - scG) * blend;
+								scB += (h4[2] - scB) * blend;
+								ext += (h4[3] - ext) * blend;
+							}
 						}
 					}
 				}
