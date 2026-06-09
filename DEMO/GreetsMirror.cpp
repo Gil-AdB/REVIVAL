@@ -736,11 +736,13 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // The flare Face is held BY VALUE in Omni, but its A/B/C
         // vertex pointers still aim at the SOURCE omni's V after the
         // memcpy — the clone's flare would render at the source's
-        // screen position. Repoint at the clone's own V; the flare
-        // blit is per-pixel z-tested, which clips the reflected flare
-        // to the mirror footprint naturally (clone world depth there,
-        // nearer real geometry everywhere else).
+        // screen position. Repoint at the clone's own V. The tag gates
+        // the flare filler on this mirror's stamped footprint — depth
+        // alone is NOT enough, because every mirror clones every omni
+        // and the other mirrors' clones sit at arbitrary reflected
+        // positions that pass plain z tests anywhere in the level.
         clone->F.A = clone->F.B = clone->F.C = &clone->V;
+        clone->F.mirrorMaskTag = m.id;
         // Tag this clone with its mirror id. The deferred lighting
         // kernel filters per-pixel against gb.mirrorId, so clones of
         // mirror N's reflected world only receive light from mirror
@@ -1142,8 +1144,11 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 clone->IPos = composedPoint(srcO->IPos);
                 clone->IDir = composedDir(srcO->IDir);
                 clone->Flags |= Omni_MirrorClone;
-                // Same flare-face repoint as the base-mirror clone loop.
+                // Same flare-face repoint + footprint tag as the base-
+                // mirror clone loop. Compounds gate on the PARENT's
+                // stamp (they don't stamp their own id).
                 clone->F.A = clone->F.B = clone->F.C = &clone->V;
+                clone->F.mirrorMaskTag = A.id;
                 clone->mirrorId = compoundId;
                 // No intensity attenuation: the per-pixel filter
                 // routes only this compound's omnis to compoundId

@@ -14,6 +14,7 @@
 #include "Base/RenderStats.h"
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in TBR helpers
 #include "SimdHelpers.h"
+#include "Mekalele.h"  // g_gbuffer — flare filler's mirror-footprint gate
 #include <Threads.h>
 // #define SIMDE_ENABLE_NATIVE_ALIASES
 #include "simde/x86/mmx.h"
@@ -1399,6 +1400,23 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 
 	// flare image size is written as a floating pt.
 	Size *= F->FlareSize;
+
+	// Mirror-clone flare: drawable only inside its OWN mirror's stamped
+	// footprint. Depth alone is not enough — every mirror clones every
+	// omni, so other mirrors' clones sit at arbitrary reflected world
+	// positions and pass plain z tests inside OTHER mirrors' footprints
+	// ("omni shows twice in the mirror") or in open rooms ("flare
+	// through walls"). Center-point test, consistent with the sprite's
+	// Face_PointZTest behavior.
+	if (F->mirrorMaskTag != 0) {
+		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
+		int32_t mx = int32_t(_A->PX);
+		int32_t my = int32_t(_A->PY);
+		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+		    != F->mirrorMaskTag) return;
+	}
 
 	if (Size<=0) return;
 	if (F->Txtr&&F->Txtr->Txtr)
