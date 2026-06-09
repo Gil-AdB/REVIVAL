@@ -115,6 +115,15 @@ struct Mirror {
     int         clonedFaces  = 0;
     int         clonedVerts  = 0;
     std::string wallMaterialName;
+    // Per-frame visibility, decided in UpdateAllMirrors: when the
+    // camera cannot see the panel (back side, fully behind the near
+    // plane, or projected footprint off screen), the mirror is
+    // deactivated — UpdateMirror's vert/face re-mirror is skipped, the
+    // clone mesh is hidden from Transform/raster, clone flares are
+    // zero-sized, and StampMirrorMasks doesn't stamp it. The test runs
+    // on the previous frame's camera pose (UpdateAllMirrors precedes
+    // Transform_Objects); a viewport margin absorbs the 1-frame lag.
+    bool        active = true;
 };
 
 // Pass 1: find the mirror plane by averaging the world-space normal /

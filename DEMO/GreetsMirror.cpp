@@ -1277,9 +1277,103 @@ void UpdateMirror(Scene *sc, Mirror &m)
     }
 }
 
+namespace {
+
+// Can mirror m contribute any pixel this frame? Two rejects:
+//   1. Camera on the back side of every wall face (a mirror shows
+//      nothing from behind).
+//   2. Every wall vert ahead of the near plane projects outside the
+//      margin-expanded viewport (panel off screen), or every vert is
+//      behind the near plane (panel behind the camera).
+// Runs on the PREVIOUS frame's camera (UpdateAllMirrors precedes
+// Transform_Objects, which is what advances ::View) — the 15% viewport
+// margin absorbs one frame of camera motion. Conservative everywhere:
+// no camera yet → visible; panel straddling the near plane → visible.
+bool mirrorPotentiallyVisible(Scene *sc, const Mirror &m)
+{
+    const Camera *cam = ::View ? ::View : (sc ? sc->CameraHead : nullptr);
+    if (!cam) return true;
+    bool anyFront = false;
+    for (const Face *F : m.wallFaces) {
+        if (!F || !F->A) continue;
+        const float dot = F->N.x * cam->ISource.x
+                        + F->N.y * cam->ISource.y
+                        + F->N.z * cam->ISource.z + F->NormProd;
+        if (dot > 0.0f) { anyFront = true; break; }
+    }
+    if (!anyFront) return false;
+    const float (*VM)[3] = cam->Mat;
+    const Vector C = cam->ISource;
+    const float w = float(::XRes), h = float(::YRes);
+    const float marginX = w * 0.15f, marginY = h * 0.15f;
+    float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+    int total = 0, behind = 0;
+    for (size_t i = 0; i < m.wallFaces.size(); ++i) {
+        const Face *F = m.wallFaces[i];
+        TriMesh *WT = i < m.wallFaceMeshes.size() ? m.wallFaceMeshes[i] : nullptr;
+        if (!F || !F->A || !F->B || !F->C) continue;
+        const Vertex *vs[3] = { F->A, F->B, F->C };
+        for (int k = 0; k < 3; ++k) {
+            Vector wp = vs[k]->Pos;
+            if (WT) {
+                Vector lp = wp;
+                MatrixXVector(WT->RotMat, &lp, &wp);
+                wp += WT->IPos;
+            }
+            const float dx = wp.x - C.x, dy = wp.y - C.y, dz = wp.z - C.z;
+            const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
+            ++total;
+            if (vz <= 0.05f) { ++behind; continue; }
+            const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
+            const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
+            const float sx =  FOVX * vx / vz + CntrEX;
+            const float sy = -FOVY * vy / vz + CntrEY;
+            bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+            by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+        }
+    }
+    if (total == 0) return true;          // no usable verts — stay safe
+    if (behind == total) return false;    // whole panel behind camera
+    if (behind > 0) return true;          // straddles near plane
+    return bx1 >= -marginX && bx0 <= w + marginX
+        && by1 >= -marginY && by0 <= h + marginY;
+}
+
+}  // namespace
+
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
 {
-    for (auto &m : mirrors) UpdateMirror(sc, m);
+    for (auto &m : mirrors) {
+        bool act;
+        if (m.parentMirrorId != 0) {
+            // Compounds ride their parent's activity — they render
+            // inside the parent's footprint only.
+            act = false;
+            for (const auto &p : mirrors) {
+                if (p.id == m.parentMirrorId) { act = p.active; break; }
+            }
+        } else {
+            act = m.plane.valid && m.cloneMesh
+               && mirrorPotentiallyVisible(sc, m);
+        }
+        m.active = act;
+        if (m.cloneMesh) {
+            // Hidden clone meshes skip Transform_Objects entirely
+            // (mesh-level HTrack_Visible check) — that's the bulk of
+            // an off-screen mirror's per-frame cost.
+            if (act) m.cloneMesh->Flags |=  HTrack_Visible;
+            else     m.cloneMesh->Flags &= ~HTrack_Visible;
+        }
+        // Clone flares: The_MMX_Scalar early-outs on Size <= 0, and
+        // Transform re-stamps F.FlareSize from ISize every frame — so
+        // ISize is the kill switch. Restored from the source omni when
+        // the mirror reactivates.
+        for (auto &c : m.omniClones) {
+            if (c.mirrorOmni && c.sourceOmni)
+                c.mirrorOmni->ISize = act ? c.sourceOmni->ISize : 0.0f;
+        }
+        if (act) UpdateMirror(sc, m);
+    }
 }
 
 void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors)
@@ -1553,6 +1647,10 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     if (::View) camPos = &::View->ISource;
     for (const auto &m : mirrors) {
         if (m.id == 0 || m.wallFaces.empty()) continue;
+        // Deactivated this frame (UpdateAllMirrors visibility gate) —
+        // its clone mesh is hidden, so stamping a footprint would
+        // carve behind-gate holes with nothing to fill them.
+        if (!m.active) continue;
         // Compound mirrors do not stamp their own pre-mask. Their wall
         // surface and clone faces gate on the PARENT mirror's stamp so
         // Mekalele's z-test resolves "compound wall vs A's clone vs
