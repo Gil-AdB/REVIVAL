@@ -7210,21 +7210,16 @@ void Render_DeferredFastFog() {
 }
 
 // Stand-in for the fast-fog pass on render passes that SKIP the froxel path
-// (the city reflection pass): REPLACE every pixel the rasterizer never
-// touched (zEnc == 0) with black sky + the slab-clipped analytic fog tint
+// (the city reflection pass): tint every pixel the rasterizer never touched
+// (zEnc == 0) toward the fog color by the slab-clipped analytic fog amount
 // for that pixel's ray — the same [zA,zB] slab integral the screen-space
-// path uses, evaluated with this pass's (mirror) camera. Two things matter:
-//   • REPLACE, not blend: those pixels are otherwise stale VPage content —
-//     uninitialized memory on a scene's first frames — and any blend keeps a
-//     fraction of it alive. The stale base is why the city water reflected
-//     white garbage at scene start that "healed" permanently only once a big
-//     camera sweep happened to redraw every pixel (the user's 360 repro);
-//     it predates the froxel gate (the old fog passes also only TINTED the
-//     stale base, amt < 1 for upward rays).
-//   • Slab-clipped τ, not the saturated far-plane amount: an upward mirrored
-//     ray exits the thin slab top quickly — painting the full 1−e^{−density}
-//     made the whole mirrored sky glare ambient-bright, which the water
-//     reflected as "white below the waterline".
+// path uses, evaluated with this pass's (mirror) camera. The base under the
+// tint is the freshly drawn skybox (the city frame loop clears VPage before
+// RenderSkyCube — see CITY.CPP; without that clear the base is STALE
+// framebuffer and no tint can hide it). Slab-clipped τ, not the saturated
+// far-plane amount: an upward mirrored ray exits the thin slab top quickly —
+// painting the full 1−e^{−density} made the whole mirrored sky glare
+// ambient-bright, which the water reflected as "white below the waterline".
 void Render_DeferredFastFogSkyPaint() {
 	if (!CurScene || !ZPage16 || !VPage) return;
 	const float fogFar = CurScene->FZP;
@@ -7280,7 +7275,7 @@ void Render_DeferredFastFogSkyPaint() {
 							zA = za > 0.0f ? za : 0.0f;
 							zB = zb < fogFar ? zb : fogFar;
 						} else if (camY < slabY0 || camY > slabY1) {
-							out[i] = 0xFF000000u; continue;   // sky outside slab
+							continue;                          // level ray outside slab
 						}
 						float tau = 0.0f;
 						if (zB > zA) {
@@ -7296,9 +7291,14 @@ void Render_DeferredFastFogSkyPaint() {
 								tau *= lo*lo*(3.f-2.f*lo) * hi*hi*(3.f-2.f*hi);
 							}
 						}
-						float amt = (tau > 0.0f) ? 1.0f - fastExpNeg(tau) : 0.0f;
+						if (tau <= 0.0f) continue;
+						float amt = 1.0f - fastExpNeg(tau);
 						if (amt > 1.0f) amt = 1.0f;
-						int nR = int(fogR * amt), nG = int(fogG * amt), nB = int(fogB * amt);
+						const float keep = 1.0f - amt;
+						const dword pix = out[i];
+						int nR = int(float((pix>>16)&0xFFu)*keep + fogR*amt);
+						int nG = int(float((pix>> 8)&0xFFu)*keep + fogG*amt);
+						int nB = int(float( pix     &0xFFu)*keep + fogB*amt);
 						if (nR > 255) nR = 255; if (nG > 255) nG = 255; if (nB > 255) nB = 255;
 						out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 					}
