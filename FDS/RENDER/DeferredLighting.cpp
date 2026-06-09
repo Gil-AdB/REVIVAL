@@ -1964,6 +1964,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 // — kept as one function body so they don't drift.
 enum class XparLayer { Front, Back };
 
+// Froxel-fog hooks for the transparent peel (defined after the froxel
+// globals below): grid validity for this renderFrame + a trilinear sample
+// of the integrated in-scatter/transmittance at a pixel's depth.
+static bool FastFog_XparActive();
+static void FastFog_SampleGrid(int px, int py, float z,
+                               float& aR, float& aG, float& aB, float& T);
+
 template <XparLayer Layer>
 static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &ctx,
                                                      int tileIndex,
@@ -2186,7 +2193,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
 
-			if (ctx.Sc->Flags & Scn_Fogged) {
+			// Fast-fog froxel path active this frame: fog is applied to the
+			// FINAL lit color below (lit·T(z) + acc(z)) instead of the
+			// legacy per-light sqrt ramp here — with the background already
+			// fully fogged by the froxel composite, the exact blend is
+			// out = α·(C·T + acc) + (1−α)·Bg.
+			const bool froxelFog = FastFog_XparActive();
+			if (!froxelFog && (ctx.Sc->Flags & Scn_Fogged)) {
 				// sqrt(t) via fast_rsqrt: sqrt(t) = t * rsqrt(t).
 				// Guarded against t<=0 (rsqrt undefined at 0).
 				const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
@@ -2202,13 +2215,20 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// Specular added on top — independent of base color tint.
 			if (wantSpecular) {
 				float fogScale = 1.0f;
-				if (ctx.Sc->Flags & Scn_Fogged) {
+				if (!froxelFog && (ctx.Sc->Flags & Scn_Fogged)) {
 					const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
 					fogScale = t > 0.0f ? t * fast_rsqrt(t) : 0.0f;
 				}
 				litB += int(sB * fogScale);
 				litG += int(sG * fogScale);
 				litR += int(sR * fogScale);
+			}
+			if (froxelFog) {
+				float aR_, aG_, aB_, T_;
+				FastFog_SampleGrid(px, py, z, aR_, aG_, aB_, T_);
+				litR = int(float(litR)*T_ + aR_);
+				litG = int(float(litG)*T_ + aG_);
+				litB = int(float(litB)*T_ + aB_);
 			}
 			if (litB > 255) litB = 255;
 			if (litG > 255) litG = 255;
@@ -6581,6 +6601,55 @@ namespace {
 	float    gFrPrevCamX, gFrPrevCamY, gFrPrevCamZ;        // prev frame camera
 	float    gFrPrevW[9];               // prev view→world rotation (rows)
 	float    gFrPrevA[3];               // Rprevᵀ·(cam − camPrev), per frame
+	// True while THIS renderFrame's froxel grid is valid for sampling
+	// (set by the froxel dispatch, cleared at every renderFrame start) —
+	// the transparent peel fogs its layers from the grid when set.
+	bool     gFrFrameActive = false;
+}
+
+// Called at the top of renderFrame (RENDER.CPP) so a frame whose fog pass
+// doesn't run (reflection pass, non-fog scenes) can't sample a stale grid.
+void FastFog_BeginFrame() { gFrFrameActive = false; }
+static bool FastFog_XparActive() { return gFrFrameActive; }
+
+// Trilinear sample of the integrated froxel grid (in-scatter acc + trans-
+// mittance T) at screen pixel (px,py), view depth z. Used by the transparent
+// peel: with the background already fully fogged, the EXACT composite under
+// the froxel model is out = α·(C·T(z) + acc(z)) + (1−α)·Bg — fog the layer's
+// lit color to its own depth, then alpha-blend normally. Linear-in-z slice
+// fraction (the opaque composite's exact optical-depth fraction needs the
+// per-slice ext, whose buffer has already ping-ponged by peel time; linear
+// is visually equivalent on soft transparents).
+static void FastFog_SampleGrid(int px, int py, float z,
+                               float& aR, float& aG, float& aB, float& T)
+{
+	const int nx = gFrX, ny = gFrY, nz = gFrZ;
+	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
+	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
+	if (z < gFrNear) z = gFrNear;
+	if (z > gFrFar)  z = gFrFar;
+	float u = std::log(z / gFrNear) * invLogFN * float(nz);   // boundary coord
+	int iz = int(u); if (iz < 0) iz = 0; if (iz > nz-1) iz = nz-1;
+	const float fz = u - float(iz);                            // 0 at zb[iz]
+	const float fx = (float(px)+0.5f)*fnx - 0.5f;
+	const float fy = (float(py)+0.5f)*fny - 0.5f;
+	int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
+	int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
+	if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 > nx-2) { ix0 = nx>1?nx-2:0; wx = nx>1?1.0f:0.0f; }
+	if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 > ny-2) { iy0 = ny>1?ny-2:0; wy = ny>1?1.0f:0.0f; }
+	const float w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+	float pR=0,pG=0,pB=0,pT=0, cR=0,cG=0,cB=0,cT=0;
+	auto add = [&](int ix, int iy, float w) {
+		const size_t ic = (size_t(iy)*nx + ix)*nz + iz;
+		cR += gFrAccR[ic]*w; cG += gFrAccG[ic]*w; cB += gFrAccB[ic]*w; cT += gFrT[ic]*w;
+		if (iz > 0) { const size_t ip = ic-1;
+			pR += gFrAccR[ip]*w; pG += gFrAccG[ip]*w; pB += gFrAccB[ip]*w; pT += gFrT[ip]*w;
+		} else pT += w;   // before slice 0: acc=0, T=1
+	};
+	add(ix0,   iy0,   w00); add(ix0+1, iy0,   w10);
+	add(ix0,   iy0+1, w01); add(ix0+1, iy0+1, w11);
+	aR = pR + (cR-pR)*fz; aG = pG + (cG-pG)*fz; aB = pB + (cB-pB)*fz;
+	T  = pT + (cT-pT)*fz;
 }
 
 // log2 via exponent bits + a rational mantissa correction (fastapprox-style,
@@ -7151,6 +7220,7 @@ void Render_DeferredFastFog() {
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		gFrFrameActive = fds::FeatureFlags::fast_fog_xpar();   // peel fogs from this grid
 		// This frame becomes next frame's history.
 		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;
 		gFrPrevW[0] = P.w00; gFrPrevW[1] = P.w01; gFrPrevW[2] = P.w02;

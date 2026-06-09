@@ -41,6 +41,7 @@ void Render_OmniHalos();
 void Render_DeferredVolumetric();
 void Render_DeferredFastFog();
 void Render_DeferredFastFogSkyPaint();
+void FastFog_BeginFrame();
 void Render_DeferredSkybox();
 void VolProf_Tick();
 
@@ -335,6 +336,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// RenderPath::ForceDeferred takes the deferred path regardless of
 	// the FDS_DEFERRED env var (which is read-once-and-cached) so
 	// snapshot harnesses can render both modes in a single process.
+	// New frame for the fast-fog grid: until this frame's fog dispatch runs
+	// (if it runs at all), the transparent peel must not sample a stale grid.
+	FastFog_BeginFrame();
+
 	bool deferred;
 	if (path == RenderPath::ForceForward)       deferred = false;
 	else if (path == RenderPath::ForceDeferred) deferred = true;
