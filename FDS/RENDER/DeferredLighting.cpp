@@ -6540,6 +6540,149 @@ static void Render_DeferredFastFog_CompositeTile(int x1, int y1, int x2, int y2,
 	}
 }
 
+// ─── Froxel volumetric fog (view-frustum 3D grid) ───────────────────────────
+// See docs/fast_fog_froxel_plan.md. Replaces the screen-space per-pixel blob
+// march: populate density + in-scatter per froxel, integrate front-to-back along
+// depth, trilinear-composite. Volumetric by construction, no per-pixel march.
+namespace {
+	std::vector<float> gFrAccR, gFrAccG, gFrAccB, gFrT;   // integrated cam→slice
+	int   gFrX = 0, gFrY = 0, gFrZ = 0;
+	float gFrNear = 1.0f, gFrFar = 1.0f;
+}
+
+// Blob (or smooth-slab) density at a single world point — one trilinear noise
+// sample, NO DDA march. Mirrors blobFieldTau's per-cell density exactly.
+static inline float froxelDensity(const FastFogParams& P, float wx, float wy, float wz) {
+	if (wy < P.slabY0 || wy > P.slabY1) return 0.0f;     // outside the slab
+	if (!P.blobs) return 1.0f;                            // smooth slab: uniform
+	const float invCell = P.invCell, cell = P.cell;
+	const int cx = int(std::floor(wx * invCell));
+	const int cy = int(std::floor(wy * invCell));
+	const int cz = int(std::floor(wz * invCell));
+	auto h01 = [](int x, int y, int z){ return float(cellHash(x, y, z)) * (1.0f/4294967296.0f); };
+	const float c000 = h01(cx,cy,cz),     c100 = h01(cx+1,cy,cz);
+	const float c010 = h01(cx,cy+1,cz),   c110 = h01(cx+1,cy+1,cz);
+	const float c001 = h01(cx,cy,cz+1),   c101 = h01(cx+1,cy,cz+1);
+	const float c011 = h01(cx,cy+1,cz+1), c111 = h01(cx+1,cy+1,cz+1);
+	float u = (wx - float(cx)*cell) * invCell;
+	float v = (wy - float(cy)*cell) * invCell;
+	float w = (wz - float(cz)*cell) * invCell;
+	u = u*u*u*(u*(u*6.f-15.f)+10.f);          // quintic fade (matches blobFieldTau)
+	v = v*v*v*(v*(v*6.f-15.f)+10.f);
+	w = w*w*w*(w*(w*6.f-15.f)+10.f);
+	const float x00 = c000+(c100-c000)*u, x01 = c001+(c101-c001)*u;
+	const float x10 = c010+(c110-c010)*u, x11 = c011+(c111-c011)*u;
+	const float y0 = x00+(x10-x00)*v, y1 = x01+(x11-x01)*v;
+	const float val = y0 + (y1-y0)*w;
+	const float d = (val - 0.45f) * 1.8f;
+	return d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
+}
+
+// Fused populate + front-to-back integrate, one pass per froxel column (the
+// column is contiguous in memory). Stores accumulated in-scattered radiance
+// (cam→slice) and transmittance T per froxel. Energy-conserving slice integral:
+// for in-scattered radiance L and extinction σ over slice dz, ∫ L·T dz across
+// the slice = L·T_in·(1−e^{−σ·dz}) (single-scatter σ_s=σ_t), then T *= e^{−σ·dz}.
+static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
+	const int nx = gFrX, ny = gFrY, nz = gFrZ;
+	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
+	const float dz = (gFrFar - gFrNear) / float(nz);
+	const ViewLightsSoA* L = P.lights;
+	for (int iy = iy0; iy < iy1; ++iy) {
+		const float sy = (float(iy)+0.5f) * invNy * float(YRes);
+		const float Y  = (CntrEY - sy) * P.invFOVY;
+		for (int ix = ix0; ix < ix1; ++ix) {
+			const float sx = (float(ix)+0.5f) * invNx * float(XRes);
+			const float X  = (sx - CntrEX) * P.invFOVX;
+			const float Dx = P.w00*X + P.w01*Y + P.w02;
+			const float gY = P.w10*X + P.w11*Y + P.w12;
+			const float Dz = P.w20*X + P.w21*Y + P.w22;
+			const size_t col = (size_t(iy)*nx + ix) * nz;
+			float Tc = 1.0f, accR = 0.0f, accG = 0.0f, accB = 0.0f;
+			for (int iz = 0; iz < nz; ++iz) {
+				const float z = gFrNear + (float(iz)+0.5f) * dz;
+				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
+				const float dens = froxelDensity(P, wx, wy, wz);
+				if (dens > 0.0f) {
+					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
+					if (P.inscatter > 0.0f && L) {
+						float gr = 0.0f, gg = 0.0f, gb = 0.0f;
+						for (int li = 0; li < P.numLights; ++li) {
+							if (L->mirrorId[li] != 0) continue;
+							float a = lightAttenAt(L, li, X*z, Y*z, z);
+							if (a <= 0.0f) continue;
+							if (L->shadowMapIdx[li] >= 0)
+								a *= volSpotShadow(L->shadowMapIdx[li], X*z, Y*z, z, P.shadowPcf);
+							gr += L->colR[li]*a; gg += L->colG[li]*a; gb += L->colB[li]*a;
+						}
+						Lr += gr*P.inscatter; Lg += gg*P.inscatter; Lb += gb*P.inscatter;
+					}
+					const float Topt = fastExpNeg(P.sigma * dens * dz);
+					const float wgt  = Tc * (1.0f - Topt);
+					accR += Lr*wgt; accG += Lg*wgt; accB += Lb*wgt;
+					Tc *= Topt;
+				}
+				gFrAccR[col+iz] = accR; gFrAccG[col+iz] = accG;
+				gFrAccB[col+iz] = accB; gFrT[col+iz] = Tc;
+			}
+		}
+	}
+}
+
+// Trilinear-sample the integrated grid at a pixel's froxel coords and composite.
+static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogParams& P) {
+	const uint16_t* zEnc = ZPage16;
+	dword* out = reinterpret_cast<dword*>(VPage);
+	const int nx = gFrX, ny = gFrY, nz = gFrZ;
+	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
+	const float zSpan = gFrFar - gFrNear;
+	auto at = [&](int ix, int iy, int iz, float& aR, float& aG, float& aB, float& t) {
+		const size_t i = (size_t(iy)*nx + ix)*nz + iz;
+		aR = gFrAccR[i]; aG = gFrAccG[i]; aB = gFrAccB[i]; t = gFrT[i];
+	};
+	for (int py = y1; py < y2; ++py) {
+		const size_t row = size_t(py) * size_t(XRes);
+		const float fy = (float(py)+0.5f)*fny - 0.5f;
+		int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
+		if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny-2<0?0:ny-2; wy = ny>1?1.0f:0.0f; }
+		const int iy1 = std::min(iy0+1, ny-1);
+		for (int px = x1; px < x2; ++px) {
+			const size_t i = row + size_t(px);
+			const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
+			float z = (zSurf <= 0.0f) ? gFrFar : (zSurf > gFrFar ? gFrFar : zSurf);
+			const float fx = (float(px)+0.5f)*fnx - 0.5f;
+			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
+			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx-2<0?0:nx-2; wx = nx>1?1.0f:0.0f; }
+			const int ix1 = std::min(ix0+1, nx-1);
+			float fz = (z - gFrNear)/zSpan*float(nz) - 0.5f;
+			int iz0 = int(std::floor(fz)); float wz = fz - float(iz0);
+			if (iz0 < 0) { iz0 = 0; wz = 0.0f; } if (iz0 >= nz-1) { iz0 = nz-1; wz = 0.0f; }
+			const int iz1 = std::min(iz0+1, nz-1);
+			// trilinear over 8 froxels of (accRGB, T)
+			float aR=0,aG=0,aB=0,t=0;
+			const float w000=(1-wx)*(1-wy)*(1-wz), w100=wx*(1-wy)*(1-wz);
+			const float w010=(1-wx)*wy*(1-wz),     w110=wx*wy*(1-wz);
+			const float w001=(1-wx)*(1-wy)*wz,     w101=wx*(1-wy)*wz;
+			const float w011=(1-wx)*wy*wz,         w111=wx*wy*wz;
+			float r,g,b,tt;
+			at(ix0,iy0,iz0,r,g,b,tt); aR+=r*w000;aG+=g*w000;aB+=b*w000;t+=tt*w000;
+			at(ix1,iy0,iz0,r,g,b,tt); aR+=r*w100;aG+=g*w100;aB+=b*w100;t+=tt*w100;
+			at(ix0,iy1,iz0,r,g,b,tt); aR+=r*w010;aG+=g*w010;aB+=b*w010;t+=tt*w010;
+			at(ix1,iy1,iz0,r,g,b,tt); aR+=r*w110;aG+=g*w110;aB+=b*w110;t+=tt*w110;
+			at(ix0,iy0,iz1,r,g,b,tt); aR+=r*w001;aG+=g*w001;aB+=b*w001;t+=tt*w001;
+			at(ix1,iy0,iz1,r,g,b,tt); aR+=r*w101;aG+=g*w101;aB+=b*w101;t+=tt*w101;
+			at(ix0,iy1,iz1,r,g,b,tt); aR+=r*w011;aG+=g*w011;aB+=b*w011;t+=tt*w011;
+			at(ix1,iy1,iz1,r,g,b,tt); aR+=r*w111;aG+=g*w111;aB+=b*w111;t+=tt*w111;
+			const dword pix = out[i];
+			int nR = int(float((pix>>16)&0xFFu)*t + aR);
+			int nG = int(float((pix>> 8)&0xFFu)*t + aG);
+			int nB = int(float( pix     &0xFFu)*t + aB);
+			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
+			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+		}
+	}
+}
+
 void Render_DeferredFastFog() {
 	if (!fds::FeatureFlags::fast_fog()) return;
 	if (!CurScene || !ZPage16 || !VPage) return;
@@ -6620,6 +6763,24 @@ void Render_DeferredFastFog() {
 		}
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	};
+
+	if (fds::FeatureFlags::fast_fog_froxel()) {
+		// Froxel path: populate+integrate the view-frustum grid, then composite.
+		const int nx = std::max(1, fds::FeatureFlags::fast_fog_froxel_x());
+		const int ny = std::max(1, fds::FeatureFlags::fast_fog_froxel_y());
+		const int nz = std::max(2, fds::FeatureFlags::fast_fog_froxel_z());
+		if (gFrX != nx || gFrY != ny || gFrZ != nz) {
+			gFrX = nx; gFrY = ny; gFrZ = nz;
+			const size_t n = size_t(nx) * size_t(ny) * size_t(nz);
+			gFrAccR.assign(n, 0.0f); gFrAccG.assign(n, 0.0f);
+			gFrAccB.assign(n, 0.0f); gFrT.assign(n, 1.0f);
+		}
+		gFrNear = std::max(1.0f, CurScene->NZP);
+		gFrFar  = fogFar;
+		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
+		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		return;
+	}
 
 	if (adaptive || fds::FeatureFlags::fast_fog_halfres()) {
 		// Downsampled compute on a coarse grid (step = coarseStep), then
