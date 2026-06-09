@@ -609,15 +609,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 xpar_done: ;
 	}
 
-	// Particle TBR first, flare sprites after: both are additive, but the
-	// 8-bit saturating adds make order visible — and a lamp's lens glow
-	// should sit OVER the particle effects around it (the fountain vortex
-	// used to composite over the purple omni's flare).
-	if (CurScene->Flags & Scn_SpriteTBR)
-	{
-		TBR_Render(CurScene);
-	}
-
+	// NOTE: this loop must run BEFORE TBR_Render — for TBR scenes the
+	// sprite fillers (TBR_Sprite, and The_MMX_Scalar's TBR divert) only
+	// INSERT into the strip lists; TBR_Render is the draw.
 	int32_t I = CAll;
 	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex *A,*B;
@@ -639,6 +633,11 @@ xpar_done: ;
 			if (A->TPos_AOS.z < C_NZP) continue;
 			F->Filler(F, &A, 1, 0, rt, cam);
 		}
+	}
+
+	if (CurScene->Flags & Scn_SpriteTBR)
+	{
+		TBR_Render(CurScene);
 	}
 
 	// Volumetric pass(es). Tri-state dispatch:

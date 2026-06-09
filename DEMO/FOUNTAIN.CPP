@@ -299,6 +299,12 @@ void Initialize_Particles(Scene *Sc)
 		}
 
 		PclT[I].Txtr->Data = (byte *)Img.Data;
+		// The Convert_Image2Texture calls above stamped SizeX/SizeY=256;
+		// this override swaps in a 32×32 buffer — fix the metadata to
+		// match or anything that trusts it (the TBR sprite-res dispatch)
+		// samples 64× past the allocation.
+		PclT[I].Txtr->SizeX = 32; PclT[I].Txtr->LSizeX = 5;
+		PclT[I].Txtr->SizeY = 32; PclT[I].Txtr->LSizeY = 5;
 	}
 	
 
