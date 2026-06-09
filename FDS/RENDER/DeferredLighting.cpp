@@ -5789,6 +5789,7 @@ struct FastFogParams {
 	bool  worley;          // froxel blob field: inverted Worley F1 instead of value noise
 	float worleyThresh;    // density hits 0 at F1 = (1-thresh) cells from a feature point
 	float worleyInvT;      // 1/(1-thresh), precomputed remap gain
+	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
 	// In-scatter glow: scene lights lighting the fog medium.
 	const ViewLightsSoA *lights;
@@ -6716,15 +6717,53 @@ static inline float worleyNoiseAt(float wx, float wy, float wz, float invCell,
 	return d*d*(3.0f - 2.0f*d);                  // rounded core, C1 zero at the edge
 }
 
+// Metaball-style ADDITIVE blob field: every neighboring cell's jittered blob
+// contributes a C1 falloff (1-(d/R)²)² and overlaps SUM, so density piles up
+// where blobs stack — "lots of overlapping big blobs" (clouds). Inverted
+// Worley F1 cannot express this: nearest-distance is bounded by the lattice,
+// so growing the radius fills space uniformly instead of overlapping. R is
+// in cell units (capped 1.5 — the 3×3×3 search horizon); the iso threshold
+// (reused fast_fog_worley_thresh) sets where fog begins out of the sum.
+static inline float metaballNoiseAt(float wx, float wy, float wz, float invCell,
+                                    float radius, float thresh, float invT)
+{
+	const float px = wx*invCell, py = wy*invCell, pz = wz*invCell;
+	const int cx = int(std::floor(px));
+	const int cy = int(std::floor(py));
+	const int cz = int(std::floor(pz));
+	const float invR2 = 1.0f / (radius*radius);
+	float sum = 0.0f;
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dy = -1; dy <= 1; ++dy)
+			for (int dx = -1; dx <= 1; ++dx) {
+				const int gx = cx+dx, gy = cy+dy, gz = cz+dz;
+				const uint32_t h = cellHash(gx, gy, gz);
+				const float ddx = float(gx) + float( h        & 1023u)*(1.0f/1024.0f) - px;
+				const float ddy = float(gy) + float((h >> 10) & 1023u)*(1.0f/1024.0f) - py;
+				const float ddz = float(gz) + float((h >> 20) & 1023u)*(1.0f/1024.0f) - pz;
+				const float t = 1.0f - (ddx*ddx + ddy*ddy + ddz*ddz) * invR2;
+				if (t > 0.0f) sum += t*t;
+			}
+	float d = (sum - thresh) * invT;
+	if (d <= 0.0f) return 0.0f;
+	return d > 1.0f ? 1.0f : d;
+}
+
 // Froxel blob-field sample at one world point for a given octave (cell size).
-// Worley puffs are size-modulated by a large-scale value-noise octave (2.7×,
-// non-integer so it doesn't resonate with the feature lattice) — without it
-// every cell grows an identical puff and the field reads as a polka-dot grid.
+// Worley/metaball puffs are size-modulated by a large-scale value-noise octave
+// (2.7×, non-integer so it doesn't resonate with the feature lattice) — without
+// it every cell grows an identical puff and the field reads as a polka-dot grid.
 static inline float fogNoiseAt(const FastFogParams& P, float wx, float wy, float wz,
                                float cell, float invCell)
 {
-	if (!P.worley) return blobNoiseAt(wx, wy, wz, cell, invCell);
-	float d = worleyNoiseAt(wx, wy, wz, invCell, P.worleyThresh, P.worleyInvT);
+	float d;
+	if (P.blobOverlap > 0.0f)
+		d = metaballNoiseAt(wx, wy, wz, invCell, P.blobOverlap,
+		                    P.worleyThresh, P.worleyInvT);
+	else if (P.worley)
+		d = worleyNoiseAt(wx, wy, wz, invCell, P.worleyThresh, P.worleyInvT);
+	else
+		return blobNoiseAt(wx, wy, wz, cell, invCell);
 	if (d <= 0.0f) return 0.0f;
 	const float mc = cell * 2.7f;
 	d *= 0.35f + blobNoiseAt(wx, wy, wz, mc, 1.0f/mc);
@@ -7128,8 +7167,16 @@ void Render_DeferredFastFog() {
 	P.invCell= 1.0f / P.cell;
 	P.jitter = fds::FeatureFlags::fast_fog_blob_jitter();
 	P.worley = fds::FeatureFlags::fast_fog_worley();
-	P.worleyThresh = std::min(0.9f, std::max(0.0f, fds::FeatureFlags::fast_fog_worley_thresh()));
-	P.worleyInvT   = 1.0f / (1.0f - P.worleyThresh);
+	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
+	if (P.blobOverlap > 0.0f) {
+		// Metaball sums exceed 1 where blobs stack (that's the point), so the
+		// iso threshold ranges [0,3]; fog ramps to full over +0.7 above iso.
+		P.worleyThresh = std::min(3.0f, std::max(0.0f, fds::FeatureFlags::fast_fog_worley_thresh()));
+		P.worleyInvT   = 1.0f / 0.7f;
+	} else {
+		P.worleyThresh = std::min(0.9f, std::max(0.0f, fds::FeatureFlags::fast_fog_worley_thresh()));
+		P.worleyInvT   = 1.0f / (1.0f - P.worleyThresh);
+	}
 	// Distance falloff: density *= exp(-z/Rf). 0 = auto (= FZP), so fog
 	// thins toward the far plane instead of forming a wall there.
 	const float Rf = fds::FeatureFlags::fast_fog_falloff();
