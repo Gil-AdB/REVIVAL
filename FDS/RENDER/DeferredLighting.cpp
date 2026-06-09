@@ -6546,6 +6546,8 @@ static void Render_DeferredFastFog_CompositeTile(int x1, int y1, int x2, int y2,
 // depth, trilinear-composite. Volumetric by construction, no per-pixel march.
 namespace {
 	std::vector<float> gFrAccR, gFrAccG, gFrAccB, gFrT;   // integrated cam→slice
+	std::vector<float> gFrExt;                            // per-slice extinction σ
+	std::vector<float> gFrZb;                             // slice boundaries [nz+1]
 	int   gFrX = 0, gFrY = 0, gFrZ = 0;
 	float gFrNear = 1.0f, gFrFar = 1.0f;
 }
@@ -6637,10 +6639,14 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 						}
 						Lr += gr*P.inscatter; Lg += gg*P.inscatter; Lb += gb*P.inscatter;
 					}
-					const float Topt = fastExpNeg(P.sigma * dens * dz);
+					const float ext = P.sigma * dens;
+						gFrExt[col+iz] = ext;
+						const float Topt = fastExpNeg(ext * dz);
 					const float wgt  = Tc * (1.0f - Topt);
 					accR += Lr*wgt; accG += Lg*wgt; accB += Lb*wgt;
 					Tc *= Topt;
+				} else {
+					gFrExt[col+iz] = 0.0f;
 				}
 				gFrAccR[col+iz] = accR; gFrAccG[col+iz] = accG;
 				gFrAccB[col+iz] = accB; gFrT[col+iz] = Tc;
@@ -6649,56 +6655,68 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	}
 }
 
-// Trilinear-sample the integrated grid at a pixel's froxel coords and composite.
+// Composite: bilinear in XY, EXACT in depth. Integrating to the pixel's exact
+// depth within its slice (not trilinear between slice centers) removes the
+// z-slice bands on tilted surfaces. The partial in-slice in-scatter is derived
+// from the stored acc difference scaled by the optical-depth fraction
+// (1-e^{-σ·partialDz})/(1-e^{-σ·dzSlice}) — no per-slice radiance stored.
 static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogParams& P) {
 	const uint16_t* zEnc = ZPage16;
 	dword* out = reinterpret_cast<dword*>(VPage);
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
-	// Inverse of the exp slice mapping: slice = nz·log(z/near)/log(far/near).
 	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
 	const float invNear  = 1.0f / gFrNear;
-	auto at = [&](int ix, int iy, int iz, float& aR, float& aG, float& aB, float& t) {
-		const size_t i = (size_t(iy)*nx + ix)*nz + iz;
-		aR = gFrAccR[i]; aG = gFrAccG[i]; aB = gFrAccB[i]; t = gFrT[i];
+	const float* zb = gFrZb.data();
+	// Read column (ix,iy): accPrev,Tprev (slice iz-1; iz=0 → 0,1), accCur, ext.
+	auto col = [&](int ix, int iy, int iz, float* o) {
+		const size_t ic = (size_t(iy)*nx + ix)*nz + iz;
+		o[4]=gFrAccR[ic]; o[5]=gFrAccG[ic]; o[6]=gFrAccB[ic]; o[7]=gFrExt[ic];
+		if (iz > 0) { const size_t ip=ic-1; o[0]=gFrAccR[ip];o[1]=gFrAccG[ip];o[2]=gFrAccB[ip];o[3]=gFrT[ip]; }
+		else { o[0]=o[1]=o[2]=0.0f; o[3]=1.0f; }
 	};
 	for (int py = y1; py < y2; ++py) {
 		const size_t row = size_t(py) * size_t(XRes);
 		const float fy = (float(py)+0.5f)*fny - 0.5f;
 		int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
-		if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny-2<0?0:ny-2; wy = ny>1?1.0f:0.0f; }
+		if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny>1?ny-2:0; wy = ny>1?1.0f:0.0f; }
 		const int iy1 = std::min(iy0+1, ny-1);
 		for (int px = x1; px < x2; ++px) {
 			const size_t i = row + size_t(px);
 			const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
 			float z = (zSurf <= 0.0f) ? gFrFar : (zSurf > gFrFar ? gFrFar : zSurf);
+			if (z < gFrNear) z = gFrNear;
 			const float fx = (float(px)+0.5f)*fnx - 0.5f;
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
-			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx-2<0?0:nx-2; wx = nx>1?1.0f:0.0f; }
+			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx>1?nx-2:0; wx = nx>1?1.0f:0.0f; }
 			const int ix1 = std::min(ix0+1, nx-1);
-			float fz = std::log(z * invNear) * invLogFN * float(nz) - 0.5f;
-			int iz0 = int(std::floor(fz)); float wz = fz - float(iz0);
-			if (iz0 < 0) { iz0 = 0; wz = 0.0f; } if (iz0 >= nz-1) { iz0 = nz-1; wz = 0.0f; }
-			const int iz1 = std::min(iz0+1, nz-1);
-			// trilinear over 8 froxels of (accRGB, T)
-			float aR=0,aG=0,aB=0,t=0;
-			const float w000=(1-wx)*(1-wy)*(1-wz), w100=wx*(1-wy)*(1-wz);
-			const float w010=(1-wx)*wy*(1-wz),     w110=wx*wy*(1-wz);
-			const float w001=(1-wx)*(1-wy)*wz,     w101=wx*(1-wy)*wz;
-			const float w011=(1-wx)*wy*wz,         w111=wx*wy*wz;
-			float r,g,b,tt;
-			at(ix0,iy0,iz0,r,g,b,tt); aR+=r*w000;aG+=g*w000;aB+=b*w000;t+=tt*w000;
-			at(ix1,iy0,iz0,r,g,b,tt); aR+=r*w100;aG+=g*w100;aB+=b*w100;t+=tt*w100;
-			at(ix0,iy1,iz0,r,g,b,tt); aR+=r*w010;aG+=g*w010;aB+=b*w010;t+=tt*w010;
-			at(ix1,iy1,iz0,r,g,b,tt); aR+=r*w110;aG+=g*w110;aB+=b*w110;t+=tt*w110;
-			at(ix0,iy0,iz1,r,g,b,tt); aR+=r*w001;aG+=g*w001;aB+=b*w001;t+=tt*w001;
-			at(ix1,iy0,iz1,r,g,b,tt); aR+=r*w101;aG+=g*w101;aB+=b*w101;t+=tt*w101;
-			at(ix0,iy1,iz1,r,g,b,tt); aR+=r*w011;aG+=g*w011;aB+=b*w011;t+=tt*w011;
-			at(ix1,iy1,iz1,r,g,b,tt); aR+=r*w111;aG+=g*w111;aB+=b*w111;t+=tt*w111;
+			int iz = int(std::log(z * invNear) * invLogFN * float(nz));
+			if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+			const float zb0 = zb[iz], dzSlice = zb[iz+1] - zb0;
+			const float partialDz = z - zb0;
+			// bilinear XY: accPrev(0..2), Tprev(3), accCur(4..6), ext(7)
+			const float w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+			float acc[8] = {0,0,0,0,0,0,0,0}, c[8];
+			col(ix0,iy0,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w00;
+			col(ix1,iy0,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w10;
+			col(ix0,iy1,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w01;
+			col(ix1,iy1,iz,c); for(int k=0;k<8;++k) acc[k]+=c[k]*w11;
+			const float ext = acc[7];
+			float aR,aG,aB,Tpix;
+			if (ext > 1e-8f) {
+				const float ToptPart = fastExpNeg(ext * partialDz);
+				const float ToptFull = fastExpNeg(ext * dzSlice);
+				const float denom = 1.0f - ToptFull;
+				const float frac = denom > 1e-6f ? (1.0f - ToptPart) / denom : 0.0f;
+				aR = acc[0] + (acc[4]-acc[0])*frac;
+				aG = acc[1] + (acc[5]-acc[1])*frac;
+				aB = acc[2] + (acc[6]-acc[2])*frac;
+				Tpix = acc[3] * ToptPart;
+			} else { aR=acc[0]; aG=acc[1]; aB=acc[2]; Tpix=acc[3]; }
 			const dword pix = out[i];
-			int nR = int(float((pix>>16)&0xFFu)*t + aR);
-			int nG = int(float((pix>> 8)&0xFFu)*t + aG);
-			int nB = int(float( pix     &0xFFu)*t + aB);
+			int nR = int(float((pix>>16)&0xFFu)*Tpix + aR);
+			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG);
+			int nB = int(float( pix     &0xFFu)*Tpix + aB);
 			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 		}
@@ -6796,9 +6814,17 @@ void Render_DeferredFastFog() {
 			const size_t n = size_t(nx) * size_t(ny) * size_t(nz);
 			gFrAccR.assign(n, 0.0f); gFrAccG.assign(n, 0.0f);
 			gFrAccB.assign(n, 0.0f); gFrT.assign(n, 1.0f);
+			gFrExt.assign(n, 0.0f); gFrZb.assign(size_t(nz)+1, 0.0f);
 		}
 		gFrNear = std::max(1.0f, CurScene->NZP);
 		gFrFar  = fogFar;
+		// Slice boundaries z_b(i) = near·(far/near)^(i/nz) — precomputed so the
+		// composite reads them instead of an exp per pixel.
+		{
+			const float rr = std::pow(gFrFar/gFrNear, 1.0f/float(nz));
+			float zbv = gFrNear;
+			for (int k = 0; k <= nz; ++k) { gFrZb[k] = zbv; zbv *= rr; }
+		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
 		return;
