@@ -1427,8 +1427,13 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 		else
 			Z = 1;
 
-		// Z compare on center only.
-		if (F->Flags & Face_PointZTest)
+		// Lens-glow semantics: visibility is decided at the flare CENTER
+		// (one Z tap), and the bloom then composites additively WITHOUT a
+		// per-pixel Z test. The old per-pixel test sliced the glow against
+		// any geometry crossing it (the fountain spire cutting a hard edge
+		// through the purple omni's flare) — a glow is a camera-space
+		// effect and should bleed over nearby occluders; a flare whose
+		// center is hidden pops off whole, the classic flare behavior.
 		{
 			int32_t x = _A->PX;
 			if (x<0) x=0;
@@ -1438,7 +1443,7 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			if (y>YRes-1) y=YRes-1;
 			if (Z <= ZPage16[XRes*y+x]) return;
 		}
-		Spriter<256, true>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
+		Spriter<256, false>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
 		//CSeven_UP_MMX(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Col, Z);
 		//CSeven_UP(_A->PX,_A->PY,Size<<1,Size<<1,F->Txtr->Txtr->Data,VPage);
 	}
