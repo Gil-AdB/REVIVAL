@@ -413,11 +413,18 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation, bool ForceFo
 	View = Cm;
 	SetCurrentScene(Sc);
 
-	Animate_Objects(Sc, SkipCameraAnimation ? nullptr : View);
+	if (!getenv("FDS_SKY_NOANIMATE"))       // debug trisection
+		Animate_Objects(Sc, SkipCameraAnimation ? nullptr : View);
 
 	Vector PrevViewPos = View->ISource;
 	Vector_Zero(&View->ISource);
 
+	if (getenv("FDS_SKY_NOXFORM")) {        // debug trisection, see below
+		View->ISource = PrevViewPos;
+		View = PrevView;
+		SetCurrentScene(PrevCurScene);
+		return;
+	}
 	Transform_Objects(Sc, fds::g_mainCamera, fds::g_mainFaces);
 	if (CAll)
 	{
@@ -428,8 +435,12 @@ void RenderSkyCube(Scene *Sc, Camera *Cm, bool SkipCameraAnimation, bool ForceFo
 		// near-full brightness. Deferred lighting would re-shade against
 		// Mat->Diffuse / Sc->Ambient (both effectively zero on sky-cube
 		// materials) and produce a black backdrop.
-		Render(RenderPath::ForceForward);
-		FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
+		// FDS_SKY_NORENDER / FDS_SKY_NOZCLEAR: debug trisection of the
+		// nondeterministic city white-frame bug (see FDS_CITY_RACE_DEBUG).
+		if (!getenv("FDS_SKY_NORENDER"))
+			Render(RenderPath::ForceForward);
+		if (!getenv("FDS_SKY_NOZCLEAR"))
+			FastWrite((byte *)ZPage16, 0, (XRes * YRes * sizeof(word)) >> 2);
 	}
 	View->ISource = PrevViewPos;
 

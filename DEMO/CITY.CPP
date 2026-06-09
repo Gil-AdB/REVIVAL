@@ -2368,11 +2368,13 @@ struct CityScene : SceneDriver {
 				const dword* vp = (const dword*)VPage;
 				for (int y = 700; y < 1000; y += 4)
 					for (int x = 400; x < 1500; x += 4) {
-						const dword p = vp[size_t(y)*XRes + x];
+						const size_t pi = size_t(y)*XRes + x;
+						if (ZPage16[pi] == 0) continue;   // geometry only — immune
+						const dword p = vp[pi];            // to sky paint of z==0
 						lum += ((p>>16)&0xFF) + ((p>>8)&0xFF) + (p&0xFF); ns += 3;
 					}
-				fprintf(stderr, "[RACEDBG] pass1: CAll=%d nzZ=%zu waterVP=%llu\n",
-				        CAll, nz, (unsigned long long)(lum/ns));
+				fprintf(stderr, "[RACEDBG] pass1: CAll=%d nzZ=%zu geomVP=%llu (n=%zu)\n",
+				        CAll, nz, (unsigned long long)(ns ? lum/ns : 0), ns);
 				if (lum/ns > 200) {                 // bad run: dump pass-1 output
 					FILE* f = fopen("race_pass1_bad.ppm", "wb");
 					if (f) {
