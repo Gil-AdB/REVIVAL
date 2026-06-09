@@ -359,11 +359,16 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
             const Vector mirroredP = reflectPointAcross(worldP, N, d);
             MM->Verts[vOfs].Pos = mirroredP;
-            // Directions go through UnscaledRotMat (rotation only —
-            // RotMat bakes IScale, which would skew normals), then the
-            // reflection. Tangent too: greets is normal-mapped nearly
-            // everywhere, and the raw-copied object-space tangent gave
-            // mirrored surfaces a wrong TBN ("shading off, faces OK").
+            // Directions go through the FULL composed RotMat — the
+            // engine's own convention (Transform.cpp: IM = ViewMat ×
+            // RotMat for N/Tangent; magnitude normalizes per pixel).
+            // NOT UnscaledRotMat: only the spline-Animate path stamps
+            // it and the parent-hierarchy composition never reaches it,
+            // so for the robot's parented legs/hull it's stale — face
+            // normals came out wrong-frame and the cull dropped faces.
+            // Tangent too: greets is normal-mapped nearly everywhere,
+            // and the raw-copied object-space tangent gave mirrored
+            // surfaces a wrong TBN ("shading off, faces OK").
             // Known limitation: the kernel rebuilds B = N × T with a
             // fixed sign, and reflection flips cross-product
             // handedness, so the nmap's V-axis detail is inverted in
@@ -371,11 +376,11 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             // needs a per-pixel handedness bit to fully resolve.
             Vector localN = T->Verts[vi].N;
             Vector worldN;
-            MatrixXVector(T->UnscaledRotMat, &localN, &worldN);
+            MatrixXVector(T->RotMat, &localN, &worldN);
             MM->Verts[vOfs].N = reflectDirAcross(worldN, N);
             Vector localT = T->Verts[vi].Tangent;
             Vector worldT;
-            MatrixXVector(T->UnscaledRotMat, &localT, &worldT);
+            MatrixXVector(T->RotMat, &localT, &worldT);
             MM->Verts[vOfs].Tangent = reflectDirAcross(worldT, N);
             bbMin.x = std::min(bbMin.x, mirroredP.x);
             bbMin.y = std::min(bbMin.y, mirroredP.y);
@@ -426,7 +431,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             // clone faces a wrong cull normal even at init.
             {
                 Vector ln = OF.N, wn;
-                MatrixXVector(T->UnscaledRotMat, &ln, &wn);
+                MatrixXVector(T->RotMat, &ln, &wn);
                 CF.N = reflectDirAcross(wn, N);
             }
             // Engine convention: NormProd = -(N · A).
@@ -1200,18 +1205,18 @@ void UpdateMirror(Scene *sc, Mirror &m)
             MatrixXVector(T->RotMat, &localP, &worldP);
             worldP.x += T->IPos.x; worldP.y += T->IPos.y; worldP.z += T->IPos.z;
             m.cloneMesh->Verts[r.vStart + vi].Pos = reflectPointAcross(worldP, N, d);
-            // Directions: UnscaledRotMat (rotation only, no IScale
-            // skew) then reflect — N and Tangent both, every frame, so
-            // the robot's animated TBN stays correct in the mirror.
-            // (See the matching init-fill comment for the B = N × T
+            // Directions: full composed RotMat then reflect — N and
+            // Tangent both, every frame, so the robot's animated TBN
+            // stays correct in the mirror. (See the init-fill comment
+            // for why NOT UnscaledRotMat, and for the B = N × T
             // handedness caveat.)
             Vector localN = T->Verts[vi].N;
             Vector worldN;
-            MatrixXVector(T->UnscaledRotMat, &localN, &worldN);
+            MatrixXVector(T->RotMat, &localN, &worldN);
             m.cloneMesh->Verts[r.vStart + vi].N = reflectDirAcross(worldN, N);
             Vector localT = T->Verts[vi].Tangent;
             Vector worldT;
-            MatrixXVector(T->UnscaledRotMat, &localT, &worldT);
+            MatrixXVector(T->RotMat, &localT, &worldT);
             m.cloneMesh->Verts[r.vStart + vi].Tangent = reflectDirAcross(worldT, N);
         }
     }
@@ -1229,7 +1234,7 @@ void UpdateMirror(Scene *sc, Mirror &m)
             if (!src || !sT) continue;
             Face &CF = m.cloneMesh->Faces[fi];
             Vector ln = src->N, wn;
-            MatrixXVector(sT->UnscaledRotMat, &ln, &wn);
+            MatrixXVector(sT->RotMat, &ln, &wn);
             CF.N = reflectDirAcross(wn, N);
             CF.NormProd = -(CF.N.x * CF.A->Pos.x +
                             CF.N.y * CF.A->Pos.y +
