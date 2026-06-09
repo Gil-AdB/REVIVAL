@@ -83,11 +83,35 @@ the cost; integrate/composite are cheap.
 
 ## Known design choices to revisit
 
-- **Depth slice count vs near-field detail** — 128 linear may band near camera;
-  exp distribution fixes it.
-- **Temporal stability** — coarse XY grid can shimmer under motion at fog/shadow
-  edges; froxel fog usually pairs with a small temporal reprojection blend. Defer
-  until static quality is right; note it for the demo's moving camera.
-- **Trilinear composite across depth discontinuities** — at a surface silhouette
-  the froxel behind vs in front differ; may need a depth-aware sample (like the
-  current bilateral upsample) to avoid halos. Defer; check at step 3.
+- **Depth slice count vs near-field detail** — DONE: exp slices + exact sub-slice
+  composite removed depth banding; z=64 sufficient.
+
+── STATUS (2026-06-09) ─────────────────────────────────────────────────────────
+DONE: populate+integrate+composite (commit 2955c1c), exp depth slices + grid
+256×144 (2d2b942), distance-LOD blob filter (kills far aliasing blocks), exact
+sub-slice composite (kills tilted-surface depth bands, z→64) (bfdbb7c). Fixes the
+grazing speckle, the "fog on surfaces not air", and perf (conetest 30→~16ms,
+city fog ~110→~30ms). Remaining visible artifact: XY edge blockiness (cone rim)
+from the 256×144 bilinear grid.
+
+REMAINING (the "do all" items #3/#4 — both substantial, scoped here):
+- #3 TEMPORAL (the fix for the XY edge blockiness + any motion shimmer): jitter
+  the froxel sample positions per frame (Halton on the slice offset + sub-froxel
+  XY), reproject the previous frame's grid (each froxel world center → prev
+  view-proj → prev froxel coords, trilinear fetch), blend ~0.9 history. Needs:
+  prev view-proj matrix, a second (history) grid, a disocclusion reject (depth/
+  validity). Dissolves the grid entirely → low-res grid looks high-res. This is
+  a real feature (history buffer + reprojection + rejection) — best as its own
+  focused pass. Alternative cheaper stop-gaps: bump XY res (costs in-slab), or a
+  small depth-aware bilateral blur of the composited fog.
+- #4 SIMD the POPULATE → PARKED FOR x64 (see fast_fog_simd_x64.md). The populate
+  is more SIMD-friendly than the screen-space march (uniform per froxel, no
+  divergent DDA); 8-column-wide populate+integrate vectorizes the cellHash +
+  light loop + the per-column prefix scan (8 independent scans). BUT the shadow
+  tap is a gather (no NEON gather → scalar) and every prior arm64 SIMD attempt
+  this session was neutral/negative (NEON 2×128, latency-hidden). On AVX2 (true
+  8-wide + VPGATHERDD) it should pay — do it there, measure there, like the
+  other parked SIMD. Not worth confirming a likely-null arm64 result.
+
+- **Composite across depth discontinuities** — sub-slice uses bilinear XY +
+  exact depth; no obvious silhouette halos seen. Revisit if they appear.
