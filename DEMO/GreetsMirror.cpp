@@ -18,9 +18,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+
+#include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
 
 // Provided by MISC/PREPROC.CPP — stamps F->A_idx/B_idx/C_idx for SoA.
 extern void Compute_FaceVertexIndices(TriMesh *T);
+// DEMO/CITY.CPP — builds a Material around a Sachletz-tiled 32-bit
+// texture (Txtr_Nomip | Txtr_Tiled, numMipmaps=1). Used for the
+// second-order mirror RTT slots.
+extern Material *Materialize(void *data, int x, int y);
+// DEMO/Resize.cpp — serializes MainSurf swaps against EngineResize.
+extern std::mutex g_engineSurfaceMutex;
+// FDS/VESA — per-surface scanline offset table (the renderer reads the
+// global YOffs alias that VESA_Surface2Global points at VS->YTable).
+extern void Build_YOffs_Table(VESA_Surface *VS);
 
 // getAlignedBlock / getAlignedType come in via FDS_DECS.H above.
 
@@ -1519,6 +1531,420 @@ inline void StampTri2D(u8 *plane, uint16_t *zplane, int w, int h,
 }
 
 }  // namespace
+
+// ─── Second-order render-to-texture ─────────────────────────────────
+namespace {
+constexpr int kRttRes         = 256;  // slot texture edge (pow2)
+constexpr int kRttPerFrame    = 2;    // most-visible slots re-rendered per frame
+
+// Orthonormal in-plane basis for a mirror plane. Same construction the
+// probe uses — keep in sync (the slot UVs and the per-frame projection
+// must agree on (u, v)).
+inline void planeBasis(const Vector &n, Vector &u, Vector &v) {
+    if (std::fabs(n.y) < 0.9f) u = { n.z, 0.0f, -n.x };
+    else                       u = { 1.0f, 0.0f, 0.0f };
+    u.normalize();
+    v = { n.y*u.z - n.z*u.y,
+          n.z*u.x - n.x*u.z,
+          n.x*u.y - n.y*u.x };
+}
+}  // namespace
+
+int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
+                                std::vector<MirrorRttSlot> &out)
+{
+    if (!sc || !fds::FeatureFlags::mirror_rtt()) return 0;
+    int created = 0;
+    std::vector<uint32_t> black(size_t(kRttRes) * size_t(kRttRes), 0xFF000000u);
+    for (Mirror &A : mirrors) {
+        if (A.id == 0 || A.parentMirrorId != 0 || !A.cloneMesh) continue;
+        if (A.cloneFaceSrc.empty()) continue;
+        for (const Mirror &B : mirrors) {
+            if (&B == &A || B.id == 0 || B.parentMirrorId != 0) continue;
+            if (B.wallFaces.empty() || !B.plane.valid) continue;
+            Vector axU, axV;
+            planeBasis(B.plane.N, axU, axV);
+            // Gather A's clone faces of B's wall panels, with each
+            // face's SOURCE (u,v) bbox for the component split.
+            struct PFace {
+                Face       *cf;       // face in A's clone mesh
+                const Face *src;      // B wall face it mirrors
+                TriMesh    *srcMesh;
+                float       u0, u1, v0, v1;
+                int         comp = -1;
+            };
+            std::vector<PFace> pf;
+            for (size_t fi = 0; fi < A.cloneFaceSrc.size()
+                              && fi < size_t(A.cloneMesh->FIndex); ++fi) {
+                const Face *src = A.cloneFaceSrc[fi].face;
+                bool isBWall = false;
+                size_t wi = 0;
+                for (; wi < B.wallFaces.size(); ++wi) {
+                    if (B.wallFaces[wi] == src) { isBWall = true; break; }
+                }
+                if (!isBWall) continue;
+                TriMesh *WT = wi < B.wallFaceMeshes.size()
+                    ? B.wallFaceMeshes[wi] : nullptr;
+                PFace p{};
+                p.cf = &A.cloneMesh->Faces[fi];
+                p.src = src;
+                p.srcMesh = WT;
+                p.u0 = p.v0 = 1e30f; p.u1 = p.v1 = -1e30f;
+                const Vertex *vs[3] = { src->A, src->B, src->C };
+                for (int k = 0; k < 3; ++k) {
+                    Vector wp = vs[k]->Pos;
+                    if (WT) {
+                        Vector lp = wp;
+                        MatrixXVector(WT->RotMat, &lp, &wp);
+                        wp += WT->IPos;
+                    }
+                    const float pu = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                    const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                    p.u0 = std::min(p.u0, pu); p.u1 = std::max(p.u1, pu);
+                    p.v0 = std::min(p.v0, pv); p.v1 = std::max(p.v1, pv);
+                }
+                pf.push_back(p);
+            }
+            if (pf.empty()) continue;
+            // Connected-component split by (u,v)-bbox proximity: one
+            // coplanar cluster can span several separate boxes, and an
+            // RTT window across all of them would waste most texels.
+            constexpr float kJoinEps = 1.0f;
+            int numComps = 0;
+            for (size_t i = 0; i < pf.size(); ++i) {
+                if (pf[i].comp >= 0) continue;
+                pf[i].comp = numComps++;
+                bool grew = true;
+                while (grew) {
+                    grew = false;
+                    for (size_t j = 0; j < pf.size(); ++j) {
+                        if (pf[j].comp >= 0) continue;
+                        for (size_t k = 0; k < pf.size(); ++k) {
+                            if (pf[k].comp != pf[i].comp) continue;
+                            const bool overlap =
+                                pf[j].u0 <= pf[k].u1 + kJoinEps &&
+                                pf[j].u1 >= pf[k].u0 - kJoinEps &&
+                                pf[j].v0 <= pf[k].v1 + kJoinEps &&
+                                pf[j].v1 >= pf[k].v0 - kJoinEps;
+                            if (overlap) {
+                                pf[j].comp = pf[i].comp;
+                                grew = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            for (int c = 0; c < numComps; ++c) {
+                MirrorRttSlot slot{};
+                slot.aId = A.id;
+                slot.bId = B.id;
+                slot.bN  = B.plane.N;
+                slot.bD  = B.plane.d;
+                slot.axisU = axU;
+                slot.axisV = axV;
+                slot.u0 = slot.v0 = 1e30f; slot.u1 = slot.v1 = -1e30f;
+                for (const PFace &p : pf) {
+                    if (p.comp != c) continue;
+                    slot.u0 = std::min(slot.u0, p.u0);
+                    slot.u1 = std::max(slot.u1, p.u1);
+                    slot.v0 = std::min(slot.v0, p.v0);
+                    slot.v1 = std::max(slot.v1, p.v1);
+                }
+                if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
+                    continue;
+                slot.mat = Materialize(black.data(), kRttRes, kRttRes);
+                // The texture holds FINAL shaded colors — display it
+                // unlit: Lum 1.0 saturates the kernel's light factor at
+                // ~255 so lit ≈ texel; Diffuse/Specular 0 keep omnis
+                // out of it entirely.
+                slot.mat->Luminosity = 1.0f;
+                slot.mat->Diffuse    = 0.0f;
+                slot.mat->Specular   = 0.0f;
+                slot.mat->RelScene   = sc;
+                {
+                    char nm[64];
+                    std::snprintf(nm, sizeof(nm), "__mirrorRtt_%u_%u_%d",
+                                  unsigned(A.id), unsigned(B.id), c);
+                    slot.mat->Name = strdup(nm);
+                }
+                // MatLib tail-append + (one) table rebuild below — the
+                // deferred kernels resolve by table matID (see the
+                // wallMatClone lesson).
+                slot.mat->Next = nullptr;
+                if (!MatLib) {
+                    slot.mat->Prev = nullptr;
+                    MatLib = slot.mat;
+                } else {
+                    Material *tail = MatLib;
+                    while (tail->Next) tail = tail->Next;
+                    tail->Next = slot.mat;
+                    slot.mat->Prev = tail;
+                }
+                for (const PFace &p : pf) {
+                    if (p.comp != c) continue;
+                    p.cf->Txtr = slot.mat;
+                    slot.faces.push_back(p.cf);
+                    // Record each clone vert with its (static) source
+                    // panel-plane coordinates; the per-frame render
+                    // stamps the actual UVs (the window's sub-rect in
+                    // the symmetric RTT view moves with the camera).
+                    // Clone winding swapped B↔C at build, so clone A↔
+                    // src A, clone B↔src C, clone C↔src B.
+                    auto record = [&](Vertex *dst, const Vertex *srcV) {
+                        for (const auto &sv : slot.verts)
+                            if (sv.v == dst) return;  // dedupe shared verts
+                        Vector wp = srcV->Pos;
+                        if (p.srcMesh) {
+                            Vector lp = wp;
+                            MatrixXVector(p.srcMesh->RotMat, &lp, &wp);
+                            wp += p.srcMesh->IPos;
+                        }
+                        slot.verts.push_back({ dst,
+                            wp.x*axU.x + wp.y*axU.y + wp.z*axU.z,
+                            wp.x*axV.x + wp.y*axV.y + wp.z*axV.z });
+                    };
+                    record(p.cf->A, p.src->A);
+                    record(p.cf->B, p.src->C);
+                    record(p.cf->C, p.src->B);
+                }
+                out.push_back(std::move(slot));
+                ++created;
+            }
+        }
+    }
+    if (created > 0) Scene_RebuildMatTable(sc);
+    std::fprintf(stderr, "[MIRROR-RTT] prepared %d slot(s) at %dx%d\n",
+                 created, kRttRes, kRttRes);
+    return created;
+}
+
+void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
+                              std::vector<MirrorRttSlot> &slots)
+{
+    if (!sc || slots.empty()) return;
+    const Camera *mainCam = ::View ? ::View : sc->CameraHead;
+    if (!mainCam) return;
+
+    // ── Pick the most visible slots ─────────────────────────────────
+    const float (*VM)[3] = mainCam->Mat;
+    const Vector C = mainCam->ISource;
+    struct Job {
+        MirrorRttSlot *slot;
+        float          area;   // projected px² (visibility ranking)
+        Vector         camPos; // C_B
+        float          dist;   // C_B distance to B's plane
+    };
+    std::vector<Job> jobs;
+    for (MirrorRttSlot &s : slots) {
+        const Mirror *A = nullptr;
+        for (const Mirror &m : mirrors) if (m.id == s.aId) { A = &m; break; }
+        if (!A || !A->active) continue;
+        float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+        bool anyAhead = false;
+        for (const Face *F : s.faces) {
+            if (!F || !F->A || !F->B || !F->C) continue;
+            const Vertex *vs[3] = { F->A, F->B, F->C };
+            for (int k = 0; k < 3; ++k) {
+                const Vector &wp = vs[k]->Pos;  // clone verts: world-baked
+                const float dx = wp.x - C.x, dy = wp.y - C.y, dz = wp.z - C.z;
+                const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
+                if (vz <= 0.05f) continue;
+                const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
+                const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
+                const float sx =  FOVX * vx / vz + CntrEX;
+                const float sy = -FOVY * vy / vz + CntrEY;
+                bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+                by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+                anyAhead = true;
+            }
+        }
+        if (!anyAhead) continue;
+        bx0 = std::max(bx0, 0.0f); by0 = std::max(by0, 0.0f);
+        bx1 = std::min(bx1, float(::XRes)); by1 = std::min(by1, float(::YRes));
+        const float area = (bx1 - bx0) * (by1 - by0);
+        if (area <= 1.0f) continue;
+        // Doubly-reflected virtual camera; must land BEHIND B's plane
+        // (in front means the geometry can't show this panel anyway).
+        const Vector ca = reflectPointAcross(C, A->plane.N, A->plane.d);
+        const Vector cb = reflectPointAcross(ca, s.bN, s.bD);
+        const float sd = s.bN.x*cb.x + s.bN.y*cb.y + s.bN.z*cb.z + s.bD;
+        if (sd >= -0.01f) continue;  // not behind the panel plane
+        jobs.push_back({ &s, area, cb, -sd });
+    }
+    if (jobs.empty()) return;
+    std::sort(jobs.begin(), jobs.end(),
+              [](const Job &a, const Job &b) { return a.area > b.area; });
+    if (int(jobs.size()) > kRttPerFrame) jobs.resize(kRttPerFrame);
+
+    // ── Offscreen surface (allocated once; CITY cube-bake pattern) ──
+    static VESA_Surface s_rttSurf = {};
+    static bool s_rttInit = false;
+    if (!s_rttInit) {
+        s_rttSurf.X = kRttRes;
+        s_rttSurf.Y = kRttRes;
+        s_rttSurf.BPP = 32;
+        s_rttSurf.CPP = 4;
+        s_rttSurf.BPSL = kRttRes * 4;
+        s_rttSurf.PageSize = s_rttSurf.BPSL * kRttRes;
+        s_rttSurf.Z16  = (byte*)std::malloc(sizeof(word) * kRttRes * kRttRes);
+        s_rttSurf.Data = (byte*)std::malloc(size_t(s_rttSurf.PageSize));
+        if (!s_rttSurf.Z16 || !s_rttSurf.Data) return;
+        s_rttSurf.Flip = MainSurf ? MainSurf->Flip : nullptr;
+        Build_YOffs_Table(&s_rttSurf);
+        s_rttInit = true;
+    }
+
+    // ── Save the world ──────────────────────────────────────────────
+    // Serialize the MainSurf swap against a concurrent EngineResize
+    // (same hazard the CITY bake documents).
+    std::lock_guard<std::mutex> lk(g_engineSurfaceMutex);
+    VESA_Surface *prevMain = MainSurf;
+    Camera *prevView   = ::View;
+    const float prevFOVX = FOVX, prevFOVY = FOVY;
+    const float prevNZP  = sc->NZP;
+    // Hide every clone mesh: the RTT view must show the REAL scene
+    // only (a reflection of a reflection is exactly what the RTT
+    // itself provides; clone geometry would double it).
+    std::vector<std::pair<TriMesh*, DWord>> savedMeshFlags;
+    for (Mirror &m : mirrors) {
+        if (!m.cloneMesh) continue;
+        savedMeshFlags.push_back({ m.cloneMesh, m.cloneMesh->Flags });
+        m.cloneMesh->Flags &= ~HTrack_Visible;
+    }
+    // Mute clone omnis entirely: flares' footprint gate reads the MAIN
+    // screen's mask with the main XRes (meaningless against the RTT
+    // surface), and the forward vertex Lighting below must see REAL
+    // lights only — 90 range-1500 clones would blow the image out.
+    std::vector<std::pair<Omni*, float>> savedOmniSize;
+    std::vector<std::pair<Omni*, dword>> savedOmniFlags;
+    for (Omni *O = sc->OmniHead; O; O = O->Next) {
+        if (!(O->Flags & Omni_MirrorClone)) continue;
+        savedOmniSize.push_back({ O, O->ISize });
+        savedOmniFlags.push_back({ O, O->Flags });
+        O->ISize = 0.0f;
+        O->Flags &= ~Omni_Active;
+    }
+    // Forward Gouraud needs lit vertex colors. The main loop's
+    // Lighting() runs AFTER this pass in the tick (and includes the
+    // clone omnis, which the deferred path ignores) — light here with
+    // the real set so frame 1 isn't black and the RTT shading is
+    // clone-free.
+    Lighting(sc);
+
+    MainSurf = &s_rttSurf;
+    VESA_Surface2Global(MainSurf);
+    static Camera s_rttCam;
+    ::View = &s_rttCam;
+
+    for (const Job &j : jobs) {
+        MirrorRttSlot &s = *j.slot;
+        const float D = j.dist;
+        // Camera basis: right = axisU, up = axisV, forward = B's
+        // normal — looking from behind the plane through the window at
+        // the real scene. With the view axis ⟂ the panel, the engine's
+        // screen-parallel near plane IS the mirror plane: setting NZP
+        // just past D clips everything behind the mirror exactly.
+        std::memset(&s_rttCam, 0, sizeof(s_rttCam));
+        s_rttCam.ISource = j.camPos;
+        s_rttCam.Mat[0][0] = s.axisU.x; s_rttCam.Mat[0][1] = s.axisU.y; s_rttCam.Mat[0][2] = s.axisU.z;
+        s_rttCam.Mat[1][0] = s.axisV.x; s_rttCam.Mat[1][1] = s.axisV.y; s_rttCam.Mat[1][2] = s.axisV.z;
+        s_rttCam.Mat[2][0] = s.bN.x;    s_rttCam.Mat[2][1] = s.bN.y;    s_rttCam.Mat[2][2] = s.bN.z;
+        // SYMMETRIC frustum centered on the camera's plane-foot
+        // (cu, cv), sized to cover the panel window. A true off-axis
+        // projection (window mapped edge-to-edge) is geometrically
+        // nicer but the engine's mesh-level frustum cull only models
+        // symmetric frusta (`fabs(S.x)*PX > S.z*CntrEX` ⇒ the view
+        // axis must be inside the viewport) — an off-axis CntrE
+        // outside [0, res] culled everything. The window therefore
+        // lands in a camera-dependent SUB-RECT of the texture; the
+        // per-frame UV stamp below keeps the mapping paired with the
+        // freshly rendered content. Texel waste grows with viewing
+        // angle (foot far from the window) — acceptable at 256².
+        const float cu = j.camPos.x*s.axisU.x + j.camPos.y*s.axisU.y + j.camPos.z*s.axisU.z;
+        const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
+        const float halfU = std::max(std::fabs(s.u1 - cu), std::fabs(s.u0 - cu));
+        const float halfV = std::max(std::fabs(s.v1 - cv), std::fabs(s.v0 - cv));
+        if (halfU < 1e-3f || halfV < 1e-3f) continue;
+        const float halfRes = float(kRttRes) * 0.5f;
+        FOVX   = halfRes * D / halfU;
+        FOVY   = halfRes * D / halfV;
+        CntrEX = halfRes;
+        CntrEY = halfRes;
+        CntrX  = kRttRes / 2;
+        CntrY  = kRttRes / 2;
+        sc->NZP = D * 1.001f + 0.01f;
+        // Stamp this slot's UVs for the projection above: texture
+        // coord of panel point (pu, pv) in the symmetric view.
+        for (const MirrorRttSlot::SlotVert &sv : s.verts) {
+            float tu = ( FOVX * (sv.pu - cu) / D + halfRes) / float(kRttRes);
+            float tv = (-FOVY * (sv.pv - cv) / D + halfRes) / float(kRttRes);
+            // Keep off the wrap seam (Txtr_Tiled wraps).
+            tu = std::min(std::max(tu, 0.002f), 0.998f);
+            tv = std::min(std::max(tv, 0.002f), 0.998f);
+            sv.v->U = tu;
+            sv.v->V = tv;
+        }
+
+        std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
+        std::memset(s_rttSurf.Z16, 0, sizeof(word) * kRttRes * kRttRes);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        if (CAll != 0) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceForward);
+        }
+        // FDS_MIRROR_RTT_DUMP=1: write each slot's first rendered
+        // frame to /tmp for inspection (linear, pre-Sachletz).
+        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
+            static int sDumped = 0;
+            if (sDumped < 8) {
+                char path[64];
+                std::snprintf(path, sizeof(path),
+                              "/tmp/rtt_m%u_m%u_%d.ppm",
+                              unsigned(s.aId), unsigned(s.bId), sDumped);
+                if (FILE *f = std::fopen(path, "wb")) {
+                    std::fprintf(f, "P6\n%d %d\n255\n", kRttRes, kRttRes);
+                    const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
+                    for (int i = 0; i < kRttRes * kRttRes; ++i) {
+                        const uint32_t p = px[i];
+                        unsigned char rgb[3] = {
+                            (unsigned char)((p >> 16) & 0xFF),
+                            (unsigned char)((p >>  8) & 0xFF),
+                            (unsigned char)( p        & 0xFF) };
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "[MIRROR-RTT] dumped %s "
+                                 "(cam %.1f,%.1f,%.1f D=%.2f win %.1fx%.1f "
+                                 "FOVX=%.0f FOVY=%.0f CntrE=%.0f,%.0f "
+                                 "NZP=%.2f FZP=%.0f CAll=%d)\n",
+                                 path, j.camPos.x, j.camPos.y, j.camPos.z,
+                                 D, s.u1 - s.u0, s.v1 - s.v0,
+                                 FOVX, FOVY, CntrEX, CntrEY,
+                                 sc->NZP, sc->FZP, int(CAll));
+                    ++sDumped;
+                }
+            }
+        }
+        // Linear RTT pixels → slot texture, re-tiled in place (the
+        // same one-way Sachletz the texture loader applies).
+        std::memcpy(s.mat->Txtr->Data, s_rttSurf.Data,
+                    size_t(kRttRes) * size_t(kRttRes) * 4);
+        Sachletz((dword*)s.mat->Txtr->Data, kRttRes, kRttRes);
+    }
+
+    // ── Restore the world ───────────────────────────────────────────
+    for (auto &p : savedOmniSize)  p.first->ISize = p.second;
+    for (auto &p : savedOmniFlags) p.first->Flags = p.second;
+    for (auto &p : savedMeshFlags) p.first->Flags = p.second;
+    ::View = prevView;
+    sc->NZP = prevNZP;
+    MainSurf = prevMain;
+    VESA_Surface2Global(MainSurf);   // restores XRes/VPage/Cntr*/YOffs
+    FOVX = prevFOVX;                 // not covered by Surface2Global —
+    FOVY = prevFOVY;                 // Animate_Objects already ran this
+                                     // frame, nothing recomputes these.
+}
 
 void ProbeSecondOrderMirrors(Scene *sc, const std::vector<Mirror> &mirrors)
 {

@@ -34,6 +34,7 @@ struct Object;
 struct Omni;
 struct Scene;
 struct TriMesh;
+struct Vertex;
 
 namespace fds {
 
@@ -191,6 +192,51 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 // first render. Static geometry only — re-call if a mirror plane or
 // mesh transform changes.
 void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
+
+// One second-order RTT slot: mirror A's reflection shows mirror B's
+// panel (one CONNECTED panel component — a coplanar cluster can span
+// several separate boxes); the faces listed here are A's clones of
+// that panel, retargeted at init to `mat` whose texture is re-rendered
+// per frame from the doubly-reflected camera.
+struct MirrorRttSlot {
+    uint8_t aId = 0;          // outer mirror (whose reflection shows the panel)
+    uint8_t bId = 0;          // inner mirror (the panel being re-rendered)
+    Vector  bN{};             // B's plane normal / offset
+    float   bD = 0.0f;
+    Vector  axisU{}, axisV{}; // orthonormal basis in B's plane
+    float   u0 = 0, u1 = 0, v0 = 0, v1 = 0;  // panel window in (u,v)
+    Material *mat = nullptr;  // RTT material (mat->Txtr->Data updated per frame)
+    std::vector<Face*> faces; // A-clone faces displaying the RTT
+    // Clone verts of those faces with their (static) panel-plane
+    // coordinates. UVs are re-stamped each time the slot re-renders:
+    // the engine's mesh frustum cull only supports symmetric frusta,
+    // so the RTT view is centered on the camera's plane-foot and the
+    // panel window lands in a camera-dependent sub-rect of the texture.
+    struct SlotVert { Vertex *v; float pu, pv; };
+    std::vector<SlotVert> verts;
+};
+
+// Init-time: enumerate (A, B, connected-panel) combos, create one RTT
+// material + texture per slot, retarget A's clone-of-B's-panel faces
+// to it and stamp their vertex UVs with normalized panel-window
+// coordinates (static — the mapping is in B's plane basis). Rebuilds
+// the per-scene mat table once at the end. Call AFTER all mirrors are
+// built. No-op (returns 0) unless --mirror-rtt.
+int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
+                                std::vector<MirrorRttSlot> &out);
+
+// Per-frame: pick the most visible slots (projected footprint area,
+// cap kMirrorRttPerFrame), render the REAL scene (clone meshes hidden,
+// clone flares muted) from C_B = reflect_B(reflect_A(cam)) through B's
+// panel window — off-axis projection, near plane AT the mirror plane —
+// into the slot texture via a low-res offscreen surface swap (CITY
+// cube-bake pattern, forward path). Call AFTER Animate_Objects and
+// BEFORE the main Transform_Objects: the pass overwrites per-vertex
+// transforms (main Transform redoes them) and restores every camera /
+// surface global it touches. Uses the previous frame's camera pose
+// (one frame of lag in the second bounce).
+void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
+                              std::vector<MirrorRttSlot> &slots);
 
 // Per-frame probe for second-order ("mirror in mirror") pairs, gated
 // by --mirror-rtt-probe. For each ordered pair (A, B) of ACTIVE base

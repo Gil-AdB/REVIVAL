@@ -48,6 +48,10 @@ static Scene *GreetSc;
 // call at scene init; per-frame `UpdateAllMirrors` re-mirrors every
 // dynamic source mesh + cloned omni for each.
 static std::vector<fds::Mirror> g_greetsMirrors;
+// Second-order RTT slots (one per outer-mirror × inner-panel pair),
+// prepared at init when --mirror-rtt is on; textures re-rendered per
+// frame by RenderSecondOrderMirrors before the main transform.
+static std::vector<fds::MirrorRttSlot> g_greetsRttSlots;
 
 // Forward-declared at namespace scope (the rest of this TU is in an
 // anonymous namespace where `extern` would silently get internal
@@ -1358,6 +1362,11 @@ void Initialize_Greets()
 		// behind a (transparent) mirror can't leak through its footprint
 		// and beat the reflected clones on Z.
 		fds::TagFacesBehindMirrors(GreetSc, g_greetsMirrors);
+		// --mirror-rtt: second-order reflections. One RTT slot per
+		// (outer mirror, inner panel component); textures re-rendered
+		// per frame in Run_Greets (RenderSecondOrderMirrors).
+		fds::PrepareSecondOrderMirrorRtt(GreetSc, g_greetsMirrors,
+		                                 g_greetsRttSlots);
 		std::fprintf(stderr, "[GREETS-MIRROR] active mirrors: %zu\n", g_greetsMirrors.size());
 	}
 }
@@ -1935,6 +1944,15 @@ struct GreetsScene : SceneDriver {
 				o->IDir.z = dzw * invLen;
 			}
 		}
+
+		// Second-order mirror RTT pass (no-op without --mirror-rtt):
+		// re-render the visible mirror-in-mirror panels into their slot
+		// textures. Must run AFTER Animate_Objects (current geometry,
+		// camera pose from this frame's spline step) and BEFORE the
+		// main Transform_Objects (the pass clobbers per-vertex
+		// transforms, which the main transform recomputes).
+		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
+		                              g_greetsRttSlots);
 
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
