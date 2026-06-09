@@ -733,6 +733,14 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         clone->IPos = reflectPointAcross(srcO->IPos, N, d);
         clone->IDir = reflectDirAcross(srcO->IDir, N);
         clone->Flags |= Omni_MirrorClone;
+        // The flare Face is held BY VALUE in Omni, but its A/B/C
+        // vertex pointers still aim at the SOURCE omni's V after the
+        // memcpy — the clone's flare would render at the source's
+        // screen position. Repoint at the clone's own V; the flare
+        // blit is per-pixel z-tested, which clips the reflected flare
+        // to the mirror footprint naturally (clone world depth there,
+        // nearer real geometry everywhere else).
+        clone->F.A = clone->F.B = clone->F.C = &clone->V;
         // Tag this clone with its mirror id. The deferred lighting
         // kernel filters per-pixel against gb.mirrorId, so clones of
         // mirror N's reflected world only receive light from mirror
@@ -1134,6 +1142,8 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
                 clone->IPos = composedPoint(srcO->IPos);
                 clone->IDir = composedDir(srcO->IDir);
                 clone->Flags |= Omni_MirrorClone;
+                // Same flare-face repoint as the base-mirror clone loop.
+                clone->F.A = clone->F.B = clone->F.C = &clone->V;
                 clone->mirrorId = compoundId;
                 // No intensity attenuation: the per-pixel filter
                 // routes only this compound's omnis to compoundId

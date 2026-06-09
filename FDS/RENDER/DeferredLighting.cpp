@@ -4845,6 +4845,13 @@ static void Render_OmniHalos_Tile(
     const bool vecPath = fds::FeatureFlags::vol_vec();
     const bool analyticHalo = fds::FeatureFlags::vol_halo_analytic();
     const float noiseStrength = fds::FeatureFlags::vol_analytic_noise();
+    // Mirror gate planes for clone-omni halos (see Render_OmniHalos's
+    // list-build comment). Null when the scene has no mirrors — and
+    // then no clone omnis are in the list either.
+    const meka::u8 *mmask = (g_gbuffer && !g_gbuffer->mirrorMask.empty())
+        ? g_gbuffer->mirrorMask.data() : nullptr;
+    const uint16_t *mmz = (g_gbuffer && !g_gbuffer->mirrorMaskZ.empty())
+        ? g_gbuffer->mirrorMaskZ.data() : nullptr;
 
     // ─── Analytic halo path ────────────────────────────────────────────
     // For each pixel/omni, the in-sphere line integral of inverse-square
@@ -4913,6 +4920,14 @@ static void Render_OmniHalos_Tile(
                     const float perOmniDensity = density * lights->haloDensityMul[li];
                     const float PP = Px*Px + Py_l*Py_l + Pz*Pz;
                     const float rr2 = rr * rr;
+                    // Mirror-clone omni: glow only inside the owning
+                    // mirror's stamped footprint, and only on the ray
+                    // segment BEHIND the wall surface (start the
+                    // integral at the wall depth). That is exactly the
+                    // reflected image of the source omni's glow between
+                    // the wall and the (reflected) scene.
+                    const uint32_t omid = lights->mirrorId[li];
+                    if (omid != 0 && (!mmask || !mmz)) continue;
 
                     // Per-lane scalar sphere bounds → zLoArr, zHiArr.
                     alignas(32) float zLoArr[8] = {}, zHiArr[8] = {};
@@ -4934,6 +4949,13 @@ static void Render_OmniHalos_Tile(
                         float zHi = (VP + sphereSq) * invUV;
                         if (zLo < zMin) zLo = zMin;
                         if (zHi > zMax) zHi = zMax;
+                        if (omid != 0) {
+                            const size_t pi = row + size_t(pxBase + lane);
+                            if (uint32_t(mmask[pi]) != omid) continue;
+                            const float zWall =
+                                float(0xFF80 - int(mmz[pi])) * invZScale;
+                            if (zLo < zWall) zLo = zWall;
+                        }
                         if (zHi <= zLo) continue;
                         zLoArr[lane] = zLo;
                         zHiArr[lane] = zHi;
@@ -5461,14 +5483,19 @@ void Render_OmniHalos() {
 
     static int omniIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int omniCount = 0;
+    // Mirror-clone halos render only on the analytic+vec path, which
+    // gates per pixel on gb.mirrorMask == clone id and starts the
+    // integral at the wall depth (mirrorMaskZ) — the reflected glow
+    // exists on the virtual segment BEHIND the mirror surface only.
+    // The ray-march / scalar fallbacks have no such gate, so clones
+    // stay excluded there (15 warm greets clones otherwise bloom a
+    // flat additive wash over the reflection AND real geometry).
+    const bool cloneHalos =
+        fds::FeatureFlags::vol_halo_analytic() && fds::FeatureFlags::vol_vec()
+        && g_gbuffer && !g_gbuffer->mirrorMask.empty()
+        && g_gbuffer->mirrorMaskZ.size() >= g_gbuffer->mirrorMask.size();
     for (int i = 0; i < numLights; ++i) {
-        // Skip mirror-clone omnis. Their halo is an ADDITIVE screen-space
-        // glow with no per-pixel mirror gating, so 15 cloned warm greets
-        // omnis bloom a flat yellow wash over the reflection (and over
-        // real geometry). A mirror should show reflected glows only
-        // inside its footprint — until the halo kernel gains a per-pixel
-        // gb.mirrorId gate, the clean fix is to not glow clones at all.
-        if (lights->mirrorId[i] != 0) continue;
+        if (lights->mirrorId[i] != 0 && !cloneHalos) continue;
         if (!lights->isSpot[i]) omniIdx[omniCount++] = i;
     }
     if (omniCount == 0) return;

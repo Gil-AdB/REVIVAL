@@ -1543,13 +1543,14 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	FDW omniFlareSize;
 	if (!scratch) for(O=Sc->OmniHead;O;O=O->Next)
 	{
-		// Mirror-clone omnis must not draw their flare billboard: 15
-		// cloned warm greets omnis behind the teleporter rendered a
-		// wall of bright yellow sprites that filled the mirror — the
-		// "yellow tint" obscuring the reflection. Clones still light
-		// (the deferred kernel reads them from OmniHead directly);
-		// they just don't get a visible flare sprite.
-		if (O->Flags & Omni_MirrorClone) continue;
+		// Mirror-clone omni flares DO draw — the lamp flares must show
+		// in reflections ("omnis don't get reflected in mirrors").
+		// This used to skip them when clones' F.A/B/C still pointed at
+		// the SOURCE omni's V (every clone flare rendered on top of the
+		// real lamp = the yellow sprite wall); GreetsMirror now repoints
+		// the clone's flare face at its own V, and the per-pixel z test
+		// in the flare blit clips the sprite to the mirror footprint
+		// (clone-world depth there, nearer real geometry elsewhere).
 
 		Vtx=&O->V;
 		Vector_Sub(&O->IPos,&cam.view->ISource,&V);
