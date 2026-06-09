@@ -5790,6 +5790,7 @@ struct FastFogParams {
 	float worleyThresh;    // density hits 0 at F1 = (1-thresh) cells from a feature point
 	float worleyInvT;      // 1/(1-thresh), precomputed remap gain
 	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
+	float glowMax;         // >0: soft-knee cap on per-slice in-scatter radiance
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
 	// In-scatter glow: scene lights lighting the fog medium.
 	const ViewLightsSoA *lights;
@@ -6971,6 +6972,21 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 						Lg += glowG[iz]*P.inscatter;
 						Lb += glowB[iz]*P.inscatter;
 					}
+					// Soft-knee radiance compressor: the lamp kernel peaks
+					// ~20× (× inscatter) and clips white near lights. Exactly
+					// linear below glowMax/2, asymptote at glowMax; scaled by
+					// the max channel so hue is preserved. Density/extinction
+					// untouched — this dims only what would clip.
+					if (P.glowMax > 0.0f) {
+						const float m = Lr > Lg ? (Lr > Lb ? Lr : Lb)
+						                        : (Lg > Lb ? Lg : Lb);
+						const float k = P.glowMax * 0.5f;
+						if (m > k) {
+							const float e = m - k;
+							const float s = (k + e / (1.0f + e / k)) / m;
+							Lr *= s; Lg *= s; Lb *= s;
+						}
+					}
 					scR = Lr*ext; scG = Lg*ext; scB = Lb*ext;
 				}
 				const float zc  = 0.5f * (zb[iz] + zb[iz+1]);
@@ -7168,6 +7184,7 @@ void Render_DeferredFastFog() {
 	P.jitter = fds::FeatureFlags::fast_fog_blob_jitter();
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
+	P.glowMax      = fds::FeatureFlags::fast_fog_glow_max();
 	if (P.blobOverlap > 0.0f) {
 		// Metaball sums exceed 1 where blobs stack (that's the point), so the
 		// iso threshold ranges [0,3]; fog ramps to full over +0.7 above iso.
