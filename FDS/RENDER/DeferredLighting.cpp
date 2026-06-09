@@ -5786,6 +5786,7 @@ struct FastFogParams {
 	float adaptThresh;
 	float ditherAmp;   // triangular dither (levels) to break 8-bit banding
 	float feather;     // slab Y-edge feather (world units); 0 = hard cutoff
+	float invFeather;  // 1/feather, precomputed for the froxel density
 };
 
 // Hash a 3D integer cell index → 32 random bits. One call yields all
@@ -6663,8 +6664,19 @@ static inline float fogNoiseAt(const FastFogParams& P, float wx, float wy, float
 
 static inline float froxelDensity(const FastFogParams& P, float wx, float wy, float wz) {
 	if (wy < P.slabY0 || wy > P.slabY1) return 0.0f;     // outside the slab
-	if (!P.blobs) return 1.0f;                            // smooth slab: uniform
-	return fogNoiseAt(P, wx, wy, wz, P.cell, P.invCell);
+	float d = P.blobs ? fogNoiseAt(P, wx, wy, wz, P.cell, P.invCell) : 1.0f;
+	// Feather the slab's Y-cutoff (same smoothstep ramp as the screen-space
+	// path, but per sample point): without it the slab top/bottom is a razor
+	// edge — a sharp horizontal fog ceiling. fast_fog_feather; auto = 20% of
+	// slab thickness.
+	if (d > 0.0f) {
+		float lo = (wy - P.slabY0) * P.invFeather;
+		float hi = (P.slabY1 - wy) * P.invFeather;
+		lo = lo < 0.f ? 0.f : (lo > 1.f ? 1.f : lo);
+		hi = hi < 0.f ? 0.f : (hi > 1.f ? 1.f : hi);
+		d *= lo*lo*(3.0f-2.0f*lo) * hi*hi*(3.0f-2.0f*hi);
+	}
+	return d;
 }
 
 // Fused populate + front-to-back integrate, one pass per froxel column (the
@@ -7072,6 +7084,7 @@ void Render_DeferredFastFog() {
 	// huge thickness → huge feather → profile stays ~1 (no-op), as intended.
 	const float fth = fds::FeatureFlags::fast_fog_feather();
 	P.feather = (fth > 0.0f) ? fth : 0.2f * (P.slabY1 - P.slabY0);
+	P.invFeather = 1.0f / P.feather;
 
 	constexpr int numTilesX = 6;
 	constexpr int numTilesY = 4;
