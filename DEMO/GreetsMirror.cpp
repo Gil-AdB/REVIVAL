@@ -404,11 +404,21 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             std::swap(CF.V2, CF.V3);
             std::swap(CF.EU2, CF.EU3);
             std::swap(CF.EV2, CF.EV3);
-            CF.N = reflectDirAcross(OF.N, N);
+            // Face normal must be the source's WORLD normal (RotMat ×
+            // local N) before reflecting — the clone mesh has identity
+            // transform, so its face N is consumed as world-space. The
+            // robot's meshes carry a real rotation; using OF.N raw gave
+            // clone faces a wrong cull normal even at init.
+            {
+                Vector ln = OF.N, wn;
+                MatrixXVector(T->RotMat, &ln, &wn);
+                CF.N = reflectDirAcross(wn, N);
+            }
             // Engine convention: NormProd = -(N · A).
             CF.NormProd = -(CF.N.x * CF.A->Pos.x +
                             CF.N.y * CF.A->Pos.y +
                             CF.N.z * CF.A->Pos.z);
+            m.cloneFaceSrc.push_back({&OF, T});
             // Tag every clone face with the owning mirror's id. Mekalele
             // reads this into ctx.mirrorTag and rejects any pixel whose
             // gb.mirrorId doesn't match — so clones can only paint inside
@@ -673,8 +683,9 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     auto ensureMirrorIdSized = [](meka::GBuffer *gb, const char *which) {
         if (!gb) return;
         const size_t needed = gb->normal.size();
-        if (gb->mirrorId.size()   < needed) gb->mirrorId.assign  (needed, 0);
-        if (gb->mirrorMask.size() < needed) gb->mirrorMask.assign(needed, 0);
+        if (gb->mirrorId.size()    < needed) gb->mirrorId.assign   (needed, 0);
+        if (gb->mirrorMask.size()  < needed) gb->mirrorMask.assign (needed, 0);
+        if (gb->mirrorMaskZ.size() < needed) gb->mirrorMaskZ.assign(needed, 0);
         (void)which;
     };
     if (g_gbuffer) {
@@ -818,10 +829,12 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         }
     }
 
-    // A real display panel has a few square units of surface; the
-    // screen boxes' narrow edge strips share the texture but make no
-    // sense as mirrors (and each would clone the whole scene + omnis).
-    constexpr float kMinMirrorArea = 1.0f;
+    // Display panels vs box edge strips, by measured greets data: the
+    // column panels are 0.98-1.00 area, the big end screens 3-172, the
+    // edge strips 0.30-0.32. 0.5 splits them cleanly. (1.0 looked
+    // safe but ate the column panels — "panels on the main columns
+    // are not reflecting".)
+    constexpr float kMinMirrorArea = 0.5f;
 
     int added = 0, skippedSlivers = 0, skippedHorizontal = 0;
     for (int c = 0; c < numClusters; ++c) {
@@ -834,24 +847,29 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                 members.push_back(samples[i].F);
                 clusterArea += samples[i].area;
             }
+        Vector cN = {0,0,0};
+        float  cD = 0.0f;
+        for (size_t i = 0; i < samples.size(); ++i)
+            if (clusterOf[i] == c) { cN = samples[i].wN; cD = samples[i].d; break; }
+        const char *verdict = "built";
         if (clusterArea < kMinMirrorArea) {
+            verdict = "sliver";
             ++skippedSlivers;
-            continue;
+        } else if (std::fabs(cN.y) > 0.8f) {
+            // Skip near-horizontal clusters: display panels are
+            // vertical; the screen boxes' TOP/BOTTOM caps share the
+            // texture but a floor/ceiling-facing mirror there is never
+            // the authored intent and each costs a full scene clone +
+            // omni set. (Drop this test if a scene ever wants real
+            // floor mirrors.)
+            verdict = "horizontal";
+            ++skippedHorizontal;
         }
-        // Skip near-horizontal clusters: display panels are vertical;
-        // the screen boxes' TOP/BOTTOM caps share the texture but a
-        // floor/ceiling-facing mirror there is never the authored
-        // intent and each costs a full scene clone + omni set. (Drop
-        // this test if a scene ever wants real floor mirrors.)
-        {
-            float ny = 0.0f;
-            for (size_t i = 0; i < samples.size(); ++i)
-                if (clusterOf[i] == c) { ny = samples[i].wN.y; break; }
-            if (std::fabs(ny) > 0.8f) {
-                ++skippedHorizontal;
-                continue;
-            }
-        }
+        std::fprintf(stderr,
+            "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
+            "area=%6.2f -> %s\n",
+            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea, verdict);
+        if (verdict[0] != 'b') continue;
         std::sort(members.begin(), members.end());
         char label[128];
         std::snprintf(label, sizeof(label), "%s#%d", textureFileName, c);
@@ -1171,6 +1189,27 @@ void UpdateMirror(Scene *sc, Mirror &m)
             m.cloneMesh->Verts[r.vStart + vi].N = reflectDirAcross(worldN, N);
         }
     }
+    // Per-face: re-derive each clone face's normal from the source's
+    // CURRENT world normal (srcMesh->RotMat moves every frame for the
+    // robot), reflect it, and recompute NormProd against the already-
+    // re-mirrored clone A vertex. Static meshes recompute to the same
+    // value; the cost (~9k faces × a 3×3 matmul) is negligible.
+    {
+        const size_t nf = std::min(m.cloneFaceSrc.size(),
+                                   size_t(m.cloneMesh->FIndex));
+        for (size_t fi = 0; fi < nf; ++fi) {
+            const Face *src = m.cloneFaceSrc[fi].face;
+            TriMesh    *sT  = m.cloneFaceSrc[fi].mesh;
+            if (!src || !sT) continue;
+            Face &CF = m.cloneMesh->Faces[fi];
+            Vector ln = src->N, wn;
+            MatrixXVector(sT->RotMat, &ln, &wn);
+            CF.N = reflectDirAcross(wn, N);
+            CF.NormProd = -(CF.N.x * CF.A->Pos.x +
+                            CF.N.y * CF.A->Pos.y +
+                            CF.N.z * CF.A->Pos.z);
+        }
+    }
     // Per-omni: re-mirror IPos / IDir, restore both source and clone
     // to their FULL original ranges every frame.
     //
@@ -1267,56 +1306,74 @@ using u8 = uint8_t;
 // projects to wherever its world-space mirror-of-mirror position lands)
 // bleeds outside the parent's actual screen footprint and we end up
 // with silver tint over real-world geometry.
-inline void StampTri2D(u8 *plane, int w, int h,
-                       float ax, float ay,
-                       float bx, float by,
-                       float cx, float cy,
-                       u8 value,
+inline void StampTri2D(u8 *plane, uint16_t *zplane, int w, int h,
+                       float ax, float ay, float arz,
+                       float bx, float by, float brz,
+                       float cx, float cy, float crz,
+                       u8 value, float zscale,
                        u8 requireExisting = 0xFF)
 {
     // Sort vertices by Y so we can split the triangle into a flat-top
     // and flat-bottom half and scan each between two edges per row.
-    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); }
-    if (by > cy) { std::swap(bx, cx); std::swap(by, cy); }
-    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); }
+    // rz = 1/z rides along — linear interpolation of 1/z in screen
+    // space is exact for a planar triangle, so the per-pixel wall
+    // depth written to zplane matches what Mekalele would rasterize.
+    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); std::swap(arz, brz); }
+    if (by > cy) { std::swap(bx, cx); std::swap(by, cy); std::swap(brz, crz); }
+    if (ay > by) { std::swap(ax, bx); std::swap(ay, by); std::swap(arz, brz); }
     const int yTop = std::max(0, int(std::ceil(ay)));
     const int yMid = std::clamp(int(std::ceil(by)), 0, h);
     const int yBot = std::min(h, int(std::ceil(cy)));
     if (yTop >= yBot) return;
-    // Edge slopes (dx / dy) for the three edges. Guard against 1-pixel
+    // Edge slopes (d? / dy) for the three edges. Guard against 1-pixel
     // tall triangles to avoid divide-by-zero.
-    auto slope = [](float x0, float y0, float x1, float y1) -> float {
+    auto slope = [](float v0, float y0, float v1, float y1) -> float {
         const float dy = y1 - y0;
-        return dy > 1e-6f ? (x1 - x0) / dy : 0.0f;
+        return dy > 1e-6f ? (v1 - v0) / dy : 0.0f;
     };
-    const float dxLong  = slope(ax, ay, cx, cy);
-    const float dxUpper = slope(ax, ay, bx, by);
-    const float dxLower = slope(bx, by, cx, cy);
+    const float dxLong   = slope(ax, ay, cx, cy);
+    const float dxUpper  = slope(ax, ay, bx, by);
+    const float dxLower  = slope(bx, by, cx, cy);
+    const float drzLong  = slope(arz, ay, crz, cy);
+    const float drzUpper = slope(arz, ay, brz, by);
+    const float drzLower = slope(brz, by, crz, cy);
     // Upper half: edges (A→C, A→B). Lower half: edges (A→C, B→C).
     for (int y = yTop; y < yBot; ++y) {
         const float yf = float(y);
-        const float xLong = ax + dxLong * (yf - ay);
-        float xOther;
+        const float xLong  = ax  + dxLong  * (yf - ay);
+        const float rzLong = arz + drzLong * (yf - ay);
+        float xOther, rzOther;
         if (y < yMid) {
-            xOther = ax + dxUpper * (yf - ay);
+            xOther  = ax  + dxUpper  * (yf - ay);
+            rzOther = arz + drzUpper * (yf - ay);
         } else {
-            xOther = bx + dxLower * (yf - by);
+            xOther  = bx  + dxLower  * (yf - by);
+            rzOther = brz + drzLower * (yf - by);
         }
-        int xL = int(std::ceil(std::min(xLong, xOther)));
-        int xR = int(std::ceil(std::max(xLong, xOther)));
+        float xLf = xLong, rzLf = rzLong, xRf = xOther, rzRf = rzOther;
+        if (xLf > xRf) { std::swap(xLf, xRf); std::swap(rzLf, rzRf); }
+        int xL = int(std::ceil(xLf));
+        int xR = int(std::ceil(xRf));
         if (xL < 0) xL = 0;
         if (xR > w) xR = w;
         if (xL >= xR) continue;
-        u8 *row = plane + size_t(y) * size_t(w);
-        if (requireExisting == 0xFF) {
-            std::memset(row + size_t(xL), value, size_t(xR - xL));
-        } else {
-            // Clip pass: only override pixels the parent already
-            // stamped. Compound mirrors use this so their wall mask
-            // can't bleed onto pixels the parent's wall doesn't cover.
-            for (int x = xL; x < xR; ++x) {
-                if (row[x] == requireExisting) row[x] = value;
-            }
+        const float spanW = xRf - xLf;
+        const float drzdx = spanW > 1e-6f ? (rzRf - rzLf) / spanW : 0.0f;
+        u8       *row  = plane  + size_t(y) * size_t(w);
+        uint16_t *zrow = zplane + size_t(y) * size_t(w);
+        for (int x = xL; x < xR; ++x) {
+            // Clip pass (requireExisting != 0xFF): only override pixels
+            // the parent already stamped. Compound mirrors use this so
+            // their wall mask can't bleed past the parent's footprint.
+            if (requireExisting != 0xFF && row[x] != requireExisting)
+                continue;
+            row[x] = value;
+            const float rz = rzLf + drzdx * (float(x) - xLf);
+            const float z  = rz > 1e-9f ? 1.0f / rz : 1e9f;
+            float encF = float(0xFF80) - z * zscale;
+            if (encF < 1.0f)       encF = 1.0f;
+            if (encF > 65407.0f)   encF = 65407.0f;  // 0xFF7F
+            zrow[x] = uint16_t(encF);
         }
     }
 }
@@ -1377,8 +1434,11 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     // test reads the same value for every face that targets a pixel.
     auto &plane = g_gbuffer->mirrorMask;
     if (plane.empty()) return;  // no mirror has activated the plane
-    // Clear last frame's coverage. Cheap memset — 2 MB at 1080p.
+    auto &zplane = g_gbuffer->mirrorMaskZ;
+    if (zplane.size() < plane.size()) return;  // sized together
+    // Clear last frame's coverage. Cheap memset — 2+4 MB at 1080p.
     std::memset(plane.data(), 0, plane.size());
+    std::memset(zplane.data(), 0, zplane.size() * sizeof(uint16_t));
     // Also clear the ownership plane each frame so foreground commits
     // (which write ownerMirrorId = 0) start from a known baseline; the
     // deferred lighting reads it as pmid per pixel.
@@ -1529,16 +1589,22 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
             }
             if (nc < 3) continue;
             // Project clipped polygon verts to screen + fan-triangulate.
-            float sx[4], sy[4];
-            for (int i = 0; i < nc; ++i) projectPreDivideToScreen(clipped[i], sx[i], sy[i]);
+            // rz = 1/z per vert feeds the wall-depth interpolation.
+            float sx[4], sy[4], rz[4];
+            for (int i = 0; i < nc; ++i) {
+                projectPreDivideToScreen(clipped[i], sx[i], sy[i]);
+                rz[i] = 1.0f / clipped[i].z;
+            }
             // Compound mirrors stamp only into pixels their parent
             // already owns. 0xFF means "unconditional" for base mirrors.
             const u8 requireExisting = (m.parentMirrorId != 0)
                 ? m.parentMirrorId : u8(0xFF);
             for (int i = 1; i + 1 < nc; ++i) {
-                StampTri2D(plane.data(), w, h,
-                           sx[0], sy[0], sx[i], sy[i], sx[i+1], sy[i+1],
-                           m.id, requireExisting);
+                StampTri2D(plane.data(), zplane.data(), w, h,
+                           sx[0], sy[0], rz[0],
+                           sx[i], sy[i], rz[i],
+                           sx[i+1], sy[i+1], rz[i+1],
+                           m.id, g_zscale, requireExisting);
             }
         }
     }
@@ -1547,16 +1613,16 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     // TransparentFront / TransparentBack targets) gate against the
     // same per-pixel id. Without this, transparent-source clones
     // bypass the mask entirely and render across the whole screen.
-    if (g_gbufferTransparent
-        && g_gbufferTransparent->mirrorMask.size() == plane.size()) {
-        std::memcpy(g_gbufferTransparent->mirrorMask.data(),
-                    plane.data(), plane.size());
-    }
-    if (g_gbufferTransparentBack
-        && g_gbufferTransparentBack->mirrorMask.size() == plane.size()) {
-        std::memcpy(g_gbufferTransparentBack->mirrorMask.data(),
-                    plane.data(), plane.size());
-    }
+    auto copyMaskTo = [&](meka::GBuffer *gb) {
+        if (!gb || gb->mirrorMask.size() != plane.size()) return;
+        std::memcpy(gb->mirrorMask.data(), plane.data(), plane.size());
+        if (gb->mirrorMaskZ.size() == zplane.size()) {
+            std::memcpy(gb->mirrorMaskZ.data(), zplane.data(),
+                        zplane.size() * sizeof(uint16_t));
+        }
+    };
+    copyMaskTo(g_gbufferTransparent);
+    copyMaskTo(g_gbufferTransparentBack);
 }
 
 }  // namespace fds

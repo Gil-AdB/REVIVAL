@@ -87,6 +87,15 @@ struct GBuffer {
 	// could fail their gate after a compound clone committed there
 	// (visible as "objects in mirror disappear, but floor remains").
 	std::vector<u8> mirrorMask;
+	// Per-pixel wall depth for the mirror gate, same 16-bit encoding
+	// as the Z buffer (0xFF80 - z*zscale; larger = closer). Written by
+	// StampMirrorMasks alongside mirrorMask. The behind-mirror cull
+	// rejects a real face's pixel only when it lies BEYOND the wall
+	// surface at that pixel — without the depth, the 2D stamp (which
+	// is z-ignorant) carved behind-plane geometry out of real walls
+	// even when the mirror itself was fully occluded by a nearer wall
+	// ("mirror visible through walls"). 0 = no wall here.
+	std::vector<u16> mirrorMaskZ;
 };
 
 // Octahedral encode: unit vector (nx, ny, nz) -> 16-bit (8.8 signed).
@@ -300,6 +309,7 @@ struct GBufferSpan {
 	u16 *shadowMatID;
 	u8  *mirrorId;
 	const u8 *mirrorMask;
+	const u16 *mirrorMaskZ;
 	u16 *zbuffer;
 
 	GBufferSpan &operator+=(i32 offset) {
@@ -311,6 +321,7 @@ struct GBufferSpan {
 		if (shadowMatID) shadowMatID += offset;
 		if (mirrorId) mirrorId += offset;
 		if (mirrorMask) mirrorMask += offset;
+		if (mirrorMaskZ) mirrorMaskZ += offset;
 		zbuffer += offset;
 		return *this;
 	}
@@ -348,6 +359,9 @@ struct GBufferSpan {
 		const u8 *mirrorMaskPtr = gbuffer.mirrorMask.empty()
 			? nullptr
 			: gbuffer.mirrorMask.data() + offset;
+		const u16 *mirrorMaskZPtr = gbuffer.mirrorMaskZ.empty()
+			? nullptr
+			: gbuffer.mirrorMaskZ.data() + offset;
 		return {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
@@ -357,6 +371,7 @@ struct GBufferSpan {
 			shadowMatIDPtr,
 			mirrorIdPtr,
 			mirrorMaskPtr,
+			mirrorMaskZPtr,
 			ctx.zbuffer + offset
 		};
 	}
@@ -602,8 +617,22 @@ struct TileRasterizer {
 						_mm256_srlv_epi32(bcast, __m256i(pixelIds)),
 						_mm256_set1_epi32(1));
 					// behind == (bit != 0); keep lanes where bit == 0.
-					const Vec8ib keep = (Vec8i(bit) == Vec8i(0));
-					p_mask &= keep;
+					Vec8ib cull = (Vec8i(bit) != Vec8i(0));
+					// Depth-qualify the cull: only reject the lane if
+					// the face pixel lies BEYOND the wall surface at
+					// that pixel (z encoding: larger = closer, so
+					// beyond == z_candidate < wallZ). The 2D stamp is
+					// z-ignorant — a footprint can land on real walls
+					// standing IN FRONT of an occluded mirror, and an
+					// unconditional cull carved see-through holes in
+					// them ("mirror visible through walls").
+					if (span.mirrorMaskZ != nullptr) {
+						Vec8us wallZ_c;
+						wallZ_c.load(span.mirrorMaskZ);
+						const Vec8ui wallZ = extend(wallZ_c);
+						cull &= Vec8ib(z_candidate < wallZ);
+					}
+					p_mask &= ~cull;
 				}
 
 				if (barry::any_lane_set(p_mask)) {

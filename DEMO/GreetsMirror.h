@@ -74,6 +74,14 @@ struct Mirror {
     Material   *wallMatClone = nullptr;
     std::vector<ClonedMeshRange> meshRanges;
     std::vector<ClonedOmniRef>   omniClones;
+    // Per clone face (parallel to cloneMesh->Faces): the source face +
+    // its owning mesh. UpdateMirror re-derives each clone face's world
+    // normal (srcMesh->RotMat × srcFace->N, reflected) and NormProd
+    // every frame — for ANIMATED sources (the robot) the init-time
+    // normal goes stale as the mesh rotates, which mis-culls clone
+    // faces (the "flipped face culling" look in the robot reflection).
+    struct CloneFaceSrc { const Face *face; TriMesh *mesh; };
+    std::vector<CloneFaceSrc> cloneFaceSrc;
     // Wall face pointers — the actual mirror SURFACE faces in the live
     // scene meshes (NOT in cloneMesh). Used by StampMirrorMasks to
     // rasterize each wall triangle's screen footprint into the gb.mirrorId
