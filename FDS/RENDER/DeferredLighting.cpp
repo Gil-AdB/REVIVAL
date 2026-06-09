@@ -6913,20 +6913,10 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 								const float a1 = a10 + (a11-a10)*tx;
 								h4[c] = a0 + (a1-a0)*ty;
 							}
-							// History must be finite to blend: NaN/Inf are
-							// ABSORBING under the lerp (lerp(cur,NaN,b)=NaN,
-							// forever) — one bad populate frame would stick
-							// in the grid until an out-of-frustum flush (the
-							// "white water cured permanently by a 360" bug
-							// signature). Rejecting it here bounds any bad
-							// value's lifetime to ONE frame; the injection
-							// itself stays visible to fast_fog_froxel_validate.
-							if (std::isfinite(h4[0]+h4[1]+h4[2]+h4[3])) {
-								scR += (h4[0] - scR) * blend;
-								scG += (h4[1] - scG) * blend;
-								scB += (h4[2] - scB) * blend;
-								ext += (h4[3] - ext) * blend;
-							}
+							scR += (h4[0] - scR) * blend;
+							scG += (h4[1] - scG) * blend;
+							scB += (h4[2] - scB) * blend;
+							ext += (h4[3] - ext) * blend;
 						}
 					}
 				}
@@ -7160,31 +7150,6 @@ void Render_DeferredFastFog() {
 			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
-		if (fds::FeatureFlags::fast_fog_froxel_validate()) {
-			// NaN/Inf are ABSORBING under the temporal lerp and huge values
-			// take 0.8^n hundreds of frames to decay — one bad frame poisons
-			// the fog until a big camera move flushes the history. Find the
-			// injection frame, not the symptom.
-			const float* s = gFrSct[gFrCur].data();
-			const size_t n4 = size_t(nx)*size_t(ny)*size_t(nz)*4;
-			size_t nBad = 0, firstBad = SIZE_MAX; float mx = 0.0f;
-			for (size_t i = 0; i < n4; ++i) {
-				const float v = s[i];
-				if (!(v >= 0.0f && v < 1.0e9f)) {      // NaN, Inf, negative, absurd
-					++nBad; if (firstBad == SIZE_MAX) firstBad = i;
-				} else if (v > mx) mx = v;
-			}
-			if (nBad) {
-				const size_t fr = firstBad / 4;
-				std::fprintf(stderr,
-					"[FRVAL] frame=%u BAD=%zu first at ix=%d iy=%d iz=%d c=%zu val=%g (maxOk=%g)\n",
-					gFrFrameIdx, nBad, int((fr/nz)%nx), int(fr/(size_t(nx)*nz)),
-					int(fr%nz), firstBad%4, double(s[firstBad]), double(mx));
-			} else if ((gFrFrameIdx & 15u) == 0u) {
-				std::fprintf(stderr, "[FRVAL] frame=%u clean, max=%g\n",
-				             gFrFrameIdx, double(mx));
-			}
-		}
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
 		// This frame becomes next frame's history.
 		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;
