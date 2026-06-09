@@ -40,6 +40,7 @@ void Render_VolumetricCones();
 void Render_OmniHalos();
 void Render_DeferredVolumetric();
 void Render_DeferredFastFog();
+void Render_DeferredFastFogSkyPaint();
 void Render_DeferredSkybox();
 void VolProf_Tick();
 
@@ -441,9 +442,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				// The froxel grid is view-aligned and temporally reprojected
 				// against the previous MAIN-camera frame — populating it with
 				// the mirror camera would corrupt the history (and pay a whole
-				// extra populate). Reflections render unfogged on that path.
+				// extra populate). Reflection-pass geometry renders unfogged,
+				// but the mirrored SKY must still be painted: those pixels
+				// otherwise keep stale VPage content (uninitialized on a
+				// scene's first frames) that the water then reflects.
 				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
 					Render_DeferredFastFog();
+				else
+					Render_DeferredFastFogSkyPaint();
 			} else
 				Render_DeferredFogPass();
 		}

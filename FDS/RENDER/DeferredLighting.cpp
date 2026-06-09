@@ -6577,7 +6577,6 @@ namespace {
 	bool     gFrHistValid = false;
 	bool     gFrTemporal = false;       // this frame: jitter + blend enabled
 	float    gFrBlend = 0.8f;
-	float    gFrJx = 0.0f, gFrJy = 0.0f, gFrJz = 0.0f;     // sub-froxel jitter
 	float    gFrPrevCamX, gFrPrevCamY, gFrPrevCamZ;        // prev frame camera
 	float    gFrPrevW[9];               // prev view→world rotation (rows)
 	float    gFrPrevA[3];               // Rprevᵀ·(cam − camPrev), per frame
@@ -6695,12 +6694,15 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	const ViewLightsSoA* L = P.lights;
 	const bool glowOn = P.inscatter > 0.0f && L && P.numLights > 0;
 	// Temporal state (set by the dispatch): sample positions jittered by a
-	// sub-froxel Halton offset; pass 3 reprojects each froxel's CANONICAL
-	// (unjittered) center into the previous frame's grid and blends history.
+	// sub-froxel Halton offset IN XY ONLY; pass 3 reprojects each froxel's
+	// CANONICAL (unjittered) center into the previous frame's grid and blends
+	// history. NO z-jitter: far slices are hundreds of units thick, so a
+	// ±half-slice offset swings the sampled blob density wildly, and the EMA
+	// over a cycling jitter is a limit CYCLE, not a fixed point — ~(1−blend)
+	// of that swing survives as permanent per-frame flicker even on a static
+	// camera. The XY footprint is tiny (~11 units at z≈1400) so XY jitter —
+	// the one that dissolves the grid stairs — leaves negligible ripple.
 	const bool  temporal = gFrTemporal && gFrHistValid;
-	const float jx = gFrTemporal ? gFrJx : 0.0f;
-	const float jy = gFrTemporal ? gFrJy : 0.0f;
-	const float jz = gFrTemporal ? gFrJz : 0.0f;   // slice frac offset, [-0.5,0.5]
 	const float blend = gFrBlend;
 	const int   cur = gFrCur, prv = cur ^ 1;
 	float*       sct  = gFrSct[cur].data();
@@ -6710,14 +6712,28 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	const float nyOverYRes = float(ny) / float(YRes);
 	const float invLog2R = invLogR * 0.6931472f;   // slice idx per log2 unit
 	const float Ax = gFrPrevA[0], Ay = gFrPrevA[1], Az = gFrPrevA[2];
+	// Per-COLUMN jitter phase: the global Halton index is offset by a hash of
+	// the column, so neighbouring columns sit at different phases of the
+	// 8-frame cycle. A GLOBAL jitter makes the whole fog field breathe
+	// laterally in lockstep each frame — the EMA damps it to (1−blend) but a
+	// coherent 20% shimmer still reads as flicker. Decorrelated phases turn
+	// the same residual into fine spatial noise that the bilinear composite
+	// and the blend average away; the converged mean is identical.
+	static const float h2[8] = {1/2.f,1/4.f,3/4.f,1/8.f,5/8.f,3/8.f,7/8.f,1/16.f};
+	static const float h3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
 	float dens[kFrMaxNz];
 	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
 	for (int iy = iy0; iy < iy1; ++iy) {
-		const float sy = (float(iy)+0.5f+jy) * invNy * float(YRes);
-		const float Y  = (CntrEY - sy) * P.invFOVY;
 		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
 		const float Yc  = (CntrEY - syc) * P.invFOVY;
 		for (int ix = ix0; ix < ix1; ++ix) {
+			float jx = 0.0f, jy = 0.0f;
+			if (gFrTemporal) {
+				const uint32_t k = (gFrFrameIdx + cellHash(ix, iy, 0x5EED)) & 7u;
+				jx = h2[k] - 0.5f; jy = h3[k] - 0.5f;
+			}
+			const float sy = (float(iy)+0.5f+jy) * invNy * float(YRes);
+			const float Y  = (CntrEY - sy) * P.invFOVY;
 			const float sx = (float(ix)+0.5f+jx) * invNx * float(XRes);
 			const float X  = (sx - CntrEX) * P.invFOVX;
 			const float Dx = P.w00*X + P.w01*Y + P.w02;
@@ -6736,9 +6752,9 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const float Bz = gFrPrevW[2]*Dxc + gFrPrevW[5]*gYc + gFrPrevW[8]*Dzc;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 
-			// ── pass 1: blob/slab density at each slice's jittered sample ───
+			// ── pass 1: blob/slab density at each slice center (XY jittered) ─
 			for (int iz = 0; iz < nz; ++iz) {
-				const float z  = zb[iz] + (0.5f + jz) * (zb[iz+1] - zb[iz]);
+				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
 				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
 				float d = froxelDensity(P, wx, wy, wz);
@@ -7104,13 +7120,8 @@ void Render_DeferredFastFog() {
 		// become the history the NEXT frame reprojects against.
 		gFrTemporal = fds::FeatureFlags::fast_fog_froxel_temporal();
 		gFrBlend    = std::min(0.95f, std::max(0.0f, fds::FeatureFlags::fast_fog_froxel_blend()));
-		if (gFrTemporal) {
-			static const float h2[8] = {1/2.f,1/4.f,3/4.f,1/8.f,5/8.f,3/8.f,7/8.f,1/16.f};
-			static const float h3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
-			static const float h5[8] = {1/5.f,2/5.f,3/5.f,4/5.f,1/25.f,6/25.f,11/25.f,16/25.f};
-			const uint32_t k = gFrFrameIdx & 7u;
-			gFrJx = h2[k] - 0.5f; gFrJy = h3[k] - 0.5f; gFrJz = h5[k] - 0.5f;
-		}
+		// (Per-column XY jitter phases are derived in the column tile from
+		// gFrFrameIdx + a column hash — see Froxel_ColumnTile.)
 		if (gFrHistValid) {
 			// Per-frame constant of the reprojection: A = Rprevᵀ·(cam−camPrev).
 			const float dx = P.camX - gFrPrevCamX, dy = P.camY - gFrPrevCamY,
@@ -7151,6 +7162,35 @@ void Render_DeferredFastFog() {
 			runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
 	} else {
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_Tile(a,b,c,d,P); });
+	}
+}
+
+// Minimal stand-in for the fast-fog pass on render passes that SKIP the
+// froxel path (the city reflection pass): paint only the pixels the
+// rasterizer never touched (zEnc == 0) with the SATURATED fog color, exactly
+// what the full pass converges to at the far plane (amount 1−e^{−density},
+// since τ(far) = density by construction). Without this, the mirrored view's
+// sky pixels keep stale VPage content — uninitialized memory on the first
+// frames of a scene — and the water reflects white garbage until camera
+// motion happens to overwrite it. Geometry pixels stay unfogged (deliberate:
+// the wobbled reflection doesn't warrant a whole extra froxel populate).
+void Render_DeferredFastFogSkyPaint() {
+	if (!CurScene || !ZPage16 || !VPage) return;
+	const float amt = 1.0f - fastExpNeg(fds::FeatureFlags::fast_fog_density());
+	const float aR = float(CurScene->Ambient.R) * amt;
+	const float aG = float(CurScene->Ambient.G) * amt;
+	const float aB = float(CurScene->Ambient.B) * amt;
+	const float keep = 1.0f - amt;
+	const uint16_t* zEnc = ZPage16;
+	dword* out = reinterpret_cast<dword*>(VPage);
+	const size_t n = size_t(XRes) * size_t(YRes);
+	for (size_t i = 0; i < n; ++i) {
+		if (zEnc[i] != 0) continue;
+		const dword pix = out[i];
+		const int nR = int(float((pix>>16)&0xFFu)*keep + aR);
+		const int nG = int(float((pix>> 8)&0xFFu)*keep + aG);
+		const int nB = int(float( pix     &0xFFu)*keep + aB);
+		out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 	}
 }
 
