@@ -83,6 +83,13 @@ static std::atomic<int> g_coneAnalyticHits{0};
 static std::atomic<int> g_coneRaymarchHits{0};
 
 constexpr int DEFERRED_MAX_LIGHTS = 128;
+// Scene-wide light capacity (ViewLightsSoA + the halo/volumetric index
+// scratch), decoupled from the per-tile cap above. Mirror-cloned omnis
+// multiply the scene total (greets: 15 source × (1 + #mirrors)) but the
+// per-tile mirror-footprint cull keeps each TILE's list small — so the
+// scene array must hold them all while TileLights stays at 128.
+// ViewLightsSoA is ~33 arrays of 4 bytes → 256 entries ≈ 34 KB, trivial.
+constexpr int DEFERRED_MAX_VIEW_LIGHTS = 256;
 constexpr int DEFERRED_NUM_TILES_X = 12;
 constexpr int DEFERRED_NUM_TILES_Y = 8;
 constexpr int DEFERRED_NUM_TILES   = DEFERRED_NUM_TILES_X * DEFERRED_NUM_TILES_Y;
@@ -101,50 +108,50 @@ static std::atomic<uint64_t> g_shadowProfSamples{0};
 static std::atomic<uint64_t> g_shadowProfLineTransitions{0};
 thread_local uintptr_t s_shadowProfLastLine = 0;
 struct ViewLightsSoA {
-	alignas(32) float posX[DEFERRED_MAX_LIGHTS];
-	alignas(32) float posY[DEFERRED_MAX_LIGHTS];
-	alignas(32) float posZ[DEFERRED_MAX_LIGHTS];
-	alignas(32) float colB[DEFERRED_MAX_LIGHTS];
-	alignas(32) float colG[DEFERRED_MAX_LIGHTS];
-	alignas(32) float colR[DEFERRED_MAX_LIGHTS];
-	alignas(32) float range2[DEFERRED_MAX_LIGHTS];
-	alignas(32) float rRange[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float posY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float posZ[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float colB[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float colG[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float colR[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float range2[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float rRange[DEFERRED_MAX_VIEW_LIGHTS];
 	// Spot light cone (Light_SpotLight). dirX/Y/Z is the cone axis in
 	// view space (unit vector). cosInner / cosOuter are the cone half
 	// angles in cosine form. isSpot=0 means omni (cone params ignored).
-	alignas(32) float dirX[DEFERRED_MAX_LIGHTS];
-	alignas(32) float dirY[DEFERRED_MAX_LIGHTS];
-	alignas(32) float dirZ[DEFERRED_MAX_LIGHTS];
-	alignas(32) float cosInner[DEFERRED_MAX_LIGHTS];
-	alignas(32) float cosOuter[DEFERRED_MAX_LIGHTS];
-	alignas(32) uint32_t isSpot[DEFERRED_MAX_LIGHTS];
+	alignas(32) float dirX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float dirY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float dirZ[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float cosInner[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float cosOuter[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) uint32_t isSpot[DEFERRED_MAX_VIEW_LIGHTS];
 	// Index into g_shadowMaps for this light's shadow map, or -1 if
 	// not a shadow-caster (most omnis). Filled per frame in
 	// Render_DeferredLighting alongside the other per-light fields.
-	alignas(32) int32_t  shadowMapIdx[DEFERRED_MAX_LIGHTS];
+	alignas(32) int32_t  shadowMapIdx[DEFERRED_MAX_VIEW_LIGHTS];
 	// World-space position of the light. Required for cube shadow
 	// face selection (option 3 in the cube infra design): the per-
 	// pixel sample's world position is computed once from the view-
 	// space sample, then `D_world = sample_world - omni_world` picks
 	// the cube face. Populated for all lights so the kernel doesn't
 	// branch on light type to read it; only used by cube-shadow path.
-	alignas(32) float posWorldX[DEFERRED_MAX_LIGHTS];
-	alignas(32) float posWorldY[DEFERRED_MAX_LIGHTS];
-	alignas(32) float posWorldZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float posWorldX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float posWorldY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float posWorldZ[DEFERRED_MAX_VIEW_LIGHTS];
 	// Index into g_cubeShadowRefs for omnis with cube shadow, or -1.
 	// Mutually exclusive with shadowMapIdx (which is only meaningful
 	// for Light_SpotLight). Populated by Render_DeferredLighting from
 	// the omni's Type + CastsShadow flag + cube allocation.
-	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_LIGHTS];
+	alignas(32) int32_t  cubeShadowIdx[DEFERRED_MAX_VIEW_LIGHTS];
 	// Per-omni halo controls, decoupled from surface lighting. See
 	// Omni::HaloIntensity / Omni::HaloRange comments. haloDensityMul[]
 	// is the per-omni density multiplier (1.0 for legacy behavior);
 	// haloRange2[] / haloRRange[] override range2[] / rRange[] for
 	// the halo sphere bounds (falling back to those when HaloRange=0).
-	alignas(32) float    haloDensityMul[DEFERRED_MAX_LIGHTS];
-	alignas(32) float    haloRange     [DEFERRED_MAX_LIGHTS];
-	alignas(32) float    haloRange2    [DEFERRED_MAX_LIGHTS];
-	alignas(32) float    haloRRange    [DEFERRED_MAX_LIGHTS];
+	alignas(32) float    haloDensityMul[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    haloRange     [DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    haloRange2    [DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    haloRRange    [DEFERRED_MAX_VIEW_LIGHTS];
 	// Per-light mirror id (0 = original world; >0 = clone of mirror
 	// with that id). The kernels read gb.mirrorId[pixel] once per
 	// pixel and skip any light whose mirrorId disagrees, so original-
@@ -152,7 +159,7 @@ struct ViewLightsSoA {
 	// clone surfaces only by that mirror's cloned omnis. Without this
 	// filter clone pixels receive the union of both light sets and
 	// saturate (greets teleporter mirror went uniformly yellow).
-	alignas(32) uint32_t mirrorId      [DEFERRED_MAX_LIGHTS];
+	alignas(32) uint32_t mirrorId      [DEFERRED_MAX_VIEW_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -314,9 +321,61 @@ static void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int nu
 	}
 }
 
+// Per-region (tile or strip) presence bitmask over the planar-mirror
+// pre-stamp plane (gb.mirrorMask): bit i set ⇔ some pixel in the region
+// carries mirror id i. Clone lights (Omni::mirrorId != 0) can only ever
+// light pixels inside their mirror's stamped footprint — the per-pixel
+// pmid filter rejects them everywhere else — so the light-list builders
+// skip regions whose presence bit is clear. Without this, every screen-
+// cluster mirror's 15 cloned omnis (range ≫ scene size) land in every
+// tile: greets with 9 mirrors ≈ 150 lights/tile, blowing past
+// DEFERRED_MAX_LIGHTS=128 (silently dropping REAL lights) and paying
+// the full per-pixel loop for lights that can't contribute.
+//
+// NOTE if compound mirrors are ever re-enabled: compounds don't stamp
+// their own id (they ride the parent's footprint), so their omnis must
+// either be tagged with the parent id for this cull or exempted here.
+static void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
+                                      int regionW, int regionH,
+                                      int regionsX, int regionsY,
+                                      uint32_t *out)
+{
+	for (int ry = 0; ry < regionsY; ++ry) {
+		const int y0 = ry * regionH;
+		const int y1 = std::min(h, y0 + regionH);
+		for (int rx = 0; rx < regionsX; ++rx) {
+			const int x0 = rx * regionW;
+			const int x1 = std::min(w, x0 + regionW);
+			uint32_t bits = 0;
+			for (int y = y0; y < y1; ++y) {
+				const uint8_t *row = mask + size_t(y) * size_t(w) + x0;
+				const int n = x1 - x0;
+				int x = 0;
+				// 8-byte chunks with a zero fast-path — the plane is
+				// mostly zeros outside mirror footprints.
+				for (; x + 8 <= n; x += 8) {
+					uint64_t chunk;
+					std::memcpy(&chunk, row + x, 8);
+					if (chunk == 0) continue;
+					for (int k = 0; k < 8; ++k) {
+						const uint8_t id = row[x + k];
+						if (id) bits |= (id < 32) ? (1u << id) : 0xffffffffu;
+					}
+				}
+				for (; x < n; ++x) {
+					const uint8_t id = row[x];
+					if (id) bits |= (id < 32) ? (1u << id) : 0xffffffffu;
+				}
+			}
+			out[size_t(ry) * size_t(regionsX) + rx] = bits;
+		}
+	}
+}
+
 static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
-                                 const ViewLightsSoA &lights, int numLights)
+                                 const ViewLightsSoA &lights, int numLights,
+                                 const uint32_t *tileMirrorPresence)
 {
 	const int numTiles = numTilesX * numTilesY;
 	for (int t = 0; t < numTiles; ++t) {
@@ -404,6 +463,13 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 				    (vz_plus_r < tl.zMin || vz_minus_r > tl.zMax)) {
 					continue;
 				}
+				// Clone-light mirror-footprint cull (see
+				// computeMirrorPresenceGrid). Ids ≥ 32 don't fit the
+				// bitmask and are conservatively kept.
+				if (Lmid != 0 && Lmid < 32 && tileMirrorPresence &&
+				    !(tileMirrorPresence[idx] & (1u << Lmid))) {
+					continue;
+				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
 					tl.posX[s]   = Lpx;
@@ -481,7 +547,8 @@ static TileLights g_stripLights[DEFERRED_MAX_STRIPS];
 static int        g_numStripLights = 0;
 
 static void buildStripLightLists(int numStrips, int stripHeight, int yres,
-                                  const ViewLightsSoA &lights, int numLights)
+                                  const ViewLightsSoA &lights, int numLights,
+                                  const uint32_t *stripMirrorPresence)
 {
 	if (numStrips > DEFERRED_MAX_STRIPS) numStrips = DEFERRED_MAX_STRIPS;
 	for (int s = 0; s < numStrips; ++s) {
@@ -529,6 +596,12 @@ static void buildStripLightLists(int numStrips, int stripHeight, int yres,
 
 		for (int s = strip_lo; s <= strip_hi; ++s) {
 			TileLights &tl = g_stripLights[s];
+			// Clone-light mirror-footprint cull — strip flavor (see
+			// computeMirrorPresenceGrid).
+			if (Lmid != 0 && Lmid < 32 && stripMirrorPresence &&
+			    !(stripMirrorPresence[s] & (1u << Lmid))) {
+				continue;
+			}
 			if (tl.count < DEFERRED_MAX_LIGHTS) {
 				const int idx = tl.count++;
 				tl.posX[idx]   = Lpx;
@@ -3362,7 +3435,7 @@ void Render_DeferredLighting() {
 
 	std::memset(&lights, 0, sizeof(lights));
 	int numLights = 0;
-	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_LIGHTS; O = O->Next) {
+	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_VIEW_LIGHTS; O = O->Next) {
 		if (!(O->Flags & Omni_Active)) continue;
 		Vector u, w;
 		Vector_Sub(&O->IPos, &View->ISource, &u);
@@ -3477,9 +3550,24 @@ void Render_DeferredLighting() {
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
 	                       invZScale);
+	// Mirror-footprint presence per tile/strip, for the clone-light
+	// cull in the list builders. Only computed when a scene actually
+	// activated the mask plane (GreetsMirror::BuildMirror).
+	const uint8_t *mirrorMaskPlane =
+		(g_gbuffer && g_gbuffer->mirrorMask.size() >= numPixels)
+		? g_gbuffer->mirrorMask.data() : nullptr;
+	static uint32_t tileMirrorPresence[DEFERRED_NUM_TILES];
+	const uint32_t *tilePresence = nullptr;
+	if (mirrorMaskPlane) {
+		computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
+		                          tileSizeX, tileSizeY,
+		                          numTilesX, numTilesY,
+		                          tileMirrorPresence);
+		tilePresence = tileMirrorPresence;
+	}
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
-	                    lights, numLights);
+	                    lights, numLights, tilePresence);
 
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
@@ -3489,7 +3577,17 @@ void Render_DeferredLighting() {
 	if (deferredUnifiedTbrEnabled()) {
 		constexpr int STRIP_H = 1 << 3;  // TILESIZE from FILLERS.CPP
 		const int numStrips = (YRes + STRIP_H - 1) >> 3;
-		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights);
+		static uint32_t stripMirrorPresence[DEFERRED_MAX_STRIPS];
+		const uint32_t *stripPresence = nullptr;
+		if (mirrorMaskPlane) {
+			computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
+			                          XRes, STRIP_H,
+			                          1, std::min(numStrips, DEFERRED_MAX_STRIPS),
+			                          stripMirrorPresence);
+			stripPresence = stripMirrorPresence;
+		}
+		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights,
+		                     stripPresence);
 	}
 	if (fds::FeatureFlags::deferred_tile_stats()) {
 		int total = 0, tmin = INT_MAX, tmax = 0;
@@ -4625,7 +4723,7 @@ void Render_VolumetricCones() {
     // Pre-filter spotlight indices once per frame; tiles share the result.
     // Mirror-clone spots are excluded (additive cone glow would wash
     // across the reflection — see Render_OmniHalos).
-    static int spotIdx[DEFERRED_MAX_LIGHTS];
+    static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int spotCount = 0;
     for (int i = 0; i < numLights; ++i) {
         if (lights->isSpot[i] && lights->mirrorId[i] == 0) spotIdx[spotCount++] = i;
@@ -4643,7 +4741,7 @@ void Render_VolumetricCones() {
     // tile-stripe artifact fixed in the prior commit). For sparse scenes
     // most tiles will see 0 spots — the per-pixel inner loop short-
     // circuits via spotCount==0.
-    static int tileSpotIdx  [numTiles][DEFERRED_MAX_LIGHTS];
+    static int tileSpotIdx  [numTiles][DEFERRED_MAX_VIEW_LIGHTS];
     static int tileSpotCount[numTiles];
     for (int t = 0; t < numTiles; ++t) tileSpotCount[t] = 0;
 
@@ -4679,7 +4777,7 @@ void Render_VolumetricCones() {
         for (int j = tj_lo; j <= tj_hi; ++j) {
             for (int i = ti_lo; i <= ti_hi; ++i) {
                 const int t = j * numTilesX + i;
-                if (tileSpotCount[t] < DEFERRED_MAX_LIGHTS) {
+                if (tileSpotCount[t] < DEFERRED_MAX_VIEW_LIGHTS) {
                     tileSpotIdx[t][tileSpotCount[t]++] = li;
                 }
             }
@@ -5361,7 +5459,7 @@ void Render_OmniHalos() {
     if (!lights) return;
     const int numLights = g_deferredCtx.numLights;
 
-    static int omniIdx[DEFERRED_MAX_LIGHTS];
+    static int omniIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int omniCount = 0;
     for (int i = 0; i < numLights; ++i) {
         // Skip mirror-clone omnis. Their halo is an ADDITIVE screen-space
@@ -5384,7 +5482,7 @@ void Render_OmniHalos() {
     // Per-tile omni cull — same sphere-projection math as cones, but
     // no z-cull (omni halo is volumetric, surface-z occlusion is per-
     // pixel via zSurf clamp inside the kernel).
-    static int tileOmniIdx  [numTiles][DEFERRED_MAX_LIGHTS];
+    static int tileOmniIdx  [numTiles][DEFERRED_MAX_VIEW_LIGHTS];
     static int tileOmniCount[numTiles];
     for (int t = 0; t < numTiles; ++t) tileOmniCount[t] = 0;
 
@@ -5425,7 +5523,7 @@ void Render_OmniHalos() {
         for (int j = tj_lo; j <= tj_hi; ++j) {
             for (int i = ti_lo; i <= ti_hi; ++i) {
                 const int t = j * numTilesX + i;
-                if (tileOmniCount[t] < DEFERRED_MAX_LIGHTS) {
+                if (tileOmniCount[t] < DEFERRED_MAX_VIEW_LIGHTS) {
                     tileOmniIdx[t][tileOmniCount[t]++] = li;
                 }
             }
@@ -6427,8 +6525,8 @@ void Render_DeferredVolumetric() {
     const int numLights = g_deferredCtx.numLights;
 
     // Pre-filter spot vs omni index lists.
-    static int spotIdx[DEFERRED_MAX_LIGHTS];
-    static int omniIdx[DEFERRED_MAX_LIGHTS];
+    static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
+    static int omniIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int spotCount = 0, omniCount = 0;
     for (int i = 0; i < numLights; ++i) {
         // Mirror clones don't cast volumetric glow — same additive-wash
