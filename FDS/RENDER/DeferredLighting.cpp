@@ -5990,6 +5990,61 @@ static inline float lightAttenAt(const ViewLightsSoA *L, int li,
 	return atten;
 }
 
+// Clip a view ray Pv(z)=(z·X,z·Y,z) against one light's support: (range sphere)
+// ∩ (spot cone, forward half). [zLo,zHi] comes in as the candidate interval and
+// leaves clipped; returns false if the ray never passes through the light.
+// uV=|V|², VP=<V,Lpos>, PP=|Lpos|² are the caller's ray/light dot products.
+// Shared by the screen-space inscatter and the froxel populate — the integrand
+// has compact support here, and BOTH need it sub-sample-exact (see callers).
+static inline bool lightRayClip(const ViewLightsSoA* L, int li, float X, float Y,
+                                float uV, float VP, float PP,
+                                float& zLo, float& zHi)
+{
+	// Range sphere: |Pv-L|² = r². uV z² - 2 VP z + (PP-r²) = 0.
+	const float sphereC    = PP - L->range2[li];
+	const float sphereDisc = VP*VP - uV*sphereC;
+	if (sphereDisc <= 0.0f) return false;          // ray misses the sphere
+	const float sphereSq = std::sqrt(sphereDisc);
+	const float zSphLo = (VP - sphereSq) / uV, zSphHi = (VP + sphereSq) / uV;
+	if (zLo < zSphLo) zLo = zSphLo;
+	if (zHi > zSphHi) zHi = zSphHi;
+	if (L->isSpot[li]) {
+		// Cone: (D·W)² = cosO²|W|². a z² + b z + cq = 0 in z.
+		const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
+		const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+		const float DV = Dx*X + Dy*Y + Dz, DP = Dx*Lx + Dy*Ly + Dz*Lz;
+		const float c2 = L->cosOuter[li] * L->cosOuter[li];
+		const float a  = DV*DV - c2*uV;
+		const float b  = 2.0f*(c2*VP - DV*DP);
+		const float cq = DP*DP - c2*PP;
+		if (a < -1e-8f) {                          // ray enters & exits cone
+			const float d = b*b - 4.0f*a*cq;
+			if (d < 0.0f) return false;
+			const float sq = std::sqrt(d), inv2a = 0.5f / a;
+			const float r1 = (-b - sq)*inv2a, r2 = (-b + sq)*inv2a;
+			if (zLo < std::min(r1,r2)) zLo = std::min(r1,r2);
+			if (zHi > std::max(r1,r2)) zHi = std::max(r1,r2);
+		} else if (a > 1e-8f) {                    // cone opens the other way
+			const float d = b*b - 4.0f*a*cq;
+			if (d >= 0.0f) {
+				const float sq = std::sqrt(d), inv2a = 0.5f / a;
+				const float r1 = std::min((-b-sq)*inv2a,(-b+sq)*inv2a);
+				const float r2 = std::max((-b-sq)*inv2a,(-b+sq)*inv2a);
+				if (DV > 1e-6f)      { if (zLo < r2) zLo = r2; }
+				else if (DV < -1e-6f){ if (zHi > r1) zHi = r1; }
+				else return false;
+			}
+		} else return false;
+		// Forward half (D·W ≥ 0): the cone is single-sheeted.
+		if (std::fabs(DV) > 1e-6f) {
+			const float zFwd = DP / DV;
+			if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
+			else           { if (zHi > zFwd) zHi = zFwd; }
+		}
+	}
+	return zHi > zLo;
+}
+
 // In-scatter glow integrated over the view-ray fog segment [zA,zB] (ray point
 // Pv(z) = (z·X, z·Y, z)): the MEAN attenuation × colour over the segment, summed
 // over lights, into gR/gG/gB (the caller scales by fog amount × strength).
@@ -6033,48 +6088,8 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 		// samples that happen to hit the ~1/dist² near-field spike quantise it
 		// into concentric rings (the "distinct circles" under shadow-cast spots).
 		float zLo = zA, zHi = zB;
-		// Range sphere: |Pv-L|² = r². uV z² - 2 VP z + (PP-r²) = 0.
-		const float sphereC    = PP - L->range2[li];
-		const float sphereDisc = VP*VP - uV*sphereC;
-		if (sphereDisc <= 0.0f) continue;             // ray misses the sphere
-		const float sphereSq = std::sqrt(sphereDisc);
-		const float zSphLo = (VP - sphereSq) / uV, zSphHi = (VP + sphereSq) / uV;
-		if (zLo < zSphLo) zLo = zSphLo;
-		if (zHi > zSphHi) zHi = zSphHi;
-		if (L->isSpot[li]) {
-			// Cone: (D·W)² = cosO²|W|². a z² + b z + cq = 0 in z.
-			const float Dx = L->dirX[li], Dy = L->dirY[li], Dz = L->dirZ[li];
-			const float DV = Dx*X + Dy*Y + Dz, DP = Dx*Lx + Dy*Ly + Dz*Lz;
-			const float c2 = L->cosOuter[li] * L->cosOuter[li];
-			const float a  = DV*DV - c2*uV;
-			const float b  = 2.0f*(c2*VP - DV*DP);
-			const float cq = DP*DP - c2*PP;
-			if (a < -1e-8f) {                          // ray enters & exits cone
-				const float d = b*b - 4.0f*a*cq;
-				if (d < 0.0f) continue;
-				const float sq = std::sqrt(d), inv2a = 0.5f / a;
-				const float r1 = (-b - sq)*inv2a, r2 = (-b + sq)*inv2a;
-				if (zLo < std::min(r1,r2)) zLo = std::min(r1,r2);
-				if (zHi > std::max(r1,r2)) zHi = std::max(r1,r2);
-			} else if (a > 1e-8f) {                    // cone opens the other way
-				const float d = b*b - 4.0f*a*cq;
-				if (d >= 0.0f) {
-					const float sq = std::sqrt(d), inv2a = 0.5f / a;
-					const float r1 = std::min((-b-sq)*inv2a,(-b+sq)*inv2a);
-					const float r2 = std::max((-b-sq)*inv2a,(-b+sq)*inv2a);
-					if (DV > 1e-6f)      { if (zLo < r2) zLo = r2; }
-					else if (DV < -1e-6f){ if (zHi > r1) zHi = r1; }
-					else continue;
-				}
-			} else continue;
-			// Forward half (D·W ≥ 0): the cone is single-sheeted.
-			if (std::fabs(DV) > 1e-6f) {
-				const float zFwd = DP / DV;
-				if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
-				else           { if (zHi > zFwd) zHi = zFwd; }
-			}
-		}
-		if (zHi <= zLo) continue;                      // segment never in-light
+		if (!lightRayClip(L, li, X, Y, uV, VP, PP, zLo, zHi))
+			continue;                                  // segment never in-light
 
 		const bool shadowed = L->shadowMapIdx[li] >= 0;
 		if (P.inscatterAnalytic) {
@@ -6587,15 +6602,29 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 // (cam→slice) and transmittance T per froxel. Energy-conserving slice integral:
 // for in-scattered radiance L and extinction σ over slice dz, ∫ L·T dz across
 // the slice = L·T_in·(1−e^{−σ·dz}) (single-scatter σ_s=σ_t), then T *= e^{−σ·dz}.
+//
+// LIGHT GLOW IS INTEGRATED PER SLICE, NOT POINT-SAMPLED. Far slices are thick
+// (exp distribution: ~130 units at z≈1400 with nz=64) while a lamp's kernel
+// spike is ~0.22·range wide and the cone near its apex narrower still — a
+// center point-sample of either gates the slice's whole contribution on/off
+// as the grid slides through world space, so the glow re-shaped wildly under
+// a 7-unit camera dolly. Instead, per column per light: clip the ray to the
+// light's support once (lightRayClip — sphere ∩ cone ∩ forward half, sub-
+// froxel-exact), then per overlapped slice take the EXACT radial integral
+// 2/√disc·Δatan over slice∩[zLo,zHi] (boundary atans carried — one atan per
+// slice). cutoff²·cone and the shadow tap stay point samples at the kernel
+// peak clamped into the lit sub-interval (slowly varying / not integrable).
+static constexpr int kFrMaxNz = 256;   // per-column stack scratch bound
 static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
-	// Exponential depth slices: z_b(i) = near·r^i, r = (far/near)^(1/nz). Near
-	// slices are thin (detail where the eye is), far slices fat — kills the
-	// linear-slice banding that showed at grazing angles. r per-step multiply,
-	// no expf in the inner loop.
-	const float r = std::pow(gFrFar / gFrNear, 1.0f / float(nz));
+	const float* zb = gFrZb.data();                   // exp slice boundaries [nz+1]
+	const float invLogR = float(nz) / std::log(gFrFar / gFrNear);   // z → slice idx
+	const float invNear = 1.0f / gFrNear;
 	const ViewLightsSoA* L = P.lights;
+	const bool glowOn = P.inscatter > 0.0f && L && P.numLights > 0;
+	float dens[kFrMaxNz];
+	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
 	for (int iy = iy0; iy < iy1; ++iy) {
 		const float sy = (float(iy)+0.5f) * invNy * float(YRes);
 		const float Y  = (CntrEY - sy) * P.invFOVY;
@@ -6606,50 +6635,104 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const float gY = P.w10*X + P.w11*Y + P.w12;
 			const float Dz = P.w20*X + P.w21*Y + P.w22;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
-			float Tc = 1.0f, accR = 0.0f, accG = 0.0f, accB = 0.0f;
-			float zb0 = gFrNear;
+
+			// ── pass 1: blob/slab density at each slice center ──────────────
 			for (int iz = 0; iz < nz; ++iz) {
-				const float zb1 = zb0 * r;
-				const float z  = 0.5f * (zb0 + zb1);   // slice center
-				const float dz = zb1 - zb0;            // slice thickness
-				zb0 = zb1;
+				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
+				const float dz = zb[iz+1] - zb[iz];
 				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
-				float dens = froxelDensity(P, wx, wy, wz);
+				float d = froxelDensity(P, wx, wy, wz);
 				// Distance LOD: a far froxel spans many blob cells but point-samples
 				// the cell=180 noise → aliases into bright/dark blocks. Blend toward
-				// the field's mean density (~0.27) by footprint/cell, so distant fog
-				// reads as smooth haze and near fog stays lumpy. Only for in-slab
-				// blob froxels (else the slab/gap zeros must stay zero).
+				// a COARSER octave (4× cell) by footprint/cell, so distant fog keeps
+				// large-scale blob masses and loses only the small-scale aliasing.
+				// Only for in-slab blob froxels (the slab/gap zeros must stay zero).
 				if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
 					const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
 					const float fp = dz > fpXY ? dz : fpXY;
 					float lod = (fp - P.cell) * (1.0f/P.cell);
 					lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
-					// Blend toward a COARSER octave (4× cell), not a flat mean, so
-					// distant fog keeps large-scale blob masses (3D-reading) and
-					// loses only the small-scale aliasing.
 					if (lod > 0.0f) {
 						const float coarse = blobNoiseAt(wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
-						dens += (coarse - dens) * lod;
+						d += (coarse - d) * lod;
 					}
 				}
-				if (dens > 0.0f) {
-					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
-					if (P.inscatter > 0.0f && L) {
-						float gr = 0.0f, gg = 0.0f, gb = 0.0f;
-						for (int li = 0; li < P.numLights; ++li) {
-							if (L->mirrorId[li] != 0) continue;
-							float a = lightAttenAt(L, li, X*z, Y*z, z);
-							if (a <= 0.0f) continue;
-							if (L->shadowMapIdx[li] >= 0)
-								a *= volSpotShadow(L->shadowMapIdx[li], X*z, Y*z, z, P.shadowPcf);
-							gr += L->colR[li]*a; gg += L->colG[li]*a; gb += L->colB[li]*a;
+				dens[iz] = d;
+			}
+
+			// ── pass 2: per-light glow per slice (clipped, analytic radial) ──
+			if (glowOn) {
+				for (int iz = 0; iz < nz; ++iz) glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
+				const float uV = X*X + Y*Y + 1.0f;
+				for (int li = 0; li < P.numLights; ++li) {
+					if (L->mirrorId[li] != 0) continue;        // clones don't glow
+					const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+					const float VP = X*Lx + Y*Ly + Lz;
+					const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
+					float zLo = zb[0], zHi = zb[nz];
+					if (!lightRayClip(L, li, X, Y, uV, VP, PP, zLo, zHi))
+						continue;                              // column never in-light
+					const float rr2   = L->rRange[li] * L->rRange[li];
+					const float alpha = rr2 * uV;
+					const float beta  = -2.0f * rr2 * VP;
+					const float gamma = rr2 * PP + 0.05f;
+					const float disc  = 4.0f*alpha*gamma - beta*beta;   // > 0 (the +0.05)
+					if (disc <= 0.0f) continue;
+					const float invD  = 1.0f / std::sqrt(disc);
+					const float twoA  = alpha + alpha;
+					const float zStar = VP / uV;               // kernel peak (closest approach)
+					const int   smi   = L->shadowMapIdx[li];
+					// Slices overlapping [zLo,zHi] (log of the exp distribution;
+					// widened ±1, the a/b clamp drops strays).
+					int izLo = int(std::log(zLo * invNear) * invLogR) - 1;
+					int izHi = int(std::log(zHi * invNear) * invLogR) + 1;
+					if (izLo < 0)    izLo = 0;
+					if (izHi > nz-1) izHi = nz-1;
+					float aPrev = std::atan((twoA*zLo + beta) * invD);
+					for (int iz = izLo; iz <= izHi; ++iz) {
+						const float a = zb[iz]   > zLo ? zb[iz]   : zLo;
+						const float b = zb[iz+1] < zHi ? zb[iz+1] : zHi;
+						if (b <= a) continue;                  // outside [zLo,zHi]
+						const float aCur = std::atan((twoA*b + beta) * invD);
+						const float dAtan = aCur - aPrev;
+						aPrev = aCur;
+						if (dens[iz] <= 0.0f) continue;        // empty froxel
+						float g = 2.0f * invD * dAtan / (zb[iz+1] - zb[iz]);
+						if (g <= 0.0f) continue;
+						// cutoff²·cone at the kernel peak clamped into the lit part
+						// (lightAttenAt × (dr²+0.05) strips its radial factor).
+						const float zm = zStar < a ? a : (zStar > b ? b : zStar);
+						float s = lightAttenAt(L, li, X*zm, Y*zm, zm);
+						if (s <= 0.0f) continue;
+						const float ddx = zm*X - Lx, ddy = zm*Y - Ly, ddz = zm - Lz;
+						s *= (ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f;
+						if (smi >= 0) {
+							const float vis = volSpotShadow(smi, X*zm, Y*zm, zm, P.shadowPcf);
+							if (vis <= 0.0f) continue;
+							s *= vis;
 						}
-						Lr += gr*P.inscatter; Lg += gg*P.inscatter; Lb += gb*P.inscatter;
+						g *= s;
+						glowR[iz] += L->colR[li] * g;
+						glowG[iz] += L->colG[li] * g;
+						glowB[iz] += L->colB[li] * g;
 					}
-					const float ext = P.sigma * dens;
-						gFrExt[col+iz] = ext;
-						const float Topt = fastExpNeg(ext * dz);
+				}
+			}
+
+			// ── pass 3: front-to-back slice integral ─────────────────────────
+			float Tc = 1.0f, accR = 0.0f, accG = 0.0f, accB = 0.0f;
+			for (int iz = 0; iz < nz; ++iz) {
+				const float d = dens[iz];
+				if (d > 0.0f) {
+					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
+					if (glowOn) {
+						Lr += glowR[iz]*P.inscatter;
+						Lg += glowG[iz]*P.inscatter;
+						Lb += glowB[iz]*P.inscatter;
+					}
+					const float ext = P.sigma * d;
+					gFrExt[col+iz] = ext;
+					const float Topt = fastExpNeg(ext * (zb[iz+1] - zb[iz]));
 					const float wgt  = Tc * (1.0f - Topt);
 					accR += Lr*wgt; accG += Lg*wgt; accB += Lb*wgt;
 					Tc *= Topt;
@@ -6824,7 +6907,7 @@ void Render_DeferredFastFog() {
 		// Froxel path: populate+integrate the view-frustum grid, then composite.
 		const int nx = std::max(1, fds::FeatureFlags::fast_fog_froxel_x());
 		const int ny = std::max(1, fds::FeatureFlags::fast_fog_froxel_y());
-		const int nz = std::max(2, fds::FeatureFlags::fast_fog_froxel_z());
+		const int nz = std::min(kFrMaxNz, std::max(2, fds::FeatureFlags::fast_fog_froxel_z()));
 		if (gFrX != nx || gFrY != ny || gFrZ != nz) {
 			gFrX = nx; gFrY = ny; gFrZ = nz;
 			const size_t n = size_t(nx) * size_t(ny) * size_t(nz);
