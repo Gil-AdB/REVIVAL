@@ -3,6 +3,7 @@
 #include <Base/FDS_DECS.H>  // Matrix_Copy + Mat_ID
 #include <Base/FDS_VARS.H>  // MatrixXVector template
 #include <Base/Face.h>
+#include <Base/FeatureFlags.h>
 #include <Base/Material.h>
 #include <Base/Matrix.h>
 #include <Base/Object.h>
@@ -829,12 +830,14 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         }
     }
 
-    // Display panels vs box edge strips, by measured greets data: the
-    // column panels are 0.98-1.00 area, the big end screens 3-172, the
-    // edge strips 0.30-0.32. 0.5 splits them cleanly. (1.0 looked
-    // safe but ate the column panels — "panels on the main columns
-    // are not reflecting".)
-    constexpr float kMinMirrorArea = 0.5f;
+    // Minimum cluster area to become a mirror — runtime flag, since it
+    // is the cost/coverage tradeoff knob. Measured greets data: box
+    // edge strips 0.30-0.32, central column panels 0.98-1.00, end
+    // screens 3.2-172. Each mirror clones the whole scene + 15 omnis;
+    // the four column-panel mirrors alone visibly hurt frame time, so
+    // the default (2.0) excludes them. --greets-mirror-min-area=0.5
+    // brings them back.
+    const float kMinMirrorArea = fds::FeatureFlags::greets_mirror_min_area();
 
     int added = 0, skippedSlivers = 0, skippedHorizontal = 0;
     for (int c = 0; c < numClusters; ++c) {
