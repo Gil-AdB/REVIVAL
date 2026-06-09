@@ -205,6 +205,10 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
                         parse_timestamps(kv.substr(2), cfg.timestamps);
                     } else if (starts_with(kv, "iters=")) {
                         cfg.iters = std::atoi(std::string(kv.substr(6)).c_str());
+                    } else if (!kv.empty() && kv.find_first_not_of("0123456789") == std::string_view::npos) {
+                        // Bare integer: continuation of a t=N1,N2,N3 list (the
+                        // key=value comma split would otherwise eat N2+).
+                        parse_timestamps(kv, cfg.timestamps);
                     }
                     tail = (comma == std::string_view::npos)
                         ? std::string_view{} : tail.substr(comma + 1);

@@ -7121,6 +7121,12 @@ void Render_DeferredFastFog() {
 		if (newNear != gFrNear || fogFar != gFrFar) gFrHistValid = false;
 		gFrNear = newNear;
 		gFrFar  = fogFar;
+		// History is only meaningful within one continuously-viewed scene —
+		// across a scene change the world the history sampled no longer
+		// exists (it would blend the previous scene's fog into this one's
+		// first frames if grid dims/near/far happen to match).
+		static const Scene* sceneOfHistory = nullptr;
+		if (CurScene != sceneOfHistory) { gFrHistValid = false; sceneOfHistory = CurScene; }
 		// Slice boundaries z_b(i) = near·(far/near)^(i/nz) — precomputed so the
 		// composite reads them instead of an exp per pixel.
 		{
@@ -7144,6 +7150,31 @@ void Render_DeferredFastFog() {
 			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
+		if (fds::FeatureFlags::fast_fog_froxel_validate()) {
+			// NaN/Inf are ABSORBING under the temporal lerp and huge values
+			// take 0.8^n hundreds of frames to decay — one bad frame poisons
+			// the fog until a big camera move flushes the history. Find the
+			// injection frame, not the symptom.
+			const float* s = gFrSct[gFrCur].data();
+			const size_t n4 = size_t(nx)*size_t(ny)*size_t(nz)*4;
+			size_t nBad = 0, firstBad = SIZE_MAX; float mx = 0.0f;
+			for (size_t i = 0; i < n4; ++i) {
+				const float v = s[i];
+				if (!(v >= 0.0f && v < 1.0e9f)) {      // NaN, Inf, negative, absurd
+					++nBad; if (firstBad == SIZE_MAX) firstBad = i;
+				} else if (v > mx) mx = v;
+			}
+			if (nBad) {
+				const size_t fr = firstBad / 4;
+				std::fprintf(stderr,
+					"[FRVAL] frame=%u BAD=%zu first at ix=%d iy=%d iz=%d c=%zu val=%g (maxOk=%g)\n",
+					gFrFrameIdx, nBad, int((fr/nz)%nx), int(fr/(size_t(nx)*nz)),
+					int(fr%nz), firstBad%4, double(s[firstBad]), double(mx));
+			} else if ((gFrFrameIdx & 15u) == 0u) {
+				std::fprintf(stderr, "[FRVAL] frame=%u clean, max=%g\n",
+				             gFrFrameIdx, double(mx));
+			}
+		}
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
 		// This frame becomes next frame's history.
 		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;
@@ -7178,33 +7209,105 @@ void Render_DeferredFastFog() {
 	}
 }
 
-// Minimal stand-in for the fast-fog pass on render passes that SKIP the
-// froxel path (the city reflection pass): paint only the pixels the
-// rasterizer never touched (zEnc == 0) with the SATURATED fog color, exactly
-// what the full pass converges to at the far plane (amount 1−e^{−density},
-// since τ(far) = density by construction). Without this, the mirrored view's
-// sky pixels keep stale VPage content — uninitialized memory on the first
-// frames of a scene — and the water reflects white garbage until camera
-// motion happens to overwrite it. Geometry pixels stay unfogged (deliberate:
-// the wobbled reflection doesn't warrant a whole extra froxel populate).
+// Stand-in for the fast-fog pass on render passes that SKIP the froxel path
+// (the city reflection pass): REPLACE every pixel the rasterizer never
+// touched (zEnc == 0) with black sky + the slab-clipped analytic fog tint
+// for that pixel's ray — the same [zA,zB] slab integral the screen-space
+// path uses, evaluated with this pass's (mirror) camera. Two things matter:
+//   • REPLACE, not blend: those pixels are otherwise stale VPage content —
+//     uninitialized memory on a scene's first frames — and any blend keeps a
+//     fraction of it alive. The stale base is why the city water reflected
+//     white garbage at scene start that "healed" permanently only once a big
+//     camera sweep happened to redraw every pixel (the user's 360 repro);
+//     it predates the froxel gate (the old fog passes also only TINTED the
+//     stale base, amt < 1 for upward rays).
+//   • Slab-clipped τ, not the saturated far-plane amount: an upward mirrored
+//     ray exits the thin slab top quickly — painting the full 1−e^{−density}
+//     made the whole mirrored sky glare ambient-bright, which the water
+//     reflected as "white below the waterline".
 void Render_DeferredFastFogSkyPaint() {
 	if (!CurScene || !ZPage16 || !VPage) return;
-	const float amt = 1.0f - fastExpNeg(fds::FeatureFlags::fast_fog_density());
-	const float aR = float(CurScene->Ambient.R) * amt;
-	const float aG = float(CurScene->Ambient.G) * amt;
-	const float aB = float(CurScene->Ambient.B) * amt;
-	const float keep = 1.0f - amt;
+	const float fogFar = CurScene->FZP;
+	if (fogFar <= 0.0f) return;
+	extern DeferredLightingCtx g_deferredCtx;
+	const float (*w2)[3] = g_deferredCtx.viewToWorld;
+	const float camY    = g_deferredCtx.cameraWorldY;
+	const float kHeight = fds::FeatureFlags::fast_fog_height();
+	const float sigma   = fds::FeatureFlags::fast_fog_density() / fogFar;
+	const float slabY0  = fds::FeatureFlags::fast_fog_bottom();
+	const float slabY1  = fds::FeatureFlags::fast_fog_top();
+	const float Rf      = fds::FeatureFlags::fast_fog_falloff();
+	const float invRf   = 1.0f / (Rf > 0.0f ? Rf : fogFar);
+	const float fth     = fds::FeatureFlags::fast_fog_feather();
+	const float feather = (fth > 0.0f) ? fth : 0.2f * (slabY1 - slabY0);
+	const float heightBase = (kHeight != 0.0f) ? fastExpNeg(kHeight * camY) : 1.0f;
+	// Blob fields fill the slab only partially — the remapped value noise and
+	// the thresholded worley both average ~0.2 of the smooth-slab density.
+	// Without this the painted reflection sky carries 4-5x the fog of the
+	// real field around it and glares bright. (A point estimate; the real
+	// field can't be marched here without paying the full fog pass.)
+	const float meanDens = fds::FeatureFlags::fast_fog_blobs() ? 0.22f : 1.0f;
+	const float fogR = float(CurScene->Ambient.R);
+	const float fogG = float(CurScene->Ambient.G);
+	const float fogB = float(CurScene->Ambient.B);
+	const float invFOVX = 1.0f / FOVX, invFOVY = 1.0f / FOVY;
 	const uint16_t* zEnc = ZPage16;
 	dword* out = reinterpret_cast<dword*>(VPage);
-	const size_t n = size_t(XRes) * size_t(YRes);
-	for (size_t i = 0; i < n; ++i) {
-		if (zEnc[i] != 0) continue;
-		const dword pix = out[i];
-		const int nR = int(float((pix>>16)&0xFFu)*keep + aR);
-		const int nG = int(float((pix>> 8)&0xFFu)*keep + aG);
-		const int nB = int(float( pix     &0xFFu)*keep + aB);
-		out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+
+	constexpr int numTilesX = 6, numTilesY = 4;
+	const int tsx = (XRes + numTilesX - 1) / numTilesX;
+	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	for (int tj = 0; tj < numTilesY; ++tj) {
+		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
+		for (int ti = 0; ti < numTilesX; ++ti) {
+			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+			ThreadPool::instance().enqueue([=]() {
+				for (int py = y1; py < y2; ++py) {
+					const float Y = (CntrEY - float(py)) * invFOVY;
+					const size_t row = size_t(py) * size_t(XRes);
+					for (int px = x1; px < x2; ++px) {
+						const size_t i = row + size_t(px);
+						if (zEnc[i] != 0) continue;
+						const float X  = (float(px) - CntrEX) * invFOVX;
+						const float uV = X*X + Y*Y + 1.0f;
+						const float gY = w2[1][0]*X + w2[1][1]*Y + w2[1][2];
+						// Slab clip (same as fogAtPixel) on [0, fogFar].
+						float zA = 0.0f, zB = fogFar;
+						if (gY > 1e-9f || gY < -1e-9f) {
+							float za = (slabY0 - camY) / gY;
+							float zb = (slabY1 - camY) / gY;
+							if (za > zb) { const float t = za; za = zb; zb = t; }
+							zA = za > 0.0f ? za : 0.0f;
+							zB = zb < fogFar ? zb : fogFar;
+						} else if (camY < slabY0 || camY > slabY1) {
+							out[i] = 0xFF000000u; continue;   // sky outside slab
+						}
+						float tau = 0.0f;
+						if (zB > zA) {
+							const float m = kHeight*gY + invRf;
+							const float dens = heightBase *
+								(fogAntiderivG(zB, m) - fogAntiderivG(zA, m));
+							tau = sigma * meanDens * std::sqrt(uV) * dens;
+							if (feather > 0.0f) {
+								const float wy = camY + gY * (0.5f*(zA+zB));
+								const float invF = 1.0f / feather;
+								float lo = (wy-slabY0)*invF; lo = lo<0.f?0.f:(lo>1.f?1.f:lo);
+								float hi = (slabY1-wy)*invF; hi = hi<0.f?0.f:(hi>1.f?1.f:hi);
+								tau *= lo*lo*(3.f-2.f*lo) * hi*hi*(3.f-2.f*hi);
+							}
+						}
+						float amt = (tau > 0.0f) ? 1.0f - fastExpNeg(tau) : 0.0f;
+						if (amt > 1.0f) amt = 1.0f;
+						int nR = int(fogR * amt), nG = int(fogG * amt), nB = int(fogB * amt);
+						if (nR > 255) nR = 255; if (nG > 255) nG = 255; if (nB > 255) nB = 255;
+						out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+					}
+				}
+				renderns::tileDone.release();
+			});
+		}
 	}
+	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
