@@ -91,19 +91,45 @@ DONE: populate+integrate+composite (commit 2955c1c), exp depth slices + grid
 256×144 (2d2b942), distance-LOD blob filter (kills far aliasing blocks), exact
 sub-slice composite (kills tilted-surface depth bands, z→64) (bfdbb7c). Fixes the
 grazing speckle, the "fog on surfaces not air", and perf (conetest 30→~16ms,
-city fog ~110→~30ms). Remaining visible artifact: XY edge blockiness (cone rim)
-from the 256×144 bilinear grid.
+city fog ~110→~30ms).
 
-REMAINING (the "do all" items #3/#4 — both substantial, scoped here):
-- #3 TEMPORAL (the fix for the XY edge blockiness + any motion shimmer): jitter
-  the froxel sample positions per frame (Halton on the slice offset + sub-froxel
-  XY), reproject the previous frame's grid (each froxel world center → prev
-  view-proj → prev froxel coords, trilinear fetch), blend ~0.9 history. Needs:
-  prev view-proj matrix, a second (history) grid, a disocclusion reject (depth/
-  validity). Dissolves the grid entirely → low-res grid looks high-res. This is
-  a real feature (history buffer + reprojection + rejection) — best as its own
-  focused pass. Alternative cheaper stop-gaps: bump XY res (costs in-slab), or a
-  small depth-aware bilateral blur of the composited fog.
+DONE — per-slice clipped analytic light glow (9f25e26): the populate point-
+sampled lightAttenAt+shadow at slice centers; the cone tip / kernel spike is
+narrower than a far slice, so the glow gated on/off per slice as the grid slid
+through world space ("light moving wildly" under a 7-unit dolly). Now per column
+per light: lightRayClip (sphere∩cone∩forward, shared with the screen-space
+inscatter) once, then the exact 2/√disc·Δatan radial integral over each
+slice∩[zLo,zHi] with boundary-atan carry. Shaping+shadow stay point samples at
+the kernel peak clamped into the lit sub-interval. Out-of-cone columns skip
+everything → pays for the atans (no perf regression: 15.5 vs ~16 ms).
+
+DONE — #3 TEMPORAL: per-frame Halton(2,3,5) sub-froxel jitter of the sample
+positions; per froxel, the CANONICAL center reprojects into the prev frame's
+grid (v = A + zc·B per column; fast log2 for the exp slice coord) and
+trilinearly blends history (fast_fog_froxel_blend=0.8, flag
+fast_fog_froxel_temporal default ON). Raw quantities are PREMULTIPLIED scatter
+L·σ + extinction σ (linear in the medium → blend correctly across empty↔dense
+edges), stored as interleaved float4 ping-pong grids; integration runs on the
+blended values (slice term scat·T·(1−e^{−σdz})/σ → scat·T·dz as σ→0).
+Out-of-frustum/behind → no history; grid/near/far change invalidates. History
+fetch skipped >2 froxel extents outside the slab band (current+history both 0
+there). Converged result dissolves the XY stair/blockiness (verified iters=30
+A/B crops). Cost +1.9ms conetest down-look (18.1 vs 16.2; first cut was +9.5ms
+— the interleave + slab skip + algebra hoist won it back). NOTE: snapshot bench
+mode (@iters=N) now writes the LAST frame's PPM — a converged-history still; a
+cold single snapshot can't show the temporal result (and a stale .ppm from a
+previous run is a classic bogus-A/B trap — bench mode used to skip the write).
+Caveats: moving lights lag ~1/(1−blend) frames (lower blend if ghosting shows);
+the froxel path is SKIPPED in the city reflection pass (skipVolumetric) — the
+mirror camera would corrupt the history and paid a whole second populate;
+reflections render unfogged. With temporal on, a coarser grid (e.g. 128×72)
+may hit the same quality much cheaper — untuned.
+
+ALSO: --fast_fog_worley (b8e0920) — inverted-Worley F1 puff field (round 3D
+cloud masses instead of value-noise caustic veins), size-modulated by a 2.7×
+value-noise octave; fast_fog_worley_thresh sets puff radius. +3.2ms.
+
+REMAINING:
 - #4 SIMD the POPULATE → PARKED FOR x64 (see fast_fog_simd_x64.md). The populate
   is more SIMD-friendly than the screen-space march (uniform per froxel, no
   divergent DDA); 8-column-wide populate+integrate vectorizes the cellHash +

@@ -437,9 +437,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		//                  scene, mixes toward Ambient.
 		//   fast_fog off → legacy sqrt-to-black ramp, Scn_Fogged only.
 		if (!useUnifiedVolumetric()) {
-			if (fds::FeatureFlags::fast_fog())
-				Render_DeferredFastFog();
-			else
+			if (fds::FeatureFlags::fast_fog()) {
+				// The froxel grid is view-aligned and temporally reprojected
+				// against the previous MAIN-camera frame — populating it with
+				// the mirror camera would corrupt the history (and pay a whole
+				// extra populate). Reflections render unfogged on that path.
+				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
+					Render_DeferredFastFog();
+			} else
 				Render_DeferredFogPass();
 		}
 

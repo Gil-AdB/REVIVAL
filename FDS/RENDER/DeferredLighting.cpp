@@ -6564,10 +6564,33 @@ static void Render_DeferredFastFog_CompositeTile(int x1, int y1, int x2, int y2,
 // depth, trilinear-composite. Volumetric by construction, no per-pixel march.
 namespace {
 	std::vector<float> gFrAccR, gFrAccG, gFrAccB, gFrT;   // integrated cam→slice
-	std::vector<float> gFrExt;                            // per-slice extinction σ
 	std::vector<float> gFrZb;                             // slice boundaries [nz+1]
 	int   gFrX = 0, gFrY = 0, gFrZ = 0;
 	float gFrNear = 1.0f, gFrFar = 1.0f;
+	// Temporal: per-froxel raw scatter L·σ (rgb) + extinction σ, INTERLEAVED
+	// float4 per froxel (one cache line covers a corner-pair in the history
+	// fetch), ping-ponged — this frame's blended values are next frame's
+	// history. [gFrCur] = current.
+	std::vector<float> gFrSct[2];
+	int      gFrCur = 0;
+	uint32_t gFrFrameIdx = 0;
+	bool     gFrHistValid = false;
+	bool     gFrTemporal = false;       // this frame: jitter + blend enabled
+	float    gFrBlend = 0.8f;
+	float    gFrJx = 0.0f, gFrJy = 0.0f, gFrJz = 0.0f;     // sub-froxel jitter
+	float    gFrPrevCamX, gFrPrevCamY, gFrPrevCamZ;        // prev frame camera
+	float    gFrPrevW[9];               // prev view→world rotation (rows)
+	float    gFrPrevA[3];               // Rprevᵀ·(cam − camPrev), per frame
+}
+
+// log2 via exponent bits + a rational mantissa correction (fastapprox-style,
+// |err| ~3e-4) — the temporal reprojection needs a per-froxel log for the exp
+// slice coordinate and libm logf dominates the loop.
+static inline float frFastLog2(float x) {
+	union { float f; uint32_t i; } vx; vx.f = x;
+	union { uint32_t i; float f; } mx; mx.i = (vx.i & 0x007FFFFFu) | 0x3F000000u;
+	const float y = float(vx.i) * 1.1920928955078125e-7f;
+	return y - 124.22551499f - 1.498030302f*mx.f - 1.72587999f/(0.3520887068f + mx.f);
 }
 
 // Trilinear value-noise density at one world point for a given cell size (one
@@ -6671,22 +6694,51 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	const float invNear = 1.0f / gFrNear;
 	const ViewLightsSoA* L = P.lights;
 	const bool glowOn = P.inscatter > 0.0f && L && P.numLights > 0;
+	// Temporal state (set by the dispatch): sample positions jittered by a
+	// sub-froxel Halton offset; pass 3 reprojects each froxel's CANONICAL
+	// (unjittered) center into the previous frame's grid and blends history.
+	const bool  temporal = gFrTemporal && gFrHistValid;
+	const float jx = gFrTemporal ? gFrJx : 0.0f;
+	const float jy = gFrTemporal ? gFrJy : 0.0f;
+	const float jz = gFrTemporal ? gFrJz : 0.0f;   // slice frac offset, [-0.5,0.5]
+	const float blend = gFrBlend;
+	const int   cur = gFrCur, prv = cur ^ 1;
+	float*       sct  = gFrSct[cur].data();
+	const float* hist = gFrSct[prv].data();
+	const float fovX = 1.0f / P.invFOVX, fovY = 1.0f / P.invFOVY;
+	const float nxOverXRes = float(nx) / float(XRes);
+	const float nyOverYRes = float(ny) / float(YRes);
+	const float invLog2R = invLogR * 0.6931472f;   // slice idx per log2 unit
+	const float Ax = gFrPrevA[0], Ay = gFrPrevA[1], Az = gFrPrevA[2];
 	float dens[kFrMaxNz];
 	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
 	for (int iy = iy0; iy < iy1; ++iy) {
-		const float sy = (float(iy)+0.5f) * invNy * float(YRes);
+		const float sy = (float(iy)+0.5f+jy) * invNy * float(YRes);
 		const float Y  = (CntrEY - sy) * P.invFOVY;
+		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
+		const float Yc  = (CntrEY - syc) * P.invFOVY;
 		for (int ix = ix0; ix < ix1; ++ix) {
-			const float sx = (float(ix)+0.5f) * invNx * float(XRes);
+			const float sx = (float(ix)+0.5f+jx) * invNx * float(XRes);
 			const float X  = (sx - CntrEX) * P.invFOVX;
 			const float Dx = P.w00*X + P.w01*Y + P.w02;
 			const float gY = P.w10*X + P.w11*Y + P.w12;
 			const float Dz = P.w20*X + P.w21*Y + P.w22;
+			// Canonical (unjittered) ray for the history reprojection. The
+			// reprojected view pos is linear in slice depth: v = A + zc·B,
+			// A = Rprevᵀ·(cam−camPrev) (per frame), B = Rprevᵀ·Dc (here).
+			const float sxc = (float(ix)+0.5f) * invNx * float(XRes);
+			const float Xc  = (sxc - CntrEX) * P.invFOVX;
+			const float Dxc = P.w00*Xc + P.w01*Yc + P.w02;
+			const float gYc = P.w10*Xc + P.w11*Yc + P.w12;
+			const float Dzc = P.w20*Xc + P.w21*Yc + P.w22;
+			const float Bx = gFrPrevW[0]*Dxc + gFrPrevW[3]*gYc + gFrPrevW[6]*Dzc;
+			const float By = gFrPrevW[1]*Dxc + gFrPrevW[4]*gYc + gFrPrevW[7]*Dzc;
+			const float Bz = gFrPrevW[2]*Dxc + gFrPrevW[5]*gYc + gFrPrevW[8]*Dzc;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 
-			// ── pass 1: blob/slab density at each slice center ──────────────
+			// ── pass 1: blob/slab density at each slice's jittered sample ───
 			for (int iz = 0; iz < nz; ++iz) {
-				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
+				const float z  = zb[iz] + (0.5f + jz) * (zb[iz+1] - zb[iz]);
 				const float dz = zb[iz+1] - zb[iz];
 				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
 				float d = froxelDensity(P, wx, wy, wz);
@@ -6767,25 +6819,92 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				}
 			}
 
-			// ── pass 3: front-to-back slice integral ─────────────────────────
+			// ── pass 3: temporal blend, then front-to-back slice integral ────
+			// Raw per-slice values are PREMULTIPLIED scatter (L·σ) + extinction
+			// σ — both linear in the medium, so history blends correctly even
+			// across empty↔dense froxel edges (L alone is undefined at σ=0).
 			float Tc = 1.0f, accR = 0.0f, accG = 0.0f, accB = 0.0f;
 			for (int iz = 0; iz < nz; ++iz) {
 				const float d = dens[iz];
+				float scR = 0.0f, scG = 0.0f, scB = 0.0f, ext = 0.0f;
 				if (d > 0.0f) {
+					ext = P.sigma * d;
 					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
 					if (glowOn) {
 						Lr += glowR[iz]*P.inscatter;
 						Lg += glowG[iz]*P.inscatter;
 						Lb += glowB[iz]*P.inscatter;
 					}
-					const float ext = P.sigma * d;
-					gFrExt[col+iz] = ext;
-					const float Topt = fastExpNeg(ext * (zb[iz+1] - zb[iz]));
-					const float wgt  = Tc * (1.0f - Topt);
-					accR += Lr*wgt; accG += Lg*wgt; accB += Lb*wgt;
+					scR = Lr*ext; scG = Lg*ext; scB = Lb*ext;
+				}
+				const float zc  = 0.5f * (zb[iz] + zb[iz+1]);
+				const float dzS0 = zb[iz+1] - zb[iz];
+				// Skip the history fetch far outside the fog slab: density is
+				// 0 there by construction (slab is world-static), so current
+				// and history are both 0. Margin = 2 froxel extents so slab-
+				// edge froxels (where blending smooths the edge) still blend.
+				const float wyc = P.camY + zc*gYc;
+				const float fpY = zc * (float(YRes)*invNy) * P.invFOVY;
+				const float mar = 2.0f * (dzS0 > fpY ? dzS0 : fpY);
+				if (temporal && wyc >= P.slabY0 - mar && wyc <= P.slabY1 + mar) {
+					// Reproject the CANONICAL froxel center into the previous
+					// frame's grid (v = A + zc·B, see above) and trilinearly
+					// blend its history.
+					const float vx = Ax + zc*Bx;
+					const float vy = Ay + zc*By;
+					const float vz = Az + zc*Bz;
+					if (vz > 0.0f) {
+						const float ivz = 1.0f / vz;
+						const float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
+						const float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
+						const float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
+						if (fx >= 0.0f && fx <= float(nx-1) && fy >= 0.0f &&
+						    fy <= float(ny-1) && fz >= 0.0f && fz <= float(nz-1)) {
+							const int x0 = int(fx), y0 = int(fy), z0 = int(fz);
+							const int x1 = x0+1 < nx ? x0+1 : x0;
+							const int y1 = y0+1 < ny ? y0+1 : y0;
+							const int z1 = z0+1 < nz ? z0+1 : z0;
+							const float tx = fx-float(x0), ty = fy-float(y0), tz = fz-float(z0);
+							// 8 interleaved float4 corners → 7 component-wise
+							// lerps (vectorizes to one 128-bit lane each).
+							const float* q000 = hist + ((size_t(y0)*nx + x0)*nz + z0)*4;
+							const float* q001 = hist + ((size_t(y0)*nx + x0)*nz + z1)*4;
+							const float* q100 = hist + ((size_t(y0)*nx + x1)*nz + z0)*4;
+							const float* q101 = hist + ((size_t(y0)*nx + x1)*nz + z1)*4;
+							const float* q010 = hist + ((size_t(y1)*nx + x0)*nz + z0)*4;
+							const float* q011 = hist + ((size_t(y1)*nx + x0)*nz + z1)*4;
+							const float* q110 = hist + ((size_t(y1)*nx + x1)*nz + z0)*4;
+							const float* q111 = hist + ((size_t(y1)*nx + x1)*nz + z1)*4;
+							float h4[4];
+							for (int c = 0; c < 4; ++c) {
+								const float a00 = q000[c] + (q001[c]-q000[c])*tz;
+								const float a01 = q100[c] + (q101[c]-q100[c])*tz;
+								const float a10 = q010[c] + (q011[c]-q010[c])*tz;
+								const float a11 = q110[c] + (q111[c]-q110[c])*tz;
+								const float a0 = a00 + (a01-a00)*tx;
+								const float a1 = a10 + (a11-a10)*tx;
+								h4[c] = a0 + (a1-a0)*ty;
+							}
+							scR += (h4[0] - scR) * blend;
+							scG += (h4[1] - scG) * blend;
+							scB += (h4[2] - scB) * blend;
+							ext += (h4[3] - ext) * blend;
+						}
+					}
+				}
+				float* sc4 = sct + (col+iz)*4;
+				sc4[0] = scR; sc4[1] = scG; sc4[2] = scB; sc4[3] = ext;
+				// Integrate the BLENDED values: L = scat/σ, so the slice term
+				// L·T·(1−e^{−σ·dz}) = scat·T·(1−e^{−σ·dz})/σ → scat·T·dz as σ→0.
+				const float dzS = zb[iz+1] - zb[iz];
+				if (ext > 1e-6f) {
+					const float Topt = fastExpNeg(ext * dzS);
+					const float w = Tc * (1.0f - Topt) / ext;
+					accR += scR*w; accG += scG*w; accB += scB*w;
 					Tc *= Topt;
 				} else {
-					gFrExt[col+iz] = 0.0f;
+					const float w = Tc * dzS;
+					accR += scR*w; accG += scG*w; accB += scB*w;
 				}
 				gFrAccR[col+iz] = accR; gFrAccG[col+iz] = accG;
 				gFrAccB[col+iz] = accB; gFrT[col+iz] = Tc;
@@ -6813,10 +6932,11 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
 	const float invNear  = 1.0f / gFrNear;
 	const float* zb = gFrZb.data();
+	const float* sctA = gFrSct[gFrCur].data();    // blended scatter+extinction (float4)
 	// Read column (ix,iy): accPrev,Tprev (slice iz-1; iz=0 → 0,1), accCur, ext.
 	auto col = [&](int ix, int iy, int iz, float* o) {
 		const size_t ic = (size_t(iy)*nx + ix)*nz + iz;
-		o[4]=gFrAccR[ic]; o[5]=gFrAccG[ic]; o[6]=gFrAccB[ic]; o[7]=gFrExt[ic];
+		o[4]=gFrAccR[ic]; o[5]=gFrAccG[ic]; o[6]=gFrAccB[ic]; o[7]=sctA[ic*4+3];
 		if (iz > 0) { const size_t ip=ic-1; o[0]=gFrAccR[ip];o[1]=gFrAccG[ip];o[2]=gFrAccB[ip];o[3]=gFrT[ip]; }
 		else { o[0]=o[1]=o[2]=0.0f; o[3]=1.0f; }
 	};
@@ -6964,9 +7084,13 @@ void Render_DeferredFastFog() {
 			const size_t n = size_t(nx) * size_t(ny) * size_t(nz);
 			gFrAccR.assign(n, 0.0f); gFrAccG.assign(n, 0.0f);
 			gFrAccB.assign(n, 0.0f); gFrT.assign(n, 1.0f);
-			gFrExt.assign(n, 0.0f); gFrZb.assign(size_t(nz)+1, 0.0f);
+			gFrZb.assign(size_t(nz)+1, 0.0f);
+			gFrSct[0].assign(n*4, 0.0f); gFrSct[1].assign(n*4, 0.0f);
+			gFrHistValid = false;          // grid changed → history invalid
 		}
-		gFrNear = std::max(1.0f, CurScene->NZP);
+		const float newNear = std::max(1.0f, CurScene->NZP);
+		if (newNear != gFrNear || fogFar != gFrFar) gFrHistValid = false;
+		gFrNear = newNear;
 		gFrFar  = fogFar;
 		// Slice boundaries z_b(i) = near·(far/near)^(i/nz) — precomputed so the
 		// composite reads them instead of an exp per pixel.
@@ -6975,8 +7099,36 @@ void Render_DeferredFastFog() {
 			float zbv = gFrNear;
 			for (int k = 0; k <= nz; ++k) { gFrZb[k] = zbv; zbv *= rr; }
 		}
+		// Temporal supersampling: Halton(2,3,5) sub-froxel jitter this frame;
+		// after the populate, this frame's camera/rotation + blended grid
+		// become the history the NEXT frame reprojects against.
+		gFrTemporal = fds::FeatureFlags::fast_fog_froxel_temporal();
+		gFrBlend    = std::min(0.95f, std::max(0.0f, fds::FeatureFlags::fast_fog_froxel_blend()));
+		if (gFrTemporal) {
+			static const float h2[8] = {1/2.f,1/4.f,3/4.f,1/8.f,5/8.f,3/8.f,7/8.f,1/16.f};
+			static const float h3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
+			static const float h5[8] = {1/5.f,2/5.f,3/5.f,4/5.f,1/25.f,6/25.f,11/25.f,16/25.f};
+			const uint32_t k = gFrFrameIdx & 7u;
+			gFrJx = h2[k] - 0.5f; gFrJy = h3[k] - 0.5f; gFrJz = h5[k] - 0.5f;
+		}
+		if (gFrHistValid) {
+			// Per-frame constant of the reprojection: A = Rprevᵀ·(cam−camPrev).
+			const float dx = P.camX - gFrPrevCamX, dy = P.camY - gFrPrevCamY,
+			            dz = P.camZ - gFrPrevCamZ;
+			gFrPrevA[0] = gFrPrevW[0]*dx + gFrPrevW[3]*dy + gFrPrevW[6]*dz;
+			gFrPrevA[1] = gFrPrevW[1]*dx + gFrPrevW[4]*dy + gFrPrevW[7]*dz;
+			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
+		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		// This frame becomes next frame's history.
+		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;
+		gFrPrevW[0] = P.w00; gFrPrevW[1] = P.w01; gFrPrevW[2] = P.w02;
+		gFrPrevW[3] = P.w10; gFrPrevW[4] = P.w11; gFrPrevW[5] = P.w12;
+		gFrPrevW[6] = P.w20; gFrPrevW[7] = P.w21; gFrPrevW[8] = P.w22;
+		gFrHistValid = true;
+		gFrCur ^= 1;
+		++gFrFrameIdx;
 		return;
 	}
 

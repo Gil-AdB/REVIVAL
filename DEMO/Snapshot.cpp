@@ -2513,6 +2513,14 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
             std::fprintf(stderr,
                 "[CONEBENCH] %-13s %d iters total=%.2f ms  mean=%.3f ms/iter  (%s)\n",
                 p.name, benchIters, total_ms, total_ms / benchIters, p.desc);
+            // Also write the LAST frame: after N in-process frames the froxel
+            // temporal history has converged, so this is the steady-state
+            // image (a single cold render can't show it).
+            char benchPath[1024];
+            std::snprintf(benchPath, sizeof(benchPath),
+                          "%s/conetest_%s.ppm", cfg.outDir.c_str(), p.name);
+            write_ppm(benchPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+            std::fprintf(stderr, "[CONEBENCH] wrote %s (last iter)\n", benchPath);
             ++produced;
             continue;
         }
