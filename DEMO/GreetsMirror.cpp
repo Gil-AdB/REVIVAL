@@ -1520,6 +1520,120 @@ inline void StampTri2D(u8 *plane, uint16_t *zplane, int w, int h,
 
 }  // namespace
 
+void ProbeSecondOrderMirrors(Scene *sc, const std::vector<Mirror> &mirrors)
+{
+    if (!sc || !fds::FeatureFlags::mirror_rtt_probe()) return;
+    const Camera *cam = ::View ? ::View : sc->CameraHead;
+    if (!cam) return;
+    // Throttle: one report every 30 frames is plenty for reading along
+    // while flying (and exactly one per snapshot tick sequence).
+    static int sGate = 0;
+    if (sGate++ % 30 != 0) return;
+
+    const float (*VM)[3] = cam->Mat;
+    const Vector C = cam->ISource;
+    auto screenOf = [&](const Vector &wp, float &sx, float &sy) -> bool {
+        const float dx = wp.x - C.x, dy = wp.y - C.y, dz = wp.z - C.z;
+        const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
+        if (vz <= 0.05f) return false;
+        const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
+        const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
+        sx =  FOVX * vx / vz + CntrEX;
+        sy = -FOVY * vy / vz + CntrEY;
+        return true;
+    };
+
+    for (const Mirror &A : mirrors) {
+        if (!A.active || A.parentMirrorId != 0 || !A.cloneMesh) continue;
+        if (A.cloneFaceSrc.empty()) continue;
+        for (const Mirror &B : mirrors) {
+            if (&B == &A || B.id == 0 || B.parentMirrorId != 0) continue;
+            if (B.wallFaces.empty() || !B.plane.valid) continue;
+            // B itself need not be active — its own panel can be off
+            // screen while its image inside A is visible.
+            float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+            int panelFaces = 0, clippedVerts = 0;
+            for (size_t fi = 0; fi < A.cloneFaceSrc.size()
+                              && fi < size_t(A.cloneMesh->FIndex); ++fi) {
+                const Face *src = A.cloneFaceSrc[fi].face;
+                bool isBWall = false;
+                for (const Face *WF : B.wallFaces) {
+                    if (WF == src) { isBWall = true; break; }
+                }
+                if (!isBWall) continue;
+                ++panelFaces;
+                const Face &CF = A.cloneMesh->Faces[fi];
+                const Vertex *vs[3] = { CF.A, CF.B, CF.C };
+                for (int k = 0; k < 3; ++k) {
+                    float sx, sy;
+                    // Clone verts are world-baked (identity transform).
+                    if (!screenOf(vs[k]->Pos, sx, sy)) { ++clippedVerts; continue; }
+                    bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+                    by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+                }
+            }
+            if (panelFaces == 0) continue;
+            // Clamp the projected bbox to the viewport — what's outside
+            // can never need texels.
+            const float vw = float(::XRes), vh = float(::YRes);
+            bx0 = std::max(bx0, 0.0f); by0 = std::max(by0, 0.0f);
+            bx1 = std::min(bx1, vw);   by1 = std::min(by1, vh);
+            const int pxW = int(std::ceil(bx1 - bx0));
+            const int pxH = int(std::ceil(by1 - by0));
+            if ((pxW <= 0 || pxH <= 0) && clippedVerts == 0) continue;
+
+            // Virtual cameras: the viewer reflected through A sees B's
+            // panel; what B shows that viewer is the real scene seen
+            // from the doubly-reflected position.
+            const Vector CA = reflectPointAcross(C,  A.plane.N, A.plane.d);
+            const Vector CB = reflectPointAcross(CA, B.plane.N, B.plane.d);
+
+            // B's panel window in its plane basis — the off-axis
+            // frustum rectangle the RTT camera must cover.
+            Vector u;  // any unit vector ⟂ B's normal
+            {
+                const Vector &n = B.plane.N;
+                if (std::fabs(n.y) < 0.9f) u = { n.z, 0.0f, -n.x };
+                else                       u = { 1.0f, 0.0f, 0.0f };
+                u.normalize();
+            }
+            const Vector &n = B.plane.N;
+            const Vector v = { n.y*u.z - n.z*u.y,
+                               n.z*u.x - n.x*u.z,
+                               n.x*u.y - n.y*u.x };
+            float u0 = 1e30f, u1 = -1e30f, v0 = 1e30f, v1 = -1e30f;
+            for (size_t i = 0; i < B.wallFaces.size(); ++i) {
+                const Face *WF = B.wallFaces[i];
+                TriMesh *WT = i < B.wallFaceMeshes.size()
+                    ? B.wallFaceMeshes[i] : nullptr;
+                if (!WF || !WF->A || !WF->B || !WF->C) continue;
+                const Vertex *ws[3] = { WF->A, WF->B, WF->C };
+                for (int k = 0; k < 3; ++k) {
+                    Vector wp = ws[k]->Pos;
+                    if (WT) {
+                        Vector lp = wp;
+                        MatrixXVector(WT->RotMat, &lp, &wp);
+                        wp += WT->IPos;
+                    }
+                    const float pu = wp.x*u.x + wp.y*u.y + wp.z*u.z;
+                    const float pv = wp.x*v.x + wp.y*v.y + wp.z*v.z;
+                    u0 = std::min(u0, pu); u1 = std::max(u1, pu);
+                    v0 = std::min(v0, pv); v1 = std::max(v1, pv);
+                }
+            }
+            std::fprintf(stderr,
+                "[RTT-PROBE] m%u('%s') shows m%u('%s'): footprint %dx%d px"
+                "%s | virtCam=(%.2f,%.2f,%.2f) | panel %.2fx%.2f world "
+                "(u=[%.2f..%.2f] v=[%.2f..%.2f])\n",
+                unsigned(A.id), A.wallMaterialName.c_str(),
+                unsigned(B.id), B.wallMaterialName.c_str(),
+                pxW, pxH, clippedVerts ? " (near-clipped, partial)" : "",
+                CB.x, CB.y, CB.z,
+                u1 - u0, v1 - v0, u0, u1, v0, v1);
+        }
+    }
+}
+
 void DebugOverlayMirrorMask(Scene *sc)
 {
     (void)sc;

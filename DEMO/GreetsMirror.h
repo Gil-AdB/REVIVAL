@@ -192,6 +192,18 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 // mesh transform changes.
 void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
 
+// Per-frame probe for second-order ("mirror in mirror") pairs, gated
+// by --mirror-rtt-probe. For each ordered pair (A, B) of ACTIVE base
+// mirrors where A's clone of B's panel projects on screen, logs:
+//   - the projected pixel bbox (= the RTT resolution actually needed),
+//   - the doubly-reflected virtual camera C_B = reflect_B(reflect_A(cam))
+//     (rendering the real scene from C_B through B's panel window is
+//     exactly what should appear on the panel inside A's reflection),
+//   - B's panel window rect in its plane basis (the off-axis frustum).
+// Call AFTER the camera is current (post-Transform). Diagnostic only —
+// groundwork for the order-2 render-to-texture path.
+void ProbeSecondOrderMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
+
 // Debug viz — overlays gb.mirrorId onto the framebuffer so we can see
 // exactly which pixels each mirror's wall pre-pass stamped (and where
 // the clone-rasterizer's per-pixel check is consequently keeping vs
