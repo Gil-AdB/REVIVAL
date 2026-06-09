@@ -6552,12 +6552,9 @@ namespace {
 	float gFrNear = 1.0f, gFrFar = 1.0f;
 }
 
-// Blob (or smooth-slab) density at a single world point — one trilinear noise
-// sample, NO DDA march. Mirrors blobFieldTau's per-cell density exactly.
-static inline float froxelDensity(const FastFogParams& P, float wx, float wy, float wz) {
-	if (wy < P.slabY0 || wy > P.slabY1) return 0.0f;     // outside the slab
-	if (!P.blobs) return 1.0f;                            // smooth slab: uniform
-	const float invCell = P.invCell, cell = P.cell;
+// Trilinear value-noise density at one world point for a given cell size (one
+// sample, NO DDA march). Mirrors blobFieldTau's per-cell density. No slab check.
+static inline float blobNoiseAt(float wx, float wy, float wz, float cell, float invCell) {
 	const int cx = int(std::floor(wx * invCell));
 	const int cy = int(std::floor(wy * invCell));
 	const int cz = int(std::floor(wz * invCell));
@@ -6578,6 +6575,11 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 	const float val = y0 + (y1-y0)*w;
 	const float d = (val - 0.45f) * 1.8f;
 	return d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
+}
+static inline float froxelDensity(const FastFogParams& P, float wx, float wy, float wz) {
+	if (wy < P.slabY0 || wy > P.slabY1) return 0.0f;     // outside the slab
+	if (!P.blobs) return 1.0f;                            // smooth slab: uniform
+	return blobNoiseAt(wx, wy, wz, P.cell, P.invCell);
 }
 
 // Fused populate + front-to-back integrate, one pass per froxel column (the
@@ -6623,7 +6625,13 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					const float fp = dz > fpXY ? dz : fpXY;
 					float lod = (fp - P.cell) * (1.0f/P.cell);
 					lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
-					dens += (0.27f - dens) * lod;
+					// Blend toward a COARSER octave (4× cell), not a flat mean, so
+					// distant fog keeps large-scale blob masses (3D-reading) and
+					// loses only the small-scale aliasing.
+					if (lod > 0.0f) {
+						const float coarse = blobNoiseAt(wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
+						dens += (coarse - dens) * lod;
+					}
 				}
 				if (dens > 0.0f) {
 					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
