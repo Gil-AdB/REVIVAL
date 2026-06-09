@@ -1334,12 +1334,13 @@ void Initialize_Greets()
 	// ever needs that we'll add a depth cap.
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
-		// One mirror per material name and one per texture filename.
-		// teleporter is matched by name (a single material with no
-		// texture); P_TEXT.JPG is the dynamic text texture shared
-		// across every greets display screen — one mirror covers
-		// them all and the cluster-based plane finder picks the
-		// dominant coplanar group.
+		// One mirror per material name, plus one mirror per coplanar
+		// CLUSTER of each texture filename. teleporter is matched by
+		// name (a single material with no texture); P_TEXT.JPG is the
+		// dynamic text texture shared across every greets display
+		// screen — the screens face four directions at different
+		// depths, so each coplanar cluster gets its own independent
+		// mirror (plane, clone mesh, omni clones).
 		const char *kMirrorMats[] = {
 			"teleporter",  // back wall — opaque silver mirror
 		};
@@ -1351,8 +1352,7 @@ void Initialize_Greets()
 			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
 		}
 		for (const char *txtrName : kMirrorTextures) {
-			fds::Mirror m = fds::BuildMirrorByTextureName(GreetSc, txtrName);
-			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
+			fds::BuildMirrorsByTextureName(GreetSc, txtrName, g_greetsMirrors);
 		}
 		// Tag original faces behind each mirror plane so room geometry
 		// behind a (transparent) mirror can't leak through its footprint

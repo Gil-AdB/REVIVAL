@@ -128,6 +128,17 @@ Mirror BuildMirror(Scene *sc, const char *wallMaterialName);
 // to enumerate all the material-name variants.
 Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 
+// Clustered entry — groups the texture's faces into coplanar clusters
+// (normals within ~18° AND plane offsets within 0.5 world units) and
+// builds one independent Mirror per cluster, appended to `out`.
+// BuildMirrorByTextureName fits a single plane to ALL matching faces,
+// which works only when every surface sharing the texture is coplanar;
+// greets's text screens face four directions at different depths, so
+// the single-plane fit kept 12/64 faces and silently dropped the rest
+// (screens that never became mirrors). Returns mirrors appended.
+int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
+                              std::vector<Mirror> &out);
+
 // Depth-1 recursive: for each ordered pair (A, B) of already-built
 // base mirrors, append a compound mirror representing "looking at B
 // through A". The compound's wall surface is A's existing clone of

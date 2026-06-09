@@ -66,6 +66,13 @@ template <class Pred, class Visit>
 void walkWallFacesIf(Scene *sc, Pred &&pred, Visit &&visit) {
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
+        // Never treat faces inside a prior mirror's clone mesh as wall
+        // candidates: the teleporter clone contains mirror-image copies
+        // of the P_TEXT screens (same texture), and collecting those
+        // spawned phantom mirrors whose planes sit OUTSIDE the room —
+        // wall-less (the retarget loop rightly skips clone meshes) and
+        // permanently invisible, but each cloning the scene + omnis.
+        if (isCloneMesh(Obj)) continue;
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Faces) continue;
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
@@ -272,7 +279,16 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         MatrixXVector(T->RotMat, &localN, &wN);
         wN.normalize();
         const float dot = wN.x*N.x + wN.y*N.y + wN.z*N.z;
-        return dot >= 0.866f;
+        if (dot < 0.866f) return false;
+        // Coplanarity by DISTANCE too, not just normal: a parallel
+        // same-material face at a different depth is regular geometry
+        // to clone, not part of this mirror's surface. Without this it
+        // got retargeted + stamped but reflected across the wrong
+        // plane (garbage reflection in the offset panel).
+        Vector localA = F.A->Pos, wA;
+        MatrixXVector(T->RotMat, &localA, &wA);
+        wA += T->IPos;
+        return distToPlane(wA, N, d) <= 0.6f;
     };
 
     // Count total verts/faces (excluding mirror-surface faces — we
@@ -409,6 +425,22 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             ++fOfs;
         }
         m.meshRanges.push_back({T, vStart, T->VIndex});
+    }
+    // Nothing in FRONT of the plane survived the per-face side test
+    // (wall faces away from the room, or sits at its far edge). A
+    // wall-retargeted mirror with no reflection content would render
+    // as a void portal — bail before linking/retargeting so the wall
+    // keeps its original material instead. The pre-allocated clone
+    // storage leaks; this runs once at scene init.
+    if (fOfs == 0) {
+        std::fprintf(stderr,
+            "[MIRROR '%s'] nothing in front of plane — skipping mirror\n",
+            label);
+        // Reclaim the id: nothing kept it (clone mesh is discarded,
+        // retarget + omni cloning haven't run yet) and TagFacesBehind-
+        // Mirrors only supports ids ≤ 31, so don't burn slots.
+        --s_nextMirrorId;
+        return Mirror{};
     }
     m.cloneMesh  = MM;
     m.clonedVerts = int(vOfs);
@@ -706,6 +738,112 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName)
 {
     if (!sc || !textureFileName) return Mirror{};
     return BuildMirrorImpl(sc, textureNameSelector(textureFileName), textureFileName);
+}
+
+int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
+                              std::vector<Mirror> &out)
+{
+    if (!sc || !textureFileName) return 0;
+
+    // Collect every matching face with its world-space unit normal and
+    // plane offset; clustering keys on both.
+    struct WallSample {
+        Face   *F;
+        Vector  wN;   // unit world normal
+        float   d;    // plane offset: wN·P + d = 0
+        float   area; // world-space triangle area
+    };
+    std::vector<WallSample> samples;
+    walkWallFacesIf(sc, textureNameSelector(textureFileName),
+                    [&](TriMesh *T, Face &F, const Vector &wN) {
+        Vector u = wN;
+        u.normalize();
+        auto worldPos = [&](const Vertex *v) {
+            Vector lp = v->Pos, wp;
+            MatrixXVector(T->RotMat, &lp, &wp);
+            wp += T->IPos;
+            return wp;
+        };
+        const Vector wA = worldPos(F.A);
+        const Vector wB = worldPos(F.B);
+        const Vector wC = worldPos(F.C);
+        const Vector e1 = { wB.x-wA.x, wB.y-wA.y, wB.z-wA.z };
+        const Vector e2 = { wC.x-wA.x, wC.y-wA.y, wC.z-wA.z };
+        const float cxv = e1.y*e2.z - e1.z*e2.y;
+        const float cyv = e1.z*e2.x - e1.x*e2.z;
+        const float czv = e1.x*e2.y - e1.y*e2.x;
+        const float area = 0.5f * std::sqrt(cxv*cxv + cyv*cyv + czv*czv);
+        samples.push_back({&F, u,
+                           -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area});
+    });
+    if (samples.empty()) {
+        std::fprintf(stderr, "[MIRROR-CLUSTER '%s'] no faces found\n",
+                     textureFileName);
+        return 0;
+    }
+
+    // Greedy seed clustering: same plane = normals within ~18° AND
+    // offsets within half a world unit. Tighter than the 30° the
+    // single-plane finder uses for outlier rejection — here disagreeing
+    // faces become their own mirror instead of being dropped.
+    constexpr float kNormalDot    = 0.95f;
+    constexpr float kPlaneDistEps = 0.5f;
+    std::vector<int> clusterOf(samples.size(), -1);
+    int numClusters = 0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (clusterOf[i] >= 0) continue;
+        const int c = numClusters++;
+        clusterOf[i] = c;
+        for (size_t j = i + 1; j < samples.size(); ++j) {
+            if (clusterOf[j] >= 0) continue;
+            const float dot = samples[i].wN.x*samples[j].wN.x
+                            + samples[i].wN.y*samples[j].wN.y
+                            + samples[i].wN.z*samples[j].wN.z;
+            if (dot < kNormalDot) continue;
+            if (std::fabs(samples[i].d - samples[j].d) > kPlaneDistEps) continue;
+            clusterOf[j] = c;
+        }
+    }
+
+    // A real display panel has a few square units of surface; the
+    // screen boxes' narrow edge strips share the texture but make no
+    // sense as mirrors (and each would clone the whole scene + omnis).
+    constexpr float kMinMirrorArea = 1.0f;
+
+    int added = 0, skippedSlivers = 0;
+    for (int c = 0; c < numClusters; ++c) {
+        // Sorted member list → O(log n) membership predicate. Face
+        // pointers are stable (live scene meshes, allocated at load).
+        std::vector<const Face*> members;
+        float clusterArea = 0.0f;
+        for (size_t i = 0; i < samples.size(); ++i)
+            if (clusterOf[i] == c) {
+                members.push_back(samples[i].F);
+                clusterArea += samples[i].area;
+            }
+        if (clusterArea < kMinMirrorArea) {
+            ++skippedSlivers;
+            continue;
+        }
+        std::sort(members.begin(), members.end());
+        char label[128];
+        std::snprintf(label, sizeof(label), "%s#%d", textureFileName, c);
+        Mirror m = BuildMirrorImpl(sc,
+            [&members](const Face &F) {
+                return std::binary_search(members.begin(), members.end(), &F);
+            },
+            label);
+        if (m.cloneMesh) {
+            out.push_back(std::move(m));
+            ++added;
+        }
+    }
+    std::fprintf(stderr,
+        "[MIRROR-CLUSTER '%s'] %zu faces -> %d clusters -> %d mirrors "
+        "(%d sliver clusters under %.1f area skipped)\n",
+        textureFileName, samples.size(), numClusters, added,
+        skippedSlivers, kMinMirrorArea);
+    return added;
 }
 
 int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
