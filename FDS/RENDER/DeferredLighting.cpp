@@ -6655,6 +6655,12 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	}
 }
 
+// Per-channel TPDF dither (stable per pixel) for the froxel composite.
+static inline float frDither(uint32_t s, float amp) {
+	uint32_t h = s*0x9E3779B9u; h^=h>>15; h*=0x85EBCA6Bu; h^=h>>13;
+	return (float(h&0xFFFFu)*(1.0f/65536.0f) + float((h>>16)&0xFFFFu)*(1.0f/65536.0f) - 1.0f) * amp;
+}
+
 // Composite: bilinear in XY, EXACT in depth. Integrating to the pixel's exact
 // depth within its slice (not trilinear between slice centers) removes the
 // z-slice bands on tilted surfaces. The partial in-slice in-scatter is derived
@@ -6714,9 +6720,11 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				Tpix = acc[3] * ToptPart;
 			} else { aR=acc[0]; aG=acc[1]; aB=acc[2]; Tpix=acc[3]; }
 			const dword pix = out[i];
-			int nR = int(float((pix>>16)&0xFFu)*Tpix + aR);
-			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG);
-			int nB = int(float( pix     &0xFFu)*Tpix + aB);
+			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
+				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
+			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG + frDither(sd^0x68E31DA4u, da));
+			int nB = int(float( pix     &0xFFu)*Tpix + aB + frDither(sd^0xB5297A4Du, da));
+				if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
 			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 		}
