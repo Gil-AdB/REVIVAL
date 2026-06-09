@@ -540,6 +540,9 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             if (!m.wallMatClone) {
                 m.wallMatClone = getAlignedType<Material>(16);
                 std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
+                // RelScene gates Scene_RebuildMatTable inclusion — set
+                // explicitly rather than trusting the memcpy'd value.
+                m.wallMatClone->RelScene = sc;
                 m.wallMatClone->Flags |= Mat_Transparent;
                 m.wallMatClone->XparBlendAlpha = kMirrorAlpha;     // 0
                 m.wallMatClone->Specular       = kMirrorSpecular;  // 0
@@ -551,10 +554,22 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                 // sampled colour doesn't matter because alpha=0 zeros
                 // the whole composition contribution.
                 m.wallMatClone->Txtr = synthesizeFlatTexture(kMirrorSilver);
-                m.wallMatClone->Prev = nullptr;
-                m.wallMatClone->Next = MatLib;
-                if (MatLib) MatLib->Prev = m.wallMatClone;
-                MatLib = m.wallMatClone;
+                // Link at MatLib TAIL, not head. Scene_RebuildMatTable
+                // (below) assigns matIDs in list order; appending keeps
+                // every pre-existing material's ID stable so anything
+                // that captured an ID earlier (lightmap bake, gbuffer
+                // commits from prior frames) stays valid — same reason
+                // SceneBuilder links its materials at the tail.
+                m.wallMatClone->Next = nullptr;
+                if (!MatLib) {
+                    m.wallMatClone->Prev = nullptr;
+                    MatLib = m.wallMatClone;
+                } else {
+                    Material *tail = MatLib;
+                    while (tail->Next) tail = tail->Next;
+                    tail->Next = m.wallMatClone;
+                    m.wallMatClone->Prev = tail;
+                }
             }
             F.Txtr = m.wallMatClone;
             // Wall face itself is NOT tagged. We used to set
@@ -659,6 +674,17 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         m.omniClones.push_back({srcO, clone, srcO->IRange, srcO->IRange});
         ++omniCount;
     }
+
+    // Register wallMatClone in the per-scene matID table. Mekalele packs
+    // F->Txtr->ID into the committed mat32 and the deferred kernels
+    // resolve the Material back through Scene_GetMatTable — the memcpy
+    // above copied the SOURCE's ID, so without a rebuild every wall
+    // pixel resolved to a different material entirely (untextured
+    // 'teleporter' carries the default ID=0 → greets wall pixels lit as
+    // MAT 0 'cockpit'; P_TEXT walls resolved to the original Lum=100
+    // screens). The alpha<0 sentinel lives on the clone, so the kernels
+    // never saw it. Tail-append above keeps pre-existing IDs stable.
+    if (m.wallMatClone) Scene_RebuildMatTable(sc);
 
     std::fprintf(stderr,
         "[MIRROR '%s'] cloned %u verts / %u faces (mirror bbox z=[%.1f..%.1f]); "
