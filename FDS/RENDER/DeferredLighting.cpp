@@ -6610,7 +6610,19 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				const float dz = zb1 - zb0;            // slice thickness
 				zb0 = zb1;
 				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
-				const float dens = froxelDensity(P, wx, wy, wz);
+				float dens = froxelDensity(P, wx, wy, wz);
+				// Distance LOD: a far froxel spans many blob cells but point-samples
+				// the cell=180 noise → aliases into bright/dark blocks. Blend toward
+				// the field's mean density (~0.27) by footprint/cell, so distant fog
+				// reads as smooth haze and near fog stays lumpy. Only for in-slab
+				// blob froxels (else the slab/gap zeros must stay zero).
+				if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
+					const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
+					const float fp = dz > fpXY ? dz : fpXY;
+					float lod = (fp - P.cell) * (1.0f/P.cell);
+					lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
+					dens += (0.27f - dens) * lod;
+				}
 				if (dens > 0.0f) {
 					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
 					if (P.inscatter > 0.0f && L) {
