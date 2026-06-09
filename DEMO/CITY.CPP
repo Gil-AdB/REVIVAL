@@ -17,6 +17,10 @@
 #include <vector>
 #include "FRUSTRUM.H"
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+#include <semaphore>           // RACEDBG probe of renderns::tileDone
+#include <climits>
+#include <FILLERS/Mekalele.h>  // RACEDBG g_gbuffer sentinel count
+namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
 // T->Verts. Forward-declared locally; called after any post-init Face
@@ -2325,6 +2329,67 @@ struct CityScene : SceneDriver {
 			// dispMap distortion below, so volumetric work (cones/halos)
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
+			if (getenv("FDS_CITY_RACE_DEBUG")) {
+				// Probe the shared tile semaphore for stray permits: every
+				// tiled pass enqueues N jobs and acquires N permits, so the
+				// count here must be 0. A leak makes every later pass's wait
+				// loop return early — persistent frame corruption.
+				{
+					int strays = 0;
+					while (renderns::tileDone.try_acquire()) ++strays;
+					if (strays) renderns::tileDone.release(strays);
+					fprintf(stderr, "[RACEDBG] straySemPermits=%d\n", strays);
+				}
+				int oi = 0;
+				for (Omni* O = CitySc->OmniHead; O && oi < 6; O = O->Next, ++oi)
+					fprintf(stderr, "[RACEDBG] omni%d IPos=(%.1f,%.1f,%.1f) ISize=%.2f IRange=%.1f L=(%d,%d,%d)\n",
+					        oi, O->IPos.x, O->IPos.y, O->IPos.z, O->ISize, O->IRange,
+					        int(O->L.R), int(O->L.G), int(O->L.B));
+				fprintf(stderr, "[RACEDBG] AmbF=%.3f DiffF=%.3f RangeF=%.3f FOVX=%.1f View=%p\n",
+				        Ambient_Factor, Diffusive_Factor, Range_Factor, FOVX, (void*)View);
+				for (Object* Ob = CitySc->ObjectHead; Ob; Ob = Ob->Next) {
+					if (Ob->Type != Obj_TriMesh || !Ob->Name || Ob->Name[0] != 'b') continue;
+					TriMesh* TM = (TriMesh*)Ob->Data;
+					for (int vi = 0; vi < 3 && vi < TM->VIndex; ++vi)
+						fprintf(stderr, "[RACEDBG] %s v%d L=(%.2f,%.2f,%.2f)\n",
+						        Ob->Name, vi, TM->Verts[vi].LR, TM->Verts[vi].LG, TM->Verts[vi].LB);
+					break;
+				}
+				size_t nz = 0;
+				for (size_t i = 0; i < size_t(XRes)*size_t(YRes); i += 7) nz += (ZPage16[i] != 0);
+				size_t nSent = 0;
+				if (g_gbuffer) {                  // count forward-filler pixels
+					const uint32_t* mt = g_gbuffer->txtr.data();
+					for (size_t i = 0; i < size_t(XRes)*size_t(YRes); i += 7)
+						nSent += (mt[i] == 0xFFFFFFFFu);
+				}
+				fprintf(stderr, "[RACEDBG] sentinelPx(sampled)=%zu\n", nSent);
+				uint64_t lum = 0; size_t ns = 0;
+				const dword* vp = (const dword*)VPage;
+				for (int y = 700; y < 1000; y += 4)
+					for (int x = 400; x < 1500; x += 4) {
+						const dword p = vp[size_t(y)*XRes + x];
+						lum += ((p>>16)&0xFF) + ((p>>8)&0xFF) + (p&0xFF); ns += 3;
+					}
+				fprintf(stderr, "[RACEDBG] pass1: CAll=%d nzZ=%zu waterVP=%llu\n",
+				        CAll, nz, (unsigned long long)(lum/ns));
+				if (lum/ns > 200) {                 // bad run: dump pass-1 output
+					FILE* f = fopen("race_pass1_bad.ppm", "wb");
+					if (f) {
+						fprintf(f, "P6\n%d %d\n255\n", XRes, YRes);
+						for (size_t i = 0; i < size_t(XRes)*size_t(YRes); ++i) {
+							const dword p = vp[i];
+							unsigned char rgb[3] = {
+								(unsigned char)((p>>16)&0xFF),
+								(unsigned char)((p>>8)&0xFF),
+								(unsigned char)(p&0xFF) };
+							fwrite(rgb, 1, 3, f);
+						}
+						fclose(f);
+						fprintf(stderr, "[RACEDBG] dumped race_pass1_bad.ppm\n");
+					}
+				}
+			}
 			{
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;
@@ -2337,6 +2402,17 @@ struct CityScene : SceneDriver {
 				}
 			}
 
+			if (getenv("FDS_CITY_RACE_DEBUG")) {
+				uint64_t lum = 0; size_t ns = 0;
+				const dword* vp = (const dword*)VPage;
+				for (int y = 700; y < 1000; y += 4)
+					for (int x = 400; x < 1500; x += 4) {
+						const dword p = vp[size_t(y)*XRes + x];
+						lum += ((p>>16)&0xFF) + ((p>>8)&0xFF) + (p&0xFF); ns += 3;
+					}
+				fprintf(stderr, "[RACEDBG] postDispMap: waterVP=%llu\n",
+				        (unsigned long long)(lum/ns));
+			}
 			// Deferred path needs Z cleared between passes so the pass-2
 			// deferred-lighting compositor doesn't re-shade pass-1 pixels
 			// with their (now stale) G-buffer entries — that would

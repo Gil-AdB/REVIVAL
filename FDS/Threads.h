@@ -36,6 +36,14 @@ public:
 
 	void init(item_t initFunc) {
 		auto numThreads = std::thread::hardware_concurrency();
+		// Debug override: FDS_THREADS=N caps the pool (FDS_THREADS=1 makes
+		// every tile-job sequence effectively serial — the fastest way to
+		// confirm a suspected thread race; parallel_memset etc. fall back
+		// to serial below 2 workers).
+		if (const char* e = getenv("FDS_THREADS")) {
+			const long v = strtol(e, nullptr, 10);
+			if (v >= 1 && v < long(numThreads)) numThreads = unsigned(v);
+		}
 		for (size_t ii = 0; ii < numThreads; ii++) {
 			pool.push_back(std::thread([this, initFunc]() {
 				HintHighPerfThread();
