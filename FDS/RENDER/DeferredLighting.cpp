@@ -6586,7 +6586,11 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
-	const float dz = (gFrFar - gFrNear) / float(nz);
+	// Exponential depth slices: z_b(i) = near·r^i, r = (far/near)^(1/nz). Near
+	// slices are thin (detail where the eye is), far slices fat — kills the
+	// linear-slice banding that showed at grazing angles. r per-step multiply,
+	// no expf in the inner loop.
+	const float r = std::pow(gFrFar / gFrNear, 1.0f / float(nz));
 	const ViewLightsSoA* L = P.lights;
 	for (int iy = iy0; iy < iy1; ++iy) {
 		const float sy = (float(iy)+0.5f) * invNy * float(YRes);
@@ -6599,8 +6603,12 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const float Dz = P.w20*X + P.w21*Y + P.w22;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 			float Tc = 1.0f, accR = 0.0f, accG = 0.0f, accB = 0.0f;
+			float zb0 = gFrNear;
 			for (int iz = 0; iz < nz; ++iz) {
-				const float z = gFrNear + (float(iz)+0.5f) * dz;
+				const float zb1 = zb0 * r;
+				const float z  = 0.5f * (zb0 + zb1);   // slice center
+				const float dz = zb1 - zb0;            // slice thickness
+				zb0 = zb1;
 				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
 				const float dens = froxelDensity(P, wx, wy, wz);
 				if (dens > 0.0f) {
@@ -6635,7 +6643,9 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 	dword* out = reinterpret_cast<dword*>(VPage);
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
-	const float zSpan = gFrFar - gFrNear;
+	// Inverse of the exp slice mapping: slice = nz·log(z/near)/log(far/near).
+	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
+	const float invNear  = 1.0f / gFrNear;
 	auto at = [&](int ix, int iy, int iz, float& aR, float& aG, float& aB, float& t) {
 		const size_t i = (size_t(iy)*nx + ix)*nz + iz;
 		aR = gFrAccR[i]; aG = gFrAccG[i]; aB = gFrAccB[i]; t = gFrT[i];
@@ -6654,7 +6664,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
 			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx-2<0?0:nx-2; wx = nx>1?1.0f:0.0f; }
 			const int ix1 = std::min(ix0+1, nx-1);
-			float fz = (z - gFrNear)/zSpan*float(nz) - 0.5f;
+			float fz = std::log(z * invNear) * invLogFN * float(nz) - 0.5f;
 			int iz0 = int(std::floor(fz)); float wz = fz - float(iz0);
 			if (iz0 < 0) { iz0 = 0; wz = 0.0f; } if (iz0 >= nz-1) { iz0 = nz-1; wz = 0.0f; }
 			const int iz1 = std::min(iz0+1, nz-1);
