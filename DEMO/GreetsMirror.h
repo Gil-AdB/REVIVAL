@@ -80,6 +80,13 @@ struct Mirror {
     // plane every frame, so the clone-rasterizer's per-pixel check can
     // gate writes to "inside this mirror's wall footprint only".
     std::vector<Face*> wallFaces;
+    // Owning TriMesh per wallFaces entry (parallel vector). The mask
+    // pre-pass transforms wall verts itself (world → view → pre-divide)
+    // instead of reading TPos_AOS, which is STALE whenever the owning
+    // mesh was frustum-culled that frame — with greets's chunked room
+    // mesh that happened constantly, stamping last-frame footprints
+    // over arbitrary geometry (the "mirror visible through walls" leak).
+    std::vector<TriMesh*> wallFaceMeshes;
     // Unique 1..255 mirror id. Assigned at BuildMirror time, written to
     // gb.mirrorId by the per-frame mask pre-pass and matched against
     // Face::mirrorMaskTag in Mekalele's inner loop.
@@ -174,13 +181,13 @@ void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
 // rejecting writes). Gated by --greets-mirror-debug-mask.
 void DebugOverlayMirrorMask(Scene *sc);
 
-// Per-frame mask pre-pass: walks every mirror's wall faces, projects
-// each triangle to screen space using already-transformed PX/PY, and
-// scanline-fills gb.mirrorId with the mirror's id at each covered
-// pixel. Cleared to 0 at entry so previous-frame coverage doesn't
-// leak. Call AFTER Transform_Objects (which populates PX/PY on the
-// wall verts) and BEFORE Render() (so the stamp is in place when
-// clone faces rasterize).
+// Per-frame mask pre-pass: walks every mirror's wall faces, transforms
+// each triangle world → view → screen itself (NOT via Vertex::TPos_AOS,
+// which is stale for frustum-culled meshes), and scanline-fills
+// gb.mirrorMask with the mirror's id at each covered pixel. Cleared to
+// 0 at entry so previous-frame coverage doesn't leak. Call AFTER the
+// camera update for this frame and BEFORE Render() (so the stamp is in
+// place when clone faces rasterize).
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors);
 
 }  // namespace fds

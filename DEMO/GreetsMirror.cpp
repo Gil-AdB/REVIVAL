@@ -551,6 +551,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     // view of the side-mirror panel was lit per-strip and the silver
     // tint flickered tile-by-tile inside the back mirror's image.
     Material *sourceWallMat = nullptr;
+    int halfSilveredWalls = 0;
     for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
         if (Obj == MObj) continue;
@@ -560,16 +561,25 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         for (DWord fi = 0; fi < T->FIndex; ++fi) {
             Face &F = T->Faces[fi];
             if (!isMirrorSurface(F, T)) continue;
-            if (!sourceWallMat) sourceWallMat = F.Txtr;
-            // ONE path for both originally-opaque and originally-
-            // transparent (P_TEXT, etc.) wall sources: synthesize a
-            // fresh fully-transparent material with alpha=0 — the wall
-            // contributes no colour, no text overlay, no silver tint.
-            // The reflected clones rendered behind the wall through
-            // the mirrorMask gate are what shows. The source's
-            // original look (P_TEXT text on the screen, opaque silver,
-            // etc.) is intentionally discarded.
-            if (!m.wallMatClone) {
+            // Two wall treatments:
+            //
+            // (A) Half-silvered glass — source is already transparent
+            //     WITH a real texture (greets's P_TEXT text screens).
+            //     KEEP the source material: the transparent kernel
+            //     composites the glowing text over whatever is behind,
+            //     and "behind" is the reflected clone world (the real
+            //     room behind the panel is gated out per pixel). The
+            //     screen reads as a display with a dimmed reflection
+            //     in it — the original half-silvered intent.
+            //
+            // (B) Full portal — opaque source (the teleporter wall).
+            //     Retarget to an alpha<0 sentinel material clone so the
+            //     wall contributes nothing and the reflection alone
+            //     shows.
+            const bool halfSilvered =
+                (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
+            if (!halfSilvered && !m.wallMatClone) {
+                if (!sourceWallMat) sourceWallMat = F.Txtr;
                 m.wallMatClone = getAlignedType<Material>(16);
                 std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
                 // RelScene gates Scene_RebuildMatTable inclusion — set
@@ -603,7 +613,8 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                     m.wallMatClone->Prev = tail;
                 }
             }
-            F.Txtr = m.wallMatClone;
+            if (!halfSilvered) F.Txtr = m.wallMatClone;
+            else ++halfSilveredWalls;
             // Wall face itself is NOT tagged. We used to set
             // F.mirrorMaskTag = m.id here, but Mekalele's per-pixel
             // gb.mirrorId == ctx.mirrorTag test would then apply to
@@ -618,6 +629,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             // faces so StampMirrorMasks can read them — it doesn't
             // need the tag on the face itself.
             m.wallFaces.push_back(&F);
+            m.wallFaceMeshes.push_back(T);
             ++m.wallFacesRetargeted;
         }
     }
@@ -720,9 +732,10 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
 
     std::fprintf(stderr,
         "[MIRROR '%s'] cloned %u verts / %u faces (mirror bbox z=[%.1f..%.1f]); "
-        "retargeted %d wall faces to transparent mat; cloned %d omnis\n",
+        "%d wall faces (%d half-silvered, %d portal); cloned %d omnis\n",
         label, unsigned(vOfs), unsigned(fOfs),
-        bbMin.z, bbMax.z, m.wallFacesRetargeted, omniCount);
+        bbMin.z, bbMax.z, m.wallFacesRetargeted, halfSilveredWalls,
+        m.wallFacesRetargeted - halfSilveredWalls, omniCount);
     return m;
 }
 
@@ -810,7 +823,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // sense as mirrors (and each would clone the whole scene + omnis).
     constexpr float kMinMirrorArea = 1.0f;
 
-    int added = 0, skippedSlivers = 0;
+    int added = 0, skippedSlivers = 0, skippedHorizontal = 0;
     for (int c = 0; c < numClusters; ++c) {
         // Sorted member list → O(log n) membership predicate. Face
         // pointers are stable (live scene meshes, allocated at load).
@@ -824,6 +837,20 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         if (clusterArea < kMinMirrorArea) {
             ++skippedSlivers;
             continue;
+        }
+        // Skip near-horizontal clusters: display panels are vertical;
+        // the screen boxes' TOP/BOTTOM caps share the texture but a
+        // floor/ceiling-facing mirror there is never the authored
+        // intent and each costs a full scene clone + omni set. (Drop
+        // this test if a scene ever wants real floor mirrors.)
+        {
+            float ny = 0.0f;
+            for (size_t i = 0; i < samples.size(); ++i)
+                if (clusterOf[i] == c) { ny = samples[i].wN.y; break; }
+            if (std::fabs(ny) > 0.8f) {
+                ++skippedHorizontal;
+                continue;
+            }
         }
         std::sort(members.begin(), members.end());
         char label[128];
@@ -840,9 +867,9 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     }
     std::fprintf(stderr,
         "[MIRROR-CLUSTER '%s'] %zu faces -> %d clusters -> %d mirrors "
-        "(%d sliver clusters under %.1f area skipped)\n",
+        "(%d slivers under %.1f area + %d horizontal skipped)\n",
         textureFileName, samples.size(), numClusters, added,
-        skippedSlivers, kMinMirrorArea);
+        skippedSlivers, kMinMirrorArea, skippedHorizontal);
     return added;
 }
 
@@ -1096,6 +1123,9 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             compound.plane = B.plane;
             compound.cloneMesh = MM;
             compound.wallFaces = std::move(compoundWalls);
+            // Compound wall faces all live in A's clone mesh.
+            compound.wallFaceMeshes.assign(compound.wallFaces.size(),
+                                           A.cloneMesh);
             compound.clonedVerts = int(vOfs);
             compound.clonedFaces = int(fOfs);
             {
@@ -1371,11 +1401,37 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
     // doesn't blow up screen coords for verts grazing the near plane
     // (greets's NZP is 0.01, but z=0.18 still yields PX values >10×
     // screen width). Sutherland-Hodgman clips each wall triangle in
-    // PROJECTION-PRE-DIVIDE space (TPos_AOS.x/.y already have FOVX/
-    // CntrX baked in by Transform_Objects's M34; only the /z is
-    // pending) against z >= kClipZ, then divides the clipped verts'
-    // (x, y) by z to get screen coords.
+    // PROJECTION-PRE-DIVIDE space against z >= kClipZ, then divides
+    // the clipped verts' (x, y) by z to get screen coords.
+    //
+    // Pre-divide coords are computed HERE from world positions + the
+    // live camera — NOT read from Vertex::TPos_AOS. TPos_AOS is only
+    // refreshed for meshes that survive Transform_Objects' frustum
+    // cull; greets's chunked room mesh gets culled per-chunk all the
+    // time, so a culled wall's TPos_AOS holds LAST-VISIBLE-frame
+    // values and the stamp landed a stale footprint over arbitrary
+    // geometry — which the behind-mirror gate then carved out of real
+    // walls ("mirror visible through walls").
     const float kClipZ = std::max(0.5f, sc->NZP * 5.0f);
+    const Camera *cam = ::View ? ::View : sc->CameraHead;
+    if (!cam) return;
+    const float (*VM)[3] = cam->Mat;
+    const Vector camSrc = cam->ISource;
+    auto preDivideOfWorld = [&](const Vector &wp) -> Vector {
+        const float dx = wp.x - camSrc.x;
+        const float dy = wp.y - camSrc.y;
+        const float dz = wp.z - camSrc.z;
+        const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
+        const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
+        const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
+        // Same perspective pre-scale Transform_Objects bakes into
+        // TPos_AOS (see the cube-face block in Transform.cpp): FOVX/
+        // FOVY are View->PerspX/PerspY, CntrEX/CntrEY the screen
+        // center, y negated for screen-down.
+        return { FOVX * vx + CntrEX * vz,
+                 -FOVY * vy + CntrEY * vz,
+                 vz };
+    };
     auto projectPreDivideToScreen = [](const Vector &vp, float &sx, float &sy) {
         const float invZ = 1.0f / vp.z;
         sx = vp.x * invZ;
@@ -1434,14 +1490,27 @@ void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
             }
         }
         if (!anyFrontFacing) continue;
-        for (const Face *F : m.wallFaces) {
+        for (size_t wf = 0; wf < m.wallFaces.size(); ++wf) {
+            const Face *F = m.wallFaces[wf];
+            TriMesh *WT = wf < m.wallFaceMeshes.size()
+                ? m.wallFaceMeshes[wf] : nullptr;
             if (!F || !F->A || !F->B || !F->C) continue;
+            auto worldOf = [&](const Vertex *v) -> Vector {
+                Vector lp = v->Pos;
+                if (!WT) return lp;  // clone meshes bake world coords
+                Vector wp;
+                MatrixXVector(WT->RotMat, &lp, &wp);
+                wp += WT->IPos;
+                return wp;
+            };
             // Clip the (A,B,C) triangle in view-space against z >= kClipZ.
             // Up to 4 verts after a single-plane clip of a triangle.
             Vector clipped[4];
             int nc = 0;
             const Vector tri[3] = {
-                F->A->TPos_AOS, F->B->TPos_AOS, F->C->TPos_AOS
+                preDivideOfWorld(worldOf(F->A)),
+                preDivideOfWorld(worldOf(F->B)),
+                preDivideOfWorld(worldOf(F->C)),
             };
             for (int e = 0; e < 3; ++e) {
                 const Vector &v0 = tri[e];
