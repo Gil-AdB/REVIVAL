@@ -1069,9 +1069,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             for (size_t i = 0; i < samples.size(); ++i) {
                 if (clusterOf[i] != c) continue;
                 const WallSample &ws = samples[i];
-                slot.faces.push_back(ws.F);
                 const Vertex *vs[3] = { ws.F->A, ws.F->B, ws.F->C };
-                Vertex *vsm[3] = { ws.F->A, ws.F->B, ws.F->C };
                 for (int k = 0; k < 3; ++k) {
                     Vector wp = vs[k]->Pos;
                     if (ws.T) {
@@ -1083,10 +1081,6 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                     const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
                     slot.u0 = std::min(slot.u0, pu); slot.u1 = std::max(slot.u1, pu);
                     slot.v0 = std::min(slot.v0, pv); slot.v1 = std::max(slot.v1, pv);
-                    bool seen = false;
-                    for (const auto &sv : slot.verts)
-                        if (sv.v == vsm[k]) { seen = true; break; }
-                    if (!seen) slot.verts.push_back({ vsm[k], pu, pv });
                 }
             }
             if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
@@ -1128,7 +1122,104 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                 tail->Next = slot.mat;
                 slot.mat->Prev = tail;
             }
-            for (Face *f : slot.faces) f->Txtr = slot.mat;
+            // The panel faces KEEP their original (transparent text)
+            // material — the screen stays a double-sided half-silvered
+            // display: glass + text render through the transparent
+            // peel exactly as before, and the reflection lives on a
+            // 2-triangle quad inset just BEHIND the glass. The quad is
+            // excluded from its own RTT render for free (it sits
+            // inside the near/mirror plane), and the clone-mesh name
+            // prefix keeps later BuildMirror calls from cloning it.
+            {
+                constexpr float kInset = 0.02f;
+                TriMesh *QM = getAlignedType<TriMesh>(16);
+                std::memset(QM, 0, sizeof(TriMesh));
+                QM->Verts = (Vertex*)getAlignedBlock(sizeof(Vertex) * 4, 16);
+                QM->Faces = (Face*)getAlignedBlock(sizeof(Face) * 2, 16);
+                std::memset(QM->Verts, 0, sizeof(Vertex) * 4);
+                std::memset(QM->Faces, 0, sizeof(Face) * 2);
+                QM->VIndex = 4;
+                QM->FIndex = 2;
+                Matrix_Copy(QM->RotMat, Mat_ID);
+                Matrix_Copy(QM->UnscaledRotMat, Mat_ID);
+                QM->IPos   = {0.0f, 0.0f, 0.0f};
+                QM->IScale = {1.0f, 1.0f, 1.0f};
+                QM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
+                QM->Flags |= HTrack_Visible | Tri_Noshading;
+                auto qkey = [](Spline &sp, float x, float y, float z, float w) {
+                    sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
+                    sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
+                    sp.Keys[0].Frame = 0.0f;
+                    sp.Keys[0].Pos = {x,y,z,w}; sp.Keys[0].AA = {x,y,z,w};
+                };
+                qkey(QM->Pos,    0,0,0,0);
+                qkey(QM->Scale,  1,1,1,0);
+                qkey(QM->Rotate, 0,0,0,1);
+                // Corners in window order: (u0,v0) (u1,v0) (u1,v1)
+                // (u0,v1), inset kInset behind the plane (-N side).
+                const float cu_[4] = { slot.u0, slot.u1, slot.u1, slot.u0 };
+                const float cv_[4] = { slot.v0, slot.v0, slot.v1, slot.v1 };
+                for (int k = 0; k < 4; ++k) {
+                    Vertex &V = QM->Verts[k];
+                    V.Pos = {
+                        cu_[k]*axU.x + cv_[k]*axV.x - (pD + kInset)*pN.x,
+                        cu_[k]*axU.y + cv_[k]*axV.y - (pD + kInset)*pN.y,
+                        cu_[k]*axU.z + cv_[k]*axV.z - (pD + kInset)*pN.z };
+                    V.N = pN;
+                    // Tangent along the window's u axis (the RTT mat is
+                    // not normal-mapped; harmless but keeps TBN sane).
+                    V.Tangent = axU;
+                    slot.verts.push_back({ &V, cu_[k], cv_[k] });
+                }
+                // Winding per the engine convention ((C−A)×(B−A) = N,
+                // matching CITY's ComputeFaceNormal): both tris CCW in
+                // the (u,v) plane.
+                auto qface = [&](Face &F, int a, int b, int cc) {
+                    F.A = &QM->Verts[a];
+                    F.B = &QM->Verts[b];
+                    F.C = &QM->Verts[cc];
+                    F.Txtr = slot.mat;
+                    F.N = pN;
+                    F.NormProd = -(pN.x*F.A->Pos.x + pN.y*F.A->Pos.y
+                                   + pN.z*F.A->Pos.z);
+                    slot.faces.push_back(&F);
+                };
+                qface(QM->Faces[0], 0, 3, 1);
+                qface(QM->Faces[1], 1, 3, 2);
+                // Tight bsphere.
+                Vector ctr = {
+                    (QM->Verts[0].Pos.x + QM->Verts[2].Pos.x) * 0.5f,
+                    (QM->Verts[0].Pos.y + QM->Verts[2].Pos.y) * 0.5f,
+                    (QM->Verts[0].Pos.z + QM->Verts[2].Pos.z) * 0.5f };
+                const float ddx = QM->Verts[2].Pos.x - QM->Verts[0].Pos.x;
+                const float ddy = QM->Verts[2].Pos.y - QM->Verts[0].Pos.y;
+                const float ddz = QM->Verts[2].Pos.z - QM->Verts[0].Pos.z;
+                const float radSq = 0.25f * (ddx*ddx + ddy*ddy + ddz*ddz);
+                QM->BSphereCtr = ctr;
+                QM->BSphereRad = radSq;
+                QM->BSphereRadius = std::sqrt(radSq);
+                Compute_FaceVertexIndices(QM);
+                Object *QObj = getAlignedType<Object>(16);
+                std::memset(QObj, 0, sizeof(Object));
+                QObj->Type = Obj_TriMesh;
+                QObj->Data = QM;
+                QObj->Pos  = &QM->IPos;
+                QObj->Rot  = &QM->RotMat;
+                {
+                    char nm[96];
+                    std::snprintf(nm, sizeof(nm),
+                                  "__mirrorClone_rtt1Quad_%s_%d",
+                                  textureFileName, c);
+                    QObj->Name = (char*)std::malloc(std::strlen(nm) + 1);
+                    std::strcpy(QObj->Name, nm);
+                }
+                QObj->Next = sc->ObjectHead;
+                if (sc->ObjectHead) sc->ObjectHead->Prev = QObj;
+                sc->ObjectHead = QObj;
+                QM->Next = sc->TriMeshHead;
+                if (sc->TriMeshHead) sc->TriMeshHead->Prev = QM;
+                sc->TriMeshHead = QM;
+            }
             rttSlots->push_back(std::move(slot));
             ++addedRtt;
             continue;
@@ -1996,6 +2087,50 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
     return created;
 }
 
+namespace {
+// RAII owner of the offscreen-render world swap. Construction locks
+// out EngineResize, saves the main view state, and swaps MainSurf to
+// the target; destruction restores everything INCLUDING the scene
+// re-stamp (SetCurrentScene) that syncs C_NZP / clipper viewport /
+// zscale back to the main pass. setNearZ() is the only sanctioned way
+// to move the near plane inside the scope — it re-stamps every time,
+// so the "wrote Sc->NZP but the clipper kept the old plane" footgun
+// can't recur. Candidate for promotion into FDS/RENDER if another
+// offscreen pass (CITY cube bake) wants it.
+struct OffscreenViewScope {
+    std::lock_guard<std::mutex> lk;
+    Scene        *sc;
+    VESA_Surface *prevMain;
+    Camera       *prevView;
+    float         prevFOVX, prevFOVY, prevNZP;
+
+    OffscreenViewScope(Scene *s, VESA_Surface *target)
+        : lk(g_engineSurfaceMutex), sc(s),
+          prevMain(MainSurf), prevView(::View),
+          prevFOVX(FOVX), prevFOVY(FOVY), prevNZP(s->NZP) {
+        MainSurf = target;
+    }
+    // Publish the (possibly re-shaped) target surface dims into the
+    // engine globals (XRes/VPage/CntrE*/YOffs…).
+    void publishSurface() { VESA_Surface2Global(MainSurf); }
+    // Move the near plane AND re-stamp the clipper from the scene.
+    void setNearZ(float nzp) {
+        sc->NZP = nzp;
+        SetCurrentScene(sc);
+    }
+    ~OffscreenViewScope() {
+        ::View = prevView;
+        sc->NZP = prevNZP;
+        MainSurf = prevMain;
+        VESA_Surface2Global(MainSurf);  // XRes/VPage/Cntr*/YOffs back
+        SetCurrentScene(sc);            // C_NZP/clipper/zscale back
+        FOVX = prevFOVX;                // not covered by Surface2Global;
+        FOVY = prevFOVY;                // nothing recomputes these until
+                                        // the next CalcPersp.
+    }
+};
+}  // namespace
+
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {
@@ -2114,14 +2249,15 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s_rttInit = true;
     }
 
-    // ── Save the world ──────────────────────────────────────────────
-    // Serialize the MainSurf swap against a concurrent EngineResize
-    // (same hazard the CITY bake documents).
-    std::lock_guard<std::mutex> lk(g_engineSurfaceMutex);
-    VESA_Surface *prevMain = MainSurf;
-    Camera *prevView   = ::View;
-    const float prevFOVX = FOVX, prevFOVY = FOVY;
-    const float prevNZP  = sc->NZP;
+    // ── Offscreen view scope ────────────────────────────────────────
+    // Owns the world-state swap: locks out EngineResize, saves and (in
+    // its destructor) restores MainSurf + ::View + FOVX/FOVY + NZP and
+    // re-stamps the scene so C_NZP/clipper/zscale match the main pass
+    // again. setNearZ() is the only way the near plane moves inside
+    // the scope — it re-stamps via SetCurrentScene every time, which
+    // is the footgun this object exists to remove (writing Sc->NZP
+    // alone never reaches the clipper).
+    OffscreenViewScope view(sc, &s_rttSurf);
     // Hide every clone mesh: the RTT view must show the REAL scene
     // only (a reflection of a reflection is exactly what the RTT
     // itself provides; clone geometry would double it).
@@ -2154,9 +2290,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         sLitOnce = true;
     }
 
-    MainSurf = &s_rttSurf;
     static Camera s_rttCam;
-    ::View = &s_rttCam;
+    ::View = &s_rttCam;          // restored by the view scope
 
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
@@ -2170,7 +2305,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             s_rttSurf.PageSize = s.texW * s.texH * 4;
             Build_YOffs_Table(&s_rttSurf);
         }
-        VESA_Surface2Global(&s_rttSurf);
+        view.publishSurface();
         // Camera basis: right = axisU, up = axisV, forward = B's
         // normal — looking from behind the plane through the window at
         // the real scene. With the view axis ⟂ the panel, the engine's
@@ -2200,18 +2335,12 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         CntrEY = FOVY * (s.v1 - cv) / D;
         CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
         CntrY  = int32_t(std::min(std::max(CntrEY, -32000.0f), 32000.0f));
-        sc->NZP = D * 1.001f + 0.01f;
-        // Writing Sc->NZP alone is NOT enough: C_NZP (the clipper's
-        // near plane) and the clipper viewport are stamped from the
-        // scene only inside SetCurrentScene. Without this re-stamp the
-        // near plane stays at the scene default and the oblique
-        // mirror-plane clip silently never happens — geometry BEHIND
-        // the mirror plane (e.g. the panel's back-side twin, black RTT
-        // texture and all) rasterizes right over the whole view. Same
-        // pattern as CITY's cube-map bake re-stamping after its
-        // surface swap. Also rebinds the clipper viewport to the RTT
-        // surface dims published by VESA_Surface2Global above.
-        SetCurrentScene(sc);
+        // Oblique mirror-plane clip: near plane just past the wall.
+        // setNearZ re-stamps C_NZP + clipper through SetCurrentScene —
+        // writing Sc->NZP directly never reaches the clipper, and the
+        // un-clipped back-side twin of the panel was the black-mirror
+        // bug (z written everywhere, color nowhere).
+        view.setNearZ(D * 1.001f + 0.01f);
         // Stamp this slot's UVs for the projection above. With the
         // edge-to-edge mapping these are static in window space, but
         // recomputing through the same formula keeps UV and projection
@@ -2312,19 +2441,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
     }
 
-    // ── Restore the world ───────────────────────────────────────────
+    // ── Restore ─────────────────────────────────────────────────────
+    // Camera/surface/near-plane restore happens in the view scope's
+    // destructor; only the mirror-specific muting is undone here.
     for (auto &p : savedOmniSize)  p.first->ISize = p.second;
     for (auto &p : savedMeshFlags) p.first->Flags = p.second;
-    ::View = prevView;
-    sc->NZP = prevNZP;
-    MainSurf = prevMain;
-    VESA_Surface2Global(MainSurf);   // restores XRes/VPage/Cntr*/YOffs
-    SetCurrentScene(sc);             // re-stamp C_NZP + clipper viewport
-                                     // for the MAIN pass (we changed
-                                     // both per job above)
-    FOVX = prevFOVX;                 // not covered by Surface2Global —
-    FOVY = prevFOVY;                 // Animate_Objects already ran this
-                                     // frame, nothing recomputes these.
 }
 
 void ProbeSecondOrderMirrors(Scene *sc, const std::vector<Mirror> &mirrors)
