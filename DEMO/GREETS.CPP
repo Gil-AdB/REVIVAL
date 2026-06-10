@@ -1356,7 +1356,11 @@ void Initialize_Greets()
 			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
 		}
 		for (const char *txtrName : kMirrorTextures) {
-			fds::BuildMirrorsByTextureName(GreetSc, txtrName, g_greetsMirrors);
+			// rttSlots: sub-threshold clusters (the column panels)
+			// become first-order RTT mirrors when --mirror-rtt is on.
+			fds::BuildMirrorsByTextureName(GreetSc, txtrName,
+			                               g_greetsMirrors,
+			                               &g_greetsRttSlots);
 		}
 		// Tag original faces behind each mirror plane so room geometry
 		// behind a (transparent) mirror can't leak through its footprint

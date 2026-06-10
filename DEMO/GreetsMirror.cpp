@@ -900,18 +900,38 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName)
     return BuildMirrorImpl(sc, textureNameSelector(textureFileName), textureFileName);
 }
 
+// ─── Render-to-texture shared bits (order 1 + 2) ─────────────────────────────────
+namespace {
+constexpr int kRttRes         = 256;  // slot texture edge (pow2)
+constexpr int kRttPerFrame    = 2;    // most-visible slots re-rendered per frame
+
+// Orthonormal in-plane basis for a mirror plane. Same construction the
+// probe uses — keep in sync (the slot UVs and the per-frame projection
+// must agree on (u, v)).
+inline void planeBasis(const Vector &n, Vector &u, Vector &v) {
+    if (std::fabs(n.y) < 0.9f) u = { n.z, 0.0f, -n.x };
+    else                       u = { 1.0f, 0.0f, 0.0f };
+    u.normalize();
+    v = { n.y*u.z - n.z*u.y,
+          n.z*u.x - n.x*u.z,
+          n.x*u.y - n.y*u.x };
+}
+}  // namespace
+
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
-                              std::vector<Mirror> &out)
+                              std::vector<Mirror> &out,
+                              std::vector<MirrorRttSlot> *rttSlots)
 {
     if (!sc || !textureFileName) return 0;
 
     // Collect every matching face with its world-space unit normal and
     // plane offset; clustering keys on both.
     struct WallSample {
-        Face   *F;
-        Vector  wN;   // unit world normal
-        float   d;    // plane offset: wN·P + d = 0
-        float   area; // world-space triangle area
+        Face    *F;
+        TriMesh *T;   // owning mesh (world transform for vert positions)
+        Vector   wN;  // unit world normal
+        float    d;   // plane offset: wN·P + d = 0
+        float    area; // world-space triangle area
     };
     std::vector<WallSample> samples;
     walkWallFacesIf(sc, textureNameSelector(textureFileName),
@@ -933,7 +953,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         const float cyv = e1.z*e2.x - e1.x*e2.z;
         const float czv = e1.x*e2.y - e1.y*e2.x;
         const float area = 0.5f * std::sqrt(cxv*cxv + cyv*cyv + czv*czv);
-        samples.push_back({&F, u,
+        samples.push_back({&F, T, u,
                            -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area});
     });
     if (samples.empty()) {
@@ -973,8 +993,15 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // the default (2.0) excludes them. --greets-mirror-min-area=0.5
     // brings them back.
     const float kMinMirrorArea = fds::FeatureFlags::greets_mirror_min_area();
+    // Below the clone threshold but above this: a FIRST-order RTT
+    // mirror (the panel re-renders the singly-reflected real scene
+    // into its own small texture — no clone mesh, no omni clones, no
+    // mask). Greets's column panels (≈1.0 area) land here. Requires
+    // --mirror-rtt and an rttSlots out-param.
+    constexpr float kMinRttArea = 0.5f;
+    const bool wantRtt = rttSlots && fds::FeatureFlags::mirror_rtt();
 
-    int added = 0, skippedSlivers = 0, skippedHorizontal = 0;
+    int added = 0, addedRtt = 0, skippedSlivers = 0, skippedHorizontal = 0;
     for (int c = 0; c < numClusters; ++c) {
         // Sorted member list → O(log n) membership predicate. Face
         // pointers are stable (live scene meshes, allocated at load).
@@ -990,10 +1017,14 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         for (size_t i = 0; i < samples.size(); ++i)
             if (clusterOf[i] == c) { cN = samples[i].wN; cD = samples[i].d; break; }
         const char *verdict = "built";
-        if (clusterArea < kMinMirrorArea) {
+        if (clusterArea < kMinRttArea) {
             verdict = "sliver";
             ++skippedSlivers;
-        } else if (std::fabs(cN.y) > 0.8f) {
+        } else if (clusterArea < kMinMirrorArea) {
+            verdict = wantRtt ? "rtt" : "sliver";
+            if (!wantRtt) ++skippedSlivers;
+        }
+        if (verdict[0] != 's' && std::fabs(cN.y) > 0.8f) {
             // Skip near-horizontal clusters: display panels are
             // vertical; the screen boxes' TOP/BOTTOM caps share the
             // texture but a floor/ceiling-facing mirror there is never
@@ -1007,6 +1038,101 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
             "area=%6.2f -> %s\n",
             c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea, verdict);
+        if (verdict[0] == 'r') {
+            // ── First-order RTT slot ────────────────────────────────
+            // Plane fit: average member normals/offsets.
+            Vector pN = {0,0,0};
+            float  pD = 0.0f;
+            int    nM = 0;
+            for (size_t i = 0; i < samples.size(); ++i)
+                if (clusterOf[i] == c) { pN += samples[i].wN; pD += samples[i].d; ++nM; }
+            pN.normalize();
+            pD /= float(nM);
+            MirrorRttSlot slot{};
+            slot.order = 1;
+            slot.bN = pN;
+            slot.bD = pD;
+            // No winding/axis flip needed: the RTT is an ordinary
+            // render of the REAL scene from the reflected position
+            // with a PROPER camera basis (normal triangle winding),
+            // and the mirror inversion is carried entirely by the ray
+            // geometry — texel(W) = scene along ray camPos→W, which is
+            // exactly what a viewer sees at panel point W. The UV
+            // stamp uses the same projection, so display mapping is
+            // consistent by construction (same reason order 2 needed
+            // nothing special).
+            Vector axU, axV;
+            planeBasis(pN, axU, axV);
+            slot.axisU = axU;
+            slot.axisV = axV;
+            slot.u0 = slot.v0 = 1e30f; slot.u1 = slot.v1 = -1e30f;
+            for (size_t i = 0; i < samples.size(); ++i) {
+                if (clusterOf[i] != c) continue;
+                const WallSample &ws = samples[i];
+                slot.faces.push_back(ws.F);
+                const Vertex *vs[3] = { ws.F->A, ws.F->B, ws.F->C };
+                Vertex *vsm[3] = { ws.F->A, ws.F->B, ws.F->C };
+                for (int k = 0; k < 3; ++k) {
+                    Vector wp = vs[k]->Pos;
+                    if (ws.T) {
+                        Vector lp = wp;
+                        MatrixXVector(ws.T->RotMat, &lp, &wp);
+                        wp += ws.T->IPos;
+                    }
+                    const float pu = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                    const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                    slot.u0 = std::min(slot.u0, pu); slot.u1 = std::max(slot.u1, pu);
+                    slot.v0 = std::min(slot.v0, pv); slot.v1 = std::max(slot.v1, pv);
+                    bool seen = false;
+                    for (const auto &sv : slot.verts)
+                        if (sv.v == vsm[k]) { seen = true; break; }
+                    if (!seen) slot.verts.push_back({ vsm[k], pu, pv });
+                }
+            }
+            if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
+                continue;
+            // Aspect-match at constant texel budget (same policy as
+            // the second-order slots).
+            {
+                const float winAspect =
+                    (slot.u1 - slot.u0) / (slot.v1 - slot.v0);
+                while (winAspect / (float(slot.texW) / float(slot.texH)) >= 2.0f
+                       && slot.texW < 1024 && slot.texH > 32) {
+                    slot.texW <<= 1; slot.texH >>= 1;
+                }
+                while ((float(slot.texW) / float(slot.texH)) / winAspect >= 2.0f
+                       && slot.texH < 1024 && slot.texW > 32) {
+                    slot.texW >>= 1; slot.texH <<= 1;
+                }
+            }
+            std::vector<uint32_t> black(
+                size_t(slot.texW) * size_t(slot.texH), 0xFF000000u);
+            slot.mat = Materialize(black.data(), slot.texW, slot.texH);
+            slot.mat->Luminosity = 1.0f;   // texture holds final colors
+            slot.mat->Diffuse    = 0.0f;
+            slot.mat->Specular   = 0.0f;
+            slot.mat->RelScene   = sc;
+            {
+                char nm[64];
+                std::snprintf(nm, sizeof(nm), "__mirrorRtt1_%s_%d",
+                              textureFileName, c);
+                slot.mat->Name = strdup(nm);
+            }
+            slot.mat->Next = nullptr;
+            if (!MatLib) {
+                slot.mat->Prev = nullptr;
+                MatLib = slot.mat;
+            } else {
+                Material *tail = MatLib;
+                while (tail->Next) tail = tail->Next;
+                tail->Next = slot.mat;
+                slot.mat->Prev = tail;
+            }
+            for (Face *f : slot.faces) f->Txtr = slot.mat;
+            rttSlots->push_back(std::move(slot));
+            ++addedRtt;
+            continue;
+        }
         if (verdict[0] != 'b') continue;
         std::sort(members.begin(), members.end());
         char label[128];
@@ -1021,11 +1147,26 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             ++added;
         }
     }
+    // First-order slot materials entered MatLib — register their
+    // matIDs (the wallMatClone lesson: Mekalele packs F->Txtr->ID and
+    // the deferred kernels resolve through the per-scene table).
+    if (addedRtt > 0) {
+        Scene_RebuildMatTable(sc);
+        for (const auto &s : *rttSlots) {
+            if (s.order != 1) continue;
+            std::fprintf(stderr,
+                "[MIRROR-RTT1] %dx%d window %.1fx%.1f u=[%.1f..%.1f] "
+                "v=[%.1f..%.1f] N=(%.1f,%.1f,%.1f) d=%.2f\n",
+                s.texW, s.texH, s.u1 - s.u0, s.v1 - s.v0,
+                s.u0, s.u1, s.v0, s.v1,
+                s.bN.x, s.bN.y, s.bN.z, s.bD);
+        }
+    }
     std::fprintf(stderr,
         "[MIRROR-CLUSTER '%s'] %zu faces -> %d clusters -> %d mirrors "
-        "(%d slivers under %.1f area + %d horizontal skipped)\n",
-        textureFileName, samples.size(), numClusters, added,
-        skippedSlivers, kMinMirrorArea, skippedHorizontal);
+        "+ %d first-order RTT (%d slivers + %d horizontal skipped)\n",
+        textureFileName, samples.size(), numClusters, added, addedRtt,
+        skippedSlivers, skippedHorizontal);
     return added;
 }
 
@@ -1660,24 +1801,6 @@ inline void StampTri2D(u8 *plane, uint16_t *zplane, int w, int h,
 
 }  // namespace
 
-// ─── Second-order render-to-texture ─────────────────────────────────
-namespace {
-constexpr int kRttRes         = 256;  // slot texture edge (pow2)
-constexpr int kRttPerFrame    = 2;    // most-visible slots re-rendered per frame
-
-// Orthonormal in-plane basis for a mirror plane. Same construction the
-// probe uses — keep in sync (the slot UVs and the per-frame projection
-// must agree on (u, v)).
-inline void planeBasis(const Vector &n, Vector &u, Vector &v) {
-    if (std::fabs(n.y) < 0.9f) u = { n.z, 0.0f, -n.x };
-    else                       u = { 1.0f, 0.0f, 0.0f };
-    u.normalize();
-    v = { n.y*u.z - n.z*u.y,
-          n.z*u.x - n.x*u.z,
-          n.x*u.y - n.y*u.x };
-}
-}  // namespace
-
 int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
                                 std::vector<MirrorRttSlot> &out)
 {
@@ -1862,9 +1985,11 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
         Scene_RebuildMatTable(sc);
         for (const MirrorRttSlot &s : out) {
             std::fprintf(stderr,
-                "[MIRROR-RTT] slot m%u->m%u %dx%d (window %.1fx%.1f)\n",
+                "[MIRROR-RTT] slot m%u->m%u %dx%d (window %.1fx%.1f "
+                "u=[%.1f..%.1f] v=[%.1f..%.1f] N=(%.1f,%.1f,%.1f) d=%.2f)\n",
                 unsigned(s.aId), unsigned(s.bId), s.texW, s.texH,
-                s.u1 - s.u0, s.v1 - s.v0);
+                s.u1 - s.u0, s.v1 - s.v0, s.u0, s.u1, s.v0, s.v1,
+                s.bN.x, s.bN.y, s.bN.z, s.bD);
         }
     }
     std::fprintf(stderr, "[MIRROR-RTT] prepared %d slot(s)\n", created);
@@ -1889,27 +2014,54 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         float          dist;   // C_B distance to B's plane
     };
     std::vector<Job> jobs;
+    auto projectToScreen = [&](const Vector &wp, float &sx, float &sy) -> bool {
+        const float dx = wp.x - C.x, dy = wp.y - C.y, dz = wp.z - C.z;
+        const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
+        if (vz <= 0.05f) return false;
+        const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
+        const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
+        sx =  FOVX * vx / vz + CntrEX;
+        sy = -FOVY * vy / vz + CntrEY;
+        return true;
+    };
     for (MirrorRttSlot &s : slots) {
-        const Mirror *A = nullptr;
-        for (const Mirror &m : mirrors) if (m.id == s.aId) { A = &m; break; }
-        if (!A || !A->active) continue;
+        if (s.order == 2) {
+            const Mirror *A = nullptr;
+            for (const Mirror &m : mirrors) if (m.id == s.aId) { A = &m; break; }
+            if (!A || !A->active) continue;
+        }
         float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
         bool anyAhead = false;
-        for (const Face *F : s.faces) {
-            if (!F || !F->A || !F->B || !F->C) continue;
-            const Vertex *vs[3] = { F->A, F->B, F->C };
-            for (int k = 0; k < 3; ++k) {
-                const Vector &wp = vs[k]->Pos;  // clone verts: world-baked
-                const float dx = wp.x - C.x, dy = wp.y - C.y, dz = wp.z - C.z;
-                const float vz = VM[2][0]*dx + VM[2][1]*dy + VM[2][2]*dz;
-                if (vz <= 0.05f) continue;
-                const float vx = VM[0][0]*dx + VM[0][1]*dy + VM[0][2]*dz;
-                const float vy = VM[1][0]*dx + VM[1][1]*dy + VM[1][2]*dz;
-                const float sx =  FOVX * vx / vz + CntrEX;
-                const float sy = -FOVY * vy / vz + CntrEY;
+        if (s.order == 1) {
+            // First order: project the panel WINDOW corners — the
+            // slot's faces are real mesh faces (mesh-local verts), but
+            // the window in plane-basis coordinates reconstructs the
+            // same world rectangle: P = u·axisU + v·axisV − d·N.
+            for (int ci = 0; ci < 4; ++ci) {
+                const float uu = (ci & 1) ? s.u1 : s.u0;
+                const float vv = (ci & 2) ? s.v1 : s.v0;
+                const Vector wp = {
+                    uu*s.axisU.x + vv*s.axisV.x - s.bD*s.bN.x,
+                    uu*s.axisU.y + vv*s.axisV.y - s.bD*s.bN.y,
+                    uu*s.axisU.z + vv*s.axisV.z - s.bD*s.bN.z };
+                float sx, sy;
+                if (!projectToScreen(wp, sx, sy)) continue;
                 bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
                 by0 = std::min(by0, sy); by1 = std::max(by1, sy);
                 anyAhead = true;
+            }
+        } else {
+            for (const Face *F : s.faces) {
+                if (!F || !F->A || !F->B || !F->C) continue;
+                const Vertex *vs[3] = { F->A, F->B, F->C };
+                for (int k = 0; k < 3; ++k) {
+                    // Clone verts: world-baked positions.
+                    float sx, sy;
+                    if (!projectToScreen(vs[k]->Pos, sx, sy)) continue;
+                    bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+                    by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+                    anyAhead = true;
+                }
             }
         }
         if (!anyAhead) continue;
@@ -1917,10 +2069,19 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         bx1 = std::min(bx1, float(::XRes)); by1 = std::min(by1, float(::YRes));
         const float area = (bx1 - bx0) * (by1 - by0);
         if (area <= 1.0f) continue;
-        // Doubly-reflected virtual camera; must land BEHIND B's plane
-        // (in front means the geometry can't show this panel anyway).
-        const Vector ca = reflectPointAcross(C, A->plane.N, A->plane.d);
-        const Vector cb = reflectPointAcross(ca, s.bN, s.bD);
+        // Virtual camera: order 1 reflects ONCE across the panel's own
+        // plane; order 2 reflects through A then B. Either way it must
+        // land BEHIND the panel plane (in front = camera on the back
+        // side of the panel, which can't show this mirror anyway).
+        Vector cb;
+        if (s.order == 1) {
+            cb = reflectPointAcross(C, s.bN, s.bD);
+        } else {
+            const Mirror *A = nullptr;
+            for (const Mirror &m : mirrors) if (m.id == s.aId) { A = &m; break; }
+            const Vector ca = reflectPointAcross(C, A->plane.N, A->plane.d);
+            cb = reflectPointAcross(ca, s.bN, s.bD);
+        }
         const float sd = s.bN.x*cb.x + s.bN.y*cb.y + s.bN.z*cb.z + s.bD;
         if (sd >= -0.01f) continue;  // not behind the panel plane
         jobs.push_back({ &s, area, cb, -sd });
@@ -2040,6 +2201,17 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
         CntrY  = int32_t(std::min(std::max(CntrEY, -32000.0f), 32000.0f));
         sc->NZP = D * 1.001f + 0.01f;
+        // Writing Sc->NZP alone is NOT enough: C_NZP (the clipper's
+        // near plane) and the clipper viewport are stamped from the
+        // scene only inside SetCurrentScene. Without this re-stamp the
+        // near plane stays at the scene default and the oblique
+        // mirror-plane clip silently never happens — geometry BEHIND
+        // the mirror plane (e.g. the panel's back-side twin, black RTT
+        // texture and all) rasterizes right over the whole view. Same
+        // pattern as CITY's cube-map bake re-stamping after its
+        // surface swap. Also rebinds the clipper viewport to the RTT
+        // surface dims published by VESA_Surface2Global above.
+        SetCurrentScene(sc);
         // Stamp this slot's UVs for the projection above. With the
         // edge-to-edge mapping these are static in window space, but
         // recomputing through the same formula keeps UV and projection
@@ -2070,6 +2242,18 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);
+        }
+        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
+            const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
+            const uint16_t *zp = (const uint16_t*)s_rttSurf.Z16;
+            int nz = 0, nzz = 0;
+            for (int i = 0; i < s.texW * s.texH; ++i) {
+                if ((px[i] & 0xFFFFFF) != 0) ++nz;
+                if (zp[i] != 0) ++nzz;
+            }
+            std::fprintf(stderr,
+                "[MIRROR-RTT] order=%d job: %d/%d color px, %d z px, CAll=%d\n",
+                int(s.order), nz, s.texW * s.texH, nzz, int(CAll));
         }
         // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
         // linear buffer (top=red, bottom=blue, left=green,
@@ -2135,6 +2319,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     sc->NZP = prevNZP;
     MainSurf = prevMain;
     VESA_Surface2Global(MainSurf);   // restores XRes/VPage/Cntr*/YOffs
+    SetCurrentScene(sc);             // re-stamp C_NZP + clipper viewport
+                                     // for the MAIN pass (we changed
+                                     // both per job above)
     FOVX = prevFOVX;                 // not covered by Surface2Global —
     FOVY = prevFOVY;                 // Animate_Objects already ran this
                                      // frame, nothing recomputes these.

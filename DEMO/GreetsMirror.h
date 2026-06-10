@@ -138,6 +138,42 @@ struct Mirror {
     bool        active = true;
 };
 
+// One second-order RTT slot: mirror A's reflection shows mirror B's
+// panel (one CONNECTED panel component — a coplanar cluster can span
+// several separate boxes); the faces listed here are A's clones of
+// that panel, retargeted at init to `mat` whose texture is re-rendered
+// per frame from the doubly-reflected camera.
+struct MirrorRttSlot {
+    // Reflection order. 2 = mirror-in-mirror (camera doubly reflected,
+    // faces are A's clones of B's panel). 1 = the panel ITSELF is the
+    // mirror: camera singly reflected across bN/bD, faces are the REAL
+    // panel faces. No winding/axis flip in either order — the RTT is a
+    // normal render of the real scene from the virtual position with a
+    // proper basis; the mirror inversion lives in the ray geometry
+    // (texel(W) = scene along camPos→W) and the UV stamp shares the
+    // projection, so the mapping is consistent by construction.
+    uint8_t order = 2;
+    uint8_t aId = 0;          // outer mirror (whose reflection shows the panel)
+    uint8_t bId = 0;          // inner mirror (the panel being re-rendered)
+    Vector  bN{};             // B's plane normal / offset
+    float   bD = 0.0f;
+    Vector  axisU{}, axisV{}; // orthonormal basis in B's plane
+    float   u0 = 0, u1 = 0, v0 = 0, v1 = 0;  // panel window in (u,v)
+    // Texture dimensions, aspect-matched to the window at a constant
+    // 64K-texel budget (a 4:1 panel gets 512x128, not a stretched
+    // square). Render surface + projection adapt per slot.
+    int     texW = 256, texH = 256;
+    Material *mat = nullptr;  // RTT material (mat->Txtr->Data updated per frame)
+    std::vector<Face*> faces; // A-clone faces displaying the RTT
+    // Clone verts of those faces with their (static) panel-plane
+    // coordinates. UVs are re-stamped each time the slot re-renders:
+    // the engine's mesh frustum cull only supports symmetric frusta,
+    // so the RTT view is centered on the camera's plane-foot and the
+    // panel window lands in a camera-dependent sub-rect of the texture.
+    struct SlotVert { Vertex *v; float pu, pv; };
+    std::vector<SlotVert> verts;
+};
+
 // Pass 1: find the mirror plane by averaging the world-space normal /
 // offset of every face whose Material name matches `wallMaterialName`.
 // Outlier faces (>30° from majority normal) dropped. Returns valid=false
@@ -172,8 +208,16 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 // greets's text screens face four directions at different depths, so
 // the single-plane fit kept 12/64 faces and silently dropped the rest
 // (screens that never became mirrors). Returns mirrors appended.
+// rttSlots (optional): clusters whose area falls below the clone-mirror
+// threshold (--greets-mirror-min-area) but above the sliver cutoff —
+// greets's column screens — become FIRST-order RTT mirrors instead of
+// being skipped: the real panel faces are retargeted to a per-slot
+// texture re-rendered each frame from the singly-reflected camera.
+// Requires --mirror-rtt; pass nullptr to skip (columns stay ordinary
+// screens).
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
-                              std::vector<Mirror> &out);
+                              std::vector<Mirror> &out,
+                              std::vector<MirrorRttSlot> *rttSlots = nullptr);
 
 // Depth-1 recursive: for each ordered pair (A, B) of already-built
 // base mirrors, append a compound mirror representing "looking at B
@@ -203,33 +247,6 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors);
 // first render. Static geometry only — re-call if a mirror plane or
 // mesh transform changes.
 void TagFacesBehindMirrors(Scene *sc, const std::vector<Mirror> &mirrors);
-
-// One second-order RTT slot: mirror A's reflection shows mirror B's
-// panel (one CONNECTED panel component — a coplanar cluster can span
-// several separate boxes); the faces listed here are A's clones of
-// that panel, retargeted at init to `mat` whose texture is re-rendered
-// per frame from the doubly-reflected camera.
-struct MirrorRttSlot {
-    uint8_t aId = 0;          // outer mirror (whose reflection shows the panel)
-    uint8_t bId = 0;          // inner mirror (the panel being re-rendered)
-    Vector  bN{};             // B's plane normal / offset
-    float   bD = 0.0f;
-    Vector  axisU{}, axisV{}; // orthonormal basis in B's plane
-    float   u0 = 0, u1 = 0, v0 = 0, v1 = 0;  // panel window in (u,v)
-    // Texture dimensions, aspect-matched to the window at a constant
-    // 64K-texel budget (a 4:1 panel gets 512x128, not a stretched
-    // square). Render surface + projection adapt per slot.
-    int     texW = 256, texH = 256;
-    Material *mat = nullptr;  // RTT material (mat->Txtr->Data updated per frame)
-    std::vector<Face*> faces; // A-clone faces displaying the RTT
-    // Clone verts of those faces with their (static) panel-plane
-    // coordinates. UVs are re-stamped each time the slot re-renders:
-    // the engine's mesh frustum cull only supports symmetric frusta,
-    // so the RTT view is centered on the camera's plane-foot and the
-    // panel window lands in a camera-dependent sub-rect of the texture.
-    struct SlotVert { Vertex *v; float pu, pv; };
-    std::vector<SlotVert> verts;
-};
 
 // Init-time: enumerate (A, B, connected-panel) combos, create one RTT
 // material + texture per slot, retarget A's clone-of-B's-panel faces
