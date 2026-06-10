@@ -2009,9 +2009,6 @@ struct GreetsScene : SceneDriver {
 		// surface footprint (worked for teleporter only because the
 		// surrounding Piramid walls were the de facto occluder mask).
 		fds::StampMirrorMasks(GreetSc, g_greetsMirrors);
-		// --mirror-rtt-probe: log visible second-order pairs (required
-		// RTT resolution + virtual camera + panel window). No-op when
-		// the flag is off.
 		fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors);
 
 		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==

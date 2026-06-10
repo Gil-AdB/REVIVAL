@@ -995,9 +995,12 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // Below the clone threshold but above this: a FIRST-order RTT
     // mirror (the panel re-renders the singly-reflected real scene
     // into its own small texture — no clone mesh, no omni clones, no
-    // mask). Greets's column panels (≈1.0 area) land here. Requires
-    // --mirror-rtt and an rttSlots out-param.
-    constexpr float kMinRttArea = 0.5f;
+    // mask). Greets's pedestal-box panels (≈1.0 area) land here, and
+    // so do the MAIN corridor columns' small screens (0.30 area — the
+    // earlier 0.5 cutoff misjudged those as box edge strips and they
+    // never became mirrors at all). Requires --mirror-rtt and an
+    // rttSlots out-param.
+    constexpr float kMinRttArea = 0.2f;
     const bool wantRtt = rttSlots && fds::FeatureFlags::mirror_rtt();
 
     int added = 0, addedRtt = 0, skippedSlivers = 0, skippedHorizontal = 0;
@@ -1121,103 +1124,88 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                 tail->Next = slot.mat;
                 slot.mat->Prev = tail;
             }
-            // The panel faces KEEP their original (transparent text)
-            // material — the screen stays a double-sided half-silvered
-            // display: glass + text render through the transparent
-            // peel exactly as before, and the reflection lives on a
-            // 2-triangle quad inset just BEHIND the glass. The quad is
-            // excluded from its own RTT render for free (it sits
-            // inside the near/mirror plane), and the clone-mesh name
-            // prefix keeps later BuildMirror calls from cloning it.
+            // The panel faces THEMSELVES become the mirror surface
+            // (retargeted to the slot material — the path proven by
+            // the bare-mirror diagnostic). The half-silvered "text
+            // over reflection" look comes from a CPU composite of the
+            // panel's ORIGINAL texture (P_TEXT — the dynamic greets
+            // text) into the RTT buffer after each re-render, mapped
+            // through the panel's authored UVs. An earlier design put
+            // the reflection on a hand-built quad behind transparent
+            // glass; hand-built meshes fought five separate engine
+            // conventions (inward face normals, quaternion key layout,
+            // Face_Reflective dispatch, …) and still never rasterized
+            // — the composite needs no new geometry at all.
             {
-                constexpr float kInset = 0.02f;
-                TriMesh *QM = getAlignedType<TriMesh>(16);
-                std::memset(QM, 0, sizeof(TriMesh));
-                QM->Verts = (Vertex*)getAlignedBlock(sizeof(Vertex) * 4, 16);
-                QM->Faces = (Face*)getAlignedBlock(sizeof(Face) * 2, 16);
-                std::memset(QM->Verts, 0, sizeof(Vertex) * 4);
-                std::memset(QM->Faces, 0, sizeof(Face) * 2);
-                QM->VIndex = 4;
-                QM->FIndex = 2;
-                Matrix_Copy(QM->RotMat, Mat_ID);
-                Matrix_Copy(QM->UnscaledRotMat, Mat_ID);
-                QM->IPos   = {0.0f, 0.0f, 0.0f};
-                QM->IScale = {1.0f, 1.0f, 1.0f};
-                QM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
-                QM->Flags |= HTrack_Visible | Tri_Noshading;
-                auto qkey = [](Spline &sp, float x, float y, float z, float w) {
-                    sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
-                    sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
-                    sp.Keys[0].Frame = 0.0f;
-                    sp.Keys[0].Pos = {x,y,z,w}; sp.Keys[0].AA = {x,y,z,w};
-                };
-                qkey(QM->Pos,    0,0,0,0);
-                qkey(QM->Scale,  1,1,1,0);
-                qkey(QM->Rotate, 0,0,0,1);
-                // Corners in window order: (u0,v0) (u1,v0) (u1,v1)
-                // (u0,v1), inset kInset behind the plane (-N side).
-                const float cu_[4] = { slot.u0, slot.u1, slot.u1, slot.u0 };
-                const float cv_[4] = { slot.v0, slot.v0, slot.v1, slot.v1 };
-                for (int k = 0; k < 4; ++k) {
-                    Vertex &V = QM->Verts[k];
-                    V.Pos = {
-                        cu_[k]*axU.x + cv_[k]*axV.x - (pD + kInset)*pN.x,
-                        cu_[k]*axU.y + cv_[k]*axV.y - (pD + kInset)*pN.y,
-                        cu_[k]*axU.z + cv_[k]*axV.z - (pD + kInset)*pN.z };
-                    V.N = pN;
-                    // Tangent along the window's u axis (the RTT mat is
-                    // not normal-mapped; harmless but keeps TBN sane).
-                    V.Tangent = axU;
-                    slot.verts.push_back({ &V, cu_[k], cv_[k] });
+                // Affine map window(pu,pv) → authored text UV, solved
+                // from one panel face's three corners (the authored
+                // mapping is linear across the panel rect).
+                const Face *protoF = nullptr;
+                const TriMesh *protoT = nullptr;
+                for (size_t i = 0; i < samples.size(); ++i)
+                    if (clusterOf[i] == c) {
+                        protoF = samples[i].F;
+                        protoT = samples[i].T;
+                        break;
+                    }
+                if (protoF && protoF->Txtr && protoF->Txtr->Txtr) {
+                    slot.textTex = protoF->Txtr->Txtr;
+                    float P[3][2];
+                    const Vertex *vs[3] = { protoF->A, protoF->B, protoF->C };
+                    for (int k = 0; k < 3; ++k) {
+                        Vector wp = vs[k]->Pos;
+                        if (protoT) {
+                            Vector lp = wp;
+                            MatrixXVector(
+                                const_cast<TriMesh*>(protoT)->RotMat, &lp, &wp);
+                            wp += protoT->IPos;
+                        }
+                        P[k][0] = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                        P[k][1] = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                    }
+                    const float tu[3] = { protoF->U1, protoF->U2, protoF->U3 };
+                    const float tv[3] = { protoF->V1, protoF->V2, protoF->V3 };
+                    const float det =
+                        (P[1][0]-P[0][0])*(P[2][1]-P[0][1]) -
+                        (P[2][0]-P[0][0])*(P[1][1]-P[0][1]);
+                    if (std::fabs(det) > 1e-9f) {
+                        const float inv = 1.0f / det;
+                        auto solve = [&](const float *t, float &ga, float &gb, float &gc) {
+                            ga = ((t[1]-t[0])*(P[2][1]-P[0][1]) -
+                                  (t[2]-t[0])*(P[1][1]-P[0][1])) * inv;
+                            gb = ((t[2]-t[0])*(P[1][0]-P[0][0]) -
+                                  (t[1]-t[0])*(P[2][0]-P[0][0])) * inv;
+                            gc = t[0] - ga*P[0][0] - gb*P[0][1];
+                        };
+                        solve(tu, slot.tA[0], slot.tA[1], slot.tA[2]);
+                        solve(tv, slot.tA[3], slot.tA[4], slot.tA[5]);
+                    } else {
+                        slot.textTex = nullptr;  // degenerate mapping
+                    }
                 }
-                // Winding per the engine convention ((C−A)×(B−A) = N,
-                // matching CITY's ComputeFaceNormal): both tris CCW in
-                // the (u,v) plane.
-                auto qface = [&](Face &F, int a, int b, int cc) {
-                    F.A = &QM->Verts[a];
-                    F.B = &QM->Verts[b];
-                    F.C = &QM->Verts[cc];
-                    F.Txtr = slot.mat;
-                    F.N = pN;
-                    F.NormProd = -(pN.x*F.A->Pos.x + pN.y*F.A->Pos.y
-                                   + pN.z*F.A->Pos.z);
-                    slot.faces.push_back(&F);
-                };
-                qface(QM->Faces[0], 0, 3, 1);
-                qface(QM->Faces[1], 1, 3, 2);
-                // Tight bsphere.
-                Vector ctr = {
-                    (QM->Verts[0].Pos.x + QM->Verts[2].Pos.x) * 0.5f,
-                    (QM->Verts[0].Pos.y + QM->Verts[2].Pos.y) * 0.5f,
-                    (QM->Verts[0].Pos.z + QM->Verts[2].Pos.z) * 0.5f };
-                const float ddx = QM->Verts[2].Pos.x - QM->Verts[0].Pos.x;
-                const float ddy = QM->Verts[2].Pos.y - QM->Verts[0].Pos.y;
-                const float ddz = QM->Verts[2].Pos.z - QM->Verts[0].Pos.z;
-                const float radSq = 0.25f * (ddx*ddx + ddy*ddy + ddz*ddz);
-                QM->BSphereCtr = ctr;
-                QM->BSphereRad = radSq;
-                QM->BSphereRadius = std::sqrt(radSq);
-                Compute_FaceVertexIndices(QM);
-                Object *QObj = getAlignedType<Object>(16);
-                std::memset(QObj, 0, sizeof(Object));
-                QObj->Type = Obj_TriMesh;
-                QObj->Data = QM;
-                QObj->Pos  = &QM->IPos;
-                QObj->Rot  = &QM->RotMat;
-                {
-                    char nm[96];
-                    std::snprintf(nm, sizeof(nm),
-                                  "__mirrorClone_rtt1Quad_%s_%d",
-                                  textureFileName, c);
-                    QObj->Name = (char*)std::malloc(std::strlen(nm) + 1);
-                    std::strcpy(QObj->Name, nm);
+                // Retarget the real panel faces to the slot material
+                // and record their verts for the per-render UV stamp.
+                for (size_t i = 0; i < samples.size(); ++i) {
+                    if (clusterOf[i] != c) continue;
+                    const WallSample &ws = samples[i];
+                    ws.F->Txtr = slot.mat;
+                    slot.faces.push_back(ws.F);
+                    Vertex *vsm[3] = { ws.F->A, ws.F->B, ws.F->C };
+                    for (int k = 0; k < 3; ++k) {
+                        Vector wp = vsm[k]->Pos;
+                        if (ws.T) {
+                            Vector lp = wp;
+                            MatrixXVector(ws.T->RotMat, &lp, &wp);
+                            wp += ws.T->IPos;
+                        }
+                        const float pu = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                        const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                        bool seen = false;
+                        for (const auto &sv : slot.verts)
+                            if (sv.v == vsm[k]) { seen = true; break; }
+                        if (!seen) slot.verts.push_back({ vsm[k], pu, pv });
+                    }
                 }
-                QObj->Next = sc->ObjectHead;
-                if (sc->ObjectHead) sc->ObjectHead->Prev = QObj;
-                sc->ObjectHead = QObj;
-                QM->Next = sc->TriMeshHead;
-                if (sc->TriMeshHead) sc->TriMeshHead->Prev = QM;
-                sc->TriMeshHead = QM;
             }
             rttSlots->push_back(std::move(slot));
             ++addedRtt;
@@ -1351,11 +1339,17 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
             // Same Noshading rationale as the base-mirror clone mesh.
             MM->Flags |= HTrack_Visible | Tri_Noshading;
+            // Field-wise (NOT brace-init): Pos/AA are Quaternion-layout
+            // {W,x,y,z} — see the qkey comment in the first-order RTT
+            // block for the degenerate-RotMat failure this causes.
             auto stampSingle = [](Spline &sp, float x, float y, float z, float w) {
                 sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
                 sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
                 sp.Keys[0].Frame = 0.0f;
-                sp.Keys[0].Pos = {x,y,z,w}; sp.Keys[0].AA = {x,y,z,w};
+                sp.Keys[0].Pos.x = x; sp.Keys[0].Pos.y = y;
+                sp.Keys[0].Pos.z = z; sp.Keys[0].Pos.W = w;
+                sp.Keys[0].AA.x  = x; sp.Keys[0].AA.y  = y;
+                sp.Keys[0].AA.z  = z; sp.Keys[0].AA.W  = w;
             };
             stampSingle(MM->Pos,    0,0,0,0);
             stampSingle(MM->Scale,  1,1,1,0);
@@ -2397,6 +2391,44 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                                  FOVX, FOVY, CntrEX, CntrEY,
                                  sc->NZP, sc->FZP, int(CAll));
                     ++sDumped;
+                }
+            }
+        }
+        // Half-silvered composite (first order): overlay the panel's
+        // dynamic text texture on the reflection, texel = text +
+        // reflection/2 saturated — the formula the transparent kernel
+        // uses for glass. Texel→window is the fixed edge-to-edge
+        // mapping; window→text UV is the affine captured at build.
+        // The text texture is Sachletz-tiled in memory (4x4 blocks,
+        // X-outer/Y-inner write order) — read through the inverse.
+        if (s.order == 1 && s.textTex && s.textTex->Data) {
+            const dword *td = (const dword*)s.textTex->Data;
+            const int tw = s.textTex->SizeX, th = s.textTex->SizeY;
+            const int tBlocksY = th >> 2;
+            uint32_t *px = (uint32_t*)s_rttSurf.Data;
+            const float du = (s.u1 - s.u0) / float(s.texW);
+            const float dv = (s.v1 - s.v0) / float(s.texH);
+            for (int y = 0; y < s.texH; ++y) {
+                const float pv = s.v1 - (float(y) + 0.5f) * dv;
+                for (int x = 0; x < s.texW; ++x) {
+                    const float pu = s.u0 + (float(x) + 0.5f) * du;
+                    const float fu = s.tA[0]*pu + s.tA[1]*pv + s.tA[2];
+                    const float fv = s.tA[3]*pu + s.tA[4]*pv + s.tA[5];
+                    const int iu = int(fu * float(tw)) & (tw - 1);
+                    const int iv = int(fv * float(th)) & (th - 1);
+                    const int blk = ((iu >> 2) * tBlocksY + (iv >> 2)) << 4;
+                    const dword t = td[blk + ((iv & 3) << 2) + (iu & 3)];
+                    uint32_t &o = px[size_t(y) * size_t(s.texW) + x];
+                    const uint32_t tb =  t        & 0xFF;
+                    const uint32_t tg = (t >> 8)  & 0xFF;
+                    const uint32_t tr = (t >> 16) & 0xFF;
+                    uint32_t ob = tb + (( o        & 0xFF) >> 1);
+                    uint32_t og = tg + (((o >> 8)  & 0xFF) >> 1);
+                    uint32_t orr = tr + (((o >> 16) & 0xFF) >> 1);
+                    if (ob > 255) ob = 255;
+                    if (og > 255) og = 255;
+                    if (orr > 255) orr = 255;
+                    o = ob | (og << 8) | (orr << 16) | 0xFF000000u;
                 }
             }
         }

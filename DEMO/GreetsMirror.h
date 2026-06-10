@@ -34,6 +34,7 @@ struct Object;
 struct Omni;
 struct Scene;
 struct TriMesh;
+struct Texture;
 struct Vertex;
 
 namespace fds {
@@ -172,6 +173,15 @@ struct MirrorRttSlot {
     // panel window lands in a camera-dependent sub-rect of the texture.
     struct SlotVert { Vertex *v; float pu, pv; };
     std::vector<SlotVert> verts;
+    // First-order half-silvered composite: the panel's ORIGINAL
+    // (dynamic text) texture + the affine map from panel-plane (pu,pv)
+    // to its authored UVs. After each re-render the text is composited
+    // over the reflection on the CPU (text + reflection/2 — the same
+    // formula the deferred transparent kernel uses for glass), so the
+    // opaque mirror panel reads as a half-silvered display. Null =
+    // no composite (second-order slots, untextured sources).
+    Texture *textTex = nullptr;
+    float    tA[6] = {0, 0, 0, 0, 0, 0};
     // Frames since this slot's texture was last re-rendered. Drives
     // the job scheduler's staleness weighting: with many slots and a
     // 2-jobs/frame cap, pure footprint-area ranking permanently

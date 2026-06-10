@@ -18,6 +18,7 @@
 // when the tile finishes.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <Base/Vector.h>
 #include <atomic>
