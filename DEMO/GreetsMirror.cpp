@@ -365,7 +365,12 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     MM->IPos   = {0.0f, 0.0f, 0.0f};
     MM->IScale = {1.0f, 1.0f, 1.0f};
     MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
-    MM->Flags |= HTrack_Visible;
+    // Noshading: clone meshes never consume vertex colors — they render
+    // deferred-only (per-pixel lighting) and the RTT offscreen pass
+    // hides them. Without this, forward Lighting() vertex-lit every
+    // ACTIVE mirror's ~27k clone verts against all real omnis each
+    // frame (~4 ms/frame of pure waste in greets).
+    MM->Flags |= HTrack_Visible | Tri_Noshading;
     auto stampSingleKey = [](Spline &sp, float x, float y, float z, float w) {
         sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
         sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
@@ -1113,7 +1118,8 @@ int BuildCompoundMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             MM->IPos   = {0.0f, 0.0f, 0.0f};
             MM->IScale = {1.0f, 1.0f, 1.0f};
             MM->IRot   = {0.0f, 0.0f, 0.0f, 1.0f};
-            MM->Flags |= HTrack_Visible;
+            // Same Noshading rationale as the base-mirror clone mesh.
+            MM->Flags |= HTrack_Visible | Tri_Noshading;
             auto stampSingle = [](Spline &sp, float x, float y, float z, float w) {
                 sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
                 sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
