@@ -5805,6 +5805,7 @@ struct FastFogParams {
 	float worleyInvT;      // 1/(1-thresh), precomputed remap gain
 	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
 	float glowMax;         // >0: soft-knee cap on per-slice in-scatter radiance
+	int   glowGridDiv;     // froxel glow on a /div coarse XY grid (1 = per-column)
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
 	// In-scatter glow: scene lights lighting the fog medium.
 	const ViewLightsSoA *lights;
@@ -6663,6 +6664,13 @@ namespace {
 	float    gFrPrevCamX, gFrPrevCamY, gFrPrevCamZ;        // prev frame camera
 	float    gFrPrevW[9];               // prev view→world rotation (rows)
 	float    gFrPrevA[3];               // Rprevᵀ·(cam − camPrev), per frame
+	// Coarse glow grid: per-light in-scatter RADIANCE evaluated on a
+	// (nx/div × ny/div × nz) grid — light radiance is low-frequency in XY
+	// (city omnis have 5000+ unit ranges) while the per-slice analytic
+	// integral keeps depth exact. The fine populate bilinearly fetches it.
+	std::vector<float> gGlow;           // gGlX×gGlY columns × nz × RGB
+	int   gGlX = 0, gGlY = 0;
+	bool  gFrHasShadowedLight = false;  // any light needing exact per-column glow
 	// True while THIS renderFrame's froxel grid is valid for sampling
 	// (set by the froxel dispatch, cleared at every renderFrame start) —
 	// the transparent peel fogs its layers from the grid when set.
@@ -6866,6 +6874,85 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 // slice). cutoff²·cone and the shadow tap stay point samples at the kernel
 // peak clamped into the lit sub-interval (slowly varying / not integrable).
 static constexpr int kFrMaxNz = 256;   // per-column stack scratch bound
+
+// Coarse glow pass: the per-light glow loop from Froxel_ColumnTile, run once
+// per COARSE column (div× fewer in each of X and Y → div² fewer light loops)
+// at full z resolution, storing pure RADIANCE (no density gating — the fine
+// populate multiplies by its own extinction, which is 0 in empty froxels).
+// This is where the 30-omni city glow cost lives; radiance is low-frequency
+// in XY so the bilinear upsample is visually free away from lamp cores.
+static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogParams& P) {
+	const int nz = gFrZ;
+	const float invGx = 1.0f/float(gGlX), invGy = 1.0f/float(gGlY);
+	const float* zb = gFrZb.data();
+	const float invLogR = float(nz) / std::log(gFrFar / gFrNear);
+	const float invNear = 1.0f / gFrNear;
+	const ViewLightsSoA* L = P.lights;
+	for (int cy = cy0; cy < cy1; ++cy) {
+		const float sy = (float(cy)+0.5f) * invGy * float(YRes);
+		const float Y  = (CntrEY - sy) * P.invFOVY;
+		for (int cx = cx0; cx < cx1; ++cx) {
+			const float sx = (float(cx)+0.5f) * invGx * float(XRes);
+			const float X  = (sx - CntrEX) * P.invFOVX;
+			float* out = gGlow.data() + (size_t(cy)*gGlX + cx) * nz * 3;
+			std::memset(out, 0, size_t(nz) * 3 * sizeof(float));
+			const float uV = X*X + Y*Y + 1.0f;
+			for (int li = 0; li < P.numLights; ++li) {
+				if (L->mirrorId[li] != 0) continue;        // clones don't glow
+				// Shadow-casting lights stay EXACT per fine column (pass 2 in
+				// Froxel_ColumnTile): the shadow boundary inside the glow is
+				// high-frequency and blocks up at coarse XY (conetest A/B).
+				if (L->shadowMapIdx[li] >= 0) continue;
+				const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+				const float VP = X*Lx + Y*Ly + Lz;
+				const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
+				float zLo = zb[0], zHi = zb[nz];
+				if (!lightRayClip(L, li, X, Y, uV, VP, PP, zLo, zHi))
+					continue;                              // column never in-light
+				const float rr2   = L->rRange[li] * L->rRange[li];
+				const float alpha = rr2 * uV;
+				const float beta  = -2.0f * rr2 * VP;
+				const float gamma = rr2 * PP + 0.05f;
+				const float disc  = 4.0f*alpha*gamma - beta*beta;
+				if (disc <= 0.0f) continue;
+				const float invD  = 1.0f / std::sqrt(disc);
+				const float twoA  = alpha + alpha;
+				const float zStar = VP / uV;
+				const int   smi   = L->shadowMapIdx[li];
+				int izLo = int(std::log(zLo * invNear) * invLogR) - 1;
+				int izHi = int(std::log(zHi * invNear) * invLogR) + 1;
+				if (izLo < 0)    izLo = 0;
+				if (izHi > nz-1) izHi = nz-1;
+				float aPrev = std::atan((twoA*zLo + beta) * invD);
+				for (int iz = izLo; iz <= izHi; ++iz) {
+					const float a = zb[iz]   > zLo ? zb[iz]   : zLo;
+					const float b = zb[iz+1] < zHi ? zb[iz+1] : zHi;
+					if (b <= a) continue;
+					const float aCur = std::atan((twoA*b + beta) * invD);
+					const float dAtan = aCur - aPrev;
+					aPrev = aCur;
+					float g = 2.0f * invD * dAtan / (zb[iz+1] - zb[iz]);
+					if (g <= 0.0f) continue;
+					const float zm = zStar < a ? a : (zStar > b ? b : zStar);
+					float sShape = lightAttenAt(L, li, X*zm, Y*zm, zm);
+					if (sShape <= 0.0f) continue;
+					const float ddx = zm*X - Lx, ddy = zm*Y - Ly, ddz = zm - Lz;
+					sShape *= (ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f;
+					if (smi >= 0) {
+						const float vis = volSpotShadow(smi, X*zm, Y*zm, zm, P.shadowPcf);
+						if (vis <= 0.0f) continue;
+						sShape *= vis;
+					}
+					g *= sShape;
+					out[iz*3+0] += L->colR[li] * g;
+					out[iz*3+1] += L->colG[li] * g;
+					out[iz*3+2] += L->colB[li] * g;
+				}
+			}
+		}
+	}
+}
+
 static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
@@ -6957,12 +7044,39 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				dens[iz] = d;
 			}
 
+			// Coarse-glow-grid mode: bilinear corner pointers/weights for this
+			// fine column into the gGlow grid (fetched per slice in pass 3).
+			const bool glowGrid = glowOn && P.glowGridDiv > 1;
+			const float* gl00 = nullptr; const float* gl10 = nullptr;
+			const float* gl01 = nullptr; const float* gl11 = nullptr;
+			float glwx = 0.0f, glwy = 0.0f;
+			if (glowGrid) {
+				const float fx = (float(ix)+0.5f) * float(gGlX) * invNx - 0.5f;
+				const float fy = (float(iy)+0.5f) * float(gGlY) * invNy - 0.5f;
+				int gx = int(std::floor(fx)); glwx = fx - float(gx);
+				int gy = int(std::floor(fy)); glwy = fy - float(gy);
+				if (gx < 0) { gx = 0; glwx = 0.0f; }
+				if (gy < 0) { gy = 0; glwy = 0.0f; }
+				if (gx > gGlX-2) { gx = gGlX > 1 ? gGlX-2 : 0; glwx = gGlX > 1 ? 1.0f : 0.0f; }
+				if (gy > gGlY-2) { gy = gGlY > 1 ? gGlY-2 : 0; glwy = gGlY > 1 ? 1.0f : 0.0f; }
+				const int gx1 = gx+1 < gGlX ? gx+1 : gx;
+				const int gy1 = gy+1 < gGlY ? gy+1 : gy;
+				gl00 = gGlow.data() + (size_t(gy )*gGlX + gx )*nz*3;
+				gl10 = gGlow.data() + (size_t(gy )*gGlX + gx1)*nz*3;
+				gl01 = gGlow.data() + (size_t(gy1)*gGlX + gx )*nz*3;
+				gl11 = gGlow.data() + (size_t(gy1)*gGlX + gx1)*nz*3;
+			}
+
 			// ── pass 2: per-light glow per slice (clipped, analytic radial) ──
-			if (glowOn) {
+			// In glow-grid mode this still runs for SHADOW-CASTING lights
+			// (exact shadow boundaries); unshadowed ones come from the grid.
+			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight);
+			if (pass2) {
 				for (int iz = 0; iz < nz; ++iz) glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
 				const float uV = X*X + Y*Y + 1.0f;
 				for (int li = 0; li < P.numLights; ++li) {
 					if (L->mirrorId[li] != 0) continue;        // clones don't glow
+					if (glowGrid && L->shadowMapIdx[li] < 0) continue;  // grid covers it
 					const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
 					const float VP = X*Lx + Y*Ly + Lz;
 					const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
@@ -7027,7 +7141,15 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				if (d > 0.0f) {
 					ext = P.sigma * d;
 					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
-					if (glowOn) {
+					if (glowGrid) {
+						const int o = iz*3;
+						const float w00 = (1-glwx)*(1-glwy), w10 = glwx*(1-glwy);
+						const float w01 = (1-glwx)*glwy,     w11 = glwx*glwy;
+						Lr += (gl00[o  ]*w00 + gl10[o  ]*w10 + gl01[o  ]*w01 + gl11[o  ]*w11) * P.inscatter;
+						Lg += (gl00[o+1]*w00 + gl10[o+1]*w10 + gl01[o+1]*w01 + gl11[o+1]*w11) * P.inscatter;
+						Lb += (gl00[o+2]*w00 + gl10[o+2]*w10 + gl01[o+2]*w01 + gl11[o+2]*w11) * P.inscatter;
+					}
+					if (pass2) {
 						Lr += glowR[iz]*P.inscatter;
 						Lg += glowG[iz]*P.inscatter;
 						Lb += glowB[iz]*P.inscatter;
@@ -7245,6 +7367,7 @@ void Render_DeferredFastFog() {
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
 	P.glowMax      = fds::FeatureFlags::fast_fog_glow_max();
+	P.glowGridDiv  = std::max(1, fds::FeatureFlags::fast_fog_glow_grid_div());
 	if (P.blobOverlap > 0.0f) {
 		// Metaball sums exceed 1 where blobs stack (that's the point), so the
 		// iso threshold ranges [0,3]; fog ramps to full over +0.7 above iso.
@@ -7341,6 +7464,22 @@ void Render_DeferredFastFog() {
 			gFrPrevA[0] = gFrPrevW[0]*dx + gFrPrevW[3]*dy + gFrPrevW[6]*dz;
 			gFrPrevA[1] = gFrPrevW[1]*dx + gFrPrevW[4]*dy + gFrPrevW[7]*dz;
 			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
+		}
+		gFrHasShadowedLight = false;
+		if (P.lights)
+			for (int li = 0; li < P.numLights; ++li)
+				if (P.lights->shadowMapIdx[li] >= 0 && P.lights->mirrorId[li] == 0) {
+					gFrHasShadowedLight = true; break;
+				}
+		if (P.glowGridDiv > 1 && P.inscatter > 0.0f && P.numLights > 0) {
+			const int gx = (nx + P.glowGridDiv - 1) / P.glowGridDiv;
+			const int gy = (ny + P.glowGridDiv - 1) / P.glowGridDiv;
+			if (gx != gGlX || gy != gGlY ||
+			    gGlow.size() != size_t(gx)*size_t(gy)*size_t(nz)*3) {
+				gGlX = gx; gGlY = gy;
+				gGlow.assign(size_t(gx)*size_t(gy)*size_t(nz)*3, 0.0f);
+			}
+			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); });
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
