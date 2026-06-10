@@ -1,233 +1,92 @@
-# Session state — refactor/frame-state-shadow
+# Session state — feature/fog (written 2026-06-10, pre-compact)
 
-**Read this first when starting a new session.** Captures what landed,
-what's open, what's broken, and which commands reproduce each state
-so we can resume cleanly after context compaction.
+**Read this first when resuming on feature/fog.** (The previous content —
+the refactor/frame-state-shadow checkpoint — is finished work; see git
+history of this file if ever needed.)
 
-Last updated: 2026-05-19 (cube shadow infrastructure end-to-end + static bake)
+Branch `feature/fog`, all work committed and pushed through `1a6ff1f`.
+Working tree clean except untracked Runtime/*.ppm debris (never
+`git add -A`). Build: `cmake --build build` (POST_BUILD copies to
+Runtime/DEMO — never tell the user to "pull"). ASan tree at `build-asan/`,
+TSan at `build-tsan/`.
 
----
+## What landed this session (newest first)
 
-## Branch + push status
+- `1a6ff1f` screen-space fast_fog fogs transparents (fogAtDepth split) +
+  blend-correct acc weight (legacy additive `lit+dst/2` gets acc·0.5 —
+  full acc 1.5x-counts path fog, blew city water white; alpha path acc·1)
+  + glow_max knee wired into SS glow.
+- `7c1f99e` flares integrated into unified TBR depth order (user rejected
+  center-Z hide). The_MMX_Scalar diverts to TBR_Sprite for Scn_SpriteTBR
+  scenes; TBR sprite draw dispatches 256-res flare (white colorize — omni
+  V.LR/G/B unmaintained, tints black) vs 32 particle (vertex tint).
+  TRAPS: sprite loop must run BEFORE TBR_Render (fillers only INSERT for
+  TBR scenes); FOUNTAIN.CPP particle textures had stale SizeX=256
+  metadata over a 32×32 buffer → res dispatch sampled into the font atlas.
+- `4f7e5d9` --fast_fog_glow_max soft-knee compressor (froxel populate):
+  "reduce intensity without affecting density" — linear below max/2,
+  asymptote at max, hue-preserving. Try 250-400.
+- `e8e5843` --fast_fog_blob_overlap metaball field: ADDITIVE blob sums
+  (worley F1 cannot overlap); value = radius in cell units (cap 1.5);
+  decouples blob size from spacing; worley_thresh reused as iso [0,3].
+- `12e926d` froxel fog on transparents (--fast_fog_xpar, default on):
+  out = α·(C·T(z)+acc(z)) + (1−α)·Bg, one grid fetch per xpar pixel.
+- `5683c89` CITY WHITE-WATER ROOT CAUSE: Reflected_Transform never set
+  F.FlareSize → ±4e36 heap garbage → screen-covering additive flare,
+  per-process coin flip, "cured" by free-cam 360 (main frustum sweep
+  initializes the field). One line. Five misattributions first — method
+  writeup in memory project_city_pass1_stale_vpage.
+- Earlier: froxel temporal reprojection (XY-only jitter — z-jitter was a
+  limit-cycle flicker engine; per-column Halton phases), per-slice clipped
+  analytic light glow (fixed "light moving wildly" under small camera
+  moves), slab feather in froxelDensity, worley puffs, snapshot @iters=N
+  now WRITES the last frame (converged temporal; old skip caused a bogus
+  byte-identical A/B), city@t=N1,N2,... multi-timestamp lists fixed,
+  FDS_THREADS=N pool cap (Threads.h).
 
-- Branch: `refactor/frame-state-shadow`
-- Pushed to: `origin/refactor/frame-state-shadow`
-- HEAD: `dac3d5f` (bake-once static shadow maps)
-- **Not merging to master** — all dev work continues on side branches per user
-  direction (2026-05-17).
-- ctest: both smoke tests pass
+## Agreed next steps (user decisions, in order)
 
-## Cube shadow infrastructure (task #53) — substantially complete
+1. **cv-pull reflection instability** — user said "we can try". Memory:
+   project_cv_pull_instability. Reflective_Mapper_Setup divides by
+   step = pullDir·N which passes through small values; reflections swing
+   with small camera moves. Reproducer: --snapshot=seaside distsweep block.
+2. **Per-scene FULL SCRIPTING** (user-decided scope): time-keyed parameter
+   values, lerped between keys, built on the FeatureFlags registry
+   (name/type/parse already there), per-scene files, hot-reload via mtime.
+   Scene-.FLD editing explicitly OUT of scope (separate later project).
+   Design-heavy — draft the file-format proposal first.
+3. Parked: SIMD froxel populate for x64 (docs/fast_fog_simd_x64.md);
+   froxel 128×72+temporal may match 256×144 quality cheaper (untuned);
+   merging feature/fog → master at some point.
 
-End-to-end working: per-omni cube shadow maps (6 face entries per
-Light_Omni with Omni_CastsShadow), per-frame render dispatch unified
-with spot path, per-pixel sampling in both scalar AND vec deferred
-kernel paths, static-bake-at-init for `Omni_StaticShadow` lights.
+## Open questions / loose ends
 
-  - `c01c470` CubeShadowRef + cubeFace marker + allocator
-  - `b2dcd6b` per-frame render of 6 face cameras per cube
-  - `47ed1f1` CubeShadow_SelectFace inline helper
-  - `e31314b` ViewLightsSoA world-pos + cubeShadowIdx
-  - `5cdee28` scalar kernel wire-in (view→world per pixel, lookup per omni)
-  - `823460e` city test omni at (0,600,500) to exercise the path
-  - `b6a426a` vec kernel wire-in (scalarized per-lane, cheap early-out)
-  - `dac3d5f` Omni_StaticShadow flag + ShadowMaps_BakeStatic() — bake at
-    scene init alongside reflection bake, per-frame pass skips static
-    lights entirely. City streetlights + test cube omni all baked once.
+- User has NOT visually confirmed in motion: TBR flare ordering (fountain
+  purple omni), SS-xpar fog, metaball look, glow_max feel. Expect feedback.
+- fast_fog_worley_thresh doubles as metaball iso — ranges differ by mode
+  (0–0.9 worley, 0–3 metaball). Candidate rename during scripting work.
+- SS xpar fog pays full per-pixel blob DDA on transparent pixels — fine
+  fountain/greets, heavy for city water (froxel recommended there). No
+  perf numbers taken.
+- User asked whether my runs open windows ("ran the whole executable in
+  front?") — snapshot mode initializes video; if windows bother them, add
+  SDL_VIDEODRIVER=dummy to headless runs (verified render-identical).
 
-Still open for task #53:
-  - Switch deferred reflection from lat-long panorama → real cube map.
-    Bigger refactor: deferred currently SKIPS reflective faces entirely
-    (RENDER.CPP:385, 478 — forward handles them). Need to enable
-    deferred-path reflection rendering first, then add cube sampling
-    in Mekalele for reflective materials.
+## Working agreements refreshed this session
 
-## Earlier cone work (this branch)
-
-  - `c6b32b4` revised conetest poses to avoid degenerate lookAt
-  - `2f8129f` PCG avalanching pxHash — fixed jitter that wasn't
-    actually decorrelating adjacent pixels (the real cause of bands)
-  - `e77f19a` decouple cone integration from depth quantization
-    (sphere bounds + smooth surface fade + stratified jitter)
-  - `1803be7` added `--snapshot=conetest` harness with 8 named poses
-  - `6a396ab` handle a>0 in cone quadratic (was being skipped → dark ellipse)
-  - `bf81fc7` move Render_VolumetricCones to final additive pass
-  - `0fb2022` tile-cull spots + squared fog
-  - `865c77c` inverted close/far cone brightness with inverse-square distAtten
-  - `852dd44` shadow-occluded volumetric cones in city test spots
-
-## What just landed (recent → older)
-
-### Volumetric spotlight cones (this session, in order)
-
-1. **`cc17d65`** — extracted greets's triangle cone overlay into
-   `DEMO/SpotlightCones.{h,cpp}` with flags. Built but underwhelming
-   visually + slow.
-2. **`be13e17`** — replaced triangle overlay with screen-space
-   ray-march in `FDS/RENDER/DeferredLighting.cpp::Render_VolumetricCones`.
-   Runs after `Render_DeferredLighting`, reuses per-tile spot SoA,
-   integrates N=6 samples along ray-cone intersection segment.
-   Triangle code deleted; `MakeSpotLight` helper kept.
-3. **(this commit)** — two fixes after visual review:
-   - **Tile-stripe bug**: was using per-tile `TileLights` whose
-     z-cull is correct for surfaces but wrong for ray integration
-     (a tile whose surface sits past a spot's z-extent gets the
-     spot culled, even if the camera→surface ray crosses the cone
-     volume). Now iterates the frame-global `ViewLightsSoA` directly
-     — no z-cull, per-pixel quadratic test does the culling.
-   - **Fog cutoff**: cones used to extend past FZP and float in the
-     cleared backdrop where geometry already fogged out. Now clamps
-     ray `zMax` to `min(zSurf, FZP)` and scales each integration
-     sample by `(1 - z/FZP)`, matching the surface fog pass.
-
-### Earlier this session
-
-- `cd6a7ca` fix(greets): the `Polys` shadowing bug (local int32_t hid
-  the global, broke shadow per-light buffer sizing). Found with ASan
-  in 2 minutes after sub-agent's static-read missed it.
-- `04b3f07` city: clamp ill-conditioned cv-pull divisor in reflective
-  panorama lookup (memory `project_cv_pull_instability`).
-- `761aeaa` material: reorder Material fields so hot per-pixel reads
-  fit in one cache line (no measurable bench delta but cleaner layout).
-- `b353353` deferred + mekalele: replace 14 sites of `1.0f/std::sqrt`
-  with `fast_rsqrt`. `fast_rsqrt` hoisted to `FDS/FILLERS/SimdHelpers.h`.
-- `cac6411` + `fc77a93` deferred: fold half-vector renormalize into NdotH
-  dot — saves 3 muls/pixel × 3 spec paths. **-2.3ms on greets**.
-- `753af3f` deferred: replace `std::pow` libm fallback with
-  `fastPow2(g*fastLog2(NdotH))`. Greets uses templated path so no bench
-  delta; benefits any non-templated gloss.
-- `f57bfdd` fix(frustrum): build LogTable/ExpTable once per thread,
-  not per Clipper. **-2.7ms on greets** (60k transcendentals/frame ✂).
-- `2137c54` made the LUT a single read-only global (vs thread_local).
-
-### Perf cumulative this session
-
-Greets@t=2500 bench: started ~30.9 ms/iter, currently ~26.3 ms/iter.
-**−4.6 ms (−15%)** across LUT fix + half-vec fold + various.
-
-### Other session work
-
-- ASan rediscovered as the right tool for memory mysteries.
-- LSP findReferences habit established for cross-TU global edits.
-- `--no_vsync` flag added; confirmed V_Flip 2.7ms is real Metal upload
-  (not vsync), still ~2ms grabbable, deferred.
-- Initialize_City coupling resolved (was the Polys shadow bug).
-- City spotlights gated behind `FDS_CITY_TEST_SPOTS` (off by default).
-- clangd wired (`.clangd` config, self-contained headers).
-- Native ctest in CI (.github/workflows/native-test.yml).
-
----
-
-## What's broken / in progress
-
-### ⏱ Volumetric cone perf (user-reported, NEXT)
-
-User after visual review: "4 fps... really needs some kind of
-optimization — probably some kind of light map / something else.
-But really really promising." Defer for now; will tackle after
-broader pipeline work.
-
-Current pass is N pixels × N spots × N=6 samples of scalar quadratic
-math. Cheap per-sample, but high pixel count + every spot iterated
-every pixel (no per-tile screen-rect cull since the z-cull-correct
-fix had to switch off per-tile filtering entirely — see commit).
-
-**Profile FIRST** (per `feedback_bench_when_idle` — ask user first).
-Candidates after profile:
-1. Per-tile screen-rect cull *without* z-cull (compute spot's 2D
-   bounding rect once per frame, intersect with tile rect — avoids
-   iterating spots whose volume can't intersect the tile).
-2. Lower N_SAMPLES for far spots (distance-adaptive sample count).
-3. Quarter-rate render with dilation (one sample per 2×2 block).
-4. Vectorize the per-sample inner loop (8-wide ray-march).
-5. Bigger-picture: precomputed light map / volume texture (user's
-   hint — would offload the per-pixel ray-march to a lookup).
-
-### Per-spotlight density / shape tuning
-
-Current City setup: 6 hardcoded streetlights in CITY.CPP gated by
-`FDS_CITY_TEST_SPOTS`. Position/angle/color tuning is awkward — would
-benefit from runtime knobs or moving the test config out of CITY.CPP.
-
-### Test-snapshot output dir pollution
-
-Local working tree has many stale .ppm/.png debug artifacts under
-Runtime/* (City snapshots, seaside sweeps, cube refl, etc.). Should
-extend `.gitignore` to cover Runtime/seaside/, Runtime/snap-*,
-Runtime/tasks_artifacts/, build-asan/. (See `feedback_git_add_all_forbidden`.)
-
----
-
-## Key flags + commands
-
-### Cones
-- `--draw_cones` or `FDS_DRAW_CONES=1` — enable volumetric cone pass
-- `--cone_strength=0.05` (default; range ~0.01-0.5)
-- `--city_test_spots` — install 6 city test spotlights
-
-### Other
-- `--no_vsync` — for clean V_Flip cost measurement
-- `--bench=scene@scene=greets,t=2500,iters=1000` — perf bench harness
-- ctest: `ctest --test-dir build`
-
-### Standard test invocations
-```sh
-# greets snapshot
-cd Runtime && FDS_DEFERRED=1 FDS_SHADOWS=1 ./DEMO --snapshot=greets@t=2500 --out=/tmp
-
-# city snapshot with cones
-cd Runtime && ./DEMO --deferred --shadows --draw_cones --city_test_spots --snapshot=city@t=1500 --out=/tmp
-
-# interactive city (fly with arrows / Tab for free cam)
-cd Runtime && ./DEMO --deferred --draw_cones --city_test_spots
-```
-
----
-
-## Memory entries created this session (read with /memories)
-
-- `feedback_use_feature_flags_for_hot_toggles` — never `getenv` in hot loops
-- `feedback_lsp_for_diff_review` — `findReferences` on aliased globals before editing
-- `feedback_git_add_all_forbidden` — explicit file names only; Runtime/ has hundreds of MB of debug junk
-- (Updated) `reference_asan_build` — reach for ASan BEFORE deferring a memory-mystery as "low ROI"
-
----
-
-## Roadmap status (see docs/ROADMAP.md)
-
-Top picks ordered by ROI when last revised:
-
-1. ~~Profile first~~ ✓ Done
-2. ~~Vec-path shadowAtten~~ ✓ Documented (vec path off by default)
-3. ~~Per-spotlight cone primitive for fog~~ ✓ Done as ray-march
-4. **City cv-pull stability fix** — done at `04b3f07`, partial fix
-   (clamp ill-conditioned divisor). Still some discontinuities visible
-   but acceptable per user.
-5. **StaticLighting visibility ray-trace** — user-flagged, not started
-6. **V_Flip native-Metal investigation** — ~2ms grabable, not started
-7. **HDR + bloom** — large project, scoped in roadmap
-8. **Per-texel lightmaps** — large project, scoped in roadmap
-
-## Things specifically deferred / noted to revisit
-
-- §9d in roadmap: City first-frame screen-wide jump (intermittent,
-  one-time-only, never reproduces on F1 rewind). Likely cube-map bake
-  or StaticLighting timing.
-- §9b in roadmap: V_Flip ~2.7ms is Metal upload, not vsync. Worth
-  investigating; wasm WebGL2 bypass doesn't transfer.
-
----
-
-## Working-tree state (uncommitted)
-
-The branch is clean source-wise. Working tree has uncommitted asset
-swaps + debug snapshots:
-
-- `Runtime/SCENES/GREETS.FLD` — swapped to 1998 small version
-- `Runtime/TEXTURES/PBRK34.JPG`, `P_PAVE.JPG` — swapped to 1998 small versions
-- `Runtime/rev.cfg` — local tweaks
-- many `Runtime/*.ppm`, `Runtime/snap-*.png`, `Runtime/seaside/`, `Runtime/tasks_artifacts/` — debug output, never to be committed
-- `build-asan/` — local asan build, never to be committed
-
-These survive across sessions; the user manages them locally. **NEVER
-`git add -A` / `git add .`** — explicit file names only.
+- Verify the CLASSIFIER and the FULL repro before attributing a bug (the
+  white-water hunt logged five wrong attributions; the user's repro
+  mechanics were right every time; a z==0-unmasked water classifier was
+  fooled by the deferred skybox repaint).
+- User corrections are load-bearing: "I can wait indefinitely" killed the
+  wallclock theory; "reproducible without fog" killed three fog theories.
+- Headless testing: --snapshot=<scene>@t=N / @iters=N from Runtime/; cp
+  the output ppm IMMEDIATELY (next run overwrites).
+- conetest repro cams: FDS_CONETEST_CAM="px,py,pz,fx,fy,fz" (env).
+- User cmdline for interactive fog testing:
+  ./DEMO --fast_fog_froxel --deferred --shadows --draw_cones
+    --cone_strength=4 --fast_fog --fast_fog_blobs --fast_fog_worley
+    --fast_fog_density=5..10 --fast_fog_bottom=-400 --fast_fog_top=420
+    --fast_fog_cell=500 --fast_fog_inscatter=4 [--fast_fog_glow_max=300]
+    [--fast_fog_blob_overlap=1.3 --fast_fog_worley_thresh=2.0]
+  (city wants bottom=0 — bottom=-400 puts 400 units of fog under the water.)
