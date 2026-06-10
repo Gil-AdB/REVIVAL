@@ -442,6 +442,27 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         bool more = driver->tick();
         (void)more;
 
+        // Bench mode (@iters=N): re-tick the SAME timestamp N times and
+        // report the mean whole-frame cost (full city frame: both passes,
+        // dispMap, fog, flares — everything tick() does). Temporal fog
+        // history converges over the warm-up + loop, so this measures the
+        // steady state. The last frame still falls through to the PPM
+        // write below, like the conetest bench.
+        if (cfg.iters > 0) {
+            using clock = std::chrono::high_resolution_clock;
+            const auto t0 = clock::now();
+            for (int i = 0; i < cfg.iters; ++i) {
+                std::srand(0);
+                Timer = ts;
+                driver->tick();
+            }
+            const auto t1 = clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::fprintf(stderr,
+                "[CITYBENCH] t=%-6d %d iters total=%.2f ms  mean=%.3f ms/iter (%.1f fps)\n",
+                ts, cfg.iters, ms, ms / cfg.iters, 1000.0 * cfg.iters / ms);
+        }
+
         // Optional level-camera override (CITYSNAP_POS / CITYSNAP_FWD) to
         // probe the near-plane/rasterizer degeneracy seen in conetest at
         // perfectly level views. Re-renders the city geometry from the
