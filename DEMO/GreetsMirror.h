@@ -53,6 +53,13 @@ struct ClonedMeshRange {
     TriMesh *sourceMesh;
     uint32_t vStart;
     uint32_t vCount;
+    // Source mesh (or an ancestor) actually animates — decided once at
+    // build by the same spline-extent heuristic Transform.cpp's
+    // isDynamicForBake uses. UpdateMirror re-mirrors only dynamic
+    // ranges after the first full pass; static geometry recomputes to
+    // identical values, so skipping it is pure savings (~95% of the
+    // per-frame re-mirror in greets, where only the robot moves).
+    bool     dynamic;
 };
 
 // Source/clone omni pair owned by a Mirror. Per-frame IPos / IDir
@@ -81,8 +88,12 @@ struct Mirror {
     // every frame — for ANIMATED sources (the robot) the init-time
     // normal goes stale as the mesh rotates, which mis-culls clone
     // faces (the "flipped face culling" look in the robot reflection).
-    struct CloneFaceSrc { const Face *face; TriMesh *mesh; };
+    struct CloneFaceSrc { const Face *face; TriMesh *mesh; bool dynamic; };
     std::vector<CloneFaceSrc> cloneFaceSrc;
+    // First UpdateMirror call does a FULL re-mirror (build-time vert
+    // capture may predate the first Animate_Objects); afterwards only
+    // dynamic ranges/faces update per frame.
+    bool primed = false;
     // Wall face pointers — the actual mirror SURFACE faces in the live
     // scene meshes (NOT in cloneMesh). Used by StampMirrorMasks to
     // rasterize each wall triangle's screen footprint into the gb.mirrorId

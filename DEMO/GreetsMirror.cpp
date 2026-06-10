@@ -14,6 +14,7 @@
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -255,6 +256,30 @@ MirrorPlane FindMirrorPlaneByTextureName(Scene *sc, const char *textureFileName)
     return FindMirrorPlaneImpl(sc, textureNameSelector(textureFileName), textureFileName);
 }
 
+// ─── --mirror-prof timing ────────────────────────────────────────────
+// Wall-time accumulators for the three per-frame mirror passes, printed
+// as averages every FDS_MIRROR_PROF_EVERY frames (default 120). The
+// frame counter advances in UpdateAllMirrors (called exactly once per
+// frame by every scene driver).
+namespace {
+struct MirrorProfAccum {
+    double updMs = 0.0, stampMs = 0.0, rttMs = 0.0;
+    int    frames = 0, activeSum = 0, rttJobsSum = 0;
+};
+MirrorProfAccum g_mirrorProf;
+
+struct ScopedMirrorMs {
+    double *acc;
+    std::chrono::steady_clock::time_point t0;
+    explicit ScopedMirrorMs(double *a)
+        : acc(a), t0(std::chrono::steady_clock::now()) {}
+    ~ScopedMirrorMs() {
+        *acc += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
+};
+}  // namespace
+
 // Monotonic mirror id counter. Each successful BuildMirror call grabs
 // the next id (1..255); the value gets written into Face::mirrorMaskTag
 // on every face that participates in this mirror (walls + clones), and
@@ -352,6 +377,40 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
     stampSingleKey(MM->Scale,  1.0f, 1.0f, 1.0f, 0.0f);
     stampSingleKey(MM->Rotate, 0.0f, 0.0f, 0.0f, 1.0f);
 
+    // Per-source-mesh dynamic test for UpdateMirror's static-skip.
+    // Same spline-extent heuristic as Transform.cpp's isDynamicForBake
+    // (kept verbatim-local there); walks the parent chain because the
+    // robot's leg meshes inherit their motion from the hull.
+    auto meshIsDynamic = [](Object *obj) -> bool {
+        constexpr float kPosEps = 0.1f;
+        constexpr float kRotEps = 0.01f;
+        for (Object *o = obj; o; o = o->Parent) {
+            if (o->Type != Obj_TriMesh) continue;
+            TriMesh *tm = (TriMesh *)o->Data;
+            if (!tm) continue;
+            if (tm->Pos.NumKeys > 1 && tm->Pos.Keys) {
+                const auto &k0 = tm->Pos.Keys[0].Pos;
+                for (DWord i = 1; i < tm->Pos.NumKeys; ++i) {
+                    const auto &k = tm->Pos.Keys[i].Pos;
+                    if (std::fabs(k.x - k0.x) > kPosEps ||
+                        std::fabs(k.y - k0.y) > kPosEps ||
+                        std::fabs(k.z - k0.z) > kPosEps) return true;
+                }
+            }
+            if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
+                const auto &q0 = tm->Rotate.Keys[0].Pos;
+                for (DWord i = 1; i < tm->Rotate.NumKeys; ++i) {
+                    const auto &q = tm->Rotate.Keys[i].Pos;
+                    if (std::fabs(q.x - q0.x) > kRotEps ||
+                        std::fabs(q.y - q0.y) > kRotEps ||
+                        std::fabs(q.z - q0.z) > kRotEps ||
+                        std::fabs(q.W - q0.W) > kRotEps) return true;
+                }
+            }
+        }
+        return false;
+    };
+
     // Fill verts (world-mirrored) and faces (winding swapped, normal +
     // NormProd reflected, UV pairs swapped to match B↔C).
     DWord vOfs = 0, fOfs = 0;
@@ -362,6 +421,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         if (isCloneMesh(Obj)) continue;  // skip prior mirror clones
         TriMesh *T = (TriMesh*)Obj->Data;
         if (!T || !T->Verts || !T->Faces) continue;
+        const bool meshDyn = meshIsDynamic(Obj);
         const DWord vStart = vOfs;
         for (DWord vi = 0; vi < T->VIndex; ++vi) {
             MM->Verts[vOfs] = T->Verts[vi];
@@ -450,7 +510,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             CF.NormProd = -(CF.N.x * CF.A->Pos.x +
                             CF.N.y * CF.A->Pos.y +
                             CF.N.z * CF.A->Pos.z);
-            m.cloneFaceSrc.push_back({&OF, T});
+            m.cloneFaceSrc.push_back({&OF, T, meshDyn});
             // Tag every clone face with the owning mirror's id. Mekalele
             // reads this into ctx.mirrorTag and rejects any pixel whose
             // gb.mirrorId doesn't match — so clones can only paint inside
@@ -466,7 +526,7 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             CF.ownerMirrorId = m.id;
             ++fOfs;
         }
-        m.meshRanges.push_back({T, vStart, T->VIndex});
+        m.meshRanges.push_back({T, vStart, T->VIndex, meshDyn});
     }
     // Nothing in FRONT of the plane survived the per-face side test
     // (wall faces away from the room, or sits at its far edge). A
@@ -1251,7 +1311,13 @@ void UpdateMirror(Scene *sc, Mirror &m)
 
     // Per-mesh: re-mirror source's CURRENT world verts into the clone.
     // Dynamic meshes (Hull / legs) end up with up-to-date reflections.
+    // After the first full pass (primed — needed because the build-time
+    // capture may predate the first Animate_Objects) only DYNAMIC
+    // ranges/faces update: static geometry recomputes identical values.
+    const bool full = !m.primed;
+    m.primed = true;
     for (const auto &r : m.meshRanges) {
+        if (!full && !r.dynamic) continue;
         TriMesh *T = r.sourceMesh;
         if (!T || !T->Verts) continue;
         const DWord n = std::min<DWord>(r.vCount, T->VIndex);
@@ -1285,6 +1351,7 @@ void UpdateMirror(Scene *sc, Mirror &m)
         const size_t nf = std::min(m.cloneFaceSrc.size(),
                                    size_t(m.cloneMesh->FIndex));
         for (size_t fi = 0; fi < nf; ++fi) {
+            if (!full && !m.cloneFaceSrc[fi].dynamic) continue;
             const Face *src = m.cloneFaceSrc[fi].face;
             TriMesh    *sT  = m.cloneFaceSrc[fi].mesh;
             if (!src || !sT) continue;
@@ -1389,6 +1456,9 @@ bool mirrorPotentiallyVisible(Scene *sc, const Mirror &m)
 
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
 {
+    int nActive = 0;
+    {
+    ScopedMirrorMs _t(&g_mirrorProf.updMs);
     for (auto &m : mirrors) {
         bool act;
         if (m.parentMirrorId != 0) {
@@ -1418,7 +1488,30 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
             if (c.mirrorOmni && c.sourceOmni)
                 c.mirrorOmni->ISize = act ? c.sourceOmni->ISize : 0.0f;
         }
-        if (act) UpdateMirror(sc, m);
+        if (act) { UpdateMirror(sc, m); ++nActive; }
+    }
+    }  // ScopedMirrorMs — accumulate before the print below reads it
+
+    if (fds::FeatureFlags::mirror_prof()) {
+        auto &P = g_mirrorProf;
+        P.activeSum += nActive;
+        ++P.frames;
+        static int sEvery = -1;
+        if (sEvery < 0) {
+            const char *e = std::getenv("FDS_MIRROR_PROF_EVERY");
+            sEvery = e ? std::max(1, std::atoi(e)) : 120;
+        }
+        if (P.frames >= sEvery) {
+            std::fprintf(stderr,
+                "[MIRROR-PROF] %df avg: update=%.3fms stamp=%.3fms "
+                "rtt=%.3fms | active=%.1f rttJobs=%.2f\n",
+                P.frames,
+                P.updMs / P.frames, P.stampMs / P.frames,
+                P.rttMs / P.frames,
+                double(P.activeSum) / P.frames,
+                double(P.rttJobsSum) / P.frames);
+            P = {};
+        }
     }
 }
 
@@ -1775,6 +1868,7 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {
+    ScopedMirrorMs _t(&g_mirrorProf.rttMs);
     if (!sc || slots.empty()) return;
     const Camera *mainCam = ::View ? ::View : sc->CameraHead;
     if (!mainCam) return;
@@ -1829,6 +1923,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     std::sort(jobs.begin(), jobs.end(),
               [](const Job &a, const Job &b) { return a.area > b.area; });
     if (int(jobs.size()) > kRttPerFrame) jobs.resize(kRttPerFrame);
+    g_mirrorProf.rttJobsSum += int(jobs.size());
 
     // ── Offscreen surface (allocated once; CITY cube-bake pattern).
     // Buffers sized for the constant 64K-texel budget; X/Y/BPSL (and
@@ -2198,6 +2293,7 @@ void DebugOverlayMirrorMask(Scene *sc)
 
 void StampMirrorMasks(Scene *sc, const std::vector<Mirror> &mirrors)
 {
+    ScopedMirrorMs _t(&g_mirrorProf.stampMs);
     if (!sc || !g_gbuffer) return;
     // The pre-stamp lives in the gate plane (mirrorMask), NOT the
     // ownership plane (mirrorId). Mekalele's commit mutates mirrorId
