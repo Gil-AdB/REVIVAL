@@ -1682,7 +1682,24 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
                 }
                 if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
                     continue;
-                slot.mat = Materialize(black.data(), kRttRes, kRttRes);
+                // Aspect-match the texture to the window at constant
+                // texel budget: halve one axis / double the other while
+                // the aspect mismatch exceeds 2x. Greets's wide end
+                // screens (≈3.7:1) land on 512x128 instead of smearing
+                // 4x horizontally out of a square.
+                {
+                    const float winAspect =
+                        (slot.u1 - slot.u0) / (slot.v1 - slot.v0);
+                    while (winAspect / (float(slot.texW) / float(slot.texH)) >= 2.0f
+                           && slot.texW < 1024 && slot.texH > 32) {
+                        slot.texW <<= 1; slot.texH >>= 1;
+                    }
+                    while ((float(slot.texW) / float(slot.texH)) / winAspect >= 2.0f
+                           && slot.texH < 1024 && slot.texW > 32) {
+                        slot.texW >>= 1; slot.texH <<= 1;
+                    }
+                }
+                slot.mat = Materialize(black.data(), slot.texW, slot.texH);
                 // The texture holds FINAL shaded colors — display it
                 // unlit: Lum 1.0 saturates the kernel's light factor at
                 // ~255 so lit ≈ texel; Diffuse/Specular 0 keep omnis
@@ -1742,9 +1759,16 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
             }
         }
     }
-    if (created > 0) Scene_RebuildMatTable(sc);
-    std::fprintf(stderr, "[MIRROR-RTT] prepared %d slot(s) at %dx%d\n",
-                 created, kRttRes, kRttRes);
+    if (created > 0) {
+        Scene_RebuildMatTable(sc);
+        for (const MirrorRttSlot &s : out) {
+            std::fprintf(stderr,
+                "[MIRROR-RTT] slot m%u->m%u %dx%d (window %.1fx%.1f)\n",
+                unsigned(s.aId), unsigned(s.bId), s.texW, s.texH,
+                s.u1 - s.u0, s.v1 - s.v0);
+        }
+    }
+    std::fprintf(stderr, "[MIRROR-RTT] prepared %d slot(s)\n", created);
     return created;
 }
 
@@ -1806,18 +1830,22 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
               [](const Job &a, const Job &b) { return a.area > b.area; });
     if (int(jobs.size()) > kRttPerFrame) jobs.resize(kRttPerFrame);
 
-    // ── Offscreen surface (allocated once; CITY cube-bake pattern) ──
+    // ── Offscreen surface (allocated once; CITY cube-bake pattern).
+    // Buffers sized for the constant 64K-texel budget; X/Y/BPSL (and
+    // the YOffs table) are re-stamped per job to the slot's aspect-
+    // matched dimensions.
     static VESA_Surface s_rttSurf = {};
     static bool s_rttInit = false;
+    constexpr int kRttTexels = kRttRes * kRttRes;
     if (!s_rttInit) {
         s_rttSurf.X = kRttRes;
         s_rttSurf.Y = kRttRes;
         s_rttSurf.BPP = 32;
         s_rttSurf.CPP = 4;
         s_rttSurf.BPSL = kRttRes * 4;
-        s_rttSurf.PageSize = s_rttSurf.BPSL * kRttRes;
-        s_rttSurf.Z16  = (byte*)std::malloc(sizeof(word) * kRttRes * kRttRes);
-        s_rttSurf.Data = (byte*)std::malloc(size_t(s_rttSurf.PageSize));
+        s_rttSurf.PageSize = kRttTexels * 4;
+        s_rttSurf.Z16  = (byte*)std::malloc(sizeof(word) * kRttTexels);
+        s_rttSurf.Data = (byte*)std::malloc(size_t(kRttTexels) * 4);
         if (!s_rttSurf.Z16 || !s_rttSurf.Data) return;
         s_rttSurf.Flip = MainSurf ? MainSurf->Flip : nullptr;
         Build_YOffs_Table(&s_rttSurf);
@@ -1862,13 +1890,22 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     Lighting(sc);
 
     MainSurf = &s_rttSurf;
-    VESA_Surface2Global(MainSurf);
     static Camera s_rttCam;
     ::View = &s_rttCam;
 
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
         const float D = j.dist;
+        // Re-stamp the surface to this slot's aspect-matched dims
+        // (same texel count, different shape) and republish globals.
+        if (s_rttSurf.X != s.texW || s_rttSurf.Y != s.texH) {
+            s_rttSurf.X = s.texW;
+            s_rttSurf.Y = s.texH;
+            s_rttSurf.BPSL = s.texW * 4;
+            s_rttSurf.PageSize = s.texW * s.texH * 4;
+            Build_YOffs_Table(&s_rttSurf);
+        }
+        VESA_Surface2Global(&s_rttSurf);
         // Camera basis: right = axisU, up = axisV, forward = B's
         // normal — looking from behind the plane through the window at
         // the real scene. With the view axis ⟂ the panel, the engine's
@@ -1892,8 +1929,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // to a few dozen texels and smeared, the 'garbled 2nd mirror'.)
         const float cu = j.camPos.x*s.axisU.x + j.camPos.y*s.axisU.y + j.camPos.z*s.axisU.z;
         const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
-        FOVX   = float(kRttRes) * D / (s.u1 - s.u0);
-        FOVY   = float(kRttRes) * D / (s.v1 - s.v0);
+        FOVX   = float(s.texW) * D / (s.u1 - s.u0);
+        FOVY   = float(s.texH) * D / (s.v1 - s.v0);
         CntrEX = FOVX * (cu - s.u0) / D;
         CntrEY = FOVY * (s.v1 - cv) / D;
         CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
@@ -1904,8 +1941,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // recomputing through the same formula keeps UV and projection
         // trivially in lockstep.
         for (const MirrorRttSlot::SlotVert &sv : s.verts) {
-            float tu = ( FOVX * (sv.pu - cu) / D + CntrEX) / float(kRttRes);
-            float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(kRttRes);
+            float tu = ( FOVX * (sv.pu - cu) / D + CntrEX) / float(s.texW);
+            float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(s.texH);
             // Keep off the wrap seam (Txtr_Tiled wraps).
             tu = std::min(std::max(tu, 0.002f), 0.998f);
             tv = std::min(std::max(tv, 0.002f), 0.998f);
@@ -1922,7 +1959,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         for (Face *f : s.faces) f->uvFromVertices();
 
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
-        std::memset(s_rttSurf.Z16, 0, sizeof(word) * kRttRes * kRttRes);
+        std::memset(s_rttSurf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
         fds::g_skipLateralFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         fds::g_skipLateralFrustumCull = false;
@@ -1936,14 +1973,14 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // are unambiguous on screen.
         if (std::getenv("FDS_MIRROR_RTT_MARK")) {
             uint32_t *px = (uint32_t*)s_rttSurf.Data;
-            for (int y = 0; y < kRttRes; ++y) {
-                for (int x = 0; x < kRttRes; ++x) {
+            for (int y = 0; y < s.texH; ++y) {
+                for (int x = 0; x < s.texW; ++x) {
                     uint32_t c = 0;
-                    if (y < 16)              c = 0xFFFF0000;  // top: red
-                    else if (y >= kRttRes-16) c = 0xFF0000FF; // bottom: blue
-                    else if (x < 16)         c = 0xFF00FF00;  // left: green
-                    else if (x >= kRttRes-16) c = 0xFFFFFF00; // right: yellow
-                    if (c) px[size_t(y)*kRttRes + x] = c;
+                    if (y < 16)               c = 0xFFFF0000;  // top: red
+                    else if (y >= s.texH-16)  c = 0xFF0000FF;  // bottom: blue
+                    else if (x < 16)          c = 0xFF00FF00;  // left: green
+                    else if (x >= s.texW-16)  c = 0xFFFFFF00;  // right: yellow
+                    if (c) px[size_t(y)*size_t(s.texW) + x] = c;
                 }
             }
         }
@@ -1957,9 +1994,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               "/tmp/rtt_m%u_m%u_%d.ppm",
                               unsigned(s.aId), unsigned(s.bId), sDumped);
                 if (FILE *f = std::fopen(path, "wb")) {
-                    std::fprintf(f, "P6\n%d %d\n255\n", kRttRes, kRttRes);
+                    std::fprintf(f, "P6\n%d %d\n255\n", s.texW, s.texH);
                     const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
-                    for (int i = 0; i < kRttRes * kRttRes; ++i) {
+                    for (int i = 0; i < s.texW * s.texH; ++i) {
                         const uint32_t p = px[i];
                         unsigned char rgb[3] = {
                             (unsigned char)((p >> 16) & 0xFF),
@@ -1983,8 +2020,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // Linear RTT pixels → slot texture, re-tiled in place (the
         // same one-way Sachletz the texture loader applies).
         std::memcpy(s.mat->Txtr->Data, s_rttSurf.Data,
-                    size_t(kRttRes) * size_t(kRttRes) * 4);
-        Sachletz((dword*)s.mat->Txtr->Data, kRttRes, kRttRes);
+                    size_t(s.texW) * size_t(s.texH) * 4);
+        Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
     }
 
     // ── Restore the world ───────────────────────────────────────────
