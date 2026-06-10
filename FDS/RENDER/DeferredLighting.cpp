@@ -7000,13 +7000,6 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				const uint32_t k = (gFrFrameIdx + cellHash(ix, iy, 0x5EED)) & 7u;
 				jx = h2[k] - 0.5f; jy = h3[k] - 0.5f;
 			}
-			const float sy = (float(iy)+0.5f+jy) * invNy * float(YRes);
-			const float Y  = (CntrEY - sy) * P.invFOVY;
-			const float sx = (float(ix)+0.5f+jx) * invNx * float(XRes);
-			const float X  = (sx - CntrEX) * P.invFOVX;
-			const float Dx = P.w00*X + P.w01*Y + P.w02;
-			const float gY = P.w10*X + P.w11*Y + P.w12;
-			const float Dz = P.w20*X + P.w21*Y + P.w22;
 			// Canonical (unjittered) ray for the history reprojection. The
 			// reprojected view pos is linear in slice depth: v = A + zc·B,
 			// A = Rprevᵀ·(cam−camPrev) (per frame), B = Rprevᵀ·Dc (here).
@@ -7020,11 +7013,30 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const float Bz = gFrPrevW[2]*Dxc + gFrPrevW[5]*gYc + gFrPrevW[8]*Dzc;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 
-			// ── pass 1: blob/slab density at each slice center (XY jittered) ─
+			// ── pass 1: blob/slab density at each slice center ──────────────
+			// XY jitter as a WORLD-SPACE offset with a capped magnitude: a
+			// ±half-froxel SCREEN jitter is hundreds of world units at far z,
+			// which hops the sample clean across the blob field's transition
+			// width every frame — the temporal EMA cannot converge on that
+			// cycling input, and the fog-top iso edge SHIMMERS (user-bisected:
+			// jitter off = no shimmer; finer grid / lower blend = no change).
+			// Near the camera the offset equals the true sub-froxel footprint
+			// (dissolves the grid stairs exactly as before); far away it is
+			// clamped to a quarter of the blob cell so the sampled density
+			// swing stays a fraction of the field's correlation length.
+			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world/units per froxel per z
+			const float jcap    = 0.25f * P.cell;
+			const float jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
+			const float jry = jx*P.w10 + jy*P.w11;
+			const float jrz = jx*P.w20 + jy*P.w21;
 			for (int iz = 0; iz < nz; ++iz) {
 				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
-				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
+				const float fp = z * fpScale;
+				const float jamp = fp < jcap ? fp : jcap;
+				const float wx = P.camX + z*Dxc + jrx*jamp;
+				const float wy = P.camY + z*gYc + jry*jamp;
+				const float wz = P.camZ + z*Dzc + jrz*jamp;
 				float d = froxelDensity(P, wx, wy, wz);
 				// Distance LOD: a far froxel spans many blob cells but point-samples
 				// the cell=180 noise → aliases into bright/dark blocks. Blend toward
@@ -7073,6 +7085,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight);
 			if (pass2) {
 				for (int iz = 0; iz < nz; ++iz) glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
+				const float X = Xc, Y = Yc;            // glow is smooth — no jitter
 				const float uV = X*X + Y*Y + 1.0f;
 				for (int li = 0; li < P.numLights; ++li) {
 					if (L->mirrorId[li] != 0) continue;        // clones don't glow
