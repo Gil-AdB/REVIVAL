@@ -14,6 +14,9 @@
 //
 // Adding a flag is a single line in this file.
 
+// ─── engine ──────────────────────────────────────────────────────────────
+FDS_FLAG_BOOL(param_scripts,            "FDS_PARAM_SCRIPTS",            1,                              "engine",   "Per-scene scripted parameters: load SCRIPTS/<scene>.params (relative to CWD) at scene start, apply its FeatureFlags values each frame (time-keyed lines lerp over the scene Timer), hot-reload on file change. CLI/env-set flags always win over the script. See docs/PARAM_SCRIPTS.md.")
+
 // ─── deferred pipeline ───────────────────────────────────────────────────
 FDS_FLAG_BOOL(deferred,                 "FDS_DEFERRED",                 FDS_DEFERRED_DEFAULT_ON,        "deferred", "Deferred G-buffer pipeline")
 FDS_FLAG_BOOL(deferred_zcull,           "FDS_DEFERRED_ZCULL",           1,                              "deferred", "Cull G-buffer ROP writes against existing Z (default on)")

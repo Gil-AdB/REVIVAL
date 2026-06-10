@@ -1,4 +1,5 @@
 #include "SceneTick.h"
+#include <Base/ParamScript.h>
 
 #include "Rev.h"
 
@@ -35,6 +36,13 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
 
 void SceneDriver::tickTabToggle(Scene *sc, const char *sceneName)
 {
+    // Per-scene scripted parameters ride this hook: every scene already
+    // calls tickTabToggle(sc, "<name>") once per frame after its Timer
+    // update, which is exactly the (scene name, per-frame) pair the
+    // script system needs. SetScene is a no-op while the name is stable.
+    fds::ParamScript_SetScene(sceneName);
+    fds::ParamScript_Tick(float(Timer));
+
     const bool tabNow = Keyboard[ScTab] != 0;
     if (tabNow && !tabPrev_) {
         const bool switchingToFC = (View != &FC);

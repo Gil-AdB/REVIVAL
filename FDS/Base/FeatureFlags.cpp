@@ -253,6 +253,21 @@ State &state() {
 }
 } // namespace
 
+FeatureFlags::ParamRef FeatureFlags::findParam(const char *name) {
+    char buf[128];
+    size_t n = 0;
+    for (; name[n] && n + 1 < sizeof(buf); ++n)
+        buf[n] = (name[n] == '-') ? '_' : name[n];
+    buf[n] = '\0';
+    int i = findBoolByCliName(buf);
+    if (i >= 0) return { ParamType::Bool, i };
+    i = findFloatByCliName(buf);
+    if (i >= 0) return { ParamType::Float, i };
+    i = findIntByCliName(buf);
+    if (i >= 0) return { ParamType::Int, i };
+    return {};
+}
+
 bool FeatureFlags::parseArgs(int argc, const char *const *argv) {
     State &s = state();
     bool helpRequested = false;
