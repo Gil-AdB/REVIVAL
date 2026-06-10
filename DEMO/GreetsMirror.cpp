@@ -607,7 +607,10 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             //
             // (A) Half-silvered glass — source is already transparent
             //     WITH a real texture (greets's P_TEXT text screens).
-            //     KEEP the source material: the transparent kernel
+            //     Keep the source's LOOK via a clone (texture, flags,
+            //     alpha preserved; Diffuse zeroed + Luminosity
+            //     saturated for strip-independent lit values — see the
+            //     clone-creation comment): the transparent kernel
             //     composites the glowing text over whatever is behind,
             //     and "behind" is the reflected clone world (the real
             //     room behind the panel is gated out per pixel). The
@@ -620,6 +623,32 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
             //     shows.
             const bool halfSilvered =
                 (F.Txtr->Flags & Mat_Transparent) && F.Txtr->Txtr;
+            if (halfSilvered && !m.wallMatClone) {
+                // Half-silvered wall material: keep the source's look
+                // (texture, transparency, alpha, Luminosity) but make
+                // the lit value PER-STRIP-INDEPENDENT — Diffuse > 0
+                // reads the per-strip transparent light lists and the
+                // tint pops strip-by-strip (the banding seen across
+                // mirrortest's glass wall; greets's Lum=100 screens
+                // were immune because their lit value saturates the
+                // clamp regardless). With Diff=0 the lit value is
+                // purely Luminosity-driven — identical in every strip.
+                m.wallMatClone = getAlignedType<Material>(16);
+                std::memcpy(m.wallMatClone, F.Txtr, sizeof(Material));
+                m.wallMatClone->RelScene   = sc;
+                m.wallMatClone->Diffuse    = 0.0f;
+                m.wallMatClone->Specular   = 0.0f;
+                m.wallMatClone->Next = nullptr;
+                if (!MatLib) {
+                    m.wallMatClone->Prev = nullptr;
+                    MatLib = m.wallMatClone;
+                } else {
+                    Material *tail = MatLib;
+                    while (tail->Next) tail = tail->Next;
+                    tail->Next = m.wallMatClone;
+                    m.wallMatClone->Prev = tail;
+                }
+            }
             if (!halfSilvered && !m.wallMatClone) {
                 if (!sourceWallMat) sourceWallMat = F.Txtr;
                 m.wallMatClone = getAlignedType<Material>(16);
@@ -655,8 +684,8 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
                     m.wallMatClone->Prev = tail;
                 }
             }
-            if (!halfSilvered) F.Txtr = m.wallMatClone;
-            else ++halfSilveredWalls;
+            F.Txtr = m.wallMatClone;
+            if (halfSilvered) ++halfSilveredWalls;
             // Wall face itself is NOT tagged. We used to set
             // F.mirrorMaskTag = m.id here, but Mekalele's per-pixel
             // gb.mirrorId == ctx.mirrorTag test would then apply to
@@ -1880,9 +1909,17 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             // Keep off the wrap seam (Txtr_Tiled wraps).
             tu = std::min(std::max(tu, 0.002f), 0.998f);
             tv = std::min(std::max(tv, 0.002f), 0.998f);
+            if (std::getenv("FDS_MIRROR_RTT_UV05")) { tu = 0.5f; tv = 0.5f; }
             sv.v->U = tu;
             sv.v->V = tv;
         }
+        // The clipper re-stamps vertex UVs from Face::U1..V3
+        // (FRUSTRUM.CPP) — without syncing the face fields, the
+        // values above get overwritten with the source panel's
+        // authored UVs whenever the face clips (which is how the
+        // display stayed on the stale mapping no matter what the
+        // vertex stamp did).
+        for (Face *f : s.faces) f->uvFromVertices();
 
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * kRttRes * kRttRes);
@@ -1892,6 +1929,23 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);
+        }
+        // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
+        // linear buffer (top=red, bottom=blue, left=green,
+        // right=yellow) so flips/mirror errors in the panel mapping
+        // are unambiguous on screen.
+        if (std::getenv("FDS_MIRROR_RTT_MARK")) {
+            uint32_t *px = (uint32_t*)s_rttSurf.Data;
+            for (int y = 0; y < kRttRes; ++y) {
+                for (int x = 0; x < kRttRes; ++x) {
+                    uint32_t c = 0;
+                    if (y < 16)              c = 0xFFFF0000;  // top: red
+                    else if (y >= kRttRes-16) c = 0xFF0000FF; // bottom: blue
+                    else if (x < 16)         c = 0xFF00FF00;  // left: green
+                    else if (x >= kRttRes-16) c = 0xFFFFFF00; // right: yellow
+                    if (c) px[size_t(y)*kRttRes + x] = c;
+                }
+            }
         }
         // FDS_MIRROR_RTT_DUMP=1: write each slot's first rendered
         // frame to /tmp for inspection (linear, pre-Sachletz).
