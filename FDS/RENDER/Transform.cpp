@@ -46,7 +46,7 @@
 // SoA Vertex refactor — Phase 1: per-mesh SoA companion of the AoS
 // transformed-vertex output fields. See docs/SOA_VERTEX_REFACTOR.md.
 #include "Base/VertexFrame.h"
-// fds::g_skipLateralFrustumCull — off-axis projection support for the
+// fds::g_offAxisFrustumCull — off-axis projection support for the
 // mirror RTT's offscreen Transform (see FrameState.h).
 #include "Base/FrameState.h"
 
@@ -882,16 +882,48 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		} else {
 			frustumFlags &=~Tri_Inside;
 		}
-		// Out by left/right + up/down. The fabs() makes this a
+		// Out by left/right + up/down. The fabs() form below is a
 		// SYMMETRIC-frustum test (the view axis must sit inside the
 		// viewport). Off-axis passes — the mirror RTT renders through
 		// a panel window whose projection center lies far outside the
-		// target — set fds::g_skipLateralFrustumCull for the duration:
-		// the lateral rejection is skipped and Tri_Inside is cleared so
-		// every surviving mesh takes the fully-clipped vertex path
-		// (per-vertex PX/PY screen-bound flags are off-axis-correct).
-		// Depth (near/far) classification above stays in effect.
-		if (fds::g_skipLateralFrustumCull) {
+		// target — set fds::g_offAxisFrustumCull for the duration:
+		// the four viewport planes are then tested individually
+		// (sphere-vs-plane, outside-positive q = distance·‖n‖; reject
+		// iff q > 0 and q² > R²‖n‖²), which is the same math as the
+		// folded test but without the mid-viewport-center assumption.
+		// Tri_Inside is cleared so survivors take the fully-clipped
+		// vertex path (per-vertex PX/PY screen-bound flags are
+		// off-axis-correct). Depth classification above stays as-is.
+		if (fds::g_offAxisFrustumCull) {
+			const float R2 = L2 * T->BSphereRad;   // view-space radius²
+			// xr/yr: the override-aware viewport extents — match what
+			// the per-vertex flag stamps use.
+			const float exR = float(xr) - cam.cntrEX;
+			const float eyB = float(yr) - cam.cntrEY;
+			// left  (screen_x < 0):    PX·x + cntrEX·z < 0
+			float q = -(PX*S.x + cam.cntrEX*S.z);
+			if (q > 0.0f && q*q > R2*(PX*PX + cam.cntrEX*cam.cntrEX)) {
+				frustumFlags |= Tri_Invisible;
+				continue;
+			}
+			// right (screen_x > XRes): PX·x - (XRes-cntrEX)·z > 0
+			q = PX*S.x - exR*S.z;
+			if (q > 0.0f && q*q > R2*(PX*PX + exR*exR)) {
+				frustumFlags |= Tri_Invisible;
+				continue;
+			}
+			// top   (screen_y < 0):    PY·y - cntrEY·z > 0
+			q = PY*S.y - cam.cntrEY*S.z;
+			if (q > 0.0f && q*q > R2*(PY*PY + cam.cntrEY*cam.cntrEY)) {
+				frustumFlags |= Tri_Invisible;
+				continue;
+			}
+			// bottom (screen_y > YRes): -PY·y - (YRes-cntrEY)·z > 0
+			q = -(PY*S.y) - eyB*S.z;
+			if (q > 0.0f && q*q > R2*(PY*PY + eyB*eyB)) {
+				frustumFlags |= Tri_Invisible;
+				continue;
+			}
 			frustumFlags &= ~Tri_Inside;
 		} else {
 		// Out by left/right

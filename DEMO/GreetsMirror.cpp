@@ -2017,7 +2017,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         //   screen_x =  FOVX*(pu - cu)/D + CntrEX  with  u0→0, u1→W
         //   screen_y = -FOVY*(pv - cv)/D + CntrEY  with  v1→0, v0→H
         // The projection center generally lies far outside the target;
-        // fds::g_skipLateralFrustumCull (set below) keeps the engine's
+        // fds::g_offAxisFrustumCull (set below) keeps the engine's
         // symmetric-frustum mesh cull from discarding everything. (The
         // first cut centered a symmetric frustum on the camera's
         // plane-foot instead — at oblique angles the window collapsed
@@ -2055,9 +2055,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
 
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
-        fds::g_skipLateralFrustumCull = true;
+        fds::g_offAxisFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
-        fds::g_skipLateralFrustumCull = false;
+        fds::g_offAxisFrustumCull = false;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);

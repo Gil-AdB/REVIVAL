@@ -28,7 +28,7 @@ CameraContext   g_mainCamera;
 FaceListContext g_mainFaces;
 
 // Off-axis projection support for offscreen passes — see FrameState.h.
-bool g_skipLateralFrustumCull = false;
+bool g_offAxisFrustumCull = false;
 
 // Legacy struct kept while phase 2 lands. Its fields are no longer the
 // canonical home for the per-frame state — they're transitional and

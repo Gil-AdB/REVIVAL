@@ -22,15 +22,16 @@ extern CameraContext   g_mainCamera;
 extern FaceListContext g_mainFaces;
 
 // Off-axis projection support for offscreen passes (mirror RTT): when
-// set, Transform_Objects skips the mesh-level lateral (left/right +
-// up/down) frustum rejection — that test models a SYMMETRIC frustum
-// (fabs(S.x)) and discards everything when the projection center lies
-// outside the viewport — and clears Tri_Inside so surviving meshes
+// set, Transform_Objects replaces its folded mesh-level lateral cull
+// — the fabs(S.x) form models a SYMMETRIC frustum and discards
+// everything when the projection center lies outside the viewport —
+// with four individual sphere-vs-viewport-plane tests that are valid
+// for any projection center. Survivors get Tri_Inside cleared and
 // take the fully-clipped per-vertex path (whose PX/PY screen-bound
-// flags are off-axis-correct). Depth classification stays in effect.
-// Set + restore around the offscreen Transform call; never leave on
-// for the main pass (it disables a useful cull).
-extern bool g_skipLateralFrustumCull;
+// flags are off-axis-correct). Depth classification is unchanged.
+// Set + restore around the offscreen Transform call; the main pass
+// keeps the cheaper folded test.
+extern bool g_offAxisFrustumCull;
 
 // Snapshot of the current main-pass render target globals (VPage,
 // ZPage16, XRes, YRes, VESA_BPSL, g_gbuffer*, g_xparZ*) into a
