@@ -6,7 +6,9 @@
 extern void SDL2_HandleResize(int newX, int newY);
 
 std::atomic<uint64_t> g_pendingResize{0};
-std::mutex g_engineSurfaceMutex;
+// Defined in FDS/RENDER/OffscreenView.cpp (the RAII offscreen-view
+// scope owns the MainSurf-swap discipline this mutex protects).
+extern std::mutex g_engineSurfaceMutex;
 
 void EngineResize(int newX, int newY) {
     // Try-lock + defer: if a scene-init thread is mid-MainSurf-swap (e.g.

@@ -124,6 +124,8 @@ set(RENDER
     RENDER/DeferredLighting.cpp
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
+    RENDER/OffscreenView.cpp
+    RENDER/OffscreenView.h
     RENDER/LightmapBake.cpp
     RENDER/LightmapBake.h
     RENDER/RENDER.CPP

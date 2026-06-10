@@ -12,6 +12,7 @@
 #include <Base/TriMesh.h>
 #include <Base/Vertex.h>
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
+#include <RENDER/OffscreenView.h>  // OffscreenViewScope (RTT world swap)
 
 #include <algorithm>
 #include <chrono>
@@ -29,8 +30,6 @@ extern void Compute_FaceVertexIndices(TriMesh *T);
 // texture (Txtr_Nomip | Txtr_Tiled, numMipmaps=1). Used for the
 // second-order mirror RTT slots.
 extern Material *Materialize(void *data, int x, int y);
-// DEMO/Resize.cpp — serializes MainSurf swaps against EngineResize.
-extern std::mutex g_engineSurfaceMutex;
 // FDS/VESA — per-surface scanline offset table (the renderer reads the
 // global YOffs alias that VESA_Surface2Global points at VS->YTable).
 extern void Build_YOffs_Table(VESA_Surface *VS);
@@ -2087,50 +2086,6 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
     return created;
 }
 
-namespace {
-// RAII owner of the offscreen-render world swap. Construction locks
-// out EngineResize, saves the main view state, and swaps MainSurf to
-// the target; destruction restores everything INCLUDING the scene
-// re-stamp (SetCurrentScene) that syncs C_NZP / clipper viewport /
-// zscale back to the main pass. setNearZ() is the only sanctioned way
-// to move the near plane inside the scope — it re-stamps every time,
-// so the "wrote Sc->NZP but the clipper kept the old plane" footgun
-// can't recur. Candidate for promotion into FDS/RENDER if another
-// offscreen pass (CITY cube bake) wants it.
-struct OffscreenViewScope {
-    std::lock_guard<std::mutex> lk;
-    Scene        *sc;
-    VESA_Surface *prevMain;
-    Camera       *prevView;
-    float         prevFOVX, prevFOVY, prevNZP;
-
-    OffscreenViewScope(Scene *s, VESA_Surface *target)
-        : lk(g_engineSurfaceMutex), sc(s),
-          prevMain(MainSurf), prevView(::View),
-          prevFOVX(FOVX), prevFOVY(FOVY), prevNZP(s->NZP) {
-        MainSurf = target;
-    }
-    // Publish the (possibly re-shaped) target surface dims into the
-    // engine globals (XRes/VPage/CntrE*/YOffs…).
-    void publishSurface() { VESA_Surface2Global(MainSurf); }
-    // Move the near plane AND re-stamp the clipper from the scene.
-    void setNearZ(float nzp) {
-        sc->NZP = nzp;
-        SetCurrentScene(sc);
-    }
-    ~OffscreenViewScope() {
-        ::View = prevView;
-        sc->NZP = prevNZP;
-        MainSurf = prevMain;
-        VESA_Surface2Global(MainSurf);  // XRes/VPage/Cntr*/YOffs back
-        SetCurrentScene(sc);            // C_NZP/clipper/zscale back
-        FOVX = prevFOVX;                // not covered by Surface2Global;
-        FOVY = prevFOVY;                // nothing recomputes these until
-                                        // the next CalcPersp.
-    }
-};
-}  // namespace
-
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {
@@ -2138,6 +2093,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     if (!sc || slots.empty()) return;
     const Camera *mainCam = ::View ? ::View : sc->CameraHead;
     if (!mainCam) return;
+    // Age every slot once per pass — the scheduler trades footprint
+    // area against staleness so the 2-jobs/frame cap round-robins
+    // across visible slots instead of starving the small ones.
+    for (MirrorRttSlot &s : slots)
+        if (s.staleFrames < (1 << 20)) ++s.staleFrames;
 
     // ── Pick the most visible slots ─────────────────────────────────
     const float (*VM)[3] = mainCam->Mat;
@@ -2219,7 +2179,13 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         }
         const float sd = s.bN.x*cb.x + s.bN.y*cb.y + s.bN.z*cb.z + s.bD;
         if (sd >= -0.01f) continue;  // not behind the panel plane
-        jobs.push_back({ &s, area, cb, -sd });
+        // Priority: projected area boosted by staleness. A slot that
+        // hasn't re-rendered in k frames counts as ~(1 + k/30)× its
+        // area, so a small panel overtakes a big fresh one within a
+        // second; never-rendered slots (staleFrames=2^20) win their
+        // first fill immediately.
+        const float priority = area * (1.0f + float(s.staleFrames) * (1.0f / 30.0f));
+        jobs.push_back({ &s, priority, cb, -sd });
     }
     if (jobs.empty()) return;
     std::sort(jobs.begin(), jobs.end(),
@@ -2291,7 +2257,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     }
 
     static Camera s_rttCam;
-    ::View = &s_rttCam;          // restored by the view scope
+    view.setView(&s_rttCam);     // restored by the view scope
 
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
@@ -2439,6 +2405,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         std::memcpy(s.mat->Txtr->Data, s_rttSurf.Data,
                     size_t(s.texW) * size_t(s.texH) * 4);
         Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
+        s.staleFrames = 0;
     }
 
     // ── Restore ─────────────────────────────────────────────────────

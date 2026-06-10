@@ -172,6 +172,13 @@ struct MirrorRttSlot {
     // panel window lands in a camera-dependent sub-rect of the texture.
     struct SlotVert { Vertex *v; float pu, pv; };
     std::vector<SlotVert> verts;
+    // Frames since this slot's texture was last re-rendered. Drives
+    // the job scheduler's staleness weighting: with many slots and a
+    // 2-jobs/frame cap, pure footprint-area ranking permanently
+    // starves small panels (a never-rendered column quad stays black
+    // forever while bigger screens are on screen). Initialized huge so
+    // a slot's FIRST fill wins over routine refreshes.
+    int staleFrames = 1 << 20;
 };
 
 // Pass 1: find the mirror plane by averaging the world-space normal /
