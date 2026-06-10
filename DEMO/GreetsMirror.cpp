@@ -1964,25 +1964,28 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         savedMeshFlags.push_back({ m.cloneMesh, m.cloneMesh->Flags });
         m.cloneMesh->Flags &= ~HTrack_Visible;
     }
-    // Mute clone omnis entirely: flares' footprint gate reads the MAIN
-    // screen's mask with the main XRes (meaningless against the RTT
-    // surface), and the forward vertex Lighting below must see REAL
-    // lights only — 90 range-1500 clones would blow the image out.
+    // Mute clone-omni FLARES: their footprint gate reads the MAIN
+    // screen's mask at main-screen coords — meaningless against the
+    // RTT surface. (Clone LIGHTING needs no handling here: forward
+    // Lighting skips Omni_MirrorClone globally.)
     std::vector<std::pair<Omni*, float>> savedOmniSize;
-    std::vector<std::pair<Omni*, dword>> savedOmniFlags;
     for (Omni *O = sc->OmniHead; O; O = O->Next) {
         if (!(O->Flags & Omni_MirrorClone)) continue;
         savedOmniSize.push_back({ O, O->ISize });
-        savedOmniFlags.push_back({ O, O->Flags });
         O->ISize = 0.0f;
-        O->Flags &= ~Omni_Active;
     }
-    // Forward Gouraud needs lit vertex colors. The main loop's
-    // Lighting() runs AFTER this pass in the tick (and includes the
-    // clone omnis, which the deferred path ignores) — light here with
-    // the real set so frame 1 isn't black and the RTT shading is
-    // clone-free.
-    Lighting(sc);
+    // Forward Gouraud needs lit vertex colors. The tick's own
+    // Lighting() provides them every frame (clone-free now) — but it
+    // runs AFTER this pass, so the very first frame would render from
+    // unlit verts. Prime once; afterwards reuse the previous frame's
+    // colors (1-frame-stale robot shading in a 256px second-bounce
+    // panel is imperceptible). The per-frame Lighting(sc) that used to
+    // sit here was ~4.5 ms — the bulk of the whole RTT pass cost.
+    static bool sLitOnce = false;
+    if (!sLitOnce) {
+        Lighting(sc);
+        sLitOnce = true;
+    }
 
     MainSurf = &s_rttSurf;
     static Camera s_rttCam;
@@ -2121,7 +2124,6 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
 
     // ── Restore the world ───────────────────────────────────────────
     for (auto &p : savedOmniSize)  p.first->ISize = p.second;
-    for (auto &p : savedOmniFlags) p.first->Flags = p.second;
     for (auto &p : savedMeshFlags) p.first->Flags = p.second;
     ::View = prevView;
     sc->NZP = prevNZP;

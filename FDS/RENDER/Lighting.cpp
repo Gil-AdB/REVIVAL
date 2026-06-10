@@ -88,6 +88,15 @@ void StaticLighting(Scene *Sc)
 		{
 			if (!(O->Flags & Omni_Active))
 				continue;
+			// Mirror-clone omnis light only their mirror's clone pixels
+			// (a per-pixel DEFERRED concept — gb.mirrorId gating).
+			// Forward vertex lighting has no such gate, so the ~6×15
+			// full-range greets clones would brighten REAL geometry.
+			// Vertex colors' only consumer in deferred mode is the
+			// mirror RTT offscreen pass, which renders the real scene
+			// and must see real lights only.
+			if (O->Flags & Omni_MirrorClone)
+				continue;
 			if (!(O->Flags & Omni_Stationary))
 				continue;
 			Vector_Sub(&O->IPos, &T->IPos, &u);
@@ -272,6 +281,9 @@ void Lighting(Scene *Sc)
 		for (O = Sc->OmniHead, L = LA; O; O = O->Next)
 		{
 			if (!(O->Flags & Omni_Active))
+				continue;
+			// See the stationary loop above — clones are deferred-only.
+			if (O->Flags & Omni_MirrorClone)
 				continue;
 			if ((T->Flags & Tri_Stationary) && (O->Flags & Omni_Stationary))
 				continue;
