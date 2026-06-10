@@ -1850,35 +1850,33 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s_rttCam.Mat[0][0] = s.axisU.x; s_rttCam.Mat[0][1] = s.axisU.y; s_rttCam.Mat[0][2] = s.axisU.z;
         s_rttCam.Mat[1][0] = s.axisV.x; s_rttCam.Mat[1][1] = s.axisV.y; s_rttCam.Mat[1][2] = s.axisV.z;
         s_rttCam.Mat[2][0] = s.bN.x;    s_rttCam.Mat[2][1] = s.bN.y;    s_rttCam.Mat[2][2] = s.bN.z;
-        // SYMMETRIC frustum centered on the camera's plane-foot
-        // (cu, cv), sized to cover the panel window. A true off-axis
-        // projection (window mapped edge-to-edge) is geometrically
-        // nicer but the engine's mesh-level frustum cull only models
-        // symmetric frusta (`fabs(S.x)*PX > S.z*CntrEX` ⇒ the view
-        // axis must be inside the viewport) — an off-axis CntrE
-        // outside [0, res] culled everything. The window therefore
-        // lands in a camera-dependent SUB-RECT of the texture; the
-        // per-frame UV stamp below keeps the mapping paired with the
-        // freshly rendered content. Texel waste grows with viewing
-        // angle (foot far from the window) — acceptable at 256².
+        // TRUE off-axis projection: the panel window maps edge-to-edge
+        // onto the kRttRes² target, so the window gets every texel
+        // regardless of viewing angle:
+        //   screen_x =  FOVX*(pu - cu)/D + CntrEX  with  u0→0, u1→W
+        //   screen_y = -FOVY*(pv - cv)/D + CntrEY  with  v1→0, v0→H
+        // The projection center generally lies far outside the target;
+        // fds::g_skipLateralFrustumCull (set below) keeps the engine's
+        // symmetric-frustum mesh cull from discarding everything. (The
+        // first cut centered a symmetric frustum on the camera's
+        // plane-foot instead — at oblique angles the window collapsed
+        // to a few dozen texels and smeared, the 'garbled 2nd mirror'.)
         const float cu = j.camPos.x*s.axisU.x + j.camPos.y*s.axisU.y + j.camPos.z*s.axisU.z;
         const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
-        const float halfU = std::max(std::fabs(s.u1 - cu), std::fabs(s.u0 - cu));
-        const float halfV = std::max(std::fabs(s.v1 - cv), std::fabs(s.v0 - cv));
-        if (halfU < 1e-3f || halfV < 1e-3f) continue;
-        const float halfRes = float(kRttRes) * 0.5f;
-        FOVX   = halfRes * D / halfU;
-        FOVY   = halfRes * D / halfV;
-        CntrEX = halfRes;
-        CntrEY = halfRes;
-        CntrX  = kRttRes / 2;
-        CntrY  = kRttRes / 2;
+        FOVX   = float(kRttRes) * D / (s.u1 - s.u0);
+        FOVY   = float(kRttRes) * D / (s.v1 - s.v0);
+        CntrEX = FOVX * (cu - s.u0) / D;
+        CntrEY = FOVY * (s.v1 - cv) / D;
+        CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
+        CntrY  = int32_t(std::min(std::max(CntrEY, -32000.0f), 32000.0f));
         sc->NZP = D * 1.001f + 0.01f;
-        // Stamp this slot's UVs for the projection above: texture
-        // coord of panel point (pu, pv) in the symmetric view.
+        // Stamp this slot's UVs for the projection above. With the
+        // edge-to-edge mapping these are static in window space, but
+        // recomputing through the same formula keeps UV and projection
+        // trivially in lockstep.
         for (const MirrorRttSlot::SlotVert &sv : s.verts) {
-            float tu = ( FOVX * (sv.pu - cu) / D + halfRes) / float(kRttRes);
-            float tv = (-FOVY * (sv.pv - cv) / D + halfRes) / float(kRttRes);
+            float tu = ( FOVX * (sv.pu - cu) / D + CntrEX) / float(kRttRes);
+            float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(kRttRes);
             // Keep off the wrap seam (Txtr_Tiled wraps).
             tu = std::min(std::max(tu, 0.002f), 0.998f);
             tv = std::min(std::max(tv, 0.002f), 0.998f);
@@ -1888,7 +1886,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
 
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * kRttRes * kRttRes);
+        fds::g_skipLateralFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        fds::g_skipLateralFrustumCull = false;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
             Render(RenderPath::ForceForward);

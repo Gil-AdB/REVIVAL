@@ -21,6 +21,17 @@ namespace fds {
 extern CameraContext   g_mainCamera;
 extern FaceListContext g_mainFaces;
 
+// Off-axis projection support for offscreen passes (mirror RTT): when
+// set, Transform_Objects skips the mesh-level lateral (left/right +
+// up/down) frustum rejection — that test models a SYMMETRIC frustum
+// (fabs(S.x)) and discards everything when the projection center lies
+// outside the viewport — and clears Tri_Inside so surviving meshes
+// take the fully-clipped per-vertex path (whose PX/PY screen-bound
+// flags are off-axis-correct). Depth classification stays in effect.
+// Set + restore around the offscreen Transform call; never leave on
+// for the main pass (it disables a useful cull).
+extern bool g_skipLateralFrustumCull;
+
 // Snapshot of the current main-pass render target globals (VPage,
 // ZPage16, XRes, YRes, VESA_BPSL, g_gbuffer*, g_xparZ*) into a
 // RenderTarget. Phase 4 dispatch sites use this to bridge the

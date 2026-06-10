@@ -46,6 +46,9 @@
 // SoA Vertex refactor — Phase 1: per-mesh SoA companion of the AoS
 // transformed-vertex output fields. See docs/SOA_VERTEX_REFACTOR.md.
 #include "Base/VertexFrame.h"
+// fds::g_skipLateralFrustumCull — off-axis projection support for the
+// mirror RTT's offscreen Transform (see FrameState.h).
+#include "Base/FrameState.h"
 
 // Front-to-back face sort. Closer faces dispatch first so subsequent
 // farther faces fail Z and skip the rasterizer's per-pixel work — a
@@ -879,6 +882,18 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		} else {
 			frustumFlags &=~Tri_Inside;
 		}
+		// Out by left/right + up/down. The fabs() makes this a
+		// SYMMETRIC-frustum test (the view axis must sit inside the
+		// viewport). Off-axis passes — the mirror RTT renders through
+		// a panel window whose projection center lies far outside the
+		// target — set fds::g_skipLateralFrustumCull for the duration:
+		// the lateral rejection is skipped and Tri_Inside is cleared so
+		// every surviving mesh takes the fully-clipped vertex path
+		// (per-vertex PX/PY screen-bound flags are off-axis-correct).
+		// Depth (near/far) classification above stays in effect.
+		if (fds::g_skipLateralFrustumCull) {
+			frustumFlags &= ~Tri_Inside;
+		} else {
 		// Out by left/right
 		S.x=fabs(S.x);
 		L1 = PX*S.x - cam.cntrEX*S.z;
@@ -904,6 +919,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 		} else {
 			if (frustumFlags&Tri_Ahead) frustumFlags &=~Tri_Inside;
+		}
 		}
 		VEnd=tVerts+T->VIndex;
 		

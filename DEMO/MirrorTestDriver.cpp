@@ -167,6 +167,10 @@ Scene *BuildInteractiveMirrorTestScene() {
 }
 
 struct MirrorTestScene : SceneDriver {
+    // Second-order RTT slots (--mirror-rtt) — the test scene's two
+    // mirrors face each other, giving simple geometry for debugging
+    // the mirror-in-mirror render path.
+    std::vector<fds::MirrorRttSlot> rttSlots;
     Scene *sc = nullptr;
     std::vector<fds::Mirror> mirrors;
     FrameProfiler prof{"mirrortest"};
@@ -238,6 +242,10 @@ struct MirrorTestScene : SceneDriver {
         fds::g_mainFaces.resize(polys * 2 + 32);
         // BuildMirror cloned the wall material; refresh matTable.
         Scene_RebuildMatTable(sc);
+        // --mirror-rtt: second-order slots (each mirror's clone of the
+        // other's panel). Creates materials + rebuilds the mat table
+        // again internally.
+        fds::PrepareSecondOrderMirrorRtt(sc, mirrors, rttSlots);
 
         Ambient_Factor = 1.0f;
         Diffusive_Factor = 1.0f;
@@ -358,6 +366,7 @@ struct MirrorTestScene : SceneDriver {
         std::memset(VPage, 0, PageSize);
         std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
         Animate_Objects(sc, View);
+        fds::RenderSecondOrderMirrors(sc, mirrors, rttSlots);
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         fds::UpdateAllMirrors(sc, mirrors);
         fds::StampMirrorMasks(sc, mirrors);
@@ -450,6 +459,10 @@ struct MirrorTestScene : SceneDriver {
             FC.IFOV = View->IFOV;
         }
         Animate_Objects(sc, View);
+
+        // Second-order RTT pass (no-op without --mirror-rtt). Before
+        // the main transform — it clobbers per-vertex projections.
+        fds::RenderSecondOrderMirrors(sc, mirrors, rttSlots);
 
         prof.switchTo(PROF_XFRM);
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
