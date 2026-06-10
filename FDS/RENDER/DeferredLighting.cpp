@@ -1964,12 +1964,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 // — kept as one function body so they don't drift.
 enum class XparLayer { Front, Back };
 
-// Froxel-fog hooks for the transparent peel (defined after the froxel
-// globals below): grid validity for this renderFrame + a trilinear sample
-// of the integrated in-scatter/transmittance at a pixel's depth.
+// Fast-fog hooks for the transparent peel (defined after the fog machinery
+// below): per-frame validity + a sample of in-scatter acc / transmittance T
+// at a pixel's own depth. Froxel variant fetches the grid; screen-space
+// variant evaluates the analytic/blob fog for the ray.
 static bool FastFog_XparActive();
 static void FastFog_SampleGrid(int px, int py, float z,
                                float& aR, float& aG, float& aB, float& T);
+static bool FastFog_SSActive();
+static void FastFog_SSSample(int px, int py, float z,
+                             float& aR, float& aG, float& aB, float& T);
 
 template <XparLayer Layer>
 static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &ctx,
@@ -2193,13 +2197,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
 
-			// Fast-fog froxel path active this frame: fog is applied to the
-			// FINAL lit color below (lit·T(z) + acc(z)) instead of the
-			// legacy per-light sqrt ramp here — with the background already
-			// fully fogged by the froxel composite, the exact blend is
-			// out = α·(C·T + acc) + (1−α)·Bg.
+			// Fast-fog active this frame (froxel grid or screen-space): fog
+			// is applied to the FINAL lit color below (lit·T(z) + acc(z))
+			// instead of the legacy per-light sqrt ramp here — with the
+			// background already fully fogged by the fast-fog composite,
+			// the exact blend is out = α·(C·T + acc) + (1−α)·Bg.
 			const bool froxelFog = FastFog_XparActive();
-			if (!froxelFog && (ctx.Sc->Flags & Scn_Fogged)) {
+			const bool ssFog     = !froxelFog && FastFog_SSActive();
+			if (!froxelFog && !ssFog && (ctx.Sc->Flags & Scn_Fogged)) {
 				// sqrt(t) via fast_rsqrt: sqrt(t) = t * rsqrt(t).
 				// Guarded against t<=0 (rsqrt undefined at 0).
 				const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
@@ -2215,7 +2220,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// Specular added on top — independent of base color tint.
 			if (wantSpecular) {
 				float fogScale = 1.0f;
-				if (!froxelFog && (ctx.Sc->Flags & Scn_Fogged)) {
+				if (!froxelFog && !ssFog && (ctx.Sc->Flags & Scn_Fogged)) {
 					const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
 					fogScale = t > 0.0f ? t * fast_rsqrt(t) : 0.0f;
 				}
@@ -2223,12 +2228,21 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG += int(sG * fogScale);
 				litR += int(sR * fogScale);
 			}
-			if (froxelFog) {
+			if (froxelFog || ssFog) {
 				float aR_, aG_, aB_, T_;
-				FastFog_SampleGrid(px, py, z, aR_, aG_, aB_, T_);
-				litR = int(float(litR)*T_ + aR_);
-				litG = int(float(litG)*T_ + aG_);
-				litB = int(float(litB)*T_ + aB_);
+				if (froxelFog) FastFog_SampleGrid(px, py, z, aR_, aG_, aB_, T_);
+				else           FastFog_SSSample(px, py, z, aR_, aG_, aB_, T_);
+				// In-scatter weight per blend rule. The path's fog [0,z] must
+				// appear ONCE in the final pixel: the blend keeps dstWeight of
+				// the background (which already carries that fog), so the
+				// layer contributes acc·(1−dstWeight)·srcWeightInv. α-blend
+				// (dst (1−α), src ×α later) → acc·1 here. Legacy additive
+				// (dst/2, src ×1) → acc·0.5 — full acc double-counts and
+				// blew the city water out white.
+				const float accW = (Mat->XparBlendAlpha > 0.0f) ? 1.0f : 0.5f;
+				litR = int(float(litR)*T_ + aR_*accW);
+				litG = int(float(litG)*T_ + aG_*accW);
+				litB = int(float(litB)*T_ + aB_*accW);
 			}
 			if (litB > 255) litB = 255;
 			if (litG > 255) litG = 255;
@@ -6305,26 +6319,18 @@ static inline void fogInscatterSegment(const FastFogParams& P, float X, float Y,
 	}
 }
 
-// Fog amount [0,1] for one pixel, plus the surface distance used (for the
-// half-res bilateral upsample) and the in-scatter glow RGB (premultiplied by
-// fog amount). Returns 0 amount where the ray doesn't fog.
-static inline float fogAtPixel(const FastFogParams& P, int px, int py,
-                               float& outZ, float& glowR, float& glowG, float& glowB)
+// Fog amount [0,1] for one pixel's ray integrated to an EXPLICIT depth zMax,
+// plus the in-scatter glow RGB (premultiplied by fog amount). The depth-
+// agnostic core shared by the opaque pass (fogAtPixel reads the Z-buffer)
+// and the transparent peel (which fogs each xpar pixel to ITS OWN depth).
+static inline float fogAtDepth(const FastFogParams& P, int px, int py,
+                               float zMax, float& glowR, float& glowG, float& glowB)
 {
 	glowR = glowG = glowB = 0.0f;
-	const uint16_t *zEnc = ZPage16;
-	const size_t i = size_t(py) * size_t(XRes) + size_t(px);
+	if (zMax <= 0.0f) return 0.0f;
 	const float Y  = (CntrEY - float(py)) * P.invFOVY;
 	const float X  = (float(px) - CntrEX) * P.invFOVX;
 	const float uV = X*X + Y*Y + 1.0f;
-
-	// Sky (no surface) fogs at the far plane so the horizon fades into the
-	// fog color; opaque surfaces clamp to FZP so fog saturates.
-	const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
-	const float zMax  = (zSurf <= 0.0f) ? P.fogFar : std::min(zSurf, P.fogFar);
-	outZ = zMax;
-	if (zMax <= 0.0f) return 0.0f;
-
 	const float Vlen = std::sqrt(uV);
 	const float gY = P.w10 * X + P.w11 * Y + P.w12;
 
@@ -6400,10 +6406,64 @@ static inline float fogAtPixel(const FastFogParams& P, int px, int py,
 		const float jitter = P.inscatterJitter ? ign
 		    : 0.5f;   // off → centered (k+0.5) samples (terraces unless PCF/high ns)
 		fogInscatterSegment(P, X, Y, zA, zB, jitter, gR, gG, gB);
-		const float s = amt * P.inscatter;
-		glowR = gR * s; glowG = gG * s; glowB = gB * s;
+		// Soft-knee glow compressor — same as the froxel populate (linear
+		// below glowMax/2, asymptote at glowMax), applied to the glow
+		// radiance before the fog-amount premultiply. The ambient term is
+		// composited separately here (fogColor·amt) and sits well below the
+		// knee, so compressing just the glow matches the froxel result.
+		gR *= P.inscatter; gG *= P.inscatter; gB *= P.inscatter;
+		if (P.glowMax > 0.0f) {
+			const float m = gR > gG ? (gR > gB ? gR : gB) : (gG > gB ? gG : gB);
+			const float k = P.glowMax * 0.5f;
+			if (m > k) {
+				const float e = m - k;
+				const float s = (k + e / (1.0f + e / k)) / m;
+				gR *= s; gG *= s; gB *= s;
+			}
+		}
+		glowR = gR * amt; glowG = gG * amt; glowB = gB * amt;
 	}
 	return amt;
+}
+
+// Fog amount [0,1] for one pixel, plus the surface distance used (for the
+// half-res bilateral upsample) and the in-scatter glow RGB (premultiplied by
+// fog amount). Returns 0 amount where the ray doesn't fog.
+static inline float fogAtPixel(const FastFogParams& P, int px, int py,
+                               float& outZ, float& glowR, float& glowG, float& glowB)
+{
+	const uint16_t *zEnc = ZPage16;
+	const size_t i = size_t(py) * size_t(XRes) + size_t(px);
+	// Sky (no surface) fogs at the far plane so the horizon fades into the
+	// fog color; opaque surfaces clamp to FZP so fog saturates.
+	const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
+	const float zMax  = (zSurf <= 0.0f) ? P.fogFar : std::min(zSurf, P.fogFar);
+	outZ = zMax;
+	return fogAtDepth(P, px, py, zMax, glowR, glowG, glowB);
+}
+
+// ── Screen-space fog hook for the transparent peel ──────────────────────
+// Mirror of the froxel-grid hook (FastFog_SampleGrid): when the SCREEN-SPACE
+// fast_fog ran this frame, the peel fogs each transparent pixel's lit color
+// to its own depth with the same model the opaque composite used:
+// T = 1−amt, acc = fogColor·amt + glow. Exact (full per-pixel evaluation,
+// including the blob DDA march when blobs are on) — transparent coverage is
+// the cost bound; the froxel path's grid fetch is the cheap variant.
+namespace {
+	FastFogParams gSSFogP;          // this frame's screen-space fog params
+	bool          gSSFogActive = false;
+}
+static bool FastFog_SSActive() { return gSSFogActive; }
+static void FastFog_SSSample(int px, int py, float z,
+                             float& aR, float& aG, float& aB, float& T)
+{
+	float gR, gG, gB;
+	const float zMax = z < gSSFogP.fogFar ? z : gSSFogP.fogFar;
+	const float amt = fogAtDepth(gSSFogP, px, py, zMax, gR, gG, gB);
+	T  = 1.0f - amt;
+	aR = gSSFogP.fogR * amt + gR;
+	aG = gSSFogP.fogG * amt + gG;
+	aB = gSSFogP.fogB * amt + gB;
 }
 
 // Composite a fog amount (mix toward fog color) plus additive in-scatter
@@ -6610,8 +6670,8 @@ namespace {
 }
 
 // Called at the top of renderFrame (RENDER.CPP) so a frame whose fog pass
-// doesn't run (reflection pass, non-fog scenes) can't sample a stale grid.
-void FastFog_BeginFrame() { gFrFrameActive = false; }
+// doesn't run (reflection pass, non-fog scenes) can't sample stale fog state.
+void FastFog_BeginFrame() { gFrFrameActive = false; gSSFogActive = false; }
 static bool FastFog_XparActive() { return gFrFrameActive; }
 
 // Trilinear sample of the integrated froxel grid (in-scatter acc + trans-
@@ -7295,6 +7355,11 @@ void Render_DeferredFastFog() {
 		++gFrFrameIdx;
 		return;
 	}
+
+	// Screen-space path runs: arm the transparent peel's per-pixel fog hook
+	// (the froxel branch above returned already; it has its own grid hook).
+	gSSFogP = P;
+	gSSFogActive = fds::FeatureFlags::fast_fog_xpar();
 
 	if (adaptive || fds::FeatureFlags::fast_fog_halfres()) {
 		// Downsampled compute on a coarse grid (step = coarseStep), then
