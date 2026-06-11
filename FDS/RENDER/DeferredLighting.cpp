@@ -4066,7 +4066,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     //       at z=zMid. Whole segment in or out (binary).
                     //       Stair-steps at shadow boundaries; tolerable
                     //       because halos are inherently diffuse.
-                    if (useAnalytic && !narrowCone) {
+                    if (useAnalytic) {
                         // α z² + β z + γ = rr²·d²(z) + 0.05
                         const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
                         // Per-lane uV (= X²+Y²+1, varies per pixel).
@@ -4116,20 +4116,81 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         // and the near-equal difference amplifies the
                         // error by 2·invD. The identity feeds ONE atan
                         // a small well-conditioned argument instead.
-                        const __m256 vNum     = _mm256_sub_ps(vArgHi, vArgLo);
-                        const __m256 vDen     = _mm256_fmadd_ps(vArgHi, vArgLo, vOne_v);
-                        const __m256 mDenZero = _mm256_cmp_ps(
-                                                _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vDen),
-                                                _mm256_set1_ps(1e-20f), _CMP_LT_OQ);
-                        const __m256 vSafeDen = _mm256_blendv_ps(vDen, _mm256_set1_ps(1e-20f), mDenZero);
-                        const __m256 vRatio   = _mm256_div_ps(vNum, vSafeDen);
-                        __m256 vAtanD         = atan_approx_x8(vRatio);
-                        const __m256 mWrap    = _mm256_cmp_ps(vDen, vZero_v, _CMP_LT_OQ);
-                        vAtanD = _mm256_add_ps(vAtanD,
-                                 _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
-                        const __m256 vIntegral = _mm256_mul_ps(
-                                                 _mm256_add_ps(vInvD, vInvD),
-                                                 vAtanD);
+                        // Stable atan difference via the identity
+                        // atan(u)−atan(v) = atan((u−v)/(1+uv)) (+π when
+                        // uv<−1) — avoids subtracting two atans of huge
+                        // near-equal arguments in the ray-grazes-light
+                        // regime.
+                        auto atanDiff = [&](const __m256 &u1, const __m256 &u0) -> __m256 {
+                            const __m256 num  = _mm256_sub_ps(u1, u0);
+                            const __m256 den  = _mm256_fmadd_ps(u1, u0, vOne_v);
+                            const __m256 mDen0 = _mm256_cmp_ps(
+                                _mm256_andnot_ps(_mm256_set1_ps(-0.0f), den),
+                                _mm256_set1_ps(1e-20f), _CMP_LT_OQ);
+                            const __m256 safeDen = _mm256_blendv_ps(den, _mm256_set1_ps(1e-20f), mDen0);
+                            __m256 at = atan_approx_x8(_mm256_div_ps(num, safeDen));
+                            const __m256 mWrap = _mm256_cmp_ps(den, vZero_v, _CMP_LT_OQ);
+                            return _mm256_add_ps(at,
+                                   _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
+                        };
+                        // coneAtten (smoothstep cosO→cosI) at a given z.
+                        auto coneAttenAt = [&](const __m256 &z) -> __m256 {
+                            const __m256 Wx = _mm256_sub_ps(_mm256_mul_ps(z, vX_v), vPx_v);
+                            const __m256 Wy = _mm256_sub_ps(_mm256_mul_ps(z, vY_v), vPy_v);
+                            const __m256 Wz = _mm256_sub_ps(z, vPz_v);
+                            const __m256 W2 = _mm256_fmadd_ps(Wx, Wx,
+                                              _mm256_fmadd_ps(Wy, Wy,
+                                               _mm256_mul_ps(Wz, Wz)));
+                            const __m256 DW = _mm256_fmadd_ps(vDx_v, Wx,
+                                              _mm256_fmadd_ps(vDy_v, Wy,
+                                               _mm256_mul_ps(vDz_dir_v, Wz)));
+                            const __m256 safeW2 = _mm256_max_ps(W2, _mm256_set1_ps(1e-12f));
+                            const __m256 cosT = _mm256_mul_ps(DW, _mm256_rsqrt_ps(safeW2));
+                            __m256 t = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
+                            t = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t));
+                            const __m256 sm = _mm256_mul_ps(_mm256_mul_ps(t, t),
+                                              _mm256_sub_ps(vThree_v, _mm256_mul_ps(vTwo_v, t)));
+                            const __m256 mIn = _mm256_cmp_ps(cosT, vCosI_v, _CMP_GE_OQ);
+                            return _mm256_blendv_ps(sm, vOne_v, mIn);
+                        };
+                        __m256 vIntegral;
+                        if (!narrowCone) {
+                            // Wide cones: single closed form. coneAtten
+                            // is applied at the midpoint further below.
+                            vIntegral = _mm256_mul_ps(
+                                        _mm256_add_ps(vInvD, vInvD),
+                                        atanDiff(vArgHi, vArgLo));
+                        } else {
+                            // Narrow cones (disco beams): per-segment
+                            // hybrid. The pure midpoint coneAtten fans
+                            // into stripes (cosT_mid varies violently
+                            // across a thin cone), and a uniform-z
+                            // ray-march loses the sharp 1/d² spike to a
+                            // sample lottery (picket-fence slats). Here
+                            // each of 8 segments gets the EXACT distance
+                            // integral (stable per-segment atan diff)
+                            // weighted by coneAtten at its midpoint —
+                            // no lottery, no global midpoint.
+                            constexpr int SEG = 8;
+                            const __m256 vSegDz = _mm256_mul_ps(
+                                _mm256_sub_ps(vZHi_v, vZLo_v),
+                                _mm256_set1_ps(1.0f / SEG));
+                            __m256 vSum  = vZero_v;
+                            __m256 uPrev = vArgLo;
+                            for (int seg = 1; seg <= SEG; ++seg) {
+                                const __m256 zk = _mm256_fmadd_ps(
+                                    _mm256_set1_ps(float(seg)), vSegDz, vZLo_v);
+                                const __m256 uk = _mm256_mul_ps(vInvD,
+                                    _mm256_fmadd_ps(vTwoA, zk, vBeta));
+                                const __m256 zm = _mm256_fmadd_ps(
+                                    _mm256_set1_ps(float(seg) - 0.5f), vSegDz, vZLo_v);
+                                vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
+                                                       coneAttenAt(zm), vSum);
+                                uPrev = uk;
+                            }
+                            vIntegral = _mm256_mul_ps(
+                                        _mm256_add_ps(vInvD, vInvD), vSum);
+                        }
 
                         // Midpoint sample: cosT_mid and surfaceFade_mid
                         // approximate the otherwise-z-dependent factors.
@@ -4167,7 +4228,11 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                                 _mm256_sub_ps(vThree_v,
                                                   _mm256_mul_ps(vTwo_v, t_m)));
                         const __m256 mInner_m = _mm256_cmp_ps(cosT_m, vCosI_v, _CMP_GE_OQ);
-                        const __m256 coneAtten_m = _mm256_blendv_ps(smooth_m, vOne_v, mInner_m);
+                        // Narrow cones already folded coneAtten in per
+                        // segment — don't apply the midpoint one again.
+                        const __m256 coneAtten_m = narrowCone
+                            ? vOne_v
+                            : _mm256_blendv_ps(smooth_m, vOne_v, mInner_m);
                         // surfaceFade at midpoint.
                         const __m256 mFade_m  = _mm256_cmp_ps(vZMid, vFadeStart_v, _CMP_GT_OQ);
                         const __m256 fadeVal_m = _mm256_mul_ps(
@@ -4379,7 +4444,12 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     // calibrated against the global N_SAMPLES, so the
                     // narrow-cone 16-sample march renormalizes — the
                     // extra samples buy smoothness, not brightness.
-                    const float nNorm = float(N_SAMPLES) / float(nSamp);
+                    // The analytic/hybrid branch never marched: its
+                    // result is already N_SAMPLES × mean (no renorm —
+                    // applying it dimmed the hybrid beams 4× into
+                    // invisibility).
+                    const float nNorm = useAnalytic
+                        ? 1.0f : float(N_SAMPLES) / float(nSamp);
                     for (int lane = 0; lane < 8; ++lane) {
                         if (accArr[lane] <= 0.0f) continue;
                         const float w = accArr[lane] * density * nNorm;
