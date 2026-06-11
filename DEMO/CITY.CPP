@@ -1698,6 +1698,70 @@ static void bakeBuildingPanorama(Object* Obj,
 #endif
 }
 
+// ── Vehicle headlights ("for the lulz") ──────────────────────────────
+// Every path-following mesh (Tri_AlignToPath — the ships) gets one warm
+// spotlight welded to its nose, re-aimed along its motion Heading every
+// frame. The cones read as volumetric beams under --draw_cones and glow
+// in the froxel fog; surface lighting paints the buildings they sweep.
+// No shadows (N moving shadow maps would eat the frame budget).
+namespace {
+struct VehicleHeadlight { TriMesh* T; Omni* spot; Vector lastDir; };
+std::vector<VehicleHeadlight> g_headlights;
+}
+
+static void Setup_Vehicle_Headlights()
+{
+	g_headlights.clear();
+	if (!fds::FeatureFlags::city_headlights()) return;
+	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
+		if (O->Type != Obj_TriMesh) continue;
+		TriMesh *T = (TriMesh *)O->Data;
+		if (!(T->Flags & Tri_AlignToPath)) continue;
+		Omni *spot = fds::MakeSpotLight(
+			CitySc,
+			/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
+			fds::FeatureFlags::city_headlight_intensity(),
+			/*range*/ 3000.0f,                               // ~30m at 1cm/unit
+			T->IPos, Vector(0.0f, 0.0f, 1.0f),
+			/*hot=*/6.0f, /*outer=*/16.0f,
+			/*shadowMapRes=*/0, /*castsShadow=*/false);
+		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 1.0f)});
+		fprintf(stderr, "[CITY] headlight on '%s'\n", O->Name ? O->Name : "?");
+	}
+	fprintf(stderr, "[CITY] %zu vehicle headlights\n", g_headlights.size());
+}
+
+// Re-aim after Animate_Objects (which re-evaluates each spot's single-key
+// Pos spline back to its creation pos — overwrite wins, same pattern as
+// the greets robot spots).
+static void Update_Vehicle_Headlights()
+{
+	const float intensity = fds::FeatureFlags::city_headlights()
+	    ? fds::FeatureFlags::city_headlight_intensity() : 0.0f;
+	for (VehicleHeadlight &h : g_headlights) {
+		TriMesh *T = h.T;
+		Vector dir = T->Heading;
+		const float l2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+		if (l2 > 1e-6f) {
+			const float il = 1.0f / std::sqrt(l2);
+			dir.x *= il; dir.y *= il; dir.z *= il;
+			h.lastDir = dir;
+		} else {
+			dir = h.lastDir;       // parked/slow: keep the last good aim
+		}
+		// Nose mount: hull center (IPos is the pivot; BSphereCtr is the
+		// mesh-local center) pushed just outside the bounding sphere so
+		// the beam doesn't start inside the mesh (the cone march would
+		// light its own cabin).
+		const float nose = T->BSphereRadius > 0.0f ? T->BSphereRadius : 50.0f;
+		h.spot->IPos.x = T->IPos.x + T->BSphereCtr.x + dir.x * nose;
+		h.spot->IPos.y = T->IPos.y + T->BSphereCtr.y + dir.y * nose;
+		h.spot->IPos.z = T->IPos.z + T->BSphereCtr.z + dir.z * nose;
+		h.spot->IDir  = dir;
+		h.spot->ISize = intensity * (T->Flags & HTrack_Visible ? 1.0f : 0.0f);
+	}
+}
+
 void Initialize_City()
 {
 	CitySc = loadSceneAligned("SCENES/CITY.FLD");
@@ -2138,6 +2202,8 @@ void Initialize_City()
 			ShadowMaps_BakeStatic(CitySc);
 		}
 	}
+
+	Setup_Vehicle_Headlights();
 }
 
 #ifdef TRACE_OBJECTS
@@ -2304,6 +2370,7 @@ struct CityScene : SceneDriver {
 
 
 		Animate_Objects(CitySc, View);
+		Update_Vehicle_Headlights();
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
