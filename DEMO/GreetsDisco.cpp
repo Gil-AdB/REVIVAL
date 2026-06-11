@@ -649,4 +649,89 @@ void UpdateDiscoBall(Scene *sc, float t)
     }
 }
 
+void DiscoBloomPost()
+{
+    if (!s_ball || !VPage || !::View) return;
+    const float strength = FeatureFlags::disco_bloom();
+    if (strength <= 0.0f) return;
+    // Ball center → view space → screen.
+    Vector rel = { s_ball->IPos.x - ::View->ISource.x,
+                   s_ball->IPos.y - ::View->ISource.y,
+                   s_ball->IPos.z - ::View->ISource.z };
+    Vector w;
+    MatrixXVector(::View->Mat, &rel, &w);
+    if (w.z < 0.5f) return;  // behind / at the camera
+    const float sx  = FOVX * w.x / w.z + CntrEX;
+    const float sy  = -FOVY * w.y / w.z + CntrEY;
+    const float rpx = FOVX * kRadius / w.z;
+    if (rpx < 4.0f) return;  // too far to matter
+    const int pad = int(rpx * 0.8f) + 8;
+    const int x0 = std::max(int(sx - rpx) - pad, 0);
+    const int y0 = std::max(int(sy - rpx) - pad, 0);
+    const int x1 = std::min(int(sx + rpx) + pad, int(XRes));
+    const int y1 = std::min(int(sy + rpx) + pad, int(YRes));
+    if (x1 - x0 < 8 || y1 - y0 < 8) return;
+
+    // Quarter-res bright-pass accumulation.
+    constexpr int DS = 4;
+    const int bw = (x1 - x0 + DS - 1) / DS;
+    const int bh = (y1 - y0 + DS - 1) / DS;
+    static std::vector<float> acc, tmp;
+    acc.assign(size_t(bw) * size_t(bh), 0.0f);
+    tmp.assign(size_t(bw) * size_t(bh), 0.0f);
+    const dword *fb = reinterpret_cast<const dword*>(VPage);
+    constexpr int kThresh = 200;
+    for (int y = y0; y < y1; ++y) {
+        const dword *row = fb + size_t(y) * size_t(XRes);
+        float *arow = acc.data() + size_t((y - y0) / DS) * bw;
+        for (int x = x0; x < x1; ++x) {
+            const dword c = row[x];
+            const int b = int(c & 0xFF), g = int((c >> 8) & 0xFF),
+                      r = int((c >> 16) & 0xFF);
+            const int lum = std::max(std::max(r, g), b);
+            if (lum > kThresh) arow[(x - x0) / DS] += float(lum - kThresh);
+        }
+    }
+    const float norm = 1.0f / float(DS * DS);
+    // Two 3x3 box passes ≈ a soft gaussian at quarter res.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int y = 0; y < bh; ++y) {
+            for (int x = 0; x < bw; ++x) {
+                float sum = 0.0f; int n = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int yy = y + dy;
+                    if (yy < 0 || yy >= bh) continue;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int xx = x + dx;
+                        if (xx < 0 || xx >= bw) continue;
+                        sum += acc[size_t(yy) * bw + xx]; ++n;
+                    }
+                }
+                tmp[size_t(y) * bw + x] = sum / float(n);
+            }
+        }
+        std::swap(acc, tmp);
+    }
+    // Additive composite, slightly cool-tinted to match the glints.
+    dword *out = reinterpret_cast<dword*>(VPage);
+    const float k = strength * norm * 0.9f;
+    for (int y = y0; y < y1; ++y) {
+        dword *row = out + size_t(y) * size_t(XRes);
+        const float *arow = acc.data() + size_t((y - y0) / DS) * bw;
+        for (int x = x0; x < x1; ++x) {
+            const float v = arow[(x - x0) / DS] * k;
+            if (v < 1.0f) continue;
+            const int add = std::min(int(v), 255);
+            const dword c = row[x];
+            int b = int(c & 0xFF) + add;
+            int g = int((c >> 8) & 0xFF) + (add * 242 >> 8);
+            int r = int((c >> 16) & 0xFF) + (add * 224 >> 8);
+            if (b > 255) b = 255;
+            if (g > 255) g = 255;
+            if (r > 255) r = 255;
+            row[x] = (c & 0xFF000000u) | (dword(r) << 16) | (dword(g) << 8) | dword(b);
+        }
+    }
+}
+
 }  // namespace fds

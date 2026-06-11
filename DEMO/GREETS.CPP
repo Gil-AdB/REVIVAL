@@ -2085,6 +2085,10 @@ struct GreetsScene : SceneDriver {
 			sF9Prev = f9Now;
 		}
 
+		// Disco-ball bloom: post-pass over the ball's screen disc
+		// (no-op when --no-greets-disco / ball off-screen).
+		fds::DiscoBloomPost();
+
 		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {
 			fds::DebugOverlayMirrorMask(GreetSc);

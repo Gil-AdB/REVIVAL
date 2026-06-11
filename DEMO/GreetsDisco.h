@@ -33,6 +33,11 @@ bool BuildDiscoBall(Scene *sc);
 // deterministic and scrub-safe.
 void UpdateDiscoBall(Scene *sc, float timerTicks);
 
+// Screen-space bloom over the ball's projected disc (threshold the
+// glints, quarter-res blur, additive composite). Call AFTER the frame
+// is rendered, before flip. No-op when the ball is off/behind.
+void DiscoBloomPost();
+
 }  // namespace fds
 
 #endif  // DEMO_GREETS_DISCO_H
