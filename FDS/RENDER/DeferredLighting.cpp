@@ -7821,6 +7821,151 @@ void Render_ScreenSpaceRain() {
 	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 
+// ─── On-camera lens droplets ──────────────────────────────────────────────
+// Persistent water drops on the "lens" while it rains: each is a small disc
+// that REFRACTS — shows a minified, inverted copy of the scene behind it
+// (sampled from a snapshot of its own rect, so reads don't see writes) with
+// a darkened rim and a specular glint. Drops spawn at a rate tied to
+// rain_intensity, dwell stuck for a while, then trickle downward with a
+// wobble, shrinking as they shed mass. All randomness is hash-seeded off a
+// spawn counter (deterministic — paused captures stay byte-stable) and all
+// motion integrates scene time, so pause freezes the trickle mid-slide.
+// Single-threaded: a realistic pool is ~25 drops × ~1.5k px each.
+namespace {
+struct LensDrop {
+	float x, y, r;
+	float age, dwell, life;
+	float vy, wobPh;
+	uint32_t seed;
+};
+std::vector<LensDrop> gLensDrops;
+float    gLensSpawnAcc  = 0.0f;
+uint32_t gLensSpawnSeq  = 0x5EED;
+int32_t  gLensPrevFT    = -1;
+}
+
+void Render_LensDrops() {
+	if (!fds::FeatureFlags::rain() || !fds::FeatureFlags::rain_lens()) {
+		gLensDrops.clear(); gLensPrevFT = -1;
+		return;
+	}
+	const float intensity = fds::FeatureFlags::rain_intensity();
+	if (!VPage) return;
+
+	// Scene-time delta (Timer = centiseconds). Clamped: pause/scrub
+	// rollback gives 0 (drops freeze), big forward scrubs cap at 100ms.
+	float dt = 0.0f;
+	if (gLensPrevFT >= 0) {
+		const float d = float(g_FrameTime - gLensPrevFT) * 0.01f;
+		dt = d < 0.0f ? 0.0f : (d > 0.1f ? 0.1f : d);
+	}
+	gLensPrevFT = g_FrameTime;
+
+	auto h01 = [](uint32_t s, int k) {
+		return float(cellHash(int(s), k, 0x10F5) & 0xFFFFu) * (1.0f/65536.0f);
+	};
+
+	// Spawn: ~5/s at intensity 1, pool-capped.
+	gLensSpawnAcc += dt * 5.0f * (intensity < 2.0f ? intensity : 2.0f);
+	while (gLensSpawnAcc >= 1.0f && gLensDrops.size() < 40) {
+		gLensSpawnAcc -= 1.0f;
+		const uint32_t s = gLensSpawnSeq++;
+		LensDrop d;
+		d.seed  = s;
+		d.x     = h01(s, 1) * float(XRes);
+		d.y     = h01(s, 2) * float(YRes) * 0.85f;
+		d.r     = 7.0f + h01(s, 3) * 17.0f;
+		d.age   = 0.0f;
+		d.dwell = 0.8f + h01(s, 4) * 3.0f;
+		d.life  = d.dwell + 2.0f + h01(s, 5) * 4.0f;
+		d.vy    = 0.0f;
+		d.wobPh = h01(s, 6) * 6.2832f;
+		gLensDrops.push_back(d);
+	}
+
+	dword* out = reinterpret_cast<dword*>(VPage);
+	static std::vector<dword> rect;       // per-drop source snapshot
+	for (size_t di = 0; di < gLensDrops.size(); ) {
+		LensDrop& d = gLensDrops[di];
+		d.age += dt;
+		if (d.age > d.dwell) {
+			// Trickle: gravity-ish, wobble, shed mass.
+			d.vy += 260.0f * dt;
+			if (d.vy > 330.0f) d.vy = 330.0f;
+			d.y  += d.vy * dt;
+			d.x  += std::sin(d.age * 9.0f + d.wobPh) * d.r * 0.6f * dt;
+			d.r  -= d.r * 0.16f * dt;
+		}
+		if (d.age > d.life || d.r < 3.0f || d.y - d.r > float(YRes)) {
+			gLensDrops[di] = gLensDrops.back();
+			gLensDrops.pop_back();
+			continue;
+		}
+		// Fade in over the first 150 ms (condensation forming).
+		const float fade = d.age < 0.15f ? d.age * (1.0f/0.15f) : 1.0f;
+		const int ri  = int(d.r);
+		const int cx  = int(d.x), cy = int(d.y);
+		int xa = cx - ri, xb = cx + ri + 1, ya = cy - ri, yb = cy + ri + 1;
+		if (xa < 0) xa = 0; if (ya < 0) ya = 0;
+		if (xb > (int)XRes) xb = (int)XRes; if (yb > (int)YRes) yb = (int)YRes;
+		if (xa >= xb || ya >= yb) { ++di; continue; }
+		const int rw = xb - xa, rh = yb - ya;
+		rect.resize(size_t(rw) * size_t(rh));
+		for (int y = 0; y < rh; ++y)
+			std::memcpy(rect.data() + size_t(y)*rw,
+			            out + size_t(ya+y)*XRes + xa,
+			            size_t(rw) * sizeof(dword));
+		const float invR2 = 1.0f / (d.r * d.r);
+		// Specular glint sits up-left of center.
+		const float gx = d.x - d.r*0.35f, gy = d.y - d.r*0.35f;
+		const float gr2 = d.r*d.r*0.04f;
+		for (int py = ya; py < yb; ++py) {
+			const float dy_ = float(py) - d.y;
+			for (int px = xa; px < xb; ++px) {
+				const float dx_ = float(px) - d.x;
+				const float t2 = (dx_*dx_ + dy_*dy_) * invR2;
+				if (t2 > 1.0f) continue;
+				// Refraction: minified INVERTED background — sample the
+				// snapshot at center − 0.55·offset (lens flips the image).
+				int sx = int(d.x - dx_*0.55f) - xa;
+				int sy = int(d.y - dy_*0.55f) - ya;
+				if (sx < 0) sx = 0; if (sx >= rw) sx = rw-1;
+				if (sy < 0) sy = 0; if (sy >= rh) sy = rh-1;
+				const dword s = rect[size_t(sy)*rw + sx];
+				float sR = float((s>>16)&0xFFu);
+				float sG = float((s>> 8)&0xFFu);
+				float sB = float( s     &0xFFu);
+				// Rim darkening (refraction steepens at the edge) + a
+				// touch of cool tint so drops read on flat areas.
+				if (t2 > 0.62f) {
+					const float k = 1.0f - (t2 - 0.62f) * (1.0f/0.38f) * 0.45f;
+					sR *= k; sG *= k; sB *= k;
+				}
+				sB = sB + 14.0f > 255.0f ? 255.0f : sB + 14.0f;
+				// Glint.
+				const float gdx = float(px)-gx, gdy = float(py)-gy;
+				if (gdx*gdx + gdy*gdy < gr2) {
+					sR += 70.0f; sG += 70.0f; sB += 70.0f;
+					if (sR > 255.0f) sR = 255.0f;
+					if (sG > 255.0f) sG = 255.0f;
+					if (sB > 255.0f) sB = 255.0f;
+				}
+				// Edge AA + spawn fade.
+				float a = fade;
+				if (t2 > 0.82f) a *= (1.0f - t2) * (1.0f/0.18f);
+				const size_t i = size_t(py)*XRes + size_t(px);
+				const dword pix = out[i];
+				const float keep = 1.0f - a;
+				const int nR = int(float((pix>>16)&0xFFu)*keep + sR*a);
+				const int nG = int(float((pix>> 8)&0xFFu)*keep + sG*a);
+				const int nB = int(float( pix     &0xFFu)*keep + sB*a);
+				out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+			}
+		}
+		++di;
+	}
+}
+
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
 // renderFrame in RENDER.CPP dispatches transparent-layer composites in a
 // tile-job lambda; the template + g_deferredCtx live here, so we expose
