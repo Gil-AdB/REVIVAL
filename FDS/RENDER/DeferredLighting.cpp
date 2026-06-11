@@ -3897,6 +3897,19 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
                     const float cosO = lights->cosOuter[li];
                     const float cosI = lights->cosInner[li];
+                    // Narrow cones (half-angle < ~10°, the disco beams)
+                    // ray-march at a fixed 16 samples: the analytic
+                    // path stripes on them (fan-of-lines moire,
+                    // resistant to NR-refined rsqrt/rcp and a stable
+                    // atan-difference identity — root cause still
+                    // unidentified), and the global N=4 march shows
+                    // jitter grain + sample-shell rungs. 16 jittered
+                    // samples integrate the thin cone accurately and
+                    // smoothly. Wide city-scale cones keep the
+                    // measured analytic win.
+                    const bool  narrowCone = cosO > 0.985f;
+                    const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
+                    const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
                     const float r2   = lights->range2[li];
                     const float rr   = lights->rRange[li];
                     const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
@@ -4004,7 +4017,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     alignas(32) float dzArr[8] = {}, invDzArr[8] = {}, fadeStartArr[8] = {};
                     for (int lane = 0; lane < 8; ++lane) {
                         if (aliveLane[lane] == 0.0f) continue;
-                        const float d = (zHiArr[lane] - zLoArr[lane]) * inv_N;
+                        const float d = (zHiArr[lane] - zLoArr[lane]) * inv_nSamp;
                         dzArr[lane]        = d;
                         invDzArr[lane]     = 1.0f / d;
                         fadeStartArr[lane] = zMaxArr[lane] - d;
@@ -4053,13 +4066,6 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     //       at z=zMid. Whole segment in or out (binary).
                     //       Stair-steps at shadow boundaries; tolerable
                     //       because halos are inherently diffuse.
-                    // Narrow cones: the boundary quadratic goes ill-
-                    // conditioned and the closed form bands into a fan
-                    // of striations (disco-ball beams, ~1.5°/4.5°
-                    // half-angles). Ray-march is smooth there; the
-                    // analytic win was measured on city-scale WIDE
-                    // cones, which stay analytic.
-                    const bool narrowCone = cosO > 0.985f;  // < ~10°
                     if (useAnalytic && !narrowCone) {
                         // α z² + β z + γ = rr²·d²(z) + 0.05
                         const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
@@ -4079,7 +4085,19 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                                 _mm256_mul_ps(vBeta, vBeta));
                         const __m256 mDisc    = _mm256_cmp_ps(vDiscQ, vZero_v, _CMP_GT_OQ);
                         const __m256 vSafeDisc = _mm256_blendv_ps(vOne_v, vDiscQ, mDisc);
-                        const __m256 vInvD    = _mm256_rsqrt_ps(vSafeDisc);
+                        // rsqrt is a 12-bit table approx; for rays
+                        // passing near the light the discriminant is
+                        // tiny, invD is huge, and the table's
+                        // quantization staircase amplifies into visible
+                        // striations across bright narrow cones (the
+                        // disco-beam moire). One Newton-Raphson step
+                        // (~24-bit) kills it for ~3 fma.
+                        __m256 vInvD          = _mm256_rsqrt_ps(vSafeDisc);
+                        vInvD = _mm256_mul_ps(vInvD,
+                                _mm256_fnmadd_ps(
+                                    _mm256_mul_ps(_mm256_set1_ps(0.5f), vSafeDisc),
+                                    _mm256_mul_ps(vInvD, vInvD),
+                                    _mm256_set1_ps(1.5f)));
 
                         const __m256 vTwoA    = _mm256_add_ps(vAlpha, vAlpha);
                         const __m256 vZHi_v   = _mm256_load_ps(zHiArr);
@@ -4087,11 +4105,31 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                                 _mm256_fmadd_ps(vTwoA, vZHi_v, vBeta));
                         const __m256 vArgLo   = _mm256_mul_ps(vInvD,
                                                 _mm256_fmadd_ps(vTwoA, vZLo_v, vBeta));
-                        const __m256 vAtanHi  = atan_approx_x8(vArgHi);
-                        const __m256 vAtanLo  = atan_approx_x8(vArgLo);
+                        // atan(u) − atan(v) computed DIRECTLY via the
+                        // identity atan((u−v)/(1+uv)) (+π when uv<−1;
+                        // u>v always since zHi>zLo). Evaluating the two
+                        // atans separately striped bright narrow cones:
+                        // both arguments are huge near the singular
+                        // (ray-grazes-the-light) regime, each crosses
+                        // the polynomial's range-reduction boundaries
+                        // (error spikes → iso-argument fan stripes),
+                        // and the near-equal difference amplifies the
+                        // error by 2·invD. The identity feeds ONE atan
+                        // a small well-conditioned argument instead.
+                        const __m256 vNum     = _mm256_sub_ps(vArgHi, vArgLo);
+                        const __m256 vDen     = _mm256_fmadd_ps(vArgHi, vArgLo, vOne_v);
+                        const __m256 mDenZero = _mm256_cmp_ps(
+                                                _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vDen),
+                                                _mm256_set1_ps(1e-20f), _CMP_LT_OQ);
+                        const __m256 vSafeDen = _mm256_blendv_ps(vDen, _mm256_set1_ps(1e-20f), mDenZero);
+                        const __m256 vRatio   = _mm256_div_ps(vNum, vSafeDen);
+                        __m256 vAtanD         = atan_approx_x8(vRatio);
+                        const __m256 mWrap    = _mm256_cmp_ps(vDen, vZero_v, _CMP_LT_OQ);
+                        vAtanD = _mm256_add_ps(vAtanD,
+                                 _mm256_and_ps(mWrap, _mm256_set1_ps(3.14159265f)));
                         const __m256 vIntegral = _mm256_mul_ps(
                                                  _mm256_add_ps(vInvD, vInvD),
-                                                 _mm256_sub_ps(vAtanHi, vAtanLo));
+                                                 vAtanD);
 
                         // Midpoint sample: cosT_mid and surfaceFade_mid
                         // approximate the otherwise-z-dependent factors.
@@ -4143,7 +4181,12 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         // mean per lane: integral / interval; final
                         // contribution per "sample-unit": mean × N ×
                         // coneAtten_mid × surfaceFade_mid.
-                        __m256 vAcc = _mm256_mul_ps(vIntegral, _mm256_rcp_ps(vSafeLen));
+                        // rcp refined for the same reason as invD.
+                        __m256 vRcpLen = _mm256_rcp_ps(vSafeLen);
+                        vRcpLen = _mm256_mul_ps(vRcpLen,
+                                  _mm256_fnmadd_ps(vSafeLen, vRcpLen,
+                                                   _mm256_set1_ps(2.0f)));
+                        __m256 vAcc = _mm256_mul_ps(vIntegral, vRcpLen);
                         vAcc = _mm256_mul_ps(vAcc, vN);
                         vAcc = _mm256_mul_ps(vAcc, coneAtten_m);
                         vAcc = _mm256_mul_ps(vAcc, surfaceFade_m);
@@ -4223,7 +4266,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
 
                         accV = _mm256_and_ps(vAcc, m);
                     } else {
-                    for (int k = 0; k < N_SAMPLES; ++k) {
+                    for (int k = 0; k < nSamp; ++k) {
                         alignas(32) float fracBuf[8];
                         for (int lane = 0; lane < 8; ++lane) {
                             const uint32_t h = pxHashArr[lane]
@@ -4332,9 +4375,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     const float colB = lights->colB[li];
                     const float colG = lights->colG[li];
                     const float colR = lights->colR[li];
+                    // March total = nSamp × mean; cone_strength is
+                    // calibrated against the global N_SAMPLES, so the
+                    // narrow-cone 16-sample march renormalizes — the
+                    // extra samples buy smoothness, not brightness.
+                    const float nNorm = float(N_SAMPLES) / float(nSamp);
                     for (int lane = 0; lane < 8; ++lane) {
                         if (accArr[lane] <= 0.0f) continue;
-                        const float w = accArr[lane] * density;
+                        const float w = accArr[lane] * density * nNorm;
                         accB[lane] += w * colB;
                         accG[lane] += w * colG;
                         accR[lane] += w * colR;
