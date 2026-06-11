@@ -665,7 +665,7 @@ void DiscoBloomPost()
     const float sy  = -FOVY * w.y / w.z + CntrEY;
     const float rpx = FOVX * kRadius / w.z;
     if (rpx < 4.0f) return;  // too far to matter
-    const int pad = int(rpx * 0.8f) + 8;
+    const int pad = int(rpx * 1.4f) + 12;
     const int x0 = std::max(int(sx - rpx) - pad, 0);
     const int y0 = std::max(int(sy - rpx) - pad, 0);
     const int x1 = std::min(int(sx + rpx) + pad, int(XRes));
@@ -712,14 +712,42 @@ void DiscoBloomPost()
         }
         std::swap(acc, tmp);
     }
-    // Additive composite, slightly cool-tinted to match the glints.
+    // Additive composite. BILINEAR upsample of the quarter-res grid
+    // (nearest showed as a 4x4 block pattern — read as moire over the
+    // beams) and a radial falloff from the ball center so the bloom
+    // is a soft round glow that fades out well before the region
+    // rectangle (whose hard edge read as 'only one tile gets bloom').
     dword *out = reinterpret_cast<dword*>(VPage);
     const float k = strength * norm * 0.9f;
+    const float invR = 1.0f / (rpx * 1.35f);
     for (int y = y0; y < y1; ++y) {
         dword *row = out + size_t(y) * size_t(XRes);
-        const float *arow = acc.data() + size_t((y - y0) / DS) * bw;
+        const float gy = (float(y) - float(y0)) / DS - 0.5f;
+        const int   gy0 = std::min(std::max(int(std::floor(gy)), 0), bh - 1);
+        const int   gy1 = std::min(gy0 + 1, bh - 1);
+        const float ty  = std::min(std::max(gy - float(gy0), 0.0f), 1.0f);
+        const float dyb = (float(y) - sy) * invR;
         for (int x = x0; x < x1; ++x) {
-            const float v = arow[(x - x0) / DS] * k;
+            const float gx = (float(x) - float(x0)) / DS - 0.5f;
+            const int   gx0 = std::min(std::max(int(std::floor(gx)), 0), bw - 1);
+            const int   gx1 = std::min(gx0 + 1, bw - 1);
+            const float tx  = std::min(std::max(gx - float(gx0), 0.0f), 1.0f);
+            const float a00 = acc[size_t(gy0) * bw + gx0];
+            const float a01 = acc[size_t(gy0) * bw + gx1];
+            const float a10 = acc[size_t(gy1) * bw + gx0];
+            const float a11 = acc[size_t(gy1) * bw + gx1];
+            const float top = a00 + (a01 - a00) * tx;
+            const float bot = a10 + (a11 - a10) * tx;
+            float v = (top + (bot - top) * ty) * k;
+            // Radial falloff: full inside the ball disc, smooth to 0
+            // by ~2.3 radii.
+            const float dxb = (float(x) - sx) * invR;
+            const float d2  = dxb * dxb + dyb * dyb;
+            if (d2 >= 1.0f) {
+                const float fall = 2.0f - d2;
+                if (fall <= 0.0f) continue;
+                v *= fall * 0.5f * (fall * 0.5f);  // smooth-ish square
+            }
             if (v < 1.0f) continue;
             const int add = std::min(int(v), 255);
             const dword c = row[x];
