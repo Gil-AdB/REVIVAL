@@ -28,6 +28,11 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
             ++polys;
         }
     }
+    // Particles insert into the same FList: 1 face each, or 2 for trail
+    // quads (addParticleTrail). Scenes that allocate Sc->Pcl before
+    // driver init (city rain) need the headroom; fountain sizes its own
+    // lists and doesn't come through here.
+    polys += sc->NumOfParticles * 2;
     fds::g_mainFaces.resize(polys);
     View  = sc->CameraHead;
     C_FZP  = sc->FZP;

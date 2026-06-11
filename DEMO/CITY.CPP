@@ -1255,6 +1255,7 @@ XMMVector evalRainVel(float curFrame) {
 
 static void initRain(Scene *Sc)
 {
+	fprintf(stderr, "[CITY] rain: %d particles\n", NUM_RAIN_PCLS);
 	rainVel = evalRainVel(0);
 	Sc->NumOfParticles = NUM_RAIN_PCLS;
 	Sc->Pcl = new Particle[Sc->NumOfParticles];
@@ -1308,7 +1309,12 @@ static void initRain(Scene *Sc)
 		p.F.Filler = drawRainDrop;
 		p.F.Txtr = M;
 
-		p.InitTrail(M, TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, 50.0f, 5.0f);
+		// Trail quads write TPos_AOS directly with no frame/A_idx wiring —
+		// the SoA rasterizer path reads frame->TPos_x[A_idx] and culls
+		// them, so on the city's non-TBR path they render to nothing.
+		// Single-pixel drops (drawRainDrop, used when TrailLength==0)
+		// bypass the mesh path entirely and still work.
+		// p.InitTrail(M, TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, 50.0f, 5.0f);
 
 		// NOTE: consider adding some randomization (per particle and over time)
 		p.Vel.x = rainVel.x;
@@ -1317,13 +1323,10 @@ static void initRain(Scene *Sc)
 	}
 }
 
-static void riskOfRain(Scene *Sc)
+static void riskOfRain(Scene *Sc, float dt)
 {
 	// set rainvel based on some noise function of current frame
 	rainVel = evalRainVel(CurFrame);
-
-	// Animate Particles
-	float dt = 0.01*dTime;
 	Particle *P, *PE;
 	Vector u, v;
 	mword i;
@@ -2128,10 +2131,10 @@ void Initialize_City()
 	if (TmpSurf.Data) { free(TmpSurf.Data); TmpSurf.Data = nullptr; }
 	if (TmpSurf.Z16) { free(TmpSurf.Z16); TmpSurf.Z16 = nullptr; }
 
-	// initialize rain FX
-#ifdef CITY_RAIN
-	initRain(CitySc);
-#endif
+	// initialize rain FX (allocates the particle pool — runs before the
+	// driver's setupFaceLists, which sizes the FList for the trails)
+	if (fds::FeatureFlags::city_rain())
+		initRain(CitySc);
 
 	// Test spotlights for volumetric-cone overlay experimentation.
 	// City coordinate scale is roughly 1-unit-per-cm (existing FLD omnis
@@ -2423,10 +2426,13 @@ struct CityScene : SceneDriver {
 
 		Lighting(CitySc);
 
-		// NOTE: Profiler ignores rain f/x
-#ifdef CITY_RAIN
-		riskOfRain(CitySc);
-#endif
+		if (fds::FeatureFlags::city_rain()) {
+			// Bill rain to ANIM (it's particle animation, and ANIM is
+			// otherwise ~0 in city). dt=0 while paused: drops freeze
+			// mid-air like everything else (water-scroll precedent).
+			prof.switchTo(PROF_ANIM);
+			riskOfRain(CitySc, pause_mode ? 0.0f : 0.01f * dTime);
+		}
 		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
