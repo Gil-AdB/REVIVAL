@@ -55,6 +55,9 @@ bool     s_panoBaked = false;
 // per-frame facet glint (shimmer) pass.
 struct FacetRef { Vector n; DWord v0; };
 std::vector<FacetRef> s_facets;
+Omni    *s_glow = nullptr;          // additive flare + soft light spill
+int      s_numGlintL = 0;           // room lights the facets glint against
+Vector   s_glintL[8];
 
 // Cube-face camera bases (right, up, forward). The equirect resample
 // below projects through the SAME bases, so the pair is self-
@@ -331,8 +334,47 @@ bool BuildDiscoBall(Scene *sc)
                                    1.5f, 4.5f,            // deg in/out
                                    0, /*castsShadow=*/false);
     }
-    std::fprintf(stderr, "[DISCO] ball: %u verts %u faces, %d spots\n",
-                 MM->VIndex, MM->FIndex, kSpotCount);
+    // ── Glow: cloned FLD omni (real flare filler + texture from
+    // Preprocess_Scene's The_MMX_Scalar install). IRange 6 gives a
+    // soft white-blue light spill on the columns; ISize is both the
+    // flare sprite size and the light intensity. The tick keeps it
+    // offset toward the camera so the flare's center-pixel depth test
+    // doesn't lose against the ball's own surface.
+    s_glow = nullptr;
+    for (Omni *src = sc->OmniHead; src; src = src->Next) {
+        if (!src->F.Txtr || !src->F.Filler) continue;
+        if (src->Flags & Omni_MirrorClone) continue;
+        Omni *g = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+        std::memcpy(g, src, sizeof(Omni));
+        g->F.A = &g->V; g->F.B = &g->V; g->F.C = &g->V;
+        g->F.mirrorMaskTag = 0;
+        g->F.ownerMirrorId = 0;
+        g->IPos = s_ballPos;
+        g->ISize = 0.55f;
+        g->IRange = 6.0f; g->rRange = 1.0f / 6.0f;
+        g->L.R = 210.0f; g->L.G = 225.0f; g->L.B = 255.0f; g->L.A = 1.0f;
+        g->Type = Light_Omni;
+        g->Flags &= ~(Omni_CastsShadow | Omni_MirrorClone);
+        g->Flags |= Omni_Active;
+        // Own 1-key splines — the memcpy shares the source's Keys, and
+        // Animate_Objects would drag the clone along the source's
+        // animation every frame.
+        auto key1 = [](Spline &sp, float x, float y, float z) {
+            sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
+            sp.Keys = (SplineKey*)std::calloc(1, sizeof(SplineKey));
+            sp.Keys[0].Pos.x = x; sp.Keys[0].Pos.y = y; sp.Keys[0].Pos.z = z;
+        };
+        key1(g->Pos, s_ballPos.x, s_ballPos.y, s_ballPos.z);
+        key1(g->Size, g->ISize, g->ISize, g->ISize);  // (tick re-stamps)
+        key1(g->Range, g->IRange, g->IRange, g->IRange);
+        g->Next = sc->OmniHead;
+        if (sc->OmniHead) sc->OmniHead->Prev = g;
+        sc->OmniHead = g;
+        s_glow = g;
+        break;
+    }
+    std::fprintf(stderr, "[DISCO] ball: %u verts %u faces, %d spots, glow=%d\n",
+                 MM->VIndex, MM->FIndex, kSpotCount, s_glow ? 1 : 0);
     return true;
 }
 
@@ -518,32 +560,91 @@ void UpdateDiscoBall(Scene *sc, float t)
         s_spots[i]->IDir = { c * b.x + s * b.z, b.y, -s * b.x + c * b.z };
     }
 
-    // Shimmer: per-facet glint. Facets whose (spun) normal lies near
-    // the halfway vector between the view direction and straight-up
-    // flash bright as the rotation sweeps them through alignment —
-    // the colorize step modulates the env sample by the interpolated
-    // vertex color, and Tri_Noshading means we own these bytes.
+    // Glow flare: keep it just camera-side of the ball surface so the
+    // flare's center-pixel depth test doesn't lose against the ball
+    // itself, with a gentle size pulse.
+    if (s_glow && ::View) {
+        Vector tc = { ::View->ISource.x - s_ball->IPos.x,
+                      ::View->ISource.y - s_ball->IPos.y,
+                      ::View->ISource.z - s_ball->IPos.z };
+        const float tl = std::sqrt(tc.x*tc.x + tc.y*tc.y + tc.z*tc.z);
+        if (tl > 1e-3f) {
+            const float k = (kRadius + 0.35f) / tl;
+            s_glow->IPos = { s_ball->IPos.x + tc.x * k,
+                             s_ball->IPos.y + tc.y * k,
+                             s_ball->IPos.z + tc.z * k };
+        }
+        s_glow->ISize = 0.55f + 0.12f * std::sin(t * 0.05f);
+    }
+
+    // Shimmer: facets glint against the ROOM'S lights — a facet
+    // flashes when its (spun) normal aligns with the halfway vector
+    // between the view direction and a light direction, i.e. when it
+    // mirrors that light at the camera. One halfway vector (the first
+    // cut) lit at most one facet at a time; against ~8 room omnis a
+    // handful sparkle at any moment, which is the classic look. The
+    // colorize step multiplies the env sample by interpolated vertex
+    // color (255 = identity), and Tri_Noshading means we own those
+    // bytes.
     if (::View) {
+        // Collect glint lights once (FLD omni IPos is only valid after
+        // the first Animate_Objects — which has run by now).
+        if (s_numGlintL == 0) {
+            for (Omni *O = sc->OmniHead; O && s_numGlintL < 8; O = O->Next) {
+                if (!(O->Flags & Omni_Active)) continue;
+                if (O->Flags & Omni_MirrorClone) continue;
+                if (O == s_glow) continue;
+                if (O->Type == Light_SpotLight) continue;  // incl. our dots
+                const float dx = O->IPos.x - s_ballPos.x;
+                const float dy = O->IPos.y - s_ballPos.y;
+                const float dz = O->IPos.z - s_ballPos.z;
+                if (dx*dx + dy*dy + dz*dz < 4.0f) continue;  // co-located
+                s_glintL[s_numGlintL++] = O->IPos;
+            }
+            std::fprintf(stderr, "[DISCO] %d glint lights\n", s_numGlintL);
+        }
         Vector vdir = { ::View->ISource.x - s_ball->IPos.x,
                         ::View->ISource.y - s_ball->IPos.y,
                         ::View->ISource.z - s_ball->IPos.z };
         const float vl = std::sqrt(vdir.x*vdir.x + vdir.y*vdir.y + vdir.z*vdir.z);
         if (vl > 1e-3f) {
             vdir.x /= vl; vdir.y /= vl; vdir.z /= vl;
-            Vector h = { vdir.x, vdir.y + 1.0f, vdir.z };
-            const float hl = std::sqrt(h.x*h.x + h.y*h.y + h.z*h.z);
-            h.x /= hl; h.y /= hl; h.z /= hl;
+            // Halfway vectors: view ↔ each glint light (plus one for
+            // straight-up so the ceiling band always participates).
+            Vector hs[9];
+            int nh = 0;
+            for (int li = 0; li < s_numGlintL; ++li) {
+                Vector l = { s_glintL[li].x - s_ball->IPos.x,
+                             s_glintL[li].y - s_ball->IPos.y,
+                             s_glintL[li].z - s_ball->IPos.z };
+                const float ll = std::sqrt(l.x*l.x + l.y*l.y + l.z*l.z);
+                if (ll < 1e-3f) continue;
+                Vector h = { vdir.x + l.x / ll, vdir.y + l.y / ll,
+                             vdir.z + l.z / ll };
+                const float hl = std::sqrt(h.x*h.x + h.y*h.y + h.z*h.z);
+                if (hl < 1e-3f) continue;
+                hs[nh++] = { h.x / hl, h.y / hl, h.z / hl };
+            }
+            {
+                Vector h = { vdir.x, vdir.y + 1.0f, vdir.z };
+                const float hl = std::sqrt(h.x*h.x + h.y*h.y + h.z*h.z);
+                hs[nh++] = { h.x / hl, h.y / hl, h.z / hl };
+            }
             for (const FacetRef &fr : s_facets) {
                 // n_world = spin × n_local (same Y rotation as above).
                 const float nx = c * fr.n.x + s * fr.n.z;
                 const float nz = -s * fr.n.x + c * fr.n.z;
-                float g = nx*h.x + fr.n.y*h.y + nz*h.z;
-                g = std::max(g, 0.0f);
-                g = g*g; g = g*g; g = g*g; g = g*g;       // ^16
-                const byte lum = byte(150.0f + 100.0f * g);
+                float best = 0.0f;
+                for (int hi = 0; hi < nh; ++hi) {
+                    const float g = nx*hs[hi].x + fr.n.y*hs[hi].y + nz*hs[hi].z;
+                    if (g > best) best = g;
+                }
+                float g = best;
+                g = g*g; g = g*g; g = g*g;                // ^8
+                const byte lum = byte(140.0f + 115.0f * g);
                 Vertex *V = s_ball->Verts + fr.v0;
-                for (int k = 0; k < 4; ++k) {
-                    V[k].LB = lum; V[k].LG = lum; V[k].LR = lum;
+                for (int k2 = 0; k2 < 4; ++k2) {
+                    V[k2].LB = lum; V[k2].LG = lum; V[k2].LR = lum;
                 }
             }
         }
