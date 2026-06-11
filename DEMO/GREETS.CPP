@@ -1149,6 +1149,13 @@ void Initialize_Greets()
 		initializeRobotSpotlights();
 	}
 
+	// Disco ball BEFORE the shadow-map allocation block (its rotating
+	// spots cast per-frame shadows — created later they'd never get
+	// map slots and beams shine through geometry) and before the
+	// mirror build (the teleporter mirror clones the ball; its 2-key
+	// Pos spline marks it dynamic → re-mirrored per frame).
+	fds::BuildDiscoBall(GreetSc);
+
 	// Shadow-map allocation + static cube bake + lightmap bake spawn.
 	// MOVED here from GreetsScene::init() so it runs during glat (via
 	// t1's Initialize_Greets) instead of waiting until the user reaches
@@ -1337,11 +1344,6 @@ void Initialize_Greets()
 	// reflection shows at each pixel. Mirror-in-mirror (two facing)
 	// would currently produce empty recursion past depth 1; if greets
 	// ever needs that we'll add a depth cap.
-	// Disco ball before the mirror build so the teleporter mirror
-	// clones it (its 2-key Pos spline marks it dynamic → re-mirrored
-	// per frame).
-	fds::BuildDiscoBall(GreetSc);
-
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
 		// One mirror per material name, plus one mirror per coplanar

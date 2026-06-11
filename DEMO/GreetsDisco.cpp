@@ -326,13 +326,19 @@ bool BuildDiscoBall(Scene *sc)
         // 1.0 here made the dots ~100× too dim to register).
         // Cool white: pops against the scene's saturated warm-gold
         // lighting (warm dots vanished into the floor).
+        // castsShadow: the volumetric pass gates beam segments by the
+        // spot's shadow map — without it beams shine straight through
+        // the robot/columns. 256² maps; the spots rotate, so the
+        // per-frame DynamicOmnisPerFrame bake re-renders them (same
+        // path as the robot/orbit spots). Narrow 9° frusta keep the
+        // depth raster tiny.
         s_spots[i] = MakeSpotLight(sc,
                                    215.0f, 235.0f, 255.0f,  // cool white
                                    6.0f,                  // intensity
                                    38.0f,                 // range
                                    s_ballPos, s_spotBase[i],
                                    1.5f, 4.5f,            // deg in/out
-                                   0, /*castsShadow=*/false);
+                                   256, /*castsShadow=*/true);
         // Volumetric beams: per-light opt-in so the robot/orbit spots
         // don't grow cones too (--draw-cones stays off scene-wide).
         s_spots[i]->Flags |= Omni_ForceVolCone;
@@ -341,6 +347,11 @@ bool BuildDiscoBall(Scene *sc)
     // ranges (thousands of units) and is invisible over greets's
     // ~10-unit beam paths. Scene default; --cone-strength overrides.
     FeatureFlags::setDefault(FeatureFlags::FloatId::cone_strength, 1.2f);
+    // 15 per-frame spot shadow bakes (10 disco + robot/orbit) make the
+    // bake-pass mesh-vs-cone cull essential: 92 -> 72 ms/iter on the
+    // full sweep with --shadows. Conservative test; ~900 px of
+    // shadow-edge delta scene-wide.
+    FeatureFlags::setDefault(FeatureFlags::BoolId::shadow_cone_cull, true);
     // ── Glow: cloned FLD omni for a soft white-blue light spill on
     // the columns (IRange 6). The flare sprite is muted (no-op
     // Filler) — the visible flare burst read as noise on the ball;
@@ -564,8 +575,17 @@ void UpdateDiscoBall(Scene *sc, float t)
     for (int i = 0; i < kSpotCount; ++i) {
         if (!s_spots[i]) continue;
         const Vector &b = s_spotBase[i];
-        s_spots[i]->IPos = s_ball->IPos;
-        s_spots[i]->IDir = { c * b.x + s * b.z, b.y, -s * b.x + c * b.z };
+        const Vector d = { c * b.x + s * b.z, b.y, -s * b.x + c * b.z };
+        // Origin just OUTSIDE the ball surface along the beam: the
+        // spots cast per-frame shadows, and an origin at the ball's
+        // center put the shadow camera inside the sphere — the ball's
+        // own facets filled the map at ~1 unit and occluded the
+        // entire beam.
+        const float off = kRadius + 0.08f;
+        s_spots[i]->IPos = { s_ball->IPos.x + d.x * off,
+                             s_ball->IPos.y + d.y * off,
+                             s_ball->IPos.z + d.z * off };
+        s_spots[i]->IDir = d;
     }
 
     // Glow light spill: rides the ball center with a gentle pulse
