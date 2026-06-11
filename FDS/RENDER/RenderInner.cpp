@@ -91,6 +91,24 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 			if (flags & Vtx_Visible) continue;
 			RasterFunc filler;
 			if (F->Flags & Face_Reflective) {
+				// Clone env faces (the disco ball's mirror image):
+				// the forward env filler has no per-pixel mirror-mask
+				// commit gate (that's Mekalele's), so without this
+				// check a mirrored ball renders floating in the void
+				// outside the room whenever its mirror is active.
+				// Same centroid-footprint gate as the clone-flare one
+				// in The_MMX_Scalar.
+				if (F->mirrorMaskTag != 0) {
+					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+						continue;
+					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
+					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
+					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					    != F->mirrorMaskTag)
+						continue;
+				}
 				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
 			} else {
 				clipper.Render(F, F->Filler, false, rt, cam);
@@ -174,6 +192,24 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 				continue;
 			}
 			if (F->Flags & Face_Reflective) {
+				// Clone env faces (the disco ball's mirror image):
+				// the forward env filler has no per-pixel mirror-mask
+				// commit gate (that's Mekalele's), so without this
+				// check a mirrored ball renders floating in the void
+				// outside the room whenever its mirror is active.
+				// Same centroid-footprint gate as the clone-flare one
+				// in The_MMX_Scalar.
+				if (F->mirrorMaskTag != 0) {
+					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+						continue;
+					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
+					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
+					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					    != F->mirrorMaskTag)
+						continue;
+				}
 				clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE, barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
 			} else if (txtrFlags & Mat_Additive) {
 				clipper.Render(F, F->Filler, false, rt, cam);   // TheOtherBarry<ADDITIVE>
