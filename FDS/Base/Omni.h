@@ -59,6 +59,15 @@ struct Omni
 	// building per-tile light lists and skips omnis whose mirrorId
 	// disagrees with the pixel's gb.mirrorId byte.
 	dword            mirrorId;
+	// Clone omnis only: the source omni + the mirror plane (world
+	// space). Lets the deferred kernel shadow a clone light with ZERO
+	// extra bakes — the clone's visibility of a point equals the
+	// SOURCE's visibility of the point reflected across the plane, so
+	// the kernel samples the source's existing shadow map at the
+	// reflected position. Set by GreetsMirror's omni cloning.
+	Omni            *mirrorSrcOmni;   // nullptr on originals
+	Vector           mirrorPlaneN;
+	float            mirrorPlaneD;
 	// Per-omni halo controls (decouple halo brightness/extent from the
 	// omni's surface-lighting parameters L*ISize and IRange). Render_-
 	// OmniHalos and Render_DeferredVolumetric multiply the per-omni

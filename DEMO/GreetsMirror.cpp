@@ -848,6 +848,11 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         // positions that pass plain z tests anywhere in the level.
         clone->F.A = clone->F.B = clone->F.C = &clone->V;
         clone->F.mirrorMaskTag = m.id;
+        // Mirrored shadow sampling: the kernel shadows this clone via
+        // the SOURCE's map at the reflected sample (zero extra bakes).
+        clone->mirrorSrcOmni = srcO;
+        clone->mirrorPlaneN  = N;
+        clone->mirrorPlaneD  = d;
         // Tag this clone with its mirror id. The deferred lighting
         // kernel filters per-pixel against gb.mirrorId, so clones of
         // mirror N's reflected world only receive light from mirror

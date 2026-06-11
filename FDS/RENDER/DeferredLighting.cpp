@@ -131,6 +131,14 @@ struct ViewLightsSoA {
 	// sin(outer half-angle) for spots (0 for omnis) — precomputed for
 	// the tile-vs-cone cull.
 	alignas(32) float sinOuter[DEFERRED_MAX_VIEW_LIGHTS];
+	// Clone lights: source's 2D shadow map index (-1 = none) + the
+	// mirror plane, for mirrored shadow sampling (the clone's
+	// visibility of P = the source's visibility of reflect(P)).
+	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float mirNX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float mirNY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float mirNZ[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float mirD [DEFERRED_MAX_VIEW_LIGHTS];
 	// Index into g_shadowMaps for this light's shadow map, or -1 if
 	// not a shadow-caster (most omnis). Filled per frame in
 	// Render_DeferredLighting alongside the other per-light fields.
@@ -197,6 +205,13 @@ struct TileLights {
 	// has Omni_CastsShadow. Lighting kernel uses it to gate the light's
 	// contribution per pixel.
 	alignas(32) int32_t shadowMapIdx[DEFERRED_MAX_LIGHTS];
+	// Clone lights: source's 2D map + mirror plane (mirrored shadow
+	// sampling; see ViewLightsSoA::srcShadowMapIdx).
+	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_LIGHTS];
+	alignas(32) float mirNX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float mirNY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float mirNZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float mirD [DEFERRED_MAX_LIGHTS];
 	// World-space position of the light + cube-shadow index. Mirrors
 	// the same fields in ViewLightsSoA; see comments there. Per-tile
 	// copy so the inner pixel loop has all light state in one SoA.
@@ -520,6 +535,9 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float Lco = lights.cosOuter[li];
 		const uint32_t Lis = lights.isSpot[li];
 		const int32_t  Lsi = lights.shadowMapIdx[li];
+		const int32_t  Lss = lights.srcShadowMapIdx[li];
+		const float    Lmnx = lights.mirNX[li], Lmny = lights.mirNY[li];
+		const float    Lmnz = lights.mirNZ[li], Lmd  = lights.mirD[li];
 		const float    Lwx = lights.posWorldX[li];
 		const float    Lwy = lights.posWorldY[li];
 		const float    Lwz = lights.posWorldZ[li];
@@ -584,6 +602,9 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 					tl.cosOuter[s] = Lco;
 					tl.isSpot[s]   = Lis;
 					tl.shadowMapIdx[s] = Lsi;
+					tl.srcShadowMapIdx[s] = Lss;
+					tl.mirNX[s] = Lmnx; tl.mirNY[s] = Lmny;
+					tl.mirNZ[s] = Lmnz; tl.mirD[s]  = Lmd;
 					tl.posWorldX[s] = Lwx;
 					tl.posWorldY[s] = Lwy;
 					tl.posWorldZ[s] = Lwz;
@@ -617,6 +638,9 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 			tl.cosOuter[p] = -2.0f;
 			tl.isSpot[p]   = 0u;
 			tl.shadowMapIdx[p] = -1;
+			tl.srcShadowMapIdx[p] = -1;
+			tl.mirNX[p] = 0.0f; tl.mirNY[p] = 0.0f;
+			tl.mirNZ[p] = 0.0f; tl.mirD[p]  = 0.0f;
 			tl.posWorldX[p] = 0.0f;
 			tl.posWorldY[p] = 0.0f;
 			tl.posWorldZ[p] = 0.0f;
@@ -1828,6 +1852,45 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// Cost: 4 loads + 4 compares + 4 muls + 4 adds.
 						const int32_t smIdx = tl.shadowMapIdx[n];
 						float shadowAtten = 1.0f;
+						// Clone light (mirror reflection): its visibility
+						// of this pixel equals the SOURCE light's
+						// visibility of the pixel REFLECTED across the
+						// mirror plane — sample the source's existing
+						// map there. Zero extra bakes; single tap (no
+						// PCF — reflected dot/beam shadows are soft).
+						const int32_t srcSm = tl.srcShadowMapIdx[n];
+						if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
+							const ShadowMap& sm = g_shadowMaps[srcSm];
+							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+							const float rwx = wpx - sd2 * tl.mirNX[n];
+							const float rwy = wpy - sd2 * tl.mirNY[n];
+							const float rwz = wpz - sd2 * tl.mirNZ[n];
+							const float ddx = rwx - ctx.cameraWorldX;
+							const float ddy = rwy - ctx.cameraWorldY;
+							const float ddz = rwz - ctx.cameraWorldZ;
+							// worldToView = transpose(viewToWorld)
+							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+							const float lx = sm.viewToLight[0][0]*rvx + sm.viewToLight[0][1]*rvy + sm.viewToLight[0][2]*rvz + sm.viewToLightOffset.x;
+							const float ly = sm.viewToLight[1][0]*rvx + sm.viewToLight[1][1]*rvy + sm.viewToLight[1][2]*rvz + sm.viewToLightOffset.y;
+							const float lz = sm.viewToLight[2][0]*rvx + sm.viewToLight[2][1]*rvy + sm.viewToLight[2][2]*rvz + sm.viewToLightOffset.z;
+							if (lz > 0.0f) {
+								const float invLZ = 1.0f / lz;
+								const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
+								const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
+								if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
+									const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
+									const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
+									int pixZ = 0xFF80 - int(lz * sm.zScale);
+									if (pixZ < 0) pixZ = 0;
+									if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
+								}
+							}
+						}
 						if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
 							const ShadowMap& sm = g_shadowMaps[smIdx];
 							const float lx = sm.viewToLight[0][0] * x +
@@ -3606,6 +3669,26 @@ void Render_DeferredLighting() {
 		}
 		lights.shadowMapIdx[numLights]  = smIdx;
 		lights.cubeShadowIdx[numLights] = cubeIdx;
+		// Clone light with a shadow-casting SPOT source → mirrored
+		// shadow sampling against the source's map.
+		int32_t srcSm = -1;
+		if ((O->Flags & Omni_MirrorClone) && O->mirrorSrcOmni &&
+		    fds::FeatureFlags::shadows() &&
+		    (O->mirrorSrcOmni->Flags & Omni_CastsShadow) &&
+		    O->mirrorSrcOmni->Type == Light_SpotLight) {
+			for (size_t i = 0; i < g_shadowMaps.size(); ++i) {
+				if (g_shadowMaps[i].omni == O->mirrorSrcOmni &&
+				    g_shadowMaps[i].cubeFace < 0) {
+					srcSm = int32_t(i);
+					break;
+				}
+			}
+		}
+		lights.srcShadowMapIdx[numLights] = srcSm;
+		lights.mirNX[numLights] = O->mirrorPlaneN.x;
+		lights.mirNY[numLights] = O->mirrorPlaneN.y;
+		lights.mirNZ[numLights] = O->mirrorPlaneN.z;
+		lights.mirD [numLights] = O->mirrorPlaneD;
 		// Per-omni halo controls. 0 → "use legacy default":
 		//   HaloIntensity = 0 → 1.0 (multiplier no-op)
 		//   HaloRange     = 0 → IRange (same as surface lighting)
