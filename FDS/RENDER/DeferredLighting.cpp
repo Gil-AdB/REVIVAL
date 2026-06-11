@@ -7903,13 +7903,23 @@ void Render_LensDrops() {
 		}
 		// Fade in over the first 150 ms (condensation forming).
 		const float fade = d.age < 0.15f ? d.age * (1.0f/0.15f) : 1.0f;
-		// Teardrop: bottom half elongated (gravity sag), top slightly squashed
-		// and tapered. Sliding drops stretch further with speed.
-		const float kBot = 1.35f + (d.vy * (1.0f/330.0f)) * 0.55f;
-		const float kTop = 0.85f;
+		// Shape: near-circular at rest (real condensation drops are NOT
+		// the cartoon teardrop — just a hint of gravity sag), and when
+		// sliding the TAIL trails ABOVE the drop (where it came from),
+		// narrowing with height, while the leading bottom edge stays round.
+		const float stretch = (d.vy * (1.0f/330.0f)) * 0.9f;   // 0..0.9
+		const float kTop = 1.05f + stretch;                    // tail above
+		const float kBot = 1.08f;                              // gentle sag
+		// Refraction FOV: a drop compresses a WIDE view — sample 1.6× the
+		// in-drop offset (inverted), so the snapshot rect must extend past
+		// the drop by that reach.
+		const float sK   = 1.6f;
+		const float padX = d.r * (1.0f + sK) + 2.0f;
+		const float padT = d.r * kTop * (1.0f + sK) + 2.0f;
+		const float padB = d.r * kBot * (1.0f + sK) + 2.0f;
 		const int cx  = int(d.x), cy = int(d.y);
-		int xa = cx - int(d.r) - 1,        xb = cx + int(d.r) + 2;
-		int ya = cy - int(d.r*kTop) - 1,   yb = cy + int(d.r*kBot) + 2;
+		int xa = cx - int(padX), xb = cx + int(padX) + 1;
+		int ya = cy - int(padT), yb = cy + int(padB) + 1;
 		if (xa < 0) xa = 0; if (ya < 0) ya = 0;
 		if (xb > (int)XRes) xb = (int)XRes; if (yb > (int)YRes) yb = (int)YRes;
 		if (xa >= xb || ya >= yb) { ++di; continue; }
@@ -7921,25 +7931,29 @@ void Render_LensDrops() {
 			            size_t(rw) * sizeof(dword));
 		const float invR  = 1.0f / d.r;
 		const float invKB = 1.0f / kBot, invKT = 1.0f / kTop;
-		// Specular glint sits up-left of center.
-		const float gx = d.x - d.r*0.35f, gy = d.y - d.r*0.35f;
-		const float gr2 = d.r*d.r*0.04f;
-		for (int py = ya; py < yb; ++py) {
+		// Specular glint sits up-left of center; small and soft.
+		const float gx = d.x - d.r*0.30f, gy = d.y - d.r*0.30f;
+		const float gr2 = d.r*d.r*0.025f;
+		const int pya = cy - int(d.r*kTop) - 1 < ya ? ya : cy - int(d.r*kTop) - 1;
+		const int pyb = cy + int(d.r*kBot) + 2 > yb ? yb : cy + int(d.r*kBot) + 2;
+		const int pxa = cx - int(d.r) - 1 < xa ? xa : cx - int(d.r) - 1;
+		const int pxb = cx + int(d.r) + 2 > xb ? xb : cx + int(d.r) + 2;
+		for (int py = pya; py < pyb; ++py) {
 			const float dyr = (float(py) - d.y) * invR;          // y in radii
-			// Normalized vertical coord of the teardrop ellipse.
 			const float ny  = dyr * (dyr > 0.0f ? invKB : invKT);
-			// Width tapers toward the top (drop necks where it hangs).
-			const float taper = dyr < 0.0f ? 1.0f + 0.30f*(-dyr*invKT) : 1.0f;
-			for (int px = xa; px < xb; ++px) {
+			// Sliding tail narrows toward its tip (above); round at rest.
+			const float taper = (dyr < 0.0f && stretch > 0.0f)
+			    ? 1.0f + 1.2f*stretch*(-dyr*invKT) : 1.0f;
+			for (int px = pxa; px < pxb; ++px) {
 				const float dx_ = float(px) - d.x;
 				const float nx  = dx_ * invR * taper;
 				const float t2  = nx*nx + ny*ny;
 				if (t2 > 1.0f) continue;
 				const float dy_ = float(py) - d.y;
-				// Refraction: minified INVERTED background — sample the
-				// snapshot at center − 0.55·offset (lens flips the image).
-				int sx = int(d.x - dx_*0.55f) - xa;
-				int sy = int(d.y - dy_*0.55f) - ya;
+				// Refraction: minified INVERTED wide-angle background —
+				// sample the padded snapshot at center − sK·offset.
+				int sx = int(d.x - dx_*sK) - xa;
+				int sy = int(d.y - dy_*sK) - ya;
 				if (sx < 0) sx = 0; if (sx >= rw) sx = rw-1;
 				if (sy < 0) sy = 0; if (sy >= rh) sy = rh-1;
 				const dword s = rect[size_t(sy)*rw + sx];
@@ -7948,15 +7962,15 @@ void Render_LensDrops() {
 				float sB = float( s     &0xFFu);
 				// Rim darkening (refraction steepens at the edge) + a
 				// touch of cool tint so drops read on flat areas.
-				if (t2 > 0.62f) {
-					const float k = 1.0f - (t2 - 0.62f) * (1.0f/0.38f) * 0.45f;
+				if (t2 > 0.70f) {
+					const float k = 1.0f - (t2 - 0.70f) * (1.0f/0.30f) * 0.30f;
 					sR *= k; sG *= k; sB *= k;
 				}
 				sB = sB + 14.0f > 255.0f ? 255.0f : sB + 14.0f;
 				// Glint.
 				const float gdx = float(px)-gx, gdy = float(py)-gy;
 				if (gdx*gdx + gdy*gdy < gr2) {
-					sR += 70.0f; sG += 70.0f; sB += 70.0f;
+					sR += 55.0f; sG += 55.0f; sB += 55.0f;
 					if (sR > 255.0f) sR = 255.0f;
 					if (sG > 255.0f) sG = 255.0f;
 					if (sB > 255.0f) sB = 255.0f;
