@@ -3955,9 +3955,15 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
             .fetch_add(1, std::memory_order_relaxed);
     }
 
-    for (int py = y1; py < y2; ++py) {
+    // Half vertical rate: compute even rows, write each result to the
+    // row and its lower neighbor. Beams are soft gradients — visually
+    // free, halves the pass cost. (Vec path only; the scalar path is
+    // the --no-vol_vec fallback.)
+    const int yStep = (vecPath && fds::FeatureFlags::vol_cone_half_y()) ? 2 : 1;
+    for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
+        const bool dupRow = (yStep == 2) && (py + 1 < y2);
         if (vecPath) {
             // ─── Pixel-major SIMD ──────────────────────────────────────
             // 8 lanes = 8 independent rays. Per-pixel setup and per-spot
@@ -4611,6 +4617,18 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     if (newB > 255) newB = 255;
                     out[i] = (dword(newR) << 16) | (dword(newG) << 8)
                              |  dword(newB)        | 0xFF000000u;
+                    if (dupRow) {
+                        const size_t i2 = i + size_t(XRes);
+                        const dword p2 = out[i2];
+                        int r2 = int((p2 >> 16) & 0xFF) + int(accR[lane]);
+                        int g2 = int((p2 >>  8) & 0xFF) + int(accG[lane]);
+                        int b2 = int( p2        & 0xFF) + int(accB[lane]);
+                        if (r2 > 255) r2 = 255;
+                        if (g2 > 255) g2 = 255;
+                        if (b2 > 255) b2 = 255;
+                        out[i2] = (dword(r2) << 16) | (dword(g2) << 8)
+                                  |  dword(b2)        | 0xFF000000u;
+                    }
                 }
             }
         } else {

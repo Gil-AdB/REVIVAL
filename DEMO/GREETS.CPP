@@ -580,7 +580,10 @@ static void initializeRobotSpotlights()
 			/*pos*/Vector(0.0f, 0.0f, 0.0f),
 			/*dir*/Vector(0.0f, -1.0f, 0.0f),
 			/*hotDeg*/15.0f, /*fallDeg*/35.0f,
-			/*shadowMapRes*/1024);
+			// 512²: the orbit shadows are soft colored pools — 1024²
+			// was 4 of the 5 big per-frame depth rasters (~4 of the
+			// bake pass's 5 ms) for no visible gain.
+			/*shadowMapRes*/512);
 		std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
 			i, init[i].tag);
 	}
