@@ -6995,11 +6995,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
 		const float Yc  = (CntrEY - syc) * P.invFOVY;
 		for (int ix = ix0; ix < ix1; ++ix) {
-			float jx = 0.0f, jy = 0.0f;
-			if (gFrTemporal) {
-				const uint32_t k = (gFrFrameIdx + cellHash(ix, iy, 0x5EED)) & 7u;
-				jx = h2[k] - 0.5f; jy = h3[k] - 0.5f;
-			}
+			const uint32_t colPhase = gFrFrameIdx + cellHash(ix, iy, 0x5EED);
 			// Canonical (unjittered) ray for the history reprojection. The
 			// reprojected view pos is linear in slice depth: v = A + zc·B,
 			// A = Rprevᵀ·(cam−camPrev) (per frame), B = Rprevᵀ·Dc (here).
@@ -7014,24 +7010,41 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 
 			// ── pass 1: blob/slab density at each slice center ──────────────
-			// XY jitter as a WORLD-SPACE offset with a capped magnitude: a
-			// ±half-froxel SCREEN jitter is hundreds of world units at far z,
-			// which hops the sample clean across the blob field's transition
-			// width every frame — the temporal EMA cannot converge on that
-			// cycling input, and the fog-top iso edge SHIMMERS (user-bisected:
-			// jitter off = no shimmer; finer grid / lower blend = no change).
-			// Near the camera the offset equals the true sub-froxel footprint
-			// (dissolves the grid stairs exactly as before); far away it is
-			// clamped to a quarter of the blob cell so the sampled density
-			// swing stays a fraction of the field's correlation length.
-			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world/units per froxel per z
+			// Sub-froxel XY jitter (the temporal supersample that dissolves
+			// the coarse grid's stairs), with TWO cycle-taming rules learned
+			// from the fog-top shimmer (user-bisected: jitter off = no
+			// shimmer; finer grid / lower blend / far-z amplitude cap = no
+			// change):
+			//   • PER-SLICE phase, not per-column. A column-constant offset
+			//     shifts every slice of the ray together, so at the grazing
+			//     fog-top the whole path integral swings across the iso edge
+			//     coherently each frame — the EMA's residual (~(1−blend) of
+			//     the swing) reads as blobby horizon shimmer. With iz in the
+			//     phase hash each slice cycles independently and the slice
+			//     sum averages ~nz independent residuals (~√nz smaller, and
+			//     spatially incoherent). The converged mean is identical.
+			//   • WORLD-space amplitude = min(froxel footprint, cell/4):
+			//     full sub-froxel near (the stairs live there), bounded far
+			//     so one sample can never hop the field's whole transition.
+			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world units per froxel per z
 			const float jcap    = 0.25f * P.cell;
-			const float jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
-			const float jry = jx*P.w10 + jy*P.w11;
-			const float jrz = jx*P.w20 + jy*P.w21;
 			for (int iz = 0; iz < nz; ++iz) {
 				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
+				float jrx = 0.0f, jry = 0.0f, jrz = 0.0f;
+				if (gFrTemporal) {
+					// +iz walks the 8-phase Halton cycle along the ray, so a
+					// path through ≥8 foggy slices covers ALL offsets within
+					// one frame — stratified, not merely decorrelated.
+					// (Antithetic sign-flip pairing was tried and measured
+					// identical: the iso edge is max(0,·)-clamped, so
+					// symmetric pairs don't cancel through it.)
+					const uint32_t k = (colPhase + uint32_t(iz)) & 7u;
+					const float jx = h2[k] - 0.5f, jy = h3[k] - 0.5f;
+					jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
+					jry = jx*P.w10 + jy*P.w11;
+					jrz = jx*P.w20 + jy*P.w21;
+				}
 				const float fp = z * fpScale;
 				const float jamp = fp < jcap ? fp : jcap;
 				const float wx = P.camX + z*Dxc + jrx*jamp;

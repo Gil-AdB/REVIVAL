@@ -463,6 +463,83 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 ts, cfg.iters, ms, ms / cfg.iters, 1000.0 * cfg.iters / ms);
         }
 
+        // Temporal-ripple probe (CITYSNAP_RIPPLE=N): tick N more consecutive
+        // frames at this SAME timestamp (static camera, jitter phases keep
+        // advancing) and accumulate the per-pixel mean |Δ| between
+        // consecutive frames — the converged steady-state flicker. Writes an
+        // 8×-amplified heatmap (ripple_tNNNNNN.ppm) and per-row-band stats.
+        if (const char* rs = std::getenv("CITYSNAP_RIPPLE")) {
+            const int N = std::max(2, std::atoi(rs));
+            const size_t npx = size_t(xres) * size_t(yres);
+            std::vector<float> acc(npx, 0.0f);
+            std::vector<unsigned char> prevF(npx * 3), curF(npx * 3);
+            auto grab = [&](std::vector<unsigned char>& dst) {
+                for (int y = 0; y < yres; ++y) {
+                    const dword* src = reinterpret_cast<const dword*>(
+                        MainSurf->Data + size_t(y) * MainSurf->BPSL);
+                    unsigned char* d = dst.data() + size_t(y) * xres * 3;
+                    for (int x = 0; x < xres; ++x) {
+                        const dword px = src[x];
+                        d[x*3+0] = (px >> 16) & 0xFF;
+                        d[x*3+1] = (px >>  8) & 0xFF;
+                        d[x*3+2] =  px        & 0xFF;
+                    }
+                }
+            };
+            grab(prevF);
+            for (int i = 0; i < N; ++i) {
+                std::srand(0);
+                Timer = ts;
+                driver->tick();
+                grab(curF);
+                for (size_t p = 0; p < npx; ++p) {
+                    const int dr = int(curF[p*3+0]) - int(prevF[p*3+0]);
+                    const int dg = int(curF[p*3+1]) - int(prevF[p*3+1]);
+                    const int db = int(curF[p*3+2]) - int(prevF[p*3+2]);
+                    acc[p] += float(std::abs(dr) + std::abs(dg) + std::abs(db)) * (1.0f/3.0f);
+                }
+                prevF.swap(curF);
+            }
+            const float invN = 1.0f / float(N);
+            // Per-row-band stats (8 horizontal bands) + global mean/max.
+            double gmean = 0.0; float gmax = 0.0f; int gmaxX = 0, gmaxY = 0;
+            for (int band = 0; band < 8; ++band) {
+                const int y0 = yres * band / 8, y1 = yres * (band+1) / 8;
+                double m = 0.0;
+                for (int y = y0; y < y1; ++y)
+                    for (int x = 0; x < xres; ++x) {
+                        const float v = acc[size_t(y)*xres + x] * invN;
+                        m += v;
+                        if (v > gmax) { gmax = v; gmaxX = x; gmaxY = y; }
+                    }
+                m /= double(y1 - y0) * xres;
+                gmean += m / 8.0;
+                std::fprintf(stderr, "[RIPPLE] rows %4d-%-4d mean|Δ|=%.4f\n", y0, y1-1, m);
+            }
+            std::fprintf(stderr,
+                "[RIPPLE] t=%d N=%d global mean|Δ|=%.4f  max=%.2f at (%d,%d)\n",
+                ts, N, gmean, gmax, gmaxX, gmaxY);
+            char rPath[1024];
+            std::snprintf(rPath, sizeof(rPath), "%s/ripple_t%06d.ppm",
+                          cfg.outDir.c_str(), ts);
+            std::FILE* rf = std::fopen(rPath, "wb");
+            if (rf) {
+                std::fprintf(rf, "P6\n%d %d\n255\n", xres, yres);
+                std::vector<unsigned char> row(xres * 3);
+                for (int y = 0; y < yres; ++y) {
+                    for (int x = 0; x < xres; ++x) {
+                        float v = acc[size_t(y)*xres + x] * invN * 8.0f;
+                        const unsigned char c =
+                            (unsigned char)(v > 255.f ? 255.f : v);
+                        row[x*3+0] = row[x*3+1] = row[x*3+2] = c;
+                    }
+                    std::fwrite(row.data(), 1, row.size(), rf);
+                }
+                std::fclose(rf);
+                std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", rPath);
+            }
+        }
+
         // Optional level-camera override (CITYSNAP_POS / CITYSNAP_FWD) to
         // probe the near-plane/rasterizer degeneracy seen in conetest at
         // perfectly level views. Re-renders the city geometry from the

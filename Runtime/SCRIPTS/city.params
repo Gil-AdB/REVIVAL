@@ -1,29 +1,22 @@
 # City — per-scene scripted parameters (see docs/PARAM_SCRIPTS.md).
-# Edit while the demo runs: the file hot-reloads on save, and deleting it
-# restores the pre-script values. CLI/env-set flags always win over lines
-# here. Times are scene Timer units (city runs 0..~2800).
+# Hot-reloads on save; CLI-set flags always win over lines here.
 
-# Fog: the froxel config tuned for city this session. bottom=0 keeps the
-# slab above the waterline (negative bottom puts fog UNDER the water and
-# brightens every water pixel).
-# Perf: city is fine at the coarse froxel grid (temporal supersampling
-# dissolves it — verified pixel-identical stills vs 256x144x64), and the
-# fog frame cost drops 71.6 -> 37.6 ms at t=1400.
+# Perf policy: coarse froxel grid — temporal supersampling dissolves it
+# (verified pixel-identical stills vs 256x144x64); fog cost 71.6->33ms.
 fast_fog_froxel_x = 128
 fast_fog_froxel_y = 72
 fast_fog_froxel_z = 48
 
-fast_fog          = 1
-fast_fog_blobs    = 1
-fast_fog_worley   = 1
-fast_fog_bottom   = 0
-fast_fog_top      = 420
-fast_fog_cell     = 500
-fast_fog_glow_max = 300
-fast_fog_inscatter = 3
-
-# Density ramps over the timeline: roll in, hold, burn off near the end.
-fast_fog_density @ 0    = 2
-fast_fog_density @ 600  = 8
-fast_fog_density @ 2200 = 8
-fast_fog_density @ 2800 = 1
+# Fog look (user-tuned 2026-06-10): metaball overlap field.
+# NOTE blob_overlap is capped at 1.5 by the 3x3x3 neighborhood search.
+fast_fog            = 1
+fast_fog_blobs      = 1
+fast_fog_worley     = 1
+fast_fog_density    = 14
+fast_fog_bottom     = -400
+fast_fog_top        = 420
+fast_fog_blob_overlap = 3
+fast_fog_worley_thresh = 2.0
+fast_fog_cell       = 500
+fast_fog_inscatter  = 4
+fast_fog_glow_max   = 250
