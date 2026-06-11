@@ -901,7 +901,8 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName)
 
 // ─── Render-to-texture shared bits (order 1 + 2) ─────────────────────────────────
 namespace {
-constexpr int kRttRes         = 256;  // slot texture edge (pow2)
+constexpr int kRttRes         = 256;  // initial/default surface edge (slots
+                                      // are density-sized, see kRttMaxRes)
 constexpr int kRttPerFrame    = 2;    // most-visible slots re-rendered per frame
 
 // Orthonormal in-plane basis for a mirror plane. Same construction the
@@ -2353,6 +2354,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // edge-to-edge mapping these are static in window space, but
         // recomputing through the same formula keeps UV and projection
         // trivially in lockstep.
+        static const bool kUv05 = std::getenv("FDS_MIRROR_RTT_UV05") != nullptr;
         for (const MirrorRttSlot::SlotVert &sv : s.verts) {
             const float epu = j.backSide ? -sv.pu : sv.pu;
             float tu = ( FOVX * (epu - cu) / D + CntrEX) / float(s.texW);
@@ -2360,7 +2362,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             // Keep off the wrap seam (Txtr_Tiled wraps).
             tu = std::min(std::max(tu, 0.002f), 0.998f);
             tv = std::min(std::max(tv, 0.002f), 0.998f);
-            if (std::getenv("FDS_MIRROR_RTT_UV05")) { tu = 0.5f; tv = 0.5f; }
+            if (kUv05) { tu = 0.5f; tv = 0.5f; }
             sv.v->U = tu;
             sv.v->V = tv;
         }

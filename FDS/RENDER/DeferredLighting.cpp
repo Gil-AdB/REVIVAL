@@ -3910,16 +3910,17 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     const float Dx = lights->dirX[li], Dy = lights->dirY[li], Dz = lights->dirZ[li];
                     const float cosO = lights->cosOuter[li];
                     const float cosI = lights->cosInner[li];
-                    // Narrow cones (half-angle < ~10°, the disco beams)
-                    // ray-march at a fixed 16 samples: the analytic
-                    // path stripes on them (fan-of-lines moire,
-                    // resistant to NR-refined rsqrt/rcp and a stable
-                    // atan-difference identity — root cause still
-                    // unidentified), and the global N=4 march shows
-                    // jitter grain + sample-shell rungs. 16 jittered
-                    // samples integrate the thin cone accurately and
-                    // smoothly. Wide city-scale cones keep the
-                    // measured analytic win.
+                    // Narrow cones (half-angle < ~10°, the disco
+                    // beams) take the per-segment hybrid inside the
+                    // analytic branch (exact segment integrals ×
+                    // per-segment coneAtten — a single midpoint
+                    // coneAtten fans into stripes at this gain, and a
+                    // uniform-z march loses the 1/d² core spike to a
+                    // sample lottery). nSamp only matters when the
+                    // analytic flag is off: the fallback march then
+                    // uses 16 samples instead of the global N. See
+                    // rsqrt_nr_x8 for the 12-bit-rsqrt amplification
+                    // that originally made this whole family visible.
                     const bool  narrowCone = cosO > 0.985f;
                     const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
                     const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
@@ -4133,15 +4134,15 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                                 _mm256_fmadd_ps(vTwoA, vZLo_v, vBeta));
                         // atan(u) − atan(v) computed DIRECTLY via the
                         // identity atan((u−v)/(1+uv)) (+π when uv<−1;
-                        // u>v always since zHi>zLo). Evaluating the two
-                        // atans separately striped bright narrow cones:
-                        // both arguments are huge near the singular
-                        // (ray-grazes-the-light) regime, each crosses
-                        // the polynomial's range-reduction boundaries
-                        // (error spikes → iso-argument fan stripes),
-                        // and the near-equal difference amplifies the
-                        // error by 2·invD. The identity feeds ONE atan
-                        // a small well-conditioned argument instead.
+                        // u>v always since zHi>zLo): near the ray-
+                        // grazes-the-light singularity both arguments
+                        // are huge and nearly equal — subtracting two
+                        // separately-evaluated atans loses precision,
+                        // amplified by 2·invD. The identity feeds ONE
+                        // atan a small well-conditioned argument.
+                        // (Historical: this was suspected as the
+                        // narrow-cone striping cause; the striping was
+                        // actually the cosT rsqrt — see rsqrt_nr_x8.)
                         // Stable atan difference via the identity
                         // atan(u)−atan(v) = atan((u−v)/(1+uv)) (+π when
                         // uv<−1) — avoids subtracting two atans of huge
@@ -6281,7 +6282,11 @@ static void Render_DeferredVolumetric_Tile(
                             mask = _mm256_and_ps(mask, _mm256_cmp_ps(DW, vZero_v, _CMP_GT_OQ));
 
                             const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
-                            const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                            // NR'd: cosT feeds the narrow-cone-gain
+                            // smoothstep (see rsqrt_nr_x8) and
+                            // Omni_ForceVolCone can route narrow cones
+                            // through the unified path too.
+                            const __m256 invLen = rsqrt_nr_x8(safeW2);
                             const __m256 dist   = _mm256_mul_ps(W2, invLen);
                             const __m256 cosT   = _mm256_mul_ps(DW, invLen);
                             mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
