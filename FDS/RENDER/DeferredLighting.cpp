@@ -7694,11 +7694,12 @@ void Render_ScreenSpaceRain() {
 	const float intensity = fds::FeatureFlags::rain_intensity();
 	if (intensity <= 0.0f || !ZPage16 || !VPage) return;
 
-	const float t = float(g_FrameTime) * 0.001f * fds::FeatureFlags::rain_speed();
+	// Timer ticks at 100 Hz (TimerInit(100) in REV.CPP) — centiseconds.
+	const float t = float(g_FrameTime) * 0.01f * fds::FeatureFlags::rain_speed();
 	// Wind: shared slant (px of x drift per px of y), slow compound gusts.
 	const float slant = 0.14f + 0.09f*std::sin(t*0.37f) + 0.05f*std::sin(t*0.83f);
 	const float density = intensity > 1.0f ? 1.0f : intensity;  // streak probability
-	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.5f; // >1 = heavier look
+	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.8f; // >1 = heavier look
 	const float invZScale = 1.0f / float(g_zscale);
 	const float fogFar = CurScene ? CurScene->FZP : 0.0f;
 	const bool froxelFog = FastFog_XparActive();
@@ -7716,9 +7717,9 @@ void Render_ScreenSpaceRain() {
 	};
 	// Near layer: long sparse bright streaks. Far: short dense faint ones.
 	static const Layer L[3] = {
-		{  500.0f, 36.0f, 96.0f, 0.40f, 22.0f, 0.42f },
-		{ 1400.0f, 22.0f, 64.0f, 0.34f, 16.0f, 0.30f },
-		{ 3200.0f, 13.0f, 42.0f, 0.30f, 11.0f, 0.20f },
+		{  500.0f, 36.0f, 96.0f, 0.55f, 22.0f, 0.55f },
+		{ 1400.0f, 22.0f, 64.0f, 0.45f, 16.0f, 0.40f },
+		{ 3200.0f, 13.0f, 42.0f, 0.38f, 11.0f, 0.28f },
 	};
 	// Rain color: cool pale blue, alpha-blended (reads on bright AND dark).
 	const float rainR = 165.0f, rainG = 185.0f, rainB = 225.0f;
@@ -7759,7 +7760,11 @@ void Render_ScreenSpaceRain() {
 							const float xj  = 0.15f + float(ch & 0xFFu)*(0.7f/255.0f);
 							const float ph  = float((ch >> 8) & 0xFFFu)*(1.0f/4096.0f);
 							const float spd = 0.85f + float((ch >> 20) & 0xFFu)*(0.3f/255.0f);
-							const float v   = vRow + scroll*spd + ph;
+							// MINUS scroll: v grows with py (down-screen), so
+							// the streak window must move to LARGER py over
+							// time — py = (v0 − vScroll)·cellH would climb;
+							// subtracting makes the pattern fall.
+							const float v   = vRow - scroll*spd + ph;
 							const int   vc  = int(std::floor(v));
 							const float fv  = v - float(vc);
 							if (fv > l.lenFrac) continue;
