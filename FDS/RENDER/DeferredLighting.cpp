@@ -4053,7 +4053,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     //       at z=zMid. Whole segment in or out (binary).
                     //       Stair-steps at shadow boundaries; tolerable
                     //       because halos are inherently diffuse.
-                    if (useAnalytic) {
+                    // Narrow cones: the boundary quadratic goes ill-
+                    // conditioned and the closed form bands into a fan
+                    // of striations (disco-ball beams, ~1.5°/4.5°
+                    // half-angles). Ray-march is smooth there; the
+                    // analytic win was measured on city-scale WIDE
+                    // cones, which stay analytic.
+                    const bool narrowCone = cosO > 0.985f;  // < ~10°
+                    if (useAnalytic && !narrowCone) {
                         // α z² + β z + γ = rr²·d²(z) + 0.05
                         const __m256 vRR2_v   = _mm256_mul_ps(vRR_v, vRR_v);
                         // Per-lane uV (= X²+Y²+1, varies per pixel).
