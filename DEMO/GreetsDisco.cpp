@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,11 +33,11 @@ namespace {
 constexpr int   kRings          = 10;   // latitude bands
 constexpr int   kSegs           = 14;   // longitude segments
 constexpr float kRadius         = 1.0f;
-constexpr int   kSpotCount      = 6;    // rotating dot cones
+constexpr int   kSpotCount      = 10;   // rotating dot cones
 constexpr float kSpinRadPerTick = 0.008f;  // ~1 rev / 8 s at 100 ticks/s
 constexpr float kBobAmp         = 0.12f;   // gentle vertical sway
 constexpr float kBobRadPerTick  = 0.012f;
-constexpr int   kCubeRes        = 256;  // bake cube-face resolution
+constexpr int   kCubeRes        = 512;  // bake cube-face resolution
 // TheOtherBarry's TEXTURETEXTURE env sampler hardcodes the env
 // texture to 1024² (t1_umask = (1<<10)-1, ×1024.0f) — any other size
 // samples out of bounds (black/garbage facets). cuberefl's panorama
@@ -50,6 +51,10 @@ Vector   s_ballPos = {0, 0, 0};
 Omni    *s_spots[kSpotCount] = {};
 Vector   s_spotBase[kSpotCount];
 bool     s_panoBaked = false;
+// Per-quad local outward normal + first-vertex index, for the
+// per-frame facet glint (shimmer) pass.
+struct FacetRef { Vector n; DWord v0; };
+std::vector<FacetRef> s_facets;
 
 // Cube-face camera bases (right, up, forward). The equirect resample
 // below projects through the SAME bases, so the pair is self-
@@ -77,6 +82,7 @@ bool BuildDiscoBall(Scene *sc)
     if (!FeatureFlags::greets_disco()) return false;
     s_ball = nullptr;
     s_panoBaked = false;
+    s_facets.clear();
 
     // ── Placement: room bbox of the loader meshes ───────────────────
     Vector bbMin = { 1e30f, 1e30f, 1e30f};
@@ -95,12 +101,12 @@ bool BuildDiscoBall(Scene *sc)
         }
     }
     const float R = kRadius;
-    // Corridor center, camera-band height + headroom. The scene bbox
-    // (logged below) is skewed by outlying geometry (roof apex at
-    // y=18.5, side rooms out to x=49) — the flight corridor itself is
-    // x≈0, z∈±21, so the spot is pinned rather than derived.
+    // Between the central columns (screen columns at x=±8.8, pedestal
+    // box at z≈-21): the corridor's central area, where the flight
+    // path spends its time. The scene bbox (logged below) is skewed
+    // by outlying geometry, so the spot is pinned rather than derived.
     // FDS_DISCO_POS="x,y,z" overrides for tuning.
-    s_ballPos = { 0.0f, 6.5f, 0.0f };
+    s_ballPos = { 0.0f, 5.8f, -25.0f };  // below the columns' crossbeam
     if (const char *e = std::getenv("FDS_DISCO_POS")) {
         float px, py, pz;
         if (std::sscanf(e, "%f,%f,%f", &px, &py, &pz) == 3)
@@ -134,7 +140,9 @@ bool BuildDiscoBall(Scene *sc)
     std::memset(baseTex, 0, sizeof(Texture));
     constexpr int BASE_SZ = 16;
     uint32_t *baseData = (uint32_t*)_aligned_malloc(BASE_SZ * BASE_SZ * 4, 16);
-    for (int i = 0; i < BASE_SZ * BASE_SZ; ++i) baseData[i] = 0xFF000000u;
+    // Mid-gray, not black: the colorize step is env + base/2, so the
+    // wash lifts the (teal-heavy) room reflection toward silver.
+    for (int i = 0; i < BASE_SZ * BASE_SZ; ++i) baseData[i] = 0xFF909090u;
     baseTex->Data   = (byte*)baseData;
     baseTex->BPP    = 32;
     baseTex->SizeX  = BASE_SZ; baseTex->LSizeX = 4;
@@ -211,6 +219,7 @@ bool BuildDiscoBall(Scene *sc)
                             std::cos(0.5f * (lo0 + lo1)) };
 
             const DWord base = vOfs;
+            s_facets.push_back({ out, base });
             const Vector corner[4] = { p00, p01, p11, p10 };
             const float  cu[4] = { 0.06f, 0.94f, 0.94f, 0.06f };
             const float  cv[4] = { 0.94f, 0.94f, 0.06f, 0.06f };
@@ -302,7 +311,10 @@ bool BuildDiscoBall(Scene *sc)
     // downward tilt so the dots sweep both floor and walls.
     for (int i = 0; i < kSpotCount; ++i) {
         const float az = 2.0f * kPI * float(i) / kSpotCount;
-        const float tilt = (i & 1) ? -0.65f : -0.25f;  // radians
+        // Tilt spread: steep cones dot the floor near the ball (always
+        // in view), shallow ones sweep the walls.
+        static const float kTilts[4] = { -1.05f, -0.65f, -0.40f, -0.18f };
+        const float tilt = kTilts[i & 3];
         s_spotBase[i] = { std::cos(tilt) * std::cos(az),
                           std::sin(tilt),
                           std::cos(tilt) * std::sin(az) };
@@ -402,11 +414,42 @@ void BakePanorama(Scene *sc)
             const float dz = d.x*b.fwd.x   + d.y*b.fwd.y   + d.z*b.fwd.z;
             const float dr = d.x*b.right.x + d.y*b.right.y + d.z*b.right.z;
             const float du = d.x*b.up.x    + d.y*b.up.y    + d.z*b.up.z;
-            int px = int(kFov * dr / dz + kFov);
-            int py = int(-kFov * du / dz + kFov);
-            px = std::min(std::max(px, 0), kCubeRes - 1);
-            py = std::min(std::max(py, 0), kCubeRes - 1);
-            pano[y * kPanoRes + x] = cube[f][py * kCubeRes + px] | 0xFF000000u;
+            // Bilinear tap — nearest left visible blocky patches where
+            // the equirect stretches a face (poles, face edges).
+            const float fx = kFov * dr / dz + kFov - 0.5f;
+            const float fy = -kFov * du / dz + kFov - 0.5f;
+            const int x0 = std::min(std::max(int(fx), 0), kCubeRes - 1);
+            const int y0 = std::min(std::max(int(fy), 0), kCubeRes - 1);
+            const int x1 = std::min(x0 + 1, kCubeRes - 1);
+            const int y1 = std::min(y0 + 1, kCubeRes - 1);
+            const float tx = std::min(std::max(fx - float(x0), 0.0f), 1.0f);
+            const float ty = std::min(std::max(fy - float(y0), 0.0f), 1.0f);
+            const uint32_t *cf = cube[f];
+            auto lerpPx = [](uint32_t a, uint32_t b2, float t) -> uint32_t {
+                uint32_t r = 0;
+                for (int sh = 0; sh <= 16; sh += 8) {
+                    const float ca = float((a  >> sh) & 0xFF);
+                    const float cb = float((b2 >> sh) & 0xFF);
+                    r |= uint32_t(ca + (cb - ca) * t) << sh;
+                }
+                return r;
+            };
+            const uint32_t top = lerpPx(cf[y0*kCubeRes+x0], cf[y0*kCubeRes+x1], tx);
+            const uint32_t bot = lerpPx(cf[y1*kCubeRes+x0], cf[y1*kCubeRes+x1], tx);
+            uint32_t cpx = lerpPx(top, bot, ty);
+            // Partial desaturation: the room is overwhelmingly teal
+            // and the ball read as jade. Pulling 45% toward luminance
+            // (plus the gray base wash) reads as silvered glass.
+            {
+                const uint32_t cb = cpx & 0xFF, cg = (cpx >> 8) & 0xFF,
+                               cr = (cpx >> 16) & 0xFF;
+                const uint32_t lum = (cr * 77 + cg * 150 + cb * 29) >> 8;
+                const uint32_t nb = cb + ((int(lum) - int(cb)) * 115 >> 8);
+                const uint32_t ng = cg + ((int(lum) - int(cg)) * 115 >> 8);
+                const uint32_t nr = cr + ((int(lum) - int(cr)) * 115 >> 8);
+                cpx = (nr << 16) | (ng << 8) | nb;
+            }
+            pano[y * kPanoRes + x] = cpx | 0xFF000000u;
         }
     }
     if (std::getenv("FDS_DISCO_DUMP")) {
@@ -473,6 +516,37 @@ void UpdateDiscoBall(Scene *sc, float t)
         const Vector &b = s_spotBase[i];
         s_spots[i]->IPos = s_ball->IPos;
         s_spots[i]->IDir = { c * b.x + s * b.z, b.y, -s * b.x + c * b.z };
+    }
+
+    // Shimmer: per-facet glint. Facets whose (spun) normal lies near
+    // the halfway vector between the view direction and straight-up
+    // flash bright as the rotation sweeps them through alignment —
+    // the colorize step modulates the env sample by the interpolated
+    // vertex color, and Tri_Noshading means we own these bytes.
+    if (::View) {
+        Vector vdir = { ::View->ISource.x - s_ball->IPos.x,
+                        ::View->ISource.y - s_ball->IPos.y,
+                        ::View->ISource.z - s_ball->IPos.z };
+        const float vl = std::sqrt(vdir.x*vdir.x + vdir.y*vdir.y + vdir.z*vdir.z);
+        if (vl > 1e-3f) {
+            vdir.x /= vl; vdir.y /= vl; vdir.z /= vl;
+            Vector h = { vdir.x, vdir.y + 1.0f, vdir.z };
+            const float hl = std::sqrt(h.x*h.x + h.y*h.y + h.z*h.z);
+            h.x /= hl; h.y /= hl; h.z /= hl;
+            for (const FacetRef &fr : s_facets) {
+                // n_world = spin × n_local (same Y rotation as above).
+                const float nx = c * fr.n.x + s * fr.n.z;
+                const float nz = -s * fr.n.x + c * fr.n.z;
+                float g = nx*h.x + fr.n.y*h.y + nz*h.z;
+                g = std::max(g, 0.0f);
+                g = g*g; g = g*g; g = g*g; g = g*g;       // ^16
+                const byte lum = byte(150.0f + 100.0f * g);
+                Vertex *V = s_ball->Verts + fr.v0;
+                for (int k = 0; k < 4; ++k) {
+                    V[k].LB = lum; V[k].LG = lum; V[k].LR = lum;
+                }
+            }
+        }
     }
 }
 
