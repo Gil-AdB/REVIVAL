@@ -1107,6 +1107,11 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             slot.mat->Luminosity = 1.0f;   // texture holds final colors
             slot.mat->Diffuse    = 0.0f;
             slot.mat->Specular   = 0.0f;
+            // Glass reflects on BOTH sides: without this the back view
+            // backface-culls into a hole showing the box interior
+            // (mirrored text of the far sheet). The per-frame job
+            // renders the side the camera is actually on.
+            slot.mat->Flags     |= Mat_TwoSided;
             slot.mat->RelScene   = sc;
             {
                 char nm[64];
@@ -2101,6 +2106,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         float          area;   // projected px² (visibility ranking)
         Vector         camPos; // C_B
         float          dist;   // C_B distance to B's plane
+        bool           backSide = false;  // order-1: camera behind plane
     };
     std::vector<Job> jobs;
     auto projectToScreen = [&](const Vector &wp, float &sx, float &sy) -> bool {
@@ -2163,15 +2169,28 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // land BEHIND the panel plane (in front = camera on the back
         // side of the panel, which can't show this mirror anyway).
         Vector cb;
+        bool backSide = false;
         if (s.order == 1) {
-            cb = reflectPointAcross(C, s.bN, s.bD);
+            // Side-aware: the glass reflects on whichever side the
+            // camera is on. Back side → reflect across the flipped
+            // plane; the render below also negates the U axis so the
+            // texture, displayed through the SAME UVs but viewed from
+            // behind (left-right mirrored by projection), reads
+            // correctly.
+            const float sdC = s.bN.x*C.x + s.bN.y*C.y + s.bN.z*C.z + s.bD;
+            backSide = (sdC < 0.0f);
+            if (backSide)
+                cb = reflectPointAcross(C, { -s.bN.x, -s.bN.y, -s.bN.z }, -s.bD);
+            else
+                cb = reflectPointAcross(C, s.bN, s.bD);
         } else {
             const Mirror *A = nullptr;
             for (const Mirror &m : mirrors) if (m.id == s.aId) { A = &m; break; }
             const Vector ca = reflectPointAcross(C, A->plane.N, A->plane.d);
             cb = reflectPointAcross(ca, s.bN, s.bD);
         }
-        const float sd = s.bN.x*cb.x + s.bN.y*cb.y + s.bN.z*cb.z + s.bD;
+        float sd = s.bN.x*cb.x + s.bN.y*cb.y + s.bN.z*cb.z + s.bD;
+        if (backSide) sd = -sd;      // flipped plane for back-side jobs
         if (sd >= -0.01f) continue;  // not behind the panel plane
         // Priority: projected area boosted by staleness. A slot that
         // hasn't re-rendered in k frames counts as ~(1 + k/30)× its
@@ -2179,7 +2198,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // second; never-rendered slots (staleFrames=2^20) win their
         // first fill immediately.
         const float priority = area * (1.0f + float(s.staleFrames) * (1.0f / 30.0f));
-        jobs.push_back({ &s, priority, cb, -sd });
+        jobs.push_back({ &s, priority, cb, -sd, backSide });
     }
     if (jobs.empty()) return;
     std::sort(jobs.begin(), jobs.end(),
@@ -2271,11 +2290,21 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // the real scene. With the view axis ⟂ the panel, the engine's
         // screen-parallel near plane IS the mirror plane: setting NZP
         // just past D clips everything behind the mirror exactly.
+        // Effective plane/basis: back-side jobs flip N and U (V kept)
+        // — flipping both keeps the basis right-handed, and the
+        // negated U makes the texture display correctly through the
+        // same UVs when the face is viewed from behind.
+        const Vector eN = j.backSide
+            ? Vector{ -s.bN.x, -s.bN.y, -s.bN.z } : s.bN;
+        const Vector eU = j.backSide
+            ? Vector{ -s.axisU.x, -s.axisU.y, -s.axisU.z } : s.axisU;
+        const float eU0 = j.backSide ? -s.u1 : s.u0;
+        const float eU1 = j.backSide ? -s.u0 : s.u1;
         std::memset(&s_rttCam, 0, sizeof(s_rttCam));
         s_rttCam.ISource = j.camPos;
-        s_rttCam.Mat[0][0] = s.axisU.x; s_rttCam.Mat[0][1] = s.axisU.y; s_rttCam.Mat[0][2] = s.axisU.z;
+        s_rttCam.Mat[0][0] = eU.x;      s_rttCam.Mat[0][1] = eU.y;      s_rttCam.Mat[0][2] = eU.z;
         s_rttCam.Mat[1][0] = s.axisV.x; s_rttCam.Mat[1][1] = s.axisV.y; s_rttCam.Mat[1][2] = s.axisV.z;
-        s_rttCam.Mat[2][0] = s.bN.x;    s_rttCam.Mat[2][1] = s.bN.y;    s_rttCam.Mat[2][2] = s.bN.z;
+        s_rttCam.Mat[2][0] = eN.x;      s_rttCam.Mat[2][1] = eN.y;      s_rttCam.Mat[2][2] = eN.z;
         // TRUE off-axis projection: the panel window maps edge-to-edge
         // onto the kRttRes² target, so the window gets every texel
         // regardless of viewing angle:
@@ -2287,11 +2316,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // first cut centered a symmetric frustum on the camera's
         // plane-foot instead — at oblique angles the window collapsed
         // to a few dozen texels and smeared, the 'garbled 2nd mirror'.)
-        const float cu = j.camPos.x*s.axisU.x + j.camPos.y*s.axisU.y + j.camPos.z*s.axisU.z;
+        const float cu = j.camPos.x*eU.x + j.camPos.y*eU.y + j.camPos.z*eU.z;
         const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
-        FOVX   = float(s.texW) * D / (s.u1 - s.u0);
+        FOVX   = float(s.texW) * D / (eU1 - eU0);
         FOVY   = float(s.texH) * D / (s.v1 - s.v0);
-        CntrEX = FOVX * (cu - s.u0) / D;
+        CntrEX = FOVX * (cu - eU0) / D;
         CntrEY = FOVY * (s.v1 - cv) / D;
         CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
         CntrY  = int32_t(std::min(std::max(CntrEY, -32000.0f), 32000.0f));
@@ -2306,7 +2335,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // recomputing through the same formula keeps UV and projection
         // trivially in lockstep.
         for (const MirrorRttSlot::SlotVert &sv : s.verts) {
-            float tu = ( FOVX * (sv.pu - cu) / D + CntrEX) / float(s.texW);
+            const float epu = j.backSide ? -sv.pu : sv.pu;
+            float tu = ( FOVX * (epu - cu) / D + CntrEX) / float(s.texW);
             float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(s.texH);
             // Keep off the wrap seam (Txtr_Tiled wraps).
             tu = std::min(std::max(tu, 0.002f), 0.998f);
@@ -2410,12 +2440,13 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             const int tw = s.textTex->SizeX, th = s.textTex->SizeY;
             const int tBlocksY = th >> 2;
             uint32_t *px = (uint32_t*)s_rttSurf.Data;
-            const float du = (s.u1 - s.u0) / float(s.texW);
+            const float du = (eU1 - eU0) / float(s.texW);
             const float dv = (s.v1 - s.v0) / float(s.texH);
             for (int y = 0; y < s.texH; ++y) {
                 const float pv = s.v1 - (float(y) + 0.5f) * dv;
                 for (int x = 0; x < s.texW; ++x) {
-                    const float pu = s.u0 + (float(x) + 0.5f) * du;
+                    const float epu = eU0 + (float(x) + 0.5f) * du;
+                    const float pu = j.backSide ? -epu : epu;
                     const float fu = s.tA[0]*pu + s.tA[1]*pv + s.tA[2];
                     const float fv = s.tA[3]*pu + s.tA[4]*pv + s.tA[5];
                     const int iu = int(fu * float(tw)) & (tw - 1);
