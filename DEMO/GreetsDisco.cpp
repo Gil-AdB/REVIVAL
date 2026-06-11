@@ -306,12 +306,17 @@ bool BuildDiscoBall(Scene *sc)
         s_spotBase[i] = { std::cos(tilt) * std::cos(az),
                           std::sin(tilt),
                           std::cos(tilt) * std::sin(az) };
+        // Color is 0–255 scale (deferred light color = L × ISize;
+        // the greets robot/orbit spots pass 255-scale too — passing
+        // 1.0 here made the dots ~100× too dim to register).
+        // Cool white: pops against the scene's saturated warm-gold
+        // lighting (warm dots vanished into the floor).
         s_spots[i] = MakeSpotLight(sc,
-                                   1.0f, 0.95f, 0.85f,   // warm white
-                                   2.2f,                  // intensity
+                                   215.0f, 235.0f, 255.0f,  // cool white
+                                   6.0f,                  // intensity
                                    38.0f,                 // range
                                    s_ballPos, s_spotBase[i],
-                                   1.2f, 3.5f,            // deg in/out
+                                   1.5f, 4.5f,            // deg in/out
                                    0, /*castsShadow=*/false);
     }
     std::fprintf(stderr, "[DISCO] ball: %u verts %u faces, %d spots\n",
