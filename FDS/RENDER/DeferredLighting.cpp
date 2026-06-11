@@ -7903,9 +7903,13 @@ void Render_LensDrops() {
 		}
 		// Fade in over the first 150 ms (condensation forming).
 		const float fade = d.age < 0.15f ? d.age * (1.0f/0.15f) : 1.0f;
-		const int ri  = int(d.r);
+		// Teardrop: bottom half elongated (gravity sag), top slightly squashed
+		// and tapered. Sliding drops stretch further with speed.
+		const float kBot = 1.35f + (d.vy * (1.0f/330.0f)) * 0.55f;
+		const float kTop = 0.85f;
 		const int cx  = int(d.x), cy = int(d.y);
-		int xa = cx - ri, xb = cx + ri + 1, ya = cy - ri, yb = cy + ri + 1;
+		int xa = cx - int(d.r) - 1,        xb = cx + int(d.r) + 2;
+		int ya = cy - int(d.r*kTop) - 1,   yb = cy + int(d.r*kBot) + 2;
 		if (xa < 0) xa = 0; if (ya < 0) ya = 0;
 		if (xb > (int)XRes) xb = (int)XRes; if (yb > (int)YRes) yb = (int)YRes;
 		if (xa >= xb || ya >= yb) { ++di; continue; }
@@ -7915,16 +7919,23 @@ void Render_LensDrops() {
 			std::memcpy(rect.data() + size_t(y)*rw,
 			            out + size_t(ya+y)*XRes + xa,
 			            size_t(rw) * sizeof(dword));
-		const float invR2 = 1.0f / (d.r * d.r);
+		const float invR  = 1.0f / d.r;
+		const float invKB = 1.0f / kBot, invKT = 1.0f / kTop;
 		// Specular glint sits up-left of center.
 		const float gx = d.x - d.r*0.35f, gy = d.y - d.r*0.35f;
 		const float gr2 = d.r*d.r*0.04f;
 		for (int py = ya; py < yb; ++py) {
-			const float dy_ = float(py) - d.y;
+			const float dyr = (float(py) - d.y) * invR;          // y in radii
+			// Normalized vertical coord of the teardrop ellipse.
+			const float ny  = dyr * (dyr > 0.0f ? invKB : invKT);
+			// Width tapers toward the top (drop necks where it hangs).
+			const float taper = dyr < 0.0f ? 1.0f + 0.30f*(-dyr*invKT) : 1.0f;
 			for (int px = xa; px < xb; ++px) {
 				const float dx_ = float(px) - d.x;
-				const float t2 = (dx_*dx_ + dy_*dy_) * invR2;
+				const float nx  = dx_ * invR * taper;
+				const float t2  = nx*nx + ny*ny;
 				if (t2 > 1.0f) continue;
+				const float dy_ = float(py) - d.y;
 				// Refraction: minified INVERTED background — sample the
 				// snapshot at center − 0.55·offset (lens flips the image).
 				int sx = int(d.x - dx_*0.55f) - xa;
