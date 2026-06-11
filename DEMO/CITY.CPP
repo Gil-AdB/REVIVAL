@@ -1699,13 +1699,25 @@ static void bakeBuildingPanorama(Object* Obj,
 }
 
 // ── Vehicle headlights ("for the lulz") ──────────────────────────────
-// Every path-following mesh (Tri_AlignToPath — the ships) gets one warm
-// spotlight welded to its nose, re-aimed along its motion Heading every
-// frame. The cones read as volumetric beams under --draw_cones and glow
-// in the froxel fog; surface lighting paints the buildings they sweep.
-// No shadows (N moving shadow maps would eat the frame budget).
+// Every vehicle-sized mover gets one warm spotlight welded to its nose,
+// re-aimed along its motion every frame. "Vehicle" = TriMesh with an
+// animated Pos spline (>1 key) and a vehicle-scale bounding sphere —
+// the city traffic system: taxis, buses, trams, police, cars, bike,
+// ambulance, plus the two AlignToPath ships. The size gate excludes the
+// movers that are NOT vehicles (water.lwo r=1061, the b1.lwo building
+// r=709, the r=0 camera target). Cones read as volumetric beams under
+// --draw_cones and glow in the froxel fog; surface lighting paints
+// whatever they sweep. No shadows (~30 moving shadow maps would eat
+// the frame budget). The police car strobes red/blue, obviously.
 namespace {
-struct VehicleHeadlight { TriMesh* T; Omni* spot; Vector lastDir; };
+struct VehicleHeadlight {
+	TriMesh* T;
+	Omni*    spot;
+	Vector   lastDir;
+	Vector   prevPos;
+	bool     hasPrev;   // delta heading needs one animated frame first
+	bool     police;
+};
 std::vector<VehicleHeadlight> g_headlights;
 }
 
@@ -1713,22 +1725,31 @@ static void Setup_Vehicle_Headlights()
 {
 	g_headlights.clear();
 	if (!fds::FeatureFlags::city_headlights()) return;
+	int omnis = 0;
+	for (Omni *o = CitySc->OmniHead; o; o = o->Next) ++omnis;
 	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
 		if (O->Type != Obj_TriMesh) continue;
 		TriMesh *T = (TriMesh *)O->Data;
-		if (!(T->Flags & Tri_AlignToPath)) continue;
+		if (T->Pos.NumKeys <= 1) continue;                     // parked scenery
+		if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
+			continue;                                          // water / moving building / camera target
+		const char *name = O->Name ? O->Name : "?";
+		const bool police = std::strstr(name, "poliece") != nullptr;
 		Omni *spot = fds::MakeSpotLight(
 			CitySc,
 			/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
 			fds::FeatureFlags::city_headlight_intensity(),
-			/*range*/ 3000.0f,                               // ~30m at 1cm/unit
+			/*range*/ 1600.0f,                               // ~16m at 1cm/unit
 			T->IPos, Vector(0.0f, 0.0f, 1.0f),
 			/*hot=*/6.0f, /*outer=*/16.0f,
 			/*shadowMapRes=*/0, /*castsShadow=*/false);
-		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 1.0f)});
-		fprintf(stderr, "[CITY] headlight on '%s'\n", O->Name ? O->Name : "?");
+		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
+		                        Vector(0.0f, 0.0f, 0.0f), false, police});
+		fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
+		        police ? " (strobe)" : "");
 	}
-	fprintf(stderr, "[CITY] %zu vehicle headlights\n", g_headlights.size());
+	fprintf(stderr, "[CITY] %zu vehicle headlights (%d scene omnis before; deferred cap %d)\n",
+	        g_headlights.size(), omnis, 128);
 }
 
 // Re-aim after Animate_Objects (which re-evaluates each spot's single-key
@@ -1740,25 +1761,49 @@ static void Update_Vehicle_Headlights()
 	    ? fds::FeatureFlags::city_headlight_intensity() : 0.0f;
 	for (VehicleHeadlight &h : g_headlights) {
 		TriMesh *T = h.T;
-		Vector dir = T->Heading;
+		// Heading: AlignToPath meshes (the ships) maintain T->Heading with
+		// spline lookahead; everything else moves by rotation-keyed splines,
+		// so derive it from the frame-to-frame position delta. Paused /
+		// parked frames (zero delta) hold the last good aim; the light
+		// stays doused until the first real delta so frame one doesn't
+		// flash a default-aimed beam.
+		Vector dir = (T->Flags & Tri_AlignToPath) ? T->Heading
+		           : Vector(T->IPos.x - h.prevPos.x,
+		                    T->IPos.y - h.prevPos.y,
+		                    T->IPos.z - h.prevPos.z);
+		const bool deltaValid = (T->Flags & Tri_AlignToPath) || h.hasPrev;
+		h.prevPos = T->IPos;
+		h.hasPrev = true;
 		const float l2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
-		if (l2 > 1e-6f) {
+		bool aimed = true;
+		if (deltaValid && l2 > 1e-6f) {
 			const float il = 1.0f / std::sqrt(l2);
 			dir.x *= il; dir.y *= il; dir.z *= il;
 			h.lastDir = dir;
-		} else {
+		} else if (h.lastDir.x*h.lastDir.x + h.lastDir.y*h.lastDir.y
+		           + h.lastDir.z*h.lastDir.z > 0.5f && h.hasPrev) {
 			dir = h.lastDir;       // parked/slow: keep the last good aim
+		} else {
+			aimed = false;         // no heading yet — keep it dark
 		}
-		// Nose mount: hull center (IPos is the pivot; BSphereCtr is the
-		// mesh-local center) pushed just outside the bounding sphere so
+		// Nose mount: pivot pushed just outside the bounding sphere
+		// (scaled — RotMat rows carry IScale, BSphereRadius doesn't) so
 		// the beam doesn't start inside the mesh (the cone march would
 		// light its own cabin).
-		const float nose = T->BSphereRadius > 0.0f ? T->BSphereRadius : 50.0f;
-		h.spot->IPos.x = T->IPos.x + T->BSphereCtr.x + dir.x * nose;
-		h.spot->IPos.y = T->IPos.y + T->BSphereCtr.y + dir.y * nose;
-		h.spot->IPos.z = T->IPos.z + T->BSphereCtr.z + dir.z * nose;
+		const float scale = T->IScale.x > 0.0f ? T->IScale.x : 1.0f;
+		const float nose = T->BSphereRadius * scale;
+		h.spot->IPos.x = T->IPos.x + dir.x * nose;
+		h.spot->IPos.y = T->IPos.y + dir.y * nose;
+		h.spot->IPos.z = T->IPos.z + dir.z * nose;
 		h.spot->IDir  = dir;
-		h.spot->ISize = intensity * (T->Flags & HTrack_Visible ? 1.0f : 0.0f);
+		h.spot->ISize = aimed && (T->Flags & HTrack_Visible) ? intensity : 0.0f;
+		if (h.police) {
+			// 2 Hz red/blue strobe (Timer is ~ms). Lulz mandate.
+			const bool red = ((int32_t)Timer / 250) & 1;
+			h.spot->L.R = red ? 255.0f : 40.0f;
+			h.spot->L.G = 40.0f;
+			h.spot->L.B = red ? 40.0f : 255.0f;
+		}
 	}
 }
 
