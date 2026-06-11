@@ -1118,6 +1118,11 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             // free-standing column panels show the scene through the
             // glass under the text + reflection.
             slot.mat->Flags     |= Mat_TwoSided | Mat_Transparent;
+            // Blend ratio: panel*a + behind*(1-a) via the kernel's
+            // XparBlendAlpha lerp. Runtime knob --mirror-rtt-alpha;
+            // the additive texel+behind/2 default read too windowy.
+            slot.mat->XparBlendAlpha =
+                fds::FeatureFlags::mirror_rtt_alpha();
             slot.mat->RelScene   = sc;
             {
                 char nm[64];
@@ -2463,9 +2468,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                     const uint32_t tb =  t        & 0xFF;
                     const uint32_t tg = (t >> 8)  & 0xFF;
                     const uint32_t tr = (t >> 16) & 0xFF;
-                    uint32_t ob = tb + (( o        & 0xFF) >> 1);
-                    uint32_t og = tg + (((o >> 8)  & 0xFF) >> 1);
-                    uint32_t orr = tr + (((o >> 16) & 0xFF) >> 1);
+                    uint32_t ob = tb + ( o        & 0xFF);
+                    uint32_t og = tg + ((o >> 8)  & 0xFF);
+                    uint32_t orr = tr + ((o >> 16) & 0xFF);
                     if (ob > 255) ob = 255;
                     if (og > 255) og = 255;
                     if (orr > 255) orr = 255;
