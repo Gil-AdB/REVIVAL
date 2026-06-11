@@ -2276,7 +2276,13 @@ struct CityScene : SceneDriver {
 		RenderSkyCube(SkySc, View, false);
 		prof.switchTo(PROF_ANIM);
 
-		Reflective_AnimateTexture();
+		// Water UV scroll advances by dTime, which stays NONZERO during
+		// pause (dTime is wallclock elapsed, computed before the pause
+		// branch pins Timer — the free camera needs it to keep flying).
+		// Gate the scroll itself so a paused frame is a fixed state and
+		// consecutive captures isolate temporal effects (fog jitter).
+		if (!pause_mode)
+			Reflective_AnimateTexture();
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
