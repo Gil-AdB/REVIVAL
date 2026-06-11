@@ -4873,6 +4873,10 @@ void Render_VolumetricCones() {
     // FDS_CONE_STRENGTH. Empirical: 0.0005-0.002 for City-scale (range
     // in thousands).
     const float density = fds::FeatureFlags::cone_strength() * 0.001f;
+    // Zero density = zero contribution: skip the whole per-pixel pass
+    // (it previously ran the full integration and multiplied by 0 at
+    // the end — --cone-strength=0 benched identical to default).
+    if (density <= 0.0f) return;
 
     // Fog cutoff + per-sample attenuation. Matches Render_DeferredFogPass:
     // cones fade by (1 - z/FZP) so they don't extend past where geometry
