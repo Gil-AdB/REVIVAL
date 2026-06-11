@@ -128,6 +128,9 @@ struct ViewLightsSoA {
 	// Omni_ForceVolCone: per-light volumetric-cone opt-in (renders a
 	// cone even when --draw-cones is off scene-wide).
 	alignas(32) uint32_t forceCone[DEFERRED_MAX_VIEW_LIGHTS];
+	// sin(outer half-angle) for spots (0 for omnis) — precomputed for
+	// the tile-vs-cone cull.
+	alignas(32) float sinOuter[DEFERRED_MAX_VIEW_LIGHTS];
 	// Index into g_shadowMaps for this light's shadow map, or -1 if
 	// not a shadow-caster (most omnis). Filled per frame in
 	// Render_DeferredLighting alongside the other per-light fields.
@@ -375,6 +378,59 @@ static void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
 	}
 }
 
+// Conservative sphere-vs-spot-cone rejection (cone expanded by the
+// sphere radius, capped at `range`). Returns true when the sphere is
+// definitely outside the cone volume — safe to drop the light for
+// every pixel the sphere bounds. Range-sphere culling alone puts a
+// narrow spot (disco beams: 4.5° half-angle, range 38) in nearly
+// every tile while its cone intersects almost none of them.
+static inline bool sphereOutsideCone(float cx, float cy, float cz, float R,
+                                     float ax, float ay, float az,
+                                     float dx, float dy, float dz,
+                                     float range, float cosO, float sinO)
+{
+	const float vx = cx - ax, vy = cy - ay, vz = cz - az;
+	const float a  = vx*dx + vy*dy + vz*dz;
+	if (a > range + R) return true;   // beyond the cap
+	if (a < -R)        return true;   // behind the apex
+	const float v2 = vx*vx + vy*vy + vz*vz;
+	const float q2 = v2 - a*a;
+	const float q  = (q2 > 0.0f) ? std::sqrt(q2) : 0.0f;
+	return (cosO * q - sinO * a) > R; // outside the expanded cone
+}
+
+// Bounding sphere of a tile's view-space frustum chunk: the screen
+// rect [x0,x1]×[y0,y1] swept over depth [zLo,zHi].
+struct TileChunkSphere { float cx, cy, cz, R; bool valid; };
+static inline TileChunkSphere tileChunkSphere(float x0, float x1,
+                                              float y0, float y1,
+                                              float zLo, float zHi)
+{
+	TileChunkSphere t{0, 0, 0, 0, false};
+	if (!(zHi >= zLo) || zHi <= 0.0f) return t;
+	if (zLo < 0.05f) zLo = 0.05f;
+	const float xn0 = (x0 - CntrEX) / FOVX, xn1 = (x1 - CntrEX) / FOVX;
+	const float yn0 = (CntrEY - y1) / FOVY, yn1 = (CntrEY - y0) / FOVY;
+	float px[8], py[8], pz[8];
+	int n = 0;
+	for (float z : { zLo, zHi })
+		for (float xn : { xn0, xn1 })
+			for (float yn : { yn0, yn1 }) {
+				px[n] = xn * z; py[n] = yn * z; pz[n] = z; ++n;
+			}
+	float cx = 0, cy = 0, cz = 0;
+	for (int i = 0; i < 8; ++i) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+	cx *= 0.125f; cy *= 0.125f; cz *= 0.125f;
+	float r2 = 0;
+	for (int i = 0; i < 8; ++i) {
+		const float dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+		const float d2 = dx*dx + dy*dy + dz*dz;
+		if (d2 > r2) r2 = d2;
+	}
+	t.cx = cx; t.cy = cy; t.cz = cz; t.R = std::sqrt(r2); t.valid = true;
+	return t;
+}
+
 static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
                                  const ViewLightsSoA &lights, int numLights,
@@ -390,6 +446,21 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 	// we reject lights whose view-space z extent doesn't overlap the
 	// tile's pixel depth range. Default on.
 	const bool zCullEnabled = fds::FeatureFlags::deferred_zcull();
+
+	// Per-tile chunk bounding spheres for the spot cone cull.
+	const bool coneCull = fds::FeatureFlags::spot_cone_cull();
+	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
+	if (coneCull) {
+		for (int j = 0; j < numTilesY; ++j) {
+			for (int i = 0; i < numTilesX; ++i) {
+				const int idx = j * numTilesX + i;
+				chunk[idx] = tileChunkSphere(
+					float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
+					float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
+					tileLights[idx].zMin, tileLights[idx].zMax);
+			}
+		}
+	}
 
 	for (int li = 0; li < numLights; ++li) {
 		const float vx = lights.posX[li];
@@ -454,6 +525,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const float    Lwz = lights.posWorldZ[li];
 		const int32_t  Lci2 = lights.cubeShadowIdx[li];
 		const uint32_t Lmid = lights.mirrorId[li];
+		const float Lso = lights.sinOuter[li];
 
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
@@ -465,6 +537,28 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 				if (zCullEnabled &&
 				    (vz_plus_r < tl.zMin || vz_minus_r > tl.zMax)) {
 					continue;
+				}
+				// Spot cone cull: the tile's pixel chunk vs the cone.
+				// The chunk's z-range is first clipped to the cone's
+				// own z-extent — an unclipped deep tile makes a fat
+				// sphere the expanded-cone test can't reject.
+				if (coneCull && Lis && chunk[idx].valid) {
+					const float pad   = r * Lso;
+					const float czLo  = std::min(vz, vz + Ldz * r) - pad;
+					const float czHi  = std::max(vz, vz + Ldz * r) + pad;
+					const float zLoC  = std::max(tl.zMin, czLo);
+					const float zHiC  = std::min(tl.zMax, czHi);
+					if (zHiC < zLoC) continue;  // no z overlap at all
+					const TileChunkSphere cs = tileChunkSphere(
+					    float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
+					    float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
+					    zLoC, zHiC);
+					if (cs.valid &&
+					    sphereOutsideCone(cs.cx, cs.cy, cs.cz, cs.R,
+					                      Lpx, Lpy, Lpz, Ldx, Ldy, Ldz,
+					                      r, Lco, Lso)) {
+						continue;
+					}
 				}
 				// Clone-light mirror-footprint cull (see
 				// computeMirrorPresenceGrid). Ids ≥ 32 don't fit the
@@ -3452,6 +3546,11 @@ void Render_DeferredLighting() {
 		lights.posWorldY[numLights] = O->IPos.y;
 		lights.posWorldZ[numLights] = O->IPos.z;
 		lights.forceCone[numLights] = (O->Flags & Omni_ForceVolCone) ? 1u : 0u;
+		{
+			const float co = (O->Type == Light_SpotLight) ? O->FallOff : 1.0f;
+			const float s2 = 1.0f - co * co;
+			lights.sinOuter[numLights] = (s2 > 0.0f) ? std::sqrt(s2) : 0.0f;
+		}
 		lights.colB[numLights]   = O->L.B * O->ISize;
 		lights.colG[numLights]   = O->L.G * O->ISize;
 		lights.colR[numLights]   = O->L.R * O->ISize;
@@ -4948,9 +5047,46 @@ void Render_VolumetricCones() {
             tj_lo = sy_min / tileSizeY;
             tj_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
         }
+        // Cone-vs-tile cull: the volumetric ray spans [near, surface],
+        // so the relevant chunk is the cone tile's screen rect swept
+        // from the near plane to the deepest surface beneath it (max
+        // of the 2x2 underlying 12x8 surface tiles' zMax; empty tiles
+        // → FZP). Without this every narrow beam pays the per-pixel
+        // quadratic + segment integral in nearly every tile.
+        const bool coneCull = fds::FeatureFlags::spot_cone_cull() &&
+                              g_deferredCtx.tileLights != nullptr;
+        const float sinO_cull = lights->sinOuter[li];
+        const float fzpFar = CurScene->FZP > 0.0f ? CurScene->FZP : 1e4f;
         for (int j = tj_lo; j <= tj_hi; ++j) {
             for (int i = ti_lo; i <= ti_hi; ++i) {
                 const int t = j * numTilesX + i;
+                if (coneCull) {
+                    float zHiT = -1e30f;
+                    for (int sj = 0; sj < 2; ++sj)
+                        for (int si = 0; si < 2; ++si) {
+                            const int st = (j*2 + sj) * DEFERRED_NUM_TILES_X + (i*2 + si);
+                            const float zm = g_deferredCtx.tileLights[st].zMax;
+                            zHiT = std::max(zHiT, (zm > 0.0f && zm < 1e30f) ? zm : fzpFar);
+                        }
+                    const float pad  = r * sinO_cull;
+                    const float dirZ = lights->dirZ[li];
+                    const float czLo = std::min(vz, vz + dirZ * r) - pad;
+                    const float czHi = std::max(vz, vz + dirZ * r) + pad;
+                    const float zLoC = std::max(0.05f, czLo);
+                    const float zHiC = std::min(zHiT, czHi);
+                    if (zHiC < zLoC) continue;  // no z overlap
+                    const TileChunkSphere cs = tileChunkSphere(
+                        float(i * tileSizeX), float(std::min((i+1) * tileSizeX, int(XRes))),
+                        float(j * tileSizeY), float(std::min((j+1) * tileSizeY, int(YRes))),
+                        zLoC, zHiC);
+                    if (cs.valid &&
+                        sphereOutsideCone(cs.cx, cs.cy, cs.cz, cs.R,
+                                          vx, vy, vz,
+                                          lights->dirX[li], lights->dirY[li],
+                                          lights->dirZ[li],
+                                          r, lights->cosOuter[li], sinO_cull))
+                        continue;
+                }
                 if (tileSpotCount[t] < DEFERRED_MAX_VIEW_LIGHTS) {
                     tileSpotIdx[t][tileSpotCount[t]++] = li;
                 }

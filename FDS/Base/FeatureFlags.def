@@ -16,6 +16,7 @@
 
 // ─── deferred pipeline ───────────────────────────────────────────────────
 FDS_FLAG_BOOL(deferred,                 "FDS_DEFERRED",                 FDS_DEFERRED_DEFAULT_ON,        "deferred", "Deferred G-buffer pipeline")
+FDS_FLAG_BOOL(spot_cone_cull,           "FDS_SPOT_CONE_CULL",           1,                              "deferred", "Tile-vs-cone culling for spot lights in the per-tile light lists + volumetric cone pass. Range-sphere culling alone puts a narrow spot (disco beams: 4.5 deg, range 38) in nearly every tile while it lights almost none of it.")
 FDS_FLAG_BOOL(deferred_zcull,           "FDS_DEFERRED_ZCULL",           1,                              "deferred", "Cull G-buffer ROP writes against existing Z (default on)")
 FDS_FLAG_BOOL(deferred_vec,             "FDS_DEFERRED_VEC",             0,                              "deferred", "SIMD lighting tile kernel (slower on arm64-via-simde)")
 FDS_FLAG_BOOL(deferred_outer_vec,       "FDS_DEFERRED_OUTER_VEC",       0,                              "deferred", "Outer-vec kernel (8 px x 1 omni); when unset, falls back to Scene::PreferOuterVec")
