@@ -1087,18 +1087,23 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             }
             if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
                 continue;
-            // Aspect-match at constant texel budget (same policy as
-            // the second-order slots).
+            // Texel density proportional to the panel's WORLD size
+            // (capped 512x512). The old constant 64K budget spread the
+            // same texels over any panel area — big panels rendered
+            // visibly blockier than small ones.
             {
-                const float winAspect =
-                    (slot.u1 - slot.u0) / (slot.v1 - slot.v0);
-                while (winAspect / (float(slot.texW) / float(slot.texH)) >= 2.0f
-                       && slot.texW < 1024 && slot.texH > 32) {
-                    slot.texW <<= 1; slot.texH >>= 1;
-                }
-                while ((float(slot.texW) / float(slot.texH)) / winAspect >= 2.0f
-                       && slot.texH < 1024 && slot.texW > 32) {
-                    slot.texW >>= 1; slot.texH <<= 1;
+                const float density = fds::FeatureFlags::mirror_rtt_density();
+                auto pow2of = [](float v, int lo, int hi) {
+                    int p = lo;
+                    while (p < hi && float(p * 2) <= v * 1.5f) p <<= 1;
+                    return p;
+                };
+                slot.texW = pow2of((slot.u1 - slot.u0) * density, 64, 512);
+                slot.texH = pow2of((slot.v1 - slot.v0) * density, 64, 512);
+                while (slot.texW * slot.texH > 512 * 512) {
+                    if (slot.texW >= slot.texH && slot.texW > 64) slot.texW >>= 1;
+                    else if (slot.texH > 64) slot.texH >>= 1;
+                    else break;
                 }
             }
             std::vector<uint32_t> black(
@@ -2004,23 +2009,25 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
                 }
                 if (slot.u1 - slot.u0 < 1e-3f || slot.v1 - slot.v0 < 1e-3f)
                     continue;
-                // Aspect-match the texture to the window at constant
-                // texel budget: halve one axis / double the other while
-                // the aspect mismatch exceeds 2x. Greets's wide end
-                // screens (≈3.7:1) land on 512x128 instead of smearing
-                // 4x horizontally out of a square.
+                // Texel density proportional to the window's world
+                // size (capped 512x512) — see the order-1 site.
                 {
-                    const float winAspect =
-                        (slot.u1 - slot.u0) / (slot.v1 - slot.v0);
-                    while (winAspect / (float(slot.texW) / float(slot.texH)) >= 2.0f
-                           && slot.texW < 1024 && slot.texH > 32) {
-                        slot.texW <<= 1; slot.texH >>= 1;
-                    }
-                    while ((float(slot.texW) / float(slot.texH)) / winAspect >= 2.0f
-                           && slot.texH < 1024 && slot.texW > 32) {
-                        slot.texW >>= 1; slot.texH <<= 1;
-                    }
+                const float density = fds::FeatureFlags::mirror_rtt_density();
+                auto pow2of = [](float v, int lo, int hi) {
+                    int p = lo;
+                    while (p < hi && float(p * 2) <= v * 1.5f) p <<= 1;
+                    return p;
+                };
+                slot.texW = pow2of((slot.u1 - slot.u0) * density, 64, 512);
+                slot.texH = pow2of((slot.v1 - slot.v0) * density, 64, 512);
+                while (slot.texW * slot.texH > 512 * 512) {
+                    if (slot.texW >= slot.texH && slot.texW > 64) slot.texW >>= 1;
+                    else if (slot.texH > 64) slot.texH >>= 1;
+                    else break;
                 }
+            }
+                black.assign(size_t(slot.texW) * size_t(slot.texH),
+                             0xFF000000u);
                 slot.mat = Materialize(black.data(), slot.texW, slot.texH);
                 // The texture holds FINAL shaded colors — display it
                 // unlit: Lum 1.0 saturates the kernel's light factor at
@@ -2223,7 +2230,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     // matched dimensions.
     static VESA_Surface s_rttSurf = {};
     static bool s_rttInit = false;
-    constexpr int kRttTexels = kRttRes * kRttRes;
+    constexpr int kRttMaxRes = 512;  // density cap in the slot sizing
+    constexpr int kRttTexels = kRttMaxRes * kRttMaxRes;
     if (!s_rttInit) {
         s_rttSurf.X = kRttRes;
         s_rttSurf.Y = kRttRes;
