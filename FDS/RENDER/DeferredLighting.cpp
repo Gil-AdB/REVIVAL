@@ -7227,11 +7227,27 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					const float vz = Az + zc*Bz;
 					if (vz > 0.0f) {
 						const float ivz = 1.0f / vz;
-						const float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
-						const float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
-						const float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
-						if (fx >= 0.0f && fx <= float(nx-1) && fy >= 0.0f &&
-						    fy <= float(ny-1) && fz >= 0.0f && fz <= float(nz-1)) {
+						float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
+						float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
+						float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
+						// Accept the outer HALF-froxel band and CLAMP into
+						// the sample range instead of rejecting. A slice's
+						// arithmetic-mean center sits past its log-space
+						// midpoint (≈ iz+0.52 for this grid), so a hard
+						// fz <= nz-1 test rejected slice nz-1 in EVERY
+						// column — the last slice never blended history and
+						// cycled at full jitter amplitude. Sky pixels
+						// integrate through that slice → standing fog-top
+						// shimmer at the skyline, immune to the blend weight
+						// (the blend never ran there). The same off-by-half
+						// on fy was the 1px dashed ripple at the very top
+						// screen rows.
+						if (fx >= -0.5f && fx <= float(nx)-0.5f &&
+						    fy >= -0.5f && fy <= float(ny)-0.5f &&
+						    fz >= -0.5f && fz <= float(nz)-0.5f) {
+							fx = fx < 0.0f ? 0.0f : (fx > float(nx-1) ? float(nx-1) : fx);
+							fy = fy < 0.0f ? 0.0f : (fy > float(ny-1) ? float(ny-1) : fy);
+							fz = fz < 0.0f ? 0.0f : (fz > float(nz-1) ? float(nz-1) : fz);
 							const int x0 = int(fx), y0 = int(fy), z0 = int(fz);
 							const int x1 = x0+1 < nx ? x0+1 : x0;
 							const int y1 = y0+1 < ny ? y0+1 : y0;

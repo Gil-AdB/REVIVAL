@@ -2430,7 +2430,6 @@ struct CityScene : SceneDriver {
 					fds_stats::g_mipFastUniform,
 					fds_stats::g_mipSplit);
 				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-				fprintf(stderr, "[CITY-CLIP] %s\n", MSGStr);
 			}
 		}
 		// 'G' (grab) — same as greets/conetest: dump THIS completed frame
