@@ -3803,6 +3803,19 @@ static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
 //     c_q = (D·P)² - c²|P|².
 //   Real roots → ray crosses cone boundary; clamp interval to
 //     [NearZ, min(z_surf, z_at_range)] and integrate.
+// rsqrt + one Newton-Raphson step (~24-bit). The cone passes feed
+// cosT = D·W·rsqrt(W²) into smoothstep((cosT−cosO)/(cosI−cosO)):
+// for NARROW cones the 1/(cosI−cosO) gain is ~350 (1.5°/4.5°), which
+// amplifies the raw 12-bit rsqrt's quantization staircase into ±10%
+// attenuation noise — the beam 'fur'/fan-stripe moire family. Wide
+// city cones (gain 2-10) never showed it.
+static inline __m256 rsqrt_nr_x8(__m256 x) {
+    __m256 r = _mm256_rsqrt_ps(x);
+    return _mm256_mul_ps(r, _mm256_fnmadd_ps(
+        _mm256_mul_ps(_mm256_set1_ps(0.5f), x),
+        _mm256_mul_ps(r, r), _mm256_set1_ps(1.5f)));
+}
+
 static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                          const ViewLightsSoA *lights,
                                          const int *spotIdx, int spotCount,
@@ -3980,6 +3993,13 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         if (zLo < zMin)   zLo = zMin;
                         if (zHi <= zLo)   continue;
                         if (zLo >= zMax)  continue;
+                        // Clamp at the surface: without this the
+                        // analytic path integrates the chord BEHIND
+                        // the floor and leans on the midpoint fade to
+                        // approximate the cut — per-pixel z16 noise
+                        // then modulates the whole-chord brightness
+                        // (the grazing-angle 'fur' on beams).
+                        if (zHi > zMax)   zHi = zMax;
                         if (std::fabs(DV) > 1e-6f) {
                             const float zFwd = DP / DV;
                             if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
@@ -4019,8 +4039,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         if (aliveLane[lane] == 0.0f) continue;
                         const float d = (zHiArr[lane] - zLoArr[lane]) * inv_nSamp;
                         dzArr[lane]        = d;
-                        invDzArr[lane]     = 1.0f / d;
-                        fadeStartArr[lane] = zMaxArr[lane] - d;
+                        // Surface-fade window: at least ~12 z-buffer
+                        // quanta wide, so the z16 staircase (large in
+                        // world units at grazing incidence) jitters
+                        // INSIDE the ramp instead of cutting the beam
+                        // at a per-column-noisy depth.
+                        const float fadeW = std::max(d, 12.0f * invZScale);
+                        invDzArr[lane]     = 1.0f / fadeW;
+                        fadeStartArr[lane] = zMaxArr[lane] - fadeW;
                     }
 
                     const __m256 vX_v        = _mm256_load_ps(Xarr);
@@ -4145,7 +4171,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                               _mm256_fmadd_ps(vDy_v, Wy,
                                                _mm256_mul_ps(vDz_dir_v, Wz)));
                             const __m256 safeW2 = _mm256_max_ps(W2, _mm256_set1_ps(1e-12f));
-                            const __m256 cosT = _mm256_mul_ps(DW, _mm256_rsqrt_ps(safeW2));
+                            const __m256 cosT = _mm256_mul_ps(DW, rsqrt_nr_x8(safeW2));
                             __m256 t = _mm256_mul_ps(_mm256_sub_ps(cosT, vCosO_v), vInvCIO_v);
                             t = _mm256_max_ps(vZero_v, _mm256_min_ps(vOne_v, t));
                             const __m256 sm = _mm256_mul_ps(_mm256_mul_ps(t, t),
@@ -4172,6 +4198,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                             // weighted by coneAtten at its midpoint —
                             // no lottery, no global midpoint.
                             constexpr int SEG = 8;
+                            const __m256 vZMaxFade_v = _mm256_load_ps(zMaxArr);
                             const __m256 vSegDz = _mm256_mul_ps(
                                 _mm256_sub_ps(vZHi_v, vZLo_v),
                                 _mm256_set1_ps(1.0f / SEG));
@@ -4184,8 +4211,17 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                     _mm256_fmadd_ps(vTwoA, zk, vBeta));
                                 const __m256 zm = _mm256_fmadd_ps(
                                     _mm256_set1_ps(float(seg) - 0.5f), vSegDz, vZLo_v);
+                                // Surface fade per segment (ramp over
+                                // the widened window) — folded here so
+                                // the global midpoint fade (skipped for
+                                // narrow below) can't reintroduce the
+                                // whole-chord z16 sensitivity.
+                                __m256 sf = _mm256_mul_ps(
+                                    _mm256_sub_ps(vZMaxFade_v, zm), vInvDz_v);
+                                sf = _mm256_max_ps(vZero_v,
+                                     _mm256_min_ps(vOne_v, sf));
                                 vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
-                                                       coneAttenAt(zm), vSum);
+                                       _mm256_mul_ps(coneAttenAt(zm), sf), vSum);
                                 uPrev = uk;
                             }
                             vIntegral = _mm256_mul_ps(
@@ -4207,7 +4243,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                             _mm256_fmadd_ps(vDy_v, Wy_m,
                                              _mm256_mul_ps(vDz_dir_v, Wz_m)));
                         const __m256 safeW2_m = _mm256_blendv_ps(vOne_v, W2_m, mAlive);
-                        const __m256 invLen_m = _mm256_rsqrt_ps(safeW2_m);
+                        const __m256 invLen_m = rsqrt_nr_x8(safeW2_m);
                         const __m256 cosT_m   = _mm256_mul_ps(DW_m, invLen_m);
                         // Near-edge softness: ray-march multiplies by
                         // (1 - rr·d)² to fade the integrand at the
@@ -4237,7 +4273,10 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         const __m256 mFade_m  = _mm256_cmp_ps(vZMid, vFadeStart_v, _CMP_GT_OQ);
                         const __m256 fadeVal_m = _mm256_mul_ps(
                                                  _mm256_sub_ps(vZMax_v, vZMid), vInvDz_v);
-                        const __m256 surfaceFade_m = _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
+                        // Narrow cones folded the fade per segment.
+                        const __m256 surfaceFade_m = narrowCone
+                            ? vOne_v
+                            : _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
 
                         // Match ray-march brightness scaling: N × mean.
                         const __m256 vIntervalLen = _mm256_sub_ps(vZHi_v, vZLo_v);
@@ -4367,7 +4406,7 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         mask = _mm256_and_ps(mask, _mm256_cmp_ps(DW, vZero_v, _CMP_GT_OQ));
 
                         const __m256 safeW2 = _mm256_blendv_ps(vOne_v, W2, mask);
-                        const __m256 invLen = _mm256_rsqrt_ps(safeW2);
+                        const __m256 invLen = rsqrt_nr_x8(safeW2);
                         const __m256 dist   = _mm256_mul_ps(W2, invLen);
                         const __m256 cosT   = _mm256_mul_ps(DW, invLen);
                         mask = _mm256_and_ps(mask, _mm256_cmp_ps(cosT, vCosO_v, _CMP_GE_OQ));
