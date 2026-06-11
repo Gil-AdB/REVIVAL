@@ -453,7 +453,7 @@ void Render_DeferredShadowMaps(class Scene *Sc,
 // passes; the next froxel fog composite fogs those z==0 reflection pixels
 // at the mirrored path length instead of uniformly at the grid far plane.
 // Consumed once, then reset (no dangling pointer across scene changes).
-void FastFog_SetReflectionZ(const uint16_t *z);
+void FastFog_SetReflectionZ(const uint16_t *z, float waterY);
 
 // Shadow technique. Toggleable at runtime.
 enum class ShadowMode {

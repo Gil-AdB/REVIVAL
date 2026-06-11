@@ -2484,7 +2484,7 @@ struct CityScene : SceneDriver {
 					}
 					ptr++; ++idx;
 				}
-				FastFog_SetReflectionZ(zr);
+				FastFog_SetReflectionZ(zr, -RflSurfOfs);   // plane: N=(0,1,0), y = -ofs
 			}
 
 			// Deferred path needs Z cleared between passes so the pass-2

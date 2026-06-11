@@ -6682,13 +6682,15 @@ namespace {
 	// the main pass's — then reset, so a scene change can't leave the
 	// pointer dangling into a freed buffer.
 	const uint16_t* gFrReflZ = nullptr;
+	float           gFrReflWaterY = 0.0f;   // mirror plane height (world Y)
 }
 
 // See gFrReflZ. The city calls this after its dispMap wobble with the
-// displaced pass-1 Z so the composite can fog the water's reflections at
-// their mirrored path length instead of uniformly at gFrFar.
-void FastFog_SetReflectionZ(const uint16_t* z) {
+// displaced pass-1 Z so the composite can fog the water's reflections along
+// their actual two-leg path instead of uniformly at gFrFar.
+void FastFog_SetReflectionZ(const uint16_t* z, float waterY) {
 	gFrReflZ = fds::FeatureFlags::fast_fog_refl_depth() ? z : nullptr;
+	gFrReflWaterY = waterY;
 }
 
 // Called at the top of renderFrame (RENDER.CPP) so a frame whose fog pass
@@ -7353,20 +7355,61 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 			// zEnc==0 pixels are sky OR the water's reflection underlay
 			// (the transparent peel writes no Z). Default: fog at gFrFar.
 			// When the scene provides the reflection pass's (displaced)
-			// depth, use the MIRRORED path length instead —
-			// |mirrorCam→building| equals the real camera→water→building
-			// distance, and the fog slab is ~symmetric about the water-
-			// line, so sampling the main grid at that depth grades
-			// reflections like the world above: near buildings stay crisp
-			// in the mirror, far ones drown.
+			// depth, fog along the reflected path's TWO legs. Sampling
+			// the main grid at the mirrored depth is NOT enough: the
+			// main (downward) ray exits the slab bottom shortly below
+			// the waterline, so its integral saturates and any mirrored
+			// depth beyond that reads the same fog. Split instead:
+			//   leg 1 camera→water: the normal grid path, at the ray's
+			//          analytic water-plane depth z_w;
+			//   leg 2 water→building (length z_m − z_w, UP-going, ray's
+			//          Y flipped about the plane): closed-form slab
+			//          integral (SkyPaint's), folded in after the fetch
+			//          as T = T1·T2, acc = acc1 + T1·acc2.
 			float z;
+			float reflAmt2 = 0.0f;             // leg-2 fog amount (0 = none)
 			if (ze == 0) {
 				z = gFrFar;
 				if (gFrReflZ) {
 					const uint16_t zr = gFrReflZ[i];
 					if (zr) {
 						const float zm = float(0xFF80 - int(zr)) * P.invZScale;
-						if (zm > 0.0f && zm < gFrFar) z = zm;
+						if (zm > 0.0f && zm < gFrFar) {
+							const float Xc = (float(px) - CntrEX) * P.invFOVX;
+							const float Yc = (CntrEY - float(py)) * P.invFOVY;
+							const float gY = P.w10*Xc + P.w11*Yc + P.w12;
+							// Main-ray depth of the water plane.
+							float zw = zm;
+							if (gY < -1e-6f) {
+								const float t = (gFrReflWaterY - P.camY) / gY;
+								if (t > 0.0f && t < zm) zw = t;
+							}
+							z = zw < gFrNear ? gFrNear : zw;
+							const float L = zm - zw;
+							if (L > 0.0f) {
+								const float gYu = -gY;     // up-going leg
+								float sB = L;
+								if (gYu > 1e-6f) {
+									const float sExit =
+									    (P.slabY1 - gFrReflWaterY) / gYu;
+									if (sExit < sB) sB = sExit;
+								}
+								if (sB > 0.0f) {
+									const float uV = Xc*Xc + Yc*Yc + 1.0f;
+									const float m  = P.kHeight*gYu + P.invRf;
+									const float hb = (P.kHeight != 0.0f)
+									    ? fastExpNeg(P.kHeight * gFrReflWaterY)
+									    : 1.0f;
+									const float meanD = P.blobs ? 0.22f : 1.0f;
+									const float tau = P.sigma * meanD
+									    * std::sqrt(uV) * hb
+									    * fogAntiderivG(sB, m);
+									reflAmt2 = 1.0f - fastExpNeg(tau);
+									if (reflAmt2 > 1.0f) reflAmt2 = 1.0f;
+									if (reflAmt2 < 0.0f) reflAmt2 = 0.0f;
+								}
+							}
+						}
 					}
 				}
 			} else {
@@ -7401,6 +7444,14 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				aB = acc[2] + (acc[6]-acc[2])*frac;
 				Tpix = acc[3] * ToptPart;
 			} else { aR=acc[0]; aG=acc[1]; aB=acc[2]; Tpix=acc[3]; }
+			// Reflection leg 2 (water→building): ambient in-scatter +
+			// extinction folded behind leg 1's transmittance.
+			if (reflAmt2 > 0.0f) {
+				aR += Tpix * P.fogR * reflAmt2;
+				aG += Tpix * P.fogG * reflAmt2;
+				aB += Tpix * P.fogB * reflAmt2;
+				Tpix *= 1.0f - reflAmt2;
+			}
 			const dword pix = out[i];
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
