@@ -1111,7 +1111,13 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             // backface-culls into a hole showing the box interior
             // (mirrored text of the far sheet). The per-frame job
             // renders the side the camera is actually on.
-            slot.mat->Flags     |= Mat_TwoSided;
+            // Mat_Transparent: the panel is a SEMI-TRANSPARENT display
+            // — it rides the xpar peel and the deferred transparent
+            // kernel composites texel + behind/2 (XparBlendAlpha=0 →
+            // the legacy glass formula the original screens used), so
+            // free-standing column panels show the scene through the
+            // glass under the text + reflection.
+            slot.mat->Flags     |= Mat_TwoSided | Mat_Transparent;
             slot.mat->RelScene   = sc;
             {
                 char nm[64];
