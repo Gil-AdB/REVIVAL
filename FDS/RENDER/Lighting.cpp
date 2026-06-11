@@ -290,8 +290,18 @@ void Lighting(Scene *Sc)
 			Vector_Sub(&O->IPos, &T->IPos, &u);
 			MatrixTXVector(T->RotMat, &u, &w);
 			Vector *wp = (Vector *)(T->RotMat);
-			//			float rScale = 1.0/Vector_Length(wp);
-			float rScale = Vector_Length(wp);
+			// INVERSE scale, matching StaticLighting: RotMat rows are
+			// s·unit, so MatrixTX gives s²·v_local — scaling by (1/s)²
+			// recovers the light offset in mesh-local units, and
+			// Range/s converts world range likewise. The non-inverted
+			// form (previously live here, inverse commented out)
+			// inflated distances by s⁴ vs a range of only s·R — on any
+			// scaled mesh every omni failed the range test and the
+			// mesh went ambient-only. Invisible for years because the
+			// deferred path ignores vertex colors; surfaced as the
+			// black robot in the mirror-RTT pass (scale-1 wall chunks
+			// were unaffected, so the walls stayed bright).
+			float rScale = 1.0f / Vector_Length(wp);
 			Vector_SelfScale(&w, rScale*rScale);
 			Vector_Copy(&L->Pos, &w);
 
