@@ -337,7 +337,14 @@ bool BuildDiscoBall(Scene *sc)
                                    6.0f,                  // intensity
                                    38.0f,                 // range
                                    s_ballPos, s_spotBase[i],
-                                   1.5f, 4.5f,            // deg in/out
+                                   // Wider than the original 1.5/4.5:
+                                   // the per-segment cone falloff is
+                                   // correct where the old midpoint
+                                   // approximation overestimated (peak
+                                   // attenuation across the whole
+                                   // chord), which read as fatter
+                                   // beams. Width restored optically.
+                                   2.6f, 7.0f,            // deg in/out
                                    256, /*castsShadow=*/true);
         // Volumetric beams: per-light opt-in so the robot/orbit spots
         // don't grow cones too (--draw-cones stays off scene-wide).
