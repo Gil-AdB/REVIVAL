@@ -478,6 +478,12 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         bool more = driver->tick();
         (void)more;
 
+        // Pose anchor for CITYSNAP_VIEW hunts: where the camera is.
+        std::fprintf(stderr,
+            "[CAM] t=%d pos=(%.0f, %.0f, %.0f)  fwd=(%.3f, %.3f, %.3f)  IFOV=%.1f\n",
+            ts, View->ISource.x, View->ISource.y, View->ISource.z,
+            View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], View->IFOV);
+
         // Bench mode (@iters=N): re-tick the SAME timestamp N times and
         // report the mean whole-frame cost (full city frame: both passes,
         // dispMap, fog, flares — everything tick() does). Temporal fog
@@ -506,6 +512,22 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // 8×-amplified heatmap (ripple_tNNNNNN.ppm) and per-row-band stats.
         if (const char* rs = std::getenv("CITYSNAP_RIPPLE")) {
             const int N = std::max(2, std::atoi(rs));
+            // Live-pause emulation. A real paused frame differs from the
+            // plain probe loop in two ways: rand() advances freely (the
+            // probe reseeds srand(0) every frame), and dTime is wallclock
+            // (~33ms — Timer advances then the pause branch rolls it back;
+            // the probe's is 0). Either can drive per-frame change the
+            // plain probe freezes. CITYSNAP_NOSRAND=1 skips the reseed;
+            // CITYSNAP_PAUSEMODE=1 latches the scene's pause_mode (via
+            // Keyboard[ScP]) and advances Timer by 33 each frame so the
+            // tick computes dTime=33 and rolls back — exactly live pause.
+            const bool noSrand   = std::getenv("CITYSNAP_NOSRAND") != nullptr;
+            const bool livePause = std::getenv("CITYSNAP_PAUSEMODE") != nullptr;
+            if (livePause) Keyboard[ScP] = 1;
+            if (noSrand || livePause)
+                std::fprintf(stderr, "[RIPPLE] live-pause emulation:%s%s\n",
+                             noSrand ? " free-running rand()" : "",
+                             livePause ? " dTime=33 (paused)" : "");
             const size_t npx = size_t(xres) * size_t(yres);
             std::vector<float> acc(npx, 0.0f);
             std::vector<unsigned char> prevF(npx * 3), curF(npx * 3);
@@ -536,8 +558,8 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             grab(prevF);
             dumpRGB("f0", prevF);   // consecutive raw pair — diff f0 vs f1
             for (int i = 0; i < N; ++i) {
-                std::srand(0);
-                Timer = ts;
+                if (!noSrand) std::srand(0);
+                Timer = livePause ? ts + 33 : ts;   // pause rolls it back
                 driver->tick();
                 grab(curF);
                 if (i == 0) dumpRGB("f1", curF);

@@ -2302,6 +2302,7 @@ struct CityScene : SceneDriver {
 			prevI = curI;
 		}
 
+
 		Animate_Objects(CitySc, View);
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
@@ -2431,6 +2432,47 @@ struct CityScene : SceneDriver {
 				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 				fprintf(stderr, "[CITY-CLIP] %s\n", MSGStr);
 			}
+		}
+		// 'G' (grab) — same as greets/conetest: dump THIS completed frame
+		// (VPage right before Flip) to /tmp/city_dump_N.ppm and print the
+		// pose in the exact CITYSNAP_VIEW format, so a failing view feeds
+		// the offline ripple repro verbatim. Edge-triggered; press twice
+		// while paused for a consecutive-frame pair. (F9 is a macOS system
+		// key, hence 'G'.)
+		{
+			static bool sGPrev = false;
+			static int  sDumpN = 0;
+			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
+			if (gNow && !sGPrev) {
+				char path[64];
+				snprintf(path, sizeof(path), "/tmp/city_dump_%d.ppm", sDumpN++);
+				std::FILE *f = std::fopen(path, "wb");
+				if (f) {
+					const int xr = (int)XRes, yr = (int)YRes;
+					std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+					std::vector<unsigned char> row(xr * 3);
+					for (int y = 0; y < yr; ++y) {
+						const dword *src = (const dword*)((const byte*)VPage
+						                  + y * (int)VESA_BPSL);
+						for (int x = 0; x < xr; ++x) {
+							dword px = src[x];
+							row[x*3+0] = (px >> 16) & 0xFF;
+							row[x*3+1] = (px >>  8) & 0xFF;
+							row[x*3+2] = (px      ) & 0xFF;
+						}
+						std::fwrite(row.data(), 1, row.size(), f);
+					}
+					std::fclose(f);
+					fprintf(stderr, "[CITY] dumped %s (t=%d)\n", path, (int)Timer);
+				}
+				fprintf(stderr,
+					"[CITY-CAM] CITYSNAP_VIEW=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\"\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+					View->IFOV);
+				std::fflush(stderr);
+			}
+			sGPrev = gNow;
 		}
 		prof.enter(PROF_FLIP);
 
