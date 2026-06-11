@@ -2276,6 +2276,7 @@ struct CityScene : SceneDriver {
 
 	std::vector<int> dispMap;
 	std::vector<dword> backBuffer;
+	std::vector<uint16_t> zRefl;   // displaced pass-1 Z for reflection fog
 
 	~CityScene() override { Destroy_Scene(CitySc); }
 
@@ -2298,6 +2299,7 @@ struct CityScene : SceneDriver {
 			}
 		}
 		backBuffer.assign(XRes * YRes, 0);
+		zRefl.assign(XRes * YRes, 0);
 	}
 
 	void on_resize(int /*newX*/, int /*newY*/) override {
@@ -2466,12 +2468,23 @@ struct CityScene : SceneDriver {
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;
 				uint16_t* zbuffer_ptr = ZPage16;
+				// Capture the pass-1 Z through the SAME displacement the
+				// color takes: the froxel composite fogs the water's
+				// reflection underlay at this mirrored path length, giving
+				// the mirror the same fog gradient as the world above
+				// (|mirrorCam→building| = camera→water→building).
+				uint16_t* zr = zRefl.data();
+				size_t idx = 0;
 				for (auto displacement : dispMap) {
 					if (*zbuffer_ptr++ != 0) {
 						*ptr = backBuffer[displacement];
+						zr[idx] = ZPage16[displacement];
+					} else {
+						zr[idx] = 0;
 					}
-					ptr++;
+					ptr++; ++idx;
 				}
+				FastFog_SetReflectionZ(zr);
 			}
 
 			// Deferred path needs Z cleared between passes so the pass-2

@@ -6676,6 +6676,19 @@ namespace {
 	// (set by the froxel dispatch, cleared at every renderFrame start) —
 	// the transparent peel fogs its layers from the grid when set.
 	bool     gFrFrameActive = false;
+	// Optional reflection-pass depth (encoded uint16, displaced through the
+	// scene's wobble like the color): set by the scene between its passes
+	// (FastFog_SetReflectionZ), consumed by exactly ONE froxel composite —
+	// the main pass's — then reset, so a scene change can't leave the
+	// pointer dangling into a freed buffer.
+	const uint16_t* gFrReflZ = nullptr;
+}
+
+// See gFrReflZ. The city calls this after its dispMap wobble with the
+// displaced pass-1 Z so the composite can fog the water's reflections at
+// their mirrored path length instead of uniformly at gFrFar.
+void FastFog_SetReflectionZ(const uint16_t* z) {
+	gFrReflZ = fds::FeatureFlags::fast_fog_refl_depth() ? z : nullptr;
 }
 
 // Called at the top of renderFrame (RENDER.CPP) so a frame whose fog pass
@@ -7336,8 +7349,30 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 		const int iy1 = std::min(iy0+1, ny-1);
 		for (int px = x1; px < x2; ++px) {
 			const size_t i = row + size_t(px);
-			const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
-			float z = (zSurf <= 0.0f) ? gFrFar : (zSurf > gFrFar ? gFrFar : zSurf);
+			const uint16_t ze = zEnc[i];
+			// zEnc==0 pixels are sky OR the water's reflection underlay
+			// (the transparent peel writes no Z). Default: fog at gFrFar.
+			// When the scene provides the reflection pass's (displaced)
+			// depth, use the MIRRORED path length instead —
+			// |mirrorCam→building| equals the real camera→water→building
+			// distance, and the fog slab is ~symmetric about the water-
+			// line, so sampling the main grid at that depth grades
+			// reflections like the world above: near buildings stay crisp
+			// in the mirror, far ones drown.
+			float z;
+			if (ze == 0) {
+				z = gFrFar;
+				if (gFrReflZ) {
+					const uint16_t zr = gFrReflZ[i];
+					if (zr) {
+						const float zm = float(0xFF80 - int(zr)) * P.invZScale;
+						if (zm > 0.0f && zm < gFrFar) z = zm;
+					}
+				}
+			} else {
+				const float zSurf = float(0xFF80 - int(ze)) * P.invZScale;
+				z = zSurf > gFrFar ? gFrFar : zSurf;
+			}
 			if (z < gFrNear) z = gFrNear;
 			const float fx = (float(px)+0.5f)*fnx - 0.5f;
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
@@ -7538,6 +7573,7 @@ void Render_DeferredFastFog() {
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		gFrReflZ = nullptr;            // consume-once (see FastFog_SetReflectionZ)
 		gFrFrameActive = fds::FeatureFlags::fast_fog_xpar();   // peel fogs from this grid
 		// This frame becomes next frame's history.
 		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;

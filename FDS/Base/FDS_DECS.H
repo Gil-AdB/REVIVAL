@@ -448,6 +448,13 @@ enum class ShadowBakeMode {
 void Render_DeferredShadowMaps(class Scene *Sc,
                                ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame);
 
+// Reflection fog gradient: a scene that composites a planar mirrored pass
+// under its water hands the (wobble-displaced) pass-1 Z here, between its
+// passes; the next froxel fog composite fogs those z==0 reflection pixels
+// at the mirrored path length instead of uniformly at the grid far plane.
+// Consumed once, then reset (no dangling pointer across scene changes).
+void FastFog_SetReflectionZ(const uint16_t *z);
+
 // Shadow technique. Toggleable at runtime.
 enum class ShadowMode {
 	Depth,    // z-compare with bias and PCF
