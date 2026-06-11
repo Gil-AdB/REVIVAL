@@ -21,6 +21,7 @@
 #define DEBUG_GREETS_DUMP_GRID 0
 
 #include "GREETS.H"
+#include "GreetsDisco.h"
 #include "GreetsMirror.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
@@ -1336,6 +1337,11 @@ void Initialize_Greets()
 	// reflection shows at each pixel. Mirror-in-mirror (two facing)
 	// would currently produce empty recursion past depth 1; if greets
 	// ever needs that we'll add a depth cap.
+	// Disco ball before the mirror build so the teleporter mirror
+	// clones it (its 2-key Pos spline marks it dynamic → re-mirrored
+	// per frame).
+	fds::BuildDiscoBall(GreetSc);
+
 	if (fds::FeatureFlags::greets_mirror()) {
 		g_greetsMirrors.clear();
 		// One mirror per material name, plus one mirror per coplanar
@@ -1859,6 +1865,11 @@ struct GreetsScene : SceneDriver {
 		// poses, before Transform_Objects reads positions. Iterates
 		// every mirror in g_greetsMirrors. No-op list when
 		// --greets-mirror is off.
+		// Disco ball spin + spot sweep: after Animate_Objects (the
+		// ball is Tri_Possessed; spots' spline-stamped IPos/IDir get
+		// overwritten here), before the mirrors re-mirror it.
+		fds::UpdateDiscoBall(GreetSc, (float)Timer);
+
 		fds::UpdateAllMirrors(GreetSc, g_greetsMirrors);
 
 		// Free-camera shadow override: when in shadow-view mode AND FC is

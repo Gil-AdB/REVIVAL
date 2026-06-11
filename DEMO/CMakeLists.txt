@@ -27,6 +27,8 @@ set(DEMO_SOURCES
     GLAT.H
     GREETS.CPP
     GREETS.H
+    GreetsDisco.cpp
+    GreetsDisco.h
     GreetsMirror.cpp
     GreetsMirror.h
     ImageCompression.cpp
