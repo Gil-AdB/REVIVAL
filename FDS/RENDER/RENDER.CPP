@@ -41,6 +41,7 @@ void Render_OmniHalos();
 void Render_DeferredVolumetric();
 void Render_DeferredFastFog();
 void Render_DeferredFastFogSkyPaint();
+void Render_ScreenSpaceRain();
 void FastFog_BeginFrame();
 void Render_DeferredSkybox();
 void VolProf_Tick();
@@ -660,6 +661,12 @@ xpar_done: ;
 			Render_VolumetricCones();
 			Render_OmniHalos();
 		}
+		// Screen-space rain LAST among the view-aligned passes (streaks
+		// overlay fog, beams and halos — near rain is in front of all of
+		// them) and never in the reflection pass (skipVolumetric): a
+		// screen-space effect re-run from the mirror camera would rain
+		// upward in the water.
+		Render_ScreenSpaceRain();
 	}
 	VolProf_Tick();
 

@@ -7678,6 +7678,144 @@ void Render_DeferredFastFogSkyPaint() {
 	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 
+// ─── Screen-space rain ────────────────────────────────────────────────────
+// Procedural streaks as a tile-parallel post pass — no particles, no face
+// list. Three layers at fixed view depths give parallax: each layer is a
+// sheared screen-space grid of columns; a column hash decides which cells
+// carry a streak this cycle, the in-cell fraction gives the streak's
+// vertical alpha ramp (faint head → bright tail, like the 1998 rainmapper).
+// Per pixel per layer it's ~a dozen ALU + 2 hashes; streak-covered pixels
+// (the rare case) additionally z-test against the surface depth and fetch
+// fog transmittance at the LAYER's depth, so distant rain dims into the
+// soup instead of punching through it. Scene time (g_FrameTime) drives the
+// fall — pause freezes rain mid-air like everything else.
+void Render_ScreenSpaceRain() {
+	if (!fds::FeatureFlags::rain()) return;
+	const float intensity = fds::FeatureFlags::rain_intensity();
+	if (intensity <= 0.0f || !ZPage16 || !VPage) return;
+
+	const float t = float(g_FrameTime) * 0.001f * fds::FeatureFlags::rain_speed();
+	// Wind: shared slant (px of x drift per px of y), slow compound gusts.
+	const float slant = 0.14f + 0.09f*std::sin(t*0.37f) + 0.05f*std::sin(t*0.83f);
+	const float density = intensity > 1.0f ? 1.0f : intensity;  // streak probability
+	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.5f; // >1 = heavier look
+	const float invZScale = 1.0f / float(g_zscale);
+	const float fogFar = CurScene ? CurScene->FZP : 0.0f;
+	const bool froxelFog = FastFog_XparActive();
+	const bool ssFog     = !froxelFog && FastFog_SSActive();
+	const bool legacyFog = !froxelFog && !ssFog && CurScene
+	                       && (CurScene->Flags & Scn_Fogged) && fogFar > 0.0f;
+
+	struct Layer {
+		float depth;     // assumed view depth (world units) — z-test + fog
+		float cellW;     // column pitch, px
+		float cellH;     // vertical streak pitch, px
+		float lenFrac;   // streak length as fraction of cellH
+		float speed;     // cells per second
+		float alpha;     // peak opacity
+	};
+	// Near layer: long sparse bright streaks. Far: short dense faint ones.
+	static const Layer L[3] = {
+		{  500.0f, 36.0f, 96.0f, 0.40f, 22.0f, 0.42f },
+		{ 1400.0f, 22.0f, 64.0f, 0.34f, 16.0f, 0.30f },
+		{ 3200.0f, 13.0f, 42.0f, 0.30f, 11.0f, 0.20f },
+	};
+	// Rain color: cool pale blue, alpha-blended (reads on bright AND dark).
+	const float rainR = 165.0f, rainG = 185.0f, rainB = 225.0f;
+
+	const uint16_t* zEnc = ZPage16;
+	dword* out = reinterpret_cast<dword*>(VPage);
+
+	constexpr int numTilesX = 6, numTilesY = 4;
+	const int tsx = (XRes + numTilesX - 1) / numTilesX;
+	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	for (int tj = 0; tj < numTilesY; ++tj) {
+		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
+		for (int ti = 0; ti < numTilesX; ++ti) {
+			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+			ThreadPool::instance().enqueue([=]() {
+				// COLUMN-major: streaks are sparse (one core ≤3 px wide per
+				// cellW-px column), so iterate the ~tileW/cellW columns per
+				// row and touch only each streak's own pixels. ~12× less
+				// work than testing every pixel of the tile.
+				for (int li = 0; li < 3; ++li) {
+					const Layer& l = L[li];
+					const float invCellW = 1.0f / l.cellW;
+					const float invCellH = 1.0f / l.cellH;
+					const float scroll   = t * l.speed;
+					const int   salt     = 0x9A1B + li*0x611;
+					for (int py = y1; py < y2; ++py) {
+						const size_t row = size_t(py) * size_t(XRes);
+						const float shear = float(py) * slant;     // px of x at this row
+						// Columns whose cores can land in [x1, x2):
+						// px = (col + xj)·cellW + shear, xj ∈ [0.15, 0.85].
+						const int c0 = int(std::floor((float(x1) - shear) * invCellW)) - 1;
+						const int c1 = int(std::floor((float(x2) - shear) * invCellW)) + 1;
+						const float vRow = float(py)*invCellH;
+						for (int col = c0; col <= c1; ++col) {
+							const uint32_t ch = cellHash(col, salt, 0);
+							// Column personality: streak x within the column,
+							// fall phase, speed wobble.
+							const float xj  = 0.15f + float(ch & 0xFFu)*(0.7f/255.0f);
+							const float ph  = float((ch >> 8) & 0xFFFu)*(1.0f/4096.0f);
+							const float spd = 0.85f + float((ch >> 20) & 0xFFu)*(0.3f/255.0f);
+							const float v   = vRow + scroll*spd + ph;
+							const int   vc  = int(std::floor(v));
+							const float fv  = v - float(vc);
+							if (fv > l.lenFrac) continue;
+							// Cell occupancy: density of streaks this cycle.
+							if (float(cellHash(col, vc, salt) & 0xFFFFu)*(1.0f/65536.0f)
+							    >= density) continue;
+							// Vertical ramp (head faint → tail bright) ×
+							// layer/intensity; fog joins at the first pixel.
+							float aBase = fv * (1.0f/l.lenFrac) * l.alpha * opacity;
+							const float xCore = (float(col) + xj) * l.cellW + shear;
+							int pxa = int(xCore - 1.0f); if (pxa < x1) pxa = x1;
+							int pxb = int(xCore + 2.0f); if (pxb > x2) pxb = x2;
+							bool fogged = false;
+							for (int px = pxa; px < pxb; ++px) {
+								const float dxp = float(px) - xCore;
+								const float lat = 1.5f - (dxp > 0.0f ? dxp : -dxp);
+								if (lat <= 0.0f) continue;
+								const size_t i = row + size_t(px);
+								const uint16_t ze = zEnc[i];
+								if (ze != 0) {
+									const float zSurf = float(0xFF80 - int(ze)) * invZScale;
+									if (zSurf < l.depth) continue;  // behind geometry
+								}
+								if (!fogged) {
+									// Fog T at the LAYER depth — once per
+									// streak-row, it can't change across 3 px.
+									fogged = true;
+									if (froxelFog || ssFog) {
+										float aR_, aG_, aB_, T_;
+										if (froxelFog) FastFog_SampleGrid(px, py, l.depth, aR_, aG_, aB_, T_);
+										else           FastFog_SSSample(px, py, l.depth, aR_, aG_, aB_, T_);
+										aBase *= T_;
+									} else if (legacyFog) {
+										const float k = 1.0f - l.depth / fogFar;
+										aBase *= k > 0.0f ? k : 0.0f;
+									}
+									if (aBase <= 0.003f) break;
+								}
+								const float a = aBase * lat * (1.0f/1.5f);
+								const dword pix = out[i];
+								const float keep = 1.0f - a;
+								int nR = int(float((pix>>16)&0xFFu)*keep + rainR*a);
+								int nG = int(float((pix>> 8)&0xFFu)*keep + rainG*a);
+								int nB = int(float( pix     &0xFFu)*keep + rainB*a);
+								out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+							}
+						}
+					}
+				}
+				renderns::tileDone.release();
+			});
+		}
+	}
+	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+}
+
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
 // renderFrame in RENDER.CPP dispatches transparent-layer composites in a
 // tile-job lambda; the template + g_deferredCtx live here, so we expose
