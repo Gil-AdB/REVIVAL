@@ -2401,8 +2401,12 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // mapping; window→text UV is the affine captured at build.
         // The text texture is Sachletz-tiled in memory (4x4 blocks,
         // X-outer/Y-inner write order) — read through the inverse.
-        if (s.order == 1 && s.textTex && s.textTex->Data) {
-            const dword *td = (const dword*)s.textTex->Data;
+        if (s.order == 1 && s.textTex && s.textTex->Mipmap[0]) {
+            // Mipmap[0], NOT Data: the greets generator repoints
+            // Mipmap[0] at its dynamic text buffer (GREETS.CPP ~227);
+            // Data keeps the static disk JPG. The rasterizer samples
+            // Mipmap[miplevel], so the live content is here.
+            const dword *td = (const dword*)s.textTex->Mipmap[0];
             const int tw = s.textTex->SizeX, th = s.textTex->SizeY;
             const int tBlocksY = th >> 2;
             uint32_t *px = (uint32_t*)s_rttSurf.Data;
