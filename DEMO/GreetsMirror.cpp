@@ -2442,6 +2442,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // mapping; window→text UV is the affine captured at build.
         // The text texture is Sachletz-tiled in memory (4x4 blocks,
         // X-outer/Y-inner write order) — read through the inverse.
+        const float rGain = fds::FeatureFlags::mirror_rtt_gain();
+        const uint32_t gainQ = uint32_t(
+            std::min(std::max(rGain, 0.0f), 1.0f) * 256.0f);
         if (s.order == 1 && s.textTex && s.textTex->Mipmap[0]) {
             // Mipmap[0], NOT Data: the greets generator repoints
             // Mipmap[0] at its dynamic text buffer (GREETS.CPP ~227);
@@ -2468,9 +2471,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                     const uint32_t tb =  t        & 0xFF;
                     const uint32_t tg = (t >> 8)  & 0xFF;
                     const uint32_t tr = (t >> 16) & 0xFF;
-                    uint32_t ob = tb + ( o        & 0xFF);
-                    uint32_t og = tg + ((o >> 8)  & 0xFF);
-                    uint32_t orr = tr + ((o >> 16) & 0xFF);
+                    // Reflection attenuated by the reflectance gain;
+                    // the text rides on top at full strength.
+                    uint32_t ob = tb + ((( o        & 0xFF) * gainQ) >> 8);
+                    uint32_t og = tg + ((((o >> 8)  & 0xFF) * gainQ) >> 8);
+                    uint32_t orr = tr + ((((o >> 16) & 0xFF) * gainQ) >> 8);
                     if (ob > 255) ob = 255;
                     if (og > 255) og = 255;
                     if (orr > 255) orr = 255;
