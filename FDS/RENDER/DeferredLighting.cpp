@@ -7866,17 +7866,17 @@ void Render_LensDrops() {
 	};
 
 	// Spawn: ~5/s at intensity 1, pool-capped.
-	gLensSpawnAcc += dt * 5.0f * (intensity < 2.0f ? intensity : 2.0f);
-	while (gLensSpawnAcc >= 1.0f && gLensDrops.size() < 40) {
+	gLensSpawnAcc += dt * 11.0f * (intensity < 2.0f ? intensity : 2.0f);
+	while (gLensSpawnAcc >= 1.0f && gLensDrops.size() < 80) {
 		gLensSpawnAcc -= 1.0f;
 		const uint32_t s = gLensSpawnSeq++;
 		LensDrop d;
 		d.seed  = s;
 		d.x     = h01(s, 1) * float(XRes);
 		d.y     = h01(s, 2) * float(YRes) * 0.85f;
-		d.r     = 7.0f + h01(s, 3) * 17.0f;
+		d.r     = 4.0f + h01(s, 3) * 9.0f;
 		d.age   = 0.0f;
-		d.dwell = 0.8f + h01(s, 4) * 3.0f;
+		d.dwell = 0.25f + h01(s, 4) * 1.2f;
 		d.life  = d.dwell + 2.0f + h01(s, 5) * 4.0f;
 		d.vy    = 0.0f;
 		d.wobPh = h01(s, 6) * 6.2832f;
@@ -7890,13 +7890,13 @@ void Render_LensDrops() {
 		d.age += dt;
 		if (d.age > d.dwell) {
 			// Trickle: gravity-ish, wobble, shed mass.
-			d.vy += 260.0f * dt;
-			if (d.vy > 330.0f) d.vy = 330.0f;
+			d.vy += 340.0f * dt;
+			if (d.vy > 400.0f) d.vy = 400.0f;
 			d.y  += d.vy * dt;
 			d.x  += std::sin(d.age * 9.0f + d.wobPh) * d.r * 0.6f * dt;
 			d.r  -= d.r * 0.16f * dt;
 		}
-		if (d.age > d.life || d.r < 3.0f || d.y - d.r > float(YRes)) {
+		if (d.age > d.life || d.r < 2.0f || d.y - d.r > float(YRes)) {
 			gLensDrops[di] = gLensDrops.back();
 			gLensDrops.pop_back();
 			continue;
@@ -7907,7 +7907,7 @@ void Render_LensDrops() {
 		// the cartoon teardrop — just a hint of gravity sag), and when
 		// sliding the TAIL trails ABOVE the drop (where it came from),
 		// narrowing with height, while the leading bottom edge stays round.
-		const float stretch = (d.vy * (1.0f/330.0f)) * 0.9f;   // 0..0.9
+		const float stretch = (d.vy * (1.0f/400.0f)) * 0.9f;   // 0..0.9
 		const float kTop = 1.05f + stretch;                    // tail above
 		const float kBot = 1.08f;                              // gentle sag
 		// Refraction FOV: a drop compresses a WIDE view — sample 1.6× the
