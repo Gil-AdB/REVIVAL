@@ -125,6 +125,9 @@ struct ViewLightsSoA {
 	alignas(32) float cosInner[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float cosOuter[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) uint32_t isSpot[DEFERRED_MAX_VIEW_LIGHTS];
+	// Omni_ForceVolCone: per-light volumetric-cone opt-in (renders a
+	// cone even when --draw-cones is off scene-wide).
+	alignas(32) uint32_t forceCone[DEFERRED_MAX_VIEW_LIGHTS];
 	// Index into g_shadowMaps for this light's shadow map, or -1 if
 	// not a shadow-caster (most omnis). Filled per frame in
 	// Render_DeferredLighting alongside the other per-light fields.
@@ -3448,6 +3451,7 @@ void Render_DeferredLighting() {
 		lights.posWorldX[numLights] = O->IPos.x;
 		lights.posWorldY[numLights] = O->IPos.y;
 		lights.posWorldZ[numLights] = O->IPos.z;
+		lights.forceCone[numLights] = (O->Flags & Omni_ForceVolCone) ? 1u : 0u;
 		lights.colB[numLights]   = O->L.B * O->ISize;
 		lights.colG[numLights]   = O->L.G * O->ISize;
 		lights.colR[numLights]   = O->L.R * O->ISize;
@@ -4696,7 +4700,7 @@ void VolProf_Tick() { VolProf_Tick_impl(); }
 void Render_VolumetricCones() {
     VolProfScope _vp(&g_volProf.ms_cones, &g_volProf.n_cones);
     if (!CurScene || !ZPage16 || !VPage) return;
-    if (!fds::FeatureFlags::draw_cones()) return;
+    const bool allCones = fds::FeatureFlags::draw_cones();
     const float invFOVX = 1.0f / FOVX;
     const float invFOVY = 1.0f / FOVY;
     const float invZScale = 1.0f / float(g_zscale);
@@ -4726,7 +4730,8 @@ void Render_VolumetricCones() {
     static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int spotCount = 0;
     for (int i = 0; i < numLights; ++i) {
-        if (lights->isSpot[i] && lights->mirrorId[i] == 0) spotIdx[spotCount++] = i;
+        if (lights->isSpot[i] && lights->mirrorId[i] == 0 &&
+            (allCones || lights->forceCone[i])) spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
 
@@ -6559,7 +6564,10 @@ void Render_DeferredVolumetric() {
         // Mirror clones don't cast volumetric glow — same additive-wash
         // reasoning as the halo pass (see Render_OmniHalos).
         if (lights->mirrorId[i] != 0) continue;
-        if (lights->isSpot[i]) spotIdx[spotCount++] = i;
+        if (lights->isSpot[i]) {
+            if (fds::FeatureFlags::draw_cones() || lights->forceCone[i])
+                spotIdx[spotCount++] = i;
+        }
         else                   omniIdx[omniCount++] = i;
     }
 
@@ -6574,7 +6582,7 @@ void Render_DeferredVolumetric() {
     const float fogR     = float(CurScene->Ambient.R);
     const float fogG     = float(CurScene->Ambient.G);
     const float fogB     = float(CurScene->Ambient.B);
-    const float coneDens = fds::FeatureFlags::draw_cones()
+    const float coneDens = (spotCount > 0)
         ? fds::FeatureFlags::cone_strength() * 0.001f
         : 0.0f;
     const float haloDens = fds::FeatureFlags::omni_halo_strength() * 0.001f;

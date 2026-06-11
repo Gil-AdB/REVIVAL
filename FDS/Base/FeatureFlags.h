@@ -106,6 +106,14 @@ public:
     static inline bool isSet(FloatId id) { return g_floatSet[static_cast<int>(id)]; }
     static inline bool isSet(IntId   id) { return g_intSet  [static_cast<int>(id)]; }
 
+    // Scene-driver default override: set a flag's value UNLESS the
+    // user explicitly set it (CLI/env). Lets a scene tune a global
+    // (e.g. greets's disco-beam cone_strength) without trampling
+    // user overrides. Does NOT mark the flag as set.
+    static inline void setDefault(BoolId  id, bool v)  { if (!isSet(id)) g_boolVals [static_cast<int>(id)] = v; }
+    static inline void setDefault(FloatId id, float v) { if (!isSet(id)) g_floatVals[static_cast<int>(id)] = v; }
+    static inline void setDefault(IntId   id, int v)   { if (!isSet(id)) g_intVals  [static_cast<int>(id)] = v; }
+
     // Generated per-flag convenience accessors. Usage: FeatureFlags::deferred().
     #define FDS_FLAG_BOOL(name, env, def, cat, help) \
         static bool name() { return get(BoolId::name); }

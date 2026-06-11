@@ -367,6 +367,12 @@ enum OmniFlags
 	// by FLD load or scene init.
 	Omni_MirrorClone = 1 << 9,
 
+	// Per-light volumetric-cone opt-in: this spot renders a volumetric
+	// cone even when the scene-wide --draw-cones flag is off. Lets the
+	// greets disco ball show beams without also putting cones on the
+	// robot/orbit spots.
+	Omni_ForceVolCone = 1 << 10,
+
 	// Light is static — its position, direction, and the world geometry
 	// around it never change. The shadow map can be rendered ONCE at
 	// scene init (or first-frame) and reused for every subsequent frame,

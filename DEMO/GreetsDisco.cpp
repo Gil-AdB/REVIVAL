@@ -333,13 +333,18 @@ bool BuildDiscoBall(Scene *sc)
                                    s_ballPos, s_spotBase[i],
                                    1.5f, 4.5f,            // deg in/out
                                    0, /*castsShadow=*/false);
+        // Volumetric beams: per-light opt-in so the robot/orbit spots
+        // don't grow cones too (--draw-cones stays off scene-wide).
+        s_spots[i]->Flags |= Omni_ForceVolCone;
     }
-    // ── Glow: cloned FLD omni (real flare filler + texture from
-    // Preprocess_Scene's The_MMX_Scalar install). IRange 6 gives a
-    // soft white-blue light spill on the columns; ISize is both the
-    // flare sprite size and the light intensity. The tick keeps it
-    // offset toward the camera so the flare's center-pixel depth test
-    // doesn't lose against the ball's own surface.
+    // Beam density: the global default (0.05) is tuned for city-scale
+    // ranges (thousands of units) and is invisible over greets's
+    // ~10-unit beam paths. Scene default; --cone-strength overrides.
+    FeatureFlags::setDefault(FeatureFlags::FloatId::cone_strength, 1.2f);
+    // ── Glow: cloned FLD omni for a soft white-blue light spill on
+    // the columns (IRange 6). The flare sprite is muted (no-op
+    // Filler) — the visible flare burst read as noise on the ball;
+    // the spill + volumetric beams carry the glow instead.
     s_glow = nullptr;
     for (Omni *src = sc->OmniHead; src; src = src->Next) {
         if (!src->F.Txtr || !src->F.Filler) continue;
@@ -347,6 +352,9 @@ bool BuildDiscoBall(Scene *sc)
         Omni *g = (Omni*)getAlignedBlock(sizeof(Omni), 16);
         std::memcpy(g, src, sizeof(Omni));
         g->F.A = &g->V; g->F.B = &g->V; g->F.C = &g->V;
+        g->F.Filler = [](Face*, Vertex**, dword, dword,
+                         const fds::RenderTarget&,
+                         const fds::CameraContext&) {};
         g->F.mirrorMaskTag = 0;
         g->F.ownerMirrorId = 0;
         g->IPos = s_ballPos;
@@ -560,20 +568,10 @@ void UpdateDiscoBall(Scene *sc, float t)
         s_spots[i]->IDir = { c * b.x + s * b.z, b.y, -s * b.x + c * b.z };
     }
 
-    // Glow flare: keep it just camera-side of the ball surface so the
-    // flare's center-pixel depth test doesn't lose against the ball
-    // itself, with a gentle size pulse.
-    if (s_glow && ::View) {
-        Vector tc = { ::View->ISource.x - s_ball->IPos.x,
-                      ::View->ISource.y - s_ball->IPos.y,
-                      ::View->ISource.z - s_ball->IPos.z };
-        const float tl = std::sqrt(tc.x*tc.x + tc.y*tc.y + tc.z*tc.z);
-        if (tl > 1e-3f) {
-            const float k = (kRadius + 0.35f) / tl;
-            s_glow->IPos = { s_ball->IPos.x + tc.x * k,
-                             s_ball->IPos.y + tc.y * k,
-                             s_ball->IPos.z + tc.z * k };
-        }
+    // Glow light spill: rides the ball center with a gentle pulse
+    // (no sprite — the Filler is a no-op).
+    if (s_glow) {
+        s_glow->IPos = s_ball->IPos;
         s_glow->ISize = 0.55f + 0.12f * std::sin(t * 0.05f);
     }
 
