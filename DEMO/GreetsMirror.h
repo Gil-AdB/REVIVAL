@@ -284,6 +284,11 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
 // transforms (main Transform redoes them) and restores every camera /
 // surface global it touches. Uses the previous frame's camera pose
 // (one frame of lag in the second bounce).
+// Jobs rendered by the last RenderSecondOrderMirrors call. In
+// deferred mode the tick's forward Lighting() exists solely to feed
+// the RTT pass's vertex colors — 0 here lets the tick skip it.
+extern int g_rttJobsLastFrame;
+
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots);
 

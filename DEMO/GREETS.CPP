@@ -1982,7 +1982,18 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);
 
-		Lighting(GreetSc);
+		// In deferred mode the only consumer of forward vertex colors
+		// is the mirror-RTT offscreen pass (1-frame-stale by design).
+		// When no RTT job rendered this frame, the colors won't be
+		// read next frame either — skip the ~4ms pass. The first
+		// frame a panel becomes visible again renders from colors at
+		// most one skip stale, same staleness class as the design.
+		const bool lightingConsumed =
+		    !fds::FeatureFlags::deferred() ||
+		    !fds::FeatureFlags::mirror_rtt() ||
+		    fds::g_rttJobsLastFrame > 0;
+		if (lightingConsumed)
+			Lighting(GreetSc);
 
 		// PROFILER: SORT phase.
 		prof.leave(PROF_LGHT);

@@ -2104,10 +2104,16 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
     return created;
 }
 
+// Number of RTT jobs rendered last frame. The tick's forward
+// Lighting() exists (in deferred mode) solely to feed vertex colors
+// to this pass — when no slot re-rendered, the next tick can skip it.
+int g_rttJobsLastFrame = 0;
+
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {
     ScopedMirrorMs _t(&g_mirrorProf.rttMs);
+    g_rttJobsLastFrame = 0;
     if (!sc || slots.empty()) return;
     const Camera *mainCam = ::View ? ::View : sc->CameraHead;
     if (!mainCam) return;
@@ -2223,6 +2229,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     std::sort(jobs.begin(), jobs.end(),
               [](const Job &a, const Job &b) { return a.area > b.area; });
     if (int(jobs.size()) > kRttPerFrame) jobs.resize(kRttPerFrame);
+    g_rttJobsLastFrame = int(jobs.size());
     g_mirrorProf.rttJobsSum += int(jobs.size());
 
     // ── Offscreen surface (allocated once; CITY cube-bake pattern).
