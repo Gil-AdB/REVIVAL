@@ -5806,6 +5806,7 @@ struct FastFogParams {
 	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
 	float glowMax;         // >0: soft-knee cap on per-slice in-scatter radiance
 	int   glowGridDiv;     // froxel glow on a /div coarse XY grid (1 = per-column)
+	int   taps;            // density samples per froxel per frame (1 or 2)
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
 	// In-scatter glow: scene lights lighting the fog medium.
 	const ViewLightsSoA *lights;
@@ -7028,45 +7029,56 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			//     so one sample can never hop the field's whole transition.
 			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world units per froxel per z
 			const float jcap    = 0.25f * P.cell;
+			// 2-tap mode: average two HALF-CYCLE-APART phases per slice each
+			// frame (k and k+4) — halves the jitter cycle's amplitude and
+			// doubles convergence for ~2× the noise-field cost.
+			const int taps = gFrTemporal ? P.taps : 1;
+			const float invTaps = taps > 1 ? 0.5f : 1.0f;
 			for (int iz = 0; iz < nz; ++iz) {
 				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
-				float jrx = 0.0f, jry = 0.0f, jrz = 0.0f;
-				if (gFrTemporal) {
-					// +iz walks the 8-phase Halton cycle along the ray, so a
-					// path through ≥8 foggy slices covers ALL offsets within
-					// one frame — stratified, not merely decorrelated.
-					// (Antithetic sign-flip pairing was tried and measured
-					// identical: the iso edge is max(0,·)-clamped, so
-					// symmetric pairs don't cancel through it.)
-					const uint32_t k = (colPhase + uint32_t(iz)) & 7u;
-					const float jx = h2[k] - 0.5f, jy = h3[k] - 0.5f;
-					jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
-					jry = jx*P.w10 + jy*P.w11;
-					jrz = jx*P.w20 + jy*P.w21;
-				}
 				const float fp = z * fpScale;
 				const float jamp = fp < jcap ? fp : jcap;
-				const float wx = P.camX + z*Dxc + jrx*jamp;
-				const float wy = P.camY + z*gYc + jry*jamp;
-				const float wz = P.camZ + z*Dzc + jrz*jamp;
-				float d = froxelDensity(P, wx, wy, wz);
-				// Distance LOD: a far froxel spans many blob cells but point-samples
-				// the cell=180 noise → aliases into bright/dark blocks. Blend toward
-				// a COARSER octave (4× cell) by footprint/cell, so distant fog keeps
-				// large-scale blob masses and loses only the small-scale aliasing.
-				// Only for in-slab blob froxels (the slab/gap zeros must stay zero).
-				if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
-					const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
-					const float fp = dz > fpXY ? dz : fpXY;
-					float lod = (fp - P.cell) * (1.0f/P.cell);
-					lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
-					if (lod > 0.0f) {
-						const float coarse = fogNoiseAt(P, wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
-						d += (coarse - d) * lod;
+				float d = 0.0f;
+				for (int tap = 0; tap < taps; ++tap) {
+					float jrx = 0.0f, jry = 0.0f, jrz = 0.0f;
+					if (gFrTemporal) {
+						// +iz walks the 8-phase Halton cycle along the ray, so
+						// a path through ≥8 foggy slices covers ALL offsets
+						// within one frame — stratified, not merely
+						// decorrelated. (Antithetic sign-flip pairing was
+						// tried and measured identical: the iso edge is
+						// max(0,·)-clamped, so symmetric pairs don't cancel
+						// through it.)
+						const uint32_t k = (colPhase + uint32_t(iz) + uint32_t(tap)*4u) & 7u;
+						const float jx = h2[k] - 0.5f, jy = h3[k] - 0.5f;
+						jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
+						jry = jx*P.w10 + jy*P.w11;
+						jrz = jx*P.w20 + jy*P.w21;
 					}
+					const float wx = P.camX + z*Dxc + jrx*jamp;
+					const float wy = P.camY + z*gYc + jry*jamp;
+					const float wz = P.camZ + z*Dzc + jrz*jamp;
+					float dt = froxelDensity(P, wx, wy, wz);
+					// Distance LOD: a far froxel spans many blob cells but
+					// point-samples the cell=180 noise → aliases into bright/
+					// dark blocks. Blend toward a COARSER octave (4× cell) by
+					// footprint/cell, so distant fog keeps large-scale blob
+					// masses and loses only the small-scale aliasing. Only for
+					// in-slab blob froxels (the slab/gap zeros must stay zero).
+					if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
+						const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
+						const float fpL = dz > fpXY ? dz : fpXY;
+						float lod = (fpL - P.cell) * (1.0f/P.cell);
+						lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
+						if (lod > 0.0f) {
+							const float coarse = fogNoiseAt(P, wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
+							dt += (coarse - dt) * lod;
+						}
+					}
+					d += dt;
 				}
-				dens[iz] = d;
+				dens[iz] = d * invTaps;
 			}
 
 			// Coarse-glow-grid mode: bilinear corner pointers/weights for this
@@ -7394,6 +7406,7 @@ void Render_DeferredFastFog() {
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
 	P.glowMax      = fds::FeatureFlags::fast_fog_glow_max();
 	P.glowGridDiv  = std::max(1, fds::FeatureFlags::fast_fog_glow_grid_div());
+	P.taps         = std::min(2, std::max(1, fds::FeatureFlags::fast_fog_froxel_taps()));
 	if (P.blobOverlap > 0.0f) {
 		// Metaball sums exceed 1 where blobs stack (that's the point), so the
 		// iso threshold ranges [0,3]; fog ramps to full over +0.7 above iso.

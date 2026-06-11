@@ -421,6 +421,42 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createCityScene();
     driver->init();
 
+    // CITYSNAP_VIEW="px,py,pz,fx,fy,fz[,ifov]" — pin the WHOLE tick to a
+    // free-cam pose (paste the [CAM] line the I key prints). Unlike the
+    // CITYSNAP_POS probe below (which re-renders geometry only), this
+    // points View at FC before any frame, so every pass — reflections,
+    // dispMap, fog, flares — renders from the user's failing view. The
+    // per-frame Transform refreshes FOVX/FOVY from View->Persp*, and
+    // Dynamic_Camera leaves FC still at dTime=0, so the pose holds.
+    if (const char* s = std::getenv("CITYSNAP_VIEW")) {
+        float px, py, pz, fx = 0, fy = 0, fz = 1, fov = 0;
+        const int n = std::sscanf(s, "%f,%f,%f,%f,%f,%f,%f",
+                                  &px, &py, &pz, &fx, &fy, &fz, &fov);
+        if (n >= 6) {
+            if (fov <= 0) {
+                // The scene camera's IFOV is spline-animated — it's 0 until
+                // the first tick. Warm up one frame so the fallback is real.
+                std::srand(0);
+                Timer = timestamps.empty() ? 0
+                      : (ctPart > 0 ? std::min(timestamps[0], ctPart - 1) : timestamps[0]);
+                driver->tick();
+                fov = View->IFOV;
+                std::fprintf(stderr, "[CITYSNAP] no ifov given — using scene cam's %.1f\n", fov);
+            }
+            FC.ISource = Vector(px, py, pz);
+            Vector fwd(fx, fy, fz); Vector_Norm(&fwd);
+            buildLookAt(FC.ISource, Vector(px+fwd.x, py+fwd.y, pz+fwd.z), FC.Mat);
+            FC.IFOV = fov;
+            CalcPersp(&FC);
+            View = &FC;
+            std::fprintf(stderr,
+                "[CITYSNAP] view pinned pos=(%.0f,%.0f,%.0f) fwd=(%.3f,%.3f,%.3f) ifov=%.1f\n",
+                px, py, pz, fwd.x, fwd.y, fwd.z, FC.IFOV);
+        } else {
+            std::fprintf(stderr, "[CITYSNAP] bad CITYSNAP_VIEW '%s' (need 6-7 floats)\n", s);
+        }
+    }
+
     int produced = 0;
     for (int32_t ts : timestamps) {
         if (ctPart > 0 && ts >= ctPart) {
@@ -486,12 +522,25 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                     }
                 }
             };
+            auto dumpRGB = [&](const char* tag, const std::vector<unsigned char>& f) {
+                char p[1024];
+                std::snprintf(p, sizeof(p), "%s/ripple_t%06d_%s.ppm",
+                              cfg.outDir.c_str(), ts, tag);
+                std::FILE* ff = std::fopen(p, "wb");
+                if (!ff) return;
+                std::fprintf(ff, "P6\n%d %d\n255\n", xres, yres);
+                std::fwrite(f.data(), 1, f.size(), ff);
+                std::fclose(ff);
+                std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", p);
+            };
             grab(prevF);
+            dumpRGB("f0", prevF);   // consecutive raw pair — diff f0 vs f1
             for (int i = 0; i < N; ++i) {
                 std::srand(0);
                 Timer = ts;
                 driver->tick();
                 grab(curF);
+                if (i == 0) dumpRGB("f1", curF);
                 for (size_t p = 0; p < npx; ++p) {
                     const int dr = int(curF[p*3+0]) - int(prevF[p*3+0]);
                     const int dg = int(curF[p*3+1]) - int(prevF[p*3+1]);
