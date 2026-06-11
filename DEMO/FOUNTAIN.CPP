@@ -2286,11 +2286,8 @@ struct FountainScene : SceneDriver {
 			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
 
 			fds::RenderStats_Flush();
-			double rndrMs = prof.cumulativeMs(PROF_RNDR);
-			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
-			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
-			double polysPerFrame = (double)g_renderedPolys / numFrames;
-			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
+			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
+			scroll = prof.drawOverlay(scroll);
 		}
 		prof.enter(PROF_FLIP);
 

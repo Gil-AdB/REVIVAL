@@ -108,16 +108,42 @@ void FrameProfiler::endFrame() {
     }
 }
 
-int FrameProfiler::drawOverlay(int scrollY,
-                                double polysPerFrame,
-                                double mPxPerFrame,
-                                double mPxPerSec) const {
+void FrameProfiler::noteCounters(double renderedPolys, double fillerPixels) {
+    // Same responsiveness as the timing rows in endFrame().
+    constexpr float kEmaAlpha = 0.1f;
+    const bool unseeded = prevPolys_ < 0.0;
+    const double dPolys  = renderedPolys - prevPolys_;
+    const double dPixels = fillerPixels - prevPixels_;
+    prevPolys_  = renderedPolys;
+    prevPixels_ = fillerPixels;
+    // First call has no previous frame to difference against (the
+    // cumulative counters already hold the scene's whole history when
+    // the profiler is toggled on mid-scene) — just record and wait.
+    if (unseeded) return;
+    // Per-frame RNDR time for Mpx/sec — this frame's RNDR section has
+    // already closed by overlay time.
+    const double rndrMs = static_cast<double>(currentFrame_[PROF_RNDR]) / 1e6;
+    const float polysSample = static_cast<float>(dPolys);
+    const float mpxSample   = static_cast<float>(dPixels / 1e6);
+    const float mpxsSample  = rndrMs > 0.0 ? static_cast<float>(dPixels / 1e3 / rndrMs) : 0.0f;
+    if (emaPolysPerFrame_ == 0.0f && emaMPxPerFrame_ == 0.0f) {
+        emaPolysPerFrame_ = polysSample;   // first real delta seeds directly
+        emaMPxPerFrame_   = mpxSample;
+        emaMPxPerSec_     = mpxsSample;
+    } else {
+        emaPolysPerFrame_ += kEmaAlpha * (polysSample - emaPolysPerFrame_);
+        emaMPxPerFrame_   += kEmaAlpha * (mpxSample   - emaMPxPerFrame_);
+        emaMPxPerSec_     += kEmaAlpha * (mpxsSample  - emaMPxPerSec_);
+    }
+}
+
+int FrameProfiler::drawOverlay(int scrollY) const {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%.3f Mpx/frame", mPxPerFrame);
+    snprintf(buf, sizeof(buf), "%.3f Mpx/frame", emaMPxPerFrame_);
     scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
-    snprintf(buf, sizeof(buf), "%.3f Mpx/sec", mPxPerSec);
+    snprintf(buf, sizeof(buf), "%.3f Mpx/sec", emaMPxPerSec_);
     scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
-    snprintf(buf, sizeof(buf), "%d polys/frame", static_cast<int>(polysPerFrame));
+    snprintf(buf, sizeof(buf), "%d polys/frame", static_cast<int>(emaPolysPerFrame_));
     scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);
     for (int i = 0; i < PROF_NUM; ++i) {
         snprintf(buf, sizeof(buf), "%s %3.1fms (%3.1f%%)",
