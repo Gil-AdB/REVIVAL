@@ -15,11 +15,13 @@
 #include <cmath>
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include "simde/x86/fma.h"
 
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
+#include "Base/FeatureFlags.h"
 
 namespace meka { struct GBuffer; }
 struct Scene;
@@ -272,6 +274,39 @@ static inline TileChunkSphere tileChunkSphere(float x0, float x1,
 	t.cx = cx; t.cy = cy; t.cz = cz; t.R = std::sqrt(r2); t.valid = true;
 	return t;
 }
+
+// Volumetric-pass timing accumulators (one set per process; updated
+// from the main thread that owns the pass dispatch). Printed every
+// FDS_VOL_PROF_INTERVAL frames (default 60) by VolProf_Tick. Shared
+// between DeferredVolumetric.cpp (cones/halos/skybox) and
+// DeferredFastFog.cpp (unified pass); g_volProf is defined in
+// DeferredVolumetric.cpp.
+using volclk = std::chrono::high_resolution_clock;
+struct VolProf {
+    double ms_cones   = 0.0;
+    double ms_halos   = 0.0;
+    double ms_unified = 0.0;
+    double ms_skybox  = 0.0;
+    int    n_cones    = 0;
+    int    n_halos    = 0;
+    int    n_unified  = 0;
+    int    n_skybox   = 0;
+    int    interval   = 60;
+    int    framesSeen = 0;
+};
+extern VolProf g_volProf;
+
+struct VolProfScope {
+    double *acc;
+    int    *cnt;
+    volclk::time_point t0;
+    VolProfScope(double *a, int *c) : acc(a), cnt(c), t0(volclk::now()) {}
+    ~VolProfScope() {
+        if (!fds::FeatureFlags::vol_prof()) return;
+        *acc += std::chrono::duration<double, std::milli>(volclk::now() - t0).count();
+        ++*cnt;
+    }
+};
 
 // rsqrt + one Newton-Raphson step (~24-bit). The cone passes feed
 // cosT = D·W·rsqrt(W²) into smoothstep((cosT−cosO)/(cosI−cosO)):
