@@ -125,7 +125,7 @@ source_group("RADIO" FILES ${RADIO})
 set(RENDER
     RENDER/DeferredCommon.h
     RENDER/DeferredFastFog.cpp
-    RENDER/DeferredLighting.cpp
+    RENDER/DeferredSurfaceKernel.cpp
     RENDER/DeferredLightLists.cpp
     RENDER/DeferredShadowSampling.h
     RENDER/DeferredVolumetric.cpp

@@ -7,10 +7,9 @@
 //   Render_DeferredVolumetric() — unified fog+cones+halos pass
 //   Render_ScreenSpaceRain()    — screen-space rain streaks
 //   FastFog_SetReflectionZ() / FastFog_BeginFrame() — city pass-2 hook
-// The transparent peel (DeferredLighting.cpp, then DeferredSurfaceKernel
-// .cpp after split 6) samples fog at xpar depth through the non-static
-// FastFog_XparActive/SampleGrid/SSActive/SSSample hooks declared in
-// DeferredCommon.h.
+// The transparent peel (DeferredSurfaceKernel.cpp) samples fog at xpar
+// depth through the non-static FastFog_XparActive/SampleGrid/SSActive/
+// SSSample hooks declared in DeferredCommon.h.
 
 #include <stdio.h>
 #include <string.h>

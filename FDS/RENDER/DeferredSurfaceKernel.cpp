@@ -1,14 +1,15 @@
-// Deferred per-pixel lighting pipeline — extracted from RENDER.CPP.
+// Deferred surface-lighting kernels + per-frame orchestrator — the
+// kernel half of the former monolithic DeferredLighting.cpp (see
+// DeferredCommon.h for the split layout; light culling, volumetric and
+// fog passes live in their own TUs).
 //
-// All variants of the tile kernel live here (opaque, transparent front/
-// back, outer-vec, quarter-rate fill), plus the per-frame view-space
-// light list (ViewLightsSoA), per-tile and per-strip light culling
-// (TileLights, buildTileLightLists, buildStripLightLists), the post-
-// pass fog walk, and the TBR-strip xpar dispatcher RenderXparClumpInStrip.
+// All variants of the per-pixel tile kernel live here (opaque scalar,
+// transparent front/back peel, outer-vec, checkerboard/quarter fill),
+// the gloss squaring-chain dispatch, the per-frame view-space light
+// build, and the TBR-strip xpar dispatcher RenderXparClumpInStrip.
 //
 // Public symbols consumed from RENDER.CPP's renderFrame orchestrator:
 //   Render_DeferredLighting()        — full deferred pass (tile dispatch)
-//   Render_DeferredFogPass()         — post-pass fog walk
 //   renderDeferredTransparentTile_Front/Back() — wrappers for the per-tile
 //                                       transparent-layer composite that
 //                                       renderFrame calls inside a runTilePass

@@ -4,13 +4,13 @@
 // DeferredCommon.h — types, constants and inline helpers shared by the
 // deferred-lighting translation units (split out of the former
 // monolithic DeferredLighting.cpp):
-//   DeferredLighting.cpp      — per-frame orchestration
+//   DeferredSurfaceKernel.cpp — per-pixel lighting kernels + the
+//                               Render_DeferredLighting orchestrator
 //   DeferredLightLists.cpp    — per-tile / per-strip light culling
-//   DeferredSurfaceKernel.cpp — per-pixel lighting kernels
-//   DeferredVolumetric.cpp    — cones / halos / fog tile passes
-//   DeferredFastFog.cpp       — analytic + froxel fog
-// Everything here is moved VERBATIM from DeferredLighting.cpp; see that
-// file's header comment for the pipeline overview.
+//   DeferredShadowSampling.h  — per-pixel shadow resolve (inline)
+//   DeferredVolumetric.cpp    — cones / halos / skybox / legacy fog
+//   DeferredFastFog.cpp       — analytic + froxel fog, unified pass
+// Everything here was moved VERBATIM from the monolith.
 
 #include <cmath>
 #include <cstdint>
@@ -193,7 +193,7 @@ struct DeferredLightingCtx {
 // also read by Render_DeferredTransparentLighting_Tile. Both kernels
 // share the same per-frame setup (matTable, tileLights, view-space
 // projection params, scene); rebuilding it per pass would double the
-// per-frame setup cost. Defined in DeferredLighting.cpp.
+// per-frame setup cost. Defined in DeferredSurfaceKernel.cpp.
 extern DeferredLightingCtx g_deferredCtx;
 
 // Light-list builders (DeferredLightLists.cpp). Called once per frame
