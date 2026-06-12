@@ -63,7 +63,7 @@ static float SwCarry = 0.0f, SwCarry2 = 0.0f;
 
 static Vector Vortex_Center(-0.053f,343.381f, 0.251f);
 
-static int32_t LightningFlag = -1;
+static int32_t g_LnLastTimer = -1;   // scrub tracking for strike triggers
 
 static char MSGStr[160];
 
@@ -916,9 +916,8 @@ void Initialize_Fountain()
 
 	g_LnMat = Generate_Gradient(endpoints, 256, 0.01, false);
 
-	// Arm the strike state machine (was parked at -1 while the bolt
-	// transform/visuals were broken). Re-init safe for snapshots.
-	LightningFlag = 0;
+	// Reset scrub tracking + any reserved strike (re-init safe).
+	g_LnLastTimer = -1;
 	Rsv_LState = 0;
 
 	// Runtime stress knob: FDS_FOUNTAIN_PARTICLE_OMNI_PCT (float in [0..100],
@@ -1672,109 +1671,43 @@ void Handle_Lightning()
 		Ambient_Factor *= exp(-dTime*0.02);
 		Ambient_Factor += basicSceneAmbient;
 	}
-	switch (LightningFlag)
-	{
-		case 0:
-			if (Timer>FntLightningTime1)
-			{
-				LightningFlag = 1;
-				Upwards.x = Pylon->x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon->y+1000.0f;
-				Upwards.z = Pylon->z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon->x;
+	// Scrub-aware strike triggers (replaces the one-way LightningFlag
+	// state machine, which never re-armed: F1/F2 rewind and pause made
+	// strikes undebuggable). A strike fires on the UPWARD crossing of its
+	// time; rewinding below a time re-arms it. The spire-ring finale is a
+	// pure Timer window, so it scrubs naturally in both directions.
+	static const int32_t strikeT[6] = {
+		FntLightningTime1, FntLightningTime2, FntLightningTime3,
+		FntLightningTime4, FntLightningTime5, FntLightningTime6,
+	};
+	static const int32_t strikeP[6] = { 45, 50, 55, 60, 65, 70 };   // 1998 escalation
+	const int32_t now = Timer;
+	if (g_LnLastTimer >= 0 && now > g_LnLastTimer) {
+		for (int i = 0; i < 6; ++i) {
+			if (g_LnLastTimer < strikeT[i] && now >= strikeT[i]) {
+				Upwards.x = Pylon[i].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
+				Upwards.y = Pylon[i].y+1000.0f;
+				Upwards.z = Pylon[i].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
+				Downwards.x = Pylon[i].x;
 				Downwards.y = 0.0f;
-				Downwards.z = Pylon->z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,45);
+				Downwards.z = Pylon[i].z;
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,strikeP[i]);
 				Ambient_Factor = 255.0f;
 			}
-		break;
-		case 1:
-			if (Timer>FntLightningTime2)
-			{
-				LightningFlag = 2;
-				Upwards.x = Pylon[1].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[1].y+1000.0f;
-				Upwards.z = Pylon[1].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[1].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[1].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,50);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 2:
-			if (Timer>FntLightningTime3)
-			{
-				LightningFlag = 3;
-				Upwards.x = Pylon[2].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[2].y+1000.0f;
-				Upwards.z = Pylon[2].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[2].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[2].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,55);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 3:
-			if (Timer>FntLightningTime4)
-			{
-				LightningFlag = 4;
-				Upwards.x = Pylon[3].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[3].y+1000.0f;
-				Upwards.z = Pylon[3].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[3].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[3].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,60);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 4:
-			if (Timer>FntLightningTime5)
-			{
-				LightningFlag = 5;
-				Upwards.x = Pylon[4].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[4].y+1000.0f;
-				Upwards.z = Pylon[4].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[4].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[4].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,65);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 5:
-			if (Timer>FntLightningTime6)
-			{
-				LightningFlag = 6;
-				Upwards.x = Pylon[5].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[5].y+1000.0f;
-				Upwards.z = Pylon[5].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[5].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[5].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,70);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 6:
-			if (Timer>FntLightningTime6+100)
-			{
-				if (Timer>FntLightningTime6+400)
-					LightningFlag = 7;
-
-//				Reserve_Lightning_Bolt(NULL,NULL,-1); //special code
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,-1);
-				Ambient_Factor = basicSceneAmbient*2.0;
-			}
-		break;
-		default:
-		break;
+		}
 	}
-	FntSc->Ambient.R = Ambient_Factor;
-	FntSc->Ambient.G = Ambient_Factor;
-	FntSc->Ambient.B = Ambient_Factor;
+	g_LnLastTimer = now;
+	// A strike rewound out from under its TTL is cancelled (the TTL is
+	// Timer+20 at reserve time; anything 25+ below it means we scrubbed).
+	if (Rsv_LState && Rsv_LUntil > 0 && now < Rsv_LUntil - 25) {
+		Rsv_LState = 0;
+		Rsv_LUntil = -1;
+	}
+	// Spire-ring finale window.
+	if (now > FntLightningTime6+100 && now < FntLightningTime6+400) {
+		Reserve_Lightning_Bolt(&Upwards,&Downwards,-1);
+		Ambient_Factor = basicSceneAmbient*2.0;
+	}
 }
 
 
