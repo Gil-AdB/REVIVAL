@@ -1,0 +1,143 @@
+# fast_fog froxel volumetrics — design & plan
+
+Replaces the screen-space per-pixel blob ray-march (`blobFieldTau` +
+`fogInscatterSegment`) with a **view-frustum-aligned 3D froxel grid**. Motivation
+(from the screen-space diagnosis): the per-pixel march paints fog onto the
+surface a ray hits (reads as a marble texture on the ground, can't float in
+air), speckles at grazing angles (importance shadow taps cluster in the
+ill-conditioned near-lamp region), and its cost scales with screen coverage
+(city ~20 fps). Froxels fix all three: fog is volumetric by construction, there
+is no per-pixel march, and cost is O(froxels) — decoupled from screen res.
+
+Gated behind `--fast_fog_froxel` (default off) so the screen-space path stays
+intact for A/B until froxels reach parity+.
+
+## Grid
+
+View-frustum-aligned grid sized `nx × ny × nz`, default ~**160 × 90 × 128**
+(tunable via flags). XY can be coarse — fog is low-frequency; the composite
+trilinearly upsamples. Froxel `(ix,iy,iz)`:
+
+- `ix,iy` → a view ray direction (screen NDC at the froxel-column center →
+  `X=(sx-CntrEX)/FOVX`, `Y=(CntrEY-sy)/FOVY`, like `fogAtPixel`).
+- `iz` → a view-space depth `z`. **Exponential slice distribution**
+  `z(iz) = near · (fogFar/near)^((iz+0.5)/nz)` so near slices are thin (detail
+  where the eye is) — standard for froxel fog. (Start linear if simpler, switch
+  to exp once it works.)
+- World center: `camWorld + viewToWorld · (X·z, Y·z, z)` — reuse
+  `g_deferredCtx.viewToWorld` + `cameraWorld` (same as the height-fog path).
+
+## Passes
+
+1. **Populate** (`Froxel_Populate`, tiled, embarrassingly parallel per froxel):
+   per froxel compute
+   - **density** = the blob field sampled **once** at the froxel world center
+     (reuse `cellHash`/trilinear + the `(val-0.45)*1.8` remap + quintic — but a
+     single point sample, **no DDA march**). Or smooth-slab density.
+   - **extinction** `σ_t = sigma · density` (× height/distance falloff).
+   - **in-scatter** `Lscat` = Σ lights `lightAttenAt(froxelCenter) · vis` × color
+     (reuse `lightAttenAt` + `volSpotShadow`, one tap per light per froxel — no
+     per-sample loop, no importance sampling → no grazing speckle).
+   Store `scatRGB` (= Lscat · density · inscatter) and `ext` (= σ_t) per froxel.
+
+2. **Integrate** (`Froxel_Integrate`, parallel per XY column): front-to-back
+   along `iz`, accumulate per froxel
+   - `T_i = exp(-Σ_{j≤i} ext_j · Δz_j)` (transmittance camera→slice i),
+   - `acc_i = acc_{i-1} + scat_i · T_{i-1} · Δz_i` (Beer-Lambert in-scatter).
+   Store `accRGB` and `T` per froxel (in place).
+
+3. **Composite** (`Froxel_Composite`, tiled per screen pixel): pixel's view-z →
+   fractional slice `iz` → **trilinear** sample `accRGB`,`T` from the grid →
+   `out = out · T + accRGB`. Replaces `fogComposite`. Trilinear in x,y,z gives a
+   smooth low-res upsample (fog is low-freq, so the coarse grid is invisible).
+
+## Reuse (all already in DeferredLighting.cpp)
+
+`cellHash` + trilinear noise, the density remap/quintic, `lightAttenAt`,
+`volSpotShadow` (PCF), the light SoA `g_deferredCtx`, `viewToWorld`/`cameraWorld`,
+the tile-job runner (`runTiles`), the FastFogParams plumbing.
+
+## Cost sketch
+
+160×90×128 ≈ 1.84M froxels × (1 blob sample + 1 tap/light). vs screen-space
+0.5M px × ~30 march-cells. ~8× less work at this grid; grid res is the knob.
+Memory: ~1.84M × (scatRGB+ext = 16 B) ≈ 30 MB (coarser grid → less). Populate is
+the cost; integrate/composite are cheap.
+
+## Flags (FeatureFlags.def, atmos)
+
+- `fast_fog_froxel` (bool, default 0) — enable the froxel path (overrides the
+  screen-space blob march).
+- `fast_fog_froxel_x` / `_y` / `_z` (int) — grid dims (default 160/90/128).
+
+## Build order (validate each)
+
+1. Grid struct + buffers + the `--fast_fog_froxel` flag + dims. Allocate/size.
+2. **Populate** (density + extinction only, no in-scatter) + **integrate** +
+   **composite** → verify volumetric fog appears (slab/blobs fill air, no
+   marble-on-surface), A/B vs screen-space density.
+3. Add **in-scatter** per froxel (lights + shadow tap) → verify glow, no grazing
+   speckle (the whole point), A/B vs screen-space inscatter.
+4. Exponential depth slices; tune grid res for quality/perf; bench vs 30 ms.
+5. Half-res composite / threading polish.
+
+## Known design choices to revisit
+
+- **Depth slice count vs near-field detail** — DONE: exp slices + exact sub-slice
+  composite removed depth banding; z=64 sufficient.
+
+── STATUS (2026-06-09) ─────────────────────────────────────────────────────────
+DONE: populate+integrate+composite (commit 2955c1c), exp depth slices + grid
+256×144 (2d2b942), distance-LOD blob filter (kills far aliasing blocks), exact
+sub-slice composite (kills tilted-surface depth bands, z→64) (bfdbb7c). Fixes the
+grazing speckle, the "fog on surfaces not air", and perf (conetest 30→~16ms,
+city fog ~110→~30ms).
+
+DONE — per-slice clipped analytic light glow (9f25e26): the populate point-
+sampled lightAttenAt+shadow at slice centers; the cone tip / kernel spike is
+narrower than a far slice, so the glow gated on/off per slice as the grid slid
+through world space ("light moving wildly" under a 7-unit dolly). Now per column
+per light: lightRayClip (sphere∩cone∩forward, shared with the screen-space
+inscatter) once, then the exact 2/√disc·Δatan radial integral over each
+slice∩[zLo,zHi] with boundary-atan carry. Shaping+shadow stay point samples at
+the kernel peak clamped into the lit sub-interval. Out-of-cone columns skip
+everything → pays for the atans (no perf regression: 15.5 vs ~16 ms).
+
+DONE — #3 TEMPORAL: per-frame Halton(2,3,5) sub-froxel jitter of the sample
+positions; per froxel, the CANONICAL center reprojects into the prev frame's
+grid (v = A + zc·B per column; fast log2 for the exp slice coord) and
+trilinearly blends history (fast_fog_froxel_blend=0.8, flag
+fast_fog_froxel_temporal default ON). Raw quantities are PREMULTIPLIED scatter
+L·σ + extinction σ (linear in the medium → blend correctly across empty↔dense
+edges), stored as interleaved float4 ping-pong grids; integration runs on the
+blended values (slice term scat·T·(1−e^{−σdz})/σ → scat·T·dz as σ→0).
+Out-of-frustum/behind → no history; grid/near/far change invalidates. History
+fetch skipped >2 froxel extents outside the slab band (current+history both 0
+there). Converged result dissolves the XY stair/blockiness (verified iters=30
+A/B crops). Cost +1.9ms conetest down-look (18.1 vs 16.2; first cut was +9.5ms
+— the interleave + slab skip + algebra hoist won it back). NOTE: snapshot bench
+mode (@iters=N) now writes the LAST frame's PPM — a converged-history still; a
+cold single snapshot can't show the temporal result (and a stale .ppm from a
+previous run is a classic bogus-A/B trap — bench mode used to skip the write).
+Caveats: moving lights lag ~1/(1−blend) frames (lower blend if ghosting shows);
+the froxel path is SKIPPED in the city reflection pass (skipVolumetric) — the
+mirror camera would corrupt the history and paid a whole second populate;
+reflections render unfogged. With temporal on, a coarser grid (e.g. 128×72)
+may hit the same quality much cheaper — untuned.
+
+ALSO: --fast_fog_worley (b8e0920) — inverted-Worley F1 puff field (round 3D
+cloud masses instead of value-noise caustic veins), size-modulated by a 2.7×
+value-noise octave; fast_fog_worley_thresh sets puff radius. +3.2ms.
+
+REMAINING:
+- #4 SIMD the POPULATE → PARKED FOR x64 (see fast_fog_simd_x64.md). The populate
+  is more SIMD-friendly than the screen-space march (uniform per froxel, no
+  divergent DDA); 8-column-wide populate+integrate vectorizes the cellHash +
+  light loop + the per-column prefix scan (8 independent scans). BUT the shadow
+  tap is a gather (no NEON gather → scalar) and every prior arm64 SIMD attempt
+  this session was neutral/negative (NEON 2×128, latency-hidden). On AVX2 (true
+  8-wide + VPGATHERDD) it should pay — do it there, measure there, like the
+  other parked SIMD. Not worth confirming a likely-null arm64 result.
+
+- **Composite across depth discontinuities** — sub-slice uses bilinear XY +
+  exact depth; no obvious silhouette halos seen. Revisit if they appear.

@@ -1391,10 +1391,22 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 	}
 }
 
+void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
+                const fds::RenderTarget& rt, const fds::CameraContext& cam);
+
 void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
-                    const fds::RenderTarget& /*rt*/,
-                    const fds::CameraContext& /*cam*/)
+                    const fds::RenderTarget& rt,
+                    const fds::CameraContext& cam)
 {
+	// TBR scenes: flares JOIN the unified per-strip back-to-front order
+	// (sprites + transparent clumps sorted together by renderZ) instead of
+	// drawing immediately — otherwise the particle TBR and the xpar clumps
+	// composite over the lamp glows (fountain vortex over the purple omni),
+	// and an immediate draw can only be fully-before or fully-after them.
+	if (CurScene->Flags & Scn_SpriteTBR) {
+		TBR_Sprite(F, V, numVerts, miplevel, rt, cam);
+		return;
+	}
 //	int32_t Size = ImageSize*_A->RZ;
 	float Size = ImageSize*_A->RZ*View->PerspX;
 
@@ -1868,12 +1880,24 @@ void TBR_Render(Scene *Sc)
 
 					Vertex* V = F->A;
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
-					dword R = V->LR, G = V->LG, B = V->LB;
-					dword Color = (R << 16) + (G << 8) + B;
 					dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
-					Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
-						F->Txtr->Txtr->Data, VPage, Color, Z,
-						0, spriteClipY1, XRes, spriteClipY2);
+					// Texture-res dispatch: particles are 32×32 and tinted by
+					// their vertex lighting; omni FLARES (diverted here by
+					// The_MMX_Scalar for TBR scenes) carry 256×256 textures
+					// whose color is baked in — colorize with white, matching
+					// the immediate-draw path (the omni V's LR/LG/LB are not
+					// maintained and would tint the flare black).
+					if (F->Txtr->Txtr->SizeX == 256) {
+						Spriter<256, true>(V->PX, V->PY, edgeLen, edgeLen,
+							F->Txtr->Txtr->Data, VPage, 0xFFFFFF, Z,
+							0, spriteClipY1, XRes, spriteClipY2);
+					} else {
+						dword R = V->LR, G = V->LG, B = V->LB;
+						dword Color = (R << 16) + (G << 8) + B;
+						Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
+							F->Txtr->Txtr->Data, VPage, Color, Z,
+							0, spriteClipY1, XRes, spriteClipY2);
+					}
 					continue;
 				}
 

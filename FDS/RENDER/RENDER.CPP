@@ -39,6 +39,9 @@ void Render_DeferredFogPass();
 void Render_VolumetricCones();
 void Render_OmniHalos();
 void Render_DeferredVolumetric();
+void Render_DeferredFastFog();
+void Render_DeferredFastFogSkyPaint();
+void FastFog_BeginFrame();
 void Render_DeferredSkybox();
 void VolProf_Tick();
 
@@ -333,6 +336,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// RenderPath::ForceDeferred takes the deferred path regardless of
 	// the FDS_DEFERRED env var (which is read-once-and-cached) so
 	// snapshot harnesses can render both modes in a single process.
+	// New frame for the fast-fog grid: until this frame's fog dispatch runs
+	// (if it runs at all), the transparent peel must not sample a stale grid.
+	FastFog_BeginFrame();
+
 	bool deferred;
 	if (path == RenderPath::ForceForward)       deferred = false;
 	else if (path == RenderPath::ForceDeferred) deferred = true;
@@ -427,12 +434,29 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			Render_DeferredSkybox();
 		}
 
-		// Full-screen linear distance fog over deferred-lit opaque pixels.
-		// Runs BEFORE the transparent peel so xpar surfaces composite onto
-		// already-fogged opaque dst. Skipped on non-Scn_Fogged scenes.
-		// Disabled when the unified volumetric pass is on (folds fog in).
+		// Full-screen distance fog over deferred-lit opaque pixels. Runs
+		// BEFORE the transparent peel AND before the cone/halo volumetric
+		// scatter, so god-ray shafts add on top of the fogged surfaces
+		// and stay bright (mixing them away afterward kills their
+		// contrast). Disabled when the unified pass is on (folds fog in).
+		//   fast_fog on  → analytic exponential model (iquilezles), any
+		//                  scene, mixes toward Ambient.
+		//   fast_fog off → legacy sqrt-to-black ramp, Scn_Fogged only.
 		if (!useUnifiedVolumetric()) {
-			Render_DeferredFogPass();
+			if (fds::FeatureFlags::fast_fog()) {
+				// The froxel grid is view-aligned and temporally reprojected
+				// against the previous MAIN-camera frame — populating it with
+				// the mirror camera would corrupt the history (and pay a whole
+				// extra populate). Reflection-pass geometry renders unfogged,
+				// but the mirrored SKY must still be painted: those pixels
+				// otherwise keep stale VPage content (uninitialized on a
+				// scene's first frames) that the water then reflects.
+				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
+					Render_DeferredFastFog();
+				else
+					Render_DeferredFastFogSkyPaint();
+			} else
+				Render_DeferredFogPass();
 		}
 
 		// Per-object peeled transparent rendering. We process each
@@ -585,6 +609,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 xpar_done: ;
 	}
 
+	// NOTE: this loop must run BEFORE TBR_Render — for TBR scenes the
+	// sprite fillers (TBR_Sprite, and The_MMX_Scalar's TBR divert) only
+	// INSERT into the strip lists; TBR_Render is the draw.
 	int32_t I = CAll;
 	fds::FListEntry* FLS = FList;//+CAll-1;
 	Vertex *A,*B;

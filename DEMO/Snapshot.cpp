@@ -205,6 +205,10 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
                         parse_timestamps(kv.substr(2), cfg.timestamps);
                     } else if (starts_with(kv, "iters=")) {
                         cfg.iters = std::atoi(std::string(kv.substr(6)).c_str());
+                    } else if (!kv.empty() && kv.find_first_not_of("0123456789") == std::string_view::npos) {
+                        // Bare integer: continuation of a t=N1,N2,N3 list (the
+                        // key=value comma split would otherwise eat N2+).
+                        parse_timestamps(kv, cfg.timestamps);
                     }
                     tail = (comma == std::string_view::npos)
                         ? std::string_view{} : tail.substr(comma + 1);
@@ -361,6 +365,41 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_Crash();
+
+    // For crash, --snapshot=crash@t=N takes N as a FRAME number, not a raw
+    // Timer. CurFrame = StartFrame + Timer/5 (CrPartTime = 5·(End-Start)),
+    // so Timer = frame·5. Handier than back-solving the Timer by hand.
+    std::vector<int32_t> frames = cfg.timestamps;
+    if (frames.empty()) frames = {40, 82, 120, 160};
+
+    auto driver = createCrashScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t fr : frames) {
+        std::srand(0);
+        Timer = fr * 5;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();   // on-screen "Frame N/M" confirms the mapping
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/crash_f%04d_color.ppm",
+                      cfg.outDir.c_str(), fr);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[CRASHSNAP] frame=%d (Timer=%d) -> %s\n", fr, fr*5, colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -402,6 +441,29 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Optional level-camera override (CITYSNAP_POS / CITYSNAP_FWD) to
+        // probe the near-plane/rasterizer degeneracy seen in conetest at
+        // perfectly level views. Re-renders the city geometry from the
+        // pinned pose (no reflections/dispMap — just enough to see whether
+        // the ground/water wedges like conetest's giant quad does).
+        if (const char* s = std::getenv("CITYSNAP_POS")) {
+            float px,py,pz, fx=0,fy=0,fz=1;
+            if (std::sscanf(s, "%f,%f,%f", &px,&py,&pz) == 3) {
+                if (const char* sf = std::getenv("CITYSNAP_FWD"))
+                    std::sscanf(sf, "%f,%f,%f", &fx,&fy,&fz);
+                View->ISource = Vector(px,py,pz);
+                Vector fwd(fx,fy,fz); Vector_Norm(&fwd);
+                buildLookAt(View->ISource, Vector(px+fwd.x,py+fwd.y,pz+fwd.z), View->Mat);
+                CalcPersp(View); FOVX = View->PerspX; FOVY = View->PerspY;
+                std::memset(VPage, 0, PageSize);
+                std::memset(ZPage16, 0, size_t(XRes)*size_t(YRes)*sizeof(word));
+                Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+                if (CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceDeferred); }
+                std::fprintf(stderr, "[CITYSNAP] override pos=(%.0f,%.0f,%.0f) fwd=(%.2f,%.2f,%.2f)\n",
+                             px,py,pz, fwd.x,fwd.y,fwd.z);
+            }
+        }
 
         char colorPath[1024];
         char zPath[1024];
@@ -1070,6 +1132,34 @@ static void appendQuad(Scene* Sc, TriMesh* T, int vBase, int fBase,
         F->Flags  = 0;
         F->uvFromVertices();
     }
+}
+
+// Compute a TriMesh's bounding sphere from its actual vertices. appendTriMesh
+// installs a bogus default (centre origin, radius 100); without recomputing,
+// the per-object frustum cull in Transform_Objects tests a phantom sphere at
+// the wrong place/size and drops the whole mesh at certain camera angles even
+// when the geometry is on-screen (this is what made conetest's cube/ground
+// vanish mid-screen at a knife-edge view). FLD meshes get this from the
+// loader; hand-built meshes must call this after filling Verts.
+static void finalizeBSphere(TriMesh* T) {
+    if (T->VIndex <= 0) return;
+    Vector mn = T->Verts[0].Pos, mx = mn;
+    for (int i = 1; i < T->VIndex; ++i) {
+        const Vector& p = T->Verts[i].Pos;
+        mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
+        mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
+    }
+    const Vector c = { 0.5f*(mn.x+mx.x), 0.5f*(mn.y+mx.y), 0.5f*(mn.z+mx.z) };
+    float r2 = 0.0f;
+    for (int i = 0; i < T->VIndex; ++i) {
+        const Vector& p = T->Verts[i].Pos;
+        const float dx = p.x-c.x, dy = p.y-c.y, dz = p.z-c.z;
+        const float d = dx*dx + dy*dy + dz*dz;
+        if (d > r2) r2 = d;
+    }
+    T->BSphereCtr    = c;
+    T->BSphereRad    = r2 * 1.01f;              // radius² (tiny pad)
+    T->BSphereRadius = std::sqrt(r2) * 1.005f;  // radius
 }
 
 // Allocate + append a stationary point omni to a scene's OmniHead chain.
@@ -1872,8 +1962,8 @@ static Scene* buildConeTestScene() {
         /*pos*/Vector(0, 400, 0),
         /*dir*/Vector(0, -1, 0),
         /*hot*/12.0f, /*outer*/35.0f,
-        /*shadowMapRes*/0,
-        /*castsShadow*/false);
+        /*shadowMapRes*/512,
+        /*castsShadow*/true);
 
     Material* matGround = makeSolidColorMat(Sc, "cone_ground",
                                             80, 80, 90, 255,
@@ -1889,19 +1979,152 @@ static Scene* buildConeTestScene() {
     linkMatToLib(matWall);
 
     {
-        TriMesh* ground = appendTriMesh(Sc, "cone_ground", 4, 2);
-        QuadDef q = {
-            { Vector(-2000, 0, -2000), Vector( 2000, 0, -2000),
-              Vector( 2000, 0,  2000), Vector(-2000, 0,  2000) },
-            Vector(0, 1, 0)
-        };
-        appendQuad(Sc, ground, 0, 0, q, matGround,
-                   TheOtherBarry<barry::TBlendMode::OVERWRITE,
-                                 barry::TTextureMode::NORMAL>);
+        // Tiled ground: a grid of small quads instead of one 4000-unit
+        // quad. A single giant quad that straddles the camera in z hits a
+        // near-plane clipper/rasterizer degeneracy at perfectly-level
+        // views (renders as a sheared wedge; flips with ~1px of camera Y).
+        // Real scenes tile their ground so they never hit it — this makes
+        // conetest match. NxN quads over [-2000,2000].
+        constexpr int N = 20;
+        constexpr float EXT = 2000.0f, STEP = (2.0f * EXT) / N;
+        TriMesh* ground = appendTriMesh(Sc, "cone_ground", 4 * N * N, 2 * N * N);
+        int qi = 0;
+        for (int iz = 0; iz < N; ++iz) {
+            for (int ix = 0; ix < N; ++ix, ++qi) {
+                const float x0 = -EXT + ix * STEP, x1 = x0 + STEP;
+                const float z0 = -EXT + iz * STEP, z1 = z0 + STEP;
+                QuadDef q = {
+                    { Vector(x0, 0, z0), Vector(x1, 0, z0),
+                      Vector(x1, 0, z1), Vector(x0, 0, z1) },
+                    Vector(0, 1, 0)
+                };
+                appendQuad(Sc, ground, qi * 4, qi * 2, q, matGround,
+                           TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                         barry::TTextureMode::NORMAL>);
+            }
+        }
+        finalizeBSphere(ground);
     }
-    // (back wall geometry intentionally omitted while diagnosing the
-    // banding artifact — see the conetest comments above)
+    // Opaque occluder cube floating inside the cone, offset to one side so
+    // it casts a shadow notch into the volumetric shaft / ground spot and
+    // clips the fog behind it. Without an occluder there's no way to test
+    // ray blocking (cone shadow, fog occlusion).
+    {
+        TriMesh* occ = appendTriMesh(Sc, "cone_occluder", 24, 12);
+        // Centered on the cone axis (apex 0,400,0 shining -Y) so it casts a
+        // shadow column straight down the middle of the shaft — the clean
+        // ray-blocking test case.
+        const Vector c(0, 250, 0);
+        constexpr float h = 45.0f;
+        const QuadDef quads[6] = {
+            {{ Vector(c.x-h,c.y-h,c.z+h), Vector(c.x+h,c.y-h,c.z+h),
+               Vector(c.x+h,c.y+h,c.z+h), Vector(c.x-h,c.y+h,c.z+h) }, Vector(0,0,1)},
+            {{ Vector(c.x+h,c.y-h,c.z+h), Vector(c.x+h,c.y-h,c.z-h),
+               Vector(c.x+h,c.y+h,c.z-h), Vector(c.x+h,c.y+h,c.z+h) }, Vector(1,0,0)},
+            {{ Vector(c.x+h,c.y-h,c.z-h), Vector(c.x-h,c.y-h,c.z-h),
+               Vector(c.x-h,c.y+h,c.z-h), Vector(c.x+h,c.y+h,c.z-h) }, Vector(0,0,-1)},
+            {{ Vector(c.x-h,c.y-h,c.z-h), Vector(c.x-h,c.y-h,c.z+h),
+               Vector(c.x-h,c.y+h,c.z+h), Vector(c.x-h,c.y+h,c.z-h) }, Vector(-1,0,0)},
+            {{ Vector(c.x-h,c.y+h,c.z+h), Vector(c.x+h,c.y+h,c.z+h),
+               Vector(c.x+h,c.y+h,c.z-h), Vector(c.x-h,c.y+h,c.z-h) }, Vector(0,1,0)},
+            {{ Vector(c.x-h,c.y-h,c.z-h), Vector(c.x+h,c.y-h,c.z-h),
+               Vector(c.x+h,c.y-h,c.z+h), Vector(c.x-h,c.y-h,c.z+h) }, Vector(0,-1,0)},
+        };
+        for (int fi = 0; fi < 6; ++fi)
+            appendQuad(Sc, occ, fi * 4, fi * 2, quads[fi], matWall,
+                       TheOtherBarry<barry::TBlendMode::OVERWRITE,
+                                     barry::TTextureMode::NORMAL>);
+        finalizeBSphere(occ);
+    }
     return Sc;
+}
+
+// ─── Interactive cone-test driver ─────────────────────────────────────────
+// Live free-cam version of the conetest scene (--scene-conetest). The rig
+// for tuning the volumetric cone, fast_fog (value-noise blobs), and the
+// in-scatter glow without flying through the whole demo. Forces deferred so
+// the volumetric/fog passes run regardless of rev.cfg.
+namespace {
+struct ConeTestScene : SceneDriver {
+    Scene *sc = nullptr;
+    char MSGStr[160] = {0};
+    float lastTimer = -1.0f;
+
+    void init() override {
+        if (VPage && PageSize) { std::memset(VPage, 0, PageSize); if (MainSurf) Flip(MainSurf); }
+        Ambient_Factor = 0.25f; Diffusive_Factor = 1.0f;
+        Specular_Factor = 1.0f; Range_Factor = 1.0f;
+        fds::g_mainFaces.resize(8192);
+        sc = buildConeTestScene();
+        SetCurrentScene(sc);
+        // Allocate the spot's 2D shadow map. Without this g_shadowMaps stays
+        // empty and Render_DeferredShadowMaps early-returns → the spot's
+        // castsShadow flag never produces a map → no shadows (and the in-scatter
+        // glow has nothing to occlude). Needs --shadows (default on).
+        ShadowMaps_Rebuild(sc, 512);
+        Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
+        setupFaceLists(sc, /*includeOmnisInCount=*/true);
+        Scene_RebuildMatTable(sc);
+        // Start in free-cam, seeded from the scene's authored camera.
+        FC.ISource = sc->CameraHead->ISource;
+        FC.IFOV    = sc->CameraHead->IFOV;
+        Matrix_Copy(FC.Mat, sc->CameraHead->Mat);
+        CalcPersp(&FC);
+        View = &FC;
+        std::fprintf(stderr, "[CONETEST] interactive — FREE-CAM. WASD/QE move, arrows look, ESC exit.\n");
+    }
+
+    bool tick() override {
+        if (Keyboard[ScESC] || Keyboard[ScBackSpace]) return false;
+        g_FrameTime = Timer;
+        tickTabToggle(sc, "conetest");
+        clearFrame();
+        dTime = (lastTimer > 0) ? (Timer - lastTimer) * 0.25f : 0.0f;
+        lastTimer = Timer;
+        if (View == &FC) Dynamic_Camera();
+        if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
+        Animate_Objects(sc, View);
+        Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+        Lighting(sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            // Bake the spot's shadow map (occluder casts into the cone) —
+            // swaps view globals, so it must run before the main Render.
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
+            Render(RenderPath::ForceDeferred);
+        }
+        std::snprintf(MSGStr, sizeof(MSGStr),
+                      "[%s] Cam=(%.0f,%.0f,%.0f)  WASD/QE move, arrows look, ,/. speed, ESC exit",
+                      (View == &FC) ? "FREE" : "SCRIPTED",
+                      View->ISource.x, View->ISource.y, View->ISource.z);
+        OutTextXY(VPage, 0, 0, MSGStr, 255);
+
+        // 'G' (grab): print the current camera pose so it can be reproduced
+        // headlessly via FDS_CONETEST_CAM="px,py,pz,fx,fy,fz". fwd = Mat row 2.
+        // Edge-triggered. (F9 is a macOS system key, hence 'G'.)
+        {
+            static bool sGPrev = false;
+            const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
+            if (gNow && !sGPrev) {
+                std::fprintf(stderr,
+                    "[CONETEST-CAM] FDS_CONETEST_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\"\n",
+                    View->ISource.x, View->ISource.y, View->ISource.z,
+                    View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
+                std::fflush(stderr);
+            }
+            sGPrev = gNow;
+        }
+        Flip(MainSurf);
+        return true;
+    }
+
+    void cleanup() override { waitBackspaceRelease(); }
+};
+} // namespace
+
+void Run_ConeTest() {
+    ConeTestScene scene;
+    runSceneBlocking(scene);
 }
 
 // ─── Halo test scene ──────────────────────────────────────────────────
@@ -2082,6 +2305,7 @@ int RunHaloTest(const SnapshotConfig& cfg, int xres, int yres) {
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
             Render(RenderPath::ForceDeferred);
         }
 
@@ -2137,12 +2361,20 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
     Specular_Factor  = 1.0f;
     Range_Factor     = 1.0f;
 
-    fds::g_mainFaces.resize(8192);
-
     Scene* sc = buildConeTestScene();
     SetCurrentScene(sc);
     View = sc->CameraHead;
     Scene_RebuildMatTable(sc);
+    // FList_Allocate sizes g_mainFaces AND sets the global ::Polys (= the scene
+    // face/omni/particle count). The interactive path gets this from the normal
+    // render loop; the snapshot must call it explicitly. A bare
+    // g_mainFaces.resize() would size the buffer but leave ::Polys at 0 — which
+    // makes the per-light shadow bake do perLightFaces.resize(0) → null fList →
+    // a crash inside Transform_Objects on a worker thread (only with --shadows).
+    FList_Allocate(sc);
+    // Allocate the spot's 2D shadow map (see ConeTestScene::init) so the bake
+    // below has something to fill — otherwise the spot casts no shadow.
+    ShadowMaps_Rebuild(sc, 512);
 
     // Six canonical viewpoints A–F. Spot apex at world (0,400,0)
     // shining DOWN (cone direction = -Y world). All cameras look in
@@ -2237,7 +2469,20 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
 
     const int benchIters = cfg.iters;
     int produced = 0;
-    for (const ConePose& p : poses) {
+
+    // FDS_CONETEST_CAM="px,py,pz,fx,fy,fz" (printed by the interactive 'G'
+    // grab) overrides the canonical poses with that one captured view, so a
+    // user-reported artifact angle can be reproduced headlessly.
+    std::vector<ConePose> active(poses, poses + (sizeof(poses)/sizeof(poses[0])));
+    if (const char* e = std::getenv("FDS_CONETEST_CAM")) {
+        float px,py,pz,fx,fy,fz;
+        if (std::sscanf(e, "%f,%f,%f,%f,%f,%f", &px,&py,&pz,&fx,&fy,&fz) == 6) {
+            static ConePose cam{"cam", Vector(px,py,pz), Vector(px+fx,py+fy,pz+fz), "FDS_CONETEST_CAM"};
+            active.assign(1, cam);
+            std::fprintf(stderr, "[CONETEST] using FDS_CONETEST_CAM pose\n");
+        }
+    }
+    for (const ConePose& p : active) {
         View->ISource = p.eye;
         buildLookAt(View->ISource, p.target, View->Mat);
         CalcPersp(View);
@@ -2252,6 +2497,7 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
         Lighting(sc);
         if (CAll) {
             Radix_Sort(FList, SList, CAll);
+            Render_DeferredShadowMaps(sc, ShadowBakeMode::DynamicOmnisPerFrame);
             Render(RenderPath::ForceDeferred);
         }
 
@@ -2271,6 +2517,14 @@ int RunConeTest(const SnapshotConfig& cfg, int xres, int yres) {
             std::fprintf(stderr,
                 "[CONEBENCH] %-13s %d iters total=%.2f ms  mean=%.3f ms/iter  (%s)\n",
                 p.name, benchIters, total_ms, total_ms / benchIters, p.desc);
+            // Also write the LAST frame: after N in-process frames the froxel
+            // temporal history has converged, so this is the steady-state
+            // image (a single cold render can't show it).
+            char benchPath[1024];
+            std::snprintf(benchPath, sizeof(benchPath),
+                          "%s/conetest_%s.ppm", cfg.outDir.c_str(), p.name);
+            write_ppm(benchPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+            std::fprintf(stderr, "[CONEBENCH] wrote %s (last iter)\n", benchPath);
             ++produced;
             continue;
         }

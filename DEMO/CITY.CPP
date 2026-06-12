@@ -762,8 +762,20 @@ OUT:
 			//dz +=0x7FFFFFFF;
 			//RoundToInt((int32_t *)&O->F.SortZ.DW,dz);
 			dz = Vtx->TPos_AOS.z;
+			// FlareSize parity with Transform_Objects' omni loop. Without
+			// this, an omni visible in the MIRROR frustum but never (yet)
+			// in the main frustum draws its reflected flare with whatever
+			// F.FlareSize holds — uninitialized heap garbage (±4e36) on
+			// the scene's first frames. Depending on the per-process
+			// garbage bits the flare rect is either degenerate (invisible)
+			// or screen-covering: the additive white wash over the whole
+			// pass-1 frame that read as "everything below the water is
+			// white", nondeterministic per process, and curable by a
+			// free-cam 360 (which swept every omni through the MAIN
+			// frustum once, letting Transform_Objects initialize it).
+			O->F.FlareSize = O->ISize;
 			O->F.SortZ.F = 2 * fzp - dz;
-			*Ins++ = { O->F.SortZ.DW, &O->F }; // no insertion : flares are not reflected for now
+			*Ins++ = { O->F.SortZ.DW, &O->F };
 		}
 	}
 	COmnies = (Ins-FList)-CPolys;
@@ -2257,6 +2269,9 @@ struct CityScene : SceneDriver {
 		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
 		// so it tracks the current frame's view (previously was rendered
 		// one frame stale because it ran before camera update).
+		// (VPage is already cleared by clearFrame() at tick start, so the
+		// mirrored-sky pixels pass-1 leaves uncovered are black+skybox —
+		// never stale content.)
 		prof.switchTo(PROF_SKY);
 		RenderSkyCube(SkySc, View, false);
 		prof.switchTo(PROF_ANIM);
