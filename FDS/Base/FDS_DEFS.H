@@ -9,7 +9,15 @@
 #include <string.h>
 #include <time.h>
 
-#define RAND_15() (rand() / (((unsigned)RAND_MAX+1) / 32768))
+// SIGNED result. The natural `rand() / (((unsigned)RAND_MAX+1)/32768)` is
+// an UNSIGNED expression, so `RAND_15() - 16384` (the idiomatic centered-
+// noise pattern, straight from the 1998 sources where rand() itself was
+// 15-bit signed) wrapped to ~+131072 for half the rolls — that single
+// promotion sent the fountain lightning walking off to infinity and biased
+// every integer-centered RAND_15 site (skycube stars, rain spawn disc).
+// Float-literal sites (`- 16384.0f`) were immune: unsigned→float converts
+// before the subtraction.
+#define RAND_15() ((int32_t)(rand() / (int)(((unsigned)RAND_MAX+1) / 32768)))
 #define RAND_15_MAX 0x7fff
 
 #define MAX_GSTRING 128
