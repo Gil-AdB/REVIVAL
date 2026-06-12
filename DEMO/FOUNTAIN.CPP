@@ -153,6 +153,7 @@ static DWord Blaze[64*128];
 static Vector Rsv_LSrc,Rsv_LTarg;
 static int32_t Rsv_LPow;
 static int32_t Rsv_LState = 0;
+static int32_t Rsv_LUntil = -1;   // strike TTL (Timer units); -1 = unarmed
 const float basicSceneAmbient = 64.0;
 
 //static Vector *Stars;
@@ -1493,10 +1494,15 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 	_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
 	_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
 
-/*	if (POW>1)
+	// The strike CORE: the original's anti-aliased pure-white line
+	// (Spark_Line for the thin branch tips), drawn over the additive
+	// glow quads. Bivex_Frustrum_Perspective near-Z + viewport clips
+	// before the line filler touches VPage. LR carries the thickness.
+	A.LR = B.LR = float(POW);
+	if (POW>1)
 		Bivex_Frustrum_Perspective(&A,&B,Lightning_Line);
 	else
-		Bivex_Frustrum_Perspective(&A,&B,Spark_Line);*/
+		Bivex_Frustrum_Perspective(&A,&B,Spark_Line);
 }
 
 
@@ -2284,11 +2290,17 @@ struct FountainScene : SceneDriver {
 
 		if (Rsv_LState) {
 			if (Rsv_LPow > -1) {
+				// Stretch the strike over ~200ms: redraw with fresh
+				// randomness every frame (the crackle IS the look) until
+				// the TTL passes. 1998 drew a single frame — at modern
+				// framerates that reads as a barely-there flicker.
+				if (Rsv_LUntil < 0) Rsv_LUntil = Timer + 20;
 				g_boltBudget = 900;            // ~main bolt + a dozen branches
 				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
-				Rsv_LState = 0;
+				if (Timer >= Rsv_LUntil) { Rsv_LState = 0; Rsv_LUntil = -1; }
 			} else {
 				Rsv_LState = 0;
+				Rsv_LUntil = -1;
 			}
 		}
 		// Debug labels at each stream-head omni's screen position.
