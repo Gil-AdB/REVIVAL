@@ -43,7 +43,9 @@ const char kPage[] = R"HTML(<!doctype html>
  button:hover{background:#33334d}
  details{margin:8px 0;border:1px solid #26263a;border-radius:8px;background:#191926}
  summary{cursor:pointer;padding:7px 12px;font-weight:600;color:#8f97e8}
- .row{display:grid;grid-template-columns:220px 1fr 150px 60px 26px;gap:10px;align-items:center;padding:4px 12px;border-top:1px solid #20202e}
+ .row{display:grid;grid-template-columns:18px 220px 1fr 150px 60px 26px;gap:8px;align-items:center;padding:4px 12px;border-top:1px solid #20202e}
+ .pin{cursor:pointer;color:#444;user-select:none}
+ .pin.on{color:#fc6}
  .row.set{background:#20283a}
  .nm{font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
  .row input[type=range]{width:100%}
@@ -70,16 +72,29 @@ function sliderRange(p){
   const lo=Math.min(0,parseFloat(p.def),parseFloat(p.value));
   return [lo,hi,p.type==='int'?1:hi/400];
 }
+const pins=new Set(JSON.parse(localStorage.tunePins||'[]'));
+function savePins(){localStorage.tunePins=JSON.stringify([...pins])}
 function render(){
   const f=q.value.toLowerCase();
+  root.innerHTML='';
+  // WORKING SET on top: pinned + console-tuned + script-driven — the
+  // knobs that matter for the scene you're tuning right now.
+  if(!f){
+    const ws=P.filter(p=>pins.has(p.name)||p.set||ST.driven.includes(p.name));
+    if(ws.length){
+      const d=document.createElement('details');d.open=true;
+      d.innerHTML=`<summary>working set <span style="color:#555">(${ws.length})</span></summary>`;
+      for(const p of ws)d.appendChild(row(p));
+      root.appendChild(d);
+    }
+  }
   const cats={};
   for(const p of P){
     if(f&&!(p.name.includes(f)||p.cat.includes(f)||p.help.toLowerCase().includes(f)))continue;
     (cats[p.cat]=cats[p.cat]||[]).push(p);
   }
-  root.innerHTML='';
   for(const c of Object.keys(cats).sort()){
-    const d=document.createElement('details');d.open=!!f||Object.keys(cats).length<4;
+    const d=document.createElement('details');d.open=!!f;
     d.innerHTML=`<summary>${c} <span style="color:#555">(${cats[c].length})</span></summary>`;
     for(const p of cats[c])d.appendChild(row(p));
     root.appendChild(d);
@@ -87,6 +102,10 @@ function render(){
 }
 function row(p){
   const r=document.createElement('div');r.className='row'+(p.set?' set':'');r.dataset.name=p.name;
+  const pin=document.createElement('span');pin.className='pin'+(pins.has(p.name)?' on':'');pin.textContent='\u2605';
+  pin.title='pin to working set';
+  pin.onclick=()=>{pins.has(p.name)?pins.delete(p.name):pins.add(p.name);savePins();render()};
+  r.appendChild(pin);
   const nm=document.createElement('div');nm.className='nm';nm.title=p.help;
   const drv=ST.driven.includes(p.name),key=ST.keyed.includes(p.name);
   nm.innerHTML=(drv?'<span style="color:#6c6" title="script-driven">&#9679;</span> ':key?'<span style="color:#fa5" title="time-keyed in script">&#9670;</span> ':'')+p.name;
@@ -123,8 +142,8 @@ function send(p,v){
 }
 function api(u){return fetch(u,{method:'POST'})}
 function refresh(){
-  Promise.all([fetch('/api/params').then(r=>r.json()),
-               fetch('/api/state').then(r=>r.json())]).then(([j,st])=>{
+  fetch('/api/all').then(r=>r.json()).then(a=>{
+    const j=a.params,st=a;
     ST={scene:st.info.scene,driven:st.info.driven,keyed:st.info.keyed,web:st.web};
     document.getElementById('scene').textContent=ST.scene?('— scene: '+ST.scene):'';
     document.getElementById('bake').textContent='bake to '+(ST.scene||'?')+'.params'+(ST.web.length?' ('+ST.web.length+')':'');
@@ -147,7 +166,7 @@ function copyOut(kind){
 }
 q.oninput=render;
 refresh();
-setInterval(()=>{if(!focused)refresh()},400);
+setInterval(()=>{if(!focused)refresh()},500);
 </script>
 )HTML";
 
@@ -207,6 +226,8 @@ void respond(int fd, const char *status, const char *ctype, const std::string &b
 	sendAll(fd, body.data(), body.size());
 }
 
+void handleConn(int fd);
+
 void serveLoop(int port) {
 	const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
 	if (srv < 0) return;
@@ -225,13 +246,27 @@ void serveLoop(int port) {
 	for (;;) {
 		const int fd = ::accept(srv, nullptr, nullptr);
 		if (fd < 0) continue;
-		char req[8192];
-		const ssize_t n = ::recv(fd, req, sizeof req - 1, 0);
-		if (n <= 0) { ::close(fd); continue; }
-		req[n] = 0;
+		// One detached thread per connection: browsers open SPECULATIVE
+		// connections that never send a request — a serial loop blocks in
+		// recv() on them while real clicks queue in the backlog ('buttons
+		// only work after a few tries'). The timeout reaps the idlers.
+		std::thread(handleConn, fd).detach();
+	}
+}
+
+void handleConn(int fd) {
+	{
+		timeval tv{2, 0};
+		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	}
+	char req[8192];
+	const ssize_t n = ::recv(fd, req, sizeof req - 1, 0);
+	if (n <= 0) { ::close(fd); return; }
+	req[n] = 0;
+	{
 		// "METHOD /path?query HTTP/1.1"
 		char *path = strchr(req, ' ');
-		if (!path) { ::close(fd); continue; }
+		if (!path) { ::close(fd); return; }
 		++path;
 		char *pend = strchr(path, ' ');
 		if (pend) *pend = 0;
@@ -240,6 +275,24 @@ void serveLoop(int port) {
 
 		if (strcmp(path, "/") == 0) {
 			respond(fd, "200 OK", "text/html; charset=utf-8", kPage);
+		} else if (strcmp(path, "/api/all") == 0) {
+			std::string js = "{\"params\":";
+			js.reserve(64 * 1024);
+			FeatureFlags::dumpParamsJson(js);
+			js += ",\"info\":";
+			ParamScript_Info(js);
+			js += ",\"web\":[";
+			{
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				bool first = true;
+				for (const auto &nm : gWebSet) {
+					if (!first) js += ",";
+					first = false;
+					js += "\"" + nm + "\"";
+				}
+			}
+			js += "]}";
+			respond(fd, "200 OK", "application/json", js);
 		} else if (strcmp(path, "/api/params") == 0) {
 			std::string js;
 			js.reserve(64 * 1024);
@@ -302,8 +355,8 @@ void serveLoop(int port) {
 		} else {
 			respond(fd, "404 Not Found", "text/plain", "nope");
 		}
-		::close(fd);
 	}
+	::close(fd);
 }
 
 } // namespace
