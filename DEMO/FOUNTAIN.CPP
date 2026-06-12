@@ -898,16 +898,27 @@ void Initialize_Fountain()
 
 	LBoltPcls = new Particle[FntLightningPcls];
 
+	// Bolt cross-section: u runs 0→1 ACROSS the quad's width, so the
+	// profile must be SYMMETRIC — dark edge → hot core → dark edge. The
+	// old gradient ramped black→white across, leaving every bolt bright
+	// on one side and dark on the other. Edges are black because the
+	// faces draw ADDITIVE (a bolt is light): black adds nothing, which
+	// also gives free soft anti-aliased edges.
 	std::vector<GradientEndpoint> endpoints;
-	endpoints.emplace_back(0, Color{ 0.0, 0.0, 0.0, 0.0 });
-	endpoints.emplace_back(0.1, Color{ 0.2, 0.0, 0.0, 0.0 });
-	endpoints.emplace_back(0.7, Color{ 0.4, 0.0, 0.1, 0.0 });
-	endpoints.emplace_back(0.75, Color{ 1.0, 0.0, 0.1, 0.0 });
-	endpoints.emplace_back(0.8, Color{ 1.0, 0.4, 0.8, 0.0 });
-	endpoints.emplace_back(0.85, Color{ 1.0, 1.0, 1.0, 0.0 });
-	endpoints.emplace_back(1.0, Color{ 1.0, 1.0, 1.0, 0.0 });
+	endpoints.emplace_back(0.00, Color{ 0.0, 0.0,  0.0,  0.0 });
+	endpoints.emplace_back(0.20, Color{ 0.25, 0.0, 0.06, 0.0 });
+	endpoints.emplace_back(0.42, Color{ 1.0, 0.30, 0.60, 0.0 });
+	endpoints.emplace_back(0.50, Color{ 1.0, 1.0,  1.0,  0.0 });
+	endpoints.emplace_back(0.58, Color{ 1.0, 0.30, 0.60, 0.0 });
+	endpoints.emplace_back(0.80, Color{ 0.25, 0.0, 0.06, 0.0 });
+	endpoints.emplace_back(1.00, Color{ 0.0, 0.0,  0.0,  0.0 });
 
 	g_LnMat = Generate_Gradient(endpoints, 256, 0.01, false);
+
+	// Arm the strike state machine (was parked at -1 while the bolt
+	// transform/visuals were broken). Re-init safe for snapshots.
+	LightningFlag = 0;
+	Rsv_LState = 0;
 
 	// Runtime stress knob: FDS_FOUNTAIN_PARTICLE_OMNI_PCT (float in [0..100],
 	// default 0). Attaches a stationary Omni to that percentage of fountain
@@ -1375,8 +1386,17 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 }
 
 
+// Per-strike fragment budget. The recursive brancher is a supercritical
+// process at high BasePow (each segment spawns a branch with ~constant
+// probability, branches spawn sub-branches...) — at the port's flat 80 the
+// expected tree size diverged and the demo hung on the first strike. The
+// 1998 powers (45..70) are restored, but termination must not depend on
+// tuning: cap the total fragments a strike may draw.
+static int32_t g_boltBudget = 0;
+
 void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 {
+	if (--g_boltBudget < 0) return;
 //	memset(VPage,255,PageSize);
 	if (POW<1) POW=1;
 	Vertex A,B;
@@ -1404,34 +1424,42 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 
 	float dx = B.PX - A.PX;
 	float dy = B.PY - A.PY;
-	float rlen = 1.0f / sqrt(dx * dx + dy * dy);
+	const float seglen2 = dx * dx + dy * dy;
+	if (seglen2 < 1e-6f) return;          // degenerate (endpoints coincide)
+	float rlen = 1.0f / sqrt(seglen2);
 	dx *= rlen;
 	dy *= rlen;
+	// Unit perpendicular IN PIXEL SPACE. The old code scaled its x by
+	// FOVX and its y by -FOVY — un-normalizing, skewing and sign-
+	// flipping the width vector for any non-vertical segment, so bolt
+	// quads twisted as segments rotated ("not transformed correctly").
+	// The world half-width projects to pixels as w·RZ·FOVX; apply that
+	// scalar to the unit perpendicular on BOTH axes.
 	float nx = -dy;
 	float ny = dx;
 	Vertex quad[4];
-	float lenA = POW * 2.0 * A.RZ;
-	float lenB = POW * 2.0 * B.RZ;
-	quad[0].PX = A.PX - lenA * FOVX * nx;
-	quad[0].PY = A.PY - lenA * (-FOVY) * ny;
+	const float halfA = POW * 2.0f * A.RZ * FOVX;   // px at the A end
+	const float halfB = POW * 2.0f * B.RZ * FOVX;   // px at the B end
+	quad[0].PX = A.PX - halfA * nx;
+	quad[0].PY = A.PY - halfA * ny;
 	quad[0].UZ = 0;
 	quad[0].VZ = 0;
 	quad[0].RZ = A.RZ;
 
-	quad[1].PX = A.PX + lenA * FOVX * nx;
-	quad[1].PY = A.PY + lenA * (-FOVY) * ny;
+	quad[1].PX = A.PX + halfA * nx;
+	quad[1].PY = A.PY + halfA * ny;
 	quad[1].UZ = A.RZ;
 	quad[1].VZ = 0;
 	quad[1].RZ = A.RZ;
 
-	quad[2].PX = B.PX + lenB * FOVX * nx;
-	quad[2].PY = B.PY + lenB * (-FOVY) * ny;
+	quad[2].PX = B.PX + halfB * nx;
+	quad[2].PY = B.PY + halfB * ny;
 	quad[2].UZ = B.RZ;
 	quad[2].VZ = B.RZ;
 	quad[2].RZ = B.RZ;
 
-	quad[3].PX = B.PX - lenB * FOVX * nx;
-	quad[3].PY = B.PY - lenB * (-FOVY) * ny;
+	quad[3].PX = B.PX - halfB * nx;
+	quad[3].PY = B.PY - halfB * ny;
 	quad[3].UZ = 0;
 	quad[3].VZ = B.RZ;
 	quad[3].RZ = B.RZ;
@@ -1449,13 +1477,15 @@ void Lightning_Bolt_Frag(Vector *Src,Vector *Targ,int32_t POW, Material* LnMat)
 	f[0].A = &quad[0];
 	f[0].B = &quad[1];
 	f[0].C = &quad[2];
-	f[0].Filler = (TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>);
+	// ADDITIVE: a bolt is light — it brightens whatever is behind it,
+	// and the gradient's black edges add nothing (free soft AA).
+	f[0].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
 	f[0].Txtr = LnMat;
 
 	f[1].A = &quad[0];
 	f[1].B = &quad[2];
 	f[1].C = &quad[3];
-	f[1].Filler = (TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>);
+	f[1].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
 	f[1].Txtr = LnMat;
 
 	const auto rt  = fds::MainRenderTargetFromGlobals();
@@ -1547,14 +1577,14 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 		Vector_Copy(&Pos,&NPos);
 		Vector_Sub(Targ,&Pos,&V);
 		Distance = Vector_Length(&V);
-		if (Distance>60.0f&&Distance<400.0f&&(RAND_15()<320*BasePow-Distance*15))
+		if (g_boltBudget>0&&Distance>60.0f&&Distance<400.0f&&(RAND_15()<320*BasePow-Distance*15))
 		{
 			Yosi.y = 0;
 			Yosi.x = Pos.x;
 			Yosi.z = Pos.z;
 			Lightning_Bolt(&Pos,&Yosi,BasePow>>1, LnMat);
 		}
-	} while (Distance>60.0f);
+	} while (Distance>60.0f&&g_boltBudget>0);
 	// attach pos with target
 
 //	Generate_Lightning_Particles(&Pos,50);
@@ -1621,7 +1651,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon->x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon->z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,45);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -1635,7 +1665,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon[1].x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon[1].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,50);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -1649,7 +1679,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon[2].x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon[2].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,55);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -1663,7 +1693,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon[3].x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon[3].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,60);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -1677,7 +1707,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon[4].x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon[4].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,65);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -1691,7 +1721,7 @@ void Handle_Lightning()
 				Downwards.x = Pylon[5].x;
 				Downwards.y = 0.0f;
 				Downwards.z = Pylon[5].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,80);
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,70);
 				Ambient_Factor = 255.0f;
 			}
 		break;
@@ -2254,6 +2284,7 @@ struct FountainScene : SceneDriver {
 
 		if (Rsv_LState) {
 			if (Rsv_LPow > -1) {
+				g_boltBudget = 900;            // ~main bolt + a dozen branches
 				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
 				Rsv_LState = 0;
 			} else {
