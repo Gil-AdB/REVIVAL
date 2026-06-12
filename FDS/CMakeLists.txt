@@ -28,6 +28,7 @@ set(Base
     Base/CameraContext.h
     Base/FaceListContext.h
     Base/FeatureFlags.cpp
+    Base/ParamScript.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
     Base/FPContract.h

@@ -6356,6 +6356,8 @@ struct FastFogParams {
 	float worleyInvT;      // 1/(1-thresh), precomputed remap gain
 	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
 	float glowMax;         // >0: soft-knee cap on per-slice in-scatter radiance
+	int   glowGridDiv;     // froxel glow on a /div coarse XY grid (1 = per-column)
+	int   taps;            // density samples per froxel per frame (1 or 2)
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
 	// In-scatter glow: scene lights lighting the fog medium.
 	const ViewLightsSoA *lights;
@@ -7214,10 +7216,32 @@ namespace {
 	float    gFrPrevCamX, gFrPrevCamY, gFrPrevCamZ;        // prev frame camera
 	float    gFrPrevW[9];               // prev view→world rotation (rows)
 	float    gFrPrevA[3];               // Rprevᵀ·(cam − camPrev), per frame
+	// Coarse glow grid: per-light in-scatter RADIANCE evaluated on a
+	// (nx/div × ny/div × nz) grid — light radiance is low-frequency in XY
+	// (city omnis have 5000+ unit ranges) while the per-slice analytic
+	// integral keeps depth exact. The fine populate bilinearly fetches it.
+	std::vector<float> gGlow;           // gGlX×gGlY columns × nz × RGB
+	int   gGlX = 0, gGlY = 0;
+	bool  gFrHasShadowedLight = false;  // any light needing exact per-column glow
 	// True while THIS renderFrame's froxel grid is valid for sampling
 	// (set by the froxel dispatch, cleared at every renderFrame start) —
 	// the transparent peel fogs its layers from the grid when set.
 	bool     gFrFrameActive = false;
+	// Optional reflection-pass depth (encoded uint16, displaced through the
+	// scene's wobble like the color): set by the scene between its passes
+	// (FastFog_SetReflectionZ), consumed by exactly ONE froxel composite —
+	// the main pass's — then reset, so a scene change can't leave the
+	// pointer dangling into a freed buffer.
+	const uint16_t* gFrReflZ = nullptr;
+	float           gFrReflWaterY = 0.0f;   // mirror plane height (world Y)
+}
+
+// See gFrReflZ. The city calls this after its dispMap wobble with the
+// displaced pass-1 Z so the composite can fog the water's reflections along
+// their actual two-leg path instead of uniformly at gFrFar.
+void FastFog_SetReflectionZ(const uint16_t* z, float waterY) {
+	gFrReflZ = fds::FeatureFlags::fast_fog_refl_depth() ? z : nullptr;
+	gFrReflWaterY = waterY;
 }
 
 // Called at the top of renderFrame (RENDER.CPP) so a frame whose fog pass
@@ -7417,6 +7441,85 @@ static inline float froxelDensity(const FastFogParams& P, float wx, float wy, fl
 // slice). cutoff²·cone and the shadow tap stay point samples at the kernel
 // peak clamped into the lit sub-interval (slowly varying / not integrable).
 static constexpr int kFrMaxNz = 256;   // per-column stack scratch bound
+
+// Coarse glow pass: the per-light glow loop from Froxel_ColumnTile, run once
+// per COARSE column (div× fewer in each of X and Y → div² fewer light loops)
+// at full z resolution, storing pure RADIANCE (no density gating — the fine
+// populate multiplies by its own extinction, which is 0 in empty froxels).
+// This is where the 30-omni city glow cost lives; radiance is low-frequency
+// in XY so the bilinear upsample is visually free away from lamp cores.
+static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogParams& P) {
+	const int nz = gFrZ;
+	const float invGx = 1.0f/float(gGlX), invGy = 1.0f/float(gGlY);
+	const float* zb = gFrZb.data();
+	const float invLogR = float(nz) / std::log(gFrFar / gFrNear);
+	const float invNear = 1.0f / gFrNear;
+	const ViewLightsSoA* L = P.lights;
+	for (int cy = cy0; cy < cy1; ++cy) {
+		const float sy = (float(cy)+0.5f) * invGy * float(YRes);
+		const float Y  = (CntrEY - sy) * P.invFOVY;
+		for (int cx = cx0; cx < cx1; ++cx) {
+			const float sx = (float(cx)+0.5f) * invGx * float(XRes);
+			const float X  = (sx - CntrEX) * P.invFOVX;
+			float* out = gGlow.data() + (size_t(cy)*gGlX + cx) * nz * 3;
+			std::memset(out, 0, size_t(nz) * 3 * sizeof(float));
+			const float uV = X*X + Y*Y + 1.0f;
+			for (int li = 0; li < P.numLights; ++li) {
+				if (L->mirrorId[li] != 0) continue;        // clones don't glow
+				// Shadow-casting lights stay EXACT per fine column (pass 2 in
+				// Froxel_ColumnTile): the shadow boundary inside the glow is
+				// high-frequency and blocks up at coarse XY (conetest A/B).
+				if (L->shadowMapIdx[li] >= 0) continue;
+				const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
+				const float VP = X*Lx + Y*Ly + Lz;
+				const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
+				float zLo = zb[0], zHi = zb[nz];
+				if (!lightRayClip(L, li, X, Y, uV, VP, PP, zLo, zHi))
+					continue;                              // column never in-light
+				const float rr2   = L->rRange[li] * L->rRange[li];
+				const float alpha = rr2 * uV;
+				const float beta  = -2.0f * rr2 * VP;
+				const float gamma = rr2 * PP + 0.05f;
+				const float disc  = 4.0f*alpha*gamma - beta*beta;
+				if (disc <= 0.0f) continue;
+				const float invD  = 1.0f / std::sqrt(disc);
+				const float twoA  = alpha + alpha;
+				const float zStar = VP / uV;
+				const int   smi   = L->shadowMapIdx[li];
+				int izLo = int(std::log(zLo * invNear) * invLogR) - 1;
+				int izHi = int(std::log(zHi * invNear) * invLogR) + 1;
+				if (izLo < 0)    izLo = 0;
+				if (izHi > nz-1) izHi = nz-1;
+				float aPrev = std::atan((twoA*zLo + beta) * invD);
+				for (int iz = izLo; iz <= izHi; ++iz) {
+					const float a = zb[iz]   > zLo ? zb[iz]   : zLo;
+					const float b = zb[iz+1] < zHi ? zb[iz+1] : zHi;
+					if (b <= a) continue;
+					const float aCur = std::atan((twoA*b + beta) * invD);
+					const float dAtan = aCur - aPrev;
+					aPrev = aCur;
+					float g = 2.0f * invD * dAtan / (zb[iz+1] - zb[iz]);
+					if (g <= 0.0f) continue;
+					const float zm = zStar < a ? a : (zStar > b ? b : zStar);
+					float sShape = lightAttenAt(L, li, X*zm, Y*zm, zm);
+					if (sShape <= 0.0f) continue;
+					const float ddx = zm*X - Lx, ddy = zm*Y - Ly, ddz = zm - Lz;
+					sShape *= (ddx*ddx + ddy*ddy + ddz*ddz) * rr2 + 0.05f;
+					if (smi >= 0) {
+						const float vis = volSpotShadow(smi, X*zm, Y*zm, zm, P.shadowPcf);
+						if (vis <= 0.0f) continue;
+						sShape *= vis;
+					}
+					g *= sShape;
+					out[iz*3+0] += L->colR[li] * g;
+					out[iz*3+1] += L->colG[li] * g;
+					out[iz*3+2] += L->colB[li] * g;
+				}
+			}
+		}
+	}
+}
+
 static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogParams& P) {
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
 	const float invNx = 1.0f/float(nx), invNy = 1.0f/float(ny);
@@ -7459,18 +7562,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
 		const float Yc  = (CntrEY - syc) * P.invFOVY;
 		for (int ix = ix0; ix < ix1; ++ix) {
-			float jx = 0.0f, jy = 0.0f;
-			if (gFrTemporal) {
-				const uint32_t k = (gFrFrameIdx + cellHash(ix, iy, 0x5EED)) & 7u;
-				jx = h2[k] - 0.5f; jy = h3[k] - 0.5f;
-			}
-			const float sy = (float(iy)+0.5f+jy) * invNy * float(YRes);
-			const float Y  = (CntrEY - sy) * P.invFOVY;
-			const float sx = (float(ix)+0.5f+jx) * invNx * float(XRes);
-			const float X  = (sx - CntrEX) * P.invFOVX;
-			const float Dx = P.w00*X + P.w01*Y + P.w02;
-			const float gY = P.w10*X + P.w11*Y + P.w12;
-			const float Dz = P.w20*X + P.w21*Y + P.w22;
+			const uint32_t colPhase = gFrFrameIdx + cellHash(ix, iy, 0x5EED);
 			// Canonical (unjittered) ray for the history reprojection. The
 			// reprojected view pos is linear in slice depth: v = A + zc·B,
 			// A = Rprevᵀ·(cam−camPrev) (per frame), B = Rprevᵀ·Dc (here).
@@ -7484,36 +7576,111 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			const float Bz = gFrPrevW[2]*Dxc + gFrPrevW[5]*gYc + gFrPrevW[8]*Dzc;
 			const size_t col = (size_t(iy)*nx + ix) * nz;
 
-			// ── pass 1: blob/slab density at each slice center (XY jittered) ─
+			// ── pass 1: blob/slab density at each slice center ──────────────
+			// Sub-froxel XY jitter (the temporal supersample that dissolves
+			// the coarse grid's stairs), with TWO cycle-taming rules learned
+			// from the fog-top shimmer (user-bisected: jitter off = no
+			// shimmer; finer grid / lower blend / far-z amplitude cap = no
+			// change):
+			//   • PER-SLICE phase, not per-column. A column-constant offset
+			//     shifts every slice of the ray together, so at the grazing
+			//     fog-top the whole path integral swings across the iso edge
+			//     coherently each frame — the EMA's residual (~(1−blend) of
+			//     the swing) reads as blobby horizon shimmer. With iz in the
+			//     phase hash each slice cycles independently and the slice
+			//     sum averages ~nz independent residuals (~√nz smaller, and
+			//     spatially incoherent). The converged mean is identical.
+			//   • WORLD-space amplitude = min(froxel footprint, cell/4):
+			//     full sub-froxel near (the stairs live there), bounded far
+			//     so one sample can never hop the field's whole transition.
+			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world units per froxel per z
+			const float jcap    = 0.25f * P.cell;
+			// 2-tap mode: average two HALF-CYCLE-APART phases per slice each
+			// frame (k and k+4) — halves the jitter cycle's amplitude and
+			// doubles convergence for ~2× the noise-field cost.
+			const int taps = gFrTemporal ? P.taps : 1;
+			const float invTaps = taps > 1 ? 0.5f : 1.0f;
 			for (int iz = 0; iz < nz; ++iz) {
 				const float z  = 0.5f * (zb[iz] + zb[iz+1]);
 				const float dz = zb[iz+1] - zb[iz];
-				const float wx = P.camX + z*Dx, wy = P.camY + z*gY, wz = P.camZ + z*Dz;
-				float d = froxelDensity(P, wx, wy, wz);
-				// Distance LOD: a far froxel spans many blob cells but point-samples
-				// the cell=180 noise → aliases into bright/dark blocks. Blend toward
-				// a COARSER octave (4× cell) by footprint/cell, so distant fog keeps
-				// large-scale blob masses and loses only the small-scale aliasing.
-				// Only for in-slab blob froxels (the slab/gap zeros must stay zero).
-				if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
-					const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
-					const float fp = dz > fpXY ? dz : fpXY;
-					float lod = (fp - P.cell) * (1.0f/P.cell);
-					lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
-					if (lod > 0.0f) {
-						const float coarse = fogNoiseAt(P, wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
-						d += (coarse - d) * lod;
+				const float fp = z * fpScale;
+				const float jamp = fp < jcap ? fp : jcap;
+				float d = 0.0f;
+				for (int tap = 0; tap < taps; ++tap) {
+					float jrx = 0.0f, jry = 0.0f, jrz = 0.0f;
+					if (gFrTemporal) {
+						// +iz walks the 8-phase Halton cycle along the ray, so
+						// a path through ≥8 foggy slices covers ALL offsets
+						// within one frame — stratified, not merely
+						// decorrelated. (Antithetic sign-flip pairing was
+						// tried and measured identical: the iso edge is
+						// max(0,·)-clamped, so symmetric pairs don't cancel
+						// through it.)
+						const uint32_t k = (colPhase + uint32_t(iz) + uint32_t(tap)*4u) & 7u;
+						const float jx = h2[k] - 0.5f, jy = h3[k] - 0.5f;
+						jrx = jx*P.w00 + jy*P.w01;     // screen-right/up in world
+						jry = jx*P.w10 + jy*P.w11;
+						jrz = jx*P.w20 + jy*P.w21;
 					}
+					const float wx = P.camX + z*Dxc + jrx*jamp;
+					const float wy = P.camY + z*gYc + jry*jamp;
+					const float wz = P.camZ + z*Dzc + jrz*jamp;
+					float dt = froxelDensity(P, wx, wy, wz);
+					// Distance LOD: a far froxel spans many blob cells but
+					// point-samples the cell=180 noise → aliases into bright/
+					// dark blocks. Blend toward a COARSER octave (4× cell) by
+					// footprint/cell, so distant fog keeps large-scale blob
+					// masses and loses only the small-scale aliasing. Only for
+					// in-slab blob froxels (the slab/gap zeros must stay zero).
+					if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
+						const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
+						const float fpL = dz > fpXY ? dz : fpXY;
+						float lod = (fpL - P.cell) * (1.0f/P.cell);
+						lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
+						if (lod > 0.0f) {
+							const float coarse = fogNoiseAt(P, wx, wy, wz, P.cell*4.0f, P.invCell*0.25f);
+							dt += (coarse - dt) * lod;
+						}
+					}
+					d += dt;
 				}
-				dens[iz] = d;
+				dens[iz] = d * invTaps;
+			}
+
+			// Coarse-glow-grid mode: bilinear corner pointers/weights for this
+			// fine column into the gGlow grid (fetched per slice in pass 3).
+			const bool glowGrid = glowOn && P.glowGridDiv > 1;
+			const float* gl00 = nullptr; const float* gl10 = nullptr;
+			const float* gl01 = nullptr; const float* gl11 = nullptr;
+			float glwx = 0.0f, glwy = 0.0f;
+			if (glowGrid) {
+				const float fx = (float(ix)+0.5f) * float(gGlX) * invNx - 0.5f;
+				const float fy = (float(iy)+0.5f) * float(gGlY) * invNy - 0.5f;
+				int gx = int(std::floor(fx)); glwx = fx - float(gx);
+				int gy = int(std::floor(fy)); glwy = fy - float(gy);
+				if (gx < 0) { gx = 0; glwx = 0.0f; }
+				if (gy < 0) { gy = 0; glwy = 0.0f; }
+				if (gx > gGlX-2) { gx = gGlX > 1 ? gGlX-2 : 0; glwx = gGlX > 1 ? 1.0f : 0.0f; }
+				if (gy > gGlY-2) { gy = gGlY > 1 ? gGlY-2 : 0; glwy = gGlY > 1 ? 1.0f : 0.0f; }
+				const int gx1 = gx+1 < gGlX ? gx+1 : gx;
+				const int gy1 = gy+1 < gGlY ? gy+1 : gy;
+				gl00 = gGlow.data() + (size_t(gy )*gGlX + gx )*nz*3;
+				gl10 = gGlow.data() + (size_t(gy )*gGlX + gx1)*nz*3;
+				gl01 = gGlow.data() + (size_t(gy1)*gGlX + gx )*nz*3;
+				gl11 = gGlow.data() + (size_t(gy1)*gGlX + gx1)*nz*3;
 			}
 
 			// ── pass 2: per-light glow per slice (clipped, analytic radial) ──
-			if (glowOn) {
+			// In glow-grid mode this still runs for SHADOW-CASTING lights
+			// (exact shadow boundaries); unshadowed ones come from the grid.
+			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight);
+			if (pass2) {
 				for (int iz = 0; iz < nz; ++iz) glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
+				const float X = Xc, Y = Yc;            // glow is smooth — no jitter
 				const float uV = X*X + Y*Y + 1.0f;
 				for (int li = 0; li < P.numLights; ++li) {
 					if (L->mirrorId[li] != 0) continue;        // clones don't glow
+					if (glowGrid && L->shadowMapIdx[li] < 0) continue;  // grid covers it
 					const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
 					const float VP = X*Lx + Y*Ly + Lz;
 					const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
@@ -7578,7 +7745,15 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				if (d > 0.0f) {
 					ext = P.sigma * d;
 					float Lr = P.fogR, Lg = P.fogG, Lb = P.fogB;   // ambient in-scatter
-					if (glowOn) {
+					if (glowGrid) {
+						const int o = iz*3;
+						const float w00 = (1-glwx)*(1-glwy), w10 = glwx*(1-glwy);
+						const float w01 = (1-glwx)*glwy,     w11 = glwx*glwy;
+						Lr += (gl00[o  ]*w00 + gl10[o  ]*w10 + gl01[o  ]*w01 + gl11[o  ]*w11) * P.inscatter;
+						Lg += (gl00[o+1]*w00 + gl10[o+1]*w10 + gl01[o+1]*w01 + gl11[o+1]*w11) * P.inscatter;
+						Lb += (gl00[o+2]*w00 + gl10[o+2]*w10 + gl01[o+2]*w01 + gl11[o+2]*w11) * P.inscatter;
+					}
+					if (pass2) {
 						Lr += glowR[iz]*P.inscatter;
 						Lg += glowG[iz]*P.inscatter;
 						Lb += glowB[iz]*P.inscatter;
@@ -7618,11 +7793,27 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					const float vz = Az + zc*Bz;
 					if (vz > 0.0f) {
 						const float ivz = 1.0f / vz;
-						const float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
-						const float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
-						const float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
-						if (fx >= 0.0f && fx <= float(nx-1) && fy >= 0.0f &&
-						    fy <= float(ny-1) && fz >= 0.0f && fz <= float(nz-1)) {
+						float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
+						float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
+						float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
+						// Accept the outer HALF-froxel band and CLAMP into
+						// the sample range instead of rejecting. A slice's
+						// arithmetic-mean center sits past its log-space
+						// midpoint (≈ iz+0.52 for this grid), so a hard
+						// fz <= nz-1 test rejected slice nz-1 in EVERY
+						// column — the last slice never blended history and
+						// cycled at full jitter amplitude. Sky pixels
+						// integrate through that slice → standing fog-top
+						// shimmer at the skyline, immune to the blend weight
+						// (the blend never ran there). The same off-by-half
+						// on fy was the 1px dashed ripple at the very top
+						// screen rows.
+						if (fx >= -0.5f && fx <= float(nx)-0.5f &&
+						    fy >= -0.5f && fy <= float(ny)-0.5f &&
+						    fz >= -0.5f && fz <= float(nz)-0.5f) {
+							fx = fx < 0.0f ? 0.0f : (fx > float(nx-1) ? float(nx-1) : fx);
+							fy = fy < 0.0f ? 0.0f : (fy > float(ny-1) ? float(ny-1) : fy);
+							fz = fz < 0.0f ? 0.0f : (fz > float(nz-1) ? float(nz-1) : fz);
 							const int x0 = int(fx), y0 = int(fy), z0 = int(fz);
 							const int x1 = x0+1 < nx ? x0+1 : x0;
 							const int y1 = y0+1 < ny ? y0+1 : y0;
@@ -7711,8 +7902,71 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 		const int iy1 = std::min(iy0+1, ny-1);
 		for (int px = x1; px < x2; ++px) {
 			const size_t i = row + size_t(px);
-			const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
-			float z = (zSurf <= 0.0f) ? gFrFar : (zSurf > gFrFar ? gFrFar : zSurf);
+			const uint16_t ze = zEnc[i];
+			// zEnc==0 pixels are sky OR the water's reflection underlay
+			// (the transparent peel writes no Z). Default: fog at gFrFar.
+			// When the scene provides the reflection pass's (displaced)
+			// depth, fog along the reflected path's TWO legs. Sampling
+			// the main grid at the mirrored depth is NOT enough: the
+			// main (downward) ray exits the slab bottom shortly below
+			// the waterline, so its integral saturates and any mirrored
+			// depth beyond that reads the same fog. Split instead:
+			//   leg 1 camera→water: the normal grid path, at the ray's
+			//          analytic water-plane depth z_w;
+			//   leg 2 water→building (length z_m − z_w, UP-going, ray's
+			//          Y flipped about the plane): closed-form slab
+			//          integral (SkyPaint's), folded in after the fetch
+			//          as T = T1·T2, acc = acc1 + T1·acc2.
+			float z;
+			float reflAmt2 = 0.0f;             // leg-2 fog amount (0 = none)
+			if (ze == 0) {
+				z = gFrFar;
+				if (gFrReflZ) {
+					const uint16_t zr = gFrReflZ[i];
+					if (zr) {
+						const float zm = float(0xFF80 - int(zr)) * P.invZScale;
+						if (zm > 0.0f && zm < gFrFar) {
+							const float Xc = (float(px) - CntrEX) * P.invFOVX;
+							const float Yc = (CntrEY - float(py)) * P.invFOVY;
+							const float gY = P.w10*Xc + P.w11*Yc + P.w12;
+							// Main-ray depth of the water plane.
+							float zw = zm;
+							if (gY < -1e-6f) {
+								const float t = (gFrReflWaterY - P.camY) / gY;
+								if (t > 0.0f && t < zm) zw = t;
+							}
+							z = zw < gFrNear ? gFrNear : zw;
+							const float L = zm - zw;
+							if (L > 0.0f) {
+								const float gYu = -gY;     // up-going leg
+								float sB = L;
+								if (gYu > 1e-6f) {
+									const float sExit =
+									    (P.slabY1 - gFrReflWaterY) / gYu;
+									if (sExit < sB) sB = sExit;
+								}
+								if (sB > 0.0f) {
+									const float uV = Xc*Xc + Yc*Yc + 1.0f;
+									const float m  = P.kHeight*gYu + P.invRf;
+									const float hb = (P.kHeight != 0.0f)
+									    ? fastExpNeg(P.kHeight * gFrReflWaterY)
+									    : 1.0f;
+									const float meanD = P.blobs ? 0.22f : 1.0f;
+									const float tau = P.sigma * meanD
+									    * std::sqrt(uV) * hb
+									    * fogAntiderivG(sB, m);
+									reflAmt2 = 1.0f - fastExpNeg(tau);
+									if (reflAmt2 > 1.0f) reflAmt2 = 1.0f;
+									if (reflAmt2 < 0.0f) reflAmt2 = 0.0f;
+								}
+							}
+						}
+					}
+				}
+			} else {
+				const float zSurf = float(0xFF80 - int(ze)) * P.invZScale;
+				z = zSurf > gFrFar ? gFrFar : zSurf;
+			}
 			if (z < gFrNear) z = gFrNear;
 			const float fx = (float(px)+0.5f)*fnx - 0.5f;
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
@@ -7741,6 +7995,14 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				aB = acc[2] + (acc[6]-acc[2])*frac;
 				Tpix = acc[3] * ToptPart;
 			} else { aR=acc[0]; aG=acc[1]; aB=acc[2]; Tpix=acc[3]; }
+			// Reflection leg 2 (water→building): ambient in-scatter +
+			// extinction folded behind leg 1's transmittance.
+			if (reflAmt2 > 0.0f) {
+				aR += Tpix * P.fogR * reflAmt2;
+				aG += Tpix * P.fogG * reflAmt2;
+				aB += Tpix * P.fogB * reflAmt2;
+				Tpix *= 1.0f - reflAmt2;
+			}
 			const dword pix = out[i];
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
@@ -7796,6 +8058,8 @@ void Render_DeferredFastFog() {
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
 	P.glowMax      = fds::FeatureFlags::fast_fog_glow_max();
+	P.glowGridDiv  = std::max(1, fds::FeatureFlags::fast_fog_glow_grid_div());
+	P.taps         = std::min(2, std::max(1, fds::FeatureFlags::fast_fog_froxel_taps()));
 	if (P.blobOverlap > 0.0f) {
 		// Metaball sums exceed 1 where blobs stack (that's the point), so the
 		// iso threshold ranges [0,3]; fog ramps to full over +0.7 above iso.
@@ -7893,8 +8157,25 @@ void Render_DeferredFastFog() {
 			gFrPrevA[1] = gFrPrevW[1]*dx + gFrPrevW[4]*dy + gFrPrevW[7]*dz;
 			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
 		}
+		gFrHasShadowedLight = false;
+		if (P.lights)
+			for (int li = 0; li < P.numLights; ++li)
+				if (P.lights->shadowMapIdx[li] >= 0 && P.lights->mirrorId[li] == 0) {
+					gFrHasShadowedLight = true; break;
+				}
+		if (P.glowGridDiv > 1 && P.inscatter > 0.0f && P.numLights > 0) {
+			const int gx = (nx + P.glowGridDiv - 1) / P.glowGridDiv;
+			const int gy = (ny + P.glowGridDiv - 1) / P.glowGridDiv;
+			if (gx != gGlX || gy != gGlY ||
+			    gGlow.size() != size_t(gx)*size_t(gy)*size_t(nz)*3) {
+				gGlX = gx; gGlY = gy;
+				gGlow.assign(size_t(gx)*size_t(gy)*size_t(nz)*3, 0.0f);
+			}
+			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); });
+		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		gFrReflZ = nullptr;            // consume-once (see FastFog_SetReflectionZ)
 		gFrFrameActive = fds::FeatureFlags::fast_fog_xpar();   // peel fogs from this grid
 		// This frame becomes next frame's history.
 		gFrPrevCamX = P.camX; gFrPrevCamY = P.camY; gFrPrevCamZ = P.camZ;
@@ -8033,6 +8314,319 @@ void Render_DeferredFastFogSkyPaint() {
 		}
 	}
 	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+}
+
+// ─── Screen-space rain ────────────────────────────────────────────────────
+// Procedural streaks as a tile-parallel post pass — no particles, no face
+// list. Three layers at fixed view depths give parallax: each layer is a
+// sheared screen-space grid of columns; a column hash decides which cells
+// carry a streak this cycle, the in-cell fraction gives the streak's
+// vertical alpha ramp (faint head → bright tail, like the 1998 rainmapper).
+// Per pixel per layer it's ~a dozen ALU + 2 hashes; streak-covered pixels
+// (the rare case) additionally z-test against the surface depth and fetch
+// fog transmittance at the LAYER's depth, so distant rain dims into the
+// soup instead of punching through it. Scene time (g_FrameTime) drives the
+// fall — pause freezes rain mid-air like everything else.
+void Render_ScreenSpaceRain() {
+	if (!fds::FeatureFlags::rain()) return;
+	const float intensity = fds::FeatureFlags::rain_intensity();
+	if (intensity <= 0.0f || !ZPage16 || !VPage) return;
+
+	// Timer ticks at 100 Hz (TimerInit(100) in REV.CPP) — centiseconds.
+	const float t = float(g_FrameTime) * 0.01f * fds::FeatureFlags::rain_speed();
+	// Wind: shared slant (px of x drift per px of y), slow compound gusts.
+	const float slant = 0.14f + 0.09f*std::sin(t*0.37f) + 0.05f*std::sin(t*0.83f);
+	const float density = intensity > 1.0f ? 1.0f : intensity;  // streak probability
+	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.8f; // >1 = heavier look
+	const float invZScale = 1.0f / float(g_zscale);
+	const float fogFar = CurScene ? CurScene->FZP : 0.0f;
+	const bool froxelFog = FastFog_XparActive();
+	const bool ssFog     = !froxelFog && FastFog_SSActive();
+	const bool legacyFog = !froxelFog && !ssFog && CurScene
+	                       && (CurScene->Flags & Scn_Fogged) && fogFar > 0.0f;
+
+	struct Layer {
+		float depth;     // assumed view depth (world units) — z-test + fog
+		float cellW;     // column pitch, px
+		float cellH;     // vertical streak pitch, px
+		float lenFrac;   // streak length as fraction of cellH
+		float speed;     // cells per second
+		float alpha;     // peak opacity
+	};
+	// Near layer: long sparse bright streaks. Far: short dense faint ones.
+	static const Layer L[3] = {
+		{  500.0f, 36.0f, 96.0f, 0.55f, 22.0f, 0.55f },
+		{ 1400.0f, 22.0f, 64.0f, 0.45f, 16.0f, 0.40f },
+		{ 3200.0f, 13.0f, 42.0f, 0.38f, 11.0f, 0.28f },
+	};
+	// Rain color: cool pale blue, alpha-blended (reads on bright AND dark).
+	const float rainR = 165.0f, rainG = 185.0f, rainB = 225.0f;
+
+	const uint16_t* zEnc = ZPage16;
+	dword* out = reinterpret_cast<dword*>(VPage);
+
+	constexpr int numTilesX = 6, numTilesY = 4;
+	const int tsx = (XRes + numTilesX - 1) / numTilesX;
+	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	for (int tj = 0; tj < numTilesY; ++tj) {
+		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
+		for (int ti = 0; ti < numTilesX; ++ti) {
+			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+			ThreadPool::instance().enqueue([=]() {
+				// COLUMN-major: streaks are sparse (one core ≤3 px wide per
+				// cellW-px column), so iterate the ~tileW/cellW columns per
+				// row and touch only each streak's own pixels. ~12× less
+				// work than testing every pixel of the tile.
+				for (int li = 0; li < 3; ++li) {
+					const Layer& l = L[li];
+					const float invCellW = 1.0f / l.cellW;
+					const float invCellH = 1.0f / l.cellH;
+					const float scroll   = t * l.speed;
+					const int   salt     = 0x9A1B + li*0x611;
+					for (int py = y1; py < y2; ++py) {
+						const size_t row = size_t(py) * size_t(XRes);
+						const float shear = float(py) * slant;     // px of x at this row
+						// Columns whose cores can land in [x1, x2):
+						// px = (col + xj)·cellW + shear, xj ∈ [0.15, 0.85].
+						const int c0 = int(std::floor((float(x1) - shear) * invCellW)) - 1;
+						const int c1 = int(std::floor((float(x2) - shear) * invCellW)) + 1;
+						const float vRow = float(py)*invCellH;
+						for (int col = c0; col <= c1; ++col) {
+							const uint32_t ch = cellHash(col, salt, 0);
+							// Column personality: streak x within the column,
+							// fall phase, speed wobble.
+							const float xj  = 0.15f + float(ch & 0xFFu)*(0.7f/255.0f);
+							const float ph  = float((ch >> 8) & 0xFFFu)*(1.0f/4096.0f);
+							const float spd = 0.85f + float((ch >> 20) & 0xFFu)*(0.3f/255.0f);
+							// MINUS scroll: v grows with py (down-screen), so
+							// the streak window must move to LARGER py over
+							// time — py = (v0 − vScroll)·cellH would climb;
+							// subtracting makes the pattern fall.
+							const float v   = vRow - scroll*spd + ph;
+							const int   vc  = int(std::floor(v));
+							const float fv  = v - float(vc);
+							if (fv > l.lenFrac) continue;
+							// Cell occupancy: density of streaks this cycle.
+							if (float(cellHash(col, vc, salt) & 0xFFFFu)*(1.0f/65536.0f)
+							    >= density) continue;
+							// Vertical ramp (head faint → tail bright) ×
+							// layer/intensity; fog joins at the first pixel.
+							float aBase = fv * (1.0f/l.lenFrac) * l.alpha * opacity;
+							const float xCore = (float(col) + xj) * l.cellW + shear;
+							int pxa = int(xCore - 1.0f); if (pxa < x1) pxa = x1;
+							int pxb = int(xCore + 2.0f); if (pxb > x2) pxb = x2;
+							bool fogged = false;
+							for (int px = pxa; px < pxb; ++px) {
+								const float dxp = float(px) - xCore;
+								const float lat = 1.5f - (dxp > 0.0f ? dxp : -dxp);
+								if (lat <= 0.0f) continue;
+								const size_t i = row + size_t(px);
+								const uint16_t ze = zEnc[i];
+								if (ze != 0) {
+									const float zSurf = float(0xFF80 - int(ze)) * invZScale;
+									if (zSurf < l.depth) continue;  // behind geometry
+								}
+								if (!fogged) {
+									// Fog T at the LAYER depth — once per
+									// streak-row, it can't change across 3 px.
+									fogged = true;
+									if (froxelFog || ssFog) {
+										float aR_, aG_, aB_, T_;
+										if (froxelFog) FastFog_SampleGrid(px, py, l.depth, aR_, aG_, aB_, T_);
+										else           FastFog_SSSample(px, py, l.depth, aR_, aG_, aB_, T_);
+										aBase *= T_;
+									} else if (legacyFog) {
+										const float k = 1.0f - l.depth / fogFar;
+										aBase *= k > 0.0f ? k : 0.0f;
+									}
+									if (aBase <= 0.003f) break;
+								}
+								const float a = aBase * lat * (1.0f/1.5f);
+								const dword pix = out[i];
+								const float keep = 1.0f - a;
+								int nR = int(float((pix>>16)&0xFFu)*keep + rainR*a);
+								int nG = int(float((pix>> 8)&0xFFu)*keep + rainG*a);
+								int nB = int(float( pix     &0xFFu)*keep + rainB*a);
+								out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+							}
+						}
+					}
+				}
+				renderns::tileDone.release();
+			});
+		}
+	}
+	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+}
+
+// ─── On-camera lens droplets ──────────────────────────────────────────────
+// Persistent water drops on the "lens" while it rains: each is a small disc
+// that REFRACTS — shows a minified, inverted copy of the scene behind it
+// (sampled from a snapshot of its own rect, so reads don't see writes) with
+// a darkened rim and a specular glint. Drops spawn at a rate tied to
+// rain_intensity, dwell stuck for a while, then trickle downward with a
+// wobble, shrinking as they shed mass. All randomness is hash-seeded off a
+// spawn counter (deterministic — paused captures stay byte-stable) and all
+// motion integrates scene time, so pause freezes the trickle mid-slide.
+// Single-threaded: a realistic pool is ~25 drops × ~1.5k px each.
+namespace {
+struct LensDrop {
+	float x, y, r;
+	float age, dwell, life;
+	float vy, wobPh;
+	uint32_t seed;
+};
+std::vector<LensDrop> gLensDrops;
+float    gLensSpawnAcc  = 0.0f;
+uint32_t gLensSpawnSeq  = 0x5EED;
+int32_t  gLensPrevFT    = -1;
+}
+
+void Render_LensDrops() {
+	if (!fds::FeatureFlags::rain() || !fds::FeatureFlags::rain_lens()) {
+		gLensDrops.clear(); gLensPrevFT = -1;
+		return;
+	}
+	const float intensity = fds::FeatureFlags::rain_intensity();
+	if (!VPage) return;
+
+	// Scene-time delta (Timer = centiseconds). Clamped: pause/scrub
+	// rollback gives 0 (drops freeze), big forward scrubs cap at 100ms.
+	float dt = 0.0f;
+	if (gLensPrevFT >= 0) {
+		const float d = float(g_FrameTime - gLensPrevFT) * 0.01f;
+		dt = d < 0.0f ? 0.0f : (d > 0.1f ? 0.1f : d);
+	}
+	gLensPrevFT = g_FrameTime;
+
+	auto h01 = [](uint32_t s, int k) {
+		return float(cellHash(int(s), k, 0x10F5) & 0xFFFFu) * (1.0f/65536.0f);
+	};
+
+	// Spawn: ~5/s at intensity 1, pool-capped.
+	gLensSpawnAcc += dt * 11.0f * (intensity < 2.0f ? intensity : 2.0f);
+	while (gLensSpawnAcc >= 1.0f && gLensDrops.size() < 80) {
+		gLensSpawnAcc -= 1.0f;
+		const uint32_t s = gLensSpawnSeq++;
+		LensDrop d;
+		d.seed  = s;
+		d.x     = h01(s, 1) * float(XRes);
+		d.y     = h01(s, 2) * float(YRes) * 0.85f;
+		d.r     = 4.0f + h01(s, 3) * 9.0f;
+		d.age   = 0.0f;
+		d.dwell = 0.25f + h01(s, 4) * 1.2f;
+		d.life  = d.dwell + 2.0f + h01(s, 5) * 4.0f;
+		d.vy    = 0.0f;
+		d.wobPh = h01(s, 6) * 6.2832f;
+		gLensDrops.push_back(d);
+	}
+
+	dword* out = reinterpret_cast<dword*>(VPage);
+	static std::vector<dword> rect;       // per-drop source snapshot
+	for (size_t di = 0; di < gLensDrops.size(); ) {
+		LensDrop& d = gLensDrops[di];
+		d.age += dt;
+		if (d.age > d.dwell) {
+			// Trickle: gravity-ish, wobble, shed mass.
+			d.vy += 340.0f * dt;
+			if (d.vy > 400.0f) d.vy = 400.0f;
+			d.y  += d.vy * dt;
+			d.x  += std::sin(d.age * 9.0f + d.wobPh) * d.r * 0.6f * dt;
+			d.r  -= d.r * 0.16f * dt;
+		}
+		if (d.age > d.life || d.r < 2.0f || d.y - d.r > float(YRes)) {
+			gLensDrops[di] = gLensDrops.back();
+			gLensDrops.pop_back();
+			continue;
+		}
+		// Fade in over the first 150 ms (condensation forming).
+		const float fade = d.age < 0.15f ? d.age * (1.0f/0.15f) : 1.0f;
+		// Shape: near-circular at rest (real condensation drops are NOT
+		// the cartoon teardrop — just a hint of gravity sag), and when
+		// sliding the TAIL trails ABOVE the drop (where it came from),
+		// narrowing with height, while the leading bottom edge stays round.
+		const float stretch = (d.vy * (1.0f/400.0f)) * 0.9f;   // 0..0.9
+		const float kTop = 1.05f + stretch;                    // tail above
+		const float kBot = 1.08f;                              // gentle sag
+		// Refraction FOV: a drop compresses a WIDE view — sample 1.6× the
+		// in-drop offset (inverted), so the snapshot rect must extend past
+		// the drop by that reach.
+		const float sK   = 1.6f;
+		const float padX = d.r * (1.0f + sK) + 2.0f;
+		const float padT = d.r * kTop * (1.0f + sK) + 2.0f;
+		const float padB = d.r * kBot * (1.0f + sK) + 2.0f;
+		const int cx  = int(d.x), cy = int(d.y);
+		int xa = cx - int(padX), xb = cx + int(padX) + 1;
+		int ya = cy - int(padT), yb = cy + int(padB) + 1;
+		if (xa < 0) xa = 0; if (ya < 0) ya = 0;
+		if (xb > (int)XRes) xb = (int)XRes; if (yb > (int)YRes) yb = (int)YRes;
+		if (xa >= xb || ya >= yb) { ++di; continue; }
+		const int rw = xb - xa, rh = yb - ya;
+		rect.resize(size_t(rw) * size_t(rh));
+		for (int y = 0; y < rh; ++y)
+			std::memcpy(rect.data() + size_t(y)*rw,
+			            out + size_t(ya+y)*XRes + xa,
+			            size_t(rw) * sizeof(dword));
+		const float invR  = 1.0f / d.r;
+		const float invKB = 1.0f / kBot, invKT = 1.0f / kTop;
+		// Specular glint sits up-left of center; small and soft.
+		const float gx = d.x - d.r*0.30f, gy = d.y - d.r*0.30f;
+		const float gr2 = d.r*d.r*0.025f;
+		const int pya = cy - int(d.r*kTop) - 1 < ya ? ya : cy - int(d.r*kTop) - 1;
+		const int pyb = cy + int(d.r*kBot) + 2 > yb ? yb : cy + int(d.r*kBot) + 2;
+		const int pxa = cx - int(d.r) - 1 < xa ? xa : cx - int(d.r) - 1;
+		const int pxb = cx + int(d.r) + 2 > xb ? xb : cx + int(d.r) + 2;
+		for (int py = pya; py < pyb; ++py) {
+			const float dyr = (float(py) - d.y) * invR;          // y in radii
+			const float ny  = dyr * (dyr > 0.0f ? invKB : invKT);
+			// Sliding tail narrows toward its tip (above); round at rest.
+			const float taper = (dyr < 0.0f && stretch > 0.0f)
+			    ? 1.0f + 1.2f*stretch*(-dyr*invKT) : 1.0f;
+			for (int px = pxa; px < pxb; ++px) {
+				const float dx_ = float(px) - d.x;
+				const float nx  = dx_ * invR * taper;
+				const float t2  = nx*nx + ny*ny;
+				if (t2 > 1.0f) continue;
+				const float dy_ = float(py) - d.y;
+				// Refraction: minified INVERTED wide-angle background —
+				// sample the padded snapshot at center − sK·offset.
+				int sx = int(d.x - dx_*sK) - xa;
+				int sy = int(d.y - dy_*sK) - ya;
+				if (sx < 0) sx = 0; if (sx >= rw) sx = rw-1;
+				if (sy < 0) sy = 0; if (sy >= rh) sy = rh-1;
+				const dword s = rect[size_t(sy)*rw + sx];
+				float sR = float((s>>16)&0xFFu);
+				float sG = float((s>> 8)&0xFFu);
+				float sB = float( s     &0xFFu);
+				// Rim darkening (refraction steepens at the edge) + a
+				// touch of cool tint so drops read on flat areas.
+				if (t2 > 0.70f) {
+					const float k = 1.0f - (t2 - 0.70f) * (1.0f/0.30f) * 0.30f;
+					sR *= k; sG *= k; sB *= k;
+				}
+				sB = sB + 14.0f > 255.0f ? 255.0f : sB + 14.0f;
+				// Glint.
+				const float gdx = float(px)-gx, gdy = float(py)-gy;
+				if (gdx*gdx + gdy*gdy < gr2) {
+					sR += 55.0f; sG += 55.0f; sB += 55.0f;
+					if (sR > 255.0f) sR = 255.0f;
+					if (sG > 255.0f) sG = 255.0f;
+					if (sB > 255.0f) sB = 255.0f;
+				}
+				// Edge AA + spawn fade.
+				float a = fade;
+				if (t2 > 0.82f) a *= (1.0f - t2) * (1.0f/0.18f);
+				const size_t i = size_t(py)*XRes + size_t(px);
+				const dword pix = out[i];
+				const float keep = 1.0f - a;
+				const int nR = int(float((pix>>16)&0xFFu)*keep + sR*a);
+				const int nG = int(float((pix>> 8)&0xFFu)*keep + sG*a);
+				const int nB = int(float( pix     &0xFFu)*keep + sB*a);
+				out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+			}
+		}
+		++di;
+	}
 }
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────

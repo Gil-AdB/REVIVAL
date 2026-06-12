@@ -39,13 +39,19 @@ public:
     void beginFrame();
     void endFrame();
 
+    // Feed the SCENE-CUMULATIVE render counters once per frame (right
+    // before drawOverlay). The profiler differentiates against the
+    // previous frame's values and smooths with the same EMA as the
+    // timing rows — so polys/frame and Mpx/frame track the CURRENT view
+    // instead of a whole-scene mean that dilutes any change across
+    // thousands of historical frames. First call (or after a counter
+    // reset) seeds the EMA instead of producing a bogus delta.
+    void noteCounters(double renderedPolys, double fillerPixels);
+
     // Draws the cached aggregates onto VPage starting at (0, scrollY). Returns
     // the new scrollY after the block. Caller is responsible for gating on
     // g_profilerActive.
-    int drawOverlay(int scrollY,
-                    double polysPerFrame,
-                    double mPxPerFrame,
-                    double mPxPerSec) const;
+    int drawOverlay(int scrollY) const;
 
     // Prints scene-end stats to stdout. Cheap; safe to call once in cleanup().
     void dump() const;
@@ -88,6 +94,14 @@ private:
     float overlayMeanMs_[PROF_NUM] = {};
     float overlayPercent_[PROF_NUM] = {};
     float overlayTotalMs_ = 0.0f;
+
+    // noteCounters() state: previous cumulative values + EMA'd per-frame
+    // rates for the overlay.
+    double prevPolys_ = -1.0;   // -1 = unseeded
+    double prevPixels_ = 0.0;
+    float  emaPolysPerFrame_ = 0.0f;
+    float  emaMPxPerFrame_   = 0.0f;
+    float  emaMPxPerSec_     = 0.0f;
 
     static constexpr const char* kNames[PROF_NUM] = {
         "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"

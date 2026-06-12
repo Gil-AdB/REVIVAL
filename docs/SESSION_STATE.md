@@ -4,7 +4,18 @@
 the refactor/frame-state-shadow checkpoint — is finished work; see git
 history of this file if ever needed.)
 
-Branch `feature/fog`, all work committed and pushed through `1a6ff1f`.
+Branch `feature/fog`, all work committed and pushed through `8f17799`
+(froxel is now the DEFAULT fog renderer — plain --fast_fog takes the froxel
+path; --no-fast_fog_froxel = legacy screen-space for A/B. User report
+"SS way over saturated no matter the knobs" was NOT a regression — SS is
+bit-identical to pre-refactor; half the knobs are froxel-only and the SS
+glow issues are structural).
+
+GIT SETUP CHANGED: the MAIN checkout (/Users/gil-ad/work/revival) now has
+feature/fog checked out — the user tests there. This fog WORKTREE is
+therefore DETACHED (a branch can only be checked out once); commit here
+detached and `git push origin HEAD:feature/fog`. The user updates their
+main checkout themselves.
 Working tree clean except untracked Runtime/*.ppm debris (never
 `git add -A`). Build: `cmake --build build` (POST_BUILD copies to
 Runtime/DEMO — never tell the user to "pull"). ASan tree at `build-asan/`,

@@ -421,6 +421,42 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createCityScene();
     driver->init();
 
+    // CITYSNAP_VIEW="px,py,pz,fx,fy,fz[,ifov]" — pin the WHOLE tick to a
+    // free-cam pose (paste the [CAM] line the I key prints). Unlike the
+    // CITYSNAP_POS probe below (which re-renders geometry only), this
+    // points View at FC before any frame, so every pass — reflections,
+    // dispMap, fog, flares — renders from the user's failing view. The
+    // per-frame Transform refreshes FOVX/FOVY from View->Persp*, and
+    // Dynamic_Camera leaves FC still at dTime=0, so the pose holds.
+    if (const char* s = std::getenv("CITYSNAP_VIEW")) {
+        float px, py, pz, fx = 0, fy = 0, fz = 1, fov = 0;
+        const int n = std::sscanf(s, "%f,%f,%f,%f,%f,%f,%f",
+                                  &px, &py, &pz, &fx, &fy, &fz, &fov);
+        if (n >= 6) {
+            if (fov <= 0) {
+                // The scene camera's IFOV is spline-animated — it's 0 until
+                // the first tick. Warm up one frame so the fallback is real.
+                std::srand(0);
+                Timer = timestamps.empty() ? 0
+                      : (ctPart > 0 ? std::min(timestamps[0], ctPart - 1) : timestamps[0]);
+                driver->tick();
+                fov = View->IFOV;
+                std::fprintf(stderr, "[CITYSNAP] no ifov given — using scene cam's %.1f\n", fov);
+            }
+            FC.ISource = Vector(px, py, pz);
+            Vector fwd(fx, fy, fz); Vector_Norm(&fwd);
+            buildLookAt(FC.ISource, Vector(px+fwd.x, py+fwd.y, pz+fwd.z), FC.Mat);
+            FC.IFOV = fov;
+            CalcPersp(&FC);
+            View = &FC;
+            std::fprintf(stderr,
+                "[CITYSNAP] view pinned pos=(%.0f,%.0f,%.0f) fwd=(%.3f,%.3f,%.3f) ifov=%.1f\n",
+                px, py, pz, fwd.x, fwd.y, fwd.z, FC.IFOV);
+        } else {
+            std::fprintf(stderr, "[CITYSNAP] bad CITYSNAP_VIEW '%s' (need 6-7 floats)\n", s);
+        }
+    }
+
     int produced = 0;
     for (int32_t ts : timestamps) {
         if (ctPart > 0 && ts >= ctPart) {
@@ -441,6 +477,139 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Pose anchor for CITYSNAP_VIEW hunts: where the camera is.
+        std::fprintf(stderr,
+            "[CAM] t=%d pos=(%.0f, %.0f, %.0f)  fwd=(%.3f, %.3f, %.3f)  IFOV=%.1f\n",
+            ts, View->ISource.x, View->ISource.y, View->ISource.z,
+            View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], View->IFOV);
+
+        // Bench mode (@iters=N): re-tick the SAME timestamp N times and
+        // report the mean whole-frame cost (full city frame: both passes,
+        // dispMap, fog, flares — everything tick() does). Temporal fog
+        // history converges over the warm-up + loop, so this measures the
+        // steady state. The last frame still falls through to the PPM
+        // write below, like the conetest bench.
+        if (cfg.iters > 0) {
+            using clock = std::chrono::high_resolution_clock;
+            const auto t0 = clock::now();
+            for (int i = 0; i < cfg.iters; ++i) {
+                std::srand(0);
+                Timer = ts;
+                driver->tick();
+            }
+            const auto t1 = clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::fprintf(stderr,
+                "[CITYBENCH] t=%-6d %d iters total=%.2f ms  mean=%.3f ms/iter (%.1f fps)\n",
+                ts, cfg.iters, ms, ms / cfg.iters, 1000.0 * cfg.iters / ms);
+        }
+
+        // Temporal-ripple probe (CITYSNAP_RIPPLE=N): tick N more consecutive
+        // frames at this SAME timestamp (static camera, jitter phases keep
+        // advancing) and accumulate the per-pixel mean |Δ| between
+        // consecutive frames — the converged steady-state flicker. Writes an
+        // 8×-amplified heatmap (ripple_tNNNNNN.ppm) and per-row-band stats.
+        if (const char* rs = std::getenv("CITYSNAP_RIPPLE")) {
+            const int N = std::max(2, std::atoi(rs));
+            // Live-pause emulation. A real paused frame differs from the
+            // plain probe loop in two ways: rand() advances freely (the
+            // probe reseeds srand(0) every frame), and dTime is wallclock
+            // (~33ms — Timer advances then the pause branch rolls it back;
+            // the probe's is 0). Either can drive per-frame change the
+            // plain probe freezes. CITYSNAP_NOSRAND=1 skips the reseed;
+            // CITYSNAP_PAUSEMODE=1 latches the scene's pause_mode (via
+            // Keyboard[ScP]) and advances Timer by 33 each frame so the
+            // tick computes dTime=33 and rolls back — exactly live pause.
+            const bool noSrand   = std::getenv("CITYSNAP_NOSRAND") != nullptr;
+            const bool livePause = std::getenv("CITYSNAP_PAUSEMODE") != nullptr;
+            if (livePause) Keyboard[ScP] = 1;
+            if (noSrand || livePause)
+                std::fprintf(stderr, "[RIPPLE] live-pause emulation:%s%s\n",
+                             noSrand ? " free-running rand()" : "",
+                             livePause ? " dTime=33 (paused)" : "");
+            const size_t npx = size_t(xres) * size_t(yres);
+            std::vector<float> acc(npx, 0.0f);
+            std::vector<unsigned char> prevF(npx * 3), curF(npx * 3);
+            auto grab = [&](std::vector<unsigned char>& dst) {
+                for (int y = 0; y < yres; ++y) {
+                    const dword* src = reinterpret_cast<const dword*>(
+                        MainSurf->Data + size_t(y) * MainSurf->BPSL);
+                    unsigned char* d = dst.data() + size_t(y) * xres * 3;
+                    for (int x = 0; x < xres; ++x) {
+                        const dword px = src[x];
+                        d[x*3+0] = (px >> 16) & 0xFF;
+                        d[x*3+1] = (px >>  8) & 0xFF;
+                        d[x*3+2] =  px        & 0xFF;
+                    }
+                }
+            };
+            auto dumpRGB = [&](const char* tag, const std::vector<unsigned char>& f) {
+                char p[1024];
+                std::snprintf(p, sizeof(p), "%s/ripple_t%06d_%s.ppm",
+                              cfg.outDir.c_str(), ts, tag);
+                std::FILE* ff = std::fopen(p, "wb");
+                if (!ff) return;
+                std::fprintf(ff, "P6\n%d %d\n255\n", xres, yres);
+                std::fwrite(f.data(), 1, f.size(), ff);
+                std::fclose(ff);
+                std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", p);
+            };
+            grab(prevF);
+            dumpRGB("f0", prevF);   // consecutive raw pair — diff f0 vs f1
+            for (int i = 0; i < N; ++i) {
+                if (!noSrand) std::srand(0);
+                Timer = livePause ? ts + 33 : ts;   // pause rolls it back
+                driver->tick();
+                grab(curF);
+                if (i == 0) dumpRGB("f1", curF);
+                for (size_t p = 0; p < npx; ++p) {
+                    const int dr = int(curF[p*3+0]) - int(prevF[p*3+0]);
+                    const int dg = int(curF[p*3+1]) - int(prevF[p*3+1]);
+                    const int db = int(curF[p*3+2]) - int(prevF[p*3+2]);
+                    acc[p] += float(std::abs(dr) + std::abs(dg) + std::abs(db)) * (1.0f/3.0f);
+                }
+                prevF.swap(curF);
+            }
+            const float invN = 1.0f / float(N);
+            // Per-row-band stats (8 horizontal bands) + global mean/max.
+            double gmean = 0.0; float gmax = 0.0f; int gmaxX = 0, gmaxY = 0;
+            for (int band = 0; band < 8; ++band) {
+                const int y0 = yres * band / 8, y1 = yres * (band+1) / 8;
+                double m = 0.0;
+                for (int y = y0; y < y1; ++y)
+                    for (int x = 0; x < xres; ++x) {
+                        const float v = acc[size_t(y)*xres + x] * invN;
+                        m += v;
+                        if (v > gmax) { gmax = v; gmaxX = x; gmaxY = y; }
+                    }
+                m /= double(y1 - y0) * xres;
+                gmean += m / 8.0;
+                std::fprintf(stderr, "[RIPPLE] rows %4d-%-4d mean|Δ|=%.4f\n", y0, y1-1, m);
+            }
+            std::fprintf(stderr,
+                "[RIPPLE] t=%d N=%d global mean|Δ|=%.4f  max=%.2f at (%d,%d)\n",
+                ts, N, gmean, gmax, gmaxX, gmaxY);
+            char rPath[1024];
+            std::snprintf(rPath, sizeof(rPath), "%s/ripple_t%06d.ppm",
+                          cfg.outDir.c_str(), ts);
+            std::FILE* rf = std::fopen(rPath, "wb");
+            if (rf) {
+                std::fprintf(rf, "P6\n%d %d\n255\n", xres, yres);
+                std::vector<unsigned char> row(xres * 3);
+                for (int y = 0; y < yres; ++y) {
+                    for (int x = 0; x < xres; ++x) {
+                        float v = acc[size_t(y)*xres + x] * invN * 8.0f;
+                        const unsigned char c =
+                            (unsigned char)(v > 255.f ? 255.f : v);
+                        row[x*3+0] = row[x*3+1] = row[x*3+2] = c;
+                    }
+                    std::fwrite(row.data(), 1, row.size(), rf);
+                }
+                std::fclose(rf);
+                std::fprintf(stderr, "[SNAPSHOT] wrote %s\n", rPath);
+            }
+        }
 
         // Optional level-camera override (CITYSNAP_POS / CITYSNAP_FWD) to
         // probe the near-plane/rasterizer degeneracy seen in conetest at

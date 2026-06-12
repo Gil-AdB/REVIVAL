@@ -1255,6 +1255,7 @@ XMMVector evalRainVel(float curFrame) {
 
 static void initRain(Scene *Sc)
 {
+	fprintf(stderr, "[CITY] rain: %d particles\n", NUM_RAIN_PCLS);
 	rainVel = evalRainVel(0);
 	Sc->NumOfParticles = NUM_RAIN_PCLS;
 	Sc->Pcl = new Particle[Sc->NumOfParticles];
@@ -1308,7 +1309,12 @@ static void initRain(Scene *Sc)
 		p.F.Filler = drawRainDrop;
 		p.F.Txtr = M;
 
-		p.InitTrail(M, TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, 50.0f, 5.0f);
+		// Trail quads write TPos_AOS directly with no frame/A_idx wiring —
+		// the SoA rasterizer path reads frame->TPos_x[A_idx] and culls
+		// them, so on the city's non-TBR path they render to nothing.
+		// Single-pixel drops (drawRainDrop, used when TrailLength==0)
+		// bypass the mesh path entirely and still work.
+		// p.InitTrail(M, TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>, 50.0f, 5.0f);
 
 		// NOTE: consider adding some randomization (per particle and over time)
 		p.Vel.x = rainVel.x;
@@ -1317,13 +1323,10 @@ static void initRain(Scene *Sc)
 	}
 }
 
-static void riskOfRain(Scene *Sc)
+static void riskOfRain(Scene *Sc, float dt)
 {
 	// set rainvel based on some noise function of current frame
 	rainVel = evalRainVel(CurFrame);
-
-	// Animate Particles
-	float dt = 0.01*dTime;
 	Particle *P, *PE;
 	Vector u, v;
 	mword i;
@@ -1698,6 +1701,115 @@ static void bakeBuildingPanorama(Object* Obj,
 #endif
 }
 
+// ── Vehicle headlights ("for the lulz") ──────────────────────────────
+// Every vehicle-sized mover gets one warm spotlight welded to its nose,
+// re-aimed along its motion every frame. "Vehicle" = TriMesh with an
+// animated Pos spline (>1 key) and a vehicle-scale bounding sphere —
+// the city traffic system: taxis, buses, trams, police, cars, bike,
+// ambulance, plus the two AlignToPath ships. The size gate excludes the
+// movers that are NOT vehicles (water.lwo r=1061, the b1.lwo building
+// r=709, the r=0 camera target). Cones read as volumetric beams under
+// --draw_cones and glow in the froxel fog; surface lighting paints
+// whatever they sweep. No shadows (~30 moving shadow maps would eat
+// the frame budget). The police car strobes red/blue, obviously.
+namespace {
+struct VehicleHeadlight {
+	TriMesh* T;
+	Omni*    spot;
+	Vector   lastDir;
+	Vector   prevPos;
+	bool     hasPrev;   // delta heading needs one animated frame first
+	bool     police;
+};
+std::vector<VehicleHeadlight> g_headlights;
+}
+
+static void Setup_Vehicle_Headlights()
+{
+	g_headlights.clear();
+	if (!fds::FeatureFlags::city_headlights()) return;
+	int omnis = 0;
+	for (Omni *o = CitySc->OmniHead; o; o = o->Next) ++omnis;
+	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
+		if (O->Type != Obj_TriMesh) continue;
+		TriMesh *T = (TriMesh *)O->Data;
+		if (T->Pos.NumKeys <= 1) continue;                     // parked scenery
+		if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
+			continue;                                          // water / moving building / camera target
+		const char *name = O->Name ? O->Name : "?";
+		const bool police = std::strstr(name, "poliece") != nullptr;
+		Omni *spot = fds::MakeSpotLight(
+			CitySc,
+			/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
+			fds::FeatureFlags::city_headlight_intensity(),
+			/*range*/ 1600.0f,                               // ~16m at 1cm/unit
+			T->IPos, Vector(0.0f, 0.0f, 1.0f),
+			/*hot=*/6.0f, /*outer=*/16.0f,
+			/*shadowMapRes=*/0, /*castsShadow=*/false);
+		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
+		                        Vector(0.0f, 0.0f, 0.0f), false, police});
+		fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
+		        police ? " (strobe)" : "");
+	}
+	fprintf(stderr, "[CITY] %zu vehicle headlights (%d scene omnis before; deferred cap %d)\n",
+	        g_headlights.size(), omnis, 128);
+}
+
+// Re-aim after Animate_Objects (which re-evaluates each spot's single-key
+// Pos spline back to its creation pos — overwrite wins, same pattern as
+// the greets robot spots).
+static void Update_Vehicle_Headlights()
+{
+	const float intensity = fds::FeatureFlags::city_headlights()
+	    ? fds::FeatureFlags::city_headlight_intensity() : 0.0f;
+	for (VehicleHeadlight &h : g_headlights) {
+		TriMesh *T = h.T;
+		// Heading: AlignToPath meshes (the ships) maintain T->Heading with
+		// spline lookahead; everything else moves by rotation-keyed splines,
+		// so derive it from the frame-to-frame position delta. Paused /
+		// parked frames (zero delta) hold the last good aim; the light
+		// stays doused until the first real delta so frame one doesn't
+		// flash a default-aimed beam.
+		Vector dir = (T->Flags & Tri_AlignToPath) ? T->Heading
+		           : Vector(T->IPos.x - h.prevPos.x,
+		                    T->IPos.y - h.prevPos.y,
+		                    T->IPos.z - h.prevPos.z);
+		const bool deltaValid = (T->Flags & Tri_AlignToPath) || h.hasPrev;
+		h.prevPos = T->IPos;
+		h.hasPrev = true;
+		const float l2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+		bool aimed = true;
+		if (deltaValid && l2 > 1e-6f) {
+			const float il = 1.0f / std::sqrt(l2);
+			dir.x *= il; dir.y *= il; dir.z *= il;
+			h.lastDir = dir;
+		} else if (h.lastDir.x*h.lastDir.x + h.lastDir.y*h.lastDir.y
+		           + h.lastDir.z*h.lastDir.z > 0.5f && h.hasPrev) {
+			dir = h.lastDir;       // parked/slow: keep the last good aim
+		} else {
+			aimed = false;         // no heading yet — keep it dark
+		}
+		// Nose mount: pivot pushed just outside the bounding sphere
+		// (scaled — RotMat rows carry IScale, BSphereRadius doesn't) so
+		// the beam doesn't start inside the mesh (the cone march would
+		// light its own cabin).
+		const float scale = T->IScale.x > 0.0f ? T->IScale.x : 1.0f;
+		const float nose = T->BSphereRadius * scale;
+		h.spot->IPos.x = T->IPos.x + dir.x * nose;
+		h.spot->IPos.y = T->IPos.y + dir.y * nose;
+		h.spot->IPos.z = T->IPos.z + dir.z * nose;
+		h.spot->IDir  = dir;
+		h.spot->ISize = aimed && (T->Flags & HTrack_Visible) ? intensity : 0.0f;
+		if (h.police) {
+			// 2 Hz red/blue strobe (Timer is ~ms). Lulz mandate.
+			const bool red = ((int32_t)Timer / 250) & 1;
+			h.spot->L.R = red ? 255.0f : 40.0f;
+			h.spot->L.G = 40.0f;
+			h.spot->L.B = red ? 40.0f : 255.0f;
+		}
+	}
+}
+
 void Initialize_City()
 {
 	CitySc = loadSceneAligned("SCENES/CITY.FLD");
@@ -2019,10 +2131,10 @@ void Initialize_City()
 	if (TmpSurf.Data) { free(TmpSurf.Data); TmpSurf.Data = nullptr; }
 	if (TmpSurf.Z16) { free(TmpSurf.Z16); TmpSurf.Z16 = nullptr; }
 
-	// initialize rain FX
-#ifdef CITY_RAIN
-	initRain(CitySc);
-#endif
+	// initialize rain FX (allocates the particle pool — runs before the
+	// driver's setupFaceLists, which sizes the FList for the trails)
+	if (fds::FeatureFlags::city_rain())
+		initRain(CitySc);
 
 	// Test spotlights for volumetric-cone overlay experimentation.
 	// City coordinate scale is roughly 1-unit-per-cm (existing FLD omnis
@@ -2138,6 +2250,8 @@ void Initialize_City()
 			ShadowMaps_BakeStatic(CitySc);
 		}
 	}
+
+	Setup_Vehicle_Headlights();
 }
 
 #ifdef TRACE_OBJECTS
@@ -2162,6 +2276,7 @@ struct CityScene : SceneDriver {
 
 	std::vector<int> dispMap;
 	std::vector<dword> backBuffer;
+	std::vector<uint16_t> zRefl;   // displaced pass-1 Z for reflection fog
 
 	~CityScene() override { Destroy_Scene(CitySc); }
 
@@ -2184,6 +2299,7 @@ struct CityScene : SceneDriver {
 			}
 		}
 		backBuffer.assign(XRes * YRes, 0);
+		zRefl.assign(XRes * YRes, 0);
 	}
 
 	void on_resize(int /*newX*/, int /*newY*/) override {
@@ -2276,7 +2392,13 @@ struct CityScene : SceneDriver {
 		RenderSkyCube(SkySc, View, false);
 		prof.switchTo(PROF_ANIM);
 
-		Reflective_AnimateTexture();
+		// Water UV scroll advances by dTime, which stays NONZERO during
+		// pause (dTime is wallclock elapsed, computed before the pause
+		// branch pins Timer — the free camera needs it to keep flying).
+		// Gate the scroll itself so a paused frame is a fixed state and
+		// consecutive captures isolate temporal effects (fog jitter).
+		if (!pause_mode)
+			Reflective_AnimateTexture();
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
@@ -2296,7 +2418,9 @@ struct CityScene : SceneDriver {
 			prevI = curI;
 		}
 
+
 		Animate_Objects(CitySc, View);
+		Update_Vehicle_Headlights();
 
 		((TriMesh*)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
@@ -2304,10 +2428,13 @@ struct CityScene : SceneDriver {
 
 		Lighting(CitySc);
 
-		// NOTE: Profiler ignores rain f/x
-#ifdef CITY_RAIN
-		riskOfRain(CitySc);
-#endif
+		if (fds::FeatureFlags::city_rain()) {
+			// Bill rain to ANIM (it's particle animation, and ANIM is
+			// otherwise ~0 in city). dt=0 while paused: drops freeze
+			// mid-air like everything else (water-scroll precedent).
+			prof.switchTo(PROF_ANIM);
+			riskOfRain(CitySc, pause_mode ? 0.0f : 0.01f * dTime);
+		}
 		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
@@ -2341,12 +2468,23 @@ struct CityScene : SceneDriver {
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;
 				uint16_t* zbuffer_ptr = ZPage16;
+				// Capture the pass-1 Z through the SAME displacement the
+				// color takes: the froxel composite fogs the water's
+				// reflection underlay at this mirrored path length, giving
+				// the mirror the same fog gradient as the world above
+				// (|mirrorCam→building| = camera→water→building).
+				uint16_t* zr = zRefl.data();
+				size_t idx = 0;
 				for (auto displacement : dispMap) {
 					if (*zbuffer_ptr++ != 0) {
 						*ptr = backBuffer[displacement];
+						zr[idx] = ZPage16[displacement];
+					} else {
+						zr[idx] = 0;
 					}
-					ptr++;
+					ptr++; ++idx;
 				}
+				FastFog_SetReflectionZ(zr, -RflSurfOfs);   // plane: N=(0,1,0), y = -ofs
 			}
 
 			// Deferred path needs Z cleared between passes so the pass-2
@@ -2408,11 +2546,8 @@ struct CityScene : SceneDriver {
 			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
 
 			fds::RenderStats_Flush();
-			double rndrMs = prof.cumulativeMs(PROF_RNDR);
-			double mPxPerFrame = FillerPixelcount / (1e6 * numFrames);
-			double mPxPerSec = rndrMs > 0 ? FillerPixelcount / 1e3 / rndrMs : 0.0;
-			double polysPerFrame = (double)g_renderedPolys / numFrames;
-			scroll = prof.drawOverlay(scroll, polysPerFrame, mPxPerFrame, mPxPerSec);
+			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
+			scroll = prof.drawOverlay(scroll);
 			// Clipper bucket breakdown — what % of polys take which path.
 			// Lets us estimate the savings from skipping non-essential
 			// clipper work for triangles that don't need it.
@@ -2426,8 +2561,48 @@ struct CityScene : SceneDriver {
 					fds_stats::g_mipFastUniform,
 					fds_stats::g_mipSplit);
 				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-				fprintf(stderr, "[CITY-CLIP] %s\n", MSGStr);
 			}
+		}
+		// 'G' (grab) — same as greets/conetest: dump THIS completed frame
+		// (VPage right before Flip) to /tmp/city_dump_N.ppm and print the
+		// pose in the exact CITYSNAP_VIEW format, so a failing view feeds
+		// the offline ripple repro verbatim. Edge-triggered; press twice
+		// while paused for a consecutive-frame pair. (F9 is a macOS system
+		// key, hence 'G'.)
+		{
+			static bool sGPrev = false;
+			static int  sDumpN = 0;
+			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
+			if (gNow && !sGPrev) {
+				char path[64];
+				snprintf(path, sizeof(path), "/tmp/city_dump_%d.ppm", sDumpN++);
+				std::FILE *f = std::fopen(path, "wb");
+				if (f) {
+					const int xr = (int)XRes, yr = (int)YRes;
+					std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+					std::vector<unsigned char> row(xr * 3);
+					for (int y = 0; y < yr; ++y) {
+						const dword *src = (const dword*)((const byte*)VPage
+						                  + y * (int)VESA_BPSL);
+						for (int x = 0; x < xr; ++x) {
+							dword px = src[x];
+							row[x*3+0] = (px >> 16) & 0xFF;
+							row[x*3+1] = (px >>  8) & 0xFF;
+							row[x*3+2] = (px      ) & 0xFF;
+						}
+						std::fwrite(row.data(), 1, row.size(), f);
+					}
+					std::fclose(f);
+					fprintf(stderr, "[CITY] dumped %s (t=%d)\n", path, (int)Timer);
+				}
+				fprintf(stderr,
+					"[CITY-CAM] CITYSNAP_VIEW=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\"\n",
+					View->ISource.x, View->ISource.y, View->ISource.z,
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+					View->IFOV);
+				std::fflush(stderr);
+			}
+			sGPrev = gNow;
 		}
 		prof.enter(PROF_FLIP);
 

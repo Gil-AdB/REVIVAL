@@ -1,4 +1,5 @@
 #include "SceneTick.h"
+#include <Base/ParamScript.h>
 
 #include "Rev.h"
 
@@ -27,6 +28,11 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
             ++polys;
         }
     }
+    // Particles insert into the same FList: 1 face each, or 2 for trail
+    // quads (addParticleTrail). Scenes that allocate Sc->Pcl before
+    // driver init (city rain) need the headroom; fountain sizes its own
+    // lists and doesn't come through here.
+    polys += sc->NumOfParticles * 2;
     fds::g_mainFaces.resize(polys);
     View  = sc->CameraHead;
     C_FZP  = sc->FZP;
@@ -35,6 +41,13 @@ void SceneDriver::setupFaceLists(Scene *sc, bool includeOmnisInCount)
 
 void SceneDriver::tickTabToggle(Scene *sc, const char *sceneName)
 {
+    // Per-scene scripted parameters ride this hook: every scene already
+    // calls tickTabToggle(sc, "<name>") once per frame after its Timer
+    // update, which is exactly the (scene name, per-frame) pair the
+    // script system needs. SetScene is a no-op while the name is stable.
+    fds::ParamScript_SetScene(sceneName);
+    fds::ParamScript_Tick(float(Timer));
+
     const bool tabNow = Keyboard[ScTab] != 0;
     if (tabNow && !tabPrev_) {
         const bool switchingToFC = (View != &FC);

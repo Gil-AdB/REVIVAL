@@ -79,6 +79,14 @@ public:
     // Source the output once per session: `source <(./DEMO --print-completion)`.
     static void printCompletion(std::FILE *out, const char *shell);
 
+    // ── Param-script registry lookup (see Base/ParamScript.cpp) ────────
+    // Resolves a flag NAME (dash or underscore form) to its type + index
+    // into the g_* arrays below, so scripts can read/write any flag by
+    // name without compile-time ids. type == None when no such flag.
+    enum class ParamType : int { None = 0, Bool, Float, Int };
+    struct ParamRef { ParamType type = ParamType::None; int index = -1; };
+    static ParamRef findParam(const char *name);
+
     // Hot-path accessors: inline reads from process-lifetime globals.
     // Flag state is set at startup (env scan + parseArgs) and frozen
     // after that — no per-call function-static guard needed. See
