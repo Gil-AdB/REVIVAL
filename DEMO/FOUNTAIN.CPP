@@ -1167,6 +1167,15 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
+	// The viewport clip is float-exact but the +0.5 rounding above can
+	// push an edge-clipped endpoint to XRes/YRes — YOffs[YRes] is OOB and
+	// a missed `Ptr != End` walks the Bresenham off the framebuffer
+	// (SEGV'd on the spark ring's near-horizontal lines). Clamp into the
+	// drawable region; the AA writes touch +-1 row and +-3 bytes.
+	if (X1 < 2) X1 = 2; if (X1 > (int32_t)XRes-4) X1 = XRes-4;
+	if (X2 < 2) X2 = 2; if (X2 > (int32_t)XRes-4) X2 = XRes-4;
+	if (Y1 < 1) Y1 = 1; if (Y1 > (int32_t)YRes-2) Y1 = YRes-2;
+	if (Y2 < 1) Y2 = 1; if (Y2 > (int32_t)YRes-2) Y2 = YRes-2;
 
 	if (X1<=X2)
 	{
@@ -1185,6 +1194,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Dy = Y1-Y2;
 	}
 //	Ptr-=hd;
+	int32_t guard = Dx + Dy + 2;   // exact step count + slack
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1195,7 +1205,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dy-Dx)<<1;
 		Bi = Dy<<1;
 		D = Bi-Dx;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 			if (D >= 0) {
 				Ptr += Yi;
 				D += Ai;
@@ -1208,7 +1218,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dx-Dy)<<1;
 		Bi = Dx<<1;
 		D = Bi-Dy;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 
 			if (D >= 0) {
 				Ptr += Xi;
@@ -1274,6 +1284,15 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
+	// The viewport clip is float-exact but the +0.5 rounding above can
+	// push an edge-clipped endpoint to XRes/YRes — YOffs[YRes] is OOB and
+	// a missed `Ptr != End` walks the Bresenham off the framebuffer
+	// (SEGV'd on the spark ring's near-horizontal lines). Clamp into the
+	// drawable region; the AA writes touch +-1 row and +-3 bytes.
+	if (X1 < 2) X1 = 2; if (X1 > (int32_t)XRes-4) X1 = XRes-4;
+	if (X2 < 2) X2 = 2; if (X2 > (int32_t)XRes-4) X2 = XRes-4;
+	if (Y1 < 1) Y1 = 1; if (Y1 > (int32_t)YRes-2) Y1 = YRes-2;
+	if (Y2 < 1) Y2 = 1; if (Y2 > (int32_t)YRes-2) Y2 = YRes-2;
 
 	if (X1<=X2)
 	{
@@ -1292,6 +1311,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Dy = Y1-Y2;
 	}
 //	Ptr-=hd;
+	int32_t guard = Dx + Dy + 2;   // exact step count + slack
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1302,7 +1322,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dy-Dx)<<1;
 		Bi = Dy<<1;
 		D = Bi-Dx;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 			if (D >= 0) {
 				Ptr += Yi;
 				D += Ai;
@@ -1345,7 +1365,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dx-Dy)<<1;
 		Bi = Dx<<1;
 		D = Bi-Dy;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 
 			if (D >= 0) {
 				Ptr += Xi;
@@ -1569,14 +1589,21 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 	Vector_Copy(&Pos,Src);
 	do
 	{
-		// randomize direction
+		// randomize direction. Uniform 30-60u segments deflected up to
+		// ~30 deg EVERY step read as a mechanical staircase at 1080p
+		// (fine at the 1998 320x240). Real bolts run mostly straight
+		// with occasional hard kinks: shorter segments, mild deviation,
+		// 20% chance of a sharp kink.
 		Vector_Sub(Targ,&Pos,&V);
 		Vector_Norm(&V);
-		V.x += ((float)(RAND_15()-16384))*0.5f/16384.0f;
-		V.y += ((float)(RAND_15()-16384))*0.5f/16384.0f;
-		V.z += ((float)(RAND_15()-16384))*0.5f/16384.0f;
+		{
+			const float amp = (RAND_15() < 6553) ? 0.55f : 0.18f;
+			V.x += ((float)(RAND_15()-16384))*amp/16384.0f;
+			V.y += ((float)(RAND_15()-16384))*amp/16384.0f;
+			V.z += ((float)(RAND_15()-16384))*amp/16384.0f;
+		}
 		Vector_Norm(&V);
-		Seg=30.0f+RAND_15()*30.0f/32768.0f;
+		Seg=16.0f+RAND_15()*16.0f/32768.0f;
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
 		Lightning_Bolt_Frag(&Pos,&NPos,BasePow>>4, LnMat);
@@ -2299,6 +2326,13 @@ struct FountainScene : SceneDriver {
 				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
 				if (Timer >= Rsv_LUntil) { Rsv_LState = 0; Rsv_LUntil = -1; }
 			} else {
+				// The 1998 finale (commented out even in the original):
+				// a ring of arcs crackling between consecutive spire
+				// TOPS, re-randomized every frame for the ~3s window
+				// (case 6 keeps re-reserving with Pow=-1).
+				g_boltBudget = 900;
+				for (int pi = 0; pi < 6; ++pi)
+					Spark(Pylon + pi, Pylon + ((pi + 1) % 6), g_LnMat);
 				Rsv_LState = 0;
 				Rsv_LUntil = -1;
 			}
