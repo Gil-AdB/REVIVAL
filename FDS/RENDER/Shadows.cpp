@@ -22,6 +22,7 @@
 #include <Base/Vector.h>
 #include <atomic>
 #include <vector>
+#include <array>
 #include <chrono>
 
 #include "Base/FDS_DEFS.H"
@@ -630,6 +631,89 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	}
 	for (int _i = 0; _i < tilesEnqueued; ++_i) {
 		renderns::tileDone.acquire();
+	}
+	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
+	// the buffer this mode just wrote. Reports a tile flipping between
+	// occupied and empty across consecutive frames — the whole-tile
+	// shadow flicker signature. Temporary diagnostic.
+	if (std::getenv("FDS_SHADOW_TILE_PROBE")) {
+		static std::vector<std::array<int,16>> sPrev;
+		static int sFrame = 0;
+		++sFrame;
+		if (sPrev.size() != g_shadowMaps.size())
+			sPrev.assign(g_shadowMaps.size(), {});
+		for (size_t li = 0; li < g_shadowMaps.size(); ++li) {
+			ShadowMap &sm = g_shadowMaps[li];
+			Omni *const O = sm.omni;
+			if (!O || !(O->Flags & Omni_Active)) continue;
+			const bool isStaticP = (O->Flags & Omni_StaticShadow) != 0;
+			if (isStaticP != wantStaticOmnis) continue;
+			const auto &buf = writeDynamicBuf ? sm.depth_dynamic : sm.depth;
+			std::array<int,16> occ{};
+			const int tw = sm.xres / 4, th = sm.yres / 4;
+			for (int ty = 0; ty < 4; ++ty)
+				for (int tx = 0; tx < 4; ++tx) {
+					int n = 0;
+					for (int y = ty*th; y < (ty+1)*th; y += 4) {
+						const uint16_t *row = buf.data() + size_t(y)*sm.xres;
+						for (int x = tx*tw; x < (tx+1)*tw; x += 4)
+							if (row[x]) ++n;
+					}
+					occ[ty*4+tx] = n;
+				}
+			for (int t = 0; t < 16; ++t) {
+				const int prev = sPrev[li][t], now = occ[t];
+				if ((prev > 50 && now == 0) || (prev == 0 && now > 50)) {
+					std::fprintf(stderr,
+						"[SHADOW-TILE] f=%d light=%zu res=%d tile=%d,%d %d -> %d\n",
+						sFrame, li, sm.xres, t%4, t/4, prev, now);
+				}
+			}
+			sPrev[li] = occ;
+			// Full-buffer hash: catches polygon-level nondeterminism the
+			// coarse occupancy misses. Under a fixed-frame bench any
+			// hash change is a race. FDS_SHADOW_DUMP_LIGHT=<li> dumps
+			// prev/now PGMs of the first two changes for texel diffing.
+			{
+				static std::vector<uint64_t> sHash;
+				static std::vector<uint16_t> sPrevBuf;
+				if (sHash.size() != g_shadowMaps.size())
+					sHash.assign(g_shadowMaps.size(), 0);
+				uint64_t h = 0xcbf29ce484222325ull;
+				const uint8_t *bp = (const uint8_t*)buf.data();
+				for (size_t k = 0; k < buf.size() * 2; k += 7) {
+					h ^= bp[k]; h *= 0x100000001b3ull;
+				}
+				const char *dl = std::getenv("FDS_SHADOW_DUMP_LIGHT");
+				const bool isDumpLight = dl && size_t(atoi(dl)) == li;
+				if (sFrame > 2 && sHash[li] != 0 && sHash[li] != h) {
+					std::fprintf(stderr,
+						"[SHADOW-HASH] f=%d light=%zu res=%d %s buffer changed\n",
+						sFrame, li, sm.xres,
+						writeDynamicBuf ? "dyn" : "static");
+					if (isDumpLight && sPrevBuf.size() == buf.size()) {
+						static int dumpN = 0;
+						if (dumpN < 2) {
+							for (int which = 0; which < 2; ++which) {
+								const auto &b2 = which ? buf : sPrevBuf;
+								char fn[128];
+								std::snprintf(fn, sizeof(fn),
+								    "/tmp/smdump_l%zu_d%d_%s.bin",
+								    li, dumpN, which ? "now" : "prev");
+								FILE *fp = std::fopen(fn, "wb");
+								if (fp) {
+									std::fwrite(b2.data(), 2, b2.size(), fp);
+									std::fclose(fp);
+								}
+							}
+							++dumpN;
+						}
+					}
+				}
+				sHash[li] = h;
+				if (isDumpLight) sPrevBuf = buf;
+			}
+		}
 	}
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {
