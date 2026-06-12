@@ -3,6 +3,8 @@
 
 #include <cstdio>
 #include <string>
+#include <utility>
+#include <vector>
 
 // Compile-time defaults consumed by FeatureFlags.def. Defined here (not in
 // FDS_DECS.H) so the .def is self-contained — anyone including FeatureFlags.h
@@ -123,6 +125,13 @@ public:
     // unsetParam clears the mark and restores the compile-time default,
     // handing control back to scripts/defaults.
     static void dumpParamsJson(std::string &out);
+    // Every explicitly-set param as (name, value-text). Used by the
+    // console's bake-to-script.
+    static void dumpSetParams(std::vector<std::pair<std::string, std::string>> &out);
+    // Clear the SET mark but KEEP the current value (bake handoff: the
+    // just-written script line takes over on its next tick with the same
+    // value — no flash through the compile default).
+    static bool clearSetMark(const char *name);
     static bool setParamFromText(const char *name, const char *value);
     static bool unsetParam(const char *name);
 

@@ -1,5 +1,6 @@
 #include "TuneServer.h"
 #include "FeatureFlags.h"
+#include "ParamScript.h"
 
 #ifndef __EMSCRIPTEN__
 
@@ -10,16 +11,27 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace fds {
 namespace {
 
-// The whole console is one self-contained page: fetches /api/params,
-// renders knobs grouped by category, debounce-POSTs edits to /api/set,
-// polls every 2s to reflect script-driven motion, exports the SET rows
-// as CLI flags or params-script lines.
+// Knobs the CONSOLE set (vs CLI/env): bake only ever writes these into
+// the scene script — and never strips a CLI flag's precedence.
+std::mutex            gWebSetMu;
+std::set<std::string> gWebSet;
+
+// The whole console is one self-contained page: fetches /api/params +
+// /api/state, renders knobs grouped by category (badges: green dot =
+// script-driven, orange diamond = time-keyed), debounce-POSTs edits to
+// /api/set, polls at 400ms so scripted ramps animate the knobs, and the
+// bake button writes console-tuned knobs into SCRIPTS/<scene>.params and
+// releases them to it.
 const char kPage[] = R"HTML(<!doctype html>
 <meta charset="utf-8"><title>REVIVAL tune</title>
 <style>
@@ -41,16 +53,16 @@ const char kPage[] = R"HTML(<!doctype html>
  .def{color:#666;font-size:11px;text-align:right}
  #msg{color:#7c8;min-width:120px;text-align:right;font-size:12px}
 </style>
-<h1>REVIVAL live tune</h1>
+<h1>REVIVAL live tune <span id=scene style="color:#667"></span></h1>
 <div id=bar>
  <input id=q type=search placeholder="filter (name / category / help)...">
+ <button id=bake onclick="bake()" title="write tuned knobs into the scene's SCRIPTS/*.params and hand them to it">bake to script</button>
  <button onclick="copyOut('cli')">copy CLI</button>
- <button onclick="copyOut('params')">copy .params</button>
  <span id=msg></span>
 </div>
 <div id=root></div>
 <script>
-let P=[],focused=null;
+let P=[],focused=null,ST={scene:'',driven:[],keyed:[],web:[]};
 const root=document.getElementById('root'),q=document.getElementById('q'),msg=document.getElementById('msg');
 function sliderRange(p){
   const d=Math.abs(parseFloat(p.def))||1,v=Math.abs(parseFloat(p.value))||0;
@@ -75,7 +87,10 @@ function render(){
 }
 function row(p){
   const r=document.createElement('div');r.className='row'+(p.set?' set':'');r.dataset.name=p.name;
-  const nm=document.createElement('div');nm.className='nm';nm.textContent=p.name;nm.title=p.help;r.appendChild(nm);
+  const nm=document.createElement('div');nm.className='nm';nm.title=p.help;
+  const drv=ST.driven.includes(p.name),key=ST.keyed.includes(p.name);
+  nm.innerHTML=(drv?'<span style="color:#6c6" title="script-driven">&#9679;</span> ':key?'<span style="color:#fa5" title="time-keyed in script">&#9670;</span> ':'')+p.name;
+  r.appendChild(nm);
   let ctl;
   if(p.type==='bool'){
     ctl=document.createElement('input');ctl.type='checkbox';ctl.checked=p.value===true||p.value==='true';
@@ -85,6 +100,7 @@ function row(p){
     const [lo,hi,st]=sliderRange(p);
     ctl=document.createElement('input');ctl.type='range';ctl.min=lo;ctl.max=hi;ctl.step=st;ctl.value=p.value;
     const num=document.createElement('input');num.type='number';num.step=st;num.value=p.value;
+    ctl.onpointerdown=()=>focused=p.name;ctl.onpointerup=()=>focused=null;
     ctl.oninput=()=>{num.value=ctl.value;send(p,ctl.value)};
     num.onfocus=()=>focused=p.name;num.onblur=()=>focused=null;
     num.onchange=()=>{ctl.value=num.value;send(p,num.value)};
@@ -107,12 +123,19 @@ function send(p,v){
 }
 function api(u){return fetch(u,{method:'POST'})}
 function refresh(){
-  fetch('/api/params').then(r=>r.json()).then(j=>{
+  Promise.all([fetch('/api/params').then(r=>r.json()),
+               fetch('/api/state').then(r=>r.json())]).then(([j,st])=>{
+    ST={scene:st.info.scene,driven:st.info.driven,keyed:st.info.keyed,web:st.web};
+    document.getElementById('scene').textContent=ST.scene?('— scene: '+ST.scene):'';
+    document.getElementById('bake').textContent='bake to '+(ST.scene||'?')+'.params'+(ST.web.length?' ('+ST.web.length+')':'');
     const open=new Set([...root.querySelectorAll('details[open] summary')].map(s=>s.textContent));
     P=j;render();
     if(open.size)for(const d of root.querySelectorAll('details'))
       d.open=open.has(d.querySelector('summary').textContent);
   });
+}
+function bake(){
+  api('/api/save').then(r=>r.text()).then(t=>{msg.textContent=t;refresh()});
 }
 function copyOut(kind){
   const set=P.filter(p=>p.set);
@@ -124,7 +147,7 @@ function copyOut(kind){
 }
 q.oninput=render;
 refresh();
-setInterval(()=>{if(!focused)refresh()},2000);
+setInterval(()=>{if(!focused)refresh()},400);
 </script>
 )HTML";
 
@@ -227,12 +250,55 @@ void serveLoop(int port) {
 			const bool ok = queryParam(qs, "name", name, sizeof name)
 			             && queryParam(qs, "value", value, sizeof value)
 			             && FeatureFlags::setParamFromText(name, value);
+			if (ok) {
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				gWebSet.insert(name);
+			}
 			respond(fd, ok ? "200 OK" : "400 Bad Request", "text/plain", ok ? "ok" : "bad");
 		} else if (strcmp(path, "/api/unset") == 0) {
 			char name[128] = {0};
 			const bool ok = queryParam(qs, "name", name, sizeof name)
 			             && FeatureFlags::unsetParam(name);
+			if (ok) {
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				gWebSet.erase(name);
+			}
 			respond(fd, ok ? "200 OK" : "400 Bad Request", "text/plain", ok ? "ok" : "bad");
+		} else if (strcmp(path, "/api/state") == 0) {
+			// Scene + script-driven/keyed params + which knobs the console
+			// owns — drives the page's badges and the bake button label.
+			std::string js = "{\"info\":";
+			ParamScript_Info(js);
+			js += ",\"web\":[";
+			{
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				bool first = true;
+				for (const auto &n : gWebSet) {
+					if (!first) js += ",";
+					first = false;
+					js += "\"" + n + "\"";
+				}
+			}
+			js += "]}";
+			respond(fd, "200 OK", "application/json", js);
+		} else if (strcmp(path, "/api/save") == 0) {
+			// Bake ONLY console-owned knobs into the scene script, then
+			// release them to it (clearSetMark inside the bake — same
+			// values, no flash; the script hot-reloads within ~15 frames).
+			std::vector<std::pair<std::string, std::string>> all, mine;
+			FeatureFlags::dumpSetParams(all);
+			{
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				for (auto &p : all)
+					if (gWebSet.count(p.first)) mine.push_back(p);
+			}
+			std::string report;
+			const bool ok = ParamScript_BakeParams(mine, report);
+			if (ok) {
+				std::lock_guard<std::mutex> lk(gWebSetMu);
+				for (auto &p : mine) gWebSet.erase(p.first);
+			}
+			respond(fd, ok ? "200 OK" : "409 Conflict", "text/plain", report);
 		} else {
 			respond(fd, "404 Not Found", "text/plain", "nope");
 		}

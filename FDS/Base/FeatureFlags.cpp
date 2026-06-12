@@ -515,6 +515,32 @@ bool FeatureFlags::setParamFromText(const char *name, const char *value) {
     }
 }
 
+void FeatureFlags::dumpSetParams(std::vector<std::pair<std::string, std::string>> &out) {
+    char b[48];
+    for (int i = 0; i < kNumBool; ++i)
+        if (g_boolSet[i]) out.emplace_back(kBoolDefs[i].name, g_boolVals[i] ? "1" : "0");
+    for (int i = 0; i < kNumFloat; ++i)
+        if (g_floatSet[i]) {
+            std::snprintf(b, sizeof b, "%g", g_floatVals[i]);
+            out.emplace_back(kFloatDefs[i].name, b);
+        }
+    for (int i = 0; i < kNumInt; ++i)
+        if (g_intSet[i]) {
+            std::snprintf(b, sizeof b, "%d", g_intVals[i]);
+            out.emplace_back(kIntDefs[i].name, b);
+        }
+}
+
+bool FeatureFlags::clearSetMark(const char *name) {
+    const ParamRef r = findParam(name);
+    switch (r.type) {
+    case ParamType::Bool:  g_boolSet[r.index]  = false; return true;
+    case ParamType::Float: g_floatSet[r.index] = false; return true;
+    case ParamType::Int:   g_intSet[r.index]   = false; return true;
+    default: return false;
+    }
+}
+
 bool FeatureFlags::unsetParam(const char *name) {
     const ParamRef r = findParam(name);
     switch (r.type) {

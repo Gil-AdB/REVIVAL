@@ -3,9 +3,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 namespace fds {
@@ -226,6 +228,115 @@ void ParamScript_Tick(float timer) {
 		if (t.shadowed || paramIsCliSet(t.ref)) continue;
 		writeParam(t.ref, evalTrack(t, timer));
 	}
+}
+
+void ParamScript_Info(std::string &out) {
+	out += "{\"scene\":\"";
+	out += g.scene;
+	out += "\",\"path\":\"";
+	out += g.path;
+	out += "\",\"driven\":[";
+	bool first = true;
+	for (const Track &t : g.tracks) {
+		if (t.shadowed || paramIsCliSet(t.ref)) continue;
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		out += t.name;
+		out += "\"";
+	}
+	out += "],\"keyed\":[";
+	first = true;
+	for (const Track &t : g.tracks) {
+		if (t.keys.size() < 2) continue;
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		out += t.name;
+		out += "\"";
+	}
+	out += "]}";
+}
+
+bool ParamScript_BakeParams(
+    const std::vector<std::pair<std::string, std::string>> &setp,
+    std::string &report) {
+	if (g.scene.empty()) {
+		report = "no active scene";
+		return false;
+	}
+	if (setp.empty()) {
+		report = "nothing tuned";
+		return true;
+	}
+	// Read the existing script (may not exist yet).
+	std::vector<std::string> lines;
+	if (std::FILE *f = std::fopen(g.path.c_str(), "rb")) {
+		char line[512];
+		while (std::fgets(line, sizeof line, f)) {
+			std::string l(line);
+			while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+			lines.push_back(std::move(l));
+		}
+		std::fclose(f);
+	}
+	// Param name at the head of a line (before '=', '@' or '#')?
+	auto lineParam = [](const std::string &l) -> std::string {
+		size_t i = 0;
+		while (i < l.size() && (l[i] == ' ' || l[i] == '\t')) ++i;
+		size_t j = i;
+		while (j < l.size() && (isalnum((unsigned char)l[j]) || l[j] == '_' || l[j] == '-')) ++j;
+		if (j == i) return {};
+		size_t k = j;
+		while (k < l.size() && (l[k] == ' ' || l[k] == '\t')) ++k;
+		if (k < l.size() && (l[k] == '=' || l[k] == '@')) return l.substr(i, j - i);
+		return {};
+	};
+	int baked = 0, skippedKeyed = 0;
+	std::string skippedNames;
+	for (const auto &sp : setp) {
+		// Keyed in the file? Leave the ramp alone.
+		bool keyed = false;
+		for (const auto &l : lines)
+			if (lineParam(l) == sp.first && l.find('@') != std::string::npos) { keyed = true; break; }
+		if (keyed) {
+			++skippedKeyed;
+			if (!skippedNames.empty()) skippedNames += " ";
+			skippedNames += sp.first;
+			continue;
+		}
+		bool replaced = false;
+		for (auto &l : lines) {
+			if (lineParam(l) != sp.first) continue;
+			// Preserve any trailing comment.
+			std::string tail;
+			const size_t hash = l.find('#');
+			if (hash != std::string::npos) tail = "   " + l.substr(hash);
+			l = sp.first + " = " + sp.second + tail;
+			replaced = true;
+			break;
+		}
+		if (!replaced)
+			lines.push_back(sp.first + " = " + sp.second + "   # tuned via console");
+		// Hand the knob to the script: keep the value, clear the mark; the
+		// reloaded script (same value) takes over on its next tick.
+		FeatureFlags::clearSetMark(sp.first.c_str());
+		++baked;
+	}
+	std::FILE *f = std::fopen(g.path.c_str(), "wb");
+	if (!f) {
+		report = "cannot write " + g.path;
+		return false;
+	}
+	for (const auto &l : lines) std::fprintf(f, "%s\n", l.c_str());
+	std::fclose(f);
+	// mtime changed — the poll reloads it within ~15 frames.
+	char buf[160];
+	std::snprintf(buf, sizeof buf, "baked %d to %s%s%s", baked, g.path.c_str(),
+	              skippedKeyed ? "; keyed (edit file): " : "",
+	              skippedKeyed ? skippedNames.c_str() : "");
+	report = buf;
+	return true;
 }
 
 } // namespace fds

@@ -60,6 +60,13 @@ While the demo runs, `http://localhost:8666` (flags: `tune_server`,
 grouped by category with sliders/checkboxes, search, and tooltips.
 Edits apply immediately and count as *explicitly set* — scripts yield
 to them exactly like CLI flags — until the row's ↺ release button
-hands control back. "copy CLI" / "copy .params" export everything
-you've touched, so the loop is: tune by eye → copy → paste into
-`SCRIPTS/<scene>.params`.
+hands control back. Badges: green dot = the scene script drives this
+param right now (knobs animate at ~2.5 Hz as keyed ramps play);
+orange diamond = time-keyed in the script (bake won't touch it).
+
+**bake to <scene>.params** writes every console-tuned knob straight
+into the scene script on disk — replacing the param's constant line
+or appending one — and releases the knobs to it in the same motion
+(same values, no flash; the script hot-reloads within a few frames).
+No copy/paste: tune by eye, hit bake, the look is committed to the
+file. "copy CLI" remains for A/B command lines.
