@@ -381,6 +381,15 @@ enum OmniFlags
 	// robot/orbit spots.
 	Omni_ForceVolCone = 1 << 10,
 
+	// Bounce-cone spot: a virtual spot at a mirrored light position
+	// throwing a reflected beam back into the room (its apex sits
+	// BEHIND the mirror glass). The volumetric cone pass clamps its
+	// chord to the camera side of the mirror plane (Omni::mirrorPlaneN/
+	// D) so the shaft starts at the glass instead of glowing through
+	// the wall around the window. Set only by the bounce pool in
+	// DEMO/GreetsMirror.cpp.
+	Omni_BounceCone = 1 << 11,
+
 	// Light is static — its position, direction, and the world geometry
 	// around it never change. The shadow map can be rendered ONCE at
 	// scene init (or first-frame) and reused for every subsequent frame,

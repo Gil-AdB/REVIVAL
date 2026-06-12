@@ -124,6 +124,11 @@ struct Mirror {
     // front of the camera.
     uint8_t     parentMirrorId = 0;
     MirrorPlane parentPlane = {};
+    // World AABB of the wall faces (the mirror "window"), computed
+    // lazily on first use by the bounce-spot pool. Thin slab in the
+    // plane-normal axis.
+    Vector      windowMin{}, windowMax{};
+    bool        windowValid = false;
     int         wallFacesRetargeted = 0;
     int         clonedFaces  = 0;
     int         clonedVerts  = 0;

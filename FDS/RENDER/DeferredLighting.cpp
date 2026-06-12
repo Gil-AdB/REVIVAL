@@ -135,6 +135,10 @@ struct ViewLightsSoA {
 	// mirror plane, for mirrored shadow sampling (the clone's
 	// visibility of P = the source's visibility of reflect(P)).
 	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_VIEW_LIGHTS];
+	// Omni_BounceCone: the cone pass clamps this spot's chord to the
+	// camera side of its mirror plane (mirN/mirD) — the apex sits
+	// behind the glass.
+	alignas(32) uint32_t bounceClamp[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float mirNX[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float mirNY[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float mirNZ[DEFERRED_MAX_VIEW_LIGHTS];
@@ -545,6 +549,7 @@ static void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTi
 		const uint32_t Lmid = lights.mirrorId[li];
 		const float Lso = lights.sinOuter[li];
 
+		int dbgPlaced = 0;
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
 			for (int i = tile_i_lo; i <= tile_i_hi; ++i) {
 				const int idx = j * numTilesX + i;
@@ -3719,6 +3724,7 @@ void Render_DeferredLighting() {
 			}
 		}
 		lights.srcShadowMapIdx[numLights] = srcSm;
+		lights.bounceClamp[numLights] = (O->Flags & Omni_BounceCone) ? 1u : 0u;
 		lights.mirNX[numLights] = O->mirrorPlaneN.x;
 		lights.mirNY[numLights] = O->mirrorPlaneN.y;
 		lights.mirNZ[numLights] = O->mirrorPlaneN.z;
@@ -4159,6 +4165,25 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     // mirror's footprint below.
                     const uint32_t omid = lights->mirrorId[li];
                     if (omid != 0 && (!mmask || !mmz)) continue;
+                    // Bounce spot: chord clamped to the camera side of
+                    // its mirror plane (apex behind the glass). Plane
+                    // → view space: n_v = viewMatᵀ·N, d_v = N·camW + D.
+                    const bool bounce = lights->bounceClamp[li] != 0;
+                    float hsNx=0, hsNy=0, hsNz=0, hsD=0;
+                    if (bounce) {
+                        const float Nx = lights->mirNX[li];
+                        const float Ny = lights->mirNY[li];
+                        const float Nz = lights->mirNZ[li];
+                        const auto &VW = g_deferredCtx.viewToWorld;
+                        hsNx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
+                        hsNy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
+                        hsNz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
+                        hsD  = Nx*g_deferredCtx.cameraWorldX +
+                               Ny*g_deferredCtx.cameraWorldY +
+                               Nz*g_deferredCtx.cameraWorldZ +
+                               lights->mirD[li];
+                        if (hsD == 0.0f) continue;  // camera on the glass
+                    }
                     const float r2   = lights->range2[li];
                     const float rr   = lights->rRange[li];
                     const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
@@ -4247,6 +4272,20 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                 float(0xFF80 - int(mmz[pi])) * invZScale;
                             if (zLo < zWall) zLo = zWall;
                             if (zHi <= zLo) continue;
+                        }
+                        // Bounce beam: keep the chord on the camera
+                        // side of the glass. Plane value along the ray
+                        // is z·kk + d_v; it changes sign at z* — clamp
+                        // zHi there when the ray crosses away from the
+                        // camera's side.
+                        if (bounce) {
+                            const float kk = hsNx*X + hsNy*Y + hsNz;
+                            if ((hsD > 0.0f && kk < -1e-9f) ||
+                                (hsD < 0.0f && kk >  1e-9f)) {
+                                const float zStar = -hsD / kk;
+                                if (zHi > zStar) zHi = zStar;
+                                if (zHi <= zLo) continue;
+                            }
                         }
                         if (std::fabs(DV) > 1e-6f) {
                             const float zFwd = DP / DV;
@@ -4859,6 +4898,22 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 // scalar fallback keeps correctness for A/B).
                 const uint32_t omid_s = lights->mirrorId[li];
                 if (omid_s != 0 && (!mmask || !mmz)) continue;
+                const bool bounce_s = lights->bounceClamp[li] != 0;
+                float hsNx_s=0, hsNy_s=0, hsNz_s=0, hsD_s=0;
+                if (bounce_s) {
+                    const float Nx = lights->mirNX[li];
+                    const float Ny = lights->mirNY[li];
+                    const float Nz = lights->mirNZ[li];
+                    const auto &VW = g_deferredCtx.viewToWorld;
+                    hsNx_s = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
+                    hsNy_s = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
+                    hsNz_s = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
+                    hsD_s  = Nx*g_deferredCtx.cameraWorldX +
+                             Ny*g_deferredCtx.cameraWorldY +
+                             Nz*g_deferredCtx.cameraWorldZ +
+                             lights->mirD[li];
+                    if (hsD_s == 0.0f) continue;
+                }
 
                 const float DV = Dx*X + Dy*Y + Dz;
                 const float DP = Dx*Px + Dy*Py + Dz*Pz;
@@ -4966,6 +5021,15 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         float(0xFF80 - int(mmz[pi])) * invZScale;
                     if (zLo < zWall) zLo = zWall;
                     if (zHi <= zLo) continue;
+                }
+                if (bounce_s) {
+                    const float kk = hsNx_s*X + hsNy_s*Y + hsNz_s;
+                    if ((hsD_s > 0.0f && kk < -1e-9f) ||
+                        (hsD_s < 0.0f && kk >  1e-9f)) {
+                        const float zStar = -hsD_s / kk;
+                        if (zHi > zStar) zHi = zStar;
+                        if (zHi <= zLo) continue;
+                    }
                 }
                 // Early-out: entire cone interval past the visible surface
                 // (zMax is the surface/sky cap; everything past it is fully
@@ -5220,7 +5284,6 @@ void Render_VolumetricCones() {
             (allCones || lights->forceCone[i])) spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
-
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
     constexpr int numTiles  = numTilesX * numTilesY;

@@ -1,4 +1,5 @@
 #include "GreetsMirror.h"
+#include "SpotlightCones.h"
 
 #include <Base/FDS_DECS.H>  // Matrix_Copy + Mat_ID
 #include <Base/FDS_VARS.H>  // MatrixXVector template
@@ -1712,6 +1713,114 @@ bool mirrorPotentiallyVisible(Scene *sc, const Mirror &m)
 
 }  // namespace
 
+// ── Bounce cones ────────────────────────────────────────────────────
+// A real beam striking a mirror window throws a reflected beam back
+// into the room. Each active (real spot × mirror) pair whose beam
+// axis hits inside the mirror's window AABB activates a pool spot at
+// the mirrored position/direction: a plain mirrorId=0 spot, so it
+// lights REAL pixels through every existing path (tile lists, cone
+// cull, surface kernel → bounced dot pools on the floor; cone pass →
+// the visible shaft). Omni_BounceCone makes the cone pass clamp its
+// chord to the camera side of the glass (the apex sits behind it).
+static constexpr int kBouncePool = 12;
+static constexpr float kBounceReflectance = 0.55f;
+
+static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
+{
+    static std::vector<Omni*> pool;
+    if (!fds::FeatureFlags::mirror_bounce()) {
+        for (Omni *o : pool) o->ISize = 0.0f;
+        return;
+    }
+    if (pool.empty()) {
+        for (int i = 0; i < kBouncePool; ++i) {
+            Omni *o = MakeSpotLight(sc, 255, 255, 255, 0.0f, 1.0f,
+                                    {0, -100, 0}, {0, -1, 0},
+                                    2.0f, 6.0f, 0, false);
+            o->ISize = 0.0f;
+            pool.push_back(o);
+        }
+    }
+    int used = 0;
+    for (Mirror &m : mirrors) {
+        // NOT gated on m.active: the bounce shaft lives in the ROOM —
+        // it stays visible when its mirror is off-screen behind you.
+        // Plane + window are static; nothing here needs the clone
+        // machinery the visibility gate exists to throttle.
+        if (!m.plane.valid || m.parentMirrorId != 0) continue;
+        if (!m.windowValid) {
+            // Lazy one-time window AABB from the wall faces (static).
+            Vector mn{ 1e30f, 1e30f, 1e30f}, mx{-1e30f,-1e30f,-1e30f};
+            for (size_t i = 0; i < m.wallFaces.size(); ++i) {
+                const Face *F = m.wallFaces[i];
+                TriMesh *T = m.wallFaceMeshes[i];
+                if (!F || !T) continue;
+                for (const Vertex *v : { F->A, F->B, F->C }) {
+                    Vector lp = v->Pos, wp;
+                    MatrixXVector(T->RotMat, &lp, &wp);
+                    wp += T->IPos;
+                    mn.x = std::min(mn.x, wp.x); mx.x = std::max(mx.x, wp.x);
+                    mn.y = std::min(mn.y, wp.y); mx.y = std::max(mx.y, wp.y);
+                    mn.z = std::min(mn.z, wp.z); mx.z = std::max(mx.z, wp.z);
+                }
+            }
+            if (mx.x >= mn.x) { m.windowMin = mn; m.windowMax = mx; }
+            m.windowValid = true;
+        }
+        if (m.windowMax.x < m.windowMin.x) continue;
+        const Vector &N = m.plane.N;
+        const float   d = m.plane.d;
+        for (Omni *O = sc->OmniHead; O && used < kBouncePool; O = O->Next) {
+            if (O->Type != Light_SpotLight) continue;
+            if (!(O->Flags & Omni_Active)) continue;
+            if (!(O->Flags & Omni_ForceVolCone)) continue;  // beams only
+            if (O->mirrorId != 0) continue;                 // not clones
+            if (O->Flags & Omni_BounceCone) continue;       // not pool spots
+            if (O->ISize <= 0.0f) continue;
+            // Beam axis vs mirror plane.
+            const float ND = N.x*O->IDir.x + N.y*O->IDir.y + N.z*O->IDir.z;
+            if (std::fabs(ND) < 1e-6f) continue;
+            const float NP = N.x*O->IPos.x + N.y*O->IPos.y + N.z*O->IPos.z + d;
+            const float t  = -NP / ND;
+            if (t <= 0.0f || t >= O->IRange) continue;
+            const Vector hit{ O->IPos.x + O->IDir.x * t,
+                              O->IPos.y + O->IDir.y * t,
+                              O->IPos.z + O->IDir.z * t };
+            // Pad by the beam's radius at the hit distance: the beam
+            // is a cone, not an axis — a window clipped by the cone
+            // edge still throws a (partial) bounce. Without this the
+            // activation window is a few degrees of azimuth and the
+            // effect reads as rare random flashes.
+            const float sinO = std::sqrt(std::max(0.0f,
+                1.0f - O->FallOff * O->FallOff));
+            const float kPad = 0.4f + t * sinO;
+            const bool inWin =
+                !(hit.x < m.windowMin.x - kPad || hit.x > m.windowMax.x + kPad ||
+                  hit.y < m.windowMin.y - kPad || hit.y > m.windowMax.y + kPad ||
+                  hit.z < m.windowMin.z - kPad || hit.z > m.windowMax.z + kPad);
+            if (!inWin) continue;
+            Omni *b = pool[used++];
+            b->IPos   = reflectPointAcross(O->IPos, N, d);
+            b->IDir   = reflectDirAcross(O->IDir, N);
+            b->L      = O->L;
+            b->ISize  = O->ISize * fds::FeatureFlags::mirror_bounce_gain();
+            // Range stretched past the source's: at physical range the
+            // surviving stub past the glass is (range − distance-to-
+            // mirror) ≈ a few units and doesn't read as a shaft.
+            b->IRange = O->IRange * fds::FeatureFlags::mirror_bounce_range();
+            b->rRange = 1.0f / b->IRange;
+            b->HotSpot = O->HotSpot;
+            b->FallOff = O->FallOff;
+            b->Flags  = Omni_Active | Omni_ForceVolCone | Omni_BounceCone;
+            b->mirrorId = 0;
+            b->mirrorSrcOmni = O;
+            b->mirrorPlaneN  = N;
+            b->mirrorPlaneD  = d;
+        }
+    }
+    for (int i = used; i < int(pool.size()); ++i) pool[i]->ISize = 0.0f;
+}
+
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
 {
     int nActive = 0;
@@ -1748,6 +1857,9 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
         }
         if (act) { UpdateMirror(sc, m); ++nActive; }
     }
+    // Bounce cones: after mirror activity + clone updates, before the
+    // render consumes light poses.
+    UpdateBounceSpots(sc, mirrors);
     }  // ScopedMirrorMs — accumulate before the print below reads it
 
     if (fds::FeatureFlags::mirror_prof()) {
