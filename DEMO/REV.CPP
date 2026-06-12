@@ -1185,7 +1185,15 @@ int main(int argc, const char *argv[])
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
 	g_playMusic = cfg.extractInteger("MusicEnable");
-	g_profilerActive = cfg.extractInteger("ProfilerEnable");
+	// rev.cfg seeds the runtime `profiler` flag (left UNMARKED, so scene
+	// scripts and the tune console can toggle the overlay live). An
+	// explicit --profiler / --no-profiler wins over the cfg.
+	if (cfg.extractInteger("ProfilerEnable") &&
+	    !fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
+		fds::FeatureFlags::setParamFromText("profiler", "1");
+		fds::FeatureFlags::clearSetMark("profiler");
+	}
+	g_profilerActive = fds::FeatureFlags::profiler();
 	g_demoXRes = cfg.extractInteger("ResolutionX");
 	g_demoYRes = cfg.extractInteger("ResolutionY");
 	g_fullScreenMode = cfg.extractInteger("FullScreenMode");

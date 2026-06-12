@@ -1,4 +1,6 @@
 #include "FrameProfiler.h"
+#include <Base/FeatureFlags.h>
+#include "Rev.h"
 
 #include <Base/FDS_DECS.H>
 #include <Base/FDS_VARS.H>
@@ -60,6 +62,10 @@ void FrameProfiler::switchTo(int section) {
 }
 
 void FrameProfiler::beginFrame() {
+    // The overlay gate is a live FeatureFlag (scriptable / tune-console);
+    // mirror it into the legacy global here — the one call every scene
+    // makes each frame — so P-key-less toggling works everywhere.
+    g_profilerActive = fds::FeatureFlags::profiler();
     for (int i = 0; i < PROF_NUM; ++i) currentFrame_[i] = 0;
     frameStart_ = clock::now();
 }
