@@ -899,22 +899,23 @@ void Initialize_Fountain()
 
 	LBoltPcls = new Particle[FntLightningPcls];
 
-	// Bolt cross-section: u runs 0→1 ACROSS the quad's width, so the
-	// profile must be SYMMETRIC — dark edge → hot core → dark edge. The
-	// old gradient ramped black→white across, leaving every bolt bright
-	// on one side and dark on the other. Edges are black because the
+	// Bolt cross-section. evalGradient FOLDS u (1-|u-0.5|*2), so the
+	// endpoint table is the HALF-profile edge(0) → core(1) and the quad
+	// center automatically gets the core. (A pre-symmetrized table gets
+	// double-folded into twin stripes.) Edges are black because the
 	// faces draw ADDITIVE (a bolt is light): black adds nothing, which
-	// also gives free soft anti-aliased edges.
+	// also gives free soft anti-aliased edges. vSlack darkens the v≈0/1
+	// caps — correct now that V is continuous along the WHOLE ribbon
+	// (per-segment V made every segment render as a capped pill: the
+	// 'ladder rungs').
 	std::vector<GradientEndpoint> endpoints;
-	endpoints.emplace_back(0.00, Color{ 0.0, 0.0,  0.0,  0.0 });
-	endpoints.emplace_back(0.20, Color{ 0.25, 0.0, 0.06, 0.0 });
-	endpoints.emplace_back(0.42, Color{ 1.0, 0.30, 0.60, 0.0 });
-	endpoints.emplace_back(0.50, Color{ 1.0, 1.0,  1.0,  0.0 });
-	endpoints.emplace_back(0.58, Color{ 1.0, 0.30, 0.60, 0.0 });
-	endpoints.emplace_back(0.80, Color{ 0.25, 0.0, 0.06, 0.0 });
-	endpoints.emplace_back(1.00, Color{ 0.0, 0.0,  0.0,  0.0 });
+	endpoints.emplace_back(0.00, Color{ 0.0,  0.0,  0.0,  0.0 });
+	endpoints.emplace_back(0.45, Color{ 0.25, 0.0,  0.06, 0.0 });
+	endpoints.emplace_back(0.78, Color{ 1.0,  0.30, 0.60, 0.0 });
+	endpoints.emplace_back(0.92, Color{ 1.0,  1.0,  1.0,  0.0 });
+	endpoints.emplace_back(1.00, Color{ 1.0,  1.0,  1.0,  0.0 });
 
-	g_LnMat = Generate_Gradient(endpoints, 256, 0.01, false);
+	g_LnMat = Generate_Gradient(endpoints, 256, 0.04, false);
 
 	// Reset scrub tracking + any reserved strike (re-init safe).
 	g_LnLastTimer = -1;
@@ -1194,6 +1195,13 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	}
 //	Ptr-=hd;
 	int32_t guard = Dx + Dy + 2;   // exact step count + slack
+	// Per-pixel Z test, perspective-correct via screen-linear RZ lerp.
+	// These fillers draw after the whole frame and used to scribble over
+	// every surface ('not respecting render order').
+	const int32_t zsteps = (Dx > Dy ? Dx : Dy);
+	float rzCur = V1->RZ;
+	const float rzStep = zsteps > 0 ? (V2->RZ - V1->RZ) / (float)zsteps : 0.0f;
+	DWord* const vbase = (DWord *)VPage;
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1210,6 +1218,13 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 				D += Ai;
 			} else D = D + Bi;
 			Ptr += Xi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 			*Ptr = 0xFFFFFF;
 //			memset(Ptr,255,depth<<2);
 		}
@@ -1224,6 +1239,13 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 				D += Ai;
 			} else D += Bi;
 			Ptr += Yi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 
 			//left anti-alias
 			cPtr = ((uint8_t *)Ptr)-8;
@@ -1311,6 +1333,13 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	}
 //	Ptr-=hd;
 	int32_t guard = Dx + Dy + 2;   // exact step count + slack
+	// Per-pixel Z test, perspective-correct via screen-linear RZ lerp.
+	// These fillers draw after the whole frame and used to scribble over
+	// every surface ('not respecting render order').
+	const int32_t zsteps = (Dx > Dy ? Dx : Dy);
+	float rzCur = V1->RZ;
+	const float rzStep = zsteps > 0 ? (V2->RZ - V1->RZ) / (float)zsteps : 0.0f;
+	DWord* const vbase = (DWord *)VPage;
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1327,6 +1356,13 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 				D += Ai;
 			} else D = D + Bi;
 			Ptr += Xi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 //			*Ptr = 0xFFFFFF;
 //			memset(Ptr,255,depth<<2);
 
@@ -1371,6 +1407,13 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 				D += Ai;
 			} else D += Bi;
 			Ptr += Yi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 
 			//left anti-alias
 			cPtr = ((uint8_t *)Ptr)-4;
@@ -1580,12 +1623,132 @@ void Lightning_Particles()
 
 }
 
+// Connected-ribbon bolt renderer. The 1998 per-segment quads crack at the
+// joints, and any segment of the 3D walk that points depth-ward projects
+// to ~zero screen length while keeping its full width — fat sideways bars
+// ('ladder rungs'). One ribbon with joint-averaged screen perpendiculars
+// and shared edge vertices fixes both. The hot core line still draws per
+// segment over the ribbon (it is endpoint-exact and crack-free already).
+static void Lightning_Ribbon(const Vector* pts, int n, int32_t POW, Material* LnMat)
+{
+	if (POW < 1) POW = 1;
+	constexpr int kMax = 160;
+	if (n > kMax) n = kMax;
+	if (n < 2) return;
+	static float px[kMax], py[kMax], rzv[kMax];
+	static bool  vis[kMax];
+	Vertex T;
+	Vector V;
+	for (int i = 0; i < n; ++i) {
+		Vector_Sub(const_cast<Vector*>(pts + i), &View->ISource, &V);
+		MatrixXVector(View->Mat, &V, &T.TPos_AOS);
+		vis[i] = T.TPos_AOS.z >= C_NZP;
+		if (!vis[i]) continue;
+		const float r = 1.0f / T.TPos_AOS.z;
+		px[i] = (T.TPos_AOS.z * CntrX + T.TPos_AOS.x * FOVX) * r;
+		py[i] = (T.TPos_AOS.z * CntrY - T.TPos_AOS.y * FOVY) * r;
+		rzv[i] = r;
+	}
+	// Joint perpendiculars from central differences over visible runs —
+	// a depth-ward middle segment inherits its neighbors' direction
+	// instead of flipping the ribbon sideways.
+	static float nxv[kMax], nyv[kMax];
+	for (int i = 0; i < n; ++i) {
+		if (!vis[i]) continue;
+		const int ip = (i > 0   && vis[i-1]) ? i-1 : i;
+		const int in_ = (i < n-1 && vis[i+1]) ? i+1 : i;
+		float dx = px[in_] - px[ip];
+		float dy = py[in_] - py[ip];
+		const float l2 = dx*dx + dy*dy;
+		if (l2 < 1e-4f) {
+			// isolated/depth-ward: reuse previous joint's perp (or down)
+			nxv[i] = (i > 0 && vis[i-1]) ? nxv[i-1] : 1.0f;
+			nyv[i] = (i > 0 && vis[i-1]) ? nyv[i-1] : 0.0f;
+			continue;
+		}
+		const float rl = 1.0f / sqrtf(l2);
+		nxv[i] = -dy * rl;
+		nyv[i] =  dx * rl;
+	}
+	// Continuous V along the whole ribbon (cumulative screen length,
+	// normalized): the pill texture's dark caps land only at the bolt's
+	// two ENDS instead of at every segment boundary.
+	static float vcum[kMax];
+	float total = 0.0f;
+	vcum[0] = 0.0f;
+	for (int i = 1; i < n; ++i) {
+		float dl = 0.0f;
+		if (vis[i] && vis[i-1]) {
+			const float ddx = px[i]-px[i-1], ddy = py[i]-py[i-1];
+			dl = sqrtf(ddx*ddx + ddy*ddy);
+		}
+		total += dl;
+		vcum[i] = total;
+	}
+	const float invTotal = total > 1.0f ? 1.0f/total : 1.0f;
+	for (int i = 0; i < n; ++i) vcum[i] *= invTotal;
+	Viewport vp;
+	viewportInit(vp, FntSc);
+	const auto rt   = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
+	for (int i = 0; i + 1 < n; ++i) {
+		if (!vis[i] || !vis[i+1]) continue;
+		if (--g_boltBudget < 0) return;
+		// World half-width projected to px, clamped sane at 1080p.
+		float hA = POW * 1.6f * rzv[i]   * FOVX;
+		float hB = POW * 1.6f * rzv[i+1] * FOVX;
+		if (hA < 1.2f) hA = 1.2f; if (hA > 14.0f) hA = 14.0f;
+		if (hB < 1.2f) hB = 1.2f; if (hB > 14.0f) hB = 14.0f;
+		Vertex quad[4];
+		quad[0].PX = px[i]   - hA*nxv[i];   quad[0].PY = py[i]   - hA*nyv[i];
+		quad[0].UZ = 0;                     quad[0].VZ = vcum[i]*rzv[i];
+		quad[0].RZ = rzv[i];
+		quad[1].PX = px[i]   + hA*nxv[i];   quad[1].PY = py[i]   + hA*nyv[i];
+		quad[1].UZ = rzv[i];                quad[1].VZ = vcum[i]*rzv[i];
+		quad[1].RZ = rzv[i];
+		quad[2].PX = px[i+1] + hB*nxv[i+1]; quad[2].PY = py[i+1] + hB*nyv[i+1];
+		quad[2].UZ = rzv[i+1];              quad[2].VZ = vcum[i+1]*rzv[i+1];
+		quad[2].RZ = rzv[i+1];
+		quad[3].PX = px[i+1] - hB*nxv[i+1]; quad[3].PY = py[i+1] - hB*nyv[i+1];
+		quad[3].UZ = 0;                     quad[3].VZ = vcum[i+1]*rzv[i+1];
+		quad[3].RZ = rzv[i+1];
+		for (int k = 0; k != 4; ++k) {
+			Vertex& v = quad[k];
+			v.LA = v.LR = v.LG = v.LB = 255.0;
+			viewportCalcFlags(vp, &v);
+		}
+		Face f[2];
+		f[0].A = &quad[0]; f[0].B = &quad[1]; f[0].C = &quad[2];
+		f[0].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
+		f[0].Txtr = LnMat;
+		f[1].A = &quad[0]; f[1].B = &quad[2]; f[1].C = &quad[3];
+		f[1].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
+		f[1].Txtr = LnMat;
+		_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
+		_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
+		// Hot core over the ribbon.
+		Vertex A, B;
+		A.PX = px[i];   A.PY = py[i];   A.RZ = rzv[i];
+		A.TPos_AOS.z = 1.0f / rzv[i];
+		B.PX = px[i+1]; B.PY = py[i+1]; B.RZ = rzv[i+1];
+		B.TPos_AOS.z = 1.0f / rzv[i+1];
+		A.LR = B.LR = float(POW);
+		if (POW > 1)
+			Bivex_Frustrum_Perspective(&A, &B, Lightning_Line);
+		else
+			Bivex_Frustrum_Perspective(&A, &B, Spark_Line);
+	}
+}
+
 void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 {
-	//ok, now we need to run from Src to Targ...
+	// Walk Src->Targ gathering the path, then draw ONE connected ribbon.
 	float Distance,Seg;
 	Vector Pos,V,NPos,Yosi;
+	Vector pts[160];
+	int np = 0;
 	Vector_Copy(&Pos,Src);
+	pts[np++] = Pos;
 	do
 	{
 		// randomize direction. Uniform 30-60u segments deflected up to
@@ -1605,8 +1768,8 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 		Seg=16.0f+RAND_15()*16.0f/32768.0f;
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
-		Lightning_Bolt_Frag(&Pos,&NPos,BasePow>>4, LnMat);
 		Vector_Copy(&Pos,&NPos);
+		if (np < 160) pts[np++] = Pos;
 		Vector_Sub(Targ,&Pos,&V);
 		Distance = Vector_Length(&V);
 		if (g_boltBudget>0&&Distance>60.0f&&Distance<400.0f&&(RAND_15()<320*BasePow-Distance*15))
@@ -1616,18 +1779,21 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 			Yosi.z = Pos.z;
 			Lightning_Bolt(&Pos,&Yosi,BasePow>>1, LnMat);
 		}
-	} while (Distance>60.0f&&g_boltBudget>0);
-	// attach pos with target
+	} while (Distance>60.0f&&g_boltBudget>0&&np<160);
 
-//	Generate_Lightning_Particles(&Pos,50);
+	Lightning_Ribbon(pts, np, BasePow>>4, LnMat);
 }
 
 void Spark(Vector *Src,Vector *Targ, Material* LnMat)
 {
-	//ok, now we need to run from Src to Targ...
+	// Same gather-then-ribbon structure as Lightning_Bolt (per-segment
+	// frags render the pill texture as dashes — see Lightning_Ribbon).
 	float Distance,Seg;
-	Vector Pos,V,NPos,Yosi;
+	Vector Pos,V,NPos;
+	Vector pts[160];
+	int np = 0;
 	Vector_Copy(&Pos,Src);
+	pts[np++] = Pos;
 	do
 	{
 		// randomize direction
@@ -1640,13 +1806,14 @@ void Spark(Vector *Src,Vector *Targ, Material* LnMat)
 		Seg=15.0f+RAND_15()*15.0f/32768.0f;
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
-		Lightning_Bolt_Frag(&Pos,&NPos,1, LnMat);
 		Vector_Copy(&Pos,&NPos);
+		if (np < 159) pts[np++] = Pos;
 		Vector_Sub(Targ,&Pos,&V);
 		Distance = Vector_Length(&V);
-	} while (Distance>30.0f);
+	} while (Distance>30.0f && g_boltBudget>0 && np<159);
 	// attach pos with target
-	Lightning_Bolt_Frag(&Pos,Targ,1, LnMat);
+	pts[np++] = *Targ;
+	Lightning_Ribbon(pts, np, 1, LnMat);
 
 	Generate_Lightning_Particles(Targ,10);
 }
