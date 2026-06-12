@@ -52,3 +52,21 @@ fast_fog_density @ 2800 = 1    # before first / after last key = clamped
   replace.
 - Applied once per frame on the demo thread before rendering — render
   workers see a consistent value for the whole frame.
+
+## Live tuning console
+
+While the demo runs, `http://localhost:8666` (flags: `tune_server`,
+`tune_port`) serves a knob page over the same registry: every flag
+grouped by category with sliders/checkboxes, search, and tooltips.
+Edits apply immediately and count as *explicitly set* — scripts yield
+to them exactly like CLI flags — until the row's ↺ release button
+hands control back. Badges: green dot = the scene script drives this
+param right now (knobs animate at ~2.5 Hz as keyed ramps play);
+orange diamond = time-keyed in the script (bake won't touch it).
+
+**bake to <scene>.params** writes every console-tuned knob straight
+into the scene script on disk — replacing the param's constant line
+or appending one — and releases the knobs to it in the same motion
+(same values, no flash; the script hot-reloads within a few frames).
+No copy/paste: tune by eye, hit bake, the look is committed to the
+file. "copy CLI" remains for A/B command lines.

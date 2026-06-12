@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace fds {
 namespace {
@@ -429,5 +430,134 @@ int   * const FeatureFlags::g_intVals   = state().intVals.data();
 bool  * const FeatureFlags::g_boolSet   = state().boolSet.data();
 bool  * const FeatureFlags::g_floatSet  = state().floatSet.data();
 bool  * const FeatureFlags::g_intSet    = state().intSet.data();
+
+
+// ── Tune-server support ─────────────────────────────────────────────────
+
+static void jsonEscapeInto(std::string &out, const char *s) {
+    for (; *s; ++s) {
+        const char c = *s;
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if ((unsigned char)c < 0x20) { out += ' '; }
+        else out += c;
+    }
+}
+
+void FeatureFlags::dumpParamsJson(std::string &out) {
+    char buf[64];
+    out += "[";
+    bool first = true;
+    auto emit = [&](const char *name, const char *type, const char *cat,
+                    const char *help, const char *val, const char *def,
+                    bool set) {
+        if (!first) out += ",";
+        first = false;
+        out += "{\"name\":\"";   out += name;
+        out += "\",\"type\":\""; out += type;
+        out += "\",\"cat\":\"";  jsonEscapeInto(out, cat);
+        out += "\",\"help\":\""; jsonEscapeInto(out, help);
+        out += "\",\"value\":";  out += val;
+        out += ",\"def\":";       out += def;
+        out += ",\"set\":";       out += set ? "true" : "false";
+        out += "}";
+    };
+    for (int i = 0; i < kNumBool; ++i) {
+        emit(kBoolDefs[i].name, "bool", kBoolDefs[i].category, kBoolDefs[i].help,
+             g_boolVals[i] ? "true" : "false",
+             kBoolDefs[i].defaultValue ? "true" : "false", g_boolSet[i]);
+    }
+    for (int i = 0; i < kNumFloat; ++i) {
+        char v[48], d[48];
+        std::snprintf(v, sizeof v, "%g", g_floatVals[i]);
+        std::snprintf(d, sizeof d, "%g", kFloatDefs[i].defaultValue);
+        emit(kFloatDefs[i].name, "float", kFloatDefs[i].category, kFloatDefs[i].help,
+             v, d, g_floatSet[i]);
+    }
+    for (int i = 0; i < kNumInt; ++i) {
+        char v[32], d[32];
+        std::snprintf(v, sizeof v, "%d", g_intVals[i]);
+        std::snprintf(d, sizeof d, "%d", kIntDefs[i].defaultValue);
+        emit(kIntDefs[i].name, "int", kIntDefs[i].category, kIntDefs[i].help,
+             v, d, g_intSet[i]);
+    }
+    out += "]";
+    (void)buf;
+}
+
+bool FeatureFlags::setParamFromText(const char *name, const char *value) {
+    const ParamRef r = findParam(name);
+    switch (r.type) {
+    case ParamType::Bool: {
+        const bool on = !(std::strcmp(value, "0") == 0 ||
+                          std::strcmp(value, "false") == 0 ||
+                          std::strcmp(value, "off") == 0);
+        g_boolVals[r.index] = on;
+        g_boolSet[r.index]  = true;
+        return true;
+    }
+    case ParamType::Float: {
+        char *end = nullptr;
+        const float v = std::strtof(value, &end);
+        if (end == value) return false;
+        g_floatVals[r.index] = v;
+        g_floatSet[r.index]  = true;
+        return true;
+    }
+    case ParamType::Int: {
+        char *end = nullptr;
+        const long v = std::strtol(value, &end, 10);
+        if (end == value) return false;
+        g_intVals[r.index] = int(v);
+        g_intSet[r.index]  = true;
+        return true;
+    }
+    default: return false;
+    }
+}
+
+void FeatureFlags::dumpSetParams(std::vector<std::pair<std::string, std::string>> &out) {
+    char b[48];
+    for (int i = 0; i < kNumBool; ++i)
+        if (g_boolSet[i]) out.emplace_back(kBoolDefs[i].name, g_boolVals[i] ? "1" : "0");
+    for (int i = 0; i < kNumFloat; ++i)
+        if (g_floatSet[i]) {
+            std::snprintf(b, sizeof b, "%g", g_floatVals[i]);
+            out.emplace_back(kFloatDefs[i].name, b);
+        }
+    for (int i = 0; i < kNumInt; ++i)
+        if (g_intSet[i]) {
+            std::snprintf(b, sizeof b, "%d", g_intVals[i]);
+            out.emplace_back(kIntDefs[i].name, b);
+        }
+}
+
+bool FeatureFlags::clearSetMark(const char *name) {
+    const ParamRef r = findParam(name);
+    switch (r.type) {
+    case ParamType::Bool:  g_boolSet[r.index]  = false; return true;
+    case ParamType::Float: g_floatSet[r.index] = false; return true;
+    case ParamType::Int:   g_intSet[r.index]   = false; return true;
+    default: return false;
+    }
+}
+
+bool FeatureFlags::unsetParam(const char *name) {
+    const ParamRef r = findParam(name);
+    switch (r.type) {
+    case ParamType::Bool:
+        g_boolVals[r.index] = kBoolDefs[r.index].defaultValue;
+        g_boolSet[r.index]  = false;
+        return true;
+    case ParamType::Float:
+        g_floatVals[r.index] = kFloatDefs[r.index].defaultValue;
+        g_floatSet[r.index]  = false;
+        return true;
+    case ParamType::Int:
+        g_intVals[r.index] = kIntDefs[r.index].defaultValue;
+        g_intSet[r.index]  = false;
+        return true;
+    default: return false;
+    }
+}
 
 } // namespace fds

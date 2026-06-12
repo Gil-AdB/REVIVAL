@@ -2,6 +2,9 @@
 #define FDS_FEATURE_FLAGS_H_INCLUDED
 
 #include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
 
 // Compile-time defaults consumed by FeatureFlags.def. Defined here (not in
 // FDS_DECS.H) so the .def is self-contained — anyone including FeatureFlags.h
@@ -121,6 +124,24 @@ public:
     static inline void setDefault(BoolId  id, bool v)  { if (!isSet(id)) g_boolVals [static_cast<int>(id)] = v; }
     static inline void setDefault(FloatId id, float v) { if (!isSet(id)) g_floatVals[static_cast<int>(id)] = v; }
     static inline void setDefault(IntId   id, int v)   { if (!isSet(id)) g_intVals  [static_cast<int>(id)] = v; }
+
+// ── Tune-server support (see Base/TuneServer.cpp) ──────────────────
+    // dumpParamsJson appends a JSON array of every flag: name, type,
+    // current value, default, category, help, and whether it's explicitly
+    // set (CLI/env/web). setParamFromText writes a value by name and marks
+    // it SET (same precedence as the CLI — param scripts yield to it);
+    // unsetParam clears the mark and restores the compile-time default,
+    // handing control back to scripts/defaults.
+    static void dumpParamsJson(std::string &out);
+    // Every explicitly-set param as (name, value-text). Used by the
+    // console's bake-to-script.
+    static void dumpSetParams(std::vector<std::pair<std::string, std::string>> &out);
+    // Clear the SET mark but KEEP the current value (bake handoff: the
+    // just-written script line takes over on its next tick with the same
+    // value — no flash through the compile default).
+    static bool clearSetMark(const char *name);
+    static bool setParamFromText(const char *name, const char *value);
+    static bool unsetParam(const char *name);
 
     // Generated per-flag convenience accessors. Usage: FeatureFlags::deferred().
     #define FDS_FLAG_BOOL(name, env, def, cat, help) \

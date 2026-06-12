@@ -29,6 +29,7 @@ set(Base
     Base/FaceListContext.h
     Base/FeatureFlags.cpp
     Base/ParamScript.cpp
+        Base/TuneServer.cpp
     Base/FeatureFlags.def
     Base/FeatureFlags.h
     Base/FPContract.h

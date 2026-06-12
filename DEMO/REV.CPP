@@ -466,6 +466,7 @@ material global ID or ptr
 #include <float.h>
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
+#include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
 #include "../Modplayer/Modplayer.h"
@@ -1184,7 +1185,15 @@ int main(int argc, const char *argv[])
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
 	g_playMusic = cfg.extractInteger("MusicEnable");
-	g_profilerActive = cfg.extractInteger("ProfilerEnable");
+	// rev.cfg seeds the runtime `profiler` flag (left UNMARKED, so scene
+	// scripts and the tune console can toggle the overlay live). An
+	// explicit --profiler / --no-profiler wins over the cfg.
+	if (cfg.extractInteger("ProfilerEnable") &&
+	    !fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
+		fds::FeatureFlags::setParamFromText("profiler", "1");
+		fds::FeatureFlags::clearSetMark("profiler");
+	}
+	g_profilerActive = fds::FeatureFlags::profiler();
 	g_demoXRes = cfg.extractInteger("ResolutionX");
 	g_demoYRes = cfg.extractInteger("ResolutionY");
 	g_fullScreenMode = cfg.extractInteger("FullScreenMode");
@@ -1285,6 +1294,7 @@ int main(int argc, const char *argv[])
 	// flags fall through to snapshot/bench parsing; those parsers ignore
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
+	fds::TuneServer_Start();
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {

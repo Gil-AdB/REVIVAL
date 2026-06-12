@@ -1,6 +1,10 @@
 #ifndef REVIVAL_PARAMSCRIPT_H
 #define REVIVAL_PARAMSCRIPT_H
 
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace fds {
 
 // Per-scene scripted parameters — see docs/PARAM_SCRIPTS.md.
@@ -29,6 +33,22 @@ void ParamScript_SetScene(const char *sceneName);
 // Evaluate the active script at `timer` and write the values into the
 // FeatureFlags state. Call once per frame, demo thread, before rendering.
 void ParamScript_Tick(float timer);
+
+// Console support. Info appends JSON: {"scene":"city","path":"...",
+// "driven":["fast_fog_density",...],"keyed":["..."]} — driven = params a
+// loaded track currently writes; keyed = driven params with >1 time keys.
+void ParamScript_Info(std::string &jsonOut);
+
+// Bake the given (name, value-text) params into the active scene's
+// SCRIPTS/<scene>.params: replaces each param's constant line or appends
+// one, leaves time-keyed tracks alone (reported, not touched), then
+// clears each baked param's SET mark so the just-saved script takes over
+// seamlessly (same values — no flash). The caller chooses the list (the
+// tune console passes only knobs IT set — never CLI flags). Short human
+// report in reportOut; false if no scene script context exists.
+bool ParamScript_BakeParams(
+    const std::vector<std::pair<std::string, std::string>> &params,
+    std::string &reportOut);
 
 } // namespace fds
 

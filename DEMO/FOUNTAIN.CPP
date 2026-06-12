@@ -63,7 +63,7 @@ static float SwCarry = 0.0f, SwCarry2 = 0.0f;
 
 static Vector Vortex_Center(-0.053f,343.381f, 0.251f);
 
-static int32_t LightningFlag = -1;
+static int32_t g_LnLastTimer = -1;   // scrub tracking for strike triggers
 
 static char MSGStr[160];
 
@@ -899,26 +899,26 @@ void Initialize_Fountain()
 
 	LBoltPcls = new Particle[FntLightningPcls];
 
-	// Bolt cross-section: u runs 0→1 ACROSS the quad's width, so the
-	// profile must be SYMMETRIC — dark edge → hot core → dark edge. The
-	// old gradient ramped black→white across, leaving every bolt bright
-	// on one side and dark on the other. Edges are black because the
+	// Bolt cross-section. evalGradient FOLDS u (1-|u-0.5|*2), so the
+	// endpoint table is the HALF-profile edge(0) → core(1) and the quad
+	// center automatically gets the core. (A pre-symmetrized table gets
+	// double-folded into twin stripes.) Edges are black because the
 	// faces draw ADDITIVE (a bolt is light): black adds nothing, which
-	// also gives free soft anti-aliased edges.
+	// also gives free soft anti-aliased edges. vSlack darkens the v≈0/1
+	// caps — correct now that V is continuous along the WHOLE ribbon
+	// (per-segment V made every segment render as a capped pill: the
+	// 'ladder rungs').
 	std::vector<GradientEndpoint> endpoints;
-	endpoints.emplace_back(0.00, Color{ 0.0, 0.0,  0.0,  0.0 });
-	endpoints.emplace_back(0.20, Color{ 0.25, 0.0, 0.06, 0.0 });
-	endpoints.emplace_back(0.42, Color{ 1.0, 0.30, 0.60, 0.0 });
-	endpoints.emplace_back(0.50, Color{ 1.0, 1.0,  1.0,  0.0 });
-	endpoints.emplace_back(0.58, Color{ 1.0, 0.30, 0.60, 0.0 });
-	endpoints.emplace_back(0.80, Color{ 0.25, 0.0, 0.06, 0.0 });
-	endpoints.emplace_back(1.00, Color{ 0.0, 0.0,  0.0,  0.0 });
+	endpoints.emplace_back(0.00, Color{ 0.0,  0.0,  0.0,  0.0 });
+	endpoints.emplace_back(0.55, Color{ 0.12, 0.0,  0.04, 0.0 });
+	endpoints.emplace_back(0.78, Color{ 0.65, 0.20, 0.45, 0.0 });
+	endpoints.emplace_back(0.88, Color{ 1.0,  0.60, 0.90, 0.0 });
+	endpoints.emplace_back(1.00, Color{ 1.0,  1.0,  1.0,  0.0 });
 
-	g_LnMat = Generate_Gradient(endpoints, 256, 0.01, false);
+	g_LnMat = Generate_Gradient(endpoints, 256, 0.04, false);
 
-	// Arm the strike state machine (was parked at -1 while the bolt
-	// transform/visuals were broken). Re-init safe for snapshots.
-	LightningFlag = 0;
+	// Reset scrub tracking + any reserved strike (re-init safe).
+	g_LnLastTimer = -1;
 	Rsv_LState = 0;
 
 	// Runtime stress knob: FDS_FOUNTAIN_PARTICLE_OMNI_PCT (float in [0..100],
@@ -1167,6 +1167,15 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
+	// The viewport clip is float-exact but the +0.5 rounding above can
+	// push an edge-clipped endpoint to XRes/YRes — YOffs[YRes] is OOB and
+	// a missed `Ptr != End` walks the Bresenham off the framebuffer
+	// (SEGV'd on the spark ring's near-horizontal lines). Clamp into the
+	// drawable region; the AA writes touch +-1 row and +-3 bytes.
+	if (X1 < 2) X1 = 2; if (X1 > (int32_t)XRes-4) X1 = XRes-4;
+	if (X2 < 2) X2 = 2; if (X2 > (int32_t)XRes-4) X2 = XRes-4;
+	if (Y1 < 1) Y1 = 1; if (Y1 > (int32_t)YRes-2) Y1 = YRes-2;
+	if (Y2 < 1) Y2 = 1; if (Y2 > (int32_t)YRes-2) Y2 = YRes-2;
 
 	if (X1<=X2)
 	{
@@ -1185,6 +1194,14 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Dy = Y1-Y2;
 	}
 //	Ptr-=hd;
+	int32_t guard = Dx + Dy + 2;   // exact step count + slack
+	// Per-pixel Z test, perspective-correct via screen-linear RZ lerp.
+	// These fillers draw after the whole frame and used to scribble over
+	// every surface ('not respecting render order').
+	const int32_t zsteps = (Dx > Dy ? Dx : Dy);
+	float rzCur = V1->RZ;
+	const float rzStep = zsteps > 0 ? (V2->RZ - V1->RZ) / (float)zsteps : 0.0f;
+	DWord* const vbase = (DWord *)VPage;
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1195,12 +1212,19 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dy-Dx)<<1;
 		Bi = Dy<<1;
 		D = Bi-Dx;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 			if (D >= 0) {
 				Ptr += Yi;
 				D += Ai;
 			} else D = D + Bi;
 			Ptr += Xi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 			*Ptr = 0xFFFFFF;
 //			memset(Ptr,255,depth<<2);
 		}
@@ -1208,13 +1232,20 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dx-Dy)<<1;
 		Bi = Dx<<1;
 		D = Bi-Dy;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 
 			if (D >= 0) {
 				Ptr += Xi;
 				D += Ai;
 			} else D += Bi;
 			Ptr += Yi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 
 			//left anti-alias
 			cPtr = ((uint8_t *)Ptr)-8;
@@ -1274,6 +1305,15 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
+	// The viewport clip is float-exact but the +0.5 rounding above can
+	// push an edge-clipped endpoint to XRes/YRes — YOffs[YRes] is OOB and
+	// a missed `Ptr != End` walks the Bresenham off the framebuffer
+	// (SEGV'd on the spark ring's near-horizontal lines). Clamp into the
+	// drawable region; the AA writes touch +-1 row and +-3 bytes.
+	if (X1 < 2) X1 = 2; if (X1 > (int32_t)XRes-4) X1 = XRes-4;
+	if (X2 < 2) X2 = 2; if (X2 > (int32_t)XRes-4) X2 = XRes-4;
+	if (Y1 < 1) Y1 = 1; if (Y1 > (int32_t)YRes-2) Y1 = YRes-2;
+	if (Y2 < 1) Y2 = 1; if (Y2 > (int32_t)YRes-2) Y2 = YRes-2;
 
 	if (X1<=X2)
 	{
@@ -1292,6 +1332,14 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Dy = Y1-Y2;
 	}
 //	Ptr-=hd;
+	int32_t guard = Dx + Dy + 2;   // exact step count + slack
+	// Per-pixel Z test, perspective-correct via screen-linear RZ lerp.
+	// These fillers draw after the whole frame and used to scribble over
+	// every surface ('not respecting render order').
+	const int32_t zsteps = (Dx > Dy ? Dx : Dy);
+	float rzCur = V1->RZ;
+	const float rzStep = zsteps > 0 ? (V2->RZ - V1->RZ) / (float)zsteps : 0.0f;
+	DWord* const vbase = (DWord *)VPage;
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
@@ -1302,12 +1350,19 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dy-Dx)<<1;
 		Bi = Dy<<1;
 		D = Bi-Dx;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 			if (D >= 0) {
 				Ptr += Yi;
 				D += Ai;
 			} else D = D + Bi;
 			Ptr += Xi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 //			*Ptr = 0xFFFFFF;
 //			memset(Ptr,255,depth<<2);
 
@@ -1345,13 +1400,20 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 		Ai = (Dx-Dy)<<1;
 		Bi = Dx<<1;
 		D = Bi-Dy;
-		while (Ptr != End) {
+		while (Ptr != End && --guard >= 0) {
 
 			if (D >= 0) {
 				Ptr += Xi;
 				D += Ai;
 			} else D += Bi;
 			Ptr += Yi;
+
+			rzCur += rzStep;
+			{
+				const float zw = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
+				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
+			}
 
 			//left anti-alias
 			cPtr = ((uint8_t *)Ptr)-4;
@@ -1561,26 +1623,165 @@ void Lightning_Particles()
 
 }
 
+// Connected-ribbon bolt renderer. The 1998 per-segment quads crack at the
+// joints, and any segment of the 3D walk that points depth-ward projects
+// to ~zero screen length while keeping its full width — fat sideways bars
+// ('ladder rungs'). One ribbon with joint-averaged screen perpendiculars
+// and shared edge vertices fixes both. The hot core line still draws per
+// segment over the ribbon (it is endpoint-exact and crack-free already).
+static void Lightning_Ribbon(const Vector* pts, int n, int32_t POW, Material* LnMat)
+{
+	if (POW < 1) POW = 1;
+	constexpr int kMax = 160;
+	if (n > kMax) n = kMax;
+	if (n < 2) return;
+	static float px[kMax], py[kMax], rzv[kMax];
+	static bool  vis[kMax];
+	Vertex T;
+	Vector V;
+	for (int i = 0; i < n; ++i) {
+		Vector_Sub(const_cast<Vector*>(pts + i), &View->ISource, &V);
+		MatrixXVector(View->Mat, &V, &T.TPos_AOS);
+		vis[i] = T.TPos_AOS.z >= C_NZP;
+		if (!vis[i]) continue;
+		const float r = 1.0f / T.TPos_AOS.z;
+		px[i] = (T.TPos_AOS.z * CntrX + T.TPos_AOS.x * FOVX) * r;
+		py[i] = (T.TPos_AOS.z * CntrY - T.TPos_AOS.y * FOVY) * r;
+		rzv[i] = r;
+	}
+	// Joint perpendiculars from central differences over visible runs —
+	// a depth-ward middle segment inherits its neighbors' direction
+	// instead of flipping the ribbon sideways.
+	static float nxv[kMax], nyv[kMax];
+	for (int i = 0; i < n; ++i) {
+		if (!vis[i]) continue;
+		const int ip = (i > 0   && vis[i-1]) ? i-1 : i;
+		const int in_ = (i < n-1 && vis[i+1]) ? i+1 : i;
+		float dx = px[in_] - px[ip];
+		float dy = py[in_] - py[ip];
+		const float l2 = dx*dx + dy*dy;
+		if (l2 < 1e-4f) {
+			// isolated/depth-ward: reuse previous joint's perp (or down)
+			nxv[i] = (i > 0 && vis[i-1]) ? nxv[i-1] : 1.0f;
+			nyv[i] = (i > 0 && vis[i-1]) ? nyv[i-1] : 0.0f;
+			continue;
+		}
+		const float rl = 1.0f / sqrtf(l2);
+		float nx_ = -dy * rl, ny_ = dx * rl;
+		// Sign continuity: on a hard kink the central-difference perp can
+		// flip ~180 deg vs the previous joint — the ribbon folds over
+		// itself and the additive double-cover reads as a bright blob.
+		if (i > 0 && vis[i-1] && (nx_*nxv[i-1] + ny_*nyv[i-1]) < 0.0f) {
+			nx_ = -nx_; ny_ = -ny_;
+		}
+		nxv[i] = nx_;
+		nyv[i] = ny_;
+	}
+	// Continuous V along the whole ribbon (cumulative screen length,
+	// normalized): the pill texture's dark caps land only at the bolt's
+	// two ENDS instead of at every segment boundary.
+	static float vcum[kMax];
+	float total = 0.0f;
+	vcum[0] = 0.0f;
+	for (int i = 1; i < n; ++i) {
+		float dl = 0.0f;
+		if (vis[i] && vis[i-1]) {
+			const float ddx = px[i]-px[i-1], ddy = py[i]-py[i-1];
+			dl = sqrtf(ddx*ddx + ddy*ddy);
+		}
+		total += dl;
+		vcum[i] = total;
+	}
+	const float invTotal = total > 1.0f ? 1.0f/total : 1.0f;
+	for (int i = 0; i < n; ++i) vcum[i] *= invTotal;
+	Viewport vp;
+	viewportInit(vp, FntSc);
+	const auto rt   = fds::MainRenderTargetFromGlobals();
+	const auto& cam = fds::g_mainCamera;
+	for (int i = 0; i + 1 < n; ++i) {
+		if (!vis[i] || !vis[i+1]) continue;
+		if (--g_boltBudget < 0) return;
+		// World half-width projected to px, clamped sane at 1080p.
+		const float wf = fds::FeatureFlags::bolt_width();
+		float hA = POW * wf * rzv[i]   * FOVX;
+		float hB = POW * wf * rzv[i+1] * FOVX;
+		if (hA < 1.0f) hA = 1.0f; if (hA > 9.0f) hA = 9.0f;
+		if (hB < 1.0f) hB = 1.0f; if (hB > 9.0f) hB = 9.0f;
+		Vertex quad[4];
+		quad[0].PX = px[i]   - hA*nxv[i];   quad[0].PY = py[i]   - hA*nyv[i];
+		quad[0].UZ = 0;                     quad[0].VZ = vcum[i]*rzv[i];
+		quad[0].RZ = rzv[i];
+		quad[1].PX = px[i]   + hA*nxv[i];   quad[1].PY = py[i]   + hA*nyv[i];
+		quad[1].UZ = rzv[i];                quad[1].VZ = vcum[i]*rzv[i];
+		quad[1].RZ = rzv[i];
+		quad[2].PX = px[i+1] + hB*nxv[i+1]; quad[2].PY = py[i+1] + hB*nyv[i+1];
+		quad[2].UZ = rzv[i+1];              quad[2].VZ = vcum[i+1]*rzv[i+1];
+		quad[2].RZ = rzv[i+1];
+		quad[3].PX = px[i+1] - hB*nxv[i+1]; quad[3].PY = py[i+1] - hB*nyv[i+1];
+		quad[3].UZ = 0;                     quad[3].VZ = vcum[i+1]*rzv[i+1];
+		quad[3].RZ = rzv[i+1];
+		for (int k = 0; k != 4; ++k) {
+			Vertex& v = quad[k];
+			v.LA = v.LR = v.LG = v.LB = 255.0;
+			viewportCalcFlags(vp, &v);
+		}
+		Face f[2];
+		f[0].A = &quad[0]; f[0].B = &quad[1]; f[0].C = &quad[2];
+		f[0].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
+		f[0].Txtr = LnMat;
+		f[1].A = &quad[0]; f[1].B = &quad[2]; f[1].C = &quad[3];
+		f[1].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
+		f[1].Txtr = LnMat;
+		_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
+		_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
+		// Hot core over the ribbon.
+		Vertex A, B;
+		A.PX = px[i];   A.PY = py[i];   A.RZ = rzv[i];
+		A.TPos_AOS.z = 1.0f / rzv[i];
+		B.PX = px[i+1]; B.PY = py[i+1]; B.RZ = rzv[i+1];
+		B.TPos_AOS.z = 1.0f / rzv[i+1];
+		A.LR = B.LR = float(POW);
+		if (POW > 1)
+			Bivex_Frustrum_Perspective(&A, &B, Lightning_Line);
+		else
+			Bivex_Frustrum_Perspective(&A, &B, Spark_Line);
+	}
+}
+
 void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 {
-	//ok, now we need to run from Src to Targ...
+	// Walk Src->Targ gathering the path, then draw ONE connected ribbon.
 	float Distance,Seg;
 	Vector Pos,V,NPos,Yosi;
+	Vector pts[160];
+	int np = 0;
 	Vector_Copy(&Pos,Src);
+	pts[np++] = Pos;
 	do
 	{
-		// randomize direction
+		// randomize direction. Uniform 30-60u segments deflected up to
+		// ~30 deg EVERY step read as a mechanical staircase at 1080p
+		// (fine at the 1998 320x240). Real bolts run mostly straight
+		// with occasional hard kinks: shorter segments, mild deviation,
+		// 20% chance of a sharp kink.
 		Vector_Sub(Targ,&Pos,&V);
 		Vector_Norm(&V);
-		V.x += ((float)(RAND_15()-16384))*0.5f/16384.0f;
-		V.y += ((float)(RAND_15()-16384))*0.5f/16384.0f;
-		V.z += ((float)(RAND_15()-16384))*0.5f/16384.0f;
+		{
+			const float kinkP = fds::FeatureFlags::bolt_kink();
+			const float amp = (RAND_15() < (int32_t)(kinkP*32768.0f)) ? 0.75f : 0.07f;
+			V.x += ((float)(RAND_15()-16384))*amp/16384.0f;
+			V.y += ((float)(RAND_15()-16384))*amp/16384.0f;
+			V.z += ((float)(RAND_15()-16384))*amp/16384.0f;
+		}
 		Vector_Norm(&V);
-		Seg=30.0f+RAND_15()*30.0f/32768.0f;
+		{
+			const float segBase = fds::FeatureFlags::bolt_seg();
+			Seg=segBase+RAND_15()*segBase/32768.0f;
+		}
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
-		Lightning_Bolt_Frag(&Pos,&NPos,BasePow>>4, LnMat);
 		Vector_Copy(&Pos,&NPos);
+		if (np < 160) pts[np++] = Pos;
 		Vector_Sub(Targ,&Pos,&V);
 		Distance = Vector_Length(&V);
 		if (g_boltBudget>0&&Distance>60.0f&&Distance<400.0f&&(RAND_15()<320*BasePow-Distance*15))
@@ -1590,18 +1791,21 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 			Yosi.z = Pos.z;
 			Lightning_Bolt(&Pos,&Yosi,BasePow>>1, LnMat);
 		}
-	} while (Distance>60.0f&&g_boltBudget>0);
-	// attach pos with target
+	} while (Distance>60.0f&&g_boltBudget>0&&np<160);
 
-//	Generate_Lightning_Particles(&Pos,50);
+	Lightning_Ribbon(pts, np, BasePow>>4, LnMat);
 }
 
 void Spark(Vector *Src,Vector *Targ, Material* LnMat)
 {
-	//ok, now we need to run from Src to Targ...
+	// Same gather-then-ribbon structure as Lightning_Bolt (per-segment
+	// frags render the pill texture as dashes — see Lightning_Ribbon).
 	float Distance,Seg;
-	Vector Pos,V,NPos,Yosi;
+	Vector Pos,V,NPos;
+	Vector pts[160];
+	int np = 0;
 	Vector_Copy(&Pos,Src);
+	pts[np++] = Pos;
 	do
 	{
 		// randomize direction
@@ -1614,13 +1818,14 @@ void Spark(Vector *Src,Vector *Targ, Material* LnMat)
 		Seg=15.0f+RAND_15()*15.0f/32768.0f;
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
-		Lightning_Bolt_Frag(&Pos,&NPos,1, LnMat);
 		Vector_Copy(&Pos,&NPos);
+		if (np < 159) pts[np++] = Pos;
 		Vector_Sub(Targ,&Pos,&V);
 		Distance = Vector_Length(&V);
-	} while (Distance>30.0f);
+	} while (Distance>30.0f && g_boltBudget>0 && np<159);
 	// attach pos with target
-	Lightning_Bolt_Frag(&Pos,Targ,1, LnMat);
+	pts[np++] = *Targ;
+	Lightning_Ribbon(pts, np, 1, LnMat);
 
 	Generate_Lightning_Particles(Targ,10);
 }
@@ -1645,109 +1850,43 @@ void Handle_Lightning()
 		Ambient_Factor *= exp(-dTime*0.02);
 		Ambient_Factor += basicSceneAmbient;
 	}
-	switch (LightningFlag)
-	{
-		case 0:
-			if (Timer>FntLightningTime1)
-			{
-				LightningFlag = 1;
-				Upwards.x = Pylon->x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon->y+1000.0f;
-				Upwards.z = Pylon->z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon->x;
+	// Scrub-aware strike triggers (replaces the one-way LightningFlag
+	// state machine, which never re-armed: F1/F2 rewind and pause made
+	// strikes undebuggable). A strike fires on the UPWARD crossing of its
+	// time; rewinding below a time re-arms it. The spire-ring finale is a
+	// pure Timer window, so it scrubs naturally in both directions.
+	static const int32_t strikeT[6] = {
+		FntLightningTime1, FntLightningTime2, FntLightningTime3,
+		FntLightningTime4, FntLightningTime5, FntLightningTime6,
+	};
+	static const int32_t strikeP[6] = { 45, 50, 55, 60, 65, 70 };   // 1998 escalation
+	const int32_t now = Timer;
+	if (g_LnLastTimer >= 0 && now > g_LnLastTimer) {
+		for (int i = 0; i < 6; ++i) {
+			if (g_LnLastTimer < strikeT[i] && now >= strikeT[i]) {
+				Upwards.x = Pylon[i].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
+				Upwards.y = Pylon[i].y+1000.0f;
+				Upwards.z = Pylon[i].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
+				Downwards.x = Pylon[i].x;
 				Downwards.y = 0.0f;
-				Downwards.z = Pylon->z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,45);
+				Downwards.z = Pylon[i].z;
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,strikeP[i]);
 				Ambient_Factor = 255.0f;
 			}
-		break;
-		case 1:
-			if (Timer>FntLightningTime2)
-			{
-				LightningFlag = 2;
-				Upwards.x = Pylon[1].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[1].y+1000.0f;
-				Upwards.z = Pylon[1].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[1].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[1].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,50);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 2:
-			if (Timer>FntLightningTime3)
-			{
-				LightningFlag = 3;
-				Upwards.x = Pylon[2].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[2].y+1000.0f;
-				Upwards.z = Pylon[2].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[2].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[2].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,55);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 3:
-			if (Timer>FntLightningTime4)
-			{
-				LightningFlag = 4;
-				Upwards.x = Pylon[3].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[3].y+1000.0f;
-				Upwards.z = Pylon[3].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[3].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[3].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,60);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 4:
-			if (Timer>FntLightningTime5)
-			{
-				LightningFlag = 5;
-				Upwards.x = Pylon[4].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[4].y+1000.0f;
-				Upwards.z = Pylon[4].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[4].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[4].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,65);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 5:
-			if (Timer>FntLightningTime6)
-			{
-				LightningFlag = 6;
-				Upwards.x = Pylon[5].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[5].y+1000.0f;
-				Upwards.z = Pylon[5].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Downwards.x = Pylon[5].x;
-				Downwards.y = 0.0f;
-				Downwards.z = Pylon[5].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,70);
-				Ambient_Factor = 255.0f;
-			}
-		break;
-		case 6:
-			if (Timer>FntLightningTime6+100)
-			{
-				if (Timer>FntLightningTime6+400)
-					LightningFlag = 7;
-
-//				Reserve_Lightning_Bolt(NULL,NULL,-1); //special code
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,-1);
-				Ambient_Factor = basicSceneAmbient*2.0;
-			}
-		break;
-		default:
-		break;
+		}
 	}
-	FntSc->Ambient.R = Ambient_Factor;
-	FntSc->Ambient.G = Ambient_Factor;
-	FntSc->Ambient.B = Ambient_Factor;
+	g_LnLastTimer = now;
+	// A strike rewound out from under its TTL is cancelled (the TTL is
+	// Timer+20 at reserve time; anything 25+ below it means we scrubbed).
+	if (Rsv_LState && Rsv_LUntil > 0 && now < Rsv_LUntil - 25) {
+		Rsv_LState = 0;
+		Rsv_LUntil = -1;
+	}
+	// Spire-ring finale window.
+	if (now > FntLightningTime6+100 && now < FntLightningTime6+400) {
+		Reserve_Lightning_Bolt(&Upwards,&Downwards,-1);
+		Ambient_Factor = basicSceneAmbient*2.0;
+	}
 }
 
 
@@ -2299,6 +2438,13 @@ struct FountainScene : SceneDriver {
 				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
 				if (Timer >= Rsv_LUntil) { Rsv_LState = 0; Rsv_LUntil = -1; }
 			} else {
+				// The 1998 finale (commented out even in the original):
+				// a ring of arcs crackling between consecutive spire
+				// TOPS, re-randomized every frame for the ~3s window
+				// (case 6 keeps re-reserving with Pow=-1).
+				g_boltBudget = 900;
+				for (int pi = 0; pi < 6; ++pi)
+					Spark(Pylon + pi, Pylon + ((pi + 1) % 6), g_LnMat);
 				Rsv_LState = 0;
 				Rsv_LUntil = -1;
 			}
