@@ -2548,20 +2548,9 @@ struct CityScene : SceneDriver {
 			fds::RenderStats_Flush();
 			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
 			scroll = prof.drawOverlay(scroll);
-			// Clipper bucket breakdown — what % of polys take which path.
-			// Lets us estimate the savings from skipping non-essential
-			// clipper work for triangles that don't need it.
-			if (fds_stats::g_clipperEntered) {
-				snprintf(MSGStr, sizeof MSGStr,
-					"clip: tot=%u Z=%u 2D=%u mip=%u(uniform=%u split=%u)",
-					fds_stats::g_clipperEntered,
-					fds_stats::g_clipNeedZ,
-					fds_stats::g_clipNeed2D,
-					fds_stats::g_mipEntered,
-					fds_stats::g_mipFastUniform,
-					fds_stats::g_mipSplit);
-				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-			}
+			// (clipper bucket breakdown removed from the overlay — the
+			// counters still exist in fds_stats if an investigation
+			// needs them; greets dropped its line for the same reason.)
 		}
 		// 'G' (grab) — same as greets/conetest: dump THIS completed frame
 		// (VPage right before Flip) to /tmp/city_dump_N.ppm and print the
