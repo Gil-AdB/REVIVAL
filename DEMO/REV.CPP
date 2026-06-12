@@ -466,6 +466,7 @@ material global ID or ptr
 #include <float.h>
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
+#include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
 #include "../Modplayer/Modplayer.h"
@@ -1285,6 +1286,7 @@ int main(int argc, const char *argv[])
 	// flags fall through to snapshot/bench parsing; those parsers ignore
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
+	fds::TuneServer_Start();
 
 	SnapshotConfig snap;
 	if (ParseSnapshotArgs(argc, argv, snap)) {

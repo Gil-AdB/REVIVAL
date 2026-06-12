@@ -221,7 +221,9 @@ void ParamScript_Tick(float timer) {
 	}
 
 	for (const Track &t : g.tracks) {
-		if (t.shadowed) continue;
+		// shadowed = CLI/env at load; paramIsCliSet re-checked per tick so
+		// a tune-server write takes a live track over immediately.
+		if (t.shadowed || paramIsCliSet(t.ref)) continue;
 		writeParam(t.ref, evalTrack(t, timer));
 	}
 }

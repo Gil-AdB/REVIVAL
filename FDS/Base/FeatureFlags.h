@@ -2,6 +2,7 @@
 #define FDS_FEATURE_FLAGS_H_INCLUDED
 
 #include <cstdio>
+#include <string>
 
 // Compile-time defaults consumed by FeatureFlags.def. Defined here (not in
 // FDS_DECS.H) so the .def is self-contained — anyone including FeatureFlags.h
@@ -113,6 +114,17 @@ public:
     static inline bool isSet(BoolId  id) { return g_boolSet [static_cast<int>(id)]; }
     static inline bool isSet(FloatId id) { return g_floatSet[static_cast<int>(id)]; }
     static inline bool isSet(IntId   id) { return g_intSet  [static_cast<int>(id)]; }
+
+    // ── Tune-server support (see Base/TuneServer.cpp) ──────────────────
+    // dumpParamsJson appends a JSON array of every flag: name, type,
+    // current value, default, category, help, and whether it's explicitly
+    // set (CLI/env/web). setParamFromText writes a value by name and marks
+    // it SET (same precedence as the CLI — param scripts yield to it);
+    // unsetParam clears the mark and restores the compile-time default,
+    // handing control back to scripts/defaults.
+    static void dumpParamsJson(std::string &out);
+    static bool setParamFromText(const char *name, const char *value);
+    static bool unsetParam(const char *name);
 
     // Generated per-flag convenience accessors. Usage: FeatureFlags::deferred().
     #define FDS_FLAG_BOOL(name, env, def, cat, help) \

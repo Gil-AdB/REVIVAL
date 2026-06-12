@@ -52,3 +52,14 @@ fast_fog_density @ 2800 = 1    # before first / after last key = clamped
   replace.
 - Applied once per frame on the demo thread before rendering — render
   workers see a consistent value for the whole frame.
+
+## Live tuning console
+
+While the demo runs, `http://localhost:8666` (flags: `tune_server`,
+`tune_port`) serves a knob page over the same registry: every flag
+grouped by category with sliders/checkboxes, search, and tooltips.
+Edits apply immediately and count as *explicitly set* — scripts yield
+to them exactly like CLI flags — until the row's ↺ release button
+hands control back. "copy CLI" / "copy .params" export everything
+you've touched, so the loop is: tune by eye → copy → paste into
+`SCRIPTS/<scene>.params`.
