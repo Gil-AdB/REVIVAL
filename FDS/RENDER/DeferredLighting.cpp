@@ -4532,8 +4532,52 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                     _mm256_sub_ps(vZMaxFade_v, zm), vInvDz_v);
                                 sf = _mm256_max_ps(vZero_v,
                                      _mm256_min_ps(vOne_v, sf));
+                                // Per-segment shadow tap: the single
+                                // whole-chord midpoint tap let beam
+                                // segments BEHIND walls glow whenever
+                                // the midpoint happened to be lit (the
+                                // beams-through-walls report). One
+                                // scalar tap per segment×lane, narrow
+                                // cones only — the tile cone-cull keeps
+                                // the per-frame count small.
+                                __m256 shv = vOne_v;
+                                if (sm) {
+                                    alignas(32) float zmA[8], shA[8] =
+                                        {1,1,1,1,1,1,1,1};
+                                    _mm256_store_ps(zmA, zm);
+                                    for (int ln = 0; ln < laneCount; ++ln) {
+                                        if (aliveLane[ln] == 0.0f) continue;
+                                        const float zL = zmA[ln];
+                                        float zX = zL * Xarr[ln];
+                                        float zY = zL * Y, zZ = zL;
+                                        if (smMirror) {
+                                            const float t2r = 2.0f *
+                                                (nvx*zX + nvy*zY + nvz*zZ + dv_pl);
+                                            zX -= t2r * nvx;
+                                            zY -= t2r * nvy;
+                                            zZ -= t2r * nvz;
+                                        }
+                                        const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zZ + sm_ox;
+                                        const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zZ + sm_oy;
+                                        const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zZ + sm_oz;
+                                        if (lz <= 0.0f) continue;
+                                        const float invLZ = 1.0f / lz;
+                                        const int iX = int(sm_cntrX + sm_perspX * lx * invLZ);
+                                        const int iY = int(sm_cntrY - sm_perspY * ly * invLZ);
+                                        if (uint32_t(iX) >= uint32_t(sm_xres) ||
+                                            uint32_t(iY) >= uint32_t(sm_yres)) continue;
+                                        const size_t o2 = size_t(iY) * size_t(sm_xres) + size_t(iX);
+                                        const uint16_t zS = std::max(
+                                            sm->depth[o2], sm->depth_dynamic[o2]);
+                                        int pixZ = 0xFF80 - int(lz * sm_zScale);
+                                        if (pixZ < 0) pixZ = 0;
+                                        if (pixZ + 128 < int(zS)) shA[ln] = 0.0f;
+                                    }
+                                    shv = _mm256_load_ps(shA);
+                                }
                                 vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
-                                       _mm256_mul_ps(coneAttenAt(zm), sf), vSum);
+                                       _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
+                                                     shv), vSum);
                                 uPrev = uk;
                             }
                             vIntegral = _mm256_mul_ps(
@@ -4646,7 +4690,9 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         // shadow boundaries; tolerated because halos
                         // are diffuse. Mirrors the in-loop sm path
                         // above but uses zMid instead of per-sample z.
-                        if (sm) {
+                        if (sm && !narrowCone) {
+                            // (narrow cones fold shadow per segment in
+                            // the hybrid above)
                             alignas(32) float maskArr_s[8], zArr_s[8];
                             _mm256_store_ps(maskArr_s, m);
                             _mm256_store_ps(zArr_s, vZMid);
