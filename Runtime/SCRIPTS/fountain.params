@@ -1,0 +1,5 @@
+# Fountain — lightning look knobs (hot-reloads on save while the demo runs).
+# Pause (P) inside a strike window and scrub with F1/F2 to replay strikes.
+bolt_width = 1.3    # ribbon half-width factor (thin=0.8, fat=3)
+bolt_kink  = 0.15   # sharp-kink probability per segment
+bolt_seg   = 24     # segment base length, world units

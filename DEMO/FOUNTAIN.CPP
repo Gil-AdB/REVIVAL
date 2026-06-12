@@ -910,9 +910,9 @@ void Initialize_Fountain()
 	// 'ladder rungs').
 	std::vector<GradientEndpoint> endpoints;
 	endpoints.emplace_back(0.00, Color{ 0.0,  0.0,  0.0,  0.0 });
-	endpoints.emplace_back(0.45, Color{ 0.25, 0.0,  0.06, 0.0 });
-	endpoints.emplace_back(0.78, Color{ 1.0,  0.30, 0.60, 0.0 });
-	endpoints.emplace_back(0.92, Color{ 1.0,  1.0,  1.0,  0.0 });
+	endpoints.emplace_back(0.55, Color{ 0.12, 0.0,  0.04, 0.0 });
+	endpoints.emplace_back(0.78, Color{ 0.65, 0.20, 0.45, 0.0 });
+	endpoints.emplace_back(0.88, Color{ 1.0,  0.60, 0.90, 0.0 });
 	endpoints.emplace_back(1.00, Color{ 1.0,  1.0,  1.0,  0.0 });
 
 	g_LnMat = Generate_Gradient(endpoints, 256, 0.04, false);
@@ -1667,8 +1667,15 @@ static void Lightning_Ribbon(const Vector* pts, int n, int32_t POW, Material* Ln
 			continue;
 		}
 		const float rl = 1.0f / sqrtf(l2);
-		nxv[i] = -dy * rl;
-		nyv[i] =  dx * rl;
+		float nx_ = -dy * rl, ny_ = dx * rl;
+		// Sign continuity: on a hard kink the central-difference perp can
+		// flip ~180 deg vs the previous joint — the ribbon folds over
+		// itself and the additive double-cover reads as a bright blob.
+		if (i > 0 && vis[i-1] && (nx_*nxv[i-1] + ny_*nyv[i-1]) < 0.0f) {
+			nx_ = -nx_; ny_ = -ny_;
+		}
+		nxv[i] = nx_;
+		nyv[i] = ny_;
 	}
 	// Continuous V along the whole ribbon (cumulative screen length,
 	// normalized): the pill texture's dark caps land only at the bolt's
@@ -1695,10 +1702,11 @@ static void Lightning_Ribbon(const Vector* pts, int n, int32_t POW, Material* Ln
 		if (!vis[i] || !vis[i+1]) continue;
 		if (--g_boltBudget < 0) return;
 		// World half-width projected to px, clamped sane at 1080p.
-		float hA = POW * 1.6f * rzv[i]   * FOVX;
-		float hB = POW * 1.6f * rzv[i+1] * FOVX;
-		if (hA < 1.2f) hA = 1.2f; if (hA > 14.0f) hA = 14.0f;
-		if (hB < 1.2f) hB = 1.2f; if (hB > 14.0f) hB = 14.0f;
+		const float wf = fds::FeatureFlags::bolt_width();
+		float hA = POW * wf * rzv[i]   * FOVX;
+		float hB = POW * wf * rzv[i+1] * FOVX;
+		if (hA < 1.0f) hA = 1.0f; if (hA > 9.0f) hA = 9.0f;
+		if (hB < 1.0f) hB = 1.0f; if (hB > 9.0f) hB = 9.0f;
 		Vertex quad[4];
 		quad[0].PX = px[i]   - hA*nxv[i];   quad[0].PY = py[i]   - hA*nyv[i];
 		quad[0].UZ = 0;                     quad[0].VZ = vcum[i]*rzv[i];
@@ -1759,13 +1767,17 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 		Vector_Sub(Targ,&Pos,&V);
 		Vector_Norm(&V);
 		{
-			const float amp = (RAND_15() < 6553) ? 0.55f : 0.18f;
+			const float kinkP = fds::FeatureFlags::bolt_kink();
+			const float amp = (RAND_15() < (int32_t)(kinkP*32768.0f)) ? 0.75f : 0.07f;
 			V.x += ((float)(RAND_15()-16384))*amp/16384.0f;
 			V.y += ((float)(RAND_15()-16384))*amp/16384.0f;
 			V.z += ((float)(RAND_15()-16384))*amp/16384.0f;
 		}
 		Vector_Norm(&V);
-		Seg=16.0f+RAND_15()*16.0f/32768.0f;
+		{
+			const float segBase = fds::FeatureFlags::bolt_seg();
+			Seg=segBase+RAND_15()*segBase/32768.0f;
+		}
 		Vector_SelfScale(&V,Seg);
 		Vector_Add(&Pos,&V,&NPos);
 		Vector_Copy(&Pos,&NPos);
