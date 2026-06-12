@@ -275,6 +275,17 @@ static inline TileChunkSphere tileChunkSphere(float x0, float x1,
 	return t;
 }
 
+// Fast-fog hooks for the transparent peel (defined in DeferredFastFog
+// .cpp): per-frame validity + a sample of in-scatter acc / transmittance
+// T at a pixel's own depth. Froxel variant fetches the grid; screen-
+// space variant evaluates the analytic/blob fog for the ray.
+bool FastFog_XparActive();
+void FastFog_SampleGrid(int px, int py, float z,
+                        float& aR, float& aG, float& aB, float& T);
+bool FastFog_SSActive();
+void FastFog_SSSample(int px, int py, float z,
+                      float& aR, float& aG, float& aB, float& T);
+
 // Volumetric-pass timing accumulators (one set per process; updated
 // from the main thread that owns the pass dispatch). Printed every
 // FDS_VOL_PROF_INTERVAL frames (default 60) by VolProf_Tick. Shared
