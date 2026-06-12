@@ -39,4 +39,9 @@ the gate. Gate script: /tmp/split_gate.sh (session-local).
   near-clipped bounce shadow maps + half-space clamp redo. User relief:
   --no-mirror-bounce.
 - Tune-server precedence assert (setDefault < ParamScript < CLI < console).
-- TSan sweep results in /tmp/tsan_sweep* (task bps278tey) if still around.
+- TSan sweep DONE (task bps278tey, /tmp/tsan_sweep.6800, 11 reports):
+  shadow path shows only the known-benign BSphereScreenPos race (now
+  confirmed firing in the per-light Transform fan-out). NEW: greets
+  init-thread LightmapBake_Static races main-thread Animate_Objects
+  spline writes (init overlap) — torn spline reads can vary the static
+  lightmap bake per run. Details in memory shadow-tile-flicker-hunt.
