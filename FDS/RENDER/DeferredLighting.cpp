@@ -4066,6 +4066,15 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
     // midpoint coneAtten / shadow tap.
     const bool useAnalytic = analyticCone;
     const float noiseStrength = fds::FeatureFlags::vol_analytic_noise();
+    // Mirror gate planes for clone-spot beams (halo-pass precedent):
+    // clone beams only paint inside their mirror's stamped footprint,
+    // starting at the wall depth. Null when the scene has no mirrors —
+    // and then no clone spots are in the list either.
+    const meka::u8 *mmask = (g_gbuffer && !g_gbuffer->mirrorMask.empty())
+        ? g_gbuffer->mirrorMask.data() : nullptr;
+    const uint16_t *mmz = (g_gbuffer && !g_gbuffer->mirrorMaskZ.empty())
+        ? g_gbuffer->mirrorMaskZ.data() : nullptr;
+    extern DeferredLightingCtx g_deferredCtx;
     if (fds::FeatureFlags::vol_prof()) {
         (useAnalytic ? g_coneAnalyticHits
                      : g_coneRaymarchHits)
@@ -4146,6 +4155,10 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     const bool  narrowCone = cosO > 0.985f;
                     const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
                     const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
+                    // Clone spot: beam reflection, confined to its
+                    // mirror's footprint below.
+                    const uint32_t omid = lights->mirrorId[li];
+                    if (omid != 0 && (!mmask || !mmz)) continue;
                     const float r2   = lights->range2[li];
                     const float rr   = lights->rRange[li];
                     const float DP   = Dx*Px + Dy*Py_l + Dz*Pz;
@@ -4223,6 +4236,18 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                         // then modulates the whole-chord brightness
                         // (the grazing-angle 'fur' on beams).
                         if (zHi > zMax)   zHi = zMax;
+                        // Clone beam: only inside its mirror's stamped
+                        // footprint, and only BEHIND the glass — clamp
+                        // the chord start to the wall depth (halo-pass
+                        // precedent).
+                        if (omid != 0) {
+                            const size_t pi = row + size_t(pxBase + lane);
+                            if (uint32_t(mmask[pi]) != omid) continue;
+                            const float zWall =
+                                float(0xFF80 - int(mmz[pi])) * invZScale;
+                            if (zLo < zWall) zLo = zWall;
+                            if (zHi <= zLo) continue;
+                        }
                         if (std::fabs(DV) > 1e-6f) {
                             const float zFwd = DP / DV;
                             if (DV > 0.0f) { if (zLo < zFwd) zLo = zFwd; }
@@ -4236,7 +4261,32 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                     }
                     if (!spotAlive) continue;
 
-                    const int32_t smIdx = lights->shadowMapIdx[li];
+                    // Clone spots have no own map (smIdx=-1) but carry
+                    // the SOURCE's map: visibility of a sample equals
+                    // the source's visibility of the sample reflected
+                    // across the mirror plane (same identity as the
+                    // surface kernel's mirrored tap). The reflection is
+                    // applied in VIEW space: v' = v − 2(n_v·v + d_v)n_v
+                    // with n_v = viewMatᵀ·N_world, d_v = N·camW + D.
+                    int32_t smIdx = lights->shadowMapIdx[li];
+                    bool  smMirror = false;
+                    float nvx=0, nvy=0, nvz=0, dv_pl=0;
+                    if (smIdx < 0 && omid != 0 &&
+                        lights->srcShadowMapIdx[li] >= 0) {
+                        smIdx = lights->srcShadowMapIdx[li];
+                        smMirror = true;
+                        const float Nx = lights->mirNX[li];
+                        const float Ny = lights->mirNY[li];
+                        const float Nz = lights->mirNZ[li];
+                        const auto &VW = g_deferredCtx.viewToWorld;
+                        nvx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
+                        nvy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
+                        nvz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
+                        dv_pl = Nx*g_deferredCtx.cameraWorldX +
+                                Ny*g_deferredCtx.cameraWorldY +
+                                Nz*g_deferredCtx.cameraWorldZ +
+                                lights->mirD[li];
+                    }
                     const ShadowMap *sm = (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size())
                                           ? &g_shadowMaps[smIdx] : nullptr;
                     float sm_m00=0, sm_m01=0, sm_m02=0, sm_ox=0;
@@ -4567,10 +4617,20 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                 if (maskArr_s[lane] == 0) continue;
                                 const float zL = zArr_s[lane];
                                 const float Xl = Xarr[lane];
-                                const float zX = zL * Xl, zY = zL * Y;
-                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zL + sm_ox;
-                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zL + sm_oy;
-                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zL + sm_oz;
+                                float zX = zL * Xl, zY = zL * Y, zZ = zL;
+                                if (smMirror) {
+                                    // Reflect the sample across the
+                                    // mirror plane (view space) — the
+                                    // source light's map sees its side.
+                                    const float t2r = 2.0f *
+                                        (nvx*zX + nvy*zY + nvz*zZ + dv_pl);
+                                    zX -= t2r * nvx;
+                                    zY -= t2r * nvy;
+                                    zZ -= t2r * nvz;
+                                }
+                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zZ + sm_ox;
+                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zZ + sm_oy;
+                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zZ + sm_oz;
                                 if (lz <= 0.0f) continue;
                                 const float invLZ = 1.0f / lz;
                                 const float smX = sm_cntrX + sm_perspX * lx * invLZ;
@@ -4665,10 +4725,17 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                                 if (maskArr[lane] == 0) continue;
                                 const float zL = zArr[lane];
                                 const float Xl = Xarr[lane];
-                                const float zX = zL * Xl, zY = zL * Y;
-                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zL + sm_ox;
-                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zL + sm_oy;
-                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zL + sm_oz;
+                                float zX = zL * Xl, zY = zL * Y, zZ = zL;
+                                if (smMirror) {
+                                    const float t2r = 2.0f *
+                                        (nvx*zX + nvy*zY + nvz*zZ + dv_pl);
+                                    zX -= t2r * nvx;
+                                    zY -= t2r * nvy;
+                                    zZ -= t2r * nvz;
+                                }
+                                const float lx = sm_m00*zX + sm_m01*zY + sm_m02*zZ + sm_ox;
+                                const float ly = sm_m10*zX + sm_m11*zY + sm_m12*zZ + sm_oy;
+                                const float lz = sm_m20*zX + sm_m21*zY + sm_m22*zZ + sm_oz;
                                 if (lz <= 0.0f) continue;
                                 const float invLZ = 1.0f / lz;
                                 const float smX = sm_cntrX + sm_perspX * lx * invLZ;
@@ -4788,6 +4855,10 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 const float cosI = lights->cosInner[li];
                 const float r2   = lights->range2[li];
                 const float rr   = lights->rRange[li];
+                // Clone-beam footprint gate (vec path has the same;
+                // scalar fallback keeps correctness for A/B).
+                const uint32_t omid_s = lights->mirrorId[li];
+                if (omid_s != 0 && (!mmask || !mmz)) continue;
 
                 const float DV = Dx*X + Dy*Y + Dz;
                 const float DP = Dx*Px + Dy*Py + Dz*Pz;
@@ -4888,6 +4959,14 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
                 if (zHi > zSphHi) zHi = zSphHi;
                 if (zLo < zMin)   zLo = zMin;
                 if (zHi <= zLo)   continue;
+                if (omid_s != 0) {
+                    const size_t pi = size_t(py) * size_t(XRes) + size_t(px);
+                    if (uint32_t(mmask[pi]) != omid_s) continue;
+                    const float zWall =
+                        float(0xFF80 - int(mmz[pi])) * invZScale;
+                    if (zLo < zWall) zLo = zWall;
+                    if (zHi <= zLo) continue;
+                }
                 // Early-out: entire cone interval past the visible surface
                 // (zMax is the surface/sky cap; everything past it is fully
                 // occluded). Without this we'd still loop N samples for no
@@ -5128,12 +5207,16 @@ void Render_VolumetricCones() {
     const int numLights = g_deferredCtx.numLights;
 
     // Pre-filter spotlight indices once per frame; tiles share the result.
-    // Mirror-clone spots are excluded (additive cone glow would wash
-    // across the reflection — see Render_OmniHalos).
+    // Mirror-clone spots ARE admitted (beams show in mirrors): the tile
+    // fn gates them per pixel on the mirror footprint mask and clamps
+    // the chord to start at the wall depth — same containment the halo
+    // pass uses for clone-omni glows. Ungated they'd wash additive glow
+    // across pixels IN FRONT of the mirror, which is why they were
+    // excluded before the gate existed.
     static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int spotCount = 0;
     for (int i = 0; i < numLights; ++i) {
-        if (lights->isSpot[i] && lights->mirrorId[i] == 0 &&
+        if (lights->isSpot[i] &&
             (allCones || lights->forceCone[i])) spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
