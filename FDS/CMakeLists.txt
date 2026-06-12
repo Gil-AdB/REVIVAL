@@ -125,6 +125,7 @@ source_group("RADIO" FILES ${RADIO})
 set(RENDER
     RENDER/DeferredCommon.h
     RENDER/DeferredLighting.cpp
+    RENDER/DeferredLightLists.cpp
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
     RENDER/OffscreenView.cpp

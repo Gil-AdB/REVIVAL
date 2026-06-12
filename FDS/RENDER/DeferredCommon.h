@@ -194,6 +194,32 @@ struct DeferredLightingCtx {
 // per-frame setup cost. Defined in DeferredLighting.cpp.
 extern DeferredLightingCtx g_deferredCtx;
 
+// Light-list builders (DeferredLightLists.cpp). Called once per frame
+// by the Render_DeferredLighting orchestrator; buildStripLightLists
+// fills g_stripLights for the unified-TBR transparent strip path.
+void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY,
+                            int tileSizeX, int tileSizeY, int xres, int yres,
+                            float invZScale);
+void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
+                               int regionW, int regionH,
+                               int regionsX, int regionsY,
+                               uint32_t *out);
+void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
+                         int tileSizeX, int tileSizeY, int xres, int yres,
+                         const ViewLightsSoA &lights, int numLights,
+                         const uint32_t *tileMirrorPresence);
+void buildStripLightLists(int numStrips, int stripHeight, int yres,
+                          const ViewLightsSoA &lights, int numLights,
+                          const uint32_t *stripMirrorPresence);
+
+// MAX strips at any reasonable display: 4096/8 = 512. We size for
+// that ceiling so reallocation isn't needed at runtime resize.
+constexpr int DEFERRED_MAX_STRIPS = 512;
+// Per-strip light lists (defined in DeferredLightLists.cpp), consumed
+// by RenderXparClumpInStrip via a DeferredLightingCtx variant whose
+// `tileLights` points at this array.
+extern TileLights g_stripLights[DEFERRED_MAX_STRIPS];
+
 // Conservative sphere-vs-spot-cone rejection (cone expanded by the
 // sphere radius, capped at `range`). Returns true when the sphere is
 // definitely outside the cone volume — safe to drop the light for
