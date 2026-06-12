@@ -126,6 +126,7 @@ set(RENDER
     RENDER/DeferredCommon.h
     RENDER/DeferredLighting.cpp
     RENDER/DeferredLightLists.cpp
+    RENDER/DeferredShadowSampling.h
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
     RENDER/OffscreenView.cpp
