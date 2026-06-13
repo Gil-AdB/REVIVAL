@@ -1748,10 +1748,14 @@ void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
 	if (hwB < 1.5f) hwB = 1.5f; if (hwB > 400.0f) hwB = 400.0f;
 	float col = bright * 255.0f; if (col < 0.0f) col = 0.0f; if (col > 255.0f) col = 255.0f;
 	Vertex q[4];
+	// This rasterizer samples UZ->texture-Y, VZ->texture-X (verified with a
+	// 4-band diagnostic). So put the bolt's LENGTH on U and width on V:
+	//   U (UZ): 0 at the A end, 1 at the B end  -> texture-Y (jagged length)
+	//   V (VZ): 0 / 1 across the width          -> texture-X (glow profile)
 	q[0].PX = ax - hwA*nx; q[0].PY = ay - hwA*ny; q[0].UZ = 0;   q[0].VZ = 0;   q[0].RZ = rzA;
-	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ = rzA; q[1].VZ = 0;   q[1].RZ = rzA;
+	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ = 0;   q[1].VZ = rzA; q[1].RZ = rzA;
 	q[2].PX = bx + hwB*nx; q[2].PY = by + hwB*ny; q[2].UZ = rzB; q[2].VZ = rzB; q[2].RZ = rzB;
-	q[3].PX = bx - hwB*nx; q[3].PY = by - hwB*ny; q[3].UZ = 0;   q[3].VZ = rzB; q[3].RZ = rzB;
+	q[3].PX = bx - hwB*nx; q[3].PY = by - hwB*ny; q[3].UZ = rzB; q[3].VZ = 0;   q[3].RZ = rzB;
 	Viewport vp; viewportInit(vp, FntSc);
 	for (int k = 0; k != 4; ++k) { q[k].LA = q[k].LR = q[k].LG = q[k].LB = col; viewportCalcFlags(vp, &q[k]); }
 	Face f[2];
@@ -1778,7 +1782,7 @@ static void RenderStrike(const Vector& src, const Vector& targ,
 	const float wf     = fds::FeatureFlags::bolt_width();
 	Vector d = { targ.x-src.x, targ.y-src.y, targ.z-src.z };
 	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
-	const float hw  = wf * 0.10f * len;     // half-width tracks bolt length
+	const float hw  = wf * 0.05f * len;     // half-width tracks bolt length
 
 	drawBoltQuad(src, targ, g_boltTex[bucket % kBoltVar], hw, bright);
 
@@ -1808,7 +1812,7 @@ void Spark(Vector *Src,Vector *Targ, Material* /*LnMat*/)
 	const uint32_t v = ((uint32_t)(bucket*2246822519u) ^ (uint32_t)(uintptr_t)Src) % kBoltVar;
 	Vector d = { Targ->x-Src->x, Targ->y-Src->y, Targ->z-Src->z };
 	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
-	const float hw  = fds::FeatureFlags::bolt_width() * 0.09f * len;
+	const float hw  = fds::FeatureFlags::bolt_width() * 0.05f * len;
 	drawBoltQuad(*Src, *Targ, g_boltTex[v], hw, boltFlicker() * fds::FeatureFlags::bolt_seg());
 	Generate_Lightning_Particles(Targ, 10);
 }
