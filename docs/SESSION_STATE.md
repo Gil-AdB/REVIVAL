@@ -33,8 +33,10 @@ the gate. Gate script: /tmp/split_gate.sh (session-local).
   realistic-city vs pre-split (4a64c3c) when the machine is idle.
 
 ## Open threads (carried over)
-- Shadow tile flicker (memory: shadow-tile-flicker-hunt): next =
-  pose-aware probe + tile-flip dump; lights 2 & 28 confirmed flapping live.
+- Shadow tile flicker: SOLVED 2026-06-14 (4fe3be2) — torn read in the
+  per-material shadow-skip cache (two relaxed atomics → stale skip on
+  pointer-slot collision; TSan-blind to atomic races). Packed into one
+  atomic. Verified 194-303 → 0 steady events under 12-concurrent load.
 - Bounce dots through walls (memory: mirror-beam-reflections-design):
   near-clipped bounce shadow maps + half-space clamp redo. User relief:
   --no-mirror-bounce.
