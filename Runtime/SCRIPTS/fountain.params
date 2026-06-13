@@ -1,5 +1,5 @@
-# Fountain — lightning look knobs (hot-reloads while running; tune via the
-# console at localhost:8666, or pause inside a strike and scrub F1/F2).
-bolt_width = 0.85   # core ribbon half-width factor (thin=0.6, fat=1.6)
-bolt_kink  = 0.40   # fractal roughness (0.25 smooth, 0.4 jagged, >0.5 loops)
-bolt_seg   = 2.8    # glow width multiplier (1=no glow, 4=heavy bloom)
+# Fountain — lightning look knobs (hot-reloads; tune at localhost:8666, or
+# pause P inside a strike and scrub F1/F2). Bolts are textured quads now.
+bolt_width = 1.0    # quad width (thin=0.6, fat=1.8)
+bolt_kink  = 0.30   # texture jaggedness (re-bakes on change: 0.18 smooth..0.4 wild)
+bolt_seg   = 1.0    # brightness (<1 dim, >1 hot)

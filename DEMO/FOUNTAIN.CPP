@@ -1627,240 +1627,168 @@ void Lightning_Particles()
 // ('ladder rungs'). One ribbon with joint-averaged screen perpendiculars
 // and shared edge vertices fixes both. The hot core line still draws per
 // segment over the ribbon (it is endpoint-exact and crack-free already).
-// One ribbon pass over an ordered path. intensity scales brightness
-// (vertex color, multiplied into the additive texel — so we draw the
-// SAME geometry twice: a wide dim halo + a thin bright core, which is
-// most of why a bolt reads as "glowing"). widthMul fattens the quad;
-// drawCore overlays the crisp white center line (core pass only).
-static void Lightning_Ribbon(const Vector* pts, int n, int32_t POW, Material* LnMat,
-                             float intensity, float widthMul, bool drawCore)
-{
-	if (POW < 1) POW = 1;
-	constexpr int kMax = 257;
-	if (n > kMax) n = kMax;
-	if (n < 2) return;
-	static float px[kMax], py[kMax], rzv[kMax];
-	static bool  vis[kMax];
-	Vertex T;
-	Vector V;
-	for (int i = 0; i < n; ++i) {
-		Vector_Sub(const_cast<Vector*>(pts + i), &View->ISource, &V);
-		MatrixXVector(View->Mat, &V, &T.TPos_AOS);
-		vis[i] = T.TPos_AOS.z >= C_NZP;
-		if (!vis[i]) continue;
-		const float r = 1.0f / T.TPos_AOS.z;
-		px[i] = (T.TPos_AOS.z * CntrX + T.TPos_AOS.x * FOVX) * r;
-		py[i] = (T.TPos_AOS.z * CntrY - T.TPos_AOS.y * FOVY) * r;
-		rzv[i] = r;
-	}
-	// Joint perpendiculars from central differences over visible runs.
-	static float nxv[kMax], nyv[kMax];
-	for (int i = 0; i < n; ++i) {
-		if (!vis[i]) continue;
-		const int ip = (i > 0   && vis[i-1]) ? i-1 : i;
-		const int in_ = (i < n-1 && vis[i+1]) ? i+1 : i;
-		float dx = px[in_] - px[ip];
-		float dy = py[in_] - py[ip];
-		const float l2 = dx*dx + dy*dy;
-		if (l2 < 1e-4f) {
-			nxv[i] = (i > 0 && vis[i-1]) ? nxv[i-1] : 1.0f;
-			nyv[i] = (i > 0 && vis[i-1]) ? nyv[i-1] : 0.0f;
-			continue;
-		}
-		const float rl = 1.0f / sqrtf(l2);
-		float nx_ = -dy * rl, ny_ = dx * rl;
-		// Sign continuity: a hard kink can flip the perp ~180 deg, folding
-		// the ribbon over itself (additive double-cover = bright blob).
-		if (i > 0 && vis[i-1] && (nx_*nxv[i-1] + ny_*nyv[i-1]) < 0.0f) {
-			nx_ = -nx_; ny_ = -ny_;
-		}
-		nxv[i] = nx_;
-		nyv[i] = ny_;
-	}
-	// Continuous V over the whole ribbon: the gradient's dark end-caps
-	// land only at the bolt's two ENDS, not at every segment boundary.
-	static float vcum[kMax];
-	float total = 0.0f;
-	vcum[0] = 0.0f;
-	for (int i = 1; i < n; ++i) {
-		float dl = 0.0f;
-		if (vis[i] && vis[i-1]) {
-			const float ddx = px[i]-px[i-1], ddy = py[i]-py[i-1];
-			dl = sqrtf(ddx*ddx + ddy*ddy);
-		}
-		total += dl;
-		vcum[i] = total;
-	}
-	const float invTotal = total > 1.0f ? 1.0f/total : 1.0f;
-	for (int i = 0; i < n; ++i) vcum[i] *= invTotal;
-
-	float col = intensity * 255.0f;
-	if (col < 0.0f) col = 0.0f; if (col > 255.0f) col = 255.0f;
-	const float wf  = fds::FeatureFlags::bolt_width() * widthMul;
-	const float wHi = 9.0f * (widthMul > 1.0f ? widthMul : 1.0f);
-
-	Viewport vp;
-	viewportInit(vp, FntSc);
-	const auto rt   = fds::MainRenderTargetFromGlobals();
-	const auto& cam = fds::g_mainCamera;
-	for (int i = 0; i + 1 < n; ++i) {
-		if (!vis[i] || !vis[i+1]) continue;
-		if (--g_boltBudget < 0) return;
-		float hA = POW * wf * rzv[i]   * FOVX;
-		float hB = POW * wf * rzv[i+1] * FOVX;
-		if (hA < 1.0f) hA = 1.0f; if (hA > wHi) hA = wHi;
-		if (hB < 1.0f) hB = 1.0f; if (hB > wHi) hB = wHi;
-		Vertex quad[4];
-		quad[0].PX = px[i]   - hA*nxv[i];   quad[0].PY = py[i]   - hA*nyv[i];
-		quad[0].UZ = 0;                     quad[0].VZ = vcum[i]*rzv[i];
-		quad[0].RZ = rzv[i];
-		quad[1].PX = px[i]   + hA*nxv[i];   quad[1].PY = py[i]   + hA*nyv[i];
-		quad[1].UZ = rzv[i];                quad[1].VZ = vcum[i]*rzv[i];
-		quad[1].RZ = rzv[i];
-		quad[2].PX = px[i+1] + hB*nxv[i+1]; quad[2].PY = py[i+1] + hB*nyv[i+1];
-		quad[2].UZ = rzv[i+1];              quad[2].VZ = vcum[i+1]*rzv[i+1];
-		quad[2].RZ = rzv[i+1];
-		quad[3].PX = px[i+1] - hB*nxv[i+1]; quad[3].PY = py[i+1] - hB*nyv[i+1];
-		quad[3].UZ = 0;                     quad[3].VZ = vcum[i+1]*rzv[i+1];
-		quad[3].RZ = rzv[i+1];
-		for (int k = 0; k != 4; ++k) {
-			Vertex& v = quad[k];
-			v.LA = v.LR = v.LG = v.LB = col;
-			viewportCalcFlags(vp, &v);
-		}
-		Face f[2];
-		f[0].A = &quad[0]; f[0].B = &quad[1]; f[0].C = &quad[2];
-		f[0].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
-		f[0].Txtr = LnMat;
-		f[1].A = &quad[0]; f[1].B = &quad[2]; f[1].C = &quad[3];
-		f[1].Filler = (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>);
-		f[1].Txtr = LnMat;
-		_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
-		_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
-		(void)drawCore;   // hot core now comes from the gradient + core pass
-	}
-}
-
-// ── Fractal bolt geometry ───────────────────────────────────────────────
-// A random walk that biases toward the target wanders — it has no large-
-// scale structure (each step only knows where it is and where it's going).
-// Lightning is FRACTAL: dead straight at the large scale, self-similarly
-// jagged at every smaller one. Recursive midpoint displacement gives
-// exactly that: subdivide each segment, push the new midpoint perpendicular
-// by an amount proportional to the segment's length. Branches fork at
-// vertices, inherit the local direction, deflect, and run shorter+dimmer.
+// ── Texture-based bolt ──────────────────────────────────────────────────
+// A polygon ribbon shows every quad facet (flat translucent parallelograms
+// = crumpled foil, not lightning). The fix is to stop putting the jaggedness
+// in GEOMETRY: a bolt is ONE camera-facing quad stretched src->target,
+// carrying a pre-rendered jagged-bolt TEXTURE (white-hot core + blue glow,
+// anti-aliased, black elsewhere so additive = transparent). One quad → zero
+// facets; jaggedness and glow are smooth at any size. A small set of texture
+// variants is baked at init and cycled per restrike.
 namespace {
 struct LnRng {
 	uint32_t s;
 	inline uint32_t u() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; }
 	inline float f01() { return (u() >> 8) * (1.0f / 16777216.0f); }
-	inline float c()   { return f01() * 2.0f - 1.0f; }    // [-1,1]
+	inline float c()   { return f01() * 2.0f - 1.0f; }
 };
-constexpr int   kBoltCap  = 257;
-constexpr int32_t kRestrike = 7;   // Timer units between fresh fractal paths
+constexpr int32_t kRestrike   = 7;    // Timer units between fresh paths
+constexpr int     kBoltVar    = 6;    // baked texture variants
+Material*         g_boltTex[kBoltVar] = { nullptr };
+float             g_boltTexKink = -1.0f;
 
-// Iterative midpoint displacement A->B into pts (ordered). Returns count.
-int genBolt(LnRng& rng, const Vector& A, const Vector& B,
-            int depth, float rough, Vector* pts)
-{
-	pts[0] = A; pts[1] = B;
-	int n = 2;
-	// Displacement floor: pure self-similar offset (rough*segLen) shrinks
-	// each level until the fine subdivisions are sub-pixel — leaving the
-	// coarse arms dead straight (visible flat quad facets). Floor the
-	// effective length at a fraction of the whole span so every level
-	// keeps a visible wiggle and the bolt reads as continuously jagged.
-	const float dAB = sqrtf((B.x-A.x)*(B.x-A.x)+(B.y-A.y)*(B.y-A.y)+(B.z-A.z)*(B.z-A.z));
-	const float effFloor = 0.025f * dAB;
-	for (int lvl = 0; lvl < depth; ++lvl) {
-		if (n * 2 - 1 > kBoltCap) break;
-		Vector tmp[kBoltCap];
-		int m = 0;
-		for (int i = 0; i + 1 < n; ++i) {
-			const Vector& p0 = pts[i];
-			const Vector& p1 = pts[i+1];
-			tmp[m++] = p0;
-			Vector d = { p1.x-p0.x, p1.y-p0.y, p1.z-p0.z };
-			const float sl = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z);
-			const float inv = sl > 1e-4f ? 1.0f/sl : 0.0f;
-			d.x*=inv; d.y*=inv; d.z*=inv;
-			// random vector, project out the segment dir -> a perpendicular
-			Vector rr = { rng.c(), rng.c(), rng.c() };
-			const float dot = rr.x*d.x + rr.y*d.y + rr.z*d.z;
-			Vector pp = { rr.x-d.x*dot, rr.y-d.y*dot, rr.z-d.z*dot };
-			const float pl = sqrtf(pp.x*pp.x + pp.y*pp.y + pp.z*pp.z);
-			if (pl > 1e-4f) { const float pv = 1.0f/pl; pp.x*=pv; pp.y*=pv; pp.z*=pv; }
-			const float eff = sl > effFloor ? sl : effFloor;
-			const float off = rough * eff * rng.c();
-			tmp[m++] = Vector{ (p0.x+p1.x)*0.5f + pp.x*off,
-			                   (p0.y+p1.y)*0.5f + pp.y*off,
-			                   (p0.z+p1.z)*0.5f + pp.z*off };
-		}
-		tmp[m++] = pts[n-1];
-		for (int i = 0; i < m; ++i) pts[i] = tmp[i];
+// Bake one jagged-bolt texture. The bolt runs down V (texture height); its
+// horizontal centre wiggles via 1D midpoint displacement. Each texel = a
+// white-hot core (sharp) + a blue glow (soft) by distance to the centre,
+// faded at the two ends so the stretched quad doesn't hard-cut.
+Material* makeBoltTexture(uint32_t seed, float rough) {
+	constexpr int W = 64, H = 256;
+	LnRng rng{ seed ? seed : 1u };
+	float vals[129]; int n = 2;
+	vals[0] = 0.5f; vals[1] = 0.5f;          // normalised centre x at the ends
+	float amp = rough;
+	for (int lvl = 0; lvl < 7; ++lvl) {
+		const int m = n * 2 - 1;
+		if (m > 129) break;
+		float tmp[129];
+		for (int i = 0; i < n; ++i)     tmp[2*i] = vals[i];
+		for (int i = 0; i + 1 < n; ++i) tmp[2*i+1] = 0.5f*(vals[i]+vals[i+1]) + rng.c()*amp;
 		n = m;
+		for (int i = 0; i < n; ++i) vals[i] = tmp[i];
+		amp *= 0.5f;
 	}
-	return n;
+	Image Img; Img.x = W; Img.y = H; Img.Data = new DWord[W*H];
+	const float coreR = 1.7f, glowR = W * 0.16f;
+	for (int y = 0; y < H; ++y) {
+		const float t = (float)y / (H-1) * (n-1);
+		const int   i = (int)t; const float f = t - i;
+		const int   j = i+1 < n ? i+1 : i;
+		const float cx = (vals[i] + (vals[j]-vals[i])*f) * W;
+		const float ty = (float)y / (H-1);
+		float ef = 1.0f;
+		if (ty < 0.05f) ef = ty / 0.05f; else if (ty > 0.95f) ef = (1.0f-ty)/0.05f;
+		for (int x = 0; x < W; ++x) {
+			const float d = fabsf(x - cx);
+			const float core = d < coreR ? 1.0f - d/coreR : 0.0f;
+			// Glow with its exp tail clipped to ZERO before the texel edge,
+			// else the ~4% tail fills the whole quad as a faint blue
+			// rectangle (the CG "panel" tell). (g-0.06)/0.94 -> 0 at d~29px.
+			float glow = expf(-d / glowR) - 0.06f;
+			glow = glow > 0.0f ? (glow / 0.94f) * 0.9f : 0.0f;
+			int Ri = (int)((core + glow*0.20f) * 255.0f * ef);
+			int Gi = (int)((core + glow*0.55f) * 255.0f * ef);
+			int Bi = (int)((core + glow*1.00f) * 255.0f * ef);
+			if (Ri>255)Ri=255; if (Gi>255)Gi=255; if (Bi>255)Bi=255;
+			Img.Data[x + y*W] = (DWord)Bi | ((DWord)Gi<<8) | ((DWord)Ri<<16) | (255u<<24);
+		}
+	}
+	Material* M = getAlignedType<Material>(16);
+	M->Flags = Mat_Virtual;
+	M->Txtr = new Texture;
+	std::memset(M->Txtr, 0, sizeof(Texture));
+	M->Txtr->BPP = 32;
+	M->Txtr->Flags = Txtr_Nomip | Txtr_Tiled;
+	Convert_Image2Texture(&Img, M->Txtr);
+	delete[] Img.Data;
+	M->Txtr->Mipmap[0] = M->Txtr->Data;
+	M->Txtr->numMipmaps = 1;
+	return M;
 }
 
-// Brightness flicker, deterministic in Timer (scrub-safe; steady on pause).
+void ensureBoltTextures() {
+	const float k = fds::FeatureFlags::bolt_kink();
+	if (g_boltTex[0] && fabsf(k - g_boltTexKink) < 0.02f) return;
+	for (int i = 0; i < kBoltVar; ++i) {
+		if (g_boltTex[i]) {        // free the previous set on a roughness change
+			if (g_boltTex[i]->Txtr) { delete[] g_boltTex[i]->Txtr->Data; delete g_boltTex[i]->Txtr; }
+		}
+		g_boltTex[i] = makeBoltTexture(0xB017u + i*2654435761u, k);
+	}
+	g_boltTexKink = k;
+}
+
 float boltFlicker() {
 	uint32_t h = (uint32_t)(Timer) * 2654435761u;
 	h ^= h >> 15; h *= 0x85EBCA6Bu; h ^= h >> 13;
-	return 0.62f + 0.38f * ((h & 0xFFFF) * (1.0f/65536.0f));
+	return 0.70f + 0.30f * ((h & 0xFFFF) * (1.0f/65536.0f));
+}
+
+// Stretch ONE textured quad from world A to world B, billboarded (screen-
+// space perpendicular), additive. hwWorld = half-width in world units;
+// bright scales the additive output via vertex colour.
+void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
+                  float hwWorld, float bright) {
+	if (--g_boltBudget < 0 || !tex) return;
+	Vertex TA, TB; Vector V;
+	Vector_Sub(const_cast<Vector*>(&A), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TA.TPos_AOS);
+	Vector_Sub(const_cast<Vector*>(&B), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TB.TPos_AOS);
+	if (TA.TPos_AOS.z < C_NZP || TB.TPos_AOS.z < C_NZP) return;   // (no near-clip; ends usually safe)
+	const float rzA = 1.0f/TA.TPos_AOS.z, rzB = 1.0f/TB.TPos_AOS.z;
+	const float ax = (TA.TPos_AOS.z*CntrX + TA.TPos_AOS.x*FOVX)*rzA;
+	const float ay = (TA.TPos_AOS.z*CntrY - TA.TPos_AOS.y*FOVY)*rzA;
+	const float bx = (TB.TPos_AOS.z*CntrX + TB.TPos_AOS.x*FOVX)*rzB;
+	const float by = (TB.TPos_AOS.z*CntrY - TB.TPos_AOS.y*FOVY)*rzB;
+	float dx = bx-ax, dy = by-ay; const float l = sqrtf(dx*dx+dy*dy);
+	if (l < 1.0f) return; dx/=l; dy/=l;
+	const float nx = -dy, ny = dx;
+	float hwA = hwWorld * rzA * FOVX, hwB = hwWorld * rzB * FOVX;
+	if (hwA < 1.5f) hwA = 1.5f; if (hwA > 400.0f) hwA = 400.0f;
+	if (hwB < 1.5f) hwB = 1.5f; if (hwB > 400.0f) hwB = 400.0f;
+	float col = bright * 255.0f; if (col < 0.0f) col = 0.0f; if (col > 255.0f) col = 255.0f;
+	Vertex q[4];
+	q[0].PX = ax - hwA*nx; q[0].PY = ay - hwA*ny; q[0].UZ = 0;   q[0].VZ = 0;   q[0].RZ = rzA;
+	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ = rzA; q[1].VZ = 0;   q[1].RZ = rzA;
+	q[2].PX = bx + hwB*nx; q[2].PY = by + hwB*ny; q[2].UZ = rzB; q[2].VZ = rzB; q[2].RZ = rzB;
+	q[3].PX = bx - hwB*nx; q[3].PY = by - hwB*ny; q[3].UZ = 0;   q[3].VZ = rzB; q[3].RZ = rzB;
+	Viewport vp; viewportInit(vp, FntSc);
+	for (int k = 0; k != 4; ++k) { q[k].LA = q[k].LR = q[k].LG = q[k].LB = col; viewportCalcFlags(vp, &q[k]); }
+	Face f[2];
+	f[0].A=&q[0]; f[0].B=&q[1]; f[0].C=&q[2];
+	f[0].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>); f[0].Txtr=tex;
+	f[1].A=&q[0]; f[1].B=&q[2]; f[1].C=&q[3];
+	f[1].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>); f[1].Txtr=tex;
+	const auto rt = fds::MainRenderTargetFromGlobals(); const auto& cam = fds::g_mainCamera;
+	_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
+	_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
 }
 } // namespace
 
-// Render one strike: a fractal main channel + a few branches, each drawn
-// as a dim wide halo + bright thin core. The path is regenerated only when
-// the restrike bucket changes (Timer/kRestrike) and is SEEDED from that
-// bucket, so it holds steady between restrikes, re-strikes ~3x across the
-// 200ms window, and reproduces exactly on F1/F2 scrub.
-static void RenderStrike(const Vector& srcIn, const Vector& targIn,
-                         int basePow, Material* mat)
+// One strike: the main channel + a few branches, each a stretched bolt quad.
+// Restrike-bucketed (steady between ~3 restrikes/strike), brightness flicker,
+// scrub-reproducible.
+static void RenderStrike(const Vector& src, const Vector& targ,
+                         int basePow, Material* /*mat*/)
 {
-	const Vector& src = srcIn;
-	const Vector& targ = targIn;
-	const float rough = fds::FeatureFlags::bolt_kink();
-	const float halo  = fds::FeatureFlags::bolt_seg();
+	ensureBoltTextures();
 	const int   bucket = (int)(Timer / kRestrike);
-	const int   rp = (basePow >> 4) > 1 ? (basePow >> 4) : 1;   // ribbon width POW
-	LnRng rng{ (uint32_t)(bucket * 2654435761u) ^ (uint32_t)(basePow * 40503u) ^ 0xB07Du };
+	LnRng rng{ (uint32_t)(bucket*2654435761u) ^ (uint32_t)(basePow*40503u) ^ 0xB07Du };
+	const float bright = boltFlicker() * fds::FeatureFlags::bolt_seg();
+	const float wf     = fds::FeatureFlags::bolt_width();
+	Vector d = { targ.x-src.x, targ.y-src.y, targ.z-src.z };
+	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
+	const float hw  = wf * 0.10f * len;     // half-width tracks bolt length
 
-	Vector main[kBoltCap];
-	const int n = genBolt(rng, src, targ, 7, rough, main);
-	const float flick = boltFlicker();
+	drawBoltQuad(src, targ, g_boltTex[bucket % kBoltVar], hw, bright);
 
-	Lightning_Ribbon(main, n, rp, mat, flick * 0.55f, halo,  false);  // wide glow
-	Lightning_Ribbon(main, n, rp, mat, flick,         1.0f,  false);  // body
-	Lightning_Ribbon(main, n, rp, mat, 1.0f,          0.45f, true);   // hot core
-
-	int nBranch = basePow / 16;
-	if (nBranch < 1) nBranch = 1; if (nBranch > 5) nBranch = 5;
-	const int brp = (rp >> 1) > 1 ? (rp >> 1) : 1;
+	int nBranch = basePow/16; if (nBranch<1) nBranch=1; if (nBranch>4) nBranch=4;
 	for (int b = 0; b < nBranch; ++b) {
-		int idx = (int)(rng.f01() * (n - 4)) + 2;
-		if (idx < 1) idx = 1; if (idx > n - 2) idx = n - 2;
-		const Vector& base = main[idx];
-		Vector ld = { main[idx+1].x-main[idx-1].x,
-		              main[idx+1].y-main[idx-1].y,
-		              main[idx+1].z-main[idx-1].z };
-		const float ll = sqrtf(ld.x*ld.x + ld.y*ld.y + ld.z*ld.z);
-		const float li = ll > 1e-4f ? 1.0f/ll : 0.0f;
-		ld.x*=li; ld.y*=li; ld.z*=li;
-		Vector dir = { ld.x + rng.c(), ld.y - (0.3f + 0.5f*rng.f01()), ld.z + rng.c() };
-		const float dl = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-		const float di = dl > 1e-4f ? 1.0f/dl : 0.0f;
-		dir.x*=di; dir.y*=di; dir.z*=di;
-		Vector rem = { targ.x-base.x, targ.y-base.y, targ.z-base.z };
-		const float reach = (0.25f + 0.35f*rng.f01()) *
-		                    sqrtf(rem.x*rem.x + rem.y*rem.y + rem.z*rem.z);
-		Vector bend = { base.x + dir.x*reach, base.y + dir.y*reach, base.z + dir.z*reach };
-		Vector br[kBoltCap];
-		const int bn = genBolt(rng, base, bend, 5, rough * 1.3f, br);
-		Lightning_Ribbon(br, bn, brp, mat, flick * 0.45f, halo,  false);
-		Lightning_Ribbon(br, bn, brp, mat, flick * 0.85f, 1.0f,  false);
-		Lightning_Ribbon(br, bn, brp, mat, 0.95f,         0.5f,  true);
+		const float u = 0.25f + 0.5f*rng.f01();           // fork point along the bolt
+		Vector base = { src.x + d.x*u, src.y + d.y*u, src.z + d.z*u };
+		const float reach = (0.25f + 0.30f*rng.f01());
+		Vector end = { base.x + d.x*reach + rng.c()*len*0.18f,
+		               base.y + d.y*reach,
+		               base.z + d.z*reach + rng.c()*len*0.18f };
+		drawBoltQuad(base, end, g_boltTex[(bucket + b + 1) % kBoltVar], hw*0.6f, bright*0.8f);
 	}
 }
 
@@ -1870,20 +1798,16 @@ void Lightning_Bolt(Vector *Src,Vector *Targ,int32_t BasePow, Material* LnMat)
 	RenderStrike(*Src, *Targ, BasePow, LnMat);
 }
 
-// Spire-ring arc: a thin fractal filament, no branches, bucket-seeded off
-// the endpoints so the six arcs differ and each holds between restrikes.
-void Spark(Vector *Src,Vector *Targ, Material* LnMat)
+// Spire-ring arc: one stretched bolt quad, bucket-seeded per endpoint pair.
+void Spark(Vector *Src,Vector *Targ, Material* /*LnMat*/)
 {
+	ensureBoltTextures();
 	const int bucket = (int)(Timer / kRestrike);
-	LnRng rng{ (uint32_t)(bucket * 2246822519u)
-	         ^ (uint32_t)(uintptr_t)Src
-	         ^ (uint32_t)(uintptr_t)Targ };
-	Vector pts[kBoltCap];
-	const int n = genBolt(rng, *Src, *Targ, 6, fds::FeatureFlags::bolt_kink() * 0.8f, pts);
-	const float flick = boltFlicker();
-	const float halo  = fds::FeatureFlags::bolt_seg();
-	Lightning_Ribbon(pts, n, 2, LnMat, flick * 0.50f, halo,  false);
-	Lightning_Ribbon(pts, n, 2, LnMat, 0.95f,         0.5f,  true);
+	const uint32_t v = ((uint32_t)(bucket*2246822519u) ^ (uint32_t)(uintptr_t)Src) % kBoltVar;
+	Vector d = { Targ->x-Src->x, Targ->y-Src->y, Targ->z-Src->z };
+	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
+	const float hw  = fds::FeatureFlags::bolt_width() * 0.09f * len;
+	drawBoltQuad(*Src, *Targ, g_boltTex[v], hw, boltFlicker() * fds::FeatureFlags::bolt_seg());
 	Generate_Lightning_Particles(Targ, 10);
 }
 
