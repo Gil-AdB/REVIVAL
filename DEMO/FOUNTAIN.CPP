@@ -1669,18 +1669,19 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 	}
 	Image Img; Img.x = W; Img.y = H; Img.Data = new DWord[W*H];
 	const float coreR = 1.7f, glowR = W * 0.16f;
-	// bolt runs along Y (length), centre wiggles in X; glow profile in X.
-	const float glowR2 = W * 0.10f;
-	for (int y = 0; y < H; ++y) {
-		const float t = (float)y / (H-1) * (n-1);
+	// bolt runs along X (the texture axis mapA's V/length samples); the
+	// jagged centre cy(x) wiggles in Y, glow profile in Y. End-fade in X.
+	const float glowR2 = H * 0.10f;
+	for (int x = 0; x < W; ++x) {
+		const float t = (float)x / (W-1) * (n-1);
 		const int   i = (int)t; const float f = t - i;
 		const int   j = i+1 < n ? i+1 : i;
-		const float cx = (vals[i] + (vals[j]-vals[i])*f) * W;
-		const float ty = (float)y / (H-1);
+		const float cy = (vals[i] + (vals[j]-vals[i])*f) * H;
+		const float tx = (float)x / (W-1);
 		float ef = 1.0f;
-		if (ty < 0.04f) ef = ty / 0.04f; else if (ty > 0.96f) ef = (1.0f-ty)/0.04f;
-		for (int x = 0; x < W; ++x) {
-			const float d = fabsf(x - cx);
+		if (tx < 0.04f) ef = tx / 0.04f; else if (tx > 0.96f) ef = (1.0f-tx)/0.04f;
+		for (int y = 0; y < H; ++y) {
+			const float d = fabsf(y - cy);
 			const float core = d < coreR ? 1.0f - d/coreR : 0.0f;
 			// Glow with its exp tail clipped to ZERO before the texel edge,
 			// else the ~4% tail fills the whole quad as a faint blue
@@ -1699,7 +1700,7 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 	M->Txtr = new Texture;
 	std::memset(M->Txtr, 0, sizeof(Texture));
 	M->Txtr->BPP = 32;
-	M->Txtr->Flags = Txtr_Nomip | Txtr_Tiled;
+	M->Txtr->Flags = Txtr_Nomip;
 	Convert_Image2Texture(&Img, M->Txtr);
 	delete[] Img.Data;
 	M->Txtr->Mipmap[0] = M->Txtr->Data;
@@ -1734,7 +1735,7 @@ void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
 	Vertex TA, TB; Vector V;
 	Vector_Sub(const_cast<Vector*>(&A), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TA.TPos_AOS);
 	Vector_Sub(const_cast<Vector*>(&B), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TB.TPos_AOS);
-	if (TA.TPos_AOS.z < C_NZP || TB.TPos_AOS.z < C_NZP) return;   // (no near-clip; ends usually safe)
+	if (TA.TPos_AOS.z < C_NZP || TB.TPos_AOS.z < C_NZP) return;
 	const float rzA = 1.0f/TA.TPos_AOS.z, rzB = 1.0f/TB.TPos_AOS.z;
 	const float ax = (TA.TPos_AOS.z*CntrX + TA.TPos_AOS.x*FOVX)*rzA;
 	const float ay = (TA.TPos_AOS.z*CntrY - TA.TPos_AOS.y*FOVY)*rzA;
@@ -1752,10 +1753,12 @@ void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
 	// 4-band diagnostic). So put the bolt's LENGTH on U and width on V:
 	//   U (UZ): 0 at the A end, 1 at the B end  -> texture-Y (jagged length)
 	//   V (VZ): 0 / 1 across the width          -> texture-X (glow profile)
-	q[0].PX = ax - hwA*nx; q[0].PY = ay - hwA*ny; q[0].UZ = 0;   q[0].VZ = 0;   q[0].RZ = rzA;
-	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ = 0;   q[1].VZ = rzA; q[1].RZ = rzA;
-	q[2].PX = bx + hwB*nx; q[2].PY = by + hwB*ny; q[2].UZ = rzB; q[2].VZ = rzB; q[2].RZ = rzB;
-	q[3].PX = bx - hwB*nx; q[3].PY = by - hwB*ny; q[3].UZ = rzB; q[3].VZ = 0;   q[3].RZ = rzB;
+	// U = across width, V = along length (the working-ribbon convention);
+	// the texture is built jagged along its V axis to match.
+	q[0].PX = ax - hwA*nx; q[0].PY = ay - hwA*ny; q[0].UZ=0;   q[0].VZ=0;   q[0].RZ = rzA;
+	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ=rzA; q[1].VZ=0;   q[1].RZ = rzA;
+	q[2].PX = bx + hwB*nx; q[2].PY = by + hwB*ny; q[2].UZ=rzB; q[2].VZ=rzB; q[2].RZ = rzB;
+	q[3].PX = bx - hwB*nx; q[3].PY = by - hwB*ny; q[3].UZ=0;   q[3].VZ=rzB; q[3].RZ = rzB;
 	Viewport vp; viewportInit(vp, FntSc);
 	for (int k = 0; k != 4; ++k) { q[k].LA = q[k].LR = q[k].LG = q[k].LB = col; viewportCalcFlags(vp, &q[k]); }
 	Face f[2];
@@ -1786,15 +1789,27 @@ static void RenderStrike(const Vector& src, const Vector& targ,
 
 	drawBoltQuad(src, targ, g_boltTex[bucket % kBoltVar], hw, bright);
 
-	int nBranch = basePow/16; if (nBranch<1) nBranch=1; if (nBranch>4) nBranch=4;
+	// Branches must VEER OFF at an angle — sending them along the main
+	// direction (+ a little jitter) just drew parallel verticals next to
+	// the bolt ("electric fence"). Direction is mostly LATERAL (a random
+	// horizontal vector ~perpendicular to the descent) with only a little
+	// continuation, so each fork clearly diverges and dead-ends in the air.
+	const float invLen = len > 1e-3f ? 1.0f/len : 0.0f;
+	const Vector ud = { d.x*invLen, d.y*invLen, d.z*invLen };   // unit main dir
+	int nBranch = basePow/22; if (nBranch<1) nBranch=1; if (nBranch>3) nBranch=3;
 	for (int b = 0; b < nBranch; ++b) {
-		const float u = 0.25f + 0.5f*rng.f01();           // fork point along the bolt
+		const float u = 0.30f + 0.45f*rng.f01();          // fork point along the bolt
 		Vector base = { src.x + d.x*u, src.y + d.y*u, src.z + d.z*u };
-		const float reach = (0.25f + 0.30f*rng.f01());
-		Vector end = { base.x + d.x*reach + rng.c()*len*0.18f,
-		               base.y + d.y*reach,
-		               base.z + d.z*reach + rng.c()*len*0.18f };
-		drawBoltQuad(base, end, g_boltTex[(bucket + b + 1) % kBoltVar], hw*0.6f, bright*0.8f);
+		// lateral (horizontal) kick + a little forward continuation
+		Vector lat = { rng.c(), 0.15f*rng.c(), rng.c() };
+		const float ll = sqrtf(lat.x*lat.x + lat.y*lat.y + lat.z*lat.z);
+		const float li = ll > 1e-3f ? 1.0f/ll : 0.0f;
+		Vector bdir = { lat.x*li + ud.x*0.45f, lat.y*li + ud.y*0.45f, lat.z*li + ud.z*0.45f };
+		const float bl = sqrtf(bdir.x*bdir.x + bdir.y*bdir.y + bdir.z*bdir.z);
+		const float bi = bl > 1e-3f ? 1.0f/bl : 0.0f;
+		const float blen = (0.22f + 0.22f*rng.f01()) * len;
+		Vector end = { base.x + bdir.x*bi*blen, base.y + bdir.y*bi*blen, base.z + bdir.z*bi*blen };
+		drawBoltQuad(base, end, g_boltTex[(bucket + b + 1) % kBoltVar], hw*0.55f, bright*0.75f);
 	}
 }
 
