@@ -39,9 +39,11 @@ the gate. Gate script: /tmp/split_gate.sh (session-local).
   near-clipped bounce shadow maps + half-space clamp redo. User relief:
   --no-mirror-bounce.
 - Tune-server precedence assert (setDefault < ParamScript < CLI < console).
-- TSan sweep DONE (task bps278tey, /tmp/tsan_sweep.6800, 11 reports):
-  shadow path shows only the known-benign BSphereScreenPos race (now
-  confirmed firing in the per-light Transform fan-out). NEW: greets
-  init-thread LightmapBake_Static races main-thread Animate_Objects
-  spline writes (init overlap) — torn spline reads can vary the static
-  lightmap bake per run. Details in memory shadow-tile-flicker-hunt.
+- TSan sweep DONE (task bps278tey, 11 reports) — both known races FIXED
+  (commit 813e680): (1) BSphereScreenPos write gated on !_inShadowPass
+  (debug-overlay-only value); (2) the greets background lightmap bake
+  raced the tick ONLY in the bench/snapshot harnesses (they didn't join
+  the bake; Run_Greets did) — join extracted to Greets_JoinBakeThread(),
+  now called from RunSceneBench + RunGreetsSnapshot. Re-verified: greets
+  TSan bench 40 iters t=100..900 = ZERO races. NOTE: neither race was the
+  shadow flicker cause (flicker = per-frame PolyId-owner flap, still open).
