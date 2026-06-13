@@ -1652,7 +1652,7 @@ float             g_boltTexKink = -1.0f;
 // white-hot core (sharp) + a blue glow (soft) by distance to the centre,
 // faded at the two ends so the stretched quad doesn't hard-cut.
 Material* makeBoltTexture(uint32_t seed, float rough) {
-	constexpr int W = 64, H = 256;
+	constexpr int W = 256, H = 256;
 	LnRng rng{ seed ? seed : 1u };
 	float vals[129]; int n = 2;
 	vals[0] = 0.5f; vals[1] = 0.5f;          // normalised centre x at the ends
@@ -1669,6 +1669,8 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 	}
 	Image Img; Img.x = W; Img.y = H; Img.Data = new DWord[W*H];
 	const float coreR = 1.7f, glowR = W * 0.16f;
+	// bolt runs along Y (length), centre wiggles in X; glow profile in X.
+	const float glowR2 = W * 0.10f;
 	for (int y = 0; y < H; ++y) {
 		const float t = (float)y / (H-1) * (n-1);
 		const int   i = (int)t; const float f = t - i;
@@ -1676,14 +1678,14 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 		const float cx = (vals[i] + (vals[j]-vals[i])*f) * W;
 		const float ty = (float)y / (H-1);
 		float ef = 1.0f;
-		if (ty < 0.05f) ef = ty / 0.05f; else if (ty > 0.95f) ef = (1.0f-ty)/0.05f;
+		if (ty < 0.04f) ef = ty / 0.04f; else if (ty > 0.96f) ef = (1.0f-ty)/0.04f;
 		for (int x = 0; x < W; ++x) {
 			const float d = fabsf(x - cx);
 			const float core = d < coreR ? 1.0f - d/coreR : 0.0f;
 			// Glow with its exp tail clipped to ZERO before the texel edge,
 			// else the ~4% tail fills the whole quad as a faint blue
 			// rectangle (the CG "panel" tell). (g-0.06)/0.94 -> 0 at d~29px.
-			float glow = expf(-d / glowR) - 0.06f;
+			float glow = expf(-d / glowR2) - 0.06f;
 			glow = glow > 0.0f ? (glow / 0.94f) * 0.9f : 0.0f;
 			int Ri = (int)((core + glow*0.20f) * 255.0f * ef);
 			int Gi = (int)((core + glow*0.55f) * 255.0f * ef);
