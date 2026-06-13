@@ -951,6 +951,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float len2 = wx*wx + wy*wy + wz*wz;
 						const float r2 = tl.range2[n];
 						if (len2 > r2) continue;
+						// Mirror-bounce window portal: a bounce spot's apex
+						// is behind the glass; only light it onto this pixel
+						// if the apex→pixel segment passes through the mirror
+						// window. Gate keeps non-bounce lights free.
+						if (tl.winMinX[n] <= tl.winMaxX[n] &&
+						    bouncePortalReject(tl, n, sampleWorldX, sampleWorldY, sampleWorldZ))
+							continue;
 						const float lenInv = fast_rsqrt(len2);
 						const float dist   = len2 * lenInv;
 						const float rRange = tl.rRange[n];
@@ -2595,8 +2602,16 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				const float dot = wx*nx + wy*ny + wz*nz;
 				if (dot < 0.0f) continue;
 				const float len2 = wx*wx + wy*wy + wz*wz;
-				if (len2 > tl.range2[n]) continue;
-				const float lenInv = fast_rsqrt(len2);
+								if (len2 > tl.range2[n]) continue;
+					// Mirror-bounce window portal (see scalar main kernel). World
+					// pos computed lazily — bounce lights are rare and this is the
+					// sub-rate fill path.
+					if (tl.winMinX[n] <= tl.winMaxX[n]) {
+						const float Pwx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+						const float Pwy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+						const float Pwz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+						if (bouncePortalReject(tl, n, Pwx, Pwy, Pwz)) continue;
+					}	const float lenInv = fast_rsqrt(len2);
 				const float dist   = len2 * lenInv;
 				float k = dot * lenInv * (1.0f - dist * tl.rRange[n]);
 				// Spot cone gate. coneAtten in [0,1] modulates BOTH diffuse
@@ -2843,6 +2858,24 @@ void Render_DeferredLighting() {
 		lights.mirNY[numLights] = O->mirrorPlaneN.y;
 		lights.mirNZ[numLights] = O->mirrorPlaneN.z;
 		lights.mirD [numLights] = O->mirrorPlaneD;
+		// Window AABB for the surface portal test. Bounce spots carry the
+		// real window; every other light gets an INVERTED AABB so the
+		// kernel's `winMinX <= winMaxX` gate is false and it skips the test.
+		if (O->Flags & Omni_BounceCone) {
+			lights.winMinX[numLights] = O->mirrorWinMin.x;
+			lights.winMinY[numLights] = O->mirrorWinMin.y;
+			lights.winMinZ[numLights] = O->mirrorWinMin.z;
+			lights.winMaxX[numLights] = O->mirrorWinMax.x;
+			lights.winMaxY[numLights] = O->mirrorWinMax.y;
+			lights.winMaxZ[numLights] = O->mirrorWinMax.z;
+		} else {
+			lights.winMinX[numLights] =  1e30f;
+			lights.winMinY[numLights] =  1e30f;
+			lights.winMinZ[numLights] =  1e30f;
+			lights.winMaxX[numLights] = -1e30f;
+			lights.winMaxY[numLights] = -1e30f;
+			lights.winMaxZ[numLights] = -1e30f;
+		}
 		// Per-omni halo controls. 0 → "use legacy default":
 		//   HaloIntensity = 0 → 1.0 (multiplier no-op)
 		//   HaloRange     = 0 → IRange (same as surface lighting)

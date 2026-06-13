@@ -1742,6 +1742,8 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
         }
     }
     int used = 0;
+    const bool bprobe = std::getenv("FDS_BOUNCE_PROBE") != nullptr;
+    int cand = 0, planeHits = 0, winHits = 0, mirrorsSeen = 0;
     for (Mirror &m : mirrors) {
         // NOT gated on m.active: the bounce shaft lives in the ROOM —
         // it stays visible when its mirror is off-screen behind you.
@@ -1768,6 +1770,7 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             m.windowValid = true;
         }
         if (m.windowMax.x < m.windowMin.x) continue;
+        ++mirrorsSeen;
         const Vector &N = m.plane.N;
         const float   d = m.plane.d;
         for (Omni *O = sc->OmniHead; O && used < kBouncePool; O = O->Next) {
@@ -1777,12 +1780,14 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             if (O->mirrorId != 0) continue;                 // not clones
             if (O->Flags & Omni_BounceCone) continue;       // not pool spots
             if (O->ISize <= 0.0f) continue;
+            ++cand;
             // Beam axis vs mirror plane.
             const float ND = N.x*O->IDir.x + N.y*O->IDir.y + N.z*O->IDir.z;
             if (std::fabs(ND) < 1e-6f) continue;
             const float NP = N.x*O->IPos.x + N.y*O->IPos.y + N.z*O->IPos.z + d;
             const float t  = -NP / ND;
             if (t <= 0.0f || t >= O->IRange) continue;
+            ++planeHits;
             const Vector hit{ O->IPos.x + O->IDir.x * t,
                               O->IPos.y + O->IDir.y * t,
                               O->IPos.z + O->IDir.z * t };
@@ -1799,6 +1804,7 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
                   hit.y < m.windowMin.y - kPad || hit.y > m.windowMax.y + kPad ||
                   hit.z < m.windowMin.z - kPad || hit.z > m.windowMax.z + kPad);
             if (!inWin) continue;
+            ++winHits;
             Omni *b = pool[used++];
             b->IPos   = reflectPointAcross(O->IPos, N, d);
             b->IDir   = reflectDirAcross(O->IDir, N);
@@ -1816,9 +1822,32 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             b->mirrorSrcOmni = O;
             b->mirrorPlaneN  = N;
             b->mirrorPlaneD  = d;
+            // Window AABB for the surface kernel's portal test: the
+            // bounce only lights room surfaces reachable through this
+            // window, not "through" the surrounding wall.
+            b->mirrorWinMin  = m.windowMin;
+            b->mirrorWinMax  = m.windowMax;
+            // Probe: dump each activated bounce spot's pose so a headless
+            // camera can be aimed at the lit floor pool. FDS_BOUNCE_PROBE=1.
+            if (std::getenv("FDS_BOUNCE_PROBE")) {
+                std::fprintf(stderr,
+                    "[BOUNCE] t=%d spot mir=%d pos=(%.2f,%.2f,%.2f) dir=(%.2f,%.2f,%.2f) "
+                    "range=%.1f size=%.2f planeN=(%.2f,%.2f,%.2f) d=%.2f "
+                    "win=[(%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)]\n",
+                    (int)Timer, (int)m.id, b->IPos.x, b->IPos.y, b->IPos.z,
+                    b->IDir.x, b->IDir.y, b->IDir.z, b->IRange, b->ISize,
+                    N.x, N.y, N.z, d,
+                    m.windowMin.x, m.windowMin.y, m.windowMin.z,
+                    m.windowMax.x, m.windowMax.y, m.windowMax.z);
+            }
         }
     }
     for (int i = used; i < int(pool.size()); ++i) pool[i]->ISize = 0.0f;
+    if (bprobe) {
+        std::fprintf(stderr,
+            "[BOUNCE] t=%d mirrors=%d cand=%d planeHits=%d winHits=%d used=%d\n",
+            (int)Timer, mirrorsSeen, cand, planeHits, winHits, used);
+    }
 }
 
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)

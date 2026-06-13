@@ -68,6 +68,12 @@ struct Omni
 	Omni            *mirrorSrcOmni;   // nullptr on originals
 	Vector           mirrorPlaneN;
 	float            mirrorPlaneD;
+	// Mirror-bounce spots only (Omni_BounceCone): the source mirror's
+	// window AABB (world space). The deferred surface kernel uses it for
+	// a per-pixel portal test so a bounce only lights room surfaces
+	// reachable through the window, not "through" the surrounding wall.
+	Vector           mirrorWinMin;
+	Vector           mirrorWinMax;
 	// Per-omni halo controls (decouple halo brightness/extent from the
 	// omni's surface-lighting parameters L*ISize and IRange). Render_-
 	// OmniHalos and Render_DeferredVolumetric multiply the per-omni

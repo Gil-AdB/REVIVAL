@@ -245,6 +245,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const int32_t  Lci2 = lights.cubeShadowIdx[li];
 		const uint32_t Lmid = lights.mirrorId[li];
 		const float Lso = lights.sinOuter[li];
+		const float Lwnx = lights.winMinX[li], Lwny = lights.winMinY[li], Lwnz = lights.winMinZ[li];
+		const float Lwxx = lights.winMaxX[li], Lwxy = lights.winMaxY[li], Lwxz = lights.winMaxZ[li];
 
 		int dbgPlaced = 0;
 		for (int j = tile_j_lo; j <= tile_j_hi; ++j) {
@@ -312,6 +314,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 					tl.posWorldZ[s] = Lwz;
 					tl.cubeShadowIdx[s] = Lci2;
 					tl.mirrorId[s]      = Lmid;
+					tl.winMinX[s] = Lwnx; tl.winMinY[s] = Lwny; tl.winMinZ[s] = Lwnz;
+					tl.winMaxX[s] = Lwxx; tl.winMaxY[s] = Lwxy; tl.winMaxZ[s] = Lwxz;
 				}
 			}
 		}
@@ -352,6 +356,10 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 			// false; the padded slots contribute nothing whatever
 			// the pixel's mirror id.
 			tl.mirrorId[p]      = 0xffffffffu;
+			// Inverted window AABB → portal-test gate (winMin<=winMax) is
+			// false, so padded slots never enter the portal test.
+			tl.winMinX[p] =  1e30f; tl.winMinY[p] =  1e30f; tl.winMinZ[p] =  1e30f;
+			tl.winMaxX[p] = -1e30f; tl.winMaxY[p] = -1e30f; tl.winMaxZ[p] = -1e30f;
 		}
 		tl.paddedCount = pad_to;
 	}
@@ -441,6 +449,11 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 				tl.cosOuter[idx] = Lco;
 				tl.isSpot[idx]   = Lis;
 				tl.mirrorId[idx] = Lmid;
+				// Transparent path doesn't run the bounce portal test;
+				// keep the window AABB inverted so the gate is a no-op
+				// and nothing reads uninitialized strip memory.
+				tl.winMinX[idx] =  1e30f; tl.winMinY[idx] =  1e30f; tl.winMinZ[idx] =  1e30f;
+				tl.winMaxX[idx] = -1e30f; tl.winMaxY[idx] = -1e30f; tl.winMaxZ[idx] = -1e30f;
 			}
 		}
 	}
@@ -467,6 +480,8 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 			tl.cosOuter[p] = -2.0f;
 			tl.isSpot[p]   = 0u;
 			tl.mirrorId[p] = 0xffffffffu;
+			tl.winMinX[p] =  1e30f; tl.winMinY[p] =  1e30f; tl.winMinZ[p] =  1e30f;
+			tl.winMaxX[p] = -1e30f; tl.winMaxY[p] = -1e30f; tl.winMaxZ[p] = -1e30f;
 		}
 		tl.paddedCount = pad_to;
 		// Strip Z bounds: not used by transparent kernel (depth is

@@ -109,6 +109,19 @@ struct ViewLightsSoA {
 	// filter clone pixels receive the union of both light sets and
 	// saturate (greets teleporter mirror went uniformly yellow).
 	alignas(32) uint32_t mirrorId      [DEFERRED_MAX_VIEW_LIGHTS];
+	// Mirror-bounce window AABB (world space). A bounce spot's apex sits
+	// BEHIND the mirror; its light only legitimately reaches a room point
+	// P if the apex→P segment passes through the mirror WINDOW rectangle.
+	// The surface kernel runs a per-pixel portal test (bouncePortalReject)
+	// against this AABB. Non-bounce lights store an INVERTED AABB
+	// (winMin > winMax) so the test gate `winMinX <= winMaxX` is false and
+	// they pay nothing. Set from Omni::mirrorWinMin/Max in the SoA build.
+	alignas(32) float    winMinX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    winMinY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    winMinZ[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    winMaxX[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    winMaxY[DEFERRED_MAX_VIEW_LIGHTS];
+	alignas(32) float    winMaxZ[DEFERRED_MAX_VIEW_LIGHTS];
 };
 
 // Per-tile light culling. Each tile (a slice of the screen) keeps a
@@ -157,6 +170,14 @@ struct TileLights {
 	// See ViewLightsSoA::mirrorId. Mirrored into the per-tile/per-
 	// strip light list so the inner pixel loop reads tl.mirrorId[n].
 	alignas(32) uint32_t mirrorId  [DEFERRED_MAX_LIGHTS];
+	// Mirror-bounce window AABB (world). See ViewLightsSoA::winMin/Max.
+	// Per-tile copy for the surface kernel's portal test.
+	alignas(32) float    winMinX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    winMinY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    winMinZ[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    winMaxX[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    winMaxY[DEFERRED_MAX_LIGHTS];
+	alignas(32) float    winMaxZ[DEFERRED_MAX_LIGHTS];
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
@@ -318,6 +339,45 @@ struct VolProfScope {
         ++*cnt;
     }
 };
+
+// Window-portal test for mirror-bounce spots (surface lighting). A
+// bounce spot's apex sits behind the mirror plane; light reaches a room
+// point P only if the segment apex→P passes through the mirror WINDOW.
+// Returns true when the light should be REJECTED for this pixel. The
+// caller gates on a valid window (winMinX[n] <= winMaxX[n]) so non-bounce
+// lights — which store an inverted AABB — never call this. `L` is duck-
+// typed over ViewLightsSoA / TileLights (both carry posWorld*, mirN*,
+// mirD, winMin*/winMax*).
+//
+// COVERAGE: applied in the SCALAR surface kernels — Render_DeferredLighting
+// _Tile's scalar path and Render_DeferredLighting_TileFill (the sub-rate
+// quarter/checkerboard fill). These are the only paths greets uses by
+// default (deferred_vec off, PreferOuterVec off). NOT yet applied in the
+// 8-wide vec inner loops (run_vec_spec_loop / the main vec body / OuterVec
+// vec) or the transparent peel — so --deferred-vec / --deferred-outer-vec
+// on greets would let the bounce leak return. Deferred to the x64 vec-path
+// pass; see memory mirror-beam-reflections-design.
+template <class L>
+static inline bool bouncePortalReject(const L &tl, int n,
+                                      float Px, float Py, float Pz)
+{
+	const float Nx = tl.mirNX[n], Ny = tl.mirNY[n], Nz = tl.mirNZ[n], Nd = tl.mirD[n];
+	const float Ax = tl.posWorldX[n], Ay = tl.posWorldY[n], Az = tl.posWorldZ[n];
+	const float tA = Nx*Ax + Ny*Ay + Nz*Az + Nd;   // signed dist: apex
+	const float tP = Nx*Px + Ny*Py + Nz*Pz + Nd;   // signed dist: sample
+	// The light path crosses the mirror plane only when the apex and the
+	// lit point straddle it. Same side ⇒ no path through the window
+	// (sample behind the glass, or coplanar wall surround at tP≈0).
+	if (tA * tP >= 0.0f) return true;
+	const float s = tA / (tA - tP);                // crossing ∈ (0,1)
+	const float cx = Ax + s * (Px - Ax);
+	const float cy = Ay + s * (Py - Ay);
+	const float cz = Az + s * (Pz - Az);
+	constexpr float pad = 0.05f;                   // edge + thin-axis slack
+	return cx < tl.winMinX[n] - pad || cx > tl.winMaxX[n] + pad ||
+	       cy < tl.winMinY[n] - pad || cy > tl.winMaxY[n] + pad ||
+	       cz < tl.winMinZ[n] - pad || cz > tl.winMaxZ[n] + pad;
+}
 
 // rsqrt + one Newton-Raphson step (~24-bit). The cone passes feed
 // cosT = D·W·rsqrt(W²) into smoothstep((cosT−cosO)/(cosI−cosO)):
