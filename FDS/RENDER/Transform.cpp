@@ -960,17 +960,26 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		if (!(F->Txtr->Flags&Mat_TwoSided))
         F->Flags = (AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z>=F->NormProd);*/
 		
-		Vector *BSC = &T->BSphereScreenPos;
+		// BSphereScreenPos is the mesh-center projected to screen space,
+		// read only by the per-mesh debug-label overlay (RENDER.CPP),
+		// which wants the MAIN-camera projection. Skip it during shadow
+		// bakes: the light-POV projection is useless to the overlay, and
+		// writing T->BSphereScreenPos (shared across meshes) from every
+		// per-light shadow thread is a data race (TSan, 2026-06-12). Only
+		// the single main-camera pass writes it now → no race, correct value.
+		if (!_inShadowPass) {
+			Vector *BSC = &T->BSphereScreenPos;
 
-		//BSC->x = M34[0][0] * V.x + M34[0][1] * V.y + M34[0][2] * V.z + M34[0][3];
-		//BSC->y = M34[1][0] * V.x + M34[1][1] * V.y + M34[1][2] * V.z + M34[1][3];
-		//BSC->z = M34[2][0] * V.x + M34[2][1] * V.y + M34[2][2] * V.z + M34[2][3];
-		BSC->x = V.x;
-		BSC->y = V.y;
-		BSC->z = V.z;
+			//BSC->x = M34[0][0] * V.x + M34[0][1] * V.y + M34[0][2] * V.z + M34[0][3];
+			//BSC->y = M34[1][0] * V.x + M34[1][1] * V.y + M34[1][2] * V.z + M34[1][3];
+			//BSC->z = M34[2][0] * V.x + M34[2][1] * V.y + M34[2][2] * V.z + M34[2][3];
+			BSC->x = V.x;
+			BSC->y = V.y;
+			BSC->z = V.z;
 
-		BSC->x /= BSC->z;
-		BSC->y /= BSC->z;
+			BSC->x /= BSC->z;
+			BSC->y /= BSC->z;
+		}
 		// Alternate vertex loop for cube-face shadow xform: when the mesh
 		// has a pre-computed world-space vertex cache, do a per-vertex
 		// pyramid test in world space and skip the view matmul for

@@ -329,6 +329,11 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // face buffer sizing in Shadows.cpp — was fixed by removing the
     // local ::Polys shadow in GREETS.CPP:777.)
     Initialize_Greets();
+    // Join the background lightmap bake before the first tick (it reads
+    // per-frame geometry + shadow maps the tick rewrites — see
+    // Greets_JoinBakeThread). Run_Greets does this; the snapshot path
+    // must too, else the dumped frame races the bake.
+    Greets_JoinBakeThread();
 
     std::vector<int32_t> timestamps = cfg.timestamps;
     if (timestamps.empty()) {
@@ -3141,6 +3146,11 @@ int RunSceneBench(const BenchConfig& cfg, int xres, int yres) {
         driver = createCityScene();
     } else if (cfg.scene == "greets") {
         Initialize_Greets();
+        // Initialize_Greets spawns the lightmap bake on a background
+        // thread; join it before the first tick or the bake races the
+        // animate + shadow-bake + raster of every iteration (same join
+        // Run_Greets does — bench/snapshot harness must too).
+        Greets_JoinBakeThread();
         driver = createGreetsScene();
     } else {
         std::fprintf(stderr, "[BENCH] scene='%s' not supported (try city, greets)\n",

@@ -2320,12 +2320,16 @@ std::unique_ptr<SceneDriver> createGreetsScene()
 	return std::make_unique<GreetsScene>();
 }
 
-void Run_Greets()
+void Greets_JoinBakeThread()
 {
 	// Block until the background lightmap bake started in Initialize_Greets
 	// has finished writing TriMesh::staticShadowLM. The first rendered
 	// frame's deferred kernel samples it; sampling unwritten memory =
-	// garbage or full-shadow.
+	// garbage or full-shadow. Equally important: the bake reads per-frame
+	// geometry (Animate_Objects spline outputs) and the deferred shadow
+	// maps (Render_DeferredShadowMaps), so any tick that runs before this
+	// join races the bake (TSan, 2026-06-12). Every driver of the greets
+	// scene must call this before its first tick.
 	if (g_greetsBakeThread.joinable()) {
 		const auto t0 = std::chrono::steady_clock::now();
 		g_greetsBakeThread.join();
@@ -2333,9 +2337,14 @@ void Run_Greets()
 		const double waitedMs = std::chrono::duration<double, std::milli>(
 			t1 - t0).count();
 		std::fprintf(stderr,
-			"[GREETS-BAKE] Run_Greets waited %.1f ms for bake thread to join\n",
+			"[GREETS-BAKE] waited %.1f ms for bake thread to join\n",
 			waitedMs);
 	}
+}
+
+void Run_Greets()
+{
+	Greets_JoinBakeThread();
 	auto scene = createGreetsScene();
 	runSceneBlocking(*scene);
 }
