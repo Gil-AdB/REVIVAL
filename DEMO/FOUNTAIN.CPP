@@ -1652,7 +1652,7 @@ float             g_boltTexKink = -1.0f;
 // white-hot core (sharp) + a blue glow (soft) by distance to the centre,
 // faded at the two ends so the stretched quad doesn't hard-cut.
 Material* makeBoltTexture(uint32_t seed, float rough) {
-	constexpr int W = 256, H = 256;
+	constexpr int W = 512, H = 512;
 	LnRng rng{ seed ? seed : 1u };
 	float vals[129]; int n = 2;
 	vals[0] = 0.5f; vals[1] = 0.5f;          // normalised centre x at the ends
@@ -1668,7 +1668,7 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 		amp *= 0.5f;
 	}
 	Image Img; Img.x = W; Img.y = H; Img.Data = new DWord[W*H];
-	const float coreR = 1.7f, glowR = W * 0.16f;
+	const float coreR = H * 0.010f;   // core half-width scales with resolution
 	// bolt runs along X (the texture axis mapA's V/length samples); the
 	// jagged centre cy(x) wiggles in Y, glow profile in Y. End-fade in X.
 	const float glowR2 = H * 0.10f;
@@ -1866,11 +1866,15 @@ void Handle_Lightning()
 	if (g_LnLastTimer >= 0 && now > g_LnLastTimer) {
 		for (int i = 0; i < 6; ++i) {
 			if (g_LnLastTimer < strikeT[i] && now >= strikeT[i]) {
-				Upwards.x = Pylon[i].x+(RAND_15()-16384.0f)/16384.0f*75.0f;
-				Upwards.y = Pylon[i].y+1000.0f;
-				Upwards.z = Pylon[i].z+(RAND_15()-16384.0f)/16384.0f*75.0f;
+				Upwards.x = Pylon[i].x+(RAND_15()-16384.0f)/16384.0f*120.0f;
+				Upwards.y = Pylon[i].y+600.0f;
+				Upwards.z = Pylon[i].z+(RAND_15()-16384.0f)/16384.0f*120.0f;
+				// Strike DOWN to the spire TIP (Pylon[i] is the tip omni's
+				// position), not the ground — the bolt should hit the
+				// structure, and ground-targeting also descended through
+				// the spire (z-occluded).
 				Downwards.x = Pylon[i].x;
-				Downwards.y = 0.0f;
+				Downwards.y = Pylon[i].y;
 				Downwards.z = Pylon[i].z;
 				Reserve_Lightning_Bolt(&Upwards,&Downwards,strikeP[i]);
 				Ambient_Factor = 255.0f;
