@@ -1677,9 +1677,11 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 		const int   i = (int)t; const float f = t - i;
 		const int   j = i+1 < n ? i+1 : i;
 		const float cy = (vals[i] + (vals[j]-vals[i])*f) * H;
-		const float tx = (float)x / (W-1);
-		float ef = 1.0f;
-		if (tx < 0.04f) ef = tx / 0.04f; else if (tx > 0.96f) ef = (1.0f-tx)/0.04f;
+		// No length-end fade: the bolt must REACH its endpoints (spire tip
+		// / source). The earlier fade left a visible gap there. Only the
+		// very first/last texel column is blacked out, as a 1-texel guard
+		// border so bilinear filtering can't bleed the bolt past the edge.
+		const float ef = (x == 0 || x == W-1) ? 0.0f : 1.0f;
 		for (int y = 0; y < H; ++y) {
 			const float d = fabsf(y - cy);
 			const float core = d < coreR ? 1.0f - d/coreR : 0.0f;
