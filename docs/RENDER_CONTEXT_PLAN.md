@@ -228,11 +228,32 @@ gate (candidate: a fixed city snapshot, verify determinism first).
 
 - Slice 1 — DONE (`primaryRenderContext()` scaffolding).
 - Slice 2 — DONE + measured; deferred bake kept opt-in (forward default).
-- Slice 3 — IN PROGRESS. Done: `DeferredLightLists.cpp` (821f93a). Next
-  (leaf-first): `RenderInner.cpp` (23) → `DeferredSurfaceKernel.cpp` (80) →
-  `DeferredVolumetric.cpp` (91) / `DeferredFastFog.cpp` (106) → `RENDER.CPP`
-  renderFrame (90, last). Pattern: thread a param (pointer or
-  `const CameraContext&`); alias to locals so the body is untouched; pass the
-  global at the call site (still canonical until renderFrame migrates);
-  mirrortest byte gate; commit.
+- Slice 3 — IN PROGRESS. Done: `DeferredLightLists.cpp` (821f93a, full);
+  `RenderInner.cpp` mask gate → rt (41fa4ab; FList/CAll/CurScene still read
+  globals — tied to the tile-dispatch signature, migrate with renderFrame).
+
+  **RESUME HERE — `DeferredSurfaceKernel.cpp` (80 sites, gate-COVERED).**
+  Tally: XRes×29, YRes×15, VPage×12, ZPage16×10, CurScene×7, g_gbuffer×5,
+  CntrEX×5, g_zscale×4, g_xparZ[Back]×8, CntrEY×4, FOVX/Y×2. The kernel
+  functions already take `const DeferredLightingCtx& ctx` (carries gb,
+  invFOVX/Y, invZScale, Sc). Migration: extend `DeferredLightingCtx` with the
+  addressing fields (`int xres,yres,bpsl; byte* vpage; word* zpage16; float
+  cntrEX,cntrEY;` + the transparent gbuffer/xparZ pointers), populate once in
+  `Render_DeferredLighting` from the globals, then add a small alias block at
+  each kernel function's entry (`const int XRes = ctx.xres;` …) so the bodies
+  are untouched (same trick as buildTileLightLists). Gate: mirrortest.
+
+  Then: `DeferredVolumetric.cpp` (91) / `DeferredFastFog.cpp` (106) — NOT
+  covered by mirrortest (no cones/fog). **Build a deterministic fog gate
+  first** (candidate: fixed city snapshot — verify determinism). Finally
+  `RENDER.CPP` renderFrame (90, last): build `ctx = primaryRenderContext()`
+  at top, thread it into the tile-dispatch lambdas → RenderInner* take
+  `const RenderContext&` and read FList/CAll/scene/target from it (closes the
+  RenderInner remainder). Once renderFrame takes a `RenderContext` param, the
+  offscreen callers stop swapping globals → Slice 6 parallelizes them.
+
+  Pattern (proven): thread a param or extend the existing ctx; alias to
+  locals so the body is untouched; pass the global at the call site (still
+  canonical until renderFrame migrates); mirrortest byte gate
+  (e440bfcdbe1aeb4e5f79bd1eba568459); commit per file.
 ```
