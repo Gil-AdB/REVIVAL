@@ -206,10 +206,33 @@ the pool (atlas cells are disjoint → no write contention). Re-measure.
 
 ## Verification
 
-- Per-slice: 3-scene / 3-pose byte gate on the **primary** path (must stay
-  identical for slices 1, 3, 4, 5).
+**Byte gate (per Slice-3 step) — use mirrortest, NOT greets.** greets is
+non-deterministic run-to-run (timing-dependent background lightmap bake);
+city unverified. mirrortest is deterministic (threaded == serial, stable
+run-to-run) and exercises the deferred kernel + mirror clone + RTT paths:
+
+    cd Runtime && FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest
+    ls /tmp/mt_view_*.ppm | sort | xargs cat | md5 -q
+    # baseline (committed state 821f93a): e440bfcdbe1aeb4e5f79bd1eba568459
+
+mirrortest does NOT cover volumetrics/fog or the city env path — when
+migrating DeferredVolumetric / DeferredFastFog, find a deterministic fog
+gate (candidate: a fixed city snapshot, verify determinism first).
+
 - Offscreen quality: eyeball greets shatter + mirror RTT after slices 2, 6.
 - Perf: `FDS_SHARD_REFL_PROF` (per-pass ms), `FDS_RNDR_BENCH` (forward vs
   deferred per-frame), `FDS_SHARD_REFL_LOOP` (extend runtime for sampling).
   Kept gated in the tree for this work.
+
+## Progress log
+
+- Slice 1 — DONE (`primaryRenderContext()` scaffolding).
+- Slice 2 — DONE + measured; deferred bake kept opt-in (forward default).
+- Slice 3 — IN PROGRESS. Done: `DeferredLightLists.cpp` (821f93a). Next
+  (leaf-first): `RenderInner.cpp` (23) → `DeferredSurfaceKernel.cpp` (80) →
+  `DeferredVolumetric.cpp` (91) / `DeferredFastFog.cpp` (106) → `RENDER.CPP`
+  renderFrame (90, last). Pattern: thread a param (pointer or
+  `const CameraContext&`); alias to locals so the body is untouched; pass the
+  global at the call site (still canonical until renderFrame migrates);
+  mirrortest byte gate; commit.
 ```
