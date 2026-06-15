@@ -35,11 +35,32 @@ architecture/perf/optionality play.
 **Update after Slice 2 measurement:** deferred offscreen bake costs ~4× the
 forward inline bake at 64² (fixed dispatch + lighting-pass overhead × N),
 for marginal quality — so deferred-offscreen is *not* a motivation. The
-**only remaining justification is parallelism**: fanning the forward shard
-pass (~41 ms serial for N=238) across cores → ~41/N_core (~5–8 ms). Whether
-that's worth a multi-slice renderer migration is a judgement call — the
-shatter is a transient few-second event, so 41 ms may be acceptable as-is.
-Decision pending (see ROADMAP / discuss before continuing past Slice 1).
+remaining justification is **thread-safety + inter-render parallelism**,
+which is bigger than the shards alone (decision: proceed).
+
+### Two threading models (the real point)
+
+- **One big render** (main view): *intra*-render tiling — all cores on one
+  frame. This is what the engine does today and should keep doing.
+- **Many small renders** (shadow maps over N lights, mirror RTT over N
+  panels, shard reflections over N=238): *inter*-render parallelism — each
+  render runs **whole, single-threaded** on a pool thread, and N of them fan
+  across the pool. Two reasons: (a) per-render threadpool dispatch is the
+  dominant cost at small sizes (Slice-2 showed it), so tiling each one is
+  pure overhead; (b) a pool thread doing a *complete* render never
+  re-submits to the pool → no nesting/deadlock.
+
+All three "many small" workloads are throttled today by global render state:
+
+- **Shadow bake** (`Shadows.cpp`) parallelizes per-light *Transform* only;
+  the raster is serial because the framebuffer/G-buffer/FList are global
+  (its own comment: "if Transform >> Raster, cross-light parallelism is
+  moot"). Per-context state lets the raster go cross-light too.
+- **Mirror RTT** (`GreetsMirror.cpp:2457`) is a fully serial slot loop.
+- **Shard reflections** — serial loop + global swap.
+
+So the migration's payoff is **inter-render parallelism for every offscreen
+workload**, not just the shards. That's why it's worth doing.
 
 ## Current state — what's already done
 
@@ -131,13 +152,37 @@ the forward inline bake as default; the deferred path stays opt-in** (for
 low-shard-count / paused scenarios, or future use). This also removes
 deferred-offscreen as a motivation for the rest of the migration — see below.
 
-**Slice 3 — thread the context through the orchestration.**
+**Slice 3 — thread the context through the orchestration. (The big one.)**
 `renderFrame`, `RenderInner*`, `Render_DeferredLighting` + volumetric/fog
 passes, and `Transform_Objects`' projection reads take `const RenderContext&`
-(or the sub-structs) instead of reading globals. One consumer at a time,
-byte-compared. The hot inner loops (`Mekalele`, `TheOtherBarry`) already take
-`rt`/`cam` — the work is the *passes that call them* and the per-pixel
-deferred kernel's global reads (`FOVX`, `CntrEX`, `XRes`, the gbuffer).
+(or the sub-structs) instead of reading globals. The hot inner loops
+(`Mekalele`, `TheOtherBarry`) already take `rt`/`cam`; `Transform_Objects`
+already takes `(sc, cam, faces)` and reads `cam.fovX` etc. The remaining work
+is the *passes that call them* + the per-pixel deferred kernel's direct global
+reads.
+
+Audited scope (`FOVX/FOVY/CntrE*/Cntr*/XRes/YRes/VPage/ZPage16/VESA_BPSL/
+CurScene/g_gbuffer/g_xparZ/FList/SList/CAll/C_NZP/C_FZP/g_zscale` reads):
+
+    DeferredFastFog.cpp        106
+    DeferredVolumetric.cpp      91
+    RENDER.CPP                  90
+    DeferredSurfaceKernel.cpp   80
+    RenderInner.cpp             23
+    DeferredLightLists.cpp      12
+    ~400 sites total (mostly repeats of XRes / FOVX / CntrEX / CurScene /
+    g_gbuffer — mechanical, but each must not perturb the main path's bytes).
+
+**Tactic:** migrate **one function at a time**, threading a
+`const RenderContext&` (or the sub-struct it needs), replacing that
+function's global reads with ctx fields, then run the 3-scene/3-pose byte
+gate before moving on. Order: leaf-most first (DeferredLightLists,
+RenderInner) → kernel (DeferredSurfaceKernel) → volumetric/fog → renderFrame
+last (it builds the sub-contexts; once it takes a `RenderContext`, the
+offscreen callers stop swapping globals). This is a dedicated multi-session
+campaign — start it fresh, not as a tail to other work; it is well-suited to
+careful incremental execution but NOT to blind delegation (hot perf code,
+byte-exact gate).
 
 **Slice 4 — thread `CurScene` → `ctx.scene`.** Mechanical; many call sites.
 
