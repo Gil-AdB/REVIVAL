@@ -209,6 +209,19 @@ struct DeferredLightingCtx {
 	float                cameraWorldX;
 	float                cameraWorldY;
 	float                cameraWorldZ;
+	// Render-target addressing — replaces the per-kernel reads of the
+	// XRes/YRes/VPage/ZPage16/CntrE* globals and the transparent G-buffer
+	// set, so the tile kernels run off the context (RenderContext migration,
+	// docs/RENDER_CONTEXT_PLAN.md). Populated once in Render_DeferredLighting.
+	int                  xres;
+	int                  yres;
+	byte                *vpage;        // 32-bit BGRA framebuffer (== VPage)
+	word                *zpage16;      // 16-bit depth (== ZPage16)
+	float                cntrEX;
+	float                cntrEY;
+	meka::GBuffer       *gbXpar;       // transparent front layer
+	word                *xparZ;        // transparent front depth
+	word                *xparZBack;    // transparent back depth
 };
 
 // File-scope ctx, populated each frame by Render_DeferredLighting and

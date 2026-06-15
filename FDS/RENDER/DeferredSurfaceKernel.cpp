@@ -328,6 +328,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
 {
+	// Render-target addressing from ctx, not globals (RenderContext
+	// migration). Locals shadow the engine globals so the body is untouched.
+	const int XRes = ctx.xres;
+	byte *const VPage = ctx.vpage;
+	word *const ZPage16 = ctx.zpage16;
+	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	// Hoist mode/global queries once per tile — a `getenv()`-backed
@@ -1339,6 +1345,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
                                                      int tileIndex,
                                                      int x1, int y1, int x2, int y2)
 {
+	// Addressing from ctx, not globals (RenderContext migration). The
+	// transparent-layer pointers (g_gbufferTransparent*/g_xparZ*) stay global
+	// for now — they migrate with the rest of the xpar path.
+	const int XRes = ctx.xres;
+	byte *const VPage = ctx.vpage;
+	word *const ZPage16 = ctx.zpage16;
+	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
 	meka::GBuffer *gbPtr;
 	uint16_t      *zPtr;
 	if constexpr (Layer == XparLayer::Front) {
@@ -1762,6 +1775,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
                                                    int tileIndex,
                                                    int x1, int y1, int x2, int y2)
 {
+	// Addressing from ctx, not globals (RenderContext migration).
+	const int XRes = ctx.xres;
+	byte *const VPage = ctx.vpage;
+	word *const ZPage16 = ctx.zpage16;
+	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool   quarter      = deferredLightingQuarterEnabled();
@@ -2322,6 +2340,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
                                               int tileIndex,
                                               int x1, int y1, int x2, int y2)
 {
+	// Addressing from ctx, not globals (RenderContext migration).
+	const int XRes = ctx.xres, YRes = ctx.yres;
+	byte *const VPage = ctx.vpage;
+	word *const ZPage16 = ctx.zpage16;
+	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
@@ -2999,6 +3022,17 @@ void Render_DeferredLighting() {
 	ctx.cameraWorldX = View->ISource.x;
 	ctx.cameraWorldY = View->ISource.y;
 	ctx.cameraWorldZ = View->ISource.z;
+	// Render-target addressing for the tile kernels (RenderContext migration):
+	// snapshot the globals here so the kernels read ctx, not the globals.
+	ctx.xres       = XRes;
+	ctx.yres       = YRes;
+	ctx.vpage      = VPage;
+	ctx.zpage16    = ZPage16;
+	ctx.cntrEX     = CntrEX;
+	ctx.cntrEY     = CntrEY;
+	ctx.gbXpar     = g_gbufferTransparent;
+	ctx.xparZ      = g_xparZ;
+	ctx.xparZBack  = g_xparZBack;
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
