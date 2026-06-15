@@ -32,6 +32,7 @@ struct Material;
 struct Texture;
 struct TriMesh;
 struct VESA_Surface;
+namespace meka { struct GBuffer; }
 
 namespace fds {
 
@@ -119,6 +120,15 @@ private:
     Texture*            textTex_ = nullptr;    // optional composited text
     bool                hasText_ = false;
     float               reflGain_ = 1.0f;      // reflectance (forward bake is unshadowed)
+    // Slice 2 (RenderContext): optional per-context G-buffer for a DEFERRED
+    // shard bake (shadowed, matches the main view) — opt-in via
+    // FDS_SHARD_DEFERRED. Sized to texRes²; swapped into the g_gbuffer
+    // globals around each shard's deferred render. Null when forward-baking.
+    bool                deferredBake_ = false;
+    meka::GBuffer*      reflGB_     = nullptr;
+    meka::GBuffer*      reflGBxF_   = nullptr;  // transparent front
+    meka::GBuffer*      reflGBxB_   = nullptr;  // transparent back
+    std::vector<uint16_t> reflXparZ_, reflXparZBack_;
     // Deterministic LCG so headless snapshots reproduce frame-for-frame.
     uint32_t            rng_ = 0x1234567u;
 };

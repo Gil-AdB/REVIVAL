@@ -14,6 +14,8 @@
 #include <Base/Camera.h>
 #include <Base/FrameState.h>     // g_mainCamera/Faces, g_offAxisFrustumCull
 #include <RENDER/OffscreenView.h>
+#include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
+#include <Base/FeatureFlags.h>
 
 #include <algorithm>
 #include <cmath>
@@ -383,6 +385,36 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 			s.mesh->Faces[fi].Filler = scene_builder::SceneBuilder::PickFillerForMaterial(atlasMat_);
 		}
 	Scene_RebuildMatTable(sc);
+
+	// FDS_SHARD_DEFERRED: bake each shard's reflection through the DEFERRED
+	// path (shadowed, per-pixel — matches the main view, closes the residual
+	// unshadowed-brightness gap) instead of forward. Needs a G-buffer sized
+	// to the bake target, swapped into the g_gbuffer globals per render.
+	// (Slice 2 of docs/RENDER_CONTEXT_PLAN.md — interim global-swap until the
+	// RenderContext threads the gbuffer through; serial-only, fine pre-Slice-6.)
+	deferredBake_ = std::getenv("FDS_SHARD_DEFERRED") != nullptr;
+	if (deferredBake_) {
+		const size_t np = size_t(texRes_) * size_t(texRes_);
+		auto mk = [&](bool xpar) {
+			auto* g = new meka::GBuffer();
+			g->normal.assign(np, 0);
+			g->txtr.assign(np, xpar ? 0xFFFFFFFFu : 0u);
+			if (!xpar) {
+				g->tangent.assign(np, 0);
+				g->shadowMatID.assign(np, 0);
+				if (fds::FeatureFlags::shadow_lightmap()) {
+					g->lightmapMF.assign(np, 0);
+					g->lightmapST.assign(np, 0);
+				}
+			}
+			return g;
+		};
+		reflGB_   = mk(false);
+		reflGBxF_ = mk(true);
+		reflGBxB_ = mk(true);
+		reflXparZ_.assign(np, 0);
+		reflXparZBack_.assign(np, 0);
+	}
 	reflCamsOn_ = true;
 }
 
@@ -500,9 +532,27 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 			Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
 			g_offAxisFrustumCull = false;
 			g_reflVertCull = false;
-			// Single-threaded raster: the 64² target's threadpool dispatch +
-			// barrier cost (profiled at ~half the pass) dwarfs the pixels.
-			if (CAll != 0) { Radix_Sort(FList, SList, CAll); RenderForwardRegionInline(0, 0, float(texRes_), float(texRes_)); }
+			if (CAll != 0) {
+				Radix_Sort(FList, SList, CAll);
+				if (deferredBake_) {
+					// Deferred bake: swap the small G-buffer into the globals,
+					// render deferred (shadowed, matches main view), restore.
+					// skipVolumetric — a reflection wants no fog/cones/halos.
+					meka::GBuffer *sgb = g_gbuffer, *sxf = g_gbufferTransparent, *sxb = g_gbufferTransparentBack;
+					uint16_t *sxz = g_xparZ, *sxzb = g_xparZBack; int sxc = g_xparZCount;
+					g_gbuffer = reflGB_; g_gbufferTransparent = reflGBxF_; g_gbufferTransparentBack = reflGBxB_;
+					g_xparZ = reflXparZ_.data(); g_xparZBack = reflXparZBack_.data();
+					g_xparZCount = int(reflXparZ_.size());
+					Render(RenderPath::ForceDeferred, /*skipVolumetric=*/true);
+					g_gbuffer = sgb; g_gbufferTransparent = sxf; g_gbufferTransparentBack = sxb;
+					g_xparZ = sxz; g_xparZBack = sxzb; g_xparZCount = sxc;
+				} else {
+					// Single-threaded raster: the 64² target's threadpool
+					// dispatch + barrier cost (profiled ~half the pass) dwarfs
+					// the pixels.
+					RenderForwardRegionInline(0, 0, float(texRes_), float(texRes_));
+				}
+			}
 
 			// Reflectance gain: the forward bake is unshadowed, so greets'
 			// over-ranged omnis flood it far brighter (and greener) than the

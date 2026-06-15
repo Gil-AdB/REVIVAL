@@ -32,6 +32,15 @@ deferred color divergence was a separate R/B-swap bug, fixed in
 `TheOtherBarry`'s `colorize` — see git log). It is purely an
 architecture/perf/optionality play.
 
+**Update after Slice 2 measurement:** deferred offscreen bake costs ~4× the
+forward inline bake at 64² (fixed dispatch + lighting-pass overhead × N),
+for marginal quality — so deferred-offscreen is *not* a motivation. The
+**only remaining justification is parallelism**: fanning the forward shard
+pass (~41 ms serial for N=238) across cores → ~41/N_core (~5–8 ms). Whether
+that's worth a multi-slice renderer migration is a judgement call — the
+shatter is a transient few-second event, so 41 ms may be acceptable as-is.
+Decision pending (see ROADMAP / discuss before continuing past Slice 1).
+
 ## Current state — what's already done
 
 The hard part of the data modelling is already in place (the SoA / FrameState
@@ -104,16 +113,23 @@ Introduce the struct; create `g_primaryContext`; make
 `MainRenderTargetFromGlobals()` return `g_primaryContext.target`; leave all
 globals as-is. Pure plumbing. Byte-identical by construction.
 
-**Slice 2 — per-context G-buffer (the high-value slice).**
-Give `RenderContext` owned G-buffer allocation sized to its target. Add a
-`Render(ctx, path)` overload that uses `ctx.target.gbuffer` instead of the
-global. The shard bake creates a 64²-sized context and calls deferred →
-shadowed, correct-magnitude reflections (closes the residual unshadowed gap
-left after the R/B fix). **This is also where we finally measure the true
-64² deferred per-render cost** (the open perf question — the full-frame 8×
-ratio is per-pixel-bound and shouldn't extrapolate). If too slow at N=238,
-the round-robin budget already built in `MirrorShatter::renderReflectionCameras`
-absorbs it.
+**Slice 2 — per-context G-buffer (deferred offscreen bake). DONE (as an
+interim global-swap) + MEASURED. Verdict: not worth it as default.**
+Implemented an opt-in deferred shard bake (`FDS_SHARD_DEFERRED`): allocate a
+texRes²-sized G-buffer set, swap it into the `g_gbuffer` globals around a
+`Render(ForceDeferred, skipVolumetric)`, restore. Measured at 64², N=238:
+
+    forward inline bake   ~41 ms
+    deferred bake        ~160 ms   (~4×)
+
+The full-frame 8× ratio did shrink (the per-pixel lighting cost collapsed at
+64²), but **fixed per-call overhead dominates** — threadpool dispatch (which
+`RenderForwardRegionInline` avoids) + the deferred lighting pass setup
+(tile-light-list build, mat32 clear), ×238. Quality gain over the
+R/B-fixed forward bake is marginal (slightly shadowed). **Conclusion: keep
+the forward inline bake as default; the deferred path stays opt-in** (for
+low-shard-count / paused scenarios, or future use). This also removes
+deferred-offscreen as a motivation for the rest of the migration — see below.
 
 **Slice 3 — thread the context through the orchestration.**
 `renderFrame`, `RenderInner*`, `Render_DeferredLighting` + volumetric/fog
