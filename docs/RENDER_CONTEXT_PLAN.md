@@ -219,6 +219,30 @@ The clean end-state, per the "use classes" direction:
 - **Parallel offscreen renders** = separate `RenderPipeline` instances (or
   separate `RenderContext`s), each on its own thread. No global swap.
 
+### Singleton-deletion touch points (enumerated — the atomic final flip)
+
+All hot **tile kernels** now take `const DeferredLightingCtx&` by param
+(surface: 4 kernels; volumetric: cone + halo tiles). Remaining readers of the
+file-scope `g_deferredCtx` are **orchestrators + one cross-file site**:
+
+- `DeferredSurfaceKernel.cpp`: `g_deferredCtx` def (95); `Render_DeferredLighting`
+  builds it (3003-3004); **`RenderXparClumpInStrip` copies it (1745)**.
+- `DeferredVolumetric.cpp`: cones orchestrator (1431), halos orchestrator (2241)
+  — read for lights/numLights (tiles already get ctx).
+- `DeferredFastFog.cpp`: `Render_DeferredFastFog` (1787), `…SkyPaint` (1992),
+  `Render_DeferredVolumetric` (3074) — build `FastFogParams` from it.
+- `DeferredCommon.h`: extern decl (235).
+- **`FILLERS.CPP:1866`** calls `RenderXparClumpInStrip` from the unified-TBR
+  transparent path — so threading the strip ctx reaches into FILLERS' TBR
+  code. This is the coupling that makes the deletion an atomic multi-file
+  change (can't gate mid-way), and why it's its own focused unit.
+
+Flip: `renderFrame` declares a stack `DeferredLightingCtx ctx`,
+`Render_DeferredLighting(ctx)` fills it, passes `ctx` to the volumetric/fastfog
+orchestrators (skybox + fogpass don't read it); thread ctx to
+`RenderXparClumpInStrip` via its FILLERS caller; delete the def + extern.
+Build + `render_gate.sh`. Then Slice 6: per-instance pipelines for parallelism.
+
 ### Revised remaining steps (do these; skip more singleton-aliasing)
 
 1. Give the volumetric/fastfog **orchestrators** a `DeferredLightingCtx&`
