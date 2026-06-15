@@ -106,13 +106,13 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 				// Same centroid-footprint gate as the clone-flare one
 				// in The_MMX_Scalar.
 				if (F->mirrorMaskTag != 0) {
-					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+					if (!rt.gbuffer || rt.gbuffer->mirrorMask.empty())
 						continue;
 					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
 					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
-					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					if (mx < 0) mx = 0; else if (mx > rt.xres - 1) mx = rt.xres - 1;
+					if (my < 0) my = 0; else if (my > rt.yres - 1) my = rt.yres - 1;
+					if (rt.gbuffer->mirrorMask[size_t(my) * size_t(rt.xres) + size_t(mx)]
 					    != F->mirrorMaskTag)
 						continue;
 				}
@@ -220,13 +220,13 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 				// Same centroid-footprint gate as the clone-flare one
 				// in The_MMX_Scalar.
 				if (F->mirrorMaskTag != 0) {
-					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+					if (!rt.gbuffer || rt.gbuffer->mirrorMask.empty())
 						continue;
 					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
 					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
-					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					if (mx < 0) mx = 0; else if (mx > rt.xres - 1) mx = rt.xres - 1;
+					if (my < 0) my = 0; else if (my > rt.yres - 1) my = rt.yres - 1;
+					if (rt.gbuffer->mirrorMask[size_t(my) * size_t(rt.xres) + size_t(mx)]
 					    != F->mirrorMaskTag)
 						continue;
 				}
