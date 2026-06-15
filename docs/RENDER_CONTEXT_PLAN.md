@@ -234,11 +234,30 @@ on the Slice-3 critical path.)
 
 - Slice 1 — DONE (`primaryRenderContext()` scaffolding).
 - Slice 2 — DONE + measured; deferred bake kept opt-in (forward default).
-- Slice 3 — IN PROGRESS. Done: `DeferredLightLists.cpp` (821f93a, full);
-  `RenderInner.cpp` mask gate → rt (41fa4ab; FList/CAll/CurScene still read
-  globals — tied to the tile-dispatch signature, migrate with renderFrame).
+- Slice 3 — IN PROGRESS. Done:
+  - `DeferredLightLists.cpp` (821f93a, full).
+  - `RenderInner.cpp` mask gate → rt (41fa4ab; FList/CAll/CurScene remain —
+    tied to the tile-dispatch signature, migrate with renderFrame).
+  - `tools/render_gate.sh` (c9bf056) — mirrortest + conetest(+fog) + halotest,
+    all deterministic, all deferred TUs covered.
+  - `DeferredSurfaceKernel.cpp` (d4e2e49) — the 4 ctx-taking tile kernels
+    (Tile, TransparentTile, OuterVec, TileFill) alias addressing from ctx
+    (extended DeferredLightingCtx with xres/yres/vpage/zpage16/cntrE*). Still
+    global: RenderXparClumpInStrip, the xpar-layer pointer select, orchestrator.
+  - `DeferredVolumetric.cpp` fog tile (e96b799) — ctx gained fovX/fovY/zscale;
+    Render_DeferredFogPass_Tile aliases from g_deferredCtx (safe: filled before
+    volumetric passes run).
 
-  **RESUME HERE — `DeferredSurfaceKernel.cpp` (80 sites, gate-COVERED).**
+  **RESUME HERE — `DeferredVolumetric.cpp` cones + halos tiles** (large
+  kernels — check each function's exact extent before aliasing), then their
+  orchestrators; `DeferredFastFog.cpp` (106); then the backbone:
+
+  Original audit (`DeferredSurfaceKernel.cpp` 80 etc) below for reference.
+  NOTE: the alias-from-g_deferredCtx steps remove *direct* global reads but
+  g_deferredCtx is still a file-scope singleton — true per-pass parallelism
+  needs renderFrame to build + thread a per-pass RenderContext (Slice 3 tail).
+
+  Original target list:
   Tally: XRes×29, YRes×15, VPage×12, ZPage16×10, CurScene×7, g_gbuffer×5,
   CntrEX×5, g_zscale×4, g_xparZ[Back]×8, CntrEY×4, FOVX/Y×2. The kernel
   functions already take `const DeferredLightingCtx& ctx` (carries gb,
