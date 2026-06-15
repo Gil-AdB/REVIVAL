@@ -260,6 +260,44 @@ Each step still gates with `tools/render_gate.sh`. This is the backbone and
 the highest-risk change — do it as a focused effort, not tacked onto other
 work.
 
+## Forward path (the parallelism-critical path) — status + Slice 6 recipe
+
+Confirmed by call-graph tracing: the parallel offscreen workloads
+(shard/shadow/RTT bakes) run **forward** (`RenderForwardRegionInline` →
+`RenderInner` → `TheOtherBarry` + `Transform_Objects`) — they never touch
+`g_deferredCtx`. So the forward path, not the deferred kernel, is what
+parallelism needs.
+
+Done: `RenderInner` / `RenderForwardRegionInline` take a per-pass
+`fds::RenderContext` (target + camera + faces + scene); renderFrame passes the
+primary context; the shard bake passes `primaryRenderContext()` over its
+OffscreenViewScope-swapped globals (5adda03). So a worker can now forward-
+raster *its own* face list into *its own* surface.
+
+**Slice 6 — parallelize the shard pass.** Each worker needs:
+1. Own `FaceListContext` — done (`ctx.faces`); `Transform_Objects` already
+   writes a passed one.
+2. Own **`VertexScratch`** — THE catch. `Transform_Objects` writes transformed
+   verts into per-mesh `VertexFrame` storage shared across the scene;
+   concurrent transforms clobber each other. Mirror the shadow bake
+   (`Shadows.cpp`: `perLightScratch[lightIdx]`, a `fds::VertexScratch` per
+   worker, stamped so `F->frame` points at the worker's scratch not the shared
+   mesh frame). This is the real work of Slice 6.
+3. Own surface (pool of N 64² targets, not the single `reflSurf_`) + own camera.
+4. Fan the shards across the pool: each worker builds its camera +
+   `Transform_Objects(sc, ctx.camera, ctx.faces)` into its scratch +
+   `RenderForwardRegionInline(ctx)` + blit its atlas cell (cells are disjoint).
+
+**Slice 6 is CONCURRENCY code — `render_gate.sh` does NOT validate it.** The
+gate runs serially; it proves byte-identity, not thread-safety. Validate with
+TSan + the concurrent-bench methodology (see the shadow-flicker memory: torn
+reads across atomics are TSan-invisible and cost ~5 sessions). Audit every
+remaining shared mutable touched on the forward path under concurrency
+(per-mesh `VertexFrame`, `MatShadowCache`, any `thread_local` assumed
+single-pass, the clipper tile rect). Do this fresh, with TSan, NOT as a tail
+to other work — the gate's green light is necessary but nowhere near
+sufficient here.
+
 ## Risks
 
 - **Inner-loop global reads** (`FOVX`/`CntrEX` in Transform & the deferred
