@@ -3030,6 +3030,9 @@ void Render_DeferredLighting() {
 	ctx.zpage16    = ZPage16;
 	ctx.cntrEX     = CntrEX;
 	ctx.cntrEY     = CntrEY;
+	ctx.fovX       = FOVX;
+	ctx.fovY       = FOVY;
+	ctx.zscale     = float(g_zscale);
 	ctx.gbXpar     = g_gbufferTransparent;
 	ctx.xparZ      = g_xparZ;
 	ctx.xparZBack  = g_xparZBack;

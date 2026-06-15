@@ -219,6 +219,9 @@ struct DeferredLightingCtx {
 	word                *zpage16;      // 16-bit depth (== ZPage16)
 	float                cntrEX;
 	float                cntrEY;
+	float                fovX;         // == FOVX (volumetric passes use it raw)
+	float                fovY;         // == FOVY
+	float                zscale;       // == g_zscale
 	meka::GBuffer       *gbXpar;       // transparent front layer
 	word                *xparZ;        // transparent front depth
 	word                *xparZBack;    // transparent back depth

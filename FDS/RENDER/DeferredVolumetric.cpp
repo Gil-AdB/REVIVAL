@@ -70,6 +70,17 @@ static std::atomic<int> g_coneRaymarchHits{0};
 static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
                                          float invFZP)
 {
+	// Render-target state from the per-frame ctx (populated by
+	// Render_DeferredLighting, which runs before any volumetric pass — see
+	// renderFrame order). Locals shadow the globals so the body is untouched.
+	// (g_deferredCtx is still file-scope; param-threading lands with renderFrame.)
+	const DeferredLightingCtx &ctx = g_deferredCtx;
+	const int XRes = ctx.xres;
+	byte *const VPage = ctx.vpage;
+	word *const ZPage16 = ctx.zpage16;
+	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const meka::GBuffer *const g_gbuffer = ctx.gb;
+	const float g_zscale = ctx.zscale;
 	dword *out = reinterpret_cast<dword*>(VPage);
 	const uint32_t *mat = g_gbuffer->txtr.data();
 	const uint16_t *zEnc = ZPage16;
