@@ -193,6 +193,49 @@ globals). CITY cube bake + mirror RTT adopt contexts.
 **Slice 6 — parallelize the shard pass.** Fan the per-shard contexts across
 the pool (atlas cells are disjoint → no write contention). Re-measure.
 
+## Class-based end-state (the actual goal — supersedes per-kernel aliasing)
+
+LSP (`findReferences` on `g_deferredCtx`) showed the real picture: the
+volumetric/fastfog passes **already read the file-scope `g_deferredCtx`
+singleton pervasively** (lights, matTable, Sc, invFOVX, and now addressing).
+So further "alias the global onto the ctx" steps in those files are
+**low-value** — they remove global *names* but the **singleton is what blocks
+parallelism**. (Also: LSP lists `DeferredLighting.cpp` references — that file
+was renamed to `DeferredSurfaceKernel.cpp`; the hits are a stale clangd index,
+ignore them.)
+
+The clean end-state, per the "use classes" direction:
+
+- **`fds::RenderPipeline` owns a `RenderContext`** (it already owns
+  `renderFrame`). The per-frame state — the `DeferredLightingCtx` contents +
+  target/gbuffer + face list — lives in the instance, not file scope.
+- **`renderFrame` builds/receives the `RenderContext`** and threads
+  `const RenderContext&` (or `DeferredLightingCtx&`) to every pass:
+  `Render_DeferredLighting(ctx)`, the volumetric/fog orchestrators(ctx) →
+  their `_Tile(ctx)`. The kernels already take ctx by param; the work is the
+  **orchestrators + `renderFrame`**.
+- **Delete the `g_deferredCtx` singleton** — the stack-local (or per-instance)
+  ctx is the only source.
+- **Parallel offscreen renders** = separate `RenderPipeline` instances (or
+  separate `RenderContext`s), each on its own thread. No global swap.
+
+### Revised remaining steps (do these; skip more singleton-aliasing)
+
+1. Give the volumetric/fastfog **orchestrators** a `DeferredLightingCtx&`
+   param; thread it to their `_Tile` functions (replace the `g_deferredCtx`
+   reads with the param). LSP `findReferences` enumerates the sites.
+2. `Render_DeferredLighting` / the orchestrators are **called from
+   `renderFrame`** — make `renderFrame` own a stack-local `DeferredLightingCtx`
+   (built where `g_deferredCtx` is built today) and pass it to all of them.
+3. Delete `g_deferredCtx`.
+4. Thread the remaining `renderFrame` globals (XRes/VPage/FList/CAll/CurScene)
+   into the `RenderContext`; the tile-dispatch lambdas capture it.
+5. Slice 6: parallelize the offscreen workloads via per-instance pipelines.
+
+Each step still gates with `tools/render_gate.sh`. This is the backbone and
+the highest-risk change — do it as a focused effort, not tacked onto other
+work.
+
 ## Risks
 
 - **Inner-loop global reads** (`FOVX`/`CntrEX` in Transform & the deferred
