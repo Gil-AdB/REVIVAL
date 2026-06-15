@@ -2922,7 +2922,7 @@ void Render_DeferredLighting() {
 	const float invZScale = 1.0f / float(g_zscale);
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
-	                       invZScale);
+	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
 	// Mirror-footprint presence per tile/strip, for the clone-light
 	// cull in the list builders. Only computed when a scene actually
 	// activated the mask plane (GreetsMirror::BuildMirror).
@@ -2940,7 +2940,7 @@ void Render_DeferredLighting() {
 	}
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
-	                    lights, numLights, tilePresence);
+	                    lights, numLights, tilePresence, fds::g_mainCamera);
 
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
@@ -2960,7 +2960,7 @@ void Render_DeferredLighting() {
 			stripPresence = stripMirrorPresence;
 		}
 		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights,
-		                     stripPresence);
+		                     stripPresence, fds::g_mainCamera);
 	}
 	if (fds::FeatureFlags::deferred_tile_stats()) {
 		int total = 0, tmin = INT_MAX, tmax = 0;

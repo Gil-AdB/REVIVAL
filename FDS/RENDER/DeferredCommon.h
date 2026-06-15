@@ -22,6 +22,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "Base/CameraContext.h"   // fds::CameraContext (light-list builders)
 
 namespace meka { struct GBuffer; }
 struct Scene;
@@ -222,7 +223,7 @@ extern DeferredLightingCtx g_deferredCtx;
 // fills g_stripLights for the unified-TBR transparent strip path.
 void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY,
                             int tileSizeX, int tileSizeY, int xres, int yres,
-                            float invZScale);
+                            float invZScale, const uint16_t *zpage16);
 void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
                                int regionW, int regionH,
                                int regionsX, int regionsY,
@@ -230,10 +231,12 @@ void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
 void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                          int tileSizeX, int tileSizeY, int xres, int yres,
                          const ViewLightsSoA &lights, int numLights,
-                         const uint32_t *tileMirrorPresence);
+                         const uint32_t *tileMirrorPresence,
+                         const fds::CameraContext &cam);
 void buildStripLightLists(int numStrips, int stripHeight, int yres,
                           const ViewLightsSoA &lights, int numLights,
-                          const uint32_t *stripMirrorPresence);
+                          const uint32_t *stripMirrorPresence,
+                          const fds::CameraContext &cam);
 
 // MAX strips at any reasonable display: 4096/8 = 512. We size for
 // that ceiling so reallocation isn't needed at runtime resize.

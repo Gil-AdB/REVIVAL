@@ -40,9 +40,9 @@
 // closer pixel. zEnc == 0 means the pixel was never touched.
 void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY,
                                    int tileSizeX, int tileSizeY, int xres, int yres,
-                                   float invZScale)
+                                   float invZScale, const uint16_t *zpage16)
 {
-	const uint16_t *zp = reinterpret_cast<const uint16_t*>(ZPage16);
+	const uint16_t *zp = zpage16;
 	for (int j = 0; j < numTilesY; ++j) {
 		const int y_lo = j * tileSizeY;
 		const int y_hi = std::min(y_lo + tileSizeY, yres);
@@ -150,8 +150,11 @@ void computeMirrorPresenceGrid(const uint8_t *mask, int w, int h,
 void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  int tileSizeX, int tileSizeY, int xres, int yres,
                                  const ViewLightsSoA &lights, int numLights,
-                                 const uint32_t *tileMirrorPresence)
+                                 const uint32_t *tileMirrorPresence,
+                                 const fds::CameraContext &cam)
 {
+	const float FOVX = cam.fovX, FOVY = cam.fovY;
+	const float CntrEX = cam.cntrEX, CntrEY = cam.cntrEY;
 	const int numTiles = numTilesX * numTilesY;
 	for (int t = 0; t < numTiles; ++t) {
 		tileLights[t].count = 0;
@@ -378,8 +381,11 @@ static int        g_numStripLights = 0;
 
 void buildStripLightLists(int numStrips, int stripHeight, int yres,
                                   const ViewLightsSoA &lights, int numLights,
-                                  const uint32_t *stripMirrorPresence)
+                                  const uint32_t *stripMirrorPresence,
+                                  const fds::CameraContext &cam)
 {
+	const float FOVY = cam.fovY;
+	const float CntrEY = cam.cntrEY;
 	if (numStrips > DEFERRED_MAX_STRIPS) numStrips = DEFERRED_MAX_STRIPS;
 	for (int s = 0; s < numStrips; ++s) {
 		g_stripLights[s].count = 0;
