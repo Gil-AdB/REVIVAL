@@ -175,12 +175,21 @@ static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
 //     c_q = (D·P)² - c²|P|².
 //   Real roots → ray crosses cone boundary; clamp interval to
 //     [NearZ, min(z_surf, z_at_range)] and integrate.
-static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
+static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
+                                         int x1, int y1, int x2, int y2,
                                          const ViewLightsSoA *lights,
                                          const int *spotIdx, int spotCount,
                                          float invFOVX, float invFOVY,
                                          float invZScale, float density,
                                          float fogZ, float invFogZ) {
+    // Render state from the threaded ctx, not globals. Local refs/aliases
+    // shadow the file-scope names so the (large) body is untouched.
+    const DeferredLightingCtx &g_deferredCtx = ctx;
+    const meka::GBuffer *const g_gbuffer = ctx.gb;
+    const int XRes = ctx.xres;
+    byte *const VPage = ctx.vpage;
+    word *const ZPage16 = ctx.zpage16;
+    const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
     if (spotCount == 0) return;
     // fogZ > 0 means scene is fogged: clamp ray to FZP and attenuate each
     // sample by the same (1 - z/FZP) the surface fog pass uses, so the
@@ -217,7 +226,6 @@ static void Render_VolumetricCones_Tile(int x1, int y1, int x2, int y2,
         ? g_gbuffer->mirrorMask.data() : nullptr;
     const uint16_t *mmz = (g_gbuffer && !g_gbuffer->mirrorMaskZ.empty())
         ? g_gbuffer->mirrorMaskZ.data() : nullptr;
-    extern DeferredLightingCtx g_deferredCtx;
     if (fds::FeatureFlags::vol_prof()) {
         (useAnalytic ? g_coneAnalyticHits
                      : g_coneRaymarchHits)
@@ -1421,6 +1429,7 @@ void Render_VolumetricCones() {
     // surface-z cull that's incorrect for volumetric integration — see the
     // note inside Render_VolumetricCones_Tile.
     extern DeferredLightingCtx g_deferredCtx;
+    const DeferredLightingCtx &ctx = g_deferredCtx;   // threaded to the tile fn
     const ViewLightsSoA *const lights = g_deferredCtx.lights;
     if (!lights) return;
     const int numLights = g_deferredCtx.numLights;
@@ -1540,10 +1549,10 @@ void Render_VolumetricCones() {
             const int tileIdx = j * numTilesX + i;
             const int *ts = tileSpotIdx[tileIdx];
             const int  tc = tileSpotCount[tileIdx];
-            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,ts,tc,
+            ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
                                             invFOVX,invFOVY,invZScale,density,
                                             fogZ,invFogZ]() {
-                Render_VolumetricCones_Tile(x1,y1,x2,y2, lights, ts, tc,
+                Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
                                              invFOVX,invFOVY,invZScale,density,
                                              fogZ,invFogZ);
                 // One permit per completed tile (see renderns::tileDone).
@@ -1575,6 +1584,7 @@ void Render_VolumetricCones() {
 // the legacy dispatch (volumetric_unified=0) so City + other scenes
 // that stay on legacy passes can still get omni halos.
 static void Render_OmniHalos_Tile(
+    const DeferredLightingCtx &ctx,
     int x1, int y1, int x2, int y2,
     const ViewLightsSoA *lights,
     const int *omniIdx, int omniCount,
@@ -1583,6 +1593,12 @@ static void Render_OmniHalos_Tile(
     float fogZ, float invFogZ,
     float density)
 {
+    // Render state from ctx, not globals (local aliases shadow the globals).
+    const meka::GBuffer *const g_gbuffer = ctx.gb;
+    const int XRes = ctx.xres;
+    byte *const VPage = ctx.vpage;
+    word *const ZPage16 = ctx.zpage16;
+    const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
     if (omniCount == 0) return;
     dword *out = reinterpret_cast<dword*>(VPage);
     const uint16_t *zEnc = ZPage16;
@@ -2223,6 +2239,7 @@ void Render_OmniHalos() {
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
 
     extern DeferredLightingCtx g_deferredCtx;
+    const DeferredLightingCtx &ctx = g_deferredCtx;   // threaded to the tile fn
     const ViewLightsSoA *const lights = g_deferredCtx.lights;
     if (!lights) return;
     const int numLights = g_deferredCtx.numLights;
@@ -2313,10 +2330,10 @@ void Render_OmniHalos() {
             const int tileIdx = j * numTilesX + i;
             const int *ts = tileOmniIdx[tileIdx];
             const int  tc = tileOmniCount[tileIdx];
-            ThreadPool::instance().enqueue([x1,y1,x2,y2,lights,ts,tc,
+            ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
                                             invFOVX,invFOVY,invZScale,
                                             fogZ,invFogZ,density]() {
-                Render_OmniHalos_Tile(x1,y1,x2,y2, lights, ts, tc,
+                Render_OmniHalos_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
                                        invFOVX,invFOVY,invZScale,
                                        fogZ,invFogZ,density);
                 // One permit per completed tile (see renderns::tileDone).
