@@ -1856,6 +1856,15 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
     {
     ScopedMirrorMs _t(&g_mirrorProf.updMs);
     for (auto &m : mirrors) {
+        // Shattered: permanently closed. Hide the clone mesh + clone
+        // flares and skip the re-mirror — the falling shards replace it.
+        if (m.broken) {
+            m.active = false;
+            if (m.cloneMesh) m.cloneMesh->Flags &= ~HTrack_Visible;
+            for (auto &c : m.omniClones)
+                if (c.mirrorOmni) c.mirrorOmni->ISize = 0.0f;
+            continue;
+        }
         bool act;
         if (m.parentMirrorId != 0) {
             // Compounds ride their parent's activity — they render

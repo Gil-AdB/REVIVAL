@@ -425,6 +425,9 @@ enum class RenderPath {
 // work in that pass is largely wasted because the result is distorted/
 // composited beyond recognition.
 void Render(RenderPath path = RenderPath::Default, bool skipVolumetric = false);
+// Single-threaded forward render of a screen region (no threadpool). For
+// tiny offscreen targets where dispatch overhead dwarfs the raster.
+void RenderForwardRegionInline(float x1, float y1, float x2, float y2);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
 // Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a

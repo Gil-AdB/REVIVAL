@@ -15,6 +15,7 @@
 // is what makes the new context types the true source of truth.
 
 #include "FrameState.h"
+#include "RenderContext.h"
 #include "CameraContext.h"
 #include "FaceListContext.h"
 #include "RenderTarget.h"
@@ -29,6 +30,12 @@ FaceListContext g_mainFaces;
 
 // Off-axis projection support for offscreen passes — see FrameState.h.
 bool g_offAxisFrustumCull = false;
+
+// Per-vertex cone cull for the mirror-shard reflection pass — see FrameState.h.
+bool   g_reflVertCull  = false;
+Vector g_reflConeApex  = {0, 0, 0};
+Vector g_reflConeDir   = {0, 0, 1};
+float  g_reflConeTan2  = 2.0f;
 
 // Legacy struct kept while phase 2 lands. Its fields are no longer the
 // canonical home for the per-frame state — they're transitional and
@@ -48,6 +55,18 @@ RenderTarget MainRenderTargetFromGlobals() {
     rt.xparZ                  = g_xparZ;
     rt.xparZBack              = g_xparZBack;
     return rt;
+}
+
+// Slice 1 of the RenderContext migration (docs/RENDER_CONTEXT_PLAN.md):
+// bundle the current canonical globals into one context. Behaviour-neutral —
+// reads the same memory the globals do; no caller is forced through it yet.
+RenderContext primaryRenderContext() {
+    RenderContext ctx;
+    ctx.target = MainRenderTargetFromGlobals();
+    ctx.camera = g_mainCamera;
+    ctx.faces  = g_mainFaces;
+    ctx.scene  = CurScene;
+    return ctx;
 }
 
 } // namespace fds

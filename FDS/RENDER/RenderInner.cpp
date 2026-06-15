@@ -89,6 +89,13 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 
 			auto flags = A->Flags & B->Flags & C->Flags;
 			if (flags & Vtx_Visible) continue;
+			// Untextured faces are unrenderable here — every forward filler
+			// (TheOtherBarry, the reflective env path) dereferences
+			// F->Txtr->Txtr. The deferred path (RenderInnerMekalele) already
+			// skips these; match it so a face deliberately blanked by
+			// nulling its Txtr (e.g. the shattered greets screen) doesn't
+			// crash the offscreen forward passes (RTT, env bake).
+			if (!F->Txtr || !F->Txtr->Txtr) continue;
 			RasterFunc filler;
 			if (F->Flags & Face_Reflective) {
 				// Clone env faces (the disco ball's mirror image):
@@ -123,6 +130,19 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	// orchestrator's `for(i<N) tileDone.acquire()` loop. Replaces the
 	// prior lock+increment+notify pattern (see RENDER.CPP renderns).
 	renderns::tileDone.release();
+}
+
+// Single-threaded forward render of a region — no threadpool dispatch or
+// barrier. For tiny offscreen targets (the mirror-shard 64² reflections),
+// the per-Render() enqueue + semaphore-barrier overhead dwarfs the actual
+// raster (profiled: workers 97% idle, the dispatch is the cost). Renders
+// inline on the caller's thread, then drains the permit RenderInner
+// released so the shared tileDone semaphore stays net-zero for the next
+// threadpool Render(). Preconditions match Render(ForceForward): FList/CAll
+// populated, CurScene + surface globals (VPage/ZPage16/XRes) set.
+void RenderForwardRegionInline(float x1, float y1, float x2, float y2) {
+	RenderInner(x1, y1, x2, y2);
+	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
 

@@ -1049,6 +1049,52 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 			goto AfterXForm;
 		}
+		// Mirror-shard reflection cull: same per-vertex world-space cone test
+		// as the cube-shadow path, but with the shard's narrow off-axis
+		// reflection cone (g_reflCone*). The apex == the reflection camera's
+		// ISource, so the world delta IS the view delta; in-cone vertices get
+		// the off-axis view xform (PX/cntrEX already hold the shard's values),
+		// out-of-cone ones are marked all-out so their faces cull. Rejects the
+		// bulk of the room before the matmul — the whole point of the pass.
+		if (fds::g_reflVertCull && T->worldVerts) {
+			const float kTan2 = fds::g_reflConeTan2;
+			const float ckX = fds::g_reflConeApex.x, ckY = fds::g_reflConeApex.y, ckZ = fds::g_reflConeApex.z;
+			const float cdX = fds::g_reflConeDir.x,  cdY = fds::g_reflConeDir.y,  cdZ = fds::g_reflConeDir.z;
+			const float (*VM)[3] = cam.view->Mat;
+			for (Vtx = tVerts; Vtx < VEnd; Vtx++) {
+				const DWord vi = DWord(Vtx - tVerts);
+				const Vector &wp = T->worldVerts[vi];
+				const float wdx = wp.x - ckX, wdy = wp.y - ckY, wdz = wp.z - ckZ;
+				const float axisDist = wdx*cdX + wdy*cdY + wdz*cdZ;
+				const float d2 = wdx*wdx + wdy*wdy + wdz*wdz;
+				const bool outside = (axisDist < 0.0f)
+					|| ((d2 - axisDist*axisDist) > kTan2 * axisDist*axisDist);
+				if (outside) {
+					Vtx->TPos_AOS.x = 0.0f; Vtx->TPos_AOS.y = 0.0f; Vtx->TPos_AOS.z = 1.0f;
+					Vtx->RZ = 1.0f; Vtx->PX = -1.0f; Vtx->PY = -1.0f;
+					Vtx->UZ = 0.0f; Vtx->VZ = 0.0f;
+					Vtx->Flags |= Vtx_Visible;
+					continue;
+				}
+				const float vx = VM[0][0]*wdx + VM[0][1]*wdy + VM[0][2]*wdz;
+				const float vy = VM[1][0]*wdx + VM[1][1]*wdy + VM[1][2]*wdz;
+				const float vz = VM[2][0]*wdx + VM[2][1]*wdy + VM[2][2]*wdz;
+				Vtx->TPos_AOS.x = PX * vx + cam.cntrEX * vz;
+				Vtx->TPos_AOS.y = -PY * vy + cam.cntrEY * vz;
+				Vtx->TPos_AOS.z = vz;
+				Vtx->Flags &= ~Vtx_Visible;
+				Vtx->RZ = 1.0f / vz;
+				Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
+				Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
+				Vtx->UZ = Vtx->U * Vtx->RZ;
+				Vtx->VZ = Vtx->V * Vtx->RZ;
+				if (Vtx->PX < 0.0f)        Vtx->Flags |= Vtx_VisLeft;
+				if (Vtx->PX >= float(xr))  Vtx->Flags |= Vtx_VisRight;
+				if (Vtx->PY < 0.0f)        Vtx->Flags |= Vtx_VisUp;
+				if (Vtx->PY >= float(yr))  Vtx->Flags |= Vtx_VisDown;
+			}
+			goto AfterXForm;
+		}
 		//    Main vertex loop,in case no restrictions apply.
 		if (!(T->Flags&Tri_Phong))
 		{
