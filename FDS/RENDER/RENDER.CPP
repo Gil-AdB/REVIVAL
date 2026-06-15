@@ -25,6 +25,7 @@
 #include "Base/FeatureFlags.h"
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in xpar-ids debug path
 #include "Base/Scene.h"
+#include "Base/RenderContext.h"
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -62,7 +63,7 @@ void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, in
 void renderDeferredTransparentTile_Back (int tileIdx, int x1, int y1, int x2, int y2);
 
 // Defined in RenderInner.cpp.
-void RenderInner(float x1, float y1, float x2, float y2);
+void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2);
 void RenderInnerMekalele(float x1, float y1, float x2, float y2);
 void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
                                     int firstIdx, int count, struct TriMesh* parentFilter,
@@ -399,6 +400,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// N-1 stays 8-aligned (tileSizeX is masked & ~7), so the existing
 	// ClipperTileRect ownership split works as before. The right/bottom
 	// edge of the last tile has no neighbour to race with.
+	// Per-pass context for the forward raster path (RenderContext migration):
+	// the primary context = the current render globals, so byte-identical.
+	// Built once, captured by the tile lambdas (must outlive the tasks — the
+	// tileDone drain below joins them before this returns).
+	const fds::RenderContext fctx = fds::primaryRenderContext();
 	for (auto j = 0; j < numTilesY; ++j) {
 		auto y1 = tileSizeY * j;
 		auto y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
@@ -409,7 +415,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			if (deferred) {
 				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInnerMekalele(x1, y1, x2, y2); });
 			} else {
-				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInner(x1, y1, x2, y2); });
+				ThreadPool::instance().enqueue([&fctx, x1, y1, x2, y2]() { RenderInner(fctx, x1, y1, x2, y2); });
 			}
 			// RenderInner(x1, y1, x2, y2);
 		}

@@ -13,6 +13,7 @@
 #include <Base/Matrix.h>
 #include <Base/Camera.h>
 #include <Base/FrameState.h>     // g_mainCamera/Faces, g_offAxisFrustumCull
+#include <Base/RenderContext.h>  // primaryRenderContext()
 #include <RENDER/OffscreenView.h>
 #include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
 #include <Base/FeatureFlags.h>
@@ -550,7 +551,11 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 					// Single-threaded raster: the 64² target's threadpool
 					// dispatch + barrier cost (profiled ~half the pass) dwarfs
 					// the pixels.
-					RenderForwardRegionInline(0, 0, float(texRes_), float(texRes_));
+					// Primary context = the OffscreenViewScope-swapped globals
+					// (surface/camera) + g_mainFaces. Per-pass-own context lands
+					// when the shard pass is parallelized (Slice 6).
+					RenderForwardRegionInline(fds::primaryRenderContext(), 0, 0,
+					                          float(texRes_), float(texRes_));
 				}
 			}
 

@@ -30,6 +30,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
 #include "Base/Scene.h"
+#include "Base/RenderContext.h"
 #include "Base/Face.h"
 #include "Base/TriMesh.h"
 #include "Base/Material.h"
@@ -51,11 +52,16 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
-void RenderInner(float x1, float y1, float x2, float y2) {
+void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2) {
+	// Forward raster of ctx's face list into ctx's target — all per-pass
+	// state from ctx, no globals, so a worker can run this on its own
+	// surface/face-list concurrently (RenderContext migration; the parallel
+	// shard/shadow/RTT bakes are the consumers). renderFrame passes the
+	// primary context (= the old globals → byte-identical).
 	FrustumClipper clipper;
-	clipper.InitViewport(CurScene);
+	clipper.InitViewport(ctx.scene);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
-	auto rt  = fds::MainRenderTargetFromGlobals();
+	auto rt  = ctx.target;
 	// Forward dispatcher: the deferred lighting kernel won't read the
 	// G-buffer this frame, so we don't want TheOtherBarry stamping its
 	// mat32 sentinel into it. Also relevant during the cube-map bake:
@@ -65,10 +71,10 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	rt.gbuffer                = nullptr;
 	rt.gbufferTransparent     = nullptr;
 	rt.gbufferTransparentBack = nullptr;
-	const auto& cam = fds::g_mainCamera;
+	const auto& cam = ctx.camera;
 
-	int32_t I = CAll;
-	fds::FListEntry* FLS = FList;//+CAll-1;
+	int32_t I = ctx.faces.cAll;
+	fds::FListEntry* FLS = ctx.faces.fList;
 	Vertex* A, * B, * C;
 
 	Vertex* V[4];
@@ -140,8 +146,9 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 // released so the shared tileDone semaphore stays net-zero for the next
 // threadpool Render(). Preconditions match Render(ForceForward): FList/CAll
 // populated, CurScene + surface globals (VPage/ZPage16/XRes) set.
-void RenderForwardRegionInline(float x1, float y1, float x2, float y2) {
-	RenderInner(x1, y1, x2, y2);
+void RenderForwardRegionInline(const fds::RenderContext& ctx,
+                               float x1, float y1, float x2, float y2) {
+	RenderInner(ctx, x1, y1, x2, y2);
 	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
