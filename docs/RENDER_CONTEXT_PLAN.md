@@ -206,18 +206,24 @@ the pool (atlas cells are disjoint → no write contention). Re-measure.
 
 ## Verification
 
-**Byte gate (per Slice-3 step) — use mirrortest, NOT greets.** greets is
-non-deterministic run-to-run (timing-dependent background lightmap bake);
-city unverified. mirrortest is deterministic (threaded == serial, stable
-run-to-run) and exercises the deferred kernel + mirror clone + RTT paths:
+**Byte gate (per Slice-3 step): `tools/render_gate.sh`.** One command, three
+deterministic deferred scenes (stable run-to-run AND threaded==serial), each
+compared to a committed-state baseline md5. greets is NOT usable (timing-
+dependent background lightmap bake); city unverified — don't add without
+re-checking determinism.
 
-    cd Runtime && FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest
-    ls /tmp/mt_view_*.ppm | sort | xargs cat | md5 -q
-    # baseline (committed state 821f93a): e440bfcdbe1aeb4e5f79bd1eba568459
+    ./tools/render_gate.sh            # PASS/FAIL per gate, nonzero exit on fail
+    ./tools/render_gate.sh --update   # reprint md5s to re-baseline after an
+                                      # INTENDED change
 
-mirrortest does NOT cover volumetrics/fog or the city env path — when
-migrating DeferredVolumetric / DeferredFastFog, find a deterministic fog
-gate (candidate: a fixed city snapshot, verify determinism first).
+Coverage:
+  - mirrortest (8-pose)  — deferred surface kernel + mirror clone + RTT
+  - conetest  (12-pose)  — DeferredVolumetric cones + DeferredFastFog (fog on)
+  - halotest  (7-pose)   — DeferredVolumetric omni halos
+
+So all of DeferredSurfaceKernel / DeferredVolumetric / DeferredFastFog are now
+gate-covered — the fog-gate gap is closed. (City env path still uncovered; not
+on the Slice-3 critical path.)
 
 - Offscreen quality: eyeball greets shatter + mirror RTT after slices 2, 6.
 - Perf: `FDS_SHARD_REFL_PROF` (per-pass ms), `FDS_RNDR_BENCH` (forward vs
@@ -243,9 +249,8 @@ gate (candidate: a fixed city snapshot, verify determinism first).
   each kernel function's entry (`const int XRes = ctx.xres;` …) so the bodies
   are untouched (same trick as buildTileLightLists). Gate: mirrortest.
 
-  Then: `DeferredVolumetric.cpp` (91) / `DeferredFastFog.cpp` (106) — NOT
-  covered by mirrortest (no cones/fog). **Build a deterministic fog gate
-  first** (candidate: fixed city snapshot — verify determinism). Finally
+  Then: `DeferredVolumetric.cpp` (91) / `DeferredFastFog.cpp` (106) — now
+  gate-covered (conetest cones+fog, halotest halos). Finally
   `RENDER.CPP` renderFrame (90, last): build `ctx = primaryRenderContext()`
   at top, thread it into the tile-dispatch lambdas → RenderInner* take
   `const RenderContext&` and read FList/CAll/scene/target from it (closes the
