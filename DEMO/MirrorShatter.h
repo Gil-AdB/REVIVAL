@@ -23,6 +23,7 @@
 //                      rigid-body pose).
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <Base/Vector.h>
@@ -64,7 +65,19 @@ public:
     void enableReflectionCameras(Scene* sc, int texRes = 64,
                                  Texture* textTex = nullptr,
                                  const float textWorldAffine[8] = nullptr);
+    // Re-render every shard's reflection into its atlas cell. Forward path
+    // (default) fans the shards across the thread pool — each worker owns its
+    // surface / camera / face-list / vertex-scratch and renders WHOLE +
+    // single-threaded on a pool thread (inter-render parallelism; Slice 6 of
+    // docs/RENDER_CONTEXT_PLAN.md). FDS_SHARD_REFL_SERIAL=1 (or the opt-in
+    // deferred bake) forces the original serial path.
     void renderReflectionCameras(Scene* sc);
+
+    // MirrorShatter owns a thread-pool's worth of reflection-render scratch
+    // (ReflWorker is nontrivial: surface + vertex clones); ctor + dtor are
+    // out-of-line so the unique_ptr<ReflPool> member sees the complete type.
+    MirrorShatter();
+    ~MirrorShatter();
     // Reflectance gain applied to the baked reflection (the forward bake has
     // no shadows, so greets' over-ranged omnis flood it far brighter than the
     // shadowed deferred main view — same reason the screen RTT uses gain<1).
@@ -100,6 +113,21 @@ private:
     float frand01();
     float frandS() { return frand01() * 2.0f - 1.0f; }
 
+    // Per-pool-thread reflection-render scratch (defined in the .cpp): an
+    // owned offscreen surface + camera + face-list + vertex-clone scratch, so
+    // N shards render concurrently with zero shared mutable state. Forward-
+    // declared here; held by value in reflWorkers_ (out-of-line dtor).
+    struct ReflWorker;
+    struct ReflPool;   // holds std::vector<ReflWorker> (pimpl — keeps the heavy
+                       // engine-context types out of this header)
+    // The original serial pass — preserved verbatim as the deferred-bake path
+    // and the FDS_SHARD_REFL_SERIAL fallback (exact prior behaviour).
+    void renderReflectionCamerasSerial(Scene* sc);
+    // Render one shard's live reflection into its atlas cell using only the
+    // worker's own state (no engine globals beyond the thread_local cull cone).
+    void renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
+                             const Vector& camEye, int aw, int ah);
+
     bool                built_  = false;
     bool                active_ = false;
     std::vector<Shard>  shards_;
@@ -111,7 +139,11 @@ private:
     // budget); each shard owns one texRes² cell of the atlas.
     bool                reflCamsOn_ = false;
     int                 texRes_ = 64;
-    VESA_Surface*       reflSurf_ = nullptr;   // shared 64² render target
+    // Forward parallel path: one ReflWorker per pool thread, kept warm across
+    // frames (vertex-clone scratch + face buffers stay allocated). Sized lazily
+    // in renderReflectionCameras to ThreadPool::size().
+    std::unique_ptr<ReflPool> reflPool_;
+    VESA_Surface*       reflSurf_ = nullptr;   // shared 64² target (serial/deferred path)
     Texture*            atlasTex_ = nullptr;   // shared cell atlas
     Material*           atlasMat_ = nullptr;   // displays the atlas unlit
     int                 atlasCols_ = 0, atlasRows_ = 0;

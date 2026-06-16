@@ -13,10 +13,14 @@
 #include <Base/Matrix.h>
 #include <Base/Camera.h>
 #include <Base/FrameState.h>     // g_mainCamera/Faces, g_offAxisFrustumCull
-#include <Base/RenderContext.h>  // primaryRenderContext()
+#include <Base/RenderContext.h>  // primaryRenderContext() + RenderContext
+#include <Base/CameraContext.h>  // per-worker projection state
+#include <Base/FaceListContext.h>// per-worker face list
+#include <Base/VertexScratch.h>  // per-worker transformed-vertex clones
 #include <RENDER/OffscreenView.h>
 #include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
 #include <Base/FeatureFlags.h>
+#include <Threads.h>             // ThreadPool — fan shards across cores
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +28,8 @@
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
+#include <atomic>
+#include <semaphore>
 
 extern void Compute_FaceVertexIndices(TriMesh *T);
 extern void Build_YOffs_Table(VESA_Surface *VS);
@@ -321,6 +327,26 @@ inline void blitCellTiled(dword* atlas, int atlasW, int atlasH,
 }
 }  // namespace
 
+// One pool thread's reflection-render scratch. Each holds a complete,
+// independent render context — own surface, camera, face list and the
+// vertex-clone scratch Transform_Objects writes into — so N shards render
+// concurrently with no shared mutable state (the atlas cells are disjoint).
+// Kept warm across frames: the surface + clone arrays stay allocated.
+struct MirrorShatter::ReflWorker {
+	VESA_Surface         surf{};       // owned texRes² color + Z16 target
+	Camera               cam{};        // reflection camera (ISource + basis)
+	fds::CameraContext   camCtx{};     // off-axis projection for this shard
+	fds::FaceListContext faces{};      // own FList/SList — no global race
+	fds::VertexScratch   scratch{};    // per-mesh transformed-vertex clones
+	bool                 surfInit = false;
+};
+struct MirrorShatter::ReflPool {
+	std::vector<ReflWorker> workers;
+};
+
+MirrorShatter::MirrorShatter()  = default;
+MirrorShatter::~MirrorShatter() = default;
+
 void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
                                             Texture* textTex, const float textWorldAffine[8]) {
 	if (!sc || !built_ || shards_.empty()) return;
@@ -419,7 +445,7 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 	reflCamsOn_ = true;
 }
 
-void MirrorShatter::renderReflectionCameras(Scene* sc) {
+void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 	if (!reflCamsOn_ || !active_ || !reflSurf_ || !atlasTex_) return;
 	const Camera* mainCam = View ? View : sc->CameraHead;
 	if (!mainCam) return;
@@ -637,6 +663,264 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 		             int(shards_.size()),
 		             std::chrono::duration<double, std::milli>(t1 - t0).count());
 	}
+}
+
+// ─── Forward parallel reflection pass (Slice 6) ──────────────────────────────
+// Fan the shards across the thread pool: each renders WHOLE + single-threaded
+// on a pool thread into its own ReflWorker (surface / camera / face-list /
+// vertex-scratch), N of them concurrent. No engine globals are mutated (the
+// projection lives in the worker's CameraContext; the cull cone is thread_local;
+// the atlas cells are disjoint). The opt-in deferred bake and the
+// FDS_SHARD_REFL_SERIAL escape hatch keep the original serial path.
+void MirrorShatter::renderReflectionCameras(Scene* sc) {
+	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
+
+	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
+	if (deferredBake_ || forceSerial) { renderReflectionCamerasSerial(sc); return; }
+
+	const Camera* mainCam = View ? View : sc->CameraHead;
+	if (!mainCam) return;
+	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
+	const auto t0 = std::chrono::steady_clock::now();
+	const Vector E = mainCam->ISource;
+	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
+	const int N  = int(shards_.size());
+	if (N <= 0) return;
+
+	// Hide every shard for the whole pass — a shard never reflects the other
+	// falling fragments (no recursive glass); each reflects the room only.
+	for (Shard& s : shards_) s.mesh->Flags &= ~HTrack_Visible;
+
+	// Size the worker pool to the thread count (one whole render per thread —
+	// inter-render parallelism; tiling a 64² target is pure dispatch overhead).
+	if (!reflPool_) reflPool_ = std::make_unique<ReflPool>();
+	size_t P = ThreadPool::instance().size();
+	if (P < 1) P = 1;
+	if (P > size_t(N)) P = size_t(N);
+	if (reflPool_->workers.size() != P) reflPool_->workers.resize(P);
+	const int polys = Polys > 0 ? Polys : 1;
+	for (ReflWorker& w : reflPool_->workers) {
+		if (!w.surfInit) {
+			std::memset(&w.surf, 0, sizeof(VESA_Surface));
+			w.surf.X = texRes_; w.surf.Y = texRes_;
+			w.surf.BPP = 32; w.surf.CPP = 4;
+			w.surf.BPSL = texRes_ * 4;
+			w.surf.PageSize = texRes_ * texRes_ * 4;
+			w.surf.Data = (byte*)_aligned_malloc(size_t(texRes_) * texRes_ * 4, 16);
+			w.surf.Z16  = (byte*)std::malloc(size_t(texRes_) * texRes_ * sizeof(word));
+			w.surf.Flip = MainSurf ? MainSurf->Flip : nullptr;
+			Build_YOffs_Table(&w.surf);
+			w.surfInit = true;
+		}
+		w.faces.resize(size_t(polys));   // no-op when already sized
+	}
+
+	// Self-balancing fan-out: workers pull shard indices off a shared atomic
+	// cursor. The join uses a LOCAL semaphore, NOT renderns::tileDone — each
+	// worker's inner RenderForwardRegionInline round-trips tileDone net-zero,
+	// so routing the outer join through it could deadlock on the final permit.
+	std::atomic<int> cursor{0};
+	std::counting_semaphore<256> done{0};
+	auto runWorker = [&](ReflWorker& w) {
+		int si;
+		while ((si = cursor.fetch_add(1, std::memory_order_relaxed)) < N)
+			renderShardIntoCell(sc, si, w, E, aw, ah);
+		done.release();
+	};
+	for (size_t t = 1; t < P; ++t) {
+		ReflWorker* wp = &reflPool_->workers[t];
+		ThreadPool::instance().enqueue([wp, &runWorker]() { runWorker(*wp); });
+	}
+	runWorker(reflPool_->workers[0]);          // calling thread is worker 0
+	for (size_t t = 0; t < P; ++t) done.acquire();
+
+	for (Shard& s : shards_) s.mesh->Flags |= HTrack_Visible;
+	if (prof) {
+		const auto t1 = std::chrono::steady_clock::now();
+		std::fprintf(stderr, "[SHARD-REFL] %d shards / %zu workers in %.1f ms\n",
+		             N, P, std::chrono::duration<double, std::milli>(t1 - t0).count());
+	}
+}
+
+// Render one shard's live reflection into its atlas cell using ONLY this
+// worker's state. Mirrors the serial body, but the reflection camera + off-axis
+// projection land in w.camCtx (not the FOVX/CntrE* globals), the transform
+// writes w.faces / w.scratch (not the shared g_mainFaces + per-mesh frame), and
+// the raster targets w.surf — so N of these run concurrently. The cull cone
+// globals it sets are thread_local; the shard's own mesh UVs it stamps are
+// disjoint across shards.
+void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
+                                        const Vector& E, int aw, int ah) {
+	Shard& s = shards_[si];
+	if (s.local.size() < 4) return;
+	const int cx = si % atlasCols_, cy = si / atlasCols_;
+
+	// Current world quad + normal from the shard's live pose.
+	Vector wc[4];
+	for (int i = 0; i < 4; ++i) {
+		Vector rw; MatrixXVector(s.mesh->RotMat, &s.local[i], &rw);
+		wc[i] = vadd(rw, s.pos);
+	}
+	Vector Nn; MatrixXVector(s.mesh->RotMat, &normal_, &Nn); Nn = vnorm(Nn);
+	float d = -vdot(Nn, wc[0]);
+	float side = vdot(Nn, E) + d;
+	Vector axisU = vnorm(vsub(wc[1], wc[0]));
+	Vector axisV = vnorm(vsub(wc[3], wc[0]));
+	if (side < 0.0f) { Nn = vscale(Nn, -1.0f); d = -d; side = -side; axisU = vscale(axisU, -1.0f); }
+	if (side < 1e-3f) return;                       // edge-on → nothing to show
+	const Vector Er = vsub(E, vscale(Nn, 2.0f * side));
+	const float  D  = side;
+
+	float u0 = 1e30f, u1 = -1e30f, v0 = 1e30f, v1 = -1e30f;
+	float cuv[4][2];
+	for (int i = 0; i < 4; ++i) {
+		const float pu = vdot(wc[i], axisU), pv = vdot(wc[i], axisV);
+		cuv[i][0] = pu; cuv[i][1] = pv;
+		u0 = std::min(u0, pu); u1 = std::max(u1, pu);
+		v0 = std::min(v0, pv); v1 = std::max(v1, pv);
+	}
+	if (u1 - u0 < 1e-4f || v1 - v0 < 1e-4f) return;
+
+	// Reflection camera + off-axis projection → this worker's CameraContext.
+	std::memset(&w.cam, 0, sizeof(w.cam));
+	w.cam.ISource = Er;
+	w.cam.Mat[0][0] = axisU.x; w.cam.Mat[0][1] = axisU.y; w.cam.Mat[0][2] = axisU.z;
+	w.cam.Mat[1][0] = axisV.x; w.cam.Mat[1][1] = axisV.y; w.cam.Mat[1][2] = axisV.z;
+	w.cam.Mat[2][0] = Nn.x;    w.cam.Mat[2][1] = Nn.y;    w.cam.Mat[2][2] = Nn.z;
+
+	const float cu = vdot(Er, axisU), cv = vdot(Er, axisV);
+	const float fovX   = float(texRes_) * D / (u1 - u0);
+	const float fovY   = float(texRes_) * D / (v1 - v0);
+	const float cntrEX = fovX * (cu - u0) / D;
+	const float cntrEY = fovY * (v1 - cv) / D;
+	w.camCtx.view    = &w.cam;
+	w.camCtx.fovX    = fovX;
+	w.camCtx.fovY    = fovY;
+	w.camCtx.cntrEX  = cntrEX;
+	w.camCtx.cntrEY  = cntrEY;
+	w.camCtx.cntrX   = int32_t(clampf(cntrEX, -32000.0f, 32000.0f));
+	w.camCtx.cntrY   = int32_t(clampf(cntrEY, -32000.0f, 32000.0f));
+	const float nearZ = D * 1.001f + 0.01f;
+	w.camCtx.nearZ    = nearZ;
+	w.camCtx.invNearZ = 1.0f / nearZ;
+	w.camCtx.farZ     = sc->FZP;
+	w.camCtx.invFarZ  = 1.0f / sc->FZP;
+	w.camCtx.zScale    = (float)0xff00 / (sc->FZP * 1.1f);
+	w.camCtx.zScale256 = w.camCtx.zScale / 256.0f;
+
+	// Stamp the shard verts' UVs through this projection into its atlas cell.
+	const float invCols = 1.0f / float(atlasCols_), invRows = 1.0f / float(atlasRows_);
+	for (int vi = 0; vi < s.mesh->VIndex; ++vi) {
+		Vector rw; MatrixXVector(s.mesh->RotMat, &s.mesh->Verts[vi].Pos, &rw);
+		const Vector wpt = vadd(rw, s.pos);
+		const float pu = vdot(wpt, axisU), pv = vdot(wpt, axisV);
+		float tu = ( fovX * (pu - cu) / D + cntrEX) / float(texRes_);
+		float tv = (-fovY * (pv - cv) / D + cntrEY) / float(texRes_);
+		tu = clampf(tu, 0.004f, 0.996f);
+		tv = clampf(tv, 0.004f, 0.996f);
+		s.mesh->Verts[vi].U = (float(cx) + tu) * invCols;
+		s.mesh->Verts[vi].V = (float(cy) + tv) * invRows;
+	}
+	for (int fi = 0; fi < s.mesh->FIndex; ++fi) s.mesh->Faces[fi].uvFromVertices();
+
+	std::memset(w.surf.Data, 0x10, size_t(texRes_) * texRes_ * 4);
+	std::memset(w.surf.Z16,  0,    size_t(texRes_) * texRes_ * sizeof(word));
+
+	// Reflection cone for the per-vertex cull (thread_local — this worker only).
+	float coneTan2 = 0.0f;
+	for (int i = 0; i < 4; ++i) {
+		const float rx = wc[i].x - Er.x, ry = wc[i].y - Er.y, rz = wc[i].z - Er.z;
+		const float ax = rx*Nn.x + ry*Nn.y + rz*Nn.z;
+		if (ax <= 1e-4f) { coneTan2 = 1e9f; break; }
+		const float t2 = ((rx*rx+ry*ry+rz*rz) - ax*ax) / (ax*ax);
+		if (t2 > coneTan2) coneTan2 = t2;
+	}
+	g_reflConeApex = Er;
+	g_reflConeDir  = Nn;
+	g_reflConeTan2 = coneTan2 * 1.3f + 1e-3f;
+	g_reflVertCull = true;
+	g_offAxisFrustumCull = true;
+	Transform_Objects(sc, w.camCtx, w.faces, texRes_, texRes_, &w.scratch);
+	g_offAxisFrustumCull = false;
+	g_reflVertCull = false;
+
+	if (w.faces.cAll != 0) {
+		Radix_Sort(w.faces.fList, w.faces.sList, w.faces.cAll);
+		// RenderInner reads only ctx.faces.fList / cAll — alias the worker's
+		// buffers (no storage copy) rather than deep-copying the FaceListContext.
+		fds::RenderContext ctx;
+		ctx.scene       = sc;
+		ctx.camera      = w.camCtx;
+		ctx.faces.fList = w.faces.fList;
+		ctx.faces.sList = w.faces.sList;
+		ctx.faces.cAll  = w.faces.cAll;
+		ctx.target.vpage            = (uint32_t*)w.surf.Data;
+		ctx.target.bytesPerScanline = w.surf.BPSL;
+		ctx.target.zpage16          = (uint16_t*)w.surf.Z16;
+		ctx.target.xres             = texRes_;
+		ctx.target.yres             = texRes_;
+		RenderForwardRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
+	}
+
+	// Reflectance gain (forward bake is unshadowed) — applied before text.
+	if (reflGain_ < 0.999f) {
+		const uint32_t gq = uint32_t(clampf(reflGain_, 0.0f, 1.0f) * 256.0f);
+		uint32_t* px = (uint32_t*)w.surf.Data;
+		for (int i = 0; i < texRes_ * texRes_; ++i) {
+			const uint32_t c = px[i];
+			const uint32_t b = ((c        & 0xFF) * gq) >> 8;
+			const uint32_t g = (((c >> 8)  & 0xFF) * gq) >> 8;
+			const uint32_t r = (((c >> 16) & 0xFF) * gq) >> 8;
+			px[i] = b | (g << 8) | (r << 16) | 0xFF000000u;
+		}
+	}
+
+	// Half-silvered text composite (text + reflection*gain), same affine the
+	// serial path uses (world plane-coords → fixed per-corner text UVs).
+	if (hasText_ && textTex_ && textTex_->Mipmap[0]) {
+		const float d1u = cuv[1][0]-cuv[0][0], d1v = cuv[1][1]-cuv[0][1];
+		const float d3u = cuv[3][0]-cuv[0][0], d3v = cuv[3][1]-cuv[0][1];
+		const float det = d1u*d3v - d3u*d1v;
+		if (std::fabs(det) > 1e-9f) {
+			const float inv = 1.0f/det;
+			auto solve = [&](float t0c, float t1c, float t3c, float& a0, float& a1, float& a2) {
+				a0 = ((t1c-t0c)*d3v - (t3c-t0c)*d1v) * inv;
+				a1 = ((t3c-t0c)*d1u - (t1c-t0c)*d3u) * inv;
+				a2 = t0c - a0*cuv[0][0] - a1*cuv[0][1];
+			};
+			float au0,au1,au2, av0,av1,av2;
+			solve(s.textUV[0][0], s.textUV[1][0], s.textUV[3][0], au0,au1,au2);
+			solve(s.textUV[0][1], s.textUV[1][1], s.textUV[3][1], av0,av1,av2);
+			const dword* td = (const dword*)textTex_->Mipmap[0];
+			const int tw = textTex_->SizeX, th = textTex_->SizeY;
+			const int tBlocksY = th >> 2;
+			constexpr uint32_t gainQ = 256;
+			uint32_t* px = (uint32_t*)w.surf.Data;
+			const float duf = (u1-u0)/float(texRes_), dvf = (v1-v0)/float(texRes_);
+			for (int y = 0; y < texRes_; ++y) {
+				const float pv = v1 - (float(y)+0.5f)*dvf;
+				for (int x = 0; x < texRes_; ++x) {
+					const float pu = u0 + (float(x)+0.5f)*duf;
+					float fu = au0*pu + au1*pv + au2;
+					float fv = av0*pu + av1*pv + av2;
+					const int iu = int(fu*float(tw)) & (tw-1);
+					const int iv = int(fv*float(th)) & (th-1);
+					const int blk = ((iu>>2)*tBlocksY + (iv>>2)) << 4;
+					const dword t = td[blk + ((iv&3)<<2) + (iu&3)];
+					uint32_t& o = px[size_t(y)*texRes_ + x];
+					uint32_t ob = (t & 0xFF)        + ((( o      & 0xFF)*gainQ)>>8);
+					uint32_t og = ((t>>8) & 0xFF)   + ((((o>>8)  & 0xFF)*gainQ)>>8);
+					uint32_t orr= ((t>>16)& 0xFF)   + ((((o>>16) & 0xFF)*gainQ)>>8);
+					if (ob>255) ob=255; if (og>255) og=255; if (orr>255) orr=255;
+					o = ob | (og<<8) | (orr<<16) | 0xFF000000u;
+				}
+			}
+		}
+	}
+
+	// Blit the render into this shard's (disjoint) atlas cell (tiled).
+	blitCellTiled((dword*)atlasTex_->Data, aw, ah,
+	              (const dword*)w.surf.Data, texRes_, cx, cy);
 }
 
 }  // namespace fds

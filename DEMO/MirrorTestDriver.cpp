@@ -470,6 +470,10 @@ struct MirrorTestScene : SceneDriver {
             std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
             Animate_Objects(sc, View);
             shatter.update();
+            // Per-shard live reflection cameras (Slice 6): no-op until enabled
+            // below at break time. Exercised here so the deterministic headless
+            // dump validates the parallel fan-out (serial via FDS_SHARD_REFL_SERIAL).
+            shatter.renderReflectionCameras(sc);
             fds::RenderSecondOrderMirrors(sc, mirrors, rttSlots);
             Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
             fds::UpdateAllMirrors(sc, mirrors);
@@ -504,6 +508,9 @@ struct MirrorTestScene : SceneDriver {
         shatter.trigger(0.46f, 0.55f);
         if (!mirrors.empty()) mirrors[0].broken = true;
         hidePanelByName("mirror_panel");
+        // Live per-shard reflection cameras: each shard re-renders the room
+        // into its atlas cell every frame (supersedes the one-shot panorama).
+        shatter.enableReflectionCameras(sc, 64);
         shatter.debugDump();
         const int frames = 120, dumpEvery = 8;
         for (int i = 1; i <= frames; ++i) frame(i, (i % dumpEvery) == 0);
