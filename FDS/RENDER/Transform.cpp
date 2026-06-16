@@ -962,12 +962,17 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		
 		// BSphereScreenPos is the mesh-center projected to screen space,
 		// read only by the per-mesh debug-label overlay (RENDER.CPP),
-		// which wants the MAIN-camera projection. Skip it during shadow
-		// bakes: the light-POV projection is useless to the overlay, and
-		// writing T->BSphereScreenPos (shared across meshes) from every
-		// per-light shadow thread is a data race (TSan, 2026-06-12). Only
-		// the single main-camera pass writes it now → no race, correct value.
-		if (!_inShadowPass) {
+		// which wants the MAIN-camera projection. Skip it for every
+		// OFFSCREEN pass — the projection is useless to the overlay and
+		// T->BSphereScreenPos is shared across all passes touching this
+		// mesh, so writing it from a concurrent pass is a data race:
+		//   - shadow bakes: per-light threads (TSan, 2026-06-12)
+		//   - mirror-shard reflections: per-worker threads (g_offAxisFrustumCull
+		//     set; TSan, 2026-06-16) — the Slice 6 parallel shard pass.
+		// (the serial mirror RTT also sets g_offAxisFrustumCull; skipping it
+		// there is harmless — the main pass re-projects after.) Only the
+		// single main-camera on-axis pass writes it → no race, correct value.
+		if (!_inShadowPass && !fds::g_offAxisFrustumCull) {
 			Vector *BSC = &T->BSphereScreenPos;
 
 			//BSC->x = M34[0][0] * V.x + M34[0][1] * V.y + M34[0][2] * V.z + M34[0][3];
