@@ -938,6 +938,12 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			ov.yres       = texRes_;
 			ov.inlineDispatch = true;
 			Render_DeferredLighting(dctx, &ov);
+			// Disco-ball / spotlight volumetric cones in the reflection where
+			// applicable: dctx now carries this worker's target + view-space
+			// lights, so the cone pass draws the beams (forceCone/draw-cones
+			// spots) additively over the shaded reflection, clipped by the
+			// reflected room depth. Inline (this worker thread).
+			Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
 		} else {
 			RenderForwardRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
 		}

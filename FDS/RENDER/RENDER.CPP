@@ -41,7 +41,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // + Render_DeferredLighting (with its optional DeferredOverride) are declared
 // in DeferredCommon.h (included below).
 void Render_DeferredFogPass();
-void Render_VolumetricCones(const DeferredLightingCtx& ctx);
+// Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
 void Render_DeferredFastFog(const DeferredLightingCtx& ctx);

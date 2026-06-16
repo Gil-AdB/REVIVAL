@@ -260,6 +260,12 @@ struct DeferredOverride {
 // pool-tiled). ov!=nullptr → offscreen bake into ov's target (see above).
 void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *ov = nullptr);
 
+// Volumetric spotlight cones (disco beams etc.). Reads its render target from
+// ctx (xres/vpage/zpage16/invFOVX…), so after a per-worker deferred bake the
+// shard reflection can run it to draw the beams. inlineDispatch=true runs the
+// tiles on the calling thread (offscreen bake); false pool-tiles (main frame).
+void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch = false);
+
 // Light-list builders (DeferredLightLists.cpp). Called once per frame
 // by the Render_DeferredLighting orchestrator; buildStripLightLists
 // fills g_stripLights for the unified-TBR transparent strip path.

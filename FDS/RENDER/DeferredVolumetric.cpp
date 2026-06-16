@@ -1402,13 +1402,21 @@ static void VolProf_Tick_impl() {
 
 void VolProf_Tick() { VolProf_Tick_impl(); }
 
-void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
+void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch) {
     VolProfScope _vp(&g_volProf.ms_cones, &g_volProf.n_cones);
-    if (!CurScene || !ZPage16 || !VPage) return;
+    // Render-target addressing from the threaded ctx (the cone tile already
+    // reads ctx). For the main frame ctx.xres==XRes etc. (Render_DeferredLighting
+    // populated it), so this is byte-identical; for an offscreen shard bake
+    // (inlineDispatch) ctx points at the worker's 64² target so the disco beams
+    // land in the reflection. inlineDispatch runs the tiles on the calling
+    // worker thread (no pool enqueue, no tileDone traffic).
+    if (!CurScene || !ctx.zpage16 || !ctx.vpage) return;
+    const int XRes = ctx.xres;
+    const int YRes = ctx.yres;
     const bool allCones = fds::FeatureFlags::draw_cones();
-    const float invFOVX = 1.0f / FOVX;
-    const float invFOVY = 1.0f / FOVY;
-    const float invZScale = 1.0f / float(g_zscale);
+    const float invFOVX = ctx.invFOVX;
+    const float invFOVY = ctx.invFOVY;
+    const float invZScale = ctx.invZScale;
     // Density: per-step contribution coefficient. Tunable via existing
     // FDS_CONE_STRENGTH. Empirical: 0.0005-0.002 for City-scale (range
     // in thousands).
@@ -1439,7 +1447,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
     // pass uses for clone-omni glows. Ungated they'd wash additive glow
     // across pixels IN FRONT of the mirror, which is why they were
     // excluded before the gate existed.
-    static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
+    int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];   // local: concurrent shard bakes
     int spotCount = 0;
     for (int i = 0; i < numLights; ++i) {
         if (lights->isSpot[i] &&
@@ -1457,8 +1465,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
     // tile-stripe artifact fixed in the prior commit). For sparse scenes
     // most tiles will see 0 spots — the per-pixel inner loop short-
     // circuits via spotCount==0.
-    static int tileSpotIdx  [numTiles][DEFERRED_MAX_VIEW_LIGHTS];
-    static int tileSpotCount[numTiles];
+    int tileSpotIdx  [numTiles][DEFERRED_MAX_VIEW_LIGHTS];   // local: concurrent shard bakes
+    int tileSpotCount[numTiles];
     for (int t = 0; t < numTiles; ++t) tileSpotCount[t] = 0;
 
     for (int s = 0; s < spotCount; ++s) {
@@ -1537,7 +1545,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
         }
     }
 
-    renderns::tileCounter = 0;
+    if (!inlineDispatch) renderns::tileCounter = 0;
     for (int j = 0; j < numTilesY; ++j) {
         const int y1 = tileSizeY * j;
         const int y2 = std::min(y1 + tileSizeY, YRes);
@@ -1547,20 +1555,29 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
             const int tileIdx = j * numTilesX + i;
             const int *ts = tileSpotIdx[tileIdx];
             const int  tc = tileSpotCount[tileIdx];
-            ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
-                                            invFOVX,invFOVY,invZScale,density,
-                                            fogZ,invFogZ]() {
+            if (inlineDispatch) {
+                // Offscreen shard bake: run on the calling worker thread (no
+                // pool re-submit, no tileDone traffic — the tile doesn't
+                // release; only the pool-path lambda below does).
                 Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
                                              invFOVX,invFOVY,invZScale,density,
                                              fogZ,invFogZ);
-                // One permit per completed tile (see renderns::tileDone).
-                renderns::tileDone.release();
-            });
+            } else {
+                ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
+                                                invFOVX,invFOVY,invZScale,density,
+                                                fogZ,invFogZ]() {
+                    Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
+                                                 invFOVX,invFOVY,invZScale,density,
+                                                 fogZ,invFogZ);
+                    // One permit per completed tile (see renderns::tileDone).
+                    renderns::tileDone.release();
+                });
+            }
         }
     }
-    for (int _i = 0; _i < numTiles; ++_i) {
-        renderns::tileDone.acquire();
-    }
+    if (!inlineDispatch)
+        for (int _i = 0; _i < numTiles; ++_i)
+            renderns::tileDone.acquire();
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
