@@ -337,6 +337,48 @@ on the Slice-3 critical path.)
 
 ## Progress log (current)
 
+**Slice 6 — parallel shard reflection pass: DONE + TSan-clean (2026-06-16).**
+The shard reflection pass now fans across the thread pool: each `ReflWorker`
+owns its surface + camera + `FaceListContext` + `VertexScratch` and renders
+WHOLE + single-threaded on a pool thread, N concurrent (inter-render
+parallelism). Commits:
+- `0da7f61` — reflection-cull globals (`g_offAxisFrustumCull`, `g_reflVertCull`,
+  `g_reflCone*`) → `thread_local`. Byte-neutral (only the serial shard pass +
+  serial mirror RTT set them; shadow bake never does). Gate ALL PASS.
+- `3eb57cb` — `RenderInner` clips from `ctx.camera` not `ctx.scene` (removes the
+  forward path's last shared-scene read; byte-identical, gate ALL PASS).
+- `e5009b2` — the parallel pass (`MirrorShatter::renderReflectionCameras` fans
+  shards via an atomic cursor + local join semaphore; serial preserved as
+  `renderReflectionCamerasSerial` under `FDS_SHARD_REFL_SERIAL` / deferred bake).
+  mirrortest's deterministic `shatterDump` now exercises the live cameras.
+- `2d9ae87` — **the one real race TSan found.** `Transform_Objects` writes
+  `T->BSphereScreenPos` (a shared per-mesh field, overlay-only) — already
+  guarded `!_inShadowPass` for the shadow race; the shard workers were a second
+  concurrent writer. Gated on `!g_offAxisFrustumCull` too. 6 races → 0.
+
+Validation (mirrortest `FDS_SHATTER_DUMP`, 12 workers / 140 shards):
+- deterministic run-to-run (no race), TSan-clean over 120 frames;
+- vs serial: identical but ≤72 bytes/frame (≤0.001%, max Δ9/255) — the
+  `VertexScratch` clone path's FP ordering, same as the shadow bake;
+- ~6× faster warm (3.1ms → 0.5ms), 18ms → 2.2ms cold.
+- engine byte-gate (mirrortest/conetest/halotest) ALL PASS throughout.
+
+**Lesson:** under inter-render parallelism, the hazard is not the per-vertex
+state (the `VertexScratch` clones isolate it) but the **shared per-mesh
+`TriMesh` struct fields** `Transform_Objects` writes in place
+(`BSphereScreenPos`). Audit those before parallelizing any new transform fan-out.
+
+**Remaining (not blocking):**
+- Perf-on-greets measurement — pending user go-ahead (bench-when-idle).
+- Optional: TSan greets (mirrortest is the more adversarial config — it does
+  NOT hide the mirror clones, greets does — so it's covered, but greets adds the
+  lightmap-bake thread).
+- Delete the published `g_deferredCtx` (gate-uncovered FILLERS TBR strip path;
+  low priority — a published copy, not a divergence; does NOT block the forward
+  parallelism Slice 6 just shipped).
+
+## Progress log (history)
+
 **Both legs' render state is now context-owned (gate-verified).**
 - Forward (parallelism-critical): `RenderInner`/`RenderForwardRegionInline`
   take a per-pass `fds::RenderContext` (5adda03). renderFrame builds the
@@ -348,17 +390,8 @@ on the Slice-3 critical path.)
   writes, read by two un-threaded sites: `RenderXparClumpInStrip` (FILLERS TBR
   strip path) and the fog tile.
 
-**Gate-coverable de-globalization is essentially complete.** What remains:
-1. **Delete the published `g_deferredCtx`** — thread the ctx through
-   `TBR_Render` → `RenderXparClumpInStrip` (FILLERS.CPP) + the fog tile. Small
-   + mechanical, but the TBR strip path is NOT covered by render_gate.sh
-   (mirrortest/city/greets fall through to the legacy peel; need a TBR scene
-   or manual check). Low priority — it's a published copy, not a divergence.
-2. **Slice 6 — parallelize** (per-worker `VertexScratch`/surface/camera).
-   CONCURRENCY code: render_gate.sh canNOT validate it. Needs TSan + the
-   concurrent-bench methodology (shadow-flicker lesson). Do fresh.
-
-## Progress log (history)
+**Gate-coverable de-globalization is essentially complete** (Slice 6 above
+parallelized the shard pass on top of this).
 
 - Slice 1 — DONE (`primaryRenderContext()` scaffolding).
 - Slice 2 — DONE + measured; deferred bake kept opt-in (forward default).
