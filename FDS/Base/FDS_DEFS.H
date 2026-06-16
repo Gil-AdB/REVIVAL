@@ -398,6 +398,13 @@ enum OmniFlags
 	// shadow-casting omnis. Don't set for animated lights (greets
 	// robot spots, vehicle headlights — they need per-frame re-bake).
 	Omni_StaticShadow = 1 << 8,
+
+	// Transient flash light (fountain lightning). The froxel fog adds this
+	// light's in-scatter PER-FRAME on top of the temporally-blended base fog
+	// instead of into the history — so a short flash doesn't linger in the fog
+	// for ~10 frames (and newly-revealed screen edges during a camera pan
+	// don't go dark against the lingering centre). Set only by FOUNTAIN.CPP.
+	Omni_FogTransient = 1 << 12,
 };
 
 //MACROS

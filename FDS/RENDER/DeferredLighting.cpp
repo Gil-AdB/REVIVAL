@@ -125,6 +125,9 @@ struct ViewLightsSoA {
 	alignas(32) float cosInner[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float cosOuter[DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) uint32_t isSpot[DEFERRED_MAX_VIEW_LIGHTS];
+	// Omni_FogTransient: the froxel fog adds this light's in-scatter per-frame
+	// on top of the blended base fog (not into history) — for short flashes.
+	alignas(32) uint32_t isFlash[DEFERRED_MAX_VIEW_LIGHTS];
 	// Omni_ForceVolCone: per-light volumetric-cone opt-in (renders a
 	// cone even when --draw-cones is off scene-wide).
 	alignas(32) uint32_t forceCone[DEFERRED_MAX_VIEW_LIGHTS];
@@ -3708,6 +3711,7 @@ void Render_DeferredLighting() {
 		}
 		lights.shadowMapIdx[numLights]  = smIdx;
 		lights.cubeShadowIdx[numLights] = cubeIdx;
+		lights.isFlash[numLights]       = (O->Flags & Omni_FogTransient) ? 1u : 0u;
 		// Clone light with a shadow-casting SPOT source → mirrored
 		// shadow sampling against the source's map.
 		int32_t srcSm = -1;
@@ -6247,6 +6251,19 @@ std::int64_t DeferredSkybox_TakeFrameNs() {
     return g_deferredSkyNs.exchange(0, std::memory_order_relaxed);
 }
 
+// Fold the nearest transparent layer's depth (from the xpar peel) into the
+// main Z-buffer. Transparents don't write the opaque Z, so a later additive
+// overlay (the fountain bolt) isn't occluded by them; after this, it is.
+// Encoding is 0xFF80 - zScale*depth, so NEARER = larger value → take the max.
+// No-op outside the deferred xpar path (g_xparZ null). ZPage16 is unused after
+// the bolt, so clobbering it here is safe.
+void Deferred_FoldXparDepthIntoMainZ() {
+    if (!g_xparZ || !ZPage16) return;
+    const size_t n = size_t(XRes) * size_t(YRes);
+    for (size_t i = 0; i < n; ++i)
+        if (g_xparZ[i] > ZPage16[i]) ZPage16[i] = g_xparZ[i];
+}
+
 void Render_DeferredSkybox() {
     VolProfScope _vp(&g_volProf.ms_skybox, &g_volProf.n_skybox);
     using clk = std::chrono::steady_clock;
@@ -7415,6 +7432,7 @@ namespace {
 	std::vector<float> gGlow;           // gGlX×gGlY columns × nz × RGB
 	int   gGlX = 0, gGlY = 0;
 	bool  gFrHasShadowedLight = false;  // any light needing exact per-column glow
+	bool  gFrHasFlashLight    = false;  // any Omni_FogTransient (added per-frame, not historied)
 	// True while THIS renderFrame's froxel grid is valid for sampling
 	// (set by the froxel dispatch, cleared at every renderFrame start) —
 	// the transparent peel fogs its layers from the grid when set.
@@ -7658,6 +7676,7 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 			const float uV = X*X + Y*Y + 1.0f;
 			for (int li = 0; li < P.numLights; ++li) {
 				if (L->mirrorId[li] != 0) continue;        // clones don't glow
+				if (L->isFlash[li]) continue;              // transient: added per-frame in pass 2/3, not historied
 				// Shadow-casting lights stay EXACT per fine column (pass 2 in
 				// Froxel_ColumnTile): the shadow boundary inside the glow is
 				// high-frequency and blocks up at coarse XY (conetest A/B).
@@ -7750,6 +7769,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	static const float h3[8] = {1/3.f,2/3.f,1/9.f,4/9.f,7/9.f,2/9.f,5/9.f,8/9.f};
 	float dens[kFrMaxNz];
 	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
+	float flashGlowR[kFrMaxNz], flashGlowG[kFrMaxNz], flashGlowB[kFrMaxNz];  // transient (not historied)
 	for (int iy = iy0; iy < iy1; ++iy) {
 		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
 		const float Yc  = (CntrEY - syc) * P.invFOVY;
@@ -7865,14 +7885,17 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			// ── pass 2: per-light glow per slice (clipped, analytic radial) ──
 			// In glow-grid mode this still runs for SHADOW-CASTING lights
 			// (exact shadow boundaries); unshadowed ones come from the grid.
-			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight);
+			const bool pass2 = glowOn && (!glowGrid || gFrHasShadowedLight || gFrHasFlashLight);
 			if (pass2) {
-				for (int iz = 0; iz < nz; ++iz) glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
+				for (int iz = 0; iz < nz; ++iz) {
+					glowR[iz] = glowG[iz] = glowB[iz] = 0.0f;
+					flashGlowR[iz] = flashGlowG[iz] = flashGlowB[iz] = 0.0f;
+				}
 				const float X = Xc, Y = Yc;            // glow is smooth — no jitter
 				const float uV = X*X + Y*Y + 1.0f;
 				for (int li = 0; li < P.numLights; ++li) {
 					if (L->mirrorId[li] != 0) continue;        // clones don't glow
-					if (glowGrid && L->shadowMapIdx[li] < 0) continue;  // grid covers it
+					if (glowGrid && L->shadowMapIdx[li] < 0 && !L->isFlash[li]) continue;  // grid covers it (but not the transient flash)
 					const float Lx = L->posX[li], Ly = L->posY[li], Lz = L->posZ[li];
 					const float VP = X*Lx + Y*Ly + Lz;
 					const float PP = Lx*Lx + Ly*Ly + Lz*Lz;
@@ -7919,9 +7942,15 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 							s *= vis;
 						}
 						g *= s;
-						glowR[iz] += L->colR[li] * g;
-						glowG[iz] += L->colG[li] * g;
-						glowB[iz] += L->colB[li] * g;
+						if (L->isFlash[li]) {            // transient → separate (not historied)
+							flashGlowR[iz] += L->colR[li] * g;
+							flashGlowG[iz] += L->colG[li] * g;
+							flashGlowB[iz] += L->colB[li] * g;
+						} else {
+							glowR[iz] += L->colR[li] * g;
+							glowG[iz] += L->colG[li] * g;
+							glowB[iz] += L->colB[li] * g;
+						}
 					}
 				}
 			}
@@ -8040,6 +8069,27 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				}
 				float* sc4 = sct + (col+iz)*4;
 				sc4[0] = scR; sc4[1] = scG; sc4[2] = scB; sc4[3] = ext;
+				// Add the TRANSIENT flash in-scatter for THIS frame only — after
+				// storing history (so it never lingers / darkens panned edges)
+				// and before the integral. Premultiplied by ext like scR.
+				if (gFrHasFlashLight && ext > 0.0f) {
+					float fLr = flashGlowR[iz]*P.inscatter;
+					float fLg = flashGlowG[iz]*P.inscatter;
+					float fLb = flashGlowB[iz]*P.inscatter;
+					// Same hue-preserving soft-knee the base Lr gets — the split
+					// otherwise lets the flash bypass it and white-out the fog.
+					if (P.glowMax > 0.0f) {
+						const float m = fLr > fLg ? (fLr > fLb ? fLr : fLb)
+						                          : (fLg > fLb ? fLg : fLb);
+						const float k = P.glowMax * 0.5f;
+						if (m > k) {
+							const float e = m - k;
+							const float s = (k + e / (1.0f + e / k)) / m;
+							fLr *= s; fLg *= s; fLb *= s;
+						}
+					}
+					scR += fLr*ext; scG += fLg*ext; scB += fLb*ext;
+				}
 				// Integrate the BLENDED values: L = scat/σ, so the slice term
 				// L·T·(1−e^{−σ·dz}) = scat·T·(1−e^{−σ·dz})/σ → scat·T·dz as σ→0.
 				const float dzS = zb[iz+1] - zb[iz];
@@ -8350,11 +8400,14 @@ void Render_DeferredFastFog() {
 			gFrPrevA[2] = gFrPrevW[2]*dx + gFrPrevW[5]*dy + gFrPrevW[8]*dz;
 		}
 		gFrHasShadowedLight = false;
+		gFrHasFlashLight    = false;
 		if (P.lights)
-			for (int li = 0; li < P.numLights; ++li)
-				if (P.lights->shadowMapIdx[li] >= 0 && P.lights->mirrorId[li] == 0) {
-					gFrHasShadowedLight = true; break;
-				}
+			for (int li = 0; li < P.numLights; ++li) {
+				if (P.lights->shadowMapIdx[li] >= 0 && P.lights->mirrorId[li] == 0)
+					gFrHasShadowedLight = true;
+				if (P.lights->isFlash[li] && P.lights->mirrorId[li] == 0)
+					gFrHasFlashLight = true;
+			}
 		if (P.glowGridDiv > 1 && P.inscatter > 0.0f && P.numLights > 0) {
 			const int gx = (nx + P.glowGridDiv - 1) / P.glowGridDiv;
 			const int gy = (ny + P.glowGridDiv - 1) / P.glowGridDiv;

@@ -34,6 +34,12 @@ template void TheOtherBarry<barry::TBlendMode::OVERWRITE,   barry::TTextureMode:
 template void TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::TRANSPARENT, barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL_BILINEAR>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NONE,           false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL_BILINEAR, false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL,          true, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::SRC_ALPHA,   barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 
 // MekaleleImpl — three targets (Opaque + TransparentFront + TransparentBack).
 template void MekaleleImpl<MekaleleTarget::Opaque>           (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);

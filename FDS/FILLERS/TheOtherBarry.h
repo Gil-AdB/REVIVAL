@@ -84,10 +84,20 @@ enum class TBlendMode {
 	OVERWRITE,
 	TRANSPARENT,
 	ADDITIVE,
+	// Real per-pixel source-alpha blend: src·α + dst·(1−α), α = the texture's
+	// authored alpha byte. Unlike TRANSPARENT (a fixed src + dst/2) this honours
+	// per-pixel coverage — the primitive for soft-edged decals / partial-alpha
+	// sprites. No consumer yet; instantiated below so the path is compiled.
+	SRC_ALPHA,
 };
 
 enum class TTextureMode {
 	NORMAL,
+	// NORMAL with a 4-tap bilinear primary-texture sample instead of nearest.
+	// Same texture setup as NORMAL (it's !=NONE, !=TEXTURETEXTURE everywhere);
+	// only the per-pixel sample differs. Used by the fountain bolt glow, which
+	// is magnified hugely — nearest stair-steps, bilinear stays smooth.
+	NORMAL_BILINEAR,
 	TEXTURETEXTURE,
 	// Untextured Gouraud / flat fills. The TileRasterizer skips its
 	// texture setup (avoids deref'ing a null Texture*) and the per-pixel
@@ -215,7 +225,16 @@ inline uint32_t tile_du(uint32_t u, uint32_t vbits, uint32_t umask) {
 #define BENCH_SKIP_COLOR 0
 #endif
 
-template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode>
+// AlphaTest: when set (used only by the fountain portal/vortex), each pixel is
+// discarded — no colour, no Z — where the texel's alpha byte is 0. The coverage
+// is baked into the texture's alpha at generation time (Vortex_Distort clips the
+// swirl to a circle and stamps alpha 0xFF inside / 0 in the corners), so the
+// kernel just reads it. Discarding the transparent corners stamps no Z there, so
+// the volumetric fog integral runs full-length behind them and no dark footprint
+// frames the disc. The opaque swirl is kept and stamps Z → the ship is still
+// occluded as it flies through.
+template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode, bool WriteZ = true,
+          bool AlphaTest = false>
 struct TileRasterizer {
 	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres,
 	               uint16_t* zpage16, float zScale,
@@ -404,10 +423,28 @@ struct TileRasterizer {
 					// blend modes; matching this so the fountain vortex
 					// (additive, SortPriorityBias=DrawFirst) writes Z and
 					// is correctly occluded by closer surfaces drawn after.
-					*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
+					// WriteZ=false (the fountain bolt): Z-TEST still gates p_mask
+					// above (so it's occluded by spires), but we don't STAMP Z —
+					// a glow is strictly additive and must never occlude itself
+					// or anything drawn after (dark bolt-quad-shaped patches).
+					// AlphaTest defers the stamp until after the texel is sampled
+					// (below) so the discard mask can fold into p_mask first.
+					if constexpr (WriteZ && !AlphaTest)
+						*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate), compress(Vec8ui(p_mask)));
 #endif
 
-					auto blend_color = Vec32us(color);
+					// Untextured Gouraud (NONE) can carry a steep per-vertex
+					// colour gradient; in partial tiles the rasterizer
+					// extrapolates `color` past the triangle, going negative and
+					// WRAPPING to garbage (the rainbow fringe on thin ribbon
+					// edges). Clamp to [0,255] so the out-of-triangle fringe goes
+					// black (= invisible under ADDITIVE). Textured paths use a
+					// uniform colour (zero gradient) so they skip this entirely.
+					Vec32us blend_color;
+					if constexpr (TextureMode == barry::TTextureMode::NONE)
+						blend_color = Vec32us(min(max(color, Vec32s(0)), Vec32s(255)));
+					else
+						blend_color = Vec32us(color);
 
 					Vec8ui texture0_samples;
 					if constexpr (TextureMode == barry::TTextureMode::NONE) {
@@ -419,25 +456,50 @@ struct TileRasterizer {
 #if BENCH_SKIP_PERSPECTIVE
 						// Stub: linear UV (no `* p_z` perspective divide). Wrong UVs,
 						// useful only for isolating the perspective compute cost.
-						Vec8i u = roundi(p_uz * t0.UScaleFactor);
-						Vec8i v = roundi(p_vz * t0.VScaleFactor);
+						const Vec8f uf = p_uz * t0.UScaleFactor;
+						const Vec8f vf = p_vz * t0.VScaleFactor;
 #else
-						Vec8i u = roundi(p_uz * p_z * t0.UScaleFactor);
-						Vec8i v = roundi(p_vz * p_z * t0.VScaleFactor);
+						const Vec8f uf = p_uz * p_z * t0.UScaleFactor;
+						const Vec8f vf = p_vz * p_z * t0.VScaleFactor;
 #endif
-
-						Vec8i tu = packed_tile_u(u, t0.LogHeight, t0_umask_swizzled);
-						Vec8i tv = packed_tile_v(v, t0_vmask);
-
-						auto p_offset = tu + tv;
-
+						if constexpr (TextureMode == barry::TTextureMode::NORMAL_BILINEAR) {
+							// 4-tap bilinear. fu/fv shared; 2 u-addrs + 2 v-addrs
+							// combined into the 4 corner offsets. Weights are
+							// 0..255 and the two halves use (255-w) and w, so each
+							// blend (s_a*(255-w) + s_b*w) <= 255*255 — fits 16-bit.
+							Vec8i u0 = truncatei(uf), v0 = truncatei(vf);
+							Vec8i u1 = u0 + 1,        v1 = v0 + 1;
+							const Vec8i wu = truncatei((uf - to_float(u0)) * 255.0f);
+							const Vec8i wv = truncatei((vf - to_float(v0)) * 255.0f);
+							Vec8i tu0 = packed_tile_u(u0, t0.LogHeight, t0_umask_swizzled);
+							Vec8i tu1 = packed_tile_u(u1, t0.LogHeight, t0_umask_swizzled);
+							Vec8i tv0 = packed_tile_v(v0, t0_vmask);
+							Vec8i tv1 = packed_tile_v(v1, t0_vmask);
+							const Vec32us s00 = extend(Vec32uc(gather(Vec8ui(tu0+tv0), t0.TextureAddr, p_mask)));
+							const Vec32us s10 = extend(Vec32uc(gather(Vec8ui(tu1+tv0), t0.TextureAddr, p_mask)));
+							const Vec32us s01 = extend(Vec32uc(gather(Vec8ui(tu0+tv1), t0.TextureAddr, p_mask)));
+							const Vec32us s11 = extend(Vec32uc(gather(Vec8ui(tu1+tv1), t0.TextureAddr, p_mask)));
+							// Per-pixel weight replicated into all 4 bytes of the lane.
+							const Vec32us wU = extend(Vec32uc(Vec8ui(wu) * Vec8ui(0x01010101u)));
+							const Vec32us wV = extend(Vec32uc(Vec8ui(wv) * Vec8ui(0x01010101u)));
+							const Vec32us iU = Vec32us(255) - wU;
+							const Vec32us top = (s00*iU + s10*wU) >> 8;
+							const Vec32us bot = (s01*iU + s11*wU) >> 8;
+							const Vec32us iV = Vec32us(255) - wV;
+							texture0_samples = Vec8ui(compress((top*iV + bot*wV) >> 8));
+						} else {
+							Vec8i u = roundi(uf);
+							Vec8i v = roundi(vf);
+							Vec8i tu = packed_tile_u(u, t0.LogHeight, t0_umask_swizzled);
+							Vec8i tv = packed_tile_v(v, t0_vmask);
+							auto p_offset = tu + tv;
 #if BENCH_SKIP_TEXTURE
-						// Stub: constant white instead of texture gather. Isolates
-						// gather/cache cost.
-						texture0_samples = Vec8ui(0xFFFFFFFF);
+							// Stub: constant white instead of texture gather.
+							texture0_samples = Vec8ui(0xFFFFFFFF);
 #else
-						texture0_samples = gather(Vec8ui(p_offset), t0.TextureAddr, p_mask);
+							texture0_samples = gather(Vec8ui(p_offset), t0.TextureAddr, p_mask);
 #endif
+						}
 					}
 					if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
 						Vec8i u1 = roundi(p_u1z * p_z * 1024.0f);
@@ -461,6 +523,22 @@ struct TileRasterizer {
 						texture0_samples = Vec8ui(add_saturated(Vec32uc(texture1_samples), Vec32uc(texture0_samples) >> 1));
 					}
 
+					// Alpha test (portal/vortex only). Gate on the texel's alpha
+					// byte — baked at texture-gen time (Vortex_Distort): 0 in the
+					// circle-clipped corners, 0xFF in the swirl. Discard the
+					// transparent corners by folding the coverage into p_mask, so
+					// neither the colour maskstore (below) nor the Z stamp touch
+					// them and the fog integrates full-length behind the disc. The
+					// opaque swirl is kept and stamps Z → ship still occluded.
+					if constexpr (AlphaTest) {
+						p_mask = p_mask & ((texture0_samples & Vec8ui(0xFF000000)) != Vec8ui(0));
+#if !BENCH_SKIP_Z
+						if constexpr (WriteZ)
+							*(__m128i*)zspan = _mm_blendv_epi8(*(__m128i*)zspan, compress(z_candidate),
+							                                   compress(Vec8ui(p_mask)));
+#endif
+					}
+
 #if BENCH_SKIP_COLOR
 					// Stub: skip the gouraud color multiply blend. Texture
 					// gather feeds the maskstore unmodified — isolates the
@@ -480,6 +558,21 @@ struct TileRasterizer {
 						Vec32uc dst;
 						dst.load_a(span);
 						texture_samples = add_saturated(texture_samples, dst);
+					}
+
+					// Real per-pixel source-alpha blend: src·α + dst·(1−α). α is the
+					// texture's authored alpha byte (per lane, broadcast across BGRA
+					// the same way the bilinear sampler broadcasts its weight); src
+					// is the colorized/lit texel. The lerp runs in 16-bit fixed point
+					// (max 255·255 < 65536, so no saturation needed), mirroring the
+					// bilinear filter's s·(255−w)+t·w >> 8.
+					if constexpr (BlendMode == TBlendMode::SRC_ALPHA) {
+						Vec32uc dst;
+						dst.load_a(span);
+						const Vec8ui  aPx = (texture0_samples >> 24) & Vec8ui(0xFF);
+						const Vec32us a   = extend(Vec32uc(aPx * Vec8ui(0x01010101u)));
+						const Vec32us ia  = Vec32us(255) - a;
+						texture_samples   = compress((extend(texture_samples) * a + extend(dst) * ia) >> 8);
 					}
 
 
@@ -800,7 +893,8 @@ struct TileRasterizer {
 
 } // namespace barry
 
-template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode = barry::TTextureMode::NORMAL>
+template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode = barry::TTextureMode::NORMAL, bool WriteZ = true,
+          bool AlphaTest = false>
 void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
                    const fds::RenderTarget& rt,
                    const fds::CameraContext& cam) {
@@ -819,7 +913,7 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// the include graph straight (Mekalele.h includes TheOtherBarry.h,
 	// not the other way round).
 	uint32_t *gbufferMat32 = meka::gbuffer_mat32_plane(rt.gbuffer);
-	barry::TileRasterizer<BlendMode, TextureMode> r(V,
+	barry::TileRasterizer<BlendMode, TextureMode, WriteZ, AlphaTest> r(V,
 	                                                 reinterpret_cast<byte*>(rt.vpage),
 	                                                 rt.bytesPerScanline,
 	                                                 rt.xres, rt.yres,
@@ -936,3 +1030,15 @@ extern template void TheOtherBarry<barry::TBlendMode::OVERWRITE,    barry::TText
 extern template void TheOtherBarry<barry::TBlendMode::TRANSPARENT,  barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 extern template void TheOtherBarry<barry::TBlendMode::TRANSPARENT,  barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL_BILINEAR>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+// Z-test-but-no-Z-write variants for the fountain bolt glow (strictly additive).
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NONE,           false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL_BILINEAR, false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+// Alpha-tested textured additive — the fountain portal/vortex (WriteZ=true,
+// AlphaTest=true): discards transparent texels so the fog isn't truncated
+// behind them, while the bright swirl still stamps Z and occludes the ship.
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL,          true, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+// Per-pixel source-alpha blend — reusable primitive (no consumer yet). Compiled
+// here so it's ready; add BILINEAR / NONE / WriteZ=false variants when needed.
+extern template void TheOtherBarry<barry::TBlendMode::SRC_ALPHA,    barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
