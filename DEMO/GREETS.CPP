@@ -704,7 +704,21 @@ static void BuildGreetsShatter()
 	// lighting doesn't dim it — matching the intact screen's reflective look
 	// rather than popping to silver on the break.
 	Material *shardMat = getAlignedType<Material>(16);
-	shardMat->Txtr       = makeFlatTexture(20, 20, 24);
+	// Silver half-silvered tint to match the intact screen's glass cast.
+	// The env filler bakes reflection(env) + baseTexture/2 (TheOtherBarry
+	// TEXTURETEXTURE), so the shard's FLAT texture is the additive base —
+	// a cool-silver value here lifts the reflection toward silver. Scaled
+	// by --greets-shard-silver so the shade can be dialled to the unbroken
+	// screen; 0 keeps the legacy near-black (pure mirror) look. BaseCol
+	// stays near-black with Luminosity=1 so the gouraud colorize saturates
+	// bright (≈ identity) and doesn't multiply-dim the reflection.
+	{
+		const float s = fds::FeatureFlags::greets_shard_silver();
+		const int r = int(20.0f + s * (185.0f - 20.0f));
+		const int g = int(20.0f + s * (195.0f - 20.0f));
+		const int b = int(24.0f + s * (215.0f - 24.0f));
+		shardMat->Txtr   = makeFlatTexture(r, g, b);
+	}
 	shardMat->BaseCol    = Color{24.0f, 20.0f, 20.0f, 255.0f};
 	shardMat->Diffuse    = 0.0f;
 	shardMat->Specular   = 0.0f;
