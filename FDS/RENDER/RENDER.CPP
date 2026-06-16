@@ -38,8 +38,8 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // Defined in the deferred TUs. The deferred lighting context is built by
 // Render_DeferredLighting (fills the passed ctx) and threaded to the
 // volumetric/fog orchestrators (RenderContext migration). DeferredLightingCtx
-// is defined in DeferredCommon.h (included below).
-void Render_DeferredLighting(DeferredLightingCtx& ctx);
+// + Render_DeferredLighting (with its optional DeferredOverride) are declared
+// in DeferredCommon.h (included below).
 void Render_DeferredFogPass();
 void Render_VolumetricCones(const DeferredLightingCtx& ctx);
 void Render_OmniHalos(const DeferredLightingCtx& ctx);

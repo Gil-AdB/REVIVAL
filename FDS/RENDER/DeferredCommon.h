@@ -234,6 +234,32 @@ struct DeferredLightingCtx {
 // per-frame setup cost. Defined in DeferredSurfaceKernel.cpp.
 extern DeferredLightingCtx g_deferredCtx;
 
+// Per-target override for an OFFSCREEN deferred bake (mirror-shard
+// reflections): when passed to Render_DeferredLighting, every render-target /
+// camera / scratch-buffer it would read from the engine globals comes from
+// here instead, so N bakes run concurrently on the pool (each owns its
+// G-buffer + view-space light list + tile-light buffer). nullptr → the engine
+// globals (main frame; byte-identical). `inlineDispatch` runs the tile kernels
+// on the calling thread (no pool enqueue) for the inter-render model.
+struct DeferredOverride {
+    meka::GBuffer        *gb         = nullptr;  // opaque G-buffer (this target)
+    const fds::CameraContext *cam    = nullptr;  // view + projection
+    ViewLightsSoA        *lights     = nullptr;  // per-view light SoA scratch
+    TileLights           *tileLights = nullptr;  // per-target tile-light scratch
+    byte                 *vpage      = nullptr;  // color framebuffer
+    word                 *zpage16    = nullptr;  // depth
+    int                   xres       = 0;
+    int                   yres       = 0;
+    meka::GBuffer        *gbXpar     = nullptr;  // transparent layers (null = opaque only)
+    word                 *xparZ      = nullptr;
+    word                 *xparZBack  = nullptr;
+    bool                  inlineDispatch = false;
+};
+
+// Deferred opaque lighting pass. ov=nullptr → main frame (engine globals,
+// pool-tiled). ov!=nullptr → offscreen bake into ov's target (see above).
+void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *ov = nullptr);
+
 // Light-list builders (DeferredLightLists.cpp). Called once per frame
 // by the Render_DeferredLighting orchestrator; buildStripLightLists
 // fills g_stripLights for the unified-TBR transparent strip path.

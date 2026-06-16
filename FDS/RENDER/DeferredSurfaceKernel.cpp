@@ -2718,9 +2718,28 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 // condition variable that Render() already uses for the rasterizer
 // pass — fine because we wait synchronously between Render's tile
 // dispatch and our own.
-void Render_DeferredLighting(DeferredLightingCtx &ctx) {
-	if (!g_gbuffer || !ZPage16 || !VPage) return;
-	const meka::GBuffer &gb = *g_gbuffer;
+void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *ov) {
+	// Override-or-global addressing. ov=nullptr (main frame) → engine globals,
+	// byte-identical. ov!=nullptr (offscreen shard bake) → ov's own G-buffer /
+	// camera / scratch buffers, so N bakes run concurrently on the pool. Shadow
+	// the legacy global names so the body below is unchanged.
+	meka::GBuffer *const gbPtr = (ov && ov->gb) ? ov->gb : g_gbuffer;
+	byte *const VPage   = ov ? ov->vpage   : ::VPage;
+	word *const ZPage16 = ov ? ov->zpage16 : ::ZPage16;
+	if (!gbPtr || !ZPage16 || !VPage) return;
+	const meka::GBuffer &gb = *gbPtr;
+	meka::GBuffer *const g_gbuffer = gbPtr;            // mirrorMask read below
+	Camera  *const View  = (ov && ov->cam) ? ov->cam->view   : ::View;
+	const float FOVX     = (ov && ov->cam) ? ov->cam->fovX   : ::FOVX;
+	const float FOVY     = (ov && ov->cam) ? ov->cam->fovY   : ::FOVY;
+	const float CntrEX   = (ov && ov->cam) ? ov->cam->cntrEX : ::CntrEX;
+	const float CntrEY   = (ov && ov->cam) ? ov->cam->cntrEY : ::CntrEY;
+	const float g_zscale = (ov && ov->cam) ? ov->cam->zScale : float(::g_zscale);
+	const int32_t XRes   = ov ? ov->xres : ::XRes;
+	const int32_t YRes   = ov ? ov->yres : ::YRes;
+	meka::GBuffer *const g_gbufferTransparent = ov ? ov->gbXpar   : ::g_gbufferTransparent;
+	word *const g_xparZ                       = ov ? ov->xparZ    : ::g_xparZ;
+	word *const g_xparZBack                   = ov ? ov->xparZBack : ::g_xparZBack;
 	const size_t numPixels = size_t(XRes) * size_t(YRes);
 	if (gb.normal.size() < numPixels || gb.txtr.size() < numPixels) return;
 
@@ -2773,8 +2792,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 		}
 	}
 
-	// Build view-space omni list once per frame.
-	static ViewLightsSoA lights;  // function-static; lifetime spans dispatch + wait
+	// Build view-space omni list (per-frame for the main pass; per-target when
+	// ov supplies its own scratch, so concurrent offscreen bakes don't race on
+	// the function-static).
+	static ViewLightsSoA s_lights;  // function-static; lifetime spans dispatch + wait
+	ViewLightsSoA &lights = (ov && ov->lights) ? *ov->lights : s_lights;
 	// Optional Range clamp — if FDS_DEFERRED_MAX_RANGE is set, any
 	// per-omni Range above that ceiling is clamped *for culling
 	// purposes only* (the falloff math still uses the real Range, so
@@ -2941,7 +2963,8 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 	// Per-tile light culling: project each omni's bounding sphere
 	// into screen space, find which tiles it overlaps, populate
 	// indices[] per tile.
-	static TileLights tileLights[DEFERRED_NUM_TILES];
+	static TileLights s_tileLights[DEFERRED_NUM_TILES];
+	TileLights *const tileLights = (ov && ov->tileLights) ? ov->tileLights : s_tileLights;
 	const float invZScale = 1.0f / float(g_zscale);
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
@@ -2952,6 +2975,8 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 	const uint8_t *mirrorMaskPlane =
 		(g_gbuffer && g_gbuffer->mirrorMask.size() >= numPixels)
 		? g_gbuffer->mirrorMask.data() : nullptr;
+	// Main-frame only: an offscreen shard bake has no mirrorMask in its
+	// G-buffer, so mirrorMaskPlane is null below and this stays untouched.
 	static uint32_t tileMirrorPresence[DEFERRED_NUM_TILES];
 	const uint32_t *tilePresence = nullptr;
 	if (mirrorMaskPlane) {
@@ -2961,19 +2986,20 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 		                          tileMirrorPresence);
 		tilePresence = tileMirrorPresence;
 	}
+	const fds::CameraContext &camCtx = (ov && ov->cam) ? *ov->cam : fds::g_mainCamera;
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
-	                    lights, numLights, tilePresence, fds::g_mainCamera);
+	                    lights, numLights, tilePresence, camCtx);
 
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
 	// when the unified path is active to avoid the per-frame cost on
 	// the legacy path. (Strip count = ceil(YRes / TILESIZE), capped at
 	// DEFERRED_MAX_STRIPS=512.)
-	if (deferredUnifiedTbrEnabled()) {
+	if (!ov && deferredUnifiedTbrEnabled()) {   // strips are main-frame xpar only
 		constexpr int STRIP_H = 1 << 3;  // TILESIZE from FILLERS.CPP
 		const int numStrips = (YRes + STRIP_H - 1) >> 3;
-		static uint32_t stripMirrorPresence[DEFERRED_MAX_STRIPS];
+		static uint32_t stripMirrorPresence[DEFERRED_MAX_STRIPS];  // main-frame only (see above)
 		const uint32_t *stripPresence = nullptr;
 		if (mirrorMaskPlane) {
 			computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
@@ -3037,8 +3063,14 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
+	// Dispatch: main frame tiles across the pool; an offscreen bake
+	// (ov->inlineDispatch) runs the tiles on the calling worker thread (it is
+	// itself a pool thread doing a WHOLE render — no nested enqueue). The tile
+	// kernel releases renderns::tileDone at its end, so the inline path drains
+	// it per tile to stay net-zero on the shared semaphore.
 	const bool useOuterVec = deferredLightingOuterVecEnabled();
-	renderns::tileCounter = 0;
+	const bool inlineDispatch = ov && ov->inlineDispatch;
+	if (!inlineDispatch) renderns::tileCounter = 0;
 	for (int j = 0; j < numTilesY; ++j) {
 		const int y1 = tileSizeY * j;
 		const int y2 = std::min(y1 + tileSizeY, YRes);
@@ -3046,18 +3078,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 			const int x1 = tileSizeX * i;
 			const int x2 = std::min(x1 + tileSizeX, XRes);
 			const int tileIndex = j * numTilesX + i;
-			if (useOuterVec) {
-				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
-					Render_DeferredLighting_Tile_OuterVec(ctx, tileIndex, x1, y1, x2, y2);
-				});
-			} else {
-				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
-					Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
-				});
-			}
+			auto run = [&ctx, useOuterVec, tileIndex, x1, y1, x2, y2]() {
+				if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, tileIndex, x1, y1, x2, y2);
+				else             Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
+			};
+			if (inlineDispatch) { run(); renderns::tileDone.acquire(); }
+			else                ThreadPool::instance().enqueue(run);
 		}
 	}
-	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
+	if (inlineDispatch) { /* drained per tile above */ }
+	else for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
 		renderns::tileDone.acquire();
 	}
 
@@ -3065,7 +3095,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 	// fallback at material edges). Skip entirely when checkerboard is
 	// off — wave 1 already covered everything.
 	if (deferredLightingCheckerboardEnabled() || deferredLightingQuarterEnabled()) {
-		renderns::tileCounter = 0;
+		if (!inlineDispatch) renderns::tileCounter = 0;
 		for (int j = 0; j < numTilesY; ++j) {
 			const int y1 = tileSizeY * j;
 			const int y2 = std::min(y1 + tileSizeY, YRes);
@@ -3073,14 +3103,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 				const int x1 = tileSizeX * i;
 				const int x2 = std::min(x1 + tileSizeX, XRes);
 				const int tileIndex = j * numTilesX + i;
-				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
+				auto run = [&ctx, tileIndex, x1, y1, x2, y2]() {
 					Render_DeferredLighting_TileFill(ctx, tileIndex, x1, y1, x2, y2);
-				});
+				};
+				if (inlineDispatch) { run(); renderns::tileDone.acquire(); }
+				else                ThreadPool::instance().enqueue(run);
 			}
 		}
-		for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-			renderns::tileDone.acquire();
-		}
+		if (!inlineDispatch)
+			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i)
+				renderns::tileDone.acquire();
 	}
 
 	// Dump cache-line transition stats accumulated by shadow sampling
