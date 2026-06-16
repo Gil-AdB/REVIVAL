@@ -19,6 +19,7 @@
 #include <Base/VertexScratch.h>  // per-worker transformed-vertex clones
 #include <RENDER/OffscreenView.h>
 #include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
+#include <RENDER/DeferredCommon.h> // ViewLightsSoA/TileLights/DeferredOverride + Render_DeferredLighting
 #include <Base/FeatureFlags.h>
 #include <Threads.h>             // ThreadPool — fan shards across cores
 
@@ -339,6 +340,14 @@ struct MirrorShatter::ReflWorker {
 	fds::FaceListContext faces{};      // own FList/SList — no global race
 	fds::VertexScratch   scratch{};    // per-mesh transformed-vertex clones
 	bool                 surfInit = false;
+	// Deferred-bake scratch (FDS_SHARD_DEFERRED): own G-buffer + view-space
+	// light list + tile-light buffer, so N shards shade through the deferred
+	// kernel concurrently via Render_DeferredLighting's DeferredOverride. Empty
+	// until the first deferred frame (allocated in the pool-sizing loop).
+	meka::GBuffer            gb{};
+	ViewLightsSoA            lights{};
+	std::vector<TileLights>  tileLights;   // sized DEFERRED_NUM_TILES
+	bool                     gbInit = false;
 };
 struct MirrorShatter::ReflPool {
 	std::vector<ReflWorker> workers;
@@ -675,8 +684,12 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 void MirrorShatter::renderReflectionCameras(Scene* sc) {
 	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
 
+	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
+	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
+	// fan across the pool — forward by default, or per-worker DEFERRED when
+	// deferredBake_ (shadowed, hue-correct; each worker owns its G-buffer).
 	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
-	if (deferredBake_ || forceSerial) { renderReflectionCamerasSerial(sc); return; }
+	if (forceSerial) { renderReflectionCamerasSerial(sc); return; }
 
 	const Camera* mainCam = View ? View : sc->CameraHead;
 	if (!mainCam) return;
@@ -713,6 +726,21 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 			w.surfInit = true;
 		}
 		w.faces.resize(size_t(polys));   // no-op when already sized
+		// Deferred bake: size this worker's G-buffer + tile-light buffer to the
+		// texRes² target (allocated once, reused; cleared per shard below).
+		if (deferredBake_ && !w.gbInit) {
+			const size_t np = size_t(texRes_) * size_t(texRes_);
+			w.gb.normal.assign(np, 0);
+			w.gb.txtr.assign(np, 0xFFFFFFFFu);
+			w.gb.tangent.assign(np, 0);
+			w.gb.shadowMatID.assign(np, 0);
+			if (fds::FeatureFlags::shadow_lightmap()) {
+				w.gb.lightmapMF.assign(np, 0);
+				w.gb.lightmapST.assign(np, 0);
+			}
+			w.tileLights.resize(DEFERRED_NUM_TILES);
+			w.gbInit = true;
+		}
 	}
 
 	// Self-balancing fan-out: workers pull shard indices off a shared atomic
@@ -846,8 +874,8 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 
 	if (w.faces.cAll != 0) {
 		Radix_Sort(w.faces.fList, w.faces.sList, w.faces.cAll);
-		// RenderInner reads only ctx.faces.fList / cAll — alias the worker's
-		// buffers (no storage copy) rather than deep-copying the FaceListContext.
+		// RenderInner / MekaleleFill read only ctx.faces.fList / cAll — alias the
+		// worker's buffers (no storage copy) rather than deep-copying.
 		fds::RenderContext ctx;
 		ctx.scene       = sc;
 		ctx.camera      = w.camCtx;
@@ -859,7 +887,32 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 		ctx.target.zpage16          = (uint16_t*)w.surf.Z16;
 		ctx.target.xres             = texRes_;
 		ctx.target.yres             = texRes_;
-		RenderForwardRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
+		if (deferredBake_) {
+			// Deferred bake: fill this worker's G-buffer, then shade it inline
+			// through Render_DeferredLighting (shadowed, hue-correct — the room
+			// is lit exactly as the main deferred view, no forward greening).
+			// Clear the mat32 sentinel + lightmap plane (Z + colour cleared above
+			// to 0x10; unshaded pixels keep that background).
+			std::fill(w.gb.txtr.begin(), w.gb.txtr.end(), 0xFFFFFFFFu);
+			if (!w.gb.lightmapMF.empty())
+				std::fill(w.gb.lightmapMF.begin(), w.gb.lightmapMF.end(), 0u);
+			ctx.target.gbuffer = &w.gb;
+			MekaleleFillRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
+			DeferredLightingCtx dctx{};
+			DeferredOverride ov;
+			ov.gb         = &w.gb;
+			ov.cam        = &w.camCtx;
+			ov.lights     = &w.lights;
+			ov.tileLights = w.tileLights.data();
+			ov.vpage      = w.surf.Data;
+			ov.zpage16    = (word*)w.surf.Z16;
+			ov.xres       = texRes_;
+			ov.yres       = texRes_;
+			ov.inlineDispatch = true;
+			Render_DeferredLighting(dctx, &ov);
+		} else {
+			RenderForwardRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
+		}
 	}
 
 	// Reflectance gain (forward bake is unshadowed) — applied before text.

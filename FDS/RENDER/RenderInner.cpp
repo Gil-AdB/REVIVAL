@@ -160,6 +160,34 @@ void RenderForwardRegionInline(const fds::RenderContext& ctx,
 	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
+// Mekalele G-buffer fill of ctx's face list into ctx.target's G-buffer —
+// single-threaded, inline, no tileDone traffic. The deferred sibling of
+// RenderForwardRegionInline: the parallel deferred shard bake (MirrorShatter)
+// calls this on a pool thread to fill its own G-buffer, then runs
+// Render_DeferredLighting with a per-worker DeferredOverride to shade it.
+// Opaque only — shard reflections render plain room geometry (no reflective /
+// additive / transparent faces), so every face routes to Mekalele.
+// ctx.target.gbuffer MUST be set (unlike the forward path, which nulls it).
+void MekaleleFillRegionInline(const fds::RenderContext& ctx,
+                              float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(ctx.camera);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+	const auto rt  = ctx.target;     // G-buffer KEPT (deferred fill)
+	const auto& cam = ctx.camera;
+	int32_t I = ctx.faces.cAll;
+	fds::FListEntry* FLS = ctx.faces.fList;
+	while (I--) {
+		Face* F = (FLS++)->face;
+		Vertex* A = F->A; Vertex* B = F->B;
+		if (A == B) continue;
+		Vertex* C = F->C;
+		if ((A->Flags & B->Flags & C->Flags) & Vtx_Visible) continue;
+		if (!F->Txtr || !F->Txtr->Txtr) continue;
+		clipper.Render(F, Mekalele, false, rt, cam);
+	}
+}
+
 
 void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;

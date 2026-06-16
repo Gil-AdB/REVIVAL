@@ -432,6 +432,11 @@ void Render(RenderPath path = RenderPath::Default, bool skipVolumetric = false);
 namespace fds { struct RenderContext; }
 void RenderForwardRegionInline(const fds::RenderContext& ctx,
                                float x1, float y1, float x2, float y2);
+// Deferred sibling: Mekalele-fill ctx's face list into ctx.target's G-buffer
+// (which MUST be set). Single-threaded, inline. Used by the parallel deferred
+// shard bake (each worker fills its own G-buffer then shades it).
+void MekaleleFillRegionInline(const fds::RenderContext& ctx,
+                              float x1, float y1, float x2, float y2);
 void SetDeferredWaterMatID(int id);
 bool deferredEnabled();
 // Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a
