@@ -59,7 +59,15 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 	// shard/shadow/RTT bakes are the consumers). renderFrame passes the
 	// primary context (= the old globals → byte-identical).
 	FrustumClipper clipper;
-	clipper.InitViewport(ctx.scene);
+	// Near/far from ctx.camera, NOT ctx.scene: the scene's NZP/FZP are
+	// shared mutable state, so concurrent offscreen workers (Slice 6 shard
+	// pass) can't each stamp a different mirror-plane near-Z into it. The
+	// CameraContext overload reads cam.nearZ/farZ + reciprocals, which are
+	// byte-identical to Sc->NZP/FZP for the main frame and the RTT path
+	// (SetCurrentScene stamps C_NZP=Sc->NZP and C_rNZP=1.0f/C_NZP, the same
+	// float expression viewportInit uses). The clip extents InitViewport
+	// would set are overwritten by SetClippingExtents below regardless.
+	clipper.InitViewport(ctx.camera);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
 	auto rt  = ctx.target;
 	// Forward dispatcher: the deferred lighting kernel won't read the
