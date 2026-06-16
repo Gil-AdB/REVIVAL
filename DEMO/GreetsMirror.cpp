@@ -2569,9 +2569,18 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         fds::g_offAxisFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         fds::g_offAxisFrustumCull = false;
+        // Deferred RTT is scoped to the half-silvered text-screen panels
+        // (textTex != null = greets's "screen"): there the shadowed,
+        // cone-lit reflection matches the main view and is worth the cost.
+        // The geometry-based recursive / portal slots (the teleporter
+        // mirror) gain almost nothing visible from the deferred kernel —
+        // they're flat reflections of room geometry — while paying the
+        // full per-slot G-buffer fill + cone pass, so they stay on the
+        // forward filler regardless of --shard-deferred.
+        const bool slotDeferred = rttDeferred && s.textTex != nullptr;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
-            if (rttDeferred) {
+            if (slotDeferred) {
                 // Deferred RTT bake: render the recursive reflection through the
                 // deferred kernel (shadows + matches the main view) + the cone
                 // pass (disco beams), instead of the forward filler. Serial pass,
@@ -2621,8 +2630,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 if (zp[i] != 0) ++nzz;
             }
             std::fprintf(stderr,
-                "[MIRROR-RTT] order=%d job: %d/%d color px, %d z px, CAll=%d\n",
-                int(s.order), nz, s.texW * s.texH, nzz, int(CAll));
+                "[MIRROR-RTT] order=%d %s job: %d/%d color px, %d z px, CAll=%d\n",
+                int(s.order), slotDeferred ? "deferred(screen)" : "forward(geom)",
+                nz, s.texW * s.texH, nzz, int(CAll));
         }
         // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
         // linear buffer (top=red, bottom=blue, left=green,
