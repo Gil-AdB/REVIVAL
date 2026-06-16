@@ -105,7 +105,7 @@ static Texture *makeFlatTexture(byte r, byte g, byte b) {
 static void GreetsApplyLiveTints()
 {
 	static Texture *sPortalSilver = nullptr;
-	if (!sPortalSilver) sPortalSilver = makeFlatTexture(185, 195, 215);  // cool silver
+	if (!sPortalSilver) sPortalSilver = makeFlatTexture(150, 170, 215);  // cool silver
 	const float pt = fds::FeatureFlags::greets_portal_tint();
 	for (fds::Mirror &m : g_greetsMirrors) {
 		if (m.wallMaterialName.find("teleporter") == std::string::npos) continue;
@@ -113,8 +113,11 @@ static void GreetsApplyLiveTints()
 		if (pt <= 0.0001f) {
 			m.wallMatClone->XparBlendAlpha = -1.0f;   // sentinel: clear portal
 		} else {
+			// litRGB = white*silverTexture = silver; composite silver*a +
+			// reflection*(1-a). pt maps to a fairly strong alpha so the tint
+			// is actually visible on the small teleporter footprint.
 			m.wallMatClone->Txtr           = sPortalSilver;          // tint via texture
-			m.wallMatClone->XparBlendAlpha = (pt < 1.0f ? pt : 1.0f) * 0.5f;
+			m.wallMatClone->XparBlendAlpha = (pt < 1.0f ? pt : 1.0f) * 0.7f;
 		}
 	}
 }

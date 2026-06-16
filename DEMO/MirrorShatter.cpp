@@ -77,6 +77,36 @@ float MirrorShatter::frand01() {
 	return float(rng_ >> 8) * (1.0f / 16777216.0f);  // [0,1)
 }
 
+namespace {
+// Half-silvered glaze for the shatter shards (#3). The shards display the
+// baked reflection atlas, lit white (textured material => Luminosity*255,
+// BaseCol ignored), so the tint has to live in the baked pixels. A real
+// half-silvered glass DESATURATES the reflection toward the (cool, dim)
+// glass colour — it does NOT brighten it. So: take the per-pixel luma,
+// build a cool-silver target (luma tinted blue>green>red, ~0.7 brightness
+// so the glass absorbs), and lerp the reflection toward it by `sv`. This
+// reads as silver rather than washing to white (the earlier additive-veil
+// bug). sv from --greets-shard-silver; 0 = untouched mirror, 1 = full
+// cool-silver glass. Re-baked every frame, so the console drives it live.
+inline void ApplyShardSilverGlaze(uint32_t* px, int count, float sv) {
+	if (sv <= 0.001f) return;
+	if (sv > 1.0f) sv = 1.0f;
+	const int q = int(sv * 256.0f);          // lerp weight toward silver
+	for (int i = 0; i < count; ++i) {
+		const uint32_t c = px[i];
+		int b = int(c & 0xFF), g = int((c >> 8) & 0xFF), r = int((c >> 16) & 0xFF);
+		const int lum = (r * 77 + g * 150 + b * 29) >> 8;   // rec601-ish luma
+		const int tr = (lum * 150) >> 8;        // cool silver: r 0.59
+		const int tg = (lum * 170) >> 8;        //              g 0.66
+		const int tb = (lum * 205) >> 8;        //              b 0.80 (cooler)
+		b = (b * (256 - q) + tb * q) >> 8;
+		g = (g * (256 - q) + tg * q) >> 8;
+		r = (r * (256 - q) + tr * q) >> 8;
+		px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
+	}
+}
+}  // namespace
+
 // Build one shard TriMesh from 4 world-space corners. Geometry is stored
 // LOCAL (relative to the centroid); IPos carries the centroid so the
 // rigid-body update only touches IPos + RotMat.
@@ -610,31 +640,9 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 				}
 			}
 
-			// Silver half-silvered glaze (#3): the shards display the atlas
-			// texel as Luminosity*255 (white) — BaseCol is ignored for a
-			// textured material in the deferred kernel — so the only way to
-			// tint them is in the baked pixels here. Dim the reflection a
-			// touch and add a cool-silver veil, matching the intact screen's
-			// glass cast. Scaled by --greets-shard-silver (0 = pure mirror).
-			// Re-baked every frame, so the tuning console drives it live.
-			{
-				const float sv = fds::FeatureFlags::greets_shard_silver();
-				if (sv > 0.001f) {
-					const uint32_t dimQ = uint32_t((1.0f - 0.25f * sv) * 256.0f);
-					const int veilB = int(120.0f * sv);   // cooler: more blue
-					const int veilG = int(104.0f * sv);
-					const int veilR = int(88.0f  * sv);
-					uint32_t* px = (uint32_t*)reflSurf_->Data;
-					for (int i = 0; i < texRes_ * texRes_; ++i) {
-						const uint32_t c = px[i];
-						int b = int(((c        & 0xFF) * dimQ) >> 8) + veilB;
-						int g = int((((c >> 8)  & 0xFF) * dimQ) >> 8) + veilG;
-						int r = int((((c >> 16) & 0xFF) * dimQ) >> 8) + veilR;
-						if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
-						px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
-					}
-				}
-			}
+			// Silver half-silvered glaze (#3) — desaturate toward cool silver.
+			ApplyShardSilverGlaze((uint32_t*)reflSurf_->Data, texRes_ * texRes_,
+			                      fds::FeatureFlags::greets_shard_silver());
 
 			// Composite the shard's fixed text fragment over its reflection,
 			// half-silvered: out = text + reflection*gain (text rides on top).
@@ -988,27 +996,9 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 		}
 	}
 
-	// Silver half-silvered glaze (#3) — see the serial path for why this
-	// must tint the baked pixels (textured atlas → lit as white, BaseCol
-	// ignored). Dim + cool-silver veil, scaled by --greets-shard-silver.
-	{
-		const float sv = fds::FeatureFlags::greets_shard_silver();
-		if (sv > 0.001f) {
-			const uint32_t dimQ = uint32_t((1.0f - 0.25f * sv) * 256.0f);
-			const int veilB = int(120.0f * sv);   // cooler: more blue
-			const int veilG = int(104.0f * sv);
-			const int veilR = int(88.0f  * sv);
-			uint32_t* px = (uint32_t*)w.surf.Data;
-			for (int i = 0; i < texRes_ * texRes_; ++i) {
-				const uint32_t c = px[i];
-				int b = int(((c        & 0xFF) * dimQ) >> 8) + veilB;
-				int g = int((((c >> 8)  & 0xFF) * dimQ) >> 8) + veilG;
-				int r = int((((c >> 16) & 0xFF) * dimQ) >> 8) + veilR;
-				if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
-				px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
-			}
-		}
-	}
+	// Silver half-silvered glaze (#3) — desaturate toward cool silver.
+	ApplyShardSilverGlaze((uint32_t*)w.surf.Data, texRes_ * texRes_,
+	                      fds::FeatureFlags::greets_shard_silver());
 
 	// Half-silvered text composite (text + reflection*gain), same affine the
 	// serial path uses (world plane-coords → fixed per-corner text UVs).
