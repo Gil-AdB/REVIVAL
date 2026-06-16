@@ -54,6 +54,8 @@ void VolProf_Tick();
 
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
+// HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); }
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -456,6 +458,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			Render_DeferredSkybox();
 		}
 
+		// HDR (prototype): size the radiance buffer before the fog composite
+		// writes it (in HDR mode it accumulates unclamped lit+fog there instead
+		// of VPage); the tonemap below maps it back. Gated on --hdr.
+		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
+
 		// Full-screen distance fog over deferred-lit opaque pixels. Runs
 		// BEFORE the transparent peel AND before the cone/halo volumetric
 		// scatter, so god-ray shafts add on top of the fogged surfaces
@@ -480,6 +487,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			} else
 				Render_DeferredFogPass();
 		}
+
+		// HDR (prototype): tonemap the radiance buffer (unclamped lit+fog) down
+		// to VPage, so the transparent peel / cones / overlays below composite
+		// over the tonemapped result instead of being erased. Gated on --hdr.
+		if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,

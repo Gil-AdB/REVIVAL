@@ -25,17 +25,19 @@ void Render_TonemapToVPage() {
     if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage) return;
 
     const float exposure = FeatureFlags::hdr_exposure();
-    const float W        = FeatureFlags::hdr_white();      // white point (≈1 = display white)
-    const float invW2    = (W > 0.0f) ? 1.0f / (W * W) : 0.0f;
+    const float knee     = std::clamp(FeatureFlags::hdr_white(), 0.05f, 0.95f); // identity below
+    const float invHead  = 1.0f / (1.0f - knee);
     const int   stride   = rt.bytesPerScanline / 4;        // VPage row stride in uint32
 
-    // Extended Reinhard per channel, in the engine's 0..255 radiance scale.
-    // NOTE: the buffer is gamma-space radiance for now (linear is Phase 3), so
-    // this is a highlight roll-off, not a linear→sRGB tonemap. Single-threaded;
-    // tile it (Render()'s job model) once the look is validated.
+    // Soft-knee highlight roll-off per channel, in the engine's 0..255 radiance
+    // scale: identity below `knee`, smoothly asymptoting to white above. This is
+    // glowMax's shape (which we disabled in HDR mode) applied ONCE on the final
+    // composited radiance instead of per fog slice. NOTE: gamma-space radiance
+    // for now (linear is Phase 3), so it's a roll-off, not a linear→sRGB map.
+    // Single-threaded; tile it (Render()'s job model) once the look is validated.
     auto tm = [&](float c) -> uint32_t {
         c *= exposure * (1.0f / 255.0f);
-        c  = c * (1.0f + c * invW2) / (1.0f + c);
+        if (c > knee) { const float e = c - knee; c = knee + e / (1.0f + e * invHead); }
         int v = int(c * 255.0f + 0.5f);
         return uint32_t(v < 0 ? 0 : (v > 255 ? 255 : v));
     };

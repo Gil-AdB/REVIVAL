@@ -34,6 +34,7 @@
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/DeferredCommon.h"
+#include "RENDER/Hdr.h"
 #include "Threads.h"
 
 // FRUSTRUM.CPP — file-scope; forward declare for libm-pow fallback.
@@ -115,6 +116,7 @@ struct FastFogParams {
 	float worleyInvT;      // 1/(1-thresh), precomputed remap gain
 	float blobOverlap;     // >0: additive metaball field, blob radius in cell units
 	float glowMax;         // >0: soft-knee cap on per-slice in-scatter radiance
+	bool  hdr;             // HDR: glowMax forced 0 (raw radiance); composite -> g_hdrBuf
 	int   glowGridDiv;     // froxel glow on a /div coarse XY grid (1 = per-column)
 	int   taps;            // density samples per froxel per frame (1 or 2)
 	float invRf;   // distance-falloff rate: density *= exp(-z·invRf)
@@ -1796,6 +1798,15 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				Tpix *= 1.0f - reflAmt2;
 			}
 			const dword pix = out[i];
+			if (P.hdr) {
+				// HDR: unclamped lit·T + in-scatter → radiance buffer (no dither/
+				// clamp; the tonemap rolls off later). g_hdrBuf is B,G,R,(pad)
+				// per pixel, contiguous (same i as VPage).
+				float* h = fds::g_hdrBuf.data() + i*4;
+				h[2] = float((pix>>16)&0xFFu)*Tpix + aR;
+				h[1] = float((pix>> 8)&0xFFu)*Tpix + aG;
+				h[0] = float( pix     &0xFFu)*Tpix + aB;
+			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
 			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG + frDither(sd^0x68E31DA4u, da));
@@ -1803,6 +1814,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
 			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+			}
 		}
 	}
 }
@@ -1849,7 +1861,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.jitter = fds::FeatureFlags::fast_fog_blob_jitter();
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
-	P.glowMax      = fds::FeatureFlags::fast_fog_glow_max();
+	P.hdr          = fds::FeatureFlags::hdr();
+	P.glowMax      = P.hdr ? 0.0f : fds::FeatureFlags::fast_fog_glow_max();  // HDR: no soft-knee; the tonemap rolls off
 	P.glowGridDiv  = std::max(1, fds::FeatureFlags::fast_fog_glow_grid_div());
 	P.taps         = std::min(2, std::max(1, fds::FeatureFlags::fast_fog_froxel_taps()));
 	if (P.blobOverlap > 0.0f) {
