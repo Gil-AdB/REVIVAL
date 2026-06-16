@@ -150,10 +150,12 @@ static Omni* AppendFountainOmni(Scene* Sc, const Vector& pos,
 static DWord Blaze[64*128];
 
 
-static Vector Rsv_LSrc,Rsv_LTarg;
-static int32_t Rsv_LPow;
-static int32_t Rsv_LState = 0;
-static int32_t Rsv_LUntil = -1;   // strike TTL (Timer units); -1 = unarmed
+// Multiple bolts can be alive at once (parallel strikes). Each slot holds one
+// bolt for kBoltLife Timer units; a strike burst fills several slots.
+struct LBolt { Vector src, targ; int32_t pow; int32_t until; };
+static const int     kMaxBolts = 5;
+static const int32_t kBoltLife = 16;          // Timer units a bolt stays lit
+static LBolt g_bolts[kMaxBolts] = {};
 const float basicSceneAmbient = 64.0;
 
 //static Vector *Stars;
@@ -165,6 +167,16 @@ static Image PhotonPlasma;
 static dword g_numPcls;
 
 static Material* g_LnMat;
+
+// Transient strike-flash light. A non-stationary Omni placed on the bolt for
+// the flash frames, fed into the deferred light list before the fog pass — so
+// the froxel in-scatter (and forward Lighting on geometry) lights up around
+// the strike. Intensity rides the existing Ambient_Factor decay; position is
+// set per strike. Idle (Omni_Active cleared) between strikes.
+static Omni*  g_BoltFlashOmni = nullptr;
+static Vector g_BoltFlashPos;
+static float  g_BoltFlashInt = 0.0f;        // own envelope (faster than ambient)
+// Peak/range/decay are CLI- + script-tunable: --bolt_flash_peak/_range/_decay.
 
 void Particle_Rast(Vertex *A,Vertex *B,Vertex *C)
 {
@@ -808,6 +820,10 @@ void Generate_Photon_Plasma()
 		}
 }
 
+namespace { void ensureBoltTextures(); }   // defined below; baked at load (see end of init)
+
+extern TriMesh VortexTri;   // defined below; filler swapped to alpha-test post-Preprocess
+
 void Initialize_Fountain()
 {
 //	Stars = new Vector [200];
@@ -862,6 +878,18 @@ void Initialize_Fountain()
 	Initialize_Particles(FntSc);
 	Preprocess_Scene(FntSc, "FOUNTAIN");
 
+	// The portal/vortex is an additive sky glow on a square quad whose texture
+	// is transparent (black) outside the swirl. Assign_Fillers gave it the plain
+	// additive filler, which stamps Z across the whole quad — and that truncates
+	// the volumetric fog integral behind the transparent texels, leaving a dark
+	// square framing the disc. Swap in the alpha-testing additive filler: it
+	// discards texels whose baked alpha is 0 (the circle-clipped corners — see
+	// Vortex_Distort) with no colour and no Z, so the fog integrates through the
+	// corners, while the opaque swirl stamps Z and occludes the ship.
+	for (int32_t fi = 0; fi < VortexTri.FIndex; ++fi)
+		VortexTri.Faces[fi].Filler =
+			TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL, true, true>;
+
 	struct TrackProfile { float r, g, b; };
 	const TrackProfile trackColors[3] = {
 		{0.20f, 0.55f, 1.00f},   // track 0 — blue
@@ -915,9 +943,24 @@ void Initialize_Fountain()
 
 	g_LnMat = Generate_Gradient(endpoints, 256, 0.04, false);
 
-	// Reset scrub tracking + any reserved strike (re-init safe).
+	// Bake the bolt textures now, at scene load, instead of lazily on the
+	// first strike — otherwise the first lightning visibly stalls the frame.
+	ensureBoltTextures();
+
+	// Transient strike-flash light, idle until Handle_Lightning pulses it.
+	// Must be non-stationary: the per-frame Lighting loop skips stationary
+	// omnis on static geometry (they're baked once by StaticLighting at ISize
+	// 0), so the strike would never light the scene.
+	g_BoltFlashOmni = AppendFountainOmni(FntSc, FntHead, 0.65f, 0.80f, 1.0f, 0.0f,
+	                                     fds::FeatureFlags::bolt_flash_range());
+	g_BoltFlashOmni->Flags &= ~(Omni_Active | Omni_Stationary);
+	// Transient: the froxel fog adds it per-frame (not into history) so the
+	// short flash doesn't linger / darken screen edges on a camera pan.
+	g_BoltFlashOmni->Flags |= Omni_FogTransient;
+
+	// Reset scrub tracking + any reserved strikes (re-init safe).
 	g_LnLastTimer = -1;
-	Rsv_LState = 0;
+	for (int i = 0; i < kMaxBolts; ++i) g_bolts[i].until = -1;
 
 	// Runtime stress knob: FDS_FOUNTAIN_PARTICLE_OMNI_PCT (float in [0..100],
 	// default 0). Attaches a stationary Omni to that percentage of fountain
@@ -1203,7 +1246,14 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
-	*Ptr = 0xFFFFFF;
+	// Z-test the start pixel too (it used to write unconditionally). The core
+	// is drawn as many short segments, so one un-tested start dot per segment
+	// = a dotted line punching through opaque geometry.
+	{
+		const float zw0 = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+		const dword zc0 = 0xFF80 - (dword)Fist(g_zscale * zw0);
+		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) *Ptr = 0xFFFFFF;
+	}
 //	 memset(Ptr,255,depth<<2);
 
 	if (Dx > Dy) {
@@ -1341,7 +1391,14 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	End=Ptr+X2+YOffs[Y2];
 	Ptr+=X1+YOffs[Y1];
 
-	*Ptr = 0xFFFFFF;
+	// Z-test the start pixel too (it used to write unconditionally). The core
+	// is drawn as many short segments, so one un-tested start dot per segment
+	// = a dotted line punching through opaque geometry.
+	{
+		const float zw0 = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
+		const dword zc0 = 0xFF80 - (dword)Fist(g_zscale * zw0);
+		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) *Ptr = 0xFFFFFF;
+	}
 //	 memset(Ptr,255,depth<<2);
 
 	if (Dx > Dy) {
@@ -1646,12 +1703,14 @@ constexpr int32_t kRestrike   = 7;    // Timer units between fresh paths
 constexpr int     kBoltVar    = 6;    // baked texture variants
 Material*         g_boltTex[kBoltVar] = { nullptr };
 float             g_boltTexKink = -1.0f;
+float             g_boltWig[kBoltVar][129] = {{0}};  // per-variant centre wiggle
+int               g_boltWigN[kBoltVar] = {0};        // wiggle sample count
 
 // Bake one jagged-bolt texture. The bolt runs down V (texture height); its
 // horizontal centre wiggles via 1D midpoint displacement. Each texel = a
 // white-hot core (sharp) + a blue glow (soft) by distance to the centre,
 // faded at the two ends so the stretched quad doesn't hard-cut.
-Material* makeBoltTexture(uint32_t seed, float rough) {
+Material* makeBoltTexture(uint32_t seed, float rough, float* outWig, int* outN) {
 	constexpr int W = 512, H = 512;
 	LnRng rng{ seed ? seed : 1u };
 	float vals[129]; int n = 2;
@@ -1668,31 +1727,45 @@ Material* makeBoltTexture(uint32_t seed, float rough) {
 		amp *= 0.5f;
 	}
 	Image Img; Img.x = W; Img.y = H; Img.Data = new DWord[W*H];
-	const float coreR = H * 0.010f;   // core half-width scales with resolution
-	// bolt runs along X (the texture axis mapA's V/length samples); the
-	// jagged centre cy(x) wiggles in Y, glow profile in Y. End-fade in X.
 	const float glowR2 = H * 0.10f;
+	// Centre as a polyline in texel space. core/glow use the 2D DISTANCE to
+	// this polyline — not the per-column |y-cy(x)|, which made every column an
+	// independent vertical glow streak that banded into 'ladder rungs' wherever
+	// the centre wiggled. A true distance field is a smooth tube. Full segment
+	// scan (a windowed search drops the true-nearest segment as it shifts per
+	// column = the banding); cheap at 512^2, baked once / on kink change.
+	for (int i = 0; i < n; ++i) outWig[i] = vals[i];   // hand the wiggle to the core-line draw
+	*outN = n;
+	float px[129], py[129];
+	for (int k = 0; k < n; ++k) { px[k] = (float)k/(n-1)*(W-1); py[k] = vals[k]*H; }
+	auto distSeg2 = [](float Px,float Py,float ax,float ay,float bx,float by)->float{
+		const float vx=bx-ax, vy=by-ay, wx=Px-ax, wy=Py-ay;
+		const float vv=vx*vx+vy*vy;
+		float tt = vv > 1e-6f ? (wx*vx+wy*vy)/vv : 0.0f;
+		tt = tt<0.0f?0.0f:(tt>1.0f?1.0f:tt);
+		const float dx=Px-(ax+vx*tt), dy=Py-(ay+vy*tt);
+		return dx*dx+dy*dy;
+	};
 	for (int x = 0; x < W; ++x) {
-		const float t = (float)x / (W-1) * (n-1);
-		const int   i = (int)t; const float f = t - i;
-		const int   j = i+1 < n ? i+1 : i;
-		const float cy = (vals[i] + (vals[j]-vals[i])*f) * H;
-		// No length-end fade: the bolt must REACH its endpoints (spire tip
-		// / source). The earlier fade left a visible gap there. Only the
-		// very first/last texel column is blacked out, as a 1-texel guard
-		// border so bilinear filtering can't bleed the bolt past the edge.
+		// 1-texel guard border so bilinear can't bleed the bolt past the edge;
+		// no length-end fade (the bolt must reach its endpoints).
 		const float ef = (x == 0 || x == W-1) ? 0.0f : 1.0f;
 		for (int y = 0; y < H; ++y) {
-			const float d = fabsf(y - cy);
-			const float core = d < coreR ? 1.0f - d/coreR : 0.0f;
-			// Glow with its exp tail clipped to ZERO before the texel edge,
-			// else the ~4% tail fills the whole quad as a faint blue
-			// rectangle (the CG "panel" tell). (g-0.06)/0.94 -> 0 at d~29px.
+			float best = 1e18f;
+			for (int k = 0; k < n-1; ++k) {
+				const float dd = distSeg2((float)x,(float)y, px[k],py[k], px[k+1],py[k+1]);
+				if (dd < best) best = dd;
+			}
+			const float d = sqrtf(best);
+			// Glow ONLY — the sharp white core now draws as a crisp geometric
+			// AA line (Lightning_Line) on top, so it can't staircase the way a
+			// magnified nearest-sampled texture core did. Tail clipped to ZERO
+			// before the edge so it doesn't fill the quad as a blue rectangle.
 			float glow = expf(-d / glowR2) - 0.06f;
 			glow = glow > 0.0f ? (glow / 0.94f) * 0.9f : 0.0f;
-			int Ri = (int)((core + glow*0.20f) * 255.0f * ef);
-			int Gi = (int)((core + glow*0.55f) * 255.0f * ef);
-			int Bi = (int)((core + glow*1.00f) * 255.0f * ef);
+			int Ri = (int)((glow*0.20f) * 255.0f * ef);
+			int Gi = (int)((glow*0.55f) * 255.0f * ef);
+			int Bi = (int)((glow*1.00f) * 255.0f * ef);
 			if (Ri>255)Ri=255; if (Gi>255)Gi=255; if (Bi>255)Bi=255;
 			Img.Data[x + y*W] = (DWord)Bi | ((DWord)Gi<<8) | ((DWord)Ri<<16) | (255u<<24);
 		}
@@ -1717,7 +1790,7 @@ void ensureBoltTextures() {
 		if (g_boltTex[i]) {        // free the previous set on a roughness change
 			if (g_boltTex[i]->Txtr) { delete[] g_boltTex[i]->Txtr->Data; delete g_boltTex[i]->Txtr; }
 		}
-		g_boltTex[i] = makeBoltTexture(0xB017u + i*2654435761u, k);
+		g_boltTex[i] = makeBoltTexture(0xB017u + i*2654435761u, k, g_boltWig[i], &g_boltWigN[i]);
 	}
 	g_boltTexKink = k;
 }
@@ -1728,11 +1801,60 @@ float boltFlicker() {
 	return 0.70f + 0.30f * ((h & 0xFFFF) * (1.0f/65536.0f));
 }
 
+// Crisp geometric AA core: a bundle of parallel Lightning_Lines through the
+// wiggle (screen space already computed by the caller). Resolution-independent
+// (no staircase); bundle width scales with YRes*bolt_width so it's not a 1px
+// thread at 1080p. Each segment is Liang-Barsky-clipped to the drawable rect
+// first — Lightning_Line clamps X/Y independently, which would turn an
+// off-screen endpoint into a bogus border line. Shared by both glow paths.
+void drawBoltCore(float ax, float ay, float bx, float by, float nx, float ny,
+                  float hwA, float hwB, float rzA, float rzB,
+                  const float* wig, int wigN) {
+	if (!wig || wigN < 2) return;
+	int thick = (int)(YRes / 270.0f * fds::FeatureFlags::bolt_width() + 0.5f);
+	if (thick < 1) thick = 1; if (thick > 8) thick = 8;
+	const float cxmin=2.0f, cymin=1.0f, cxmax=(float)XRes-4.0f, cymax=(float)YRes-2.0f;
+	auto clipSeg = [&](float&x0,float&y0,float&x1,float&y1)->bool{
+		const float dx=x1-x0, dy=y1-y0; float t0=0.0f, t1=1.0f;
+		const float p[4]={-dx,dx,-dy,dy};
+		const float q[4]={x0-cxmin,cxmax-x0,y0-cymin,cymax-y0};
+		for(int i=0;i<4;i++){
+			if(p[i]==0.0f){ if(q[i]<0.0f) return false; }
+			else { const float r=q[i]/p[i];
+				if(p[i]<0.0f){ if(r>t1) return false; if(r>t0) t0=r; }
+				else         { if(r<t0) return false; if(r<t1) t1=r; } }
+		}
+		const float bx0=x0, by0=y0;
+		x0=bx0+t0*dx; y0=by0+t0*dy; x1=bx0+t1*dx; y1=by0+t1*dy; return true;
+	};
+	Vertex cp{}, cc{}; bool have = false;
+	for (int k = 0; k < wigN; ++k) {
+		const float t   = (float)k / (wigN - 1);
+		const float hwk = hwA + (hwB - hwA) * t;
+		const float off = hwk * (2.0f * wig[k] - 1.0f);
+		cc.PX = ax + (bx - ax) * t + nx * off;
+		cc.PY = ay + (by - ay) * t + ny * off;
+		cc.RZ = rzA + (rzB - rzA) * t;
+		cc.LR = 1.0f;
+		if (have) {
+			for (int o = 0; o < thick; ++o) {
+				const float od = (float)o - (thick - 1) * 0.5f;
+				Vertex a2 = cp, b2 = cc;
+				a2.PX += nx * od; a2.PY += ny * od;
+				b2.PX += nx * od; b2.PY += ny * od;
+				if (clipSeg(a2.PX, a2.PY, b2.PX, b2.PY))
+					Lightning_Line(&a2, &b2);
+			}
+		}
+		cp = cc; have = true;
+	}
+}
+
 // Stretch ONE textured quad from world A to world B, billboarded (screen-
 // space perpendicular), additive. hwWorld = half-width in world units;
 // bright scales the additive output via vertex colour.
 void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
-                  float hwWorld, float bright) {
+                  float hwWorld, float bright, const float* wig, int wigN) {
 	if (--g_boltBudget < 0 || !tex) return;
 	Vertex TA, TB; Vector V;
 	Vector_Sub(const_cast<Vector*>(&A), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TA.TPos_AOS);
@@ -1765,12 +1887,104 @@ void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
 	for (int k = 0; k != 4; ++k) { q[k].LA = q[k].LR = q[k].LG = q[k].LB = col; viewportCalcFlags(vp, &q[k]); }
 	Face f[2];
 	f[0].A=&q[0]; f[0].B=&q[1]; f[0].C=&q[2];
-	f[0].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>); f[0].Txtr=tex;
+	f[0].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL_BILINEAR, false>); f[0].Txtr=tex;
 	f[1].A=&q[0]; f[1].B=&q[2]; f[1].C=&q[3];
-	f[1].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL>); f[1].Txtr=tex;
+	f[1].Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NORMAL_BILINEAR, false>); f[1].Txtr=tex;
 	const auto rt = fds::MainRenderTargetFromGlobals(); const auto& cam = fds::g_mainCamera;
 	_2DClipper::getInstance()->clip(vp, f[0], rt, cam);
 	_2DClipper::getInstance()->clip(vp, f[1], rt, cam);
+
+	drawBoltCore(ax, ay, bx, by, nx, ny, hwA, hwB, rzA, rzB, wig, wigN);
+}
+
+// Option A: fully geometric, NO texture. A 3-rail additive Gouraud ribbon
+// (edge=black, centre=bright, edge=black) gives a smooth glow tube via vertex-
+// colour interpolation — no bake, no texture sample (so no stall, no maze, no
+// magnification stairs), and properly clipped (no out-of-bounds). NOT the flat
+// translucent textured ribbon that looked like foil: this is additive + smooth
+// colour, overlaps just brighten. The crisp AA core line draws on top.
+void drawBoltRibbon(const Vector& A, const Vector& B,
+                    float hwWorld, float bright, const float* wig, int wigN) {
+	if (--g_boltBudget < 0 || !wig || wigN < 2) return;
+	Vertex TA, TB; Vector V;
+	Vector_Sub(const_cast<Vector*>(&A), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TA.TPos_AOS);
+	Vector_Sub(const_cast<Vector*>(&B), &View->ISource, &V); MatrixXVector(View->Mat, &V, &TB.TPos_AOS);
+	if (TA.TPos_AOS.z < C_NZP || TB.TPos_AOS.z < C_NZP) return;
+	const float rzA = 1.0f/TA.TPos_AOS.z, rzB = 1.0f/TB.TPos_AOS.z;
+	const float ax = (TA.TPos_AOS.z*CntrX + TA.TPos_AOS.x*FOVX)*rzA;
+	const float ay = (TA.TPos_AOS.z*CntrY - TA.TPos_AOS.y*FOVY)*rzA;
+	const float bx = (TB.TPos_AOS.z*CntrX + TB.TPos_AOS.x*FOVX)*rzB;
+	const float by = (TB.TPos_AOS.z*CntrY - TB.TPos_AOS.y*FOVY)*rzB;
+	float dx = bx-ax, dy = by-ay; const float l = sqrtf(dx*dx+dy*dy);
+	if (l < 1.0f) return; dx/=l; dy/=l;
+	const float nx = -dy, ny = dx;
+	float hwA = hwWorld * rzA * FOVX, hwB = hwWorld * rzB * FOVX;
+	if (hwA < 1.5f) hwA = 1.5f; if (hwA > 400.0f) hwA = 400.0f;
+	if (hwB < 1.5f) hwB = 1.5f; if (hwB > 400.0f) hwB = 400.0f;
+	// Centre glow colour (additive). Cool blue; edges = 0. NOTE LR/LG/LB map to
+	// screen B/G/R (engine stores BGRA), so LR carries the blue. Scaled by bright.
+	float cr = bright * 255.0f, cg = bright * 150.0f, cb = bright * 55.0f;
+	if (cr > 255.0f) cr = 255.0f; if (cg > 255.0f) cg = 255.0f; if (cb > 255.0f) cb = 255.0f;
+
+	Viewport vp; viewportInit(vp, FntSc);
+	const auto rt = fds::MainRenderTargetFromGlobals(); const auto& cam = fds::g_mainCamera;
+	// N-rail additive Gouraud ribbon. A peaked brightness profile (vs a flat
+	// 3-rail tent, which reads as a uniform beam) gives a hot core fading to a
+	// soft halo — like the texture's exp glow. Outer rails at <hw keep the body
+	// tight. UZ/VZ unused (NONE mode); vertex colour IS the additive output.
+	constexpr int NR = 5;
+	const float rOff[NR] = { -0.70f, -0.28f, 0.0f, 0.28f, 0.70f };  // × hw
+	const float rBri[NR] = {  0.0f,   0.40f, 1.0f, 0.40f, 0.0f  };  // × centre
+	Vertex prev[NR]{}, cur[NR]{};
+	bool have = false;
+	auto setV = [&](Vertex& v, float px, float py, float rz, float w){
+		v.PX = px; v.PY = py; v.RZ = rz; v.UZ = 0; v.VZ = 0;
+		v.LR = cr*w; v.LG = cg*w; v.LB = cb*w; v.LA = cb*w;
+		viewportCalcFlags(vp, &v);
+	};
+	auto emit = [&](Vertex& a, Vertex& b2, Vertex& c){
+		// Skip near-degenerate triangles: the rasterizer's colour gradient
+		// divides by signed area, so a ~0-area sliver blows the Gouraud up into
+		// garbage-coloured dashes. (Edge-on branches / tiny segments hit this.)
+		// Partial / off-screen triangles are CLIPPED normally — the NONE-mode
+		// colour clamp keeps the out-of-triangle fringe black, so the halo can
+		// reach the screen edges and around forks without garbage.
+		const float area = (b2.PX-a.PX)*(c.PY-a.PY) - (b2.PY-a.PY)*(c.PX-a.PX);
+		if (area > -1.0f && area < 1.0f) return;
+		Face f; f.A=&a; f.B=&b2; f.C=&c;
+		f.Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NONE, false>);
+		f.Txtr=nullptr;
+		_2DClipper::getInstance()->clip(vp, f, rt, cam);
+	};
+	// Decimate the glow path to ~40 segments: the soft glow doesn't need the
+	// full 128-pt jaggedness (the crisp core line does, and draws it), and long
+	// segments avoid the thin near-degenerate triangles. Big perf win too.
+	const int step = (wigN > 48) ? (wigN - 1) / 40 : 1;
+	for (int k = 0; ; k += step) {
+		const bool last = (k >= wigN - 1);
+		const int  kk   = last ? wigN - 1 : k;
+		const float t   = (float)kk / (wigN - 1);
+		const float rz  = rzA + (rzB - rzA) * t;
+		const float hwk = hwA + (hwB - hwA) * t;
+		const float off = hwk * (2.0f * wig[kk] - 1.0f);   // wiggle centre
+		const float mx  = ax + (bx - ax) * t + nx * off;
+		const float my  = ay + (by - ay) * t + ny * off;
+		for (int r = 0; r < NR; ++r) {
+			const float ro = rOff[r] * hwk;
+			setV(cur[r], mx + nx*ro, my + ny*ro, rz, rBri[r]);
+		}
+		if (have) {
+			for (int r = 0; r < NR-1; ++r) {
+				emit(prev[r], prev[r+1], cur[r+1]);
+				emit(prev[r], cur[r+1], cur[r]);
+			}
+		}
+		for (int r = 0; r < NR; ++r) prev[r] = cur[r];
+		have = true;
+		if (last) break;
+	}
+
+	drawBoltCore(ax, ay, bx, by, nx, ny, hwA, hwB, rzA, rzB, wig, wigN);
 }
 } // namespace
 
@@ -1789,7 +2003,9 @@ static void RenderStrike(const Vector& src, const Vector& targ,
 	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
 	const float hw  = wf * 0.05f * len;     // half-width tracks bolt length
 
-	drawBoltQuad(src, targ, g_boltTex[bucket % kBoltVar], hw, bright);
+	const int mvi=bucket%kBoltVar;
+	if (fds::FeatureFlags::bolt_geom()) drawBoltRibbon(src, targ, hw, bright, g_boltWig[mvi], g_boltWigN[mvi]);
+	else                                drawBoltQuad(src, targ, g_boltTex[mvi], hw, bright, g_boltWig[mvi], g_boltWigN[mvi]);
 
 	// Branches must VEER OFF at an angle — sending them along the main
 	// direction (+ a little jitter) just drew parallel verticals next to
@@ -1811,7 +2027,9 @@ static void RenderStrike(const Vector& src, const Vector& targ,
 		const float bi = bl > 1e-3f ? 1.0f/bl : 0.0f;
 		const float blen = (0.22f + 0.22f*rng.f01()) * len;
 		Vector end = { base.x + bdir.x*bi*blen, base.y + bdir.y*bi*blen, base.z + bdir.z*bi*blen };
-		drawBoltQuad(base, end, g_boltTex[(bucket + b + 1) % kBoltVar], hw*0.55f, bright*0.75f);
+		const int bvi=(bucket+b+1)%kBoltVar;
+		if (fds::FeatureFlags::bolt_geom()) drawBoltRibbon(base, end, hw*0.55f, bright*0.75f, g_boltWig[bvi], g_boltWigN[bvi]);
+		else                                drawBoltQuad(base, end, g_boltTex[bvi], hw*0.55f, bright*0.75f, g_boltWig[bvi], g_boltWigN[bvi]);
 	}
 }
 
@@ -1830,18 +2048,39 @@ void Spark(Vector *Src,Vector *Targ, Material* /*LnMat*/)
 	Vector d = { Targ->x-Src->x, Targ->y-Src->y, Targ->z-Src->z };
 	const float len = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
 	const float hw  = fds::FeatureFlags::bolt_width() * 0.05f * len;
-	drawBoltQuad(*Src, *Targ, g_boltTex[v], hw, boltFlicker() * fds::FeatureFlags::bolt_seg());
+	const float sbr = boltFlicker() * fds::FeatureFlags::bolt_seg();
+	if (fds::FeatureFlags::bolt_geom()) drawBoltRibbon(*Src, *Targ, hw, sbr, g_boltWig[v], g_boltWigN[v]);
+	else                                drawBoltQuad(*Src, *Targ, g_boltTex[v], hw, sbr, g_boltWig[v], g_boltWigN[v]);
 	Generate_Lightning_Particles(Targ, 10);
 }
 
 
 void Reserve_Lightning_Bolt(Vector *Src,Vector *Targ,int32_t Pow)
 {
-	Vector_Copy(&Rsv_LSrc,Src);
-	Vector_Copy(&Rsv_LTarg,Targ);
-	Rsv_LPow = Pow;
-	Rsv_LState = 1;
+	// Drop into a free slot (until <= Timer), else evict the oldest — so a
+	// burst can light several parallel bolts at once.
+	int slot = 0; int32_t oldest = g_bolts[0].until;
+	for (int i = 0; i < kMaxBolts; ++i) {
+		if (g_bolts[i].until <= Timer) { slot = i; break; }
+		if (g_bolts[i].until < oldest) { oldest = g_bolts[i].until; slot = i; }
+	}
+	g_bolts[slot].src   = *Src;
+	g_bolts[slot].targ  = *Targ;
+	g_bolts[slot].pow   = Pow;
+	g_bolts[slot].until = Timer + kBoltLife;
 }
+
+// Draw every live bolt (Timer < until). Shared by the per-frame tick path and
+// the snapshot harness (the override camera re-renders the scene but not the
+// bolts, which draw at the tail of tick()).
+void DrawActiveBolts()
+{
+	g_boltBudget = 1600 * kMaxBolts;   // shared across all live bolts this frame
+	for (int i = 0; i < kMaxBolts; ++i)
+		if (g_bolts[i].until > Timer)
+			Lightning_Bolt(&g_bolts[i].src, &g_bolts[i].targ, g_bolts[i].pow, g_LnMat);
+}
+void Snapshot_DrawReservedBolt() { DrawActiveBolts(); }
 
 
 void Handle_Lightning()
@@ -1851,49 +2090,72 @@ void Handle_Lightning()
 	if (Ambient_Factor>basicSceneAmbient)
 	{
 		Ambient_Factor -= basicSceneAmbient;
-		Ambient_Factor *= exp(-dTime*0.02);
+		Ambient_Factor *= exp(-dTime*0.04);   // faster global flash decay
 		Ambient_Factor += basicSceneAmbient;
 	}
-	// Scrub-aware strike triggers (replaces the one-way LightningFlag
-	// state machine, which never re-armed: F1/F2 rewind and pause made
-	// strikes undebuggable). A strike fires on the UPWARD crossing of its
-	// time; rewinding below a time re-arms it. The spire-ring finale is a
-	// pure Timer window, so it scrubs naturally in both directions.
-	static const int32_t strikeT[6] = {
-		FntLightningTime1, FntLightningTime2, FntLightningTime3,
-		FntLightningTime4, FntLightningTime5, FntLightningTime6,
+	// Flash light envelope — decays faster than the ambient so the strike pop
+	// is short/snappy (--bolt_flash_decay, default 0.05 > the ambient's 0.04).
+	if (g_BoltFlashInt > 0.0f) g_BoltFlashInt *= exp(-dTime*fds::FeatureFlags::bolt_flash_decay());
+	// Scrub-aware PERIODIC strike triggers. A strike's time is a pure function
+	// of its index i (base + i*interval + bounded per-index jitter), so the
+	// whole schedule is deterministic — fires on the upward crossing of each
+	// time, re-arms on rewind, scrubs naturally. interval is live-tunable
+	// (--bolt_interval); spire + power are hashed per index for variety.
+	const int32_t base     = FntLightningTime1;
+	int32_t       interval = (int32_t)fds::FeatureFlags::bolt_interval();
+	if (interval < 40) interval = 40;
+	const int32_t lastT = FNTPartTime - 100;          // stop before the finale/scene end
+	auto strikeTime = [&](int i)->int32_t {
+		uint32_t h = (uint32_t)i * 2654435761u; h ^= h >> 15;
+		const int32_t jit = (int32_t)(h % (uint32_t)interval) - interval/2;  // |jit| < interval/2 -> monotonic
+		return base + i*interval + jit;
 	};
-	static const int32_t strikeP[6] = { 45, 50, 55, 60, 65, 70 };   // 1998 escalation
 	const int32_t now = Timer;
 	if (g_LnLastTimer >= 0 && now > g_LnLastTimer) {
-		for (int i = 0; i < 6; ++i) {
-			if (g_LnLastTimer < strikeT[i] && now >= strikeT[i]) {
-				Upwards.x = Pylon[i].x+(RAND_15()-16384.0f)/16384.0f*120.0f;
-				Upwards.y = Pylon[i].y+600.0f;
-				Upwards.z = Pylon[i].z+(RAND_15()-16384.0f)/16384.0f*120.0f;
-				// Strike DOWN to the spire TIP (Pylon[i] is the tip omni's
-				// position), not the ground — the bolt should hit the
-				// structure, and ground-targeting also descended through
-				// the spire (z-occluded).
-				Downwards.x = Pylon[i].x;
-				Downwards.y = Pylon[i].y;
-				Downwards.z = Pylon[i].z;
-				Reserve_Lightning_Bolt(&Upwards,&Downwards,strikeP[i]);
-				Ambient_Factor = 255.0f;
+		int i0 = (g_LnLastTimer < base) ? 0 : (g_LnLastTimer - base)/interval;
+		for (int i = i0; ; ++i) {
+			const int32_t st = strikeTime(i);
+			if (st > now) break;
+			if (st <= g_LnLastTimer || st < base || st >= lastT) continue;
+			uint32_t h = (uint32_t)i*2654435761u; h^=h>>15; h*=0x85EBCA6Bu; h^=h>>13;
+			// Fire a BURST of 1..3 parallel bolts at different spires.
+			const int nBurst = 1 + (int)(h % 3);
+			for (int b = 0; b < nBurst; ++b) {
+				uint32_t hb = h ^ ((uint32_t)(b+1) * 2654435761u);
+				hb^=hb>>15; hb*=0x85EBCA6Bu; hb^=hb>>13;
+				const int   pi = hb % 6;                          // random spire
+				const int32_t pw = 45 + (int32_t)((hb >> 8) % 30);  // power 45..74
+				Upwards.x = Pylon[pi].x+(RAND_15()-16384.0f)/16384.0f*120.0f;
+				Upwards.y = Pylon[pi].y+600.0f;
+				Upwards.z = Pylon[pi].z+(RAND_15()-16384.0f)/16384.0f*120.0f;
+				// Strike DOWN to the spire TIP (Pylon is the tip omni position),
+				// not the ground (which descended through the spire, z-occluded).
+				Downwards = Pylon[pi];
+				Reserve_Lightning_Bolt(&Upwards,&Downwards,pw);
+				g_BoltFlashPos.x = (Upwards.x + Downwards.x) * 0.5f;
+				g_BoltFlashPos.y = (Upwards.y + Downwards.y) * 0.5f;
+				g_BoltFlashPos.z = (Upwards.z + Downwards.z) * 0.5f;
 			}
+			Ambient_Factor = 255.0f;
+			g_BoltFlashInt  = 1.0f;
 		}
 	}
 	g_LnLastTimer = now;
-	// A strike rewound out from under its TTL is cancelled (the TTL is
-	// Timer+20 at reserve time; anything 25+ below it means we scrubbed).
-	if (Rsv_LState && Rsv_LUntil > 0 && now < Rsv_LUntil - 25) {
-		Rsv_LState = 0;
-		Rsv_LUntil = -1;
-	}
-	// Spire-ring finale window.
+	// Cancel any bolt left in the future by a rewind (until = reserveT+life, so
+	// until-now > life means we scrubbed back before it was reserved).
+	for (int i = 0; i < kMaxBolts; ++i)
+		if (g_bolts[i].until - now > kBoltLife + 5) g_bolts[i].until = -1;
+	// Spire-ring finale window — also pulses the flash, but DIMMER than a main
+	// strike (the ring is a low crackle, not a full strike).
 	if (now > FntLightningTime6+100 && now < FntLightningTime6+400) {
-		Reserve_Lightning_Bolt(&Upwards,&Downwards,-1);
-		Ambient_Factor = basicSceneAmbient*2.0;
+		// Global light PULSATES with the ring crackle (was a steady 2x bump).
+		const float pulse = (boltFlicker() - 0.70f) * (1.0f/0.30f);   // 0..1, per-frame
+		Ambient_Factor = basicSceneAmbient * (1.2f + 1.3f*pulse);     // ~1.2x..2.5x
+		Vector c = {0,0,0};
+		for (int i = 0; i < 6; ++i) { c.x+=Pylon[i].x; c.y+=Pylon[i].y; c.z+=Pylon[i].z; }
+		c.x/=6.0f; c.y/=6.0f; c.z/=6.0f;
+		g_BoltFlashPos = c;
+		g_BoltFlashInt = 0.12f + 0.15f*pulse;   // low pulsing crackle — lights the scene much less than a main strike
 	}
 }
 
@@ -2125,11 +2387,18 @@ void Vortex_Distort()
 //	Grid_Texture_Mapper_XXX(Vortex_GP,&VorImg,TempBuf);
 	GridRendererT(Vortex_GP,&VorImg,TempBuf, 256, 256);
 
-	// change this to a radial smooth fade to black
+	// Circle-clip AND bake coverage into the alpha channel: texels outside the
+	// inscribed circle are fully transparent (0); everything inside is stamped
+	// opaque (alpha 0xFF). The portal's alpha-testing additive filler reads this
+	// alpha to skip Z on the transparent corners — so the volumetric fog isn't
+	// truncated behind them and no dark square frames the disc — while the swirl
+	// still stamps Z and occludes the ship.
 	for(Y=-128;Y<128;Y++)
 		for(X=-128;X<128;X++)
 			if (X*X+Y*Y>128*128)
 				TempBuf[128+128*256+X+(Y<<8)] = 0;
+			else
+				TempBuf[128+128*256+X+(Y<<8)] |= 0xFF000000;
 
 	// right now, there is no support for non-blocked textures,
 	// so we need to rearrange TempBuf by 4x4 blocks
@@ -2414,6 +2683,26 @@ struct FountainScene : SceneDriver {
 			}
 		}
 
+		// Drive the strike-flash omni from the Ambient_Factor decay (255 on a
+		// strike, eased back to basicSceneAmbient). After Animate so the spline
+		// doesn't overwrite IPos/ISize; before Lighting/Render so the deferred
+		// light list + froxel fog in-scatter pick it up — lightning lighting
+		// the scene and the fog volume.
+		if (g_BoltFlashOmni) {
+			const float fi = g_BoltFlashInt;   // own fast-decay envelope
+			if (fi > 0.02f) {
+				const float frange = fds::FeatureFlags::bolt_flash_range();
+				g_BoltFlashOmni->Flags  |= Omni_Active;
+				g_BoltFlashOmni->IPos    = g_BoltFlashPos;
+				g_BoltFlashOmni->ISize   = fds::FeatureFlags::bolt_flash_peak() * fi;
+				g_BoltFlashOmni->IRange  = frange;
+				g_BoltFlashOmni->rRange  = 1.0f / frange;
+			} else {
+				g_BoltFlashOmni->Flags &= ~Omni_Active;
+				g_BoltFlashOmni->ISize  = 0.0f;
+			}
+		}
+
 		prof.switchTo(PROF_XFRM);
 
 		Transform_Objects(FntSc, fds::g_mainCamera, fds::g_mainFaces);
@@ -2435,27 +2724,21 @@ struct FountainScene : SceneDriver {
 		// to show. No-op when --deferred-skybox is off.
 		prof.addExternalNs(PROF_SKY, DeferredSkybox_TakeFrameNs());
 
-		if (Rsv_LState) {
-			if (Rsv_LPow > -1) {
-				// Strike lasts ~200ms. RenderStrike regenerates the fractal
-				// path only when the restrike bucket (Timer/kRestrike)
-				// changes — so it holds steady, re-strikes ~3x across the
-				// window, and flickers in brightness in between.
-				if (Rsv_LUntil < 0) Rsv_LUntil = Timer + 20;
-				g_boltBudget = 1600;           // 2-pass main + branches
-				Lightning_Bolt(&Rsv_LSrc, &Rsv_LTarg, Rsv_LPow, g_LnMat);
-				if (Timer >= Rsv_LUntil) { Rsv_LState = 0; Rsv_LUntil = -1; }
-			} else {
-				// The 1998 finale (commented out even in the original):
-				// a ring of arcs crackling between consecutive spire
-				// TOPS, re-randomized every frame for the ~3s window
-				// (case 6 keeps re-reserving with Pow=-1).
-				g_boltBudget = 2400;
-				for (int pi = 0; pi < 6; ++pi)
-					Spark(Pylon + pi, Pylon + ((pi + 1) % 6), g_LnMat);
-				Rsv_LState = 0;
-				Rsv_LUntil = -1;
-			}
+		// Fold the transparent peel's depth into the main Z so the bolt (drawn
+		// next, additive) is occluded by translucent surfaces (the glass dome)
+		// too — not just opaque. No-op outside the deferred xpar path.
+		Deferred_FoldXparDepthIntoMainZ();
+
+		// All live (parallel) bolts. Each holds for kBoltLife Timer units;
+		// RenderStrike regenerates the fractal path only on restrike-bucket
+		// changes, so each holds steady + flickers across its window.
+		DrawActiveBolts();
+		// Spire-ring finale: a ring of arcs crackling between consecutive spire
+		// TOPS, re-randomized every frame for the ~3s window.
+		if (Timer > FntLightningTime6+100 && Timer < FntLightningTime6+400) {
+			g_boltBudget = 2400;
+			for (int pi = 0; pi < 6; ++pi)
+				Spark(Pylon + pi, Pylon + ((pi + 1) % 6), g_LnMat);
 		}
 		// Debug labels at each stream-head omni's screen position.
 		for (int i = 0; i < kNumFollowerOmnis; ++i) {

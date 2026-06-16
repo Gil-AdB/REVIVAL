@@ -114,3 +114,6 @@ private:
 // existing PROF_SKY hooks around RenderSkyCube show 0 ms in that mode
 // because RenderSkyCube becomes a no-op.
 std::int64_t DeferredSkybox_TakeFrameNs();
+// Fold the xpar-peel front depth into the main Z so a later additive overlay
+// (fountain bolt) is occluded by translucent surfaces too. No-op if no peel.
+void Deferred_FoldXparDepthIntoMainZ();

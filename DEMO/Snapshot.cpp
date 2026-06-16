@@ -304,6 +304,8 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 Radix_Sort(FList, SList, CAll);
                 Render();
             }
+            extern void Snapshot_DrawReservedBolt();
+            Snapshot_DrawReservedBolt();   // bolt draws after Render, like tick()
         }
 
         char colorPath[1024];
