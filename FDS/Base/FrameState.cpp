@@ -29,13 +29,19 @@ CameraContext   g_mainCamera;
 FaceListContext g_mainFaces;
 
 // Off-axis projection support for offscreen passes — see FrameState.h.
-bool g_offAxisFrustumCull = false;
+// thread_local: set + read on the same thread (mirror RTT / shard pass are
+// serial today; Slice 6 fans the shard workers across the pool, each setting
+// its own cone on its own thread). Byte-neutral for every existing path —
+// the main frame + shadow bake never set it, so all threads read the default.
+thread_local bool g_offAxisFrustumCull = false;
 
 // Per-vertex cone cull for the mirror-shard reflection pass — see FrameState.h.
-bool   g_reflVertCull  = false;
-Vector g_reflConeApex  = {0, 0, 0};
-Vector g_reflConeDir   = {0, 0, 1};
-float  g_reflConeTan2  = 2.0f;
+// thread_local for the same reason: each parallel shard worker (Slice 6) owns
+// its reflection cone; the main pass + shadows never touch these.
+thread_local bool   g_reflVertCull  = false;
+thread_local Vector g_reflConeApex  = {0, 0, 0};
+thread_local Vector g_reflConeDir   = {0, 0, 1};
+thread_local float  g_reflConeTan2  = 2.0f;
 
 // Legacy struct kept while phase 2 lands. Its fields are no longer the
 // canonical home for the per-frame state — they're transitional and
