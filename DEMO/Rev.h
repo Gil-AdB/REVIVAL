@@ -74,6 +74,15 @@ void Run_Fountain();
 
 void Initialize_Greets();
 void Run_Greets();
+// Block until the background lightmap-bake thread spawned by
+// Initialize_Greets has finished writing TriMesh::staticShadowLM. MUST
+// be called before the first tick of the greets scene: the bake reads
+// per-frame geometry + shadow-map state, so ticking (animate + shadow
+// bake + raster) while it runs is a data race that yields a garbage
+// lightmap (TSan, 2026-06-12). Run_Greets calls it; any other driver
+// of the greets scene (bench/snapshot harness) must too. No-op +
+// timing log; safe when no bake was ever spawned.
+void Greets_JoinBakeThread();
 // Quit-time cleanup: if the user exits before Run_Greets has joined the
 // background lightmap-bake thread, the std::thread destructor would call
 // std::terminate. Call this at every demo_exit path to join whichever

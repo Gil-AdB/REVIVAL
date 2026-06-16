@@ -108,7 +108,7 @@ private:
     };
 };
 
-// Drain + reset the deferred-skybox accumulator (DeferredLighting.cpp).
+// Drain + reset the deferred-skybox accumulator (DeferredVolumetric.cpp).
 // Returns elapsed ns since the previous drain. Scene drivers call this
 // once per frame to feed PROF_SKY when --deferred-skybox is on; the
 // existing PROF_SKY hooks around RenderSkyCube show 0 ms in that mode

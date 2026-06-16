@@ -30,6 +30,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
 #include "Base/Scene.h"
+#include "Base/RenderContext.h"
 #include "Base/Face.h"
 #include "Base/TriMesh.h"
 #include "Base/Material.h"
@@ -51,11 +52,24 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
-void RenderInner(float x1, float y1, float x2, float y2) {
+void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2) {
+	// Forward raster of ctx's face list into ctx's target — all per-pass
+	// state from ctx, no globals, so a worker can run this on its own
+	// surface/face-list concurrently (RenderContext migration; the parallel
+	// shard/shadow/RTT bakes are the consumers). renderFrame passes the
+	// primary context (= the old globals → byte-identical).
 	FrustumClipper clipper;
-	clipper.InitViewport(CurScene);
+	// Near/far from ctx.camera, NOT ctx.scene: the scene's NZP/FZP are
+	// shared mutable state, so concurrent offscreen workers (Slice 6 shard
+	// pass) can't each stamp a different mirror-plane near-Z into it. The
+	// CameraContext overload reads cam.nearZ/farZ + reciprocals, which are
+	// byte-identical to Sc->NZP/FZP for the main frame and the RTT path
+	// (SetCurrentScene stamps C_NZP=Sc->NZP and C_rNZP=1.0f/C_NZP, the same
+	// float expression viewportInit uses). The clip extents InitViewport
+	// would set are overwritten by SetClippingExtents below regardless.
+	clipper.InitViewport(ctx.camera);
 	clipper.SetClippingExtents(x1, y1, x2, y2);
-	auto rt  = fds::MainRenderTargetFromGlobals();
+	auto rt  = ctx.target;
 	// Forward dispatcher: the deferred lighting kernel won't read the
 	// G-buffer this frame, so we don't want TheOtherBarry stamping its
 	// mat32 sentinel into it. Also relevant during the cube-map bake:
@@ -65,10 +79,10 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	rt.gbuffer                = nullptr;
 	rt.gbufferTransparent     = nullptr;
 	rt.gbufferTransparentBack = nullptr;
-	const auto& cam = fds::g_mainCamera;
+	const auto& cam = ctx.camera;
 
-	int32_t I = CAll;
-	fds::FListEntry* FLS = FList;//+CAll-1;
+	int32_t I = ctx.faces.cAll;
+	fds::FListEntry* FLS = ctx.faces.fList;
 	Vertex* A, * B, * C;
 
 	Vertex* V[4];
@@ -89,6 +103,13 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 
 			auto flags = A->Flags & B->Flags & C->Flags;
 			if (flags & Vtx_Visible) continue;
+			// Untextured faces are unrenderable here — every forward filler
+			// (TheOtherBarry, the reflective env path) dereferences
+			// F->Txtr->Txtr. The deferred path (RenderInnerMekalele) already
+			// skips these; match it so a face deliberately blanked by
+			// nulling its Txtr (e.g. the shattered greets screen) doesn't
+			// crash the offscreen forward passes (RTT, env bake).
+			if (!F->Txtr || !F->Txtr->Txtr) continue;
 			RasterFunc filler;
 			if (F->Flags & Face_Reflective) {
 				// Clone env faces (the disco ball's mirror image):
@@ -99,13 +120,13 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 				// Same centroid-footprint gate as the clone-flare one
 				// in The_MMX_Scalar.
 				if (F->mirrorMaskTag != 0) {
-					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+					if (!rt.gbuffer || rt.gbuffer->mirrorMask.empty())
 						continue;
 					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
 					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
-					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					if (mx < 0) mx = 0; else if (mx > rt.xres - 1) mx = rt.xres - 1;
+					if (my < 0) my = 0; else if (my > rt.yres - 1) my = rt.yres - 1;
+					if (rt.gbuffer->mirrorMask[size_t(my) * size_t(rt.xres) + size_t(mx)]
 					    != F->mirrorMaskTag)
 						continue;
 				}
@@ -123,6 +144,64 @@ void RenderInner(float x1, float y1, float x2, float y2) {
 	// orchestrator's `for(i<N) tileDone.acquire()` loop. Replaces the
 	// prior lock+increment+notify pattern (see RENDER.CPP renderns).
 	renderns::tileDone.release();
+}
+
+// Single-threaded forward render of a region — no threadpool dispatch or
+// barrier. For tiny offscreen targets (the mirror-shard 64² reflections),
+// the per-Render() enqueue + semaphore-barrier overhead dwarfs the actual
+// raster (profiled: workers 97% idle, the dispatch is the cost). Renders
+// inline on the caller's thread, then drains the permit RenderInner
+// released so the shared tileDone semaphore stays net-zero for the next
+// threadpool Render(). Preconditions match Render(ForceForward): FList/CAll
+// populated, CurScene + surface globals (VPage/ZPage16/XRes) set.
+void RenderForwardRegionInline(const fds::RenderContext& ctx,
+                               float x1, float y1, float x2, float y2) {
+	RenderInner(ctx, x1, y1, x2, y2);
+	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
+}
+
+// Deferred G-buffer fill of ctx's face list into ctx.target's G-buffer —
+// single-threaded, inline, no tileDone traffic. The deferred sibling of
+// RenderForwardRegionInline: the deferred shard bake (MirrorShatter) and the
+// deferred mirror RTT (GreetsMirror) call this to fill their own G-buffer,
+// then run Render_DeferredLighting with a per-pass DeferredOverride to shade it.
+// Same face routing as RenderInnerMekalele (the main deferred opaque pass) so
+// an offscreen view of the full room renders correctly: opaque → Mekalele
+// (G-buffer); reflective → forward env filler straight to vpage (the deferred
+// kernel leaves those mat32-sentinel pixels alone); additive → forward filler;
+// transparent → skipped (no xpar pass offscreen). ctx.target.gbuffer MUST be
+// set (unlike the forward path, which nulls it).
+void MekaleleFillRegionInline(const fds::RenderContext& ctx,
+                              float x1, float y1, float x2, float y2) {
+	FrustumClipper clipper;
+	clipper.InitViewport(ctx.camera);
+	clipper.SetClippingExtents(x1, y1, x2, y2);
+	const auto rt  = ctx.target;     // G-buffer KEPT (deferred fill)
+	const auto& cam = ctx.camera;
+	int32_t I = ctx.faces.cAll;
+	fds::FListEntry* FLS = ctx.faces.fList;
+	while (I--) {
+		Face* F = (FLS++)->face;
+		Vertex* A = F->A; Vertex* B = F->B;
+		if (A == B) continue;
+		Vertex* C = F->C;
+		if ((A->Flags & B->Flags & C->Flags) & Vtx_Visible) continue;
+		if (!F->Txtr || !F->Txtr->Txtr) continue;
+		const dword txtrFlags = F->Txtr->Flags;
+		if (txtrFlags & Mat_Transparent) continue;   // no offscreen xpar pass
+		if (F->Flags & Face_Reflective) {
+			// Clone env faces gate on the mirror mask (which an offscreen
+			// G-buffer doesn't carry) — skip them; regular reflective faces
+			// (disco ball, windows) render the env map straight to vpage.
+			if (F->mirrorMaskTag != 0) continue;
+			clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE,
+			               barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
+		} else if (txtrFlags & Mat_Additive) {
+			clipper.Render(F, F->Filler, false, rt, cam);   // TheOtherBarry<ADDITIVE>
+		} else {
+			clipper.Render(F, Mekalele, false, rt, cam);
+		}
+	}
 }
 
 
@@ -200,13 +279,13 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 				// Same centroid-footprint gate as the clone-flare one
 				// in The_MMX_Scalar.
 				if (F->mirrorMaskTag != 0) {
-					if (!g_gbuffer || g_gbuffer->mirrorMask.empty())
+					if (!rt.gbuffer || rt.gbuffer->mirrorMask.empty())
 						continue;
 					int32_t mx = int32_t((F->A->PX + F->B->PX + F->C->PX) * (1.0f / 3.0f));
 					int32_t my = int32_t((F->A->PY + F->B->PY + F->C->PY) * (1.0f / 3.0f));
-					if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
-					if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
-					if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+					if (mx < 0) mx = 0; else if (mx > rt.xres - 1) mx = rt.xres - 1;
+					if (my < 0) my = 0; else if (my > rt.yres - 1) my = rt.yres - 1;
+					if (rt.gbuffer->mirrorMask[size_t(my) * size_t(rt.xres) + size_t(mx)]
 					    != F->mirrorMaskTag)
 						continue;
 				}

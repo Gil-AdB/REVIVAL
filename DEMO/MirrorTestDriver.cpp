@@ -2,6 +2,7 @@
 
 #include "FrameProfiler.h"
 #include "GreetsMirror.h"
+#include "MirrorShatter.h"
 #include "Rev.h"
 #include "SceneBuilder.h"
 #include "SceneTick.h"
@@ -9,7 +10,11 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
+#include <Base/Object.h>
+#include <Base/TriMesh.h>
+#include <cstring>
 #include <FILLERS/Mekalele.h>  // g_gbuffer for label pmid readback
+#include <RENDER/EnvBake.h>    // BakeEquirectPanorama (shard reflections)
 
 #include <cstdio>
 
@@ -22,7 +27,7 @@ namespace {
 // kernel has something to do at the surfaces. Kept separate from the
 // snapshot's MT_buildScene because the interactive one places the
 // camera at a starting pose and adds a working light.
-Scene *BuildInteractiveMirrorTestScene() {
+Scene *BuildInteractiveMirrorTestScene(fds::MirrorShatter &shatter) {
     using namespace fds::scene_builder;
     SceneBuilder b;
     b.SetNearFar(0.5f, 200.0f);
@@ -86,6 +91,21 @@ Scene *BuildInteractiveMirrorTestScene() {
         Vector(-3.0f, 6.0f, 5.0f), Vector( 3.0f, 6.0f, 5.0f),
     };
     b.AddQuad("mirror_panel", mirrorV, matMirror);
+    // Shatter shards for the back mirror — built HIDDEN now (so Finalize
+    // counts them in Polys/FList sizing); press B at runtime to break the
+    // mirror. Opaque silver with a strong specular so the pieces glint as
+    // they tumble. mirrorV is CCW with outward normal toward the room.
+    {
+        Texture *shardTex = b.AddSolidColorTexture(8, 8, 0xFFCAD0E0u);
+        Material *matShard = b.AddMaterial("shard_mat", shardTex,
+                                            {200, 205, 225, 255}, 0);
+        matShard->Diffuse    = 0.55f;
+        matShard->Specular   = 1.0f;
+        matShard->Glossiness = 48;
+        matShard->Luminosity = 0.04f;
+        const Vector shatterN(0.0f, 0.0f, -1.0f);
+        shatter.build(b.scene(), mirrorV, shatterN, matShard, 14, 10);
+    }
     // Orange frame around the back mirror. Four thin coplanar strips at
     // z=5 surrounding the mirror quad. Same CCW winding as the mirror
     // panel so the frame's outward normal matches (N=(0,0,-1) toward the
@@ -173,6 +193,7 @@ struct MirrorTestScene : SceneDriver {
     std::vector<fds::MirrorRttSlot> rttSlots;
     Scene *sc = nullptr;
     std::vector<fds::Mirror> mirrors;
+    fds::MirrorShatter shatter;
     FrameProfiler prof{"mirrortest"};
     char MSGStr[192] = {0};
     float TTrd_ = -1.0f;
@@ -204,7 +225,7 @@ struct MirrorTestScene : SceneDriver {
             if (MainSurf) Flip(MainSurf);
         }
 
-        sc = BuildInteractiveMirrorTestScene();
+        sc = BuildInteractiveMirrorTestScene(shatter);
         SetCurrentScene(sc);
         Calibrate_FreeCamera_ForScene(sc->FZP, sc->CameraHead);
 
@@ -275,8 +296,8 @@ struct MirrorTestScene : SceneDriver {
 
         std::fprintf(stderr,
             "[MIRRORTEST] interactive scene ready — starting in FREE-CAM. "
-            "WASD/QE to move, arrows to look, TAB to toggle scripted cam, "
-            "ESC to exit.\n");
+            "WASD/QE to move, arrows to look, Y to break mirror, "
+            "TAB to toggle scripted cam, ESC to exit.\n");
     }
 
     // Project a world point to screen, returns false if behind near
@@ -398,8 +419,107 @@ struct MirrorTestScene : SceneDriver {
             eye.x, eye.y, eye.z, path);
     }
 
+    // Bake the room into an equirectangular panorama from `center` and hand
+    // it to the shatter so the shards reflect it. Done at break time (not
+    // init) so the reflection captures the mirror's last live state — the
+    // right behaviour for a dynamic scene. Hides the mirror clone meshes
+    // for the bake so a reflection-of-a-reflection doesn't ghost in (shards
+    // are still hidden pre-trigger, so they self-exclude).
+    void bakeShardReflection(const Vector& center) {
+        std::vector<std::pair<TriMesh*, DWord>> hidden;
+        for (fds::Mirror &m : mirrors) {
+            if (!m.cloneMesh) continue;
+            hidden.push_back({m.cloneMesh, m.cloneMesh->Flags});
+            m.cloneMesh->Flags &= ~HTrack_Visible;
+        }
+        Texture *pano = fds::BakeEquirectPanorama(sc, center);
+        for (auto &h : hidden) h.first->Flags = h.second;
+        shatter.setReflection(pano);
+        std::fprintf(stderr, "[MIRRORTEST] baked shard reflection panorama %p\n",
+                     (void *)pano);
+    }
+
+    // Hide a named mesh object (the mirror panel surface) so once the
+    // shards clear, the spot it occupied is empty rather than showing the
+    // intact silver panel. Walks the scene's Object list by name.
+    void hidePanelByName(const char* name) {
+        for (Object* o = sc->ObjectHead; o; o = o->Next) {
+            if (o->Type == Obj_TriMesh && o->Name && std::strcmp(o->Name, name) == 0) {
+                TriMesh* T = (TriMesh*)o->Data;
+                if (T) T->Flags &= ~HTrack_Visible;
+            }
+        }
+    }
+
+    // Headless shatter animation: fixed camera, render one intact frame,
+    // break the back mirror, then step the shard physics and dump a PPM
+    // every few frames. FDS_SHATTER_DUMP=1 (FDS_SHATTER_OUT=dir).
+    void shatterDump() {
+        const char *outEnv = std::getenv("FDS_SHATTER_OUT");
+        char dir[512];
+        std::snprintf(dir, sizeof(dir), "%s", outEnv ? outEnv : "/tmp/shatter");
+        const Vector eye{ -2.6f, 3.4f, -3.6f };
+        const Vector lookAt{ 0.2f, 1.6f, 5.0f };
+        auto frame = [&](int idx, bool dump) {
+            FC.ISource = eye;
+            Vector lc = lookAt;
+            Kick_Camera(&FC.ISource, &lc, 0.0f, FC.Mat);
+            CalcPersp(&FC);
+            View = &FC;
+            std::memset(VPage, 0, PageSize);
+            std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+            Animate_Objects(sc, View);
+            shatter.update();
+            // Per-shard live reflection cameras (Slice 6): no-op until enabled
+            // below at break time. Exercised here so the deterministic headless
+            // dump validates the parallel fan-out (serial via FDS_SHARD_REFL_SERIAL).
+            shatter.renderReflectionCameras(sc);
+            fds::RenderSecondOrderMirrors(sc, mirrors, rttSlots);
+            Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
+            fds::UpdateAllMirrors(sc, mirrors);
+            fds::StampMirrorMasks(sc, mirrors);
+            Lighting(sc);
+            if (CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceDeferred); }
+            if (!dump) return;
+            char path[600];
+            std::snprintf(path, sizeof(path), "%s/shatter_%03d.ppm", dir, idx);
+            std::FILE *f = std::fopen(path, "wb");
+            if (!f) return;
+            const int xr = (int)XRes, yr = (int)YRes;
+            std::fprintf(f, "P6\n%d %d\n255\n", xr, yr);
+            std::vector<unsigned char> row(xr * 3);
+            for (int y = 0; y < yr; ++y) {
+                const dword *src = (const dword*)((const byte*)VPage + y * (int)VESA_BPSL);
+                for (int x = 0; x < xr; ++x) {
+                    dword px = src[x];
+                    row[x*3+0] = (px >> 16) & 0xFF;
+                    row[x*3+1] = (px >>  8) & 0xFF;
+                    row[x*3+2] = (px      ) & 0xFF;
+                }
+                std::fwrite(row.data(), 1, row.size(), f);
+            }
+            std::fclose(f);
+            std::fprintf(stderr, "[SHATTER] frame %d -> %s\n", idx, path);
+        };
+        // Intact reflecting mirror.
+        frame(0, true);
+        // Break it, then run the fall.
+        bakeShardReflection(Vector(0.0f, 3.0f, 5.0f));  // back-mirror centre
+        shatter.trigger(0.46f, 0.55f);
+        if (!mirrors.empty()) mirrors[0].broken = true;
+        hidePanelByName("mirror_panel");
+        // Live per-shard reflection cameras: each shard re-renders the room
+        // into its atlas cell every frame (supersedes the one-shot panorama).
+        shatter.enableReflectionCameras(sc, 64);
+        shatter.debugDump();
+        const int frames = 120, dumpEvery = 8;
+        for (int i = 1; i <= frames; ++i) frame(i, (i % dumpEvery) == 0);
+        shatter.debugDump();
+    }
+
     bool tick() override {
         if (Keyboard[ScESC] || Keyboard[ScBackSpace]) return false;
+        if (std::getenv("FDS_SHATTER_DUMP")) { shatterDump(); return false; }
         // Multi-view sanity dump: ignores keyboard, renders 6 preset poses,
         // exits. Pose set chosen so the mirror panel is in view from
         // distinct angles (front, side, high, low, close, far) — eyeball
@@ -460,6 +580,23 @@ struct MirrorTestScene : SceneDriver {
         }
         Animate_Objects(sc, View);
 
+        // Mirror shatter: B breaks the back mirror — shards fly off the
+        // impact point and tumble to the floor. The physics step runs
+        // AFTER Animate_Objects (which resets each shard to its rest pose
+        // from the single-key splines) and BEFORE Transform_Objects.
+        {
+            static bool sYPrev = false;
+            const bool yNow = Keyboard[ScY] != 0;
+            if (yNow && !sYPrev && shatter.built() && !shatter.active()) {
+                bakeShardReflection(Vector(0.0f, 3.0f, 5.0f));  // back-mirror centre
+                shatter.trigger(0.46f, 0.55f);
+                if (!mirrors.empty()) mirrors[0].broken = true;
+                hidePanelByName("mirror_panel");
+            }
+            sYPrev = yNow;
+            shatter.update();
+        }
+
         // Second-order RTT pass (no-op without --mirror-rtt). Before
         // the main transform — it clobbers per-vertex projections.
         fds::RenderSecondOrderMirrors(sc, mirrors, rttSlots);
@@ -493,7 +630,7 @@ struct MirrorTestScene : SceneDriver {
         // Cheap on-screen HUD: camera mode + pose + active mirror count.
         std::snprintf(MSGStr, sizeof(MSGStr),
                       "[%s]  Mirrors:%zu  Cam=(%.1f,%.1f,%.1f)  "
-                      "WASD/QE move, arrows look, TAB toggle, ESC exit",
+                      "WASD/QE move, arrows look, Y=break mirror, TAB toggle, ESC exit",
                       (View == &FC) ? "FREE" : "SCRIPTED",
                       mirrors.size(),
                       View->ISource.x, View->ISource.y, View->ISource.z);

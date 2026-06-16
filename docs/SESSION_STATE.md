@@ -1,103 +1,51 @@
-# Session state — feature/fog (written 2026-06-10, pre-compact)
+# SESSION STATE — DeferredLighting.cpp split: DONE (2026-06-12)
 
-**Read this first when resuming on feature/fog.** (The previous content —
-the refactor/frame-state-shadow checkpoint — is finished work; see git
-history of this file if ever needed.)
+The single-phase split of FDS/RENDER/DeferredLighting.cpp (9590 lines at
+merge 006d9f9) landed as six commits, 1dcfd4e..3cac793, all verbatim
+function moves:
 
-Branch `feature/fog`, all work committed and pushed through `8f17799`
-(froxel is now the DEFAULT fog renderer — plain --fast_fog takes the froxel
-path; --no-fast_fog_froxel = legacy screen-space for A/B. User report
-"SS way over saturated no matter the knobs" was NOT a regression — SS is
-bit-identical to pre-refactor; half the knobs are froxel-only and the SS
-glow issues are structural).
+| file | lines | contents |
+|---|---|---|
+| DeferredCommon.h | ~360 | ViewLightsSoA, TileLights, DeferredLightingCtx (+extern g_deferredCtx), DEFERRED_* consts, sphereOutsideCone/tileChunkSphere, rsqrt_nr_x8, VolProf/VolProfScope (+extern g_volProf), light-list decls, FastFog xpar-hook decls |
+| DeferredShadowSampling.h | 219 | PixelLightmap, resolvePixelLightmap, CubeAttenFlags, resolveCubeAtten (all static inline) |
+| DeferredLightLists.cpp | 478 | computeTileDepthBounds, computeMirrorPresenceGrid, buildTileLightLists, buildStripLightLists, g_stripLights |
+| DeferredVolumetric.cpp | 2585 | Render_DeferredFogPass(+Tile), Render_VolumetricCones(+Tile), Render_OmniHalos(+Tile), Render_DeferredSkybox, VolProf_Tick, g_volProf def, cone counters |
+| DeferredFastFog.cpp | 3139 | fastExp/fogAntideriv, FastFogParams, blobField, SS+froxel passes, composite, FastFog_SetReflectionZ/BeginFrame, Render_DeferredFastFog, Render_ScreenSpaceRain, Render_DeferredVolumetric (unified) |
+| DeferredSurfaceKernel.cpp | 3046 | scalar tile kernel, xpar peel template + Front/Back wrappers, OuterVec, TileFill, gloss squaring dispatch, RenderXparClumpInStrip, Render_DeferredLighting orchestrator, g_deferredCtx def (git mv of the monolith remainder — history preserved) |
 
-GIT SETUP CHANGED: the MAIN checkout (/Users/gil-ad/work/revival) now has
-feature/fog checked out — the user tests there. This fog WORKTREE is
-therefore DETACHED (a branch can only be checked out once); commit here
-detached and `git push origin HEAD:feature/fog`. The user updates their
-main checkout themselves.
-Working tree clean except untracked Runtime/*.ppm debris (never
-`git add -A`). Build: `cmake --build build` (POST_BUILD copies to
-Runtime/DEMO — never tell the user to "pull"). ASan tree at `build-asan/`,
-TSan at `build-tsan/`.
+Linkage changes (the ONLY non-verbatim edits): light-list builders +
+g_stripLights, the four FastFog xpar hooks (XparActive/SampleGrid/
+SSActive/SSSample) de-static'd; VolProf hoisted out of its anonymous
+namespace into DeferredCommon.h (one shared g_volProf instance, as
+before the split).
 
-## What landed this session (newest first)
+**Gate (passed on every commit):** build + byte-identical PPMs vs the
+pre-split baseline for (a) city fog `--fast_fog --snapshot=city@t=280`,
+(b) greets teleporter `FDS_GREETS_CAM="-0.069,4.917,-5.214,-0.097,
+-0.342,0.935" --deferred --greets-mirror --mirror-rtt --shadows
+--snapshot=greets@t=700`, (c) `--scene-mirrortest --mirrortest-multi-dump`
+8/8 poses. Determinism of all three verified run-to-run before trusting
+the gate. Gate script: /tmp/split_gate.sh (session-local).
 
-- `1a6ff1f` screen-space fast_fog fogs transparents (fogAtDepth split) +
-  blend-correct acc weight (legacy additive `lit+dst/2` gets acc·0.5 —
-  full acc 1.5x-counts path fog, blew city water white; alpha path acc·1)
-  + glow_max knee wired into SS glow.
-- `7c1f99e` flares integrated into unified TBR depth order (user rejected
-  center-Z hide). The_MMX_Scalar diverts to TBR_Sprite for Scn_SpriteTBR
-  scenes; TBR sprite draw dispatches 256-res flare (white colorize — omni
-  V.LR/G/B unmaintained, tints black) vs 32 particle (vertex tint).
-  TRAPS: sprite loop must run BEFORE TBR_Render (fillers only INSERT for
-  TBR scenes); FOUNTAIN.CPP particle textures had stale SizeX=256
-  metadata over a 32×32 buffer → res dispatch sampled into the font atlas.
-- `4f7e5d9` --fast_fog_glow_max soft-knee compressor (froxel populate):
-  "reduce intensity without affecting density" — linear below max/2,
-  asymptote at max, hue-preserving. Try 250-400.
-- `e8e5843` --fast_fog_blob_overlap metaball field: ADDITIVE blob sums
-  (worley F1 cannot overlap); value = radius in cell units (cap 1.5);
-  decouples blob size from spacing; worley_thresh reused as iso [0,3].
-- `12e926d` froxel fog on transparents (--fast_fog_xpar, default on):
-  out = α·(C·T(z)+acc(z)) + (1−α)·Bg, one grid fetch per xpar pixel.
-- `5683c89` CITY WHITE-WATER ROOT CAUSE: Reflected_Transform never set
-  F.FlareSize → ±4e36 heap garbage → screen-covering additive flare,
-  per-process coin flip, "cured" by free-cam 360 (main frustum sweep
-  initializes the field). One line. Five misattributions first — method
-  writeup in memory project_city_pass1_stale_vpage.
-- Earlier: froxel temporal reprojection (XY-only jitter — z-jitter was a
-  limit-cycle flicker engine; per-column Halton phases), per-slice clipped
-  analytic light glow (fixed "light moving wildly" under small camera
-  moves), slab feather in froxelDensity, worley puffs, snapshot @iters=N
-  now WRITES the last frame (converged temporal; old skip caused a bogus
-  byte-identical A/B), city@t=N1,N2,... multi-timestamp lists fixed,
-  FDS_THREADS=N pool cap (Threads.h).
+## Remaining
+- **Idle-machine bench NOT yet run** — -flto=thin should preserve
+  cross-TU inlining but this is unverified. Bench greets full sweep +
+  realistic-city vs pre-split (4a64c3c) when the machine is idle.
 
-## Agreed next steps (user decisions, in order)
-
-1. **cv-pull reflection instability** — user said "we can try". Memory:
-   project_cv_pull_instability. Reflective_Mapper_Setup divides by
-   step = pullDir·N which passes through small values; reflections swing
-   with small camera moves. Reproducer: --snapshot=seaside distsweep block.
-2. **Per-scene FULL SCRIPTING** (user-decided scope): time-keyed parameter
-   values, lerped between keys, built on the FeatureFlags registry
-   (name/type/parse already there), per-scene files, hot-reload via mtime.
-   Scene-.FLD editing explicitly OUT of scope (separate later project).
-   Design-heavy — draft the file-format proposal first.
-3. Parked: SIMD froxel populate for x64 (docs/fast_fog_simd_x64.md);
-   froxel 128×72+temporal may match 256×144 quality cheaper (untuned);
-   merging feature/fog → master at some point.
-
-## Open questions / loose ends
-
-- User has NOT visually confirmed in motion: TBR flare ordering (fountain
-  purple omni), SS-xpar fog, metaball look, glow_max feel. Expect feedback.
-- fast_fog_worley_thresh doubles as metaball iso — ranges differ by mode
-  (0–0.9 worley, 0–3 metaball). Candidate rename during scripting work.
-- SS xpar fog pays full per-pixel blob DDA on transparent pixels — fine
-  fountain/greets, heavy for city water (froxel recommended there). No
-  perf numbers taken.
-- User asked whether my runs open windows ("ran the whole executable in
-  front?") — snapshot mode initializes video; if windows bother them, add
-  SDL_VIDEODRIVER=dummy to headless runs (verified render-identical).
-
-## Working agreements refreshed this session
-
-- Verify the CLASSIFIER and the FULL repro before attributing a bug (the
-  white-water hunt logged five wrong attributions; the user's repro
-  mechanics were right every time; a z==0-unmasked water classifier was
-  fooled by the deferred skybox repaint).
-- User corrections are load-bearing: "I can wait indefinitely" killed the
-  wallclock theory; "reproducible without fog" killed three fog theories.
-- Headless testing: --snapshot=<scene>@t=N / @iters=N from Runtime/; cp
-  the output ppm IMMEDIATELY (next run overwrites).
-- conetest repro cams: FDS_CONETEST_CAM="px,py,pz,fx,fy,fz" (env).
-- User cmdline for interactive fog testing:
-  ./DEMO --fast_fog_froxel --deferred --shadows --draw_cones
-    --cone_strength=4 --fast_fog --fast_fog_blobs --fast_fog_worley
-    --fast_fog_density=5..10 --fast_fog_bottom=-400 --fast_fog_top=420
-    --fast_fog_cell=500 --fast_fog_inscatter=4 [--fast_fog_glow_max=300]
-    [--fast_fog_blob_overlap=1.3 --fast_fog_worley_thresh=2.0]
-  (city wants bottom=0 — bottom=-400 puts 400 units of fog under the water.)
+## Open threads (carried over)
+- Shadow tile flicker: SOLVED 2026-06-14 (4fe3be2) — torn read in the
+  per-material shadow-skip cache (two relaxed atomics → stale skip on
+  pointer-slot collision; TSan-blind to atomic races). Packed into one
+  atomic. Verified 194-303 → 0 steady events under 12-concurrent load.
+- Bounce dots through walls (memory: mirror-beam-reflections-design):
+  near-clipped bounce shadow maps + half-space clamp redo. User relief:
+  --no-mirror-bounce.
+- Tune-server precedence assert (setDefault < ParamScript < CLI < console).
+- TSan sweep DONE (task bps278tey, 11 reports) — both known races FIXED
+  (commit 813e680): (1) BSphereScreenPos write gated on !_inShadowPass
+  (debug-overlay-only value); (2) the greets background lightmap bake
+  raced the tick ONLY in the bench/snapshot harnesses (they didn't join
+  the bake; Run_Greets did) — join extracted to Greets_JoinBakeThread(),
+  now called from RunSceneBench + RunGreetsSnapshot. Re-verified: greets
+  TSan bench 40 iters t=100..900 = ZERO races. NOTE: neither race was the
+  shadow flicker cause (flicker = per-frame PolyId-owner flap, still open).

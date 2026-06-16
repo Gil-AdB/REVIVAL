@@ -960,17 +960,31 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		if (!(F->Txtr->Flags&Mat_TwoSided))
         F->Flags = (AP.x*F->N.x + AP.y*F->N.y + AP.z*F->N.z>=F->NormProd);*/
 		
-		Vector *BSC = &T->BSphereScreenPos;
+		// BSphereScreenPos is the mesh-center projected to screen space,
+		// read only by the per-mesh debug-label overlay (RENDER.CPP),
+		// which wants the MAIN-camera projection. Skip it for every
+		// OFFSCREEN pass — the projection is useless to the overlay and
+		// T->BSphereScreenPos is shared across all passes touching this
+		// mesh, so writing it from a concurrent pass is a data race:
+		//   - shadow bakes: per-light threads (TSan, 2026-06-12)
+		//   - mirror-shard reflections: per-worker threads (g_offAxisFrustumCull
+		//     set; TSan, 2026-06-16) — the Slice 6 parallel shard pass.
+		// (the serial mirror RTT also sets g_offAxisFrustumCull; skipping it
+		// there is harmless — the main pass re-projects after.) Only the
+		// single main-camera on-axis pass writes it → no race, correct value.
+		if (!_inShadowPass && !fds::g_offAxisFrustumCull) {
+			Vector *BSC = &T->BSphereScreenPos;
 
-		//BSC->x = M34[0][0] * V.x + M34[0][1] * V.y + M34[0][2] * V.z + M34[0][3];
-		//BSC->y = M34[1][0] * V.x + M34[1][1] * V.y + M34[1][2] * V.z + M34[1][3];
-		//BSC->z = M34[2][0] * V.x + M34[2][1] * V.y + M34[2][2] * V.z + M34[2][3];
-		BSC->x = V.x;
-		BSC->y = V.y;
-		BSC->z = V.z;
+			//BSC->x = M34[0][0] * V.x + M34[0][1] * V.y + M34[0][2] * V.z + M34[0][3];
+			//BSC->y = M34[1][0] * V.x + M34[1][1] * V.y + M34[1][2] * V.z + M34[1][3];
+			//BSC->z = M34[2][0] * V.x + M34[2][1] * V.y + M34[2][2] * V.z + M34[2][3];
+			BSC->x = V.x;
+			BSC->y = V.y;
+			BSC->z = V.z;
 
-		BSC->x /= BSC->z;
-		BSC->y /= BSC->z;
+			BSC->x /= BSC->z;
+			BSC->y /= BSC->z;
+		}
 		// Alternate vertex loop for cube-face shadow xform: when the mesh
 		// has a pre-computed world-space vertex cache, do a per-vertex
 		// pyramid test in world space and skip the view matmul for
@@ -1037,6 +1051,52 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				if (Vtx->PX >= float(xr)) Vtx->Flags |= Vtx_VisRight;
 				if (Vtx->PY < 0.0f) Vtx->Flags |= Vtx_VisUp;
 				if (Vtx->PY >= float(yr)) Vtx->Flags |= Vtx_VisDown;
+			}
+			goto AfterXForm;
+		}
+		// Mirror-shard reflection cull: same per-vertex world-space cone test
+		// as the cube-shadow path, but with the shard's narrow off-axis
+		// reflection cone (g_reflCone*). The apex == the reflection camera's
+		// ISource, so the world delta IS the view delta; in-cone vertices get
+		// the off-axis view xform (PX/cntrEX already hold the shard's values),
+		// out-of-cone ones are marked all-out so their faces cull. Rejects the
+		// bulk of the room before the matmul — the whole point of the pass.
+		if (fds::g_reflVertCull && T->worldVerts) {
+			const float kTan2 = fds::g_reflConeTan2;
+			const float ckX = fds::g_reflConeApex.x, ckY = fds::g_reflConeApex.y, ckZ = fds::g_reflConeApex.z;
+			const float cdX = fds::g_reflConeDir.x,  cdY = fds::g_reflConeDir.y,  cdZ = fds::g_reflConeDir.z;
+			const float (*VM)[3] = cam.view->Mat;
+			for (Vtx = tVerts; Vtx < VEnd; Vtx++) {
+				const DWord vi = DWord(Vtx - tVerts);
+				const Vector &wp = T->worldVerts[vi];
+				const float wdx = wp.x - ckX, wdy = wp.y - ckY, wdz = wp.z - ckZ;
+				const float axisDist = wdx*cdX + wdy*cdY + wdz*cdZ;
+				const float d2 = wdx*wdx + wdy*wdy + wdz*wdz;
+				const bool outside = (axisDist < 0.0f)
+					|| ((d2 - axisDist*axisDist) > kTan2 * axisDist*axisDist);
+				if (outside) {
+					Vtx->TPos_AOS.x = 0.0f; Vtx->TPos_AOS.y = 0.0f; Vtx->TPos_AOS.z = 1.0f;
+					Vtx->RZ = 1.0f; Vtx->PX = -1.0f; Vtx->PY = -1.0f;
+					Vtx->UZ = 0.0f; Vtx->VZ = 0.0f;
+					Vtx->Flags |= Vtx_Visible;
+					continue;
+				}
+				const float vx = VM[0][0]*wdx + VM[0][1]*wdy + VM[0][2]*wdz;
+				const float vy = VM[1][0]*wdx + VM[1][1]*wdy + VM[1][2]*wdz;
+				const float vz = VM[2][0]*wdx + VM[2][1]*wdy + VM[2][2]*wdz;
+				Vtx->TPos_AOS.x = PX * vx + cam.cntrEX * vz;
+				Vtx->TPos_AOS.y = -PY * vy + cam.cntrEY * vz;
+				Vtx->TPos_AOS.z = vz;
+				Vtx->Flags &= ~Vtx_Visible;
+				Vtx->RZ = 1.0f / vz;
+				Vtx->PX = Vtx->TPos_AOS.x * Vtx->RZ;
+				Vtx->PY = Vtx->TPos_AOS.y * Vtx->RZ;
+				Vtx->UZ = Vtx->U * Vtx->RZ;
+				Vtx->VZ = Vtx->V * Vtx->RZ;
+				if (Vtx->PX < 0.0f)        Vtx->Flags |= Vtx_VisLeft;
+				if (Vtx->PX >= float(xr))  Vtx->Flags |= Vtx_VisRight;
+				if (Vtx->PY < 0.0f)        Vtx->Flags |= Vtx_VisUp;
+				if (Vtx->PY >= float(yr))  Vtx->Flags |= Vtx_VisDown;
 			}
 			goto AfterXForm;
 		}

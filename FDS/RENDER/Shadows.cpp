@@ -527,8 +527,20 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						// have O(50) distinct materials; a flat 256-entry
 						// hash-keyed-by-pointer is plenty.
 						struct MatShadowCache {
-							std::atomic<Material*> mat[256] = {};
-							std::atomic<uint8_t>   skip[256] = {};
+							// Pack (material pointer | skip-bit) into ONE atomic
+							// so the pointer-match and the skip flag are read/
+							// written together, atomically. Two separate atomics
+							// (mat[k] + skip[k]) tore under thread contention: a
+							// reader could match mat[k] yet read a STALE skip[k]
+							// left by a different material that previously
+							// occupied slot k (pointers collide mod 256). That
+							// gave a load-dependent wrong skip decision, which
+							// dropped/added shadow polygons frame-to-frame — THE
+							// shadow tile flicker. TSan never caught it because
+							// data races on atomics are not reported. Material is
+							// ≥2-aligned, so bit 0 of the pointer is free for the
+							// flag.
+							std::atomic<uintptr_t> entry[256] = {};
 						};
 						static MatShadowCache sCache;
 						auto looksEmissive = [](const char *n) -> bool {
@@ -544,13 +556,13 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						auto shouldSkip = [&](Material *m) -> bool {
 							if (!m) return true;
 							const uintptr_t k = (uintptr_t(m) >> 4) & 255;
-							if (sCache.mat[k].load(std::memory_order_relaxed) == m) {
-								return sCache.skip[k].load(std::memory_order_relaxed) != 0;
-							}
+							const uintptr_t mbits = uintptr_t(m);  // bit0 = 0 (aligned)
+							const uintptr_t e = sCache.entry[k].load(std::memory_order_relaxed);
+							if ((e & ~uintptr_t(1)) == mbits) return (e & 1) != 0;
 							const bool skip = (m->Flags & (Mat_Transparent | Mat_Additive | Mat_SkipZ))
 							                 || looksEmissive(m->Name);
-							sCache.mat[k].store(m, std::memory_order_relaxed);
-							sCache.skip[k].store(uint8_t(skip ? 1 : 0), std::memory_order_relaxed);
+							sCache.entry[k].store(mbits | (skip ? uintptr_t(1) : uintptr_t(0)),
+							                      std::memory_order_relaxed);
 							return skip;
 						};
 						int kept = 0, skXpar = 0, skDegen = 0, skBack = 0, skNoTxtr = 0;

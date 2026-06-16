@@ -36,6 +36,7 @@ set(Base
     Base/FrameState.cpp
     Base/FrameState.h
     Base/RenderStats.cpp
+    Base/RenderContext.h
     Base/RenderStats.h
     Base/RenderTarget.h
     Base/KeyFrame.h
@@ -123,7 +124,14 @@ set(RADIO RADIO/RADIO.CPP)
 source_group("RADIO" FILES ${RADIO})
 
 set(RENDER
-    RENDER/DeferredLighting.cpp
+    RENDER/DeferredCommon.h
+    RENDER/DeferredFastFog.cpp
+    RENDER/DeferredSurfaceKernel.cpp
+    RENDER/DeferredLightLists.cpp
+    RENDER/DeferredShadowSampling.h
+    RENDER/DeferredVolumetric.cpp
+    RENDER/EnvBake.cpp
+    RENDER/EnvBake.h
     RENDER/GENERAL.H
     RENDER/Lighting.cpp
     RENDER/OffscreenView.cpp

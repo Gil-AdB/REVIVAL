@@ -372,9 +372,17 @@ struct TileRasterizer {
 		// 0..15	16..31	32..47	48..63	64..79	80..95	96..111	112..127	128..143	144..159	160..175	176..191	192..207	208..223	224..239	240..255
 		// r		g		b		a		r		g		b		a			r			g			b			a			r			g			b			a
 
+		// Lane order is B,G,R,A to match the gathered texel's in-memory byte
+		// order (textures are stored BGRA — stb loads RGBA, IMGCODE swaps
+		// byte0↔byte2 on load). colorize() multiplies texel-byte[i] by light-
+		// element[i], so the light channels must line up with the texel's
+		// B,G,R,A bytes. The old r,g,b,a order paired blue-texel × red-light
+		// — invisible under white light, but it tinted every colored-light
+		// surface wrong (greets' omnis made reflections green where the
+		// deferred kernel — which reads BGRA correctly — showed warm).
 		auto color = v32_from_arith_seq(
-			{ FixedPoint(tile.t0.r0), FixedPoint(tile.t0.g0), FixedPoint(tile.t0.b0), FixedPoint(tile.t0.a0) },
-			{ FixedPoint(drdx),	   FixedPoint(dgdx),		FixedPoint(dbdx),		 FixedPoint(dadx) });
+			{ FixedPoint(tile.t0.b0), FixedPoint(tile.t0.g0), FixedPoint(tile.t0.r0), FixedPoint(tile.t0.a0) },
+			{ FixedPoint(dbdx),	   FixedPoint(dgdx),		FixedPoint(drdx),		 FixedPoint(dadx) });
 
 		//Vec16s rg
 		for (int32_t y = 0; y != TILE_SIZE; ++y, a0 += tile.dady, b0 += tile.dbdy, c0 += tile.dcdy, span += bpsl_u32, zspan += xres, mat32_span += (mat32_span ? xres : 0)) {
@@ -605,7 +613,7 @@ struct TileRasterizer {
 				p_u1z += Vec8f(t0.du1zdy);
 				p_v1z += Vec8f(t0.dv1zdy);
 			}
-			color += Vec32sFromVec4s({ FixedPoint(drdy), FixedPoint(dgdy), FixedPoint(dbdy), FixedPoint(dady) });
+			color += Vec32sFromVec4s({ FixedPoint(dbdy), FixedPoint(dgdy), FixedPoint(drdy), FixedPoint(dady) });  // B,G,R,A (see color init above)
 
 			if constexpr (Coverage == barry::TCoverage::PARTIAL) {
 				p_a += Vec8i(tile.dady);

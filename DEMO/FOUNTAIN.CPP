@@ -1921,9 +1921,11 @@ void drawBoltRibbon(const Vector& A, const Vector& B,
 	float hwA = hwWorld * rzA * FOVX, hwB = hwWorld * rzB * FOVX;
 	if (hwA < 1.5f) hwA = 1.5f; if (hwA > 400.0f) hwA = 400.0f;
 	if (hwB < 1.5f) hwB = 1.5f; if (hwB > 400.0f) hwB = 400.0f;
-	// Centre glow colour (additive). Cool blue; edges = 0. NOTE LR/LG/LB map to
-	// screen B/G/R (engine stores BGRA), so LR carries the blue. Scaled by bright.
-	float cr = bright * 255.0f, cg = bright * 150.0f, cb = bright * 55.0f;
+	// Centre glow colour (additive). Cool blue; edges = 0. Since a66668b fixed
+	// TheOtherBarry's colorize to pack the vertex colour BGRA, LR→screen-Red and
+	// LB→screen-Blue (the natural RGB mapping), so the blue now rides LB (cb).
+	// Scaled by bright.
+	float cr = bright * 55.0f, cg = bright * 150.0f, cb = bright * 255.0f;
 	if (cr > 255.0f) cr = 255.0f; if (cg > 255.0f) cg = 255.0f; if (cb > 255.0f) cb = 255.0f;
 
 	Viewport vp; viewportInit(vp, FntSc);

@@ -142,6 +142,11 @@ struct Mirror {
     // on the previous frame's camera pose (UpdateAllMirrors precedes
     // Transform_Objects); a viewport margin absorbs the 1-frame lag.
     bool        active = true;
+    // Set by the shatter effect: a broken mirror is permanently closed —
+    // UpdateAllMirrors forces it inactive, hides its clone mesh + flares,
+    // and skips the per-frame re-mirror so the falling shards are all
+    // that's left where the panel was.
+    bool        broken = false;
 };
 
 // One second-order RTT slot: mirror A's reflection shows mirror B's

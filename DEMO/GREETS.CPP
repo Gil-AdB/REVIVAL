@@ -23,6 +23,8 @@
 #include "GREETS.H"
 #include "GreetsDisco.h"
 #include "GreetsMirror.h"
+#include "MirrorShatter.h"
+#include "RENDER/EnvBake.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
 #include "MISC/PREPROC.H"
@@ -53,6 +55,34 @@ static std::vector<fds::Mirror> g_greetsMirrors;
 // prepared at init when --mirror-rtt is on; textures re-rendered per
 // frame by RenderSecondOrderMirrors before the main transform.
 static std::vector<fds::MirrorRttSlot> g_greetsRttSlots;
+
+// Shatter effect for the largest wall screen — breaks on the Y key,
+// reflecting the room from a panorama baked at the moment of the break.
+// Built in Initialize_Greets (so GreetsScene::init's Polys count covers
+// the shard faces); driven in the tick. Index of the targeted mirror in
+// g_greetsMirrors (-1 = none), so the tick can close + hide it on break.
+static fds::MirrorShatter g_greetsShatter;
+static int                g_greetsShatterMirror = -1;
+// Invisible material the broken screen's wall faces are retargeted to, so
+// the panel surface (reflection AND half-silvered text) vanishes when it
+// shatters. Opaque Flags=0 keeps Transform happy; Txtr=null makes the
+// rasterizer skip every face (RenderInner: `!F->Txtr->Txtr` → continue).
+static Material          *g_greetsScreenHideMat = nullptr;
+
+// 1x1 BGRA texture from an (R,G,B) triple — the shard material's base so
+// the rasterizer's F->Txtr->Txtr deref is valid (GreetsMirror has an
+// identical helper, but it's TU-local).
+static Texture *makeFlatTexture(byte r, byte g, byte b) {
+	Texture *T = new Texture();
+	std::memset(T, 0, sizeof(Texture));
+	T->BPP = 32; T->SizeX = 1; T->SizeY = 1; T->LSizeX = 0; T->LSizeY = 0;
+	T->Data = (byte*)_aligned_malloc(4, 16);
+	((dword*)T->Data)[0] = (dword(b) << 0) | (dword(g) << 8)
+	                     | (dword(r) << 16) | (dword(0xFFu) << 24);
+	T->Mipmap[0] = T->Data; T->numMipmaps = 1;
+	T->Flags = Txtr_Nomip | Txtr_Tiled;
+	return T;
+}
 
 // Forward-declared at namespace scope (the rest of this TU is in an
 // anonymous namespace where `extern` would silently get internal
@@ -587,6 +617,115 @@ static void initializeRobotSpotlights()
 		std::fprintf(stderr, "[GREETS] orbit spot %d (%s) installed\n",
 			i, init[i].tag);
 	}
+}
+
+// Build the shatter shards for the largest wall SCREEN (the two giant
+// P_TEXT side-wall panels; the teleporter is excluded — it's the plain
+// back-wall mirror). Runs at the tail of Initialize_Greets, before
+// GreetsScene::init counts Polys, so the shard faces are sized into FList.
+// Press Y at runtime to break it (see the tick).
+static void BuildGreetsShatter()
+{
+	if (!fds::FeatureFlags::greets_mirror() || g_greetsMirrors.empty()) return;
+	auto crossv = [](const Vector &a, const Vector &b) {
+		return Vector{ a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
+	};
+	auto normv = [](Vector v) {
+		float l = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+		if (l > 1e-6f) { v.x/=l; v.y/=l; v.z/=l; }
+		return v;
+	};
+	auto worldPos = [](const Vertex *vtx, TriMesh *T) {
+		Vector lp = vtx->Pos, w;
+		if (T) { MatrixXVector(T->RotMat, &lp, &w); w += T->IPos; } else w = lp;
+		return w;
+	};
+	// Pick the largest non-teleporter wall mirror by total wall-face area.
+	int best = -1; float bestArea = 0.0f;
+	for (size_t i = 0; i < g_greetsMirrors.size(); ++i) {
+		const fds::Mirror &m = g_greetsMirrors[i];
+		if (m.wallMaterialName.find("teleporter") != std::string::npos) continue;
+		if (m.wallFaces.empty() || !m.plane.valid) continue;
+		float area = 0.0f;
+		for (size_t k = 0; k < m.wallFaces.size(); ++k) {
+			const Face *F = m.wallFaces[k];
+			TriMesh *T = k < m.wallFaceMeshes.size() ? m.wallFaceMeshes[k] : nullptr;
+			const Vector a = worldPos(F->A, T), b = worldPos(F->B, T), c = worldPos(F->C, T);
+			const Vector e1{ b.x-a.x, b.y-a.y, b.z-a.z }, e2{ c.x-a.x, c.y-a.y, c.z-a.z };
+			const Vector cr = crossv(e1, e2);
+			area += 0.5f * std::sqrt(cr.x*cr.x + cr.y*cr.y + cr.z*cr.z);
+		}
+		if (area > bestArea) { bestArea = area; best = int(i); }
+	}
+	if (best < 0) return;
+	fds::Mirror &m = g_greetsMirrors[best];
+
+	// Plane basis: U/V span the screen, N is the room-facing normal.
+	const Vector N = normv(m.plane.N);
+	const Vector ref = (std::fabs(N.y) > 0.9f) ? Vector{1,0,0} : Vector{0,1,0};
+	const Vector U = normv(crossv(ref, N));
+	const Vector V = normv(crossv(N, U));
+	float u0=1e30f, u1=-1e30f, v0=1e30f, v1=-1e30f, ymin=1e30f;
+	for (size_t k = 0; k < m.wallFaces.size(); ++k) {
+		const Face *F = m.wallFaces[k];
+		TriMesh *T = k < m.wallFaceMeshes.size() ? m.wallFaceMeshes[k] : nullptr;
+		const Vertex *vs[3] = { F->A, F->B, F->C };
+		for (int j = 0; j < 3; ++j) {
+			const Vector w = worldPos(vs[j], T);
+			const float pu = w.x*U.x + w.y*U.y + w.z*U.z;
+			const float pv = w.x*V.x + w.y*V.y + w.z*V.z;
+			u0 = std::min(u0, pu); u1 = std::max(u1, pu);
+			v0 = std::min(v0, pv); v1 = std::max(v1, pv);
+			ymin = std::min(ymin, w.y);
+		}
+	}
+	const float d = m.plane.d;
+	auto planePt = [&](float u, float v) {
+		return Vector{ u*U.x + v*V.x - d*N.x,
+		               u*U.y + v*V.y - d*N.y,
+		               u*U.z + v*V.z - d*N.z };
+	};
+	const Vector corners[4] = {
+		planePt(u0, v0), planePt(u1, v0), planePt(u1, v1), planePt(u0, v1),
+	};
+
+	// Mirror shard material: the forward env blend is reflection + base/2,
+	// so a bright base washes the reflection into flat gray. Keep the base
+	// near-black so the room reflection dominates (a real mirror is ~all
+	// reflection), and drive it Luminosity-bright so per-vertex greets
+	// lighting doesn't dim it — matching the intact screen's reflective look
+	// rather than popping to silver on the break.
+	Material *shardMat = getAlignedType<Material>(16);
+	shardMat->Txtr       = makeFlatTexture(20, 20, 24);
+	shardMat->BaseCol    = Color{24.0f, 20.0f, 20.0f, 255.0f};
+	shardMat->Diffuse    = 0.0f;
+	shardMat->Specular   = 0.0f;
+	shardMat->Glossiness = 48;
+	shardMat->Luminosity = 1.0f;
+	shardMat->RelScene   = GreetSc;
+	shardMat->Name       = strdup("greets_shard");
+	shardMat->Next = nullptr;
+	if (!MatLib) { shardMat->Prev = nullptr; MatLib = shardMat; }
+	else { Material *t = MatLib; while (t->Next) t = t->Next; t->Next = shardMat; shardMat->Prev = t; }
+	// Invisible material for the broken screen's wall faces (see decl).
+	g_greetsScreenHideMat = getAlignedType<Material>(16);
+	g_greetsScreenHideMat->Txtr     = nullptr;
+	g_greetsScreenHideMat->Flags    = 0;
+	g_greetsScreenHideMat->RelScene = GreetSc;
+	g_greetsScreenHideMat->Name     = strdup("greets_screen_hidden");
+	g_greetsScreenHideMat->Next = nullptr;
+	{ Material *t = MatLib; while (t->Next) t = t->Next; t->Next = g_greetsScreenHideMat; g_greetsScreenHideMat->Prev = t; }
+	Scene_RebuildMatTable(GreetSc);
+
+	// ~1.2 shards per world unit, clamped.
+	auto clampi = [](int x, int lo, int hi){ return x < lo ? lo : (x > hi ? hi : x); };
+	const int gx = clampi(int((u1-u0)*1.2f), 6, 40);
+	const int gy = clampi(int((v1-v0)*1.2f), 5, 40);
+	g_greetsShatter.build(GreetSc, corners, N, shardMat, gx, gy, ymin);
+	g_greetsShatterMirror = best;
+	std::fprintf(stderr,
+		"[GREETS-SHATTER] target mirror %d area=%.1f grid=%dx%d floorY=%.1f "
+		"N=(%.2f,%.2f,%.2f)\n", best, bestArea, gx, gy, ymin, N.x, N.y, N.z);
 }
 
 void Initialize_Greets()
@@ -1326,18 +1465,11 @@ void Initialize_Greets()
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
 		ShadowMaps_BakeStatic(GreetSc);
 		fds::LightmapStampOrigBary(GreetSc);
-		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
-		const auto bakeSpawnT = std::chrono::steady_clock::now();
-		Scene * const greetScForBake = GreetSc;
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
-			fds::LightmapBake_Static(greetScForBake);
-			const auto bakeDoneT = std::chrono::steady_clock::now();
-			const double ms = std::chrono::duration<double, std::milli>(
-				bakeDoneT - bakeSpawnT).count();
-			std::fprintf(stderr,
-				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
-				ms);
-		});
+		// NOTE: the lightmap bake thread is spawned LATER (after the mirror /
+		// shatter setup below), not here — LightmapBake_Static reads Materials,
+		// and BuildMirrorsByTextureName / BuildGreetsShatter rewrite the
+		// Material table (Scene_RebuildMatTable). Spawning the bake before that
+		// raced the read against the write (TSan, 2026-06-16).
 	}
 
 	// Build per-mirror clones. Each material name passed to BuildMirror
@@ -1383,6 +1515,31 @@ void Initialize_Greets()
 		fds::PrepareSecondOrderMirrorRtt(GreetSc, g_greetsMirrors,
 		                                 g_greetsRttSlots);
 		std::fprintf(stderr, "[GREETS-MIRROR] active mirrors: %zu\n", g_greetsMirrors.size());
+		// Shatter shards for the largest wall screen — built hidden here so
+		// GreetsScene::init's Polys count sizes FList for them.
+		BuildGreetsShatter();
+	}
+
+	// Spawn the background lightmap bake AFTER all Material-table rewrites
+	// (the mirror + shatter setup above call Scene_RebuildMatTable). The bake
+	// thread reads Materials, so starting it earlier raced the read against
+	// those writes (TSan: LightmapBake_Static vs Scene_RebuildMatTable). The
+	// bake is still background — joined in Run_Greets before the first frame.
+	// Unconditional (matches the prior behaviour); LightmapBake_Static no-ops
+	// fast when --shadow-lightmap is off.
+	{
+		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
+		const auto bakeSpawnT = std::chrono::steady_clock::now();
+		Scene * const greetScForBake = GreetSc;
+		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
+			fds::LightmapBake_Static(greetScForBake);
+			const auto bakeDoneT = std::chrono::steady_clock::now();
+			const double ms = std::chrono::duration<double, std::milli>(
+				bakeDoneT - bakeSpawnT).count();
+			std::fprintf(stderr,
+				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
+				ms);
+		});
 	}
 }
 
@@ -1865,6 +2022,114 @@ struct GreetsScene : SceneDriver {
 
 		Animate_Objects(GreetSc, View);
 
+		// Mirror shatter (Y key): bake the room into a panorama from the
+		// screen's centre, break it into reflecting shards, and close the
+		// mirror. The physics step runs AFTER Animate_Objects (which resets
+		// each shard to its rest pose) and BEFORE Transform_Objects.
+		{
+			static bool sYPrev = false;
+			// FDS_GREETS_SHATTER=1 auto-breaks on the first eligible tick
+			// (headless verification — the snapshot can't inject keys).
+			static const bool sAuto = std::getenv("FDS_GREETS_SHATTER") != nullptr;
+			const bool yNow = Keyboard[ScY] != 0 || sAuto;
+			if (yNow && !sYPrev && g_greetsShatter.built()
+			    && !g_greetsShatter.active() && g_greetsShatterMirror >= 0) {
+				fds::Mirror &m = g_greetsMirrors[g_greetsShatterMirror];
+				// Light now: the per-shard reflection bakes forward (reads
+				// per-vertex LR/LG/LB). The tick's Lighting() runs later, so
+				// the first (prime) pass would otherwise bake the room black.
+				Lighting(GreetSc);
+				g_greetsShatter.trigger(0.5f, 0.55f);
+				// Build the world→text-UV affine from one screen wall face
+				// (its world corners + authored P_TEXT UVs) so the shards carry
+				// the screen's text, and find the live P_TEXT texture.
+				Texture *ptext = nullptr;
+				float A[8] = {0};
+				bool haveText = false;
+				if (!m.wallFaces.empty()) {
+					for (Material *Mt = MatLib; Mt; Mt = Mt->Next)
+						if (Mt->RelScene == GreetSc && Mt->Txtr && Mt->Txtr->FileName
+						    && !strcmp(Mt->Txtr->FileName, "TEXTURES/P_TEXT.JPG")) { ptext = Mt->Txtr; break; }
+					const Face *F = m.wallFaces[0];
+					TriMesh *T = m.wallFaceMeshes.empty() ? nullptr : m.wallFaceMeshes[0];
+					auto wp = [&](const Vertex *v) {
+						Vector lp = v->Pos, w; if (T) { MatrixXVector(T->RotMat, &lp, &w); w += T->IPos; } else w = lp; return w;
+					};
+					// Plane basis.
+					Vector N = m.plane.N; { float l=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z); if(l>1e-6f){N.x/=l;N.y/=l;N.z/=l;} }
+					Vector ref = (std::fabs(N.y) > 0.9f) ? Vector{1,0,0} : Vector{0,1,0};
+					auto cr = [](const Vector&a,const Vector&b){ return Vector{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x}; };
+					auto nz = [](Vector v){ float l=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z); if(l>1e-6f){v.x/=l;v.y/=l;v.z/=l;} return v; };
+					Vector U = nz(cr(ref,N)), V = nz(cr(N,U));
+					// Negate U (after V is derived) so the text is mirrored
+					// horizontally only: the shards display through the
+					// reflected camera (L-R flipped), so the painted-on text
+					// must be globally mirrored to read forward in the main view.
+					U = Vector{-U.x,-U.y,-U.z};
+					const Vector w0=wp(F->A), w1=wp(F->B), w2=wp(F->C);
+					const float p0u=w0.x*U.x+w0.y*U.y+w0.z*U.z, p0v=w0.x*V.x+w0.y*V.y+w0.z*V.z;
+					const float p1u=w1.x*U.x+w1.y*U.y+w1.z*U.z, p1v=w1.x*V.x+w1.y*V.y+w1.z*V.z;
+					const float p2u=w2.x*U.x+w2.y*U.y+w2.z*U.z, p2v=w2.x*V.x+w2.y*V.y+w2.z*V.z;
+					const float d1u=p1u-p0u,d1v=p1v-p0v,d2u=p2u-p0u,d2v=p2v-p0v;
+					const float det=d1u*d2v-d2u*d1v;
+					if (ptext && std::fabs(det) > 1e-9f) {
+						const float inv=1.0f/det;
+						auto solve=[&](float t0,float t1,float t2,float&a0,float&a1,float&a2){
+							a0=((t1-t0)*d2v-(t2-t0)*d1v)*inv;
+							a1=((t2-t0)*d1u-(t1-t0)*d2u)*inv;
+							a2=t0-a0*p0u-a1*p0v;
+						};
+						float au0,au1,au2, av0,av1,av2;
+						solve(F->U1,F->U2,F->U3, au0,au1,au2);
+						solve(F->V1,F->V2,F->V3, av0,av1,av2);
+						// tu(world) = au0*(world·U) + au1*(world·V) + au2.
+						A[0]=au0*U.x+au1*V.x; A[1]=au0*U.y+au1*V.y; A[2]=au0*U.z+au1*V.z; A[3]=au2;
+						A[4]=av0*U.x+av1*V.x; A[5]=av0*U.y+av1*V.y; A[6]=av0*U.z+av1*V.z; A[7]=av2;
+						haveText = true;
+					}
+				}
+				// Each shard becomes its own live reflection camera. NOTE: the
+				// bake currently renders FORWARD (unshadowed Gouraud off the
+				// static T->SL bake), which diverges in HUE from the shadowed
+				// deferred main view (greens the greets room). Gain only dims,
+				// it can't fix the hue — the real fix is a deferred (shadowed)
+				// bake, pending the render-state declobbering. Full gain for now.
+				g_greetsShatter.setReflectionGain(1.0f);
+				g_greetsShatter.enableReflectionCameras(GreetSc, 64,
+				                                        haveText ? ptext : nullptr,
+				                                        haveText ? A : nullptr);
+				m.broken = true;   // UpdateAllMirrors closes the reflection
+				// Hide the panel surface itself (reflection + half-silvered
+				// text) — the shards replace it. Per-face Txtr swap; the
+				// faces are shared in the room mesh so we can't hide a mesh.
+				// TODO(shatter): m.wallFaces is only the FRONT mirror face.
+				// The screen's box has a back face + side faces (own material,
+				// not in wallFaces) that survive the break — visible as a black
+				// vertical line on the wall afterwards. Hide the whole screen
+				// box (by mesh, or collect the coplanar-cluster's other faces)
+				// when polishing. Non-urgent.
+				if (g_greetsScreenHideMat)
+					for (Face *F : m.wallFaces) F->Txtr = g_greetsScreenHideMat;
+				std::fprintf(stderr, "[GREETS-SHATTER] broke mirror %d\n",
+				             g_greetsShatterMirror);
+			}
+			sYPrev = yNow;
+			g_greetsShatter.update();
+			// Per-shard reflection pass: hide the mirror clones first so a
+			// shard doesn't reflect another mirror's reflection. Runs after
+			// the physics update (current poses), before the main transform.
+			if (g_greetsShatter.reflectionCamerasEnabled()) {
+				std::vector<std::pair<TriMesh*, DWord>> hidden;
+				for (fds::Mirror &mm : g_greetsMirrors) {
+					if (!mm.cloneMesh) continue;
+					hidden.push_back({ mm.cloneMesh, mm.cloneMesh->Flags });
+					mm.cloneMesh->Flags &= ~HTrack_Visible;
+				}
+				g_greetsShatter.renderReflectionCameras(GreetSc);
+				for (auto &h : hidden) h.first->Flags = h.second;
+			}
+		}
+
 		// Mirror clone tracking: re-mirror dynamic meshes (Hull / legs)
 		// and cloned omnis after Animate_Objects refreshes the source
 		// poses, before Transform_Objects reads positions. Iterates
@@ -2048,6 +2313,24 @@ struct GreetsScene : SceneDriver {
 		// pass --greets-mirror implies "I want to see reflections" —
 		// force the deferred path here rather than requiring the user
 		// to also remember --deferred / FDS_DEFERRED=1.
+		// FDS_RNDR_BENCH=1: time ForceForward vs ForceDeferred over the same
+		// full-frame workload (FList/CAll already built) so we know the
+		// per-render cost ratio before committing the shard bake to deferred.
+		if (std::getenv("FDS_RNDR_BENCH")) {
+			const int K = 20;
+			auto tF0 = std::chrono::steady_clock::now();
+			for (int i = 0; i < K; ++i) Render(RenderPath::ForceForward);
+			auto tF1 = std::chrono::steady_clock::now();
+			for (int i = 0; i < K; ++i) Render(RenderPath::ForceDeferred, /*skipVolumetric=*/false);
+			auto tD1 = std::chrono::steady_clock::now();
+			for (int i = 0; i < K; ++i) Render(RenderPath::ForceDeferred, /*skipVolumetric=*/true);
+			auto tDS1 = std::chrono::steady_clock::now();
+			const double fwd = std::chrono::duration<double,std::milli>(tF1-tF0).count()/K;
+			const double def = std::chrono::duration<double,std::milli>(tD1-tF1).count()/K;
+			const double defNV = std::chrono::duration<double,std::milli>(tDS1-tD1).count()/K;
+			std::fprintf(stderr, "[RNDR-BENCH] fwd=%.2f  deferred=%.2f (%.1fx)  deferred-noVol=%.2f (%.1fx)  CAll=%d %dx%d\n",
+			             fwd, def, def/fwd, defNV, defNV/fwd, int(CAll), int(XRes), int(YRes));
+		}
 		if (fds::FeatureFlags::greets_mirror()) {
 			Render(RenderPath::ForceDeferred);
 		} else {
@@ -2320,12 +2603,16 @@ std::unique_ptr<SceneDriver> createGreetsScene()
 	return std::make_unique<GreetsScene>();
 }
 
-void Run_Greets()
+void Greets_JoinBakeThread()
 {
 	// Block until the background lightmap bake started in Initialize_Greets
 	// has finished writing TriMesh::staticShadowLM. The first rendered
 	// frame's deferred kernel samples it; sampling unwritten memory =
-	// garbage or full-shadow.
+	// garbage or full-shadow. Equally important: the bake reads per-frame
+	// geometry (Animate_Objects spline outputs) and the deferred shadow
+	// maps (Render_DeferredShadowMaps), so any tick that runs before this
+	// join races the bake (TSan, 2026-06-12). Every driver of the greets
+	// scene must call this before its first tick.
 	if (g_greetsBakeThread.joinable()) {
 		const auto t0 = std::chrono::steady_clock::now();
 		g_greetsBakeThread.join();
@@ -2333,9 +2620,14 @@ void Run_Greets()
 		const double waitedMs = std::chrono::duration<double, std::milli>(
 			t1 - t0).count();
 		std::fprintf(stderr,
-			"[GREETS-BAKE] Run_Greets waited %.1f ms for bake thread to join\n",
+			"[GREETS-BAKE] waited %.1f ms for bake thread to join\n",
 			waitedMs);
 	}
+}
+
+void Run_Greets()
+{
+	Greets_JoinBakeThread();
 	auto scene = createGreetsScene();
 	runSceneBlocking(*scene);
 }

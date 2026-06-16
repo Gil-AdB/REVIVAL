@@ -14,6 +14,8 @@
 #include <Base/Vertex.h>
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
 #include <RENDER/OffscreenView.h>  // OffscreenViewScope (RTT world swap)
+#include <RENDER/DeferredCommon.h> // DeferredOverride + Render_DeferredLighting/VolumetricCones (deferred RTT)
+#include <Base/RenderContext.h>    // fds::RenderContext (deferred RTT bake)
 
 #include <algorithm>
 #include <chrono>
@@ -1007,7 +1009,11 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // earlier 0.5 cutoff misjudged those as box edge strips and they
     // never became mirrors at all). Requires --mirror-rtt and an
     // rttSlots out-param.
-    constexpr float kMinRttArea = 0.2f;
+    // Tunable (default 1.5): drops the ~1.0-area central column panels + ~0.30
+    // box edge strips — barely-visible half-silvered screens not worth an RTT
+    // slot. Only end-screen CLONES (>=2.0) survive as first-order mirrors;
+    // second-order/recursive RTT is built separately. Set 0.2 to re-include.
+    const float kMinRttArea = fds::FeatureFlags::greets_mirror_rtt_min_area();
     const bool wantRtt = rttSlots && fds::FeatureFlags::mirror_rtt();
 
     int added = 0, addedRtt = 0, skippedSlivers = 0, skippedHorizontal = 0;
@@ -1742,6 +1748,8 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
         }
     }
     int used = 0;
+    const bool bprobe = std::getenv("FDS_BOUNCE_PROBE") != nullptr;
+    int cand = 0, planeHits = 0, winHits = 0, mirrorsSeen = 0;
     for (Mirror &m : mirrors) {
         // NOT gated on m.active: the bounce shaft lives in the ROOM —
         // it stays visible when its mirror is off-screen behind you.
@@ -1768,6 +1776,7 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             m.windowValid = true;
         }
         if (m.windowMax.x < m.windowMin.x) continue;
+        ++mirrorsSeen;
         const Vector &N = m.plane.N;
         const float   d = m.plane.d;
         for (Omni *O = sc->OmniHead; O && used < kBouncePool; O = O->Next) {
@@ -1777,12 +1786,14 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             if (O->mirrorId != 0) continue;                 // not clones
             if (O->Flags & Omni_BounceCone) continue;       // not pool spots
             if (O->ISize <= 0.0f) continue;
+            ++cand;
             // Beam axis vs mirror plane.
             const float ND = N.x*O->IDir.x + N.y*O->IDir.y + N.z*O->IDir.z;
             if (std::fabs(ND) < 1e-6f) continue;
             const float NP = N.x*O->IPos.x + N.y*O->IPos.y + N.z*O->IPos.z + d;
             const float t  = -NP / ND;
             if (t <= 0.0f || t >= O->IRange) continue;
+            ++planeHits;
             const Vector hit{ O->IPos.x + O->IDir.x * t,
                               O->IPos.y + O->IDir.y * t,
                               O->IPos.z + O->IDir.z * t };
@@ -1799,6 +1810,7 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
                   hit.y < m.windowMin.y - kPad || hit.y > m.windowMax.y + kPad ||
                   hit.z < m.windowMin.z - kPad || hit.z > m.windowMax.z + kPad);
             if (!inWin) continue;
+            ++winHits;
             Omni *b = pool[used++];
             b->IPos   = reflectPointAcross(O->IPos, N, d);
             b->IDir   = reflectDirAcross(O->IDir, N);
@@ -1816,9 +1828,32 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             b->mirrorSrcOmni = O;
             b->mirrorPlaneN  = N;
             b->mirrorPlaneD  = d;
+            // Window AABB for the surface kernel's portal test: the
+            // bounce only lights room surfaces reachable through this
+            // window, not "through" the surrounding wall.
+            b->mirrorWinMin  = m.windowMin;
+            b->mirrorWinMax  = m.windowMax;
+            // Probe: dump each activated bounce spot's pose so a headless
+            // camera can be aimed at the lit floor pool. FDS_BOUNCE_PROBE=1.
+            if (std::getenv("FDS_BOUNCE_PROBE")) {
+                std::fprintf(stderr,
+                    "[BOUNCE] t=%d spot mir=%d pos=(%.2f,%.2f,%.2f) dir=(%.2f,%.2f,%.2f) "
+                    "range=%.1f size=%.2f planeN=(%.2f,%.2f,%.2f) d=%.2f "
+                    "win=[(%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)]\n",
+                    (int)Timer, (int)m.id, b->IPos.x, b->IPos.y, b->IPos.z,
+                    b->IDir.x, b->IDir.y, b->IDir.z, b->IRange, b->ISize,
+                    N.x, N.y, N.z, d,
+                    m.windowMin.x, m.windowMin.y, m.windowMin.z,
+                    m.windowMax.x, m.windowMax.y, m.windowMax.z);
+            }
         }
     }
     for (int i = used; i < int(pool.size()); ++i) pool[i]->ISize = 0.0f;
+    if (bprobe) {
+        std::fprintf(stderr,
+            "[BOUNCE] t=%d mirrors=%d cand=%d planeHits=%d winHits=%d used=%d\n",
+            (int)Timer, mirrorsSeen, cand, planeHits, winHits, used);
+    }
 }
 
 void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
@@ -1827,6 +1862,15 @@ void UpdateAllMirrors(Scene *sc, std::vector<Mirror> &mirrors)
     {
     ScopedMirrorMs _t(&g_mirrorProf.updMs);
     for (auto &m : mirrors) {
+        // Shattered: permanently closed. Hide the clone mesh + clone
+        // flares and skip the re-mirror — the falling shards replace it.
+        if (m.broken) {
+            m.active = false;
+            if (m.cloneMesh) m.cloneMesh->Flags &= ~HTrack_Visible;
+            for (auto &c : m.omniClones)
+                if (c.mirrorOmni) c.mirrorOmni->ISize = 0.0f;
+            continue;
+        }
         bool act;
         if (m.parentMirrorId != 0) {
             // Compounds ride their parent's activity — they render
@@ -2372,6 +2416,28 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s_rttInit = true;
     }
 
+    // --shard-deferred also routes the RTT through the deferred kernel +
+    // cone pass (shadows + disco beams in the recursive mirror, matching the
+    // main view) instead of the forward filler. Serial pass → reuse one static
+    // G-buffer + light/tile scratch sized to the max RTT target.
+    const bool rttDeferred = fds::FeatureFlags::shard_deferred();
+    static meka::GBuffer            s_rttGB;
+    static ViewLightsSoA            s_rttLights;
+    static std::vector<TileLights>  s_rttTileLights;
+    static bool                     s_rttGBInit = false;
+    if (rttDeferred && !s_rttGBInit) {
+        s_rttGB.normal.assign(kRttTexels, 0);
+        s_rttGB.txtr.assign(kRttTexels, 0xFFFFFFFFu);
+        s_rttGB.tangent.assign(kRttTexels, 0);
+        s_rttGB.shadowMatID.assign(kRttTexels, 0);
+        if (fds::FeatureFlags::shadow_lightmap()) {
+            s_rttGB.lightmapMF.assign(kRttTexels, 0);
+            s_rttGB.lightmapST.assign(kRttTexels, 0);
+        }
+        s_rttTileLights.resize(DEFERRED_NUM_TILES);
+        s_rttGBInit = true;
+    }
+
     // ── Offscreen view scope ────────────────────────────────────────
     // Owns the world-state swap: locks out EngineResize, saves and (in
     // its destructor) restores MainSurf + ::View + FOVX/FOVY + NZP and
@@ -2505,7 +2571,46 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         fds::g_offAxisFrustumCull = false;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
-            Render(RenderPath::ForceForward);
+            if (rttDeferred) {
+                // Deferred RTT bake: render the recursive reflection through the
+                // deferred kernel (shadows + matches the main view) + the cone
+                // pass (disco beams), instead of the forward filler. Serial pass,
+                // so reuse the static per-RTT G-buffer + light/tile scratch and
+                // the global FList/g_mainCamera (which carry this slot's off-axis
+                // projection). Same inline machinery as the shard bake.
+                const size_t np = size_t(s.texW) * size_t(s.texH);
+                std::fill_n(s_rttGB.txtr.begin(), np, 0xFFFFFFFFu);
+                if (!s_rttGB.lightmapMF.empty())
+                    std::fill_n(s_rttGB.lightmapMF.begin(), np, 0u);
+                fds::RenderContext rctx;
+                rctx.scene       = sc;
+                rctx.camera      = fds::g_mainCamera;
+                rctx.faces.fList = FList;
+                rctx.faces.sList = SList;
+                rctx.faces.cAll  = CAll;
+                rctx.target.vpage            = (uint32_t*)s_rttSurf.Data;
+                rctx.target.bytesPerScanline = s_rttSurf.BPSL;
+                rctx.target.zpage16          = (uint16_t*)s_rttSurf.Z16;
+                rctx.target.xres             = s.texW;
+                rctx.target.yres             = s.texH;
+                rctx.target.gbuffer          = &s_rttGB;
+                MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
+                DeferredLightingCtx dctx{};
+                DeferredOverride ov;
+                ov.gb         = &s_rttGB;
+                ov.cam        = &fds::g_mainCamera;
+                ov.lights     = &s_rttLights;
+                ov.tileLights = s_rttTileLights.data();
+                ov.vpage      = s_rttSurf.Data;
+                ov.zpage16    = (word*)s_rttSurf.Z16;
+                ov.xres       = s.texW;
+                ov.yres       = s.texH;
+                ov.inlineDispatch = true;
+                Render_DeferredLighting(dctx, &ov);
+                Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
+            } else {
+                Render(RenderPath::ForceForward);
+            }
         }
         if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
             const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
