@@ -1465,18 +1465,11 @@ void Initialize_Greets()
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
 		ShadowMaps_BakeStatic(GreetSc);
 		fds::LightmapStampOrigBary(GreetSc);
-		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
-		const auto bakeSpawnT = std::chrono::steady_clock::now();
-		Scene * const greetScForBake = GreetSc;
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
-			fds::LightmapBake_Static(greetScForBake);
-			const auto bakeDoneT = std::chrono::steady_clock::now();
-			const double ms = std::chrono::duration<double, std::milli>(
-				bakeDoneT - bakeSpawnT).count();
-			std::fprintf(stderr,
-				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
-				ms);
-		});
+		// NOTE: the lightmap bake thread is spawned LATER (after the mirror /
+		// shatter setup below), not here — LightmapBake_Static reads Materials,
+		// and BuildMirrorsByTextureName / BuildGreetsShatter rewrite the
+		// Material table (Scene_RebuildMatTable). Spawning the bake before that
+		// raced the read against the write (TSan, 2026-06-16).
 	}
 
 	// Build per-mirror clones. Each material name passed to BuildMirror
@@ -1525,6 +1518,28 @@ void Initialize_Greets()
 		// Shatter shards for the largest wall screen — built hidden here so
 		// GreetsScene::init's Polys count sizes FList for them.
 		BuildGreetsShatter();
+	}
+
+	// Spawn the background lightmap bake AFTER all Material-table rewrites
+	// (the mirror + shatter setup above call Scene_RebuildMatTable). The bake
+	// thread reads Materials, so starting it earlier raced the read against
+	// those writes (TSan: LightmapBake_Static vs Scene_RebuildMatTable). The
+	// bake is still background — joined in Run_Greets before the first frame.
+	// Unconditional (matches the prior behaviour); LightmapBake_Static no-ops
+	// fast when --shadow-lightmap is off.
+	{
+		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
+		const auto bakeSpawnT = std::chrono::steady_clock::now();
+		Scene * const greetScForBake = GreetSc;
+		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
+			fds::LightmapBake_Static(greetScForBake);
+			const auto bakeDoneT = std::chrono::steady_clock::now();
+			const double ms = std::chrono::duration<double, std::milli>(
+				bakeDoneT - bakeSpawnT).count();
+			std::fprintf(stderr,
+				"[GREETS-BAKE] lightmap bake done in %.1f ms (background)\n",
+				ms);
+		});
 	}
 }
 
