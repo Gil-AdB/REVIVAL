@@ -380,6 +380,11 @@ the deferred kernel. `MekaleleFillRegionInline` fills the worker gb;
 **per-context G-buffer** half of the g_deferredCtx-singleton deletion.
 Greets (238 shards, 12 workers): forward parallel ~6.3ms, **deferred parallel
 ~20.5ms**, serial deferred ~195ms (9.5×). TSan 0 races.
+Plus **disco/spot volumetric cones** (d8b4aae): each worker runs
+`Render_VolumetricCones(dctx, inlineDispatch=true)` after the surface bake — the
+cone orchestrator now reads its target from ctx + has stack-local spot buffers +
+inline dispatch; main frame byte-identical (conetest-gated), TSan 0 races on
+greets. The deferred bake also flips it to a real CLI flag (`--shard-deferred`).
 
 **GOTCHA: clean-build before gating after header edits.** ThinLTO incremental
 builds drift cross-module inlining after editing a widely-included header
