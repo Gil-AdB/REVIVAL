@@ -777,7 +777,7 @@ static void BuildGreetsShatter()
 		const float vMargin = 0.02f * std::max(1.0f, v1 - v0);
 		const float maxDepth = 0.5f * std::min(u1 - u0, v1 - v0);
 		const float frontEps = 0.02f * maxDepth;  // ignore coplanar front faces
-		const float uExp = 0.30f * (u1 - u0), vExp = 0.30f * (v1 - v0);
+		const float uExp = 0.60f * (u1 - u0), vExp = 0.60f * (v1 - v0);
 		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
 		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -786,8 +786,13 @@ static void BuildGreetsShatter()
 			if (!T || !T->Faces) continue;
 			for (DWord fi = 0; fi < T->FIndex; ++fi) {
 				Face &F = T->Faces[fi];
+				// Any "screen*" material is this screen's own geometry (frame,
+				// emitter rims, panels — census: screen emiter / fance / green
+				// / screen 3); stairs/rooms in the volume don't match, so they
+				// stay. The footprint scopes it to THIS screen (others are on
+				// other walls).
 				const bool isFrameMat = F.Txtr && F.Txtr->Name &&
-				                        strstr(F.Txtr->Name, "screen emiter") != nullptr;
+				                        strstr(F.Txtr->Name, "screen") != nullptr;
 				const Vertex *vs[3] = { F.A, F.B, F.C };
 				bool inGlass = true, behindFront = false, inExp = true;
 				for (int j = 0; j < 3; ++j) {
@@ -820,35 +825,49 @@ static void BuildGreetsShatter()
 			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
 			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
 			             u1-u0, v1-v0);
-		// One-shot geometry scan: faces in an EXPANDED footprint but OUTSIDE
-		// the glass rect (the suspected bezel/border ring), with material
-		// name + depth, so we can see what survives the break as a border.
+		// One-shot per-material census over a GENEROUS region around the
+		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
+		// vs collected per material so we can see what survives the break
+		// and why (a material we don't target, or faces just outside the
+		// narrower collection bounds).
 		if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
-			const float ue = 0.30f * (u1 - u0), ve = 0.30f * (v1 - v0);
-			int shown = 0;
-			for (Object *Obj = GreetSc->ObjectHead; Obj && shown < 50; Obj = Obj->Next) {
+			const float ue = 0.60f * (u1 - u0), ve = 0.60f * (v1 - v0);
+			const float dWide = 1.5f * maxDepth;
+			struct Tally { std::string name; int total=0, collected=0; float dmin=1e30f, dmax=-1e30f; };
+			std::vector<Tally> tally;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 				if (Obj->Type != Obj_TriMesh) continue;
 				TriMesh *T = (TriMesh*)Obj->Data;
 				if (!T || !T->Faces) continue;
-				for (DWord fi = 0; fi < T->FIndex && shown < 50; ++fi) {
+				for (DWord fi = 0; fi < T->FIndex; ++fi) {
 					Face &F = T->Faces[fi];
+					const bool isFrameMat = F.Txtr && F.Txtr->Name &&
+					                        strstr(F.Txtr->Name, "screen") != nullptr;
 					const Vertex *vs[3] = { F.A, F.B, F.C };
-					float cu=0,cv=0,cd=0; bool inExp=true, inGlass=true;
+					float cd = 0; bool inWide=true, inGlass=true, behindFront=false, inExp=true;
 					for (int j = 0; j < 3; ++j) {
 						const Vector w = worldPos(vs[j], T);
 						const float pu=w.x*U.x+w.y*U.y+w.z*U.z, pv=w.x*V.x+w.y*V.y+w.z*V.z;
-						const float dp=(w.x*N.x+w.y*N.y+w.z*N.z)+d;
-						cu+=pu/3; cv+=pv/3; cd+=dp/3;
-						if (pu<u0-ue||pu>u1+ue||pv<v0-ve||pv>v1+ve||dp<-maxDepth||dp>maxDepth) inExp=false;
-						if (pu<u0-uMargin||pu>u1+uMargin||pv<v0-vMargin||pv>v1+vMargin) inGlass=false;
+						const float dp=(w.x*N.x+w.y*N.y+w.z*N.z)+d; cd+=dp/3;
+						if (pu<u0-ue||pu>u1+ue||pv<v0-ve||pv>v1+ve||dp<-dWide||dp>dWide) inWide=false;
+						if (dp < -frontEps) behindFront = true;
+						if (pu<u0-uMargin||pu>u1+uMargin||pv<v0-vMargin||pv>v1+vMargin||dp>frontEps||dp<-maxDepth) inGlass=false;
+						if (pu<u0-uExp||pu>u1+uExp||pv<v0-vExp||pv>v1+vExp||dp<-maxDepth||dp>maxDepth) inExp=false;
 					}
-					if (inExp && !inGlass) {
-						std::fprintf(stderr, "[SHATTER-SCAN] mat=%-24s d=%+.2f pu=%+.1f pv=%+.1f\n",
-						             (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)", cd, cu, cv);
-						++shown;
-					}
+					if (!inWide) continue;
+					const bool collected = (inGlass && behindFront) || (inExp && isFrameMat);
+					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
+					Tally *t = nullptr;
+					for (Tally &x : tally) if (x.name == nm) { t = &x; break; }
+					if (!t) { tally.push_back({nm,0,0,1e30f,-1e30f}); t = &tally.back(); }
+					t->total++; if (collected) t->collected++;
+					t->dmin = std::min(t->dmin, cd); t->dmax = std::max(t->dmax, cd);
 				}
 			}
+			for (const Tally &t : tally)
+				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d %s depth=[%+.2f..%+.2f]\n",
+				             t.name.c_str(), t.total, t.collected,
+				             t.collected < t.total ? "<-- SURVIVES" : "", t.dmin, t.dmax);
 		}
 	}
 
