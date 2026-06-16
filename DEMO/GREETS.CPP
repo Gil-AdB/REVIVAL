@@ -725,43 +725,58 @@ static void BuildGreetsShatter()
 	{ Material *t = MatLib; while (t->Next) t = t->Next; t->Next = g_greetsScreenHideMat; g_greetsScreenHideMat->Prev = t; }
 	Scene_RebuildMatTable(GreetSc);
 
-	// Collect the screen BOX's side/back faces (everything but the front
-	// mirror panel) so the break can hide them too. A box face is any
-	// face whose three verts all fall inside the panel's (u,v) footprint
-	// AND that extends BEHIND the front plane (N·P = -d is the front; the
-	// room-facing N means the body sits at N·P < -d). The all-verts-inside
-	// test rejects the surrounding wall (its verts spill past the
-	// footprint); the behind-front test rejects the front faces themselves
-	// (they're coplanar at depth ≈ 0). Depth is slabbed so we don't reach
-	// far room geometry — a screen box is shallow relative to its span.
+	// Collect every screen face the break must hide besides the front
+	// mirror panel (m.wallFaces). The screen is a box with a raised
+	// emissive frame, so two families survive otherwise:
+	//   (A) box body — side rims + back face: verts all inside the glass
+	//       (u,v) footprint AND extending BEHIND the front plane (N·P=-d
+	//       is the front; room-facing N puts the body at N·P < -d). The
+	//       all-inside test rejects the surrounding wall; behind-front
+	//       rejects the coplanar front faces; depth is slabbed so we
+	//       don't reach far geometry.
+	//   (B) the emissive frame ("screen emiter*") — it PROTRUDES in front
+	//       of the glass (positive depth) and sits just OUTSIDE the glass
+	//       rect, so (A) never catches it; that's the black border on the
+	//       wall after the break. Match it by material name within an
+	//       expanded footprint + depth slab, which scopes it to THIS
+	//       screen (other screens' frames are on other walls, and nearby
+	//       room geometry like the stairs has a different material).
 	g_greetsScreenBoxFaces.clear();
 	{
 		const float uMargin = 0.02f * std::max(1.0f, u1 - u0);
 		const float vMargin = 0.02f * std::max(1.0f, v1 - v0);
 		const float maxDepth = 0.5f * std::min(u1 - u0, v1 - v0);
 		const float frontEps = 0.02f * maxDepth;  // ignore coplanar front faces
+		const float uExp = 0.30f * (u1 - u0), vExp = 0.30f * (v1 - v0);
 		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
-		float dmin = 1e30f, dmax = -1e30f;
+		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
 			TriMesh *T = (TriMesh*)Obj->Data;
 			if (!T || !T->Faces) continue;
 			for (DWord fi = 0; fi < T->FIndex; ++fi) {
 				Face &F = T->Faces[fi];
+				const bool isFrameMat = F.Txtr && F.Txtr->Name &&
+				                        strstr(F.Txtr->Name, "screen emiter") != nullptr;
 				const Vertex *vs[3] = { F.A, F.B, F.C };
-				bool inFootprint = true, behindFront = false;
+				bool inGlass = true, behindFront = false, inExp = true;
 				for (int j = 0; j < 3; ++j) {
 					const Vector w  = worldPos(vs[j], T);
 					const float  pu = w.x*U.x + w.y*U.y + w.z*U.z;
 					const float  pv = w.x*V.x + w.y*V.y + w.z*V.z;
 					const float  depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d; // 0 = front
+					if (depth < -frontEps) behindFront = true;
 					if (pu < u0 - uMargin || pu > u1 + uMargin ||
 					    pv < v0 - vMargin || pv > v1 + vMargin ||
-					    depth > frontEps   || depth < -maxDepth) { inFootprint = false; break; }
-					if (depth < -frontEps) behindFront = true;
+					    depth > frontEps   || depth < -maxDepth) inGlass = false;
+					if (pu < u0 - uExp || pu > u1 + uExp || pv < v0 - vExp ||
+					    pv > v1 + vExp || depth < -maxDepth || depth > maxDepth) inExp = false;
 				}
-				if (inFootprint && behindFront) {
+				const bool isBox   = inGlass && behindFront;          // (A)
+				const bool isFrame = inExp   && isFrameMat;           // (B)
+				if (isBox || isFrame) {
 					g_greetsScreenBoxFaces.push_back(&F);
+					if (isFrame) ++nFrame;
 					if (dump) {
 						const Vector w = worldPos(F.A, T);
 						const float depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d;
@@ -771,10 +786,40 @@ static void BuildGreetsShatter()
 			}
 		}
 		if (dump)
-			std::fprintf(stderr, "[GREETS-SHATTER] box faces=%zu depth=[%.3f..%.3f] "
+			std::fprintf(stderr, "[GREETS-SHATTER] hide faces=%zu (frame=%d) depth=[%.3f..%.3f] "
 			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
-			             g_greetsScreenBoxFaces.size(), dmin, dmax, maxDepth,
+			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
 			             u1-u0, v1-v0);
+		// One-shot geometry scan: faces in an EXPANDED footprint but OUTSIDE
+		// the glass rect (the suspected bezel/border ring), with material
+		// name + depth, so we can see what survives the break as a border.
+		if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
+			const float ue = 0.30f * (u1 - u0), ve = 0.30f * (v1 - v0);
+			int shown = 0;
+			for (Object *Obj = GreetSc->ObjectHead; Obj && shown < 50; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				if (!T || !T->Faces) continue;
+				for (DWord fi = 0; fi < T->FIndex && shown < 50; ++fi) {
+					Face &F = T->Faces[fi];
+					const Vertex *vs[3] = { F.A, F.B, F.C };
+					float cu=0,cv=0,cd=0; bool inExp=true, inGlass=true;
+					for (int j = 0; j < 3; ++j) {
+						const Vector w = worldPos(vs[j], T);
+						const float pu=w.x*U.x+w.y*U.y+w.z*U.z, pv=w.x*V.x+w.y*V.y+w.z*V.z;
+						const float dp=(w.x*N.x+w.y*N.y+w.z*N.z)+d;
+						cu+=pu/3; cv+=pv/3; cd+=dp/3;
+						if (pu<u0-ue||pu>u1+ue||pv<v0-ve||pv>v1+ve||dp<-maxDepth||dp>maxDepth) inExp=false;
+						if (pu<u0-uMargin||pu>u1+uMargin||pv<v0-vMargin||pv>v1+vMargin) inGlass=false;
+					}
+					if (inExp && !inGlass) {
+						std::fprintf(stderr, "[SHATTER-SCAN] mat=%-24s d=%+.2f pu=%+.1f pv=%+.1f\n",
+						             (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)", cd, cu, cv);
+						++shown;
+					}
+				}
+			}
+		}
 	}
 
 	// ~1.2 shards per world unit, clamped.
