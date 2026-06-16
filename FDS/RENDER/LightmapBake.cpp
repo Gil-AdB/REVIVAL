@@ -31,6 +31,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <unistd.h>  // isatty for progress-bar carriage-return gating
+#include <semaphore>
+#include <Threads.h>  // ThreadPool — fan the per-face bake across cores
 #include <vector>
 
 namespace fds {
@@ -228,8 +230,11 @@ void LightmapBake_Static(Scene *Sc)
     const int numCubeOmnis = int(g_cubeShadowRefs.size());
 
     const auto t0 = std::chrono::steady_clock::now();
-    size_t meshCount = 0, faceCount = 0;
-    size_t texelsBaked = 0, texelsCovered = 0;
+    size_t meshCount = 0;
+    // Atomic: the per-face bake loop fans across the thread pool (each face is
+    // independent — disjoint lm writes), so these stats accumulate concurrently.
+    std::atomic<size_t> faceCount{0};
+    std::atomic<size_t> texelsBaked{0}, texelsCovered{0};
     size_t skippedDynamic = 0, considered = 0;
 
     // Pre-walk: count meshes we will actually bake so the progress bar
@@ -332,10 +337,13 @@ void LightmapBake_Static(Scene *Sc)
             lm.planarBases.assign(size_t(T->FIndex), FacePlanarBasis{});
         }
 
-        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+        // Per-face bake (independent: each face writes its own lm texels +
+        // planar basis; SampleStaticCubeAtWorld is read-only). Wrapped so the
+        // loop can fan across the pool below — this is the bulk of the bake.
+        auto bakeOneFace = [&](DWord fi) {
             const Face &F = T->Faces[fi];
-            if (!F.A || !F.B || !F.C) continue;
-            ++faceCount;
+            if (!F.A || !F.B || !F.C) return;
+            size_t fBaked = 0, fCovered = 0;
 
             // Vertex world positions for this face.
             Vector wA, wB, wC;
@@ -508,12 +516,41 @@ void LightmapBake_Static(Scene *Sc)
                         uint8_t lit = SampleStaticCubeAtWorld(cr, wp, constBias, faceSlopeBias, bakeMatId);
                         uint8_t *dst = lm.texel(int(fi), tx, ty) + oi;
                         *dst = lit;
-                        ++texelsBaked;
-                        if (lit > 0) { anyCovered = true; ++texelsCovered; }
+                        ++fBaked;
+                        if (lit > 0) { anyCovered = true; ++fCovered; }
                     }
                 }
                 if (anyCovered) lm.setCovers(int(fi), oi);
             }
+            texelsBaked.fetch_add(fBaked, std::memory_order_relaxed);
+            texelsCovered.fetch_add(fCovered, std::memory_order_relaxed);
+            faceCount.fetch_add(1, std::memory_order_relaxed);
+        };  // bakeOneFace
+
+        // Fan the per-face bake across the pool for big meshes; small meshes
+        // run serial. Faces are independent (disjoint lm texel writes), so the
+        // atomic cursor just hands them out. LOCAL join semaphore — the bake is
+        // on its own background thread, so it must NOT touch renderns::tileDone.
+        const uint32_t nf = T->FIndex;
+        size_t P = ThreadPool::instance().size();
+        // 32-face floor: greets's chunked room mesh is ~225 faces/chunk, so a
+        // higher cutoff left the bulk serial. Each face is 11 omnis × lmRes²
+        // samples — plenty to amortize the fan-out at 32+.
+        if (nf >= 32 && P > 1) {
+            std::atomic<uint32_t> cur{0};
+            std::counting_semaphore<256> done{0};
+            auto worker = [&]() {
+                uint32_t fi;
+                while ((fi = cur.fetch_add(1, std::memory_order_relaxed)) < nf)
+                    bakeOneFace(fi);
+                done.release();
+            };
+            for (size_t t = 1; t < P; ++t)
+                ThreadPool::instance().enqueue([&worker]{ worker(); });
+            worker();
+            for (size_t t = 0; t < P; ++t) done.acquire();
+        } else {
+            for (DWord fi = 0; fi < nf; ++fi) bakeOneFace(fi);
         }
         reportProgress(meshCount, name, false);
     }
@@ -531,9 +568,9 @@ void LightmapBake_Static(Scene *Sc)
         "[LM] LightmapBake_Static: %zu/%zu meshes kept (%zu skipped dynamic) / "
         "%zu faces / %d omnis × %d² texels → %zu baked, %zu lit (%.1f%%) in %.1f ms\n",
         meshCount, considered, skippedDynamic,
-        faceCount, numCubeOmnis, lmRes,
-        texelsBaked, texelsCovered,
-        texelsBaked ? 100.0 * double(texelsCovered) / double(texelsBaked) : 0.0,
+        faceCount.load(), numCubeOmnis, lmRes,
+        texelsBaked.load(), texelsCovered.load(),
+        texelsBaked.load() ? 100.0 * double(texelsCovered.load()) / double(texelsBaked.load()) : 0.0,
         ms);
 }
 
