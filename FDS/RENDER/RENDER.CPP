@@ -26,6 +26,7 @@
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in xpar-ids debug path
 #include "Base/Scene.h"
 #include "Base/RenderContext.h"
+#include "DeferredCommon.h"   // DeferredLightingCtx + g_deferredCtx (publish for strip path)
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -34,14 +35,17 @@
 // (RenderXparClumpInStrip) and by the legacy xpar peel.
 bool IsFrontFacingInViewSpace(const Face* F);
 
-// Defined in DeferredLighting.cpp.
-void Render_DeferredLighting();
+// Defined in the deferred TUs. The deferred lighting context is built by
+// Render_DeferredLighting (fills the passed ctx) and threaded to the
+// volumetric/fog orchestrators (RenderContext migration). DeferredLightingCtx
+// is defined in DeferredCommon.h (included below).
+void Render_DeferredLighting(DeferredLightingCtx& ctx);
 void Render_DeferredFogPass();
-void Render_VolumetricCones();
-void Render_OmniHalos();
-void Render_DeferredVolumetric();
-void Render_DeferredFastFog();
-void Render_DeferredFastFogSkyPaint();
+void Render_VolumetricCones(const DeferredLightingCtx& ctx);
+void Render_OmniHalos(const DeferredLightingCtx& ctx);
+void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
+void Render_DeferredFastFog(const DeferredLightingCtx& ctx);
+void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx& ctx);
 void Render_ScreenSpaceRain();
 void Render_LensDrops();
 void FastFog_BeginFrame();
@@ -425,13 +429,23 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		renderns::tileDone.acquire();
 	}
 
+	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
+	// migration): Render_DeferredLighting fills it; it's threaded to the
+	// volumetric/fog orchestrators. Published to the file-scope g_deferredCtx
+	// after fill for the one remaining un-threaded reader —
+	// RenderXparClumpInStrip on FILLERS' TBR strip path (threading the
+	// deferred type through FILLERS is a separate, gate-uncovered step). Empty
+	// in forward mode → the volumetric passes no-op (null lights), which is
+	// also safer than the old stale-singleton read.
+	DeferredLightingCtx dctx{};
 	if (deferred) {
 		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
 		// + linear falloff against the scene's omnis, modulated by the
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
-		Render_DeferredLighting();
+		Render_DeferredLighting(dctx);
+		g_deferredCtx = dctx;
 
 		// Deferred skybox: paint pixels the rasterizer didn't touch
 		// (zEnc == 0) by sampling the sky cube directly from the G-
@@ -460,9 +474,9 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				// otherwise keep stale VPage content (uninitialized on a
 				// scene's first frames) that the water then reflects.
 				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
-					Render_DeferredFastFog();
+					Render_DeferredFastFog(dctx);
 				else
-					Render_DeferredFastFogSkyPaint();
+					Render_DeferredFastFogSkyPaint(dctx);
 			} else
 				Render_DeferredFogPass();
 		}
@@ -663,10 +677,10 @@ xpar_done: ;
 	//     or halos if enabled.
 	if (!skipVolumetric) {
 		if (useUnifiedVolumetric()) {
-			Render_DeferredVolumetric();
+			Render_DeferredVolumetric(dctx);
 		} else {
-			Render_VolumetricCones();
-			Render_OmniHalos();
+			Render_VolumetricCones(dctx);
+			Render_OmniHalos(dctx);
 		}
 		// Screen-space rain LAST among the view-aligned passes (streaks
 		// overlay fog, beams and halos — near rain is in front of all of

@@ -2718,7 +2718,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 // condition variable that Render() already uses for the rasterizer
 // pass — fine because we wait synchronously between Render's tile
 // dispatch and our own.
-void Render_DeferredLighting() {
+void Render_DeferredLighting(DeferredLightingCtx &ctx) {
 	if (!g_gbuffer || !ZPage16 || !VPage) return;
 	const meka::GBuffer &gb = *g_gbuffer;
 	const size_t numPixels = size_t(XRes) * size_t(YRes);
@@ -3000,8 +3000,6 @@ void Render_DeferredLighting() {
 	// (Render_DeferredTransparentLighting_Tile) — same per-frame setup,
 	// no point rebuilding it. The kernels never run concurrently with
 	// each other, so the single instance is safe.
-	extern DeferredLightingCtx g_deferredCtx;
-	DeferredLightingCtx &ctx = g_deferredCtx;
 	ctx.gb         = &gb;
 	ctx.matTable   = matTable;
 	ctx.lights     = &lights;
@@ -3049,11 +3047,11 @@ void Render_DeferredLighting() {
 			const int x2 = std::min(x1 + tileSizeX, XRes);
 			const int tileIndex = j * numTilesX + i;
 			if (useOuterVec) {
-				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
 					Render_DeferredLighting_Tile_OuterVec(ctx, tileIndex, x1, y1, x2, y2);
 				});
 			} else {
-				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
 					Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
 				});
 			}
@@ -3075,7 +3073,7 @@ void Render_DeferredLighting() {
 				const int x1 = tileSizeX * i;
 				const int x2 = std::min(x1 + tileSizeX, XRes);
 				const int tileIndex = j * numTilesX + i;
-				ThreadPool::instance().enqueue([tileIndex, x1, y1, x2, y2]() {
+				ThreadPool::instance().enqueue([&ctx, tileIndex, x1, y1, x2, y2]() {
 					Render_DeferredLighting_TileFill(ctx, tileIndex, x1, y1, x2, y2);
 				});
 			}

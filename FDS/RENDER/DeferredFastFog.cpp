@@ -1774,7 +1774,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 	}
 }
 
-void Render_DeferredFastFog() {
+void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	if (!fds::FeatureFlags::fast_fog()) return;
 	if (!CurScene || !ZPage16 || !VPage) return;
 
@@ -1784,7 +1784,7 @@ void Render_DeferredFastFog() {
 	if (fogFar <= 0.0f) return;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 
-	extern DeferredLightingCtx g_deferredCtx;
+	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
 	const float (*w2)[3] = g_deferredCtx.viewToWorld;
 	const float camY = g_deferredCtx.cameraWorldY;
 
@@ -1985,11 +1985,11 @@ void Render_DeferredFastFog() {
 // far-plane amount: an upward mirrored ray exits the thin slab top quickly —
 // painting the full 1−e^{−density} made the whole mirrored sky glare
 // ambient-bright, which the water reflected as "white below the waterline".
-void Render_DeferredFastFogSkyPaint() {
+void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	if (!CurScene || !ZPage16 || !VPage) return;
 	const float fogFar = CurScene->FZP;
 	if (fogFar <= 0.0f) return;
-	extern DeferredLightingCtx g_deferredCtx;
+	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
 	const float (*w2)[3] = g_deferredCtx.viewToWorld;
 	const float camY    = g_deferredCtx.cameraWorldY;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
@@ -3067,11 +3067,11 @@ static void Render_DeferredVolumetric_Tile(
     }
 }
 
-void Render_DeferredVolumetric() {
+void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_unified, &g_volProf.n_unified);
     if (!CurScene || !ZPage16 || !VPage) return;
 
-    extern DeferredLightingCtx g_deferredCtx;
+    const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
     const ViewLightsSoA *const lights = g_deferredCtx.lights;
     if (!lights) return;
     const int numLights = g_deferredCtx.numLights;

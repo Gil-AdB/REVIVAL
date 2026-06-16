@@ -1402,7 +1402,7 @@ static void VolProf_Tick_impl() {
 
 void VolProf_Tick() { VolProf_Tick_impl(); }
 
-void Render_VolumetricCones() {
+void Render_VolumetricCones(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_cones, &g_volProf.n_cones);
     if (!CurScene || !ZPage16 || !VPage) return;
     const bool allCones = fds::FeatureFlags::draw_cones();
@@ -1428,11 +1428,9 @@ void Render_VolumetricCones() {
     // (g_deferredCtx.lights / .numLights). The per-tile TileLights apply a
     // surface-z cull that's incorrect for volumetric integration — see the
     // note inside Render_VolumetricCones_Tile.
-    extern DeferredLightingCtx g_deferredCtx;
-    const DeferredLightingCtx &ctx = g_deferredCtx;   // threaded to the tile fn
-    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    const ViewLightsSoA *const lights = ctx.lights;
     if (!lights) return;
-    const int numLights = g_deferredCtx.numLights;
+    const int numLights = ctx.numLights;
 
     // Pre-filter spotlight indices once per frame; tiles share the result.
     // Mirror-clone spots ARE admitted (beams show in mirrors): the tile
@@ -1499,7 +1497,7 @@ void Render_VolumetricCones() {
         // → FZP). Without this every narrow beam pays the per-pixel
         // quadratic + segment integral in nearly every tile.
         const bool coneCull = fds::FeatureFlags::spot_cone_cull() &&
-                              g_deferredCtx.tileLights != nullptr;
+                              ctx.tileLights != nullptr;
         const float sinO_cull = lights->sinOuter[li];
         const float fzpFar = CurScene->FZP > 0.0f ? CurScene->FZP : 1e4f;
         for (int j = tj_lo; j <= tj_hi; ++j) {
@@ -1510,7 +1508,7 @@ void Render_VolumetricCones() {
                     for (int sj = 0; sj < 2; ++sj)
                         for (int si = 0; si < 2; ++si) {
                             const int st = (j*2 + sj) * DEFERRED_NUM_TILES_X + (i*2 + si);
-                            const float zm = g_deferredCtx.tileLights[st].zMax;
+                            const float zm = ctx.tileLights[st].zMax;
                             zHiT = std::max(zHiT, (zm > 0.0f && zm < 1e30f) ? zm : fzpFar);
                         }
                     const float pad  = r * sinO_cull;
@@ -2227,7 +2225,7 @@ static void Render_OmniHalos_Tile(
     }
 }
 
-void Render_OmniHalos() {
+void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_halos, &g_volProf.n_halos);
     if (!CurScene || !ZPage16 || !VPage) return;
     if (fds::FeatureFlags::omni_halo_strength() <= 0.0f) return;
@@ -2238,11 +2236,9 @@ void Render_OmniHalos() {
     const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
 
-    extern DeferredLightingCtx g_deferredCtx;
-    const DeferredLightingCtx &ctx = g_deferredCtx;   // threaded to the tile fn
-    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    const ViewLightsSoA *const lights = ctx.lights;
     if (!lights) return;
-    const int numLights = g_deferredCtx.numLights;
+    const int numLights = ctx.numLights;
 
     static int omniIdx[DEFERRED_MAX_VIEW_LIGHTS];
     int omniCount = 0;
