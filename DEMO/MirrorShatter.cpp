@@ -767,6 +767,35 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 		std::fprintf(stderr, "[SHARD-REFL] %d shards / %zu workers in %.1f ms\n",
 		             N, P, std::chrono::duration<double, std::milli>(t1 - t0).count());
 	}
+
+	// FDS_SHARD_ATLAS_DUMP=<path>: de-tile + write the whole reflection atlas to
+	// a PPM at a fixed frame (FDS_SHARD_ATLAS_FRAME, default 30 — shard poses are
+	// deterministic, so forward vs deferred is a fair A/B for inspecting whether
+	// the deferred shadows actually land in the reflection cells). Diagnostic.
+	static const char* sAtlasDump = std::getenv("FDS_SHARD_ATLAS_DUMP");
+	if (sAtlasDump) {
+		static int sFrame = 0;
+		static const int target = std::getenv("FDS_SHARD_ATLAS_FRAME")
+		                        ? std::atoi(std::getenv("FDS_SHARD_ATLAS_FRAME")) : 30;
+		if (sFrame++ == target) {
+			const dword* atl = (const dword*)atlasTex_->Data;
+			const int blocksY = ah >> 2;
+			std::vector<unsigned char> img(size_t(aw) * size_t(ah) * 3);
+			for (int y = 0; y < ah; ++y)
+				for (int x = 0; x < aw; ++x) {
+					const int blk = ((x >> 2) * blocksY + (y >> 2)) << 4;
+					const dword px = atl[blk + ((y & 3) << 2) + (x & 3)];
+					const size_t o = (size_t(y) * aw + x) * 3;
+					img[o+0] = (px >> 16) & 0xFF; img[o+1] = (px >> 8) & 0xFF; img[o+2] = px & 0xFF;
+				}
+			if (std::FILE* f = std::fopen(sAtlasDump, "wb")) {
+				std::fprintf(f, "P6\n%d %d\n255\n", aw, ah);
+				std::fwrite(img.data(), 1, img.size(), f);
+				std::fclose(f);
+				std::fprintf(stderr, "[SHARD-ATLAS] frame %d -> %s (%dx%d)\n", target, sAtlasDump, aw, ah);
+			}
+		}
+	}
 }
 
 // Render one shard's live reflection into its atlas cell using ONLY this
