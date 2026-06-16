@@ -370,6 +370,22 @@ state (the `VertexScratch` clones isolate it) but the **shared per-mesh
 `TriMesh` struct fields** `Transform_Objects` writes in place
 (`BSphereScreenPos`). Audit those before parallelizing any new transform fan-out.
 
+**Parallel DEFERRED shard bake — DONE + TSan-clean (2edfac6 + 445493c).**
+`Render_DeferredLighting(ctx, const DeferredOverride* ov)` — ov=nullptr → engine
+globals (byte-identical main frame, clean-build gate ALL PASS); ov!=nullptr →
+per-worker G-buffer + view-space lights + tile buffer + surface + camera, tiles
+run inline on the worker thread. Each shard bakes shadowed/hue-correct through
+the deferred kernel. `MekaleleFillRegionInline` fills the worker gb;
+`FDS_SHARD_DEFERRED` routes through the parallel path. This is also the
+**per-context G-buffer** half of the g_deferredCtx-singleton deletion.
+Greets (238 shards, 12 workers): forward parallel ~6.3ms, **deferred parallel
+~20.5ms**, serial deferred ~195ms (9.5×). TSan 0 races.
+
+**GOTCHA: clean-build before gating after header edits.** ThinLTO incremental
+builds drift cross-module inlining after editing a widely-included header
+(DeferredCommon.h) → spurious gate FAILs on byte-identical source. `rm -rf build`
++ reconfigure + rebuild restores the baseline.
+
 **Remaining (not blocking):**
 - ~~Perf-on-greets measurement~~ — DONE: 52ms → 6.3ms (8.3×) on 12 workers.
 - Optional: TSan greets (mirrortest is the more adversarial config — it does
