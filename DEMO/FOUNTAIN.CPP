@@ -13,6 +13,7 @@
 #include "Clipper.h"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "RENDER/Hdr.h"
 #include <memory>
 #include <cstdlib>
 #include <cstdio>
@@ -2730,6 +2731,11 @@ struct FountainScene : SceneDriver {
 		// next, additive) is occluded by translucent surfaces (the glass dome)
 		// too — not just opaque. No-op outside the deferred xpar path.
 		Deferred_FoldXparDepthIntoMainZ();
+
+		// HDR (prototype): tonemap the deferred radiance buffer to the 8-bit VPage
+		// before the additive overlays (bolts) composite over it. No-op until the
+		// deferred passes populate g_hdrBuf (Phase 1). See docs/fountain_hdr_plan.md.
+		if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
 
 		// All live (parallel) bolts. Each holds for kBoltLife Timer units;
 		// RenderStrike regenerates the fractal path only on restrike-bucket

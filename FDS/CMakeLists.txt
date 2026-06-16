@@ -133,6 +133,8 @@ set(RENDER
     RENDER/EnvBake.cpp
     RENDER/EnvBake.h
     RENDER/GENERAL.H
+    RENDER/Hdr.cpp
+    RENDER/Hdr.h
     RENDER/Lighting.cpp
     RENDER/OffscreenView.cpp
     RENDER/OffscreenView.h
