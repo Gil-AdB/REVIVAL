@@ -335,7 +335,30 @@ on the Slice-3 critical path.)
   deferred per-frame), `FDS_SHARD_REFL_LOOP` (extend runtime for sampling).
   Kept gated in the tree for this work.
 
-## Progress log
+## Progress log (current)
+
+**Both legs' render state is now context-owned (gate-verified).**
+- Forward (parallelism-critical): `RenderInner`/`RenderForwardRegionInline`
+  take a per-pass `fds::RenderContext` (5adda03). renderFrame builds the
+  primary context; the shard bake passes its own.
+- Deferred: `renderFrame` owns a stack `DeferredLightingCtx`, fills it via
+  `Render_DeferredLighting(ctx)`, threads it to all volumetric/fog
+  orchestrators; tile kernels take it by param (d4e2e49, 39b6110, e96b799,
+  50ffe20). `g_deferredCtx` survives only as a *published copy* renderFrame
+  writes, read by two un-threaded sites: `RenderXparClumpInStrip` (FILLERS TBR
+  strip path) and the fog tile.
+
+**Gate-coverable de-globalization is essentially complete.** What remains:
+1. **Delete the published `g_deferredCtx`** — thread the ctx through
+   `TBR_Render` → `RenderXparClumpInStrip` (FILLERS.CPP) + the fog tile. Small
+   + mechanical, but the TBR strip path is NOT covered by render_gate.sh
+   (mirrortest/city/greets fall through to the legacy peel; need a TBR scene
+   or manual check). Low priority — it's a published copy, not a divergence.
+2. **Slice 6 — parallelize** (per-worker `VertexScratch`/surface/camera).
+   CONCURRENCY code: render_gate.sh canNOT validate it. Needs TSan + the
+   concurrent-bench methodology (shadow-flicker lesson). Do fresh.
+
+## Progress log (history)
 
 - Slice 1 — DONE (`primaryRenderContext()` scaffolding).
 - Slice 2 — DONE + measured; deferred bake kept opt-in (forward default).
