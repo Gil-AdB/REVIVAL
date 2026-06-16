@@ -1009,7 +1009,11 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // earlier 0.5 cutoff misjudged those as box edge strips and they
     // never became mirrors at all). Requires --mirror-rtt and an
     // rttSlots out-param.
-    constexpr float kMinRttArea = 0.2f;
+    // Tunable (default 1.5): drops the ~1.0-area central column panels + ~0.30
+    // box edge strips — barely-visible half-silvered screens not worth an RTT
+    // slot. Only end-screen CLONES (>=2.0) survive as first-order mirrors;
+    // second-order/recursive RTT is built separately. Set 0.2 to re-include.
+    const float kMinRttArea = fds::FeatureFlags::greets_mirror_rtt_min_area();
     const bool wantRtt = rttSlots && fds::FeatureFlags::mirror_rtt();
 
     int added = 0, addedRtt = 0, skippedSlivers = 0, skippedHorizontal = 0;
