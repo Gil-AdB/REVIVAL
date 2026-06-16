@@ -160,14 +160,17 @@ void RenderForwardRegionInline(const fds::RenderContext& ctx,
 	renderns::tileDone.acquire();   // drain RenderInner's release (non-blocking)
 }
 
-// Mekalele G-buffer fill of ctx's face list into ctx.target's G-buffer —
+// Deferred G-buffer fill of ctx's face list into ctx.target's G-buffer —
 // single-threaded, inline, no tileDone traffic. The deferred sibling of
-// RenderForwardRegionInline: the parallel deferred shard bake (MirrorShatter)
-// calls this on a pool thread to fill its own G-buffer, then runs
-// Render_DeferredLighting with a per-worker DeferredOverride to shade it.
-// Opaque only — shard reflections render plain room geometry (no reflective /
-// additive / transparent faces), so every face routes to Mekalele.
-// ctx.target.gbuffer MUST be set (unlike the forward path, which nulls it).
+// RenderForwardRegionInline: the deferred shard bake (MirrorShatter) and the
+// deferred mirror RTT (GreetsMirror) call this to fill their own G-buffer,
+// then run Render_DeferredLighting with a per-pass DeferredOverride to shade it.
+// Same face routing as RenderInnerMekalele (the main deferred opaque pass) so
+// an offscreen view of the full room renders correctly: opaque → Mekalele
+// (G-buffer); reflective → forward env filler straight to vpage (the deferred
+// kernel leaves those mat32-sentinel pixels alone); additive → forward filler;
+// transparent → skipped (no xpar pass offscreen). ctx.target.gbuffer MUST be
+// set (unlike the forward path, which nulls it).
 void MekaleleFillRegionInline(const fds::RenderContext& ctx,
                               float x1, float y1, float x2, float y2) {
 	FrustumClipper clipper;
@@ -184,7 +187,20 @@ void MekaleleFillRegionInline(const fds::RenderContext& ctx,
 		Vertex* C = F->C;
 		if ((A->Flags & B->Flags & C->Flags) & Vtx_Visible) continue;
 		if (!F->Txtr || !F->Txtr->Txtr) continue;
-		clipper.Render(F, Mekalele, false, rt, cam);
+		const dword txtrFlags = F->Txtr->Flags;
+		if (txtrFlags & Mat_Transparent) continue;   // no offscreen xpar pass
+		if (F->Flags & Face_Reflective) {
+			// Clone env faces gate on the mirror mask (which an offscreen
+			// G-buffer doesn't carry) — skip them; regular reflective faces
+			// (disco ball, windows) render the env map straight to vpage.
+			if (F->mirrorMaskTag != 0) continue;
+			clipper.Render(F, TheOtherBarry<barry::TBlendMode::OVERWRITE,
+			               barry::TTextureMode::TEXTURETEXTURE>, false, rt, cam);
+		} else if (txtrFlags & Mat_Additive) {
+			clipper.Render(F, F->Filler, false, rt, cam);   // TheOtherBarry<ADDITIVE>
+		} else {
+			clipper.Render(F, Mekalele, false, rt, cam);
+		}
 	}
 }
 

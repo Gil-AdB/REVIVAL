@@ -14,6 +14,8 @@
 #include <Base/Vertex.h>
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
 #include <RENDER/OffscreenView.h>  // OffscreenViewScope (RTT world swap)
+#include <RENDER/DeferredCommon.h> // DeferredOverride + Render_DeferredLighting/VolumetricCones (deferred RTT)
+#include <Base/RenderContext.h>    // fds::RenderContext (deferred RTT bake)
 
 #include <algorithm>
 #include <chrono>
@@ -2410,6 +2412,28 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s_rttInit = true;
     }
 
+    // --shard-deferred also routes the RTT through the deferred kernel +
+    // cone pass (shadows + disco beams in the recursive mirror, matching the
+    // main view) instead of the forward filler. Serial pass → reuse one static
+    // G-buffer + light/tile scratch sized to the max RTT target.
+    const bool rttDeferred = fds::FeatureFlags::shard_deferred();
+    static meka::GBuffer            s_rttGB;
+    static ViewLightsSoA            s_rttLights;
+    static std::vector<TileLights>  s_rttTileLights;
+    static bool                     s_rttGBInit = false;
+    if (rttDeferred && !s_rttGBInit) {
+        s_rttGB.normal.assign(kRttTexels, 0);
+        s_rttGB.txtr.assign(kRttTexels, 0xFFFFFFFFu);
+        s_rttGB.tangent.assign(kRttTexels, 0);
+        s_rttGB.shadowMatID.assign(kRttTexels, 0);
+        if (fds::FeatureFlags::shadow_lightmap()) {
+            s_rttGB.lightmapMF.assign(kRttTexels, 0);
+            s_rttGB.lightmapST.assign(kRttTexels, 0);
+        }
+        s_rttTileLights.resize(DEFERRED_NUM_TILES);
+        s_rttGBInit = true;
+    }
+
     // ── Offscreen view scope ────────────────────────────────────────
     // Owns the world-state swap: locks out EngineResize, saves and (in
     // its destructor) restores MainSurf + ::View + FOVX/FOVY + NZP and
@@ -2543,7 +2567,46 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         fds::g_offAxisFrustumCull = false;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
-            Render(RenderPath::ForceForward);
+            if (rttDeferred) {
+                // Deferred RTT bake: render the recursive reflection through the
+                // deferred kernel (shadows + matches the main view) + the cone
+                // pass (disco beams), instead of the forward filler. Serial pass,
+                // so reuse the static per-RTT G-buffer + light/tile scratch and
+                // the global FList/g_mainCamera (which carry this slot's off-axis
+                // projection). Same inline machinery as the shard bake.
+                const size_t np = size_t(s.texW) * size_t(s.texH);
+                std::fill_n(s_rttGB.txtr.begin(), np, 0xFFFFFFFFu);
+                if (!s_rttGB.lightmapMF.empty())
+                    std::fill_n(s_rttGB.lightmapMF.begin(), np, 0u);
+                fds::RenderContext rctx;
+                rctx.scene       = sc;
+                rctx.camera      = fds::g_mainCamera;
+                rctx.faces.fList = FList;
+                rctx.faces.sList = SList;
+                rctx.faces.cAll  = CAll;
+                rctx.target.vpage            = (uint32_t*)s_rttSurf.Data;
+                rctx.target.bytesPerScanline = s_rttSurf.BPSL;
+                rctx.target.zpage16          = (uint16_t*)s_rttSurf.Z16;
+                rctx.target.xres             = s.texW;
+                rctx.target.yres             = s.texH;
+                rctx.target.gbuffer          = &s_rttGB;
+                MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
+                DeferredLightingCtx dctx{};
+                DeferredOverride ov;
+                ov.gb         = &s_rttGB;
+                ov.cam        = &fds::g_mainCamera;
+                ov.lights     = &s_rttLights;
+                ov.tileLights = s_rttTileLights.data();
+                ov.vpage      = s_rttSurf.Data;
+                ov.zpage16    = (word*)s_rttSurf.Z16;
+                ov.xres       = s.texW;
+                ov.yres       = s.texH;
+                ov.inlineDispatch = true;
+                Render_DeferredLighting(dctx, &ov);
+                Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
+            } else {
+                Render(RenderPath::ForceForward);
+            }
         }
         if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
             const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
