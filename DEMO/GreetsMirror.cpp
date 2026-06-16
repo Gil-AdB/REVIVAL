@@ -2569,15 +2569,16 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         fds::g_offAxisFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         fds::g_offAxisFrustumCull = false;
-        // Deferred RTT is scoped to the half-silvered text-screen panels
-        // (textTex != null = greets's "screen"): there the shadowed,
-        // cone-lit reflection matches the main view and is worth the cost.
-        // The geometry-based recursive / portal slots (the teleporter
-        // mirror) gain almost nothing visible from the deferred kernel —
-        // they're flat reflections of room geometry — while paying the
-        // full per-slot G-buffer fill + cone pass, so they stay on the
-        // forward filler regardless of --shard-deferred.
-        const bool slotDeferred = rttDeferred && s.textTex != nullptr;
+        // Every rendering RTT slot is an order-2 reflection that shows the
+        // room (the disco + its volumetric cones live there), so they ALL
+        // want the deferred kernel when --shard-deferred is on — without it
+        // the cones are missing from the reflection inside the screens
+        // (the m2->m1 "screen reflects the room clone" slot is the obvious
+        // case). The forward-clone room mirror (#1) is NOT an RTT slot, so
+        // it's untouched by this flag regardless. (An earlier textTex gate
+        // tried to keep "geometry" slots forward but only managed to strip
+        // the cones from the very reflections that need them.)
+        const bool slotDeferred = rttDeferred;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
             if (slotDeferred) {
@@ -2631,7 +2632,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             }
             std::fprintf(stderr,
                 "[MIRROR-RTT] order=%d %s job: %d/%d color px, %d z px, CAll=%d\n",
-                int(s.order), slotDeferred ? "deferred(screen)" : "forward(geom)",
+                int(s.order), slotDeferred ? "deferred" : "forward",
                 nz, s.texW * s.texH, nzz, int(CAll));
         }
         // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
