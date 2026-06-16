@@ -92,6 +92,33 @@ static Texture *makeFlatTexture(byte r, byte g, byte b) {
 	return T;
 }
 
+// Per-frame live tint for the teleporter portal mirror (#1). The deferred
+// kernel lights a TEXTURED material as Luminosity*255 (pure white) and
+// IGNORES BaseCol (DeferredSurfaceKernel: `if (Mat->Txtr) lit = Lum*255`),
+// so the tint must ride on the TEXTURE, not BaseCol. The portal wall was
+// retargeted to a transparent clone with a flat synth texture + an alpha
+// sentinel of -1 ("contribute nothing"). Swap that texture to a cool
+// silver and give it a positive blend alpha: the kernel then composites
+// silver*alpha + reflection*(1-alpha). pt=0 restores the clear-portal
+// sentinel. Re-applied every frame so the tuning console / greets.params
+// can drive it.
+static void GreetsApplyLiveTints()
+{
+	static Texture *sPortalSilver = nullptr;
+	if (!sPortalSilver) sPortalSilver = makeFlatTexture(185, 195, 215);  // cool silver
+	const float pt = fds::FeatureFlags::greets_portal_tint();
+	for (fds::Mirror &m : g_greetsMirrors) {
+		if (m.wallMaterialName.find("teleporter") == std::string::npos) continue;
+		if (!m.wallMatClone) continue;
+		if (pt <= 0.0001f) {
+			m.wallMatClone->XparBlendAlpha = -1.0f;   // sentinel: clear portal
+		} else {
+			m.wallMatClone->Txtr           = sPortalSilver;          // tint via texture
+			m.wallMatClone->XparBlendAlpha = (pt < 1.0f ? pt : 1.0f) * 0.5f;
+		}
+	}
+}
+
 // Forward-declared at namespace scope (the rest of this TU is in an
 // anonymous namespace where `extern` would silently get internal
 // linkage and the linker would fail to find the real definition in
@@ -704,21 +731,7 @@ static void BuildGreetsShatter()
 	// lighting doesn't dim it — matching the intact screen's reflective look
 	// rather than popping to silver on the break.
 	Material *shardMat = getAlignedType<Material>(16);
-	// Silver half-silvered tint to match the intact screen's glass cast.
-	// The env filler bakes reflection(env) + baseTexture/2 (TheOtherBarry
-	// TEXTURETEXTURE), so the shard's FLAT texture is the additive base —
-	// a cool-silver value here lifts the reflection toward silver. Scaled
-	// by --greets-shard-silver so the shade can be dialled to the unbroken
-	// screen; 0 keeps the legacy near-black (pure mirror) look. BaseCol
-	// stays near-black with Luminosity=1 so the gouraud colorize saturates
-	// bright (≈ identity) and doesn't multiply-dim the reflection.
-	{
-		const float s = fds::FeatureFlags::greets_shard_silver();
-		const int r = int(20.0f + s * (185.0f - 20.0f));
-		const int g = int(20.0f + s * (195.0f - 20.0f));
-		const int b = int(24.0f + s * (215.0f - 24.0f));
-		shardMat->Txtr   = makeFlatTexture(r, g, b);
-	}
+	shardMat->Txtr       = makeFlatTexture(20, 20, 24);
 	shardMat->BaseCol    = Color{24.0f, 20.0f, 20.0f, 255.0f};
 	shardMat->Diffuse    = 0.0f;
 	shardMat->Specular   = 0.0f;
@@ -1637,6 +1650,10 @@ void Initialize_Greets()
 		// Shatter shards for the largest wall screen — built hidden here so
 		// GreetsScene::init's Polys count sizes FList for them.
 		BuildGreetsShatter();
+		// Apply the portal tint (#1) once at init so it's present on the
+		// first frame and in the headless snapshot (which doesn't run the
+		// tick where the per-frame re-apply lives).
+		GreetsApplyLiveTints();
 	}
 
 	// Spawn the background lightmap bake AFTER all Material-table rewrites
@@ -2258,6 +2275,10 @@ struct GreetsScene : SceneDriver {
 		// ball is Tri_Possessed; spots' spline-stamped IPos/IDir get
 		// overwritten here), before the mirrors re-mirror it.
 		fds::UpdateDiscoBall(GreetSc, (float)Timer);
+
+		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
+		// every frame so the tuning console / greets.params can drive them.
+		GreetsApplyLiveTints();
 
 		fds::UpdateAllMirrors(GreetSc, g_greetsMirrors);
 

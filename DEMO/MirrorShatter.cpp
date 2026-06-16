@@ -610,6 +610,32 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 				}
 			}
 
+			// Silver half-silvered glaze (#3): the shards display the atlas
+			// texel as Luminosity*255 (white) — BaseCol is ignored for a
+			// textured material in the deferred kernel — so the only way to
+			// tint them is in the baked pixels here. Dim the reflection a
+			// touch and add a cool-silver veil, matching the intact screen's
+			// glass cast. Scaled by --greets-shard-silver (0 = pure mirror).
+			// Re-baked every frame, so the tuning console drives it live.
+			{
+				const float sv = fds::FeatureFlags::greets_shard_silver();
+				if (sv > 0.001f) {
+					const uint32_t dimQ = uint32_t((1.0f - 0.25f * sv) * 256.0f);
+					const int veilB = int(120.0f * sv);   // cooler: more blue
+					const int veilG = int(104.0f * sv);
+					const int veilR = int(88.0f  * sv);
+					uint32_t* px = (uint32_t*)reflSurf_->Data;
+					for (int i = 0; i < texRes_ * texRes_; ++i) {
+						const uint32_t c = px[i];
+						int b = int(((c        & 0xFF) * dimQ) >> 8) + veilB;
+						int g = int((((c >> 8)  & 0xFF) * dimQ) >> 8) + veilG;
+						int r = int((((c >> 16) & 0xFF) * dimQ) >> 8) + veilR;
+						if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
+						px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
+					}
+				}
+			}
+
 			// Composite the shard's fixed text fragment over its reflection,
 			// half-silvered: out = text + reflection*gain (text rides on top).
 			// The window→text-UV map is an affine through the shard's CURRENT
@@ -959,6 +985,28 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			const uint32_t g = (((c >> 8)  & 0xFF) * gq) >> 8;
 			const uint32_t r = (((c >> 16) & 0xFF) * gq) >> 8;
 			px[i] = b | (g << 8) | (r << 16) | 0xFF000000u;
+		}
+	}
+
+	// Silver half-silvered glaze (#3) — see the serial path for why this
+	// must tint the baked pixels (textured atlas → lit as white, BaseCol
+	// ignored). Dim + cool-silver veil, scaled by --greets-shard-silver.
+	{
+		const float sv = fds::FeatureFlags::greets_shard_silver();
+		if (sv > 0.001f) {
+			const uint32_t dimQ = uint32_t((1.0f - 0.25f * sv) * 256.0f);
+			const int veilB = int(120.0f * sv);   // cooler: more blue
+			const int veilG = int(104.0f * sv);
+			const int veilR = int(88.0f  * sv);
+			uint32_t* px = (uint32_t*)w.surf.Data;
+			for (int i = 0; i < texRes_ * texRes_; ++i) {
+				const uint32_t c = px[i];
+				int b = int(((c        & 0xFF) * dimQ) >> 8) + veilB;
+				int g = int((((c >> 8)  & 0xFF) * dimQ) >> 8) + veilG;
+				int r = int((((c >> 16) & 0xFF) * dimQ) >> 8) + veilR;
+				if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
+				px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
+			}
 		}
 	}
 
