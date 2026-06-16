@@ -777,7 +777,11 @@ static void BuildGreetsShatter()
 		const float vMargin = 0.02f * std::max(1.0f, v1 - v0);
 		const float maxDepth = 0.5f * std::min(u1 - u0, v1 - v0);
 		const float frontEps = 0.02f * maxDepth;  // ignore coplanar front faces
-		const float uExp = 0.60f * (u1 - u0), vExp = 0.60f * (v1 - v0);
+		// 1.0x footprint: the half-silvered glass ("screen 3") edge faces and
+		// the box frame spill well past the glass rect; the material filter
+		// ("screen") keeps this scoped to THIS screen (walls/stairs/rooms and
+		// neighbouring screens on other planes don't match here).
+		const float uExp = 1.00f * (u1 - u0), vExp = 1.00f * (v1 - v0);
 		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
 		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -833,7 +837,7 @@ static void BuildGreetsShatter()
 		if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
 			const float ue = 1.00f * (u1 - u0), ve = 1.00f * (v1 - v0);
 			const float dWide = 2.5f * maxDepth;
-			struct Tally { std::string name; int total=0, collected=0, reflective=0; float dmin=1e30f, dmax=-1e30f; };
+			struct Tally { std::string name; int total=0, collected=0, reflective=0, transparent=0; float dmin=1e30f, dmax=-1e30f; };
 			std::vector<Tally> tally;
 			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 				if (Obj->Type != Obj_TriMesh) continue;
@@ -859,15 +863,16 @@ static void BuildGreetsShatter()
 					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
 					Tally *t = nullptr;
 					for (Tally &x : tally) if (x.name == nm) { t = &x; break; }
-					if (!t) { tally.push_back({nm,0,0,0,1e30f,-1e30f}); t = &tally.back(); }
+					if (!t) { tally.push_back({nm,0,0,0,0,1e30f,-1e30f}); t = &tally.back(); }
 					t->total++; if (collected) t->collected++;
 					if (F.Flags & Face_Reflective) t->reflective++;
+					if (F.Txtr && (F.Txtr->Flags & Mat_Transparent)) t->transparent++;
 					t->dmin = std::min(t->dmin, cd); t->dmax = std::max(t->dmax, cd);
 				}
 			}
 			for (const Tally &t : tally)
-				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d refl=%-4d %s depth=[%+.2f..%+.2f]\n",
-				             t.name.c_str(), t.total, t.collected, t.reflective,
+				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d refl=%-4d xpar=%-4d %s depth=[%+.2f..%+.2f]\n",
+				             t.name.c_str(), t.total, t.collected, t.reflective, t.transparent,
 				             t.collected < t.total ? "<-- SURVIVES" : "", t.dmin, t.dmax);
 			// Scene-wide reflective-face dump (robot-reflecting strip hunt):
 			// one line per Face_Reflective material with count + world bbox +
