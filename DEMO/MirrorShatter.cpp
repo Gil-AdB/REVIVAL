@@ -422,13 +422,12 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 		}
 	Scene_RebuildMatTable(sc);
 
-	// FDS_SHARD_DEFERRED: bake each shard's reflection through the DEFERRED
-	// path (shadowed, per-pixel — matches the main view, closes the residual
-	// unshadowed-brightness gap) instead of forward. Needs a G-buffer sized
-	// to the bake target, swapped into the g_gbuffer globals per render.
-	// (Slice 2 of docs/RENDER_CONTEXT_PLAN.md — interim global-swap until the
-	// RenderContext threads the gbuffer through; serial-only, fine pre-Slice-6.)
-	deferredBake_ = std::getenv("FDS_SHARD_DEFERRED") != nullptr;
+	// --shard-deferred: bake each shard's reflection through the DEFERRED kernel
+	// (shadowed, lit exactly as the main deferred view) instead of the forward
+	// filler. The parallel path gives each worker its own G-buffer +
+	// DeferredOverride (renderShardIntoCell); the serial fallback
+	// (FDS_SHARD_REFL_SERIAL) still swaps the g_gbuffer globals per render.
+	deferredBake_ = fds::FeatureFlags::shard_deferred();
 	if (deferredBake_) {
 		const size_t np = size_t(texRes_) * size_t(texRes_);
 		auto mk = [&](bool xpar) {
