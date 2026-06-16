@@ -68,6 +68,14 @@ static int                g_greetsShatterMirror = -1;
 // shatters. Opaque Flags=0 keeps Transform happy; Txtr=null makes the
 // rasterizer skip every face (RenderInner: `!F->Txtr->Txtr` → continue).
 static Material          *g_greetsScreenHideMat = nullptr;
+// The screen is a thin BOX, not a flat quad: besides the front mirror
+// faces (m.wallFaces) it has side rims + a back face, with their OWN
+// material — not in wallFaces, so the front-face hide alone left them
+// behind as a dark strip on the wall after the break. Collected at
+// BuildGreetsShatter (faces whose verts all fall inside the panel's
+// (u,v) footprint AND sit behind the front plane) and retargeted to
+// the hide material alongside m.wallFaces on trigger.
+static std::vector<Face*> g_greetsScreenBoxFaces;
 
 // 1x1 BGRA texture from an (R,G,B) triple — the shard material's base so
 // the rasterizer's F->Txtr->Txtr deref is valid (GreetsMirror has an
@@ -716,6 +724,58 @@ static void BuildGreetsShatter()
 	g_greetsScreenHideMat->Next = nullptr;
 	{ Material *t = MatLib; while (t->Next) t = t->Next; t->Next = g_greetsScreenHideMat; g_greetsScreenHideMat->Prev = t; }
 	Scene_RebuildMatTable(GreetSc);
+
+	// Collect the screen BOX's side/back faces (everything but the front
+	// mirror panel) so the break can hide them too. A box face is any
+	// face whose three verts all fall inside the panel's (u,v) footprint
+	// AND that extends BEHIND the front plane (N·P = -d is the front; the
+	// room-facing N means the body sits at N·P < -d). The all-verts-inside
+	// test rejects the surrounding wall (its verts spill past the
+	// footprint); the behind-front test rejects the front faces themselves
+	// (they're coplanar at depth ≈ 0). Depth is slabbed so we don't reach
+	// far room geometry — a screen box is shallow relative to its span.
+	g_greetsScreenBoxFaces.clear();
+	{
+		const float uMargin = 0.02f * std::max(1.0f, u1 - u0);
+		const float vMargin = 0.02f * std::max(1.0f, v1 - v0);
+		const float maxDepth = 0.5f * std::min(u1 - u0, v1 - v0);
+		const float frontEps = 0.02f * maxDepth;  // ignore coplanar front faces
+		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
+		float dmin = 1e30f, dmax = -1e30f;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			if (!T || !T->Faces) continue;
+			for (DWord fi = 0; fi < T->FIndex; ++fi) {
+				Face &F = T->Faces[fi];
+				const Vertex *vs[3] = { F.A, F.B, F.C };
+				bool inFootprint = true, behindFront = false;
+				for (int j = 0; j < 3; ++j) {
+					const Vector w  = worldPos(vs[j], T);
+					const float  pu = w.x*U.x + w.y*U.y + w.z*U.z;
+					const float  pv = w.x*V.x + w.y*V.y + w.z*V.z;
+					const float  depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d; // 0 = front
+					if (pu < u0 - uMargin || pu > u1 + uMargin ||
+					    pv < v0 - vMargin || pv > v1 + vMargin ||
+					    depth > frontEps   || depth < -maxDepth) { inFootprint = false; break; }
+					if (depth < -frontEps) behindFront = true;
+				}
+				if (inFootprint && behindFront) {
+					g_greetsScreenBoxFaces.push_back(&F);
+					if (dump) {
+						const Vector w = worldPos(F.A, T);
+						const float depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d;
+						dmin = std::min(dmin, depth); dmax = std::max(dmax, depth);
+					}
+				}
+			}
+		}
+		if (dump)
+			std::fprintf(stderr, "[GREETS-SHATTER] box faces=%zu depth=[%.3f..%.3f] "
+			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
+			             g_greetsScreenBoxFaces.size(), dmin, dmax, maxDepth,
+			             u1-u0, v1-v0);
+	}
 
 	// ~1.2 shards per world unit, clamped.
 	auto clampi = [](int x, int lo, int hi){ return x < lo ? lo : (x > hi ? hi : x); };
@@ -2100,16 +2160,16 @@ struct GreetsScene : SceneDriver {
 				                                        haveText ? A : nullptr);
 				m.broken = true;   // UpdateAllMirrors closes the reflection
 				// Hide the panel surface itself (reflection + half-silvered
-				// text) — the shards replace it. Per-face Txtr swap; the
-				// faces are shared in the room mesh so we can't hide a mesh.
-				// TODO(shatter): m.wallFaces is only the FRONT mirror face.
-				// The screen's box has a back face + side faces (own material,
-				// not in wallFaces) that survive the break — visible as a black
-				// vertical line on the wall afterwards. Hide the whole screen
-				// box (by mesh, or collect the coplanar-cluster's other faces)
-				// when polishing. Non-urgent.
-				if (g_greetsScreenHideMat)
-					for (Face *F : m.wallFaces) F->Txtr = g_greetsScreenHideMat;
+				// text) AND the screen box's side/back faces — the shards
+				// replace the whole box. Per-face Txtr swap; the faces are
+				// shared in the room mesh so we can't hide a mesh. The box
+				// faces (side rims + back) were collected at build by
+				// footprint + behind-front-plane test; without this they
+				// survived as a dark strip on the wall after the break.
+				if (g_greetsScreenHideMat) {
+					for (Face *F : m.wallFaces)            F->Txtr = g_greetsScreenHideMat;
+					for (Face *F : g_greetsScreenBoxFaces) F->Txtr = g_greetsScreenHideMat;
+				}
 				std::fprintf(stderr, "[GREETS-SHATTER] broke mirror %d\n",
 				             g_greetsShatterMirror);
 			}
