@@ -831,9 +831,9 @@ static void BuildGreetsShatter()
 		// and why (a material we don't target, or faces just outside the
 		// narrower collection bounds).
 		if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
-			const float ue = 0.60f * (u1 - u0), ve = 0.60f * (v1 - v0);
-			const float dWide = 1.5f * maxDepth;
-			struct Tally { std::string name; int total=0, collected=0; float dmin=1e30f, dmax=-1e30f; };
+			const float ue = 1.00f * (u1 - u0), ve = 1.00f * (v1 - v0);
+			const float dWide = 2.5f * maxDepth;
+			struct Tally { std::string name; int total=0, collected=0, reflective=0; float dmin=1e30f, dmax=-1e30f; };
 			std::vector<Tally> tally;
 			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 				if (Obj->Type != Obj_TriMesh) continue;
@@ -859,15 +859,45 @@ static void BuildGreetsShatter()
 					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
 					Tally *t = nullptr;
 					for (Tally &x : tally) if (x.name == nm) { t = &x; break; }
-					if (!t) { tally.push_back({nm,0,0,1e30f,-1e30f}); t = &tally.back(); }
+					if (!t) { tally.push_back({nm,0,0,0,1e30f,-1e30f}); t = &tally.back(); }
 					t->total++; if (collected) t->collected++;
+					if (F.Flags & Face_Reflective) t->reflective++;
 					t->dmin = std::min(t->dmin, cd); t->dmax = std::max(t->dmax, cd);
 				}
 			}
 			for (const Tally &t : tally)
-				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d %s depth=[%+.2f..%+.2f]\n",
-				             t.name.c_str(), t.total, t.collected,
+				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d refl=%-4d %s depth=[%+.2f..%+.2f]\n",
+				             t.name.c_str(), t.total, t.collected, t.reflective,
 				             t.collected < t.total ? "<-- SURVIVES" : "", t.dmin, t.dmax);
+			// Scene-wide reflective-face dump (robot-reflecting strip hunt):
+			// one line per Face_Reflective material with count + world bbox +
+			// reflection texture, so we can spot the strip wherever it lives.
+			struct RTally { std::string name; std::string refTex; int n=0;
+			                float x0=1e30f,y0=1e30f,z0=1e30f,x1=-1e30f,y1=-1e30f,z1=-1e30f; };
+			std::vector<RTally> rt;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				if (!T || !T->Faces) continue;
+				for (DWord fi = 0; fi < T->FIndex; ++fi) {
+					Face &F = T->Faces[fi];
+					if (!(F.Flags & Face_Reflective)) continue;
+					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
+					const char *rx = (F.ReflectionTexture && F.ReflectionTexture->FileName)
+					               ? F.ReflectionTexture->FileName : "(env)";
+					RTally *e = nullptr;
+					for (RTally &x : rt) if (x.name == nm && x.refTex == rx) { e = &x; break; }
+					if (!e) { rt.push_back({nm,rx,0,1e30f,1e30f,1e30f,-1e30f,-1e30f,-1e30f}); e = &rt.back(); }
+					e->n++;
+					const Vector w = worldPos(F.A, T);
+					e->x0=std::min(e->x0,w.x); e->x1=std::max(e->x1,w.x);
+					e->y0=std::min(e->y0,w.y); e->y1=std::max(e->y1,w.y);
+					e->z0=std::min(e->z0,w.z); e->z1=std::max(e->z1,w.z);
+				}
+			}
+			for (const RTally &e : rt)
+				std::fprintf(stderr, "[REFL-FACE] mat=%-22s refTex=%-18s n=%-4d world x[%.0f..%.0f] y[%.0f..%.0f] z[%.0f..%.0f]\n",
+				             e.name.c_str(), e.refTex.c_str(), e.n, e.x0,e.x1, e.y0,e.y1, e.z0,e.z1);
 		}
 	}
 
@@ -880,6 +910,16 @@ static void BuildGreetsShatter()
 	std::fprintf(stderr,
 		"[GREETS-SHATTER] target mirror %d area=%.1f grid=%dx%d floorY=%.1f "
 		"N=(%.2f,%.2f,%.2f)\n", best, bestArea, gx, gy, ymin, N.x, N.y, N.z);
+	// Camera pose looking straight at the broken screen, for headless
+	// inspection via CITYSNAP_POS / CITYSNAP_FWD (works in --snapshot=greets).
+	if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
+		const Vector ctr = planePt(0.5f*(u0+u1), 0.5f*(v0+v1));
+		const float dist = 0.9f * std::max(u1-u0, v1-v0);
+		std::fprintf(stderr,
+			"[GREETS-SHATTER] CITYSNAP_POS='%.1f %.1f %.1f' CITYSNAP_FWD='%.3f %.3f %.3f' (screen ctr %.1f,%.1f,%.1f)\n",
+			ctr.x + N.x*dist, ctr.y + N.y*dist, ctr.z + N.z*dist,
+			-N.x, -N.y, -N.z, ctr.x, ctr.y, ctr.z);
+	}
 }
 
 void Initialize_Greets()
