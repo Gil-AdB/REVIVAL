@@ -360,7 +360,9 @@ Validation (mirrortest `FDS_SHATTER_DUMP`, 12 workers / 140 shards):
 - deterministic run-to-run (no race), TSan-clean over 120 frames;
 - vs serial: identical but ≤72 bytes/frame (≤0.001%, max Δ9/255) — the
   `VertexScratch` clone path's FP ordering, same as the shadow bake;
-- ~6× faster warm (3.1ms → 0.5ms), 18ms → 2.2ms cold.
+- mirrortest: ~6× faster warm (3.1ms → 0.5ms), 18ms → 2.2ms cold.
+- **greets (238 shards, 12 workers): ~52ms serial → ~6.3ms parallel = 8.3×**
+  (the real-scene win — each greets shard reflects the whole room).
 - engine byte-gate (mirrortest/conetest/halotest) ALL PASS throughout.
 
 **Lesson:** under inter-render parallelism, the hazard is not the per-vertex
@@ -369,7 +371,7 @@ state (the `VertexScratch` clones isolate it) but the **shared per-mesh
 (`BSphereScreenPos`). Audit those before parallelizing any new transform fan-out.
 
 **Remaining (not blocking):**
-- Perf-on-greets measurement — pending user go-ahead (bench-when-idle).
+- ~~Perf-on-greets measurement~~ — DONE: 52ms → 6.3ms (8.3×) on 12 workers.
 - Optional: TSan greets (mirrortest is the more adversarial config — it does
   NOT hide the mirror clones, greets does — so it's covered, but greets adds the
   lightmap-bake thread).
