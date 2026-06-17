@@ -1031,6 +1031,69 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         float  cD = 0.0f;
         for (size_t i = 0; i < samples.size(); ++i)
             if (clusterOf[i] == c) { cN = samples[i].wN; cD = samples[i].d; break; }
+        // ── Display-face discrimination ──────────────────────────────
+        // A screen box is a thin slab of half-silvered glass: the FRONT
+        // is the display, but the back + 4 side caps share the material
+        // and each forms its own coplanar cluster. Those non-display
+        // faces should NOT be mirrors — a side cap seen edge-on reflects
+        // black and its mask carves the wall behind (the greets black
+        // strip); the back is mounted against the wall. Discriminate by:
+        //   (1) ASPECT — a side cap is a long thin strip (depth×height,
+        //       ~40:1); a display is roughly rectangular (~1:1).
+        //   (2) OPEN SPACE on the reflecting (+normal) side — a real
+        //       display faces the room; a back cap faces the wall it's
+        //       mounted on (opaque geometry within ~2 units along +cN).
+        Vector axU, axV; planeBasis(cN, axU, axV);
+        float bu0=1e30f,bu1=-1e30f,bv0=1e30f,bv1=-1e30f;
+        Vector cCtr{0,0,0}; int cNv=0;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (clusterOf[i] != c) continue;
+            const WallSample &ws = samples[i];
+            const Vertex *vs[3] = { ws.F->A, ws.F->B, ws.F->C };
+            for (int k = 0; k < 3; ++k) {
+                Vector wp = vs[k]->Pos;
+                if (ws.T) { Vector lp = wp; MatrixXVector(ws.T->RotMat, &lp, &wp); wp += ws.T->IPos; }
+                const float pu = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                bu0=std::min(bu0,pu); bu1=std::max(bu1,pu);
+                bv0=std::min(bv0,pv); bv1=std::max(bv1,pv);
+                cCtr.x+=wp.x; cCtr.y+=wp.y; cCtr.z+=wp.z; ++cNv;
+            }
+        }
+        if (cNv) { cCtr.x/=cNv; cCtr.y/=cNv; cCtr.z/=cNv; }
+        const float exU = bu1-bu0, exV = bv1-bv0;
+        const float exMin = std::min(exU,exV), exMax = std::max(exU,exV);
+        const float aspect = (exMin > 1e-3f) ? exMax/exMin : 1e9f;
+        // Short ray from just off the surface along +cN (the reflecting
+        // side). Hit on opaque, non-clone, non-glass geometry within
+        // kFaceWallDist ⇒ the face is mounted against a wall (a back).
+        bool facesWall = false;
+        {
+            const float kFaceWallDist = 2.0f;
+            const Vector O{ cCtr.x+cN.x*0.2f, cCtr.y+cN.y*0.2f, cCtr.z+cN.z*0.2f };
+            for (Object *O2 = sc->ObjectHead; O2 && !facesWall; O2 = O2->Next) {
+                if (O2->Type != Obj_TriMesh || isCloneMesh(O2)) continue;
+                TriMesh *T2 = (TriMesh*)O2->Data; if (!T2 || !T2->Faces) continue;
+                for (DWord fi = 0; fi < T2->FIndex; ++fi) {
+                    Face &F = T2->Faces[fi]; if (!F.A||!F.B||!F.C) continue;
+                    if (F.Txtr && (F.Txtr->Flags & Mat_Transparent)) continue; // skip glass
+                    auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T2->RotMat,&lp,&w); w+=T2->IPos; return w; };
+                    const Vector A=wp(F.A),B=wp(F.B),C=wp(F.C);
+                    const Vector e1{B.x-A.x,B.y-A.y,B.z-A.z}, e2{C.x-A.x,C.y-A.y,C.z-A.z};
+                    const Vector pvv{cN.y*e2.z-cN.z*e2.y, cN.z*e2.x-cN.x*e2.z, cN.x*e2.y-cN.y*e2.x};
+                    const float det=e1.x*pvv.x+e1.y*pvv.y+e1.z*pvv.z;
+                    if (det>-1e-6f && det<1e-6f) continue;
+                    const float inv=1.0f/det;
+                    const Vector tv{O.x-A.x,O.y-A.y,O.z-A.z};
+                    const float uu=(tv.x*pvv.x+tv.y*pvv.y+tv.z*pvv.z)*inv; if (uu<0||uu>1) continue;
+                    const Vector qv{tv.y*e1.z-tv.z*e1.y, tv.z*e1.x-tv.x*e1.z, tv.x*e1.y-tv.y*e1.x};
+                    const float vv=(cN.x*qv.x+cN.y*qv.y+cN.z*qv.z)*inv; if (vv<0||uu+vv>1) continue;
+                    const float dist=(e2.x*qv.x+e2.y*qv.y+e2.z*qv.z)*inv;
+                    if (dist>0.05f && dist<kFaceWallDist) { facesWall=true; break; }
+                }
+            }
+        }
+        constexpr float kMaxDisplayAspect = 6.0f;
         const char *verdict = "built";
         if (clusterArea < kMinRttArea) {
             verdict = "sliver";
@@ -1049,10 +1112,22 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             verdict = "horizontal";
             ++skippedHorizontal;
         }
+        // Only override a face that would otherwise be a display (built
+        // or rtt). 'edge'/'occluded' start with neither 'r' nor 'b', so
+        // both the RTT path (verdict[0]=='r') and the clone path
+        // (verdict[0]!='b' → continue) skip them.
+        const float fillRatio = (exU > 1e-3f && exV > 1e-3f)
+            ? clusterArea / (exU * exV) : 1.0f;
+        if (verdict[0] == 'b' || verdict[0] == 'r') {
+            if (aspect > kMaxDisplayAspect)      verdict = "edge";      // thin box-side cap
+            else if (fillRatio < 0.30f)          verdict = "sparse";    // scattered caps merged across the plane, not a solid panel
+            else if (facesWall)                  verdict = "occluded";  // back, mounted on wall
+        }
         std::fprintf(stderr,
             "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
-            "area=%6.2f -> %s\n",
-            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea, verdict);
+            "area=%6.2f ext=%.2fx%.2f aspect=%.1f fill=%.2f facesWall=%d -> %s\n",
+            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea,
+            exU, exV, aspect, fillRatio, (int)facesWall, verdict);
         if (verdict[0] == 'r') {
             // ── First-order RTT slot ────────────────────────────────
             // Plane fit: average member normals/offsets.
