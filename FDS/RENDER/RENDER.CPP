@@ -712,9 +712,17 @@ xpar_done: ;
 		// HDR (Phase 2.x): tonemap now that ALL scene-radiance overlays (cones,
 		// halos, rain) have accumulated into g_hdrBuf. SKIPPED when
 		// g_hdrDeferTonemap — the scene tonemaps later itself (the fountain
-		// tonemaps after its bolt, so the bolt blooms too). No-op unless
-		// g_hdrActive (main frame, froxel populated the buffer).
-		if (fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
+		// tonemaps after its bolt, so the bolt blooms too).
+		//
+		// MUST gate on `deferred`: this volumetric block runs for EVERY
+		// renderFrame call, including the forward sky-cube paint
+		// (RenderSkyCube → Render(ForceForward), deferred=false). On that path
+		// Hdr_BeginFrame never ran, so g_hdrActive is stale-true and g_hdrBuf
+		// holds the PREVIOUS frame's scene — tonemapping then overwrites the
+		// freshly-painted skybox with last frame's image (grey wash + cityscape
+		// smear under camera motion). Snapshots hid it: on a one-frame render
+		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
+		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
 
 		// Lens droplets are on the "camera glass" — a post effect that refracts
 		// the FINAL displayed image, so they run AFTER the tonemap (LDR, like
