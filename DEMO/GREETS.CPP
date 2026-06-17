@@ -797,8 +797,9 @@ static void BuildGreetsShatter()
 				// other walls).
 				const bool isFrameMat = F.Txtr && F.Txtr->Name &&
 				                        strstr(F.Txtr->Name, "screen") != nullptr;
+				const float uPan = 3.0f * (u1 - u0), vPan = 3.0f * (v1 - v0);
 				const Vertex *vs[3] = { F.A, F.B, F.C };
-				bool inGlass = true, behindFront = false, inExp = true;
+				bool inGlass = true, behindFront = false, inExp = true, coplanar = true, inPanel = true;
 				for (int j = 0; j < 3; ++j) {
 					const Vector w  = worldPos(vs[j], T);
 					const float  pu = w.x*U.x + w.y*U.y + w.z*U.z;
@@ -810,10 +811,22 @@ static void BuildGreetsShatter()
 					    depth > frontEps   || depth < -maxDepth) inGlass = false;
 					if (pu < u0 - uExp || pu > u1 + uExp || pv < v0 - vExp ||
 					    pv > v1 + vExp || depth < -maxDepth || depth > maxDepth) inExp = false;
+					// Coplanar = on the broken screen's plane (front-glass depth).
+					if (depth < -0.6f || depth > 0.6f) coplanar = false;
+					// Generous panel footprint (3x) — captures the rest of the
+					// physical glass panel while excluding far-Z coplanar
+					// neighbours that share the plane.
+					if (pu < u0 - uPan || pu > u1 + uPan || pv < v0 - vPan || pv > v1 + vPan) inPanel = false;
 				}
-				const bool isBox   = inGlass && behindFront;          // (A)
-				const bool isFrame = inExp   && isFrameMat;           // (B)
-				if (isBox || isFrame) {
+				const bool isBox   = inGlass && behindFront;          // (A) box body
+				const bool isFrame = inExp   && isFrameMat;           // (B) frame in footprint
+				// (C) The mirror cluster is only a SUB-RECTANGLE of the physical
+				// glass panel; the rest of the coplanar 'screen*' glass survives
+				// the break as a strip. Hide the whole coplanar panel, bounded
+				// by a generous (3x) footprint so it can't reach a different
+				// screen that merely shares this X-plane far away in Z.
+				const bool isPanelFace = coplanar && isFrameMat && inPanel; // (C)
+				if (isBox || isFrame || isPanelFace) {
 					g_greetsScreenBoxFaces.push_back(&F);
 					if (isFrame) ++nFrame;
 					if (dump) {
