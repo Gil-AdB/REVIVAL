@@ -844,12 +844,18 @@ static void BuildGreetsShatter()
 			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
 			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
 			             u1-u0, v1-v0);
-		// The screen box's SIDE faces are transparent glass ('screen 3') with
-		// side-facing normals (not the front mirror's N). Seen edge-on they
-		// show a black reflection (the box-side glass over void) — that's the
-		// black strip. Retarget them to the opaque brick wall material so the
-		// box edge reads as solid wall, not black glass. Front mirror faces
-		// (N ~ the screen plane normal) are left untouched.
+		// The screen sits in a brick niche, but the niche's SIDE walls were
+		// never modeled as brick: the only geometry on the niche sides is the
+		// glass box's own transparent 'screen 3' side faces. Edge-on (grazing
+		// camera) those show black — the black strip — and removing them just
+		// opens a hole (no brick was ever behind them). The niche FRONT-frame
+		// (+0.04) and BACK (-0.58) ARE brick; only the sides are missing.
+		// Fix: retarget the glass box's non-front 'screen 3' faces (sides +
+		// back) to the 'rooms' brick so they read as the niche's brick walls,
+		// and keep them through the break (the shards replace only the front
+		// display). This corrects the material on the actual niche-side faces
+		// — no added geometry. (Confirmed via FACEFIND + the [GEOM] dump:
+		// strip pixels x[1003..1061] == the N=(0,0,±1)/(0,±1,0) side faces.)
 		{
 			Material *brick = nullptr; void *brickFiller = nullptr;
 			for (Object *Obj = GreetSc->ObjectHead; Obj && !brick; Obj = Obj->Next) {
@@ -865,24 +871,24 @@ static void BuildGreetsShatter()
 			std::unordered_set<Face*> bricked;
 			if (brick) for (Face *F : g_greetsScreenBoxFaces) {
 				if (!F->Txtr || !F->Txtr->Name || !strstr(F->Txtr->Name, "screen 3")) continue;
-				// Skip only the FRONT mirror face (normal aligned WITH the
-				// room-facing plane normal N, dot ~ +1). The back face (dot ~
-				// -1) and sides (dot ~ 0) become brick. (|dot| would wrongly
-				// skip the back too, leaving it as the black survivor.)
+				// Skip only the FRONT display face (normal aligned WITH the
+				// room-facing plane normal N, dot ~ +1) — it breaks into shards.
+				// The back (dot ~ -1) and sides (dot ~ 0) become the niche's
+				// brick walls. (|dot| would wrongly skip the back too.)
 				if (F->N.x*N.x + F->N.y*N.y + F->N.z*N.z > 0.7f) continue;
 				F->Txtr = brick; F->Filler = (decltype(F->Filler))brickFiller;
 				bricked.insert(F); ++nEdge;
 			}
-			// These bricked side faces are now solid wall — DON'T hide them on
-			// break (else the void behind reappears). Drop them from the hide
-			// set so the box's brick shell stays and seals the corner.
+			// These are now solid brick niche walls — DON'T hide them on break
+			// (else the hole reopens). Drop them from the hide set so the brick
+			// niche stays after the front display shatters.
 			if (!bricked.empty())
 				g_greetsScreenBoxFaces.erase(
 					std::remove_if(g_greetsScreenBoxFaces.begin(), g_greetsScreenBoxFaces.end(),
 					               [&](Face *f){ return bricked.count(f) != 0; }),
 					g_greetsScreenBoxFaces.end());
 			if (nEdge) { Scene_RebuildMatTable(GreetSc);
-				std::fprintf(stderr, "[GREETS-EDGEBRICK] %d screen-box glass side faces -> brick (kept on break)\n", nEdge); }
+				std::fprintf(stderr, "[GREETS-EDGEBRICK] %d niche side/back glass faces -> brick (kept on break)\n", nEdge); }
 		}
 		// One-shot per-material census over a GENEROUS region around the
 		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
@@ -929,6 +935,30 @@ static void BuildGreetsShatter()
 				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d refl=%-4d xpar=%-4d %s depth=[%+.2f..%+.2f]\n",
 				             t.name.c_str(), t.total, t.collected, t.reflective, t.transparent,
 				             t.collected < t.total ? "<-- SURVIVES" : "", t.dmin, t.dmax);
+			// Per-face WORLD-coord dump for the 'rooms' brick + 'screen 3' glass
+			// faces in the region, classified by orientation relative to the
+			// screen normal N: FRONT/BACK (|n·N|>0.7) vs SIDE (the inset-depth
+			// walls). This shows, in actual 3D, whether any brick lines the
+			// inset SIDE (where the black strip is) or only the front/back.
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data; if (!T || !T->Faces) continue;
+				for (DWord fi = 0; fi < T->FIndex; ++fi) {
+					Face &F = T->Faces[fi];
+					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "";
+					const bool want = !strcmp(nm,"rooms") || !strcmp(nm,"screen 3");
+					if (!want) continue;
+					const Vector a=worldPos(F.A,T), b=worldPos(F.B,T), c=worldPos(F.C,T);
+					const Vector ctr{(a.x+b.x+c.x)/3,(a.y+b.y+c.y)/3,(a.z+b.z+c.z)/3};
+					const float pu=ctr.x*U.x+ctr.y*U.y+ctr.z*U.z, pv=ctr.x*V.x+ctr.y*V.y+ctr.z*V.z;
+					const float dp=(ctr.x*N.x+ctr.y*N.y+ctr.z*N.z)+d;
+					// only faces whose centroid is within the glass footprint (+small margin)
+					if (pu<u0-1.0f||pu>u1+1.0f||pv<v0-1.0f||pv>v1+1.0f||dp<-dWide||dp>dWide) continue;
+					const float dotN = F.N.x*N.x+F.N.y*N.y+F.N.z*N.z;
+					std::fprintf(stderr, "[GEOM] %-9s %-5s ctr=(%.1f,%.1f,%.1f) N=(%.2f,%.2f,%.2f) depthAlongN=%+.2f\n",
+						nm, (dotN>0.7f||dotN<-0.7f)?"FRONT":"SIDE", ctr.x,ctr.y,ctr.z, F.N.x,F.N.y,F.N.z, dp);
+				}
+			}
 			// Scene-wide reflective-face dump (robot-reflecting strip hunt):
 			// one line per Face_Reflective material with count + world bbox +
 			// reflection texture, so we can spot the strip wherever it lives.
