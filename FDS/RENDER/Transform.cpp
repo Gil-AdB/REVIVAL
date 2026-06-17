@@ -1396,15 +1396,11 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				// Verification gate — off by default; turn on with
 				// --soa-verify during migration to catch any future
 				// divergence between AoS and SoA paths bit-for-bit.
+				// Checks exactly the field(s) DumpFromAoS populates (only
+				// TPos_z today); extend both together when a consumer migrates.
 				if (fds::FeatureFlags::soa_verify()) {
 					for (uint32_t i = 0; i < nv; ++i) {
-						const Vertex *v = &tVerts[i];
-						const bool ok =
-							F_->TPos_x[i] == v->TPos_AOS.x && F_->TPos_y[i] == v->TPos_AOS.y && F_->TPos_z[i] == v->TPos_AOS.z &&
-							F_->TN_x[i] == v->TN.x && F_->TN_y[i] == v->TN.y && F_->TN_z[i] == v->TN.z &&
-							F_->PX[i] == v->PX && F_->PY[i] == v->PY && F_->RZ[i] == v->RZ &&
-							F_->UZ[i] == v->UZ && F_->VZ[i] == v->VZ && F_->Flags[i] == v->Flags;
-						if (!ok) {
+						if (F_->TPos_z[i] != tVerts[i].TPos_AOS.z) {
 							std::fprintf(stderr, "[SOA-VERIFY] mismatch vert %u mesh %p\n", i, (void*)T);
 							std::abort();
 						}
