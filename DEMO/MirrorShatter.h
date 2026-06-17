@@ -105,6 +105,9 @@ private:
         Vector              vel{};     // linear velocity (world units / frame)
         Vector              angVel{};  // euler angular velocity (rad / frame)
         bool                settled = false;
+        float               settleRot[3][3] = {{0}}; // final rest orientation (published each frame once settled)
+        float               cFloor = -1e30f;        // cached floor height under this shard
+        float               cfX = 1e30f, cfZ = 1e30f; // (x,z) the cached floor was sampled at
         float               textUV[4][2] = {{0}};  // fixed text-UV per corner
     };
 
@@ -133,6 +136,13 @@ private:
     std::vector<Shard>  shards_;
     Vector              origin_{}, uAxis_{}, vAxis_{}, normal_{};
     float               floorY_ = 0.0f;
+    // Static floor/stage surfaces (world tris, flattened 3-per) sampled at
+    // build time: up-facing opaque faces at or below the panel base. Each
+    // shard ray-casts straight down into these to find the surface beneath
+    // it, so debris settles on a stage, a step, or the floor — whatever is
+    // actually under it — instead of one global plane.
+    std::vector<Vector> floorTris_;
+    float castFloorAt(float x, float z) const;
     Texture*            reflTex_ = nullptr;
     // Per-shard live reflection cameras. All shards share ONE atlas texture
     // + material (a material per shard would blow the 8-bit deferred matID
