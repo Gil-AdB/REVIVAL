@@ -151,3 +151,33 @@ after re-tune" as the go/no-go for rolling HDR to city/greets/etc.
 Phase 0+1 (enough to judge the fog/flash payoff): **~400-500 lines**, fountain-
 flagged, hot-kernel writes touched but the opaque *rasterizer* (Mekalele
 G-buffer) untouched. Phase 2 adds bolt/flare fix. Phase 3 is correctness.
+
+---
+
+## STATUS — Phase 0/1 DONE + auto-tune (2026-06-17)
+
+Shipped (gated on `--hdr`, off by default; render-gate ALL PASS flag-off):
+- **Phase 0** (711db6d): `FDS/RENDER/Hdr.{h,cpp}` — f32 BGR `g_hdrBuf` + tonemap; flags `hdr`/`hdr_exposure`/`hdr_white`.
+- **Phase 1** (dd5060c): froxel composite (`Froxel_CompositeTile`) writes unclamped lit+fog → `g_hdrBuf`; `glowMax` forced 0 in HDR; tonemap in `renderFrame` after the fog. Black-scene fix (aed13e7): `g_hdrActive` guard so the tonemap no-ops when the froxel composite didn't run.
+- **Tonemap** (0df8c61): ACES (Narkowicz); `hdr_white` repurposed as post-tonemap chroma scale.
+- **Auto-tune** (3213e35): `hdr_glow_scale` (default 0.25) scales the glowMax-cap-tuned inputs (`fast_fog_inscatter`, `bolt_flash_peak`, `cone_strength`) in HDR so the *original* flags work under `--hdr`.
+
+Tuned fountain cmdline: original glowMax flags + `--hdr --hdr_exposure=0.9 --hdr_glow_scale=0.12 --fast_fog_density=6` (density 14→6 kills the milky soup — that's *extinction*, unrelated to HDR/glowMax).
+
+Key findings: the **portal is additive-forward (pre-fog) → already HDR** via the composite read; **soupiness = fog density**, not glow; glowMax was already a per-slice tonemap, so HDR's win needed re-tuning the cap-leaning inputs (done via `hdr_glow_scale`).
+
+## Phase 2 — overlay HDR reorg (IN PROGRESS, the remaining work)
+
+Goal: bolt/cones/sprites/water all composite LDR over the tonemapped base today (~1.3% pure-white / ~4.8% R clipping in the bolt+flash frame). Route them through `g_hdrBuf` so they bloom/roll off.
+
+Mechanism: **walk the tonemap to the end** (currently `renderFrame` right after the fog) and redirect each overlay's `out[i]`→VPage write to `g_hdrBuf[i*4]` (float), gated on `g_hdrActive`. All edits are `--hdr`-gated, so the byte-gate (flag-off) stays valid; verify the HDR path by fountain/greets snapshot.
+
+Pipeline order + redirect sites (do pass-by-pass, walking the tonemap down, commit each):
+1. **xpar** — `Render_DeferredTransparentLighting_Tile<Front/Back>` (DeferredSurfaceKernel.cpp: water blend ~1253, general/`XparBlendAlpha` ~1634) **and** `Render_DeferredLighting_TileFill` (~2696, water) — the latter is the `--deferred-quarter` path (active in the user's cmdline). Read dst from `g_hdrBuf` (float), write `g_hdrBuf`.
+2. **sprites** — `TBR_Render` / sprite filler (RENDER.CPP ~674) → `g_hdrBuf`.
+3. **cones** — `Render_VolumetricCones` (DeferredVolumetric) → `g_hdrBuf`.
+4. **halos** — `Render_OmniHalos` → `g_hdrBuf`.
+5. **rain** — `Render_ScreenSpaceRain` → `g_hdrBuf`.
+6. **bolt** — `DrawActiveBolts` (FOUNTAIN tick): `TheOtherBarry<ADDITIVE>` ribbon/quad + `Lightning_Line` core → float-add into `g_hdrBuf`. This moves the tonemap into the fountain tick (after the bolt); needs a defer flag so `renderFrame` skips its tonemap when the scene will do it post-overlay.
+
+Note: portal already HDR (skip). Most passes are float-internal (cones/halos/xpar) so the redirect is an output swap; the bolt/sprites integer rasterizers need a float-accumulate at their store site (additive: `g_hdrBuf[i] += src`).
