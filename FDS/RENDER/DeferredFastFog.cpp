@@ -1881,6 +1881,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	// In-scatter glow reuses the deferred light SoA (view-space positions,
 	// colors, ranges, cone params already set up for the frame).
 	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
+	if (P.hdr) P.inscatter *= fds::FeatureFlags::hdr_glow_scale();  // glowMax cap is off in HDR — compensate
 	P.inscatterSamples  = std::max(1, fds::FeatureFlags::fast_fog_inscatter_samples());
 	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
 	P.inscatterJitter   = fds::FeatureFlags::fast_fog_inscatter_jitter();
@@ -3158,6 +3159,7 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     const float fogB     = float(CurScene->Ambient.B);
     const float coneDens = (spotCount > 0)
         ? fds::FeatureFlags::cone_strength() * 0.001f
+          * (fds::FeatureFlags::hdr() ? fds::FeatureFlags::hdr_glow_scale() : 1.0f)  // glowMax cap off in HDR
         : 0.0f;
     const float haloDens = fds::FeatureFlags::omni_halo_strength() * 0.001f;
 

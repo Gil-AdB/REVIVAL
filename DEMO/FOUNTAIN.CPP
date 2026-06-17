@@ -2696,7 +2696,8 @@ struct FountainScene : SceneDriver {
 				const float frange = fds::FeatureFlags::bolt_flash_range();
 				g_BoltFlashOmni->Flags  |= Omni_Active;
 				g_BoltFlashOmni->IPos    = g_BoltFlashPos;
-				g_BoltFlashOmni->ISize   = fds::FeatureFlags::bolt_flash_peak() * fi;
+				g_BoltFlashOmni->ISize   = fds::FeatureFlags::bolt_flash_peak() * fi
+					* (fds::FeatureFlags::hdr() ? fds::FeatureFlags::hdr_glow_scale() : 1.0f);  // glowMax cap off in HDR
 				g_BoltFlashOmni->IRange  = frange;
 				g_BoltFlashOmni->rRange  = 1.0f / frange;
 			} else {
