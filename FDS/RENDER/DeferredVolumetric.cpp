@@ -31,6 +31,7 @@
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/DeferredCommon.h"
+#include "RENDER/Hdr.h"  // HDR overlay reorg — cones/halos composite into g_hdrBuf
 #include "Threads.h"
 
 #include <mutex>
@@ -51,6 +52,29 @@ namespace renderns {
 // can reach them.
 static std::atomic<int> g_coneAnalyticHits{0};
 static std::atomic<int> g_coneRaymarchHits{0};
+
+// HDR overlay reorg: additively composite a float scatter contribution (the
+// cone/halo in-scatter accumulated for this pixel) at pixel index i. In HDR
+// mode (g_hdrActive) it accumulates UNCAPPED into the float radiance buffer so
+// god-ray shafts + omni halos bloom and roll off at the tonemap instead of
+// clipping at 255; otherwise it's the legacy 8-bit add-and-saturate onto VPage.
+// Channel order B,G,R matches both buffers. The LDR branch is byte-identical to
+// the inline code it replaces (render gate covers it via conetest/halotest).
+static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, float aR) {
+    if (fds::g_hdrActive) {
+        float* h = fds::g_hdrBuf.data() + i * 4;
+        h[0] += aB; h[1] += aG; h[2] += aR;
+        return;
+    }
+    const dword pix = out[i];
+    int newR = int((pix >> 16) & 0xFF) + int(aR);
+    int newG = int((pix >>  8) & 0xFF) + int(aG);
+    int newB = int( pix        & 0xFF) + int(aB);
+    if (newR > 255) newR = 255;
+    if (newG > 255) newG = 255;
+    if (newB > 255) newB = 255;
+    out[i] = (dword(newR) << 16) | (dword(newG) << 8) | dword(newB) | 0xFF000000u;
+}
 
 // Full-screen distance fog over opaque pixels. Runs after
 // Render_DeferredLighting writes finished colors to VPage; before the
@@ -1022,27 +1046,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     if (accB[lane] <= 0.0f && accG[lane] <= 0.0f && accR[lane] <= 0.0f) continue;
                     const int px = pxBase + lane;
                     const size_t i = row + size_t(px);
-                    const dword pix = out[i];
-                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane]);
-                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane]);
-                    int newB = int( pix        & 0xFF) + int(accB[lane]);
-                    if (newR > 255) newR = 255;
-                    if (newG > 255) newG = 255;
-                    if (newB > 255) newB = 255;
-                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                             |  dword(newB)        | 0xFF000000u;
-                    if (dupRow) {
-                        const size_t i2 = i + size_t(XRes);
-                        const dword p2 = out[i2];
-                        int r2 = int((p2 >> 16) & 0xFF) + int(accR[lane]);
-                        int g2 = int((p2 >>  8) & 0xFF) + int(accG[lane]);
-                        int b2 = int( p2        & 0xFF) + int(accB[lane]);
-                        if (r2 > 255) r2 = 255;
-                        if (g2 > 255) g2 = 255;
-                        if (b2 > 255) b2 = 255;
-                        out[i2] = (dword(r2) << 16) | (dword(g2) << 8)
-                                  |  dword(b2)        | 0xFF000000u;
-                    }
+                    VolCompositeAdd(out, i, accB[lane], accG[lane], accR[lane]);
+                    if (dupRow)
+                        VolCompositeAdd(out, i + size_t(XRes), accB[lane], accG[lane], accR[lane]);
                 }
             }
         } else {
@@ -1354,15 +1360,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
             }
             if (accB <= 0.0f && accG <= 0.0f && accR <= 0.0f) continue;
             const size_t i = row + size_t(px);
-            const dword pix = out[i];
-            int newR = int((pix >> 16) & 0xFF) + int(accR);
-            int newG = int((pix >>  8) & 0xFF) + int(accG);
-            int newB = int( pix        & 0xFF) + int(accB);
-            if (newR > 255) newR = 255;
-            if (newG > 255) newG = 255;
-            if (newB > 255) newB = 255;
-            out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                     |  dword(newB)        | 0xFF000000u;
+            VolCompositeAdd(out, i, accB, accG, accR);
         }
         }
     }
@@ -1864,15 +1862,11 @@ static void Render_OmniHalos_Tile(
                     const int px = pxBase + lane;
                     const float d = kBayer4[(py & 3) * 4 + (px & 3)];
                     const size_t i = row + size_t(px);
-                    const dword pix = out[i];
-                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane] + 0.5f + d);
-                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane] + 0.5f + d);
-                    int newB = int( pix        & 0xFF) + int(accB[lane] + 0.5f + d);
-                    if (newR > 255) newR = 255;
-                    if (newG > 255) newG = 255;
-                    if (newB > 255) newB = 255;
-                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                           |  dword(newB)        | 0xFF000000u;
+                    // Bayer dither + round bias kept inside the value so the LDR
+                    // path stays byte-identical; the <1.0 bias is negligible in
+                    // HDR float (no quantization here — the tonemap dithers).
+                    VolCompositeAdd(out, i, accB[lane] + 0.5f + d,
+                                    accG[lane] + 0.5f + d, accR[lane] + 0.5f + d);
                 }
             }
         }
@@ -1964,15 +1958,7 @@ static void Render_OmniHalos_Tile(
                 };
                 const float d = kBayer4[(py & 3) * 4 + (px & 3)];
                 const size_t i = row + size_t(px);
-                const dword pix = out[i];
-                int newR = int((pix >> 16) & 0xFF) + int(accR + 0.5f + d);
-                int newG = int((pix >>  8) & 0xFF) + int(accG + 0.5f + d);
-                int newB = int( pix        & 0xFF) + int(accB + 0.5f + d);
-                if (newR > 255) newR = 255;
-                if (newG > 255) newG = 255;
-                if (newB > 255) newB = 255;
-                out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                       |  dword(newB)        | 0xFF000000u;
+                VolCompositeAdd(out, i, accB + 0.5f + d, accG + 0.5f + d, accR + 0.5f + d);
             }
         }
         return;
@@ -2140,15 +2126,7 @@ static void Render_OmniHalos_Tile(
                     if (accR[lane] <= 0.0f && accG[lane] <= 0.0f && accB[lane] <= 0.0f) continue;
                     const int px = pxBase + lane;
                     const size_t i = row + size_t(px);
-                    const dword pix = out[i];
-                    int newR = int((pix >> 16) & 0xFF) + int(accR[lane]);
-                    int newG = int((pix >>  8) & 0xFF) + int(accG[lane]);
-                    int newB = int( pix        & 0xFF) + int(accB[lane]);
-                    if (newR > 255) newR = 255;
-                    if (newG > 255) newG = 255;
-                    if (newB > 255) newB = 255;
-                    out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                           |  dword(newB)        | 0xFF000000u;
+                    VolCompositeAdd(out, i, accB[lane], accG[lane], accR[lane]);
                 }
             }
         } else {
@@ -2229,15 +2207,7 @@ static void Render_OmniHalos_Tile(
             }
             if (accR <= 0.0f && accG <= 0.0f && accB <= 0.0f) continue;
             const size_t i = row + size_t(px);
-            const dword pix = out[i];
-            int newR = int((pix >> 16) & 0xFF) + int(accR);
-            int newG = int((pix >>  8) & 0xFF) + int(accG);
-            int newB = int( pix        & 0xFF) + int(accB);
-            if (newR > 255) newR = 255;
-            if (newG > 255) newG = 255;
-            if (newB > 255) newB = 255;
-            out[i] = (dword(newR) << 16) | (dword(newG) << 8)
-                   |  dword(newB)        | 0xFF000000u;
+            VolCompositeAdd(out, i, accB, accG, accR);
         }
         }
     }

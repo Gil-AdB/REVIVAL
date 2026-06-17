@@ -676,13 +676,9 @@ xpar_done: ;
 		TBR_Render(CurScene);
 	}
 
-	// HDR (Phase 2 overlay reorg): tonemap the radiance buffer down to VPage
-	// now that the transparent peel + sprites (the TBR pass above) have
-	// accumulated into it. The cone/halo/rain passes below still composite LDR
-	// over the tonemapped result for now — each future step moves this call
-	// further down until it runs last (after the fountain bolt). No-ops unless
-	// the froxel composite populated g_hdrBuf this frame (g_hdrActive).
-	if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
+	// HDR (Phase 2 overlay reorg): the tonemap walks down the pipeline as each
+	// overlay is redirected into g_hdrBuf. It now fires after the cone/halo
+	// volumetric passes below (was: here, right after TBR_Render). See that call.
 
 	// Volumetric pass(es). Tri-state dispatch:
 	//   useUnifiedVolumetric()=true: one Beer-Lambert pass that does
@@ -699,11 +695,19 @@ xpar_done: ;
 	//     or halos if enabled.
 	if (!skipVolumetric) {
 		if (useUnifiedVolumetric()) {
-			Render_DeferredVolumetric(dctx);
+			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
 			Render_VolumetricCones(dctx);
 			Render_OmniHalos(dctx);
 		}
+
+		// HDR (Phase 2.2): tonemap now that cones + halos (separate-pass path)
+		// have accumulated into g_hdrBuf, so god-ray shafts + omni halos bloom
+		// and roll off instead of clipping. Rain + lens drops below still
+		// composite LDR over the tonemapped base (rain is the next step). No-op
+		// unless g_hdrActive (main frame, froxel populated the buffer).
+		if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
+
 		// Screen-space rain LAST among the view-aligned passes (streaks
 		// overlay fog, beams and halos — near rain is in front of all of
 		// them) and never in the reflection pass (skipVolumetric): a
