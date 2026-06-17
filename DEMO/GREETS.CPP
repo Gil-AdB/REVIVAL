@@ -2172,15 +2172,6 @@ struct GreetsScene : SceneDriver {
 			if (scrubStep > Timer) Timer = 0;
 			else                   Timer -= scrubStep;
 		}
-		// K: print the current camera pose as a ready-to-paste headless
-		// override, so a live view can be reproduced exactly in
-		// --snapshot=greets via FDS_GREETS_CAM.
-		if (Keyboard[ScK] && View) {
-			std::fprintf(stderr,
-				"[GREETS-CAM-POSE] FDS_GREETS_CAM=%.1f,%.1f,%.1f,%.3f,%.3f,%.3f\n",
-				View->ISource.x, View->ISource.y, View->ISource.z,
-				View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
-		}
 		g_FrameTime = TTrd = Timer;
 
 		clearFrame();
