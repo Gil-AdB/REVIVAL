@@ -63,18 +63,15 @@ void Render_TonemapToVPage() {
         auto q = [](float c){ int v = int(c*255.0f+0.5f); return uint32_t(v<0?0:(v>255?255:v)); };
         outPix = q(b) | (q(g) << 8) | (q(r) << 16) | 0xFF000000u;
     };
-    // Linear path (Stage A): the accumulated buffer is gamma-encoded (lit scene
-    // copied from the 8-bit VPage + additive overlays). Decode gamma->linear with
-    // the cheap gamma-2.0 approx (square), scale exposure in linear, ACES, then
-    // finish() re-encodes (sqrt). Gamma path is byte-identical to before.
+    // Linear path (Phase 3 full coherence): the accumulated buffer is now LINEAR
+    // radiance end-to-end — the surface kernel stores linear (B2), and the fog +
+    // overlays accumulate linear. So NO decode here: just expose, ACES, then
+    // finish() encodes linear->sRGB (gamma-2.0 sqrt) for the 8-bit framebuffer.
+    // (Earlier Stage A decoded a gamma buffer with bn*bn; the kernel/composite
+    // now produce linear directly, so that square is gone.) Gamma path
+    // (--hdr without --hdr_linear) is byte-identical to before.
     auto tmRGB = [&](float B, float G, float R, uint32_t& outPix) {
-        float b, g, r;
-        if (linear) {
-            const float bn = B*kN, gn = G*kN, rn = R*kN;
-            b = aces(bn*bn*exposure); g = aces(gn*gn*exposure); r = aces(rn*rn*exposure);
-        } else {
-            b = aces(B*kE); g = aces(G*kE); r = aces(R*kE);
-        }
+        const float b = aces(B*kE), g = aces(G*kE), r = aces(R*kE);
         finish(b, g, r, outPix);
     };
     for (int y = 0; y < rt.yres; ++y) {

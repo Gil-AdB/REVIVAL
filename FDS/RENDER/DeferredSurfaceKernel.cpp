@@ -1295,10 +1295,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (hdrWrite) {
 				float* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {
-					// B2: linear lighting. albedo² (gamma-2.0 decode) × light at
-					// power 1; specular is reflected light → linear add. Re-encode
-					// (sqrt) for the gamma buffer; T·scene + in-scatter then compose
-					// as before and the tonemap decode recovers linear radiance.
+					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
+					// decode) × light at power 1; specular is reflected light → a
+					// linear add. Store LINEAR radiance directly (the tonemap no
+					// longer decodes; T·scene + in-scatter compose in linear).
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
 					float rlB = aB*aB*lB + sB, rlG = aG*aG*lG + sG, rlR = aR*aR*lR + sR;
@@ -1307,9 +1307,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB>0.0f ? sqrtf(rlB*kN)*255.0f : 0.0f;
-					h[1] = rlG>0.0f ? sqrtf(rlG*kN)*255.0f : 0.0f;
-					h[2] = rlR>0.0f ? sqrtf(rlR*kN)*255.0f : 0.0f;
+					h[0] = rlB; h[1] = rlG; h[2] = rlR;
 				} else {
 					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
 				}
@@ -1426,6 +1424,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	// useful for diagnosing whether observed lighting steps come from
 	// culling drift at tile seams.
 	const bool lightAll = fds::FeatureFlags::xpar_light_all();
+	const bool hdrLinear = fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -1643,9 +1642,20 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
 			}
 
-			int litB = int((texB * lB) * (1.0f / 256.0f));
-			int litG = int((texG * lG) * (1.0f / 256.0f));
-			int litR = int((texR * lR) * (1.0f / 256.0f));
+			// HDR full coherence: linearize the transparent albedo (gamma-2.0
+			// square) so the lit surface composes in the linear buffer like the
+			// opaque kernel (B2); light stays linear. Off → gamma diffuse.
+			int litB, litG, litR;
+			if (hdrLinear) {
+				const float kN = 1.0f/255.0f;
+				litB = int((texB*kN)*(texB*kN)*lB);
+				litG = int((texG*kN)*(texG*kN)*lG);
+				litR = int((texR*kN)*(texR*kN)*lR);
+			} else {
+				litB = int((texB * lB) * (1.0f / 256.0f));
+				litG = int((texG * lG) * (1.0f / 256.0f));
+				litR = int((texR * lR) * (1.0f / 256.0f));
+			}
 			// Specular added on top — independent of base color tint.
 			if (wantSpecular) {
 				float fogScale = 1.0f;
@@ -1673,9 +1683,11 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG = int(float(litG)*T_ + aG_*accW);
 				litB = int(float(litB)*T_ + aB_*accW);
 			}
-			if (litB > 255) litB = 255;
-			if (litG > 255) litG = 255;
-			if (litR > 255) litR = 255;
+			if (!fds::g_hdrActive) {     // HDR: leave unclamped so transparents bloom too
+				if (litB > 255) litB = 255;
+				if (litG > 255) litG = 255;
+				if (litR > 255) litR = 255;
+			}
 			if (litB < 0) litB = 0;
 			if (litG < 0) litG = 0;
 			if (litR < 0) litR = 0;
@@ -2791,7 +2803,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			}
 			if (hdrWrite) {
 				float* h = fds::g_hdrBuf.data() + i * 4;
-				if (hdrLinear) {            // B2 linear lighting — see main kernel
+				if (hdrLinear) {            // B2 + full coherence — see main kernel
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
 					float rlB = aB*aB*lB + sB, rlG = aG*aG*lG + sG, rlR = aR*aR*lR + sR;
@@ -2800,9 +2812,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB>0.0f ? sqrtf(rlB*kN)*255.0f : 0.0f;
-					h[1] = rlG>0.0f ? sqrtf(rlG*kN)*255.0f : 0.0f;
-					h[2] = rlR>0.0f ? sqrtf(rlR*kN)*255.0f : 0.0f;
+					h[0] = rlB; h[1] = rlG; h[2] = rlR;   // store LINEAR
 				} else {
 					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
 				}
