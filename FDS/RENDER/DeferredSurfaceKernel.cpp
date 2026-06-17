@@ -353,6 +353,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// LDR byte-identical; when on but the froxel composite doesn't run, g_hdrActive
 	// stays false and the tonemap no-ops, so the buffer is harmlessly ignored.
 	const bool hdrWrite = fds::FeatureFlags::hdr();
+	// HDR Phase 3 B2: when --hdr_linear, do the lighting math in LINEAR space —
+	// square the (normalized) albedo and let light enter at power 1 (B1/gamma
+	// effectively squares the light too). Store the result re-encoded to gamma
+	// (sqrt) so the buffer stays gamma-coherent with the composite + overlays +
+	// the gamma tonemap-decode that --hdr_linear already applies; the decode
+	// recovers the true linear radiance. Contained to this write — no composite/
+	// overlay/tonemap change. Off → B1 gamma radiance.
+	const bool hdrLinear = hdrWrite && fds::FeatureFlags::hdr_linear();
 
 	// Per-stage ablation gates. Set one of these on to short-circuit the
 	// stage so a bench harness can measure its cost from the frame-time
@@ -1280,13 +1288,32 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				hR += float(rR) * 0.5f;
 			}
 
-			// HDR B1: stash the unclamped opaque radiance + coverage flag before
-			// the debug-viz stomp, so viz only affects the displayed (LDR) VPage.
-			// The froxel composite reads h[3] to take the scene from here (opaque)
-			// vs the VPage (sky/forward content the deferred kernel never wrote).
+			// HDR B1/B2: stash the unclamped opaque radiance + coverage flag
+			// before the debug-viz stomp, so viz only affects the displayed (LDR)
+			// VPage. The froxel composite reads h[3] to take the scene from here
+			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
 				float* h = fds::g_hdrBuf.data() + i * 4;
-				h[0] = hB; h[1] = hG; h[2] = hR; h[3] = 1.0f;
+				if (hdrLinear) {
+					// B2: linear lighting. albedo² (gamma-2.0 decode) × light at
+					// power 1; specular is reflected light → linear add. Re-encode
+					// (sqrt) for the gamma buffer; T·scene + in-scatter then compose
+					// as before and the tonemap decode recovers linear radiance.
+					const float kN = 1.0f / 255.0f;
+					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
+					float rlB = aB*aB*lB + sB, rlG = aG*aG*lG + sG, rlR = aR*aR*lR + sR;
+					if (isWater) {            // reflection underlay is gamma → linearize
+						const dword e = out[i];
+						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
+						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
+					}
+					h[0] = rlB>0.0f ? sqrtf(rlB*kN)*255.0f : 0.0f;
+					h[1] = rlG>0.0f ? sqrtf(rlG*kN)*255.0f : 0.0f;
+					h[2] = rlR>0.0f ? sqrtf(rlR*kN)*255.0f : 0.0f;
+				} else {
+					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+				}
+				h[3] = 1.0f;
 			}
 
 			// FDS_VIZ_NORMAL / FDS_VIZ_TANGENT: stomp final output with
@@ -2404,6 +2431,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool hdrWrite     = fds::FeatureFlags::hdr();   // HDR B1: see main kernel
+	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved
 	// surface gives wildly different shading at adjacent pixels, and
@@ -2763,7 +2791,22 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			}
 			if (hdrWrite) {
 				float* h = fds::g_hdrBuf.data() + i * 4;
-				h[0] = hB; h[1] = hG; h[2] = hR; h[3] = 1.0f;   // coverage for the composite
+				if (hdrLinear) {            // B2 linear lighting — see main kernel
+					const float kN = 1.0f / 255.0f;
+					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
+					float rlB = aB*aB*lB + sB, rlG = aG*aG*lG + sG, rlR = aR*aR*lR + sR;
+					if (isWater) {
+						const dword e = out[i];
+						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
+						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
+					}
+					h[0] = rlB>0.0f ? sqrtf(rlB*kN)*255.0f : 0.0f;
+					h[1] = rlG>0.0f ? sqrtf(rlG*kN)*255.0f : 0.0f;
+					h[2] = rlR>0.0f ? sqrtf(rlR*kN)*255.0f : 0.0f;
+				} else {
+					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+				}
+				h[3] = 1.0f;   // coverage for the composite
 			}
 			if (outB > 255) outB = 255;
 			if (outG > 255) outG = 255;
