@@ -44,6 +44,11 @@ extern bool g_hdrDeferTonemap;
 // before any HDR write (Phase 1 wires this ahead of the deferred passes).
 void Hdr_BeginFrame();
 
+// Same, but for an arbitrary target resolution — the mirror RTT pass sizes
+// g_hdrBuf to its offscreen surface so its reflection accumulates + tonemaps
+// HDR-correctly (Hdr_WritableFor then matches that pass's ctx.xres/yres).
+void Hdr_BeginFramePass(int w, int h);
+
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();

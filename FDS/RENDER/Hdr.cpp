@@ -16,14 +16,19 @@ bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
 int g_hdrBufW = 0, g_hdrBufH = 0;
 
-void Hdr_BeginFrame() {
+void Hdr_BeginFramePass(int w, int h) {
     g_hdrActive = false;
-    g_hdrBufW = XRes;
-    g_hdrBufH = YRes;
-    const size_t n = size_t(XRes) * size_t(YRes) * 4;
+    g_hdrBufW = w;
+    g_hdrBufH = h;
+    const size_t n = size_t(w) * size_t(h) * 4;
     if (g_hdrBuf.size() != n) g_hdrBuf.assign(n, 0.0f);
     else std::fill(g_hdrBuf.begin(), g_hdrBuf.end(), 0.0f);
 }
+
+// Main view: size g_hdrBuf to the global framebuffer. The mirror RTT calls
+// Hdr_BeginFramePass with its own (smaller) dims so its reflection blooms
+// through the same tonemap — see RenderSecondOrderMirrors.
+void Hdr_BeginFrame() { Hdr_BeginFramePass(XRes, YRes); }
 
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();

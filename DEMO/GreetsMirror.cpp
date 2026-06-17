@@ -15,6 +15,7 @@
 #include <FILLERS/Mekalele.h>  // g_gbuffer + GBuffer::mirrorId plane
 #include <RENDER/OffscreenView.h>  // OffscreenViewScope (RTT world swap)
 #include <RENDER/DeferredCommon.h> // DeferredOverride + Render_DeferredLighting/VolumetricCones (deferred RTT)
+#include <RENDER/Hdr.h>            // HDR-correct reflections: per-RTT-slot begin/tonemap
 #include <Base/RenderContext.h>    // fds::RenderContext (deferred RTT bake)
 
 #include <algorithm>
@@ -2708,8 +2709,27 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 ov.xres       = s.texW;
                 ov.yres       = s.texH;
                 ov.inlineDispatch = true;
+                // HDR-correct reflection: size g_hdrBuf to THIS RTT slot so the
+                // deferred kernel + cones accumulate linear radiance, then tonemap
+                // it onto the RTT surface (the globals point at s_rttSurf inside
+                // the OffscreenViewScope, so Render_TonemapToVPage targets it).
+                // g_hdrActive is set manually — the RTT has no froxel composite to
+                // set it — so cones add into g_hdrBuf and the tonemap runs;
+                // uncovered pixels are 0 (black, no forward sky in the deferred
+                // RTT) and tonemap to black as before. The main pass's
+                // Hdr_BeginFrame restores g_hdrBuf to the screen dims afterward.
+                const bool rttHdr = fds::FeatureFlags::hdr();
+                if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
                 Render_DeferredLighting(dctx, &ov);
+                if (rttHdr) fds::g_hdrActive = true;
                 Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
+                if (rttHdr) {
+                    fds::Render_TonemapToVPage();
+                    // The slot's radiance is now resolved onto s_rttSurf; clear
+                    // the active flag so a later pass (e.g. parallel shards) can't
+                    // accumulate into this RTT-sized buffer at its own dims.
+                    fds::g_hdrActive = false;
+                }
             } else {
                 Render(RenderPath::ForceForward);
             }
