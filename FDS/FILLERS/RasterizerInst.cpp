@@ -38,6 +38,9 @@ template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode:
 template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NONE>          (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NONE,           false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL_BILINEAR, false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+// HDR overlay reorg: bolt-glow ribbon variants accumulating into g_hdrBuf.
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NONE,           false, false, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL_BILINEAR, false, false, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::ADDITIVE,    barry::TTextureMode::NORMAL,          true, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 template void TheOtherBarry<barry::TBlendMode::SRC_ALPHA,   barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 

@@ -6,6 +6,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/RenderTarget.h"
 #include "Base/CameraContext.h"
+#include "RENDER/Hdr.h"  // HDR overlay reorg — ADDITIVE bolt accumulates into g_hdrBuf
 #include "F4Vec.h"
 #include "ClipperTileRect.h"
 
@@ -234,7 +235,7 @@ inline uint32_t tile_du(uint32_t u, uint32_t vbits, uint32_t umask) {
 // frames the disc. The opaque swirl is kept and stamps Z → the ship is still
 // occluded as it flies through.
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode, bool WriteZ = true,
-          bool AlphaTest = false>
+          bool AlphaTest = false, bool HDRAccum = false>
 struct TileRasterizer {
 	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres,
 	               uint16_t* zpage16, float zScale,
@@ -556,6 +557,31 @@ struct TileRasterizer {
 					auto texture_samples = colorize(Vec32uc(texture0_samples), blend_color);
 #endif
 
+					if constexpr (HDRAccum) {
+						// HDR overlay reorg: additive source → g_hdrBuf (float,
+						// uncapped) instead of the 8-bit add_saturated store, so
+						// the bolt blooms + rolls off at the tonemap instead of
+						// clipping at 255 over the flash. Scalar over the masked
+						// lanes (bolt coverage is sparse). Screen x,y from the
+						// tile origin; g_hdrBuf is B,G,R,(pad) per pixel at
+						// XRes stride (== VPage stride; the deferred path relies
+						// on that). The colour maskstore + mat32 stamp are
+						// skipped — the bolt draws post-deferred, into HDR only.
+						alignas(32) uint8_t hsrc[32];
+						Vec32uc(texture_samples).store(hsrc);
+						int hmask[8];
+						select(p_mask, Vec8i(-1), Vec8i(0)).store(hmask);
+						const int hpy  = tile.y * TILE_SIZE + y;
+						const int hpx0 = tile.x * TILE_SIZE;
+						float* hbuf = fds::g_hdrBuf.data();
+						for (int k = 0; k < 8; ++k) {
+							if (!hmask[k]) continue;
+							float* h = hbuf + (size_t(hpy) * size_t(xres) + size_t(hpx0 + k)) * 4;
+							h[0] += float(hsrc[k * 4 + 0]);   // B
+							h[1] += float(hsrc[k * 4 + 1]);   // G
+							h[2] += float(hsrc[k * 4 + 2]);   // R
+						}
+					} else {
 					if constexpr (BlendMode == TBlendMode::TRANSPARENT) {
 						Vec32uc dst;
 						dst.load_a(span);
@@ -603,6 +629,7 @@ struct TileRasterizer {
 							*(__m256i*)(&p_mask),
 							_mm256_set1_epi32(int(0xFFFFFFFF)));
 					}
+					}  // end else (non-HDRAccum store path)
 				}
 			}
 
@@ -902,7 +929,7 @@ struct TileRasterizer {
 } // namespace barry
 
 template <barry::TBlendMode BlendMode, barry::TTextureMode TextureMode = barry::TTextureMode::NORMAL, bool WriteZ = true,
-          bool AlphaTest = false>
+          bool AlphaTest = false, bool HDRAccum = false>
 void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
                    const fds::RenderTarget& rt,
                    const fds::CameraContext& cam) {
@@ -921,7 +948,7 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// the include graph straight (Mekalele.h includes TheOtherBarry.h,
 	// not the other way round).
 	uint32_t *gbufferMat32 = meka::gbuffer_mat32_plane(rt.gbuffer);
-	barry::TileRasterizer<BlendMode, TextureMode, WriteZ, AlphaTest> r(V,
+	barry::TileRasterizer<BlendMode, TextureMode, WriteZ, AlphaTest, HDRAccum> r(V,
 	                                                 reinterpret_cast<byte*>(rt.vpage),
 	                                                 rt.bytesPerScanline,
 	                                                 rt.xres, rt.yres,
@@ -1043,6 +1070,10 @@ extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TText
 // Z-test-but-no-Z-write variants for the fountain bolt glow (strictly additive).
 extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NONE,           false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL_BILINEAR, false>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+// HDR overlay reorg: bolt glow ribbon accumulating into g_hdrBuf (HDRAccum=true)
+// so it blooms over the flash instead of clipping. Used when --hdr + g_hdrActive.
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NONE,           false, false, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TTextureMode::NORMAL_BILINEAR, false, false, true>(Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
 // Alpha-tested textured additive — the fountain portal/vortex (WriteZ=true,
 // AlphaTest=true): discards transparent texels so the fog isn't truncated
 // behind them, while the bright swirl still stamps Z and occludes the ship.

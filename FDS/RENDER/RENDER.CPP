@@ -55,7 +55,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); }
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); extern bool g_hdrDeferTonemap; }
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -701,12 +701,13 @@ xpar_done: ;
 			Render_OmniHalos(dctx);
 		}
 
-		// HDR (Phase 2.2): tonemap now that cones + halos (separate-pass path)
-		// have accumulated into g_hdrBuf, so god-ray shafts + omni halos bloom
-		// and roll off instead of clipping. Rain + lens drops below still
-		// composite LDR over the tonemapped base (rain is the next step). No-op
-		// unless g_hdrActive (main frame, froxel populated the buffer).
-		if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
+		// HDR (Phase 2.2/2.3): tonemap now that cones + halos have accumulated
+		// into g_hdrBuf, so god-ray shafts + omni halos bloom and roll off
+		// instead of clipping. SKIPPED when g_hdrDeferTonemap — the scene
+		// tonemaps later itself (the fountain tonemaps after its bolt, so the
+		// bolt accumulates into g_hdrBuf and blooms too). No-op unless
+		// g_hdrActive (main frame, froxel populated the buffer).
+		if (fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
 
 		// Screen-space rain LAST among the view-aligned passes (streaks
 		// overlay fog, beams and halos — near rain is in front of all of

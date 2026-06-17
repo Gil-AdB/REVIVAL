@@ -12,6 +12,7 @@ namespace fds {
 
 std::vector<float> g_hdrBuf;
 bool g_hdrActive = false;
+bool g_hdrDeferTonemap = false;
 
 void Hdr_BeginFrame() {
     g_hdrActive = false;

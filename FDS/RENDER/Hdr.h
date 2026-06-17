@@ -20,6 +20,14 @@ extern std::vector<float> g_hdrBuf;
 // instead of tonemapping a cleared buffer to black.
 extern bool g_hdrActive;
 
+// Phase 2.3: when true, renderFrame SKIPS its own end-of-pipeline tonemap — the
+// scene tonemaps later itself (the fountain tick tonemaps AFTER the bolt so the
+// bolt accumulates into g_hdrBuf and blooms). The fountain sets this before
+// Render() and clears it after its own tonemap. NOT reset by Hdr_BeginFrame
+// (which runs inside Render(), after the scene set it). Other scenes leave it
+// false → renderFrame tonemaps at its own end.
+extern bool g_hdrDeferTonemap;
+
 // Size g_hdrBuf to the current XRes*YRes and clear it. Call once per frame,
 // before any HDR write (Phase 1 wires this ahead of the deferred passes).
 void Hdr_BeginFrame();

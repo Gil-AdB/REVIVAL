@@ -1206,6 +1206,22 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	DWord *Ptr = (DWord *)VPage;
 	DWord *End;
 
+	// HDR overlay reorg: in HDR mode the core + AA accumulate into g_hdrBuf
+	// (float, uncapped) so the bolt core blooms over the flash instead of being
+	// overwritten/clipped. g_hdrBuf is B,G,R,(pad) per pixel at XRes stride,
+	// which equals the VPage byte stride (the deferred path relies on that), so
+	// a VPage byte offset indexes g_hdrBuf directly. additive, no 255 cap. The
+	// LDR path (g_hdrActive false) is byte-for-byte unchanged. AA writes recover
+	// their additive delta as (sat - *cPtr) so the conversion is uniform.
+	const bool     hdrAcc = fds::g_hdrActive;
+	float* const   hbuf   = fds::g_hdrBuf.data();
+	uint8_t* const vbaseB = (uint8_t*)VPage;
+	auto putCore = [&](DWord* P){
+		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);
+		              hbuf[o+0]+=255.0f; hbuf[o+1]+=255.0f; hbuf[o+2]+=255.0f; }
+		else *P = 0xFFFFFF;
+	};
+
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
 	// The viewport clip is float-exact but the +0.5 rounding above can
@@ -1252,7 +1268,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	{
 		const float zw0 = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
 		const dword zc0 = 0xFF80 - (dword)Fist(g_zscale * zw0);
-		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) *Ptr = 0xFFFFFF;
+		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) putCore(Ptr);
 	}
 //	 memset(Ptr,255,depth<<2);
 
@@ -1273,7 +1289,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
 				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
 			}
-			*Ptr = 0xFFFFFF;
+			putCore(Ptr);
 //			memset(Ptr,255,depth<<2);
 		}
 	} else {
@@ -1299,39 +1315,39 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 			cPtr = ((uint8_t *)Ptr)-8;
 			Offs = 128*(D-Ai)/(Bi-Ai);
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>1);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			cPtr++;
 
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>2);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>1);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
-			*Ptr = 0xFFFFFF;
+			putCore(Ptr);
 
 			cPtr+=5;
 			Offs = 128-Offs;
 
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>2);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>1);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 			cPtr++;
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 //			memset(Ptr,255,depth<<2);
 		}
@@ -1350,6 +1366,22 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	uint8_t *cPtr;
 	DWord *Ptr = (DWord *)VPage;
 	DWord *End;
+
+	// HDR overlay reorg: in HDR mode the core + AA accumulate into g_hdrBuf
+	// (float, uncapped) so the bolt core blooms over the flash instead of being
+	// overwritten/clipped. g_hdrBuf is B,G,R,(pad) per pixel at XRes stride,
+	// which equals the VPage byte stride (the deferred path relies on that), so
+	// a VPage byte offset indexes g_hdrBuf directly. additive, no 255 cap. The
+	// LDR path (g_hdrActive false) is byte-for-byte unchanged. AA writes recover
+	// their additive delta as (sat - *cPtr) so the conversion is uniform.
+	const bool     hdrAcc = fds::g_hdrActive;
+	float* const   hbuf   = fds::g_hdrBuf.data();
+	uint8_t* const vbaseB = (uint8_t*)VPage;
+	auto putCore = [&](DWord* P){
+		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);
+		              hbuf[o+0]+=255.0f; hbuf[o+1]+=255.0f; hbuf[o+2]+=255.0f; }
+		else *P = 0xFFFFFF;
+	};
 
 	X1=V1->PX+0.5; Y1=V1->PY+0.5;
 	X2=V2->PX+0.5; Y2=V2->PY+0.5;
@@ -1397,7 +1429,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	{
 		const float zw0 = 1.0f / (rzCur > 1e-9f ? rzCur : 1e-9f);
 		const dword zc0 = 0xFF80 - (dword)Fist(g_zscale * zw0);
-		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) *Ptr = 0xFFFFFF;
+		if (ZPage16[(size_t)(Ptr - vbase)] < zc0) putCore(Ptr);
 	}
 //	 memset(Ptr,255,depth<<2);
 
@@ -1418,35 +1450,35 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 				const dword zc = 0xFF80 - (dword)Fist(g_zscale * zw);
 				if (ZPage16[(size_t)(Ptr - vbase)] >= zc) continue;
 			}
-//			*Ptr = 0xFFFFFF;
+//			putCore(Ptr);
 //			memset(Ptr,255,depth<<2);
 
 			cPtr = ((uint8_t *)Ptr)-VESA_BPSL;
 			Offs = 128*(D-Ai)/(Bi-Ai);
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 			cPtr+=VESA_BPSL-3;
 			sat = *cPtr+(128);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(128);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(128);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 			cPtr+=VESA_BPSL-3;
 			Offs = 128-Offs;
 
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 
 
@@ -1474,31 +1506,31 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 			cPtr = ((uint8_t *)Ptr)-4;
 			Offs = 128*(D-Ai)/(Bi-Ai);
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
 			cPtr++;
 			sat = *cPtr+(24);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(48);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(96);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 
-			//*Ptr = 0xFFFFFF;
+			//putCore(Ptr);
 
 			cPtr++;
 			Offs = 128-Offs;
 
 			sat = *cPtr+(Offs>>5);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>4);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 			sat = *cPtr+(Offs>>3);
-			if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
+			if (hdrAcc) { hbuf[size_t(cPtr - vbaseB)] += float(sat - int(*cPtr)); ++cPtr; } else if (sat>255) *cPtr++ = 255; else *cPtr++ = sat;
 		}
 	}
 }
@@ -1954,7 +1986,11 @@ void drawBoltRibbon(const Vector& A, const Vector& B,
 		const float area = (b2.PX-a.PX)*(c.PY-a.PY) - (b2.PY-a.PY)*(c.PX-a.PX);
 		if (area > -1.0f && area < 1.0f) return;
 		Face f; f.A=&a; f.B=&b2; f.C=&c;
-		f.Filler=(TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NONE, false>);
+		// HDR overlay reorg: in HDR mode the ribbon accumulates into g_hdrBuf
+		// (float, uncapped) so it blooms over the flash; else the 8-bit additive.
+		f.Filler = fds::g_hdrActive
+			? (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NONE, false, false, true>)
+			: (TheOtherBarry<barry::TBlendMode::ADDITIVE, barry::TTextureMode::NONE, false>);
 		f.Txtr=nullptr;
 		_2DClipper::getInstance()->clip(vp, f, rt, cam);
 	};
@@ -2720,6 +2756,10 @@ struct FountainScene : SceneDriver {
 		prof.enter(PROF_SORT);
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
+		// HDR overlay reorg: defer the tonemap so the bolt (drawn after Render)
+		// accumulates into g_hdrBuf and blooms over the flash. renderFrame skips
+		// its own tonemap when this is set; we tonemap below after the bolt.
+		fds::g_hdrDeferTonemap = fds::FeatureFlags::hdr();
 		Render();
 		// Attribute the deferred-skybox tile cost (timed inside
 		// Render_DeferredSkybox via an atomic) back to PROF_SKY so
@@ -2743,6 +2783,15 @@ struct FountainScene : SceneDriver {
 			for (int pi = 0; pi < 6; ++pi)
 				Spark(Pylon + pi, Pylon + ((pi + 1) % 6), g_LnMat);
 		}
+
+		// HDR overlay reorg: the bolt + all scene overlays have now accumulated
+		// into g_hdrBuf — tonemap ONCE, here, so the bolt blooms + rolls off
+		// with the flash instead of clipping. Must run BEFORE the debug labels /
+		// profiler overlay below (those are LDR UI drawn on top of the final
+		// image). No-op unless g_hdrActive (froxel populated the buffer).
+		if (fds::FeatureFlags::hdr() && fds::g_hdrActive) fds::Render_TonemapToVPage();
+		fds::g_hdrDeferTonemap = false;
+
 		// Debug labels at each stream-head omni's screen position.
 		for (int i = 0; i < kNumFollowerOmnis; ++i) {
 			const FollowerOmni& f = g_FntFollowerOmnis[i];
