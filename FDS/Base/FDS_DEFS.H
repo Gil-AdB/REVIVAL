@@ -135,6 +135,7 @@ enum SceneFlags
 #define Mat_Additive	 0x0040
 #define Mat_SrcAlpha	 0x0080
 #define Mat_SkipZ		 0x0100
+#define Mat_HdrReflection 0x0200  // panel shows float reflection radiance (Material::hdrRefl); the transparent kernel samples it emissively into g_hdrBuf so reflected highlights bloom (HDR mirror RTT)
 
 #define DEFAULT_BLOCKSIZEX 2
 #define DEFAULT_BLOCKSIZEY 2

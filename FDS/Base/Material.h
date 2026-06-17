@@ -81,6 +81,15 @@ struct Material
     float                 TFP1                  = 0.0f;
     bool                  ZBufferWrite          = true;
     bool                  ZBufferTest           = true;
+    // ─── HDR mirror reflection (Mat_HdrReflection) ───────────────────
+    // Float reflection radiance baked by the deferred mirror RTT, row-major
+    // BGR (3 floats/texel), hdrReflW×hdrReflH. The transparent kernel samples
+    // this emissively into g_hdrBuf so reflected highlights bloom instead of
+    // clipping at the 8-bit panel texture. Raw pointer (Material is memcpy'd at
+    // mirror-clone time, so no std::vector here); owned/managed by the RTT bake.
+    float               * hdrRefl               = nullptr;
+    int                   hdrReflW              = 0;
+    int                   hdrReflH              = 0;
 };
 
 #pragma pack(pop)

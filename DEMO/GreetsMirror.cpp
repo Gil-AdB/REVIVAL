@@ -2514,6 +2514,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     // main view) instead of the forward filler. Serial pass → reuse one static
     // G-buffer + light/tile scratch sized to the max RTT target.
     const bool rttDeferred = fds::FeatureFlags::shard_deferred();
+    const bool rttHdr = fds::FeatureFlags::hdr();  // HDR mirror reflection (b): frame-level, used by the deferred render AND the panel composite below
     static meka::GBuffer            s_rttGB;
     static ViewLightsSoA            s_rttLights;
     static std::vector<TileLights>  s_rttTileLights;
@@ -2710,15 +2711,12 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 ov.yres       = s.texH;
                 ov.inlineDispatch = true;
                 // HDR-correct reflection: size g_hdrBuf to THIS RTT slot so the
-                // deferred kernel + cones accumulate linear radiance, then tonemap
-                // it onto the RTT surface (the globals point at s_rttSurf inside
-                // the OffscreenViewScope, so Render_TonemapToVPage targets it).
-                // g_hdrActive is set manually — the RTT has no froxel composite to
-                // set it — so cones add into g_hdrBuf and the tonemap runs;
-                // uncovered pixels are 0 (black, no forward sky in the deferred
-                // RTT) and tonemap to black as before. The main pass's
-                // Hdr_BeginFrame restores g_hdrBuf to the screen dims afterward.
-                const bool rttHdr = fds::FeatureFlags::hdr();
+                // deferred kernel + cones accumulate linear radiance. For order-1
+                // panels the composite below captures that float radiance into the
+                // material's hdrRefl (b); we still tonemap onto s_rttSurf as the
+                // 8-bit LDR fallback. g_hdrActive is set manually — the RTT has no
+                // froxel composite to set it — so cones add into g_hdrBuf and the
+                // tonemap runs. The main pass's Hdr_BeginFrame restores g_hdrBuf.
                 if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
                 Render_DeferredLighting(dctx, &ov);
                 if (rttHdr) fds::g_hdrActive = true;
@@ -2818,6 +2816,22 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             uint32_t *px = (uint32_t*)s_rttSurf.Data;
             const float du = (eU1 - eU0) / float(s.texW);
             const float dv = (s.v1 - s.v0) / float(s.texH);
+            // HDR reflection (b): build a FLOAT panel radiance = linear(text) +
+            // reflection*gain, sampled emissively by the transparent kernel so
+            // reflected highlights bloom. Reuses this loop's text affine; the
+            // reflection comes from the float g_hdrBuf (the RTT slot's radiance,
+            // not yet quantized) at the same pixel index. The 8-bit path below
+            // stays as the LDR fallback. hdrRefl owned by the panel material.
+            float *hdrR = nullptr;
+            if (rttHdr && slotDeferred) {   // float radiance only exists when the deferred render ran this slot
+                if (s.mat->hdrReflW != s.texW || s.mat->hdrReflH != s.texH) {
+                    std::free(s.mat->hdrRefl);
+                    s.mat->hdrRefl = (float*)std::malloc(size_t(s.texW)*s.texH*3*sizeof(float));
+                    s.mat->hdrReflW = s.texW; s.mat->hdrReflH = s.texH;
+                }
+                hdrR = s.mat->hdrRefl;
+            }
+            auto linf = [](uint32_t c){ const float n = float(c)*(1.0f/255.0f); return n*n*255.0f; };
             for (int y = 0; y < s.texH; ++y) {
                 const float pv = s.v1 - (float(y) + 0.5f) * dv;
                 for (int x = 0; x < s.texW; ++x) {
@@ -2829,10 +2843,16 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                     const int iv = int(fv * float(th)) & (th - 1);
                     const int blk = ((iu >> 2) * tBlocksY + (iv >> 2)) << 4;
                     const dword t = td[blk + ((iv & 3) << 2) + (iu & 3)];
-                    uint32_t &o = px[size_t(y) * size_t(s.texW) + x];
+                    const size_t pix = size_t(y) * size_t(s.texW) + x;
+                    uint32_t &o = px[pix];
                     const uint32_t tb =  t        & 0xFF;
                     const uint32_t tg = (t >> 8)  & 0xFF;
                     const uint32_t tr = (t >> 16) & 0xFF;
+                    if (hdrR) {
+                        hdrR[pix*3+0] = linf(tb) + fds::g_hdrBuf[pix*4+0]*rGain;
+                        hdrR[pix*3+1] = linf(tg) + fds::g_hdrBuf[pix*4+1]*rGain;
+                        hdrR[pix*3+2] = linf(tr) + fds::g_hdrBuf[pix*4+2]*rGain;
+                    }
                     // Reflection attenuated by the reflectance gain;
                     // the text rides on top at full strength.
                     uint32_t ob = tb + ((( o        & 0xFF) * gainQ) >> 8);
@@ -2844,6 +2864,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                     o = ob | (og << 8) | (orr << 16) | 0xFF000000u;
                 }
             }
+            if (rttHdr && slotDeferred) s.mat->Flags |=  Mat_HdrReflection;
+            else                        s.mat->Flags &= ~Mat_HdrReflection;
         }
         // Linear RTT pixels → slot texture, re-tiled in place (the
         // same one-way Sachletz the texture loader applies).

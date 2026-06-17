@@ -1647,11 +1647,37 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				lR = std::min(std::max(lR * fogRate, 10.0f), 253.0f);
 			}
 
-			// HDR full coherence: linearize the transparent albedo (gamma-2.0
-			// square) so the lit surface composes in the linear buffer like the
-			// opaque kernel (B2); light stays linear. Off → gamma diffuse.
+			// HDR mirror reflection (b): the deferred RTT baked this panel's FLOAT
+			// reflection radiance (gain·reflection + linear text) into Mat->hdrRefl.
+			// Sample it emissively so reflected highlights exceed 255 and bloom
+			// through the main tonemap, instead of clamping at the 8-bit panel
+			// texture. The G-buffer carries a swizzled mip-0 texel index, so invert
+			// the Sachletz (4x4 block, X-outer/Y-inner) back to row-major iu/iv;
+			// mip>0 (distant panel) falls back to the 8-bit albedo path below.
+			// pmid == 0: only the DIRECT (original) panel samples its float
+			// reflection. The same material is shared by clone copies (order-2 /
+			// portal reflections, pmid > 0) whose G-buffer texel index belongs to
+			// a different render context — sampling hdrRefl there reads float
+			// radiance into the wrong place and blows out. Clones fall back to the
+			// 8-bit panel texture (order-2 HDR reflection is a later extension).
+			const bool isHdrRefl = (Mat->Flags & Mat_HdrReflection) && Mat->hdrRefl
+			                       && fds::g_hdrActive && miplevel == 0 && pmid == 0
+			                       && Mat->hdrReflW > 0 && Mat->hdrReflH > 0;
 			int litB, litG, litR;
-			if (hdrLinear) {
+			if (isHdrRefl) {
+				const int W = Mat->hdrReflW, H = Mat->hdrReflH;
+				const int within = int(swizzledUV) & 15, blk = int(swizzledUV) >> 4;
+				const int blocksY = H >> 2;
+				int iu = (blk / blocksY) * 4 + (within & 3);
+				int iv = (blk % blocksY) * 4 + ((within >> 2) & 3);
+				if (iu >= W) iu = W - 1;
+				if (iv >= H) iv = H - 1;
+				const float* hr = Mat->hdrRefl + (size_t(iv) * size_t(W) + size_t(iu)) * 3;
+				litB = int(hr[0]); litG = int(hr[1]); litR = int(hr[2]);
+			} else if (hdrLinear) {
+				// Full coherence: linearize the transparent albedo (gamma-2.0
+				// square) so it composes in the linear buffer like the opaque
+				// kernel (B2); light stays linear.
 				const float kN = 1.0f/255.0f;
 				litB = int((texB*kN)*(texB*kN)*lB);
 				litG = int((texG*kN)*(texG*kN)*lG);
@@ -1661,8 +1687,9 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG = int((texG * lG) * (1.0f / 256.0f));
 				litR = int((texR * lR) * (1.0f / 256.0f));
 			}
-			// Specular added on top — independent of base color tint.
-			if (wantSpecular) {
+			// Specular added on top — independent of base color tint. Skipped for
+			// the HDR-reflection path (hdrRefl already carries the full radiance).
+			if (wantSpecular && !isHdrRefl) {
 				float fogScale = 1.0f;
 				if (!froxelFog && !ssFog && (ctx.Sc->Flags & Scn_Fogged)) {
 					const float t = 1.0f - z * (1.0f / ctx.Sc->FZP);
@@ -1672,7 +1699,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG += int(sG * fogScale);
 				litR += int(sR * fogScale);
 			}
-			if (froxelFog || ssFog) {
+			if ((froxelFog || ssFog) && !isHdrRefl) {
 				float aR_, aG_, aB_, T_;
 				if (froxelFog) FastFog_SampleGrid(px, py, z, aR_, aG_, aB_, T_);
 				else           FastFog_SSSample(px, py, z, aR_, aG_, aB_, T_);
