@@ -1802,10 +1802,19 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				// HDR: unclamped lit·T + in-scatter → radiance buffer (no dither/
 				// clamp; the tonemap rolls off later). g_hdrBuf is B,G,R,(pad)
 				// per pixel, contiguous (same i as VPage).
+				//
+				// HDR B1: take the scene radiance from g_hdrBuf where the deferred
+				// kernel wrote it UNCLAMPED (coverage flag h[3] > 0) so bright
+				// surfaces bloom; fall back to the 8-bit VPage where it didn't —
+				// sky / forward content (skycube, reflective windows, additive
+				// vortex) only ever lands in VPage.
 				float* h = fds::g_hdrBuf.data() + i*4;
-				h[2] = float((pix>>16)&0xFFu)*Tpix + aR;
-				h[1] = float((pix>> 8)&0xFFu)*Tpix + aG;
-				h[0] = float( pix     &0xFFu)*Tpix + aB;
+				float scnB, scnG, scnR;
+				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
+				else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
+				h[2] = scnR*Tpix + aR;
+				h[1] = scnG*Tpix + aG;
+				h[0] = scnB*Tpix + aB;
 			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));

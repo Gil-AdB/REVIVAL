@@ -346,6 +346,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool useVec         = deferredLightingVecEnabled();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 	const bool profShadowCache = fds::FeatureFlags::shadow_prof_cache();
+	// HDR Phase 3 B1: route the opaque lit radiance into g_hdrBuf UNCLAMPED so
+	// bright surfaces bloom/roll-off at the tonemap instead of clipping at the
+	// 8-bit VPage. The composite reads this back (coverage flag in h[3]) rather
+	// than lifting the already-clamped VPage. Gated on hdr(): when off, no write,
+	// LDR byte-identical; when on but the froxel composite doesn't run, g_hdrActive
+	// stays false and the tonemap no-ops, so the buffer is harmlessly ignored.
+	const bool hdrWrite = fds::FeatureFlags::hdr();
 
 	// Per-stage ablation gates. Set one of these on to short-circuit the
 	// stage so a bench harness can measure its cost from the frame-time
@@ -1212,10 +1219,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				}
 			}
 
-			// Saturation cap (matches forward at 250).
-			if (lB > 250.0f) lB = 250.0f;
-			if (lG > 250.0f) lG = 250.0f;
-			if (lR > 250.0f) lR = 250.0f;
+			// Saturation cap (matches forward at 250). The 250/255 caps are
+			// 8-bit rollover guards; in HDR the radiance lands in a float buffer
+			// that can't roll over, so we lift the UPPER cap (else bright lit
+			// surfaces max at ~250 and never bloom). Lower clamp stays — negative
+			// light is nonsense in either path.
+			if (!hdrWrite) {
+				if (lB > 250.0f) lB = 250.0f;
+				if (lG > 250.0f) lG = 250.0f;
+				if (lR > 250.0f) lR = 250.0f;
+			}
 			if (lB < 0.0f)   lB = 0.0f;
 			if (lG < 0.0f)   lG = 0.0f;
 			if (lR < 0.0f)   lR = 0.0f;
@@ -1239,6 +1252,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
+			// HDR B1: unclamped float radiance (same gamma-space value, no 8-bit
+			// truncation/clamp), accumulated through the water blend below and
+			// written to g_hdrBuf before the debug-viz stomp.
+			float hB = fdB + sB, hG = fdG + sG, hR = fdR + sR;
 
 			// Water-mesh transparent blend. Forward draws the water plane
 			// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
@@ -1258,6 +1275,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				outB += rB >> 1;
 				outG += rG >> 1;
 				outR += rR >> 1;
+				hB += float(rB) * 0.5f;
+				hG += float(rG) * 0.5f;
+				hR += float(rR) * 0.5f;
+			}
+
+			// HDR B1: stash the unclamped opaque radiance + coverage flag before
+			// the debug-viz stomp, so viz only affects the displayed (LDR) VPage.
+			// The froxel composite reads h[3] to take the scene from here (opaque)
+			// vs the VPage (sky/forward content the deferred kernel never wrote).
+			if (hdrWrite) {
+				float* h = fds::g_hdrBuf.data() + i * 4;
+				h[0] = hB; h[1] = hG; h[2] = hR; h[3] = 1.0f;
 			}
 
 			// FDS_VIZ_NORMAL / FDS_VIZ_TANGENT: stomp final output with
@@ -2374,6 +2403,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
+	const bool hdrWrite     = fds::FeatureFlags::hdr();   // HDR B1: see main kernel
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved
 	// surface gives wildly different shading at adjacent pixels, and
@@ -2701,9 +2731,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				}
 			}
 
-			if (lB > 250.0f) lB = 250.0f;
-			if (lG > 250.0f) lG = 250.0f;
-			if (lR > 250.0f) lR = 250.0f;
+			if (!hdrWrite) {               // 8-bit rollover guard only (see main kernel)
+				if (lB > 250.0f) lB = 250.0f;
+				if (lG > 250.0f) lG = 250.0f;
+				if (lR > 250.0f) lR = 250.0f;
+			}
 			if (lB < 0.0f) lB = 0.0f;
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
@@ -2716,11 +2748,22 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
+			float hB = fdB + sB, hG = fdG + sG, hR = fdR + sR;   // HDR B1 unclamped radiance
 			if (isWater) {
 				const dword existing = out[i];
-				outB += int(existing & 0xFF) >> 1;
-				outG += int((existing >> 8) & 0xFF) >> 1;
-				outR += int((existing >> 16) & 0xFF) >> 1;
+				const int rB = int(existing & 0xFF);
+				const int rG = int((existing >> 8) & 0xFF);
+				const int rR = int((existing >> 16) & 0xFF);
+				outB += rB >> 1;
+				outG += rG >> 1;
+				outR += rR >> 1;
+				hB += float(rB) * 0.5f;
+				hG += float(rG) * 0.5f;
+				hR += float(rR) * 0.5f;
+			}
+			if (hdrWrite) {
+				float* h = fds::g_hdrBuf.data() + i * 4;
+				h[0] = hB; h[1] = hG; h[2] = hR; h[3] = 1.0f;   // coverage for the composite
 			}
 			if (outB > 255) outB = 255;
 			if (outG > 255) outG = 255;

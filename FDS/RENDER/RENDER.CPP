@@ -441,6 +441,15 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// also safer than the old stale-singleton read.
 	DeferredLightingCtx dctx{};
 	if (deferred) {
+		// HDR (prototype): size + clear the radiance buffer BEFORE the deferred
+		// lighting pass. In HDR mode the surface kernel writes its unclamped
+		// opaque radiance + a coverage flag into g_hdrBuf (HDR B1), the fog
+		// composite reads that back, and the tonemap below maps it down. Must
+		// precede Render_DeferredLighting (which writes it) and run exactly once
+		// per frame (clearing it again afterward would wipe the coverage). Gated
+		// on --hdr.
+		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
+
 		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
 		// + linear falloff against the scene's omnis, modulated by the
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
@@ -457,11 +466,6 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		if (fds::FeatureFlags::deferred_skybox()) {
 			Render_DeferredSkybox();
 		}
-
-		// HDR (prototype): size the radiance buffer before the fog composite
-		// writes it (in HDR mode it accumulates unclamped lit+fog there instead
-		// of VPage); the tonemap below maps it back. Gated on --hdr.
-		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
 
 		// Full-screen distance fog over deferred-lit opaque pixels. Runs
 		// BEFORE the transparent peel AND before the cone/halo volumetric
