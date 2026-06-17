@@ -55,7 +55,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); extern bool g_hdrDeferTonemap; }
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -491,6 +491,17 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			} else
 				Render_DeferredFogPass();
 		}
+
+		// Fog-off HDR activation: a no-fog scene (greets) never ran the froxel
+		// composite, so g_hdrActive is still false — the transparent peel below
+		// and the end-of-pipeline tonemap would both no-op and the view stays LDR.
+		// Resolve + activate here, AFTER the deferred kernel and BEFORE the peel.
+		// No-op when the composite already activated (fast_fog) or HDR is off.
+		// !skipVolumetric: only the MAIN pass activates — the city water reflection
+		// pass (skipVolumetric) is an intermediate LDR underlay that must NOT route
+		// its transparents into g_hdrBuf (it never tonemaps), same as the RTT.
+		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
+			fds::Hdr_ActivateNoFog();
 
 		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
 		// fog), forcing every overlay below to composite LDR over the tonemapped

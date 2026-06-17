@@ -30,6 +30,27 @@ void Hdr_BeginFramePass(int w, int h) {
 // through the same tonemap — see RenderSecondOrderMirrors.
 void Hdr_BeginFrame() { Hdr_BeginFramePass(XRes, YRes); }
 
+void Hdr_ActivateNoFog() {
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const size_t px = size_t(rt.xres) * size_t(rt.yres);
+    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage) return;
+    const bool  linear = FeatureFlags::hdr_linear();
+    const int   stride = rt.bytesPerScanline / 4;
+    const float kInv   = 1.0f / 255.0f;
+    for (int y = 0; y < rt.yres; ++y) {
+        const uint32_t* row = rt.vpage + size_t(y) * size_t(stride);
+        float*          h   = g_hdrBuf.data() + size_t(y) * size_t(rt.xres) * 4;
+        for (int x = 0; x < rt.xres; ++x) {
+            if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
+            const uint32_t p = row[x];
+            float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
+            if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 → linear scale
+            h[x*4+0] = b; h[x*4+1] = g; h[x*4+2] = r;
+        }
+    }
+    g_hdrActive = true;
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);

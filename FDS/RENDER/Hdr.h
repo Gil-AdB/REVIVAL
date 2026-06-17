@@ -53,4 +53,14 @@ void Hdr_BeginFramePass(int w, int h);
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();
 
+// Fog-off HDR activation. Scenes without the froxel fog composite (no --fast_fog,
+// e.g. greets) otherwise never set g_hdrActive, so the tonemap AND the transparent
+// peel's HDR/reflection path no-op and the view stays LDR. This does what the
+// composite does minus the fog: covered opaque pixels already hold the kernel's
+// linear radiance (B1/B2); uncovered pixels (sky/forward, coverage h[3]==0) are
+// lifted from VPage so the tonemap doesn't black them out — then it sets
+// g_hdrActive. Call AFTER the deferred kernel and BEFORE the transparent peel,
+// only when hdr() && !g_hdrActive (composite already activated → skip).
+void Hdr_ActivateNoFog();
+
 } // namespace fds
