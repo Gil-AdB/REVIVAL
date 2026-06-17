@@ -181,3 +181,106 @@ Pipeline order + redirect sites (do pass-by-pass, walking the tonemap down, comm
 6. **bolt** — `DrawActiveBolts` (FOUNTAIN tick): `TheOtherBarry<ADDITIVE>` ribbon/quad + `Lightning_Line` core → float-add into `g_hdrBuf`. This moves the tonemap into the fountain tick (after the bolt); needs a defer flag so `renderFrame` skips its tonemap when the scene will do it post-overlay.
 
 Note: portal already HDR (skip). Most passes are float-internal (cones/halos/xpar) so the redirect is an output swap; the bolt/sprites integer rasterizers need a float-accumulate at their store site (additive: `g_hdrBuf[i] += src`).
+
+---
+
+# Phase 2 — DETAILED IMPLEMENTATION PLAN (ready for next session)
+
+## Objective / done-state
+Every scene-color overlay composites in HDR (into `g_hdrBuf`); the tonemap runs
+ONCE, last. Bolt / cones / halos / sprites / water bloom + roll off instead of
+clipping (today: ~1.3% pure-white, ~4.8% R-channel in the bolt+flash frame).
+Done = clipping ≈ 0, bolt visibly blooms, byte-gate still ALL PASS (flag-off),
+fountain + greets `--hdr` snapshots clean.
+
+## Architecture (one buffer, tonemap last)
+- `g_hdrBuf` (f32, BGR+pad, contiguous, `i = py*XRes+px`, index `i*4`) is the
+  single accumulation buffer. Already populated by the froxel composite +
+  `Hdr_BeginFrame`; `g_hdrActive` says it's live this frame.
+- Each overlay, **gated on `g_hdrActive`**, reads its dst from / writes its
+  result to `g_hdrBuf` instead of `VPage`. Flag-off path stays byte-identical →
+  the gate (flag-off) remains the safety net; the HDR path is verified by
+  snapshot (the gate can't see it).
+- The tonemap walks down the pipeline as each pass is redirected, ending after
+  the bolt (which lives in the fountain tick, post-`renderFrame`).
+
+## Tonemap-defer mechanism (the one architectural change)
+- `Hdr.h`: add `extern bool g_hdrDeferTonemap;`. `Hdr_BeginFrame` resets it false.
+- `renderFrame` (RENDER.CPP), at the END (after rain): 
+  `if (FeatureFlags::hdr() && g_hdrActive && !g_hdrDeferTonemap) Render_TonemapToVPage();`
+- Fountain tick: set `g_hdrDeferTonemap = FeatureFlags::hdr()` before `Render()`;
+  after `DrawActiveBolts()` (and all fountain overlays), call
+  `if (FeatureFlags::hdr() && g_hdrActive) Render_TonemapToVPage();`.
+- Other scenes leave the flag false → `renderFrame` tonemaps at its own end.
+- During the incremental walk (steps 1-5) the tonemap call just moves stepwise
+  inside `renderFrame`; step 6 introduces the defer flag + the tick call.
+
+## Redirect mechanism by pass type
+- **Float-internal** (xpar peel, cones, halos): they already compute float; swap
+  the final `out[i] = pack(clamp(...))` for `g_hdrBuf[i*4..]= float(...)`, and read
+  the dst from `g_hdrBuf` (not VPage). Gate: `if (g_hdrActive) {hdr} else {old}`.
+- **Integer rasterizer** (bolt ribbon/quad = `TheOtherBarry<ADDITIVE>`, bolt core
+  = `Lightning_Line`, sprites): **float-accumulate** at the store. Add an
+  `HDRAccum` template bool to `TileRasterizer`/`TheOtherBarry`; when set, replace
+  the 8-bit `_mm256_maskstore` with a scalar per-lane `g_hdrBuf[idx*4+0]+=B; +1+=G;
+  +2+=R;` over the covered lanes (overlays are sparse — scalar is fine; SIMD
+  float-RMW is a later optimization). `Lightning_Line`/sprite pixel writes get the
+  same runtime `if (g_hdrActive) g_hdrBuf[i]+= ... else VPage ...`.
+  - REJECTED alt: a separate 8-bit additive layer folded into HDR — an 8-bit
+    layer clips the bolt core at 255 before it reaches HDR → no bloom.
+
+## Steps (one commit + snapshot per step; tonemap walks down)
+**Step 1 — xpar peel → HDR.** `DeferredSurfaceKernel.cpp`
+`Render_DeferredTransparentLighting_Tile<Front/Back>` (one templated fn, covers
+both layers): water-reflection blend (~L1253) + general/`XparBlendAlpha` blend
+(~L1634). In HDR: read dst from `g_hdrBuf[i*4]`, blend in float, write
+`g_hdrBuf[i*4]`. Move the tonemap from RENDER.CPP:494 → after `xpar_done:` (~L643,
+before TBR L674). **Gotcha:** the dst MUST come from `g_hdrBuf` (lit+fog) — VPage
+holds only pre-fog lit once the tonemap moved later. **--deferred-quarter note:**
+`Render_DeferredLighting_TileFill` water (~L2696) runs *inside* `Render_DeferredLighting`
+(pre-fog) → already captured by the froxel composite; do NOT redirect it (double-count).
+
+**Step 2 — sprites → HDR.** `TBR_Render` / sprite filler (additive) → float-accum
+into `g_hdrBuf`. Tonemap → after TBR_Render (~L674→after).
+
+**Step 3 — cones → HDR.** `Render_VolumetricCones` (DeferredVolumetric): float
+radiance currently added to VPage → add to `g_hdrBuf`. Tonemap → after cones.
+
+**Step 4 — halos → HDR.** `Render_OmniHalos`: same. Tonemap → after halos.
+
+**Step 5 — rain → HDR.** `Render_ScreenSpaceRain` → `g_hdrBuf`. Tonemap → end of
+`renderFrame` (gated `!g_hdrDeferTonemap`, now always-on for non-fountain).
+
+**Step 6 — bolt → HDR + tonemap to the tick.** `DrawActiveBolts` (FOUNTAIN):
+`TheOtherBarry<ADDITIVE,...>` ribbon/quad + `Lightning_Line` core → the `HDRAccum`
+path. Add the template variant + instantiations (`ADDITIVE,NONE,false,HDRAccum`
+and `ADDITIVE,NORMAL_BILINEAR,false,HDRAccum`); swap the bolt fillers to them when
+`hdr()` (mirror the portal's AlphaTest swap). Wire the defer flag: fountain sets
+it, tonemaps after the bolt. **This is the meatiest step (~150 lines).**
+
+## Validation (per step)
+- Byte-gate (`tools/render_gate.sh`) ALL PASS after every step (flag-off untouched).
+- Fountain `--hdr` snapshot: flash+bolt (`@t=4500,4820`) + non-flash (`@t=4820`),
+  the tuned cmdline. Measure pure-white + per-channel ≥254 clipping — should drop
+  monotonically; ≈0 by step 6. Eyeball the bolt bloom.
+- Greets `--hdr` (the user's flag set incl. `--deferred-quarter`) — must stay
+  non-black + look right (it exercises the TileFill/quarter path + the peel).
+
+## Risks / gotchas
+1. **Peel dst source** — must read `g_hdrBuf`, not VPage, in HDR (step 1).
+2. **`g_hdrActive` gate on every redirect** — keeps flag-off byte-identical (gate
+   stays the safety net; HDR bugs are snapshot-only).
+3. **Threading** — tiled passes write disjoint pixels (safe); sequential bolt
+   draws `+=` overlapping pixels on one thread (safe).
+4. **Defer flag** reset per frame; only the fountain sets it; other scenes
+   tonemap at `renderFrame` end.
+5. **Still gamma-space** (Phase 3 = linear later) — overlays accumulate in gamma,
+   consistent with the base; ACES applied once at the tonemap.
+6. **Post-reorg re-tune** — overlays now pass through the tonemap, so their
+   apparent brightness shifts slightly; re-check the tuned cmdline
+   (`hdr_glow_scale`/`hdr_exposure`) after step 6. The bolt isn't `hdr_glow_scale`d
+   (it's ≤255/px additive); decide if it needs its own scale once it blooms.
+
+## Rough size
+~6 commits, ~300-500 lines total; step 6 (TheOtherBarry/Lightning_Line HDRAccum)
+is ~150 of those. Everything `--hdr`-gated.
