@@ -624,6 +624,11 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		//if (stricmp(Obj->Name, "water.lwo")) continue;
 		T = (TriMesh *)(Obj->Data);
 
+		// Non-shadow-casting meshes (Tri_NoShadowCast — e.g. the disco ball):
+		// excluded from every shadow occluder pass. _inShadowPass covers the
+		// static bake, the dynamic per-frame bake, and moving-omni cube re-bakes.
+		if (_inShadowPass && (T->Flags & Tri_NoShadowCast)) continue;
+
 		uint32_t frustumFlags = 0;  // Tri_Invisible | Tri_Ahead | Tri_Inside, racy
 		                            // when T->Flags is shared across N parallel
 		                            // shadow-render tasks. Hold locally per call.

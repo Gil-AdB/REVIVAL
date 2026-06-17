@@ -32,6 +32,7 @@
 #include "Scenes.h"
 #include "FILLERS/Mekalele.h"
 #include <map>
+#include <algorithm>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/LightmapBake.h"
@@ -68,6 +69,14 @@ static int                g_greetsShatterMirror = -1;
 // shatters. Opaque Flags=0 keeps Transform happy; Txtr=null makes the
 // rasterizer skip every face (RenderInner: `!F->Txtr->Txtr` → continue).
 static Material          *g_greetsScreenHideMat = nullptr;
+// The screen is a thin BOX, not a flat quad: besides the front mirror
+// faces (m.wallFaces) it has side rims + a back face, with their OWN
+// material — not in wallFaces, so the front-face hide alone left them
+// behind as a dark strip on the wall after the break. Collected at
+// BuildGreetsShatter (faces whose verts all fall inside the panel's
+// (u,v) footprint AND sit behind the front plane) and retargeted to
+// the hide material alongside m.wallFaces on trigger.
+static std::vector<Face*> g_greetsScreenBoxFaces;
 
 // 1x1 BGRA texture from an (R,G,B) triple — the shard material's base so
 // the rasterizer's F->Txtr->Txtr deref is valid (GreetsMirror has an
@@ -75,13 +84,57 @@ static Material          *g_greetsScreenHideMat = nullptr;
 static Texture *makeFlatTexture(byte r, byte g, byte b) {
 	Texture *T = new Texture();
 	std::memset(T, 0, sizeof(Texture));
-	T->BPP = 32; T->SizeX = 1; T->SizeY = 1; T->LSizeX = 0; T->LSizeY = 0;
-	T->Data = (byte*)_aligned_malloc(4, 16);
-	((dword*)T->Data)[0] = (dword(b) << 0) | (dword(g) << 8)
-	                     | (dword(r) << 16) | (dword(0xFFu) << 24);
+	// MUST be at least one full 4x4 tile: Txtr_Tiled stores texels in 4x4
+	// blocks, so a 1x1 tiled texture is malformed — the deferred kernel's
+	// swizzled-UV sample reads outside the 4-byte alloc and returns BLACK
+	// (this lit the teleporter portal's silver black → it darkened the
+	// reflection instead of tinting it). 8x8 = 2x2 blocks; every texel is
+	// the flat colour so the tiled layout is irrelevant.
+	const int S = 8;
+	T->BPP = 32; T->SizeX = S; T->SizeY = S; T->LSizeX = 3; T->LSizeY = 3;
+	T->Data = (byte*)_aligned_malloc(size_t(S) * S * 4, 16);
+	const dword px = (dword(b) << 0) | (dword(g) << 8)
+	               | (dword(r) << 16) | (dword(0xFFu) << 24);
+	for (int i = 0; i < S * S; ++i) ((dword*)T->Data)[i] = px;
 	T->Mipmap[0] = T->Data; T->numMipmaps = 1;
 	T->Flags = Txtr_Nomip | Txtr_Tiled;
 	return T;
+}
+
+// Per-frame live tint for the teleporter portal mirror (#1). The deferred
+// kernel lights a TEXTURED material as Luminosity*255 (pure white) and
+// IGNORES BaseCol (DeferredSurfaceKernel: `if (Mat->Txtr) lit = Lum*255`),
+// so the tint must ride on the TEXTURE, not BaseCol. The portal wall was
+// retargeted to a transparent clone with a flat synth texture + an alpha
+// sentinel of -1 ("contribute nothing"). Swap that texture to a cool
+// silver and give it a positive blend alpha: the kernel then composites
+// silver*alpha + reflection*(1-alpha). pt=0 restores the clear-portal
+// sentinel. Re-applied every frame so the tuning console / greets.params
+// can drive it.
+static void GreetsApplyLiveTints()
+{
+	static Texture *sPortalSilver = nullptr;
+	if (!sPortalSilver) sPortalSilver = std::getenv("FDS_TINT_RED")
+		? makeFlatTexture(255, 0, 0)         // verify: unmistakable bright red
+		: makeFlatTexture(150, 170, 215);    // cool silver
+	const float pt = fds::FeatureFlags::greets_mirror_tint();
+	for (fds::Mirror &m : g_greetsMirrors) {
+		if (m.wallMaterialName.find("teleporter") == std::string::npos) continue;
+		if (!m.wallMatClone) continue;
+		// EXACT same composite as the half-silvered screens (#2) and the
+		// shards: out = litRGB + dst/2, where dst is the (warm) reflection and
+		// litRGB = silver*tint is an OPTIONAL cool cast. XparBlendAlpha=0
+		// selects the kernel's `litRGB + dst/2` path; Lum=pt scales the silver
+		// (litRGB = Lum*255 × silverTex = silver*pt). pt=0 → litRGB=0 → out =
+		// dst/2: a dimmed warm reflection, identical to #2 with no cast and to
+		// the shard glaze at sv=0. Raise pt for a cool silver cast on all three.
+		// (Two real bugs had to be fixed for any silver to show: the texture was
+		// a malformed 1x1 Txtr_Tiled — now 8x8 — and the inherited Lum=0.)
+		m.wallMatClone->Txtr           = sPortalSilver;
+		m.wallMatClone->Luminosity     = pt;
+		m.wallMatClone->Diffuse        = 0.0f;
+		m.wallMatClone->XparBlendAlpha = 0.0f;
+	}
 }
 
 // Forward-declared at namespace scope (the rest of this TU is in an
@@ -717,15 +770,196 @@ static void BuildGreetsShatter()
 	{ Material *t = MatLib; while (t->Next) t = t->Next; t->Next = g_greetsScreenHideMat; g_greetsScreenHideMat->Prev = t; }
 	Scene_RebuildMatTable(GreetSc);
 
+	// Collect every screen face the break must hide besides the front
+	// mirror panel (m.wallFaces). The screen is a box with a raised
+	// emissive frame, so two families survive otherwise:
+	//   (A) box body — side rims + back face: verts all inside the glass
+	//       (u,v) footprint AND extending BEHIND the front plane (N·P=-d
+	//       is the front; room-facing N puts the body at N·P < -d). The
+	//       all-inside test rejects the surrounding wall; behind-front
+	//       rejects the coplanar front faces; depth is slabbed so we
+	//       don't reach far geometry.
+	//   (B) the emissive frame ("screen emiter*") — it PROTRUDES in front
+	//       of the glass (positive depth) and sits just OUTSIDE the glass
+	//       rect, so (A) never catches it; that's the black border on the
+	//       wall after the break. Match it by material name within an
+	//       expanded footprint + depth slab, which scopes it to THIS
+	//       screen (other screens' frames are on other walls, and nearby
+	//       room geometry like the stairs has a different material).
+	g_greetsScreenBoxFaces.clear();
+	{
+		const float uMargin = 0.02f * std::max(1.0f, u1 - u0);
+		const float vMargin = 0.02f * std::max(1.0f, v1 - v0);
+		const float maxDepth = 0.5f * std::min(u1 - u0, v1 - v0);
+		const float frontEps = 0.02f * maxDepth;  // ignore coplanar front faces
+		// 1.0x footprint: the half-silvered glass ("screen 3") edge faces and
+		// the box frame spill well past the glass rect; the material filter
+		// ("screen") keeps this scoped to THIS screen (walls/stairs/rooms and
+		// neighbouring screens on other planes don't match here).
+		const float uExp = 1.00f * (u1 - u0), vExp = 1.00f * (v1 - v0);
+		const bool  dump = std::getenv("FDS_GREETS_SHATTER_BOXDUMP") != nullptr;
+		float dmin = 1e30f, dmax = -1e30f; int nFrame = 0;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			if (!T || !T->Faces) continue;
+			for (DWord fi = 0; fi < T->FIndex; ++fi) {
+				Face &F = T->Faces[fi];
+				// Any "screen*" material is this screen's own geometry (frame,
+				// emitter rims, panels — census: screen emiter / fance / green
+				// / screen 3); stairs/rooms in the volume don't match, so they
+				// stay. The footprint scopes it to THIS screen (others are on
+				// other walls).
+				const bool isFrameMat = F.Txtr && F.Txtr->Name &&
+				                        strstr(F.Txtr->Name, "screen") != nullptr;
+				const float uPan = 3.0f * (u1 - u0), vPan = 3.0f * (v1 - v0);
+				const Vertex *vs[3] = { F.A, F.B, F.C };
+				bool inGlass = true, behindFront = false, inExp = true, coplanar = true, inPanel = true;
+				for (int j = 0; j < 3; ++j) {
+					const Vector w  = worldPos(vs[j], T);
+					const float  pu = w.x*U.x + w.y*U.y + w.z*U.z;
+					const float  pv = w.x*V.x + w.y*V.y + w.z*V.z;
+					const float  depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d; // 0 = front
+					if (depth < -frontEps) behindFront = true;
+					if (pu < u0 - uMargin || pu > u1 + uMargin ||
+					    pv < v0 - vMargin || pv > v1 + vMargin ||
+					    depth > frontEps   || depth < -maxDepth) inGlass = false;
+					if (pu < u0 - uExp || pu > u1 + uExp || pv < v0 - vExp ||
+					    pv > v1 + vExp || depth < -maxDepth || depth > maxDepth) inExp = false;
+					// Coplanar = on the broken screen's plane (front-glass depth).
+					if (depth < -0.6f || depth > 0.6f) coplanar = false;
+					// Generous panel footprint (3x) — captures the rest of the
+					// physical glass panel while excluding far-Z coplanar
+					// neighbours that share the plane.
+					if (pu < u0 - uPan || pu > u1 + uPan || pv < v0 - vPan || pv > v1 + vPan) inPanel = false;
+				}
+				const bool isBox   = inGlass && behindFront;          // (A) box body
+				const bool isFrame = inExp   && isFrameMat;           // (B) frame in footprint
+				// (C) The mirror cluster is only a SUB-RECTANGLE of the physical
+				// glass panel; the rest of the coplanar 'screen*' glass survives
+				// the break as a strip. Hide the whole coplanar panel, bounded
+				// by a generous (3x) footprint so it can't reach a different
+				// screen that merely shares this X-plane far away in Z.
+				const bool isPanelFace = coplanar && isFrameMat && inPanel; // (C)
+				if (isBox || isFrame || isPanelFace) {
+					g_greetsScreenBoxFaces.push_back(&F);
+					if (isFrame) ++nFrame;
+					if (dump) {
+						const Vector w = worldPos(F.A, T);
+						const float depth = (w.x*N.x + w.y*N.y + w.z*N.z) + d;
+						dmin = std::min(dmin, depth); dmax = std::max(dmax, depth);
+					}
+				}
+			}
+		}
+		if (dump)
+			std::fprintf(stderr, "[GREETS-SHATTER] hide faces=%zu (frame=%d) depth=[%.3f..%.3f] "
+			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
+			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
+			             u1-u0, v1-v0);
+		// One-shot per-material census over a GENEROUS region around the
+		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
+		// vs collected per material so we can see what survives the break
+		// and why (a material we don't target, or faces just outside the
+		// narrower collection bounds).
+		if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
+			const float ue = 1.00f * (u1 - u0), ve = 1.00f * (v1 - v0);
+			const float dWide = 2.5f * maxDepth;
+			struct Tally { std::string name; int total=0, collected=0, reflective=0, transparent=0; float dmin=1e30f, dmax=-1e30f; };
+			std::vector<Tally> tally;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				if (!T || !T->Faces) continue;
+				for (DWord fi = 0; fi < T->FIndex; ++fi) {
+					Face &F = T->Faces[fi];
+					const bool isFrameMat = F.Txtr && F.Txtr->Name &&
+					                        strstr(F.Txtr->Name, "screen") != nullptr;
+					const Vertex *vs[3] = { F.A, F.B, F.C };
+					float cd = 0; bool inWide=true, inGlass=true, behindFront=false, inExp=true;
+					for (int j = 0; j < 3; ++j) {
+						const Vector w = worldPos(vs[j], T);
+						const float pu=w.x*U.x+w.y*U.y+w.z*U.z, pv=w.x*V.x+w.y*V.y+w.z*V.z;
+						const float dp=(w.x*N.x+w.y*N.y+w.z*N.z)+d; cd+=dp/3;
+						if (pu<u0-ue||pu>u1+ue||pv<v0-ve||pv>v1+ve||dp<-dWide||dp>dWide) inWide=false;
+						if (dp < -frontEps) behindFront = true;
+						if (pu<u0-uMargin||pu>u1+uMargin||pv<v0-vMargin||pv>v1+vMargin||dp>frontEps||dp<-maxDepth) inGlass=false;
+						if (pu<u0-uExp||pu>u1+uExp||pv<v0-vExp||pv>v1+vExp||dp<-maxDepth||dp>maxDepth) inExp=false;
+					}
+					if (!inWide) continue;
+					const bool collected = (inGlass && behindFront) || (inExp && isFrameMat);
+					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
+					Tally *t = nullptr;
+					for (Tally &x : tally) if (x.name == nm) { t = &x; break; }
+					if (!t) { tally.push_back({nm,0,0,0,0,1e30f,-1e30f}); t = &tally.back(); }
+					t->total++; if (collected) t->collected++;
+					if (F.Flags & Face_Reflective) t->reflective++;
+					if (F.Txtr && (F.Txtr->Flags & Mat_Transparent)) t->transparent++;
+					t->dmin = std::min(t->dmin, cd); t->dmax = std::max(t->dmax, cd);
+				}
+			}
+			for (const Tally &t : tally)
+				std::fprintf(stderr, "[SHATTER-CENSUS] mat=%-26s total=%-4d collected=%-4d refl=%-4d xpar=%-4d %s depth=[%+.2f..%+.2f]\n",
+				             t.name.c_str(), t.total, t.collected, t.reflective, t.transparent,
+				             t.collected < t.total ? "<-- SURVIVES" : "", t.dmin, t.dmax);
+			// Scene-wide reflective-face dump (robot-reflecting strip hunt):
+			// one line per Face_Reflective material with count + world bbox +
+			// reflection texture, so we can spot the strip wherever it lives.
+			struct RTally { std::string name; std::string refTex; int n=0;
+			                float x0=1e30f,y0=1e30f,z0=1e30f,x1=-1e30f,y1=-1e30f,z1=-1e30f; };
+			std::vector<RTally> rt;
+			for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *T = (TriMesh*)Obj->Data;
+				if (!T || !T->Faces) continue;
+				for (DWord fi = 0; fi < T->FIndex; ++fi) {
+					Face &F = T->Faces[fi];
+					if (!(F.Flags & Face_Reflective)) continue;
+					const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : "(null)";
+					const char *rx = (F.ReflectionTexture && F.ReflectionTexture->FileName)
+					               ? F.ReflectionTexture->FileName : "(env)";
+					RTally *e = nullptr;
+					for (RTally &x : rt) if (x.name == nm && x.refTex == rx) { e = &x; break; }
+					if (!e) { rt.push_back({nm,rx,0,1e30f,1e30f,1e30f,-1e30f,-1e30f,-1e30f}); e = &rt.back(); }
+					e->n++;
+					const Vector w = worldPos(F.A, T);
+					e->x0=std::min(e->x0,w.x); e->x1=std::max(e->x1,w.x);
+					e->y0=std::min(e->y0,w.y); e->y1=std::max(e->y1,w.y);
+					e->z0=std::min(e->z0,w.z); e->z1=std::max(e->z1,w.z);
+				}
+			}
+			for (const RTally &e : rt)
+				std::fprintf(stderr, "[REFL-FACE] mat=%-22s refTex=%-18s n=%-4d world x[%.0f..%.0f] y[%.0f..%.0f] z[%.0f..%.0f]\n",
+				             e.name.c_str(), e.refTex.c_str(), e.n, e.x0,e.x1, e.y0,e.y1, e.z0,e.z1);
+		}
+	}
+
 	// ~1.2 shards per world unit, clamped.
 	auto clampi = [](int x, int lo, int hi){ return x < lo ? lo : (x > hi ? hi : x); };
 	const int gx = clampi(int((u1-u0)*1.2f), 6, 40);
 	const int gy = clampi(int((v1-v0)*1.2f), 5, 40);
 	g_greetsShatter.build(GreetSc, corners, N, shardMat, gx, gy, ymin);
 	g_greetsShatterMirror = best;
+	// Pre-bake the shard reflection atlas NOW (at load) rather than on the
+	// break frame: the offscreen surface + atlas texture + per-shard material
+	// swap + Scene_RebuildMatTable + deferred G-buffers were a ~40ms one-frame
+	// hitch right when the screen shatters. trigger() only flips the per-frame
+	// bake on (armReflectionCameras) + stamps the text fragments.
+	g_greetsShatter.prepareReflectionAtlas(GreetSc, 64);
 	std::fprintf(stderr,
 		"[GREETS-SHATTER] target mirror %d area=%.1f grid=%dx%d floorY=%.1f "
 		"N=(%.2f,%.2f,%.2f)\n", best, bestArea, gx, gy, ymin, N.x, N.y, N.z);
+	// Camera pose looking straight at the broken screen, for headless
+	// inspection via CITYSNAP_POS / CITYSNAP_FWD (works in --snapshot=greets).
+	if (std::getenv("FDS_GREETS_SHATTER_SCAN")) {
+		const Vector ctr = planePt(0.5f*(u0+u1), 0.5f*(v0+v1));
+		const float dist = 0.9f * std::max(u1-u0, v1-v0);
+		std::fprintf(stderr,
+			"[GREETS-SHATTER] CITYSNAP_POS='%.1f %.1f %.1f' CITYSNAP_FWD='%.3f %.3f %.3f' (screen ctr %.1f,%.1f,%.1f)\n",
+			ctr.x + N.x*dist, ctr.y + N.y*dist, ctr.z + N.z*dist,
+			-N.x, -N.y, -N.z, ctr.x, ctr.y, ctr.z);
+	}
+
 }
 
 void Initialize_Greets()
@@ -1518,6 +1752,10 @@ void Initialize_Greets()
 		// Shatter shards for the largest wall screen — built hidden here so
 		// GreetsScene::init's Polys count sizes FList for them.
 		BuildGreetsShatter();
+		// Apply the portal tint (#1) once at init so it's present on the
+		// first frame and in the headless snapshot (which doesn't run the
+		// tick where the per-frame re-apply lives).
+		GreetsApplyLiveTints();
 	}
 
 	// Spawn the background lightmap bake AFTER all Material-table rewrites
@@ -1631,6 +1869,11 @@ struct GreetsScene : SceneDriver {
 			if (fov < 1.0f && GreetSc->CameraHead->FOV.NumKeys > 0)
 				fov = GreetSc->CameraHead->FOV.Keys[0].Pos.x;
 			if (fov < 1.0f) fov = 75.0f;
+			// Start from a FULL copy of the scripted camera so FC carries
+			// every field the mirror reflection RTT reads (NZP/FZP, etc.) —
+			// otherwise the teleporter clone reflection rendered black in
+			// snapshots even though it's fine under the live scripted camera.
+			if (GreetSc->CameraHead) FC = *GreetSc->CameraHead;
 			if (posed) {
 				FC.ISource = { px, py, pz };
 				Vector look = { px + fx, py + fy, pz + fz };
@@ -2095,21 +2338,24 @@ struct GreetsScene : SceneDriver {
 				// it can't fix the hue — the real fix is a deferred (shadowed)
 				// bake, pending the render-state declobbering. Full gain for now.
 				g_greetsShatter.setReflectionGain(1.0f);
-				g_greetsShatter.enableReflectionCameras(GreetSc, 64,
-				                                        haveText ? ptext : nullptr,
-				                                        haveText ? A : nullptr);
+				// Atlas was pre-baked at load (prepareReflectionAtlas); the
+				// break only stamps the per-shard text fragments + arms the
+				// per-frame bake — no allocation hitch here.
+				g_greetsShatter.setShardText(haveText ? ptext : nullptr,
+				                             haveText ? A : nullptr);
+				g_greetsShatter.armReflectionCameras();
 				m.broken = true;   // UpdateAllMirrors closes the reflection
 				// Hide the panel surface itself (reflection + half-silvered
-				// text) — the shards replace it. Per-face Txtr swap; the
-				// faces are shared in the room mesh so we can't hide a mesh.
-				// TODO(shatter): m.wallFaces is only the FRONT mirror face.
-				// The screen's box has a back face + side faces (own material,
-				// not in wallFaces) that survive the break — visible as a black
-				// vertical line on the wall afterwards. Hide the whole screen
-				// box (by mesh, or collect the coplanar-cluster's other faces)
-				// when polishing. Non-urgent.
-				if (g_greetsScreenHideMat)
-					for (Face *F : m.wallFaces) F->Txtr = g_greetsScreenHideMat;
+				// text) AND the screen box's side/back faces — the shards
+				// replace the whole box. Per-face Txtr swap; the faces are
+				// shared in the room mesh so we can't hide a mesh. The box
+				// faces (side rims + back) were collected at build by
+				// footprint + behind-front-plane test; without this they
+				// survived as a dark strip on the wall after the break.
+				if (g_greetsScreenHideMat) {
+					for (Face *F : m.wallFaces)            F->Txtr = g_greetsScreenHideMat;
+					for (Face *F : g_greetsScreenBoxFaces) F->Txtr = g_greetsScreenHideMat;
+				}
 				std::fprintf(stderr, "[GREETS-SHATTER] broke mirror %d\n",
 				             g_greetsShatterMirror);
 			}
@@ -2139,6 +2385,10 @@ struct GreetsScene : SceneDriver {
 		// ball is Tri_Possessed; spots' spline-stamped IPos/IDir get
 		// overwritten here), before the mirrors re-mirror it.
 		fds::UpdateDiscoBall(GreetSc, (float)Timer);
+
+		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
+		// every frame so the tuning console / greets.params can drive them.
+		GreetsApplyLiveTints();
 
 		fds::UpdateAllMirrors(GreetSc, g_greetsMirrors);
 
@@ -2445,6 +2695,50 @@ struct GreetsScene : SceneDriver {
 						"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
 				}
 				OutTextXY(VPage, 0, YRes - 30, MSGStr, 255);
+				// FDS_GREETS_FACEFIND="x,y": find the ACTUAL faces covering a
+				// pixel by point-in-triangle over every transformed visible
+				// face (their screen PX/PY are set even for forward/xpar faces
+				// that only stamp the gbuffer sentinel). Reports the front-most
+				// few so the black strip's real face/mesh/material is found.
+				if (const char *ff = std::getenv("FDS_GREETS_FACEFIND")) {
+					int qx = XRes/2, qy = YRes/2; std::sscanf(ff, "%d,%d", &qx, &qy);
+					struct Hit { Face *f; TriMesh *T; float rz; };
+					std::vector<Hit> hits;
+					for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+						if (!(T->Flags & HTrack_Visible)) continue;
+						for (DWord fi = 0; fi < T->FIndex; ++fi) {
+							Face &F = T->Faces[fi];
+							if (!F.A || !F.B || !F.C) continue;
+							const float ax=F.A->PX, ay=F.A->PY, bx=F.B->PX, by=F.B->PY, cxx=F.C->PX, cyy=F.C->PY;
+							const float d1=(qx-bx)*(ay-by)-(ax-bx)*(qy-by);
+							const float d2=(qx-cxx)*(by-cyy)-(bx-cxx)*(qy-cyy);
+							const float d3=(qx-ax)*(cyy-ay)-(cxx-ax)*(qy-ay);
+							const bool neg=(d1<0)||(d2<0)||(d3<0), pos=(d1>0)||(d2>0)||(d3>0);
+							if (neg && pos) continue;  // pixel outside triangle
+							hits.push_back({ &F, T, (F.A->RZ+F.B->RZ+F.C->RZ)/3.0f });
+						}
+					}
+					std::sort(hits.begin(), hits.end(), [](const Hit&a, const Hit&b){ return a.rz > b.rz; });
+					{ const uint32_t m32 = g_gbuffer->txtr[size_t(qy)*size_t(XRes)+size_t(qx)];
+					  const word z = ((const word*)MainSurf->Z16)[size_t(qy)*size_t(XRes)+size_t(qx)];
+					  const MatTable mt = Scene_GetMatTable(GreetSc); const uint32_t id=(m32>>20)&0xFF;
+					  std::fprintf(stderr,"[FACEFIND @%d,%d] gbuffer mat32=0x%x %s zEnc=%u\n", qx,qy, m32,
+					    m32==0xFFFFFFFFu?"FORWARD/empty":((id<mt.count&&mt.data&&mt.data[id]&&mt.data[id]->Name)?mt.data[id]->Name:"?"), z); }
+					std::fprintf(stderr, "[FACEFIND @%d,%d] %zu faces cover this pixel:\n", qx, qy, hits.size());
+					for (size_t i = 0; i < hits.size() && i < 6; ++i) {
+						Face *F = hits[i].f; TriMesh *T = hits[i].T;
+						auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T->RotMat,&lp,&w); w+=T->IPos; return w; };
+						const Vector a=wp(F->A);
+						std::fprintf(stderr, "  #%zu mat='%s' refl=%d xpar=%d maskTag=%u Flags=0x%x rz=%.4f N=(%.2f,%.2f,%.2f) worldA=(%.1f,%.1f,%.1f)\n"
+						             "       scr A(%.0f,%.0f rz%.3f) B(%.0f,%.0f rz%.3f) C(%.0f,%.0f rz%.3f) mesh=%p\n",
+							i, (F->Txtr&&F->Txtr->Name)?F->Txtr->Name:"?",
+							(F->Flags&Face_Reflective)!=0, (F->Txtr&&(F->Txtr->Flags&Mat_Transparent))?1:0,
+							(unsigned)F->mirrorMaskTag, (unsigned)F->Flags,
+							hits[i].rz, F->N.x,F->N.y,F->N.z, a.x,a.y,a.z,
+							F->A->PX,F->A->PY,F->A->RZ, F->B->PX,F->B->PY,F->B->RZ, F->C->PX,F->C->PY,F->C->RZ, (void*)T);
+					}
+					std::fflush(stderr);
+				}
 			}
 			// Crosshair so user can see what pixel the readout reflects.
 			dword *fb = (dword*)VPage;

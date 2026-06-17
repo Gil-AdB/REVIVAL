@@ -309,6 +309,11 @@ bool BuildDiscoBall(Scene *sc)
     sc->TriMeshHead = MM;
     s_ball = MM;
 
+    // The ball lights normally but casts no shadow: its faceted sphere would
+    // throw a hard blob (a dark hole on the floor/walls), not read as a
+    // reflective disco ball. Excluded from every shadow occluder pass.
+    MM->Flags |= Tri_NoShadowCast;
+
     // ── Rotating dot cones ──────────────────────────────────────────
     // Six narrow spots around the ball, alternating steep/shallow
     // downward tilt so the dots sweep both floor and walls.

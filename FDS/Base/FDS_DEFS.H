@@ -166,6 +166,13 @@ enum TrimeshFlags
 	// It is set by the scene loader. Manual removal of this flag should be made prior to
 	// scene Preprocess routine.
 	Tri_Stationary		= 1 << 14,
+
+	// Mesh is excluded from every shadow occluder pass (static bake, dynamic
+	// per-frame bake, moving-omni cube re-bake) — it lights normally but casts
+	// no shadow. Set by callers that don't want a mesh blocking light (e.g. the
+	// disco ball, whose facets would throw a hard blob instead of reading as a
+	// reflective ball). Gated in Transform_Objects on g_inShadowPass.
+	Tri_NoShadowCast	= 1 << 15,
 };
 
 enum SortPriority

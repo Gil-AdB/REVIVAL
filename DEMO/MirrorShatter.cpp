@@ -48,6 +48,9 @@ inline Vector vscale(const Vector& a, float s)       { return { a.x*s, a.y*s, a.
 inline float  vdot(const Vector& a, const Vector& b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 inline float  vlen(const Vector& a)                  { return std::sqrt(vdot(a,a)); }
 inline Vector vnorm(const Vector& a) { float l = vlen(a); return l > 1e-6f ? vscale(a, 1.0f/l) : Vector{0,0,0}; }
+inline Vector vcross(const Vector& a, const Vector& b) {
+	return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
+}
 
 // Single constant keyframe so Animate_Objects has a track to walk
 // (it crashes on NumKeys==0). Mirrors SceneBuilder's StampSingleKey,
@@ -76,6 +79,42 @@ float MirrorShatter::frand01() {
 	rng_ = rng_ * 1664525u + 1013904223u;
 	return float(rng_ >> 8) * (1.0f / 16777216.0f);  // [0,1)
 }
+
+namespace {
+// Half-silvered glaze for the shatter shards (#3). The shards display the
+// baked reflection atlas, lit white (textured material => Luminosity*255,
+// BaseCol ignored), so the tint has to live in the baked pixels. A real
+// half-silvered glass DESATURATES the reflection toward the (cool, dim)
+// glass colour — it does NOT brighten it. So: take the per-pixel luma,
+// build a cool-silver target (luma tinted blue>green>red, ~0.7 brightness
+// so the glass absorbs), and lerp the reflection toward it by `sv`. This
+// reads as silver rather than washing to white (the earlier additive-veil
+// bug). sv from --greets-shard-silver; 0 = untouched mirror, 1 = full
+// cool-silver glass. Re-baked every frame, so the console drives it live.
+inline void ApplyShardSilverGlaze(uint32_t* px, int count, float sv) {
+	if (sv < 0.0f) sv = 0.0f;
+	if (sv > 1.0f) sv = 1.0f;
+	// The half-silvered look (#2) is a DIMMED WARM reflection, NOT an added
+	// silver colour. So ALWAYS halve the reflection (out = ... + dst/2), and
+	// only ADD silver*sv on top — sv=0 leaves the warm reflection at half
+	// brightness (matches #2's `litRGB + dst/2` with no extra cast); raise sv
+	// for an optional cool cast. (Earlier the silver was added at full strength
+	// and the reflection wasn't halved, so the shards read bright/cool/white
+	// while #2 reads dim/warm.) FDS_TINT_RED swaps the silver for red to verify.
+	static const bool kRed = std::getenv("FDS_TINT_RED") != nullptr;
+	const int sr = int(float(kRed ? 255 : 150) * sv);   // optional cast = silver * sv
+	const int sg = int(float(kRed ?   0 : 170) * sv);
+	const int sb = int(float(kRed ?   0 : 215) * sv);
+	for (int i = 0; i < count; ++i) {
+		const uint32_t c = px[i];
+		int b = int(c & 0xFF), g = int((c >> 8) & 0xFF), r = int((c >> 16) & 0xFF);
+		r = sr + (r >> 1); if (r > 255) r = 255;    // silver*sv + reflection/2
+		g = sg + (g >> 1); if (g > 255) g = 255;
+		b = sb + (b >> 1); if (b > 255) b = 255;
+		px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
+	}
+}
+}  // namespace
 
 // Build one shard TriMesh from 4 world-space corners. Geometry is stored
 // LOCAL (relative to the centroid); IPos carries the centroid so the
@@ -166,13 +205,48 @@ void MirrorShatter::build(Scene* sc, const Vector corners[4], const Vector& N,
 	if (gx < 1) gx = 1;
 	if (gy < 1) gy = 1;
 
-	// Jittered grid lines in [0,1] along U and V. Interior lines wobble
-	// so the shards are irregular (real glass doesn't crack on a lattice).
-	std::vector<float> gu(gx + 1), gv(gy + 1);
-	for (int i = 0; i <= gx; ++i) gu[i] = float(i) / gx;
-	for (int j = 0; j <= gy; ++j) gv[j] = float(j) / gy;
-	for (int i = 1; i < gx; ++i) gu[i] += frandS() * (0.40f / gx);
-	for (int j = 1; j < gy; ++j) gv[j] += frandS() * (0.40f / gy);
+	// Shard tessellation. Two independent sources of irregularity, both
+	// scaled by greets_shard_randomness (0 = clean uniform grid, 1 =
+	// natural cracked glass, >1 = chaotic):
+	//   (A) non-uniform grid-line SPACING → shards of varied SIZE
+	//   (B) per-INTERSECTION 2D jitter      → irregular SHAPES (the old
+	//       code only wobbled whole lines, so every cell in a row shared
+	//       an edge and stayed a rectangle)
+	const float rnd = std::max(0.0f, fds::FeatureFlags::greets_shard_randomness());
+	// (A) cumulative random cell widths, normalised to [0,1].
+	auto makeLines = [&](int n) {
+		std::vector<float> w(n), g(n + 1);
+		float tot = 0.0f;
+		for (int k = 0; k < n; ++k) {
+			float ww = 1.0f + frandS() * 0.6f * rnd;   // ±60% × randomness
+			if (ww < 0.2f) ww = 0.2f;
+			w[k] = ww; tot += ww;
+		}
+		g[0] = 0.0f;
+		for (int k = 0; k < n; ++k) g[k + 1] = g[k] + w[k] / tot;
+		g[n] = 1.0f;
+		return g;
+	};
+	const std::vector<float> gu = makeLines(gx), gv = makeLines(gy);
+	// (B) 2D jitter per interior intersection (capped at ~0.45 of a cell
+	// so neighbouring intersections can't cross → no self-intersecting
+	// quads). Border intersections move only ALONG their edge, keeping the
+	// panel's outer rectangle intact.
+	const float amp = std::min(0.45f, 0.35f * rnd);
+	const float ju = amp / float(gx), jv = amp / float(gy);
+	const int   stride = gx + 1;
+	std::vector<float> pu((gx + 1) * (gy + 1)), pv((gx + 1) * (gy + 1));
+	for (int j = 0; j <= gy; ++j) {
+		for (int i = 0; i <= gx; ++i) {
+			float u = gu[i], v = gv[j];
+			const bool edgeI = (i == 0 || i == gx);
+			const bool edgeJ = (j == 0 || j == gy);
+			if (!edgeI) u += frandS() * ju;   // free unless on the left/right border
+			if (!edgeJ) v += frandS() * jv;   // free unless on the top/bottom border
+			pu[j * stride + i] = u;
+			pv[j * stride + i] = v;
+		}
+	}
 
 	auto panelPt = [&](float u, float v) -> Vector {
 		return vadd(origin_, vadd(vscale(uAxis_, u), vscale(vAxis_, v)));
@@ -180,11 +254,13 @@ void MirrorShatter::build(Scene* sc, const Vector corners[4], const Vector& N,
 
 	for (int j = 0; j < gy; ++j) {
 		for (int i = 0; i < gx; ++i) {
+			const int a = j * stride + i,       b = j * stride + (i + 1);
+			const int c = (j + 1) * stride + (i + 1), d = (j + 1) * stride + i;
 			const Vector wc[4] = {
-				panelPt(gu[i],   gv[j]),
-				panelPt(gu[i+1], gv[j]),
-				panelPt(gu[i+1], gv[j+1]),
-				panelPt(gu[i],   gv[j+1]),
+				panelPt(pu[a], pv[a]),
+				panelPt(pu[b], pv[b]),
+				panelPt(pu[c], pv[c]),
+				panelPt(pu[d], pv[d]),
 			};
 			Shard s;
 			s.mesh = makeShardMesh(sc, wc, normal_, shardMat, s.local);
@@ -192,7 +268,58 @@ void MirrorShatter::build(Scene* sc, const Vector corners[4], const Vector& N,
 			shards_.push_back(std::move(s));
 		}
 	}
+
+	// Gather the static floor/stage surfaces shards can rest on: opaque,
+	// UP-facing faces (world normal y > 0.3) at or below the panel base
+	// (centroid.y <= floorY+1). This keeps floors + stages + steps and
+	// drops ceilings (down-facing) and walls (side-facing), so a shard's
+	// downward ray finds the real surface under it. Sampled once here.
+	floorTris_.clear();
+	for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh) continue;
+		TriMesh* T = (TriMesh*)Obj->Data;
+		if (!T || !T->Faces) continue;
+		for (DWord fi = 0; fi < T->FIndex; ++fi) {
+			Face& F = T->Faces[fi];
+			if (!F.A || !F.B || !F.C) continue;
+			if (F.Txtr && (F.Txtr->Flags & Mat_Transparent)) continue;  // skip glass/water surfaces
+			Vector fn = F.N, wn;
+			MatrixXVector(T->RotMat, &fn, &wn);
+			if (wn.y < 0.3f) continue;                                  // up-facing only
+			auto wp = [&](const Vertex* v) { Vector lp = v->Pos, w; MatrixXVector(T->RotMat, &lp, &w); return vadd(w, T->IPos); };
+			const Vector A = wp(F.A), B = wp(F.B), C = wp(F.C);
+			if ((A.y + B.y + C.y) * (1.0f/3.0f) > floorY + 1.0f) continue;  // at/below the panel base
+			floorTris_.push_back(A);
+			floorTris_.push_back(B);
+			floorTris_.push_back(C);
+		}
+	}
+
 	built_ = true;
+}
+
+// Highest static floor/stage surface directly under (x,z): a downward ray
+// from high above through floorTris_, taking the topmost hit. Returns
+// -1e30 if nothing is below (caller falls back to floorY_).
+float MirrorShatter::castFloorAt(float x, float z) const {
+	constexpr float kBigY = 1.0e4f;
+	float best = -1e30f;
+	for (size_t i = 0; i + 2 < floorTris_.size(); i += 3) {
+		const Vector& A = floorTris_[i]; const Vector& B = floorTris_[i+1]; const Vector& C = floorTris_[i+2];
+		const Vector e1 = vsub(B, A), e2 = vsub(C, A);
+		const Vector P{ -e2.z, 0.0f, e2.x };          // D × e2, D = (0,-1,0)
+		const float det = e1.x*P.x + e1.z*P.z;        // e1 · P (P.y = 0)
+		if (det > -1e-6f && det < 1e-6f) continue;
+		const float inv = 1.0f / det;
+		const Vector Tv{ x - A.x, kBigY - A.y, z - A.z };
+		const float u = (Tv.x*P.x + Tv.z*P.z) * inv; if (u < 0.0f || u > 1.0f) continue;
+		const Vector Q{ Tv.y*e1.z - Tv.z*e1.y, Tv.z*e1.x - Tv.x*e1.z, Tv.x*e1.y - Tv.y*e1.x };
+		const float v = (-Q.y) * inv; if (v < 0.0f || u + v > 1.0f) continue;  // D · Q = -Q.y
+		const float t = (e2.x*Q.x + e2.y*Q.y + e2.z*Q.z) * inv;
+		const float hy = kBigY - t;
+		if (hy > best) best = hy;
+	}
+	return best;
 }
 
 void MirrorShatter::trigger(float impactU, float impactV) {
@@ -229,12 +356,27 @@ void MirrorShatter::trigger(float impactU, float impactV) {
 void MirrorShatter::update(float dt) {
 	if (!active_) return;
 	if (dt <= 0.0f) dt = 1.0f;
+	const float fall    = std::max(0.0f, fds::FeatureFlags::greets_shard_fall_speed());
+	const bool  layFlat = fds::FeatureFlags::greets_shard_lay_flat();
 	for (Shard& s : shards_) {
 		if (!s.settled) {
 			// Integrate.
-			s.vel.y -= kGravity * dt;
+			s.vel.y -= kGravity * fall * dt;
 			s.pos = vadd(s.pos, vscale(s.vel, dt));
 			s.eul = vadd(s.eul, vscale(s.angVel, dt));
+
+			// Per-shard floor: the surface directly under THIS shard (a
+			// stage, a step, the floor) — not one global plane. Re-sampled
+			// only when the shard drifts > 0.5u horizontally (cheap; most
+			// of the fall reuses the cache). Falls back to floorY_ if the
+			// ray finds nothing below.
+			if (s.cFloor <= -1e29f ||
+			    std::fabs(s.pos.x - s.cfX) > 0.5f || std::fabs(s.pos.z - s.cfZ) > 0.5f) {
+				const float f = castFloorAt(s.pos.x, s.pos.z);
+				s.cFloor = (f > -1e29f) ? f : floorY_;
+				s.cfX = s.pos.x; s.cfZ = s.pos.z;
+			}
+			const float fy = s.cFloor;
 
 			Matrix rot;
 			Euler_Angles(rot, s.eul.x, s.eul.y, s.eul.z);
@@ -247,8 +389,8 @@ void MirrorShatter::update(float dt) {
 				const Vector w = vadd(rw, s.pos);
 				if (w.y < lowest) lowest = w.y;
 			}
-			if (lowest < floorY_) {
-				s.pos.y += floorY_ - lowest;             // lift back to rest on the floor
+			if (lowest < fy) {
+				s.pos.y += fy - lowest;                  // lift back to rest on the floor
 				s.vel.y = -s.vel.y * kRestitution;       // bounce
 				s.vel.x *= kFriction;
 				s.vel.z *= kFriction;
@@ -256,18 +398,38 @@ void MirrorShatter::update(float dt) {
 				if (vlen(s.vel) < kSettleVel) {
 					s.vel = {0,0,0};
 					s.angVel = {0,0,0};
-					// Lay flat on the floor (glass topples; it doesn't rest
-					// on edge). Local normal is N≈(0,0,-1); pitch it to face
-					// +Y, random yaw so the debris isn't uniformly aligned.
-					s.eul = { 1.57079633f, s.eul.y, 0.0f };
-					Matrix flat;
-					Euler_Angles(flat, s.eul.x, s.eul.y, s.eul.z);
+					// Final rest orientation.
+					Matrix fin;
+					if (layFlat) {
+						// Lay flat: rotate so the shard's face normal (the
+						// panel normal, in local axes) maps to +Y, i.e. the
+						// quad lies in the XZ floor plane. Row-major MatrixXVector
+						// means RotMat·n = +Y iff RotMat's rows are {t1, n, t2}
+						// with t1,t2 an in-plane orthonormal basis. A random
+						// in-plane spin gives each shard a different yaw.
+						const Vector n  = vnorm(normal_);
+						const Vector rf = (std::fabs(n.y) < 0.9f) ? Vector{0,1,0} : Vector{1,0,0};
+						const Vector t1 = vnorm(vcross(rf, n));
+						const Vector t2 = vcross(n, t1);            // unit (n,t1 orthonormal)
+						const float  a  = frand01() * 6.2831853f;
+						const float  ca = std::cos(a), sa = std::sin(a);
+						const Vector r1 = vadd(vscale(t1, ca), vscale(t2, sa));
+						const Vector r2 = vadd(vscale(t1, -sa), vscale(t2, ca));
+						Matrix_Form(fin, r1.x, r1.y, r1.z,
+						                 n.x,  n.y,  n.z,
+						                 r2.x, r2.y, r2.z);
+					} else {
+						// Legacy: freeze at the tumbled orientation.
+						Euler_Angles(fin, s.eul.x, s.eul.y, s.eul.z);
+					}
+					// Re-seat on the floor with the final orientation.
 					float lo2 = 1e30f;
 					for (const Vector& lv : s.local) {
-						Vector rw2; MatrixXVector(flat, &lv, &rw2);
+						Vector rw2; MatrixXVector(fin, &lv, &rw2);
 						if (rw2.y + s.pos.y < lo2) lo2 = rw2.y + s.pos.y;
 					}
-					if (lo2 < floorY_) s.pos.y += floorY_ - lo2;
+					if (lo2 < fy) s.pos.y += fy - lo2;
+					Matrix_Copy(s.settleRot, fin);
 					s.settled = true;
 				}
 			}
@@ -276,10 +438,15 @@ void MirrorShatter::update(float dt) {
 		// mesh to its rest pose (the original z=5 panel slot) from the
 		// single-key splines every frame, so even settled shards must
 		// re-apply their final pose or they snap back and reform the panel.
-		Matrix rot;
-		Euler_Angles(rot, s.eul.x, s.eul.y, s.eul.z);
-		Matrix_Copy(s.mesh->RotMat, rot);
-		Matrix_Copy(s.mesh->UnscaledRotMat, rot);
+		if (s.settled) {
+			Matrix_Copy(s.mesh->RotMat, s.settleRot);
+			Matrix_Copy(s.mesh->UnscaledRotMat, s.settleRot);
+		} else {
+			Matrix rot;
+			Euler_Angles(rot, s.eul.x, s.eul.y, s.eul.z);
+			Matrix_Copy(s.mesh->RotMat, rot);
+			Matrix_Copy(s.mesh->UnscaledRotMat, rot);
+		}
 		s.mesh->IPos = s.pos;
 	}
 }
@@ -358,22 +525,35 @@ MirrorShatter::~MirrorShatter() = default;
 
 void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
                                             Texture* textTex, const float textWorldAffine[8]) {
-	if (!sc || !built_ || shards_.empty()) return;
-	texRes_  = texRes > 0 ? texRes : 64;
+	// Back-compat: the original one-shot entry. The greets path now calls the
+	// three pieces separately (prepare at load, text+arm at the break).
+	prepareReflectionAtlas(sc, texRes);
+	setShardText(textTex, textWorldAffine);
+	armReflectionCameras();
+}
+
+void MirrorShatter::setShardText(Texture* textTex, const float textWorldAffine[8]) {
+	if (!built_ || shards_.empty()) return;
 	textTex_ = textTex;
 	hasText_ = (textTex && textWorldAffine);
-	if (hasText_) {
-		// Each shard's fixed text fragment: its original (rest-pose) corners
-		// mapped through the screen's world→text-UV affine. RotMat is identity
-		// at trigger, so the original world corner is local[i] + centroid.
-		const float* A = textWorldAffine;
-		for (Shard& s : shards_)
-			for (int i = 0; i < 4 && i < int(s.local.size()); ++i) {
-				const Vector w = vadd(s.local[i], s.pos);
-				s.textUV[i][0] = A[0]*w.x + A[1]*w.y + A[2]*w.z + A[3];
-				s.textUV[i][1] = A[4]*w.x + A[5]*w.y + A[6]*w.z + A[7];
-			}
-	}
+	if (!hasText_) return;
+	// Each shard's fixed text fragment: its original (rest-pose) corners
+	// mapped through the screen's world→text-UV affine. RotMat is identity
+	// (rest pose), so the original world corner is local[i] + centroid.
+	const float* A = textWorldAffine;
+	for (Shard& s : shards_)
+		for (int i = 0; i < 4 && i < int(s.local.size()); ++i) {
+			const Vector w = vadd(s.local[i], s.pos);
+			s.textUV[i][0] = A[0]*w.x + A[1]*w.y + A[2]*w.z + A[3];
+			s.textUV[i][1] = A[4]*w.x + A[5]*w.y + A[6]*w.z + A[7];
+		}
+}
+
+void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
+	if (!sc || !built_ || shards_.empty()) return;
+	if (reflPrepared_) return;   // idempotent — allocate once (at load)
+	reflPrepared_ = true;
+	texRes_  = texRes > 0 ? texRes : 64;
 
 	// Shared offscreen render target (one 64² surf, reused per shard).
 	reflSurf_ = new VESA_Surface();
@@ -406,6 +586,9 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 	// 0 keep omnis out) — the same recipe the mirror-RTT slots use.
 	atlasMat_ = getAlignedType<Material>(16);
 	atlasMat_->Txtr = atlasTex_;
+	// Displayed as-is (Lum=1): the half-silvered composite (silver + dst/2)
+	// is baked into the atlas pixels by ApplyShardSilverGlaze, so the dimming
+	// lives there, not here.
 	atlasMat_->Diffuse = 0.0f; atlasMat_->Specular = 0.0f; atlasMat_->Luminosity = 1.0f;
 	atlasMat_->BaseCol = Color{255.0f, 255.0f, 255.0f, 255.0f};
 	atlasMat_->RelScene = sc;
@@ -450,7 +633,11 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 		reflXparZ_.assign(np, 0);
 		reflXparZBack_.assign(np, 0);
 	}
-	reflCamsOn_ = true;
+	// Warm the parallel-bake worker pool + per-worker scratch now (the cold
+	// allocation was most of the break-frame bake hitch).
+	ensureReflWorkers();
+	// NOTE: arming (reflCamsOn_) is deliberately NOT done here — that's
+	// armReflectionCameras(), called at the break. Prepare only allocates.
 }
 
 void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
@@ -610,6 +797,10 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 				}
 			}
 
+			// Silver half-silvered glaze (#3) — desaturate toward cool silver.
+			ApplyShardSilverGlaze((uint32_t*)reflSurf_->Data, texRes_ * texRes_,
+			                      fds::FeatureFlags::greets_mirror_tint());
+
 			// Composite the shard's fixed text fragment over its reflection,
 			// half-silvered: out = text + reflection*gain (text rides on top).
 			// The window→text-UV map is an affine through the shard's CURRENT
@@ -680,29 +871,9 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 // projection lives in the worker's CameraContext; the cull cone is thread_local;
 // the atlas cells are disjoint). The opt-in deferred bake and the
 // FDS_SHARD_REFL_SERIAL escape hatch keep the original serial path.
-void MirrorShatter::renderReflectionCameras(Scene* sc) {
-	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
-
-	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
-	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
-	// fan across the pool — forward by default, or per-worker DEFERRED when
-	// deferredBake_ (shadowed, hue-correct; each worker owns its G-buffer).
-	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
-	if (forceSerial) { renderReflectionCamerasSerial(sc); return; }
-
-	const Camera* mainCam = View ? View : sc->CameraHead;
-	if (!mainCam) return;
-	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
-	const auto t0 = std::chrono::steady_clock::now();
-	const Vector E = mainCam->ISource;
-	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
-	const int N  = int(shards_.size());
-	if (N <= 0) return;
-
-	// Hide every shard for the whole pass — a shard never reflects the other
-	// falling fragments (no recursive glass); each reflects the room only.
-	for (Shard& s : shards_) s.mesh->Flags &= ~HTrack_Visible;
-
+void MirrorShatter::ensureReflWorkers() {
+	if (shards_.empty()) return;
+	const int N = int(shards_.size());
 	// Size the worker pool to the thread count (one whole render per thread —
 	// inter-render parallelism; tiling a 64² target is pure dispatch overhead).
 	if (!reflPool_) reflPool_ = std::make_unique<ReflPool>();
@@ -741,6 +912,37 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 			w.gbInit = true;
 		}
 	}
+}
+
+void MirrorShatter::renderReflectionCameras(Scene* sc) {
+	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
+
+	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
+	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
+	// fan across the pool — forward by default, or per-worker DEFERRED when
+	// deferredBake_ (shadowed, hue-correct; each worker owns its G-buffer).
+	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
+	if (forceSerial) { renderReflectionCamerasSerial(sc); return; }
+
+	const Camera* mainCam = View ? View : sc->CameraHead;
+	if (!mainCam) return;
+	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
+	const auto t0 = std::chrono::steady_clock::now();
+	const Vector E = mainCam->ISource;
+	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
+	const int N  = int(shards_.size());
+	if (N <= 0) return;
+
+	// Hide every shard for the whole pass — a shard never reflects the other
+	// falling fragments (no recursive glass); each reflects the room only.
+	for (Shard& s : shards_) s.mesh->Flags &= ~HTrack_Visible;
+
+	// Worker pool + per-worker scratch. Warmed at init (prepareReflectionAtlas
+	// → ensureReflWorkers) so the COLD allocation isn't paid on the first
+	// post-break bake; here it's a cheap no-op (only grows the face list if
+	// Polys grew since init).
+	ensureReflWorkers();
+	const size_t P = reflPool_->workers.size();
 
 	// Self-balancing fan-out: workers pull shard indices off a shared atomic
 	// cursor. The join uses a LOCAL semaphore, NOT renderns::tileDone — each
@@ -961,6 +1163,10 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			px[i] = b | (g << 8) | (r << 16) | 0xFF000000u;
 		}
 	}
+
+	// Silver half-silvered glaze (#3) — desaturate toward cool silver.
+	ApplyShardSilverGlaze((uint32_t*)w.surf.Data, texRes_ * texRes_,
+	                      fds::FeatureFlags::greets_mirror_tint());
 
 	// Half-silvered text composite (text + reflection*gain), same affine the
 	// serial path uses (world plane-coords → fixed per-corner text UVs).

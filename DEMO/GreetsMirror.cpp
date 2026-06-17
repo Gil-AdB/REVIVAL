@@ -940,6 +940,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         Vector   wN;  // unit world normal
         float    d;   // plane offset: wN·P + d = 0
         float    area; // world-space triangle area
+        Vector   ctr;  // world-space face centroid (for spatial clustering)
     };
     std::vector<WallSample> samples;
     walkWallFacesIf(sc, textureNameSelector(textureFileName),
@@ -961,8 +962,9 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         const float cyv = e1.z*e2.x - e1.x*e2.z;
         const float czv = e1.x*e2.y - e1.y*e2.x;
         const float area = 0.5f * std::sqrt(cxv*cxv + cyv*cyv + czv*czv);
+        const Vector ctr{ (wA.x+wB.x+wC.x)/3.0f, (wA.y+wB.y+wC.y)/3.0f, (wA.z+wB.z+wC.z)/3.0f };
         samples.push_back({&F, T, u,
-                           -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area});
+                           -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area, ctr});
     });
     if (samples.empty()) {
         std::fprintf(stderr, "[MIRROR-CLUSTER '%s'] no faces found\n",
@@ -971,11 +973,21 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     }
 
     // Greedy seed clustering: same plane = normals within ~18° AND
-    // offsets within half a world unit. Tighter than the 30° the
-    // single-plane finder uses for outlier rejection — here disagreeing
-    // faces become their own mirror instead of being dropped.
-    constexpr float kNormalDot    = 0.95f;
-    constexpr float kPlaneDistEps = 0.5f;
+    // offsets within half a world unit, AND spatially near the seed.
+    // The proximity term is essential: coplanarity ALONE merges faces
+    // from DIFFERENT fixtures that happen to share a plane (e.g. a
+    // screen box's thin +z side cap and a separate screen across the
+    // room, both facing +z at the same z). Merged, the cluster looks
+    // like neither a clean panel nor a clean strip, so the per-cluster
+    // display tests below misjudge it (the cap's mask carved the wall =
+    // the black strip; rejecting the merged cluster killed the real
+    // screen with it). A single fixture's faces sit within a few units;
+    // separate fixtures are far. kFixtureRadius is generous enough to
+    // hold one panel together (its tris' centroids are ≈diagonal/3
+    // apart) yet far below inter-fixture spacing.
+    constexpr float kNormalDot     = 0.95f;
+    constexpr float kPlaneDistEps  = 0.5f;
+    constexpr float kFixtureRadius = 12.0f;
     std::vector<int> clusterOf(samples.size(), -1);
     int numClusters = 0;
     for (size_t i = 0; i < samples.size(); ++i) {
@@ -989,6 +1001,10 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                             + samples[i].wN.z*samples[j].wN.z;
             if (dot < kNormalDot) continue;
             if (std::fabs(samples[i].d - samples[j].d) > kPlaneDistEps) continue;
+            const float ddx = samples[i].ctr.x - samples[j].ctr.x;
+            const float ddy = samples[i].ctr.y - samples[j].ctr.y;
+            const float ddz = samples[i].ctr.z - samples[j].ctr.z;
+            if (ddx*ddx + ddy*ddy + ddz*ddz > kFixtureRadius*kFixtureRadius) continue;
             clusterOf[j] = c;
         }
     }
@@ -1031,6 +1047,69 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         float  cD = 0.0f;
         for (size_t i = 0; i < samples.size(); ++i)
             if (clusterOf[i] == c) { cN = samples[i].wN; cD = samples[i].d; break; }
+        // ── Display-face discrimination ──────────────────────────────
+        // A screen box is a thin slab of half-silvered glass: the FRONT
+        // is the display, but the back + 4 side caps share the material
+        // and each forms its own coplanar cluster. Those non-display
+        // faces should NOT be mirrors — a side cap seen edge-on reflects
+        // black and its mask carves the wall behind (the greets black
+        // strip); the back is mounted against the wall. Discriminate by:
+        //   (1) ASPECT — a side cap is a long thin strip (depth×height,
+        //       ~40:1); a display is roughly rectangular (~1:1).
+        //   (2) OPEN SPACE on the reflecting (+normal) side — a real
+        //       display faces the room; a back cap faces the wall it's
+        //       mounted on (opaque geometry within ~2 units along +cN).
+        Vector axU, axV; planeBasis(cN, axU, axV);
+        float bu0=1e30f,bu1=-1e30f,bv0=1e30f,bv1=-1e30f;
+        Vector cCtr{0,0,0}; int cNv=0;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (clusterOf[i] != c) continue;
+            const WallSample &ws = samples[i];
+            const Vertex *vs[3] = { ws.F->A, ws.F->B, ws.F->C };
+            for (int k = 0; k < 3; ++k) {
+                Vector wp = vs[k]->Pos;
+                if (ws.T) { Vector lp = wp; MatrixXVector(ws.T->RotMat, &lp, &wp); wp += ws.T->IPos; }
+                const float pu = wp.x*axU.x + wp.y*axU.y + wp.z*axU.z;
+                const float pv = wp.x*axV.x + wp.y*axV.y + wp.z*axV.z;
+                bu0=std::min(bu0,pu); bu1=std::max(bu1,pu);
+                bv0=std::min(bv0,pv); bv1=std::max(bv1,pv);
+                cCtr.x+=wp.x; cCtr.y+=wp.y; cCtr.z+=wp.z; ++cNv;
+            }
+        }
+        if (cNv) { cCtr.x/=cNv; cCtr.y/=cNv; cCtr.z/=cNv; }
+        const float exU = bu1-bu0, exV = bv1-bv0;
+        const float exMin = std::min(exU,exV), exMax = std::max(exU,exV);
+        const float aspect = (exMin > 1e-3f) ? exMax/exMin : 1e9f;
+        // Short ray from just off the surface along +cN (the reflecting
+        // side). Hit on opaque, non-clone, non-glass geometry within
+        // kFaceWallDist ⇒ the face is mounted against a wall (a back).
+        bool facesWall = false;
+        {
+            const float kFaceWallDist = 2.0f;
+            const Vector O{ cCtr.x+cN.x*0.2f, cCtr.y+cN.y*0.2f, cCtr.z+cN.z*0.2f };
+            for (Object *O2 = sc->ObjectHead; O2 && !facesWall; O2 = O2->Next) {
+                if (O2->Type != Obj_TriMesh || isCloneMesh(O2)) continue;
+                TriMesh *T2 = (TriMesh*)O2->Data; if (!T2 || !T2->Faces) continue;
+                for (DWord fi = 0; fi < T2->FIndex; ++fi) {
+                    Face &F = T2->Faces[fi]; if (!F.A||!F.B||!F.C) continue;
+                    if (F.Txtr && (F.Txtr->Flags & Mat_Transparent)) continue; // skip glass
+                    auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T2->RotMat,&lp,&w); w+=T2->IPos; return w; };
+                    const Vector A=wp(F.A),B=wp(F.B),C=wp(F.C);
+                    const Vector e1{B.x-A.x,B.y-A.y,B.z-A.z}, e2{C.x-A.x,C.y-A.y,C.z-A.z};
+                    const Vector pvv{cN.y*e2.z-cN.z*e2.y, cN.z*e2.x-cN.x*e2.z, cN.x*e2.y-cN.y*e2.x};
+                    const float det=e1.x*pvv.x+e1.y*pvv.y+e1.z*pvv.z;
+                    if (det>-1e-6f && det<1e-6f) continue;
+                    const float inv=1.0f/det;
+                    const Vector tv{O.x-A.x,O.y-A.y,O.z-A.z};
+                    const float uu=(tv.x*pvv.x+tv.y*pvv.y+tv.z*pvv.z)*inv; if (uu<0||uu>1) continue;
+                    const Vector qv{tv.y*e1.z-tv.z*e1.y, tv.z*e1.x-tv.x*e1.z, tv.x*e1.y-tv.y*e1.x};
+                    const float vv=(cN.x*qv.x+cN.y*qv.y+cN.z*qv.z)*inv; if (vv<0||uu+vv>1) continue;
+                    const float dist=(e2.x*qv.x+e2.y*qv.y+e2.z*qv.z)*inv;
+                    if (dist>0.05f && dist<kFaceWallDist) { facesWall=true; break; }
+                }
+            }
+        }
+        constexpr float kMaxDisplayAspect = 6.0f;
         const char *verdict = "built";
         if (clusterArea < kMinRttArea) {
             verdict = "sliver";
@@ -1049,10 +1128,23 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             verdict = "horizontal";
             ++skippedHorizontal;
         }
+        // Only override a face that would otherwise be a display (built
+        // or rtt). 'edge'/'occluded' start with neither 'r' nor 'b', so
+        // both the RTT path (verdict[0]=='r') and the clone path
+        // (verdict[0]!='b' → continue) skip them.
+        // With spatial clustering each cluster is one fixture, so the
+        // tests are clean: an isolated thin side cap reads as a high
+        // aspect strip; a back reads as facing a wall. (No fill-ratio
+        // test — that only mattered when caps merged with real panels.)
+        if (verdict[0] == 'b' || verdict[0] == 'r') {
+            if (aspect > kMaxDisplayAspect)      verdict = "edge";      // thin box-side cap
+            else if (facesWall)                  verdict = "occluded";  // back, mounted on wall
+        }
         std::fprintf(stderr,
             "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
-            "area=%6.2f -> %s\n",
-            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea, verdict);
+            "area=%6.2f ext=%.2fx%.2f aspect=%.1f facesWall=%d -> %s\n",
+            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea,
+            exU, exV, aspect, (int)facesWall, verdict);
         if (verdict[0] == 'r') {
             // ── First-order RTT slot ────────────────────────────────
             // Plane fit: average member normals/offsets.
@@ -2569,9 +2661,19 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         fds::g_offAxisFrustumCull = true;
         Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
         fds::g_offAxisFrustumCull = false;
+        // Every rendering RTT slot is an order-2 reflection that shows the
+        // room (the disco + its volumetric cones live there), so they ALL
+        // want the deferred kernel when --shard-deferred is on — without it
+        // the cones are missing from the reflection inside the screens
+        // (the m2->m1 "screen reflects the room clone" slot is the obvious
+        // case). The forward-clone room mirror (#1) is NOT an RTT slot, so
+        // it's untouched by this flag regardless. (An earlier textTex gate
+        // tried to keep "geometry" slots forward but only managed to strip
+        // the cones from the very reflections that need them.)
+        const bool slotDeferred = rttDeferred;
         if (CAll != 0) {
             Radix_Sort(FList, SList, CAll);
-            if (rttDeferred) {
+            if (slotDeferred) {
                 // Deferred RTT bake: render the recursive reflection through the
                 // deferred kernel (shadows + matches the main view) + the cone
                 // pass (disco beams), instead of the forward filler. Serial pass,
@@ -2621,8 +2723,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 if (zp[i] != 0) ++nzz;
             }
             std::fprintf(stderr,
-                "[MIRROR-RTT] order=%d job: %d/%d color px, %d z px, CAll=%d\n",
-                int(s.order), nz, s.texW * s.texH, nzz, int(CAll));
+                "[MIRROR-RTT] order=%d %s job: %d/%d color px, %d z px, CAll=%d\n",
+                int(s.order), slotDeferred ? "deferred" : "forward",
+                nz, s.texW * s.texH, nzz, int(CAll));
         }
         // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
         // linear buffer (top=red, bottom=blue, left=green,
