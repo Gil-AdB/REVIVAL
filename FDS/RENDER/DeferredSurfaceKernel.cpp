@@ -55,6 +55,7 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
+#include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/FILLERS.H"
@@ -1623,7 +1624,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			if (litG < 0) litG = 0;
 			if (litR < 0) litR = 0;
 
-			// Alpha-blend onto VPage. Default: `litRGB + dst/2`
+			// Alpha-blend onto the destination. Default: `litRGB + dst/2`
 			// saturated — matches forward TheOtherBarry<TRANSPARENT>
 			// (source-full + dest-halved, NOT 50/50).
 			// Opt-in per-material (Mat->XparBlendAlpha > 0): linear
@@ -1631,6 +1632,28 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// cap. Fountain orb glass uses α=0.4 for a more
 			// see-through look; other transparents in the same scene
 			// (e.g. fountain spires) keep the legacy formula.
+			//
+			// HDR overlay reorg: in HDR mode the dst is the float radiance in
+			// g_hdrBuf (lit+fog, unclamped — this runs after the froxel
+			// composite), and the composite stays in float with no 255 cap so
+			// the bolt/flash/fog visible THROUGH transparents blooms and rolls
+			// off at the tonemap instead of clipping. Gated on g_hdrActive so
+			// the LDR path (flag off, fog-off scenes) is byte-identical.
+			if (fds::g_hdrActive) {
+				float* h = fds::g_hdrBuf.data() + i * 4;
+				const float dB = h[0], dG = h[1], dR = h[2];
+				if (Mat->XparBlendAlpha > 0.0f) {
+					const float a = Mat->XparBlendAlpha;
+					const float ia = 1.0f - a;
+					h[0] = float(litB) * a + dB * ia;
+					h[1] = float(litG) * a + dG * ia;
+					h[2] = float(litR) * a + dR * ia;
+				} else {
+					h[0] = float(litB) + dB * 0.5f;
+					h[1] = float(litG) + dG * 0.5f;
+					h[2] = float(litR) + dR * 0.5f;
+				}
+			} else {
 			const dword existing = out[i];
 			const int dB = int((existing      ) & 0xFF);
 			const int dG = int((existing >>  8) & 0xFF);
@@ -1651,6 +1674,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				if (outR > 255) outR = 255;
 			}
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+			}
 		}
 	}
 	// See the Front-layer variant above for why no release() here.

@@ -488,10 +488,12 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				Render_DeferredFogPass();
 		}
 
-		// HDR (prototype): tonemap the radiance buffer (unclamped lit+fog) down
-		// to VPage, so the transparent peel / cones / overlays below composite
-		// over the tonemapped result instead of being erased. Gated on --hdr.
-		if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
+		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
+		// fog), forcing every overlay below to composite LDR over the tonemapped
+		// base. It now walks down the pipeline — the transparent peel + sprites
+		// accumulate into g_hdrBuf (gated g_hdrActive) and the tonemap fires
+		// after TBR_Render (see below). Each subsequent step (cones/halos/rain/
+		// bolt) moves it further until it runs last.
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,
@@ -673,6 +675,14 @@ xpar_done: ;
 	{
 		TBR_Render(CurScene);
 	}
+
+	// HDR (Phase 2 overlay reorg): tonemap the radiance buffer down to VPage
+	// now that the transparent peel + sprites (the TBR pass above) have
+	// accumulated into it. The cone/halo/rain passes below still composite LDR
+	// over the tonemapped result for now — each future step moves this call
+	// further down until it runs last (after the fountain bolt). No-ops unless
+	// the froxel composite populated g_hdrBuf this frame (g_hdrActive).
+	if (fds::FeatureFlags::hdr()) fds::Render_TonemapToVPage();
 
 	// Volumetric pass(es). Tri-state dispatch:
 	//   useUnifiedVolumetric()=true: one Beer-Lambert pass that does

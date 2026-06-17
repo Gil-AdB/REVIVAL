@@ -15,6 +15,7 @@
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in TBR helpers
 #include "SimdHelpers.h"
 #include "Mekalele.h"  // g_gbuffer — flare filler's mirror-footprint gate
+#include "RENDER/Hdr.h"  // HDR overlay reorg — sprites accumulate into g_hdrBuf
 #include <Threads.h>
 // #define SIMDE_ENABLE_NATIVE_ALIASES
 #include "simde/x86/mmx.h"
@@ -1294,7 +1295,7 @@ constexpr uint32_t clog2(uint32_t n)
 }
 
 
-template <int TextureRes = 32, bool EnableZTest = false>
+template <int TextureRes = 32, bool EnableZTest = false, bool HDRAccum = false>
 void Spriter(float x, float y, float width, float height, void* txtr, void* vpage, dword Color, dword Z, float spriteClipX1, float spriteClipY1, float spriteClipX2, float spriteClipY2) {
 	float x1, y1, x2, y2;
 	float du, dv;
@@ -1374,11 +1375,33 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 			auto p_offset = ((v_u >> 16) & (TextureRes - 1)) | v_v_ofs;
 			auto texture_samples = gather(Vec8ui(p_offset), txtr, mask);
 			texture_samples = colorize(Vec32uc(texture_samples), blend_color);
-			Vec32uc dst;
-			dst.load_a(span);
-			texture_samples = add_saturated(Vec32uc(texture_samples), dst);
+			if constexpr (HDRAccum) {
+				// HDR overlay reorg: additively accumulate the source
+				// contribution into the float radiance buffer instead of the
+				// 8-bit add_saturated store, so overlapping/over-flash sprites
+				// bloom and roll off at the tonemap rather than clipping at
+				// 255. Scalar over the masked lanes — sprites are sparse, a
+				// SIMD float-RMW gather/scatter is a later optimization.
+				alignas(32) uint8_t src[32];
+				Vec32uc(texture_samples).store(src);
+				int marr[8];
+				select(mask, Vec8i(-1), Vec8i(0)).store(marr);
+				const int baseX = tile_x * TILE_SIZE;
+				float* hbuf = fds::g_hdrBuf.data();
+				for (int k = 0; k < 8; ++k) {
+					if (!marr[k]) continue;
+					float* h = hbuf + (size_t(y) * size_t(XRes) + size_t(baseX + k)) * 4;
+					h[0] += float(src[k * 4 + 0]);   // B
+					h[1] += float(src[k * 4 + 1]);   // G
+					h[2] += float(src[k * 4 + 2]);   // R
+				}
+			} else {
+				Vec32uc dst;
+				dst.load_a(span);
+				texture_samples = add_saturated(Vec32uc(texture_samples), dst);
 
-			_mm256_maskstore_ps((float*)span, *(__m256i*)(&mask), *(__m256*)(&texture_samples));
+				_mm256_maskstore_ps((float*)span, *(__m256i*)(&mask), *(__m256*)(&texture_samples));
+			}
 
 			v_x += 8u;
 			v_u += v_du;
@@ -1389,6 +1412,20 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 		zscanline += XRes * 2;
 		v_v += v_dv;
 	}
+}
+
+// HDR overlay reorg: pick the HDRAccum Spriter instantiation at runtime.
+// g_hdrActive is set once the froxel composite has populated g_hdrBuf this
+// frame (HDR mode); until then — LDR scenes, --hdr off — sprites take the
+// 8-bit add_saturated path and the result is byte-identical to before.
+template <int Res>
+static inline void SpriterRT(float x, float y, float w, float h, void* txtr,
+                             void* vpage, dword Color, dword Z,
+                             float cx1, float cy1, float cx2, float cy2) {
+	if (fds::g_hdrActive)
+		Spriter<Res, true, true >(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
+	else
+		Spriter<Res, true, false>(x, y, w, h, txtr, vpage, Color, Z, cx1, cy1, cx2, cy2);
 }
 
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
@@ -1468,7 +1505,7 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 			if (y>YRes-1) y=YRes-1;
 			if (Z <= ZPage16[XRes*y+x]) return;
 		}
-		Spriter<256, true>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
+		SpriterRT<256>(_A->PX, _A->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage, Col, Z, 0, 0, XRes, YRes);
 		//CSeven_UP_MMX(_A->PX,_A->PY,edgeLen,edgeLen,F->Txtr->Txtr->Data,VPage, Col, Z);
 		//CSeven_UP(_A->PX,_A->PY,Size<<1,Size<<1,F->Txtr->Txtr->Data,VPage);
 	}
@@ -1888,13 +1925,13 @@ void TBR_Render(Scene *Sc)
 					// the immediate-draw path (the omni V's LR/LG/LB are not
 					// maintained and would tint the flare black).
 					if (F->Txtr->Txtr->SizeX == 256) {
-						Spriter<256, true>(V->PX, V->PY, edgeLen, edgeLen,
+						SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, 0xFFFFFF, Z,
 							0, spriteClipY1, XRes, spriteClipY2);
 					} else {
 						dword R = V->LR, G = V->LG, B = V->LB;
 						dword Color = (R << 16) + (G << 8) + B;
-						Spriter<32, true>(V->PX, V->PY, edgeLen, edgeLen,
+						SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen,
 							F->Txtr->Txtr->Data, VPage, Color, Z,
 							0, spriteClipY1, XRes, spriteClipY2);
 					}
