@@ -32,6 +32,8 @@
 #include "Scenes.h"
 #include "FILLERS/Mekalele.h"
 #include <map>
+#include <unordered_set>
+#include <algorithm>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/LightmapBake.h"
@@ -842,6 +844,46 @@ static void BuildGreetsShatter()
 			             "(maxDepth=%.3f span u=%.2f v=%.2f)\n",
 			             g_greetsScreenBoxFaces.size(), nFrame, dmin, dmax, maxDepth,
 			             u1-u0, v1-v0);
+		// The screen box's SIDE faces are transparent glass ('screen 3') with
+		// side-facing normals (not the front mirror's N). Seen edge-on they
+		// show a black reflection (the box-side glass over void) — that's the
+		// black strip. Retarget them to the opaque brick wall material so the
+		// box edge reads as solid wall, not black glass. Front mirror faces
+		// (N ~ the screen plane normal) are left untouched.
+		{
+			Material *brick = nullptr; void *brickFiller = nullptr;
+			for (Object *Obj = GreetSc->ObjectHead; Obj && !brick; Obj = Obj->Next) {
+				if (Obj->Type != Obj_TriMesh) continue;
+				TriMesh *Tm = (TriMesh*)Obj->Data; if (!Tm || !Tm->Faces) continue;
+				for (DWord fi = 0; fi < Tm->FIndex; ++fi)
+					if (Tm->Faces[fi].Txtr && Tm->Faces[fi].Txtr->Name &&
+					    !strcmp(Tm->Faces[fi].Txtr->Name, "rooms")) {
+						brick = Tm->Faces[fi].Txtr; brickFiller = (void*)Tm->Faces[fi].Filler; break;
+					}
+			}
+			int nEdge = 0;
+			std::unordered_set<Face*> bricked;
+			if (brick) for (Face *F : g_greetsScreenBoxFaces) {
+				if (!F->Txtr || !F->Txtr->Name || !strstr(F->Txtr->Name, "screen 3")) continue;
+				// Skip only the FRONT mirror face (normal aligned WITH the
+				// room-facing plane normal N, dot ~ +1). The back face (dot ~
+				// -1) and sides (dot ~ 0) become brick. (|dot| would wrongly
+				// skip the back too, leaving it as the black survivor.)
+				if (F->N.x*N.x + F->N.y*N.y + F->N.z*N.z > 0.7f) continue;
+				F->Txtr = brick; F->Filler = (decltype(F->Filler))brickFiller;
+				bricked.insert(F); ++nEdge;
+			}
+			// These bricked side faces are now solid wall — DON'T hide them on
+			// break (else the void behind reappears). Drop them from the hide
+			// set so the box's brick shell stays and seals the corner.
+			if (!bricked.empty())
+				g_greetsScreenBoxFaces.erase(
+					std::remove_if(g_greetsScreenBoxFaces.begin(), g_greetsScreenBoxFaces.end(),
+					               [&](Face *f){ return bricked.count(f) != 0; }),
+					g_greetsScreenBoxFaces.end());
+			if (nEdge) { Scene_RebuildMatTable(GreetSc);
+				std::fprintf(stderr, "[GREETS-EDGEBRICK] %d screen-box glass side faces -> brick (kept on break)\n", nEdge); }
+		}
 		// One-shot per-material census over a GENEROUS region around the
 		// screen (0.6x footprint margin, 1.5x depth slab), tallying total
 		// vs collected per material so we can see what survives the break
@@ -938,6 +980,7 @@ static void BuildGreetsShatter()
 			ctr.x + N.x*dist, ctr.y + N.y*dist, ctr.z + N.z*dist,
 			-N.x, -N.y, -N.z, ctr.x, ctr.y, ctr.z);
 	}
+
 }
 
 void Initialize_Greets()
@@ -2665,6 +2708,50 @@ struct GreetsScene : SceneDriver {
 						"[MAT@(%d,%d)] id=%u %s", cx, cy, (unsigned)matID, name);
 				}
 				OutTextXY(VPage, 0, YRes - 30, MSGStr, 255);
+				// FDS_GREETS_FACEFIND="x,y": find the ACTUAL faces covering a
+				// pixel by point-in-triangle over every transformed visible
+				// face (their screen PX/PY are set even for forward/xpar faces
+				// that only stamp the gbuffer sentinel). Reports the front-most
+				// few so the black strip's real face/mesh/material is found.
+				if (const char *ff = std::getenv("FDS_GREETS_FACEFIND")) {
+					int qx = XRes/2, qy = YRes/2; std::sscanf(ff, "%d,%d", &qx, &qy);
+					struct Hit { Face *f; TriMesh *T; float rz; };
+					std::vector<Hit> hits;
+					for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+						if (!(T->Flags & HTrack_Visible)) continue;
+						for (DWord fi = 0; fi < T->FIndex; ++fi) {
+							Face &F = T->Faces[fi];
+							if (!F.A || !F.B || !F.C) continue;
+							const float ax=F.A->PX, ay=F.A->PY, bx=F.B->PX, by=F.B->PY, cxx=F.C->PX, cyy=F.C->PY;
+							const float d1=(qx-bx)*(ay-by)-(ax-bx)*(qy-by);
+							const float d2=(qx-cxx)*(by-cyy)-(bx-cxx)*(qy-cyy);
+							const float d3=(qx-ax)*(cyy-ay)-(cxx-ax)*(qy-ay);
+							const bool neg=(d1<0)||(d2<0)||(d3<0), pos=(d1>0)||(d2>0)||(d3>0);
+							if (neg && pos) continue;  // pixel outside triangle
+							hits.push_back({ &F, T, (F.A->RZ+F.B->RZ+F.C->RZ)/3.0f });
+						}
+					}
+					std::sort(hits.begin(), hits.end(), [](const Hit&a, const Hit&b){ return a.rz > b.rz; });
+					{ const uint32_t m32 = g_gbuffer->txtr[size_t(qy)*size_t(XRes)+size_t(qx)];
+					  const word z = ((const word*)MainSurf->Z16)[size_t(qy)*size_t(XRes)+size_t(qx)];
+					  const MatTable mt = Scene_GetMatTable(GreetSc); const uint32_t id=(m32>>20)&0xFF;
+					  std::fprintf(stderr,"[FACEFIND @%d,%d] gbuffer mat32=0x%x %s zEnc=%u\n", qx,qy, m32,
+					    m32==0xFFFFFFFFu?"FORWARD/empty":((id<mt.count&&mt.data&&mt.data[id]&&mt.data[id]->Name)?mt.data[id]->Name:"?"), z); }
+					std::fprintf(stderr, "[FACEFIND @%d,%d] %zu faces cover this pixel:\n", qx, qy, hits.size());
+					for (size_t i = 0; i < hits.size() && i < 6; ++i) {
+						Face *F = hits[i].f; TriMesh *T = hits[i].T;
+						auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T->RotMat,&lp,&w); w+=T->IPos; return w; };
+						const Vector a=wp(F->A);
+						std::fprintf(stderr, "  #%zu mat='%s' refl=%d xpar=%d maskTag=%u Flags=0x%x rz=%.4f N=(%.2f,%.2f,%.2f) worldA=(%.1f,%.1f,%.1f)\n"
+						             "       scr A(%.0f,%.0f rz%.3f) B(%.0f,%.0f rz%.3f) C(%.0f,%.0f rz%.3f) mesh=%p\n",
+							i, (F->Txtr&&F->Txtr->Name)?F->Txtr->Name:"?",
+							(F->Flags&Face_Reflective)!=0, (F->Txtr&&(F->Txtr->Flags&Mat_Transparent))?1:0,
+							(unsigned)F->mirrorMaskTag, (unsigned)F->Flags,
+							hits[i].rz, F->N.x,F->N.y,F->N.z, a.x,a.y,a.z,
+							F->A->PX,F->A->PY,F->A->RZ, F->B->PX,F->B->PY,F->B->RZ, F->C->PX,F->C->PY,F->C->RZ, (void*)T);
+					}
+					std::fflush(stderr);
+				}
 			}
 			// Crosshair so user can see what pixel the readout reflects.
 			dword *fb = (dword*)VPage;
