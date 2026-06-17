@@ -701,22 +701,27 @@ xpar_done: ;
 			Render_OmniHalos(dctx);
 		}
 
-		// HDR (Phase 2.2/2.3): tonemap now that cones + halos have accumulated
-		// into g_hdrBuf, so god-ray shafts + omni halos bloom and roll off
-		// instead of clipping. SKIPPED when g_hdrDeferTonemap — the scene
-		// tonemaps later itself (the fountain tonemaps after its bolt, so the
-		// bolt accumulates into g_hdrBuf and blooms too). No-op unless
-		// g_hdrActive (main frame, froxel populated the buffer).
-		if (fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
-
-		// Screen-space rain LAST among the view-aligned passes (streaks
+		// Screen-space rain LAST among the view-aligned scene passes (streaks
 		// overlay fog, beams and halos — near rain is in front of all of
 		// them) and never in the reflection pass (skipVolumetric): a
 		// screen-space effect re-run from the mirror camera would rain
-		// upward in the water. Lens droplets are on the "camera glass" —
-		// in front of even the rain.
+		// upward in the water. Rain is scene radiance → in HDR it accumulates
+		// into g_hdrBuf (gated g_hdrActive) and is captured by the tonemap.
 		Render_ScreenSpaceRain();
-		Render_LensDrops();
+
+		// HDR (Phase 2.x): tonemap now that ALL scene-radiance overlays (cones,
+		// halos, rain) have accumulated into g_hdrBuf. SKIPPED when
+		// g_hdrDeferTonemap — the scene tonemaps later itself (the fountain
+		// tonemaps after its bolt, so the bolt blooms too). No-op unless
+		// g_hdrActive (main frame, froxel populated the buffer).
+		if (fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
+
+		// Lens droplets are on the "camera glass" — a post effect that refracts
+		// the FINAL displayed image, so they run AFTER the tonemap (LDR, like
+		// UI). The deferred fountain tonemaps in its tick, so it runs lens
+		// drops there instead; skip here when the tonemap is deferred.
+		if (!(fds::FeatureFlags::hdr() && fds::g_hdrDeferTonemap))
+			Render_LensDrops();
 	}
 	VolProf_Tick();
 

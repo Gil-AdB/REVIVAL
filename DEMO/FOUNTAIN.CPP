@@ -18,6 +18,11 @@
 #include <cstdio>
 #include <vector>
 
+// Defined in FDS/RENDER/DeferredFastFog.cpp (global scope). The deferred
+// fountain tonemaps in its tick, so it runs the post-tonemap lens-drop pass
+// itself (renderFrame skips it when the tonemap is deferred).
+void Render_LensDrops();
+
 namespace {
 void dbg_write_ppm(const char* path, const byte* bgra, int xres, int yres, int bpsl) {
     std::FILE* f = std::fopen(path, "wb");
@@ -2788,8 +2793,13 @@ struct FountainScene : SceneDriver {
 		// into g_hdrBuf — tonemap ONCE, here, so the bolt blooms + rolls off
 		// with the flash instead of clipping. Must run BEFORE the debug labels /
 		// profiler overlay below (those are LDR UI drawn on top of the final
-		// image). No-op unless g_hdrActive (froxel populated the buffer).
-		if (fds::FeatureFlags::hdr() && fds::g_hdrActive) fds::Render_TonemapToVPage();
+		// image). No-op unless g_hdrActive (froxel populated the buffer). Lens
+		// drops refract the FINAL image, so they run AFTER the tonemap here
+		// (renderFrame skipped them because the tonemap was deferred).
+		if (fds::FeatureFlags::hdr() && fds::g_hdrActive) {
+			fds::Render_TonemapToVPage();
+			Render_LensDrops();
+		}
 		fds::g_hdrDeferTonemap = false;
 
 		// Debug labels at each stream-head omni's screen position.

@@ -2256,12 +2256,22 @@ void Render_ScreenSpaceRain() {
 									if (aBase <= 0.003f) break;
 								}
 								const float a = aBase * lat * (1.0f/1.5f);
-								const dword pix = out[i];
 								const float keep = 1.0f - a;
-								int nR = int(float((pix>>16)&0xFFu)*keep + rainR*a);
-								int nG = int(float((pix>> 8)&0xFFu)*keep + rainG*a);
-								int nB = int(float( pix     &0xFFu)*keep + rainB*a);
-								out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+								// HDR overlay reorg: rain is scene radiance — in HDR
+								// alpha-blend in float into g_hdrBuf (captured by the
+								// tonemap below/in the tick); else the 8-bit blend.
+								if (fds::g_hdrActive) {
+									float* h = fds::g_hdrBuf.data() + i*4;
+									h[2] = h[2]*keep + rainR*a;   // R
+									h[1] = h[1]*keep + rainG*a;   // G
+									h[0] = h[0]*keep + rainB*a;   // B
+								} else {
+									const dword pix = out[i];
+									int nR = int(float((pix>>16)&0xFFu)*keep + rainR*a);
+									int nG = int(float((pix>> 8)&0xFFu)*keep + rainG*a);
+									int nB = int(float( pix     &0xFFu)*keep + rainB*a);
+									out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
+								}
 							}
 						}
 					}
