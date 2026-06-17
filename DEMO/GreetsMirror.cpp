@@ -940,6 +940,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         Vector   wN;  // unit world normal
         float    d;   // plane offset: wN·P + d = 0
         float    area; // world-space triangle area
+        Vector   ctr;  // world-space face centroid (for spatial clustering)
     };
     std::vector<WallSample> samples;
     walkWallFacesIf(sc, textureNameSelector(textureFileName),
@@ -961,8 +962,9 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         const float cyv = e1.z*e2.x - e1.x*e2.z;
         const float czv = e1.x*e2.y - e1.y*e2.x;
         const float area = 0.5f * std::sqrt(cxv*cxv + cyv*cyv + czv*czv);
+        const Vector ctr{ (wA.x+wB.x+wC.x)/3.0f, (wA.y+wB.y+wC.y)/3.0f, (wA.z+wB.z+wC.z)/3.0f };
         samples.push_back({&F, T, u,
-                           -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area});
+                           -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area, ctr});
     });
     if (samples.empty()) {
         std::fprintf(stderr, "[MIRROR-CLUSTER '%s'] no faces found\n",
@@ -971,11 +973,21 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     }
 
     // Greedy seed clustering: same plane = normals within ~18° AND
-    // offsets within half a world unit. Tighter than the 30° the
-    // single-plane finder uses for outlier rejection — here disagreeing
-    // faces become their own mirror instead of being dropped.
-    constexpr float kNormalDot    = 0.95f;
-    constexpr float kPlaneDistEps = 0.5f;
+    // offsets within half a world unit, AND spatially near the seed.
+    // The proximity term is essential: coplanarity ALONE merges faces
+    // from DIFFERENT fixtures that happen to share a plane (e.g. a
+    // screen box's thin +z side cap and a separate screen across the
+    // room, both facing +z at the same z). Merged, the cluster looks
+    // like neither a clean panel nor a clean strip, so the per-cluster
+    // display tests below misjudge it (the cap's mask carved the wall =
+    // the black strip; rejecting the merged cluster killed the real
+    // screen with it). A single fixture's faces sit within a few units;
+    // separate fixtures are far. kFixtureRadius is generous enough to
+    // hold one panel together (its tris' centroids are ≈diagonal/3
+    // apart) yet far below inter-fixture spacing.
+    constexpr float kNormalDot     = 0.95f;
+    constexpr float kPlaneDistEps  = 0.5f;
+    constexpr float kFixtureRadius = 12.0f;
     std::vector<int> clusterOf(samples.size(), -1);
     int numClusters = 0;
     for (size_t i = 0; i < samples.size(); ++i) {
@@ -989,6 +1001,10 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                             + samples[i].wN.z*samples[j].wN.z;
             if (dot < kNormalDot) continue;
             if (std::fabs(samples[i].d - samples[j].d) > kPlaneDistEps) continue;
+            const float ddx = samples[i].ctr.x - samples[j].ctr.x;
+            const float ddy = samples[i].ctr.y - samples[j].ctr.y;
+            const float ddz = samples[i].ctr.z - samples[j].ctr.z;
+            if (ddx*ddx + ddy*ddy + ddz*ddz > kFixtureRadius*kFixtureRadius) continue;
             clusterOf[j] = c;
         }
     }
@@ -1116,18 +1132,19 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         // or rtt). 'edge'/'occluded' start with neither 'r' nor 'b', so
         // both the RTT path (verdict[0]=='r') and the clone path
         // (verdict[0]!='b' → continue) skip them.
-        const float fillRatio = (exU > 1e-3f && exV > 1e-3f)
-            ? clusterArea / (exU * exV) : 1.0f;
+        // With spatial clustering each cluster is one fixture, so the
+        // tests are clean: an isolated thin side cap reads as a high
+        // aspect strip; a back reads as facing a wall. (No fill-ratio
+        // test — that only mattered when caps merged with real panels.)
         if (verdict[0] == 'b' || verdict[0] == 'r') {
             if (aspect > kMaxDisplayAspect)      verdict = "edge";      // thin box-side cap
-            else if (fillRatio < 0.30f)          verdict = "sparse";    // scattered caps merged across the plane, not a solid panel
             else if (facesWall)                  verdict = "occluded";  // back, mounted on wall
         }
         std::fprintf(stderr,
             "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
-            "area=%6.2f ext=%.2fx%.2f aspect=%.1f fill=%.2f facesWall=%d -> %s\n",
+            "area=%6.2f ext=%.2fx%.2f aspect=%.1f facesWall=%d -> %s\n",
             c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea,
-            exU, exV, aspect, fillRatio, (int)facesWall, verdict);
+            exU, exV, aspect, (int)facesWall, verdict);
         if (verdict[0] == 'r') {
             // ── First-order RTT slot ────────────────────────────────
             // Plane fit: average member normals/offsets.
