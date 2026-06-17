@@ -11,8 +11,10 @@
 namespace fds {
 
 std::vector<float> g_hdrBuf;
+bool g_hdrActive = false;
 
 void Hdr_BeginFrame() {
+    g_hdrActive = false;
     const size_t n = size_t(XRes) * size_t(YRes) * 4;
     if (g_hdrBuf.size() != n) g_hdrBuf.assign(n, 0.0f);
     else std::fill(g_hdrBuf.begin(), g_hdrBuf.end(), 0.0f);
@@ -21,8 +23,10 @@ void Hdr_BeginFrame() {
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);
-    // No-op until something has populated the buffer (Phase 0 / hdr() off path).
-    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage) return;
+    // No-op until something has populated the buffer this frame: unsized, or the
+    // froxel composite never ran (fog off / non-froxel path) — otherwise we'd
+    // tonemap a cleared buffer to black (greets with fog off did exactly this).
+    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage || !g_hdrActive) return;
 
     const float exposure = FeatureFlags::hdr_exposure();
     const float knee     = std::clamp(FeatureFlags::hdr_white(), 0.05f, 0.95f); // identity below

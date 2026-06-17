@@ -1983,6 +1983,11 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
 		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		// This is the only path that populates g_hdrBuf; mark it so the tonemap
+		// runs (and doesn't blacken scenes/frames where the froxel composite
+		// never ran — e.g. greets with fog off, which would otherwise tonemap a
+		// cleared buffer to black).
+		if (P.hdr) fds::g_hdrActive = true;
 		gFrReflZ = nullptr;            // consume-once (see FastFog_SetReflectionZ)
 		gFrFrameActive = fds::FeatureFlags::fast_fog_xpar();   // peel fogs from this grid
 		// This frame becomes next frame's history.

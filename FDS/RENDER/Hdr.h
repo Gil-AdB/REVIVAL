@@ -14,6 +14,12 @@ namespace fds {
 // when hdr() is on; Render_TonemapToVPage maps it to VPage.
 extern std::vector<float> g_hdrBuf;
 
+// Set true by the froxel composite (the only writer of g_hdrBuf) when it runs in
+// HDR mode; reset by Hdr_BeginFrame. The tonemap no-ops when false, so frames
+// that never populated the buffer (fog off, non-froxel paths) render normally
+// instead of tonemapping a cleared buffer to black.
+extern bool g_hdrActive;
+
 // Size g_hdrBuf to the current XRes*YRes and clear it. Call once per frame,
 // before any HDR write (Phase 1 wires this ahead of the deferred passes).
 void Hdr_BeginFrame();
