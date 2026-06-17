@@ -84,10 +84,18 @@ static std::vector<Face*> g_greetsScreenBoxFaces;
 static Texture *makeFlatTexture(byte r, byte g, byte b) {
 	Texture *T = new Texture();
 	std::memset(T, 0, sizeof(Texture));
-	T->BPP = 32; T->SizeX = 1; T->SizeY = 1; T->LSizeX = 0; T->LSizeY = 0;
-	T->Data = (byte*)_aligned_malloc(4, 16);
-	((dword*)T->Data)[0] = (dword(b) << 0) | (dword(g) << 8)
-	                     | (dword(r) << 16) | (dword(0xFFu) << 24);
+	// MUST be at least one full 4x4 tile: Txtr_Tiled stores texels in 4x4
+	// blocks, so a 1x1 tiled texture is malformed — the deferred kernel's
+	// swizzled-UV sample reads outside the 4-byte alloc and returns BLACK
+	// (this lit the teleporter portal's silver black → it darkened the
+	// reflection instead of tinting it). 8x8 = 2x2 blocks; every texel is
+	// the flat colour so the tiled layout is irrelevant.
+	const int S = 8;
+	T->BPP = 32; T->SizeX = S; T->SizeY = S; T->LSizeX = 3; T->LSizeY = 3;
+	T->Data = (byte*)_aligned_malloc(size_t(S) * S * 4, 16);
+	const dword px = (dword(b) << 0) | (dword(g) << 8)
+	               | (dword(r) << 16) | (dword(0xFFu) << 24);
+	for (int i = 0; i < S * S; ++i) ((dword*)T->Data)[i] = px;
 	T->Mipmap[0] = T->Data; T->numMipmaps = 1;
 	T->Flags = Txtr_Nomip | Txtr_Tiled;
 	return T;
@@ -106,20 +114,26 @@ static Texture *makeFlatTexture(byte r, byte g, byte b) {
 static void GreetsApplyLiveTints()
 {
 	static Texture *sPortalSilver = nullptr;
-	if (!sPortalSilver) sPortalSilver = makeFlatTexture(150, 170, 215);  // cool silver
-	const float pt = fds::FeatureFlags::greets_portal_tint();
+	if (!sPortalSilver) sPortalSilver = std::getenv("FDS_TINT_RED")
+		? makeFlatTexture(255, 0, 0)         // verify: unmistakable bright red
+		: makeFlatTexture(150, 170, 215);    // cool silver
+	const float pt = fds::FeatureFlags::greets_mirror_tint();
 	for (fds::Mirror &m : g_greetsMirrors) {
 		if (m.wallMaterialName.find("teleporter") == std::string::npos) continue;
 		if (!m.wallMatClone) continue;
-		if (pt <= 0.0001f) {
-			m.wallMatClone->XparBlendAlpha = -1.0f;   // sentinel: clear portal
-		} else {
-			// litRGB = white*silverTexture = silver; composite silver*a +
-			// reflection*(1-a). pt maps to a fairly strong alpha so the tint
-			// is actually visible on the small teleporter footprint.
-			m.wallMatClone->Txtr           = sPortalSilver;          // tint via texture
-			m.wallMatClone->XparBlendAlpha = (pt < 1.0f ? pt : 1.0f) * 0.7f;
-		}
+		// EXACT same composite as the half-silvered screens (#2) and the
+		// shards: out = litRGB + dst/2, where dst is the (warm) reflection and
+		// litRGB = silver*tint is an OPTIONAL cool cast. XparBlendAlpha=0
+		// selects the kernel's `litRGB + dst/2` path; Lum=pt scales the silver
+		// (litRGB = Lum*255 × silverTex = silver*pt). pt=0 → litRGB=0 → out =
+		// dst/2: a dimmed warm reflection, identical to #2 with no cast and to
+		// the shard glaze at sv=0. Raise pt for a cool silver cast on all three.
+		// (Two real bugs had to be fixed for any silver to show: the texture was
+		// a malformed 1x1 Txtr_Tiled — now 8x8 — and the inherited Lum=0.)
+		m.wallMatClone->Txtr           = sPortalSilver;
+		m.wallMatClone->Luminosity     = pt;
+		m.wallMatClone->Diffuse        = 0.0f;
+		m.wallMatClone->XparBlendAlpha = 0.0f;
 	}
 }
 
@@ -926,6 +940,12 @@ static void BuildGreetsShatter()
 	const int gy = clampi(int((v1-v0)*1.2f), 5, 40);
 	g_greetsShatter.build(GreetSc, corners, N, shardMat, gx, gy, ymin);
 	g_greetsShatterMirror = best;
+	// Pre-bake the shard reflection atlas NOW (at load) rather than on the
+	// break frame: the offscreen surface + atlas texture + per-shard material
+	// swap + Scene_RebuildMatTable + deferred G-buffers were a ~40ms one-frame
+	// hitch right when the screen shatters. trigger() only flips the per-frame
+	// bake on (armReflectionCameras) + stamps the text fragments.
+	g_greetsShatter.prepareReflectionAtlas(GreetSc, 64);
 	std::fprintf(stderr,
 		"[GREETS-SHATTER] target mirror %d area=%.1f grid=%dx%d floorY=%.1f "
 		"N=(%.2f,%.2f,%.2f)\n", best, bestArea, gx, gy, ymin, N.x, N.y, N.z);
@@ -1849,6 +1869,11 @@ struct GreetsScene : SceneDriver {
 			if (fov < 1.0f && GreetSc->CameraHead->FOV.NumKeys > 0)
 				fov = GreetSc->CameraHead->FOV.Keys[0].Pos.x;
 			if (fov < 1.0f) fov = 75.0f;
+			// Start from a FULL copy of the scripted camera so FC carries
+			// every field the mirror reflection RTT reads (NZP/FZP, etc.) —
+			// otherwise the teleporter clone reflection rendered black in
+			// snapshots even though it's fine under the live scripted camera.
+			if (GreetSc->CameraHead) FC = *GreetSc->CameraHead;
 			if (posed) {
 				FC.ISource = { px, py, pz };
 				Vector look = { px + fx, py + fy, pz + fz };
@@ -2313,9 +2338,12 @@ struct GreetsScene : SceneDriver {
 				// it can't fix the hue — the real fix is a deferred (shadowed)
 				// bake, pending the render-state declobbering. Full gain for now.
 				g_greetsShatter.setReflectionGain(1.0f);
-				g_greetsShatter.enableReflectionCameras(GreetSc, 64,
-				                                        haveText ? ptext : nullptr,
-				                                        haveText ? A : nullptr);
+				// Atlas was pre-baked at load (prepareReflectionAtlas); the
+				// break only stamps the per-shard text fragments + arms the
+				// per-frame bake — no allocation hitch here.
+				g_greetsShatter.setShardText(haveText ? ptext : nullptr,
+				                             haveText ? A : nullptr);
+				g_greetsShatter.armReflectionCameras();
 				m.broken = true;   // UpdateAllMirrors closes the reflection
 				// Hide the panel surface itself (reflection + half-silvered
 				// text) AND the screen box's side/back faces — the shards

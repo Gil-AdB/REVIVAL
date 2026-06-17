@@ -92,19 +92,25 @@ namespace {
 // bug). sv from --greets-shard-silver; 0 = untouched mirror, 1 = full
 // cool-silver glass. Re-baked every frame, so the console drives it live.
 inline void ApplyShardSilverGlaze(uint32_t* px, int count, float sv) {
-	if (sv <= 0.001f) return;
+	if (sv < 0.0f) sv = 0.0f;
 	if (sv > 1.0f) sv = 1.0f;
-	const int q = int(sv * 256.0f);          // lerp weight toward silver
+	// The half-silvered look (#2) is a DIMMED WARM reflection, NOT an added
+	// silver colour. So ALWAYS halve the reflection (out = ... + dst/2), and
+	// only ADD silver*sv on top — sv=0 leaves the warm reflection at half
+	// brightness (matches #2's `litRGB + dst/2` with no extra cast); raise sv
+	// for an optional cool cast. (Earlier the silver was added at full strength
+	// and the reflection wasn't halved, so the shards read bright/cool/white
+	// while #2 reads dim/warm.) FDS_TINT_RED swaps the silver for red to verify.
+	static const bool kRed = std::getenv("FDS_TINT_RED") != nullptr;
+	const int sr = int(float(kRed ? 255 : 150) * sv);   // optional cast = silver * sv
+	const int sg = int(float(kRed ?   0 : 170) * sv);
+	const int sb = int(float(kRed ?   0 : 215) * sv);
 	for (int i = 0; i < count; ++i) {
 		const uint32_t c = px[i];
 		int b = int(c & 0xFF), g = int((c >> 8) & 0xFF), r = int((c >> 16) & 0xFF);
-		const int lum = (r * 77 + g * 150 + b * 29) >> 8;   // rec601-ish luma
-		const int tr = (lum * 150) >> 8;        // cool silver: r 0.59
-		const int tg = (lum * 170) >> 8;        //              g 0.66
-		const int tb = (lum * 205) >> 8;        //              b 0.80 (cooler)
-		b = (b * (256 - q) + tb * q) >> 8;
-		g = (g * (256 - q) + tg * q) >> 8;
-		r = (r * (256 - q) + tr * q) >> 8;
+		r = sr + (r >> 1); if (r > 255) r = 255;    // silver*sv + reflection/2
+		g = sg + (g >> 1); if (g > 255) g = 255;
+		b = sb + (b >> 1); if (b > 255) b = 255;
 		px[i] = uint32_t(b) | (uint32_t(g) << 8) | (uint32_t(r) << 16) | 0xFF000000u;
 	}
 }
@@ -519,22 +525,35 @@ MirrorShatter::~MirrorShatter() = default;
 
 void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
                                             Texture* textTex, const float textWorldAffine[8]) {
-	if (!sc || !built_ || shards_.empty()) return;
-	texRes_  = texRes > 0 ? texRes : 64;
+	// Back-compat: the original one-shot entry. The greets path now calls the
+	// three pieces separately (prepare at load, text+arm at the break).
+	prepareReflectionAtlas(sc, texRes);
+	setShardText(textTex, textWorldAffine);
+	armReflectionCameras();
+}
+
+void MirrorShatter::setShardText(Texture* textTex, const float textWorldAffine[8]) {
+	if (!built_ || shards_.empty()) return;
 	textTex_ = textTex;
 	hasText_ = (textTex && textWorldAffine);
-	if (hasText_) {
-		// Each shard's fixed text fragment: its original (rest-pose) corners
-		// mapped through the screen's world→text-UV affine. RotMat is identity
-		// at trigger, so the original world corner is local[i] + centroid.
-		const float* A = textWorldAffine;
-		for (Shard& s : shards_)
-			for (int i = 0; i < 4 && i < int(s.local.size()); ++i) {
-				const Vector w = vadd(s.local[i], s.pos);
-				s.textUV[i][0] = A[0]*w.x + A[1]*w.y + A[2]*w.z + A[3];
-				s.textUV[i][1] = A[4]*w.x + A[5]*w.y + A[6]*w.z + A[7];
-			}
-	}
+	if (!hasText_) return;
+	// Each shard's fixed text fragment: its original (rest-pose) corners
+	// mapped through the screen's world→text-UV affine. RotMat is identity
+	// (rest pose), so the original world corner is local[i] + centroid.
+	const float* A = textWorldAffine;
+	for (Shard& s : shards_)
+		for (int i = 0; i < 4 && i < int(s.local.size()); ++i) {
+			const Vector w = vadd(s.local[i], s.pos);
+			s.textUV[i][0] = A[0]*w.x + A[1]*w.y + A[2]*w.z + A[3];
+			s.textUV[i][1] = A[4]*w.x + A[5]*w.y + A[6]*w.z + A[7];
+		}
+}
+
+void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
+	if (!sc || !built_ || shards_.empty()) return;
+	if (reflPrepared_) return;   // idempotent — allocate once (at load)
+	reflPrepared_ = true;
+	texRes_  = texRes > 0 ? texRes : 64;
 
 	// Shared offscreen render target (one 64² surf, reused per shard).
 	reflSurf_ = new VESA_Surface();
@@ -567,6 +586,9 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 	// 0 keep omnis out) — the same recipe the mirror-RTT slots use.
 	atlasMat_ = getAlignedType<Material>(16);
 	atlasMat_->Txtr = atlasTex_;
+	// Displayed as-is (Lum=1): the half-silvered composite (silver + dst/2)
+	// is baked into the atlas pixels by ApplyShardSilverGlaze, so the dimming
+	// lives there, not here.
 	atlasMat_->Diffuse = 0.0f; atlasMat_->Specular = 0.0f; atlasMat_->Luminosity = 1.0f;
 	atlasMat_->BaseCol = Color{255.0f, 255.0f, 255.0f, 255.0f};
 	atlasMat_->RelScene = sc;
@@ -611,7 +633,11 @@ void MirrorShatter::enableReflectionCameras(Scene* sc, int texRes,
 		reflXparZ_.assign(np, 0);
 		reflXparZBack_.assign(np, 0);
 	}
-	reflCamsOn_ = true;
+	// Warm the parallel-bake worker pool + per-worker scratch now (the cold
+	// allocation was most of the break-frame bake hitch).
+	ensureReflWorkers();
+	// NOTE: arming (reflCamsOn_) is deliberately NOT done here — that's
+	// armReflectionCameras(), called at the break. Prepare only allocates.
 }
 
 void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
@@ -773,7 +799,7 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 
 			// Silver half-silvered glaze (#3) — desaturate toward cool silver.
 			ApplyShardSilverGlaze((uint32_t*)reflSurf_->Data, texRes_ * texRes_,
-			                      fds::FeatureFlags::greets_shard_silver());
+			                      fds::FeatureFlags::greets_mirror_tint());
 
 			// Composite the shard's fixed text fragment over its reflection,
 			// half-silvered: out = text + reflection*gain (text rides on top).
@@ -845,29 +871,9 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 // projection lives in the worker's CameraContext; the cull cone is thread_local;
 // the atlas cells are disjoint). The opt-in deferred bake and the
 // FDS_SHARD_REFL_SERIAL escape hatch keep the original serial path.
-void MirrorShatter::renderReflectionCameras(Scene* sc) {
-	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
-
-	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
-	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
-	// fan across the pool — forward by default, or per-worker DEFERRED when
-	// deferredBake_ (shadowed, hue-correct; each worker owns its G-buffer).
-	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
-	if (forceSerial) { renderReflectionCamerasSerial(sc); return; }
-
-	const Camera* mainCam = View ? View : sc->CameraHead;
-	if (!mainCam) return;
-	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
-	const auto t0 = std::chrono::steady_clock::now();
-	const Vector E = mainCam->ISource;
-	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
-	const int N  = int(shards_.size());
-	if (N <= 0) return;
-
-	// Hide every shard for the whole pass — a shard never reflects the other
-	// falling fragments (no recursive glass); each reflects the room only.
-	for (Shard& s : shards_) s.mesh->Flags &= ~HTrack_Visible;
-
+void MirrorShatter::ensureReflWorkers() {
+	if (shards_.empty()) return;
+	const int N = int(shards_.size());
 	// Size the worker pool to the thread count (one whole render per thread —
 	// inter-render parallelism; tiling a 64² target is pure dispatch overhead).
 	if (!reflPool_) reflPool_ = std::make_unique<ReflPool>();
@@ -906,6 +912,37 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 			w.gbInit = true;
 		}
 	}
+}
+
+void MirrorShatter::renderReflectionCameras(Scene* sc) {
+	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
+
+	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
+	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
+	// fan across the pool — forward by default, or per-worker DEFERRED when
+	// deferredBake_ (shadowed, hue-correct; each worker owns its G-buffer).
+	static const bool forceSerial = std::getenv("FDS_SHARD_REFL_SERIAL") != nullptr;
+	if (forceSerial) { renderReflectionCamerasSerial(sc); return; }
+
+	const Camera* mainCam = View ? View : sc->CameraHead;
+	if (!mainCam) return;
+	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
+	const auto t0 = std::chrono::steady_clock::now();
+	const Vector E = mainCam->ISource;
+	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
+	const int N  = int(shards_.size());
+	if (N <= 0) return;
+
+	// Hide every shard for the whole pass — a shard never reflects the other
+	// falling fragments (no recursive glass); each reflects the room only.
+	for (Shard& s : shards_) s.mesh->Flags &= ~HTrack_Visible;
+
+	// Worker pool + per-worker scratch. Warmed at init (prepareReflectionAtlas
+	// → ensureReflWorkers) so the COLD allocation isn't paid on the first
+	// post-break bake; here it's a cheap no-op (only grows the face list if
+	// Polys grew since init).
+	ensureReflWorkers();
+	const size_t P = reflPool_->workers.size();
 
 	// Self-balancing fan-out: workers pull shard indices off a shared atomic
 	// cursor. The join uses a LOCAL semaphore, NOT renderns::tileDone — each
@@ -1129,7 +1166,7 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 
 	// Silver half-silvered glaze (#3) — desaturate toward cool silver.
 	ApplyShardSilverGlaze((uint32_t*)w.surf.Data, texRes_ * texRes_,
-	                      fds::FeatureFlags::greets_shard_silver());
+	                      fds::FeatureFlags::greets_mirror_tint());
 
 	// Half-silvered text composite (text + reflection*gain), same affine the
 	// serial path uses (world plane-coords → fixed per-corner text UVs).

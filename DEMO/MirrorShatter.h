@@ -65,6 +65,21 @@ public:
     void enableReflectionCameras(Scene* sc, int texRes = 64,
                                  Texture* textTex = nullptr,
                                  const float textWorldAffine[8] = nullptr);
+    // Split of enableReflectionCameras so the EXPENSIVE setup (offscreen
+    // surface + atlas texture + per-shard material swap + Scene_RebuildMatTable
+    // + deferred bake G-buffers) can run at INIT instead of on the break frame
+    // (it was a ~40ms one-frame hitch right when the screen shatters):
+    //   prepareReflectionAtlas() — allocations + material; call at load.
+    //   setShardText()           — per-shard text-UV fragments (cheap); trigger.
+    //   armReflectionCameras()   — flip the per-frame bake on; trigger.
+    // enableReflectionCameras() above just calls all three (back-compat).
+    void prepareReflectionAtlas(Scene* sc, int texRes = 64);
+    void setShardText(Texture* textTex, const float textWorldAffine[8]);
+    void armReflectionCameras() { reflCamsOn_ = true; }
+    // Allocate the parallel-bake worker pool + per-worker scratch. Idempotent.
+    // Called by prepareReflectionAtlas at INIT to warm it (the cold alloc was
+    // most of the break-frame bake hitch) and by the bake as a no-op.
+    void ensureReflWorkers();
     // Re-render every shard's reflection into its atlas cell. Forward path
     // (default) fans the shards across the thread pool — each worker owns its
     // surface / camera / face-list / vertex-scratch and renders WHOLE +
@@ -144,6 +159,7 @@ private:
     std::vector<Vector> floorTris_;
     float castFloorAt(float x, float z) const;
     Texture*            reflTex_ = nullptr;
+    bool                reflPrepared_ = false;   // prepareReflectionAtlas done
     // Per-shard live reflection cameras. All shards share ONE atlas texture
     // + material (a material per shard would blow the 8-bit deferred matID
     // budget); each shard owns one texRes² cell of the atlas.

@@ -1,8 +1,9 @@
 # Session changes — `feature/soa-vertex` (gbuffer worktree)
 
-Handoff notes for a branch that wants to **merge or cherry-pick this work**. Covers the
-last ~50 commits (`4a64c3c..af0b86d`). Grouped by theme, with the new public API surface,
-new flags, validation status, and merge-order dependencies.
+Handoff notes for a branch that wants to **merge or cherry-pick this work**. Covers
+`4a64c3c` onward (the de-globalization era through the greets-mirror tint + disco-shadow
+polish in §11–§12). Grouped by theme, with the new public API surface, new flags,
+validation status, and merge-order dependencies.
 
 > The headline deliverables are **inter-render parallelism for mirror reflections**
 > (per-worker offscreen renders fanned across the pool), an **optional deferred path**
@@ -166,13 +167,66 @@ slot + per-frame bake. Default drops them; only end-screen clones at ≥2.0 surv
 
 ---
 
+## 11. Greets shatter / mirror polish
+
+| commit | change |
+|---|---|
+| `209c7bc` `3d5e930` | **black strip = box side/back faces wrongly registered as mirrors** — fixed at root: a glass cluster becomes a mirror only if it's a real display surface (reject `aspect>6` thin caps + `facesWall` backs); cluster by plane **and** spatial proximity (`kFixtureRadius=12`) so a real screen coplanar with a box cap isn't merged + dropped. Supersedes the abandoned EDGEBRICK repaint (`a5d709a`/`da588b0`). |
+| `a9fcc95` | tunable shard **shape/size** (`greets_shard_randomness`), **fall speed** (`greets_shard_fall_speed`), **flat settle** on the surface beneath each shard (`greets_shard_lay_flat` + per-shard `castFloorAt` downward ray into static floor/stage tris). |
+| (this batch) | **unified half-silvered tint** + **shard-atlas pre-bake** (below). |
+
+### Unified mirror tint (`greets_mirror_tint`)
+
+Every greets mirror now composites with the SAME formula — the half-silvered display
+screens' (#2) `out = silver*tint + reflection/2`:
+- **Display screens (#2):** native — deferred transparent kernel `litRGB + dst/2` (`XparBlendAlpha=0`).
+- **Teleporter portal (#1):** same kernel path — `XparBlendAlpha=0` + `Lum=tint` (litRGB = silver*tint). Two real bugs fixed so any silver shows: the silver was a malformed **1×1 `Txtr_Tiled`** texture (→ 8×8) and the clone's inherited **`Lum=0`** lit it black.
+- **Shatter shards (#3):** the same formula on the baked atlas pixels (`ApplyShardSilverGlaze`: `silver*tint + atlas/2`).
+
+The half-silvered look is a **dimmed warm reflection, not an added silver colour** — so
+`greets_mirror_tint` defaults to **0** (= `reflection/2`, matching #2 with no cast); raise
+it for an optional cool-silver cast on #1 + #3. Replaces the old separate
+`greets_shard_silver` / `greets_portal_tint`. `FDS_TINT_RED=1` swaps silver→red to verify.
+
+> ⚠ The greets mirrors are **not faithfully renderable headless** (the teleporter
+> reflection comes out black under `FDS_GREETS_CAM`, and the deferred shard bake is far
+> darker than live) — tint changes **must** be verified in the live demo.
+
+### Shard-atlas pre-bake
+
+`MirrorShatter::enableReflectionCameras` split: the EXPENSIVE setup (offscreen surface +
+atlas texture + per-shard material swap + `Scene_RebuildMatTable` + deferred-bake
+G-buffers + worker pool) moves to `prepareReflectionAtlas()` at **init**; `setShardText()`
++ `armReflectionCameras()` (cheap) run on the break. Shrinks the ~40ms one-frame hitch at
+shatter (cold-bake residual remains). **Ordering:** `prepareReflectionAtlas` runs inside
+the `Initialize_Greets` mirror block — preserve it relative to the §8 lightmap-thread spawn.
+
+---
+
+## 12. Disco ball non-shadow-casting (`Tri_NoShadowCast`)
+
+New general `TrimeshFlags` bit `Tri_NoShadowCast` (`1<<15`, `FDS/Base/FDS_DEFS.H`): a mesh
+flagged with it lights normally but is **skipped in every shadow occluder pass** — gated in
+`Transform_Objects` on `g_inShadowPass` (covers the static cube bake, the dynamic per-frame
+bake, AND the moving-omni cube re-bake; the static lightmap samples those same maps, so it's
+covered transitively). `BuildDiscoBall` sets it on the ball (`DEMO/GreetsDisco.cpp`) so its
+faceted sphere stops throwing a hard blob shadow that read as a dark hole. Reusable by any
+mesh that should cast no shadow.
+
+---
+
 ## New flags introduced this session
 
 | flag (CLI) | env | default | scope |
 |---|---|---|---|
 | `--shard-deferred` | `FDS_SHARD_DEFERRED` | `0` | greets — shards bake via deferred kernel |
 | `--greets-mirror-rtt-min-area` | `FDS_GREETS_MIRROR_RTT_MIN_AREA` | `1.5` | greets — RTT-mirror area cutoff |
+| `--greets-mirror-tint` | `FDS_GREETS_MIRROR_TINT` | `0.0` | greets — optional cool-silver cast on all mirrors (`silver*tint + reflection/2`) |
+| `--greets-shard-randomness` | `FDS_GREETS_SHARD_RANDOMNESS` | `1.0` | greets — shard shape/size irregularity |
+| `--greets-shard-fall-speed` | `FDS_GREETS_SHARD_FALL_SPEED` | `1.5` | greets — shard gravity multiplier |
+| `--greets-shard-lay-flat` | `FDS_GREETS_SHARD_LAY_FLAT` | `1` | greets — settle shards flat on the surface beneath |
 | (diag) | `FDS_SHARD_ATLAS_DUMP` | off | dump de-tiled reflection atlas to PPM |
+| (diag) | `FDS_TINT_RED` | off | swap mirror silver → red to verify the tint lands |
 | (existing knob) | `FDS_SHARD_REFL_SERIAL` | off | force serial shard path |
 
 ---
@@ -210,8 +264,10 @@ The commits are layered; cherry-pick in dependency order:
 
 - Scope deferred RTT to the non-breakable screen mirrors only (§7).
 - Tighten whole-mirror visibility culling further.
-- Mirror **tint after break** (shards/screen lose the tint).
-- **Side/back faces of the screen box surviving the shatter** (task #27).
+- ~~Mirror tint after break~~ — **resolved** (§11 unified tint).
+- ~~Black strip from box side/back faces~~ — **resolved** at root (§11, `209c7bc`/`3d5e930`).
+  The faces still exist as plain glass geometry after the break (no longer mirrors, no longer
+  carving the wall); dropping the screen-box fixture mesh on shatter is a possible follow-up.
 - **Perf ground truth (instruction-level, greets t=700, full flags, 58.6ms RNDR / 93.6% of
   frame):** the **volumetric cone pass dominates** — `Render_VolumetricCones_Tile` ≈ 30.6k
   leaf samples, then per-pixel cube-shadow sampling (`CubeShadow_Sample`+`resolveCubeAtten`
