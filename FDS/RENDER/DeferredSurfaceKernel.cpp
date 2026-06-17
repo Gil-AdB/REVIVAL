@@ -352,7 +352,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// than lifting the already-clamped VPage. Gated on hdr(): when off, no write,
 	// LDR byte-identical; when on but the froxel composite doesn't run, g_hdrActive
 	// stays false and the tonemap no-ops, so the buffer is harmlessly ignored.
-	const bool hdrWrite = fds::FeatureFlags::hdr();
+	// Hdr_WritableFor: only the MAIN pass (g_hdrBuf sized for these dims) may
+	// write it — the order-2 mirror RTT calls this kernel directly with its own
+	// (smaller) dims and never ran Hdr_BeginFrame, so g_hdrBuf is unsized there
+	// (writing it = null deref / wrong-res index).
+	const bool hdrWrite = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);
 	// HDR Phase 3 B2: when --hdr_linear, do the lighting math in LINEAR space —
 	// square the (normalized) albedo and let light enter at power 1 (B1/gamma
 	// effectively squares the light too). Store the result re-encoded to gamma
@@ -1424,7 +1428,8 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	// useful for diagnosing whether observed lighting steps come from
 	// culling drift at tile seams.
 	const bool lightAll = fds::FeatureFlags::xpar_light_all();
-	const bool hdrLinear = fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
+	const bool hdrBufReady = fds::Hdr_WritableFor(ctx.xres, ctx.yres);  // main pass only (not the mirror RTT)
+	const bool hdrLinear = hdrBufReady && fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -1707,7 +1712,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// the bolt/flash/fog visible THROUGH transparents blooms and rolls
 			// off at the tonemap instead of clipping. Gated on g_hdrActive so
 			// the LDR path (flag off, fog-off scenes) is byte-identical.
-			if (fds::g_hdrActive) {
+			if (fds::g_hdrActive && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
 				float* h = fds::g_hdrBuf.data() + i * 4;
 				const float dB = h[0], dG = h[1], dR = h[2];
 				if (Mat->XparBlendAlpha > 0.0f) {
@@ -2442,7 +2447,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
-	const bool hdrWrite     = fds::FeatureFlags::hdr();   // HDR B1: see main kernel
+	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
 	const bool hdrLinear    = hdrWrite && fds::FeatureFlags::hdr_linear();  // HDR B2
 	// Normal-similarity threshold for the quarter fill predicate. matID
 	// equality alone is too loose — same hull material on a curved

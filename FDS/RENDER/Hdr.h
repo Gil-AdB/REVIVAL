@@ -20,6 +20,18 @@ extern std::vector<float> g_hdrBuf;
 // instead of tonemapping a cleared buffer to black.
 extern bool g_hdrActive;
 
+// Dimensions g_hdrBuf was last sized for by Hdr_BeginFrame (= the MAIN view).
+// g_hdrBuf parallels the main framebuffer; a pass that renders into a DIFFERENT
+// target — notably the order-2 mirror RTT, which calls Render_DeferredLighting
+// directly without going through renderFrame/Hdr_BeginFrame — must NOT write
+// g_hdrBuf: it's either unsized (null .data() → crash) or sized for the wrong
+// resolution. Every g_hdrBuf write gates on Hdr_WritableFor with the CURRENT
+// pass's dims (ctx.xres/ctx.yres); only the main pass matches.
+extern int g_hdrBufW, g_hdrBufH;
+inline bool Hdr_WritableFor(int xr, int yr) {
+    return !g_hdrBuf.empty() && xr == g_hdrBufW && yr == g_hdrBufH;
+}
+
 // Phase 2.3: when true, renderFrame SKIPS its own end-of-pipeline tonemap — the
 // scene tonemaps later itself (the fountain tick tonemaps AFTER the bolt so the
 // bolt accumulates into g_hdrBuf and blooms). The fountain sets this before

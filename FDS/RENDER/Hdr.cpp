@@ -14,9 +14,12 @@ namespace fds {
 std::vector<float> g_hdrBuf;
 bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
+int g_hdrBufW = 0, g_hdrBufH = 0;
 
 void Hdr_BeginFrame() {
     g_hdrActive = false;
+    g_hdrBufW = XRes;
+    g_hdrBufH = YRes;
     const size_t n = size_t(XRes) * size_t(YRes) * 4;
     if (g_hdrBuf.size() != n) g_hdrBuf.assign(n, 0.0f);
     else std::fill(g_hdrBuf.begin(), g_hdrBuf.end(), 0.0f);
