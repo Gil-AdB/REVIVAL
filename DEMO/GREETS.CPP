@@ -966,8 +966,79 @@ static void BuildGreetsShatter()
 
 }
 
+// Greets scene defaults — the tuned look/perf the scene ships with. Applied
+// via FeatureFlags::setDefault, so ANY explicit --flag / FDS_* on the CLI/env
+// still wins (setDefault only writes when the flag wasn't user-set).
+//
+// SCOPING: the demo inits ALL scenes (Initialize_City/.../Greets) before
+// running any, so a GLOBAL render flag (hdr, bloom, deferred_quarter, …) set
+// during Initialize_Greets would leak into every scene's render (e.g. break
+// the mirrortest gate, which runs Initialize_Greets then Run_MirrorTest).
+// So the defaults are split by WHERE they're read:
+//   - GreetsApplyInitDefaults  → Initialize_Greets: only flags the greets
+//     BUILD/BAKE reads (mirror clone, omni cube + lightmap bake, shard atlas).
+//     These are greets-specific; no other scene's render reads them.
+//   - GreetsApplyRunDefaults   → createGreetsScene: the global render +
+//     per-frame flags. createGreetsScene is greets-exclusive (Run_Greets AND
+//     the bench call it; --scene-mirrortest / other single scenes don't) and
+//     runs AFTER the shared init phase, so nothing leaks: greets is the last
+//     scene to run, and mirrortest never creates the greets scene.
+// True when a DIFFERENT single scene is the target. The demo inits every scene
+// before running any, so Initialize_Greets runs even for --scene-mirrortest /
+// --scene-conetest; applying greets's defaults there would leak into that
+// scene's render (and the byte gate). Greets still gets them via --scene-greets,
+// the greets bench, or the full sequence (where greets runs last).
+static bool GreetsScenePreempted()
+{
+	return fds::FeatureFlags::scene_mirrortest() ||
+	       fds::FeatureFlags::scene_conetest();
+}
+
+static void GreetsApplyInitDefaults()
+{
+	if (GreetsScenePreempted()) return;
+	using FF = fds::FeatureFlags;
+	FF::setDefault(FF::BoolId::greets_mirror,           true);
+	FF::setDefault(FF::BoolId::no_greets_spots,         true);
+	FF::setDefault(FF::BoolId::greets_omni_shadows,     true);
+	FF::setDefault(FF::IntId::greets_omni_shadow_res,   512);
+	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
+	FF::setDefault(FF::BoolId::shard_deferred,          true);
+	FF::setDefault(FF::IntId::greets_shard_res,         64);
+	// Lightmap bake (LightmapBake_Static, spawned here) reads these at init.
+	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
+	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
+	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
+	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
+}
+
+static void GreetsApplyRunDefaults()
+{
+	if (GreetsScenePreempted()) return;
+	using FF = fds::FeatureFlags;
+	// Shadow sampling / dynamic bake (greets tick + deferred kernel).
+	FF::setDefault(FF::BoolId::shadows,                 true);
+	FF::setDefault(FF::BoolId::shadow_dynamic,          true);
+	// HDR + bloom + cones (global render path).
+	FF::setDefault(FF::BoolId::hdr,                     true);
+	FF::setDefault(FF::BoolId::hdr_linear,              true);
+	FF::setDefault(FF::BoolId::deferred_quarter,        true);
+	FF::setDefault(FF::BoolId::bloom,                   true);
+	FF::setDefault(FF::FloatId::bloom_intensity,        2.0f);
+	FF::setDefault(FF::FloatId::hdr_refl_gain,          4.0f);
+	FF::setDefault(FF::FloatId::cone_strength,          2.0f);
+	FF::setDefault(FF::BoolId::cone_fine_tiles,         true);
+	FF::setDefault(FF::FloatId::disco_bloom,            0.0f);
+	// Mirror RTT (per-frame) + shatter feel.
+	FF::setDefault(FF::BoolId::mirror_rtt,              true);
+	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
+	FF::setDefault(FF::FloatId::greets_shard_fall_speed, 0.8f);
+	FF::setDefault(FF::FloatId::greets_shard_randomness, 0.8f);
+}
+
 void Initialize_Greets()
 {
+	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
 
 	gg = new GreetsGenerator;
@@ -2902,6 +2973,7 @@ struct GreetsScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createGreetsScene()
 {
+	GreetsApplyRunDefaults();   // global render/runtime flags — greets-exclusive entry
 	return std::make_unique<GreetsScene>();
 }
 
