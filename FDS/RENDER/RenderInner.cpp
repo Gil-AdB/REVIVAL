@@ -45,6 +45,11 @@
 #include <semaphore>
 #include <climits>
 
+// Shared view-space front/back classifier (defined in Transform.cpp). Reads
+// the SoA frame; the xpar batch loop in RENDER.CPP uses the same helper, so
+// the peel rasterizer below must too (see RenderInnerDeferredTransparent).
+bool IsFrontFacingInViewSpace(const Face* F);
+
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
@@ -354,24 +359,17 @@ void RenderInnerDeferredTransparent(float x1, float y1, float x2, float y2,
 		if (!(txtrFlags & Mat_Transparent)) continue;
 		if (F->Flags & Face_Reflective) continue;  // handled in main pass
 
-		// Per-face front/back test: compute the triangle's view-space face
-		// normal from its three vertex positions, then sign-test against any
-		// point on the face. Using A->TN (a per-vertex normal that the engine
-		// smooths across adjacent faces) splits coplanar triangles of the
-		// same quad into different code paths when the averaged vertex
-		// normals diverge slightly — caused the "panel renders as a frame"
-		// bug in xpartest case 3.
-		const float ex = B->TPos_AOS.x - A->TPos_AOS.x;
-		const float ey = B->TPos_AOS.y - A->TPos_AOS.y;
-		const float ez = B->TPos_AOS.z - A->TPos_AOS.z;
-		const float fx = C->TPos_AOS.x - A->TPos_AOS.x;
-		const float fy = C->TPos_AOS.y - A->TPos_AOS.y;
-		const float fz = C->TPos_AOS.z - A->TPos_AOS.z;
-		const float nx = ey * fz - ez * fy;
-		const float ny = ez * fx - ex * fz;
-		const float nz = ex * fy - ey * fx;
-		const float vd = nx * A->TPos_AOS.x + ny * A->TPos_AOS.y + nz * A->TPos_AOS.z;
-		const bool frontFacing = vd < 0.0f;
+		// Per-face front/back test: geometric view-space face normal sign,
+		// via the SHARED SoA helper. This MUST match the batch-side classifier
+		// in RENDER.CPP (which also calls IsFrontFacingInViewSpace) — otherwise
+		// the batch flushes one side (faceSel) while we classify the other, and
+		// every face is rejected. The old inline test read per-vertex AoS
+		// TPos_AOS, which is STALE for SoA-only meshes: the City water's
+		// tessellated grid (Phase 6.1) carries garbage AoS positions, so it
+		// disagreed with the batch, flushed BackOnly vs. front, and the water
+		// never rasterized (only the pass-1 reflection underlay showed; HDR fog
+		// then buried it). The helper reads F->frame SoA, same as the batch.
+		const bool frontFacing = IsFrontFacingInViewSpace(F);
 		if (frontFacing) {
 			if (faceSel == XparFaceSel::BackOnly) continue;
 			clipper.Render(F, MekaleleTransparent, false, rt, cam);
