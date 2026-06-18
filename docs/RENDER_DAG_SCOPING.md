@@ -1,5 +1,19 @@
 # Render DAG / barrier-tail reclaim — scoping
 
+> **CONCLUSION (phase-2 de-risk, 2026-06-19): DO NOT BUILD THIS.** Phase-1 instrumentation
+> measured the cone wave at **effPar ≈ 12–13 on a 12-core box = full pool utilization, idle
+> ≈ 0** — the render-frame parallel waves are *already balanced* (96 fine tiles + work-stealing
+> pool spread the hot disco center; no solo-tile tail). So overlapping cones ∥ lighting
+> reclaims only the inter-wave barrier gap — the same shape that made Stage A a net-negative
+> wash. The ~24–28% worker idle (`__psynch_cvwait`) is the **SERIAL fraction** (tick-thread
+> Animate/Transform/Radix_Sort/orchestration while the pool parks) + the shadow bake — Amdahl,
+> NOT reclaimable by fusing balanced render waves. The frame is near its parallel floor. The
+> design below is correct and elegant, but it would not pay. Remaining levers are either
+> serial-section parallelization (harder, different campaign) or algorithmic/rate cuts (visual
+> tradeoff). Kept for the record + the (good) `accumBuf`/commutative-additive design.
+
+
+
 Goal: reclaim the ~24–28% worker idle that is the **single biggest line in the greets
 profile** — `__psynch_cvwait` = 23287 samples, larger than any compute leaf (cones 18888,
 lighting 12513, cube tap 8970, clipper 6238). The idle is **barrier tails**: the engine
