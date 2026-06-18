@@ -170,9 +170,23 @@ private:
     // in renderReflectionCameras to ThreadPool::size().
     std::unique_ptr<ReflPool> reflPool_;
     VESA_Surface*       reflSurf_ = nullptr;   // shared 64² target (serial/deferred path)
-    Texture*            atlasTex_ = nullptr;   // shared cell atlas
-    Material*           atlasMat_ = nullptr;   // displays the atlas unlit
-    int                 atlasCols_ = 0, atlasRows_ = 0;
+    // Shards split across as many <=1024/axis atlas textures as needed: the
+    // block-tiled sampler (Mekalele tile_u/tile_v) can't address beyond 1024
+    // per axis, so a single atlas caps per-shard res at 1024/gridAxis (64 for
+    // greets's 238 shards). Each atlas holds atlasCols_*atlasRows_ cells of
+    // texRes^2; shards fill atlas 0, then 1, ... One material per atlas (a few
+    // fit the 8-bit deferred matID budget; per-shard materials would not).
+    std::vector<Texture*>  atlasTex_;
+    std::vector<Material*> atlasMat_;
+    int                 atlasCols_ = 0, atlasRows_ = 0;   // cells per atlas axis (square)
+    // Resolve a shard index to its atlas texture + cell coords within it.
+    struct AtlasCell { Texture* tex; int cx, cy; };
+    AtlasCell shardCell(int si) const {
+        const int per = atlasCols_ * atlasRows_;
+        const int ai  = per > 0 ? si / per : 0;
+        const int loc = per > 0 ? si % per : 0;
+        return { atlasTex_[ai], loc % atlasCols_, loc / atlasCols_ };
+    }
     int                 reflCursor_ = 0;       // round-robin start (perf budget)
     bool                reflPrimed_ = false;   // first pass fills every cell
     Texture*            textTex_ = nullptr;    // optional composited text

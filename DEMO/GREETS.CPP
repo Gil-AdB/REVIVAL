@@ -945,7 +945,11 @@ static void BuildGreetsShatter()
 	// swap + Scene_RebuildMatTable + deferred G-buffers were a ~40ms one-frame
 	// hitch right when the screen shatters. trigger() only flips the per-frame
 	// bake on (armReflectionCameras) + stamps the text fragments.
-	g_greetsShatter.prepareReflectionAtlas(GreetSc, 64);
+	// Per-shard reflection res (--greets-shard-res), rounded up to pow2 so
+	// the Txtr_Tiled atlas (res² × pow2 shard grid) stays power-of-two.
+	int shardRes = fds::FeatureFlags::greets_shard_res();
+	{ int p = 16; while (p < shardRes && p < 1024) p <<= 1; shardRes = p; }
+	g_greetsShatter.prepareReflectionAtlas(GreetSc, shardRes);
 	std::fprintf(stderr,
 		"[GREETS-SHATTER] target mirror %d area=%.1f grid=%dx%d floorY=%.1f "
 		"N=(%.2f,%.2f,%.2f)\n", best, bestArea, gx, gy, ymin, N.x, N.y, N.z);
