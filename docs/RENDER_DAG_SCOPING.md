@@ -38,14 +38,26 @@ per-tile task chain** — each tile flows gbuffer→lighting→cones without eve
 cross-tile barrier. That removes barriers 1 and 3-ish and lets the slow center tiles (38
 lights) overlap the fast edge tiles' whole chain. This is the bulk of the reclaim.
 
-**THE BLOCKER (learned the hard way this session):** cones MUST run *after*
-`Hdr_ActivateNoFog`, which is currently **global** (back-fills uncovered/sky pixels in
-linear, sets `g_hdrActive`; cones composite into `g_hdrBuf` gated on `g_hdrActive`). Fusing
-lighting+cones already broke greets beams once (reverted) for exactly this reason. So:
-- **To fuse cones into the per-tile chain, `Hdr_ActivateNoFog` must become per-tile**
-  (back-fill tile T's uncovered pixels right after lighting tile T; set `g_hdrActive` once
-  after all tiles, or make cones not depend on the global flag). This is the linchpin task.
-- Without that, the fuse stops at gbuffer→lighting (still removes barrier 1 — one fat tail).
+**THE APPARENT BLOCKER — and the clean way around it (the better design):** cones currently
+run *after* `Hdr_ActivateNoFog` because they composite *into* `g_hdrBuf`, which lighting also
+writes. But that is a **write-conflict, not a data dependency.** Verified in
+`DeferredVolumetric.cpp:56–77` (`compositeScatter`): in HDR mode the cone composite is purely
+`g_hdrBuf[i] += scatter` — it **never reads the lit color or `g_hdrActive`'s buffer state**.
+The cone *computation* depends only on gbuffer depth + the light list + shadow maps, all
+ready after the gbuffer.
+
+→ **Give cones their own `accumBuf`.** Then:
+- Cones compute from gbuffer depth (independent of lighting) and write `accumBuf` additively.
+- Lighting (→`g_hdrBuf`) and cones (→`accumBuf`) write **disjoint buffers**, so they run as
+  **one interleaved pool wave with NO hard dependency** — unlike Stage A's shadow-bake (which
+  lighting truly depended on), a worker that finishes a fast lighting tile just grabs a cone
+  tile instead of idling on the barrier. *This* is the tail reclaim, and it's free of the HDR
+  ordering trap that broke greets beams when we tried fusing lighting+cones earlier.
+- After activate, one cheap full-screen compose `g_hdrBuf[i] += accumBuf[i]`, run **before
+  bloom** (so the disco beams still bloom). Legacy 8-bit mode's lit-read (`out[i]` add+
+  saturate) simply moves into this compose step — same decoupling.
+- This **removes the per-tile-`Hdr_ActivateNoFog` linchpin entirely** (was the riskiest part).
+  Cost: one `accumBuf` (~24 MB float RGB @1080p) + a memory-bound ~0.5 ms compose pass.
 
 Waves 0 (shadow bake) and 5 (bloom/tonemap) stay **global-barriered** (genuinely need all
 tiles): shadow maps feed every lighting tile; bloom's bright-pass reads the whole buffer.
@@ -59,10 +71,14 @@ the pool) — so wave 0 stays as-is; this campaign is about waves 1→2→(3)→
 barrier between. Removes barrier #1. Cones/HDR unchanged (still global after). Smallest,
 safest, no HDR-ordering issue. Est: removes one of the fatter tails.
 
-**B. + per-tile HDR activate + cones (full local chain).** Make `Hdr_ActivateNoFog`
-per-tile, then one task per tile = gbuffer→lighting→activate→cones. Removes barriers #1, #3,
-#4. Biggest reclaim. Requires the activate restructure (the linchpin) and careful
-`g_hdrActive` handling.
+**B. Decoupled cone wave via `accumBuf` (the better path — replaces the per-tile-activate
+idea).** Cones write their own `accumBuf` instead of `g_hdrBuf`, so lighting + cones dispatch
+as **one combined pool wave** (lighting tiles → `g_hdrBuf`, cone tiles → `accumBuf`, disjoint,
+no inter-dependency). One barrier instead of two, and idle workers during lighting's tail
+pick up cone tiles. Then `Hdr_ActivateNoFog` (unchanged, global) → compose
+`g_hdrBuf += accumBuf` → bloom → tonemap. No per-tile-activate restructure, no HDR-ordering
+trap. Removes the lighting↔cones barrier — the fattest pair (cones 18888 + lighting 12513 are
+the two biggest leaves). This is the main reclaim.
 
 **C. General task-DAG with explicit dependencies.** A scheduler where tasks declare deps
 (tile-T-lighting depends on tile-T-gbuffer + global-shadow-bake) and the pool runs any
@@ -101,9 +117,12 @@ Recommend **A first (measure), then B if A pays.** Skip C.
    reclaimable tail. Confirms which barrier is fattest (hypothesis: lighting #2 and cones #4,
    since the center tiles carry 38 lights vs edge tiles' few — huge per-tile variance). ~½ day.
 2. **Option A** (gbuffer→lighting fuse), gated, validate 1–6, measure. ~1–2 days.
-3. If A pays, **Option B** (per-tile HDR activate + cones). The activate restructure is the
-   linchpin; do it as its own byte-identical step first, then fuse. ~2–4 days.
-4. Leave waves 0 and 5 global.
+3. **Option B** (decoupled cone `accumBuf` wave) — likely the bigger and *easier* win than A,
+   since it removes the lighting↔cones barrier (the two fattest leaves) without the
+   HDR-activate restructure. Land the `accumBuf` + compose as a byte-identical step (compose
+   reproduces the current additive result), then merge the lighting + cone dispatch into one
+   wave. ~2–3 days. May be worth doing BEFORE A.
+4. Leave waves 0 (shadow bake) and 5 (bloom/tonemap) global.
 
 ## Expected payoff / risk
 - Ceiling: the idle is ~24–28%, but part is serial (Animate/Transform/Radix_Sort/orchestration
