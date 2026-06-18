@@ -174,6 +174,11 @@ struct MirrorRttSlot {
     // 64K-texel budget (a 4:1 panel gets 512x128, not a stretched
     // square). Render surface + projection adapt per slot.
     int     texW = 256, texH = 256;
+    // Build-time MAX dims = the size mat->Txtr->Data is allocated at.
+    // texW/texH may be shrunk per frame to the panel's on-screen
+    // footprint (--mirror-rtt-adaptive) so a distant/oblique panel bakes
+    // at the resolution it actually occupies, never above texWMax.
+    int     texWMax = 256, texHMax = 256;
     Material *mat = nullptr;  // RTT material (mat->Txtr->Data updated per frame)
     std::vector<Face*> faces; // A-clone faces displaying the RTT
     // Clone verts of those faces with their (static) panel-plane
