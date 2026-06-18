@@ -1606,6 +1606,38 @@ static Scene* buildXparTestScene(int testCase) {
         }
     }
 
+    if (testCase == 5) {
+        // Nested concentric glass cubes in ONE mesh — all Mat_TwoSided
+        // transparent. Along a ray: outer-front, inner-front, inner-back,
+        // outer-back = FOUR overlapping fragments in a single clump. The
+        // legacy 2-deep front/back peel keeps only outer-front + inner-back
+        // (inner-front and outer-back dropped); xpar_peel_passes>=2 (reverse
+        // depth peel) recovers all four in correct back-to-front order.
+        // N-deep transparent-peel validation case.
+        TriMesh* cube = appendTriMesh(Sc, "nested_glass", 48, 24);
+        const float CY = 2.0f;
+        const float scales[2] = { 1.5f, 0.7f };
+        int vo = 0, fo = 0;
+        for (int c = 0; c < 2; ++c) {
+            const float S = scales[c];
+            auto P = [&](float x, float y, float z) { return Vector(x*S, CY + y*S, z*S); };
+            const QuadDef quads[6] = {
+                { { P(-1,-1, 1), P( 1,-1, 1), P( 1, 1, 1), P(-1, 1, 1) }, Vector(0,0, 1) },
+                { { P( 1,-1, 1), P( 1,-1,-1), P( 1, 1,-1), P( 1, 1, 1) }, Vector(1,0, 0) },
+                { { P( 1,-1,-1), P(-1,-1,-1), P(-1, 1,-1), P( 1, 1,-1) }, Vector(0,0,-1) },
+                { { P(-1,-1,-1), P(-1,-1, 1), P(-1, 1, 1), P(-1, 1,-1) }, Vector(-1,0,0) },
+                { { P(-1, 1, 1), P( 1, 1, 1), P( 1, 1,-1), P(-1, 1,-1) }, Vector(0, 1,0) },
+                { { P(-1,-1,-1), P( 1,-1,-1), P( 1,-1, 1), P(-1,-1, 1) }, Vector(0,-1,0) },
+            };
+            for (int fi = 0; fi < 6; ++fi) {
+                appendQuad(Sc, cube, vo, fo, quads[fi], matXpar,
+                           TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+                                         barry::TTextureMode::NORMAL>);
+                vo += 4; fo += 2;
+            }
+        }
+    }
+
     return Sc;
 }
 

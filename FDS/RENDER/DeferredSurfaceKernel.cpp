@@ -1839,68 +1839,75 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 {
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
 	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
+	const int peelPasses = std::max(1, fds::FeatureFlags::xpar_peel_passes());
+	meka::GBuffer* sideGB = front ? g_gbufferTransparent : g_gbufferTransparentBack;
+	uint16_t*      sideZ  = front ? g_xparZ              : g_xparZBack;
 
-	// Clear strip's slice of the relevant xpar layer.
-	if (front) {
-		if (g_gbufferTransparent) {
-			std::memset(g_gbufferTransparent->txtr.data() + rowStart,
-			            0xFF, rowCount * sizeof(uint32_t));
+	// Raster the clump's faces into the side layer, then composite the strip
+	// rows. Clipper extents pin the rasterizer to the strip; faces route to
+	// MekaleleTransparent (front) / MekaleleTransparentBack (back). The
+	// composite uses a ctx variant whose tileLights -> g_stripLights so the
+	// strip gets exactly the lights overlapping its 8 rows.
+	auto rasterAndComposite = [&]() {
+		FrustumClipper clipper;
+		clipper.InitViewport(CurScene);
+		clipper.SetClippingExtents(0.0f, float(strip_y),
+		                            float(XRes), float(strip_y + strip_h));
+		const auto rt  = fds::MainRenderTargetFromGlobals();
+		const auto& cam = fds::g_mainCamera;
+		// Strip-clamp the rasterizer: a clipped tri whose max PY snapped to
+		// strip_y + strip_h would compute tile_My one tile-row past the strip
+		// and write pixels the neighbouring strip's clear (concurrent) wipes.
+		const int stripTileRow = strip_y >> 3;  // TILELOG=3
+		const meka::RasterStripClamp savedClamp = meka::g_rasterStripClamp;
+		meka::g_rasterStripClamp = { stripTileRow, stripTileRow };
+		for (int i = 0; i < count; ++i) {
+			Face* F = faces[i];
+			if (!F) continue;
+			if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
+			else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 		}
-		if (g_xparZ) std::memset(g_xparZ + rowStart, 0,
-		                          rowCount * sizeof(uint16_t));
-	} else {
-		if (g_gbufferTransparentBack) {
-			std::memset(g_gbufferTransparentBack->txtr.data() + rowStart,
-			            0xFF, rowCount * sizeof(uint32_t));
+		meka::g_rasterStripClamp = savedClamp;
+
+		const int stripIdx = strip_y >> 3;  // TILELOG=3
+		DeferredLightingCtx stripCtx = g_deferredCtx;
+		stripCtx.tileLights = g_stripLights;
+		if (front) {
+			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
+				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
+		} else {
+			Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
+				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
 		}
-		if (g_xparZBack) std::memset(g_xparZBack + rowStart, 0,
-		                              rowCount * sizeof(uint16_t));
+	};
+
+	// thread_local: this strip runs on its own worker; the synchronous
+	// clipper.Render above reads g_xparPeelReverse on the same thread.
+	g_xparPeelReverse = (peelPasses > 1);
+
+	if (peelPasses <= 1) {
+		// Legacy single-fragment peel — byte-identical. Clear the strip's
+		// slice of the side layer (txtr=empty, Z=0) and render once.
+		if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
+		if (sideZ)  std::memset(sideZ + rowStart, 0, rowCount * sizeof(uint16_t));
+		rasterAndComposite();
+		return;
 	}
 
-	// Raster the clump's faces into this layer. Clipper extents pin the
-	// rasterizer to the strip; faces are routed to MekaleleTransparent
-	// (front-facing → front layer) or MekaleleTransparentBack (back-
-	// facing → back layer). All faces in a clump share orientation by
-	// construction.
-	FrustumClipper clipper;
-	clipper.InitViewport(CurScene);
-	clipper.SetClippingExtents(0.0f, float(strip_y),
-	                            float(XRes), float(strip_y + strip_h));
-	const auto rt  = fds::MainRenderTargetFromGlobals();
-	const auto& cam = fds::g_mainCamera;
-	// Strip-clamp the rasterizer: a clipped tri whose max PY snapped to
-	// strip_y + strip_h would compute tile_My one tile-row past the strip
-	// and write pixels that the neighbouring strip's clear (concurrent)
-	// then wipes — visible as 1-row dark stripes every TILE_SIZE rows.
-	const int stripTileRow = strip_y >> 3;  // TILELOG=3
-	const meka::RasterStripClamp savedClamp = meka::g_rasterStripClamp;
-	meka::g_rasterStripClamp = { stripTileRow, stripTileRow };
-	for (int i = 0; i < count; ++i) {
-		Face* F = faces[i];
-		if (!F) continue;
-		if (front) clipper.Render(F, MekaleleTransparent,     false, rt, cam);
-		else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
-	}
-	meka::g_rasterStripClamp = savedClamp;
-
-	// Composite the strip rows onto VPage via the transparent lighting
-	// kernel, with a ctx variant whose `tileLights` points at the
-	// per-strip light array (built by buildStripLightLists in
-	// Render_DeferredLighting). The kernel reads ctx.tileLights[
-	// tileIndex] for its per-pixel light loop; with tileLights ->
-	// g_stripLights and tileIndex = strip_y/TILESIZE the strip gets
-	// exactly the lights overlapping its 8 rows.
-	const int stripIdx = strip_y >> 3;  // TILELOG=3
-	DeferredLightingCtx stripCtx = g_deferredCtx;
-	stripCtx.tileLights = g_stripLights;
-	if (front) {
-		Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-			stripCtx, stripIdx,
-			0, strip_y, XRes, strip_y + strip_h);
-	} else {
-		Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-			stripCtx, stripIdx,
-			0, strip_y, XRes, strip_y + strip_h);
+	// Reverse depth peel WITHIN this (clump, side), K passes deep, over the
+	// strip's row slice — farthest-first, compositing each over the last.
+	for (int pass = 0; pass < peelPasses; ++pass) {
+		// Per-pass ceiling: pass 0 accepts all (0); later passes accept only
+		// fragments nearer than the previous pass's peeled Z.
+		if (pass == 0) {
+			if (g_xparPeelFloor) std::memset(g_xparPeelFloor + rowStart, 0, rowCount * sizeof(uint16_t));
+		} else if (g_xparPeelFloor && sideZ) {
+			std::memcpy(g_xparPeelFloor + rowStart, sideZ + rowStart, rowCount * sizeof(uint16_t));
+		}
+		// Clear side layer slice: Z to 0xFFFF (keep-farthest init), txtr empty.
+		if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
+		if (sideZ)  std::memset(sideZ + rowStart, 0xFF, rowCount * sizeof(uint16_t));
+		rasterAndComposite();
 	}
 }
 

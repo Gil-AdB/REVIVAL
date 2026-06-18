@@ -611,6 +611,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		bool     batchOpen    = false;
 		int      batchFirst   = 0;
 		int      batchLastEnd = 0;
+		const int peelPasses = std::max(1, fds::FeatureFlags::xpar_peel_passes());
 		auto flushBatch = [&]() {
 			if (!batchOpen) return;
 			TriMesh*    T   = batchMesh;
@@ -618,21 +619,58 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			                              : XparFaceSel::BackOnly;
 			const int first = batchFirst;
 			const int count = batchLastEnd - batchFirst;
-			if (batchFront) clearFront();
-			else            clearBack();
-			runTilePass([first, count, T, sel](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
-				RenderInnerDeferredTransparent(float(x1), float(y1),
-				                                float(x2), float(y2),
-				                                first, count, T, sel);
-			});
-			if (batchFront) {
-				runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-					renderDeferredTransparentTile_Front(tileIdx, x1, y1, x2, y2);
+			const bool reverseMode = (peelPasses > 1);
+			auto rasterAndComposite = [&]() {
+				runTilePass([first, count, T, sel, reverseMode](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
+					// thread_local: set on THIS worker, read by the synchronous
+					// raster below (same thread). Opaque ignores it.
+					g_xparPeelReverse = reverseMode;
+					RenderInnerDeferredTransparent(float(x1), float(y1),
+					                                float(x2), float(y2),
+					                                first, count, T, sel);
 				});
-			} else {
-				runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-					renderDeferredTransparentTile_Back(tileIdx, x1, y1, x2, y2);
-				});
+				if (batchFront) {
+					runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+						renderDeferredTransparentTile_Front(tileIdx, x1, y1, x2, y2);
+					});
+				} else {
+					runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
+						renderDeferredTransparentTile_Back(tileIdx, x1, y1, x2, y2);
+					});
+				}
+			};
+
+			if (peelPasses <= 1) {
+				// Legacy single-fragment peel — byte-identical.
+				if (batchFront) clearFront();
+				else            clearBack();
+				rasterAndComposite();
+				batchOpen = false;
+				return;
+			}
+
+			// Reverse depth peel WITHIN this (mesh, side) batch: peel the
+			// side's overlapping fragments farthest-first and composite each
+			// over the last → far-to-near, which is the same order the
+			// facing split + sort key already establish between batches. K
+			// passes deep; fixes >2 overlapping transparents sharing a mesh
+			// (the fountain glass orbs) that the single keep-nearest layer
+			// dropped. The inter-batch order (sort key) is untouched.
+			uint16_t*      sideZ  = batchFront ? g_xparZ            : g_xparZBack;
+			meka::GBuffer* sideGB = batchFront ? g_gbufferTransparent : g_gbufferTransparentBack;
+			for (int pass = 0; pass < peelPasses; ++pass) {
+				// Per-pass ceiling: pass 0 accepts everything (0); later passes
+				// accept only fragments NEARER than the previous pass's peeled
+				// Z (copied before the layer is cleared below).
+				if (pass == 0)
+					parallel_memset(g_xparPeelFloor, 0, numPixels * sizeof(uint16_t));
+				else if (g_xparPeelFloor && sideZ)
+					std::memcpy(g_xparPeelFloor, sideZ, numPixels * sizeof(uint16_t));
+				// Clear the side layer: Z to 0xFFFF (keep-farthest init),
+				// txtr to the empty sentinel.
+				if (sideGB) parallel_memset(sideGB->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
+				if (sideZ)  parallel_memset(sideZ, 0xFF, numPixels * sizeof(uint16_t));
+				rasterAndComposite();
 			}
 			batchOpen = false;
 		};

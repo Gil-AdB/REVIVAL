@@ -23,6 +23,11 @@
 #include "Base/Scene.h"
 #include "Base/FeatureFlags.h"
 
+// Reverse-peel mode flag for the transparent rasterizer (see the documented
+// extern further down). Forward-declared here so meka::TileRasterizer's
+// apply_exact, defined inside the namespace below, can read it.
+extern thread_local bool g_xparPeelReverse;
+
 namespace meka {
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -587,9 +592,21 @@ struct TileRasterizer {
 				// peelFloor is nullptr for opaque (skipped) and all-0xFFFF on
 				// the first/only pass (no-op: z_candidate <= 0xFF80 < 0xFFFF).
 				if (span.peelFloor) {
-					Vec8us floor_c;
-					floor_c.load_a(span.peelFloor);
-					zmask &= (z_candidate < extend(floor_c));
+					Vec8us bound_c;
+					bound_c.load_a(span.peelFloor);
+					if (g_xparPeelReverse) {
+						// Reverse depth peel (passes >= 2): keep the FARTHEST
+						// fragment (smallest z_candidate; layer Z pre-cleared to
+						// 0xFFFF), and only those NEARER than the layer already
+						// composited this batch (z_candidate > ceiling). Successive
+						// passes walk toward the camera; each composites over the
+						// last → far-to-near WITHIN the (mesh, side) batch, which
+						// is exactly the order the facing split + sort key expect.
+						zmask = (z_candidate < z_existing) & (z_candidate > extend(bound_c));
+					} else {
+						// Legacy floor gate — no-op at passes==1 (all-0xFFFF).
+						zmask &= (z_candidate < extend(bound_c));
+					}
 				}
 
 				p_mask &= zmask;
@@ -963,7 +980,16 @@ struct TileRasterizer {
 extern meka::GBuffer *g_gbuffer;
 extern meka::GBuffer *g_gbufferTransparent;
 extern uint16_t      *g_xparZ;        // separate Z-buffer for closest-front transparent
-extern uint16_t      *g_xparPeelFloor; // depth-peel floor (z_candidate < floor accepted)
+extern uint16_t      *g_xparPeelFloor; // depth-peel floor/ceiling buffer (per-pass bound)
+// When true, the transparent rasterizer runs in reverse-peel mode: keep the
+// FARTHEST fragment nearer than g_xparPeelFloor (the ceiling), with the layer
+// Z pre-cleared to 0xFFFF. Set per (mesh, side) batch by the K-pass dispatch
+// for xpar_peel_passes >= 2; false elsewhere (legacy keep-nearest front/back).
+// thread_local: TBR strips raster on parallel worker threads, and the legacy
+// peel rasters on the threadpool too, so each worker sets its own copy right
+// before its raster (the synchronous clipper.Render reads it on the same
+// thread). Opaque ignores it (null peelFloor short-circuits the gate).
+extern thread_local bool g_xparPeelReverse;
 extern int            g_xparZCount;
 
 inline void SetGBuffer(meka::GBuffer *gbuffer) {

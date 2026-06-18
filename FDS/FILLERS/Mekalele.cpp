@@ -49,6 +49,7 @@ int            g_xparZCount             = 0;
 // the K=1 (single front/back) configuration leaves it at 0xFFFF and is
 // byte-identical to the legacy 2-deep peel.
 uint16_t      *g_xparPeelFloor          = nullptr;
+thread_local bool g_xparPeelReverse     = false;
 
 void EngineGBuffer_Resize(int X, int Y) {
     size_t numPixels = size_t(X) * size_t(Y);
