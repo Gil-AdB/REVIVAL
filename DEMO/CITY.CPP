@@ -2321,7 +2321,11 @@ struct CityScene : SceneDriver {
 		const float speed = fds::FeatureFlags::water_ripple_speed();
 		const float amp   = fds::FeatureFlags::water_ripple_amp();
 		const float scale = fds::FeatureFlags::water_ripple_scale();
-		const float t = timeMs * 0.001f * speed;
+		// Timer is CENTISECONDS (TimerInit(100) → 100 ticks/sec), not ms — so
+		// 0.02 puts the dominant wave (×1.3 below) at ~2.5 rad/s ≈ 0.4 Hz, a
+		// visible water undulation. (At 0.001 it was ~0.13 rad/s — one cycle per
+		// ~48 s, i.e. frozen to the eye: the "can't see the bump" bug.)
+		const float t = timeMs * 0.02f * speed;
 		if ((int)dispMap.size() < XRes * YRes) dispMap.assign(XRes * YRes, 0);
 		rip_gx1.resize(XRes); rip_gx2.resize(XRes);
 		rip_gy1.resize(YRes); rip_gy2.resize(YRes);
