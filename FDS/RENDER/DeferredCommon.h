@@ -157,6 +157,10 @@ struct TileLights {
 	// Clone lights: source's 2D map + mirror plane (mirrored shadow
 	// sampling; see ViewLightsSoA::srcShadowMapIdx).
 	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_LIGHTS];
+	// 1 for bounce spots (Omni_BounceCone): the reflected-source-map tap
+	// defaults DARK and lights only inside the source's cone. Clones (0)
+	// stay default-lit. See ViewLightsSoA::bounceClamp.
+	alignas(32) uint32_t bounceClamp[DEFERRED_MAX_LIGHTS];
 	alignas(32) float mirNX[DEFERRED_MAX_LIGHTS];
 	alignas(32) float mirNY[DEFERRED_MAX_LIGHTS];
 	alignas(32) float mirNZ[DEFERRED_MAX_LIGHTS];
