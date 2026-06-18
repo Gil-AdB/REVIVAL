@@ -32,6 +32,7 @@ meka::GBuffer       s_engineGBufferTransparent;
 meka::GBuffer       s_engineGBufferTransparentBack;
 std::vector<uint16_t> s_engineXparZ;
 std::vector<uint16_t> s_engineXparZBack;
+std::vector<uint16_t> s_engineXparPeelFloor;
 } // namespace
 
 meka::GBuffer *g_gbuffer                = nullptr;
@@ -40,6 +41,14 @@ meka::GBuffer *g_gbufferTransparentBack = nullptr;
 uint16_t      *g_xparZ                  = nullptr;
 uint16_t      *g_xparZBack              = nullptr;
 int            g_xparZCount             = 0;
+// Depth-peel floor: per-pixel "nearest already-peeled" Z, used to peel
+// transparent surfaces deeper than the single front/back fragment. A
+// transparent raster pass accepts a fragment only when its z_candidate is
+// STRICTLY FARTHER than this floor (z_candidate < floor), so successive
+// passes walk away from the camera. 0xFFFF = no floor (everything passes) —
+// the K=1 (single front/back) configuration leaves it at 0xFFFF and is
+// byte-identical to the legacy 2-deep peel.
+uint16_t      *g_xparPeelFloor          = nullptr;
 
 void EngineGBuffer_Resize(int X, int Y) {
     size_t numPixels = size_t(X) * size_t(Y);
@@ -78,5 +87,11 @@ void EngineGBuffer_Resize(int X, int Y) {
     g_xparZ = s_engineXparZ.data();
     s_engineXparZBack.assign(numPixels, 0);
     g_xparZBack = s_engineXparZBack.data();
+    // Peel floor: 0xFFFF everywhere = "no fragment peeled yet, accept all".
+    // The dispatch resets/advances it per (mesh, side) batch when peeling
+    // more than one pass; left untouched it keeps the legacy single-pass
+    // behaviour (every z_candidate < 0xFFFF, since z_candidate <= 0xFF80).
+    s_engineXparPeelFloor.assign(numPixels, 0xFFFFu);
+    g_xparPeelFloor = s_engineXparPeelFloor.data();
     g_xparZCount = int(numPixels);
 }

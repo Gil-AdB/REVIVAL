@@ -238,6 +238,11 @@ struct TileRasterizerCtx {
 	dword miplevel;
 	u16 *zbuffer;
 	float zScale;      // was: g_zscale global. Per-pass depth scalar.
+	// Depth-peel floor (transparent passes only; nullptr for opaque). A
+	// fragment is accepted only when z_candidate < peelFloor[i] — strictly
+	// farther than the nearest already-peeled layer — so successive passes
+	// walk away from the camera. nullptr or all-0xFFFF = no gate (legacy).
+	u16 *peelFloor = nullptr;
 
 	// Static-shadow lightmap addressing (zero = no lightmap → skip the
 	// G-buffer plane writes; deferred kernel falls back to per-pixel
@@ -311,6 +316,7 @@ struct GBufferSpan {
 	const u8 *mirrorMask;
 	const u16 *mirrorMaskZ;
 	u16 *zbuffer;
+	u16 *peelFloor;   // depth-peel floor (nullptr = no gate)
 
 	GBufferSpan &operator+=(i32 offset) {
 		normal += offset;
@@ -323,6 +329,7 @@ struct GBufferSpan {
 		if (mirrorMask) mirrorMask += offset;
 		if (mirrorMaskZ) mirrorMaskZ += offset;
 		zbuffer += offset;
+		if (peelFloor) peelFloor += offset;
 		return *this;
 	}
 
@@ -372,7 +379,8 @@ struct GBufferSpan {
 			mirrorIdPtr,
 			mirrorMaskPtr,
 			mirrorMaskZPtr,
-			ctx.zbuffer + offset
+			ctx.zbuffer + offset,
+			ctx.peelFloor ? ctx.peelFloor + offset : nullptr
 		};
 	}
 };
@@ -572,6 +580,17 @@ struct TileRasterizer {
 				auto z_existing = extend(z_existing_c);
 
 				auto zmask = z_candidate > z_existing;
+
+				// Depth-peel floor: accept only fragments STRICTLY farther
+				// than the nearest already-peeled layer (z_candidate < floor),
+				// so successive transparent passes walk away from the camera.
+				// peelFloor is nullptr for opaque (skipped) and all-0xFFFF on
+				// the first/only pass (no-op: z_candidate <= 0xFF80 < 0xFFFF).
+				if (span.peelFloor) {
+					Vec8us floor_c;
+					floor_c.load_a(span.peelFloor);
+					zmask &= (z_candidate < extend(floor_c));
+				}
 
 				p_mask &= zmask;
 
@@ -944,6 +963,7 @@ struct TileRasterizer {
 extern meka::GBuffer *g_gbuffer;
 extern meka::GBuffer *g_gbufferTransparent;
 extern uint16_t      *g_xparZ;        // separate Z-buffer for closest-front transparent
+extern uint16_t      *g_xparPeelFloor; // depth-peel floor (z_candidate < floor accepted)
 extern int            g_xparZCount;
 
 inline void SetGBuffer(meka::GBuffer *gbuffer) {
@@ -988,15 +1008,18 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
                          const fds::CameraContext& cam) {
 	meka::GBuffer *gb;
 	uint16_t *zbuf;
+	uint16_t *peelFloorPtr = nullptr;   // transparent only; gates deeper peel passes
 	if constexpr (Target == MekaleleTarget::Opaque) {
 		gb   = rt.gbuffer;
 		zbuf = rt.zpage16;
 	} else if constexpr (Target == MekaleleTarget::TransparentFront) {
 		gb   = rt.gbufferTransparent;
 		zbuf = rt.xparZ;
+		peelFloorPtr = rt.xparPeelFloor;
 	} else {  // TransparentBack
 		gb   = rt.gbufferTransparentBack;
 		zbuf = rt.xparZBack;
+		peelFloorPtr = rt.xparPeelFloor;
 	}
 	// Per-face static-shadow lightmap addressing. ParentTri is set in
 	// Transform_Objects when the face hits FList; staticLMMeshId is set
@@ -1032,6 +1055,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.miplevel = miplevel,
 		.zbuffer = zbuf,
 		.zScale = cam.zScale,
+		.peelFloor = peelFloorPtr,
 		.lmMeshId  = lmMeshId,
 		.lmFaceIdx = lmFaceIdx,
 		.shadowMatId = shadowMatId,

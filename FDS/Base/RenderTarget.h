@@ -48,6 +48,10 @@ struct RenderTarget {
     // above. Null when forward.
     uint16_t      *xparZ                    = nullptr;
     uint16_t      *xparZBack                = nullptr;
+    // Depth-peel floor (parallel to xparZ): a transparent fragment is
+    // accepted only when z_candidate < xparPeelFloor[i] (strictly farther
+    // than the nearest already-peeled layer). Null / all-0xFFFF = no gate.
+    uint16_t      *xparPeelFloor            = nullptr;
     // Raw opaque mat32 plane (== gbuffer->txtr) + its pixel count. Exposed as a
     // bare pointer so the HDR lift can read the per-pixel forward sentinel
     // (Mat_HdrEmissive → 0xFFFFFFFE) without pulling in the full GBuffer
