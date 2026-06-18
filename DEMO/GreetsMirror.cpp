@@ -2719,7 +2719,15 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 // tonemap runs. The main pass's Hdr_BeginFrame restores g_hdrBuf.
                 if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
                 Render_DeferredLighting(dctx, &ov);
-                if (rttHdr) fds::g_hdrActive = true;
+                // Hdr_ActivateNoFog (not a bare g_hdrActive=true): with
+                // --deferred-quarter the kernel shades only wave-1 into g_hdrBuf;
+                // the wave-2 FILL pixels land in s_rttSurf (8-bit) but NOT g_hdrBuf,
+                // so a bare activate would tonemap them as 0 → a checkerboard
+                // garble (HDR only; the 8-bit surface is coherent). Lifting the
+                // uncovered (h[3]==0) pixels from s_rttSurf into g_hdrBuf first
+                // resolves the full image, THEN activates — so cones + tonemap see
+                // a complete buffer.
+                if (rttHdr) fds::Hdr_ActivateNoFog();
                 Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
                 if (rttHdr) {
                     fds::Render_TonemapToVPage();
