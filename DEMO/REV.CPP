@@ -1181,6 +1181,22 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
+	// Headless modes (--snapshot / --bench) must never pop an SDL window or
+	// steal desktop focus when run in the background (the byte gate, perf
+	// benches, agents). Force SDL's built-in dummy video+audio drivers BEFORE
+	// any SDL_Init: the snapshot path never touches SDL anyway, but the
+	// raster/scene/flip bench opens a real window — dummy makes it offscreen.
+	// Interactive runs (no --snapshot/--bench) are untouched and still open a
+	// real window. (To benchmark the real Metal flip specifically, unset
+	// SDL_VIDEODRIVER in the environment.)
+	for (int i = 1; i < argc; ++i) {
+		if (argv[i] && (std::strncmp(argv[i], "--snapshot", 10) == 0 ||
+		                std::strncmp(argv[i], "--bench",    7) == 0)) {
+			setenv("SDL_VIDEODRIVER", "dummy", 1);
+			setenv("SDL_AUDIODRIVER", "dummy", 1);
+			break;
+		}
+	}
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
