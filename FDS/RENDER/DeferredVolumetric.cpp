@@ -32,6 +32,7 @@
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — cones/halos composite into g_hdrBuf
+#include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "Threads.h"
 
 #include <mutex>
@@ -1612,8 +1613,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         }
     }
     if (!inlineDispatch)
-        for (int _i = 0; _i < numTiles; ++_i)
-            renderns::tileDone.acquire();
+        TailProf::drain(renderns::tileDone, numTiles, "cones");
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
@@ -2640,8 +2640,6 @@ void Render_DeferredFogPass() {
 			});
 		}
 	}
-	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
 }
 

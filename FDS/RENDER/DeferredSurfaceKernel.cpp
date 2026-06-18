@@ -56,6 +56,7 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
+#include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/FILLERS.H"
@@ -3317,9 +3318,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		}
 	}
 	if (inlineDispatch) { /* drained per tile above */ }
-	else for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	else TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w1");
 
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
 	// fallback at material edges). Skip entirely when checkerboard is
@@ -3341,8 +3340,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			}
 		}
 		if (!inlineDispatch)
-			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i)
-				renderns::tileDone.acquire();
+			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w2");
 	}
 
 	// Dump cache-line transition stats accumulated by shadow sampling

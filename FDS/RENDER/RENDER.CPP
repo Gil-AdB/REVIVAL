@@ -27,6 +27,7 @@
 #include "Base/Scene.h"
 #include "Base/RenderContext.h"
 #include "DeferredCommon.h"   // DeferredLightingCtx + g_deferredCtx (publish for strip path)
+#include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -435,9 +436,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 	}
 
-	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer");
 
 	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
 	// migration): Render_DeferredLighting fills it; it's threaded to the
@@ -586,9 +585,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					});
 				}
 			}
-			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-				renderns::tileDone.acquire();
-			}
+			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "postlight");
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
