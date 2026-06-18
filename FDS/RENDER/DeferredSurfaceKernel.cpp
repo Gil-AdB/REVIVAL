@@ -2516,6 +2516,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			    ? 0u : uint32_t(gb.mirrorId[i]);
 
 			const uint32_t mat32  = gb.txtr[i];
+			// Forward content (reflective env disco ball, additive) writes Z
+			// but a sentinel matID -- wave-1 skips it, so it stays uncovered and
+			// is lifted from VPage in HDR. The fill must skip it too, else it
+			// shades the sentinel as garbage into g_hdrBuf at the wave-2 cells
+			// (deferred-quarter checker over the forward surface, HDR only; in
+			// LDR the forward filler overwrites VPage so it is invisible -> gate
+			// on hdrWrite to keep the LDR fill byte-exact).
+			if (hdrWrite && mat32 == 0xFFFFFFFFu) continue;
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
 
 			// Center normal decoded once; reused by every fill pattern's
