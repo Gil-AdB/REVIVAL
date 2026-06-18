@@ -87,6 +87,29 @@ and the highest race surface. Overkill for the win; A→B is the pragmatic path.
 
 Recommend **A first (measure), then B if A pays.** Skip C.
 
+## Reuse the transparent-peel infra (don't build Option B from scratch)
+
+The cone `accumBuf` is the **additive sibling of the transparent peel**, which already is a
+"compute a layer in its own buffer → composite into `g_hdrBuf` float, after fog, before
+bloom" pass. Model Option B on it:
+- **Buffer lifecycle** — screen-size alloc + `parallel_memset` clear (RENDER.CPP:388 for the
+  xpar G-buffer) + composite-before-bloom slot. `accumBuf` follows the same lifecycle.
+- **Composite step** — the peel's HDR-float composite (`DeferredSurfaceKernel.cpp:1761–1768`,
+  `g_hdrBuf[i]` float blend, unclamped, runs after the froxel fog composite) is the same
+  write the cone compose needs, just `+=` instead of α-blend. Factor a shared
+  "composite-contribution-into-`g_hdrBuf`" helper; peel = blend, cones = add.
+- **Dispatch** — cones + peel already share the deferred tile model + `DeferredLightingCtx`;
+  no new dispatch scaffolding.
+- **Do NOT reuse** the xpar G-buffer (stores material/normal/depth for *re-lighting* — far
+  heavier than an RGB-add accum) or `RenderXparClumpInStrip` (re-lighting kernel). Cones need
+  only an RGB accum + their existing tile light lists.
+
+Architecturally the engine already composites post-lighting **layers** into `g_hdrBuf` in
+order (opaque → froxel fog → peel → cones/halos → bloom → tonemap). The cone `accumBuf` fills
+in that pattern rather than inventing one — lower risk, and a step toward unifying all
+contribution layers under a single composite (which is what makes the whole post-lighting
+stage a clean DAG).
+
 ## Dependency / correctness notes
 - Per-tile fuse keeps each tile's writes disjoint (gbuffer tile T, framebuffer tile T) — the
   same disjoint-slice invariant the current waves rely on. The fuse only changes *when*, not
