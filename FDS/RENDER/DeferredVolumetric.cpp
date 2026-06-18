@@ -258,9 +258,24 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 
     // Half vertical rate: compute even rows, write each result to the
     // row and its lower neighbor. Beams are soft gradients — visually
-    // free, halves the pass cost. (Vec path only; the scalar path is
-    // the --no-vol_vec fallback.)
-    const int yStep = (vecPath && fds::FeatureFlags::vol_cone_half_y()) ? 2 : 1;
+    // free except at narrow-beam edges. (Vec path only; the scalar path
+    // is the --no-vol_vec fallback.)
+    //
+    // Tie the cone rate to the deferred fill mode: when the surface kernel
+    // runs reduced-rate (quarter or checkerboard), halve the cone vertical
+    // rate too — one rate knob for the whole reduced-rate frame. The
+    // standalone --vol-cone-half-y still forces it independently.
+    //
+    // No true 2D quarter for cones (my call, per the half-y A/B): this loop
+    // is pixel-major SIMD, 8 lanes across X, so X-subsampling wastes lanes
+    // and fights the kernel; and the narrow disco beams (2.6°/7°) already
+    // show thin one-row edge artifacts at half-Y — quartering both axes
+    // doubles that for only ~2 ms on a ~15 ms pass. Row-doubling is the
+    // sweet spot; the surface kernel keeps its own 2D quarter/checker.
+    const bool coneReduced = fds::FeatureFlags::vol_cone_half_y()
+                          || fds::FeatureFlags::deferred_quarter()
+                          || fds::FeatureFlags::deferred_checkerboard();
+    const int yStep = (vecPath && coneReduced) ? 2 : 1;
     for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
