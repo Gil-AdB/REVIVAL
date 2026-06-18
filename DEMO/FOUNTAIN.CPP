@@ -2797,6 +2797,7 @@ struct FountainScene : SceneDriver {
 		// drops refract the FINAL image, so they run AFTER the tonemap here
 		// (renderFrame skipped them because the tonemap was deferred).
 		if (fds::FeatureFlags::hdr() && fds::g_hdrActive) {
+			fds::Render_BloomPass();      // glow into g_hdrBuf before the tonemap (no-op unless --bloom)
 			fds::Render_TonemapToVPage();
 			Render_LensDrops();
 		}
