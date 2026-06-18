@@ -258,6 +258,14 @@ namespace renderns {
 	// orchestrator may enqueue hundreds of Transform_Objects tasks).
 	std::counting_semaphore<INT_MAX> tileDone{0};
 
+	// Dedicated completion signal for the dynamic shadow-map bake
+	// (Render_DeferredShadowMaps). Kept separate from tileDone so the bake
+	// can run on its own orchestrator thread concurrently with the gbuffer
+	// fill (which drains tileDone) without the two stealing each other's
+	// permits — pool workers release whichever semaphore matches the task
+	// they just ran. See docs/THREADING_OVERLAP_PLAN.md (Stage A).
+	std::counting_semaphore<INT_MAX> shadowDone{0};
+
 	// Legacy mutex+condvar trio: still referenced by a few non-hot
 	// setup paths (e.g. shadow-orchestrator pre-dispatch counter reset)
 	// that haven't been migrated yet. Safe to keep alongside the

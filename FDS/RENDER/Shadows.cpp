@@ -48,6 +48,7 @@
 #include <climits>
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
+	extern std::counting_semaphore<INT_MAX> shadowDone;
 	extern std::mutex                tileCounterMutex;
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
@@ -430,12 +431,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				g_currentShadowOmni = nullptr;
 				g_inDynamicShadowBake = false;
 				g_inShadowPass = false;
-				// One permit per completed task (see renderns::tileDone).
-				renderns::tileDone.release();
+				// One permit per completed task (see renderns::shadowDone).
+				renderns::shadowDone.release();
 			});
 	}
 	for (int _i = 0; _i < xformsEnqueued; ++_i) {
-		renderns::tileDone.acquire();
+		renderns::shadowDone.acquire();
 	}
 	const auto tXformEnd = clk::now();
 	if (sProfShadow) {
@@ -635,14 +636,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						}
 						g_currentShadowMap = nullptr;
 						g_inDynamicShadowBake = false;
-						// One permit per completed task (see renderns::tileDone).
-						renderns::tileDone.release();
+						// One permit per completed task (see renderns::shadowDone).
+						renderns::shadowDone.release();
 					});
 			}
 		}
 	}
 	for (int _i = 0; _i < tilesEnqueued; ++_i) {
-		renderns::tileDone.acquire();
+		renderns::shadowDone.acquire();
 	}
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between
