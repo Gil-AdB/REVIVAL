@@ -24,7 +24,11 @@ struct Vector;
 
 namespace fds {
 
-void LightmapBake_Static(Scene *Sc);
+// forceEnable: bake regardless of the global --shadow-lightmap flag. A scene
+// that wants baked lightmaps (greets) passes true so the bake runs at init even
+// though the per-pixel SAMPLE flag (shadow_lightmap) is left off until that
+// scene actually renders — keeps the flag from leaking onto other scenes.
+void LightmapBake_Static(Scene *Sc, bool forceEnable = false);
 
 // Stamp every static-mesh face's (A, B, C) vertices with their object-
 // space barycentric weight on the face itself: A→(0,0), B→(1,0), C→(0,1).

@@ -1005,8 +1005,13 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
-	// Lightmap bake (LightmapBake_Static, spawned here) reads these at init.
-	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
+	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
+	// shadow_lightmap itself: that's the per-pixel SAMPLE gate the deferred
+	// kernel reads for EVERY scene, so it leaks if set during the shared init
+	// phase — it lives in GreetsApplyRunDefaults instead, and the bake is
+	// force-enabled at spawn so it still runs here. res/planar/skip_animated
+	// only matter while sampling (shadow_lightmap on), so they're inert on
+	// other scenes and safe to leave at init.
 	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
 	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
 	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
@@ -1019,6 +1024,9 @@ static void GreetsApplyRunDefaults()
 	// Shadow sampling / dynamic bake (greets tick + deferred kernel).
 	FF::setDefault(FF::BoolId::shadows,                 true);
 	FF::setDefault(FF::BoolId::shadow_dynamic,          true);
+	// Per-pixel lightmap SAMPLE gate — set at RUN (not init) so it doesn't
+	// leak onto earlier scenes; the bake itself was force-enabled at init.
+	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
 	// HDR + bloom + cones (global render path).
 	FF::setDefault(FF::BoolId::hdr,                     true);
 	FF::setDefault(FF::BoolId::hdr_linear,              true);
@@ -1844,8 +1852,14 @@ void Initialize_Greets()
 		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
 		const auto bakeSpawnT = std::chrono::steady_clock::now();
 		Scene * const greetScForBake = GreetSc;
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
-			fds::LightmapBake_Static(greetScForBake);
+		// Force the bake on: greets wants lightmaps, but the global
+		// shadow_lightmap SAMPLE flag is now set at greets-RUN (so it doesn't
+		// leak onto city/fountain), so the bake's own gate would otherwise
+		// no-op here. Skip the force when greets won't render (preempted by
+		// another --scene-X) — then the bake no-ops fast as before.
+		const bool bakeForce = !GreetsScenePreempted();
+		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
+			fds::LightmapBake_Static(greetScForBake, bakeForce);
 			const auto bakeDoneT = std::chrono::steady_clock::now();
 			const double ms = std::chrono::duration<double, std::milli>(
 				bakeDoneT - bakeSpawnT).count();
