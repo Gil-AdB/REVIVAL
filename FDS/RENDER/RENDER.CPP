@@ -611,7 +611,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		bool     batchOpen    = false;
 		int      batchFirst   = 0;
 		int      batchLastEnd = 0;
-		const int peelPasses = std::max(1, fds::FeatureFlags::xpar_peel_passes());
+		const int peelPasses = xparPeelPassesEffective();
 		auto flushBatch = [&]() {
 			if (!batchOpen) return;
 			TriMesh*    T   = batchMesh;

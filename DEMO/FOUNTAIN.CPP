@@ -877,6 +877,11 @@ void Initialize_Fountain()
 	FntSc->NZP = 20.0f;
 	FntSc->FZP = 5000.0f;
 	FntSc->Flags |= Scn_SpriteTBR;
+	// Nested spire glass (outer f_sphere + inner "in shpere" + the mizraka
+	// centre sphere) stacks past the single front/back peel. Peel deeper here
+	// so the overlapping transparent layers compose; other scenes keep the
+	// legacy 1. --xpar_peel_passes overrides this when set explicitly.
+	FntSc->XparPeelPasses = 4;
 
 	tagSceneMaterials(FntSc, /*restrictToScene=*/true);
 

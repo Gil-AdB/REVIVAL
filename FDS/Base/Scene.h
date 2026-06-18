@@ -67,6 +67,13 @@ struct Scene
     // still override with FDS_VOLUMETRIC_UNIFIED.
     dword            PreferVolumetricUnified;
 
+    // Transparent depth-peel passes PER SIDE for this scene (total stacked
+    // layers = 2x). 0/1 = legacy single front/back peel; scenes with nested
+    // glass (the fountain spire orbs) set higher so >2 overlapping transparent
+    // layers stack. The CLI/env flag --xpar_peel_passes overrides this when
+    // explicitly set. Read via xparPeelPassesEffective() in the xpar dispatch.
+    dword            XparPeelPasses;
+
     // Static-shadow lightmap table populated by LightmapBake_Static.
     // Index 0 is reserved sentinel (nullptr) so Mekalele's per-pixel
     // staticLMMeshId == 0 means "no lightmap for this pixel". Indices

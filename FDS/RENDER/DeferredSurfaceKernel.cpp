@@ -1823,6 +1823,18 @@ bool deferredUnifiedTbrEnabled() {
 	return true;
 }
 
+// Effective transparent depth-peel passes (per side): the CLI/env flag wins
+// when explicitly set, otherwise the current scene's per-scene default
+// (Scene::XparPeelPasses; 0 → legacy 1). Used by both xpar dispatch paths.
+int xparPeelPassesEffective() {
+	if (fds::FeatureFlags::isSet(fds::FeatureFlags::IntId::xpar_peel_passes)) {
+		const int f = fds::FeatureFlags::xpar_peel_passes();
+		return f < 1 ? 1 : f;
+	}
+	const int p = CurScene ? int(CurScene->XparPeelPasses) : 0;
+	return p < 1 ? 1 : p;
+}
+
 // Per-strip xpar render helper, called from TBR_Render's per-strip walk
 // for each clump of consecutive same-(mesh, frontFacing) transparent
 // faces in the sorted item list. The strip covers rows [strip_y,
@@ -1839,7 +1851,7 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 {
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
 	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
-	const int peelPasses = std::max(1, fds::FeatureFlags::xpar_peel_passes());
+	const int peelPasses = xparPeelPassesEffective();
 	meka::GBuffer* sideGB = front ? g_gbufferTransparent : g_gbufferTransparentBack;
 	uint16_t*      sideZ  = front ? g_xparZ              : g_xparZBack;
 
