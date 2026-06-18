@@ -61,6 +61,11 @@ void Render_BloomPass();
 // g_hdrActive. Threaded. Call alongside Render_BloomPass, before the tonemap.
 void Render_AnamorphicPass();
 
+// Depth-of-field: circle-of-confusion bokeh blur off the G-buffer depth, applied
+// to the linear g_hdrBuf. Call BEFORE Render_BloomPass so defocused highlights
+// bloom into discs. No-op unless --dof && g_hdrActive. Threaded.
+void Render_DoFPass();
+
 // Screen-space lens-flare ghosts: a chain of chroma-fringed discs + a halo ring
 // mirrored through screen-centre off each hot HDR source, sampled from the
 // bright-pass and added pre-tonemap. No-op unless --lens_ghosts && g_hdrActive.

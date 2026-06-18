@@ -4,6 +4,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FrameState.h"      // MainRenderTargetFromGlobals
 #include "Base/RenderTarget.h"
+#include "Base/Scene.h"           // CurScene->FZP for DoF range normalization
 #include "Base/FeatureFlags.h"
 #include "Threads.h"             // ThreadPool — tile the tonemap across the pool
 
@@ -297,6 +298,100 @@ void Render_AnamorphicPass() {
                 row[x*4+0] += b * tB * intensity;
                 row[x*4+1] += g * tG * intensity;
                 row[x*4+2] += r * tR * intensity;
+            }
+        }
+    });
+}
+
+// Depth-of-field: circle-of-confusion bokeh blur off the G-buffer depth.
+// Applied to the linear g_hdrBuf BEFORE bloom so defocused highlights bloom
+// into discs. Gather blur over a golden-angle unit disc scaled by each pixel's
+// CoC; "scatter-as-gather" weighting (a tap contributes only if its OWN CoC is
+// large enough to reach the centre) keeps sharp foreground from bleeding into
+// blurred background. In-focus pixels (CoC < ~1px) are left untouched. No-op
+// unless --dof && g_hdrActive.
+void Render_DoFPass() {
+    if (!FeatureFlags::dof() || !g_hdrActive) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.zpage16) return;
+    const float maxR = FeatureFlags::dof_max();
+    if (maxR < 0.75f) return;
+    // dof_range is a fraction of the scene far-plane → absolute view-z units,
+    // so a single default works whether the scene is a small room or a vista.
+    const float fzp = (CurScene && CurScene->FZP > 0.0f) ? CurScene->FZP : 1000.0f;
+    const float range = std::max(1e-3f, FeatureFlags::dof_range() * fzp);
+    const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+    const uint16_t* const Z = rt.zpage16;
+    auto viewZ = [=](size_t i) -> float {
+        const int enc = int(Z[i]);
+        if (enc == 0) return 3.0e9f;          // no geometry → treat as far (sky)
+        return float(0xFF80 - enc) * invZScale;
+    };
+
+    // Focus distance: explicit (dof_focus), or auto on a small screen-centre
+    // window (skipping sky). If the centre is all sky there's no subject → no-op.
+    float focus = FeatureFlags::dof_focus();
+    if (focus <= 0.0f) {
+        double acc = 0.0; int n = 0;
+        const int cx = W / 2, cy = H / 2, R = std::max(2, std::min(W, H) / 40);
+        for (int dy = -R; dy <= R; ++dy) {
+            const int yy = cy + dy; if (yy < 0 || yy >= H) continue;
+            for (int dx = -R; dx <= R; ++dx) {
+                const int xx = cx + dx; if (xx < 0 || xx >= W) continue;
+                const float z = viewZ(size_t(yy) * W + xx);
+                if (z < 2.0e9f) { acc += z; ++n; }
+            }
+        }
+        if (n == 0) return;
+        focus = float(acc / double(n));
+    }
+
+    // Golden-angle unit-disc tap offsets — deterministic (no RNG, banned in scripts).
+    constexpr int TAPS = 24;
+    static float s_ox[TAPS], s_oy[TAPS], s_or[TAPS];
+    static bool s_init = false;
+    if (!s_init) {
+        const float GA = 2.39996323f;
+        for (int t = 0; t < TAPS; ++t) {
+            const float r = std::sqrt((float(t) + 0.5f) / float(TAPS));
+            const float a = float(t) * GA;
+            s_ox[t] = r * std::cos(a); s_oy[t] = r * std::sin(a); s_or[t] = r;
+        }
+        s_init = true;
+    }
+
+    static std::vector<float> s_src;
+    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
+    const float* const SRC = s_src.data();
+    float* const DST = g_hdrBuf.data();
+
+    auto cocAt = [=](size_t i) -> float {
+        float c = std::fabs(viewZ(i) - focus) / range; if (c > 1.0f) c = 1.0f;
+        return c * maxR;
+    };
+
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        for (int y = y1; y < y2; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const size_t i = size_t(y) * size_t(W) + size_t(x);
+                const float coc = cocAt(i);
+                if (coc < 0.75f) continue;               // in focus → keep DST (== SRC)
+                float sb = SRC[i*4+0], sg = SRC[i*4+1], sr = SRC[i*4+2], wsum = 1.0f;
+                for (int t = 0; t < TAPS; ++t) {
+                    const int sx = int(float(x) + s_ox[t] * coc + 0.5f);
+                    const int sy = int(float(y) + s_oy[t] * coc + 0.5f);
+                    if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+                    const size_t si = size_t(sy) * size_t(W) + size_t(sx);
+                    const float d = s_or[t] * coc;        // tap distance from centre (px)
+                    float w = cocAt(si) - d + 1.0f;       // tap reaches centre iff its CoC >= d
+                    if (w <= 0.0f) continue; if (w > 1.0f) w = 1.0f;
+                    sb += SRC[si*4+0] * w; sg += SRC[si*4+1] * w; sr += SRC[si*4+2] * w;
+                    wsum += w;
+                }
+                const float inv = 1.0f / wsum;
+                DST[i*4+0] = sb * inv; DST[i*4+1] = sg * inv; DST[i*4+2] = sr * inv;
             }
         }
     });

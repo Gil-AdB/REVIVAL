@@ -203,6 +203,10 @@ FDS_FLAG_BOOL (chromatic,               "FDS_CHROMATIC",                0,      
 FDS_FLAG_FLOAT(chromatic_amount,        "FDS_CHROMATIC_AMOUNT",         2.5f,                           "atmos",    "Max channel split in pixels at the frame corner (0 at centre). ~1-4 subtle to strong.")
 FDS_FLAG_BOOL (vignette,                "FDS_VIGNETTE",                 0,                              "atmos",    "Vignette: darken the frame toward the corners (cinematic focus). Post-tonemap on the 8-bit image.")
 FDS_FLAG_FLOAT(vignette_strength,       "FDS_VIGNETTE_STRENGTH",        0.4f,                           "atmos",    "Vignette darkening at the corner (0 = none, 1 = black corners). ~0.3-0.5 natural.")
+FDS_FLAG_BOOL (dof,                     "FDS_DOF",                      0,                              "atmos",    "Depth-of-field: circle-of-confusion bokeh blur off the G-buffer depth, applied to the linear g_hdrBuf BEFORE bloom so defocused highlights bloom into discs. Gather blur with a golden-angle disc kernel + scatter-as-gather weighting (no foreground bleed). Requires --hdr. Threaded.")
+FDS_FLAG_FLOAT(dof_focus,               "FDS_DOF_FOCUS",                0.0f,                           "atmos",    "Focus-plane distance in view-space z units. 0 (default) = auto-focus on the screen-centre depth each frame.")
+FDS_FLAG_FLOAT(dof_range,               "FDS_DOF_RANGE",                0.06f,                          "atmos",    "Depth over which sharpness falls to full blur, as a FRACTION of the scene far-plane (so one value auto-scales across scenes: a small room and an outdoor vista both work). Smaller = shallower depth of field. ~0.03 shallow, ~0.1 gentle.")
+FDS_FLAG_FLOAT(dof_max,                 "FDS_DOF_MAX",                  10.0f,                          "atmos",    "Maximum blur radius in pixels at full circle-of-confusion. 0 = off.")
 
 // ─── scene-specific ──────────────────────────────────────────────────────
 FDS_FLAG_BOOL(skip_cubemap,             "FDS_SKIP_CUBEMAP",             0,                              "city",     "City: skip per-building env-map bake")
