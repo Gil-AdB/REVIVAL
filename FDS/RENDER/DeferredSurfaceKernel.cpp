@@ -3196,6 +3196,31 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights, tilePresence, camCtx);
 
+	// Diagnostic (FDS_TILE_LIGHT_PROF=1): avg/max surviving lights per tile
+	// after the cone cull, main frame only. Decides whether the deferred-kernel
+	// cost is "many lights survive" (→ contribution culling) or "few lights but
+	// heavy per-light math" (→ specular). Per-frame at the dispatcher, not hot.
+	static const bool s_tileLightProf = (std::getenv("FDS_TILE_LIGHT_PROF") != nullptr);
+	if (s_tileLightProf && !ov) {
+		static long long accFrames = 0, accSum = 0, accTiles = 0;
+		static int       accMax = 0, accTilesWith = 0, accNonEmpty = 0;
+		const int nT = numTilesX * numTilesY;
+		int sum = 0, mx = 0, nonEmpty = 0;
+		for (int t = 0; t < nT; ++t) {
+			const int c = tileLights[t].count;
+			sum += c; if (c > mx) mx = c; if (c > 0) ++nonEmpty;
+		}
+		accFrames++; accSum += sum; accTiles += nT; accNonEmpty += nonEmpty;
+		if (mx > accMax) accMax = mx;
+		if (accFrames % 60 == 0) {
+			std::fprintf(stderr,
+				"[TILE-LIGHT-PROF] tiles=%d  avg/tile=%.1f  avg/non-empty=%.1f  max=%d  (numLights=%d, %lld frames)\n",
+				nT, double(accSum)/double(accTiles),
+				accNonEmpty ? double(accSum)/double(accNonEmpty) : 0.0,
+				accMax, numLights, accFrames);
+		}
+	}
+
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
 	// when the unified path is active to avoid the per-frame cost on
