@@ -316,7 +316,10 @@ void Render_DoFPass() {
     const int W = rt.xres, H = rt.yres;
     const size_t px = size_t(W) * size_t(H);
     if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.zpage16) return;
-    const float maxR = FeatureFlags::dof_max();
+    // dof_max is specified at a 540p reference height; scale to the actual
+    // resolution so the perceptual blur is consistent (a fixed pixel radius
+    // looks half as strong at 1080p as at 540p — the "not seeing it" trap).
+    const float maxR = FeatureFlags::dof_max() * (float(rt.yres) / 540.0f);
     if (maxR < 0.75f) return;
     // dof_range is a fraction of the scene far-plane → absolute view-z units,
     // so a single default works whether the scene is a small room or a vista.
