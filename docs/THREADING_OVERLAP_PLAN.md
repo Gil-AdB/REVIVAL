@@ -1,12 +1,20 @@
 # Stage A — Shadow-bake ∥ gbuffer-fill overlap (detailed plan)
 
-Status: **IMPLEMENTED, GATED OFF** behind `--shadow-gbuffer-overlap` (default 0). Wired
-across 4 commits (semaphore swap → flag+tileCounter guard → dispatch/join helpers →
-GREETS/RENDER wiring). Validated: byte-gate (flag off) byte-identical; `FDS_THREADS=1`
-flag-on == flag-off; default-threads flag-on == baseline across 5× t=1000 + t={410,500,840}.
-**Still pending before default-on: the 12-concurrent-bench STEADY-count under load** (the
-TSan-blind torn-read detector — a quiet single process won't trigger it) **+ the perf
-measurement** (does it actually reclaim wall-time). Both need an idle machine + go-ahead.
+Status: **IMPLEMENTED, GATED OFF, MEASURED NET-NEGATIVE — do not default on.** Wired across
+4 commits (semaphore swap → flag+tileCounter guard → dispatch/join helpers → GREETS/RENDER
+wiring). Correctness validated: byte-gate (flag off) byte-identical; `FDS_THREADS=1` flag-on
+== flag-off; default-threads flag-on == baseline across 5× t=1000 + t={410,500,840}.
+
+**PERF RESULT (greets sweep t=200→1000, 3 alternating rounds, idle): the overlap is a
+consistent regression.** p50 ~40.0→52.5 ms (+2.4), p95 ~57.5→62.0 (+4); max ~94→89 (−5, it
+smooths the heaviest frames but worsens the typical ones). ROOT CAUSE: the shadow bake and
+the gbuffer fill *each already saturate the thread pool* (both dispatch pool tasks), so
+overlapping them adds no parallelism — only orchestration + cache-interleave cost. The ~27%
+worker idle is within-pass barrier *tail*; the other pass's tasks can't fill it because they
+also need all workers. Reclaiming that idle needs the bigger DAG/task-fusion scheduler
+campaign, NOT a two-pass overlap. The 12-concurrent STEADY-count race check was therefore
+skipped (moot for a feature that won't be enabled).
+
 The safe freebie `Hdr_ActivateNoFog` threading already shipped as `84f189e`. This is the
 big overlap. It is the **highest-risk change in the codebase** — it lives in the exact shadow-bake code that hosted the TSan-invisible
 torn-read that cost ~5 sessions (see memory `project_shadow_tile_flicker_hunt` +
