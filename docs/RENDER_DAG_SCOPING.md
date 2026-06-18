@@ -78,7 +78,9 @@ no inter-dependency). One barrier instead of two, and idle workers during lighti
 pick up cone tiles. Then `Hdr_ActivateNoFog` (unchanged, global) → compose
 `g_hdrBuf += accumBuf` → bloom → tonemap. No per-tile-activate restructure, no HDR-ordering
 trap. Removes the lighting↔cones barrier — the fattest pair (cones 18888 + lighting 12513 are
-the two biggest leaves). This is the main reclaim.
+the two biggest leaves). This is the main reclaim. **Generalizes to the whole additive layer
+(cones + halos + flares + particles), which is commutative → one parallel wave — see "The
+whole ADDITIVE layer is one commutative parallel wave" below.**
 
 **C. General task-DAG with explicit dependencies.** A scheduler where tasks declare deps
 (tile-T-lighting depends on tile-T-gbuffer + global-shadow-bake) and the pool runs any
@@ -87,28 +89,42 @@ and the highest race surface. Overkill for the win; A→B is the pragmatic path.
 
 Recommend **A first (measure), then B if A pays.** Skip C.
 
-## Reuse the transparent-peel infra (don't build Option B from scratch)
+## The whole ADDITIVE layer is one commutative parallel wave (the real Option B)
 
-The cone `accumBuf` is the **additive sibling of the transparent peel**, which already is a
-"compute a layer in its own buffer → composite into `g_hdrBuf` float, after fog, before
-bloom" pass. Model Option B on it:
-- **Buffer lifecycle** — screen-size alloc + `parallel_memset` clear (RENDER.CPP:388 for the
-  xpar G-buffer) + composite-before-bloom slot. `accumBuf` follows the same lifecycle.
-- **Composite step** — the peel's HDR-float composite (`DeferredSurfaceKernel.cpp:1761–1768`,
-  `g_hdrBuf[i]` float blend, unclamped, runs after the froxel fog composite) is the same
-  write the cone compose needs, just `+=` instead of α-blend. Factor a shared
-  "composite-contribution-into-`g_hdrBuf`" helper; peel = blend, cones = add.
-- **Dispatch** — cones + peel already share the deferred tile model + `DeferredLightingCtx`;
-  no new dispatch scaffolding.
-- **Do NOT reuse** the xpar G-buffer (stores material/normal/depth for *re-lighting* — far
-  heavier than an RGB-add accum) or `RenderXparClumpInStrip` (re-lighting kernel). Cones need
-  only an RGB accum + their existing tile light lists.
+The closest analog to cones is NOT the alpha peel — it's the **additive geometry path**.
+Verified: `TheOtherBarry<TBlendMode::ADDITIVE>` already does `g_hdrBuf[i] += src` in HDR
+(`TheOtherBarry.h:563–578`), **identical** to cones' `compositeScatter`
+(`DeferredVolumetric.cpp:64–66`, `g_hdrBuf[i] += scatter`). Halos and flares are the same.
+So all of these are already the *same operation* into the *same buffer*.
 
-Architecturally the engine already composites post-lighting **layers** into `g_hdrBuf` in
-order (opaque → froxel fog → peel → cones/halos → bloom → tonemap). The cone `accumBuf` fills
-in that pattern rather than inventing one — lower risk, and a step toward unifying all
-contribution layers under a single composite (which is what makes the whole post-lighting
-stage a clean DAG).
+KEY PROPERTY: **additive is commutative.** Cones, halos, flares, additive particles are
+therefore **mutually order-independent**, and in HDR mode independent of the lit color. Their
+only input is the **gbuffer depth** (to Z-test against opaque — a flare behind a wall is
+hidden), which is ready right after the gbuffer. So the entire additive layer can be **one
+parallel accumulation wave** that runs *concurrently with lighting* (lighting → `g_hdrBuf`,
+additive → shared `accumBuf`, disjoint), with NO internal ordering and NO dependency on
+lighting's output. Compose `g_hdrBuf += accumBuf` once, before bloom.
+
+This is the strongest form of the reclaim: lighting + the *entire* additive layer (cones +
+halos + flares + particles) become one big pool of independent tiles/faces — the pool stays
+full, one barrier instead of several, and idle workers during any one sub-pass's tail pick up
+another's work. It also parallelizes cones *against the additive geometry*, per the obvious
+commutativity.
+
+Concrete reuse (small, uniform change — not a new architecture):
+- Both cones (`compositeScatter`) and `TheOtherBarry<ADDITIVE>` already target `g_hdrBuf`
+  additively → **redirect both to a shared `accumBuf`** (same `+=`, just a different base
+  pointer), then one compose `g_hdrBuf += accumBuf` before bloom.
+- **Buffer lifecycle** — screen-size float alloc + `parallel_memset` clear (mirror the xpar
+  G-buffer clear, RENDER.CPP:388) + the existing compose-before-bloom slot.
+- **Do NOT reuse** the xpar G-buffer / `RenderXparClumpInStrip` (those re-light transparent
+  fragments — far heavier). Greets uses *forward* additive anyway (`deferredUnifiedTbrEnabled`
+  is fountain-only); the additive faces render per-face via `TheOtherBarry<ADDITIVE>`.
+
+Caveats: additive is Z-tested against opaque depth (ready after gbuffer — fine) and currently
+*writes* Z alongside opaque (`RenderInner.cpp:260`); writing to `accumBuf` instead means the
+additive Z-writes go away, which is safe IFF nothing opaque draws after the additive layer
+(it's last before bloom — verify). Color stays exact (commutative add).
 
 ## Dependency / correctness notes
 - Per-tile fuse keeps each tile's writes disjoint (gbuffer tile T, framebuffer tile T) — the
