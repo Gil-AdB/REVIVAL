@@ -37,35 +37,6 @@ void Hdr_BeginFramePass(int w, int h) {
 // through the same tonemap — see RenderSecondOrderMirrors.
 void Hdr_BeginFrame() { Hdr_BeginFramePass(XRes, YRes); }
 
-void Hdr_ActivateNoFog() {
-    const RenderTarget rt = MainRenderTargetFromGlobals();
-    const size_t px = size_t(rt.xres) * size_t(rt.yres);
-    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage) return;
-    const bool  linear = FeatureFlags::hdr_linear();
-    const int   stride = rt.bytesPerScanline / 4;
-    const float kInv   = 1.0f / 255.0f;
-    // Mat_HdrEmissive boost: forward env surfaces (the disco ball) stamp the
-    // 0xFFFFFFFE sentinel; lift them ×gain so they exceed 255 and over-bloom.
-    // Only when the mat32 plane matches THIS pass's dims (in the mirror RTT the
-    // globals are the RTT surface but g_gbuffer is the MAIN one → skip).
-    const bool  boostOK = rt.mat32 && rt.mat32Count == uint32_t(px);
-    const float gain    = boostOK ? FeatureFlags::hdr_refl_gain() : 1.0f;
-    for (int y = 0; y < rt.yres; ++y) {
-        const uint32_t* row = rt.vpage + size_t(y) * size_t(stride);
-        float*          h   = g_hdrBuf.data() + size_t(y) * size_t(rt.xres) * 4;
-        const uint32_t* mrow = boostOK ? rt.mat32 + size_t(y) * size_t(rt.xres) : nullptr;
-        for (int x = 0; x < rt.xres; ++x) {
-            if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
-            const uint32_t p = row[x];
-            float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
-            if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 → linear scale
-            if (mrow && mrow[x] == 0xFFFFFFFEu) { b *= gain; g *= gain; r *= gain; }
-            h[x*4+0] = b; h[x*4+1] = g; h[x*4+2] = r;
-        }
-    }
-    g_hdrActive = true;
-}
-
 // Shared row-band tile dispatch (no write overlap: each job owns a row band of
 // the TARGET buffer). body(y1,y2) processes rows [y1,y2). Callers run on the
 // tick thread, not a pool worker, so enqueue+wait can't deadlock.
@@ -81,6 +52,43 @@ static void hdrDispatchRows(int rows, Body&& body) {
         ++jobs;
     }
     for (int k = 0; k < jobs; ++k) renderns::tileDone.acquire();
+}
+
+void Hdr_ActivateNoFog() {
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const size_t px = size_t(rt.xres) * size_t(rt.yres);
+    if (px == 0 || g_hdrBuf.size() < px * 4 || !rt.vpage) return;
+    const bool  linear = FeatureFlags::hdr_linear();
+    const int   stride = rt.bytesPerScanline / 4;
+    const float kInv   = 1.0f / 255.0f;
+    // Mat_HdrEmissive boost: forward env surfaces (the disco ball) stamp the
+    // 0xFFFFFFFE sentinel; lift them ×gain so they exceed 255 and over-bloom.
+    // Only when the mat32 plane matches THIS pass's dims (in the mirror RTT the
+    // globals are the RTT surface but g_gbuffer is the MAIN one → skip).
+    const bool  boostOK = rt.mat32 && rt.mat32Count == uint32_t(px);
+    const float gain    = boostOK ? FeatureFlags::hdr_refl_gain() : 1.0f;
+    // Threaded over disjoint row bands — was a serial full-screen scan that
+    // parked all workers between the lighting and cone passes.
+    const int            xres  = rt.xres;
+    const uint32_t* const vpage = rt.vpage;
+    const uint32_t* const mat32 = rt.mat32;
+    float* const          hbuf  = g_hdrBuf.data();
+    hdrDispatchRows(rt.yres, [=](int y1, int y2) {
+        for (int y = y1; y < y2; ++y) {
+            const uint32_t* row = vpage + size_t(y) * size_t(stride);
+            float*          h   = hbuf  + size_t(y) * size_t(xres) * 4;
+            const uint32_t* mrow = boostOK ? mat32 + size_t(y) * size_t(xres) : nullptr;
+            for (int x = 0; x < xres; ++x) {
+                if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
+                const uint32_t p = row[x];
+                float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
+                if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 → linear scale
+                if (mrow && mrow[x] == 0xFFFFFFFEu) { b *= gain; g *= gain; r *= gain; }
+                h[x*4+0] = b; h[x*4+1] = g; h[x*4+2] = r;
+            }
+        }
+    });
+    g_hdrActive = true;
 }
 
 void Render_BloomPass() {
