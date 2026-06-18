@@ -2636,7 +2636,11 @@ struct GreetsScene : SceneDriver {
 
 		// Disco-ball bloom: post-pass over the ball's screen disc
 		// (no-op when --no-greets-disco / ball off-screen).
-		fds::DiscoBloomPost();
+		// SUBSUMED by full-screen --bloom (the ball is Mat_HdrEmissive, a true
+		// HDR source that over-blooms through the general bloom). Run this
+		// legacy localized pass only when --bloom is OFF.
+		if (!fds::FeatureFlags::bloom())
+			fds::DiscoBloomPost();
 
 		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {

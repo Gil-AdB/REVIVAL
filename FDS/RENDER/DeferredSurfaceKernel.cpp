@@ -2523,7 +2523,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// (deferred-quarter checker over the forward surface, HDR only; in
 			// LDR the forward filler overwrites VPage so it is invisible -> gate
 			// on hdrWrite to keep the LDR fill byte-exact).
-			if (hdrWrite && mat32 == 0xFFFFFFFFu) continue;
+			if (hdrWrite && (mat32 == 0xFFFFFFFFu || mat32 == 0xFFFFFFFEu)) continue;  // both forward sentinels
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
 
 			// Center normal decoded once; reused by every fill pattern's

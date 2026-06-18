@@ -60,6 +60,9 @@ RenderTarget MainRenderTargetFromGlobals() {
     rt.gbufferTransparentBack = g_gbufferTransparentBack;
     rt.xparZ                  = g_xparZ;
     rt.xparZBack              = g_xparZBack;
+    rt.mat32                  = (g_gbuffer && !g_gbuffer->txtr.empty())
+                                ? g_gbuffer->txtr.data() : nullptr;   // HDR lift reads the forward sentinel
+    rt.mat32Count             = g_gbuffer ? uint32_t(g_gbuffer->txtr.size()) : 0u;
     return rt;
 }
 

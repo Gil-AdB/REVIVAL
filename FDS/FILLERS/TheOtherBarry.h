@@ -240,7 +240,7 @@ struct TileRasterizer {
 	TileRasterizer(Vertex** V, byte* dstSurface, int32_t bpsl, int32_t xres, int32_t yres,
 	               uint16_t* zpage16, float zScale,
 	               uint32_t* gbufferMat32,
-	               Texture* Txtr, int miplevel)
+	               Texture* Txtr, int miplevel, uint32_t sentinel = 0xFFFFFFFFu)
 		: V(V)
 		, dstSurface(dstSurface)
 		, bpsl(bpsl)
@@ -248,7 +248,8 @@ struct TileRasterizer {
 		, yres(yres)
 		, zpage16(zpage16)
 		, zScale(zScale)
-		, gbufferMat32(gbufferMat32) {
+		, gbufferMat32(gbufferMat32)
+		, sentinel(sentinel) {
 
 		if constexpr (TextureMode != barry::TTextureMode::NONE) {
 			t0.LogWidth = Txtr->LSizeX - miplevel;
@@ -276,6 +277,7 @@ struct TileRasterizer {
 	// would leave its real matID in mat32 and the lighting kernel would
 	// re-shade it over our color. With the stamp, order doesn't matter.
 	uint32_t* gbufferMat32;
+	uint32_t  sentinel;     // mat32 value stamped for written lanes (Mat_HdrEmissive → 0xFFFFFFFE so the HDR lift boosts it; else 0xFFFFFFFF)
 	struct TextureInfo {
 		const dword* TextureAddr;
 		const dword* TextureAddr1;
@@ -627,7 +629,7 @@ struct TileRasterizer {
 						_mm256_maskstore_epi32(
 							reinterpret_cast<int*>(mat32_span),
 							*(__m256i*)(&p_mask),
-							_mm256_set1_epi32(int(0xFFFFFFFF)));
+							_mm256_set1_epi32(int(sentinel)));
 					}
 					}  // end else (non-HDRAccum store path)
 				}
@@ -948,13 +950,19 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// the include graph straight (Mekalele.h includes TheOtherBarry.h,
 	// not the other way round).
 	uint32_t *gbufferMat32 = meka::gbuffer_mat32_plane(rt.gbuffer);
+	// Mat_HdrEmissive (the forward env disco ball) stamps a DISTINCT sentinel so
+	// the HDR lift boosts those pixels past 255 (over-bloom) — material-driven,
+	// no hot-kernel cost. Plain forward surfaces keep 0xFFFFFFFF. The deferred
+	// kernel skips both (sentinel matID 0xFF >= matTable.count).
+	const uint32_t sentinel = (F->Txtr && (F->Txtr->Flags & Mat_HdrEmissive))
+	                          ? 0xFFFFFFFEu : 0xFFFFFFFFu;
 	barry::TileRasterizer<BlendMode, TextureMode, WriteZ, AlphaTest, HDRAccum> r(V,
 	                                                 reinterpret_cast<byte*>(rt.vpage),
 	                                                 rt.bytesPerScanline,
 	                                                 rt.xres, rt.yres,
 	                                                 rt.zpage16, cam.zScale,
 	                                                 gbufferMat32,
-	                                                 F->Txtr->Txtr, miplevel);
+	                                                 F->Txtr->Txtr, miplevel, sentinel);
 
 	if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
 		r.t0.TextureAddr1 = (dword*)F->ReflectionTexture->Data;

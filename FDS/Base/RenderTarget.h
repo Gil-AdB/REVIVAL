@@ -48,6 +48,14 @@ struct RenderTarget {
     // above. Null when forward.
     uint16_t      *xparZ                    = nullptr;
     uint16_t      *xparZBack                = nullptr;
+    // Raw opaque mat32 plane (== gbuffer->txtr) + its pixel count. Exposed as a
+    // bare pointer so the HDR lift can read the per-pixel forward sentinel
+    // (Mat_HdrEmissive → 0xFFFFFFFE) without pulling in the full GBuffer
+    // definition. mat32Count lets the lift confirm the plane matches THIS pass's
+    // dims — in the mirror RTT the globals are the RTT surface but g_gbuffer is
+    // still the MAIN one, so count != rt.xres*yres there and the boost is skipped.
+    const uint32_t *mat32                   = nullptr;
+    uint32_t        mat32Count              = 0;
 };
 
 } // namespace fds

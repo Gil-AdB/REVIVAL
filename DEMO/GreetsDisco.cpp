@@ -163,7 +163,10 @@ bool BuildDiscoBall(Scene *sc)
     M->Diffuse    = 1.0f;
     M->Reflection = 100.0f;
     M->Luminosity = 0.0f;
-    M->Flags      = Mat_RGBInterp;  // NOT TwoSided: the ball backface-culls
+    M->Flags      = Mat_RGBInterp | Mat_HdrEmissive;  // NOT TwoSided: backface-culls.
+                                    // Mat_HdrEmissive: the env filler stamps a
+                                    // distinct G-buffer sentinel so the HDR lift
+                                    // boosts the ball past 255 → it over-blooms.
     M->RelScene   = sc;
     M->ID         = 0;  // forward env path — never commits a G-buffer matID
     M->Name       = strdup("disco_ball");
