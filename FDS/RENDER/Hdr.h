@@ -49,6 +49,13 @@ void Hdr_BeginFrame();
 // HDR-correctly (Hdr_WritableFor then matches that pass's ctx.xres/yres).
 void Hdr_BeginFramePass(int w, int h);
 
+// Full-screen HDR bloom. Bright-passes the linear radiance in g_hdrBuf, blurs a
+// quarter-res pyramid, and adds the glow back INTO g_hdrBuf — so call it after
+// all HDR accumulation (scene/fog/cones/overlays) and BEFORE Render_TonemapToVPage
+// (the bloom then rolls off through ACES with everything else). No-op unless
+// --bloom && g_hdrActive. Threaded (tile-job dispatch).
+void Render_BloomPass();
+
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();

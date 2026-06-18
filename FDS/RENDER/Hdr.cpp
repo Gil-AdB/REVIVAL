@@ -58,6 +58,118 @@ void Hdr_ActivateNoFog() {
     g_hdrActive = true;
 }
 
+// Shared row-band tile dispatch (no write overlap: each job owns a row band of
+// the TARGET buffer). body(y1,y2) processes rows [y1,y2). Callers run on the
+// tick thread, not a pool worker, so enqueue+wait can't deadlock.
+template <class Body>
+static void hdrDispatchRows(int rows, Body&& body) {
+    constexpr int kBands = 24;
+    const int band = (rows + kBands - 1) / kBands;
+    if (band <= 0) return;
+    int jobs = 0;
+    for (int y = 0; y < rows; y += band) {
+        const int y2 = std::min(y + band, rows);
+        ThreadPool::instance().enqueue([=]() { body(y, y2); renderns::tileDone.release(); });
+        ++jobs;
+    }
+    for (int k = 0; k < jobs; ++k) renderns::tileDone.acquire();
+}
+
+void Render_BloomPass() {
+    if (!FeatureFlags::bloom() || !g_hdrActive) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4) return;
+    const float thresh    = FeatureFlags::bloom_threshold();
+    const float intensity = FeatureFlags::bloom_intensity();
+    if (intensity <= 0.0f) return;
+
+    constexpr int DS = 4;                              // quarter-res bloom buffer
+    const int bw = (W + DS - 1) / DS, bh = (H + DS - 1) / DS;
+    static std::vector<float> s_acc, s_tmp;            // reused across frames
+    s_acc.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
+    s_tmp.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
+    const float* const hb = g_hdrBuf.data();
+    float* const A = s_acc.data();
+    float* const T = s_tmp.data();
+
+    // 1. Bright-pass + downsample: each quarter-res cell = mean over its DS×DS
+    //    source block of the radiance ABOVE the knee (per-channel, soft so the
+    //    colour is preserved and the transition isn't hard). Reads the linear
+    //    g_hdrBuf — the true unclamped source.
+    hdrDispatchRows(bh, [=](int by1, int by2) {
+        const float inv = 1.0f / float(DS * DS);
+        for (int by = by1; by < by2; ++by)
+            for (int bx = 0; bx < bw; ++bx) {
+                float sb = 0, sg = 0, sr = 0;
+                for (int dy = 0; dy < DS; ++dy) {
+                    const int sy = by * DS + dy; if (sy >= H) break;
+                    const float* h = hb + size_t(sy) * size_t(W) * 4;
+                    for (int dx = 0; dx < DS; ++dx) {
+                        const int sx = bx * DS + dx; if (sx >= W) break;
+                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
+                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
+                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
+                    }
+                }
+                float* a = A + (size_t(by) * bw + bx) * 3;
+                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
+            }
+    });
+
+    // 2. Separable 5-tap gaussian ([1 4 6 4 1]/16), 2 passes for a wider glow.
+    //    Horizontal A->T then vertical T->A (each pass writes disjoint rows).
+    const float gwc = 6.0f/16.0f, gw1 = 4.0f/16.0f, gw2 = 1.0f/16.0f;
+    for (int pass = 0; pass < 2; ++pass) {
+        hdrDispatchRows(bh, [=](int y1, int y2) {            // horizontal A -> T
+            for (int y = y1; y < y2; ++y)
+                for (int x = 0; x < bw; ++x) {
+                    const int xm2=std::max(x-2,0), xm1=std::max(x-1,0), xp1=std::min(x+1,bw-1), xp2=std::min(x+2,bw-1);
+                    const float* r = A + size_t(y) * bw * 3;
+                    float* d = T + (size_t(y)*bw + x)*3;
+                    for (int c=0;c<3;++c)
+                        d[c] = r[xm2*3+c]*gw2 + r[xm1*3+c]*gw1 + r[x*3+c]*gwc + r[xp1*3+c]*gw1 + r[xp2*3+c]*gw2;
+                }
+        });
+        hdrDispatchRows(bh, [=](int y1, int y2) {            // vertical T -> A
+            for (int y = y1; y < y2; ++y) {
+                const int ym2=std::max(y-2,0), ym1=std::max(y-1,0), yp1=std::min(y+1,bh-1), yp2=std::min(y+2,bh-1);
+                for (int x = 0; x < bw; ++x) {
+                    const float* a=T+(size_t(ym2)*bw+x)*3; const float* b=T+(size_t(ym1)*bw+x)*3;
+                    const float* c0=T+(size_t(y)*bw+x)*3;   const float* d0=T+(size_t(yp1)*bw+x)*3;
+                    const float* e=T+(size_t(yp2)*bw+x)*3;  float* o=A+(size_t(y)*bw+x)*3;
+                    for (int c=0;c<3;++c) o[c]=a[c]*gw2+b[c]*gw1+c0[c]*gwc+d0[c]*gw1+e[c]*gw2;
+                }
+            }
+        });
+    }
+
+    // 3. Bilinear upsample + add intensity*bloom back into g_hdrBuf (pre-tonemap,
+    //    so the glow rolls off through ACES). Each job writes disjoint rows.
+    float* const hw = g_hdrBuf.data();
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        for (int y = y1; y < y2; ++y) {
+            const float fy = (float(y) + 0.5f) / float(DS) - 0.5f;
+            int y0 = int(std::floor(fy)); float wy = fy - float(y0);
+            if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
+            const int y0b = std::min(y0 + 1, bh - 1);
+            float* row = hw + size_t(y) * size_t(W) * 4;
+            for (int x = 0; x < W; ++x) {
+                const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
+                int x0 = int(std::floor(fx)); float wx = fx - float(x0);
+                if (x0 < 0) { x0 = 0; wx = 0; } if (x0 >= bw - 1) { x0 = bw > 1 ? bw - 2 : 0; wx = bw > 1 ? 1.0f : 0.0f; }
+                const int x0b = std::min(x0 + 1, bw - 1);
+                const float w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+                const float* a00=A+(size_t(y0 )*bw+x0 )*3; const float* a10=A+(size_t(y0 )*bw+x0b)*3;
+                const float* a01=A+(size_t(y0b)*bw+x0 )*3; const float* a11=A+(size_t(y0b)*bw+x0b)*3;
+                for (int c = 0; c < 3; ++c)
+                    row[x*4+c] += (a00[c]*w00 + a10[c]*w10 + a01[c]*w01 + a11[c]*w11) * intensity;
+            }
+        }
+    });
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);

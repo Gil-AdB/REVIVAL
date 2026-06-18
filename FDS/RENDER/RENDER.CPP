@@ -55,7 +55,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_BloomPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -737,7 +737,10 @@ xpar_done: ;
 		// freshly-painted skybox with last frame's image (grey wash + cityscape
 		// smear under camera motion). Snapshots hid it: on a one-frame render
 		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
-		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) fds::Render_TonemapToVPage();
+		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
+			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)
+			fds::Render_TonemapToVPage();
+		}
 
 		// Lens droplets are on the "camera glass" — a post effect that refracts
 		// the FINAL displayed image, so they run AFTER the tonemap (LDR, like
