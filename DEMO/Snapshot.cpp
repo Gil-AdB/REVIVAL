@@ -346,14 +346,66 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         timestamps = {100, 600, 1000, 1500, 2100};
     }
 
+    // Optional camera override via env vars, mirroring the fountain path's
+    // FNTSNAP_POS/FWD/FOV. FDS_GREETS_CAM uses the SAME six-float
+    // "px,py,pz,fx,fy,fz" pose format the interactive tick prints on G/F9
+    // ([GREETS-CAM] line), so a pose grabbed live pastes straight in here.
+    // FDS_GREETS_FOV is an optional scalar; without it we leave FOV at the
+    // value the scene/free-cam settled on.
+    //
+    // GreetsScene::init() already honours FDS_GREETS_CAM (it parks View on
+    // the free-cam FC), but the snapshot re-pins the pose itself, BEFORE
+    // each tick's Transform_Objects + Render, so the dumped frame can't
+    // regress on the init() heuristic and so the optional FOV applies. The
+    // tick reads View throughout and Animate_Objects skips camera-spline
+    // animation while View == &FC, so the pinned pose survives the tick.
+    bool overrideCam = false;
+    Vector camPos(0,0,0), camFwd(0,0,1);
+    float  camFOV = 0.0f;   // 0 = keep whatever FC/init() resolved
+    if (const char* s = std::getenv("FDS_GREETS_CAM")) {
+        float px, py, pz, fx, fy, fz;
+        if (std::sscanf(s, "%f,%f,%f,%f,%f,%f",
+                        &px, &py, &pz, &fx, &fy, &fz) == 6) {
+            camPos = Vector(px, py, pz);
+            camFwd = Vector(fx, fy, fz);
+            overrideCam = true;
+        }
+    }
+    if (const char* s = std::getenv("FDS_GREETS_FOV")) {
+        camFOV = float(std::atof(s));
+    }
+
     auto driver = createGreetsScene();
     driver->init();
+
+    if (overrideCam) {
+        std::fprintf(stderr,
+            "[GREETSSNAP] override cam pos=(%.3f,%.3f,%.3f) fwd=(%.3f,%.3f,%.3f) fov=%.1f%s\n",
+            camPos.x, camPos.y, camPos.z, camFwd.x, camFwd.y, camFwd.z,
+            camFOV, camFOV > 0.0f ? "" : " (scene default)");
+    }
 
     int produced = 0;
     for (int32_t ts : timestamps) {
         std::srand(0);
         Timer = ts;
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+
+        if (overrideCam) {
+            // Pin the free-cam to the requested pose BEFORE the tick so the
+            // tick's own Transform_Objects + TBR/Render run on it. Mirrors
+            // GreetsScene::init()'s pose path: a full Kick_Camera basis from
+            // pos + forward, then CalcPersp. Keep init()'s resolved FOV
+            // unless FDS_GREETS_FOV overrides it.
+            FC.ISource = camPos;
+            Vector look(camPos.x + camFwd.x,
+                        camPos.y + camFwd.y,
+                        camPos.z + camFwd.z);
+            Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+            if (camFOV > 0.0f) FC.IFOV = camFOV;
+            CalcPersp(&FC);
+            View = &FC;
+        }
 
         bool more = driver->tick();
         (void)more;
