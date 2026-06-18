@@ -2277,6 +2277,9 @@ struct CityScene : SceneDriver {
 	std::vector<int> dispMap;
 	std::vector<dword> backBuffer;
 	std::vector<uint16_t> zRefl;   // displaced pass-1 Z for reflection fog
+	// Per-frame animated ripple: 1D sine terms (cheap; XRes/YRes sin calls)
+	// summed cross-axis per pixel to drive dispMap. See updateRippleDispMap.
+	std::vector<float> rip_gx1, rip_gx2, rip_gy1, rip_gy2;
 
 	~CityScene() override { Destroy_Scene(CitySc); }
 
@@ -2304,6 +2307,72 @@ struct CityScene : SceneDriver {
 
 	void on_resize(int /*newX*/, int /*newY*/) override {
 		rebuildDispBuffers();
+	}
+
+	// Animated organic ripple for the water reflection. Replaces the static
+	// baked sin(x)/cos(y) warp in rebuildDispBuffers with a time-varying,
+	// cross-axis displacement so the mirrored world below the water actually
+	// moves. Cost is kept low by summing two SEPARABLE sine waves per axis
+	// (XRes+YRes sin calls), then per pixel just lookups + adds; the per-pixel
+	// rebuild is row-parallel across the pool (mirrors parallel_memset). t is
+	// derived from Timer, which is pinned while paused → the ripple freezes
+	// with everything else. No-op when --no-water_ripple (dispMap stays static).
+	void updateRippleDispMap(float timeMs) {
+		const float speed = fds::FeatureFlags::water_ripple_speed();
+		const float amp   = fds::FeatureFlags::water_ripple_amp();
+		const float scale = fds::FeatureFlags::water_ripple_scale();
+		const float t = timeMs * 0.001f * speed;
+		if ((int)dispMap.size() < XRes * YRes) dispMap.assign(XRes * YRes, 0);
+		rip_gx1.resize(XRes); rip_gx2.resize(XRes);
+		rip_gy1.resize(YRes); rip_gy2.resize(YRes);
+		for (int x = 0; x < XRes; ++x) {
+			rip_gx1[x] = std::sin(x * 0.033f * scale + t * 1.3f);
+			rip_gx2[x] = std::sin(x * 0.017f * scale - t * 0.7f);
+		}
+		for (int y = 0; y < YRes; ++y) {
+			rip_gy1[y] = std::sin(y * 0.027f * scale + t * 1.1f);
+			rip_gy2[y] = std::cos(y * 0.019f * scale - t * 0.9f);
+		}
+		int* const dm = dispMap.data();
+		const float* const gx1 = rip_gx1.data(); const float* const gx2 = rip_gx2.data();
+		const float* const gy1 = rip_gy1.data(); const float* const gy2 = rip_gy2.data();
+		const int xr1 = XRes_1, yr1 = YRes_1, xr = XRes;
+		auto band = [=](int y0, int y1) {
+			for (int y = y0; y < y1; ++y) {
+				const float gyB = gy1[y] * 0.4f;       // y-contribution to dx
+				const float dyA = gy2[y] * 0.6f;       // y-contribution to dy
+				int* row = dm + size_t(y) * size_t(xr);
+				for (int x = 0; x < xr; ++x) {
+					const float dx = amp * (gx1[x] * 0.6f + gyB);
+					const float dy = amp * (dyA + gx2[x] * 0.4f);
+					int tx = x + int(dx);
+					int ty = y + int(dy);
+					if (tx < 0) tx = -tx; if (tx > xr1) tx = 2 * xr1 - tx;
+					if (ty < 0) ty = -ty; if (ty > yr1) ty = 2 * yr1 - ty;
+					if (tx < 0) tx = 0; else if (tx > xr1) tx = xr1;   // belt + suspenders
+					if (ty < 0) ty = 0; else if (ty > yr1) ty = yr1;
+					row[x] = ty * xr + tx;
+				}
+			}
+		};
+		auto& tp = ThreadPool::instance();
+		const int nThreads = (int)tp.size();
+		if (nThreads < 2 || YRes < 64) { band(0, YRes); return; }
+		const int chunk = (YRes + nThreads - 1) / nThreads;
+		auto remaining = std::make_shared<std::atomic<int>>(0);
+		int launched = 0;
+		for (int i = 0; i < nThreads; ++i) {
+			const int y0 = i * chunk; if (y0 >= YRes) break;
+			const int y1 = std::min(y0 + chunk, YRes);
+			remaining->fetch_add(1, std::memory_order_relaxed);
+			++launched;
+			tp.enqueue([band, y0, y1, remaining]() {
+				band(y0, y1);
+				remaining->fetch_sub(1, std::memory_order_release);
+			});
+		}
+		(void)launched;
+		while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
 	}
 
 	void init() override {
@@ -2399,6 +2468,13 @@ struct CityScene : SceneDriver {
 		// consecutive captures isolate temporal effects (fog jitter).
 		if (!pause_mode)
 			Reflective_AnimateTexture();
+
+		// Animate the water-reflection displacement (cross-axis travelling
+		// ripples). t = Timer (pinned while paused → ripple freezes too).
+		// Consumed below at the pass-1 dispMap resample; --no-water_ripple
+		// leaves the static warp baked by rebuildDispBuffers untouched.
+		if (fds::FeatureFlags::water_ripple())
+			updateRippleDispMap((float)Timer);
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
