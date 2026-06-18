@@ -178,6 +178,130 @@ void Render_BloomPass() {
     });
 }
 
+// Anamorphic lens streaks (Star Trek 2009 look). Bright-pass the linear
+// g_hdrBuf, build a long HORIZONTAL streak (+ a shorter faint VERTICAL cross)
+// off every hot source via exponential doubling-blur at quarter-res, tint cool
+// blue-white, and add back BEFORE the tonemap so it rolls off through ACES.
+// Independent of --bloom (own bright-pass at bloom_threshold).
+void Render_AnamorphicPass() {
+    if (!FeatureFlags::anamorphic() || !g_hdrActive) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4) return;
+    const float intensity = FeatureFlags::anamorphic_intensity();
+    if (intensity <= 0.0f) return;
+    const float thresh  = FeatureFlags::bloom_threshold();
+    const int   passesH = std::max(0, FeatureFlags::anamorphic_passes());
+    const float decay   = FeatureFlags::anamorphic_decay();
+    const float vert    = FeatureFlags::anamorphic_vert();
+
+    constexpr int DS = 4;                              // quarter-res like bloom
+    const int bw = (W + DS - 1) / DS, bh = (H + DS - 1) / DS;
+    const size_t n = size_t(bw) * size_t(bh) * 3;
+    static std::vector<float> s_br, s_h, s_v, s_tmp;
+    s_br.assign(n, 0.0f);
+    s_h.assign(n, 0.0f);
+    s_v.assign(vert > 0.0f ? n : 0, 0.0f);
+    s_tmp.assign(n, 0.0f);
+    const float* const hb = g_hdrBuf.data();
+    float* const BR = s_br.data();
+
+    // 1. Bright-pass + downsample (same soft knee as bloom).
+    hdrDispatchRows(bh, [=](int by1, int by2) {
+        const float inv = 1.0f / float(DS * DS);
+        for (int by = by1; by < by2; ++by)
+            for (int bx = 0; bx < bw; ++bx) {
+                float sb = 0, sg = 0, sr = 0;
+                for (int dy = 0; dy < DS; ++dy) {
+                    const int sy = by * DS + dy; if (sy >= H) break;
+                    const float* h = hb + size_t(sy) * size_t(W) * 4;
+                    for (int dx = 0; dx < DS; ++dx) {
+                        const int sx = bx * DS + dx; if (sx >= W) break;
+                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
+                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
+                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
+                    }
+                }
+                float* a = BR + (size_t(by) * bw + bx) * 3;
+                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
+            }
+    });
+
+    // 2. Directional exponential streak via offset-doubling (length ~2^passes
+    //    quarter-res px). Each pass: out[x] = in[x] + decay*(in[x-s] + in[x+s]),
+    //    s = 1,2,4,... Ping-pong cur/tmp. The vertical uses fewer passes so it
+    //    stays a short faint cross rather than matching the horizontal length.
+    auto buildStreak = [&](float* out, bool horiz, int passes) {
+        std::copy(BR, BR + n, out);
+        float* cur = out;
+        float* tmp = s_tmp.data();
+        int step = 1;
+        for (int i = 0; i < passes; ++i) {
+            const int   s   = step;
+            const float w   = decay;
+            const float* src = cur;
+            float* dst = tmp;
+            const int lbw = bw, lbh = bh;
+            hdrDispatchRows(bh, [src, dst, s, w, horiz, lbw, lbh](int y1, int y2) {
+                for (int y = y1; y < y2; ++y)
+                    for (int x = 0; x < lbw; ++x) {
+                        const float* c = src + (size_t(y) * lbw + x) * 3;
+                        const float* a; const float* b;
+                        if (horiz) {
+                            const int xm = x - s < 0 ? 0 : x - s, xp = x + s >= lbw ? lbw - 1 : x + s;
+                            a = src + (size_t(y) * lbw + xm) * 3;
+                            b = src + (size_t(y) * lbw + xp) * 3;
+                        } else {
+                            const int ym = y - s < 0 ? 0 : y - s, yp = y + s >= lbh ? lbh - 1 : y + s;
+                            a = src + (size_t(ym) * lbw + x) * 3;
+                            b = src + (size_t(yp) * lbw + x) * 3;
+                        }
+                        float* d = dst + (size_t(y) * lbw + x) * 3;
+                        for (int k = 0; k < 3; ++k) d[k] = c[k] + w * (a[k] + b[k]);
+                    }
+            });
+            std::swap(cur, tmp);
+            step <<= 1;
+        }
+        if (cur != out) std::copy(cur, cur + n, out);
+    };
+    buildStreak(s_h.data(), /*horiz=*/true, passesH);
+    if (vert > 0.0f) buildStreak(s_v.data(), /*horiz=*/false, std::max(0, passesH - 2));
+
+    // 3. Bilinear upsample + tinted add into g_hdrBuf (pre-tonemap). Cool
+    //    blue-white streak tint (B>G>R) for the JJ-Abrams cast.
+    const float tB = 1.0f, tG = 0.9f, tR = 0.7f;
+    float* const hw = g_hdrBuf.data();
+    const float* const SH = s_h.data();
+    const float* const SV = (vert > 0.0f) ? s_v.data() : nullptr;
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        for (int y = y1; y < y2; ++y) {
+            const float fy = (float(y) + 0.5f) / float(DS) - 0.5f;
+            int y0 = int(std::floor(fy)); float wy = fy - float(y0);
+            if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
+            const int y0b = std::min(y0 + 1, bh - 1);
+            float* row = hw + size_t(y) * size_t(W) * 4;
+            for (int x = 0; x < W; ++x) {
+                const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
+                int x0 = int(std::floor(fx)); float wx = fx - float(x0);
+                if (x0 < 0) { x0 = 0; wx = 0; } if (x0 >= bw - 1) { x0 = bw > 1 ? bw - 2 : 0; wx = bw > 1 ? 1.0f : 0.0f; }
+                const int x0b = std::min(x0 + 1, bw - 1);
+                const float w00=(1-wx)*(1-wy), w10=wx*(1-wy), w01=(1-wx)*wy, w11=wx*wy;
+                auto samp = [&](const float* S, int c) {
+                    return S[(size_t(y0 )*bw+x0 )*3+c]*w00 + S[(size_t(y0 )*bw+x0b)*3+c]*w10
+                         + S[(size_t(y0b)*bw+x0 )*3+c]*w01 + S[(size_t(y0b)*bw+x0b)*3+c]*w11;
+                };
+                float b = samp(SH,0), g = samp(SH,1), r = samp(SH,2);
+                if (SV) { b += samp(SV,0)*vert; g += samp(SV,1)*vert; r += samp(SV,2)*vert; }
+                row[x*4+0] += b * tB * intensity;
+                row[x*4+1] += g * tG * intensity;
+                row[x*4+2] += r * tR * intensity;
+            }
+        }
+    });
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);

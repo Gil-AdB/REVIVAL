@@ -56,6 +56,11 @@ void Hdr_BeginFramePass(int w, int h);
 // --bloom && g_hdrActive. Threaded (tile-job dispatch).
 void Render_BloomPass();
 
+// Anamorphic lens streaks (Star Trek 2009): horizontal + faint vertical light
+// streaks off hot HDR sources, added pre-tonemap. No-op unless --anamorphic &&
+// g_hdrActive. Threaded. Call alongside Render_BloomPass, before the tonemap.
+void Render_AnamorphicPass();
+
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();
