@@ -61,6 +61,17 @@ void Render_BloomPass();
 // g_hdrActive. Threaded. Call alongside Render_BloomPass, before the tonemap.
 void Render_AnamorphicPass();
 
+// Screen-space lens-flare ghosts: a chain of chroma-fringed discs + a halo ring
+// mirrored through screen-centre off each hot HDR source, sampled from the
+// bright-pass and added pre-tonemap. No-op unless --lens_ghosts && g_hdrActive.
+// Threaded. Call alongside Render_BloomPass/Render_AnamorphicPass, before the tonemap.
+void Render_LensGhostPass();
+
+// Post-tonemap lens "glass": radial chromatic aberration + vignette on the final
+// 8-bit VPage. No-op unless --chromatic / --vignette. Threaded. Call AFTER
+// Render_TonemapToVPage, and only on the main view (not the mirror RTT).
+void Render_LensPostPass();
+
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();

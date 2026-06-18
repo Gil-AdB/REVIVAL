@@ -2804,7 +2804,9 @@ struct FountainScene : SceneDriver {
 		if (fds::FeatureFlags::hdr() && fds::g_hdrActive) {
 			fds::Render_AnamorphicPass(); // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();      // glow into g_hdrBuf before the tonemap (no-op unless --bloom)
+			fds::Render_LensGhostPass();  // ghost discs + halo before the tonemap (no-op unless --lens_ghosts)
 			fds::Render_TonemapToVPage();
+			fds::Render_LensPostPass();   // CA + vignette on the 8-bit image (no-op unless --chromatic/--vignette)
 			Render_LensDrops();
 		}
 		fds::g_hdrDeferTonemap = false;

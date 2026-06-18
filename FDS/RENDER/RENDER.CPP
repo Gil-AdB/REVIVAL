@@ -55,7 +55,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_BloomPass(); void Render_AnamorphicPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -778,7 +778,9 @@ xpar_done: ;
 		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
 			fds::Render_AnamorphicPass();   // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)
+			fds::Render_LensGhostPass();    // ghost discs + halo into g_hdrBuf BEFORE the tonemap (no-op unless --lens_ghosts)
 			fds::Render_TonemapToVPage();
+			fds::Render_LensPostPass();     // CA + vignette on the 8-bit image AFTER the tonemap (no-op unless --chromatic/--vignette)
 		}
 
 		// Lens droplets are on the "camera glass" — a post effect that refracts

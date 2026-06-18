@@ -302,6 +302,162 @@ void Render_AnamorphicPass() {
     });
 }
 
+// Screen-space lens-flare ghosts. From the bright-pass, march a chain of
+// discs (+ a halo ring) along the line through screen-centre, mirrored from
+// each bright source, with a subtle per-channel radial chroma split. Added to
+// g_hdrBuf BEFORE the tonemap (like bloom/anamorphic). Reuses the same
+// quarter-res bright-pass; independent toggle.
+void Render_LensGhostPass() {
+    if (!FeatureFlags::lens_ghosts() || !g_hdrActive) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4) return;
+    const float intensity = FeatureFlags::lens_ghost_intensity();
+    if (intensity <= 0.0f) return;
+    const float thresh = FeatureFlags::bloom_threshold();
+    const int   count  = std::max(0, FeatureFlags::lens_ghost_count());
+    const float disp   = FeatureFlags::lens_ghost_dispersal();
+    const float halo   = FeatureFlags::lens_ghost_halo();
+
+    constexpr int DS = 4;
+    const int bw = (W + DS - 1) / DS, bh = (H + DS - 1) / DS;
+    static std::vector<float> s_br;
+    s_br.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
+    const float* const hb = g_hdrBuf.data();
+    float* const BR = s_br.data();
+    hdrDispatchRows(bh, [=](int by1, int by2) {
+        const float inv = 1.0f / float(DS * DS);
+        for (int by = by1; by < by2; ++by)
+            for (int bx = 0; bx < bw; ++bx) {
+                float sb = 0, sg = 0, sr = 0;
+                for (int dy = 0; dy < DS; ++dy) {
+                    const int sy = by * DS + dy; if (sy >= H) break;
+                    const float* h = hb + size_t(sy) * size_t(W) * 4;
+                    for (int dx = 0; dx < DS; ++dx) {
+                        const int sx = bx * DS + dx; if (sx >= W) break;
+                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
+                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
+                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
+                    }
+                }
+                float* a = BR + (size_t(by) * bw + bx) * 3;
+                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
+            }
+    });
+
+    float* const hw = g_hdrBuf.data();
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        auto sampleBR = [&](float u, float v, int c) -> float {
+            if (u < 0 || u > 1 || v < 0 || v > 1) return 0.0f;
+            float fx = u * bw - 0.5f, fy = v * bh - 0.5f;
+            int x0 = int(std::floor(fx)); float wx = fx - x0;
+            int y0 = int(std::floor(fy)); float wy = fy - y0;
+            if (x0 < 0) { x0 = 0; wx = 0; } if (x0 >= bw - 1) { x0 = bw > 1 ? bw - 2 : 0; wx = bw > 1 ? 1 : 0; }
+            if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1 : 0; }
+            const int x1 = std::min(x0 + 1, bw - 1), y1b = std::min(y0 + 1, bh - 1);
+            const float* a = BR + (size_t(y0 )*bw + x0)*3; const float* b = BR + (size_t(y0 )*bw + x1)*3;
+            const float* d = BR + (size_t(y1b)*bw + x0)*3; const float* e = BR + (size_t(y1b)*bw + x1)*3;
+            return (a[c]*(1-wx) + b[c]*wx)*(1-wy) + (d[c]*(1-wx) + e[c]*wx)*wy;
+        };
+        const float ca = 0.012f;          // per-channel chroma split for the fringe
+        for (int y = y1; y < y2; ++y) {
+            const float v = (float(y) + 0.5f) / float(H);
+            float* row = hw + size_t(y) * size_t(W) * 4;
+            for (int x = 0; x < W; ++x) {
+                const float u = (float(x) + 0.5f) / float(W);
+                // Mirror the sample origin through centre: ghosts appear on the
+                // far side of centre from each source.
+                const float tu = 1.0f - u, tv = 1.0f - v;
+                const float gx = 0.5f - tu, gy = 0.5f - tv;
+                float sb = 0, sg = 0, sr = 0;
+                for (int i = 1; i <= count; ++i) {
+                    const float t = disp * float(i);
+                    // distance of this ghost from centre → bright-near-centre falloff
+                    const float ox = tu + gx * t, oy = tv + gy * t;
+                    float dc = std::sqrt((0.5f - ox)*(0.5f - ox) + (0.5f - oy)*(0.5f - oy)) * 2.0f;
+                    float wgt = 1.0f - dc; if (wgt < 0) wgt = 0; wgt = wgt * wgt * wgt;
+                    if (wgt <= 0) continue;
+                    sr += sampleBR(tu + gx * t * (1 + ca), tv + gy * t * (1 + ca), 2) * wgt;
+                    sg += sampleBR(ox, oy, 1) * wgt;
+                    sb += sampleBR(tu + gx * t * (1 - ca), tv + gy * t * (1 - ca), 0) * wgt;
+                }
+                if (halo > 0.0f) {
+                    const float len = std::sqrt(gx*gx + gy*gy) + 1e-5f;
+                    const float nx = gx / len, ny = gy / len;
+                    const float hr = 0.42f;   // halo radius (uv)
+                    const float ox = tu + nx * hr, oy = tv + ny * hr;
+                    float dc = std::sqrt((0.5f - ox)*(0.5f - ox) + (0.5f - oy)*(0.5f - oy));
+                    float wgt = 1.0f - std::fabs(dc - hr * 0.5f) * 4.0f; if (wgt < 0) wgt = 0;
+                    wgt *= halo;
+                    if (wgt > 0) {
+                        sr += sampleBR(tu + nx * hr * (1 + ca*2), tv + ny * hr * (1 + ca*2), 2) * wgt;
+                        sg += sampleBR(ox, oy, 1) * wgt;
+                        sb += sampleBR(tu + nx * hr * (1 - ca*2), tv + ny * hr * (1 - ca*2), 0) * wgt;
+                    }
+                }
+                row[x*4+0] += sb * intensity;
+                row[x*4+1] += sg * intensity;
+                row[x*4+2] += sr * intensity;
+            }
+        }
+    });
+}
+
+// Post-tonemap lens "glass": radial chromatic aberration (R outward / B inward,
+// growing toward the corner) + vignette. Operates on the final 8-bit VPage
+// (BGRA: byte0=B, byte1=G, byte2=R). Call AFTER Render_TonemapToVPage, only on
+// the main view (not the mirror RTT).
+void Render_LensPostPass() {
+    const bool doCA = FeatureFlags::chromatic();
+    const bool doVG = FeatureFlags::vignette();
+    if (!doCA && !doVG) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    if (W <= 0 || H <= 0 || !rt.vpage) return;
+    dword* const vp = reinterpret_cast<dword*>(rt.vpage);
+    const float caAmt = doCA ? FeatureFlags::chromatic_amount() : 0.0f;
+    const float vgStr = doVG ? FeatureFlags::vignette_strength() : 0.0f;
+    const float cx = W * 0.5f, cy = H * 0.5f;
+    const float invMaxR = 1.0f / std::sqrt(cx*cx + cy*cy);
+    // CA reads offset neighbours → needs an unmodified source copy.
+    static std::vector<dword> s_src;
+    const dword* src = nullptr;
+    if (doCA) { s_src.assign(size_t(W) * size_t(H), 0u); std::copy(vp, vp + size_t(W)*size_t(H), s_src.data()); src = s_src.data(); }
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        for (int y = y1; y < y2; ++y) {
+            dword* row = vp + size_t(y) * size_t(W);
+            for (int x = 0; x < W; ++x) {
+                const float dx = float(x) - cx, dy = float(y) - cy;
+                const float dist = std::sqrt(dx*dx + dy*dy);
+                const float r = dist * invMaxR;       // 0 centre .. 1 corner
+                int B, G, R;
+                if (doCA) {
+                    const float ux = dx / (dist + 1e-3f), uy = dy / (dist + 1e-3f);
+                    const float off = caAmt * r;
+                    auto samp = [&](float fx, float fy, int sh) -> int {
+                        int sx = int(fx + 0.5f), sy = int(fy + 0.5f);
+                        if (sx < 0) sx = 0; if (sx >= W) sx = W - 1;
+                        if (sy < 0) sy = 0; if (sy >= H) sy = H - 1;
+                        return int((src[size_t(sy) * W + sx] >> sh) & 0xFFu);
+                    };
+                    B = samp(x - ux * off, y - uy * off, 0);
+                    G = samp(float(x),     float(y),     8);
+                    R = samp(x + ux * off, y + uy * off, 16);
+                } else {
+                    const dword p = row[x];
+                    B = int(p & 0xFFu); G = int((p >> 8) & 0xFFu); R = int((p >> 16) & 0xFFu);
+                }
+                if (doVG) {
+                    float vf = 1.0f - vgStr * (r * r); if (vf < 0) vf = 0;
+                    B = int(B * vf); G = int(G * vf); R = int(R * vf);
+                }
+                row[x] = dword(B) | (dword(G) << 8) | (dword(R) << 16) | 0xFF000000u;
+            }
+        }
+    });
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);
