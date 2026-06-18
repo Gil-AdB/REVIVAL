@@ -2617,14 +2617,14 @@ struct GreetsScene : SceneDriver {
 		// frame 0 reads all-zero buffers → no shadows that frame).
 		// City does it in this order (CITY.CPP:2230-2235 then Render at
 		// :2278). Gated on env FDS_SHADOWS=1; no-op when off.
-		Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicOmnisPerFrame);
-		// Per-frame dynamic-mesh bake into the dynamic shadow buffer
-		// of each static omni. Lighting kernel samples max(static,
-		// dynamic) so moving meshes cast moving shadows on static
-		// receivers. No-op when --shadow-dynamic is off.
-		if (fds::FeatureFlags::shadow_dynamic()) {
-			Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicMeshesPerFrame);
-		}
+		// Runs the DynamicOmnis bake and, when --shadow-dynamic is set, the
+		// DynamicMeshes bake into each static omni's dynamic buffer (lighting
+		// samples max(static, dynamic) so moving meshes cast moving shadows).
+		// With --shadow-gbuffer-overlap (Stage A, docs/THREADING_OVERLAP_PLAN.md)
+		// these run on a dedicated thread overlapping the gbuffer fill in
+		// gg->Render() below, and renderFrame joins before deferred lighting;
+		// otherwise they run synchronously inline here (current behavior).
+		ShadowBake_DispatchGreets(GreetSc);
 		gg->Render();
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;

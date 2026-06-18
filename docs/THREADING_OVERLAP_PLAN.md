@@ -1,8 +1,14 @@
 # Stage A — Shadow-bake ∥ gbuffer-fill overlap (detailed plan)
 
-Status: **NOT IMPLEMENTED** (the safe freebie `Hdr_ActivateNoFog` threading already
-shipped as `84f189e`). This is the big overlap. It is the **highest-risk change in the
-codebase** — it lives in the exact shadow-bake code that hosted the TSan-invisible
+Status: **IMPLEMENTED, GATED OFF** behind `--shadow-gbuffer-overlap` (default 0). Wired
+across 4 commits (semaphore swap → flag+tileCounter guard → dispatch/join helpers →
+GREETS/RENDER wiring). Validated: byte-gate (flag off) byte-identical; `FDS_THREADS=1`
+flag-on == flag-off; default-threads flag-on == baseline across 5× t=1000 + t={410,500,840}.
+**Still pending before default-on: the 12-concurrent-bench STEADY-count under load** (the
+TSan-blind torn-read detector — a quiet single process won't trigger it) **+ the perf
+measurement** (does it actually reclaim wall-time). Both need an idle machine + go-ahead.
+The safe freebie `Hdr_ActivateNoFog` threading already shipped as `84f189e`. This is the
+big overlap. It is the **highest-risk change in the codebase** — it lives in the exact shadow-bake code that hosted the TSan-invisible
 torn-read that cost ~5 sessions (see memory `project_shadow_tile_flicker_hunt` +
 `reference_tsan_atomic_blindspot`). Do it unhurried, gated, and validate with the
 concurrent-bench STEADY-count, NOT just TSan / the byte-gate.

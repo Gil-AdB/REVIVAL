@@ -458,6 +458,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// on --hdr.
 		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
 
+		// Stage A overlap (docs/THREADING_OVERLAP_PLAN.md): join the dynamic
+		// shadow bake here — as late as possible (after the gbuffer fill, which
+		// ran concurrently with it) but before lighting samples the maps. No-op
+		// unless a bake was dispatched async this frame (--shadow-gbuffer-overlap,
+		// greets only); pending is cleared by this first join so recursive
+		// shard/RTT lighting passes don't re-join.
+		ShadowBake_JoinPending();
+
 		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
 		// + linear falloff against the scene's omnis, modulated by the
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
