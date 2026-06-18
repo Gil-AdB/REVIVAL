@@ -1603,9 +1603,11 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
                                                 invFOVX,invFOVY,invZScale,density,
                                                 fogZ,invFogZ]() {
+                    const long long _tp = TailProf::nowNs();
                     Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
                                                  invFOVX,invFOVY,invZScale,density,
                                                  fogZ,invFogZ);
+                    TailProf::addBusy(_tp);   // before release → race-free idle metric
                     // One permit per completed tile (see renderns::tileDone).
                     renderns::tileDone.release();
                 });
