@@ -77,6 +77,12 @@ void Render_LensGhostPass();
 // Render_TonemapToVPage, and only on the main view (not the mirror RTT).
 void Render_LensPostPass();
 
+// Post-tonemap "film stock": colour grade (temperature/contrast/saturation +
+// teal-orange split-tone) + animated film grain, on the final 8-bit VPage.
+// No-op unless --grade / --grain. Threaded. Call AFTER Render_LensPostPass,
+// main view only.
+void Render_GradeGrainPass();
+
 // Tonemap g_hdrBuf -> VPage (8-bit BGRA). Call after all HDR writes, before the
 // UI/text overlays (those must NOT be tonemapped). No-op if g_hdrBuf is unsized.
 void Render_TonemapToVPage();

@@ -2808,6 +2808,7 @@ struct FountainScene : SceneDriver {
 			fds::Render_LensGhostPass();  // ghost discs + halo before the tonemap (no-op unless --lens_ghosts)
 			fds::Render_TonemapToVPage();
 			fds::Render_LensPostPass();   // CA + vignette on the 8-bit image (no-op unless --chromatic/--vignette)
+			fds::Render_GradeGrainPass(); // colour grade + film grain on the 8-bit image (no-op unless --grade/--grain)
 			Render_LensDrops();
 		}
 		fds::g_hdrDeferTonemap = false;

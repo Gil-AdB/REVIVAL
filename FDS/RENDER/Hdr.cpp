@@ -556,6 +556,60 @@ void Render_LensPostPass() {
     });
 }
 
+// Post-tonemap colour grade + film grain — the "film stock" tier, on the final
+// 8-bit VPage (after lens-post). Grade: temperature, contrast (around mid), HSL
+// saturation, and a teal-orange split-tone (shadows → teal, highlights → orange,
+// the blockbuster look). Grain: animated per-pixel luminance noise (hashed on
+// x,y,frame). No-op unless --grade / --grain. Threaded.
+void Render_GradeGrainPass() {
+    const bool doGrade = FeatureFlags::grade();
+    const bool doGrain = FeatureFlags::grain();
+    if (!doGrade && !doGrain) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    if (W <= 0 || H <= 0 || !rt.vpage) return;
+    dword* const vp = reinterpret_cast<dword*>(rt.vpage);
+    const float teal = doGrade ? FeatureFlags::grade_teal_orange() : 0.0f;
+    const float con  = doGrade ? FeatureFlags::grade_contrast()    : 1.0f;
+    const float sat  = doGrade ? FeatureFlags::grade_saturation()  : 1.0f;
+    const float temp = doGrade ? FeatureFlags::grade_temp()        : 0.0f;
+    const float grainAmt = doGrain ? FeatureFlags::grain_strength() : 0.0f;
+    static unsigned s_frame = 0;
+    const unsigned frame = doGrain ? s_frame++ : 0u;     // advances → grain animates live
+    hdrDispatchRows(H, [=](int y1, int y2) {
+        auto clamp255 = [](float v) -> int { int i = int(v + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
+        for (int y = y1; y < y2; ++y) {
+            dword* row = vp + size_t(y) * size_t(W);
+            for (int x = 0; x < W; ++x) {
+                const dword p = row[x];
+                float R = float((p >> 16) & 0xFFu), G = float((p >> 8) & 0xFFu), B = float(p & 0xFFu);
+                if (doGrade) {
+                    float r = R * (1.0f/255.0f), g = G * (1.0f/255.0f), b = B * (1.0f/255.0f);
+                    r += temp * 0.1f; b -= temp * 0.1f;                          // temperature
+                    r = (r - 0.5f) * con + 0.5f; g = (g - 0.5f) * con + 0.5f; b = (b - 0.5f) * con + 0.5f; // contrast
+                    const float luma = 0.299f*r + 0.587f*g + 0.114f*b;
+                    r = luma + (r - luma) * sat; g = luma + (g - luma) * sat; b = luma + (b - luma) * sat;  // saturation
+                    const float t = (luma - 0.5f) * 2.0f;                        // -1 shadow .. +1 highlight
+                    const float wH = teal * (t > 0.0f ? t : 0.0f);               // highlight → orange
+                    const float wS = teal * (t < 0.0f ? -t : 0.0f);              // shadow → teal
+                    r += wH * 0.18f - wS * 0.12f;
+                    g += wH * 0.07f + wS * 0.04f;
+                    b += -wH * 0.16f + wS * 0.14f;
+                    R = r * 255.0f; G = g * 255.0f; B = b * 255.0f;
+                }
+                if (doGrain) {
+                    unsigned h = (unsigned(x) * 73856093u) ^ (unsigned(y) * 19349663u) ^ (frame * 83492791u);
+                    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+                    const float n = (float(h & 0xFFFFu) * (1.0f/65535.0f) - 0.5f) * 2.0f;
+                    const float ofs = n * grainAmt;
+                    R += ofs; G += ofs; B += ofs;
+                }
+                row[x] = dword(clamp255(B)) | (dword(clamp255(G)) << 8) | (dword(clamp255(R)) << 16) | 0xFF000000u;
+            }
+        }
+    });
+}
+
 void Render_TonemapToVPage() {
     const RenderTarget rt = MainRenderTargetFromGlobals();
     const size_t px = size_t(rt.xres) * size_t(rt.yres);
