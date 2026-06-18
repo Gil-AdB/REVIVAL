@@ -240,6 +240,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const uint32_t Lis = lights.isSpot[li];
 		const int32_t  Lsi = lights.shadowMapIdx[li];
 		const int32_t  Lss = lights.srcShadowMapIdx[li];
+		const uint32_t Lbc = lights.bounceClamp[li];
 		const float    Lmnx = lights.mirNX[li], Lmny = lights.mirNY[li];
 		const float    Lmnz = lights.mirNZ[li], Lmd  = lights.mirD[li];
 		const float    Lwx = lights.posWorldX[li];
@@ -310,6 +311,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 					tl.isSpot[s]   = Lis;
 					tl.shadowMapIdx[s] = Lsi;
 					tl.srcShadowMapIdx[s] = Lss;
+					tl.bounceClamp[s] = Lbc;
 					tl.mirNX[s] = Lmnx; tl.mirNY[s] = Lmny;
 					tl.mirNZ[s] = Lmnz; tl.mirD[s]  = Lmd;
 					tl.posWorldX[s] = Lwx;
@@ -348,6 +350,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 			tl.isSpot[p]   = 0u;
 			tl.shadowMapIdx[p] = -1;
 			tl.srcShadowMapIdx[p] = -1;
+			tl.bounceClamp[p] = 0u;
 			tl.mirNX[p] = 0.0f; tl.mirNY[p] = 0.0f;
 			tl.mirNZ[p] = 0.0f; tl.mirD[p]  = 0.0f;
 			tl.posWorldX[p] = 0.0f;

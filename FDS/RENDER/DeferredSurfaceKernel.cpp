@@ -1023,6 +1023,22 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// PCF — reflected dot/beam shadows are soft).
 						const int32_t srcSm = tl.srcShadowMapIdx[n];
 						if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
+							// A clone/bounce light borrows its SOURCE spot's 2-D
+							// map: reflect this pixel across the mirror plane and
+							// sample the source's map.
+							//
+							// BOUNCE spots (clampBounce) own no map and may only
+							// relight what the source actually illuminates, so they
+							// default to DARK and are lit only where the reflected
+							// point lands inside the source's cone AND the source
+							// sees it — out-of-cone / occluded stay dark. Without
+							// this the bounce spilled disco light onto walls the
+							// source could never reach (the through-mirror bleed).
+							//
+							// Mirror CLONES keep the established default-lit
+							// behaviour (occluded → dark).
+							const bool clampBounce = (tl.bounceClamp[n] != 0u);
+							if (clampBounce) shadowAtten = 0.0f;
 							const ShadowMap& sm = g_shadowMaps[srcSm];
 							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
 							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
@@ -1050,7 +1066,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
 									int pixZ = 0xFF80 - int(lz * sm.zScale);
 									if (pixZ < 0) pixZ = 0;
-									if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
+									if (clampBounce) {
+										// In-cone + the source sees this point (not
+										// behind a closer occluder) → bounce lights it;
+										// everything else stays dark (set above).
+										if (pixZ + 128 >= int(zS)) shadowAtten = 1.0f;
+									} else {
+										// Clone: default lit, darken only where the
+										// source's map shows a closer occluder.
+										if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
+									}
 								}
 							}
 						}
@@ -3060,10 +3085,12 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		lights.shadowMapIdx[numLights]  = smIdx;
 		lights.cubeShadowIdx[numLights] = cubeIdx;
 		lights.isFlash[numLights]       = (O->Flags & Omni_FogTransient) ? 1u : 0u;
-		// Clone light with a shadow-casting SPOT source → mirrored
-		// shadow sampling against the source's map.
+		// Clone OR bounce light with a shadow-casting SPOT source →
+		// mirrored shadow sampling against the source's 2-D map. Bounce
+		// spots own no map (castsShadow=false); they borrow the source
+		// disco spot's reflected map exactly like clones do.
 		int32_t srcSm = -1;
-		if ((O->Flags & Omni_MirrorClone) && O->mirrorSrcOmni &&
+		if ((O->Flags & (Omni_MirrorClone | Omni_BounceCone)) && O->mirrorSrcOmni &&
 		    fds::FeatureFlags::shadows() &&
 		    (O->mirrorSrcOmni->Flags & Omni_CastsShadow) &&
 		    O->mirrorSrcOmni->Type == Light_SpotLight) {

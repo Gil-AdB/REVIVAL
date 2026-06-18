@@ -567,42 +567,74 @@ void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
 	reflSurf_->Flip = MainSurf ? MainSurf->Flip : nullptr;
 	Build_YOffs_Table(reflSurf_);
 
-	// One shared atlas: a grid of texRes² cells, one per shard. A material
-	// per shard would overrun the 8-bit deferred matID budget, so every
-	// shard shares ONE material/texture and owns a sub-rect.
+	// Reflection atlases: a grid of texRes^2 cells, one cell per shard. A
+	// material per shard would overrun the 8-bit deferred matID budget, so
+	// shards share atlas materials. But the block-tiled sampler (Mekalele
+	// tile_u/tile_v) can't address beyond 1024/axis, so a SINGLE atlas would
+	// cap per-shard res at 1024/gridAxis (64 for greets's 238 shards). Split
+	// the shards across multiple <=1024^2 atlases instead: each holds
+	// atlasCols_*atlasRows_ cells of texRes^2, and we allocate as many as the
+	// shard count needs (one material apiece — a handful fits the matID cap).
 	const int n = int(shards_.size());
-	atlasCols_ = nextPow2(int(std::ceil(std::sqrt(double(n)))));
-	atlasRows_ = nextPow2((n + atlasCols_ - 1) / atlasCols_);
+	if (texRes_ > 1024) texRes_ = 1024;      // a cell must fit one atlas axis
+	auto floorPow2 = [](int v) { int p = 1; while (p * 2 <= v) p <<= 1; return p; };
+	// Cells per atlas axis: how many texRes^2 cells tile into 1024 (pow2 so
+	// the atlas dim atlasCols_*texRes_ stays pow2 for the tiled sampler).
+	atlasCols_ = atlasRows_ = std::max(1, floorPow2(1024 / texRes_));
+	int perAtlas = atlasCols_ * atlasRows_;
+	int nAtlases = (n + perAtlas - 1) / perAtlas;
+	// Cap the atlas count (each = one material + up to 1024^2*4 bytes). A high
+	// res with many shards would need too many; step res down until it fits.
+	constexpr int kMaxAtlases = 8;
+	while (nAtlases > kMaxAtlases && texRes_ > 16) {
+		texRes_ >>= 1;
+		atlasCols_ = atlasRows_ = std::max(1, floorPow2(1024 / texRes_));
+		perAtlas = atlasCols_ * atlasRows_;
+		nAtlases = (n + perAtlas - 1) / perAtlas;
+	}
 	const int aw = atlasCols_ * texRes_, ah = atlasRows_ * texRes_;
-	atlasTex_ = getAlignedType<Texture>(16);
-	atlasTex_->Flags = Txtr_Nomip | Txtr_Tiled;
-	atlasTex_->BPP = 32; atlasTex_->SizeX = aw; atlasTex_->SizeY = ah;
-	atlasTex_->LSizeX = iLog2i(aw); atlasTex_->LSizeY = iLog2i(ah);
-	atlasTex_->Data = (byte*)_aligned_malloc(size_t(aw) * ah * 4, 16);
-	std::memset(atlasTex_->Data, 0, size_t(aw) * ah * 4);
-	atlasTex_->Mipmap[0] = atlasTex_->Data; atlasTex_->numMipmaps = 1;
+	std::fprintf(stderr,
+		"[SHARD-REFL] %d shards: res=%d -> %d atlas(es) of %dx%d (%d cells each)\n",
+		n, texRes_, nAtlases, aw, ah, perAtlas);
 
-	// Display the atlas texel unlit (Lum saturates the light factor; Diff/Spec
-	// 0 keep omnis out) — the same recipe the mirror-RTT slots use.
-	atlasMat_ = getAlignedType<Material>(16);
-	atlasMat_->Txtr = atlasTex_;
-	// Displayed as-is (Lum=1): the half-silvered composite (silver + dst/2)
-	// is baked into the atlas pixels by ApplyShardSilverGlaze, so the dimming
-	// lives there, not here.
-	atlasMat_->Diffuse = 0.0f; atlasMat_->Specular = 0.0f; atlasMat_->Luminosity = 1.0f;
-	atlasMat_->BaseCol = Color{255.0f, 255.0f, 255.0f, 255.0f};
-	atlasMat_->RelScene = sc;
-	atlasMat_->Name = strdup("shard_refl_atlas");
-	atlasMat_->Next = nullptr;
-	if (!MatLib) { atlasMat_->Prev = nullptr; MatLib = atlasMat_; }
-	else { Material* t = MatLib; while (t->Next) t = t->Next; t->Next = atlasMat_; atlasMat_->Prev = t; }
+	atlasTex_.clear();
+	atlasMat_.clear();
+	for (int ai = 0; ai < nAtlases; ++ai) {
+		Texture* tx = getAlignedType<Texture>(16);
+		tx->Flags = Txtr_Nomip | Txtr_Tiled;
+		tx->BPP = 32; tx->SizeX = aw; tx->SizeY = ah;
+		tx->LSizeX = iLog2i(aw); tx->LSizeY = iLog2i(ah);
+		tx->Data = (byte*)_aligned_malloc(size_t(aw) * ah * 4, 16);
+		std::memset(tx->Data, 0, size_t(aw) * ah * 4);
+		tx->Mipmap[0] = tx->Data; tx->numMipmaps = 1;
 
-	for (Shard& s : shards_)
+		// Display the atlas texel unlit (Lum saturates the light factor;
+		// Diff/Spec 0 keep omnis out). The half-silvered composite (silver +
+		// dst/2) is baked into the pixels by ApplyShardSilverGlaze.
+		Material* mt = getAlignedType<Material>(16);
+		mt->Txtr = tx;
+		mt->Diffuse = 0.0f; mt->Specular = 0.0f; mt->Luminosity = 1.0f;
+		mt->BaseCol = Color{255.0f, 255.0f, 255.0f, 255.0f};
+		mt->RelScene = sc;
+		char nm[40]; std::snprintf(nm, sizeof(nm), "shard_refl_atlas%d", ai);
+		mt->Name = strdup(nm);
+		mt->Next = nullptr;
+		if (!MatLib) { mt->Prev = nullptr; MatLib = mt; }
+		else { Material* t = MatLib; while (t->Next) t = t->Next; t->Next = mt; mt->Prev = t; }
+		atlasTex_.push_back(tx);
+		atlasMat_.push_back(mt);
+	}
+
+	// Point each shard's faces at its atlas material (shard si -> atlas si/perAtlas).
+	for (int si = 0; si < n; ++si) {
+		Material* mt = atlasMat_[si / perAtlas];
+		Shard& s = shards_[si];
 		for (int fi = 0; fi < s.mesh->FIndex; ++fi) {
 			s.mesh->Faces[fi].Flags &= ~Face_Reflective;
-			s.mesh->Faces[fi].Txtr   = atlasMat_;
-			s.mesh->Faces[fi].Filler = scene_builder::SceneBuilder::PickFillerForMaterial(atlasMat_);
+			s.mesh->Faces[fi].Txtr   = mt;
+			s.mesh->Faces[fi].Filler = scene_builder::SceneBuilder::PickFillerForMaterial(mt);
 		}
+	}
 	Scene_RebuildMatTable(sc);
 
 	// --shard-deferred: bake each shard's reflection through the DEFERRED kernel
@@ -641,7 +673,7 @@ void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
 }
 
 void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
-	if (!reflCamsOn_ || !active_ || !reflSurf_ || !atlasTex_) return;
+	if (!reflCamsOn_ || !active_ || !reflSurf_ || atlasTex_.empty()) return;
 	const Camera* mainCam = View ? View : sc->CameraHead;
 	if (!mainCam) return;
 	const bool prof = std::getenv("FDS_SHARD_REFL_PROF") != nullptr;
@@ -670,7 +702,8 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 		for (int si = 0; si < int(shards_.size()); ++si) {
 			Shard& s = shards_[si];
 			if (s.local.size() < 4) continue;
-			const int cx = si % atlasCols_, cy = si / atlasCols_;
+			const AtlasCell cell = shardCell(si);
+			const int cx = cell.cx, cy = cell.cy;
 			// Current world quad + normal from the shard's live pose.
 			Vector wc[4];
 			for (int i = 0; i < 4; ++i) {
@@ -849,8 +882,8 @@ void MirrorShatter::renderReflectionCamerasSerial(Scene* sc) {
 				}
 			}
 
-			// Blit the 64² render into this shard's atlas cell (tiled).
-			blitCellTiled((dword*)atlasTex_->Data, aw, ah,
+			// Blit the render into this shard's atlas cell (tiled).
+			blitCellTiled((dword*)cell.tex->Data, aw, ah,
 			              (const dword*)reflSurf_->Data, texRes_, cx, cy);
 		}
 	}   // scope exit restores MainSurf/View/FOV/clip
@@ -915,7 +948,7 @@ void MirrorShatter::ensureReflWorkers() {
 }
 
 void MirrorShatter::renderReflectionCameras(Scene* sc) {
-	if (!reflCamsOn_ || !active_ || !atlasTex_) return;
+	if (!reflCamsOn_ || !active_ || atlasTex_.empty()) return;
 
 	// FDS_SHARD_REFL_SERIAL forces the original serial path (forward or, with
 	// FDS_SHARD_DEFERRED, the global-swap deferred bake). Otherwise the shards
@@ -980,21 +1013,28 @@ void MirrorShatter::renderReflectionCameras(Scene* sc) {
 		static const int target = std::getenv("FDS_SHARD_ATLAS_FRAME")
 		                        ? std::atoi(std::getenv("FDS_SHARD_ATLAS_FRAME")) : 30;
 		if (sFrame++ == target) {
-			const dword* atl = (const dword*)atlasTex_->Data;
 			const int blocksY = ah >> 2;
 			std::vector<unsigned char> img(size_t(aw) * size_t(ah) * 3);
-			for (int y = 0; y < ah; ++y)
-				for (int x = 0; x < aw; ++x) {
-					const int blk = ((x >> 2) * blocksY + (y >> 2)) << 4;
-					const dword px = atl[blk + ((y & 3) << 2) + (x & 3)];
-					const size_t o = (size_t(y) * aw + x) * 3;
-					img[o+0] = (px >> 16) & 0xFF; img[o+1] = (px >> 8) & 0xFF; img[o+2] = px & 0xFF;
+			// One PPM per atlas: sAtlasDump for atlas 0, then _1/_2/… suffixed.
+			for (size_t ai = 0; ai < atlasTex_.size(); ++ai) {
+				const dword* atl = (const dword*)atlasTex_[ai]->Data;
+				for (int y = 0; y < ah; ++y)
+					for (int x = 0; x < aw; ++x) {
+						const int blk = ((x >> 2) * blocksY + (y >> 2)) << 4;
+						const dword px = atl[blk + ((y & 3) << 2) + (x & 3)];
+						const size_t o = (size_t(y) * aw + x) * 3;
+						img[o+0] = (px >> 16) & 0xFF; img[o+1] = (px >> 8) & 0xFF; img[o+2] = px & 0xFF;
+					}
+				char path[512];
+				if (ai == 0) std::snprintf(path, sizeof(path), "%s", sAtlasDump);
+				else         std::snprintf(path, sizeof(path), "%s_%zu", sAtlasDump, ai);
+				if (std::FILE* f = std::fopen(path, "wb")) {
+					std::fprintf(f, "P6\n%d %d\n255\n", aw, ah);
+					std::fwrite(img.data(), 1, img.size(), f);
+					std::fclose(f);
+					std::fprintf(stderr, "[SHARD-ATLAS] frame %d atlas %zu -> %s (%dx%d)\n",
+					             target, ai, path, aw, ah);
 				}
-			if (std::FILE* f = std::fopen(sAtlasDump, "wb")) {
-				std::fprintf(f, "P6\n%d %d\n255\n", aw, ah);
-				std::fwrite(img.data(), 1, img.size(), f);
-				std::fclose(f);
-				std::fprintf(stderr, "[SHARD-ATLAS] frame %d -> %s (%dx%d)\n", target, sAtlasDump, aw, ah);
 			}
 		}
 	}
@@ -1011,7 +1051,8 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
                                         const Vector& E, int aw, int ah) {
 	Shard& s = shards_[si];
 	if (s.local.size() < 4) return;
-	const int cx = si % atlasCols_, cy = si / atlasCols_;
+	const AtlasCell cell = shardCell(si);
+	const int cx = cell.cx, cy = cell.cy;
 
 	// Current world quad + normal from the shard's live pose.
 	Vector wc[4];
@@ -1212,7 +1253,7 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 	}
 
 	// Blit the render into this shard's (disjoint) atlas cell (tiled).
-	blitCellTiled((dword*)atlasTex_->Data, aw, ah,
+	blitCellTiled((dword*)cell.tex->Data, aw, ah,
 	              (const dword*)w.surf.Data, texRes_, cx, cy);
 }
 

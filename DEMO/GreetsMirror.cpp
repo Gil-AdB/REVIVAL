@@ -1215,6 +1215,8 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             std::vector<uint32_t> black(
                 size_t(slot.texW) * size_t(slot.texH), 0xFF000000u);
             slot.mat = Materialize(black.data(), slot.texW, slot.texH);
+            slot.texWMax = slot.texW;   // buffer is allocated at this size
+            slot.texHMax = slot.texH;   // (adaptive sizing only shrinks)
             slot.mat->Luminosity = 1.0f;   // texture holds final colors
             slot.mat->Diffuse    = 0.0f;
             slot.mat->Specular   = 0.0f;
@@ -2284,6 +2286,8 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
                 black.assign(size_t(slot.texW) * size_t(slot.texH),
                              0xFF000000u);
                 slot.mat = Materialize(black.data(), slot.texW, slot.texH);
+                slot.texWMax = slot.texW;   // buffer allocated at this size
+                slot.texHMax = slot.texH;   // (adaptive sizing only shrinks)
                 // The texture holds FINAL shaded colors — display it
                 // unlit: Lum 1.0 saturates the kernel's light factor at
                 // ~255 so lit ≈ texel; Diffuse/Specular 0 keep omnis
@@ -2382,10 +2386,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     const Vector C = mainCam->ISource;
     struct Job {
         MirrorRttSlot *slot;
-        float          area;   // projected px² (visibility ranking)
+        float          area;   // priority: projected px² × staleness (ranking)
         Vector         camPos; // C_B
         float          dist;   // C_B distance to B's plane
         bool           backSide = false;  // order-1: camera behind plane
+        float          sw = 0, sh = 0;    // raw on-screen footprint px (adaptive res)
     };
     std::vector<Job> jobs;
     auto projectToScreen = [&](const Vector &wp, float &sx, float &sy) -> bool {
@@ -2477,7 +2482,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // second; never-rendered slots (staleFrames=2^20) win their
         // first fill immediately.
         const float priority = area * (1.0f + float(s.staleFrames) * (1.0f / 30.0f));
-        jobs.push_back({ &s, priority, cb, -sd, backSide });
+        jobs.push_back({ &s, priority, cb, -sd, backSide,
+                         bx1 - bx0, by1 - by0 });
     }
     if (jobs.empty()) return;
     std::sort(jobs.begin(), jobs.end(),
@@ -2576,9 +2582,32 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     static Camera s_rttCam;
     view.setView(&s_rttCam);     // restored by the view scope
 
+    // View-dependent resolution: bake each panel at the pow2 size matching
+    // its on-screen footprint, clamped to the build-time max (texWMax/Max).
+    // A distant/oblique panel that the fixed world-size×density formula
+    // would still bake at 512² (saturating the cap) drops to the few-hundred
+    // texels it actually occupies — the dominant central-room ANIM cost.
+    const bool rttAdaptive = fds::FeatureFlags::mirror_rtt_adaptive();
+    const float rttAdScale = fds::FeatureFlags::mirror_rtt_adaptive_scale();
+    auto pow2clamp = [](float v, int lo, int hi) {
+        int p = lo;
+        while (p < hi && float(p * 2) <= v * 1.5f) p <<= 1;
+        return p;
+    };
+
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
         const float D = j.dist;
+        // Shrink this job's bake to its on-screen footprint (never above
+        // the allocated texWMax/texHMax). Aspect is preserved by sizing
+        // each axis from its own projected extent.
+        if (rttAdaptive) {
+            s.texW = pow2clamp(j.sw * rttAdScale, 64, s.texWMax);
+            s.texH = pow2clamp(j.sh * rttAdScale, 64, s.texHMax);
+        } else {
+            s.texW = s.texWMax;
+            s.texH = s.texHMax;
+        }
         // Re-stamp the surface to this slot's aspect-matched dims
         // (same texel count, different shape) and republish globals.
         if (s_rttSurf.X != s.texW || s_rttSurf.Y != s.texH) {
@@ -2880,6 +2909,13 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         std::memcpy(s.mat->Txtr->Data, s_rttSurf.Data,
                     size_t(s.texW) * size_t(s.texH) * 4);
         Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
+        // Adaptive res may have shrunk texW/texH below the allocated max;
+        // re-point the texture's dims (+log2 for the Txtr_Tiled masks) so
+        // the sampler reads exactly the filled region. Buffer (texWMax)
+        // unchanged. Dims are pow2, so log2 is a shift count.
+        auto log2p2 = [](int v) { int l = 0; while (v > 1) { v >>= 1; ++l; } return l; };
+        s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
+        s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
         s.staleFrames = 0;
     }
 

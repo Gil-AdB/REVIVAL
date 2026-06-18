@@ -215,10 +215,67 @@ mesh that should cast no shadow.
 
 ---
 
+## 13. Greets perf + bounce shadow + multi-atlas — commits `0ce5373..f229044`
+
+Five commits layered **on top of `bf0b6b5`** (the merge-base with `feature/fog`). These are
+the ones a fog merge has NOT yet seen.
+
+- **`0ce5373` SoA dump trim** — `VertexFrame_DumpFromAoS` writes only the consumed field
+  (`TPos_z`), not all 18. `FDS/Base/VertexFrame.cpp` + `Transform.cpp`. Low conflict risk.
+- **`2c9843a` mirror-bounce through-wall shadow fix** — bounce spots (`Omni_BounceCone`,
+  `castsShadow=false`) borrow their source disco spot's reflected 2-D map. Extends the
+  `srcShadowMapIdx` gate to `Omni_BounceCone`, adds `bounceClamp` (default-dark for bounce,
+  default-lit for clones) in `DeferredSurfaceKernel.cpp`, plumbs `bounceClamp` through
+  `TileLights` (`DeferredCommon.h` + `DeferredLightLists.cpp`), and relaxes the volumetric
+  source-tap gate in `DeferredVolumetric.cpp`.
+- **`fdd1653` mirrortest golden refresh** — `tools/render_gate.sh` `BASE_MIRROR` →
+  `bd664b1067b6610b486d1c81b305ebf6` (was stale pre-existing drift, unrelated to the fix).
+- **`06c225d` view-dependent mirror RTT res** — `RenderSecondOrderMirrors` sizes each bake
+  to the panel's on-screen footprint (clamped to a build-time max `texWMax/texHMax`),
+  re-pointing the texture `SizeX/LSizeX` per job. ANIM 45.6→2.7ms at the greets central room.
+  Flags `--mirror-rtt-adaptive` (default on) + `--mirror-rtt-adaptive-scale`. `GreetsMirror.cpp/.h`.
+- **`f229044` multi-atlas shard res** — shards split across multiple ≤1024² reflection
+  atlases (the block-tiled sampler `tile_u/tile_v` overflows past 1024/axis → black above a
+  single-atlas's 64). New `--greets-shard-res` (pow2, default 64); atlas count capped at 8.
+  `MirrorShatter.cpp/.h` (`atlasTex_`/`atlasMat_` → vectors + `shardCell()`), `GREETS.CPP`.
+
+### ⚠ Conflict surface vs `feature/fog` (7 files; 3 hard)
+
+The HDR work and this work touch overlapping code. Resolutions (the changes are **orthogonal
+in intent** — res/shadowing vs colour-space — so the merge is usually "keep both"):
+
+- **`GreetsMirror.cpp` (`RenderSecondOrderMirrors`)** — adaptive res sizing (this) vs
+  HDR-correct RTT tonemap routing (fog). Keep both: size the bake adaptively **and** run it
+  through the HDR path. The per-job `s.texW/texH = pow2clamp(footprint)` block is independent
+  of the colour-space routing.
+- **`DeferredSurfaceKernel.cpp`** — the `srcShadowMapIdx`/`bounceClamp` shadow branch (this)
+  is independent of linear-space lighting math (fog); both apply.
+- **`DeferredVolumetric.cpp`** — bounce source-tap gate relax (this) vs HDR cone compositing
+  (fog); orthogonal.
+- **`DeferredCommon.h`** — `bounceClamp` field added to `TileLights`/`ViewLightsSoA` (this)
+  vs HDR ctx fields (fog). ⚠ widely-included header → **clean-build before trusting the gate.**
+- **`FeatureFlags.def`** — adjacent flag additions; auto-merges, just check for no dup.
+- **`GREETS.CPP`** — `--greets-shard-res` wiring (this) vs disco HDR-emissive + tonemap hooks
+  (fog). Note fog **retired `DiscoBloomPost` (`12e8c8b`)** — drop any reference to it.
+- **`tools/render_gate.sh`** — BOTH branches changed `BASE_MIRROR` (fog `8c84efc`, this
+  `fdd1653`). After the merge the mirrortest output changes again (HDR tonemap × adaptive
+  res), so **re-baseline ONCE post-merge and agree on the single golden hash.**
+
+### Threading / DAG work is BLOCKED on this consolidation
+
+The next campaign (fuse lighting+cones, overlap shadow-bake ∥ gbuffer, eventual task-DAG)
+restructures the **same `RENDER.CPP` orchestration** fog just threaded in `317a4d6` (tonemap
+6×4 tile-job dispatch). Do NOT start it until the consolidated base (with `317a4d6`) lands on
+`soa-vertex`, so the fusion is built **on top of** the threaded tonemap (folding the tonemap
+into the fused per-tile pass) rather than colliding with it.
+
 ## New flags introduced this session
 
 | flag (CLI) | env | default | scope |
 |---|---|---|---|
+| `--mirror-rtt-adaptive` | `FDS_MIRROR_RTT_ADAPTIVE` | `1` | greets — RTT bake sized to on-screen footprint |
+| `--mirror-rtt-adaptive-scale` | `FDS_MIRROR_RTT_ADAPTIVE_SCALE` | `1.0` | greets — RTT footprint sharpness multiplier |
+| `--greets-shard-res` | `FDS_GREETS_SHARD_RES` | `64` | greets — per-shard reflection res (pow2; multi-atlas) |
 | `--shard-deferred` | `FDS_SHARD_DEFERRED` | `0` | greets — shards bake via deferred kernel |
 | `--greets-mirror-rtt-min-area` | `FDS_GREETS_MIRROR_RTT_MIN_AREA` | `1.5` | greets — RTT-mirror area cutoff |
 | `--greets-mirror-tint` | `FDS_GREETS_MIRROR_TINT` | `0.0` | greets — optional cool-silver cast on all mirrors (`silver*tint + reflection/2`) |

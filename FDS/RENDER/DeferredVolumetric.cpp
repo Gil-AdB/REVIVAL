@@ -469,17 +469,20 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     }
                     if (!spotAlive) continue;
 
-                    // Clone spots have no own map (smIdx=-1) but carry
-                    // the SOURCE's map: visibility of a sample equals
-                    // the source's visibility of the sample reflected
-                    // across the mirror plane (same identity as the
-                    // surface kernel's mirrored tap). The reflection is
+                    // Clone AND bounce spots have no own map (smIdx=-1)
+                    // but carry the SOURCE's map: visibility of a sample
+                    // equals the source's visibility of the sample
+                    // reflected across the mirror plane (same identity as
+                    // the surface kernel's mirrored tap). The reflection is
                     // applied in VIEW space: v' = v − 2(n_v·v + d_v)n_v
                     // with n_v = viewMatᵀ·N_world, d_v = N·camW + D.
+                    // Bounce spots are mirrorId=0 (they light the real
+                    // room, not a reflected RTT), so gate on the source-map
+                    // index alone — it is only ever set for clones/bounces.
                     int32_t smIdx = lights->shadowMapIdx[li];
                     bool  smMirror = false;
                     float nvx=0, nvy=0, nvz=0, dv_pl=0;
-                    if (smIdx < 0 && omid != 0 &&
+                    if (smIdx < 0 &&
                         lights->srcShadowMapIdx[li] >= 0) {
                         smIdx = lights->srcShadowMapIdx[li];
                         smMirror = true;
