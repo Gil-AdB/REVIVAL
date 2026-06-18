@@ -5,6 +5,7 @@
 #include "Base/FrameState.h"      // MainRenderTargetFromGlobals
 #include "Base/RenderTarget.h"
 #include "Base/Scene.h"           // CurScene->FZP for DoF range normalization
+#include "Base/Camera.h"          // View->ITarget for DoF camera-target auto-focus
 #include "Base/FeatureFlags.h"
 #include "Threads.h"             // ThreadPool — tile the tonemap across the pool
 
@@ -333,22 +334,36 @@ void Render_DoFPass() {
         return float(0xFF80 - enc) * invZScale;
     };
 
-    // Focus distance: explicit (dof_focus), or auto on a small screen-centre
-    // window (skipping sky). If the centre is all sky there's no subject → no-op.
+    // Focus distance: explicit (dof_focus), or auto. Auto prefers the camera
+    // track's look-at TARGET (View->ITarget — the point the camera spline is
+    // aimed at, i.e. the intended subject), projected onto the view forward
+    // axis (Mat row 2) to get camera-space z in the same units as viewZ. Falls
+    // back to the average depth of a small screen-centre window (skipping sky)
+    // when there's no usable target (free-look scenes, target behind the eye).
     float focus = FeatureFlags::dof_focus();
     if (focus <= 0.0f) {
-        double acc = 0.0; int n = 0;
-        const int cx = W / 2, cy = H / 2, R = std::max(2, std::min(W, H) / 40);
-        for (int dy = -R; dy <= R; ++dy) {
-            const int yy = cy + dy; if (yy < 0 || yy >= H) continue;
-            for (int dx = -R; dx <= R; ++dx) {
-                const int xx = cx + dx; if (xx < 0 || xx >= W) continue;
-                const float z = viewZ(size_t(yy) * W + xx);
-                if (z < 2.0e9f) { acc += z; ++n; }
-            }
+        focus = 0.0f;
+        if (View) {
+            const float dxt = View->ITarget.x - View->ISource.x;
+            const float dyt = View->ITarget.y - View->ISource.y;
+            const float dzt = View->ITarget.z - View->ISource.z;
+            const float fz = dxt * View->Mat[2][0] + dyt * View->Mat[2][1] + dzt * View->Mat[2][2];
+            if (fz > 1.0f && fz < fzp) focus = fz;       // target in front, within the scene
         }
-        if (n == 0) return;
-        focus = float(acc / double(n));
+        if (focus <= 0.0f) {                              // no usable target → centre-window depth
+            double acc = 0.0; int n = 0;
+            const int cx = W / 2, cy = H / 2, R = std::max(2, std::min(W, H) / 40);
+            for (int dy = -R; dy <= R; ++dy) {
+                const int yy = cy + dy; if (yy < 0 || yy >= H) continue;
+                for (int dx = -R; dx <= R; ++dx) {
+                    const int xx = cx + dx; if (xx < 0 || xx >= W) continue;
+                    const float z = viewZ(size_t(yy) * W + xx);
+                    if (z < 2.0e9f) { acc += z; ++n; }
+                }
+            }
+            if (n == 0) return;
+            focus = float(acc / double(n));
+        }
     }
 
     // Golden-angle unit-disc tap offsets — deterministic (no RNG, banned in scripts).
