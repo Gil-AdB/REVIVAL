@@ -2592,6 +2592,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (px < XRes - 1 && py < YRes - 1) nidx[nc++] = i + XRes + 1;
 				}
 				int sumR = 0, sumG = 0, sumB = 0;
+				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -2599,6 +2600,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
+					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					++n;
 				}
 				if (n > 0) {
@@ -2608,6 +2610,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
 					else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
 					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					// HDR: average the neighbours' unclamped float radiance so the
+					// filled pixel matches wave-1 (the 8-bit avg above caps at 255 →
+					// dim checker on bright reflections under --deferred-quarter).
+					if (hdrWrite) {
+						const float inv = 1.0f / float(n);
+						float* h = fds::g_hdrBuf.data() + i*4;
+						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+					}
 					matched = true;
 				}
 			} else {
@@ -2622,6 +2632,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (px < XRes - 1) nidx[nc++] = i + 1;
 				if (nc == 0) continue;
 				int sumR = 0, sumG = 0, sumB = 0;
+				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -2629,6 +2640,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
+					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					++n;
 				}
 				if (n > 0) {
@@ -2636,6 +2648,11 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
 					else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
 					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
+						const float inv = 1.0f / float(n);
+						float* h = fds::g_hdrBuf.data() + i*4;
+						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+					}
 					matched = true;
 				}
 			}
