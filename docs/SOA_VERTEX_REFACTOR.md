@@ -18,8 +18,21 @@ Verified live state of the refactor:
   (the Ahead/Regular branch flags). Validation matrix: 1-LSB pixel-diff on city@1500 /
   greets@2500 / fountain / chase + TSan + bench (`--soa-verify` gate exists for AoS-vs-SoA
   bit checks). Foundation-critical: a wrong transform breaks every pixel — do it fresh, not
-  at the tail of a long session. **Entry point: `Transform.cpp:317` (the `for (Vtx=Vert...)`
-  loop) + lines 346 (Ahead near-clip) + the Regular branch.**
+  at the tail of a long session.
+
+  **CORRECTED entry point (verified 2026-06-19):** NOT `Vertex_Loop1` (`Transform.cpp:312`) —
+  that is **DEAD CODE** (legacy MMX-era reference, line 7). The live per-vertex transform is
+  the **Inside / Ahead / EAhead loops inside `Transform_Objects` (~lines 1100-1370; labels
+  `Ahead:` @1165, `EAhead:` @1306, Inside just above @1155)** + the near-clip path
+  `calcVisibilityFlags` (@343, called @395). Those loops **already do Vec4f "1-wide-broadcast"**
+  — one vertex, SIMD across the matrix columns (`mul_add(m34_col_x, Vec4f(vpx), m34_col_w)`),
+  cda338e (~1 ms). Phase 2 = the **Vec8f-across-4-to-8-VERTS** restructure: transpose/gather 8
+  verts' AoS `Pos.x/y/z` into Vec8f lanes (the crux — AoS stride forces a transpose; whether it
+  pays vs the scalar math saved is THE open question — could wash like the other levers if the
+  gather/scatter dominates), wide matrix-mul + reciprocal + project, scatter back to AoS (Phase 2
+  keeps the dual-write, so the scatter stays until Phase 5 drops AoS for aligned SoA stores — the
+  *full* win likely needs Phase 4->5, not Phase 2 alone). Plus the tricky near-clip mask. Gate
+  behind a flag (default off) so the scalar path stays correct during validation.
 
 ## Goal
 
