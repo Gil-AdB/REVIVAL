@@ -2,6 +2,25 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## CURRENT STATE (2026-06-19) — Phase 2 is the next + biggest lever, NOT yet started
+
+Verified live state of the refactor:
+- **Phase 1 done** but as a *post-pass sweep*: the scalar per-vertex transform loop
+  (`Transform.cpp:317`, `MatrixXVector` + project + divide) writes AoS, then a separate
+  sweep (`Transform.cpp:1383`, `VertexFrame_DumpFromAoS`) copies AoS→SoA. That sweep
+  currently dual-writes **only `TPos_z`** (the one field a consumer — SortZ — migrated to),
+  so eliminating it alone saves ~nothing.
+- **Phase 4 barely started** (SortZ on SoA; Transform.cpp:419/461/1540/1609). **Phase 6.1/6.2
+  tried + REVERTED** (clipper TPos/PX override — stale-frame after Reflected_Transform).
+- **Phase 2 NOT started** — the transform loop is still scalar/1-wide-broadcast. **This is
+  the perf win** (~3–5 ms greets per the Goal below): rewrite the three loops
+  (Inside/Ahead/Regular) to Vec4f/Vec8f over 4–8 verts. The hard part is the near-clip mask
+  (the Ahead/Regular branch flags). Validation matrix: 1-LSB pixel-diff on city@1500 /
+  greets@2500 / fountain / chase + TSan + bench (`--soa-verify` gate exists for AoS-vs-SoA
+  bit checks). Foundation-critical: a wrong transform breaks every pixel — do it fresh, not
+  at the tail of a long session. **Entry point: `Transform.cpp:317` (the `for (Vtx=Vert...)`
+  loop) + lines 346 (Ahead near-clip) + the Regular branch.**
+
 ## Goal
 
 Convert the per-vertex transformed-state from AoS (pack(1) `Vertex` struct,
