@@ -2462,9 +2462,12 @@ struct CityScene : SceneDriver {
 					// plane hit + opaque occlusion rather than an XZ rect.
 					const uint16_t oe = orow[x];                      // opaque-Z occlusion
 					if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
-					// domain warp → non-periodic field
-					const float wpx = wx + dwa * std::sin(wz * dwf + t * 0.23f);
-					const float wpz = wz + dwa * std::cos(wx * dwf - t * 0.17f);
+					// Fractal domain warp (warp the warp) → breaks the residual
+					// sine-interference periodicity into a noise-like field.
+					const float w1x = wx + dwa * std::sin(wz * dwf + t * 0.23f);
+					const float w1z = wz + dwa * std::cos(wx * dwf - t * 0.17f);
+					const float wpx = w1x + dwa * 0.5f * std::sin(w1z * dwf * 2.7f - t * 0.41f);
+					const float wpz = w1z + dwa * 0.5f * std::cos(w1x * dwf * 2.7f + t * 0.33f);
 					float bnx = 0.0f, bnz = 0.0f;
 					for (int k = 0; k < 6; ++k) {
 						const float ph = (wpx * wv[k].dx + wpz * wv[k].dz) * wv[k].f + t * wv[k].s;
