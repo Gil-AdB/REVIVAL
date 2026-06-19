@@ -2382,6 +2382,81 @@ struct CityScene : SceneDriver {
 		while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
 	}
 
+	// Bump-mapped specular glints on the water surface — the "bump" proper, as
+	// opposed to the reflection-displacement ripple. The deferred kernel skips
+	// lighting on the water (its tiny BSphere blew it to cyan), so the water has
+	// no specular response; this is a dedicated screen-space pass after pass-2.
+	// For each water-reflection pixel (zRefl != 0) we build an animated ripple
+	// NORMAL (the gradient of the same sine field — cos terms), tilt it off a
+	// flat base, and add a specular glint toward a fixed key light. The normal
+	// faces the light only on wave faces, so bright sparkles crawl across the
+	// surface. Runs on the final 8-bit VPage (post-tonemap); row-parallel.
+	void addWaterBumpGlints() {
+		const float strength = fds::FeatureFlags::water_bump_strength();
+		if (strength <= 0.0f) return;
+		if ((int)zRefl.size() < XRes * YRes) return;
+		const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
+		const float scale = fds::FeatureFlags::water_bump_scale();
+		const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
+		// Sum of waves travelling in NON-axis-aligned directions at NON-harmonic
+		// frequencies → an irregular, organic normal field (axis-aligned separable
+		// sines give an ugly regular lattice). The per-pixel normal tilt (nx,ny)
+		// is the height gradient = -sum(dir * sin(phase)).
+		const float bf = 0.012f * scale;            // base spatial frequency
+		struct Wv { float dx, dy, f, s, a; };
+		const Wv wv[4] = {
+			{ 0.96f,  0.28f, bf * 1.00f,  1.3f, 1.00f },
+			{-0.42f,  0.91f, bf * 1.73f, -0.9f, 0.80f },
+			{ 0.66f, -0.75f, bf * 2.61f,  1.1f, 0.55f },
+			{-0.88f, -0.47f, bf * 3.77f, -0.7f, 0.40f },
+		};
+		// Key light (screen space) + water flatness. nzFlat small → the normal
+		// can tilt far enough toward L to peak the glint; large → subtler.
+		const float nzFlat = 0.6f;
+		const float lx = 0.30f, ly = -0.78f, lz = 0.55f;
+		const float llen = std::sqrt(lx*lx + ly*ly + lz*lz);
+		const float Lx = lx/llen, Ly = ly/llen, Lz = lz/llen;
+		dword* const vp = (dword*)VPage;
+		const uint16_t* const zr = zRefl.data();
+		const int xr = XRes;
+		auto band = [=](int y0, int y1) {
+			for (int y = y0; y < y1; ++y) {
+				dword* row = vp + size_t(y) * size_t(xr);
+				const uint16_t* zrow = zr + size_t(y) * size_t(xr);
+				for (int x = 0; x < xr; ++x) {
+					if (zrow[x] == 0) continue;            // not water
+					float nx = 0.0f, ny = 0.0f;
+					for (int k = 0; k < 4; ++k) {
+						const float ph = (x * wv[k].dx + y * wv[k].dy) * wv[k].f + t * wv[k].s;
+						const float s = std::sin(ph) * wv[k].a;
+						nx -= wv[k].dx * s; ny -= wv[k].dy * s;
+					}
+					const float len = std::sqrt(nx*nx + ny*ny + nzFlat*nzFlat);
+					const float d = (nx*Lx + ny*Ly + nzFlat*Lz) / len;
+					if (d <= 0.0f) continue;
+					const float g = std::pow(d, shin) * strength;
+					int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
+					const dword p = row[x];
+					int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
+					if (B>255)B=255; if (G>255)G=255; if (R>255)R=255;
+					row[x] = dword(B) | (dword(G)<<8) | (dword(R)<<16) | 0xFF000000u;
+				}
+			}
+		};
+		auto& tp = ThreadPool::instance();
+		const int nT = (int)tp.size();
+		if (nT < 2 || YRes < 64) { band(0, YRes); return; }
+		const int chunk = (YRes + nT - 1) / nT;
+		auto remaining = std::make_shared<std::atomic<int>>(0);
+		for (int i = 0; i < nT; ++i) {
+			const int y0 = i * chunk; if (y0 >= YRes) break;
+			const int y1 = std::min(y0 + chunk, YRes);
+			remaining->fetch_add(1, std::memory_order_relaxed);
+			tp.enqueue([band, y0, y1, remaining]() { band(y0, y1); remaining->fetch_sub(1, std::memory_order_release); });
+		}
+		while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+	}
+
 	void init() override {
 		SetCurrentScene(CitySc);
 		Calibrate_FreeCamera_ForScene(CitySc->FZP, CitySc->CameraHead);
@@ -2596,6 +2671,9 @@ struct CityScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 		prof.switchTo(PROF_RNDR);
 		Render();
+		// Bump-mapped specular glints on the water (post-tonemap, on the final
+		// image). zRefl marks the water-reflection pixels from the pass-1 resample.
+		if (fds::FeatureFlags::water_bump()) addWaterBumpGlints();
 		// Note: volumetric spotlight cones run inside renderFrame's
 		// post-lighting passes (Render_VolumetricCones), so no per-scene
 		// hook needed here.
