@@ -2414,14 +2414,23 @@ struct CityScene : SceneDriver {
 		// Key light (world): glint where the wave normal faces the V+L half-vector.
 		float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
 		// World-space waves: non-axis dirs + non-harmonic freqs → organic, no lattice.
+		// A pure sum of sines is still quasi-periodic (the interference pattern
+		// recurs → "repetitive"), so the sample point is DOMAIN-WARPED by a
+		// low-freq term below before the octaves are summed — that breaks the
+		// regularity into something noise-like. 6 octaves over a wide span add
+		// both coarse swells and fine chop.
 		const float bf = 0.0012f * scale;
 		const float bumpAmp = 1.7f;
+		const float dwf = bf * 0.31f;      // domain-warp frequency (low)
+		const float dwa = 1.3f / bf;       // domain-warp amplitude (~a wavelength)
 		struct Wv { float dx, dz, f, s, a; };
-		const Wv wv[4] = {
-			{ 0.96f,  0.28f, bf * 1.00f,  1.3f, 1.00f },
-			{-0.42f,  0.91f, bf * 1.73f, -0.9f, 0.80f },
-			{ 0.66f, -0.75f, bf * 2.61f,  1.1f, 0.55f },
-			{-0.88f, -0.47f, bf * 3.77f, -0.7f, 0.40f },
+		const Wv wv[6] = {
+			{ 0.96f,  0.28f, bf * 1.00f,  1.30f, 1.00f },
+			{-0.42f,  0.91f, bf * 1.37f, -0.90f, 0.82f },
+			{ 0.66f, -0.75f, bf * 1.93f,  1.10f, 0.64f },
+			{-0.88f, -0.47f, bf * 2.71f, -0.70f, 0.48f },
+			{ 0.21f,  0.98f, bf * 3.83f,  0.85f, 0.34f },
+			{-0.99f,  0.14f, bf * 5.31f, -1.05f, 0.24f },
 		};
 		dword* const vp = (dword*)VPage;
 		const uint32_t* const mat = g_gbufferTransparent->txtr.data();
@@ -2447,9 +2456,12 @@ struct CityScene : SceneDriver {
 					const float yv = (cey - float(y)) * z * invFY;
 					const float wx = ex + m00*xv + m10*yv + m20*z;
 					const float wz = ez + m02*xv + m12*yv + m22*z;
+					// domain warp → non-periodic field
+					const float wpx = wx + dwa * std::sin(wz * dwf + t * 0.23f);
+					const float wpz = wz + dwa * std::cos(wx * dwf - t * 0.17f);
 					float bnx = 0.0f, bnz = 0.0f;
-					for (int k = 0; k < 4; ++k) {
-						const float ph = (wx * wv[k].dx + wz * wv[k].dz) * wv[k].f + t * wv[k].s;
+					for (int k = 0; k < 6; ++k) {
+						const float ph = (wpx * wv[k].dx + wpz * wv[k].dz) * wv[k].f + t * wv[k].s;
 						const float s = std::sin(ph) * wv[k].a;
 						bnx -= wv[k].dx * s; bnz -= wv[k].dz * s;
 					}
