@@ -5,8 +5,6 @@
 #include <Base/FeatureFlags.h>
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/ShadowMap.h>
-#include <FILLERS/Mekalele.h>     // g_gbufferTransparent / g_xparZ — water-bump mask
-extern int g_deferredWaterMatID;  // DeferredSurfaceKernel.cpp — global scope (not CITY's anon ns)
 #include "CITY.H"
 #include "CityPanoramaCache.h"
 #include "FrameProfiler.h"
@@ -39,6 +37,11 @@ Scene *SkySc;
 static Object *RflObj;
 static Vector RflSurfNorm(0,1,0);
 static float RflSurfOfs = 0;
+// World-space extent + plane height of the water grid (set in tessellateWaterGrid).
+// Used by the water-bump pass to ray-cast the water plane directly (peel-robust),
+// rather than reading the transparent G-buffer (whose front layer doesn't hold
+// the water under a multi-pass xpar peel).
+static float g_waterMinX = 0, g_waterMaxX = 0, g_waterMinZ = 0, g_waterMaxZ = 0, g_waterY = 0;
 
 static int32_t CTPartTime;
 static Matrix AxisAlignedViews[6] = {
@@ -268,6 +271,8 @@ static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 		if (u < mu) mu = u; if (u > Mu) Mu = u;
 		if (v < mv) mv = v; if (v > Mv) Mv = v;
 	}
+	// Publish the water grid's world XZ extent + plane height for the bump pass.
+	g_waterMinX = mx; g_waterMaxX = Mx; g_waterMinZ = mz; g_waterMaxZ = Mz; g_waterY = y;
 
 	delete [] T->Verts;
 	delete [] T->Faces;
@@ -2386,19 +2391,18 @@ struct CityScene : SceneDriver {
 
 	// Bump-mapped specular GLINTS on the water surface — the "bump" proper, vs the
 	// reflection-displacement ripple. The deferred kernel skips lighting on the
-	// water, so it has no specular response; this adds it. Masks on the TRANSPARENT
-	// G-buffer (front transparent == water matID) with the SAME opaque-Z occlusion
-	// the kernel uses — so it covers the whole visible water surface and never
-	// paints over foreground geometry (fixes the earlier zRefl-only/over-geometry
-	// bugs). The wave normal is built in WORLD space (reconstructed from the water
-	// depth) → grounded, perspective-correct, non-repetitive; the highlight is
-	// view-dependent (half-vector). Final 8-bit VPage, post-tonemap; row-parallel.
+	// water, so it has no specular response; this adds it. Per pixel we RAY-CAST
+	// the view ray to the known water plane (y = g_waterY) and keep the hit only
+	// if it lands inside the water rect and isn't occluded by opaque geometry
+	// (ZPage16). This is peel-INDEPENDENT — unlike reading the transparent
+	// G-buffer's front layer, which doesn't hold the water under a multi-pass xpar
+	// peel (the "glints vanish with --xpar_peel_passes=4" bug). The wave normal is
+	// built in WORLD space (the hit's XZ) → grounded, perspective-correct, organic;
+	// the highlight is view-dependent (half-vector). 8-bit VPage; row-parallel.
 	void addWaterBumpGlints() {
 		const float strength = fds::FeatureFlags::water_bump_strength();
 		if (strength <= 0.0f || !View) return;
-		if (g_deferredWaterMatID < 0 || !g_gbufferTransparent || !g_xparZ) return;
-		if ((int)g_gbufferTransparent->txtr.size() < XRes * YRes) return;
-		const uint32_t waterID = (uint32_t)g_deferredWaterMatID;
+		if (g_waterMaxX <= g_waterMinX) return;        // water extent not set yet
 		const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
 		const float scale = fds::FeatureFlags::water_bump_scale();
 		const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
@@ -2432,30 +2436,32 @@ struct CityScene : SceneDriver {
 			{ 0.21f,  0.98f, bf * 3.83f,  0.85f, 0.34f },
 			{-0.99f,  0.14f, bf * 5.31f, -1.05f, 0.24f },
 		};
+		const float wYplane = g_waterY;
 		dword* const vp = (dword*)VPage;
-		const uint32_t* const mat = g_gbufferTransparent->txtr.data();
-		const uint16_t* const xz = g_xparZ;
 		const uint16_t* const oz = ZPage16;
 		const int xr = XRes;
 		auto band = [=](int y0, int y1) {
 			for (int y = y0; y < y1; ++y) {
 				dword* row = vp + size_t(y) * size_t(xr);
-				const uint32_t* mrow = mat + size_t(y) * size_t(xr);
-				const uint16_t* xrow = xz + size_t(y) * size_t(xr);
 				const uint16_t* orow = oz + size_t(y) * size_t(xr);
 				for (int x = 0; x < xr; ++x) {
-					const uint32_t m32 = mrow[x];
-					if (m32 == 0xFFFFFFFFu) continue;                 // no transparent front
-					const uint16_t zEnc = xrow[x];
-					if (zEnc == 0) continue;
-					if (((m32 >> 20) & 0xFFu) != waterID) continue;   // front transparent isn't water
-					if (orow[x] > zEnc) continue;                     // opaque in front → occluded
-					// reconstruct view-space pos, then view→world (R^T * v + eye)
-					const float z  = float(0xFF80 - int(zEnc)) * invZScale;
-					const float xv = (float(x) - cex) * z * invFX;
-					const float yv = (cey - float(y)) * z * invFY;
-					const float wx = ex + m00*xv + m10*yv + m20*z;
-					const float wz = ez + m02*xv + m12*yv + m22*z;
+					// Ray-cast this pixel to the water plane — a peel-independent mask
+					// (the transparent G-buffer's front layer doesn't hold the water
+					// under a multi-pass xpar peel). View ray dir per unit depth:
+					const float xn = (float(x) - cex) * invFX;
+					const float yn = (cey - float(y)) * invFY;
+					const float D = m01*xn + m11*yn + m21;            // d(world.y)/d(view-z)
+					if (D == 0.0f) continue;
+					const float sd = (wYplane - ey) / D;              // view-z of the plane hit
+					if (sd <= 1.0f) continue;                         // behind / at the eye
+					const float wx = ex + sd * (m00*xn + m10*yn + m20);
+					const float wz = ez + sd * (m02*xn + m12*yn + m22);
+					// NB: the water mesh's local bounds don't map to its world
+					// placement, and the city sits in the water (everything below
+					// the horizon that isn't opaque is water), so we gate on the
+					// plane hit + opaque occlusion rather than an XZ rect.
+					const uint16_t oe = orow[x];                      // opaque-Z occlusion
+					if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
 					// domain warp → non-periodic field
 					const float wpx = wx + dwa * std::sin(wz * dwf + t * 0.23f);
 					const float wpz = wz + dwa * std::cos(wx * dwf - t * 0.17f);
@@ -2468,8 +2474,7 @@ struct CityScene : SceneDriver {
 					float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
 					const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
 					Nx*=nInv; Ny*=nInv; Nz*=nInv;
-					const float wy = ey + m01*xv + m11*yv + m21*z;    // for the view vector
-					float Vx = ex-wx, Vy = ey-wy, Vz = ez-wz;
+					float Vx = ex-wx, Vy = ey-wYplane, Vz = ez-wz;   // view dir (worldPos.y = plane)
 					const float vInv = 1.0f / std::sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
 					Vx*=vInv; Vy*=vInv; Vz*=vInv;
 					float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
