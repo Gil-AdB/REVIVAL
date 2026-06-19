@@ -1007,15 +1007,12 @@ void Reflective_AnimateTexture()
 		Vtx->U += dTime * 0.001;
 		Vtx->V += dTime * 0.0005;
 	}*/
-	// Scroll the water-surface texture (drives the rasterizer via the FACE UVs
-	// F->U1..U3 — verified empirically; the vertex UVs are ignored by the render
-	// path). Rate is dTime-scaled; dTime is CENTISECONDS (~100/sec), so UV/sec ≈
-	// coeff*100. The legacy coeff (0.0014) was tuned for millisecond dTime →
-	// 0.14 UV/sec, i.e. a near-static texture (the "texture is constant" bug).
-	// 0.018 / 0.008 restores ~1.8 / 0.8 UV/sec, a visible flow; tunable via
-	// water_scroll_speed.
+	// Scroll the water-surface texture. Drives the rasterizer via the FACE UVs
+	// F->U1..U3 (verified empirically — the render path ignores vertex UVs).
+	// Original rate restored per user request; water_scroll_speed scales it
+	// (1.0 = original).
 	const float sp = fds::FeatureFlags::water_scroll_speed();
-	const float du = dTime * 0.018f * sp, dv = dTime * 0.008f * sp;
+	const float du = dTime * 0.0007f * 2.0f * sp, dv = dTime * 0.0003f * 2.0f * sp;
 	Face *F, *FE;
 	for(F = T->Faces, FE = F + T->FIndex; F<FE; F++)
 	{
