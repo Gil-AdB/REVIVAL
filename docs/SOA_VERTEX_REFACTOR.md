@@ -2,6 +2,25 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-06-19 — Phase 2 WASHES; the transform is only ~0.35 ms. STOP.
+
+Built the Vec8f-across-8-verts Inside loop (gated `--soa-wide-xform`, FMA association
+matched → byte-identical to the scalar path: flag-off == flag-on confirmed). **Result on
+greets: XFRM 0.353 ms (off) vs 0.358 ms (on) — no change.** Reverted.
+
+Two facts kill the SoA-perf premise:
+1. **The per-frame transform is ~0.35 ms (0.7% of frame), not the 3–5 ms this doc's Goal
+   estimated.** That estimate was load-inflated / from an earlier state. There is no 3–5 ms
+   to win here.
+2. Even so, the Vec8f path didn't beat the per-vertex Vec4f-broadcast: the AoS gather of
+   ~11 input fields + scatter of ~14 output fields per 8 verts (strided, no HW gather on
+   arm64) dominates the wide-compute saving — the documented wash-risk, confirmed.
+
+The refactor still has *correctness/cleanliness* value (Phase 5 shrinks `Vertex` 136 B→60 B,
+helps the clipper's `*A=*F->A` copy), but **NOT a perf justification.** Do not pursue Phase 2+
+for speed. If continued, justify it on cache-density/cleanliness, measure the clipper-copy
+win directly, and expect the transform itself to stay ~0.35 ms.
+
 ## CURRENT STATE (2026-06-19) — Phase 2 is the next + biggest lever, NOT yet started
 
 Verified live state of the refactor:
