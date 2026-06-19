@@ -269,7 +269,17 @@ namespace renderns {
 
 // output is unused on the deferred path.
 bool deferredEnabled() {
-	return fds::FeatureFlags::deferred();
+	// --hdr / --deferred-quarter / --shard-deferred are meaningless without the
+	// deferred kernel (only it populates g_hdrBuf and the quarter/shard paths),
+	// so treat them as implying --deferred. Otherwise a cmdline with --hdr but no
+	// bare --deferred renders the city FORWARD: no tonemap and the whole HDR post
+	// block (bloom/anamorphic/dof/vignette/grade/grain/water-glints) is skipped,
+	// while greets still works (its scene forces the deferred path). Flag-OFF is
+	// unchanged → render-gate unaffected.
+	return fds::FeatureFlags::deferred()
+	    || fds::FeatureFlags::hdr()
+	    || fds::FeatureFlags::deferred_quarter()
+	    || fds::FeatureFlags::shard_deferred();
 }
 
 // Per-scene matID for the water material — when this matches the
