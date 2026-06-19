@@ -60,6 +60,41 @@ inline void addBusy(long long startNs) {
 	if (enabled()) busyAcc().fetch_add(nowNs() - startNs, std::memory_order_relaxed);
 }
 
+// RAII timer for a SINGLE-THREADED glue step (the work between/around the
+// parallel waves, where the pool idles). Tick-thread only → no atomics. Prints
+// avg ms/frame every 60 frames. Use: { TailProf::ScopeTimer _t("StampMasks"); ... }
+struct ScopeTimer {
+	const char* name;
+	long long   t0;
+	explicit ScopeTimer(const char* n) : name(n), t0(enabled() ? nowNs() : 0) {}
+	~ScopeTimer() {
+		if (!enabled()) return;
+		const double ms = (nowNs() - t0) / 1e6;
+		struct Acc { double ms = 0; int frames = 0; };
+		static std::map<std::string, Acc> accs;   // tick-thread only
+		Acc& a = accs[name]; a.ms += ms; ++a.frames;
+		if (a.frames >= 60) {
+			std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n",
+			             name, a.ms / a.frames);
+			a.ms = 0; a.frames = 0;
+		}
+	}
+};
+
+// Manual serial-region mark (for regions that can't be a clean RAII scope
+// because they declare locals used later). Call with the start timestamp.
+inline void mark(const char* name, long long startNs) {
+	if (!enabled()) return;
+	const double ms = (nowNs() - startNs) / 1e6;
+	struct Acc { double ms = 0; int frames = 0; };
+	static std::map<std::string, Acc> accs;     // tick-thread only
+	Acc& a = accs[name]; a.ms += ms; ++a.frames;
+	if (a.frames >= 60) {
+		std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n", name, a.ms / a.frames);
+		a.ms = 0; a.frames = 0;
+	}
+}
+
 // Drain `n` permits from `sem`. Identical to a plain `for(n) sem.acquire()`
 // loop when disabled; when enabled, measures wall + tail and prints per wave.
 inline void drain(std::counting_semaphore<INT_MAX>& sem, int n, const char* wave) {

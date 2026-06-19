@@ -35,6 +35,7 @@
 #include <algorithm>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
+#include "RENDER/TailProf.h"   // phase-1 serial-glue breakdown (FDS_TAIL_PROF)
 #include "RENDER/LightmapBake.h"
 #include <chrono>
 #include <memory>
@@ -2575,8 +2576,9 @@ struct GreetsScene : SceneDriver {
 		// camera pose from this frame's spline step) and BEFORE the
 		// main Transform_Objects (the pass clobbers per-vertex
 		// transforms, which the main transform recomputes).
+		{ TailProf::ScopeTimer _tp("RTT");
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
-		                              g_greetsRttSlots);
+		                              g_greetsRttSlots); }
 
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
@@ -2625,7 +2627,7 @@ struct GreetsScene : SceneDriver {
 		// gg->Render() below, and renderFrame joins before deferred lighting;
 		// otherwise they run synchronously inline here (current behavior).
 		ShadowBake_DispatchGreets(GreetSc);
-		gg->Render();
+		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
 		// Diagnostic: identify shadow maps whose dynamic polyId hash isn't
@@ -2639,8 +2641,8 @@ struct GreetsScene : SceneDriver {
 		// wall covers. Without this clones spill outside the mirror
 		// surface footprint (worked for teleporter only because the
 		// surrounding Piramid walls were the de facto occluder mask).
-		fds::StampMirrorMasks(GreetSc, g_greetsMirrors);
-		fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors);
+		{ TailProf::ScopeTimer _tp("StampMasks");   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("ProbeMirrors"); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
 
 		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==
 		// ctx.mirrorTag) only runs on the deferred path. Forward sends
@@ -2671,6 +2673,7 @@ struct GreetsScene : SceneDriver {
 			             fwd, def, def/fwd, defNV, defNV/fwd, int(CAll), int(XRes), int(YRes));
 		}
 		if (fds::FeatureFlags::greets_mirror()) {
+			TailProf::ScopeTimer _tp("Render-3D");
 			Render(RenderPath::ForceDeferred);
 		} else {
 			Render();

@@ -3172,6 +3172,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	static TileLights s_tileLights[DEFERRED_NUM_TILES];
 	TileLights *const tileLights = (ov && ov->tileLights) ? ov->tileLights : s_tileLights;
 	const float invZScale = 1.0f / float(g_zscale);
+	const long long _lsetup = TailProf::nowNs();
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
 	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
@@ -3196,6 +3197,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights, tilePresence, camCtx);
+	TailProf::mark("light-setup", _lsetup);   // serial per-tile light culling
 
 	// Diagnostic (FDS_TILE_LIGHT_PROF=1): avg/max surviving lights per tile
 	// after the cone cull, main frame only. Decides whether the deferred-kernel
