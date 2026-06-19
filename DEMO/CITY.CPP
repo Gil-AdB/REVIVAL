@@ -5,6 +5,8 @@
 #include <Base/FeatureFlags.h>
 #include <FILLERS/TheOtherBarry.h>
 #include <FILLERS/ShadowMap.h>
+#include <FILLERS/Mekalele.h>     // g_gbufferTransparent / g_xparZ — water-bump mask
+extern int g_deferredWaterMatID;  // DeferredSurfaceKernel.cpp — global scope (not CITY's anon ns)
 #include "CITY.H"
 #include "CityPanoramaCache.h"
 #include "FrameProfiler.h"
@@ -2382,59 +2384,87 @@ struct CityScene : SceneDriver {
 		while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
 	}
 
-	// Bump-mapped specular glints on the water surface — the "bump" proper, as
-	// opposed to the reflection-displacement ripple. The deferred kernel skips
-	// lighting on the water (its tiny BSphere blew it to cyan), so the water has
-	// no specular response; this is a dedicated screen-space pass after pass-2.
-	// For each water-reflection pixel (zRefl != 0) we build an animated ripple
-	// NORMAL (the gradient of the same sine field — cos terms), tilt it off a
-	// flat base, and add a specular glint toward a fixed key light. The normal
-	// faces the light only on wave faces, so bright sparkles crawl across the
-	// surface. Runs on the final 8-bit VPage (post-tonemap); row-parallel.
+	// Bump-mapped specular GLINTS on the water surface — the "bump" proper, vs the
+	// reflection-displacement ripple. The deferred kernel skips lighting on the
+	// water, so it has no specular response; this adds it. Masks on the TRANSPARENT
+	// G-buffer (front transparent == water matID) with the SAME opaque-Z occlusion
+	// the kernel uses — so it covers the whole visible water surface and never
+	// paints over foreground geometry (fixes the earlier zRefl-only/over-geometry
+	// bugs). The wave normal is built in WORLD space (reconstructed from the water
+	// depth) → grounded, perspective-correct, non-repetitive; the highlight is
+	// view-dependent (half-vector). Final 8-bit VPage, post-tonemap; row-parallel.
 	void addWaterBumpGlints() {
 		const float strength = fds::FeatureFlags::water_bump_strength();
-		if (strength <= 0.0f) return;
-		if ((int)zRefl.size() < XRes * YRes) return;
+		if (strength <= 0.0f || !View) return;
+		if (g_deferredWaterMatID < 0 || !g_gbufferTransparent || !g_xparZ) return;
+		if ((int)g_gbufferTransparent->txtr.size() < XRes * YRes) return;
+		const uint32_t waterID = (uint32_t)g_deferredWaterMatID;
 		const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
 		const float scale = fds::FeatureFlags::water_bump_scale();
 		const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
-		// Sum of waves travelling in NON-axis-aligned directions at NON-harmonic
-		// frequencies → an irregular, organic normal field (axis-aligned separable
-		// sines give an ugly regular lattice). The per-pixel normal tilt (nx,ny)
-		// is the height gradient = -sum(dir * sin(phase)).
-		const float bf = 0.012f * scale;            // base spatial frequency
-		struct Wv { float dx, dy, f, s, a; };
+		const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+		const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+		const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+		const float cex = CntrEX, cey = CntrEY;
+		// camera world->view rotation (rows = camera axes) + eye → view-to-world.
+		const float m00=View->Mat[0][0], m10=View->Mat[1][0], m20=View->Mat[2][0];
+		const float m01=View->Mat[0][1], m11=View->Mat[1][1], m21=View->Mat[2][1];
+		const float m02=View->Mat[0][2], m12=View->Mat[1][2], m22=View->Mat[2][2];
+		const float ex=View->ISource.x, ey=View->ISource.y, ez=View->ISource.z;
+		// Key light (world): glint where the wave normal faces the V+L half-vector.
+		float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
+		// World-space waves: non-axis dirs + non-harmonic freqs → organic, no lattice.
+		const float bf = 0.0012f * scale;
+		const float bumpAmp = 1.7f;
+		struct Wv { float dx, dz, f, s, a; };
 		const Wv wv[4] = {
 			{ 0.96f,  0.28f, bf * 1.00f,  1.3f, 1.00f },
 			{-0.42f,  0.91f, bf * 1.73f, -0.9f, 0.80f },
 			{ 0.66f, -0.75f, bf * 2.61f,  1.1f, 0.55f },
 			{-0.88f, -0.47f, bf * 3.77f, -0.7f, 0.40f },
 		};
-		// Key light (screen space) + water flatness. nzFlat small → the normal
-		// can tilt far enough toward L to peak the glint; large → subtler.
-		const float nzFlat = 0.6f;
-		const float lx = 0.30f, ly = -0.78f, lz = 0.55f;
-		const float llen = std::sqrt(lx*lx + ly*ly + lz*lz);
-		const float Lx = lx/llen, Ly = ly/llen, Lz = lz/llen;
 		dword* const vp = (dword*)VPage;
-		const uint16_t* const zr = zRefl.data();
+		const uint32_t* const mat = g_gbufferTransparent->txtr.data();
+		const uint16_t* const xz = g_xparZ;
+		const uint16_t* const oz = ZPage16;
 		const int xr = XRes;
 		auto band = [=](int y0, int y1) {
 			for (int y = y0; y < y1; ++y) {
 				dword* row = vp + size_t(y) * size_t(xr);
-				const uint16_t* zrow = zr + size_t(y) * size_t(xr);
+				const uint32_t* mrow = mat + size_t(y) * size_t(xr);
+				const uint16_t* xrow = xz + size_t(y) * size_t(xr);
+				const uint16_t* orow = oz + size_t(y) * size_t(xr);
 				for (int x = 0; x < xr; ++x) {
-					if (zrow[x] == 0) continue;            // not water
-					float nx = 0.0f, ny = 0.0f;
+					const uint32_t m32 = mrow[x];
+					if (m32 == 0xFFFFFFFFu) continue;                 // no transparent front
+					const uint16_t zEnc = xrow[x];
+					if (zEnc == 0) continue;
+					if (((m32 >> 20) & 0xFFu) != waterID) continue;   // front transparent isn't water
+					if (orow[x] > zEnc) continue;                     // opaque in front → occluded
+					// reconstruct view-space pos, then view→world (R^T * v + eye)
+					const float z  = float(0xFF80 - int(zEnc)) * invZScale;
+					const float xv = (float(x) - cex) * z * invFX;
+					const float yv = (cey - float(y)) * z * invFY;
+					const float wx = ex + m00*xv + m10*yv + m20*z;
+					const float wz = ez + m02*xv + m12*yv + m22*z;
+					float bnx = 0.0f, bnz = 0.0f;
 					for (int k = 0; k < 4; ++k) {
-						const float ph = (x * wv[k].dx + y * wv[k].dy) * wv[k].f + t * wv[k].s;
+						const float ph = (wx * wv[k].dx + wz * wv[k].dz) * wv[k].f + t * wv[k].s;
 						const float s = std::sin(ph) * wv[k].a;
-						nx -= wv[k].dx * s; ny -= wv[k].dy * s;
+						bnx -= wv[k].dx * s; bnz -= wv[k].dz * s;
 					}
-					const float len = std::sqrt(nx*nx + ny*ny + nzFlat*nzFlat);
-					const float d = (nx*Lx + ny*Ly + nzFlat*Lz) / len;
-					if (d <= 0.0f) continue;
-					const float g = std::pow(d, shin) * strength;
+					float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
+					const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
+					Nx*=nInv; Ny*=nInv; Nz*=nInv;
+					const float wy = ey + m01*xv + m11*yv + m21*z;    // for the view vector
+					float Vx = ex-wx, Vy = ey-wy, Vz = ez-wz;
+					const float vInv = 1.0f / std::sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
+					Vx*=vInv; Vy*=vInv; Vz*=vInv;
+					float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
+					const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
+					const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
+					if (ndh <= 0.0f) continue;
+					const float g = std::pow(ndh, shin) * strength;
 					int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
 					const dword p = row[x];
 					int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
