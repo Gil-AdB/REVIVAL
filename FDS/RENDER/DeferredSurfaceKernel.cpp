@@ -3176,6 +3176,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
 	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
+	TailProf::mark("depth-bounds", _lsetup);   // per-tile z-buffer scan (par-able)
 	// Mirror-footprint presence per tile/strip, for the clone-light
 	// cull in the list builders. Only computed when a scene actually
 	// activated the mask plane (GreetsMirror::BuildMirror).
@@ -3194,10 +3195,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		tilePresence = tileMirrorPresence;
 	}
 	const fds::CameraContext &camCtx = (ov && ov->cam) ? *ov->cam : fds::g_mainCamera;
+	const long long _tcull = TailProf::nowNs();
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights, tilePresence, camCtx);
-	TailProf::mark("light-setup", _lsetup);   // serial per-tile light culling
+	TailProf::mark("tile-cull", _tcull);       // light-major append (harder to par)
 
 	// Diagnostic (FDS_TILE_LIGHT_PROF=1): avg/max surviving lights per tile
 	// after the cone cull, main frame only. Decides whether the deferred-kernel
