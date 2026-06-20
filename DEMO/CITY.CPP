@@ -265,30 +265,69 @@ static inline float waterDetileV(const Vector& p, float amp, float f) {
 	return amp * (std::cos(p.z*f + p.x*f*0.6f) + 0.5f*std::cos(p.z*f*1.7f - p.x*f*1.1f));
 }
 
-// THE shared water surface field. Returns the wave SLOPE (gradient of the
-// animated height) at world XZ — domain-warped sum of non-axis, non-harmonic
-// octaves → organic + non-repetitive. BOTH the reflection displacement and the
-// specular glints derive from this, so they ripple to the same waves (coherent
-// water). nOct picks detail depth: the reflection uses a few coarse octaves
-// (fine detail is invisible in a blurred mirror + cheaper); the glints use all.
-static inline void waterWaveSlope(float wx, float wz, float t, float scale, int nOct, float& bnx, float& bnz) {
-	const float bf = 0.0012f * scale;
-	const float dwf = bf * 0.31f, dwa = 1.3f / bf;
-	const float w1x = wx + dwa * std::sin(wz * dwf + t * 0.23f);
-	const float w1z = wz + dwa * std::cos(wx * dwf - t * 0.17f);
-	const float wpx = w1x + dwa * 0.5f * std::sin(w1z * dwf * 2.7f - t * 0.41f);
-	const float wpz = w1z + dwa * 0.5f * std::cos(w1x * dwf * 2.7f + t * 0.33f);
-	static const float dx[6] = { 0.96f,-0.42f, 0.66f,-0.88f, 0.21f,-0.99f };
-	static const float dz[6] = { 0.28f, 0.91f,-0.75f,-0.47f, 0.98f, 0.14f };
-	static const float fm[6] = { 1.00f, 1.37f, 1.93f, 2.71f, 3.83f, 5.31f };
-	static const float sm[6] = { 1.30f,-0.90f, 1.10f,-0.70f, 0.85f,-1.05f };
-	static const float am[6] = { 1.00f, 0.82f, 0.64f, 0.48f, 0.34f, 0.24f };
-	bnx = 0.0f; bnz = 0.0f;
-	for (int k = 0; k < nOct; ++k) {
-		const float ph = (wpx * dx[k] + wpz * dz[k]) * (bf * fm[k]) + t * sm[k];
-		const float s = std::sin(ph) * am[k];
-		bnx -= dx[k] * s; bnz -= dz[k] * s;
+// ───────── Procedural water surface field (Stage A: precomputed normal map) ─────────
+// THE shared water field: returns the wave SLOPE (nx,nz) at world XZ. Both the
+// reflection displacement and the specular glints derive from this, so they
+// ripple to the same waves (coherent water). The field is a small SEAMLESS
+// tiling slope map (built once from integer-wavevector sines), sampled as TWO
+// scrolling layers at different scale/rotation — the layers break each other's
+// tiling into something organic + non-repetitive, and the whole thing is a
+// couple of texture taps per pixel instead of ~9 trig calls (the optimization).
+static std::vector<float> g_waterNrm;       // WNRM*WNRM*2 floats: slope (nx,nz), tiling
+static constexpr int      WNRM = 128;
+
+static void buildWaterNormalMap() {
+	g_waterNrm.assign(size_t(WNRM) * size_t(WNRM) * 2, 0.0f);
+	struct W { int kx, kz; float a, ph; };
+	const W ws[8] = {
+		{1, 0, 1.00f, 0.0f}, {0, 1, 0.85f, 1.3f}, {1, 1, 0.70f, 2.1f}, {2,-1, 0.55f, 0.7f},
+		{-1,2, 0.45f, 3.4f}, {2, 2, 0.35f, 1.8f}, {3, 1, 0.28f, 0.4f}, {1,-3, 0.22f, 2.7f},
+	};
+	const float twoPi = 6.2831853f;
+	float maxAbs = 1e-6f;
+	for (int j = 0; j < WNRM; ++j) for (int i = 0; i < WNRM; ++i) {
+		float nx = 0.0f, nz = 0.0f;
+		for (const W& w : ws) {
+			const float ph = twoPi * (w.kx * float(i) + w.kz * float(j)) / float(WNRM) + w.ph;
+			const float c = std::cos(ph);                       // slope ∝ k·cos(phase)
+			nx += w.a * (twoPi * float(w.kx) / float(WNRM)) * c;
+			nz += w.a * (twoPi * float(w.kz) / float(WNRM)) * c;
+		}
+		float* p = &g_waterNrm[(size_t(j) * WNRM + i) * 2];
+		p[0] = nx; p[1] = nz;
+		if (std::fabs(nx) > maxAbs) maxAbs = std::fabs(nx);
+		if (std::fabs(nz) > maxAbs) maxAbs = std::fabs(nz);
 	}
+	const float inv = 1.0f / maxAbs;                            // normalize slope to ~[-1,1]
+	for (float& v : g_waterNrm) v *= inv;
+}
+
+static inline void sampleWaterNrm(float u, float v, float& nx, float& nz) {
+	const int N = WNRM;
+	float fu = u - std::floor(u / N) * N;                       // wrap to [0,N)
+	float fv = v - std::floor(v / N) * N;
+	int i0 = int(fu), j0 = int(fv); if (i0 >= N) i0 = 0; if (j0 >= N) j0 = 0;
+	const float du = fu - i0, dv = fv - j0;
+	const int i1 = (i0 + 1) % N, j1 = (j0 + 1) % N;
+	const float* a = &g_waterNrm[(size_t(j0)*N + i0)*2];
+	const float* b = &g_waterNrm[(size_t(j0)*N + i1)*2];
+	const float* c = &g_waterNrm[(size_t(j1)*N + i0)*2];
+	const float* d = &g_waterNrm[(size_t(j1)*N + i1)*2];
+	nx = (a[0]*(1-du)+b[0]*du)*(1-dv) + (c[0]*(1-du)+d[0]*du)*dv;
+	nz = (a[1]*(1-du)+b[1]*du)*(1-dv) + (c[1]*(1-du)+d[1]*du)*dv;
+}
+
+// nOct kept for call-site compatibility; the texture bakes all detail, so both
+// the reflection and the glints get the same two-layer sample (coherent).
+static inline void waterWaveSlope(float wx, float wz, float t, float scale, int /*nOct*/, float& bnx, float& bnz) {
+	if (g_waterNrm.empty()) { bnx = bnz = 0.0f; return; }
+	const float base = 0.02f * scale;                          // world→texel frequency
+	float n1x, n1z; sampleWaterNrm(wx*base + t*0.7f, wz*base - t*0.5f, n1x, n1z);
+	const float ca = 0.87f, sa = 0.5f;                         // ~30° rotated 2nd layer
+	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
+	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*0.4f, rz*base*1.7f + t*0.6f, n2x, n2z);
+	bnx = (n1x + n2x*0.6f) * 1.6f;                             // ~match the old trig slope range
+	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
 
 static void tessellateWaterGrid(TriMesh *T, dword NumSections)
@@ -2560,6 +2599,7 @@ struct CityScene : SceneDriver {
 		// get the reflective water surface object
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
+		buildWaterNormalMap();   // procedural water field (reflection + glints + composite)
 
 		setupFaceLists(CitySc, /*includeOmnisInCount=*/true);
 
