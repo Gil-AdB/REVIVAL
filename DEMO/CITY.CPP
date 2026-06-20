@@ -251,6 +251,20 @@ static void prepareWaterSurface(Object *waterObj, TriMesh *T)
 // the affine gouraud / xpar shader produce smooth interpolation. Assumes
 // RflSurfNorm = (0, 1, 0) — i.e. the water surface is aligned to XZ and
 // the UV mapping is a scalar transform onto XZ with no rotation.
+// Low-frequency UV domain warp for water de-tiling. Displaces the texture
+// mapping by a smooth function of world XZ so the tiled albedo stretches/swirls
+// across the surface instead of repeating as a regular grid. Applied to the
+// FACE UVs (which the rasterizer consumes); the rasterizer then swizzles the
+// warped coords correctly — no manual swizzle math. Per shared vertex position
+// → consistent across adjacent faces (no seams). Static (baked at init); the
+// per-frame scroll rides on top as a uniform offset, preserving the warp.
+static inline float waterDetileU(const Vector& p, float amp, float f) {
+	return amp * (std::sin(p.x*f + p.z*f*0.7f) + 0.5f*std::sin(p.x*f*1.9f - p.z*f*1.3f));
+}
+static inline float waterDetileV(const Vector& p, float amp, float f) {
+	return amp * (std::cos(p.z*f + p.x*f*0.6f) + 0.5f*std::cos(p.z*f*1.7f - p.x*f*1.1f));
+}
+
 static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 {
 	// Extract coverage (range) over the XZ plane and over texture UV
@@ -322,6 +336,21 @@ static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 			F->U2 = F->B->U; F->V2 = F->B->V;
 			F->U3 = F->C->U; F->V3 = F->C->V;
 			++F;
+		}
+	}
+
+	// De-tile: warp the face UVs by a smooth low-freq function of vertex world
+	// XZ so the tiled albedo stops repeating as a regular grid. Per-vertex-pos
+	// → consistent across shared vertices. The rasterizer swizzles the warped
+	// coords; the per-frame scroll adds a uniform offset on top (warp preserved).
+	if (fds::FeatureFlags::water_detile()) {
+		const float amp = fds::FeatureFlags::water_detile_amp();
+		const float f   = 0.012f * fds::FeatureFlags::water_detile_scale();
+		Face *FW = T->Faces, *FWE = T->Faces + T->FIndex;
+		for (; FW < FWE; ++FW) {
+			FW->U1 += waterDetileU(FW->A->Pos, amp, f); FW->V1 += waterDetileV(FW->A->Pos, amp, f);
+			FW->U2 += waterDetileU(FW->B->Pos, amp, f); FW->V2 += waterDetileV(FW->B->Pos, amp, f);
+			FW->U3 += waterDetileU(FW->C->Pos, amp, f); FW->V3 += waterDetileV(FW->C->Pos, amp, f);
 		}
 	}
 
