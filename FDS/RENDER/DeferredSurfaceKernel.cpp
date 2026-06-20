@@ -1455,6 +1455,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const bool lightAll = fds::FeatureFlags::xpar_light_all();
 	const bool hdrBufReady = fds::Hdr_WritableFor(ctx.xres, ctx.yres);  // main pass only (not the mirror RTT)
 	const bool hdrLinear = hdrBufReady && fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
+	// Procedural water composite (Stage B) — fresnel mix of a deep colour and the
+	// reflection underlay, for the water matID only. Hoisted; per-pixel fresnel below.
+	const bool  waterProcOn = fds::FeatureFlags::water_procedural();
+	const float wDeepB = fds::FeatureFlags::water_deep_b();
+	const float wDeepG = fds::FeatureFlags::water_deep_g();
+	const float wDeepR = fds::FeatureFlags::water_deep_r();
+	const float wRefl  = fds::FeatureFlags::water_reflectivity();
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -1550,6 +1557,20 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// channel → cyan/turquoise water instead of forward's deep blue.
 			// Mirrors the same skip in Render_DeferredLighting_Tile.
 			const bool isWater = (int(matID) == ctx.waterMatID);
+
+			// Procedural water: Schlick fresnel from the view angle (the wave-
+			// normal micro detail is the screen-space glint pass; this is the
+			// macro deep-vs-reflection mix). vDotN = view·N in view space.
+			const bool waterProc = isWater && waterProcOn;
+			float wFres = 0.0f;
+			if (waterProc) {
+				const float vl2 = x*x + y*y + z*z;
+				const float vDotN = -(nx*x + ny*y + nz*z) * fast_rsqrt(vl2 > 0.0f ? vl2 : 1.0f);
+				float c = 1.0f - (vDotN > 0.0f ? vDotN : 0.0f);
+				const float c5 = c*c*c*c*c;
+				wFres = 0.06f + (wRefl - 0.06f) * c5;
+				if (wFres < 0.0f) wFres = 0.0f; if (wFres > 1.0f) wFres = 1.0f;
+			}
 
 			// Light loop. Default: per-tile compacted list. Diagnostic
 			// mode: full scene omni list (FDS_XPAR_LIGHT_ALL=1).
@@ -1712,6 +1733,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG = int((texG * lG) * (1.0f / 256.0f));
 				litR = int((texR * lR) * (1.0f / 256.0f));
 			}
+			// Procedural water: deep colour x (1-fresnel); the reflection underlay
+			// gets weight = fresnel in the blend below -> out ~ lerp(deep, refl,
+			// fresnel). Fog applies to both afterward, so it stays correct.
+			if (waterProc) {
+				const float k = 1.0f - wFres;
+				litB = int(wDeepB * k); litG = int(wDeepG * k); litR = int(wDeepR * k);
+			}
 			// Specular added on top — independent of base color tint. Skipped for
 			// the HDR-reflection path (hdrRefl already carries the full radiance).
 			if (wantSpecular && !isHdrRefl) {
@@ -1774,9 +1802,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					h[1] = float(litG) * a + dG * ia;
 					h[2] = float(litR) * a + dR * ia;
 				} else {
-					h[0] = float(litB) + dB * 0.5f;
-					h[1] = float(litG) + dG * 0.5f;
-					h[2] = float(litR) + dR * 0.5f;
+					const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+					h[0] = float(litB) + dB * dw;
+					h[1] = float(litG) + dG * dw;
+					h[2] = float(litR) + dR * dw;
 				}
 			} else {
 			const dword existing = out[i];
@@ -1791,9 +1820,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				outG = int(float(litG) * a + float(dG) * ia);
 				outR = int(float(litR) * a + float(dR) * ia);
 			} else {
-				outB = litB + dB / 2;
-				outG = litG + dG / 2;
-				outR = litR + dR / 2;
+				const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+				outB = litB + int(float(dB) * dw);
+				outG = litG + int(float(dG) * dw);
+				outR = litR + int(float(dR) * dw);
 				if (outB > 255) outB = 255;
 				if (outG > 255) outG = 255;
 				if (outR > 255) outR = 255;
