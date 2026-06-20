@@ -322,10 +322,14 @@ static inline void sampleWaterNrm(float u, float v, float& nx, float& nz) {
 static inline void waterWaveSlope(float wx, float wz, float t, float scale, int /*nOct*/, float& bnx, float& bnz) {
 	if (g_waterNrm.empty()) { bnx = bnz = 0.0f; return; }
 	const float base = 0.02f * scale;                          // world→texel frequency
-	float n1x, n1z; sampleWaterNrm(wx*base + t*0.7f, wz*base - t*0.5f, n1x, n1z);
+	// Scroll the two layers across the 128-texel map. The terms are in TEXEL
+	// units, so they must be big (~tens) to move a meaningful fraction of the
+	// map per second — small values (the first cut's ~0.7) crawl ≈1 cycle/90s,
+	// i.e. frozen ("no movement"). ~16 → the dominant wave drifts ~0.3 Hz.
+	float n1x, n1z; sampleWaterNrm(wx*base + t*16.0f, wz*base - t*12.0f, n1x, n1z);
 	const float ca = 0.87f, sa = 0.5f;                         // ~30° rotated 2nd layer
 	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
-	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*0.4f, rz*base*1.7f + t*0.6f, n2x, n2z);
+	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*10.0f, rz*base*1.7f + t*14.0f, n2x, n2z);
 	bnx = (n1x + n2x*0.6f) * 1.6f;                             // ~match the old trig slope range
 	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
