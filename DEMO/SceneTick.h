@@ -8,6 +8,7 @@
 
 #include "Resize.h"
 #include "Base/FaceListContext.h"
+#include "Base/FeatureFlags.h"
 
 // Quit/skip flags live in Rev.h, but we forward-declare here to avoid
 // pulling the rest of Rev.h's transitive includes (FDS_VARS, Modplayer,
@@ -71,6 +72,54 @@ protected:
 // pointer is returned to the caller; ownership stays with whoever called us
 // (typically a file-scope static, freed by the matching Destroy_Scene later).
 Scene *loadSceneAligned(const char *fldPath);
+
+// Cinematic preset (--cinematic): turn HDR + the filmic post-FX stack on for
+// THIS scene at its own per-scene exposure. Called at the top of each scene's
+// factory. Notes:
+//   - setDefault yields to anything the user set explicitly on the CLI, so
+//     individual --flags still override the preset.
+//   - Each scene passes its OWN exposure; since setDefault overwrites the value
+//     (it only skips when the flag was CLI-set), values don't leak between
+//     scenes in the full sequence — but a scene that wants HDR must call this
+//     (or pin hdr_exposure itself) so it doesn't inherit the prior scene's.
+//   - Deliberately does NOT touch deferred_quarter: that's a greets-only
+//     optimization whose 2x2 reconstruction checkerboards on other scenes.
+// Per-scene cinematic exposures, measured so the tonemap rolls off instead of
+// blowing out: bright daylit water → low, dark scenes → high. Used by both the
+// live scene factories and the headless snapshots so they stay in lockstep.
+namespace cine {
+    constexpr float kCityExposure     = 0.4f;   // bright water mirror
+    constexpr float kChaseExposure    = 1.0f;   // neutral (no headless snapshot; tune live)
+    constexpr float kFountainExposure = 1.5f;   // dark night scene, lift slightly
+    constexpr float kCrashExposure    = 1.5f;   // dark by design
+    constexpr float kGreetsExposure   = 1.0f;   // greets' own tuning
+}
+
+// `anamorphic` adds horizontal lens streaks. Unlike bloom (which a high
+// threshold keeps to the brightest highlights), anamorphic streaks ANY bright
+// region into long bars — gorgeous on DISCRETE hot sources (greets disco,
+// fountain bolts) but it smears scenes whose brightness is broad and diffuse:
+// city's sunlit water is one giant bright source, so the streaks wash the
+// frame. Diffuse-bright scenes leave it off and keep the rest.
+inline void ApplyCinematicSceneDefaults(float exposure, bool anamorphic = false)
+{
+    using FF = fds::FeatureFlags;
+    if (!FF::cinematic()) return;
+    FF::setDefault(FF::BoolId::hdr,              true);
+    FF::setDefault(FF::BoolId::hdr_linear,       true);
+    FF::setDefault(FF::FloatId::hdr_exposure,    exposure);
+    // Restrained bloom — a high threshold keeps it to the brightest highlights,
+    // so even bright water doesn't wash (measured safe). Greets overrides hotter.
+    FF::setDefault(FF::BoolId::bloom,            true);
+    FF::setDefault(FF::FloatId::bloom_threshold, 245.0f);
+    FF::setDefault(FF::FloatId::bloom_intensity, 0.4f);
+    // Post-tonemap colour/lens FX — safe everywhere (no bright-pass):
+    FF::setDefault(FF::BoolId::chromatic,        true);
+    FF::setDefault(FF::BoolId::vignette,         true);
+    FF::setDefault(FF::BoolId::grade,            true);
+    FF::setDefault(FF::BoolId::grain,            true);
+    if (anamorphic) FF::setDefault(FF::BoolId::anamorphic, true);
+}
 
 // Walk MatLib and stamp Mat_RGBInterp + Txtr_Tiled on every textured material.
 // Restricted to materials belonging to `sc` when restrictToScene=true (the

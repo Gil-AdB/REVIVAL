@@ -1043,6 +1043,19 @@ static void GreetsApplyRunDefaults()
 	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
 	FF::setDefault(FF::FloatId::greets_shard_fall_speed, 0.8f);
 	FF::setDefault(FF::FloatId::greets_shard_randomness, 0.8f);
+	// Pin greets' own exposure so it doesn't inherit a leaked --cinematic value
+	// from the prior scene (crash sets one via setDefault; greets runs after it).
+	FF::setDefault(FF::FloatId::hdr_exposure,           cine::kGreetsExposure);
+	// --cinematic: greets keeps its own hotter HDR/bloom (set above) but gains
+	// the same filmic post stack as the other scenes. The disco ball + omnis are
+	// the brightest sources in the demo, so anamorphic streaks earn their keep.
+	if (FF::cinematic()) {
+		FF::setDefault(FF::BoolId::anamorphic, true);
+		FF::setDefault(FF::BoolId::chromatic,  true);
+		FF::setDefault(FF::BoolId::vignette,   true);
+		FF::setDefault(FF::BoolId::grade,      true);
+		FF::setDefault(FF::BoolId::grain,      true);
+	}
 }
 
 void Initialize_Greets()

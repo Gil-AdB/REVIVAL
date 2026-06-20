@@ -234,6 +234,7 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // interactive demo goes through Initialize_City first naturally.
     Initialize_City();
     Initialize_Fountain();
+    ApplyCinematicSceneDefaults(cine::kFountainExposure);   // bloom-only; mirror the live factory
 
     std::vector<int32_t> timestamps = cfg.timestamps;
     if (timestamps.empty()) {
@@ -428,6 +429,7 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
     Initialize_Crash();
+    ApplyCinematicSceneDefaults(cine::kCrashExposure);   // mirror the live factory
 
     // For crash, --snapshot=crash@t=N takes N as a FRAME number, not a raw
     // Timer. CurFrame = StartFrame + Timer/5 (CrPartTime = 5·(End-Start)),
@@ -464,6 +466,10 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     if (!initSnapshotEnvironment(xres, yres)) return 3;
 
     Initialize_City();
+    // The snapshot renders directly (it doesn't go through createCityScene), so
+    // apply the same --cinematic per-scene profile the live factory would, to
+    // keep `--cinematic --snapshot=city` faithful to the demo.
+    ApplyCinematicSceneDefaults(cine::kCityExposure);
 
     const int32_t ctPart = getCityCTPartTime();
     std::fprintf(stderr, "[SNAPSHOT] City CTPartTime = %d (Timer must be < this for tick to render)\n",

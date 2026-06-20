@@ -3033,6 +3033,9 @@ struct CityScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createCityScene()
 {
+	// Bright daylit water mirror → low exposure so the reflection rolls off
+	// instead of blowing out.
+	ApplyCinematicSceneDefaults(cine::kCityExposure);
 	return std::make_unique<CityScene>();
 }
 

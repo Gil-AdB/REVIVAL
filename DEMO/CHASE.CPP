@@ -814,6 +814,7 @@ struct ChaseScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createChaseScene()
 {
+	ApplyCinematicSceneDefaults(cine::kChaseExposure);
 	return std::make_unique<ChaseScene>();
 }
 
