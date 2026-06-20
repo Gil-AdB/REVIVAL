@@ -2589,6 +2589,14 @@ struct CityScene : SceneDriver {
 		const float texScale = fds::FeatureFlags::water_tex_scale();
 		const float texWarp  = fds::FeatureFlags::water_tex_warp();
 		const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
+		// Texture FLOW: translate the caustic UV at the wave field's world velocity
+		// (the field scrolls g_waterNrm by t*16/-12 texels at frequency `base`; the
+		// texture is at frequency `texScale`, so texScale/base matches world speed).
+		// water_tex_flow scales it (1 = ride the glints, 0 = warp-only/in-place).
+		const float wnBase = 0.02f * scale;                  // mirrors waterWaveSlope()
+		const float flowK  = (wnBase > 0.0f) ? (texScale / wnBase) * fds::FeatureFlags::water_tex_flow() : 0.0f;
+		const float flowU  =  t * 16.0f * flowK;
+		const float flowV  = -t * 12.0f * flowK;
 		const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
 		const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
 		const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
@@ -2646,13 +2654,23 @@ struct CityScene : SceneDriver {
 					// not hiding it.
 					if (texMix > 0.0f && g_waterTexW > 0) {
 						float cb, cg, cr;
-						sampleWaterTex(wx*texScale + bnx*texWarp, wz*texScale + bnz*texWarp, cb, cg, cr);
+						// Warp = ripple-in-place (wave slope); flow = translate with the
+						// field at its world velocity (same scroll as the glints) so the
+						// caustics ride the waves instead of standing still.
+						sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
+						               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
 						const float cell = (cb + cg + cr) * (1.0f/765.0f);   // 0..1 cell value
-						const float mod = 1.0f + (cell - 0.5f) * 2.0f * texMix; // ±texMix brightness
+						const float cellHi = cell - 0.40f;                   // + on lines, - in base
+						// Uniform (hue-preserving) brightness contrast keeps the base blue
+						// instead of warming it...
+						const float mod = 1.0f + cellHi * 2.0f * texMix * 0.6f;
+						// ...plus an ADDITIVE blue tint on the bright caustic lines: only
+						// bluens (never warms), so the caustics read distinctly blue.
+						const float blueLine = (cellHi > 0.0f ? cellHi : 0.0f) * texMix * 220.0f;
 						const dword p = row[x];
-						int nb = int(float(p & 0xFFu) * mod);
-						int ng = int(float((p>>8)&0xFFu) * mod);
-						int nr = int(float((p>>16)&0xFFu) * mod);
+						int nb = int(float(p & 0xFFu)     * mod + blueLine);
+						int ng = int(float((p>>8)&0xFFu)  * mod + blueLine * 0.40f);
+						int nr = int(float((p>>16)&0xFFu) * mod + blueLine * 0.08f);
 						if (nb<0)nb=0; if (ng<0)ng=0; if (nr<0)nr=0;
 						if (nb>255)nb=255; if (ng>255)ng=255; if (nr>255)nr=255;
 						row[x] = dword(nb) | (dword(ng)<<8) | (dword(nr)<<16) | 0xFF000000u;
