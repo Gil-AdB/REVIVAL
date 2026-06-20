@@ -828,7 +828,7 @@ OUT:
 			if ((dz=Sc->Pcl[I].V.TPos_AOS.z)>=Sc->NZP) {
 				F = &Sc->Pcl[I].F;
 				dz *=-16384;
-				dz +=0x7FFFFFFF;
+				dz +=float(0x7FFFFFFF); // explicit: INT_MAX bias as float (rounds to 2^31)
 				RoundToInt((int32_t*)&F->SortZ.DW,dz);
 #ifdef FRONT_TO_BACK_SORTING
 				F->SortZ.F = 2*fzp-dz;

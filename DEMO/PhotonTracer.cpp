@@ -38,11 +38,11 @@ ptObject2D::ptObject2D(mword numVerts)
 
 ptErrorCode ptObject2D::create(mword numVerts)
 {
-	_verts = new ptObject2DVertex [numVerts];
+	// Value-initialize (the trailing ()) so every member is zeroed via the
+	// type's own semantics — ptObject2DVertex is non-trivially-copyable, so a
+	// raw memset is ill-advised (and warned). Zeroing here is unimportant.
+	_verts = new ptObject2DVertex [numVerts]();
 	_numVerts = numVerts;
-
-	// unimportant, can be remarked
-	memset(_verts, 0, sizeof(ptObject2DVertex) * numVerts);
 
 	return PT_OK;
 }
