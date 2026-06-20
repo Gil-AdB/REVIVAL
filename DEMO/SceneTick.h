@@ -177,7 +177,7 @@ inline constexpr CinematicProfile kCity{
     .vignetteStrength = 0.8f,
     .fog = true, .fogWorley = true,
     .fogDensity = 3.0f, .fogBottom = -400.0f, .fogTop = 420.0f,
-    .fogBlobOverlap = 3.0f, .fogWorleyThresh = 2.0f, .fogCell = 500.0f, .fogInscatter = 3.0f,
+    .fogBlobOverlap = 3.0f, .fogWorleyThresh = 2.0f, .fogCell = 500.0f, .fogInscatter = 1.5f,
     .rain = true, .boltFlashPeak = 10000.0f, .boltFlashRange = 600.0f,
     .anamorphic = true, .anamIntensity = 3.0f, .anamVert = 0.0f, .anamDecay = 0.3f, .anamPasses = 3,
     .shadows = true, .coneStrength = 2.0f, .hdrGlowScale = 0.12f, .xparPeel = 4,
