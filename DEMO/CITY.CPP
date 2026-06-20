@@ -334,34 +334,43 @@ static inline void waterWaveSlope(float wx, float wz, float t, float scale, int 
 	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
 
-// Row-major (de-swizzled) copy of the water albedo, so the screen-space water
-// pass can sample it at an arbitrary field-WARPED UV per pixel (the rasterizer's
-// swizzled layout can't be sampled at offset UVs without this). Built once at
-// init by gathering through the forward swizzle (tile_u/tile_v).
+// Procedural water-detail texture (row-major), sampled by the screen-space water
+// pass at a field-WARPED UV per pixel. Generated at init (buildWaterDetail) —
+// replaces de-swizzling the original low-res albedo (no swizzle dependence, no
+// blockiness).
 static std::vector<dword> g_waterTex;
 static int g_waterTexW = 0, g_waterTexH = 0;
 
-static void buildWaterTexLinear() {
-	g_waterTexW = g_waterTexH = 0; g_waterTex.clear();
-	if (!RflObj) return;
-	TriMesh* T = (TriMesh*)RflObj->Data;
-	if (!T || T->FIndex == 0 || !T->Faces[0].Txtr || !T->Faces[0].Txtr->Txtr) return;
-	Texture* tx = T->Faces[0].Txtr->Txtr;
-	const dword* swz = (const dword*)tx->Mipmap[0];
-	if (!swz) return;
-	const int LW = tx->LSizeX, LH = tx->LSizeY;
-	const int W = 1 << LW, H = 1 << LH;
-	const uint32_t umask = (1u << LW) - 1, vmask = (1u << LH) - 1, vbits = (uint32_t)LH;
-	// V2 block-tiling swizzle (SimdHelpers.h packed_tile_u/v — the layout the
-	// rasterizer actually reads): idx = (u&3) | ((u<<vbits)&swzU) | ((v&vmask)<<2).
-	const uint32_t swzU = (umask >> 2) << (2 + vbits);
-	g_waterTex.assign(size_t(W) * size_t(H), 0u);
-	for (int v = 0; v < H; ++v)
-		for (int u = 0; u < W; ++u) {
-			const uint32_t idx = ((uint32_t)u & 3u) | (((uint32_t)u << vbits) & swzU) | (((uint32_t)v & vmask) << 2);
-			g_waterTex[size_t(v) * W + u] = swz[idx];
+static void buildWaterDetail() {
+	// Procedural, high-res, row-major → no swizzle dependence (no V1/V2 trap) and
+	// no blockiness (the original albedo was low-res). A soft tiling Worley cell
+	// field tinted blue-cyan; the water pass samples it field-warped for coherence.
+	const int N = 256;
+	g_waterTex.assign(size_t(N) * size_t(N), 0u);
+	g_waterTexW = g_waterTexH = N;
+	const int G = 14;                                       // feature-cell grid (tiles seamlessly via %G)
+	auto fp = [](int gx, int gy, int ax) -> float {
+		uint32_t h = uint32_t(gx)*73856093u ^ uint32_t(gy)*19349663u ^ uint32_t(ax+1)*2654435761u;
+		h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+		return float(h & 0xFFFFu) * (1.0f/65535.0f);
+	};
+	const float cs = float(N) / float(G);
+	for (int py = 0; py < N; ++py) for (int px = 0; px < N; ++px) {
+		const float fx = (px + 0.5f) / cs, fy = (py + 0.5f) / cs;
+		const int cx = int(fx), cy = int(fy);
+		float d1 = 1e9f;
+		for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 1; ++ox) {
+			const int gx = ((cx+ox) % G + G) % G, gy = ((cy+oy) % G + G) % G;
+			const float dx = (cx+ox + fp(gx,gy,0)) - fx;
+			const float dy = (cy+oy + fp(gx,gy,1)) - fy;
+			const float d = dx*dx + dy*dy;
+			if (d < d1) d1 = d;
 		}
-	g_waterTexW = W; g_waterTexH = H;
+		float c = 1.0f - std::sqrt(d1); if (c < 0) c = 0; c = c*c;   // soft bright cell interiors
+		int B = int(62 + c*120), Gn = int(56 + c*128), R = int(32 + c*70);
+		if (B>255)B=255; if (Gn>255)Gn=255; if (R>255)R=255;
+		g_waterTex[size_t(py)*N + px] = dword(B) | (dword(Gn)<<8) | (dword(R)<<16) | 0xFF000000u;
+	}
 }
 
 static inline void sampleWaterTex(float u, float v, float& cb, float& cg, float& cr) {
@@ -2669,7 +2678,7 @@ struct CityScene : SceneDriver {
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 		buildWaterNormalMap();   // procedural water field (reflection + glints + composite)
-		buildWaterTexLinear();   // de-swizzled albedo for the field-warped texture pass
+		buildWaterDetail();      // procedural high-res water texture for the field-warped pass
 
 		setupFaceLists(CitySc, /*includeOmnisInCount=*/true);
 
