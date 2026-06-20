@@ -115,6 +115,7 @@ struct CrashScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createCrashScene()
 {
+	fds::FeatureFlags::ResetToSceneBaseline();   // clean per-scene baseline (no city fog/storm)
 	// Dark by design (the register/crash dump) → keep it moody, lift slightly.
 	ApplyCinematicSceneDefaults(cine::kCrashExposure);
 	return std::make_unique<CrashScene>();

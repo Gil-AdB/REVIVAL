@@ -88,20 +88,20 @@ Scene *loadSceneAligned(const char *fldPath);
 // blowing out: bright daylit water → low, dark scenes → high. Used by both the
 // live scene factories and the headless snapshots so they stay in lockstep.
 namespace cine {
-    constexpr float kCityExposure     = 0.4f;   // bright water mirror
-    constexpr float kChaseExposure    = 1.0f;   // neutral (no headless snapshot; tune live)
+    constexpr float kCityExposure     = 0.3f;   // bright water mirror + fog (user-tuned)
+    constexpr float kChaseExposure    = 0.45f;  // city-chase: foggy, a touch brighter than city
     constexpr float kFountainExposure = 1.5f;   // dark night scene, lift slightly
     constexpr float kCrashExposure    = 1.5f;   // dark by design
     constexpr float kGreetsExposure   = 1.0f;   // greets' own tuning
 }
 
-// `anamorphic` adds horizontal lens streaks. Unlike bloom (which a high
-// threshold keeps to the brightest highlights), anamorphic streaks ANY bright
-// region into long bars — gorgeous on DISCRETE hot sources (greets disco,
-// fountain bolts) but it smears scenes whose brightness is broad and diffuse:
-// city's sunlit water is one giant bright source, so the streaks wash the
-// frame. Diffuse-bright scenes leave it off and keep the rest.
-inline void ApplyCinematicSceneDefaults(float exposure, bool anamorphic = false)
+// The common cinematic base every scene shares: HDR + restrained bloom + the
+// safe post-tonemap colour/lens FX. Per-scene exposure. Anamorphic is NOT here
+// — it streaks any bright region into bars, which suits some scenes (city/chase
+// under fog, greets disco) and smears others, so each scene opts in itself.
+// Call ResetToSceneBaseline() before this (the factories do) so the scene
+// starts from a clean baseline and these settings don't bleed across scenes.
+inline void ApplyCinematicSceneDefaults(float exposure)
 {
     using FF = fds::FeatureFlags;
     if (!FF::cinematic()) return;
@@ -118,7 +118,47 @@ inline void ApplyCinematicSceneDefaults(float exposure, bool anamorphic = false)
     FF::setDefault(FF::BoolId::vignette,         true);
     FF::setDefault(FF::BoolId::grade,            true);
     FF::setDefault(FF::BoolId::grain,            true);
-    if (anamorphic) FF::setDefault(FF::BoolId::anamorphic, true);
+}
+
+// City & chase share the cityscape world, so they get the same tuned cinematic
+// atmosphere on top of the base: froxel volumetric fog, a storm (rain + bright
+// lightning flash), stronger cones / deeper transparency peel, punchier
+// anamorphic streaks (the fog tames the wash) + stronger CA/vignette. Per-scene
+// isolation (ResetToSceneBaseline in the factory) keeps this OFF the other
+// scenes. Lens ghosts + DoF deliberately excluded. Cinematic-gated.
+inline void CityChaseApplyAtmosphere()
+{
+    using FF = fds::FeatureFlags;
+    if (!FF::cinematic()) return;
+    // Froxel volumetric fog (the city's signature haze).
+    FF::setDefault(FF::BoolId::fast_fog,              true);
+    FF::setDefault(FF::BoolId::fast_fog_froxel,       true);
+    FF::setDefault(FF::BoolId::fast_fog_worley,       true);
+    FF::setDefault(FF::BoolId::fast_fog_xpar,         true);
+    FF::setDefault(FF::FloatId::fast_fog_density,        3.0f);
+    FF::setDefault(FF::FloatId::fast_fog_bottom,         -400.0f);
+    FF::setDefault(FF::FloatId::fast_fog_top,            420.0f);
+    FF::setDefault(FF::FloatId::fast_fog_blob_overlap,   3.0f);
+    FF::setDefault(FF::FloatId::fast_fog_worley_thresh,  2.0f);
+    FF::setDefault(FF::FloatId::fast_fog_cell,           500.0f);
+    FF::setDefault(FF::FloatId::fast_fog_inscatter,      3.0f);
+    // Lighting / transparency depth / HDR glow compensation.
+    FF::setDefault(FF::BoolId::shadows,              true);
+    FF::setDefault(FF::FloatId::cone_strength,       2.0f);
+    FF::setDefault(FF::FloatId::hdr_glow_scale,      0.12f);
+    FF::setDefault(FF::IntId::xpar_peel_passes,      4);
+    // Storm: rain + bright lightning flash.
+    FF::setDefault(FF::BoolId::rain,                 true);
+    FF::setDefault(FF::FloatId::bolt_flash_peak,     10000.0f);
+    FF::setDefault(FF::FloatId::bolt_flash_range,    600.0f);
+    // Punchy anamorphic + stronger CA/vignette (base already enabled CA/vignette).
+    FF::setDefault(FF::BoolId::anamorphic,           true);
+    FF::setDefault(FF::FloatId::anamorphic_intensity, 3.0f);
+    FF::setDefault(FF::FloatId::anamorphic_vert,      0.0f);
+    FF::setDefault(FF::FloatId::anamorphic_decay,     0.3f);
+    FF::setDefault(FF::IntId::anamorphic_passes,      3);
+    FF::setDefault(FF::FloatId::chromatic_amount,     3.0f);
+    FF::setDefault(FF::FloatId::vignette_strength,    0.8f);
 }
 
 // Walk MatLib and stamp Mat_RGBInterp + Txtr_Tiled on every textured material.

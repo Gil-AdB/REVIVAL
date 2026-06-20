@@ -2876,6 +2876,7 @@ std::unique_ptr<SceneDriver> createFountainScene()
 {
 	// Dark night scene → lift exposure a touch (still moody; the bolts/lights
 	// pop). Fountain tonemaps itself (g_hdrDeferTonemap); exposure still applies.
+	fds::FeatureFlags::ResetToSceneBaseline();   // clean per-scene baseline (no city fog/storm)
 	// Bloom-only (no anamorphic): the discrete lights bloom gorgeously, but
 	// anamorphic's bars smear the bright orbs/spray. Add --anamorphic to taste.
 	ApplyCinematicSceneDefaults(cine::kFountainExposure);

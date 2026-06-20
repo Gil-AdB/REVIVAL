@@ -506,6 +506,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // keep `--cinematic --snapshot=city` faithful to the demo.
     fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
     ApplyCinematicSceneDefaults(cine::kCityExposure);
+    CityChaseApplyAtmosphere();   // mirror the live factory (fog + storm + tuned post)
 
     const int32_t ctPart = getCityCTPartTime();
     std::fprintf(stderr, "[SNAPSHOT] City CTPartTime = %d (Timer must be < this for tick to render)\n",
