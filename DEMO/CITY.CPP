@@ -352,10 +352,15 @@ static void buildWaterTexLinear() {
 	const int LW = tx->LSizeX, LH = tx->LSizeY;
 	const int W = 1 << LW, H = 1 << LH;
 	const uint32_t umask = (1u << LW) - 1, vmask = (1u << LH) - 1, vbits = (uint32_t)LH;
+	// V2 block-tiling swizzle (SimdHelpers.h packed_tile_u/v — the layout the
+	// rasterizer actually reads): idx = (u&3) | ((u<<vbits)&swzU) | ((v&vmask)<<2).
+	const uint32_t swzU = (umask >> 2) << (2 + vbits);
 	g_waterTex.assign(size_t(W) * size_t(H), 0u);
 	for (int v = 0; v < H; ++v)
-		for (int u = 0; u < W; ++u)
-			g_waterTex[size_t(v) * W + u] = swz[barry::tile_u((uint32_t)u, vbits, umask) + barry::tile_v((uint32_t)v, vmask)];
+		for (int u = 0; u < W; ++u) {
+			const uint32_t idx = ((uint32_t)u & 3u) | (((uint32_t)u << vbits) & swzU) | (((uint32_t)v & vmask) << 2);
+			g_waterTex[size_t(v) * W + u] = swz[idx];
+		}
 	g_waterTexW = W; g_waterTexH = H;
 }
 
