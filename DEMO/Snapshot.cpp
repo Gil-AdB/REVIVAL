@@ -469,6 +469,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // The snapshot renders directly (it doesn't go through createCityScene), so
     // apply the same --cinematic per-scene profile the live factory would, to
     // keep `--cinematic --snapshot=city` faithful to the demo.
+    fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
     ApplyCinematicSceneDefaults(cine::kCityExposure);
 
     const int32_t ctPart = getCityCTPartTime();
