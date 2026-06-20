@@ -35,6 +35,8 @@ set(DEMO_SOURCES
     ImageCompression.h
     MeshOps.cpp
     MeshOps.h
+    ProceduralWater.cpp
+    ProceduralWater.h
     MirrorShatter.cpp
     MirrorShatter.h
     MirrorTestDriver.cpp
