@@ -460,6 +460,16 @@ enum class ShadowBakeMode {
 void Render_DeferredShadowMaps(class Scene *Sc,
                                ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame);
 
+// Stage A overlap (docs/THREADING_OVERLAP_PLAN.md). The greets per-frame
+// dynamic shadow bake. With --shadow-gbuffer-overlap, runs the bake(s) on a
+// dedicated orchestrator thread so it overlaps the subsequent gbuffer fill;
+// renderFrame calls ShadowBake_JoinPending() before deferred lighting (which
+// samples the maps). Without the flag, runs the bakes synchronously inline
+// (current behavior) and JoinPending is a no-op. DispatchGreets runs both the
+// DynamicOmnis bake and, when --shadow-dynamic is set, the DynamicMeshes bake.
+void ShadowBake_DispatchGreets(class Scene *Sc);
+void ShadowBake_JoinPending();
+
 // Reflection fog gradient: a scene that composites a planar mirrored pass
 // under its water hands the (wobble-displaced) pass-1 Z here, between its
 // passes; the next froxel fog composite fogs those z==0 reflection pixels

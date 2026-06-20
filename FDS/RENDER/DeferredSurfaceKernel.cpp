@@ -56,6 +56,7 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
+#include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
 #include "FILLERS/FILLERS.H"
@@ -419,6 +420,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    /*profNoCubeTap        */ fds::FeatureFlags::prof_no_cube_tap(),
 	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
 	};
+
+	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this
+	// tile, matching the HDR-linear accumulation below (albedo²·intensity·color).
+	// After the pixel loop we count lights whose max contribution is below visible
+	// thresholds = the contribution-cull potential. Diffuse-only (spec excluded);
+	// linear-radiance units, PRE-tonemap. Load-independent (it's a count). Gated;
+	// negligible when off. Per-tile stack array → no cross-thread race; atomics
+	// aggregate at the end. Covers the scalar path (= all of greets: nmap forces
+	// scalar); vec-path pixels aren't tracked.
+	static const bool s_contribProf = (std::getenv("FDS_CONTRIB_CULL") != nullptr);
+	alignas(64) float contribMax[DEFERRED_MAX_LIGHTS];
+	const int contribN = s_contribProf
+	    ? std::min(ctx.tileLights[tileIndex].count, int(DEFERRED_MAX_LIGHTS)) : 0;
+	for (int ci = 0; ci < contribN; ++ci) contribMax[ci] = 0.0f;
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
@@ -1221,6 +1236,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						lB += intensity * Lcb;
 						lG += intensity * Lcg;
 						lR += intensity * Lcr;
+						if (s_contribProf) {   // max linear diffuse contrib of light n over the tile
+							const float kN = 1.0f/255.0f;
+							const float aB=texB*kN, aG=texG*kN, aR=texR*kN;
+							float cc = aB*aB*intensity*Lcb;
+							const float cg = aG*aG*intensity*Lcg; if (cg>cc) cc=cg;
+							const float cr = aR*aR*intensity*Lcr; if (cr>cc) cc=cr;
+							if (cc > contribMax[n]) contribMax[n] = cc;
+						}
 
 						if (wantSpecular) {
 							const float ldx = wx * lenInv;
@@ -1403,6 +1426,30 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
+	}
+
+	if (s_contribProf) {   // [DIAG] count this tile's lights with sub-visible max contribution
+		int d05=0, d1=0, d2=0;
+		for (int ci = 0; ci < contribN; ++ci) {
+			if (contribMax[ci] < 0.5f) ++d05;
+			if (contribMax[ci] < 1.0f) ++d1;
+			if (contribMax[ci] < 2.0f) ++d2;
+		}
+		static std::atomic<long long> aTiles{0}, aN{0}, a05{0}, a1{0}, a2{0};
+		aTiles.fetch_add(1, std::memory_order_relaxed);
+		aN.fetch_add(contribN, std::memory_order_relaxed);
+		a05.fetch_add(d05, std::memory_order_relaxed);
+		a1.fetch_add(d1, std::memory_order_relaxed);
+		a2.fetch_add(d2, std::memory_order_relaxed);
+		const long long t = aTiles.load(std::memory_order_relaxed);
+		if (t > 0 && (t % 2000) == 0) {
+			const double td = double(t);
+			std::fprintf(stderr,
+			    "[CONTRIB-CULL] lights/tile=%.1f  droppable (max linear diffuse contrib < thr): "
+			    "<0.5=%.1f  <1.0=%.1f  <2.0=%.1f  (per tile, %lld tiles)\n",
+			    double(aN.load())/td, double(a05.load())/td,
+			    double(a1.load())/td, double(a2.load())/td, t);
 		}
 	}
 
@@ -3223,9 +3270,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	static TileLights s_tileLights[DEFERRED_NUM_TILES];
 	TileLights *const tileLights = (ov && ov->tileLights) ? ov->tileLights : s_tileLights;
 	const float invZScale = 1.0f / float(g_zscale);
+	const long long _lsetup = TailProf::nowNs();
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
 	                       tileSizeX, tileSizeY, XRes, YRes,
 	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
+	TailProf::mark("depth-bounds", _lsetup);   // per-tile z-buffer scan (par-able)
 	// Mirror-footprint presence per tile/strip, for the clone-light
 	// cull in the list builders. Only computed when a scene actually
 	// activated the mask plane (GreetsMirror::BuildMirror).
@@ -3244,9 +3293,36 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		tilePresence = tileMirrorPresence;
 	}
 	const fds::CameraContext &camCtx = (ov && ov->cam) ? *ov->cam : fds::g_mainCamera;
+	const long long _tcull = TailProf::nowNs();
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
 	                    tileSizeX, tileSizeY, XRes, YRes,
 	                    lights, numLights, tilePresence, camCtx);
+	TailProf::mark("tile-cull", _tcull);       // light-major append (harder to par)
+
+	// Diagnostic (FDS_TILE_LIGHT_PROF=1): avg/max surviving lights per tile
+	// after the cone cull, main frame only. Decides whether the deferred-kernel
+	// cost is "many lights survive" (→ contribution culling) or "few lights but
+	// heavy per-light math" (→ specular). Per-frame at the dispatcher, not hot.
+	static const bool s_tileLightProf = (std::getenv("FDS_TILE_LIGHT_PROF") != nullptr);
+	if (s_tileLightProf && !ov) {
+		static long long accFrames = 0, accSum = 0, accTiles = 0;
+		static int       accMax = 0, accTilesWith = 0, accNonEmpty = 0;
+		const int nT = numTilesX * numTilesY;
+		int sum = 0, mx = 0, nonEmpty = 0;
+		for (int t = 0; t < nT; ++t) {
+			const int c = tileLights[t].count;
+			sum += c; if (c > mx) mx = c; if (c > 0) ++nonEmpty;
+		}
+		accFrames++; accSum += sum; accTiles += nT; accNonEmpty += nonEmpty;
+		if (mx > accMax) accMax = mx;
+		if (accFrames % 60 == 0) {
+			std::fprintf(stderr,
+				"[TILE-LIGHT-PROF] tiles=%d  avg/tile=%.1f  avg/non-empty=%.1f  max=%d  (numLights=%d, %lld frames)\n",
+				nT, double(accSum)/double(accTiles),
+				accNonEmpty ? double(accSum)/double(accNonEmpty) : 0.0,
+				accMax, numLights, accFrames);
+		}
+	}
 
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
@@ -3344,9 +3420,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		}
 	}
 	if (inlineDispatch) { /* drained per tile above */ }
-	else for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	else TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w1");
 
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
 	// fallback at material edges). Skip entirely when checkerboard is
@@ -3368,8 +3442,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			}
 		}
 		if (!inlineDispatch)
-			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i)
-				renderns::tileDone.acquire();
+			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w2");
 	}
 
 	// Dump cache-line transition stats accumulated by shadow sampling

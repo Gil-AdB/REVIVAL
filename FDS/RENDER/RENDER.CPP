@@ -27,6 +27,7 @@
 #include "Base/Scene.h"
 #include "Base/RenderContext.h"
 #include "DeferredCommon.h"   // DeferredLightingCtx + g_deferredCtx (publish for strip path)
+#include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
@@ -258,6 +259,14 @@ namespace renderns {
 	// orchestrator may enqueue hundreds of Transform_Objects tasks).
 	std::counting_semaphore<INT_MAX> tileDone{0};
 
+	// Dedicated completion signal for the dynamic shadow-map bake
+	// (Render_DeferredShadowMaps). Kept separate from tileDone so the bake
+	// can run on its own orchestrator thread concurrently with the gbuffer
+	// fill (which drains tileDone) without the two stealing each other's
+	// permits — pool workers release whichever semaphore matches the task
+	// they just ran. See docs/THREADING_OVERLAP_PLAN.md (Stage A).
+	std::counting_semaphore<INT_MAX> shadowDone{0};
+
 	// Legacy mutex+condvar trio: still referenced by a few non-hot
 	// setup paths (e.g. shadow-orchestrator pre-dispatch counter reset)
 	// that haven't been migrated yet. Safe to keep alongside the
@@ -437,9 +446,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 	}
 
-	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer");
 
 	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
 	// migration): Render_DeferredLighting fills it; it's threaded to the
@@ -459,6 +466,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// per frame (clearing it again afterward would wipe the coverage). Gated
 		// on --hdr.
 		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
+
+		// Stage A overlap (docs/THREADING_OVERLAP_PLAN.md): join the dynamic
+		// shadow bake here — as late as possible (after the gbuffer fill, which
+		// ran concurrently with it) but before lighting samples the maps. No-op
+		// unless a bake was dispatched async this frame (--shadow-gbuffer-overlap,
+		// greets only); pending is cleared by this first join so recursive
+		// shard/RTT lighting passes don't re-join.
+		ShadowBake_JoinPending();
 
 		// Phase A deferred lighting pass: per-pixel ambient + Lambertian
 		// + linear falloff against the scene's omnis, modulated by the
@@ -580,9 +595,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					});
 				}
 			}
-			for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-				renderns::tileDone.acquire();
-			}
+			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "postlight");
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);

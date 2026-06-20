@@ -35,6 +35,7 @@
 #include <algorithm>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
+#include "RENDER/TailProf.h"   // phase-1 serial-glue breakdown (FDS_TAIL_PROF)
 #include "RENDER/LightmapBake.h"
 #include <chrono>
 #include <memory>
@@ -966,8 +967,87 @@ static void BuildGreetsShatter()
 
 }
 
+// Greets scene defaults — the tuned look/perf the scene ships with. Applied
+// via FeatureFlags::setDefault, so ANY explicit --flag / FDS_* on the CLI/env
+// still wins (setDefault only writes when the flag wasn't user-set).
+//
+// SCOPING: the demo inits ALL scenes (Initialize_City/.../Greets) before
+// running any, so a GLOBAL render flag (hdr, bloom, deferred_quarter, …) set
+// during Initialize_Greets would leak into every scene's render (e.g. break
+// the mirrortest gate, which runs Initialize_Greets then Run_MirrorTest).
+// So the defaults are split by WHERE they're read:
+//   - GreetsApplyInitDefaults  → Initialize_Greets: only flags the greets
+//     BUILD/BAKE reads (mirror clone, omni cube + lightmap bake, shard atlas).
+//     These are greets-specific; no other scene's render reads them.
+//   - GreetsApplyRunDefaults   → createGreetsScene: the global render +
+//     per-frame flags. createGreetsScene is greets-exclusive (Run_Greets AND
+//     the bench call it; --scene-mirrortest / other single scenes don't) and
+//     runs AFTER the shared init phase, so nothing leaks: greets is the last
+//     scene to run, and mirrortest never creates the greets scene.
+// True when a DIFFERENT single scene is the target. The demo inits every scene
+// before running any, so Initialize_Greets runs even for --scene-mirrortest /
+// --scene-conetest; applying greets's defaults there would leak into that
+// scene's render (and the byte gate). Greets still gets them via --scene-greets,
+// the greets bench, or the full sequence (where greets runs last).
+static bool GreetsScenePreempted()
+{
+	return fds::FeatureFlags::scene_mirrortest() ||
+	       fds::FeatureFlags::scene_conetest();
+}
+
+static void GreetsApplyInitDefaults()
+{
+	if (GreetsScenePreempted()) return;
+	using FF = fds::FeatureFlags;
+	FF::setDefault(FF::BoolId::greets_mirror,           true);
+	FF::setDefault(FF::BoolId::no_greets_spots,         true);
+	FF::setDefault(FF::BoolId::greets_omni_shadows,     true);
+	FF::setDefault(FF::IntId::greets_omni_shadow_res,   512);
+	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
+	FF::setDefault(FF::BoolId::shard_deferred,          true);
+	FF::setDefault(FF::IntId::greets_shard_res,         64);
+	// Lightmap bake atlas params (LightmapBake_Static reads these). NOT
+	// shadow_lightmap itself: that's the per-pixel SAMPLE gate the deferred
+	// kernel reads for EVERY scene, so it leaks if set during the shared init
+	// phase — it lives in GreetsApplyRunDefaults instead, and the bake is
+	// force-enabled at spawn so it still runs here. res/planar/skip_animated
+	// only matter while sampling (shadow_lightmap on), so they're inert on
+	// other scenes and safe to leave at init.
+	FF::setDefault(FF::IntId::shadow_lightmap_res,      128);
+	FF::setDefault(FF::BoolId::shadow_lightmap_planar,  true);
+	FF::setDefault(FF::BoolId::shadow_skip_animated,    true);
+}
+
+static void GreetsApplyRunDefaults()
+{
+	if (GreetsScenePreempted()) return;
+	using FF = fds::FeatureFlags;
+	// Shadow sampling / dynamic bake (greets tick + deferred kernel).
+	FF::setDefault(FF::BoolId::shadows,                 true);
+	FF::setDefault(FF::BoolId::shadow_dynamic,          true);
+	// Per-pixel lightmap SAMPLE gate — set at RUN (not init) so it doesn't
+	// leak onto earlier scenes; the bake itself was force-enabled at init.
+	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
+	// HDR + bloom + cones (global render path).
+	FF::setDefault(FF::BoolId::hdr,                     true);
+	FF::setDefault(FF::BoolId::hdr_linear,              true);
+	FF::setDefault(FF::BoolId::deferred_quarter,        true);
+	FF::setDefault(FF::BoolId::bloom,                   true);
+	FF::setDefault(FF::FloatId::bloom_intensity,        2.0f);
+	FF::setDefault(FF::FloatId::hdr_refl_gain,          4.0f);
+	FF::setDefault(FF::FloatId::cone_strength,          2.0f);
+	FF::setDefault(FF::BoolId::cone_fine_tiles,         true);
+	FF::setDefault(FF::FloatId::disco_bloom,            0.0f);
+	// Mirror RTT (per-frame) + shatter feel.
+	FF::setDefault(FF::BoolId::mirror_rtt,              true);
+	FF::setDefault(FF::FloatId::mirror_rtt_density,     1024.0f);
+	FF::setDefault(FF::FloatId::greets_shard_fall_speed, 0.8f);
+	FF::setDefault(FF::FloatId::greets_shard_randomness, 0.8f);
+}
+
 void Initialize_Greets()
 {
+	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
 
 	gg = new GreetsGenerator;
@@ -1773,8 +1853,14 @@ void Initialize_Greets()
 		std::fprintf(stderr, "[GREETS-BAKE] spawning lightmap bake thread\n");
 		const auto bakeSpawnT = std::chrono::steady_clock::now();
 		Scene * const greetScForBake = GreetSc;
-		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT]() {
-			fds::LightmapBake_Static(greetScForBake);
+		// Force the bake on: greets wants lightmaps, but the global
+		// shadow_lightmap SAMPLE flag is now set at greets-RUN (so it doesn't
+		// leak onto city/fountain), so the bake's own gate would otherwise
+		// no-op here. Skip the force when greets won't render (preempted by
+		// another --scene-X) — then the bake no-ops fast as before.
+		const bool bakeForce = !GreetsScenePreempted();
+		g_greetsBakeThread = std::thread([greetScForBake, bakeSpawnT, bakeForce]() {
+			fds::LightmapBake_Static(greetScForBake, bakeForce);
 			const auto bakeDoneT = std::chrono::steady_clock::now();
 			const double ms = std::chrono::duration<double, std::milli>(
 				bakeDoneT - bakeSpawnT).count();
@@ -2490,8 +2576,9 @@ struct GreetsScene : SceneDriver {
 		// camera pose from this frame's spline step) and BEFORE the
 		// main Transform_Objects (the pass clobbers per-vertex
 		// transforms, which the main transform recomputes).
+		{ TailProf::ScopeTimer _tp("RTT");
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
-		                              g_greetsRttSlots);
+		                              g_greetsRttSlots); }
 
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
@@ -2532,15 +2619,15 @@ struct GreetsScene : SceneDriver {
 		// frame 0 reads all-zero buffers → no shadows that frame).
 		// City does it in this order (CITY.CPP:2230-2235 then Render at
 		// :2278). Gated on env FDS_SHADOWS=1; no-op when off.
-		Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicOmnisPerFrame);
-		// Per-frame dynamic-mesh bake into the dynamic shadow buffer
-		// of each static omni. Lighting kernel samples max(static,
-		// dynamic) so moving meshes cast moving shadows on static
-		// receivers. No-op when --shadow-dynamic is off.
-		if (fds::FeatureFlags::shadow_dynamic()) {
-			Render_DeferredShadowMaps(GreetSc, ShadowBakeMode::DynamicMeshesPerFrame);
-		}
-		gg->Render();
+		// Runs the DynamicOmnis bake and, when --shadow-dynamic is set, the
+		// DynamicMeshes bake into each static omni's dynamic buffer (lighting
+		// samples max(static, dynamic) so moving meshes cast moving shadows).
+		// With --shadow-gbuffer-overlap (Stage A, docs/THREADING_OVERLAP_PLAN.md)
+		// these run on a dedicated thread overlapping the gbuffer fill in
+		// gg->Render() below, and renderFrame joins before deferred lighting;
+		// otherwise they run synchronously inline here (current behavior).
+		ShadowBake_DispatchGreets(GreetSc);
+		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;
 		// Diagnostic: identify shadow maps whose dynamic polyId hash isn't
@@ -2554,8 +2641,8 @@ struct GreetsScene : SceneDriver {
 		// wall covers. Without this clones spill outside the mirror
 		// surface footprint (worked for teleporter only because the
 		// surrounding Piramid walls were the de facto occluder mask).
-		fds::StampMirrorMasks(GreetSc, g_greetsMirrors);
-		fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors);
+		{ TailProf::ScopeTimer _tp("StampMasks");   fds::StampMirrorMasks(GreetSc, g_greetsMirrors); }
+		{ TailProf::ScopeTimer _tp("ProbeMirrors"); fds::ProbeSecondOrderMirrors(GreetSc, g_greetsMirrors); }
 
 		// The mirror clone-mask (Mekalele's per-pixel gb.mirrorId ==
 		// ctx.mirrorTag) only runs on the deferred path. Forward sends
@@ -2586,6 +2673,7 @@ struct GreetsScene : SceneDriver {
 			             fwd, def, def/fwd, defNV, defNV/fwd, int(CAll), int(XRes), int(YRes));
 		}
 		if (fds::FeatureFlags::greets_mirror()) {
+			TailProf::ScopeTimer _tp("Render-3D");
 			Render(RenderPath::ForceDeferred);
 		} else {
 			Render();
@@ -2902,6 +2990,7 @@ struct GreetsScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createGreetsScene()
 {
+	GreetsApplyRunDefaults();   // global render/runtime flags — greets-exclusive entry
 	return std::make_unique<GreetsScene>();
 }
 

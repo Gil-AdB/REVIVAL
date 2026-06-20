@@ -32,6 +32,7 @@
 #include "FILLERS/ShadowMap.h"
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — cones/halos composite into g_hdrBuf
+#include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "Threads.h"
 
 #include <mutex>
@@ -258,9 +259,24 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
 
     // Half vertical rate: compute even rows, write each result to the
     // row and its lower neighbor. Beams are soft gradients — visually
-    // free, halves the pass cost. (Vec path only; the scalar path is
-    // the --no-vol_vec fallback.)
-    const int yStep = (vecPath && fds::FeatureFlags::vol_cone_half_y()) ? 2 : 1;
+    // free except at narrow-beam edges. (Vec path only; the scalar path
+    // is the --no-vol_vec fallback.)
+    //
+    // Tie the cone rate to the deferred fill mode: when the surface kernel
+    // runs reduced-rate (quarter or checkerboard), halve the cone vertical
+    // rate too — one rate knob for the whole reduced-rate frame. The
+    // standalone --vol-cone-half-y still forces it independently.
+    //
+    // No true 2D quarter for cones (my call, per the half-y A/B): this loop
+    // is pixel-major SIMD, 8 lanes across X, so X-subsampling wastes lanes
+    // and fights the kernel; and the narrow disco beams (2.6°/7°) already
+    // show thin one-row edge artifacts at half-Y — quartering both axes
+    // doubles that for only ~2 ms on a ~15 ms pass. Row-doubling is the
+    // sweet spot; the surface kernel keeps its own 2D quarter/checker.
+    const bool coneReduced = fds::FeatureFlags::vol_cone_half_y()
+                          || fds::FeatureFlags::deferred_quarter()
+                          || fds::FeatureFlags::deferred_checkerboard();
+    const int yStep = (vecPath && coneReduced) ? 2 : 1;
     for (int py = y1; py < y2; py += yStep) {
         const float Y = (CntrEY - float(py)) * invFOVY;
         const size_t row = size_t(py) * size_t(XRes);
@@ -1456,19 +1472,38 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             (allCones || lights->forceCone[i])) spotIdx[spotCount++] = i;
     }
     if (spotCount == 0) return;
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
-    constexpr int numTiles  = numTilesX * numTilesY;
-    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    // --cone-fine-tiles: 12x8 (== the lighting grid) instead of the coarse
+    // 6x4. Finer tiles spread the cone-heavy region across 4x more tasks for
+    // better load balance at the pass barrier; each cone tile then maps 1:1
+    // onto a lighting tile (scaleX/Y = 1) for the zMax lookup. Coarse 6x4
+    // keeps the legacy 2x2 (scaleX/Y = 2) mapping.
+    const bool coneFine = fds::FeatureFlags::cone_fine_tiles();
+    const int numTilesX = coneFine ? DEFERRED_NUM_TILES_X : 6;
+    const int numTilesY = coneFine ? DEFERRED_NUM_TILES_Y : 4;
+    const int numTiles  = numTilesX * numTilesY;
+    const int scaleX = DEFERRED_NUM_TILES_X / numTilesX;   // lighting tiles per cone tile
+    const int scaleY = DEFERRED_NUM_TILES_Y / numTilesY;
+    int tileSizeX, tileSizeY;
+    if (coneFine) {
+        // Match the lighting tile geometry exactly so cone tile K == lighting
+        // tile K (Render_DeferredLighting:3164-3166: 8-rounded X).
+        const int rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
+        tileSizeX = (rawTileX + 7) & ~7;
+        tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+    } else {
+        tileSizeX = (XRes + numTilesX - 1) / numTilesX;
+        tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    }
 
     // Per-tile spot filtering. Mirror buildTileLightLists's screen-space
     // sphere projection but WITHOUT the z-cull (which caused the
     // tile-stripe artifact fixed in the prior commit). For sparse scenes
     // most tiles will see 0 spots — the per-pixel inner loop short-
-    // circuits via spotCount==0.
-    int tileSpotIdx  [numTiles][DEFERRED_MAX_VIEW_LIGHTS];   // local: concurrent shard bakes
-    int tileSpotCount[numTiles];
+    // circuits via spotCount==0. Array sized for the 12x8 max; cap 64 is
+    // ample (only spots → ~10 disco + 12 bounce on greets, well under 64).
+    constexpr int CONE_TILE_SPOT_CAP = 64;
+    int tileSpotIdx  [DEFERRED_NUM_TILES][CONE_TILE_SPOT_CAP];   // local: concurrent shard bakes
+    int tileSpotCount[DEFERRED_NUM_TILES];
     for (int t = 0; t < numTiles; ++t) tileSpotCount[t] = 0;
 
     for (int s = 0; s < spotCount; ++s) {
@@ -1515,9 +1550,9 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 const int t = j * numTilesX + i;
                 if (coneCull) {
                     float zHiT = -1e30f;
-                    for (int sj = 0; sj < 2; ++sj)
-                        for (int si = 0; si < 2; ++si) {
-                            const int st = (j*2 + sj) * DEFERRED_NUM_TILES_X + (i*2 + si);
+                    for (int sj = 0; sj < scaleY; ++sj)
+                        for (int si = 0; si < scaleX; ++si) {
+                            const int st = (j*scaleY + sj) * DEFERRED_NUM_TILES_X + (i*scaleX + si);
                             const float zm = ctx.tileLights[st].zMax;
                             zHiT = std::max(zHiT, (zm > 0.0f && zm < 1e30f) ? zm : fzpFar);
                         }
@@ -1540,7 +1575,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                                           r, lights->cosOuter[li], sinO_cull))
                         continue;
                 }
-                if (tileSpotCount[t] < DEFERRED_MAX_VIEW_LIGHTS) {
+                if (tileSpotCount[t] < CONE_TILE_SPOT_CAP) {
                     tileSpotIdx[t][tileSpotCount[t]++] = li;
                 }
             }
@@ -1568,9 +1603,11 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                 ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
                                                 invFOVX,invFOVY,invZScale,density,
                                                 fogZ,invFogZ]() {
+                    const long long _tp = TailProf::nowNs();
                     Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
                                                  invFOVX,invFOVY,invZScale,density,
                                                  fogZ,invFogZ);
+                    TailProf::addBusy(_tp);   // before release → race-free idle metric
                     // One permit per completed tile (see renderns::tileDone).
                     renderns::tileDone.release();
                 });
@@ -1578,8 +1615,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         }
     }
     if (!inlineDispatch)
-        for (int _i = 0; _i < numTiles; ++_i)
-            renderns::tileDone.acquire();
+        TailProf::drain(renderns::tileDone, numTiles, "cones");
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
@@ -2606,8 +2642,6 @@ void Render_DeferredFogPass() {
 			});
 		}
 	}
-	for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
 }
 

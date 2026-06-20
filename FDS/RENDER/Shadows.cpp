@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <Base/Vector.h>
 #include <atomic>
+#include <thread>
 #include <vector>
 #include <array>
 #include <chrono>
@@ -37,6 +38,7 @@
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in backface skip
 #include "Base/Material.h"
 #include "FILLERS/ShadowMap.h"
+#include "TailProf.h"     // phase-1 barrier instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "Base/VertexScratch.h"
 #include "FRUSTRUM.H"
@@ -48,6 +50,7 @@
 #include <climits>
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
+	extern std::counting_semaphore<INT_MAX> shadowDone;
 	extern std::mutex                tileCounterMutex;
 	extern std::atomic<int>          tileCounter;
 	extern std::condition_variable   condition;
@@ -266,7 +269,13 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// each task projects the scene into its own FaceListContext +
 	// VertexScratch + sets its own thread_local g_inShadowPass /
 	// g_currentShadowOmni. No shared writes between tasks.
-	{
+	//
+	// The Phase-A/B tasks pre-assign their tiles and never fetch_add on
+	// tileCounter, so this reset is vestigial for the bake — it only kept
+	// the shared counter clean for later passes (which reset it themselves
+	// before use). When overlapping with the gbuffer fill we must NOT touch
+	// the shared counter from this off-thread bake; skip it. (Stage A.)
+	if (!fds::FeatureFlags::shadow_gbuffer_overlap()) {
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
@@ -430,12 +439,12 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				g_currentShadowOmni = nullptr;
 				g_inDynamicShadowBake = false;
 				g_inShadowPass = false;
-				// One permit per completed task (see renderns::tileDone).
-				renderns::tileDone.release();
+				// One permit per completed task (see renderns::shadowDone).
+				renderns::shadowDone.release();
 			});
 	}
 	for (int _i = 0; _i < xformsEnqueued; ++_i) {
-		renderns::tileDone.acquire();
+		renderns::shadowDone.acquire();
 	}
 	const auto tXformEnd = clk::now();
 	if (sProfShadow) {
@@ -458,7 +467,9 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	constexpr int numTilesX = 4;
 	constexpr int numTilesY = 4;
 	const auto tRasterStart = clk::now();
-	{
+	// Vestigial for the bake (Phase-B tiles are pre-assigned); skip it when
+	// overlapping so the off-thread bake doesn't touch the shared counter.
+	if (!fds::FeatureFlags::shadow_gbuffer_overlap()) {
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
@@ -511,6 +522,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				const bool dynBakeForLambda = writeDynamicBuf;
 				ThreadPool::instance().enqueue(
 					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f, dynBakeForLambda]() {
+						const long long _tp = TailProf::nowNs();
 						g_currentShadowMap = smPtr;
 						g_inDynamicShadowBake = dynBakeForLambda;
 						const auto rt  = fds::MainRenderTargetFromGlobals();
@@ -635,15 +647,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						}
 						g_currentShadowMap = nullptr;
 						g_inDynamicShadowBake = false;
-						// One permit per completed task (see renderns::tileDone).
-						renderns::tileDone.release();
+						TailProf::addBusy(_tp);   // before release → race-free
+						// One permit per completed task (see renderns::shadowDone).
+						renderns::shadowDone.release();
 					});
 			}
 		}
 	}
-	for (int _i = 0; _i < tilesEnqueued; ++_i) {
-		renderns::tileDone.acquire();
-	}
+	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake");
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on
 	// the buffer this mode just wrote. Reports a tile flipping between
 	// occupied and empty across consecutive frames — the whole-tile
@@ -825,4 +836,38 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		}
 	}
 #endif
+}
+
+// ─── Stage A: shadow bake / gbuffer overlap ───────────────────────────────
+// See docs/THREADING_OVERLAP_PLAN.md. The bake is data-isolated from the
+// gbuffer fill (per-light VertexScratch clones, its own shadow maps, its own
+// renderns::shadowDone semaphore; it does not touch tileCounter when
+// overlapping). It must complete before deferred lighting samples the maps, so
+// renderFrame calls ShadowBake_JoinPending() right before Render_DeferredLighting.
+namespace {
+	std::thread       g_shadowBakeThread;
+	std::atomic<bool> g_shadowBakePending{false};
+}
+
+void ShadowBake_DispatchGreets(Scene *Sc) {
+	auto runBakes = [Sc]() {
+		Render_DeferredShadowMaps(Sc, ShadowBakeMode::DynamicOmnisPerFrame);
+		if (fds::FeatureFlags::shadow_dynamic())
+			Render_DeferredShadowMaps(Sc, ShadowBakeMode::DynamicMeshesPerFrame);
+	};
+	if (fds::FeatureFlags::shadow_gbuffer_overlap()) {
+		// Spawn on a dedicated orchestrator thread; the gbuffer fill in the
+		// subsequent gg->Render() runs concurrently. Pending is cleared by the
+		// first JoinPending() of the frame (the main lighting pass).
+		g_shadowBakePending.store(true, std::memory_order_release);
+		g_shadowBakeThread = std::thread(runBakes);
+	} else {
+		runBakes();  // current behavior: synchronous inline bake
+	}
+}
+
+void ShadowBake_JoinPending() {
+	if (g_shadowBakePending.exchange(false, std::memory_order_acquire)) {
+		if (g_shadowBakeThread.joinable()) g_shadowBakeThread.join();
+	}
 }

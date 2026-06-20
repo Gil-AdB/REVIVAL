@@ -214,9 +214,9 @@ void LightmapStampOrigBary(Scene *Sc)
     }
 }
 
-void LightmapBake_Static(Scene *Sc)
+void LightmapBake_Static(Scene *Sc, bool forceEnable)
 {
-    if (!fds::FeatureFlags::shadow_lightmap()) return;
+    if (!forceEnable && !fds::FeatureFlags::shadow_lightmap()) return;
     if (!Sc) return;
     if (g_cubeShadowRefs.empty()) {
         std::fprintf(stderr, "[LM] no cube-shadow casters; skipping bake\n");

@@ -2,6 +2,57 @@
 
 Branch: `feature/soa-vertex` (to be created off `feature/static-shadow-lightmaps`)
 
+## MEASURED 2026-06-19 — Phase 2 WASHES; the transform is only ~0.35 ms. STOP.
+
+Built the Vec8f-across-8-verts Inside loop (gated `--soa-wide-xform`, FMA association
+matched → byte-identical to the scalar path: flag-off == flag-on confirmed). **Result on
+greets: XFRM 0.353 ms (off) vs 0.358 ms (on) — no change.** Reverted.
+
+Two facts kill the SoA-perf premise:
+1. **The per-frame transform is ~0.35 ms (0.7% of frame), not the 3–5 ms this doc's Goal
+   estimated.** That estimate was load-inflated / from an earlier state. There is no 3–5 ms
+   to win here.
+2. Even so, the Vec8f path didn't beat the per-vertex Vec4f-broadcast: the AoS gather of
+   ~11 input fields + scatter of ~14 output fields per 8 verts (strided, no HW gather on
+   arm64) dominates the wide-compute saving — the documented wash-risk, confirmed.
+
+The refactor still has *correctness/cleanliness* value (Phase 5 shrinks `Vertex` 136 B→60 B,
+helps the clipper's `*A=*F->A` copy), but **NOT a perf justification.** Do not pursue Phase 2+
+for speed. If continued, justify it on cache-density/cleanliness, measure the clipper-copy
+win directly, and expect the transform itself to stay ~0.35 ms.
+
+## CURRENT STATE (2026-06-19) — Phase 2 is the next + biggest lever, NOT yet started
+
+Verified live state of the refactor:
+- **Phase 1 done** but as a *post-pass sweep*: the scalar per-vertex transform loop
+  (`Transform.cpp:317`, `MatrixXVector` + project + divide) writes AoS, then a separate
+  sweep (`Transform.cpp:1383`, `VertexFrame_DumpFromAoS`) copies AoS→SoA. That sweep
+  currently dual-writes **only `TPos_z`** (the one field a consumer — SortZ — migrated to),
+  so eliminating it alone saves ~nothing.
+- **Phase 4 barely started** (SortZ on SoA; Transform.cpp:419/461/1540/1609). **Phase 6.1/6.2
+  tried + REVERTED** (clipper TPos/PX override — stale-frame after Reflected_Transform).
+- **Phase 2 NOT started** — the transform loop is still scalar/1-wide-broadcast. **This is
+  the perf win** (~3–5 ms greets per the Goal below): rewrite the three loops
+  (Inside/Ahead/Regular) to Vec4f/Vec8f over 4–8 verts. The hard part is the near-clip mask
+  (the Ahead/Regular branch flags). Validation matrix: 1-LSB pixel-diff on city@1500 /
+  greets@2500 / fountain / chase + TSan + bench (`--soa-verify` gate exists for AoS-vs-SoA
+  bit checks). Foundation-critical: a wrong transform breaks every pixel — do it fresh, not
+  at the tail of a long session.
+
+  **CORRECTED entry point (verified 2026-06-19):** NOT `Vertex_Loop1` (`Transform.cpp:312`) —
+  that is **DEAD CODE** (legacy MMX-era reference, line 7). The live per-vertex transform is
+  the **Inside / Ahead / EAhead loops inside `Transform_Objects` (~lines 1100-1370; labels
+  `Ahead:` @1165, `EAhead:` @1306, Inside just above @1155)** + the near-clip path
+  `calcVisibilityFlags` (@343, called @395). Those loops **already do Vec4f "1-wide-broadcast"**
+  — one vertex, SIMD across the matrix columns (`mul_add(m34_col_x, Vec4f(vpx), m34_col_w)`),
+  cda338e (~1 ms). Phase 2 = the **Vec8f-across-4-to-8-VERTS** restructure: transpose/gather 8
+  verts' AoS `Pos.x/y/z` into Vec8f lanes (the crux — AoS stride forces a transpose; whether it
+  pays vs the scalar math saved is THE open question — could wash like the other levers if the
+  gather/scatter dominates), wide matrix-mul + reciprocal + project, scatter back to AoS (Phase 2
+  keeps the dual-write, so the scatter stays until Phase 5 drops AoS for aligned SoA stores — the
+  *full* win likely needs Phase 4->5, not Phase 2 alone). Plus the tricky near-clip mask. Gate
+  behind a flag (default off) so the scalar path stays correct during validation.
+
 ## Goal
 
 Convert the per-vertex transformed-state from AoS (pack(1) `Vertex` struct,
