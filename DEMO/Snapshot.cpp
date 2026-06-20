@@ -461,6 +461,41 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
+// values (centiseconds; chase runs ~0..2500). Driver-based: createChaseScene
+// applies the cinematic + water_procedural defaults, exactly like the live demo.
+int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_Chase();
+
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) timestamps = {500, 1000, 1500, 2000};
+
+    auto driver = createChaseScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();   // clears VPage, renders both passes + glints, noop-flips
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/chase_t%06d_color.ppm",
+                      cfg.outDir.c_str(), ts);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[CHASESNAP] t=%d -> %s\n", ts, colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;

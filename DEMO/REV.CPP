@@ -1343,6 +1343,9 @@ int main(int argc, const char *argv[])
 		if (snap.scene == "crash") {
 			return RunCrashSnapshot(snap, g_demoXRes, g_demoYRes);
 		}
+		if (snap.scene == "chase") {
+			return RunChaseSnapshot(snap, g_demoXRes, g_demoYRes);
+		}
 		if (snap.scene == "xpartest") {
 			return RunXparTest(snap, g_demoXRes, g_demoYRes);
 		}

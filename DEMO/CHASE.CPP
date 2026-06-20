@@ -6,6 +6,7 @@
 #include <Base/Scene.h>
 
 #include "CHASE.H"
+#include "ProceduralWater.h"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
@@ -19,6 +20,12 @@ static int32_t CHPartTime = 25.0f*100;
 static Object *RflObj;
 static Vector RflSurfNorm(0, 1, 0);
 static float RflSurfOfs = 0;
+
+// World-space extent + plane height of chase's water (water.lwo), captured in
+// Reflective_Surface_Setup and fed to the shared procedural-water pass (same
+// role as city's g_waterMin/Max/Y).
+static float g_chaseWaterMinX = 0, g_chaseWaterMaxX = 0,
+             g_chaseWaterMinZ = 0, g_chaseWaterMaxZ = 0, g_chaseWaterY = 0;
 
 static DWord WaterBuf[65536 * 4];
 
@@ -582,6 +589,22 @@ static void Reflective_Surface_Setup()
 				F->Txtr->Flags |= Mat_Transparent;
 			}
 
+			// Capture the water plane (height + XZ extent) for the shared
+			// procedural-water glint pass — the surface is XZ-aligned so the
+			// plane height is the (constant) vertex Y.
+			{
+				float wmx = T->Verts[0].Pos.x, wMx = wmx;
+				float wmz = T->Verts[0].Pos.z, wMz = wmz;
+				for (dword wi = 1; wi < T->VIndex; ++wi) {
+					const Vector& P = T->Verts[wi].Pos;
+					if (P.x < wmx) wmx = P.x; if (P.x > wMx) wMx = P.x;
+					if (P.z < wmz) wmz = P.z; if (P.z > wMz) wMz = P.z;
+				}
+				g_chaseWaterMinX = wmx; g_chaseWaterMaxX = wMx;
+				g_chaseWaterMinZ = wmz; g_chaseWaterMaxZ = wMz;
+				g_chaseWaterY = T->Verts[0].Pos.y;
+			}
+
 			// force scale
 			//Vtx = T->Verts;
 			//VE = Vtx + T->VIndex;
@@ -746,6 +769,16 @@ struct ChaseScene : SceneDriver {
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 		setupFaceLists(ChaseSc, /*includeOmnisInCount=*/false);
+		// Procedural water (shared with city): build the field + caustic texture,
+		// and register chase's water material so the deferred fresnel composite
+		// (water_procedural) recognizes its pixels. The screen-space caustic/glint
+		// pass runs in tick(); both need the water plane captured above.
+		pwater::BuildField();
+		if (RflObj) {
+			TriMesh *wT = (TriMesh *)RflObj->Data;
+			if (wT && wT->Faces && wT->Faces->Txtr)
+				SetDeferredWaterMatID((int)wT->Faces->Txtr->ID);
+		}
 	}
 
 	bool tick() override {
@@ -796,6 +829,12 @@ struct ChaseScene : SceneDriver {
 		Render();
 		prof.leave(PROF_RNDR);
 
+		// Procedural caustic texture + specular glints over the water plane
+		// (shared with city). Screen-space, peel-independent, occlusion-tested.
+		if (fds::FeatureFlags::water_bump())
+			pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+			                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
 		prof.leave(PROF_FLIP);
@@ -814,6 +853,7 @@ struct ChaseScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createChaseScene()
 {
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
 	ApplyCinematicSceneDefaults(cine::kChaseExposure);
 	return std::make_unique<ChaseScene>();
 }
