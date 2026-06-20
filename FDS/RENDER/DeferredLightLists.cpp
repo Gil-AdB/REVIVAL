@@ -168,9 +168,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 
 	// Per-tile chunk bounding spheres for the spot cone cull.
 	const bool coneCull = fds::FeatureFlags::spot_cone_cull();
-	const float contribThresh = fds::FeatureFlags::contrib_cull_thresh();
 	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
-	if (coneCull || contribThresh > 0.0f) {
+	if (coneCull) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {
 				const int idx = j * numTilesX + i;
@@ -293,25 +292,6 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				if (Lmid != 0 && Lmid < 32 && tileMirrorPresence &&
 				    !(tileMirrorPresence[idx] & (1u << Lmid))) {
 					continue;
-				}
-				// Contribution cull (--contrib-cull-thresh): drop this light from
-				// the tile if its MAX possible diffuse contribution is provably
-				// below the threshold. Conservative upper bound over the tile's
-				// geometry sphere: (1/d_near)(1-d_near/range)*maxColor, omitting
-				// Diffuse/albedo^2/N.L/shadow (all <=1) so it never over-culls a
-				// visible light. Surface list only; cones unaffected.
-				if (contribThresh > 0.0f && chunk[idx].valid) {
-					// Cull ⟺ bound (1/d)(1−d/range)·maxColor < thresh. Solved for the
-					// center-distance and compared SQUARED (no sqrt): cull if
-					// dist²(light,chunkCtr) > (R + maxColor/(thresh + maxColor/range))².
-					// Conservative vs the clamped-d form for dim lights inside the
-					// sphere (keeps them) → never over-culls.
-					const float maxCol = std::max(Lcb, std::max(Lcg, Lcr));
-					const float cullR  = chunk[idx].R + maxCol / (contribThresh + maxCol * Lrr);
-					const float dcx = Lpx - chunk[idx].cx;
-					const float dcy = Lpy - chunk[idx].cy;
-					const float dcz = Lpz - chunk[idx].cz;
-					if (dcx*dcx + dcy*dcy + dcz*dcz > cullR * cullR) continue;
 				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
