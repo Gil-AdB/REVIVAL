@@ -1463,7 +1463,6 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const float wDeepR = fds::FeatureFlags::water_deep_r();
 	const float wRefl  = fds::FeatureFlags::water_reflectivity();
 	const float wFresBase = fds::FeatureFlags::water_fresnel_base();   // reflection floor looking down
-	const float wAlbMix   = fds::FeatureFlags::water_albedo_mix();     // blend original texture into deep colour
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -1739,13 +1738,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// gets weight = fresnel in the blend below -> out ~ lerp(deep, refl,
 			// fresnel). Fog applies to both afterward, so it stays correct.
 			if (waterProc) {
+				// Deep colour only here; the coherent (field-warped) albedo texture
+				// is blended in the screen-space water pass, not the swizzled kernel.
 				const float k = 1.0f - wFres;
-				// Blend the original (de-tiled) albedo texel into the deep colour
-				// for some legacy character; am=0 pure deep, am=1 full texture.
-				const float am = wAlbMix, im = 1.0f - am;
-				litB = int((wDeepB*im + texB*am) * k);
-				litG = int((wDeepG*im + texG*am) * k);
-				litR = int((wDeepR*im + texR*am) * k);
+				litB = int(wDeepB * k); litG = int(wDeepG * k); litR = int(wDeepR * k);
 			}
 			// Specular added on top — independent of base color tint. Skipped for
 			// the HDR-reflection path (hdrRefl already carries the full radiance).

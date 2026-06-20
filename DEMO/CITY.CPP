@@ -334,6 +334,47 @@ static inline void waterWaveSlope(float wx, float wz, float t, float scale, int 
 	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
 
+// Row-major (de-swizzled) copy of the water albedo, so the screen-space water
+// pass can sample it at an arbitrary field-WARPED UV per pixel (the rasterizer's
+// swizzled layout can't be sampled at offset UVs without this). Built once at
+// init by gathering through the forward swizzle (tile_u/tile_v).
+static std::vector<dword> g_waterTex;
+static int g_waterTexW = 0, g_waterTexH = 0;
+
+static void buildWaterTexLinear() {
+	g_waterTexW = g_waterTexH = 0; g_waterTex.clear();
+	if (!RflObj) return;
+	TriMesh* T = (TriMesh*)RflObj->Data;
+	if (!T || T->FIndex == 0 || !T->Faces[0].Txtr || !T->Faces[0].Txtr->Txtr) return;
+	Texture* tx = T->Faces[0].Txtr->Txtr;
+	const dword* swz = (const dword*)tx->Mipmap[0];
+	if (!swz) return;
+	const int LW = tx->LSizeX, LH = tx->LSizeY;
+	const int W = 1 << LW, H = 1 << LH;
+	const uint32_t umask = (1u << LW) - 1, vmask = (1u << LH) - 1, vbits = (uint32_t)LH;
+	g_waterTex.assign(size_t(W) * size_t(H), 0u);
+	for (int v = 0; v < H; ++v)
+		for (int u = 0; u < W; ++u)
+			g_waterTex[size_t(v) * W + u] = swz[barry::tile_u((uint32_t)u, vbits, umask) + barry::tile_v((uint32_t)v, vmask)];
+	g_waterTexW = W; g_waterTexH = H;
+}
+
+static inline void sampleWaterTex(float u, float v, float& cb, float& cg, float& cr) {
+	const int W = g_waterTexW, H = g_waterTexH;
+	float fu = u - std::floor(u / W) * W;                       // wrap
+	float fv = v - std::floor(v / H) * H;
+	int i0 = int(fu), j0 = int(fv); if (i0 >= W) i0 = 0; if (j0 >= H) j0 = 0;
+	const float du = fu - i0, dv = fv - j0;
+	const int i1 = (i0 + 1) % W, j1 = (j0 + 1) % H;
+	const dword a = g_waterTex[size_t(j0)*W + i0], b = g_waterTex[size_t(j0)*W + i1];
+	const dword c = g_waterTex[size_t(j1)*W + i0], d = g_waterTex[size_t(j1)*W + i1];
+	auto lerp4 = [&](int sh) {
+		const float A=float((a>>sh)&0xFF), B=float((b>>sh)&0xFF), C=float((c>>sh)&0xFF), D=float((d>>sh)&0xFF);
+		return (A*(1-du)+B*du)*(1-dv) + (C*(1-du)+D*du)*dv;
+	};
+	cb = lerp4(0); cg = lerp4(8); cr = lerp4(16);
+}
+
 static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 {
 	// Extract coverage (range) over the XZ plane and over texture UV
@@ -2513,6 +2554,11 @@ struct CityScene : SceneDriver {
 		if (g_waterMaxX <= g_waterMinX) return;        // water extent not set yet
 		const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
 		const float scale = fds::FeatureFlags::water_bump_scale();
+		// Field-warped albedo texture (only in procedural mode): the SAME field
+		// distorts the texture sample → the texture ripples with the waves.
+		const float texMix   = fds::FeatureFlags::water_procedural() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
+		const float texScale = fds::FeatureFlags::water_tex_scale();
+		const float texWarp  = fds::FeatureFlags::water_tex_warp();
 		const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
 		const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
 		const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
@@ -2563,6 +2609,20 @@ struct CityScene : SceneDriver {
 					if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
 					float bnx, bnz;
 					waterWaveSlope(wx, wz, t, scale, 6, bnx, bnz);   // all octaves (fine detail)
+					// Field-warped albedo: sample the de-swizzled texture at a UV
+					// distorted by the SAME wave slope → the texture ripples with the
+					// waves (coherent with the glints/reflection). Blend over the water.
+					if (texMix > 0.0f && g_waterTexW > 0) {
+						float cb, cg, cr;
+						sampleWaterTex(wx*texScale + bnx*texWarp, wz*texScale + bnz*texWarp, cb, cg, cr);
+						const dword p = row[x];
+						const float im = 1.0f - texMix;
+						int nb = int(float(p & 0xFFu)*im + cb*texMix);
+						int ng = int(float((p>>8)&0xFFu)*im + cg*texMix);
+						int nr = int(float((p>>16)&0xFFu)*im + cr*texMix);
+						if (nb>255)nb=255; if (ng>255)ng=255; if (nr>255)nr=255;
+						row[x] = dword(nb) | (dword(ng)<<8) | (dword(nr)<<16) | 0xFF000000u;
+					}
 					float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
 					const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
 					Nx*=nInv; Ny*=nInv; Nz*=nInv;
@@ -2604,6 +2664,7 @@ struct CityScene : SceneDriver {
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 		buildWaterNormalMap();   // procedural water field (reflection + glints + composite)
+		buildWaterTexLinear();   // de-swizzled albedo for the field-warped texture pass
 
 		setupFaceLists(CitySc, /*includeOmnisInCount=*/true);
 
