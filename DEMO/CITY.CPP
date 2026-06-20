@@ -265,6 +265,32 @@ static inline float waterDetileV(const Vector& p, float amp, float f) {
 	return amp * (std::cos(p.z*f + p.x*f*0.6f) + 0.5f*std::cos(p.z*f*1.7f - p.x*f*1.1f));
 }
 
+// THE shared water surface field. Returns the wave SLOPE (gradient of the
+// animated height) at world XZ — domain-warped sum of non-axis, non-harmonic
+// octaves → organic + non-repetitive. BOTH the reflection displacement and the
+// specular glints derive from this, so they ripple to the same waves (coherent
+// water). nOct picks detail depth: the reflection uses a few coarse octaves
+// (fine detail is invisible in a blurred mirror + cheaper); the glints use all.
+static inline void waterWaveSlope(float wx, float wz, float t, float scale, int nOct, float& bnx, float& bnz) {
+	const float bf = 0.0012f * scale;
+	const float dwf = bf * 0.31f, dwa = 1.3f / bf;
+	const float w1x = wx + dwa * std::sin(wz * dwf + t * 0.23f);
+	const float w1z = wz + dwa * std::cos(wx * dwf - t * 0.17f);
+	const float wpx = w1x + dwa * 0.5f * std::sin(w1z * dwf * 2.7f - t * 0.41f);
+	const float wpz = w1z + dwa * 0.5f * std::cos(w1x * dwf * 2.7f + t * 0.33f);
+	static const float dx[6] = { 0.96f,-0.42f, 0.66f,-0.88f, 0.21f,-0.99f };
+	static const float dz[6] = { 0.28f, 0.91f,-0.75f,-0.47f, 0.98f, 0.14f };
+	static const float fm[6] = { 1.00f, 1.37f, 1.93f, 2.71f, 3.83f, 5.31f };
+	static const float sm[6] = { 1.30f,-0.90f, 1.10f,-0.70f, 0.85f,-1.05f };
+	static const float am[6] = { 1.00f, 0.82f, 0.64f, 0.48f, 0.34f, 0.24f };
+	bnx = 0.0f; bnz = 0.0f;
+	for (int k = 0; k < nOct; ++k) {
+		const float ph = (wpx * dx[k] + wpz * dz[k]) * (bf * fm[k]) + t * sm[k];
+		const float s = std::sin(ph) * am[k];
+		bnx -= dx[k] * s; bnz -= dz[k] * s;
+	}
+}
+
 static void tessellateWaterGrid(TriMesh *T, dword NumSections)
 {
 	// Extract coverage (range) over the XZ plane and over texture UV
@@ -2359,37 +2385,47 @@ struct CityScene : SceneDriver {
 	void updateRippleDispMap(float timeMs) {
 		const float speed = fds::FeatureFlags::water_ripple_speed();
 		const float amp   = fds::FeatureFlags::water_ripple_amp();
-		const float scale = fds::FeatureFlags::water_ripple_scale();
+		const float scale = fds::FeatureFlags::water_bump_scale();   // SHARED field scale → coherent with glints
 		// Timer is CENTISECONDS (TimerInit(100) → 100 ticks/sec), not ms — so
 		// 0.02 puts the dominant wave (×1.3 below) at ~2.5 rad/s ≈ 0.4 Hz, a
 		// visible water undulation. (At 0.001 it was ~0.13 rad/s — one cycle per
 		// ~48 s, i.e. frozen to the eye: the "can't see the bump" bug.)
 		const float t = timeMs * 0.02f * speed;
 		if ((int)dispMap.size() < XRes * YRes) dispMap.assign(XRes * YRes, 0);
-		rip_gx1.resize(XRes); rip_gx2.resize(XRes);
-		rip_gy1.resize(YRes); rip_gy2.resize(YRes);
-		for (int x = 0; x < XRes; ++x) {
-			rip_gx1[x] = std::sin(x * 0.033f * scale + t * 1.3f);
-			rip_gx2[x] = std::sin(x * 0.017f * scale - t * 0.7f);
-		}
-		for (int y = 0; y < YRes; ++y) {
-			rip_gy1[y] = std::sin(y * 0.027f * scale + t * 1.1f);
-			rip_gy2[y] = std::cos(y * 0.019f * scale - t * 0.9f);
-		}
+		if (!View) return;   // need the camera to ray-cast the water plane (keep the static warp)
+		// Ray-cast each pixel to the water plane, evaluate THE shared wave slope
+		// (waterWaveSlope) there, and offset the reflection source by it → the
+		// reflection ripples to the SAME waves as the glints. Coarse octaves (the
+		// mirror blurs fine detail + cheaper). Non-water-plane pixels stay identity.
+		const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+		const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+		const float cex = CntrEX, cey = CntrEY;
+		const float m00=View->Mat[0][0], m10=View->Mat[1][0], m20=View->Mat[2][0];
+		const float m01=View->Mat[0][1], m11=View->Mat[1][1], m21=View->Mat[2][1];
+		const float m02=View->Mat[0][2], m12=View->Mat[1][2], m22=View->Mat[2][2];
+		const float ex=View->ISource.x, ey=View->ISource.y, ez=View->ISource.z;
+		const float wYplane = g_waterY;
 		int* const dm = dispMap.data();
-		const float* const gx1 = rip_gx1.data(); const float* const gx2 = rip_gx2.data();
-		const float* const gy1 = rip_gy1.data(); const float* const gy2 = rip_gy2.data();
 		const int xr1 = XRes_1, yr1 = YRes_1, xr = XRes;
 		auto band = [=](int y0, int y1) {
 			for (int y = y0; y < y1; ++y) {
-				const float gyB = gy1[y] * 0.4f;       // y-contribution to dx
-				const float dyA = gy2[y] * 0.6f;       // y-contribution to dy
 				int* row = dm + size_t(y) * size_t(xr);
 				for (int x = 0; x < xr; ++x) {
-					const float dx = amp * (gx1[x] * 0.6f + gyB);
-					const float dy = amp * (dyA + gx2[x] * 0.4f);
-					int tx = x + int(dx);
-					int ty = y + int(dy);
+					int tx = x, ty = y;
+					const float xn = (float(x) - cex) * invFX;
+					const float yn = (cey - float(y)) * invFY;
+					const float D = m01*xn + m11*yn + m21;
+					if (D != 0.0f) {
+						const float sd = (wYplane - ey) / D;     // view-z of the plane hit
+						if (sd > 1.0f) {
+							const float wx = ex + sd * (m00*xn + m10*yn + m20);
+							const float wz = ez + sd * (m02*xn + m12*yn + m22);
+							float bnx, bnz;
+							waterWaveSlope(wx, wz, t, scale, 3, bnx, bnz);   // coarse → coherent with glints
+							tx = x + int(amp * bnx);
+							ty = y + int(amp * bnz);
+						}
+					}
 					if (tx < 0) tx = -tx; if (tx > xr1) tx = 2 * xr1 - tx;
 					if (ty < 0) ty = -ty; if (ty > yr1) ty = 2 * yr1 - ty;
 					if (tx < 0) tx = 0; else if (tx > xr1) tx = xr1;   // belt + suspenders
@@ -2446,26 +2482,16 @@ struct CityScene : SceneDriver {
 		const float ex=View->ISource.x, ey=View->ISource.y, ez=View->ISource.z;
 		// Key light (world): glint where the wave normal faces the V+L half-vector.
 		float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
-		// World-space waves: non-axis dirs + non-harmonic freqs → organic, no lattice.
-		// A pure sum of sines is still quasi-periodic (the interference pattern
-		// recurs → "repetitive"), so the sample point is DOMAIN-WARPED by a
-		// low-freq term below before the octaves are summed — that breaks the
-		// regularity into something noise-like. 6 octaves over a wide span add
-		// both coarse swells and fine chop.
-		const float bf = 0.0012f * scale;
+		// Wave SLOPE comes from waterWaveSlope() — the SAME field the reflection
+		// ripple uses, so glints and reflection agree (coherent water).
 		const float bumpAmp = 1.7f;
-		const float dwf = bf * 0.31f;      // domain-warp frequency (low)
-		const float dwa = 1.3f / bf;       // domain-warp amplitude (~a wavelength)
-		struct Wv { float dx, dz, f, s, a; };
-		const Wv wv[6] = {
-			{ 0.96f,  0.28f, bf * 1.00f,  1.30f, 1.00f },
-			{-0.42f,  0.91f, bf * 1.37f, -0.90f, 0.82f },
-			{ 0.66f, -0.75f, bf * 1.93f,  1.10f, 0.64f },
-			{-0.88f, -0.47f, bf * 2.71f, -0.70f, 0.48f },
-			{ 0.21f,  0.98f, bf * 3.83f,  0.85f, 0.34f },
-			{-0.99f,  0.14f, bf * 5.31f, -1.05f, 0.24f },
-		};
 		const float wYplane = g_waterY;
+		// Cut glints off at the far plane and fade them over the last stretch —
+		// otherwise the grazing water near the horizon spikes the specular into
+		// a bright artifact band.
+		const float fzp = (CurScene && CurScene->FZP > 0.0f) ? CurScene->FZP : 1e30f;
+		const float fadeStart = fzp * 0.55f;
+		const float invFadeRange = 1.0f / std::max(1.0f, fzp - fadeStart);
 		dword* const vp = (dword*)VPage;
 		const uint16_t* const oz = ZPage16;
 		const int xr = XRes;
@@ -2482,7 +2508,8 @@ struct CityScene : SceneDriver {
 					const float D = m01*xn + m11*yn + m21;            // d(world.y)/d(view-z)
 					if (D == 0.0f) continue;
 					const float sd = (wYplane - ey) / D;              // view-z of the plane hit
-					if (sd <= 1.0f) continue;                         // behind / at the eye
+					if (sd <= 1.0f || sd >= fzp) continue;            // behind the eye / past the far plane
+					const float distFade = sd <= fadeStart ? 1.0f : (fzp - sd) * invFadeRange;
 					const float wx = ex + sd * (m00*xn + m10*yn + m20);
 					const float wz = ez + sd * (m02*xn + m12*yn + m22);
 					// NB: the water mesh's local bounds don't map to its world
@@ -2491,18 +2518,8 @@ struct CityScene : SceneDriver {
 					// plane hit + opaque occlusion rather than an XZ rect.
 					const uint16_t oe = orow[x];                      // opaque-Z occlusion
 					if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
-					// Fractal domain warp (warp the warp) → breaks the residual
-					// sine-interference periodicity into a noise-like field.
-					const float w1x = wx + dwa * std::sin(wz * dwf + t * 0.23f);
-					const float w1z = wz + dwa * std::cos(wx * dwf - t * 0.17f);
-					const float wpx = w1x + dwa * 0.5f * std::sin(w1z * dwf * 2.7f - t * 0.41f);
-					const float wpz = w1z + dwa * 0.5f * std::cos(w1x * dwf * 2.7f + t * 0.33f);
-					float bnx = 0.0f, bnz = 0.0f;
-					for (int k = 0; k < 6; ++k) {
-						const float ph = (wpx * wv[k].dx + wpz * wv[k].dz) * wv[k].f + t * wv[k].s;
-						const float s = std::sin(ph) * wv[k].a;
-						bnx -= wv[k].dx * s; bnz -= wv[k].dz * s;
-					}
+					float bnx, bnz;
+					waterWaveSlope(wx, wz, t, scale, 6, bnx, bnz);   // all octaves (fine detail)
 					float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
 					const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
 					Nx*=nInv; Ny*=nInv; Nz*=nInv;
@@ -2513,7 +2530,7 @@ struct CityScene : SceneDriver {
 					const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
 					const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
 					if (ndh <= 0.0f) continue;
-					const float g = std::pow(ndh, shin) * strength;
+					const float g = std::pow(ndh, shin) * strength * distFade;
 					int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
 					const dword p = row[x];
 					int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
