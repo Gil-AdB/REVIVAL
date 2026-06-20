@@ -1181,26 +1181,38 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
-	// Headless modes (--snapshot / --bench) must never pop an SDL window or
-	// steal desktop focus when run in the background (the byte gate, perf
-	// benches, agents). Force SDL's built-in dummy video+audio drivers BEFORE
-	// any SDL_Init: the snapshot path never touches SDL anyway, but the
-	// raster/scene/flip bench opens a real window — dummy makes it offscreen.
-	// Interactive runs (no --snapshot/--bench) are untouched and still open a
-	// real window. (To benchmark the real Metal flip specifically, unset
-	// SDL_VIDEODRIVER in the environment.)
+	// Headless modes (--snapshot / --bench) must never pop an SDL window,
+	// steal desktop focus, or play music when run in the background (the byte
+	// gate, perf benches, agents). Detect them up front so we can (a) force
+	// SDL's built-in dummy video+audio drivers BEFORE any SDL_Init and (b)
+	// hard-disable music below regardless of rev.cfg. The snapshot path never
+	// touches SDL anyway, but the raster/scene/flip bench opens a real window —
+	// dummy makes it offscreen. Interactive runs (no --snapshot/--bench) are
+	// untouched and still open a real window with audio. We match the
+	// --snapshot / --bench *prefix*, which is a superset of the --snapshot= /
+	// --bench= forms the arg parsers accept, so every headless invocation is
+	// covered.
+	bool headless = false;
 	for (int i = 1; i < argc; ++i) {
 		if (argv[i] && (std::strncmp(argv[i], "--snapshot", 10) == 0 ||
 		                std::strncmp(argv[i], "--bench",    7) == 0)) {
-			setenv("SDL_VIDEODRIVER", "dummy", 1);
-			setenv("SDL_AUDIODRIVER", "dummy", 1);
+			headless = true;
 			break;
 		}
+	}
+	if (headless) {
+		setenv("SDL_VIDEODRIVER", "dummy", 1);
+		setenv("SDL_AUDIODRIVER", "dummy", 1);
 	}
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
 	g_playMusic = cfg.extractInteger("MusicEnable");
+	// Headless snapshot/bench runs return before CodeEntry (where the music
+	// thread is created), so music never starts today — but make the contract
+	// explicit so a future earlier music-init can't sneak audio into a
+	// background byte-gate / bench run.
+	if (headless) g_playMusic = 0;
 	// rev.cfg seeds the runtime `profiler` flag (left UNMARKED, so scene
 	// scripts and the tune console can toggle the overlay live). An
 	// explicit --profiler / --no-profiler wins over the cfg.
