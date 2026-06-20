@@ -358,18 +358,33 @@ static void buildWaterDetail() {
 	for (int py = 0; py < N; ++py) for (int px = 0; px < N; ++px) {
 		const float fx = (px + 0.5f) / cs, fy = (py + 0.5f) / cs;
 		const int cx = int(fx), cy = int(fy);
-		float d1 = 1e9f;
+		float d1 = 1e9f, d2 = 1e9f;                              // nearest two feature dists
 		for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 1; ++ox) {
 			const int gx = ((cx+ox) % G + G) % G, gy = ((cy+oy) % G + G) % G;
 			const float dx = (cx+ox + fp(gx,gy,0)) - fx;
 			const float dy = (cy+oy + fp(gx,gy,1)) - fy;
 			const float d = dx*dx + dy*dy;
-			if (d < d1) d1 = d;
+			if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
 		}
-		float c = 1.0f - std::sqrt(d1); if (c < 0) c = 0; c = c*c;   // soft bright cell interiors
-		int B = int(62 + c*120), Gn = int(56 + c*128), R = int(32 + c*70);
+		// Caustic NETWORK: bright thin lines along cell boundaries (where the two
+		// nearest features are equidistant → F2-F1 ≈ 0) — the recognizable water look.
+		const float edge = std::sqrt(d2) - std::sqrt(d1);
+		float c = 1.0f - edge / 0.38f; if (c < 0) c = 0; c = c*c;
+		int B = int(40 + c*175), Gn = int(52 + c*190), R = int(30 + c*120);
 		if (B>255)B=255; if (Gn>255)Gn=255; if (R>255)R=255;
 		g_waterTex[size_t(py)*N + px] = dword(B) | (dword(Gn)<<8) | (dword(R)<<16) | 0xFF000000u;
+	}
+	if (std::getenv("FDS_WATERTEX_DUMP")) {                  // debug: see the texture itself
+		FILE* f = fopen("/tmp/water_tex.ppm", "wb");
+		if (f) {
+			fprintf(f, "P6\n%d %d\n255\n", N, N);
+			for (int i = 0; i < N*N; ++i) {
+				const dword c = g_waterTex[i];
+				const unsigned char rgb[3] = { (unsigned char)((c>>16)&0xFF), (unsigned char)((c>>8)&0xFF), (unsigned char)(c&0xFF) };
+				fwrite(rgb, 1, 3, f);
+			}
+			fclose(f);
+		}
 	}
 }
 
