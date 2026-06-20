@@ -421,6 +421,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	    /*shadowMode           */ g_shadowMode.load(std::memory_order_relaxed),
 	};
 
+	// [DIAG] FDS_CONTRIB_CULL: per-light MAX linear diffuse contribution over this
+	// tile, matching the HDR-linear accumulation below (albedo²·intensity·color).
+	// After the pixel loop we count lights whose max contribution is below visible
+	// thresholds = the contribution-cull potential. Diffuse-only (spec excluded);
+	// linear-radiance units, PRE-tonemap. Load-independent (it's a count). Gated;
+	// negligible when off. Per-tile stack array → no cross-thread race; atomics
+	// aggregate at the end. Covers the scalar path (= all of greets: nmap forces
+	// scalar); vec-path pixels aren't tracked.
+	static const bool s_contribProf = (std::getenv("FDS_CONTRIB_CULL") != nullptr);
+	alignas(64) float contribMax[DEFERRED_MAX_LIGHTS];
+	const int contribN = s_contribProf
+	    ? std::min(ctx.tileLights[tileIndex].count, int(DEFERRED_MAX_LIGHTS)) : 0;
+	for (int ci = 0; ci < contribN; ++ci) contribMax[ci] = 0.0f;
+
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			// Wave-1 of checkerboard: skip odd cells (filled by the
@@ -1222,6 +1236,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						lB += intensity * Lcb;
 						lG += intensity * Lcg;
 						lR += intensity * Lcr;
+						if (s_contribProf) {   // max linear diffuse contrib of light n over the tile
+							const float kN = 1.0f/255.0f;
+							const float aB=texB*kN, aG=texG*kN, aR=texR*kN;
+							float cc = aB*aB*intensity*Lcb;
+							const float cg = aG*aG*intensity*Lcg; if (cg>cc) cc=cg;
+							const float cr = aR*aR*intensity*Lcr; if (cr>cc) cc=cr;
+							if (cc > contribMax[n]) contribMax[n] = cc;
+						}
 
 						if (wantSpecular) {
 							const float ldx = wx * lenInv;
@@ -1404,6 +1426,30 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (outR < 0)   outR = 0;
 
 			out[i] = dword(outB) | (dword(outG) << 8) | (dword(outR) << 16) | 0xFF000000u;
+		}
+	}
+
+	if (s_contribProf) {   // [DIAG] count this tile's lights with sub-visible max contribution
+		int d05=0, d1=0, d2=0;
+		for (int ci = 0; ci < contribN; ++ci) {
+			if (contribMax[ci] < 0.5f) ++d05;
+			if (contribMax[ci] < 1.0f) ++d1;
+			if (contribMax[ci] < 2.0f) ++d2;
+		}
+		static std::atomic<long long> aTiles{0}, aN{0}, a05{0}, a1{0}, a2{0};
+		aTiles.fetch_add(1, std::memory_order_relaxed);
+		aN.fetch_add(contribN, std::memory_order_relaxed);
+		a05.fetch_add(d05, std::memory_order_relaxed);
+		a1.fetch_add(d1, std::memory_order_relaxed);
+		a2.fetch_add(d2, std::memory_order_relaxed);
+		const long long t = aTiles.load(std::memory_order_relaxed);
+		if (t > 0 && (t % 2000) == 0) {
+			const double td = double(t);
+			std::fprintf(stderr,
+			    "[CONTRIB-CULL] lights/tile=%.1f  droppable (max linear diffuse contrib < thr): "
+			    "<0.5=%.1f  <1.0=%.1f  <2.0=%.1f  (per tile, %lld tiles)\n",
+			    double(aN.load())/td, double(a05.load())/td,
+			    double(a1.load())/td, double(a2.load())/td, t);
 		}
 	}
 
