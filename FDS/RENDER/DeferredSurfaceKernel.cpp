@@ -1462,6 +1462,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const float wDeepG = fds::FeatureFlags::water_deep_g();
 	const float wDeepR = fds::FeatureFlags::water_deep_r();
 	const float wRefl  = fds::FeatureFlags::water_reflectivity();
+	const float wFresBase = fds::FeatureFlags::water_fresnel_base();   // reflection floor looking down
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -1568,7 +1569,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				const float vDotN = -(nx*x + ny*y + nz*z) * fast_rsqrt(vl2 > 0.0f ? vl2 : 1.0f);
 				float c = 1.0f - (vDotN > 0.0f ? vDotN : 0.0f);
 				const float c5 = c*c*c*c*c;
-				wFres = 0.06f + (wRefl - 0.06f) * c5;
+				wFres = wFresBase + (wRefl - wFresBase) * c5;
 				if (wFres < 0.0f) wFres = 0.0f; if (wFres > 1.0f) wFres = 1.0f;
 			}
 
