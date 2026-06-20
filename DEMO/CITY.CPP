@@ -2623,17 +2623,22 @@ struct CityScene : SceneDriver {
 					if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;   // opaque in front
 					float bnx, bnz;
 					waterWaveSlope(wx, wz, t, scale, 6, bnx, bnz);   // all octaves (fine detail)
-					// Field-warped albedo: sample the de-swizzled texture at a UV
-					// distorted by the SAME wave slope → the texture ripples with the
-					// waves (coherent with the glints/reflection). Blend over the water.
+					// Field-warped texture: sample the generated cell texture at a UV
+					// distorted by the SAME wave slope → it ripples with the waves
+					// (coherent). MODULATE the water brightness by the cell value
+					// (rather than lerp a cyan colour over cyan water — invisible) so
+					// the cells show as light/dark detail ON TOP of the reflection,
+					// not hiding it.
 					if (texMix > 0.0f && g_waterTexW > 0) {
 						float cb, cg, cr;
 						sampleWaterTex(wx*texScale + bnx*texWarp, wz*texScale + bnz*texWarp, cb, cg, cr);
+						const float cell = (cb + cg + cr) * (1.0f/765.0f);   // 0..1 cell value
+						const float mod = 1.0f + (cell - 0.5f) * 2.0f * texMix; // ±texMix brightness
 						const dword p = row[x];
-						const float im = 1.0f - texMix;
-						int nb = int(float(p & 0xFFu)*im + cb*texMix);
-						int ng = int(float((p>>8)&0xFFu)*im + cg*texMix);
-						int nr = int(float((p>>16)&0xFFu)*im + cr*texMix);
+						int nb = int(float(p & 0xFFu) * mod);
+						int ng = int(float((p>>8)&0xFFu) * mod);
+						int nr = int(float((p>>16)&0xFFu) * mod);
+						if (nb<0)nb=0; if (ng<0)ng=0; if (nr<0)nr=0;
 						if (nb>255)nb=255; if (ng>255)ng=255; if (nr>255)nr=255;
 						row[x] = dword(nb) | (dword(ng)<<8) | (dword(nr)<<16) | 0xFF000000u;
 					}
