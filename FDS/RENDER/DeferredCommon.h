@@ -70,6 +70,10 @@ struct ViewLightsSoA {
 	// mirror plane, for mirrored shadow sampling (the clone's
 	// visibility of P = the source's visibility of reflect(P)).
 	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_VIEW_LIGHTS];
+	// Clone lights whose source is a CUBE omni: the source's cube-ref
+	// index (-1 = none). Same reflect-and-sample-source idea as
+	// srcShadowMapIdx, but a cube tap at reflect(P) instead of a 2D map.
+	alignas(32) int32_t srcCubeShadowIdx[DEFERRED_MAX_VIEW_LIGHTS];
 	// Omni_BounceCone: the cone pass clamps this spot's chord to the
 	// camera side of its mirror plane (mirN/mirD) — the apex sits
 	// behind the glass.
@@ -160,6 +164,9 @@ struct TileLights {
 	// Clone lights: source's 2D map + mirror plane (mirrored shadow
 	// sampling; see ViewLightsSoA::srcShadowMapIdx).
 	alignas(32) int32_t srcShadowMapIdx[DEFERRED_MAX_LIGHTS];
+	// Clone lights whose source is a CUBE omni: source's cube-ref index
+	// (mirrored cube tap; see ViewLightsSoA::srcCubeShadowIdx).
+	alignas(32) int32_t srcCubeShadowIdx[DEFERRED_MAX_LIGHTS];
 	// 1 for bounce spots (Omni_BounceCone): the reflected-source-map tap
 	// defaults DARK and lights only inside the source's cone. Clones (0)
 	// stay default-lit. See ViewLightsSoA::bounceClamp.
