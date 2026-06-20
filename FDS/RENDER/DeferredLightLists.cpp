@@ -301,14 +301,17 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				// Diffuse/albedo^2/N.L/shadow (all <=1) so it never over-culls a
 				// visible light. Surface list only; cones unaffected.
 				if (contribThresh > 0.0f && chunk[idx].valid) {
+					// Cull ⟺ bound (1/d)(1−d/range)·maxColor < thresh. Solved for the
+					// center-distance and compared SQUARED (no sqrt): cull if
+					// dist²(light,chunkCtr) > (R + maxColor/(thresh + maxColor/range))².
+					// Conservative vs the clamped-d form for dim lights inside the
+					// sphere (keeps them) → never over-culls.
+					const float maxCol = std::max(Lcb, std::max(Lcg, Lcr));
+					const float cullR  = chunk[idx].R + maxCol / (contribThresh + maxCol * Lrr);
 					const float dcx = Lpx - chunk[idx].cx;
 					const float dcy = Lpy - chunk[idx].cy;
 					const float dcz = Lpz - chunk[idx].cz;
-					const float dCtr = std::sqrt(dcx*dcx + dcy*dcy + dcz*dcz);
-					const float dNear = std::max(0.05f, dCtr - chunk[idx].R);
-					const float kMax = (1.0f / dNear) * std::max(0.0f, 1.0f - dNear * Lrr);
-					const float maxCol = std::max(Lcb, std::max(Lcg, Lcr));
-					if (kMax * maxCol < contribThresh) continue;
+					if (dcx*dcx + dcy*dcy + dcz*dcz > cullR * cullR) continue;
 				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
