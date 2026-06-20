@@ -168,8 +168,9 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 
 	// Per-tile chunk bounding spheres for the spot cone cull.
 	const bool coneCull = fds::FeatureFlags::spot_cone_cull();
+	const float contribThresh = fds::FeatureFlags::contrib_cull_thresh();
 	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
-	if (coneCull) {
+	if (coneCull || contribThresh > 0.0f) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {
 				const int idx = j * numTilesX + i;
@@ -292,6 +293,22 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				if (Lmid != 0 && Lmid < 32 && tileMirrorPresence &&
 				    !(tileMirrorPresence[idx] & (1u << Lmid))) {
 					continue;
+				}
+				// Contribution cull (--contrib-cull-thresh): drop this light from
+				// the tile if its MAX possible diffuse contribution is provably
+				// below the threshold. Conservative upper bound over the tile's
+				// geometry sphere: (1/d_near)(1-d_near/range)*maxColor, omitting
+				// Diffuse/albedo^2/N.L/shadow (all <=1) so it never over-culls a
+				// visible light. Surface list only; cones unaffected.
+				if (contribThresh > 0.0f && chunk[idx].valid) {
+					const float dcx = Lpx - chunk[idx].cx;
+					const float dcy = Lpy - chunk[idx].cy;
+					const float dcz = Lpz - chunk[idx].cz;
+					const float dCtr = std::sqrt(dcx*dcx + dcy*dcy + dcz*dcz);
+					const float dNear = std::max(0.05f, dCtr - chunk[idx].R);
+					const float kMax = (1.0f / dNear) * std::max(0.0f, 1.0f - dNear * Lrr);
+					const float maxCol = std::max(Lcb, std::max(Lcg, Lcr));
+					if (kMax * maxCol < contribThresh) continue;
 				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
