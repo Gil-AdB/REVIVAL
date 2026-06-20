@@ -432,36 +432,6 @@ bool  * const FeatureFlags::g_floatSet  = state().floatSet.data();
 bool  * const FeatureFlags::g_intSet    = state().intSet.data();
 
 
-// ── Per-scene settings baseline ─────────────────────────────────────────
-// Each scene configures itself by calling setDefault() on the flags it cares
-// about. Those writes persist in the global value arrays, so without isolation
-// an early scene's profile would bleed into later scenes. ResetToSceneBaseline()
-// gives every scene a clean starting point: the first call snapshots the
-// post-startup state (CLI + env + compile defaults + each scene's INIT-phase
-// setDefaults, since the demo inits all scenes before running any), and every
-// later call restores it. Scenes then layer their own setDefaults on top, so a
-// scene's settings depend only on that scene — not on what ran before it. The
-// *Set marks (CLI/env precedence) are untouched by setDefault, so they don't
-// need snapshotting; CLI overrides ride along in the values and survive restore.
-static bool               g_baselineCaptured = false;
-static std::array<bool,  kNumBool>  g_baseBool{};
-static std::array<float, kNumFloat> g_baseFloat{};
-static std::array<int,   kNumInt>   g_baseInt{};
-
-void FeatureFlags::ResetToSceneBaseline() {
-    if (!g_baselineCaptured) {
-        for (int i = 0; i < kNumBool;  ++i) g_baseBool[i]  = g_boolVals[i];
-        for (int i = 0; i < kNumFloat; ++i) g_baseFloat[i] = g_floatVals[i];
-        for (int i = 0; i < kNumInt;   ++i) g_baseInt[i]   = g_intVals[i];
-        g_baselineCaptured = true;
-        return;   // first scene already starts from this state
-    }
-    for (int i = 0; i < kNumBool;  ++i) g_boolVals[i]  = g_baseBool[i];
-    for (int i = 0; i < kNumFloat; ++i) g_floatVals[i] = g_baseFloat[i];
-    for (int i = 0; i < kNumInt;   ++i) g_intVals[i]   = g_baseInt[i];
-}
-
-
 // ── Tune-server support ─────────────────────────────────────────────────
 
 static void jsonEscapeInto(std::string &out, const char *s) {

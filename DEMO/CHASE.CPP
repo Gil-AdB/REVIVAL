@@ -853,10 +853,8 @@ struct ChaseScene : SceneDriver {
 
 std::unique_ptr<SceneDriver> createChaseScene()
 {
-	fds::FeatureFlags::ResetToSceneBaseline();   // clean per-scene baseline
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
-	ApplyCinematicSceneDefaults(cine::kChaseExposure);
-	CityChaseApplyAtmosphere();                  // same cityscape atmosphere as city
+	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
 	return std::make_unique<ChaseScene>();
 }
 

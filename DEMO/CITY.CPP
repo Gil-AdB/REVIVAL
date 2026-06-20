@@ -2761,14 +2761,10 @@ std::unique_ptr<SceneDriver> createCityScene()
 {
 	// Bright daylit water mirror → low exposure so the reflection rolls off
 	// instead of blowing out.
-	fds::FeatureFlags::ResetToSceneBaseline();   // start from a clean per-scene baseline
 	// Procedural caustic water on by default (the scene the feature was built
-	// for). setDefault → --no-water_procedural still disables it. Full effect
-	// (deep-water fresnel composite) needs the deferred path; the caustic
-	// texture + glints run screen-space either way.
+	// for), independent of --cinematic. --no-water_procedural still disables it.
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
-	ApplyCinematicSceneDefaults(cine::kCityExposure);
-	CityChaseApplyAtmosphere();                  // fog + storm + tuned post (city/chase look)
+	ApplyCinematicProfile(cine::kCity);          // storm-city look (fog/rain/post)
 	return std::make_unique<CityScene>();
 }
 

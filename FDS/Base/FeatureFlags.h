@@ -125,14 +125,6 @@ public:
     static inline void setDefault(FloatId id, float v) { if (!isSet(id)) g_floatVals[static_cast<int>(id)] = v; }
     static inline void setDefault(IntId   id, int v)   { if (!isSet(id)) g_intVals  [static_cast<int>(id)] = v; }
 
-    // Per-scene settings isolation. Call at the TOP of each scene's factory,
-    // before that scene's setDefault() profile. The first call snapshots the
-    // post-startup baseline (CLI/env/defaults + all scenes' init-phase
-    // setDefaults); every later call restores it, so one scene's profile never
-    // bleeds into the next. CLI/env overrides survive (they ride in the values
-    // and setDefault yields to their *Set marks). See FeatureFlags.cpp.
-    static void ResetToSceneBaseline();
-
 // ── Tune-server support (see Base/TuneServer.cpp) ──────────────────
     // dumpParamsJson appends a JSON array of every flag: name, type,
     // current value, default, category, help, and whether it's explicitly
