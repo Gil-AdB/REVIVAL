@@ -1058,6 +1058,27 @@ static void GreetsApplyRunDefaults()
 	}
 }
 
+// --greets-stone-tex helper: fully load a texture file (pixels + 32bpp + block
+// mipmaps) so it can serve either as a diffuse or as a raw-luminance HEIGHT
+// source for BakeNormalMapFromDiffuse. Mirrors the per-material setup
+// Unify_Textures does. The height path is colour-space-agnostic — the bake
+// reads raw luminance (no gamma), which is exactly what a height map wants.
+static Texture *GreetsLoadFullTexture(const char *path)
+{
+	Texture *t = new Texture;
+	t->FileName = strdup(path);
+	t->BPP = 0;
+	if (!Load_Texture(t)) {
+		std::fprintf(stderr, "[GREETS] stone-tex: cannot load %s\n", path);
+		delete t;
+		return nullptr;
+	}
+	if (t->BPP != 32) BPPConvert_Texture(t, 32);
+	t->Flags |= Txtr_Tiled;
+	Generate_Mipmaps(t, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, 1);
+	return t;
+}
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1078,6 +1099,34 @@ void Initialize_Greets()
 	GreetSc->NZP = 0.01f;
 	GreetSc->FZP = 150.0f;
 //	GreetSc->Flags |= Scn_Fogged;
+
+	// --greets-stone-tex: before Preprocess loads textures, point the wall
+	// ('rooms') + floor ('floor') diffuse at the de-lit 1024² Egyptian
+	// sandstone set so they load through the normal pipeline (correct matID +
+	// mipmaps). The dedicated tangent-space normal is baked here from a raw
+	// grayscale HEIGHT map (greets_*_h.png) rather than from the diffuse
+	// luminance; set on the Material so the post-Preprocess luminance-bake
+	// below skips it (it gates on !NormalMap). De-lit albedo stays sRGB — the
+	// HDR-linear path squares it.
+	if (fds::FeatureFlags::greets_stone_tex()) {
+		for (Material *M = MatLib; M; M = M->Next) {
+			if (M->RelScene != GreetSc || !M->Name || !M->Txtr) continue;
+			const char *albedo = nullptr, *height = nullptr;
+			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.jpg";  height = "TEXTURES/greets_wall_h.png"; }
+			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.jpg"; height = "TEXTURES/greets_floor_h.png"; }
+			if (!albedo) continue;
+			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
+			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
+			if (Texture *h = GreetsLoadFullTexture(height)) {
+				M->NormalMap = BakeNormalMapFromDiffuse(h, 4.0f);
+				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + dedicated normal from %s "
+				             "(height %dx%d mips=%u, normal mips=%u)\n",
+				             M->Name, albedo, height, h->SizeX, h->SizeY, h->numMipmaps,
+				             M->NormalMap ? M->NormalMap->numMipmaps : 0);
+			}
+		}
+	}
+
 	Preprocess_Scene(GreetSc, "GREETS");
 	// also make the appropriate Layer 2 fillers,
 

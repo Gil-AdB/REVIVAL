@@ -32,7 +32,7 @@ namespace {
 
 constexpr int   kRings          = 10;   // latitude bands
 constexpr int   kSegs           = 14;   // longitude segments
-constexpr float kRadius         = 1.0f;
+constexpr float kRadius         = 0.6f;   // scaled down from 1.0 (was too big in-scene)
 constexpr int   kSpotCount      = 10;   // rotating dot cones
 constexpr float kSpinRadPerTick = 0.008f;  // ~1 rev / 8 s at 100 ticks/s
 constexpr float kBobAmp         = 0.12f;   // gentle vertical sway
@@ -104,12 +104,61 @@ bool BuildDiscoBall(Scene *sc)
         }
     }
     const float R = kRadius;
-    // Between the central columns (screen columns at x=±8.8, pedestal
-    // box at z≈-21): the corridor's central area, where the flight
-    // path spends its time. The scene bbox (logged below) is skewed
-    // by outlying geometry, so the spot is pinned rather than derived.
-    // FDS_DISCO_POS="x,y,z" overrides for tuning.
-    s_ballPos = { 0.0f, 5.8f, -25.0f };  // below the columns' crossbeam
+    // Placement priority:
+    //  1. an authored 'DiscoBall' null in the scene — add it in LightWave and
+    //     move it; we read its first keyframe position. (Makes the ball a
+    //     scene-authored placeholder rather than a code constant.)
+    //  2. else derive above the central 'screen2' panel, between the 'amudim'
+    //     columns (both at x≈0, z≈-21): scan its world verts for centroid (x,z)
+    //     + top (y), lift a fixed gap into the column bay.
+    //  3. else the old pin.
+    // FDS_DISCO_POS="x,y,z" overrides all for tuning.
+    bool placed = false;
+    for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (!Obj->Name || std::strcmp(Obj->Name, "DiscoBall") != 0) continue;
+        if (Obj->Type == Obj_TriMesh && Obj->Data) {
+            TriMesh *T = (TriMesh*)Obj->Data;
+            if (T->Pos.NumKeys > 0 && T->Pos.Keys) {
+                // Keys[].Pos is a Quaternion whose x/y/z carry the keyframe
+                // position (same convention the disco uses when it writes MM->Pos).
+                s_ballPos.x = T->Pos.Keys[0].Pos.x;
+                s_ballPos.y = T->Pos.Keys[0].Pos.y;
+                s_ballPos.z = T->Pos.Keys[0].Pos.z;
+                placed = true;
+                std::fprintf(stderr, "[DISCO] anchored to authored 'DiscoBall' null (%.2f %.2f %.2f)\n",
+                             s_ballPos.x, s_ballPos.y, s_ballPos.z);
+            }
+        }
+        break;
+    }
+    if (!placed) {
+        Vector scSum = {0.0f, 0.0f, 0.0f};
+        float  scTopY = -1e30f;
+        int    scN = 0;
+        for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+            if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+            TriMesh *T = (TriMesh*)Obj->Data;
+            if (!T->Faces) continue;
+            for (DWord fi = 0; fi < T->FIndex; ++fi) {
+                const Face &F = T->Faces[fi];
+                if (!F.Txtr || !F.Txtr->Name || std::strcmp(F.Txtr->Name, "screen2") != 0) continue;
+                const Vertex *vtx[3] = { F.A, F.B, F.C };
+                for (int k = 0; k < 3; ++k) {
+                    Vector lp = vtx[k]->Pos, wp;
+                    MatrixXVector(T->RotMat, &lp, &wp);
+                    wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+                    scSum.x += wp.x; scSum.y += wp.y; scSum.z += wp.z;
+                    if (wp.y > scTopY) scTopY = wp.y;
+                    ++scN;
+                }
+            }
+        }
+        const float kDiscoGapAboveScreen = 3.0f;  // lift above the screen top into the column bay
+        if (scN > 0)
+            s_ballPos = { scSum.x / float(scN), scTopY + kDiscoGapAboveScreen, scSum.z / float(scN) };
+        else
+            s_ballPos = { 0.0f, 5.8f, -25.0f };  // fallback pin (screen2 surface not found)
+    }
     if (const char *e = std::getenv("FDS_DISCO_POS")) {
         float px, py, pz;
         if (std::sscanf(e, "%f,%f,%f", &px, &py, &pz) == 3)

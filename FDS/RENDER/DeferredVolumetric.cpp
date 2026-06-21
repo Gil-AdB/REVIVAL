@@ -61,8 +61,30 @@ static std::atomic<int> g_coneRaymarchHits{0};
 // clipping at 255; otherwise it's the legacy 8-bit add-and-saturate onto VPage.
 // Channel order B,G,R matches both buffers. The LDR branch is byte-identical to
 // the inline code it replaces (render gate covers it via conetest/halotest).
+// --hdr-cone-softknee: soft-knee the cone/halo in-scatter (max-channel scaled,
+// hue-preserving) — same gain curve g=(2x-1)/x² as the fog in-scatter knee.
+// Rolls hot shaft cores off toward `glowMax` so they bloom and tonemap through
+// ACES instead of running hot, replacing the flat hdr_glow_scale fudge.
+static inline void ConeGlowSoftKnee(float &r, float &g, float &b, float glowMax) {
+    if (glowMax <= 0.0f) return;
+    const float m = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    const float k = glowMax * 0.5f;
+    if (m > k) {
+        const float e = m - k;
+        const float s = (k + e / (1.0f + e / k)) / m;
+        r *= s; g *= s; b *= s;
+    }
+}
+
 static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, float aR) {
     if (fds::g_hdrActive) {
+        // Physical roll-off of the cone/halo glow before it enters the linear
+        // HDR buffer (cached FeatureFlags reads — the sanctioned hot-loop toggle).
+        if (fds::FeatureFlags::hdr_cone_softknee()) {
+            float gm = fds::FeatureFlags::cone_glow_max();
+            if (gm <= 0.0f) gm = 200.0f;
+            ConeGlowSoftKnee(aR, aG, aB, gm);
+        }
         float* h = fds::g_hdrBuf.data() + i * 4;
         h[0] += aB; h[1] += aG; h[2] += aR;
         return;
@@ -1438,7 +1460,10 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     // FDS_CONE_STRENGTH. Empirical: 0.0005-0.002 for City-scale (range
     // in thousands).
     float density = fds::FeatureFlags::cone_strength() * 0.001f;
-    if (fds::FeatureFlags::hdr()) density *= fds::FeatureFlags::hdr_glow_scale();  // glowMax cap off in HDR
+    // HDR: flat-scale by hdr_glow_scale (no cap), UNLESS --hdr-cone-softknee does
+    // the roll-off at the VolCompositeAdd HDR composite instead (then pass raw).
+    if (fds::FeatureFlags::hdr() && !fds::FeatureFlags::hdr_cone_softknee())
+        density *= fds::FeatureFlags::hdr_glow_scale();  // glowMax cap off in HDR
     // Zero density = zero contribution: skip the whole per-pixel pass
     // (it previously ran the full integration and multiplied by 0 at
     // the end — --cone-strength=0 benched identical to default).

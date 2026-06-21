@@ -1871,7 +1871,17 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
 	P.hdr          = fds::FeatureFlags::hdr();
-	P.glowMax      = P.hdr ? 0.0f : fds::FeatureFlags::fast_fog_glow_max();  // HDR: no soft-knee; the tonemap rolls off
+	// --hdr-glow-softknee: run the in-scatter soft-knee in HDR-linear with
+	// fast_fog_glow_max as a physical radiance ceiling (auto-tracks the glow
+	// level), instead of disabling it and flat-scaling by hdr_glow_scale below.
+	// ACES rolls off on top. Falls back to a sensible 300 ceiling if unset.
+	const bool hdrSoftKnee = P.hdr && fds::FeatureFlags::hdr_glow_softknee();
+	if (hdrSoftKnee) {
+		const float gm = fds::FeatureFlags::fast_fog_glow_max();
+		P.glowMax = gm > 0.0f ? gm : 300.0f;
+	} else {
+		P.glowMax = P.hdr ? 0.0f : fds::FeatureFlags::fast_fog_glow_max();  // HDR: no soft-knee; the tonemap rolls off
+	}
 	P.glowGridDiv  = std::max(1, fds::FeatureFlags::fast_fog_glow_grid_div());
 	P.taps         = std::min(2, std::max(1, fds::FeatureFlags::fast_fog_froxel_taps()));
 	if (P.blobOverlap > 0.0f) {
@@ -1890,7 +1900,10 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	// In-scatter glow reuses the deferred light SoA (view-space positions,
 	// colors, ranges, cone params already set up for the frame).
 	P.inscatter = fds::FeatureFlags::fast_fog_inscatter();
-	if (P.hdr) P.inscatter *= fds::FeatureFlags::hdr_glow_scale();  // glowMax cap is off in HDR — compensate
+	// HDR without the soft-knee: glow inputs were tuned against glowMax's cap,
+	// which is off here, so flat-scale them. With --hdr-glow-softknee the knee
+	// (re-enabled above) does the roll-off in linear instead, so skip the fudge.
+	if (P.hdr && !hdrSoftKnee) P.inscatter *= fds::FeatureFlags::hdr_glow_scale();  // glowMax cap off in HDR — compensate
 	P.inscatterSamples  = std::max(1, fds::FeatureFlags::fast_fog_inscatter_samples());
 	P.inscatterAnalytic = fds::FeatureFlags::fast_fog_inscatter_analytic();
 	P.inscatterJitter   = fds::FeatureFlags::fast_fog_inscatter_jitter();
