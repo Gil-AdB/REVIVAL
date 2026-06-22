@@ -1681,6 +1681,16 @@ void UpdateMirror(Scene *sc, Mirror &m)
         TriMesh *T = r.sourceMesh;
         if (!T || !T->Verts) continue;
         const DWord n = std::min<DWord>(r.vCount, T->VIndex);
+        // Forward-shaded meshes (Tri_Noshading) own their per-vertex
+        // colour: the disco ball rewrites LR/LG/LB every tick (the
+        // shimmer glint). Re-mirroring only Pos/N/Tangent left the clone
+        // ball's sparkle frozen at its build-time shade, so the mirror
+        // ball looked dead/out-of-step next to the spinning original.
+        // Copy the lit colour through for those meshes too — it's a
+        // scalar shade, no reflection needed. Deferred meshes (the
+        // robot) get their mirror shade from the kernel, not the vertex
+        // colour, so they're skipped to avoid needless writes.
+        const bool copyColour = (T->Flags & Tri_Noshading) != 0;
         for (DWord vi = 0; vi < n; ++vi) {
             Vector localP = T->Verts[vi].Pos;
             Vector worldP;
@@ -1700,6 +1710,11 @@ void UpdateMirror(Scene *sc, Mirror &m)
             Vector worldT;
             MatrixXVector(T->RotMat, &localT, &worldT);
             m.cloneMesh->Verts[r.vStart + vi].Tangent = reflectDirAcross(worldT, N);
+            if (copyColour) {
+                Vertex       &cv = m.cloneMesh->Verts[r.vStart + vi];
+                const Vertex &sv = T->Verts[vi];
+                cv.LR = sv.LR; cv.LG = sv.LG; cv.LB = sv.LB;
+            }
         }
     }
     // Per-face: re-derive each clone face's normal from the source's
