@@ -2345,26 +2345,9 @@ struct GreetsScene : SceneDriver {
 
 		tickTabToggle(GreetSc, "greets");
 
-		dTime = Timer - TTrd;
-		if (Keyboard[ScP]) pause_mode = true;
-		if (Keyboard[ScU]) pause_mode = false;
-		if (pause_mode) {
-			Timer = TTrd;
-		}
-		// Fast forward / rewind. In normal play, scrub at 8× the
-		// frame's dTime. In pause, dTime is 0 (Timer pinned above) so
-		// we'd never advance — fall back to a small per-tick step so
-		// F1/F2 still scrubs while paused (10 ms ≈ 0.3 frames at 30 fps,
-		// fine-grained enough to step single anim frames).
-		const int32_t scrubStep = pause_mode ? 10 : (dTime * 8);
-		if (Keyboard[ScF2]) {
-			Timer += scrubStep;
-		}
-		if (Keyboard[ScF1]) {
-			if (scrubStep > Timer) Timer = 0;
-			else                   Timer -= scrubStep;
-		}
-		g_FrameTime = TTrd = Timer;
+		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
+		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
+		tickSceneTimer(TTrd, pause_mode);
 
 		clearFrame();
 
@@ -2536,7 +2519,11 @@ struct GreetsScene : SceneDriver {
 		// Disco ball spin + spot sweep: after Animate_Objects (the
 		// ball is Tri_Possessed; spots' spline-stamped IPos/IDir get
 		// overwritten here), before the mirrors re-mirror it.
-		fds::UpdateDiscoBall(GreetSc, (float)Timer);
+		// g_FrameTime, not the raw atomic Timer — the latter keeps
+		// ticking on the SDL timer thread, so reading it here would let
+		// the ball spin/bob a hair while paused. g_FrameTime is the
+		// frozen/scrubbed scene time CurFrame already uses.
+		fds::UpdateDiscoBall(GreetSc, (float)g_FrameTime);
 
 		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
 		// every frame so the tuning console / greets.params can drive them.
@@ -2753,9 +2740,10 @@ struct GreetsScene : SceneDriver {
 			// (Mission Control) and never reaches the app.
 			const bool  f9Now   = Keyboard[ScF9] != 0 || Keyboard[ScG] != 0;
 			if (f9Now && !sF9Prev) {
-				char path[64];
+				const int dumpT = (int)g_FrameTime;   // scene time this frame
+				char path[80];
 				std::snprintf(path, sizeof(path),
-				              "/tmp/greets_dump_%d.ppm", sDumpN++);
+				              "/tmp/greets_dump_%d_t%d.ppm", sDumpN++, dumpT);
 				std::FILE *f = std::fopen(path, "wb");
 				if (f) {
 					const int xr = (int)XRes, yr = (int)YRes;
@@ -2773,16 +2761,16 @@ struct GreetsScene : SceneDriver {
 						std::fwrite(row.data(), 1, row.size(), f);
 					}
 					std::fclose(f);
-					std::fprintf(stderr, "[GREETS] dumped %s\n", path);
+					std::fprintf(stderr, "[GREETS] dumped %s (t=%d)\n", path, dumpT);
 				}
-				// Also print the current camera pose so the user can
-				// reproduce this exact view in a headless snapshot:
-				//   FDS_GREETS_CAM="px,py,pz,fx,fy,fz" ./DEMO --snapshot=...
+				// Also print the current camera pose + scene time so the
+				// user can reproduce this exact view headless:
+				//   FDS_GREETS_CAM="px,py,pz,fx,fy,fz" ./DEMO --snapshot=greets@t=<t>
 				// pos = eye; fwd = the camera's forward (Mat row 2).
 				std::fprintf(stderr,
-					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\"\n",
+					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\" t=%d\n",
 					View->ISource.x, View->ISource.y, View->ISource.z,
-					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
+					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], dumpT);
 				std::fflush(stderr);
 			}
 			sF9Prev = f9Now;

@@ -63,6 +63,19 @@ protected:
     // Honours g_shouldQuit so ESC/Ctrl-C still exits.
     void waitBackspaceRelease();
 
+    // Shared scene-time / pause / fast-forward-rewind, used by every scene
+    // so the transport controls behave identically:
+    //   P / U     pause / unpause (toggles the caller's `pauseMode`)
+    //   F2 / F1   fast-forward / rewind — 8× the frame delta in play, a
+    //             small fixed step while paused (single-frame stepping)
+    // `Timer` is a free-running atomic (the SDL timer thread bumps it); this
+    // snapshots it once, freezes scene time at `TTrd` while paused, and only
+    // writes the atomic back when pausing or scrubbing — so a background tick
+    // can't creep the time forward mid-frame. Updates the globals dTime and
+    // g_FrameTime and the caller's `TTrd`; returns the scene time. Callers
+    // should seed `TTrd = Timer` in init() and feed g_FrameTime into CurFrame.
+    int32_t tickSceneTimer(int32_t &TTrd, bool &pauseMode);
+
     bool tabPrev_ = false;
 };
 

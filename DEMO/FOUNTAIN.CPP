@@ -2627,25 +2627,9 @@ struct FountainScene : SceneDriver {
 
 		prof.switchTo(PROF_ANIM);
 
-		dTime = Timer - TTrd;
-		// fast forward/rewind
-		if (Keyboard[ScF2]) {
-			Timer += dTime * 8;
-		}
-		if (Keyboard[ScF1]) {
-			if (dTime * 8 > Timer)
-				Timer = 0;
-			else
-				Timer -= dTime * 8;
-		}
-		if (Keyboard[ScP])
-			pause_mode = true;
-		if (Keyboard[ScU])
-			pause_mode = false;
-		if (pause_mode) {
-			Timer = TTrd;
-		}
-		g_FrameTime = TTrd = Timer;
+		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
+		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
+		tickSceneTimer(TTrd, pause_mode);
 
 		Dynamic_Camera();
 		if (Keyboard[ScC]) {FC.ISource = View->ISource; Matrix_Copy(FC.Mat,View->Mat); FC.IFOV=View->IFOV;}

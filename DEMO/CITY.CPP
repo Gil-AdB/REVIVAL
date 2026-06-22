@@ -2486,27 +2486,10 @@ struct CityScene : SceneDriver {
 
 		prof.switchTo(PROF_ANIM);
 
-		dTime = Timer - TTrd;
-		if (dTime > 300) dTime = 300;
-		if (Keyboard[ScP])
-			pause_mode = true;
-		if (Keyboard[ScU])
-			pause_mode = false;
-		if (pause_mode) {
-			Timer = TTrd;
-		}
-		// fast forward/rewind. In pause, dTime is 0 (Timer pinned above),
-		// so fall back to a small per-tick step so F1/F2 still scrubs
-		// while paused (matches GREETS df918e77).
-		const int32_t scrubStep = pause_mode ? 10 : (dTime * 8);
-		if (Keyboard[ScF2]) {
-			Timer += scrubStep;
-		}
-		if (Keyboard[ScF1]) {
-			if (scrubStep > Timer) Timer = 0;
-			else                   Timer -= scrubStep;
-		}
-		g_FrameTime = TTrd = Timer;
+		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
+		// the race-free scene-time snapshot. dTime (set here) stays the
+		// wallclock delta the free camera / water scroll rely on in pause.
+		tickSceneTimer(TTrd, pause_mode);
 		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
@@ -2530,11 +2513,12 @@ struct CityScene : SceneDriver {
 			Reflective_AnimateTexture();
 
 		// Animate the water-reflection displacement (cross-axis travelling
-		// ripples). t = Timer (pinned while paused → ripple freezes too).
+		// ripples). t = g_FrameTime (the frozen/scrubbed scene time, so the
+		// ripple freezes cleanly while paused — the raw atomic would drift).
 		// Consumed below at the pass-1 dispMap resample; --no-water_ripple
 		// leaves the static warp baked by rebuildDispBuffers untouched.
 		if (fds::FeatureFlags::water_ripple())
-			updateRippleDispMap((float)Timer);
+			updateRippleDispMap((float)g_FrameTime);
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 

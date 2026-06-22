@@ -298,7 +298,8 @@ struct GlatoScene : SceneDriver {
 	float Code_RS = 0.0f;
 	float Gfx_RS = 0.0f;
 
-	dword TTrd = 0;
+	int32_t TTrd = 0;          // shared transport state (pause / scrub)
+	bool    pause_mode = false;
 	int32_t timerStack[20] = {};
 	int32_t timerIndex = 0;
 	FrameProfiler prof{"glato"};
@@ -354,21 +355,11 @@ struct GlatoScene : SceneDriver {
 		int Gfx = 0, Sfx = 0, Code = 1;
 		float ST;
 
-		bool skip = false;
-		// fast forward/rewind
-		dTime = Timer - TTrd;
-		if (Keyboard[ScF2]) {
-			skip = true;
-			Timer += dTime * 8;
-		}
-		if (Keyboard[ScF1]) {
-			skip = true;
-			if (dTime * 8 > Timer)
-				Timer = 0;
-			else
-				Timer -= dTime * 8;
-		}
-		TTrd = Timer;
+		// scrub state for the on-screen readout below; the actual
+		// transport (pause P/U, fast-forward/rewind F2/F1, race-free
+		// snapshot) is the shared SceneDriver::tickSceneTimer.
+		const bool skip = Keyboard[ScF1] != 0 || Keyboard[ScF2] != 0;
+		tickSceneTimer(TTrd, pause_mode);
 
 		if (Timer <= 100 * 11)
 			ST = (Timer*2500)/(1000+Timer);//  sqrt(Timer*1600);

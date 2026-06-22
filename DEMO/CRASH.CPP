@@ -39,6 +39,8 @@ namespace {
 struct CrashScene : SceneDriver {
 	char MSGStr[128];
 	FrameProfiler prof{"crash"};
+	int32_t TTrd = 0;          // shared transport state (pause / scrub)
+	bool    pause_mode = false;
 
 	~CrashScene() override { Destroy_Scene(CrashSc); }
 
@@ -52,6 +54,7 @@ struct CrashScene : SceneDriver {
 		Ambient_Factor = 1;
 		Diffusive_Factor = 1;
 		ImageSize = 1;
+		TTrd = Timer;
 	}
 
 	bool tick() override {
@@ -61,7 +64,9 @@ struct CrashScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		g_FrameTime = Timer;
+		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
+		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
+		tickSceneTimer(TTrd, pause_mode);
 
 		tickTabToggle(CrashSc, "crash");
 		clearFrame();

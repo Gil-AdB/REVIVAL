@@ -69,6 +69,41 @@ void SceneDriver::tickTabToggle(Scene *sc, const char *sceneName)
     tabPrev_ = tabNow;
 }
 
+int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
+{
+    // Timer is a free-running atomic — TimerProc (the SDL timer thread,
+    // REV.CPP) bumps it every tick. Snapshot it ONCE and do all scene-time
+    // math on a local: the old per-scene code pinned the atomic (Timer =
+    // TTrd) and then RE-READ it into g_FrameTime, so a background tick
+    // landing between the pin and the read crept 't' upward a few units
+    // each paused frame.
+    const int32_t nowTimer = Timer.load();
+    dTime = float(nowTimer - TTrd);
+    if (dTime > 300.0f) dTime = 300.0f;   // cap a post-stall jump
+    if (Keyboard[ScP]) pauseMode = true;
+    if (Keyboard[ScU]) pauseMode = false;
+
+    // Scene time this frame: frozen at TTrd while paused (the free-running
+    // clock is ignored), else caught up to wall clock.
+    int32_t sceneT = pauseMode ? TTrd : nowTimer;
+    // Fast forward / rewind: 8× the frame delta in play; in pause dTime is
+    // ~0 so fall back to a small per-tick step so F1/F2 still scrubs while
+    // paused (fine enough to step single anim frames).
+    const int32_t scrubStep = pauseMode ? 10 : int32_t(dTime * 8.0f);
+    bool scrubbed = false;
+    if (Keyboard[ScF2]) { sceneT += scrubStep; scrubbed = true; }
+    if (Keyboard[ScF1]) { sceneT = (scrubStep > sceneT) ? 0 : sceneT - scrubStep; scrubbed = true; }
+
+    // Override the free-running clock only when we must: paused (re-pin
+    // every frame so a background tick can't advance it) or scrubbing.
+    // Normal play leaves Timer free-running so no wall-clock ticks elapsed
+    // during frame processing are dropped.
+    if (pauseMode || scrubbed) Timer = sceneT;
+
+    g_FrameTime = TTrd = sceneT;
+    return sceneT;
+}
+
 void SceneDriver::clearFrame()
 {
     parallel_memset(VPage, 0, PageSize);

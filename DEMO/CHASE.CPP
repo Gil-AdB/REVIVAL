@@ -737,6 +737,8 @@ void Initialize_Chase()
 namespace {
 struct ChaseScene : SceneDriver {
 	FrameProfiler prof{"chase"};
+	int32_t TTrd = 0;          // shared transport state (pause / scrub)
+	bool    pause_mode = false;
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
@@ -746,6 +748,7 @@ struct ChaseScene : SceneDriver {
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
 		setupFaceLists(ChaseSc, /*includeOmnisInCount=*/false);
+		TTrd = Timer;
 	}
 
 	bool tick() override {
@@ -755,7 +758,9 @@ struct ChaseScene : SceneDriver {
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
 
-		g_FrameTime = Timer;
+		// Shared transport: pause (P/U), fast-forward/rewind (F2/F1), and
+		// the race-free scene-time snapshot. See SceneDriver::tickSceneTimer.
+		tickSceneTimer(TTrd, pause_mode);
 		clearFrame();
 
 		CurFrame = ChaseSc->StartFrame + (ChaseSc->EndFrame-ChaseSc->StartFrame) * (float)g_FrameTime / (float)CHPartTime;

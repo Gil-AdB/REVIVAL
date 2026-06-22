@@ -610,9 +610,10 @@ float Vel_Speed   = 0.080;
 // per frame that gives a per-frame rotation feel matching the old
 // Rot_Speed=0.004 + near-zero-decay accumulation (snappy turn) but
 // with the key-release stop fired in ~3 frames instead of drifting.
-// Tuned at 0.06 → ~70°/sec sustained which feels right for arrow-key
-// nav; K/L still scale via RotSpeedMult for users who want more.
-static float Rot_Speed_Base = 0.06f;
+// Was 0.06 (~70°/sec); dialled down to 0.045 (~52°/sec) for finer aim
+// when lining up the camera — a slower default turn reads as higher
+// sensitivity. K/L still scale via RotSpeedMult for users who want more.
+static float Rot_Speed_Base = 0.045f;
 // Independent rotation-speed dial — adjusted by `K` (slower) / `L`
 // (faster) inside Dynamic_Camera. Multiplies Rot_Speed_Base on top of
 // the shared `, .` CamSpeedMult, letting you slow rotation without
