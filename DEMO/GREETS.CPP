@@ -1111,6 +1111,55 @@ static Texture *GreetsLoadNormalMap(const char *path, bool flipGreen)
 	return t;
 }
 
+// --greets-stone-tex floor retiling: the medieval pavement tiles many times
+// over the big floor and reads as a regular grid. Two fixes, both on the floor
+// face UVs (the planar projection is baked at FLD load, so we rescale in code):
+//   • scale (greets_floor_uv_scale) — bigger tiles, fewer repetitions
+//   • de-tile (greets_floor_detile) — a low-frequency world-space warp that
+//     swirls the mapping so the grid stops reading as a grid (same trick city
+//     water uses). Warp is a pure function of WORLD position, so vertices
+//     shared between adjacent floor faces get the identical offset → seamless.
+static inline float greetsDetileU(float wx, float wz, float amp) {
+	const float f = 0.012f;
+	return amp * (std::sin(wx*f + wz*f*0.7f) + 0.5f*std::sin(wx*f*1.9f - wz*f*1.3f));
+}
+static inline float greetsDetileV(float wx, float wz, float amp) {
+	const float f = 0.012f;
+	return amp * (std::cos(wz*f + wx*f*0.6f) + 0.5f*std::cos(wz*f*1.7f - wx*f*1.1f));
+}
+static void GreetsRetileFloor(Scene *sc)
+{
+	const float scale = fds::FeatureFlags::greets_floor_uv_scale();
+	const float amp   = fds::FeatureFlags::greets_floor_detile();
+	if (scale == 1.0f && amp == 0.0f) return;
+	const float invScale = scale > 0.0f ? 1.0f / scale : 1.0f;
+	int touched = 0;
+	for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Faces) continue;
+		for (DWord fi = 0; fi < T->FIndex; ++fi) {
+			Face &F = T->Faces[fi];
+			if (!F.Txtr || !F.Txtr->Name || strcmp(F.Txtr->Name, "floor")) continue;
+			if (!F.A || !F.B || !F.C) continue;
+			Vertex *vs[3] = { F.A, F.B, F.C };
+			float *uu[3] = { &F.U1, &F.U2, &F.U3 };
+			float *vv[3] = { &F.V1, &F.V2, &F.V3 };
+			for (int k = 0; k < 3; ++k) {
+				// World position of this face vertex (mesh transform).
+				Vector lp = vs[k]->Pos, wp;
+				MatrixXVector(T->RotMat, &lp, &wp);
+				wp.x += T->IPos.x; wp.y += T->IPos.y; wp.z += T->IPos.z;
+				// Scale around 0.5 (the planar-projection centre) so bigger
+				// tiles, then add the world-space de-tile warp.
+				*uu[k] = (*uu[k] - 0.5f) * invScale + 0.5f + greetsDetileU(wp.x, wp.z, amp);
+				*vv[k] = (*vv[k] - 0.5f) * invScale + 0.5f + greetsDetileV(wp.x, wp.z, amp);
+			}
+			++touched;
+		}
+	}
+	std::fprintf(stderr, "[GREETS] floor retile: scale=%.2f detile=%.3f (%d faces)\n",
+	             scale, amp, touched);
+}
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1166,6 +1215,11 @@ void Initialize_Greets()
 	}
 
 	Preprocess_Scene(GreetSc, "GREETS");
+
+	// Floor de-tile + scale (face UVs exist now that Preprocess ran).
+	if (fds::FeatureFlags::greets_stone_tex())
+		GreetsRetileFloor(GreetSc);
+
 	// also make the appropriate Layer 2 fillers,
 
 	GreetSc->Ambient.R = 32;
