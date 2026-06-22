@@ -327,9 +327,15 @@ float Temp;
 
 	fread(&Temp,1,4,LWO);
 	SwapDW(&Temp);
-	Surf->Luminosity=Temp*100.0f;
+	// VLUM is already a 0..1 fraction. The engine's deferred kernel uses
+	// Material.Luminosity as a 0..1 emissive scale (lit = Luminosity*255 x
+	// texture), so write the fraction straight through. (The old *100 made
+	// it a percent, so any luminous surface hit Luminosity>=1 and saturated
+	// to full white — authored partial-emissive values like the mech's
+	// 'linght' lamps at 50% had no effect.)
+	Surf->Luminosity=Temp;
 #ifdef ObjectDebugMode
-	printf("  Luminosity(float): %3.2f%%\n",Surf->Luminosity);
+	printf("  Luminosity(float): %3.2f%%\n",Surf->Luminosity*100.0f);
 #endif
 }
 
