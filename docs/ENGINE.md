@@ -311,8 +311,10 @@ Mostly-const-after-init:
 
 ## Rendering backends
 
-`DEMO/SDL2.cpp` is the only active backend. The legacy DirectDraw / D3D8 /
-GDI backends were removed during Tier-1 cleanup.
+`DEMO/SDL2.cpp` is the only active backend (native: a streaming
+`SDL_Texture`; wasm: a small WebGL2 present path — see "Wasm-specific
+architecture" below). The legacy DirectDraw / D3D8 / GDI backends were
+removed during Tier-1 cleanup.
 
 `V_Flip` is dual-mode:
 
@@ -332,6 +334,94 @@ GDI backends were removed during Tier-1 cleanup.
   `VESA_Surface2Global` in `V_Flip` — that would clobber engine
   globals with the child's dimensions (see commit 9668bae for the
   regression that motivated the dual-mode split).
+## Wasm-specific architecture
+
+The wasm build diverges from native in three places: the main loop, the
+present path, and audio. All three are gated by `#ifdef __EMSCRIPTEN__`;
+native paths are untouched.
+
+### Main loop on the browser main thread
+
+`main()` runs on the actual browser main thread (no `-sPROXY_TO_PTHREAD`).
+`DEMO/MainLoop.cpp` owns a state machine (`WAIT_GESTURE → RUN_GLATO →
+RUN_CITY → ...`) driven by `emscripten_set_main_loop`. The state machine
+walks the existing `SceneDriver` factories one frame at a time. Heavy
+init (`Initialize_City`, `Fountain`, etc.) still runs off-main: a
+`std::thread` spawned at boot does all `Initialize_*` in sequence,
+signalling per-scene atomic ready flags as it completes.
+
+This was the right answer after a multi-day investigation showed that
+worker-thread WebGL via OffscreenCanvas + `emscripten_webgl_commit_frame`
+silently fails on modern Chromium/Firefox (emscripten#17816, #23806):
+GL operations succeed, the placeholder canvas never composites. Browser-
+main rendering is the only reliably-working path; sub-millisecond FLIP
+times confirm we don't pay any proxy cost.
+
+### Present path (WebGL2)
+
+`Wasm_PresentGL` in `SDL2.cpp` uploads `VPage` to a streaming RGBA8
+texture via `texSubImage2D` and draws a fullscreen triangle strip. The
+fragment shader handles BGRA → RGBA swizzle (the engine writes ARGB8888
+packed, which is BGRA byte order) and forces `alpha = 1.0` (the
+rasterizer never writes alpha). Letterboxing is done via CSS on the
+canvas element rather than in-shader.
+
+Sub-pieces worth knowing:
+
+- The vertex shader synthesizes the quad from `gl_VertexID` so the VAO
+  needs no real attribute data, but a 4-float dummy VBO bound to
+  `location = 0` is required to keep desktop GL drivers (Mac in
+  particular) off the slow attrib-emulation path.
+- `uFade` uniform multiplies sampled colour, used by `MainLoop`'s
+  `FADE_OUT` state to animate the end-of-Greets transition to black.
+- Native build keeps the SDL_Renderer + SDL_Texture path; the WebGL2
+  code is wasm-only.
+
+### Audio (AudioWorklet, not SDL audio)
+
+SDL2's emscripten port still uses `ScriptProcessorNode` (deprecated; runs
+the audio callback on browser main, gets starved by heavy rAF ticks at
+HD). We bypass it on wasm.
+
+`DEMO/audio-worklet.js` is an `AudioWorkletProcessor` with a 2-second
+Float32 ring buffer per channel. It signals `'needData'` when its ring
+drops below 50 ms; the main thread responds by calling
+`Modplayer_FillBufferPlanar` (a planar-output FFI we added to modplayer-
+lib) and posting the chunk to the worklet's port. Audio decode + playback
+live entirely on the audio thread; main is just a forwarder.
+
+The AudioContext setup is gated on a real user-gesture call stack — the
+state machine's `WAIT_GESTURE` runs from rAF, which has no gesture
+context, so `shell.html` listens for the first `pointerdown` / `keydown`
+directly and pre-arms `_floodAudioStart` from the gesture handler.
+
+### Cross-origin isolation
+
+We use `coi-serviceworker` to inject the `COOP` + `COEP` headers needed
+for `SharedArrayBuffer` (which the pthread render workers depend on).
+`shell.html` overrides `coi.coepCredentialless` to `false` on Firefox
+Android, where the credentialless top-level isolation path doesn't
+activate; require-corp works there.
+
+If isolation fails entirely (private browsing, very old browser, some
+mobile setups), `shell.html` shows a friendly error overlay instead of
+the cryptic `WebAssembly.Memory cannot be serialized` stack trace,
+including a captured `[coop-diag]` / `[audio-diag]` log so the user can
+report what state they're in.
+
+### Build flags
+
+In `DEMO/CMakeLists.txt`:
+
+- `-pthread` + `-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency+4`:
+  ThreadPool render workers are real Web Workers.
+- `-sALLOW_BLOCKING_ON_MAIN_THREAD=1`: the rasterizer dispatches tile
+  jobs and waits on a condvar — that's a sync block on main by design.
+- `-sEXIT_RUNTIME=0`: main returns after registering the rAF callback;
+  the runtime stays alive for the callback to keep firing. End-of-demo
+  cleanup is detached on a worker thread so the runtime doesn't drag.
+- `-sUSE_SDL=2` + `--preload-file Runtime`: we still use SDL2 for window
+  creation and event delivery, just not for audio or the present path.
 
 ## What's *not* done
 

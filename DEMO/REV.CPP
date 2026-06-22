@@ -477,7 +477,67 @@ material global ID or ptr
 #include <iostream>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include "MainLoop.h"
 #endif
+#ifndef __EMSCRIPTEN__
+#include <unistd.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+#endif
+
+// Locate the executable's directory and chdir into the asset root so
+// the demo's CWD-relative fopen()s (rev.cfg, SCENES/, TEXTURES/,
+// FONTS/, Revival.xM) resolve no matter where you launched it from.
+// Tries: <bindir>, <bindir>/../Runtime, <bindir>/../../Runtime — the
+// first one that has rev.cfg wins. No-op on emscripten (assets are
+// preloaded at "/").
+static void ChdirToAssetRoot(const char* argv0)
+{
+#ifndef __EMSCRIPTEN__
+	char exe[4096] = {0};
+#ifdef __APPLE__
+	uint32_t size = sizeof(exe);
+	if (_NSGetExecutablePath(exe, &size) != 0) {
+		strncpy(exe, argv0, sizeof(exe) - 1);
+	}
+#elif defined(__linux__)
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (n <= 0) strncpy(exe, argv0, sizeof(exe) - 1);
+#else
+	strncpy(exe, argv0, sizeof(exe) - 1);
+#endif
+
+	char resolved[4096];
+	if (realpath(exe, resolved)) {
+		strncpy(exe, resolved, sizeof(exe) - 1);
+		exe[sizeof(exe) - 1] = 0;
+	}
+
+	char* dir = dirname(exe);
+	const char* suffixes[] = { "", "/../Runtime", "/../../Runtime" };
+	for (const char* sfx : suffixes) {
+		char cand[4096];
+		snprintf(cand, sizeof(cand), "%s%s/rev.cfg", dir, sfx);
+		if (access(cand, R_OK) == 0) {
+			char target[4096];
+			snprintf(target, sizeof(target), "%s%s", dir, sfx);
+			if (chdir(target) != 0) {
+				fprintf(stderr, "ChdirToAssetRoot: chdir(%s) failed\n", target);
+			}
+			return;
+		}
+	}
+	// No rev.cfg found anywhere obvious — leave CWD alone and let
+	// the next fopen() report the error in context.
+#else
+	(void)argv0;
+#endif
+}
 
 // global configuration db
 static ConfigurationDB *g_cfg;
@@ -1181,6 +1241,8 @@ demo_exit:;
 
 int main(int argc, const char *argv[])
 {
+	ChdirToAssetRoot(argc > 0 ? argv[0] : "");
+
 	// Headless modes (--snapshot / --bench) must never pop an SDL window,
 	// steal desktop focus, or play music when run in the background (the byte
 	// gate, perf benches, agents). Detect them up front so we can (a) force
@@ -1482,40 +1544,44 @@ int main(int argc, const char *argv[])
 	freopen("logfile.txt", "w+", stdout);
 
 #ifdef __EMSCRIPTEN__
-	// Browsers require a user gesture before AudioContext can start. To keep
-	// audio in lockstep with scene playback, defer the entire demo (CodeEntry)
-	// until the first input event arrives. Show a hint overlay until then.
-	// PROXY_TO_PTHREAD: main() runs on a pthread worker with no DOM access,
-	// so dispatch DOM work to the browser main thread via MAIN_THREAD_EM_ASM.
-	MAIN_THREAD_EM_ASM({
-		var hint = document.createElement('div');
-		hint.id = 'rev-click-hint';
-		hint.textContent = 'Click or press any key to start';
-		hint.style.cssText =
-			'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
-			'padding:1em 2em;background:rgba(0,0,0,0.75);color:#fff;' +
-			'font:18px/1.2 sans-serif;border-radius:4px;z-index:9999;' +
-			'pointer-events:none;';
-		document.body.appendChild(hint);
+	// Wasm: main() runs on the actual browser main thread. We can't block
+	// here — that'd freeze the page. Instead, set up audio + ThreadPool +
+	// modplayer synchronously (cheap), arm the user-gesture wait + spawn
+	// the background init thread via DemoBoot, register the rAF callback,
+	// and return. The runtime stays alive (EXIT_RUNTIME=0); DemoTick drives
+	// scenes one frame at a time on browser main where WebGL2 actually
+	// works (the OffscreenCanvas + commit_frame path from a pthread is
+	// known-broken — emscripten#17816 / #23806).
+	InitPolyStats(200);
+	ThreadPool::instance().init([]() {
+		InitPolyStats(200);
+		FPU_LPrecision();
 	});
-	while (1) {
-		SDL_Event event;
-		SDL_WaitEvent(&event);
-		if (event.type == SDL_QUIT) {
-			SDL_Quit();
-			return 0;
-		}
-		if (event.type == SDL_KEYDOWN ||
-		    event.type == SDL_MOUSEBUTTONDOWN ||
-		    event.type == SDL_FINGERDOWN) {
-			break;
-		}
+	Generate_RGBFlares();
+	ModplayerHandle sh = nullptr;
+	if (g_playMusic) {
+		sh = Modplayer_Create("REVIVAL.XM");
+		if (sh) Modplayer_SetDisplay(sh, false);
+		g_RevModuleHandle = sh;
 	}
-	MAIN_THREAD_EM_ASM({
-		var h = document.getElementById('rev-click-hint');
-		if (h) h.remove();
-	});
-	fprintf(stderr, "[DEMO] user gesture observed, starting demo\n");
+	Timer = 0;
+	DemoBoot(sh);
+	emscripten_set_main_loop(
+		[](){
+			if (!DemoTick()) {
+				emscripten_cancel_main_loop();
+			}
+		},
+		0,    // fps=0 -> use requestAnimationFrame
+		false // don't simulate-infinite-loop; let main() return cleanly.
+	);
+	// Leak the SDL window: main() is about to return and EXIT_RUNTIME=0
+	// keeps the runtime alive for rAF, but C++ destructors still fire on
+	// return. The window/renderer/etc. need to outlive main(). The OS
+	// reaps everything when the tab closes; emscripten_cancel_main_loop
+	// in DemoTick:DONE handles graceful teardown.
+	(void)window.release();
+	return 0;
 #endif
 
 	fprintf(stderr, "[DEMO] spawning CodeEntry thread\n");
@@ -1537,12 +1603,20 @@ int main(int argc, const char *argv[])
 		    (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
 		     event.window.event == SDL_WINDOWEVENT_RESIZED)) {
 			// event.window.data1/data2 are in window points (logical units);
-			// SDL_GetRendererOutputSize gives the actual backing-store pixel
-			// size, which is what we render in. With HiDPI off they're equal;
-			// with HiDPI on (retina) they differ by the OS scale factor.
+			// the actual backing-store pixel size is what we render in. With
+			// HiDPI off they're equal; with HiDPI on (retina) they differ by
+			// the OS scale factor.
 			int px = 0, py = 0;
 			SDL_Renderer *r = MainSurf ? static_cast<SDL_Renderer *>(MainSurf->Renderer) : nullptr;
-			if (r) SDL_GetRendererOutputSize(r, &px, &py);
+			if (r) {
+				SDL_GetRendererOutputSize(r, &px, &py);
+			} else {
+				// Wasm path has no SDL renderer (we present via WebGL2 directly).
+				// JS already pre-multiplies by devicePixelRatio when calling
+				// SDL2_RequestSize, so data1/data2 are in physical pixels.
+				px = event.window.data1;
+				py = event.window.data2;
+			}
 			fprintf(stderr, "[RESIZE-EVT] kind=%d points=%dx%d pixels=%dx%d\n",
 			        event.window.event, event.window.data1, event.window.data2, px, py);
 			if (px > 0 && py > 0) {

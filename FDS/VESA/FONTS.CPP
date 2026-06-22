@@ -66,7 +66,7 @@ Font * LoadAFT(const char *FileName)
 	return FFI;
 }
 
-int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int xres /* = XRes*/, int yres /*= YRes*/)
+int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int xres /* = XRes*/, int yres /*= YRes*/, int scaleOverride /*= -1*/)
 {
 	int DX;
 	int II, IJ;
@@ -76,7 +76,7 @@ int32_t OutTextXY(byte *Where,int32_t X,int32_t Y, const char *S, uint8_t C, int
 	char CPP = (BPP + 1) >> 3;
 	byte *Ptr, *Pen;
 	Font *F = Active_Font;
-	const int scale = g_fontScale > 0 ? g_fontScale : 1;
+	const int scale = scaleOverride >= 0 ? scaleOverride : (g_fontScale > 0 ? g_fontScale : 1);
 	const int glyphH = F->Y * scale;
 	if (Y >= yres - glyphH) {
 		return Y;

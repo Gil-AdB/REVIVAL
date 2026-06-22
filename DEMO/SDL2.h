@@ -34,6 +34,12 @@ void SDL2_Flip(VESA_Surface *VS);
 // auto-stretches their content to whatever size the window has become.
 SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag);
 
+// Arms a fade-in on the engine surface: the next `frames` V_Flip calls
+// will scale VPage in place by an increasing factor (1/N → 1.0) using
+// the engine's AlphaBlend, so each scene fades up from black.
+// Counterpart to engineFadeStep (SceneTick.h) which does fade-out.
+extern "C" void EngineStartFadeIn(int frames);
+
 #ifdef __EMSCRIPTEN__
 // Emscripten music: the Rust modplayer-lib is built with the external-audio
 // feature (no Rust-side audio backend), so the host opens an SDL_AudioDevice

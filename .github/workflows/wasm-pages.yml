@@ -52,6 +52,13 @@ jobs:
       - name: Build
         run: cmake --build build-wasm
 
+      - name: Smoke test (headless Chromium boots demo + verifies render)
+        run: |
+          cd scripts && npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          cd ..
+          node scripts/ci_smoke_test.mjs
+
       - name: Stage site
         run: |
           mkdir -p _site
@@ -60,6 +67,7 @@ jobs:
           cp build-wasm/DEMO/DEMO.wasm _site/
           cp build-wasm/DEMO/DEMO.data _site/
           cp build-wasm/DEMO/coi-serviceworker.js _site/
+          cp build-wasm/DEMO/audio-worklet.js _site/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -80,10 +80,16 @@ void VESA_Surface2Global(VESA_Surface *VS)
   ZPage16 = (word *)VS->Z16;
   Flip = VS->Flip;
   YOffs = VS->YTable;
-  // HiDPI font auto-scale. The bitmap font is ~8 px tall — at 1920×1080+
-  // each glyph is sub-millimeter on a retina display. Threshold at 1600 px
-  // wide; matches "1080p or larger" for the common cases.
-  g_fontScale = (XRes >= 1600) ? 2 : 1;
+#ifndef __EMSCRIPTEN__
+  // HiDPI font auto-scale. The bitmap font is ~8 px tall — only kick in
+  // at retina-class resolutions (4K+). 1080p still gets 1× glyphs.
+  // On wasm the JS shell knows the visual context (devicePixelRatio + the
+  // HD/SD toggle) and sets g_fontScale via SDL2_SetFontScale, so don't
+  // overwrite it here — the threshold is wrong for mobile HD anyway
+  // (canvas backing under 2500 px but glyphs render at half visual size
+  // because of devicePixelRatio).
+  g_fontScale = (XRes >= 2500) ? 2 : 1;
+#endif
 }
 
 void VESA_Warning(const char *Msg)
@@ -155,7 +161,11 @@ void VESA_VPageExternal(VESA_Surface *ExtrnVS)//void *vPagePtr, void (*FlipperCa
 	VS->FOV = 0;
 
 	VS->PageSize = VS->BPSL * VS->Y;
-	VS->Flags = VSurf_EffScreen;
+	// |= rather than = — the SDL backend's V_Create may have already set
+	// VSurf_LockRender on this surface, and overwriting Flags wholesale
+	// here was silently demoting it back to the legacy SDL_UpdateTexture
+	// path (which on wasm costs ~28 ms per flip in SDL_RenderPresent).
+	VS->Flags |= VSurf_EffScreen;
 
 	//if (VS->YTable) Build_YOffs_Table(Screen);
 	//VESA_MainFlip();

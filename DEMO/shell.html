@@ -41,11 +41,121 @@
     </style>
   </head>
   <body>
+    <!-- Diagnostic-log capture. We also keep a buffered copy of every
+         [coop-diag] / [audio-diag] line so we can dump them into the
+         on-screen error panel when the demo can't start (mostly so
+         Firefox Mobile users — who can't readily inspect the JS console
+         — can copy useful info out of the page itself). Captures
+         console.log + console.error output that starts with one of our
+         tag prefixes. -->
+    <script>
+      (function() {
+        if (typeof window === 'undefined') return;
+        var diagLog = [];
+        window.__diagLog = diagLog;
+        function tagged(args) {
+          var s = '';
+          for (var i = 0; i < args.length; ++i) {
+            s += (i ? ' ' : '') + args[i];
+          }
+          return /^\[(coop|audio)-diag\]/.test(s) ? s : null;
+        }
+        var origLog = console.log.bind(console);
+        var origErr = console.error.bind(console);
+        console.log = function() {
+          var t = tagged(arguments);
+          if (t) diagLog.push(t);
+          return origLog.apply(null, arguments);
+        };
+        console.error = function() {
+          var t = tagged(arguments);
+          if (t) diagLog.push(t);
+          return origErr.apply(null, arguments);
+        };
+
+        function snap(label) {
+          if (navigator.serviceWorker) {
+            try {
+              navigator.serviceWorker.getRegistrations().then(function(regs) {
+                console.log('[coop-diag] ' + label + ' regs=' + regs.length +
+                  regs.map(function(r){
+                    return ' [scope=' + r.scope +
+                      ' active=' + !!r.active +
+                      ' installing=' + !!r.installing +
+                      ' waiting=' + !!r.waiting + ']';
+                  }).join(''));
+              });
+            } catch (e) {
+              console.log('[coop-diag] ' + label + ' getRegistrations err: ' + e.message);
+            }
+          }
+          console.log('[coop-diag] ' + label +
+            ' isSecureContext=' + window.isSecureContext +
+            ' crossOriginIsolated=' + window.crossOriginIsolated +
+            ' UA=' + navigator.userAgent.slice(0, 80) +
+            ' hasNetscape=' + (typeof netscape !== 'undefined') +
+            ' hasChrome=' + (typeof chrome !== 'undefined') +
+            ' SW=' + !!navigator.serviceWorker +
+            ' SWController=' + !!(navigator.serviceWorker && navigator.serviceWorker.controller) +
+            ' SAB=' + (typeof SharedArrayBuffer !== 'undefined') +
+            ' sessionStorage=' + (function(){try{window.sessionStorage.length;return 'ok';}catch(e){return 'blocked:'+e.message;}})()
+          );
+        }
+        snap('initial');
+        setTimeout(function(){ snap('+1s'); }, 1000);
+        setTimeout(function(){ snap('+3s'); }, 3000);
+      })();
+    </script>
+    <!-- Browser-specific coi-serviceworker config. Firefox Android (UA
+         contains "Android" + "Firefox") has been observed not isolating
+         the top-level document under COEP credentialless even with
+         coi-serviceworker active and the SW controlling the page
+         (crossOriginIsolated=false despite SWController=true). Forcing
+         require-corp seems to fix it; same-origin assets get an explicit
+         CORP from the SW so require-corp's stricter rules are satisfied. -->
+    <script>
+      var ua = navigator.userAgent || '';
+      if (ua.indexOf('Android') >= 0 && ua.indexOf('Firefox') >= 0) {
+        window.coi = window.coi || {};
+        window.coi.coepCredentialless = function() { return false; };
+        console.log('[coop-diag] FF Android detected; forcing require-corp');
+      }
+    </script>
     <!-- coi-serviceworker injects COOP/COEP headers so SharedArrayBuffer
          (required for our pthread build) works on hosts like GitHub Pages
          that don't support custom HTTP headers. No-op on emrun, which
          already sets the headers itself. -->
     <script src="coi-serviceworker.js"></script>
+    <script>
+      // Friendly error if cross-origin isolation never activates.
+      // Includes the captured [coop-diag] / [audio-diag] log so people
+      // diagnosing on a phone (or anyone without a JS console handy)
+      // can copy actionable info straight out of the page.
+      (function() {
+        if (typeof window === 'undefined') return;
+        setTimeout(function() {
+          if (window.crossOriginIsolated) return;
+          var msg = (
+            "Couldn't enable cross-origin isolation in this browser. " +
+            "REVIVAL needs SharedArrayBuffer to run its render workers. " +
+            "Common causes:\n\n" +
+            "  - Private / incognito browsing (Firefox disables service workers there)\n" +
+            "  - Outdated browser (need Chrome 92+, Firefox 79+, Safari 15.2+)\n" +
+            "  - Some Firefox Mobile setups\n\n" +
+            "Try a regular (non-private) tab in an up-to-date Chrome or Firefox."
+          );
+          var diag = (window.__diagLog || []).join('\n');
+          var div = document.createElement('div');
+          div.style.cssText =
+            'position:fixed;inset:0;background:#000;color:#ccc;' +
+            'font:14px/1.4 sans-serif;padding:2em;white-space:pre-wrap;' +
+            'z-index:99999;overflow:auto;';
+          div.textContent = msg + '\n\n--- diagnostic log ---\n' + diag;
+          document.body.appendChild(div);
+          console.error(msg);
+        }, 4000);
+      })();
+    </script>
     <div id="status">Downloading...</div>
     <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
     <div id="controls">
@@ -75,7 +185,112 @@
         // (resize, mousemove, fullscreenchange) can't call into a torn-down
         // wasm runtime — that path used to throw "called after runtime
         // exit" assertions in the console.
-        onExit: function() { runtimeExited = true; }
+        onExit: function() { runtimeExited = true; },
+        // Once wasm exports are ready, re-apply the HD/SD font scale
+        // (the boot-time applyHidpi() ran before _SDL2_SetFontScale
+        // existed). Same for ?hidpi=1 in the URL.
+        onRuntimeInitialized: function() {
+          if (typeof applyHidpi === 'function') applyHidpi();
+        }
+      };
+
+      // ---- Audio: AudioWorklet pump ---------------------------------
+      // Replaces SDL2's emscripten ScriptProcessorNode path. The wasm
+      // side calls Module._floodAudioStart() on user gesture; that
+      // creates the AudioContext + worklet, hooks its 'needData' /
+      // 'starve' messages back to a wasm-exported _Audio_FeedWorklet
+      // function. Module._floodAudioStop() tears down at end of demo.
+      // Browsers gate AudioContext.resume() on a user-gesture call stack.
+      // The C-side state machine catches the click via SDL_PollEvent later,
+      // by which point the gesture context is gone — ctx.resume() then
+      // resolves but the context stays in "suspended" state and the worklet
+      // never produces audio. Listen for the first click/keydown directly
+      // in JS and kick off audio in that handler. The C side calls
+      // _floodAudioStart() too once it sees the gesture; the second call
+      // returns immediately because Module.__audioCtx is already set.
+      function preArmAudio(e) {
+        window.removeEventListener('pointerdown', preArmAudio);
+        window.removeEventListener('keydown',     preArmAudio);
+        console.log('[audio-diag] preArmAudio fired type=' + e.type +
+          ' _floodAudioStart=' + (typeof Module._floodAudioStart) +
+          ' _Audio_FeedWorklet=' + (typeof Module._Audio_FeedWorklet));
+        if (Module._floodAudioStart) Module._floodAudioStart();
+      }
+      window.addEventListener('pointerdown', preArmAudio);
+      window.addEventListener('keydown',     preArmAudio);
+
+      Module._floodAudioStart = async function() {
+        // Re-entry: __audioCtx is set only AFTER the first await chain
+        // completes. Without a separate "starting" flag, two calls in
+        // rapid succession (preArm click handler + C-side SDL2_StartMusic
+        // from the next rAF tick) both pass the audioCtx guard, both
+        // proceed, both build a worklet, both pump. The C side then
+        // advances the song at 2× rate — sounds like fast-forwarding
+        // after the first few seconds.
+        if (Module.__audioStarting || Module.__audioCtx) {
+          console.log('[audio-diag] _floodAudioStart re-entry; already started or starting');
+          return;
+        }
+        Module.__audioStarting = true;
+        console.log('[audio-diag] _floodAudioStart: creating AudioContext');
+        var ctx = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 48000
+        });
+        console.log('[audio-diag] AudioContext state=' + ctx.state +
+                    ' actualSampleRate=' + ctx.sampleRate);
+        await ctx.resume();
+        console.log('[audio-diag] after resume() state=' + ctx.state +
+                    ' actualSampleRate=' + ctx.sampleRate);
+        try {
+          await ctx.audioWorklet.addModule('audio-worklet.js');
+          console.log('[audio-diag] addModule ok');
+        } catch (e) {
+          console.error('[audio-diag] addModule failed: ' + e.message);
+          return;
+        }
+        var node = new AudioWorkletNode(ctx, 'flood-modplayer-worklet', {
+          outputChannelCount: [2]
+        });
+        // Gain in the chain for mute. The wasm pump keeps running even
+        // when muted (so position advances + unmute resumes mid-track),
+        // we just zero the audible signal.
+        var gain = ctx.createGain();
+        gain.gain.value = muted ? 0 : 1;
+        node.connect(gain).connect(ctx.destination);
+        Module.__audioGain = gain;
+        node.port.onmessage = function(e) {
+          if (!Module.__audioMsgSeen) {
+            Module.__audioMsgSeen = 1;
+            console.log('[audio-diag] first port message from worklet: ' + (e.data && e.data.type));
+          }
+          if (Module.__muted) return;
+          if (Module.__feeding) return; // re-entry guard
+          Module.__feeding = true;
+          try {
+            if (Module._Audio_FeedWorklet) Module._Audio_FeedWorklet(2048);
+          } finally {
+            Module.__feeding = false;
+          }
+        };
+        Module.__audioCtx = ctx;
+        Module.__audioNode = node;
+        Module.__audioPort = node.port;
+        console.log('[audio-diag] worklet wired up, kicking initial pump; ctx.state=' + ctx.state);
+        // Kick off the ring with one pump so the worklet has data before
+        // it asks for more.
+        if (Module._Audio_FeedWorklet) Module._Audio_FeedWorklet(2048);
+        // Re-check ctx state on the next tick — if it's still 'suspended'
+        // we have a gesture-context problem.
+        setTimeout(function(){
+          console.log('[audio-diag] +200ms ctx.state=' + ctx.state +
+            ' modHandle_known_to_C=via_wasm');
+        }, 200);
+      };
+      Module._floodAudioStop = function() {
+        if (Module.__audioPort) Module.__audioPort.postMessage({ type: 'stop' });
+        if (Module.__audioNode) try { Module.__audioNode.disconnect(); } catch (_) {}
+        if (Module.__audioCtx) try { Module.__audioCtx.close(); } catch (_) {}
+        Module.__audioCtx = Module.__audioNode = Module.__audioPort = null;
       };
       setStatus('Downloading...');
       window.onerror = function() {
@@ -108,11 +323,28 @@
       // HD/SD button toggles it at runtime; ?hidpi=1 in the URL opts in
       // at boot.
       var hiDPI = /[?&]hidpi=1/.test(window.location.search);
+      // Mobile heuristic: coarse pointer + small viewport. On mobile we
+      // tweak the SD/HD effective DPR — naive 1× is too pixelated (CSS
+      // upscale to fill a phone screen looks blocky), naive full DPR
+      // tanks fps on heavy scenes. So:
+      //   SD on mobile = min(DPR, 1.5) — looks decent
+      //   HD on mobile = min(DPR, 2)   — sharp without tripling pixel work
+      // Desktop unaffected.
+      var isMobile = window.matchMedia &&
+                     window.matchMedia('(pointer:coarse)').matches &&
+                     Math.min(window.innerWidth, window.innerHeight) <= 900;
       // Becomes true once main() has returned — guards against late-firing
       // resize/orientation listeners trying to call into freed wasm.
       var runtimeExited = false;
+      function effectiveDpr() {
+        var dpr = window.devicePixelRatio || 1;
+        if (isMobile) {
+          return hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+        }
+        return hiDPI ? dpr : 1;
+      }
       function resizeCanvasToWindow() {
-        var dpr = hiDPI ? (window.devicePixelRatio || 1) : 1;
+        var dpr = effectiveDpr();
         var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
         var h = Math.max(1, Math.floor(window.innerHeight * dpr));
         // Route through SDL_SetWindowSize once the wasm is ready — it
@@ -152,17 +384,22 @@
       function applyMute() {
         btnMute.textContent = muted ? '🔇' : '🔊';
         btnMute.setAttribute('aria-pressed', muted ? 'true' : 'false');
-        // Module._SDL2_SetMute is exported via EMSCRIPTEN_KEEPALIVE in
-        // SDL2.cpp. Guard since the module may not be ready when the user
-        // taps the button mid-load.
-        if (typeof Module !== 'undefined' && Module._SDL2_SetMute) {
-          Module._SDL2_SetMute(muted ? 1 : 0);
-        }
+        // GainNode in the audio chain — wasm pump keeps running so the
+        // song stays in lockstep with the visuals; we just zero the
+        // audible signal.
+        if (Module.__audioGain) Module.__audioGain.gain.value = muted ? 0 : 1;
       }
       function applyHidpi() {
         btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
         btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
-        // resizeCanvasToWindow now routes through Module._SDL2_RequestSize
+        // Match the font scale to the effective DPR — that way one
+        // glyph pixel maps to one CSS pixel regardless of HD/SD or
+        // mobile/desktop. Round up so we stay legible.
+        if (Module._SDL2_SetFontScale) {
+          var scale = Math.max(1, Math.round(effectiveDpr()));
+          Module._SDL2_SetFontScale(scale);
+        }
+        // resizeCanvasToWindow routes through Module._SDL2_RequestSize
         // → SDL_SetWindowSize, which both resizes the canvas DOM element
         // and fires SDL_WINDOWEVENT_SIZE_CHANGED so the demo thread
         // repaints at the new resolution.

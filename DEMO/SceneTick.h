@@ -6,7 +6,13 @@
 #include <memory>
 #include <vector>
 
+#include <SDL.h>
+
+#include "Base/FDS_VARS.H"
+#include "VESA/Vesa.h"
+
 #include "Resize.h"
+#include "SDL2.h"
 #include "Base/FaceListContext.h"
 #include "Base/FeatureFlags.h"
 
@@ -230,8 +236,40 @@ inline void poll_pending_resize(SceneDriver* driver) {
     if (driver) driver->on_resize(x, y);
 }
 
+// One frame of inter-scene fade: alpha-blend VPage in place toward black
+// using the engine's existing AlphaBlend primitive (same SIMD path Glat
+// uses for its smear/composite passes), then Flip. The cumulative
+// per-frame factor (totalFrames-frame-1)/(totalFrames-frame) gives a
+// linear fade from V_0 to 0 over `totalFrames` calls (frame=0..N-1).
+inline void engineFadeStep(int frame, int totalFrames) {
+    if (!MainSurf || !VPage || totalFrames <= 0) return;
+    int denom = totalFrames - frame;
+    if (denom <= 0) denom = 1;
+    int modValue = (totalFrames - frame - 1) * 255 / denom;
+    if (modValue < 0) modValue = 0;
+    DWord perSrc = (DWord)((modValue & 0xFF) * 0x01010101u);
+    DWord perDst = 0;
+    // Source==Target==VPage. Within a single 16-byte SIMD chunk, the
+    // reads happen before the writes, and chunks don't overlap, so the
+    // in-place modify is safe.
+    AlphaBlend(VPage, VPage, perSrc, perDst, PageSize);
+    Flip(MainSurf);
+}
+
+// Native: drive the fade as a blocking loop at ~60 fps.
+inline void runFadeOut(int frames) {
+    for (int i = 0; i < frames; ++i) {
+        engineFadeStep(i, frames);
+        SDL_Delay(16);  // ~60 fps cadence; renderer's vsync absorbs jitter
+    }
+}
+
 inline void runSceneBlocking(SceneDriver& driver) {
     driver.init();
+    // Arm a fade-in: V_Flip will scale VPage in place by an increasing
+    // factor for the first N flips, so the scene comes up from black.
+    // Symmetric with the runFadeOut at scene end.
+    EngineStartFadeIn(15);
     while (true) {
         // Quit (ESC, SDL_QUIT, Ctrl-C) wins over everything else: we don't
         // even bother running another tick; just tear down and return so
@@ -243,6 +281,9 @@ inline void runSceneBlocking(SceneDriver& driver) {
         poll_pending_resize(&driver);
         if (!driver.tick()) break;
     }
+    // Fade the last rendered frame to black before cleanup hands control
+    // back to the caller (which usually transitions to the next scene).
+    runFadeOut(15);
     driver.cleanup();
 }
 

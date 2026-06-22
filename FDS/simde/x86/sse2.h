@@ -1274,7 +1274,12 @@ simde_mm_bslli_si128 (simde__m128i a, const int imm8)
     const simde__m128i_private simde_tmp_a_ = simde__m128i_to_private(a); \
     const simde__m128i_private simde_tmp_z_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     simde__m128i_private simde_tmp_r_; \
-    if (HEDLEY_UNLIKELY(imm8 > 15)) { \
+    /* REVIVAL local patch: parens around imm8 in the `> 15` test. \
+       Without them, callers passing an unparen'd `... & 0xF` argument \
+       parse as `... & (0xF > 15)` = `... & 0` = 0, and the bounds \
+       check is silently broken. -Wparentheses flags it. \
+       Mirror in simde_mm_bsrli_si128 + simde_mm_slli_si128 below. */ \
+    if (HEDLEY_UNLIKELY((imm8) > 15)) { \
       simde_tmp_r_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     } else { \
       simde_tmp_r_.i8 = \
@@ -1348,7 +1353,7 @@ simde_mm_bsrli_si128 (simde__m128i a, const int imm8)
     const simde__m128i_private simde_tmp_a_ = simde__m128i_to_private(a); \
     const simde__m128i_private simde_tmp_z_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     simde__m128i_private simde_tmp_r_ = simde__m128i_to_private(a); \
-    if (HEDLEY_UNLIKELY(imm8 > 15)) { \
+    if (HEDLEY_UNLIKELY((imm8) > 15)) { \
       simde_tmp_r_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     } else { \
       simde_tmp_r_.wasm_v128 = \
@@ -1378,7 +1383,7 @@ simde_mm_bsrli_si128 (simde__m128i a, const int imm8)
     const simde__m128i_private simde_tmp_a_ = simde__m128i_to_private(a); \
     const simde__m128i_private simde_tmp_z_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     simde__m128i_private simde_tmp_r_ = simde__m128i_to_private(a); \
-    if (HEDLEY_UNLIKELY(imm8 > 15)) { \
+    if (HEDLEY_UNLIKELY((imm8) > 15)) { \
       simde_tmp_r_ = simde__m128i_to_private(simde_mm_setzero_si128()); \
     } else { \
       simde_tmp_r_.i8 = \

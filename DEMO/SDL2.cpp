@@ -3,12 +3,14 @@
 #include <Base/FeatureFlags.h>
 #include "SDL2.h"
 #include "FILLERS/Mekalele.h"
+#include <VESA/Vesa.h>  // AlphaBlend
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 
 #ifdef __EMSCRIPTEN__
 #include "../Modplayer/Modplayer.h"
+#include "Rev.h"  // g_RevModuleHandle for the audio pump
 #include <emscripten.h>
 #include <emscripten/threading.h>
 #endif
@@ -39,6 +41,199 @@ static SDLTex s_engineTex;
 // static meka::GBuffer and updates g_gbuffer. V_Create calls it for
 // boot + resize so the deferred path's storage matches framebuffer dims.
 
+// Fade-in counters. Set via EngineStartFadeIn(N); V_Flip applies an
+// in-place AlphaBlend on the engine surface for the next N flips with
+// an increasing factor, so each scene fades up from black. Counterpart
+// to engineFadeStep (SceneTick.h) which does the symmetric fade-out.
+static int s_fadeInTotal     = 0;
+static int s_fadeInRemaining = 0;
+
+extern "C" void EngineStartFadeIn(int frames)
+{
+	if (frames <= 0) { s_fadeInRemaining = s_fadeInTotal = 0; return; }
+	s_fadeInTotal     = frames;
+	s_fadeInRemaining = frames;
+}
+
+#ifdef __EMSCRIPTEN__
+// One-time WebGL2 setup on the SDL canvas. Must run before any other
+// rendering context is requested on it (canvas allows only one type at a
+// time). On wasm we skip SDL_CreateRenderer entirely so the canvas is
+// free for WebGL2 here.
+//
+// The fragment shader handles two engine quirks:
+//   1. The framebuffer is laid out as ARGB8888 packed = bytes BGRA in LE.
+//      WebGL uploaded as gl.RGBA reads those bytes as R=B, G=G, B=R, A=A.
+//      We swizzle .bgra to undo it.
+//   2. The rasterizer never writes alpha (always 0), so canvas would be
+//      fully transparent. We force alpha = 1.0 in the shader.
+static int Wasm_InitGL()
+{
+	// V_Flip runs on the browser main thread (main() is no longer proxied
+	// to a pthread). WebGL state lives here too, so plain EM_ASM is fine
+	// — no cross-thread proxy.
+	return EM_ASM_INT({
+		var canvas = Module.canvas;
+		if (!canvas) return 1;
+		var gl = canvas.getContext('webgl2', {
+			alpha: false,
+			antialias: false,
+			depth: false,
+			stencil: false,
+			premultipliedAlpha: false,
+			preserveDrawingBuffer: false,
+			powerPreference: 'high-performance'
+		});
+		if (!gl) return 2;
+		Module.__floodGL = gl;
+
+		var vsSrc =
+			'#version 300 es\n' +
+			// Dummy attribute at location 0. Without an attribute bound
+			// to location 0, desktop GL drivers (Mac in particular) fall
+			// into a slow attrib-emulation path even when an unused VBO
+			// is bound. Declaring it in the shader makes the linker mark
+			// location 0 as "used" and silences the WebGL warning.
+			'layout(location=0) in float aDummy;\n' +
+			'out vec2 vUV;\n' +
+			'void main() {\n' +
+			'  vec2 corners[4];\n' +
+			'  corners[0] = vec2(-1.0, -1.0);\n' +
+			'  corners[1] = vec2( 1.0, -1.0);\n' +
+			'  corners[2] = vec2(-1.0,  1.0);\n' +
+			'  corners[3] = vec2( 1.0,  1.0);\n' +
+			'  vec2 uvs[4];\n' +
+			'  uvs[0] = vec2(0.0, 1.0);\n' +
+			'  uvs[1] = vec2(1.0, 1.0);\n' +
+			'  uvs[2] = vec2(0.0, 0.0);\n' +
+			'  uvs[3] = vec2(1.0, 0.0);\n' +
+			'  vUV = uvs[gl_VertexID];\n' +
+			'  // aDummy participates so the optimizer cannot strip it.\n' +
+			'  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0 + aDummy * 0.0);\n' +
+			'}';
+		var fsSrc =
+			'#version 300 es\n' +
+			'precision highp float;\n' +
+			'in vec2 vUV;\n' +
+			'uniform sampler2D uTex;\n' +
+			'out vec4 oColor;\n' +
+			'void main() {\n' +
+			'  vec4 c = texture(uTex, vUV);\n' +
+			'  oColor = vec4(c.b, c.g, c.r, 1.0);\n' +
+			'}';
+		function compile(type, src) {
+			var s = gl.createShader(type);
+			gl.shaderSource(s, src);
+			gl.compileShader(s);
+			if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+				console.error('flood gl shader: ' + gl.getShaderInfoLog(s));
+			}
+			return s;
+		}
+		var prog = gl.createProgram();
+		gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+		gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+		gl.linkProgram(prog);
+		if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+			console.error('flood gl link: ' + gl.getProgramInfoLog(prog));
+		}
+		Module.__floodProg = prog;
+		Module.__floodTex = gl.createTexture();
+		Module.__floodTexW = 0;
+		Module.__floodTexH = 0;
+		// VAO with a dummy attribute at location 0. The vertex shader
+		// declares aDummy at location 0 (silences the desktop-GL
+		// emulation warning) and multiplies it by 0 so the optimizer
+		// can't strip it. The buffer must hold enough data for the
+		// full draw — drawArrays(TRIANGLE_STRIP, 0, 4) reads 4 floats
+		// at this attribute, so a 4-element buffer; an undersized buffer
+		// triggers out-of-bounds reads that some drivers handle by
+		// dropping the entire draw call (= black canvas).
+		Module.__floodVAO = gl.createVertexArray();
+		gl.bindVertexArray(Module.__floodVAO);
+		var dummyVBO = gl.createBuffer();
+		gl.bindBuffer(gl.ARRAY_BUFFER, dummyVBO);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 0, 0]), gl.STATIC_DRAW);
+		gl.enableVertexAttribArray(0);
+		gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
+		gl.bindVertexArray(null);
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		gl.disable(gl.DEPTH_TEST);
+		return 0;
+	});
+}
+
+// Upload `pixels` (srcW x srcH, BGRA byte order) into the WebGL texture
+// and present a fullscreen quad letterboxed inside the canvas.
+static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
+{
+	static bool s_initialized = false;
+	static bool s_initFailed  = false;
+	if (!s_initialized && !s_initFailed) {
+		int rc = Wasm_InitGL();
+		if (rc != 0) {
+			fprintf(stderr, "[SDL] Wasm_InitGL failed rc=%d\n", rc);
+			s_initFailed = true;
+			return;
+		}
+		s_initialized = true;
+	}
+	if (s_initFailed) return;
+
+	EM_ASM({
+		var gl = Module.__floodGL;
+		if (!gl) return;
+		var canvas = Module.canvas;
+		var cw = canvas.width;
+		var ch = canvas.height;
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		if (Module.__floodTexW !== $1 || Module.__floodTexH !== $2) {
+			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, $1, $2, 0,
+			              gl.RGBA, gl.UNSIGNED_BYTE, null);
+			Module.__floodTexW = $1;
+			Module.__floodTexH = $2;
+		}
+		// WebGL2 texSubImage2D accepts SAB-backed Uint8Array views directly,
+		// so this is a single GPU upload — no intermediate JS-side memcpy.
+		var view = new Uint8Array(HEAPU8.buffer, $0, $1 * $2 * 4);
+		gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, $1, $2,
+		                 gl.RGBA, gl.UNSIGNED_BYTE, view);
+
+		// Letterbox inside the canvas — preserve src aspect ratio. One var
+		// per line: the C preprocessor splits MAIN_THREAD_EM_ASM body args
+		// on top-level commas (parens protect, braces don't), so multi-var
+		// declarations get tokenized as separate macro arguments.
+		var srcAR = $1 / $2;
+		var canAR = cw / ch;
+		var dx = 0;
+		var dy = 0;
+		var dw = cw;
+		var dh = ch;
+		if (canAR > srcAR) {
+			dw = (ch * srcAR) | 0;
+			dx = (cw - dw) >> 1;
+		} else {
+			dh = (cw / srcAR) | 0;
+			dy = (ch - dh) >> 1;
+		}
+		gl.viewport(0, 0, cw, ch);
+		gl.clearColor(0, 0, 0, 1);
+		gl.clear(gl.COLOR_BUFFER_BIT);
+		gl.viewport(dx, dy, dw, dh);
+		gl.useProgram(Module.__floodProg);
+		gl.bindVertexArray(Module.__floodVAO);
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+	}, (uintptr_t)pixels, srcW, srcH);
+}
+
+#endif
+
 static void V_Flip(VESA_Surface *VS)
 {
 	// Shadow-map debug viewer thumbnail. No-op when g_shadowViewIdx < 0
@@ -66,6 +261,32 @@ static void V_Flip(VESA_Surface *VS)
 	SDL_Renderer *renderer = static_cast<SDL_Renderer*>(VS->Renderer);
 	SDL_Texture  *texture  = static_cast<SDL_Texture*>(VS->Handle);
 	const bool lockMode = (VS->Flags & VSurf_LockRender) != 0;
+
+	// Fade-in pass: while EngineStartFadeIn-armed, scale VPage in place
+	// by an increasing factor before presenting. Only on the engine
+	// surface (lockMode) — Glat's FinalSurf is its own buffer with its
+	// own composite pipeline.
+	if (s_fadeInRemaining > 0 && lockMode && VS->Data && s_fadeInTotal > 0) {
+		int step = s_fadeInTotal - s_fadeInRemaining;  // 0..N-1
+		int modValue = (step + 1) * 255 / s_fadeInTotal;
+		if (modValue > 255) modValue = 255;
+		DWord perSrc = (DWord)((modValue & 0xFF) * 0x01010101u);
+		DWord perDst = 0;
+		AlphaBlend(VS->Data, VS->Data, perSrc, perDst, VS->PageSize);
+		--s_fadeInRemaining;
+	}
+
+#ifdef __EMSCRIPTEN__
+	// Wasm path: SDL renderer is never created on this build, so we can't
+	// (and don't need to) touch SDL_RenderCopy / SDL_RenderPresent. The
+	// pixel buffer at VS->Data is a plain malloc; ship it to WebGL2 via
+	// texSubImage2D + a fullscreen quad. Handles both lockMode (engine
+	// surface) and non-lockMode (Glat's FinalSurf) — same upload, same
+	// shader, just different src dims.
+	(void)lockMode;
+	Wasm_PresentGL(VS->Data, (int)VS->X, (int)VS->Y);
+	return;
+#endif
 	if (lockMode) {
 		// Engine wrote directly into the texture's locked pixel buffer
 		// this frame. Unlock to commit (no-op for the SW renderer
@@ -87,13 +308,12 @@ static void V_Flip(VESA_Surface *VS)
 	// reduces to a full-window blit with no bars.
 	int rw = 0, rh = 0;
 	SDL_GetRendererOutputSize(renderer, &rw, &rh);
-	if (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0) {
-		SDL_RenderCopy(renderer, texture, NULL, NULL);
-	} else {
+	SDL_Rect dst{0, 0, rw, rh};
+	bool useFullDst = (rw <= 0 || rh <= 0 || VS->X <= 0 || VS->Y <= 0);
+	if (!useFullDst) {
 		float sx = (float)rw / (float)VS->X;
 		float sy = (float)rh / (float)VS->Y;
 		float s  = sx < sy ? sx : sy;
-		SDL_Rect dst;
 		dst.w = (int)((float)VS->X * s);
 		dst.h = (int)((float)VS->Y * s);
 		dst.x = (rw - dst.w) / 2;
@@ -120,9 +340,8 @@ static void V_Flip(VESA_Surface *VS)
 			bars[n++] = SDL_Rect{dst.x + dst.w, dst.y, rw - (dst.x + dst.w), dst.h};
 		}
 		if (n > 0) SDL_RenderFillRects(renderer, bars, n);
-
-		SDL_RenderCopy(renderer, texture, NULL, &dst);
 	}
+	SDL_RenderCopy(renderer, texture, NULL, useFullDst ? NULL : &dst);
 	SDL_RenderPresent(renderer);
 
 	if (lockMode) {
@@ -157,6 +376,17 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	if (!(VS->Z16 = (byte *)malloc(ZBufferSize))) return 1;
 	memset(VS->Z16, 0, ZBufferSize);
 
+#ifdef __EMSCRIPTEN__
+	// Wasm: don't go through SDL_CreateTexture / SDL_LockTexture — there's
+	// no SDL renderer on this build. Allocate the framebuffer ourselves;
+	// V_Flip uploads it via WebGL2 each frame.
+	(void)renderer;
+	VS->Data = (byte *)malloc(VS->BPSL * VS->Y);
+	if (!VS->Data) return 1;
+	memset(VS->Data, 0, VS->BPSL * VS->Y);
+	VS->Handle = nullptr;
+	VS->Flags |= VSurf_LockRender;
+#else
 	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
 	VS->Handle = static_cast<void *>(s_engineTex.get());
 
@@ -185,6 +415,7 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	VS->Data = static_cast<byte *>(pixels);
 	VS->BPSL = pitch;
 	memset(VS->Data, 0, pitch * VS->Y);
+#endif
 
 	return 0;
 }
@@ -192,9 +423,17 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 
 SDLTex SDL2_CreateChildTexture(int X, int Y, const char *tag)
 {
+#ifdef __EMSCRIPTEN__
+	// Wasm has no SDL renderer; child surfaces (Glat's FinalSurf) get a
+	// null Handle and present through the same WebGL path as the engine
+	// surface (V_Flip uploads VS->Data regardless of lockMode).
+	(void)X; (void)Y;
+	return SDLTex(nullptr, SDLTexDeleter{tag});
+#else
 	// Same renderer the engine display uses; assumes SDL2_InitDisplay ran.
 	if (!SDL_MainSurf.Renderer || X <= 0 || Y <= 0) return SDLTex(nullptr, SDLTexDeleter{tag});
 	return SDL2_MakeTexture(static_cast<SDL_Renderer *>(SDL_MainSurf.Renderer), X, Y, tag);
+#endif
 }
 
 // Tear down + reallocate the SDL-side framebuffer / Z-buffer / SDL_Texture
@@ -262,6 +501,15 @@ void SDL2_HandleResize(int newX, int newY)
 		MainSurf->YTable = nullptr;
 	}
 
+#ifdef __EMSCRIPTEN__
+	// Wasm: framebuffer is a plain malloc — free and zero. WebGL texture
+	// gets resized lazily on the next Wasm_PresentGL call.
+	if (SDL_MainSurf.Data) {
+		free(SDL_MainSurf.Data);
+		SDL_MainSurf.Data = nullptr;
+	}
+	SDL_MainSurf.Handle = nullptr;
+#else
 	// VS->Data is the texture's locked pixel buffer — unlock it before
 	// destroying the texture (SDL_DestroyTexture on a still-locked
 	// streaming texture is undefined). The deleter (RAII) actually frees;
@@ -272,6 +520,7 @@ void SDL2_HandleResize(int newX, int newY)
 	SDL_MainSurf.Data = nullptr;
 	s_engineTex.reset();
 	SDL_MainSurf.Handle = nullptr;
+#endif
 	// Z-buffer is its own allocation now.
 	if (SDL_MainSurf.Z16) {
 		free(SDL_MainSurf.Z16);
@@ -292,29 +541,28 @@ dword SDL2_InitDisplay(SDL_Window *window)
 
 	// Fill in the secondary surface VSurf structure
 
-	// Create a renderer with V-Sync enabled.
-	// On Emscripten with PROXY_TO_PTHREAD, WebGL contexts can't be cleanly
-	// created from a pthread worker (the canvas gets transferred to the
-	// worker for offscreen rendering and becomes inaccessible to the main
-	// thread's GL init path). Force the software renderer there — the
-	// final frame is just an SDL_UpdateTexture + SDL_RenderCopy anyway, so
-	// CPU vs WebGL for that last step is a minor perf detail.
 #ifdef __EMSCRIPTEN__
-	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_SOFTWARE);
+	// Wasm: skip SDL_CreateRenderer entirely. The SDL software renderer's
+	// SDL_RenderPresent was costing ~28 ms per flip; we present via
+	// WebGL2 + texSubImage2D + a fullscreen quad instead. WebGL must be
+	// the only context on the canvas, so don't let SDL grab a 2D one.
+	// Wasm_InitGL is deferred until the first V_Flip — by then the canvas
+	// has been transferred to the CodeEntry pthread, which is where the
+	// flip-side WebGL context needs to live.
+	SDL_Renderer *renderer = nullptr;
+	SDL_MainSurf.Renderer = nullptr;
+	int px = 0, py = 0;
+	SDL_GetWindowSize(sdl_window, &px, &py);
 #else
+	// Native: real SDL renderer; no_vsync flag picks ACCELERATED vs PRESENTVSYNC.
 	const uint32_t rendererFlags = fds::FeatureFlags::no_vsync()
 		? SDL_RENDERER_ACCELERATED
 		: SDL_RENDERER_PRESENTVSYNC;
 	SDL_Renderer * renderer = SDL_CreateRenderer(sdl_window, -1, rendererFlags);
-#endif
 	SDL_MainSurf.Renderer = renderer;
-
-	// Use renderer output size (in pixels) rather than window size (in
-	// points). With SDL_WINDOW_ALLOW_HIGHDPI on a retina display these
-	// differ by the DPI scale factor; we always want pixels because that's
-	// what the framebuffer + SDL_Texture are sized in.
-	int px, py;
+	int px = 0, py = 0;
 	SDL_GetRendererOutputSize(renderer, &px, &py);
+#endif
 	// Letterbox to demo AR + snap to TILE_SIZE — same as SDL2_HandleResize,
 	// just for the boot path.
 	int engX = px, engY = py;
@@ -349,17 +597,16 @@ dword SDL2_InitDisplay(SDL_Window *window)
 }
 
 #ifdef __EMSCRIPTEN__
-static SDL_AudioDeviceID g_audio_dev = 0;
-static int g_audio_cb_count = 0;
-// Mute flag toggled from the JS shell's button. We still pull samples from
-// the modplayer (so position keeps advancing) and just silence the output —
-// that way unmute resumes mid-track instead of restarting.
+// Mute flag — read by Audio_FeedWorklet to silence pumped samples.
+// Audio playback in shell.html ALSO has a GainNode that we set to 0 on
+// mute; this is belt-and-suspenders, and keeps the song advancing
+// (Modplayer_FillBuffer is still called, just with zeros posted) so
+// unmute resumes mid-track instead of restarting.
 static std::atomic<bool> g_mute{false};
 
 extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
 {
 	g_mute.store(muted != 0);
-	fprintf(stderr, "[AUDIO] mute=%d\n", muted);
 }
 
 // Tell SDL the canvas backing size (in physical pixels) has changed.
@@ -374,6 +621,17 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetMute(int muted)
 // SDL2 listens to window 'resize' but reads window.innerWidth/innerHeight,
 // not the canvas dims, so HiDPI toggles never reached SDL. Routing through
 // SDL_SetWindowSize is the canonical fix.
+// JS-driven font scale. Called from shell.html when HiDPI toggles
+// (and at boot). On wasm we ignore the XRes-threshold heuristic in
+// VESA_Surface2Global and let JS pick — it's the only place that
+// knows about devicePixelRatio + the HD/SD button state.
+extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_SetFontScale(int scale)
+{
+	if (scale < 1) scale = 1;
+	if (scale > 4) scale = 4;
+	g_fontScale = scale;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 {
 	if (!sdl_window || w <= 0 || h <= 0) return;
@@ -390,59 +648,79 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SDL2_RequestSize(int w, int h)
 	SDL_SetWindowSize(sdl_window, engX, engY);
 }
 
-static void wasm_audio_callback(void* userdata, Uint8* stream, int len)
+// AudioWorklet pump. Replaces SDL2's emscripten audio backend (which
+// uses ScriptProcessorNode — deprecated, runs the audio callback on
+// browser main, gets starved by heavy rAF ticks at HD).
+//
+// Architecture:
+//   1. shell.html boots the AudioWorklet (audio-worklet.js) on user
+//      gesture and connects it to the audio context destination. It
+//      keeps a port reference at Module.__audioPort and gates the pump
+//      via Module.__feeding.
+//   2. Worklet maintains a 2 s ring buffer per channel; when below
+//      50 ms it postMessages 'needData' back to main.
+//   3. shell.html's onmessage handler calls _Audio_FeedWorklet here
+//      (we're on browser main now since main() is no longer proxied),
+//      which pulls samples from Modplayer + posts them to the worklet.
+
+// Per-pump scratch. Sized to comfortably hold one 'needData' chunk
+// (default 2048 frames).
+static constexpr int kPumpFramesMax = 4096;
+static float s_audioLeft [kPumpFramesMax];
+static float s_audioRight[kPumpFramesMax];
+
+extern "C" EMSCRIPTEN_KEEPALIVE void Audio_FeedWorklet(int frames)
 {
-	if (g_audio_cb_count < 3) {
-		fprintf(stderr, "[AUDIO] callback #%d len=%d ud=%p\n",
-		        g_audio_cb_count, len, userdata);
+	static int s_firstCall = 1;
+	if (s_firstCall) {
+		s_firstCall = 0;
+		fprintf(stderr, "[audio-diag] Audio_FeedWorklet first call frames=%d modHandle=%p\n",
+		        frames, g_RevModuleHandle);
 	}
-	g_audio_cb_count++;
-	// 512 frames × 2 channels × sizeof(float) = 4096 bytes per callback.
-	Modplayer_FillBuffer((ModplayerHandle)userdata,
-	                     reinterpret_cast<float*>(stream),
-	                     len / (2 * sizeof(float)));
+	if (!g_RevModuleHandle) return;
+	if (frames <= 0) return;
+	if (frames > kPumpFramesMax) frames = kPumpFramesMax;
+	// Planar fill — modplayer-lib's PlanarBufferAdaptar writes each
+	// channel directly into the destination, no deinterleave needed.
+	Modplayer_FillBufferPlanar(g_RevModuleHandle, s_audioLeft, s_audioRight, frames);
 	if (g_mute.load(std::memory_order_relaxed)) {
-		memset(stream, 0, len);
+		// Still pulled samples so song position advances; just zero
+		// the audible side. (Belt + suspenders with shell.html's
+		// GainNode.)
+		memset(s_audioLeft,  0, frames * sizeof(float));
+		memset(s_audioRight, 0, frames * sizeof(float));
 	}
+	// Post a copy to the worklet. HEAPF32-backed views can't cross
+	// thread boundaries via postMessage (SAB), so we copy into fresh
+	// Float32Arrays. ~32 KB / pump @ 2048 frames; cheap.
+	EM_ASM({
+		if (!Module.__audioPort) return;
+		const left  = HEAPF32.subarray($0 / 4, $0 / 4 + $2);
+		const right = HEAPF32.subarray($1 / 4, $1 / 4 + $2);
+		Module.__audioPort.postMessage({
+			type: 'audio',
+			left:  new Float32Array(left),
+			right: new Float32Array(right),
+		});
+	}, (uintptr_t)s_audioLeft, (uintptr_t)s_audioRight, frames);
 }
 
-// Runs on the browser main thread (proxied via emscripten_sync_run_in_main_runtime_thread).
-// SDL2's emscripten audio implementation references a JS-side `SDL2` global
-// that only exists in the main thread's JS context, so the open call must
-// happen there.
-static void open_audio_main_thread(void* modplayerHandle)
+void SDL2_StartMusic(void* /*modplayerHandle*/)
 {
-	SDL_AudioSpec want = {};
-	SDL_AudioSpec have = {};
-	want.freq = 48000;
-	want.format = AUDIO_F32SYS;
-	want.channels = 2;
-	want.samples = 512;  // matches xmplayer's AUDIO_BUF_FRAMES
-	want.callback = wasm_audio_callback;
-	want.userdata = modplayerHandle;
-	g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-	fprintf(stderr, "[AUDIO] OpenAudioDevice -> dev=%u (err=%s)\n",
-	        (unsigned)g_audio_dev, g_audio_dev ? "ok" : SDL_GetError());
-	if (g_audio_dev) {
-		fprintf(stderr, "[AUDIO] have: freq=%d fmt=%04x ch=%d samples=%d\n",
-		        have.freq, have.format, have.channels, have.samples);
-		SDL_PauseAudioDevice(g_audio_dev, 0);
-		fprintf(stderr, "[AUDIO] device unpaused\n");
-	}
-}
-
-void SDL2_StartMusic(void* modplayerHandle)
-{
-	if (g_audio_dev || !modplayerHandle) return;
-	emscripten_sync_run_in_main_runtime_thread(
-		EM_FUNC_SIG_VI, &open_audio_main_thread, modplayerHandle);
+	// Modplayer handle is read off g_RevModuleHandle in Audio_FeedWorklet;
+	// here we just kick the JS-side AudioWorklet setup. The shell.html
+	// handler is async (await ctx.audioWorklet.addModule), so we don't
+	// block — the worklet starts feeding once it's ready.
+	EM_ASM({
+		if (Module._floodAudioStart) Module._floodAudioStart();
+	});
 }
 
 void SDL2_StopMusic()
 {
-	if (!g_audio_dev) return;
-	SDL_CloseAudioDevice(g_audio_dev);
-	g_audio_dev = 0;
+	EM_ASM({
+		if (Module._floodAudioStop) Module._floodAudioStop();
+	});
 }
 #endif
 

@@ -117,8 +117,14 @@ extern char *VESA_Pal;
 
 extern void VESA_Message(const char *Msg);
 extern void VESA_Warning(const char *Msg);
-extern char VESA_Init_Video(int32_t X, int32_t Y, int32_t BPP);
-extern void Set_Screen(int32_t X, int32_t Y, int32_t BPP,char ZBuf,float FOV);
+// extern "C" to match FDS_DECS.H's (extern "C") declarations of the same
+// symbols. A plain redeclaration inherits prior linkage, but an explicit
+// extern "C" after a C++ decl is a "different language linkage" error — so
+// when a TU pulls this header before FDS_DECS.H (as the merged SceneTick.h
+// now does) the linkage must agree here. VESA.CPP defines them after
+// FDS_DECS.H, so extern "C" is the authoritative linkage.
+extern "C" char VESA_Init_Video(int32_t X, int32_t Y, int32_t BPP);
+extern "C" void Set_Screen(int32_t X, int32_t Y, int32_t BPP,char ZBuf,float FOV);
 
 extern char *Gouraud_Table;
 extern char *ATable,*STable,*CTable,*TTable;
@@ -370,7 +376,7 @@ inline void Transparence_32(byte *Source, byte *Target)
 	// x86 asm motion-blur kernel deleted; no portable replacement yet.
 }
 
-inline void Modulate(VESA_Surface *Source,VESA_Surface *Target,DWord SrcMask,DWord TrgMask, dword PageSize)
+extern "C" inline void Modulate(VESA_Surface *Source,VESA_Surface *Target,DWord SrcMask,DWord TrgMask, dword PageSize)
 {
   if (Source->BPP!=Target->BPP) return;
   switch (Source->BPP)
@@ -385,7 +391,7 @@ inline void Modulate(VESA_Surface *Source,VESA_Surface *Target,DWord SrcMask,DWo
 inline void Transparence_8(byte *Source,byte *Target) {}
 
 
-inline void Transparence(VESA_Surface *Source,VESA_Surface *Target)
+extern "C" inline void Transparence(VESA_Surface *Source,VESA_Surface *Target)
 {
   if (Source->BPP!=Target->BPP) return;
   switch (Source->BPP)
