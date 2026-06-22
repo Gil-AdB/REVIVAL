@@ -1082,6 +1082,35 @@ static Texture *GreetsLoadFullTexture(const char *path)
 	return t;
 }
 
+// --greets-stone-tex helper: load an AUTHORED tangent-space normal map and
+// hand it straight to Mat->NormalMap. The kernel reads the normal as R->nmX,
+// G->nmY, B->nmZ in [-1,1] (DeferredSurfaceKernel.cpp), which is exactly a
+// standard tangent-space normal map, so a file's R/G/B channels map through
+// 1:1. Optional green flip (--greets-nmap-flip-g) reconciles OpenGL (+Y up)
+// vs DirectX (+Y down) authoring conventions. Returns null if the file is
+// absent so callers can fall back to the Sobel-from-height bake.
+static Texture *GreetsLoadNormalMap(const char *path, bool flipGreen)
+{
+	Texture *t = new Texture;
+	t->FileName = strdup(path);
+	t->BPP = 0;
+	if (!Load_Texture(t)) { delete t; return nullptr; }   // absent -> fall back
+	if (t->BPP != 32) BPPConvert_Texture(t, 32);
+	if (flipGreen) {
+		// Per-pixel green negate (G -> 255-G). Works on the swizzled 32bpp
+		// block layout directly — it's a per-texel op, swizzle-agnostic.
+		dword *px = (dword *)t->Data;
+		const size_t n = size_t(t->SizeX) * size_t(t->SizeY);
+		for (size_t i = 0; i < n; ++i) {
+			const dword g = (px[i] >> 8) & 0xFF;
+			px[i] = (px[i] & 0xFFFF00FFu) | ((255u - g) << 8);
+		}
+	}
+	t->Flags |= Txtr_Tiled;
+	Generate_Mipmaps(t, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, 1);
+	return t;
+}
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1104,25 +1133,31 @@ void Initialize_Greets()
 //	GreetSc->Flags |= Scn_Fogged;
 
 	// --greets-stone-tex: before Preprocess loads textures, point the wall
-	// ('rooms') + floor ('floor') diffuse at the de-lit 1024² Egyptian
-	// sandstone set so they load through the normal pipeline (correct matID +
-	// mipmaps). The dedicated tangent-space normal is baked here from a raw
-	// grayscale HEIGHT map (greets_*_h.png) rather than from the diffuse
-	// luminance; set on the Material so the post-Preprocess luminance-bake
-	// below skips it (it gates on !NormalMap). De-lit albedo stays sRGB — the
-	// HDR-linear path squares it.
+	// ('rooms') + floor ('floor') diffuse at the 1024² Egyptian sandstone set
+	// so they load through the normal pipeline (correct matID + mipmaps). For
+	// the tangent-space normal we PREFER an authored map (greets_*_n.png) —
+	// loaded straight onto Mat->NormalMap — and only Sobel-bake from a height
+	// map (greets_*_h.png) when no authored map exists. Set on the Material so
+	// the post-Preprocess luminance-bake below skips it (gates on !NormalMap).
+	// Albedo stays sRGB — the HDR-linear path squares it.
 	if (fds::FeatureFlags::greets_stone_tex()) {
+		const bool flipG = fds::FeatureFlags::greets_nmap_flip_g();
 		for (Material *M = MatLib; M; M = M->Next) {
 			if (M->RelScene != GreetSc || !M->Name || !M->Txtr) continue;
-			const char *albedo = nullptr, *height = nullptr;
-			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.jpg";  height = "TEXTURES/greets_wall_h.png"; }
-			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.jpg"; height = "TEXTURES/greets_floor_h.png"; }
+			const char *albedo = nullptr, *height = nullptr, *normal = nullptr;
+			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.jpg";  height = "TEXTURES/greets_wall_h.png";  normal = "TEXTURES/greets_wall_n.png"; }
+			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.jpg"; height = "TEXTURES/greets_floor_h.png"; normal = "TEXTURES/greets_floor_n.png"; }
 			if (!albedo) continue;
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
-			if (Texture *h = GreetsLoadFullTexture(height)) {
+			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
+				M->NormalMap = n;
+				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + AUTHORED normal %s "
+				             "(flipG=%d, %dx%d mips=%u)\n",
+				             M->Name, albedo, normal, flipG, n->SizeX, n->SizeY, n->numMipmaps);
+			} else if (Texture *h = GreetsLoadFullTexture(height)) {
 				M->NormalMap = BakeNormalMapFromDiffuse(h, 4.0f);
-				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + dedicated normal from %s "
+				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + baked normal from %s "
 				             "(height %dx%d mips=%u, normal mips=%u)\n",
 				             M->Name, albedo, height, h->SizeX, h->SizeY, h->numMipmaps,
 				             M->NormalMap ? M->NormalMap->numMipmaps : 0);
