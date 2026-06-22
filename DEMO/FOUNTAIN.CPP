@@ -2860,9 +2860,9 @@ std::unique_ptr<SceneDriver> createFountainScene()
 {
 	// Dark night scene → lift exposure a touch (still moody; the bolts/lights
 	// pop). Fountain tonemaps itself (g_hdrDeferTonemap); exposure still applies.
-	// Bloom-only (no anamorphic): the discrete lights bloom gorgeously, but
-	// anamorphic's bars smear the bright orbs/spray. Add --anamorphic to taste.
-	ApplyCinematicSceneDefaults(cine::kFountainExposure);
+	// Bloom-only profile (no fog/anamorphic): the discrete lights bloom
+	// gorgeously, but anamorphic's bars smear the bright orbs/spray.
+	ApplyCinematicProfile(cine::kFountain);
 	return std::make_unique<FountainScene>();
 }
 

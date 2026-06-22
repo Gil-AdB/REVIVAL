@@ -553,6 +553,13 @@ Mirror BuildMirrorImpl(Scene *sc, Pred &&isWall, const char *label)
         return Mirror{};
     }
     m.cloneMesh  = MM;
+    // Mirror clones are VIRTUAL reflection geometry — they exist only to be
+    // drawn into the mirror surface, and their HTrack_Visible tracks whether
+    // the mirror is in view (camera-dependent). They must NOT cast real
+    // shadows: baking them into the omni shadow cubes made the dynamic-omni
+    // shadow maps change with the camera (clone occluders appearing/vanishing
+    // as mirrors came into view) → garbled, camera-position-dependent shadows.
+    MM->Flags |= Tri_NoShadowCast;
     m.clonedVerts = int(vOfs);
     m.clonedFaces = int(fOfs);
     // The front-side skip can leave fewer faces than pre-counted, so

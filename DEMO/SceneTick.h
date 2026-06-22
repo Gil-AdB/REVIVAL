@@ -86,53 +86,131 @@ protected:
 // (typically a file-scope static, freed by the matching Destroy_Scene later).
 Scene *loadSceneAligned(const char *fldPath);
 
-// Cinematic preset (--cinematic): turn HDR + the filmic post-FX stack on for
-// THIS scene at its own per-scene exposure. Called at the top of each scene's
-// factory. Notes:
-//   - setDefault yields to anything the user set explicitly on the CLI, so
-//     individual --flags still override the preset.
-//   - Each scene passes its OWN exposure; since setDefault overwrites the value
-//     (it only skips when the flag was CLI-set), values don't leak between
-//     scenes in the full sequence — but a scene that wants HDR must call this
-//     (or pin hdr_exposure itself) so it doesn't inherit the prior scene's.
-//   - Deliberately does NOT touch deferred_quarter: that's a greets-only
-//     optimization whose 2x2 reconstruction checkerboards on other scenes.
-// Per-scene cinematic exposures, measured so the tonemap rolls off instead of
-// blowing out: bright daylit water → low, dark scenes → high. Used by both the
-// live scene factories and the headless snapshots so they stay in lockstep.
-namespace cine {
-    constexpr float kCityExposure     = 0.4f;   // bright water mirror
-    constexpr float kChaseExposure    = 1.0f;   // neutral (no headless snapshot; tune live)
-    constexpr float kFountainExposure = 1.5f;   // dark night scene, lift slightly
-    constexpr float kCrashExposure    = 1.5f;   // dark by design
-    constexpr float kGreetsExposure   = 1.0f;   // greets' own tuning
-}
+// ── Per-scene cinematic settings (--cinematic) ───────────────────────────
+// Each scene owns a CinematicProfile: an explicit value object describing its
+// look. ApplyCinematicProfile() pushes EVERY field through setDefault(), so a
+// profile is fully self-describing — every cinematic scene sets the same flags
+// (just to different values, including "off"), so the previous scene's values
+// are always overwritten and nothing bleeds between scenes. No global save /
+// restore, no ordering assumptions. setDefault still yields to explicit CLI/env
+// flags, so user overrides win. deferred_quarter is greets-only and not here.
+//
+// Member defaults are the engine defaults / "off", so a scene's profile only
+// names what differs (e.g. fountain = just a brighter exposure).
+struct CinematicProfile {
+    float exposure         = 1.0f;     // hdr_exposure
+    float bloomThreshold   = 245.0f;   // restrained: only the brightest highlights bloom
+    float bloomIntensity   = 0.4f;
+    float chromaticAmount  = 2.5f;
+    float vignetteStrength = 0.4f;
+    // Froxel volumetric fog (off by default).
+    bool  fog              = false;
+    bool  fogWorley        = false;
+    float fogDensity       = 3.0f;
+    float fogBottom        = -1.0e9f;
+    float fogTop           = 1.0e9f;
+    float fogBlobOverlap   = 0.0f;
+    float fogWorleyThresh  = 0.5f;
+    float fogCell          = 400.0f;
+    float fogInscatter     = 0.0f;
+    // Storm.
+    bool  rain             = false;
+    float boltFlashPeak    = 500.0f;
+    float boltFlashRange   = 500.0f;
+    // Anamorphic streaks (off by default — they smear diffuse-bright scenes).
+    bool  anamorphic       = false;
+    float anamIntensity    = 0.5f;
+    float anamVert         = 0.25f;
+    float anamDecay        = 0.85f;
+    int   anamPasses       = 6;
+    // Lighting / transparency depth / HDR glow compensation.
+    bool  shadows          = false;
+    float coneStrength     = 0.05f;
+    float hdrGlowScale     = 0.25f;
+    int   xparPeel         = 1;
+};
 
-// `anamorphic` adds horizontal lens streaks. Unlike bloom (which a high
-// threshold keeps to the brightest highlights), anamorphic streaks ANY bright
-// region into long bars — gorgeous on DISCRETE hot sources (greets disco,
-// fountain bolts) but it smears scenes whose brightness is broad and diffuse:
-// city's sunlit water is one giant bright source, so the streaks wash the
-// frame. Diffuse-bright scenes leave it off and keep the rest.
-inline void ApplyCinematicSceneDefaults(float exposure, bool anamorphic = false)
+inline void ApplyCinematicProfile(const CinematicProfile &p)
 {
     using FF = fds::FeatureFlags;
     if (!FF::cinematic()) return;
-    FF::setDefault(FF::BoolId::hdr,              true);
-    FF::setDefault(FF::BoolId::hdr_linear,       true);
-    FF::setDefault(FF::FloatId::hdr_exposure,    exposure);
-    // Restrained bloom — a high threshold keeps it to the brightest highlights,
-    // so even bright water doesn't wash (measured safe). Greets overrides hotter.
-    FF::setDefault(FF::BoolId::bloom,            true);
-    FF::setDefault(FF::FloatId::bloom_threshold, 245.0f);
-    FF::setDefault(FF::FloatId::bloom_intensity, 0.4f);
-    // Post-tonemap colour/lens FX — safe everywhere (no bright-pass):
-    FF::setDefault(FF::BoolId::chromatic,        true);
-    FF::setDefault(FF::BoolId::vignette,         true);
-    FF::setDefault(FF::BoolId::grade,            true);
-    FF::setDefault(FF::BoolId::grain,            true);
-    if (anamorphic) FF::setDefault(FF::BoolId::anamorphic, true);
+    // Base: HDR + restrained bloom + post-tonemap colour/lens FX (every scene).
+    FF::setDefault(FF::BoolId::hdr,                   true);
+    FF::setDefault(FF::BoolId::hdr_linear,            true);
+    FF::setDefault(FF::FloatId::hdr_exposure,         p.exposure);
+    FF::setDefault(FF::BoolId::bloom,                 true);
+    FF::setDefault(FF::FloatId::bloom_threshold,      p.bloomThreshold);
+    FF::setDefault(FF::FloatId::bloom_intensity,      p.bloomIntensity);
+    FF::setDefault(FF::BoolId::chromatic,             true);
+    FF::setDefault(FF::FloatId::chromatic_amount,     p.chromaticAmount);
+    FF::setDefault(FF::BoolId::vignette,              true);
+    FF::setDefault(FF::FloatId::vignette_strength,    p.vignetteStrength);
+    FF::setDefault(FF::BoolId::grade,                 true);
+    FF::setDefault(FF::BoolId::grain,                 true);
+    // Froxel volumetric fog.
+    FF::setDefault(FF::BoolId::fast_fog,              p.fog);
+    FF::setDefault(FF::BoolId::fast_fog_froxel,       true);
+    FF::setDefault(FF::BoolId::fast_fog_worley,       p.fogWorley);
+    FF::setDefault(FF::BoolId::fast_fog_xpar,         true);
+    FF::setDefault(FF::FloatId::fast_fog_density,       p.fogDensity);
+    FF::setDefault(FF::FloatId::fast_fog_bottom,        p.fogBottom);
+    FF::setDefault(FF::FloatId::fast_fog_top,           p.fogTop);
+    FF::setDefault(FF::FloatId::fast_fog_blob_overlap,  p.fogBlobOverlap);
+    FF::setDefault(FF::FloatId::fast_fog_worley_thresh, p.fogWorleyThresh);
+    FF::setDefault(FF::FloatId::fast_fog_cell,          p.fogCell);
+    FF::setDefault(FF::FloatId::fast_fog_inscatter,     p.fogInscatter);
+    // Storm.
+    FF::setDefault(FF::BoolId::rain,                  p.rain);
+    FF::setDefault(FF::FloatId::bolt_flash_peak,      p.boltFlashPeak);
+    FF::setDefault(FF::FloatId::bolt_flash_range,     p.boltFlashRange);
+    // Anamorphic.
+    FF::setDefault(FF::BoolId::anamorphic,            p.anamorphic);
+    FF::setDefault(FF::FloatId::anamorphic_intensity, p.anamIntensity);
+    FF::setDefault(FF::FloatId::anamorphic_vert,      p.anamVert);
+    FF::setDefault(FF::FloatId::anamorphic_decay,     p.anamDecay);
+    FF::setDefault(FF::IntId::anamorphic_passes,      p.anamPasses);
+    // Lighting / transparency depth / glow compensation.
+    FF::setDefault(FF::BoolId::shadows,              p.shadows);
+    FF::setDefault(FF::FloatId::cone_strength,       p.coneStrength);
+    FF::setDefault(FF::FloatId::hdr_glow_scale,      p.hdrGlowScale);
+    FF::setDefault(FF::IntId::xpar_peel_passes,      p.xparPeel);
 }
+
+// ── The scenes' profiles ─────────────────────────────────────────────────
+namespace cine {
+
+// City + chase share the cityscape: tuned storm-city look — froxel volumetric
+// fog (worley + blob overlap + inscatter glow), rain + bright lightning flash,
+// shadows, strong cones, deep transparency peel, punchy anamorphic + CA/vignette.
+// Low exposure (the fog inscatter supplies the brightness). Lens ghosts + DoF
+// deliberately excluded.
+inline constexpr CinematicProfile kCity{
+    .exposure = 0.3f,
+    .chromaticAmount = 3.0f,
+    .vignetteStrength = 0.8f,
+    .fog = true, .fogWorley = true,
+    .fogDensity = 3.0f, .fogBottom = -400.0f, .fogTop = 420.0f,
+    .fogBlobOverlap = 3.0f, .fogWorleyThresh = 2.0f, .fogCell = 500.0f, .fogInscatter = 1.5f,
+    .rain = true, .boltFlashPeak = 10000.0f, .boltFlashRange = 600.0f,
+    .anamorphic = true, .anamIntensity = 3.0f, .anamVert = 0.0f, .anamDecay = 0.3f, .anamPasses = 3,
+    .shadows = true, .coneStrength = 2.0f, .hdrGlowScale = 0.12f, .xparPeel = 4,
+};
+
+// Chase = the same cityscape atmosphere, a touch brighter (it's darker than city).
+inline constexpr CinematicProfile kChase = [] { CinematicProfile p = kCity; p.exposure = 0.45f; return p; }();
+
+// Fountain: dark night scene — just lift exposure; bloom-only (its discrete
+// lights bloom; fog/anamorphic would smear the orbs).
+inline constexpr CinematicProfile kFountain{ .exposure = 1.5f };
+
+// Crash: the register/crash dump — dark by design, lift slightly.
+inline constexpr CinematicProfile kCrash{ .exposure = 1.5f };
+
+// Greets keeps its own richer flag block (GreetsApplyRunDefaults); this is just
+// the exposure it pins so it doesn't inherit the prior scene's.
+inline constexpr float kGreetsExposure = 1.0f;
+
+}  // namespace cine
 
 // Walk MatLib and stamp Mat_RGBInterp + Txtr_Tiled on every textured material.
 // Restricted to materials belonging to `sc` when restrictToScene=true (the

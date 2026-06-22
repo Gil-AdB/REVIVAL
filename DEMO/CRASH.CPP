@@ -121,7 +121,7 @@ struct CrashScene : SceneDriver {
 std::unique_ptr<SceneDriver> createCrashScene()
 {
 	// Dark by design (the register/crash dump) → keep it moody, lift slightly.
-	ApplyCinematicSceneDefaults(cine::kCrashExposure);
+	ApplyCinematicProfile(cine::kCrash);
 	return std::make_unique<CrashScene>();
 }
 

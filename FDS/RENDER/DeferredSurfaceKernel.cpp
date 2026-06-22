@@ -1094,6 +1094,30 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 								}
 							}
 						}
+						// Clone omni with a CUBE source: borrow the SOURCE omni's
+						// cube and sample it at this pixel REFLECTED across the
+						// mirror plane — the cube analogue of the srcShadowMapIdx
+						// path above. PolyId mode (surfaceShadowId): the reflected
+						// receiver lands on the SOURCE surface (the clone is that
+						// geometry flipped) and clones share the source's matID, so
+						// the identity test matches — same acne-free path as the
+						// rest of greets. No clone geometry is baked.
+						const int32_t srcCube = tl.srcCubeShadowIdx[n];
+						if (srcCube >= 0) {
+							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+							const float rwx = wpx - sd2 * tl.mirNX[n];
+							const float rwy = wpy - sd2 * tl.mirNY[n];
+							const float rwz = wpz - sd2 * tl.mirNZ[n];
+							const float ddx = rwx - ctx.cameraWorldX, ddy = rwy - ctx.cameraWorldY, ddz = rwz - ctx.cameraWorldZ;
+							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+							shadowAtten *= CubeShadow_Sample(srcCube, rwx, rwy, rwz, rvx, rvy, rvz,
+							                                 kShadowBiasG, kSlopeBiasG, surfaceShadowId);
+						}
 						if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
 							const ShadowMap& sm = g_shadowMaps[smIdx];
 							const float lx = sm.viewToLight[0][0] * x +
@@ -3202,6 +3226,21 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			}
 		}
 		lights.srcShadowMapIdx[numLights] = srcSm;
+		// Clone omni whose SOURCE is a CUBE omni: borrow the source's cube and
+		// sample it at the receiver reflected across the mirror plane (kernel
+		// reflects via mirN/mirD). Cube analogue of srcShadowMapIdx — reflected
+		// shadows from the real baked geometry, no clone bake (clones carry
+		// Tri_NoShadowCast).
+		int32_t srcCube = -1;
+		if ((O->Flags & Omni_MirrorClone) && O->mirrorSrcOmni &&
+		    fds::FeatureFlags::shadows() &&
+		    (O->mirrorSrcOmni->Flags & Omni_CastsShadow) &&
+		    O->mirrorSrcOmni->Type == Light_Omni) {
+			for (size_t i = 0; i < g_cubeShadowRefs.size(); ++i) {
+				if (g_cubeShadowRefs[i].omni == O->mirrorSrcOmni) { srcCube = int32_t(i); break; }
+			}
+		}
+		lights.srcCubeShadowIdx[numLights] = srcCube;
 		lights.bounceClamp[numLights] = (O->Flags & Omni_BounceCone) ? 1u : 0u;
 		lights.mirNX[numLights] = O->mirrorPlaneN.x;
 		lights.mirNY[numLights] = O->mirrorPlaneN.y;

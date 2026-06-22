@@ -234,7 +234,7 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // interactive demo goes through Initialize_City first naturally.
     Initialize_City();
     Initialize_Fountain();
-    ApplyCinematicSceneDefaults(cine::kFountainExposure);   // bloom-only; mirror the live factory
+    ApplyCinematicProfile(cine::kFountain);   // bloom-only; mirror the live factory
 
     std::vector<int32_t> timestamps = cfg.timestamps;
     if (timestamps.empty()) {
@@ -429,7 +429,7 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
     Initialize_Crash();
-    ApplyCinematicSceneDefaults(cine::kCrashExposure);   // mirror the live factory
+    ApplyCinematicProfile(cine::kCrash);   // mirror the live factory
 
     // For crash, --snapshot=crash@t=N takes N as a FRAME number, not a raw
     // Timer. CurFrame = StartFrame + Timer/5 (CrPartTime = 5·(End-Start)),
@@ -461,6 +461,41 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
+// values (centiseconds; chase runs ~0..2500). Driver-based: createChaseScene
+// applies the cinematic + water_procedural defaults, exactly like the live demo.
+int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_Chase();
+
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) timestamps = {500, 1000, 1500, 2000};
+
+    auto driver = createChaseScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();   // clears VPage, renders both passes + glints, noop-flips
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/chase_t%06d_color.ppm",
+                      cfg.outDir.c_str(), ts);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[CHASESNAP] t=%d -> %s\n", ts, colorPath);
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -470,7 +505,7 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     // apply the same --cinematic per-scene profile the live factory would, to
     // keep `--cinematic --snapshot=city` faithful to the demo.
     fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
-    ApplyCinematicSceneDefaults(cine::kCityExposure);
+    ApplyCinematicProfile(cine::kCity);   // mirror the live factory
 
     const int32_t ctPart = getCityCTPartTime();
     std::fprintf(stderr, "[SNAPSHOT] City CTPartTime = %d (Timer must be < this for tick to render)\n",
