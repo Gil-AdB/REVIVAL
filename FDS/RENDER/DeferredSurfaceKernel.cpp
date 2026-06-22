@@ -628,10 +628,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 						tx *= invTLen; ty *= invTLen; tz *= invTLen;
 					}
-					// B = N × T
-					const float bx = ny * tz - nz * ty;
-					const float by = nz * tx - nx * tz;
-					const float bz = nx * ty - ny * tx;
+					// B = handedness · (N × T). The sign comes from the
+					// material (faces with mirrored UVs are split onto a
+					// handedness=-1 clone) — without it, the fixed-sign cross
+					// product inverts the normal map's V detail on mirrored
+					// faces, seaming against their non-mirrored neighbours.
+					const float hsign = Mat->TbnHandedness;
+					const float bx = (ny * tz - nz * ty) * hsign;
+					const float by = (nz * tx - nx * tz) * hsign;
+					const float bz = (nx * ty - ny * tx) * hsign;
 					// new_N = T * nmX + B * nmY + N * nmZ (view space)
 					float vnx = tx * nmX + bx * nmY + nx * nmZ;
 					float vny = ty * nmX + by * nmY + ny * nmZ;
@@ -2315,9 +2320,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 					tx *= invTLen; ty *= invTLen; tz *= invTLen;
 				}
-				const float bx = lny * tz - lnz * ty;
-				const float by = lnz * tx - lnx * tz;
-				const float bz = lnx * ty - lny * tx;
+				const float hsign = MatN->TbnHandedness;  // mirrored-UV bitangent flip
+				const float bx = (lny * tz - lnz * ty) * hsign;
+				const float by = (lnz * tx - lnx * tz) * hsign;
+				const float bz = (lnx * ty - lny * tx) * hsign;
 				float vnx = tx * nmX + bx * nmY + lnx * nmZ;
 				float vny = ty * nmX + by * nmY + lny * nmZ;
 				float vnz = tz * nmX + bz * nmY + lnz * nmZ;
@@ -2873,9 +2879,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const float invTLen = fast_rsqrt(tx*tx + ty*ty + tz*tz);
 						tx *= invTLen; ty *= invTLen; tz *= invTLen;
 					}
-					const float bx = ny * tz - nz * ty;
-					const float by = nz * tx - nx * tz;
-					const float bz = nx * ty - ny * tx;
+					const float hsign = Mat->TbnHandedness;  // mirrored-UV bitangent flip
+					const float bx = (ny * tz - nz * ty) * hsign;
+					const float by = (nz * tx - nx * tz) * hsign;
+					const float bz = (nx * ty - ny * tx) * hsign;
 					float vnx = tx * nmX + bx * nmY + nx * nmZ;
 					float vny = ty * nmX + by * nmY + ny * nmZ;
 					float vnz = tz * nmX + bz * nmY + nz * nmZ;

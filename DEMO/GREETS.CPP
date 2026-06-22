@@ -1160,6 +1160,50 @@ static void GreetsRetileFloor(Scene *sc)
 	             scale, amp, touched);
 }
 
+// Fix the normal-map relief seam at UV-handedness boundaries. The per-vertex
+// tangent (Lengyel) carries UV winding in its direction, but the deferred
+// kernel reconstructs the bitangent as a fixed-sign N×T — wrong on faces with
+// mirrored UVs (negative determinant), whose green/V normal detail inverts and
+// seams against their non-mirrored neighbours. We can't flip B per face in the
+// kernel (it's deferred, per-pixel), so split the negative-det faces of every
+// normal-mapped material onto a handedness=-1 clone of that material; the kernel
+// reads Mat->TbnHandedness and flips B accordingly. Must run after all face→
+// material retargeting (robot bin-split etc.) and before Scene_RebuildMatTable.
+static void GreetsFixBitangentHandedness(Scene *sc)
+{
+	if (!fds::FeatureFlags::greets_tbn_fix()) return;
+	std::map<Material*, Material*> mir;   // source mat -> handedness=-1 clone
+	int split = 0;
+	for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+		if (!T->Faces) continue;
+		for (DWord fi = 0; fi < T->FIndex; ++fi) {
+			Face &F = T->Faces[fi];
+			Material *M = F.Txtr;
+			if (!M || !M->NormalMap) continue;        // handedness only matters w/ nmap
+			if (M->TbnHandedness < 0.0f) continue;    // already a mirror clone
+			const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+			const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+			if (du1*dv2 - du2*dv1 >= 0.0f) continue;  // positive handedness: leave
+			auto it = mir.find(M);
+			if (it == mir.end()) {
+				Material *c = new Material;
+				*c = *M;                              // share Txtr / NormalMap / shadow id
+				c->TbnHandedness = -1.0f;
+				char nm[96];
+				std::snprintf(nm, sizeof(nm), "%s::mirUV", M->Name ? M->Name : "mat");
+				c->Name = strdup(nm);
+				Material *tail = MatLib; while (tail->Next) tail = tail->Next;
+				c->Prev = tail; c->Next = nullptr; tail->Next = c;
+				it = mir.emplace(M, c).first;
+			}
+			F.Txtr = it->second;
+			++split;
+		}
+	}
+	std::fprintf(stderr, "[GREETS-TBN] split %d mirrored-UV faces onto %zu handedness clones\n",
+	             split, mir.size());
+}
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1750,6 +1794,9 @@ void Initialize_Greets()
 			}
 		}
 	}
+	// Split mirrored-UV faces onto handedness clones (after all robot/face
+	// retargeting, before the matID rebuild so the clones get IDs).
+	GreetsFixBitangentHandedness(GreetSc);
 	Scene_RebuildMatTable(GreetSc);
 	std::fprintf(stderr, "[ROBOT-MAT] total clones: %d\n", totalClones);
 	std::fflush(stderr);

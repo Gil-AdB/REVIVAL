@@ -90,6 +90,15 @@ struct Material
     float               * hdrRefl               = nullptr;
     int                   hdrReflW              = 0;
     int                   hdrReflH              = 0;
+
+    // Tangent-space normal-map bitangent handedness: B = TbnHandedness·(N×T).
+    // The per-vertex tangent (Lengyel) carries UV winding in its direction,
+    // but the kernel reconstructs the bitangent as a fixed-sign cross product,
+    // which is wrong on faces with MIRRORED UVs (negative UV determinant) —
+    // their normal-map green/V detail inverts, producing a relief seam at the
+    // boundary with positive-det faces. Faces are split onto a handedness=-1
+    // material clone so the kernel can flip B per pixel. +1 = normal.
+    float                 TbnHandedness          = 1.0f;
 };
 
 #pragma pack(pop)
