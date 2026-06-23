@@ -510,12 +510,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 #if FDS_DEV
 			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
 			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
+			static const bool sVizGeoNormal   = fds::FeatureFlags::viz_geonormal();
 			static const bool sVizMatID       = fds::FeatureFlags::viz_matid();
 			static const bool sVizPmid        = fds::FeatureFlags::viz_pmid();
 			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
 #else
 			constexpr bool sVizTangent    = false;
 			constexpr bool sVizNormal     = false;
+			constexpr bool sVizGeoNormal  = false;
 			constexpr bool sVizMatID      = false;
 			constexpr bool sVizPmid       = false;
 			constexpr bool sNmapAsDiffuse = false;
@@ -1405,6 +1407,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				outR = int((nx + 1.0f) * 127.5f);
 				outG = int((ny + 1.0f) * 127.5f);
 				outB = int((nz + 1.0f) * 127.5f);
+			}
+			if (sVizGeoNormal) {
+				// Pre-nmap geometry normal (nGeoX/Y/Z saved before the
+				// normal-map block). A flat wall → one solid colour; any
+				// diagonal/variation = the vertex-normal interpolation crease.
+				outR = int((nGeoX + 1.0f) * 127.5f);
+				outG = int((nGeoY + 1.0f) * 127.5f);
+				outB = int((nGeoZ + 1.0f) * 127.5f);
 			}
 			if (sVizMatID) {
 				// Hash matID to a distinct colour. matID is already in
