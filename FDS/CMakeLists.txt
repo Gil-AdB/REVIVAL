@@ -129,6 +129,7 @@ set(RENDER
     RENDER/DeferredSurfaceKernel.cpp
     RENDER/DeferredLightLists.cpp
     RENDER/DeferredShadowSampling.h
+    RENDER/DeferredSSAO.cpp
     RENDER/DeferredVolumetric.cpp
     RENDER/EnvBake.cpp
     RENDER/EnvBake.h

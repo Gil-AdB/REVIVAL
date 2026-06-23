@@ -42,6 +42,8 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // + Render_DeferredLighting (with its optional DeferredOverride) are declared
 // in DeferredCommon.h (included below).
 void Render_DeferredFogPass();
+// Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
+void Render_SSAO();
 // Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
@@ -482,6 +484,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// colorize step in one go.
 		Render_DeferredLighting(dctx);
 		g_deferredCtx = dctx;
+
+		// Full-res SSAO: darken contact creases over the deferred-lit opaque
+		// pixels, BEFORE fog/volumetric so haze layers on top of the occluded
+		// surfaces. MAIN pass only (!skipVolumetric) — skip the mirror RTT /
+		// water-reflection underlay passes (cost + the static AO scratch buffer
+		// isn't re-entrant). No-op unless --ssao.
+		if (!skipVolumetric)
+			Render_SSAO();
 
 		// Deferred skybox: paint pixels the rasterizer didn't touch
 		// (zEnc == 0) by sampling the sky cube directly from the G-
