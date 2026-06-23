@@ -233,11 +233,88 @@ A complete, recent post-pass that exercises every section above:
   occluded), else multiplies VPage.
 - Reduced-res ladder: `--ssao_downscale 1|2|4` computes AO on a `W/d × H/d` grid and
   depth-aware-bilinear-upsamples; the depth buffer is always full-res so edges stay crisp.
-  Cost on greets 1080p, 16 samples: full **≈35 ms**, half **≈13 ms**, quarter **≈5 ms**.
+  The low-res denoise is **normal+depth-aware** — panel-gap creases are normal
+  discontinuities with continuous depth, so a depth-only blur washes them out.
 - Flags `--ssao*` are auto-derived from `FeatureFlags.def`; `FDS_SSAO_STATS=1` prints the
-  live view-Z range + AO histogram.
+  per-pass timing, live view-Z range + AO histogram.
+- **Scene scale gotcha:** view-Z ≈ [5..80] units, so `--ssao_radius` ~3–5 (NOT 24, which
+  overshoots all geometry → *less* occlusion). See §5.
 
-To add a similar pass: copy the file's three-wave structure (compute → blur →
+### SSAO performance — what was done, and what didn't pay
+
+Three passes (compute → denoise → apply), tiled 6×4 over the threadpool. Cost levers,
+in the order they were applied (greets 1080p quarter-res, `FDS_SSAO_STATS=1`):
+
+| change | effect |
+|---|---|
+| `--ssao_samples 8` default | compute ∝ samples; 8 ≈ 16 visually (denoise hides grain) |
+| divide-free bilateral weights (denoise+apply) | `1/(1+x²)` per tap → `max(0,1−x²·k)`; killed the full-res denoise cost |
+| 8-wide SIMD compute (`_mm256_rcp_ps`, `fast_rsqrt`) | ~20–25% on compute (gather-bound caps it — the per-sample depth lookup stays scalar; cf. the volumetric-SIMD note) |
+| Newton-Raphson on the projection rcp | **dropped** — measured byte-≈identical (≤3/255) and free-but-pointless |
+
+Net: **5.8 → 3.7 ms** at quarter-res, all correct. The **apply (~1.7 ms) is now the floor**,
+~0.7 ms of which is the unavoidable `g_hdrBuf` read-modify-write bandwidth.
+
+**Approx reciprocals:** the SSAO compute uses raw `_mm256_rcp_ps` (12-bit) for the
+per-sample projection and range divides — at 1080p that's ~0.25 px of tap drift, which
+rounds to the same depth pixel. Audit before trusting rcp in *high-gain* contexts (the
+narrow-cone moire family, see `DeferredCommon.h::rsqrt_nr_x8`); SSAO is low-gain so it's safe.
+NB `oct_decode_u16` has **no** runtime divide (`1/127` is const-folded, normalize is
+`fast_rsqrt`); `oct_encode_u16_x8` (Mekalele.h, #1 hot rasterizer line) *does* `_mm256_div_ps`
+— a separate, byte-gated optimization opportunity, not yet taken.
+
+### Fusion experiment (kernel-fold) — measured, reverted, does NOT pay
+
+The apply's ~0.7 ms is a separate full-res sweep of `g_hdrBuf`. The TBR/locality instinct:
+fold the AO multiply into a pass already touching those pixels. The **lighting kernel** is
+the only *correct* target (the tonemap runs after the volumetric glow composites into
+`g_hdrBuf`, so fusing there would wrongly darken the disco beams). A prototype (SSAO
+compute+denoise before lighting, kernel multiplies AO into its `g_hdrBuf` write) was built,
+measured, and **reverted** — it's not in the tree, this is the recorded finding.
+
+**Result: it loses.** Adding a per-pixel AO sample to the hot *scalar* kernel cost more
+than the apply sweep it removed — full-rate kernel **+5.4 ms** vs ~1.6 ms apply saved
+(**net +3.8 ms**); quarter-rate ~break-even-to-slightly-worse. This is the documented
+"merging into the tuned kernel regresses" trap. **Keep the standalone apply.**
+
+The win is real only at the *architectural* level: a **tile-resident deferred pass** that
+fuses lighting → SSAO → fog → cones → tonemap so `g_hdrBuf` is produced+consumed in cache
+and barely hits DRAM (the `RENDER_DAG_SCOPING.md` direction). SSAO is one stage of that,
+not a standalone graft.
+
+### SSAO + PBR AO maps (future)
+
+A baked **AO map** is the natural companion to SSAO, and the two are *complementary, not
+redundant*:
+
+- **AO map** — baked, static, *material-scale* occlusion from the asset's high-poly bake
+  (pores, panel-seam recesses, bolt holes). Detail SSAO physically **cannot** see: it's
+  sub-pixel, or occluded by geometry the G-buffer doesn't hold.
+- **SSAO** — dynamic, view/scene-dependent, *inter-object* and large-scale occlusion (one
+  object's contact shadow on another). No baked map can capture this.
+
+PBR combines them: `ambient *= aoMap × ssao` (or `min`), applied to **ambient/indirect
+only** — direct light keeps its own shadows. (Today's standalone SSAO multiplies *total*
+radiance, which is cheaper but slightly wrong; moving to ambient-only is the PBR-correct
+shift and changes the look a touch — less aggressive.)
+
+What AO maps would buy here:
+1. **Fill the detail reduced-res SSAO drops.** The thin creases `--ssao_downscale 4` can't
+   resolve are exactly the static material detail a baked map carries — for one texture
+   sample. So you could run SSAO *cheaper* and let the map do the fine work.
+2. **Material grounding where SSAO is blind** — flat-ish surfaces with baked crevice detail.
+3. **Near-free to add.** A sibling branch already loads normal maps from disk; AO is just
+   another channel (or packed into a free channel). The G-buffer already does per-pixel
+   texel fetch and carries tangent (§3).
+4. **It flips the fusion verdict.** The kernel-fold above lost because it *added* an AO
+   sample to the kernel. In a PBR kernel the ambient term is **already** multiplied by the
+   AO map per pixel — SSAO rides that existing multiply for ~free, with no separate apply
+   sweep. The fusion is worth it precisely when the kernel was going to do the multiply anyway.
+
+Caveat: only helps if assets actually have baked AO maps — the greets meshes likely weren't
+authored with AO bakes, so they'd need baking (or packing alongside the normal-map work).
+
+To add a similar pass: copy the file's three-wave structure (compute → denoise →
 apply), register flags in `FeatureFlags.def`, add the `.cpp` to `FDS/CMakeLists.txt`'s
 `RENDER` group, declare the entry point near the other `void Render_*();` in `RENDER.CPP`,
 and call it in `renderFrame` at the right point in §2.
