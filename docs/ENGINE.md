@@ -211,6 +211,32 @@ Other rasterizers in `FILLERS/`:
 - `Flags` — visibility bits (`Vtx_VisLeft/Right/Up/Down/Near/Far/Visible`),
   used by clipper to skip early.
 
+#### Per-face vs per-vertex UVs — read UVs from the FACE, not the vertex
+
+UVs exist in **two** places: per-vertex (`Vertex::U/V`) and per-face
+(`Face::U1/V1, U2/V2, U3/V3`). **For any geometric derivation (tangents,
+UV gradients, projection math) read the per-FACE `U1..V3`, never the
+per-vertex `A->U/B->U/C->U`.**
+
+Why: UVs are not stored in the `.lwo`/`.FLD` — they're computed at load by
+`Get_UV`/`Get_Mapping` (`FLD/FLD_MAT.CPP`) from the material's projection
+(Planar/Cubic/Cylindrical/Spherical). `Get_UV` writes the per-vertex `U/V`
+*and* snapshots them into the face's `U1..V3`. But a vertex **shared**
+between faces of different projection orientation (e.g. a box corner where
+a +X wall meets a +Z wall) has its per-vertex `U/V` **clobbered by
+whichever face is mapped last** — so it's correct for only one of the
+sharers. The per-face `U1..V3` snapshot is taken at map time and is always
+correct; it's what the rasterizer uses for the albedo (which is why a
+mismatched per-vertex UV corrupts only derived data like tangents, while
+the texture itself looks fine).
+
+This bit `Compute_Vertex_Tangents` (`MISC/PREPROC.CPP`): reading per-vertex
+UVs gave shared-corner faces a flipped tangent → a diagonal normal-map
+relief seam through wall quads, visible only with a directional normal
+map. Fixed by deriving the UV gradient from `U1..V3` (with a fallback to
+per-vertex when the per-face triangle is degenerate, for procedural meshes
+that set only per-vertex UVs).
+
 ### Material / Texture
 
 `FDS/Base/Material.h`, `FDS/Base/Texture.h`. Each `Material` owns a

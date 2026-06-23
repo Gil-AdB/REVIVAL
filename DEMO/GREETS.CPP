@@ -1214,51 +1214,10 @@ static void GreetsFixBitangentHandedness(Scene *sc)
 // axis (fixed U/V convention, same TextureSize/Center so the scale + offset are
 // preserved) makes the tangent uniform → no seam. Caller recomputes tangents
 // afterward. Operates on the per-vertex U/V and the cached per-face U1..V3.
-static void GreetsReprojectWallUVs(Scene *sc)
-{
-	if (!fds::FeatureFlags::greets_wall_reproject()) return;
-	int faces = 0;
-	for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
-		if (!T->Faces || !T->Verts) continue;
-		for (DWord fi = 0; fi < T->FIndex; ++fi) {
-			Face &F = T->Faces[fi];
-			Material *M = F.Txtr;
-			if (!M || !M->Name) continue;
-			// Walls + ceiling only. The floor is a single flat plane (no
-			// per-triangle tangent flip) and has its OWN UV pass
-			// (GreetsRetileFloor: scale + de-tile) which reprojecting here
-			// would clobber, so leave it out.
-			if (strcmp(M->Name, "rooms") && strcmp(M->Name, "siling"))
-				continue;
-			if (!F.A || !F.B || !F.C) continue;
-			// Dominant axis of the face normal picks the projection plane.
-			const float ax = std::fabs(F.N.x), ay = std::fabs(F.N.y), az = std::fabs(F.N.z);
-			// Texture scale per axis (guard against a 0 that would divide-by-zero;
-			// the FLD sometimes ships one zero component for a planar map).
-			auto sz = [](float v) { return std::fabs(v) > 1e-4f ? v : 1.0f; };
-			const Vector &C = M->TextureCenter;
-			const Vector &S = M->TextureSize;
-			auto project = [&](Vertex *v, float &u, float &t) {
-				const float px = v->Pos.x - C.x, py = v->Pos.y - C.y, pz = v->Pos.z - C.z;
-				if (ax >= ay && ax >= az) {        // wall facing ±X → U=Z, V=Y
-					u =  pz / sz(S.z) + 0.5f;  t = -py / sz(S.y) + 0.5f;
-				} else if (az >= ax && az >= ay) { // wall facing ±Z → U=X, V=Y
-					u =  px / sz(S.x) + 0.5f;  t = -py / sz(S.y) + 0.5f;
-				} else {                            // floor/ceiling ±Y → U=X, V=Z
-					u =  px / sz(S.x) + 0.5f;  t = -pz / sz(S.z) + 0.5f;
-				}
-			};
-			project(F.A, F.A->U, F.A->V);
-			project(F.B, F.B->U, F.B->V);
-			project(F.C, F.C->U, F.C->V);
-			F.U1 = F.A->U; F.V1 = F.A->V;
-			F.U2 = F.B->U; F.V2 = F.B->V;
-			F.U3 = F.C->U; F.V3 = F.C->V;
-			++faces;
-		}
-	}
-	std::fprintf(stderr, "[GREETS] wall UV reproject: %d faces (per-face axis planar)\n", faces);
-}
+// (GreetsReprojectWallUVs removed — the diagonal wall-relief seam was a
+// per-face-vs-per-vertex UV tangent bug; fixed at source in
+// Compute_Vertex_Tangents. See docs/ENGINE.md.)
+
 
 void Initialize_Greets()
 {
@@ -1331,18 +1290,6 @@ void Initialize_Greets()
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
-
-	// Fix the diagonal wall-relief seam: re-project wall UVs per-face (the
-	// FLD's single-axis projection gave perpendicular walls degenerate /
-	// flipped tangents), then recompute tangents on the new UVs + split topo.
-	// Scoped to the stone-tex path so the default greets wall layout is
-	// untouched; the seam only shows with the directional stone-tex normals.
-	if (fds::FeatureFlags::greets_stone_tex() && fds::FeatureFlags::greets_wall_reproject()) {
-		extern void Compute_Vertex_Tangents(TriMesh *T);
-		GreetsReprojectWallUVs(GreetSc);
-		for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next)
-			Compute_Vertex_Tangents(T);
-	}
 
 	// Bump Specular on materials that should plausibly have shiny
 	// surfaces — marble stairs, marble pillars, stone floor, the mecha

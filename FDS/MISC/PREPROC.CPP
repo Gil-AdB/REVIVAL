@@ -409,10 +409,34 @@ void Compute_Vertex_Tangents(TriMesh *T)
 		Vector e1, e2;
 		Vector_Sub(&p1, &p0, &e1);
 		Vector_Sub(&p2, &p0, &e2);
-		const float du1 = F->B->U - F->A->U;
-		const float dv1 = F->B->V - F->A->V;
-		const float du2 = F->C->U - F->A->U;
-		const float dv2 = F->C->V - F->A->V;
+		// Tangents come from the per-FACE UVs (F->U1..V3), NOT the per-VERTEX
+		// (F->A->U). At load Get_UV writes per-vertex U/V, but a vertex SHARED
+		// between faces of different projection orientation (e.g. a box corner
+		// touching a +X wall and a +Z wall) gets its per-vertex UV clobbered by
+		// whichever face mapped it last — so it's wrong for the others →
+		// garbage tangents → a diagonal normal-map relief seam through the
+		// quad. The per-face F.U1..V3 snapshot is taken at map time and is
+		// always correct (it's what the rasterizer uses for the albedo, which
+		// is why the albedo looked fine while only the bump seamed). See
+		// docs/ENGINE.md "Per-face vs per-vertex UVs".
+		//
+		// Fallback: a face whose OWN per-face UV triangle is degenerate (no UV
+		// area) — e.g. an edge-on face under a single-axis planar projection,
+		// where this face's projected U or V is ~constant — has no usable
+		// per-face gradient. Its per-VERTEX UVs, however, were clobbered by a
+		// better-oriented neighbour sharing those verts and are non-degenerate,
+		// so they give a tangent that's at least continuous with the neighbour.
+		// Use them in that case. (Common on FLD building/vehicle hulls; matches
+		// the pre-per-face-UV behaviour for those faces, so no regression.)
+		float au = F->U1, av = F->V1, bu = F->U2, bv = F->V2, cu = F->U3, cv = F->V3;
+		float du1 = bu - au, dv1 = bv - av, du2 = cu - au, dv2 = cv - av;
+		if (std::fabs(du1*dv2 - du2*dv1) < 1e-8f) {
+			const float vdu1 = F->B->U - F->A->U, vdv1 = F->B->V - F->A->V;
+			const float vdu2 = F->C->U - F->A->U, vdv2 = F->C->V - F->A->V;
+			if (std::fabs(vdu1*vdv2 - vdu2*vdv1) >= 1e-8f) {
+				du1 = vdu1; dv1 = vdv1; du2 = vdu2; dv2 = vdv2;
+			}
+		}
 		const float denom = du1 * dv2 - du2 * dv1;
 		if (std::fabs(denom) < 1e-8f) continue;  // degenerate UVs
 		const float r = 1.0f / denom;
