@@ -47,6 +47,8 @@ There is no test suite, no linter, no CI. "Testing" means running the demo and w
 
 For a detailed description of the current rendering pipeline (mipmap-via-subdivision clipper, tiled AVX2 rasterizer, threading, per-frame global state), see `docs/ENGINE.md`. The narrative below is the high-level summary.
 
+**Adding or debugging a graphics feature (deferred path):** read `docs/GRAPHICS_PIPELINE.md` first — it's the wiring map (per-frame `renderFrame` call order, G-buffer layout, view-space reconstruction math, the HDR buffer + tonemap and its "VPage writes are silently discarded under `--hdr`" gotcha, the canonical 6×4 tiled post-pass recipe, FeatureFlags, and headless snapshot validation). It exists so you don't re-derive all of that each time.
+
 ### Control flow
 
 `DEMO/REV.CPP:main()` reads `rev.cfg`, inits SDL + FDS, then spawns `StubbedThread` which calls `CodeEntry`. `CodeEntry` is the demo director: it initializes all scenes on a worker thread (`Initialize_City/Chase/Fountain/Crash/Greets`), starts music via `Modplayer_*`, then runs scenes in sequence (`Run_Glato`, `Run_City`, `Run_Chase`, `Run_Fountain`, `Run_Crash`, `Run_Greets`). The SDL main thread only pumps events → writes `Keyboard[scancode]` — scenes poll this array to detect ESC / skip.
