@@ -269,8 +269,11 @@ A complete, recent post-pass that exercises every section above:
     extent → tight contact-defined AO, no fat band, no bright rim. The 32-sector bitmask +
     `--ssao_gtao_thickness` lets light pass behind thin occluders (the legs). Knobs:
     `--ssao_gtao_slices` (dirs), `--ssao_gtao_steps` (march), `--ssao_gtao_thickness`.
-  - GTAO cost (scalar): ~4× the hemisphere's SIMD compute — d4 ~7ms, d2 ~24ms, d1 ~80ms.
-    SIMD-able later (per-sample gather + popcount resist it; the arithmetic vectorizes).
+  - GTAO compute is **8-wide SIMD** (vectorized per-sample arithmetic + bitmask via
+    `_mm256_sllv/srlv`; gather + popcount stay scalar-per-lane). ~2.7× over scalar →
+    **on par with the hemisphere sampler** (d4 ~4ms, d2 ~10ms total). `FDS_SSAO_NOSIMD`
+    forces the scalar reference for A/B. SIMD matches scalar within rsqrt/cvt rounding
+    (max ~6/255, denoised away).
   - **A bright edge halo is NOT always SSAO** — full-screen **bloom/anamorphic** blur the
     blown-out floor over a dark silhouette too (non-depth-aware), an *additive* rim that
     persists with `--no-ssao`. Diagnose by toggling `--no-ssao` (SSAO halo = contrast,
