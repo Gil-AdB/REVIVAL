@@ -2,6 +2,40 @@
 
 struct TriMesh;
 struct Scene;
+struct Object;
+struct Vector;
+
+// Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
+// with all the plumbing the engine needs — each item below cost a debug session
+// when missed while adding custom geometry (disco ball, blaster bolts, ...):
+//
+//   • Compute_FaceVertexIndices: the SoA transform indexes verts via
+//     F->A_idx/B_idx/C_idx; unstamped (0) → every face collapses to vertex 0
+//     and is culled.
+//   • 2 Pos spline keys >0.1 apart: marks the mesh dynamic so Transform
+//     re-reads its vertices every frame instead of caching a static silhouette.
+//   • A large bounding sphere: so the mesh is never frustum-culled as you move
+//     its verts around (override via bsphereRadius for a localized mesh).
+//   • Flags: HTrack_Visible | Tri_Possessed (Animate_Objects won't touch it —
+//     you stamp verts directly) | Tri_Noshading | Tri_NoShadowCast.
+//   • Links into Sc->ObjectHead + Sc->TriMeshHead.
+//
+// Preconditions the CALLER must satisfy before calling:
+//   • mesh->Verts / mesh->Faces allocated; each face's A/B/C, Txtr, Filler,
+//     Flags, N, and per-face U1..V3 (call Face::uvFromVertices) wired.
+//   • mesh->VIndex / mesh->FIndex set to the FULL pool size (reserved here so
+//     setupFaceLists counts them in the poly budget — shrink-per-frame drops
+//     faces; degenerate unused slots instead).
+//   • RUNTIME GOTCHA (not enforceable here): every face Material needs a
+//     non-null Txtr->Txtr (a real texture). The deferred per-tile pass skips
+//     untextured faces. And additive faces want WriteZ=true in deferred so the
+//     mat32 "skip-lighting" sentinel survives.
+//
+// Returns the created Object (already linked); call BEFORE the scene's
+// setupFaceLists / mirror build so the faces are budgeted and (if greets)
+// cloned. Idempotent registration is the caller's concern.
+Object *Scene_AddDynamicMesh(Scene *sc, TriMesh *mesh, const char *name,
+                             const Vector &bsphereCtr, float bsphereRadius);
 
 // Per-face vertex duplication: replace shared-vertex topology with one
 // independent Vertex copy per face. Each new copy's N is the area-

@@ -375,3 +375,54 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 		MakeFacesIndependent(T, thresholdDegrees);
 	}
 }
+
+#include <Base/Object.h>
+#include <Base/TriMesh.h>
+#include <Base/Vector.h>
+#include <cstdlib>
+
+Object *Scene_AddDynamicMesh(Scene *sc, TriMesh *mesh, const char *name,
+                             const Vector &bsphereCtr, float bsphereRadius)
+{
+	if (!sc || !mesh) return nullptr;
+
+	// SoA: stamp F->A_idx/B_idx/C_idx so the transform indexes the right verts.
+	Compute_FaceVertexIndices(mesh);
+
+	// Identity transform: caller writes world-space vertex positions directly.
+	Matrix_Copy(mesh->RotMat, Mat_ID);
+	Matrix_Copy(mesh->UnscaledRotMat, Mat_ID);
+	mesh->IPos = { 0, 0, 0 };
+
+	// Bounding sphere — large by default so moving verts never frustum-cull it.
+	mesh->BSphereCtr    = bsphereCtr;
+	mesh->BSphereRadius = bsphereRadius;
+	mesh->BSphereRad    = bsphereRadius * bsphereRadius;
+
+	// Dynamic marking: 2 Pos keys >0.1 apart → re-transformed every frame
+	// (Transform won't treat it as a cached-static silhouette). Possessed so
+	// Animate_Objects leaves IPos/RotMat alone (we own the verts).
+	mesh->Pos.NumKeys = 2; mesh->Pos.CurKey = 0; mesh->Pos.Flags = 0;
+	mesh->Pos.Keys = (SplineKey*)std::calloc(2, sizeof(SplineKey));
+	mesh->Pos.Keys[0].Frame = 0;
+	mesh->Pos.Keys[0].Pos.x = 0.0f; mesh->Pos.Keys[0].Pos.y = 0.0f; mesh->Pos.Keys[0].Pos.z = 0.0f;
+	mesh->Pos.Keys[1].Frame = 100;
+	mesh->Pos.Keys[1].Pos.x = 0.2f; mesh->Pos.Keys[1].Pos.y = 0.0f; mesh->Pos.Keys[1].Pos.z = 0.0f;
+
+	mesh->Flags |= HTrack_Visible | Tri_Possessed | Tri_Noshading | Tri_NoShadowCast;
+
+	Object *O = getAlignedType<Object>(16);
+	std::memset(O, 0, sizeof(Object));
+	O->Type = Obj_TriMesh;
+	O->Data = mesh;
+	O->Pos  = &mesh->IPos;
+	O->Rot  = &mesh->RotMat;
+	O->Name = strdup(name ? name : "__dynamicMesh");
+	O->Next = sc->ObjectHead;
+	if (sc->ObjectHead) sc->ObjectHead->Prev = O;
+	sc->ObjectHead = O;
+	mesh->Next = sc->TriMeshHead;
+	if (sc->TriMeshHead) sc->TriMeshHead->Prev = mesh;
+	sc->TriMeshHead = mesh;
+	return O;
+}
