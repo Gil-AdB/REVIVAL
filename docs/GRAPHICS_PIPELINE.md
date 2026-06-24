@@ -264,8 +264,10 @@ NB `oct_decode_u16` has **no** runtime divide (`1/127` is const-folded, normaliz
 `_mm256_rcp_ps` (commit `026a211`) — byte-near-identical (max 2/255 on ≤0.016% of pixels,
 nothing visible), with the dead-code scalar `oct_encode_u16` reference moved to the same
 `_mm_rcp_ss` estimate (proven bit-identical) so both paths agree. **Frame-level perf was
-in the noise** — the encode is already vectorized (one reciprocal per 8 px), so the stale
-"#1 hot rasterizer line" comment (pre-vectorization) overstated it. Lesson: this hunt also
+in the noise on arm64** — the encode is already vectorized (one reciprocal per 8 px), so
+the stale "#1 hot rasterizer line" comment (pre-vectorization) overstated it. Kept anyway
+deliberately: x86 has a much wider `divps`/`rcpps` gap than NEON, so it may be a real gain
+on an Intel/AMD or wasm→x86 build (don't revert it reading only "neutral"). Lesson: this hunt also
 showed incremental `ninja` + edit churn can give phantom diffs — `touch` the header to
 force a clean rebuild before trusting a byte-comparison.
 
