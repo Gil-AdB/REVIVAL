@@ -114,6 +114,19 @@ inline float gtaoAcos(float x) {
 	return x >= 0.0f ? r : 3.14159265f - r;
 }
 
+// 8-wide gtaoAcos — same Eberly fit, exact same value per lane as the scalar
+// (so the SIMD GTAO path matches the scalar reference). x clamped to [-1,1].
+inline __m256 gtaoAcos_x8(__m256 x) {
+	const __m256 sgn = _mm256_set1_ps(-0.0f);
+	const __m256 one = _mm256_set1_ps(1.0f);
+	__m256 ax = _mm256_min_ps(_mm256_andnot_ps(sgn, x), one);           // |x| clamped
+	__m256 r  = _mm256_mul_ps(
+		_mm256_fmadd_ps(_mm256_set1_ps(-0.156583f), ax, _mm256_set1_ps(1.57079633f)),
+		_mm256_sqrt_ps(_mm256_sub_ps(one, ax)));
+	__m256 neg = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_LT_OQ);
+	return _mm256_blendv_ps(r, _mm256_sub_ps(_mm256_set1_ps(3.14159265f), r), neg);
+}
+
 // Low-res scratch (sized lowW*lowH). aoZ holds the representative view-space Z
 // per cell (< 0 == sky / no surface).
 std::vector<float> g_aoRaw, g_aoBlur, g_aoZ;
@@ -195,6 +208,7 @@ void Render_SSAO() {
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
+		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		for (int tj = 0; tj < numTilesY; ++tj) {
@@ -202,81 +216,216 @@ void Render_SSAO() {
 			for (int ti = 0; ti < numTilesX; ++ti) {
 				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 				ThreadPool::instance().enqueue([=]() {
-					for (int ly = ly1; ly < ly2; ++ly) {
-						for (int lx = lx1; lx < lx2; ++lx) {
-							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
-							const int px = std::min(lx * down + half, W - 1);
-							const int py = std::min(ly * down + half, H - 1);
-							const size_t i = size_t(py) * size_t(W) + size_t(px);
-							const word ze = zEnc[i];
-							if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f; continue; }
-							const float z = float(0xFF80 - ze) * invZScale;
-							aoZ[lo] = z;
-							const float Px = (float(px) - cx) * z * invFOVX;
-							const float Py = (cy - float(py)) * z * invFOVY;
-							const float Pz = z;
-							float Nx, Ny, Nz; meka::oct_decode_u16(nrm[i], Nx, Ny, Nz);
-							if (Nx*Px + Ny*Py + Nz*Pz > 0.0f) { Nx=-Nx; Ny=-Ny; Nz=-Nz; }
-							const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
-							const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;   // toward camera
-							float srad = radius * fovX / z;                            // view radius → screen px
-							if (srad < 2.0f) srad = 2.0f; else if (srad > 256.0f) srad = 256.0f;
-							const int ri = (ly & 3) * 4 + (lx & 3);                    // 4×4 tiling
-							const float jit = g_rotCos[ri] * 0.5f + 0.5f;              // per-cell [0,1)
-							float vis = 0.0f;
-							for (int s = 0; s < slices; ++s) {
-								const float phi = (float(s) + jit) * (kPI / float(slices));
-								const float dcx = cosf(phi), dsy = sinf(phi);          // screen dir
-								// screen dir → view (screen +y is view −y); slice plane normal = norm(cross(d3,V))
-								const float d3x = dcx, d3y = -dsy;
-								float snx = d3y*Vz - 0.0f, sny = 0.0f - d3x*Vz, snz = d3x*Vy - d3y*Vx;
-								const float snl = fast_rsqrt(snx*snx + sny*sny + snz*snz + 1e-12f);
-								snx*=snl; sny*=snl; snz*=snl;
-								const float ndotsn = Nx*snx + Ny*sny + Nz*snz;          // project N onto plane
-								const float pnx = Nx - snx*ndotsn, pny = Ny - sny*ndotsn, pnz = Nz - snz*ndotsn;
-								const float tx = sny*Vz - snz*Vy, ty = snz*Vx - snx*Vz, tz = snx*Vy - sny*Vx; // T = sn×V
-								const float nAng = atan2f(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
-								uint32_t mask = 0u;
-								for (int sgn = -1; sgn <= 1; sgn += 2) {
-									for (int j = 0; j < steps; ++j) {
-										const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
-										const int sx = px + int(float(sgn)*dcx*t + 0.5f);
-										const int sy = py + int(float(sgn)*dsy*t + 0.5f);
-										if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
-										const word ze2 = zEnc[size_t(sy)*size_t(W)+size_t(sx)];
-										if (ze2 == 0) continue;
-										const float sz = float(0xFF80 - ze2) * invZScale;
-										const float dx = (float(sx)-cx)*sz*invFOVX - Px;
-										const float dy = (cy-float(sy))*sz*invFOVY - Py;
-										const float dz = sz - Pz;
-										const float dl2 = dx*dx + dy*dy + dz*dz;
-										if (dl2 > r2max || dl2 < 1e-8f) continue;       // range cutoff
-										const float dinv = fast_rsqrt(dl2);
-										const float bx = dx - Vx*thickness, by = dy - Vy*thickness, bz = dz - Vz*thickness;
-										const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
-										const float fa = gtaoAcos((dx*Vx + dy*Vy + dz*Vz) * dinv);
-										const float ba = gtaoAcos((bx*Vx + by*Vy + bz*Vz) * binv);
-										float h0 = (float(sgn)*(-fa) - nAng + kHalfPI) / kPI;
-										float h1 = (float(sgn)*(-ba) - nAng + kHalfPI) / kPI;
-										h0 = h0<0?0:(h0>1?1:h0); h1 = h1<0?0:(h1>1?1:h1);
-										const float mn = h0<h1?h0:h1, mx = h0<h1?h1:h0;
-										uint32_t startBit = (uint32_t)(mn * 32.0f);
-										int angBits = (int)ceilf((mx - mn) * 32.0f);
-										if (angBits > 0) {
-											if (startBit > 31) startBit = 31;
-											const uint32_t bf = (angBits >= 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu >> (32 - angBits));
-											mask |= bf << startBit;
-										}
+					// Scalar per-cell GTAO (reference + 8-wide remainder tail).
+					auto gtaoCell = [&](int lx, int ly) {
+						const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
+						const int px = std::min(lx * down + half, W - 1);
+						const int py = std::min(ly * down + half, H - 1);
+						const size_t i = size_t(py) * size_t(W) + size_t(px);
+						const word ze = zEnc[i];
+						if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f; return; }
+						const float z = float(0xFF80 - ze) * invZScale;
+						aoZ[lo] = z;
+						const float Px = (float(px) - cx) * z * invFOVX;
+						const float Py = (cy - float(py)) * z * invFOVY;
+						const float Pz = z;
+						float Nx, Ny, Nz; meka::oct_decode_u16(nrm[i], Nx, Ny, Nz);
+						if (Nx*Px + Ny*Py + Nz*Pz > 0.0f) { Nx=-Nx; Ny=-Ny; Nz=-Nz; }
+						const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
+						const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;
+						float srad = radius * fovX / z;
+						if (srad < 2.0f) srad = 2.0f; else if (srad > 256.0f) srad = 256.0f;
+						const int ri = (ly & 3) * 4 + (lx & 3);
+						const float jit = g_rotCos[ri] * 0.5f + 0.5f;
+						float vis = 0.0f;
+						for (int s = 0; s < slices; ++s) {
+							const float phi = (float(s) + jit) * (kPI / float(slices));
+							const float dcx = cosf(phi), dsy = sinf(phi);
+							const float d3x = dcx, d3y = -dsy;
+							float snx = d3y*Vz, sny = -d3x*Vz, snz = d3x*Vy - d3y*Vx;
+							const float snl = fast_rsqrt(snx*snx + sny*sny + snz*snz + 1e-12f);
+							snx*=snl; sny*=snl; snz*=snl;
+							const float ndotsn = Nx*snx + Ny*sny + Nz*snz;
+							const float pnx = Nx - snx*ndotsn, pny = Ny - sny*ndotsn, pnz = Nz - snz*ndotsn;
+							const float tx = sny*Vz - snz*Vy, ty = snz*Vx - snx*Vz, tz = snx*Vy - sny*Vx;
+							const float nAng = atan2f(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
+							uint32_t mask = 0u;
+							for (int sgn = -1; sgn <= 1; sgn += 2) {
+								for (int j = 0; j < steps; ++j) {
+									const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
+									const int sx = px + int(float(sgn)*dcx*t + 0.5f);
+									const int sy = py + int(float(sgn)*dsy*t + 0.5f);
+									if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
+									const word ze2 = zEnc[size_t(sy)*size_t(W)+size_t(sx)];
+									if (ze2 == 0) continue;
+									const float sz = float(0xFF80 - ze2) * invZScale;
+									const float dx = (float(sx)-cx)*sz*invFOVX - Px;
+									const float dy = (cy-float(sy))*sz*invFOVY - Py;
+									const float dz = sz - Pz;
+									const float dl2 = dx*dx + dy*dy + dz*dz;
+									if (dl2 > r2max || dl2 < 1e-8f) continue;
+									const float dinv = fast_rsqrt(dl2);
+									const float bx = dx - Vx*thickness, by = dy - Vy*thickness, bz = dz - Vz*thickness;
+									const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
+									const float fa = gtaoAcos((dx*Vx + dy*Vy + dz*Vz) * dinv);
+									const float ba = gtaoAcos((bx*Vx + by*Vy + bz*Vz) * binv);
+									float h0 = (float(sgn)*(-fa) - nAng + kHalfPI) / kPI;
+									float h1 = (float(sgn)*(-ba) - nAng + kHalfPI) / kPI;
+									h0 = h0<0?0:(h0>1?1:h0); h1 = h1<0?0:(h1>1?1:h1);
+									const float mn = h0<h1?h0:h1, mx = h0<h1?h1:h0;
+									uint32_t startBit = (uint32_t)(mn * 32.0f);
+									int angBits = (int)ceilf((mx - mn) * 32.0f);
+									if (angBits > 0) {
+										if (startBit > 31) startBit = 31;
+										const uint32_t bf = (angBits >= 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu >> (32 - angBits));
+										mask |= bf << startBit;
 									}
 								}
-								vis += 1.0f - float(__builtin_popcount(mask)) / 32.0f;
 							}
-							vis /= float(slices);
-							float ao = 1.0f - (1.0f - vis) * strength;
-							if (ao < 0.0f) ao = 0.0f; else if (ao > 1.0f) ao = 1.0f;
-							if (power != 1.0f) ao = powf(ao, power);
-							aoRaw[lo] = ao;
+							vis += 1.0f - float(__builtin_popcount(mask)) / 32.0f;
 						}
+						vis /= float(slices);
+						float ao = 1.0f - (1.0f - vis) * strength;
+						if (ao < 0.0f) ao = 0.0f; else if (ao > 1.0f) ao = 1.0f;
+						if (power != 1.0f) ao = powf(ao, power);
+						aoRaw[lo] = ao;
+					};
+
+					// 8-wide GTAO over 8 cells of a row: the per-sample arithmetic
+					// (reconstruct, 2× gtaoAcos, horizon, bitmask build) is vector;
+					// the depth gather and the per-slice popcount stay scalar (8×).
+					// Per-lane slice setup (trig) is scalar but only slices×8 per
+					// group. Matches the scalar gtaoCell within rsqrt/cvt rounding.
+					auto gtaoRow8 = [&](int lx, int ly) {
+						const int py = std::min(ly * down + half, H - 1);
+						alignas(32) float aPx[8], aPy[8], aPz[8], aVx[8], aVy[8], aVz[8];
+						alignas(32) float aNx[8], aNy[8], aNz[8], aSr[8], aJit[8], aPxi[8];
+						alignas(32) int   aPxInt[8];
+						bool valid[8];
+						for (int k = 0; k < 8; ++k) {
+							const int cx_ = lx + k;
+							const int px = std::min(cx_ * down + half, W - 1);
+							const size_t lo = size_t(ly)*size_t(lowW) + size_t(cx_);
+							const size_t i = size_t(py)*size_t(W) + size_t(px);
+							const word ze = zEnc[i];
+							aPxInt[k] = px; aPxi[k] = float(px);
+							if (ze == 0) { valid[k]=false; aoRaw[lo]=1.0f; aoZ[lo]=-1.0f;
+							               aPx[k]=aPy[k]=aPz[k]=0; aVx[k]=aVy[k]=0; aVz[k]=1;
+							               aNx[k]=aNy[k]=0; aNz[k]=1; aSr[k]=2; aJit[k]=0; continue; }
+							const float z = float(0xFF80 - ze) * invZScale;
+							aoZ[lo] = z;
+							const float Px=(float(px)-cx)*z*invFOVX, Py=(cy-float(py))*z*invFOVY, Pz=z;
+							float Nx,Ny,Nz; meka::oct_decode_u16(nrm[i],Nx,Ny,Nz);
+							if (Nx*Px+Ny*Py+Nz*Pz>0.0f){Nx=-Nx;Ny=-Ny;Nz=-Nz;}
+							const float vinv=fast_rsqrt(Px*Px+Py*Py+Pz*Pz+1e-12f);
+							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>256.0f)sr=256.0f;
+							const int ri=(ly&3)*4+(cx_&3);
+							aPx[k]=Px;aPy[k]=Py;aPz[k]=Pz; aVx[k]=-Px*vinv;aVy[k]=-Py*vinv;aVz[k]=-Pz*vinv;
+							aNx[k]=Nx;aNy[k]=Ny;aNz[k]=Nz; aSr[k]=sr; aJit[k]=g_rotCos[ri]*0.5f+0.5f;
+							valid[k]=true;
+						}
+						const __m256 PxV=_mm256_load_ps(aPx),PyV=_mm256_load_ps(aPy),PzV=_mm256_load_ps(aPz);
+						const __m256 VxV=_mm256_load_ps(aVx),VyV=_mm256_load_ps(aVy),VzV=_mm256_load_ps(aVz);
+						const __m256 pxiV=_mm256_load_ps(aPxi), pyV=_mm256_set1_ps(float(py));
+						const __m256 sradV=_mm256_load_ps(aSr);
+						alignas(32) float visAcc[8] = {0,0,0,0,0,0,0,0};
+						const __m256 vHalf=_mm256_set1_ps(0.5f), vOne=_mm256_set1_ps(1.0f), vZero=_mm256_setzero_ps();
+						const __m256 vPI=_mm256_set1_ps(kPI), vHalfPI=_mm256_set1_ps(kHalfPI);
+						const __m256 vThick=_mm256_set1_ps(thickness), vR2=_mm256_set1_ps(r2max), vEps=_mm256_set1_ps(1e-8f);
+						const __m256 v32=_mm256_set1_ps(32.0f);
+						const __m256i i32=_mm256_set1_epi32(32), iAll=_mm256_set1_epi32(-1);
+						for (int s = 0; s < slices; ++s) {
+							// per-lane slice setup (scalar trig; slices×8 only)
+							alignas(32) float aDcx[8],aDsy[8],aNang[8];
+							for (int k=0;k<8;++k){
+								const float phi=(float(s)+aJit[k])*(kPI/float(slices));
+								const float dcx=cosf(phi),dsy=sinf(phi);
+								aDcx[k]=dcx;aDsy[k]=dsy;
+								const float d3x=dcx,d3y=-dsy;
+								float snx=d3y*aVz[k],sny=-d3x*aVz[k],snz=d3x*aVy[k]-d3y*aVx[k];
+								const float snl=fast_rsqrt(snx*snx+sny*sny+snz*snz+1e-12f); snx*=snl;sny*=snl;snz*=snl;
+								const float nd=aNx[k]*snx+aNy[k]*sny+aNz[k]*snz;
+								const float pnx=aNx[k]-snx*nd,pny=aNy[k]-sny*nd,pnz=aNz[k]-snz*nd;
+								const float tx=sny*aVz[k]-snz*aVy[k],ty=snz*aVx[k]-snx*aVz[k],tz=snx*aVy[k]-sny*aVx[k];
+								aNang[k]=atan2f(pnx*tx+pny*ty+pnz*tz, pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]);
+							}
+							const __m256 dcxV=_mm256_load_ps(aDcx), dsyV=_mm256_load_ps(aDsy), nAngV=_mm256_load_ps(aNang);
+							const __m256 jitV=_mm256_load_ps(aJit);
+							const __m256 srStep=_mm256_mul_ps(sradV,_mm256_set1_ps(1.0f/float(steps)));
+							__m256i maskV=_mm256_setzero_si256();
+							for (int sgn=-1; sgn<=1; sgn+=2) {
+								const __m256 sgnV=_mm256_set1_ps(float(sgn));
+								for (int j=0;j<steps;++j) {
+									// t = ((j+0.5)+jit*0.5) * srad/steps
+									__m256 tV=_mm256_mul_ps(_mm256_add_ps(_mm256_set1_ps(float(j)+0.5f),
+									           _mm256_mul_ps(jitV,vHalf)), srStep);
+									// sample int pos: px + int(sgn*dcx*t + 0.5)
+									__m256 offx=_mm256_mul_ps(_mm256_mul_ps(sgnV,dcxV),tV);
+									__m256 offy=_mm256_mul_ps(_mm256_mul_ps(sgnV,dsyV),tV);
+									__m256i sxi=_mm256_add_epi32(_mm256_load_si256((const __m256i*)aPxInt),
+									              _mm256_cvttps_epi32(_mm256_add_ps(offx,vHalf)));
+									__m256i syi=_mm256_add_epi32(_mm256_set1_epi32(py),
+									              _mm256_cvttps_epi32(_mm256_add_ps(offy,vHalf)));
+									alignas(32) int sxA[8], syA[8]; alignas(32) float szA[8];
+									_mm256_store_si256((__m256i*)sxA,sxi);
+									_mm256_store_si256((__m256i*)syA,syi);
+									bool any=false;
+									for (int k=0;k<8;++k){
+										const int sx=sxA[k], sy=syA[k];
+										if ((unsigned)sx>=(unsigned)W||(unsigned)sy>=(unsigned)H){ szA[k]=0.0f; continue; }
+										const word z2=zEnc[size_t(sy)*size_t(W)+size_t(sx)];
+										if (!z2){ szA[k]=0.0f; continue; }
+										szA[k]=float(0xFF80-z2)*invZScale; any=true;
+									}
+									if (!any) continue;
+									const __m256 szV=_mm256_load_ps(szA);
+									// gather-valid = sz>0 (sky/offscreen lanes set sz=0); proper all-ones mask
+									__m256 gmask=_mm256_cmp_ps(szV,vZero,_CMP_GT_OQ);
+									const __m256 sxf=_mm256_cvtepi32_ps(sxi), syf=_mm256_cvtepi32_ps(syi);
+									const __m256 dx=_mm256_sub_ps(_mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(sxf,_mm256_set1_ps(cx)),szV),_mm256_set1_ps(invFOVX)),PxV);
+									const __m256 dy=_mm256_sub_ps(_mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(cy),syf),szV),_mm256_set1_ps(invFOVY)),PyV);
+									const __m256 dz=_mm256_sub_ps(szV,PzV);
+									const __m256 dl2=_mm256_fmadd_ps(dx,dx,_mm256_fmadd_ps(dy,dy,_mm256_mul_ps(dz,dz)));
+									// range valid: dl2<=r2max && dl2>=eps  (AND the gather-valid mask)
+									__m256 rok=_mm256_and_ps(_mm256_cmp_ps(dl2,vR2,_CMP_LE_OQ),_mm256_cmp_ps(dl2,vEps,_CMP_GE_OQ));
+									gmask=_mm256_and_ps(gmask,rok);
+									const __m256 dinv=_mm256_rsqrt_ps(dl2);
+									const __m256 bx=_mm256_fnmadd_ps(VxV,vThick,dx), by=_mm256_fnmadd_ps(VyV,vThick,dy), bz=_mm256_fnmadd_ps(VzV,vThick,dz);
+									const __m256 binv=_mm256_rsqrt_ps(_mm256_fmadd_ps(bx,bx,_mm256_fmadd_ps(by,by,_mm256_fmadd_ps(bz,bz,_mm256_set1_ps(1e-12f)))));
+									const __m256 fdot=_mm256_mul_ps(_mm256_fmadd_ps(dx,VxV,_mm256_fmadd_ps(dy,VyV,_mm256_mul_ps(dz,VzV))),dinv);
+									const __m256 bdot=_mm256_mul_ps(_mm256_fmadd_ps(bx,VxV,_mm256_fmadd_ps(by,VyV,_mm256_mul_ps(bz,VzV))),binv);
+									const __m256 fa=gtaoAcos_x8(fdot), ba=gtaoAcos_x8(bdot);
+									// h = (sgn*(-a) - nAng + halfPI)/PI
+									__m256 h0=_mm256_div_ps(_mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(sgnV,_mm256_sub_ps(vZero,fa)),nAngV),vHalfPI),vPI);
+									__m256 h1=_mm256_div_ps(_mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(sgnV,_mm256_sub_ps(vZero,ba)),nAngV),vHalfPI),vPI);
+									h0=_mm256_min_ps(_mm256_max_ps(h0,vZero),vOne); h1=_mm256_min_ps(_mm256_max_ps(h1,vZero),vOne);
+									const __m256 mn=_mm256_min_ps(h0,h1), mx=_mm256_max_ps(h0,h1);
+									__m256i startB=_mm256_min_epi32(_mm256_cvttps_epi32(_mm256_mul_ps(mn,v32)),_mm256_set1_epi32(31));
+									__m256i angB=_mm256_min_epi32(_mm256_max_epi32(_mm256_cvttps_epi32(_mm256_ceil_ps(_mm256_mul_ps(_mm256_sub_ps(mx,mn),v32))),_mm256_setzero_si256()),i32);
+									// base = 0xFFFFFFFF >> (32-angB);  contrib = base << startB
+									__m256i base=_mm256_srlv_epi32(iAll,_mm256_sub_epi32(i32,angB));
+									__m256i contrib=_mm256_sllv_epi32(base,startB);
+									contrib=_mm256_and_si256(contrib,_mm256_castps_si256(gmask));
+									maskV=_mm256_or_si256(maskV,contrib);
+								}
+							}
+							alignas(32) uint32_t mk[8]; _mm256_store_si256((__m256i*)mk,maskV);
+							for (int k=0;k<8;++k) visAcc[k]+=1.0f-float(__builtin_popcount(mk[k]))/32.0f;
+						}
+						const float invS=1.0f/float(slices);
+						for (int k=0;k<8;++k){
+							if (!valid[k]) continue;
+							float ao=1.0f-(1.0f-visAcc[k]*invS)*strength;
+							if (ao<0)ao=0; else if(ao>1)ao=1;
+							if (power!=1.0f) ao=powf(ao,power);
+							aoRaw[size_t(ly)*size_t(lowW)+size_t(lx+k)]=ao;
+						}
+					};
+
+					for (int ly = ly1; ly < ly2; ++ly) {
+						int lx = lx1;
+						if (!noSimd) for (; lx + 8 <= lx2; lx += 8) gtaoRow8(lx, ly);
+						for (; lx < lx2; ++lx) gtaoCell(lx, ly);
 					}
 					renderns::tileDone.release();
 				});
