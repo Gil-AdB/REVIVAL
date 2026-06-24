@@ -233,17 +233,25 @@ A complete, recent post-pass that exercises every section above:
   occluded), else multiplies VPage.
 - Reduced-res ladder: `--ssao_downscale 1|2|4` computes AO on a `W/d × H/d` grid and
   depth-aware-bilinear-upsamples; the depth buffer is always full-res so edges stay crisp.
-  The low-res denoise is **normal+depth-aware** — panel-gap creases are normal
-  discontinuities with continuous depth, so a depth-only blur washes them out.
-  - **Reduced-res leaves a slight "aura" at sharp-Z silhouettes** (the bilinear pulls in
-    cells across the depth step). Tried + REVERTED a normal-aware *upsample* to fix it:
-    it added grid-aligned **banding on normal-mapped surfaces** (the greets floor) because
-    the cos⁴ term keys off the *bump-perturbed shading* normal, not a smooth geometric one
-    — stepping the tap weights on the low-res grid. A correct fix needs a geometric (pre-
-    normal-map) normal in the G-buffer, which isn't stored. Also +1.8 ms (full-res
-    `oct_decode`/pixel) and edge-gating it doesn't help (the per-pixel branch deopts the
-    apply loop's auto-vectorization, ~1.2 ms regardless). Net: not worth it — the aura is
-    minor and the cure was worse. The denoise's normal term is fine (low-res, pre-upsample).
+- **Noise/denoise (the floor-banding saga — read before touching it):** the kernel
+  rotation is a **4×4 tiling** pattern (16 golden-ratio angles, cell `x,y mod 4`) paired
+  with a **matched 4×4 box denoise** (offsets −2..+1 = exactly one period). The blur then
+  averages each of the 16 rotations once and cancels the rotation variance on flat
+  surfaces. A *continuous* per-pixel rotation (the original interleaved-gradient angle)
+  never repeats, so no finite blur resolves it → a faint diagonal **"hatch"** on the
+  grazing floor, sample-count-independent (still there at 256 spp). Things that were
+  **tried and REVERTED** (don't re-attempt):
+  - `cos⁴(shading-normal)` weight in the denoise/upsample → **bands on normal-mapped
+    surfaces**: the G-buffer normal is bump-perturbed, so neighbours disagree and the
+    filter down-weights its own taps. A correct crease-preserving weight needs a *smooth
+    geometric* normal (pre-normal-map), which the G-buffer doesn't store.
+  - geometric-normal **plane-distance** weight (iq's SSAO denoise) → **0 hatch gain here,
+    ~2× denoise cost**. Measured, dropped.
+  - normal-aware **upsample** → same normal-map banding + ~+1.8 ms; edge-gating it deopts
+    the apply loop's auto-vectorization (~1.2 ms regardless). Reverted.
+  The residual ~0.9 hatch (debug AO, 6–10× stretched) is inherent low-amplitude AO noise —
+  invisible at normal contrast once composited. `--ssao_samples` (default 16) does NOT fix
+  it (it's an inter-pixel pattern, not per-pixel variance); only the matched blur does.
 - Flags `--ssao*` are auto-derived from `FeatureFlags.def`; `FDS_SSAO_STATS=1` prints the
   per-pass timing, live view-Z range + AO histogram.
 - **Scene scale gotcha:** view-Z ≈ [5..80] units, so `--ssao_radius` ~3–5 (NOT 24, which
