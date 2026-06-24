@@ -235,6 +235,15 @@ A complete, recent post-pass that exercises every section above:
   depth-aware-bilinear-upsamples; the depth buffer is always full-res so edges stay crisp.
   The low-res denoise is **normal+depth-aware** — panel-gap creases are normal
   discontinuities with continuous depth, so a depth-only blur washes them out.
+  - **Reduced-res leaves a slight "aura" at sharp-Z silhouettes** (the bilinear pulls in
+    cells across the depth step). Tried + REVERTED a normal-aware *upsample* to fix it:
+    it added grid-aligned **banding on normal-mapped surfaces** (the greets floor) because
+    the cos⁴ term keys off the *bump-perturbed shading* normal, not a smooth geometric one
+    — stepping the tap weights on the low-res grid. A correct fix needs a geometric (pre-
+    normal-map) normal in the G-buffer, which isn't stored. Also +1.8 ms (full-res
+    `oct_decode`/pixel) and edge-gating it doesn't help (the per-pixel branch deopts the
+    apply loop's auto-vectorization, ~1.2 ms regardless). Net: not worth it — the aura is
+    minor and the cure was worse. The denoise's normal term is fine (low-res, pre-upsample).
 - Flags `--ssao*` are auto-derived from `FeatureFlags.def`; `FDS_SSAO_STATS=1` prints the
   per-pass timing, live view-Z range + AO histogram.
 - **Scene scale gotcha:** view-Z ≈ [5..80] units, so `--ssao_radius` ~3–5 (NOT 24, which
