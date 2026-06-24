@@ -22,6 +22,7 @@
 
 #include "GREETS.H"
 #include "GreetsDisco.h"
+#include "BlasterBolts.h"
 #include "GreetsMirror.h"
 #include "MirrorShatter.h"
 #include "RENDER/EnvBake.h"
@@ -1832,6 +1833,11 @@ void Initialize_Greets()
 	// Pos spline marks it dynamic → re-mirrored per frame).
 	fds::BuildDiscoBall(GreetSc);
 
+	// Blaster-bolt test harness (--greets-blasters): build the bolt mesh now
+	// so it's registered before the mirror build / mat-table rebuild.
+	if (fds::FeatureFlags::greets_blasters())
+		fds::BlasterBolts_Init(GreetSc);
+
 	// Shadow-map allocation + static cube bake + lightmap bake spawn.
 	// MOVED here from GreetsScene::init() so it runs during glat (via
 	// t1's Initialize_Greets) instead of waiting until the user reaches
@@ -2678,6 +2684,24 @@ struct GreetsScene : SceneDriver {
 		// the ball spin/bob a hair while paused. g_FrameTime is the
 		// frozen/scrubbed scene time CurFrame already uses.
 		fds::UpdateDiscoBall(GreetSc, (float)g_FrameTime);
+
+		// Blaster-bolt test (--greets-blasters): two emitters trade fire
+		// across the corridor at the robot's height. Deterministic on
+		// g_FrameTime so it's scrub-safe; billboards to the live camera.
+		if (fds::FeatureFlags::greets_blasters()) {
+			static int32_t sLastFire = -10000;
+			const int32_t t = (int32_t)g_FrameTime;
+			if (t - sLastFire >= 26 || t < sLastFire) {   // (t<last -> scrubbed back)
+				sLastFire = t;
+				const Vector eyeL{ -6.0f, 3.5f, -17.0f }, dirR{ 1.0f, 0.0f, -0.1f };
+				const Vector eyeR{  6.0f, 3.5f, -19.0f }, dirL{ -1.0f, 0.0f, -0.1f };
+				fds::BlasterBolts_Fire(eyeL, dirR, 0.45f, 1.0f, 0.20f, 0.10f);  // red
+				fds::BlasterBolts_Fire(eyeR, dirL, 0.45f, 0.20f, 1.0f, 0.35f);  // green
+			}
+			float bdt = (float)dTime; if (bdt < 0.5f) bdt = 0.5f; if (bdt > 4.0f) bdt = 4.0f;
+			const Vector camPos = ::View ? ::View->ISource : Vector{ 0, 3, -10 };
+			fds::BlasterBolts_Update(GreetSc, bdt, camPos);
+		}
 
 		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
 		// every frame so the tuning console / greets.params can drive them.
