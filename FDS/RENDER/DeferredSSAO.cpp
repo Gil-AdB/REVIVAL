@@ -92,9 +92,8 @@ inline float ignAngle(int px, int py) {
 }
 
 // Low-res scratch (sized lowW*lowH). aoZ holds the representative view-space Z
-// per cell (< 0 == sky / no surface); aoN* the cell's raw view-space normal
-// (the bilateral-upsample guide).
-std::vector<float> g_aoRaw, g_aoBlur, g_aoZ, g_aoNx, g_aoNy, g_aoNz;
+// per cell (< 0 == sky / no surface).
+std::vector<float> g_aoRaw, g_aoBlur, g_aoZ;
 
 } // namespace
 
@@ -126,7 +125,6 @@ void Render_SSAO() {
 	if (g_aoRaw.size()  < lowN) g_aoRaw.resize(lowN);
 	if (g_aoBlur.size() < lowN) g_aoBlur.resize(lowN);
 	if (g_aoZ.size()    < lowN) g_aoZ.resize(lowN);
-	if (g_aoNx.size()   < lowN) { g_aoNx.resize(lowN); g_aoNy.resize(lowN); g_aoNz.resize(lowN); }
 
 	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
 	const float invFOVX = 1.0f / FOVX, invFOVY = 1.0f / FOVY;
@@ -138,7 +136,6 @@ void Render_SSAO() {
 	float* aoRaw  = g_aoRaw.data();
 	float* aoBlur = g_aoBlur.data();
 	float* aoZ    = g_aoZ.data();
-	float* aoNx   = g_aoNx.data(); float* aoNy = g_aoNy.data(); float* aoNz = g_aoNz.data();
 	const int half = down >> 1;
 
 	// HDR: AO multiplies linear radiance in g_hdrBuf (correct + survives the
@@ -169,22 +166,19 @@ void Render_SSAO() {
 			for (int ti = 0; ti < numTilesX; ++ti) {
 				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 				ThreadPool::instance().enqueue([=]() {
-					// Per-pixel setup: writes aoZ/aoN; returns false for sky.
+					// Per-pixel setup: writes aoZ; returns false for sky.
 					struct Setup { float x,y,z, Tx,Ty,Tz, Bx,By,Bz, nx,ny,nz; };
 					auto setup = [&](int px, int py, size_t lo, Setup& S) -> bool {
 						const size_t i = size_t(py) * size_t(W) + size_t(px);
 						const word ze = zEnc[i];
-						if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f;
-						               aoNx[lo] = aoNy[lo] = aoNz[lo] = 0.0f; return false; }
+						if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f; return false; }
 						const float z = float(0xFF80 - ze) * invZScale;
 						S.z = z;
 						S.x = (float(px) - cx) * z * invFOVX;
 						S.y = (cy - float(py)) * z * invFOVY;
 						aoZ[lo] = z;
-						float rnx, rny, rnz;
-						meka::oct_decode_u16(nrm[i], rnx, rny, rnz);
-						aoNx[lo] = rnx; aoNy[lo] = rny; aoNz[lo] = rnz;
-						float nx = rnx, ny = rny, nz = rnz;
+						float nx, ny, nz;
+						meka::oct_decode_u16(nrm[i], nx, ny, nz);
 						if (nx*S.x + ny*S.y + nz*z > 0.0f) { nx = -nx; ny = -ny; nz = -nz; }
 						float hx = 0.0f, hy = 0.0f, hz = 1.0f;
 						if (fabsf(nz) > 0.999f) { hx = 1.0f; hz = 0.0f; }
@@ -318,13 +312,15 @@ void Render_SSAO() {
 	}
 	const auto tP1 = std::chrono::steady_clock::now();
 
-	// ── Pass 2: low-res DEPTH+NORMAL bilateral denoise ─────────────────────
-	// The denoise lives in low-res (cheap: W/d × H/d pixels) and is the real
-	// quality lever for reduced-res. NORMAL-awareness is the fix: panel-gap
-	// creases are normal discontinuities with *continuous* depth, so a
-	// depth-only blur smears across them (washed-out look). The cos^4 normal
-	// weight rejects taps across a crease, keeping detail while killing the
-	// per-cell rotation grain.
+	// ── Pass 2: low-res DEPTH-aware bilateral denoise ──────────────────────
+	// Resolves the per-pixel interleaved-gradient dither into smooth AO. DEPTH
+	// only — a previous cos^4(normal) term was REMOVED: on normal-mapped
+	// surfaces (the greets floor) the bump-perturbed shading normal makes
+	// neighbouring cells' normals disagree, so the cos^4 down-weighted the
+	// denoise's own taps and the dither survived as a diagonal "hatch"/banding.
+	// Depth alone denoises flat-but-bumpy surfaces correctly. (Crease
+	// preservation would need a smooth geometric normal, which the G-buffer
+	// doesn't store — see docs/GRAPHICS_PIPELINE.md.)
 	const float* aoSrc = aoRaw;
 	if (blurR > 0) {
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
@@ -345,7 +341,6 @@ void Render_SSAO() {
 							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
 							const float zc = aoZ[lo];
 							if (zc < 0.0f) { aoBlur[lo] = aoRaw[lo]; continue; }
-							const float cnx = aoNx[lo], cny = aoNy[lo], cnz = aoNz[lo];
 							const int bx0 = std::max(0, lx - blurR), bx1 = std::min(lowW - 1, lx + blurR);
 							float sum = 0.0f, wsum = 0.0f;
 							for (int yy = by0; yy <= by1; ++yy) {
@@ -355,11 +350,8 @@ void Render_SSAO() {
 									const float zt = aoZ[o];
 									if (zt < 0.0f) continue;
 									const float dz = zc - zt;
-									float wd = 1.0f - dz * dz * invDepthK;
-									if (wd <= 0.0f) continue;
-									float nd = cnx*aoNx[o] + cny*aoNy[o] + cnz*aoNz[o];
-									if (nd < 0.0f) nd = 0.0f;
-									const float w = wd * nd * nd * nd * nd;   // depth × cos^4(normal)
+									float w = 1.0f - dz * dz * invDepthK;   // depth-only (divide-free)
+									if (w <= 0.0f) continue;
 									sum += aoRaw[o] * w; wsum += w;
 								}
 							}
