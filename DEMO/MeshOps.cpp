@@ -364,6 +364,25 @@ Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	return nm;
 }
 
+Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
+                                bool buildMips) {
+	// Step 1: resample to 256^2 + BPP-convert. Leaves data LINEAR.
+	Image img; img.x = width; img.y = height; img.FileName = nullptr;
+	img.Data = new DWord[size_t(width) * size_t(height)];
+	std::memcpy(img.Data, pixels, size_t(width) * size_t(height) * sizeof(DWord));
+	Texture *t = new Texture;
+	std::memset(t, 0, sizeof(Texture));
+	t->BPP = 32;
+	Convert_Image2Texture(&img, t);
+	delete[] img.Data;
+	// Step 2: block-tile ("shachletz") so the rasterizer's swizzled UV
+	// addressing (packed_tile_u/v) hits the right texels. Without this the
+	// texture samples scrambled / repeated. See MeshOps.h for the full story.
+	t->Flags |= Txtr_Tiled;
+	Generate_Mipmaps(t, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, buildMips ? 1 : 0);
+	return t;
+}
+
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 	if (!Sc) return;
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {

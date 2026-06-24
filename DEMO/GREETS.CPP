@@ -1833,10 +1833,9 @@ void Initialize_Greets()
 	// Pos spline marks it dynamic → re-mirrored per frame).
 	fds::BuildDiscoBall(GreetSc);
 
-	// Blaster-bolt test harness (--greets-blasters): build the bolt mesh now
-	// so it's registered before the mirror build / mat-table rebuild.
+	// Blaster-bolt test harness (--greets-blasters): build the bolt texture.
 	if (fds::FeatureFlags::greets_blasters())
-		fds::BlasterBolts_Init(GreetSc);
+		fds::BlasterBolts_Init();
 
 	// Shadow-map allocation + static cube bake + lightmap bake spawn.
 	// MOVED here from GreetsScene::init() so it runs during glat (via
@@ -2699,8 +2698,7 @@ struct GreetsScene : SceneDriver {
 				fds::BlasterBolts_Fire(eyeR, dirL, 0.45f, 0.20f, 1.0f, 0.35f);  // green
 			}
 			float bdt = (float)dTime; if (bdt < 0.5f) bdt = 0.5f; if (bdt > 4.0f) bdt = 4.0f;
-			const Vector camPos = ::View ? ::View->ISource : Vector{ 0, 3, -10 };
-			fds::BlasterBolts_Update(GreetSc, bdt, camPos);
+			fds::BlasterBolts_Update(bdt);
 		}
 
 		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
@@ -2961,6 +2959,10 @@ struct GreetsScene : SceneDriver {
 		// legacy localized pass only when --bloom is OFF.
 		if (!fds::FeatureFlags::bloom())
 			fds::DiscoBloomPost();
+
+		// Blaster bolts: additive screen-space draw over the finished frame.
+		if (fds::FeatureFlags::greets_blasters())
+			fds::BlasterBolts_Draw();
 
 		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {

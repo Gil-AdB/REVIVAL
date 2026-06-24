@@ -244,6 +244,38 @@ that set only per-vertex UVs).
 (`IMGGENR/IMGGENR.CPP`). `LSizeX`/`LSizeY` are log2 dimensions used by
 the tiled addressing functions.
 
+#### Hand-built textures must be block-tiled ("shachletz") — `Convert_Image2Texture` is not enough
+
+The rasterizers (`TheOtherBarry`, `Mekalele`) **always** sample textures
+in a block-tile **swizzled** layout via `packed_tile_u/v` +
+`swizzle_umask` (`FDS/FILLERS/SimdHelpers.h`). The data behind
+`Mipmap[level]` must be stored in that interleaved order or every fetch
+lands on the wrong texel.
+
+`Convert_Image2Texture` (`FDS/IMGPROC/Imgproc.cpp`) does **not** produce
+that layout — it only resamples to 256×256 and converts BPP, leaving the
+pixels **linear / row-major**. The block-tiling + mip-chain build is a
+**separate** step, `Generate_Mipmaps(Tx, DEFAULT_BLOCKSIZEX,
+DEFAULT_BLOCKSIZEY, enableMip)` (`FDS/IMGCODE/IMGCODE.CPP`), gated on the
+`Txtr_Tiled` flag. The disk-load path runs both; code that bakes a
+texture by hand and stops after `Convert_Image2Texture` (or just sets
+`Mipmap[0] = Data; numMipmaps = 1`) ships **linear data read as
+swizzled** → the texture renders as evenly-spaced repeated cells (looks
+like 4× UV tiling, but the UVs and mip level are correct — the *bytes*
+are in the wrong order). The fountain lightning bolt has this latent bug;
+its noisy distance-field pattern just hides the corruption.
+
+Once correctly tiled, UV→texel mapping is the **standard** `U →
+texture-column`, `V → texture-row`. Any baker that reads its UVs as
+"swapped" (e.g. the fountain bolt's `UZ → texture-Y` comment) was
+silently compensating for the un-tiled bug and bakes its source image
+transposed — do **not** copy that as a convention.
+
+Use the consolidated helper `Scene_MakeTiledTexture(w, h, pixels,
+buildMips)` (`DEMO/MeshOps.h`) for any hand-built texture; it does the
+`Convert_Image2Texture` → `Txtr_Tiled` → `Generate_Mipmaps` dance in one
+call.
+
 ### VESA_Surface
 
 `FDS/Base/FDS_VARS.H:352`. Holds the per-surface state — `Data`

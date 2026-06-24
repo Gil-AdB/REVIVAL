@@ -1,9 +1,42 @@
 #pragma once
 
+#include <cstdint>
+
 struct TriMesh;
 struct Scene;
 struct Object;
 struct Vector;
+struct Texture;
+
+// Build a render-ready Texture from a LINEAR, row-major 32-bpp pixel buffer
+// (0xAARRGGBB DWords, `width*height` of them).
+//
+// This encapsulates a two-step gotcha that has cost a debug session every
+// time custom geometry got a hand-built texture (disco ball, blaster bolts,
+// fountain lightning):
+//
+//   1. Convert_Image2Texture ONLY resamples to 256x256 and converts BPP. It
+//      leaves the pixel data LINEAR (row-major), and it does NOT build mips
+//      or block-tile.
+//   2. The rasterizer (TheOtherBarry / Mekalele) ALWAYS samples textures
+//      block-tile SWIZZLED via packed_tile_u/v. So linear data is read at the
+//      wrong offsets — the texture renders scrambled / 4x-repeated (the bug
+//      manifests as evenly tiled cells, not noise). The data MUST be run
+//      through Generate_Mipmaps(.., DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, ..)
+//      with the Txtr_Tiled flag — the "shachletz" (interleave) step.
+//
+// With correct tiling, UV mapping is the STANDARD U -> texture-column,
+// V -> texture-row. (Any code that reads UVs as "swapped" — e.g. the fountain
+// bolt's UZ->texture-Y comment — was silently compensating for the un-tiled
+// bug and bakes its texture transposed; don't copy that as a convention.)
+//
+// `pixels` is copied internally — the caller keeps ownership. buildMips=true
+// builds the full mip chain (needed for surfaces that minify in the distance);
+// false still block-tiles but keeps a single level (fine for screen-space
+// sprites the 2D clipper always draws at mip 0, e.g. blaster bolts). Returns a
+// newly-allocated Texture* (caller owns).
+Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
+                                bool buildMips);
 
 // Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
 // with all the plumbing the engine needs — each item below cost a debug session
@@ -30,6 +63,10 @@ struct Vector;
 //     non-null Txtr->Txtr (a real texture). The deferred per-tile pass skips
 //     untextured faces. And additive faces want WriteZ=true in deferred so the
 //     mat32 "skip-lighting" sentinel survives.
+//   • TEXTURE GOTCHA: any hand-built Texture must be block-tiled, not just
+//     run through Convert_Image2Texture (which leaves data LINEAR while the
+//     rasterizer samples block-tile swizzled — the texture renders as repeated
+//     cells). Build it via Scene_MakeTiledTexture (below) and you're safe.
 //
 // Returns the created Object (already linked); call BEFORE the scene's
 // setupFaceLists / mirror build so the faces are budgeted and (if greets)
