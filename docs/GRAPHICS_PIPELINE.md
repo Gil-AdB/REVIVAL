@@ -256,6 +256,25 @@ A complete, recent post-pass that exercises every section above:
   per-pass timing, live view-Z range + AO histogram.
 - **Scene scale gotcha:** view-Z ≈ [5..80] units, so `--ssao_radius` ~3–5 (NOT 24, which
   overshoots all geometry → *less* occlusion). See §5.
+- **Two compute producers (Pass 1):** the default **hemisphere point-sampler** (8-wide SIMD)
+  and **GTAO + Visibility Bitmask** (`--ssao_gtao`, scalar, opt-in). They write the same
+  `aoRaw`/`aoZ`, so the denoise + apply downstream are shared — GTAO is a true drop-in.
+  - The hemisphere sampler has the classic **"halo"**: a foreground object over-occludes a
+    fat band of background (the sphere reaches past the silhouette), darkening the floor far
+    past real contact AND leaving the silhouette edge under-occluded → a **bright rim
+    relative to the darkened surroundings**. Note SSAO only ever *darkens* per-pixel — the
+    bright halo is a *contrast* effect (darkened floor next to an un-darkened edge), so a
+    diff showing "edge unchanged, surroundings darker" IS the halo, not its absence.
+  - **GTAO fixes it**: horizon integration occludes only by the occluder's true angular
+    extent → tight contact-defined AO, no fat band, no bright rim. The 32-sector bitmask +
+    `--ssao_gtao_thickness` lets light pass behind thin occluders (the legs). Knobs:
+    `--ssao_gtao_slices` (dirs), `--ssao_gtao_steps` (march), `--ssao_gtao_thickness`.
+  - GTAO cost (scalar): ~4× the hemisphere's SIMD compute — d4 ~7ms, d2 ~24ms, d1 ~80ms.
+    SIMD-able later (per-sample gather + popcount resist it; the arithmetic vectorizes).
+  - **A bright edge halo is NOT always SSAO** — full-screen **bloom/anamorphic** blur the
+    blown-out floor over a dark silhouette too (non-depth-aware), an *additive* rim that
+    persists with `--no-ssao`. Diagnose by toggling `--no-ssao` (SSAO halo = contrast,
+    vanishes) vs `--no-bloom --no-anamorphic` (post halo = additive, vanishes).
 
 ### SSAO performance — what was done, and what didn't pay
 
