@@ -254,16 +254,19 @@ lands on the wrong texel.
 
 `Convert_Image2Texture` (`FDS/IMGPROC/Imgproc.cpp`) does **not** produce
 that layout — it only resamples to 256×256 and converts BPP, leaving the
-pixels **linear / row-major**. The block-tiling + mip-chain build is a
-**separate** step, `Generate_Mipmaps(Tx, DEFAULT_BLOCKSIZEX,
-DEFAULT_BLOCKSIZEY, enableMip)` (`FDS/IMGCODE/IMGCODE.CPP`), gated on the
-`Txtr_Tiled` flag. The disk-load path runs both; code that bakes a
+pixels **linear / row-major**. The block-tiling is a **separate** step,
+done by either `Sachletz(data, w, h)` (`FDS/IMGGENR/IMGGENR.CPP`, the
+standalone in-place swizzle most call sites use — disco, mirrors, RTTs,
+scene-builder, skybox, env-bake) or `Generate_Mipmaps(Tx,
+DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, enableMip)`
+(`FDS/IMGCODE/IMGCODE.CPP`, which also builds the mip chain), with the
+`Txtr_Tiled` flag. Both produce the same 4×4-block, X-outer/Y-inner
+layout. The disk-load path runs `Generate_Mipmaps`; code that bakes a
 texture by hand and stops after `Convert_Image2Texture` (or just sets
 `Mipmap[0] = Data; numMipmaps = 1`) ships **linear data read as
 swizzled** → the texture renders as evenly-spaced repeated cells (looks
 like 4× UV tiling, but the UVs and mip level are correct — the *bytes*
-are in the wrong order). The fountain lightning bolt has this latent bug;
-its noisy distance-field pattern just hides the corruption.
+are in the wrong order).
 
 Once correctly tiled, UV→texel mapping is the **standard** `U →
 texture-column`, `V → texture-row`. Any baker that reads its UVs as

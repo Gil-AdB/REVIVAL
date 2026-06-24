@@ -14,9 +14,14 @@ interleaved order or every fetch lands on the wrong texel.
 
 `Convert_Image2Texture` does **not** produce that layout — it only resamples to
 256×256 and converts BPP, leaving the data **linear / row-major**. The
-block-tiling + mip build is a **separate** step:
-`Generate_Mipmaps(Tx, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, enableMip)` with
-the `Txtr_Tiled` flag set.
+block-tiling is a **separate** step, done by either of (they produce the same
+4×4-block, X-outer/Y-inner layout):
+- `Sachletz(data, w, h)` (`FDS/IMGGENR/IMGGENR.CPP`) — the standalone in-place
+  swizzle, used across the codebase (disco, mirrors, RTTs, scene-builder,
+  skybox, env-bake). This is the "shachletz" the layout is named after.
+- `Generate_Mipmaps(Tx, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, enableMip)`
+  (`FDS/IMGCODE/IMGCODE.CPP`) — swizzles **and** builds the mip chain; the
+  disk-load path uses this. Set the `Txtr_Tiled` flag alongside it.
 
 - **Symptom of skipping it:** the texture renders as evenly-spaced **repeated
   cells** (looks like 4× UV tiling). The UVs and mip level are correct — the
