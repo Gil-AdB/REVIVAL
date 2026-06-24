@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <cstdint>
 #include <semaphore>
 
 #include <arm_neon.h>
@@ -104,6 +105,15 @@ void buildRot() {
 	done = true;
 }
 
+// Fast acos (GTAO, Eberly fit), ~0.18° max error — cheap vs std::acos in the
+// per-sample horizon loop. Input clamped to [-1,1] by the caller's dot/rsqrt.
+inline float gtaoAcos(float x) {
+	if (x < -1.0f) x = -1.0f; else if (x > 1.0f) x = 1.0f;
+	const float ax = fabsf(x);
+	const float r = (-0.156583f * ax + 1.57079633f) * sqrtf(1.0f - ax);
+	return x >= 0.0f ? r : 3.14159265f - r;
+}
+
 // Low-res scratch (sized lowW*lowH). aoZ holds the representative view-space Z
 // per cell (< 0 == sky / no surface).
 std::vector<float> g_aoRaw, g_aoBlur, g_aoZ;
@@ -162,15 +172,118 @@ void Render_SSAO() {
 
 	constexpr int numTilesX = 6, numTilesY = 4;
 
-	// ── Pass 1: compute AO + guide (depth, normal) on the low-res grid ──────
-	// Per-pixel SETUP (reconstruct, decode normal, build the rotated TBN basis)
-	// is scalar — it's once-per-pixel and cheap next to the sample loop. The
-	// SAMPLE LOOP is the hot path: vectorized 8 pixels wide, with approximate
-	// reciprocals (_mm256_rcp_ps) for the per-sample divides — one NR-refined
-	// rcp for the projection (tap position needs accuracy) and a raw rcp for
-	// the range term (it feeds min(1,·)+average, so 12 bits is plenty). The
-	// per-sample depth lookup stays a scalar gather (re-projected address); the
-	// arithmetic around it is what SIMD recovers. Scalar tail for the <8 remnant.
+	const bool gtao = fds::FeatureFlags::ssao_gtao();
+
+	// ── Pass 1: compute the AO field on the low-res grid ───────────────────
+	// Two interchangeable producers writing the same aoRaw[lo] (AO 0..1) +
+	// aoZ[lo] (view-Z, <0 = sky); the denoise + apply downstream don't care
+	// which ran. GTAO path = horizon/bitmask (--ssao_gtao); else the hemisphere
+	// point-sampler. Both use the 4×4-tiling rotation so the matched box denoise
+	// cancels their per-cell noise.
+	if (gtao) {
+		// GTAO + Visibility Bitmask (Therrien & Levesque 2023,
+		// cdrinmatane.github.io/posts/ssaovb-code). Per slice: march a screen
+		// direction (both ways), turn each occluder sample into a [front,back]
+		// horizon-angle range (back = front offset by `thickness` along −V, so
+		// light passes behind thin occluders), set those sectors in a 32-bit
+		// mask; AO = 1 − occludedSectors/32, averaged over slices. Horizon
+		// integration occludes only by the occluder's true angular extent, so it
+		// has none of the hemisphere sampler's over-occlusion halo / bright rim.
+		// Scalar (opt-in); low-res grid keeps it cheap. SECTOR_COUNT = 32.
+		int slices = fds::FeatureFlags::ssao_gtao_slices(); slices = std::max(1, std::min(8, slices));
+		int steps  = fds::FeatureFlags::ssao_gtao_steps();  steps  = std::max(1, std::min(16, steps));
+		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
+		const float r2max = radius * radius;
+		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
+		const int tsx = (lowW + numTilesX - 1) / numTilesX;
+		const int tsy = (lowH + numTilesY - 1) / numTilesY;
+		for (int tj = 0; tj < numTilesY; ++tj) {
+			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
+			for (int ti = 0; ti < numTilesX; ++ti) {
+				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+				ThreadPool::instance().enqueue([=]() {
+					for (int ly = ly1; ly < ly2; ++ly) {
+						for (int lx = lx1; lx < lx2; ++lx) {
+							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
+							const int px = std::min(lx * down + half, W - 1);
+							const int py = std::min(ly * down + half, H - 1);
+							const size_t i = size_t(py) * size_t(W) + size_t(px);
+							const word ze = zEnc[i];
+							if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f; continue; }
+							const float z = float(0xFF80 - ze) * invZScale;
+							aoZ[lo] = z;
+							const float Px = (float(px) - cx) * z * invFOVX;
+							const float Py = (cy - float(py)) * z * invFOVY;
+							const float Pz = z;
+							float Nx, Ny, Nz; meka::oct_decode_u16(nrm[i], Nx, Ny, Nz);
+							if (Nx*Px + Ny*Py + Nz*Pz > 0.0f) { Nx=-Nx; Ny=-Ny; Nz=-Nz; }
+							const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
+							const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;   // toward camera
+							float srad = radius * fovX / z;                            // view radius → screen px
+							if (srad < 2.0f) srad = 2.0f; else if (srad > 256.0f) srad = 256.0f;
+							const int ri = (ly & 3) * 4 + (lx & 3);                    // 4×4 tiling
+							const float jit = g_rotCos[ri] * 0.5f + 0.5f;              // per-cell [0,1)
+							float vis = 0.0f;
+							for (int s = 0; s < slices; ++s) {
+								const float phi = (float(s) + jit) * (kPI / float(slices));
+								const float dcx = cosf(phi), dsy = sinf(phi);          // screen dir
+								// screen dir → view (screen +y is view −y); slice plane normal = norm(cross(d3,V))
+								const float d3x = dcx, d3y = -dsy;
+								float snx = d3y*Vz - 0.0f, sny = 0.0f - d3x*Vz, snz = d3x*Vy - d3y*Vx;
+								const float snl = fast_rsqrt(snx*snx + sny*sny + snz*snz + 1e-12f);
+								snx*=snl; sny*=snl; snz*=snl;
+								const float ndotsn = Nx*snx + Ny*sny + Nz*snz;          // project N onto plane
+								const float pnx = Nx - snx*ndotsn, pny = Ny - sny*ndotsn, pnz = Nz - snz*ndotsn;
+								const float tx = sny*Vz - snz*Vy, ty = snz*Vx - snx*Vz, tz = snx*Vy - sny*Vx; // T = sn×V
+								const float nAng = atan2f(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
+								uint32_t mask = 0u;
+								for (int sgn = -1; sgn <= 1; sgn += 2) {
+									for (int j = 0; j < steps; ++j) {
+										const float t = (float(j) + 0.5f + jit*0.5f) / float(steps) * srad;
+										const int sx = px + int(float(sgn)*dcx*t + 0.5f);
+										const int sy = py + int(float(sgn)*dsy*t + 0.5f);
+										if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
+										const word ze2 = zEnc[size_t(sy)*size_t(W)+size_t(sx)];
+										if (ze2 == 0) continue;
+										const float sz = float(0xFF80 - ze2) * invZScale;
+										const float dx = (float(sx)-cx)*sz*invFOVX - Px;
+										const float dy = (cy-float(sy))*sz*invFOVY - Py;
+										const float dz = sz - Pz;
+										const float dl2 = dx*dx + dy*dy + dz*dz;
+										if (dl2 > r2max || dl2 < 1e-8f) continue;       // range cutoff
+										const float dinv = fast_rsqrt(dl2);
+										const float bx = dx - Vx*thickness, by = dy - Vy*thickness, bz = dz - Vz*thickness;
+										const float binv = fast_rsqrt(bx*bx + by*by + bz*bz + 1e-12f);
+										const float fa = gtaoAcos((dx*Vx + dy*Vy + dz*Vz) * dinv);
+										const float ba = gtaoAcos((bx*Vx + by*Vy + bz*Vz) * binv);
+										float h0 = (float(sgn)*(-fa) - nAng + kHalfPI) / kPI;
+										float h1 = (float(sgn)*(-ba) - nAng + kHalfPI) / kPI;
+										h0 = h0<0?0:(h0>1?1:h0); h1 = h1<0?0:(h1>1?1:h1);
+										const float mn = h0<h1?h0:h1, mx = h0<h1?h1:h0;
+										uint32_t startBit = (uint32_t)(mn * 32.0f);
+										int angBits = (int)ceilf((mx - mn) * 32.0f);
+										if (angBits > 0) {
+											if (startBit > 31) startBit = 31;
+											const uint32_t bf = (angBits >= 32) ? 0xFFFFFFFFu : (0xFFFFFFFFu >> (32 - angBits));
+											mask |= bf << startBit;
+										}
+									}
+								}
+								vis += 1.0f - float(__builtin_popcount(mask)) / 32.0f;
+							}
+							vis /= float(slices);
+							float ao = 1.0f - (1.0f - vis) * strength;
+							if (ao < 0.0f) ao = 0.0f; else if (ao > 1.0f) ao = 1.0f;
+							if (power != 1.0f) ao = powf(ao, power);
+							aoRaw[lo] = ao;
+						}
+					}
+					renderns::tileDone.release();
+				});
+			}
+		}
+		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+	} else
 	{
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
@@ -455,9 +568,9 @@ void Render_SSAO() {
 
 	static int frame = 0;
 	if (((frame++) % 120) == 0) {
-		fprintf(stderr, "[ssao] %dx%d /%d (%dx%d), %d samples, %s, %s: %.2f ms\n",
-		        W, H, down, lowW, lowH, nSamp,
-		        down == 1 ? "box-blur denoise" : "bilateral upsample",
+		fprintf(stderr, "[ssao] %dx%d /%d (%dx%d), %s, %s: %.2f ms\n",
+		        W, H, down, lowW, lowH,
+		        gtao ? "GTAO+bitmask" : "hemisphere",
 		        useHdr ? "HDR g_hdrBuf" : "LDR VPage", g_ssaoLastMs);
 		if (getenv("FDS_SSAO_STATS")) {
 			using ms = std::chrono::duration<double, std::milli>;
