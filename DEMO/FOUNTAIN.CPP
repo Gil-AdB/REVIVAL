@@ -13,6 +13,7 @@
 #include "Clipper.h"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "MeshOps.h"   // Scene_MakeTiledTexture (block-tile a hand-built texture)
 #include <memory>
 #include <cstdlib>
 #include <cstdio>
@@ -1779,7 +1780,12 @@ Material* makeBoltTexture(uint32_t seed, float rough, float* outWig, int* outN) 
 	for (int i = 0; i < n; ++i) outWig[i] = vals[i];   // hand the wiggle to the core-line draw
 	*outN = n;
 	float px[129], py[129];
-	for (int k = 0; k < n; ++k) { px[k] = (float)k/(n-1)*(W-1); py[k] = vals[k]*H; }
+	// The wiggly centre runs DOWN texture-Y (rows = bolt LENGTH, sampled by V),
+	// wiggling across X (cols = width, sampled by U). With the texture correctly
+	// block-tiled the rasterizer maps U->column, V->row, so this lays the
+	// lightning along the bolt's length. (The pre-tiling bake ran it along X and
+	// relied on the un-tiled swizzle mis-read to transpose it — see MeshOps.h.)
+	for (int k = 0; k < n; ++k) { px[k] = vals[k]*W; py[k] = (float)k/(n-1)*(H-1); }
 	auto distSeg2 = [](float Px,float Py,float ax,float ay,float bx,float by)->float{
 		const float vx=bx-ax, vy=by-ay, wx=Px-ax, wy=Py-ay;
 		const float vv=vx*vx+vy*vy;
@@ -1814,14 +1820,12 @@ Material* makeBoltTexture(uint32_t seed, float rough, float* outWig, int* outN) 
 	}
 	Material* M = getAlignedType<Material>(16);
 	M->Flags = Mat_Virtual;
-	M->Txtr = new Texture;
-	std::memset(M->Txtr, 0, sizeof(Texture));
-	M->Txtr->BPP = 32;
-	M->Txtr->Flags = Txtr_Nomip;
-	Convert_Image2Texture(&Img, M->Txtr);
+	// Block-tile the bake so the rasterizer's swizzled UV addressing samples it
+	// correctly. Skipping this (raw Convert_Image2Texture + numMipmaps=1) is what
+	// made the glow halo sample scrambled / repeated. See DEMO/MeshOps.h. The 2D
+	// clipper always draws this at mip 0, so no mip chain is needed.
+	M->Txtr = Scene_MakeTiledTexture(W, H, Img.Data, /*buildMips=*/false);
 	delete[] Img.Data;
-	M->Txtr->Mipmap[0] = M->Txtr->Data;
-	M->Txtr->numMipmaps = 1;
 	return M;
 }
 
@@ -1915,12 +1919,11 @@ void drawBoltQuad(const Vector& A, const Vector& B, Material* tex,
 	if (hwB < 1.5f) hwB = 1.5f; if (hwB > 400.0f) hwB = 400.0f;
 	float col = bright * 255.0f; if (col < 0.0f) col = 0.0f; if (col > 255.0f) col = 255.0f;
 	Vertex q[4];
-	// This rasterizer samples UZ->texture-Y, VZ->texture-X (verified with a
-	// 4-band diagnostic). So put the bolt's LENGTH on U and width on V:
-	//   U (UZ): 0 at the A end, 1 at the B end  -> texture-Y (jagged length)
-	//   V (VZ): 0 / 1 across the width          -> texture-X (glow profile)
-	// U = across width, V = along length (the working-ribbon convention);
-	// the texture is built jagged along its V axis to match.
+	// Standard UV mapping — the bolt texture is block-tiled, so U->texture-column,
+	// V->texture-row:
+	//   U (UZ): 0 / 1 across the WIDTH   -> texture-column (glow profile)
+	//   V (VZ): 0 at A, 1 at B (LENGTH)  -> texture-row    (jagged length)
+	// makeBoltTexture bakes its wiggly centre down rows = V to match.
 	q[0].PX = ax - hwA*nx; q[0].PY = ay - hwA*ny; q[0].UZ=0;   q[0].VZ=0;   q[0].RZ = rzA;
 	q[1].PX = ax + hwA*nx; q[1].PY = ay + hwA*ny; q[1].UZ=rzA; q[1].VZ=0;   q[1].RZ = rzA;
 	q[2].PX = bx + hwB*nx; q[2].PY = by + hwB*ny; q[2].UZ=rzB; q[2].VZ=rzB; q[2].RZ = rzB;
