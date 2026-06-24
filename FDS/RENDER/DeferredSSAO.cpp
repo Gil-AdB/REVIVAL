@@ -85,10 +85,23 @@ void buildKernel(int n) {
 	g_kernelN = n;
 }
 
-// Jorge Jimenez interleaved-gradient noise -> per-pixel decorrelation angle.
-inline float ignAngle(int px, int py) {
-	float v = 52.9829189f * fmodf(0.06711056f * float(px) + 0.00583715f * float(py), 1.0f);
-	return (v - floorf(v)) * 6.2831853f;
+// 4×4 TILING rotation table (cos, sin), filled once on the main thread. 16
+// golden-ratio-distributed angles, indexed by the low-res cell's (x,y) mod 4.
+// The kernel-rotation noise REPEATS every 4 cells, so a matched 4×4 box blur
+// averages exactly one full period of the 16 rotations and cancels the per-cell
+// rotation variance (the diagonal "hatch") on flat surfaces. A continuous
+// per-pixel noise (the old interleaved-gradient angle) never repeats, so no
+// finite blur fully resolves it — that residual was the floor banding.
+float g_rotCos[16], g_rotSin[16];
+void buildRot() {
+	static bool done = false;
+	if (done) return;                 // main-thread only (called before dispatch)
+	for (int i = 0; i < 16; ++i) {
+		float f = float(i) * 0.6180339887f; f -= floorf(f);   // golden-ratio low-discrepancy
+		float a = f * 6.2831853f;
+		g_rotCos[i] = cosf(a); g_rotSin[i] = sinf(a);
+	}
+	done = true;
 }
 
 // Low-res scratch (sized lowW*lowH). aoZ holds the representative view-space Z
@@ -118,6 +131,7 @@ void Render_SSAO() {
 	const bool  dbg      = fds::FeatureFlags::ssao_debug();
 
 	buildKernel(nSamp);
+	buildRot();
 
 	const int    lowW = (W + down - 1) / down;
 	const int    lowH = (H + down - 1) / down;
@@ -166,9 +180,10 @@ void Render_SSAO() {
 			for (int ti = 0; ti < numTilesX; ++ti) {
 				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 				ThreadPool::instance().enqueue([=]() {
-					// Per-pixel setup: writes aoZ; returns false for sky.
+					// Per-pixel setup: writes aoZ; returns false for sky. ca/sa is
+					// the per-cell 4×4-tiling kernel rotation (see g_rotCos/Sin).
 					struct Setup { float x,y,z, Tx,Ty,Tz, Bx,By,Bz, nx,ny,nz; };
-					auto setup = [&](int px, int py, size_t lo, Setup& S) -> bool {
+					auto setup = [&](int px, int py, float ca, float sa, size_t lo, Setup& S) -> bool {
 						const size_t i = size_t(py) * size_t(W) + size_t(px);
 						const word ze = zEnc[i];
 						if (ze == 0) { aoRaw[lo] = 1.0f; aoZ[lo] = -1.0f; return false; }
@@ -186,8 +201,6 @@ void Render_SSAO() {
 						float tl = fast_rsqrt(t0x*t0x + t0y*t0y + t0z*t0z + 1e-12f);  // approx 1/sqrt, no divide
 						t0x *= tl; t0y *= tl; t0z *= tl;
 						float b0x = ny*t0z - nz*t0y, b0y = nz*t0x - nx*t0z, b0z = nx*t0y - ny*t0x;
-						const float a = ignAngle(px, py);
-						const float ca = cosf(a), sa = sinf(a);
 						S.Tx = t0x*ca + b0x*sa; S.Ty = t0y*ca + b0y*sa; S.Tz = t0z*ca + b0z*sa;
 						S.Bx = -t0x*sa + b0x*ca; S.By = -t0y*sa + b0y*ca; S.Bz = -t0z*sa + b0z*ca;
 						S.nx = nx; S.ny = ny; S.nz = nz;
@@ -218,8 +231,10 @@ void Render_SSAO() {
 							bool  valid[8];
 							for (int k = 0; k < 8; ++k) {
 								Setup S{};
-								const int px = std::min((lx + k) * down + half, W - 1);
-								valid[k] = setup(px, py, rowLo + size_t(lx + k), S);
+								const int cellX = lx + k;
+								const int px = std::min(cellX * down + half, W - 1);
+								const int ri = (ly & 3) * 4 + (cellX & 3);   // 4×4 tiling rotation
+								valid[k] = setup(px, py, g_rotCos[ri], g_rotSin[ri], rowLo + size_t(cellX), S);
 								aX[k]=S.x; aY[k]=S.y; aZ[k]=S.z;
 								aTx[k]=S.Tx; aTy[k]=S.Ty; aTz[k]=S.Tz;
 								aBx[k]=S.Bx; aBy[k]=S.By; aBz[k]=S.Bz;
@@ -280,8 +295,9 @@ void Render_SSAO() {
 						for (; lx < lx2; ++lx) {
 							const size_t lo = rowLo + size_t(lx);
 							const int px = std::min(lx * down + half, W - 1);
+							const int ri = (ly & 3) * 4 + (lx & 3);   // 4×4 tiling rotation
 							Setup S{};
-							if (!setup(px, py, lo, S)) continue;
+							if (!setup(px, py, g_rotCos[ri], g_rotSin[ri], lo, S)) continue;
 							float occ = 0.0f;
 							for (int s = 0; s < nSamp; ++s) {
 								const float ox = (S.Tx*kx[s] + S.Bx*ky[s] + S.nx*kz[s]) * radius;
@@ -312,36 +328,33 @@ void Render_SSAO() {
 	}
 	const auto tP1 = std::chrono::steady_clock::now();
 
-	// ── Pass 2: low-res DEPTH-aware bilateral denoise ──────────────────────
-	// Resolves the per-pixel interleaved-gradient dither into smooth AO. DEPTH
-	// only — a previous cos^4(normal) term was REMOVED: on normal-mapped
-	// surfaces (the greets floor) the bump-perturbed shading normal makes
-	// neighbouring cells' normals disagree, so the cos^4 down-weighted the
-	// denoise's own taps and the dither survived as a diagonal "hatch"/banding.
-	// Depth alone denoises flat-but-bumpy surfaces correctly. (Crease
-	// preservation would need a smooth geometric normal, which the G-buffer
-	// doesn't store — see docs/GRAPHICS_PIPELINE.md.)
+	// ── Pass 2: MATCHED 4×4 depth-aware box denoise ────────────────────────
+	// Fixed 4×4 box (offsets -2..+1) = exactly the 4×4 tiling-rotation period,
+	// so it averages each of the 16 rotations once → cancels the rotation
+	// "hatch" on flat surfaces (a 5×5 or continuous-noise blur leaves a residual
+	// — that was the floor banding). DEPTH-only weight: a geometric-normal
+	// PLANE-distance weight (iq's trick) was measured and dropped — zero hatch
+	// improvement here and ~2× the denoise cost. The cos^4 SHADING-normal weight
+	// is also gone (it banded on the normal-mapped floor). blurR>0 enables it;
+	// window is fixed at 4 (matched to the noise period), not blurR-scaled.
 	const float* aoSrc = aoRaw;
 	if (blurR > 0) {
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		const float depthSig = std::max(radius, 1.0f);
-		// Divide-free depth falloff: max(0, 1 - dz²·invDepthK), cutoff at
-		// 2·depthSig. Replaces a per-tap reciprocal (25 divides/pixel at R=2)
-		// with a multiply — the denoise is the dominant full-res cost.
-		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);
+		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);  // divide-free depth falloff
 		for (int tj = 0; tj < numTilesY; ++tj) {
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
 			for (int ti = 0; ti < numTilesX; ++ti) {
 				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
 				ThreadPool::instance().enqueue([=]() {
 					for (int ly = ly1; ly < ly2; ++ly) {
-						const int by0 = std::max(0, ly - blurR), by1 = std::min(lowH - 1, ly + blurR);
+						const int by0 = std::max(0, ly - 2), by1 = std::min(lowH - 1, ly + 1);  // 4×4 box
 						for (int lx = lx1; lx < lx2; ++lx) {
 							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
 							const float zc = aoZ[lo];
 							if (zc < 0.0f) { aoBlur[lo] = aoRaw[lo]; continue; }
-							const int bx0 = std::max(0, lx - blurR), bx1 = std::min(lowW - 1, lx + blurR);
+							const int bx0 = std::max(0, lx - 2), bx1 = std::min(lowW - 1, lx + 1);
 							float sum = 0.0f, wsum = 0.0f;
 							for (int yy = by0; yy <= by1; ++yy) {
 								const size_t r2 = size_t(yy) * size_t(lowW);
