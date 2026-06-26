@@ -2699,6 +2699,11 @@ struct GreetsScene : SceneDriver {
 			}
 			float bdt = (float)dTime; if (bdt < 0.5f) bdt = 0.5f; if (bdt > 4.0f) bdt = 4.0f;
 			fds::BlasterBolts_Update(bdt);
+			// Emit transient bolt-lights AFTER Animate_Objects (ran above, sets
+			// omni IPos from splines) and BEFORE gg->Render()'s deferred lighting.
+			// Pass GreetSc (the rendered scene) — the deferred kernel reads that,
+			// not the global CurScene.
+			fds::BlasterBolts_EmitLights(GreetSc);
 		}
 
 		// Live tint knobs (shard silver #3 + portal tint #1): re-applied

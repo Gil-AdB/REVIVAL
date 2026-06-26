@@ -10,6 +10,10 @@
 #include <Base/Material.h>
 #include <Base/Texture.h>
 #include <Base/FrameState.h>      // MainRenderTargetFromGlobals, g_mainCamera
+#include <Base/Omni.h>            // Omni (transient bolt-lights)
+#include <Base/Scene.h>           // Scene::OmniHead
+#include <Base/Spline.h>          // SplineKey (single-key init for Animate_Objects)
+#include <Base/FeatureFlags.h>
 #include <FRUSTRUM.H>             // Viewport, viewportInit, viewportCalcFlags
 #include <Clipper.h>              // _2DClipper
 #include <FILLERS/TheOtherBarry.h>
@@ -38,6 +42,42 @@ struct Bolt {
 Bolt      s_bolts[kMaxBolts];
 Material *s_mat    = nullptr;
 bool      s_inited = false;
+
+// ── Transient bolt-lights ─────────────────────────────────────────────────
+// Each live bolt drives a non-stationary coloured Omni so the deferred kernel
+// lights nearby geometry with a moving pool (and the froxel fog in-scatters it
+// for free where fog is on — no fog-specific path needed). Pooled + capped:
+// fewer lights than bolts (the per-tile cull bounds spatial cost, but the
+// scene-wide omni list shouldn't balloon). Lazily allocated onto CurScene and
+// re-attached if the scene changes (the module is scene-agnostic).
+constexpr int kMaxBoltLights = 12;
+Omni  *s_lights[kMaxBoltLights] = {};
+Scene *s_lightScene = nullptr;
+
+void NopBoltOmniFiller(Face*, Vertex**, dword, dword,
+                       const fds::RenderTarget&, const fds::CameraContext&) {}
+
+// Build one idle transient omni and append it to Sc's OmniHead chain. Single-
+// key splines so Animate_Objects (which walks every omni's Pos/Size/Range each
+// frame) doesn't OOB; we overwrite IPos per-frame AFTER Animate_Objects anyway.
+// F.A/B/C + Filler plumbed or Render() dereferences null (see fountain omnis).
+Omni *makeBoltLight(Scene *Sc) {
+	Omni *O = (Omni*)getAlignedBlock(sizeof(Omni), 16);
+	std::memset(O, 0, sizeof(Omni));
+	O->L.R = O->L.G = O->L.B = 0.0f; O->L.A = 1.0f;
+	O->ISize = 0.0f; O->IRange = 1.0f; O->rRange = 1.0f;
+	O->Flags = 0;                                  // idle: not Active, not Stationary
+	auto initKey = [](Spline &sp) {
+		sp.NumKeys = 1; sp.CurKey = 0; sp.Flags = 0;
+		sp.Keys = new SplineKey; std::memset(sp.Keys, 0, sizeof(SplineKey));
+	};
+	initKey(O->Pos); initKey(O->Size); initKey(O->Range);
+	O->F.A = O->F.B = O->F.C = &O->V;
+	O->F.Filler = NopBoltOmniFiller;
+	if (!Sc->OmniHead) { Sc->OmniHead = O; }
+	else { Omni *t = Sc->OmniHead; while (t->Next) t = t->Next; t->Next = O; O->Prev = t; }
+	return O;
+}
 
 inline float smooth01(float t) { if (t<0)t=0; if (t>1)t=1; return t*t*(3.0f-2.0f*t); }
 inline Vector vnorm(const Vector &a) {
@@ -107,6 +147,50 @@ void BlasterBolts_Update(float dtTicks) {
 		B.pos.x += B.vel.x*dtTicks; B.pos.y += B.vel.y*dtTicks; B.pos.z += B.vel.z*dtTicks;
 		B.life -= int32_t(dtTicks);
 		if (B.life <= 0) B.active = false;
+	}
+}
+
+// Drive the transient bolt-lights from the live bolts. MUST be called per-frame
+// AFTER Animate_Objects (which overwrites every omni's IPos from its spline) and
+// BEFORE the deferred lighting builds its view-light list. No-op (and lights
+// forced idle) when --no-blaster_light.
+void BlasterBolts_EmitLights(Scene *Sc) {
+	if (!s_inited || !Sc) return;
+	const bool on = fds::FeatureFlags::blaster_light();
+
+	// (Re)allocate the pool onto the rendered scene the first time, or if the
+	// scene changed under us (chase vs greets) — old pool stays orphaned on the
+	// previous scene's chain, harmless (idle, never re-activated). Sc must be the
+	// scene the deferred kernel actually reads (GreetSc, NOT the global CurScene,
+	// which can point elsewhere mid-tick).
+	if (s_lightScene != Sc) {
+		for (int i = 0; i < kMaxBoltLights; ++i) s_lights[i] = makeBoltLight(Sc);
+		s_lightScene = Sc;
+	}
+
+	const float isize = fds::FeatureFlags::blaster_light_intensity();
+	const float range = fds::FeatureFlags::blaster_light_range();
+	const float rRange = range > 1e-4f ? 1.0f / range : 1.0f;
+
+	int li = 0;
+	if (on && isize > 0.0f) {
+		for (int i = 0; i < kMaxBolts && li < kMaxBoltLights; ++i) {
+			const Bolt &B = s_bolts[i];
+			if (!B.active) continue;
+			Omni *O = s_lights[li++];
+			O->IPos = B.pos;
+			O->L.R = B.r; O->L.G = B.g; O->L.B = B.b; O->L.A = 1.0f;
+			O->ISize  = isize;
+			O->IRange = range; O->rRange = rRange;
+			// Non-stationary (re-lit each frame; stationary omnis get baked once
+			// onto static geometry — wrong for a moving light). FogTransient so
+			// the froxel fog adds its in-scatter per-frame where fog is enabled.
+			O->Flags = Omni_Active | Omni_FogTransient;
+		}
+	}
+	for (; li < kMaxBoltLights; ++li) {            // idle the unused pool lights
+		Omni *O = s_lights[li];
+		O->Flags &= ~Omni_Active; O->ISize = 0.0f;
 	}
 }
 

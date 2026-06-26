@@ -15,6 +15,7 @@
 // BlasterBolts_Draw() after the scene Render() (it billboards to the live View).
 
 struct Vector;
+struct Scene;
 
 namespace fds {
 
@@ -22,6 +23,11 @@ void BlasterBolts_Init();
 void BlasterBolts_Fire(const Vector &pos, const Vector &dir, float speed,
                        float r, float g, float b);
 void BlasterBolts_Update(float dtTicks);
+// Drive transient per-bolt Omnis so live bolts light the scene (deferred + fog).
+// Call AFTER Animate_Objects, BEFORE the deferred lighting pass, passing the
+// scene the renderer actually reads (e.g. GreetSc — NOT the global CurScene).
+// Gated on --blaster_light. See BlasterBolts.cpp.
+void BlasterBolts_EmitLights(Scene *Sc);
 void BlasterBolts_Draw();
 
 }  // namespace fds
