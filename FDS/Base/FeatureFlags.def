@@ -99,7 +99,11 @@ FDS_FLAG_FLOAT(nmap_lod_fade_step,      "FDS_NMAP_LOD_FADE_STEP",       0.33f,  
 FDS_FLAG_BOOL(no_nmap,                  "FDS_NO_NMAP",                  0,                              "nmap",     "Force flat normals everywhere")
 FDS_FLAG_FLOAT(nmap_strength,           "FDS_NMAP_STRENGTH",            1.5f,                           "nmap",     "Sobel-bake strength: higher = more pronounced bump")
 FDS_FLAG_INT(nmap_blur,                 "FDS_NMAP_BLUR",                4,                              "nmap",     "Box-blur passes (3x3) applied to luminance before Sobel (0 = no blur)")
+// ─── per-material AO map (PBR) ────────────────────────────────────────────
+FDS_FLAG_BOOL(ao_map,                   "FDS_AO_MAP",                   1,                              "ao",       "Enable per-material AO map sampling (Material::AoMap), multiplied into the deferred ambient term (direct light is shadow-occluded, not AO'd). Composes with screen-space SSAO/GTAO.")
+FDS_FLAG_FLOAT(ao_map_strength,         "FDS_AO_MAP_STRENGTH",          2.0f,                           "ao",       "AO map strength: ao' = 1 - strength*(1-ao). 0 = no occlusion, 1 = full map, >1 = exaggerated.")
 #if FDS_DEV
+FDS_FLAG_BOOL(ao_from_diffuse,          "FDS_AO_FROM_DIFFUSE",          0,                              "ao-dev",   "[dev] Stand-in AO from the diffuse texture's luminance (no authored AO files needed) — proves the AO path on existing scenes.")
 FDS_FLAG_BOOL(nmap_from_diffuse,        "FDS_NMAP_FROM_DIFFUSE",        0,                              "nmap-dev", "[dev] Derive normal map from diffuse")
 FDS_FLAG_BOOL(viz_tangent,              "FDS_VIZ_TANGENT",              0,                              "nmap-dev", "[dev] Visualize per-pixel view-space tangent as diffuse color")
 FDS_FLAG_BOOL(viz_normal,               "FDS_VIZ_NORMAL",               0,                              "nmap-dev", "[dev] Visualize per-pixel view-space normal as diffuse color (POST normal-map perturbation)")

@@ -382,9 +382,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// to function entry.
 #if FDS_DEV
 	const bool nmapFromDiffuseG = fds::FeatureFlags::nmap_from_diffuse();
+	const bool aoFromDiffuseG   = fds::FeatureFlags::ao_from_diffuse();
 #else
 	constexpr bool nmapFromDiffuseG = false;
+	constexpr bool aoFromDiffuseG   = false;
 #endif
+	const bool  aoMapOnG        = fds::FeatureFlags::ao_map();
+	const float aoStrengthG     = fds::FeatureFlags::ao_map_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
@@ -523,6 +527,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			constexpr bool sNmapAsDiffuse = false;
 #endif
 			float texB, texG, texR;
+			float texA = 255.0f;   // albedo alpha (Mat_AoInAlpha packs AO here)
 			if (profNoTex) {
 				texB = texG = texR = 128.0f;
 			} else {
@@ -534,6 +539,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				texB = float(texel & 0xFF);
 				texG = float((texel >> 8) & 0xFF);
 				texR = float((texel >> 16) & 0xFF);
+				texA = float((texel >> 24) & 0xFF);
 			}
 
 			// Static-shadow lightmap address for this pixel — resolved
@@ -732,7 +738,38 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// normal-map perturbation would be lost.
 			const bool hasNormalMap = Mat->NormalMap ||
 				(nmapFromDiffuseG && Mat->Txtr);
-			const bool useVecHere = useVec && !hasNormalMap;
+			// Per-material AO sources, in priority order:
+			//   1. Mat_AoInAlpha  — AO baked into the albedo's alpha (texA,
+			//      already fetched above → FREE; the recommended PBR packing).
+			//   2. Mat->AoMap     — a separate AO texture (escape hatch for
+			//      materials that need albedo-alpha for cutout).
+			//   3. ao_from_diffuse (dev) — diffuse luminance stand-in.
+			// All but #1's vec-compat live in the scalar path (extra texture
+			// fetch), so force scalar when a separate map is used.
+			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
+			const bool hasAoMap  = aoMapOnG &&
+				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
+			const bool useVecHere = useVec && !hasNormalMap
+				&& !(hasAoMap && !aoInAlpha);
+
+			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
+			// the direct-light loop adds to them) — direct light is occluded by
+			// shadows, not AO.
+			if (hasAoMap) {
+				float ao;
+				if (aoInAlpha) {
+					ao = texA * (1.0f/255.0f);            // free (albedo alpha)
+				} else {
+					const Texture *aoTex = Mat->AoMap ? Mat->AoMap : Mat->Txtr;
+					const dword *aoData = (const dword *)aoTex->Mipmap[miplevel];
+					const dword aoTexel = aoData ? aoData[swizzledUV] : 0xFFFFFFFFu;
+					ao = (float(aoTexel & 0xFF)         * 0.114f
+					    + float((aoTexel >> 8)  & 0xFF)  * 0.587f
+					    + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
+				}
+				ao = 1.0f - aoStrengthG * (1.0f - ao);
+				lB *= ao; lG *= ao; lR *= ao;
+			}
 
 			// Sample's world-space position. Computed here (outside the
 			// vec/scalar split) so both light paths can use it for cube

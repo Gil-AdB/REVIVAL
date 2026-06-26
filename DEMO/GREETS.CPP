@@ -1253,12 +1253,16 @@ void Initialize_Greets()
 		const bool flipG = fds::FeatureFlags::greets_nmap_flip_g();
 		for (Material *M = MatLib; M; M = M->Next) {
 			if (M->RelScene != GreetSc || !M->Name || !M->Txtr) continue;
+			// albedo is RGBA with AO baked into the alpha channel (Mat_AoInAlpha):
+			// the kernel reads occlusion straight from the already-fetched albedo
+			// texel — no separate AO texture, no extra per-pixel fetch.
 			const char *albedo = nullptr, *height = nullptr, *normal = nullptr;
-			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.jpg";  height = "TEXTURES/greets_wall_h.png";  normal = "TEXTURES/greets_wall_n.png"; }
-			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.jpg"; height = "TEXTURES/greets_floor_h.png"; normal = "TEXTURES/greets_floor_n.png"; }
+			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.png";  height = "TEXTURES/greets_wall_h.png";  normal = "TEXTURES/greets_wall_n.png"; }
+			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.png"; height = "TEXTURES/greets_floor_h.png"; normal = "TEXTURES/greets_floor_n.png"; }
 			if (!albedo) continue;
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
+			M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
 				M->NormalMap = n;
 				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + AUTHORED normal %s "
