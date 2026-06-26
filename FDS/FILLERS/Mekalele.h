@@ -255,6 +255,14 @@ struct TileRasterizerCtx {
 	dword miplevel;
 	u16 *zbuffer;
 	float zScale;      // was: g_zscale global. Per-pass depth scalar.
+	// Parallax (offset) mapping (--parallax). heightData = the material's
+	// HeightMap mip[miplevel] (same tiled layout as Txtr, so the same swizzled
+	// texel address indexes it), or null = parallax off. The apply loop
+	// reconstructs the view dir from cntrE*/invFOV* + per-pixel screen pos to
+	// nudge the UV before the texel pack. Grayscale height = low byte.
+	const dword *heightData = nullptr;
+	float parallaxStrength  = 0.0f;
+	float cntrEX = 0.0f, cntrEY = 0.0f, invFOVX = 0.0f, invFOVY = 0.0f;
 	// Depth-peel floor (transparent passes only; nullptr for opaque). A
 	// fragment is accepted only when z_candidate < peelFloor[i] — strictly
 	// farther than the nearest already-peeled layer — so successive passes
@@ -685,8 +693,50 @@ struct TileRasterizer {
 
 				if (barry::any_lane_set(p_mask)) {
 					*(__m128i*)span.zbuffer = _mm_blendv_epi8(*(__m128i*)span.zbuffer, compress(z_candidate), compress(Vec8ui(p_mask)));
-					Vec8i u = roundi(p_uz * p_z * UScaleFactor);
-					Vec8i v = roundi(p_vz * p_z * VScaleFactor);
+					// UV (pre-scale, [0,1) tiled). Parallax (--parallax) nudges it
+					// along the tangent-space view ray before the texel pack, so
+					// albedo/normal/AO all sample the shifted texel.
+					Vec8f uf = p_uz * p_z;
+					Vec8f vf = p_vz * p_z;
+					if (ctx.heightData && wantTangent) {
+						// Sample height at the un-offset UV (reuse the texel-pack
+						// swizzle; height shares the albedo tiled layout). Low byte =
+						// grayscale height; scalar gather (no sub-32 SIMD gather).
+						Vec8i hu0 = roundi(uf * UScaleFactor);
+						Vec8i hv0 = roundi(vf * VScaleFactor);
+						Vec8i haddr = packed_tile_u(hu0, LogHeight, t_umask_swizzled)
+						            + packed_tile_v(hv0, t_vmask);
+						alignas(32) int32_t aA[8]; haddr.store_a(aA);
+						alignas(32) float hA[8];
+						for (int k = 0; k < 8; ++k)
+							hA[k] = float(ctx.heightData[aA[k]] & 0xFFu) * (1.0f / 255.0f);
+						Vec8f H; H.load_a(hA);
+						// View-space position per lane (same reconstruction as the
+						// deferred kernel): screen x = tile.x*TILE_SIZE + lane,
+						// y = tile.y*TILE_SIZE + row. V points toward the camera.
+						Vec8f sx = v8_from_arith_seq(float(tile.x * TILE_SIZE), 1.0f);
+						float syf = float(tile.y * TILE_SIZE + y);
+						Vec8f X = (sx - Vec8f(ctx.cntrEX)) * Vec8f(ctx.invFOVX) * p_z;
+						Vec8f Y = (Vec8f(ctx.cntrEY) - Vec8f(syf)) * Vec8f(ctx.invFOVY) * p_z;
+						Vec8f Z = p_z;
+						Vec8f vinv = approx_rsqrt(X*X + Y*Y + Z*Z);
+						Vec8f Vx = X * (-vinv), Vy = Y * (-vinv), Vz = Z * (-vinv);
+						// Normalize interpolated view N and T; B = N×T.
+						Vec8f nl = approx_rsqrt(p_nx*p_nx + p_ny*p_ny + p_nz*p_nz);
+						Vec8f Nx = p_nx*nl, Ny = p_ny*nl, Nz = p_nz*nl;
+						Vec8f tl = approx_rsqrt(p_tx*p_tx + p_ty*p_ty + p_tz*p_tz);
+						Vec8f Tx = p_tx*tl, Ty = p_ty*tl, Tz = p_tz*tl;
+						Vec8f Bx = Ny*Tz - Nz*Ty, By = Nz*Tx - Nx*Tz, Bz = Nx*Ty - Ny*Tx;
+						// Tangent-space view xy (offset-limiting: no /Vz → stable at
+						// grazing). Centre at h=0.5 so mid-height = no shift.
+						Vec8f VtT = Vx*Tx + Vy*Ty + Vz*Tz;
+						Vec8f VtB = Vx*Bx + Vy*By + Vz*Bz;
+						Vec8f hc  = (H - Vec8f(0.5f)) * Vec8f(ctx.parallaxStrength);
+						uf += VtT * hc;
+						vf += VtB * hc;
+					}
+					Vec8i u = roundi(uf * UScaleFactor);
+					Vec8i v = roundi(vf * VScaleFactor);
 
 					Vec8i tu = packed_tile_u(u, LogHeight, t_umask_swizzled);
 					Vec8i tv = packed_tile_v(v, t_vmask);
@@ -1084,6 +1134,15 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	} else {
 		shadowMatId = uint16_t(F->Txtr->ID + 1);
 	}
+	// Parallax: resolve the material's height mip for THIS miplevel (shares the
+	// albedo's tiled layout, so the rasterizer's swizzled texel address indexes
+	// it). Null unless --parallax + a HeightMap with that mip present.
+	const dword *heightData = nullptr;
+	if (fds::FeatureFlags::parallax() && F->Txtr->HeightMap) {
+		Texture *hm = F->Txtr->HeightMap;
+		if ((dword)miplevel < hm->numMipmaps && hm->Mipmap[miplevel])
+			heightData = reinterpret_cast<const dword*>(hm->Mipmap[miplevel]);
+	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
@@ -1093,6 +1152,12 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.miplevel = miplevel,
 		.zbuffer = zbuf,
 		.zScale = cam.zScale,
+		.heightData = heightData,
+		.parallaxStrength = fds::FeatureFlags::parallax_strength(),
+		.cntrEX = cam.cntrEX,
+		.cntrEY = cam.cntrEY,
+		.invFOVX = (cam.fovX != 0.0f) ? 1.0f / cam.fovX : 0.0f,
+		.invFOVY = (cam.fovY != 0.0f) ? 1.0f / cam.fovY : 0.0f,
 		.peelFloor = peelFloorPtr,
 		.lmMeshId  = lmMeshId,
 		.lmFaceIdx = lmFaceIdx,
