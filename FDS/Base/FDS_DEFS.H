@@ -137,6 +137,7 @@ enum SceneFlags
 #define Mat_SkipZ		 0x0100
 #define Mat_HdrReflection 0x0200  // panel shows float reflection radiance (Material::hdrRefl); the transparent kernel samples it emissively into g_hdrBuf so reflected highlights bloom (HDR mirror RTT)
 #define Mat_HdrEmissive   0x0400  // forward env/reflective surface (e.g. disco ball) that should over-bloom: the filler stamps a distinct G-buffer sentinel so the HDR lift boosts it by hdr_refl_gain past 255
+#define Mat_AoInAlpha     0x0800  // PBR: the albedo texture's ALPHA channel holds a baked ambient-occlusion map. The deferred kernel reads it from the already-fetched albedo texel (free) and multiplies the ambient term. Only set on materials that don't use albedo-alpha for cutout.
 
 #define DEFAULT_BLOCKSIZEX 2
 #define DEFAULT_BLOCKSIZEY 2

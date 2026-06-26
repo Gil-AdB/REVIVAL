@@ -48,6 +48,12 @@ struct Material
     // tops out near 600).
     unsigned short        ShadowMatID           = 0;
     Texture             * EnvTexture            = nullptr;
+    // Per-material ambient-occlusion map (PBR). Grayscale; sampled per-pixel
+    // in the deferred kernel at the SAME swizzled UV / miplevel as the diffuse
+    // (so it must share the diffuse's dimensions + block-tiled layout), and
+    // multiplied into the AMBIENT term only — direct light is occluded by
+    // shadows, not AO. AO is a scalar (no TBN), so it works on dynamic meshes.
+    Texture             * AoMap                 = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;
     char                * Name                  = nullptr;
