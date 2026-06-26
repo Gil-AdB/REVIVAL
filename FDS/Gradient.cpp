@@ -64,8 +64,8 @@ Material* Generate_Gradient(const std::vector<GradientEndpoint>& endpoints, int 
 	// whatever that means
 	M->Flags = Mat_Virtual;
 	M->Txtr = new Texture;
-	M->Txtr->Flags = Txtr_Nomip | Txtr_Tiled;
-	memset(M->Txtr, 0, sizeof(Texture));
+	memset(M->Txtr, 0, sizeof(Texture));   // must precede the flag set — it was
+	M->Txtr->Flags = Txtr_Nomip | Txtr_Tiled;  // wiping Txtr_Tiled when after.
 	M->Txtr->BPP = 32;
 	Img.Data = new DWord[txSize * txSize];
 
@@ -85,7 +85,14 @@ Material* Generate_Gradient(const std::vector<GradientEndpoint>& endpoints, int 
 	Convert_Image2Texture(&Img, M->Txtr);
 	delete[] Img.Data;
 
-	//Sachletz((dword*)(M->Txtr->Data), txSize, txSize);
+	// Block-tile ("shachletz") the data so the rasterizer's swizzled UV
+	// addressing samples it correctly — Convert_Image2Texture leaves it LINEAR
+	// and a NORMAL-path draw would otherwise see repeated cells. Use the
+	// post-convert dims (forced to 256^2), NOT txSize. Was disabled; current
+	// callers happen not to sample it (fountain g_LnMat is dead, city rain uses
+	// a hardcoded-colour filler), but it set Txtr_Tiled while shipping linear
+	// data — a trap for the next caller that draws it on a real surface.
+	Sachletz((dword*)M->Txtr->Data, M->Txtr->SizeX, M->Txtr->SizeY);
 	M->Txtr->Mipmap[0] = M->Txtr->Data;
 	M->Txtr->numMipmaps = 1;
 

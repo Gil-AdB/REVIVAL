@@ -1,7 +1,78 @@
 #pragma once
 
+#include <cstdint>
+
 struct TriMesh;
 struct Scene;
+struct Object;
+struct Vector;
+struct Texture;
+
+// Build a render-ready Texture from a LINEAR, row-major 32-bpp pixel buffer
+// (0xAARRGGBB DWords, `width*height` of them).
+//
+// This encapsulates a two-step gotcha that has cost a debug session every
+// time custom geometry got a hand-built texture (disco ball, blaster bolts,
+// fountain lightning):
+//
+//   1. Convert_Image2Texture ONLY resamples to 256x256 and converts BPP. It
+//      leaves the pixel data LINEAR (row-major), and it does NOT build mips
+//      or block-tile.
+//   2. The rasterizer (TheOtherBarry / Mekalele) ALWAYS samples textures
+//      block-tile SWIZZLED via packed_tile_u/v. So linear data is read at the
+//      wrong offsets — the texture renders scrambled / 4x-repeated (the bug
+//      manifests as evenly tiled cells, not noise). The data MUST be run
+//      through Generate_Mipmaps(.., DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, ..)
+//      with the Txtr_Tiled flag — the "shachletz" (interleave) step.
+//
+// With correct tiling, UV mapping is the STANDARD U -> texture-column,
+// V -> texture-row. (Any code that reads UVs as "swapped" — e.g. the fountain
+// bolt's UZ->texture-Y comment — was silently compensating for the un-tiled
+// bug and bakes its texture transposed; don't copy that as a convention.)
+//
+// `pixels` is copied internally — the caller keeps ownership. buildMips=true
+// builds the full mip chain (needed for surfaces that minify in the distance);
+// false still block-tiles but keeps a single level (fine for screen-space
+// sprites the 2D clipper always draws at mip 0, e.g. blaster bolts). Returns a
+// newly-allocated Texture* (caller owns).
+Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
+                                bool buildMips);
+
+// Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
+// with all the plumbing the engine needs — each item below cost a debug session
+// when missed while adding custom geometry (disco ball, blaster bolts, ...):
+//
+//   • Compute_FaceVertexIndices: the SoA transform indexes verts via
+//     F->A_idx/B_idx/C_idx; unstamped (0) → every face collapses to vertex 0
+//     and is culled.
+//   • 2 Pos spline keys >0.1 apart: marks the mesh dynamic so Transform
+//     re-reads its vertices every frame instead of caching a static silhouette.
+//   • A large bounding sphere: so the mesh is never frustum-culled as you move
+//     its verts around (override via bsphereRadius for a localized mesh).
+//   • Flags: HTrack_Visible | Tri_Possessed (Animate_Objects won't touch it —
+//     you stamp verts directly) | Tri_Noshading | Tri_NoShadowCast.
+//   • Links into Sc->ObjectHead + Sc->TriMeshHead.
+//
+// Preconditions the CALLER must satisfy before calling:
+//   • mesh->Verts / mesh->Faces allocated; each face's A/B/C, Txtr, Filler,
+//     Flags, N, and per-face U1..V3 (call Face::uvFromVertices) wired.
+//   • mesh->VIndex / mesh->FIndex set to the FULL pool size (reserved here so
+//     setupFaceLists counts them in the poly budget — shrink-per-frame drops
+//     faces; degenerate unused slots instead).
+//   • RUNTIME GOTCHA (not enforceable here): every face Material needs a
+//     non-null Txtr->Txtr (a real texture). The deferred per-tile pass skips
+//     untextured faces. And additive faces want WriteZ=true in deferred so the
+//     mat32 "skip-lighting" sentinel survives.
+//   • TEXTURE GOTCHA: any hand-built Texture must be block-tiled, not just
+//     run through Convert_Image2Texture (which leaves data LINEAR while the
+//     rasterizer samples block-tile swizzled — the texture renders as repeated
+//     cells). Build it via Scene_MakeTiledTexture (below) and you're safe.
+//
+// Returns the created Object (already linked); call BEFORE the scene's
+// setupFaceLists / mirror build so the faces are budgeted and (if greets)
+// cloned. Idempotent registration is the caller's concern.
+Object *Scene_AddDynamicMesh(Scene *sc, TriMesh *mesh, const char *name,
+                             const Vector &bsphereCtr, float bsphereRadius);
 
 // Per-face vertex duplication: replace shared-vertex topology with one
 // independent Vertex copy per face. Each new copy's N is the area-

@@ -211,12 +211,73 @@ Other rasterizers in `FILLERS/`:
 - `Flags` — visibility bits (`Vtx_VisLeft/Right/Up/Down/Near/Far/Visible`),
   used by clipper to skip early.
 
+#### Per-face vs per-vertex UVs — read UVs from the FACE, not the vertex
+
+UVs exist in **two** places: per-vertex (`Vertex::U/V`) and per-face
+(`Face::U1/V1, U2/V2, U3/V3`). **For any geometric derivation (tangents,
+UV gradients, projection math) read the per-FACE `U1..V3`, never the
+per-vertex `A->U/B->U/C->U`.**
+
+Why: UVs are not stored in the `.lwo`/`.FLD` — they're computed at load by
+`Get_UV`/`Get_Mapping` (`FLD/FLD_MAT.CPP`) from the material's projection
+(Planar/Cubic/Cylindrical/Spherical). `Get_UV` writes the per-vertex `U/V`
+*and* snapshots them into the face's `U1..V3`. But a vertex **shared**
+between faces of different projection orientation (e.g. a box corner where
+a +X wall meets a +Z wall) has its per-vertex `U/V` **clobbered by
+whichever face is mapped last** — so it's correct for only one of the
+sharers. The per-face `U1..V3` snapshot is taken at map time and is always
+correct; it's what the rasterizer uses for the albedo (which is why a
+mismatched per-vertex UV corrupts only derived data like tangents, while
+the texture itself looks fine).
+
+This bit `Compute_Vertex_Tangents` (`MISC/PREPROC.CPP`): reading per-vertex
+UVs gave shared-corner faces a flipped tangent → a diagonal normal-map
+relief seam through wall quads, visible only with a directional normal
+map. Fixed by deriving the UV gradient from `U1..V3` (with a fallback to
+per-vertex when the per-face triangle is degenerate, for procedural meshes
+that set only per-vertex UVs).
+
 ### Material / Texture
 
 `FDS/Base/Material.h`, `FDS/Base/Texture.h`. Each `Material` owns a
 `Texture*` with `Mipmap[numMipmaps]` pre-generated at load time
 (`IMGGENR/IMGGENR.CPP`). `LSizeX`/`LSizeY` are log2 dimensions used by
 the tiled addressing functions.
+
+#### Hand-built textures must be block-tiled ("shachletz") — `Convert_Image2Texture` is not enough
+
+The rasterizers (`TheOtherBarry`, `Mekalele`) **always** sample textures
+in a block-tile **swizzled** layout via `packed_tile_u/v` +
+`swizzle_umask` (`FDS/FILLERS/SimdHelpers.h`). The data behind
+`Mipmap[level]` must be stored in that interleaved order or every fetch
+lands on the wrong texel.
+
+`Convert_Image2Texture` (`FDS/IMGPROC/Imgproc.cpp`) does **not** produce
+that layout — it only resamples to 256×256 and converts BPP, leaving the
+pixels **linear / row-major**. The block-tiling is a **separate** step,
+done by either `Sachletz(data, w, h)` (`FDS/IMGGENR/IMGGENR.CPP`, the
+standalone in-place swizzle most call sites use — disco, mirrors, RTTs,
+scene-builder, skybox, env-bake) or `Generate_Mipmaps(Tx,
+DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, enableMip)`
+(`FDS/IMGCODE/IMGCODE.CPP`, which also builds the mip chain), with the
+`Txtr_Tiled` flag. Both produce the same 4×4-block, X-outer/Y-inner
+layout. The disk-load path runs `Generate_Mipmaps`; code that bakes a
+texture by hand and stops after `Convert_Image2Texture` (or just sets
+`Mipmap[0] = Data; numMipmaps = 1`) ships **linear data read as
+swizzled** → the texture renders as evenly-spaced repeated cells (looks
+like 4× UV tiling, but the UVs and mip level are correct — the *bytes*
+are in the wrong order).
+
+Once correctly tiled, UV→texel mapping is the **standard** `U →
+texture-column`, `V → texture-row`. Any baker that reads its UVs as
+"swapped" (e.g. the fountain bolt's `UZ → texture-Y` comment) was
+silently compensating for the un-tiled bug and bakes its source image
+transposed — do **not** copy that as a convention.
+
+Use the consolidated helper `Scene_MakeTiledTexture(w, h, pixels,
+buildMips)` (`DEMO/MeshOps.h`) for any hand-built texture; it does the
+`Convert_Image2Texture` → `Txtr_Tiled` → `Generate_Mipmaps` dance in one
+call.
 
 ### VESA_Surface
 

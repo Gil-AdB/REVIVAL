@@ -31,6 +31,8 @@ set(DEMO_SOURCES
     GreetsDisco.h
     GreetsMirror.cpp
     GreetsMirror.h
+    BlasterBolts.cpp
+    BlasterBolts.h
     MainLoop.cpp
     MainLoop.h
     ImageCompression.cpp

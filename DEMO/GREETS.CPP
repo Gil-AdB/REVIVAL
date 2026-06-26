@@ -22,6 +22,7 @@
 
 #include "GREETS.H"
 #include "GreetsDisco.h"
+#include "BlasterBolts.h"
 #include "GreetsMirror.h"
 #include "MirrorShatter.h"
 #include "RENDER/EnvBake.h"
@@ -1204,6 +1205,21 @@ static void GreetsFixBitangentHandedness(Scene *sc)
 	             split, mir.size());
 }
 
+// Re-project wall/floor/ceiling UVs from a per-FACE axis-aware planar map.
+// The FLD authored 'rooms'/'siling'/'floor' with a single global projection
+// axis (Material.TextureFlags), so faces whose plane is perpendicular to that
+// axis get near-degenerate or inconsistent U — which yields flipped per-vertex
+// tangents and a diagonal relief seam through each wall quad once a directional
+// normal map is applied (--viz-tangent shows the wall split red↔green across
+// it). Re-projecting each face onto the plane matching its OWN dominant normal
+// axis (fixed U/V convention, same TextureSize/Center so the scale + offset are
+// preserved) makes the tangent uniform → no seam. Caller recomputes tangents
+// afterward. Operates on the per-vertex U/V and the cached per-face U1..V3.
+// (GreetsReprojectWallUVs removed — the diagonal wall-relief seam was a
+// per-face-vs-per-vertex UV tangent bug; fixed at source in
+// Compute_Vertex_Tangents. See docs/ENGINE.md.)
+
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1816,6 +1832,10 @@ void Initialize_Greets()
 	// mirror build (the teleporter mirror clones the ball; its 2-key
 	// Pos spline marks it dynamic → re-mirrored per frame).
 	fds::BuildDiscoBall(GreetSc);
+
+	// Blaster-bolt test harness (--greets-blasters): build the bolt texture.
+	if (fds::FeatureFlags::greets_blasters())
+		fds::BlasterBolts_Init();
 
 	// Shadow-map allocation + static cube bake + lightmap bake spawn.
 	// MOVED here from GreetsScene::init() so it runs during glat (via
@@ -2664,6 +2684,23 @@ struct GreetsScene : SceneDriver {
 		// frozen/scrubbed scene time CurFrame already uses.
 		fds::UpdateDiscoBall(GreetSc, (float)g_FrameTime);
 
+		// Blaster-bolt test (--greets-blasters): two emitters trade fire
+		// across the corridor at the robot's height. Deterministic on
+		// g_FrameTime so it's scrub-safe; billboards to the live camera.
+		if (fds::FeatureFlags::greets_blasters()) {
+			static int32_t sLastFire = -10000;
+			const int32_t t = (int32_t)g_FrameTime;
+			if (t - sLastFire >= 26 || t < sLastFire) {   // (t<last -> scrubbed back)
+				sLastFire = t;
+				const Vector eyeL{ -6.0f, 3.5f, -17.0f }, dirR{ 1.0f, 0.0f, -0.1f };
+				const Vector eyeR{  6.0f, 3.5f, -19.0f }, dirL{ -1.0f, 0.0f, -0.1f };
+				fds::BlasterBolts_Fire(eyeL, dirR, 0.45f, 1.0f, 0.20f, 0.10f);  // red
+				fds::BlasterBolts_Fire(eyeR, dirL, 0.45f, 0.20f, 1.0f, 0.35f);  // green
+			}
+			float bdt = (float)dTime; if (bdt < 0.5f) bdt = 0.5f; if (bdt > 4.0f) bdt = 4.0f;
+			fds::BlasterBolts_Update(bdt);
+		}
+
 		// Live tint knobs (shard silver #3 + portal tint #1): re-applied
 		// every frame so the tuning console / greets.params can drive them.
 		GreetsApplyLiveTints();
@@ -2922,6 +2959,10 @@ struct GreetsScene : SceneDriver {
 		// legacy localized pass only when --bloom is OFF.
 		if (!fds::FeatureFlags::bloom())
 			fds::DiscoBloomPost();
+
+		// Blaster bolts: additive screen-space draw over the finished frame.
+		if (fds::FeatureFlags::greets_blasters())
+			fds::BlasterBolts_Draw();
 
 		// Optional mirror-mask debug overlay (--greets-mirror-debug-mask).
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {
