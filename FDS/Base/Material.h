@@ -54,6 +54,14 @@ struct Material
     // multiplied into the AMBIENT term only — direct light is occluded by
     // shadows, not AO. AO is a scalar (no TBN), so it works on dynamic meshes.
     Texture             * AoMap                 = nullptr;
+    // Per-material height/displacement map (PBR parallax). Grayscale height in
+    // [0,1] (any channel; sampled byte). Must share the diffuse's dimensions +
+    // block-tiled layout + mip structure so the SAME swizzled UV/miplevel the
+    // rasterizer computes for the albedo indexes it. Consumed in Mekalele
+    // (offset parallax: nudge the UV along the tangent-space view ray before the
+    // texel pack), so albedo/normal/AO then all sample the parallax-shifted
+    // texel for free. Gated on --parallax; null = flat.
+    Texture             * HeightMap              = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;
     char                * Name                  = nullptr;

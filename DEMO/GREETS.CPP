@@ -1263,6 +1263,17 @@ void Initialize_Greets()
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
 			M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
+			// Parallax (--parallax): load the grayscale height map onto the
+			// material so Mekalele can offset the UV by it. Shares the albedo's
+			// tiled+mip layout (GreetsLoadFullTexture → Generate_Mipmaps), so the
+			// swizzled UV/miplevel the rasterizer computes indexes it directly.
+			if (fds::FeatureFlags::parallax() && height) {
+				if (Texture *hm = GreetsLoadFullTexture(height)) {
+					M->HeightMap = hm;
+					std::fprintf(stderr, "[GREETS] parallax '%s' -> height %s (%dx%d mips=%u)\n",
+					             M->Name, height, hm->SizeX, hm->SizeY, hm->numMipmaps);
+				}
+			}
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
 				M->NormalMap = n;
 				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + AUTHORED normal %s "
