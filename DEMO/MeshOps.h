@@ -43,6 +43,11 @@ Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
 // Used for parallax height maps — the variable-texel-size pilot. Caller owns.
 Texture *MakeHeight8(Texture *src);
 
+// Pack a 32-bit BGRA tangent-space normal map to 16-bit RG (X,Y; Z reconstructed
+// in-shader), same layout (half the memory). BPP=16 marks the kernel decode.
+// Caller owns.
+Texture *MakeNormal16(Texture *src);
+
 // Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
 // with all the plumbing the engine needs — each item below cost a debug session
 // when missed while adding custom geometry (disco ball, blaster bolts, ...):

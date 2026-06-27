@@ -207,6 +207,42 @@ Texture *MakeHeight8(Texture *src) {
 	return h;
 }
 
+// Pack a 32-bit (BGRA) tangent-space normal map down to 16-bit RG (X,Y only;
+// Z is reconstructed in the shader as sqrt(1-x²-y²)), same tiled+mip layout as
+// the 32-bit source — so the same swizzled texel index the kernel computes
+// indexes it (just 2 bytes/texel instead of 4 → half the memory + cache). R
+// (>>16) and G (>>8) of each source texel are packed as (R | G<<8); B (=Z) and
+// A are dropped. BPP=16 marks the format for the kernel's decode branch.
+// Generalizes the variable-texel-size pilot (height was 8-bit) to normals.
+Texture *MakeNormal16(Texture *src) {
+	if (!src || src->BPP != 32 || !src->Mipmap[0] || src->numMipmaps == 0) return nullptr;
+	const int blockX = src->blockSizeX, blockY = src->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	size_t total = 0;
+	int cx = src->SizeX >> blockX, cy = src->SizeY >> blockY;
+	for (dword i = 0; i < src->numMipmaps; ++i) {
+		total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+		cx = (cx + 1) >> 1; cy = (cy + 1) >> 1;
+	}
+	Texture *n = new Texture;
+	*n = *src;
+	n->Pal = nullptr; n->FileName = nullptr; n->ID = 0; n->Flags = src->Flags;
+	n->BPP = 16;
+	for (int i = 0; i < 16; ++i) n->Mipmap[i] = nullptr;
+	uint16_t *dst = (uint16_t *)getAlignedBlock(total * sizeof(uint16_t));
+	n->Data = reinterpret_cast<byte *>(dst);
+	const uint32_t *s0 = reinterpret_cast<const uint32_t *>(src->Mipmap[0]);
+	for (size_t t = 0; t < total; ++t) {
+		const uint32_t px = s0[t];
+		dst[t] = uint16_t(((px >> 16) & 0xFFu) | (((px >> 8) & 0xFFu) << 8));   // R | G<<8
+	}
+	for (dword i = 0; i < src->numMipmaps; ++i) {
+		const size_t texelOff = size_t(reinterpret_cast<const uint32_t *>(src->Mipmap[i]) - s0);
+		n->Mipmap[i] = reinterpret_cast<byte *>(dst + texelOff);
+	}
+	return n;
+}
+
 Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	if (!diffuse || diffuse->BPP != 32 || !diffuse->Mipmap[0]) return nullptr;
 	const int W = diffuse->SizeX;

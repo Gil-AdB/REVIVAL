@@ -1291,10 +1291,15 @@ void Initialize_Greets()
 				}
 			}
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {
+				// --nmap_16bit: pack to 16-bit RG (Z reconstructed in-shader) —
+				// half the memory; the kernel decode branches on BPP.
+				if (fds::FeatureFlags::nmap_16bit()) {
+					if (Texture *n16 = MakeNormal16(n)) n = n16;
+				}
 				M->NormalMap = n;
 				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + AUTHORED normal %s "
-				             "(flipG=%d, %dx%d mips=%u)\n",
-				             M->Name, albedo, normal, flipG, n->SizeX, n->SizeY, n->numMipmaps);
+				             "(flipG=%d, %dx%d mips=%u, %d-bit)\n",
+				             M->Name, albedo, normal, flipG, n->SizeX, n->SizeY, n->numMipmaps, n->BPP);
 			} else if (Texture *h = GreetsLoadFullTexture(height)) {
 				M->NormalMap = BakeNormalMapFromDiffuse(h, 4.0f);
 				std::fprintf(stderr, "[GREETS] stone-tex '%s' -> %s + baked normal from %s "

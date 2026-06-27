@@ -113,6 +113,30 @@ std::atomic<bool> g_vizMipLevel{false};
 // into a flat sequence of fmuls. Works for any N ≥ 1; the scalar and
 // SIMD overloads of sq()/fmul() let one template body cover both
 // float and __m256.
+// Decode a tangent-space normal texel → (nmX, nmY, nmZ) in [-1,1]. Branches on
+// the texture format (BPP): 32-bit BGRA reads R/G/B directly (unchanged); 16-bit
+// RG (MakeNormal16) reads X,Y from the two bytes and RECONSTRUCTS Z = √(1-x²-y²)
+// — half the memory/cache, visually equivalent (RG are the same 8-bit values; a
+// unit normal's Z is determined by X,Y). Returns false if the mip is absent.
+static inline bool decodeNormalTexel(const Texture *t, uint32_t miplevel, uint32_t uv,
+                                     float &nmX, float &nmY, float &nmZ) {
+	const void *mip = t->Mipmap[miplevel];
+	if (!mip) return false;
+	if (t->BPP == 16) {
+		const uint16_t px = static_cast<const uint16_t *>(mip)[uv];   // R | G<<8
+		nmX = (float( px        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+		nmY = (float((px >> 8)  & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+		float z2 = 1.0f - nmX*nmX - nmY*nmY;
+		nmZ = z2 > 0.0f ? std::sqrt(z2) : 0.0f;                       // reconstruct
+	} else {
+		const uint32_t px = static_cast<const uint32_t *>(mip)[uv];   // BGRA: R>>16, G>>8, B
+		nmX = (float((px >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+		nmY = (float((px >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+		nmZ = (float( px        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+	}
+	return true;
+}
+
 static inline float  sq(float  x) { return x * x; }
 static inline __m256 sq(__m256 x) { return _mm256_mul_ps(x, x); }
 static inline float  fmul(float  a, float  b) { return a * b; }
@@ -581,12 +605,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			Texture* nmTex = nmapDisabledG ? nullptr : Mat->NormalMap;
 			if (!nmTex && nmapFromDiffuseG) nmTex = Mat->Txtr;
 			if (nmTex) {
-				const dword *nmData = (const dword *)nmTex->Mipmap[miplevel];
-				if (nmData) {
-					const dword nmTexel = nmData[swizzledUV];
-					float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				float nmX, nmY, nmZ;
+				if (decodeNormalTexel(nmTex, miplevel, swizzledUV, nmX, nmY, nmZ)) {
 					// LOD-aware bump fade: scale (nmX, nmY) toward zero at
 					// high mip. Uses miplevelForFade so the N-key override
 					// can simulate "as if at higher mip" without touching
@@ -2347,12 +2367,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				const uint32_t uvL  = m & 0xFFFFF;
 				Material *MatN = ctx.matTable.data[mid];
 				if (!MatN || !MatN->NormalMap) continue;
-				const dword *nmData = (const dword*)MatN->NormalMap->Mipmap[mipL];
-				if (!nmData) continue;
-				const dword nmTexel = nmData[uvL];
-				const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-				const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-				const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				float nmX, nmY, nmZ;
+				if (!decodeNormalTexel(MatN->NormalMap, mipL, uvL, nmX, nmY, nmZ)) continue;
 				float lnx = nx_lane[k], lny = ny_lane[k], lnz = nz_lane[k];
 				float tx = 0, ty = 0, tz = 0;
 				bool tangentValid = false;
@@ -2911,12 +2927,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// surrounding interpolated pixels and broke quarter mode
 			// silently. Tier B per-vertex tangent + Mikkelsen fallback.
 			if (Mat->NormalMap) {
-				const dword *nmData = (const dword *)Mat->NormalMap->Mipmap[miplevel];
-				if (nmData) {
-					const dword nmTexel = nmData[swizzledUV];
-					const float nmX = (float((nmTexel >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					const float nmY = (float((nmTexel >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
-					const float nmZ = (float( nmTexel        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+				float nmX, nmY, nmZ;
+				if (decodeNormalTexel(Mat->NormalMap, miplevel, swizzledUV, nmX, nmY, nmZ)) {
 					float tx = 0, ty = 0, tz = 0;
 					bool tangentValid = false;
 					if (!gb.tangent.empty()) {
