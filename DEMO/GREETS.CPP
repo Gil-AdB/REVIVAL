@@ -1355,6 +1355,23 @@ void Initialize_Greets()
 			if (M->Specular < 0.4f) M->Specular = 0.4f;
 			if (M->Glossiness == 0) M->Glossiness = 48;
 		}
+		// The 'rooms' wall is now polished white marble — give it a specular
+		// sheen. Marble's "reflectivity" reads mostly as this highlight, not a
+		// planar room reflection. Gloss 64 (a broad, lower-peak lobe) rather
+		// than 128 (a tiny hot glint) so the highlight doesn't blow out when
+		// it's written unclamped into g_hdrBuf and bloomed under HDR. Low
+		// intensity (0.1) — the wall is NOT a Mat_HdrReflection surface, so
+		// hdr_refl_gain doesn't apply; the specular value is the lever, and 0.6
+		// (gloss128) / 0.25 (gloss64) both bloomed too hot. Runs in the default
+		// path (the stone-tex swap is off by default).
+		if (!strcmp(n, "rooms")) {
+			unsigned short oldG = M->Glossiness;
+			float          oldS = M->Specular;
+			M->Glossiness = 64;
+			M->Specular   = 0.1f;
+			std::fprintf(stderr, "[GREETS] marble gloss 'rooms' glossiness %u->%u specular %.3f->%.3f\n",
+			             oldG, M->Glossiness, oldS, M->Specular);
+		}
 		// Tangent-space normal maps work on any face orientation —
 		// the perturbation lives in the surface's own tangent plane
 		// and the lighting kernel multiplies by per-pixel TBN to bring
