@@ -793,6 +793,18 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					for (int t = 0; t < NT; ++t) { tbX0[t]=0; tbY0[t]=0; tbX1[t]=XRes; tbY1[t]=YRes; }
 			}
 			haveBox:;
+			if (getenv("FDS_XPAR_BATCHLOG")) {
+				int ux0=XRes,uy0=YRes,ux1=0,uy1=0; bool any=false;
+				for (int t=0;t<NT;++t){ if(tbX1[t]<=tbX0[t]||tbY1[t]<=tbY0[t])continue; any=true;
+					if(tbX0[t]<ux0)ux0=tbX0[t]; if(tbY0[t]<uy0)uy0=tbY0[t];
+					if(tbX1[t]>ux1)ux1=tbX1[t]; if(tbY1[t]>uy1)uy1=tbY1[t]; }
+				std::fprintf(stderr,
+					"[XPAR-BATCH] front=%d faces=%d cloneTag=%d mirWin=[%d,%d..%d,%d] tbUnion=%s[%d,%d..%d,%d]\n",
+					batchFront?1:0, count, (int)cloneTag,
+					cloneTag?mirWinX0[cloneTag]:-1, cloneTag?mirWinY0[cloneTag]:-1,
+					cloneTag?mirWinX1[cloneTag]:-1, cloneTag?mirWinY1[cloneTag]:-1,
+					any?"":"EMPTY ", ux0,uy0,ux1,uy1);
+			}
 			auto rasterAndComposite = [&]() {
 				runTilePass([first, count, T, sel, reverseMode](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
 					// thread_local: set on THIS worker, read by the synchronous
@@ -813,15 +825,19 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				}
 			};
 
-			// FDS_XPAR_TILEVIZ=1: outline each non-empty per-tile box on the
-			// framebuffer so the computed bound can be eyeballed against the actual
-			// transparent geometry (front=green, back=orange). VPage only -
-			// invisible under --hdr (the composite writes g_hdrBuf), so run the
-			// snapshot WITHOUT --hdr to see it.
+			// FDS_XPAR_TILEVIZ — outline EVERY transparent batch's per-tile bound
+			// on the framebuffer (front=green, back=orange): mirror clones, mirror
+			// panels, lamp glows, glass — all of them. VPage only (invisible under
+			// --hdr, so snapshot WITHOUT --hdr). NOTE: drawn per-batch, so a later
+			// batch's composite can paint over an earlier box (e.g. a front glass
+			// panel over a clone's box). For mirror-clone windows specifically use
+			// FDS_XPAR_MIRRORVIZ, which draws AFTER the whole peel (below) so
+			// nothing overwrites it.
 			auto drawTileMaskViz = [&]() {
 				if (!getenv("FDS_XPAR_TILEVIZ")) return;
 				dword* vp = reinterpret_cast<dword*>(VPage);
-				const dword col = batchFront ? 0x0000FF00u : 0x00FF8000u;
+				const dword col = batchFront ? 0x0000FF00u          // green = front xpar
+				                             : 0x00FF8000u;          // orange = back xpar
 				for (int t = 0; t < NT; ++t) {
 					if (tbX1[t] <= tbX0[t] || tbY1[t] <= tbY0[t]) continue;
 					const int xa = tbX0[t], xb = tbX1[t] - 1, ya = tbY0[t], yb = tbY1[t] - 1;
@@ -990,6 +1006,44 @@ xpar_done: ;
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last
 	// so cones/halos/fog/xpar can't overwrite the diagnostic display.
 	fds::Render_LightmapViz(CurScene);
+
+	// FDS_XPAR_MIRRORVIZ — outline each mirror's stamped window (thick red) on
+	// the FINAL image. Must run HERE (after Render_TonemapToVPage + all post),
+	// NOT during the transparent peel: greets tonemaps into VPage from g_hdrBuf,
+	// so any box drawn during the peel is overwritten before flip. Re-scan
+	// g_gbuffer->mirrorId for each id's screen bbox — only mirror surfaces stamp
+	// it, so every window is a mirror, and the clone composite is bounded exactly
+	// to this window (cross-checked via FDS_XPAR_BATCHLOG). VPage only.
+	if (std::getenv("FDS_XPAR_MIRRORVIZ") && g_gbuffer && !g_gbuffer->mirrorId.empty()) {
+		int wx0[256], wy0[256], wx1[256], wy1[256];
+		for (int i = 0; i < 256; ++i) { wx0[i]=XRes; wy0[i]=YRes; wx1[i]=-1; wy1[i]=-1; }
+		const uint8_t* mid = g_gbuffer->mirrorId.data();
+		for (int y = 0; y < YRes; ++y) {
+			const uint8_t* row = mid + size_t(y) * XRes;
+			for (int x = 0; x < XRes; ++x) {
+				const uint8_t id = row[x];
+				if (!id) continue;
+				if (x < wx0[id]) wx0[id]=x;  if (x > wx1[id]) wx1[id]=x;
+				if (y < wy0[id]) wy0[id]=y;  if (y > wy1[id]) wy1[id]=y;
+			}
+		}
+		dword* vp = reinterpret_cast<dword*>(VPage);
+		const dword col = 0x00FF0000u;   // bright red
+		const int TH = 6;                // border thickness, px
+		for (int id = 1; id < 256; ++id) {
+			if (wx1[id] < wx0[id] || wy1[id] < wy0[id]) continue;
+			const int xa = std::max(0, wx0[id]),        ya = std::max(0, wy0[id]);
+			const int xb = std::min(XRes - 1, wx1[id]), yb = std::min(YRes - 1, wy1[id]);
+			if (xb < xa || yb < ya) continue;
+			std::fprintf(stderr, "[MIRRORVIZ] id=%d box=[%d,%d..%d,%d]\n", id, xa, ya, xb, yb);
+			for (int t = 0; t < TH; ++t) {
+				const int yt = std::min(yb, ya + t), yb2 = std::max(ya, yb - t);
+				for (int x = xa; x <= xb; ++x) { vp[yt * XRes + x] = col; vp[yb2 * XRes + x] = col; }
+				const int xl = std::min(xb, xa + t), xr2 = std::max(xa, xb - t);
+				for (int y = ya; y <= yb; ++y) { vp[y * XRes + xl] = col; vp[y * XRes + xr2] = col; }
+			}
+		}
+	}
 
 
 
