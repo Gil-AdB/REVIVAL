@@ -62,6 +62,16 @@ struct Material
     // texel pack), so albedo/normal/AO then all sample the parallax-shifted
     // texel for free. Gated on --parallax; null = flat.
     Texture             * HeightMap              = nullptr;
+    // Per-material parallax strength multiplier (× the global --parallax_strength).
+    // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
+    // UV-tiled floors). Default 1.
+    float                 ParallaxScale          = 1.0f;
+    // Per-material roughness map (PBR). Grayscale, 8-bit single-channel, same
+    // tiled/mip layout as the albedo (sampled at the same swizzled UV/miplevel
+    // — incl. the parallax-shifted UV). White = rough → LESS specular. Cheap
+    // tier: modulates specular INTENSITY only (keeps the compile-time gloss
+    // exponent). Gated on --roughness_map; null = uniform Mat->Specular.
+    Texture             * RoughnessMap           = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;
     char                * Name                  = nullptr;

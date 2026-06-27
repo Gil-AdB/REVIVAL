@@ -387,6 +387,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	constexpr bool nmapFromDiffuseG = false;
 	constexpr bool aoFromDiffuseG   = false;
 #endif
+	const bool  roughMapOnG     = fds::FeatureFlags::roughness_map();
+	const float roughStrengthG  = fds::FeatureFlags::roughness_strength();
 	const bool  aoMapOnG        = fds::FeatureFlags::ao_map();
 	const float aoStrengthG     = fds::FeatureFlags::ao_map_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
@@ -1377,6 +1379,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
+			// rough → dimmer highlight, so the highlight breaks up across the
+			// surface (matte mortar vs glinty stone). 8-bit gather at the same
+			// (parallax-shifted) swizzled UV; only when there's a highlight.
+			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
+				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->RoughnessMap->Mipmap[miplevel]) : nullptr;
+				if (rd) {
+					float specMul = 1.0f - roughStrengthG * (float(rd[swizzledUV]) * (1.0f/255.0f));
+					if (specMul < 0.0f) specMul = 0.0f;
+					sB *= specMul; sG *= specMul; sR *= specMul;
+				}
+			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
@@ -2673,6 +2688,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const meka::GBuffer &gb = *ctx.gb;
 	dword *out = reinterpret_cast<dword *>(VPage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
+	const bool  roughMapOnG    = fds::FeatureFlags::roughness_map();   // see main kernel
+	const float roughStrengthG = fds::FeatureFlags::roughness_strength();
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
@@ -3044,6 +3061,16 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Roughness map (cheap tier): per-pixel specular intensity (see main path).
+			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
+				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->RoughnessMap->Mipmap[miplevel]) : nullptr;
+				if (rd) {
+					float specMul = 1.0f - roughStrengthG * (float(rd[swizzledUV]) * (1.0f/255.0f));
+					if (specMul < 0.0f) specMul = 0.0f;
+					sB *= specMul; sG *= specMul; sR *= specMul;
+				}
+			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);

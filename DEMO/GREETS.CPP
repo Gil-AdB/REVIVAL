@@ -1256,13 +1256,25 @@ void Initialize_Greets()
 			// albedo is RGBA with AO baked into the alpha channel (Mat_AoInAlpha):
 			// the kernel reads occlusion straight from the already-fetched albedo
 			// texel — no separate AO texture, no extra per-pixel fetch.
-			const char *albedo = nullptr, *height = nullptr, *normal = nullptr;
-			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.png";  height = "TEXTURES/greets_wall_h.png";  normal = "TEXTURES/greets_wall_n.png"; }
-			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.png"; height = "TEXTURES/greets_floor_h.png"; normal = "TEXTURES/greets_floor_n.png"; }
+			const char *albedo = nullptr, *height = nullptr, *normal = nullptr, *rough = nullptr;
+			float pxScale = 1.0f;
+			if      (!strcmp(M->Name, "rooms")) { albedo = "TEXTURES/greets_wall.png";  height = "TEXTURES/greets_wall_h.png";  normal = "TEXTURES/greets_wall_n.png";  rough = "TEXTURES/greets_wall_r.png"; }
+			else if (!strcmp(M->Name, "floor")) { albedo = "TEXTURES/greets_floor.png"; height = "TEXTURES/greets_floor_h.png"; normal = "TEXTURES/greets_floor_n.png"; rough = "TEXTURES/greets_floor_r.png"; pxScale = 0.25f; }  // floor: offset-parallax swims on the grazing, densely-tiled floor → dial it down
 			if (!albedo) continue;
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
 			M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
+			M->ParallaxScale = pxScale;
+			// Roughness map (--roughness_map): per-pixel specular intensity. 8-bit
+			// single-channel (MakeHeight8), same layout as albedo → same swizzled UV.
+			if (rough) {
+				if (Texture *r32 = GreetsLoadFullTexture(rough)) {
+					Texture *r8 = MakeHeight8(r32);
+					M->RoughnessMap = r8 ? r8 : r32;
+					std::fprintf(stderr, "[GREETS] roughness '%s' -> %s (%s)\n",
+					             M->Name, rough, r8 ? "8-bit" : "32-bit");
+				}
+			}
 			// Parallax (--parallax): load the grayscale height map onto the
 			// material so Mekalele can offset the UV by it. Shares the albedo's
 			// tiled+mip layout (GreetsLoadFullTexture → Generate_Mipmaps), so the
