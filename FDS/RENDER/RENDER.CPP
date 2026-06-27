@@ -602,20 +602,32 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// the right/bottom remainder strip skipped every xpar pass and
 		// transparent surfaces (e.g. city water) failed to render in
 		// those bands.
+		// Per-TILE pixel bound for the batch: tb{X0,Y0,X1,Y1}[tile] is the union
+		// of this batch's faces' screen extents intersected with that tile (an
+		// empty box = no face touches the tile → skipped). This is the REAL
+		// bound — the union of the faces' coverage, NOT a single bounding rect
+		// over the whole batch (which would swallow the gaps between spread-out
+		// faces and the unrelated objects in them). The legacy peel otherwise
+		// composites every batch across all 30 tiles (4-5× full screen, 99.5%
+		// empty). Each enqueued tile job is clamped to its tb box. Default =
+		// whole tile until flushBatch narrows it.
+		constexpr int NT = numTilesX * numTilesY;
+		int tbX0[NT], tbY0[NT], tbX1[NT], tbY1[NT];
 		auto runTilePass = [&](auto workFn) {
+			int enq = 0;
 			for (auto j = 0; j < numTilesY; ++j) {
-				auto y1 = tileSizeY * j;
-				auto y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
 				for (auto i = 0; i < numTilesX; ++i) {
-					auto x1 = tileSizeX * i;
-					auto x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
 					const int tileIdx = j * numTilesX + i;
-					ThreadPool::instance().enqueue([x1, y1, x2, y2, tileIdx, workFn]() {
-						workFn(x1, y1, x2, y2, tileIdx);
+					const int cx1 = tbX0[tileIdx], cy1 = tbY0[tileIdx];
+					const int cx2 = tbX1[tileIdx], cy2 = tbY1[tileIdx];
+					if (cx1 >= cx2 || cy1 >= cy2) continue;     // no face in this tile
+					ThreadPool::instance().enqueue([cx1, cy1, cx2, cy2, tileIdx, workFn]() {
+						workFn(cx1, cy1, cx2, cy2, tileIdx);
 					});
+					++enq;
 				}
 			}
-			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "postlight");
+			TailProf::drain(renderns::tileDone, enq, "postlight");
 		};
 
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
@@ -649,6 +661,35 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// Consecutive same-(mesh,side) faces naturally co-cluster in
 		// the sorted list because the sort key has a high-bit partition
 		// per side and a per-mesh score within.
+		// Per-mirror WINDOW bbox, in screen pixels. A transparent CLONE face
+		// (mirrorMaskTag != 0) is the reflected room geometry living in mirror
+		// space: projecting its vertices spans the whole reflected room (a near-
+		// fullscreen box), but it's only VISIBLE where the deferred mask gates it
+		// — gb.mirrorId == mirrorMaskTag, i.e. the mirror's stamped footprint.
+		// So a clone batch's correct composite bound is its mirror's window, NOT
+		// the clone geometry's projection. The mirror walls already stamped
+		// gb.mirrorId during the opaque pass; scan it once to get each id's
+		// screen bbox, and bound clone batches by it below.
+		int mirWinX0[256], mirWinY0[256], mirWinX1[256], mirWinY1[256];
+		bool mirWinAny = false;
+		{
+			for (int id = 0; id < 256; ++id) { mirWinX0[id]=XRes; mirWinY0[id]=YRes; mirWinX1[id]=-1; mirWinY1[id]=-1; }
+			const meka::GBuffer* og = g_gbuffer;
+			if (og && !og->mirrorId.empty()) {
+				const uint8_t* mid = og->mirrorId.data();
+				for (int y = 0; y < YRes; ++y) {
+					const uint8_t* row = mid + size_t(y) * XRes;
+					for (int x = 0; x < XRes; ++x) {
+						const uint8_t id = row[x];
+						if (!id) continue;
+						mirWinAny = true;
+						if (x < mirWinX0[id]) mirWinX0[id] = x;  if (x > mirWinX1[id]) mirWinX1[id] = x;
+						if (y < mirWinY0[id]) mirWinY0[id] = y;  if (y > mirWinY1[id]) mirWinY1[id] = y;
+					}
+				}
+			}
+		}
+
 		TriMesh* batchMesh    = nullptr;
 		bool     batchFront   = false;
 		bool     batchOpen    = false;
@@ -663,6 +704,95 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			const int first = batchFirst;
 			const int count = batchLastEnd - batchFirst;
 			const bool reverseMode = (peelPasses > 1);
+
+			// CLONE batch (reflected mirror geometry): bound by the mirror's
+			// stamped window, not the clone's own projection. The clone lives in
+			// mirror space — its verts project across the whole reflected room (a
+			// near-fullscreen box), but it only contributes where gb.mirrorId ==
+			// its mirrorMaskTag, so pixels outside that window are masked off and
+			// skipping them is output-identical. mirWin[id] is that window.
+			// Reset per-tile boxes to empty (inverted => skipped).
+			for (int t = 0; t < NT; ++t) { tbX0[t]=XRes; tbY0[t]=YRes; tbX1[t]=0; tbY1[t]=0; }
+			// addRect: OR a screen-pixel rect into every tile it overlaps, clamped
+			// to (rect intersect tile). Building the per-tile union from the
+			// individual face/window rects (not one batch-wide rect) keeps the
+			// bound tight to the faces and OUT of the gaps between spread faces.
+			auto tileXhi = [&](int i){ return (i==numTilesX-1)?XRes:tileSizeX*(i+1); };
+			auto tileYhi = [&](int j){ return (j==numTilesY-1)?YRes:tileSizeY*(j+1); };
+			auto addRect = [&](int rx0,int ry0,int rx1,int ry1){
+				rx0=std::max(0,rx0); ry0=std::max(0,ry0);
+				rx1=std::min(XRes,rx1); ry1=std::min(YRes,ry1);
+				if (rx1<=rx0 || ry1<=ry0) return;
+				const int ti0=std::min(rx0/tileSizeX,numTilesX-1), ti1=std::min((rx1-1)/tileSizeX,numTilesX-1);
+				const int tj0=std::min(ry0/tileSizeY,numTilesY-1), tj1=std::min((ry1-1)/tileSizeY,numTilesY-1);
+				for (int j=tj0;j<=tj1;++j) for (int i=ti0;i<=ti1;++i) {
+					const int idx=j*numTilesX+i;
+					const int ix0=std::max(rx0,tileSizeX*i), iy0=std::max(ry0,tileSizeY*j);
+					const int ix1=std::min(rx1,tileXhi(i)),  iy1=std::min(ry1,tileYhi(j));
+					if (ix0<tbX0[idx]) tbX0[idx]=ix0;  if (iy0<tbY0[idx]) tbY0[idx]=iy0;
+					if (ix1>tbX1[idx]) tbX1[idx]=ix1;  if (iy1>tbY1[idx]) tbY1[idx]=iy1;
+				}
+			};
+
+			const uint8_t cloneTag =
+				(count > 0 && FList[first].face) ? FList[first].face->mirrorMaskTag : 0;
+			if (cloneTag != 0) {
+				// Clone: bound to the mirror's stamped window only (it's masked to
+				// gb.mirrorId == cloneTag; outside is output-identical to skip).
+				if (mirWinX1[cloneTag] >= mirWinX0[cloneTag])
+					addRect(mirWinX0[cloneTag], mirWinY0[cloneTag],
+					        mirWinX1[cloneTag]+1, mirWinY1[cloneTag]+1);
+				goto haveBox;
+			}
+
+			// Non-clone transparent: pixel-precise screen bbox of the batch's
+			// faces. frame->PX/RZ aren't projected for transparent faces yet (that
+			// happens in the per-tile clipper), but view-space TPos IS filled
+			// (same as computeFront reads), and TPos already has FOVX/CntrEX baked
+			// in (Transform: TPos.x = fovX*x + cntrEX*z) so the screen pixel is
+			// TPos.x * (1/z). Each triangle is near-plane-clipped (z > C_NZP)
+			// BEFORE projecting, so a face straddling the near plane contributes
+			// its on-screen extent (clamped to the viewport) instead of a
+			// garbage/huge projection.
+			// Non-clone transparent: OR in each FACE's own screen extent (a union,
+			// so gaps between spread-out faces stay out of the bound). TPos is
+			// view-space with FOVX/CntrEX baked in (screen = TPos.x * 1/z); each
+			// triangle is near-plane-clipped (z > C_NZP) before projecting.
+			{
+				bool anyFaceBad = false;
+				for (int k = first; k < batchLastEnd && !anyFaceBad; ++k) {
+					Face* F = FList[k].face;
+					if (!F || !F->frame) { anyFaceBad = true; break; }
+					const VertexFrame* ff = F->frame;
+					const uint32_t vi[3] = { F->A_idx, F->B_idx, F->C_idx };
+					float vx[3], vy[3], vz[3];
+					for (int t = 0; t < 3; ++t) { vx[t]=ff->TPos_x[vi[t]]; vy[t]=ff->TPos_y[vi[t]]; vz[t]=ff->TPos_z[vi[t]]; }
+					float mnx=1e30f, mny=1e30f, mxx=-1e30f, mxy=-1e30f;   // THIS face's bbox
+					auto proj = [&](float x, float y, float z) {
+						const float rz = 1.0f / z, sx = x*rz, sy = y*rz;
+						if (sx<mnx)mnx=sx; if (sx>mxx)mxx=sx; if (sy<mny)mny=sy; if (sy>mxy)mxy=sy;
+					};
+					for (int t = 0; t < 3; ++t) {
+						const int n = (t + 1) % 3;
+						const bool ci = vz[t] > C_NZP, ni = vz[n] > C_NZP;
+						if (ci) proj(vx[t], vy[t], vz[t]);
+						if (ci != ni) {
+							const float a = (C_NZP - vz[t]) / (vz[n] - vz[t]);
+							proj(vx[t] + a*(vx[n]-vx[t]), vy[t] + a*(vy[n]-vy[t]), C_NZP);
+						}
+					}
+					if (mxx >= mnx && mxy >= mny)
+						// +1px guard each side: the rasterizer's sub-pixel fill
+						// convention can touch a pixel just past the projected
+						// vertex bbox; without the guard tight per-face bounds drop
+						// a thin edge sliver (seen at t=410).
+						addRect(int(std::floor(mnx))-1, int(std::floor(mny))-1,
+						        int(std::ceil(mxx))+2, int(std::ceil(mxy))+2);
+				}
+				if (anyFaceBad)            // couldn't bound a face -> all tiles full
+					for (int t = 0; t < NT; ++t) { tbX0[t]=0; tbY0[t]=0; tbX1[t]=XRes; tbY1[t]=YRes; }
+			}
+			haveBox:;
 			auto rasterAndComposite = [&]() {
 				runTilePass([first, count, T, sel, reverseMode](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
 					// thread_local: set on THIS worker, read by the synchronous
@@ -683,11 +813,29 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				}
 			};
 
+			// FDS_XPAR_TILEVIZ=1: outline each non-empty per-tile box on the
+			// framebuffer so the computed bound can be eyeballed against the actual
+			// transparent geometry (front=green, back=orange). VPage only -
+			// invisible under --hdr (the composite writes g_hdrBuf), so run the
+			// snapshot WITHOUT --hdr to see it.
+			auto drawTileMaskViz = [&]() {
+				if (!getenv("FDS_XPAR_TILEVIZ")) return;
+				dword* vp = reinterpret_cast<dword*>(VPage);
+				const dword col = batchFront ? 0x0000FF00u : 0x00FF8000u;
+				for (int t = 0; t < NT; ++t) {
+					if (tbX1[t] <= tbX0[t] || tbY1[t] <= tbY0[t]) continue;
+					const int xa = tbX0[t], xb = tbX1[t] - 1, ya = tbY0[t], yb = tbY1[t] - 1;
+					for (int x = xa; x <= xb; ++x) { vp[ya * XRes + x] = col; vp[yb * XRes + x] = col; }
+					for (int y = ya; y <= yb; ++y) { vp[y * XRes + xa] = col; vp[y * XRes + xb] = col; }
+				}
+			};
+
 			if (peelPasses <= 1) {
 				// Legacy single-fragment peel — byte-identical.
 				if (batchFront) clearFront();
 				else            clearBack();
 				rasterAndComposite();
+				drawTileMaskViz();
 				batchOpen = false;
 				return;
 			}
@@ -715,6 +863,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				if (sideZ)  parallel_memset(sideZ, 0xFF, numPixels * sizeof(uint16_t));
 				rasterAndComposite();
 			}
+			drawTileMaskViz();
 			batchOpen = false;
 		};
 
