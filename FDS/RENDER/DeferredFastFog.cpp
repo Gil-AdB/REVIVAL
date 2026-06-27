@@ -137,6 +137,16 @@ struct FastFogParams {
 	float ditherAmp;   // triangular dither (levels) to break 8-bit banding
 	float feather;     // slab Y-edge feather (world units); 0 = hard cutoff
 	float invFeather;  // 1/feather, precomputed for the froxel density
+	// Animation: rigid wind drift + a low-frequency curl (swirl) of the noise
+	// field, so the fog flows and churns instead of sitting frozen. driftX/Y/Z
+	// is this frame's advection in world units (= wind·time); the curl warps the
+	// sample position rotationally. Froxel path applies both (fogWarp); the
+	// screen-space DDA applies only the rigid drift (a straight-ray DDA can't
+	// follow a curved warp). All 0 = static field.
+	float driftX, driftY, driftZ;
+	float swirlAmp;    // curl warp amplitude (world units); 0 = drift only
+	float swirlFreq;   // curl spatial frequency (1/world-units)
+	float swirlPhase;  // curl temporal phase (radians; advances with scene time)
 };
 
 // Hash a 3D integer cell index → 32 random bits. One call yields all
@@ -160,6 +170,44 @@ static inline uint32_t cellHash(int ix, int iy, int iz) {
 	return h;
 }
 
+// ── Fog animation: sin/cos LUT ─────────────────────────────────────────────
+// The curl warp (fogWarp) evaluates sin/cos per dense froxel across the whole
+// screen, so libm trig would dominate. A 1024-entry table — built once at
+// static-init time, before any worker thread runs — with linear interpolation
+// is plenty for a low-frequency domain warp. The extra guard entry [1024]==[0]
+// lets the lerp read i+1 without a wrap branch.
+static const struct FogTrigLUT {
+	float s[1025];
+	FogTrigLUT() {
+		for (int i = 0; i <= 1024; ++i)
+			s[i] = float(std::sin(double(i) * (6.283185307179586 / 1024.0)));
+	}
+} g_fogTrig;
+static inline float fogSin(float x) {
+	float r = x * (1.0f / 6.2831853f);
+	r -= std::floor(r);                       // wrap to [0,1)
+	float f = r * 1024.0f;
+	int   i = int(f);                         // 0..1023
+	return g_fogTrig.s[i] + (g_fogTrig.s[i + 1] - g_fogTrig.s[i]) * (f - float(i));
+}
+static inline float fogCos(float x) { return fogSin(x + 1.5707963f); }
+
+// Domain-warp a world sample position so the fog field animates: a rigid wind
+// drift plus a low-frequency curl that rotates the flow (the field churns, not
+// just slides). Driven by P.swirlPhase, which advances with scene time. Called
+// at the noise-lookup entry so every variant (value/worley/metaball) and every
+// octave warps identically. The z term uses the pre-warp x to avoid feedback.
+static inline void fogWarp(const FastFogParams& P, float& wx, float& wy, float& wz) {
+	wx += P.driftX; wy += P.driftY; wz += P.driftZ;
+	if (P.swirlAmp > 0.0f) {
+		const float f = P.swirlFreq, ph = P.swirlPhase;
+		const float ox = wx;                              // pre-warp x
+		wx += P.swirlAmp * fogSin(wz * f + ph);
+		wz += P.swirlAmp * fogCos(ox * f + ph);
+		wy += P.swirlAmp * 0.5f * fogSin((ox + wz) * f * 0.7f + ph * 1.3f);
+	}
+}
+
 // Optical depth of the procedural fog field along the world ray
 // O + t·D over t ∈ [tA,tB]. The density is trilinear VALUE NOISE on the
 // world grid: each lattice corner gets a hashed random value, and the
@@ -176,6 +224,11 @@ static float blobFieldTau(const FastFogParams& P,
                           float /*a*/, float Vlen, float tA, float tB)
 {
 	const float cell = P.cell, invCell = P.invCell;
+
+	// Wind drift: rigid translation of the field, which keeps this straight-ray
+	// DDA valid. The curl swirl is froxel-path only (see fogWarp) — a domain
+	// warp would bend the ray and break the cell traversal.
+	Ox += P.driftX; Oy += P.driftY; Oz += P.driftZ;
 
 	const float ex = Ox + tA*Dx, ey = Oy + tA*Dy, ez = Oz + tA*Dz;
 	int cx = int(std::floor(ex * invCell));
@@ -1154,6 +1207,7 @@ static inline float metaballNoiseAt(float wx, float wy, float wz, float invCell,
 static inline float fogNoiseAt(const FastFogParams& P, float wx, float wy, float wz,
                                float cell, float invCell)
 {
+	fogWarp(P, wx, wy, wz);   // animate: wind drift + curl swirl (drives every octave)
 	float d;
 	if (P.blobOverlap > 0.0f)
 		d = metaballNoiseAt(wx, wy, wz, invCell, P.blobOverlap,
@@ -1867,6 +1921,21 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.blobs  = fds::FeatureFlags::fast_fog_blobs();
 	P.cell   = std::max(1.0f, fds::FeatureFlags::fast_fog_cell());
 	P.invCell= 1.0f / P.cell;
+	// ── Fog animation (drift + curl swirl) ──────────────────────────────
+	// Scene time in seconds (g_FrameTime = centiseconds, 100 Hz; pause-aware,
+	// and pinned to Timer in snapshots → deterministic per t). Drift is a
+	// gentle horizontal wind expressed in cells/second so it reads the same at
+	// any blob scale; the curl is a large-scale rotational warp spanning ~2
+	// cells, rotating slowly. Subtle by design — fog creeps, it doesn't churn.
+	{
+		const float tsec = float(g_FrameTime) * 0.01f;
+		P.driftX = (0.35f * P.cell) * tsec;     // ~0.35 cell/s downwind (X)
+		P.driftY = 0.0f;                        // no vertical bulk drift
+		P.driftZ = (0.15f * P.cell) * tsec;     // cross-flow (Z)
+		P.swirlAmp   = 0.45f * P.cell;          // bounded warp (< 1 cell)
+		P.swirlFreq  = 1.0f / (2.0f * P.cell);  // curl spans ~2 cells
+		P.swirlPhase = 1.8f * tsec;             // ~1.8 rad/s rotation
+	}
 	P.jitter = fds::FeatureFlags::fast_fog_blob_jitter();
 	P.worley = fds::FeatureFlags::fast_fog_worley();
 	P.blobOverlap  = std::min(1.5f, fds::FeatureFlags::fast_fog_blob_overlap());
