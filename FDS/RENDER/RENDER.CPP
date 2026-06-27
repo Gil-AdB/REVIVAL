@@ -493,6 +493,16 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		if (!skipVolumetric)
 			Render_SSAO();
 
+		// --ssao-debug self-isolation: Render_SSAO has written the greyscale AO
+		// term to VPage; STOP here so the downstream compositing (skybox, fog,
+		// transparent peel, cones/halos, sprites/TBR, tonemap, and the LDR post
+		// stack — chromatic/vignette/dof/grade) doesn't paint over it. Without
+		// this the AO viz is buried under the scene's lights and post. Main pass
+		// only (the debug write only happened when !skipVolumetric); requires
+		// --no-hdr (else the tonemap we're skipping is also what maps VPage).
+		if (!skipVolumetric && fds::FeatureFlags::ssao() && fds::FeatureFlags::ssao_debug())
+			return;
+
 		// Deferred skybox: paint pixels the rasterizer didn't touch
 		// (zEnc == 0) by sampling the sky cube directly from the G-
 		// buffer. Replaces the forward RenderSkyCube draw and removes
