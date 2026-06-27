@@ -936,7 +936,8 @@ inline void planeBasis(const Vector &n, Vector &u, Vector &v) {
 
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                               std::vector<Mirror> &out,
-                              std::vector<MirrorRttSlot> *rttSlots)
+                              std::vector<MirrorRttSlot> *rttSlots,
+                              const std::vector<std::string> *allowedMatNames)
 {
     if (!sc || !textureFileName) return 0;
 
@@ -1070,9 +1071,11 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         Vector axU, axV; planeBasis(cN, axU, axV);
         float bu0=1e30f,bu1=-1e30f,bv0=1e30f,bv1=-1e30f;
         Vector cCtr{0,0,0}; int cNv=0;
+        const char *cMatName = "?";
         for (size_t i = 0; i < samples.size(); ++i) {
             if (clusterOf[i] != c) continue;
             const WallSample &ws = samples[i];
+            if (cMatName[0]=='?' && ws.F->Txtr && ws.F->Txtr->Name) cMatName = ws.F->Txtr->Name;
             const Vertex *vs[3] = { ws.F->A, ws.F->B, ws.F->C };
             for (int k = 0; k < 3; ++k) {
                 Vector wp = vs[k]->Pos;
@@ -1119,7 +1122,20 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         }
         constexpr float kMaxDisplayAspect = 6.0f;
         const char *verdict = "built";
-        if (clusterArea < kMinRttArea) {
+        // Explicit per-surface mirror designation (authored on the LWO surface
+        // name). When an allowlist is supplied, a cluster is a mirror candidate
+        // ONLY if its surface is named in it — no area heuristic decides IF a
+        // screen reflects, only WHICH face of a marked screen's box does.
+        bool nameAllowed = true;
+        if (allowedMatNames) {
+            nameAllowed = false;
+            for (const std::string &nm : *allowedMatNames)
+                if (nm == cMatName) { nameAllowed = true; break; }
+        }
+        if (!nameAllowed) {
+            verdict = "unmarked";
+            ++skippedSlivers;
+        } else if (clusterArea < kMinRttArea) {
             verdict = "sliver";
             ++skippedSlivers;
         } else if (clusterArea < kMinMirrorArea) {
@@ -1149,9 +1165,9 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             else if (facesWall)                  verdict = "occluded";  // back, mounted on wall
         }
         std::fprintf(stderr,
-            "[CLUSTER %2d] N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
+            "[CLUSTER %2d] mat='%s' ctr=(%.0f,%.0f,%.0f) N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
             "area=%6.2f ext=%.2fx%.2f aspect=%.1f facesWall=%d -> %s\n",
-            c, cN.x, cN.y, cN.z, cD, members.size(), clusterArea,
+            c, cMatName, cCtr.x, cCtr.y, cCtr.z, cN.x, cN.y, cN.z, cD, members.size(), clusterArea,
             exU, exV, aspect, (int)facesWall, verdict);
         if (verdict[0] == 'r') {
             // ── First-order RTT slot ────────────────────────────────

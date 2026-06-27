@@ -247,9 +247,18 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 // texture re-rendered each frame from the singly-reflected camera.
 // Requires --mirror-rtt; pass nullptr to skip (columns stay ordinary
 // screens).
+// allowedMatNames (optional): if non-null, ONLY coplanar clusters whose
+// source surface name is in this list become mirrors — an explicit, per-
+// surface mirror designation that replaces the area heuristic for SELECTION
+// (area/aspect is still used to pick the front face of a marked screen's box
+// vs its side caps). The mark is authored on the LWO surface (e.g. the big
+// greets display is surface "screen 3"); the small amudim screens ("screen 4")
+// and column panels ("screen2") are simply left off the list. Pass nullptr to
+// keep the legacy area-gated behaviour (any P_TEXT cluster >= min-area).
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                               std::vector<Mirror> &out,
-                              std::vector<MirrorRttSlot> *rttSlots = nullptr);
+                              std::vector<MirrorRttSlot> *rttSlots = nullptr,
+                              const std::vector<std::string> *allowedMatNames = nullptr);
 
 // Depth-1 recursive: for each ordered pair (A, B) of already-built
 // base mirrors, append a compound mirror representing "looking at B

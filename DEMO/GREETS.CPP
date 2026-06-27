@@ -2069,6 +2069,18 @@ void Initialize_Greets()
 		const char *kMirrorTextures[] = {
 			"P_TEXT.JPG",  // greets text screens — half-silvered glass
 		};
+		// EXPLICIT mirror designation, authored on the LWO surface name.
+		// Only these P_TEXT surfaces become reflective screens; the small
+		// "amudim" screens ("screen 4") and column panels ("screen2") share
+		// the P_TEXT texture but are NOT mirrors (they were spuriously caught
+		// by the old texture+area heuristic). To make another screen a mirror,
+		// add its surface name here (no LWO change needed — the name IS the
+		// mark; rename the surface in Piramid.lwo if you want a distinct one).
+		const std::vector<std::string> kMirrorScreenMats = {
+			"screen 3",   // the big end display (far +x wall)
+			"screen 4",   // the display opposite the teleporter (center-back)
+			// "screen2" (central column panel) intentionally NOT a mirror.
+		};
 		for (const char *matName : kMirrorMats) {
 			fds::Mirror m = fds::BuildMirror(GreetSc, matName);
 			if (m.cloneMesh) g_greetsMirrors.push_back(std::move(m));
@@ -2078,7 +2090,8 @@ void Initialize_Greets()
 			// become first-order RTT mirrors when --mirror-rtt is on.
 			fds::BuildMirrorsByTextureName(GreetSc, txtrName,
 			                               g_greetsMirrors,
-			                               &g_greetsRttSlots);
+			                               &g_greetsRttSlots,
+			                               &kMirrorScreenMats);
 		}
 		// Tag original faces behind each mirror plane so room geometry
 		// behind a (transparent) mirror can't leak through its footprint
