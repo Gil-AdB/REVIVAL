@@ -77,10 +77,25 @@ void RenderStats_Flush();
   #define FDS_STATS_INC_POLYS()        (::fds::stats_tls().polysRendered++)
   #define FDS_STATS_ADD_PIXELS(area)   (::fds::stats_tls().fillerPixelcount += (area))
   #define FDS_STATS_INC(field)         (::fds::stats_tls().field++)
+  // Scoped variants: capture the per-thread block ONCE with FDS_STATS_SCOPE()
+  // at the top of a hot function, then bump via the _S macros. `stats_tls()`
+  // is a non-inlined cross-TU call guarded by a thread-local init check
+  // (TlsHolder has a non-trivial ctor/dtor), so the per-face clipper — which
+  // hits ~10 increment sites — was paying that guard+call each time. One
+  // capture per call collapses it; the counters are identical (byte-for-byte
+  // output), only the lookup is hoisted.
+  #define FDS_STATS_SCOPE()            ::fds::PerThreadRenderStats& _fds_st = ::fds::stats_tls()
+  #define FDS_STATS_INC_POLYS_S()      (_fds_st.polysRendered++)
+  #define FDS_STATS_ADD_PIXELS_S(area) (_fds_st.fillerPixelcount += (area))
+  #define FDS_STATS_INC_S(field)       (_fds_st.field++)
 #else
   #define FDS_STATS_INC_POLYS()        ((void)0)
   #define FDS_STATS_ADD_PIXELS(area)   ((void)(area))
   #define FDS_STATS_INC(field)         ((void)0)
+  #define FDS_STATS_SCOPE()            ((void)0)
+  #define FDS_STATS_INC_POLYS_S()      ((void)0)
+  #define FDS_STATS_ADD_PIXELS_S(area) ((void)(area))
+  #define FDS_STATS_INC_S(field)       ((void)0)
 #endif
 
 } // namespace fds
