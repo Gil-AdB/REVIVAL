@@ -1268,10 +1268,14 @@ void Initialize_Greets()
 			// tiled+mip layout (GreetsLoadFullTexture → Generate_Mipmaps), so the
 			// swizzled UV/miplevel the rasterizer computes indexes it directly.
 			if (fds::FeatureFlags::parallax() && height) {
-				if (Texture *hm = GreetsLoadFullTexture(height)) {
-					M->HeightMap = hm;
-					std::fprintf(stderr, "[GREETS] parallax '%s' -> height %s (%dx%d mips=%u)\n",
-					             M->Name, height, hm->SizeX, hm->SizeY, hm->numMipmaps);
+				if (Texture *hm32 = GreetsLoadFullTexture(height)) {
+					// Pack to 8-bit single-channel (¼ the memory; same layout so
+					// the rasterizer's swizzled index still indexes it).
+					Texture *hm = MakeHeight8(hm32);
+					M->HeightMap = hm ? hm : hm32;
+					std::fprintf(stderr, "[GREETS] parallax '%s' -> height %s (%dx%d mips=%u, %s)\n",
+					             M->Name, height, M->HeightMap->SizeX, M->HeightMap->SizeY,
+					             M->HeightMap->numMipmaps, hm ? "8-bit" : "32-bit fallback");
 				}
 			}
 			if (Texture *n = GreetsLoadNormalMap(normal, flipG)) {

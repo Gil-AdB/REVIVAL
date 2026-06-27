@@ -38,6 +38,11 @@ struct Texture;
 Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
                                 bool buildMips);
 
+// Pack a 32-bit tiled+mipmapped grayscale texture to an 8-bit single-channel
+// copy with the IDENTICAL layout (same swizzled index works; ¼ the memory).
+// Used for parallax height maps — the variable-texel-size pilot. Caller owns.
+Texture *MakeHeight8(Texture *src);
+
 // Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
 // with all the plumbing the engine needs — each item below cost a debug session
 // when missed while adding custom geometry (disco ball, blaster bolts, ...):

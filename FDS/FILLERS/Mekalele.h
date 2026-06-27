@@ -259,8 +259,8 @@ struct TileRasterizerCtx {
 	// HeightMap mip[miplevel] (same tiled layout as Txtr, so the same swizzled
 	// texel address indexes it), or null = parallax off. The apply loop
 	// reconstructs the view dir from cntrE*/invFOV* + per-pixel screen pos to
-	// nudge the UV before the texel pack. Grayscale height = low byte.
-	const dword *heightData = nullptr;
+	// nudge the UV before the texel pack. 8-bit single-channel (1 byte/texel).
+	const byte *heightData = nullptr;
 	float parallaxStrength  = 0.0f;
 	float cntrEX = 0.0f, cntrEY = 0.0f, invFOVX = 0.0f, invFOVY = 0.0f;
 	// Depth-peel floor (transparent passes only; nullptr for opaque). A
@@ -709,7 +709,7 @@ struct TileRasterizer {
 						alignas(32) int32_t aA[8]; haddr.store_a(aA);
 						alignas(32) float hA[8];
 						for (int k = 0; k < 8; ++k)
-							hA[k] = float(ctx.heightData[aA[k]] & 0xFFu) * (1.0f / 255.0f);
+							hA[k] = float(ctx.heightData[aA[k]]) * (1.0f / 255.0f);
 						Vec8f H; H.load_a(hA);
 						// View-space position per lane (same reconstruction as the
 						// deferred kernel): screen x = tile.x*TILE_SIZE + lane,
@@ -1137,11 +1137,11 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// Parallax: resolve the material's height mip for THIS miplevel (shares the
 	// albedo's tiled layout, so the rasterizer's swizzled texel address indexes
 	// it). Null unless --parallax + a HeightMap with that mip present.
-	const dword *heightData = nullptr;
+	const byte *heightData = nullptr;
 	if (fds::FeatureFlags::parallax() && F->Txtr->HeightMap) {
 		Texture *hm = F->Txtr->HeightMap;
 		if ((dword)miplevel < hm->numMipmaps && hm->Mipmap[miplevel])
-			heightData = reinterpret_cast<const dword*>(hm->Mipmap[miplevel]);
+			heightData = reinterpret_cast<const byte*>(hm->Mipmap[miplevel]);
 	}
 	meka::TileRasterizerCtx ctx = {
 		.V = V,

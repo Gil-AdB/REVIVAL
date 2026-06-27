@@ -170,6 +170,43 @@ static inline size_t SwizzledOffset(int x, int y, int blockSizeX, int blockSizeY
 	       + size_t(j) * BX + k;
 }
 
+// Pack a 32-bit (BGRA, tiled+mipmapped) grayscale texture down to an 8-bit
+// SINGLE-CHANNEL copy with the IDENTICAL block-tile + mip layout — so the same
+// swizzled texel index the rasterizer computes for the 32-bit albedo also
+// indexes this (just 1 byte/texel instead of 4 → ¼ the memory + cache). The
+// mip chain is one contiguous block (Generate_Mipmaps; Mipmap[i] point into
+// Data), so a flat low-byte copy preserves the layout exactly, and each mip's
+// byte offset == its texel offset in the source. This is the variable-texel-
+// size pilot (parallax height is the low-blast-radius first consumer: a new
+// texture, point-sampled, one reader). Returns a new Texture (BPP=8); caller owns.
+Texture *MakeHeight8(Texture *src) {
+	if (!src || src->BPP != 32 || !src->Mipmap[0] || src->numMipmaps == 0) return nullptr;
+	const int blockX = src->blockSizeX, blockY = src->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	// Total texels across all mip levels (matches Generate_Mipmaps' layout).
+	size_t total = 0;
+	int cx = src->SizeX >> blockX, cy = src->SizeY >> blockY;
+	for (dword i = 0; i < src->numMipmaps; ++i) {
+		total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+		cx = (cx + 1) >> 1; cy = (cy + 1) >> 1;
+	}
+	Texture *h = new Texture;
+	*h = *src;                       // copy dims/LSize/blockSize/numMipmaps/Optclass
+	h->Pal = nullptr; h->FileName = nullptr; h->ID = 0; h->Flags = src->Flags;
+	h->BPP = 8;
+	for (int i = 0; i < 16; ++i) h->Mipmap[i] = nullptr;
+	byte *dst = (byte *)getAlignedBlock(total);
+	h->Data = dst;
+	const uint32_t *s0 = reinterpret_cast<const uint32_t *>(src->Mipmap[0]);
+	for (size_t t = 0; t < total; ++t) dst[t] = byte(s0[t] & 0xFFu);   // low byte = gray
+	// Per-mip byte offset in the u8 buffer == the source's per-mip texel offset.
+	for (dword i = 0; i < src->numMipmaps; ++i) {
+		const size_t texelOff = size_t(reinterpret_cast<const uint32_t *>(src->Mipmap[i]) - s0);
+		h->Mipmap[i] = dst + texelOff;
+	}
+	return h;
+}
+
 Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	if (!diffuse || diffuse->BPP != 32 || !diffuse->Mipmap[0]) return nullptr;
 	const int W = diffuse->SizeX;
