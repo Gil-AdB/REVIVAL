@@ -1023,32 +1023,49 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		};
 		const float det = m[0] * m[3] - m[1] * m[2];
 		if (fabs(det) <= 0.01f) continue;
-		const float im[4] = {
-			 m[3] / det, -m[1] / det,
-			-m[2] / det,  m[0] / det
-		};
-		r.drzdx = im[0] * (v2.RZ - v1.RZ) + im[1] * (v3.RZ - v1.RZ);
-		r.drzdy = im[2] * (v2.RZ - v1.RZ) + im[3] * (v3.RZ - v1.RZ);
-		r.t0.du0zdx = im[0] * (v2.UZ - v1.UZ) + im[1] * (v3.UZ - v1.UZ);
-		r.t0.du0zdy = im[2] * (v2.UZ - v1.UZ) + im[3] * (v3.UZ - v1.UZ);
-		r.t0.dv0zdx = im[0] * (v2.VZ - v1.VZ) + im[1] * (v3.VZ - v1.VZ);
-		r.t0.dv0zdy = im[2] * (v2.VZ - v1.VZ) + im[3] * (v3.VZ - v1.VZ);
+		// One reciprocal instead of four divides (item 1).
+		const float invDet = 1.0f / det;
+		const float im0 =  m[3] * invDet, im1 = -m[1] * invDet;
+		const float im2 = -m[2] * invDet, im3 =  m[0] * invDet;
 
+		// Every gradient is the same im[]·(da, db) solve; batch the
+		// per-attribute deltas and evaluate 8 attributes per vector pass
+		// (item 5). Lane map: 0 RZ | 1 UZ | 2 VZ | 3 LA | 4 LR | 5 LG | 6 LB |
+		// 7 EUZ | 8 EVZ (env, TEXTURETEXTURE only; else 0).
+		alignas(32) float da[16] = {0}, db[16] = {0};
+		da[0] = v2.RZ - v1.RZ;             db[0] = v3.RZ - v1.RZ;
+		da[1] = v2.UZ - v1.UZ;             db[1] = v3.UZ - v1.UZ;
+		da[2] = v2.VZ - v1.VZ;             db[2] = v3.VZ - v1.VZ;
+		da[3] = float(v2.LA) - float(v1.LA); db[3] = float(v3.LA) - float(v1.LA);
+		da[4] = float(v2.LR) - float(v1.LR); db[4] = float(v3.LR) - float(v1.LR);
+		da[5] = float(v2.LG) - float(v1.LG); db[5] = float(v3.LG) - float(v1.LG);
+		da[6] = float(v2.LB) - float(v1.LB); db[6] = float(v3.LB) - float(v1.LB);
 		if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
-			r.t0.du1zdx = im[0] * (v2.EUZ - v1.EUZ) + im[1] * (v3.EUZ - v1.EUZ);
-			r.t0.du1zdy = im[2] * (v2.EUZ - v1.EUZ) + im[3] * (v3.EUZ - v1.EUZ);
-			r.t0.dv1zdx = im[0] * (v2.EVZ - v1.EVZ) + im[1] * (v3.EVZ - v1.EVZ);
-			r.t0.dv1zdy = im[2] * (v2.EVZ - v1.EVZ) + im[3] * (v3.EVZ - v1.EVZ);
+			da[7] = v2.EUZ - v1.EUZ;       db[7] = v3.EUZ - v1.EUZ;
+			da[8] = v2.EVZ - v1.EVZ;       db[8] = v3.EVZ - v1.EVZ;
 		}
-
-		r.dadx = (im[0] * (float(v2.LA) - float(v1.LA)) + im[1] * (float(v3.LA) - float(v1.LA)));
-		r.dady = (im[2] * (float(v2.LA) - float(v1.LA)) + im[3] * (float(v3.LA) - float(v1.LA)));
-		r.drdx = (im[0] * (float(v2.LR) - float(v1.LR)) + im[1] * (float(v3.LR) - float(v1.LR)));
-		r.drdy = (im[2] * (float(v2.LR) - float(v1.LR)) + im[3] * (float(v3.LR) - float(v1.LR)));
-		r.dgdx = (im[0] * (float(v2.LG) - float(v1.LG)) + im[1] * (float(v3.LG) - float(v1.LG)));
-		r.dgdy = (im[2] * (float(v2.LG) - float(v1.LG)) + im[3] * (float(v3.LG) - float(v1.LG)));
-		r.dbdx = (im[0] * (float(v2.LB) - float(v1.LB)) + im[1] * (float(v3.LB) - float(v1.LB)));
-		r.dbdy = (im[2] * (float(v2.LB) - float(v1.LB)) + im[3] * (float(v3.LB) - float(v1.LB)));
+		alignas(32) float gdx[16], gdy[16];
+		const Vec8f vim0(im0), vim1(im1), vim2(im2), vim3(im3);
+		for (int k = 0; k < 16; k += 8) {
+			Vec8f vda, vdb;
+			vda.load_a(da + k);
+			vdb.load_a(db + k);
+			Vec8f rx = mul_add(vim0, vda, vim1 * vdb);
+			Vec8f ry = mul_add(vim2, vda, vim3 * vdb);
+			rx.store_a(gdx + k);
+			ry.store_a(gdy + k);
+		}
+		r.drzdx = gdx[0]; r.drzdy = gdy[0];
+		r.t0.du0zdx = gdx[1]; r.t0.du0zdy = gdy[1];
+		r.t0.dv0zdx = gdx[2]; r.t0.dv0zdy = gdy[2];
+		r.dadx = gdx[3]; r.dady = gdy[3];
+		r.drdx = gdx[4]; r.drdy = gdy[4];
+		r.dgdx = gdx[5]; r.dgdy = gdy[5];
+		r.dbdx = gdx[6]; r.dbdy = gdy[6];
+		if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
+			r.t0.du1zdx = gdx[7]; r.t0.du1zdy = gdy[7];
+			r.t0.dv1zdx = gdx[8]; r.t0.dv1zdy = gdy[8];
+		}
 		r.umask = (1 << r.t0.LogWidth) - 1;
 		r.vmask = (1 << r.t0.LogHeight) - 1;
 

@@ -315,6 +315,13 @@ struct TileRasterizerCtx {
 	// (transparent, no-opaque-Z) mirror's footprint. 0 for the common
 	// case (face not behind any mirror) → the gate is a no-op.
 	u32 faceBehindMirrorMask = 0;
+
+	// Per-face: does this face's material carry a tangent-space normal map?
+	// Only then does the deferred kernel read gb.tangent, so faces without
+	// one skip BOTH the per-face tangent-gradient setup and the per-pixel
+	// tangent G-buffer write (the kernel reads the matID-gated material, so a
+	// stale tangent left in the plane is never sampled). Set by the dispatcher.
+	bool writeTangent = true;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -576,7 +583,7 @@ struct TileRasterizer {
 		Vec8f p_nx = v8_from_arith_seq(tile.nx0, dnxdx);
 		Vec8f p_ny = v8_from_arith_seq(tile.ny0, dnydx);
 		Vec8f p_nz = v8_from_arith_seq(tile.nz0, dnzdx);
-		const bool wantTangent = (span.tangent != nullptr);
+		const bool wantTangent = (span.tangent != nullptr) && ctx.writeTangent;
 		Vec8f p_tx = wantTangent ? v8_from_arith_seq(tile.tx0, dtxdx) : Vec8f(0.0f);
 		Vec8f p_ty = wantTangent ? v8_from_arith_seq(tile.ty0, dtydx) : Vec8f(0.0f);
 		Vec8f p_tz = wantTangent ? v8_from_arith_seq(tile.tz0, dtzdx) : Vec8f(0.0f);
@@ -1143,6 +1150,15 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		if ((dword)miplevel < hm->numMipmaps && hm->Mipmap[miplevel])
 			heightData = reinterpret_cast<const byte*>(hm->Mipmap[miplevel]);
 	}
+	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
+	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
+	// parallax UV offset (needs tangent-space view dir). Skip the tangent
+	// gradient + G-buffer write otherwise (item 2). The dev nmap_from_diffuse
+	// diagnostic forces the normal-map path for every textured face.
+	bool writeTangent = (F->Txtr->NormalMap != nullptr) || (heightData != nullptr);
+#if FDS_DEV
+	if (fds::FeatureFlags::nmap_from_diffuse() && F->Txtr->Txtr) writeTangent = true;
+#endif
 	meka::TileRasterizerCtx ctx = {
 		.V = V,
 		.xres = rt.xres,
@@ -1165,6 +1181,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.mirrorTag = F->mirrorMaskTag,
 		.faceOwnerMirrorId = F->ownerMirrorId,
 		.faceBehindMirrorMask = F->behindMirrorMask,
+		.writeTangent = writeTangent,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
@@ -1183,51 +1200,69 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		};
 		const float det = m[0] * m[3] - m[1] * m[2];
 		if (fabs(det) <= 0.01f) continue;
-		const float im[4] = {
-			 m[3] / det, -m[1] / det,
-			-m[2] / det,  m[0] / det
-		};
-		r.drzdx = im[0] * (v2.RZ - v1.RZ) + im[1] * (v3.RZ - v1.RZ);
-		r.drzdy = im[2] * (v2.RZ - v1.RZ) + im[3] * (v3.RZ - v1.RZ);
-		r.duzdx = im[0] * (v2.UZ - v1.UZ) + im[1] * (v3.UZ - v1.UZ);
-		r.duzdy = im[2] * (v2.UZ - v1.UZ) + im[3] * (v3.UZ - v1.UZ);
-		r.dvzdx = im[0] * (v2.VZ - v1.VZ) + im[1] * (v3.VZ - v1.VZ);
-		r.dvzdy = im[2] * (v2.VZ - v1.VZ) + im[3] * (v3.VZ - v1.VZ);
-		// Per-vertex shading-normal gradients. Same screen-space
-		// inverse-Jacobian (`im`) as UV — the rasterizer interpolates
-		// linearly across the triangle and renormalizes per-pixel (nlerp).
-		r.dnxdx = im[0] * (v2.TN.x - v1.TN.x) + im[1] * (v3.TN.x - v1.TN.x);
-		r.dnxdy = im[2] * (v2.TN.x - v1.TN.x) + im[3] * (v3.TN.x - v1.TN.x);
-		r.dnydx = im[0] * (v2.TN.y - v1.TN.y) + im[1] * (v3.TN.y - v1.TN.y);
-		r.dnydy = im[2] * (v2.TN.y - v1.TN.y) + im[3] * (v3.TN.y - v1.TN.y);
-		r.dnzdx = im[0] * (v2.TN.z - v1.TN.z) + im[1] * (v3.TN.z - v1.TN.z);
-		r.dnzdy = im[2] * (v2.TN.z - v1.TN.z) + im[3] * (v3.TN.z - v1.TN.z);
-		// Per-vertex view-space tangent gradients (Tier B). Same im[]
-		// inverse-Jacobian as N/UV. Used by the inner loop only when
-		// span.tangent != nullptr — the transparent G-buffer paths
-		// leave it null and skip the tangent write entirely.
-		r.dtxdx = im[0] * (v2.TTangent.x - v1.TTangent.x) + im[1] * (v3.TTangent.x - v1.TTangent.x);
-		r.dtxdy = im[2] * (v2.TTangent.x - v1.TTangent.x) + im[3] * (v3.TTangent.x - v1.TTangent.x);
-		r.dtydx = im[0] * (v2.TTangent.y - v1.TTangent.y) + im[1] * (v3.TTangent.y - v1.TTangent.y);
-		r.dtydy = im[2] * (v2.TTangent.y - v1.TTangent.y) + im[3] * (v3.TTangent.y - v1.TTangent.y);
-		r.dtzdx = im[0] * (v2.TTangent.z - v1.TTangent.z) + im[1] * (v3.TTangent.z - v1.TTangent.z);
-		r.dtzdy = im[2] * (v2.TTangent.z - v1.TTangent.z) + im[3] * (v3.TTangent.z - v1.TTangent.z);
-		// OrigBary*RZ gradient — same im[] solve as UZ/VZ. OrigBary is
-		// stamped at scene init (A→(0,0), B→(1,0), C→(0,1)) and clip-
-		// interpolated perspective-correctly, so for any (v1, v2, v3)
-		// triangle the rasterizer sees post-clipping, the linear function
-		// (OrigBary*RZ)(x, y) is exact. Divide by per-pixel RZ to get
-		// object-space bary on the original face.
-		const float obBZ1 = v1.OrigBaryB * v1.RZ;
-		const float obBZ2 = v2.OrigBaryB * v2.RZ;
-		const float obBZ3 = v3.OrigBaryB * v3.RZ;
-		const float obCZ1 = v1.OrigBaryC * v1.RZ;
-		const float obCZ2 = v2.OrigBaryC * v2.RZ;
-		const float obCZ3 = v3.OrigBaryC * v3.RZ;
-		r.dobBdx = im[0] * (obBZ2 - obBZ1) + im[1] * (obBZ3 - obBZ1);
-		r.dobBdy = im[2] * (obBZ2 - obBZ1) + im[3] * (obBZ3 - obBZ1);
-		r.dobCdx = im[0] * (obCZ2 - obCZ1) + im[1] * (obCZ3 - obCZ1);
-		r.dobCdy = im[2] * (obCZ2 - obCZ1) + im[3] * (obCZ3 - obCZ1);
+		// One reciprocal instead of four divides (item 1). The inverse
+		// Jacobian maps screen-space (dx, dy) deltas to (1/A, 1/B) face-edge
+		// barycentric rates.
+		const float invDet = 1.0f / det;
+		const float im0 =  m[3] * invDet, im1 = -m[1] * invDet;
+		const float im2 = -m[2] * invDet, im3 =  m[0] * invDet;
+
+		// Every per-attribute gradient is the SAME solve:
+		//   ddx = im0*da + im1*db,  ddy = im2*da + im3*db
+		// with da = attr(v2)-attr(v1), db = attr(v3)-attr(v1). Pack the
+		// deltas into lane-parallel arrays and evaluate 8 attributes per
+		// vector pass (item 5) — the scalar loop was ~22 separate FMA pairs.
+		// Lane map: 0 RZ | 1 UZ | 2 VZ | 3 nx | 4 ny | 5 nz |
+		//           6 tx | 7 ty | 8 tz | 9 obB | 10 obC  (11..15 unused = 0).
+		// Tangent lanes are filled only when the face's material has a normal
+		// map (item 2); OrigBary lanes only when the face is lightmapped (item
+		// 3) — both gate the per-pixel write/read downstream, and zeroing the
+		// gradient keeps the unused tile origin deterministic.
+		const bool faceWantTangent = ctx.writeTangent;
+		const bool faceWantLm      = (lmMeshId != 0);
+		alignas(32) float da[16] = {0}, db[16] = {0};
+		da[0] = v2.RZ   - v1.RZ;   db[0] = v3.RZ   - v1.RZ;
+		da[1] = v2.UZ   - v1.UZ;   db[1] = v3.UZ   - v1.UZ;
+		da[2] = v2.VZ   - v1.VZ;   db[2] = v3.VZ   - v1.VZ;
+		da[3] = v2.TN.x - v1.TN.x; db[3] = v3.TN.x - v1.TN.x;
+		da[4] = v2.TN.y - v1.TN.y; db[4] = v3.TN.y - v1.TN.y;
+		da[5] = v2.TN.z - v1.TN.z; db[5] = v3.TN.z - v1.TN.z;
+		if (faceWantTangent) {
+			da[6] = v2.TTangent.x - v1.TTangent.x; db[6] = v3.TTangent.x - v1.TTangent.x;
+			da[7] = v2.TTangent.y - v1.TTangent.y; db[7] = v3.TTangent.y - v1.TTangent.y;
+			da[8] = v2.TTangent.z - v1.TTangent.z; db[8] = v3.TTangent.z - v1.TTangent.z;
+		}
+		if (faceWantLm) {
+			// OrigBary*RZ (perspective-correct transport). Stamped at scene
+			// init (A→(0,0), B→(1,0), C→(0,1)); the kernel divides by per-pixel
+			// RZ to recover object-space bary on the original (pre-clip) face.
+			const float obBZ1 = v1.OrigBaryB * v1.RZ, obBZ2 = v2.OrigBaryB * v2.RZ, obBZ3 = v3.OrigBaryB * v3.RZ;
+			const float obCZ1 = v1.OrigBaryC * v1.RZ, obCZ2 = v2.OrigBaryC * v2.RZ, obCZ3 = v3.OrigBaryC * v3.RZ;
+			da[9]  = obBZ2 - obBZ1; db[9]  = obBZ3 - obBZ1;
+			da[10] = obCZ2 - obCZ1; db[10] = obCZ3 - obCZ1;
+		}
+		alignas(32) float gdx[16], gdy[16];
+		const Vec8f vim0(im0), vim1(im1), vim2(im2), vim3(im3);
+		for (int k = 0; k < 16; k += 8) {
+			Vec8f vda, vdb;
+			vda.load_a(da + k);
+			vdb.load_a(db + k);
+			Vec8f rx = mul_add(vim0, vda, vim1 * vdb);
+			Vec8f ry = mul_add(vim2, vda, vim3 * vdb);
+			rx.store_a(gdx + k);
+			ry.store_a(gdy + k);
+		}
+		r.drzdx = gdx[0];  r.drzdy = gdy[0];
+		r.duzdx = gdx[1];  r.duzdy = gdy[1];
+		r.dvzdx = gdx[2];  r.dvzdy = gdy[2];
+		r.dnxdx = gdx[3];  r.dnxdy = gdy[3];
+		r.dnydx = gdx[4];  r.dnydy = gdy[4];
+		r.dnzdx = gdx[5];  r.dnzdy = gdy[5];
+		r.dtxdx = gdx[6];  r.dtxdy = gdy[6];
+		r.dtydx = gdx[7];  r.dtydy = gdy[7];
+		r.dtzdx = gdx[8];  r.dtzdy = gdy[8];
+		r.dobBdx = gdx[9];  r.dobBdy = gdy[9];
+		r.dobCdx = gdx[10]; r.dobCdy = gdy[10];
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;
