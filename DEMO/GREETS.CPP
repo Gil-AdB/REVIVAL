@@ -1324,6 +1324,17 @@ void Initialize_Greets()
 
 	GreetSc->PathingMinVelocity = 0.01;
 
+	// EXPERIMENTAL geometry fix for the mummy ('momy'): Phong-tessellate the
+	// coarse lathe to round the silhouette. DEFAULT OFF (FDS_MOMY_SUBDIV=N to
+	// enable) — the current impl CRACKS the mesh at its UV/duplicate-vertex
+	// seams (edge-midpoint sharing is keyed by vertex index and doesn't merge
+	// coincident verts), so it needs a vertex-weld pass before it's usable.
+	{
+		const char *lv = std::getenv("FDS_MOMY_SUBDIV");
+		const int levels = lv ? std::atoi(lv) : 0;
+		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy", levels);
+	}
+
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
