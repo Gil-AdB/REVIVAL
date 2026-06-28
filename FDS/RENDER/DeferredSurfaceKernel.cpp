@@ -537,21 +537,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// dword (B,G,R,A in low→high bytes).
 			// Cached-once-per-frame debug viz switches (FeatureFlags reads
 			// env at startup; per-pixel cost is one bool load each).
-			// viz_normal is exposed in the SHIPPING build too (--viz_normal /
-			// FDS_VIZ_NORMAL): it paints the per-pixel shading normal as RGB and
-			// is wanted as a usable diagnostic / future dynamic effect, not just a
-			// dev tool. NOTE: writes VPage, so under greets' forced HDR the tonemap
-			// overwrites it — run with --no-hdr to see it (same caveat as the other
-			// VPage vizes). The rest stay dev-only to keep hot-loop branches down.
-			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
 #if FDS_DEV
 			static const bool sVizTangent     = fds::FeatureFlags::viz_tangent();
+			static const bool sVizNormal      = fds::FeatureFlags::viz_normal();
 			static const bool sVizGeoNormal   = fds::FeatureFlags::viz_geonormal();
 			static const bool sVizMatID       = fds::FeatureFlags::viz_matid();
 			static const bool sVizPmid        = fds::FeatureFlags::viz_pmid();
 			static const bool sNmapAsDiffuse  = fds::FeatureFlags::nmap_as_diffuse();
 #else
 			constexpr bool sVizTangent    = false;
+			constexpr bool sVizNormal     = false;
 			constexpr bool sVizGeoNormal  = false;
 			constexpr bool sVizMatID      = false;
 			constexpr bool sVizPmid       = false;
