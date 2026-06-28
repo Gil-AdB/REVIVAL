@@ -257,6 +257,18 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 				Texture *r8 = MakeHeight8(r32);
 				M->RoughnessMap = r8 ? r8 : r32;
 				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), r8 ? "8-bit" : "32-bit");
+				// A roughness map implies the surface is meant to be specular, but
+				// many FLD materials (e.g. greets 'momy') ship Specular=0 → the
+				// roughness map would modulate a highlight that never appears. Give
+				// the material a sensible base Specular/Glossiness so the map shows.
+				// Only when the author left them at 0 (don't stomp a tuned value).
+				if (M->Specular <= 0.0f) {
+					M->Specular = 0.5f;
+					if (M->Glossiness == 0) M->Glossiness = 32;
+					std::fprintf(stderr, "    [spec] roughness map present + Specular was 0 -> "
+					             "default Specular=0.5 Glossiness=%u (roughness map modulates it)\n",
+					             M->Glossiness);
+				}
 			}
 		}
 		if (!height.empty()) {
