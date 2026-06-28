@@ -423,6 +423,26 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                              rev::Editor_GetSurfacesJSON().c_str());
             }
         }
+        // EDIT_TEST: does a surface edit persist across a render tick? (snap-back
+        // hunt) Set cockpit specular to a marker, print it, tick again, reprint.
+        if (std::getenv("EDIT_TEST")) {
+            static bool done = false;
+            if (!done) {
+                done = true;
+                auto cockpitSpec = []() -> std::string {
+                    std::string j = rev::Editor_GetSurfacesJSON();
+                    size_t p = j.find("\"cockpit\"");
+                    size_t s = j.find("\"specular\":", p);
+                    return (p==std::string::npos||s==std::string::npos) ? "?" : j.substr(s, 22);
+                };
+                rev::Editor_SetSurfaceProp("cockpit", "specular", 0.123f);
+                std::fprintf(stderr, "[EDITTEST] after set:       %s\n", cockpitSpec().c_str());
+                driver->tick();
+                std::fprintf(stderr, "[EDITTEST] after one tick:  %s\n", cockpitSpec().c_str());
+                driver->tick();
+                std::fprintf(stderr, "[EDITTEST] after two ticks: %s\n", cockpitSpec().c_str());
+            }
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/greets_t%06d_color.ppm",

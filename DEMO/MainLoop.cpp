@@ -80,6 +80,7 @@ static float  g_camYaw   = 0.6f;
 static float  g_camPitch = 0.45f;
 static float  g_camDist  = 48.0f;
 static Vector g_camTarget;               // set in DemoBoot (greets room centre)
+static bool   g_editorCamSeeded = false; // first frame seeds orbit from scene cam
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
 // set-1. Same table as native main() loop. Returned legacy code or -1.
@@ -307,6 +308,26 @@ static void cleanupCurrentScene()
 	g_currentDriverInitialized = false;
 }
 
+// Seed the orbit (yaw/pitch/dist/target) from whatever camera the scene used on
+// the first rendered frame — greets's spline at the frozen time — so the editor
+// opens framed exactly like the demo's t=600 shot instead of an arbitrary far
+// pose. forward = Mat row 2 (same as the [CAM] dump); orbit eye→target = forward.
+static void seedOrbitFromView()
+{
+	if (!View) return;
+	const Vector eye = View->ISource;
+	float fx = View->Mat[2][0], fy = View->Mat[2][1], fz = View->Mat[2][2];
+	const float D = 26.0f;                 // approx eye→subject distance for greets
+	g_camTarget.x = eye.x + fx * D;
+	g_camTarget.y = eye.y + fy * D;
+	g_camTarget.z = eye.z + fz * D;
+	g_camDist  = D;
+	float syp = -fy; if (syp < -1.0f) syp = -1.0f; if (syp > 1.0f) syp = 1.0f;
+	g_camPitch = std::asin(syp);
+	g_camYaw   = std::atan2(-fx, -fz);
+	if (View->IFOV > 0.0f) FC.IFOV = View->IFOV;
+}
+
 // Build the orbit camera from (yaw,pitch,dist) around g_camTarget and pin View
 // to it. With View==&FC, greets's Animate_Objects leaves the camera alone — only
 // object animation tracks Timer, which we freeze — so the orbit is stable.
@@ -353,9 +374,18 @@ static void editorTick()
 	--g_editorRenderFrames;
 
 	Timer = g_editorFreezeTimer;
-	updateEditorCamera();
-	poll_pending_resize(g_currentDriver.get());
-	g_currentDriver->tick();
+	if (!g_editorCamSeeded) {
+		// First frame: render with the scene's own (spline) camera, then seed
+		// the orbit from it so we open on the demo's framing.
+		poll_pending_resize(g_currentDriver.get());
+		g_currentDriver->tick();
+		seedOrbitFromView();
+		g_editorCamSeeded = true;
+	} else {
+		updateEditorCamera();
+		poll_pending_resize(g_currentDriver.get());
+		g_currentDriver->tick();
+	}
 }
 
 bool DemoTick()

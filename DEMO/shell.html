@@ -533,11 +533,18 @@
         });
       }
       function setProp(name, key, v){
-        var ok = Module.editorSetSurfaceProp(name, key, v);
+        var ok = false;
+        try { ok = Module.editorSetSurfaceProp(name, key, v); }
+        catch(e){ editorStatus('set failed: ' + e); console.error('editorSetSurfaceProp', e); return false; }
+        if (!ok) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
         var s = editorSurfaces.find(function(x){ return x.name === name; });
-        if (s) s[key] = v;
+        if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
         return ok;
       }
+      // Per-property ranges — the engine stores these on different scales:
+      // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
+      var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
+                            transparency:[0,100], reflection:[0,100] };
       function propRow(s, key, min, max, step){
         var row = document.createElement('div'); row.className = 'prop-row';
         var lab = document.createElement('label'); lab.textContent = key; row.appendChild(lab);
@@ -550,7 +557,8 @@
         var el = document.getElementById('editor-props'); el.innerHTML = '';
         var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;'; h.textContent = s.name; el.appendChild(h);
         ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
-          el.appendChild(propRow(s, k, 0, 2, 0.01));
+          var rg = EDITOR_RANGES[k] || [0,2];
+          el.appendChild(propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200));
         });
         // glossiness = specular exponent; keep to the kernel's fast specialized set.
         var gr = document.createElement('div'); gr.className = 'prop-row';
