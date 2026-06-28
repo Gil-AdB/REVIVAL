@@ -291,6 +291,101 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 	}
 }
 
+// --pbr TEST: Cook-Torrance microfacet specular (GGX NDF + Smith-Schlick
+// geometry + Schlick Fresnel), 8 lights wide, replacing the Blinn-Phong
+// run_vec_spec_loop. This is a COST/quality probe — wired into the vec path so
+// we can measure SIMD PBR per-light against the existing Blinn-Phong term.
+// Divides use _mm256_rcp_ps (fast approx, matches the engine's rcp/rsqrt
+// style). roughness ∈ (0,1], F0 = dielectric 0.04 (metallic workflow TBD).
+// Specular only — diffuse is accumulated by the caller's existing loop.
+static inline void run_vec_ggx_loop(const TileLights &tl,
+                                     float x, float y, float z,
+                                     float nx, float ny, float nz,
+                                     float vx, float vy, float vz,
+                                     float matSpec, float roughness,
+                                     uint32_t pmid,
+                                     float &sB, float &sG, float &sR) {
+	const __m256 vx_v  = _mm256_set1_ps(x),  vy_v = _mm256_set1_ps(y),  vz_v = _mm256_set1_ps(z);
+	const __m256 vnx_v = _mm256_set1_ps(nx), vny_v = _mm256_set1_ps(ny), vnz_v = _mm256_set1_ps(nz);
+	const __m256 vvx_v = _mm256_set1_ps(vx), vvy_v = _mm256_set1_ps(vy), vvz_v = _mm256_set1_ps(vz);
+	const __m256 vSpec = _mm256_set1_ps(matSpec);
+	const __m256 vZero = _mm256_setzero_ps();
+	const __m256 vOne  = _mm256_set1_ps(1.0f);
+	const __m256i pmid_v = _mm256_set1_epi32((int)pmid);
+	// GGX constants. a = roughness²; Smith k = a/2 (IBL-less direct-light form).
+	const float a  = roughness * roughness;
+	const __m256 va2 = _mm256_set1_ps(a * a);
+	const __m256 vk  = _mm256_set1_ps(a * 0.5f);
+	const __m256 vInvPi = _mm256_set1_ps(0.31830989f);
+	const __m256 vF0 = _mm256_set1_ps(0.04f);     // dielectric base reflectance
+	// N·V (view-independent of light) — clamp to avoid div blow-up at grazing.
+	const float ndotvf = std::max(nx*vx + ny*vy + nz*vz, 1e-3f);
+	const __m256 vNdotV = _mm256_set1_ps(ndotvf);
+	__m256 accB = _mm256_setzero_ps(), accG = _mm256_setzero_ps(), accR = _mm256_setzero_ps();
+
+	for (int slot = 0; slot < tl.paddedCount; slot += 8) {
+		__m256 lpx = _mm256_load_ps(tl.posX + slot), lpy = _mm256_load_ps(tl.posY + slot), lpz = _mm256_load_ps(tl.posZ + slot);
+		__m256 lcb = _mm256_load_ps(tl.colB + slot), lcg = _mm256_load_ps(tl.colG + slot), lcr = _mm256_load_ps(tl.colR + slot);
+		__m256 lr2 = _mm256_load_ps(tl.range2 + slot), lrr = _mm256_load_ps(tl.rRange + slot);
+		__m256i lmid = _mm256_load_si256((const __m256i*)(tl.mirrorId + slot));
+		__m256 mirrorMask = _mm256_castsi256_ps(_mm256_cmpeq_epi32(lmid, pmid_v));
+
+		__m256 wx = _mm256_sub_ps(lpx, vx_v), wy = _mm256_sub_ps(lpy, vy_v), wz = _mm256_sub_ps(lpz, vz_v);
+		__m256 dot  = _mm256_fmadd_ps(wx, vnx_v, _mm256_fmadd_ps(wy, vny_v, _mm256_mul_ps(wz, vnz_v)));
+		__m256 len2 = _mm256_fmadd_ps(wx, wx, _mm256_fmadd_ps(wy, wy, _mm256_mul_ps(wz, wz)));
+		__m256 mask = _mm256_and_ps(_mm256_cmp_ps(len2, lr2, _CMP_LE_OQ),
+		               _mm256_and_ps(_mm256_cmp_ps(dot, vZero, _CMP_GT_OQ),
+		                _mm256_and_ps(_mm256_cmp_ps(len2, vZero, _CMP_GT_OQ), mirrorMask)));
+		__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
+		__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
+		__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
+		__m256 falloff = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
+
+		__m256 ldx = _mm256_mul_ps(wx, lenInv), ldy = _mm256_mul_ps(wy, lenInv), ldz = _mm256_mul_ps(wz, lenInv);
+		__m256 NdotL = _mm256_mul_ps(dot, lenInv);   // dot is N·w (unnormalized) → ·lenInv
+		// Half vector, normalized.
+		__m256 hx = _mm256_add_ps(ldx, vvx_v), hy = _mm256_add_ps(ldy, vvy_v), hz = _mm256_add_ps(ldz, vvz_v);
+		__m256 hLen2 = _mm256_fmadd_ps(hx, hx, _mm256_fmadd_ps(hy, hy, _mm256_mul_ps(hz, hz)));
+		__m256 hInv = _mm256_rsqrt_ps(_mm256_max_ps(hLen2, _mm256_set1_ps(1e-12f)));
+		__m256 NdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vnx_v, _mm256_fmadd_ps(hy, vny_v, _mm256_mul_ps(hz, vnz_v))), hInv);
+		__m256 VdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vvx_v, _mm256_fmadd_ps(hy, vvy_v, _mm256_mul_ps(hz, vvz_v))), hInv);
+		NdotH = _mm256_max_ps(NdotH, vZero);
+		VdotH = _mm256_max_ps(VdotH, vZero);
+
+		// D (GGX): a² / (π · (NdotH²·(a²-1)+1)²)
+		__m256 nh2 = _mm256_mul_ps(NdotH, NdotH);
+		__m256 denomD = _mm256_fmadd_ps(nh2, _mm256_sub_ps(va2, vOne), vOne);   // NdotH²(a²-1)+1
+		denomD = _mm256_mul_ps(denomD, denomD);                                 // squared
+		__m256 D = _mm256_mul_ps(_mm256_mul_ps(va2, vInvPi), _mm256_rcp_ps(_mm256_max_ps(denomD, _mm256_set1_ps(1e-6f))));
+
+		// G (Smith, Schlick-GGX): Gv·Gl, Gx = Ndotx / (Ndotx·(1-k)+k)
+		__m256 oneMinusK = _mm256_sub_ps(vOne, vk);
+		__m256 Gv = _mm256_mul_ps(vNdotV, _mm256_rcp_ps(_mm256_fmadd_ps(vNdotV, oneMinusK, vk)));
+		__m256 Gl = _mm256_mul_ps(NdotL,  _mm256_rcp_ps(_mm256_fmadd_ps(NdotL,  oneMinusK, vk)));
+		__m256 G  = _mm256_mul_ps(Gv, Gl);
+
+		// F (Schlick): F0 + (1-F0)·(1-VdotH)^5
+		__m256 om = _mm256_sub_ps(vOne, VdotH);
+		__m256 om2 = _mm256_mul_ps(om, om);
+		__m256 om5 = _mm256_mul_ps(_mm256_mul_ps(om2, om2), om);
+		__m256 F = _mm256_fmadd_ps(_mm256_sub_ps(vOne, vF0), om5, vF0);
+
+		// spec = D·G·F / (4·NdotV·NdotL) · NdotL (radiance) = D·G·F/(4·NdotV)
+		__m256 specBRDF = _mm256_mul_ps(_mm256_mul_ps(D, G), F);
+		__m256 denom = _mm256_mul_ps(_mm256_set1_ps(4.0f), vNdotV);
+		__m256 spec = _mm256_mul_ps(specBRDF, _mm256_rcp_ps(denom));   // ·NdotL folded out (radiance) and NdotL/NdotL cancels one
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
+		__m256 contrib = _mm256_blendv_ps(vZero, strength, mask);
+
+		accB = _mm256_fmadd_ps(contrib, lcb, accB);
+		accG = _mm256_fmadd_ps(contrib, lcg, accG);
+		accR = _mm256_fmadd_ps(contrib, lcr, accR);
+	}
+	alignas(32) float bufB[8], bufG[8], bufR[8];
+	_mm256_store_ps(bufB, accB); _mm256_store_ps(bufG, accG); _mm256_store_ps(bufR, accR);
+	for (int i = 0; i < 8; ++i) { sB += bufB[i]; sG += bufG[i]; sR += bufR[i]; }
+}
+
 // FDS_DEFERRED_VEC=1 in env switches the per-pixel inner loop from the
 // scalar branch-predicted early-out to a Vec8f SoA accumulation. Stays
 // available for A/B benchmarking — on arm64-via-simde it's slower than
@@ -417,6 +512,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float aoStrengthG     = fds::FeatureFlags::ao_map_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
+	const bool sPbr             = fds::FeatureFlags::pbr();
+	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
 	// Lightmap kernel branch is gated off when --shadow-dynamic is on
@@ -971,7 +1068,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// FDS_DEFERRED_GLOSS_STATS confirms our FLDs only ship
 					// gloss ∈ {48, 64}; the other cases here are defensive
 					// for spectest's authored values and future FLDs.
-					if (wantSpecular) {
+					if (wantSpecular && sPbr) {
+						// --pbr TEST: Cook-Torrance instead of Blinn-Phong, same
+						// 8-lights-wide vec path. Roughness fixed (--pbr_roughness)
+						// or derived from Glossiness (roughness=sqrt(2/(gloss+2))).
+						float rough = sPbrRoughFixed;
+						if (rough <= 0.0f)
+							rough = std::sqrt(2.0f / (float(Mat->Glossiness > 0 ? Mat->Glossiness : 32) + 2.0f));
+						if (rough < 0.04f) rough = 0.04f;
+						if (rough > 1.0f)  rough = 1.0f;
+						run_vec_ggx_loop(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, rough, pmid, sB,sG,sR);
+					} else if (wantSpecular) {
 						switch (Mat->Glossiness) {
 							case 4:
 								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
