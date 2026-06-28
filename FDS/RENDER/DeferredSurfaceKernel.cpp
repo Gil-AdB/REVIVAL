@@ -190,6 +190,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
                                       float vx, float vy, float vz,
                                       float matSpec,
                                       uint32_t pmid,
+                                      const float *coneShadowAtten,
                                       float &sB, float &sG, float &sR) {
 	__m256 vx_v   = _mm256_set1_ps(x);
 	__m256 vy_v   = _mm256_set1_ps(y);
@@ -271,7 +272,11 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		__m256 safeNH = _mm256_max_ps(NdotH, vZero);
 		safeNH        = _mm256_min_ps(safeNH, vOne);
 		__m256 spec   = pow_squaring<Gloss, __m256>(safeNH);
-		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
+		// Per-light spot-cone × cube-shadow attenuation, computed once in the
+		// diffuse loop and shared here so specular respects shadows + cones
+		// (was leaking through both — the documented vec-spec gap).
+		__m256 csa = _mm256_load_ps(coneShadowAtten + slot);
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff), csa);
 		// Apply combined mask (range + dot ≥ 0 + h positive + NdotH > 0)
 		__m256 fullMask = _mm256_and_ps(mask, _mm256_and_ps(mask_hpos, mask_nh));
 		__m256 contrib  = _mm256_blendv_ps(vZero, strength, fullMask);
@@ -304,6 +309,7 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
                                      float vx, float vy, float vz,
                                      float matSpec, float roughness,
                                      uint32_t pmid,
+                                     const float *coneShadowAtten,
                                      float &sB, float &sG, float &sR) {
 	const __m256 vx_v  = _mm256_set1_ps(x),  vy_v = _mm256_set1_ps(y),  vz_v = _mm256_set1_ps(z);
 	const __m256 vnx_v = _mm256_set1_ps(nx), vny_v = _mm256_set1_ps(ny), vnz_v = _mm256_set1_ps(nz);
@@ -374,7 +380,9 @@ static inline void run_vec_ggx_loop(const TileLights &tl,
 		__m256 specBRDF = _mm256_mul_ps(_mm256_mul_ps(D, G), F);
 		__m256 denom = _mm256_mul_ps(_mm256_set1_ps(4.0f), vNdotV);
 		__m256 spec = _mm256_mul_ps(specBRDF, _mm256_rcp_ps(denom));   // ·NdotL folded out (radiance) and NdotL/NdotL cancels one
-		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
+		// spot-cone × cube-shadow attenuation (shared from the diffuse loop).
+		__m256 csa = _mm256_load_ps(coneShadowAtten + slot);
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff), csa);
 		__m256 contrib = _mm256_blendv_ps(vZero, strength, mask);
 
 		accB = _mm256_fmadd_ps(contrib, lcb, accB);
@@ -949,6 +957,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					__m256 accG   = _mm256_setzero_ps();
 					__m256 accR   = _mm256_setzero_ps();
 
+					// Per-light spot-cone × cube-shadow attenuation, captured here
+					// so the (separate, templated) spec loop can apply the SAME
+					// shadow + cone the diffuse loop computes — fixing the vec-spec
+					// "leaks through shadows/cones" gap. Only populated when spec is
+					// wanted (one vector store per slot).
+					alignas(32) float coneShadowAtten[DEFERRED_MAX_VIEW_LIGHTS];
+
 					__m256i pmid_v_main = _mm256_set1_epi32((int)pmid);
 					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
 						__m256 lpx = _mm256_load_ps(tl.posX   + slot);
@@ -1019,6 +1034,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						                     _mm256_cmpgt_epi32(lis, _mm256_setzero_si256()));
 						__m256 coneAtten = _mm256_blendv_ps(vOne, spotAtten, isSpotMask);
 						k = _mm256_mul_ps(k, coneAtten);
+						// Stash cone atten for the spec loop; cube shadow is folded
+						// in per-lane below. (Spec computes its own falloff + N·H, so
+						// only cone × shadow needs sharing.)
+						if (wantSpecular) _mm256_store_ps(coneShadowAtten + slot, coneAtten);
 
 						// Cube shadow attenuation per lane (scalarized).
 						// Most lanes have cubeShadowIdx < 0 (no shadow);
@@ -1053,6 +1072,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 									x, y, z, kSB, kSL,
 									surfaceShadowId);
 								kArr[lane] *= cubeAtten;
+								if (wantSpecular) coneShadowAtten[slot + lane] *= cubeAtten;
 							}
 							k = _mm256_load_ps(kArr);
 						}
@@ -1093,23 +1113,23 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							rough = std::sqrt(2.0f / (float(Mat->Glossiness > 0 ? Mat->Glossiness : 32) + 2.0f));
 						if (rough < 0.04f) rough = 0.04f;
 						if (rough > 1.0f)  rough = 1.0f;
-						run_vec_ggx_loop(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, rough, pmid, sB,sG,sR);
+						run_vec_ggx_loop(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, rough, pmid, coneShadowAtten, sB,sG,sR);
 					} else if (wantSpecular) {
 						switch (Mat->Glossiness) {
 							case 4:
-								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 8:
-								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 16:
-								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 32:
-								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 48:
-								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 64:
-								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 128:
-								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							default:
 								// Unknown gloss — defensive scalar libm path
 								// (matches old behavior). If this fires on a
