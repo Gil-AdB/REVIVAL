@@ -373,10 +373,35 @@ static void updateEditorCamera()
 	View = &FC;
 }
 
-// Editor mode tick: bring greets up once (mirror off, bake joined); scrub the
-// frozen time with ,/. ; orbit with the mouse; and render ONLY while something
-// changed (Editor_ConsumeDirty), idling otherwise so a static view doesn't burn
-// CPU re-rendering the same (full-res deferred) frame every rAF.
+// True if any of Dynamic_Camera's fly/look/speed keys is held — keeps the idle
+// throttle rendering while you fly.
+static bool anyFreeCamKey()
+{
+	return Keyboard[ScA] || Keyboard[ScD] || Keyboard[ScW] || Keyboard[ScS] || Keyboard[ScZ] ||
+	       Keyboard[ScQ] || Keyboard[ScE] || Keyboard[ScLeft] || Keyboard[ScRight] ||
+	       Keyboard[ScUp] || Keyboard[ScDown] || Keyboard[ScHome] || Keyboard[ScPgUp] ||
+	       Keyboard[ScPgDn] || Keyboard[ScEnd] || Keyboard[ScGrayPlus] || Keyboard[ScGrayMinus] ||
+	       Keyboard[ScComma] || Keyboard[ScPeriod] || Keyboard[ScK] || Keyboard[ScL];
+}
+
+// After Dynamic_Camera flew FC, re-derive the orbit state from FC so a later
+// mouse-orbit pivots around where you flew to. Keeps g_camDist; the pivot sits
+// dist ahead along the new forward (FC.Mat row 2 = look direction).
+static void syncOrbitFromFC()
+{
+	const float Fx = FC.Mat[2][0], Fy = FC.Mat[2][1], Fz = FC.Mat[2][2];
+	g_camTarget.x = FC.ISource.x + Fx * g_camDist;
+	g_camTarget.y = FC.ISource.y + Fy * g_camDist;
+	g_camTarget.z = FC.ISource.z + Fz * g_camDist;
+	float sp = -Fy; if (sp < -1.0f) sp = -1.0f; if (sp > 1.0f) sp = 1.0f;
+	g_camPitch = std::asin(sp);
+	g_camYaw   = std::atan2(-Fx, -Fz);
+}
+
+// Editor mode tick: bring greets up once (mirror off, bake joined). Camera is
+// the engine free-cam (Dynamic_Camera: WASD/QE fly, arrow look, ,. / KL speed —
+// the SAME handling as TAB in the demo) while keys are held, else the mouse
+// orbit. Renders only while something changed (idle throttle).
 static void editorTick()
 {
 	if (!g_currentDriver) {
@@ -387,47 +412,39 @@ static void editorTick()
 		g_currentDriverInitialized = true;
 		EngineStartFadeIn(kFadeFrames);
 		g_editorRenderFrames = kFadeFrames + 1;   // play the fade-in
-		fprintf(stderr, "[EDITOR] greets up — orbit: drag + wheel, frame: ',' '.'\n");
+		Init_FreeCamera();
+		if (CurScene) Calibrate_FreeCamera_ForScene(CurScene->FZP, CurScene->CameraHead);
+		fprintf(stderr, "[EDITOR] greets up — fly: WASD/QE + arrows; mouse-drag orbit; wheel zoom; click a surface to focus\n");
 	}
 
-	// Frame scrub (held key = continuous): step the frozen animation/camera time.
 	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
-	if (Keyboard[ScComma])  { g_editorFreezeTimer -= 10; if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0; rev::Editor_MarkDirty(); }
-	if (Keyboard[ScPeriod]) { g_editorFreezeTimer += 10; rev::Editor_MarkDirty(); }
+	if (anyFreeCamKey()) rev::Editor_MarkDirty();  // keep rendering while flying
 
-	// Fly forward / back through the scene with Up / Down (held = continuous):
-	// move the whole orbit rig along the view direction (eye + target together),
-	// scaled by distance. orbitDir = target→eye; forward into the scene = −orbitDir.
-	{
-		float fly = 0.0f;
-		if (Keyboard[ScUp])   fly -= g_camDist * 0.04f;   // forward (into the scene)
-		if (Keyboard[ScDown]) fly += g_camDist * 0.04f;   // back
-		if (fly != 0.0f) {
-			const float cp = std::cos(g_camPitch), sp = std::sin(g_camPitch);
-			const float cy = std::cos(g_camYaw),   sy = std::sin(g_camYaw);
-			g_camTarget.x += cp*sy * fly;
-			g_camTarget.y += sp    * fly;
-			g_camTarget.z += cp*cy * fly;
-			rev::Editor_MarkDirty();
-		}
-	}
-
-	// Idle throttle: a surface edit / camera move / frame step marks dirty; we
-	// render a couple of frames so the change (and the SDL flip) lands, then idle.
+	// Idle throttle: a surface edit / camera move / key marks dirty; render a few
+	// frames so the change (+ SDL flip + key coast) lands, then idle.
 	if (rev::Editor_ConsumeDirty() && g_editorRenderFrames < 4) g_editorRenderFrames = 4;
-	if (g_editorRenderFrames <= 0) return;        // nothing changed — skip the render
+	if (g_editorRenderFrames <= 0) return;
 	--g_editorRenderFrames;
 
 	Timer = g_editorFreezeTimer;
 	if (!g_editorCamSeeded) {
-		// First frame: render with the scene's own (spline) camera, then seed
-		// the orbit from it so we open on the demo's framing.
+		// First frame: render with the scene's own (spline) camera, seed the
+		// orbit from it, and build FC so the free-cam starts there too.
 		poll_pending_resize(g_currentDriver.get());
 		g_currentDriver->tick();
 		seedOrbitFromView();
+		updateEditorCamera();          // FC ready for keyboard fly next frame
 		g_editorCamSeeded = true;
 	} else {
-		updateEditorCamera();
+		if (anyFreeCamKey()) {
+			dTime = 16.0f;             // fixed step (Timer is frozen → no scene dTime)
+			Dynamic_Camera();          // keyboard fly + look (the TAB free-cam)
+			CalcPersp(&FC);
+			View = &FC;
+			syncOrbitFromFC();         // orbit pivot tracks where we flew
+		} else {
+			updateEditorCamera();      // mouse orbit/pan/zoom → FC
+		}
 		poll_pending_resize(g_currentDriver.get());
 		g_currentDriver->tick();
 	}
