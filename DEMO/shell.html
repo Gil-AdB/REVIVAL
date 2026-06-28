@@ -171,9 +171,13 @@
         statusEl.classList.remove('hidden');
         statusEl.textContent = text;
       }
+      // ?editor in the URL → surface-editor mode. Read in C++ (DemoBoot) to
+      // boot greets-only/mirror-off, and here to show the surface panel.
+      var revEditorMode = /[?&]editor\b/.test(location.search);
       var Module = {
         canvas: canvasEl,
         setStatus: setStatus,
+        revEditorMode: revEditorMode ? 1 : 0,
         totalDependencies: 0,
         monitorRunDependencies: function(left) {
           this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -191,6 +195,7 @@
         // existed). Same for ?hidpi=1 in the URL.
         onRuntimeInitialized: function() {
           if (typeof applyHidpi === 'function') applyHidpi();
+          if (revEditorMode && typeof initEditorPanel === 'function') initEditorPanel();
         }
       };
 
@@ -467,6 +472,98 @@
       controlsEl.addEventListener('click', showControls);
       // Show at boot so the controls are discoverable, then auto-hide.
       showControls();
+    </script>
+
+    <!-- ───────── LWO surface editor panel (shown only with ?editor) ───────── -->
+    <style>
+      #editor-panel { position:fixed; top:0; right:0; width:300px; max-height:100vh;
+        overflow-y:auto; background:rgba(18,18,22,0.92); color:#ddd; box-sizing:border-box;
+        font:12px/1.4 system-ui,sans-serif; z-index:10000; padding:8px; border-left:1px solid #333; }
+      #editor-panel.hidden { display:none; }
+      #editor-panel h2 { font-size:13px; margin:4px 0 8px; color:#fff; }
+      #editor-search { width:100%; box-sizing:border-box; margin-bottom:6px;
+        background:#222; color:#ddd; border:1px solid #444; padding:4px; }
+      #editor-list { max-height:40vh; overflow-y:auto; }
+      .surf-item { padding:3px 6px; cursor:pointer; border-radius:3px; }
+      .surf-item:hover { background:#2a2a33; }
+      .surf-item.sel { background:#3a3a4a; color:#fff; }
+      .surf-tex { color:#888; font-size:10px; }
+      #editor-props { border-top:1px solid #333; margin-top:6px; padding-top:6px; }
+      .prop-row { display:flex; align-items:center; gap:6px; margin:3px 0; }
+      .prop-row label { flex:0 0 80px; }
+      .prop-row input[type=range], .prop-row select { flex:1; min-width:0; }
+      .prop-row .val { flex:0 0 36px; text-align:right; color:#9cf; }
+      #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
+    </style>
+    <div id="editor-panel" class="hidden">
+      <h2>Surfaces — greets</h2>
+      <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
+      <div id="editor-list"></div>
+      <div id="editor-props"></div>
+      <div id="editor-status"></div>
+    </div>
+    <script>
+      var editorSurfaces = [], editorSelected = null;
+      function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
+      // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
+      // until it returns a non-empty list (then it's safe to read/edit).
+      function initEditorPanel(){
+        document.getElementById('editor-panel').classList.remove('hidden');
+        editorStatus('loading greets…');
+        var tries = 0;
+        var iv = setInterval(function(){
+          tries++;
+          var list = [];
+          try { list = JSON.parse(Module.editorGetSurfaces()); } catch(e){}
+          if (list.length){ clearInterval(iv); editorSurfaces = list; editorStatus(list.length+' surfaces'); renderSurfaceList(); }
+          else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
+        }, 500);
+      }
+      function renderSurfaceList(){
+        var q = (document.getElementById('editor-search').value || '').toLowerCase();
+        var el = document.getElementById('editor-list'); el.innerHTML = '';
+        editorSurfaces.forEach(function(s){
+          if (q && s.name.toLowerCase().indexOf(q) < 0) return;
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (editorSelected === s.name ? ' sel' : '');
+          d.innerHTML = '<div>' + s.name + '</div>' +
+            (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
+          d.onclick = function(){ editorSelected = s.name; renderSurfaceList(); renderSurfaceProps(s); };
+          el.appendChild(d);
+        });
+      }
+      function setProp(name, key, v){
+        var ok = Module.editorSetSurfaceProp(name, key, v);
+        var s = editorSurfaces.find(function(x){ return x.name === name; });
+        if (s) s[key] = v;
+        return ok;
+      }
+      function propRow(s, key, min, max, step){
+        var row = document.createElement('div'); row.className = 'prop-row';
+        var lab = document.createElement('label'); lab.textContent = key; row.appendChild(lab);
+        var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = s[key];
+        var val = document.createElement('span'); val.className = 'val'; val.textContent = (+s[key]).toFixed(2);
+        r.oninput = function(){ var v = parseFloat(r.value); val.textContent = v.toFixed(2); setProp(s.name, key, v); };
+        row.appendChild(r); row.appendChild(val); return row;
+      }
+      function renderSurfaceProps(s){
+        var el = document.getElementById('editor-props'); el.innerHTML = '';
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;'; h.textContent = s.name; el.appendChild(h);
+        ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
+          el.appendChild(propRow(s, k, 0, 2, 0.01));
+        });
+        // glossiness = specular exponent; keep to the kernel's fast specialized set.
+        var gr = document.createElement('div'); gr.className = 'prop-row';
+        var gl = document.createElement('label'); gl.textContent = 'glossiness'; gr.appendChild(gl);
+        var sel = document.createElement('select');
+        [0,4,8,16,32,48,64,128].forEach(function(g){
+          var o = document.createElement('option'); o.value = g; o.textContent = g;
+          if (+s.glossiness === g) o.selected = true; sel.appendChild(o);
+        });
+        sel.onchange = function(){ setProp(s.name, 'glossiness', parseInt(sel.value, 10)); };
+        gr.appendChild(sel); el.appendChild(gr);
+        if (s.texture){ var t = document.createElement('div'); t.className = 'surf-tex'; t.textContent = 'tex: ' + s.texture; el.appendChild(t); }
+      }
     </script>
     {{{ SCRIPT }}}
   </body>

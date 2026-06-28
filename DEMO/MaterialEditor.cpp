@@ -85,3 +85,26 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 }
 
 } // namespace rev
+
+// ── Browser (Embind) surface API ───────────────────────────────────────────
+// Exposed to JS as Module.editorGetSurfaces() / Module.editorSetSurfaceProp().
+// The shell.html surface panel calls these; edits land on the live Material and
+// show on the next rendered frame. Wasm-only — native uses the rev:: functions
+// directly (e.g. the DUMP_SURFACES snapshot hook).
+#ifdef __EMSCRIPTEN__
+#include <emscripten/bind.h>
+
+namespace {
+std::string js_editorGetSurfaces() { return rev::Editor_GetSurfacesJSON(); }
+bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
+{
+	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
+}
+} // namespace
+
+EMSCRIPTEN_BINDINGS(rev_material_editor)
+{
+	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
+	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
+}
+#endif // __EMSCRIPTEN__

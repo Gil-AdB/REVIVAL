@@ -2,6 +2,7 @@
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
+#include <Base/FeatureFlags.h>
 #include <atomic>
 #include <thread>
 
@@ -61,6 +62,13 @@ static constexpr int kFadeFrames = 15;
 static DemoState g_state = WAIT_GESTURE;
 static std::unique_ptr<SceneDriver> g_currentDriver;
 static bool g_currentDriverInitialized = false;
+
+// LWO surface-editor mode (?editor in the URL → shell.html sets
+// Module.revEditorMode). Instead of the demo sequence, init ONLY greets
+// (mirror off — it clones+bakes every mesh, ~4.8 GB, past wasm's 4 GB cap) and
+// render a frozen overview frame each tick so live surface edits show up.
+static bool g_editorMode = false;
+static int  g_editorFreezeTimer = 600;   // a good greets overview frame
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
 // set-1. Same table as native main() loop. Returned legacy code or -1.
@@ -149,6 +157,27 @@ static bool pumpEvents()
 void DemoBoot(ModplayerHandle modHandle)
 {
 	g_modHandle = modHandle;
+
+	// Editor mode: shell.html sets Module.revEditorMode from the URL (?editor).
+	// Skip the demo sequence + audio; init ONLY greets with the teleporter
+	// mirror forced off (setParamFromText marks the flag explicitly-set so
+	// greets's setDefault can't re-enable it), then render a frozen overview
+	// frame each tick so live surface edits are visible.
+	g_editorMode = EM_ASM_INT({ return (Module.revEditorMode ? 1 : 0); });
+	if (g_editorMode) {
+		fprintf(stderr, "[EDITOR] surface editor mode: greets, mirror off\n");
+		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+		g_initThread = std::thread([](){
+			HintHighPerfThread();
+			InitPolyStats(200);
+			FPU_LPrecision();
+			Initialize_Greets();
+			g_greetsReady.store(true);
+			g_initThreadDone.store(true);
+			fprintf(stderr, "[EDITOR] greets init complete\n");
+		});
+		return;
+	}
 
 	// Click-to-start hint. Browsers gate AudioContext on user gesture,
 	// and we want audio in lockstep with scene playback.
@@ -240,9 +269,36 @@ static void cleanupCurrentScene()
 	g_currentDriverInitialized = false;
 }
 
+// Editor mode tick: bring greets up once (mirror off, bake joined), then
+// re-render a frozen overview frame every rAF so surface edits made via the
+// Embind API show immediately. No demo sequence, no audio, no scene advance.
+static void editorTick()
+{
+	if (!g_currentDriver) {
+		if (!g_greetsReady.load()) return;        // init thread still loading
+		Greets_JoinBakeThread();                  // finish the static lightmap bake
+		g_currentDriver = createGreetsScene();
+		g_currentDriver->init();
+		g_currentDriverInitialized = true;
+		EngineStartFadeIn(kFadeFrames);
+		fprintf(stderr, "[EDITOR] greets up — editing surfaces live\n");
+	}
+	Timer = g_editorFreezeTimer;                  // freeze the camera + animation
+	poll_pending_resize(g_currentDriver.get());
+	g_currentDriver->tick();
+}
+
 bool DemoTick()
 {
-	if (pumpEvents()) {
+	bool quit = pumpEvents();
+
+	if (g_editorMode) {
+		if (quit) return false;
+		editorTick();
+		return true;
+	}
+
+	if (quit) {
 		g_state = DONE;
 	}
 

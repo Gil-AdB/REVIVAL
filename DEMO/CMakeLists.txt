@@ -159,6 +159,9 @@ if(EMSCRIPTEN)
         # names instead of wasm-function[N]. Cheap (no codegen impact) and
         # essential for diagnosing OOB / unreachable traps.
         --profiling-funcs
+        # Embind: exposes the surface-editor API to JS as
+        # Module.editorGetSurfaces() / Module.editorSetSurfaceProp().
+        -lembind
         # Curated asset dir (staged above) → mounted at "/". The bare `dir@/`
         # remap is the form emcc parses correctly.
         --preload-file "${WASM_ASSET_STAGE}@/"
