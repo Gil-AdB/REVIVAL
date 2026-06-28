@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "MaterialEditor.h"
 #include "FillerTest.h"
 #include "GLAT.H"
 #include "Rev.h"
@@ -410,6 +411,18 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Native validation hook for the surface-editor core (Phase 1): with
+        // DUMP_SURFACES=1 print the live surface list once after a tick (when
+        // CurScene == GreetSc) so the Embind path can be checked headless.
+        if (std::getenv("DUMP_SURFACES")) {
+            static bool dumped = false;
+            if (!dumped) {
+                dumped = true;
+                std::fprintf(stderr, "[SURFACES] %s\n",
+                             rev::Editor_GetSurfacesJSON().c_str());
+            }
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/greets_t%06d_color.ppm",
