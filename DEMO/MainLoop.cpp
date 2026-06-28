@@ -10,6 +10,7 @@
 #include "MaterialEditor.h"
 
 #include <emscripten.h>
+#include <emscripten/bind.h>
 #include <SDL.h>
 
 #include "MainLoop.h"
@@ -536,6 +537,34 @@ bool DemoTick()
 	}
 	}
 	return true;
+}
+
+// JS-driven editor camera (shell.html canvas handlers call these). SDL mouse
+// events proved unreliable for the orbit in-browser, so the canvas drag/wheel is
+// handled in JS and routed here via Embind. Updates the orbit state + marks the
+// view dirty so the idle-throttled loop renders the move.
+namespace {
+void editorOrbit(float dxPixels, float dyPixels)
+{
+	g_camYaw   -= dxPixels * 0.008f;
+	g_camPitch += dyPixels * 0.008f;
+	if (g_camPitch >  1.45f) g_camPitch =  1.45f;
+	if (g_camPitch < -1.45f) g_camPitch = -1.45f;
+	rev::Editor_MarkDirty();
+}
+void editorZoom(float wheelDir)   // +1 = in, -1 = out
+{
+	g_camDist *= (wheelDir > 0.0f) ? 0.9f : 1.1f;
+	if (g_camDist <   4.0f) g_camDist =   4.0f;
+	if (g_camDist > 400.0f) g_camDist = 400.0f;
+	rev::Editor_MarkDirty();
+}
+} // namespace
+
+EMSCRIPTEN_BINDINGS(rev_editor_camera)
+{
+	emscripten::function("editorOrbit", &editorOrbit);
+	emscripten::function("editorZoom",  &editorZoom);
 }
 
 #endif // __EMSCRIPTEN__

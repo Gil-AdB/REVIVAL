@@ -168,6 +168,12 @@ if(EMSCRIPTEN)
         --shell-file "${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
     )
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
+    # --shell-file is a link FLAG, so ninja doesn't know shell.html is an input;
+    # editing it wouldn't relink and DEMO.html would stay stale (this bit us:
+    # editor panel/JS edits never reached the browser). Declare it (+ the copied
+    # sidecars) as link deps so a shell edit forces a regen.
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shell.html;${CMAKE_CURRENT_SOURCE_DIR}/coi-serviceworker.js;${CMAKE_CURRENT_SOURCE_DIR}/audio-worklet.js")
 
     # Copy the COOP/COEP service worker next to the generated HTML so it's
     # served at the same scope (needed when hosting on plain static servers

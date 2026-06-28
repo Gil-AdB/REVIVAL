@@ -496,7 +496,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets</h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b2</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -508,6 +508,8 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
+        console.log('[editor] panel init (build b2); orbit/zoom embind =',
+                    typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
         var tries = 0;
@@ -537,6 +539,8 @@
         try { ok = Module.editorSetSurfaceProp(name, key, v); }
         catch(e){ editorStatus('set failed: ' + e); console.error('editorSetSurfaceProp', e); return false; }
         if (!ok) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
+        else editorStatus('set ' + key + ' = ' + (+v).toFixed(2));
+        console.log('[editor] set', name, key, v, '->', ok);
         var s = editorSurfaces.find(function(x){ return x.name === name; });
         if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
         return ok;
@@ -572,6 +576,31 @@
         gr.appendChild(sel); el.appendChild(gr);
         if (s.texture){ var t = document.createElement('div'); t.className = 'surf-tex'; t.textContent = 'tex: ' + s.texture; el.appendChild(t); }
       }
+
+      // Camera orbit handled in JS on the canvas (SDL's in-browser mouse events
+      // proved unreliable for this) → Embind editorOrbit/editorZoom. And the
+      // panel stops its own mouse events from bubbling out, so a global SDL
+      // listener can't eat slider drags and panel drags never orbit the camera.
+      (function(){
+        if (!revEditorMode) return;
+        var dragging = false, lastX = 0, lastY = 0;
+        canvasEl.addEventListener('mousedown', function(e){ dragging = true; lastX = e.clientX; lastY = e.clientY; });
+        window.addEventListener('mouseup', function(){ dragging = false; });
+        window.addEventListener('mousemove', function(e){
+          if (!dragging || !Module.editorOrbit) return;
+          Module.editorOrbit(e.clientX - lastX, e.clientY - lastY);
+          lastX = e.clientX; lastY = e.clientY;
+        });
+        canvasEl.addEventListener('wheel', function(e){
+          if (!Module.editorZoom) return;
+          e.preventDefault();
+          Module.editorZoom(e.deltaY < 0 ? 1 : -1);
+        }, { passive: false });
+        var panel = document.getElementById('editor-panel');
+        ['mousedown','mousemove','mouseup','wheel','pointerdown','pointermove','click'].forEach(function(t){
+          panel.addEventListener(t, function(e){ e.stopPropagation(); });
+        });
+      })();
     </script>
     {{{ SCRIPT }}}
   </body>
