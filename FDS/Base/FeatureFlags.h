@@ -19,6 +19,18 @@
 #ifndef FDS_SHADOW_POLYID_DEFAULT_ON
 #define FDS_SHADOW_POLYID_DEFAULT_ON 1
 #endif
+// Inner-vec (8-omni) deferred light loop. Default ON for x86 (native AVX2 — real
+// 256-bit lanes + gather, no simde→NEON expansion), OFF for arm64 (measured
+// neutral-to-slower via simde, no early-out). CAVEAT: the vec path still omits
+// 2D spot-shadow MAPS + mirror-clone shadows (cube shadows + cone + spec-shadow
+// are handled). The scenes that use those (greets) are nmap→scalar regardless.
+#ifndef FDS_DEFERRED_VEC_DEFAULT
+  #if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__amd64)
+    #define FDS_DEFERRED_VEC_DEFAULT 1
+  #else
+    #define FDS_DEFERRED_VEC_DEFAULT 0
+  #endif
+#endif
 
 namespace fds {
 
