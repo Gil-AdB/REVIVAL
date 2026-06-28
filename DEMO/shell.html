@@ -496,7 +496,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b2</span></h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b3</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -508,7 +508,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b2); orbit/zoom embind =',
+        console.log('[editor] panel init (build b3); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
@@ -575,6 +575,33 @@
         sel.onchange = function(){ setProp(s.name, 'glossiness', parseInt(sel.value, 10)); };
         gr.appendChild(sel); el.appendChild(gr);
         if (s.texture){ var t = document.createElement('div'); t.className = 'surf-tex'; t.textContent = 'tex: ' + s.texture; el.appendChild(t); }
+
+        // PBR map import — upload an image per role; bytes go to the engine via
+        // Embind (editorImportTexture), which reuses the --material-import path.
+        var imp = document.createElement('div');
+        imp.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
+        var ih = document.createElement('div'); ih.style.cssText = 'color:#fff;margin-bottom:4px;'; ih.textContent = 'Import PBR maps'; imp.appendChild(ih);
+        ['albedo','normal','height','roughness','ao'].forEach(function(role){
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lab = document.createElement('label'); lab.textContent = role; row.appendChild(lab);
+          var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+          inp.style.cssText = 'flex:1;min-width:0;font-size:10px;color:#bbb;';
+          inp.onchange = function(){
+            var file = inp.files && inp.files[0]; if (!file) return;
+            editorStatus('importing ' + role + '…');
+            var fr = new FileReader();
+            fr.onload = function(){
+              var bytes = new Uint8Array(fr.result), ok = false;
+              try { ok = Module.editorImportTexture(s.name, role, file.name, bytes); }
+              catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); return; }
+              editorStatus(ok ? (role + ' imported: ' + file.name) : (role + ' import FAILED'));
+              console.log('[editor] import', s.name, role, file.name, bytes.length, '->', ok);
+            };
+            fr.readAsArrayBuffer(file);
+          };
+          row.appendChild(inp); imp.appendChild(row);
+        });
+        el.appendChild(imp);
       }
 
       // Camera orbit handled in JS on the canvas (SDL's in-browser mouse events

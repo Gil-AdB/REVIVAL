@@ -301,4 +301,45 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	}
 }
 
+bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
+                                 const char *role, const char *path) {
+	if (!sc || !matName || !role || !path) return false;
+	Material *M = findMaterial(sc, matName);
+	if (!M) { std::fprintf(stderr, "[MAT-IMPORT] '%s' not in scene\n", matName); return false; }
+
+	const std::string r = role;
+	bool tangentMap = false, ok = false;
+	if (r == "albedo") {
+		if (Texture *t = loadTiled(path, false)) { M->Txtr = t; ok = true; }
+	} else if (r == "normal") {
+		// No filename convention to sniff here; default to the engine (OGL)
+		// convention, honoring the global --material-import-flip-normal override.
+		if (Texture *t = loadTiled(path, g_forceFlipNormal)) {
+			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+			M->NormalMap = t; tangentMap = true; ok = true;
+		}
+	} else if (r == "height") {
+		if (Texture *h32 = loadTiled(path, false)) { Texture *h8 = MakeHeight8(h32); M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
+	} else if (r == "roughness") {
+		if (Texture *r32 = loadTiled(path, false)) { Texture *r8 = MakeHeight8(r32); M->RoughnessMap = r8 ? r8 : r32; ok = true; }
+	} else if (r == "ao") {
+		if (Texture *a32 = loadTiled(path, false)) { Texture *a8 = MakeHeight8(a32); M->AoMap = a8 ? a8 : a32; ok = true; }
+	} else {
+		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
+	}
+	std::fprintf(stderr, "[MAT-IMPORT] '%s' <- %s map %s (%s)\n",
+	             matName, role, path, ok ? "ok" : "FAILED");
+	// A material that gained a normal/height map needs its meshes' tangents
+	// recomputed (same reason as the CLI path).
+	if (ok && tangentMap) {
+		for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+			bool uses = false;
+			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
+				if (T->Faces[i].Txtr == M) uses = true;
+			if (uses) Compute_Vertex_Tangents(T);
+		}
+	}
+	return ok;
+}
+
 } // namespace fds

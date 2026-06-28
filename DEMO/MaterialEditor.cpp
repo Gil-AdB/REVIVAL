@@ -1,4 +1,5 @@
 #include "MaterialEditor.h"
+#include "MaterialImport.h"   // MaterialImport_ApplyMapFile
 
 #include <Base/FDS_VARS.H>   // MatLib, CurScene
 #include <Base/Material.h>
@@ -7,6 +8,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_set>
 
 namespace rev {
@@ -90,6 +92,22 @@ static std::atomic<bool> g_editorDirty{true};   // first frame renders
 void Editor_MarkDirty()    { g_editorDirty.store(true, std::memory_order_relaxed); }
 bool Editor_ConsumeDirty() { return g_editorDirty.exchange(false, std::memory_order_relaxed); }
 
+bool Editor_ImportTexture(const char* surface, const char* role,
+                          const char* filename, const unsigned char* data, unsigned long len)
+{
+	if (!surface || !role || !data || len == 0) return false;
+	// Preserve the uploaded extension so the image loader picks the right codec.
+	const char* dot = filename ? std::strrchr(filename, '.') : nullptr;
+	std::string tmp = std::string("/tmp/ed_import") + (dot ? dot : ".png");
+	FILE* f = std::fopen(tmp.c_str(), "wb");
+	if (!f) { std::fprintf(stderr, "[EDITOR] import: can't open %s\n", tmp.c_str()); return false; }
+	std::fwrite(data, 1, len, f);
+	std::fclose(f);
+	const bool ok = fds::MaterialImport_ApplyMapFile(CurScene, surface, role, tmp.c_str());
+	if (ok) Editor_MarkDirty();
+	return ok;
+}
+
 } // namespace rev
 
 // ── Browser (Embind) surface API ───────────────────────────────────────────
@@ -99,6 +117,8 @@ bool Editor_ConsumeDirty() { return g_editorDirty.exchange(false, std::memory_or
 // directly (e.g. the DUMP_SURFACES snapshot hook).
 #ifdef __EMSCRIPTEN__
 #include <emscripten/bind.h>
+#include <emscripten/val.h>
+#include <vector>
 
 namespace {
 std::string js_editorGetSurfaces() { return rev::Editor_GetSurfacesJSON(); }
@@ -106,11 +126,20 @@ bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 {
 	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
 }
+// bytes is a JS Uint8Array of the uploaded image file.
+bool js_editorImportTexture(std::string surface, std::string role,
+                            std::string filename, emscripten::val bytes)
+{
+	std::vector<unsigned char> buf = emscripten::vecFromJSArray<unsigned char>(bytes);
+	return rev::Editor_ImportTexture(surface.c_str(), role.c_str(),
+	                                 filename.c_str(), buf.data(), buf.size());
+}
 } // namespace
 
 EMSCRIPTEN_BINDINGS(rev_material_editor)
 {
 	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
+	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 }
 #endif // __EMSCRIPTEN__

@@ -44,6 +44,14 @@ bool MaterialImport_Active();
 // No-op when no specs were given. Logs what it detected/applied per material.
 void MaterialImport_Apply(Scene *sc, const char *sceneName);
 
+// Apply ONE PBR map (already on disk at `path` — e.g. an uploaded file the
+// browser editor wrote to MEMFS) to material `matName` in scene `sc`, by role:
+// "albedo" | "normal" | "height" | "roughness" | "ao". Reuses the same load +
+// convert (MakeNormal16/MakeHeight8) + assign + tangent-recompute as the CLI
+// path. Returns true on success. The single-map entry point for the LWO editor.
+bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
+                                 const char *role, const char *path);
+
 } // namespace fds
 
 #endif // REVIVAL_MATERIAL_IMPORT_H

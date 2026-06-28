@@ -31,6 +31,14 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value);
 void Editor_MarkDirty();
 bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 
+// Import a PBR map onto a surface from raw image-file bytes (a browser upload),
+// by role: "albedo" | "normal" | "height" | "roughness" | "ao". Writes the bytes
+// to a temp file and reuses MaterialImport_ApplyMapFile (same load/convert/assign
+// as --material-import) — no native filesystem path needed. Returns true on
+// success and marks the view dirty.
+bool Editor_ImportTexture(const char* surface, const char* role,
+                          const char* filename, const unsigned char* data, unsigned long len);
+
 } // namespace rev
 
 #endif // REVIVAL_MATERIAL_EDITOR_H
