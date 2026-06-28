@@ -825,6 +825,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				vy = -y * vlenInv;
 				vz = -z * vlenInv;
 			}
+			// --pbr per-pixel constants (hoisted out of the per-light loop so the
+			// scalar GGX cost is measured fairly). roughness fixed or gloss-derived;
+			// a=rough², Smith k=a/2, F0=0.04 dielectric; NdotV clamped.
+			float pbrA2 = 0, pbrK = 0, pbrNdotV = 0;
+			if (wantSpecular && sPbr) {
+				float rough = sPbrRoughFixed;
+				if (rough <= 0.0f) rough = std::sqrt(2.0f / (gloss + 2.0f));
+				if (rough < 0.04f) rough = 0.04f;
+				if (rough > 1.0f)  rough = 1.0f;
+				const float a = rough * rough;
+				pbrA2 = a * a;
+				pbrK  = a * 0.5f;
+				pbrNdotV = nx*vx + ny*vy + nz*vz;
+				if (pbrNdotV < 1e-3f) pbrNdotV = 1e-3f;
+			}
 
 			// Specular accumulator — kept separate from diffuse so it can
 			// be added AFTER texture modulation (highlights are independent
@@ -1456,9 +1471,28 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							// the > 0 cull still works.
 							const float NdotH_raw = nx*hx + ny*hy + nz*hz;
 							if (hLen2 > 0.0f && NdotH_raw > 0.0f) {
-								const float NdotH = NdotH_raw * fast_rsqrt(hLen2);
+								const float hInv  = fast_rsqrt(hLen2);
+								const float NdotH = NdotH_raw * hInv;
+								float spec;
+								if (sPbr) {
+									// Scalar Cook-Torrance (GGX D + Smith-Schlick G +
+									// Schlick F), mirroring run_vec_ggx_loop. NdotL =
+									// dot·lenInv; VdotH = (V·H)·hInv. spec = D·G·F/(4·NdotV).
+									const float NdotL = dot * lenInv;
+									const float VdotH = (vx*hx + vy*hy + vz*hz) * hInv;
+									const float d1 = NdotH*NdotH*(pbrA2 - 1.0f) + 1.0f;
+									const float D = pbrA2 * 0.31830989f / (d1*d1 + 1e-6f);
+									const float omk = 1.0f - pbrK;
+									const float Gv = pbrNdotV / (pbrNdotV*omk + pbrK);
+									const float Gl = NdotL / (NdotL*omk + pbrK);
+									const float om = 1.0f - (VdotH > 0.0f ? VdotH : 0.0f);
+									const float om2 = om*om;
+									const float F = 0.04f + 0.96f * (om2*om2*om);
+									spec = D * Gv * Gl * F / (4.0f * pbrNdotV);
+								} else {
+									spec = pow_glossClass(NdotH, Mat->Glossiness);
+								}
 								{
-									const float spec = pow_glossClass(NdotH, Mat->Glossiness);
 									// Multiply by shadowAtten so shadowed pixels don't
 									// leak specular highlights — was a visible bug at
 									// bumped-mortar pixels inside shadow regions, where
