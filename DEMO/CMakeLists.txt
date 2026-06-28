@@ -39,6 +39,8 @@ set(DEMO_SOURCES
     ImageCompression.h
     MeshOps.cpp
     MeshOps.h
+    MaterialImport.cpp
+    MaterialImport.h
     ProceduralWater.cpp
     ProceduralWater.h
     MirrorShatter.cpp

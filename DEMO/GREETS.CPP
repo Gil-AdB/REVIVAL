@@ -28,6 +28,7 @@
 #include "RENDER/EnvBake.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
+#include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
 #include "Scenes.h"
@@ -1312,6 +1313,11 @@ void Initialize_Greets()
 	}
 
 	Preprocess_Scene(GreetSc, "GREETS");
+
+	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
+	// onto named materials for testing. After Preprocess (textures loaded), so
+	// it replaces the loaded maps directly. No-op without the flag.
+	fds::MaterialImport_Apply(GreetSc, "greets");
 
 	// Floor de-tile + scale (face UVs exist now that Preprocess ran).
 	if (fds::FeatureFlags::greets_stone_tex())
