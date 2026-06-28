@@ -5,7 +5,9 @@
 #include <Base/FeatureFlags.h>
 #include <atomic>
 #include <cmath>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "MaterialEditor.h"
 
@@ -197,14 +199,39 @@ void DemoBoot(ModplayerHandle modHandle)
 	// frame each tick so live surface edits are visible.
 	g_editorMode = EM_ASM_INT({ return (Module.revEditorMode ? 1 : 0); });
 	if (g_editorMode) {
-		fprintf(stderr, "[EDITOR] surface editor mode: greets, deferred, mirror off\n");
-		// Render the deferred G-buffer kernel (the full material path) — it's
-		// OFF by default in the wasm build (FDS_DEFERRED_DEFAULT_ON=0), which is
-		// why the editor was showing the forward path. setParamFromText marks
-		// the flags explicitly-set so a scene's setDefault can't flip them back.
-		// (Quarter/checkerboard left at scene default — the user is fine with it.)
-		fds::FeatureFlags::setParamFromText("deferred", "1");
-		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+		// Apply the URL query string as feature flags via the SAME parser the CLI
+		// uses (dash→underscore, =value, no-): paste your flag set, e.g.
+		//   DEMO.html?editor&hdr&hdr-linear&greets-stone-tex&parallax&ssao&bloom
+		// With no flags, fall back to a sensible full-look default. Two hard
+		// overrides after parsing: deferred ON (the full material path — off by
+		// default in wasm) and the teleporter mirror OFF (clones+bakes every
+		// mesh, ~6 GB, past wasm's 4 GB cap). NOTE: --material-import reads native
+		// filesystem paths that don't exist in the wasm VFS, so that PBR import is
+		// native-only — it can't run here.
+		std::vector<std::string> args;
+		args.push_back("DEMO");
+		bool hadFlag = false;
+		if (const char *qs = emscripten_run_script_string("location.search.replace(/^[?]/,'')")) {
+			std::string q = qs, tok;
+			for (size_t i = 0; i <= q.size(); ++i) {
+				if (i == q.size() || q[i] == '&') {
+					if (!tok.empty() && tok != "editor") { args.push_back("--" + tok); hadFlag = true; }
+					tok.clear();
+				} else tok.push_back(q[i]);
+			}
+		}
+		if (!hadFlag) {
+			const char *def[] = { "--hdr", "--hdr-linear", "--greets-stone-tex",
+			                      "--parallax", "--nmap_16bit", "--ssao", "--ssao-gtao", "--bloom" };
+			for (const char *d : def) args.push_back(d);
+		}
+		std::vector<const char*> argv;
+		for (auto &a : args) argv.push_back(a.c_str());
+		fds::FeatureFlags::parseArgs((int)argv.size(), argv.data());
+		fds::FeatureFlags::setParamFromText("deferred", "1");        // full material path
+		fds::FeatureFlags::setParamFromText("greets_mirror", "0");   // mirror OOMs in wasm
+		fprintf(stderr, "[EDITOR] greets editor: %d flag(s) from URL/default, deferred on, mirror off\n",
+		        (int)args.size() - 1);
 		// Orbit target = greets room-bbox centre (see the [DISCO] room-bbox log).
 		g_camTarget.x = 18.0f; g_camTarget.y = 6.0f; g_camTarget.z = -35.0f;
 		g_initThread = std::thread([](){
