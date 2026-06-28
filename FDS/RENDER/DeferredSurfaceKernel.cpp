@@ -174,15 +174,12 @@ static inline float pow_glossClass(float x, unsigned gloss) {
 // constants (the kernel switches on it; default falls back to scalar
 // libm pow). Replaces the scalar spec loop the vec path used before.
 //
-// KNOWN GAP: this vec loop does NOT apply tl.shadowMapIdx[n] / PCF
-// shadow attenuation per-light — the scalar lighting body does, but
-// the SIMD body short-circuits the per-light shadow tap. The deferred
-// vec path is off by default (FDS_DEFERRED_VEC=0, slower than scalar
-// on arm64-via-simde anyway), so this never fires in production —
-// but if vec is ever turned on for non-bumped scenes, shadowed
-// surfaces will leak specular highlights through shadows. Mirror the
-// scalar fix at DeferredLighting.cpp:1312 (multiply specStrength by
-// shadowAtten) when that day comes.
+// Shadow attenuation: the vec diffuse loop now folds the full per-light
+// shadow term into `coneShadowAtten` — own cube (resolveCubeAtten) plus
+// the mirror-clone source map/cube and own 2-D spot map (computeMapShadowAtten),
+// matching the scalar body. This spec loop multiplies that `coneShadowAtten`
+// (`csa`) into specStrength, so shadowed surfaces no longer leak specular
+// highlights through shadows.
 template<int Gloss>
 static inline void run_vec_spec_loop(const TileLights &tl,
                                       float x, float y, float z,
@@ -452,6 +449,205 @@ static bool deferredLightingQuarterEnabled() {
 	return fds::FeatureFlags::deferred_quarter();
 }
 
+
+// Shared 2-D-shadow-map attenuation for a single light `n`, extracted from the
+// scalar lighting body so both the scalar and the 8-omni SIMD path compute the
+// SAME shadowing for mirror-clone source maps (srcSm), mirror-clone source
+// cubes (srcCube), and the light's own 2-D spot map (smIdx + PCF). It does NOT
+// cover the light's OWN cube (cubeShadowIdx) — that stays at the call site via
+// resolveCubeAtten (the scalar block's own-cube path and the vec lane loop both
+// already handle it). Returns the combined srcSm×srcCube×smIdx attenuation in
+// [0,1]; 0.0 means fully shadowed (callers early-out). wx/wy/wz/lenInv are the
+// light→pixel vector + 1/|w| (used only by the smIdx slope bias). Byte-identical
+// to the inlined scalar code it replaced.
+static inline float computeMapShadowAtten(const TileLights& tl, int n,
+                                          const DeferredLightingCtx& ctx,
+                                          float x, float y, float z,
+                                          float wx, float wy, float wz,
+                                          float lenInv,
+                                          float nGeoX, float nGeoY, float nGeoZ,
+                                          int surfaceShadowId,
+                                          int kShadowBiasG, int kSlopeBiasG,
+                                          bool profShadowCache)
+{
+	const int32_t smIdx = tl.shadowMapIdx[n];
+	float shadowAtten = 1.0f;
+	// Clone light (mirror reflection): its visibility of this pixel equals
+	// the SOURCE light's visibility of the pixel REFLECTED across the mirror
+	// plane — sample the source's existing map there. Zero extra bakes;
+	// single tap (no PCF — reflected dot/beam shadows are soft).
+	const int32_t srcSm = tl.srcShadowMapIdx[n];
+	if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
+		// A clone/bounce light borrows its SOURCE spot's 2-D map: reflect this
+		// pixel across the mirror plane and sample the source's map.
+		//
+		// BOUNCE spots (clampBounce) own no map and may only relight what the
+		// source actually illuminates, so they default to DARK and are lit only
+		// where the reflected point lands inside the source's cone AND the
+		// source sees it — out-of-cone / occluded stay dark. Without this the
+		// bounce spilled disco light onto walls the source could never reach
+		// (the through-mirror bleed).
+		//
+		// Mirror CLONES keep the established default-lit behaviour
+		// (occluded → dark).
+		const bool clampBounce = (tl.bounceClamp[n] != 0u);
+		if (clampBounce) shadowAtten = 0.0f;
+		const ShadowMap& sm = g_shadowMaps[srcSm];
+		const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+		const float rwx = wpx - sd2 * tl.mirNX[n];
+		const float rwy = wpy - sd2 * tl.mirNY[n];
+		const float rwz = wpz - sd2 * tl.mirNZ[n];
+		const float ddx = rwx - ctx.cameraWorldX;
+		const float ddy = rwy - ctx.cameraWorldY;
+		const float ddz = rwz - ctx.cameraWorldZ;
+		// worldToView = transpose(viewToWorld)
+		const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+		const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+		const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+		const float lx = sm.viewToLight[0][0]*rvx + sm.viewToLight[0][1]*rvy + sm.viewToLight[0][2]*rvz + sm.viewToLightOffset.x;
+		const float ly = sm.viewToLight[1][0]*rvx + sm.viewToLight[1][1]*rvy + sm.viewToLight[1][2]*rvz + sm.viewToLightOffset.y;
+		const float lz = sm.viewToLight[2][0]*rvx + sm.viewToLight[2][1]*rvy + sm.viewToLight[2][2]*rvz + sm.viewToLightOffset.z;
+		if (lz > 0.0f) {
+			const float invLZ = 1.0f / lz;
+			const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
+			const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
+			if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
+				const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
+				const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
+				int pixZ = 0xFF80 - int(lz * sm.zScale);
+				if (pixZ < 0) pixZ = 0;
+				if (clampBounce) {
+					// In-cone + the source sees this point (not behind a closer
+					// occluder) → bounce lights it; everything else stays dark
+					// (set above).
+					if (pixZ + 128 >= int(zS)) shadowAtten = 1.0f;
+				} else {
+					// Clone: default lit, darken only where the source's map
+					// shows a closer occluder.
+					if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
+				}
+			}
+		}
+	}
+	// Clone omni with a CUBE source: borrow the SOURCE omni's cube and sample
+	// it at this pixel REFLECTED across the mirror plane — the cube analogue of
+	// the srcShadowMapIdx path above. PolyId mode (surfaceShadowId): the
+	// reflected receiver lands on the SOURCE surface (the clone is that geometry
+	// flipped) and clones share the source's matID, so the identity test matches
+	// — same acne-free path as the rest of greets. No clone geometry is baked.
+	const int32_t srcCube = tl.srcCubeShadowIdx[n];
+	if (srcCube >= 0) {
+		const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+		const float rwx = wpx - sd2 * tl.mirNX[n];
+		const float rwy = wpy - sd2 * tl.mirNY[n];
+		const float rwz = wpz - sd2 * tl.mirNZ[n];
+		const float ddx = rwx - ctx.cameraWorldX, ddy = rwy - ctx.cameraWorldY, ddz = rwz - ctx.cameraWorldZ;
+		const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+		const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+		const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+		shadowAtten *= CubeShadow_Sample(srcCube, rwx, rwy, rwz, rvx, rvy, rvz,
+		                                 kShadowBiasG, kSlopeBiasG, surfaceShadowId);
+	}
+	if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
+		const ShadowMap& sm = g_shadowMaps[smIdx];
+		const float lx = sm.viewToLight[0][0] * x +
+		                 sm.viewToLight[0][1] * y +
+		                 sm.viewToLight[0][2] * z +
+		                 sm.viewToLightOffset.x;
+		const float ly = sm.viewToLight[1][0] * x +
+		                 sm.viewToLight[1][1] * y +
+		                 sm.viewToLight[1][2] * z +
+		                 sm.viewToLightOffset.y;
+		const float lz = sm.viewToLight[2][0] * x +
+		                 sm.viewToLight[2][1] * y +
+		                 sm.viewToLight[2][2] * z +
+		                 sm.viewToLightOffset.z;
+		if (lz > 0.0f) {
+			const float invLZ = 1.0f / lz;
+			const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+			const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+			const int iX = int(smX);
+			const int iY = int(smY);
+			if (iX >= 0 && iX + 1 < sm.xres &&
+			    iY >= 0 && iY + 1 < sm.yres) {
+				const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+				const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
+				const uint16_t *zsRow1 = zsRow0 + sm.xres;
+				const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
+				const uint16_t *zdRow1 = zdRow0 + sm.xres;
+				// Per-tap closest-occluder. Static buffer holds the once-baked
+				// statics; dynamic holds animated meshes (zero when off).
+				// max() wins on whichever caster is closer.
+				const uint16_t z00 = std::max(zsRow0[iX  ], zdRow0[iX  ]);
+				const uint16_t z10 = std::max(zsRow0[iX+1], zdRow0[iX+1]);
+				const uint16_t z01 = std::max(zsRow1[iX  ], zdRow1[iX  ]);
+				const uint16_t z11 = std::max(zsRow1[iX+1], zdRow1[iX+1]);
+				if (profShadowCache) {
+					// One PCF check = one tracked sample. Use the (00) tap's
+					// cache-line address — adjacent shadow checks on the same
+					// thread that share this line are hits.
+					const uintptr_t line =
+						reinterpret_cast<uintptr_t>(&zsRow0[iX]) >> 6;
+					if (s_shadowProfLastLine != line) {
+						g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
+						s_shadowProfLastLine = line;
+					}
+					g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
+				}
+				const float fx = smX - float(iX);
+				const float fy = smY - float(iY);
+				const float w00 = (1.0f - fx) * (1.0f - fy);
+				const float w10 =         fx  * (1.0f - fy);
+				const float w01 = (1.0f - fx) *         fy;
+				const float w11 =         fx  *         fy;
+				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
+				float occ = 0.0f;
+				if (mode == ShadowMode::PolyId) {
+					const uint16_t *idRow0 = sm.polyId.data() +
+						size_t(iY) * size_t(sm.xres);
+					const uint16_t *idRow1 = idRow0 + sm.xres;
+					// Surface matID extracted from gb.txtr's packed
+					// (miplevel:4 | matID:8 | swizzledUV:20). Shadow buffer
+					// stores matID+1 of the closest occluder; +1 here too so the
+					// comparison uses the same offset, and 0 stays as the
+					// "no occluder" sentinel.
+					const uint16_t surfaceId = uint16_t(surfaceShadowId);
+					if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
+					if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
+					if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
+					if (idRow1[iX + 1] != surfaceId && idRow1[iX + 1] != 0) occ += w11;
+				} else {
+					int pixZenc = 0xFF80 - int(lz * sm.zScale);
+					if (pixZenc < 0) pixZenc = 0;
+					if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+					// Constant + slope-scale bias. See the inlined scalar comment
+					// for the rationale; the slope grows as the surface meets the
+					// light at shallow angles, plateauing at the 0.2 clamp.
+					const int kShadowBias = kShadowBiasG;
+					const int kSlopeBias  = kSlopeBiasG;
+					const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+					const float nDotL = dotGeo * lenInv;
+					const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+					const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
+					const int biased = pixZenc + kShadowBias + slopeBias;
+					if (biased < int(z00)) occ += w00;
+					if (biased < int(z10)) occ += w10;
+					if (biased < int(z01)) occ += w01;
+					if (biased < int(z11)) occ += w11;
+				}
+				if (occ >= 1.0f) return 0.0f;       // fully shadowed
+				shadowAtten = 1.0f - occ;
+			}
+		}
+	}
+	return shadowAtten;
+}
 
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
@@ -1039,19 +1235,31 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// only cone × shadow needs sharing.)
 						if (wantSpecular) _mm256_store_ps(coneShadowAtten + slot, coneAtten);
 
-						// Cube shadow attenuation per lane (scalarized).
-						// Most lanes have cubeShadowIdx < 0 (no shadow);
-						// quick-check the SoA before paying the lookup cost.
-						// Per-pixel sampleWorld is already computed for the
-						// scalar path; bring it here too via a sibling
-						// computation in the vec branch's setup.
+						// Per-lane shadow attenuation (scalarized). Covers the
+						// light's OWN cube (resolveCubeAtten) AND, mirroring the
+						// scalar body, mirror-clone source maps / cubes / the own
+						// 2-D spot map via computeMapShadowAtten. The loop fires
+						// for a lane if ANY of those four index planes is set;
+						// most lanes have none, so we quick-check the SoA before
+						// paying the lookup cost. Per-pixel sampleWorld is already
+						// computed above for both light paths.
 						__m256i cubeIdxV = _mm256_load_si256(
 							(const __m256i*)(tl.cubeShadowIdx + slot));
-						__m256i anyCube = _mm256_cmpgt_epi32(cubeIdxV,
-							_mm256_set1_epi32(-1));
-						if (_mm256_movemask_epi8(anyCube) != 0) {
-							alignas(32) int32_t idxArr[8];
-							_mm256_store_si256((__m256i*)idxArr, cubeIdxV);
+						__m256i smIdxV = _mm256_load_si256(
+							(const __m256i*)(tl.shadowMapIdx + slot));
+						__m256i srcSmV = _mm256_load_si256(
+							(const __m256i*)(tl.srcShadowMapIdx + slot));
+						__m256i srcCubeV = _mm256_load_si256(
+							(const __m256i*)(tl.srcCubeShadowIdx + slot));
+						__m256i negOne = _mm256_set1_epi32(-1);
+						__m256i anyShadow = _mm256_or_si256(
+							_mm256_or_si256(_mm256_cmpgt_epi32(cubeIdxV, negOne),
+							                _mm256_cmpgt_epi32(smIdxV,   negOne)),
+							_mm256_or_si256(_mm256_cmpgt_epi32(srcSmV,   negOne),
+							                _mm256_cmpgt_epi32(srcCubeV, negOne)));
+						if (_mm256_movemask_epi8(anyShadow) != 0) {
+							alignas(32) int32_t cubeArr[8];
+							_mm256_store_si256((__m256i*)cubeArr, cubeIdxV);
 							alignas(32) float kArr[8];
 							_mm256_store_ps(kArr, k);
 							alignas(32) float wxArr[8], wyArr[8], wzArr[8], liArr[8];
@@ -1062,17 +1270,28 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const int kSB = kShadowBiasG;
 							const int kSL = kSlopeBiasG;
 							for (int lane = 0; lane < 8; ++lane) {
-								if (idxArr[lane] < 0) continue;
 								if (kArr[lane] <= 0.0f) continue;
-								const float cubeAtten = resolveCubeAtten(
-									pixelLM, idxArr[lane], lmKernelEnabled, caFlags,
+								const int gi = slot + lane;
+								// Own cube (default 1.0 when this lane carries none).
+								float atten = 1.0f;
+								if (cubeArr[lane] >= 0) {
+									atten = resolveCubeAtten(
+										pixelLM, cubeArr[lane], lmKernelEnabled, caFlags,
+										wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
+										nGeoX, nGeoY, nGeoZ,
+										sampleWorldX, sampleWorldY, sampleWorldZ,
+										x, y, z, kSB, kSL,
+										surfaceShadowId);
+								}
+								// Mirror-clone source map/cube + own 2-D spot map
+								// (returns 1.0 when none of those apply for this lane).
+								atten *= computeMapShadowAtten(
+									tl, gi, ctx, x, y, z,
 									wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
-									nGeoX, nGeoY, nGeoZ,
-									sampleWorldX, sampleWorldY, sampleWorldZ,
-									x, y, z, kSB, kSL,
-									surfaceShadowId);
-								kArr[lane] *= cubeAtten;
-								if (wantSpecular) coneShadowAtten[slot + lane] *= cubeAtten;
+									nGeoX, nGeoY, nGeoZ, surfaceShadowId,
+									kSB, kSL, profShadowCache);
+								kArr[lane] *= atten;
+								if (wantSpecular) coneShadowAtten[gi] *= atten;
 							}
 							k = _mm256_load_ps(kArr);
 						}
@@ -1237,214 +1456,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// polygons that project to a single texel flicker
 						// in/out as the texel-grid shifts under them.
 						// Cost: 4 loads + 4 compares + 4 muls + 4 adds.
-						const int32_t smIdx = tl.shadowMapIdx[n];
-						float shadowAtten = 1.0f;
-						// Clone light (mirror reflection): its visibility
-						// of this pixel equals the SOURCE light's
-						// visibility of the pixel REFLECTED across the
-						// mirror plane — sample the source's existing
-						// map there. Zero extra bakes; single tap (no
-						// PCF — reflected dot/beam shadows are soft).
-						const int32_t srcSm = tl.srcShadowMapIdx[n];
-						if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
-							// A clone/bounce light borrows its SOURCE spot's 2-D
-							// map: reflect this pixel across the mirror plane and
-							// sample the source's map.
-							//
-							// BOUNCE spots (clampBounce) own no map and may only
-							// relight what the source actually illuminates, so they
-							// default to DARK and are lit only where the reflected
-							// point lands inside the source's cone AND the source
-							// sees it — out-of-cone / occluded stay dark. Without
-							// this the bounce spilled disco light onto walls the
-							// source could never reach (the through-mirror bleed).
-							//
-							// Mirror CLONES keep the established default-lit
-							// behaviour (occluded → dark).
-							const bool clampBounce = (tl.bounceClamp[n] != 0u);
-							if (clampBounce) shadowAtten = 0.0f;
-							const ShadowMap& sm = g_shadowMaps[srcSm];
-							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
-							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
-							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
-							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
-							const float rwx = wpx - sd2 * tl.mirNX[n];
-							const float rwy = wpy - sd2 * tl.mirNY[n];
-							const float rwz = wpz - sd2 * tl.mirNZ[n];
-							const float ddx = rwx - ctx.cameraWorldX;
-							const float ddy = rwy - ctx.cameraWorldY;
-							const float ddz = rwz - ctx.cameraWorldZ;
-							// worldToView = transpose(viewToWorld)
-							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
-							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
-							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
-							const float lx = sm.viewToLight[0][0]*rvx + sm.viewToLight[0][1]*rvy + sm.viewToLight[0][2]*rvz + sm.viewToLightOffset.x;
-							const float ly = sm.viewToLight[1][0]*rvx + sm.viewToLight[1][1]*rvy + sm.viewToLight[1][2]*rvz + sm.viewToLightOffset.y;
-							const float lz = sm.viewToLight[2][0]*rvx + sm.viewToLight[2][1]*rvy + sm.viewToLight[2][2]*rvz + sm.viewToLightOffset.z;
-							if (lz > 0.0f) {
-								const float invLZ = 1.0f / lz;
-								const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
-								const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
-								if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
-									const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
-									const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
-									int pixZ = 0xFF80 - int(lz * sm.zScale);
-									if (pixZ < 0) pixZ = 0;
-									if (clampBounce) {
-										// In-cone + the source sees this point (not
-										// behind a closer occluder) → bounce lights it;
-										// everything else stays dark (set above).
-										if (pixZ + 128 >= int(zS)) shadowAtten = 1.0f;
-									} else {
-										// Clone: default lit, darken only where the
-										// source's map shows a closer occluder.
-										if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
-									}
-								}
-							}
-						}
-						// Clone omni with a CUBE source: borrow the SOURCE omni's
-						// cube and sample it at this pixel REFLECTED across the
-						// mirror plane — the cube analogue of the srcShadowMapIdx
-						// path above. PolyId mode (surfaceShadowId): the reflected
-						// receiver lands on the SOURCE surface (the clone is that
-						// geometry flipped) and clones share the source's matID, so
-						// the identity test matches — same acne-free path as the
-						// rest of greets. No clone geometry is baked.
-						const int32_t srcCube = tl.srcCubeShadowIdx[n];
-						if (srcCube >= 0) {
-							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
-							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
-							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
-							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
-							const float rwx = wpx - sd2 * tl.mirNX[n];
-							const float rwy = wpy - sd2 * tl.mirNY[n];
-							const float rwz = wpz - sd2 * tl.mirNZ[n];
-							const float ddx = rwx - ctx.cameraWorldX, ddy = rwy - ctx.cameraWorldY, ddz = rwz - ctx.cameraWorldZ;
-							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
-							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
-							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
-							shadowAtten *= CubeShadow_Sample(srcCube, rwx, rwy, rwz, rvx, rvy, rvz,
-							                                 kShadowBiasG, kSlopeBiasG, surfaceShadowId);
-						}
-						if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
-							const ShadowMap& sm = g_shadowMaps[smIdx];
-							const float lx = sm.viewToLight[0][0] * x +
-							                 sm.viewToLight[0][1] * y +
-							                 sm.viewToLight[0][2] * z +
-							                 sm.viewToLightOffset.x;
-							const float ly = sm.viewToLight[1][0] * x +
-							                 sm.viewToLight[1][1] * y +
-							                 sm.viewToLight[1][2] * z +
-							                 sm.viewToLightOffset.y;
-							const float lz = sm.viewToLight[2][0] * x +
-							                 sm.viewToLight[2][1] * y +
-							                 sm.viewToLight[2][2] * z +
-							                 sm.viewToLightOffset.z;
-							if (lz > 0.0f) {
-								const float invLZ = 1.0f / lz;
-								const float smX = sm.cntrX + sm.perspX * lx * invLZ;
-								const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-								const int iX = int(smX);
-								const int iY = int(smY);
-								if (iX >= 0 && iX + 1 < sm.xres &&
-								    iY >= 0 && iY + 1 < sm.yres) {
-									const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-									const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-									const uint16_t *zsRow1 = zsRow0 + sm.xres;
-									const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-									const uint16_t *zdRow1 = zdRow0 + sm.xres;
-									// Per-tap closest-occluder. Static buffer
-									// holds the once-baked statics; dynamic
-									// holds animated meshes (zero when off).
-									// max() wins on whichever caster is closer.
-									const uint16_t z00 = std::max(zsRow0[iX  ], zdRow0[iX  ]);
-									const uint16_t z10 = std::max(zsRow0[iX+1], zdRow0[iX+1]);
-									const uint16_t z01 = std::max(zsRow1[iX  ], zdRow1[iX  ]);
-									const uint16_t z11 = std::max(zsRow1[iX+1], zdRow1[iX+1]);
-									if (profShadowCache) {
-										// One PCF check = one tracked sample.
-										// Use the (00) tap's cache-line address
-										// — adjacent shadow checks on the same
-										// thread that share this line are hits.
-										const uintptr_t line =
-											reinterpret_cast<uintptr_t>(&zsRow0[iX]) >> 6;
-										if (s_shadowProfLastLine != line) {
-											g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
-											s_shadowProfLastLine = line;
-										}
-										g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
-									}
-									const float fx = smX - float(iX);
-									const float fy = smY - float(iY);
-									const float w00 = (1.0f - fx) * (1.0f - fy);
-									const float w10 =         fx  * (1.0f - fy);
-									const float w01 = (1.0f - fx) *         fy;
-									const float w11 =         fx  *         fy;
-									const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
-									float occ = 0.0f;
-									if (mode == ShadowMode::PolyId) {
-										const uint16_t *idRow0 = sm.polyId.data() +
-											size_t(iY) * size_t(sm.xres);
-										const uint16_t *idRow1 = idRow0 + sm.xres;
-										// Surface matID extracted from gb.txtr's
-										// packed (miplevel:4 | matID:8 | swizzledUV:20).
-										// Shadow buffer stores matID+1 of the closest
-										// occluder; +1 here too so the comparison
-										// uses the same offset, and 0 stays as the
-										// "no occluder" sentinel.
-										// Receiver identity: read the per-pixel
-										// `gb.shadowMatID` plane (stamped by
-										// Mekalele with the full resolution
-										// chain). Falls back to uint16_t(matID+1)
-										// when the plane wasn't allocated.
-										// Mirrors the scalar surfaceShadowId
-										// resolution above.
-										const uint16_t surfaceId = uint16_t(surfaceShadowId);
-										if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
-										if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
-										if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
-										if (idRow1[iX + 1] != surfaceId && idRow1[iX + 1] != 0) occ += w11;
-									} else {
-										int pixZenc = 0xFF80 - int(lz * sm.zScale);
-										if (pixZenc < 0) pixZenc = 0;
-										if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-										// Constant + slope-scale bias. The constant
-										// handles front-facing self-shadow acne. The
-										// slope term grows as the surface meets the
-										// light at shallow angles — a wall almost
-										// parallel to the light direction has a steep
-										// depth gradient across one shadow texel, so
-										// the constant bias alone leaves grazing
-										// surfaces with banded "acne" patterns. We
-										// scale by 1/(N·L) - 1 so front-facing surfaces
-										// get no extra; grazing surfaces get a lot.
-										// Tunable via FDS_SHADOW_BIAS / SLOPE_BIAS.
-										const int kShadowBias = kShadowBiasG;
-										const int kSlopeBias  = kSlopeBiasG;
-										// Use the GEOMETRIC normal (saved before normal-
-										// map perturbation) for slope calc — the slope
-										// is about the underlying surface, not the
-										// bumpy micro-detail. Without this, bump-mapped
-										// floors show patchy shadow following the bumps,
-										// and grazing-angle bumps explode the slope.
-										// Clamp at 0.2 so very steep angles plateau
-										// rather than blowing past nearby occluders.
-										const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
-										const float nDotL = dotGeo * lenInv;
-										const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
-										const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
-										const int biased = pixZenc + kShadowBias + slopeBias;
-										if (biased < int(z00)) occ += w00;
-										if (biased < int(z10)) occ += w10;
-										if (biased < int(z01)) occ += w01;
-										if (biased < int(z11)) occ += w11;
-									}
-									if (occ >= 1.0f) continue;       // fully shadowed
-									shadowAtten = 1.0f - occ;
-								}
-							}
-						}
+						float shadowAtten = computeMapShadowAtten(
+							tl, n, ctx, x, y, z, wx, wy, wz, lenInv,
+							nGeoX, nGeoY, nGeoZ, surfaceShadowId,
+							kShadowBiasG, kSlopeBiasG, profShadowCache);
+						// Combined srcSm×srcCube×smIdx; 0 = fully shadowed (the
+						// old `if (occ >= 1.0f) continue;` early-out).
+						if (shadowAtten <= 0.0f) continue;
 
 						// Cube shadow (omni shadow caster). Two paths:
 						//  - Static-mesh pixel + lightmap baked for this
