@@ -17,6 +17,9 @@
 #include <algorithm>
 #include <dirent.h>
 
+// PREPROC.CPP — recompute per-vertex tangents from current Faces + maps.
+void Compute_Vertex_Tangents(TriMesh *T);
+
 namespace fds {
 
 namespace {
@@ -107,13 +110,38 @@ bool normalSourceIsOGL(const std::string &stem) {
 	return true;  // -ogl, opengl, or unmarked
 }
 
-// Load an image → 32bpp → optional green flip (normals) → block-tile + mips.
+// Max texture dimension the deferred path can address. The G-buffer packs the
+// swizzled UV into a 20-bit field (mat32 = miplevel:4 | matID:8 | swizzledUV:20),
+// so the texel index must fit in 2^20 = 1024*1024. A larger texture overflows
+// the field and samples garbage (the "black band" on imported 2048² PBR sets).
+// greets' own authored textures are 1024², which is why the engine never hit
+// this. Cap imported textures here.
+constexpr int kMaxTexDim = 1024;
+
+static int ilog2(int v) { int l = 0; while ((1 << l) < v) ++l; return l; }
+
+// Load an image → 32bpp → cap to kMaxTexDim → optional green flip → tile + mips.
 Texture *loadTiled(const std::string &path, bool flipGreen) {
 	Texture *t = new Texture;
 	t->FileName = strdup(path.c_str());
 	t->BPP = 0;
 	if (!Load_Texture(t)) { std::free(t->FileName); delete t; return nullptr; }
 	if (t->BPP != 32) BPPConvert_Texture(t, 32);
+	// Downsample if the source exceeds the deferred 20-bit UV budget. Scale_Image
+	// mipmaps down + bilinear-resamples (any size, not just po2) and owns its
+	// buffer; we leak the original t->Data (init-time, matches engine convention).
+	if (t->SizeX > kMaxTexDim || t->SizeY > kMaxTexDim) {
+		const int nx = std::min(t->SizeX, kMaxTexDim);
+		const int ny = std::min(t->SizeY, kMaxTexDim);
+		Image img; img.FileName = nullptr; img.x = t->SizeX; img.y = t->SizeY;
+		img.Data = (DWord*)_aligned_malloc(sizeof(DWord) * size_t(t->SizeX) * size_t(t->SizeY), 16);
+		std::memcpy(img.Data, t->Data, sizeof(DWord) * size_t(t->SizeX) * size_t(t->SizeY));
+		Scale_Image(&img, nx, ny);   // frees+reallocs img.Data to nx*ny
+		t->Data  = (byte*)img.Data;
+		t->SizeX = nx; t->SizeY = ny;
+		t->LSizeX = ilog2(nx); t->LSizeY = ilog2(ny);
+		std::fprintf(stderr, "    [cap] %s downsampled to %dx%d (20-bit UV limit)\n", path.c_str(), nx, ny);
+	}
 	if (flipGreen) {
 		dword *px = (dword *)t->Data;
 		const size_t n = size_t(t->SizeX) * size_t(t->SizeY);
@@ -159,6 +187,14 @@ bool MaterialImport_Active() { return !g_specs.empty(); }
 
 void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	if (g_specs.empty() || !sc) return;
+	// Materials that gained a tangent-using map (normal/height) this call —
+	// their meshes need per-vertex tangents recomputed (see the recompute pass
+	// at the end). MaterialImport_Apply runs AFTER Preprocess_Scene, which is
+	// where Compute_Vertex_Tangents normally runs; a material that had no
+	// normal/height map at Preprocess time has zero tangents, so the kernel's
+	// TBN (new_N = T·nmX + B·nmY + N·nmZ) degenerates to N·nmZ and goes black
+	// at steep-relief texels. Recomputing tangents now fixes it.
+	std::vector<Material*> needTangent;
 	for (const ImportSpec &spec : g_specs) {
 		Material *M = findMaterial(sc, spec.matName);
 		if (!M) {
@@ -241,6 +277,27 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 		if (!metallic.empty())
 			std::fprintf(stderr, "    metallic  %s  [IGNORED — deferred path is diffuse+spec, no metallic workflow]\n",
 			             metallic.c_str());
+
+		if (M->NormalMap || M->HeightMap) needTangent.push_back(M);
+	}
+
+	// Recompute per-vertex tangents for any mesh using a material that just
+	// gained a normal/height map (Preprocess already ran, so those meshes have
+	// zero tangents otherwise → black TBN). Cheap, init-time. NOTE: this does
+	// NOT do the mirrored-UV handedness split (greets' FixNormalMapSeam) — if an
+	// imported material lands on faces with negative-determinant UVs, those need
+	// a handedness=-1 clone too; revisit if a relief seam appears.
+	if (!needTangent.empty()) {
+		for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+			bool uses = false;
+			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
+				for (Material *m : needTangent)
+					if (T->Faces[i].Txtr == m) { uses = true; break; }
+			if (uses) {
+				Compute_Vertex_Tangents(T);
+				std::fprintf(stderr, "[MAT-IMPORT] recomputed tangents for a mesh (%d faces)\n", T->FIndex);
+			}
+		}
 	}
 }
 
