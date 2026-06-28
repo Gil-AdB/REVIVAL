@@ -669,6 +669,26 @@ static constexpr int kPumpFramesMax = 4096;
 static float s_audioLeft [kPumpFramesMax];
 static float s_audioRight[kPumpFramesMax];
 
+// modplayer-lib (current submodule, commit 2282b91) exports only the
+// interleaved Modplayer_FillBuffer — its planned planar PlanarBufferAdaptar
+// isn't in this submodule yet, so Modplayer_FillBufferPlanar is undefined and
+// the wasm link fails. Provide a WEAK de-interleave shim: pull the interleaved
+// stereo frames, split into the L/R destinations the AudioWorklet wants. Weak
+// so that if a future modplayer-lib ships a strong Modplayer_FillBufferPlanar,
+// the Rust export wins with no duplicate-symbol error.
+extern "C" __attribute__((weak)) void
+Modplayer_FillBufferPlanar(ModplayerHandle handle, float* left, float* right,
+                           unsigned int frames)
+{
+	if (frames > (unsigned)kPumpFramesMax) frames = (unsigned)kPumpFramesMax;
+	static float interleaved[kPumpFramesMax * 2];   // audio pump is serialized
+	Modplayer_FillBuffer(handle, interleaved, frames);   // frames*2 stereo f32s
+	for (unsigned i = 0; i < frames; ++i) {
+		left[i]  = interleaved[2 * i];
+		right[i] = interleaved[2 * i + 1];
+	}
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void Audio_FeedWorklet(int frames)
 {
 	static int s_firstCall = 1;
