@@ -464,6 +464,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool quarter        = deferredLightingQuarterEnabled();
 	const bool checker        = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool useVec         = deferredLightingVecEnabled();
+	const bool sVecForce      = fds::FeatureFlags::deferred_vec_force();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 	const bool profShadowCache = fds::FeatureFlags::shadow_prof_cache();
 	// HDR Phase 3 B1: route the opaque lit radiance into g_hdrBuf UNCLAMPED so
@@ -883,8 +884,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
-			const bool useVecHere = useVec && !hasNormalMap
-				&& !(hasAoMap && !aoInAlpha);
+			const bool useVecHere = useVec
+				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
 
 			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
 			// the direct-light loop adds to them) — direct light is occluded by
