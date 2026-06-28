@@ -395,6 +395,23 @@ static void editorTick()
 	if (Keyboard[ScComma])  { g_editorFreezeTimer -= 10; if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0; rev::Editor_MarkDirty(); }
 	if (Keyboard[ScPeriod]) { g_editorFreezeTimer += 10; rev::Editor_MarkDirty(); }
 
+	// Fly forward / back through the scene with Up / Down (held = continuous):
+	// move the whole orbit rig along the view direction (eye + target together),
+	// scaled by distance. orbitDir = target→eye; forward into the scene = −orbitDir.
+	{
+		float fly = 0.0f;
+		if (Keyboard[ScUp])   fly -= g_camDist * 0.04f;   // forward (into the scene)
+		if (Keyboard[ScDown]) fly += g_camDist * 0.04f;   // back
+		if (fly != 0.0f) {
+			const float cp = std::cos(g_camPitch), sp = std::sin(g_camPitch);
+			const float cy = std::cos(g_camYaw),   sy = std::sin(g_camYaw);
+			g_camTarget.x += cp*sy * fly;
+			g_camTarget.y += sp    * fly;
+			g_camTarget.z += cp*cy * fly;
+			rev::Editor_MarkDirty();
+		}
+	}
+
 	// Idle throttle: a surface edit / camera move / frame step marks dirty; we
 	// render a couple of frames so the change (and the SDL flip) lands, then idle.
 	if (rev::Editor_ConsumeDirty() && g_editorRenderFrames < 4) g_editorRenderFrames = 4;
@@ -579,19 +596,69 @@ void editorOrbit(float dxPixels, float dyPixels)
 	if (g_camPitch < -1.45f) g_camPitch = -1.45f;
 	rev::Editor_MarkDirty();
 }
-void editorZoom(float wheelDir)   // +1 = in, -1 = out
+// Raw wheel deltaY → proportional, smooth zoom (trackpad fires many small
+// events; a fixed per-event ratio made it lurch). exp() keeps it multiplicative.
+void editorZoom(float wheelDeltaY)
 {
-	g_camDist *= (wheelDir > 0.0f) ? 0.9f : 1.1f;
-	if (g_camDist <   4.0f) g_camDist =   4.0f;
-	if (g_camDist > 400.0f) g_camDist = 400.0f;
+	g_camDist *= std::exp(wheelDeltaY * 0.0015f);
+	if (g_camDist <   3.0f) g_camDist =   3.0f;
+	if (g_camDist > 600.0f) g_camDist = 600.0f;
+	rev::Editor_MarkDirty();
+}
+// Pan the orbit target in the camera's view plane (right-drag / shift-drag).
+// FC.Mat row 0 = camera right, row 1 = up; scale by distance so it feels the
+// same near and far.
+void editorPan(float dxPixels, float dyPixels)
+{
+	const float k = g_camDist * 0.0018f;
+	g_camTarget.x += (-dxPixels * FC.Mat[0][0] + dyPixels * FC.Mat[1][0]) * k;
+	g_camTarget.y += (-dxPixels * FC.Mat[0][1] + dyPixels * FC.Mat[1][1]) * k;
+	g_camTarget.z += (-dxPixels * FC.Mat[0][2] + dyPixels * FC.Mat[1][2]) * k;
+	rev::Editor_MarkDirty();
+}
+// Frame the orbit on the SELECTED surface: world-space bbox of every face using
+// that material (world = RotMat·Pos + IPos — the real interpolated transform),
+// pivot at its centre, distance sized to fit. This is the "orbit around the
+// actual object" fix — the pivot now tracks geometry, not a fixed guess.
+void editorFocusSurface(std::string name)
+{
+	if (!CurScene) return;
+	float lox=1e30f, loy=1e30f, loz=1e30f, hix=-1e30f, hiy=-1e30f, hiz=-1e30f;
+	long n = 0;
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		for (DWord i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.Txtr || !F.Txtr->Name || name != F.Txtr->Name) continue;
+			Vertex *vs[3] = { F.A, F.B, F.C };
+			for (int k = 0; k < 3; ++k) {
+				Vertex *v = vs[k]; if (!v) continue;
+				Vector w; MatrixXVector(T->RotMat, &v->Pos, &w); Vector_SelfAdd(&w, &T->IPos);
+				if (w.x < lox) lox = w.x; if (w.y < loy) loy = w.y; if (w.z < loz) loz = w.z;
+				if (w.x > hix) hix = w.x; if (w.y > hiy) hiy = w.y; if (w.z > hiz) hiz = w.z;
+				++n;
+			}
+		}
+	}
+	if (n == 0) { std::fprintf(stderr, "[EDITOR] focus '%s': no faces\n", name.c_str()); return; }
+	g_camTarget.x = (lox + hix) * 0.5f;
+	g_camTarget.y = (loy + hiy) * 0.5f;
+	g_camTarget.z = (loz + hiz) * 0.5f;
+	const float dx = hix-lox, dy = hiy-loy, dz = hiz-loz;
+	const float diag = std::sqrt(dx*dx + dy*dy + dz*dz);
+	g_camDist = diag * 1.3f < 6.0f ? 6.0f : diag * 1.3f;
+	g_editorCamSeeded = true;   // don't let the first-frame seed override the focus
+	std::fprintf(stderr, "[EDITOR] focus '%s': %ld verts, centre (%.1f %.1f %.1f) dist %.1f\n",
+	             name.c_str(), n, g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
 	rev::Editor_MarkDirty();
 }
 } // namespace
 
 EMSCRIPTEN_BINDINGS(rev_editor_camera)
 {
-	emscripten::function("editorOrbit", &editorOrbit);
-	emscripten::function("editorZoom",  &editorZoom);
+	emscripten::function("editorOrbit",         &editorOrbit);
+	emscripten::function("editorZoom",          &editorZoom);
+	emscripten::function("editorPan",           &editorPan);
+	emscripten::function("editorFocusSurface",  &editorFocusSurface);
 }
 
 #endif // __EMSCRIPTEN__
