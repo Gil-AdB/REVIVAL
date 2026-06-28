@@ -28,11 +28,13 @@
 #include "RENDER/EnvBake.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
+#include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
 #include "Scenes.h"
 #include "FILLERS/Mekalele.h"
 #include <map>
+#include <set>
 #include <algorithm>
 #include "Base/FDS_DECS.H"
 #include "FILLERS/ShadowMap.h"
@@ -1312,6 +1314,11 @@ void Initialize_Greets()
 
 	Preprocess_Scene(GreetSc, "GREETS");
 
+	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
+	// onto named materials for testing. After Preprocess (textures loaded), so
+	// it replaces the loaded maps directly. No-op without the flag.
+	fds::MaterialImport_Apply(GreetSc, "greets");
+
 	// Floor de-tile + scale (face UVs exist now that Preprocess ran).
 	if (fds::FeatureFlags::greets_stone_tex())
 		GreetsRetileFloor(GreetSc);
@@ -1323,6 +1330,17 @@ void Initialize_Greets()
 	GreetSc->Ambient.B = 32;
 
 	GreetSc->PathingMinVelocity = 0.01;
+
+	// EXPERIMENTAL geometry fix for the mummy ('momy'): Phong-tessellate the
+	// coarse lathe to round the silhouette. DEFAULT OFF (FDS_MOMY_SUBDIV=N to
+	// enable) — the current impl CRACKS the mesh at its UV/duplicate-vertex
+	// seams (edge-midpoint sharing is keyed by vertex index and doesn't merge
+	// coincident verts), so it needs a vertex-weld pass before it's usable.
+	{
+		const char *lv = std::getenv("FDS_MOMY_SUBDIV");
+		const int levels = lv ? std::atoi(lv) : 0;
+		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy", levels);
+	}
 
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
@@ -1568,6 +1586,20 @@ void Initialize_Greets()
 				return d < o.d;
 			}
 		};
+		// Materials whose faces should collapse to ONE shadow cluster regardless
+		// of facet orientation. The per-plane clustering above is correct for flat
+		// walls (distinct walls cross-shadow, coplanar faces self-match) but WRONG
+		// for a smooth curved surface: every facet gets a different plane key →
+		// a unique ShadowMatID per facet → at each poly edge the light-view and
+		// camera-view faces carry different ids → the PolyId equality test reports
+		// a spurious self-shadow → a dark line on every facet edge. The mummy
+		// ('momy') is the one curved lathe in Piramid.lwo, so force its whole
+		// surface to a single id (it then self-matches everywhere → no acne lines).
+		// Same idea as the hull/robot single-id merge. Add curved alcove mats here
+		// when we tackle those (concave, so it's a softer trade-off — real
+		// self-shadowing inside the alcove is lost along with the artifact).
+		static const std::set<std::string> kSingleShadowIdMats = { "momy" };
+
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -1598,10 +1630,16 @@ void Initialize_Greets()
 				const float cy = (F->A->Pos.y + F->B->Pos.y + F->C->Pos.y) * (1.0f/3.0f);
 				const float cz = (F->A->Pos.z + F->B->Pos.z + F->C->Pos.z) * (1.0f/3.0f);
 				const float d  = nx*cx + ny*cy + nz*cz;
-				PlaneKey key{ quantize(nx, kNormalQ),
-				              quantize(ny, kNormalQ),
-				              quantize(nz, kNormalQ),
-				              quantize(d,  kDistanceQ) };
+				// Curved single-id materials: constant key so every facet of the
+				// surface lands in ONE cluster (one ShadowMatID) → self-matches
+				// everywhere, killing the per-facet self-shadow acne lines.
+				const bool singleId = src->Name && kSingleShadowIdMats.count(src->Name) > 0;
+				PlaneKey key = singleId
+				    ? PlaneKey{ 0, 0, 0, 0 }
+				    : PlaneKey{ quantize(nx, kNormalQ),
+				                quantize(ny, kNormalQ),
+				                quantize(nz, kNormalQ),
+				                quantize(d,  kDistanceQ) };
 				auto mk = std::make_pair(src, key);
 				auto it = clusters.find(mk);
 				if (it == clusters.end()) {

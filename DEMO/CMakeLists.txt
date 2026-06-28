@@ -41,6 +41,8 @@ set(DEMO_SOURCES
     MeshOps.h
     MaterialEditor.cpp
     MaterialEditor.h
+    MaterialImport.cpp
+    MaterialImport.h
     ProceduralWater.cpp
     ProceduralWater.h
     MirrorShatter.cpp

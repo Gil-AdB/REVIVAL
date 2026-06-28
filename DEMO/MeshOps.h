@@ -112,6 +112,13 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees = 30.0f);
 // breaking smooth meshes (Fountain crystal, Greets curved letters).
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees);
 
+// Phong-tessellate (curved PN-style) every face whose material name == matName,
+// `levels` times (each level = 1→4 split per target triangle, edge midpoints
+// displaced toward the smooth surface so the silhouette rounds). Crack-free
+// (shared edge midpoints), non-target faces untouched. Run after Preprocess
+// (needs vertex normals) and before MakeFacesIndependentByAngle.
+void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels);
+
 struct Texture;
 
 // Bake an object-space normal map from a 32-bpp diffuse texture's

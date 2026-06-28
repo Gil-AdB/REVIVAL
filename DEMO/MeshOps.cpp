@@ -5,10 +5,12 @@
 #include <Base/FeatureFlags.h>
 #include <Base/Scene.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // PREPROC.CPP — recompute per-vertex tangents from the current Faces +
@@ -79,20 +81,47 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	}
 	const float cosSmoothing = std::cos(smoothingThresholdDegrees * float(PI) / 180.0f);
 
+	// The mummy ('momy') is an organic lathe that LightWave authored as
+	// smooth (Surf_Smoothing, MaxSmoothingAngle ~1.6 rad ≈ 92°). The global
+	// architectural crease threshold (30°, tuned for hard edges like the City
+	// corners) splits its radial facets and the whole body goes faceted. For
+	// that one surface, honor its authored smoothing angle instead, and smooth
+	// only among its own faces so it can't bleed into the floor it sits on.
+	// Every other surface keeps the global threshold => other scenes unchanged.
+	auto matIsMomy = [](const Face *f) {
+		return f && f->Txtr && f->Txtr->Name && !std::strcmp(f->Txtr->Name, "momy");
+	};
+
 	auto computeSmoothedNormal = [&](Vertex *origVtx, const Face *face) {
+		const bool momy = matIsMomy(face);
 		Vector accum{};
 		Vector_Form(&accum, 0, 0, 0);
 		auto it = incident.find(origVtx);
 		if (it == incident.end()) return face->N;
 		for (Face *adj : it->second) {
-			if (Dot_Product(&face->N, &adj->N) >= cosSmoothing) {
-				// Area weight (matches Compute_Vertex_Normals).
-				Vector w;
-				Vector_Scale(&adj->N,
-				             Tri_Surface(&adj->A->Pos, &adj->B->Pos, &adj->C->Pos),
-				             &w);
-				Vector_SelfAdd(&accum, &w);
+			if (momy) {
+				// True shared per-vertex normal: average EVERY incident momy
+				// face, with NO per-face-relative angle gate. The gate (used
+				// below for the architectural crease pass) is exactly what
+				// breaks continuity for a smooth surface: faces A and B sharing
+				// a vertex would each keep only the neighbours within threshold
+				// of THEIR own normal, so the two copies of that vertex get
+				// DIFFERENT averaged normals and Phong interpolation jumps at
+				// the shared edge — the visible seam. Averaging all incident
+				// momy faces gives every copy the IDENTICAL normal => continuous
+				// shading across every edge (this is Compute_Vertex_Normals,
+				// reproduced per face-clone). Restricted to momy faces so it
+				// can't blend into the floor the mummy stands on.
+				if (!matIsMomy(adj)) continue;
+			} else if (Dot_Product(&face->N, &adj->N) < cosSmoothing) {
+				continue;   // architectural crease: only neighbours within threshold
 			}
+			// Area weight (matches Compute_Vertex_Normals).
+			Vector w;
+			Vector_Scale(&adj->N,
+			             Tri_Surface(&adj->A->Pos, &adj->B->Pos, &adj->C->Pos),
+			             &w);
+			Vector_SelfAdd(&accum, &w);
 		}
 		if (Vector_Length(&accum) < EPSILON) return face->N;
 		Vector_Norm(&accum);
@@ -465,6 +494,127 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 		// is "smooth" (averaged normal); beyond is a "crease" (face
 		// normal alone).
 		MakeFacesIndependent(T, thresholdDegrees);
+	}
+}
+
+// Phong-tessellate (curved PN-style) every face whose material is `matName`,
+// `levels` times. Each target triangle splits 1→4 at its edge midpoints; the
+// midpoint is displaced toward the surface implied by the two endpoints' smooth
+// vertex normals (project the linear midpoint onto each endpoint's tangent plane,
+// average) so the silhouette rounds out instead of staying a flat polygon. Edge
+// midpoints are shared between adjacent target faces (keyed by sorted vertex
+// index) so the mesh stays crack-free. Non-target faces are copied verbatim.
+//
+// Must run AFTER per-vertex normals exist (Preprocess) and BEFORE
+// MakeFacesIndependentByAngle (which then re-smooths the finer mesh). Rebuilds
+// T->Verts/T->Faces and restamps A_idx exactly like MakeFacesIndependent, so the
+// downstream count change is handled the same proven way. Old arrays are leaked
+// (init-time, matches MakeFacesIndependent).
+void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
+	if (!Sc || !matName || levels <= 0) return;
+	auto isTarget = [&](const Face *F) {
+		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
+	};
+	for (int lvl = 0; lvl < levels; ++lvl) {
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+			int nTarget = 0;
+			for (int32_t i = 0; i < T->FIndex; ++i)
+				if (isTarget(&T->Faces[i])) ++nTarget;
+			if (nTarget == 0) continue;
+
+			Vertex *const oldV = T->Verts;
+			std::vector<Vertex> verts(oldV, oldV + T->VIndex);   // copy originals
+			std::map<std::pair<uint32_t, uint32_t>, uint32_t> midOf;
+			auto vidx = [&](const Vertex *v) { return uint32_t(v - oldV); };
+
+			auto edgeMid = [&](uint32_t ia, uint32_t ib) -> uint32_t {
+				const auto key = std::make_pair(std::min(ia, ib), std::max(ia, ib));
+				auto it = midOf.find(key);
+				if (it != midOf.end()) return it->second;
+				const Vertex &A = oldV[ia], &B = oldV[ib];
+				Vertex m = A;                       // inherit Flags etc.
+				const float lx = (A.Pos.x + B.Pos.x) * 0.5f;
+				const float ly = (A.Pos.y + B.Pos.y) * 0.5f;
+				const float lz = (A.Pos.z + B.Pos.z) * 0.5f;
+				// Project the linear midpoint onto each endpoint's tangent plane.
+				const float da = (lx - A.Pos.x) * A.N.x + (ly - A.Pos.y) * A.N.y + (lz - A.Pos.z) * A.N.z;
+				const float db = (lx - B.Pos.x) * B.N.x + (ly - B.Pos.y) * B.N.y + (lz - B.Pos.z) * B.N.z;
+				m.Pos.x = lx - 0.5f * (da * A.N.x + db * B.N.x);
+				m.Pos.y = ly - 0.5f * (da * A.N.y + db * B.N.y);
+				m.Pos.z = lz - 0.5f * (da * A.N.z + db * B.N.z);
+				float nx = A.N.x + B.N.x, ny = A.N.y + B.N.y, nz = A.N.z + B.N.z;
+				const float nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+				if (nl > 1e-6f) { m.N.x = nx / nl; m.N.y = ny / nl; m.N.z = nz / nl; }
+				m.U = (A.U + B.U) * 0.5f;   m.V = (A.V + B.V) * 0.5f;
+				m.EU = (A.EU + B.EU) * 0.5f; m.EV = (A.EV + B.EV) * 0.5f;
+				const uint32_t id = uint32_t(verts.size());
+				verts.push_back(m);
+				midOf[key] = id;
+				return id;
+			};
+
+			std::vector<Face> faces;
+			std::vector<std::array<uint32_t, 3>> fIdx;
+			faces.reserve(size_t(T->FIndex) + size_t(nTarget) * 3);
+			fIdx.reserve(faces.capacity());
+			auto emit = [&](const Face &proto, uint32_t i0, uint32_t i1, uint32_t i2,
+			                float u0, float v0, float u1, float v1, float u2, float v2) {
+				Face f = proto;            // inherit Txtr/Flags/ShadowMatID/mirror tags
+				f.frame = nullptr;
+				f.U1 = u0; f.V1 = v0; f.U2 = u1; f.V2 = v1; f.U3 = u2; f.V3 = v2;
+				f.EU1 = u0; f.EV1 = v0; f.EU2 = u1; f.EV2 = v1; f.EU3 = u2; f.EV3 = v2;
+				faces.push_back(f);
+				fIdx.push_back({i0, i1, i2});
+			};
+
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) {
+					faces.push_back(F);
+					fIdx.push_back({F.A ? vidx(F.A) : 0u, F.B ? vidx(F.B) : 0u, F.C ? vidx(F.C) : 0u});
+					continue;
+				}
+				const uint32_t ia = vidx(F.A), ib = vidx(F.B), ic = vidx(F.C);
+				const uint32_t mab = edgeMid(ia, ib), mbc = edgeMid(ib, ic), mca = edgeMid(ic, ia);
+				const float uab = (F.U1 + F.U2) * 0.5f, vab = (F.V1 + F.V2) * 0.5f;
+				const float ubc = (F.U2 + F.U3) * 0.5f, vbc = (F.V2 + F.V3) * 0.5f;
+				const float uca = (F.U3 + F.U1) * 0.5f, vca = (F.V3 + F.V1) * 0.5f;
+				emit(F, ia,  mab, mca, F.U1, F.V1, uab, vab, uca, vca);
+				emit(F, mab, ib,  mbc, uab, vab, F.U2, F.V2, ubc, vbc);
+				emit(F, mca, mbc, ic,  uca, vca, ubc, vbc, F.U3, F.V3);
+				emit(F, mab, mbc, mca, uab, vab, ubc, vbc, uca, vca);
+			}
+
+			Vertex *nv = new Vertex[verts.size()];
+			std::memcpy(nv, verts.data(), verts.size() * sizeof(Vertex));
+			Face *nf = new Face[faces.size()];
+			for (size_t i = 0; i < faces.size(); ++i) {
+				nf[i] = faces[i];
+				nf[i].A = &nv[fIdx[i][0]];
+				nf[i].B = &nv[fIdx[i][1]];
+				nf[i].C = &nv[fIdx[i][2]];
+				// Recompute the face normal from the new positions, aligned to the
+				// proto's orientation (preserve winding/cull sign).
+				const Vector &A = nf[i].A->Pos, &B = nf[i].B->Pos, &C = nf[i].C->Pos;
+				const float e1x = B.x - A.x, e1y = B.y - A.y, e1z = B.z - A.z;
+				const float e2x = C.x - A.x, e2y = C.y - A.y, e2z = C.z - A.z;
+				float gx = e1y * e2z - e1z * e2y, gy = e1z * e2x - e1x * e2z, gz = e1x * e2y - e1y * e2x;
+				const float gl = std::sqrt(gx * gx + gy * gy + gz * gz);
+				if (gl > 1e-6f) {
+					gx /= gl; gy /= gl; gz /= gl;
+					if (gx * faces[i].N.x + gy * faces[i].N.y + gz * faces[i].N.z < 0.0f) { gx = -gx; gy = -gy; gz = -gz; }
+					nf[i].N.x = gx; nf[i].N.y = gy; nf[i].N.z = gz;
+				}
+			}
+			T->Verts  = nv; T->VIndex = int32_t(verts.size());
+			T->Faces  = nf; T->FIndex = int32_t(faces.size());
+			Compute_FaceVertexIndices(T);
+			if (T->Flags & Tri_Stationary)
+				T->SL = (Color *)getAlignedBlock(sizeof(Color) * T->VIndex, 16);
+			std::fprintf(stderr, "[SUBDIV] '%s' lvl%d -> verts %d faces %d (+%d target split)\n",
+			             matName, lvl, T->VIndex, T->FIndex, nTarget);
+		}
 	}
 }
 

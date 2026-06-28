@@ -99,6 +99,17 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 {
 	if (!shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
+
+	// --shadow_bake_time: total wall-clock of the DYNAMIC bake stage (this whole
+	// call up to the end of the raster phase). Excludes the init StaticOnce bake
+	// — that runs once on a worker thread and isn't the per-frame cost we care
+	// about. Coarse single number, complementary to the xform/raster split that
+	// --shadow_prof reports. Measured here at entry; reported just after the
+	// raster phase ends (tRasterEnd), averaged over FDS_SHADOW_PROF_INTERVAL.
+	const bool sBakeTime = fds::FeatureFlags::shadow_bake_time()
+	                       && (mode != ShadowBakeMode::StaticOnce);
+	const auto tBakeStart = std::chrono::high_resolution_clock::now();
+
 	// Refresh each CubeShadowRef's lightISource from the omni's current
 	// IPos. Set once at CubeShadowMaps_Rebuild time; for FLD-animated
 	// omnis (e.g. greets robot-following lights) the omni's IPos drifts
@@ -741,6 +752,33 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {
 		sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
+	}
+
+	// --shadow_bake_time: accumulate this frame's full dynamic-bake wall time
+	// and emit one averaged [SHADOW-BAKE] line per interval. Same interval knob
+	// as --shadow_prof so the two read together. PER-MODE accumulators: both
+	// DynamicOmnisPerFrame and DynamicMeshesPerFrame reach this block every
+	// frame, so a shared accumulator would conflate them (and the print would
+	// always land on whichever mode hits the interval boundary). Keyed by mode
+	// index, each pass reports its own honest per-frame cost.
+	if (sBakeTime) {
+		static thread_local double sBakeAcc[3]   = {0.0, 0.0, 0.0};
+		static thread_local int    sBakeFrames[3] = {0, 0, 0};
+		static const int sBakeInterval = []() {
+			const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
+			return (e && *e) ? std::max(1, std::atoi(e)) : 60;
+		}();
+		const int mi = int(mode);   // 1=DynOmnis, 2=DynMeshes (0=StaticOnce excluded by sBakeTime)
+		sBakeAcc[mi] += std::chrono::duration<double, std::milli>(tRasterEnd - tBakeStart).count();
+		if (++sBakeFrames[mi] % sBakeInterval == 0) {
+			std::fprintf(stderr,
+				"[SHADOW-BAKE] dynamic bake: %.2f ms/frame (avg of %d, %s, %zu maps)\n",
+				sBakeAcc[mi] / sBakeInterval, sBakeInterval,
+				mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
+				g_shadowMaps.size());
+			std::fflush(stderr);
+			sBakeAcc[mi] = 0.0;
+		}
 	}
 
 

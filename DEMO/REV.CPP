@@ -462,6 +462,7 @@ material global ID or ptr
 #include "ImageCompression.h"
 #include "PhotonTracer.h"
 #include "Snapshot.h"
+#include "MaterialImport.h"
 #include "Resize.h"
 #include <float.h>
 #include <Base/TriMesh.h>
@@ -1266,6 +1267,9 @@ int main(int argc, const char *argv[])
 		setenv("SDL_VIDEODRIVER", "dummy", 1);
 		setenv("SDL_AUDIODRIVER", "dummy", 1);
 	}
+	// --material-import=MAT:DIR specs aren't FeatureFlags; pre-scan argv (like
+	// --snapshot above). Scenes apply them at init via MaterialImport_Apply.
+	fds::MaterialImport_ParseArgs(argc, argv);
 	ConfigurationDB cfg;
 	g_cfg = &cfg;
 	cfg.fromFile("rev.cfg");
