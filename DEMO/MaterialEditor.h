@@ -21,7 +21,15 @@ std::string Editor_GetSurfacesJSON();
 // Set one float property (key) on every CurScene material whose Name matches.
 // Keys: baseR/baseG/baseB, diffuse, specular, glossiness, luminosity,
 // transparency, reflection. Returns true if at least one material was updated.
+// A successful edit marks the view dirty (see below).
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value);
+
+// Re-render request signaling for the editor's idle throttle. The render loop
+// renders only while the view is dirty and idles otherwise (a static frozen
+// frame doesn't need re-drawing at rAF rate). Any surface edit marks dirty; the
+// host also marks dirty on camera/frame/resize changes.
+void Editor_MarkDirty();
+bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 
 } // namespace rev
 

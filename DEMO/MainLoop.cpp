@@ -4,7 +4,10 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <atomic>
+#include <cmath>
 #include <thread>
+
+#include "MaterialEditor.h"
 
 #include <emscripten.h>
 #include <SDL.h>
@@ -68,7 +71,15 @@ static bool g_currentDriverInitialized = false;
 // (mirror off — it clones+bakes every mesh, ~4.8 GB, past wasm's 4 GB cap) and
 // render a frozen overview frame each tick so live surface edits show up.
 static bool g_editorMode = false;
-static int  g_editorFreezeTimer = 600;   // a good greets overview frame
+static int  g_editorFreezeTimer = 600;   // frozen animation/camera-spline time
+static int  g_editorRenderFrames = 0;    // idle throttle: render only while > 0
+
+// Orbit free-cam around the greets room centre. Mouse-drag = orbit, wheel =
+// zoom (pumpEvents); applied to FC each rendered frame (updateEditorCamera).
+static float  g_camYaw   = 0.6f;
+static float  g_camPitch = 0.45f;
+static float  g_camDist  = 48.0f;
+static Vector g_camTarget;               // set in DemoBoot (greets room centre)
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
 // set-1. Same table as native main() loop. Returned legacy code or -1.
@@ -133,6 +144,7 @@ static bool pumpEvents()
 				int px = event.window.data1, py = event.window.data2;
 				if (px > 0 && py > 0) {
 					g_pendingResize.store(pack_size(px, py));
+						if (g_editorMode) rev::Editor_MarkDirty();
 				}
 			}
 			break;
@@ -146,6 +158,24 @@ static bool pumpEvents()
 		case SDL_MOUSEBUTTONDOWN:
 		case SDL_FINGERDOWN:
 			g_userGesture.store(true);
+			break;
+		case SDL_MOUSEMOTION:
+			// Editor orbit: left-drag rotates the camera around the target.
+			if (g_editorMode && (event.motion.state & SDL_BUTTON_LMASK)) {
+				g_camYaw   -= event.motion.xrel * 0.008f;
+				g_camPitch += event.motion.yrel * 0.008f;
+				if (g_camPitch >  1.45f) g_camPitch =  1.45f;  // avoid pole flip
+				if (g_camPitch < -1.45f) g_camPitch = -1.45f;
+				rev::Editor_MarkDirty();
+			}
+			break;
+		case SDL_MOUSEWHEEL:
+			if (g_editorMode) {
+				g_camDist *= (event.wheel.y > 0) ? 0.9f : 1.1f;
+				if (g_camDist <   4.0f) g_camDist =   4.0f;
+				if (g_camDist > 400.0f) g_camDist = 400.0f;
+				rev::Editor_MarkDirty();
+			}
 			break;
 		default:
 			break;
@@ -165,8 +195,16 @@ void DemoBoot(ModplayerHandle modHandle)
 	// frame each tick so live surface edits are visible.
 	g_editorMode = EM_ASM_INT({ return (Module.revEditorMode ? 1 : 0); });
 	if (g_editorMode) {
-		fprintf(stderr, "[EDITOR] surface editor mode: greets, mirror off\n");
+		fprintf(stderr, "[EDITOR] surface editor mode: greets, deferred, mirror off\n");
+		// Render the deferred G-buffer kernel (the full material path) — it's
+		// OFF by default in the wasm build (FDS_DEFERRED_DEFAULT_ON=0), which is
+		// why the editor was showing the forward path. setParamFromText marks
+		// the flags explicitly-set so a scene's setDefault can't flip them back.
+		// (Quarter/checkerboard left at scene default — the user is fine with it.)
+		fds::FeatureFlags::setParamFromText("deferred", "1");
 		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+		// Orbit target = greets room-bbox centre (see the [DISCO] room-bbox log).
+		g_camTarget.x = 18.0f; g_camTarget.y = 6.0f; g_camTarget.z = -35.0f;
 		g_initThread = std::thread([](){
 			HintHighPerfThread();
 			InitPolyStats(200);
@@ -269,9 +307,27 @@ static void cleanupCurrentScene()
 	g_currentDriverInitialized = false;
 }
 
-// Editor mode tick: bring greets up once (mirror off, bake joined), then
-// re-render a frozen overview frame every rAF so surface edits made via the
-// Embind API show immediately. No demo sequence, no audio, no scene advance.
+// Build the orbit camera from (yaw,pitch,dist) around g_camTarget and pin View
+// to it. With View==&FC, greets's Animate_Objects leaves the camera alone — only
+// object animation tracks Timer, which we freeze — so the orbit is stable.
+static void updateEditorCamera()
+{
+	const float cp = std::cos(g_camPitch), sp = std::sin(g_camPitch);
+	const float cy = std::cos(g_camYaw),   sy = std::sin(g_camYaw);
+	FC.ISource.x = g_camTarget.x + g_camDist * cp * sy;
+	FC.ISource.y = g_camTarget.y + g_camDist * sp;
+	FC.ISource.z = g_camTarget.z + g_camDist * cp * cy;
+	Vector look = g_camTarget;
+	Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+	if (FC.IFOV <= 0.0f) FC.IFOV = 65.0f;
+	CalcPersp(&FC);
+	View = &FC;
+}
+
+// Editor mode tick: bring greets up once (mirror off, bake joined); scrub the
+// frozen time with ,/. ; orbit with the mouse; and render ONLY while something
+// changed (Editor_ConsumeDirty), idling otherwise so a static view doesn't burn
+// CPU re-rendering the same (full-res deferred) frame every rAF.
 static void editorTick()
 {
 	if (!g_currentDriver) {
@@ -281,9 +337,23 @@ static void editorTick()
 		g_currentDriver->init();
 		g_currentDriverInitialized = true;
 		EngineStartFadeIn(kFadeFrames);
-		fprintf(stderr, "[EDITOR] greets up — editing surfaces live\n");
+		g_editorRenderFrames = kFadeFrames + 1;   // play the fade-in
+		fprintf(stderr, "[EDITOR] greets up — orbit: drag + wheel, frame: ',' '.'\n");
 	}
-	Timer = g_editorFreezeTimer;                  // freeze the camera + animation
+
+	// Frame scrub (held key = continuous): step the frozen animation/camera time.
+	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
+	if (Keyboard[ScComma])  { g_editorFreezeTimer -= 10; if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0; rev::Editor_MarkDirty(); }
+	if (Keyboard[ScPeriod]) { g_editorFreezeTimer += 10; rev::Editor_MarkDirty(); }
+
+	// Idle throttle: a surface edit / camera move / frame step marks dirty; we
+	// render a couple of frames so the change (and the SDL flip) lands, then idle.
+	if (rev::Editor_ConsumeDirty() && g_editorRenderFrames < 4) g_editorRenderFrames = 4;
+	if (g_editorRenderFrames <= 0) return;        // nothing changed — skip the render
+	--g_editorRenderFrames;
+
+	Timer = g_editorFreezeTimer;
+	updateEditorCamera();
 	poll_pending_resize(g_currentDriver.get());
 	g_currentDriver->tick();
 }

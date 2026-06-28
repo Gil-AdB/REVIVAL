@@ -4,6 +4,7 @@
 #include <Base/Material.h>
 #include <Base/Texture.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <unordered_set>
@@ -81,8 +82,13 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 		else return false;   // unknown key — fail fast, don't silently no-op
 		any = true;
 	}
+	if (any) Editor_MarkDirty();
 	return any;
 }
+
+static std::atomic<bool> g_editorDirty{true};   // first frame renders
+void Editor_MarkDirty()    { g_editorDirty.store(true, std::memory_order_relaxed); }
+bool Editor_ConsumeDirty() { return g_editorDirty.exchange(false, std::memory_order_relaxed); }
 
 } // namespace rev
 
