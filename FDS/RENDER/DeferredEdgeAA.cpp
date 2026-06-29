@@ -78,11 +78,19 @@ void Render_EdgeAA() {
 						const size_t i = size_t(y) * size_t(W) + size_t(x);
 						const word ze = zEnc[i];
 						if (ze == 0) continue;                     // sky: leave as-is
-						float n0x, n0y, n0z; meka::oct_decode_u16(nrm[i], n0x, n0y, n0z);
 						const float z0 = float(0xFF80 - ze) * invZScale;
+						// Normal-edge from the RAW packed oct code — no decode.
+						// The u16 is (int8 octX) | (int8 octY)<<8; adjacent normals
+						// have adjacent oct codes, so |Δqx|+|Δqy| is a linear angle
+						// proxy (~127 L1 ≈ 90° crease → scale 1/127 ≈ old 1-N·N).
+						// Octahedral fold seams can spike Δ for similar normals — a
+						// harmless false-positive edge (slight blend), never a miss.
+						const meka::u16 p0 = nrm[i];
+						const int qx0 = int(int8_t(p0 & 0xff));
+						const int qy0 = int(int8_t((p0 >> 8) & 0xff));
 
 						// 4-neighbour edge metric: relative depth jump + normal
-						// divergence. Each neighbour adds 0..2; averaged below.
+						// divergence. Each neighbour adds 0..~2; averaged below.
 						const int off[4] = { -1, +1, -W, +W };
 						float edge = 0.0f;
 						for (int d = 0; d < 4; ++d) {
@@ -93,9 +101,10 @@ void Render_EdgeAA() {
 							const float denom = z0 > 1e-3f ? z0 : 1e-3f;
 							const float zrel  = std::fabs(z0 - zj) / denom;
 							edge += zrel > 0.04f ? 1.0f : zrel * 25.0f;  // depth edge
-							float nx, ny, nz; meka::oct_decode_u16(nrm[j], nx, ny, nz);
-							const float ndot = n0x * nx + n0y * ny + n0z * nz;
-							if (ndot < 1.0f) edge += 1.0f - ndot;        // normal edge
+							const meka::u16 pj = nrm[j];
+							const int dq = std::abs(qx0 - int(int8_t(pj & 0xff)))
+							             + std::abs(qy0 - int(int8_t((pj >> 8) & 0xff)));
+							edge += float(dq) * (1.0f / 127.0f);         // normal edge
 						}
 						edge *= 0.25f;
 						if (edge < 0.05f) continue;                    // interior: untouched
