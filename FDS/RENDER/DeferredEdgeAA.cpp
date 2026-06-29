@@ -131,4 +131,9 @@ void Render_EdgeAA() {
 
 	g_aaLastMs = std::chrono::duration<double, std::milli>(
 		std::chrono::steady_clock::now() - t0).count();
+	if (std::getenv("FDS_AA_PROF")) {
+		static int c = 0;
+		if ((c++ & 63) == 0)
+			std::fprintf(stderr, "[aa] %dx%d str=%.2f: %.3f ms\n", W, H, strength, g_aaLastMs);
+	}
 }
