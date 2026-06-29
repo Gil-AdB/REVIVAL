@@ -1,14 +1,25 @@
 // ── Edge-aware anti-aliasing (deferred path) ──────────────────────────────
 //
 // Minimal post-process AA tuned to the deferred G-buffer. It detects geometry
-// edges from per-pixel NORMAL + DEPTH discontinuities (creases via the normal,
-// silhouettes via the depth jump — including geometry-vs-sky) and blends a 5-tap
-// cross only across those edges. Interiors and textures are untouched, so it
-// removes jaggies without the global softening of a luma-only FXAA.
+// edges and blends a 5-tap cross only across them; interiors and textures are
+// untouched, so it removes jaggies without the global softening of a luma FXAA.
 //
-// Runs AFTER the tonemap, on the final LDR image in VPage (HDR-agnostic — VPage
-// already holds the tonemapped result). One tiled wave over the same 6×4
-// threadpool grid the other deferred post-passes use. Gated --aa; default off.
+// Edge metric (per X/Y axis, from the two opposite neighbours):
+//   - depth: a step (large first-difference on one side) AND curvature (the two
+//     sides not co-linear). This pair distinguishes a real silhouette/crease
+//     (step + curvature) from a smoothly-receding GRAZING surface (big step, ~0
+//     curvature → NOT flagged) and from bumpy-but-shallow water (curvature, no
+//     step → NOT flagged). A first-difference-only depth test wrongly flagged
+//     the whole grazing greets floor.
+//   - normal: packed-oct byte-distance to the max-divergence neighbour (no
+//     decode). Catches creases between equal-depth surfaces.
+//   - sky neighbour on an axis → that axis is a hard silhouette.
+//
+// Runs AFTER the tonemap, on the final LDR image in VPage (HDR-agnostic). One
+// tiled wave over the 6×4 post-pass grid; SIMD 8-wide interior (byte-identical
+// to the scalar reference) + scalar borders/blend. Gated --aa; default off.
+// Debug: --aa_viz (green edge map), FDS_AA_VIZ_SPLIT (red=depth/blue=normal),
+// FDS_AA_SCALAR (force scalar), FDS_AA_PROF (pass timing).
 //
 // Reconstruction matches the surface kernel: z = (0xFF80 - zEnc) * invZScale,
 // zEnc == 0 marks sky / no surface.
@@ -83,26 +94,64 @@ void Render_EdgeAA() {
 		const word ze = zEnc[i];
 		if (ze == 0) return -1.0f;
 		const float z0 = float(0xFF80 - ze) * invZScale;
+		const float denom = z0 > 1e-3f ? z0 : 1e-3f;
 		const meka::u16 p0 = nrm[i];
 		const int qx0 = int(int8_t(p0 & 0xff));
 		const int qy0 = int(int8_t((p0 >> 8) & 0xff));
-		const int off[4] = { -1, +1, -W, +W };
+		// Per axis: depth edge needs a STEP (large first-diff on at least one
+		// side) AND CURVATURE (the two sides not co-linear) → a real
+		// silhouette/crease. A grazing floor is a straight depth ramp (big
+		// first-diff, ~zero curvature) → not flagged. Water is bumpy but
+		// shallow (curvature without a big step) → not flagged. Normal edge is
+		// the packed-oct first-difference (catches creases at equal depth).
+		const int ax[2][2] = { { -1, +1 }, { -W, +W } };
 		float edge = 0.0f;
-		for (int d = 0; d < 4; ++d) {
-			const size_t j = i + size_t(off[d]);
-			const word zn = zEnc[j];
-			if (zn == 0) { edge += 1.0f; continue; }       // silhouette vs sky
-			const float zj = float(0xFF80 - zn) * invZScale;
-			const float denom = z0 > 1e-3f ? z0 : 1e-3f;
-			const float zrel  = std::fabs(z0 - zj) / denom;
-			edge += zrel > 0.04f ? 1.0f : zrel * 25.0f;    // depth edge
-			const meka::u16 pj = nrm[j];
-			const int dq = std::abs(qx0 - int(int8_t(pj & 0xff)))
-			             + std::abs(qy0 - int(int8_t((pj >> 8) & 0xff)));
-			edge += float(dq) * (1.0f / 127.0f);           // normal edge
+		for (int a = 0; a < 2; ++a) {
+			const word zA = zEnc[i + size_t(ax[a][0])], zB = zEnc[i + size_t(ax[a][1])];
+			const meka::u16 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
+			if (zA == 0 || zB == 0) { edge += 2.0f; continue; }   // silhouette vs sky
+			const float za = float(0xFF80 - zA) * invZScale, zb = float(0xFF80 - zB) * invZScale;
+			const float step = std::max(std::fabs(z0 - za), std::fabs(z0 - zb)) / denom;
+			const float curv = std::fabs(2.0f * z0 - za - zb) / denom;
+			// both must clear their knee: step>4%, curvature>1.5%.
+			const float sT = step > 0.04f ? 1.0f : step * 25.0f;
+			const float cT = curv > 0.015f ? 1.0f : curv * 66.7f;
+			edge += std::min(sT, cT);                              // depth edge (this axis)
+			const int dqa = std::abs(qx0 - int(int8_t(pA & 0xff))) + std::abs(qy0 - int(int8_t((pA >> 8) & 0xff)));
+			const int dqb = std::abs(qx0 - int(int8_t(pB & 0xff))) + std::abs(qy0 - int(int8_t((pB >> 8) & 0xff)));
+			edge += float(std::max(dqa, dqb)) * (1.0f / 127.0f);  // normal edge (this axis)
 		}
 		return edge * 0.25f;
 	};
+
+	// Diagnostic split: step×curvature depth + normal edge, returned separately.
+	auto edgeSplit = [&](int x, int y, float &dE, float &nE) -> bool {
+		const size_t i = size_t(y) * size_t(W) + size_t(x);
+		const word ze = zEnc[i];
+		if (ze == 0) { dE = nE = 0; return false; }
+		const float z0 = float(0xFF80 - ze) * invZScale;
+		const float denom = z0 > 1e-3f ? z0 : 1e-3f;
+		const meka::u16 p0 = nrm[i];
+		const int qx0 = int(int8_t(p0 & 0xff)), qy0 = int(int8_t((p0 >> 8) & 0xff));
+		const int ax[2][2] = { { -1, +1 }, { -W, +W } };
+		dE = nE = 0.0f;
+		for (int a = 0; a < 2; ++a) {
+			const word zA = zEnc[i + size_t(ax[a][0])], zB = zEnc[i + size_t(ax[a][1])];
+			const meka::u16 pA = nrm[i + size_t(ax[a][0])], pB = nrm[i + size_t(ax[a][1])];
+			if (zA == 0 || zB == 0) { dE += 2.0f; continue; }
+			const float za = float(0xFF80 - zA) * invZScale, zb = float(0xFF80 - zB) * invZScale;
+			const float step = std::max(std::fabs(z0 - za), std::fabs(z0 - zb)) / denom;
+			const float curv = std::fabs(2.0f * z0 - za - zb) / denom;
+			const float sT = step > 0.04f ? 1.0f : step * 25.0f;
+			const float cT = curv > 0.015f ? 1.0f : curv * 66.7f;
+			dE += std::min(sT, cT);
+			const int dqa = std::abs(qx0 - int(int8_t(pA & 0xff))) + std::abs(qy0 - int(int8_t((pA >> 8) & 0xff)));
+			const int dqb = std::abs(qx0 - int(int8_t(pB & 0xff))) + std::abs(qy0 - int(int8_t((pB >> 8) & 0xff)));
+			nE += float(std::max(dqa, dqb)) * (1.0f / 127.0f);
+		}
+		dE *= 0.25f; nE *= 0.25f; return true;
+	};
+	const bool vizSplit = std::getenv("FDS_AA_VIZ_SPLIT") != nullptr;
 
 	// Apply the 5-tap cross blend at pixel i given its edge metric.
 	auto blendAt = [&](size_t i, float edge) {
@@ -136,6 +185,14 @@ void Render_EdgeAA() {
 							const size_t i = size_t(y) * size_t(W) + size_t(x);
 							const dword c = src[i];
 							const bool border = (x == 0 || x == W - 1 || y == 0 || y == H - 1);
+							if (vizSplit && !border) {
+								float dE, nE; edgeSplit(x, y, dE, nE);
+								if (dE + nE >= 0.05f) {                 // red=depth, blue=normal
+									int rr = int(std::min(1.0f, dE) * 255.0f), bb = int(std::min(1.0f, nE) * 255.0f);
+									out[i] = dword(bb) | (dword(rr) << 16) | (c & 0xFF000000u);
+									continue;
+								}
+							}
 							const float e = border ? -1.0f : edgeAt(x, y);
 							if (e >= 0.05f) { out[i] = 0x0000FF00u | (c & 0xFF000000u); }   // green
 							else {                                                          // dim 45%
@@ -159,12 +216,13 @@ void Render_EdgeAA() {
 				const __m256  vInv127= _mm256_set1_ps(1.0f / 127.0f);
 				const int off[4] = { -1, +1, -W, +W };
 
+				const bool useSimd = !std::getenv("FDS_AA_SCALAR");
 				for (int y = std::max(y1, 1); y < std::min(y2, H - 1); ++y) {
 					const int xa = std::max(x1, 1), xb = std::min(x2, W - 1);
 					int x = xa;
 					// 8-wide interior fast path: vectorize the edge metric for 8
 					// pixels, then scalar-blend only the (rare) edge lanes.
-					for (; x + 8 <= xb; x += 8) {
+					for (; useSimd && x + 8 <= xb; x += 8) {
 						const size_t i = size_t(y) * size_t(W) + size_t(x);
 						const __m256i ze = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(zEnc + i)));
 						const __m256  z0 = _mm256_mul_ps(
@@ -175,25 +233,45 @@ void Render_EdgeAA() {
 						const __m256i qy0 = _mm256_srai_epi32(_mm256_slli_epi32(nv, 16), 24);
 						const __m256  denom = _mm256_max_ps(z0, vEps);
 
+						// Per-axis step×curvature depth + max-side normal edge — the
+						// same metric as scalar edgeAt (8-wide). axis 0 = {-1,+1},
+						// axis 1 = {-W,+W}.
+						const __m256  absMask = _mm256_set1_ps(-0.0f);
+						const __m256  vTwo  = _mm256_set1_ps(2.0f);
+						const __m256  v66_7 = _mm256_set1_ps(66.7f);
 						__m256 edge = _mm256_setzero_ps();
-						for (int d = 0; d < 4; ++d) {
-							const size_t j = i + size_t(off[d]);
-							const __m256i zn = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(zEnc + j)));
-							const __m256  skyN = _mm256_castsi256_ps(_mm256_cmpeq_epi32(zn, vZeroI));
-							const __m256  zj = _mm256_mul_ps(
-								_mm256_cvtepi32_ps(_mm256_sub_epi32(vFF80, zn)), vInvZ);
-							const __m256  zrel = _mm256_div_ps(
-								_mm256_andnot_ps(_mm256_set1_ps(-0.0f), _mm256_sub_ps(z0, zj)), denom);
-							const __m256  depthE = _mm256_min_ps(vOne, _mm256_mul_ps(zrel, v25));
-							const __m256i nj = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + j)));
-							const __m256i qxj = _mm256_srai_epi32(_mm256_slli_epi32(nj, 24), 24);
-							const __m256i qyj = _mm256_srai_epi32(_mm256_slli_epi32(nj, 16), 24);
-							const __m256i dq = _mm256_add_epi32(
-								_mm256_abs_epi32(_mm256_sub_epi32(qx0, qxj)),
-								_mm256_abs_epi32(_mm256_sub_epi32(qy0, qyj)));
-							const __m256  normE = _mm256_mul_ps(_mm256_cvtepi32_ps(dq), vInv127);
-							// sky neighbour → contribute exactly 1.0 (no normal term)
-							const __m256  contrib = _mm256_blendv_ps(_mm256_add_ps(depthE, normE), vOne, skyN);
+						for (int a = 0; a < 2; ++a) {
+							const size_t jm = i + size_t(off[a*2+0]), jp = i + size_t(off[a*2+1]);
+							const __m256i zAi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(zEnc + jm)));
+							const __m256i zBi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(zEnc + jp)));
+							const __m256  axisSky = _mm256_or_ps(
+								_mm256_castsi256_ps(_mm256_cmpeq_epi32(zAi, vZeroI)),
+								_mm256_castsi256_ps(_mm256_cmpeq_epi32(zBi, vZeroI)));
+							const __m256  za = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(vFF80, zAi)), vInvZ);
+							const __m256  zb = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(vFF80, zBi)), vInvZ);
+							const __m256  da = _mm256_andnot_ps(absMask, _mm256_sub_ps(z0, za));
+							const __m256  db = _mm256_andnot_ps(absMask, _mm256_sub_ps(z0, zb));
+							const __m256  step = _mm256_div_ps(_mm256_max_ps(da, db), denom);
+							const __m256  curv = _mm256_div_ps(
+								_mm256_andnot_ps(absMask,
+									_mm256_sub_ps(_mm256_sub_ps(_mm256_mul_ps(vTwo, z0), za), zb)), denom);
+							const __m256  sT = _mm256_min_ps(vOne, _mm256_mul_ps(step, v25));
+							const __m256  cT = _mm256_min_ps(vOne, _mm256_mul_ps(curv, v66_7));
+							const __m256  depthA = _mm256_min_ps(sT, cT);
+							const __m256i nAi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + jm)));
+							const __m256i nBi = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(nrm + jp)));
+							const __m256i qxa = _mm256_srai_epi32(_mm256_slli_epi32(nAi, 24), 24);
+							const __m256i qya = _mm256_srai_epi32(_mm256_slli_epi32(nAi, 16), 24);
+							const __m256i qxb = _mm256_srai_epi32(_mm256_slli_epi32(nBi, 24), 24);
+							const __m256i qyb = _mm256_srai_epi32(_mm256_slli_epi32(nBi, 16), 24);
+							const __m256i dqa = _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(qx0, qxa)),
+							                                     _mm256_abs_epi32(_mm256_sub_epi32(qy0, qya)));
+							const __m256i dqb = _mm256_add_epi32(_mm256_abs_epi32(_mm256_sub_epi32(qx0, qxb)),
+							                                     _mm256_abs_epi32(_mm256_sub_epi32(qy0, qyb)));
+							const __m256  normA = _mm256_mul_ps(
+								_mm256_cvtepi32_ps(_mm256_max_epi32(dqa, dqb)), vInv127);
+							// sky on this axis → contribute exactly 2.0 (silhouette)
+							const __m256  contrib = _mm256_blendv_ps(_mm256_add_ps(depthA, normA), vTwo, axisSky);
 							edge = _mm256_add_ps(edge, contrib);
 						}
 						edge = _mm256_mul_ps(edge, _mm256_set1_ps(0.25f));
