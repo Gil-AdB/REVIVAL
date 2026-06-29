@@ -4,6 +4,7 @@
 #include <Base/FDS_VARS.H>   // MatLib, CurScene
 #include <Base/Material.h>
 #include <Base/Texture.h>
+#include <Base/FDS_DECS.H>   // Scene_GetMatTable, MatTable
 
 #include <atomic>
 #include <cstdio>
@@ -134,6 +135,24 @@ bool js_editorImportTexture(std::string surface, std::string role,
 	return rev::Editor_ImportTexture(surface.c_str(), role.c_str(),
 	                                 filename.c_str(), buf.data(), buf.size());
 }
+// Diagnostic: does the matTable instance the kernel renders == the MatLib
+// instance the editor mutates?
+std::string js_editorMatDebug(std::string name)
+{
+	Material* ml = nullptr;
+	int mlCount = 0;
+	for (Material* M = MatLib; M; M = M->Next)
+		if (M->RelScene == CurScene && M->Name && name == M->Name) { if (!ml) ml = M; ++mlCount; }
+	MatTable mt = Scene_GetMatTable(CurScene);
+	Material* tt = nullptr;
+	for (dword i = 0; i < mt.count; ++i)
+		if (mt.data[i] && mt.data[i]->Name && name == mt.data[i]->Name) { tt = mt.data[i]; break; }
+	char buf[300];
+	std::snprintf(buf, sizeof buf,
+	  "{\"matlib_lum\":%.2f,\"matlib_count\":%d,\"mattable_lum\":%.2f,\"mattable_count\":%u,\"same_ptr\":%d}",
+	  ml ? ml->Luminosity : -1.0f, mlCount, tt ? tt->Luminosity : -1.0f, (unsigned)mt.count, (ml == tt) ? 1 : 0);
+	return buf;
+}
 } // namespace
 
 EMSCRIPTEN_BINDINGS(rev_material_editor)
@@ -141,5 +160,6 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
+	emscripten::function("editorMatDebug",       &js_editorMatDebug);
 }
 #endif // __EMSCRIPTEN__

@@ -420,20 +420,24 @@ static void editorTick()
 	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
 	if (anyFreeCamKey()) rev::Editor_MarkDirty();  // keep rendering while flying
 
-	// Idle throttle: a surface edit / camera move / key marks dirty; render a few
-	// frames so the change (+ SDL flip + key coast) lands, then idle.
+	// Idle throttle: render only while something changed (edit / camera / key);
+	// otherwise RE-PRESENT the last frame so the WebGL canvas stays alive (it goes
+	// black if nothing is flipped) without paying the deferred re-render.
 	if (rev::Editor_ConsumeDirty() && g_editorRenderFrames < 4) g_editorRenderFrames = 4;
-	if (g_editorRenderFrames <= 0) return;
+	if (g_editorRenderFrames <= 0) {
+		if (MainSurf && MainSurf->Flip) MainSurf->Flip(MainSurf);
+		return;
+	}
 	--g_editorRenderFrames;
 
 	Timer = g_editorFreezeTimer;
 	if (!g_editorCamSeeded) {
-		// First frame: render with the scene's own (spline) camera, seed the
-		// orbit from it, and build FC so the free-cam starts there too.
+		// Open on the fixed default orbit (room centre). The earlier auto-seed
+		// from the scene's spline camera produced a through-the-floor pose
+		// (target below the floor) → black; the fixed default frames the room.
+		updateEditorCamera();          // build FC from the default orbit
 		poll_pending_resize(g_currentDriver.get());
 		g_currentDriver->tick();
-		seedOrbitFromView();
-		updateEditorCamera();          // FC ready for keyboard fly next frame
 		g_editorCamSeeded = true;
 	} else {
 		if (anyFreeCamKey()) {
