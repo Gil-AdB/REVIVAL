@@ -125,6 +125,7 @@ FDS_FLAG_BOOL(nmap_as_diffuse,          "FDS_NMAP_AS_DIFFUSE",          0,      
 // ─── anti-aliasing ────────────────────────────────────────────────────────
 FDS_FLAG_BOOL(aa,                       "FDS_AA",                       0,                              "aa",       "Edge-aware AA: a post-tonemap pass that blends a 5-tap cross only across G-buffer geometry edges (normal creases + depth/silhouette discontinuities). Removes jaggies without softening textures/interiors. Deferred path only.")
 FDS_FLAG_FLOAT(aa_strength,             "FDS_AA_STRENGTH",              1.0f,                           "aa",       "Max blend weight at a detected edge (0..1). 1 = full 5-tap cross average at the strongest edges, scaled down by edge strength elsewhere; lower = subtler.")
+FDS_FLAG_BOOL(aa_viz,                   "FDS_AA_VIZ",                   0,                              "aa",       "Debug: paint the AA edge map — detected geometry edges in green over a dimmed frame — instead of blending. Shows exactly which pixels --aa touches (silhouettes + creases). Requires --aa.")
 
 // ─── display / present ───────────────────────────────────────────────────
 FDS_FLAG_BOOL(no_vsync,                 "FDS_NO_VSYNC",                 0,                              "display",  "Disable SDL_RENDERER_PRESENTVSYNC — lets SDL_RenderPresent return immediately for benching real flip cost")
