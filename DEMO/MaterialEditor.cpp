@@ -121,8 +121,15 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 #include <emscripten/val.h>
 #include <vector>
 
+void Editor_SetHighlight(const char* name);   // RENDER.CPP — outline pass
+
 namespace {
 std::string js_editorGetSurfaces() { return rev::Editor_GetSurfacesJSON(); }
+void js_editorHighlight(std::string name)
+{
+	Editor_SetHighlight(name.c_str());
+	rev::Editor_MarkDirty();
+}
 bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 {
 	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
@@ -161,5 +168,6 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 	emscripten::function("editorMatDebug",       &js_editorMatDebug);
+	emscripten::function("editorHighlight",      &js_editorHighlight);
 }
 #endif // __EMSCRIPTEN__

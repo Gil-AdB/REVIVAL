@@ -60,6 +60,22 @@ namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
 namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
+// LWO editor: per-matID highlight flags. The outline pass at the end of the
+// deferred render reads these; Editor_SetHighlight (the Embind editorHighlight)
+// sets them on surface-select by resolving a surface name to its matID(s).
+bool g_editorHL[256] = { false };
+bool g_editorHLActive = false;
+void Editor_SetHighlight(const char* name) {
+	for (int i = 0; i < 256; ++i) g_editorHL[i] = false;
+	g_editorHLActive = false;
+	if (!name || !*name || !CurScene) return;
+	MatTable mt = Scene_GetMatTable(CurScene);
+	for (dword i = 0; i < mt.count && i < 256; ++i)
+		if (mt.data[i] && mt.data[i]->Name && std::strcmp(mt.data[i]->Name, name) == 0) {
+			g_editorHL[i] = true; g_editorHLActive = true;
+		}
+}
+
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
 //   otherwise → scene's PreferVolumetricUnified
@@ -1043,6 +1059,23 @@ xpar_done: ;
 				for (int y = ya; y <= yb; ++y) { vp[y * XRes + xl] = col; vp[y * XRes + xr2] = col; }
 			}
 		}
+	}
+
+	// LWO editor surface highlight — outline the selected surface's pixels (its
+	// matID, edge where a 4-neighbour differs) on the FINAL image. Same place /
+	// reason as MIRRORVIZ (after tonemap + all post, before the scene flip).
+	if (g_editorHLActive && g_gbuffer && !g_gbuffer->txtr.empty()) {
+		const uint32_t* tx = g_gbuffer->txtr.data();
+		dword* vp = reinterpret_cast<dword*>(VPage);
+		auto hl = [&](int x, int y) -> bool {
+			if ((unsigned)x >= (unsigned)XRes || (unsigned)y >= (unsigned)YRes) return false;
+			return g_editorHL[(tx[size_t(y) * XRes + x] >> 20) & 0xFF];
+		};
+		const dword col = 0x0000FFFFu;   // bright cyan
+		for (int y = 0; y < YRes; ++y)
+			for (int x = 0; x < XRes; ++x)
+				if (hl(x, y) && (!hl(x-1,y) || !hl(x+1,y) || !hl(x,y-1) || !hl(x,y+1)))
+					vp[size_t(y) * XRes + x] = col;
 	}
 
 
