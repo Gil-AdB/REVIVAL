@@ -210,27 +210,48 @@ void DemoBoot(ModplayerHandle modHandle)
 		// native-only — it can't run here.
 		std::vector<std::string> args;
 		args.push_back("DEMO");
-		bool hadFlag = false;
+		// Full-pipeline defaults = the user's native greets flag set, so a plain
+		// ?editor matches the native look (deferred-quarter + HDR + all the post
+		// FX: anamorphic, lens ghosts, chromatic, vignette, DoF, SSAO/GTAO, AA,
+		// PBR, omni/spot shadows, parallax). The teleporter mirror (--greets-mirror
+		// / --mirror-rtt) is deliberately OMITTED: it clones+bakes every mesh (~6 GB,
+		// past wasm's 4 GB cap) and isn't needed for editing. --material-import is
+		// native-only (reads native FS paths); the browser PBR upload replaces it.
+		static const char *def[] = {
+			"--shadows", "--greets-omni-shadows", "--greets-omni-default-range=30",
+			"--greets-omni-shadow-res=256", "--shadow-skip-animated", "--greets-spots",
+			"--shadow-dynamic", "--shadow-lightmap-planar", "--shadow-lightmap-res=64",
+			"--shadow-lightmap", "--cone-strength=2", "--bloom", "--disco-bloom=0",
+			"--shard-deferred", "--greets-shard-fall-speed=0.8", "--greets-shard-randomness=0.8",
+			"--hdr-linear", "--deferred-quarter", "--greets-shard-res=64", "--bloom-intensity=2",
+			"--hdr-refl-gain=4", "--cone-fine-tiles", "--anamorphic", "--anamorphic_intensity=1.5",
+			"--anamorphic_vert=0", "--anamorphic_decay=0.3", "--anamorphic_passes=3",
+			"--lens_ghosts", "--lens_ghost_intensity=0.05", "--lens_ghost_count=0",
+			"--lens_ghost_dispersal=0.01", "--lens_ghost_halo=0.01", "--chromatic",
+			"--chromatic_amount=3", "--vignette", "--vignette_strength=1", "--dof",
+			"--dof_range=20", "--dof_max=4", "--greets-stone-tex", "--ssao-downscale=2",
+			"--ssao-gtao", "--ao_map_strength=1", "--parallax_strength=0.1", "--parallax",
+			"--nmap_16bit", "--hdr", "--ssao", "--aa", "--pbr",
+		};
+		for (const char *d : def) args.push_back(d);
+		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8
+		// overrides a default (later wins; setParamFromText marks explicitly-set).
 		if (const char *qs = emscripten_run_script_string("location.search.replace(/^[?]/,'')")) {
 			std::string q = qs, tok;
 			for (size_t i = 0; i <= q.size(); ++i) {
 				if (i == q.size() || q[i] == '&') {
-					if (!tok.empty() && tok != "editor") { args.push_back("--" + tok); hadFlag = true; }
+					if (!tok.empty() && tok != "editor") args.push_back("--" + tok);
 					tok.clear();
 				} else tok.push_back(q[i]);
 			}
 		}
-		if (!hadFlag) {
-			const char *def[] = { "--hdr", "--hdr-linear", "--greets-stone-tex",
-			                      "--parallax", "--nmap_16bit", "--ssao", "--ssao-gtao", "--bloom" };
-			for (const char *d : def) args.push_back(d);
-		}
 		std::vector<const char*> argv;
 		for (auto &a : args) argv.push_back(a.c_str());
 		fds::FeatureFlags::parseArgs((int)argv.size(), argv.data());
-		fds::FeatureFlags::setParamFromText("deferred", "1");        // full material path
-		fds::FeatureFlags::setParamFromText("greets_mirror", "0");   // mirror OOMs in wasm
-		fprintf(stderr, "[EDITOR] greets editor: %d flag(s) from URL/default, deferred on, mirror off\n",
+		// Only hard override: the teleporter mirror stays off in wasm (memory).
+		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+		fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
+		fprintf(stderr, "[EDITOR] greets editor: full native pipeline (%d flags), mirror off (wasm mem)\n",
 		        (int)args.size() - 1);
 		// Orbit target = greets room-bbox centre (see the [DISCO] room-bbox log).
 		g_camTarget.x = 18.0f; g_camTarget.y = 6.0f; g_camTarget.z = -35.0f;

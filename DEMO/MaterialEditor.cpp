@@ -5,6 +5,9 @@
 #include <Base/Material.h>
 #include <Base/Texture.h>
 #include <Base/FDS_DECS.H>   // Scene_GetMatTable, MatTable
+#include <Base/Scene.h>      // Scene::Ambient
+#include <Base/FeatureFlags.h>
+#include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
 
 #include <atomic>
 #include <cstdio>
@@ -13,6 +16,19 @@
 #include <unordered_set>
 
 namespace rev {
+
+// A surface can render through per-handedness mirror-UV clones named
+// "<surface>::mirUV" (e.g. the floor renders only as "floor::mirUV", base
+// "floor" covers 0 px). Collapse the clone onto its base so the panel lists
+// each surface once and an edit reaches every material that draws it.
+static std::string baseSurfName(const char* n)
+{
+	std::string s = n ? n : "";
+	static const std::string suf = "::mirUV";
+	if (s.size() > suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0)
+		s.resize(s.size() - suf.size());
+	return s;
+}
 
 static void jsonEscape(std::string& out, const char* s)
 {
@@ -41,12 +57,13 @@ std::string Editor_GetSurfacesJSON()
 	for (Material* M = MatLib; M; M = M->Next) {
 		if (M->RelScene != CurScene) continue;
 		if (!M->Name) continue;
-		if (!seen.insert(M->Name).second) continue;   // de-dup by name
+		std::string base = baseSurfName(M->Name);
+		if (!seen.insert(base).second) continue;   // de-dup by base name (::mirUV collapsed)
 
 		if (!first) out += ",";
 		first = false;
 		out += "{\"name\":\"";
-		jsonEscape(out, M->Name);
+		jsonEscape(out, base.c_str());
 		out += "\",";
 		appendNum(out, "baseR",        M->BaseCol.R);    out += ",";
 		appendNum(out, "baseG",        M->BaseCol.G);    out += ",";
@@ -72,7 +89,7 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	bool any = false;
 	for (Material* M = MatLib; M; M = M->Next) {
 		if (M->RelScene != CurScene) continue;
-		if (!M->Name || std::strcmp(M->Name, name) != 0) continue;
+		if (!M->Name || baseSurfName(M->Name) != name) continue;   // ::mirUV clones too
 		if      (!std::strcmp(key, "baseR"))        M->BaseCol.R = value;
 		else if (!std::strcmp(key, "baseG"))        M->BaseCol.G = value;
 		else if (!std::strcmp(key, "baseB"))        M->BaseCol.B = value;
@@ -160,6 +177,75 @@ std::string js_editorMatDebug(std::string name)
 	  ml ? ml->Luminosity : -1.0f, mlCount, tt ? tt->Luminosity : -1.0f, (unsigned)mt.count, (ml == tt) ? 1 : 0);
 	return buf;
 }
+// Diagnostic: the live render-flag state the kernel actually sees, so we can tell
+// from JS whether the editor's flag overrides (deferred / shadow_lightmap off /
+// hdr) really took effect — instead of inferring it from screenshots.
+std::string js_editorFlags()
+{
+	using FF = fds::FeatureFlags;
+	char buf[400];
+	std::snprintf(buf, sizeof buf,
+	  "{\"shadow_lightmap\":%d,\"shadow_dynamic\":%d,\"shadows\":%d,"
+	  "\"deferred\":%d,\"deferred_quarter\":%d,\"hdr\":%d,\"hdr_linear\":%d,"
+	  "\"ambientR\":%.2f,\"ambientG\":%.2f,\"ambientB\":%.2f}",
+	  FF::shadow_lightmap()?1:0, FF::shadow_dynamic()?1:0, FF::shadows()?1:0,
+	  FF::deferred()?1:0, FF::deferred_quarter()?1:0, FF::hdr()?1:0, FF::hdr_linear()?1:0,
+	  CurScene ? CurScene->Ambient.R : -1.0f,
+	  CurScene ? CurScene->Ambient.G : -1.0f,
+	  CurScene ? CurScene->Ambient.B : -1.0f);
+	return buf;
+}
+// Diagnostic: average the FINAL framebuffer (VPage, post-tonemap+post-FX) color
+// over exactly the pixels whose G-buffer matID belongs to `name`. This reads the
+// rendered output for one surface directly — no screenshot framing / fog noise /
+// camera guessing. If a property edit doesn't move this average, the edit truly
+// isn't reaching the pixels; if it does, the render responds and any "no effect"
+// is a framing/perception issue.
+std::string js_editorProbe(std::string name)
+{
+	MatTable mt = Scene_GetMatTable(CurScene);
+	bool want[256] = { false };
+	int  matIds[8]; int nIds = 0;
+	float lum = -1, dif = -1, spec = -1; unsigned gloss = 0;
+	for (dword i = 0; i < mt.count && i < 256; ++i)
+		if (mt.data[i] && mt.data[i]->Name && rev::baseSurfName(mt.data[i]->Name) == name) {
+			want[i] = true;
+			if (nIds < 8) matIds[nIds++] = int(i);
+			lum = mt.data[i]->Luminosity; dif = mt.data[i]->Diffuse;
+			spec = mt.data[i]->Specular;  gloss = mt.data[i]->Glossiness;
+		}
+	long count = 0; double sr = 0, sg = 0, sb = 0;
+	// G-buffer diagnostics: how big is the txtr plane, how many pixels carry a
+	// non-zero matID at all, and the highest matID seen — so we can tell an
+	// encoding mismatch from an empty/unpopulated buffer.
+	size_t gbSize = g_gbuffer ? g_gbuffer->txtr.size() : 0;
+	long   gbNonZero = 0; int gbMaxId = -1;
+	if (g_gbuffer && !g_gbuffer->txtr.empty() && VPage) {
+		const uint32_t *tx = g_gbuffer->txtr.data();
+		const uint32_t *vp = reinterpret_cast<const uint32_t *>(VPage);
+		size_t n = size_t(XRes) * size_t(YRes);
+		if (g_gbuffer->txtr.size() < n) n = g_gbuffer->txtr.size();
+		for (size_t i = 0; i < n; ++i) {
+			const int mid = int((tx[i] >> 20) & 0xFF);
+			if (mid != 0) { ++gbNonZero; if (mid > gbMaxId) gbMaxId = mid; }
+			if (mid < 256 && want[mid]) {
+				const uint32_t c = vp[i];
+				sb += double(c & 0xFF); sg += double((c >> 8) & 0xFF); sr += double((c >> 16) & 0xFF);
+				++count;
+			}
+		}
+	}
+	char idbuf[64] = ""; int off = 0;
+	for (int k = 0; k < nIds; ++k) off += std::snprintf(idbuf + off, sizeof(idbuf) - off, "%s%d", k ? "," : "", matIds[k]);
+	char buf[360];
+	std::snprintf(buf, sizeof buf,
+	  "{\"px\":%ld,\"avgR\":%.1f,\"avgG\":%.1f,\"avgB\":%.1f,\"matIds\":[%s],"
+	  "\"lum\":%.2f,\"dif\":%.2f,\"spec\":%.2f,\"gloss\":%u,"
+	  "\"gbSize\":%zu,\"gbNonZero\":%ld,\"gbMaxId\":%d,\"xy\":\"%dx%d\"}",
+	  count, count ? sr / count : -1.0, count ? sg / count : -1.0, count ? sb / count : -1.0,
+	  idbuf, lum, dif, spec, gloss, gbSize, gbNonZero, gbMaxId, (int)XRes, (int)YRes);
+	return buf;
+}
 } // namespace
 
 EMSCRIPTEN_BINDINGS(rev_material_editor)
@@ -169,5 +255,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 	emscripten::function("editorMatDebug",       &js_editorMatDebug);
 	emscripten::function("editorHighlight",      &js_editorHighlight);
+	emscripten::function("editorFlags",          &js_editorFlags);
+	emscripten::function("editorProbe",          &js_editorProbe);
 }
 #endif // __EMSCRIPTEN__

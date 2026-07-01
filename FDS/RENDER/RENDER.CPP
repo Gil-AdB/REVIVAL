@@ -65,13 +65,24 @@ namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render
 // sets them on surface-select by resolving a surface name to its matID(s).
 bool g_editorHL[256] = { false };
 bool g_editorHLActive = false;
+// A surface can render through per-handedness mirror-UV clones named
+// "<surface>::mirUV" (e.g. floor renders only as "floor::mirUV"). Treat the
+// clone and its base as the same editor surface so a select/edit covers both.
+static bool sameEditorSurface(const char* matName, const char* want) {
+	if (!matName || !want) return false;
+	size_t len = std::strlen(matName);
+	static const char suf[] = "::mirUV";
+	const size_t sl = sizeof(suf) - 1;
+	if (len > sl && std::strcmp(matName + len - sl, suf) == 0) len -= sl;
+	return std::strlen(want) == len && std::strncmp(matName, want, len) == 0;
+}
 void Editor_SetHighlight(const char* name) {
 	for (int i = 0; i < 256; ++i) g_editorHL[i] = false;
 	g_editorHLActive = false;
 	if (!name || !*name || !CurScene) return;
 	MatTable mt = Scene_GetMatTable(CurScene);
 	for (dword i = 0; i < mt.count && i < 256; ++i)
-		if (mt.data[i] && mt.data[i]->Name && std::strcmp(mt.data[i]->Name, name) == 0) {
+		if (mt.data[i] && sameEditorSurface(mt.data[i]->Name, name)) {
 			g_editorHL[i] = true; g_editorHLActive = true;
 		}
 }
