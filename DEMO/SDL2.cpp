@@ -232,6 +232,43 @@ static void Wasm_PresentGL(const uint8_t *pixels, int srcW, int srcH)
 	}, (uintptr_t)pixels, srcW, srcH);
 }
 
+// Draw-only re-present (see SDL2.h): same letterbox + quad draw as
+// Wasm_PresentGL, minus the texSubImage2D upload — the texture still holds the
+// last presented frame. Keeps the idle editor canvas alive at ~zero GPU cost
+// instead of re-uploading the full framebuffer 60×/s for identical pixels.
+void SDL2_Wasm_RepresentLast()
+{
+	EM_ASM({
+		var gl = Module.__floodGL;
+		if (!gl || !Module.__floodTexW) return;   // nothing presented yet
+		var canvas = Module.canvas;
+		var cw = canvas.width;
+		var ch = canvas.height;
+		var srcAR = Module.__floodTexW / Module.__floodTexH;
+		var canAR = cw / ch;
+		var dx = 0;
+		var dy = 0;
+		var dw = cw;
+		var dh = ch;
+		if (canAR > srcAR) {
+			dw = (ch * srcAR) | 0;
+			dx = (cw - dw) >> 1;
+		} else {
+			dh = (cw / srcAR) | 0;
+			dy = (ch - dh) >> 1;
+		}
+		gl.viewport(0, 0, cw, ch);
+		gl.clearColor(0, 0, 0, 1);
+		gl.clear(gl.COLOR_BUFFER_BIT);
+		gl.viewport(dx, dy, dw, dh);
+		gl.useProgram(Module.__floodProg);
+		gl.bindVertexArray(Module.__floodVAO);
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, Module.__floodTex);
+		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+	});
+}
+
 #endif
 
 static void V_Flip(VESA_Surface *VS)

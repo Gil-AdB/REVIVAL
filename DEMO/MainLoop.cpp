@@ -442,11 +442,13 @@ static void editorTick()
 	if (anyFreeCamKey()) rev::Editor_MarkDirty();  // keep rendering while flying
 
 	// Idle throttle: render only while something changed (edit / camera / key);
-	// otherwise RE-PRESENT the last frame so the WebGL canvas stays alive (it goes
-	// black if nothing is flipped) without paying the deferred re-render.
+	// otherwise RE-PRESENT the last frame so the WebGL canvas stays alive (it
+	// goes black if nothing is drawn) without paying the deferred re-render.
+	// Draw-only: the full V_Flip re-uploaded the whole framebuffer each rAF
+	// (~300 MB/s of GPU-process work at fullscreen for identical pixels).
 	if (rev::Editor_ConsumeDirty() && g_editorRenderFrames < 4) g_editorRenderFrames = 4;
 	if (g_editorRenderFrames <= 0) {
-		if (MainSurf && MainSurf->Flip) MainSurf->Flip(MainSurf);
+		SDL2_Wasm_RepresentLast();
 		return;
 	}
 	--g_editorRenderFrames;
