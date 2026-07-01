@@ -2982,6 +2982,26 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				return true;
 			};
 
+			// C (texture/lighting decouple): fetch a pixel's own point-sampled
+			// texel (B,G,R). Lets the fill reconstruct each neighbour's LIGHTING
+			// (final ÷ own texel) and re-apply THIS pixel's own texel — so the
+			// far floor keeps its texture detail instead of averaging into mush.
+			// Returns false for untextured/missing (caller falls back to the
+			// plain colour average). texel fetch is ~free (measured).
+			auto fetchTexel = [&](size_t j, float &tb, float &tg, float &tr) -> bool {
+				const uint32_t m32 = gb.txtr[j];
+				const uint32_t mid = (m32 >> 20) & 0xFF;
+				if (mid >= ctx.matTable.count) return false;
+				const Material *M = ctx.matTable.data[mid];
+				if (!M || !M->Txtr) return false;
+				const dword *td = (const dword *)M->Txtr->Mipmap[(m32 >> 28) & 0xF];
+				if (!td) return false;
+				const dword t = td[m32 & 0xFFFFF];
+				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
+				return true;
+			};
+			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp() && !hdrWrite;
+
 			bool matched = false;
 			if (quarter) {
 				// Adaptive partial averaging: per-neighbor compatibility
@@ -3015,6 +3035,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				}
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
+				float ownB=0, ownG=0, ownR=0;
+				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
+				float slB=0, slG=0, slR=0; int nsharp=0;
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -3023,9 +3046,27 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
 					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					if (haveOwn) {
+						float nb, ng, nr;
+						if (fetchTexel(nidx[k], nb, ng, nr)) {
+							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
+							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
+							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							++nsharp;
+						}
+					}
 					++n;
 				}
 				if (n > 0) {
+					if (haveOwn && nsharp > 0) {
+						const float inv = 1.0f / (float(nsharp) * 256.0f);
+						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
+						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
+						int oR = int(ownR * slR * inv + 0.5f); if (oR > 255) oR = 255;
+						out[i] = dword(oB) | (dword(oG) << 8) | (dword(oR) << 16) | 0xFF000000u;
+						matched = true;
+						continue;
+					}
 					int aR, aG, aB;
 					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
 					else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
