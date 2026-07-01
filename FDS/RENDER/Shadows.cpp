@@ -104,9 +104,12 @@ std::atomic<ShadowMode> g_shadowMode{
 // exactly the cost the experiment wants to weigh against the PCF read gain.
 static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 {
-	const int tpr = ShadowSwzTilesPerRow(sm.xres);
-	const int trs = (sm.yres + 7) >> 3;
-	const size_t n = size_t(tpr) * size_t(trs) * 64;
+	const ShadowSwzShape &shp = ShadowSwzGetShape();
+	const int tw = 1 << shp.a, th = 1 << shp.b;
+	const int tileSz = tw * th;
+	const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
+	const int trs = (sm.yres + shp.maskY) >> shp.b;
+	const size_t n = size_t(tpr) * size_t(trs) * size_t(tileSz);
 	auto tile = [&](const std::vector<uint16_t> &src, std::vector<uint16_t> &dst) {
 		if (src.empty()) { dst.clear(); return; }
 		if (dst.size() != n) dst.assign(n, 0);   // zero pad = "unwritten" sentinel
@@ -114,12 +117,13 @@ static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 		uint16_t *d = dst.data();
 		for (int y = 0; y < sm.yres; ++y) {
 			const uint16_t *srow = s + size_t(y) * size_t(sm.xres);
-			uint16_t *drow = d + ((size_t(y >> 3) * size_t(tpr)) << 6)
-			                   + size_t((y & 7) << 3);
+			// row-of-tile runs: tw consecutive texels per tile share y.
+			uint16_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
+			                   + (size_t(y & shp.maskY) << shp.a);
 			int x = 0;
-			for (int t = 0; t < tpr; ++t, x += 8)
-				std::memcpy(drow + (size_t(t) << 6), srow + x,
-				            size_t(std::min(8, sm.xres - x)) * sizeof(uint16_t));
+			for (int t = 0; t < tpr; ++t, x += tw)
+				std::memcpy(drow + size_t(t) * size_t(tileSz), srow + x,
+				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint16_t));
 		}
 	};
 	if (dynPlanes) { tile(sm.depth_dynamic, sm.depthDynSw); tile(sm.polyId_dynamic, sm.polyIdDynSw); }

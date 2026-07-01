@@ -109,3 +109,26 @@ interleave variant a priori: it can only shrink lines/tap further (8→1–2 vs
 on the BAKE side (per-frame re-transform + re-raster into 76 maps), not the
 sample side. Future effort → min/max block fast-path (cuts tap count),
 bake-side reduction (fewer/lower-res moving maps, caching), not layout.**
+
+## 2026-07-01 (later) — tile-SHAPE sweep: no shape wins
+
+Parameterized the harness: `FDS_SHADOW_SWZ_SHAPE=WxH` (power-of-two, default
+8x8) selects the tile shape at startup — swept 2x2 / 4x2 / 2x4 / 4x4 / 8x8
+without rebuilding. All shapes byte-identical to linear (verified per shape).
+
+Greets shadows config, min-of-120-iters, 3 interleaved trials (machine under
+load — absolute deltas noisy, but the ordering was unanimous):
+
+| | linear | 2x2 | 4x2 | 2x4 | 4x4 | 8x8 |
+|---|---|---|---|---|---|---|
+| best min (ms) | **27.12** | 28.88 | 28.06 | 29.40 | 28.81 | 28.53 |
+
+**Linear won all 15 shape-measurements.** Best swizzled shape (4x2) still ~+1 ms.
+Also: the re-tile pass cost scales inversely with tile WIDTH (row-run length =
+the memcpy size): 2x2/2x4 ≈ 2.5 ms/frame (4-byte copies, per-copy overhead
+dominates), 4-wide ≈ 0.9 ms, 8-wide ≈ 0.8 ms. So narrow tiles — the ones with
+the theoretically best 2×2-PCF locality — have the worst swizzle economics,
+closing off the whole family.
+
+**Final verdict: shadow-map tiling is measured-negative across the entire
+layout family on this workload. Closed. The shadow cost is bake-side.**

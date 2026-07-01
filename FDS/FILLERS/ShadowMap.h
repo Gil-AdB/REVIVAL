@@ -182,18 +182,40 @@ extern std::vector<CubeShadowRef> g_cubeShadowRefs;
 // handling spotlights. `res` is per-face edge length.
 void CubeShadowMaps_Rebuild(struct Scene *Sc, int res);
 
-// [experiment: --shadow-swizzle] 8×8-tile swizzled texel offset. One tile =
-// 64 texels = 128 B (2 cache lines); rows within a tile are 16 B apart, so a
-// 2×2 PCF footprint that doesn't cross a tile edge lands in ONE cache line —
-// vs the linear layout where the two rows are xres*2 B apart (always ≥2
-// lines, one per row). ~6 int ops per tap vs 2 adds linear: the experiment
-// weighs that ALU + the bake-side swizzle cost against the halved line
-// traffic (see docs/SHADOWMAP_TILING_PLAN.md).
-inline int ShadowSwzTilesPerRow(int xres) { return (xres + 7) >> 3; }
-inline size_t ShadowSwzOffset(int x, int y, int tilesPerRow)
+// [experiment: --shadow-swizzle] tile-swizzled texel offset. Tile shape is a
+// power-of-two W×H selected once via FDS_SHADOW_SWZ_SHAPE="WxH" (default 8x8)
+// so the layout family can be swept without rebuilding:
+//   8x8 = 128 B/tile (2 lines), rows 16 B apart inside the tile;
+//   4x4 =  32 B/tile (two tiles per 64 B line);
+//   2x2 =   8 B/tile — an ALIGNED 2×2 PCF quad is exactly one tile;
+//   4x2/2x4 = 16 B rectangles biased to x/y-straddling footprints.
+// A 2×2 PCF footprint that stays inside one tile lands in ONE cache line vs
+// the linear layout's ≥2 (one per row, xres*2 B apart). The experiment weighs
+// the extra per-tap int ops + the bake-side swizzle cost against the line-
+// traffic saving (see docs/SHADOWMAP_TILING_PLAN.md for measured results).
+struct ShadowSwzShape { int a, b, maskX, maskY; };   // tile = 2^a × 2^b texels
+inline const ShadowSwzShape& ShadowSwzGetShape()
 {
-    return (size_t(size_t(y >> 3) * size_t(tilesPerRow) + size_t(x >> 3)) << 6)
-         + size_t((y & 7) << 3) + size_t(x & 7);
+    static const ShadowSwzShape s = [] {
+        int w = 8, h = 8;
+        if (const char *e = std::getenv("FDS_SHADOW_SWZ_SHAPE"))
+            std::sscanf(e, "%dx%d", &w, &h);
+        auto lg = [](int v) { int l = 0; while ((1 << l) < v) ++l; return l; };
+        const int a = lg(std::min(std::max(w, 2), 64));
+        const int b = lg(std::min(std::max(h, 2), 64));
+        std::fprintf(stderr, "[SHADOW-SWZ] tile shape %dx%d\n", 1 << a, 1 << b);
+        return ShadowSwzShape{a, b, (1 << a) - 1, (1 << b) - 1};
+    }();
+    return s;
+}
+inline int ShadowSwzTilesPerRow(int xres, const ShadowSwzShape &s)
+{
+    return (xres + s.maskX) >> s.a;
+}
+inline size_t ShadowSwzOffset(int x, int y, int tilesPerRow, const ShadowSwzShape &s)
+{
+    return (size_t(size_t(y >> s.b) * size_t(tilesPerRow) + size_t(x >> s.a)) << (s.a + s.b))
+         + (size_t(y & s.maskY) << s.a) + size_t(x & s.maskX);
 }
 
 // Cube face selection: direction → face index in CubeShadowRef::faceIdx.
@@ -311,11 +333,12 @@ inline float CubeShadow_Sample(int cubeIdx,
     const uint16_t *zsB, *zdB;
     const uint16_t *idsB = nullptr, *iddB = nullptr;
     if (swz) {
-        const int tpr = ShadowSwzTilesPerRow(sm.xres);
-        o00 = ShadowSwzOffset(iX,     iY,     tpr);
-        o10 = ShadowSwzOffset(iX + 1, iY,     tpr);
-        o01 = ShadowSwzOffset(iX,     iY + 1, tpr);
-        o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr);
+        const ShadowSwzShape &shp = ShadowSwzGetShape();
+        const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
+        o00 = ShadowSwzOffset(iX,     iY,     tpr, shp);
+        o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
+        o01 = ShadowSwzOffset(iX,     iY + 1, tpr, shp);
+        o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr, shp);
         zsB = sm.depthSw.data();  zdB = sm.depthDynSw.data();
         if (surfaceMatId >= 0) { idsB = sm.polyIdSw.data(); iddB = sm.polyIdDynSw.data(); }
     } else {

@@ -587,11 +587,12 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 				size_t o00, o10, o01, o11;
 				const uint16_t *zsB, *zdB, *idB;
 				if (swz) {
-					const int tpr = ShadowSwzTilesPerRow(sm.xres);
-					o00 = ShadowSwzOffset(iX,     iY,     tpr);
-					o10 = ShadowSwzOffset(iX + 1, iY,     tpr);
-					o01 = ShadowSwzOffset(iX,     iY + 1, tpr);
-					o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr);
+					const ShadowSwzShape &shp = ShadowSwzGetShape();
+					const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
+					o00 = ShadowSwzOffset(iX,     iY,     tpr, shp);
+					o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
+					o01 = ShadowSwzOffset(iX,     iY + 1, tpr, shp);
+					o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr, shp);
 					zsB = sm.depthSw.data(); zdB = sm.depthDynSw.data();
 					idB = sm.polyIdSw.data();
 				} else {
