@@ -95,6 +95,37 @@ std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
 
+// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked planes into
+// the 8×8-tiled *Sw copies (see ShadowSwzOffset). dynPlanes selects which pair
+// this bake wrote: static (depth/polyId — StaticOnce + DynOmnis) or dynamic
+// (depth_dynamic/polyId_dynamic — DynMeshes). Linear planes stay the source
+// of truth; this is a derived copy. Row-of-tile copies are 8×u16 = 16 B →
+// one 128-bit load/store each; the pass is pure memory traffic, which is
+// exactly the cost the experiment wants to weigh against the PCF read gain.
+static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
+{
+	const int tpr = ShadowSwzTilesPerRow(sm.xres);
+	const int trs = (sm.yres + 7) >> 3;
+	const size_t n = size_t(tpr) * size_t(trs) * 64;
+	auto tile = [&](const std::vector<uint16_t> &src, std::vector<uint16_t> &dst) {
+		if (src.empty()) { dst.clear(); return; }
+		if (dst.size() != n) dst.assign(n, 0);   // zero pad = "unwritten" sentinel
+		const uint16_t *s = src.data();
+		uint16_t *d = dst.data();
+		for (int y = 0; y < sm.yres; ++y) {
+			const uint16_t *srow = s + size_t(y) * size_t(sm.xres);
+			uint16_t *drow = d + ((size_t(y >> 3) * size_t(tpr)) << 6)
+			                   + size_t((y & 7) << 3);
+			int x = 0;
+			for (int t = 0; t < tpr; ++t, x += 8)
+				std::memcpy(drow + (size_t(t) << 6), srow + x,
+				            size_t(std::min(8, sm.xres - x)) * sizeof(uint16_t));
+		}
+	};
+	if (dynPlanes) { tile(sm.depth_dynamic, sm.depthDynSw); tile(sm.polyId_dynamic, sm.polyIdDynSw); }
+	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
+}
+
 void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 {
 	if (!shadowsEnabled()) return;
@@ -485,6 +516,10 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		renderns::tileCounter = 0;
 	}
 	int tilesEnqueued = 0;
+	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
+	// the raster drain (see below). Filled by the same Phase-B filter.
+	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
+	std::vector<size_t> swzMaps;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
 		Omni *const O = sm.omni;
@@ -520,6 +555,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		const int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
 		const int tileSizeX = rawTX & ~7;
 		const int tileSizeY = rawTY & ~7;
+		if (sSwz) swzMaps.push_back(lightIdx);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
@@ -752,6 +788,51 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {
 		sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
+	}
+
+	// [experiment: --shadow-swizzle] Re-tile the planes this bake just wrote,
+	// timed SEPARATELY from the bake (its own [SHADOW-BAKE] swizzle line) so
+	// the overhead is measurable against the PCF-read gain. Parallel over
+	// maps on the pool (memory-bound copies). Moving omnis (DynOmnis) never
+	// get a dynamic-plane bake, so also build their (all-zero) dynamic copies
+	// once — the cube tap only switches a map to the tiled path when all the
+	// planes it needs are tiled.
+	if (sSwz && !swzMaps.empty()) {
+		const auto tSwzStart = clk::now();
+		for (size_t li : swzMaps) {
+			ShadowMap *smp = &g_shadowMaps[li];
+			const bool dynPl = writeDynamicBuf;
+			ThreadPool::instance().enqueue([smp, dynPl]() {
+				ShadowMap_SwizzlePlanes(*smp, dynPl);
+				if (!dynPl && smp->depthDynSw.empty())
+					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
+				renderns::shadowDone.release();
+			});
+		}
+		for (size_t k = 0; k < swzMaps.size(); ++k) renderns::shadowDone.acquire();
+		const double swzMs = std::chrono::duration<double, std::milli>(clk::now() - tSwzStart).count();
+		if (mode == ShadowBakeMode::StaticOnce) {
+			std::fprintf(stderr, "[SHADOW-SWZ] init swizzle: %.2f ms (%zu maps)\n",
+			             swzMs, swzMaps.size());
+		} else if (sBakeTime) {
+			static thread_local double sSwzAcc[3] = {0.0, 0.0, 0.0};
+			static thread_local int    sSwzN[3]   = {0, 0, 0};
+			static const int sSwzInterval = []() {
+				const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
+				return (e && *e) ? std::max(1, std::atoi(e)) : 60;
+			}();
+			const int mi = int(mode);
+			sSwzAcc[mi] += swzMs;
+			if (++sSwzN[mi] % sSwzInterval == 0) {
+				std::fprintf(stderr,
+					"[SHADOW-BAKE] swizzle: %.2f ms/frame (avg of %d, %s, %zu maps)\n",
+					sSwzAcc[mi] / sSwzInterval, sSwzInterval,
+					mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
+					swzMaps.size());
+				std::fflush(stderr);
+				sSwzAcc[mi] = 0.0;
+			}
+		}
 	}
 
 	// --shadow_bake_time: accumulate this frame's full dynamic-bake wall time

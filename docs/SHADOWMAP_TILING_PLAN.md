@@ -82,3 +82,30 @@ The decisive factor is **read/write ratio + which taps dominate**:
 Net: **don't tile now.** The complexity is high, the re-tile pass is self-defeating, and
 the dominant (cube) cost barely benefits. Spend the effort on the fast-path + prefetch,
 which cut the tap count/latency without touching the storage format.
+
+## 2026-07-01 — MEASURED (experiment built, verdict: no benefit)
+
+Built behind `--shadow-swizzle` (kept in-tree, default off): 8×8-tiled copies of
+all four planes (`ShadowMap::*Sw`), re-tiled after each bake by a separately-
+timed pass, hot PCF reads (cube tap + kernel 2D PCF) switched to tiled
+addressing, byte-identical output verified.
+
+Greets, user's shadow config (76 maps, 256² cube faces, PolyId + dynamic):
+
+- **Swizzle cost:** 0.23 ms/frame (DynOmnis, 28 maps) + 0.18 ms/frame
+  (DynMeshes, 20 maps) ≈ **0.41 ms/frame**, + 1.2 ms one-shot init (48 maps).
+- **Frame time:** linear min ≈ 27.0–27.3 ms, swizzled min ≈ 27.3–27.7 ms —
+  swizzled is consistently **~0.3 ms SLOWER**: the tiled reads don't even
+  recover the swizzle cost. Read-side gain ≲ 0.1 ms.
+
+Interpretation: the receiver-side PCF taps are not cache-line-bound on this
+workload — the tap working set clusters (receivers project coherently) and
+mostly hits L2 regardless of layout, and the ~6 extra int ops per tiled tap
+offset eat what little line-traffic saving there is. This also kills the AoS
+interleave variant a priori: it can only shrink lines/tap further (8→1–2 vs
+8→4), and 8→4 was worth ≲0.1 ms while interleave doubles the swizzle traffic.
+
+**Conclusion: shadow-map tiling is measured-negative here. The shadow cost is
+on the BAKE side (per-frame re-transform + re-raster into 76 maps), not the
+sample side. Future effort → min/max block fast-path (cuts tap count),
+bake-side reduction (fewer/lower-res moving maps, caching), not layout.**

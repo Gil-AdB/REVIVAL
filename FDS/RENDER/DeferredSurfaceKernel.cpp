@@ -576,24 +576,44 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 			const int iY = int(smY);
 			if (iX >= 0 && iX + 1 < sm.xres &&
 			    iY >= 0 && iY + 1 < sm.yres) {
-				const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-				const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-				const uint16_t *zsRow1 = zsRow0 + sm.xres;
-				const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-				const uint16_t *zdRow1 = zdRow0 + sm.xres;
+				// Tap addressing: linear row-major, or 8×8-tiled under
+				// --shadow-swizzle (see CubeShadow_Sample / ShadowSwzOffset;
+				// halves the cache lines a 2×2 footprint touches). Falls back
+				// to linear when the tiled copies aren't built — both layouts
+				// hold identical values.
+				const bool swz = fds::FeatureFlags::shadow_swizzle()
+				              && !sm.depthSw.empty() && !sm.depthDynSw.empty()
+				              && !sm.polyIdSw.empty();
+				size_t o00, o10, o01, o11;
+				const uint16_t *zsB, *zdB, *idB;
+				if (swz) {
+					const int tpr = ShadowSwzTilesPerRow(sm.xres);
+					o00 = ShadowSwzOffset(iX,     iY,     tpr);
+					o10 = ShadowSwzOffset(iX + 1, iY,     tpr);
+					o01 = ShadowSwzOffset(iX,     iY + 1, tpr);
+					o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr);
+					zsB = sm.depthSw.data(); zdB = sm.depthDynSw.data();
+					idB = sm.polyIdSw.data();
+				} else {
+					const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+					o00 = rowOfs + size_t(iX);   o10 = o00 + 1;
+					o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
+					zsB = sm.depth.data(); zdB = sm.depth_dynamic.data();
+					idB = sm.polyId.data();
+				}
 				// Per-tap closest-occluder. Static buffer holds the once-baked
 				// statics; dynamic holds animated meshes (zero when off).
 				// max() wins on whichever caster is closer.
-				const uint16_t z00 = std::max(zsRow0[iX  ], zdRow0[iX  ]);
-				const uint16_t z10 = std::max(zsRow0[iX+1], zdRow0[iX+1]);
-				const uint16_t z01 = std::max(zsRow1[iX  ], zdRow1[iX  ]);
-				const uint16_t z11 = std::max(zsRow1[iX+1], zdRow1[iX+1]);
+				const uint16_t z00 = std::max(zsB[o00], zdB[o00]);
+				const uint16_t z10 = std::max(zsB[o10], zdB[o10]);
+				const uint16_t z01 = std::max(zsB[o01], zdB[o01]);
+				const uint16_t z11 = std::max(zsB[o11], zdB[o11]);
 				if (profShadowCache) {
 					// One PCF check = one tracked sample. Use the (00) tap's
 					// cache-line address — adjacent shadow checks on the same
 					// thread that share this line are hits.
 					const uintptr_t line =
-						reinterpret_cast<uintptr_t>(&zsRow0[iX]) >> 6;
+						reinterpret_cast<uintptr_t>(&zsB[o00]) >> 6;
 					if (s_shadowProfLastLine != line) {
 						g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
 						s_shadowProfLastLine = line;
@@ -609,19 +629,16 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
 				float occ = 0.0f;
 				if (mode == ShadowMode::PolyId) {
-					const uint16_t *idRow0 = sm.polyId.data() +
-						size_t(iY) * size_t(sm.xres);
-					const uint16_t *idRow1 = idRow0 + sm.xres;
 					// Surface matID extracted from gb.txtr's packed
 					// (miplevel:4 | matID:8 | swizzledUV:20). Shadow buffer
 					// stores matID+1 of the closest occluder; +1 here too so the
 					// comparison uses the same offset, and 0 stays as the
 					// "no occluder" sentinel.
 					const uint16_t surfaceId = uint16_t(surfaceShadowId);
-					if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
-					if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
-					if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
-					if (idRow1[iX + 1] != surfaceId && idRow1[iX + 1] != 0) occ += w11;
+					if (idB[o00] != surfaceId && idB[o00] != 0) occ += w00;
+					if (idB[o10] != surfaceId && idB[o10] != 0) occ += w10;
+					if (idB[o01] != surfaceId && idB[o01] != 0) occ += w01;
+					if (idB[o11] != surfaceId && idB[o11] != 0) occ += w11;
 				} else {
 					int pixZenc = 0xFF80 - int(lz * sm.zScale);
 					if (pixZenc < 0) pixZenc = 0;

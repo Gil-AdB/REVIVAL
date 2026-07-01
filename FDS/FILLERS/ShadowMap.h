@@ -47,6 +47,15 @@ struct ShadowMap {
 	// CubeShadowMaps_Rebuild — same size as `depth` / `polyId`.
 	std::vector<uint16_t> depth_dynamic;
 	std::vector<uint16_t> polyId_dynamic;
+
+	// [experiment: --shadow-swizzle] 8×8-tiled copies of the four planes.
+	// Rebuilt from the linear planes after each bake (ShadowMap_SwizzlePlanes,
+	// timed separately so the swizzle overhead is measurable on its own); the
+	// linear planes stay the source of truth for every other reader (viz,
+	// overlay, lightmap bake, clone taps). Sized tilesPerRow*tileRows*64 with
+	// zero-filled edge padding (reads there = "unwritten" sentinel). Empty
+	// until first swizzle → hot readers fall back to linear when empty.
+	std::vector<uint16_t> depthSw, polyIdSw, depthDynSw, polyIdDynSw;
 	int    xres = 0;
 	int    yres = 0;
 
@@ -173,6 +182,20 @@ extern std::vector<CubeShadowRef> g_cubeShadowRefs;
 // handling spotlights. `res` is per-face edge length.
 void CubeShadowMaps_Rebuild(struct Scene *Sc, int res);
 
+// [experiment: --shadow-swizzle] 8×8-tile swizzled texel offset. One tile =
+// 64 texels = 128 B (2 cache lines); rows within a tile are 16 B apart, so a
+// 2×2 PCF footprint that doesn't cross a tile edge lands in ONE cache line —
+// vs the linear layout where the two rows are xres*2 B apart (always ≥2
+// lines, one per row). ~6 int ops per tap vs 2 adds linear: the experiment
+// weighs that ALU + the bake-side swizzle cost against the halved line
+// traffic (see docs/SHADOWMAP_TILING_PLAN.md).
+inline int ShadowSwzTilesPerRow(int xres) { return (xres + 7) >> 3; }
+inline size_t ShadowSwzOffset(int x, int y, int tilesPerRow)
+{
+    return (size_t(size_t(y >> 3) * size_t(tilesPerRow) + size_t(x >> 3)) << 6)
+         + size_t((y & 7) << 3) + size_t(x & 7);
+}
+
 // Cube face selection: direction → face index in CubeShadowRef::faceIdx.
 // Standard "find dominant axis" — ~6 ops, no branches we care about
 // (CMOV-friendly). Returns 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
@@ -276,7 +299,32 @@ inline float CubeShadow_Sample(int cubeIdx,
     const int iX = int(smX);
     const int iY = int(smY);
     if (iX < 0 || iX + 1 >= sm.xres || iY < 0 || iY + 1 >= sm.yres) return 1.0f;
-    const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+    // Tap addressing: linear row-major, or 8×8-tiled under --shadow-swizzle
+    // (halves the cache lines a 2×2 footprint touches; the tiled copies are
+    // derived after each bake). Falls back to linear when a needed tiled
+    // copy hasn't been built yet — both layouts hold identical values, so
+    // mixing per-map is safe and byte-identical.
+    const bool swz = fds::FeatureFlags::shadow_swizzle()
+                  && !sm.depthSw.empty() && !sm.depthDynSw.empty()
+                  && (surfaceMatId < 0 || (!sm.polyIdSw.empty() && !sm.polyIdDynSw.empty()));
+    size_t o00, o10, o01, o11;
+    const uint16_t *zsB, *zdB;
+    const uint16_t *idsB = nullptr, *iddB = nullptr;
+    if (swz) {
+        const int tpr = ShadowSwzTilesPerRow(sm.xres);
+        o00 = ShadowSwzOffset(iX,     iY,     tpr);
+        o10 = ShadowSwzOffset(iX + 1, iY,     tpr);
+        o01 = ShadowSwzOffset(iX,     iY + 1, tpr);
+        o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr);
+        zsB = sm.depthSw.data();  zdB = sm.depthDynSw.data();
+        if (surfaceMatId >= 0) { idsB = sm.polyIdSw.data(); iddB = sm.polyIdDynSw.data(); }
+    } else {
+        const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+        o00 = rowOfs + size_t(iX);   o10 = o00 + 1;
+        o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
+        zsB = sm.depth.data();  zdB = sm.depth_dynamic.data();
+        if (surfaceMatId >= 0) { idsB = sm.polyId.data(); iddB = sm.polyId_dynamic.data(); }
+    }
     const float fx = smX - float(iX);
     const float fy = smY - float(iY);
     const float w00 = (1.0f - fx) * (1.0f - fy);
@@ -303,14 +351,6 @@ inline float CubeShadow_Sample(int cubeIdx,
         // = 24 bytes/tap × 4 taps = 96 bytes vs depth-only's 64 bytes.
         // Slightly more memory than pure depth, but still identity-test
         // semantics (no bias acne).
-        const uint16_t *idsRow0 = sm.polyId.data() + rowOfs;
-        const uint16_t *idsRow1 = idsRow0 + sm.xres;
-        const uint16_t *iddRow0 = sm.polyId_dynamic.data() + rowOfs;
-        const uint16_t *iddRow1 = iddRow0 + sm.xres;
-        const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-        const uint16_t *zsRow1 = zsRow0 + sm.xres;
-        const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-        const uint16_t *zdRow1 = zdRow0 + sm.xres;
         // Direct 16-bit comparison: caller already resolved ShadowMatID.
         const uint16_t receiverId = uint16_t(surfaceMatId);
         auto closestPoly = [&](uint16_t sId, uint16_t dId,
@@ -324,37 +364,32 @@ inline float CubeShadow_Sample(int cubeIdx,
         };
         // dynamicOnly: zero out the static side so closestPoly always
         // returns the dynamic id (or 0 if dynamic is also empty).
-        const uint16_t s00 = dynamicOnly ? uint16_t(0) : idsRow0[iX  ];
-        const uint16_t s10 = dynamicOnly ? uint16_t(0) : idsRow0[iX+1];
-        const uint16_t s01 = dynamicOnly ? uint16_t(0) : idsRow1[iX  ];
-        const uint16_t s11 = dynamicOnly ? uint16_t(0) : idsRow1[iX+1];
-        const uint16_t zs00 = dynamicOnly ? uint16_t(0) : zsRow0[iX  ];
-        const uint16_t zs10 = dynamicOnly ? uint16_t(0) : zsRow0[iX+1];
-        const uint16_t zs01 = dynamicOnly ? uint16_t(0) : zsRow1[iX  ];
-        const uint16_t zs11 = dynamicOnly ? uint16_t(0) : zsRow1[iX+1];
+        const uint16_t s00 = dynamicOnly ? uint16_t(0) : idsB[o00];
+        const uint16_t s10 = dynamicOnly ? uint16_t(0) : idsB[o10];
+        const uint16_t s01 = dynamicOnly ? uint16_t(0) : idsB[o01];
+        const uint16_t s11 = dynamicOnly ? uint16_t(0) : idsB[o11];
+        const uint16_t zs00 = dynamicOnly ? uint16_t(0) : zsB[o00];
+        const uint16_t zs10 = dynamicOnly ? uint16_t(0) : zsB[o10];
+        const uint16_t zs01 = dynamicOnly ? uint16_t(0) : zsB[o01];
+        const uint16_t zs11 = dynamicOnly ? uint16_t(0) : zsB[o11];
         if (fds::FeatureFlags::shadow_polyid_no_pcf()) {
-            const uint16_t c = closestPoly(s00, iddRow0[iX], zs00, zdRow0[iX]);
+            const uint16_t c = closestPoly(s00, iddB[o00], zs00, zdB[o00]);
             if (c != 0 && c != receiverId) occ = 1.0f;
         } else {
-            const uint16_t c00 = closestPoly(s00, iddRow0[iX  ], zs00, zdRow0[iX  ]);
-            const uint16_t c10 = closestPoly(s10, iddRow0[iX+1], zs10, zdRow0[iX+1]);
-            const uint16_t c01 = closestPoly(s01, iddRow1[iX  ], zs01, zdRow1[iX  ]);
-            const uint16_t c11 = closestPoly(s11, iddRow1[iX+1], zs11, zdRow1[iX+1]);
+            const uint16_t c00 = closestPoly(s00, iddB[o00], zs00, zdB[o00]);
+            const uint16_t c10 = closestPoly(s10, iddB[o10], zs10, zdB[o10]);
+            const uint16_t c01 = closestPoly(s01, iddB[o01], zs01, zdB[o01]);
+            const uint16_t c11 = closestPoly(s11, iddB[o11], zs11, zdB[o11]);
             if (c00 != 0 && c00 != receiverId) occ += w00;
             if (c10 != 0 && c10 != receiverId) occ += w10;
             if (c01 != 0 && c01 != receiverId) occ += w01;
             if (c11 != 0 && c11 != receiverId) occ += w11;
         }
     } else {
-        // Depth mode: legacy biased depth comparison.
-        const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-        const uint16_t *zsRow1 = zsRow0 + sm.xres;
-        // Dynamic buffer — populated only when --shadow-dynamic on. When
-        // off it's still allocated but all-zero, so max() falls through
-        // to the static value with no behavior change. (Cache cost of
-        // touching it is the real penalty; gate at scene level if needed.)
-        const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-        const uint16_t *zdRow1 = zdRow0 + sm.xres;
+        // Depth mode: legacy biased depth comparison. Dynamic plane is
+        // populated only when --shadow-dynamic on; when off it's still
+        // allocated but all-zero, so max() falls through to the static
+        // value with no behavior change.
         int pixZenc = 0xFF80 - int(lz * sm.zScale);
         if (pixZenc < 0) pixZenc = 0;
         if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
@@ -365,10 +400,10 @@ inline float CubeShadow_Sample(int cubeIdx,
             return int((dynamicOnly ? uint16_t(0) : a) > b
                        ? (dynamicOnly ? uint16_t(0) : a) : b);
         };
-        if (biased < closest(zsRow0[iX    ], zdRow0[iX    ])) occ += w00;
-        if (biased < closest(zsRow0[iX + 1], zdRow0[iX + 1])) occ += w10;
-        if (biased < closest(zsRow1[iX    ], zdRow1[iX    ])) occ += w01;
-        if (biased < closest(zsRow1[iX + 1], zdRow1[iX + 1])) occ += w11;
+        if (biased < closest(zsB[o00], zdB[o00])) occ += w00;
+        if (biased < closest(zsB[o10], zdB[o10])) occ += w10;
+        if (biased < closest(zsB[o01], zdB[o01])) occ += w01;
+        if (biased < closest(zsB[o11], zdB[o11])) occ += w11;
     }
     return (occ >= 1.0f) ? 0.0f : (1.0f - occ);
 }
