@@ -175,6 +175,32 @@ std::string js_editorMatDebug(std::string name)
 	  ml ? ml->Luminosity : -1.0f, mlCount, tt ? tt->Luminosity : -1.0f, (unsigned)mt.count, (ml == tt) ? 1 : 0);
 	return buf;
 }
+// Pack upload: classify one filename into its map role with the native token
+// rules (albedo/normal/height/roughness/ao, "" = skip) so the browser's
+// load-a-whole-folder flow detects roles identically to --material-import.
+std::string js_editorClassifyMap(std::string filename)
+{
+	return fds::MaterialImport_ClassifyRole(filename.c_str());
+}
+// Phase 2 click-to-pick: resolve the surface under a canvas click. (u,v) are
+// normalized [0,1] over the ENGINE surface (shell.html undoes the canvas
+// letterbox using Module.__floodTexW/H — the same math Wasm_PresentGL uses to
+// draw it). Reads the last rendered frame's G-buffer matID plane; returns the
+// base surface name ("" = no surface: sentinel pixel, forward-rendered, or
+// out of range).
+std::string js_editorPick(float u, float v)
+{
+	if (!g_gbuffer || g_gbuffer->txtr.empty() || !CurScene) return "";
+	const int x = int(u * float(XRes));
+	const int y = int(v * float(YRes));
+	if (x < 0 || y < 0 || x >= XRes || y >= YRes) return "";
+	const size_t i = size_t(y) * size_t(XRes) + size_t(x);
+	if (i >= g_gbuffer->txtr.size()) return "";
+	const unsigned mid = (g_gbuffer->txtr[i] >> 20) & 0xFF;
+	MatTable mt = Scene_GetMatTable(CurScene);
+	if (mid >= mt.count || !mt.data[mid] || !mt.data[mid]->Name) return "";
+	return rev::Editor_BaseSurfName(mt.data[mid]->Name);
+}
 // Diagnostic: the live render-flag state the kernel actually sees, so we can tell
 // from JS whether the editor's flag overrides (deferred / shadow_lightmap off /
 // hdr) really took effect — instead of inferring it from screenshots.
@@ -255,5 +281,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorHighlight",      &js_editorHighlight);
 	emscripten::function("editorFlags",          &js_editorFlags);
 	emscripten::function("editorProbe",          &js_editorProbe);
+	emscripten::function("editorPick",           &js_editorPick);
+	emscripten::function("editorClassifyMap",    &js_editorClassifyMap);
 }
 #endif // __EMSCRIPTEN__

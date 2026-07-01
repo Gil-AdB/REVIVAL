@@ -305,6 +305,18 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	}
 }
 
+const char *MaterialImport_ClassifyRole(const char *filename) {
+	if (!filename || !hasImageExt(filename)) return "";
+	switch (classify(stemLower(filename))) {
+		case Role::Albedo:    return "albedo";
+		case Role::Normal:    return "normal";
+		case Role::Height:    return "height";
+		case Role::Roughness: return "roughness";
+		case Role::Ao:        return "ao";
+		default:              return "";   // Skip / Metallic / None — nothing to apply
+	}
+}
+
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path) {
 	if (!sc || !matName || !role || !path) return false;

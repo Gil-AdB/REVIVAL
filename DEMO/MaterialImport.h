@@ -52,6 +52,13 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName);
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path);
 
+// Classify a map filename into its role using the same token rules as the CLI
+// dir scan (see the table above). Returns "albedo" | "normal" | "height" |
+// "roughness" | "ao" | "" (unrecognized / non-image / preview-skip / metallic —
+// roles the editor can't apply). Lets the browser's load-a-whole-pack upload
+// share the native detection instead of duplicating it in JS.
+const char *MaterialImport_ClassifyRole(const char *filename);
+
 } // namespace fds
 
 #endif // REVIVAL_MATERIAL_IMPORT_H

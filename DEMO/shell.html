@@ -496,7 +496,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b14</span></h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b16</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -505,10 +505,24 @@
     <script>
       var editorSurfaces = [], editorSelected = null;
       function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
+      // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
+      // window and preventDefault()s every key (they feed the engine's Keyboard[]
+      // array), so an <input> never receives the character — the filter box was
+      // untypeable. This capture-phase listener is registered BEFORE the wasm
+      // runtime loads (the emscripten SCRIPT tag is below), so it runs first: when focus is
+      // in a form field, stop the event from ever reaching SDL and let the
+      // browser's default text editing happen.
+      if (revEditorMode) ['keydown','keyup','keypress'].forEach(function(t){
+        window.addEventListener(t, function(e){
+          var el = document.activeElement;
+          if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA'))
+            e.stopImmediatePropagation();   // no preventDefault — typing IS the default
+        }, true);
+      });
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b14); orbit/zoom embind =',
+        console.log('[editor] panel init (build b16); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
@@ -530,13 +544,19 @@
           d.className = 'surf-item' + (editorSelected === s.name ? ' sel' : '');
           d.innerHTML = '<div>' + s.name + '</div>' +
             (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
-          d.onclick = function(){
-            editorSelected = s.name; renderSurfaceList(); renderSurfaceProps(s);
-            if (Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
-            if (Module.editorHighlight) Module.editorHighlight(s.name);        // outline it in the render
-          };
+          d.onclick = function(){ selectSurface(s, /*alsoFocus=*/true); };
           el.appendChild(d);
         });
+      }
+      // Shared select path: list click focuses the orbit on the surface;
+      // canvas pick only selects/highlights (jumping the camera on every
+      // viewport click would fight the user's framing).
+      function selectSurface(s, alsoFocus){
+        editorSelected = s.name; renderSurfaceList(); renderSurfaceProps(s);
+        if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
+        if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
+        var sel = document.querySelector('#editor-list .surf-item.sel');
+        if (sel) sel.scrollIntoView({ block: 'nearest' });
       }
       function setProp(name, key, v){
         var ok = false;
@@ -582,9 +602,50 @@
 
         // PBR map import — upload an image per role; bytes go to the engine via
         // Embind (editorImportTexture), which reuses the --material-import path.
+        function importFile(role, file, done){
+          var fr = new FileReader();
+          fr.onload = function(){
+            var bytes = new Uint8Array(fr.result), ok = false;
+            try { ok = Module.editorImportTexture(s.name, role, file.name, bytes); }
+            catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); if (done) done(false); return; }
+            console.log('[editor] import', s.name, role, file.name, bytes.length, '->', ok);
+            if (done) done(ok);
+          };
+          fr.readAsArrayBuffer(file);
+        }
         var imp = document.createElement('div');
         imp.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
         var ih = document.createElement('div'); ih.style.cssText = 'color:#fff;margin-bottom:4px;'; ih.textContent = 'Import PBR maps'; imp.appendChild(ih);
+        // Whole-pack import: pick a folder (FreePBR/ambientCG layout) and each
+        // map is role-detected by filename with the SAME native token rules as
+        // --material-import (Module.editorClassifyMap). First match per role wins.
+        var pr = document.createElement('div'); pr.className = 'prop-row';
+        var pl = document.createElement('label'); pl.textContent = 'pack (dir)'; pr.appendChild(pl);
+        var pinp = document.createElement('input'); pinp.type = 'file';
+        pinp.setAttribute('webkitdirectory', ''); pinp.setAttribute('multiple', '');
+        pinp.style.cssText = 'flex:1;min-width:0;font-size:10px;color:#bbb;';
+        pinp.onchange = function(){
+          var files = Array.prototype.slice.call(pinp.files || []);
+          if (!files.length) return;
+          var slots = {};   // role -> file, first match wins (native dir-scan order rule)
+          files.forEach(function(f){
+            var role = '';
+            try { role = Module.editorClassifyMap(f.name); } catch(e){}
+            if (role && !slots[role]) slots[role] = f;
+          });
+          var roles = Object.keys(slots);
+          if (!roles.length) { editorStatus('pack: no recognizable maps in folder'); return; }
+          editorStatus('pack: importing ' + roles.join(', ') + '…');
+          var doneCount = 0, okCount = 0;
+          roles.forEach(function(role){
+            importFile(role, slots[role], function(ok){
+              if (ok) okCount++;
+              if (++doneCount === roles.length)
+                editorStatus('pack: ' + okCount + '/' + roles.length + ' maps applied (' + roles.join(', ') + ')');
+            });
+          });
+        };
+        pr.appendChild(pinp); imp.appendChild(pr);
         ['albedo','normal','height','roughness','ao'].forEach(function(role){
           var row = document.createElement('div'); row.className = 'prop-row';
           var lab = document.createElement('label'); lab.textContent = role; row.appendChild(lab);
@@ -593,15 +654,9 @@
           inp.onchange = function(){
             var file = inp.files && inp.files[0]; if (!file) return;
             editorStatus('importing ' + role + '…');
-            var fr = new FileReader();
-            fr.onload = function(){
-              var bytes = new Uint8Array(fr.result), ok = false;
-              try { ok = Module.editorImportTexture(s.name, role, file.name, bytes); }
-              catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); return; }
+            importFile(role, file, function(ok){
               editorStatus(ok ? (role + ' imported: ' + file.name) : (role + ' import FAILED'));
-              console.log('[editor] import', s.name, role, file.name, bytes.length, '->', ok);
-            };
-            fr.readAsArrayBuffer(file);
+            });
           };
           row.appendChild(inp); imp.appendChild(row);
         });
@@ -614,19 +669,55 @@
       // listener can't eat slider drags and panel drags never orbit the camera.
       (function(){
         if (!revEditorMode) return;
-        // left-drag = orbit, right-drag or shift+drag = pan, wheel = zoom.
-        var mode = null, lastX = 0, lastY = 0;
+        // left-drag = orbit, right-drag or shift+drag = pan, wheel = zoom,
+        // left-CLICK (no drag) = pick the surface under the cursor.
+        var mode = null, lastX = 0, lastY = 0, downX = 0, downY = 0, dragged = false;
         canvasEl.addEventListener('mousedown', function(e){
           mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
-          lastX = e.clientX; lastY = e.clientY; e.preventDefault();
+          lastX = downX = e.clientX; lastY = downY = e.clientY; dragged = false;
+          e.preventDefault();
         });
         window.addEventListener('mouseup', function(){ mode = null; });
         window.addEventListener('mousemove', function(e){
           if (!mode) return;
           var dx = e.clientX - lastX, dy = e.clientY - lastY;
           lastX = e.clientX; lastY = e.clientY;
+          if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) dragged = true;
           if (mode === 'pan')  { if (Module.editorPan)   Module.editorPan(dx, dy); }
           else                 { if (Module.editorOrbit) Module.editorOrbit(dx, dy); }
+        });
+        // Click position → engine-surface UV: undo the canvas letterbox with the
+        // SAME math Wasm_PresentGL uses (Module.__floodTexW/H = engine surface).
+        function canvasToEngineUV(e){
+          var tw = Module.__floodTexW, th = Module.__floodTexH;
+          if (!tw || !th) return null;
+          var r = canvasEl.getBoundingClientRect();
+          var cx = (e.clientX - r.left) * (canvasEl.width  / r.width);
+          var cy = (e.clientY - r.top)  * (canvasEl.height / r.height);
+          var srcAR = tw / th, canAR = canvasEl.width / canvasEl.height;
+          var dx = 0, dy = 0, dw = canvasEl.width, dh = canvasEl.height;
+          if (canAR > srcAR) { dw = (canvasEl.height * srcAR) | 0; dx = (canvasEl.width  - dw) >> 1; }
+          else               { dh = (canvasEl.width  / srcAR) | 0; dy = (canvasEl.height - dh) >> 1; }
+          var u = (cx - dx) / dw, v = (cy - dy) / dh;
+          return (u < 0 || u > 1 || v < 0 || v > 1) ? null : { u: u, v: v };
+        }
+        function pickAt(e){
+          if (!Module.editorPick) return null;
+          var uv = canvasToEngineUV(e);
+          if (!uv) return null;
+          try { return Module.editorPick(uv.u, uv.v) || null; } catch (err) { return null; }
+        }
+        canvasEl.addEventListener('mouseup', function(e){
+          if (dragged || e.button !== 0 || e.shiftKey) return;
+          var name = pickAt(e);
+          if (!name) { editorStatus('pick: no surface here'); return; }
+          var s = editorSurfaces.find(function(x){ return x.name === name; });
+          if (s) { selectSurface(s, /*alsoFocus=*/false); editorStatus('picked: ' + name); }
+        });
+        // Double-click = pick AND frame the orbit on it.
+        canvasEl.addEventListener('dblclick', function(e){
+          var name = pickAt(e);
+          if (name && Module.editorFocusSurface) Module.editorFocusSurface(name);
         });
         canvasEl.addEventListener('wheel', function(e){
           if (!Module.editorZoom) return;
