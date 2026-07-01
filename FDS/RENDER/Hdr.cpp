@@ -93,6 +93,67 @@ void Hdr_ActivateNoFog() {
     g_hdrActive = true;
 }
 
+// ── Shared HDR bright-pass ────────────────────────────────────────────────
+// Bloom, anamorphic, and lens-ghost each built an IDENTICAL bright-pass (DS=4
+// downsample of g_hdrBuf, soft knee at bloom_threshold) — streaming the full
+// HDR buffer 3× (memory-bound). Compute once per frame; each consumer copies it
+// into its own working buffer. Built only when a consumer is active.
+static std::vector<float> g_brightPass;   // g_bpBW*g_bpBH*3
+static int g_bpBW = 0, g_bpBH = 0;
+
+// The DS=4 soft-knee downsample loop (parallel over rows; scalar inner — it's
+// memory-bound, so avoiding the 2 redundant streams matters more than SIMD).
+static void hdrBrightPassInto(float* dst, int bw, int bh, int W, int H,
+                              const float* hb, float thresh) {
+    hdrDispatchRows(bh, [=](int by1, int by2) {
+        const float inv = 1.0f / 16.0f;   // DS*DS
+        for (int by = by1; by < by2; ++by)
+            for (int bx = 0; bx < bw; ++bx) {
+                float sb = 0, sg = 0, sr = 0;
+                for (int dy = 0; dy < 4; ++dy) {
+                    const int sy = by*4 + dy; if (sy >= H) break;
+                    const float* h = hb + size_t(sy) * size_t(W) * 4;
+                    for (int dx = 0; dx < 4; ++dx) {
+                        const int sx = bx*4 + dx; if (sx >= W) break;
+                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
+                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
+                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
+                    }
+                }
+                float* a = dst + (size_t(by) * bw + bx) * 3;
+                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
+            }
+    });
+}
+
+// Copy the shared bright-pass into `dst`, or compute it if the shared one wasn't
+// built for these dims (fallback — keeps each pass correct standalone).
+static void getBrightPass(float* dst, int bw, int bh, int W, int H,
+                          const float* hb, float thresh) {
+    const size_t n = size_t(bw) * size_t(bh) * 3;
+    if (g_bpBW == bw && g_bpBH == bh && g_brightPass.size() >= n)
+        std::memcpy(dst, g_brightPass.data(), n * sizeof(float));
+    else
+        hdrBrightPassInto(dst, bw, bh, W, H, hb, thresh);
+}
+
+// Build the shared bright-pass once per frame — call BEFORE the consumers.
+// No-op unless at least one of bloom / anamorphic / lens-ghost is active.
+void Render_HdrBrightPass() {
+    g_bpBW = g_bpBH = 0;
+    if (!g_hdrActive) return;
+    if (!(FeatureFlags::bloom() || FeatureFlags::anamorphic() || FeatureFlags::lens_ghosts())) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4) return;
+    const int bw = (W + 3) / 4, bh = (H + 3) / 4;
+    g_brightPass.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
+    hdrBrightPassInto(g_brightPass.data(), bw, bh, W, H, g_hdrBuf.data(),
+                      FeatureFlags::bloom_threshold());
+    g_bpBW = bw; g_bpBH = bh;
+}
+
 void Render_BloomPass() {
     if (!FeatureFlags::bloom() || !g_hdrActive) return;
     const RenderTarget rt = MainRenderTargetFromGlobals();
@@ -112,29 +173,10 @@ void Render_BloomPass() {
     float* const A = s_acc.data();
     float* const T = s_tmp.data();
 
-    // 1. Bright-pass + downsample: each quarter-res cell = mean over its DS×DS
-    //    source block of the radiance ABOVE the knee (per-channel, soft so the
-    //    colour is preserved and the transition isn't hard). Reads the linear
-    //    g_hdrBuf — the true unclamped source.
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = A + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // Bright-pass + downsample (soft knee above the threshold) — SHARED with
+    // anamorphic + lens-ghost via Render_HdrBrightPass (computed once/frame;
+    // getBrightPass falls back to inline if the shared one wasn't built).
+    getBrightPass(A, bw, bh, W, H, hb, thresh);
 
     // 2. Separable 5-tap gaussian ([1 4 6 4 1]/16), 2 passes for a wider glow.
     //    Horizontal A->T then vertical T->A (each pass writes disjoint rows).
@@ -217,26 +259,8 @@ void Render_AnamorphicPass() {
     const float* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
 
-    // 1. Bright-pass + downsample (same soft knee as bloom).
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = BR + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // 1. Bright-pass + downsample (same soft knee as bloom) — SHARED.
+    getBrightPass(BR, bw, bh, W, H, hb, thresh);
 
     // 2. Directional exponential streak via offset-doubling (length ~2^passes
     //    quarter-res px). Each pass: out[x] = in[x] + decay*(in[x-s] + in[x+s]),
@@ -447,25 +471,10 @@ void Render_LensGhostPass() {
     s_br.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
     const float* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = BR + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // Bright-pass — SHARED (computed once/frame by Render_HdrBrightPass). With
+    // count=0 the ghost chain below is a no-op; the shared pass means this pass
+    // no longer pays its own full-HDR downsample just for the halo.
+    getBrightPass(BR, bw, bh, W, H, hb, thresh);
 
     float* const hw = g_hdrBuf.data();
     hdrDispatchRows(H, [=](int y1, int y2) {
