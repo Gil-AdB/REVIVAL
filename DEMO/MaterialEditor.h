@@ -10,6 +10,13 @@
 // mutation shows up on the next rendered frame with no re-bake.
 namespace rev {
 
+// Collapse a "<surface>::mirUV" handedness-clone material name (greets'
+// FixNormalMapSeam split) onto its base surface name. Some surfaces render
+// ONLY through their clone (base "floor" covers 0 px), so every name-keyed
+// operation — enumerate, edit, highlight, focus, PBR import — must match by
+// base name or it silently misses the geometry that actually draws.
+std::string Editor_BaseSurfName(const char* name);
+
 // JSON array of the current scene's distinct surfaces + their editable props:
 //   [{name, baseR,baseG,baseB, diffuse, specular, glossiness, luminosity,
 //     transparency, reflection, flags, texture}, ...]

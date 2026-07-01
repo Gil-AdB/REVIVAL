@@ -17,11 +17,9 @@
 
 namespace rev {
 
-// A surface can render through per-handedness mirror-UV clones named
-// "<surface>::mirUV" (e.g. the floor renders only as "floor::mirUV", base
-// "floor" covers 0 px). Collapse the clone onto its base so the panel lists
-// each surface once and an edit reaches every material that draws it.
-static std::string baseSurfName(const char* n)
+// See MaterialEditor.h — some surfaces render only through their "::mirUV"
+// handedness clone, so all name-keyed ops collapse to the base name.
+std::string Editor_BaseSurfName(const char* n)
 {
 	std::string s = n ? n : "";
 	static const std::string suf = "::mirUV";
@@ -57,7 +55,7 @@ std::string Editor_GetSurfacesJSON()
 	for (Material* M = MatLib; M; M = M->Next) {
 		if (M->RelScene != CurScene) continue;
 		if (!M->Name) continue;
-		std::string base = baseSurfName(M->Name);
+		std::string base = Editor_BaseSurfName(M->Name);
 		if (!seen.insert(base).second) continue;   // de-dup by base name (::mirUV collapsed)
 
 		if (!first) out += ",";
@@ -89,7 +87,7 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	bool any = false;
 	for (Material* M = MatLib; M; M = M->Next) {
 		if (M->RelScene != CurScene) continue;
-		if (!M->Name || baseSurfName(M->Name) != name) continue;   // ::mirUV clones too
+		if (!M->Name || Editor_BaseSurfName(M->Name) != name) continue;   // ::mirUV clones too
 		if      (!std::strcmp(key, "baseR"))        M->BaseCol.R = value;
 		else if (!std::strcmp(key, "baseG"))        M->BaseCol.G = value;
 		else if (!std::strcmp(key, "baseB"))        M->BaseCol.B = value;
@@ -208,7 +206,7 @@ std::string js_editorProbe(std::string name)
 	int  matIds[8]; int nIds = 0;
 	float lum = -1, dif = -1, spec = -1; unsigned gloss = 0;
 	for (dword i = 0; i < mt.count && i < 256; ++i)
-		if (mt.data[i] && mt.data[i]->Name && rev::baseSurfName(mt.data[i]->Name) == name) {
+		if (mt.data[i] && mt.data[i]->Name && rev::Editor_BaseSurfName(mt.data[i]->Name) == name) {
 			want[i] = true;
 			if (nIds < 8) matIds[nIds++] = int(i);
 			lum = mt.data[i]->Luminosity; dif = mt.data[i]->Diffuse;

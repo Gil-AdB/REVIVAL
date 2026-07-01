@@ -670,7 +670,9 @@ void editorFocusSurface(std::string name)
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
 		for (DWord i = 0; i < T->FIndex; ++i) {
 			Face &F = T->Faces[i];
-			if (!F.Txtr || !F.Txtr->Name || name != F.Txtr->Name) continue;
+			// Base-name match: floor's faces reference the "floor::mirUV"
+			// handedness clone, so an exact compare finds no faces at all.
+			if (!F.Txtr || !F.Txtr->Name || rev::Editor_BaseSurfName(F.Txtr->Name) != name) continue;
 			Vertex *vs[3] = { F.A, F.B, F.C };
 			for (int k = 0; k < 3; ++k) {
 				Vertex *v = vs[k]; if (!v) continue;

@@ -1,5 +1,6 @@
 #include "MaterialImport.h"
 
+#include "MaterialEditor.h"          // rev::Editor_BaseSurfName (::mirUV collapse)
 #include "MeshOps.h"                 // MakeHeight8, MakeNormal16, BakeNormalMapFromDiffuse
 #include <Base/FDS_VARS.H>           // MatLib
 #include <Base/FDS_DECS.H>           // Load_Texture, BPPConvert_Texture, Generate_Mipmaps
@@ -304,38 +305,49 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path) {
 	if (!sc || !matName || !role || !path) return false;
-	Material *M = findMaterial(sc, matName);
-	if (!M) { std::fprintf(stderr, "[MAT-IMPORT] '%s' not in scene\n", matName); return false; }
+	// Collect EVERY material drawing this surface: the exact name plus any
+	// "::mirUV" handedness clones. Some surfaces render only through their
+	// clone (greets floor), so assigning the map to the base material alone
+	// changes nothing on screen.
+	std::vector<Material *> mats;
+	for (Material *M = MatLib; M; M = M->Next)
+		if (M->RelScene == sc && M->Name &&
+		    (matName == std::string(M->Name) || rev::Editor_BaseSurfName(M->Name) == matName))
+			mats.push_back(M);
+	if (mats.empty()) { std::fprintf(stderr, "[MAT-IMPORT] '%s' not in scene\n", matName); return false; }
 
+	// Load/convert once, share the Texture* across all matching materials.
 	const std::string r = role;
 	bool tangentMap = false, ok = false;
 	if (r == "albedo") {
-		if (Texture *t = loadTiled(path, false)) { M->Txtr = t; ok = true; }
+		if (Texture *t = loadTiled(path, false)) { for (Material *M : mats) M->Txtr = t; ok = true; }
 	} else if (r == "normal") {
 		// No filename convention to sniff here; default to the engine (OGL)
 		// convention, honoring the global --material-import-flip-normal override.
 		if (Texture *t = loadTiled(path, g_forceFlipNormal)) {
 			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
-			M->NormalMap = t; tangentMap = true; ok = true;
+			for (Material *M : mats) M->NormalMap = t;
+			tangentMap = true; ok = true;
 		}
 	} else if (r == "height") {
-		if (Texture *h32 = loadTiled(path, false)) { Texture *h8 = MakeHeight8(h32); M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
+		if (Texture *h32 = loadTiled(path, false)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
-		if (Texture *r32 = loadTiled(path, false)) { Texture *r8 = MakeHeight8(r32); M->RoughnessMap = r8 ? r8 : r32; ok = true; }
+		if (Texture *r32 = loadTiled(path, false)) { Texture *r8 = MakeHeight8(r32); for (Material *M : mats) M->RoughnessMap = r8 ? r8 : r32; ok = true; }
 	} else if (r == "ao") {
-		if (Texture *a32 = loadTiled(path, false)) { Texture *a8 = MakeHeight8(a32); M->AoMap = a8 ? a8 : a32; ok = true; }
+		if (Texture *a32 = loadTiled(path, false)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
 	} else {
 		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
 	}
-	std::fprintf(stderr, "[MAT-IMPORT] '%s' <- %s map %s (%s)\n",
-	             matName, role, path, ok ? "ok" : "FAILED");
+	std::fprintf(stderr, "[MAT-IMPORT] '%s' <- %s map %s (%s, %zu material(s))\n",
+	             matName, role, path, ok ? "ok" : "FAILED", mats.size());
 	// A material that gained a normal/height map needs its meshes' tangents
 	// recomputed (same reason as the CLI path).
 	if (ok && tangentMap) {
 		for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
 			bool uses = false;
 			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
-				if (T->Faces[i].Txtr == M) uses = true;
+				for (Material *M : mats)
+					if (T->Faces[i].Txtr == M) { uses = true; break; }
 			if (uses) Compute_Vertex_Tangents(T);
 		}
 	}
