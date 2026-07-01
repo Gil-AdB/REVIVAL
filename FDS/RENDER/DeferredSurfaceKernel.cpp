@@ -3000,7 +3000,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
 				return true;
 			};
-			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp() && !hdrWrite;
+			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp();
 
 			bool matched = false;
 			if (quarter) {
@@ -3037,7 +3037,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
 				float ownB=0, ownG=0, ownR=0;
 				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
-				float slB=0, slG=0, slR=0; int nsharp=0;
+				float slB=0, slG=0, slR=0;                 // LDR reconstructed lighting
+				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -3045,41 +3046,51 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					const float* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr;
 						if (fetchTexel(nidx[k], nb, ng, nr)) {
 							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
 							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
 							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							if (nh) {
+								// radiance ∝ texel^exp (2 = hdr_linear albedo², 1 = gamma);
+								// re-apply own texel: R_i = R_n·(texel_i/texel_n)^exp.
+								float rB=ownB/std::max(nb,1.0f), rG=ownG/std::max(ng,1.0f), rR=ownR/std::max(nr,1.0f);
+								if (hdrLinear) { rB*=rB; rG*=rG; rR*=rR; }
+								ahB += nh[0]*rB; ahG += nh[1]*rG; ahR += nh[2]*rR;
+							}
 							++nsharp;
 						}
 					}
 					++n;
 				}
 				if (n > 0) {
-					if (haveOwn && nsharp > 0) {
+					if (haveOwn && nsharp > 0 && !hdrWrite) {
 						const float inv = 1.0f / (float(nsharp) * 256.0f);
 						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
 						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
 						int oR = int(ownR * slR * inv + 0.5f); if (oR > 255) oR = 255;
 						out[i] = dword(oB) | (dword(oG) << 8) | (dword(oR) << 16) | 0xFF000000u;
-						matched = true;
-						continue;
+					} else {
+						int aR, aG, aB;
+						if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+						else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
+						else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
+						else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
+						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
-					int aR, aG, aB;
-					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
-					else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
-					else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
-					else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
-					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
-					// HDR: average the neighbours' unclamped float radiance so the
-					// filled pixel matches wave-1 (the 8-bit avg above caps at 255 →
-					// dim checker on bright reflections under --deferred-quarter).
 					if (hdrWrite) {
-						const float inv = 1.0f / float(n);
 						float* h = fds::g_hdrBuf.data() + i*4;
-						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+						if (haveOwn && nsharp > 0) {
+							const float invn = 1.0f / float(nsharp);
+							h[0] = ahB*invn; h[1] = ahG*invn; h[2] = ahR*invn;
+						} else {
+							const float inv = 1.0f / float(n);
+							h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv;
+						}
+						h[3] = 1.0f;
 					}
 					matched = true;
 				}
