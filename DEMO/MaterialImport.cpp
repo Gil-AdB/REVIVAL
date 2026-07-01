@@ -156,12 +156,6 @@ Texture *loadTiled(const std::string &path, bool flipGreen) {
 	return t;
 }
 
-Material *findMaterial(Scene *sc, const std::string &name) {
-	for (Material *M = MatLib; M; M = M->Next)
-		if (M->RelScene == sc && M->Name && name == M->Name) return M;
-	return nullptr;
-}
-
 } // namespace
 
 void MaterialImport_ParseArgs(int argc, const char *const *argv) {
@@ -197,7 +191,15 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	// at steep-relief texels. Recomputing tangents now fixes it.
 	std::vector<Material*> needTangent;
 	for (const ImportSpec &spec : g_specs) {
-		Material *M = findMaterial(sc, spec.matName);
+		// Every material drawing this surface: exact name + "::mirUV" handedness
+		// clones (some surfaces render ONLY through their clone — see
+		// MaterialImport_ApplyMapFile). Maps are loaded once and shared.
+		std::vector<Material *> mats;
+		for (Material *m = MatLib; m; m = m->Next)
+			if (m->RelScene == sc && m->Name &&
+			    (spec.matName == m->Name || rev::Editor_BaseSurfName(m->Name) == spec.matName))
+				mats.push_back(m);
+		Material *M = mats.empty() ? nullptr : mats[0];
 		if (!M) {
 			// Help the user: a material name that isn't in this scene is usually
 			// a typo or wrong scene. List what IS available.
@@ -236,7 +238,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 
 		if (!albedo.empty()) {
 			if (Texture *t = loadTiled(albedo, false)) {
-				M->Txtr = t;
+				for (Material *m : mats) m->Txtr = t;
 				std::fprintf(stderr, "    albedo    %s (%dx%d)\n", albedo.c_str(), t->SizeX, t->SizeY);
 			}
 		} else {
@@ -248,7 +250,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			if (g_forceFlipNormal) flip = !flip;
 			if (Texture *t = loadTiled(normal, flip)) {
 				if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
-				M->NormalMap = t;
+				for (Material *m : mats) m->NormalMap = t;
 				std::fprintf(stderr, "    normal    %s (src=%s, flipG=%d%s)\n", normal.c_str(),
 				             srcOGL ? "OGL" : "DX", flip, g_forceFlipNormal ? ", forced" : "");
 			}
@@ -256,14 +258,14 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 		if (!rough.empty()) {
 			if (Texture *r32 = loadTiled(rough, false)) {
 				Texture *r8 = MakeHeight8(r32);
-				M->RoughnessMap = r8 ? r8 : r32;
+				for (Material *m : mats) m->RoughnessMap = r8 ? r8 : r32;
 				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), r8 ? "8-bit" : "32-bit");
 			}
 		}
 		if (!height.empty()) {
 			if (Texture *h32 = loadTiled(height, false)) {
 				Texture *h8 = MakeHeight8(h32);
-				M->HeightMap = h8 ? h8 : h32;
+				for (Material *m : mats) m->HeightMap = h8 ? h8 : h32;
 				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), h8 ? "8-bit" : "32-bit",
 				             fds::FeatureFlags::parallax() ? "" : "  [--parallax off: loaded but inactive]");
 			}
@@ -271,7 +273,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 		if (!ao.empty()) {
 			if (Texture *a32 = loadTiled(ao, false)) {
 				Texture *a8 = MakeHeight8(a32);
-				M->AoMap = a8 ? a8 : a32;
+				for (Material *m : mats) m->AoMap = a8 ? a8 : a32;
 				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), a8 ? "8-bit" : "32-bit");
 			}
 		}
@@ -279,7 +281,8 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			std::fprintf(stderr, "    metallic  %s  [IGNORED — deferred path is diffuse+spec, no metallic workflow]\n",
 			             metallic.c_str());
 
-		if (M->NormalMap || M->HeightMap) needTangent.push_back(M);
+		if (M->NormalMap || M->HeightMap)
+			for (Material *m : mats) needTangent.push_back(m);
 	}
 
 	// Recompute per-vertex tangents for any mesh using a material that just
