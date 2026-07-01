@@ -58,7 +58,19 @@ values here are 0..~10⁴). Alpha/coverage flag can stay a u8 plane or f16.
 - **Why it ranks #1:** it's the only lever that cuts the *whole* 16 ms bucket
   proportionally without any per-effect quality decision.
 
-### 3.2 Cube-face shared transform in the shadow bake — EST −2…3 ms, medium effort, byte-identical
+### 3.2 ~~Cube-face shared transform~~ → SUPERSEDED 2026-07-02: adaptive tile grid (SHIPPED, −2.3 ms)
+Measurement redirected this one. The per-mesh "Supermatrix" already folds the
+projection constants into the same per-vertex FMAs (no separate transform stage
+to amortize), and with face-culling each mesh only visits ~1.5-2 faces — so the
+shared-transform ceiling was ~0.3-0.5 ms of a 1.5 ms xform phase. The REAL bake
+cost was the Phase-B raster: a fixed 4×4 grid (tuned for 512²) made every tile
+task re-walk the light's whole FList through the clipper — 16 clip-walks/light
+at 256². Shipped: per-light grid = res/128 clamped [1,4] (commit 2168980).
+Bake 7.55→4.77 ms, frame −2.3 ms. Also fixed --shadow_prof per-mode accounting.
+Residual bake ideas if ever needed: per-omni single mesh-walk (share the 6
+face-cull tests), world-bsphere caching per frame.
+
+### (original 3.2 analysis, kept for the record) — cube-face shared transform
 The bake is transform-bound (halving raster res only saved ~0.8 of ~5 ms). Today each
 of an omni's 6 faces runs a full `Transform_Objects` (world→view 3×3 matmul + project
 per vertex) = 76 transform passes/frame. But the cube-face cameras are **world-axis-
