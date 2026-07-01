@@ -248,7 +248,7 @@ void Render_SSAO() {
 							const float ndotsn = Nx*snx + Ny*sny + Nz*snz;
 							const float pnx = Nx - snx*ndotsn, pny = Ny - sny*ndotsn, pnz = Nz - snz*ndotsn;
 							const float tx = sny*Vz - snz*Vy, ty = snz*Vx - snx*Vz, tz = snx*Vy - sny*Vx;
-							const float nAng = atan2f(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
+							const float nAng = atan2_approx(pnx*tx + pny*ty + pnz*tz, pnx*Vx + pny*Vy + pnz*Vz);
 							uint32_t mask = 0u;
 							for (int sgn = -1; sgn <= 1; sgn += 2) {
 								for (int j = 0; j < steps; ++j) {
@@ -347,7 +347,7 @@ void Render_SSAO() {
 								const float nd=aNx[k]*snx+aNy[k]*sny+aNz[k]*snz;
 								const float pnx=aNx[k]-snx*nd,pny=aNy[k]-sny*nd,pnz=aNz[k]-snz*nd;
 								const float tx=sny*aVz[k]-snz*aVy[k],ty=snz*aVx[k]-snx*aVz[k],tz=snx*aVy[k]-sny*aVx[k];
-								aNang[k]=atan2f(pnx*tx+pny*ty+pnz*tz, pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]);
+								aNang[k]=atan2_approx(pnx*tx+pny*ty+pnz*tz, pnx*aVx[k]+pny*aVy[k]+pnz*aVz[k]);
 							}
 							const __m256 dcxV=_mm256_load_ps(aDcx), dsyV=_mm256_load_ps(aDsy), nAngV=_mm256_load_ps(aNang);
 							const __m256 jitV=_mm256_load_ps(aJit);
