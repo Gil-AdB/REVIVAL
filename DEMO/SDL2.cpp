@@ -386,6 +386,14 @@ static dword V_Create(VESA_Surface *VS, SDL_Renderer * renderer)
 	memset(VS->Data, 0, VS->BPSL * VS->Y);
 	VS->Handle = nullptr;
 	VS->Flags |= VSurf_LockRender;
+
+	// Engine G-buffer (matches framebuffer / Z16 lifecycle). This was
+	// previously native-only, so the wasm build had g_gbuffer sized 0 →
+	// renderFrame's "deferred only if the G-buffer is sized" guard
+	// (RENDER.CPP) fell back to FORWARD every frame. That silently disabled
+	// the entire deferred/HDR pipeline (tonemap, bloom, all post FX, and the
+	// per-pixel material kernel) in the browser. Size it here too.
+	EngineGBuffer_Resize(VS->X, VS->Y);
 #else
 	s_engineTex = SDL2_MakeTexture(renderer, VS->X, VS->Y, "engine");
 	VS->Handle = static_cast<void *>(s_engineTex.get());
