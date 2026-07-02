@@ -199,19 +199,54 @@
         }
       };
 
-      // Editor: fetch the LIVE GREETS.FLD from the dev server (tools/
-      // editor_server.py serves Runtime/SCENES/GREETS.FLD at this path). The
-      // copy inside DEMO.data was baked at link time, so after a "Save to LWO"
-      // regenerates the FLD, a plain browser reload + this fetch picks it up
-      // without relinking. editorTick (MainLoop.cpp) waits for editorFldReady,
-      // installs the bytes over the preloaded MEMFS file, then starts scene
-      // init. -1 (fetch failed / static hosting) falls back to the baked FLD.
+      // Editor: fetch the LIVE scene data from the dev server (tools/
+      // editor_server.py serves Runtime/ at these paths) — the copies inside
+      // DEMO.data were baked at link time, so after a "Save" regenerates them,
+      // a plain browser reload + these fetches pick them up without relinking:
+      //   SCENES/GREETS.FLD   the scene (numeric material values)
+      //   SCENES/GREETS.MAT   the PBR-map sidecar (surface|role|path lines)
+      //   TEXTURES/PBR/*      every map the sidecar references
+      // editorTick (MainLoop.cpp) waits for editorFldReady, installs
+      // editorFreshFiles into MEMFS, then starts scene init. -1 (fetch failed /
+      // static hosting without the server) falls back to the baked copies.
       if (revEditorMode) {
         Module.editorFldReady = 0;
-        fetch('SCENES/GREETS.FLD?ts=' + Date.now(), { cache: 'no-store' })
-          .then(function(r){ if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-          .then(function(b){ Module.editorFreshFLD = new Uint8Array(b); Module.editorFldReady = 1; })
-          .catch(function(e){ console.warn('[editor] live FLD fetch failed (using baked copy):', e); Module.editorFldReady = -1; });
+        Module.editorFreshFiles = [];   // [{path:'/SCENES/...', data:Uint8Array}]
+        (function(){
+          var bust = '?ts=' + Date.now();
+          function grab(rel){
+            return fetch(rel + bust, { cache: 'no-store' })
+              .then(function(r){ if (!r.ok) throw new Error(rel + ': ' + r.status); return r.arrayBuffer(); })
+              .then(function(b){ Module.editorFreshFiles.push({ path: '/' + rel, data: new Uint8Array(b) }); });
+          }
+          grab('SCENES/GREETS.FLD')
+            .then(function(){
+              // Sidecar is optional (404 = no persisted maps yet).
+              return fetch('SCENES/GREETS.MAT' + bust, { cache: 'no-store' })
+                .then(function(r){ return r.ok ? r.arrayBuffer() : null; })
+                .catch(function(){ return null; });
+            })
+            .then(function(matBuf){
+              if (!matBuf) return [];
+              Module.editorFreshFiles.push({ path: '/SCENES/GREETS.MAT', data: new Uint8Array(matBuf) });
+              var text = new TextDecoder().decode(matBuf);
+              var maps = [];
+              text.split('\n').forEach(function(line){
+                line = line.trim();
+                if (!line || line[0] === '#') return;
+                var parts = line.split('|');
+                if (parts.length === 3 && maps.indexOf(parts[2]) < 0) maps.push(parts[2]);
+              });
+              return Promise.all(maps.map(function(rel){
+                return grab(rel).catch(function(e){ console.warn('[editor] sidecar map fetch failed:', e); });
+              }));
+            })
+            .then(function(){ Module.editorFldReady = 1; })
+            .catch(function(e){
+              console.warn('[editor] live scene fetch failed (using baked copies):', e);
+              Module.editorFldReady = -1;
+            });
+        })();
       }
 
       // ---- Audio: AudioWorklet pump ---------------------------------
@@ -511,7 +546,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b17</span></h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b18</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -541,7 +576,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b17); orbit/zoom embind =',
+        console.log('[editor] panel init (build b18); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
@@ -563,6 +598,22 @@
         }, 500);
       }
       var editorPristine = {};
+      // PBR maps imported this session, pending persistence: surface -> role ->
+      // {filename, bytes:Uint8Array}. Applied live at import time (MEMFS);
+      // "Save" ships them to the server, which stores the files under
+      // Runtime/TEXTURES/PBR/ and records them in the SCENES/GREETS.MAT sidecar.
+      var editorPendingMaps = {};
+      function pendingMapCount(){
+        var n = 0;
+        Object.keys(editorPendingMaps).forEach(function(s){ n += Object.keys(editorPendingMaps[s]).length; });
+        return n;
+      }
+      function b64FromBytes(bytes){
+        var s = '', CH = 0x8000;
+        for (var i = 0; i < bytes.length; i += CH)
+          s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        return btoa(s);
+      }
       var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection'];
       function surfaceDirty(s){
         var p = editorPristine[s.name]; if (!p) return false;
@@ -580,9 +631,11 @@
       }
       function updateSaveButton(){
         var b = document.getElementById('editor-save'); if (!b) return;
-        var n = Object.keys(collectDirty()).length;
-        b.disabled = !n;
-        b.textContent = n ? ('Save to LWO (' + n + ')') : 'Save to LWO';
+        var n = Object.keys(collectDirty()).length, m = pendingMapCount();
+        b.disabled = !(n || m);
+        b.textContent = (n || m)
+          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : ''].filter(Boolean).join(', ') + ')')
+          : 'Save to LWO';
       }
       function renderSurfaceList(){
         var q = (document.getElementById('editor-search').value || '').toLowerCase();
@@ -627,22 +680,35 @@
       document.getElementById('editor-save').onclick = function(){
         var dirty = collectDirty();
         var names = Object.keys(dirty);
-        if (!names.length) return;
-        editorStatus('saving ' + names.length + ' surface(s)…');
-        fetch('api/greets/save', { method: 'POST', body: JSON.stringify({ surfaces: dirty }) })
+        var maps = {};
+        Object.keys(editorPendingMaps).forEach(function(surf){
+          Object.keys(editorPendingMaps[surf]).forEach(function(role){
+            var m = editorPendingMaps[surf][role];
+            (maps[surf] = maps[surf] || {})[role] = { filename: m.filename, data: b64FromBytes(m.bytes) };
+          });
+        });
+        var nMaps = pendingMapCount();
+        if (!names.length && !nMaps) return;
+        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s)…');
+        var payload = { surfaces: dirty };
+        if (nMaps) payload.maps = maps;
+        fetch('api/greets/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
             if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
-            var files = (res.patched || []).map(function(p){ return p.file; }).join(', ');
-            editorStatus('saved → ' + (files || 'no file changes') + ' + GREETS.FLD' +
+            var bits = (res.patched || []).map(function(p){ return p.file; });
+            if (names.length) bits.push('GREETS.FLD');
+            if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → GREETS.MAT');
+            editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
             console.log('[editor] save ok:', res);
-            // Saved values are the new baseline.
+            // Saved values/maps are the new baseline.
             names.forEach(function(n){
               var s = editorSurfaces.find(function(x){ return x.name === n; });
               if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
             });
+            editorPendingMaps = {};
             renderSurfaceList(); updateSaveButton();
           })
           .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
@@ -688,6 +754,13 @@
             try { ok = Module.editorImportTexture(s.name, role, file.name, bytes); }
             catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); if (done) done(false); return; }
             console.log('[editor] import', s.name, role, file.name, bytes.length, '->', ok);
+            if (ok) {
+              // Queue for persistence: Save ships these to the server, which
+              // stores them under Runtime/TEXTURES/PBR/ + the GREETS.MAT sidecar.
+              (editorPendingMaps[s.name] = editorPendingMaps[s.name] || {})[role] =
+                { filename: file.name, bytes: bytes };
+              updateSaveButton();
+            }
             if (done) done(ok);
           };
           fr.readAsArrayBuffer(file);

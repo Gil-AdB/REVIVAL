@@ -431,13 +431,18 @@ static void editorMaybeSpawnInit()
 	if (st == 0) return;                          // fetch still in flight
 	if (st == 1) {
 		EM_ASM({
-			try {
-				FS.writeFile('/SCENES/GREETS.FLD', Module.editorFreshFLD);
-				console.log('[editor] live GREETS.FLD installed (' +
-				            Module.editorFreshFLD.length + ' bytes)');
-			} catch (e) {
-				console.warn('[editor] live FLD install failed, using baked copy:', e);
-			}
+			// Install every live-fetched file (FLD + PBR sidecar + the maps it
+			// references) over the link-time preloaded MEMFS copies.
+			(Module.editorFreshFiles || []).forEach(function(f) {
+				try {
+					var dir = f.path.substring(0, f.path.lastIndexOf('/'));
+					if (dir) FS.mkdirTree(dir);
+					FS.writeFile(f.path, f.data);
+					console.log('[editor] live install ' + f.path + ' (' + f.data.length + ' bytes)');
+				} catch (e) {
+					console.warn('[editor] live install failed for ' + f.path + ':', e);
+				}
+			});
 		});
 	}
 	g_editorInitSpawned = true;

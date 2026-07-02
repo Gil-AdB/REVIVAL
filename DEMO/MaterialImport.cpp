@@ -305,6 +305,33 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	}
 }
 
+void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
+	if (!sc || !path) return;
+	FILE *f = std::fopen(path, "r");
+	if (!f) return;   // no sidecar for this scene — fine
+	char line[512];
+	int applied = 0, failed = 0;
+	while (std::fgets(line, sizeof line, f)) {
+		// strip newline / CR; skip blanks + comments
+		line[std::strcspn(line, "\r\n")] = 0;
+		if (!line[0] || line[0] == '#') continue;
+		char *sep1 = std::strchr(line, '|');
+		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
+		if (!sep1 || !sep2) {
+			std::fprintf(stderr, "[MAT-SIDECAR] bad line (want surface|role|path): %s\n", line);
+			continue;
+		}
+		*sep1 = 0;
+		*sep2 = 0;
+		const char *surface = line, *role = sep1 + 1, *mapPath = sep2 + 1;
+		if (MaterialImport_ApplyMapFile(sc, surface, role, mapPath)) ++applied;
+		else                                                         ++failed;
+	}
+	std::fclose(f);
+	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d map(s) applied%s\n",
+	             path, applied, failed ? " (some FAILED, see above)" : "");
+}
+
 const char *MaterialImport_ClassifyRole(const char *filename) {
 	if (!filename || !hasImageExt(filename)) return "";
 	switch (classify(stemLower(filename))) {

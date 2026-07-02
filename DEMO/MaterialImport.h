@@ -59,6 +59,20 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 // share the native detection instead of duplicating it in JS.
 const char *MaterialImport_ClassifyRole(const char *filename);
 
+// Sidecar loader — the PERSISTED form of the editor's PBR map assignments
+// (LWO1 has no slot for them, so they can't live in the .lwo like the numeric
+// surface values do). Line format, paths relative to Runtime/ (the CWD):
+//   # comment / blank lines ignored
+//   surface|role|TEXTURES/PBR/file.png
+// '|' separator because surface names contain spaces ("hull not smooth").
+// Applies each line via MaterialImport_ApplyMapFile (same load/convert/assign/
+// tangent-recompute as the CLI path, ::mirUV clones included). Call at scene
+// init after Scene_RebuildMatTable, BEFORE MaterialImport_Apply so explicit
+// --material-import CLI specs still override the sidecar. A missing sidecar is
+// a silent no-op; a missing texture file inside one logs and skips that line.
+// The editor's dev server (tools/editor_server.py) writes this file on Save.
+void MaterialImport_ApplySidecar(Scene *sc, const char *path);
+
 } // namespace fds
 
 #endif // REVIVAL_MATERIAL_IMPORT_H

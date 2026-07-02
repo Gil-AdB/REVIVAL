@@ -1314,6 +1314,11 @@ void Initialize_Greets()
 
 	Preprocess_Scene(GreetSc, "GREETS");
 
+	// Persisted PBR map assignments (the editor's "Save" writes this sidecar —
+	// LWO1 can't hold map paths, so they live here). Before the CLI overlay so
+	// an explicit --material-import still wins for testing.
+	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
+
 	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
 	// onto named materials for testing. After Preprocess (textures loaded), so
 	// it replaces the loaded maps directly. No-op without the flag.
