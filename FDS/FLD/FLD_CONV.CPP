@@ -114,7 +114,9 @@ void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 	Obj->Rot = &Mat_ID;
 	Obj->ParentID=CurParent;
 	Vector_Form(&Om->IPos,0,0,0);
-	Om->Flags = Omni_Active | Omni_Flare; // lights are active and rendered as flares by default.
+	// Lights are active + flare-rendered by default; SceneAuthored marks this
+	// as the i-th FLD/LWS light for the editor's enumeration + LWS write-back.
+	Om->Flags = Omni_Active | Omni_Flare | Omni_SceneAuthored;
 	Om->F.A = Om->F.B = Om->F.C = &Om->V;
 
 	if (Sc->OmniHead)

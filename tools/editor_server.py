@@ -143,19 +143,109 @@ def save_maps(maps, warnings):
     return written
 
 
+LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
+
+
+def patch_lws_lights(lights, warnings):
+    """{"<index>": {r,g,b,intensity,range}} -> patch the i-th AddLight block of
+    the LWS (LWSC v1 is line-based text: LightColor R G B / LgtIntensity F /
+    LightRange F). Index order == the engine's Omni_SceneAuthored order ==
+    AddLight file order. Returns list of patched entries; writes + backs up the
+    LWS only if something changed."""
+    if not lights:
+        return []
+    path = os.path.join(AUTHORING, LWS)
+    lines = open(path, encoding="latin-1").read().split("\n")
+    # Block spans: AddLight line -> next AddLight (or EOF). Camera section
+    # follows the last light; patching only known keys inside a span is safe.
+    starts = [i for i, l in enumerate(lines) if l.strip() == "AddLight"]
+    patched = []
+    for idx_s, props in sorted(lights.items(), key=lambda kv: int(kv[0])):
+        idx = int(idx_s)
+        if idx < 0 or idx >= len(starts):
+            warnings.append(f"light {idx}: LWS has {len(starts)} AddLight blocks — skipped")
+            continue
+        bad = set(props) - LIGHT_KEYS
+        if bad:
+            warnings.append(f"light {idx}: unknown keys {sorted(bad)} — skipped")
+            continue
+        lo = starts[idx]
+        hi = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        done = set()
+        for i in range(lo, hi):
+            stripped = lines[i].strip()
+            if stripped.startswith("LightColor ") and {"r", "g", "b"} & set(props):
+                old = stripped.split()
+                r = int(round(float(props.get("r", old[1]))))
+                g = int(round(float(props.get("g", old[2]))))
+                b = int(round(float(props.get("b", old[3]))))
+                lines[i] = f"LightColor {r} {g} {b}"
+                done |= {"r", "g", "b"} & set(props)
+            elif stripped.startswith("LgtIntensity ") and "intensity" in props:
+                lines[i] = f"LgtIntensity {float(props['intensity']):.6f}"
+                done.add("intensity")
+            elif stripped.startswith("LightRange ") and "range" in props:
+                lines[i] = f"LightRange {float(props['range']):.6f}"
+                done.add("range")
+        missing = set(props) - done
+        if missing:
+            warnings.append(f"light {idx}: keys {sorted(missing)} not found in its "
+                            f"AddLight block (envelope-animated?) — skipped those")
+        if done:
+            patched.append({"index": idx, "keys": sorted(done)})
+    if patched:
+        new = "\n".join(lines)
+        if new != open(path, encoding="latin-1").read():
+            bak = lwopatch.backup(path, BACKUPS)
+            with open(path, "w", encoding="latin-1") as f:
+                f.write(new)
+            for p in patched:
+                p["file"] = LWS
+                p["backup"] = os.path.relpath(bak, REPO)
+        else:
+            patched = []   # values identical — nothing actually changed
+    return patched
+
+
+def regen_fld(patched):
+    """Rerun lwsread and install the FLD. Returns (code, response-dict)."""
+    ensure_lwsread()
+    tmp_fld = os.path.join(AUTHORING, ".GREETS.tmp.fld")
+    r = subprocess.run([LWSREAD, LWS, tmp_fld], cwd=AUTHORING,
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(tmp_fld):
+        return 500, {"ok": False, "error": "lwsread failed",
+                     "stderr": (r.stderr or r.stdout)[-2000:], "patched": patched}
+    shutil.move(tmp_fld, FLD_INSTALL)
+    return 200, {"ok": True, "patched": patched,
+                 "fld": os.path.relpath(FLD_INSTALL, REPO),
+                 "fld_bytes": os.path.getsize(FLD_INSTALL)}
+
+
 def do_save(payload):
-    """Apply {"surfaces": {name: {prop: val}}, "maps": {...}} -> patch LWOs,
-    store uploaded PBR maps + sidecar, regen + install FLD."""
+    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}} -> patch LWOs
+    + LWS, store uploaded PBR maps + sidecar, regen + install FLD."""
     surfaces = payload.get("surfaces") or {}
     maps = payload.get("maps") or {}
-    if (not isinstance(surfaces, dict)) or (not surfaces and not maps):
-        return 400, {"ok": False, "error": "no surfaces or maps in payload"}
+    lights = payload.get("lights") or {}
+    if not isinstance(surfaces, dict) or not isinstance(lights, dict) \
+       or (not surfaces and not maps and not lights):
+        return 400, {"ok": False, "error": "no surfaces, maps, or lights in payload"}
 
     warnings = []
     saved_maps = save_maps(maps, warnings)
+    patched_lights = patch_lws_lights(lights, warnings)
     if not surfaces:
-        # Maps-only save: no LWO patching / FLD regen needed (map paths live in
-        # the sidecar; the FLD doesn't reference them).
+        if patched_lights:
+            # Lights changed -> the FLD must be regenerated (it embeds them).
+            code, resp = regen_fld([])
+            if code != 200:
+                return code, resp
+            resp.update({"maps": saved_maps, "lights": patched_lights,
+                         "warnings": warnings})
+            return 200, resp
+        # Maps-only save: no FLD regen needed (map paths live in the sidecar;
+        # the FLD doesn't reference them).
         return 200, {"ok": True, "patched": [], "maps": saved_maps,
                      "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
                      "warnings": warnings}
@@ -193,10 +283,15 @@ def do_save(payload):
                 slot[p] = v
 
     if not per_file:
-        if saved_maps:   # numeric edits all missed, but map uploads landed
-            return 200, {"ok": True, "patched": [], "maps": saved_maps,
-                         "sidecar": os.path.relpath(SIDECAR, REPO),
-                         "warnings": warnings}
+        if saved_maps or patched_lights:   # surface edits all missed, but these landed
+            code, resp = (regen_fld([]) if patched_lights
+                          else (200, {"ok": True, "patched": []}))
+            if code != 200:
+                return code, resp
+            resp.update({"maps": saved_maps, "lights": patched_lights,
+                         "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
+                         "warnings": warnings})
+            return 200, resp
         return 400, {"ok": False, "error": "nothing matched", "warnings": warnings}
 
     # Patch + write (backup first), only files that actually change.
@@ -217,20 +312,13 @@ def do_save(payload):
                         "backup": os.path.relpath(bak, REPO)})
 
     # Regenerate + install the FLD.
-    ensure_lwsread()
-    tmp_fld = os.path.join(AUTHORING, ".GREETS.tmp.fld")
-    r = subprocess.run([LWSREAD, LWS, tmp_fld], cwd=AUTHORING,
-                       capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(tmp_fld):
-        return 500, {"ok": False, "error": "lwsread failed",
-                     "stderr": (r.stderr or r.stdout)[-2000:], "patched": patched}
-    shutil.move(tmp_fld, FLD_INSTALL)
-
-    return 200, {"ok": True, "patched": patched, "maps": saved_maps,
+    code, resp = regen_fld(patched)
+    if code != 200:
+        return code, resp
+    resp.update({"maps": saved_maps, "lights": patched_lights,
                  "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
-                 "fld": os.path.relpath(FLD_INSTALL, REPO),
-                 "fld_bytes": os.path.getsize(FLD_INSTALL),
-                 "warnings": warnings}
+                 "warnings": warnings})
+    return 200, resp
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):

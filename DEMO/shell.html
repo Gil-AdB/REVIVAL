@@ -546,10 +546,13 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b18</span></h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b20</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
+      <div id="editor-lights-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;">Lights <span id="editor-lights-count" style="color:#6c8;font-size:10px;"></span></div>
+      <div id="editor-lights" style="display:none;"></div>
+      <div id="editor-light-props"></div>
       <div id="editor-actions" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;">
         <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
         <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
@@ -576,7 +579,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b18); orbit/zoom embind =',
+        console.log('[editor] panel init (build b20); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
@@ -592,7 +595,12 @@
             // their .lwo rewritten).
             editorPristine = {};
             list.forEach(function(s){ editorPristine[s.name] = JSON.parse(JSON.stringify(s)); });
-            editorStatus(list.length+' surfaces'); renderSurfaceList(); updateSaveButton();
+            try {
+              editorLights = JSON.parse(Module.editorGetLights());
+              editorLightsPristine = {};
+              editorLights.forEach(function(l){ editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l)); });
+            } catch(e){ console.warn('[editor] lights enumerate failed', e); }
+            editorStatus(list.length+' surfaces'); renderSurfaceList(); renderLightList(); updateSaveButton();
           }
           else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
         }, 500);
@@ -615,6 +623,24 @@
         return btoa(s);
       }
       var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection'];
+      // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
+      // AddLight blocks, which is what the server patches on Save).
+      var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
+      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range'];
+      function lightDirty(l){
+        var p = editorLightsPristine[l.i]; if (!p) return false;
+        return EDITOR_LIGHT_PROPS.some(function(k){ return Math.abs((+l[k]) - (+p[k])) > 1e-6; });
+      }
+      function collectDirtyLights(){
+        var out = {};
+        editorLights.forEach(function(l){
+          var p = editorLightsPristine[l.i]; if (!p) return;
+          EDITOR_LIGHT_PROPS.forEach(function(k){
+            if (Math.abs((+l[k]) - (+p[k])) > 1e-6) (out[l.i] = out[l.i] || {})[k] = +l[k];
+          });
+        });
+        return out;
+      }
       function surfaceDirty(s){
         var p = editorPristine[s.name]; if (!p) return false;
         return EDITOR_SAVE_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; });
@@ -631,11 +657,63 @@
       }
       function updateSaveButton(){
         var b = document.getElementById('editor-save'); if (!b) return;
-        var n = Object.keys(collectDirty()).length, m = pendingMapCount();
-        b.disabled = !(n || m);
-        b.textContent = (n || m)
-          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : ''].filter(Boolean).join(', ') + ')')
+        var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
+            L = Object.keys(collectDirtyLights()).length;
+        b.disabled = !(n || m || L);
+        b.textContent = (n || m || L)
+          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '']
+               .filter(Boolean).join(', ') + ')')
           : 'Save to LWO';
+      }
+      // ── Lights UI ─────────────────────────────────────────────────────
+      document.getElementById('editor-lights-hdr').onclick = function(){
+        var el = document.getElementById('editor-lights');
+        el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+      };
+      function renderLightList(){
+        document.getElementById('editor-lights-count').textContent = editorLights.length ? ('(' + editorLights.length + ')') : '';
+        var el = document.getElementById('editor-lights'); el.innerHTML = '';
+        editorLights.forEach(function(l){
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (editorSelectedLight === l.i ? ' sel' : '');
+          d.innerHTML = '<div><span style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:rgb(' + l.r + ',' + l.g + ',' + l.b + ')"></span>' +
+            'Light ' + l.i + (l.type ? ' (spot)' : '') + (l.shadow ? ' ◘' : '') +
+            (lightDirty(l) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
+            '<div class="surf-tex">pos ' + l.x + ',' + l.y + ',' + l.z +
+            ' • int ' + (+l.intensity).toFixed(2) + ' • range ' + (+l.range).toFixed(1) + '</div>';
+          d.onclick = function(){ editorSelectedLight = l.i; renderLightList(); renderLightProps(l); };
+          el.appendChild(d);
+        });
+      }
+      function setLightProp(l, key, v){
+        var ok = false;
+        try { ok = Module.editorSetLightProp(l.i, key, v); }
+        catch(e){ editorStatus('light set failed: ' + e); return false; }
+        if (ok) { l[key] = v; editorStatus('light ' + l.i + ' ' + key + ' = ' + (+v).toFixed(2)); }
+        else editorStatus('light set → false');
+        updateSaveButton();
+        return ok;
+      }
+      var EDITOR_LIGHT_RANGES = { r:[0,255,1], g:[0,255,1], b:[0,255,1],
+                                  intensity:[0,4,0.01], range:[0,100,0.5] };
+      function renderLightProps(l){
+        var el = document.getElementById('editor-light-props'); el.innerHTML = '';
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;';
+        h.textContent = 'Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : '');
+        el.appendChild(h);
+        EDITOR_LIGHT_PROPS.forEach(function(k){
+          var rg = EDITOR_LIGHT_RANGES[k];
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lab = document.createElement('label'); lab.textContent = k; row.appendChild(lab);
+          var r = document.createElement('input'); r.type = 'range';
+          r.min = rg[0]; r.max = rg[1]; r.step = rg[2]; r.value = l[k];
+          var val = document.createElement('span'); val.className = 'val'; val.textContent = (+l[k]).toFixed(k==='intensity'?2:0);
+          r.oninput = function(){
+            var v = parseFloat(r.value); val.textContent = v.toFixed(k==='intensity'?2:0);
+            setLightProp(l, k, v); renderLightList();
+          };
+          row.appendChild(r); row.appendChild(val); el.appendChild(row);
+        });
       }
       function renderSurfaceList(){
         var q = (document.getElementById('editor-search').value || '').toLowerCase();
@@ -688,28 +766,36 @@
           });
         });
         var nMaps = pendingMapCount();
-        if (!names.length && !nMaps) return;
-        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s)…');
+        var dirtyLights = collectDirtyLights();
+        var lightIdx = Object.keys(dirtyLights);
+        if (!names.length && !nMaps && !lightIdx.length) return;
+        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' + lightIdx.length + ' light(s)…');
         var payload = { surfaces: dirty };
         if (nMaps) payload.maps = maps;
+        if (lightIdx.length) payload.lights = dirtyLights;
         fetch('api/greets/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
             if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
             var bits = (res.patched || []).map(function(p){ return p.file; });
-            if (names.length) bits.push('GREETS.FLD');
+            if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
+            if (names.length || (res.lights && res.lights.length)) bits.push('GREETS.FLD');
             if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → GREETS.MAT');
             editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
             console.log('[editor] save ok:', res);
-            // Saved values/maps are the new baseline.
+            // Saved values/maps/lights are the new baseline.
             names.forEach(function(n){
               var s = editorSurfaces.find(function(x){ return x.name === n; });
               if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
             });
+            lightIdx.forEach(function(i){
+              var l = editorLights.find(function(x){ return String(x.i) === String(i); });
+              if (l) editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l));
+            });
             editorPendingMaps = {};
-            renderSurfaceList(); updateSaveButton();
+            renderSurfaceList(); renderLightList(); updateSaveButton();
           })
           .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
       };

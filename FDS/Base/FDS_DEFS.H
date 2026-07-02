@@ -415,6 +415,13 @@ enum OmniFlags
 	// for ~10 frames (and newly-revealed screen edges during a camera pan
 	// don't go dark against the lingering centre). Set only by FOUNTAIN.CPP.
 	Omni_FogTransient = 1 << 12,
+
+	// Authored in the scene file — set by FLD_CONV's AddOmni, i.e. this omni
+	// is the i-th light of the .FLD (and of the source .LWS). Code-created
+	// lights (spot cones, mirror clones, transients) never carry it. The LWO
+	// editor enumerates these for live editing, and their LIST ORDER maps 1:1
+	// onto the LWS AddLight blocks for write-back (tools/editor_server.py).
+	Omni_SceneAuthored = 1 << 13,
 };
 
 //MACROS

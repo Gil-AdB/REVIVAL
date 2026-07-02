@@ -5,7 +5,9 @@
 #include <Base/Material.h>
 #include <Base/Texture.h>
 #include <Base/FDS_DECS.H>   // Scene_GetMatTable, MatTable
-#include <Base/Scene.h>      // Scene::Ambient
+#include <Base/FDS_DEFS.H>   // Omni_SceneAuthored
+#include <Base/Scene.h>      // Scene::Ambient, OmniHead
+#include <Base/Omni.h>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
 
@@ -175,6 +177,68 @@ std::string js_editorMatDebug(std::string name)
 	  ml ? ml->Luminosity : -1.0f, mlCount, tt ? tt->Luminosity : -1.0f, (unsigned)mt.count, (ml == tt) ? 1 : 0);
 	return buf;
 }
+// ── Light editing ──────────────────────────────────────────────────────────
+// Scene-authored omnis only (Omni_SceneAuthored = the i-th FLD/LWS light, in
+// list order — the same index the server's LWS patcher uses for write-back).
+// Color lives in Omni::L (0-255); intensity/range are 1-key-per-value splines
+// whose scalar sits in Keys[].Pos.x — Animate_Objects re-interpolates ISize/
+// IRange from them every tick, so a key edit shows on the next rendered frame.
+static Omni *editorLightByIndex(int want)
+{
+	if (!CurScene) return nullptr;
+	int i = 0;
+	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		if (i == want) return O;
+		++i;
+	}
+	return nullptr;
+}
+
+std::string js_editorGetLights()
+{
+	std::string out = "[";
+	int i = 0;
+	if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		char buf[300];
+		std::snprintf(buf, sizeof buf,
+		  "%s{\"i\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
+		  "\"intensity\":%.4g,\"range\":%.4g,"
+		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
+		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u}",
+		  i ? "," : "", i, O->L.R, O->L.G, O->L.B,
+		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
+		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
+		  O->IPos.x, O->IPos.y, O->IPos.z,
+		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
+		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
+		out += buf;
+		++i;
+	}
+	out += "]";
+	return out;
+}
+
+bool js_editorSetLightProp(int index, std::string key, float value)
+{
+	Omni *O = editorLightByIndex(index);
+	if (!O) return false;
+	if      (key == "r") O->L.R = value;
+	else if (key == "g") O->L.G = value;
+	else if (key == "b") O->L.B = value;
+	else if (key == "intensity") {
+		// Set every key so animated envelopes take the value uniformly (greets
+		// lights are all single-key; multi-key edits flatten the curve — the
+		// panel shows the key count so that's not a surprise).
+		for (dword k = 0; k < O->Size.NumKeys; ++k) O->Size.Keys[k].Pos.x = value;
+	} else if (key == "range") {
+		for (dword k = 0; k < O->Range.NumKeys; ++k) O->Range.Keys[k].Pos.x = value;
+	} else return false;
+	rev::Editor_MarkDirty();
+	return true;
+}
+
 // Pack upload: classify one filename into its map role with the native token
 // rules (albedo/normal/height/roughness/ao, "" = skip) so the browser's
 // load-a-whole-folder flow detects roles identically to --material-import.
@@ -283,5 +347,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorProbe",          &js_editorProbe);
 	emscripten::function("editorPick",           &js_editorPick);
 	emscripten::function("editorClassifyMap",    &js_editorClassifyMap);
+	emscripten::function("editorGetLights",      &js_editorGetLights);
+	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
 }
 #endif // __EMSCRIPTEN__
