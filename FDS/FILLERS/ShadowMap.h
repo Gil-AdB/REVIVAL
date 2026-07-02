@@ -47,6 +47,13 @@ struct ShadowMap {
 	// CubeShadowMaps_Rebuild — same size as `depth` / `polyId`.
 	std::vector<uint16_t> depth_dynamic;
 	std::vector<uint16_t> polyId_dynamic;
+	// True iff the DynamicMeshesPerFrame bake processed this map THIS frame
+	// (a dynamic mesh was visible in the face pyramid). When false the
+	// dynamic planes are stale/empty and the dynamicOnly tap short-circuits
+	// to lit — which both skips the tap cost for the (common) faces with no
+	// moving mesh AND stops a stale last-visible-frame silhouette from
+	// shadowing after the mesh leaves the face.
+	bool dynBaked = false;
 
 	// [experiment: --shadow-swizzle] 8×8-tiled copies of the four planes.
 	// Rebuilt from the linear planes after each bake (ShadowMap_SwizzlePlanes,
@@ -266,6 +273,9 @@ inline float CubeShadow_Sample(int cubeIdx,
     const float dwz = worldZ - cr.lightISource.z;
     const int face = CubeShadow_SelectFace(dwx, dwy, dwz);
     const ShadowMap& sm = g_shadowMaps[cr.faceIdx[face]];
+    // dynamicOnly composite tap: nothing was baked into this face's dynamic
+    // planes this frame → fully lit, skip the projection + PCF entirely.
+    if (dynamicOnly && !sm.dynBaked) return 1.0f;
     // Project view-space sample point into face-view space.
     const float lx = sm.viewToLight[0][0] * viewX + sm.viewToLight[0][1] * viewY +
                      sm.viewToLight[0][2] * viewZ + sm.viewToLightOffset.x;

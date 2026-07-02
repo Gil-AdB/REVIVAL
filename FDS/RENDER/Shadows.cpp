@@ -355,9 +355,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		}
 		// DynamicMeshesPerFrame cube-face cull: skip faces where no
 		// dynamic mesh would be visible. Pre-computed above.
-		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
-		    && sm.cubeFace >= 0
-		    && !hasDynMeshVisible[lightIdx]) continue;
+		if (mode == ShadowBakeMode::DynamicMeshesPerFrame && sm.cubeFace >= 0) {
+			// Maintain the per-face dynamic-content flag the dynamicOnly
+			// composite tap reads (ShadowMap.h). Set for processed maps,
+			// cleared for skipped ones — a skipped map's dynamic planes are
+			// stale and must not shadow.
+			sm.dynBaked = hasDynMeshVisible[lightIdx];
+			if (!hasDynMeshVisible[lightIdx]) continue;
+		}
 
 		// Build the per-light camera. Spot path: existing IDir-based
 		// lookAt + cone-FOV. Cube-face path: fixed axis-aligned camera

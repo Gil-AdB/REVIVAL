@@ -739,10 +739,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
-	// Lightmap kernel branch is gated off when --shadow-dynamic is on
-	// (see resolveCubeAtten's contract above). Hoisted to tile-level
-	// so the per-pixel + per-omni hot path doesn't re-query.
-	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic();
+	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
+	// lightmap fast path ENTIRELY (the dynamic buffers are invisible to the
+	// static atlas), forcing full cube taps for every static light at every
+	// pixel — measured 2.6ms of lighting-w1 on greets. resolveCubeAtten has
+	// since grown the proper composite (lightmap static factor × dynamic-only
+	// cube tap, gated per-face on ShadowMap::dynBaked), so the lightmap stays
+	// on. --no-shadow_lm_dynamic restores the old full-tap fallback for A/B.
+	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic()
+	                            || fds::FeatureFlags::shadow_lm_dynamic();
 	// Normal-map LOD fade. The texture mip-chain averages cleanly, but
 	// averaged normals shorten + rotate toward the surface average, so
 	// at distance the bump's perturbation becomes high-frequency lighting
