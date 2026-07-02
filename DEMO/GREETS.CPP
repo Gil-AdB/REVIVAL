@@ -1037,7 +1037,11 @@ static void GreetsApplyRunDefaults()
 	// HDR + bloom + cones (global render path).
 	FF::setDefault(FF::BoolId::hdr,                     true);
 	FF::setDefault(FF::BoolId::hdr_linear,              true);
-	FF::setDefault(FF::BoolId::deferred_quarter,        true);
+	// Checkerboard (half-rate) over quarter: at the kernel-bound reference
+	// frame (ts=491) it costs only ~0.5-1 ms more than quarter while shading
+	// 2x the pixels (full-rate is +20 ms). An explicit --deferred_quarter
+	// still wins — the kernel gives quarter precedence when both are set.
+	FF::setDefault(FF::BoolId::deferred_checkerboard,   true);
 	FF::setDefault(FF::BoolId::bloom,                   true);
 	FF::setDefault(FF::FloatId::bloom_intensity,        2.0f);
 	FF::setDefault(FF::FloatId::hdr_refl_gain,          4.0f);

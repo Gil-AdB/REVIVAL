@@ -291,6 +291,7 @@ bool deferredEnabled() {
 	return fds::FeatureFlags::deferred()
 	    || fds::FeatureFlags::hdr()
 	    || fds::FeatureFlags::deferred_quarter()
+	    || fds::FeatureFlags::deferred_checkerboard()
 	    || fds::FeatureFlags::shard_deferred();
 }
 

@@ -3144,6 +3144,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (nc == 0) continue;
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
+				// C (texture/lighting decouple) — same divide-out + trust region
+				// as the quarter path above; without it the checker fill plain-
+				// averages neighbour colours and mushes far-floor texture detail
+				// (measured |checker-full| 1.32 vs quarter+C 0.31 on greets).
+				float ownB=0, ownG=0, ownR=0;
+				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
+				float slB=0, slG=0, slR=0;                 // LDR reconstructed lighting
+				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -3151,18 +3159,51 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					if (hdrWrite) { const fds::hdrf* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					if (haveOwn) {
+						float nb, ng, nr, nrB, nrG, nrR;
+						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
+						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
+						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
+							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
+							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
+							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							if (nh) {
+								// radiance ∝ texel^exp; re-apply own texel (see quarter path)
+								float rB=nrB, rG=nrG, rR=nrR;
+								if (hdrLinear) { rB*=rB; rG*=rG; rR*=rR; }
+								ahB += nh[0]*rB; ahG += nh[1]*rG; ahR += nh[2]*rR;
+							}
+							++nsharp;
+						}
+					}
 					++n;
 				}
 				if (n > 0) {
-					int aR, aG, aB;
-					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
-					else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
-					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					if (haveOwn && nsharp > 0 && !hdrWrite) {
+						const float inv = 1.0f / (float(nsharp) * 256.0f);
+						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
+						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
+						int oR = int(ownR * slR * inv + 0.5f); if (oR > 255) oR = 255;
+						out[i] = dword(oB) | (dword(oG) << 8) | (dword(oR) << 16) | 0xFF000000u;
+					} else {
+						int aR, aG, aB;
+						if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+						else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
+						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					}
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
-						const float inv = 1.0f / float(n);
 						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
-						h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv); h[3] = 1.0f;
+						if (haveOwn && nsharp > 0) {
+							const float invn = 1.0f / float(nsharp);
+							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
+						} else {
+							const float inv = 1.0f / float(n);
+							h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv);
+						}
+						h[3] = 1.0f;
 					}
 					matched = true;
 				}
