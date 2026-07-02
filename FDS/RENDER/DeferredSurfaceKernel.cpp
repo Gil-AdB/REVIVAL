@@ -1963,7 +1963,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					h[1] = float(litG) * a + dG * ia;
 					h[2] = float(litR) * a + dR * ia;
 				} else {
-					const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+					const float dw = waterProc ? wFres
+					: (Mat->Transparency > 0.0f ? Mat->Transparency * 0.01f : 0.5f);
+				// water: reflection at fresnel weight. Legacy additive blend
+				// (out = lit + behind*dw): dw follows the AUTHORED transparency
+				// (LWO TRAN, 0-100%%) so the editor slider has a real effect —
+				// the shipped screens author 50%% -> dw 0.5, byte-identical.
+				// Hand-built xpar materials (mirrors) author Transparency=0 and
+				// keep the legacy 0.5.
 					h[0] = float(litB) + dB * dw;
 					h[1] = float(litG) + dG * dw;
 					h[2] = float(litR) + dR * dw;
@@ -1981,7 +1988,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				outG = int(float(litG) * a + float(dG) * ia);
 				outR = int(float(litR) * a + float(dR) * ia);
 			} else {
-				const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+				const float dw = waterProc ? wFres
+					: (Mat->Transparency > 0.0f ? Mat->Transparency * 0.01f : 0.5f);
+				// water: reflection at fresnel weight. Legacy additive blend
+				// (out = lit + behind*dw): dw follows the AUTHORED transparency
+				// (LWO TRAN, 0-100%%) so the editor slider has a real effect —
+				// the shipped screens author 50%% -> dw 0.5, byte-identical.
+				// Hand-built xpar materials (mirrors) author Transparency=0 and
+				// keep the legacy 0.5.
 				outB = litB + int(float(dB) * dw);
 				outG = litG + int(float(dG) * dw);
 				outR = litR + int(float(dR) * dw);
