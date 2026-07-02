@@ -163,3 +163,30 @@ New ranked targets from the corrected data:
 3. **Account the ~5.5 ms serial inside Render-3D** (instrument first).
 4. Still standing from §3: f16 HDR buffer, pointwise post-FX fusion, half-res
    DoF, temporal SSAO.
+
+## 2026-07-02 (later) — #1 and #3 resolved, #2 closed by prior art
+
+**#1 lightmap × dynamic composite: MEASURED NEUTRAL-to-NEGATIVE — retracted.**
+Built + gated (--shadow_lm_dynamic, default OFF, commit 8ad15ad). Two reasons the
+2.6ms tap bucket didn't yield: (a) the mech's bsphere keeps dynBaked true on
+~20/48 static faces → those pixels pay lightmap + dynamic tap > one combined
+tap (the planar sampler's per-pixel projection costs ≈ a tap); (b) a chunk of
+the bucket is MOVING-omni taps that can never use lightmaps. Visuals validated
+equivalent. Side benefit kept: ShadowMap::dynBaked fixes stale dynamic
+silhouettes (only active when the flag is on).
+
+**#2 per-tile light contribution culling: CLOSED (prior art).** Tried before
+this campaign — perf only came with hard per-tile light cutoffs, i.e. visible
+inter-tile shading discontinuities. Do not reopen without a smooth-falloff
+scheme (e.g. per-tile light fade bands), which erases most of the win.
+
+**#3 serial accounting: CLOSED.** New TailProf scopes decompose the former
+~5.5ms gap: DeferredLighting serial setup ~1.2 / xpar-peel ~1.0 / tonemap-post
+~0.6 / StampMasks 0.3 / hdr-activate 0.23 / ~2.5 clears+sprite-insert+glue.
+Long tail — no hidden monster. Confirms the Amdahl picture.
+
+**Standing open doors after this round:** f16 HDR buffer (§3.1, unchanged),
+pointwise post-FX fusion (§3.3), half-res DoF (§3.4), temporal SSAO (§3.5),
+frame pipelining (§3.6). The lighting waves (w1 7ms + w2 2.8ms) are now the
+largest single bucket; levers there are rate/algorithmic (quarter already on)
+— or x86, where the vec path may finally pay.
