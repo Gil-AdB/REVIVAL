@@ -62,6 +62,12 @@ namespace renderns {
 // shadow pass.
 thread_local Omni* g_currentShadowOmni = nullptr;
 
+// Generation stamp for the per-mesh bake cache (TriMesh::BakeCacheGen /
+// BakeWsBSphereCtr / BakeIsDynamic). Bumped + primed serially at the top
+// of Render_DeferredShadowMaps before any Phase-A task is enqueued; the
+// parallel per-face Transform_Objects tasks only compare + read.
+uint32_t g_shadowBakeGen = 0;
+
 // True only inside Render_DeferredShadowMaps_Dynamic's per-frame bake.
 // Inverts the Transform_Objects mesh filter (keep animated, skip static)
 // and routes MekaleleShadowDepth writes to sm.depth_dynamic / polyId_dynamic
@@ -217,16 +223,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// Only the DynamicMeshesPerFrame path benefits: StaticOnce baked at
 	// init (one-shot) and DynamicOmnisPerFrame re-bakes ALL geometry
 	// for moving omnis (mech), where there's no "dyn only" subset.
-	static thread_local std::vector<bool> hasDynMeshVisible;
-	if (mode == ShadowBakeMode::DynamicMeshesPerFrame) {
-		hasDynMeshVisible.assign(g_shadowMaps.size(), false);
-		// Gather dynamic meshes' world-space bsphere centers + radii.
-		// "Dynamic" mirrors Transform_Objects's isDynamicForBake (walks
-		// parent chain looking for non-trivial Pos / Rotate spline
-		// extents). Cheap — single pass over ObjectHead with O(few)
-		// meshes per spline.
-		struct DynBSphere { Vector center; float radius; };
-		std::vector<DynBSphere> dynMeshes;
+	// ── Prime the per-mesh bake cache (TriMesh::BakeWsBSphereCtr /
+	// BakeIsDynamic, valid while BakeCacheGen == g_shadowBakeGen). One
+	// serial ObjectHead walk here replaces the same spline-extent walk +
+	// world-bsphere MatrixXVector that every per-face Transform_Objects
+	// task would otherwise re-derive per mesh (identical across all 6
+	// cube faces of every light in this call). Tasks read it only.
+	// "Dynamic" mirrors Transform_Objects's isDynamicForBake exactly.
+	++g_shadowBakeGen;
+	{
 		auto isMeshDynamic = [](Object *o) -> bool {
 			constexpr float kPosEps = 0.1f, kRotEps = 0.01f;
 			for (Object *p = o; p; p = p->Parent) {
@@ -246,24 +251,45 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 				}
 				if (tm->Rotate.NumKeys > 1 && tm->Rotate.Keys) {
 					const auto& q0 = tm->Rotate.Keys[0].Pos;
+					float xmn=q0.x,xmx=q0.x,ymn=q0.y,ymx=q0.y;
+					float zmn=q0.z,zmx=q0.z,wmn=q0.W,wmx=q0.W;
 					for (DWord i=1;i<tm->Rotate.NumKeys;++i) {
 						const auto& q = tm->Rotate.Keys[i].Pos;
-						const float dx=q.x-q0.x, dy=q.y-q0.y, dz=q.z-q0.z, dw=q.W-q0.W;
-						if (dx*dx+dy*dy+dz*dz+dw*dw > kRotEps*kRotEps) return true;
+						if (q.x<xmn) xmn=q.x; if (q.x>xmx) xmx=q.x;
+						if (q.y<ymn) ymn=q.y; if (q.y>ymx) ymx=q.y;
+						if (q.z<zmn) zmn=q.z; if (q.z>zmx) zmx=q.z;
+						if (q.W<wmn) wmn=q.W; if (q.W>wmx) wmx=q.W;
 					}
+					if ((xmx-xmn)>kRotEps||(ymx-ymn)>kRotEps||
+					    (zmx-zmn)>kRotEps||(wmx-wmn)>kRotEps) return true;
 				}
 			}
 			return false;
 		};
 		for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
-			if (!isMeshDynamic(Obj)) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			if (!T) continue;
+			MatrixXVector(T->RotMat, &T->BSphereCtr, &T->BakeWsBSphereCtr);
+			Vector_SelfAdd(&T->BakeWsBSphereCtr, &T->IPos);
+			T->BakeIsDynamic = isMeshDynamic(Obj) ? 1 : 0;
+			T->BakeCacheGen  = g_shadowBakeGen;
+		}
+	}
+
+	static thread_local std::vector<bool> hasDynMeshVisible;
+	if (mode == ShadowBakeMode::DynamicMeshesPerFrame) {
+		hasDynMeshVisible.assign(g_shadowMaps.size(), false);
+		// Gather dynamic meshes' world-space bsphere centers + radii —
+		// straight off the just-primed cache.
+		struct DynBSphere { Vector center; float radius; };
+		std::vector<DynBSphere> dynMeshes;
+		for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh) continue;
 			TriMesh *T = (TriMesh*)Obj->Data;
 			if (!T || T->FIndex == 0) continue;
-			Vector wc;
-			MatrixXVector(T->RotMat, &T->BSphereCtr, &wc);
-			Vector_SelfAdd(&wc, &T->IPos);
-			dynMeshes.push_back({wc, T->BSphereRadius});
+			if (!T->BakeIsDynamic) continue;
+			dynMeshes.push_back({T->BakeWsBSphereCtr, T->BSphereRadius});
 		}
 		// Per shadow map: is any dyn mesh visible from this cube face?
 		// Specialized sphere-vs-cone for the 90°-pyramid's CIRCUMSCRIBED
