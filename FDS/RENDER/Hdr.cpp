@@ -443,15 +443,138 @@ void Render_DoFPass() {
         s_init = true;
     }
 
-    static std::vector<float> s_src;
-    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
-    const float* const SRC = s_src.data();
-    hdrf* const DST = g_hdrBuf.data();
-
     auto cocAt = [=](size_t i) -> float {
         float c = std::fabs(viewZ(i) - focus) / range; if (c > 1.0f) c = 1.0f;
         return c * maxR;
     };
+
+    // ── Reduced-res path (--dof_downscale > 1, same idea as --ssao_downscale):
+    // gather at W/d x H/d (~1/d² the taps, and skips the full-res f16→f32
+    // source copy the full-res path pays), then a 4-tap depth-aware bilinear
+    // upsample. Defocused content is blurry by definition, so the res cut is
+    // invisible except near the focus boundary — where CoC (and thus the blur)
+    // is small — so the composite blends toward the sharp original as CoC → the
+    // in-focus threshold and the transition band stays clean.
+    const int down = std::max(1, std::min(4, FeatureFlags::dof_downscale()));
+    if (down > 1) {
+        const int lowW = (W + down - 1) / down, lowH = (H + down - 1) / down;
+        const size_t lpx = size_t(lowW) * size_t(lowH);
+        static std::vector<float> s_lowS;   // pre-blur colour (B,G,R)
+        static std::vector<float> s_lowC;   // blurred colour  (B,G,R)
+        static std::vector<float> s_lowZ;   // view-z of the sampled texel
+        static std::vector<float> s_lowCoc; // CoC in FULL-res pixel units
+        s_lowS.resize(lpx * 3); s_lowC.resize(lpx * 3);
+        s_lowZ.resize(lpx);     s_lowCoc.resize(lpx);
+        float* const lowS = s_lowS.data(); float* const lowC = s_lowC.data();
+        float* const lowZ = s_lowZ.data(); float* const lowCoc = s_lowCoc.data();
+        const hdrf* const HB = g_hdrBuf.data();
+        const int half = down / 2;
+
+        // Pass A: point-sample each cell's centre pixel (colour + z + CoC).
+        // No box prefilter — the gather blur is itself a low-pass.
+        hdrDispatchRows(lowH, [=](int y1, int y2) {
+            for (int ly = y1; ly < y2; ++ly) {
+                for (int lx = 0; lx < lowW; ++lx) {
+                    const int fx = std::min(W - 1, lx * down + half);
+                    const int fy = std::min(H - 1, ly * down + half);
+                    const size_t fi = size_t(fy) * size_t(W) + size_t(fx);
+                    const size_t li = size_t(ly) * size_t(lowW) + size_t(lx);
+                    lowS[li*3+0] = float(HB[fi*4+0]);
+                    lowS[li*3+1] = float(HB[fi*4+1]);
+                    lowS[li*3+2] = float(HB[fi*4+2]);
+                    const float z = viewZ(fi);
+                    lowZ[li] = z;
+                    float c = std::fabs(z - focus) / range; if (c > 1.0f) c = 1.0f;
+                    lowCoc[li] = c * maxR;
+                }
+            }
+        });
+
+        // Pass B: golden-angle gather at low res. CoC and tap distances stay
+        // in full-res pixel units (so scatter-as-gather weighting is
+        // unchanged); only the tap OFFSETS are divided into low-res texels.
+        const float invDown = 1.0f / float(down);
+        hdrDispatchRows(lowH, [=](int y1, int y2) {
+            for (int ly = y1; ly < y2; ++ly) {
+                for (int lx = 0; lx < lowW; ++lx) {
+                    const size_t li = size_t(ly) * size_t(lowW) + size_t(lx);
+                    const float coc = lowCoc[li];
+                    if (coc < 0.75f) {
+                        lowC[li*3+0] = lowS[li*3+0];
+                        lowC[li*3+1] = lowS[li*3+1];
+                        lowC[li*3+2] = lowS[li*3+2];
+                        continue;
+                    }
+                    float sb = lowS[li*3+0], sg = lowS[li*3+1], sr = lowS[li*3+2], wsum = 1.0f;
+                    const float cocLow = coc * invDown;
+                    for (int t = 0; t < TAPS; ++t) {
+                        const int sx = int(float(lx) + s_ox[t] * cocLow + 0.5f);
+                        const int sy = int(float(ly) + s_oy[t] * cocLow + 0.5f);
+                        if (sx < 0 || sx >= lowW || sy < 0 || sy >= lowH) continue;
+                        const size_t si = size_t(sy) * size_t(lowW) + size_t(sx);
+                        const float d = s_or[t] * coc;        // full-res px
+                        float w = lowCoc[si] - d + 1.0f;
+                        if (w <= 0.0f) continue; if (w > 1.0f) w = 1.0f;
+                        sb += lowS[si*3+0] * w; sg += lowS[si*3+1] * w; sr += lowS[si*3+2] * w;
+                        wsum += w;
+                    }
+                    const float inv = 1.0f / wsum;
+                    lowC[li*3+0] = sb * inv; lowC[li*3+1] = sg * inv; lowC[li*3+2] = sr * inv;
+                }
+            }
+        });
+
+        // Pass C: full-res composite. 4-tap depth-aware bilinear from the
+        // blurred low-res field, then lerp(sharp, blur, blend) where blend
+        // ramps 0→1 over CoC 0.75..2.0 px.
+        hdrf* const DSTh = g_hdrBuf.data();
+        const float depthSig = range * 0.5f;
+        const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);
+        hdrDispatchRows(H, [=](int y1, int y2) {
+            for (int y = y1; y < y2; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const size_t i = size_t(y) * size_t(W) + size_t(x);
+                    const float coc = cocAt(i);
+                    if (coc < 0.75f) continue;                // in focus → untouched
+                    const float zf = viewZ(i);
+                    const float gx = (float(x) - float(half)) * invDown;
+                    const float gy = (float(y) - float(half)) * invDown;
+                    int x0 = (int)std::floor(gx), y0 = (int)std::floor(gy);
+                    const float fxs = gx - float(x0), fys = gy - float(y0);
+                    int x1c = x0 + 1, y1c = y0 + 1;
+                    x0  = std::max(0, std::min(lowW - 1, x0));  x1c = std::max(0, std::min(lowW - 1, x1c));
+                    y0  = std::max(0, std::min(lowH - 1, y0));  y1c = std::max(0, std::min(lowH - 1, y1c));
+                    const size_t o00 = size_t(y0 )*lowW + x0, o10 = size_t(y0 )*lowW + x1c;
+                    const size_t o01 = size_t(y1c)*lowW + x0, o11 = size_t(y1c)*lowW + x1c;
+                    const float bw00 = (1-fxs)*(1-fys), bw10 = fxs*(1-fys);
+                    const float bw01 = (1-fxs)*fys,     bw11 = fxs*fys;
+                    float ab = 0, ag = 0, ar = 0, wsum = 0;
+                    #define DOF_TAP(O, BW) { const float dz = zf - lowZ[O]; \
+                        float wd = 1.0f - dz*dz*invDepthK; \
+                        if (wd > 0.0f) { const float w = (BW)*wd; \
+                            ab += lowC[(O)*3+0]*w; ag += lowC[(O)*3+1]*w; ar += lowC[(O)*3+2]*w; wsum += w; } }
+                    DOF_TAP(o00, bw00) DOF_TAP(o10, bw10)
+                    DOF_TAP(o01, bw01) DOF_TAP(o11, bw11)
+                    #undef DOF_TAP
+                    if (wsum <= 1e-6f) continue;              // no depth-compatible texel → keep sharp
+                    const float inv = 1.0f / wsum;
+                    float blend = (coc - 0.75f) * 0.8f;       // 0 at 0.75px, 1 at 2px
+                    if (blend > 1.0f) blend = 1.0f;
+                    const float keep = 1.0f - blend;
+                    hdrf* h = DSTh + i * 4;
+                    h[0] = float(h[0]) * keep + ab * inv * blend;
+                    h[1] = float(h[1]) * keep + ag * inv * blend;
+                    h[2] = float(h[2]) * keep + ar * inv * blend;
+                }
+            }
+        });
+        return;
+    }
+
+    static std::vector<float> s_src;
+    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
+    const float* const SRC = s_src.data();
+    hdrf* const DST = g_hdrBuf.data();
 
     hdrDispatchRows(H, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {

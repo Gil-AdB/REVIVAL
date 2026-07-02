@@ -1009,6 +1009,10 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::BoolId::no_greets_spots,         true);
 	FF::setDefault(FF::BoolId::greets_omni_shadows,     true);
 	FF::setDefault(FF::IntId::greets_omni_shadow_res,   512);
+	// Moving omnis (mech-attached) pay a full cube re-bake every frame; 128
+	// is visually adequate for lights that near-always sit close to their
+	// caster and saves ~1 ms of bake (measured 2026-07-01).
+	FF::setDefault(FF::IntId::greets_moving_omni_shadow_res, 128);
 	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
