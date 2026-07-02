@@ -41,6 +41,17 @@ extern bool g_hdrActive;
 // resolution. Every g_hdrBuf write gates on Hdr_WritableFor with the CURRENT
 // pass's dims (ctx.xres/ctx.yres); only the main pass matches.
 extern int g_hdrBufW, g_hdrBufH;
+void Hdr_DebugScan(const char* tag);
+
+// f16-safe radiance ceiling for every g_hdrBuf store. __fp16 overflows to +inf
+// above 65504, and one inf turns the whole post chain to NaN/black tiles (the
+// bright-pass computes (lum-thresh)/lum, DoF divides weight sums). 60000 is
+// within 5% of the largest radiance measured in real content (63008, a spec
+// hotspot) and far beyond where the bright-pass weight and the tonemap already
+// saturate — clamping is visually free. Applies identically under f32 storage
+// (keeps the two configurations rendering the same image).
+constexpr float kHdrMax = 60000.0f;
+static inline float HdrClamp(float v) { return v > kHdrMax ? kHdrMax : v; }
 inline bool Hdr_WritableFor(int xr, int yr) {
     return !g_hdrBuf.empty() && xr == g_hdrBufW && yr == g_hdrBufH;
 }

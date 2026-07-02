@@ -1812,9 +1812,9 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				float scnB, scnG, scnR;
 				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
 				else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
-				h[2] = scnR*Tpix + aR;
-				h[1] = scnG*Tpix + aG;
-				h[0] = scnB*Tpix + aB;
+				h[2] = fds::HdrClamp(scnR*Tpix + aR);
+				h[1] = fds::HdrClamp(scnG*Tpix + aG);
+				h[0] = fds::HdrClamp(scnB*Tpix + aB);
 			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));

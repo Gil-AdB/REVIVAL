@@ -1665,9 +1665,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB; h[1] = rlG; h[2] = rlR;
+					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);
 				} else {
-					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
 				}
 				h[3] = 1.0f;
 			}
@@ -3108,10 +3108,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
-							h[0] = ahB*invn; h[1] = ahG*invn; h[2] = ahR*invn;
+							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
 						} else {
 							const float inv = 1.0f / float(n);
-							h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv;
+							h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv);
 						}
 						h[3] = 1.0f;
 					}
@@ -3148,7 +3148,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
 						const float inv = 1.0f / float(n);
 						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
-						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+						h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv); h[3] = 1.0f;
 					}
 					matched = true;
 				}
@@ -3365,9 +3365,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB; h[1] = rlG; h[2] = rlR;   // store LINEAR
+					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);   // store LINEAR
 				} else {
-					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
 				}
 				h[3] = 1.0f;   // coverage for the composite
 			}

@@ -579,9 +579,9 @@ struct TileRasterizer {
 						for (int k = 0; k < 8; ++k) {
 							if (!hmask[k]) continue;
 							fds::hdrf* h = hbuf + (size_t(hpy) * size_t(xres) + size_t(hpx0 + k)) * 4;
-							h[0] += float(hsrc[k * 4 + 0]);   // B
-							h[1] += float(hsrc[k * 4 + 1]);   // G
-							h[2] += float(hsrc[k * 4 + 2]);   // R
+							h[0] = fds::HdrClamp(float(h[0]) + float(hsrc[k * 4 + 0]));   // B
+							h[1] = fds::HdrClamp(float(h[1]) + float(hsrc[k * 4 + 1]));   // G
+							h[2] = fds::HdrClamp(float(h[2]) + float(hsrc[k * 4 + 2]));   // R
 						}
 					} else {
 					if constexpr (BlendMode == TBlendMode::TRANSPARENT) {

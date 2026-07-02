@@ -86,7 +86,7 @@ void Hdr_ActivateNoFog() {
                 float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
                 if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 → linear scale
                 if (mrow && mrow[x] == 0xFFFFFFFEu) { b *= gain; g *= gain; r *= gain; }
-                h[x*4+0] = b; h[x*4+1] = g; h[x*4+2] = r;
+                h[x*4+0] = HdrClamp(b); h[x*4+1] = HdrClamp(g); h[x*4+2] = HdrClamp(r);
             }
         }
     });
@@ -141,6 +141,16 @@ static void getBrightPass(float* dst, int bw, int bh, int W, int H,
 // No-op unless at least one of bloom / anamorphic / lens-ghost is active.
 void Render_HdrBrightPass() {
     g_bpBW = g_bpBH = 0;
+    // Sharing is OPT-IN (FDS_SHARED_BP=1), default OFF: the sequential passes
+    // deliberately compound — bloom's bright-pass sees anamorphic's streaks,
+    // and the lens-ghost HALO samples the post-bloom buffer, so bright sources
+    // arrive smoothed (a clean chromatic ring). The shared pre-bloom bright-
+    // pass fed the halo raw sparse spec hotspots instead → red/green speckles
+    // (user-visible regression, greets t=191). Sharing saved only ~0.4 ms;
+    // not worth the look change. Kept for A/B and for configs without the
+    // halo/ghost pass.
+    static const bool on = std::getenv("FDS_SHARED_BP") != nullptr;
+    if (!on) return;
     if (!g_hdrActive) return;
     if (!(FeatureFlags::bloom() || FeatureFlags::anamorphic() || FeatureFlags::lens_ghosts())) return;
     const RenderTarget rt = MainRenderTargetFromGlobals();
@@ -152,6 +162,27 @@ void Render_HdrBrightPass() {
     hdrBrightPassInto(g_brightPass.data(), bw, bh, W, H, g_hdrBuf.data(),
                       FeatureFlags::bloom_threshold());
     g_bpBW = bw; g_bpBH = bh;
+}
+
+// FDS_HDR_SCAN=1: env-gated inf/NaN + max-finite scan of g_hdrBuf, printed
+// with a tag per call site. Diagnostic for f16-overflow hunts: the first tag
+// reporting inf/NaN names the phase that produced it (before post spreads it).
+void Hdr_DebugScan(const char* tag) {
+    static const bool on = std::getenv("FDS_HDR_SCAN") != nullptr;
+    if (!on || g_hdrBuf.empty()) return;
+    const size_t n = g_hdrBuf.size();
+    size_t nInf = 0, nNan = 0; float mx = 0; size_t mxI = 0, firstBad = SIZE_MAX;
+    for (size_t i = 0; i < n; ++i) {
+        if ((i & 3) == 3) continue;                // skip the coverage lane
+        const float v = float(g_hdrBuf[i]);
+        if (std::isnan(v)) { ++nNan; if (firstBad == SIZE_MAX) firstBad = i; }
+        else if (std::isinf(v)) { ++nInf; if (firstBad == SIZE_MAX) firstBad = i; }
+        else if (v > mx) { mx = v; mxI = i; }
+    }
+    const int W = g_hdrBufW > 0 ? g_hdrBufW : 1;
+    std::fprintf(stderr, "[HDR-SCAN] %-14s inf=%zu nan=%zu maxFinite=%.0f @(%d,%d)%s\n",
+                 tag, nInf, nNan, mx, int((mxI/4)%W), int((mxI/4)/W),
+                 firstBad != SIZE_MAX ? " <-- BAD" : "");
 }
 
 void Render_BloomPass() {
@@ -224,7 +255,7 @@ void Render_BloomPass() {
                 const float* a00=A+(size_t(y0 )*bw+x0 )*3; const float* a10=A+(size_t(y0 )*bw+x0b)*3;
                 const float* a01=A+(size_t(y0b)*bw+x0 )*3; const float* a11=A+(size_t(y0b)*bw+x0b)*3;
                 for (int c = 0; c < 3; ++c)
-                    row[x*4+c] += (a00[c]*w00 + a10[c]*w10 + a01[c]*w01 + a11[c]*w11) * intensity;
+                    row[x*4+c] = HdrClamp(float(row[x*4+c]) + (a00[c]*w00 + a10[c]*w10 + a01[c]*w01 + a11[c]*w11) * intensity);
             }
         }
     });
@@ -328,9 +359,9 @@ void Render_AnamorphicPass() {
                 };
                 float b = samp(SH,0), g = samp(SH,1), r = samp(SH,2);
                 if (SV) { b += samp(SV,0)*vert; g += samp(SV,1)*vert; r += samp(SV,2)*vert; }
-                row[x*4+0] += b * tB * intensity;
-                row[x*4+1] += g * tG * intensity;
-                row[x*4+2] += r * tR * intensity;
+                row[x*4+0] = HdrClamp(float(row[x*4+0]) + b * tB * intensity);
+                row[x*4+1] = HdrClamp(float(row[x*4+1]) + g * tG * intensity);
+                row[x*4+2] = HdrClamp(float(row[x*4+2]) + r * tR * intensity);
             }
         }
     });
@@ -526,9 +557,9 @@ void Render_LensGhostPass() {
                         sb += sampleBR(tu + nx * hr * (1 - ca*2), tv + ny * hr * (1 - ca*2), 0) * wgt;
                     }
                 }
-                row[x*4+0] += sb * intensity;
-                row[x*4+1] += sg * intensity;
-                row[x*4+2] += sr * intensity;
+                row[x*4+0] = HdrClamp(float(row[x*4+0]) + sb * intensity);
+                row[x*4+1] = HdrClamp(float(row[x*4+1]) + sg * intensity);
+                row[x*4+2] = HdrClamp(float(row[x*4+2]) + sr * intensity);
             }
         }
     });

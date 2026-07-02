@@ -483,7 +483,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
-		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); }
+		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 		g_deferredCtx = dctx;
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
@@ -547,7 +547,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// pass (skipVolumetric) is an intermediate LDR underlay that must NOT route
 		// its transparents into g_hdrBuf (it never tonemaps), same as the RTT.
 		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
-			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); }
+			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); } fds::Hdr_DebugScan("activate");
 
 		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
 		// fog), forcing every overlay below to composite LDR over the tonemapped
@@ -972,7 +972,7 @@ xpar_done: ;
 			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
 			Render_VolumetricCones(dctx);
-			{ TailProf::ScopeTimer _tp("halos"); Render_OmniHalos(dctx); }
+			{ TailProf::ScopeTimer _tp("halos"); Render_OmniHalos(dctx); } fds::Hdr_DebugScan("cones+halos");
 		}
 
 		// Screen-space rain LAST among the view-aligned scene passes (streaks
@@ -997,7 +997,7 @@ xpar_done: ;
 		// smear under camera motion). Snapshots hid it: on a one-frame render
 		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
 		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
-			fds::Render_DoFPass();          // depth-of-field bokeh on g_hdrBuf BEFORE bloom (no-op unless --dof)
+			fds::Hdr_DebugScan("pre-dof"); fds::Render_DoFPass(); fds::Hdr_DebugScan("post-dof");
 			fds::Render_HdrBrightPass();    // one shared bright-pass for anamorphic+bloom+lens-ghost (no-op unless one is on)
 			fds::Render_AnamorphicPass();   // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)

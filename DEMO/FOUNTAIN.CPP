@@ -1229,7 +1229,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	uint8_t* const vbaseB = (uint8_t*)VPage;
 	auto putCore = [&](DWord* P){
 		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);
-		              hbuf[o+0]+=255.0f; hbuf[o+1]+=255.0f; hbuf[o+2]+=255.0f; }
+		              hbuf[o+0]=fds::HdrClamp(float(hbuf[o+0])+255.0f); hbuf[o+1]=fds::HdrClamp(float(hbuf[o+1])+255.0f); hbuf[o+2]=fds::HdrClamp(float(hbuf[o+2])+255.0f); }
 		else *P = 0xFFFFFF;
 	};
 
@@ -1390,7 +1390,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	uint8_t* const vbaseB = (uint8_t*)VPage;
 	auto putCore = [&](DWord* P){
 		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);
-		              hbuf[o+0]+=255.0f; hbuf[o+1]+=255.0f; hbuf[o+2]+=255.0f; }
+		              hbuf[o+0]=fds::HdrClamp(float(hbuf[o+0])+255.0f); hbuf[o+1]=fds::HdrClamp(float(hbuf[o+1])+255.0f); hbuf[o+2]=fds::HdrClamp(float(hbuf[o+2])+255.0f); }
 		else *P = 0xFFFFFF;
 	};
 

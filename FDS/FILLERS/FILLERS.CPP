@@ -1391,9 +1391,9 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 				for (int k = 0; k < 8; ++k) {
 					if (!marr[k]) continue;
 					fds::hdrf* h = hbuf + (size_t(y) * size_t(XRes) + size_t(baseX + k)) * 4;
-					h[0] += float(src[k * 4 + 0]);   // B
-					h[1] += float(src[k * 4 + 1]);   // G
-					h[2] += float(src[k * 4 + 2]);   // R
+					h[0] = fds::HdrClamp(float(h[0]) + float(src[k * 4 + 0]));   // B
+					h[1] = fds::HdrClamp(float(h[1]) + float(src[k * 4 + 1]));   // G
+					h[2] = fds::HdrClamp(float(h[2]) + float(src[k * 4 + 2]));   // R
 				}
 			} else {
 				Vec32uc dst;
