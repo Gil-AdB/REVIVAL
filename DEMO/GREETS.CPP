@@ -2608,6 +2608,11 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		prof.switchTo(PROF_ANIM);
 
+		// Frame-pipeline Slice-0 decomposition (FDS_TAIL_PROF=1): how much
+		// pure-serial tick-thread time precedes the render — that wall time
+		// is the pipelining campaign's whole ceiling.
+		long long _tickT = TailProf::nowNs();
+
 		if (Timer < CHPartTime-500.0)
 			CurFrame = GreetSc->StartFrame + (GreetSc->EndFrame-GreetSc->StartFrame) * (float)g_FrameTime / (float)(CHPartTime-500.0);
 		else
@@ -2653,6 +2658,7 @@ struct GreetsScene : SceneDriver {
 		}
 
 		Animate_Objects(GreetSc, View);
+		TailProf::mark("Tick-Anim", _tickT); _tickT = TailProf::nowNs();
 
 		// Mirror shatter (Y key): bake the room into a panorama from the
 		// screen's centre, break it into reflecting shards, and close the
@@ -2895,6 +2901,8 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 
+		TailProf::mark("Tick-Logic", _tickT);
+
 		// Second-order mirror RTT pass (no-op without --mirror-rtt):
 		// re-render the visible mirror-in-mirror panels into their slot
 		// textures. Must run AFTER Animate_Objects (current geometry,
@@ -2905,10 +2913,33 @@ struct GreetsScene : SceneDriver {
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
 		                              g_greetsRttSlots); }
 
+		// --bake_tick_overlap: dispatch the per-frame shadow bake NOW — its
+		// pool tasks run underneath the serial Transform/Lighting/Radix
+		// chunk below (complementary resources: the pool is otherwise
+		// parked while the tick thread works). Joined explicitly before
+		// gg->Render(). Guards: not while the shatter is active (fresh
+		// shard meshes would race their first VertexScratch clone-init
+		// copy against the concurrent main Transform) and not in the first
+		// frames (clone warmup — steady state has no init copies). The
+		// bake reads only Animate-written pose state (stable by now) + its
+		// own clones; the serial chunk writes shared per-vertex projection
+		// and colour fields the depth-only bake never reads.
+		static int sBakeOverlapWarmup = 0;
+		const bool bakeOverTick = fds::FeatureFlags::bake_tick_overlap()
+		    && !fds::FeatureFlags::shadow_gbuffer_overlap()
+		    && !g_greetsShatter.active()
+		    && sBakeOverlapWarmup++ > 2;
+		if (bakeOverTick) {
+			prof.switchTo(PROF_BAKE);
+			ShadowBake_DispatchGreets(GreetSc);
+		}
+
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
 
+		_tickT = TailProf::nowNs();
 		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
+		TailProf::mark("Tick-Xfrm", _tickT); _tickT = TailProf::nowNs();
 
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);
@@ -2925,6 +2956,7 @@ struct GreetsScene : SceneDriver {
 		    fds::g_rttJobsLastFrame > 0;
 		if (lightingConsumed)
 			Lighting(GreetSc);
+		TailProf::mark("Tick-Light", _tickT); _tickT = TailProf::nowNs();
 
 		// PROFILER: SORT phase.
 		prof.leave(PROF_LGHT);
@@ -2932,6 +2964,7 @@ struct GreetsScene : SceneDriver {
 		prof.enter(PROF_SORT);
 
 		Radix_Sort(FList, SList, CAll);
+		TailProf::mark("Tick-Radix", _tickT);
 
 		// PROFILER: RNDR phase.
 		prof.switchTo(PROF_BAKE);
@@ -2951,7 +2984,11 @@ struct GreetsScene : SceneDriver {
 		// these run on a dedicated thread overlapping the gbuffer fill in
 		// gg->Render() below, and renderFrame joins before deferred lighting;
 		// otherwise they run synchronously inline here (current behavior).
-		ShadowBake_DispatchGreets(GreetSc);
+		if (!bakeOverTick)
+			ShadowBake_DispatchGreets(GreetSc);
+		else
+			ShadowBake_JoinPending();   // tick-thread join: the bake never
+			                            // contends the render's own waves
 		prof.switchTo(PROF_RNDR);
 		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics

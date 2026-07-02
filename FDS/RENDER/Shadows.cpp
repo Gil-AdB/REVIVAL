@@ -352,7 +352,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// the shared counter clean for later passes (which reset it themselves
 	// before use). When overlapping with the gbuffer fill we must NOT touch
 	// the shared counter from this off-thread bake; skip it. (Stage A.)
-	if (!fds::FeatureFlags::shadow_gbuffer_overlap()) {
+	if (!fds::FeatureFlags::shadow_gbuffer_overlap()
+	    && !fds::FeatureFlags::bake_tick_overlap()) {
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
@@ -569,7 +570,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	const auto tRasterStart = clk::now();
 	// Vestigial for the bake (Phase-B tiles are pre-assigned); skip it when
 	// overlapping so the off-thread bake doesn't touch the shared counter.
-	if (!fds::FeatureFlags::shadow_gbuffer_overlap()) {
+	if (!fds::FeatureFlags::shadow_gbuffer_overlap()
+	    && !fds::FeatureFlags::bake_tick_overlap()) {
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
@@ -1036,10 +1038,14 @@ void ShadowBake_DispatchGreets(Scene *Sc) {
 		if (fds::FeatureFlags::shadow_dynamic())
 			Render_DeferredShadowMaps(Sc, ShadowBakeMode::DynamicMeshesPerFrame);
 	};
-	if (fds::FeatureFlags::shadow_gbuffer_overlap()) {
-		// Spawn on a dedicated orchestrator thread; the gbuffer fill in the
-		// subsequent gg->Render() runs concurrently. Pending is cleared by the
-		// first JoinPending() of the frame (the main lighting pass).
+	if (fds::FeatureFlags::shadow_gbuffer_overlap()
+	    || fds::FeatureFlags::bake_tick_overlap()) {
+		// Spawn on a dedicated orchestrator thread. Stage A overlaps the
+		// gbuffer fill (join in renderFrame before deferred lighting);
+		// --bake_tick_overlap dispatches from EARLIER in the greets tick so
+		// the bake's pool tasks run under the serial Transform/Lighting/
+		// Radix chunk instead, with an explicit JoinPending before Render.
+		// Pending is cleared by the first JoinPending() of the frame.
 		g_shadowBakePending.store(true, std::memory_order_release);
 		g_shadowBakeThread = std::thread(runBakes);
 	} else {

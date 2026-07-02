@@ -22,6 +22,12 @@
 #include "Base/Omni.h"
 #include "Base/Material.h"
 #include "Base/Camera.h"
+#include "Base/FeatureFlags.h"
+
+#include <semaphore>
+#include <vector>
+#include <climits>
+#include "Threads.h"              // ThreadPool — fan Lighting() per mesh
 
 float Vector_CosAngleFAST(Vector *U,Vector *V)
 {
@@ -221,45 +227,38 @@ void StaticLighting(Scene *Sc)
 // Vtx->LR/LG/LB for its colorize step — so the per-vertex pass has to
 // populate those even when the rest of the frame is going through the
 // G-buffer compositor.
-void Lighting(Scene *Sc)
+// Per-mesh body of Lighting(), extracted so the per-frame pass can fan
+// meshes across the thread pool: each mesh's writes are its own Verts'
+// L{R,G,B,A} — disjoint per task — and every read (omnis, materials,
+// scene ambient) is stable for the duration of the pass. The scratch
+// that used to be function-static (the CurLight array) is thread_local;
+// the tiny Color temporaries live on the stack. Math is untouched, so
+// parallel == serial byte-for-byte per vertex.
+static void LightMeshVerts(Scene *Sc, TriMesh *T)
 {
-
-	TriMesh *T;
 	Vertex *V, *VE;
-	Face *F, *FE;
 	Omni *O;
 
-	Vector u, v, w;
-	dword n;
+	Vector u, w;
 
-	Matrix M;
 	Material *Mat;
 	float Lumin;
 
-	// hopefully, paragraph aligned
-	static Color *pl = (Color *)getAlignedBlock(sizeof(Color), 16);
-	static Color Ambient;
+	Color plStorage, *pl = &plStorage;
+	Color Ambient;
 
 	// light position vector
-	static CurLight *LA = (CurLight *)getAlignedBlock(sizeof(CurLight) * 128, 16);
-	static CurLight *L, *LE;
+	static thread_local CurLight LA[128];
+	CurLight *L, *LE;
 
-	if (!(Sc->Flags & Scn_StaticLighting))
 	{
-		Sc->Flags |= Scn_StaticLighting;
-		StaticLighting(Sc);
-	}
-
-	for (T = Sc->TriMeshHead; T; T = T->Next)
-	{
-		if (T->Flags&(Tri_Invisible | Tri_Noshading)) continue;
-
 		if (T->FIndex)
 		{
 			Mat = T->Faces[0].Txtr;
 			Lumin = Mat->Luminosity;
 		}
-		else Lumin = 0.0;
+		else return;   // no faces → no material; the old code read a stale
+		               // Mat pointer here (latent UB), never hit in practice.
 
 
 		// Calculate ambient factor
@@ -412,5 +411,60 @@ void Lighting(Scene *Sc)
 			V->LR = pl->R;
 			V->LA = pl->A;
 		}
+	}
+}
+
+void Lighting(Scene *Sc)
+{
+	if (!(Sc->Flags & Scn_StaticLighting))
+	{
+		Sc->Flags |= Scn_StaticLighting;
+		StaticLighting(Sc);
+	}
+
+	// Fan the per-mesh work across the pool (the pool is parked during the
+	// scene tick, so this is free parallelism — measured ~1 ms serial on
+	// greets). --no-vertex_light_parallel restores the serial walk.
+	if (fds::FeatureFlags::vertex_light_parallel())
+	{
+		// Chunked fan: greets is many SMALL meshes (wall chunks), so a
+		// task per mesh drowned in enqueue/semaphore overhead (measured
+		// 1.27 ms vs 0.83 serial). Gather once, stride across a fixed
+		// task count instead — 12 enqueues total, meshes interleaved so
+		// the big mech parts spread across tasks.
+		static std::vector<TriMesh*> sMeshes;   // tick-thread only
+		sMeshes.clear();
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
+		{
+			if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
+			sMeshes.push_back(T);
+		}
+		const int nTasks = std::min<int>(12, (int)sMeshes.size());
+		if (nTasks > 1)
+		{
+			static std::counting_semaphore<INT_MAX> sDone{0};
+			TriMesh **meshes = sMeshes.data();
+			const int count = (int)sMeshes.size();
+			for (int k = 0; k < nTasks; ++k)
+			{
+				ThreadPool::instance().enqueue([Sc, meshes, count, k, nTasks]() {
+					for (int i = k; i < count; i += nTasks)
+						LightMeshVerts(Sc, meshes[i]);
+					sDone.release();
+				});
+			}
+			for (int i = 0; i < nTasks; ++i) sDone.acquire();
+		}
+		else
+		{
+			for (TriMesh *T : sMeshes) LightMeshVerts(Sc, T);
+		}
+		return;
+	}
+
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
+	{
+		if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
+		LightMeshVerts(Sc, T);
 	}
 }
