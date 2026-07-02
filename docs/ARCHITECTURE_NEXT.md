@@ -133,3 +133,33 @@ a bucket. Do it last, or never — the per-bucket levers above total more.
 
 Expected total from 1-4: **roughly −7…10 ms on the user's full config** (47→~38 ms)
 with only 3.4 carrying a visible quality tradeoff — before any config trims.
+
+## 2026-07-02 — measurement-audit round: 3 instrumentation bugs, corrected anatomy
+
+Audit found a third attribution bug (same class as the --shadow_bake_time /
+--shadow_prof shared-accumulator fixes): greets+city entered PROF_RNDR **before**
+the shadow bake, folding ~5 ms of bake into the RNDR row everyone reads. Fixed
+with a PROF_BAKE section (6680941). One-shot timers (g_ssaoLastMs, g_aaLastMs,
+TailProf) audited clean.
+
+Corrected greets anatomy (shadows config, quarter, NO post-FX): frame ~26 ms =
+RNDR 19.7 + BAKE 5.1 + LGHT 0.9 + XFRM 0.4. Inside RNDR (TailProf):
+lighting-w1 6.7 / lighting-w2 2.6 / cones 2.1 / gbuffer 1.8 / StampMasks 0.3 /
+**~5.5 un-instrumented serial** (tonemap, xpar peel, activate, TBR — needs
+ScopeTimers before optimizing). lighting-w1 ablation: per-light loop 5.1
+(cube taps 2.6 + light math 2.5), base 1.2, nmap 0.65.
+
+New ranked targets from the corrected data:
+
+1. **Lightmap × dynamic-cube composite** — `lmKernelEnabled = !shadow_dynamic()`
+   (DeferredSurfaceKernel.cpp:745): --shadow-dynamic globally disables the static
+   lightmap fast path, so every static light pays full cube taps. Machinery for
+   the fix exists: CubeShadow_Sample(dynamicOnly=true) + per-map hasDynMeshVisible
+   (skip the dynamic tap entirely for maps with no moving-mesh content). Est
+   −1.5…2 ms of the 2.6 ms tap bucket. The earlier "kernel is negligible" claim
+   was a sample-profile misattribution — retracted.
+2. **Per-tile light contribution culling** — light math is 2.5 ms across ~41 view
+   lights; FDS_CONTRIB_CULL diagnostic already measures the cullable fraction.
+3. **Account the ~5.5 ms serial inside Render-3D** (instrument first).
+4. Still standing from §3: f16 HDR buffer, pointwise post-FX fusion, half-res
+   DoF, temporal SSAO.
