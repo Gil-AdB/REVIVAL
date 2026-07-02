@@ -52,6 +52,23 @@ SIDECAR = os.path.join(RUNTIME, "SCENES", "GREETS.MAT")
 PBR_DIR = os.path.join(RUNTIME, "TEXTURES", "PBR")
 LWSREAD = os.path.join(REPO, "tools", "lwsread", "build", "lwsread")
 
+# Scene registry. greets has pinned LWO/LWS authoring sources, so numeric
+# surface edits patch the .lwo files and light edits patch the .lws (then the
+# FLD is regenerated). The other scenes' sources aren't pinned (Authoring/
+# README status table) — their numeric edits persist as sidecar prop lines
+# instead (surface|prop|value, applied at scene init by
+# MaterialImport_ApplySidecar), and light edits are live-only.
+SCENES = {
+    "greets":   {"authoring": True},
+    "city":     {"authoring": False},
+    "chase":    {"authoring": False},
+    "fountain": {"authoring": False},
+}
+
+
+def scene_sidecar(scene):
+    return os.path.join(RUNTIME, "SCENES", scene.upper() + ".MAT")
+
 ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "glossiness", "luminosity", "transparency", "reflection"}
 ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao"}
@@ -84,12 +101,12 @@ def map_surface_name(name):
     return None, name
 
 
-def read_sidecar():
-    """GREETS.MAT -> {(surface, role): path}; preserves nothing else (comments
-    are regenerated on write)."""
+def read_sidecar(path):
+    """Sidecar -> {(surface, key): value-string}. Holds both map lines
+    (key=role, value=path) and numeric prop lines (key=prop, value=number)."""
     entries = {}
-    if os.path.exists(SIDECAR):
-        for line in open(SIDECAR, encoding="utf-8"):
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -99,23 +116,25 @@ def read_sidecar():
     return entries
 
 
-def write_sidecar(entries):
-    lines = ["# PBR map assignments — written by tools/editor_server.py (editor",
+def write_sidecar(path, entries):
+    lines = ["# Editor overrides — written by tools/editor_server.py (editor",
              "# \"Save\"), loaded at scene init by MaterialImport_ApplySidecar.",
-             "# Format: surface|role|path-relative-to-Runtime", ""]
-    for (surface, role), path in sorted(entries.items()):
-        lines.append(f"{surface}|{role}|{path}")
-    with open(SIDECAR, "w", encoding="utf-8") as f:
+             "# Format: surface|role|path-relative-to-Runtime (PBR map)",
+             "#         surface|prop|value                    (numeric override)", ""]
+    for (surface, key), value in sorted(entries.items()):
+        lines.append(f"{surface}|{key}|{value}")
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
-def save_maps(maps, warnings):
+def save_maps(scene, maps, warnings):
     """{"<surface>": {"<role>": {"filename": ..., "data": base64}}} -> write the
-    bytes under Runtime/TEXTURES/PBR/ and update the sidecar. Returns the list
-    of written entries. Deterministic filenames (<surface>_<role><ext>) so a
-    re-import of the same slot overwrites instead of accumulating files."""
+    bytes under Runtime/TEXTURES/PBR/ and update the scene sidecar. Returns the
+    list of written entries. Deterministic filenames so a re-import of the same
+    slot overwrites instead of accumulating files."""
     written = []
-    entries = read_sidecar()
+    sidecar = scene_sidecar(scene)
+    entries = read_sidecar(sidecar)
     for surface, roles in (maps or {}).items():
         if not isinstance(roles, dict):
             warnings.append(f"maps['{surface}']: bad shape — skipped")
@@ -130,7 +149,10 @@ def save_maps(maps, warnings):
             if not data:
                 warnings.append(f"maps['{surface}']['{role}']: empty data — skipped")
                 continue
-            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{surface}_{role}{ext}")
+            # greets predates the scene prefix (momy_albedo.png &c) — keep its
+            # naming stable; other scenes prefix to avoid cross-scene collisions.
+            stem = f"{surface}_{role}" if scene == "greets" else f"{scene}_{surface}_{role}"
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem + ext)
             os.makedirs(PBR_DIR, exist_ok=True)
             with open(os.path.join(PBR_DIR, safe), "wb") as f:
                 f.write(data)
@@ -139,8 +161,27 @@ def save_maps(maps, warnings):
             written.append({"surface": surface, "role": role, "path": rel,
                             "bytes": len(data), "original": fname})
     if written:
-        write_sidecar(entries)
+        write_sidecar(sidecar, entries)
     return written
+
+
+def save_props_to_sidecar(scene, surfaces, warnings):
+    """Numeric surface edits for scenes WITHOUT pinned LWO sources: persist as
+    sidecar prop lines (applied at scene init). Returns per-surface summary."""
+    sidecar = scene_sidecar(scene)
+    entries = read_sidecar(sidecar)
+    saved = []
+    for name, props in surfaces.items():
+        bad = set(props) - ALLOWED_PROPS
+        if bad:
+            warnings.append(f"'{name}': unknown props {sorted(bad)} — skipped")
+            continue
+        for p, v in props.items():
+            entries[(name, p)] = f"{float(v):.6g}"
+        saved.append({"surface": name, "props": sorted(props)})
+    if saved:
+        write_sidecar(sidecar, entries)
+    return saved
 
 
 LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
@@ -222,9 +263,13 @@ def regen_fld(patched):
                  "fld_bytes": os.path.getsize(FLD_INSTALL)}
 
 
-def do_save(payload):
-    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}} -> patch LWOs
-    + LWS, store uploaded PBR maps + sidecar, regen + install FLD."""
+def do_save(scene, payload):
+    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}}.
+    greets: patch LWOs + LWS, regen + install the FLD.
+    other scenes (no pinned sources): surfaces persist as sidecar prop lines,
+    lights are live-only (warned). Maps go to the scene sidecar either way."""
+    if scene not in SCENES:
+        return 404, {"ok": False, "error": f"unknown scene '{scene}'"}
     surfaces = payload.get("surfaces") or {}
     maps = payload.get("maps") or {}
     lights = payload.get("lights") or {}
@@ -233,7 +278,21 @@ def do_save(payload):
         return 400, {"ok": False, "error": "no surfaces, maps, or lights in payload"}
 
     warnings = []
-    saved_maps = save_maps(maps, warnings)
+    saved_maps = save_maps(scene, maps, warnings)
+
+    if not SCENES[scene]["authoring"]:
+        # Sidecar-persisted scene: numeric props -> sidecar; no FLD regen (the
+        # overrides apply at scene init, on top of the untouched FLD).
+        saved_props = save_props_to_sidecar(scene, surfaces, warnings) if surfaces else []
+        if lights:
+            warnings.append(f"light write-back needs pinned LWS sources — '{scene}' "
+                            "has none yet (Authoring/README.md); light edits are live-only")
+        return 200, {"ok": True, "patched": [], "maps": saved_maps,
+                     "props": saved_props,
+                     "sidecar": os.path.relpath(scene_sidecar(scene), REPO)
+                                if (saved_maps or saved_props) else None,
+                     "warnings": warnings}
+
     patched_lights = patch_lws_lights(lights, warnings)
     if not surfaces:
         if patched_lights:
@@ -352,14 +411,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/api/greets/save":
+        m = re.match(r"^/api/(\w+)/save$", self.path.split("?")[0])
+        if not m:
             self.send_error(404)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             with save_lock:
-                code, resp = do_save(payload)
+                code, resp = do_save(m.group(1), payload)
         except Exception as e:  # report, don't kill the server
             code, resp = 500, {"ok": False, "error": f"{type(e).__name__}: {e}"}
         body = json.dumps(resp, indent=1).encode()

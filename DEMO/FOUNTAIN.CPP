@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "MaterialImport.h"
 #include <Base/RenderStats.h>
 #include <Threads.h>
 #include <Base/RenderStats.h>
@@ -888,6 +889,10 @@ void Initialize_Fountain()
 
 	Initialize_Particles(FntSc);
 	Preprocess_Scene(FntSc, "FOUNTAIN");
+
+	// Persisted editor overrides (PBR maps + numeric surface props) — the
+	// browser editor's "Save" writes this sidecar; no-op when absent.
+	fds::MaterialImport_ApplySidecar(FntSc, "SCENES/FOUNTAIN.MAT");
 
 	// The portal/vortex is an additive sky glow on a square quad whose texture
 	// is transparent (black) outside the swirl. Assign_Fillers gave it the plain

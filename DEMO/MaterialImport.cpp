@@ -305,6 +305,34 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	}
 }
 
+bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
+                                   const char *prop, float value) {
+	if (!sc || !surface || !prop) return false;
+	bool any = false;
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != sc) continue;
+		if (!M->Name || rev::Editor_BaseSurfName(M->Name) != surface) continue;
+		if      (!std::strcmp(prop, "baseR"))        M->BaseCol.R = value;
+		else if (!std::strcmp(prop, "baseG"))        M->BaseCol.G = value;
+		else if (!std::strcmp(prop, "baseB"))        M->BaseCol.B = value;
+		else if (!std::strcmp(prop, "diffuse"))      M->Diffuse = value;
+		else if (!std::strcmp(prop, "specular"))     M->Specular = value;
+		else if (!std::strcmp(prop, "glossiness"))   M->Glossiness = (unsigned short)(value < 0 ? 0 : value);
+		else if (!std::strcmp(prop, "luminosity"))   M->Luminosity = value;
+		else if (!std::strcmp(prop, "transparency")) M->Transparency = value;
+		else if (!std::strcmp(prop, "reflection"))   M->Reflection = value;
+		else return false;   // unknown prop
+		any = true;
+	}
+	return any;
+}
+
+static bool sidecarIsMapRole(const char *role) {
+	return !std::strcmp(role, "albedo") || !std::strcmp(role, "normal")
+	    || !std::strcmp(role, "height") || !std::strcmp(role, "roughness")
+	    || !std::strcmp(role, "ao");
+}
+
 void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 	if (!sc || !path) return;
 	FILE *f = std::fopen(path, "r");
@@ -318,17 +346,24 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 		char *sep1 = std::strchr(line, '|');
 		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
 		if (!sep1 || !sep2) {
-			std::fprintf(stderr, "[MAT-SIDECAR] bad line (want surface|role|path): %s\n", line);
+			std::fprintf(stderr, "[MAT-SIDECAR] bad line (want surface|key|value): %s\n", line);
 			continue;
 		}
 		*sep1 = 0;
 		*sep2 = 0;
-		const char *surface = line, *role = sep1 + 1, *mapPath = sep2 + 1;
-		if (MaterialImport_ApplyMapFile(sc, surface, role, mapPath)) ++applied;
-		else                                                         ++failed;
+		const char *surface = line, *key = sep1 + 1, *value = sep2 + 1;
+		bool ok;
+		if (sidecarIsMapRole(key)) {
+			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);
+		} else {
+			ok = MaterialImport_SetSurfaceProp(sc, surface, key, std::strtof(value, nullptr));
+			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: no match / unknown prop\n",
+			                      surface, key);
+		}
+		if (ok) ++applied; else ++failed;
 	}
 	std::fclose(f);
-	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d map(s) applied%s\n",
+	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d entrie(s) applied%s\n",
 	             path, applied, failed ? " (some FAILED, see above)" : "");
 }
 

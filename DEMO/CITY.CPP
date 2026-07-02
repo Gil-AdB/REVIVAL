@@ -1,5 +1,6 @@
 
 #include "Rev.h"
+#include "MaterialImport.h"
 #include <Base/RenderStats.h>
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
@@ -1877,6 +1878,10 @@ void Initialize_City()
 
 
 	Preprocess_Scene(CitySc, "CITY");
+
+	// Persisted editor overrides (PBR maps + numeric surface props) — the
+	// browser editor's "Save" writes this sidecar; no-op when absent.
+	fds::MaterialImport_ApplySidecar(CitySc, "SCENES/CITY.MAT");
 
 	//for(M = MatLib;M;M=M->Next)
 	//{

@@ -61,17 +61,29 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 
 // Sidecar loader — the PERSISTED form of the editor's PBR map assignments
 // (LWO1 has no slot for them, so they can't live in the .lwo like the numeric
-// surface values do). Line format, paths relative to Runtime/ (the CWD):
+// surface values do) and, for scenes WITHOUT pinned LWO authoring sources
+// (city/chase/fountain), of numeric surface-property overrides too. Line
+// format, paths relative to Runtime/ (the CWD):
 //   # comment / blank lines ignored
-//   surface|role|TEXTURES/PBR/file.png
+//   surface|role|TEXTURES/PBR/file.png      (role: albedo/normal/height/roughness/ao)
+//   surface|prop|value                      (prop: diffuse/specular/glossiness/
+//                                            luminosity/transparency/reflection/
+//                                            baseR/baseG/baseB — engine scale)
 // '|' separator because surface names contain spaces ("hull not smooth").
-// Applies each line via MaterialImport_ApplyMapFile (same load/convert/assign/
-// tangent-recompute as the CLI path, ::mirUV clones included). Call at scene
-// init after Scene_RebuildMatTable, BEFORE MaterialImport_Apply so explicit
+// Map lines go through MaterialImport_ApplyMapFile (same load/convert/assign/
+// tangent-recompute as the CLI path, ::mirUV clones included); prop lines go
+// through MaterialImport_SetSurfaceProp below. Call at scene init after
+// Scene_RebuildMatTable, BEFORE MaterialImport_Apply so explicit
 // --material-import CLI specs still override the sidecar. A missing sidecar is
-// a silent no-op; a missing texture file inside one logs and skips that line.
+// a silent no-op; a bad line inside one logs and skips that line.
 // The editor's dev server (tools/editor_server.py) writes this file on Save.
 void MaterialImport_ApplySidecar(Scene *sc, const char *path);
+
+// Set one numeric property (engine scale) on every material of `sc` whose
+// base name (::mirUV collapsed) matches `surface`. The shared setter under
+// both the sidecar prop lines and the editor's live Editor_SetSurfaceProp.
+bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
+                                   const char *prop, float value);
 
 } // namespace fds
 

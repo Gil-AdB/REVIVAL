@@ -85,23 +85,9 @@ std::string Editor_GetSurfacesJSON()
 
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 {
-	if (!name || !key) return false;
-	bool any = false;
-	for (Material* M = MatLib; M; M = M->Next) {
-		if (M->RelScene != CurScene) continue;
-		if (!M->Name || Editor_BaseSurfName(M->Name) != name) continue;   // ::mirUV clones too
-		if      (!std::strcmp(key, "baseR"))        M->BaseCol.R = value;
-		else if (!std::strcmp(key, "baseG"))        M->BaseCol.G = value;
-		else if (!std::strcmp(key, "baseB"))        M->BaseCol.B = value;
-		else if (!std::strcmp(key, "diffuse"))      M->Diffuse = value;
-		else if (!std::strcmp(key, "specular"))     M->Specular = value;
-		else if (!std::strcmp(key, "glossiness"))   M->Glossiness = (unsigned short)(value < 0 ? 0 : value);
-		else if (!std::strcmp(key, "luminosity"))   M->Luminosity = value;
-		else if (!std::strcmp(key, "transparency")) M->Transparency = value;
-		else if (!std::strcmp(key, "reflection"))   M->Reflection = value;
-		else return false;   // unknown key — fail fast, don't silently no-op
-		any = true;
-	}
+	// Shared setter (also used by the sidecar's numeric prop lines): sets on
+	// every CurScene material whose base name matches, ::mirUV clones included.
+	const bool any = fds::MaterialImport_SetSurfaceProp(CurScene, name, key, value);
 	if (any) Editor_MarkDirty();
 	return any;
 }

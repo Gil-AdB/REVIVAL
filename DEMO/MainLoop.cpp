@@ -83,6 +83,28 @@ static float  g_camYaw   = 0.6f;
 static float  g_camPitch = 0.45f;
 static float  g_camDist  = 48.0f;
 static Vector g_camTarget;               // set in DemoBoot (greets room centre)
+
+// ── Editor scene registry ───────────────────────────────────────────────
+// ?editor&scene=<name> picks which scene the editor boots (default greets).
+// camTarget: fixed default orbit pivot; autoFrame=true computes it from the
+// scene's world bbox after the first tick instead (greets keeps its known-
+// good room-centre pose). joinGreetsBake: greets-only static-lightmap join.
+struct EditorSceneDef {
+	const char *name;
+	void      (*init)();
+	std::unique_ptr<SceneDriver> (*create)();
+	bool        joinGreetsBake;
+	bool        autoFrame;
+	float       tx, ty, tz, dist;
+};
+static const EditorSceneDef kEditorScenes[] = {
+	{ "greets",   &Initialize_Greets,   &createGreetsScene,   true,  false, 18.0f, 6.0f, -35.0f, 48.0f },
+	{ "city",     &Initialize_City,     &createCityScene,     false, true,  0, 0, 0, 48.0f },
+	{ "chase",    &Initialize_Chase,    &createChaseScene,    false, true,  0, 0, 0, 48.0f },
+	{ "fountain", &Initialize_Fountain, &createFountainScene, false, true,  0, 0, 0, 48.0f },
+};
+static const EditorSceneDef *g_editorScene = &kEditorScenes[0];
+static std::atomic<bool> g_editorSceneReady{false};
 static bool   g_editorCamSeeded = false; // first frame seeds orbit from scene cam
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
@@ -236,11 +258,19 @@ void DemoBoot(ModplayerHandle modHandle)
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8
 		// overrides a default (later wins; setParamFromText marks explicitly-set).
+		// scene=<name> picks the edited scene (registry above) and is excluded
+		// from the flag list.
 		if (const char *qs = emscripten_run_script_string("location.search.replace(/^[?]/,'')")) {
 			std::string q = qs, tok;
 			for (size_t i = 0; i <= q.size(); ++i) {
 				if (i == q.size() || q[i] == '&') {
-					if (!tok.empty() && tok != "editor") args.push_back("--" + tok);
+					if (tok.rfind("scene=", 0) == 0) {
+						const std::string want = tok.substr(6);
+						for (const EditorSceneDef &s : kEditorScenes)
+							if (want == s.name) g_editorScene = &s;
+					} else if (!tok.empty() && tok != "editor") {
+						args.push_back("--" + tok);
+					}
 					tok.clear();
 				} else tok.push_back(q[i]);
 			}
@@ -251,14 +281,16 @@ void DemoBoot(ModplayerHandle modHandle)
 		// Only hard override: the teleporter mirror stays off in wasm (memory).
 		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
 		fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
-		fprintf(stderr, "[EDITOR] greets editor: full native pipeline (%d flags), mirror off (wasm mem)\n",
-		        (int)args.size() - 1);
-		// Orbit target = greets room-bbox centre (see the [DISCO] room-bbox log).
-		g_camTarget.x = 18.0f; g_camTarget.y = 6.0f; g_camTarget.z = -35.0f;
-		// NOTE: the greets init thread is NOT spawned here — editorTick spawns
-		// it once the shell's live-FLD fetch resolves (see editorSpawnInit),
-		// so a freshly saved GREETS.FLD can be installed into MEMFS over the
-		// link-time preloaded copy BEFORE Initialize_Greets opens it.
+		fprintf(stderr, "[EDITOR] %s editor: full native pipeline (%d flags), mirror off (wasm mem)\n",
+		        g_editorScene->name, (int)args.size() - 1);
+		// Default orbit pivot (greets: room-bbox centre; autoFrame scenes
+		// recompute from the world bbox after the first tick).
+		g_camTarget.x = g_editorScene->tx; g_camTarget.y = g_editorScene->ty; g_camTarget.z = g_editorScene->tz;
+		g_camDist = g_editorScene->dist;
+		// NOTE: the scene init thread is NOT spawned here — editorTick spawns
+		// it once the shell's live-FLD fetch resolves (see editorMaybeSpawnInit),
+		// so a freshly saved FLD/sidecar can be installed into MEMFS over the
+		// link-time preloaded copies BEFORE the scene init opens them.
 		return;
 	}
 
@@ -450,27 +482,60 @@ static void editorMaybeSpawnInit()
 		HintHighPerfThread();
 		InitPolyStats(200);
 		FPU_LPrecision();
-		Initialize_Greets();
-		g_greetsReady.store(true);
+		g_editorScene->init();
+		g_editorSceneReady.store(true);
 		g_initThreadDone.store(true);
-		fprintf(stderr, "[EDITOR] greets init complete\n");
+		fprintf(stderr, "[EDITOR] %s init complete\n", g_editorScene->name);
 	});
+}
+
+// Auto-frame: world bbox of every mesh (RotMat·Pos + IPos — valid after the
+// first tick's Animate) → orbit pivot at the centre, distance to fit. Used by
+// scenes without a hand-tuned default pose (city/chase/fountain).
+static void editorAutoFrame()
+{
+	if (!CurScene) return;
+	float lox = 1e30f, loy = 1e30f, loz = 1e30f, hix = -1e30f, hiy = -1e30f, hiz = -1e30f;
+	long n = 0;
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		for (DWord v = 0; v < T->VIndex; ++v) {
+			Vector w;
+			MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
+			Vector_SelfAdd(&w, &T->IPos);
+			if (w.x < lox) lox = w.x; if (w.y < loy) loy = w.y; if (w.z < loz) loz = w.z;
+			if (w.x > hix) hix = w.x; if (w.y > hiy) hiy = w.y; if (w.z > hiz) hiz = w.z;
+			++n;
+		}
+	}
+	if (!n) return;
+	g_camTarget.x = (lox + hix) * 0.5f;
+	g_camTarget.y = (loy + hiy) * 0.5f;
+	g_camTarget.z = (loz + hiz) * 0.5f;
+	const float dx = hix - lox, dy = hiy - loy, dz = hiz - loz;
+	float d = std::sqrt(dx*dx + dy*dy + dz*dz) * 0.6f;
+	if (d < 6.0f) d = 6.0f;
+	if (d > 600.0f) d = 600.0f;
+	g_camDist = d;
+	fprintf(stderr, "[EDITOR] auto-frame: %ld verts, centre (%.1f %.1f %.1f) dist %.1f\n",
+	        n, g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
 }
 
 static void editorTick()
 {
 	if (!g_currentDriver) {
 		editorMaybeSpawnInit();
-		if (!g_greetsReady.load()) return;        // init thread still loading
-		Greets_JoinBakeThread();                  // finish the static lightmap bake
-		g_currentDriver = createGreetsScene();
+		if (!g_editorSceneReady.load()) return;   // init thread still loading
+		if (g_editorScene->joinGreetsBake)
+			Greets_JoinBakeThread();              // finish the static lightmap bake
+		g_currentDriver = g_editorScene->create();
 		g_currentDriver->init();
 		g_currentDriverInitialized = true;
 		EngineStartFadeIn(kFadeFrames);
 		g_editorRenderFrames = kFadeFrames + 1;   // play the fade-in
 		Init_FreeCamera();
 		if (CurScene) Calibrate_FreeCamera_ForScene(CurScene->FZP, CurScene->CameraHead);
-		fprintf(stderr, "[EDITOR] greets up — fly: WASD/QE + arrows; mouse-drag orbit; wheel zoom; click a surface to focus\n");
+		fprintf(stderr, "[EDITOR] %s up — fly: WASD/QE + arrows; mouse-drag orbit; wheel zoom; click a surface to focus\n",
+		        g_editorScene->name);
 	}
 
 	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
@@ -497,6 +562,13 @@ static void editorTick()
 		poll_pending_resize(g_currentDriver.get());
 		g_currentDriver->tick();
 		g_editorCamSeeded = true;
+		if (g_editorScene->autoFrame) {
+			// Meshes now have valid RotMat/IPos (the tick ran Animate) —
+			// reframe on the scene bbox and re-render next frame.
+			editorAutoFrame();
+			updateEditorCamera();
+			rev::Editor_MarkDirty();
+		}
 	} else {
 		if (anyFreeCamKey()) {
 			dTime = 16.0f;             // fixed step (Timer is frozen → no scene dTime)

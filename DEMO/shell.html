@@ -174,6 +174,12 @@
       // ?editor in the URL → surface-editor mode. Read in C++ (DemoBoot) to
       // boot greets-only/mirror-off, and here to show the surface panel.
       var revEditorMode = /[?&]editor\b/.test(location.search);
+      // ?scene=<name> picks the edited scene (default greets). The C++ side
+      // parses the same token (MainLoop's editor scene registry); here it
+      // selects the live-fetch paths + the save API route.
+      var revEditorScene = (location.search.match(/[?&]scene=(\w+)/) || [])[1] || 'greets';
+      var revEditorFLD = 'SCENES/' + revEditorScene.toUpperCase() + '.FLD';
+      var revEditorMAT = 'SCENES/' + revEditorScene.toUpperCase() + '.MAT';
       var Module = {
         canvas: canvasEl,
         setStatus: setStatus,
@@ -219,16 +225,16 @@
               .then(function(r){ if (!r.ok) throw new Error(rel + ': ' + r.status); return r.arrayBuffer(); })
               .then(function(b){ Module.editorFreshFiles.push({ path: '/' + rel, data: new Uint8Array(b) }); });
           }
-          grab('SCENES/GREETS.FLD')
+          grab(revEditorFLD)
             .then(function(){
               // Sidecar is optional (404 = no persisted maps yet).
-              return fetch('SCENES/GREETS.MAT' + bust, { cache: 'no-store' })
+              return fetch(revEditorMAT + bust, { cache: 'no-store' })
                 .then(function(r){ return r.ok ? r.arrayBuffer() : null; })
                 .catch(function(){ return null; });
             })
             .then(function(matBuf){
               if (!matBuf) return [];
-              Module.editorFreshFiles.push({ path: '/SCENES/GREETS.MAT', data: new Uint8Array(matBuf) });
+              Module.editorFreshFiles.push({ path: '/' + revEditorMAT, data: new Uint8Array(matBuf) });
               var text = new TextDecoder().decode(matBuf);
               var maps = [];
               text.split('\n').forEach(function(line){
@@ -546,7 +552,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b20</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b22</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -579,9 +585,10 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b20); orbit/zoom embind =',
+        console.log('[editor] panel init (build b22); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
+        document.getElementById('editor-scene-name').textContent = revEditorScene;
         editorStatus('loading greets…');
         var tries = 0;
         var iv = setInterval(function(){
@@ -773,14 +780,15 @@
         var payload = { surfaces: dirty };
         if (nMaps) payload.maps = maps;
         if (lightIdx.length) payload.lights = dirtyLights;
-        fetch('api/greets/save', { method: 'POST', body: JSON.stringify(payload) })
+        fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
             if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
             var bits = (res.patched || []).map(function(p){ return p.file; });
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
-            if (names.length || (res.lights && res.lights.length)) bits.push('GREETS.FLD');
-            if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → GREETS.MAT');
+            if (res.fld) bits.push(res.fld.split('/').pop());
+            if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
+            if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → sidecar');
             editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
