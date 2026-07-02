@@ -255,15 +255,10 @@ void DemoBoot(ModplayerHandle modHandle)
 		        (int)args.size() - 1);
 		// Orbit target = greets room-bbox centre (see the [DISCO] room-bbox log).
 		g_camTarget.x = 18.0f; g_camTarget.y = 6.0f; g_camTarget.z = -35.0f;
-		g_initThread = std::thread([](){
-			HintHighPerfThread();
-			InitPolyStats(200);
-			FPU_LPrecision();
-			Initialize_Greets();
-			g_greetsReady.store(true);
-			g_initThreadDone.store(true);
-			fprintf(stderr, "[EDITOR] greets init complete\n");
-		});
+		// NOTE: the greets init thread is NOT spawned here — editorTick spawns
+		// it once the shell's live-FLD fetch resolves (see editorSpawnInit),
+		// so a freshly saved GREETS.FLD can be installed into MEMFS over the
+		// link-time preloaded copy BEFORE Initialize_Greets opens it.
 		return;
 	}
 
@@ -423,9 +418,44 @@ static void syncOrbitFromFC()
 // the engine free-cam (Dynamic_Camera: WASD/QE fly, arrow look, ,. / KL speed —
 // the SAME handling as TAB in the demo) while keys are held, else the mouse
 // orbit. Renders only while something changed (idle throttle).
+// Editor scene init, deferred until the shell's live-FLD fetch settles: the
+// dev server (tools/editor_server.py) serves the current Runtime/SCENES/
+// GREETS.FLD; installing it over the link-time preloaded MEMFS copy is what
+// makes save→reload pick up persisted LWO edits without relinking DEMO.data.
+// Fetch failed (-1, e.g. static hosting without the server) → baked copy.
+static bool g_editorInitSpawned = false;
+static void editorMaybeSpawnInit()
+{
+	if (g_editorInitSpawned) return;
+	const int st = EM_ASM_INT({ return (Module.editorFldReady | 0); });
+	if (st == 0) return;                          // fetch still in flight
+	if (st == 1) {
+		EM_ASM({
+			try {
+				FS.writeFile('/SCENES/GREETS.FLD', Module.editorFreshFLD);
+				console.log('[editor] live GREETS.FLD installed (' +
+				            Module.editorFreshFLD.length + ' bytes)');
+			} catch (e) {
+				console.warn('[editor] live FLD install failed, using baked copy:', e);
+			}
+		});
+	}
+	g_editorInitSpawned = true;
+	g_initThread = std::thread([](){
+		HintHighPerfThread();
+		InitPolyStats(200);
+		FPU_LPrecision();
+		Initialize_Greets();
+		g_greetsReady.store(true);
+		g_initThreadDone.store(true);
+		fprintf(stderr, "[EDITOR] greets init complete\n");
+	});
+}
+
 static void editorTick()
 {
 	if (!g_currentDriver) {
+		editorMaybeSpawnInit();
 		if (!g_greetsReady.load()) return;        // init thread still loading
 		Greets_JoinBakeThread();                  // finish the static lightmap bake
 		g_currentDriver = createGreetsScene();

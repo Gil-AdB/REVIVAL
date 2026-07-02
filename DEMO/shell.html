@@ -199,6 +199,21 @@
         }
       };
 
+      // Editor: fetch the LIVE GREETS.FLD from the dev server (tools/
+      // editor_server.py serves Runtime/SCENES/GREETS.FLD at this path). The
+      // copy inside DEMO.data was baked at link time, so after a "Save to LWO"
+      // regenerates the FLD, a plain browser reload + this fetch picks it up
+      // without relinking. editorTick (MainLoop.cpp) waits for editorFldReady,
+      // installs the bytes over the preloaded MEMFS file, then starts scene
+      // init. -1 (fetch failed / static hosting) falls back to the baked FLD.
+      if (revEditorMode) {
+        Module.editorFldReady = 0;
+        fetch('SCENES/GREETS.FLD?ts=' + Date.now(), { cache: 'no-store' })
+          .then(function(r){ if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+          .then(function(b){ Module.editorFreshFLD = new Uint8Array(b); Module.editorFldReady = 1; })
+          .catch(function(e){ console.warn('[editor] live FLD fetch failed (using baked copy):', e); Module.editorFldReady = -1; });
+      }
+
       // ---- Audio: AudioWorklet pump ---------------------------------
       // Replaces SDL2's emscripten ScriptProcessorNode path. The wasm
       // side calls Module._floodAudioStart() on user gesture; that
@@ -496,10 +511,14 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b16</span></h2>
+      <h2>Surfaces — greets <span style="color:#6c8;font-size:10px;font-weight:normal">build b17</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
+      <div id="editor-actions" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;">
+        <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
+        <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
+      </div>
       <div id="editor-status"></div>
     </div>
     <script>
@@ -522,7 +541,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b16); orbit/zoom embind =',
+        console.log('[editor] panel init (build b17); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         editorStatus('loading greets…');
@@ -531,9 +550,39 @@
           tries++;
           var list = [];
           try { list = JSON.parse(Module.editorGetSurfaces()); } catch(e){}
-          if (list.length){ clearInterval(iv); editorSurfaces = list; editorStatus(list.length+' surfaces'); renderSurfaceList(); }
+          if (list.length){
+            clearInterval(iv); editorSurfaces = list;
+            // Pristine snapshot = values as loaded; "Save to LWO" sends only
+            // props that differ from this (so untouched surfaces never get
+            // their .lwo rewritten).
+            editorPristine = {};
+            list.forEach(function(s){ editorPristine[s.name] = JSON.parse(JSON.stringify(s)); });
+            editorStatus(list.length+' surfaces'); renderSurfaceList(); updateSaveButton();
+          }
           else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
         }, 500);
+      }
+      var editorPristine = {};
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection'];
+      function surfaceDirty(s){
+        var p = editorPristine[s.name]; if (!p) return false;
+        return EDITOR_SAVE_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; });
+      }
+      function collectDirty(){
+        var out = {};
+        editorSurfaces.forEach(function(s){
+          var p = editorPristine[s.name]; if (!p) return;
+          EDITOR_SAVE_PROPS.forEach(function(k){
+            if (Math.abs((+s[k]) - (+p[k])) > 1e-6) (out[s.name] = out[s.name] || {})[k] = +s[k];
+          });
+        });
+        return out;
+      }
+      function updateSaveButton(){
+        var b = document.getElementById('editor-save'); if (!b) return;
+        var n = Object.keys(collectDirty()).length;
+        b.disabled = !n;
+        b.textContent = n ? ('Save to LWO (' + n + ')') : 'Save to LWO';
       }
       function renderSurfaceList(){
         var q = (document.getElementById('editor-search').value || '').toLowerCase();
@@ -542,7 +591,8 @@
           if (q && s.name.toLowerCase().indexOf(q) < 0) return;
           var d = document.createElement('div');
           d.className = 'surf-item' + (editorSelected === s.name ? ' sel' : '');
-          d.innerHTML = '<div>' + s.name + '</div>' +
+          d.innerHTML = '<div>' + s.name +
+            (surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
             (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
           d.onclick = function(){ selectSurface(s, /*alsoFocus=*/true); };
           el.appendChild(d);
@@ -567,8 +617,37 @@
         console.log('[editor] set', name, key, v, '->', ok);
         var s = editorSurfaces.find(function(x){ return x.name === name; });
         if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
+        updateSaveButton();
         return ok;
       }
+      // Save to LWO: POST the dirty props to the dev server, which patches the
+      // Authoring/greets .lwo files (with backups), reruns lwsread, and installs
+      // the FLD into Runtime/SCENES. "Reload scene" then re-boots the page —
+      // the editor fetches the fresh FLD at boot, so the saved values persist.
+      document.getElementById('editor-save').onclick = function(){
+        var dirty = collectDirty();
+        var names = Object.keys(dirty);
+        if (!names.length) return;
+        editorStatus('saving ' + names.length + ' surface(s)…');
+        fetch('api/greets/save', { method: 'POST', body: JSON.stringify({ surfaces: dirty }) })
+          .then(function(r){ return r.json(); })
+          .then(function(res){
+            if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
+            var files = (res.patched || []).map(function(p){ return p.file; }).join(', ');
+            editorStatus('saved → ' + (files || 'no file changes') + ' + GREETS.FLD' +
+                         (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
+            if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
+            console.log('[editor] save ok:', res);
+            // Saved values are the new baseline.
+            names.forEach(function(n){
+              var s = editorSurfaces.find(function(x){ return x.name === n; });
+              if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
+            });
+            renderSurfaceList(); updateSaveButton();
+          })
+          .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
+      };
+      document.getElementById('editor-reload').onclick = function(){ location.reload(); };
       // Per-property ranges — the engine stores these on different scales:
       // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
