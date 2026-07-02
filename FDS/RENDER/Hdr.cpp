@@ -20,7 +20,7 @@ namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
 
 namespace fds {
 
-std::vector<float> g_hdrBuf;
+std::vector<hdrf> g_hdrBuf;
 bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
 int g_hdrBufW = 0, g_hdrBufH = 0;
@@ -74,11 +74,11 @@ void Hdr_ActivateNoFog() {
     const int            xres  = rt.xres;
     const uint32_t* const vpage = rt.vpage;
     const uint32_t* const mat32 = rt.mat32;
-    float* const          hbuf  = g_hdrBuf.data();
+    hdrf* const          hbuf  = g_hdrBuf.data();
     hdrDispatchRows(rt.yres, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
             const uint32_t* row = vpage + size_t(y) * size_t(stride);
-            float*          h   = hbuf  + size_t(y) * size_t(xres) * 4;
+            hdrf*           h   = hbuf  + size_t(y) * size_t(xres) * 4;
             const uint32_t* mrow = boostOK ? mat32 + size_t(y) * size_t(xres) : nullptr;
             for (int x = 0; x < xres; ++x) {
                 if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
@@ -104,7 +104,7 @@ static int g_bpBW = 0, g_bpBH = 0;
 // The DS=4 soft-knee downsample loop (parallel over rows; scalar inner — it's
 // memory-bound, so avoiding the 2 redundant streams matters more than SIMD).
 static void hdrBrightPassInto(float* dst, int bw, int bh, int W, int H,
-                              const float* hb, float thresh) {
+                              const hdrf* hb, float thresh) {
     hdrDispatchRows(bh, [=](int by1, int by2) {
         const float inv = 1.0f / 16.0f;   // DS*DS
         for (int by = by1; by < by2; ++by)
@@ -112,7 +112,7 @@ static void hdrBrightPassInto(float* dst, int bw, int bh, int W, int H,
                 float sb = 0, sg = 0, sr = 0;
                 for (int dy = 0; dy < 4; ++dy) {
                     const int sy = by*4 + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
+                    const hdrf* h = hb + size_t(sy) * size_t(W) * 4;
                     for (int dx = 0; dx < 4; ++dx) {
                         const int sx = bx*4 + dx; if (sx >= W) break;
                         const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
@@ -129,7 +129,7 @@ static void hdrBrightPassInto(float* dst, int bw, int bh, int W, int H,
 // Copy the shared bright-pass into `dst`, or compute it if the shared one wasn't
 // built for these dims (fallback — keeps each pass correct standalone).
 static void getBrightPass(float* dst, int bw, int bh, int W, int H,
-                          const float* hb, float thresh) {
+                          const hdrf* hb, float thresh) {
     const size_t n = size_t(bw) * size_t(bh) * 3;
     if (g_bpBW == bw && g_bpBH == bh && g_brightPass.size() >= n)
         std::memcpy(dst, g_brightPass.data(), n * sizeof(float));
@@ -169,7 +169,7 @@ void Render_BloomPass() {
     static std::vector<float> s_acc, s_tmp;            // reused across frames
     s_acc.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
     s_tmp.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const A = s_acc.data();
     float* const T = s_tmp.data();
 
@@ -207,14 +207,14 @@ void Render_BloomPass() {
 
     // 3. Bilinear upsample + add intensity*bloom back into g_hdrBuf (pre-tonemap,
     //    so the glow rolls off through ACES). Each job writes disjoint rows.
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     hdrDispatchRows(H, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
             const float fy = (float(y) + 0.5f) / float(DS) - 0.5f;
             int y0 = int(std::floor(fy)); float wy = fy - float(y0);
             if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
             const int y0b = std::min(y0 + 1, bh - 1);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
                 int x0 = int(std::floor(fx)); float wx = fx - float(x0);
@@ -256,7 +256,7 @@ void Render_AnamorphicPass() {
     s_h.assign(n, 0.0f);
     s_v.assign(vert > 0.0f ? n : 0, 0.0f);
     s_tmp.assign(n, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
 
     // 1. Bright-pass + downsample (same soft knee as bloom) — SHARED.
@@ -306,7 +306,7 @@ void Render_AnamorphicPass() {
     // 3. Bilinear upsample + tinted add into g_hdrBuf (pre-tonemap). Cool
     //    blue-white streak tint (B>G>R) for the JJ-Abrams cast.
     const float tB = 1.0f, tG = 0.9f, tR = 0.7f;
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     const float* const SH = s_h.data();
     const float* const SV = (vert > 0.0f) ? s_v.data() : nullptr;
     hdrDispatchRows(H, [=](int y1, int y2) {
@@ -315,7 +315,7 @@ void Render_AnamorphicPass() {
             int y0 = int(std::floor(fy)); float wy = fy - float(y0);
             if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
             const int y0b = std::min(y0 + 1, bh - 1);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
                 int x0 = int(std::floor(fx)); float wx = fx - float(x0);
@@ -415,7 +415,7 @@ void Render_DoFPass() {
     static std::vector<float> s_src;
     s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
     const float* const SRC = s_src.data();
-    float* const DST = g_hdrBuf.data();
+    hdrf* const DST = g_hdrBuf.data();
 
     auto cocAt = [=](size_t i) -> float {
         float c = std::fabs(viewZ(i) - focus) / range; if (c > 1.0f) c = 1.0f;
@@ -469,14 +469,14 @@ void Render_LensGhostPass() {
     const int bw = (W + DS - 1) / DS, bh = (H + DS - 1) / DS;
     static std::vector<float> s_br;
     s_br.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
     // Bright-pass — SHARED (computed once/frame by Render_HdrBrightPass). With
     // count=0 the ghost chain below is a no-op; the shared pass means this pass
     // no longer pays its own full-HDR downsample just for the halo.
     getBrightPass(BR, bw, bh, W, H, hb, thresh);
 
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     hdrDispatchRows(H, [=](int y1, int y2) {
         auto sampleBR = [&](float u, float v, int c) -> float {
             if (u < 0 || u > 1 || v < 0 || v > 1) return 0.0f;
@@ -493,7 +493,7 @@ void Render_LensGhostPass() {
         const float ca = 0.012f;          // per-channel chroma split for the fringe
         for (int y = y1; y < y2; ++y) {
             const float v = (float(y) + 0.5f) / float(H);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float u = (float(x) + 0.5f) / float(W);
                 // Mirror the sample origin through centre: ghosts appear on the
@@ -657,7 +657,7 @@ void Render_TonemapToVPage() {
 
     const float kN = 1.0f / 255.0f;
     const float kE = exposure * kN;
-    const float* const hbuf = g_hdrBuf.data();
+    const hdrf* const hbuf = g_hdrBuf.data();
     uint32_t* const     vp  = rt.vpage;
     const int W = rt.xres, H = rt.yres;
 
@@ -677,7 +677,7 @@ void Render_TonemapToVPage() {
         auto q = [](float c){ int v = int(c*255.0f+0.5f); return uint32_t(v<0?0:(v>255?255:v)); };
         for (int y = y1; y < y2; ++y) {
             uint32_t*    row = vp   + size_t(y) * size_t(stride);
-            const float* h   = hbuf + size_t(y) * size_t(W) * 4;
+            const hdrf* h   = hbuf + size_t(y) * size_t(W) * 4;
             for (int x = x1; x < x2; ++x) {
                 float b = aces(h[x*4+0]*kE), g = aces(h[x*4+1]*kE), r = aces(h[x*4+2]*kE);
                 if (sat != 1.0f) {

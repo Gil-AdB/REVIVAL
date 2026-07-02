@@ -1225,7 +1225,7 @@ void Lightning_Line(Vertex *V1,Vertex *V2)
 	// LDR path (g_hdrActive false) is byte-for-byte unchanged. AA writes recover
 	// their additive delta as (sat - *cPtr) so the conversion is uniform.
 	const bool     hdrAcc = fds::g_hdrActive;
-	float* const   hbuf   = fds::g_hdrBuf.data();
+	fds::hdrf* const hbuf  = fds::g_hdrBuf.data();
 	uint8_t* const vbaseB = (uint8_t*)VPage;
 	auto putCore = [&](DWord* P){
 		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);
@@ -1386,7 +1386,7 @@ void Spark_Line(Vertex *V1,Vertex *V2)
 	// LDR path (g_hdrActive false) is byte-for-byte unchanged. AA writes recover
 	// their additive delta as (sat - *cPtr) so the conversion is uniform.
 	const bool     hdrAcc = fds::g_hdrActive;
-	float* const   hbuf   = fds::g_hdrBuf.data();
+	fds::hdrf* const hbuf  = fds::g_hdrBuf.data();
 	uint8_t* const vbaseB = (uint8_t*)VPage;
 	auto putCore = [&](DWord* P){
 		if (hdrAcc) { size_t o = size_t((uint8_t*)P - vbaseB);

@@ -85,7 +85,7 @@ static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, flo
             if (gm <= 0.0f) gm = 200.0f;
             ConeGlowSoftKnee(aR, aG, aB, gm);
         }
-        float* h = fds::g_hdrBuf.data() + i * 4;
+        fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
         h[0] += aB; h[1] += aG; h[2] += aR;
         return;
     }

@@ -1651,7 +1651,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// VPage. The froxel composite reads h[3] to take the scene from here
 			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {
 					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
 					// decode) × light at power 1; specular is reflected light → a
@@ -2157,7 +2157,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// off at the tonemap instead of clipping. Gated on g_hdrActive so
 			// the LDR path (flag off, fog-off scenes) is byte-identical.
 			if (fds::g_hdrActive && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				const float dB = h[0], dG = h[1], dR = h[2];
 				if (Mat->XparBlendAlpha > 0.0f) {
 					const float a = Mat->XparBlendAlpha;
@@ -3069,7 +3069,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					const float* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr;
@@ -3105,7 +3105,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
 					if (hdrWrite) {
-						float* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
 							h[0] = ahB*invn; h[1] = ahG*invn; h[2] = ahR*invn;
@@ -3137,7 +3137,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					if (hdrWrite) { const fds::hdrf* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					++n;
 				}
 				if (n > 0) {
@@ -3147,7 +3147,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
 						const float inv = 1.0f / float(n);
-						float* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
 					}
 					matched = true;
@@ -3355,7 +3355,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				hR += float(rR) * 0.5f;
 			}
 			if (hdrWrite) {
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {            // B2 + full coherence — see main kernel
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;

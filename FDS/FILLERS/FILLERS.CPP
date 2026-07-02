@@ -1387,10 +1387,10 @@ void Spriter(float x, float y, float width, float height, void* txtr, void* vpag
 				int marr[8];
 				select(mask, Vec8i(-1), Vec8i(0)).store(marr);
 				const int baseX = tile_x * TILE_SIZE;
-				float* hbuf = fds::g_hdrBuf.data();
+				fds::hdrf* hbuf = fds::g_hdrBuf.data();
 				for (int k = 0; k < 8; ++k) {
 					if (!marr[k]) continue;
-					float* h = hbuf + (size_t(y) * size_t(XRes) + size_t(baseX + k)) * 4;
+					fds::hdrf* h = hbuf + (size_t(y) * size_t(XRes) + size_t(baseX + k)) * 4;
 					h[0] += float(src[k * 4 + 0]);   // B
 					h[1] += float(src[k * 4 + 1]);   // G
 					h[2] += float(src[k * 4 + 2]);   // R

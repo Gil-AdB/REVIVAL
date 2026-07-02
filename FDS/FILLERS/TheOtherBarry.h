@@ -575,10 +575,10 @@ struct TileRasterizer {
 						select(p_mask, Vec8i(-1), Vec8i(0)).store(hmask);
 						const int hpy  = tile.y * TILE_SIZE + y;
 						const int hpx0 = tile.x * TILE_SIZE;
-						float* hbuf = fds::g_hdrBuf.data();
+						fds::hdrf* hbuf = fds::g_hdrBuf.data();
 						for (int k = 0; k < 8; ++k) {
 							if (!hmask[k]) continue;
-							float* h = hbuf + (size_t(hpy) * size_t(xres) + size_t(hpx0 + k)) * 4;
+							fds::hdrf* h = hbuf + (size_t(hpy) * size_t(xres) + size_t(hpx0 + k)) * 4;
 							h[0] += float(hsrc[k * 4 + 0]);   // B
 							h[1] += float(hsrc[k * 4 + 1]);   // G
 							h[2] += float(hsrc[k * 4 + 2]);   // R

@@ -180,7 +180,7 @@ void Render_SSAO() {
 	// g_hdrActive — at our call site the kernel has written opaque radiance but
 	// activation runs later. LDR: multiply VPage in place.
 	const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H);
-	float* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
+	fds::hdrf* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
 	dword* out  = reinterpret_cast<dword*>(VPage);
 
 	constexpr int numTilesX = 6, numTilesY = 4;
@@ -694,7 +694,7 @@ void Render_SSAO() {
 								const byte gb = (byte)(g < 0 ? 0 : (g > 255 ? 255 : g));
 								out[i] = (dword(gb) << 16) | (dword(gb) << 8) | dword(gb) | 0xFF000000u;
 							} else if (useHdr) {
-								float* h = hbuf + i * 4;
+								fds::hdrf* h = hbuf + i * 4;
 								h[0] *= ao; h[1] *= ao; h[2] *= ao;       // B,G,R linear radiance
 							} else {
 								const dword pix = out[i];
