@@ -212,3 +212,20 @@ peak, so halving bytes pays double). Visual: maxΔ 3 vs f32 on the full post-FX
 snapshot; disco beams + fountain bolts banding-free. FDS_HDR_F32 escape hatch.
 
 Standing doors: half-res DoF, temporal SSAO, frame pipelining, x86 measurements.
+
+## 2026-07-02 (night) — two HDR regressions found by the user, fixed (5f5dfdf)
+
+1. **f16 black tiles**: spec hotspots legitimately reach ~63000 radiance —
+   past __fp16 max (65504) → inf → NaN through bright-pass/DoF → black blotches.
+   Fix: fds::HdrClamp(60000) at every g_hdrBuf store. New FDS_HDR_SCAN=1
+   diagnostic (inf/NaN scan at phase boundaries) pinpointed the source in
+   minutes — keep using it for any future HDR anomaly.
+2. **Bright-pass sharing (cae9ebf) visibly changed the lens-ghost halo**
+   (smooth post-bloom rainbow ring → pre-bloom speckles). The sequential
+   passes deliberately compound; the one-frame byte-gate that "validated" the
+   consolidation had no halo-visible content. Sharing is now opt-in
+   (FDS_SHARED_BP), default per-pass. LESSON for the ledger: a byte-gate on ONE
+   frame does not validate an ORDER change — sweep frames with each effect
+   visibly exercised, or don't reorder.
+
+Final full-config: 44.5-45.5 ms min (pre-campaign f32 baseline 50.7-51.4).
