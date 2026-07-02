@@ -24,7 +24,12 @@ mkdir -p "$OUT"
 cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 
 # Baselines — committed state. Update with --update after an INTENTED change.
-BASE_MIRROR="bd664b1067b6610b486d1c81b305ebf6"
+# mirrortest re-baselined 2026-07-04: bisect (git bisect run over 8c84efc..dbdd8a3)
+# pinned the divergence to c340ffa — the fog-wt/soa-vertex branch CONSOLIDATION
+# (user-driven, intended mirror-work state), which post-dates the previous
+# golden bump (8c84efc). Not a session regression: every editor-era commit
+# reproduces this same hash.
+BASE_MIRROR="b5e307499d9f0fa0375fac0caaecfbe7"
 BASE_CONE="8a82e21d53b0d050bbc1220b4fe137f0"
 BASE_HALO="a916347df504ab12a3add321747c2f08"
 
