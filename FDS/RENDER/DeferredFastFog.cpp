@@ -1862,13 +1862,13 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				// surfaces bloom; fall back to the 8-bit VPage where it didn't —
 				// sky / forward content (skycube, reflective windows, additive
 				// vortex) only ever lands in VPage.
-				float* h = fds::g_hdrBuf.data() + i*4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 				float scnB, scnG, scnR;
 				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
 				else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
-				h[2] = scnR*Tpix + aR;
-				h[1] = scnG*Tpix + aG;
-				h[0] = scnB*Tpix + aB;
+				h[2] = fds::HdrClamp(scnR*Tpix + aR);
+				h[1] = fds::HdrClamp(scnG*Tpix + aG);
+				h[0] = fds::HdrClamp(scnB*Tpix + aB);
 			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
 				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
@@ -2352,7 +2352,7 @@ void Render_ScreenSpaceRain() {
 								// alpha-blend in float into g_hdrBuf (captured by the
 								// tonemap below/in the tick); else the 8-bit blend.
 								if (fds::g_hdrActive) {
-									float* h = fds::g_hdrBuf.data() + i*4;
+									fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 									h[2] = h[2]*keep + rainR*a;   // R
 									h[1] = h[1]*keep + rainG*a;   // G
 									h[0] = h[0]*keep + rainB*a;   // B

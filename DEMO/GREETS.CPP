@@ -1009,6 +1009,10 @@ static void GreetsApplyInitDefaults()
 	FF::setDefault(FF::BoolId::no_greets_spots,         true);
 	FF::setDefault(FF::BoolId::greets_omni_shadows,     true);
 	FF::setDefault(FF::IntId::greets_omni_shadow_res,   512);
+	// Moving omnis (mech-attached) pay a full cube re-bake every frame; 128
+	// is visually adequate for lights that near-always sit close to their
+	// caster and saves ~1 ms of bake (measured 2026-07-01).
+	FF::setDefault(FF::IntId::greets_moving_omni_shadow_res, 128);
 	FF::setDefault(FF::FloatId::greets_omni_default_range, 30.0f);
 	FF::setDefault(FF::BoolId::shard_deferred,          true);
 	FF::setDefault(FF::IntId::greets_shard_res,         64);
@@ -1037,7 +1041,11 @@ static void GreetsApplyRunDefaults()
 	// HDR + bloom + cones (global render path).
 	FF::setDefault(FF::BoolId::hdr,                     true);
 	FF::setDefault(FF::BoolId::hdr_linear,              true);
-	FF::setDefault(FF::BoolId::deferred_quarter,        true);
+	// Checkerboard (half-rate) over quarter: at the kernel-bound reference
+	// frame (ts=491) it costs only ~0.5-1 ms more than quarter while shading
+	// 2x the pixels (full-rate is +20 ms). An explicit --deferred_quarter
+	// still wins — the kernel gives quarter precedence when both are set.
+	FF::setDefault(FF::BoolId::deferred_checkerboard,   true);
 	FF::setDefault(FF::BoolId::bloom,                   true);
 	FF::setDefault(FF::FloatId::bloom_intensity,        2.0f);
 	FF::setDefault(FF::FloatId::hdr_refl_gain,          4.0f);
@@ -2924,7 +2932,7 @@ struct GreetsScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 
 		// PROFILER: RNDR phase.
-		prof.switchTo(PROF_RNDR);
+		prof.switchTo(PROF_BAKE);
 
 		// Per-frame shadow-map depth pre-pass (Omni_CastsShadow lights).
 		// MUST run before gg->Render(): Render() invokes the deferred
@@ -2942,6 +2950,7 @@ struct GreetsScene : SceneDriver {
 		// gg->Render() below, and renderFrame joins before deferred lighting;
 		// otherwise they run synchronously inline here (current behavior).
 		ShadowBake_DispatchGreets(GreetSc);
+		prof.switchTo(PROF_RNDR);
 		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;

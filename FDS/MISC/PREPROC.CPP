@@ -787,7 +787,14 @@ void Init_Flares(Scene *Sc)
 		if (O2==O)
 		{
 //			printf("Generating flare: R:%.3f G:%.3f B:%.3f\n",O->L.R,O->L.G,O->L.B);
-			O->F.Txtr=Generate_RGBFlare(O->L.B,O->L.G,O->L.R);
+			// Generate_RGBFlare(R,G,B) → Generate_Flare_Image packs byte2=R
+			// (the framebuffer's red slot; Convert_Image2Texture memcpy's it
+			// straight, no swizzle). Passing (L.B,L.G,L.R) fed the omni's BLUE
+			// into the flare's red → every omni flare (and its mirror/floor
+			// reflection) rendered R/B-swapped vs the deferred-lit pool the same
+			// omni casts. Visible on greets' saturated lamp omnis; masked on
+			// white/warm flares elsewhere. Pass true R,G,B order.
+			O->F.Txtr=Generate_RGBFlare(O->L.R,O->L.G,O->L.B);
 			O->F.Txtr->RelScene = Sc;
 
 			// insertion

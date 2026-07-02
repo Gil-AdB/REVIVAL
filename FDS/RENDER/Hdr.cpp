@@ -20,7 +20,7 @@ namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
 
 namespace fds {
 
-std::vector<float> g_hdrBuf;
+std::vector<hdrf> g_hdrBuf;
 bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
 int g_hdrBufW = 0, g_hdrBufH = 0;
@@ -74,11 +74,11 @@ void Hdr_ActivateNoFog() {
     const int            xres  = rt.xres;
     const uint32_t* const vpage = rt.vpage;
     const uint32_t* const mat32 = rt.mat32;
-    float* const          hbuf  = g_hdrBuf.data();
+    hdrf* const          hbuf  = g_hdrBuf.data();
     hdrDispatchRows(rt.yres, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
             const uint32_t* row = vpage + size_t(y) * size_t(stride);
-            float*          h   = hbuf  + size_t(y) * size_t(xres) * 4;
+            hdrf*           h   = hbuf  + size_t(y) * size_t(xres) * 4;
             const uint32_t* mrow = boostOK ? mat32 + size_t(y) * size_t(xres) : nullptr;
             for (int x = 0; x < xres; ++x) {
                 if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
@@ -86,11 +86,103 @@ void Hdr_ActivateNoFog() {
                 float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
                 if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }  // gamma-2.0 → linear scale
                 if (mrow && mrow[x] == 0xFFFFFFFEu) { b *= gain; g *= gain; r *= gain; }
-                h[x*4+0] = b; h[x*4+1] = g; h[x*4+2] = r;
+                h[x*4+0] = HdrClamp(b); h[x*4+1] = HdrClamp(g); h[x*4+2] = HdrClamp(r);
             }
         }
     });
     g_hdrActive = true;
+}
+
+// ── Shared HDR bright-pass ────────────────────────────────────────────────
+// Bloom, anamorphic, and lens-ghost each built an IDENTICAL bright-pass (DS=4
+// downsample of g_hdrBuf, soft knee at bloom_threshold) — streaming the full
+// HDR buffer 3× (memory-bound). Compute once per frame; each consumer copies it
+// into its own working buffer. Built only when a consumer is active.
+static std::vector<float> g_brightPass;   // g_bpBW*g_bpBH*3
+static int g_bpBW = 0, g_bpBH = 0;
+
+// The DS=4 soft-knee downsample loop (parallel over rows; scalar inner — it's
+// memory-bound, so avoiding the 2 redundant streams matters more than SIMD).
+static void hdrBrightPassInto(float* dst, int bw, int bh, int W, int H,
+                              const hdrf* hb, float thresh) {
+    hdrDispatchRows(bh, [=](int by1, int by2) {
+        const float inv = 1.0f / 16.0f;   // DS*DS
+        for (int by = by1; by < by2; ++by)
+            for (int bx = 0; bx < bw; ++bx) {
+                float sb = 0, sg = 0, sr = 0;
+                for (int dy = 0; dy < 4; ++dy) {
+                    const int sy = by*4 + dy; if (sy >= H) break;
+                    const hdrf* h = hb + size_t(sy) * size_t(W) * 4;
+                    for (int dx = 0; dx < 4; ++dx) {
+                        const int sx = bx*4 + dx; if (sx >= W) break;
+                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
+                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
+                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
+                    }
+                }
+                float* a = dst + (size_t(by) * bw + bx) * 3;
+                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
+            }
+    });
+}
+
+// Copy the shared bright-pass into `dst`, or compute it if the shared one wasn't
+// built for these dims (fallback — keeps each pass correct standalone).
+static void getBrightPass(float* dst, int bw, int bh, int W, int H,
+                          const hdrf* hb, float thresh) {
+    const size_t n = size_t(bw) * size_t(bh) * 3;
+    if (g_bpBW == bw && g_bpBH == bh && g_brightPass.size() >= n)
+        std::memcpy(dst, g_brightPass.data(), n * sizeof(float));
+    else
+        hdrBrightPassInto(dst, bw, bh, W, H, hb, thresh);
+}
+
+// Build the shared bright-pass once per frame — call BEFORE the consumers.
+// No-op unless at least one of bloom / anamorphic / lens-ghost is active.
+void Render_HdrBrightPass() {
+    g_bpBW = g_bpBH = 0;
+    // Sharing is OPT-IN (FDS_SHARED_BP=1), default OFF: the sequential passes
+    // deliberately compound — bloom's bright-pass sees anamorphic's streaks,
+    // and the lens-ghost HALO samples the post-bloom buffer, so bright sources
+    // arrive smoothed (a clean chromatic ring). The shared pre-bloom bright-
+    // pass fed the halo raw sparse spec hotspots instead → red/green speckles
+    // (user-visible regression, greets t=191). Sharing saved only ~0.4 ms;
+    // not worth the look change. Kept for A/B and for configs without the
+    // halo/ghost pass.
+    static const bool on = std::getenv("FDS_SHARED_BP") != nullptr;
+    if (!on) return;
+    if (!g_hdrActive) return;
+    if (!(FeatureFlags::bloom() || FeatureFlags::anamorphic() || FeatureFlags::lens_ghosts())) return;
+    const RenderTarget rt = MainRenderTargetFromGlobals();
+    const int W = rt.xres, H = rt.yres;
+    const size_t px = size_t(W) * size_t(H);
+    if (px == 0 || g_hdrBuf.size() < px * 4) return;
+    const int bw = (W + 3) / 4, bh = (H + 3) / 4;
+    g_brightPass.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
+    hdrBrightPassInto(g_brightPass.data(), bw, bh, W, H, g_hdrBuf.data(),
+                      FeatureFlags::bloom_threshold());
+    g_bpBW = bw; g_bpBH = bh;
+}
+
+// FDS_HDR_SCAN=1: env-gated inf/NaN + max-finite scan of g_hdrBuf, printed
+// with a tag per call site. Diagnostic for f16-overflow hunts: the first tag
+// reporting inf/NaN names the phase that produced it (before post spreads it).
+void Hdr_DebugScan(const char* tag) {
+    static const bool on = std::getenv("FDS_HDR_SCAN") != nullptr;
+    if (!on || g_hdrBuf.empty()) return;
+    const size_t n = g_hdrBuf.size();
+    size_t nInf = 0, nNan = 0; float mx = 0; size_t mxI = 0, firstBad = SIZE_MAX;
+    for (size_t i = 0; i < n; ++i) {
+        if ((i & 3) == 3) continue;                // skip the coverage lane
+        const float v = float(g_hdrBuf[i]);
+        if (std::isnan(v)) { ++nNan; if (firstBad == SIZE_MAX) firstBad = i; }
+        else if (std::isinf(v)) { ++nInf; if (firstBad == SIZE_MAX) firstBad = i; }
+        else if (v > mx) { mx = v; mxI = i; }
+    }
+    const int W = g_hdrBufW > 0 ? g_hdrBufW : 1;
+    std::fprintf(stderr, "[HDR-SCAN] %-14s inf=%zu nan=%zu maxFinite=%.0f @(%d,%d)%s\n",
+                 tag, nInf, nNan, mx, int((mxI/4)%W), int((mxI/4)/W),
+                 firstBad != SIZE_MAX ? " <-- BAD" : "");
 }
 
 void Render_BloomPass() {
@@ -108,33 +200,14 @@ void Render_BloomPass() {
     static std::vector<float> s_acc, s_tmp;            // reused across frames
     s_acc.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
     s_tmp.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const A = s_acc.data();
     float* const T = s_tmp.data();
 
-    // 1. Bright-pass + downsample: each quarter-res cell = mean over its DS×DS
-    //    source block of the radiance ABOVE the knee (per-channel, soft so the
-    //    colour is preserved and the transition isn't hard). Reads the linear
-    //    g_hdrBuf — the true unclamped source.
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = A + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // Bright-pass + downsample (soft knee above the threshold) — SHARED with
+    // anamorphic + lens-ghost via Render_HdrBrightPass (computed once/frame;
+    // getBrightPass falls back to inline if the shared one wasn't built).
+    getBrightPass(A, bw, bh, W, H, hb, thresh);
 
     // 2. Separable 5-tap gaussian ([1 4 6 4 1]/16), 2 passes for a wider glow.
     //    Horizontal A->T then vertical T->A (each pass writes disjoint rows).
@@ -165,14 +238,14 @@ void Render_BloomPass() {
 
     // 3. Bilinear upsample + add intensity*bloom back into g_hdrBuf (pre-tonemap,
     //    so the glow rolls off through ACES). Each job writes disjoint rows.
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     hdrDispatchRows(H, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
             const float fy = (float(y) + 0.5f) / float(DS) - 0.5f;
             int y0 = int(std::floor(fy)); float wy = fy - float(y0);
             if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
             const int y0b = std::min(y0 + 1, bh - 1);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
                 int x0 = int(std::floor(fx)); float wx = fx - float(x0);
@@ -182,7 +255,7 @@ void Render_BloomPass() {
                 const float* a00=A+(size_t(y0 )*bw+x0 )*3; const float* a10=A+(size_t(y0 )*bw+x0b)*3;
                 const float* a01=A+(size_t(y0b)*bw+x0 )*3; const float* a11=A+(size_t(y0b)*bw+x0b)*3;
                 for (int c = 0; c < 3; ++c)
-                    row[x*4+c] += (a00[c]*w00 + a10[c]*w10 + a01[c]*w01 + a11[c]*w11) * intensity;
+                    row[x*4+c] = HdrClamp(float(row[x*4+c]) + (a00[c]*w00 + a10[c]*w10 + a01[c]*w01 + a11[c]*w11) * intensity);
             }
         }
     });
@@ -214,29 +287,11 @@ void Render_AnamorphicPass() {
     s_h.assign(n, 0.0f);
     s_v.assign(vert > 0.0f ? n : 0, 0.0f);
     s_tmp.assign(n, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
 
-    // 1. Bright-pass + downsample (same soft knee as bloom).
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = BR + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // 1. Bright-pass + downsample (same soft knee as bloom) — SHARED.
+    getBrightPass(BR, bw, bh, W, H, hb, thresh);
 
     // 2. Directional exponential streak via offset-doubling (length ~2^passes
     //    quarter-res px). Each pass: out[x] = in[x] + decay*(in[x-s] + in[x+s]),
@@ -282,7 +337,7 @@ void Render_AnamorphicPass() {
     // 3. Bilinear upsample + tinted add into g_hdrBuf (pre-tonemap). Cool
     //    blue-white streak tint (B>G>R) for the JJ-Abrams cast.
     const float tB = 1.0f, tG = 0.9f, tR = 0.7f;
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     const float* const SH = s_h.data();
     const float* const SV = (vert > 0.0f) ? s_v.data() : nullptr;
     hdrDispatchRows(H, [=](int y1, int y2) {
@@ -291,7 +346,7 @@ void Render_AnamorphicPass() {
             int y0 = int(std::floor(fy)); float wy = fy - float(y0);
             if (y0 < 0) { y0 = 0; wy = 0; } if (y0 >= bh - 1) { y0 = bh > 1 ? bh - 2 : 0; wy = bh > 1 ? 1.0f : 0.0f; }
             const int y0b = std::min(y0 + 1, bh - 1);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float fx = (float(x) + 0.5f) / float(DS) - 0.5f;
                 int x0 = int(std::floor(fx)); float wx = fx - float(x0);
@@ -304,9 +359,9 @@ void Render_AnamorphicPass() {
                 };
                 float b = samp(SH,0), g = samp(SH,1), r = samp(SH,2);
                 if (SV) { b += samp(SV,0)*vert; g += samp(SV,1)*vert; r += samp(SV,2)*vert; }
-                row[x*4+0] += b * tB * intensity;
-                row[x*4+1] += g * tG * intensity;
-                row[x*4+2] += r * tR * intensity;
+                row[x*4+0] = HdrClamp(float(row[x*4+0]) + b * tB * intensity);
+                row[x*4+1] = HdrClamp(float(row[x*4+1]) + g * tG * intensity);
+                row[x*4+2] = HdrClamp(float(row[x*4+2]) + r * tR * intensity);
             }
         }
     });
@@ -388,15 +443,138 @@ void Render_DoFPass() {
         s_init = true;
     }
 
-    static std::vector<float> s_src;
-    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
-    const float* const SRC = s_src.data();
-    float* const DST = g_hdrBuf.data();
-
     auto cocAt = [=](size_t i) -> float {
         float c = std::fabs(viewZ(i) - focus) / range; if (c > 1.0f) c = 1.0f;
         return c * maxR;
     };
+
+    // ── Reduced-res path (--dof_downscale > 1, same idea as --ssao_downscale):
+    // gather at W/d x H/d (~1/d² the taps, and skips the full-res f16→f32
+    // source copy the full-res path pays), then a 4-tap depth-aware bilinear
+    // upsample. Defocused content is blurry by definition, so the res cut is
+    // invisible except near the focus boundary — where CoC (and thus the blur)
+    // is small — so the composite blends toward the sharp original as CoC → the
+    // in-focus threshold and the transition band stays clean.
+    const int down = std::max(1, std::min(4, FeatureFlags::dof_downscale()));
+    if (down > 1) {
+        const int lowW = (W + down - 1) / down, lowH = (H + down - 1) / down;
+        const size_t lpx = size_t(lowW) * size_t(lowH);
+        static std::vector<float> s_lowS;   // pre-blur colour (B,G,R)
+        static std::vector<float> s_lowC;   // blurred colour  (B,G,R)
+        static std::vector<float> s_lowZ;   // view-z of the sampled texel
+        static std::vector<float> s_lowCoc; // CoC in FULL-res pixel units
+        s_lowS.resize(lpx * 3); s_lowC.resize(lpx * 3);
+        s_lowZ.resize(lpx);     s_lowCoc.resize(lpx);
+        float* const lowS = s_lowS.data(); float* const lowC = s_lowC.data();
+        float* const lowZ = s_lowZ.data(); float* const lowCoc = s_lowCoc.data();
+        const hdrf* const HB = g_hdrBuf.data();
+        const int half = down / 2;
+
+        // Pass A: point-sample each cell's centre pixel (colour + z + CoC).
+        // No box prefilter — the gather blur is itself a low-pass.
+        hdrDispatchRows(lowH, [=](int y1, int y2) {
+            for (int ly = y1; ly < y2; ++ly) {
+                for (int lx = 0; lx < lowW; ++lx) {
+                    const int fx = std::min(W - 1, lx * down + half);
+                    const int fy = std::min(H - 1, ly * down + half);
+                    const size_t fi = size_t(fy) * size_t(W) + size_t(fx);
+                    const size_t li = size_t(ly) * size_t(lowW) + size_t(lx);
+                    lowS[li*3+0] = float(HB[fi*4+0]);
+                    lowS[li*3+1] = float(HB[fi*4+1]);
+                    lowS[li*3+2] = float(HB[fi*4+2]);
+                    const float z = viewZ(fi);
+                    lowZ[li] = z;
+                    float c = std::fabs(z - focus) / range; if (c > 1.0f) c = 1.0f;
+                    lowCoc[li] = c * maxR;
+                }
+            }
+        });
+
+        // Pass B: golden-angle gather at low res. CoC and tap distances stay
+        // in full-res pixel units (so scatter-as-gather weighting is
+        // unchanged); only the tap OFFSETS are divided into low-res texels.
+        const float invDown = 1.0f / float(down);
+        hdrDispatchRows(lowH, [=](int y1, int y2) {
+            for (int ly = y1; ly < y2; ++ly) {
+                for (int lx = 0; lx < lowW; ++lx) {
+                    const size_t li = size_t(ly) * size_t(lowW) + size_t(lx);
+                    const float coc = lowCoc[li];
+                    if (coc < 0.75f) {
+                        lowC[li*3+0] = lowS[li*3+0];
+                        lowC[li*3+1] = lowS[li*3+1];
+                        lowC[li*3+2] = lowS[li*3+2];
+                        continue;
+                    }
+                    float sb = lowS[li*3+0], sg = lowS[li*3+1], sr = lowS[li*3+2], wsum = 1.0f;
+                    const float cocLow = coc * invDown;
+                    for (int t = 0; t < TAPS; ++t) {
+                        const int sx = int(float(lx) + s_ox[t] * cocLow + 0.5f);
+                        const int sy = int(float(ly) + s_oy[t] * cocLow + 0.5f);
+                        if (sx < 0 || sx >= lowW || sy < 0 || sy >= lowH) continue;
+                        const size_t si = size_t(sy) * size_t(lowW) + size_t(sx);
+                        const float d = s_or[t] * coc;        // full-res px
+                        float w = lowCoc[si] - d + 1.0f;
+                        if (w <= 0.0f) continue; if (w > 1.0f) w = 1.0f;
+                        sb += lowS[si*3+0] * w; sg += lowS[si*3+1] * w; sr += lowS[si*3+2] * w;
+                        wsum += w;
+                    }
+                    const float inv = 1.0f / wsum;
+                    lowC[li*3+0] = sb * inv; lowC[li*3+1] = sg * inv; lowC[li*3+2] = sr * inv;
+                }
+            }
+        });
+
+        // Pass C: full-res composite. 4-tap depth-aware bilinear from the
+        // blurred low-res field, then lerp(sharp, blur, blend) where blend
+        // ramps 0→1 over CoC 0.75..2.0 px.
+        hdrf* const DSTh = g_hdrBuf.data();
+        const float depthSig = range * 0.5f;
+        const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);
+        hdrDispatchRows(H, [=](int y1, int y2) {
+            for (int y = y1; y < y2; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const size_t i = size_t(y) * size_t(W) + size_t(x);
+                    const float coc = cocAt(i);
+                    if (coc < 0.75f) continue;                // in focus → untouched
+                    const float zf = viewZ(i);
+                    const float gx = (float(x) - float(half)) * invDown;
+                    const float gy = (float(y) - float(half)) * invDown;
+                    int x0 = (int)std::floor(gx), y0 = (int)std::floor(gy);
+                    const float fxs = gx - float(x0), fys = gy - float(y0);
+                    int x1c = x0 + 1, y1c = y0 + 1;
+                    x0  = std::max(0, std::min(lowW - 1, x0));  x1c = std::max(0, std::min(lowW - 1, x1c));
+                    y0  = std::max(0, std::min(lowH - 1, y0));  y1c = std::max(0, std::min(lowH - 1, y1c));
+                    const size_t o00 = size_t(y0 )*lowW + x0, o10 = size_t(y0 )*lowW + x1c;
+                    const size_t o01 = size_t(y1c)*lowW + x0, o11 = size_t(y1c)*lowW + x1c;
+                    const float bw00 = (1-fxs)*(1-fys), bw10 = fxs*(1-fys);
+                    const float bw01 = (1-fxs)*fys,     bw11 = fxs*fys;
+                    float ab = 0, ag = 0, ar = 0, wsum = 0;
+                    #define DOF_TAP(O, BW) { const float dz = zf - lowZ[O]; \
+                        float wd = 1.0f - dz*dz*invDepthK; \
+                        if (wd > 0.0f) { const float w = (BW)*wd; \
+                            ab += lowC[(O)*3+0]*w; ag += lowC[(O)*3+1]*w; ar += lowC[(O)*3+2]*w; wsum += w; } }
+                    DOF_TAP(o00, bw00) DOF_TAP(o10, bw10)
+                    DOF_TAP(o01, bw01) DOF_TAP(o11, bw11)
+                    #undef DOF_TAP
+                    if (wsum <= 1e-6f) continue;              // no depth-compatible texel → keep sharp
+                    const float inv = 1.0f / wsum;
+                    float blend = (coc - 0.75f) * 0.8f;       // 0 at 0.75px, 1 at 2px
+                    if (blend > 1.0f) blend = 1.0f;
+                    const float keep = 1.0f - blend;
+                    hdrf* h = DSTh + i * 4;
+                    h[0] = float(h[0]) * keep + ab * inv * blend;
+                    h[1] = float(h[1]) * keep + ag * inv * blend;
+                    h[2] = float(h[2]) * keep + ar * inv * blend;
+                }
+            }
+        });
+        return;
+    }
+
+    static std::vector<float> s_src;
+    s_src.assign(g_hdrBuf.begin(), g_hdrBuf.begin() + px * 4);
+    const float* const SRC = s_src.data();
+    hdrf* const DST = g_hdrBuf.data();
 
     hdrDispatchRows(H, [=](int y1, int y2) {
         for (int y = y1; y < y2; ++y) {
@@ -445,29 +623,14 @@ void Render_LensGhostPass() {
     const int bw = (W + DS - 1) / DS, bh = (H + DS - 1) / DS;
     static std::vector<float> s_br;
     s_br.assign(size_t(bw) * size_t(bh) * 3, 0.0f);
-    const float* const hb = g_hdrBuf.data();
+    const hdrf* const hb = g_hdrBuf.data();
     float* const BR = s_br.data();
-    hdrDispatchRows(bh, [=](int by1, int by2) {
-        const float inv = 1.0f / float(DS * DS);
-        for (int by = by1; by < by2; ++by)
-            for (int bx = 0; bx < bw; ++bx) {
-                float sb = 0, sg = 0, sr = 0;
-                for (int dy = 0; dy < DS; ++dy) {
-                    const int sy = by * DS + dy; if (sy >= H) break;
-                    const float* h = hb + size_t(sy) * size_t(W) * 4;
-                    for (int dx = 0; dx < DS; ++dx) {
-                        const int sx = bx * DS + dx; if (sx >= W) break;
-                        const float B = h[sx*4+0], G = h[sx*4+1], R = h[sx*4+2];
-                        const float lum = R > G ? (R > B ? R : B) : (G > B ? G : B);
-                        if (lum > thresh) { const float w = (lum - thresh) / lum; sb += B*w; sg += G*w; sr += R*w; }
-                    }
-                }
-                float* a = BR + (size_t(by) * bw + bx) * 3;
-                a[0] = sb * inv; a[1] = sg * inv; a[2] = sr * inv;
-            }
-    });
+    // Bright-pass — SHARED (computed once/frame by Render_HdrBrightPass). With
+    // count=0 the ghost chain below is a no-op; the shared pass means this pass
+    // no longer pays its own full-HDR downsample just for the halo.
+    getBrightPass(BR, bw, bh, W, H, hb, thresh);
 
-    float* const hw = g_hdrBuf.data();
+    hdrf* const hw = g_hdrBuf.data();
     hdrDispatchRows(H, [=](int y1, int y2) {
         auto sampleBR = [&](float u, float v, int c) -> float {
             if (u < 0 || u > 1 || v < 0 || v > 1) return 0.0f;
@@ -484,7 +647,7 @@ void Render_LensGhostPass() {
         const float ca = 0.012f;          // per-channel chroma split for the fringe
         for (int y = y1; y < y2; ++y) {
             const float v = (float(y) + 0.5f) / float(H);
-            float* row = hw + size_t(y) * size_t(W) * 4;
+            hdrf* row = hw + size_t(y) * size_t(W) * 4;
             for (int x = 0; x < W; ++x) {
                 const float u = (float(x) + 0.5f) / float(W);
                 // Mirror the sample origin through centre: ghosts appear on the
@@ -517,9 +680,9 @@ void Render_LensGhostPass() {
                         sb += sampleBR(tu + nx * hr * (1 - ca*2), tv + ny * hr * (1 - ca*2), 0) * wgt;
                     }
                 }
-                row[x*4+0] += sb * intensity;
-                row[x*4+1] += sg * intensity;
-                row[x*4+2] += sr * intensity;
+                row[x*4+0] = HdrClamp(float(row[x*4+0]) + sb * intensity);
+                row[x*4+1] = HdrClamp(float(row[x*4+1]) + sg * intensity);
+                row[x*4+2] = HdrClamp(float(row[x*4+2]) + sr * intensity);
             }
         }
     });
@@ -648,7 +811,7 @@ void Render_TonemapToVPage() {
 
     const float kN = 1.0f / 255.0f;
     const float kE = exposure * kN;
-    const float* const hbuf = g_hdrBuf.data();
+    const hdrf* const hbuf = g_hdrBuf.data();
     uint32_t* const     vp  = rt.vpage;
     const int W = rt.xres, H = rt.yres;
 
@@ -668,7 +831,7 @@ void Render_TonemapToVPage() {
         auto q = [](float c){ int v = int(c*255.0f+0.5f); return uint32_t(v<0?0:(v>255?255:v)); };
         for (int y = y1; y < y2; ++y) {
             uint32_t*    row = vp   + size_t(y) * size_t(stride);
-            const float* h   = hbuf + size_t(y) * size_t(W) * 4;
+            const hdrf* h   = hbuf + size_t(y) * size_t(W) * 4;
             for (int x = x1; x < x2; ++x) {
                 float b = aces(h[x*4+0]*kE), g = aces(h[x*4+1]*kE), r = aces(h[x*4+2]*kE);
                 if (sat != 1.0f) {

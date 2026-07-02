@@ -47,9 +47,11 @@ enum
 	PROF_XFRM	=	3,
 	PROF_LGHT   =	4,
 	PROF_SORT	=	5,
-	PROF_RNDR	=	6,
-	PROF_FLIP	=	7,
-	PROF_NUM	=	8
+	PROF_BAKE	=	6,  // per-frame dynamic shadow bake — was folded into RNDR,
+	                    // hiding ~5ms of bake behind the raster/lighting row
+	PROF_RNDR	=	7,
+	PROF_FLIP	=	8,
+	PROF_NUM	=	9
 };
 
 extern ModplayerHandle g_RevModuleHandle;

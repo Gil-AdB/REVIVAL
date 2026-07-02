@@ -44,6 +44,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 void Render_DeferredFogPass();
 // Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
 void Render_SSAO();
+void Render_EdgeAA();
 // Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
@@ -58,7 +59,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
+namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_HdrBrightPass(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
 // LWO editor: per-matID highlight flags. The outline pass at the end of the
 // deferred render reads these; Editor_SetHighlight (the Embind editorHighlight)
@@ -330,6 +331,7 @@ bool deferredEnabled() {
 	return fds::FeatureFlags::deferred()
 	    || fds::FeatureFlags::hdr()
 	    || fds::FeatureFlags::deferred_quarter()
+	    || fds::FeatureFlags::deferred_checkerboard()
 	    || fds::FeatureFlags::shard_deferred();
 }
 
@@ -522,7 +524,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
-		Render_DeferredLighting(dctx);
+		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 		g_deferredCtx = dctx;
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
@@ -586,7 +588,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// pass (skipVolumetric) is an intermediate LDR underlay that must NOT route
 		// its transparents into g_hdrBuf (it never tonemaps), same as the RTT.
 		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
-			fds::Hdr_ActivateNoFog();
+			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); } fds::Hdr_DebugScan("activate");
 
 		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
 		// fog), forcing every overlay below to composite LDR over the tonemapped
@@ -594,6 +596,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// accumulate into g_hdrBuf (gated g_hdrActive) and the tonemap fires
 		// after TBR_Render (see below). Each subsequent step (cones/halos/rain/
 		// bolt) moves it further until it runs last.
+
+		// [TAIL-PROF] xpar-peel span timer — brace-scoped ScopeTimer can't
+		// cross the goto xpar_done, so accumulate manually at the label.
+		const long long _xparT0 = TailProf::nowNs();
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,
@@ -944,6 +950,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		flushBatch();
 		}  // close unifiedTbr=false legacy block
 xpar_done: ;
+	if (TailProf::enabled()) {
+		static double _xa = 0; static int _xn = 0;
+		_xa += double(TailProf::nowNs() - _xparT0) / 1e6;
+		if (++_xn >= 60) {
+			std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n", "xpar-peel", _xa / _xn);
+			_xa = 0; _xn = 0;
+		}
+	}
 	}
 
 	// NOTE: this loop must run BEFORE TBR_Render — for TBR scenes the
@@ -974,7 +988,7 @@ xpar_done: ;
 
 	if (CurScene->Flags & Scn_SpriteTBR)
 	{
-		TBR_Render(CurScene);
+		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene); }
 	}
 
 	// HDR (Phase 2 overlay reorg): the tonemap walks down the pipeline as each
@@ -999,7 +1013,7 @@ xpar_done: ;
 			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
 			Render_VolumetricCones(dctx);
-			Render_OmniHalos(dctx);
+			{ TailProf::ScopeTimer _tp("halos"); Render_OmniHalos(dctx); } fds::Hdr_DebugScan("cones+halos");
 		}
 
 		// Screen-space rain LAST among the view-aligned scene passes (streaks
@@ -1024,13 +1038,16 @@ xpar_done: ;
 		// smear under camera motion). Snapshots hid it: on a one-frame render
 		// g_hdrActive starts false so the sky-cube pass's tonemap no-ops.
 		if (deferred && fds::FeatureFlags::hdr() && !fds::g_hdrDeferTonemap) {
-			fds::Render_DoFPass();          // depth-of-field bokeh on g_hdrBuf BEFORE bloom (no-op unless --dof)
+			fds::Hdr_DebugScan("pre-dof"); fds::Render_DoFPass(); fds::Hdr_DebugScan("post-dof");
+			fds::Render_HdrBrightPass();    // one shared bright-pass for anamorphic+bloom+lens-ghost (no-op unless one is on)
 			fds::Render_AnamorphicPass();   // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)
 			fds::Render_LensGhostPass();    // ghost discs + halo into g_hdrBuf BEFORE the tonemap (no-op unless --lens_ghosts)
+		{ TailProf::ScopeTimer _tp("tonemap-post");
 			fds::Render_TonemapToVPage();
-			fds::Render_LensPostPass();     // CA + vignette on the 8-bit image AFTER the tonemap (no-op unless --chromatic/--vignette)
-			fds::Render_GradeGrainPass();   // colour grade + film grain on the 8-bit image (no-op unless --grade/--grain)
+			fds::Render_LensPostPass();     // CA + vignette (no-op unless --chromatic/--vignette)
+			fds::Render_GradeGrainPass();   // grade + grain (no-op unless --grade/--grain)
+			}
 		}
 
 		// Lens droplets are on the "camera glass" — a post effect that refracts
@@ -1041,6 +1058,11 @@ xpar_done: ;
 			Render_LensDrops();
 	}
 	VolProf_Tick();
+
+	// Edge-aware AA (--aa): blend across G-buffer geometry edges on the final
+	// LDR image. After the tonemap + all post (operates on VPage), before the
+	// debug overlays. No-op when --aa is off or on the forward path.
+	{ TailProf::ScopeTimer _tp("edge-aa"); Render_EdgeAA(); }
 
 	// Lightmap debug viz — paints VPage with mesh/face/bary/factor
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last

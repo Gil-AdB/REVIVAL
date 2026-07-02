@@ -174,15 +174,12 @@ static inline float pow_glossClass(float x, unsigned gloss) {
 // constants (the kernel switches on it; default falls back to scalar
 // libm pow). Replaces the scalar spec loop the vec path used before.
 //
-// KNOWN GAP: this vec loop does NOT apply tl.shadowMapIdx[n] / PCF
-// shadow attenuation per-light — the scalar lighting body does, but
-// the SIMD body short-circuits the per-light shadow tap. The deferred
-// vec path is off by default (FDS_DEFERRED_VEC=0, slower than scalar
-// on arm64-via-simde anyway), so this never fires in production —
-// but if vec is ever turned on for non-bumped scenes, shadowed
-// surfaces will leak specular highlights through shadows. Mirror the
-// scalar fix at DeferredLighting.cpp:1312 (multiply specStrength by
-// shadowAtten) when that day comes.
+// Shadow attenuation: the vec diffuse loop now folds the full per-light
+// shadow term into `coneShadowAtten` — own cube (resolveCubeAtten) plus
+// the mirror-clone source map/cube and own 2-D spot map (computeMapShadowAtten),
+// matching the scalar body. This spec loop multiplies that `coneShadowAtten`
+// (`csa`) into specStrength, so shadowed surfaces no longer leak specular
+// highlights through shadows.
 template<int Gloss>
 static inline void run_vec_spec_loop(const TileLights &tl,
                                       float x, float y, float z,
@@ -190,6 +187,7 @@ static inline void run_vec_spec_loop(const TileLights &tl,
                                       float vx, float vy, float vz,
                                       float matSpec,
                                       uint32_t pmid,
+                                      const float *coneShadowAtten,
                                       float &sB, float &sG, float &sR) {
 	__m256 vx_v   = _mm256_set1_ps(x);
 	__m256 vy_v   = _mm256_set1_ps(y);
@@ -271,7 +269,11 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		__m256 safeNH = _mm256_max_ps(NdotH, vZero);
 		safeNH        = _mm256_min_ps(safeNH, vOne);
 		__m256 spec   = pow_squaring<Gloss, __m256>(safeNH);
-		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff);
+		// Per-light spot-cone × cube-shadow attenuation, computed once in the
+		// diffuse loop and shared here so specular respects shadows + cones
+		// (was leaking through both — the documented vec-spec gap).
+		__m256 csa = _mm256_load_ps(coneShadowAtten + slot);
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff), csa);
 		// Apply combined mask (range + dot ≥ 0 + h positive + NdotH > 0)
 		__m256 fullMask = _mm256_and_ps(mask, _mm256_and_ps(mask_hpos, mask_nh));
 		__m256 contrib  = _mm256_blendv_ps(vZero, strength, fullMask);
@@ -289,6 +291,104 @@ static inline void run_vec_spec_loop(const TileLights &tl,
 		sG += bufG[i];
 		sR += bufR[i];
 	}
+}
+
+// --pbr TEST: Cook-Torrance microfacet specular (GGX NDF + Smith-Schlick
+// geometry + Schlick Fresnel), 8 lights wide, replacing the Blinn-Phong
+// run_vec_spec_loop. This is a COST/quality probe — wired into the vec path so
+// we can measure SIMD PBR per-light against the existing Blinn-Phong term.
+// Divides use _mm256_rcp_ps (fast approx, matches the engine's rcp/rsqrt
+// style). roughness ∈ (0,1], F0 = dielectric 0.04 (metallic workflow TBD).
+// Specular only — diffuse is accumulated by the caller's existing loop.
+static inline void run_vec_ggx_loop(const TileLights &tl,
+                                     float x, float y, float z,
+                                     float nx, float ny, float nz,
+                                     float vx, float vy, float vz,
+                                     float matSpec, float roughness,
+                                     uint32_t pmid,
+                                     const float *coneShadowAtten,
+                                     float &sB, float &sG, float &sR) {
+	const __m256 vx_v  = _mm256_set1_ps(x),  vy_v = _mm256_set1_ps(y),  vz_v = _mm256_set1_ps(z);
+	const __m256 vnx_v = _mm256_set1_ps(nx), vny_v = _mm256_set1_ps(ny), vnz_v = _mm256_set1_ps(nz);
+	const __m256 vvx_v = _mm256_set1_ps(vx), vvy_v = _mm256_set1_ps(vy), vvz_v = _mm256_set1_ps(vz);
+	const __m256 vSpec = _mm256_set1_ps(matSpec);
+	const __m256 vZero = _mm256_setzero_ps();
+	const __m256 vOne  = _mm256_set1_ps(1.0f);
+	const __m256i pmid_v = _mm256_set1_epi32((int)pmid);
+	// GGX constants. a = roughness²; Smith k = a/2 (IBL-less direct-light form).
+	const float a  = roughness * roughness;
+	const __m256 va2 = _mm256_set1_ps(a * a);
+	const __m256 vk  = _mm256_set1_ps(a * 0.5f);
+	const __m256 vInvPi = _mm256_set1_ps(0.31830989f);
+	const __m256 vF0 = _mm256_set1_ps(0.04f);     // dielectric base reflectance
+	// N·V (view-independent of light) — clamp to avoid div blow-up at grazing.
+	const float ndotvf = std::max(nx*vx + ny*vy + nz*vz, 1e-3f);
+	const __m256 vNdotV = _mm256_set1_ps(ndotvf);
+	__m256 accB = _mm256_setzero_ps(), accG = _mm256_setzero_ps(), accR = _mm256_setzero_ps();
+
+	for (int slot = 0; slot < tl.paddedCount; slot += 8) {
+		__m256 lpx = _mm256_load_ps(tl.posX + slot), lpy = _mm256_load_ps(tl.posY + slot), lpz = _mm256_load_ps(tl.posZ + slot);
+		__m256 lcb = _mm256_load_ps(tl.colB + slot), lcg = _mm256_load_ps(tl.colG + slot), lcr = _mm256_load_ps(tl.colR + slot);
+		__m256 lr2 = _mm256_load_ps(tl.range2 + slot), lrr = _mm256_load_ps(tl.rRange + slot);
+		__m256i lmid = _mm256_load_si256((const __m256i*)(tl.mirrorId + slot));
+		__m256 mirrorMask = _mm256_castsi256_ps(_mm256_cmpeq_epi32(lmid, pmid_v));
+
+		__m256 wx = _mm256_sub_ps(lpx, vx_v), wy = _mm256_sub_ps(lpy, vy_v), wz = _mm256_sub_ps(lpz, vz_v);
+		__m256 dot  = _mm256_fmadd_ps(wx, vnx_v, _mm256_fmadd_ps(wy, vny_v, _mm256_mul_ps(wz, vnz_v)));
+		__m256 len2 = _mm256_fmadd_ps(wx, wx, _mm256_fmadd_ps(wy, wy, _mm256_mul_ps(wz, wz)));
+		__m256 mask = _mm256_and_ps(_mm256_cmp_ps(len2, lr2, _CMP_LE_OQ),
+		               _mm256_and_ps(_mm256_cmp_ps(dot, vZero, _CMP_GT_OQ),
+		                _mm256_and_ps(_mm256_cmp_ps(len2, vZero, _CMP_GT_OQ), mirrorMask)));
+		__m256 safe_len2 = _mm256_blendv_ps(vOne, len2, mask);
+		__m256 lenInv = _mm256_rsqrt_ps(safe_len2);
+		__m256 dist   = _mm256_mul_ps(safe_len2, lenInv);
+		__m256 falloff = _mm256_sub_ps(vOne, _mm256_mul_ps(dist, lrr));
+
+		__m256 ldx = _mm256_mul_ps(wx, lenInv), ldy = _mm256_mul_ps(wy, lenInv), ldz = _mm256_mul_ps(wz, lenInv);
+		__m256 NdotL = _mm256_mul_ps(dot, lenInv);   // dot is N·w (unnormalized) → ·lenInv
+		// Half vector, normalized.
+		__m256 hx = _mm256_add_ps(ldx, vvx_v), hy = _mm256_add_ps(ldy, vvy_v), hz = _mm256_add_ps(ldz, vvz_v);
+		__m256 hLen2 = _mm256_fmadd_ps(hx, hx, _mm256_fmadd_ps(hy, hy, _mm256_mul_ps(hz, hz)));
+		__m256 hInv = _mm256_rsqrt_ps(_mm256_max_ps(hLen2, _mm256_set1_ps(1e-12f)));
+		__m256 NdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vnx_v, _mm256_fmadd_ps(hy, vny_v, _mm256_mul_ps(hz, vnz_v))), hInv);
+		__m256 VdotH = _mm256_mul_ps(_mm256_fmadd_ps(hx, vvx_v, _mm256_fmadd_ps(hy, vvy_v, _mm256_mul_ps(hz, vvz_v))), hInv);
+		NdotH = _mm256_max_ps(NdotH, vZero);
+		VdotH = _mm256_max_ps(VdotH, vZero);
+
+		// D (GGX): a² / (π · (NdotH²·(a²-1)+1)²)
+		__m256 nh2 = _mm256_mul_ps(NdotH, NdotH);
+		__m256 denomD = _mm256_fmadd_ps(nh2, _mm256_sub_ps(va2, vOne), vOne);   // NdotH²(a²-1)+1
+		denomD = _mm256_mul_ps(denomD, denomD);                                 // squared
+		__m256 D = _mm256_mul_ps(_mm256_mul_ps(va2, vInvPi), _mm256_rcp_ps(_mm256_max_ps(denomD, _mm256_set1_ps(1e-6f))));
+
+		// G (Smith, Schlick-GGX): Gv·Gl, Gx = Ndotx / (Ndotx·(1-k)+k)
+		__m256 oneMinusK = _mm256_sub_ps(vOne, vk);
+		__m256 Gv = _mm256_mul_ps(vNdotV, _mm256_rcp_ps(_mm256_fmadd_ps(vNdotV, oneMinusK, vk)));
+		__m256 Gl = _mm256_mul_ps(NdotL,  _mm256_rcp_ps(_mm256_fmadd_ps(NdotL,  oneMinusK, vk)));
+		__m256 G  = _mm256_mul_ps(Gv, Gl);
+
+		// F (Schlick): F0 + (1-F0)·(1-VdotH)^5
+		__m256 om = _mm256_sub_ps(vOne, VdotH);
+		__m256 om2 = _mm256_mul_ps(om, om);
+		__m256 om5 = _mm256_mul_ps(_mm256_mul_ps(om2, om2), om);
+		__m256 F = _mm256_fmadd_ps(_mm256_sub_ps(vOne, vF0), om5, vF0);
+
+		// spec = D·G·F / (4·NdotV·NdotL) · NdotL (radiance) = D·G·F/(4·NdotV)
+		__m256 specBRDF = _mm256_mul_ps(_mm256_mul_ps(D, G), F);
+		__m256 denom = _mm256_mul_ps(_mm256_set1_ps(4.0f), vNdotV);
+		__m256 spec = _mm256_mul_ps(specBRDF, _mm256_rcp_ps(denom));   // ·NdotL folded out (radiance) and NdotL/NdotL cancels one
+		// spot-cone × cube-shadow attenuation (shared from the diffuse loop).
+		__m256 csa = _mm256_load_ps(coneShadowAtten + slot);
+		__m256 strength = _mm256_mul_ps(_mm256_mul_ps(_mm256_mul_ps(spec, vSpec), falloff), csa);
+		__m256 contrib = _mm256_blendv_ps(vZero, strength, mask);
+
+		accB = _mm256_fmadd_ps(contrib, lcb, accB);
+		accG = _mm256_fmadd_ps(contrib, lcg, accG);
+		accR = _mm256_fmadd_ps(contrib, lcr, accR);
+	}
+	alignas(32) float bufB[8], bufG[8], bufR[8];
+	_mm256_store_ps(bufB, accB); _mm256_store_ps(bufG, accG); _mm256_store_ps(bufR, accR);
+	for (int i = 0; i < 8; ++i) { sB += bufB[i]; sG += bufG[i]; sR += bufR[i]; }
 }
 
 // FDS_DEFERRED_VEC=1 in env switches the per-pixel inner loop from the
@@ -350,6 +450,223 @@ static bool deferredLightingQuarterEnabled() {
 }
 
 
+// Shared 2-D-shadow-map attenuation for a single light `n`, extracted from the
+// scalar lighting body so both the scalar and the 8-omni SIMD path compute the
+// SAME shadowing for mirror-clone source maps (srcSm), mirror-clone source
+// cubes (srcCube), and the light's own 2-D spot map (smIdx + PCF). It does NOT
+// cover the light's OWN cube (cubeShadowIdx) — that stays at the call site via
+// resolveCubeAtten (the scalar block's own-cube path and the vec lane loop both
+// already handle it). Returns the combined srcSm×srcCube×smIdx attenuation in
+// [0,1]; 0.0 means fully shadowed (callers early-out). wx/wy/wz/lenInv are the
+// light→pixel vector + 1/|w| (used only by the smIdx slope bias). Byte-identical
+// to the inlined scalar code it replaced.
+static inline float computeMapShadowAtten(const TileLights& tl, int n,
+                                          const DeferredLightingCtx& ctx,
+                                          float x, float y, float z,
+                                          float wx, float wy, float wz,
+                                          float lenInv,
+                                          float nGeoX, float nGeoY, float nGeoZ,
+                                          int surfaceShadowId,
+                                          int kShadowBiasG, int kSlopeBiasG,
+                                          bool profShadowCache)
+{
+	const int32_t smIdx = tl.shadowMapIdx[n];
+	float shadowAtten = 1.0f;
+	// Clone light (mirror reflection): its visibility of this pixel equals
+	// the SOURCE light's visibility of the pixel REFLECTED across the mirror
+	// plane — sample the source's existing map there. Zero extra bakes;
+	// single tap (no PCF — reflected dot/beam shadows are soft).
+	const int32_t srcSm = tl.srcShadowMapIdx[n];
+	if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
+		// A clone/bounce light borrows its SOURCE spot's 2-D map: reflect this
+		// pixel across the mirror plane and sample the source's map.
+		//
+		// BOUNCE spots (clampBounce) own no map and may only relight what the
+		// source actually illuminates, so they default to DARK and are lit only
+		// where the reflected point lands inside the source's cone AND the
+		// source sees it — out-of-cone / occluded stay dark. Without this the
+		// bounce spilled disco light onto walls the source could never reach
+		// (the through-mirror bleed).
+		//
+		// Mirror CLONES keep the established default-lit behaviour
+		// (occluded → dark).
+		const bool clampBounce = (tl.bounceClamp[n] != 0u);
+		if (clampBounce) shadowAtten = 0.0f;
+		const ShadowMap& sm = g_shadowMaps[srcSm];
+		const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+		const float rwx = wpx - sd2 * tl.mirNX[n];
+		const float rwy = wpy - sd2 * tl.mirNY[n];
+		const float rwz = wpz - sd2 * tl.mirNZ[n];
+		const float ddx = rwx - ctx.cameraWorldX;
+		const float ddy = rwy - ctx.cameraWorldY;
+		const float ddz = rwz - ctx.cameraWorldZ;
+		// worldToView = transpose(viewToWorld)
+		const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+		const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+		const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+		const float lx = sm.viewToLight[0][0]*rvx + sm.viewToLight[0][1]*rvy + sm.viewToLight[0][2]*rvz + sm.viewToLightOffset.x;
+		const float ly = sm.viewToLight[1][0]*rvx + sm.viewToLight[1][1]*rvy + sm.viewToLight[1][2]*rvz + sm.viewToLightOffset.y;
+		const float lz = sm.viewToLight[2][0]*rvx + sm.viewToLight[2][1]*rvy + sm.viewToLight[2][2]*rvz + sm.viewToLightOffset.z;
+		if (lz > 0.0f) {
+			const float invLZ = 1.0f / lz;
+			const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
+			const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
+			if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
+				const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
+				const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
+				int pixZ = 0xFF80 - int(lz * sm.zScale);
+				if (pixZ < 0) pixZ = 0;
+				if (clampBounce) {
+					// In-cone + the source sees this point (not behind a closer
+					// occluder) → bounce lights it; everything else stays dark
+					// (set above).
+					if (pixZ + 128 >= int(zS)) shadowAtten = 1.0f;
+				} else {
+					// Clone: default lit, darken only where the source's map
+					// shows a closer occluder.
+					if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
+				}
+			}
+		}
+	}
+	// Clone omni with a CUBE source: borrow the SOURCE omni's cube and sample
+	// it at this pixel REFLECTED across the mirror plane — the cube analogue of
+	// the srcShadowMapIdx path above. PolyId mode (surfaceShadowId): the
+	// reflected receiver lands on the SOURCE surface (the clone is that geometry
+	// flipped) and clones share the source's matID, so the identity test matches
+	// — same acne-free path as the rest of greets. No clone geometry is baked.
+	const int32_t srcCube = tl.srcCubeShadowIdx[n];
+	if (srcCube >= 0) {
+		const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
+		const float rwx = wpx - sd2 * tl.mirNX[n];
+		const float rwy = wpy - sd2 * tl.mirNY[n];
+		const float rwz = wpz - sd2 * tl.mirNZ[n];
+		const float ddx = rwx - ctx.cameraWorldX, ddy = rwy - ctx.cameraWorldY, ddz = rwz - ctx.cameraWorldZ;
+		const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
+		const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
+		const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
+		shadowAtten *= CubeShadow_Sample(srcCube, rwx, rwy, rwz, rvx, rvy, rvz,
+		                                 kShadowBiasG, kSlopeBiasG, surfaceShadowId);
+	}
+	if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
+		const ShadowMap& sm = g_shadowMaps[smIdx];
+		const float lx = sm.viewToLight[0][0] * x +
+		                 sm.viewToLight[0][1] * y +
+		                 sm.viewToLight[0][2] * z +
+		                 sm.viewToLightOffset.x;
+		const float ly = sm.viewToLight[1][0] * x +
+		                 sm.viewToLight[1][1] * y +
+		                 sm.viewToLight[1][2] * z +
+		                 sm.viewToLightOffset.y;
+		const float lz = sm.viewToLight[2][0] * x +
+		                 sm.viewToLight[2][1] * y +
+		                 sm.viewToLight[2][2] * z +
+		                 sm.viewToLightOffset.z;
+		if (lz > 0.0f) {
+			const float invLZ = 1.0f / lz;
+			const float smX = sm.cntrX + sm.perspX * lx * invLZ;
+			const float smY = sm.cntrY - sm.perspY * ly * invLZ;
+			const int iX = int(smX);
+			const int iY = int(smY);
+			if (iX >= 0 && iX + 1 < sm.xres &&
+			    iY >= 0 && iY + 1 < sm.yres) {
+				// Tap addressing: linear row-major, or 8×8-tiled under
+				// --shadow-swizzle (see CubeShadow_Sample / ShadowSwzOffset;
+				// halves the cache lines a 2×2 footprint touches). Falls back
+				// to linear when the tiled copies aren't built — both layouts
+				// hold identical values.
+				const bool swz = fds::FeatureFlags::shadow_swizzle()
+				              && !sm.depthSw.empty() && !sm.depthDynSw.empty()
+				              && !sm.polyIdSw.empty();
+				size_t o00, o10, o01, o11;
+				const uint16_t *zsB, *zdB, *idB;
+				if (swz) {
+					const ShadowSwzShape &shp = ShadowSwzGetShape();
+					const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
+					o00 = ShadowSwzOffset(iX,     iY,     tpr, shp);
+					o10 = ShadowSwzOffset(iX + 1, iY,     tpr, shp);
+					o01 = ShadowSwzOffset(iX,     iY + 1, tpr, shp);
+					o11 = ShadowSwzOffset(iX + 1, iY + 1, tpr, shp);
+					zsB = sm.depthSw.data(); zdB = sm.depthDynSw.data();
+					idB = sm.polyIdSw.data();
+				} else {
+					const size_t rowOfs = size_t(iY) * size_t(sm.xres);
+					o00 = rowOfs + size_t(iX);   o10 = o00 + 1;
+					o01 = o00 + size_t(sm.xres); o11 = o01 + 1;
+					zsB = sm.depth.data(); zdB = sm.depth_dynamic.data();
+					idB = sm.polyId.data();
+				}
+				// Per-tap closest-occluder. Static buffer holds the once-baked
+				// statics; dynamic holds animated meshes (zero when off).
+				// max() wins on whichever caster is closer.
+				const uint16_t z00 = std::max(zsB[o00], zdB[o00]);
+				const uint16_t z10 = std::max(zsB[o10], zdB[o10]);
+				const uint16_t z01 = std::max(zsB[o01], zdB[o01]);
+				const uint16_t z11 = std::max(zsB[o11], zdB[o11]);
+				if (profShadowCache) {
+					// One PCF check = one tracked sample. Use the (00) tap's
+					// cache-line address — adjacent shadow checks on the same
+					// thread that share this line are hits.
+					const uintptr_t line =
+						reinterpret_cast<uintptr_t>(&zsB[o00]) >> 6;
+					if (s_shadowProfLastLine != line) {
+						g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
+						s_shadowProfLastLine = line;
+					}
+					g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
+				}
+				const float fx = smX - float(iX);
+				const float fy = smY - float(iY);
+				const float w00 = (1.0f - fx) * (1.0f - fy);
+				const float w10 =         fx  * (1.0f - fy);
+				const float w01 = (1.0f - fx) *         fy;
+				const float w11 =         fx  *         fy;
+				const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
+				float occ = 0.0f;
+				if (mode == ShadowMode::PolyId) {
+					// Surface matID extracted from gb.txtr's packed
+					// (miplevel:4 | matID:8 | swizzledUV:20). Shadow buffer
+					// stores matID+1 of the closest occluder; +1 here too so the
+					// comparison uses the same offset, and 0 stays as the
+					// "no occluder" sentinel.
+					const uint16_t surfaceId = uint16_t(surfaceShadowId);
+					if (idB[o00] != surfaceId && idB[o00] != 0) occ += w00;
+					if (idB[o10] != surfaceId && idB[o10] != 0) occ += w10;
+					if (idB[o01] != surfaceId && idB[o01] != 0) occ += w01;
+					if (idB[o11] != surfaceId && idB[o11] != 0) occ += w11;
+				} else {
+					int pixZenc = 0xFF80 - int(lz * sm.zScale);
+					if (pixZenc < 0) pixZenc = 0;
+					if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
+					// Constant + slope-scale bias. See the inlined scalar comment
+					// for the rationale; the slope grows as the surface meets the
+					// light at shallow angles, plateauing at the 0.2 clamp.
+					const int kShadowBias = kShadowBiasG;
+					const int kSlopeBias  = kSlopeBiasG;
+					const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
+					const float nDotL = dotGeo * lenInv;
+					const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
+					const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
+					const int biased = pixZenc + kShadowBias + slopeBias;
+					if (biased < int(z00)) occ += w00;
+					if (biased < int(z10)) occ += w10;
+					if (biased < int(z01)) occ += w01;
+					if (biased < int(z11)) occ += w11;
+				}
+				if (occ >= 1.0f) return 0.0f;       // fully shadowed
+				shadowAtten = 1.0f - occ;
+			}
+		}
+	}
+	return shadowAtten;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -369,6 +686,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool quarter        = deferredLightingQuarterEnabled();
 	const bool checker        = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool useVec         = deferredLightingVecEnabled();
+	const bool sVecForce      = fds::FeatureFlags::deferred_vec_force();
 	const bool specGlobalOn   = Specular_Factor > 0.0f;
 	const bool profShadowCache = fds::FeatureFlags::shadow_prof_cache();
 	// HDR Phase 3 B1: route the opaque lit radiance into g_hdrBuf UNCLAMPED so
@@ -417,12 +735,19 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float aoStrengthG     = fds::FeatureFlags::ao_map_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
+	const bool sPbr             = fds::FeatureFlags::pbr();
+	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
-	// Lightmap kernel branch is gated off when --shadow-dynamic is on
-	// (see resolveCubeAtten's contract above). Hoisted to tile-level
-	// so the per-pixel + per-omni hot path doesn't re-query.
-	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic();
+	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
+	// lightmap fast path ENTIRELY (the dynamic buffers are invisible to the
+	// static atlas), forcing full cube taps for every static light at every
+	// pixel — measured 2.6ms of lighting-w1 on greets. resolveCubeAtten has
+	// since grown the proper composite (lightmap static factor × dynamic-only
+	// cube tap, gated per-face on ShadowMap::dynBaked), so the lightmap stays
+	// on. --no-shadow_lm_dynamic restores the old full-tap fallback for A/B.
+	const bool lmKernelEnabled  = !fds::FeatureFlags::shadow_dynamic()
+	                            || fds::FeatureFlags::shadow_lm_dynamic();
 	// Normal-map LOD fade. The texture mip-chain averages cleanly, but
 	// averaged normals shorten + rotate toward the surface average, so
 	// at distance the bump's perturbation becomes high-frequency lighting
@@ -728,6 +1053,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				vy = -y * vlenInv;
 				vz = -z * vlenInv;
 			}
+			// --pbr per-pixel constants (hoisted out of the per-light loop so the
+			// scalar GGX cost is measured fairly). roughness fixed or gloss-derived;
+			// a=rough², Smith k=a/2, F0=0.04 dielectric; NdotV clamped.
+			float pbrA2 = 0, pbrK = 0, pbrNdotV = 0;
+			if (wantSpecular && sPbr) {
+				float rough = sPbrRoughFixed;
+				if (rough <= 0.0f) rough = std::sqrt(2.0f / (gloss + 2.0f));
+				if (rough < 0.04f) rough = 0.04f;
+				if (rough > 1.0f)  rough = 1.0f;
+				const float a = rough * rough;
+				pbrA2 = a * a;
+				pbrK  = a * 0.5f;
+				pbrNdotV = nx*vx + ny*vy + nz*vz;
+				if (pbrNdotV < 1e-3f) pbrNdotV = 1e-3f;
+			}
 
 			// Specular accumulator — kept separate from diffuse so it can
 			// be added AFTER texture modulation (highlights are independent
@@ -771,8 +1111,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
-			const bool useVecHere = useVec && !hasNormalMap
-				&& !(hasAoMap && !aoInAlpha);
+			const bool useVecHere = useVec
+				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
 
 			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
 			// the direct-light loop adds to them) — direct light is occluded by
@@ -835,6 +1175,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					__m256 accB   = _mm256_setzero_ps();
 					__m256 accG   = _mm256_setzero_ps();
 					__m256 accR   = _mm256_setzero_ps();
+
+					// Per-light spot-cone × cube-shadow attenuation, captured here
+					// so the (separate, templated) spec loop can apply the SAME
+					// shadow + cone the diffuse loop computes — fixing the vec-spec
+					// "leaks through shadows/cones" gap. Only populated when spec is
+					// wanted (one vector store per slot).
+					alignas(32) float coneShadowAtten[DEFERRED_MAX_VIEW_LIGHTS];
 
 					__m256i pmid_v_main = _mm256_set1_epi32((int)pmid);
 					for (int slot = 0; slot < tl.paddedCount; slot += 8) {
@@ -906,20 +1253,36 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						                     _mm256_cmpgt_epi32(lis, _mm256_setzero_si256()));
 						__m256 coneAtten = _mm256_blendv_ps(vOne, spotAtten, isSpotMask);
 						k = _mm256_mul_ps(k, coneAtten);
+						// Stash cone atten for the spec loop; cube shadow is folded
+						// in per-lane below. (Spec computes its own falloff + N·H, so
+						// only cone × shadow needs sharing.)
+						if (wantSpecular) _mm256_store_ps(coneShadowAtten + slot, coneAtten);
 
-						// Cube shadow attenuation per lane (scalarized).
-						// Most lanes have cubeShadowIdx < 0 (no shadow);
-						// quick-check the SoA before paying the lookup cost.
-						// Per-pixel sampleWorld is already computed for the
-						// scalar path; bring it here too via a sibling
-						// computation in the vec branch's setup.
+						// Per-lane shadow attenuation (scalarized). Covers the
+						// light's OWN cube (resolveCubeAtten) AND, mirroring the
+						// scalar body, mirror-clone source maps / cubes / the own
+						// 2-D spot map via computeMapShadowAtten. The loop fires
+						// for a lane if ANY of those four index planes is set;
+						// most lanes have none, so we quick-check the SoA before
+						// paying the lookup cost. Per-pixel sampleWorld is already
+						// computed above for both light paths.
 						__m256i cubeIdxV = _mm256_load_si256(
 							(const __m256i*)(tl.cubeShadowIdx + slot));
-						__m256i anyCube = _mm256_cmpgt_epi32(cubeIdxV,
-							_mm256_set1_epi32(-1));
-						if (_mm256_movemask_epi8(anyCube) != 0) {
-							alignas(32) int32_t idxArr[8];
-							_mm256_store_si256((__m256i*)idxArr, cubeIdxV);
+						__m256i smIdxV = _mm256_load_si256(
+							(const __m256i*)(tl.shadowMapIdx + slot));
+						__m256i srcSmV = _mm256_load_si256(
+							(const __m256i*)(tl.srcShadowMapIdx + slot));
+						__m256i srcCubeV = _mm256_load_si256(
+							(const __m256i*)(tl.srcCubeShadowIdx + slot));
+						__m256i negOne = _mm256_set1_epi32(-1);
+						__m256i anyShadow = _mm256_or_si256(
+							_mm256_or_si256(_mm256_cmpgt_epi32(cubeIdxV, negOne),
+							                _mm256_cmpgt_epi32(smIdxV,   negOne)),
+							_mm256_or_si256(_mm256_cmpgt_epi32(srcSmV,   negOne),
+							                _mm256_cmpgt_epi32(srcCubeV, negOne)));
+						if (_mm256_movemask_epi8(anyShadow) != 0) {
+							alignas(32) int32_t cubeArr[8];
+							_mm256_store_si256((__m256i*)cubeArr, cubeIdxV);
 							alignas(32) float kArr[8];
 							_mm256_store_ps(kArr, k);
 							alignas(32) float wxArr[8], wyArr[8], wzArr[8], liArr[8];
@@ -930,16 +1293,28 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							const int kSB = kShadowBiasG;
 							const int kSL = kSlopeBiasG;
 							for (int lane = 0; lane < 8; ++lane) {
-								if (idxArr[lane] < 0) continue;
 								if (kArr[lane] <= 0.0f) continue;
-								const float cubeAtten = resolveCubeAtten(
-									pixelLM, idxArr[lane], lmKernelEnabled, caFlags,
+								const int gi = slot + lane;
+								// Own cube (default 1.0 when this lane carries none).
+								float atten = 1.0f;
+								if (cubeArr[lane] >= 0) {
+									atten = resolveCubeAtten(
+										pixelLM, cubeArr[lane], lmKernelEnabled, caFlags,
+										wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
+										nGeoX, nGeoY, nGeoZ,
+										sampleWorldX, sampleWorldY, sampleWorldZ,
+										x, y, z, kSB, kSL,
+										surfaceShadowId);
+								}
+								// Mirror-clone source map/cube + own 2-D spot map
+								// (returns 1.0 when none of those apply for this lane).
+								atten *= computeMapShadowAtten(
+									tl, gi, ctx, x, y, z,
 									wxArr[lane], wyArr[lane], wzArr[lane], liArr[lane],
-									nGeoX, nGeoY, nGeoZ,
-									sampleWorldX, sampleWorldY, sampleWorldZ,
-									x, y, z, kSB, kSL,
-									surfaceShadowId);
-								kArr[lane] *= cubeAtten;
+									nGeoX, nGeoY, nGeoZ, surfaceShadowId,
+									kSB, kSL, profShadowCache);
+								kArr[lane] *= atten;
+								if (wantSpecular) coneShadowAtten[gi] *= atten;
 							}
 							k = _mm256_load_ps(kArr);
 						}
@@ -971,22 +1346,32 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					// FDS_DEFERRED_GLOSS_STATS confirms our FLDs only ship
 					// gloss ∈ {48, 64}; the other cases here are defensive
 					// for spectest's authored values and future FLDs.
-					if (wantSpecular) {
+					if (wantSpecular && sPbr) {
+						// --pbr TEST: Cook-Torrance instead of Blinn-Phong, same
+						// 8-lights-wide vec path. Roughness fixed (--pbr_roughness)
+						// or derived from Glossiness (roughness=sqrt(2/(gloss+2))).
+						float rough = sPbrRoughFixed;
+						if (rough <= 0.0f)
+							rough = std::sqrt(2.0f / (float(Mat->Glossiness > 0 ? Mat->Glossiness : 32) + 2.0f));
+						if (rough < 0.04f) rough = 0.04f;
+						if (rough > 1.0f)  rough = 1.0f;
+						run_vec_ggx_loop(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, rough, pmid, coneShadowAtten, sB,sG,sR);
+					} else if (wantSpecular) {
 						switch (Mat->Glossiness) {
 							case 4:
-								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<4>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 8:
-								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<8>  (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 16:
-								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<16> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 32:
-								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<32> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 48:
-								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<48> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 64:
-								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<64> (tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							case 128:
-								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, sB,sG,sR); break;
+								run_vec_spec_loop<128>(tl, x,y,z, nx,ny,nz, vx,vy,vz, Mat->Specular, pmid, coneShadowAtten, sB,sG,sR); break;
 							default:
 								// Unknown gloss — defensive scalar libm path
 								// (matches old behavior). If this fires on a
@@ -1094,214 +1479,13 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						// polygons that project to a single texel flicker
 						// in/out as the texel-grid shifts under them.
 						// Cost: 4 loads + 4 compares + 4 muls + 4 adds.
-						const int32_t smIdx = tl.shadowMapIdx[n];
-						float shadowAtten = 1.0f;
-						// Clone light (mirror reflection): its visibility
-						// of this pixel equals the SOURCE light's
-						// visibility of the pixel REFLECTED across the
-						// mirror plane — sample the source's existing
-						// map there. Zero extra bakes; single tap (no
-						// PCF — reflected dot/beam shadows are soft).
-						const int32_t srcSm = tl.srcShadowMapIdx[n];
-						if (srcSm >= 0 && size_t(srcSm) < g_shadowMaps.size()) {
-							// A clone/bounce light borrows its SOURCE spot's 2-D
-							// map: reflect this pixel across the mirror plane and
-							// sample the source's map.
-							//
-							// BOUNCE spots (clampBounce) own no map and may only
-							// relight what the source actually illuminates, so they
-							// default to DARK and are lit only where the reflected
-							// point lands inside the source's cone AND the source
-							// sees it — out-of-cone / occluded stay dark. Without
-							// this the bounce spilled disco light onto walls the
-							// source could never reach (the through-mirror bleed).
-							//
-							// Mirror CLONES keep the established default-lit
-							// behaviour (occluded → dark).
-							const bool clampBounce = (tl.bounceClamp[n] != 0u);
-							if (clampBounce) shadowAtten = 0.0f;
-							const ShadowMap& sm = g_shadowMaps[srcSm];
-							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
-							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
-							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
-							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
-							const float rwx = wpx - sd2 * tl.mirNX[n];
-							const float rwy = wpy - sd2 * tl.mirNY[n];
-							const float rwz = wpz - sd2 * tl.mirNZ[n];
-							const float ddx = rwx - ctx.cameraWorldX;
-							const float ddy = rwy - ctx.cameraWorldY;
-							const float ddz = rwz - ctx.cameraWorldZ;
-							// worldToView = transpose(viewToWorld)
-							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
-							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
-							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
-							const float lx = sm.viewToLight[0][0]*rvx + sm.viewToLight[0][1]*rvy + sm.viewToLight[0][2]*rvz + sm.viewToLightOffset.x;
-							const float ly = sm.viewToLight[1][0]*rvx + sm.viewToLight[1][1]*rvy + sm.viewToLight[1][2]*rvz + sm.viewToLightOffset.y;
-							const float lz = sm.viewToLight[2][0]*rvx + sm.viewToLight[2][1]*rvy + sm.viewToLight[2][2]*rvz + sm.viewToLightOffset.z;
-							if (lz > 0.0f) {
-								const float invLZ = 1.0f / lz;
-								const int iX = int(sm.cntrX + sm.perspX * lx * invLZ);
-								const int iY = int(sm.cntrY - sm.perspY * ly * invLZ);
-								if (iX >= 0 && iX < sm.xres && iY >= 0 && iY < sm.yres) {
-									const size_t o = size_t(iY) * size_t(sm.xres) + size_t(iX);
-									const uint16_t zS = std::max(sm.depth[o], sm.depth_dynamic[o]);
-									int pixZ = 0xFF80 - int(lz * sm.zScale);
-									if (pixZ < 0) pixZ = 0;
-									if (clampBounce) {
-										// In-cone + the source sees this point (not
-										// behind a closer occluder) → bounce lights it;
-										// everything else stays dark (set above).
-										if (pixZ + 128 >= int(zS)) shadowAtten = 1.0f;
-									} else {
-										// Clone: default lit, darken only where the
-										// source's map shows a closer occluder.
-										if (pixZ + 128 < int(zS)) shadowAtten = 0.0f;
-									}
-								}
-							}
-						}
-						// Clone omni with a CUBE source: borrow the SOURCE omni's
-						// cube and sample it at this pixel REFLECTED across the
-						// mirror plane — the cube analogue of the srcShadowMapIdx
-						// path above. PolyId mode (surfaceShadowId): the reflected
-						// receiver lands on the SOURCE surface (the clone is that
-						// geometry flipped) and clones share the source's matID, so
-						// the identity test matches — same acne-free path as the
-						// rest of greets. No clone geometry is baked.
-						const int32_t srcCube = tl.srcCubeShadowIdx[n];
-						if (srcCube >= 0) {
-							const float wpx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
-							const float wpy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
-							const float wpz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
-							const float sd2 = 2.0f * (tl.mirNX[n]*wpx + tl.mirNY[n]*wpy + tl.mirNZ[n]*wpz + tl.mirD[n]);
-							const float rwx = wpx - sd2 * tl.mirNX[n];
-							const float rwy = wpy - sd2 * tl.mirNY[n];
-							const float rwz = wpz - sd2 * tl.mirNZ[n];
-							const float ddx = rwx - ctx.cameraWorldX, ddy = rwy - ctx.cameraWorldY, ddz = rwz - ctx.cameraWorldZ;
-							const float rvx = ctx.viewToWorld[0][0]*ddx + ctx.viewToWorld[1][0]*ddy + ctx.viewToWorld[2][0]*ddz;
-							const float rvy = ctx.viewToWorld[0][1]*ddx + ctx.viewToWorld[1][1]*ddy + ctx.viewToWorld[2][1]*ddz;
-							const float rvz = ctx.viewToWorld[0][2]*ddx + ctx.viewToWorld[1][2]*ddy + ctx.viewToWorld[2][2]*ddz;
-							shadowAtten *= CubeShadow_Sample(srcCube, rwx, rwy, rwz, rvx, rvy, rvz,
-							                                 kShadowBiasG, kSlopeBiasG, surfaceShadowId);
-						}
-						if (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size()) {
-							const ShadowMap& sm = g_shadowMaps[smIdx];
-							const float lx = sm.viewToLight[0][0] * x +
-							                 sm.viewToLight[0][1] * y +
-							                 sm.viewToLight[0][2] * z +
-							                 sm.viewToLightOffset.x;
-							const float ly = sm.viewToLight[1][0] * x +
-							                 sm.viewToLight[1][1] * y +
-							                 sm.viewToLight[1][2] * z +
-							                 sm.viewToLightOffset.y;
-							const float lz = sm.viewToLight[2][0] * x +
-							                 sm.viewToLight[2][1] * y +
-							                 sm.viewToLight[2][2] * z +
-							                 sm.viewToLightOffset.z;
-							if (lz > 0.0f) {
-								const float invLZ = 1.0f / lz;
-								const float smX = sm.cntrX + sm.perspX * lx * invLZ;
-								const float smY = sm.cntrY - sm.perspY * ly * invLZ;
-								const int iX = int(smX);
-								const int iY = int(smY);
-								if (iX >= 0 && iX + 1 < sm.xres &&
-								    iY >= 0 && iY + 1 < sm.yres) {
-									const size_t rowOfs = size_t(iY) * size_t(sm.xres);
-									const uint16_t *zsRow0 = sm.depth.data() + rowOfs;
-									const uint16_t *zsRow1 = zsRow0 + sm.xres;
-									const uint16_t *zdRow0 = sm.depth_dynamic.data() + rowOfs;
-									const uint16_t *zdRow1 = zdRow0 + sm.xres;
-									// Per-tap closest-occluder. Static buffer
-									// holds the once-baked statics; dynamic
-									// holds animated meshes (zero when off).
-									// max() wins on whichever caster is closer.
-									const uint16_t z00 = std::max(zsRow0[iX  ], zdRow0[iX  ]);
-									const uint16_t z10 = std::max(zsRow0[iX+1], zdRow0[iX+1]);
-									const uint16_t z01 = std::max(zsRow1[iX  ], zdRow1[iX  ]);
-									const uint16_t z11 = std::max(zsRow1[iX+1], zdRow1[iX+1]);
-									if (profShadowCache) {
-										// One PCF check = one tracked sample.
-										// Use the (00) tap's cache-line address
-										// — adjacent shadow checks on the same
-										// thread that share this line are hits.
-										const uintptr_t line =
-											reinterpret_cast<uintptr_t>(&zsRow0[iX]) >> 6;
-										if (s_shadowProfLastLine != line) {
-											g_shadowProfLineTransitions.fetch_add(1, std::memory_order_relaxed);
-											s_shadowProfLastLine = line;
-										}
-										g_shadowProfSamples.fetch_add(1, std::memory_order_relaxed);
-									}
-									const float fx = smX - float(iX);
-									const float fy = smY - float(iY);
-									const float w00 = (1.0f - fx) * (1.0f - fy);
-									const float w10 =         fx  * (1.0f - fy);
-									const float w01 = (1.0f - fx) *         fy;
-									const float w11 =         fx  *         fy;
-									const ShadowMode mode = g_shadowMode.load(std::memory_order_relaxed);
-									float occ = 0.0f;
-									if (mode == ShadowMode::PolyId) {
-										const uint16_t *idRow0 = sm.polyId.data() +
-											size_t(iY) * size_t(sm.xres);
-										const uint16_t *idRow1 = idRow0 + sm.xres;
-										// Surface matID extracted from gb.txtr's
-										// packed (miplevel:4 | matID:8 | swizzledUV:20).
-										// Shadow buffer stores matID+1 of the closest
-										// occluder; +1 here too so the comparison
-										// uses the same offset, and 0 stays as the
-										// "no occluder" sentinel.
-										// Receiver identity: read the per-pixel
-										// `gb.shadowMatID` plane (stamped by
-										// Mekalele with the full resolution
-										// chain). Falls back to uint16_t(matID+1)
-										// when the plane wasn't allocated.
-										// Mirrors the scalar surfaceShadowId
-										// resolution above.
-										const uint16_t surfaceId = uint16_t(surfaceShadowId);
-										if (idRow0[iX    ] != surfaceId && idRow0[iX    ] != 0) occ += w00;
-										if (idRow0[iX + 1] != surfaceId && idRow0[iX + 1] != 0) occ += w10;
-										if (idRow1[iX    ] != surfaceId && idRow1[iX    ] != 0) occ += w01;
-										if (idRow1[iX + 1] != surfaceId && idRow1[iX + 1] != 0) occ += w11;
-									} else {
-										int pixZenc = 0xFF80 - int(lz * sm.zScale);
-										if (pixZenc < 0) pixZenc = 0;
-										if (pixZenc > 0xFFFF) pixZenc = 0xFFFF;
-										// Constant + slope-scale bias. The constant
-										// handles front-facing self-shadow acne. The
-										// slope term grows as the surface meets the
-										// light at shallow angles — a wall almost
-										// parallel to the light direction has a steep
-										// depth gradient across one shadow texel, so
-										// the constant bias alone leaves grazing
-										// surfaces with banded "acne" patterns. We
-										// scale by 1/(N·L) - 1 so front-facing surfaces
-										// get no extra; grazing surfaces get a lot.
-										// Tunable via FDS_SHADOW_BIAS / SLOPE_BIAS.
-										const int kShadowBias = kShadowBiasG;
-										const int kSlopeBias  = kSlopeBiasG;
-										// Use the GEOMETRIC normal (saved before normal-
-										// map perturbation) for slope calc — the slope
-										// is about the underlying surface, not the
-										// bumpy micro-detail. Without this, bump-mapped
-										// floors show patchy shadow following the bumps,
-										// and grazing-angle bumps explode the slope.
-										// Clamp at 0.2 so very steep angles plateau
-										// rather than blowing past nearby occluders.
-										const float dotGeo = wx*nGeoX + wy*nGeoY + wz*nGeoZ;
-										const float nDotL = dotGeo * lenInv;
-										const float invNdotL = 1.0f / (nDotL > 0.2f ? nDotL : 0.2f);
-										const int slopeBias = int(float(kSlopeBias) * (invNdotL - 1.0f));
-										const int biased = pixZenc + kShadowBias + slopeBias;
-										if (biased < int(z00)) occ += w00;
-										if (biased < int(z10)) occ += w10;
-										if (biased < int(z01)) occ += w01;
-										if (biased < int(z11)) occ += w11;
-									}
-									if (occ >= 1.0f) continue;       // fully shadowed
-									shadowAtten = 1.0f - occ;
-								}
-							}
-						}
+						float shadowAtten = computeMapShadowAtten(
+							tl, n, ctx, x, y, z, wx, wy, wz, lenInv,
+							nGeoX, nGeoY, nGeoZ, surfaceShadowId,
+							kShadowBiasG, kSlopeBiasG, profShadowCache);
+						// Combined srcSm×srcCube×smIdx; 0 = fully shadowed (the
+						// old `if (occ >= 1.0f) continue;` early-out).
+						if (shadowAtten <= 0.0f) continue;
 
 						// Cube shadow (omni shadow caster). Two paths:
 						//  - Static-mesh pixel + lightmap baked for this
@@ -1349,9 +1533,28 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 							// the > 0 cull still works.
 							const float NdotH_raw = nx*hx + ny*hy + nz*hz;
 							if (hLen2 > 0.0f && NdotH_raw > 0.0f) {
-								const float NdotH = NdotH_raw * fast_rsqrt(hLen2);
+								const float hInv  = fast_rsqrt(hLen2);
+								const float NdotH = NdotH_raw * hInv;
+								float spec;
+								if (sPbr) {
+									// Scalar Cook-Torrance (GGX D + Smith-Schlick G +
+									// Schlick F), mirroring run_vec_ggx_loop. NdotL =
+									// dot·lenInv; VdotH = (V·H)·hInv. spec = D·G·F/(4·NdotV).
+									const float NdotL = dot * lenInv;
+									const float VdotH = (vx*hx + vy*hy + vz*hz) * hInv;
+									const float d1 = NdotH*NdotH*(pbrA2 - 1.0f) + 1.0f;
+									const float D = pbrA2 * 0.31830989f / (d1*d1 + 1e-6f);
+									const float omk = 1.0f - pbrK;
+									const float Gv = pbrNdotV / (pbrNdotV*omk + pbrK);
+									const float Gl = NdotL / (NdotL*omk + pbrK);
+									const float om = 1.0f - (VdotH > 0.0f ? VdotH : 0.0f);
+									const float om2 = om*om;
+									const float F = 0.04f + 0.96f * (om2*om2*om);
+									spec = D * Gv * Gl * F / (4.0f * pbrNdotV);
+								} else {
+									spec = pow_glossClass(NdotH, Mat->Glossiness);
+								}
 								{
-									const float spec = pow_glossClass(NdotH, Mat->Glossiness);
 									// Multiply by shadowAtten so shadowed pixels don't
 									// leak specular highlights — was a visible bug at
 									// bumped-mortar pixels inside shadow regions, where
@@ -1448,7 +1651,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// VPage. The froxel composite reads h[3] to take the scene from here
 			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {
 					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
 					// decode) × light at power 1; specular is reflected light → a
@@ -1462,9 +1665,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB; h[1] = rlG; h[2] = rlR;
+					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);
 				} else {
-					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
 				}
 				h[3] = 1.0f;
 			}
@@ -1954,7 +2157,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// off at the tonemap instead of clipping. Gated on g_hdrActive so
 			// the LDR path (flag off, fog-off scenes) is byte-identical.
 			if (fds::g_hdrActive && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				const float dB = h[0], dG = h[1], dR = h[2];
 				if (Mat->XparBlendAlpha > 0.0f) {
 					const float a = Mat->XparBlendAlpha;
@@ -2816,6 +3019,26 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				return true;
 			};
 
+			// C (texture/lighting decouple): fetch a pixel's own point-sampled
+			// texel (B,G,R). Lets the fill reconstruct each neighbour's LIGHTING
+			// (final ÷ own texel) and re-apply THIS pixel's own texel — so the
+			// far floor keeps its texture detail instead of averaging into mush.
+			// Returns false for untextured/missing (caller falls back to the
+			// plain colour average). texel fetch is ~free (measured).
+			auto fetchTexel = [&](size_t j, float &tb, float &tg, float &tr) -> bool {
+				const uint32_t m32 = gb.txtr[j];
+				const uint32_t mid = (m32 >> 20) & 0xFF;
+				if (mid >= ctx.matTable.count) return false;
+				const Material *M = ctx.matTable.data[mid];
+				if (!M || !M->Txtr) return false;
+				const dword *td = (const dword *)M->Txtr->Mipmap[(m32 >> 28) & 0xF];
+				if (!td) return false;
+				const dword t = td[m32 & 0xFFFFF];
+				tb = float(t & 0xFF); tg = float((t >> 8) & 0xFF); tr = float((t >> 16) & 0xFF);
+				return true;
+			};
+			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp();
+
 			bool matched = false;
 			if (quarter) {
 				// Adaptive partial averaging: per-neighbor compatibility
@@ -2849,6 +3072,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				}
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
+				float ownB=0, ownG=0, ownR=0;
+				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
+				float slB=0, slG=0, slR=0;                 // LDR reconstructed lighting
+				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -2856,23 +3083,65 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					if (haveOwn) {
+						float nb, ng, nr;
+						// Trust region: the divide-out model (R ∝ texel^exp × smooth
+						// lighting) only holds where the neighbour's texel is bright
+						// enough to be a reliable lighting probe. When own ≫ neighbour
+						// (an LED dot over its panel's black background: 255/1, then
+						// squared to ×65025 under hdr_linear) the division amplifies
+						// whatever non-texture-modulated radiance (spec, ambient floor)
+						// the dark texel carries and blows the pixel out far past the
+						// full-rate result. Such a neighbour can't contribute to the
+						// sharp reconstruction; it still counts in the plain radiance
+						// average, which handles the pixel when no neighbour qualifies.
+						float nrB, nrG, nrR;
+						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
+						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
+						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
+							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
+							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
+							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							if (nh) {
+								// radiance ∝ texel^exp (2 = hdr_linear albedo², 1 = gamma);
+								// re-apply own texel: R_i = R_n·(texel_i/texel_n)^exp.
+								float rB=nrB, rG=nrG, rR=nrR;
+								if (hdrLinear) { rB*=rB; rG*=rG; rR*=rR; }
+								ahB += nh[0]*rB; ahG += nh[1]*rG; ahR += nh[2]*rR;
+							}
+							++nsharp;
+						}
+					}
 					++n;
 				}
 				if (n > 0) {
-					int aR, aG, aB;
-					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
-					else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
-					else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
-					else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
-					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
-					// HDR: average the neighbours' unclamped float radiance so the
-					// filled pixel matches wave-1 (the 8-bit avg above caps at 255 →
-					// dim checker on bright reflections under --deferred-quarter).
+					if (haveOwn && nsharp > 0 && !hdrWrite) {
+						const float inv = 1.0f / (float(nsharp) * 256.0f);
+						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
+						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
+						int oR = int(ownR * slR * inv + 0.5f); if (oR > 255) oR = 255;
+						out[i] = dword(oB) | (dword(oG) << 8) | (dword(oR) << 16) | 0xFF000000u;
+					} else {
+						int aR, aG, aB;
+						if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+						else if (n == 2) { aB = sumB >> 1;  aG = sumG >> 1;  aR = sumR >> 1;  }
+						else if (n == 4) { aB = sumB >> 2;  aG = sumG >> 2;  aR = sumR >> 2;  }
+						else /* n == 3 */ { aB = sumB / 3;  aG = sumG / 3;   aR = sumR / 3;   }
+						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					}
 					if (hdrWrite) {
-						const float inv = 1.0f / float(n);
-						float* h = fds::g_hdrBuf.data() + i*4;
-						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						if (haveOwn && nsharp > 0) {
+							const float invn = 1.0f / float(nsharp);
+							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
+						} else {
+							const float inv = 1.0f / float(n);
+							h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv);
+						}
+						h[3] = 1.0f;
 					}
 					matched = true;
 				}
@@ -2889,6 +3158,14 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (nc == 0) continue;
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
+				// C (texture/lighting decouple) — same divide-out + trust region
+				// as the quarter path above; without it the checker fill plain-
+				// averages neighbour colours and mushes far-floor texture detail
+				// (measured |checker-full| 1.32 vs quarter+C 0.31 on greets).
+				float ownB=0, ownG=0, ownR=0;
+				const bool haveOwn = sTexSharp && fetchTexel(i, ownB, ownG, ownR);
+				float slB=0, slG=0, slR=0;                 // LDR reconstructed lighting
+				float ahB=0, ahG=0, ahR=0; int nsharp=0;   // HDR reconstructed radiance
 				int n = 0;
 				for (int k = 0; k < nc; ++k) {
 					if (!neighborCompatible(nidx[k], matIDc)) continue;
@@ -2896,18 +3173,51 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					if (hdrWrite) { const float* nh = fds::g_hdrBuf.data() + nidx[k]*4; hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
+					if (haveOwn) {
+						float nb, ng, nr, nrB, nrG, nrR;
+						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
+						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
+						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
+							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
+							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
+							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
+							if (nh) {
+								// radiance ∝ texel^exp; re-apply own texel (see quarter path)
+								float rB=nrB, rG=nrG, rR=nrR;
+								if (hdrLinear) { rB*=rB; rG*=rG; rR*=rR; }
+								ahB += nh[0]*rB; ahG += nh[1]*rG; ahR += nh[2]*rR;
+							}
+							++nsharp;
+						}
+					}
 					++n;
 				}
 				if (n > 0) {
-					int aR, aG, aB;
-					if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
-					else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
-					out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					if (haveOwn && nsharp > 0 && !hdrWrite) {
+						const float inv = 1.0f / (float(nsharp) * 256.0f);
+						int oB = int(ownB * slB * inv + 0.5f); if (oB > 255) oB = 255;
+						int oG = int(ownG * slG * inv + 0.5f); if (oG > 255) oG = 255;
+						int oR = int(ownR * slR * inv + 0.5f); if (oR > 255) oR = 255;
+						out[i] = dword(oB) | (dword(oG) << 8) | (dword(oR) << 16) | 0xFF000000u;
+					} else {
+						int aR, aG, aB;
+						if (n == 1)      { aB = sumB;       aG = sumG;       aR = sumR;       }
+						else /* n == 2 */ { aB = sumB >> 1; aG = sumG >> 1;  aR = sumR >> 1; }
+						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
+					}
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
-						const float inv = 1.0f / float(n);
-						float* h = fds::g_hdrBuf.data() + i*4;
-						h[0] = hsB*inv; h[1] = hsG*inv; h[2] = hsR*inv; h[3] = 1.0f;
+						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						if (haveOwn && nsharp > 0) {
+							const float invn = 1.0f / float(nsharp);
+							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
+						} else {
+							const float inv = 1.0f / float(n);
+							h[0] = fds::HdrClamp(hsB*inv); h[1] = fds::HdrClamp(hsG*inv); h[2] = fds::HdrClamp(hsR*inv);
+						}
+						h[3] = 1.0f;
 					}
 					matched = true;
 				}
@@ -3114,7 +3424,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				hR += float(rR) * 0.5f;
 			}
 			if (hdrWrite) {
-				float* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {            // B2 + full coherence — see main kernel
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;
@@ -3124,9 +3434,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						const float wB=float(e&0xFF)*kN, wG=float((e>>8)&0xFF)*kN, wR=float((e>>16)&0xFF)*kN;
 						rlB += wB*wB*255.0f*0.5f; rlG += wG*wG*255.0f*0.5f; rlR += wR*wR*255.0f*0.5f;
 					}
-					h[0] = rlB; h[1] = rlG; h[2] = rlR;   // store LINEAR
+					h[0] = fds::HdrClamp(rlB); h[1] = fds::HdrClamp(rlG); h[2] = fds::HdrClamp(rlR);   // store LINEAR
 				} else {
-					h[0] = hB; h[1] = hG; h[2] = hR;   // B1 gamma radiance
+					h[0] = fds::HdrClamp(hB); h[1] = fds::HdrClamp(hG); h[2] = fds::HdrClamp(hR);   // B1 gamma radiance
 				}
 				h[3] = 1.0f;   // coverage for the composite
 			}

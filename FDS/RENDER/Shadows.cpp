@@ -95,6 +95,41 @@ std::atomic<ShadowMode> g_shadowMode{
 	fds::FeatureFlags::shadow_polyid() ? ShadowMode::PolyId : ShadowMode::Depth};
 
 
+// [experiment: --shadow-swizzle] Re-tile one map's freshly-baked planes into
+// the 8×8-tiled *Sw copies (see ShadowSwzOffset). dynPlanes selects which pair
+// this bake wrote: static (depth/polyId — StaticOnce + DynOmnis) or dynamic
+// (depth_dynamic/polyId_dynamic — DynMeshes). Linear planes stay the source
+// of truth; this is a derived copy. Row-of-tile copies are 8×u16 = 16 B →
+// one 128-bit load/store each; the pass is pure memory traffic, which is
+// exactly the cost the experiment wants to weigh against the PCF read gain.
+static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
+{
+	const ShadowSwzShape &shp = ShadowSwzGetShape();
+	const int tw = 1 << shp.a, th = 1 << shp.b;
+	const int tileSz = tw * th;
+	const int tpr = ShadowSwzTilesPerRow(sm.xres, shp);
+	const int trs = (sm.yres + shp.maskY) >> shp.b;
+	const size_t n = size_t(tpr) * size_t(trs) * size_t(tileSz);
+	auto tile = [&](const std::vector<uint16_t> &src, std::vector<uint16_t> &dst) {
+		if (src.empty()) { dst.clear(); return; }
+		if (dst.size() != n) dst.assign(n, 0);   // zero pad = "unwritten" sentinel
+		const uint16_t *s = src.data();
+		uint16_t *d = dst.data();
+		for (int y = 0; y < sm.yres; ++y) {
+			const uint16_t *srow = s + size_t(y) * size_t(sm.xres);
+			// row-of-tile runs: tw consecutive texels per tile share y.
+			uint16_t *drow = d + (size_t(y >> shp.b) * size_t(tpr)) * size_t(tileSz)
+			                   + (size_t(y & shp.maskY) << shp.a);
+			int x = 0;
+			for (int t = 0; t < tpr; ++t, x += tw)
+				std::memcpy(drow + size_t(t) * size_t(tileSz), srow + x,
+				            size_t(std::min(tw, sm.xres - x)) * sizeof(uint16_t));
+		}
+	};
+	if (dynPlanes) { tile(sm.depth_dynamic, sm.depthDynSw); tile(sm.polyId_dynamic, sm.polyIdDynSw); }
+	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
+}
+
 void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 {
 	if (!shadowsEnabled()) return;
@@ -144,10 +179,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// — if Transform >> Raster, cross-light parallelism is moot.
 	const bool sProfShadow = fds::FeatureFlags::shadow_prof();
 	using clk = std::chrono::high_resolution_clock;
-	static thread_local int sFrameIdx = 0;
-	static thread_local double sXformAcc = 0.0;
-	static thread_local double sRasterAcc = 0.0;
-	static thread_local int sLightCount = 0;
+	// PER-MODE accumulators (same fix as --shadow_bake_time): both
+	// DynamicOmnisPerFrame and DynamicMeshesPerFrame call this every frame,
+	// so shared accumulators divided by the CALL interval under-reported
+	// per-frame cost by ~2x and conflated the modes.
+	static thread_local int sFrameIdx[3] = {0, 0, 0};
+	static thread_local double sXformAcc[3] = {0.0, 0.0, 0.0};
+	static thread_local double sRasterAcc[3] = {0.0, 0.0, 0.0};
+	static thread_local int sLightCount[3] = {0, 0, 0};
+	const int sProfMi = int(mode);
 
 	// Per-light scratch: one FaceListContext + VertexScratch + Camera +
 	// CameraContext per shadow-casting light. Kept across frames so the
@@ -315,9 +355,14 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		}
 		// DynamicMeshesPerFrame cube-face cull: skip faces where no
 		// dynamic mesh would be visible. Pre-computed above.
-		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
-		    && sm.cubeFace >= 0
-		    && !hasDynMeshVisible[lightIdx]) continue;
+		if (mode == ShadowBakeMode::DynamicMeshesPerFrame && sm.cubeFace >= 0) {
+			// Maintain the per-face dynamic-content flag the dynamicOnly
+			// composite tap reads (ShadowMap.h). Set for processed maps,
+			// cleared for skipped ones — a skipped map's dynamic planes are
+			// stale and must not shadow.
+			sm.dynBaked = hasDynMeshVisible[lightIdx];
+			if (!hasDynMeshVisible[lightIdx]) continue;
+		}
 
 		// Build the per-light camera. Spot path: existing IDir-based
 		// lookAt + cone-FOV. Cube-face path: fixed axis-aligned camera
@@ -459,8 +504,8 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	}
 	const auto tXformEnd = clk::now();
 	if (sProfShadow) {
-		sXformAcc += std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count();
-		sLightCount += xformsEnqueued;
+		sXformAcc[sProfMi] += std::chrono::duration<double, std::milli>(tXformEnd - tXformStart).count();
+		sLightCount[sProfMi] += xformsEnqueued;
 	}
 
 	// ─── Phase B: flat (light × tile) tile rasterization ────────────────
@@ -477,6 +522,24 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// (TSan-confirmed).
 	constexpr int numTilesX = 4;
 	constexpr int numTilesY = 4;
+	// Adaptive per-light grid (Phase-B loop below): the 4×4 grid was tuned for
+	// 512² maps, but EVERY tile task walks the light's whole FList through the
+	// clipper — at 256² that's 16× the face-walk for raster work 4 tiles cover.
+	// Target ~128-px tile edges: grid = res/128 clamped [1, 4]. Tile edges stay
+	// multiples of 8 (the apply_exact blendv-RMW seam rule) for the pow2 map
+	// sizes in use (64..1024). FDS_SHADOW_TILE_GRID=N forces a fixed N×N grid
+	// (=4 restores the old behavior for A/B).
+	static const int sForcedGrid = []() {
+		const char *e = std::getenv("FDS_SHADOW_TILE_GRID");
+		return (e && *e) ? std::max(1, std::min(8, std::atoi(e))) : 0;
+	}();
+	auto gridFor = [](int res) -> int {
+		if (sForcedGrid > 0) return sForcedGrid;
+		int g = res >> 7;              // 128→1, 256→2, 512→4, 1024→8…
+		if (g < 1) g = 1;
+		if (g > 4) g = 4;
+		return g;
+	};
 	const auto tRasterStart = clk::now();
 	// Vestigial for the bake (Phase-B tiles are pre-assigned); skip it when
 	// overlapping so the off-thread bake doesn't touch the shared counter.
@@ -485,6 +548,10 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		renderns::tileCounter = 0;
 	}
 	int tilesEnqueued = 0;
+	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
+	// the raster drain (see below). Filled by the same Phase-B filter.
+	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
+	std::vector<size_t> swzMaps;
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
 		ShadowMap& sm = g_shadowMaps[lightIdx];
 		Omni *const O = sm.omni;
@@ -516,19 +583,22 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		// branch is what actually makes the remainder strip render;
 		// without it, the last column / row of `sm.xres/yres` would stay
 		// at the pre-clear value.
-		const int rawTX = (sm.xres + numTilesX - 1) / numTilesX;
-		const int rawTY = (sm.yres + numTilesY - 1) / numTilesY;
+		const int numTX = gridFor(sm.xres);
+		const int numTY = gridFor(sm.yres);
+		const int rawTX = (sm.xres + numTX - 1) / numTX;
+		const int rawTY = (sm.yres + numTY - 1) / numTY;
 		const int tileSizeX = rawTX & ~7;
 		const int tileSizeY = rawTY & ~7;
+		if (sSwz) swzMaps.push_back(lightIdx);
 		ShadowMap *const                   smPtr     = &sm;
 		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
 		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
-		for (int ty = 0; ty < numTilesY; ++ty) {
+		for (int ty = 0; ty < numTY; ++ty) {
 			const float y1f = float(ty * tileSizeY);
-			const float y2f = float((ty == numTilesY - 1) ? sm.yres : ((ty + 1) * tileSizeY));
-			for (int tx = 0; tx < numTilesX; ++tx) {
+			const float y2f = float((ty == numTY - 1) ? sm.yres : ((ty + 1) * tileSizeY));
+			for (int tx = 0; tx < numTX; ++tx) {
 				const float x1f = float(tx * tileSizeX);
-				const float x2f = float((tx == numTilesX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
+				const float x2f = float((tx == numTX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
 				++tilesEnqueued;
 				const bool dynBakeForLambda = writeDynamicBuf;
 				ThreadPool::instance().enqueue(
@@ -751,7 +821,52 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	}
 	const auto tRasterEnd = clk::now();
 	if (sProfShadow) {
-		sRasterAcc += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
+		sRasterAcc[sProfMi] += std::chrono::duration<double, std::milli>(tRasterEnd - tRasterStart).count();
+	}
+
+	// [experiment: --shadow-swizzle] Re-tile the planes this bake just wrote,
+	// timed SEPARATELY from the bake (its own [SHADOW-BAKE] swizzle line) so
+	// the overhead is measurable against the PCF-read gain. Parallel over
+	// maps on the pool (memory-bound copies). Moving omnis (DynOmnis) never
+	// get a dynamic-plane bake, so also build their (all-zero) dynamic copies
+	// once — the cube tap only switches a map to the tiled path when all the
+	// planes it needs are tiled.
+	if (sSwz && !swzMaps.empty()) {
+		const auto tSwzStart = clk::now();
+		for (size_t li : swzMaps) {
+			ShadowMap *smp = &g_shadowMaps[li];
+			const bool dynPl = writeDynamicBuf;
+			ThreadPool::instance().enqueue([smp, dynPl]() {
+				ShadowMap_SwizzlePlanes(*smp, dynPl);
+				if (!dynPl && smp->depthDynSw.empty())
+					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
+				renderns::shadowDone.release();
+			});
+		}
+		for (size_t k = 0; k < swzMaps.size(); ++k) renderns::shadowDone.acquire();
+		const double swzMs = std::chrono::duration<double, std::milli>(clk::now() - tSwzStart).count();
+		if (mode == ShadowBakeMode::StaticOnce) {
+			std::fprintf(stderr, "[SHADOW-SWZ] init swizzle: %.2f ms (%zu maps)\n",
+			             swzMs, swzMaps.size());
+		} else if (sBakeTime) {
+			static thread_local double sSwzAcc[3] = {0.0, 0.0, 0.0};
+			static thread_local int    sSwzN[3]   = {0, 0, 0};
+			static const int sSwzInterval = []() {
+				const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
+				return (e && *e) ? std::max(1, std::atoi(e)) : 60;
+			}();
+			const int mi = int(mode);
+			sSwzAcc[mi] += swzMs;
+			if (++sSwzN[mi] % sSwzInterval == 0) {
+				std::fprintf(stderr,
+					"[SHADOW-BAKE] swizzle: %.2f ms/frame (avg of %d, %s, %zu maps)\n",
+					sSwzAcc[mi] / sSwzInterval, sSwzInterval,
+					mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
+					swzMaps.size());
+				std::fflush(stderr);
+				sSwzAcc[mi] = 0.0;
+			}
+		}
 	}
 
 	// --shadow_bake_time: accumulate this frame's full dynamic-bake wall time
@@ -783,7 +898,7 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 
 
 	if (sProfShadow) {
-		++sFrameIdx;
+		++sFrameIdx[sProfMi];
 		// Print interval — env override SHADOW_PROF_INTERVAL=N (default 60
 		// for live runs to keep stderr quiet; snapshot harness uses N=1
 		// since each invocation only renders a handful of frames).
@@ -791,22 +906,24 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 			const char *e = std::getenv("FDS_SHADOW_PROF_INTERVAL");
 			return (e && *e) ? std::max(1, std::atoi(e)) : 60;
 		}();
-		if (sFrameIdx % sInterval == 0) {
-			const double xformAvg  = sXformAcc  / sInterval;
-			const double rasterAvg = sRasterAcc / sInterval;
-			const double perLightX = sLightCount ? sXformAcc / sLightCount : 0.0;
-			const double perLightR = sLightCount ? sRasterAcc / sLightCount : 0.0;
+		if (sFrameIdx[sProfMi] % sInterval == 0) {
+			const double xformAvg  = sXformAcc[sProfMi]  / sInterval;
+			const double rasterAvg = sRasterAcc[sProfMi] / sInterval;
+			const double perLightX = sLightCount[sProfMi] ? sXformAcc[sProfMi] / sLightCount[sProfMi] : 0.0;
+			const double perLightR = sLightCount[sProfMi] ? sRasterAcc[sProfMi] / sLightCount[sProfMi] : 0.0;
 			std::fprintf(stderr,
-				"[SHADOW-PROF] last %d frame(s): total/frame: xform=%.2fms raster=%.2fms "
+				"[SHADOW-PROF] last %d frame(s): %s: xform=%.2fms raster=%.2fms "
 				"sum=%.2fms  per-light: xform=%.2fms raster=%.2fms  "
 				"(N=%d lights/frame)\n",
-				sInterval, xformAvg, rasterAvg, xformAvg + rasterAvg,
+				sInterval,
+				mode == ShadowBakeMode::DynamicMeshesPerFrame ? "DynMeshes" : "DynOmnis",
+				xformAvg, rasterAvg, xformAvg + rasterAvg,
 				perLightX, perLightR,
-				int(sLightCount / sInterval));
+				int(sLightCount[sProfMi] / sInterval));
 			std::fflush(stderr);
-			sXformAcc = 0.0;
-			sRasterAcc = 0.0;
-			sLightCount = 0;
+			sXformAcc[sProfMi] = 0.0;
+			sRasterAcc[sProfMi] = 0.0;
+			sLightCount[sProfMi] = 0;
 		}
 	}
 
