@@ -94,6 +94,19 @@ void buildKernel(int n) {
 // per-pixel noise (the old interleaved-gradient angle) never repeats, so no
 // finite blur fully resolves it — that residual was the floor banding.
 float g_rotCos[16], g_rotSin[16];
+// Temporal (--ssao_temporal): per-frame offset into the 16-entry rotation
+// table so successive frames sample different directions and the history
+// blend converges toward the full-quality field. 0 when temporal is off —
+// the static image stays bit-stable for gates.
+int g_ssaoRotPhase = 0;
+// Ping-pong low-res history (blended AO + its view-z) and the camera the
+// history was rendered from. Written serially between the tile waves.
+static std::vector<float> g_aoHistBuf[2], g_aoHistZBuf[2];
+static int    g_histIdx   = 0;
+static bool   g_histValid = false;
+static int    g_histW = 0, g_histH = 0;
+static Matrix g_histMat;
+static Vector g_histPos;
 void buildRot() {
 	static bool done = false;
 	if (done) return;                 // main-thread only (called before dispatch)
@@ -145,8 +158,15 @@ void Render_SSAO() {
 
 	// Tunables (cached FeatureFlags reads — hot-loop safe).
 	int nSamp = fds::FeatureFlags::ssao_samples(); nSamp = std::max(1, std::min(64, nSamp));
+	if (fds::FeatureFlags::ssao_temporal()) nSamp = std::max(1, nSamp >> 1);
 	int blurR = fds::FeatureFlags::ssao_blur();    blurR = std::max(0, std::min(8, blurR));
 	int down  = fds::FeatureFlags::ssao_downscale(); down = std::max(1, std::min(4, down));
+	// Temporal accumulation: halve the per-frame sampling (the history blend
+	// funds the quality back) and advance the rotation phase (7 is coprime
+	// with 16 so all 16 tilings cycle).
+	const bool temporal = fds::FeatureFlags::ssao_temporal();
+	static uint32_t sTemporalFrame = 0;
+	g_ssaoRotPhase = temporal ? int(((++sTemporalFrame) * 7u) & 15u) : 0;
 	const float radius   = fds::FeatureFlags::ssao_radius();
 	const float strength = fds::FeatureFlags::ssao_strength();
 	const float bias     = fds::FeatureFlags::ssao_bias();
@@ -205,6 +225,7 @@ void Render_SSAO() {
 		// Scalar (opt-in); low-res grid keeps it cheap. SECTOR_COUNT = 32.
 		int slices = fds::FeatureFlags::ssao_gtao_slices(); slices = std::max(1, std::min(8, slices));
 		int steps  = fds::FeatureFlags::ssao_gtao_steps();  steps  = std::max(1, std::min(16, steps));
+		if (temporal) steps = std::max(1, steps >> 1);
 		const float thickness = fds::FeatureFlags::ssao_gtao_thickness();
 		const float r2max = radius * radius;
 		const float kPI = 3.14159265f, kHalfPI = 1.57079633f;
@@ -235,7 +256,7 @@ void Render_SSAO() {
 						const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;
 						float srad = radius * fovX / z;
 						if (srad < 2.0f) srad = 2.0f; else if (srad > 256.0f) srad = 256.0f;
-						const int ri = (ly & 3) * 4 + (lx & 3);
+						const int ri = ((ly & 3) * 4 + (lx & 3) + g_ssaoRotPhase) & 15;
 						const float jit = g_rotCos[ri] * 0.5f + 0.5f;
 						float vis = 0.0f;
 						for (int s = 0; s < slices; ++s) {
@@ -319,7 +340,7 @@ void Render_SSAO() {
 							if (Nx*Px+Ny*Py+Nz*Pz>0.0f){Nx=-Nx;Ny=-Ny;Nz=-Nz;}
 							const float vinv=fast_rsqrt(Px*Px+Py*Py+Pz*Pz+1e-12f);
 							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>256.0f)sr=256.0f;
-							const int ri=(ly&3)*4+(cx_&3);
+							const int ri=((ly&3)*4+(cx_&3)+g_ssaoRotPhase)&15;
 							aPx[k]=Px;aPy[k]=Py;aPz[k]=Pz; aVx[k]=-Px*vinv;aVy[k]=-Py*vinv;aVz[k]=-Pz*vinv;
 							aNx[k]=Nx;aNy[k]=Ny;aNz[k]=Nz; aSr[k]=sr; aJit[k]=g_rotCos[ri]*0.5f+0.5f;
 							valid[k]=true;
@@ -495,7 +516,7 @@ void Render_SSAO() {
 								Setup S{};
 								const int cellX = lx + k;
 								const int px = std::min(cellX * down + half, W - 1);
-								const int ri = (ly & 3) * 4 + (cellX & 3);   // 4×4 tiling rotation
+								const int ri = ((ly & 3) * 4 + (cellX & 3) + g_ssaoRotPhase) & 15;   // 4×4 tiling rotation
 								valid[k] = setup(px, py, g_rotCos[ri], g_rotSin[ri], rowLo + size_t(cellX), S);
 								aX[k]=S.x; aY[k]=S.y; aZ[k]=S.z;
 								aTx[k]=S.Tx; aTy[k]=S.Ty; aTz[k]=S.Tz;
@@ -557,7 +578,7 @@ void Render_SSAO() {
 						for (; lx < lx2; ++lx) {
 							const size_t lo = rowLo + size_t(lx);
 							const int px = std::min(lx * down + half, W - 1);
-							const int ri = (ly & 3) * 4 + (lx & 3);   // 4×4 tiling rotation
+							const int ri = ((ly & 3) * 4 + (lx & 3) + g_ssaoRotPhase) & 15;   // 4×4 tiling rotation
 							Setup S{};
 							if (!setup(px, py, g_rotCos[ri], g_rotSin[ri], lo, S)) continue;
 							float occ = 0.0f;
@@ -642,6 +663,114 @@ void Render_SSAO() {
 	}
 	const auto tP2 = std::chrono::steady_clock::now();
 
+	// ── Pass 2.5: temporal accumulation (--ssao_temporal) ───────────────
+	// Reproject each low-res cell's view point through the camera delta into
+	// last frame's blended history, depth-reject against the history's own
+	// view-z, and blend. The blended field becomes both this frame's aoSrc
+	// and the next frame's history. Off: bit-identical to the non-temporal
+	// pipeline (phase pinned to 0, sampling un-halved).
+	if (temporal) {
+		if (g_histW != lowW || g_histH != lowH) {
+			g_histValid = false; g_histW = lowW; g_histH = lowH;
+		}
+		const int wrIdx = g_histIdx ^ 1;
+		auto &rdBuf = g_aoHistBuf[g_histIdx]; auto &rdZ = g_aoHistZBuf[g_histIdx];
+		auto &wrBuf = g_aoHistBuf[wrIdx];     auto &wrZ = g_aoHistZBuf[wrIdx];
+		if (wrBuf.size() < lowN) { wrBuf.resize(lowN); wrZ.resize(lowN); }
+		const bool histOk = g_histValid && rdBuf.size() >= lowN && View != nullptr;
+		const float *histRd  = histOk ? rdBuf.data() : nullptr;
+		const float *histZRd = histOk ? rdZ.data()   : nullptr;
+		float *histWr = wrBuf.data(); float *histZWr = wrZ.data();
+		float blendW = fds::FeatureFlags::ssao_temporal_blend();
+		if (blendW < 0.0f) blendW = 0.0f;
+		if (blendW > 0.98f) blendW = 0.98f;
+		// Current camera: world = Mat^T · viewPos + ISource. History camera:
+		// viewPos' = histMat · (world − histPos). Matrix is a C array — copy
+		// the elements into a struct the tile lambdas capture by value.
+		struct Cam9 { float c[9]; float pm[9]; };
+		Cam9 cams = {};
+		Vector camPos{0,0,0}, prevPos = g_histPos;
+		if (View) {
+			for (int r = 0; r < 3; ++r) for (int q = 0; q < 3; ++q) {
+				cams.c[r*3+q]  = View->Mat[r][q];
+				cams.pm[r*3+q] = g_histMat[r][q];
+			}
+			camPos = View->ISource;
+		}
+		const float invDownT = 1.0f / float(down);
+		const float depthSigT = std::max(radius, 1.0f);
+		const float invDepthKT = 1.0f / (4.0f * depthSigT * depthSigT);
+		const float *aoIn = aoSrc;
+		const int tsx = (lowW + numTilesX - 1) / numTilesX;
+		const int tsy = (lowH + numTilesY - 1) / numTilesY;
+		for (int tj = 0; tj < numTilesY; ++tj) {
+			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
+			for (int ti = 0; ti < numTilesX; ++ti) {
+				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+				ThreadPool::instance().enqueue([=]() {
+					for (int ly = ly1; ly < ly2; ++ly) {
+						for (int lx = lx1; lx < lx2; ++lx) {
+							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
+							const float aoNew = aoIn[lo];
+							const float z = aoZ[lo];
+							float outAo = aoNew;
+							if (histRd && z > 0.0f) {
+								const int px = std::min(lx * down + half, W - 1);
+								const int py = std::min(ly * down + half, H - 1);
+								const float Px = (float(px) - cx) * z * invFOVX;
+								const float Py = (cy - float(py)) * z * invFOVY;
+								const float Wx = cams.c[0]*Px + cams.c[3]*Py + cams.c[6]*z + camPos.x;
+								const float Wy = cams.c[1]*Px + cams.c[4]*Py + cams.c[7]*z + camPos.y;
+								const float Wz = cams.c[2]*Px + cams.c[5]*Py + cams.c[8]*z + camPos.z;
+								const float dx = Wx - prevPos.x, dy = Wy - prevPos.y, dz = Wz - prevPos.z;
+								const float P2x = cams.pm[0]*dx + cams.pm[1]*dy + cams.pm[2]*dz;
+								const float P2y = cams.pm[3]*dx + cams.pm[4]*dy + cams.pm[5]*dz;
+								const float P2z = cams.pm[6]*dx + cams.pm[7]*dy + cams.pm[8]*dz;
+								if (P2z > 0.5f) {
+									const float spx = cx + P2x * fovX / P2z;
+									const float spy = cy - P2y * fovY / P2z;
+									const float gx = (spx - float(half)) * invDownT;
+									const float gy = (spy - float(half)) * invDownT;
+									int x0 = (int)floorf(gx), y0 = (int)floorf(gy);
+									const float fxs = gx - float(x0), fys = gy - float(y0);
+									const int x1c = x0 + 1, y1c = y0 + 1;
+									if (x0 >= 0 && y0 >= 0 && x1c < lowW && y1c < lowH) {
+										const size_t o00 = size_t(y0 )*lowW + x0, o10 = size_t(y0 )*lowW + x1c;
+										const size_t o01 = size_t(y1c)*lowW + x0, o11 = size_t(y1c)*lowW + x1c;
+										const float bw00 = (1-fxs)*(1-fys), bw10 = fxs*(1-fys);
+										const float bw01 = (1-fxs)*fys,     bw11 = fxs*fys;
+										float sum = 0.0f, wsum = 0.0f;
+#define SSAO_TTAP(O, BW) { const float zt = histZRd[O]; \
+	if (zt >= 0.0f) { const float dzr = P2z - zt; \
+		const float wd = 1.0f - dzr*dzr*invDepthKT; \
+		if (wd > 0.0f) { const float w = (BW)*wd; \
+			sum += histRd[O]*w; wsum += w; } } }
+										SSAO_TTAP(o00, bw00) SSAO_TTAP(o10, bw10)
+										SSAO_TTAP(o01, bw01) SSAO_TTAP(o11, bw11)
+#undef SSAO_TTAP
+										if (wsum > 1e-4f)
+											outAo = (sum / wsum) * blendW + aoNew * (1.0f - blendW);
+									}
+								}
+							}
+							histWr[lo] = outAo;
+							histZWr[lo] = z;
+						}
+					}
+					renderns::tileDone.release();
+				});
+			}
+		}
+		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+		g_histIdx = wrIdx;
+		g_histValid = true;
+		if (View) {
+			for (int r = 0; r < 3; ++r) for (int q = 0; q < 3; ++q) g_histMat[r][q] = View->Mat[r][q];
+			g_histPos = View->ISource;
+		}
+		aoSrc = histWr;
+	}
+
 	// ── Pass 3: apply (full-res). down==1: direct. down>1: cheap 4-tap
 	//    depth-aware bilinear upsample (the low-res denoise already did the
 	//    edge-aware work, so the upsample stays light — 4 taps, no decode). ──
@@ -716,7 +845,8 @@ void Render_SSAO() {
 	g_ssaoLastMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
 	static int frame = 0;
-	if (((frame++) % 120) == 0) {
+	static const bool sEveryFrame = getenv("FDS_SSAO_EVERY") != nullptr;
+	if (sEveryFrame || ((frame++) % 120) == 0) {
 		fprintf(stderr, "[ssao] %dx%d /%d (%dx%d), %s, %s: %.2f ms\n",
 		        W, H, down, lowW, lowH,
 		        gtao ? "GTAO+bitmask" : "hemisphere",
