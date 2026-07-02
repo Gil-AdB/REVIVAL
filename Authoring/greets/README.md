@@ -52,3 +52,20 @@ unfixed low-poly source is `Original/Scenes/CITY/INPYR/PIRAMID-orig.LWO`
 (read-only reference). The high-poly improved mesh is
 `Original/Scenes/CITY/INPYR/PIRAMID.lwo` (1.28 MB) — kept for reference but not
 needed now that deferred per-pixel lighting removes the need for high-poly-for-Gouraud.
+
+## Editor write-back
+
+The browser surface editor (`DEMO.html?editor`, served by
+`tools/editor_server.py`) persists material edits **into these .lwo files**:
+"Save to LWO" POSTs the changed surface values; the server patches the SURF
+chunks (`tools/lwopatch.py` — updates or inserts DIFF/VDIF, SPEC/VSPC, GLOS,
+LUMI/VLUM, TRAN/VTRN, REFL/VRFL, COLR), copies the previous file into
+`.backups/<name>.<timestamp>.lwo` (gitignored), reruns `lwsread`, and installs
+the new `GREETS.FLD` into `Runtime/SCENES/`. "Reload scene" re-boots the page;
+the editor fetches the live FLD at boot, so saved values show immediately —
+native runs pick them up at next launch.
+
+Specular/glossiness for `rooms` (marble wall: 0.1/64) and the shiny set
+(`stairs`/`amudim`/`floor`/`hull`/`hull not smooth`: 0.4/48) are authored here
+in the LWOs — they used to be code-side bumps in `DEMO/GREETS.CPP`, baked into
+the sources when write-back shipped so saved edits can't be stomped at load.

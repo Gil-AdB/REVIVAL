@@ -1346,15 +1346,13 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
-	// Bump Specular on materials that should plausibly have shiny
-	// surfaces — marble stairs, marble pillars, stone floor, the mecha
-	// hull/cockpit. Most FLD materials author Specular=0; deferred-path
-	// Phong needs a non-zero value to draw a highlight, and Glossiness
-	// defaults to 32 in Render_DeferredLighting when the FLD didn't set
-	// one. Per-name match keeps the change targeted to surfaces where a
-	// highlight is sensible. Greets sets Specular_Factor=0 in tick init,
-	// which gates the deferred Phong term off — to enable highlights here
-	// the per-scene tone bump that follows raises Specular_Factor too.
+	// Specular/Glossiness are AUTHORED IN THE LWO SOURCES now (Authoring/
+	// greets — stairs/amudim/floor/hull/cockpit at spec 0.4 gloss 48, the
+	// marble 'rooms' wall at spec 0.1 gloss 64; see tools/lwopatch.py). The
+	// old code-side bumps that lived here were baked into the .lwo files and
+	// deleted, so the browser editor's LWO write-back is authoritative — a
+	// saved specular no longer gets stomped at the next scene load. The name
+	// lists remain only to pick which surfaces get a Sobel-baked normal map.
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != GreetSc || !M->Name) continue;
 		const char *n = M->Name;
@@ -1364,32 +1362,10 @@ void Initialize_Greets()
 		                     strstr(n, "cockpit");
 		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
 		// big brick wall texture in the back of the greets scene) and
-		// 'siling' (the ceiling that uses the same brick atlas). Not
-		// "shiny" — we don't bump Specular here — but they show enough
-		// surface detail in the diffuse to benefit from a Sobel-baked
+		// 'siling' (the ceiling that uses the same brick atlas). They show
+		// enough surface detail in the diffuse to benefit from a Sobel-baked
 		// tangent-space map.
 		const bool isWall = !strcmp(n, "rooms") || !strcmp(n, "siling");
-		if (isShiny) {
-			if (M->Specular < 0.4f) M->Specular = 0.4f;
-			if (M->Glossiness == 0) M->Glossiness = 48;
-		}
-		// The 'rooms' wall is now polished white marble — give it a specular
-		// sheen. Marble's "reflectivity" reads mostly as this highlight, not a
-		// planar room reflection. Gloss 64 (a broad, lower-peak lobe) rather
-		// than 128 (a tiny hot glint) so the highlight doesn't blow out when
-		// it's written unclamped into g_hdrBuf and bloomed under HDR. Low
-		// intensity (0.1) — the wall is NOT a Mat_HdrReflection surface, so
-		// hdr_refl_gain doesn't apply; the specular value is the lever, and 0.6
-		// (gloss128) / 0.25 (gloss64) both bloomed too hot. Runs in the default
-		// path (the stone-tex swap is off by default).
-		if (!strcmp(n, "rooms")) {
-			unsigned short oldG = M->Glossiness;
-			float          oldS = M->Specular;
-			M->Glossiness = 64;
-			M->Specular   = 0.1f;
-			std::fprintf(stderr, "[GREETS] marble gloss 'rooms' glossiness %u->%u specular %.3f->%.3f\n",
-			             oldG, M->Glossiness, oldS, M->Specular);
-		}
 		// Tangent-space normal maps work on any face orientation —
 		// the perturbation lives in the surface's own tangent plane
 		// and the lighting kernel multiplies by per-pixel TBN to bring
