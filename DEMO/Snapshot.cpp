@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <set>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -461,6 +462,22 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                 dumped = true;
                 std::fprintf(stderr, "[SURFACES] %s\n",
                              rev::Editor_GetSurfacesJSON().c_str());
+                std::fprintf(stderr, "[OBJECTS] %s\n",
+                             rev::Editor_GetObjectsJSON().c_str());
+                // DUMP_MESHES=1: one line per mesh — its distinct surface set.
+                // Ground truth for the editor's object-grouping heuristics.
+                if (std::getenv("DUMP_MESHES")) {
+                    int mi = 0;
+                    for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next, ++mi) {
+                        std::set<std::string> names;
+                        for (DWord f = 0; f < T->FIndex; ++f)
+                            if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
+                                names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+                        std::string line;
+                        for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
+                        std::fprintf(stderr, "[MESH %3d] %u faces: %s\n", mi, (unsigned)T->FIndex, line.c_str());
+                    }
+                }
             }
         }
         // EDIT_TEST: does a surface edit persist across a render tick? (snap-back
