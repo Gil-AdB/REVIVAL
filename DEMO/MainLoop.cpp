@@ -747,6 +747,16 @@ void editorOrbit(float dxPixels, float dyPixels)
 	if (g_camPitch < -1.45f) g_camPitch = -1.45f;
 	rev::Editor_MarkDirty();
 }
+// Scene-time scrub: step the frozen animation clock (objects/splines evaluate
+// at Timer = g_editorFreezeTimer each tick). Fwd/back through the scene's
+// animation without unfreezing it. Returns the new time for the UI readout.
+float editorTimeStep(float delta)
+{
+	g_editorFreezeTimer += (int)delta;
+	if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0;
+	rev::Editor_MarkDirty();
+	return (float)g_editorFreezeTimer;
+}
 // Raw wheel deltaY → proportional, smooth zoom (trackpad fires many small
 // events; a fixed per-event ratio made it lurch). exp() keeps it multiplicative.
 void editorZoom(float wheelDeltaY)
@@ -812,6 +822,7 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorZoom",          &editorZoom);
 	emscripten::function("editorPan",           &editorPan);
 	emscripten::function("editorFocusSurface",  &editorFocusSurface);
+	emscripten::function("editorTimeStep",      &editorTimeStep);
 }
 
 #endif // __EMSCRIPTEN__

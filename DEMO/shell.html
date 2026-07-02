@@ -532,7 +532,7 @@
 
     <!-- ───────── LWO surface editor panel (shown only with ?editor) ───────── -->
     <style>
-      #editor-panel { position:fixed; top:0; right:0; width:300px; max-height:100vh;
+      #editor-panel { position:fixed; top:0; right:0; width:340px; max-height:100vh;
         overflow-y:auto; background:rgba(18,18,22,0.92); color:#ddd; box-sizing:border-box;
         font:12px/1.4 system-ui,sans-serif; z-index:10000; padding:8px; border-left:1px solid #333; }
       #editor-panel.hidden { display:none; }
@@ -546,20 +546,27 @@
       .surf-tex { color:#888; font-size:10px; }
       #editor-props { border-top:1px solid #333; margin-top:6px; padding-top:6px; }
       .prop-row { display:flex; align-items:center; gap:6px; margin:3px 0; }
-      .prop-row label { flex:0 0 80px; }
-      .prop-row input[type=range], .prop-row select { flex:1; min-width:0; }
+      .prop-row label { flex:0 0 64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .prop-row input[type=range], .prop-row select { flex:1 1 auto; min-width:90px; }
+      .prop-row input[type=number] { flex:0 0 46px; }
       .prop-row .val { flex:0 0 36px; text-align:right; color:#9cf; }
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b23</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b24</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
       <div id="editor-lights-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;">Lights <span id="editor-lights-count" style="color:#6c8;font-size:10px;"></span></div>
       <div id="editor-lights" style="display:none;"></div>
       <div id="editor-light-props"></div>
-      <div id="editor-actions" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;">
+      <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
+        <span style="flex:0 0 64px;">scene time</span>
+        <button id="editor-time-back" title="step back ([ key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">◀</button>
+        <span id="editor-time-val" style="flex:1;text-align:center;color:#9cf;">600</span>
+        <button id="editor-time-fwd" title="step forward (] key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">▶</button>
+      </div>
+      <div id="editor-actions" style="margin-top:6px;display:flex;gap:6px;">
         <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
         <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
       </div>
@@ -577,17 +584,27 @@
       // runtime loads (the emscripten SCRIPT tag is below), so it runs first: when focus is
       // in a form field, stop the event from ever reaching SDL and let the
       // browser's default text editing happen.
+      function editorTextEntryFocused(){
+        var el = document.activeElement;
+        if (!el) return false;
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+        if (el.tagName !== 'INPUT') return false;
+        // Only TEXT-ENTRY inputs capture the keyboard — range sliders, file
+        // pickers and buttons don't (so WASD fly keys keep reaching SDL even
+        // if the last click was on a slider).
+        var t = (el.type || 'text').toLowerCase();
+        return t === 'text' || t === 'number' || t === 'search' || t === 'email' || t === 'url';
+      }
       if (revEditorMode) ['keydown','keyup','keypress'].forEach(function(t){
         window.addEventListener(t, function(e){
-          var el = document.activeElement;
-          if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA'))
+          if (editorTextEntryFocused())
             e.stopImmediatePropagation();   // no preventDefault — typing IS the default
         }, true);
       });
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b23); orbit/zoom embind =',
+        console.log('[editor] panel init (build b24); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         document.getElementById('editor-scene-name').textContent = revEditorScene;
@@ -731,7 +748,7 @@
           r.min = rg[0]; r.max = rg[1]; r.step = rg[2]; r.value = l[k];
           var val = document.createElement('input'); val.type = 'number'; val.step = rg[2];
           val.value = +(+l[k]).toFixed(3);
-          val.style.cssText = 'flex:0 0 52px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
           r.oninput = function(){
             var v = parseFloat(r.value); val.value = +v.toFixed(3);
             setLightProp(l, k, v); renderLightList();
@@ -829,6 +846,20 @@
           .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
       };
       document.getElementById('editor-reload').onclick = function(){ location.reload(); };
+      // Scene-time scrub: the editor freezes the animation clock; step it to
+      // scrub the scene's animation (robot walk, camera-independent tracks).
+      function timeStep(d){
+        if (!Module.editorTimeStep) return;
+        var t = Module.editorTimeStep(d);
+        document.getElementById('editor-time-val').textContent = t;
+      }
+      document.getElementById('editor-time-back').onclick = function(e){ timeStep(e.shiftKey ? -500 : -50); };
+      document.getElementById('editor-time-fwd').onclick  = function(e){ timeStep(e.shiftKey ?  500 :  50); };
+      window.addEventListener('keydown', function(e){
+        if (editorTextEntryFocused()) return;
+        if (e.key === '[') timeStep(e.shiftKey ? -500 : -50);
+        else if (e.key === ']') timeStep(e.shiftKey ? 500 : 50);
+      });
       // Backups (greets authoring files only): every Save/restore stashes the
       // previous .lwo/.LWS under Authoring/greets/.backups; restoring copies
       // one back over its file (backing up the current state first) and regens
@@ -878,7 +909,7 @@
         var lab = document.createElement('label'); lab.textContent = key; row.appendChild(lab);
         var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = s[key];
         var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+s[key]).toFixed(3);
-        val.style.cssText = 'flex:0 0 52px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+        val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
         r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); setProp(s.name, key, v); };
         val.onchange = function(){
           var v = parseFloat(val.value); if (isNaN(v)) return;
@@ -905,7 +936,15 @@
         h.appendChild(rst); el.appendChild(h);
         ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
-          el.appendChild(propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200));
+          var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
+          if (k === 'reflection') {
+            // Honest label: the engine has no per-material reflection path
+            // (env-mapped faces are code-routed) — the value persists to the
+            // LWO/sidecar for authoring but doesn't render.
+            row.querySelector('label').textContent = 'reflection*';
+            row.title = 'reflection: saved to LWO/sidecar but NOT consumed by the renderer (env-mapped faces are code-driven)';
+          }
+          el.appendChild(row);
         });
         // glossiness = specular exponent; keep to the kernel's fast specialized set.
         var gr = document.createElement('div'); gr.className = 'prop-row';
@@ -961,14 +1000,21 @@
           });
           var roles = Object.keys(slots);
           if (!roles.length) { editorStatus('pack: no recognizable maps in folder'); return; }
+          // Albedo first: it defines the material's texel layout; the engine
+          // resamples the other maps to it (and drops stale mismatched ones).
+          roles.sort(function(a,b){ return (a==='albedo'?0:1) - (b==='albedo'?0:1); });
           editorStatus('pack: importing ' + roles.join(', ') + '…');
           var doneCount = 0, okCount = 0;
+          var chain = Promise.resolve();
           roles.forEach(function(role){
-            importFile(role, slots[role], function(ok){
-              if (ok) okCount++;
-              if (++doneCount === roles.length)
-                editorStatus('pack: ' + okCount + '/' + roles.length + ' maps applied (' + roles.join(', ') + ')');
-            });
+            chain = chain.then(function(){ return new Promise(function(res){
+              importFile(role, slots[role], function(ok){
+                if (ok) okCount++;
+                if (++doneCount === roles.length)
+                  editorStatus('pack: ' + okCount + '/' + roles.length + ' maps applied (' + roles.join(', ') + ')');
+                res();
+              });
+            }); });
           });
         };
         pr.appendChild(pinp); imp.appendChild(pr);
@@ -999,6 +1045,9 @@
         // left-CLICK (no drag) = pick the surface under the cursor.
         var mode = null, lastX = 0, lastY = 0, downX = 0, downY = 0, dragged = false;
         canvasEl.addEventListener('mousedown', function(e){
+          // Hand the keyboard back to the engine: a focused panel control
+          // (slider / number box) would otherwise swallow the fly keys.
+          if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
           mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
           lastX = downX = e.clientX; lastY = downY = e.clientY; dragged = false;
           e.preventDefault();
