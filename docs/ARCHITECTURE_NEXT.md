@@ -229,3 +229,20 @@ Standing doors: half-res DoF, temporal SSAO, frame pipelining, x86 measurements.
    visibly exercised, or don't reorder.
 
 Final full-config: 44.5-45.5 ms min (pre-campaign f32 baseline 50.7-51.4).
+
+## 2026-07-02 — third HDR regression: C-fill blowout on high-contrast textures
+
+User report: mech cockpit LED panel "way too bright". Bisected headless (same
+FDS_GREETS_CAM pose across commits, panel-crop mean) to 1f8315e (C step 2, HDR).
+The divide-out model R_i = R_n·(texel_i/texel_n)^exp explodes when the
+neighbour's texel is near-black: max(texel,1) floors the denominator at 1, so
+an LED dot (255) over the panel's black background computes ratio 255 —
+squared to ×65025 under hdr_linear — amplifying the black texel's residual
+spec/ambient radiance. Panel crop: full-rate truth 30.2, C-fill 52.1 (+ cyan
+smear). Fix: trust region — a neighbour with any channel ratio > 4 is excluded
+from the sharp reconstruction (falls back to the plain radiance average, the
+pre-C behaviour). Floor-detail win intact: |quarter−full| 3.09 → 0.31 on the
+same frame. The commit's own "byte-identical to full" gate passed because the
+verification frame (stone floor) has locally smooth texture ratios — same
+lesson as #2 above: gate frames must exercise the failure mode (here, a
+high-contrast texture), not just the success mode.

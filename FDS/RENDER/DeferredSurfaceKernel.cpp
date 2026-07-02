@@ -3073,14 +3073,28 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr;
-						if (fetchTexel(nidx[k], nb, ng, nr)) {
+						// Trust region: the divide-out model (R ∝ texel^exp × smooth
+						// lighting) only holds where the neighbour's texel is bright
+						// enough to be a reliable lighting probe. When own ≫ neighbour
+						// (an LED dot over its panel's black background: 255/1, then
+						// squared to ×65025 under hdr_linear) the division amplifies
+						// whatever non-texture-modulated radiance (spec, ambient floor)
+						// the dark texel carries and blows the pixel out far past the
+						// full-rate result. Such a neighbour can't contribute to the
+						// sharp reconstruction; it still counts in the plain radiance
+						// average, which handles the pixel when no neighbour qualifies.
+						float nrB, nrG, nrR;
+						if (fetchTexel(nidx[k], nb, ng, nr) &&
+						    (nrB = ownB / std::max(nb, 1.0f)) <= 4.0f &&
+						    (nrG = ownG / std::max(ng, 1.0f)) <= 4.0f &&
+						    (nrR = ownR / std::max(nr, 1.0f)) <= 4.0f) {
 							slB += float(p & 0xFF)        * 256.0f / std::max(nb, 1.0f);
 							slG += float((p >> 8) & 0xFF)  * 256.0f / std::max(ng, 1.0f);
 							slR += float((p >> 16) & 0xFF) * 256.0f / std::max(nr, 1.0f);
 							if (nh) {
 								// radiance ∝ texel^exp (2 = hdr_linear albedo², 1 = gamma);
 								// re-apply own texel: R_i = R_n·(texel_i/texel_n)^exp.
-								float rB=ownB/std::max(nb,1.0f), rG=ownG/std::max(ng,1.0f), rR=ownR/std::max(nr,1.0f);
+								float rB=nrB, rG=nrG, rR=nrR;
 								if (hdrLinear) { rB*=rB; rG*=rG; rR*=rR; }
 								ahB += nh[0]*rB; ahG += nh[1]*rG; ahR += nh[2]*rR;
 							}
