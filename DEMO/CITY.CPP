@@ -2567,7 +2567,7 @@ struct CityScene : SceneDriver {
 
 			Radix_Sort(FList, SList, CAll);
 
-			prof.switchTo(PROF_RNDR);
+			prof.switchTo(PROF_BAKE);
 
 			// Per-frame shadow-map depth pre-pass for Omni_CastsShadow
 			// lights (currently the test streetlights when
@@ -2580,6 +2580,7 @@ struct CityScene : SceneDriver {
 			if (fds::FeatureFlags::shadow_dynamic()) {
 				Render_DeferredShadowMaps(CitySc, ShadowBakeMode::DynamicMeshesPerFrame);
 			}
+		prof.switchTo(PROF_RNDR);
 			// skipVolumetric=true — the pass-1 output is consumed by the
 			// dispMap distortion below, so volumetric work (cones/halos)
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).

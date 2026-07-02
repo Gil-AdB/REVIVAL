@@ -2926,7 +2926,7 @@ struct GreetsScene : SceneDriver {
 		Radix_Sort(FList, SList, CAll);
 
 		// PROFILER: RNDR phase.
-		prof.switchTo(PROF_RNDR);
+		prof.switchTo(PROF_BAKE);
 
 		// Per-frame shadow-map depth pre-pass (Omni_CastsShadow lights).
 		// MUST run before gg->Render(): Render() invokes the deferred
@@ -2944,6 +2944,7 @@ struct GreetsScene : SceneDriver {
 		// gg->Render() below, and renderFrame joins before deferred lighting;
 		// otherwise they run synchronously inline here (current behavior).
 		ShadowBake_DispatchGreets(GreetSc);
+		prof.switchTo(PROF_RNDR);
 		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics
 		zPass = zReject = 0;

@@ -112,7 +112,7 @@ private:
     float  emaMPxPerSec_     = 0.0f;
 
     static constexpr const char* kNames[PROF_NUM] = {
-        "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "RNDR", "FLIP"
+        "ZCLR", "SKY", "ANIM", "XFRM", "LGHT", "SORT", "BAKE", "RNDR", "FLIP"
     };
 };
 
