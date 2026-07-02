@@ -24,7 +24,7 @@ mkdir -p "$OUT"
 cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 
 # Baselines — committed state. Update with --update after an INTENTED change.
-BASE_MIRROR="bd664b1067b6610b486d1c81b305ebf6"
+BASE_MIRROR="b5e307499d9f0fa0375fac0caaecfbe7"
 BASE_CONE="8a82e21d53b0d050bbc1220b4fe137f0"
 BASE_HALO="a916347df504ab12a3add321747c2f08"
 
