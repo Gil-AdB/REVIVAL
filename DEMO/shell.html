@@ -552,7 +552,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b22</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b23</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-list"></div>
       <div id="editor-props"></div>
@@ -563,6 +563,8 @@
         <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
         <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
       </div>
+      <div id="editor-backups-hdr" style="margin-top:6px;color:#c96;font-size:10px;cursor:pointer;display:none;">Backups…</div>
+      <div id="editor-backups" style="display:none;"></div>
       <div id="editor-status"></div>
     </div>
     <script>
@@ -585,7 +587,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b22); orbit/zoom embind =',
+        console.log('[editor] panel init (build b23); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         document.getElementById('editor-scene-name').textContent = revEditorScene;
@@ -705,19 +707,38 @@
                                   intensity:[0,4,0.01], range:[0,100,0.5] };
       function renderLightProps(l){
         var el = document.getElementById('editor-light-props'); el.innerHTML = '';
-        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;';
-        h.textContent = 'Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : '');
-        el.appendChild(h);
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;display:flex;justify-content:space-between;';
+        var hn = document.createElement('span');
+        hn.textContent = 'Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : '');
+        h.appendChild(hn);
+        var rst = document.createElement('a');
+        rst.textContent = 'reset'; rst.href = '#';
+        rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          var p = editorLightsPristine[l.i]; if (!p) return;
+          EDITOR_LIGHT_PROPS.forEach(function(k){
+            if (Math.abs((+l[k]) - (+p[k])) > 1e-9) setLightProp(l, k, +p[k]);
+          });
+          renderLightList(); renderLightProps(l); updateSaveButton();
+        };
+        h.appendChild(rst); el.appendChild(h);
         EDITOR_LIGHT_PROPS.forEach(function(k){
           var rg = EDITOR_LIGHT_RANGES[k];
           var row = document.createElement('div'); row.className = 'prop-row';
           var lab = document.createElement('label'); lab.textContent = k; row.appendChild(lab);
           var r = document.createElement('input'); r.type = 'range';
           r.min = rg[0]; r.max = rg[1]; r.step = rg[2]; r.value = l[k];
-          var val = document.createElement('span'); val.className = 'val'; val.textContent = (+l[k]).toFixed(k==='intensity'?2:0);
+          var val = document.createElement('input'); val.type = 'number'; val.step = rg[2];
+          val.value = +(+l[k]).toFixed(3);
+          val.style.cssText = 'flex:0 0 52px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
           r.oninput = function(){
-            var v = parseFloat(r.value); val.textContent = v.toFixed(k==='intensity'?2:0);
+            var v = parseFloat(r.value); val.value = +v.toFixed(3);
             setLightProp(l, k, v); renderLightList();
+          };
+          val.onchange = function(){
+            var v = parseFloat(val.value); if (isNaN(v)) return;
+            r.value = v; setLightProp(l, k, v); renderLightList();
           };
           row.appendChild(r); row.appendChild(val); el.appendChild(row);
         });
@@ -808,21 +829,80 @@
           .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
       };
       document.getElementById('editor-reload').onclick = function(){ location.reload(); };
+      // Backups (greets authoring files only): every Save/restore stashes the
+      // previous .lwo/.LWS under Authoring/greets/.backups; restoring copies
+      // one back over its file (backing up the current state first) and regens
+      // the FLD — Reload then shows it.
+      if (revEditorScene === 'greets') {
+        var bhdr = document.getElementById('editor-backups-hdr');
+        bhdr.style.display = 'block';
+        var bopen = false;
+        bhdr.onclick = function(){
+          var el = document.getElementById('editor-backups');
+          bopen = !bopen;
+          el.style.display = bopen ? 'block' : 'none';
+          if (!bopen) return;
+          el.innerHTML = '<div class="surf-tex">loading…</div>';
+          fetch('api/greets/backups').then(function(r){ return r.json(); }).then(function(res){
+            el.innerHTML = '';
+            if (!res.backups || !res.backups.length) { el.innerHTML = '<div class="surf-tex">no backups yet</div>'; return; }
+            res.backups.forEach(function(b){
+              var d = document.createElement('div'); d.className = 'surf-item';
+              d.innerHTML = '<div>' + b.file + '</div><div class="surf-tex">restores ' + b.target + '</div>';
+              d.onclick = function(){
+                if (!confirm('Restore ' + b.target + ' from ' + b.file + '?\n(The current file is backed up first.)')) return;
+                editorStatus('restoring ' + b.file + '…');
+                fetch('api/greets/restore', { method: 'POST', body: JSON.stringify({ file: b.file }) })
+                  .then(function(r){ return r.json(); })
+                  .then(function(res2){
+                    editorStatus(res2.ok
+                      ? ((res2.restored ? 'restored ' + res2.restored + ' + FLD — Reload scene to see it'
+                                        : (res2.note || 'nothing to do')))
+                      : ('restore FAILED: ' + (res2.error || '?')));
+                  })
+                  .catch(function(e){ editorStatus('restore failed: ' + e); });
+              };
+              el.appendChild(d);
+            });
+          }).catch(function(e){ el.innerHTML = '<div class="surf-tex">backups fetch failed: ' + e + '</div>'; });
+        };
+      }
       // Per-property ranges — the engine stores these on different scales:
       // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
                             transparency:[0,100], reflection:[0,100] };
+      // Slider + numeric twin. The number box accepts values beyond the slider
+      // range (type an exact 3.5 even if the slider tops out at 2).
       function propRow(s, key, min, max, step){
         var row = document.createElement('div'); row.className = 'prop-row';
         var lab = document.createElement('label'); lab.textContent = key; row.appendChild(lab);
         var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = s[key];
-        var val = document.createElement('span'); val.className = 'val'; val.textContent = (+s[key]).toFixed(2);
-        r.oninput = function(){ var v = parseFloat(r.value); val.textContent = v.toFixed(2); setProp(s.name, key, v); };
+        var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+s[key]).toFixed(3);
+        val.style.cssText = 'flex:0 0 52px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+        r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); setProp(s.name, key, v); };
+        val.onchange = function(){
+          var v = parseFloat(val.value); if (isNaN(v)) return;
+          r.value = v; setProp(s.name, key, v);
+        };
         row.appendChild(r); row.appendChild(val); return row;
       }
       function renderSurfaceProps(s){
         var el = document.getElementById('editor-props'); el.innerHTML = '';
-        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;'; h.textContent = s.name; el.appendChild(h);
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;display:flex;justify-content:space-between;';
+        var hn = document.createElement('span'); hn.textContent = s.name; h.appendChild(hn);
+        // Reset = back to the LOADED values (pristine snapshot), engine + UI.
+        var rst = document.createElement('a');
+        rst.textContent = 'reset'; rst.href = '#';
+        rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          var p = editorPristine[s.name]; if (!p) return;
+          EDITOR_SAVE_PROPS.forEach(function(k){
+            if (Math.abs((+s[k]) - (+p[k])) > 1e-9) setProp(s.name, k, +p[k]);
+          });
+          renderSurfaceList(); renderSurfaceProps(s); updateSaveButton();
+        };
+        h.appendChild(rst); el.appendChild(h);
         ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
           el.appendChild(propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200));

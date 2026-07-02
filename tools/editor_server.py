@@ -380,6 +380,49 @@ def do_save(scene, payload):
     return 200, resp
 
 
+def list_backups():
+    """Newest-first [{file, target, mtime}] from Authoring/greets/.backups."""
+    if not os.path.isdir(BACKUPS):
+        return []
+    out = []
+    for f in os.listdir(BACKUPS):
+        # <stem>.<YYYYmmdd-HHMMSS>[-n].<ext> -> restore target <stem>.<ext>
+        m = re.match(r"^(.+)\.(\d{8}-\d{6}(?:-\d+)?)(\.\w+)$", f)
+        if not m:
+            continue
+        # Sort by the FILENAME timestamp (backup creation time) — copy2
+        # preserves the source file's mtime, which is when the source was last
+        # WRITTEN, not when the backup was taken.
+        out.append({"file": f, "target": m.group(1) + m.group(3),
+                    "when": m.group(2)})
+    out.sort(key=lambda e: e["when"], reverse=True)
+    return out
+
+
+def do_restore(payload):
+    """Restore one backup over its authoring file (backing up the CURRENT file
+    first, so a restore is itself undoable), then regen + install the FLD."""
+    name = os.path.basename(payload.get("file") or "")
+    entry = next((e for e in list_backups() if e["file"] == name), None)
+    if entry is None:
+        return 404, {"ok": False, "error": f"no such backup '{name}'"}
+    target = os.path.join(AUTHORING, entry["target"])
+    if not os.path.exists(target):
+        return 404, {"ok": False, "error": f"target '{entry['target']}' missing"}
+    src = os.path.join(BACKUPS, name)
+    if open(src, "rb").read() == open(target, "rb").read():
+        return 200, {"ok": True, "restored": None,
+                     "note": "backup is identical to the current file — nothing to do"}
+    pre = lwopatch.backup(target, BACKUPS)
+    shutil.copy2(src, target)
+    code, resp = regen_fld([{"file": entry["target"], "restored_from": name,
+                             "pre_restore_backup": os.path.relpath(pre, REPO)}])
+    if code != 200:
+        return code, resp
+    resp["restored"] = entry["target"]
+    return 200, resp
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=WASM_ROOT, **k)
@@ -393,9 +436,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def send_json(self, code, obj):
+        body = json.dumps(obj, indent=1).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        # Live routes — always the current Runtime/ copy, never the staged one.
         clean = self.path.split("?")[0]
+        if clean == "/api/greets/backups":
+            self.send_json(200, {"ok": True, "backups": list_backups()[:30]})
+            return
+        # Live routes — always the current Runtime/ copy, never the staged one.
         if clean.startswith(LIVE_PREFIXES):
             rel = os.path.normpath(clean.lstrip("/"))
             live = os.path.join(RUNTIME, rel)
@@ -411,7 +465,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        m = re.match(r"^/api/(\w+)/save$", self.path.split("?")[0])
+        clean = self.path.split("?")[0]
+        m = re.match(r"^/api/(\w+)/(save|restore)$", clean)
         if not m:
             self.send_error(404)
             return
@@ -419,12 +474,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             with save_lock:
-                code, resp = do_save(m.group(1), payload)
+                if m.group(2) == "restore":
+                    code, resp = ((404, {"ok": False, "error": "restore is greets-only"})
+                                  if m.group(1) != "greets" else do_restore(payload))
+                else:
+                    code, resp = do_save(m.group(1), payload)
         except Exception as e:  # report, don't kill the server
             code, resp = 500, {"ok": False, "error": f"{type(e).__name__}: {e}"}
         body = json.dumps(resp, indent=1).encode()
+        # Restore-shaped patched entries have no 'surfaces' key — don't let the
+        # log line throw after the work is done (it dropped the response).
         print(f"[save] {code}: " + ", ".join(
-            f"{p['file']}({','.join(p['surfaces'])})" for p in resp.get("patched", []))
+            f"{p.get('file', '?')}({','.join(p.get('surfaces', []))})"
+            for p in resp.get("patched", []))
+            + (f" restored={resp['restored']}" if resp.get("restored") else "")
             + (f" warnings={resp['warnings']}" if resp.get("warnings") else "")
             + ("" if resp.get("ok") else f" ERROR={resp.get('error')}"))
         self.send_response(code)
