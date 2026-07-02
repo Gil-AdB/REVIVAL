@@ -483,7 +483,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
-		Render_DeferredLighting(dctx);
+		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); }
 		g_deferredCtx = dctx;
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
@@ -547,7 +547,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// pass (skipVolumetric) is an intermediate LDR underlay that must NOT route
 		// its transparents into g_hdrBuf (it never tonemaps), same as the RTT.
 		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
-			fds::Hdr_ActivateNoFog();
+			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); }
 
 		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
 		// fog), forcing every overlay below to composite LDR over the tonemapped
@@ -555,6 +555,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// accumulate into g_hdrBuf (gated g_hdrActive) and the tonemap fires
 		// after TBR_Render (see below). Each subsequent step (cones/halos/rain/
 		// bolt) moves it further until it runs last.
+
+		// [TAIL-PROF] xpar-peel span timer — brace-scoped ScopeTimer can't
+		// cross the goto xpar_done, so accumulate manually at the label.
+		const long long _xparT0 = TailProf::nowNs();
 
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,
@@ -905,6 +909,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		flushBatch();
 		}  // close unifiedTbr=false legacy block
 xpar_done: ;
+	if (TailProf::enabled()) {
+		static double _xa = 0; static int _xn = 0;
+		_xa += double(TailProf::nowNs() - _xparT0) / 1e6;
+		if (++_xn >= 60) {
+			std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n", "xpar-peel", _xa / _xn);
+			_xa = 0; _xn = 0;
+		}
+	}
 	}
 
 	// NOTE: this loop must run BEFORE TBR_Render — for TBR scenes the
@@ -935,7 +947,7 @@ xpar_done: ;
 
 	if (CurScene->Flags & Scn_SpriteTBR)
 	{
-		TBR_Render(CurScene);
+		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene); }
 	}
 
 	// HDR (Phase 2 overlay reorg): the tonemap walks down the pipeline as each
@@ -960,7 +972,7 @@ xpar_done: ;
 			Render_DeferredVolumetric(dctx);   // NB: not yet HDR-redirected (no scene uses it)
 		} else {
 			Render_VolumetricCones(dctx);
-			Render_OmniHalos(dctx);
+			{ TailProf::ScopeTimer _tp("halos"); Render_OmniHalos(dctx); }
 		}
 
 		// Screen-space rain LAST among the view-aligned scene passes (streaks
@@ -990,9 +1002,11 @@ xpar_done: ;
 			fds::Render_AnamorphicPass();   // lens streaks before the tonemap (no-op unless --anamorphic)
 			fds::Render_BloomPass();        // glow into g_hdrBuf BEFORE the tonemap (no-op unless --bloom)
 			fds::Render_LensGhostPass();    // ghost discs + halo into g_hdrBuf BEFORE the tonemap (no-op unless --lens_ghosts)
+		{ TailProf::ScopeTimer _tp("tonemap-post");
 			fds::Render_TonemapToVPage();
-			fds::Render_LensPostPass();     // CA + vignette on the 8-bit image AFTER the tonemap (no-op unless --chromatic/--vignette)
-			fds::Render_GradeGrainPass();   // colour grade + film grain on the 8-bit image (no-op unless --grade/--grain)
+			fds::Render_LensPostPass();     // CA + vignette (no-op unless --chromatic/--vignette)
+			fds::Render_GradeGrainPass();   // grade + grain (no-op unless --grade/--grain)
+			}
 		}
 
 		// Lens droplets are on the "camera glass" — a post effect that refracts
@@ -1007,7 +1021,7 @@ xpar_done: ;
 	// Edge-aware AA (--aa): blend across G-buffer geometry edges on the final
 	// LDR image. After the tonemap + all post (operates on VPage), before the
 	// debug overlays. No-op when --aa is off or on the forward path.
-	Render_EdgeAA();
+	{ TailProf::ScopeTimer _tp("edge-aa"); Render_EdgeAA(); }
 
 	// Lightmap debug viz — paints VPage with mesh/face/bary/factor
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last
