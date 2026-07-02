@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b25</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b26</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -588,9 +588,12 @@
       <div id="editor-light-props"></div>
       <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
         <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
-        <label style="font-size:10px;color:#aaa;font-weight:normal;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
-          <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
-        </label>
+        <span style="font-weight:normal;">
+          <a id="editor-knobs-resetall" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="reset every explicitly-set knob to its default">reset all</a>
+          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
+            <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
+          </label>
+        </span>
       </div>
       <div id="editor-knobs" style="display:none;"></div>
       <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
@@ -642,7 +645,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b25); orbit/zoom embind =',
+        console.log('[editor] panel init (build b26); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         document.getElementById('editor-scene-name').textContent = revEditorScene;
@@ -748,7 +751,12 @@
             (lightDirty(l) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
             '<div class="surf-tex">pos ' + l.x + ',' + l.y + ',' + l.z +
             ' • int ' + (+l.intensity).toFixed(2) + ' • range ' + (+l.range).toFixed(1) + '</div>';
-          d.onclick = function(){ editorSelectedLight = l.i; renderLightList(); renderLightProps(l); };
+          d.onclick = function(){
+            editorSelectedLight = l.i; renderLightList(); renderLightProps(l);
+            // Frame the orbit on the light (same as clicking a surface row).
+            if (Module.editorFocusLight) Module.editorFocusLight(l.i);
+            editorStatus('light ' + l.i + ' — focused (' + l.x + ',' + l.y + ',' + l.z + ')');
+          };
           el.appendChild(d);
         });
       }
@@ -807,7 +815,7 @@
       // grouped by category. Edits call editorSetParam (same write path as
       // the CLI) and re-render on the next frame; "reset" = unsetParam
       // (back to the compile-time default).
-      var editorParams = [];
+      var editorParams = [], editorParamsPristine = null;
       var EDITOR_KNOBS = ['bloom','bloom_intensity','disco_bloom','hdr_refl_gain',
         'ssao','ssao_gtao','ssao_downscale','ao_map_strength',
         'parallax','parallax_strength','nmap_16bit',
@@ -819,6 +827,17 @@
         'deferred_quarter','fast_fog','fast_fog_froxel'];
       function refreshParams(){
         try { editorParams = JSON.parse(Module.editorGetParams()); } catch(e){ editorParams = []; }
+        // Pristine = the values at first open (the editor's boot look: the
+        // native flag set + URL overrides). Reset restores THESE, not the
+        // compile-time defaults — unsetParam would strip hdr/bloom/etc.
+        if (!editorParamsPristine && editorParams.length) {
+          editorParamsPristine = {};
+          editorParams.forEach(function(p){ editorParamsPristine[p.name] = p.value; });
+        }
+      }
+      function knobPristine(p){
+        return (editorParamsPristine && p.name in editorParamsPristine)
+          ? editorParamsPristine[p.name] : p.def;
       }
       function knobRow(p){
         var row = document.createElement('div'); row.className = 'prop-row';
@@ -834,14 +853,22 @@
         }
         if (p.type === 'bool') {
           var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!p.value;
+          cb.style.flex = '1';
           cb.onchange = function(){ p.value = cb.checked; setIt(cb.checked ? 1 : 0); };
           row.appendChild(cb);
         } else {
-          // Slider range: span the default generously (defaults of 0 still
-          // get a usable range). The number box accepts anything.
+          // Slider range: span BOTH the default and the current value
+          // generously (a CLI/scene value above 4×default used to cap the
+          // slider at the loaded value). Typing past the top in the number
+          // box grows the slider range too.
           var d = Math.abs(+p.def) || 1;
           var r = document.createElement('input'); r.type = 'range';
-          r.min = 0; r.max = Math.max(4 * d, 1); r.step = (p.type === 'int') ? 1 : Math.max(4 * d, 1) / 200;
+          function fitRange(v){
+            var m = Math.max(4 * d, 2.5 * Math.abs(v), 1);
+            r.min = Math.min(0, v); r.max = m;
+            r.step = (p.type === 'int') ? 1 : m / 200;
+          }
+          fitRange(+p.value);
           r.value = +p.value;
           var val = document.createElement('input'); val.type = 'number'; val.step = r.step;
           val.value = +(+p.value).toFixed(3);
@@ -849,16 +876,20 @@
           r.oninput = function(){ var v = (p.type === 'int') ? parseInt(r.value, 10) : parseFloat(r.value);
                                   val.value = v; p.value = v; setIt(v); };
           val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return;
+                                     if (v > +r.max || v < +r.min) fitRange(v);
                                      r.value = v; p.value = v; setIt(v); };
           row.appendChild(r); row.appendChild(val);
         }
         var rst = document.createElement('a');
-        rst.textContent = '⟲'; rst.href = '#'; rst.title = 'reset to default (' + p.def + ')';
-        rst.style.cssText = 'color:#c96;font-size:11px;text-decoration:none;flex:0 0 12px;';
+        rst.textContent = '⟲'; rst.href = '#';
+        rst.title = 'reset to loaded value (' + knobPristine(p) + ')';
+        rst.style.cssText = 'color:#c96;font-size:11px;text-decoration:none;flex:0 0 14px;text-align:center;';
         rst.onclick = function(e){
           e.preventDefault();
-          try { Module.editorUnsetParam(p.name); } catch(err){}
+          var v = knobPristine(p);
+          try { Module.editorSetParam(p.name, String(typeof v === 'boolean' ? (v ? 1 : 0) : v)); } catch(err){}
           refreshParams(); renderKnobList();
+          editorStatus('reset ' + p.name + ' = ' + v);
         };
         row.appendChild(rst);
         return row;
@@ -888,13 +919,30 @@
         }
       }
       document.getElementById('editor-knobs-hdr').onclick = function(e){
-        if (e.target && e.target.id === 'editor-knobs-all') return;  // the checkbox, not a toggle
+        if (e.target && (e.target.id === 'editor-knobs-all' ||
+                         e.target.id === 'editor-knobs-resetall' ||
+                         e.target.tagName === 'LABEL')) return;   // controls, not a toggle
         var el = document.getElementById('editor-knobs');
         var opening = el.style.display === 'none';
         el.style.display = opening ? 'block' : 'none';
         if (opening) { refreshParams(); renderKnobList(); }
       };
       document.getElementById('editor-knobs-all').onchange = function(){ renderKnobList(); };
+      document.getElementById('editor-knobs-resetall').onclick = function(e){
+        e.preventDefault();
+        refreshParams();
+        var n = 0;
+        editorParams.forEach(function(p){
+          var v = knobPristine(p);
+          if (String(p.value) !== String(v)) {
+            try {
+              if (Module.editorSetParam(p.name, String(typeof v === 'boolean' ? (v ? 1 : 0) : v))) n++;
+            } catch(err){}
+          }
+        });
+        refreshParams(); renderKnobList();
+        editorStatus('reset ' + n + ' knob(s) to loaded values');
+      };
       function renderSurfaceList(){
         var q = (document.getElementById('editor-search').value || '').toLowerCase();
         var el = document.getElementById('editor-list'); el.innerHTML = '';
@@ -1151,6 +1199,31 @@
           renderSurfaceList(); renderSurfaceProps(s); updateSaveButton();
         };
         h.appendChild(rst); el.appendChild(h);
+        // Split spatially-separate instances (two mummies share one material —
+        // editing one edits both). Live-only: the LWO has ONE shared surface,
+        // so persisted saves apply to the base name.
+        if (!obj) {
+          var spl = document.createElement('a');
+          spl.textContent = 'split instances'; spl.href = '#';
+          spl.title = 'give each spatially-separate copy of this surface its own editable material (live-only — Save writes the base surface)';
+          spl.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;display:block;margin-bottom:4px;';
+          spl.onclick = function(e){
+            e.preventDefault();
+            var names = [];
+            try { names = JSON.parse(Module.editorSplitInstances(s.name)); } catch(err){}
+            if (!names.length) { editorStatus('split: only one instance of "' + s.name + '" found'); return; }
+            // Re-enumerate: the clones are new surfaces (own matIDs — canvas
+            // pick now resolves each instance separately).
+            editorSurfaces = JSON.parse(Module.editorGetSurfaces());
+            editorSurfaces.forEach(function(x){
+              if (!editorPristine[x.name]) editorPristine[x.name] = JSON.parse(JSON.stringify(x));
+            });
+            renderSurfaceList();
+            editorStatus('split "' + s.name + '" → ' + names.join(', ') +
+                         ' (live-only; Save writes the base surface)');
+          };
+          el.appendChild(spl);
+        }
         ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
           var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);

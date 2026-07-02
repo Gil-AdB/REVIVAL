@@ -49,6 +49,18 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value);
 void Editor_MarkDirty();
 bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 
+// Split a surface's spatially-separate INSTANCES into independent surfaces so
+// they can be edited apart (two mummies share the material "momy" — editing
+// one edits both). Faces are clustered by world position (grid single-linkage,
+// radius ~15% of the union diagonal); the biggest cluster keeps the original
+// material(s), every other cluster gets clones named "<name>#2", "#3", …
+// (::mirUV handedness clones are cloned alongside and keep their suffix, so
+// all name-keyed ops collapse correctly). Appends to MatLib + rebuilds the
+// scene mat table. LIVE-ONLY: the LWO has one shared surface, so saves apply
+// to the base name. Returns a JSON array of the NEW base names ([] = nothing
+// to split — only one instance found).
+std::string Editor_SplitInstances(const char* name);
+
 // Import a PBR map onto a surface from raw image-file bytes (a browser upload),
 // by role: "albedo" | "normal" | "height" | "roughness" | "ao". Writes the bytes
 // to a temp file and reuses MaterialImport_ApplyMapFile (same load/convert/assign

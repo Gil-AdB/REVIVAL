@@ -3,6 +3,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
+#include <Base/Omni.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -898,6 +899,29 @@ void editorFocusSurface(std::string name)
 	             name.c_str(), used, boxes.size(), g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
 	rev::Editor_MarkDirty();
 }
+// Frame the orbit on a scene-authored light (same index space as
+// editorGetLights / the LWS write-back): pivot at its position, distance from
+// its range so the pool of light it casts is in view.
+void editorFocusLight(int want)
+{
+	if (!CurScene) return;
+	int i = 0;
+	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		if (i++ != want) continue;
+		g_camTarget = O->IPos;
+		const float range = O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f;
+		g_camDist = range > 1.0f ? range * 0.8f : 12.0f;
+		if (g_camDist < 6.0f)   g_camDist = 6.0f;
+		if (g_camDist > 200.0f) g_camDist = 200.0f;
+		g_editorCamSeeded = true;
+		std::fprintf(stderr, "[EDITOR] focus light %d at (%.1f %.1f %.1f) dist %.1f\n",
+		             want, O->IPos.x, O->IPos.y, O->IPos.z, g_camDist);
+		rev::Editor_MarkDirty();
+		return;
+	}
+	std::fprintf(stderr, "[EDITOR] focus light %d: not found (%d authored)\n", want, i);
+}
 } // namespace
 
 EMSCRIPTEN_BINDINGS(rev_editor_camera)
@@ -906,6 +930,7 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorZoom",          &editorZoom);
 	emscripten::function("editorPan",           &editorPan);
 	emscripten::function("editorFocusSurface",  &editorFocusSurface);
+	emscripten::function("editorFocusLight",    &editorFocusLight);
 	emscripten::function("editorTimeStep",      &editorTimeStep);
 }
 

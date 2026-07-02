@@ -14,12 +14,15 @@
 #include <Base/TriMesh.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace rev {
 
@@ -175,6 +178,145 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	return any;
 }
 
+std::string Editor_SplitInstances(const char* name)
+{
+	if (!CurScene || !name || !*name) return "[]";
+	// Faces of this surface (any of its materials — base + ::mirUV clones),
+	// with world-space centres.
+	struct FRef { Face* F; float c[3]; };
+	std::vector<FRef> refs;
+	for (TriMesh* T = CurScene->TriMeshHead; T; T = T->Next)
+		for (DWord i = 0; i < T->FIndex; ++i) {
+			Face& F = T->Faces[i];
+			if (!F.Txtr || !F.Txtr->Name || Editor_BaseSurfName(F.Txtr->Name) != name) continue;
+			Vertex* vs[3] = { F.A, F.B, F.C };
+			float c[3] = { 0, 0, 0 };
+			int nv = 0;
+			for (int k = 0; k < 3; ++k) {
+				if (!vs[k]) continue;
+				Vector w;
+				MatrixXVector(T->RotMat, &vs[k]->Pos, &w);
+				Vector_SelfAdd(&w, &T->IPos);
+				c[0] += w.x; c[1] += w.y; c[2] += w.z;
+				++nv;
+			}
+			if (!nv) continue;
+			refs.push_back({ &F, { c[0]/nv, c[1]/nv, c[2]/nv } });
+		}
+	if (refs.size() < 2) return "[]";
+
+	// Cluster radius from the union bbox (same scale the focus clustering uses).
+	float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+	for (const FRef& r : refs)
+		for (int a = 0; a < 3; ++a) {
+			if (r.c[a] < lo[a]) lo[a] = r.c[a];
+			if (r.c[a] > hi[a]) hi[a] = r.c[a];
+		}
+	const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
+	const float R = std::max(std::sqrt(dx*dx + dy*dy + dz*dz) * 0.15f, 2.0f);
+
+	// Single-linkage via a uniform grid of cell size R: faces in the same or
+	// adjacent cells union (linear in faces — no O(n²) pass, splitting a big
+	// surface like rooms stays instant in wasm).
+	const size_t n = refs.size();
+	std::vector<int> parent(n);
+	for (size_t i = 0; i < n; ++i) parent[i] = int(i);
+	auto find = [&](int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; };
+	auto unite = [&](int a, int b) { a = find(a); b = find(b); if (a != b) parent[b] = a; };
+	auto cellKey = [&](int gx, int gy, int gz) {
+		return (long long)(gx + 0x40000) | ((long long)(gy + 0x40000) << 20) | ((long long)(gz + 0x40000) << 40);
+	};
+	std::map<long long, int> cellRep;   // cell → representative face idx
+	for (size_t i = 0; i < n; ++i) {
+		const int gx = int(std::floor(refs[i].c[0] / R));
+		const int gy = int(std::floor(refs[i].c[1] / R));
+		const int gz = int(std::floor(refs[i].c[2] / R));
+		for (int ox = -1; ox <= 1; ++ox)
+			for (int oy = -1; oy <= 1; ++oy)
+				for (int oz = -1; oz <= 1; ++oz) {
+					auto it = cellRep.find(cellKey(gx+ox, gy+oy, gz+oz));
+					if (it != cellRep.end()) unite(it->second, int(i));
+				}
+		cellRep[cellKey(gx, gy, gz)] = find(int(i));
+	}
+
+	std::map<int, long> clusterSize;
+	for (size_t i = 0; i < n; ++i) ++clusterSize[find(int(i))];
+	if (clusterSize.size() < 2) return "[]";
+	int primary = -1; long primarySize = -1;
+	for (auto& [root, sz] : clusterSize)
+		if (sz > primarySize) { primarySize = sz; primary = root; }
+
+	// Next free "#k" suffix (repeat splits mustn't collide).
+	int suffix = 2;
+	for (bool taken = true; taken; ) {
+		taken = false;
+		char probe[160];
+		std::snprintf(probe, sizeof probe, "%s#%d", name, suffix);
+		for (Material* M = MatLib; M; M = M->Next)
+			if (M->RelScene == CurScene && M->Name && Editor_BaseSurfName(M->Name) == probe) { taken = true; ++suffix; break; }
+	}
+
+	Material* tail = MatLib;
+	while (tail && tail->Next) tail = tail->Next;
+
+	// Stable numbering: every non-primary cluster gets the next "#k", in
+	// first-seen face order.
+	std::map<int, int> clusterK;
+	for (size_t i = 0; i < n; ++i) {
+		const int root = find(int(i));
+		if (root != primary && !clusterK.count(root)) clusterK[root] = suffix++;
+	}
+
+	// Per (cluster, source material) clone. The ::mirUV suffix stays OUTSIDE
+	// the "#k" ("momy#2::mirUV") so Editor_BaseSurfName collapses to "momy#2".
+	std::map<std::pair<int, Material*>, Material*> clones;
+	static const std::string mirSuf = "::mirUV";
+	for (size_t i = 0; i < n; ++i) {
+		const int root = find(int(i));
+		if (root == primary) continue;
+		Material* src = refs[i].F->Txtr;
+		const auto key = std::make_pair(root, src);
+		auto it = clones.find(key);
+		if (it == clones.end()) {
+			const std::string srcName = src->Name ? src->Name : "";
+			const bool isMir = srcName.size() > mirSuf.size() &&
+			                   srcName.compare(srcName.size() - mirSuf.size(), mirSuf.size(), mirSuf) == 0;
+			char nm[200];
+			std::snprintf(nm, sizeof nm, "%s#%d%s", name, clusterK[root], isMir ? mirSuf.c_str() : "");
+			Material* C = new Material(*src);   // field-copy (shares Texture*s — intended)
+			C->Name = strdup(nm);
+			C->Next = nullptr;
+			C->Prev = tail;
+			if (tail) tail->Next = C;
+			tail = C;
+			it = clones.emplace(key, C).first;
+		}
+		refs[i].F->Txtr = it->second;
+	}
+	// New base names for the caller (dedup'd across mir/non-mir clones).
+	std::set<std::string> newNames;
+	for (auto& [key, C] : clones) newNames.insert(Editor_BaseSurfName(C->Name));
+	std::string out = "[";
+	bool first = true;
+	for (const std::string& nn : newNames) {
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		jsonEscape(out, nn.c_str());
+		out += "\"";
+	}
+	out += "]";
+	// New MatLib entries → matIDs + table (post-load materials are invisible
+	// to the deferred kernel until the table is rebuilt — the greets mirror
+	// "yellow tint" lesson).
+	Scene_RebuildMatTable(CurScene);
+	Editor_MarkDirty();
+	std::fprintf(stderr, "[EDITOR] split '%s': %zu faces, %zu clusters (primary %ld faces) -> %s\n",
+	             name, n, clusterSize.size(), primarySize, out.c_str());
+	return out;
+}
+
 static std::atomic<bool> g_editorDirty{true};   // first frame renders
 void Editor_MarkDirty()    { g_editorDirty.store(true, std::memory_order_relaxed); }
 bool Editor_ConsumeDirty() { return g_editorDirty.exchange(false, std::memory_order_relaxed); }
@@ -220,6 +362,10 @@ void js_editorHighlight(std::string name)
 bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 {
 	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
+}
+std::string js_editorSplitInstances(std::string name)
+{
+	return rev::Editor_SplitInstances(name.c_str());
 }
 // bytes is a JS Uint8Array of the uploaded image file.
 bool js_editorImportTexture(std::string surface, std::string role,
@@ -442,6 +588,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorClassifyMap",    &js_editorClassifyMap);
 	emscripten::function("editorGetLights",      &js_editorGetLights);
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
+	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);
