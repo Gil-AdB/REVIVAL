@@ -11,9 +11,13 @@
 #include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
 
+#include <Base/TriMesh.h>
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <unordered_set>
 
@@ -83,6 +87,85 @@ std::string Editor_GetSurfacesJSON()
 	return out;
 }
 
+// Objects can't be derived from meshes here: greets' big per-round meshes mix
+// room AND mech faces in one TriMesh (verified via the DUMP_MESHES snapshot
+// hook), and surface names are reused across models (the room hull is also
+// called "hull"). The one well-defined multi-part model is the robot-clone
+// naming scheme itself: "X.lwo::surf[_body|_upper]" materials exist precisely
+// to give a multi-mesh animated model per-part materials. So the hierarchy is
+// name-derived: one parent object per clone-file family (the mech), with a
+// child object per file (Hull.lwo, L_leg1.lwo, …), each listing its surfaces.
+static void appendSurfArray(std::string& out, const std::set<std::string>& names)
+{
+	out += "\"surfaces\":[";
+	bool first = true;
+	for (const std::string& s : names) {
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		jsonEscape(out, s.c_str());
+		out += "\"";
+	}
+	out += "]";
+}
+
+std::string Editor_GetObjectsJSON()
+{
+	if (!CurScene) return "[]";
+	// Clone-file → its surfaces (dedup'd editor base names).
+	std::map<std::string, std::set<std::string>> parts;
+	std::set<std::string> all;
+	for (Material* M = MatLib; M; M = M->Next) {
+		if (M->RelScene != CurScene || !M->Name) continue;
+		const std::string base = Editor_BaseSurfName(M->Name);
+		const size_t sep = base.find("::");
+		if (sep == std::string::npos) continue;   // plain surface — not a model part
+		parts[base.substr(0, sep)].insert(base);
+		all.insert(base);
+	}
+	if (parts.empty()) return "[]";
+	// Face tally per file so the model is named after its heaviest part's stem
+	// ("Hull.lwo" → "Hull") — the engine has no authored object names.
+	std::map<std::string, long> fileFaces;
+	for (TriMesh* T = CurScene->TriMeshHead; T; T = T->Next)
+		for (DWord f = 0; f < T->FIndex; ++f) {
+			Material* M = T->Faces[f].Txtr;
+			if (!M || !M->Name) continue;
+			const std::string base = Editor_BaseSurfName(M->Name);
+			const size_t sep = base.find("::");
+			if (sep != std::string::npos) ++fileFaces[base.substr(0, sep)];
+		}
+	std::string heavy;
+	long heavyFaces = -1;
+	for (auto& [file, cnt] : fileFaces)
+		if (cnt > heavyFaces) { heavyFaces = cnt; heavy = file; }
+	if (heavy.empty()) heavy = parts.begin()->first;
+	std::string stem = heavy;
+	const size_t dot = stem.find_last_of('.');
+	if (dot != std::string::npos) stem.resize(dot);
+
+	std::string out = "[{\"name\":\"";
+	jsonEscape(out, (stem + " (model)").c_str());
+	out += "\",";
+	char buf[48];
+	std::snprintf(buf, sizeof buf, "\"meshes\":%zu,", parts.size());
+	out += buf;
+	appendSurfArray(out, all);
+	out += ",\"children\":[";
+	bool first = true;
+	for (auto& [file, names] : parts) {
+		if (!first) out += ",";
+		first = false;
+		out += "{\"name\":\"";
+		jsonEscape(out, file.c_str());
+		out += "\",";
+		appendSurfArray(out, names);
+		out += "}";
+	}
+	out += "]}]";
+	return out;
+}
+
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 {
 	// Shared setter (also used by the sidecar's numeric prop lines): sets on
@@ -128,6 +211,7 @@ void Editor_SetHighlight(const char* name);   // RENDER.CPP — outline pass
 
 namespace {
 std::string js_editorGetSurfaces() { return rev::Editor_GetSurfacesJSON(); }
+std::string js_editorGetObjects()  { return rev::Editor_GetObjectsJSON(); }
 void js_editorHighlight(std::string name)
 {
 	Editor_SetHighlight(name.c_str());
@@ -225,6 +309,28 @@ bool js_editorSetLightProp(int index, std::string key, float value)
 	return true;
 }
 
+// ── Render knobs ───────────────────────────────────────────────────────────
+// The full FeatureFlags registry (name/type/cat/help/value/default/set) as
+// JSON, and name-keyed set/unset — the editor's Render section is data-driven
+// from this, so any flag added to FeatureFlags.def shows up automatically.
+std::string js_editorGetParams()
+{
+	std::string s;
+	fds::FeatureFlags::dumpParamsJson(s);
+	return s;
+}
+bool js_editorSetParam(std::string name, std::string value)
+{
+	const bool ok = fds::FeatureFlags::setParamFromText(name.c_str(), value.c_str());
+	if (ok) rev::Editor_MarkDirty();
+	return ok;
+}
+bool js_editorUnsetParam(std::string name)
+{
+	const bool ok = fds::FeatureFlags::unsetParam(name.c_str());
+	if (ok) rev::Editor_MarkDirty();
+	return ok;
+}
 // Pack upload: classify one filename into its map role with the native token
 // rules (albedo/normal/height/roughness/ao, "" = skip) so the browser's
 // load-a-whole-folder flow detects roles identically to --material-import.
@@ -325,6 +431,7 @@ std::string js_editorProbe(std::string name)
 EMSCRIPTEN_BINDINGS(rev_material_editor)
 {
 	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
+	emscripten::function("editorGetObjects",     &js_editorGetObjects);
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 	emscripten::function("editorMatDebug",       &js_editorMatDebug);
@@ -335,5 +442,8 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorClassifyMap",    &js_editorClassifyMap);
 	emscripten::function("editorGetLights",      &js_editorGetLights);
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
+	emscripten::function("editorGetParams",      &js_editorGetParams);
+	emscripten::function("editorSetParam",       &js_editorSetParam);
+	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);
 }
 #endif // __EMSCRIPTEN__

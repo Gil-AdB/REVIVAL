@@ -25,6 +25,17 @@ std::string Editor_BaseSurfName(const char* name);
 // applies to every material sharing the name).
 std::string Editor_GetSurfacesJSON();
 
+// JSON array of the scene's OBJECTS — groups of surfaces that belong to one
+// logical model (the mech, the room, …):
+//   [{name, meshes, surfaces:[...names as in GetSurfacesJSON...]}, ...]
+// The engine has no object names at runtime (TriMesh carries none), so objects
+// are derived: meshes that share a surface TOKEN are one object. The token is
+// the surface's base identity across the robot-clone naming scheme — base name
+// (::mirUV collapsed), then the part after "X.lwo::", minus the _body/_upper
+// clone suffixes. E.g. Hull.lwo + the four leg meshes all use token "hull", so
+// they union into one object (the mech); the room mesh's surfaces form another.
+std::string Editor_GetObjectsJSON();
+
 // Set one float property (key) on every CurScene material whose Name matches.
 // Keys: baseR/baseG/baseB, diffuse, specular, glossiness, luminosity,
 // transparency, reflection. Returns true if at least one material was updated.

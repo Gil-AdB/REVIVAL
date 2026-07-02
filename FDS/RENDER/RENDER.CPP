@@ -76,15 +76,28 @@ static bool sameEditorSurface(const char* matName, const char* want) {
 	if (len > sl && std::strcmp(matName + len - sl, suf) == 0) len -= sl;
 	return std::strlen(want) == len && std::strncmp(matName, want, len) == 0;
 }
+// `name` may be a single surface or a ';'-separated list (object selection
+// highlights every surface of the group at once).
 void Editor_SetHighlight(const char* name) {
 	for (int i = 0; i < 256; ++i) g_editorHL[i] = false;
 	g_editorHLActive = false;
 	if (!name || !*name || !CurScene) return;
 	MatTable mt = Scene_GetMatTable(CurScene);
-	for (dword i = 0; i < mt.count && i < 256; ++i)
-		if (mt.data[i] && sameEditorSurface(mt.data[i]->Name, name)) {
-			g_editorHL[i] = true; g_editorHLActive = true;
+	const char* p = name;
+	while (*p) {
+		const char* semi = strchr(p, ';');
+		const size_t len = semi ? size_t(semi - p) : strlen(p);
+		if (len) {
+			char one[128];
+			const size_t cl = len < sizeof(one) - 1 ? len : sizeof(one) - 1;
+			memcpy(one, p, cl); one[cl] = 0;
+			for (dword i = 0; i < mt.count && i < 256; ++i)
+				if (mt.data[i] && sameEditorSurface(mt.data[i]->Name, one)) {
+					g_editorHL[i] = true; g_editorHLActive = true;
+				}
 		}
+		p += len + (semi ? 1 : 0);
+	}
 }
 
 // Resolve the unified-pass preference tri-state:

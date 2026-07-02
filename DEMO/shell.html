@@ -397,12 +397,23 @@
       // Becomes true once main() has returned — guards against late-firing
       // resize/orientation listeners trying to call into freed wasm.
       var runtimeExited = false;
+      // Render-scale divisor on top of HD/SD: 1 = full, 2 = half-res, 4 =
+      // quarter-res drawing buffer (CSS upscales to fill the window). The
+      // rasterizer's cost is ~linear in pixels, so ½× ≈ 4× fewer pixels.
+      // ?scale=2 / ?scale=4 in the URL sets it at boot.
+      var renderScale = (function(){
+        var m = /[?&]scale=(2|4)/.exec(window.location.search);
+        return m ? parseInt(m[1], 10) : 1;
+      })();
       function effectiveDpr() {
         var dpr = window.devicePixelRatio || 1;
+        var base;
         if (isMobile) {
-          return hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+          base = hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+        } else {
+          base = hiDPI ? dpr : 1;
         }
-        return hiDPI ? dpr : 1;
+        return base / renderScale;
       }
       function resizeCanvasToWindow() {
         var dpr = effectiveDpr();
@@ -451,7 +462,10 @@
         if (Module.__audioGain) Module.__audioGain.gain.value = muted ? 0 : 1;
       }
       function applyHidpi() {
-        btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
+        btnHidpi.textContent = renderScale === 4 ? '¼×'
+                             : renderScale === 2 ? '½×'
+                             : (hiDPI ? 'HD' : 'SD');
+        btnHidpi.title = 'render resolution: HD → SD → ½× → ¼× (click to cycle)';
         btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
         // Match the font scale to the effective DPR — that way one
         // glyph pixel maps to one CSS pixel regardless of HD/SD or
@@ -478,7 +492,12 @@
         applyMute();
       });
       btnHidpi.addEventListener('click', function() {
-        hiDPI = !hiDPI;
+        // Cycle HD → SD → ½× → ¼× → HD. The two low-res steps divide the
+        // drawing buffer for perf (heavy scenes / editor on battery).
+        if (hiDPI)                    { hiDPI = false; renderScale = 1; }
+        else if (renderScale === 1)   { renderScale = 2; }
+        else if (renderScale === 2)   { renderScale = 4; }
+        else                          { renderScale = 1; hiDPI = true; }
         applyHidpi();
       });
       btnFullscreen.addEventListener('click', function() {
@@ -553,13 +572,27 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b24</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b25</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
+      <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
+        <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
+        <label style="font-size:10px;color:#aaa;font-weight:normal;cursor:pointer;" title="canvas click selects the whole object instead of one surface">
+          <input type="checkbox" id="editor-pickobj" style="vertical-align:-2px;"> pick=object
+        </label>
+      </div>
+      <div id="editor-objects"></div>
       <div id="editor-list"></div>
       <div id="editor-props"></div>
       <div id="editor-lights-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;">Lights <span id="editor-lights-count" style="color:#6c8;font-size:10px;"></span></div>
       <div id="editor-lights" style="display:none;"></div>
       <div id="editor-light-props"></div>
+      <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+        <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
+        <label style="font-size:10px;color:#aaa;font-weight:normal;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
+          <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
+        </label>
+      </div>
+      <div id="editor-knobs" style="display:none;"></div>
       <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
         <span style="flex:0 0 64px;">scene time</span>
         <button id="editor-time-back" title="step back ([ key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">◀</button>
@@ -576,6 +609,11 @@
     </div>
     <script>
       var editorSurfaces = [], editorSelected = null;
+      // Object selection: editorGroup = array of surface names being edited
+      // together (an "object" — meshes grouped by shared surfaces, e.g. the
+      // whole mech), or null for single-surface mode. setProp/importFile fan
+      // edits out over the group.
+      var editorObjects = [], editorGroup = null;
       function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
       // window and preventDefault()s every key (they feed the engine's Keyboard[]
@@ -604,7 +642,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b24); orbit/zoom embind =',
+        console.log('[editor] panel init (build b25); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         document.getElementById('editor-scene-name').textContent = revEditorScene;
@@ -626,7 +664,10 @@
               editorLightsPristine = {};
               editorLights.forEach(function(l){ editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l)); });
             } catch(e){ console.warn('[editor] lights enumerate failed', e); }
-            editorStatus(list.length+' surfaces'); renderSurfaceList(); renderLightList(); updateSaveButton();
+            try {
+              editorObjects = JSON.parse(Module.editorGetObjects ? Module.editorGetObjects() : '[]');
+            } catch(e){ console.warn('[editor] objects enumerate failed', e); }
+            editorStatus(list.length+' surfaces'); renderObjectList(); renderSurfaceList(); renderLightList(); updateSaveButton();
           }
           else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
         }, 500);
@@ -760,13 +801,108 @@
           row.appendChild(r); row.appendChild(val); el.appendChild(row);
         });
       }
+      // ── Render knobs: live engine feature-flags ───────────────────────
+      // Data-driven from editorGetParams (the FeatureFlags registry dump).
+      // Default view = the curated important set; "all" shows everything
+      // grouped by category. Edits call editorSetParam (same write path as
+      // the CLI) and re-render on the next frame; "reset" = unsetParam
+      // (back to the compile-time default).
+      var editorParams = [];
+      var EDITOR_KNOBS = ['bloom','bloom_intensity','disco_bloom','hdr_refl_gain',
+        'ssao','ssao_gtao','ssao_downscale','ao_map_strength',
+        'parallax','parallax_strength','nmap_16bit',
+        'chromatic','chromatic_amount','vignette','vignette_strength',
+        'dof','dof_range','dof_max',
+        'anamorphic','anamorphic_intensity','anamorphic_passes','anamorphic_decay',
+        'lens_ghosts','lens_ghost_intensity','lens_ghost_dispersal','lens_ghost_halo',
+        'cone_strength','aa','shadows','shadow_dynamic','pbr','hdr','hdr_linear',
+        'deferred_quarter','fast_fog','fast_fog_froxel'];
+      function refreshParams(){
+        try { editorParams = JSON.parse(Module.editorGetParams()); } catch(e){ editorParams = []; }
+      }
+      function knobRow(p){
+        var row = document.createElement('div'); row.className = 'prop-row';
+        row.title = p.help || '';
+        var lab = document.createElement('label'); lab.textContent = p.name;
+        lab.style.cssText = 'flex:0 0 130px;overflow:hidden;text-overflow:ellipsis;' + (p.set ? 'color:#fc8;' : '');
+        row.appendChild(lab);
+        function setIt(v){
+          var ok = false;
+          try { ok = Module.editorSetParam(p.name, String(v)); } catch(e){}
+          editorStatus((ok ? 'flag ' : 'flag FAILED ') + p.name + ' = ' + v);
+          p.set = true; lab.style.color = '#fc8';
+        }
+        if (p.type === 'bool') {
+          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!p.value;
+          cb.onchange = function(){ p.value = cb.checked; setIt(cb.checked ? 1 : 0); };
+          row.appendChild(cb);
+        } else {
+          // Slider range: span the default generously (defaults of 0 still
+          // get a usable range). The number box accepts anything.
+          var d = Math.abs(+p.def) || 1;
+          var r = document.createElement('input'); r.type = 'range';
+          r.min = 0; r.max = Math.max(4 * d, 1); r.step = (p.type === 'int') ? 1 : Math.max(4 * d, 1) / 200;
+          r.value = +p.value;
+          var val = document.createElement('input'); val.type = 'number'; val.step = r.step;
+          val.value = +(+p.value).toFixed(3);
+          val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          r.oninput = function(){ var v = (p.type === 'int') ? parseInt(r.value, 10) : parseFloat(r.value);
+                                  val.value = v; p.value = v; setIt(v); };
+          val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return;
+                                     r.value = v; p.value = v; setIt(v); };
+          row.appendChild(r); row.appendChild(val);
+        }
+        var rst = document.createElement('a');
+        rst.textContent = '⟲'; rst.href = '#'; rst.title = 'reset to default (' + p.def + ')';
+        rst.style.cssText = 'color:#c96;font-size:11px;text-decoration:none;flex:0 0 12px;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          try { Module.editorUnsetParam(p.name); } catch(err){}
+          refreshParams(); renderKnobList();
+        };
+        row.appendChild(rst);
+        return row;
+      }
+      function renderKnobList(){
+        var el = document.getElementById('editor-knobs'); if (!el) return;
+        var all = document.getElementById('editor-knobs-all').checked;
+        el.innerHTML = '';
+        var cnt = document.getElementById('editor-knobs-count');
+        if (cnt) cnt.textContent = editorParams.length ? ('(' + (all ? editorParams.length : EDITOR_KNOBS.length) + ')') : '';
+        if (!editorParams.length) return;
+        if (all) {
+          var byCat = {};
+          editorParams.forEach(function(p){ (byCat[p.cat || 'misc'] = byCat[p.cat || 'misc'] || []).push(p); });
+          Object.keys(byCat).sort().forEach(function(cat){
+            var h = document.createElement('div');
+            h.style.cssText = 'color:#8ac;font-size:10px;margin-top:6px;border-bottom:1px solid #234;';
+            h.textContent = cat;
+            el.appendChild(h);
+            byCat[cat].forEach(function(p){ el.appendChild(knobRow(p)); });
+          });
+        } else {
+          EDITOR_KNOBS.forEach(function(name){
+            var p = editorParams.find(function(x){ return x.name === name; });
+            if (p) el.appendChild(knobRow(p));
+          });
+        }
+      }
+      document.getElementById('editor-knobs-hdr').onclick = function(e){
+        if (e.target && e.target.id === 'editor-knobs-all') return;  // the checkbox, not a toggle
+        var el = document.getElementById('editor-knobs');
+        var opening = el.style.display === 'none';
+        el.style.display = opening ? 'block' : 'none';
+        if (opening) { refreshParams(); renderKnobList(); }
+      };
+      document.getElementById('editor-knobs-all').onchange = function(){ renderKnobList(); };
       function renderSurfaceList(){
         var q = (document.getElementById('editor-search').value || '').toLowerCase();
         var el = document.getElementById('editor-list'); el.innerHTML = '';
         editorSurfaces.forEach(function(s){
           if (q && s.name.toLowerCase().indexOf(q) < 0) return;
+          var inGroup = editorGroup && editorGroup.indexOf(s.name) >= 0;
           var d = document.createElement('div');
-          d.className = 'surf-item' + (editorSelected === s.name ? ' sel' : '');
+          d.className = 'surf-item' + ((editorSelected === s.name || inGroup) ? ' sel' : '');
           d.innerHTML = '<div>' + s.name +
             (surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
             (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
@@ -774,27 +910,103 @@
           el.appendChild(d);
         });
       }
+      // Hierarchy tree: model → parts → surfaces. Clicking an object/part row
+      // selects the whole group (edits fan out); a surface leaf selects just
+      // that surface, same as the flat list. ▸/▾ expands a level.
+      var editorObjExpanded = {};
+      function renderObjectList(){
+        var cnt = document.getElementById('editor-objects-count');
+        if (cnt) cnt.textContent = editorObjects.length ? ('(' + editorObjects.length + ')') : '';
+        var el = document.getElementById('editor-objects'); if (!el) return;
+        el.innerHTML = '';
+        function addObjRow(o, depth, key){
+          var isSel = editorGroup && editorGroup === o.surfaces;
+          var open = !!editorObjExpanded[key];
+          var kids = o.children || [];
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (isSel ? ' sel' : '');
+          d.style.marginLeft = (depth * 14) + 'px';
+          d.innerHTML = '<div><span class="obj-exp" style="display:inline-block;width:14px;cursor:pointer;color:#8ac;">' +
+            (open ? '▾' : '▸') + '</span>⬚ ' + o.name + '</div>' +
+            '<div class="surf-tex" style="margin-left:14px;">' + o.surfaces.length + ' surface(s)' +
+            (kids.length ? ', ' + kids.length + ' part(s)' : '') + '</div>';
+          d.querySelector('.obj-exp').onclick = function(ev){
+            ev.stopPropagation();
+            editorObjExpanded[key] = !open;
+            renderObjectList();
+          };
+          d.onclick = function(){ selectObject(o); };
+          el.appendChild(d);
+          if (!open) return;
+          if (kids.length) {
+            kids.forEach(function(c, i){ addObjRow(c, depth + 1, key + '/' + c.name + i); });
+          } else {
+            o.surfaces.forEach(function(n){
+              var s = editorSurfaces.find(function(x){ return x.name === n; });
+              var c = document.createElement('div');
+              c.className = 'surf-item' + (editorSelected === n && !editorGroup ? ' sel' : '');
+              c.style.marginLeft = ((depth + 1) * 14 + 4) + 'px';
+              c.innerHTML = '<div>' + n + (s && surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>';
+              c.onclick = function(){ if (s) selectSurface(s, /*alsoFocus=*/true); };
+              el.appendChild(c);
+            });
+          }
+        }
+        editorObjects.forEach(function(o, i){ addObjRow(o, 0, o.name + i); });
+      }
+      // Object select: every surface of the group edits together. Props panel
+      // shows the FIRST surface's values; highlight + focus cover the group.
+      function selectObject(o){
+        var names = o.surfaces.filter(function(n){
+          return editorSurfaces.some(function(s){ return s.name === n; });
+        });
+        if (!names.length) { editorStatus('object "' + o.name + '": no editable surfaces'); return; }
+        editorGroup = o.surfaces;   // identity — renderObjectList marks it selected
+        editorSelected = names[0];
+        var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
+        renderObjectList(); renderSurfaceList(); renderSurfaceProps(s, o);
+        if (Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
+        if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
+        editorStatus('object "' + o.name + '": editing ' + names.length + ' surfaces together');
+      }
       // Shared select path: list click focuses the orbit on the surface;
       // canvas pick only selects/highlights (jumping the camera on every
       // viewport click would fight the user's framing).
       function selectSurface(s, alsoFocus){
-        editorSelected = s.name; renderSurfaceList(); renderSurfaceProps(s);
+        editorGroup = null;   // single-surface mode
+        editorSelected = s.name; renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
         if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
         var sel = document.querySelector('#editor-list .surf-item.sel');
         if (sel) sel.scrollIntoView({ block: 'nearest' });
       }
+      // The names an edit applies to: the whole object group when one is
+      // selected (and the edited surface belongs to it), else just the one.
+      function editSurfNames(name){
+        if (editorGroup && editorGroup.indexOf(name) >= 0)
+          return editorGroup.filter(function(n){
+            return editorSurfaces.some(function(s){ return s.name === n; });
+          });
+        return [name];
+      }
       function setProp(name, key, v){
-        var ok = false;
-        try { ok = Module.editorSetSurfaceProp(name, key, v); }
-        catch(e){ editorStatus('set failed: ' + e); console.error('editorSetSurfaceProp', e); return false; }
-        if (!ok) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
-        else editorStatus('set ' + key + ' = ' + (+v).toFixed(2));
-        console.log('[editor] set', name, key, v, '->', ok);
-        var s = editorSurfaces.find(function(x){ return x.name === name; });
-        if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
+        var names = editSurfNames(name);
+        var okAll = true;
+        names.forEach(function(n){
+          var ok = false;
+          try { ok = Module.editorSetSurfaceProp(n, key, v); }
+          catch(e){ editorStatus('set failed: ' + e); console.error('editorSetSurfaceProp', e); okAll = false; return; }
+          if (ok) {
+            var s = editorSurfaces.find(function(x){ return x.name === n; });
+            if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
+          } else okAll = false;
+        });
+        if (!okAll) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
+        else editorStatus('set ' + key + ' = ' + (+v).toFixed(2) +
+                          (names.length > 1 ? ' (' + names.length + ' surfaces)' : ''));
+        console.log('[editor] set', names.join(','), key, v, '->', okAll);
         updateSaveButton();
-        return ok;
+        return okAll;
       }
       // Save to LWO: POST the dirty props to the dev server, which patches the
       // Authoring/greets .lwo files (with backups), reruns lwsread, and installs
@@ -917,10 +1129,15 @@
         };
         row.appendChild(r); row.appendChild(val); return row;
       }
-      function renderSurfaceProps(s){
+      function renderSurfaceProps(s, obj){
         var el = document.getElementById('editor-props'); el.innerHTML = '';
         var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;display:flex;justify-content:space-between;';
-        var hn = document.createElement('span'); hn.textContent = s.name; h.appendChild(hn);
+        var hn = document.createElement('span');
+        // Object mode: edits fan out over the whole group; values shown are the
+        // FIRST surface's (they may differ across the group until edited).
+        hn.textContent = obj ? ('⬚ ' + obj.name + ' (' + obj.surfaces.length + ' surfaces)') : s.name;
+        if (obj) hn.title = 'editing all of: ' + obj.surfaces.join(', ');
+        h.appendChild(hn);
         // Reset = back to the LOADED values (pristine snapshot), engine + UI.
         var rst = document.createElement('a');
         rst.textContent = 'reset'; rst.href = '#';
@@ -964,16 +1181,22 @@
           var fr = new FileReader();
           fr.onload = function(){
             var bytes = new Uint8Array(fr.result), ok = false;
-            try { ok = Module.editorImportTexture(s.name, role, file.name, bytes); }
-            catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); if (done) done(false); return; }
-            console.log('[editor] import', s.name, role, file.name, bytes.length, '->', ok);
-            if (ok) {
-              // Queue for persistence: Save ships these to the server, which
-              // stores them under Runtime/TEXTURES/PBR/ + the GREETS.MAT sidecar.
-              (editorPendingMaps[s.name] = editorPendingMaps[s.name] || {})[role] =
-                { filename: file.name, bytes: bytes };
-              updateSaveButton();
-            }
+            // Object mode: the map lands on EVERY surface of the group.
+            var names = editSurfNames(s.name);
+            names.forEach(function(n){
+              var one = false;
+              try { one = Module.editorImportTexture(n, role, file.name, bytes); }
+              catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); return; }
+              if (one) {
+                // Queue for persistence: Save ships these to the server, which
+                // stores them under Runtime/TEXTURES/PBR/ + the GREETS.MAT sidecar.
+                (editorPendingMaps[n] = editorPendingMaps[n] || {})[role] =
+                  { filename: file.name, bytes: bytes };
+                ok = true;
+              }
+            });
+            console.log('[editor] import', names.join(','), role, file.name, bytes.length, '->', ok);
+            if (ok) updateSaveButton();
             if (done) done(ok);
           };
           fr.readAsArrayBuffer(file);
@@ -992,26 +1215,46 @@
         pinp.onchange = function(){
           var files = Array.prototype.slice.call(pinp.files || []);
           if (!files.length) return;
-          var slots = {};   // role -> file, first match wins (native dir-scan order rule)
+          // webkitdirectory RECURSES: picking a folder above the pack (e.g. a
+          // walls-bl category dir) used to mix roles across different packs —
+          // albedo from one, normal from another (scrambled relief). Bucket
+          // files by their containing directory and import from ONE pack: the
+          // dir with the most distinct roles, albedo-bearing dirs preferred.
+          var dirs = {};   // dirPath -> { role -> file }
           files.forEach(function(f){
             var role = '';
             try { role = Module.editorClassifyMap(f.name); } catch(e){}
-            if (role && !slots[role]) slots[role] = f;
+            if (!role) return;
+            var rel = f.webkitRelativePath || f.name;
+            var dir = rel.indexOf('/') >= 0 ? rel.substring(0, rel.lastIndexOf('/')) : '';
+            if (!dirs[dir]) dirs[dir] = {};
+            if (!dirs[dir][role]) dirs[dir][role] = f;
           });
+          var best = null, bestKey = null, nDirs = 0;
+          Object.keys(dirs).forEach(function(k){
+            nDirs++;
+            var score = Object.keys(dirs[k]).length + (dirs[k].albedo ? 100 : 0);
+            var bestScore = best ? Object.keys(best).length + (best.albedo ? 100 : 0) : -1;
+            if (score > bestScore) { best = dirs[k]; bestKey = k; }
+          });
+          if (!best) { editorStatus('pack: no recognizable maps in folder'); return; }
+          var slots = best;
           var roles = Object.keys(slots);
-          if (!roles.length) { editorStatus('pack: no recognizable maps in folder'); return; }
+          var packName = bestKey ? bestKey.split('/').pop() : '(folder)';
           // Albedo first: it defines the material's texel layout; the engine
           // resamples the other maps to it (and drops stale mismatched ones).
           roles.sort(function(a,b){ return (a==='albedo'?0:1) - (b==='albedo'?0:1); });
-          editorStatus('pack: importing ' + roles.join(', ') + '…');
-          var doneCount = 0, okCount = 0;
+          editorStatus('pack ' + packName + ': importing ' + roles.join(', ') + '…'
+                       + (nDirs > 1 ? ' (' + nDirs + ' folders seen, using ' + packName + ')' : ''));
+          var doneCount = 0, okCount = 0, applied = [];
           var chain = Promise.resolve();
           roles.forEach(function(role){
             chain = chain.then(function(){ return new Promise(function(res){
               importFile(role, slots[role], function(ok){
-                if (ok) okCount++;
+                if (ok) { okCount++; applied.push(role + '=' + slots[role].name); }
                 if (++doneCount === roles.length)
-                  editorStatus('pack: ' + okCount + '/' + roles.length + ' maps applied (' + roles.join(', ') + ')');
+                  editorStatus('pack ' + packName + ': ' + okCount + '/' + roles.length
+                               + ' applied — ' + applied.join(', '));
                 res();
               });
             }); });
@@ -1086,6 +1329,13 @@
           if (dragged || e.button !== 0 || e.shiftKey) return;
           var name = pickAt(e);
           if (!name) { editorStatus('pick: no surface here'); return; }
+          // pick=object: promote the picked surface to its owning object so
+          // the whole model (e.g. the mech) is selected/edited at once.
+          var pickObj = document.getElementById('editor-pickobj');
+          if (pickObj && pickObj.checked) {
+            var o = editorObjects.find(function(x){ return x.surfaces.indexOf(name) >= 0; });
+            if (o) { selectObject(o); editorStatus('picked object: ' + o.name + ' (via ' + name + ')'); return; }
+          }
           var s = editorSurfaces.find(function(x){ return x.name === name; });
           if (s) { selectSurface(s, /*alsoFocus=*/false); editorStatus('picked: ' + name); }
         });
@@ -1097,7 +1347,14 @@
         canvasEl.addEventListener('wheel', function(e){
           if (!Module.editorZoom) return;
           e.preventDefault();
-          Module.editorZoom(e.deltaY);   // proportional → smooth on a trackpad
+          // Normalize: deltaMode 1 = lines (real mouse wheels on some
+          // platforms) → ~33 px/line. Trackpad pinch arrives as ctrlKey
+          // wheel events with SMALL fractional deltas — boost them so a
+          // pinch spans a useful zoom range (matches browser page-zoom
+          // feel, which uses ~exp(-delta*0.01)).
+          var d = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+          if (e.ctrlKey) d *= 7;
+          Module.editorZoom(d);          // proportional → smooth on a trackpad
         }, { passive: false });
         canvasEl.addEventListener('contextmenu', function(e){ e.preventDefault(); });  // allow right-drag pan
         var panel = document.getElementById('editor-panel');

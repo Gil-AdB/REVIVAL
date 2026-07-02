@@ -3,6 +3,7 @@
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <string>
@@ -141,10 +142,15 @@ static int translateScancode(SDL_Scancode sc)
 	case SDL_SCANCODE_D:         return ScD;
 	case SDL_SCANCODE_E:         return ScE;
 	case SDL_SCANCODE_H:         return ScH;
+	case SDL_SCANCODE_K:         return ScK;
+	case SDL_SCANCODE_L:         return ScL;
 	case SDL_SCANCODE_M:         return ScM;
 	case SDL_SCANCODE_P:         return ScP;
+	case SDL_SCANCODE_Q:         return ScQ;
 	case SDL_SCANCODE_R:         return ScR;
+	case SDL_SCANCODE_S:         return ScS;
 	case SDL_SCANCODE_U:         return ScU;
+	case SDL_SCANCODE_W:         return ScW;
 	case SDL_SCANCODE_Y:         return ScY;
 	case SDL_SCANCODE_Z:         return ScZ;
 	default: return -1;
@@ -196,12 +202,12 @@ static bool pumpEvents()
 			}
 			break;
 		case SDL_MOUSEWHEEL:
-			if (g_editorMode) {
-				g_camDist *= (event.wheel.y > 0) ? 0.9f : 1.1f;
-				if (g_camDist <   4.0f) g_camDist =   4.0f;
-				if (g_camDist > 400.0f) g_camDist = 400.0f;
-				rev::Editor_MarkDirty();
-			}
+			// Editor zoom is handled by the JS canvas wheel listener
+			// (Module.editorZoom — float deltas). This SDL path used int
+			// wheel.y: trackpad-pinch deltas < 1 truncated to 0, and the
+			// (y > 0 ? 0.9 : 1.1) ternary turned EVERY pinch event into
+			// zoom-OUT. Both handlers also fired per event, fighting each
+			// other. SDL wheel is now ignored in editor mode.
 			break;
 		default:
 			break;
@@ -571,7 +577,11 @@ static void editorTick()
 		}
 	} else {
 		if (anyFreeCamKey()) {
-			dTime = 16.0f;             // fixed step (Timer is frozen → no scene dTime)
+			// Fixed step in the free-cam's tuned regime (~0.25 Timer ticks per
+			// frame — Rot_Speed_Base's comments assume it). The earlier 16.0
+			// (a "milliseconds" value pasted into Timer-tick units) made one
+			// held-arrow frame rotate 0.045*16 ≈ 41°: rotation read as broken.
+			dTime = 0.25f;             // (Timer is frozen → no scene dTime)
 			Dynamic_Camera();          // keyboard fly + look (the TAB free-cam)
 			CalcPersp(&FC);
 			View = &FC;
@@ -784,34 +794,108 @@ void editorPan(float dxPixels, float dyPixels)
 void editorFocusSurface(std::string name)
 {
 	if (!CurScene) return;
-	float lox=1e30f, loy=1e30f, loz=1e30f, hix=-1e30f, hiy=-1e30f, hiz=-1e30f;
-	long n = 0;
+	// `name` may be a ';'-separated list (object selection frames the group).
+	std::vector<std::string> wants;
+	for (size_t pos = 0; pos <= name.size(); ) {
+		size_t semi = name.find(';', pos);
+		if (semi == std::string::npos) semi = name.size();
+		if (semi > pos) wants.push_back(name.substr(pos, semi - pos));
+		pos = semi + 1;
+	}
+	// Gather every matching face's world-space bbox + centre. A surface like
+	// "lamp" appears on MANY instances around the room — framing the union of
+	// all of them parks the camera "from afar". So for a SINGLE surface we
+	// cluster the faces around the instance nearest the camera and frame only
+	// that cluster; a group (object) focus keeps the full union (the object is
+	// one connected model, its union is already tight).
+	struct FBox { float lo[3], hi[3], c[3]; };
+	std::vector<FBox> boxes;
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
 		for (DWord i = 0; i < T->FIndex; ++i) {
 			Face &F = T->Faces[i];
 			// Base-name match: floor's faces reference the "floor::mirUV"
 			// handedness clone, so an exact compare finds no faces at all.
-			if (!F.Txtr || !F.Txtr->Name || rev::Editor_BaseSurfName(F.Txtr->Name) != name) continue;
+			if (!F.Txtr || !F.Txtr->Name) continue;
+			const std::string base = rev::Editor_BaseSurfName(F.Txtr->Name);
+			if (std::find(wants.begin(), wants.end(), base) == wants.end()) continue;
+			FBox b = { { 1e30f, 1e30f, 1e30f }, { -1e30f, -1e30f, -1e30f }, { 0, 0, 0 } };
 			Vertex *vs[3] = { F.A, F.B, F.C };
+			int nv = 0;
 			for (int k = 0; k < 3; ++k) {
 				Vertex *v = vs[k]; if (!v) continue;
 				Vector w; MatrixXVector(T->RotMat, &v->Pos, &w); Vector_SelfAdd(&w, &T->IPos);
-				if (w.x < lox) lox = w.x; if (w.y < loy) loy = w.y; if (w.z < loz) loz = w.z;
-				if (w.x > hix) hix = w.x; if (w.y > hiy) hiy = w.y; if (w.z > hiz) hiz = w.z;
-				++n;
+				const float p[3] = { w.x, w.y, w.z };
+				for (int a = 0; a < 3; ++a) {
+					if (p[a] < b.lo[a]) b.lo[a] = p[a];
+					if (p[a] > b.hi[a]) b.hi[a] = p[a];
+					b.c[a] += p[a];
+				}
+				++nv;
 			}
+			if (!nv) continue;
+			for (int a = 0; a < 3; ++a) b.c[a] /= float(nv);
+			boxes.push_back(b);
 		}
 	}
-	if (n == 0) { std::fprintf(stderr, "[EDITOR] focus '%s': no faces\n", name.c_str()); return; }
-	g_camTarget.x = (lox + hix) * 0.5f;
-	g_camTarget.y = (loy + hiy) * 0.5f;
-	g_camTarget.z = (loz + hiz) * 0.5f;
-	const float dx = hix-lox, dy = hiy-loy, dz = hiz-loz;
+	if (boxes.empty()) { std::fprintf(stderr, "[EDITOR] focus '%s': no faces\n", name.c_str()); return; }
+
+	// Union bbox (also the cluster threshold scale).
+	float ulo[3] = { 1e30f, 1e30f, 1e30f }, uhi[3] = { -1e30f, -1e30f, -1e30f };
+	for (const FBox &b : boxes)
+		for (int a = 0; a < 3; ++a) {
+			if (b.lo[a] < ulo[a]) ulo[a] = b.lo[a];
+			if (b.hi[a] > uhi[a]) uhi[a] = b.hi[a];
+		}
+	float lo[3], hi[3];
+	long used = long(boxes.size());
+	if (wants.size() > 1) {
+		for (int a = 0; a < 3; ++a) { lo[a] = ulo[a]; hi[a] = uhi[a]; }
+	} else {
+		// Single-linkage growth from the face nearest the camera: include any
+		// face whose centre is within R of the growing cluster bbox. R scales
+		// with the union diagonal so far-apart instances stay separate.
+		const float ud[3] = { uhi[0]-ulo[0], uhi[1]-ulo[1], uhi[2]-ulo[2] };
+		const float uDiag = std::sqrt(ud[0]*ud[0] + ud[1]*ud[1] + ud[2]*ud[2]);
+		const float R = std::max(uDiag * 0.15f, 2.0f), R2 = R * R;
+		size_t seed = 0; float bestD = 1e30f;
+		const float cam[3] = { FC.ISource.x, FC.ISource.y, FC.ISource.z };
+		for (size_t i = 0; i < boxes.size(); ++i) {
+			const float d0 = boxes[i].c[0]-cam[0], d1 = boxes[i].c[1]-cam[1], d2 = boxes[i].c[2]-cam[2];
+			const float d = d0*d0 + d1*d1 + d2*d2;
+			if (d < bestD) { bestD = d; seed = i; }
+		}
+		std::vector<char> in(boxes.size(), 0);
+		in[seed] = 1;
+		for (int a = 0; a < 3; ++a) { lo[a] = boxes[seed].lo[a]; hi[a] = boxes[seed].hi[a]; }
+		for (bool grew = true; grew; ) {
+			grew = false;
+			for (size_t i = 0; i < boxes.size(); ++i) {
+				if (in[i]) continue;
+				float d2sum = 0.0f;
+				for (int a = 0; a < 3; ++a) {
+					const float v = boxes[i].c[a] < lo[a] ? lo[a] - boxes[i].c[a]
+					              : boxes[i].c[a] > hi[a] ? boxes[i].c[a] - hi[a] : 0.0f;
+					d2sum += v * v;
+				}
+				if (d2sum > R2) continue;
+				in[i] = 1; grew = true;
+				for (int a = 0; a < 3; ++a) {
+					if (boxes[i].lo[a] < lo[a]) lo[a] = boxes[i].lo[a];
+					if (boxes[i].hi[a] > hi[a]) hi[a] = boxes[i].hi[a];
+				}
+			}
+		}
+		used = long(std::count(in.begin(), in.end(), 1));
+	}
+	g_camTarget.x = (lo[0] + hi[0]) * 0.5f;
+	g_camTarget.y = (lo[1] + hi[1]) * 0.5f;
+	g_camTarget.z = (lo[2] + hi[2]) * 0.5f;
+	const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
 	const float diag = std::sqrt(dx*dx + dy*dy + dz*dz);
 	g_camDist = diag * 1.3f < 6.0f ? 6.0f : diag * 1.3f;
 	g_editorCamSeeded = true;   // don't let the first-frame seed override the focus
-	std::fprintf(stderr, "[EDITOR] focus '%s': %ld verts, centre (%.1f %.1f %.1f) dist %.1f\n",
-	             name.c_str(), n, g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
+	std::fprintf(stderr, "[EDITOR] focus '%s': %ld/%zu faces, centre (%.1f %.1f %.1f) dist %.1f\n",
+	             name.c_str(), used, boxes.size(), g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
 	rev::Editor_MarkDirty();
 }
 } // namespace
