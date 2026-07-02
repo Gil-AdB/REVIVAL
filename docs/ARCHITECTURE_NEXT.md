@@ -190,3 +190,25 @@ pointwise post-FX fusion (§3.3), half-res DoF (§3.4), temporal SSAO (§3.5),
 frame pipelining (§3.6). The lighting waves (w1 7ms + w2 2.8ms) are now the
 largest single bucket; levers there are rate/algorithmic (quarter already on)
 — or x86, where the vec path may finally pay.
+
+## 2026-07-02 (evening) — #2 bench-verified dead; f16 HDR SHIPPED (−7 ms)
+
+**#2 contribution culling, bench-verified (FDS_CONTRIB_CULL_THR harness,
+3e02226):** a-priori per-tile bound culls 23% of tile-lights at the guaranteed-
+invisible threshold — frame min UNCHANGED (24.65 vs 24.68). The provably-dim
+lights already early-out on the per-pixel range test; the oracle's other half
+(in-range but dim via albedo/dot) is unknowable before shading. Confirmed dead
+on both perf and quality grounds.
+
+**#3.3 pointwise fusion: dead for the production config** — chromatic is a
+GATHER over the tonemapped image, so Render_LensPostPass must exist whenever
+--chromatic is on, and vignette already rides in it. Only pays with chromatic
+off (~0.3 ms); not built.
+
+**#3.1 f16 HDR buffer: SHIPPED (44cd690).** hdrf = __fp16 storage on arm64.
+Full-config frame min 50.7→43.6 ms (**−7 ms, −14%** — bigger than the −2…4
+estimate; effective streaming bandwidth under pool contention is well below
+peak, so halving bytes pays double). Visual: maxΔ 3 vs f32 on the full post-FX
+snapshot; disco beams + fountain bolts banding-free. FDS_HDR_F32 escape hatch.
+
+Standing doors: half-res DoF, temporal SSAO, frame pipelining, x86 measurements.
