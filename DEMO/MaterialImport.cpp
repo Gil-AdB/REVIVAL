@@ -122,12 +122,29 @@ constexpr int kMaxTexDim = 1024;
 static int ilog2(int v) { int l = 0; while ((1 << l) < v) ++l; return l; }
 
 // Load an image → 32bpp → cap to kMaxTexDim → optional green flip → tile + mips.
-Texture *loadTiled(const std::string &path, bool flipGreen) {
+// targetW/H (optional): force the final dimensions. The deferred kernel samples
+// EVERY per-material map (normal/height/rough/ao) with the swizzled texel index
+// + miplevel the rasterizer computed against the ALBEDO's layout — a map whose
+// dimensions differ from the material's current albedo reads scrambled
+// (per-pixel sparkle noise). Aux-map imports pass the albedo dims here.
+Texture *loadTiled(const std::string &path, bool flipGreen,
+                   int targetW = 0, int targetH = 0) {
 	Texture *t = new Texture;
 	t->FileName = strdup(path.c_str());
 	t->BPP = 0;
 	if (!Load_Texture(t)) { std::free(t->FileName); delete t; return nullptr; }
 	if (t->BPP != 32) BPPConvert_Texture(t, 32);
+	if (targetW > 0 && targetH > 0 && (t->SizeX != targetW || t->SizeY != targetH)) {
+		Image img; img.FileName = nullptr; img.x = t->SizeX; img.y = t->SizeY;
+		img.Data = (DWord*)_aligned_malloc(sizeof(DWord) * size_t(t->SizeX) * size_t(t->SizeY), 16);
+		std::memcpy(img.Data, t->Data, sizeof(DWord) * size_t(t->SizeX) * size_t(t->SizeY));
+		Scale_Image(&img, targetW, targetH);
+		t->Data  = (byte*)img.Data;
+		t->SizeX = targetW; t->SizeY = targetH;
+		t->LSizeX = ilog2(targetW); t->LSizeY = ilog2(targetH);
+		std::fprintf(stderr, "    [match] %s resampled to %dx%d (albedo texel layout)\n",
+		             path.c_str(), targetW, targetH);
+	}
 	// Downsample if the source exceeds the deferred 20-bit UV budget. Scale_Image
 	// mipmaps down + bilinear-resamples (any size, not just po2) and owns its
 	// buffer; we leak the original t->Data (init-time, matches engine convention).
@@ -244,11 +261,15 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 		} else {
 			std::fprintf(stderr, "    (no albedo found — material keeps its existing texture)\n");
 		}
+		// Aux maps must match the albedo's texel layout (the kernel samples them
+		// with the albedo-computed swizzled index) — resample to its dims.
+		int aw = 0, ah = 0;
+		if (M->Txtr) { aw = M->Txtr->SizeX; ah = M->Txtr->SizeY; }
 		if (!normal.empty()) {
 			const bool srcOGL = normalSourceIsOGL(stemLower(normal));
 			bool flip = (srcOGL != kEngineExpectsOGL);
 			if (g_forceFlipNormal) flip = !flip;
-			if (Texture *t = loadTiled(normal, flip)) {
+			if (Texture *t = loadTiled(normal, flip, aw, ah)) {
 				if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
 				for (Material *m : mats) m->NormalMap = t;
 				std::fprintf(stderr, "    normal    %s (src=%s, flipG=%d%s)\n", normal.c_str(),
@@ -256,14 +277,14 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			}
 		}
 		if (!rough.empty()) {
-			if (Texture *r32 = loadTiled(rough, false)) {
+			if (Texture *r32 = loadTiled(rough, false, aw, ah)) {
 				Texture *r8 = MakeHeight8(r32);
 				for (Material *m : mats) m->RoughnessMap = r8 ? r8 : r32;
 				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), r8 ? "8-bit" : "32-bit");
 			}
 		}
 		if (!height.empty()) {
-			if (Texture *h32 = loadTiled(height, false)) {
+			if (Texture *h32 = loadTiled(height, false, aw, ah)) {
 				Texture *h8 = MakeHeight8(h32);
 				for (Material *m : mats) m->HeightMap = h8 ? h8 : h32;
 				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), h8 ? "8-bit" : "32-bit",
@@ -271,7 +292,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			}
 		}
 		if (!ao.empty()) {
-			if (Texture *a32 = loadTiled(ao, false)) {
+			if (Texture *a32 = loadTiled(ao, false, aw, ah)) {
 				Texture *a8 = MakeHeight8(a32);
 				for (Material *m : mats) m->AoMap = a8 ? a8 : a32;
 				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), a8 ? "8-bit" : "32-bit");
@@ -319,7 +340,16 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		else if (!std::strcmp(prop, "specular"))     M->Specular = value;
 		else if (!std::strcmp(prop, "glossiness"))   M->Glossiness = (unsigned short)(value < 0 ? 0 : value);
 		else if (!std::strcmp(prop, "luminosity"))   M->Luminosity = value;
-		else if (!std::strcmp(prop, "transparency")) M->Transparency = value;
+		else if (!std::strcmp(prop, "transparency")) {
+			// Mat_Transparent is the ROUTING flag (derived from the value at
+			// FLD load): both xpar passes re-check it per frame, so flipping
+			// it live moves the faces between the opaque raster and the
+			// transparent peel. The blend degree is the value itself (the
+			// deferred xpar kernel blends behind*Transparency/100).
+			M->Transparency = value;
+			if (value > 0.0f) M->Flags |=  Mat_Transparent;
+			else              M->Flags &= ~Mat_Transparent;
+		}
 		else if (!std::strcmp(prop, "reflection"))   M->Reflection = value;
 		else return false;   // unknown prop
 		any = true;
@@ -394,24 +424,48 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	if (mats.empty()) { std::fprintf(stderr, "[MAT-IMPORT] '%s' not in scene\n", matName); return false; }
 
 	// Load/convert once, share the Texture* across all matching materials.
+	// Aux maps are resampled to the material's CURRENT albedo dims (the kernel
+	// samples them with the albedo-layout texel index — see loadTiled).
 	const std::string r = role;
+	int aw = 0, ah = 0;
+	if (mats[0]->Txtr) { aw = mats[0]->Txtr->SizeX; ah = mats[0]->Txtr->SizeY; }
 	bool tangentMap = false, ok = false;
 	if (r == "albedo") {
-		if (Texture *t = loadTiled(path, false)) { for (Material *M : mats) M->Txtr = t; ok = true; }
+		if (Texture *t = loadTiled(path, false)) {
+			for (Material *M : mats) {
+				M->Txtr = t;
+				// New albedo = new texel layout. Aux maps sized for the OLD
+				// layout would read scrambled — drop them (re-import from the
+				// pack restores them at the matching size; the pack flow
+				// imports albedo first, so this is self-healing).
+				auto dropIf = [&](Texture *&slot, const char *what) {
+					if (slot && (slot->SizeX != t->SizeX || slot->SizeY != t->SizeY)) {
+						std::fprintf(stderr, "    [drop] stale %s map (%dx%d vs new albedo %dx%d)\n",
+						             what, slot->SizeX, slot->SizeY, t->SizeX, t->SizeY);
+						slot = nullptr;
+					}
+				};
+				dropIf(M->NormalMap, "normal");
+				dropIf(M->HeightMap, "height");
+				dropIf(M->RoughnessMap, "roughness");
+				dropIf(M->AoMap, "ao");
+			}
+			ok = true;
+		}
 	} else if (r == "normal") {
 		// No filename convention to sniff here; default to the engine (OGL)
 		// convention, honoring the global --material-import-flip-normal override.
-		if (Texture *t = loadTiled(path, g_forceFlipNormal)) {
+		if (Texture *t = loadTiled(path, g_forceFlipNormal, aw, ah)) {
 			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
 			for (Material *M : mats) M->NormalMap = t;
 			tangentMap = true; ok = true;
 		}
 	} else if (r == "height") {
-		if (Texture *h32 = loadTiled(path, false)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
+		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
-		if (Texture *r32 = loadTiled(path, false)) { Texture *r8 = MakeHeight8(r32); for (Material *M : mats) M->RoughnessMap = r8 ? r8 : r32; ok = true; }
+		if (Texture *r32 = loadTiled(path, false, aw, ah)) { Texture *r8 = MakeHeight8(r32); for (Material *M : mats) M->RoughnessMap = r8 ? r8 : r32; ok = true; }
 	} else if (r == "ao") {
-		if (Texture *a32 = loadTiled(path, false)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
+		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
 	} else {
 		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
 	}

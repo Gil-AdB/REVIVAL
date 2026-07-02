@@ -323,6 +323,42 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// IMPORT_TEST=surface:role:path — exercise the RUNTIME map-import path
+// (rev::Editor_ImportTexture / MaterialImport_ApplyMapFile, the browser
+// editor's code) natively, as opposed to the CLI --material-import which
+// applies at scene INIT. Isolates runtime-vs-init import differences
+// without the browser in the loop. Fires once.
+static void RunImportTestHook() {
+    const char *spec = std::getenv("IMPORT_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    // Semicolon-separated list of surface:role:path entries.
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        size_t c1 = s.find(':'), c2 = (c1 == std::string::npos) ? c1 : s.find(':', c1 + 1);
+        if (c2 == std::string::npos) { std::fprintf(stderr, "[IMPORTTEST] want surface:role:path\n"); continue; }
+        std::string surf = s.substr(0, c1), role = s.substr(c1 + 1, c2 - c1 - 1), path = s.substr(c2 + 1);
+        FILE *f = std::fopen(path.c_str(), "rb");
+        if (!f) { std::fprintf(stderr, "[IMPORTTEST] can't open %s\n", path.c_str()); continue; }
+        std::fseek(f, 0, SEEK_END); long len = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+        std::vector<unsigned char> buf(static_cast<size_t>(len), 0);
+        size_t rd = std::fread(buf.data(), 1, buf.size(), f);
+        std::fclose(f);
+        const bool ok = rev::Editor_ImportTexture(surf.c_str(), role.c_str(),
+                                                  path.c_str(), buf.data(), rd);
+        std::fprintf(stderr, "[IMPORTTEST] %s %s <- %s: %s\n",
+                     surf.c_str(), role.c_str(), path.c_str(), ok ? "ok" : "FAILED");
+    }
+}
+
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -408,6 +444,10 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             CalcPersp(&FC);
             View = &FC;
         }
+
+        // IMPORT_TEST fires BEFORE the tick so the first written frame (t=100,
+        // which frames the big rooms wall) already shows the imported map.
+        RunImportTestHook();
 
         bool more = driver->tick();
         (void)more;
