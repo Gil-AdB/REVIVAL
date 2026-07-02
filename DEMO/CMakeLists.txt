@@ -225,6 +225,10 @@ if(EMSCRIPTEN)
         -sASSERTIONS=1
         -sEXIT_RUNTIME=1
         -sUSE_SDL=2
+        # The editor Embind surface (MaterialEditor/MainLoop) is compiled into
+        # every wasm target that shares DEMO_SOURCES; node never calls it, but
+        # the registration symbols must still resolve.
+        -lembind
     )
     set_target_properties(DEMO_snapshot PROPERTIES SUFFIX ".js")
 else()
