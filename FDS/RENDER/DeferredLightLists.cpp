@@ -168,8 +168,18 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 
 	// Per-tile chunk bounding spheres for the spot cone cull.
 	const bool coneCull = fds::FeatureFlags::spot_cone_cull();
+	// [EXPERIMENT] FDS_CONTRIB_CULL_THR=<t>: per-tile HARD contribution cull —
+	// drop a light from a tile when its a-priori max diffuse contribution
+	// bound (maxColor × falloff at the closest possible pixel, via the tile
+	// chunk sphere) is below t (linear 0-255 units; 0.5 ≈ half an 8-bit step).
+	// The historically-rejected hard-cutoff design (inter-tile shading steps) —
+	// kept as a measurement harness for the cull's perf ceiling, NOT shipping.
+	static const float sContribThr = []() {
+		const char *e = std::getenv("FDS_CONTRIB_CULL_THR");
+		return (e && *e) ? float(std::atof(e)) : 0.0f;
+	}();
 	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
-	if (coneCull) {
+	if (coneCull || sContribThr > 0.0f) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {
 				const int idx = j * numTilesX + i;
@@ -293,6 +303,16 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				if (Lmid != 0 && Lmid < 32 && tileMirrorPresence &&
 				    !(tileMirrorPresence[idx] & (1u << Lmid))) {
 					continue;
+				}
+				// [EXPERIMENT] hard contribution cull (see sContribThr above).
+				if (sContribThr > 0.0f && chunk[idx].valid) {
+					const TileChunkSphere &cc = chunk[idx];
+					const float ddx = Lpx - cc.cx, ddy = Lpy - cc.cy, ddz = Lpz - cc.cz;
+					const float dmin = std::sqrt(ddx*ddx + ddy*ddy + ddz*ddz) - cc.R;
+					if (dmin > 0.0f) {
+						const float maxCol = std::max(Lcb, std::max(Lcg, Lcr));
+						if (maxCol * (1.0f - dmin * Lrr) < sContribThr) continue;
+					}
 				}
 				if (tl.count < DEFERRED_MAX_LIGHTS) {
 					const int s = tl.count++;
