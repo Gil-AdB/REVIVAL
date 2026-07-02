@@ -246,3 +246,14 @@ same frame. The commit's own "byte-identical to full" gate passed because the
 verification frame (stone floor) has locally smooth texture ratios — same
 lesson as #2 above: gate frames must exercise the failure mode (here, a
 high-contrast texture), not just the success mode.
+
+## 2026-07-02 — quarter/checker vs full is FRAME-dependent; reference frame now ts=491
+
+Prior "quarter is neutral on greets" was measured at ts=1700 (shadow-bound).
+User designated ts=491 (disco, kernel-bound: RNDR 81% of frame) as the perf
+reference. Full config, 1512x848, min over 120 iters, interleaved x2:
+quarter 46.5-48.0 ms / checkerboard 47.4-47.5 / full-rate 67.0-68.2. The
+whole 20 ms delta is RNDR (58.5 -> 39.1 min); BAKE/ANIM identical. So on
+kernel-bound frames quarter is a 30% frame win and checker buys nothing over
+it; on shadow-bound frames it's neutral; on city it's still 2.5x slower.
+Quote both ts=491 and ts=1700 for anything shifting kernel-vs-bake balance.
