@@ -88,6 +88,10 @@ private:
     // Per-frame samples in nanoseconds. Used for min/max/p50/p95 in dump().
     std::vector<std::int64_t> samples_[PROF_NUM];
     std::vector<std::int64_t> frameTotals_; // wall ns per frame (for FPS stats)
+    std::vector<std::int32_t> frameT_;      // g_FrameTime per frame — dump()
+                                            // prints the slowest frames' t so a
+                                            // heavy stretch can be re-visited
+                                            // (G-key dump / --bench ts=<t>)
 
     clock::time_point frameStart_;
     clock::time_point sceneStart_;
