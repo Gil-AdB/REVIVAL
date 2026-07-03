@@ -88,6 +88,11 @@
 // loop below can read its cone params for the bsphere-vs-cone cull.
 extern thread_local Omni* g_currentShadowOmni;
 
+// Defined in Shadows.cpp. Generation stamp for the per-mesh bake cache
+// (TriMesh::BakeCacheGen / BakeWsBSphereCtr / BakeIsDynamic); primed
+// serially before the parallel per-face tasks, read-only here.
+extern uint32_t g_shadowBakeGen;
+
 // Return true when the world-space sphere (center C, radius r) lies
 // fully outside the spot cone (apex P, normalized axis D, outer cosine
 // cosOuter, max range). Conservative — false-negatives (keeps a sphere
@@ -703,10 +708,20 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 			return false;
 		};
+		// Prefer the bake cache over re-walking spline keys: primed once
+		// per bake call (Shadows.cpp), same predicate, valid while the
+		// generation stamps match. Snapshot/one-off callers that bake
+		// without priming fall back to the walk.
+		const bool bakeCacheValid = _inShadowPass
+		    && T->BakeCacheGen == g_shadowBakeGen;
+		auto meshDynForBake = [&]() -> bool {
+			return bakeCacheValid ? (T->BakeIsDynamic != 0)
+			                      : isDynamicForBake(Obj);
+		};
 		// Symmetric counterpart for the dynamic per-frame bake: skip
 		// meshes whose Pos/Rotate splines are effectively static —
 		// those already live in the once-baked static map.
-		if (inDynamicBake && !isDynamicForBake(Obj)) {
+		if (inDynamicBake && !meshDynForBake()) {
 			static std::atomic<int> sDynSkip{0};
 			if (sDynSkip.fetch_add(1) < 32) {
 				std::fprintf(stderr,
@@ -724,7 +739,7 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				    unsigned(T->Pos.NumKeys), unsigned(T->FIndex));
 			}
 		}
-		if (inStaticBake && isDynamicForBake(Obj)) {
+		if (inStaticBake && meshDynForBake()) {
 			static std::atomic<int> sSkipLogged{0};
 			if (sSkipLogged.fetch_add(1) < 32) {
 				std::fprintf(stderr,
@@ -744,34 +759,22 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			}
 		}
 
-		// Per-pass clone redirection. With scratch non-null, all
-		// reads/writes of this TriMesh's per-vertex projection state
-		// (Vertex::PX, PY, RZ, TPos_AOS, TN, TTangent, UZ, VZ, Flags…)
-		// land in scratch's clone instead of T's own Verts. Face
-		// pushes also use the clone's Face* (whose A/B/C point into
-		// the clone's Verts), so downstream code sees a coherent
-		// per-pass snapshot. Nullptr → in-place writes to tVerts
-		// (main pass keeps the no-allocation fast path).
-		Vertex *tVerts;
-		Face   *tFaces;
-		if (scratch) {
-			auto& clone = scratch->cloneOf(T);
-			tVerts = clone.verts.data();
-			tFaces = clone.faces.data();
-		} else {
-			tVerts = T->Verts;
-			tFaces = T->Faces;
-		}
-
 		// Mesh-bsphere-vs-cone cull during shadow-pass Transform_Objects.
 		// Cheap pre-test that lets us skip the matrix work + vertex
 		// transform + face faces.fList submission for any mesh whose bsphere
 		// can't contribute to this light's shadow map. Saves both the
 		// per-vertex xform and the per-face raster work downstream.
+		// The world bsphere comes from the bake cache when primed (see
+		// Render_DeferredShadowMaps): identical across every face task of
+		// the call, so the per-face MatrixXVector re-derivation is skipped.
 		if (coneCull) {
 			Vector wsBsphereCtr;
-			MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
-			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			if (bakeCacheValid) {
+				wsBsphereCtr = T->BakeWsBSphereCtr;
+			} else {
+				MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
+				Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			}
 			if (sphereOutsideSpotCone(wsBsphereCtr, T->BSphereRadius,
 			                          conePos, coneDir, coneCosOuter, coneRange)) {
 				frustumFlags |= Tri_Invisible;
@@ -785,14 +788,41 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// (each task wants a per-face decision, not a global one).
 		if (cubeFaceCull) {
 			Vector wsBsphereCtr;
-			MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
-			Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			if (bakeCacheValid) {
+				wsBsphereCtr = T->BakeWsBSphereCtr;
+			} else {
+				MatrixXVector(T->RotMat, &T->BSphereCtr, &wsBsphereCtr);
+				Vector_SelfAdd(&wsBsphereCtr, &T->IPos);
+			}
 			// cubeFaceCos = 0.577 by construction; use the constant-
 			// folded variant to skip the sqrt + divide per call.
 			if (sphereOutsidePyramidCone(wsBsphereCtr, T->BSphereRadius,
 			                             cubeFacePos, cubeFaceDir, cubeFaceRange)) {
 				continue;
 			}
+		}
+
+		// Per-pass clone redirection. With scratch non-null, all
+		// reads/writes of this TriMesh's per-vertex projection state
+		// (Vertex::PX, PY, RZ, TPos_AOS, TN, TTangent, UZ, VZ, Flags…)
+		// land in scratch's clone instead of T's own Verts. Face
+		// pushes also use the clone's Face* (whose A/B/C point into
+		// the clone's Verts), so downstream code sees a coherent
+		// per-pass snapshot. Nullptr → in-place writes to tVerts
+		// (main pass keeps the no-allocation fast path).
+		// Fetched AFTER the culls: a culled mesh must not pay the clone
+		// lookup — nor the one-time full vertex/face copy cloneOf does on
+		// first use, which for a mesh never visible from this light's
+		// face was pure wasted memory + bandwidth.
+		Vertex *tVerts;
+		Face   *tFaces;
+		if (scratch) {
+			auto& clone = scratch->cloneOf(T);
+			tVerts = clone.verts.data();
+			tFaces = clone.faces.data();
+		} else {
+			tVerts = T->Verts;
+			tFaces = T->Faces;
 		}
 
 		MatrixXMatrix(cam.view->Mat,T->RotMat,M);

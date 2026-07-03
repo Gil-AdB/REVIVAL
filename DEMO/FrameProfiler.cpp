@@ -70,6 +70,11 @@ void FrameProfiler::beginFrame() {
     frameStart_ = clock::now();
 }
 
+// Scene time of the frame in flight (FDS_VARS.H) — every scene driver
+// assigns it from Timer at tick start. Snapshotted per frame so dump() can
+// name the slowest frames' t.
+extern int32_t g_FrameTime;
+
 void FrameProfiler::endFrame() {
     auto now = clock::now();
     ++numFrames_;
@@ -81,6 +86,7 @@ void FrameProfiler::endFrame() {
     }
     auto wallNs = std::chrono::duration_cast<ns>(now - frameStart_).count();
     frameTotals_.push_back(wallNs);
+    frameT_.push_back(g_FrameTime);
 
     // Trailing-window mean: kFpsWindow most recent frame totals.
     // Update incrementally so it's O(1) per frame.
@@ -223,5 +229,23 @@ void FrameProfiler::dump() const {
                kNames[i], mean, pct, mn, p50, p95, mx);
     }
     fprintf(stderr, "%-6s  %8.3f\n", "TOTL", nsToMs(sectionSum) / numFrames_);
+
+    // Top-10 slowest frames with their scene time, so a heavy stretch can be
+    // re-visited directly: fly there live and G-dump the pose, or bench the
+    // exact frame with --bench=scene@scene=...,ts=<t>.
+    const size_t nTop = std::min<size_t>(10, frameTotals_.size());
+    if (nTop > 0) {
+        std::vector<size_t> idx(frameTotals_.size());
+        for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+        std::partial_sort(idx.begin(), idx.begin() + nTop, idx.end(),
+            [&](size_t a, size_t b) { return frameTotals_[a] > frameTotals_[b]; });
+        fprintf(stderr, "slowest frames (ms@t):");
+        for (size_t k = 0; k < nTop; ++k) {
+            const size_t i = idx[k];
+            fprintf(stderr, " %.1f@%d", nsToMs(frameTotals_[i]),
+                    i < frameT_.size() ? int(frameT_[i]) : -1);
+        }
+        fprintf(stderr, "\n");
+    }
     fflush(stderr);
 }

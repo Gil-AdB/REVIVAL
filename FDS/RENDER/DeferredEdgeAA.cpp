@@ -172,11 +172,11 @@ void Render_EdgeAA() {
 		out[i] = dword(ob[0]) | (dword(ob[1]) << 8) | (dword(ob[2]) << 16) | (c & 0xFF000000u);
 	};
 
-	for (int tj = 0; tj < numTilesY; ++tj) {
-		for (int ti = 0; ti < numTilesX; ++ti) {
-			const int x1 = ti * tsx, x2 = std::min(x1 + tsx, W);
-			const int y1 = tj * tsy, y2 = std::min(y1 + tsy, H);
-			ThreadPool::instance().enqueue([=]() {
+	dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+		const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
+		const int y1 = tj * tsy, y2 = std::min(y1 + tsy, H);
+		const int x1 = ti * tsx, x2 = std::min(x1 + tsx, W);
+		{
 				// VIZ: green edge heatmap over a dimmed frame. All-scalar (rare;
 				// for inspection, perf irrelevant). Matches the offline heatmap.
 				if (viz) {
@@ -291,9 +291,8 @@ void Render_EdgeAA() {
 					}
 				}
 				renderns::tileDone.release();
-			});
-		}
-	}
+			}
+	});
 	for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 
 	g_aaLastMs = std::chrono::duration<double, std::milli>(

@@ -24,14 +24,19 @@ mkdir -p "$OUT"
 cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 
 # Baselines — committed state. Update with --update after an INTENTED change.
-# mirrortest re-baselined 2026-07-04: bisect (git bisect run over 8c84efc..dbdd8a3)
-# pinned the divergence to c340ffa — the fog-wt/soa-vertex branch CONSOLIDATION
-# (user-driven, intended mirror-work state), which post-dates the previous
-# golden bump (8c84efc). Not a session regression: every editor-era commit
-# reproduces this same hash.
-BASE_MIRROR="b5e307499d9f0fa0375fac0caaecfbe7"
+# mirrortest baseline: soa-vertex's d187f9a rebaseline (c340ffa FP-noise drift)
+# + ce4f906 mirror clone wall-depth clamp. Verified 2026-07-04 on the merged
+# tree — matches soa-vertex's committed golden exactly, so the editor-branch
+# work does not perturb mirror output.
+BASE_MIRROR="d3a06fb97a01f8c5e250dad7e41f9f4d"
 BASE_CONE="8a82e21d53b0d050bbc1220b4fe137f0"
 BASE_HALO="a916347df504ab12a3add321747c2f08"
+
+# HEADLESS: every DEMO run uses the SDL dummy driver — no window pops on the
+# desktop (the gate gets run a lot, incl. from bisects). Dummy output differs
+# from windowed output byte-wise but is deterministic run-to-run, which is all
+# a gate needs; the baselines below are DUMMY-mode hashes.
+export SDL_VIDEODRIVER=dummy
 
 md5_of() { ls "$@" 2>/dev/null | sort | xargs cat | md5 -q; }
 

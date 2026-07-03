@@ -28,7 +28,20 @@
 // apply_exact, defined inside the namespace below, can read it.
 extern thread_local bool g_xparPeelReverse;
 
+#include <atomic>
+#include <cstdlib>
+
 namespace meka {
+
+// Diagnostic (FDS_MIRROR_CLAMP_STATS=1): lanes rejected by the clone
+// wall-depth clamp this frame + clone lanes that passed the tag gate at
+// all (denominator — distinguishes "clamp inert" from "no clones here").
+inline std::atomic<long long> g_mirrorClampCount{0};
+inline std::atomic<long long> g_mirrorCloneLanes{0};
+inline const bool g_mirrorClampStats = std::getenv("FDS_MIRROR_CLAMP_STATS") != nullptr;
+// A/B escape (validation): disable the clone wall-depth clamp.
+inline const bool g_mirrorNoWallZClamp = std::getenv("FDS_NO_MIRROR_WALLZ_CLAMP") != nullptr;
+
 using u8  = uint8_t;
 using u16 = uint16_t;
 using i32 = int32_t;
@@ -658,6 +671,36 @@ struct TileRasterizer {
 					const Vec8i pixelIds = Vec8i(_mm256_cvtepu8_epi32(packed));
 					const Vec8ib mirrorMask = (pixelIds == Vec8i(int(ctx.mirrorTag)));
 					p_mask &= mirrorMask;
+					if (g_mirrorClampStats)
+						g_mirrorCloneLanes.fetch_add(
+							horizontal_count(Vec8ib(p_mask)),
+							std::memory_order_relaxed);
+					// Wall-depth clamp: a reflection lives BEHIND the
+					// glass, so a clone lane strictly CLOSER than the
+					// mirror wall's surface at that pixel (z encoding:
+					// larger = closer) is physically impossible
+					// reflected content. It happens when clone geometry
+					// lands on the viewer's side of the plane — e.g. a
+					// real wall that CROSSES the mirror plane reflects
+					// back ONTO ITSELF, and the coincident twin Z-ties
+					// with the original per raster order (the live
+					// shimmer/moire "mirror seen through the wall" at
+					// greets' corridor walls). Small tolerance (~4 cm at
+					// greets' z scale) keeps content lying ON the glass
+					// plane through both paths' interpolation rounding.
+					if (span.mirrorMaskZ != nullptr && !g_mirrorNoWallZClamp) {
+						Vec8us wallZ_c;
+						wallZ_c.load(span.mirrorMaskZ);
+						const Vec8ui wallZ = extend(wallZ_c);
+						const Vec8ib nearer = Vec8ib(z_candidate > wallZ + 16);
+						// FDS_MIRROR_CLAMP_STATS=1: count clamped lanes (was
+						// the lane alive before the clamp?). Diagnostic only.
+						if (g_mirrorClampStats)
+							g_mirrorClampCount.fetch_add(
+								horizontal_count(Vec8ib(p_mask) & nearer),
+								std::memory_order_relaxed);
+						p_mask &= ~nearer;
+					}
 				}
 				// Behind-mirror clip for ORIGINAL faces. If this face is
 				// behind one or more mirror planes (faceBehindMirrorMask

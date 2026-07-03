@@ -222,7 +222,10 @@ static void SceneCorrections()
 	TriMesh *T;
 	for(T=Sc->TriMeshHead, index=0; T; T=T->Next, index++)
 	{
-		if (ObjStationary[index])
+		// Bounds guard (ASan find, 2026-07-03): the scene has far more meshes
+		// than the 9-entry table; the unguarded read walked stack garbage and
+		// randomly flagged meshes stationary depending on stack contents.
+		if (index < NumObjects && ObjStationary[index])
 		{
 			if (!(T->Flags & Tri_Stationary))
 			{
@@ -2606,6 +2609,11 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: ANIM phase. also includes Dynamic Camera manager
 		prof.switchTo(PROF_ANIM);
 
+		// Frame-pipeline Slice-0 decomposition (FDS_TAIL_PROF=1): how much
+		// pure-serial tick-thread time precedes the render — that wall time
+		// is the pipelining campaign's whole ceiling.
+		long long _tickT = TailProf::nowNs();
+
 		if (Timer < CHPartTime-500.0)
 			CurFrame = GreetSc->StartFrame + (GreetSc->EndFrame-GreetSc->StartFrame) * (float)g_FrameTime / (float)(CHPartTime-500.0);
 		else
@@ -2651,6 +2659,7 @@ struct GreetsScene : SceneDriver {
 		}
 
 		Animate_Objects(GreetSc, View);
+		TailProf::mark("Tick-Anim", _tickT); _tickT = TailProf::nowNs();
 
 		// Mirror shatter (Y key): bake the room into a panorama from the
 		// screen's centre, break it into reflecting shards, and close the
@@ -2893,6 +2902,8 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 
+		TailProf::mark("Tick-Logic", _tickT);
+
 		// Second-order mirror RTT pass (no-op without --mirror-rtt):
 		// re-render the visible mirror-in-mirror panels into their slot
 		// textures. Must run AFTER Animate_Objects (current geometry,
@@ -2903,10 +2914,33 @@ struct GreetsScene : SceneDriver {
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
 		                              g_greetsRttSlots); }
 
+		// --bake_tick_overlap: dispatch the per-frame shadow bake NOW — its
+		// pool tasks run underneath the serial Transform/Lighting/Radix
+		// chunk below (complementary resources: the pool is otherwise
+		// parked while the tick thread works). Joined explicitly before
+		// gg->Render(). Guards: not while the shatter is active (fresh
+		// shard meshes would race their first VertexScratch clone-init
+		// copy against the concurrent main Transform) and not in the first
+		// frames (clone warmup — steady state has no init copies). The
+		// bake reads only Animate-written pose state (stable by now) + its
+		// own clones; the serial chunk writes shared per-vertex projection
+		// and colour fields the depth-only bake never reads.
+		static int sBakeOverlapWarmup = 0;
+		const bool bakeOverTick = fds::FeatureFlags::bake_tick_overlap()
+		    && !fds::FeatureFlags::shadow_gbuffer_overlap()
+		    && !g_greetsShatter.active()
+		    && sBakeOverlapWarmup++ > 2;
+		if (bakeOverTick) {
+			prof.switchTo(PROF_BAKE);
+			ShadowBake_DispatchGreets(GreetSc);
+		}
+
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
 
+		_tickT = TailProf::nowNs();
 		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
+		TailProf::mark("Tick-Xfrm", _tickT); _tickT = TailProf::nowNs();
 
 		// PROFILER: LGHT phase.
 		prof.switchTo(PROF_LGHT);
@@ -2923,6 +2957,7 @@ struct GreetsScene : SceneDriver {
 		    fds::g_rttJobsLastFrame > 0;
 		if (lightingConsumed)
 			Lighting(GreetSc);
+		TailProf::mark("Tick-Light", _tickT); _tickT = TailProf::nowNs();
 
 		// PROFILER: SORT phase.
 		prof.leave(PROF_LGHT);
@@ -2930,6 +2965,7 @@ struct GreetsScene : SceneDriver {
 		prof.enter(PROF_SORT);
 
 		Radix_Sort(FList, SList, CAll);
+		TailProf::mark("Tick-Radix", _tickT);
 
 		// PROFILER: RNDR phase.
 		prof.switchTo(PROF_BAKE);
@@ -2949,7 +2985,11 @@ struct GreetsScene : SceneDriver {
 		// these run on a dedicated thread overlapping the gbuffer fill in
 		// gg->Render() below, and renderFrame joins before deferred lighting;
 		// otherwise they run synchronously inline here (current behavior).
-		ShadowBake_DispatchGreets(GreetSc);
+		if (!bakeOverTick)
+			ShadowBake_DispatchGreets(GreetSc);
+		else
+			ShadowBake_JoinPending();   // tick-thread join: the bake never
+			                            // contends the render's own waves
 		prof.switchTo(PROF_RNDR);
 		{ TailProf::ScopeTimer _tp("Render-total"); gg->Render(); }
 		// reset per-frame zbuffer statistics
@@ -2958,6 +2998,16 @@ struct GreetsScene : SceneDriver {
 		// changing across frames (= dynamic bake not reaching that map).
 		// No-op unless toggled by T key in REV.CPP.
 		::ShadowMap_TickStalenessTracker();
+		// FDS_MIRROR_CLAMP_STATS=1: per-frame count of clone lanes the
+		// wall-depth clamp rejected (Mekalele.h). Nonzero at a pose =
+		// clone geometry was landing NEARER than the glass there (the
+		// self-reflection moire); zero everywhere = the clamp is inert.
+		if (meka::g_mirrorClampStats) {
+			const long long n = meka::g_mirrorClampCount.exchange(0, std::memory_order_relaxed);
+			const long long c = meka::g_mirrorCloneLanes.exchange(0, std::memory_order_relaxed);
+			std::fprintf(stderr, "[MIRROR-CLAMP] clone-lanes=%lld rejected=%lld (t=%d)\n",
+			             c, n, (int)g_FrameTime);
+		}
 
 		// Stamp gb.mirrorId with each mirror's id at its wall faces'
 		// screen-space pixels — Mekalele's clone path tests this per
@@ -3161,6 +3211,65 @@ struct GreetsScene : SceneDriver {
 							(unsigned)F->mirrorMaskTag, (unsigned)F->Flags,
 							hits[i].rz, F->N.x,F->N.y,F->N.z, a.x,a.y,a.z,
 							F->A->PX,F->A->PY,F->A->RZ, F->B->PX,F->B->PY,F->B->RZ, F->C->PX,F->C->PY,F->C->RZ, (void*)T);
+					}
+
+					// WORLD-SPACE RAYCAST — the decisive version. The screen
+					// point-in-triangle list above uses raw projected PX/PY,
+					// which are garbage for faces straddling the near plane
+					// (huge wall quads next to the camera — exactly the faces
+					// an occlusion question is about). Cast the pixel's world
+					// ray and Moller-Trumbore every visible face instead; the
+					// t-ordered hit list is ground truth for "what SHOULD the
+					// camera see first at this pixel".
+					if (View) {
+						Vector dv = { (float(qx) - CntrEX) / FOVX,
+						              -(float(qy) - CntrEY) / FOVY, 1.0f };
+						Vector rd = { View->Mat[0][0]*dv.x + View->Mat[1][0]*dv.y + View->Mat[2][0]*dv.z,
+						              View->Mat[0][1]*dv.x + View->Mat[1][1]*dv.y + View->Mat[2][1]*dv.z,
+						              View->Mat[0][2]*dv.x + View->Mat[1][2]*dv.y + View->Mat[2][2]*dv.z };
+						Vector_Norm(&rd);
+						const Vector ro = View->ISource;
+						struct RHit { Face *f; TriMesh *T; float t; Vector p; };
+						std::vector<RHit> rhits;
+						for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+							if (!(T->Flags & HTrack_Visible)) continue;
+							for (DWord fi = 0; fi < T->FIndex; ++fi) {
+								Face &F = T->Faces[fi];
+								if (!F.A || !F.B || !F.C) continue;
+								auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T->RotMat,&lp,&w); w+=T->IPos; return w; };
+								const Vector A=wp(F.A), B=wp(F.B), C=wp(F.C);
+								const Vector e1={B.x-A.x,B.y-A.y,B.z-A.z}, e2={C.x-A.x,C.y-A.y,C.z-A.z};
+								const Vector pv={rd.y*e2.z-rd.z*e2.y, rd.z*e2.x-rd.x*e2.z, rd.x*e2.y-rd.y*e2.x};
+								const float det = e1.x*pv.x+e1.y*pv.y+e1.z*pv.z;
+								if (std::fabs(det) < 1e-9f) continue;
+								const float invDet = 1.0f/det;
+								const Vector tv={ro.x-A.x,ro.y-A.y,ro.z-A.z};
+								const float u=(tv.x*pv.x+tv.y*pv.y+tv.z*pv.z)*invDet;
+								if (u < -0.001f || u > 1.001f) continue;
+								const Vector qv={tv.y*e1.z-tv.z*e1.y, tv.z*e1.x-tv.x*e1.z, tv.x*e1.y-tv.y*e1.x};
+								const float v=(rd.x*qv.x+rd.y*qv.y+rd.z*qv.z)*invDet;
+								if (v < -0.001f || u+v > 1.001f) continue;
+								const float t=(e2.x*qv.x+e2.y*qv.y+e2.z*qv.z)*invDet;
+								if (t <= 0.01f) continue;
+								rhits.push_back({&F, T, t,
+									{ro.x+rd.x*t, ro.y+rd.y*t, ro.z+rd.z*t}});
+							}
+						}
+						std::sort(rhits.begin(), rhits.end(),
+						          [](const RHit&a, const RHit&b){ return a.t < b.t; });
+						std::fprintf(stderr, "[RAYCAST @%d,%d] ro=(%.2f,%.2f,%.2f) rd=(%.3f,%.3f,%.3f) %zu hits (near first):\n",
+						             qx, qy, ro.x, ro.y, ro.z, rd.x, rd.y, rd.z, rhits.size());
+						for (size_t i = 0; i < rhits.size() && i < 10; ++i) {
+							Face *F = rhits[i].f; TriMesh *T = rhits[i].T;
+							const float facing = F->N.x*rd.x + F->N.y*rd.y + F->N.z*rd.z;
+							std::fprintf(stderr,
+								"  t=%7.2f  hit=(%.1f,%.1f,%.1f)  mat='%s'  N=(%.2f,%.2f,%.2f) %s  maskTag=%u  mesh=%p\n",
+								rhits[i].t, rhits[i].p.x, rhits[i].p.y, rhits[i].p.z,
+								(F->Txtr&&F->Txtr->Name)?F->Txtr->Name:"?",
+								F->N.x, F->N.y, F->N.z,
+								facing < 0 ? "FRONT-facing" : "back-facing",
+								(unsigned)F->mirrorMaskTag, (void*)T);
+						}
 					}
 					std::fflush(stderr);
 				}

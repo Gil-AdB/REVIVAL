@@ -1,6 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
+#include <climits>
+#include <memory>
+#include <semaphore>
 #include <condition_variable>
 #include <cstring>
 #include <functional>
@@ -97,6 +101,49 @@ private:
 	std::vector<std::thread> pool;
 };
 
+
+// Work-stealing indexed dispatch: run fn(i) for every i in [0, jobs) across
+// the pool via W chunk tasks pulling indices off an atomic cursor, instead of
+// one enqueue per index. Each enqueue costs ~12 µs serial on the producer
+// (queue mutex + notify_one while workers park, then the woken workers
+// contend the same mutex to pop) — at 96-tile waves that was ~1.2 ms/frame
+// of tick-thread time per wave (measured, greets ts=491).
+//
+// Completion contract: `done` (when non-null) is released ONCE PER INDEX by
+// the chunk task right after fn(i) returns — callers keep their existing
+// `jobs`-permit drain. If fn itself releases the semaphore (some tile
+// kernels do), pass done=nullptr.
+//
+// LIFETIME (two traps, both hit during development — do not "simplify"):
+//   1. fn is usually a TEMPORARY closure: it dies when the dispatchIndexed()
+//      call expression ends — BEFORE the caller's drain. So each chunk task
+//      copies fn BY VALUE. Copying a [&] closure copies only the references,
+//      which point at the caller's stack — valid until the caller's drain
+//      completes, and fn is only invoked before that index's release.
+//   2. After the last index's release, the caller's drain can return and its
+//      stack die while a STRAGGLER worker evaluates the while-condition one
+//      final time. So everything the condition touches (cursor, jobs) is
+//      captured by value (cursor via shared_ptr); the straggler destroys its
+//      fn copy without invoking it.
+template <class Fn>
+inline void dispatchIndexed(int jobs, std::counting_semaphore<INT_MAX>* done, Fn fn) {
+	auto& tp = ThreadPool::instance();
+	const int nTasks = (int)std::min<size_t>(tp.size(), (size_t)(jobs > 0 ? jobs : 0));
+	if (nTasks <= 1) {
+		for (int i = 0; i < jobs; ++i) { fn(i); if (done) done->release(); }
+		return;
+	}
+	auto cursor = std::make_shared<std::atomic<int>>(0);
+	for (int k = 0; k < nTasks; ++k) {
+		tp.enqueue([fn, cursor, jobs, done]() {
+			int i;
+			while ((i = cursor->fetch_add(1, std::memory_order_relaxed)) < jobs) {
+				fn(i);
+				if (done) done->release();
+			}
+		});
+	}
+}
 
 // Parallel memset across the ThreadPool. Splits the buffer into N chunks
 // (one per worker) and waits for completion. For small buffers, falls back

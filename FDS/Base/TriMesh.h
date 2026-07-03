@@ -47,6 +47,17 @@ struct TriMesh
     float            BSphereRad     = 0.0f; // Bounding Sphere Radius, squared. kept for backward compatibility until pipeline code is updated
     DWord            Flags          = 0;
 
+    // Per-shadow-bake-call cache. Written SERIALLY by Render_Deferred-
+    // ShadowMaps' prime pass before it enqueues the parallel per-face
+    // Transform_Objects tasks; the tasks read it only (valid when
+    // BakeCacheGen == g_shadowBakeGen). Replaces a per-mesh-per-face
+    // spline-extent walk (isDynamicForBake) and world-bsphere
+    // MatrixXVector, which are identical across all 6 cube faces of
+    // every light in the call.
+    Vector           BakeWsBSphereCtr;
+    uint32_t         BakeCacheGen   = 0;
+    uint8_t          BakeIsDynamic  = 0;
+
     // Pre-baked per-face shadow factor for static omnis. Allocated by
     // LightmapBake_Static at scene init when --shadow-lightmap is on
     // and this mesh is "effectively static" (Pos/Rotate splines have

@@ -1608,39 +1608,52 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     }
 
     if (!inlineDispatch) renderns::tileCounter = 0;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tileSizeY * j;
-        const int y2 = std::min(y1 + tileSizeY, YRes);
-        for (int i = 0; i < numTilesX; ++i) {
-            const int x1 = tileSizeX * i;
-            const int x2 = std::min(x1 + tileSizeX, XRes);
-            const int tileIdx = j * numTilesX + i;
-            const int *ts = tileSpotIdx[tileIdx];
-            const int  tc = tileSpotCount[tileIdx];
-            if (inlineDispatch) {
-                // Offscreen shard bake: run on the calling worker thread (no
-                // pool re-submit, no tileDone traffic — the tile doesn't
-                // release; only the pool-path lambda below does).
-                Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
-                                             invFOVX,invFOVY,invZScale,density,
-                                             fogZ,invFogZ);
-            } else {
-                ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
-                                                invFOVX,invFOVY,invZScale,density,
-                                                fogZ,invFogZ]() {
+    if (inlineDispatch) {
+        // Offscreen shard bake: run on the calling worker thread (no
+        // pool re-submit, no tileDone traffic).
+        for (int t = 0; t < numTiles; ++t) {
+            const int j = t / numTilesX, i = t - j * numTilesX;
+            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+            Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
+                                         tileSpotIdx[t], tileSpotCount[t],
+                                         invFOVX,invFOVY,invZScale,density,
+                                         fogZ,invFogZ);
+        }
+    } else {
+        // Work-stealing chunk dispatch (same as the lighting waves): enqueue
+        // only W tasks pulling tiles off an atomic cursor — the task-per-tile
+        // loop cost ~1 ms serial in mutex+notify_one per enqueue. Everything
+        // is captured by reference: the drain below completes before this
+        // frame returns, so the stack (cursor, tileSpotIdx) outlives the
+        // tasks. Per-tile release unchanged → drain unchanged; tiles write
+        // disjoint rows in any order → byte-identical.
+        // LIFETIME: a straggler worker can evaluate the while-condition one
+        // last time AFTER the drain below completed and this frame returned
+        // — so the cursor is a shared_ptr by value and the tile count a
+        // by-value copy; everything else is only touched inside the loop
+        // body, strictly before that tile's release.
+        auto coneCursor = std::make_shared<std::atomic<int>>(0);
+        const int nTasks = std::min<int>((int)ThreadPool::instance().size(), numTiles);
+        for (int k = 0; k < nTasks; ++k) {
+            ThreadPool::instance().enqueue([&, coneCursor, numTiles]() {
+                int t;
+                while ((t = coneCursor->fetch_add(1, std::memory_order_relaxed)) < numTiles) {
+                    const int j = t / numTilesX, i = t - j * numTilesX;
+                    const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+                    const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
                     const long long _tp = TailProf::nowNs();
-                    Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
+                    Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
+                                                 tileSpotIdx[t], tileSpotCount[t],
                                                  invFOVX,invFOVY,invZScale,density,
                                                  fogZ,invFogZ);
                     TailProf::addBusy(_tp);   // before release → race-free idle metric
-                    // One permit per completed tile (see renderns::tileDone).
                     renderns::tileDone.release();
-                });
-            }
+                }
+            });
         }
-    }
-    if (!inlineDispatch)
         TailProf::drain(renderns::tileDone, numTiles, "cones");
+    }
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
@@ -2369,25 +2382,24 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     }
 
     renderns::tileCounter = 0;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tileSizeY * j;
-        const int y2 = std::min(y1 + tileSizeY, YRes);
-        for (int i = 0; i < numTilesX; ++i) {
-            const int x1 = tileSizeX * i;
-            const int x2 = std::min(x1 + tileSizeX, XRes);
-            const int tileIdx = j * numTilesX + i;
-            const int *ts = tileOmniIdx[tileIdx];
-            const int  tc = tileOmniCount[tileIdx];
-            ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
-                                            invFOVX,invFOVY,invZScale,
-                                            fogZ,invFogZ,density]() {
-                Render_OmniHalos_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
+    // Work-stealing chunk dispatch (see the cones wave above) — one enqueue
+    // per worker instead of per tile. Job data (tileOmniIdx/Count) lives on
+    // this frame's stack; valid until the drain below completes.
+    {
+        const auto *tileOmniIdxP  = &tileOmniIdx[0];
+        const int  *tileOmniCntP  = &tileOmniCount[0];
+        dispatchIndexed(numTilesX * numTilesY, nullptr,
+            [&ctx, lights, invFOVX, invFOVY, invZScale, fogZ, invFogZ, density,
+             tileSizeX, tileSizeY, tileOmniIdxP, tileOmniCntP](int t) {
+                const int j = t / numTilesX, i = t - j * numTilesX;
+                const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+                const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+                Render_OmniHalos_Tile(ctx, x1,y1,x2,y2, lights,
+                                       tileOmniIdxP[t], tileOmniCntP[t],
                                        invFOVX,invFOVY,invZScale,
                                        fogZ,invFogZ,density);
-                // One permit per completed tile (see renderns::tileDone).
                 renderns::tileDone.release();
             });
-        }
     }
     for (int _i = 0; _i < numTiles; ++_i) {
         renderns::tileDone.acquire();
@@ -2485,13 +2497,13 @@ void Render_DeferredSkybox() {
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
     renderns::tileCounter = 0;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tileSizeY * j;
-        const int y2 = std::min(y1 + tileSizeY, YRes);
-        for (int i = 0; i < numTilesX; ++i) {
-            const int x1 = tileSizeX * i;
-            const int x2 = std::min(x1 + tileSizeX, XRes);
-            ThreadPool::instance().enqueue([=]() {
+    dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+    	const int j = _t / numTilesX, i = _t - j * numTilesX;
+    	const int y1 = tileSizeY * j;
+    	const int y2 = std::min(y1 + tileSizeY, YRes);
+    	const int x1 = tileSizeX * i;
+    	const int x2 = std::min(x1 + tileSizeX, XRes);
+    	{
                 dword *out = reinterpret_cast<dword *>(VPage);
                 // Hoisted broadcasts for the 8-wide view→world FMAs.
                 const __m256 vm00 = _mm256_set1_ps(m00);
@@ -2637,9 +2649,8 @@ void Render_DeferredSkybox() {
                 }          // per-row for-py
                 // One permit per completed tile (see renderns::tileDone).
                 renderns::tileDone.release();
-            });
-        }
-    }
+            }
+    });
     for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
         renderns::tileDone.acquire();
     }
@@ -2654,19 +2665,14 @@ void Render_DeferredFogPass() {
 	const auto tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
 	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;
-	for (int j = 0; j < numTilesY; ++j) {
-		const int y1 = tileSizeY * j;
-		const int y2 = std::min(y1 + tileSizeY, YRes);
-		for (int i = 0; i < numTilesX; ++i) {
-			const int x1 = tileSizeX * i;
-			const int x2 = std::min(x1 + tileSizeX, XRes);
-			ThreadPool::instance().enqueue([x1, y1, x2, y2, invFZP]() {
-				Render_DeferredFogPass_Tile(x1, y1, x2, y2, invFZP);
-				// One permit per completed tile (see renderns::tileDone).
-				renderns::tileDone.release();
-			});
-		}
-	}
+	dispatchIndexed(numTilesX * numTilesY, nullptr,
+	    [tileSizeX, tileSizeY, invFZP](int t) {
+		const int j = t / numTilesX, i = t - j * numTilesX;
+		const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+		const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+		Render_DeferredFogPass_Tile(x1, y1, x2, y2, invFZP);
+		renderns::tileDone.release();
+	});
 	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
 }
 

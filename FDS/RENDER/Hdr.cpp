@@ -47,11 +47,37 @@ static void hdrDispatchRows(int rows, Body&& body) {
     constexpr int kBands = 24;
     const int band = (rows + kBands - 1) / kBands;
     if (band <= 0) return;
-    int jobs = 0;
-    for (int y = 0; y < rows; y += band) {
-        const int y2 = std::min(y + band, rows);
-        ThreadPool::instance().enqueue([=]() { body(y, y2); renderns::tileDone.release(); });
-        ++jobs;
+    const int jobs = (rows + band - 1) / band;
+    // Work-stealing chunk dispatch: enqueue only W tasks, each pulling row
+    // bands off an atomic cursor. Each pool enqueue costs ~12 µs serial
+    // (queue mutex + notify_one + the woken workers contending the same
+    // mutex to pop) — at 24 bands × every post pass that added up to ~2 ms
+    // per frame across the HDR stack. Everything is captured by reference:
+    // the acquire loop below completes before this frame returns, so the
+    // stack cursor + body outlive the tasks. Row bands are disjoint and
+    // order-free → byte-identical.
+    // LIFETIME: after a worker releases the LAST band, the caller's acquire
+    // loop completes and this frame returns — while a STRAGGLER worker may
+    // still evaluate the while-condition one final time. So everything the
+    // condition touches (cursor, jobs, band, rows) is captured BY VALUE
+    // (cursor via shared_ptr); only `body` stays by reference — it is only
+    // invoked before that band's release, i.e. strictly before the caller
+    // can return.
+    auto cursor = std::make_shared<std::atomic<int>>(0);
+    const int nTasks = std::min<int>((int)ThreadPool::instance().size(), jobs);
+    if (nTasks <= 1) {
+        body(0, rows);
+        return;
+    }
+    for (int k = 0; k < nTasks; ++k) {
+        ThreadPool::instance().enqueue([&body, cursor, jobs, band, rows]() {
+            int b;
+            while ((b = cursor->fetch_add(1, std::memory_order_relaxed)) < jobs) {
+                const int y = b * band;
+                body(y, std::min(y + band, rows));
+                renderns::tileDone.release();
+            }
+        });
     }
     for (int k = 0; k < jobs; ++k) renderns::tileDone.acquire();
 }
@@ -854,13 +880,13 @@ void Render_TonemapToVPage() {
     constexpr int numTilesX = 6, numTilesY = 4;
     const int tsx = (W + numTilesX - 1) / numTilesX;
     const int tsy = (H + numTilesY - 1) / numTilesY;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tsy * j, y2 = std::min(y1 + tsy, H);
-        for (int i = 0; i < numTilesX; ++i) {
+    dispatchIndexed(numTilesX * numTilesY, &renderns::tileDone,
+        [&tileBody, tsx, tsy, W, H](int t) {
+            const int j = t / numTilesX, i = t - j * numTilesX;
+            const int y1 = tsy * j, y2 = std::min(y1 + tsy, H);
             const int x1 = tsx * i, x2 = std::min(x1 + tsx, W);
-            ThreadPool::instance().enqueue([=]() { tileBody(x1, y1, x2, y2); renderns::tileDone.release(); });
-        }
-    }
+            tileBody(x1, y1, x2, y2);
+        });
     for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 

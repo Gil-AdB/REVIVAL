@@ -257,3 +257,36 @@ whole 20 ms delta is RNDR (58.5 -> 39.1 min); BAKE/ANIM identical. So on
 kernel-bound frames quarter is a 30% frame win and checker buys nothing over
 it; on shadow-bound frames it's neutral; on city it's still 2.5x slower.
 Quote both ts=491 and ts=1700 for anything shifting kernel-vs-bake balance.
+
+## 2026-07-03 — perf batch #2 (user-approved 1/2/3/4): DoF half-res, moving-omni-128, bake cache, temporal SSAO
+
+All at the ts=491 reference, user's full config, idle-machine mins unless noted.
+
+1. **Half-res DoF SHIPPED, default on (--dof_downscale=2)**: −3 ms (53.0→50.0 on
+   checkerC). Golden-angle gather at W/2 + 4-tap depth-aware upsample, CoC-ramp
+   blend to sharp at the focus boundary; also skips the full-res f16→f32 copy.
+   t=1252 pose: mean diff 0.045, worst region indistinguishable.
+2. **greets_moving_omni_shadow_res=128 now a greets init default** (−1 ms).
+3. **Bake mesh cache + cull-before-clone SHIPPED**: per-call serial prime of
+   world-bsphere + isDynamicForBake onto TriMesh (BakeCacheGen), read by the
+   per-face tasks; cloneOf moved below the culls. Zero-pixel identical
+   (outside the teleporter stone's pre-existing run-to-run nondeterminism —
+   that region is NOT gateable, rand()-seeded texture suspected; mask
+   x∈[1160,1270] y∈[40,370] when gating this pose). Perf ~neutral-to-small
+   (bake is no longer walk-bound after the adaptive grid); kept for the
+   structural cleanliness + it feeds any future per-omni face-mask work.
+4. **Temporal SSAO SHIPPED, default OFF (--ssao_temporal)**: reproject+depth-
+   reject+blend history (ping-pong low-res), halves GTAO steps / hemisphere
+   samples, cycles the 4×4 rotation phase per frame. SSAO pass 5.81→4.90 ms
+   min (FDS_SSAO_EVERY=1 per-frame print added). 5-frame static sweep matches
+   non-temporal; the −3 ms estimate assumed full-res 5.8 ms SSAO — at
+   downscale=2+GTAO the march is only ~half the pass, so the ceiling is ~−1.
+   RISK to eyeball live before defaulting: AO cast by the WALKING MECH onto
+   the floor lags ~6 frames (receiver depth unchanged → reject can't fire).
+
+**Checkerboard default correction (measured on idle machine)**: checkerC is
++6 ms over quarter+C at ts=491 (50.0 vs 43.4-44.4) — 2× wave-1 kernel pixels;
+the C-port itself is only ~0.8 ms (--no-quarter_tex_sharp A/B). The +0.5-1 ms
+that justified the default flip was creeping-load contamination. Quality:
+checkerC closest to full (floor |Δfull| 0.145 vs quarter+C 0.311). Decision
+pending: 43.4 ms (quarter) vs 50.0 ms (checker) is the real trade.
