@@ -110,7 +110,7 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
     if saved:
         write_sidecar(sidecar, entries)
     return saved
-ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao"}
+ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao", "metallic"}
 
 # UV mapping pseudo-props: routed to lwopatch.set_uv_mapping (greets) /
 # fldpatch.patch_material_uv (FLD scenes). The editor sends the FULL set

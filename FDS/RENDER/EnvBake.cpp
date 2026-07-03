@@ -200,9 +200,33 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
 
 // ── Deferred env-specular registry ─────────────────────────────────────────
 namespace {
-struct EnvPanoStore { std::vector<uint32_t> px; EnvPanoLinear view; };
+struct EnvPanoStore {
+    std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
+    EnvPanoLinear view;
+};
 std::map<Scene*, EnvPanoStore> g_envPanoByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
+
+// 2×2 box downsample (per-channel average), ARGB.
+void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
+                   std::vector<uint32_t>& dst) {
+    const int dw = sw >> 1, dh = sh >> 1;
+    dst.resize(size_t(dw) * dh);
+    for (int y = 0; y < dh; ++y)
+        for (int x = 0; x < dw; ++x) {
+            const uint32_t a = src[size_t(2*y)   * sw + 2*x];
+            const uint32_t b = src[size_t(2*y)   * sw + 2*x + 1];
+            const uint32_t c = src[size_t(2*y+1) * sw + 2*x];
+            const uint32_t d = src[size_t(2*y+1) * sw + 2*x + 1];
+            uint32_t out = 0;
+            for (int sh8 = 0; sh8 < 32; sh8 += 8) {
+                const uint32_t s = ((a >> sh8) & 0xFF) + ((b >> sh8) & 0xFF)
+                                 + ((c >> sh8) & 0xFF) + ((d >> sh8) & 0xFF);
+                out |= ((s + 2) >> 2) << sh8;
+            }
+            dst[size_t(y) * dw + x] = out;
+        }
+}
 }
 
 const EnvPanoLinear* EnvReflection_Get(Scene* sc) {
@@ -218,15 +242,28 @@ void EnvReflection_EnsureBaked(Scene* sc, const Vector& center) {
     params.panoWidth = 512;          // eye anyway — half the CITY bake res
     params.panoHeight = 512;
     EnvPanoStore store;
-    const bool ok = renderCubeAndStitch(sc, center, params, store.px);
+    const bool ok = renderCubeAndStitch(sc, center, params, store.levels[0]);
     g_envBakeInProgress = false;
     if (!ok) return;
-    store.view = { store.px.data(), params.panoWidth, params.panoHeight };
     auto& slot = g_envPanoByScene[sc];
     slot = std::move(store);
-    slot.view.px = slot.px.data();   // re-point after the move
-    std::fprintf(stderr, "[ENVREFL] baked %dx%d panorama for scene %p at (%.1f %.1f %.1f)\n",
-                 slot.view.W, slot.view.H, (void*)sc, center.x, center.y, center.z);
+    // Pre-filtered chain for roughness: each level a 2×2 box downsample of
+    // the previous (512→256→128→64). Downsampling an equirect ignores the
+    // pole distortion — acceptable for a rough-blur approximation.
+    slot.view.W = params.panoWidth;
+    slot.view.H = params.panoHeight;
+    slot.view.numMips = EnvPanoLinear::kMaxMips;
+    int w = params.panoWidth, h = params.panoHeight;
+    for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+        boxDownsample(slot.levels[k-1], w, h, slot.levels[k]);
+        w >>= 1; h >>= 1;
+    }
+    for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
+        slot.view.mip[k] = slot.levels[k].data();
+    slot.view.px = slot.view.mip[0];
+    std::fprintf(stderr, "[ENVREFL] baked %dx%d panorama (+%d blur mips) for scene %p at (%.1f %.1f %.1f)\n",
+                 slot.view.W, slot.view.H, slot.view.numMips - 1, (void*)sc,
+                 center.x, center.y, center.z);
 }
 
 void EnvReflection_Invalidate(Scene* sc) { g_envPanoByScene.erase(sc); }

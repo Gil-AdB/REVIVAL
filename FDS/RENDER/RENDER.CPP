@@ -427,7 +427,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	    && !fds::EnvReflection_Get(CurScene)) {
 		bool anyRefl = false;
 		for (Material *M = MatLib; M && !anyRefl; M = M->Next)
-			if (M->RelScene == CurScene && M->Reflection > 0.0f) anyRefl = true;
+			if (M->RelScene == CurScene && (M->Reflection > 0.0f || M->MetallicMap))
+				anyRefl = true;
 		if (anyRefl) {
 			fds::EnvReflection_EnsureBaked(CurScene, View->ISource);
 			// The bake's six cube-face renders ran Transform_Objects with

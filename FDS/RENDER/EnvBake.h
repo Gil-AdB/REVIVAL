@@ -48,8 +48,15 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
 // reflected direction; the Sachletz swizzle only helps the rasterizer's
 // per-face walk).
 struct EnvPanoLinear {
-    const unsigned* px = nullptr;   // W*H ARGB
-    int W = 0, H = 0;
+    // Pre-filtered mip chain: mip[0] = full W×H, each next level a 2×2 box
+    // downsample (half dims) — the kernel picks the level from the pixel's
+    // ROUGHNESS, so rough surfaces reflect a blurred environment instead of
+    // a dimmed sharp one (the physically-right look).
+    static constexpr int kMaxMips = 4;
+    const unsigned* mip[kMaxMips] = {};
+    int W = 0, H = 0;               // mip 0 dims (level k = W>>k × H>>k)
+    int numMips = 0;
+    const unsigned* px = nullptr;   // == mip[0] (legacy alias)
 };
 
 // nullptr until EnsureBaked ran for this scene.

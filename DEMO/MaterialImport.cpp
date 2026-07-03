@@ -312,9 +312,14 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), a8 ? "8-bit" : "32-bit");
 			}
 		}
-		if (!metallic.empty())
-			std::fprintf(stderr, "    metallic  %s  [IGNORED — deferred path is diffuse+spec, no metallic workflow]\n",
-			             metallic.c_str());
+		if (!metallic.empty()) {
+			if (Texture *m32 = loadTiled(metallic, false, aw, ah)) {
+				Texture *m8 = MakeHeight8(m32);
+				for (Material *m : mats) m->MetallicMap = m8 ? m8 : m32;
+				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; needs --env_refl for reflections)\n",
+				             metallic.c_str(), m8 ? "8-bit" : "32-bit");
+			}
+		}
 
 		if (M->NormalMap || M->HeightMap)
 			for (Material *m : mats) needTangent.push_back(m);
@@ -401,7 +406,7 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 static bool sidecarIsMapRole(const char *role) {
 	return !std::strcmp(role, "albedo") || !std::strcmp(role, "normal")
 	    || !std::strcmp(role, "height") || !std::strcmp(role, "roughness")
-	    || !std::strcmp(role, "ao");
+	    || !std::strcmp(role, "ao")     || !std::strcmp(role, "metallic");
 }
 
 // Sidecar light lines: "light:<i>|<key>|<value>" — engine-only per-light
@@ -466,7 +471,8 @@ const char *MaterialImport_ClassifyRole(const char *filename) {
 		case Role::Height:    return "height";
 		case Role::Roughness: return "roughness";
 		case Role::Ao:        return "ao";
-		default:              return "";   // Skip / Metallic / None — nothing to apply
+		case Role::Metallic:  return "metallic";
+		default:              return "";   // Skip / None — nothing to apply
 	}
 }
 
@@ -510,6 +516,7 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 				dropIf(M->HeightMap, "height");
 				dropIf(M->RoughnessMap, "roughness");
 				dropIf(M->AoMap, "ao");
+				dropIf(M->MetallicMap, "metallic");
 			}
 			ok = true;
 		}
@@ -543,6 +550,8 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 		}
 	} else if (r == "ao") {
 		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
+	} else if (r == "metallic") {
+		if (Texture *m32 = loadTiled(path, false, aw, ah)) { Texture *m8 = MakeHeight8(m32); for (Material *M : mats) M->MetallicMap = m8 ? m8 : m32; ok = true; }
 	} else {
 		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
 	}

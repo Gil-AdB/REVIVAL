@@ -742,7 +742,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// along the reflected view ray for Mat->Reflection > 0 materials.
 	const fds::EnvPanoLinear *envPanoG = fds::FeatureFlags::env_refl()
 		? fds::EnvReflection_Get(ctx.Sc) : nullptr;
-	const float envReflGainG    = fds::FeatureFlags::env_refl_gain() * 0.01f; // ×Reflection%
+	// Raw gain: the material's Reflection% now enters through Fresnel F0
+	// (F0 = Reflection/100), so the gain is a plain multiplier on top.
+	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
+	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
 	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
@@ -1117,11 +1120,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
-			// Env reflection needs the per-pixel reflected-ray sample —
-			// scalar-path only (like normal maps), so gate vec off for it.
-			const bool hasEnvRefl = envPanoG && Mat->Reflection > 0.0f;
+			// Env reflection + metalness need per-pixel work (reflected-ray
+			// sample / diffuse-kill + tint) — scalar-path only, like nmaps.
+			// Metals get env even at Reflection == 0 (a metal with no
+			// reflection is just black — its "diffuse" IS the reflection).
+			const bool hasMetal   = metalMapOnG && Mat->MetallicMap;
+			const bool hasEnvRefl = envPanoG && (Mat->Reflection > 0.0f || hasMetal);
 			const bool useVecHere = useVec
-				&& (sVecForce || (!hasNormalMap && !hasEnvRefl && !(hasAoMap && !aoInAlpha)));
+				&& (sVecForce || (!hasNormalMap && !hasEnvRefl && !hasMetal
+				                  && !(hasAoMap && !aoInAlpha)));
 
 			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
 			// the direct-light loop adds to them) — direct light is occluded by
@@ -1613,10 +1620,45 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Metalness (--metal_map): m=1 pixels are conductors — no diffuse
+			// (the albedo becomes the REFLECTION tint below), and analytic
+			// highlights tint by the albedo instead of staying light-colored.
+			float metalM = 0.0f;
+			if (metalMapOnG && Mat->MetallicMap) {
+				const byte *md = (miplevel < Mat->MetallicMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
+				if (md) metalM = float(md[swizzledUV]) * (1.0f/255.0f);
+				if (metalM > 0.0f) {
+					const float dk = 1.0f - metalM;
+					fdB *= dk; fdG *= dk; fdR *= dk;
+				}
+			}
+			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
+			// rough → dimmer highlight, so the highlight breaks up across the
+			// surface (matte mortar vs glinty stone). 8-bit gather at the same
+			// (parallax-shifted) swizzled UV; only when there's a highlight.
+			// The env reflection is added AFTER this block: rough surfaces get
+			// a BLURRED reflection (pre-filtered pano mip), not a dimmed one.
+			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
+				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->RoughnessMap->Mipmap[miplevel]) : nullptr;
+				if (rd) {
+					float specMul = 1.0f - roughStrengthG * (float(rd[swizzledUV]) * (1.0f/255.0f));
+					if (specMul < 0.0f) specMul = 0.0f;
+					sB *= specMul; sG *= specMul; sR *= specMul;
+				}
+			}
+			// Metals: tint the accumulated analytic highlights by the albedo.
+			if (metalM > 0.0f) {
+				const float inv255 = 1.0f / 255.0f;
+				sB *= 1.0f - metalM + metalM * texB * inv255;
+				sG *= 1.0f - metalM + metalM * texG * inv255;
+				sR *= 1.0f - metalM + metalM * texR * inv255;
+			}
 			// Env-specular reflection (--env_refl): sample the scene panorama
-			// along the reflected view ray, weighted by Mat->Reflection %.
-			// Added into the SPECULAR accumulator (pre-roughness) so a
-			// roughness map dims reflections exactly like highlights.
+			// along the reflected view ray. Fresnel-weighted (Schlick): F0 =
+			// the authored Reflection% (0.04 dielectric floor), pulled toward
+			// 1 by metalness; grazing angles reflect more, like real surfaces.
 			if (hasEnvRefl) {
 				// Incident ray d = pixel direction (view space, camera at
 				// origin); reflect about the (possibly nmap-perturbed) N.
@@ -1640,26 +1682,61 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				eu -= std::floor(eu);
 				float evv = 0.5f - lat * (1.0f / 3.14159265359f);
 				if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
-				const int epx = int(eu * float(envPanoG->W)) % envPanoG->W;
-				const int epy = int(evv * float(envPanoG->H));
-				const uint32_t ec = envPanoG->px[size_t(epy) * envPanoG->W + epx];
-				const float ek = Mat->Reflection * envReflGainG;
-				sB += float( ec        & 0xFF) * ek;
-				sG += float((ec >>  8) & 0xFF) * ek;
-				sR += float((ec >> 16) & 0xFF) * ek;
-			}
-			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
-			// rough → dimmer highlight, so the highlight breaks up across the
-			// surface (matte mortar vs glinty stone). 8-bit gather at the same
-			// (parallax-shifted) swizzled UV; only when there's a highlight.
-			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
-				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
-					? reinterpret_cast<const byte*>(Mat->RoughnessMap->Mipmap[miplevel]) : nullptr;
-				if (rd) {
-					float specMul = 1.0f - roughStrengthG * (float(rd[swizzledUV]) * (1.0f/255.0f));
-					if (specMul < 0.0f) specMul = 0.0f;
-					sB *= specMul; sG *= specMul; sR *= specMul;
+				// Pre-filtered mip by per-pixel roughness (map texel, else the
+				// gloss-derived roughness the --pbr path uses).
+				float rough;
+				if (roughMapOnG && Mat->RoughnessMap && miplevel < Mat->RoughnessMap->numMipmaps
+				    && Mat->RoughnessMap->Mipmap[miplevel]) {
+					rough = float(reinterpret_cast<const byte*>(
+						Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+				} else {
+					rough = std::sqrt(2.0f / (gloss + 2.0f));
 				}
+				// Trilinear across the blur chain: nearest-level select on a
+				// NOISY roughness map made adjacent pixels flip between sharp
+				// and blurred mips (speckle). Lerp the two straddling levels.
+				float lvlF = rough * float(envPanoG->numMips - 1);
+				if (lvlF < 0.0f) lvlF = 0.0f;
+				if (lvlF > float(envPanoG->numMips - 1)) lvlF = float(envPanoG->numMips - 1);
+				const int lvl0 = int(lvlF);
+				const int lvl1 = lvl0 + 1 < envPanoG->numMips ? lvl0 + 1 : lvl0;
+				const float lf = lvlF - float(lvl0);
+				auto fetchLvl = [&](int lvl) -> uint32_t {
+					const int lw = envPanoG->W >> lvl, lh = envPanoG->H >> lvl;
+					const int epx = int(eu * float(lw)) % lw;
+					const int epy_ = int(evv * float(lh));
+					return envPanoG->mip[lvl][size_t(epy_) * lw + epx];
+				};
+				const uint32_t c0 = fetchLvl(lvl0);
+				const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;
+				const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
+				const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
+				const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
+				// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
+				// d·N < 0). F0 = authored Reflection% with the dielectric
+				// floor, pulled to ~1 by metalness. F90 (the grazing limit)
+				// is attenuated by roughness — the standard rough-Fresnel
+				// trick; without it a noisy normal map turns every grazing
+				// texel into a white spark (pow5 amplifies the nmap noise).
+				float ndv = -dDotN;
+				if (ndv < 0.0f) ndv = 0.0f; if (ndv > 1.0f) ndv = 1.0f;
+				float f0 = Mat->Reflection * 0.01f;
+				if (f0 < 0.04f) f0 = 0.04f;
+				f0 = f0 + (0.98f - f0) * metalM;
+				float f90 = 1.0f - rough;
+				if (f90 < f0) f90 = f0;
+				const float omv = 1.0f - ndv;
+				const float omv2 = omv * omv;
+				const float fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
+				const float ek = fres * envReflGainG;
+				const float inv255 = 1.0f / 255.0f;
+				// Metal tint: reflection takes the albedo's color.
+				const float tB = 1.0f - metalM + metalM * texB * inv255;
+				const float tG = 1.0f - metalM + metalM * texG * inv255;
+				const float tR = 1.0f - metalM + metalM * texR * inv255;
+				sB += ecB * ek * tB;
+				sG += ecG * ek * tG;
+				sR += ecR * ek * tR;
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);

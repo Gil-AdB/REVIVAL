@@ -76,6 +76,11 @@ struct Material
     // tier: modulates specular INTENSITY only (keeps the compile-time gloss
     // exponent). Gated on --roughness_map; null = uniform Mat->Specular.
     Texture             * RoughnessMap           = nullptr;
+    // Per-material metalness map (PBR). Grayscale 8-bit, albedo texel layout
+    // like the other aux maps. m=1: diffuse dies (metals have no diffuse),
+    // specular + env reflection tint by the albedo, env F0 → ~1. Gated on
+    // --metal_map; null = dielectric (m=0 everywhere).
+    Texture             * MetallicMap            = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;
     char                * Name                  = nullptr;
