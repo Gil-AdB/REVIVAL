@@ -18,6 +18,7 @@
 #include <memory>
 #include <vector>
 #include "FRUSTRUM.H"
+#include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
@@ -1942,6 +1943,16 @@ void Initialize_City()
 	// Hold g_engineSurfaceMutex for the duration of the swap so a
 	// concurrent EngineResize blocks until we restore MainSurf below.
 	std::lock_guard<std::mutex> mainsurfLock(g_engineSurfaceMutex);
+
+	// This hand-rolled swap is an offscreen render in all but name; mark
+	// it in g_offscreenViewDepth so renderFrame-side passes that must not
+	// nest their own offscreen render (the --env_refl panorama bake, whose
+	// OffscreenViewScope would relock g_engineSurfaceMutex on this thread
+	// and self-deadlock) stay gated during the cube-face renders below.
+	struct OffscreenDepthMark {
+		OffscreenDepthMark() { ++fds::g_offscreenViewDepth; }
+		~OffscreenDepthMark() { --fds::g_offscreenViewDepth; }
+	} offscreenDepthMark;
 
 	VESA_Surface* PrevMainSurf = MainSurf;
 	VESA_Surface TmpSurf = { 0 };
