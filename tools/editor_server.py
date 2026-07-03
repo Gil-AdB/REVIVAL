@@ -44,30 +44,34 @@ import fldpatch  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WASM_ROOT = os.path.join(REPO, "build-wasm", "DEMO")
-AUTHORING = os.path.join(REPO, "Authoring", "greets")
-BACKUPS = os.path.join(AUTHORING, ".backups")
-LWS = "JENINPYR-new-2.LWS"
 RUNTIME = os.path.join(REPO, "Runtime")
-FLD_INSTALL = os.path.join(RUNTIME, "SCENES", "GREETS.FLD")
-SIDECAR = os.path.join(RUNTIME, "SCENES", "GREETS.MAT")
 PBR_DIR = os.path.join(RUNTIME, "TEXTURES", "PBR")
 LWSREAD = os.path.join(REPO, "tools", "lwsread", "build", "lwsread")
+LWSREAD_LEGACY = os.path.join(REPO, "tools", "lwsread", "build", "lwsread_legacy")
 
-# Scene registry. greets has pinned LWO/LWS authoring sources, so numeric
-# surface edits patch the .lwo files and light edits patch the .lws (then the
-# FLD is regenerated). The other scenes' exact 1998 sources aren't archived
-# (candidate .lws conversions come out ~half the shipping size — see the
-# Authoring/README status table + tools/pin_scene.py), so their surface AND
-# light edits patch the shipping FLD binary directly via tools/fldpatch.py,
-# with timestamped backups + restore under Runtime/SCENES/.backups/. PBR maps
-# go to the sidecar either way.
+# Scene registry. Scenes with pinned LWO/LWS authoring sources (Authoring/
+# README status table): numeric surface edits patch the .lwo files, light
+# edits patch the .lws, then the FLD is regenerated + installed. `legacy`
+# selects the converter: the shipping CHASE/FOUNTAIN FLDs predate the LWO
+# luminosity-unit fix (b441da6, VLUM*100), so their regen must use
+# lwsread_legacy or every emissive shifts x100. Unpinned scenes patch the
+# shipping FLD binary directly via tools/fldpatch.py (backups + restore under
+# Runtime/SCENES/.backups/). PBR maps go to the sidecar either way.
 SCENES = {
-    "greets":   {"authoring": True},
+    "greets":   {"authoring": True,  "dir": "greets",   "lws": "JENINPYR-new-2.LWS",   "legacy": False},
+    "chase":    {"authoring": True,  "dir": "chase",    "lws": "CHASE.LWS",            "legacy": True},
+    "fountain": {"authoring": True,  "dir": "fountain", "lws": "FOUNTAIN - final.LWS", "legacy": True},
     "city":     {"authoring": False},
-    "chase":    {"authoring": False},
-    "fountain": {"authoring": False},
     "crash":    {"authoring": False},
 }
+
+
+def scene_authoring_dir(scene):
+    return os.path.join(REPO, "Authoring", SCENES[scene]["dir"])
+
+
+def scene_lwsread(scene):
+    return LWSREAD_LEGACY if SCENES[scene].get("legacy") else LWSREAD
 
 FLD_BACKUPS = os.path.join(RUNTIME, "SCENES", ".backups")
 
@@ -152,10 +156,10 @@ save_lock = threading.Lock()
 
 
 def ensure_lwsread():
-    if os.path.exists(LWSREAD):
+    if os.path.exists(LWSREAD) and os.path.exists(LWSREAD_LEGACY):
         return
     src = os.path.join(REPO, "tools", "lwsread")
-    print("[server] building tools/lwsread ...")
+    print("[server] building tools/lwsread (+legacy) ...")
     subprocess.run(["cmake", "-S", src, "-B", os.path.join(src, "build")],
                    check=True, capture_output=True)
     subprocess.run(["cmake", "--build", os.path.join(src, "build")],
@@ -286,15 +290,16 @@ def split_light_sidecar_keys(scene, lights, warnings):
     return saved
 
 
-def patch_lws_lights(lights, warnings):
+def patch_lws_lights(scene, lights, warnings):
     """{"<index>": {r,g,b,intensity,range}} -> patch the i-th AddLight block of
-    the LWS (LWSC v1 is line-based text: LightColor R G B / LgtIntensity F /
-    LightRange F). Index order == the engine's Omni_SceneAuthored order ==
-    AddLight file order. Returns list of patched entries; writes + backs up the
-    LWS only if something changed."""
+    the scene's LWS (LWSC v1 is line-based text: LightColor R G B /
+    LgtIntensity F / LightRange F). Index order == the engine's
+    Omni_SceneAuthored order == AddLight file order. Returns list of patched
+    entries; writes + backs up the LWS only if something changed."""
     if not lights:
         return []
-    path = os.path.join(AUTHORING, LWS)
+    lws_name = SCENES[scene]["lws"]
+    path = os.path.join(scene_authoring_dir(scene), lws_name)
     lines = open(path, encoding="latin-1").read().split("\n")
     # Block spans: AddLight line -> next AddLight (or EOF). Camera section
     # follows the last light; patching only known keys inside a span is safe.
@@ -336,30 +341,33 @@ def patch_lws_lights(lights, warnings):
     if patched:
         new = "\n".join(lines)
         if new != open(path, encoding="latin-1").read():
-            bak = lwopatch.backup(path, BACKUPS)
+            bak = lwopatch.backup(path, scene_backup_dir(scene))
             with open(path, "w", encoding="latin-1") as f:
                 f.write(new)
             for p in patched:
-                p["file"] = LWS
+                p["file"] = lws_name
                 p["backup"] = os.path.relpath(bak, REPO)
         else:
             patched = []   # values identical — nothing actually changed
     return patched
 
 
-def regen_fld(patched):
-    """Rerun lwsread and install the FLD. Returns (code, response-dict)."""
+def regen_fld(scene, patched):
+    """Rerun the scene's converter (legacy for pre-b441da6 shipping FLDs —
+    the VLUM x100 era) and install the FLD. Returns (code, response-dict)."""
     ensure_lwsread()
-    tmp_fld = os.path.join(AUTHORING, ".GREETS.tmp.fld")
-    r = subprocess.run([LWSREAD, LWS, tmp_fld], cwd=AUTHORING,
-                       capture_output=True, text=True)
+    adir = scene_authoring_dir(scene)
+    tmp_fld = os.path.join(adir, ".regen.tmp.fld")
+    r = subprocess.run([scene_lwsread(scene), SCENES[scene]["lws"], ".regen.tmp.fld"],
+                       cwd=adir, capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(tmp_fld):
         return 500, {"ok": False, "error": "lwsread failed",
                      "stderr": (r.stderr or r.stdout)[-2000:], "patched": patched}
-    shutil.move(tmp_fld, FLD_INSTALL)
+    fld_install = scene_fld(scene)
+    shutil.move(tmp_fld, fld_install)
     return 200, {"ok": True, "patched": patched,
-                 "fld": os.path.relpath(FLD_INSTALL, REPO),
-                 "fld_bytes": os.path.getsize(FLD_INSTALL)}
+                 "fld": os.path.relpath(fld_install, REPO),
+                 "fld_bytes": os.path.getsize(fld_install)}
 
 
 def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
@@ -470,11 +478,11 @@ def do_save(scene, payload):
     if not SCENES[scene]["authoring"]:
         return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
 
-    patched_lights = patch_lws_lights(lights, warnings)
+    patched_lights = patch_lws_lights(scene, lights, warnings)
     if not surfaces and not uv_by_name:
         if patched_lights:
             # Lights changed -> the FLD must be regenerated (it embeds them).
-            code, resp = regen_fld([])
+            code, resp = regen_fld(scene, [])
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
@@ -483,11 +491,12 @@ def do_save(scene, payload):
         # Maps-only save: no FLD regen needed (map paths live in the sidecar;
         # the FLD doesn't reference them).
         return 200, {"ok": True, "patched": [], "maps": saved_maps,
-                     "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
+                     "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                      "warnings": warnings}
 
-    lwos = {f: lwopatch.LwoFile(os.path.join(AUTHORING, f))
-            for f in sorted(os.listdir(AUTHORING)) if f.endswith(".lwo")}
+    adir = scene_authoring_dir(scene)
+    lwos = {f: lwopatch.LwoFile(os.path.join(adir, f))
+            for f in sorted(os.listdir(adir)) if f.lower().endswith(".lwo")}
 
     # (file, surf) -> {prop: value}; resolve editor names against actual files.
     per_file = {}
@@ -535,12 +544,12 @@ def do_save(scene, payload):
 
     if not per_file and not uv_targets:
         if saved_maps or patched_lights:   # surface edits all missed, but these landed
-            code, resp = (regen_fld([]) if patched_lights
+            code, resp = (regen_fld(scene, []) if patched_lights
                           else (200, {"ok": True, "patched": []}))
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
-                         "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
+                         "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                          "warnings": warnings})
             return 200, resp
         return 400, {"ok": False, "error": "nothing matched", "warnings": warnings}
@@ -551,11 +560,11 @@ def do_save(scene, payload):
         for p, v in props.items():
             lwos[fname].surface(surf).set_prop(p, v)
     for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}):
-        path = os.path.join(AUTHORING, fname)
+        path = os.path.join(adir, fname)
         new = lwos[fname].serialize()
         if new == open(path, "rb").read():
             continue
-        bak = lwopatch.backup(path, BACKUPS)
+        bak = lwopatch.backup(path, scene_backup_dir(scene))
         with open(path, "wb") as f:
             f.write(new)
         patched.append({"file": fname,
@@ -564,19 +573,22 @@ def do_save(scene, payload):
                         "backup": os.path.relpath(bak, REPO)})
 
     # Regenerate + install the FLD.
-    code, resp = regen_fld(patched)
+    code, resp = regen_fld(scene, patched)
     if code != 200:
         return code, resp
     resp.update({"maps": saved_maps, "lights": patched_lights,
-                 "sidecar": os.path.relpath(SIDECAR, REPO) if saved_maps else None,
+                 "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                  "warnings": warnings})
     return 200, resp
 
 
 def scene_backup_dir(scene):
-    """greets backs up its LWO/LWS authoring sources; FLD-patched scenes back
-    up the shipping FLD itself."""
-    return BACKUPS if SCENES.get(scene, {}).get("authoring") else FLD_BACKUPS
+    """Authoring scenes back up their LWO/LWS sources under
+    Authoring/<scene>/.backups; FLD-patched scenes back up the shipping FLD
+    under Runtime/SCENES/.backups."""
+    if SCENES.get(scene, {}).get("authoring"):
+        return os.path.join(scene_authoring_dir(scene), ".backups")
+    return FLD_BACKUPS
 
 
 def list_backups(scene="greets"):
@@ -613,7 +625,7 @@ def do_restore(scene, payload):
     entry = next((e for e in list_backups(scene) if e["file"] == name), None)
     if entry is None:
         return 404, {"ok": False, "error": f"no such backup '{name}'"}
-    target = (os.path.join(AUTHORING, entry["target"]) if authoring
+    target = (os.path.join(scene_authoring_dir(scene), entry["target"]) if authoring
               else os.path.join(RUNTIME, "SCENES", entry["target"]))
     if not os.path.exists(target):
         return 404, {"ok": False, "error": f"target '{entry['target']}' missing"}
@@ -626,7 +638,7 @@ def do_restore(scene, payload):
     info = [{"file": entry["target"], "restored_from": name,
              "pre_restore_backup": os.path.relpath(pre, REPO)}]
     if authoring:
-        code, resp = regen_fld(info)
+        code, resp = regen_fld(scene, info)
         if code != 200:
             return code, resp
     else:
@@ -727,7 +739,7 @@ def main():
     with socketserver.ThreadingTCPServer(("127.0.0.1", args.port), Handler) as httpd:
         print(f"[server] {WASM_ROOT}")
         print(f"[server] editor: http://localhost:{args.port}/DEMO.html?editor")
-        print(f"[server] write-back: {AUTHORING} -> {FLD_INSTALL}")
+        print("[server] write-back scenes: " + ", ".join(k for k, v in SCENES.items() if v.get("authoring")) + " (source-level), rest via fldpatch")
         httpd.serve_forever()
 
 
