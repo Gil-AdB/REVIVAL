@@ -81,3 +81,27 @@ until something changes.** The honest residual paths, in order:
 
 Measured floors this session (idle, ts=491, quarter, full config):
 pre-session 43.4-44.4 → with P1 ~43.4-43.9 (Tick-Light −0.34).
+
+## 2026-07-03 (later) — the orchestrator gap profiled: it was ENQUEUE overhead
+
+New TailProf marks inside Render_DeferredLighting decomposed the ~1.75 ms
+unaccounted serial: light-list 0.011 ms (the linear shadow-map scans are
+noise), mirror-grid 0.524 ms (full-res mirrorMask scan — still serial,
+parallelizable follow-up), and the rest was the DISPATCH LOOPS themselves:
+96 ThreadPool::enqueue x ~12 us (queue mutex + notify_one while workers park,
+plus the woken workers contending the same mutex to pop) = ~1.2 ms serial per
+wave, x2 lighting waves + the cones wave.
+
+Fix (348216c): work-stealing chunk dispatch — enqueue only W tasks, each
+pulling tiles off a by-value shared_ptr atomic cursor (straggler-safe: a
+worker can evaluate the loop condition after the drain returns; the first cut
+captured the stack cursor by reference and crashed intermittently). Per-tile
+tileDone releases unchanged -> byte-identical. w1-enqueue 1.20 -> 0.09 ms;
+ts=491 quarter floor 43.4 -> 40.5 ms min. hdrDispatchRows converted too —
+neutral (post-pass workers rarely park so notify_one was cheap) but
+structurally better.
+
+Remaining serial leads, updated: mirror-grid 0.524 (parallelize the scan),
+RTT 1.68 (blocked on context migration), Tick-Xfrm 0.44. The gate now runs
+HEADLESS (SDL_VIDEODRIVER=dummy, rebaselined) — it was popping a window on
+the desktop every run.
