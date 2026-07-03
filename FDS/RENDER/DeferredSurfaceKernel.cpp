@@ -56,6 +56,7 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
+#include "RENDER/EnvBake.h"  // --env_refl: per-scene panorama for env-specular
 #include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
@@ -737,6 +738,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
+	// Env-specular reflection (--env_refl): per-SURFACE baked panoramas,
+	// matID-indexed (each reflective material's pano is captured from its own
+	// centroid; the lookup is parallax-corrected against the scene AABB).
+	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
+		? fds::EnvReflection_Table(ctx.Sc) : nullptr;
+	// Raw gain: the material's Reflection% now enters through Fresnel F0
+	// (F0 = Reflection/100), so the gain is a plain multiplier on top.
+	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
+	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
 	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
@@ -1111,6 +1121,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
+			// Env reflection + metalness live in the shared per-pixel COMPOSE
+			// (after the light loop), so they do NOT force the scalar light
+			// loop — only nmap/AO do (they change the normal the loop uses).
+			// Metals get env even at Reflection == 0 (a metal with no
+			// reflection is just black — its "diffuse" IS the reflection).
+			const bool hasMetal   = metalMapOnG && Mat->MetallicMap;
+			const fds::EnvPanoLinear *envP =
+				(envTabG && (Mat->Reflection > 0.0f || hasMetal)) ? envTabG[matID] : nullptr;
+			const bool hasEnvRefl = envP != nullptr;
 			const bool useVecHere = useVec
 				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
 
@@ -1129,7 +1148,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					    + float((aoTexel >> 8)  & 0xFF)  * 0.587f
 					    + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
 				}
-				ao = 1.0f - aoStrengthG * (1.0f - ao);
+				// Global dial × per-material dial (Mat->AoStrength defaults 1 —
+				// the ParallaxScale pattern).
+				ao = 1.0f - aoStrengthG * Mat->AoStrength * (1.0f - ao);
 				lB *= ao; lG *= ao; lR *= ao;
 			}
 
@@ -1602,10 +1623,25 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Metalness (--metal_map): m=1 pixels are conductors — no diffuse
+			// (the albedo becomes the REFLECTION tint below), and analytic
+			// highlights tint by the albedo instead of staying light-colored.
+			float metalM = 0.0f;
+			if (metalMapOnG && Mat->MetallicMap) {
+				const byte *md = (miplevel < Mat->MetallicMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
+				if (md) metalM = float(md[swizzledUV]) * (1.0f/255.0f);
+				if (metalM > 0.0f) {
+					const float dk = 1.0f - metalM;
+					fdB *= dk; fdG *= dk; fdR *= dk;
+				}
+			}
 			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
 			// rough → dimmer highlight, so the highlight breaks up across the
 			// surface (matte mortar vs glinty stone). 8-bit gather at the same
 			// (parallax-shifted) swizzled UV; only when there's a highlight.
+			// The env reflection is added AFTER this block: rough surfaces get
+			// a BLURRED reflection (pre-filtered pano mip), not a dimmed one.
 			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
 				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
 					? reinterpret_cast<const byte*>(Mat->RoughnessMap->Mipmap[miplevel]) : nullptr;
@@ -1614,6 +1650,129 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					if (specMul < 0.0f) specMul = 0.0f;
 					sB *= specMul; sG *= specMul; sR *= specMul;
 				}
+			}
+			// Metals: tint the accumulated analytic highlights by the albedo.
+			if (metalM > 0.0f) {
+				const float inv255 = 1.0f / 255.0f;
+				sB *= 1.0f - metalM + metalM * texB * inv255;
+				sG *= 1.0f - metalM + metalM * texG * inv255;
+				sR *= 1.0f - metalM + metalM * texR * inv255;
+			}
+			// Env-specular reflection (--env_refl): sample this surface's
+			// panorama along the reflected view ray. Fresnel-weighted
+			// (Schlick): F0 = the authored Reflection% (0.04 dielectric
+			// floor), pulled toward 1 by metalness. PARALLAX-CORRECTED: the
+			// pano is only exact at its bake point, so the reflected ray is
+			// intersected with the scene-AABB proxy from the pixel's WORLD
+			// position and the direction to that hit (from the bake point)
+			// indexes the pano — floors/walls track position instead of
+			// wearing a pasted-on picture.
+			if (hasEnvRefl) {
+				// Incident ray d = pixel direction (view space, camera at
+				// origin); reflect about the (possibly nmap-perturbed) N.
+				const float dInv = fast_rsqrt(x*x + y*y + z*z);
+				const float dx = x * dInv, dy = y * dInv, dz = z * dInv;
+				const float dDotN = dx*nx + dy*ny + dz*nz;
+				const float rvx = dx - 2.0f * dDotN * nx;
+				const float rvy = dy - 2.0f * dDotN * ny;
+				const float rvz = dz - 2.0f * dDotN * nz;
+				// View → world rotation (viewToWorld is the transpose of the
+				// camera rotation; direction ⇒ no translation).
+				float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
+				float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
+				float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+				// Parallax correction: exit-t of ray sampleWorld + t·R against
+				// the AABB (slab method, per-axis far plane), hit point → the
+				// lookup direction from the BAKE point. t ≤ 0 (pixel outside
+				// the proxy) falls back to the uncorrected direction.
+				{
+					const float bigT = 1e30f;
+					const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
+					                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
+					const float ty_ = rwy > 1e-6f ? (envP->boxMaxY - sampleWorldY) / rwy
+					                : rwy < -1e-6f ? (envP->boxMinY - sampleWorldY) / rwy : bigT;
+					const float tz_ = rwz > 1e-6f ? (envP->boxMaxZ - sampleWorldZ) / rwz
+					                : rwz < -1e-6f ? (envP->boxMinZ - sampleWorldZ) / rwz : bigT;
+					float t = tx_ < ty_ ? tx_ : ty_;
+					if (tz_ < t) t = tz_;
+					if (t > 0.0f && t < bigT) {
+						const float hx_ = sampleWorldX + t * rwx - envP->bakeX;
+						const float hy_ = sampleWorldY + t * rwy - envP->bakeY;
+						const float hz_ = sampleWorldZ + t * rwz - envP->bakeZ;
+						const float hInv_ = fast_rsqrt(hx_*hx_ + hy_*hy_ + hz_*hz_ + 1e-12f);
+						rwx = hx_ * hInv_; rwy = hy_ * hInv_; rwz = hz_ * hInv_;
+					}
+				}
+				// Equirect lookup — the exact inverse of EnvBake's stitch
+				// mapping: lon = atan2(-z, -x), lat = asin(y). Polynomial
+				// approximations (SimdHelpers) — libm atan2f/asinf here were
+				// the bulk of the env cost (~5ms on a cockpit-sized surface).
+				const float lon = atan2_approx(-rwz, -rwx);
+				float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
+				const float lat = asin_approx(sy_);
+				float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
+				eu -= std::floor(eu);
+				float evv = 0.5f - lat * (1.0f / 3.14159265359f);
+				if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
+				// Pre-filtered mip by per-pixel roughness (map texel, else the
+				// gloss-derived roughness the --pbr path uses).
+				float rough;
+				if (roughMapOnG && Mat->RoughnessMap && miplevel < Mat->RoughnessMap->numMipmaps
+				    && Mat->RoughnessMap->Mipmap[miplevel]) {
+					rough = float(reinterpret_cast<const byte*>(
+						Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+				} else {
+					rough = std::sqrt(2.0f / (gloss + 2.0f));
+				}
+				// Trilinear across the blur chain: nearest-level select on a
+				// NOISY roughness map made adjacent pixels flip between sharp
+				// and blurred mips (speckle). Lerp the two straddling levels.
+				float lvlF = rough * float(envP->numMips - 1);
+				if (lvlF < 0.0f) lvlF = 0.0f;
+				if (lvlF > float(envP->numMips - 1)) lvlF = float(envP->numMips - 1);
+				const int lvl0 = int(lvlF);
+				const int lvl1 = lvl0 + 1 < envP->numMips ? lvl0 + 1 : lvl0;
+				const float lf = lvlF - float(lvl0);
+				// ENV_NOFETCH=1: constant color instead of the pano loads —
+				// cost-attribution experiment (fetch-bound vs math-bound).
+				static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
+				auto fetchLvl = [&](int lvl) -> uint32_t {
+					if (sNoFetch) return 0xFF808080u;
+					const int lw = envP->W >> lvl, lh = envP->H >> lvl;
+					const int epx = int(eu * float(lw)) % lw;
+					const int epy_ = int(evv * float(lh));
+					return envP->mip[lvl][size_t(epy_) * lw + epx];
+				};
+				const uint32_t c0 = fetchLvl(lvl0);
+				const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;
+				const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
+				const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
+				const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
+				// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
+				// d·N < 0). F0 = authored Reflection% with the dielectric
+				// floor, pulled to ~1 by metalness. F90 (the grazing limit)
+				// is attenuated by roughness — the standard rough-Fresnel
+				// trick; without it a noisy normal map turns every grazing
+				// texel into a white spark (pow5 amplifies the nmap noise).
+				float ndv = -dDotN;
+				if (ndv < 0.0f) ndv = 0.0f; if (ndv > 1.0f) ndv = 1.0f;
+				float f0 = Mat->Reflection * 0.01f;
+				if (f0 < 0.04f) f0 = 0.04f;
+				f0 = f0 + (0.98f - f0) * metalM;
+				float f90 = 1.0f - rough;
+				if (f90 < f0) f90 = f0;
+				const float omv = 1.0f - ndv;
+				const float omv2 = omv * omv;
+				const float fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
+				const float ek = fres * envReflGainG;
+				const float inv255 = 1.0f / 255.0f;
+				// Metal tint: reflection takes the albedo's color.
+				const float tB = 1.0f - metalM + metalM * texB * inv255;
+				const float tG = 1.0f - metalM + metalM * texG * inv255;
+				const float tR = 1.0f - metalM + metalM * texR * inv255;
+				sB += ecB * ek * tB;
+				sG += ecG * ek * tG;
+				sR += ecR * ek * tR;
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
@@ -2166,7 +2325,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					h[1] = float(litG) * a + dG * ia;
 					h[2] = float(litR) * a + dR * ia;
 				} else {
-					const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+					const float dw = waterProc ? wFres
+					: (Mat->Transparency > 0.0f ? Mat->Transparency * 0.01f : 0.5f);
+				// water: reflection at fresnel weight. Legacy additive blend
+				// (out = lit + behind*dw): dw follows the AUTHORED transparency
+				// (LWO TRAN, 0-100%%) so the editor slider has a real effect —
+				// the shipped screens author 50%% -> dw 0.5, byte-identical.
+				// Hand-built xpar materials (mirrors) author Transparency=0 and
+				// keep the legacy 0.5.
 					h[0] = float(litB) + dB * dw;
 					h[1] = float(litG) + dG * dw;
 					h[2] = float(litR) + dR * dw;
@@ -2184,7 +2350,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				outG = int(float(litG) * a + float(dG) * ia);
 				outR = int(float(litR) * a + float(dR) * ia);
 			} else {
-				const float dw = waterProc ? wFres : 0.5f;   // water: reflection at fresnel weight
+				const float dw = waterProc ? wFres
+					: (Mat->Transparency > 0.0f ? Mat->Transparency * 0.01f : 0.5f);
+				// water: reflection at fresnel weight. Legacy additive blend
+				// (out = lit + behind*dw): dw follows the AUTHORED transparency
+				// (LWO TRAN, 0-100%%) so the editor slider has a real effect —
+				// the shipped screens author 50%% -> dw 0.5, byte-identical.
+				// Hand-built xpar materials (mirrors) author Transparency=0 and
+				// keep the legacy 0.5.
 				outB = litB + int(float(dB) * dw);
 				outG = litG + int(float(dG) * dw);
 				outR = litR + int(float(dR) * dw);

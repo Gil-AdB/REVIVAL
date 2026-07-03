@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "MaterialEditor.h"
 #include "FillerTest.h"
 #include "GLAT.H"
 #include "Rev.h"
@@ -20,6 +21,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <set>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -322,6 +324,89 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// IMPORT_TEST=surface:role:path — exercise the RUNTIME map-import path
+// (rev::Editor_ImportTexture / MaterialImport_ApplyMapFile, the browser
+// editor's code) natively, as opposed to the CLI --material-import which
+// applies at scene INIT. Isolates runtime-vs-init import differences
+// without the browser in the loop. Fires once.
+static void RunImportTestHook() {
+    const char *spec = std::getenv("IMPORT_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    // Semicolon-separated list of surface:role:path entries.
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        size_t c1 = s.find(':'), c2 = (c1 == std::string::npos) ? c1 : s.find(':', c1 + 1);
+        if (c2 == std::string::npos) { std::fprintf(stderr, "[IMPORTTEST] want surface:role:path\n"); continue; }
+        std::string surf = s.substr(0, c1), role = s.substr(c1 + 1, c2 - c1 - 1), path = s.substr(c2 + 1);
+        FILE *f = std::fopen(path.c_str(), "rb");
+        if (!f) { std::fprintf(stderr, "[IMPORTTEST] can't open %s\n", path.c_str()); continue; }
+        std::fseek(f, 0, SEEK_END); long len = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+        std::vector<unsigned char> buf(static_cast<size_t>(len), 0);
+        size_t rd = std::fread(buf.data(), 1, buf.size(), f);
+        std::fclose(f);
+        const bool ok = rev::Editor_ImportTexture(surf.c_str(), role.c_str(),
+                                                  path.c_str(), buf.data(), rd);
+        std::fprintf(stderr, "[IMPORTTEST] %s %s <- %s: %s\n",
+                     surf.c_str(), role.c_str(), path.c_str(), ok ? "ok" : "FAILED");
+    }
+}
+
+// LIGHT_TEST=index:key:value[;...] — exercise the RUNTIME light-edit path
+// (rev::Editor_SetLightProp — the browser editor's code) natively. Fires once,
+// before the tick, like IMPORT_TEST.
+static void RunLightTestHook() {
+    const char *spec = std::getenv("LIGHT_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        size_t c1 = s.find(':'), c2 = (c1 == std::string::npos) ? c1 : s.find(':', c1 + 1);
+        if (c2 == std::string::npos) { std::fprintf(stderr, "[LIGHTTEST] want index:key:value\n"); continue; }
+        const int idx = std::atoi(s.substr(0, c1).c_str());
+        const std::string key = s.substr(c1 + 1, c2 - c1 - 1);
+        const float val = std::strtof(s.c_str() + c2 + 1, nullptr);
+        const bool ok = rev::Editor_SetLightProp(idx, key.c_str(), val);
+        std::fprintf(stderr, "[LIGHTTEST] light %d %s = %g: %s\n", idx, key.c_str(), val,
+                     ok ? "ok" : "FAILED");
+    }
+}
+
+// UV_TEST=surface:proj:sx,sy,sz:axis — exercise the runtime UV re-projection
+// (rev::Editor_SetUVMapping) natively. Fires once, before the tick.
+static void RunUVTestHook() {
+    const char *spec = std::getenv("UV_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    char surf[128];
+    int proj = 0, axis = 2;
+    float sx = 1, sy = 1, sz = 1;
+    if (std::sscanf(spec, "%127[^:]:%d:%f,%f,%f:%d", surf, &proj, &sx, &sy, &sz, &axis) < 5) {
+        std::fprintf(stderr, "[UVTEST] want surface:proj:sx,sy,sz:axis\n");
+        return;
+    }
+    const std::string r = rev::Editor_SetUVMapping(surf, proj, sx, sy, sz, axis);
+    std::fprintf(stderr, "[UVTEST] %s -> %s\n", surf, r.c_str());
+}
+
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -408,8 +493,62 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             View = &FC;
         }
 
+        // IMPORT_TEST fires BEFORE the tick so the first written frame (t=100,
+        // which frames the big rooms wall) already shows the imported map.
+        RunImportTestHook();
+        RunLightTestHook();
+        RunUVTestHook();
+
         bool more = driver->tick();
         (void)more;
+
+        // Native validation hook for the surface-editor core (Phase 1): with
+        // DUMP_SURFACES=1 print the live surface list once after a tick (when
+        // CurScene == GreetSc) so the Embind path can be checked headless.
+        if (std::getenv("DUMP_SURFACES")) {
+            static bool dumped = false;
+            if (!dumped) {
+                dumped = true;
+                std::fprintf(stderr, "[SURFACES] %s\n",
+                             rev::Editor_GetSurfacesJSON().c_str());
+                std::fprintf(stderr, "[OBJECTS] %s\n",
+                             rev::Editor_GetObjectsJSON().c_str());
+                // DUMP_MESHES=1: one line per mesh — its distinct surface set.
+                // Ground truth for the editor's object-grouping heuristics.
+                if (std::getenv("DUMP_MESHES")) {
+                    int mi = 0;
+                    for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next, ++mi) {
+                        std::set<std::string> names;
+                        for (DWord f = 0; f < T->FIndex; ++f)
+                            if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
+                                names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+                        std::string line;
+                        for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
+                        std::fprintf(stderr, "[MESH %3d] %u faces: %s\n", mi, (unsigned)T->FIndex, line.c_str());
+                    }
+                }
+            }
+        }
+        // EDIT_TEST: does a surface edit persist across a render tick? (snap-back
+        // hunt) Set cockpit specular to a marker, print it, tick again, reprint.
+        if (std::getenv("EDIT_TEST")) {
+            static bool done = false;
+            if (!done) {
+                done = true;
+                auto cockpitSpec = []() -> std::string {
+                    std::string j = rev::Editor_GetSurfacesJSON();
+                    size_t p = j.find("\"cockpit\"");
+                    size_t s = j.find("\"specular\":", p);
+                    return (p==std::string::npos||s==std::string::npos) ? "?" : j.substr(s, 22);
+                };
+                rev::Editor_SetSurfaceProp("cockpit", "specular", 0.123f);
+                std::fprintf(stderr, "[EDITTEST] after set:       %s\n", cockpitSpec().c_str());
+                driver->tick();
+                std::fprintf(stderr, "[EDITTEST] after one tick:  %s\n", cockpitSpec().c_str());
+                driver->tick();
+                std::fprintf(stderr, "[EDITTEST] after two ticks: %s\n", cockpitSpec().c_str());
+            }
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/greets_t%06d_color.ppm",

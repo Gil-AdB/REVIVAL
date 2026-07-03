@@ -48,6 +48,12 @@ struct SceneDriver {
     // YOffs, ...) have already been updated by the time this fires.
     virtual void on_resize(int /*newX*/, int /*newY*/) {}
 
+    // Scene duration in Timer units (the *PartTime each scene ends at:
+    // `Timer >= PartTime` → tick returns false). Scene time is NOT FLD
+    // frames — every scene maps Timer onto its spline CurFrame through
+    // this. 0 = unknown. The editor's play mode loops/scrubs against it.
+    virtual int32_t partTime() const { return 0; }
+
 protected:
     // Count polys + omnis in `sc`, resize fds::g_mainFaces sort buffers to
     // match, and wire up the engine-side camera globals: View = sc->CameraHead,

@@ -84,6 +84,12 @@ struct Omni
 	// still reads L*ISize and IRange unchanged.
 	float            HaloIntensity;
 	float            HaloRange;
+	// Flare-sprite size multiplier, decoupling the flare from the light's
+	// intensity (F.FlareSize = ISize × FlareScale — historically the flare
+	// size WAS ISize, so brightening a light also grew its flare). Same
+	// sentinel convention as the halo overrides: 0 → legacy 1.0, so the
+	// many memset(0)-initialized Omni creation sites keep their look.
+	float            FlareScale;
 };
 
 #pragma pack(pop)

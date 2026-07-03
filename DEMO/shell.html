@@ -171,9 +171,19 @@
         statusEl.classList.remove('hidden');
         statusEl.textContent = text;
       }
+      // ?editor in the URL → surface-editor mode. Read in C++ (DemoBoot) to
+      // boot greets-only/mirror-off, and here to show the surface panel.
+      var revEditorMode = /[?&]editor\b/.test(location.search);
+      // ?scene=<name> picks the edited scene (default greets). The C++ side
+      // parses the same token (MainLoop's editor scene registry); here it
+      // selects the live-fetch paths + the save API route.
+      var revEditorScene = (location.search.match(/[?&]scene=(\w+)/) || [])[1] || 'greets';
+      var revEditorFLD = 'SCENES/' + revEditorScene.toUpperCase() + '.FLD';
+      var revEditorMAT = 'SCENES/' + revEditorScene.toUpperCase() + '.MAT';
       var Module = {
         canvas: canvasEl,
         setStatus: setStatus,
+        revEditorMode: revEditorMode ? 1 : 0,
         totalDependencies: 0,
         monitorRunDependencies: function(left) {
           this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -191,8 +201,59 @@
         // existed). Same for ?hidpi=1 in the URL.
         onRuntimeInitialized: function() {
           if (typeof applyHidpi === 'function') applyHidpi();
+          if (revEditorMode && typeof initEditorPanel === 'function') initEditorPanel();
         }
       };
+
+      // Editor: fetch the LIVE scene data from the dev server (tools/
+      // editor_server.py serves Runtime/ at these paths) — the copies inside
+      // DEMO.data were baked at link time, so after a "Save" regenerates them,
+      // a plain browser reload + these fetches pick them up without relinking:
+      //   SCENES/GREETS.FLD   the scene (numeric material values)
+      //   SCENES/GREETS.MAT   the PBR-map sidecar (surface|role|path lines)
+      //   TEXTURES/PBR/*      every map the sidecar references
+      // editorTick (MainLoop.cpp) waits for editorFldReady, installs
+      // editorFreshFiles into MEMFS, then starts scene init. -1 (fetch failed /
+      // static hosting without the server) falls back to the baked copies.
+      if (revEditorMode) {
+        Module.editorFldReady = 0;
+        Module.editorFreshFiles = [];   // [{path:'/SCENES/...', data:Uint8Array}]
+        (function(){
+          var bust = '?ts=' + Date.now();
+          function grab(rel){
+            return fetch(rel + bust, { cache: 'no-store' })
+              .then(function(r){ if (!r.ok) throw new Error(rel + ': ' + r.status); return r.arrayBuffer(); })
+              .then(function(b){ Module.editorFreshFiles.push({ path: '/' + rel, data: new Uint8Array(b) }); });
+          }
+          grab(revEditorFLD)
+            .then(function(){
+              // Sidecar is optional (404 = no persisted maps yet).
+              return fetch(revEditorMAT + bust, { cache: 'no-store' })
+                .then(function(r){ return r.ok ? r.arrayBuffer() : null; })
+                .catch(function(){ return null; });
+            })
+            .then(function(matBuf){
+              if (!matBuf) return [];
+              Module.editorFreshFiles.push({ path: '/' + revEditorMAT, data: new Uint8Array(matBuf) });
+              var text = new TextDecoder().decode(matBuf);
+              var maps = [];
+              text.split('\n').forEach(function(line){
+                line = line.trim();
+                if (!line || line[0] === '#') return;
+                var parts = line.split('|');
+                if (parts.length === 3 && maps.indexOf(parts[2]) < 0) maps.push(parts[2]);
+              });
+              return Promise.all(maps.map(function(rel){
+                return grab(rel).catch(function(e){ console.warn('[editor] sidecar map fetch failed:', e); });
+              }));
+            })
+            .then(function(){ Module.editorFldReady = 1; })
+            .catch(function(e){
+              console.warn('[editor] live scene fetch failed (using baked copies):', e);
+              Module.editorFldReady = -1;
+            });
+        })();
+      }
 
       // ---- Audio: AudioWorklet pump ---------------------------------
       // Replaces SDL2's emscripten ScriptProcessorNode path. The wasm
@@ -336,12 +397,23 @@
       // Becomes true once main() has returned — guards against late-firing
       // resize/orientation listeners trying to call into freed wasm.
       var runtimeExited = false;
+      // Render-scale divisor on top of HD/SD: 1 = full, 2 = half-res, 4 =
+      // quarter-res drawing buffer (CSS upscales to fill the window). The
+      // rasterizer's cost is ~linear in pixels, so ½× ≈ 4× fewer pixels.
+      // ?scale=2 / ?scale=4 in the URL sets it at boot.
+      var renderScale = (function(){
+        var m = /[?&]scale=(2|4)/.exec(window.location.search);
+        return m ? parseInt(m[1], 10) : 1;
+      })();
       function effectiveDpr() {
         var dpr = window.devicePixelRatio || 1;
+        var base;
         if (isMobile) {
-          return hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+          base = hiDPI ? Math.min(dpr, 2) : Math.min(dpr, 1.5);
+        } else {
+          base = hiDPI ? dpr : 1;
         }
-        return hiDPI ? dpr : 1;
+        return base / renderScale;
       }
       function resizeCanvasToWindow() {
         var dpr = effectiveDpr();
@@ -390,7 +462,10 @@
         if (Module.__audioGain) Module.__audioGain.gain.value = muted ? 0 : 1;
       }
       function applyHidpi() {
-        btnHidpi.textContent = hiDPI ? 'HD' : 'SD';
+        btnHidpi.textContent = renderScale === 4 ? '¼×'
+                             : renderScale === 2 ? '½×'
+                             : (hiDPI ? 'HD' : 'SD');
+        btnHidpi.title = 'render resolution: HD → SD → ½× → ¼× (click to cycle)';
         btnHidpi.setAttribute('aria-pressed', hiDPI ? 'true' : 'false');
         // Match the font scale to the effective DPR — that way one
         // glyph pixel maps to one CSS pixel regardless of HD/SD or
@@ -417,7 +492,12 @@
         applyMute();
       });
       btnHidpi.addEventListener('click', function() {
-        hiDPI = !hiDPI;
+        // Cycle HD → SD → ½× → ¼× → HD. The two low-res steps divide the
+        // drawing buffer for perf (heavy scenes / editor on battery).
+        if (hiDPI)                    { hiDPI = false; renderScale = 1; }
+        else if (renderScale === 1)   { renderScale = 2; }
+        else if (renderScale === 2)   { renderScale = 4; }
+        else                          { renderScale = 1; hiDPI = true; }
         applyHidpi();
       });
       btnFullscreen.addEventListener('click', function() {
@@ -467,6 +547,1186 @@
       controlsEl.addEventListener('click', showControls);
       // Show at boot so the controls are discoverable, then auto-hide.
       showControls();
+    </script>
+
+    <!-- ───────── LWO surface editor panel (shown only with ?editor) ───────── -->
+    <style>
+      #editor-panel { position:fixed; top:0; right:0; width:340px; max-height:100vh;
+        overflow-y:auto; background:rgba(18,18,22,0.92); color:#ddd; box-sizing:border-box;
+        font:12px/1.4 system-ui,sans-serif; z-index:10000; padding:8px; border-left:1px solid #333; }
+      #editor-panel.hidden { display:none; }
+      #editor-panel h2 { font-size:13px; margin:4px 0 8px; color:#fff; }
+      #editor-search { width:100%; box-sizing:border-box; margin-bottom:6px;
+        background:#222; color:#ddd; border:1px solid #444; padding:4px; }
+      #editor-list { max-height:40vh; overflow-y:auto; }
+      .surf-item { padding:3px 6px; cursor:pointer; border-radius:3px; }
+      .surf-item:hover { background:#2a2a33; }
+      .surf-item.sel { background:#3a3a4a; color:#fff; }
+      .surf-tex { color:#888; font-size:10px; }
+      #editor-props { border-top:1px solid #333; margin-top:6px; padding-top:6px; }
+      .prop-row { display:flex; align-items:center; gap:6px; margin:3px 0; }
+      .prop-row label { flex:0 0 64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .prop-row input[type=range], .prop-row select { flex:1 1 auto; min-width:90px; }
+      .prop-row input[type=number] { flex:0 0 46px; }
+      .prop-row .val { flex:0 0 36px; text-align:right; color:#9cf; }
+      #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
+    </style>
+    <div id="editor-panel" class="hidden">
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b44</span></h2>
+      <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
+      <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
+        <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
+        <span style="font-weight:normal;">
+          <a id="editor-invert-sel" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="invert the multi-selection within its containing object (ctrl/cmd-click rows to multi-select)">invert</a>
+          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="canvas click selects the whole object instead of one surface">
+            <input type="checkbox" id="editor-pickobj" style="vertical-align:-2px;"> pick=object
+          </label>
+        </span>
+      </div>
+      <div id="editor-objects"></div>
+      <div id="editor-list"></div>
+      <div id="editor-props"></div>
+      <div id="editor-lights-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;">Lights <span id="editor-lights-count" style="color:#6c8;font-size:10px;"></span></div>
+      <div id="editor-lights" style="display:none;"></div>
+      <div id="editor-light-props"></div>
+      <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+        <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
+        <span style="font-weight:normal;">
+          <a id="editor-rebake-env" href="#" style="color:#69c;font-size:10px;text-decoration:none;margin-right:8px;" title="re-bake the env-reflection panoramas with the CURRENT lights/materials (they capture the scene once, at first use)">rebake refl</a>
+          <a id="editor-knobs-resetall" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="reset every explicitly-set knob to its default">reset all</a>
+          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
+            <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
+          </label>
+        </span>
+      </div>
+      <div id="editor-knobs" style="display:none;"></div>
+      <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
+        <span style="flex:0 0 64px;">scene time</span>
+        <button id="editor-time-back" title="step back ([ key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">◀</button>
+        <span id="editor-time-val" style="flex:1;text-align:center;color:#9cf;">600</span>
+        <button id="editor-time-fwd" title="step forward (] key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">▶</button>
+        <button id="editor-time-play" title="play the scene from the demo camera (space; loops at scene end — drag the canvas or press again to stop)" style="background:#232;color:#cfc;border:1px solid #464;border-radius:3px;padding:2px 10px;cursor:pointer;">▶ play</button>
+      </div>
+      <input type="range" id="editor-time-bar" min="0" max="2000" step="1" value="600" title="scene time — drag to seek (works during playback)" style="width:100%;margin-top:4px;accent-color:#4a8;cursor:pointer;">
+      <div id="editor-actions" style="margin-top:6px;display:flex;gap:6px;">
+        <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
+        <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
+      </div>
+      <div id="editor-backups-hdr" style="margin-top:6px;color:#c96;font-size:10px;cursor:pointer;display:none;">Backups…</div>
+      <div id="editor-backups" style="display:none;"></div>
+      <div id="editor-status"></div>
+    </div>
+    <script>
+      var editorSurfaces = [], editorSelected = null;
+      // Object selection: editorGroup = array of surface names being edited
+      // together, or null for single-surface mode. setProp/importFile fan
+      // edits out over the group. The group is either a whole object's
+      // surfaces (click an object/part row) or a CUSTOM multi-selection
+      // (ctrl/cmd-click rows to toggle). editorGroupObj = the containing
+      // object (scopes "invert"; null = scope is all surfaces).
+      var editorObjects = [], editorGroup = null, editorGroupObj = null;
+      function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
+      // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
+      // window and preventDefault()s every key (they feed the engine's Keyboard[]
+      // array), so an <input> never receives the character — the filter box was
+      // untypeable. This capture-phase listener is registered BEFORE the wasm
+      // runtime loads (the emscripten SCRIPT tag is below), so it runs first: when focus is
+      // in a form field, stop the event from ever reaching SDL and let the
+      // browser's default text editing happen.
+      function editorTextEntryFocused(){
+        var el = document.activeElement;
+        if (!el) return false;
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+        if (el.tagName !== 'INPUT') return false;
+        // Only TEXT-ENTRY inputs capture the keyboard — range sliders, file
+        // pickers and buttons don't (so WASD fly keys keep reaching SDL even
+        // if the last click was on a slider).
+        var t = (el.type || 'text').toLowerCase();
+        return t === 'text' || t === 'number' || t === 'search' || t === 'email' || t === 'url';
+      }
+      if (revEditorMode) ['keydown','keyup','keypress'].forEach(function(t){
+        window.addEventListener(t, function(e){
+          if (editorTextEntryFocused())
+            e.stopImmediatePropagation();   // no preventDefault — typing IS the default
+        }, true);
+      });
+      // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
+      // until it returns a non-empty list (then it's safe to read/edit).
+      function initEditorPanel(){
+        console.log('[editor] panel init (build b44); orbit/zoom embind =',
+                    typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
+        document.getElementById('editor-panel').classList.remove('hidden');
+        // Scene picker: navigating swaps ?scene= and reloads (the FLD +
+        // sidecar live-fetch and scene init are boot-time).
+        var ssel = document.getElementById('editor-scene-sel');
+        ['greets','city','chase','fountain','crash'].forEach(function(sc){
+          var o = document.createElement('option'); o.value = sc; o.textContent = sc;
+          if (sc === revEditorScene) o.selected = true;
+          ssel.appendChild(o);
+        });
+        ssel.onchange = function(){
+          location.href = location.pathname + '?editor&scene=' + ssel.value;
+        };
+        editorStatus('loading ' + revEditorScene + '…');
+        var tries = 0;
+        var iv = setInterval(function(){
+          tries++;
+          var list = [];
+          try { list = JSON.parse(Module.editorGetSurfaces()); } catch(e){}
+          if (list.length){
+            clearInterval(iv); editorSurfaces = list;
+            // Pristine snapshot = values as loaded; "Save to LWO" sends only
+            // props that differ from this (so untouched surfaces never get
+            // their .lwo rewritten).
+            editorPristine = {};
+            list.forEach(function(s){ editorPristine[s.name] = JSON.parse(JSON.stringify(s)); });
+            try {
+              editorLights = JSON.parse(Module.editorGetLights());
+              editorLightsPristine = {};
+              editorLights.forEach(function(l){ editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l)); });
+            } catch(e){ console.warn('[editor] lights enumerate failed', e); }
+            try {
+              editorObjects = JSON.parse(Module.editorGetObjects ? Module.editorGetObjects() : '[]');
+            } catch(e){ console.warn('[editor] objects enumerate failed', e); }
+            editorStatus(list.length+' surfaces'); renderObjectList(); renderSurfaceList(); renderLightList(); updateSaveButton();
+          }
+          else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
+        }, 500);
+      }
+      var editorPristine = {};
+      // PBR maps imported this session, pending persistence: surface -> role ->
+      // {filename, bytes:Uint8Array}. Applied live at import time (MEMFS);
+      // "Save" ships them to the server, which stores the files under
+      // Runtime/TEXTURES/PBR/ and records them in the SCENES/GREETS.MAT sidecar.
+      var editorPendingMaps = {};
+      function pendingMapCount(){
+        var n = 0;
+        Object.keys(editorPendingMaps).forEach(function(s){ n += Object.keys(editorPendingMaps[s]).length; });
+        return n;
+      }
+      function b64FromBytes(bytes){
+        var s = '', CH = 0x8000;
+        for (var i = 0; i < bytes.length; i += CH)
+          s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        return btoa(s);
+      }
+      // aoStrength/parallaxScale are engine-only dials (× the global
+      // ao_map_strength / parallax_strength) — the server persists them to the
+      // scene sidecar, the rest to LWO/FLD.
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip'];
+      // UV mapping is a grouped edit: if ANY of these differs from pristine,
+      // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
+      var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
+      // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
+      // AddLight blocks, which is what the server patches on Save).
+      var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
+      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range','flareScale'];
+      function lightDirty(l){
+        var p = editorLightsPristine[l.i]; if (!p) return false;
+        return EDITOR_LIGHT_PROPS.some(function(k){ return Math.abs((+l[k]) - (+p[k])) > 1e-6; });
+      }
+      function collectDirtyLights(){
+        var out = {};
+        editorLights.forEach(function(l){
+          var p = editorLightsPristine[l.i]; if (!p) return;
+          EDITOR_LIGHT_PROPS.forEach(function(k){
+            if (Math.abs((+l[k]) - (+p[k])) > 1e-6) (out[l.i] = out[l.i] || {})[k] = +l[k];
+          });
+        });
+        return out;
+      }
+      function uvDirty(s, p){
+        return EDITOR_UV_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; });
+      }
+      function surfaceDirty(s){
+        var p = editorPristine[s.name]; if (!p) return false;
+        return EDITOR_SAVE_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; })
+            || uvDirty(s, p);
+      }
+      function collectDirty(){
+        var out = {};
+        editorSurfaces.forEach(function(s){
+          var p = editorPristine[s.name]; if (!p) return;
+          EDITOR_SAVE_PROPS.forEach(function(k){
+            if (Math.abs((+s[k]) - (+p[k])) > 1e-6) (out[s.name] = out[s.name] || {})[k] = +s[k];
+          });
+          if (uvDirty(s, p))
+            EDITOR_UV_PROPS.forEach(function(k){ (out[s.name] = out[s.name] || {})[k] = +s[k]; });
+        });
+        return out;
+      }
+      function updateSaveButton(){
+        var b = document.getElementById('editor-save'); if (!b) return;
+        var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
+            L = Object.keys(collectDirtyLights()).length;
+        b.disabled = !(n || m || L);
+        b.textContent = (n || m || L)
+          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '']
+               .filter(Boolean).join(', ') + ')')
+          : 'Save to LWO';
+      }
+      // ── Lights UI ─────────────────────────────────────────────────────
+      document.getElementById('editor-lights-hdr').onclick = function(){
+        var el = document.getElementById('editor-lights');
+        el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+      };
+      function renderLightList(){
+        document.getElementById('editor-lights-count').textContent = editorLights.length ? ('(' + editorLights.length + ')') : '';
+        var el = document.getElementById('editor-lights'); el.innerHTML = '';
+        editorLights.forEach(function(l){
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (editorSelectedLight === l.i ? ' sel' : '');
+          d.innerHTML = '<div><span style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:rgb(' + l.r + ',' + l.g + ',' + l.b + ')"></span>' +
+            'Light ' + l.i + (l.type ? ' (spot)' : '') + (l.shadow ? ' ◘' : '') +
+            (lightDirty(l) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
+            '<div class="surf-tex">pos ' + l.x + ',' + l.y + ',' + l.z +
+            ' • int ' + (+l.intensity).toFixed(2) + ' • range ' + (+l.range).toFixed(1) + '</div>';
+          d.onclick = function(){
+            editorSelectedLight = l.i; renderLightList(); renderLightProps(l);
+            // Frame the orbit on the light (same as clicking a surface row).
+            if (Module.editorFocusLight) Module.editorFocusLight(l.i);
+            editorStatus('light ' + l.i + ' — focused (' + l.x + ',' + l.y + ',' + l.z + ')');
+          };
+          el.appendChild(d);
+        });
+      }
+      function setLightProp(l, key, v){
+        var ok = false;
+        try { ok = Module.editorSetLightProp(l.i, key, v); }
+        catch(e){ editorStatus('light set failed: ' + e); return false; }
+        if (ok) { l[key] = v; editorStatus('light ' + l.i + ' ' + key + ' = ' + (+v).toFixed(2)); }
+        else editorStatus('light set → false');
+        updateSaveButton();
+        return ok;
+      }
+      // flareScale multiplies the flare SPRITE size on top of intensity
+      // (engine: F.FlareSize = ISize × flareScale) — decouples "how bright
+      // the light is" from "how big the flare draws". Persists via the scene
+      // sidecar (no LWS/FLD field for it).
+      var EDITOR_LIGHT_RANGES = { r:[0,255,1], g:[0,255,1], b:[0,255,1],
+                                  intensity:[0,4,0.01], range:[0,100,0.5],
+                                  flareScale:[0.05,4,0.01] };
+      function renderLightProps(l){
+        var el = document.getElementById('editor-light-props'); el.innerHTML = '';
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;display:flex;justify-content:space-between;';
+        var hn = document.createElement('span');
+        hn.textContent = 'Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : '');
+        h.appendChild(hn);
+        var rst = document.createElement('a');
+        rst.textContent = 'reset'; rst.href = '#';
+        rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          var p = editorLightsPristine[l.i]; if (!p) return;
+          EDITOR_LIGHT_PROPS.forEach(function(k){
+            if (Math.abs((+l[k]) - (+p[k])) > 1e-9) setLightProp(l, k, +p[k]);
+          });
+          renderLightList(); renderLightProps(l); updateSaveButton();
+        };
+        h.appendChild(rst); el.appendChild(h);
+        EDITOR_LIGHT_PROPS.forEach(function(k){
+          var rg = EDITOR_LIGHT_RANGES[k];
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lab = document.createElement('label'); lab.textContent = k; row.appendChild(lab);
+          var r = document.createElement('input'); r.type = 'range';
+          r.min = rg[0]; r.max = rg[1]; r.step = rg[2]; r.value = l[k];
+          var val = document.createElement('input'); val.type = 'number'; val.step = rg[2];
+          val.value = +(+l[k]).toFixed(3);
+          val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          r.oninput = function(){
+            var v = parseFloat(r.value); val.value = +v.toFixed(3);
+            setLightProp(l, k, v); renderLightList();
+          };
+          val.onchange = function(){
+            var v = parseFloat(val.value); if (isNaN(v)) return;
+            r.value = v; setLightProp(l, k, v); renderLightList();
+          };
+          row.appendChild(r); row.appendChild(val); el.appendChild(row);
+        });
+      }
+      // ── Render knobs: live engine feature-flags ───────────────────────
+      // Data-driven from editorGetParams (the FeatureFlags registry dump).
+      // Default view = the curated important set; "all" shows everything
+      // grouped by category. Edits call editorSetParam (same write path as
+      // the CLI) and re-render on the next frame; "reset" = unsetParam
+      // (back to the compile-time default).
+      var editorParams = [], editorParamsPristine = null;
+      var EDITOR_KNOBS = ['bloom','bloom_intensity','disco_bloom','hdr_refl_gain',
+        'ssao','ssao_gtao','ssao_downscale','ao_map_strength',
+        'parallax','parallax_strength','nmap_16bit',
+        'chromatic','chromatic_amount','vignette','vignette_strength',
+        'dof','dof_range','dof_max',
+        'anamorphic','anamorphic_intensity','anamorphic_passes','anamorphic_decay',
+        'lens_ghosts','lens_ghost_intensity','lens_ghost_dispersal','lens_ghost_halo',
+        'cone_strength','aa','shadows','shadow_dynamic','pbr','hdr','hdr_linear',
+        'deferred_quarter','fast_fog','fast_fog_froxel','env_refl','env_refl_gain','nmap_viz'];
+      function refreshParams(){
+        try { editorParams = JSON.parse(Module.editorGetParams()); } catch(e){ editorParams = []; }
+        // Pristine = the values at first open (the editor's boot look: the
+        // native flag set + URL overrides). Reset restores THESE, not the
+        // compile-time defaults — unsetParam would strip hdr/bloom/etc.
+        if (!editorParamsPristine && editorParams.length) {
+          editorParamsPristine = {};
+          editorParams.forEach(function(p){ editorParamsPristine[p.name] = p.value; });
+        }
+      }
+      function knobPristine(p){
+        return (editorParamsPristine && p.name in editorParamsPristine)
+          ? editorParamsPristine[p.name] : p.def;
+      }
+      function knobRow(p){
+        var row = document.createElement('div'); row.className = 'prop-row';
+        row.title = p.help || '';
+        var lab = document.createElement('label'); lab.textContent = p.name;
+        lab.style.cssText = 'flex:0 0 130px;overflow:hidden;text-overflow:ellipsis;' + (p.set ? 'color:#fc8;' : '');
+        row.appendChild(lab);
+        function setIt(v){
+          var ok = false;
+          try { ok = Module.editorSetParam(p.name, String(v)); } catch(e){}
+          editorStatus((ok ? 'flag ' : 'flag FAILED ') + p.name + ' = ' + v);
+          p.set = true; lab.style.color = '#fc8';
+        }
+        if (p.type === 'bool') {
+          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!p.value;
+          cb.style.flex = '1';
+          cb.onchange = function(){ p.value = cb.checked; setIt(cb.checked ? 1 : 0); };
+          row.appendChild(cb);
+        } else {
+          // Slider range: span BOTH the default and the current value
+          // generously (a CLI/scene value above 4×default used to cap the
+          // slider at the loaded value). Typing past the top in the number
+          // box grows the slider range too.
+          var d = Math.abs(+p.def) || 1;
+          var r = document.createElement('input'); r.type = 'range';
+          function fitRange(v){
+            var m = Math.max(4 * d, 2.5 * Math.abs(v), 1);
+            r.min = Math.min(0, v); r.max = m;
+            r.step = (p.type === 'int') ? 1 : m / 200;
+          }
+          fitRange(+p.value);
+          r.value = +p.value;
+          var val = document.createElement('input'); val.type = 'number'; val.step = r.step;
+          val.value = +(+p.value).toFixed(3);
+          val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          r.oninput = function(){ var v = (p.type === 'int') ? parseInt(r.value, 10) : parseFloat(r.value);
+                                  val.value = v; p.value = v; setIt(v); };
+          val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return;
+                                     if (v > +r.max || v < +r.min) fitRange(v);
+                                     r.value = v; p.value = v; setIt(v); };
+          row.appendChild(r); row.appendChild(val);
+        }
+        var rst = document.createElement('a');
+        rst.textContent = '⟲'; rst.href = '#';
+        rst.title = 'reset to loaded value (' + knobPristine(p) + ')';
+        rst.style.cssText = 'color:#c96;font-size:11px;text-decoration:none;flex:0 0 14px;text-align:center;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          var v = knobPristine(p);
+          try { Module.editorSetParam(p.name, String(typeof v === 'boolean' ? (v ? 1 : 0) : v)); } catch(err){}
+          refreshParams(); renderKnobList();
+          editorStatus('reset ' + p.name + ' = ' + v);
+        };
+        row.appendChild(rst);
+        return row;
+      }
+      function renderKnobList(){
+        var el = document.getElementById('editor-knobs'); if (!el) return;
+        var all = document.getElementById('editor-knobs-all').checked;
+        el.innerHTML = '';
+        var cnt = document.getElementById('editor-knobs-count');
+        if (cnt) cnt.textContent = editorParams.length ? ('(' + (all ? editorParams.length : EDITOR_KNOBS.length) + ')') : '';
+        if (!editorParams.length) return;
+        if (all) {
+          var byCat = {};
+          editorParams.forEach(function(p){ (byCat[p.cat || 'misc'] = byCat[p.cat || 'misc'] || []).push(p); });
+          Object.keys(byCat).sort().forEach(function(cat){
+            var h = document.createElement('div');
+            h.style.cssText = 'color:#8ac;font-size:10px;margin-top:6px;border-bottom:1px solid #234;';
+            h.textContent = cat;
+            el.appendChild(h);
+            byCat[cat].forEach(function(p){ el.appendChild(knobRow(p)); });
+          });
+        } else {
+          EDITOR_KNOBS.forEach(function(name){
+            var p = editorParams.find(function(x){ return x.name === name; });
+            if (p) el.appendChild(knobRow(p));
+          });
+        }
+      }
+      document.getElementById('editor-rebake-env').onclick = function(e){
+        e.preventDefault(); e.stopPropagation();
+        try { Module.editorRebakeEnv(); editorStatus('env reflections invalidated — re-baking next frame'); }
+        catch(err){ editorStatus('rebake failed: ' + err); }
+      };
+      document.getElementById('editor-knobs-hdr').onclick = function(e){
+        if (e.target && (e.target.id === 'editor-knobs-all' ||
+                         e.target.id === 'editor-knobs-resetall' ||
+                         e.target.id === 'editor-rebake-env' ||
+                         e.target.tagName === 'LABEL')) return;   // controls, not a toggle
+        var el = document.getElementById('editor-knobs');
+        var opening = el.style.display === 'none';
+        el.style.display = opening ? 'block' : 'none';
+        if (opening) { refreshParams(); renderKnobList(); }
+      };
+      document.getElementById('editor-knobs-all').onchange = function(){ renderKnobList(); };
+      document.getElementById('editor-knobs-resetall').onclick = function(e){
+        e.preventDefault();
+        refreshParams();
+        var n = 0;
+        editorParams.forEach(function(p){
+          var v = knobPristine(p);
+          if (String(p.value) !== String(v)) {
+            try {
+              if (Module.editorSetParam(p.name, String(typeof v === 'boolean' ? (v ? 1 : 0) : v))) n++;
+            } catch(err){}
+          }
+        });
+        refreshParams(); renderKnobList();
+        editorStatus('reset ' + n + ' knob(s) to loaded values');
+      };
+      function renderSurfaceList(){
+        var q = (document.getElementById('editor-search').value || '').toLowerCase();
+        var el = document.getElementById('editor-list'); el.innerHTML = '';
+        editorSurfaces.forEach(function(s){
+          if (q && s.name.toLowerCase().indexOf(q) < 0) return;
+          var grouped = editorGroup && editorGroup.indexOf(s.name) >= 0;
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (((editorSelected === s.name && !editorGroup) || grouped) ? ' sel' : '');
+          d.innerHTML = '<div>' + s.name +
+            (surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
+            (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
+          d.onclick = function(ev){
+            if (ev.ctrlKey || ev.metaKey) toggleGroup([s.name], null);
+            else selectSurface(s, /*alsoFocus=*/true);
+          };
+          el.appendChild(d);
+        });
+      }
+      // Hierarchy tree: model → parts → surfaces. Clicking an object/part row
+      // selects the whole group (edits fan out); a surface leaf selects just
+      // that surface, same as the flat list. Ctrl/cmd-click any row to TOGGLE
+      // it in a multi-selection instead; "invert" in the header flips the
+      // multi-selection within its containing object. ▸/▾ expands a level.
+      var editorObjExpanded = {};
+      function inGroup(n){ return !!(editorGroup && editorGroup.indexOf(n) >= 0); }
+      function groupHasAll(names){
+        return names.length > 0 && names.every(inGroup);
+      }
+      function renderObjectList(){
+        var cnt = document.getElementById('editor-objects-count');
+        if (cnt) cnt.textContent = editorObjects.length ? ('(' + editorObjects.length + ')') : '';
+        var inv = document.getElementById('editor-invert-sel');
+        if (inv) inv.style.display = editorGroup ? '' : 'none';
+        var el = document.getElementById('editor-objects'); if (!el) return;
+        el.innerHTML = '';
+        function addObjRow(o, depth, key, container){
+          var isSel = groupHasAll(o.surfaces);
+          var open = !!editorObjExpanded[key];
+          var kids = o.children || [];
+          var d = document.createElement('div');
+          d.className = 'surf-item' + (isSel ? ' sel' : '');
+          d.style.marginLeft = (depth * 14) + 'px';
+          d.innerHTML = '<div><span class="obj-exp" style="display:inline-block;width:14px;cursor:pointer;color:#8ac;">' +
+            (open ? '▾' : '▸') + '</span>⬚ ' + o.name + '</div>' +
+            '<div class="surf-tex" style="margin-left:14px;">' + o.surfaces.length + ' surface(s)' +
+            (kids.length ? ', ' + kids.length + ' part(s)' : '') + '</div>';
+          d.querySelector('.obj-exp').onclick = function(ev){
+            ev.stopPropagation();
+            editorObjExpanded[key] = !open;
+            renderObjectList();
+          };
+          d.onclick = function(ev){
+            if (ev.ctrlKey || ev.metaKey) toggleGroup(o.surfaces, container || o);
+            else selectObject(o);
+          };
+          el.appendChild(d);
+          if (!open) return;
+          if (kids.length) {
+            kids.forEach(function(c, i){ addObjRow(c, depth + 1, key + '/' + c.name + i, container || o); });
+          } else {
+            o.surfaces.forEach(function(n){
+              var s = editorSurfaces.find(function(x){ return x.name === n; });
+              var c = document.createElement('div');
+              c.className = 'surf-item' + ((inGroup(n) || (editorSelected === n && !editorGroup)) ? ' sel' : '');
+              c.style.marginLeft = ((depth + 1) * 14 + 4) + 'px';
+              c.innerHTML = '<div>' + n + (s && surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>';
+              c.onclick = function(ev){
+                if (ev.ctrlKey || ev.metaKey) toggleGroup([n], container || o);
+                else if (s) selectSurface(s, /*alsoFocus=*/true);
+              };
+              el.appendChild(c);
+            });
+          }
+        }
+        editorObjects.forEach(function(o, i){ addObjRow(o, 0, o.name + i, null); });
+      }
+      // Apply the current editorGroup: props panel (first member's values),
+      // group highlight + framing, list refresh, status.
+      function applyGroupSelection(label){
+        var names = (editorGroup || []).filter(function(n){
+          return editorSurfaces.some(function(s){ return s.name === n; });
+        });
+        if (!names.length) {
+          editorGroup = null; editorGroupObj = null;
+          renderObjectList(); renderSurfaceList();
+          editorStatus('selection empty');
+          return;
+        }
+        editorGroup = names;
+        editorSelected = names[0];
+        var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
+        renderObjectList(); renderSurfaceList();
+        renderSurfaceProps(s, { name: label, surfaces: names });
+        if (Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
+        if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
+        editorStatus(label + ': editing ' + names.length + ' surface(s) together');
+      }
+      // Ctrl/cmd-click: toggle `names` in/out of the multi-selection. Starting
+      // a fresh multi-select seeds it with the current single selection so
+      // ctrl-click naturally EXTENDS what you had.
+      function toggleGroup(names, container){
+        if (!editorGroup) {
+          editorGroup = (editorSelected && names.indexOf(editorSelected) < 0)
+            ? [editorSelected] : [];
+        }
+        var allIn = names.length > 0 && names.every(inGroup);
+        if (allIn) {
+          editorGroup = editorGroup.filter(function(n){ return names.indexOf(n) < 0; });
+        } else {
+          names.forEach(function(n){ if (!inGroup(n)) editorGroup.push(n); });
+        }
+        editorGroupObj = container || editorGroupObj;
+        applyGroupSelection('selection');
+      }
+      // Object select: every surface of the group edits together. Props panel
+      // shows the FIRST surface's values; highlight + focus cover the group.
+      function selectObject(o){
+        editorGroup = o.surfaces.slice();
+        editorGroupObj = o;
+        applyGroupSelection('object "' + o.name + '"');
+      }
+      // Shared select path: list click focuses the orbit on the surface;
+      // canvas pick only selects/highlights (jumping the camera on every
+      // viewport click would fight the user's framing).
+      function selectSurface(s, alsoFocus){
+        editorGroup = null; editorGroupObj = null;   // single-surface mode
+        editorSelected = s.name; renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
+        if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
+        if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
+        var sel = document.querySelector('#editor-list .surf-item.sel');
+        if (sel) sel.scrollIntoView({ block: 'nearest' });
+      }
+      // Invert the multi-selection within its containing object (or, with no
+      // container, within all surfaces): selected ↔ unselected.
+      document.getElementById('editor-invert-sel').onclick = function(e){
+        e.preventDefault();
+        if (!editorGroup) return;
+        var scope = editorGroupObj ? editorGroupObj.surfaces
+                                   : editorSurfaces.map(function(s){ return s.name; });
+        editorGroup = scope.filter(function(n){ return !inGroup(n); });
+        applyGroupSelection(editorGroupObj ? 'inverted in "' + editorGroupObj.name + '"' : 'inverted');
+      };
+      // Re-pull the surface model from the engine and re-render the panel for
+      // the current selection. Needed after map imports: fields like
+      // hasNormalMap / normalFlip / texture gate panel controls (the 'normal
+      // G' row only exists when a normal map is present), and they change
+      // when maps land.
+      function refreshSurfacesAndProps(selName){
+        var fresh;
+        try { fresh = JSON.parse(Module.editorGetSurfaces()); } catch(e){ return; }
+        fresh.forEach(function(ns){
+          var i = editorSurfaces.findIndex(function(x){ return x.name === ns.name; });
+          if (i >= 0) editorSurfaces[i] = ns;
+          else { editorSurfaces.push(ns); }
+          if (!editorPristine[ns.name]) editorPristine[ns.name] = JSON.parse(JSON.stringify(ns));
+        });
+        renderSurfaceList();
+        var cur = editorSurfaces.find(function(x){ return x.name === (editorSelected || selName); });
+        if (cur) renderSurfaceProps(cur, editorGroup ? { name: 'selection', surfaces: editorGroup } : undefined);
+      }
+      // The names an edit applies to: the whole object group when one is
+      // selected (and the edited surface belongs to it), else just the one.
+      function editSurfNames(name){
+        if (editorGroup && editorGroup.indexOf(name) >= 0)
+          return editorGroup.filter(function(n){
+            return editorSurfaces.some(function(s){ return s.name === n; });
+          });
+        return [name];
+      }
+      function setProp(name, key, v){
+        var names = editSurfNames(name);
+        var okAll = true;
+        names.forEach(function(n){
+          var ok = false;
+          try { ok = Module.editorSetSurfaceProp(n, key, v); }
+          catch(e){ editorStatus('set failed: ' + e); console.error('editorSetSurfaceProp', e); okAll = false; return; }
+          if (ok) {
+            var s = editorSurfaces.find(function(x){ return x.name === n; });
+            if (s) s[key] = v;   // keep the JS model in sync so re-selecting shows the edit
+          } else okAll = false;
+        });
+        if (!okAll) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
+        else editorStatus('set ' + key + ' = ' + (+v).toFixed(2) +
+                          (names.length > 1 ? ' (' + names.length + ' surfaces)' : ''));
+        // Reflection renders only under the env_refl knob — auto-enable it
+        // the first time someone dials reflection up, instead of silently
+        // doing nothing (the #1 "reflections don't work" report).
+        if (okAll && key === 'reflection' && v > 0) {
+          try {
+            var pEnv = JSON.parse(Module.editorGetParams()).find(function(p){ return p.name === 'env_refl'; });
+            if (pEnv && !pEnv.value) {
+              Module.editorSetParam('env_refl', '1');
+              editorStatus('set reflection = ' + (+v).toFixed(0) + ' — env_refl was OFF, enabled it (reflections need it)');
+            }
+          } catch(e){}
+        }
+        console.log('[editor] set', names.join(','), key, v, '->', okAll);
+        updateSaveButton();
+        return okAll;
+      }
+      // Save to LWO: POST the dirty props to the dev server, which patches the
+      // Authoring/greets .lwo files (with backups), reruns lwsread, and installs
+      // the FLD into Runtime/SCENES. "Reload scene" then re-boots the page —
+      // the editor fetches the fresh FLD at boot, so the saved values persist.
+      document.getElementById('editor-save').onclick = function(){
+        var dirty = collectDirty();
+        var names = Object.keys(dirty);
+        var maps = {};
+        Object.keys(editorPendingMaps).forEach(function(surf){
+          Object.keys(editorPendingMaps[surf]).forEach(function(role){
+            var m = editorPendingMaps[surf][role];
+            (maps[surf] = maps[surf] || {})[role] = { filename: m.filename, data: b64FromBytes(m.bytes) };
+          });
+        });
+        var nMaps = pendingMapCount();
+        var dirtyLights = collectDirtyLights();
+        var lightIdx = Object.keys(dirtyLights);
+        if (!names.length && !nMaps && !lightIdx.length) return;
+        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' + lightIdx.length + ' light(s)…');
+        var payload = { surfaces: dirty };
+        if (nMaps) payload.maps = maps;
+        if (lightIdx.length) payload.lights = dirtyLights;
+        fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
+          .then(function(r){ return r.json(); })
+          .then(function(res){
+            if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
+            var bits = (res.patched || []).map(function(p){ return p.file; });
+            if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
+            if (res.fld) bits.push(res.fld.split('/').pop());
+            if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
+            if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → FLD');
+            editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
+                         (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
+            if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
+            console.log('[editor] save ok:', res);
+            // Saved values/maps/lights are the new baseline.
+            names.forEach(function(n){
+              var s = editorSurfaces.find(function(x){ return x.name === n; });
+              if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
+            });
+            lightIdx.forEach(function(i){
+              var l = editorLights.find(function(x){ return String(x.i) === String(i); });
+              if (l) editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l));
+            });
+            editorPendingMaps = {};
+            renderSurfaceList(); renderLightList(); updateSaveButton();
+          })
+          .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
+      };
+      document.getElementById('editor-reload').onclick = function(){ location.reload(); };
+      // Scene-time scrub: the editor freezes the animation clock; step it to
+      // scrub the scene's animation (robot walk, camera-independent tracks).
+      // The progress bar spans the scene's REAL duration (driver partTime,
+      // Timer units) — sized lazily since the driver isn't up at page load.
+      var timeBar = document.getElementById('editor-time-bar');
+      var timeBarDragging = false;
+      function updateTimeUI(t){
+        t = Math.round(t);
+        document.getElementById('editor-time-val').textContent = t;
+        if (Module.editorSceneLength) {
+          var len = Module.editorSceneLength();
+          if (len > 0 && +timeBar.max !== len) timeBar.max = len;
+        }
+        if (!timeBarDragging) timeBar.value = t;
+      }
+      function timeStep(d){
+        if (!Module.editorTimeStep) return;
+        updateTimeUI(Module.editorTimeStep(d));
+      }
+      document.getElementById('editor-time-back').onclick = function(e){ timeStep(e.shiftKey ? -500 : -50); };
+      document.getElementById('editor-time-fwd').onclick  = function(e){ timeStep(e.shiftKey ?  500 :  50); };
+      // Drag = absolute seek (frozen or mid-playback). The poll leaves the
+      // thumb alone while the pointer holds it.
+      timeBar.addEventListener('pointerdown', function(){ timeBarDragging = true; });
+      window.addEventListener('pointerup', function(){ timeBarDragging = false; });
+      timeBar.addEventListener('input', function(){
+        if (!Module.editorTimeSet) return;
+        var t = Module.editorTimeSet(+timeBar.value);
+        document.getElementById('editor-time-val').textContent = Math.round(t);
+      });
+      // Size the bar as soon as the scene driver is up (its partTime is 0
+      // until then) — otherwise the max stays at the placeholder until the
+      // first scrub/play touch.
+      var timeBarSizer = setInterval(function(){
+        if (!Module.editorSceneLength) return;
+        var len = Module.editorSceneLength();
+        if (len > 0) {
+          timeBar.max = len;
+          if (Module.editorSceneTime) timeBar.value = Module.editorSceneTime();
+          clearInterval(timeBarSizer);
+        }
+      }, 500);
+      // Play the scene from the demo's spline camera (loops at scene end).
+      // Starts from the current frozen time; stopping re-freezes wherever
+      // playback got to and hands the view back to the editor orbit camera.
+      var scenePlaying = false, scenePlayPoll = null;
+      function setScenePlaying(on){
+        if (!Module.editorPlayScene || on === scenePlaying) return;
+        scenePlaying = on;
+        var t = Module.editorPlayScene(on);
+        var btn = document.getElementById('editor-time-play');
+        btn.textContent = on ? '■ stop' : '▶ play';
+        btn.style.background = on ? '#422' : '#232';
+        updateTimeUI(t);
+        if (on) {
+          scenePlayPoll = setInterval(function(){
+            if (Module.editorSceneTime) updateTimeUI(Module.editorSceneTime());
+          }, 200);
+        } else if (scenePlayPoll) { clearInterval(scenePlayPoll); scenePlayPoll = null; }
+      }
+      window.editorSetScenePlaying = setScenePlaying;  // canvas grab auto-stops play
+      document.getElementById('editor-time-play').onclick = function(){ setScenePlaying(!scenePlaying); };
+      window.addEventListener('keydown', function(e){
+        if (editorTextEntryFocused()) return;
+        if (e.key === '[') timeStep(e.shiftKey ? -500 : -50);
+        else if (e.key === ']') timeStep(e.shiftKey ? 500 : 50);
+        else if (e.key === ' ' && !e.repeat) { setScenePlaying(!scenePlaying); e.preventDefault(); }
+      });
+      // Backups: greets stashes its .lwo/.LWS authoring sources under
+      // Authoring/greets/.backups (restore regens the FLD); the other scenes
+      // stash the shipping FLD itself under Runtime/SCENES/.backups (their
+      // saves patch the FLD directly — tools/fldpatch.py). Restoring backs up
+      // the current state first — Reload then shows it.
+      (function(){
+        var bhdr = document.getElementById('editor-backups-hdr');
+        bhdr.style.display = 'block';
+        var bopen = false;
+        bhdr.onclick = function(){
+          var el = document.getElementById('editor-backups');
+          bopen = !bopen;
+          el.style.display = bopen ? 'block' : 'none';
+          if (!bopen) return;
+          el.innerHTML = '<div class="surf-tex">loading…</div>';
+          fetch('api/' + revEditorScene + '/backups').then(function(r){ return r.json(); }).then(function(res){
+            el.innerHTML = '';
+            if (!res.backups || !res.backups.length) { el.innerHTML = '<div class="surf-tex">no backups yet</div>'; return; }
+            res.backups.forEach(function(b){
+              var d = document.createElement('div'); d.className = 'surf-item';
+              d.innerHTML = '<div>' + b.file + '</div><div class="surf-tex">restores ' + b.target + '</div>';
+              d.onclick = function(){
+                if (!confirm('Restore ' + b.target + ' from ' + b.file + '?\n(The current file is backed up first.)')) return;
+                editorStatus('restoring ' + b.file + '…');
+                fetch('api/' + revEditorScene + '/restore', { method: 'POST', body: JSON.stringify({ file: b.file }) })
+                  .then(function(r){ return r.json(); })
+                  .then(function(res2){
+                    editorStatus(res2.ok
+                      ? ((res2.restored ? 'restored ' + res2.restored + ' — Reload scene to see it'
+                                        : (res2.note || 'nothing to do')))
+                      : ('restore FAILED: ' + (res2.error || '?')));
+                  })
+                  .catch(function(e){ editorStatus('restore failed: ' + e); });
+              };
+              el.appendChild(d);
+            });
+          }).catch(function(e){ el.innerHTML = '<div class="surf-tex">backups fetch failed: ' + e + '</div>'; });
+        };
+      })();
+      // Per-property ranges — the engine stores these on different scales:
+      // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
+      var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
+                            transparency:[0,100], reflection:[0,100],
+                            aoStrength:[0,2], parallaxScale:[0,3] };
+      // Slider + numeric twin. The number box accepts values beyond the slider
+      // range (type an exact 3.5 even if the slider tops out at 2).
+      function propRow(s, key, min, max, step){
+        var row = document.createElement('div'); row.className = 'prop-row';
+        var lab = document.createElement('label'); lab.textContent = key; row.appendChild(lab);
+        var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = s[key];
+        var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+s[key]).toFixed(3);
+        val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+        r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); setProp(s.name, key, v); };
+        val.onchange = function(){
+          var v = parseFloat(val.value); if (isNaN(v)) return;
+          r.value = v; setProp(s.name, key, v);
+        };
+        row.appendChild(r); row.appendChild(val); return row;
+      }
+      function renderSurfaceProps(s, obj){
+        var el = document.getElementById('editor-props'); el.innerHTML = '';
+        var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;display:flex;justify-content:space-between;';
+        var hn = document.createElement('span');
+        // Object mode: edits fan out over the whole group; values shown are the
+        // FIRST surface's (they may differ across the group until edited).
+        hn.textContent = obj ? ('⬚ ' + obj.name + ' (' + obj.surfaces.length + ' surfaces)') : s.name;
+        if (obj) hn.title = 'editing all of: ' + obj.surfaces.join(', ');
+        h.appendChild(hn);
+        // Reset = back to the LOADED values (pristine snapshot), engine + UI.
+        var rst = document.createElement('a');
+        rst.textContent = 'reset'; rst.href = '#';
+        rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
+        rst.onclick = function(e){
+          e.preventDefault();
+          var p = editorPristine[s.name]; if (!p) return;
+          EDITOR_SAVE_PROPS.forEach(function(k){
+            if (Math.abs((+s[k]) - (+p[k])) > 1e-9) setProp(s.name, k, +p[k]);
+          });
+          renderSurfaceList(); renderSurfaceProps(s); updateSaveButton();
+        };
+        h.appendChild(rst); el.appendChild(h);
+        // Split spatially-separate instances (two mummies share one material —
+        // editing one edits both). Live-only: the LWO has ONE shared surface,
+        // so persisted saves apply to the base name.
+        if (!obj) {
+          var spl = document.createElement('a');
+          spl.textContent = 'split instances'; spl.href = '#';
+          spl.title = 'give each spatially-separate copy of this surface its own editable material (live-only — Save writes the base surface)';
+          spl.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;display:block;margin-bottom:4px;';
+          spl.onclick = function(e){
+            e.preventDefault();
+            var names = [];
+            try { names = JSON.parse(Module.editorSplitInstances(s.name)); } catch(err){}
+            if (!names.length) { editorStatus('split: only one instance of "' + s.name + '" found'); return; }
+            // Re-enumerate: the clones are new surfaces (own matIDs — canvas
+            // pick now resolves each instance separately).
+            editorSurfaces = JSON.parse(Module.editorGetSurfaces());
+            editorSurfaces.forEach(function(x){
+              if (!editorPristine[x.name]) editorPristine[x.name] = JSON.parse(JSON.stringify(x));
+            });
+            renderSurfaceList();
+            editorStatus('split "' + s.name + '" → ' + names.join(', ') +
+                         ' (live-only; Save writes the base surface)');
+          };
+          el.appendChild(spl);
+        }
+        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale'].forEach(function(k){
+          var rg = EDITOR_RANGES[k] || [0,2];
+          var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
+          if (k === 'aoStrength') {
+            row.title = 'per-material AO-map strength (× global ao_map_strength). Only visible with an AO map + --ssao/--ao flags.';
+          }
+          if (k === 'parallaxScale') {
+            row.title = 'per-material parallax depth (× global parallax_strength). Only visible with a height map + --parallax.';
+          }
+          if (k === 'reflection') {
+            row.title = 'env-specular reflection %. Renders when the env_refl render knob is ON (bakes a scene panorama at first use); persists to LWO/FLD.';
+          }
+          el.appendChild(row);
+        });
+        // Normal-map controls: G-channel convention flip (OGL↔DX) + viz
+        // shortcut. Only meaningful when the surface HAS a normal map.
+        if (+s.hasNormalMap) {
+          var nfr = document.createElement('div'); nfr.className = 'prop-row';
+          var nfl = document.createElement('label'); nfl.textContent = 'normal G';
+          nfr.title = 'flip the normal map\'s green channel (OpenGL ↔ DirectX convention). If relief looks inverted (mortar bulges out), flip it. Persists via sidecar.';
+          nfr.appendChild(nfl);
+          var nfc = document.createElement('input'); nfc.type = 'checkbox'; nfc.checked = !!(+s.normalFlip);
+          nfc.onchange = function(){ setProp(s.name, 'normalFlip', nfc.checked ? 1 : 0); };
+          nfr.appendChild(nfc);
+          var viz = document.createElement('a');
+          viz.textContent = 'viz'; viz.href = '#';
+          viz.title = 'cycle normal viz: off → shaded normal (nmap applied) → raw nmap texel → geometric (--nmap_viz)';
+          viz.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;margin-left:auto;';
+          viz.onclick = function(e){
+            e.preventDefault();
+            var cur = 0;
+            try { cur = +(JSON.parse(Module.editorGetParams()).find(function(p){ return p.name === 'nmap_viz'; }) || {}).value || 0; } catch(err){}
+            var next = [2,3,1,0][ [0,2,3,1].indexOf(cur) ];   // 0→2→3→1→0
+            if (next === undefined) next = 0;
+            Module.editorSetParam('nmap_viz', String(next));
+            editorStatus('nmap_viz = ' + next + ' (' + ['off','geometric','shaded','raw texel'][next] + ')');
+          };
+          nfr.appendChild(viz);
+          el.appendChild(nfr);
+        }
+        // UV mapping: LightWave projection + world-units-per-tile scale + axis.
+        // UVs are baked at load; "apply" re-projects live (editorSetUVMapping).
+        // uvProj -1 = surface with no image-map projection recorded — still
+        // re-projectable (the engine copies always exist), shown as planar.
+        (function(){
+          var hdr = document.createElement('div');
+          hdr.style.cssText = 'color:#fff;margin-top:8px;border-top:1px solid #333;padding-top:6px;';
+          hdr.textContent = 'Texture mapping';
+          el.appendChild(hdr);
+          var row1 = document.createElement('div'); row1.className = 'prop-row';
+          var l1 = document.createElement('label'); l1.textContent = 'projection'; row1.appendChild(l1);
+          var psel = document.createElement('select');
+          ['planar','cylindrical','spherical','cubic (box)'].forEach(function(nm, i){
+            var o = document.createElement('option'); o.value = i; o.textContent = nm;
+            if (i === Math.max(0, +s.uvProj)) o.selected = true;
+            psel.appendChild(o);
+          });
+          row1.appendChild(psel);
+          var asel = document.createElement('select');
+          asel.title = 'projection axis (planar/cylindrical; cubic picks per face)';
+          [['1','X'],['2','Y'],['4','Z']].forEach(function(a){
+            var o = document.createElement('option'); o.value = a[0]; o.textContent = a[1];
+            if ((+s.uvAxis & 7) === +a[0]) o.selected = true;
+            asel.appendChild(o);
+          });
+          if (!(+s.uvAxis & 7)) asel.selectedIndex = 2;   // LW default = Z
+          row1.appendChild(asel);
+          el.appendChild(row1);
+          var row2 = document.createElement('div'); row2.className = 'prop-row';
+          var l2 = document.createElement('label'); l2.textContent = 'tile size';
+          row2.title = 'world units per texture tile, per axis (LightWave TextureSize) — smaller = denser tiling';
+          row2.appendChild(l2);
+          var sc = [];
+          ['uvScaleX','uvScaleY','uvScaleZ'].forEach(function(k){
+            var inp = document.createElement('input'); inp.type = 'number'; inp.step = 0.1;
+            inp.value = +(+s[k] || 1).toFixed(3);
+            inp.style.cssText = 'flex:1;min-width:0;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+            sc.push(inp); row2.appendChild(inp);
+          });
+          el.appendChild(row2);
+          var row3 = document.createElement('div'); row3.className = 'prop-row';
+          var apply = document.createElement('button');
+          apply.textContent = 'apply mapping';
+          apply.style.cssText = 'flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:3px;cursor:pointer;font-size:11px;';
+          apply.onclick = function(){
+            var proj = parseInt(psel.value, 10), axis = parseInt(asel.value, 10);
+            var sx = parseFloat(sc[0].value) || 1, sy = parseFloat(sc[1].value) || 1, sz = parseFloat(sc[2].value) || 1;
+            var names = editSurfNames(s.name), nOK = 0;
+            names.forEach(function(n){
+              try {
+                var r = JSON.parse(Module.editorSetUVMapping(n, proj, sx, sy, sz, axis));
+                if (r.faces) nOK++;
+                var t = editorSurfaces.find(function(x){ return x.name === n; });
+                if (t) { t.uvProj = proj; t.uvScaleX = sx; t.uvScaleY = sy; t.uvScaleZ = sz; t.uvAxis = axis; }
+              } catch(e){ console.error('editorSetUVMapping', e); }
+            });
+            editorStatus('uv mapping applied to ' + nOK + '/' + names.length + ' surface(s)');
+            updateSaveButton();
+          };
+          row3.appendChild(apply);
+          el.appendChild(row3);
+        })();
+        // glossiness = specular exponent; keep to the kernel's fast specialized set.
+        var gr = document.createElement('div'); gr.className = 'prop-row';
+        var gl = document.createElement('label'); gl.textContent = 'glossiness'; gr.appendChild(gl);
+        var sel = document.createElement('select');
+        [0,4,8,16,32,48,64,128].forEach(function(g){
+          var o = document.createElement('option'); o.value = g; o.textContent = g;
+          if (+s.glossiness === g) o.selected = true; sel.appendChild(o);
+        });
+        sel.onchange = function(){ setProp(s.name, 'glossiness', parseInt(sel.value, 10)); };
+        gr.appendChild(sel); el.appendChild(gr);
+        if (s.texture){ var t = document.createElement('div'); t.className = 'surf-tex'; t.textContent = 'tex: ' + s.texture; el.appendChild(t); }
+
+        // PBR map import — upload an image per role; bytes go to the engine via
+        // Embind (editorImportTexture), which reuses the --material-import path.
+        function importFile(role, file, done){
+          var fr = new FileReader();
+          fr.onload = function(){
+            var bytes = new Uint8Array(fr.result), ok = false;
+            // Object mode: the map lands on EVERY surface of the group.
+            var names = editSurfNames(s.name);
+            names.forEach(function(n){
+              var one = false;
+              try { one = Module.editorImportTexture(n, role, file.name, bytes); }
+              catch(e){ editorStatus('import failed: ' + e); console.error('editorImportTexture', e); return; }
+              if (one) {
+                // Queue for persistence: Save ships these to the server, which
+                // stores them under Runtime/TEXTURES/PBR/ + the GREETS.MAT sidecar.
+                (editorPendingMaps[n] = editorPendingMaps[n] || {})[role] =
+                  { filename: file.name, bytes: bytes };
+                ok = true;
+              }
+            });
+            console.log('[editor] import', names.join(','), role, file.name, bytes.length, '->', ok);
+            if (ok) updateSaveButton();
+            if (done) done(ok);
+          };
+          fr.readAsArrayBuffer(file);
+        }
+        var imp = document.createElement('div');
+        imp.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
+        var ih = document.createElement('div'); ih.style.cssText = 'color:#fff;margin-bottom:4px;'; ih.textContent = 'Import PBR maps'; imp.appendChild(ih);
+        // Whole-pack import: pick a folder (FreePBR/ambientCG layout) and each
+        // map is role-detected by filename with the SAME native token rules as
+        // --material-import (Module.editorClassifyMap). First match per role wins.
+        var pr = document.createElement('div'); pr.className = 'prop-row';
+        var pl = document.createElement('label'); pl.textContent = 'pack (dir)'; pr.appendChild(pl);
+        var pinp = document.createElement('input'); pinp.type = 'file';
+        pinp.setAttribute('webkitdirectory', ''); pinp.setAttribute('multiple', '');
+        pinp.style.cssText = 'flex:1;min-width:0;font-size:10px;color:#bbb;';
+        pinp.onchange = function(){
+          var files = Array.prototype.slice.call(pinp.files || []);
+          if (!files.length) return;
+          // webkitdirectory RECURSES: picking a folder above the pack (e.g. a
+          // walls-bl category dir) used to mix roles across different packs —
+          // albedo from one, normal from another (scrambled relief). Bucket
+          // files by their containing directory and import from ONE pack: the
+          // dir with the most distinct roles, albedo-bearing dirs preferred.
+          var dirs = {};   // dirPath -> { role -> file }
+          files.forEach(function(f){
+            var role = '';
+            try { role = Module.editorClassifyMap(f.name); } catch(e){}
+            if (!role) return;
+            var rel = f.webkitRelativePath || f.name;
+            var dir = rel.indexOf('/') >= 0 ? rel.substring(0, rel.lastIndexOf('/')) : '';
+            if (!dirs[dir]) dirs[dir] = {};
+            if (!dirs[dir][role]) dirs[dir][role] = f;
+          });
+          var best = null, bestKey = null, nDirs = 0;
+          Object.keys(dirs).forEach(function(k){
+            nDirs++;
+            var score = Object.keys(dirs[k]).length + (dirs[k].albedo ? 100 : 0);
+            var bestScore = best ? Object.keys(best).length + (best.albedo ? 100 : 0) : -1;
+            if (score > bestScore) { best = dirs[k]; bestKey = k; }
+          });
+          if (!best) { editorStatus('pack: no recognizable maps in folder'); return; }
+          var slots = best;
+          var roles = Object.keys(slots);
+          var packName = bestKey ? bestKey.split('/').pop() : '(folder)';
+          // Albedo first: it defines the material's texel layout; the engine
+          // resamples the other maps to it (and drops stale mismatched ones).
+          roles.sort(function(a,b){ return (a==='albedo'?0:1) - (b==='albedo'?0:1); });
+          editorStatus('pack ' + packName + ': importing ' + roles.join(', ') + '…'
+                       + (nDirs > 1 ? ' (' + nDirs + ' folders seen, using ' + packName + ')' : ''));
+          var doneCount = 0, okCount = 0, applied = [];
+          var chain = Promise.resolve();
+          roles.forEach(function(role){
+            chain = chain.then(function(){ return new Promise(function(res){
+              importFile(role, slots[role], function(ok){
+                if (ok) { okCount++; applied.push(role + '=' + slots[role].name); }
+                if (++doneCount === roles.length) {
+                  editorStatus('pack ' + packName + ': ' + okCount + '/' + roles.length
+                               + ' applied — ' + applied.join(', '));
+                  // The panel renders map-dependent controls (the 'normal G'
+                  // flip row only exists when the surface HAS a normal map) —
+                  // refresh the surface model + re-render so the new maps'
+                  // knobs appear without a reload.
+                  refreshSurfacesAndProps(s.name);
+                }
+                res();
+              });
+            }); });
+          });
+        };
+        pr.appendChild(pinp); imp.appendChild(pr);
+        ['albedo','normal','height','roughness','ao','metallic'].forEach(function(role){
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lab = document.createElement('label'); lab.textContent = role; row.appendChild(lab);
+          var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+          inp.style.cssText = 'flex:1;min-width:0;font-size:10px;color:#bbb;';
+          inp.onchange = function(){
+            var file = inp.files && inp.files[0]; if (!file) return;
+            editorStatus('importing ' + role + '…');
+            importFile(role, file, function(ok){
+              editorStatus(ok ? (role + ' imported: ' + file.name) : (role + ' import FAILED'));
+              if (ok) refreshSurfacesAndProps(s.name);
+            });
+          };
+          row.appendChild(inp); imp.appendChild(row);
+        });
+        el.appendChild(imp);
+      }
+
+      // Camera orbit handled in JS on the canvas (SDL's in-browser mouse events
+      // proved unreliable for this) → Embind editorOrbit/editorZoom. And the
+      // panel stops its own mouse events from bubbling out, so a global SDL
+      // listener can't eat slider drags and panel drags never orbit the camera.
+      (function(){
+        if (!revEditorMode) return;
+        // left-drag = orbit, right-drag or shift+drag = pan, wheel = zoom,
+        // left-CLICK (no drag) = pick the surface under the cursor.
+        var mode = null, lastX = 0, lastY = 0, downX = 0, downY = 0, dragged = false;
+        var downOnCanvas = false;   // THIS press started on the canvas
+        canvasEl.addEventListener('mousedown', function(e){
+          // Hand the keyboard back to the engine: a focused panel control
+          // (slider / number box) would otherwise swallow the fly keys.
+          if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+          // Grabbing the canvas takes the camera back from scene playback.
+          if (window.editorSetScenePlaying) window.editorSetScenePlaying(false);
+          mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
+          lastX = downX = e.clientX; lastY = downY = e.clientY; dragged = false;
+          downOnCanvas = true;
+          e.preventDefault();
+        });
+        // Clears AFTER the canvas mouseup handler (the same event reaches the
+        // canvas target before it bubbles to window).
+        window.addEventListener('mouseup', function(){ mode = null; downOnCanvas = false; });
+        window.addEventListener('mousemove', function(e){
+          if (!mode) return;
+          var dx = e.clientX - lastX, dy = e.clientY - lastY;
+          lastX = e.clientX; lastY = e.clientY;
+          if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) dragged = true;
+          if (mode === 'pan')  { if (Module.editorPan)   Module.editorPan(dx, dy); }
+          else                 { if (Module.editorOrbit) Module.editorOrbit(dx, dy); }
+        });
+        // Click position → engine-surface UV: undo the canvas letterbox with the
+        // SAME math Wasm_PresentGL uses (Module.__floodTexW/H = engine surface).
+        function canvasToEngineUV(e){
+          var tw = Module.__floodTexW, th = Module.__floodTexH;
+          if (!tw || !th) return null;
+          var r = canvasEl.getBoundingClientRect();
+          var cx = (e.clientX - r.left) * (canvasEl.width  / r.width);
+          var cy = (e.clientY - r.top)  * (canvasEl.height / r.height);
+          var srcAR = tw / th, canAR = canvasEl.width / canvasEl.height;
+          var dx = 0, dy = 0, dw = canvasEl.width, dh = canvasEl.height;
+          if (canAR > srcAR) { dw = (canvasEl.height * srcAR) | 0; dx = (canvasEl.width  - dw) >> 1; }
+          else               { dh = (canvasEl.width  / srcAR) | 0; dy = (canvasEl.height - dh) >> 1; }
+          var u = (cx - dx) / dw, v = (cy - dy) / dh;
+          return (u < 0 || u > 1 || v < 0 || v > 1) ? null : { u: u, v: v };
+        }
+        function pickAt(e){
+          if (!Module.editorPick) return null;
+          var uv = canvasToEngineUV(e);
+          if (!uv) return null;
+          try { return Module.editorPick(uv.u, uv.v) || null; } catch (err) { return null; }
+        }
+        canvasEl.addEventListener('mouseup', function(e){
+          // Releasing a PANEL slider drag with the cursor over the canvas used
+          // to land here with stale dragged/down state from the PREVIOUS
+          // canvas press and run a pick — hijacking the selection (usually
+          // onto the floor) mid-edit. Only pick when the press began here.
+          if (!downOnCanvas) return;
+          if (dragged || e.button !== 0 || e.shiftKey) return;
+          var name = pickAt(e);
+          if (!name) { editorStatus('pick: no surface here'); return; }
+          // pick=object: promote the picked surface to its owning object so
+          // the whole model (e.g. the mech) is selected/edited at once.
+          var pickObj = document.getElementById('editor-pickobj');
+          if (pickObj && pickObj.checked) {
+            var o = editorObjects.find(function(x){ return x.surfaces.indexOf(name) >= 0; });
+            if (o) { selectObject(o); editorStatus('picked object: ' + o.name + ' (via ' + name + ')'); return; }
+          }
+          var s = editorSurfaces.find(function(x){ return x.name === name; });
+          if (s) { selectSurface(s, /*alsoFocus=*/false); editorStatus('picked: ' + name); }
+        });
+        // Double-click = pick AND frame the orbit on it.
+        canvasEl.addEventListener('dblclick', function(e){
+          var name = pickAt(e);
+          if (name && Module.editorFocusSurface) Module.editorFocusSurface(name);
+        });
+        canvasEl.addEventListener('wheel', function(e){
+          if (!Module.editorZoom) return;
+          e.preventDefault();
+          // Normalize: deltaMode 1 = lines (real mouse wheels on some
+          // platforms) → ~33 px/line. Trackpad pinch arrives as ctrlKey
+          // wheel events with SMALL fractional deltas — boost them so a
+          // pinch spans a useful zoom range (matches browser page-zoom
+          // feel, which uses ~exp(-delta*0.01)).
+          var d = e.deltaY * (e.deltaMode === 1 ? 33 : 1);
+          if (e.ctrlKey) d *= 7;
+          Module.editorZoom(d);          // proportional → smooth on a trackpad
+        }, { passive: false });
+        canvasEl.addEventListener('contextmenu', function(e){ e.preventDefault(); });  // allow right-drag pan
+        var panel = document.getElementById('editor-panel');
+        ['mousedown','mousemove','mouseup','wheel','pointerdown','pointermove','click','contextmenu'].forEach(function(t){
+          panel.addEventListener(t, function(e){ e.stopPropagation(); });
+        });
+      })();
     </script>
     {{{ SCRIPT }}}
   </body>

@@ -28,6 +28,7 @@
 //   preview/thumbnail files are skipped.
 
 struct Scene;
+struct Material;
 
 namespace fds {
 
@@ -43,6 +44,52 @@ bool MaterialImport_Active();
 // loaded + Scene_RebuildMatTable (same point as the greets stone-tex block).
 // No-op when no specs were given. Logs what it detected/applied per material.
 void MaterialImport_Apply(Scene *sc, const char *sceneName);
+
+// Apply ONE PBR map (already on disk at `path` — e.g. an uploaded file the
+// browser editor wrote to MEMFS) to material `matName` in scene `sc`, by role:
+// "albedo" | "normal" | "height" | "roughness" | "ao". Reuses the same load +
+// convert (MakeNormal16/MakeHeight8) + assign + tangent-recompute as the CLI
+// path. Returns true on success. The single-map entry point for the LWO editor.
+bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
+                                 const char *role, const char *path);
+
+// Classify a map filename into its role using the same token rules as the CLI
+// dir scan (see the table above). Returns "albedo" | "normal" | "height" |
+// "roughness" | "ao" | "" (unrecognized / non-image / preview-skip / metallic —
+// roles the editor can't apply). Lets the browser's load-a-whole-pack upload
+// share the native detection instead of duplicating it in JS.
+const char *MaterialImport_ClassifyRole(const char *filename);
+
+// Sidecar loader — the PERSISTED form of the editor's PBR map assignments
+// (LWO1 has no slot for them, so they can't live in the .lwo like the numeric
+// surface values do) and, for scenes WITHOUT pinned LWO authoring sources
+// (city/chase/fountain), of numeric surface-property overrides too. Line
+// format, paths relative to Runtime/ (the CWD):
+//   # comment / blank lines ignored
+//   surface|role|TEXTURES/PBR/file.png      (role: albedo/normal/height/roughness/ao)
+//   surface|prop|value                      (prop: diffuse/specular/glossiness/
+//                                            luminosity/transparency/reflection/
+//                                            baseR/baseG/baseB — engine scale)
+// '|' separator because surface names contain spaces ("hull not smooth").
+// Map lines go through MaterialImport_ApplyMapFile (same load/convert/assign/
+// tangent-recompute as the CLI path, ::mirUV clones included); prop lines go
+// through MaterialImport_SetSurfaceProp below. Call at scene init after
+// Scene_RebuildMatTable, BEFORE MaterialImport_Apply so explicit
+// --material-import CLI specs still override the sidecar. A missing sidecar is
+// a silent no-op; a bad line inside one logs and skips that line.
+// The editor's dev server (tools/editor_server.py) writes this file on Save.
+void MaterialImport_ApplySidecar(Scene *sc, const char *path);
+
+// Set one numeric property (engine scale) on every material of `sc` whose
+// base name (::mirUV collapsed) matches `surface`. The shared setter under
+// both the sidecar prop lines and the editor's live Editor_SetSurfaceProp.
+bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
+                                   const char *prop, float value);
+
+// Current normal-G flip parity of the material's normal map (0 = as the file
+// loaded, 1 = flipped). Set via SetSurfaceProp("normalFlip", 0|1); tracked per
+// TEXTURE so shared clones flip once and the editor UI reads a truthful state.
+int MaterialImport_GetNormalFlip(const Material *M);
 
 } // namespace fds
 

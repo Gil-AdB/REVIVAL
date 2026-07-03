@@ -333,7 +333,13 @@ float Temp;
 	// it a percent, so any luminous surface hit Luminosity>=1 and saturated
 	// to full white — authored partial-emissive values like the mech's
 	// 'linght' lamps at 50% had no effect.)
+	// Legacy mode (-DLEGACY_VLUM): use the 1998 *100 behavior to reproduce
+	// shipping FLDs (CHASE.FLD, FOUNTAIN.FLD) that were built before this fix.
+#ifdef LEGACY_VLUM
+	Surf->Luminosity=Temp*100.0f;
+#else
 	Surf->Luminosity=Temp;
+#endif
 #ifdef ObjectDebugMode
 	printf("  Luminosity(float): %3.2f%%\n",Surf->Luminosity*100.0f);
 #endif

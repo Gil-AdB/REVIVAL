@@ -18,7 +18,7 @@ cmake -S ../../tools/lwsread -B ../../tools/lwsread/build && cmake --build ../..
 cp GREETS.FLD ../../Runtime/SCENES/GREETS.FLD
 ```
 
-Produces a 233,272-byte, FldVersion-0.113 scene (9 objects, 10 lights).
+Produces a 233,315-byte, FldVersion-0.113 scene (9 objects, 10 lights).
 
 ## Files
 
@@ -30,9 +30,15 @@ Produces a 233,272-byte, FldVersion-0.113 scene (9 objects, 10 lights).
 
 The `.lws` references objects via DOS paths (`c:\lwave\city\INPYR\...`); the
 converter strips them to basename, so the files just need to sit here named as
-above. Textures (`P_TEXT.JPG`, `MARB*.JPG`, `P*.JPG`, …) are not needed for
-conversion — they're recorded by name and resolved at runtime from
-`Runtime/TEXTURES/`.
+above.
+
+The `.lwo` files used to store full DOS `TIMG`/`RIMG`/`TALP` paths
+(`C:\LWAVE\CITY\INPYR\...`); these have been rewritten to plain basenames
+(e.g. `MECH_HUL.JPG`). The 12 referenced textures are also copied here so
+LightWave can open the scene without needing the original DOS directory tree.
+The engine resolves textures at runtime from `Runtime/TEXTURES/` (uppercasing
+the name on load), so the copies in this directory are authoring-only — they
+are tracked in git but not installed by the build.
 
 ## The screen-orientation fix (low-poly only)
 
@@ -52,3 +58,20 @@ unfixed low-poly source is `Original/Scenes/CITY/INPYR/PIRAMID-orig.LWO`
 (read-only reference). The high-poly improved mesh is
 `Original/Scenes/CITY/INPYR/PIRAMID.lwo` (1.28 MB) — kept for reference but not
 needed now that deferred per-pixel lighting removes the need for high-poly-for-Gouraud.
+
+## Editor write-back
+
+The browser surface editor (`DEMO.html?editor`, served by
+`tools/editor_server.py`) persists material edits **into these .lwo files**:
+"Save to LWO" POSTs the changed surface values; the server patches the SURF
+chunks (`tools/lwopatch.py` — updates or inserts DIFF/VDIF, SPEC/VSPC, GLOS,
+LUMI/VLUM, TRAN/VTRN, REFL/VRFL, COLR), copies the previous file into
+`.backups/<name>.<timestamp>.lwo` (gitignored), reruns `lwsread`, and installs
+the new `GREETS.FLD` into `Runtime/SCENES/`. "Reload scene" re-boots the page;
+the editor fetches the live FLD at boot, so saved values show immediately —
+native runs pick them up at next launch.
+
+Specular/glossiness for `rooms` (marble wall: 0.1/64) and the shiny set
+(`stairs`/`amudim`/`floor`/`hull`/`hull not smooth`: 0.4/48) are authored here
+in the LWOs — they used to be code-side bumps in `DEMO/GREETS.CPP`, baked into
+the sources when write-back shipped so saved edits can't be stomped at load.

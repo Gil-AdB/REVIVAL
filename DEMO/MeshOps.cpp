@@ -272,6 +272,33 @@ Texture *MakeNormal16(Texture *src) {
 	return n;
 }
 
+// Total texel count across the mip chain — the same walk MakeNormal16 does
+// (mips live contiguously after the base in one allocation).
+static size_t mipChainTexels(const Texture *t) {
+	size_t total = 0;
+	int cx = t->SizeX >> t->blockSizeX, cy = t->SizeY >> t->blockSizeY;
+	const size_t block = size_t(1 << t->blockSizeX) * size_t(1 << t->blockSizeY);
+	for (dword i = 0; i < t->numMipmaps; ++i) {
+		total += size_t(cx) * size_t(cy) * block;
+		cx = (cx + 1) >> 1; cy = (cy + 1) >> 1;
+	}
+	return total;
+}
+
+void FlipNormalMapG(Texture *t) {
+	if (!t || !t->Mipmap[0] || t->numMipmaps == 0) return;
+	const size_t total = mipChainTexels(t);
+	if (t->BPP == 16) {
+		uint16_t *px = reinterpret_cast<uint16_t *>(t->Mipmap[0]);
+		for (size_t i = 0; i < total; ++i)
+			px[i] = uint16_t((px[i] & 0x00FF) | ((0xFF00 - (px[i] & 0xFF00)) & 0xFF00));
+	} else if (t->BPP == 32) {
+		uint32_t *px = reinterpret_cast<uint32_t *>(t->Mipmap[0]);
+		for (size_t i = 0; i < total; ++i)
+			px[i] = (px[i] & 0xFFFF00FFu) | ((255u - ((px[i] >> 8) & 0xFFu)) << 8);
+	}
+}
+
 Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	if (!diffuse || diffuse->BPP != 32 || !diffuse->Mipmap[0]) return nullptr;
 	const int W = diffuse->SizeX;

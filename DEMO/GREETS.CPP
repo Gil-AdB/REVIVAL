@@ -1325,6 +1325,11 @@ void Initialize_Greets()
 
 	Preprocess_Scene(GreetSc, "GREETS");
 
+	// Persisted PBR map assignments (the editor's "Save" writes this sidecar —
+	// LWO1 can't hold map paths, so they live here). Before the CLI overlay so
+	// an explicit --material-import still wins for testing.
+	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
+
 	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
 	// onto named materials for testing. After Preprocess (textures loaded), so
 	// it replaces the loaded maps directly. No-op without the flag.
@@ -1357,15 +1362,13 @@ void Initialize_Greets()
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
 
-	// Bump Specular on materials that should plausibly have shiny
-	// surfaces — marble stairs, marble pillars, stone floor, the mecha
-	// hull/cockpit. Most FLD materials author Specular=0; deferred-path
-	// Phong needs a non-zero value to draw a highlight, and Glossiness
-	// defaults to 32 in Render_DeferredLighting when the FLD didn't set
-	// one. Per-name match keeps the change targeted to surfaces where a
-	// highlight is sensible. Greets sets Specular_Factor=0 in tick init,
-	// which gates the deferred Phong term off — to enable highlights here
-	// the per-scene tone bump that follows raises Specular_Factor too.
+	// Specular/Glossiness are AUTHORED IN THE LWO SOURCES now (Authoring/
+	// greets — stairs/amudim/floor/hull/cockpit at spec 0.4 gloss 48, the
+	// marble 'rooms' wall at spec 0.1 gloss 64; see tools/lwopatch.py). The
+	// old code-side bumps that lived here were baked into the .lwo files and
+	// deleted, so the browser editor's LWO write-back is authoritative — a
+	// saved specular no longer gets stomped at the next scene load. The name
+	// lists remain only to pick which surfaces get a Sobel-baked normal map.
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != GreetSc || !M->Name) continue;
 		const char *n = M->Name;
@@ -1375,15 +1378,10 @@ void Initialize_Greets()
 		                     strstr(n, "cockpit");
 		// Wall / ceiling surfaces — the FLD names them 'rooms' (the
 		// big brick wall texture in the back of the greets scene) and
-		// 'siling' (the ceiling that uses the same brick atlas). Not
-		// "shiny" — we don't bump Specular here — but they show enough
-		// surface detail in the diffuse to benefit from a Sobel-baked
+		// 'siling' (the ceiling that uses the same brick atlas). They show
+		// enough surface detail in the diffuse to benefit from a Sobel-baked
 		// tangent-space map.
 		const bool isWall = !strcmp(n, "rooms") || !strcmp(n, "siling");
-		if (isShiny) {
-			if (M->Specular < 0.4f) M->Specular = 0.4f;
-			if (M->Glossiness == 0) M->Glossiness = 48;
-		}
 		// Tangent-space normal maps work on any face orientation —
 		// the perturbation lives in the surface's own tangent plane
 		// and the lighting kernel multiplies by per-pixel TBN to bring
@@ -2220,6 +2218,7 @@ void Initialize_Greets()
 
 namespace {
 struct GreetsScene : SceneDriver {
+	int32_t partTime() const override { return CHPartTime; }
 	char MSGStr[128];
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};

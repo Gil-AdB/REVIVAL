@@ -39,6 +39,8 @@ set(DEMO_SOURCES
     ImageCompression.h
     MeshOps.cpp
     MeshOps.h
+    MaterialEditor.cpp
+    MaterialEditor.h
     MaterialImport.cpp
     MaterialImport.h
     ProceduralWater.cpp
@@ -108,8 +110,23 @@ if(EMSCRIPTEN)
     # happens off-main: MainLoop spawns a single std::thread that runs
     # all Initialize_* in sequence, gating each scene's start on the
     # corresponding atomic flag.
-    # --preload-file Runtime: embed the asset tree so the demo can read
-    # rev.cfg / SCENES / TEXTURES / FONTS relative to "/".
+    # Stage ONLY the assets the demo reads into a clean dir, then preload that
+    # whole dir at "/". Preloading Runtime/ directly bundled a 1.3 GB .data —
+    # hundreds of MB of debug PPM/PGM snapshots + the 284 MB city panorama
+    # cache/ (greets never needs it) — which the browser can't load. (emcc
+    # mis-parses per-file `src@/dst` remaps; the bare `dir@/` form is what
+    # works, so we curate the dir instead.)
+    set(WASM_ASSET_STAGE "${CMAKE_CURRENT_BINARY_DIR}/wasm_assets")
+    add_custom_command(TARGET ${PROJECT_NAME} PRE_LINK
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${WASM_ASSET_STAGE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WASM_ASSET_STAGE}"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/Runtime/rev.cfg"    "${WASM_ASSET_STAGE}/rev.cfg"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/Runtime/REVIVAL.XM" "${WASM_ASSET_STAGE}/REVIVAL.XM"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Runtime/SCENES"   "${WASM_ASSET_STAGE}/SCENES"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Runtime/FONTS"    "${WASM_ASSET_STAGE}/FONTS"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Runtime/TEXTURES" "${WASM_ASSET_STAGE}/TEXTURES"
+        COMMENT "Staging wasm assets (excludes debug PPMs + city cache)")
+
     target_compile_options(${PROJECT_NAME} PRIVATE -pthread)
     target_link_options(${PROJECT_NAME} PRIVATE
         -pthread
@@ -130,6 +147,10 @@ if(EMSCRIPTEN)
         -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=128MB
+        # Greets with mirrors on (clones every mesh reflected) + the lightmap
+        # bake + deferred buffers exceeds wasm's default 2GB cap. wasm32 can
+        # address up to 4GB; raise the ceiling so the heaviest scene fits.
+        -sMAXIMUM_MEMORY=4GB
         -sASSERTIONS=1
         # EXIT_RUNTIME=0: main() returns immediately after registering the
         # rAF callback; the runtime must stay alive for the callback to
@@ -140,10 +161,21 @@ if(EMSCRIPTEN)
         # names instead of wasm-function[N]. Cheap (no codegen impact) and
         # essential for diagnosing OOB / unreachable traps.
         --profiling-funcs
-        --preload-file "${CMAKE_SOURCE_DIR}/Runtime@/"
+        # Embind: exposes the surface-editor API to JS as
+        # Module.editorGetSurfaces() / Module.editorSetSurfaceProp().
+        -lembind
+        # Curated asset dir (staged above) → mounted at "/". The bare `dir@/`
+        # remap is the form emcc parses correctly.
+        --preload-file "${WASM_ASSET_STAGE}@/"
         --shell-file "${CMAKE_CURRENT_SOURCE_DIR}/shell.html"
     )
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
+    # --shell-file is a link FLAG, so ninja doesn't know shell.html is an input;
+    # editing it wouldn't relink and DEMO.html would stay stale (this bit us:
+    # editor panel/JS edits never reached the browser). Declare it (+ the copied
+    # sidecars) as link deps so a shell edit forces a regen.
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shell.html;${CMAKE_CURRENT_SOURCE_DIR}/coi-serviceworker.js;${CMAKE_CURRENT_SOURCE_DIR}/audio-worklet.js")
 
     # Copy the COOP/COEP service worker next to the generated HTML so it's
     # served at the same scope (needed when hosting on plain static servers
@@ -186,9 +218,17 @@ if(EMSCRIPTEN)
         -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=128MB
+        # Greets with mirrors on (clones every mesh reflected) + the lightmap
+        # bake + deferred buffers exceeds wasm's default 2GB cap. wasm32 can
+        # address up to 4GB; raise the ceiling so the heaviest scene fits.
+        -sMAXIMUM_MEMORY=4GB
         -sASSERTIONS=1
         -sEXIT_RUNTIME=1
         -sUSE_SDL=2
+        # The editor Embind surface (MaterialEditor/MainLoop) is compiled into
+        # every wasm target that shares DEMO_SOURCES; node never calls it, but
+        # the registration symbols must still resolve.
+        -lembind
     )
     set_target_properties(DEMO_snapshot PROPERTIES SUFFIX ".js")
 else()

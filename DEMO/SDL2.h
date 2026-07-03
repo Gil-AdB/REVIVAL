@@ -48,6 +48,14 @@ extern "C" void EngineStartFadeIn(int frames);
 // AudioContext can start.
 void SDL2_StartMusic(void* modplayerHandle);
 void SDL2_StopMusic();
+
+// Draw-only re-present: redraw the LAST uploaded frame texture into the canvas
+// (letterboxed) without the texSubImage2D upload. The editor's idle loop calls
+// this every rAF to keep the WebGL canvas alive; re-running the full V_Flip
+// there re-uploaded the entire framebuffer 60×/s for identical pixels — at
+// 1504×848 that's ~300 MB/s of GPU-process busywork while idle. No-op until
+// the first real present has initialized GL + the texture.
+void SDL2_Wasm_RepresentLast();
 #endif
 
 

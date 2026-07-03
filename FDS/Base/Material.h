@@ -66,12 +66,21 @@ struct Material
     // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
     // UV-tiled floors). Default 1.
     float                 ParallaxScale          = 1.0f;
+    // Per-material AO-map strength multiplier (× the global --ao_map_strength),
+    // same pattern as ParallaxScale. 1 = full effect; lower to tame an AO map
+    // that reads too dark on one surface without dialing the whole scene.
+    float                 AoStrength             = 1.0f;
     // Per-material roughness map (PBR). Grayscale, 8-bit single-channel, same
     // tiled/mip layout as the albedo (sampled at the same swizzled UV/miplevel
     // — incl. the parallax-shifted UV). White = rough → LESS specular. Cheap
     // tier: modulates specular INTENSITY only (keeps the compile-time gloss
     // exponent). Gated on --roughness_map; null = uniform Mat->Specular.
     Texture             * RoughnessMap           = nullptr;
+    // Per-material metalness map (PBR). Grayscale 8-bit, albedo texel layout
+    // like the other aux maps. m=1: diffuse dies (metals have no diffuse),
+    // specular + env reflection tint by the albedo, env F0 → ~1. Gated on
+    // --metal_map; null = dielectric (m=0 everywhere).
+    Texture             * MetallicMap            = nullptr;
     Material            * Next                  = nullptr;
     Material            * Prev                  = nullptr;
     char                * Name                  = nullptr;

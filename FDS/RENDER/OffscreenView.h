@@ -16,6 +16,13 @@ extern std::mutex g_engineSurfaceMutex;
 
 namespace fds {
 
+// Depth of active OffscreenViewScope nesting on this thread's render path
+// (0 = the main-camera frame). Passes that must not start their OWN
+// offscreen render from inside another one — e.g. the --env_refl panorama
+// bake triggering inside the disco ball's nested renderFrame, which
+// deadlocked on g_engineSurfaceMutex (non-reentrant) — gate on this == 0.
+extern int g_offscreenViewDepth;
+
 // RAII owner of an offscreen-render world swap. The engine's render
 // state is global soup (MainSurf, ::View, FOVX/FOVY, CntrE*, Sc->NZP/
 // FZP, AspectRatio, C_NZP/zscale/clipper viewport); any pass that

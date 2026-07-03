@@ -437,7 +437,10 @@ bool BuildDiscoBall(Scene *sc)
         g->IRange = 6.0f; g->rRange = 1.0f / 6.0f;
         g->L.R = 210.0f; g->L.G = 225.0f; g->L.B = 255.0f; g->L.A = 1.0f;
         g->Type = Light_Omni;
-        g->Flags &= ~(Omni_CastsShadow | Omni_MirrorClone);
+        // Not SceneAuthored: the memcpy inherits the source FLD omni's flag,
+        // but this clone has no LWS AddLight block — leaving it set would
+        // shift the editor's light indices off the LWS write-back mapping.
+        g->Flags &= ~(Omni_CastsShadow | Omni_MirrorClone | Omni_SceneAuthored);
         g->Flags |= Omni_Active;
         // Own 1-key splines — the memcpy shares the source's Keys, and
         // Animate_Objects would drag the clone along the source's

@@ -1,5 +1,6 @@
 
 #include "Rev.h"
+#include "MaterialImport.h"
 #include <Base/RenderStats.h>
 #include <Threads.h>
 #include <Base/FeatureFlags.h>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <vector>
 #include "FRUSTRUM.H"
+#include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
@@ -815,7 +817,7 @@ OUT:
 			// white", nondeterministic per process, and curable by a
 			// free-cam 360 (which swept every omni through the MAIN
 			// frustum once, letting Transform_Objects initialize it).
-			O->F.FlareSize = O->ISize;
+			O->F.FlareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
 			O->F.SortZ.F = 2 * fzp - dz;
 			*Ins++ = { O->F.SortZ.DW, &O->F };
 		}
@@ -1878,6 +1880,10 @@ void Initialize_City()
 
 	Preprocess_Scene(CitySc, "CITY");
 
+	// Persisted editor overrides (PBR maps + numeric surface props) — the
+	// browser editor's "Save" writes this sidecar; no-op when absent.
+	fds::MaterialImport_ApplySidecar(CitySc, "SCENES/CITY.MAT");
+
 	//for(M = MatLib;M;M=M->Next)
 	//{
 	//	if (M->RelScene != CitySc) continue;
@@ -1937,6 +1943,16 @@ void Initialize_City()
 	// Hold g_engineSurfaceMutex for the duration of the swap so a
 	// concurrent EngineResize blocks until we restore MainSurf below.
 	std::lock_guard<std::mutex> mainsurfLock(g_engineSurfaceMutex);
+
+	// This hand-rolled swap is an offscreen render in all but name; mark
+	// it in g_offscreenViewDepth so renderFrame-side passes that must not
+	// nest their own offscreen render (the --env_refl panorama bake, whose
+	// OffscreenViewScope would relock g_engineSurfaceMutex on this thread
+	// and self-deadlock) stay gated during the cube-face renders below.
+	struct OffscreenDepthMark {
+		OffscreenDepthMark() { ++fds::g_offscreenViewDepth; }
+		~OffscreenDepthMark() { --fds::g_offscreenViewDepth; }
+	} offscreenDepthMark;
 
 	VESA_Surface* PrevMainSurf = MainSurf;
 	VESA_Surface TmpSurf = { 0 };
@@ -2311,6 +2327,7 @@ std::vector<debug_outtext> DebugStrs;
 
 namespace {
 struct CityScene : SceneDriver {
+	int32_t partTime() const override { return CTPartTime; }
 	char MSGStr[128];
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};

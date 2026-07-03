@@ -7,13 +7,18 @@
 #include <Base/FrameState.h> // g_mainCamera, g_mainFaces
 #include <Base/Scene.h>
 #include <Base/Camera.h>
+#include <Base/FeatureFlags.h> // env_refl_res
+#include <Base/Material.h>   // per-surface bakes: Reflection / MetallicMap / ID
 #include <Base/Texture.h>
+#include <Base/TriMesh.h>    // material centroids + scene AABB
 #include <Base/Vector.h>
 
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <vector>
 
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
@@ -21,6 +26,12 @@
 extern void Build_YOffs_Table(VESA_Surface *VS);
 
 namespace fds {
+
+// Read by Transform_Objects (Transform.cpp): while true, meshes that fail the
+// static-shadow-bake predicate (moving Pos/Rotate splines — the walking mech)
+// are skipped, so the panorama doesn't freeze a moving object into the
+// reflection at wherever it happened to stand on bake frame.
+bool g_envBakeSkipDynamic = false;
 
 namespace {
 
@@ -75,9 +86,12 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 
 }  // namespace
 
-Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
-                              const EnvBakeParams& params) {
-    if (!sc) return nullptr;
+// Shared core: render the six cube faces from `center` and stitch them into
+// a LINEAR equirect panorama in `pano`. Returns false on alloc failure.
+static bool renderCubeAndStitch(Scene* sc, const Vector& center,
+                                const EnvBakeParams& params,
+                                std::vector<uint32_t>& pano) {
+    if (!sc) return false;
     const int res = params.cubeRes;
     const int W = params.panoWidth, H = params.panoHeight;
 
@@ -92,7 +106,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     surf.Data = (byte*)std::malloc(size_t(res) * res * 4);
     surf.Z16  = (byte*)std::malloc(size_t(res) * res * sizeof(word));
     surf.Flip = MainSurf ? MainSurf->Flip : nullptr;
-    if (!surf.Data || !surf.Z16) { std::free(surf.Data); std::free(surf.Z16); return nullptr; }
+    if (!surf.Data || !surf.Z16) { std::free(surf.Data); std::free(surf.Z16); return false; }
     Build_YOffs_Table(&surf);
 
     std::vector<uint32_t> faces[6];
@@ -104,6 +118,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
         static Camera s_cam;
         view.setView(&s_cam);
 
+        g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
         for (int i = 0; i < 6; ++i) {
             std::memset(&s_cam, 0, sizeof(s_cam));
             s_cam.ISource = center;
@@ -129,6 +144,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
         }
+        g_envBakeSkipDynamic = false;
     }   // scope exit restores MainSurf/View/FOV/clip planes
 
     std::free(surf.Data);
@@ -139,7 +155,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     // reflecting world-direction d samples the scene content baked for d:
     //   lat = PI*(0.5 - ev),  lon = 2*PI*(eu - 0.5) - PI/2
     //   d = ( -cos(lon)cos(lat), sin(lat), -sin(lon)cos(lat) )
-    std::vector<uint32_t> pano(size_t(W) * H);
+    pano.assign(size_t(W) * H, params.voidColor);
     for (int py = 0; py < H; ++py) {
         const float ev  = (float(py) + 0.5f) / float(H);
         const float lat = float(M_PI) * (0.5f - ev);
@@ -171,6 +187,14 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
             std::fclose(f);
         }
     }
+    return true;
+}
+
+Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
+                              const EnvBakeParams& params) {
+    std::vector<uint32_t> pano;
+    if (!renderCubeAndStitch(sc, center, params, pano)) return nullptr;
+    const int W = params.panoWidth, H = params.panoHeight;
 
     // Materialize into a Sachletz-tiled Texture the forward env filler reads.
     Texture* T = getAlignedType<Texture>(16);
@@ -185,5 +209,175 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     T->numMipmaps = 1;
     return T;
 }
+
+// ── Deferred env-specular registry (per reflective surface) ───────────────
+namespace {
+struct EnvPanoStore {
+    std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
+    EnvPanoLinear view;
+};
+struct SceneEnv {
+    // Owning stores + Material* → store index (materials with near-identical
+    // centroids alias one store: ::mirUV clones, split instances).
+    std::vector<std::unique_ptr<EnvPanoStore>> stores;
+    std::map<const Material*, int> byMat;
+    // matID-indexed view table the kernel reads (rebuilt each FramePrep —
+    // matIDs shift when the editor rebuilds the mat table).
+    const EnvPanoLinear* table[256] = {};
+    // Scene AABB proxy (world), computed once.
+    float boxMin[3] = {}, boxMax[3] = {};
+    bool  boxValid = false;
+};
+std::map<Scene*, SceneEnv> g_envByScene;
+bool g_envBakeInProgress = false;   // bake renders through Render() → guard
+
+// 2×2 box downsample (per-channel average), ARGB.
+void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
+                   std::vector<uint32_t>& dst) {
+    const int dw = sw >> 1, dh = sh >> 1;
+    dst.resize(size_t(dw) * dh);
+    for (int y = 0; y < dh; ++y)
+        for (int x = 0; x < dw; ++x) {
+            const uint32_t a = src[size_t(2*y)   * sw + 2*x];
+            const uint32_t b = src[size_t(2*y)   * sw + 2*x + 1];
+            const uint32_t c = src[size_t(2*y+1) * sw + 2*x];
+            const uint32_t d = src[size_t(2*y+1) * sw + 2*x + 1];
+            uint32_t out = 0;
+            for (int sh8 = 0; sh8 < 32; sh8 += 8) {
+                const uint32_t s = ((a >> sh8) & 0xFF) + ((b >> sh8) & 0xFF)
+                                 + ((c >> sh8) & 0xFF) + ((d >> sh8) & 0xFF);
+                out |= ((s + 2) >> 2) << sh8;
+            }
+            dst[size_t(y) * dw + x] = out;
+        }
+}
+
+// World-space centroid of every face using material M. False if none found
+// (material exists but no faces reference it — nothing to reflect anyway).
+bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
+    double sx = 0, sy = 0, sz = 0;
+    long n = 0;
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+        for (DWord i = 0; i < T->FIndex; ++i) {
+            const Face& F = T->Faces[i];
+            if (F.Txtr != M) continue;
+            const Vertex* vs[3] = { F.A, F.B, F.C };
+            for (int k = 0; k < 3; ++k) {
+                if (!vs[k]) continue;
+                Vector w;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&vs[k]->Pos), &w);
+                Vector_SelfAdd(&w, &T->IPos);
+                sx += w.x; sy += w.y; sz += w.z;
+                ++n;
+            }
+        }
+    if (!n) return false;
+    out = { float(sx / n), float(sy / n), float(sz / n) };
+    return true;
+}
+
+void sceneAABB(Scene* sc, SceneEnv& env) {
+    if (env.boxValid) return;
+    float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+        for (DWord v = 0; v < T->VIndex; ++v) {
+            Vector w;
+            MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
+            Vector_SelfAdd(&w, &T->IPos);
+            const float p[3] = { w.x, w.y, w.z };
+            for (int a = 0; a < 3; ++a) {
+                if (p[a] < lo[a]) lo[a] = p[a];
+                if (p[a] > hi[a]) hi[a] = p[a];
+            }
+        }
+    for (int a = 0; a < 3; ++a) { env.boxMin[a] = lo[a]; env.boxMax[a] = hi[a]; }
+    env.boxValid = true;
+}
+
+// Bake one panorama from `center` into a fresh store (mip chain + metadata).
+std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
+                                        const Vector& center) {
+    EnvBakeParams params;
+    // --env_refl_res (default 512): reflections are roughness-blurred by eye
+    // anyway, so half the CITY bake res reads fine. Clamp: the mip chain
+    // needs res ≥ 64; cap at 1024.
+    int res = fds::FeatureFlags::env_refl_res();
+    if (res < 64) res = 64;
+    if (res > 1024) res = 1024;
+    params.cubeRes = res / 2;
+    params.panoWidth = res;
+    params.panoHeight = res;
+    auto store = std::make_unique<EnvPanoStore>();
+    g_envBakeInProgress = true;
+    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0]);
+    g_envBakeInProgress = false;
+    if (!ok) return nullptr;
+    EnvPanoLinear& v = store->view;
+    v.W = params.panoWidth;
+    v.H = params.panoHeight;
+    v.numMips = EnvPanoLinear::kMaxMips;
+    int w = v.W, h = v.H;
+    for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+        boxDownsample(store->levels[k-1], w, h, store->levels[k]);
+        w >>= 1; h >>= 1;
+    }
+    for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
+        v.mip[k] = store->levels[k].data();
+    v.bakeX = center.x; v.bakeY = center.y; v.bakeZ = center.z;
+    v.boxMinX = env.boxMin[0]; v.boxMinY = env.boxMin[1]; v.boxMinZ = env.boxMin[2];
+    v.boxMaxX = env.boxMax[0]; v.boxMaxY = env.boxMax[1]; v.boxMaxZ = env.boxMax[2];
+    return store;
+}
+}   // namespace
+
+bool EnvReflection_FramePrep(Scene* sc) {
+    if (!sc || g_envBakeInProgress) return false;
+    SceneEnv& env = g_envByScene[sc];
+    bool bakedAny = false;
+    // Bake for every reflective material that lacks one; centroids within a
+    // few world units share a store (clone materials, adjacent panels).
+    for (Material* M = MatLib; M; M = M->Next) {
+        if (M->RelScene != sc) continue;
+        if (!(M->Reflection > 0.0f || M->MetallicMap)) continue;
+        if (env.byMat.count(M)) continue;
+        Vector c;
+        if (!materialCentroid(sc, M, c)) { env.byMat[M] = -1; continue; }
+        if (std::getenv("ENVDBG"))
+            std::fprintf(stderr, "[ENVDBG] mat '%s' refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
+                         M->Name ? M->Name : "?", M->Reflection, M->MetallicMap ? 1 : 0,
+                         c.x, c.y, c.z);
+        sceneAABB(sc, env);
+        int idx = -1;
+        for (size_t i = 0; i < env.stores.size(); ++i) {
+            const EnvPanoLinear& v = env.stores[i]->view;
+            const float dx = v.bakeX - c.x, dy = v.bakeY - c.y, dz = v.bakeZ - c.z;
+            if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { idx = int(i); break; }
+        }
+        if (idx < 0) {
+            auto store = bakeStore(sc, env, c);
+            if (!store) { env.byMat[M] = -1; continue; }
+            std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
+                         store->view.W, store->view.H, store->view.numMips - 1,
+                         M->Name ? M->Name : "?", c.x, c.y, c.z);
+            env.stores.push_back(std::move(store));
+            idx = int(env.stores.size()) - 1;
+            bakedAny = true;
+        }
+        env.byMat[M] = idx;
+    }
+    // Refresh the matID table (IDs move when the editor rebuilds the table).
+    std::memset(env.table, 0, sizeof(env.table));
+    for (auto& [M, idx] : env.byMat)
+        if (idx >= 0 && M->RelScene == sc && M->ID < 256)
+            env.table[M->ID] = &env.stores[size_t(idx)]->view;
+    return bakedAny;
+}
+
+const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {
+    auto it = g_envByScene.find(sc);
+    return it == g_envByScene.end() ? nullptr : it->second.table;
+}
+
+void EnvReflection_Invalidate(Scene* sc) { g_envByScene.erase(sc); }
 
 }  // namespace fds

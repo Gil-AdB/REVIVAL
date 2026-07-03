@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include "MaterialImport.h"
 #include <Threads.h>
 #include "FrameProfiler.h"
 #include <Base/Object.h>
@@ -754,11 +755,16 @@ void Initialize_Chase()
 
 	SceneCorrections();
 	Preprocess_Scene(ChaseSc, "CHASE");
+
+	// Persisted editor overrides (PBR maps + numeric surface props) — the
+	// browser editor's "Save" writes this sidecar; no-op when absent.
+	fds::MaterialImport_ApplySidecar(ChaseSc, "SCENES/CHASE.MAT");
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 }
 
 namespace {
 struct ChaseScene : SceneDriver {
+	int32_t partTime() const override { return CHPartTime; }
 	FrameProfiler prof{"chase"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;

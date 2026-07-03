@@ -23,3 +23,23 @@ add_executable(lwsread
     LWOREAD.CPP
     FLDSAVE.CPP
 )
+
+# Legacy build: reproduces 1998 VLUM*100 behavior for pin_scene.py byte-identical
+# comparisons against CHASE.FLD / FOUNTAIN.FLD (built before the b441da6 fix).
+add_executable(lwsread_legacy
+    LWSREAD.CPP
+    LWOREAD.CPP
+    FLDSAVE.CPP
+)
+target_compile_definitions(lwsread_legacy PRIVATE LEGACY_VLUM=1)
+
+# OFIR-generation build: LEGACY_VLUM plus the older "LastFrame" keyword
+# mapping (the newer readers use "PreviewLastFrame"). Reproduces the
+# 2018-2020 "extended" FOUNTAIN.FLD (git 0bf67d4) byte-identical — see
+# Authoring/fountain-extended/README.md.
+add_executable(lwsread_ofir
+    LWSREAD.CPP
+    LWOREAD.CPP
+    FLDSAVE.CPP
+)
+target_compile_definitions(lwsread_ofir PRIVATE LEGACY_VLUM=1 OFIR_LASTFRAME=1)

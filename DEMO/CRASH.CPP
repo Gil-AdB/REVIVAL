@@ -3,6 +3,7 @@
 
 #include "CRASH.H"
 #include "FrameProfiler.h"
+#include "MaterialImport.h"
 #include "MeshOps.h"
 #include "SceneTick.h"
 #include "Scenes.h"
@@ -30,6 +31,9 @@ void Initialize_Crash()
 
 	Preprocess_Scene(CrashSc, "CRASH");
 
+	// Editor persistence: PBR maps + prop overrides saved for this scene.
+	fds::MaterialImport_ApplySidecar(CrashSc, "SCENES/CRASH.MAT");
+
 	// Auto-detect creased meshes (laptop facade) and switch them to
 	// per-face vertex normals; smooth meshes (if any) untouched.
 	MakeFacesIndependentByAngle(CrashSc, 30.0f);
@@ -37,6 +41,7 @@ void Initialize_Crash()
 
 namespace {
 struct CrashScene : SceneDriver {
+	int32_t partTime() const override { return CrPartTime; }
 	char MSGStr[128];
 	FrameProfiler prof{"crash"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)

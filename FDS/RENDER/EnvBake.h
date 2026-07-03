@@ -41,6 +41,49 @@ struct EnvBakeParams {
 Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
                               const EnvBakeParams& params = {});
 
+// ── Deferred env-specular reflection (--env_refl) ─────────────────────────
+// PER-SURFACE linear (unswizzled) equirect panoramas the deferred kernel
+// samples for materials with Reflection > 0 / a metalness map. Each
+// reflective material gets a panorama baked from ITS OWN centroid (a pano
+// baked from the camera is a picture from the wrong place for everything
+// else — the editor's far orbit pose made reflections look broken), and the
+// lookup is PARALLAX-CORRECTED: the reflected ray is intersected with the
+// scene's AABB proxy from the pixel's WORLD position, and the direction to
+// that hit point (from the bake centroid) indexes the pano. That's what
+// makes a floor/wall reflection track position instead of being pasted on —
+// the "local cubemap" standard; per-texel lightmap-style capture is overkill.
+struct EnvPanoLinear {
+    // Pre-filtered mip chain: mip[0] = full W×H, each next level a 2×2 box
+    // downsample (half dims) — the kernel picks the level from the pixel's
+    // ROUGHNESS, so rough surfaces reflect a blurred environment instead of
+    // a dimmed sharp one (the physically-right look).
+    static constexpr int kMaxMips = 4;
+    const unsigned* mip[kMaxMips] = {};
+    int W = 0, H = 0;               // mip 0 dims (level k = W>>k × H>>k)
+    int numMips = 0;
+    // Capture point (world) + the scene AABB proxy for parallax correction.
+    float bakeX = 0, bakeY = 0, bakeZ = 0;
+    float boxMinX = 0, boxMinY = 0, boxMinZ = 0;
+    float boxMaxX = 0, boxMaxY = 0, boxMaxZ = 0;
+};
+
+// Per-frame prep, called from renderFrame's MAIN-camera pass (never from a
+// nested OffscreenViewScope — the bake takes the non-reentrant engine-surface
+// mutex): computes the scene AABB once, bakes a panorama from the centroid of
+// every reflective material that lacks one (deduped — materials whose
+// centroids sit within a few units share a bake, e.g. ::mirUV clones), and
+// refreshes the matID→pano table. Returns true if any bake ran this call
+// (the caller must re-Transform the frame — the bake clobbered it).
+bool EnvReflection_FramePrep(Scene* sc);
+
+// matID-indexed pano table (256 entries; null = material not reflective /
+// not yet baked). Rebuilt by FramePrep; stable within a frame.
+const EnvPanoLinear* const* EnvReflection_Table(Scene* sc);
+
+// Drop every bake for the scene so the next FramePrep re-renders them
+// (editor: after light/material edits that should show in reflections).
+void EnvReflection_Invalidate(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_ENV_BAKE_H_INCLUDED

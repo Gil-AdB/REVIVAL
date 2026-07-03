@@ -11,6 +11,8 @@ std::mutex g_engineSurfaceMutex;
 
 namespace fds {
 
+int g_offscreenViewDepth = 0;
+
 OffscreenViewScope::OffscreenViewScope(Scene *sc, VESA_Surface *target)
     : lk_(g_engineSurfaceMutex),
       sc_(sc),
@@ -20,6 +22,8 @@ OffscreenViewScope::OffscreenViewScope(Scene *sc, VESA_Surface *target)
       prevNZP_(sc->NZP), prevFZP_(sc->FZP),
       prevAspect_(AspectRatio)
 {
+    ++g_offscreenViewDepth;   // written under the mutex; read by the
+                              // env_refl trigger on the same render path
     MainSurf = target;
 }
 
@@ -57,6 +61,7 @@ OffscreenViewScope::~OffscreenViewScope()
     FOVX = prevFOVX_;               // not covered by Surface2Global;
     FOVY = prevFOVY_;               // nothing recomputes these until
                                     // the next CalcPersp.
+    --g_offscreenViewDepth;
 }
 
 }  // namespace fds

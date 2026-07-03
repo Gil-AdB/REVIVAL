@@ -27,6 +27,8 @@
 #include "Base/Scene.h"
 #include "Base/RenderContext.h"
 #include "DeferredCommon.h"   // DeferredLightingCtx + g_deferredCtx (publish for strip path)
+#include "EnvBake.h"          // --env_refl: per-scene panorama bake + registry
+#include "OffscreenView.h"    // g_offscreenViewDepth (env_refl bake gate)
 #include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "RenderPipeline.h"
 #include "VESA/Vesa.h"
@@ -57,9 +59,49 @@ void Render_DeferredSkybox();
 void VolProf_Tick();
 
 // Defined in LightmapBake.cpp.
-namespace fds { void Render_LightmapViz(struct Scene *Sc); }
+namespace fds { void Render_LightmapViz(struct Scene *Sc); void Render_NormalViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
 namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_HdrBrightPass(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
+
+// LWO editor: per-matID highlight flags. The outline pass at the end of the
+// deferred render reads these; Editor_SetHighlight (the Embind editorHighlight)
+// sets them on surface-select by resolving a surface name to its matID(s).
+bool g_editorHL[256] = { false };
+bool g_editorHLActive = false;
+// A surface can render through per-handedness mirror-UV clones named
+// "<surface>::mirUV" (e.g. floor renders only as "floor::mirUV"). Treat the
+// clone and its base as the same editor surface so a select/edit covers both.
+static bool sameEditorSurface(const char* matName, const char* want) {
+	if (!matName || !want) return false;
+	size_t len = std::strlen(matName);
+	static const char suf[] = "::mirUV";
+	const size_t sl = sizeof(suf) - 1;
+	if (len > sl && std::strcmp(matName + len - sl, suf) == 0) len -= sl;
+	return std::strlen(want) == len && std::strncmp(matName, want, len) == 0;
+}
+// `name` may be a single surface or a ';'-separated list (object selection
+// highlights every surface of the group at once).
+void Editor_SetHighlight(const char* name) {
+	for (int i = 0; i < 256; ++i) g_editorHL[i] = false;
+	g_editorHLActive = false;
+	if (!name || !*name || !CurScene) return;
+	MatTable mt = Scene_GetMatTable(CurScene);
+	const char* p = name;
+	while (*p) {
+		const char* semi = strchr(p, ';');
+		const size_t len = semi ? size_t(semi - p) : strlen(p);
+		if (len) {
+			char one[128];
+			const size_t cl = len < sizeof(one) - 1 ? len : sizeof(one) - 1;
+			memcpy(one, p, cl); one[cl] = 0;
+			for (dword i = 0; i < mt.count && i < 256; ++i)
+				if (mt.data[i] && sameEditorSurface(mt.data[i]->Name, one)) {
+					g_editorHL[i] = true; g_editorHLActive = true;
+				}
+		}
+		p += len + (semi ? 1 : 0);
+	}
+}
 
 // Resolve the unified-pass preference tri-state:
 //   CLI/env explicit (FDS_VOLUMETRIC_UNIFIED set) → flag wins
@@ -371,6 +413,25 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// New frame for the fast-fog grid: until this frame's fog dispatch runs
 	// (if it runs at all), the transparent peel must not sample a stale grid.
 	FastFog_BeginFrame();
+
+	// Env-specular reflection (--env_refl): per-surface panorama bakes at
+	// first use (FramePrep walks reflective materials, bakes from each one's
+	// centroid, refreshes the matID table). g_offscreenViewDepth gate: only
+	// from the MAIN-camera frame — nested offscreen renders (the disco ball's
+	// panorama, mirror RTT) already hold the non-reentrant
+	// g_engineSurfaceMutex and starting our own OffscreenViewScope inside one
+	// deadlocks (found the hard way: hung 20 min inside UpdateDiscoBall).
+	if (fds::FeatureFlags::env_refl() && CurScene && View
+	    && fds::g_offscreenViewDepth == 0) {
+		if (fds::EnvReflection_FramePrep(CurScene)) {
+			// The bakes' cube-face renders ran Transform_Objects with their
+			// own cameras, clobbering the transformed vertex state the scene
+			// tick prepared for THIS frame — re-transform + re-sort so the
+			// frame renders from its own camera. One-time cost per scene.
+			Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+			if (CAll != 0) Radix_Sort(FList, SList, CAll);
+		}
+	}
 
 	bool deferred;
 	if (path == RenderPath::ForceForward)       deferred = false;
@@ -1056,6 +1117,9 @@ xpar_done: ;
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last
 	// so cones/halos/fog/xpar can't overwrite the diagnostic display.
 	fds::Render_LightmapViz(CurScene);
+	// Normal debug viz (--nmap_viz): geometric / TBN-shaded / raw-texel
+	// normals as RGB. Same post-tonemap slot for the same reason.
+	fds::Render_NormalViz(CurScene);
 
 	// FDS_XPAR_MIRRORVIZ — outline each mirror's stamped window (thick red) on
 	// the FINAL image. Must run HERE (after Render_TonemapToVPage + all post),
@@ -1093,6 +1157,23 @@ xpar_done: ;
 				for (int y = ya; y <= yb; ++y) { vp[y * XRes + xl] = col; vp[y * XRes + xr2] = col; }
 			}
 		}
+	}
+
+	// LWO editor surface highlight — outline the selected surface's pixels (its
+	// matID, edge where a 4-neighbour differs) on the FINAL image. Same place /
+	// reason as MIRRORVIZ (after tonemap + all post, before the scene flip).
+	if (g_editorHLActive && g_gbuffer && !g_gbuffer->txtr.empty()) {
+		const uint32_t* tx = g_gbuffer->txtr.data();
+		dword* vp = reinterpret_cast<dword*>(VPage);
+		auto hl = [&](int x, int y) -> bool {
+			if ((unsigned)x >= (unsigned)XRes || (unsigned)y >= (unsigned)YRes) return false;
+			return g_editorHL[(tx[size_t(y) * XRes + x] >> 20) & 0xFF];
+		};
+		const dword col = 0x0000FFFFu;   // bright cyan
+		for (int y = 0; y < YRes; ++y)
+			for (int x = 0; x < XRes; ++x)
+				if (hl(x, y) && (!hl(x-1,y) || !hl(x+1,y) || !hl(x,y-1) || !hl(x,y+1)))
+					vp[size_t(y) * XRes + x] = col;
 	}
 
 
