@@ -1820,30 +1820,22 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	}
 }
 
-namespace tbr {
-	std::mutex					tileCounterMutex;
-	std::atomic<int>			tileCounter;
-	std::condition_variable		condition;
-}
-
 // Execute/Clear sprite buffer
 //
 // Per-strip walk: each Y-strip (8 rows) is processed by one worker
-// thread. The linked list at SBufferHead[i] holds all sprite entries
-// that overlap this strip (and, once unified, transparent face
-// fragments too). At flush time we collect entries into a scratch
-// array, sort descending by renderZ (back-to-front), and walk the
-// sorted array dispatching each item.
+// thread (work-stealing dispatchIndexed — a task per strip cost one
+// enqueue mutex+notify per strip). The linked list at SBufferHead[i]
+// holds all sprite entries that overlap this strip (and, once
+// unified, transparent face fragments too). At flush time we collect
+// entries into a scratch array, sort descending by renderZ
+// (back-to-front), and walk the sorted array dispatching each item.
 void TBR_Render(Scene *Sc)
 {
-	dword numTiles = Sc->NumTiles;
+	const int numTiles = int(Sc->NumTiles);
+	std::counting_semaphore<INT_MAX> stripsDone{0};
 
-	tbr::tileCounter = 0;
-
-	for (mword i = 0; i < numTiles; i++)
-	{
-
-		ThreadPool::instance().enqueue([i, Sc]() {
+	dispatchIndexed(numTiles, &stripsDone, [Sc](int ii) {
+			const mword i = mword(ii);
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
 			if (spriteClipY2 > YRes) spriteClipY2 = YRes;
@@ -1955,17 +1947,9 @@ void TBR_Render(Scene *Sc)
 			// Trailing flush.
 			flushXparClump();
 			Sc->SBufferHead[i] = -1;
+	});
 
-			std::unique_lock<std::mutex> lock(tbr::tileCounterMutex);
-			++tbr::tileCounter;
-			tbr::condition.notify_one();
-		});
-	}
-
-	{
-		std::unique_lock<std::mutex> lock(tbr::tileCounterMutex);
-		tbr::condition.wait(lock, [numTiles] {return tbr::tileCounter == numTiles; });
-	}
+	for (int k = 0; k < numTiles; ++k) stripsDone.acquire();
 
 	Sc->SBufferCur = 0;
 }

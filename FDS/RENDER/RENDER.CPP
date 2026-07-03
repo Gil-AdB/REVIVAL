@@ -688,19 +688,22 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		constexpr int NT = numTilesX * numTilesY;
 		int tbX0[NT], tbY0[NT], tbX1[NT], tbY1[NT];
 		auto runTilePass = [&](auto workFn) {
+			// Compact the non-empty tiles first, then work-steal across
+			// them — dispatchIndexed enqueues min(pool, enq) tasks, never
+			// more than the old task-per-non-empty-tile loop.
+			int tileList[NT];
 			int enq = 0;
-			for (auto j = 0; j < numTilesY; ++j) {
-				for (auto i = 0; i < numTilesX; ++i) {
-					const int tileIdx = j * numTilesX + i;
-					const int cx1 = tbX0[tileIdx], cy1 = tbY0[tileIdx];
-					const int cx2 = tbX1[tileIdx], cy2 = tbY1[tileIdx];
-					if (cx1 >= cx2 || cy1 >= cy2) continue;     // no face in this tile
-					ThreadPool::instance().enqueue([cx1, cy1, cx2, cy2, tileIdx, workFn]() {
-						workFn(cx1, cy1, cx2, cy2, tileIdx);
-					});
-					++enq;
-				}
+			for (int tileIdx = 0; tileIdx < NT; ++tileIdx) {
+				if (tbX0[tileIdx] >= tbX1[tileIdx] ||
+				    tbY0[tileIdx] >= tbY1[tileIdx]) continue;   // no face in this tile
+				tileList[enq++] = tileIdx;
 			}
+			dispatchIndexed(enq, nullptr,
+			                [&tbX0, &tbY0, &tbX1, &tbY1, &tileList, workFn](int k) {
+				const int tileIdx = tileList[k];
+				workFn(tbX0[tileIdx], tbY0[tileIdx],
+				       tbX1[tileIdx], tbY1[tileIdx], tileIdx);
+			});
 			TailProf::drain(renderns::tileDone, enq, "postlight");
 		};
 

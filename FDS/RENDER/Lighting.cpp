@@ -427,11 +427,12 @@ void Lighting(Scene *Sc)
 	// greets). --no-vertex_light_parallel restores the serial walk.
 	if (fds::FeatureFlags::vertex_light_parallel())
 	{
-		// Chunked fan: greets is many SMALL meshes (wall chunks), so a
-		// task per mesh drowned in enqueue/semaphore overhead (measured
-		// 1.27 ms vs 0.83 serial). Gather once, stride across a fixed
-		// task count instead — 12 enqueues total, meshes interleaved so
-		// the big mech parts spread across tasks.
+		// Work-stealing per-mesh fan via dispatchIndexed: W enqueues total
+		// (a task PER MESH drowned in enqueue/semaphore overhead — measured
+		// 1.27 ms vs 0.83 serial — which stealing per index avoids while
+		// still load-balancing the big mech parts). Snapshot .data() by
+		// value: sMeshes is tick-thread state, and thread_local/static
+		// vectors must not be re-resolved inside the worker lambda.
 		static std::vector<TriMesh*> sMeshes;   // tick-thread only
 		sMeshes.clear();
 		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next)
@@ -439,21 +440,15 @@ void Lighting(Scene *Sc)
 			if (T->Flags & (Tri_Invisible | Tri_Noshading)) continue;
 			sMeshes.push_back(T);
 		}
-		const int nTasks = std::min<int>(12, (int)sMeshes.size());
-		if (nTasks > 1)
+		const int count = (int)sMeshes.size();
+		if (count > 1)
 		{
 			static std::counting_semaphore<INT_MAX> sDone{0};
 			TriMesh **meshes = sMeshes.data();
-			const int count = (int)sMeshes.size();
-			for (int k = 0; k < nTasks; ++k)
-			{
-				ThreadPool::instance().enqueue([Sc, meshes, count, k, nTasks]() {
-					for (int i = k; i < count; i += nTasks)
-						LightMeshVerts(Sc, meshes[i]);
-					sDone.release();
-				});
-			}
-			for (int i = 0; i < nTasks; ++i) sDone.acquire();
+			dispatchIndexed(count, &sDone, [Sc, meshes](int i) {
+				LightMeshVerts(Sc, meshes[i]);
+			});
+			for (int i = 0; i < count; ++i) sDone.acquire();
 		}
 		else
 		{

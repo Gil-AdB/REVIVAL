@@ -537,18 +537,10 @@ void LightmapBake_Static(Scene *Sc, bool forceEnable)
         // higher cutoff left the bulk serial. Each face is 11 omnis × lmRes²
         // samples — plenty to amortize the fan-out at 32+.
         if (nf >= 32 && P > 1) {
-            std::atomic<uint32_t> cur{0};
-            std::counting_semaphore<256> done{0};
-            auto worker = [&]() {
-                uint32_t fi;
-                while ((fi = cur.fetch_add(1, std::memory_order_relaxed)) < nf)
-                    bakeOneFace(fi);
-                done.release();
-            };
-            for (size_t t = 1; t < P; ++t)
-                ThreadPool::instance().enqueue([&worker]{ worker(); });
-            worker();
-            for (size_t t = 0; t < P; ++t) done.acquire();
+            std::counting_semaphore<INT_MAX> done{0};
+            dispatchIndexed(int(nf), &done,
+                            [&bakeOneFace](int fi) { bakeOneFace(DWord(fi)); });
+            for (uint32_t k = 0; k < nf; ++k) done.acquire();
         } else {
             for (DWord fi = 0; fi < nf; ++fi) bakeOneFace(fi);
         }

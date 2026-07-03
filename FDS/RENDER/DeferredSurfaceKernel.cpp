@@ -4044,24 +4044,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			renderns::tileDone.acquire();
 		}
 	} else {
-		// Work-stealing chunk dispatch: enqueue only W tasks, each pulling
-		// tiles off an atomic cursor. The old task-per-tile loop cost ~1.2 ms
-		// SERIAL per wave (96 × mutex+notify_one, and each woken worker
-		// contends the same queue mutex to pop). The tile kernel still
-		// releases tileDone once per tile, so the drain is unchanged; tiles
-		// write disjoint regions in any order → byte-identical.
-		auto cursor = std::make_shared<std::atomic<int>>(0);
-		const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
-		for (int k = 0; k < nTasks; ++k) {
-			ThreadPool::instance().enqueue([&ctx, useOuterVec, cursor, tileBounds]() {
-				int t;
-				while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
-					int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
-					if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
-					else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
-				}
-			});
-		}
+		// Work-stealing chunk dispatch via dispatchIndexed (the tile kernel
+		// releases tileDone itself → done=nullptr; drain unchanged). The old
+		// task-per-tile loop cost ~1.2 ms SERIAL per wave (96 ×
+		// mutex+notify_one, and each woken worker contends the same queue
+		// mutex to pop). Tiles write disjoint regions in any order →
+		// byte-identical.
+		dispatchIndexed(nTiles, nullptr, [&ctx, useOuterVec, tileBounds](int t) {
+			int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+			if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
+			else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
+		});
 		TailProf::mark("w1-enqueue", _w1q);
 		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1");
 	}
@@ -4078,18 +4071,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 				renderns::tileDone.acquire();
 			}
 		} else {
-			// Same work-stealing chunk dispatch as wave 1 (see above).
-			auto cursor = std::make_shared<std::atomic<int>>(0);
-			const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
-			for (int k = 0; k < nTasks; ++k) {
-				ThreadPool::instance().enqueue([&ctx, cursor, tileBounds]() {
-					int t;
-					while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
-						int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
-						Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
-					}
-				});
-			}
+			// Same dispatchIndexed shape as wave 1 (see above).
+			dispatchIndexed(nTiles, nullptr, [&ctx, tileBounds](int t) {
+				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
+			});
 			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2");
 		}
 	}
