@@ -20,6 +20,49 @@
 #include "Base/FeatureFlags.h"
 #include "RENDER/DeferredCommon.h"
 
+// Zero a TileLights' padding slots (count..8-rounded) so the vec light
+// loop's over-read produces entries that contribute nothing: range2=0
+// fails the per-pixel `len2 <= range2` mask; mirrorId=0xffffffff never
+// equals a pixel's mirror id (< 256); the inverted window AABB keeps
+// padded slots out of the bounce portal test. Shared by the tile and
+// strip builders (the strip kernel reads a subset of these fields —
+// zeroing the rest is harmless).
+static void zeroTileLightPadding(TileLights &tl)
+{
+	const int padded = (tl.count + 7) & ~7;
+	const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
+	for (int p = tl.count; p < pad_to; ++p) {
+		tl.posX[p]   = 0.0f;
+		tl.posY[p]   = 0.0f;
+		tl.posZ[p]   = 0.0f;
+		tl.colB[p]   = 0.0f;
+		tl.colG[p]   = 0.0f;
+		tl.colR[p]   = 0.0f;
+		tl.range2[p] = 0.0f;
+		tl.rRange[p] = 0.0f;
+		tl.dirX[p]     = 0.0f;
+		tl.dirY[p]     = 0.0f;
+		tl.dirZ[p]     = 0.0f;
+		tl.cosInner[p] = -2.0f;
+		tl.cosOuter[p] = -2.0f;
+		tl.isSpot[p]   = 0u;
+		tl.shadowMapIdx[p] = -1;
+		tl.srcShadowMapIdx[p] = -1;
+		tl.srcCubeShadowIdx[p] = -1;
+		tl.bounceClamp[p] = 0u;
+		tl.mirNX[p] = 0.0f; tl.mirNY[p] = 0.0f;
+		tl.mirNZ[p] = 0.0f; tl.mirD[p]  = 0.0f;
+		tl.posWorldX[p] = 0.0f;
+		tl.posWorldY[p] = 0.0f;
+		tl.posWorldZ[p] = 0.0f;
+		tl.cubeShadowIdx[p] = -1;
+		tl.mirrorId[p]      = 0xffffffffu;
+		tl.winMinX[p] =  1e30f; tl.winMinY[p] =  1e30f; tl.winMinZ[p] =  1e30f;
+		tl.winMaxX[p] = -1e30f; tl.winMaxY[p] = -1e30f; tl.winMaxZ[p] = -1e30f;
+	}
+	tl.paddedCount = pad_to;
+}
+
 // Build per-tile compacted SoA. For each omni: project its view-space
 // bounding sphere into screen space, find overlapping tile rects, then
 // **append the omni's values** (not its index) into each overlapping
@@ -200,39 +243,17 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const float vz_minus_r = vz - r;
 		const float vz_plus_r  = vz + r;
 
-		// Sphere entirely behind camera: skip.
-		if (vz + r < 0.0f) continue;
+		LightScreenRect sr;
+		if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
+		                           xres, yres, sr)) continue;
+		if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
 
-		int sx_min, sx_max, sy_min, sy_max;
-		if (vz - r < 1.0f) {
-			// Sphere straddles or is in front of near plane — be
-			// conservative and tag every tile. (This is rare for
-			// City; keeps the math simple.)
-			sx_min = 0;        sx_max = xres - 1;
-			sy_min = 0;        sy_max = yres - 1;
-		} else {
-			// Pinhole projection of bounding sphere — small-angle
-			// approximation. Center: (CntrEX + vx*FOVX/vz, CntrEY -
-			// vy*FOVY/vz). Radius on-screen: r * FOVX/vz (use FOVY for
-			// vertical). Slightly over-estimates near the edges of
-			// the FOV but that just lights tiles that miss the per-
-			// pixel cull, no correctness impact.
-			const float invZ = 1.0f / vz;
-			const float cx   = CntrEX + vx * FOVX * invZ;
-			const float cy   = CntrEY - vy * FOVY * invZ;
-			const float rx   = r * FOVX * invZ;
-			const float ry   = r * FOVY * invZ;
-			sx_min = std::max(0,        int(std::floor(cx - rx)));
-			sx_max = std::min(xres - 1, int(std::ceil (cx + rx)));
-			sy_min = std::max(0,        int(std::floor(cy - ry)));
-			sy_max = std::min(yres - 1, int(std::ceil (cy + ry)));
-			if (sx_min > sx_max || sy_min > sy_max) continue;
-		}
-
-		const int tile_i_lo = sx_min / tileSizeX;
-		const int tile_i_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
-		const int tile_j_lo = sy_min / tileSizeY;
-		const int tile_j_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
+		const int tile_i_lo = sr.full ? 0 : sr.x0 / tileSizeX;
+		const int tile_i_hi = sr.full ? numTilesX - 1
+		                              : std::min(numTilesX - 1, sr.x1 / tileSizeX);
+		const int tile_j_lo = sr.full ? 0 : sr.y0 / tileSizeY;
+		const int tile_j_hi = sr.full ? numTilesY - 1
+		                              : std::min(numTilesY - 1, sr.y1 / tileSizeY);
 
 		const float Lpx = lights.posX[li];
 		const float Lpy = lights.posY[li];
@@ -348,49 +369,9 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		}
 	}
 
-	// Zero the padding slots (count..paddedCount) so the vec loop's
-	// over-read produces range2=0 entries that fail the per-pixel
-	// `len2 <= range2` mask and contribute nothing.
+	// Zero the padding slots so the vec loop's over-read is benign.
 	for (int t = 0; t < numTiles; ++t) {
-		TileLights &tl = tileLights[t];
-		const int padded = (tl.count + 7) & ~7;
-		const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
-		for (int p = tl.count; p < pad_to; ++p) {
-			tl.posX[p]   = 0.0f;
-			tl.posY[p]   = 0.0f;
-			tl.posZ[p]   = 0.0f;
-			tl.colB[p]   = 0.0f;
-			tl.colG[p]   = 0.0f;
-			tl.colR[p]   = 0.0f;
-			tl.range2[p] = 0.0f;
-			tl.rRange[p] = 0.0f;
-			tl.dirX[p]     = 0.0f;
-			tl.dirY[p]     = 0.0f;
-			tl.dirZ[p]     = 0.0f;
-			tl.cosInner[p] = -2.0f;
-			tl.cosOuter[p] = -2.0f;
-			tl.isSpot[p]   = 0u;
-			tl.shadowMapIdx[p] = -1;
-			tl.srcShadowMapIdx[p] = -1;
-			tl.srcCubeShadowIdx[p] = -1;
-			tl.bounceClamp[p] = 0u;
-			tl.mirNX[p] = 0.0f; tl.mirNY[p] = 0.0f;
-			tl.mirNZ[p] = 0.0f; tl.mirD[p]  = 0.0f;
-			tl.posWorldX[p] = 0.0f;
-			tl.posWorldY[p] = 0.0f;
-			tl.posWorldZ[p] = 0.0f;
-			tl.cubeShadowIdx[p] = -1;
-			// 0xffffffff in the padding slot so the per-pixel `==`
-			// test against pixelMirrorId (always < 256) is always
-			// false; the padded slots contribute nothing whatever
-			// the pixel's mirror id.
-			tl.mirrorId[p]      = 0xffffffffu;
-			// Inverted window AABB → portal-test gate (winMin<=winMax) is
-			// false, so padded slots never enter the portal test.
-			tl.winMinX[p] =  1e30f; tl.winMinY[p] =  1e30f; tl.winMinZ[p] =  1e30f;
-			tl.winMaxX[p] = -1e30f; tl.winMaxY[p] = -1e30f; tl.winMaxZ[p] = -1e30f;
-		}
-		tl.paddedCount = pad_to;
+		zeroTileLightPadding(tileLights[t]);
 	}
 }
 
@@ -423,22 +404,16 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 		const float vz = lights.posZ[li];
 		const float r  = std::sqrt(lights.range2[li]);
 
-		if (vz + r < 0.0f) continue;
+		// Y-only: strips ignore X, so an off-screen-in-X light must
+		// still reach its Y strips (see lightSphereScreenRect docs).
+		LightScreenRect sr;
+		if (!lightSphereScreenRect(vx, vy, vz, r, 0.0f, FOVY, 0.0f, CntrEY,
+		                           1, yres, sr)) continue;
+		if (!sr.full && sr.y0 > sr.y1) continue;
 
-		int sy_min, sy_max;
-		if (vz - r < 1.0f) {
-			sy_min = 0;        sy_max = yres - 1;
-		} else {
-			const float invZ = 1.0f / vz;
-			const float cy   = CntrEY - vy * FOVY * invZ;
-			const float ry   = r * FOVY * invZ;
-			sy_min = std::max(0,       int(std::floor(cy - ry)));
-			sy_max = std::min(yres - 1, int(std::ceil (cy + ry)));
-			if (sy_min > sy_max) continue;
-		}
-
-		const int strip_lo = sy_min / stripHeight;
-		const int strip_hi = std::min(numStrips - 1, sy_max / stripHeight);
+		const int strip_lo = sr.full ? 0 : sr.y0 / stripHeight;
+		const int strip_hi = sr.full ? numStrips - 1
+		                             : std::min(numStrips - 1, sr.y1 / stripHeight);
 
 		const float Lpx = lights.posX[li];
 		const float Lpy = lights.posY[li];
@@ -490,32 +465,10 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 		}
 	}
 
-	// Zero the padding slots so the vec loop's overread is benign
-	// (range2=0 lanes fail the per-pixel `len2 <= range2` mask).
+	// Zero the padding slots so the vec loop's overread is benign.
 	for (int s = 0; s < numStrips; ++s) {
 		TileLights &tl = g_stripLights[s];
-		const int padded = (tl.count + 7) & ~7;
-		const int pad_to = std::min(padded, DEFERRED_MAX_LIGHTS);
-		for (int p = tl.count; p < pad_to; ++p) {
-			tl.posX[p]   = 0.0f;
-			tl.posY[p]   = 0.0f;
-			tl.posZ[p]   = 0.0f;
-			tl.colB[p]   = 0.0f;
-			tl.colG[p]   = 0.0f;
-			tl.colR[p]   = 0.0f;
-			tl.range2[p] = 0.0f;
-			tl.rRange[p] = 0.0f;
-			tl.dirX[p]     = 0.0f;
-			tl.dirY[p]     = 0.0f;
-			tl.dirZ[p]     = 0.0f;
-			tl.cosInner[p] = -2.0f;
-			tl.cosOuter[p] = -2.0f;
-			tl.isSpot[p]   = 0u;
-			tl.mirrorId[p] = 0xffffffffu;
-			tl.winMinX[p] =  1e30f; tl.winMinY[p] =  1e30f; tl.winMinZ[p] =  1e30f;
-			tl.winMaxX[p] = -1e30f; tl.winMaxY[p] = -1e30f; tl.winMaxZ[p] = -1e30f;
-		}
-		tl.paddedCount = pad_to;
+		zeroTileLightPadding(tl);
 		// Strip Z bounds: not used by transparent kernel (depth is
 		// already in the xpar G-buffer). Set sentinels.
 		tl.zMin = -std::numeric_limits<float>::infinity();

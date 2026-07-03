@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include "simde/x86/fma.h"
 
@@ -287,6 +288,45 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 // shard reflection can run it to draw the beams. inlineDispatch=true runs the
 // tiles on the calling thread (offscreen bake); false pool-tiles (main frame).
 void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch = false);
+
+// Screen-space bounding rect of a view-space sphere — the shared first
+// step of every light-list / volumetric tile binning (was copied in 4
+// places; a cull added to one copy rotted in the others). Returns:
+//   false        → sphere entirely behind the camera; skip the light.
+//   true, full=1 → sphere straddles the near plane; bin conservatively
+//                  into every tile (the rect fields are not written).
+//   true, full=0 → rect is the clamped pixel bbox; callers reject the
+//                  light when the rect is empty ONLY if they cull that
+//                  axis (the strip builder ignores X, so an off-screen-
+//                  in-X light must still reach its Y strips).
+struct LightScreenRect {
+	int  x0, x1, y0, y1;   // inclusive pixel bounds, clamped to screen
+	bool full;             // near-plane straddle → tag every tile
+};
+inline bool lightSphereScreenRect(float vx, float vy, float vz, float r,
+                                  float fovX, float fovY,
+                                  float cntrEX, float cntrEY,
+                                  int xres, int yres,
+                                  LightScreenRect &out)
+{
+	if (vz + r < 0.0f) return false;      // entirely behind camera
+	if (vz - r < 1.0f) { out.full = true; return true; }
+	out.full = false;
+	// Pinhole projection of the bounding sphere — small-angle
+	// approximation. Slightly over-estimates near the FOV edges, which
+	// just bins tiles that the per-pixel cull rejects; no correctness
+	// impact.
+	const float invZ = 1.0f / vz;
+	const float cx   = cntrEX + vx * fovX * invZ;
+	const float cy   = cntrEY - vy * fovY * invZ;
+	const float rx   = r * fovX * invZ;
+	const float ry   = r * fovY * invZ;
+	out.x0 = std::max(0,        int(std::floor(cx - rx)));
+	out.x1 = std::min(xres - 1, int(std::ceil (cx + rx)));
+	out.y0 = std::max(0,        int(std::floor(cy - ry)));
+	out.y1 = std::min(yres - 1, int(std::ceil (cy + ry)));
+	return true;
+}
 
 // Light-list builders (DeferredLightLists.cpp). Called once per frame
 // by the Render_DeferredLighting orchestrator; buildStripLightLists

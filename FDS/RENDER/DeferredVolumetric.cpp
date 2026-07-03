@@ -1595,29 +1595,16 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         const float vy = lights->posY[li];
         const float vz = lights->posZ[li];
         const float r  = std::sqrt(lights->range2[li]);
-        if (vz + r < 0.0f) continue;  // entirely behind camera
-
-        int ti_lo, ti_hi, tj_lo, tj_hi;
-        if (vz - r < 1.0f) {
-            // Sphere straddles near plane: be conservative, tag every tile.
-            ti_lo = 0; ti_hi = numTilesX - 1;
-            tj_lo = 0; tj_hi = numTilesY - 1;
-        } else {
-            const float invZ = 1.0f / vz;
-            const float cx = CntrEX + vx * FOVX * invZ;
-            const float cy = CntrEY - vy * FOVY * invZ;
-            const float rx = r * FOVX * invZ;
-            const float ry = r * FOVY * invZ;
-            const int sx_min = std::max(0,        int(std::floor(cx - rx)));
-            const int sx_max = std::min(XRes - 1, int(std::ceil (cx + rx)));
-            const int sy_min = std::max(0,        int(std::floor(cy - ry)));
-            const int sy_max = std::min(YRes - 1, int(std::ceil (cy + ry)));
-            if (sx_min > sx_max || sy_min > sy_max) continue;
-            ti_lo = sx_min / tileSizeX;
-            ti_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
-            tj_lo = sy_min / tileSizeY;
-            tj_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
-        }
+        LightScreenRect sr;
+        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
+                                   XRes, YRes, sr)) continue;
+        if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
+        const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
+        const int ti_hi = sr.full ? numTilesX - 1
+                                  : std::min(numTilesX - 1, sr.x1 / tileSizeX);
+        const int tj_lo = sr.full ? 0 : sr.y0 / tileSizeY;
+        const int tj_hi = sr.full ? numTilesY - 1
+                                  : std::min(numTilesY - 1, sr.y1 / tileSizeY);
         // Cone-vs-tile cull: the volumetric ray spans [near, surface],
         // so the relevant chunk is the cone tile's screen rect swept
         // from the near plane to the deepest surface beneath it (max
@@ -2433,27 +2420,16 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
         // adjacent tiles disagreed on whether the (small) surface sphere
         // crossed them.
         const float r  = lights->haloRange[li];
-        if (vz + r < 0.0f) continue;
-        int ti_lo, ti_hi, tj_lo, tj_hi;
-        if (vz - r < 1.0f) {
-            ti_lo = 0; ti_hi = numTilesX - 1;
-            tj_lo = 0; tj_hi = numTilesY - 1;
-        } else {
-            const float invZ = 1.0f / vz;
-            const float cx = CntrEX + vx * FOVX * invZ;
-            const float cy = CntrEY - vy * FOVY * invZ;
-            const float rx = r * FOVX * invZ;
-            const float ry = r * FOVY * invZ;
-            const int sx_min = std::max(0,        int(std::floor(cx - rx)));
-            const int sx_max = std::min(XRes - 1, int(std::ceil (cx + rx)));
-            const int sy_min = std::max(0,        int(std::floor(cy - ry)));
-            const int sy_max = std::min(YRes - 1, int(std::ceil (cy + ry)));
-            if (sx_min > sx_max || sy_min > sy_max) continue;
-            ti_lo = sx_min / tileSizeX;
-            ti_hi = std::min(numTilesX - 1, sx_max / tileSizeX);
-            tj_lo = sy_min / tileSizeY;
-            tj_hi = std::min(numTilesY - 1, sy_max / tileSizeY);
-        }
+        LightScreenRect sr;
+        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
+                                   XRes, YRes, sr)) continue;
+        if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
+        const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
+        const int ti_hi = sr.full ? numTilesX - 1
+                                  : std::min(numTilesX - 1, sr.x1 / tileSizeX);
+        const int tj_lo = sr.full ? 0 : sr.y0 / tileSizeY;
+        const int tj_hi = sr.full ? numTilesY - 1
+                                  : std::min(numTilesY - 1, sr.y1 / tileSizeY);
         const uint32_t omidBin = lights->mirrorId[li];
         for (int j = tj_lo; j <= tj_hi; ++j) {
             for (int i = ti_lo; i <= ti_hi; ++i) {
