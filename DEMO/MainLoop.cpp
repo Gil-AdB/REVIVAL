@@ -262,6 +262,12 @@ void DemoBoot(ModplayerHandle modHandle)
 			"--dof_range=20", "--dof_max=4", "--greets-stone-tex", "--ssao-downscale=2",
 			"--ssao-gtao", "--ao_map_strength=1", "--parallax_strength=0.1", "--parallax",
 			"--nmap_16bit", "--hdr", "--ssao", "--aa", "--pbr",
+			// Editor-only default: env reflections ON, so the per-surface
+			// 'reflection' slider works out of the box (the panorama bake
+			// only fires for materials that actually set Reflection > 0 /
+			// carry a metalness map — free otherwise). The demo sequence
+			// keeps the flag's normal default (off).
+			"--env_refl",
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8

@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b35</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b37</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -650,7 +650,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b35); orbit/zoom embind =',
+        console.log('[editor] panel init (build b37); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -1117,6 +1117,24 @@
         editorGroup = scope.filter(function(n){ return !inGroup(n); });
         applyGroupSelection(editorGroupObj ? 'inverted in "' + editorGroupObj.name + '"' : 'inverted');
       };
+      // Re-pull the surface model from the engine and re-render the panel for
+      // the current selection. Needed after map imports: fields like
+      // hasNormalMap / normalFlip / texture gate panel controls (the 'normal
+      // G' row only exists when a normal map is present), and they change
+      // when maps land.
+      function refreshSurfacesAndProps(selName){
+        var fresh;
+        try { fresh = JSON.parse(Module.editorGetSurfaces()); } catch(e){ return; }
+        fresh.forEach(function(ns){
+          var i = editorSurfaces.findIndex(function(x){ return x.name === ns.name; });
+          if (i >= 0) editorSurfaces[i] = ns;
+          else { editorSurfaces.push(ns); }
+          if (!editorPristine[ns.name]) editorPristine[ns.name] = JSON.parse(JSON.stringify(ns));
+        });
+        renderSurfaceList();
+        var cur = editorSurfaces.find(function(x){ return x.name === (editorSelected || selName); });
+        if (cur) renderSurfaceProps(cur, editorGroup ? { name: 'selection', surfaces: editorGroup } : undefined);
+      }
       // The names an edit applies to: the whole object group when one is
       // selected (and the edited surface belongs to it), else just the one.
       function editSurfNames(name){
@@ -1141,6 +1159,18 @@
         if (!okAll) editorStatus('set ' + key + ' on "' + name + '" → false (not applied)');
         else editorStatus('set ' + key + ' = ' + (+v).toFixed(2) +
                           (names.length > 1 ? ' (' + names.length + ' surfaces)' : ''));
+        // Reflection renders only under the env_refl knob — auto-enable it
+        // the first time someone dials reflection up, instead of silently
+        // doing nothing (the #1 "reflections don't work" report).
+        if (okAll && key === 'reflection' && v > 0) {
+          try {
+            var pEnv = JSON.parse(Module.editorGetParams()).find(function(p){ return p.name === 'env_refl'; });
+            if (pEnv && !pEnv.value) {
+              Module.editorSetParam('env_refl', '1');
+              editorStatus('set reflection = ' + (+v).toFixed(0) + ' — env_refl was OFF, enabled it (reflections need it)');
+            }
+          } catch(e){}
+        }
         console.log('[editor] set', names.join(','), key, v, '->', okAll);
         updateSaveButton();
         return okAll;
@@ -1506,9 +1536,15 @@
             chain = chain.then(function(){ return new Promise(function(res){
               importFile(role, slots[role], function(ok){
                 if (ok) { okCount++; applied.push(role + '=' + slots[role].name); }
-                if (++doneCount === roles.length)
+                if (++doneCount === roles.length) {
                   editorStatus('pack ' + packName + ': ' + okCount + '/' + roles.length
                                + ' applied — ' + applied.join(', '));
+                  // The panel renders map-dependent controls (the 'normal G'
+                  // flip row only exists when the surface HAS a normal map) —
+                  // refresh the surface model + re-render so the new maps'
+                  // knobs appear without a reload.
+                  refreshSurfacesAndProps(s.name);
+                }
                 res();
               });
             }); });
@@ -1525,6 +1561,7 @@
             editorStatus('importing ' + role + '…');
             importFile(role, file, function(ok){
               editorStatus(ok ? (role + ' imported: ' + file.name) : (role + ' import FAILED'));
+              if (ok) refreshSurfacesAndProps(s.name);
             });
           };
           row.appendChild(inp); imp.appendChild(row);
