@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b28</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b29</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -650,7 +650,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b28); orbit/zoom embind =',
+        console.log('[editor] panel init (build b29); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -1433,15 +1433,19 @@
         // left-drag = orbit, right-drag or shift+drag = pan, wheel = zoom,
         // left-CLICK (no drag) = pick the surface under the cursor.
         var mode = null, lastX = 0, lastY = 0, downX = 0, downY = 0, dragged = false;
+        var downOnCanvas = false;   // THIS press started on the canvas
         canvasEl.addEventListener('mousedown', function(e){
           // Hand the keyboard back to the engine: a focused panel control
           // (slider / number box) would otherwise swallow the fly keys.
           if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
           mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
           lastX = downX = e.clientX; lastY = downY = e.clientY; dragged = false;
+          downOnCanvas = true;
           e.preventDefault();
         });
-        window.addEventListener('mouseup', function(){ mode = null; });
+        // Clears AFTER the canvas mouseup handler (the same event reaches the
+        // canvas target before it bubbles to window).
+        window.addEventListener('mouseup', function(){ mode = null; downOnCanvas = false; });
         window.addEventListener('mousemove', function(e){
           if (!mode) return;
           var dx = e.clientX - lastX, dy = e.clientY - lastY;
@@ -1472,6 +1476,11 @@
           try { return Module.editorPick(uv.u, uv.v) || null; } catch (err) { return null; }
         }
         canvasEl.addEventListener('mouseup', function(e){
+          // Releasing a PANEL slider drag with the cursor over the canvas used
+          // to land here with stale dragged/down state from the PREVIOUS
+          // canvas press and run a pick — hijacking the selection (usually
+          // onto the floor) mid-edit. Only pick when the press began here.
+          if (!downOnCanvas) return;
           if (dragged || e.button !== 0 || e.shiftKey) return;
           var name = pickAt(e);
           if (!name) { editorStatus('pick: no surface here'); return; }
