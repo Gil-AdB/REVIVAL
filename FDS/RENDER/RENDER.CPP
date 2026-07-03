@@ -559,6 +559,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// cross the goto xpar_done, so accumulate manually at the label.
 		const long long _xparT0 = TailProf::nowNs();
 
+		// FDS_TAIL_PROF: per-phase decomposition of the peel (accumulated
+		// across batches, printed at the xpar_done label with the span).
+		static double s_xparClearMs = 0, s_xparRasterMs = 0, s_xparCompMs = 0;
+		static int    s_xparBatches = 0;
+
 		// Per-object peeled transparent rendering. We process each
 		// transparent TriMesh independently — clear the xpar G-buffers,
 		// render that mesh's transparent faces (back-facing → back
@@ -810,6 +815,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					any?"":"EMPTY ", ux0,uy0,ux1,uy1);
 			}
 			auto rasterAndComposite = [&]() {
+				const long long _rT = TailProf::nowNs();
 				runTilePass([first, count, T, sel, reverseMode](int x1, int y1, int x2, int y2, int /*tileIdx*/) {
 					// thread_local: set on THIS worker, read by the synchronous
 					// raster below (same thread). Opaque ignores it.
@@ -818,6 +824,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 					                                float(x2), float(y2),
 					                                first, count, T, sel);
 				});
+				const long long _cT = TailProf::nowNs();
+				s_xparRasterMs += double(_cT - _rT) / 1e6;
 				if (batchFront) {
 					runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
 						renderDeferredTransparentTile_Front(tileIdx, x1, y1, x2, y2);
@@ -827,6 +835,8 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 						renderDeferredTransparentTile_Back(tileIdx, x1, y1, x2, y2);
 					});
 				}
+				s_xparCompMs += double(TailProf::nowNs() - _cT) / 1e6;
+				++s_xparBatches;
 			};
 
 			// FDS_XPAR_TILEVIZ — outline EVERY transparent batch's per-tile bound
@@ -852,8 +862,10 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 
 			if (peelPasses <= 1) {
 				// Legacy single-fragment peel — byte-identical.
+				const long long _clT = TailProf::nowNs();
 				if (batchFront) clearFront();
 				else            clearBack();
+				s_xparClearMs += double(TailProf::nowNs() - _clT) / 1e6;
 				rasterAndComposite();
 				drawTileMaskViz();
 				batchOpen = false;
@@ -913,6 +925,10 @@ xpar_done: ;
 		_xa += double(TailProf::nowNs() - _xparT0) / 1e6;
 		if (++_xn >= 60) {
 			std::fprintf(stderr, "[TAIL-PROF] serial %-18s %7.3fms/f\n", "xpar-peel", _xa / _xn);
+			std::fprintf(stderr, "[TAIL-PROF] xpar-phases  clear=%.3f raster=%.3f composite=%.3f ms/f  (%.1f batches/f)\n",
+			             s_xparClearMs / _xn, s_xparRasterMs / _xn, s_xparCompMs / _xn,
+			             double(s_xparBatches) / _xn);
+			s_xparClearMs = s_xparRasterMs = s_xparCompMs = 0; s_xparBatches = 0;
 			_xa = 0; _xn = 0;
 		}
 	}
