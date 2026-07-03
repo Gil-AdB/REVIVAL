@@ -24,6 +24,9 @@
 #include <unordered_set>
 #include <vector>
 
+// PREPROC.CPP — recompute per-vertex tangents from current Faces + maps.
+void Compute_Vertex_Tangents(TriMesh *T);
+
 namespace rev {
 
 // See MaterialEditor.h — some surfaces render only through their "::mirUV"
@@ -85,6 +88,21 @@ std::string Editor_GetSurfacesJSON()
 		appendNum(out, "parallaxScale",M->ParallaxScale);out += ",";
 		appendNum(out, "normalFlip",   fds::MaterialImport_GetNormalFlip(M)); out += ",";
 		out += M->NormalMap ? "\"hasNormalMap\":1," : "\"hasNormalMap\":0,";
+		// Current UV mapping (as loaded / as last re-projected).
+		{
+			int proj = -1;   // -1 = unknown / not an image-mapped surface
+			if (M->ColorTexture) {
+				if      (!std::strncmp(M->ColorTexture, "Planar", 6))      proj = 0;
+				else if (!std::strncmp(M->ColorTexture, "Cylindrical", 11)) proj = 1;
+				else if (!std::strncmp(M->ColorTexture, "Spherical", 9))   proj = 2;
+				else if (!std::strncmp(M->ColorTexture, "Cubic", 5))       proj = 3;
+			}
+			appendNum(out, "uvProj",   proj);              out += ",";
+			appendNum(out, "uvScaleX", M->TextureSize.x);  out += ",";
+			appendNum(out, "uvScaleY", M->TextureSize.y);  out += ",";
+			appendNum(out, "uvScaleZ", M->TextureSize.z);  out += ",";
+			appendNum(out, "uvAxis",   M->TextureFlags & 7); out += ",";
+		}
 		appendNum(out, "flags",        (double)M->Flags);out += ",";
 		out += "\"texture\":\"";
 		jsonEscape(out, (M->Txtr && M->Txtr->FileName) ? M->Txtr->FileName : "");
@@ -358,6 +376,138 @@ static void retintFlare(Omni *O)
 	O->F.Txtr = it->second;
 }
 
+// ── Runtime UV re-projection ────────────────────────────────────────────────
+// UVs are BAKED at FLD load (Get_UV, FLD_MAT.CPP) from the material's
+// LightWave projection ("Planar/Cylindrical/Spherical/Cubic Image Map"),
+// TextureSize (world-units-per-tile scale), TextureCenter, and the axis flag.
+// The engine Material keeps copies of all of those, and the render path reads
+// FACE-level UVs (FRUSTRUM copies F->U1.. into the transformed verts), so a
+// live re-projection just recomputes each face corner's UV from its
+// OBJECT-SPACE position — the same math, then retangents affected meshes.
+namespace {
+constexpr float kPi   = 3.14159265358979323846f;
+constexpr float kPiD2 = kPi * 0.5f;
+constexpr float kPiM2 = kPi * 2.0f;
+
+// Cartesian → cylinder heading / sphere heading+pitch (Get_UV's helpers).
+float uvXyzToH(float x, float, float z)
+{
+	if (x == 0.0f && z == 0.0f) return 0.0f;
+	if (z == 0.0f) return (x < 0.0f) ? kPiD2 : -kPiD2;
+	if (z < 0.0f)  return -std::atan(x / z) + kPi;
+	return -std::atan(x / z);
+}
+void uvXyzToHP(float x, float y, float z, float *h, float *p)
+{
+	if (x == 0.0f && z == 0.0f) {
+		*h = 0.0f;
+		*p = (y != 0.0f) ? ((y < 0.0f) ? -kPiD2 : kPiD2) : 0.0f;
+		return;
+	}
+	*h = uvXyzToH(x, y, z);
+	x = std::sqrt(x * x + z * z);
+	*p = (x == 0.0f) ? ((y < 0.0f) ? -kPiD2 : kPiD2) : std::atan(y / x);
+}
+
+// One corner's (u,v) under `proj` (0=planar 1=cylindrical 2=spherical
+// 3=cubic). pos is object space; axis bits = Texture_XAxis/YAxis (LWREAD.H).
+// faceN = |face normal| (cubic picks its dominant axis per face).
+void uvProject(int proj, const Vector &pos, const Vector &ctr, const Vector &size,
+               unsigned axis, const Vector &faceN, float &u, float &v)
+{
+	const float vx = pos.x - ctr.x, vy = pos.y - ctr.y, vz = pos.z - ctr.z;
+	float s, t, lon, lat;
+	switch (proj) {
+	default:
+	case 0:   // planar
+		s = (axis & 1) ? vz / size.z + 0.5f : vx / size.x + 0.5f;
+		t = (axis & 2) ? -vz / size.z + 0.5f : -vy / size.y + 0.5f;
+		u = s; v = t;
+		return;
+	case 1:   // cylindrical
+		if (axis & 1)      { lon = uvXyzToH(vz, vx, -vy); t = -vx / size.x + 0.5f; }
+		else if (axis & 2) { lon = uvXyzToH(-vx, vy, vz); t = -vy / size.y + 0.5f; }
+		else               { lon = uvXyzToH(-vx, vz, -vy); t = -vz / size.z + 0.5f; }
+		u = 1.0f - lon / kPiM2; v = t;
+		return;
+	case 2:   // spherical
+		if (axis & 1)      uvXyzToHP(vz, vx, -vy, &lon, &lat);
+		else if (axis & 2) uvXyzToHP(-vx, vy, vz, &lon, &lat);
+		else               uvXyzToHP(-vx, vz, -vy, &lon, &lat);
+		u = 1.0f - lon / kPiM2;
+		v = 0.5f - lat / kPi;
+		return;
+	case 3: { // cubic: dominant face-normal axis picks the plane
+		const bool X = faceN.x > faceN.y && faceN.x > faceN.z;
+		const bool Y = !X && faceN.y > faceN.x && faceN.y > faceN.z;
+		s = X ? vz / size.z : vx / size.x;
+		t = Y ? -vz / size.z : -vy / size.y;
+		u = s + 0.5f; v = t + 0.5f;
+		return;
+	}
+	}
+}
+} // namespace
+
+// LW projection-string names, indexed by the proj codes above (persisted into
+// the material so the LWO/FLD writers can serialize the choice).
+static const char *kProjName[4] = {
+	"Planar Image Map", "Cylindrical Image Map",
+	"Spherical Image Map", "Cubic Image Map",
+};
+
+std::string Editor_SetUVMapping(const char *name, int proj, float sx, float sy, float sz, int axis)
+{
+	if (!CurScene || !name || proj < 0 || proj > 3) return "{}";
+	if (sx == 0.0f) sx = 1.0f;   // zero scale = division blowup
+	if (sy == 0.0f) sy = 1.0f;
+	if (sz == 0.0f) sz = 1.0f;
+	// Update the mapping parameters on every material of the surface (base +
+	// ::mirUV clones) so re-projection, persistence and re-enumeration agree.
+	std::set<Material*> mats;
+	for (Material *M = MatLib; M; M = M->Next)
+		if (M->RelScene == CurScene && M->Name && Editor_BaseSurfName(M->Name) == name)
+			mats.insert(M);
+	if (mats.empty()) return "{}";
+	const Vector size = { sx, sy, sz };
+	for (Material *M : mats) {
+		M->ColorTexture = strdup(kProjName[proj]);   // init-time-leak convention
+		M->TextureSize = size;
+		M->TextureFlags = (unsigned short)((M->TextureFlags & ~7u) | (axis & 7));
+	}
+	// Re-project every face using those materials. Face-level UVs only —
+	// vertices are shared across surfaces, and the render path reads F->U1..
+	long faces = 0;
+	std::set<TriMesh*> touched;
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		for (DWord i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.Txtr || !mats.count(F.Txtr)) continue;
+			if (!F.A || !F.B || !F.C) continue;
+			Vector e1, e2, n;
+			Vector_Sub(&F.B->Pos, &F.A->Pos, &e1);
+			Vector_Sub(&F.C->Pos, &F.A->Pos, &e2);
+			Cross_Product(&e1, &e2, &n);
+			n.x = std::fabs(n.x); n.y = std::fabs(n.y); n.z = std::fabs(n.z);
+			Material *M = F.Txtr;
+			uvProject(proj, F.A->Pos, M->TextureCenter, size, axis, n, F.U1, F.V1);
+			uvProject(proj, F.B->Pos, M->TextureCenter, size, axis, n, F.U2, F.V2);
+			uvProject(proj, F.C->Pos, M->TextureCenter, size, axis, n, F.U3, F.V3);
+			touched.insert(T);
+			++faces;
+		}
+	}
+	// New UVs = new tangent basis (normal/parallax relief direction).
+	for (TriMesh *T : touched) Compute_Vertex_Tangents(T);
+	Editor_MarkDirty();
+	char buf[160];
+	std::snprintf(buf, sizeof buf,
+	              "{\"faces\":%ld,\"meshes\":%zu,\"proj\":\"%s\",\"size\":[%g,%g,%g],\"axis\":%d}",
+	              faces, touched.size(), kProjName[proj], sx, sy, sz, axis);
+	std::fprintf(stderr, "[EDITOR] uvmap '%s': %s\n", name, buf);
+	return buf;
+}
+
 bool Editor_SetLightProp(int index, const char *key, float value)
 {
 	Omni *O = lightByIndex(index);
@@ -428,6 +578,11 @@ bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 std::string js_editorSplitInstances(std::string name)
 {
 	return rev::Editor_SplitInstances(name.c_str());
+}
+std::string js_editorSetUVMapping(std::string name, int proj,
+                                  float sx, float sy, float sz, int axis)
+{
+	return rev::Editor_SetUVMapping(name.c_str(), proj, sx, sy, sz, axis);
 }
 // bytes is a JS Uint8Array of the uploaded image file.
 bool js_editorImportTexture(std::string surface, std::string role,
@@ -624,6 +779,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetLights",      &js_editorGetLights);
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
 	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
+	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);

@@ -388,6 +388,25 @@ static void RunLightTestHook() {
     }
 }
 
+// UV_TEST=surface:proj:sx,sy,sz:axis — exercise the runtime UV re-projection
+// (rev::Editor_SetUVMapping) natively. Fires once, before the tick.
+static void RunUVTestHook() {
+    const char *spec = std::getenv("UV_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    char surf[128];
+    int proj = 0, axis = 2;
+    float sx = 1, sy = 1, sz = 1;
+    if (std::sscanf(spec, "%127[^:]:%d:%f,%f,%f:%d", surf, &proj, &sx, &sy, &sz, &axis) < 5) {
+        std::fprintf(stderr, "[UVTEST] want surface:proj:sx,sy,sz:axis\n");
+        return;
+    }
+    const std::string r = rev::Editor_SetUVMapping(surf, proj, sx, sy, sz, axis);
+    std::fprintf(stderr, "[UVTEST] %s -> %s\n", surf, r.c_str());
+}
+
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -478,6 +497,7 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // which frames the big rooms wall) already shows the imported map.
         RunImportTestHook();
         RunLightTestHook();
+        RunUVTestHook();
 
         bool more = driver->tick();
         (void)more;

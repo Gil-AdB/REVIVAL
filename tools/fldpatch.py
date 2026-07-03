@@ -129,16 +129,23 @@ class FldFile:
         self._skip(2)                      # Flags u16
         self._skip(4 * 5)                  # Lum, Dif, Spec, Refl, Transp
         self._skip(2 + 2)                  # Glossiness, ReflectionMode
-        self.mats.append({"obj": obj_name, "name": name, "off": off})
         self._cstr()                       # ReflectionImage
         self._skip(4 * 4)                  # SeamAngle, RefrIndex, EdgeTransp, MaxSmooth
-        for _ in range(7):                 # Color/Diffuse/Specular/Reflection/
+        ctex_start = self.pos              # ColorTexture (projection string)
+        self._cstr()
+        ctex_end = self.pos                # includes the NUL
+        for _ in range(6):                 # Diffuse/Specular/Reflection/
             self._cstr()                   #   Transparency/Bump/TextureImage
+        tflg_off = self.pos
         self._skip(2)                      # TextureFlags
+        tsiz_off = self.pos
         self._skip(12 * 4)                 # TextureSize/Center/FallOff/Velocity
         self._cstr()                       # TextureAlpha
         self._skip(2 * 3)                  # NoiseFrequencies, WrapX, WrapY
         self._skip(4 * 4)                  # AAStrength, Opacity, TFP0, TFP1
+        self.mats.append({"obj": obj_name, "name": name, "off": off,
+                          "ctex": (ctex_start, ctex_end),
+                          "tflg": tflg_off, "tsiz": tsiz_off})
 
     def _walk_object(self):
         name = self._cstr() if self.has_obj_names else ""
@@ -267,6 +274,38 @@ class FldFile:
                 elif p == "glossiness":
                     struct.pack_into("<H", self.data, off + 25,
                                      max(0, min(65535, int(round(float(v))))))
+            count += 1
+        return count
+
+    UV_PROJ_NAMES = ["Planar Image Map", "Cylindrical Image Map",
+                     "Spherical Image Map", "Cubic Image Map"]
+
+    def patch_material_uv(self, name, proj, sx, sy, sz, axis):
+        """Rewrite a surface's UV mapping: ColorTexture projection string
+        (length may change → splice + re-walk), TextureFlags axis bits, and
+        TextureSize. Patches every record with the surface name; returns the
+        count."""
+        want = self.UV_PROJ_NAMES[int(proj)].encode("latin-1") + b"\x00"
+        count = 0
+        for nth in range(len(self.mats)):   # upper bound; re-walk shifts offsets
+            recs = [m for m in self.mats if m["name"] == name]
+            if nth >= len(recs):
+                break
+            m = recs[nth]
+            struct.pack_into("<H", self.data, m["tflg"],
+                             (struct.unpack_from("<H", self.data, m["tflg"])[0] & ~0x7)
+                             | (int(axis) & 0x7))
+            struct.pack_into("<3f", self.data, m["tsiz"],
+                             float(sx), float(sy), float(sz))
+            s, e = m["ctex"]
+            if self.data[s:e] != want:
+                self.data[s:e] = want
+                # splice moved everything after `s` — rebuild the index
+                self.pos = 0
+                self.mats, self.point_lights, self.objects = [], [], []
+                self._walk()
+                if self.pos != len(self.data):
+                    raise ValueError("post-CTEX-splice walk failed — refusing to continue")
             count += 1
         return count
 

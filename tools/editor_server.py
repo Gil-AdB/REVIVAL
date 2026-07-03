@@ -112,6 +112,38 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
     return saved
 ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao"}
 
+# UV mapping pseudo-props: routed to lwopatch.set_uv_mapping (greets) /
+# fldpatch.patch_material_uv (FLD scenes). The editor sends the FULL set
+# whenever any of them changes.
+UV_KEYS = {"uvProj", "uvScaleX", "uvScaleY", "uvScaleZ", "uvAxis"}
+
+
+def pop_uv_props(surfaces, warnings):
+    """Extract complete UV parameter sets out of the surface payload.
+    Returns {name: (proj, sx, sy, sz, axis)}; partial sets warn + drop."""
+    out = {}
+    for name in list(surfaces):
+        props = surfaces[name]
+        if not isinstance(props, dict):
+            continue
+        uv = {k: props.pop(k) for k in list(props) if k in UV_KEYS}
+        if not props:
+            del surfaces[name]
+        if not uv:
+            continue
+        if set(uv) != UV_KEYS:
+            warnings.append(f"'{name}': partial UV set {sorted(uv)} — skipped "
+                            "(editor sends all five together)")
+            continue
+        proj = int(uv["uvProj"])
+        if proj < 0 or proj > 3:
+            warnings.append(f"'{name}': uvProj {proj} out of range — skipped")
+            continue
+        out[re.sub(r"#\d+$", "", name)] = (proj, float(uv["uvScaleX"]),
+                                           float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
+                                           int(uv["uvAxis"]))
+    return out
+
 # Live-served paths: the wasm preload (DEMO.data) copy of these is link-time
 # stale, so the editor fetches them fresh from Runtime/ at boot. Prefix match.
 LIVE_PREFIXES = ("/SCENES/", "/TEXTURES/PBR/")
@@ -330,7 +362,7 @@ def regen_fld(patched):
                  "fld_bytes": os.path.getsize(FLD_INSTALL)}
 
 
-def do_save_fld(scene, surfaces, lights, saved_maps, warnings):
+def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
     """Write-back for scenes without pinned sources: patch the shipping FLD
     in place (tools/fldpatch.py — walk-validated), with a timestamped backup.
     Also drop any sidecar prop lines this save supersedes: sidecar overrides
@@ -356,6 +388,13 @@ def do_save_fld(scene, surfaces, lights, saved_maps, warnings):
             warnings.append(f"'{name}': no material record in {os.path.basename(fld_path)} — skipped")
         else:
             patched_surfaces.append({"surface": base, "records": n, "props": sorted(props)})
+
+    for name, uv in (uv_by_name or {}).items():
+        n = fld.patch_material_uv(name, *uv)
+        if n == 0:
+            warnings.append(f"'{name}': UV target not in {os.path.basename(fld_path)} — skipped")
+        else:
+            patched_surfaces.append({"surface": name, "records": n, "props": ["uv-mapping"]})
 
     for idx_s, props in sorted(lights.items(), key=lambda kv: int(kv[0])):
         bad = set(props) - LIGHT_KEYS
@@ -426,12 +465,13 @@ def do_save(scene, payload):
     saved_surf_side = split_surface_sidecar_keys(scene, surfaces, warnings)
     if saved_surf_side:
         warnings.append(f"{len(saved_surf_side)} surface key(s) → sidecar (engine-only, no LWO/FLD field)")
+    uv_by_name = pop_uv_props(surfaces, warnings)
 
     if not SCENES[scene]["authoring"]:
-        return do_save_fld(scene, surfaces, lights, saved_maps, warnings)
+        return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
 
     patched_lights = patch_lws_lights(lights, warnings)
-    if not surfaces:
+    if not surfaces and not uv_by_name:
         if patched_lights:
             # Lights changed -> the FLD must be regenerated (it embeds them).
             code, resp = regen_fld([])
@@ -478,7 +518,22 @@ def do_save(scene, payload):
                                     f"({slot[p]} vs {v}) — using {v}")
                 slot[p] = v
 
-    if not per_file:
+    # UV mapping edits: resolve names the same way, patch CTEX/TSIZ/TFLG.
+    uv_targets = {}   # (fname, surf) -> uv tuple
+    for name, uv in uv_by_name.items():
+        fname, surf = map_surface_name(name)
+        targets = ([(fname, surf)] if fname is not None and fname in lwos
+                                      and lwos[fname].surface(surf) is not None
+                   else [(f, surf) for f, lwo in lwos.items() if lwo.surface(surf)])
+        if not targets:
+            warnings.append(f"'{name}': UV target not found in any .lwo — skipped")
+            continue
+        for key in targets:
+            uv_targets[key] = uv
+    for (fname, surf), uv in sorted(uv_targets.items()):
+        lwos[fname].surface(surf).set_uv_mapping(*uv)
+
+    if not per_file and not uv_targets:
         if saved_maps or patched_lights:   # surface edits all missed, but these landed
             code, resp = (regen_fld([]) if patched_lights
                           else (200, {"ok": True, "patched": []}))
@@ -495,7 +550,7 @@ def do_save(scene, payload):
     for (fname, surf), props in sorted(per_file.items()):
         for p, v in props.items():
             lwos[fname].surface(surf).set_prop(p, v)
-    for fname in sorted({f for (f, _) in per_file}):
+    for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}):
         path = os.path.join(AUTHORING, fname)
         new = lwos[fname].serialize()
         if new == open(path, "rb").read():
@@ -504,7 +559,8 @@ def do_save(scene, payload):
         with open(path, "wb") as f:
             f.write(new)
         patched.append({"file": fname,
-                        "surfaces": sorted({s for (f, s) in per_file if f == fname}),
+                        "surfaces": sorted({s for (f, s) in per_file if f == fname}
+                                           | {s for (f, s) in uv_targets if f == fname}),
                         "backup": os.path.relpath(bak, REPO)})
 
     # Regenerate + install the FLD.

@@ -61,6 +61,16 @@ bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 // to split — only one instance found).
 std::string Editor_SplitInstances(const char* name);
 
+// Re-project a surface's texture coordinates live: proj 0=planar 1=cylindrical
+// 2=spherical 3=cubic (LightWave's projections — UVs are baked at FLD load
+// from exactly these parameters); size = world units per texture tile per
+// axis; axis = LW axis flag (1=X 2=Y 0/4=Z; planar/cylindrical only, cubic
+// picks per face). Rewrites face UVs + retangents affected meshes + updates
+// the material's mapping fields (so LWO/FLD write-back can persist them).
+// Returns a JSON summary ({} = surface not found).
+std::string Editor_SetUVMapping(const char *name, int proj,
+                                float sx, float sy, float sz, int axis);
+
 // Set one property on the i-th scene-authored light (Omni_SceneAuthored, file
 // order — the same index the LWS/FLD write-back patchers use). Keys: r/g/b
 // (0-255; also re-points the omni's flare sprite at a texture baked for the

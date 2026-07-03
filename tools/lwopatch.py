@@ -82,6 +82,26 @@ class Surf:
                 break
         self.subchunks.insert(at, (cid, body))
 
+    # UV mapping subchunks: CTEX = projection string ("Planar Image Map"...),
+    # TFLG = u2 axis/flags bitfield (1=X 2=Y 4=Z + world/pixel-blend bits),
+    # TSIZ = 3×f4 world-units-per-tile. The engine bakes UVs from exactly
+    # these at FLD load (Get_UV), so patching them + reconverting reproduces
+    # the editor's live re-projection.
+    UV_PROJ_NAMES = ["Planar Image Map", "Cylindrical Image Map",
+                     "Spherical Image Map", "Cubic Image Map"]
+
+    def set_uv_mapping(self, proj, sx, sy, sz, axis):
+        name = self.UV_PROJ_NAMES[int(proj)]
+        body = name.encode("latin-1") + b"\x00"
+        if len(body) % 2:
+            body += b"\x00"
+        self.set_chunk("CTEX", body)
+        self.set_chunk("TSIZ", struct.pack(">3f", float(sx), float(sy), float(sz)))
+        i = self._find("TFLG")
+        flags = struct.unpack(">H", self.subchunks[i][1])[0] if i >= 0 else 0
+        flags = (flags & ~0x7) | (int(axis) & 0x7)
+        self.set_chunk("TFLG", struct.pack(">H", flags))
+
     def set_prop(self, prop, value):
         if prop in VALUE_PROPS:
             ichunk, fchunk, div = VALUE_PROPS[prop]

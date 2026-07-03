@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b31</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b32</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -650,7 +650,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b31); orbit/zoom embind =',
+        console.log('[editor] panel init (build b32); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -711,6 +711,9 @@
       // ao_map_strength / parallax_strength) — the server persists them to the
       // scene sidecar, the rest to LWO/FLD.
       var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip'];
+      // UV mapping is a grouped edit: if ANY of these differs from pristine,
+      // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
+      var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
       // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
       // AddLight blocks, which is what the server patches on Save).
       var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
@@ -729,9 +732,13 @@
         });
         return out;
       }
+      function uvDirty(s, p){
+        return EDITOR_UV_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; });
+      }
       function surfaceDirty(s){
         var p = editorPristine[s.name]; if (!p) return false;
-        return EDITOR_SAVE_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; });
+        return EDITOR_SAVE_PROPS.some(function(k){ return Math.abs((+s[k]) - (+p[k])) > 1e-6; })
+            || uvDirty(s, p);
       }
       function collectDirty(){
         var out = {};
@@ -740,6 +747,8 @@
           EDITOR_SAVE_PROPS.forEach(function(k){
             if (Math.abs((+s[k]) - (+p[k])) > 1e-6) (out[s.name] = out[s.name] || {})[k] = +s[k];
           });
+          if (uvDirty(s, p))
+            EDITOR_UV_PROPS.forEach(function(k){ (out[s.name] = out[s.name] || {})[k] = +s[k]; });
         });
         return out;
       }
@@ -1350,6 +1359,68 @@
           nfr.appendChild(viz);
           el.appendChild(nfr);
         }
+        // UV mapping: LightWave projection + world-units-per-tile scale + axis.
+        // UVs are baked at load; "apply" re-projects live (editorSetUVMapping).
+        // uvProj -1 = surface with no image-map projection recorded — still
+        // re-projectable (the engine copies always exist), shown as planar.
+        (function(){
+          var hdr = document.createElement('div');
+          hdr.style.cssText = 'color:#fff;margin-top:8px;border-top:1px solid #333;padding-top:6px;';
+          hdr.textContent = 'Texture mapping';
+          el.appendChild(hdr);
+          var row1 = document.createElement('div'); row1.className = 'prop-row';
+          var l1 = document.createElement('label'); l1.textContent = 'projection'; row1.appendChild(l1);
+          var psel = document.createElement('select');
+          ['planar','cylindrical','spherical','cubic (box)'].forEach(function(nm, i){
+            var o = document.createElement('option'); o.value = i; o.textContent = nm;
+            if (i === Math.max(0, +s.uvProj)) o.selected = true;
+            psel.appendChild(o);
+          });
+          row1.appendChild(psel);
+          var asel = document.createElement('select');
+          asel.title = 'projection axis (planar/cylindrical; cubic picks per face)';
+          [['1','X'],['2','Y'],['4','Z']].forEach(function(a){
+            var o = document.createElement('option'); o.value = a[0]; o.textContent = a[1];
+            if ((+s.uvAxis & 7) === +a[0]) o.selected = true;
+            asel.appendChild(o);
+          });
+          if (!(+s.uvAxis & 7)) asel.selectedIndex = 2;   // LW default = Z
+          row1.appendChild(asel);
+          el.appendChild(row1);
+          var row2 = document.createElement('div'); row2.className = 'prop-row';
+          var l2 = document.createElement('label'); l2.textContent = 'tile size';
+          row2.title = 'world units per texture tile, per axis (LightWave TextureSize) — smaller = denser tiling';
+          row2.appendChild(l2);
+          var sc = [];
+          ['uvScaleX','uvScaleY','uvScaleZ'].forEach(function(k){
+            var inp = document.createElement('input'); inp.type = 'number'; inp.step = 0.1;
+            inp.value = +(+s[k] || 1).toFixed(3);
+            inp.style.cssText = 'flex:1;min-width:0;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+            sc.push(inp); row2.appendChild(inp);
+          });
+          el.appendChild(row2);
+          var row3 = document.createElement('div'); row3.className = 'prop-row';
+          var apply = document.createElement('button');
+          apply.textContent = 'apply mapping';
+          apply.style.cssText = 'flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:3px;cursor:pointer;font-size:11px;';
+          apply.onclick = function(){
+            var proj = parseInt(psel.value, 10), axis = parseInt(asel.value, 10);
+            var sx = parseFloat(sc[0].value) || 1, sy = parseFloat(sc[1].value) || 1, sz = parseFloat(sc[2].value) || 1;
+            var names = editSurfNames(s.name), nOK = 0;
+            names.forEach(function(n){
+              try {
+                var r = JSON.parse(Module.editorSetUVMapping(n, proj, sx, sy, sz, axis));
+                if (r.faces) nOK++;
+                var t = editorSurfaces.find(function(x){ return x.name === n; });
+                if (t) { t.uvProj = proj; t.uvScaleX = sx; t.uvScaleY = sy; t.uvScaleZ = sz; t.uvAxis = axis; }
+              } catch(e){ console.error('editorSetUVMapping', e); }
+            });
+            editorStatus('uv mapping applied to ' + nOK + '/' + names.length + ' surface(s)');
+            updateSaveButton();
+          };
+          row3.appendChild(apply);
+          el.appendChild(row3);
+        })();
         // glossiness = specular exponent; keep to the kernel's fast specialized set.
         var gr = document.createElement('div'); gr.className = 'prop-row';
         var gl = document.createElement('label'); gl.textContent = 'glossiness'; gr.appendChild(gl);
