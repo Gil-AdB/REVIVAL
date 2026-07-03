@@ -16,6 +16,7 @@ import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LWSREAD = os.path.join(REPO, "tools", "lwsread", "build", "lwsread")
+LWSREAD_LEGACY = os.path.join(REPO, "tools", "lwsread", "build", "lwsread_legacy")
 ORIGINAL = os.path.join(REPO, "Original")
 
 
@@ -55,8 +56,11 @@ def main():
     ap.add_argument("fld")
     ap.add_argument("--pick", action="append", default=[],
                     help="objname.lwo=/explicit/path — resolve an ambiguous object")
+    ap.add_argument("--legacy-vlum", action="store_true",
+                    help="use lwsread_legacy (VLUM*100 behavior) for 1998 shipping FLDs")
     args = ap.parse_args()
     picks = dict(p.split("=", 1) for p in args.pick)
+    lwsread_bin = LWSREAD_LEGACY if args.legacy_vlum else LWSREAD
 
     objs = lws_objects(args.lws)
     print(f"[lws] {args.lws}: {len(objs)} object refs")
@@ -92,7 +96,7 @@ def main():
     lws_local = os.path.join(tmp, os.path.basename(args.lws))
     shutil.copy2(args.lws, lws_local)
     out = os.path.join(tmp, "out.fld")
-    r = subprocess.run([LWSREAD, os.path.basename(lws_local), "out.fld"],
+    r = subprocess.run([lwsread_bin, os.path.basename(lws_local), "out.fld"],
                        cwd=tmp, capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
         print(f"[lwsread] FAILED rc={r.returncode}\n{(r.stderr or r.stdout)[-1500:]}")

@@ -29,8 +29,8 @@ converter — so a correct source set reproduces them byte-for-byte.
 |-------|----------|-----------|--------|
 | **greets** | `GREETS.FLD` (232 KB, low-poly) | `greets/JENINPYR-new-2.LWS` + pyramid + mech | ✅ identified & validated (converter reproduces `out1.fld` byte-for-byte; low-poly screen-orientation fix applied — see `greets/README.md`). Pending live visual confirmation. |
 | city | `CITY.FLD` (977 KB) | candidates: `Original/Scenes/CITY/CITY.LWS`, `CITY_J~1.LWS` | ⏳ exact source not yet pinned (the hard one). |
-| chase | `CHASE.FLD` (747 KB) | candidate: `…/CHASING/CHASE.LWS` | ⏳ not yet validated. |
-| fountain | `FOUNTAIN.FLD` (512 KB) | candidates: `…/S1FNT/FOUNTAIN.LWS`, `…/FOUNTAIN/FOUNT.LWS` | ⏳ not yet validated. |
+| **chase** | `CHASE.FLD` (747 KB, 80 objects, 7 lights) | `chase/CHASE.LWS` (dos-rev, 18 camera keys) + dos-rev mountain/ship variants | ✅ byte-identical with `lwsread_legacy --legacy-vlum` (see `chase/README.md`). |
+| **fountain** | `FOUNTAIN.FLD` (512 KB, 24 objects, 14 lights) | `fountain/FOUNTAIN - final.LWS` (S1FNT, 22 obj refs) + dos-rev CITY SHIP1 | ✅ byte-identical with `lwsread_legacy --legacy-vlum` (see `fountain/README.md`). |
 | crash | `CRASH.FLD` (2 KB) | — | ⏳ tiny; likely largely code-built, no obvious `.lws`. |
 
 To pin a pending scene we use the same method that worked for greets: convert a

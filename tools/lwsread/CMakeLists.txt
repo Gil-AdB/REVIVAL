@@ -23,3 +23,12 @@ add_executable(lwsread
     LWOREAD.CPP
     FLDSAVE.CPP
 )
+
+# Legacy build: reproduces 1998 VLUM*100 behavior for pin_scene.py byte-identical
+# comparisons against CHASE.FLD / FOUNTAIN.FLD (built before the b441da6 fix).
+add_executable(lwsread_legacy
+    LWSREAD.CPP
+    LWOREAD.CPP
+    FLDSAVE.CPP
+)
+target_compile_definitions(lwsread_legacy PRIVATE LEGACY_VLUM=1)
