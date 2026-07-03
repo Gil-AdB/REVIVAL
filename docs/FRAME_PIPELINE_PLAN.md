@@ -155,3 +155,30 @@ re-lights every covered pixel at full rate. Levers, by size:
 Costs scale ~linearly with mirror screen coverage; at typical greets framing
 (mirror ~15-30% of screen) the total is the ~6 ms measured in the t=1130
 cluster investigation.
+
+## 2026-07-03 — the t=1130-1162 slow cluster MEASURED (window bench)
+
+`--bench=scene@scene=greets,ts=1130,tend=1162,iters=120` full user config
+(quarter + ssao_temporal), mirror on/off interleaved x2:
+
+| | min | p50 |
+|---|--:|--:|
+| mirror on | 41.0-41.4 | 50.7 |
+| mirror off | 37.6-38.7 | 43.5 |
+| mirror total | ~3.3 | ~7 |
+
+In-window TailProf (mirror on): lighting w1+w2 = 14.7 wall (vs ~11 at
+ts=491); **cones = 6.55 wall / 72.8 ms POOL BUSY** (3x the ts=491 cone
+load — the teleport-event beams + bounce spots + clone beams stack);
+xpar-peel total only 1.53 (glass composite 0.61, clones 0.03);
+StampMasks+grid 0.8.
+
+Verdicts for the cluster:
+- The glass cheap-path (option b) is worth only ~0.6 ms here — it's a
+  point-blank-pose optimization, not a cluster fix.
+- The two levers that pay at BOTH ts=491 and the cluster:
+  (1) cones — biggest single block, 72.8 ms of pool work in-window;
+  (2) clone lights in the kernel tile lists (option c) — footprint cull
+  already exists (computeMirrorPresenceGrid) but inside footprint tiles
+  every pixel still iterates the clone lights.
+User approved: "let's try to attack the cones/clones".
