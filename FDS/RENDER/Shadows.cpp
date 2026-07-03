@@ -357,6 +357,41 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
+	// Phase-A jobs collected per light, then work-stealing-dispatched as W
+	// chunk tasks (dispatchIndexed) instead of one enqueue per light — the
+	// per-enqueue mutex+notify cost was ~12 us x ~58 lights, serial on the
+	// tick thread. The body below is the old per-light lambda, verbatim;
+	// it still releases shadowDone once per job, so the drain is unchanged.
+	struct PhaseAJob {
+		Scene *Sc; ShadowMap *sm; fds::CameraContext *ctx;
+		fds::FaceListContext *faces; fds::VertexScratch *scratch;
+	};
+	static thread_local std::vector<PhaseAJob> sPhaseAJobs;
+	sPhaseAJobs.clear();
+	const bool dynBakeForLambda = writeDynamicBuf;
+	auto runPhaseAXform = [dynBakeForLambda](const PhaseAJob &J) {
+		Scene *const ScPtr = J.Sc;
+		ShadowMap *const smPtr = J.sm;
+		fds::CameraContext *const ctxPtr = J.ctx;
+		fds::FaceListContext *const facesPtr = J.faces;
+		fds::VertexScratch *const scratchPtr = J.scratch;
+				g_inShadowPass = true;
+				g_inDynamicShadowBake = dynBakeForLambda;
+				g_currentShadowOmni = smPtr->omni;
+				// Set the active shadow map too — Transform_Objects's
+				// per-cube-face bsphere cull needs sm->cubeFace to pick
+				// the face axis. (raster lambda already sets this; mirror
+				// it here so the xform task has the same context.)
+				g_currentShadowMap = smPtr;
+				Transform_Objects(ScPtr, *ctxPtr, *facesPtr,
+				                  smPtr->xres, smPtr->yres, scratchPtr);
+				g_currentShadowMap = nullptr;
+				g_currentShadowOmni = nullptr;
+				g_inDynamicShadowBake = false;
+				g_inShadowPass = false;
+				// One permit per completed task (see renderns::shadowDone).
+				renderns::shadowDone.release();
+	};
 	int xformsEnqueued = 0;
 	const auto tXformStart = clk::now();
 	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
@@ -505,26 +540,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		fds::FaceListContext *const  facesPtr   = &perLightFaces[lightIdx];
 		fds::VertexScratch *const    scratchPtr = &perLightScratch[lightIdx];
 		++xformsEnqueued;
-		const bool dynBakeForLambda = writeDynamicBuf;
-		ThreadPool::instance().enqueue(
-			[ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr, dynBakeForLambda]() {
-				g_inShadowPass = true;
-				g_inDynamicShadowBake = dynBakeForLambda;
-				g_currentShadowOmni = smPtr->omni;
-				// Set the active shadow map too — Transform_Objects's
-				// per-cube-face bsphere cull needs sm->cubeFace to pick
-				// the face axis. (raster lambda already sets this; mirror
-				// it here so the xform task has the same context.)
-				g_currentShadowMap = smPtr;
-				Transform_Objects(ScPtr, *ctxPtr, *facesPtr,
-				                  smPtr->xres, smPtr->yres, scratchPtr);
-				g_currentShadowMap = nullptr;
-				g_currentShadowOmni = nullptr;
-				g_inDynamicShadowBake = false;
-				g_inShadowPass = false;
-				// One permit per completed task (see renderns::shadowDone).
-				renderns::shadowDone.release();
-			});
+		sPhaseAJobs.push_back({ScPtr, smPtr, ctxPtr, facesPtr, scratchPtr});
+	}
+	// NOTE: sPhaseAJobs is thread_local — a [&] lambda does NOT capture
+	// thread_locals, it re-resolves them on the EXECUTING worker thread
+	// (empty vector there). Snapshot the caller's data() by value.
+	{
+		const PhaseAJob *const aJobs = sPhaseAJobs.data();
+		dispatchIndexed((int)sPhaseAJobs.size(), nullptr,
+		                [aJobs, &runPhaseAXform](int jj) { runPhaseAXform(aJobs[jj]); });
 	}
 	for (int _i = 0; _i < xformsEnqueued; ++_i) {
 		renderns::shadowDone.acquire();
@@ -575,62 +599,25 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 		std::unique_lock<std::mutex> lock(renderns::tileCounterMutex);
 		renderns::tileCounter = 0;
 	}
-	int tilesEnqueued = 0;
-	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
-	// the raster drain (see below). Filled by the same Phase-B filter.
-	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
-	std::vector<size_t> swzMaps;
-	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
-		ShadowMap& sm = g_shadowMaps[lightIdx];
-		Omni *const O = sm.omni;
-		if (!O) continue;
-		if (!(O->Flags & Omni_Active)) continue;
-		// Same mode-driven omni filter as Phase A.
-		const bool isStaticB = (O->Flags & Omni_StaticShadow) != 0;
-		if (isStaticB != wantStaticOmnis) continue;
-		// Same filter as Phase A: spots, and cube-face entries.
-		if (O->Type == Light_SpotLight) {
-			// ok
-		} else if (O->Type == Light_Omni && sm.cubeFace >= 0) {
-			// ok — cube face entry
-		} else {
-			continue;
-		}
-		// Same cube-face cull as Phase A. Must match — otherwise we
-		// enqueue tile workers for a face we skipped in phase A, and
-		// they'd read uninitialized perLightFaces / perLightCtx state.
-		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
-		    && sm.cubeFace >= 0
-		    && !hasDynMeshVisible[lightIdx]) continue;
-
-		// Tile size must be a multiple of 8 (see numTilesX comment for
-		// why). At shadow res = 4*N*8 (e.g. 128, 256, 512, 1024) this is
-		// naturally clean. For arbitrary res, round down to mult-of-8 and
-		// let the last tile absorb the remainder — matching the main
-		// renderFrame tiler (see RENDER.CPP). The `(ty == numTilesY - 1)`
-		// branch is what actually makes the remainder strip render;
-		// without it, the last column / row of `sm.xres/yres` would stay
-		// at the pre-clear value.
-		const int numTX = gridFor(sm.xres);
-		const int numTY = gridFor(sm.yres);
-		const int rawTX = (sm.xres + numTX - 1) / numTX;
-		const int rawTY = (sm.yres + numTY - 1) / numTY;
-		const int tileSizeX = rawTX & ~7;
-		const int tileSizeY = rawTY & ~7;
-		if (sSwz) swzMaps.push_back(lightIdx);
-		ShadowMap *const                   smPtr     = &sm;
-		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
-		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
-		for (int ty = 0; ty < numTY; ++ty) {
-			const float y1f = float(ty * tileSizeY);
-			const float y2f = float((ty == numTY - 1) ? sm.yres : ((ty + 1) * tileSizeY));
-			for (int tx = 0; tx < numTX; ++tx) {
-				const float x1f = float(tx * tileSizeX);
-				const float x2f = float((tx == numTX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
-				++tilesEnqueued;
-				const bool dynBakeForLambda = writeDynamicBuf;
-				ThreadPool::instance().enqueue(
-					[smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f, dynBakeForLambda]() {
+	// Phase-B jobs collected per (light x tile), then work-stealing-
+	// dispatched (dispatchIndexed) instead of one enqueue per tile —
+	// ~60-160 enqueues/frame at ~12 us each, serial on the tick thread.
+	// The body is the old per-tile lambda, verbatim; it still releases
+	// shadowDone once per job, so the drain below is unchanged.
+	struct PhaseBJob {
+		ShadowMap *sm; const fds::CameraContext *cam;
+		const fds::FaceListContext *faces;
+		float x1f, y1f, x2f, y2f;
+	};
+	static thread_local std::vector<PhaseBJob> sPhaseBJobs;
+	sPhaseBJobs.clear();
+	const bool dynBakeB = writeDynamicBuf;
+	auto runPhaseBTile = [dynBakeB](const PhaseBJob &J) {
+		ShadowMap *const smPtr = J.sm;
+		const fds::CameraContext *const camPtr = J.cam;
+		const fds::FaceListContext *const facesPtr = J.faces;
+		const float x1f = J.x1f, y1f = J.y1f, x2f = J.x2f, y2f = J.y2f;
+		const bool dynBakeForLambda = dynBakeB;
 						const long long _tp = TailProf::nowNs();
 						g_currentShadowMap = smPtr;
 						g_inDynamicShadowBake = dynBakeForLambda;
@@ -759,9 +746,69 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 						TailProf::addBusy(_tp);   // before release → race-free
 						// One permit per completed task (see renderns::shadowDone).
 						renderns::shadowDone.release();
-					});
+	};
+	int tilesEnqueued = 0;
+	// [experiment: --shadow-swizzle] maps this bake writes → re-tiled after
+	// the raster drain (see below). Filled by the same Phase-B filter.
+	const bool sSwz = fds::FeatureFlags::shadow_swizzle();
+	std::vector<size_t> swzMaps;
+	for (size_t lightIdx = 0; lightIdx < g_shadowMaps.size(); ++lightIdx) {
+		ShadowMap& sm = g_shadowMaps[lightIdx];
+		Omni *const O = sm.omni;
+		if (!O) continue;
+		if (!(O->Flags & Omni_Active)) continue;
+		// Same mode-driven omni filter as Phase A.
+		const bool isStaticB = (O->Flags & Omni_StaticShadow) != 0;
+		if (isStaticB != wantStaticOmnis) continue;
+		// Same filter as Phase A: spots, and cube-face entries.
+		if (O->Type == Light_SpotLight) {
+			// ok
+		} else if (O->Type == Light_Omni && sm.cubeFace >= 0) {
+			// ok — cube face entry
+		} else {
+			continue;
+		}
+		// Same cube-face cull as Phase A. Must match — otherwise we
+		// enqueue tile workers for a face we skipped in phase A, and
+		// they'd read uninitialized perLightFaces / perLightCtx state.
+		if (mode == ShadowBakeMode::DynamicMeshesPerFrame
+		    && sm.cubeFace >= 0
+		    && !hasDynMeshVisible[lightIdx]) continue;
+
+		// Tile size must be a multiple of 8 (see numTilesX comment for
+		// why). At shadow res = 4*N*8 (e.g. 128, 256, 512, 1024) this is
+		// naturally clean. For arbitrary res, round down to mult-of-8 and
+		// let the last tile absorb the remainder — matching the main
+		// renderFrame tiler (see RENDER.CPP). The `(ty == numTilesY - 1)`
+		// branch is what actually makes the remainder strip render;
+		// without it, the last column / row of `sm.xres/yres` would stay
+		// at the pre-clear value.
+		const int numTX = gridFor(sm.xres);
+		const int numTY = gridFor(sm.yres);
+		const int rawTX = (sm.xres + numTX - 1) / numTX;
+		const int rawTY = (sm.yres + numTY - 1) / numTY;
+		const int tileSizeX = rawTX & ~7;
+		const int tileSizeY = rawTY & ~7;
+		if (sSwz) swzMaps.push_back(lightIdx);
+		ShadowMap *const                   smPtr     = &sm;
+		const fds::CameraContext *const    camPtr    = &perLightCtx[lightIdx];
+		const fds::FaceListContext *const  facesPtr  = &perLightFaces[lightIdx];
+		for (int ty = 0; ty < numTY; ++ty) {
+			const float y1f = float(ty * tileSizeY);
+			const float y2f = float((ty == numTY - 1) ? sm.yres : ((ty + 1) * tileSizeY));
+			for (int tx = 0; tx < numTX; ++tx) {
+				const float x1f = float(tx * tileSizeX);
+				const float x2f = float((tx == numTX - 1) ? sm.xres : ((tx + 1) * tileSizeX));
+				++tilesEnqueued;
+				sPhaseBJobs.push_back({smPtr, camPtr, facesPtr, x1f, y1f, x2f, y2f});
 			}
 		}
+	}
+	// Same thread_local capture trap as Phase A: snapshot data() by value.
+	{
+		const PhaseBJob *const bJobs = sPhaseBJobs.data();
+		dispatchIndexed((int)sPhaseBJobs.size(), nullptr,
+		                [bJobs, &runPhaseBTile](int jj) { runPhaseBTile(bJobs[jj]); });
 	}
 	TailProf::drain(renderns::shadowDone, tilesEnqueued, "shadow-bake");
 	// FDS_SHADOW_TILE_PROBE: per-frame 4x4 tile occupancy tracking on

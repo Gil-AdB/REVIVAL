@@ -222,7 +222,10 @@ static void SceneCorrections()
 	TriMesh *T;
 	for(T=Sc->TriMeshHead, index=0; T; T=T->Next, index++)
 	{
-		if (ObjStationary[index])
+		// Bounds guard (ASan find, 2026-07-03): the scene has far more meshes
+		// than the 9-entry table; the unguarded read walked stack garbage and
+		// randomly flagged meshes stationary depending on stack contents.
+		if (index < NumObjects && ObjStationary[index])
 		{
 			if (!(T->Flags & Tri_Stationary))
 			{

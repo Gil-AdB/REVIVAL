@@ -434,21 +434,19 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// Built once, captured by the tile lambdas (must outlive the tasks — the
 	// tileDone drain below joins them before this returns).
 	const fds::RenderContext fctx = fds::primaryRenderContext();
-	for (auto j = 0; j < numTilesY; ++j) {
-		auto y1 = tileSizeY * j;
-		auto y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
-		for (auto i = 0; i < numTilesX; ++i) {
-			auto x1 = tileSizeX * i;
-			auto x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
-
-			if (deferred) {
-				ThreadPool::instance().enqueue([x1, y1, x2, y2]() { RenderInnerMekalele(x1, y1, x2, y2); });
-			} else {
-				ThreadPool::instance().enqueue([&fctx, x1, y1, x2, y2]() { RenderInner(fctx, x1, y1, x2, y2); });
-			}
-			// RenderInner(x1, y1, x2, y2);
-		}
-	}
+	// Work-stealing chunk dispatch — one enqueue per worker instead of per
+	// tile (the per-enqueue mutex+notify cost was ~12 us serial on the tick
+	// thread; see dispatchIndexed). Tile kernels release tileDone per tile.
+	dispatchIndexed(numTilesX * numTilesY, nullptr,
+	    [&fctx, deferred, tileSizeX, tileSizeY](int t) {
+		const int j = t / numTilesX, i = t - j * numTilesX;
+		const int y1 = tileSizeY * j;
+		const int y2 = (j == numTilesY - 1) ? YRes : (y1 + tileSizeY);
+		const int x1 = tileSizeX * i;
+		const int x2 = (i == numTilesX - 1) ? XRes : (x1 + tileSizeX);
+		if (deferred) RenderInnerMekalele(x1, y1, x2, y2);
+		else          RenderInner(fctx, x1, y1, x2, y2);
+	});
 
 	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer");
 

@@ -880,13 +880,13 @@ void Render_TonemapToVPage() {
     constexpr int numTilesX = 6, numTilesY = 4;
     const int tsx = (W + numTilesX - 1) / numTilesX;
     const int tsy = (H + numTilesY - 1) / numTilesY;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tsy * j, y2 = std::min(y1 + tsy, H);
-        for (int i = 0; i < numTilesX; ++i) {
+    dispatchIndexed(numTilesX * numTilesY, &renderns::tileDone,
+        [&tileBody, tsx, tsy, W, H](int t) {
+            const int j = t / numTilesX, i = t - j * numTilesX;
+            const int y1 = tsy * j, y2 = std::min(y1 + tsy, H);
             const int x1 = tsx * i, x2 = std::min(x1 + tsx, W);
-            ThreadPool::instance().enqueue([=]() { tileBody(x1, y1, x2, y2); renderns::tileDone.release(); });
-        }
-    }
+            tileBody(x1, y1, x2, y2);
+        });
     for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 

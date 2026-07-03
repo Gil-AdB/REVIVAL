@@ -232,11 +232,11 @@ void Render_SSAO() {
 		const bool noSimd = std::getenv("FDS_SSAO_NOSIMD") != nullptr;   // A/B validation escape
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
-		for (int tj = 0; tj < numTilesY; ++tj) {
+		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
-			for (int ti = 0; ti < numTilesX; ++ti) {
-				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
-				ThreadPool::instance().enqueue([=]() {
+			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+			{
 					// Scalar per-cell GTAO (reference + 8-wide remainder tail).
 					auto gtaoCell = [&](int lx, int ly) {
 						const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
@@ -449,20 +449,19 @@ void Render_SSAO() {
 						for (; lx < lx2; ++lx) gtaoCell(lx, ly);
 					}
 					renderns::tileDone.release();
-				});
-			}
-		}
+				}
+		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	} else
 	{
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		const float invN = 1.0f / float(nSamp);
-		for (int tj = 0; tj < numTilesY; ++tj) {
+		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
-			for (int ti = 0; ti < numTilesX; ++ti) {
-				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
-				ThreadPool::instance().enqueue([=]() {
+			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+			{
 					// Per-pixel setup: writes aoZ; returns false for sky. ca/sa is
 					// the per-cell 4×4-tiling kernel rotation (see g_rotCos/Sin).
 					struct Setup { float x,y,z, Tx,Ty,Tz, Bx,By,Bz, nx,ny,nz; };
@@ -604,9 +603,8 @@ void Render_SSAO() {
 						}
 					}
 					renderns::tileDone.release();
-				});
-			}
-		}
+				}
+		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	}
 	const auto tP1 = std::chrono::steady_clock::now();
@@ -626,11 +624,11 @@ void Render_SSAO() {
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
 		const float depthSig = std::max(radius, 1.0f);
 		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);  // divide-free depth falloff
-		for (int tj = 0; tj < numTilesY; ++tj) {
+		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
-			for (int ti = 0; ti < numTilesX; ++ti) {
-				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
-				ThreadPool::instance().enqueue([=]() {
+			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+			{
 					for (int ly = ly1; ly < ly2; ++ly) {
 						const int by0 = std::max(0, ly - 2), by1 = std::min(lowH - 1, ly + 1);  // 4×4 box
 						for (int lx = lx1; lx < lx2; ++lx) {
@@ -655,9 +653,8 @@ void Render_SSAO() {
 						}
 					}
 					renderns::tileDone.release();
-				});
-			}
-		}
+				}
+		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 		aoSrc = aoBlur;
 	}
@@ -703,11 +700,11 @@ void Render_SSAO() {
 		const float *aoIn = aoSrc;
 		const int tsx = (lowW + numTilesX - 1) / numTilesX;
 		const int tsy = (lowH + numTilesY - 1) / numTilesY;
-		for (int tj = 0; tj < numTilesY; ++tj) {
+		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int ly1 = tsy * tj, ly2 = std::min(ly1 + tsy, lowH);
-			for (int ti = 0; ti < numTilesX; ++ti) {
-				const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
-				ThreadPool::instance().enqueue([=]() {
+			const int lx1 = tsx * ti, lx2 = std::min(lx1 + tsx, lowW);
+			{
 					for (int ly = ly1; ly < ly2; ++ly) {
 						for (int lx = lx1; lx < lx2; ++lx) {
 							const size_t lo = size_t(ly) * size_t(lowW) + size_t(lx);
@@ -758,9 +755,8 @@ void Render_SSAO() {
 						}
 					}
 					renderns::tileDone.release();
-				});
-			}
-		}
+				}
+		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 		g_histIdx = wrIdx;
 		g_histValid = true;
@@ -780,11 +776,11 @@ void Render_SSAO() {
 		const float invDown  = 1.0f / float(down);
 		const float depthSig = std::max(radius, 1.0f);
 		const float invDepthK = 1.0f / (4.0f * depthSig * depthSig);  // divide-free depth falloff
-		for (int tj = 0; tj < numTilesY; ++tj) {
+		dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
+			const int tj = _t / numTilesX, ti = _t - tj * numTilesX;
 			const int y1 = tsy * tj, y2 = std::min(y1 + tsy, H);
-			for (int ti = 0; ti < numTilesX; ++ti) {
-				const int x1 = tsx * ti, x2 = std::min(x1 + tsx, W);
-				ThreadPool::instance().enqueue([=]() {
+			const int x1 = tsx * ti, x2 = std::min(x1 + tsx, W);
+			{
 					for (int py = y1; py < y2; ++py) {
 						const size_t row = size_t(py) * size_t(W);
 						for (int px = x1; px < x2; ++px) {
@@ -835,9 +831,8 @@ void Render_SSAO() {
 						}
 					}
 					renderns::tileDone.release();
-				});
-			}
-		}
+				}
+		});
 		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 	}
 
