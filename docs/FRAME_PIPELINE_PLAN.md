@@ -128,3 +128,30 @@ Bonus ASan find while validating: GREETS SceneCorrections() read past its
 9-entry ObjStationary[] stack array for every mesh beyond the 9th — nonzero
 stack garbage would randomly mark meshes stationary (a latent nondeterminism
 source). Bounds-guarded, byte-neutral in release.
+
+## 2026-07-03 — mirror double-shading MEASURED (greets teleporter, coverage sweep)
+
+Full-screen mirror (cam 0,2.5,-2.5 facing teleporter, t=700, quarter, full
+config): frame min 20.9 (mirror off) -> 39.0 (on) = +18 ms. Repeatable x2
+interleaved. Decomposition of the delta:
+
+| pass | off | on | delta |
+|---|--:|--:|--:|
+| xpar-peel (the GLASS wall is a transparent face!) | 0.0 | 5.2 | +5.2 |
+| lighting-w1 (clone surfaces + clone omnis in tiles) | 5.0 | 9.6 | +4.6 |
+| lighting-w2 (fill over mirror pixels) | 2.1 | 3.8 | +1.7 |
+| cones (clone beams in reflection) | 0.5 | 2.3 | +1.8 |
+| RTT + StampMasks + mirror-grid + Probe | 0.0 | 2.0 | +2.0 |
+| (remainder: clone raster in gbuffer + xform) | | | ~+2.7 |
+
+The single biggest line is NOT the reflected-surface kernel — it's the
+half-silvered GLASS overlay going through the transparent peel, which
+re-lights every covered pixel at full rate. Levers, by size:
+1. Cheap-glass path for the mirror wall in the peel (near-uniform tint —
+   doesn't need the full per-pixel light loop), or quarter/checker rate for
+   the transparent kernel. ~5 ms at full coverage.
+2. Reduced-rate (quarter/checker) shading for clone-layer pixels. ~6 ms.
+3. Cone rate/cap inside reflections. ~2 ms.
+Costs scale ~linearly with mirror screen coverage; at typical greets framing
+(mirror ~15-30% of screen) the total is the ~6 ms measured in the t=1130
+cluster investigation.
