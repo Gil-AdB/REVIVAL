@@ -572,13 +572,16 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b27</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b28</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
-        <label style="font-size:10px;color:#aaa;font-weight:normal;cursor:pointer;" title="canvas click selects the whole object instead of one surface">
-          <input type="checkbox" id="editor-pickobj" style="vertical-align:-2px;"> pick=object
-        </label>
+        <span style="font-weight:normal;">
+          <a id="editor-invert-sel" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="invert the multi-selection within its containing object (ctrl/cmd-click rows to multi-select)">invert</a>
+          <label style="font-size:10px;color:#aaa;cursor:pointer;" title="canvas click selects the whole object instead of one surface">
+            <input type="checkbox" id="editor-pickobj" style="vertical-align:-2px;"> pick=object
+          </label>
+        </span>
       </div>
       <div id="editor-objects"></div>
       <div id="editor-list"></div>
@@ -613,10 +616,12 @@
     <script>
       var editorSurfaces = [], editorSelected = null;
       // Object selection: editorGroup = array of surface names being edited
-      // together (an "object" — meshes grouped by shared surfaces, e.g. the
-      // whole mech), or null for single-surface mode. setProp/importFile fan
-      // edits out over the group.
-      var editorObjects = [], editorGroup = null;
+      // together, or null for single-surface mode. setProp/importFile fan
+      // edits out over the group. The group is either a whole object's
+      // surfaces (click an object/part row) or a CUSTOM multi-selection
+      // (ctrl/cmd-click rows to toggle). editorGroupObj = the containing
+      // object (scopes "invert"; null = scope is all surfaces).
+      var editorObjects = [], editorGroup = null, editorGroupObj = null;
       function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
       // window and preventDefault()s every key (they feed the engine's Keyboard[]
@@ -645,11 +650,21 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b27); orbit/zoom embind =',
+        console.log('[editor] panel init (build b28); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
-        document.getElementById('editor-scene-name').textContent = revEditorScene;
-        editorStatus('loading greets…');
+        // Scene picker: navigating swaps ?scene= and reloads (the FLD +
+        // sidecar live-fetch and scene init are boot-time).
+        var ssel = document.getElementById('editor-scene-sel');
+        ['greets','city','chase','fountain','crash'].forEach(function(sc){
+          var o = document.createElement('option'); o.value = sc; o.textContent = sc;
+          if (sc === revEditorScene) o.selected = true;
+          ssel.appendChild(o);
+        });
+        ssel.onchange = function(){
+          location.href = location.pathname + '?editor&scene=' + ssel.value;
+        };
+        editorStatus('loading ' + revEditorScene + '…');
         var tries = 0;
         var iv = setInterval(function(){
           tries++;
@@ -948,27 +963,38 @@
         var el = document.getElementById('editor-list'); el.innerHTML = '';
         editorSurfaces.forEach(function(s){
           if (q && s.name.toLowerCase().indexOf(q) < 0) return;
-          var inGroup = editorGroup && editorGroup.indexOf(s.name) >= 0;
+          var grouped = editorGroup && editorGroup.indexOf(s.name) >= 0;
           var d = document.createElement('div');
-          d.className = 'surf-item' + ((editorSelected === s.name || inGroup) ? ' sel' : '');
+          d.className = 'surf-item' + (((editorSelected === s.name && !editorGroup) || grouped) ? ' sel' : '');
           d.innerHTML = '<div>' + s.name +
             (surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
             (s.texture ? '<div class="surf-tex">' + s.texture.replace(/^TEXTURES\//,'') + '</div>' : '');
-          d.onclick = function(){ selectSurface(s, /*alsoFocus=*/true); };
+          d.onclick = function(ev){
+            if (ev.ctrlKey || ev.metaKey) toggleGroup([s.name], null);
+            else selectSurface(s, /*alsoFocus=*/true);
+          };
           el.appendChild(d);
         });
       }
       // Hierarchy tree: model → parts → surfaces. Clicking an object/part row
       // selects the whole group (edits fan out); a surface leaf selects just
-      // that surface, same as the flat list. ▸/▾ expands a level.
+      // that surface, same as the flat list. Ctrl/cmd-click any row to TOGGLE
+      // it in a multi-selection instead; "invert" in the header flips the
+      // multi-selection within its containing object. ▸/▾ expands a level.
       var editorObjExpanded = {};
+      function inGroup(n){ return !!(editorGroup && editorGroup.indexOf(n) >= 0); }
+      function groupHasAll(names){
+        return names.length > 0 && names.every(inGroup);
+      }
       function renderObjectList(){
         var cnt = document.getElementById('editor-objects-count');
         if (cnt) cnt.textContent = editorObjects.length ? ('(' + editorObjects.length + ')') : '';
+        var inv = document.getElementById('editor-invert-sel');
+        if (inv) inv.style.display = editorGroup ? '' : 'none';
         var el = document.getElementById('editor-objects'); if (!el) return;
         el.innerHTML = '';
-        function addObjRow(o, depth, key){
-          var isSel = editorGroup && editorGroup === o.surfaces;
+        function addObjRow(o, depth, key, container){
+          var isSel = groupHasAll(o.surfaces);
           var open = !!editorObjExpanded[key];
           var kids = o.children || [];
           var d = document.createElement('div');
@@ -983,51 +1009,97 @@
             editorObjExpanded[key] = !open;
             renderObjectList();
           };
-          d.onclick = function(){ selectObject(o); };
+          d.onclick = function(ev){
+            if (ev.ctrlKey || ev.metaKey) toggleGroup(o.surfaces, container || o);
+            else selectObject(o);
+          };
           el.appendChild(d);
           if (!open) return;
           if (kids.length) {
-            kids.forEach(function(c, i){ addObjRow(c, depth + 1, key + '/' + c.name + i); });
+            kids.forEach(function(c, i){ addObjRow(c, depth + 1, key + '/' + c.name + i, container || o); });
           } else {
             o.surfaces.forEach(function(n){
               var s = editorSurfaces.find(function(x){ return x.name === n; });
               var c = document.createElement('div');
-              c.className = 'surf-item' + (editorSelected === n && !editorGroup ? ' sel' : '');
+              c.className = 'surf-item' + ((inGroup(n) || (editorSelected === n && !editorGroup)) ? ' sel' : '');
               c.style.marginLeft = ((depth + 1) * 14 + 4) + 'px';
               c.innerHTML = '<div>' + n + (s && surfaceDirty(s) ? ' <span style="color:#fa5">●</span>' : '') + '</div>';
-              c.onclick = function(){ if (s) selectSurface(s, /*alsoFocus=*/true); };
+              c.onclick = function(ev){
+                if (ev.ctrlKey || ev.metaKey) toggleGroup([n], container || o);
+                else if (s) selectSurface(s, /*alsoFocus=*/true);
+              };
               el.appendChild(c);
             });
           }
         }
-        editorObjects.forEach(function(o, i){ addObjRow(o, 0, o.name + i); });
+        editorObjects.forEach(function(o, i){ addObjRow(o, 0, o.name + i, null); });
+      }
+      // Apply the current editorGroup: props panel (first member's values),
+      // group highlight + framing, list refresh, status.
+      function applyGroupSelection(label){
+        var names = (editorGroup || []).filter(function(n){
+          return editorSurfaces.some(function(s){ return s.name === n; });
+        });
+        if (!names.length) {
+          editorGroup = null; editorGroupObj = null;
+          renderObjectList(); renderSurfaceList();
+          editorStatus('selection empty');
+          return;
+        }
+        editorGroup = names;
+        editorSelected = names[0];
+        var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
+        renderObjectList(); renderSurfaceList();
+        renderSurfaceProps(s, { name: label, surfaces: names });
+        if (Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
+        if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
+        editorStatus(label + ': editing ' + names.length + ' surface(s) together');
+      }
+      // Ctrl/cmd-click: toggle `names` in/out of the multi-selection. Starting
+      // a fresh multi-select seeds it with the current single selection so
+      // ctrl-click naturally EXTENDS what you had.
+      function toggleGroup(names, container){
+        if (!editorGroup) {
+          editorGroup = (editorSelected && names.indexOf(editorSelected) < 0)
+            ? [editorSelected] : [];
+        }
+        var allIn = names.length > 0 && names.every(inGroup);
+        if (allIn) {
+          editorGroup = editorGroup.filter(function(n){ return names.indexOf(n) < 0; });
+        } else {
+          names.forEach(function(n){ if (!inGroup(n)) editorGroup.push(n); });
+        }
+        editorGroupObj = container || editorGroupObj;
+        applyGroupSelection('selection');
       }
       // Object select: every surface of the group edits together. Props panel
       // shows the FIRST surface's values; highlight + focus cover the group.
       function selectObject(o){
-        var names = o.surfaces.filter(function(n){
-          return editorSurfaces.some(function(s){ return s.name === n; });
-        });
-        if (!names.length) { editorStatus('object "' + o.name + '": no editable surfaces'); return; }
-        editorGroup = o.surfaces;   // identity — renderObjectList marks it selected
-        editorSelected = names[0];
-        var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
-        renderObjectList(); renderSurfaceList(); renderSurfaceProps(s, o);
-        if (Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
-        if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
-        editorStatus('object "' + o.name + '": editing ' + names.length + ' surfaces together');
+        editorGroup = o.surfaces.slice();
+        editorGroupObj = o;
+        applyGroupSelection('object "' + o.name + '"');
       }
       // Shared select path: list click focuses the orbit on the surface;
       // canvas pick only selects/highlights (jumping the camera on every
       // viewport click would fight the user's framing).
       function selectSurface(s, alsoFocus){
-        editorGroup = null;   // single-surface mode
+        editorGroup = null; editorGroupObj = null;   // single-surface mode
         editorSelected = s.name; renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
         if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
         var sel = document.querySelector('#editor-list .surf-item.sel');
         if (sel) sel.scrollIntoView({ block: 'nearest' });
       }
+      // Invert the multi-selection within its containing object (or, with no
+      // container, within all surfaces): selected ↔ unselected.
+      document.getElementById('editor-invert-sel').onclick = function(e){
+        e.preventDefault();
+        if (!editorGroup) return;
+        var scope = editorGroupObj ? editorGroupObj.surfaces
+                                   : editorSurfaces.map(function(s){ return s.name; });
+        editorGroup = scope.filter(function(n){ return !inGroup(n); });
+        applyGroupSelection(editorGroupObj ? 'inverted in "' + editorGroupObj.name + '"' : 'inverted');
+      };
       // The names an edit applies to: the whole object group when one is
       // selected (and the edited surface belongs to it), else just the one.
       function editSurfNames(name){
