@@ -33,9 +33,13 @@ Two concrete sub-targets, in order:
       branch for Diffuse==0 materials is small and targeted, but only covers
       the glass batch, not the clone batches.
    c. Cap/cull lights harder for clone-tagged xpar pixels.
-   Recommendation: measure per-batch composite cost first (extend the
-   xpar-phases print with per-batch tag/ms) to see if the glass batch or the
-   clone batches dominate, THEN pick a/b/c. Don't skip this step.
+   MEASURED (per-batch print landed): the GLASS batch (tag=0 front, 4 faces)
+   is 2.645 ms of the 2.94 composite; clone batches are 0.30 combined. So
+   option (a) is DEAD (don't build quarter-rate xpar) and (b) is the task:
+   cheap path for Diffuse==0 glass — either skip the light loop entirely
+   (if the spec sheen isn't load-bearing — EYEBALL at the t=700 pose, gates
+   can't judge it) or a spec-only loop (skips diffuse+shadow work). ~2.5 ms
+   at full mirror coverage; ~0 at ts=491 (coverage-scaled).
 
 2. **The ~1 ms serial mirWin scan** (RENDER.CPP peel preamble ~line 680:
    full-screen gb.mirrorId byte scan building per-mirror bboxes). Either
