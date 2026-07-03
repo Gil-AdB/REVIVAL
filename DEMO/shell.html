@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b46</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b47</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -653,7 +653,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b46); orbit/zoom embind =',
+        console.log('[editor] panel init (build b47); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -1062,7 +1062,8 @@
       }
       // Apply the current editorGroup: props panel (first member's values),
       // group highlight + framing, list refresh, status.
-      function applyGroupSelection(label){
+      function applyGroupSelection(label, alsoFocus){
+        if (alsoFocus === undefined) alsoFocus = true;
         var names = (editorGroup || []).filter(function(n){
           return editorSurfaces.some(function(s){ return s.name === n; });
         });
@@ -1077,7 +1078,7 @@
         var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
         renderObjectList(); renderSurfaceList();
         renderSurfaceProps(s, { name: label, surfaces: names });
-        if (Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
+        if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(names.join(';'));
         if (Module.editorHighlight)    Module.editorHighlight(names.join(';'));
         editorStatus(label + ': editing ' + names.length + ' surface(s) together');
       }
@@ -1100,10 +1101,13 @@
       }
       // Object select: every surface of the group edits together. Props panel
       // shows the FIRST surface's values; highlight + focus cover the group.
-      function selectObject(o){
+      // alsoFocus=false for canvas picks — a viewport click must never move
+      // the camera (focus now re-AIMS the orbit too, which made every
+      // pick=object canvas click swing the view).
+      function selectObject(o, alsoFocus){
         editorGroup = o.surfaces.slice();
         editorGroupObj = o;
-        applyGroupSelection('object "' + o.name + '"');
+        applyGroupSelection('object "' + o.name + '"', alsoFocus);
       }
       // Shared select path: list click focuses the orbit on the surface;
       // canvas pick only selects/highlights (jumping the camera on every
@@ -1525,13 +1529,13 @@
         // PBR map import — upload an image per role; bytes go to the engine via
         // Embind (editorImportTexture), which reuses the --material-import path.
         function importFile(role, file, done){
-          // The engine decodes via stb_image — TIFF/EXR/WEBP are NOT
-          // supported and fail silently deep in the loader. Say so up
-          // front (the #1 "pbr import is broken" report was a .tif pack).
+          // The engine decodes via stb_image + TinyTiff (.tif packs work) —
+          // EXR/WEBP/AVIF are not supported and would fail silently deep in
+          // the loader. Say so up front.
           var ext = (file.name.split('.').pop() || '').toLowerCase();
-          if (['tif','tiff','exr','webp','avif'].indexOf(ext) >= 0) {
+          if (['exr','webp','avif'].indexOf(ext) >= 0) {
             editorStatus('cannot import ' + file.name + ': .' + ext +
-                         ' is not supported (engine decodes PNG/JPG/TGA/BMP/PSD/GIF) — convert to PNG');
+                         ' is not supported (engine decodes PNG/JPG/TGA/BMP/PSD/GIF/TIFF) — convert to PNG');
             if (done) done(false);
             return;
           }
@@ -1709,7 +1713,7 @@
           var pickObj = document.getElementById('editor-pickobj');
           if (pickObj && pickObj.checked) {
             var o = editorObjects.find(function(x){ return x.surfaces.indexOf(name) >= 0; });
-            if (o) { selectObject(o); editorStatus('picked object: ' + o.name + ' (via ' + name + ')'); return; }
+            if (o) { selectObject(o, /*alsoFocus=*/false); editorStatus('picked object: ' + o.name + ' (via ' + name + ')'); return; }
           }
           var s = editorSurfaces.find(function(x){ return x.name === name; });
           if (s) { selectSurface(s, /*alsoFocus=*/false); editorStatus('picked: ' + name); }

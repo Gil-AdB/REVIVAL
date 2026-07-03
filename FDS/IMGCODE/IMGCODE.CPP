@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "TinyTiff.h"
+
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FDS_DEFS.H"
@@ -1035,8 +1037,14 @@ DWord GetOptClass(int32_t X,int32_t Y)
 char* LoadPNG(Texture* Tx)
 {
 	unsigned char* Txtr;
+	bool viaTiff = false;
 	int x, y, n;
-	if (!(Txtr = stbi_load(Tx->FileName, &x, &y, &n, 4))) return 0;
+	if (!(Txtr = stbi_load(Tx->FileName, &x, &y, &n, 4))) {
+		// stb_image has no TIFF support — PBR texture packs (TextureCom,
+		// ambientCG) ship .tif, so fall back to the minimal decoder.
+		if (!(Txtr = TinyTiff_DecodeFile(Tx->FileName, &x, &y))) return 0;
+		viaTiff = true;
+	}
 	Tx->SizeX = x;
 	Tx->SizeY = y;
 	Tx->BPP = 32;
@@ -1048,7 +1056,8 @@ char* LoadPNG(Texture* Tx)
 		std::swap(ptr[4 * i], ptr[4 * i + 2]);
 	}
 
-	stbi_image_free(Txtr);
+	if (viaTiff) free(Txtr);
+	else stbi_image_free(Txtr);
 	return (char *)Tx->Data;
 }
 
@@ -1222,6 +1231,19 @@ static char _Load_Texture(Texture *Tx)
 	{
 		Txd = LoadPNG(Tx);
 		return 1;
+	}
+
+	// TIFF (PBR texture packs ship .tif): sniff the magic and route
+	// through LoadPNG, whose stbi-fail fallback decodes via TinyTiff.
+	{
+		FILE *tf = fopen(Tx->FileName, "rb");
+		if (tf) {
+			unsigned char magic[8] = {0};
+			const size_t got = fread(magic, 1, 8, tf);
+			fclose(tf);
+			if (got == 8 && TinyTiff_Sniff(magic, 8) && LoadPNG(Tx))
+				return 1;
+		}
 	}
 		// CEL detection and load goes here
 	return 0;

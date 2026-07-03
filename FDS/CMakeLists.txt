@@ -97,6 +97,8 @@ source_group("Fillers" FILES ${Fillers})
 set(IMGCODE
     IMGCODE/IMGCODE.CPP
     IMGCODE/QUANTUM.H
+    IMGCODE/TinyTiff.cpp
+    IMGCODE/TinyTiff.h
     IMGCODE/stb_image.h)
 source_group("IMGCODE" FILES ${IMGCODE})
 
