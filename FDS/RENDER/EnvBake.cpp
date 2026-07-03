@@ -299,12 +299,11 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         const Vector& center) {
     EnvBakeParams params;
     // --env_refl_res (default 512): reflections are roughness-blurred by eye
-    // anyway, so half the CITY bake res reads fine. Clamp to something sane —
-    // the mip chain needs res ≥ 64, and the 20-bit-style budgets don't apply
-    // here (linear addressing), but >2048 is just memory.
+    // anyway, so half the CITY bake res reads fine. Clamp: the mip chain
+    // needs res ≥ 64; cap at 1024.
     int res = fds::FeatureFlags::env_refl_res();
     if (res < 64) res = 64;
-    if (res > 2048) res = 2048;
+    if (res > 1024) res = 1024;
     params.cubeRes = res / 2;
     params.panoWidth = res;
     params.panoHeight = res;
