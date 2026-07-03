@@ -585,7 +585,16 @@ struct
 {
 // Scene section
 	{"FirstFrame"	 ,		ReadFirstFrame},
+#ifdef OFIR_LASTFRAME
+	// The older OFIR-generation reader (Original/READERS/LWREAD/OFIR/
+	// LWSREAD.CPP) took the FLD's LastFrame from the LWS "LastFrame"
+	// keyword; the newer generation switched to "PreviewLastFrame".
+	// The 2018-2020 "extended" FOUNTAIN.FLD was converted by the OFIR
+	// era and only reproduces byte-identical with this mapping.
+	{"LastFrame"			 , ReadLastFrame},
+#else
 	{"PreviewLastFrame"		 , ReadLastFrame},
+#endif
 	{"FrameStep"			 , ReadFrameStep},
 	{"FramesPerSecond" , ReadFPS},
 // Object section

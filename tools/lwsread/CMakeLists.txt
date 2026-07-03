@@ -32,3 +32,14 @@ add_executable(lwsread_legacy
     FLDSAVE.CPP
 )
 target_compile_definitions(lwsread_legacy PRIVATE LEGACY_VLUM=1)
+
+# OFIR-generation build: LEGACY_VLUM plus the older "LastFrame" keyword
+# mapping (the newer readers use "PreviewLastFrame"). Reproduces the
+# 2018-2020 "extended" FOUNTAIN.FLD (git 0bf67d4) byte-identical — see
+# Authoring/fountain-extended/README.md.
+add_executable(lwsread_ofir
+    LWSREAD.CPP
+    LWOREAD.CPP
+    FLDSAVE.CPP
+)
+target_compile_definitions(lwsread_ofir PRIVATE LEGACY_VLUM=1 OFIR_LASTFRAME=1)

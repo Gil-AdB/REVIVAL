@@ -17,6 +17,7 @@ import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LWSREAD = os.path.join(REPO, "tools", "lwsread", "build", "lwsread")
 LWSREAD_LEGACY = os.path.join(REPO, "tools", "lwsread", "build", "lwsread_legacy")
+LWSREAD_OFIR = os.path.join(REPO, "tools", "lwsread", "build", "lwsread_ofir")
 ORIGINAL = os.path.join(REPO, "Original")
 
 
@@ -58,9 +59,11 @@ def main():
                     help="objname.lwo=/explicit/path — resolve an ambiguous object")
     ap.add_argument("--legacy-vlum", action="store_true",
                     help="use lwsread_legacy (VLUM*100 behavior) for 1998 shipping FLDs")
+    ap.add_argument("--ofir", action="store_true",
+                    help="use lwsread_ofir (VLUM*100 + LastFrame keyword) for OFIR-era FLDs")
     args = ap.parse_args()
     picks = dict(p.split("=", 1) for p in args.pick)
-    lwsread_bin = LWSREAD_LEGACY if args.legacy_vlum else LWSREAD
+    lwsread_bin = LWSREAD_OFIR if args.ofir else (LWSREAD_LEGACY if args.legacy_vlum else LWSREAD)
 
     objs = lws_objects(args.lws)
     print(f"[lws] {args.lws}: {len(objs)} object refs")
