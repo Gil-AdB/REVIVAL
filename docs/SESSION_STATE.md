@@ -1,9 +1,44 @@
-# SESSION STATE — mirror/xpar cost campaign (updated 2026-07-03, end of marathon session)
+# SESSION STATE — structural push (updated 2026-07-04)
 
 Read this when resuming. Branch feature/soa-vertex, all pushed.
-Perf floor at the ts=491 reference: **~40.4 ms min** (session start was 43.4;
-campaign start ~51). Bench recipe + load-sanity rules live in the memory file
+Perf floor at the ts=491 reference: **~40.4 ms min** on an idle box
+(machine-load drift makes day-to-day mins swing 41-44; always interleave
+A/B). Bench recipe + load-sanity rules live in the memory file
 `greets-bench-reference-frame` and docs/FRAME_PIPELINE_PLAN.md.
+
+## STRUCTURAL PUSH (user-approved campaign, 2026-07-04) — status
+
+Ranked list (full reasoning in the 2026-07-04 conversation + below):
+1. ✅ **#3 dispatch consolidation (e1355f0)** — every pool fan now goes
+   through dispatchIndexed (was: task-per-tile loops, hand-rolled
+   cursor+semaphore fans, TBR_Render's mutex+condvar). Net −76 lines.
+   Validated: gate ALL PASS, city/fountain snapshots byte-identical,
+   greets diff == pre-existing noise floor, TSan clean, perf-neutral.
+2. ✅ **#2 binning helper (c786b1f)** — lightSphereScreenRect in
+   DeferredCommon.h replaces the 4 copied sphere→tile-range blocks
+   (kernel/strips/cones/halos; the clone-cone cull gap was exactly this
+   rot). zeroTileLightPadding folds the two padding blocks. Same
+   validation, all green.
+3. ⬜ **TBR migration** — greets/city still use the legacy xpar peel only
+   because they never call TBR_Init (capability-wise TBR handles peeled
+   multi-layer + additive — fountain proves it; user confirmed, code
+   verified at deferredUnifiedTbrEnabled's comment). Enabling TBR_Init
+   there + retiring the legacy peel deletes a whole path AND likely wins
+   the peel's full-plane clear/composite cost (~5ms at point-blank mirror
+   framing). NOT byte-gateable (strip lighting differs) — eyeball + gate.
+4. ⬜ **#1 RenderContext migration slices 3-5** (RENDER_CONTEXT_PLAN.md) —
+   the standing campaign; unlocks RTT/shadow-raster parallelism, ends the
+   global-swap bug family.
+5. ⬜ **#4 promote GreetsMirror/MirrorShatter to FDS/RENDER** — mechanical.
+
+Also fixed this session (before the push): lightmap-bake coverage-bit
+race (0df96a6, atomic OR — TSan-confirmed real, greets init now clean);
+teleporter-stone run-to-run nondeterminism is NOT it — still open,
+separate cause. DoF "not working" = user config had --dof_range=20 but
+the flag is a FRACTION of far-plane (0.03-0.1 sane); code is fine.
+fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
+OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
+still shadows the merged pinned 512KB one — user to decide.
 
 ## CONES/CLONES CAMPAIGN — DONE 2026-07-04 (commit 5a58269)
 
