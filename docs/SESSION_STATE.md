@@ -5,20 +5,18 @@ Perf floor at the ts=491 reference: **~40.4 ms min** (session start was 43.4;
 campaign start ~51). Bench recipe + load-sanity rules live in the memory file
 `greets-bench-reference-frame` and docs/FRAME_PIPELINE_PLAN.md.
 
-## CURRENT TASK (user: "let's try to attack the cones/clones")
+## CONES/CLONES CAMPAIGN — DONE 2026-07-04 (commit 5a58269)
 
-The t=1130-1162 slow-cluster window was measured (FRAME_PIPELINE_PLAN.md
-2026-07-03 cluster entry): mirror = +3.3 min / +7 p50 ms there, but the
-xpar glass composite is only 0.6 ms at that framing — the glass fast path
-(below) got DEPRIORITIZED. The levers that pay at BOTH ts=491 and the
-cluster:
-1. **Cones** — 6.55 ms wall / 72.8 ms pool busy in-window (3x the ts=491
-   cone load): event beams + 12-spot bounce pool + clone beams. Attack =
-   per-category attribution first (which spots cost what), then cap/cull.
-2. **Clone lights in the kernel** (option c) — computeMirrorPresenceGrid
-   already culls clone omnis to footprint tiles, but inside those tiles
-   every pixel iterates them (per-pixel pmid filter rejects late, in the
-   loop). w1 = 10.8 in-window vs ~8 mirror-off.
+The t=1130-1162 cluster + attack results (full numbers in
+FRAME_PIPELINE_PLAN.md 2026-07-03/04 entries):
+1. **Clone-cone footprint cull SHIPPED**: 40/50 cone spots were mirror
+   clones with no tile-level footprint cull. Cones wall 6.4-7.5 → 3.6-4.1
+   in-window (p50 −4 ms), ts=491 −1.3 ms. Byte-identical + gate PASS.
+   Debug: FDS_NO_CONE_MIRROR_CULL / FDS_CONE_SKIP_* / FDS_CONE_ATTR.
+2. **Clone lights in the kernel: measured DEAD** — presence cull already
+   contains them (w1 10.0 vs 10.1 mirror off/on, avg lights/tile ~10.5
+   both). Don't build a cap. Remaining mirror delta (+2.5 min/+4 p50) is
+   spread machinery (peel 1.3-1.5, RTT 0.9, masks 0.8, clone raster).
 
 ## PREVIOUS NEXT-TASK (deprioritized 2026-07-03): xpar composite fast path
 
