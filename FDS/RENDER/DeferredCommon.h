@@ -209,6 +209,14 @@ struct DeferredLightingCtx {
 	const ViewLightsSoA *lights;
 	int                  numLights;
 	const TileLights    *tileLights;  // [DEFERRED_NUM_TILES]
+	// Mirror-footprint presence bits per LIGHTING tile (see
+	// computeMirrorPresenceGrid) for the volumetric passes' clone-light
+	// tile cull. Copied BY VALUE: the kernel's grid is a file-static
+	// that an offscreen bake (shard/RTT) can recompute between the
+	// lighting call and the cone/halo passes. hasMirrorPresence=false →
+	// keep all clone lights (no mirrors this frame / offscreen ctx).
+	uint32_t             tileMirrorPresence[DEFERRED_NUM_TILES];
+	bool                 hasMirrorPresence;
 	float                invFOVX;
 	float                invFOVY;
 	float                invZScale;

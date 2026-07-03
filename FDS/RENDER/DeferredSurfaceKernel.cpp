@@ -3812,6 +3812,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	ctx.lights     = &lights;
 	ctx.numLights  = numLights;
 	ctx.tileLights = tileLights;
+	ctx.hasMirrorPresence = (tilePresence != nullptr);
+	if (tilePresence)
+		std::memcpy(ctx.tileMirrorPresence, tilePresence,
+		            sizeof(ctx.tileMirrorPresence));
 	ctx.invFOVX    = 1.0f / FOVX;
 	ctx.invFOVY    = 1.0f / FOVY;
 	ctx.invZScale  = 1.0f / float(g_zscale);
