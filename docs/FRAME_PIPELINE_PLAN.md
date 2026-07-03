@@ -105,3 +105,26 @@ Remaining serial leads, updated: mirror-grid 0.524 (parallelize the scan),
 RTT 1.68 (blocked on context migration), Tick-Xfrm 0.44. The gate now runs
 HEADLESS (SDL_VIDEODRIVER=dummy, rebaselined) — it was popping a window on
 the desktop every run.
+
+## 2026-07-03 (later still) — full enqueue-loop audit + P-core scheduling answer
+
+Every remaining task-per-tile enqueue loop converted to the new Threads.h
+`dispatchIndexed` (shadow bake Phase A/B, SSAO x5, EdgeAA, skybox, halos, fog
+composite, gbuffer fill, Hdr tile helper). All byte-neutral (gate x3, 5-frame
+greets sequence zero-pixel, ASan clean). Floor stayed ~40.4 — the extra loops'
+enqueues were largely hidden behind already-busy workers (notify_one is only
+expensive when workers are PARKED, i.e. at post-barrier wave starts — which is
+why lighting/cones were the ones worth ms). Kept for robustness: the helper
+encodes both lifetime traps (temporary fn dies before the caller's drain →
+copy fn per task; thread_local job vectors re-resolve on the worker → snapshot
+.data()) that each cost a crash-bisect during development.
+
+**P-core-only scheduling: measured NO — it loses.** 8P+4E box, workers already
+QOS_USER_INTERACTIVE: pool=8 (P-only) = 43.0-43.2 ms min vs default 10 = 40.4,
+all 12 = 40.4. E-cores are net-positive; work-stealing chunks self-balance
+around their slowness. Pool sizing stays min(16, cores-2).
+
+Bonus ASan find while validating: GREETS SceneCorrections() read past its
+9-entry ObjStationary[] stack array for every mesh beyond the 9th — nonzero
+stack garbage would randomly mark meshes stationary (a latent nondeterminism
+source). Bounds-guarded, byte-neutral in release.
