@@ -830,6 +830,21 @@ float editorPlayScene(bool on)
 }
 // Live scene-time readout while playing (g_editorFreezeTimer tracks playback).
 float editorSceneTime() { return (float)g_editorFreezeTimer; }
+// Camera-state dump for headless debugging (focus/orbit investigations).
+std::string editorCamDebug()
+{
+	char buf[512];
+	std::snprintf(buf, sizeof(buf),
+		"{\"target\":[%.2f,%.2f,%.2f],\"yaw\":%.3f,\"pitch\":%.3f,\"dist\":%.2f,"
+		"\"eye\":[%.2f,%.2f,%.2f],\"fwd\":[%.3f,%.3f,%.3f],\"ifov\":%.1f,"
+		"\"viewIsFC\":%d,\"playing\":%d,\"seeded\":%d}",
+		g_camTarget.x, g_camTarget.y, g_camTarget.z,
+		g_camYaw, g_camPitch, g_camDist,
+		FC.ISource.x, FC.ISource.y, FC.ISource.z,
+		FC.Mat[2][0], FC.Mat[2][1], FC.Mat[2][2], FC.IFOV,
+		View == &FC ? 1 : 0, g_editorPlaying ? 1 : 0, g_editorCamSeeded ? 1 : 0);
+	return buf;
+}
 // Absolute seek (the progress-bar drag). Works frozen and mid-playback.
 float editorTimeSet(float t)
 {
@@ -864,6 +879,28 @@ void editorPan(float dxPixels, float dyPixels)
 	g_camTarget.y += (-dxPixels * FC.Mat[0][1] + dyPixels * FC.Mat[1][1]) * k;
 	g_camTarget.z += (-dxPixels * FC.Mat[0][2] + dyPixels * FC.Mat[1][2]) * k;
 	rev::Editor_MarkDirty();
+}
+// After a focus set g_camTarget/g_camDist, aim the orbit FROM THE CURRENT
+// CAMERA POSITION: yaw/pitch face the new target from where you already
+// are, so focusing means "turn toward it and dolly in". Keeping the OLD
+// yaw/pitch teleported the eye to `target + dist·old_direction` — an
+// arbitrary vantage that could sit behind walls or view the object from
+// its far side ("non-centered view from somewhere" until the first
+// play-stop happened to reseed a sensible direction).
+static void orbitFaceTargetFromHere()
+{
+	const float fx = g_camTarget.x - FC.ISource.x;
+	const float fy = g_camTarget.y - FC.ISource.y;
+	const float fz = g_camTarget.z - FC.ISource.z;
+	const float len2 = fx*fx + fy*fy + fz*fz;
+	if (len2 < 1e-4f) return;                 // on top of it — keep direction
+	const float inv = 1.0f / std::sqrt(len2);
+	float sp = -fy * inv;
+	if (sp < -1.0f) sp = -1.0f; if (sp > 1.0f) sp = 1.0f;
+	g_camPitch = std::asin(sp);
+	if (g_camPitch >  1.45f) g_camPitch =  1.45f;
+	if (g_camPitch < -1.45f) g_camPitch = -1.45f;
+	g_camYaw = std::atan2(-fx * inv, -fz * inv);
 }
 // Frame the orbit on the SELECTED surface: world-space bbox of every face using
 // that material (world = RotMat·Pos + IPos — the real interpolated transform),
@@ -971,6 +1008,7 @@ void editorFocusSurface(std::string name)
 	const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
 	const float diag = std::sqrt(dx*dx + dy*dy + dz*dz);
 	g_camDist = diag * 1.3f < 6.0f ? 6.0f : diag * 1.3f;
+	orbitFaceTargetFromHere();
 	g_editorCamSeeded = true;   // don't let the first-frame seed override the focus
 	std::fprintf(stderr, "[EDITOR] focus '%s': %ld/%zu faces, centre (%.1f %.1f %.1f) dist %.1f\n",
 	             name.c_str(), used, boxes.size(), g_camTarget.x, g_camTarget.y, g_camTarget.z, g_camDist);
@@ -991,6 +1029,7 @@ void editorFocusLight(int want)
 		g_camDist = range > 1.0f ? range * 0.8f : 12.0f;
 		if (g_camDist < 6.0f)   g_camDist = 6.0f;
 		if (g_camDist > 200.0f) g_camDist = 200.0f;
+		orbitFaceTargetFromHere();
 		g_editorCamSeeded = true;
 		std::fprintf(stderr, "[EDITOR] focus light %d at (%.1f %.1f %.1f) dist %.1f\n",
 		             want, O->IPos.x, O->IPos.y, O->IPos.z, g_camDist);
@@ -1013,6 +1052,7 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorSceneTime",     &editorSceneTime);
 	emscripten::function("editorTimeSet",       &editorTimeSet);
 	emscripten::function("editorSceneLength",   &editorSceneLength);
+	emscripten::function("editorCamDebug",      &editorCamDebug);
 }
 
 #endif // __EMSCRIPTEN__
