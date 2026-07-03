@@ -109,6 +109,7 @@ static const EditorSceneDef kEditorScenes[] = {
 static const EditorSceneDef *g_editorScene = &kEditorScenes[0];
 static std::atomic<bool> g_editorSceneReady{false};
 static bool   g_editorCamSeeded = false; // first frame seeds orbit from scene cam
+static bool   g_editorPlaying = false;   // play mode: scene time runs, View = scene camera
 
 // Scancode translation: SDL2 reports HID, the legacy engine expects PS/2
 // set-1. Same table as native main() loop. Returned legacy code or -1.
@@ -559,6 +560,7 @@ static void editorTick()
 
 	Keyboard[ScESC] = 0;                          // don't let the scene self-exit
 	if (anyFreeCamKey()) rev::Editor_MarkDirty();  // keep rendering while flying
+	if (g_editorPlaying) rev::Editor_MarkDirty(); // play mode renders every frame
 
 	// Idle throttle: render only while something changed (edit / camera / key);
 	// otherwise RE-PRESENT the last frame so the WebGL canvas stays alive (it
@@ -571,6 +573,23 @@ static void editorTick()
 		return;
 	}
 	--g_editorRenderFrames;
+
+	// Play mode: run the scene exactly like the demo does — Timer free-runs
+	// (TimerProc keeps bumping it; the driver's tickSceneTimer derives dTime
+	// from it) and View is the scene's spline camera, which Animate_Objects
+	// moves along its FLD path. Loops back to StartFrame at the scene's end.
+	// g_editorFreezeTimer tracks playback so stopping freezes where you are
+	// (and the [ ] scrub / UI readout stay coherent).
+	if (g_editorPlaying && g_editorCamSeeded && CurScene) {
+		if (CurScene->EndFrame > CurScene->StartFrame &&
+		    (float)Timer.load() >= CurScene->EndFrame)
+			Timer = (int32_t)CurScene->StartFrame;
+		if (CurScene->CameraHead) View = CurScene->CameraHead;
+		poll_pending_resize(g_currentDriver.get());
+		g_currentDriver->tick();
+		g_editorFreezeTimer = Timer.load();
+		return;
+	}
 
 	Timer = g_editorFreezeTimer;
 	if (!g_editorCamSeeded) {
@@ -777,9 +796,32 @@ float editorTimeStep(float delta)
 {
 	g_editorFreezeTimer += (int)delta;
 	if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0;
+	if (g_editorPlaying) Timer = g_editorFreezeTimer;  // seek within playback
 	rev::Editor_MarkDirty();
 	return (float)g_editorFreezeTimer;
 }
+// Play/stop the scene from the demo's camera. Starting resumes from the
+// current frozen time (compose with the [ ] scrub to pick a shot); stopping
+// re-freezes at wherever playback got to and hands the view back to the
+// editor orbit camera. Returns the scene time for the UI readout.
+float editorPlayScene(bool on)
+{
+	if (on) {
+		Timer = g_editorFreezeTimer;          // resume from the frozen t
+	} else {
+		g_editorFreezeTimer = Timer.load();
+		// Continue editing from the shot you stopped on: re-seed the orbit
+		// from the scene camera's pose instead of snapping back to the
+		// pre-play editor pose.
+		seedOrbitFromView();
+	}
+	g_editorPlaying = on;
+	rev::Editor_MarkDirty();
+	fprintf(stderr, "[EDITOR] play %s at t=%d\n", on ? "ON (scene camera)" : "off", g_editorFreezeTimer);
+	return (float)g_editorFreezeTimer;
+}
+// Live scene-time readout while playing (g_editorFreezeTimer tracks playback).
+float editorSceneTime() { return (float)g_editorFreezeTimer; }
 // Raw wheel deltaY → proportional, smooth zoom (trackpad fires many small
 // events; a fixed per-event ratio made it lurch). exp() keeps it multiplicative.
 void editorZoom(float wheelDeltaY)
@@ -944,6 +986,8 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorFocusSurface",  &editorFocusSurface);
 	emscripten::function("editorFocusLight",    &editorFocusLight);
 	emscripten::function("editorTimeStep",      &editorTimeStep);
+	emscripten::function("editorPlayScene",     &editorPlayScene);
+	emscripten::function("editorSceneTime",     &editorSceneTime);
 }
 
 #endif // __EMSCRIPTEN__
