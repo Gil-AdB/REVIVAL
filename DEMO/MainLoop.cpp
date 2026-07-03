@@ -577,13 +577,16 @@ static void editorTick()
 	// Play mode: run the scene exactly like the demo does — Timer free-runs
 	// (TimerProc keeps bumping it; the driver's tickSceneTimer derives dTime
 	// from it) and View is the scene's spline camera, which Animate_Objects
-	// moves along its FLD path. Loops back to StartFrame at the scene's end.
+	// moves along its FLD path. Loops back to t=0 at the scene's real end:
+	// partTime() (Timer units — the `Timer >= PartTime` each scene exits
+	// on), NOT Scene::EndFrame, which is FLD-spline frames that every scene
+	// maps Timer onto through its own scale (greets looped ~4× early).
 	// g_editorFreezeTimer tracks playback so stopping freezes where you are
 	// (and the [ ] scrub / UI readout stay coherent).
 	if (g_editorPlaying && g_editorCamSeeded && CurScene) {
-		if (CurScene->EndFrame > CurScene->StartFrame &&
-		    (float)Timer.load() >= CurScene->EndFrame)
-			Timer = (int32_t)CurScene->StartFrame;
+		const int32_t endT = g_currentDriver->partTime();
+		if (endT > 0 && Timer.load() >= endT)
+			Timer = 0;
 		if (CurScene->CameraHead) View = CurScene->CameraHead;
 		poll_pending_resize(g_currentDriver.get());
 		g_currentDriver->tick();
@@ -822,6 +825,21 @@ float editorPlayScene(bool on)
 }
 // Live scene-time readout while playing (g_editorFreezeTimer tracks playback).
 float editorSceneTime() { return (float)g_editorFreezeTimer; }
+// Absolute seek (the progress-bar drag). Works frozen and mid-playback.
+float editorTimeSet(float t)
+{
+	g_editorFreezeTimer = (int)t;
+	if (g_editorFreezeTimer < 0) g_editorFreezeTimer = 0;
+	if (g_editorPlaying) Timer = g_editorFreezeTimer;
+	rev::Editor_MarkDirty();
+	return (float)g_editorFreezeTimer;
+}
+// Scene duration in Timer units (the driver's *PartTime) — sizes the
+// progress bar. 0 until the scene driver is up.
+float editorSceneLength()
+{
+	return g_currentDriver ? (float)g_currentDriver->partTime() : 0.0f;
+}
 // Raw wheel deltaY → proportional, smooth zoom (trackpad fires many small
 // events; a fixed per-event ratio made it lurch). exp() keeps it multiplicative.
 void editorZoom(float wheelDeltaY)
@@ -988,6 +1006,8 @@ EMSCRIPTEN_BINDINGS(rev_editor_camera)
 	emscripten::function("editorTimeStep",      &editorTimeStep);
 	emscripten::function("editorPlayScene",     &editorPlayScene);
 	emscripten::function("editorSceneTime",     &editorSceneTime);
+	emscripten::function("editorTimeSet",       &editorTimeSet);
+	emscripten::function("editorSceneLength",   &editorSceneLength);
 }
 
 #endif // __EMSCRIPTEN__

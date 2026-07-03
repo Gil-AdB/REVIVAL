@@ -764,6 +764,7 @@ void Initialize_Chase()
 
 namespace {
 struct ChaseScene : SceneDriver {
+	int32_t partTime() const override { return CHPartTime; }
 	FrameProfiler prof{"chase"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;

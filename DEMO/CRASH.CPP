@@ -41,6 +41,7 @@ void Initialize_Crash()
 
 namespace {
 struct CrashScene : SceneDriver {
+	int32_t partTime() const override { return CrPartTime; }
 	char MSGStr[128];
 	FrameProfiler prof{"crash"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)

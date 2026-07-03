@@ -2327,6 +2327,7 @@ std::vector<debug_outtext> DebugStrs;
 
 namespace {
 struct CityScene : SceneDriver {
+	int32_t partTime() const override { return CTPartTime; }
 	char MSGStr[128];
 	int32_t TTrd = 0;
 	int32_t timerStack[20] = {};

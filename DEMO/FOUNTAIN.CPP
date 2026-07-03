@@ -2554,6 +2554,7 @@ extern Scene* SkySc;
 
 namespace {
 struct FountainScene : SceneDriver {
+	int32_t partTime() const override { return FNTPartTime; }
 	std::unique_ptr<byte[]> BPage;
 	VESA_Surface Blur = {};
 	int32_t timerStack[20] = {};

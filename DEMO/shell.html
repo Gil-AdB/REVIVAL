@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b41</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b42</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -607,6 +607,7 @@
         <button id="editor-time-fwd" title="step forward (] key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">▶</button>
         <button id="editor-time-play" title="play the scene from the demo camera (space; loops at scene end — drag the canvas or press again to stop)" style="background:#232;color:#cfc;border:1px solid #464;border-radius:3px;padding:2px 10px;cursor:pointer;">▶ play</button>
       </div>
+      <input type="range" id="editor-time-bar" min="0" max="2000" step="1" value="600" title="scene time — drag to seek (works during playback)" style="width:100%;margin-top:4px;accent-color:#4a8;cursor:pointer;">
       <div id="editor-actions" style="margin-top:6px;display:flex;gap:6px;">
         <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
         <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
@@ -652,7 +653,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b41); orbit/zoom embind =',
+        console.log('[editor] panel init (build b42); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -1235,13 +1236,46 @@
       document.getElementById('editor-reload').onclick = function(){ location.reload(); };
       // Scene-time scrub: the editor freezes the animation clock; step it to
       // scrub the scene's animation (robot walk, camera-independent tracks).
+      // The progress bar spans the scene's REAL duration (driver partTime,
+      // Timer units) — sized lazily since the driver isn't up at page load.
+      var timeBar = document.getElementById('editor-time-bar');
+      var timeBarDragging = false;
+      function updateTimeUI(t){
+        t = Math.round(t);
+        document.getElementById('editor-time-val').textContent = t;
+        if (Module.editorSceneLength) {
+          var len = Module.editorSceneLength();
+          if (len > 0 && +timeBar.max !== len) timeBar.max = len;
+        }
+        if (!timeBarDragging) timeBar.value = t;
+      }
       function timeStep(d){
         if (!Module.editorTimeStep) return;
-        var t = Module.editorTimeStep(d);
-        document.getElementById('editor-time-val').textContent = t;
+        updateTimeUI(Module.editorTimeStep(d));
       }
       document.getElementById('editor-time-back').onclick = function(e){ timeStep(e.shiftKey ? -500 : -50); };
       document.getElementById('editor-time-fwd').onclick  = function(e){ timeStep(e.shiftKey ?  500 :  50); };
+      // Drag = absolute seek (frozen or mid-playback). The poll leaves the
+      // thumb alone while the pointer holds it.
+      timeBar.addEventListener('pointerdown', function(){ timeBarDragging = true; });
+      window.addEventListener('pointerup', function(){ timeBarDragging = false; });
+      timeBar.addEventListener('input', function(){
+        if (!Module.editorTimeSet) return;
+        var t = Module.editorTimeSet(+timeBar.value);
+        document.getElementById('editor-time-val').textContent = Math.round(t);
+      });
+      // Size the bar as soon as the scene driver is up (its partTime is 0
+      // until then) — otherwise the max stays at the placeholder until the
+      // first scrub/play touch.
+      var timeBarSizer = setInterval(function(){
+        if (!Module.editorSceneLength) return;
+        var len = Module.editorSceneLength();
+        if (len > 0) {
+          timeBar.max = len;
+          if (Module.editorSceneTime) timeBar.value = Module.editorSceneTime();
+          clearInterval(timeBarSizer);
+        }
+      }, 500);
       // Play the scene from the demo's spline camera (loops at scene end).
       // Starts from the current frozen time; stopping re-freezes wherever
       // playback got to and hands the view back to the editor orbit camera.
@@ -1253,11 +1287,10 @@
         var btn = document.getElementById('editor-time-play');
         btn.textContent = on ? '■ stop' : '▶ play';
         btn.style.background = on ? '#422' : '#232';
-        document.getElementById('editor-time-val').textContent = Math.round(t);
+        updateTimeUI(t);
         if (on) {
           scenePlayPoll = setInterval(function(){
-            if (Module.editorSceneTime)
-              document.getElementById('editor-time-val').textContent = Math.round(Module.editorSceneTime());
+            if (Module.editorSceneTime) updateTimeUI(Module.editorSceneTime());
           }, 200);
         } else if (scenePlayPoll) { clearInterval(scenePlayPoll); scenePlayPoll = null; }
       }
