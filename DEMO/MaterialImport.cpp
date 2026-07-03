@@ -524,7 +524,23 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	} else if (r == "height") {
 		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
-		if (Texture *r32 = loadTiled(path, false, aw, ah)) { Texture *r8 = MakeHeight8(r32); for (Material *M : mats) M->RoughnessMap = r8 ? r8 : r32; ok = true; }
+		if (Texture *r32 = loadTiled(path, false, aw, ah)) {
+			Texture *r8 = MakeHeight8(r32);
+			for (Material *M : mats) {
+				M->RoughnessMap = r8 ? r8 : r32;
+				// Same defaulting as the CLI dir-scan path: a roughness map
+				// implies a specular surface, but many FLD materials ship
+				// Specular=0 — the map would modulate a highlight that never
+				// renders. Only when the author left it at 0.
+				if (M->Specular <= 0.0f) {
+					M->Specular = 0.5f;
+					if (M->Glossiness == 0) M->Glossiness = 32;
+					std::fprintf(stderr, "    [spec] roughness map + Specular was 0 -> "
+					             "default Specular=0.5 Glossiness=%u\n", M->Glossiness);
+				}
+			}
+			ok = true;
+		}
 	} else if (r == "ao") {
 		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
 	} else {
