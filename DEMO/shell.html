@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b37</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b38</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -592,6 +592,7 @@
       <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
         <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
         <span style="font-weight:normal;">
+          <a id="editor-rebake-env" href="#" style="color:#69c;font-size:10px;text-decoration:none;margin-right:8px;" title="re-bake the env-reflection panoramas with the CURRENT lights/materials (they capture the scene once, at first use)">rebake refl</a>
           <a id="editor-knobs-resetall" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="reset every explicitly-set knob to its default">reset all</a>
           <label style="font-size:10px;color:#aaa;cursor:pointer;" title="show every engine flag, grouped by category (default: the important ones)">
             <input type="checkbox" id="editor-knobs-all" style="vertical-align:-2px;"> all
@@ -650,7 +651,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b37); orbit/zoom embind =',
+        console.log('[editor] panel init (build b38); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -950,9 +951,15 @@
           });
         }
       }
+      document.getElementById('editor-rebake-env').onclick = function(e){
+        e.preventDefault(); e.stopPropagation();
+        try { Module.editorRebakeEnv(); editorStatus('env reflections invalidated — re-baking next frame'); }
+        catch(err){ editorStatus('rebake failed: ' + err); }
+      };
       document.getElementById('editor-knobs-hdr').onclick = function(e){
         if (e.target && (e.target.id === 'editor-knobs-all' ||
                          e.target.id === 'editor-knobs-resetall' ||
+                         e.target.id === 'editor-rebake-env' ||
                          e.target.tagName === 'LABEL')) return;   // controls, not a toggle
         var el = document.getElementById('editor-knobs');
         var opening = el.style.display === 'none';

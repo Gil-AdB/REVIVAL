@@ -503,6 +503,10 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 	return dz;
 }
 
+// Defined in EnvBake.cpp: while an env-reflection panorama bake renders its
+// cube faces, moving meshes are excluded (see the inStaticBake predicate).
+namespace fds { extern bool g_envBakeSkipDynamic; }
+
 // xresOverride / yresOverride: when >= 0, use these instead of the
 // global XRes / YRes for vertex visibility flags + face-level
 // VisibilityFlagsAll() culling. Lets a caller (e.g. the shadow-map
@@ -574,11 +578,16 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	//                  them; the per-frame dynamic pass only contains
 	//                  the moving parts).
 	// Same isDynamicForBake() predicate decides both.
-	const bool inStaticBake = g_inShadowPass
+	// Env-reflection bake (EnvBake.cpp): the panorama is a STATIC capture, so
+	// moving meshes (the walking mech) must not be frozen into it — they'll
+	// have walked away by the time the reflection is seen. Same predicate as
+	// the static shadow bake.
+	const bool inStaticBake = (g_inShadowPass
 		&& g_currentShadowOmni
 		&& (g_currentShadowOmni->Flags & Omni_StaticShadow)
 		&& !g_inDynamicShadowBake
-		&& fds::FeatureFlags::shadow_skip_animated();
+		&& fds::FeatureFlags::shadow_skip_animated())
+		|| fds::g_envBakeSkipDynamic;
 	const bool inDynamicBake = g_inShadowPass && g_inDynamicShadowBake;
 	// Normalize the cone axis once: the shadow lighting kernel does the
 	// same for its per-pixel cone test (see StaticLighting), so the

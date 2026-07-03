@@ -10,6 +10,7 @@
 #include <Base/Omni.h>
 #include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
+#include <RENDER/EnvBake.h>   // EnvReflection_Invalidate (rebake button)
 
 #include <Base/TriMesh.h>
 
@@ -584,6 +585,13 @@ std::string js_editorSetUVMapping(std::string name, int proj,
 {
 	return rev::Editor_SetUVMapping(name.c_str(), proj, sx, sy, sz, axis);
 }
+// Drop every env-reflection panorama for the scene; the next frame's
+// FramePrep re-bakes them with the CURRENT lights/materials/positions.
+void js_editorRebakeEnv()
+{
+	fds::EnvReflection_Invalidate(CurScene);
+	rev::Editor_MarkDirty();
+}
 // bytes is a JS Uint8Array of the uploaded image file.
 bool js_editorImportTexture(std::string surface, std::string role,
                             std::string filename, emscripten::val bytes)
@@ -780,6 +788,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
 	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
+	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);

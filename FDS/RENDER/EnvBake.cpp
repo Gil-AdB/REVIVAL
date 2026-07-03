@@ -7,6 +7,7 @@
 #include <Base/FrameState.h> // g_mainCamera, g_mainFaces
 #include <Base/Scene.h>
 #include <Base/Camera.h>
+#include <Base/FeatureFlags.h> // env_refl_res
 #include <Base/Material.h>   // per-surface bakes: Reflection / MetallicMap / ID
 #include <Base/Texture.h>
 #include <Base/TriMesh.h>    // material centroids + scene AABB
@@ -25,6 +26,12 @@
 extern void Build_YOffs_Table(VESA_Surface *VS);
 
 namespace fds {
+
+// Read by Transform_Objects (Transform.cpp): while true, meshes that fail the
+// static-shadow-bake predicate (moving Pos/Rotate splines — the walking mech)
+// are skipped, so the panorama doesn't freeze a moving object into the
+// reflection at wherever it happened to stand on bake frame.
+bool g_envBakeSkipDynamic = false;
 
 namespace {
 
@@ -111,6 +118,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
         static Camera s_cam;
         view.setView(&s_cam);
 
+        g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
         for (int i = 0; i < 6; ++i) {
             std::memset(&s_cam, 0, sizeof(s_cam));
             s_cam.ISource = center;
@@ -136,6 +144,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
         }
+        g_envBakeSkipDynamic = false;
     }   // scope exit restores MainSurf/View/FOV/clip planes
 
     std::free(surf.Data);
@@ -289,9 +298,16 @@ void sceneAABB(Scene* sc, SceneEnv& env) {
 std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         const Vector& center) {
     EnvBakeParams params;
-    params.cubeRes = 256;            // reflections are roughness-blurred by
-    params.panoWidth = 512;          // eye anyway — half the CITY bake res
-    params.panoHeight = 512;
+    // --env_refl_res (default 512): reflections are roughness-blurred by eye
+    // anyway, so half the CITY bake res reads fine. Clamp to something sane —
+    // the mip chain needs res ≥ 64, and the 20-bit-style budgets don't apply
+    // here (linear addressing), but >2048 is just memory.
+    int res = fds::FeatureFlags::env_refl_res();
+    if (res < 64) res = 64;
+    if (res > 2048) res = 2048;
+    params.cubeRes = res / 2;
+    params.panoWidth = res;
+    params.panoHeight = res;
     auto store = std::make_unique<EnvPanoStore>();
     g_envBakeInProgress = true;
     const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0]);
