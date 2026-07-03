@@ -738,10 +738,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
-	// Env-specular reflection (--env_refl): per-scene baked panorama, sampled
-	// along the reflected view ray for Mat->Reflection > 0 materials.
-	const fds::EnvPanoLinear *envPanoG = fds::FeatureFlags::env_refl()
-		? fds::EnvReflection_Get(ctx.Sc) : nullptr;
+	// Env-specular reflection (--env_refl): per-SURFACE baked panoramas,
+	// matID-indexed (each reflective material's pano is captured from its own
+	// centroid; the lookup is parallax-corrected against the scene AABB).
+	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
+		? fds::EnvReflection_Table(ctx.Sc) : nullptr;
 	// Raw gain: the material's Reflection% now enters through Fresnel F0
 	// (F0 = Reflection/100), so the gain is a plain multiplier on top.
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
@@ -1120,15 +1121,17 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
-			// Env reflection + metalness need per-pixel work (reflected-ray
-			// sample / diffuse-kill + tint) — scalar-path only, like nmaps.
+			// Env reflection + metalness live in the shared per-pixel COMPOSE
+			// (after the light loop), so they do NOT force the scalar light
+			// loop — only nmap/AO do (they change the normal the loop uses).
 			// Metals get env even at Reflection == 0 (a metal with no
 			// reflection is just black — its "diffuse" IS the reflection).
 			const bool hasMetal   = metalMapOnG && Mat->MetallicMap;
-			const bool hasEnvRefl = envPanoG && (Mat->Reflection > 0.0f || hasMetal);
+			const fds::EnvPanoLinear *envP =
+				(envTabG && (Mat->Reflection > 0.0f || hasMetal)) ? envTabG[matID] : nullptr;
+			const bool hasEnvRefl = envP != nullptr;
 			const bool useVecHere = useVec
-				&& (sVecForce || (!hasNormalMap && !hasEnvRefl && !hasMetal
-				                  && !(hasAoMap && !aoInAlpha)));
+				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
 
 			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
 			// the direct-light loop adds to them) — direct light is occluded by
@@ -1655,10 +1658,15 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				sG *= 1.0f - metalM + metalM * texG * inv255;
 				sR *= 1.0f - metalM + metalM * texR * inv255;
 			}
-			// Env-specular reflection (--env_refl): sample the scene panorama
-			// along the reflected view ray. Fresnel-weighted (Schlick): F0 =
-			// the authored Reflection% (0.04 dielectric floor), pulled toward
-			// 1 by metalness; grazing angles reflect more, like real surfaces.
+			// Env-specular reflection (--env_refl): sample this surface's
+			// panorama along the reflected view ray. Fresnel-weighted
+			// (Schlick): F0 = the authored Reflection% (0.04 dielectric
+			// floor), pulled toward 1 by metalness. PARALLAX-CORRECTED: the
+			// pano is only exact at its bake point, so the reflected ray is
+			// intersected with the scene-AABB proxy from the pixel's WORLD
+			// position and the direction to that hit (from the bake point)
+			// indexes the pano — floors/walls track position instead of
+			// wearing a pasted-on picture.
 			if (hasEnvRefl) {
 				// Incident ray d = pixel direction (view space, camera at
 				// origin); reflect about the (possibly nmap-perturbed) N.
@@ -1670,14 +1678,38 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				const float rvz = dz - 2.0f * dDotN * nz;
 				// View → world rotation (viewToWorld is the transpose of the
 				// camera rotation; direction ⇒ no translation).
-				const float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
-				const float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
-				const float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+				float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
+				float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
+				float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+				// Parallax correction: exit-t of ray sampleWorld + t·R against
+				// the AABB (slab method, per-axis far plane), hit point → the
+				// lookup direction from the BAKE point. t ≤ 0 (pixel outside
+				// the proxy) falls back to the uncorrected direction.
+				{
+					const float bigT = 1e30f;
+					const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
+					                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
+					const float ty_ = rwy > 1e-6f ? (envP->boxMaxY - sampleWorldY) / rwy
+					                : rwy < -1e-6f ? (envP->boxMinY - sampleWorldY) / rwy : bigT;
+					const float tz_ = rwz > 1e-6f ? (envP->boxMaxZ - sampleWorldZ) / rwz
+					                : rwz < -1e-6f ? (envP->boxMinZ - sampleWorldZ) / rwz : bigT;
+					float t = tx_ < ty_ ? tx_ : ty_;
+					if (tz_ < t) t = tz_;
+					if (t > 0.0f && t < bigT) {
+						const float hx_ = sampleWorldX + t * rwx - envP->bakeX;
+						const float hy_ = sampleWorldY + t * rwy - envP->bakeY;
+						const float hz_ = sampleWorldZ + t * rwz - envP->bakeZ;
+						const float hInv_ = fast_rsqrt(hx_*hx_ + hy_*hy_ + hz_*hz_ + 1e-12f);
+						rwx = hx_ * hInv_; rwy = hy_ * hInv_; rwz = hz_ * hInv_;
+					}
+				}
 				// Equirect lookup — the exact inverse of EnvBake's stitch
-				// mapping: lon = atan2(-z, -x), lat = asin(y).
-				const float lon = std::atan2(-rwz, -rwx);
+				// mapping: lon = atan2(-z, -x), lat = asin(y). Polynomial
+				// approximations (SimdHelpers) — libm atan2f/asinf here were
+				// the bulk of the env cost (~5ms on a cockpit-sized surface).
+				const float lon = atan2_approx(-rwz, -rwx);
 				float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
-				const float lat = std::asin(sy_);
+				const float lat = asin_approx(sy_);
 				float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
 				eu -= std::floor(eu);
 				float evv = 0.5f - lat * (1.0f / 3.14159265359f);
@@ -1695,17 +1727,21 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				// Trilinear across the blur chain: nearest-level select on a
 				// NOISY roughness map made adjacent pixels flip between sharp
 				// and blurred mips (speckle). Lerp the two straddling levels.
-				float lvlF = rough * float(envPanoG->numMips - 1);
+				float lvlF = rough * float(envP->numMips - 1);
 				if (lvlF < 0.0f) lvlF = 0.0f;
-				if (lvlF > float(envPanoG->numMips - 1)) lvlF = float(envPanoG->numMips - 1);
+				if (lvlF > float(envP->numMips - 1)) lvlF = float(envP->numMips - 1);
 				const int lvl0 = int(lvlF);
-				const int lvl1 = lvl0 + 1 < envPanoG->numMips ? lvl0 + 1 : lvl0;
+				const int lvl1 = lvl0 + 1 < envP->numMips ? lvl0 + 1 : lvl0;
 				const float lf = lvlF - float(lvl0);
+				// ENV_NOFETCH=1: constant color instead of the pano loads —
+				// cost-attribution experiment (fetch-bound vs math-bound).
+				static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
 				auto fetchLvl = [&](int lvl) -> uint32_t {
-					const int lw = envPanoG->W >> lvl, lh = envPanoG->H >> lvl;
+					if (sNoFetch) return 0xFF808080u;
+					const int lw = envP->W >> lvl, lh = envP->H >> lvl;
 					const int epx = int(eu * float(lw)) % lw;
 					const int epy_ = int(evv * float(lh));
-					return envPanoG->mip[lvl][size_t(epy_) * lw + epx];
+					return envP->mip[lvl][size_t(epy_) * lw + epx];
 				};
 				const uint32_t c0 = fetchLvl(lvl0);
 				const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;

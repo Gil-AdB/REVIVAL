@@ -414,27 +414,20 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// (if it runs at all), the transparent peel must not sample a stale grid.
 	FastFog_BeginFrame();
 
-	// Env-specular reflection (--env_refl): bake the scene panorama at first
-	// use if any material actually asks for it. The bake renders the six cube
-	// faces through Render(ForceForward) — EnsureBaked is re-entrancy-guarded
-	// so those inner frames pass straight through here. g_offscreenViewDepth
-	// gate: only trigger from the MAIN-camera frame — nested offscreen renders
-	// (the disco ball's panorama, mirror RTT) already hold the non-reentrant
+	// Env-specular reflection (--env_refl): per-surface panorama bakes at
+	// first use (FramePrep walks reflective materials, bakes from each one's
+	// centroid, refreshes the matID table). g_offscreenViewDepth gate: only
+	// from the MAIN-camera frame — nested offscreen renders (the disco ball's
+	// panorama, mirror RTT) already hold the non-reentrant
 	// g_engineSurfaceMutex and starting our own OffscreenViewScope inside one
 	// deadlocks (found the hard way: hung 20 min inside UpdateDiscoBall).
 	if (fds::FeatureFlags::env_refl() && CurScene && View
-	    && fds::g_offscreenViewDepth == 0
-	    && !fds::EnvReflection_Get(CurScene)) {
-		bool anyRefl = false;
-		for (Material *M = MatLib; M && !anyRefl; M = M->Next)
-			if (M->RelScene == CurScene && (M->Reflection > 0.0f || M->MetallicMap))
-				anyRefl = true;
-		if (anyRefl) {
-			fds::EnvReflection_EnsureBaked(CurScene, View->ISource);
-			// The bake's six cube-face renders ran Transform_Objects with
-			// their own cameras, clobbering the transformed vertex state the
-			// scene tick prepared for THIS frame — re-transform + re-sort so
-			// the frame renders from its own camera. One-time cost per scene.
+	    && fds::g_offscreenViewDepth == 0) {
+		if (fds::EnvReflection_FramePrep(CurScene)) {
+			// The bakes' cube-face renders ran Transform_Objects with their
+			// own cameras, clobbering the transformed vertex state the scene
+			// tick prepared for THIS frame — re-transform + re-sort so the
+			// frame renders from its own camera. One-time cost per scene.
 			Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
 			if (CAll != 0) Radix_Sort(FList, SList, CAll);
 		}

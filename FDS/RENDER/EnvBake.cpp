@@ -7,7 +7,9 @@
 #include <Base/FrameState.h> // g_mainCamera, g_mainFaces
 #include <Base/Scene.h>
 #include <Base/Camera.h>
+#include <Base/Material.h>   // per-surface bakes: Reflection / MetallicMap / ID
 #include <Base/Texture.h>
+#include <Base/TriMesh.h>    // material centroids + scene AABB
 #include <Base/Vector.h>
 
 #include <cmath>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <vector>
 
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
@@ -198,13 +201,25 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     return T;
 }
 
-// ── Deferred env-specular registry ─────────────────────────────────────────
+// ── Deferred env-specular registry (per reflective surface) ───────────────
 namespace {
 struct EnvPanoStore {
     std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
     EnvPanoLinear view;
 };
-std::map<Scene*, EnvPanoStore> g_envPanoByScene;
+struct SceneEnv {
+    // Owning stores + Material* → store index (materials with near-identical
+    // centroids alias one store: ::mirUV clones, split instances).
+    std::vector<std::unique_ptr<EnvPanoStore>> stores;
+    std::map<const Material*, int> byMat;
+    // matID-indexed view table the kernel reads (rebuilt each FramePrep —
+    // matIDs shift when the editor rebuilds the mat table).
+    const EnvPanoLinear* table[256] = {};
+    // Scene AABB proxy (world), computed once.
+    float boxMin[3] = {}, boxMax[3] = {};
+    bool  boxValid = false;
+};
+std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
 
 // 2×2 box downsample (per-channel average), ARGB.
@@ -227,45 +242,127 @@ void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
             dst[size_t(y) * dw + x] = out;
         }
 }
+
+// World-space centroid of every face using material M. False if none found
+// (material exists but no faces reference it — nothing to reflect anyway).
+bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
+    double sx = 0, sy = 0, sz = 0;
+    long n = 0;
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+        for (DWord i = 0; i < T->FIndex; ++i) {
+            const Face& F = T->Faces[i];
+            if (F.Txtr != M) continue;
+            const Vertex* vs[3] = { F.A, F.B, F.C };
+            for (int k = 0; k < 3; ++k) {
+                if (!vs[k]) continue;
+                Vector w;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&vs[k]->Pos), &w);
+                Vector_SelfAdd(&w, &T->IPos);
+                sx += w.x; sy += w.y; sz += w.z;
+                ++n;
+            }
+        }
+    if (!n) return false;
+    out = { float(sx / n), float(sy / n), float(sz / n) };
+    return true;
 }
 
-const EnvPanoLinear* EnvReflection_Get(Scene* sc) {
-    auto it = g_envPanoByScene.find(sc);
-    return it == g_envPanoByScene.end() ? nullptr : &it->second.view;
+void sceneAABB(Scene* sc, SceneEnv& env) {
+    if (env.boxValid) return;
+    float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+        for (DWord v = 0; v < T->VIndex; ++v) {
+            Vector w;
+            MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
+            Vector_SelfAdd(&w, &T->IPos);
+            const float p[3] = { w.x, w.y, w.z };
+            for (int a = 0; a < 3; ++a) {
+                if (p[a] < lo[a]) lo[a] = p[a];
+                if (p[a] > hi[a]) hi[a] = p[a];
+            }
+        }
+    for (int a = 0; a < 3; ++a) { env.boxMin[a] = lo[a]; env.boxMax[a] = hi[a]; }
+    env.boxValid = true;
 }
 
-void EnvReflection_EnsureBaked(Scene* sc, const Vector& center) {
-    if (!sc || g_envBakeInProgress || g_envPanoByScene.count(sc)) return;
-    g_envBakeInProgress = true;
+// Bake one panorama from `center` into a fresh store (mip chain + metadata).
+std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
+                                        const Vector& center) {
     EnvBakeParams params;
     params.cubeRes = 256;            // reflections are roughness-blurred by
     params.panoWidth = 512;          // eye anyway — half the CITY bake res
     params.panoHeight = 512;
-    EnvPanoStore store;
-    const bool ok = renderCubeAndStitch(sc, center, params, store.levels[0]);
+    auto store = std::make_unique<EnvPanoStore>();
+    g_envBakeInProgress = true;
+    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0]);
     g_envBakeInProgress = false;
-    if (!ok) return;
-    auto& slot = g_envPanoByScene[sc];
-    slot = std::move(store);
-    // Pre-filtered chain for roughness: each level a 2×2 box downsample of
-    // the previous (512→256→128→64). Downsampling an equirect ignores the
-    // pole distortion — acceptable for a rough-blur approximation.
-    slot.view.W = params.panoWidth;
-    slot.view.H = params.panoHeight;
-    slot.view.numMips = EnvPanoLinear::kMaxMips;
-    int w = params.panoWidth, h = params.panoHeight;
+    if (!ok) return nullptr;
+    EnvPanoLinear& v = store->view;
+    v.W = params.panoWidth;
+    v.H = params.panoHeight;
+    v.numMips = EnvPanoLinear::kMaxMips;
+    int w = v.W, h = v.H;
     for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
-        boxDownsample(slot.levels[k-1], w, h, slot.levels[k]);
+        boxDownsample(store->levels[k-1], w, h, store->levels[k]);
         w >>= 1; h >>= 1;
     }
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
-        slot.view.mip[k] = slot.levels[k].data();
-    slot.view.px = slot.view.mip[0];
-    std::fprintf(stderr, "[ENVREFL] baked %dx%d panorama (+%d blur mips) for scene %p at (%.1f %.1f %.1f)\n",
-                 slot.view.W, slot.view.H, slot.view.numMips - 1, (void*)sc,
-                 center.x, center.y, center.z);
+        v.mip[k] = store->levels[k].data();
+    v.bakeX = center.x; v.bakeY = center.y; v.bakeZ = center.z;
+    v.boxMinX = env.boxMin[0]; v.boxMinY = env.boxMin[1]; v.boxMinZ = env.boxMin[2];
+    v.boxMaxX = env.boxMax[0]; v.boxMaxY = env.boxMax[1]; v.boxMaxZ = env.boxMax[2];
+    return store;
+}
+}   // namespace
+
+bool EnvReflection_FramePrep(Scene* sc) {
+    if (!sc || g_envBakeInProgress) return false;
+    SceneEnv& env = g_envByScene[sc];
+    bool bakedAny = false;
+    // Bake for every reflective material that lacks one; centroids within a
+    // few world units share a store (clone materials, adjacent panels).
+    for (Material* M = MatLib; M; M = M->Next) {
+        if (M->RelScene != sc) continue;
+        if (!(M->Reflection > 0.0f || M->MetallicMap)) continue;
+        if (env.byMat.count(M)) continue;
+        Vector c;
+        if (!materialCentroid(sc, M, c)) { env.byMat[M] = -1; continue; }
+        if (std::getenv("ENVDBG"))
+            std::fprintf(stderr, "[ENVDBG] mat '%s' refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
+                         M->Name ? M->Name : "?", M->Reflection, M->MetallicMap ? 1 : 0,
+                         c.x, c.y, c.z);
+        sceneAABB(sc, env);
+        int idx = -1;
+        for (size_t i = 0; i < env.stores.size(); ++i) {
+            const EnvPanoLinear& v = env.stores[i]->view;
+            const float dx = v.bakeX - c.x, dy = v.bakeY - c.y, dz = v.bakeZ - c.z;
+            if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { idx = int(i); break; }
+        }
+        if (idx < 0) {
+            auto store = bakeStore(sc, env, c);
+            if (!store) { env.byMat[M] = -1; continue; }
+            std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
+                         store->view.W, store->view.H, store->view.numMips - 1,
+                         M->Name ? M->Name : "?", c.x, c.y, c.z);
+            env.stores.push_back(std::move(store));
+            idx = int(env.stores.size()) - 1;
+            bakedAny = true;
+        }
+        env.byMat[M] = idx;
+    }
+    // Refresh the matID table (IDs move when the editor rebuilds the table).
+    std::memset(env.table, 0, sizeof(env.table));
+    for (auto& [M, idx] : env.byMat)
+        if (idx >= 0 && M->RelScene == sc && M->ID < 256)
+            env.table[M->ID] = &env.stores[size_t(idx)]->view;
+    return bakedAny;
 }
 
-void EnvReflection_Invalidate(Scene* sc) { g_envPanoByScene.erase(sc); }
+const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {
+    auto it = g_envByScene.find(sc);
+    return it == g_envByScene.end() ? nullptr : it->second.table;
+}
+
+void EnvReflection_Invalidate(Scene* sc) { g_envByScene.erase(sc); }
 
 }  // namespace fds
