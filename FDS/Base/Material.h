@@ -66,6 +66,10 @@ struct Material
     // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
     // UV-tiled floors). Default 1.
     float                 ParallaxScale          = 1.0f;
+    // Per-material AO-map strength multiplier (× the global --ao_map_strength),
+    // same pattern as ParallaxScale. 1 = full effect; lower to tame an AO map
+    // that reads too dark on one surface without dialing the whole scene.
+    float                 AoStrength             = 1.0f;
     // Per-material roughness map (PBR). Grayscale, 8-bit single-channel, same
     // tiled/mip layout as the albedo (sampled at the same swizzled UV/miplevel
     // — incl. the parallax-shifted UV). White = rough → LESS specular. Cheap

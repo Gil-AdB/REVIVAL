@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b30</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b31</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -650,7 +650,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b30); orbit/zoom embind =',
+        console.log('[editor] panel init (build b31); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -707,7 +707,10 @@
           s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
         return btoa(s);
       }
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection'];
+      // aoStrength/parallaxScale are engine-only dials (× the global
+      // ao_map_strength / parallax_strength) — the server persists them to the
+      // scene sidecar, the rest to LWO/FLD.
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip'];
       // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
       // AddLight blocks, which is what the server patches on Save).
       var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
@@ -1239,7 +1242,8 @@
       // Per-property ranges — the engine stores these on different scales:
       // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
-                            transparency:[0,100], reflection:[0,100] };
+                            transparency:[0,100], reflection:[0,100],
+                            aoStrength:[0,2], parallaxScale:[0,3] };
       // Slider + numeric twin. The number box accepts values beyond the slider
       // range (type an exact 3.5 even if the slider tops out at 2).
       function propRow(s, key, min, max, step){
@@ -1302,9 +1306,15 @@
           };
           el.appendChild(spl);
         }
-        ['diffuse','specular','luminosity','transparency','reflection'].forEach(function(k){
+        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
           var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
+          if (k === 'aoStrength') {
+            row.title = 'per-material AO-map strength (× global ao_map_strength). Only visible with an AO map + --ssao/--ao flags.';
+          }
+          if (k === 'parallaxScale') {
+            row.title = 'per-material parallax depth (× global parallax_strength). Only visible with a height map + --parallax.';
+          }
           if (k === 'reflection') {
             // Honest label: the engine has no per-material reflection path
             // (env-mapped faces are code-routed) — the value persists to the
@@ -1314,6 +1324,32 @@
           }
           el.appendChild(row);
         });
+        // Normal-map controls: G-channel convention flip (OGL↔DX) + viz
+        // shortcut. Only meaningful when the surface HAS a normal map.
+        if (+s.hasNormalMap) {
+          var nfr = document.createElement('div'); nfr.className = 'prop-row';
+          var nfl = document.createElement('label'); nfl.textContent = 'normal G';
+          nfr.title = 'flip the normal map\'s green channel (OpenGL ↔ DirectX convention). If relief looks inverted (mortar bulges out), flip it. Persists via sidecar.';
+          nfr.appendChild(nfl);
+          var nfc = document.createElement('input'); nfc.type = 'checkbox'; nfc.checked = !!(+s.normalFlip);
+          nfc.onchange = function(){ setProp(s.name, 'normalFlip', nfc.checked ? 1 : 0); };
+          nfr.appendChild(nfc);
+          var viz = document.createElement('a');
+          viz.textContent = 'viz'; viz.href = '#';
+          viz.title = 'cycle normal viz: off → shaded normal (nmap applied) → raw nmap texel → geometric (--nmap_viz)';
+          viz.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;margin-left:auto;';
+          viz.onclick = function(e){
+            e.preventDefault();
+            var cur = 0;
+            try { cur = +(JSON.parse(Module.editorGetParams()).find(function(p){ return p.name === 'nmap_viz'; }) || {}).value || 0; } catch(err){}
+            var next = [2,3,1,0][ [0,2,3,1].indexOf(cur) ];   // 0→2→3→1→0
+            if (next === undefined) next = 0;
+            Module.editorSetParam('nmap_viz', String(next));
+            editorStatus('nmap_viz = ' + next + ' (' + ['off','geometric','shaded','raw texel'][next] + ')');
+          };
+          nfr.appendChild(viz);
+          el.appendChild(nfr);
+        }
         // glossiness = specular exponent; keep to the kernel's fast specialized set.
         var gr = document.createElement('div'); gr.className = 'prop-row';
         var gl = document.createElement('label'); gl.textContent = 'glossiness'; gr.appendChild(gl);

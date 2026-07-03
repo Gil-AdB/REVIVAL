@@ -28,6 +28,7 @@
 //   preview/thumbnail files are skipped.
 
 struct Scene;
+struct Material;
 
 namespace fds {
 
@@ -84,6 +85,11 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path);
 // both the sidecar prop lines and the editor's live Editor_SetSurfaceProp.
 bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
                                    const char *prop, float value);
+
+// Current normal-G flip parity of the material's normal map (0 = as the file
+// loaded, 1 = flipped). Set via SetSurfaceProp("normalFlip", 0|1); tracked per
+// TEXTURE so shared clones flip once and the editor UI reads a truthful state.
+int MaterialImport_GetNormalFlip(const Material *M);
 
 } // namespace fds
 

@@ -62,6 +62,7 @@ uint8_t LightmapBake_DebugSampleAtWorld(int cubeIdx, float wx, float wy, float w
 //   5 = baked shadow factor for omni 0 (greyscale)
 // 0 (default) = no-op.
 void Render_LightmapViz(Scene *Sc);
+void Render_NormalViz(Scene *Sc);   // --nmap_viz debug (post-tonemap, like LightmapViz)
 
 }  // namespace fds
 

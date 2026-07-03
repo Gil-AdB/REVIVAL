@@ -717,4 +717,95 @@ uint8_t LightmapBake_DebugSampleAtWorld(int cubeIdx, float wx, float wy, float w
     return SampleStaticCubeAtWorld(cr, wp, constBias, slopeBiasInt, -1);
 }
 
+// ── Normal debug viz (--nmap_viz) ──────────────────────────────────────────
+// Post-tonemap VPage overwrite, same slot as Render_LightmapViz (anything
+// drawn earlier is wiped by the tonemap). Scalar per-pixel redo of the
+// kernel's normal path — debug-only, cost is irrelevant.
+//   1 = G-buffer geometric normal   2 = final TBN-perturbed shaded normal
+//   3 = raw normal-map texel RGB
+void Render_NormalViz(Scene *Sc)
+{
+    const int mode = fds::FeatureFlags::nmap_viz();
+    if (mode == 0) return;
+    meka::GBuffer *gb = g_gbuffer;
+    if (!Sc || !gb || gb->normal.empty() || gb->txtr.empty()) return;
+    MatTable mt = Scene_GetMatTable(Sc);
+    uint32_t *out = reinterpret_cast<uint32_t *>(VPage);
+    const size_t n = std::min(size_t(XRes) * size_t(YRes), gb->normal.size());
+    for (size_t i = 0; i < n; ++i) {
+        const meka::u16 packedN = gb->normal[i];
+        if (packedN == 0) { out[i] = 0xFF101010u; continue; }   // sentinel / sky
+        float nx, ny, nz;
+        meka::oct_decode_u16(packedN, nx, ny, nz);
+
+        const uint32_t mat32 = gb->txtr[i];
+        const uint32_t matId = (mat32 >> 20) & 0xFF;
+        const uint32_t swizzledUV = mat32 & 0xFFFFF;
+        const uint32_t miplevel = mat32 >> 28;
+        Material *Mat = (matId < mt.count) ? mt.data[matId] : nullptr;
+
+        float nmX = 0, nmY = 0, nmZ = 1;
+        bool haveTexel = false;
+        if (Mat && Mat->NormalMap && Mat->NormalMap->Mipmap[miplevel]) {
+            const Texture *t = Mat->NormalMap;
+            if (t->BPP == 16) {
+                const uint16_t px = reinterpret_cast<const uint16_t *>(t->Mipmap[miplevel])[swizzledUV];
+                nmX = (float(px & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+                nmY = (float((px >> 8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+                const float z2 = 1.0f - nmX*nmX - nmY*nmY;
+                nmZ = z2 > 0.0f ? std::sqrt(z2) : 0.0f;
+            } else {
+                const uint32_t px = reinterpret_cast<const uint32_t *>(t->Mipmap[miplevel])[swizzledUV];
+                nmX = (float((px >> 16) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+                nmY = (float((px >>  8) & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+                nmZ = (float( px        & 0xFF) * (1.0f/255.0f)) * 2.0f - 1.0f;
+            }
+            haveTexel = true;
+        }
+
+        auto pack = [](float x, float y, float z) -> uint32_t {
+            const int R = int((x * 0.5f + 0.5f) * 255.0f);
+            const int G = int((y * 0.5f + 0.5f) * 255.0f);
+            const int B = int((z * 0.5f + 0.5f) * 255.0f);
+            return uint32_t(B < 0 ? 0 : B > 255 ? 255 : B)
+                 | (uint32_t(G < 0 ? 0 : G > 255 ? 255 : G) << 8)
+                 | (uint32_t(R < 0 ? 0 : R > 255 ? 255 : R) << 16) | 0xFF000000u;
+        };
+
+        if (mode == 1) { out[i] = pack(nx, ny, nz); continue; }
+        if (mode == 3) { out[i] = haveTexel ? pack(nmX, nmY, nmZ) : 0xFF303030u; continue; }
+
+        // mode 2: the kernel's TBN combine (scalar copy of the shading path).
+        if (!haveTexel) { out[i] = pack(nx, ny, nz); continue; }
+        float tx = 0, ty = 0, tz = 0;
+        bool tangentValid = false;
+        if (!gb->tangent.empty() && gb->tangent[i] != 0) {
+            meka::oct_decode_u16(gb->tangent[i], tx, ty, tz);
+            const float tDotN = tx*nx + ty*ny + tz*nz;
+            tx -= nx * tDotN; ty -= ny * tDotN; tz -= nz * tDotN;
+            const float tl2 = tx*tx + ty*ty + tz*tz;
+            if (tl2 > 1e-12f) {
+                const float inv = 1.0f / std::sqrt(tl2);
+                tx *= inv; ty *= inv; tz *= inv;
+                tangentValid = true;
+            }
+        }
+        if (!tangentValid) {
+            float rx, ry, rz;
+            if (std::fabs(ny) < 0.9f) { rx = 0; ry = 1; rz = 0; }
+            else                      { rx = 1; ry = 0; rz = 0; }
+            tx = ry*nz - rz*ny; ty = rz*nx - rx*nz; tz = rx*ny - ry*nx;
+            const float inv = 1.0f / std::sqrt(tx*tx + ty*ty + tz*tz);
+            tx *= inv; ty *= inv; tz *= inv;
+        }
+        const float hs = Mat->TbnHandedness;
+        const float bx = (ny*tz - nz*ty) * hs, by = (nz*tx - nx*tz) * hs, bz = (nx*ty - ny*tx) * hs;
+        float vx = tx*nmX + bx*nmY + nx*nmZ;
+        float vy = ty*nmX + by*nmY + ny*nmZ;
+        float vz = tz*nmX + bz*nmY + nz*nmZ;
+        const float inv = 1.0f / std::sqrt(vx*vx + vy*vy + vz*vz + 1e-12f);
+        out[i] = pack(vx*inv, vy*inv, vz*inv);
+    }
+}
+
 }  // namespace fds

@@ -1129,7 +1129,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					    + float((aoTexel >> 8)  & 0xFF)  * 0.587f
 					    + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
 				}
-				ao = 1.0f - aoStrengthG * (1.0f - ao);
+				// Global dial × per-material dial (Mat->AoStrength defaults 1 —
+				// the ParallaxScale pattern).
+				ao = 1.0f - aoStrengthG * Mat->AoStrength * (1.0f - ao);
 				lB *= ao; lG *= ao; lR *= ao;
 			}
 

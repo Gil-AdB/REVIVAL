@@ -48,6 +48,12 @@ Texture *MakeHeight8(Texture *src);
 // Caller owns.
 Texture *MakeNormal16(Texture *src);
 
+// Invert the GREEN channel of a normal map IN PLACE, across the full mip chain
+// (OGL ↔ DX tangent-space convention). Handles both kernel formats: 32-bit
+// BGRA (G at bits 8-15) and MakeNormal16's 16-bit R|G<<8 (G = high byte).
+// Involutive — flip twice = original.
+void FlipNormalMapG(Texture *t);
+
 // Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
 // with all the plumbing the engine needs — each item below cost a debug session
 // when missed while adding custom geometry (disco ball, blaster bolts, ...):

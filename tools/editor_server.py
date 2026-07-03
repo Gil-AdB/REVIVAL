@@ -81,6 +81,35 @@ def scene_sidecar(scene):
 
 ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "glossiness", "luminosity", "transparency", "reflection"}
+# Engine-only per-material dials with no LWO/FLD field — persist as sidecar
+# surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip"}
+
+
+def split_surface_sidecar_keys(scene, surfaces, warnings):
+    """Strip SURF_SIDECAR_KEYS out of the save payload's surface dicts and
+    persist them as sidecar prop lines. Mutates `surfaces` (drops entries that
+    become empty). Runtime '#k' instance-split names collapse to the base
+    surface (splits are live-only). Returns a summary list."""
+    if not surfaces:
+        return []
+    sidecar = scene_sidecar(scene)
+    entries = read_sidecar(sidecar)
+    saved = []
+    for name in list(surfaces):
+        props = surfaces[name]
+        if not isinstance(props, dict):
+            continue
+        side = {k: props.pop(k) for k in list(props) if k in SURF_SIDECAR_KEYS}
+        base = re.sub(r"#\d+$", "", name)
+        for k, v in side.items():
+            entries[(base, k)] = f"{float(v):.6g}"
+            saved.append({"surface": base, "key": k})
+        if not props:
+            del surfaces[name]
+    if saved:
+        write_sidecar(sidecar, entries)
+    return saved
 ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao"}
 
 # Live-served paths: the wasm preload (DEMO.data) copy of these is link-time
@@ -388,11 +417,15 @@ def do_save(scene, payload):
 
     warnings = []
     saved_maps = save_maps(scene, maps, warnings)
-    # Engine-only light keys (flareScale) → sidecar, for every scene type;
-    # what remains in `lights` goes to the LWS / FLD patchers below.
+    # Engine-only keys (light flareScale, surface aoStrength/parallaxScale) →
+    # sidecar, for every scene type; what remains goes to the LWS/LWO/FLD
+    # patchers below.
     saved_light_side = split_light_sidecar_keys(scene, lights, warnings)
     if saved_light_side:
         warnings.append(f"{len(saved_light_side)} light key(s) → sidecar (engine-only, no LWS/FLD field)")
+    saved_surf_side = split_surface_sidecar_keys(scene, surfaces, warnings)
+    if saved_surf_side:
+        warnings.append(f"{len(saved_surf_side)} surface key(s) → sidecar (engine-only, no LWO/FLD field)")
 
     if not SCENES[scene]["authoring"]:
         return do_save_fld(scene, surfaces, lights, saved_maps, warnings)

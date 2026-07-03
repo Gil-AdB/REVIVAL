@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -339,6 +340,16 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 	}
 }
 
+// Normal-G flip parity per texture (0 = as loaded from file). Keyed by
+// texture (shared across a surface's material clones) so a flip lands once.
+static std::map<Texture*, int> g_nmapFlipParity;
+
+int MaterialImport_GetNormalFlip(const Material *M) {
+	if (!M || !M->NormalMap) return 0;
+	auto it = g_nmapFlipParity.find(M->NormalMap);
+	return it == g_nmapFlipParity.end() ? 0 : it->second;
+}
+
 bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
                                    const char *prop, float value) {
 	if (!sc || !surface || !prop) return false;
@@ -364,6 +375,23 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 			else              M->Flags &= ~Mat_Transparent;
 		}
 		else if (!std::strcmp(prop, "reflection"))   M->Reflection = value;
+		// Engine-only per-material dials (no LWO/FLD field — persist via the
+		// scene sidecar). Both multiply their global FeatureFlags strength.
+		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
+		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		else if (!std::strcmp(prop, "normalFlip")) {
+			// Green-channel convention toggle (OGL ↔ DX), value = desired
+			// parity (0/1 vs the file as loaded). The flip mutates the
+			// TEXTURE, which is shared across a surface's material clones —
+			// parity is tracked per texture so the clone loop flips it
+			// exactly once, and the sidecar's init-time apply and later
+			// editor toggles stay consistent (GetNormalFlip reads it back).
+			const int want = int(value) & 1;
+			if (M->NormalMap && g_nmapFlipParity[M->NormalMap] != want) {
+				FlipNormalMapG(M->NormalMap);
+				g_nmapFlipParity[M->NormalMap] = want;
+			}
+		}
 		else return false;   // unknown prop
 		any = true;
 	}

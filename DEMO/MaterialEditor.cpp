@@ -81,6 +81,10 @@ std::string Editor_GetSurfacesJSON()
 		appendNum(out, "luminosity",   M->Luminosity);   out += ",";
 		appendNum(out, "transparency", M->Transparency); out += ",";
 		appendNum(out, "reflection",   M->Reflection);   out += ",";
+		appendNum(out, "aoStrength",   M->AoStrength);   out += ",";
+		appendNum(out, "parallaxScale",M->ParallaxScale);out += ",";
+		appendNum(out, "normalFlip",   fds::MaterialImport_GetNormalFlip(M)); out += ",";
+		out += M->NormalMap ? "\"hasNormalMap\":1," : "\"hasNormalMap\":0,";
 		appendNum(out, "flags",        (double)M->Flags);out += ",";
 		out += "\"texture\":\"";
 		jsonEscape(out, (M->Txtr && M->Txtr->FileName) ? M->Txtr->FileName : "");
