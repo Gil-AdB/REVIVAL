@@ -104,6 +104,7 @@ static const EditorSceneDef kEditorScenes[] = {
 	{ "city",     &Initialize_City,     &createCityScene,     false, true,  0, 0, 0, 48.0f },
 	{ "chase",    &Initialize_Chase,    &createChaseScene,    false, true,  0, 0, 0, 48.0f },
 	{ "fountain", &Initialize_Fountain, &createFountainScene, false, true,  0, 0, 0, 48.0f },
+	{ "crash",    &Initialize_Crash,    &createCrashScene,    false, true,  0, 0, 0, 48.0f },
 };
 static const EditorSceneDef *g_editorScene = &kEditorScenes[0];
 static std::atomic<bool> g_editorSceneReady{false};

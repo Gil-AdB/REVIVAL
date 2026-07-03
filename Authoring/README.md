@@ -36,3 +36,19 @@ converter — so a correct source set reproduces them byte-for-byte.
 To pin a pending scene we use the same method that worked for greets: convert a
 candidate `.lws` with the matching objects and `cmp` against the shipping FLD
 (0.113), iterating on object versions/variants until byte-identical.
+`tools/pin_scene.py <candidate.LWS> <shipping.FLD>` automates one attempt
+(stages basename-matched objects from `Original/`, converts, reports the size
+delta + first differing byte + ambiguous object variants to `--pick` from).
+
+## Editor write-back without pinned sources
+
+First pin attempts on chase came out ~half the shipping size (wrong-generation
+object variants), so the editor doesn't wait for the archaeology: for city /
+chase / fountain / crash, `tools/editor_server.py` patches the **shipping FLD
+binary directly** via `tools/fldpatch.py` (a byte-exact walker of the v0.113
+layout from `tools/lwsread/FLDSAVE.CPP` — it refuses to touch a file whose
+walk doesn't land exactly on EOF). Surface props and point-light
+color/intensity/range both persist; backups + restore live under
+`Runtime/SCENES/.backups/`. If a scene's sources are pinned later, flip it to
+`authoring: True` in the server registry and it upgrades to source-level
+write-back like greets.

@@ -3,6 +3,7 @@
 
 #include "CRASH.H"
 #include "FrameProfiler.h"
+#include "MaterialImport.h"
 #include "MeshOps.h"
 #include "SceneTick.h"
 #include "Scenes.h"
@@ -29,6 +30,9 @@ void Initialize_Crash()
 	tagSceneMaterials(CrashSc, /*restrictToScene=*/false);
 
 	Preprocess_Scene(CrashSc, "CRASH");
+
+	// Editor persistence: PBR maps + prop overrides saved for this scene.
+	fds::MaterialImport_ApplySidecar(CrashSc, "SCENES/CRASH.MAT");
 
 	// Auto-detect creased meshes (laptop facade) and switch them to
 	// per-face vertex normals; smooth meshes (if any) untouched.

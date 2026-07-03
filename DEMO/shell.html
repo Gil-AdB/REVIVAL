@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b26</span></h2>
+      <h2>Surfaces — <span id="editor-scene-name">greets</span> <span style="color:#6c8;font-size:10px;font-weight:normal">build b27</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -645,7 +645,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b26); orbit/zoom embind =',
+        console.log('[editor] panel init (build b27); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         document.getElementById('editor-scene-name').textContent = revEditorScene;
@@ -1086,7 +1086,7 @@
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
             if (res.fld) bits.push(res.fld.split('/').pop());
             if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
-            if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → sidecar');
+            if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → FLD');
             editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
@@ -1120,11 +1120,12 @@
         if (e.key === '[') timeStep(e.shiftKey ? -500 : -50);
         else if (e.key === ']') timeStep(e.shiftKey ? 500 : 50);
       });
-      // Backups (greets authoring files only): every Save/restore stashes the
-      // previous .lwo/.LWS under Authoring/greets/.backups; restoring copies
-      // one back over its file (backing up the current state first) and regens
-      // the FLD — Reload then shows it.
-      if (revEditorScene === 'greets') {
+      // Backups: greets stashes its .lwo/.LWS authoring sources under
+      // Authoring/greets/.backups (restore regens the FLD); the other scenes
+      // stash the shipping FLD itself under Runtime/SCENES/.backups (their
+      // saves patch the FLD directly — tools/fldpatch.py). Restoring backs up
+      // the current state first — Reload then shows it.
+      (function(){
         var bhdr = document.getElementById('editor-backups-hdr');
         bhdr.style.display = 'block';
         var bopen = false;
@@ -1134,7 +1135,7 @@
           el.style.display = bopen ? 'block' : 'none';
           if (!bopen) return;
           el.innerHTML = '<div class="surf-tex">loading…</div>';
-          fetch('api/greets/backups').then(function(r){ return r.json(); }).then(function(res){
+          fetch('api/' + revEditorScene + '/backups').then(function(r){ return r.json(); }).then(function(res){
             el.innerHTML = '';
             if (!res.backups || !res.backups.length) { el.innerHTML = '<div class="surf-tex">no backups yet</div>'; return; }
             res.backups.forEach(function(b){
@@ -1143,11 +1144,11 @@
               d.onclick = function(){
                 if (!confirm('Restore ' + b.target + ' from ' + b.file + '?\n(The current file is backed up first.)')) return;
                 editorStatus('restoring ' + b.file + '…');
-                fetch('api/greets/restore', { method: 'POST', body: JSON.stringify({ file: b.file }) })
+                fetch('api/' + revEditorScene + '/restore', { method: 'POST', body: JSON.stringify({ file: b.file }) })
                   .then(function(r){ return r.json(); })
                   .then(function(res2){
                     editorStatus(res2.ok
-                      ? ((res2.restored ? 'restored ' + res2.restored + ' + FLD — Reload scene to see it'
+                      ? ((res2.restored ? 'restored ' + res2.restored + ' — Reload scene to see it'
                                         : (res2.note || 'nothing to do')))
                       : ('restore FAILED: ' + (res2.error || '?')));
                   })
@@ -1157,7 +1158,7 @@
             });
           }).catch(function(e){ el.innerHTML = '<div class="surf-tex">backups fetch failed: ' + e + '</div>'; });
         };
-      }
+      })();
       // Per-property ranges — the engine stores these on different scales:
       // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],

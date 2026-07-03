@@ -40,6 +40,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lwopatch  # noqa: E402
+import fldpatch  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WASM_ROOT = os.path.join(REPO, "build-wasm", "DEMO")
@@ -54,16 +55,25 @@ LWSREAD = os.path.join(REPO, "tools", "lwsread", "build", "lwsread")
 
 # Scene registry. greets has pinned LWO/LWS authoring sources, so numeric
 # surface edits patch the .lwo files and light edits patch the .lws (then the
-# FLD is regenerated). The other scenes' sources aren't pinned (Authoring/
-# README status table) — their numeric edits persist as sidecar prop lines
-# instead (surface|prop|value, applied at scene init by
-# MaterialImport_ApplySidecar), and light edits are live-only.
+# FLD is regenerated). The other scenes' exact 1998 sources aren't archived
+# (candidate .lws conversions come out ~half the shipping size — see the
+# Authoring/README status table + tools/pin_scene.py), so their surface AND
+# light edits patch the shipping FLD binary directly via tools/fldpatch.py,
+# with timestamped backups + restore under Runtime/SCENES/.backups/. PBR maps
+# go to the sidecar either way.
 SCENES = {
     "greets":   {"authoring": True},
     "city":     {"authoring": False},
     "chase":    {"authoring": False},
     "fountain": {"authoring": False},
+    "crash":    {"authoring": False},
 }
+
+FLD_BACKUPS = os.path.join(RUNTIME, "SCENES", ".backups")
+
+
+def scene_fld(scene):
+    return os.path.join(RUNTIME, "SCENES", scene.upper() + ".FLD")
 
 
 def scene_sidecar(scene):
@@ -263,6 +273,77 @@ def regen_fld(patched):
                  "fld_bytes": os.path.getsize(FLD_INSTALL)}
 
 
+def do_save_fld(scene, surfaces, lights, saved_maps, warnings):
+    """Write-back for scenes without pinned sources: patch the shipping FLD
+    in place (tools/fldpatch.py — walk-validated), with a timestamped backup.
+    Also drop any sidecar prop lines this save supersedes: sidecar overrides
+    apply AFTER the FLD loads, so a stale line would shadow the patched value."""
+    fld_path = scene_fld(scene)
+    if not os.path.exists(fld_path):
+        return 404, {"ok": False, "error": f"no FLD for scene '{scene}'"}
+    fld = fldpatch.FldFile(fld_path)
+
+    patched_surfaces, patched_lights = [], []
+    for name, props in surfaces.items():
+        bad = set(props) - ALLOWED_PROPS
+        if bad:
+            return 400, {"ok": False, "error": f"'{name}': unknown props {sorted(bad)}"}
+        # Editor names are base-collapsed already; strip a runtime "#k"
+        # instance-split suffix (live-only clones — the FLD has one surface).
+        base = re.sub(r"#\d+$", "", name)
+        if base != name:
+            warnings.append(f"'{name}' is a runtime instance split — patched the "
+                            f"base surface '{base}' (splits are live-only)")
+        n = fld.patch_material(base, props)
+        if n == 0:
+            warnings.append(f"'{name}': no material record in {os.path.basename(fld_path)} — skipped")
+        else:
+            patched_surfaces.append({"surface": base, "records": n, "props": sorted(props)})
+
+    for idx_s, props in sorted(lights.items(), key=lambda kv: int(kv[0])):
+        bad = set(props) - LIGHT_KEYS
+        if bad:
+            return 400, {"ok": False, "error": f"light {idx_s}: unknown keys {sorted(bad)}"}
+        try:
+            fld.patch_light(int(idx_s), props)
+            patched_lights.append({"index": int(idx_s), "keys": sorted(props)})
+        except ValueError as e:
+            warnings.append(f"light {idx_s}: {e}")
+
+    wrote = None
+    if patched_surfaces or patched_lights:
+        if bytes(fld.data) != open(fld_path, "rb").read():
+            bak = lwopatch.backup(fld_path, FLD_BACKUPS)
+            fld.save(fld_path)
+            wrote = {"file": os.path.basename(fld_path),
+                     "surfaces": [p["surface"] for p in patched_surfaces],
+                     "backup": os.path.relpath(bak, REPO)}
+        else:
+            warnings.append("values identical to the FLD — nothing written")
+
+    # Migrate superseded sidecar prop lines out (map lines stay).
+    if patched_surfaces:
+        sidecar = scene_sidecar(scene)
+        entries = read_sidecar(sidecar)
+        removed = [k for k in entries
+                   if any(k[0] == p["surface"] and k[1] in p["props"]
+                          for p in patched_surfaces)]
+        if removed:
+            for k in removed:
+                del entries[k]
+            write_sidecar(sidecar, entries)
+            warnings.append(f"migrated {len(removed)} sidecar prop line(s) into the FLD")
+
+    return 200, {"ok": True,
+                 "patched": [wrote] if wrote else [],
+                 "props": patched_surfaces,
+                 "lights": patched_lights,
+                 "fld": os.path.relpath(fld_path, REPO) if wrote else None,
+                 "maps": saved_maps,
+                 "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
+                 "warnings": warnings}
+
+
 def do_save(scene, payload):
     """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}}.
     greets: patch LWOs + LWS, regen + install the FLD.
@@ -281,17 +362,7 @@ def do_save(scene, payload):
     saved_maps = save_maps(scene, maps, warnings)
 
     if not SCENES[scene]["authoring"]:
-        # Sidecar-persisted scene: numeric props -> sidecar; no FLD regen (the
-        # overrides apply at scene init, on top of the untouched FLD).
-        saved_props = save_props_to_sidecar(scene, surfaces, warnings) if surfaces else []
-        if lights:
-            warnings.append(f"light write-back needs pinned LWS sources — '{scene}' "
-                            "has none yet (Authoring/README.md); light edits are live-only")
-        return 200, {"ok": True, "patched": [], "maps": saved_maps,
-                     "props": saved_props,
-                     "sidecar": os.path.relpath(scene_sidecar(scene), REPO)
-                                if (saved_maps or saved_props) else None,
-                     "warnings": warnings}
+        return do_save_fld(scene, surfaces, lights, saved_maps, warnings)
 
     patched_lights = patch_lws_lights(lights, warnings)
     if not surfaces:
@@ -380,12 +451,21 @@ def do_save(scene, payload):
     return 200, resp
 
 
-def list_backups():
-    """Newest-first [{file, target, mtime}] from Authoring/greets/.backups."""
-    if not os.path.isdir(BACKUPS):
+def scene_backup_dir(scene):
+    """greets backs up its LWO/LWS authoring sources; FLD-patched scenes back
+    up the shipping FLD itself."""
+    return BACKUPS if SCENES.get(scene, {}).get("authoring") else FLD_BACKUPS
+
+
+def list_backups(scene="greets"):
+    """Newest-first [{file, target, when}] for the scene's backup dir. For FLD
+    scenes only that scene's FLD backups are listed (the dir is shared)."""
+    bdir = scene_backup_dir(scene)
+    if not os.path.isdir(bdir):
         return []
+    only_stem = None if SCENES.get(scene, {}).get("authoring") else scene.upper()
     out = []
-    for f in os.listdir(BACKUPS):
+    for f in os.listdir(bdir):
         # <stem>.<YYYYmmdd-HHMMSS>[-n].<ext> -> restore target <stem>.<ext>
         m = re.match(r"^(.+)\.(\d{8}-\d{6}(?:-\d+)?)(\.\w+)$", f)
         if not m:
@@ -393,32 +473,43 @@ def list_backups():
         # Sort by the FILENAME timestamp (backup creation time) — copy2
         # preserves the source file's mtime, which is when the source was last
         # WRITTEN, not when the backup was taken.
+        if only_stem is not None and not m.group(1).upper().startswith(only_stem):
+            continue
         out.append({"file": f, "target": m.group(1) + m.group(3),
                     "when": m.group(2)})
     out.sort(key=lambda e: e["when"], reverse=True)
     return out
 
 
-def do_restore(payload):
-    """Restore one backup over its authoring file (backing up the CURRENT file
-    first, so a restore is itself undoable), then regen + install the FLD."""
+def do_restore(scene, payload):
+    """Restore one backup over its target (backing up the CURRENT file first,
+    so a restore is itself undoable). greets targets an authoring LWO/LWS and
+    regenerates the FLD; FLD scenes restore the FLD directly."""
+    authoring = SCENES.get(scene, {}).get("authoring")
+    bdir = scene_backup_dir(scene)
     name = os.path.basename(payload.get("file") or "")
-    entry = next((e for e in list_backups() if e["file"] == name), None)
+    entry = next((e for e in list_backups(scene) if e["file"] == name), None)
     if entry is None:
         return 404, {"ok": False, "error": f"no such backup '{name}'"}
-    target = os.path.join(AUTHORING, entry["target"])
+    target = (os.path.join(AUTHORING, entry["target"]) if authoring
+              else os.path.join(RUNTIME, "SCENES", entry["target"]))
     if not os.path.exists(target):
         return 404, {"ok": False, "error": f"target '{entry['target']}' missing"}
-    src = os.path.join(BACKUPS, name)
+    src = os.path.join(bdir, name)
     if open(src, "rb").read() == open(target, "rb").read():
         return 200, {"ok": True, "restored": None,
                      "note": "backup is identical to the current file — nothing to do"}
-    pre = lwopatch.backup(target, BACKUPS)
+    pre = lwopatch.backup(target, bdir)
     shutil.copy2(src, target)
-    code, resp = regen_fld([{"file": entry["target"], "restored_from": name,
-                             "pre_restore_backup": os.path.relpath(pre, REPO)}])
-    if code != 200:
-        return code, resp
+    info = [{"file": entry["target"], "restored_from": name,
+             "pre_restore_backup": os.path.relpath(pre, REPO)}]
+    if authoring:
+        code, resp = regen_fld(info)
+        if code != 200:
+            return code, resp
+    else:
+        resp = {"ok": True, "patched": info,
+                "fld": os.path.relpath(target, REPO)}
     resp["restored"] = entry["target"]
     return 200, resp
 
@@ -446,8 +537,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         clean = self.path.split("?")[0]
-        if clean == "/api/greets/backups":
-            self.send_json(200, {"ok": True, "backups": list_backups()[:30]})
+        mb = re.match(r"^/api/(\w+)/backups$", clean)
+        if mb:
+            scene = mb.group(1)
+            if scene not in SCENES:
+                self.send_json(404, {"ok": False, "error": f"unknown scene '{scene}'"})
+                return
+            self.send_json(200, {"ok": True, "backups": list_backups(scene)[:30]})
             return
         # Live routes — always the current Runtime/ copy, never the staged one.
         if clean.startswith(LIVE_PREFIXES):
@@ -475,8 +571,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             with save_lock:
                 if m.group(2) == "restore":
-                    code, resp = ((404, {"ok": False, "error": "restore is greets-only"})
-                                  if m.group(1) != "greets" else do_restore(payload))
+                    code, resp = ((404, {"ok": False, "error": f"unknown scene '{m.group(1)}'"})
+                                  if m.group(1) not in SCENES else do_restore(m.group(1), payload))
                 else:
                     code, resp = do_save(m.group(1), payload)
         except Exception as e:  # report, don't kill the server

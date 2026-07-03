@@ -317,3 +317,4 @@ DEMO.exe
 /libpng16/zlib.lib
 /build-wasm/
 Authoring/*/.backups/
+Runtime/SCENES/.backups/
