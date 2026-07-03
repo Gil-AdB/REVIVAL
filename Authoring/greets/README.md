@@ -18,7 +18,7 @@ cmake -S ../../tools/lwsread -B ../../tools/lwsread/build && cmake --build ../..
 cp GREETS.FLD ../../Runtime/SCENES/GREETS.FLD
 ```
 
-Produces a 233,272-byte, FldVersion-0.113 scene (9 objects, 10 lights).
+Produces a 233,315-byte, FldVersion-0.113 scene (9 objects, 10 lights).
 
 ## Files
 
@@ -30,9 +30,15 @@ Produces a 233,272-byte, FldVersion-0.113 scene (9 objects, 10 lights).
 
 The `.lws` references objects via DOS paths (`c:\lwave\city\INPYR\...`); the
 converter strips them to basename, so the files just need to sit here named as
-above. Textures (`P_TEXT.JPG`, `MARB*.JPG`, `P*.JPG`, …) are not needed for
-conversion — they're recorded by name and resolved at runtime from
-`Runtime/TEXTURES/`.
+above.
+
+The `.lwo` files used to store full DOS `TIMG`/`RIMG`/`TALP` paths
+(`C:\LWAVE\CITY\INPYR\...`); these have been rewritten to plain basenames
+(e.g. `MECH_HUL.JPG`). The 12 referenced textures are also copied here so
+LightWave can open the scene without needing the original DOS directory tree.
+The engine resolves textures at runtime from `Runtime/TEXTURES/` (uppercasing
+the name on load), so the copies in this directory are authoring-only — they
+are tracked in git but not installed by the build.
 
 ## The screen-orientation fix (low-poly only)
 
