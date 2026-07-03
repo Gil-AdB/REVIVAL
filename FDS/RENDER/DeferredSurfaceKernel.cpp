@@ -3534,6 +3534,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// effective ranges scene-wide.
 	const float maxRange = fds::FeatureFlags::deferred_max_range();
 
+	const long long _llist = TailProf::nowNs();
 	std::memset(&lights, 0, sizeof(lights));
 	int numLights = 0;
 	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_VIEW_LIGHTS; O = O->Next) {
@@ -3692,6 +3693,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		lights.mirrorId      [numLights] = O->mirrorId;
 		++numLights;
 	}
+	TailProf::mark("light-list", _llist);   // SoA build: per-light xform + linear shadow-map scans
 
 	constexpr int numTilesX = DEFERRED_NUM_TILES_X;
 	constexpr int numTilesY = DEFERRED_NUM_TILES_Y;
@@ -3728,11 +3730,13 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	static uint32_t tileMirrorPresence[DEFERRED_NUM_TILES];
 	const uint32_t *tilePresence = nullptr;
 	if (mirrorMaskPlane) {
+		const long long _mgrid = TailProf::nowNs();
 		computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
 		                          tileSizeX, tileSizeY,
 		                          numTilesX, numTilesY,
 		                          tileMirrorPresence);
 		tilePresence = tileMirrorPresence;
+		TailProf::mark("mirror-grid", _mgrid);   // full-res mirrorMask scan
 	}
 	const fds::CameraContext &camCtx = (ov && ov->cam) ? *ov->cam : fds::g_mainCamera;
 	const long long _tcull = TailProf::nowNs();
@@ -3783,8 +3787,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			                          stripMirrorPresence);
 			stripPresence = stripMirrorPresence;
 		}
+		const long long _slist = TailProf::nowNs();
 		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights,
 		                     stripPresence, fds::g_mainCamera);
+		TailProf::mark("strip-lists", _slist);
 	}
 	if (fds::FeatureFlags::deferred_tile_stats()) {
 		int total = 0, tmin = INT_MAX, tmax = 0;
@@ -3846,45 +3852,69 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	const bool useOuterVec = deferredLightingOuterVecEnabled();
 	const bool inlineDispatch = ov && ov->inlineDispatch;
 	if (!inlineDispatch) renderns::tileCounter = 0;
-	for (int j = 0; j < numTilesY; ++j) {
-		const int y1 = tileSizeY * j;
-		const int y2 = std::min(y1 + tileSizeY, YRes);
-		for (int i = 0; i < numTilesX; ++i) {
-			const int x1 = tileSizeX * i;
-			const int x2 = std::min(x1 + tileSizeX, XRes);
-			const int tileIndex = j * numTilesX + i;
-			auto run = [&ctx, useOuterVec, tileIndex, x1, y1, x2, y2]() {
-				if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, tileIndex, x1, y1, x2, y2);
-				else             Render_DeferredLighting_Tile(ctx, tileIndex, x1, y1, x2, y2);
-			};
-			if (inlineDispatch) { run(); renderns::tileDone.acquire(); }
-			else                ThreadPool::instance().enqueue(run);
+	const long long _w1q = TailProf::nowNs();
+	constexpr int nTiles = DEFERRED_NUM_TILES;
+	auto tileBounds = [tileSizeX, tileSizeY, XRes, YRes](int t, int &x1, int &y1, int &x2, int &y2) {
+		const int j = t / numTilesX, i = t - j * numTilesX;
+		y1 = tileSizeY * j; y2 = std::min(y1 + tileSizeY, YRes);
+		x1 = tileSizeX * i; x2 = std::min(x1 + tileSizeX, XRes);
+	};
+	if (inlineDispatch) {
+		for (int t = 0; t < nTiles; ++t) {
+			int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+			if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
+			else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
+			renderns::tileDone.acquire();
 		}
+	} else {
+		// Work-stealing chunk dispatch: enqueue only W tasks, each pulling
+		// tiles off an atomic cursor. The old task-per-tile loop cost ~1.2 ms
+		// SERIAL per wave (96 × mutex+notify_one, and each woken worker
+		// contends the same queue mutex to pop). The tile kernel still
+		// releases tileDone once per tile, so the drain is unchanged; tiles
+		// write disjoint regions in any order → byte-identical.
+		auto cursor = std::make_shared<std::atomic<int>>(0);
+		const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
+		for (int k = 0; k < nTasks; ++k) {
+			ThreadPool::instance().enqueue([&ctx, useOuterVec, cursor, tileBounds]() {
+				int t;
+				while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
+					int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+					if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
+					else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
+				}
+			});
+		}
+		TailProf::mark("w1-enqueue", _w1q);
+		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1");
 	}
-	if (inlineDispatch) { /* drained per tile above */ }
-	else TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w1");
 
 	// Wave 2: fill odd cells via 2-tap interpolation (with full-shade
 	// fallback at material edges). Skip entirely when checkerboard is
 	// off — wave 1 already covered everything.
 	if (deferredLightingCheckerboardEnabled() || deferredLightingQuarterEnabled()) {
 		if (!inlineDispatch) renderns::tileCounter = 0;
-		for (int j = 0; j < numTilesY; ++j) {
-			const int y1 = tileSizeY * j;
-			const int y2 = std::min(y1 + tileSizeY, YRes);
-			for (int i = 0; i < numTilesX; ++i) {
-				const int x1 = tileSizeX * i;
-				const int x2 = std::min(x1 + tileSizeX, XRes);
-				const int tileIndex = j * numTilesX + i;
-				auto run = [&ctx, tileIndex, x1, y1, x2, y2]() {
-					Render_DeferredLighting_TileFill(ctx, tileIndex, x1, y1, x2, y2);
-				};
-				if (inlineDispatch) { run(); renderns::tileDone.acquire(); }
-				else                ThreadPool::instance().enqueue(run);
+		if (inlineDispatch) {
+			for (int t = 0; t < nTiles; ++t) {
+				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
+				renderns::tileDone.acquire();
 			}
+		} else {
+			// Same work-stealing chunk dispatch as wave 1 (see above).
+			auto cursor = std::make_shared<std::atomic<int>>(0);
+			const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
+			for (int k = 0; k < nTasks; ++k) {
+				ThreadPool::instance().enqueue([&ctx, cursor, tileBounds]() {
+					int t;
+					while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
+						int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+						Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
+					}
+				});
+			}
+			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2");
 		}
-		if (!inlineDispatch)
-			TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "lighting-w2");
 	}
 
 	// Dump cache-line transition stats accumulated by shadow sampling

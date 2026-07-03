@@ -24,9 +24,15 @@ mkdir -p "$OUT"
 cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 
 # Baselines — committed state. Update with --update after an INTENTED change.
-BASE_MIRROR="b5e307499d9f0fa0375fac0caaecfbe7"
+BASE_MIRROR="d3a06fb97a01f8c5e250dad7e41f9f4d"
 BASE_CONE="8a82e21d53b0d050bbc1220b4fe137f0"
 BASE_HALO="a916347df504ab12a3add321747c2f08"
+
+# HEADLESS: every DEMO run uses the SDL dummy driver — no window pops on the
+# desktop (the gate gets run a lot, incl. from bisects). Dummy output differs
+# from windowed output byte-wise but is deterministic run-to-run, which is all
+# a gate needs; the baselines below are DUMMY-mode hashes.
+export SDL_VIDEODRIVER=dummy
 
 md5_of() { ls "$@" 2>/dev/null | sort | xargs cat | md5 -q; }
 

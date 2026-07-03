@@ -1608,39 +1608,52 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     }
 
     if (!inlineDispatch) renderns::tileCounter = 0;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tileSizeY * j;
-        const int y2 = std::min(y1 + tileSizeY, YRes);
-        for (int i = 0; i < numTilesX; ++i) {
-            const int x1 = tileSizeX * i;
-            const int x2 = std::min(x1 + tileSizeX, XRes);
-            const int tileIdx = j * numTilesX + i;
-            const int *ts = tileSpotIdx[tileIdx];
-            const int  tc = tileSpotCount[tileIdx];
-            if (inlineDispatch) {
-                // Offscreen shard bake: run on the calling worker thread (no
-                // pool re-submit, no tileDone traffic — the tile doesn't
-                // release; only the pool-path lambda below does).
-                Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
-                                             invFOVX,invFOVY,invZScale,density,
-                                             fogZ,invFogZ);
-            } else {
-                ThreadPool::instance().enqueue([&ctx,x1,y1,x2,y2,lights,ts,tc,
-                                                invFOVX,invFOVY,invZScale,density,
-                                                fogZ,invFogZ]() {
+    if (inlineDispatch) {
+        // Offscreen shard bake: run on the calling worker thread (no
+        // pool re-submit, no tileDone traffic).
+        for (int t = 0; t < numTiles; ++t) {
+            const int j = t / numTilesX, i = t - j * numTilesX;
+            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+            Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
+                                         tileSpotIdx[t], tileSpotCount[t],
+                                         invFOVX,invFOVY,invZScale,density,
+                                         fogZ,invFogZ);
+        }
+    } else {
+        // Work-stealing chunk dispatch (same as the lighting waves): enqueue
+        // only W tasks pulling tiles off an atomic cursor — the task-per-tile
+        // loop cost ~1 ms serial in mutex+notify_one per enqueue. Everything
+        // is captured by reference: the drain below completes before this
+        // frame returns, so the stack (cursor, tileSpotIdx) outlives the
+        // tasks. Per-tile release unchanged → drain unchanged; tiles write
+        // disjoint rows in any order → byte-identical.
+        // LIFETIME: a straggler worker can evaluate the while-condition one
+        // last time AFTER the drain below completed and this frame returned
+        // — so the cursor is a shared_ptr by value and the tile count a
+        // by-value copy; everything else is only touched inside the loop
+        // body, strictly before that tile's release.
+        auto coneCursor = std::make_shared<std::atomic<int>>(0);
+        const int nTasks = std::min<int>((int)ThreadPool::instance().size(), numTiles);
+        for (int k = 0; k < nTasks; ++k) {
+            ThreadPool::instance().enqueue([&, coneCursor, numTiles]() {
+                int t;
+                while ((t = coneCursor->fetch_add(1, std::memory_order_relaxed)) < numTiles) {
+                    const int j = t / numTilesX, i = t - j * numTilesX;
+                    const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
+                    const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
                     const long long _tp = TailProf::nowNs();
-                    Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights, ts, tc,
+                    Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
+                                                 tileSpotIdx[t], tileSpotCount[t],
                                                  invFOVX,invFOVY,invZScale,density,
                                                  fogZ,invFogZ);
                     TailProf::addBusy(_tp);   // before release → race-free idle metric
-                    // One permit per completed tile (see renderns::tileDone).
                     renderns::tileDone.release();
-                });
-            }
+                }
+            });
         }
-    }
-    if (!inlineDispatch)
         TailProf::drain(renderns::tileDone, numTiles, "cones");
+    }
 }
 
 // ─── Omni halos — standalone additive pass for legacy mode ───────────
