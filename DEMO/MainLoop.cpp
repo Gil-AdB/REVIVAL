@@ -815,8 +815,13 @@ float editorPlayScene(bool on)
 		g_editorFreezeTimer = Timer.load();
 		// Continue editing from the shot you stopped on: re-seed the orbit
 		// from the scene camera's pose instead of snapping back to the
-		// pre-play editor pose.
+		// pre-play editor pose. KEEP the editor's own FOV though —
+		// seedOrbitFromView copies View->IFOV, and inheriting the scene
+		// camera's FOV silently changed how every later click-to-focus
+		// framed its subject.
+		const float editorFov = FC.IFOV;
 		seedOrbitFromView();
+		FC.IFOV = editorFov;
 	}
 	g_editorPlaying = on;
 	rev::Editor_MarkDirty();
