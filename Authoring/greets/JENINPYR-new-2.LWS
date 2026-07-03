@@ -9,7 +9,7 @@ PreviewLastFrame 2400
 PreviewFrameStep 1
 FramesPerSecond 30.000000
 
-LoadObject c:\lwave\city\INPYR\Piramid.lwo
+LoadObject Piramid.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -79,7 +79,7 @@ LookAheadFrames 1
 PivotPoint 0 3.345 0.36
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\Hull.lwo
+LoadObject Hull.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -114,7 +114,7 @@ PivotPoint 0 0.4299998 -0.09000007
 ParentObject 4
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\Hull2.lwo
+LoadObject Hull2.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -693,7 +693,7 @@ PivotPoint 0 0.05 -0.49
 ParentObject 2
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\L_leg1.lwo
+LoadObject L_leg1.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -1064,7 +1064,7 @@ PivotPoint 0 0.05 -0.49
 ParentObject 4
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\L_leg2.lwo
+LoadObject L_leg2.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -1509,7 +1509,7 @@ PivotPoint 0 -1.72 -1.31
 ParentObject 5
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\R_leg1.lwo
+LoadObject R_leg1.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
@@ -1938,7 +1938,7 @@ PivotPoint 0 0.05 -0.4999999
 ParentObject 4
 ShadowOptions 7
 
-LoadObject c:\lwave\city\INPYR\MECH\R_leg2.lwo
+LoadObject R_leg2.lwo
 ShowObject 8 7
 ObjectMotion (unnamed)
   9
