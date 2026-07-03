@@ -41,6 +41,29 @@ struct EnvBakeParams {
 Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
                               const EnvBakeParams& params = {});
 
+// ── Deferred env-specular reflection (--env_refl) ─────────────────────────
+// A per-scene LINEAR (unswizzled) equirect panorama the deferred kernel
+// samples per pixel for materials with Mat->Reflection > 0 — same bake as
+// above, but linear addressing (the kernel computes its own (u,v) from the
+// reflected direction; the Sachletz swizzle only helps the rasterizer's
+// per-face walk).
+struct EnvPanoLinear {
+    const unsigned* px = nullptr;   // W*H ARGB
+    int W = 0, H = 0;
+};
+
+// nullptr until EnsureBaked ran for this scene.
+const EnvPanoLinear* EnvReflection_Get(Scene* sc);
+
+// Bake the scene's panorama from `center` if not yet baked. Re-entrancy-safe:
+// the bake renders through Render(ForceForward), which comes back through
+// renderFrame — calls during a bake return immediately.
+void EnvReflection_EnsureBaked(Scene* sc, const Vector& center);
+
+// Drop the scene's panorama so the next EnsureBaked re-renders it (editor:
+// after lighting/material edits that should show in reflections).
+void EnvReflection_Invalidate(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_ENV_BAKE_H_INCLUDED

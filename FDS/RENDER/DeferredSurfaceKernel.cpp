@@ -56,6 +56,7 @@ extern float fastPow2(float x);
 #include "RENDER/DeferredShadowSampling.h"
 #include "RENDER/LightmapBake.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
+#include "RENDER/EnvBake.h"  // --env_refl: per-scene panorama for env-specular
 #include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
@@ -737,6 +738,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
 	const float sPbrRoughFixed  = fds::FeatureFlags::pbr_roughness();
+	// Env-specular reflection (--env_refl): per-scene baked panorama, sampled
+	// along the reflected view ray for Mat->Reflection > 0 materials.
+	const fds::EnvPanoLinear *envPanoG = fds::FeatureFlags::env_refl()
+		? fds::EnvReflection_Get(ctx.Sc) : nullptr;
+	const float envReflGainG    = fds::FeatureFlags::env_refl_gain() * 0.01f; // ×Reflection%
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
 	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
@@ -1111,8 +1117,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
 			const bool hasAoMap  = aoMapOnG &&
 				(aoInAlpha || Mat->AoMap || (aoFromDiffuseG && Mat->Txtr));
+			// Env reflection needs the per-pixel reflected-ray sample —
+			// scalar-path only (like normal maps), so gate vec off for it.
+			const bool hasEnvRefl = envPanoG && Mat->Reflection > 0.0f;
 			const bool useVecHere = useVec
-				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
+				&& (sVecForce || (!hasNormalMap && !hasEnvRefl && !(hasAoMap && !aoInAlpha)));
 
 			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
 			// the direct-light loop adds to them) — direct light is occluded by
@@ -1604,6 +1613,41 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Env-specular reflection (--env_refl): sample the scene panorama
+			// along the reflected view ray, weighted by Mat->Reflection %.
+			// Added into the SPECULAR accumulator (pre-roughness) so a
+			// roughness map dims reflections exactly like highlights.
+			if (hasEnvRefl) {
+				// Incident ray d = pixel direction (view space, camera at
+				// origin); reflect about the (possibly nmap-perturbed) N.
+				const float dInv = fast_rsqrt(x*x + y*y + z*z);
+				const float dx = x * dInv, dy = y * dInv, dz = z * dInv;
+				const float dDotN = dx*nx + dy*ny + dz*nz;
+				const float rvx = dx - 2.0f * dDotN * nx;
+				const float rvy = dy - 2.0f * dDotN * ny;
+				const float rvz = dz - 2.0f * dDotN * nz;
+				// View → world rotation (viewToWorld is the transpose of the
+				// camera rotation; direction ⇒ no translation).
+				const float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
+				const float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
+				const float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+				// Equirect lookup — the exact inverse of EnvBake's stitch
+				// mapping: lon = atan2(-z, -x), lat = asin(y).
+				const float lon = std::atan2(-rwz, -rwx);
+				float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
+				const float lat = std::asin(sy_);
+				float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
+				eu -= std::floor(eu);
+				float evv = 0.5f - lat * (1.0f / 3.14159265359f);
+				if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
+				const int epx = int(eu * float(envPanoG->W)) % envPanoG->W;
+				const int epy = int(evv * float(envPanoG->H));
+				const uint32_t ec = envPanoG->px[size_t(epy) * envPanoG->W + epx];
+				const float ek = Mat->Reflection * envReflGainG;
+				sB += float( ec        & 0xFF) * ek;
+				sG += float((ec >>  8) & 0xFF) * ek;
+				sR += float((ec >> 16) & 0xFF) * ek;
+			}
 			// Roughness map (cheap tier): per-pixel specular INTENSITY. White =
 			// rough → dimmer highlight, so the highlight breaks up across the
 			// surface (matte mortar vs glinty stone). 8-bit gather at the same

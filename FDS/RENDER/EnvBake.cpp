@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <map>
 #include <vector>
 
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
@@ -75,9 +76,12 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 
 }  // namespace
 
-Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
-                              const EnvBakeParams& params) {
-    if (!sc) return nullptr;
+// Shared core: render the six cube faces from `center` and stitch them into
+// a LINEAR equirect panorama in `pano`. Returns false on alloc failure.
+static bool renderCubeAndStitch(Scene* sc, const Vector& center,
+                                const EnvBakeParams& params,
+                                std::vector<uint32_t>& pano) {
+    if (!sc) return false;
     const int res = params.cubeRes;
     const int W = params.panoWidth, H = params.panoHeight;
 
@@ -92,7 +96,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     surf.Data = (byte*)std::malloc(size_t(res) * res * 4);
     surf.Z16  = (byte*)std::malloc(size_t(res) * res * sizeof(word));
     surf.Flip = MainSurf ? MainSurf->Flip : nullptr;
-    if (!surf.Data || !surf.Z16) { std::free(surf.Data); std::free(surf.Z16); return nullptr; }
+    if (!surf.Data || !surf.Z16) { std::free(surf.Data); std::free(surf.Z16); return false; }
     Build_YOffs_Table(&surf);
 
     std::vector<uint32_t> faces[6];
@@ -139,7 +143,7 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     // reflecting world-direction d samples the scene content baked for d:
     //   lat = PI*(0.5 - ev),  lon = 2*PI*(eu - 0.5) - PI/2
     //   d = ( -cos(lon)cos(lat), sin(lat), -sin(lon)cos(lat) )
-    std::vector<uint32_t> pano(size_t(W) * H);
+    pano.assign(size_t(W) * H, params.voidColor);
     for (int py = 0; py < H; ++py) {
         const float ev  = (float(py) + 0.5f) / float(H);
         const float lat = float(M_PI) * (0.5f - ev);
@@ -171,6 +175,14 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
             std::fclose(f);
         }
     }
+    return true;
+}
+
+Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
+                              const EnvBakeParams& params) {
+    std::vector<uint32_t> pano;
+    if (!renderCubeAndStitch(sc, center, params, pano)) return nullptr;
+    const int W = params.panoWidth, H = params.panoHeight;
 
     // Materialize into a Sachletz-tiled Texture the forward env filler reads.
     Texture* T = getAlignedType<Texture>(16);
@@ -185,5 +197,38 @@ Texture* BakeEquirectPanorama(Scene* sc, const Vector& center,
     T->numMipmaps = 1;
     return T;
 }
+
+// ── Deferred env-specular registry ─────────────────────────────────────────
+namespace {
+struct EnvPanoStore { std::vector<uint32_t> px; EnvPanoLinear view; };
+std::map<Scene*, EnvPanoStore> g_envPanoByScene;
+bool g_envBakeInProgress = false;   // bake renders through Render() → guard
+}
+
+const EnvPanoLinear* EnvReflection_Get(Scene* sc) {
+    auto it = g_envPanoByScene.find(sc);
+    return it == g_envPanoByScene.end() ? nullptr : &it->second.view;
+}
+
+void EnvReflection_EnsureBaked(Scene* sc, const Vector& center) {
+    if (!sc || g_envBakeInProgress || g_envPanoByScene.count(sc)) return;
+    g_envBakeInProgress = true;
+    EnvBakeParams params;
+    params.cubeRes = 256;            // reflections are roughness-blurred by
+    params.panoWidth = 512;          // eye anyway — half the CITY bake res
+    params.panoHeight = 512;
+    EnvPanoStore store;
+    const bool ok = renderCubeAndStitch(sc, center, params, store.px);
+    g_envBakeInProgress = false;
+    if (!ok) return;
+    store.view = { store.px.data(), params.panoWidth, params.panoHeight };
+    auto& slot = g_envPanoByScene[sc];
+    slot = std::move(store);
+    slot.view.px = slot.px.data();   // re-point after the move
+    std::fprintf(stderr, "[ENVREFL] baked %dx%d panorama for scene %p at (%.1f %.1f %.1f)\n",
+                 slot.view.W, slot.view.H, (void*)sc, center.x, center.y, center.z);
+}
+
+void EnvReflection_Invalidate(Scene* sc) { g_envPanoByScene.erase(sc); }
 
 }  // namespace fds
