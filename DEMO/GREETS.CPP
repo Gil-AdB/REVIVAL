@@ -3000,6 +3000,16 @@ struct GreetsScene : SceneDriver {
 		// changing across frames (= dynamic bake not reaching that map).
 		// No-op unless toggled by T key in REV.CPP.
 		::ShadowMap_TickStalenessTracker();
+		// FDS_MIRROR_CLAMP_STATS=1: per-frame count of clone lanes the
+		// wall-depth clamp rejected (Mekalele.h). Nonzero at a pose =
+		// clone geometry was landing NEARER than the glass there (the
+		// self-reflection moire); zero everywhere = the clamp is inert.
+		if (meka::g_mirrorClampStats) {
+			const long long n = meka::g_mirrorClampCount.exchange(0, std::memory_order_relaxed);
+			const long long c = meka::g_mirrorCloneLanes.exchange(0, std::memory_order_relaxed);
+			std::fprintf(stderr, "[MIRROR-CLAMP] clone-lanes=%lld rejected=%lld (t=%d)\n",
+			             c, n, (int)g_FrameTime);
+		}
 
 		// Stamp gb.mirrorId with each mirror's id at its wall faces'
 		// screen-space pixels — Mekalele's clone path tests this per
@@ -3203,6 +3213,65 @@ struct GreetsScene : SceneDriver {
 							(unsigned)F->mirrorMaskTag, (unsigned)F->Flags,
 							hits[i].rz, F->N.x,F->N.y,F->N.z, a.x,a.y,a.z,
 							F->A->PX,F->A->PY,F->A->RZ, F->B->PX,F->B->PY,F->B->RZ, F->C->PX,F->C->PY,F->C->RZ, (void*)T);
+					}
+
+					// WORLD-SPACE RAYCAST — the decisive version. The screen
+					// point-in-triangle list above uses raw projected PX/PY,
+					// which are garbage for faces straddling the near plane
+					// (huge wall quads next to the camera — exactly the faces
+					// an occlusion question is about). Cast the pixel's world
+					// ray and Moller-Trumbore every visible face instead; the
+					// t-ordered hit list is ground truth for "what SHOULD the
+					// camera see first at this pixel".
+					if (View) {
+						Vector dv = { (float(qx) - CntrEX) / FOVX,
+						              -(float(qy) - CntrEY) / FOVY, 1.0f };
+						Vector rd = { View->Mat[0][0]*dv.x + View->Mat[1][0]*dv.y + View->Mat[2][0]*dv.z,
+						              View->Mat[0][1]*dv.x + View->Mat[1][1]*dv.y + View->Mat[2][1]*dv.z,
+						              View->Mat[0][2]*dv.x + View->Mat[1][2]*dv.y + View->Mat[2][2]*dv.z };
+						Vector_Norm(&rd);
+						const Vector ro = View->ISource;
+						struct RHit { Face *f; TriMesh *T; float t; Vector p; };
+						std::vector<RHit> rhits;
+						for (TriMesh *T = GreetSc->TriMeshHead; T; T = T->Next) {
+							if (!(T->Flags & HTrack_Visible)) continue;
+							for (DWord fi = 0; fi < T->FIndex; ++fi) {
+								Face &F = T->Faces[fi];
+								if (!F.A || !F.B || !F.C) continue;
+								auto wp=[&](const Vertex*v){ Vector lp=v->Pos,w; MatrixXVector(T->RotMat,&lp,&w); w+=T->IPos; return w; };
+								const Vector A=wp(F.A), B=wp(F.B), C=wp(F.C);
+								const Vector e1={B.x-A.x,B.y-A.y,B.z-A.z}, e2={C.x-A.x,C.y-A.y,C.z-A.z};
+								const Vector pv={rd.y*e2.z-rd.z*e2.y, rd.z*e2.x-rd.x*e2.z, rd.x*e2.y-rd.y*e2.x};
+								const float det = e1.x*pv.x+e1.y*pv.y+e1.z*pv.z;
+								if (std::fabs(det) < 1e-9f) continue;
+								const float invDet = 1.0f/det;
+								const Vector tv={ro.x-A.x,ro.y-A.y,ro.z-A.z};
+								const float u=(tv.x*pv.x+tv.y*pv.y+tv.z*pv.z)*invDet;
+								if (u < -0.001f || u > 1.001f) continue;
+								const Vector qv={tv.y*e1.z-tv.z*e1.y, tv.z*e1.x-tv.x*e1.z, tv.x*e1.y-tv.y*e1.x};
+								const float v=(rd.x*qv.x+rd.y*qv.y+rd.z*qv.z)*invDet;
+								if (v < -0.001f || u+v > 1.001f) continue;
+								const float t=(e2.x*qv.x+e2.y*qv.y+e2.z*qv.z)*invDet;
+								if (t <= 0.01f) continue;
+								rhits.push_back({&F, T, t,
+									{ro.x+rd.x*t, ro.y+rd.y*t, ro.z+rd.z*t}});
+							}
+						}
+						std::sort(rhits.begin(), rhits.end(),
+						          [](const RHit&a, const RHit&b){ return a.t < b.t; });
+						std::fprintf(stderr, "[RAYCAST @%d,%d] ro=(%.2f,%.2f,%.2f) rd=(%.3f,%.3f,%.3f) %zu hits (near first):\n",
+						             qx, qy, ro.x, ro.y, ro.z, rd.x, rd.y, rd.z, rhits.size());
+						for (size_t i = 0; i < rhits.size() && i < 10; ++i) {
+							Face *F = rhits[i].f; TriMesh *T = rhits[i].T;
+							const float facing = F->N.x*rd.x + F->N.y*rd.y + F->N.z*rd.z;
+							std::fprintf(stderr,
+								"  t=%7.2f  hit=(%.1f,%.1f,%.1f)  mat='%s'  N=(%.2f,%.2f,%.2f) %s  maskTag=%u  mesh=%p\n",
+								rhits[i].t, rhits[i].p.x, rhits[i].p.y, rhits[i].p.z,
+								(F->Txtr&&F->Txtr->Name)?F->Txtr->Name:"?",
+								F->N.x, F->N.y, F->N.z,
+								facing < 0 ? "FRONT-facing" : "back-facing",
+								(unsigned)F->mirrorMaskTag, (void*)T);
+						}
 					}
 					std::fflush(stderr);
 				}
