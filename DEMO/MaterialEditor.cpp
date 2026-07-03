@@ -317,6 +317,64 @@ std::string Editor_SplitInstances(const char* name)
 	return out;
 }
 
+// ── Light editing (shared native/wasm — native uses it via the LIGHT_TEST
+// snapshot hook) ────────────────────────────────────────────────────────────
+// Scene-authored omnis only (Omni_SceneAuthored = the i-th FLD/LWS light, in
+// list order — the same index the server's LWS/FLD patchers use).
+static Omni *lightByIndex(int want)
+{
+	if (!CurScene) return nullptr;
+	int i = 0;
+	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		if (i == want) return O;
+		++i;
+	}
+	return nullptr;
+}
+
+// The flare sprite's COLOR is a texture baked from the light color (Init_-
+// Flares → Generate_RGBFlare, deduped by color) — it does NOT read O->L at
+// draw time. A live color edit therefore re-points the omni at a flare
+// texture for the new color. Cached by packed RGB: a slider drag revisits
+// colors and each 256² flare is ~256 KB — regenerate each distinct color once
+// per session, reuse after.
+static void retintFlare(Omni *O)
+{
+	if (!O->F.Txtr) return;   // no flare on this light — nothing to retint
+	static std::map<unsigned, Material*> cache;
+	const unsigned key = (unsigned(O->L.R) << 16) | (unsigned(O->L.G) << 8) | unsigned(O->L.B);
+	auto it = cache.find(key);
+	if (it == cache.end()) {
+		Material *M = Generate_RGBFlare((unsigned char)O->L.R, (unsigned char)O->L.G,
+		                                (unsigned char)O->L.B);
+		M->RelScene = CurScene;   // same tagging Init_Flares gives flare materials
+		it = cache.emplace(key, M).first;
+	}
+	O->F.Txtr = it->second;
+}
+
+bool Editor_SetLightProp(int index, const char *key, float value)
+{
+	Omni *O = lightByIndex(index);
+	if (!O) return false;
+	if      (!std::strcmp(key, "r")) { O->L.R = value; retintFlare(O); }
+	else if (!std::strcmp(key, "g")) { O->L.G = value; retintFlare(O); }
+	else if (!std::strcmp(key, "b")) { O->L.B = value; retintFlare(O); }
+	else if (!std::strcmp(key, "intensity")) {
+		// Set every key so animated envelopes take the value uniformly (greets
+		// lights are all single-key; multi-key edits flatten the curve — the
+		// panel shows the key count so that's not a surprise).
+		for (dword k = 0; k < O->Size.NumKeys; ++k) O->Size.Keys[k].Pos.x = value;
+	} else if (!std::strcmp(key, "range")) {
+		for (dword k = 0; k < O->Range.NumKeys; ++k) O->Range.Keys[k].Pos.x = value;
+	} else if (!std::strcmp(key, "flareScale")) {
+		O->FlareScale = value;   // 0 = legacy (track intensity 1:1)
+	} else return false;
+	Editor_MarkDirty();
+	return true;
+}
+
 static std::atomic<bool> g_editorDirty{true};   // first frame renders
 void Editor_MarkDirty()    { g_editorDirty.store(true, std::memory_order_relaxed); }
 bool Editor_ConsumeDirty() { return g_editorDirty.exchange(false, std::memory_order_relaxed); }
@@ -387,45 +445,32 @@ std::string js_editorMatDebug(std::string name)
 	Material* tt = nullptr;
 	for (dword i = 0; i < mt.count; ++i)
 		if (mt.data[i] && mt.data[i]->Name && name == mt.data[i]->Name) { tt = mt.data[i]; break; }
-	char buf[300];
+	char buf[360];
 	std::snprintf(buf, sizeof buf,
 	  "{\"matlib_lum\":%.2f,\"matlib_count\":%d,\"mattable_lum\":%.2f,\"mattable_count\":%u,\"same_ptr\":%d}",
 	  ml ? ml->Luminosity : -1.0f, mlCount, tt ? tt->Luminosity : -1.0f, (unsigned)mt.count, (ml == tt) ? 1 : 0);
 	return buf;
 }
-// ── Light editing ──────────────────────────────────────────────────────────
-// Scene-authored omnis only (Omni_SceneAuthored = the i-th FLD/LWS light, in
-// list order — the same index the server's LWS patcher uses for write-back).
+// ── Light enumeration ──────────────────────────────────────────────────────
 // Color lives in Omni::L (0-255); intensity/range are 1-key-per-value splines
 // whose scalar sits in Keys[].Pos.x — Animate_Objects re-interpolates ISize/
 // IRange from them every tick, so a key edit shows on the next rendered frame.
-static Omni *editorLightByIndex(int want)
-{
-	if (!CurScene) return nullptr;
-	int i = 0;
-	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
-		if (!(O->Flags & Omni_SceneAuthored)) continue;
-		if (i == want) return O;
-		++i;
-	}
-	return nullptr;
-}
-
 std::string js_editorGetLights()
 {
 	std::string out = "[";
 	int i = 0;
 	if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
 		if (!(O->Flags & Omni_SceneAuthored)) continue;
-		char buf[300];
+		char buf[360];
 		std::snprintf(buf, sizeof buf,
 		  "%s{\"i\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
-		  "\"intensity\":%.4g,\"range\":%.4g,"
+		  "\"intensity\":%.4g,\"range\":%.4g,\"flareScale\":%.4g,"
 		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
 		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u}",
 		  i ? "," : "", i, O->L.R, O->L.G, O->L.B,
 		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
 		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
+		  O->FlareScale > 0.0f ? O->FlareScale : 1.0f,
 		  O->IPos.x, O->IPos.y, O->IPos.z,
 		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
 		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
@@ -438,21 +483,7 @@ std::string js_editorGetLights()
 
 bool js_editorSetLightProp(int index, std::string key, float value)
 {
-	Omni *O = editorLightByIndex(index);
-	if (!O) return false;
-	if      (key == "r") O->L.R = value;
-	else if (key == "g") O->L.G = value;
-	else if (key == "b") O->L.B = value;
-	else if (key == "intensity") {
-		// Set every key so animated envelopes take the value uniformly (greets
-		// lights are all single-key; multi-key edits flatten the curve — the
-		// panel shows the key count so that's not a surprise).
-		for (dword k = 0; k < O->Size.NumKeys; ++k) O->Size.Keys[k].Pos.x = value;
-	} else if (key == "range") {
-		for (dword k = 0; k < O->Range.NumKeys; ++k) O->Range.Keys[k].Pos.x = value;
-	} else return false;
-	rev::Editor_MarkDirty();
-	return true;
+	return rev::Editor_SetLightProp(index, key.c_str(), value);
 }
 
 // ── Render knobs ───────────────────────────────────────────────────────────

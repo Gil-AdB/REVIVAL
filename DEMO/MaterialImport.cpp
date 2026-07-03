@@ -7,6 +7,7 @@
 #include <Base/FDS_DEFS.H>           // DEFAULT_BLOCKSIZEX/Y, Txtr_Tiled, Mat_AoInAlpha
 #include <Base/Texture.h>
 #include <Base/Material.h>
+#include <Base/Omni.h>               // FlareScale (sidecar light: lines)
 #include <Base/Scene.h>
 #include <Base/FeatureFlags.h>
 
@@ -375,6 +376,21 @@ static bool sidecarIsMapRole(const char *role) {
 	    || !std::strcmp(role, "ao");
 }
 
+// Sidecar light lines: "light:<i>|<key>|<value>" — engine-only per-light
+// extensions with no LWS/FLD field (currently flareScale). <i> indexes the
+// scene-authored omnis in file order, the SAME mapping the editor and the
+// LWS/FLD light patchers use.
+static bool sidecarSetLightProp(Scene *sc, int index, const char *key, float value) {
+	int i = 0;
+	for (Omni *O = sc->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		if (i++ != index) continue;
+		if (!std::strcmp(key, "flareScale")) { O->FlareScale = value; return true; }
+		return false;   // unknown per-light sidecar key
+	}
+	return false;       // index out of range
+}
+
 void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 	if (!sc || !path) return;
 	FILE *f = std::fopen(path, "r");
@@ -395,7 +411,12 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 		*sep2 = 0;
 		const char *surface = line, *key = sep1 + 1, *value = sep2 + 1;
 		bool ok;
-		if (sidecarIsMapRole(key)) {
+		if (!std::strncmp(surface, "light:", 6)) {
+			ok = sidecarSetLightProp(sc, std::atoi(surface + 6), key,
+			                         std::strtof(value, nullptr));
+			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such light / key\n",
+			                      surface, key);
+		} else if (sidecarIsMapRole(key)) {
 			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);
 		} else {
 			ok = MaterialImport_SetSurfaceProp(sc, surface, key, std::strtof(value, nullptr));

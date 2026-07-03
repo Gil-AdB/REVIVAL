@@ -1687,7 +1687,9 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 
 			//omniFlareSize.F = O->ISize;
 			//O->F.Flags = omniFlareSize.DW; // overwrite face flags with a pointer to the omnilight object
-			O->F.FlareSize = (O->ISize);
+			// FlareScale: per-omni sprite-size dial (0 = legacy 1.0), so the
+			// flare can be sized independently of the lighting intensity.
+			O->F.FlareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
 			if (O->Flags & Omni_Rand) {
 				O->F.FlareSize *= 1.0 + ((frand() - 0.5) * 0.2f);
 			}

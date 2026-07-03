@@ -816,7 +816,7 @@ OUT:
 			// white", nondeterministic per process, and curable by a
 			// free-cam 360 (which swept every omni through the MAIN
 			// frustum once, letting Transform_Objects initialize it).
-			O->F.FlareSize = O->ISize;
+			O->F.FlareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
 			O->F.SortZ.F = 2 * fzp - dz;
 			*Ins++ = { O->F.SortZ.DW, &O->F };
 		}

@@ -1,6 +1,7 @@
-# PBR map assignments — written by tools/editor_server.py (editor
+# Editor overrides — written by tools/editor_server.py (editor
 # "Save"), loaded at scene init by MaterialImport_ApplySidecar.
-# Format: surface|role|path-relative-to-Runtime
+# Format: surface|role|path-relative-to-Runtime (PBR map)
+#         surface|prop|value                    (numeric override)
 
 momy|albedo|TEXTURES/PBR/momy_albedo.png
 momy|ao|TEXTURES/PBR/momy_ao.png

@@ -195,6 +195,34 @@ def save_props_to_sidecar(scene, surfaces, warnings):
 
 
 LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
+# Engine-only per-light extensions: no LWS/FLD field exists, so they persist
+# as sidecar "light:<i>|<key>|<value>" lines (applied at scene init by
+# MaterialImport_ApplySidecar).
+LIGHT_SIDECAR_KEYS = {"flareScale"}
+
+
+def split_light_sidecar_keys(scene, lights, warnings):
+    """Strip LIGHT_SIDECAR_KEYS out of the save payload's light dicts and
+    persist them as sidecar light: lines. Mutates `lights` (drops entries
+    that become empty). Returns a summary list."""
+    if not lights:
+        return []
+    sidecar = scene_sidecar(scene)
+    entries = read_sidecar(sidecar)
+    saved = []
+    for idx_s in list(lights):
+        props = lights[idx_s]
+        if not isinstance(props, dict):
+            continue
+        side = {k: props.pop(k) for k in list(props) if k in LIGHT_SIDECAR_KEYS}
+        for k, v in side.items():
+            entries[(f"light:{int(idx_s)}", k)] = f"{float(v):.6g}"
+            saved.append({"light": int(idx_s), "key": k})
+        if not props:
+            del lights[idx_s]
+    if saved:
+        write_sidecar(sidecar, entries)
+    return saved
 
 
 def patch_lws_lights(lights, warnings):
@@ -360,6 +388,11 @@ def do_save(scene, payload):
 
     warnings = []
     saved_maps = save_maps(scene, maps, warnings)
+    # Engine-only light keys (flareScale) → sidecar, for every scene type;
+    # what remains in `lights` goes to the LWS / FLD patchers below.
+    saved_light_side = split_light_sidecar_keys(scene, lights, warnings)
+    if saved_light_side:
+        warnings.append(f"{len(saved_light_side)} light key(s) → sidecar (engine-only, no LWS/FLD field)")
 
     if not SCENES[scene]["authoring"]:
         return do_save_fld(scene, surfaces, lights, saved_maps, warnings)

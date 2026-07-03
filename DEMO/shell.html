@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b29</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b30</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -650,7 +650,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b29); orbit/zoom embind =',
+        console.log('[editor] panel init (build b30); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -711,7 +711,7 @@
       // Scene lights (Omni_SceneAuthored — index order maps 1:1 onto the LWS
       // AddLight blocks, which is what the server patches on Save).
       var editorLights = [], editorLightsPristine = {}, editorSelectedLight = null;
-      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range'];
+      var EDITOR_LIGHT_PROPS = ['r','g','b','intensity','range','flareScale'];
       function lightDirty(l){
         var p = editorLightsPristine[l.i]; if (!p) return false;
         return EDITOR_LIGHT_PROPS.some(function(k){ return Math.abs((+l[k]) - (+p[k])) > 1e-6; });
@@ -784,8 +784,13 @@
         updateSaveButton();
         return ok;
       }
+      // flareScale multiplies the flare SPRITE size on top of intensity
+      // (engine: F.FlareSize = ISize × flareScale) — decouples "how bright
+      // the light is" from "how big the flare draws". Persists via the scene
+      // sidecar (no LWS/FLD field for it).
       var EDITOR_LIGHT_RANGES = { r:[0,255,1], g:[0,255,1], b:[0,255,1],
-                                  intensity:[0,4,0.01], range:[0,100,0.5] };
+                                  intensity:[0,4,0.01], range:[0,100,0.5],
+                                  flareScale:[0.05,4,0.01] };
       function renderLightProps(l){
         var el = document.getElementById('editor-light-props'); el.innerHTML = '';
         var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;display:flex;justify-content:space-between;';

@@ -61,6 +61,13 @@ bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 // to split — only one instance found).
 std::string Editor_SplitInstances(const char* name);
 
+// Set one property on the i-th scene-authored light (Omni_SceneAuthored, file
+// order — the same index the LWS/FLD write-back patchers use). Keys: r/g/b
+// (0-255; also re-points the omni's flare sprite at a texture baked for the
+// new color), intensity, range (splines — every key set), flareScale (sprite
+// size multiplier on top of intensity; 0 = legacy).
+bool Editor_SetLightProp(int index, const char *key, float value);
+
 // Import a PBR map onto a surface from raw image-file bytes (a browser upload),
 // by role: "albedo" | "normal" | "height" | "roughness" | "ao". Writes the bytes
 // to a temp file and reuses MaterialImport_ApplyMapFile (same load/convert/assign

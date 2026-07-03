@@ -360,6 +360,34 @@ static void RunImportTestHook() {
     }
 }
 
+// LIGHT_TEST=index:key:value[;...] — exercise the RUNTIME light-edit path
+// (rev::Editor_SetLightProp — the browser editor's code) natively. Fires once,
+// before the tick, like IMPORT_TEST.
+static void RunLightTestHook() {
+    const char *spec = std::getenv("LIGHT_TEST");
+    if (!spec) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::string all = spec, s;
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t semi = all.find(';', pos);
+        if (semi == std::string::npos) semi = all.size();
+        s = all.substr(pos, semi - pos);
+        pos = semi + 1;
+        if (s.empty()) continue;
+        size_t c1 = s.find(':'), c2 = (c1 == std::string::npos) ? c1 : s.find(':', c1 + 1);
+        if (c2 == std::string::npos) { std::fprintf(stderr, "[LIGHTTEST] want index:key:value\n"); continue; }
+        const int idx = std::atoi(s.substr(0, c1).c_str());
+        const std::string key = s.substr(c1 + 1, c2 - c1 - 1);
+        const float val = std::strtof(s.c_str() + c2 + 1, nullptr);
+        const bool ok = rev::Editor_SetLightProp(idx, key.c_str(), val);
+        std::fprintf(stderr, "[LIGHTTEST] light %d %s = %g: %s\n", idx, key.c_str(), val,
+                     ok ? "ok" : "FAILED");
+    }
+}
+
 int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -449,6 +477,7 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // IMPORT_TEST fires BEFORE the tick so the first written frame (t=100,
         // which frames the big rooms wall) already shows the imported map.
         RunImportTestHook();
+        RunLightTestHook();
 
         bool more = driver->tick();
         (void)more;
