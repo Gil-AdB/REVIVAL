@@ -668,6 +668,130 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 	return shadowAtten;
 }
 
+// Env-specular reflection compose (--env_refl): sample the surface's baked
+// panorama along the reflected view ray and add the Fresnel-weighted,
+// roughness-mip-blurred, metal-tinted contribution into the spec
+// accumulators. Extracted VERBATIM from the wave-1 scalar compose so the
+// wave-2 quarter/checker fill FALLBACK shades identically — the fallback
+// previously had no env block at all, which rendered reflections as a
+// 1-of-4 dot grid on any surface whose neighbors fail the fill's
+// normal-similarity test (curved cockpit glass under --deferred-quarter).
+static inline void EnvSpecComposeScalar(
+	const DeferredLightingCtx &ctx, const fds::EnvPanoLinear *envP,
+	const Material *Mat, uint32_t miplevel, uint32_t swizzledUV,
+	float x, float y, float z, float nx, float ny, float nz,
+	float sampleWorldX, float sampleWorldY, float sampleWorldZ,
+	float texB, float texG, float texR,
+	float gloss, float metalM, bool roughMapOn, float envReflGain,
+	float &sB, float &sG, float &sR)
+{
+	// Incident ray d = pixel direction (view space, camera at
+	// origin); reflect about the (possibly nmap-perturbed) N.
+	const float dInv = fast_rsqrt(x*x + y*y + z*z);
+	const float dx = x * dInv, dy = y * dInv, dz = z * dInv;
+	const float dDotN = dx*nx + dy*ny + dz*nz;
+	const float rvx = dx - 2.0f * dDotN * nx;
+	const float rvy = dy - 2.0f * dDotN * ny;
+	const float rvz = dz - 2.0f * dDotN * nz;
+	// View → world rotation (viewToWorld is the transpose of the
+	// camera rotation; direction ⇒ no translation).
+	float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
+	float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
+	float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+	// Parallax correction: exit-t of ray sampleWorld + t·R against
+	// the AABB (slab method, per-axis far plane), hit point → the
+	// lookup direction from the BAKE point. t ≤ 0 (pixel outside
+	// the proxy) falls back to the uncorrected direction.
+	{
+		const float bigT = 1e30f;
+		const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
+		                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
+		const float ty_ = rwy > 1e-6f ? (envP->boxMaxY - sampleWorldY) / rwy
+		                : rwy < -1e-6f ? (envP->boxMinY - sampleWorldY) / rwy : bigT;
+		const float tz_ = rwz > 1e-6f ? (envP->boxMaxZ - sampleWorldZ) / rwz
+		                : rwz < -1e-6f ? (envP->boxMinZ - sampleWorldZ) / rwz : bigT;
+		float t = tx_ < ty_ ? tx_ : ty_;
+		if (tz_ < t) t = tz_;
+		if (t > 0.0f && t < bigT) {
+			const float hx_ = sampleWorldX + t * rwx - envP->bakeX;
+			const float hy_ = sampleWorldY + t * rwy - envP->bakeY;
+			const float hz_ = sampleWorldZ + t * rwz - envP->bakeZ;
+			const float hInv_ = fast_rsqrt(hx_*hx_ + hy_*hy_ + hz_*hz_ + 1e-12f);
+			rwx = hx_ * hInv_; rwy = hy_ * hInv_; rwz = hz_ * hInv_;
+		}
+	}
+	// Equirect lookup — the exact inverse of EnvBake's stitch
+	// mapping: lon = atan2(-z, -x), lat = asin(y). Polynomial
+	// approximations (SimdHelpers) — libm atan2f/asinf here were
+	// the bulk of the env cost (~5ms on a cockpit-sized surface).
+	const float lon = atan2_approx(-rwz, -rwx);
+	float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
+	const float lat = asin_approx(sy_);
+	float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
+	eu -= std::floor(eu);
+	float evv = 0.5f - lat * (1.0f / 3.14159265359f);
+	if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
+	// Pre-filtered mip by per-pixel roughness (map texel, else the
+	// gloss-derived roughness the --pbr path uses).
+	float rough;
+	if (roughMapOn && Mat->RoughnessMap && miplevel < Mat->RoughnessMap->numMipmaps
+	    && Mat->RoughnessMap->Mipmap[miplevel]) {
+		rough = float(reinterpret_cast<const byte*>(
+			Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+	} else {
+		rough = std::sqrt(2.0f / (gloss + 2.0f));
+	}
+	// Trilinear across the blur chain: nearest-level select on a
+	// NOISY roughness map made adjacent pixels flip between sharp
+	// and blurred mips (speckle). Lerp the two straddling levels.
+	float lvlF = rough * float(envP->numMips - 1);
+	if (lvlF < 0.0f) lvlF = 0.0f;
+	if (lvlF > float(envP->numMips - 1)) lvlF = float(envP->numMips - 1);
+	const int lvl0 = int(lvlF);
+	const int lvl1 = lvl0 + 1 < envP->numMips ? lvl0 + 1 : lvl0;
+	const float lf = lvlF - float(lvl0);
+	// ENV_NOFETCH=1: constant color instead of the pano loads —
+	// cost-attribution experiment (fetch-bound vs math-bound).
+	static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
+	auto fetchLvl = [&](int lvl) -> uint32_t {
+		if (sNoFetch) return 0xFF808080u;
+		const int lw = envP->W >> lvl, lh = envP->H >> lvl;
+		const int epx = int(eu * float(lw)) % lw;
+		const int epy_ = int(evv * float(lh));
+		return envP->mip[lvl][size_t(epy_) * lw + epx];
+	};
+	const uint32_t c0 = fetchLvl(lvl0);
+	const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;
+	const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
+	const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
+	const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
+	// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
+	// d·N < 0). F0 = authored Reflection% with the dielectric
+	// floor, pulled to ~1 by metalness. F90 (the grazing limit)
+	// is attenuated by roughness — the standard rough-Fresnel
+	// trick; without it a noisy normal map turns every grazing
+	// texel into a white spark (pow5 amplifies the nmap noise).
+	float ndv = -dDotN;
+	if (ndv < 0.0f) ndv = 0.0f; if (ndv > 1.0f) ndv = 1.0f;
+	float f0 = Mat->Reflection * 0.01f;
+	if (f0 < 0.04f) f0 = 0.04f;
+	f0 = f0 + (0.98f - f0) * metalM;
+	float f90 = 1.0f - rough;
+	if (f90 < f0) f90 = f0;
+	const float omv = 1.0f - ndv;
+	const float omv2 = omv * omv;
+	const float fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
+	const float ek = fres * envReflGain;
+	const float inv255 = 1.0f / 255.0f;
+	// Metal tint: reflection takes the albedo's color.
+	const float tB = 1.0f - metalM + metalM * texB * inv255;
+	const float tG = 1.0f - metalM + metalM * texG * inv255;
+	const float tR = 1.0f - metalM + metalM * texR * inv255;
+	sB += ecB * ek * tB;
+	sG += ecG * ek * tG;
+	sR += ecR * ek * tR;
+}
+
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
                                           int tileIndex,
                                           int x1, int y1, int x2, int y2)
@@ -1668,111 +1792,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// indexes the pano — floors/walls track position instead of
 			// wearing a pasted-on picture.
 			if (hasEnvRefl) {
-				// Incident ray d = pixel direction (view space, camera at
-				// origin); reflect about the (possibly nmap-perturbed) N.
-				const float dInv = fast_rsqrt(x*x + y*y + z*z);
-				const float dx = x * dInv, dy = y * dInv, dz = z * dInv;
-				const float dDotN = dx*nx + dy*ny + dz*nz;
-				const float rvx = dx - 2.0f * dDotN * nx;
-				const float rvy = dy - 2.0f * dDotN * ny;
-				const float rvz = dz - 2.0f * dDotN * nz;
-				// View → world rotation (viewToWorld is the transpose of the
-				// camera rotation; direction ⇒ no translation).
-				float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
-				float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
-				float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
-				// Parallax correction: exit-t of ray sampleWorld + t·R against
-				// the AABB (slab method, per-axis far plane), hit point → the
-				// lookup direction from the BAKE point. t ≤ 0 (pixel outside
-				// the proxy) falls back to the uncorrected direction.
-				{
-					const float bigT = 1e30f;
-					const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
-					                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
-					const float ty_ = rwy > 1e-6f ? (envP->boxMaxY - sampleWorldY) / rwy
-					                : rwy < -1e-6f ? (envP->boxMinY - sampleWorldY) / rwy : bigT;
-					const float tz_ = rwz > 1e-6f ? (envP->boxMaxZ - sampleWorldZ) / rwz
-					                : rwz < -1e-6f ? (envP->boxMinZ - sampleWorldZ) / rwz : bigT;
-					float t = tx_ < ty_ ? tx_ : ty_;
-					if (tz_ < t) t = tz_;
-					if (t > 0.0f && t < bigT) {
-						const float hx_ = sampleWorldX + t * rwx - envP->bakeX;
-						const float hy_ = sampleWorldY + t * rwy - envP->bakeY;
-						const float hz_ = sampleWorldZ + t * rwz - envP->bakeZ;
-						const float hInv_ = fast_rsqrt(hx_*hx_ + hy_*hy_ + hz_*hz_ + 1e-12f);
-						rwx = hx_ * hInv_; rwy = hy_ * hInv_; rwz = hz_ * hInv_;
-					}
-				}
-				// Equirect lookup — the exact inverse of EnvBake's stitch
-				// mapping: lon = atan2(-z, -x), lat = asin(y). Polynomial
-				// approximations (SimdHelpers) — libm atan2f/asinf here were
-				// the bulk of the env cost (~5ms on a cockpit-sized surface).
-				const float lon = atan2_approx(-rwz, -rwx);
-				float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
-				const float lat = asin_approx(sy_);
-				float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
-				eu -= std::floor(eu);
-				float evv = 0.5f - lat * (1.0f / 3.14159265359f);
-				if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
-				// Pre-filtered mip by per-pixel roughness (map texel, else the
-				// gloss-derived roughness the --pbr path uses).
-				float rough;
-				if (roughMapOnG && Mat->RoughnessMap && miplevel < Mat->RoughnessMap->numMipmaps
-				    && Mat->RoughnessMap->Mipmap[miplevel]) {
-					rough = float(reinterpret_cast<const byte*>(
-						Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
-				} else {
-					rough = std::sqrt(2.0f / (gloss + 2.0f));
-				}
-				// Trilinear across the blur chain: nearest-level select on a
-				// NOISY roughness map made adjacent pixels flip between sharp
-				// and blurred mips (speckle). Lerp the two straddling levels.
-				float lvlF = rough * float(envP->numMips - 1);
-				if (lvlF < 0.0f) lvlF = 0.0f;
-				if (lvlF > float(envP->numMips - 1)) lvlF = float(envP->numMips - 1);
-				const int lvl0 = int(lvlF);
-				const int lvl1 = lvl0 + 1 < envP->numMips ? lvl0 + 1 : lvl0;
-				const float lf = lvlF - float(lvl0);
-				// ENV_NOFETCH=1: constant color instead of the pano loads —
-				// cost-attribution experiment (fetch-bound vs math-bound).
-				static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
-				auto fetchLvl = [&](int lvl) -> uint32_t {
-					if (sNoFetch) return 0xFF808080u;
-					const int lw = envP->W >> lvl, lh = envP->H >> lvl;
-					const int epx = int(eu * float(lw)) % lw;
-					const int epy_ = int(evv * float(lh));
-					return envP->mip[lvl][size_t(epy_) * lw + epx];
-				};
-				const uint32_t c0 = fetchLvl(lvl0);
-				const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;
-				const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
-				const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
-				const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
-				// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
-				// d·N < 0). F0 = authored Reflection% with the dielectric
-				// floor, pulled to ~1 by metalness. F90 (the grazing limit)
-				// is attenuated by roughness — the standard rough-Fresnel
-				// trick; without it a noisy normal map turns every grazing
-				// texel into a white spark (pow5 amplifies the nmap noise).
-				float ndv = -dDotN;
-				if (ndv < 0.0f) ndv = 0.0f; if (ndv > 1.0f) ndv = 1.0f;
-				float f0 = Mat->Reflection * 0.01f;
-				if (f0 < 0.04f) f0 = 0.04f;
-				f0 = f0 + (0.98f - f0) * metalM;
-				float f90 = 1.0f - rough;
-				if (f90 < f0) f90 = f0;
-				const float omv = 1.0f - ndv;
-				const float omv2 = omv * omv;
-				const float fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
-				const float ek = fres * envReflGainG;
-				const float inv255 = 1.0f / 255.0f;
-				// Metal tint: reflection takes the albedo's color.
-				const float tB = 1.0f - metalM + metalM * texB * inv255;
-				const float tG = 1.0f - metalM + metalM * texG * inv255;
-				const float tR = 1.0f - metalM + metalM * texR * inv255;
-				sB += ecB * ek * tB;
-				sG += ecG * ek * tG;
-				sR += ecR * ek * tR;
+				EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
+				                     x, y, z, nx, ny, nz,
+				                     sampleWorldX, sampleWorldY, sampleWorldZ,
+				                     texB, texG, texR, gloss, metalM,
+				                     roughMapOnG, envReflGainG, sB, sG, sR);
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
@@ -3082,6 +3106,13 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool  roughMapOnG    = fds::FeatureFlags::roughness_map();   // see main kernel
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();
+	// Env-reflection + metalness state — the fallback below replays the
+	// wave-1 kernel and must include the env compose (see EnvSpecComposeScalar;
+	// its absence here was the quarter-mode "reflection = dot grid" bug).
+	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
+	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
+	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
+	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
@@ -3135,6 +3166,17 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// on hdrWrite to keep the LDR fill byte-exact).
 			if (hdrWrite && (mat32 == 0xFFFFFFFFu || mat32 == 0xFFFFFFFEu)) continue;  // both forward sentinels
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
+
+			// Env-reflective materials always take the full-shade fallback:
+			// BOTH averaging models break on them. The plain average carries
+			// env only from compatible neighbors, and the texture-decouple
+			// reconstruction scales neighbor radiance by (texel_i/texel_n)^exp
+			// — a model for albedo-modulated diffuse that CRUSHES the env
+			// term (albedo-independent spec) wherever the pixel's texel is
+			// darker than its neighbor's. On the cockpit glass this rendered
+			// reflections as alternating lit/dark columns. Reflective pixels
+			// are a small fraction of the frame; full shading them is cheap.
+			const bool envForceFull = envTabG && envTabG[matIDc] != nullptr;
 
 			// Center normal decoded once; reused by every fill pattern's
 			// neighbor-similarity test below. Cheap enough vs the avoided
@@ -3199,7 +3241,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const bool sTexSharp = fds::FeatureFlags::quarter_tex_sharp();
 
 			bool matched = false;
-			if (quarter) {
+			if (envForceFull) {
+				// fall through to the full-shade fallback below
+			} else if (quarter) {
 				// Adaptive partial averaging: per-neighbor compatibility
 				// test (matID + normal + Z), then average ONLY the passing
 				// neighbors. Avoids the per-face-edge outline that the
@@ -3556,6 +3600,18 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			float fdB = (texB * lB) * (1.0f / 256.0f);
 			float fdG = (texG * lG) * (1.0f / 256.0f);
 			float fdR = (texR * lR) * (1.0f / 256.0f);
+			// Metalness (see main kernel): conductors get no diffuse.
+			float metalM = 0.0f;
+			const bool hasMetal = metalMapOnG && Mat->MetallicMap;
+			if (hasMetal) {
+				const byte *md = (miplevel < Mat->MetallicMap->numMipmaps)
+					? reinterpret_cast<const byte*>(Mat->MetallicMap->Mipmap[miplevel]) : nullptr;
+				if (md) metalM = float(md[swizzledUV]) * (1.0f/255.0f);
+				if (metalM > 0.0f) {
+					const float dk = 1.0f - metalM;
+					fdB *= dk; fdG *= dk; fdR *= dk;
+				}
+			}
 			// Roughness map (cheap tier): per-pixel specular intensity (see main path).
 			if (roughMapOnG && Mat->RoughnessMap && (sB != 0.0f || sG != 0.0f || sR != 0.0f)) {
 				const byte *rd = (miplevel < Mat->RoughnessMap->numMipmaps)
@@ -3564,6 +3620,35 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					float specMul = 1.0f - roughStrengthG * (float(rd[swizzledUV]) * (1.0f/255.0f));
 					if (specMul < 0.0f) specMul = 0.0f;
 					sB *= specMul; sG *= specMul; sR *= specMul;
+				}
+			}
+			// Metals: tint the accumulated analytic highlights by the albedo.
+			if (metalM > 0.0f) {
+				const float inv255 = 1.0f / 255.0f;
+				sB *= 1.0f - metalM + metalM * texB * inv255;
+				sG *= 1.0f - metalM + metalM * texG * inv255;
+				sR *= 1.0f - metalM + metalM * texR * inv255;
+			}
+			// Env-specular reflection — the SAME compose as wave-1 (shared
+			// helper), so fallback-shaded fill pixels carry reflections.
+			{
+				const fds::EnvPanoLinear *envP =
+					(envTabG && (Mat->Reflection > 0.0f || hasMetal)) ? envTabG[matID] : nullptr;
+				if (envP) {
+					const float sampleWorldX =
+						ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y +
+						ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+					const float sampleWorldY =
+						ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y +
+						ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+					const float sampleWorldZ =
+						ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
+						ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+					EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
+					                     x, y, z, nx, ny, nz,
+					                     sampleWorldX, sampleWorldY, sampleWorldZ,
+					                     texB, texG, texR, gloss, metalM,
+					                     roughMapOnG, envReflGainG, sB, sG, sR);
 				}
 			}
 			int outB = int(fdB) + int(sB);

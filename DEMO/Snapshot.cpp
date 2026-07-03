@@ -555,6 +555,26 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                       cfg.outDir.c_str(), ts);
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
+
+        // GBUF_PROBE="x1,y1,x2,y2": per-column-parity matID histogram over a
+        // rect — diagnosis hook (e.g. which pixels are forward-sentinel vs
+        // which deferred material; the env-refl quarter-dots hunt).
+        if (const char* pr = std::getenv("GBUF_PROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4) {
+                std::unordered_map<uint64_t, int> hist;  // (matID-or-sentinel)<<1 | x-parity -> n
+                for (int yy = py1; yy < py2; ++yy)
+                    for (int xx = px1; xx < px2; ++xx) {
+                        const uint32_t m32 = g_gbuffer->txtr[size_t(yy) * xres + xx];
+                        const uint32_t key = (m32 == 0xFFFFFFFFu || m32 == 0xFFFFFFFEu)
+                            ? m32 : ((m32 >> 20) & 0xFF);
+                        ++hist[(uint64_t(key) << 1) | uint64_t(xx & 1)];
+                    }
+                for (auto& kv : hist)
+                    std::fprintf(stderr, "[GBUFPROBE] mat=%08x oddx=%d n=%d\n",
+                                 uint32_t(kv.first >> 1), int(kv.first & 1), kv.second);
+            }
+        }
         ++produced;
     }
 
