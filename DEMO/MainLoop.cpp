@@ -292,11 +292,16 @@ void DemoBoot(ModplayerHandle modHandle)
 		std::vector<const char*> argv;
 		for (auto &a : args) argv.push_back(a.c_str());
 		fds::FeatureFlags::parseArgs((int)argv.size(), argv.data());
-		// Only hard override: the teleporter mirror stays off in wasm (memory).
-		fds::FeatureFlags::setParamFromText("greets_mirror", "0");
-		fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
-		fprintf(stderr, "[EDITOR] %s editor: full native pipeline (%d flags), mirror off (wasm mem)\n",
-		        g_editorScene->name, (int)args.size() - 1);
+		// Mirrors default OFF in the editor (historical wasm-memory caution —
+		// the measured overhead is now ~15 MB, so an EXPLICIT ?editor&greets-mirror
+		// /&mirror-rtt in the URL is honored; without one they stay off).
+		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::greets_mirror))
+			fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::mirror_rtt))
+			fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
+		fprintf(stderr, "[EDITOR] %s editor: full native pipeline (%d flags), mirror %s\n",
+		        g_editorScene->name, (int)args.size() - 1,
+		        fds::FeatureFlags::greets_mirror() ? "ON (URL opt-in)" : "off (default)");
 		// Default orbit pivot (greets: room-bbox centre; autoFrame scenes
 		// recompute from the world bbox after the first tick).
 		g_camTarget.x = g_editorScene->tx; g_camTarget.y = g_editorScene->ty; g_camTarget.z = g_editorScene->tz;
