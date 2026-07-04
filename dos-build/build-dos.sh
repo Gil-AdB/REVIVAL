@@ -64,7 +64,7 @@ done < <(find "$FDS" -name '*.ASM' | sort)
 
 echo "=== compiling demo scenes (C++) ==="
 export INCLUDE="$INCLUDE_REV"
-for f in "$REV"/REV.CPP "$REV"/SHIT.CPP "$REV"/CITY.CPP "$REV"/FOUNTAIN.CPP "$REV"/GREETS.CPP "$REV"/GLAT.CPP "$REV"/CHASE.CPP "$REV"/CRASH.CPP "$REV"/CREDITS.CPP; do
+for f in "$REV"/REV.CPP "$REV"/DOSRECOVER.CPP "$REV"/SHIT.CPP "$REV"/CITY.CPP "$REV"/FOUNTAIN.CPP "$REV"/GREETS.CPP "$REV"/GLAT.CPP "$REV"/CHASE.CPP "$REV"/CRASH.CPP "$REV"/CREDITS.CPP; do
   [ -f "$f" ] || continue
   o="$OUT/$(basename "${f%.CPP}").o"
   if wpp386 $CFLAGS -fo="$o" "$f" >/tmp/cc.log 2>&1; then
@@ -89,7 +89,9 @@ if [ "$cpp_fail" = 0 ] && [ "$asm_fail" = 0 ]; then
     LINKOBJS="$LINKOBJS,$o"
   done
   LINKOBJS=${LINKOBJS#,}
-  wlink system dos4g name "$OUT/REV.EXE" option quiet \
+  # nocaseexact: 1998 libs mangle C++ names lowercase (W?LoadARJ$n(pnapna)pna),
+  # OW2 uppercase ($N/PNA) — match case-insensitively.
+  wlink system dos4g name "$OUT/REV.EXE" option quiet,nocaseexact \
     file "$LINKOBJS" \
     library "$ROOT/FDS/MIDAS.LIB" library "$ROOT/FDS/JPEGLIBD.LIB" library "$ROOT/FDS/UNARJ.LIB" \
     2>&1 | grep -iE 'error|undefined' | sort -u | head -40
