@@ -323,6 +323,16 @@ byte-identical; zero scene-pixel change vs pre-change binary.
 NOTE: the greets teleporter-stone run-to-run item may have been this —
 re-test it before investigating further.
 
+FOLLOW-UP SHIPPED (c0347f4): `screen_text` master HUD kill-switch. The
+remaining UNCONDITIONAL counters (crash frame counters, city t=
+indicator, greets Shadow:[F3] indicator, fountain follower-omni labels,
+SDL2 flip resolution overlay) are now behind it; snapshot mode
+setDefaults it OFF (captures = scene pixels only), --no-screen_text
+removes all HUD at runtime, --screen_text forces it back headless.
+Debug-viz probes (env-gated) + mirrortest labels (golden-hashed)
+deliberately untouched. NOTE for A/B vs OLD reference captures: text
+regions will diff once — re-baseline references, or compare new-vs-new.
+
 ## Known open items beyond the xpar task
 - User to eyeball live: temporal SSAO mech-contact-AO lag; f16/DoF look.
 - quarter-vs-checker default decision (above).
