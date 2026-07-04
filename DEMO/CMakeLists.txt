@@ -13,6 +13,7 @@ set(DEMO_SOURCES
     CityPanoramaCache.h
     Config.cpp
     Config.h
+    CloakTest.cpp
     CRASH.CPP
     CRASH.H
     PBRTEST.CPP

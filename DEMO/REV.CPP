@@ -1153,6 +1153,12 @@ void CodeEntry(void *var)
 	// Single-scene dispatch: if the user passed --scene-mirrortest,
 	// skip the whole demo sequence and run only that scene. Useful
 	// for poking at the mirror system with free-cam.
+	if (fds::FeatureFlags::scene_cloaktest()) {
+		extern void Run_CloakTest();
+		if (t1.joinable()) t1.join();   // same FList-realloc race as mirrortest
+		Run_CloakTest();
+		goto demo_exit;
+	}
 	if (fds::FeatureFlags::scene_mirrortest()) {
 		extern void Run_MirrorTest();
 		// Join the init thread BEFORE running the mirror test scene.
