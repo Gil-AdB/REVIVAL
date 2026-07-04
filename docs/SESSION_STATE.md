@@ -19,13 +19,18 @@ Ranked list (full reasoning in the 2026-07-04 conversation + below):
    (kernel/strips/cones/halos; the clone-cone cull gap was exactly this
    rot). zeroTileLightPadding folds the two padding blocks. Same
    validation, all green.
-3. ⬜ **TBR migration** — greets/city still use the legacy xpar peel only
-   because they never call TBR_Init (capability-wise TBR handles peeled
-   multi-layer + additive — fountain proves it; user confirmed, code
-   verified at deferredUnifiedTbrEnabled's comment). Enabling TBR_Init
-   there + retiring the legacy peel deletes a whole path AND likely wins
-   the peel's full-plane clear/composite cost (~5ms at point-blank mirror
-   framing). NOT byte-gateable (strip lighting differs) — eyeball + gate.
+3. 🟨 **TBR migration — greets slice SHIPPED (800fc47)**; city + peel
+   deletion remain. Greets now routes xpar + flares through the TBR
+   strips (TBR_EnsureInit + Scn_SpriteTBR in GreetsScene::init, gated on
+   --deferred_unified_tbr; --no-… = exact legacy). Two holes closed:
+   TBR_Sprite got the mirror-clone footprint gate; new TBR_MatchesTarget
+   guards all TBR consumers against offscreen passes (forward RTT would
+   have cross-polluted the main strip lists). Flares now sort by Z —
+   FIXES the known "flare over transparents" bug (eyeballed at t=700:
+   mirror content identical, lamp flares attenuate through glass —
+   USER EYEBALL PENDING live). ~1ms faster at ts=491 + the event window.
+   Remaining: city (rain-particle + water interactions — own slice);
+   the legacy peel can't be DELETED (offscreen fallback uses it).
 4. ⬜ **#1 RenderContext migration slices 3-5** (RENDER_CONTEXT_PLAN.md) —
    the standing campaign; unlocks RTT/shadow-raster parallelism, ends the
    global-swap bug family.
