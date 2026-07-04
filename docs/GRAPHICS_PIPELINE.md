@@ -386,3 +386,4 @@ and call it in `renderFrame` at the right point in §2.
 | Runtime flags | `FDS/Base/FeatureFlags.{def,h,cpp}` |
 | Camera/view globals | `FDS/Base/FDS_VARS.H` |
 | Headless snapshots | `DEMO/Snapshot.cpp` |
+| Env maps (padded cube faces) | `FDS/RENDER/EnvCube.h` (convention + trig-free lookup), `EnvBake.cpp` (deferred bake), `DEMO/CITY.CPP` (per-building bake) — see `docs/ENV_CUBEMAP_PLAN.md`; `--no-env_cube` = legacy equirect |
