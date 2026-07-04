@@ -48,8 +48,21 @@ debug print NEVER FIRED → walked the drop upstream (kernel → clump →
 strip insertion → PY garbage). The earlier "pinned at the isWater
 composite" note was wrong — chase water never reaches the OPAQUE kernel.
 
-Still open (unchanged agreement): env_refl should skip planar-reflection
-water, done properly (the naive line-1136 exclusion greyed the water).
+env_refl-on-water follow-up: RESOLVED, NO CODE CHANGE (2026-07-04,
+measured). env_refl has exactly ONE application site — the OPAQUE
+kernel compose (envP ~1136/1675); the xpar kernel has none. Probes
+confirmed ZERO water pixels reach the opaque or C-fill kernels in
+chase OR city, full-res or quarter (all water is Mat_Transparent →
+xpar kernel; the opaque/fill isWater composites are dead code for
+current scenes, left in place). So env never applies to water pixels
+directly — the earlier `&& !isWater` line-1136 exclusion was a no-op
+on real water, and its observed "greying" was mis-attributed during
+the water-not-rendering state. The env "tint on water" is indirect:
+env changes the mirrored geometry in the pass-1 underlay and the
+water correctly reflects it (chase ±env_refl diff is confined to the
+mirrored-mountain / reflected-flare regions with a clean zero-diff
+gap between them — NOT a uniform water tint).
+
 Chase deferred water vs forward residual: deferred samples the water
 texture at rasterizer mip (crisper caustic web, slightly brighter);
 eyeball live before tuning anything.
