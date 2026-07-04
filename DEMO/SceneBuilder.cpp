@@ -130,7 +130,10 @@ Material *SceneBuilder::AddMaterial(const char *name, Texture *tex,
                                      Color baseCol, unsigned flags) {
     if (!sc_) return nullptr;
     Material *M = getAlignedType<Material>(16);
-    std::memset(M, 0, sizeof(Material));
+    // Value-init, NOT memset: Material has NSDMI defaults (TintR/G/B,
+    // AoStrength, ParallaxScale = 1.0f) that the kernel multiplies by
+    // unconditionally — zeroing them renders the material black.
+    *M = Material{};
     M->Txtr        = tex;
     M->BaseCol     = baseCol;
     M->Diffuse     = 1.0f;

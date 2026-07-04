@@ -1036,6 +1036,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				texR = float((texel >> 16) & 0xFF);
 				texA = float((texel >> 24) & 0xFF);
 			}
+			// Editor albedo tint — per-MATERIAL so surfaces sharing one
+			// deduped Texture* don't bleed into each other (mutating the
+			// texture pixels did; MECH_HUL.JPG serves hull+canons+legs).
+			// x*1.0f is bit-exact, so untinted materials are unchanged.
+			texB *= Mat->TintB; texG *= Mat->TintG; texR *= Mat->TintR;
 
 			// Static-shadow lightmap address for this pixel — resolved
 			// once, used by all cube-shadow taps in the per-omni loops
@@ -2070,9 +2075,9 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
 			if (!texData) continue;
 			const dword texel = texData[swizzledUV];
-			const float texB = float(texel & 0xFF);
-			const float texG = float((texel >> 8) & 0xFF);
-			const float texR = float((texel >> 16) & 0xFF);
+			const float texB = float(texel & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
+			const float texG = float((texel >> 8) & 0xFF)  * Mat->TintG;
+			const float texR = float((texel >> 16) & 0xFF) * Mat->TintR;
 
 			float nx, ny, nz;
 			meka::oct_decode_u16(gbX.normal[i], nx, ny, nz);
@@ -2704,9 +2709,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					continue;
 				}
 				const dword tx = texData[uv];
-				lane_texB[k] = float(tx & 0xFF);
-				lane_texG[k] = float((tx >> 8) & 0xFF);
-				lane_texR[k] = float((tx >> 16) & 0xFF);
+				lane_texB[k] = float(tx & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
+				lane_texG[k] = float((tx >> 8) & 0xFF)  * Mat->TintG;
+				lane_texR[k] = float((tx >> 16) & 0xFF) * Mat->TintR;
 				const float Lumin = Mat->Luminosity;
 				const float Diff  = Mat->Diffuse;
 				lane_ambB[k]    = Lumin * 255.0f + Diff * ambB_sc;
@@ -3455,9 +3460,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const dword *texData = (const dword *)Mat->Txtr->Mipmap[miplevel];
 			if (!texData) continue;
 			const dword texel = texData[swizzledUV];
-			const float texB = float(texel & 0xFF);
-			const float texG = float((texel >> 8) & 0xFF);
-			const float texR = float((texel >> 16) & 0xFF);
+			const float texB = float(texel & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
+			const float texG = float((texel >> 8) & 0xFF)  * Mat->TintG;
+			const float texR = float((texel >> 16) & 0xFF) * Mat->TintR;
 
 			float nx, ny, nz;
 			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);

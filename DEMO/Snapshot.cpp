@@ -4250,7 +4250,7 @@ Texture *MT_makeTextAlphaTexture(const char *fileName) {
 Material *MT_makeMaterial(Scene *sc, const char *name, Texture *texture,
                           float r, float g, float b, dword flags) {
     Material *M = getAlignedType<Material>(16);
-    std::memset(M, 0, sizeof(Material));
+    *M = Material{};   // NSDMI defaults (Tint*/AoStrength = 1), not memset
     M->Txtr = texture;
     M->BaseCol.R = r; M->BaseCol.G = g; M->BaseCol.B = b; M->BaseCol.A = 255;
     M->Diffuse = 1.0f;

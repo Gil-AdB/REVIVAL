@@ -112,7 +112,7 @@ Material *makeBoltTex() {
 		}
 	}
 	Material *M = getAlignedType<Material>(16);
-	std::memset(M, 0, sizeof(Material));
+	*M = Material{};   // NSDMI defaults (Tint*/AoStrength = 1), not memset
 	M->Flags = Mat_Virtual;
 	M->Txtr = Scene_MakeTiledTexture(W, H, px.data(), /*buildMips=*/true);
 	return M;
