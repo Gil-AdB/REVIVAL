@@ -773,6 +773,13 @@ struct ChaseScene : SceneDriver {
 
 	void init() override {
 		SetCurrentScene(ChaseSc);
+		// Unified-TBR transparent path (same wiring as greets/city — see
+		// GreetsScene::init). Chase's consumer is the water surface
+		// (Mat_Transparent, set in the water setup above/below).
+		if (fds::FeatureFlags::deferred_unified_tbr()) {
+			TBR_EnsureInit(ChaseSc, 256);
+			ChaseSc->Flags |= Scn_SpriteTBR;
+		}
 		Calibrate_FreeCamera_ForScene(ChaseSc->FZP, ChaseSc->CameraHead);
 		Reflective_Mapper_Setup();
 		Setup_Water_Distort();
@@ -793,6 +800,9 @@ struct ChaseScene : SceneDriver {
 	bool tick() override {
 		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
 		if (Keyboard[ScBackSpace] || Timer >= CHPartTime) return false;
+
+		// Mid-scene resize: keep the TBR strips tracking YRes.
+		if (ChaseSc->Flags & Scn_SpriteTBR) TBR_EnsureInit(ChaseSc, 256);
 
 		prof.beginFrame();
 		prof.enter(PROF_ZCLR);
