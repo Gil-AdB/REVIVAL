@@ -13,7 +13,7 @@
 #include "ProceduralWater.h"
 #include "SceneTick.h"
 #include "Scenes.h"
-#include "SpotlightCones.h"
+#include <RENDER/SpotlightCones.h>
 #include <algorithm>
 #include <memory>
 #include <vector>

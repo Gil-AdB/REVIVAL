@@ -1,5 +1,4 @@
 #include "MirrorShatter.h"
-#include "SceneBuilder.h"
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
@@ -19,6 +18,7 @@
 #include <Base/VertexScratch.h>  // per-worker transformed-vertex clones
 #include <RENDER/OffscreenView.h>
 #include <FILLERS/Mekalele.h>    // meka::GBuffer + g_gbuffer globals (deferred bake)
+#include <FILLERS/TheOtherBarry.h> // PickFillerForMaterial (canonical filler picker)
 #include <RENDER/DeferredCommon.h> // ViewLightsSoA/TileLights/DeferredOverride + Render_DeferredLighting
 #include <Base/FeatureFlags.h>
 #include <Threads.h>             // ThreadPool — fan shards across cores
@@ -160,7 +160,7 @@ TriMesh* MirrorShatter::makeShardMesh(Scene* sc, const Vector wc[4], const Vecto
 		F.U3 = F.C->U; F.V3 = F.C->V;
 		F.N = N;
 		F.NormProd = -vdot(F.N, F.A->Pos);
-		F.Filler = scene_builder::SceneBuilder::PickFillerForMaterial(mat);
+		F.Filler = PickFillerForMaterial(mat);
 	};
 	setupTri(T->Faces[0], 0, 1, 2);
 	setupTri(T->Faces[1], 0, 2, 3);
@@ -632,7 +632,7 @@ void MirrorShatter::prepareReflectionAtlas(Scene* sc, int texRes) {
 		for (int fi = 0; fi < s.mesh->FIndex; ++fi) {
 			s.mesh->Faces[fi].Flags &= ~Face_Reflective;
 			s.mesh->Faces[fi].Txtr   = mt;
-			s.mesh->Faces[fi].Filler = scene_builder::SceneBuilder::PickFillerForMaterial(mt);
+			s.mesh->Faces[fi].Filler = PickFillerForMaterial(mt);
 		}
 	}
 	Scene_RebuildMatTable(sc);

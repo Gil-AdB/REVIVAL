@@ -13,7 +13,7 @@
 #include <Base/Vertex.h>
 #include <RENDER/OffscreenView.h>
 
-#include "SpotlightCones.h"
+#include <RENDER/SpotlightCones.h>
 
 #include <algorithm>
 #include <cmath>

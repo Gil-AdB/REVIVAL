@@ -23,8 +23,8 @@
 #include "GREETS.H"
 #include "GreetsDisco.h"
 #include "BlasterBolts.h"
-#include "GreetsMirror.h"
-#include "MirrorShatter.h"
+#include <RENDER/GreetsMirror.h>
+#include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
 #include "FillerTest.h"
 #include "MeshOps.h"

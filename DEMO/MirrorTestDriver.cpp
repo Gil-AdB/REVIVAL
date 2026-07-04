@@ -1,8 +1,8 @@
 #include "MirrorTestDriver.h"
 
 #include "FrameProfiler.h"
-#include "GreetsMirror.h"
-#include "MirrorShatter.h"
+#include <RENDER/GreetsMirror.h>
+#include <RENDER/MirrorShatter.h>
 #include "Rev.h"
 #include "SceneBuilder.h"
 #include "SceneTick.h"
