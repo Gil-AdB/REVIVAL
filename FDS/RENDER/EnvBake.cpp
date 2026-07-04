@@ -33,6 +33,11 @@ namespace fds {
 // reflection at wherever it happened to stand on bake frame.
 bool g_envBakeSkipDynamic = false;
 
+// The material whose probe is currently baking — its own mesh(es) are
+// excluded from the capture (see Transform.cpp; classic local-cubemap
+// self-exclusion; null outside a bake).
+Material* g_envBakeSkipMaterial = nullptr;
+
 namespace {
 
 // One cube face: an orthonormal (right, up, forward) basis. forward is the
@@ -90,7 +95,8 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 // a LINEAR equirect panorama in `pano`. Returns false on alloc failure.
 static bool renderCubeAndStitch(Scene* sc, const Vector& center,
                                 const EnvBakeParams& params,
-                                std::vector<uint32_t>& pano) {
+                                std::vector<uint32_t>& pano,
+                                Material* skipMat = nullptr) {
     if (!sc) return false;
     const int res = params.cubeRes;
     const int W = params.panoWidth, H = params.panoHeight;
@@ -119,6 +125,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
         view.setView(&s_cam);
 
         g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
+        g_envBakeSkipMaterial = skipMat;   // ...and so does the reflector itself
         for (int i = 0; i < 6; ++i) {
             std::memset(&s_cam, 0, sizeof(s_cam));
             s_cam.ISource = center;
@@ -156,6 +163,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
         }
         g_envBakeSkipDynamic = false;
+        g_envBakeSkipMaterial = nullptr;
     }   // scope exit restores MainSurf/View/FOV/clip planes
 
     std::free(surf.Data);
@@ -307,7 +315,8 @@ void sceneAABB(Scene* sc, SceneEnv& env) {
 
 // Bake one panorama from `center` into a fresh store (mip chain + metadata).
 std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
-                                        const Vector& center) {
+                                        const Vector& center,
+                                        Material* skipMat = nullptr) {
     EnvBakeParams params;
     // --env_refl_res (default 512): reflections are roughness-blurred by eye
     // anyway, so half the CITY bake res reads fine. Clamp: the mip chain
@@ -320,7 +329,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
     params.panoHeight = res;
     auto store = std::make_unique<EnvPanoStore>();
     g_envBakeInProgress = true;
-    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0]);
+    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0], skipMat);
     g_envBakeInProgress = false;
     if (!ok) return nullptr;
     EnvPanoLinear& v = store->view;
@@ -365,7 +374,7 @@ bool EnvReflection_FramePrep(Scene* sc) {
             if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { idx = int(i); break; }
         }
         if (idx < 0) {
-            auto store = bakeStore(sc, env, c);
+            auto store = bakeStore(sc, env, c, M);
             if (!store) { env.byMat[M] = -1; continue; }
             std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
                          store->view.W, store->view.H, store->view.numMips - 1,
@@ -415,6 +424,11 @@ void EnvReflection_DrawViz(Scene* sc) {
         out[size_t(y0 + y) * XRes + x0 - 1]  = 0xFF00FF00u;
         out[size_t(y0 + y) * XRes + x0 + dw] = 0xFF00FF00u;
     }
+}
+
+int EnvReflection_Count(Scene* sc) {
+    auto it = g_envByScene.find(sc);
+    return it == g_envByScene.end() ? 0 : int(it->second.stores.size());
 }
 
 const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {

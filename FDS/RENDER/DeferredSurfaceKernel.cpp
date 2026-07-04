@@ -693,16 +693,22 @@ static inline void EnvSpecComposeScalar(
 	const float rvx = dx - 2.0f * dDotN * nx;
 	const float rvy = dy - 2.0f * dDotN * ny;
 	const float rvz = dz - 2.0f * dDotN * nz;
+	// ENVPROBE=1: sample along the surface NORMAL instead of the
+	// reflection — turns any env surface into a direction probe for
+	// validating the pano/equirect/world mapping (diagnostic only).
+	static const bool sProbe = std::getenv("ENVPROBE") != nullptr;
 	// View → world rotation (viewToWorld is the transpose of the
 	// camera rotation; direction ⇒ no translation).
-	float rwx = ctx.viewToWorld[0][0]*rvx + ctx.viewToWorld[0][1]*rvy + ctx.viewToWorld[0][2]*rvz;
-	float rwy = ctx.viewToWorld[1][0]*rvx + ctx.viewToWorld[1][1]*rvy + ctx.viewToWorld[1][2]*rvz;
-	float rwz = ctx.viewToWorld[2][0]*rvx + ctx.viewToWorld[2][1]*rvy + ctx.viewToWorld[2][2]*rvz;
+	const float pvx = sProbe ? nx : rvx, pvy = sProbe ? ny : rvy, pvz = sProbe ? nz : rvz;
+	float rwx = ctx.viewToWorld[0][0]*pvx + ctx.viewToWorld[0][1]*pvy + ctx.viewToWorld[0][2]*pvz;
+	float rwy = ctx.viewToWorld[1][0]*pvx + ctx.viewToWorld[1][1]*pvy + ctx.viewToWorld[1][2]*pvz;
+	float rwz = ctx.viewToWorld[2][0]*pvx + ctx.viewToWorld[2][1]*pvy + ctx.viewToWorld[2][2]*pvz;
 	// Parallax correction: exit-t of ray sampleWorld + t·R against
 	// the AABB (slab method, per-axis far plane), hit point → the
 	// lookup direction from the BAKE point. t ≤ 0 (pixel outside
 	// the proxy) falls back to the uncorrected direction.
-	{
+	static const bool sNoPara = std::getenv("ENVNOPARA") != nullptr;
+	if (!sNoPara) {
 		const float bigT = 1e30f;
 		const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
 		                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
@@ -724,6 +730,13 @@ static inline void EnvSpecComposeScalar(
 	// mapping: lon = atan2(-z, -x), lat = asin(y). Polynomial
 	// approximations (SimdHelpers) — libm atan2f/asinf here were
 	// the bulk of the env cost (~5ms on a cockpit-sized surface).
+	// ENVFLIP=xyz axis-flip diagnostic (any subset, e.g. ENVFLIP=y).
+	static const char* sFlip = std::getenv("ENVFLIP");
+	if (sFlip) {
+		if (std::strchr(sFlip, 'x')) rwx = -rwx;
+		if (std::strchr(sFlip, 'y')) rwy = -rwy;
+		if (std::strchr(sFlip, 'z')) rwz = -rwz;
+	}
 	const float lon = atan2_approx(-rwz, -rwx);
 	float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
 	const float lat = asin_approx(sy_);

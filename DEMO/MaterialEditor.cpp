@@ -594,6 +594,11 @@ void js_editorRebakeEnv()
 	fds::EnvReflection_Invalidate(CurScene);
 	rev::Editor_MarkDirty();
 }
+
+int js_editorEnvPanoCount()
+{
+	return CurScene ? fds::EnvReflection_Count(CurScene) : 0;
+}
 // bytes is a JS Uint8Array of the uploaded image file.
 bool js_editorImportTexture(std::string surface, std::string role,
                             std::string filename, emscripten::val bytes)
@@ -797,6 +802,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
 	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);
+	emscripten::function("editorEnvPanoCount",   &js_editorEnvPanoCount);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);

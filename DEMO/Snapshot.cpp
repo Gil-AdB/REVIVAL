@@ -678,6 +678,25 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                     std::fprintf(stderr, "[GBUFPROBE] mat=%08x n=%d\n", uint32_t(kv.first), kv.second);
             }
         }
+        // GBUF_NPROBE="x1,y1,x2,y2": decoded G-buffer normal at the region's
+        // corner/edge/centre sample points (view-space; the env-reflection
+        // input). One line per sample: px py -> n=(x y z).
+        if (const char* pr = std::getenv("GBUF_NPROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4 && g_gbuffer) {
+                const int mx = (px1 + px2) / 2, my = (py1 + py2) / 2;
+                const int pts[5][2] = { {mx, py1+8}, {mx, py2-8}, {px1+8, my}, {px2-8, my}, {mx, my} };
+                const char* names[5] = { "top", "bottom", "left", "right", "centre" };
+                for (int k = 0; k < 5; ++k) {
+                    const size_t i = size_t(pts[k][1]) * xres + pts[k][0];
+                    float nx, ny, nz;
+                    meka::oct_decode_u16(g_gbuffer->normal[i], nx, ny, nz);
+                    std::fprintf(stderr, "[GBUFNPROBE] %-6s (%d,%d) n=(%.3f %.3f %.3f) z16=%u\n",
+                                 names[k], pts[k][0], pts[k][1], nx, ny, nz,
+                                 (unsigned)((word*)MainSurf->Z16)[i]);
+                }
+            }
+        }
         if (View)
             std::fprintf(stderr, "[PBRTESTSNAP] cam src=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f) IFOV=%.2f PerspX=%.1f\n",
                          View->ISource.x, View->ISource.y, View->ISource.z,

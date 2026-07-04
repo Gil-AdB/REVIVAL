@@ -89,6 +89,9 @@ void EnvReflection_Invalidate(Scene* sc);
 // N beyond the store count clamps to the last one; 0 = off (no-op).
 void EnvReflection_DrawViz(Scene* sc);
 
+// Number of baked panorama stores for the scene (viewer paging bound).
+int EnvReflection_Count(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_ENV_BAKE_H_INCLUDED

@@ -510,7 +510,8 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 
 // Defined in EnvBake.cpp: while an env-reflection panorama bake renders its
 // cube faces, moving meshes are excluded (see the inStaticBake predicate).
-namespace fds { extern bool g_envBakeSkipDynamic; }
+namespace fds { extern bool g_envBakeSkipDynamic;
+                 extern Material* g_envBakeSkipMaterial; }
 
 // xresOverride / yresOverride: when >= 0, use these instead of the
 // global XRes / YRes for vertex visibility flags + face-level
@@ -738,6 +739,17 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				    (Obj->Name ? Obj->Name : "?"),
 				    unsigned(T->Pos.NumKeys), unsigned(T->FIndex));
 			}
+		}
+		// Env-bake self-exclusion: skip the mesh(es) carrying the material
+		// being baked. The pano is captured from the material's centroid —
+		// often INSIDE its own object (mummy statue, sphere) — and concave
+		// self-geometry would smear across the whole capture. Classic
+		// local-cubemap rule: the reflector never appears in its own probe.
+		if (fds::g_envBakeSkipDynamic && fds::g_envBakeSkipMaterial) {
+			bool hasMat = false;
+			for (DWord fi = 0; fi < T->FIndex && !hasMat; ++fi)
+				hasMat = (T->Faces[fi].Txtr == fds::g_envBakeSkipMaterial);
+			if (hasMat) continue;
 		}
 		if (inStaticBake && meshDynForBake()) {
 			static std::atomic<int> sSkipLogged{0};
