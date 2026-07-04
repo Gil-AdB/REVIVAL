@@ -55,7 +55,7 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx& ctx);
 void Render_ScreenSpaceRain();
 void Render_LensDrops();
 void FastFog_BeginFrame();
-void Render_DeferredSkybox();
+void Render_DeferredSkybox(const DeferredLightingCtx &ctx);
 void VolProf_Tick();
 
 // Defined in LightmapBake.cpp.
@@ -569,7 +569,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// its overdraw. Gated on --deferred-skybox; off by default
 		// until visually validated.
 		if (fds::FeatureFlags::deferred_skybox()) {
-			Render_DeferredSkybox();
+			Render_DeferredSkybox(dctx);
 		}
 
 		// Full-screen distance fog over deferred-lit opaque pixels. Runs

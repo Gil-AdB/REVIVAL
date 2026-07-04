@@ -40,6 +40,14 @@
 #include <atomic>
 #include <semaphore>
 #include <climits>
+
+// RenderContext migration: this TU is GLOBAL-CLEAN — every render pass
+// reads its target/projection state from the DeferredLightingCtx param,
+// never from the engine globals. The poison makes the compiler enforce
+// it (any new use of these names in this file is a build error; read
+// ctx, or take a param).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
@@ -148,15 +156,15 @@ static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
 	// Render-target state from the per-frame ctx (populated by
 	// Render_DeferredLighting, which runs before any volumetric pass — see
 	// renderFrame order). Locals shadow the globals so the body is untouched.
-	const int XRes = ctx.xres;
-	byte *const VPage = ctx.vpage;
-	word *const ZPage16 = ctx.zpage16;
-	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const int xres = ctx.xres;
+	byte *const vpage = ctx.vpage;
+	word *const zpage16 = ctx.zpage16;
+	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	const meka::GBuffer *const g_gbuffer = ctx.gb;
 	const float g_zscale = ctx.zscale;
-	dword *out = reinterpret_cast<dword*>(VPage);
+	dword *out = reinterpret_cast<dword*>(vpage);
 	const uint32_t *mat = g_gbuffer->txtr.data();
-	const uint16_t *zEnc = ZPage16;
+	const uint16_t *zEnc = zpage16;
 	const float invZScale = 1.0f / float(g_zscale);
 	const Vec8f vInvZScale(invZScale);
 	const Vec8f vInvFZP(invFZP);
@@ -171,7 +179,7 @@ static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
 
 	for (int py = y1; py < y2; ++py) {
 		int px = x1;
-		const size_t row = size_t(py) * XRes;
+		const size_t row = size_t(py) * xres;
 		// 8-pixel SIMD body.
 		for (; px + 8 <= x2; px += 8) {
 			const size_t i = row + px;
@@ -239,8 +247,8 @@ static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
 // no separate culling required.
 //
 // Math (view-space, ray origin = camera):
-//   Pixel ray direction: V = (X, Y, 1) where X=(px-CntrEX)*invFOVX,
-//                                            Y=(CntrEY-py)*invFOVY.
+//   Pixel ray direction: V = (X, Y, 1) where X=(px-cntrEX)*invFOVX,
+//                                            Y=(cntrEY-py)*invFOVY.
 //   Cone (apex P, axis D, half-angle cosα²=c²): point Q is inside iff
 //     (D·(Q-P))² ≥ c²|Q-P|² AND D·(Q-P) ≥ 0.
 //   Substituting Q = z_s · V gives a quadratic in z_s with
@@ -259,10 +267,10 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     // shadow the file-scope names so the (large) body is untouched.
     const DeferredLightingCtx &dc = ctx;
     const meka::GBuffer *const g_gbuffer = ctx.gb;
-    const int XRes = ctx.xres;
-    byte *const VPage = ctx.vpage;
-    word *const ZPage16 = ctx.zpage16;
-    const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+    const int xres = ctx.xres;
+    byte *const vpage = ctx.vpage;
+    word *const zpage16 = ctx.zpage16;
+    const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
     if (spotCount == 0) return;
     // fogZ > 0 means scene is fogged: clamp ray to FZP and attenuate each
     // sample by the same (1 - z/FZP) the surface fog pass uses, so the
@@ -276,8 +284,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
     // volume. Using the unfiltered list keeps cones consistent across
     // tile boundaries; the per-pixel quadratic test culls per-pixel.
 
-    dword *out = reinterpret_cast<dword*>(VPage);
-    const uint16_t *zEnc = ZPage16;
+    dword *out = reinterpret_cast<dword*>(vpage);
+    const uint16_t *zEnc = zpage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
@@ -326,8 +334,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                           || fds::FeatureFlags::deferred_checkerboard();
     const int yStep = (vecPath && coneReduced) ? 2 : 1;
     for (int py = y1; py < y2; py += yStep) {
-        const float Y = (CntrEY - float(py)) * invFOVY;
-        const size_t row = size_t(py) * size_t(XRes);
+        const float Y = (cntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(xres);
         const bool dupRow = (yStep == 2) && (py + 1 < y2);
         if (vecPath) {
             // ─── Pixel-major SIMD ──────────────────────────────────────
@@ -350,7 +358,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 bool anyAlive = false;
                 for (int lane = 0; lane < laneCount; ++lane) {
                     const int px = pxBase + lane;
-                    const float X = (float(px) - CntrEX) * invFOVX;
+                    const float X = (float(px) - cntrEX) * invFOVX;
                     Xarr[lane]  = X;
                     uVarr[lane] = X*X + Y*Y + 1.0f;
                     uint32_t h = uint32_t(px) * 0x9E3779B9u
@@ -1115,12 +1123,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const size_t i = row + size_t(px);
                     VolCompositeAdd(out, i, accB[lane], accG[lane], accR[lane]);
                     if (dupRow)
-                        VolCompositeAdd(out, i + size_t(XRes), accB[lane], accG[lane], accR[lane]);
+                        VolCompositeAdd(out, i + size_t(xres), accB[lane], accG[lane], accR[lane]);
                 }
             }
         } else {
         for (int px = x1; px < x2; ++px) {
-            const float X = (float(px) - CntrEX) * invFOVX;
+            const float X = (float(px) - cntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
 
             // Stratified per-pixel jitter offset, in [0,1). Used inside the
@@ -1279,7 +1287,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 if (zLo < zMin)   zLo = zMin;
                 if (zHi <= zLo)   continue;
                 if (omid_s != 0) {
-                    const size_t pi = size_t(py) * size_t(XRes) + size_t(px);
+                    const size_t pi = size_t(py) * size_t(xres) + size_t(px);
                     if (uint32_t(mmask[pi]) != omid_s) continue;
                     const float zWall =
                         float(0xFF80 - int(mmz[pi])) * invZScale;
@@ -1470,14 +1478,15 @@ void VolProf_Tick() { VolProf_Tick_impl(); }
 void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch) {
     VolProfScope _vp(&g_volProf.ms_cones, &g_volProf.n_cones);
     // Render-target addressing from the threaded ctx (the cone tile already
-    // reads ctx). For the main frame ctx.xres==XRes etc. (Render_DeferredLighting
+    // reads ctx). For the main frame ctx.xres==xres etc. (Render_DeferredLighting
     // populated it), so this is byte-identical; for an offscreen shard bake
     // (inlineDispatch) ctx points at the worker's 64² target so the disco beams
     // land in the reflection. inlineDispatch runs the tiles on the calling
     // worker thread (no pool enqueue, no tileDone traffic).
-    if (!CurScene || !ctx.zpage16 || !ctx.vpage) return;
-    const int XRes = ctx.xres;
-    const int YRes = ctx.yres;
+    if (!ctx.Sc || !ctx.zpage16 || !ctx.vpage) return;
+    const int xres = ctx.xres;
+    const int yres = ctx.yres;
+    const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
     const bool allCones = fds::FeatureFlags::draw_cones();
     const float invFOVX = ctx.invFOVX;
     const float invFOVY = ctx.invFOVY;
@@ -1498,7 +1507,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     // Fog cutoff + per-sample attenuation. Matches Render_DeferredFogPass:
     // cones fade by (1 - z/FZP) so they don't extend past where geometry
     // already fully fogged out. fogZ <= 0 disables (unfogged scenes).
-    const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
+    const float fogZ    = (ctx.Sc->Flags & Scn_Fogged) ? ctx.Sc->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
 
     // Iterate the frame-global ViewLightsSoA built by Render_DeferredLighting
@@ -1551,12 +1560,12 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     if (coneFine) {
         // Match the lighting tile geometry exactly so cone tile K == lighting
         // tile K (Render_DeferredLighting:3164-3166: 8-rounded X).
-        const int rawTileX = (XRes + (numTilesX - 1)) / numTilesX;
+        const int rawTileX = (xres + (numTilesX - 1)) / numTilesX;
         tileSizeX = (rawTileX + 7) & ~7;
-        tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+        tileSizeY = (yres + (numTilesY - 1)) / numTilesY;
     } else {
-        tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-        tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+        tileSizeX = (xres + numTilesX - 1) / numTilesX;
+        tileSizeY = (yres + numTilesY - 1) / numTilesY;
     }
 
     // Per-tile spot filtering. Mirror buildTileLightLists's screen-space
@@ -1584,8 +1593,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         tilePresenceBits[t] = mirrorPresenceForRect(
             ctx.tileMirrorPresence,
             i * tileSizeX, j * tileSizeY,
-            std::min((i + 1) * tileSizeX, XRes), std::min((j + 1) * tileSizeY, YRes),
-            XRes, YRes);
+            std::min((i + 1) * tileSizeX, xres), std::min((j + 1) * tileSizeY, yres),
+            xres, yres);
     }
 
     for (int s = 0; s < spotCount; ++s) {
@@ -1595,8 +1604,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         const float vz = lights->posZ[li];
         const float r  = std::sqrt(lights->range2[li]);
         LightScreenRect sr;
-        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
-                                   XRes, YRes, sr)) continue;
+        if (!lightSphereScreenRect(vx, vy, vz, r, ctx.fovX, ctx.fovY, cntrEX, cntrEY,
+                                   xres, yres, sr)) continue;
         if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
         const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
         const int ti_hi = sr.full ? numTilesX - 1
@@ -1613,7 +1622,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         const bool coneCull = fds::FeatureFlags::spot_cone_cull() &&
                               ctx.tileLights != nullptr;
         const float sinO_cull = lights->sinOuter[li];
-        const float fzpFar = CurScene->FZP > 0.0f ? CurScene->FZP : 1e4f;
+        const float fzpFar = ctx.Sc->FZP > 0.0f ? ctx.Sc->FZP : 1e4f;
         const uint32_t omidBin = lights->mirrorId[li];
         for (int j = tj_lo; j <= tj_hi; ++j) {
             for (int i = ti_lo; i <= ti_hi; ++i) {
@@ -1641,8 +1650,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                     const float zHiC = std::min(zHiT, czHi);
                     if (zHiC < zLoC) continue;  // no z overlap
                     const TileChunkSphere cs = tileChunkSphere(
-                        float(i * tileSizeX), float(std::min((i+1) * tileSizeX, int(XRes))),
-                        float(j * tileSizeY), float(std::min((j+1) * tileSizeY, int(YRes))),
+                        float(i * tileSizeX), float(std::min((i+1) * tileSizeX, int(xres))),
+                        float(j * tileSizeY), float(std::min((j+1) * tileSizeY, int(yres))),
                         zLoC, zHiC);
                     if (cs.valid &&
                         sphereOutsideCone(cs.cx, cs.cy, cs.cz, cs.R,
@@ -1682,8 +1691,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         // pool re-submit, no tileDone traffic).
         for (int t = 0; t < numTiles; ++t) {
             const int j = t / numTilesX, i = t - j * numTilesX;
-            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
-            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, yres);
+            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, xres);
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
                                          invFOVX,invFOVY,invZScale,density,
@@ -1696,8 +1705,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
         // disjoint rows in any order → byte-identical.
         dispatchIndexed(numTiles, nullptr, [&](int t) {
             const int j = t / numTilesX, i = t - j * numTilesX;
-            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
-            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+            const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, yres);
+            const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, xres);
             const long long _tp = TailProf::nowNs();
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
@@ -1740,13 +1749,13 @@ static void Render_OmniHalos_Tile(
 {
     // Render state from ctx, not globals (local aliases shadow the globals).
     const meka::GBuffer *const g_gbuffer = ctx.gb;
-    const int XRes = ctx.xres;
-    byte *const VPage = ctx.vpage;
-    word *const ZPage16 = ctx.zpage16;
-    const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+    const int xres = ctx.xres;
+    byte *const vpage = ctx.vpage;
+    word *const zpage16 = ctx.zpage16;
+    const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
     if (omniCount == 0) return;
-    dword *out = reinterpret_cast<dword*>(VPage);
-    const uint16_t *zEnc = ZPage16;
+    dword *out = reinterpret_cast<dword*>(vpage);
+    const uint16_t *zEnc = zpage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
@@ -1779,8 +1788,8 @@ static void Render_OmniHalos_Tile(
         // (has a sphereDisc<0 reject branch), then 8-wide vec analytic
         // integral via atan_approx_x8.
         for (int py = y1; py < y2; ++py) {
-            const float Y = (CntrEY - float(py)) * invFOVY;
-            const size_t row = size_t(py) * size_t(XRes);
+            const float Y = (cntrEY - float(py)) * invFOVY;
+            const size_t row = size_t(py) * size_t(xres);
             for (int pxBase = x1; pxBase < x2; pxBase += 8) {
                 const int pxEnd     = std::min(pxBase + 8, x2);
                 const int laneCount = pxEnd - pxBase;
@@ -1790,7 +1799,7 @@ static void Render_OmniHalos_Tile(
                 bool anyAlive = false;
                 for (int lane = 0; lane < laneCount; ++lane) {
                     const int px = pxBase + lane;
-                    const float X = (float(px) - CntrEX) * invFOVX;
+                    const float X = (float(px) - cntrEX) * invFOVX;
                     Xarr[lane]  = X;
                     uVarr[lane] = X*X + Y*Y + 1.0f;
                     const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
@@ -2007,10 +2016,10 @@ static void Render_OmniHalos_Tile(
     if (analyticHalo) {
         // Scalar fallback (analytic + scalar atan_approx).
         for (int py = y1; py < y2; ++py) {
-            const float Y = (CntrEY - float(py)) * invFOVY;
-            const size_t row = size_t(py) * size_t(XRes);
+            const float Y = (cntrEY - float(py)) * invFOVY;
+            const size_t row = size_t(py) * size_t(xres);
             for (int px = x1; px < x2; ++px) {
-                const float X = (float(px) - CntrEX) * invFOVX;
+                const float X = (float(px) - cntrEX) * invFOVX;
                 const float uV = X*X + Y*Y + 1.0f;
 
                 const float zSurf = float(0xFF80 - int(zEnc[row + px])) * invZScale;
@@ -2096,8 +2105,8 @@ static void Render_OmniHalos_Tile(
     }
 
     for (int py = y1; py < y2; ++py) {
-        const float Y = (CntrEY - float(py)) * invFOVY;
-        const size_t row = size_t(py) * size_t(XRes);
+        const float Y = (cntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(xres);
         if (vecPath) {
             // Pixel-major SIMD — see Render_VolumetricCones_Tile for
             // rationale. Halo is simpler: only sphere intersection
@@ -2113,7 +2122,7 @@ static void Render_OmniHalos_Tile(
                 bool anyAlive = false;
                 for (int lane = 0; lane < laneCount; ++lane) {
                     const int px = pxBase + lane;
-                    const float X = (float(px) - CntrEX) * invFOVX;
+                    const float X = (float(px) - cntrEX) * invFOVX;
                     Xarr[lane]  = X;
                     uVarr[lane] = X*X + Y*Y + 1.0f;
                     uint32_t h = uint32_t(px) * 0x9E3779B9u
@@ -2262,7 +2271,7 @@ static void Render_OmniHalos_Tile(
             }
         } else {
         for (int px = x1; px < x2; ++px) {
-            const float X = (float(px) - CntrEX) * invFOVX;
+            const float X = (float(px) - cntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
 
             uint32_t pxHash = uint32_t(px) * 0x9E3779B9u
@@ -2346,13 +2355,15 @@ static void Render_OmniHalos_Tile(
 
 void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_halos, &g_volProf.n_halos);
-    if (!CurScene || !ZPage16 || !VPage) return;
+    if (!ctx.Sc || !ctx.zpage16 || !ctx.vpage) return;
     if (fds::FeatureFlags::omni_halo_strength() <= 0.0f) return;
-    const float invFOVX = 1.0f / FOVX;
-    const float invFOVY = 1.0f / FOVY;
+    const int xres = ctx.xres, yres = ctx.yres;
+    const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
+    const float invFOVX = 1.0f / ctx.fovX;
+    const float invFOVY = 1.0f / ctx.fovY;
     const float invZScale = 1.0f / float(g_zscale);
     const float density = fds::FeatureFlags::omni_halo_strength() * 0.001f;
-    const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
+    const float fogZ    = (ctx.Sc->Flags & Scn_Fogged) ? ctx.Sc->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
 
     const ViewLightsSoA *const lights = ctx.lights;
@@ -2381,8 +2392,8 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
     constexpr int numTiles  = numTilesX * numTilesY;
-    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    const int tileSizeX = (xres + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (yres + numTilesY - 1) / numTilesY;
 
     // Per-tile omni cull — same sphere-projection math as cones, but
     // no z-cull (omni halo is volumetric, surface-z occlusion is per-
@@ -2402,8 +2413,8 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
         tilePresenceBits[t] = mirrorPresenceForRect(
             ctx.tileMirrorPresence,
             i * tileSizeX, j * tileSizeY,
-            std::min((i + 1) * tileSizeX, XRes), std::min((j + 1) * tileSizeY, YRes),
-            XRes, YRes);
+            std::min((i + 1) * tileSizeX, xres), std::min((j + 1) * tileSizeY, yres),
+            xres, yres);
     }
 
     for (int o = 0; o < omniCount; ++o) {
@@ -2420,8 +2431,8 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
         // crossed them.
         const float r  = lights->haloRange[li];
         LightScreenRect sr;
-        if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
-                                   XRes, YRes, sr)) continue;
+        if (!lightSphereScreenRect(vx, vy, vz, r, ctx.fovX, ctx.fovY, cntrEX, cntrEY,
+                                   xres, yres, sr)) continue;
         if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
         const int ti_lo = sr.full ? 0 : sr.x0 / tileSizeX;
         const int ti_hi = sr.full ? numTilesX - 1
@@ -2453,10 +2464,10 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
         const int  *tileOmniCntP  = &tileOmniCount[0];
         dispatchIndexed(numTilesX * numTilesY, nullptr,
             [&ctx, lights, invFOVX, invFOVY, invZScale, fogZ, invFogZ, density,
-             tileSizeX, tileSizeY, tileOmniIdxP, tileOmniCntP](int t) {
+             tileSizeX, tileSizeY, tileOmniIdxP, tileOmniCntP, xres, yres](int t) {
                 const int j = t / numTilesX, i = t - j * numTilesX;
-                const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
-                const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+                const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, yres);
+                const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, xres);
                 Render_OmniHalos_Tile(ctx, x1,y1,x2,y2, lights,
                                        tileOmniIdxP[t], tileOmniCntP[t],
                                        invFOVX,invFOVY,invZScale,
@@ -2500,16 +2511,19 @@ std::int64_t DeferredSkybox_TakeFrameNs() {
 // main Z-buffer. Transparents don't write the opaque Z, so a later additive
 // overlay (the fountain bolt) isn't occluded by them; after this, it is.
 // Encoding is 0xFF80 - zScale*depth, so NEARER = larger value → take the max.
-// No-op outside the deferred xpar path (g_xparZ null). ZPage16 is unused after
-// the bolt, so clobbering it here is safe.
+// No-op outside the deferred xpar path (g_xparZ null). The main Z is unused
+// after the bolt, so clobbering it here is safe. Reads the CURRENT target via
+// rt — called from FOUNTAIN's tick (no ctx in scope), same target-polymorphic
+// shape as the Hdr passes.
 void Deferred_FoldXparDepthIntoMainZ() {
-    if (!g_xparZ || !ZPage16) return;
-    const size_t n = size_t(XRes) * size_t(YRes);
+    const fds::RenderTarget rt = fds::MainRenderTargetFromGlobals();
+    if (!g_xparZ || !rt.zpage16) return;
+    const size_t n = size_t(rt.xres) * size_t(rt.yres);
     for (size_t i = 0; i < n; ++i)
-        if (g_xparZ[i] > ZPage16[i]) ZPage16[i] = g_xparZ[i];
+        if (g_xparZ[i] > rt.zpage16[i]) rt.zpage16[i] = g_xparZ[i];
 }
 
-void Render_DeferredSkybox() {
+void Render_DeferredSkybox(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_skybox, &g_volProf.n_skybox);
     using clk = std::chrono::steady_clock;
     const auto t0 = clk::now();
@@ -2521,7 +2535,11 @@ void Render_DeferredSkybox() {
             g_deferredSkyNs.fetch_add(dt, std::memory_order_relaxed);
         }
     } _accum{t0};
-    if (!CurScene || !VPage || !ZPage16) return;
+    if (!ctx.Sc || !ctx.vpage || !ctx.zpage16) return;
+    const int xres = ctx.xres, yres = ctx.yres;
+    const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
+    byte *const vpage = ctx.vpage;
+    const word *const zpage16 = ctx.zpage16;
     extern const dword *SkyCube_GetFaceMip(int, int, int&, int&);
     extern int SkyCube_NumMips();
     const int numMips = SkyCube_NumMips();
@@ -2547,27 +2565,27 @@ void Render_DeferredSkybox() {
     const float m00 = View->Mat[0][0], m01 = View->Mat[0][1], m02 = View->Mat[0][2];
     const float m10 = View->Mat[1][0], m11 = View->Mat[1][1], m12 = View->Mat[1][2];
     const float m20 = View->Mat[2][0], m21 = View->Mat[2][1], m22 = View->Mat[2][2];
-    const float invFOVX_l = 1.0f / FOVX;
-    const float invFOVY_l = 1.0f / FOVY;
-    const float cntrX_l = CntrEX;
-    const float cntrY_l = CntrEY;
+    const float invFOVX_l = 1.0f / ctx.fovX;
+    const float invFOVY_l = 1.0f / ctx.fovY;
+    const float cntrX_l = cntrEX;
+    const float cntrY_l = cntrEY;
     // Per-pixel angular size in view space. Used to estimate the
     // cubemap UV change between adjacent pixels for mip selection.
     const float pixelAngle = (invFOVX_l > invFOVY_l) ? invFOVX_l : invFOVY_l;
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
-    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    const int tileSizeX = (xres + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (yres + numTilesY - 1) / numTilesY;
     renderns::tileCounter = 0;
     dispatchIndexed(numTilesX * numTilesY, nullptr, [=](int _t) {
     	const int j = _t / numTilesX, i = _t - j * numTilesX;
     	const int y1 = tileSizeY * j;
-    	const int y2 = std::min(y1 + tileSizeY, YRes);
+    	const int y2 = std::min(y1 + tileSizeY, yres);
     	const int x1 = tileSizeX * i;
-    	const int x2 = std::min(x1 + tileSizeX, XRes);
+    	const int x2 = std::min(x1 + tileSizeX, xres);
     	{
-                dword *out = reinterpret_cast<dword *>(VPage);
+                dword *out = reinterpret_cast<dword *>(vpage);
                 // Hoisted broadcasts for the 8-wide view→world FMAs.
                 const __m256 vm00 = _mm256_set1_ps(m00);
                 const __m256 vm10 = _mm256_set1_ps(m10);
@@ -2589,7 +2607,7 @@ void Render_DeferredSkybox() {
                     const __m256 dxY = _mm256_fmadd_ps(vm10, vvy, vm20);
                     const __m256 dyY = _mm256_fmadd_ps(vm11, vvy, vm21);
                     const __m256 dzY = _mm256_fmadd_ps(vm12, vvy, vm22);
-                    const size_t row = size_t(py) * size_t(XRes);
+                    const size_t row = size_t(py) * size_t(xres);
                     for (int pxBase = x1; pxBase < x2; pxBase += 8) {
                         const int pxEnd = std::min(pxBase + 8, x2);
                         const int laneCount = pxEnd - pxBase;
@@ -2599,7 +2617,7 @@ void Render_DeferredSkybox() {
                         bool anySky = false;
                         alignas(32) uint32_t skyMask[8] = {};
                         for (int l = 0; l < laneCount; ++l) {
-                            if (ZPage16[row + pxBase + l] == 0) {
+                            if (zpage16[row + pxBase + l] == 0) {
                                 skyMask[l] = 0xFFFFFFFFu; anySky = true;
                             }
                         }
@@ -2720,24 +2738,24 @@ void Render_DeferredSkybox() {
 }
 
 void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
-	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
+	if (!ctx.Sc || !(ctx.Sc->Flags & Scn_Fogged)) return;
 	// Empty ctx = forward-mode frame (renderFrame only fills dctx on the
 	// deferred path) — same no-op contract as the cone/halo passes. An
 	// offscreen ForceForward render of a fogged scene reaches here; the
 	// tile writes ctx.vpage, so without this it would write through null
 	// (the old global-reading code silently fogged the WRONG target).
 	if (!ctx.gb || !ctx.vpage || !ctx.zpage16) return;
-	const float invFZP = 1.0f / CurScene->FZP;
+	const float invFZP = 1.0f / ctx.Sc->FZP;
 	constexpr auto numTilesX = 6;
 	constexpr auto numTilesY = 4;
-	const auto tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
-	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+	const auto tileSizeX = (ctx.xres + (numTilesX - 1)) / numTilesX;
+	const auto tileSizeY = (ctx.yres + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
 	    [&ctx, tileSizeX, tileSizeY, invFZP](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
-		const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
-		const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
+		const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, ctx.yres);
+		const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, ctx.xres);
 		Render_DeferredFogPass_Tile(ctx, x1, y1, x2, y2, invFZP);
 		renderns::tileDone.release();
 	});
