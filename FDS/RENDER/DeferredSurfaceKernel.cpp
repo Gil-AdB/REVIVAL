@@ -81,7 +81,7 @@ extern int g_deferredWaterMatID;
 // / fds::g_mainCamera accessors on the ov==nullptr path), never from the
 // engine globals. The poison makes the compiler enforce it (any new use
 // of these names in this file is a build error; read ctx, or take a param).
-#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL g_zscale
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;

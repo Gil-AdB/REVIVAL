@@ -46,7 +46,7 @@
 // never from the engine globals. The poison makes the compiler enforce
 // it (any new use of these names in this file is a build error; read
 // ctx, or take a param).
-#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL g_zscale
 
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
@@ -161,11 +161,10 @@ static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
 	word *const zpage16 = ctx.zpage16;
 	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	const meka::GBuffer *const g_gbuffer = ctx.gb;
-	const float g_zscale = ctx.zscale;
 	dword *out = reinterpret_cast<dword*>(vpage);
 	const uint32_t *mat = g_gbuffer->txtr.data();
 	const uint16_t *zEnc = zpage16;
-	const float invZScale = 1.0f / float(g_zscale);
+	const float invZScale = 1.0f / ctx.zscale;
 	const Vec8f vInvZScale(invZScale);
 	const Vec8f vInvFZP(invFZP);
 	const Vec8f vOne(1.0f);
@@ -2361,7 +2360,7 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
     const float invFOVX = 1.0f / ctx.fovX;
     const float invFOVY = 1.0f / ctx.fovY;
-    const float invZScale = 1.0f / float(g_zscale);
+    const float invZScale = 1.0f / ctx.zscale;
     const float density = fds::FeatureFlags::omni_halo_strength() * 0.001f;
     const float fogZ    = (ctx.Sc->Flags & Scn_Fogged) ? ctx.Sc->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;

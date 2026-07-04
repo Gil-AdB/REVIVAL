@@ -53,7 +53,7 @@ extern float fastPow2(float x);
 // target-polymorphic via MainRenderTargetFromGlobals (FOUNTAIN's tick
 // calls it outside renderFrame). The poison makes the compiler enforce
 // it (any new use of these names in this file is a build error).
-#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL g_zscale
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
@@ -1922,7 +1922,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.vpage   = ctx.vpage;
 	P.invFOVX   = 1.0f / ctx.fovX;
 	P.invFOVY   = 1.0f / ctx.fovY;
-	P.invZScale = 1.0f / float(g_zscale);
+	P.invZScale = 1.0f / ctx.zscale;
 	P.sigma     = fds::FeatureFlags::fast_fog_density() / fogFar;
 	P.fogFar    = fogFar;
 	P.kHeight   = kHeight;
@@ -2269,7 +2269,7 @@ void Render_ScreenSpaceRain(const DeferredLightingCtx &ctx) {
 	const float slant = 0.14f + 0.09f*std::sin(t*0.37f) + 0.05f*std::sin(t*0.83f);
 	const float density = intensity > 1.0f ? 1.0f : intensity;  // streak probability
 	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.8f; // >1 = heavier look
-	const float invZScale = 1.0f / float(g_zscale);
+	const float invZScale = 1.0f / ctx.zscale;
 	const float fogFar = ctx.Sc ? ctx.Sc->FZP : 0.0f;
 	const bool froxelFog = FastFog_XparActive();
 	const bool ssFog     = !froxelFog && FastFog_SSActive();
@@ -3280,7 +3280,7 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
 
     const float invFOVX  = 1.0f / ctx.fovX;
     const float invFOVY  = 1.0f / ctx.fovY;
-    const float invZScale= 1.0f / float(g_zscale);
+    const float invZScale= 1.0f / ctx.zscale;
     const bool  fogged   = (ctx.Sc->Flags & Scn_Fogged) != 0;
     const float fogFar   = fogged ? ctx.Sc->FZP : 1e30f;
     const float sigma    = fogged

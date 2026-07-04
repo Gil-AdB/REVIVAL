@@ -48,7 +48,7 @@
 // never from the engine globals. The poison makes the compiler enforce
 // it (any new use of these names in this file is a build error; read
 // ctx, or take a param).
-#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL g_zscale
 
 // Shared tile-drain semaphore (defined in DeferredFastFog.cpp). AA never runs
 // concurrently with SSAO/fog, so sharing the counter is safe.
