@@ -68,6 +68,48 @@ fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
 OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
 still shadows the merged pinned 512KB one — user to decide.
 
+## STEP 5 UNIT: parallel mirror-RTT slots (designed 2026-07-04, next up)
+
+RTT = 1.77-1.85 ms/f SERIAL at ts=491 (biggest reclaimable serial line;
+"serial tonemap-post/edge-aa" are internally-threaded, misleading label).
+RenderSecondOrderMirrors' per-slot loop transforms the WHOLE scene through
+the global camera into the shared face list per slot, then bakes inline.
+MirrorShatter's slice-6 ShardWorker already solved this exact shape —
+per-worker camCtx (incl. nearZ = D*1.001f mirror clip, MirrorShatter.cpp
+~1102), FaceListContext, VertexScratch, surf, gb, lights, tileLights,
+inlineDispatch deferred bake. The fan is a transplant:
+
+1. PREPASS (serial): compute adaptive dims + stamp slot UVs
+   (sv.v->U/V + face uvFromVertices) for ALL jobs before any render —
+   slots view each other's panels, so UV writes must not race worker
+   rasters. Byte-identical refactor on its own (UVs don't depend on
+   other slots' renders).
+2. Per-job worker state (clone ShardWorker or reuse): off-axis camCtx
+   from the slot math (the FOVX/CntrE formulas in the loop), faces,
+   scratch, per-worker surf sized texWMax², gb, lights/tileLights.
+   Transform_Objects(sc, w.camCtx, w.faces) with thread_local
+   g_offAxisFrustumCull; Radix_Sort local; MekaleleFillRegionInline;
+   Render_DeferredLighting(dctx, &ov) with ov.cam=&w.camCtx,
+   inlineDispatch=true (workers ARE pool threads — no nested enqueue);
+   cones inline; ctx.Sc = scene (caller contract).
+3. HDR SUB-PROBLEM: the slot loop uses Hdr_BeginFramePass /
+   Hdr_ActivateNoFog / Render_TonemapToVPage against the GLOBAL
+   g_hdrBuf (resized per slot!). Concurrent slots need an explicit
+   HdrTarget{buf,W,H,active} param variant of those 3 (+ the cone
+   pass's HDR accumulate already goes through ctx? VolCompositeAdd
+   reads g_hdrBuf/g_hdrActive globals — check). Global-based versions
+   delegate to the param version with the global target = main path
+   unchanged. If this balloons, ship increments 1-2 with HDR slots
+   still serial (fan the non-HDR case) and leave 3 documented.
+4. OffscreenViewScope shrinks to: hide clones / mute flares / restore
+   (the world-swap parts die — workers never touch globals).
+Validation: per-slot outputs are per-slot textures; transform+bake are
+per-worker → byte-identical is achievable. Gate (mirrortest!) + warm
+greets t=700/2014 full-config byte A/B + TSan run + the FDS_MIRROR_RTT_DUMP
+probe. Payoff est. ~1.0-1.3 ms at ts=491. Note the 2-job/frame cap
+memory ("rtt 0.5-0.8ms at the 2-job cap") — if jobs/frame ≤2, measure
+whether raising the cap under the fan buys quality headroom for free.
+
 ## CONES/CLONES CAMPAIGN — DONE 2026-07-04 (commit 5a58269)
 
 The t=1130-1162 cluster + attack results (full numbers in
