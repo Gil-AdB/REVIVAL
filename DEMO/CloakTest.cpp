@@ -280,6 +280,15 @@ void renderPoseToPPM(CloakScene &cs, Vector eye, Vector lookAt, const char *path
     std::memset(VPage, 0, PageSize);
     std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
     Animate_Objects(cs.sc, View);
+    // Each pose must be an independent depth-N measurement: slot textures
+    // persist across bakes (single-buffer recursion state), so without this
+    // reset pose 2+ inherits pose 1's converged tunnel and cross-depth
+    // comparisons of later poses measure nothing. Restore the build-time
+    // content (opaque black) before this pose's bake.
+    for (fds::MirrorRttSlot &s : cs.rttSlots)
+        if (s.mat && s.mat->Txtr && s.mat->Txtr->Data)
+            std::fill_n((uint32_t*)s.mat->Txtr->Data,
+                        size_t(s.texWMax) * size_t(s.texHMax), 0xFF000000u);
     fds::RenderSecondOrderMirrors(cs.sc, cs.mirrors, cs.rttSlots);
     Transform_Objects(cs.sc, fds::g_mainCamera, fds::g_mainFaces);
     fds::UpdateAllMirrors(cs.sc, cs.mirrors);

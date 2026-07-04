@@ -127,23 +127,50 @@ V-cloak can't validate: its two V's present opaque BACKS to each other's
 reflected cameras — nothing to bounce — which is the "unresolved cloak optics"
 noted in memory, a scene-geometry problem, not the engine.)
 
-**Result**: recursion WORKS but is limited. depth 1→2 changes the tunnel by
-~367k px (a real extra bounce), then it **converges** (depth 2 == depth 4,
-byte-identical): the panel textures reach a fixed point after ONE extra bounce
-because a bezel-less mirror reflecting a fairly uniform room has no
-high-contrast recursive detail to carry deeper.
+**Result**: recursion WORKS but the first cut washed out to white and
+converged after one bounce (depth 2 == depth 4).
 
-**Two limitations found (→ slice 2/3):**
-- **Re-lighting washout**: opaque RTT panels are RE-LIT by scene omnis on each
-  bounce, so the reflection over-brightens toward white. Need a true
-  emissive/unlit passthrough for the RTT texel (Lum=1 overshoots with several
-  lights). This dominates the visual and hides tunnel structure.
+### Slice 1b follow-up — washout FIXED (this session)
+
+The washout was **misdiagnosed** as "panels re-lit by scene omnis each
+bounce". The deferred kernel actually displays a Lum=1/Diffuse=0 textured
+material as `texel * 250/256` — the 250 saturation cap absorbs Luminosity's
+255 base *plus any omni spill*, so the kernel is a near-passthrough (mild
+2.3% decay), NOT a brightener. The real washout was the bake's
+**half-silvered text composite**: `texel = baseTex + reflection*0.55`
+(mirror_rtt_gain) adds the panel's base texture at full strength every
+bounce — `v' = base + 0.55·v` has its fixed point past white. Two fixes,
+both gated on recurse:
+
+1. **Pure-mirror panels**: recurse slots don't capture `textTex`, so the
+   composite never runs (no base add, effective gain 1.0). Greets'
+   text-over-reflection look under recursion = the slice-3 composite item.
+2. **Passthrough compensation**: the stored texture is pre-multiplied by
+   256/250 (rounded), exactly cancelling the kernel's display attenuation —
+   bit-stable bounces (±1 LSB), guaranteed by the clamp regardless of
+   scene lights.
+
+Plus a harness fix: cloaktest **resets slot textures to build content
+(black) before every pose** — textures persist across bakes, so pose 2+
+used to inherit pose 1's converged tunnel and its cross-depth diffs
+measured nothing.
+
+**Validated** (FDS_CLOAK_PARALLEL tunnel, 2 poses × depths 1-4): a real
+receding infinity tunnel with stable brightness and correct colors. Depth
+is monotone: each +1 fills the next nested black core (off-axis pose 1→2 =
+~357k px, 2→3 = ~2k px, 3→4 = 0 — repeats shrink sub-pixel, genuine
+structural convergence). Depth-0 gates: render_gate 3/3 PASS, greets build
+unchanged, all 9 V-cloak poses byte-identical.
+
+**Remaining limitation (→ slice 2/3):**
 - **Geometric approximation**: each panel is baked from its OWN order-1
   reflected camera and shares ONE texture. That texture is only correct for
   looking *directly* at the panel, not for the panel *seen through another*
-  mirror — so nested bounces are geometrically crude. A crisp receding tunnel
-  needs per-context reflected cameras (the recursive `renderView(vcam,depth-1)`
-  tree in the pseudocode above), plus bezels/high-contrast content to read.
+  mirror — so nested bounces are geometrically crude (parallel facing
+  mirrors happen to be the friendly case: the order-1 virtual camera is
+  nearly right on-axis, which is why the tunnel reads well). Exact nesting
+  needs per-context reflected cameras (the recursive `renderView(vcam,
+  depth-1)` tree in the pseudocode above).
 - **Slice 2: multiple mirrors per view.** Loop over all mirrors visible in
   each reflected view; per-mirror scissor. Validate on cloaktest: the black
   hole fills at depth 2, more at 3, and the bg pillar appears at depth 4.

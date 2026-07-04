@@ -1325,7 +1325,14 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                         protoT = samples[i].T;
                         break;
                     }
-                if (protoF && protoF->Txtr && protoF->Txtr->Txtr) {
+                // Recursive panels are PURE mirrors: leave textTex unset so
+                // the bake's half-silvered composite (texel = baseTex +
+                // reflection*gain) never runs. That composite is the washout:
+                // it ADDS the panel's base texture at full strength every
+                // bounce (v' = base + 0.55*v ⇒ fixed point past white). The
+                // greets text-over-reflection look under recursion is the
+                // slice-3 "wire the composite through the recursion" item.
+                if (!recurse && protoF && protoF->Txtr && protoF->Txtr->Txtr) {
                     slot.textTex = protoF->Txtr->Txtr;
                     float P[3][2];
                     const Vertex *vs[3] = { protoF->A, protoF->B, protoF->C };
@@ -3006,6 +3013,27 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             }
             if (rttHdr && slotDeferred) s.mat->Flags |=  Mat_HdrReflection;
             else                        s.mat->Flags &= ~Mat_HdrReflection;
+        }
+        // Recursive passthrough compensation: the deferred kernel displays a
+        // Lum=1/Diffuse=0 textured material as texel*250/256 — the 250
+        // saturation cap absorbs Luminosity's 255 base PLUS any omni spill,
+        // so that ratio is exact regardless of scene lights (the panels are
+        // NOT re-lit; the cap eats it). Pre-multiply the stored texture by
+        // 256/250 (rounded) so display cancels to texel*1.0: without this
+        // every bounce decays ~2.3% and a deep tunnel darkens visibly.
+        if (recurseDepth > 0) {
+            uint32_t *cpx = (uint32_t*)s_rttSurf.Data;
+            const size_t n = size_t(s.texW) * size_t(s.texH);
+            for (size_t i = 0; i < n; ++i) {
+                const uint32_t p = cpx[i];
+                uint32_t b = (( p        & 0xFF) * 256u + 125u) / 250u;
+                uint32_t g = (((p >> 8)  & 0xFF) * 256u + 125u) / 250u;
+                uint32_t r = (((p >> 16) & 0xFF) * 256u + 125u) / 250u;
+                if (b > 255u) b = 255u;
+                if (g > 255u) g = 255u;
+                if (r > 255u) r = 255u;
+                cpx[i] = b | (g << 8) | (r << 16) | 0xFF000000u;
+            }
         }
         // Linear RTT pixels → slot texture, re-tiled in place (the
         // same one-way Sachletz the texture loader applies).
