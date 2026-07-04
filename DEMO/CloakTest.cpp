@@ -151,6 +151,13 @@ CloakScene buildCloakScene() {
         Vector( 16.0f, 0.0f,  30.0f), Vector( 16.0f, 0.0f, -16.0f),
     };
     b.AddQuad("floor", floorV, matFloor);
+    // Ceiling (normal down) so mirrors that reflect UPWARD hit a surface
+    // instead of the empty void (the black patches in the mirror view).
+    const Vector ceilV[4] = {
+        Vector(-16.0f, 8.0f, -16.0f), Vector( 16.0f, 8.0f, -16.0f),
+        Vector( 16.0f, 8.0f,  30.0f), Vector(-16.0f, 8.0f,  30.0f),
+    };
+    b.AddQuad("ceiling", ceilV, matWall);
 
     // Room shell, height 8, normals into the room. Back wall (z=28) is the
     // teal the cloak's see-through should reveal.
@@ -158,6 +165,19 @@ CloakScene buildCloakScene() {
     addWall(b, "wall_back",   16.0f, 28.0f, -16.0f, 28.0f, H, matBg);    // faces -z (teal)
     addWall(b, "wall_left",  -16.0f, 28.0f, -16.0f, -16.0f, H, matWall); // faces +x
     addWall(b, "wall_right",  16.0f, -16.0f, 16.0f,  28.0f, H, matWall); // faces -x
+
+    // "wall" from the sketch: hides the LEFT V (and the left corridor) from
+    // any direct front view — the left V only appears via the right V's
+    // reflection. At z=8 (below the corridors at z~10.5/13.5 so it doesn't
+    // clip the relay), x from -15 to -1, facing -z.
+    addWall(b, "wall_hide", -1.0f, 8.0f, -15.0f, 8.0f, H, matWall);
+
+    // BACKGROUND reference object: a bright green pillar behind the whole
+    // contraption on the viewer's axis (x=3.5, z=26). This is the "visible
+    // behind the mirrors" object — the relayed see-through should show it,
+    // while the hero in the mouth (below) disappears.
+    Material *matBgObj = b.AddMaterial("bg_obj", b.AddSolidColorTexture(8,8,0xFF30E060u), {48,224,96,255}, 0);
+    b.AddCube("bg_obj", Vector(3.5f, 2.5f, 26.0f), 1.6f, matBgObj);
 
     // ── The cloak: two 90-degree V-corners, both open +x (validated in a
     // 2D ray-trace — viewer↑ relays around the right V's OUTER faces via
