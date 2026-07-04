@@ -343,8 +343,8 @@ bool EnvReflection_FramePrep(Scene* sc) {
         Vector c;
         if (!materialCentroid(sc, M, c)) { env.byMat[M] = -1; continue; }
         if (std::getenv("ENVDBG"))
-            std::fprintf(stderr, "[ENVDBG] mat '%s' refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
-                         M->Name ? M->Name : "?", M->Reflection, M->MetallicMap ? 1 : 0,
+            std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
+                         M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
                          c.x, c.y, c.z);
         sceneAABB(sc, env);
         int idx = -1;

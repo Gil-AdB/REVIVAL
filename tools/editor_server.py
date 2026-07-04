@@ -63,6 +63,7 @@ SCENES = {
     "fountain": {"authoring": True,  "dir": "fountain", "lws": "FOUNTAIN - final.LWS", "legacy": True},
     "city":     {"authoring": False},
     "crash":    {"authoring": False},
+    "pbrtest":  {"authoring": True,  "dir": "pbrtest",  "lws": "PBRTEST.LWS",          "legacy": False},
 }
 
 

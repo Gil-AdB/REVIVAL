@@ -1,0 +1,109 @@
+LWSC
+1
+
+FirstFrame 0
+LastFrame 240
+FrameStep 1
+PreviewFirstFrame 0
+PreviewLastFrame 240
+PreviewFrameStep 1
+FramesPerSecond 30.000000
+
+LoadObject floor.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject wall.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject balls.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+LoadObject box.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  0 0 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+ShadowOptions 7
+
+AmbientColor 255 255 255
+AmbIntensity 0.250000
+
+AddLight
+LightName key
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  0 12 -8 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 255 255
+LgtIntensity 1.000000
+LightRange 80
+LightType 1
+ShadowType 1
+
+AddLight
+LightName warm
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -14 6 2 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 190 120
+LgtIntensity 0.800000
+LightRange 50
+LightType 1
+ShadowType 1
+
+AddLight
+LightName cool
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  14 5 10 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 120 170 255
+LgtIntensity 0.700000
+LightRange 45
+LightType 1
+ShadowType 1
+
+ShowCamera 1 7
+CameraMotion (unnamed)
+  9
+  2
+  0 5.5 -17 0 8 0 1 1 1
+  0 0 0 0 0
+  6 4.5 -13 -18 6 0 1 1 1
+  240 0 0 0 0
+EndBehavior 1
+ZoomFactor 3.200000

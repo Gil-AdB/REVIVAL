@@ -33,6 +33,7 @@ converter — so a correct source set reproduces them byte-for-byte.
 | **fountain** | `FOUNTAIN.FLD` (512 KB, 24 objects, 14 lights) | `fountain/FOUNTAIN - final.LWS` (S1FNT, 22 obj refs) + dos-rev CITY SHIP1 | ✅ byte-identical with `lwsread_legacy --legacy-vlum` (see `fountain/README.md`). |
 | **fountain-extended** | historical `FOUNTAIN.FLD` (141 KB, git `0bf67d4`; shipped 2018-2020) | `fountain-extended/FOUNTA~1.LWS` + FOUNTAIN-dir objects + low-poly CITY SHIP1 | ✅ byte-identical with `lwsread_ofir` / `pin_scene.py --ofir` (OFIR-era `LastFrame` keyword; see `fountain-extended/README.md`). |
 | crash | `CRASH.FLD` (2 KB) | — | ⏳ tiny; likely largely code-built, no obvious `.lws`. |
+| **pbrtest** | `PBRTEST.FLD` (32 KB) | `pbrtest/PBRTEST.LWS` + generated LWOs (`tools/make_pbrtest.py`) | ✅ our own authored test scene (PBR/env-reflection lab; converter gotchas in `pbrtest/README.md`). |
 
 To pin a pending scene we use the same method that worked for greets: convert a
 candidate `.lws` with the matching objects and `cmp` against the shipping FLD

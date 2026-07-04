@@ -620,6 +620,75 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// --snapshot=pbrtest[@t=N1,N2,...] — the PBR/env-reflection test scene at
+// pinned Timer values (0..800; camera dollies over the 240-frame spline).
+// Deterministic baseline shots for the material/reflection pipeline.
+int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
+    ensureOutDir(cfg.outDir);
+    if (!initSnapshotEnvironment(xres, yres)) return 3;
+    Initialize_PBRTest();
+
+    std::vector<int32_t> timestamps = cfg.timestamps;
+    if (timestamps.empty()) timestamps = {100, 400, 700};
+
+    auto driver = createPBRTestScene();
+    driver->init();
+
+    int produced = 0;
+    for (int32_t ts : timestamps) {
+        std::srand(0);
+        Timer = ts;
+        std::memset((void*)Keyboard, 0, sizeof(Keyboard));
+        driver->tick();
+
+        char colorPath[1024];
+        std::snprintf(colorPath, sizeof(colorPath), "%s/pbrtest_t%06d_color.ppm",
+                      cfg.outDir.c_str(), ts);
+        write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
+        std::fprintf(stderr, "[PBRTESTSNAP] t=%d polys=%d -> %s\n", ts, (int)CAll, colorPath);
+        if (const char* pr = std::getenv("GBUF_PROBE")) {
+            int px1, py1, px2, py2;
+            if (std::sscanf(pr, "%d,%d,%d,%d", &px1, &py1, &px2, &py2) == 4 && g_gbuffer) {
+                std::unordered_map<uint64_t, int> hist;
+                for (int yy = py1; yy < py2; ++yy)
+                    for (int xx = px1; xx < px2; ++xx) {
+                        const uint32_t m32 = g_gbuffer->txtr[size_t(yy) * xres + xx];
+                        const uint32_t key = (m32 == 0xFFFFFFFFu || m32 == 0xFFFFFFFEu)
+                            ? m32 : ((m32 >> 20) & 0xFF);
+                        ++hist[key];
+                    }
+                for (auto& kv : hist)
+                    std::fprintf(stderr, "[GBUFPROBE] mat=%08x n=%d\n", uint32_t(kv.first), kv.second);
+            }
+        }
+        if (View)
+            std::fprintf(stderr, "[PBRTESTSNAP] cam src=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f) IFOV=%.2f PerspX=%.1f\n",
+                         View->ISource.x, View->ISource.y, View->ISource.z,
+                         View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], View->IFOV, View->PerspX);
+        if (View)
+            std::fprintf(stderr, "[PBRTESTSNAP] cam keys: src=%d tgt=%d fov=%d flags=%u camHead=%p View=%p\n",
+                         (int)View->Source.NumKeys, (int)View->Target.NumKeys, (int)View->FOV.NumKeys,
+                         (unsigned)View->Flags, (void*)CurScene->CameraHead, (void*)View);
+        if (View && View->Source.NumKeys >= 2)
+            std::fprintf(stderr, "[PBRTESTSNAP] srcKey0 frame=%.1f pos=(%.2f %.2f %.2f) key1 frame=%.1f pos=(%.2f %.2f %.2f) fovKey0=%.2f curFrame=%.1f\n",
+                         View->Source.Keys[0].Frame, View->Source.Keys[0].Pos.x, View->Source.Keys[0].Pos.y, View->Source.Keys[0].Pos.z,
+                         View->Source.Keys[1].Frame, View->Source.Keys[1].Pos.x, View->Source.Keys[1].Pos.y, View->Source.Keys[1].Pos.z,
+                         View->FOV.NumKeys ? View->FOV.Keys[0].Pos.x : -1.0f, CurFrame);
+        if (CurScene && CurScene->TriMeshHead) {
+            TriMesh *T = CurScene->TriMeshHead;
+            std::fprintf(stderr, "[PBRTESTSNAP] mesh IPos=(%.2f %.2f %.2f) bsr=%.2f flags=%u VIndex=%u FIndex=%u\n",
+                         T->IPos.x, T->IPos.y, T->IPos.z,
+                         T->BSphereRadius, (unsigned)T->Flags, (unsigned)T->VIndex, (unsigned)T->FIndex);
+        }
+        ++produced;
+    }
+
+    driver->cleanup();
+    driver.reset();
+    ThreadPool::instance().close();
+    return produced > 0 ? 0 : 5;
+}
+
 // --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
 // values (centiseconds; chase runs ~0..2500). Driver-based: createChaseScene
 // applies the cinematic + water_procedural defaults, exactly like the live demo.

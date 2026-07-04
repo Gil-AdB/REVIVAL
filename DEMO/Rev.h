@@ -92,6 +92,7 @@ void Greets_JoinBakeThread();
 void Greets_ShutdownBakeThread();
 
 void Initialize_Crash();
+void Initialize_PBRTest();
 void Run_Crash();
 
 #endif

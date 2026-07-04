@@ -15,6 +15,8 @@ set(DEMO_SOURCES
     Config.h
     CRASH.CPP
     CRASH.H
+    PBRTEST.CPP
+    PBRTEST.H
     CREDITS.CPP
     CREDITS.H
     FillerTest.cpp
