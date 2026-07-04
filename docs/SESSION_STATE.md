@@ -37,17 +37,39 @@ Ranked list (full reasoning in the 2026-07-04 conversation + below):
    read as a 7ms regression = machine load — ALWAYS interleave).
    The legacy peel remains ONLY as the offscreen fallback + escape
    flag; deleting it outright needs an offscreen story first.
-4. 🟨 **#1 RenderContext migration — the g_deferredCtx SINGLETON IS
-   DELETED (f6519c7 + 5a9967f)**. renderFrame's stack dctx is the only
-   source; every reader takes ctx by param (fog pass, legacy-peel
-   transparent wrappers, RenderXparClumpInStrip via TBR_Render's new
-   ctx pointer — null on forward TBR frames). Shadow locals renamed dc.
-   Byte-identical on 4 scenes + gate. REMAINING (plan steps 4-5, the
-   ~400-site mechanical campaign): thread XRes/VPage/FList/CAll/
-   CurScene into RenderContext function-by-function (leaf-first, gate
-   each), then per-instance pipelines for offscreen parallelism
-   (RTT/shadow-raster). See RENDER_CONTEXT_PLAN.md "Revised remaining
-   steps" 4-5.
+4. 🟨 **#1 RenderContext migration — singleton DELETED + 8/10 render
+   TUs POISON-CLEAN.** g_deferredCtx gone (f6519c7); then the poison
+   campaign (user's compiler-enumeration idea, scoped via
+   `#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY
+   CurScene VESA_BPSL` per TU — the pragma STAYS as permanent
+   enforcement): EdgeAA d154bf0 (pilot — caught offscreen-AA-on-
+   misaligned-main-gbuffer latent bug), SSAO a4f9697, LightLists
+   9eeb22a, Hdr c5280ca (NARROWED list — post stack is target-
+   polymorphic: fountain's tick drives it outside renderFrame),
+   Volumetric 81348d7, FastFog b3160ec (FastFogParams grew target
+   addressing, stamped once from ctx — the froxel grid now maps against
+   its own gFrScreenX/Y dims). Every TU byte-gated on 4 scenes + gate.
+   REMAINING, in order:
+   a. **DeferredSurfaceKernel.cpp (~109 hits)** — blocked on a design
+      move: Render_DeferredLighting IS the ctx-fill site, so the
+      target/projection snapshot must RELOCATE to the callers
+      (renderFrame fills dctx for the main path; GreetsMirror /
+      MirrorShatter offscreen callers fill from their own targets via
+      their DeferredOverride) before the TU can be poisoned. Also
+      contains the strip path + light-SoA build (reads CurScene omnis —
+      becomes ctx.Sc). Focused unit, do fresh.
+   b. **RENDER.CPP (~120 hits)** — the legitimate snapshot point; can
+      never be fully poisoned. End shape: reads via explicit
+      fds::g_mainCamera / MainRenderTargetFromGlobals at ctx-build
+      points only.
+   c. Plan step 5: per-instance pipelines for offscreen parallelism
+      (RTT/shadow-raster payoffs).
+   Protocol per TU (proven x6): cp Runtime/DEMO pre-binary → poison →
+   fix compiler errors (grep enumeration beats compiler at >20 errors,
+   -ferror-limit) → build → gate → 4-scene byte A/B (+path-specific
+   configs) → commit. Intentional main-camera reads (froxel history,
+   fountain-tick post stack) become explicit fds::g_mainCamera /
+   MainRenderTargetFromGlobals with justification, or narrow the list.
 5. ✅ **#4 mirror system promoted to FDS/RENDER (1e26fc5)** —
    GreetsMirror + MirrorShatter + SpotlightCones moved wholesale (they
    were already parameterized); canonical PickFillerForMaterial now
