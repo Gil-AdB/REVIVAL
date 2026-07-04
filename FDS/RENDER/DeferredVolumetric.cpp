@@ -2721,7 +2721,12 @@ void Render_DeferredSkybox() {
 
 void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
-	if (!g_gbuffer || !ZPage16 || !VPage) return;
+	// Empty ctx = forward-mode frame (renderFrame only fills dctx on the
+	// deferred path) — same no-op contract as the cone/halo passes. An
+	// offscreen ForceForward render of a fogged scene reaches here; the
+	// tile writes ctx.vpage, so without this it would write through null
+	// (the old global-reading code silently fogged the WRONG target).
+	if (!ctx.gb || !ctx.vpage || !ctx.zpage16) return;
 	const float invFZP = 1.0f / CurScene->FZP;
 	constexpr auto numTilesX = 6;
 	constexpr auto numTilesY = 4;

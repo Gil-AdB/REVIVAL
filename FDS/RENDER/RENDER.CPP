@@ -46,7 +46,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 void Render_DeferredFogPass(const DeferredLightingCtx &ctx);
 // Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
 void Render_SSAO();
-void Render_EdgeAA();
+void Render_EdgeAA(const DeferredLightingCtx &ctx);
 // Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
@@ -1116,7 +1116,7 @@ xpar_done: ;
 	// Edge-aware AA (--aa): blend across G-buffer geometry edges on the final
 	// LDR image. After the tonemap + all post (operates on VPage), before the
 	// debug overlays. No-op when --aa is off or on the forward path.
-	{ TailProf::ScopeTimer _tp("edge-aa"); Render_EdgeAA(); }
+	{ TailProf::ScopeTimer _tp("edge-aa"); Render_EdgeAA(dctx); }
 
 	// Lightmap debug viz — paints VPage with mesh/face/bary/factor
 	// data when --shadow-lightmap-viz != 0. No-op otherwise. Runs last
