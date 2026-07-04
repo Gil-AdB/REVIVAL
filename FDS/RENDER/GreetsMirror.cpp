@@ -17,6 +17,12 @@
 #include <RENDER/DeferredCommon.h> // DeferredOverride + Render_DeferredLighting/VolumetricCones (deferred RTT)
 #include <RENDER/Hdr.h>            // HDR-correct reflections: per-RTT-slot begin/tonemap
 #include <Base/RenderContext.h>    // fds::RenderContext (deferred RTT bake)
+#include <Base/CameraContext.h>    // per-worker off-axis projection (RTT fan)
+#include <Base/FaceListContext.h>  // per-worker face list (RTT fan)
+#include <Base/VertexScratch.h>    // per-worker transformed-vertex clones (RTT fan)
+#include <Threads.h>               // ThreadPool — fan RTT jobs across workers
+#include <atomic>
+#include <semaphore>
 
 #include <algorithm>
 #include <chrono>
@@ -2405,6 +2411,28 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
 // to this pass — when no slot re-rendered, the next tick can skip it.
 int g_rttJobsLastFrame = 0;
 
+// One pool thread's RTT-bake scratch (the MirrorShatter ReflWorker
+// pattern): a complete independent render context — surface, camera,
+// face list, vertex-clone scratch, deferred G-buffer/light scratch and
+// an HDR radiance target — so N RTT jobs bake concurrently with no
+// shared mutable state (each job owns its slot's texture).
+namespace {
+struct RttWorker {
+    VESA_Surface         surf{};
+    Camera               cam{};
+    fds::CameraContext   camCtx{};
+    fds::FaceListContext faces{};
+    fds::VertexScratch   scratch{};
+    meka::GBuffer            gb{};
+    ViewLightsSoA            lights{};
+    std::vector<TileLights>  tileLights;
+    std::vector<fds::hdrf>   hdrVec;   // slot radiance (B,G,R,coverage)
+    fds::HdrTarget           ht{};
+    bool surfInit = false;
+    bool gbInit   = false;
+};
+}  // namespace
+
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {
@@ -2712,6 +2740,394 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         for (Face *f : s.faces) f->uvFromVertices();
     }
 
+    // Per-slot finish: debug dumps/marks, the half-silvered text composite
+    // (+ HDR float-radiance capture) and the copy into the slot texture.
+    // Shared verbatim by the serial loop (main surf + g_hdrBuf) and the
+    // parallel fan (worker surf + worker HDR target); reads only its
+    // parameters + immutable captures, so concurrent calls on disjoint
+    // slots are safe.
+    auto finishSlot = [&](const Job &j, MirrorRttSlot &s, byte *surfData,
+                          const byte *surfZ16, const fds::hdrf *hdrRad,
+                          bool slotDeferred, int cAll,
+                          const meka::GBuffer *gbForDump) {
+        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
+            const uint32_t *px = (const uint32_t*)surfData;
+            const uint16_t *zp = (const uint16_t*)surfZ16;
+            int nz = 0, nzz = 0;
+            for (int i = 0; i < s.texW * s.texH; ++i) {
+                if ((px[i] & 0xFFFFFF) != 0) ++nz;
+                if (zp[i] != 0) ++nzz;
+            }
+            std::fprintf(stderr,
+                "[MIRROR-RTT] order=%d %s job: %d/%d color px, %d z px, CAll=%d\n",
+                int(s.order), slotDeferred ? "deferred" : "forward",
+                nz, s.texW * s.texH, nzz, cAll);
+        }
+        // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
+        // linear buffer (top=red, bottom=blue, left=green,
+        // right=yellow) so flips/mirror errors in the panel mapping
+        // are unambiguous on screen.
+        if (std::getenv("FDS_MIRROR_RTT_MARK")) {
+            uint32_t *px = (uint32_t*)surfData;
+            for (int y = 0; y < s.texH; ++y) {
+                for (int x = 0; x < s.texW; ++x) {
+                    uint32_t c = 0;
+                    if (y < 16)               c = 0xFFFF0000;  // top: red
+                    else if (y >= s.texH-16)  c = 0xFF0000FF;  // bottom: blue
+                    else if (x < 16)          c = 0xFF00FF00;  // left: green
+                    else if (x >= s.texW-16)  c = 0xFFFFFF00;  // right: yellow
+                    if (c) px[size_t(y)*size_t(s.texW) + x] = c;
+                }
+            }
+        }
+        // FDS_MIRROR_RTT_MDUMP=1: raw mat32 plane (tie-break A/B probe).
+        if (std::getenv("FDS_MIRROR_RTT_MDUMP") && gbForDump) {
+            static int sMDumped = 0;
+            if (sMDumped < 8) {
+                char mpath[64];
+                std::snprintf(mpath, sizeof(mpath), "/tmp/rttm_m%u_m%u_%d.bin",
+                              unsigned(s.aId), unsigned(s.bId), sMDumped);
+                if (FILE *f = std::fopen(mpath, "wb")) {
+                    std::fwrite(gbForDump->txtr.data(), 4,
+                                size_t(s.texW) * size_t(s.texH), f);
+                    std::fclose(f);
+                    ++sMDumped;
+                }
+            }
+        }
+        // FDS_MIRROR_RTT_LMDUMP=1: lightmapMF + normal planes (shading A/B).
+        if (std::getenv("FDS_MIRROR_RTT_LMDUMP") && gbForDump) {
+            static int sLDumped = 0;
+            if (sLDumped < 8) {
+                char lpath[64];
+                std::snprintf(lpath, sizeof(lpath), "/tmp/rttl_m%u_m%u_%d.bin",
+                              unsigned(s.aId), unsigned(s.bId), sLDumped);
+                if (FILE *f = std::fopen(lpath, "wb")) {
+                    const size_t np = size_t(s.texW) * size_t(s.texH);
+                    if (!gbForDump->lightmapMF.empty())
+                        std::fwrite(gbForDump->lightmapMF.data(), 4, np, f);
+                    if (!gbForDump->normal.empty())
+                        std::fwrite(gbForDump->normal.data(), 2, np, f);
+                    if (!gbForDump->lightmapST.empty())
+                        std::fwrite(gbForDump->lightmapST.data(), 4, np, f);
+                    std::fclose(f);
+                    ++sLDumped;
+                }
+            }
+        }
+        // FDS_MIRROR_RTT_ZDUMP=1: raw Z plane as PGM (raster A/B probe).
+        if (std::getenv("FDS_MIRROR_RTT_ZDUMP")) {
+            static int sZDumped = 0;
+            if (sZDumped < 8) {
+                char zpath[64];
+                std::snprintf(zpath, sizeof(zpath), "/tmp/rttz_m%u_m%u_%d.pgm",
+                              unsigned(s.aId), unsigned(s.bId), sZDumped);
+                if (FILE *f = std::fopen(zpath, "wb")) {
+                    std::fprintf(f, "P5\n%d %d\n65535\n", s.texW, s.texH);
+                    const uint16_t *zp = (const uint16_t*)surfZ16;
+                    for (int i = 0; i < s.texW * s.texH; ++i) {
+                        unsigned char b2[2] = { (unsigned char)(zp[i] >> 8),
+                                                (unsigned char)(zp[i] & 0xFF) };
+                        std::fwrite(b2, 1, 2, f);
+                    }
+                    std::fclose(f);
+                    ++sZDumped;
+                }
+            }
+        }
+        // FDS_MIRROR_RTT_DUMP=1: write each slot's first rendered
+        // frame to /tmp for inspection (linear, pre-Sachletz).
+        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
+            static int sDumped = 0;
+            if (sDumped < 8) {
+                char path[64];
+                std::snprintf(path, sizeof(path),
+                              "/tmp/rtt_m%u_m%u_%d.ppm",
+                              unsigned(s.aId), unsigned(s.bId), sDumped);
+                if (FILE *f = std::fopen(path, "wb")) {
+                    std::fprintf(f, "P6\n%d %d\n255\n", s.texW, s.texH);
+                    const uint32_t *px = (const uint32_t*)surfData;
+                    for (int i = 0; i < s.texW * s.texH; ++i) {
+                        const uint32_t p = px[i];
+                        unsigned char rgb[3] = {
+                            (unsigned char)((p >> 16) & 0xFF),
+                            (unsigned char)((p >>  8) & 0xFF),
+                            (unsigned char)( p        & 0xFF) };
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "[MIRROR-RTT] dumped %s "
+                                 "(cam %.1f,%.1f,%.1f D=%.2f win %.1fx%.1f "
+                                 "FOVX=%.0f FOVY=%.0f CntrE=%.0f,%.0f "
+                                 "NZP=%.2f FZP=%.0f CAll=%d)\n",
+                                 path, j.camPos.x, j.camPos.y, j.camPos.z,
+                                 j.dist, s.u1 - s.u0, s.v1 - s.v0,
+                                 j.fovX, j.fovY, j.cntrEX, j.cntrEY,
+                                 sc->NZP, sc->FZP, cAll);
+                    ++sDumped;
+                }
+            }
+        }
+        // Half-silvered composite (first order): overlay the panel's
+        // dynamic text texture on the reflection, texel = text +
+        // reflection/2 saturated — the formula the transparent kernel
+        // uses for glass. Texel→window is the fixed edge-to-edge
+        // mapping; window→text UV is the affine captured at build.
+        // The text texture is Sachletz-tiled in memory (4x4 blocks,
+        // X-outer/Y-inner write order) — read through the inverse.
+        const float rGain = fds::FeatureFlags::mirror_rtt_gain();
+        const uint32_t gainQ = uint32_t(
+            std::min(std::max(rGain, 0.0f), 1.0f) * 256.0f);
+        if (s.order == 1 && s.textTex && s.textTex->Mipmap[0]) {
+            // Mipmap[0], NOT Data: the greets generator repoints
+            // Mipmap[0] at its dynamic text buffer (GREETS.CPP ~227);
+            // Data keeps the static disk JPG. The rasterizer samples
+            // Mipmap[miplevel], so the live content is here.
+            const dword *td = (const dword*)s.textTex->Mipmap[0];
+            const int tw = s.textTex->SizeX, th = s.textTex->SizeY;
+            const int tBlocksY = th >> 2;
+            uint32_t *px = (uint32_t*)surfData;
+            const float du = (j.eU1 - j.eU0) / float(s.texW);
+            const float dv = (s.v1 - s.v0) / float(s.texH);
+            // HDR reflection (b): build a FLOAT panel radiance = linear(text) +
+            // reflection*gain, sampled emissively by the transparent kernel so
+            // reflected highlights bloom. Reuses this loop's text affine; the
+            // reflection comes from the float radiance buffer (the RTT slot's,
+            // not yet quantized) at the same pixel index. The 8-bit path below
+            // stays as the LDR fallback. hdrRefl owned by the panel material.
+            float *hdrR = nullptr;
+            if (rttHdr && slotDeferred && hdrRad) {   // float radiance only exists when the deferred render ran this slot
+                if (s.mat->hdrReflW != s.texW || s.mat->hdrReflH != s.texH) {
+                    std::free(s.mat->hdrRefl);
+                    s.mat->hdrRefl = (float*)std::malloc(size_t(s.texW)*s.texH*3*sizeof(float));
+                    s.mat->hdrReflW = s.texW; s.mat->hdrReflH = s.texH;
+                }
+                hdrR = s.mat->hdrRefl;
+            }
+            auto linf = [](uint32_t c){ const float n = float(c)*(1.0f/255.0f); return n*n*255.0f; };
+            for (int y = 0; y < s.texH; ++y) {
+                const float pv = s.v1 - (float(y) + 0.5f) * dv;
+                for (int x = 0; x < s.texW; ++x) {
+                    const float epu = j.eU0 + (float(x) + 0.5f) * du;
+                    const float pu = j.backSide ? -epu : epu;
+                    const float fu = s.tA[0]*pu + s.tA[1]*pv + s.tA[2];
+                    const float fv = s.tA[3]*pu + s.tA[4]*pv + s.tA[5];
+                    const int iu = int(fu * float(tw)) & (tw - 1);
+                    const int iv = int(fv * float(th)) & (th - 1);
+                    const int blk = ((iu >> 2) * tBlocksY + (iv >> 2)) << 4;
+                    const dword t = td[blk + ((iv & 3) << 2) + (iu & 3)];
+                    const size_t pix = size_t(y) * size_t(s.texW) + x;
+                    uint32_t &o = px[pix];
+                    const uint32_t tb =  t        & 0xFF;
+                    const uint32_t tg = (t >> 8)  & 0xFF;
+                    const uint32_t tr = (t >> 16) & 0xFF;
+                    if (hdrR) {
+                        hdrR[pix*3+0] = linf(tb) + float(hdrRad[pix*4+0])*rGain;
+                        hdrR[pix*3+1] = linf(tg) + float(hdrRad[pix*4+1])*rGain;
+                        hdrR[pix*3+2] = linf(tr) + float(hdrRad[pix*4+2])*rGain;
+                    }
+                    // Reflection attenuated by the reflectance gain;
+                    // the text rides on top at full strength.
+                    uint32_t ob = tb + ((( o        & 0xFF) * gainQ) >> 8);
+                    uint32_t og = tg + ((((o >> 8)  & 0xFF) * gainQ) >> 8);
+                    uint32_t orr = tr + ((((o >> 16) & 0xFF) * gainQ) >> 8);
+                    if (ob > 255) ob = 255;
+                    if (og > 255) og = 255;
+                    if (orr > 255) orr = 255;
+                    o = ob | (og << 8) | (orr << 16) | 0xFF000000u;
+                }
+            }
+            if (rttHdr && slotDeferred && hdrRad) s.mat->Flags |=  Mat_HdrReflection;
+            else                        s.mat->Flags &= ~Mat_HdrReflection;
+        }
+        // Linear RTT pixels → slot texture, re-tiled in place (the
+        // same one-way Sachletz the texture loader applies).
+        std::memcpy(s.mat->Txtr->Data, surfData,
+                    size_t(s.texW) * size_t(s.texH) * 4);
+        Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
+        // Adaptive res may have shrunk texW/texH below the allocated max;
+        // re-point the texture's dims (+log2 for the Txtr_Tiled masks) so
+        // the sampler reads exactly the filled region. Buffer (texWMax)
+        // unchanged. Dims are pow2, so log2 is a shift count.
+        auto log2p2 = [](int v) { int l = 0; while (v > 1) { v >>= 1; ++l; } return l; };
+        s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
+        s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
+        s.staleFrames = 0;
+    };
+
+    // ── Parallel fan (deferred RTT): each job bakes WHOLE on a pool
+    // worker into its own RttWorker — per-worker camera/faces/scratch/
+    // G-buffer/HDR target, no engine globals touched (the enclosing
+    // OffscreenViewScope still holds the resize lock + restores the
+    // publish it did at construction; the fan itself never reads the
+    // published globals). Forward RTT (no --shard-deferred) keeps the
+    // serial global-swap loop below; FDS_MIRROR_RTT_SERIAL forces it.
+    // OPT-IN (--mirror-rtt-parallel): the fan reproduces the serial bake
+    // except for one unexplained residual — a light shaft in one 64² panel
+    // at the t=700 teleporter pose (1604px max=58 on screen) that survives
+    // P=1 + no-scratch isolation while EVERY enumerated input is byte-equal
+    // (z/mat32/normal/lightmapMF/ST planes, the 117-light SoA incl. spot
+    // dirs+cones, all 76 shadow-map depth planes, camera ctx field-by-field,
+    // same bake frame). The FDS_MIRROR_RTT_{P1,NOSCRATCH,ZDUMP,MDUMP,LMDUMP}
+    // envs + the plane dumps in finishSlot are the investigation kit.
+    // Until that's closed, serial stays the default (byte-exact).
+    static const bool kRttForceSerial = std::getenv("FDS_MIRROR_RTT_SERIAL") != nullptr;
+    if (rttDeferred && fds::FeatureFlags::mirror_rtt_parallel() && !kRttForceSerial) {
+        static std::vector<RttWorker> workers;   // tick-thread only
+        size_t P = ThreadPool::instance().size();
+        if (P < 1) P = 1;
+        if (P > jobs.size()) P = jobs.size();
+        static const bool kRttOneWorker = std::getenv("FDS_MIRROR_RTT_P1") != nullptr;
+        if (kRttOneWorker) P = 1;   // debug: isolate cross-worker interference
+        if (workers.size() < P) workers.resize(P);
+        const int polys = Polys > 0 ? Polys : 1;
+        for (size_t wi = 0; wi < P; ++wi) {
+            RttWorker &w = workers[wi];
+            if (!w.surfInit) {
+                std::memset(&w.surf, 0, sizeof(VESA_Surface));
+                w.surf.BPP = 32; w.surf.CPP = 4;
+                w.surf.Data = (byte*)std::malloc(size_t(kRttTexels) * 4);
+                w.surf.Z16  = (byte*)std::malloc(sizeof(word) * kRttTexels);
+                w.surf.Flip = MainSurf ? MainSurf->Flip : nullptr;
+                w.surfInit = true;
+            }
+            w.faces.resize(size_t(polys));
+            if (!w.gbInit) {
+                w.gb.normal.assign(kRttTexels, 0);
+                w.gb.txtr.assign(kRttTexels, 0xFFFFFFFFu);
+                w.gb.tangent.assign(kRttTexels, 0);
+                w.gb.shadowMatID.assign(kRttTexels, 0);
+                if (fds::FeatureFlags::shadow_lightmap()) {
+                    w.gb.lightmapMF.assign(kRttTexels, 0);
+                    w.gb.lightmapST.assign(kRttTexels, 0);
+                }
+                w.tileLights.resize(DEFERRED_NUM_TILES);
+                w.gbInit = true;
+            }
+            if (rttHdr && w.hdrVec.size() < size_t(kRttTexels) * 4)
+                w.hdrVec.resize(size_t(kRttTexels) * 4);
+        }
+
+        auto renderJob = [&](const Job &j, RttWorker &w) {
+            MirrorRttSlot &s = *j.slot;
+            const float D = j.dist;
+            // Shape the worker surface to this slot (buffers are
+            // kRttTexels-sized; only the dims/stride change).
+            w.surf.X = s.texW; w.surf.Y = s.texH;
+            w.surf.BPSL = s.texW * 4;
+            w.surf.PageSize = s.texW * s.texH * 4;
+            Build_YOffs_Table(&w.surf);
+            // Off-axis camera from the prepass constants (see the
+            // serial loop's comments for the projection derivation).
+            std::memset(&w.cam, 0, sizeof(w.cam));
+            w.cam.ISource = j.camPos;
+            w.cam.Mat[0][0] = j.eU.x;    w.cam.Mat[0][1] = j.eU.y;    w.cam.Mat[0][2] = j.eU.z;
+            w.cam.Mat[1][0] = s.axisV.x; w.cam.Mat[1][1] = s.axisV.y; w.cam.Mat[1][2] = s.axisV.z;
+            w.cam.Mat[2][0] = j.eN.x;    w.cam.Mat[2][1] = j.eN.y;    w.cam.Mat[2][2] = j.eN.z;
+            w.camCtx.view    = &w.cam;
+            w.camCtx.fovX    = j.fovX;
+            w.camCtx.fovY    = j.fovY;
+            w.camCtx.cntrEX  = j.cntrEX;
+            w.camCtx.cntrEY  = j.cntrEY;
+            w.camCtx.cntrX   = int32_t(std::min(std::max(j.cntrEX, -32000.0f), 32000.0f));
+            w.camCtx.cntrY   = int32_t(std::min(std::max(j.cntrEY, -32000.0f), 32000.0f));
+            const float nearZ = D * 1.001f + 0.01f;   // mirror-plane clip (== serial setNearZ)
+            w.camCtx.nearZ    = nearZ;
+            w.camCtx.invNearZ = 1.0f / nearZ;
+            w.camCtx.farZ     = sc->FZP;
+            w.camCtx.invFarZ  = 1.0f / sc->FZP;
+            // EXACT engine stamp (RENDER.CPP g_zscale): double 1.1, not
+            // 1.1f — a 1-ulp zScale difference shifts z-test boundaries
+            // and byte-diffs the bake vs the serial path.
+            w.camCtx.zScale    = float((float)0xff00 / (sc->FZP * 1.1));
+            w.camCtx.zScale256 = w.camCtx.zScale / 256.0f;
+
+            std::memset(w.surf.Data, 0, size_t(w.surf.PageSize));
+            std::memset(w.surf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
+            fds::g_offAxisFrustumCull = true;   // thread_local
+            static const bool kNoScratch = std::getenv("FDS_MIRROR_RTT_NOSCRATCH") != nullptr;
+            Transform_Objects(sc, w.camCtx, w.faces, s.texW, s.texH,
+                              kNoScratch ? nullptr : &w.scratch);
+            fds::g_offAxisFrustumCull = false;
+            if (w.faces.cAll != 0) {
+                Radix_Sort(w.faces.fList, w.faces.sList, w.faces.cAll);
+                const size_t np = size_t(s.texW) * size_t(s.texH);
+                std::fill_n(w.gb.txtr.begin(), np, 0xFFFFFFFFu);
+                if (!w.gb.lightmapMF.empty())
+                    std::fill_n(w.gb.lightmapMF.begin(), np, 0u);
+                fds::RenderContext rctx;
+                rctx.scene       = sc;
+                rctx.camera      = w.camCtx;
+                rctx.faces.fList = w.faces.fList;
+                rctx.faces.sList = w.faces.sList;
+                rctx.faces.cAll  = w.faces.cAll;
+                rctx.target.vpage            = (uint32_t*)w.surf.Data;
+                rctx.target.bytesPerScanline = w.surf.BPSL;
+                rctx.target.zpage16          = (uint16_t*)w.surf.Z16;
+                rctx.target.xres             = s.texW;
+                rctx.target.yres             = s.texH;
+                rctx.target.gbuffer          = &w.gb;
+                MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
+                DeferredLightingCtx dctx{};
+                dctx.Sc = sc;   // kernel caller contract
+                DeferredOverride ov;
+                ov.gb         = &w.gb;
+                ov.cam        = &w.camCtx;
+                ov.lights     = &w.lights;
+                ov.tileLights = w.tileLights.data();
+                ov.vpage      = w.surf.Data;
+                ov.zpage16    = (word*)w.surf.Z16;
+                ov.xres       = s.texW;
+                ov.yres       = s.texH;
+                ov.inlineDispatch = true;
+                // Per-worker HDR target: kernel + cones resolve against
+                // it through the thread_local override (Hdr_BufData /
+                // Hdr_Active / Hdr_WritableFor) instead of resizing the
+                // shared g_hdrBuf per slot like the serial path did.
+                if (rttHdr) {
+                    std::fill_n(w.hdrVec.begin(), np * 4, fds::hdrf(0));
+                    w.ht.buf = w.hdrVec.data();
+                    w.ht.w = s.texW; w.ht.h = s.texH;
+                    w.ht.active = false;
+                    fds::t_hdrOverride = &w.ht;
+                }
+                Render_DeferredLighting(dctx, &ov);
+                // Same resolve order as the serial path: lift uncovered
+                // pixels from the 8-bit surface (quarter-fill wave-2),
+                // THEN cones accumulate, THEN tonemap.
+                if (rttHdr) fds::Hdr_ActivateNoFogTarget(w.ht, (const uint32_t*)w.surf.Data, s.texW, s.texH);
+                Render_VolumetricCones(dctx, /*inlineDispatch=*/true);
+                if (rttHdr) {
+                    fds::Render_TonemapToTarget(w.ht, (uint32_t*)w.surf.Data, s.texW, s.texH);
+                    w.ht.active = false;
+                }
+                fds::t_hdrOverride = nullptr;
+            }
+            finishSlot(j, s, w.surf.Data, w.surf.Z16,
+                       rttHdr ? w.hdrVec.data() : nullptr,
+                       /*slotDeferred=*/true, int(w.faces.cAll), &w.gb);
+        };
+
+        // Self-balancing fan (the MirrorShatter shape): workers pull job
+        // indices off an atomic cursor; LOCAL semaphore for the join —
+        // the inline kernel/cones round-trip renderns::tileDone net-zero,
+        // so the outer join must not ride it.
+        const int NJ = int(jobs.size());
+        std::atomic<int> cursor{0};
+        std::counting_semaphore<256> done{0};
+        auto runWorker = [&](RttWorker &w) {
+            int ji;
+            while ((ji = cursor.fetch_add(1, std::memory_order_relaxed)) < NJ)
+                renderJob(jobs[ji], w);
+            done.release();
+        };
+        for (size_t t = 1; t < P; ++t) {
+            RttWorker *wp = &workers[t];
+            ThreadPool::instance().enqueue([wp, &runWorker]() { runWorker(*wp); });
+        }
+        runWorker(workers[0]);          // calling thread is worker 0
+        for (size_t t = 0; t < P; ++t) done.acquire();
+    } else
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
         const float D = j.dist;
@@ -2817,6 +3233,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 // tonemap runs. The main pass's Hdr_BeginFrame restores g_hdrBuf.
                 if (rttHdr) fds::Hdr_BeginFramePass(s.texW, s.texH);
                 Render_DeferredLighting(dctx, &ov);
+
                 // Hdr_ActivateNoFog (not a bare g_hdrActive=true): with
                 // --deferred-quarter the kernel shades only wave-1 into g_hdrBuf;
                 // the wave-2 FILL pixels land in s_rttSurf (8-bit) but NOT g_hdrBuf,
@@ -2838,154 +3255,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 Render(RenderPath::ForceForward);
             }
         }
-        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
-            const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
-            const uint16_t *zp = (const uint16_t*)s_rttSurf.Z16;
-            int nz = 0, nzz = 0;
-            for (int i = 0; i < s.texW * s.texH; ++i) {
-                if ((px[i] & 0xFFFFFF) != 0) ++nz;
-                if (zp[i] != 0) ++nzz;
-            }
-            std::fprintf(stderr,
-                "[MIRROR-RTT] order=%d %s job: %d/%d color px, %d z px, CAll=%d\n",
-                int(s.order), slotDeferred ? "deferred" : "forward",
-                nz, s.texW * s.texH, nzz, int(CAll));
-        }
-        // FDS_MIRROR_RTT_MARK=1: paint orientation markers into the
-        // linear buffer (top=red, bottom=blue, left=green,
-        // right=yellow) so flips/mirror errors in the panel mapping
-        // are unambiguous on screen.
-        if (std::getenv("FDS_MIRROR_RTT_MARK")) {
-            uint32_t *px = (uint32_t*)s_rttSurf.Data;
-            for (int y = 0; y < s.texH; ++y) {
-                for (int x = 0; x < s.texW; ++x) {
-                    uint32_t c = 0;
-                    if (y < 16)               c = 0xFFFF0000;  // top: red
-                    else if (y >= s.texH-16)  c = 0xFF0000FF;  // bottom: blue
-                    else if (x < 16)          c = 0xFF00FF00;  // left: green
-                    else if (x >= s.texW-16)  c = 0xFFFFFF00;  // right: yellow
-                    if (c) px[size_t(y)*size_t(s.texW) + x] = c;
-                }
-            }
-        }
-        // FDS_MIRROR_RTT_DUMP=1: write each slot's first rendered
-        // frame to /tmp for inspection (linear, pre-Sachletz).
-        if (std::getenv("FDS_MIRROR_RTT_DUMP")) {
-            static int sDumped = 0;
-            if (sDumped < 8) {
-                char path[64];
-                std::snprintf(path, sizeof(path),
-                              "/tmp/rtt_m%u_m%u_%d.ppm",
-                              unsigned(s.aId), unsigned(s.bId), sDumped);
-                if (FILE *f = std::fopen(path, "wb")) {
-                    std::fprintf(f, "P6\n%d %d\n255\n", s.texW, s.texH);
-                    const uint32_t *px = (const uint32_t*)s_rttSurf.Data;
-                    for (int i = 0; i < s.texW * s.texH; ++i) {
-                        const uint32_t p = px[i];
-                        unsigned char rgb[3] = {
-                            (unsigned char)((p >> 16) & 0xFF),
-                            (unsigned char)((p >>  8) & 0xFF),
-                            (unsigned char)( p        & 0xFF) };
-                        std::fwrite(rgb, 1, 3, f);
-                    }
-                    std::fclose(f);
-                    std::fprintf(stderr, "[MIRROR-RTT] dumped %s "
-                                 "(cam %.1f,%.1f,%.1f D=%.2f win %.1fx%.1f "
-                                 "FOVX=%.0f FOVY=%.0f CntrE=%.0f,%.0f "
-                                 "NZP=%.2f FZP=%.0f CAll=%d)\n",
-                                 path, j.camPos.x, j.camPos.y, j.camPos.z,
-                                 D, s.u1 - s.u0, s.v1 - s.v0,
-                                 FOVX, FOVY, CntrEX, CntrEY,
-                                 sc->NZP, sc->FZP, int(CAll));
-                    ++sDumped;
-                }
-            }
-        }
-        // Half-silvered composite (first order): overlay the panel's
-        // dynamic text texture on the reflection, texel = text +
-        // reflection/2 saturated — the formula the transparent kernel
-        // uses for glass. Texel→window is the fixed edge-to-edge
-        // mapping; window→text UV is the affine captured at build.
-        // The text texture is Sachletz-tiled in memory (4x4 blocks,
-        // X-outer/Y-inner write order) — read through the inverse.
-        const float rGain = fds::FeatureFlags::mirror_rtt_gain();
-        const uint32_t gainQ = uint32_t(
-            std::min(std::max(rGain, 0.0f), 1.0f) * 256.0f);
-        if (s.order == 1 && s.textTex && s.textTex->Mipmap[0]) {
-            // Mipmap[0], NOT Data: the greets generator repoints
-            // Mipmap[0] at its dynamic text buffer (GREETS.CPP ~227);
-            // Data keeps the static disk JPG. The rasterizer samples
-            // Mipmap[miplevel], so the live content is here.
-            const dword *td = (const dword*)s.textTex->Mipmap[0];
-            const int tw = s.textTex->SizeX, th = s.textTex->SizeY;
-            const int tBlocksY = th >> 2;
-            uint32_t *px = (uint32_t*)s_rttSurf.Data;
-            const float du = (eU1 - eU0) / float(s.texW);
-            const float dv = (s.v1 - s.v0) / float(s.texH);
-            // HDR reflection (b): build a FLOAT panel radiance = linear(text) +
-            // reflection*gain, sampled emissively by the transparent kernel so
-            // reflected highlights bloom. Reuses this loop's text affine; the
-            // reflection comes from the float g_hdrBuf (the RTT slot's radiance,
-            // not yet quantized) at the same pixel index. The 8-bit path below
-            // stays as the LDR fallback. hdrRefl owned by the panel material.
-            float *hdrR = nullptr;
-            if (rttHdr && slotDeferred) {   // float radiance only exists when the deferred render ran this slot
-                if (s.mat->hdrReflW != s.texW || s.mat->hdrReflH != s.texH) {
-                    std::free(s.mat->hdrRefl);
-                    s.mat->hdrRefl = (float*)std::malloc(size_t(s.texW)*s.texH*3*sizeof(float));
-                    s.mat->hdrReflW = s.texW; s.mat->hdrReflH = s.texH;
-                }
-                hdrR = s.mat->hdrRefl;
-            }
-            auto linf = [](uint32_t c){ const float n = float(c)*(1.0f/255.0f); return n*n*255.0f; };
-            for (int y = 0; y < s.texH; ++y) {
-                const float pv = s.v1 - (float(y) + 0.5f) * dv;
-                for (int x = 0; x < s.texW; ++x) {
-                    const float epu = eU0 + (float(x) + 0.5f) * du;
-                    const float pu = j.backSide ? -epu : epu;
-                    const float fu = s.tA[0]*pu + s.tA[1]*pv + s.tA[2];
-                    const float fv = s.tA[3]*pu + s.tA[4]*pv + s.tA[5];
-                    const int iu = int(fu * float(tw)) & (tw - 1);
-                    const int iv = int(fv * float(th)) & (th - 1);
-                    const int blk = ((iu >> 2) * tBlocksY + (iv >> 2)) << 4;
-                    const dword t = td[blk + ((iv & 3) << 2) + (iu & 3)];
-                    const size_t pix = size_t(y) * size_t(s.texW) + x;
-                    uint32_t &o = px[pix];
-                    const uint32_t tb =  t        & 0xFF;
-                    const uint32_t tg = (t >> 8)  & 0xFF;
-                    const uint32_t tr = (t >> 16) & 0xFF;
-                    if (hdrR) {
-                        hdrR[pix*3+0] = linf(tb) + fds::g_hdrBuf[pix*4+0]*rGain;
-                        hdrR[pix*3+1] = linf(tg) + fds::g_hdrBuf[pix*4+1]*rGain;
-                        hdrR[pix*3+2] = linf(tr) + fds::g_hdrBuf[pix*4+2]*rGain;
-                    }
-                    // Reflection attenuated by the reflectance gain;
-                    // the text rides on top at full strength.
-                    uint32_t ob = tb + ((( o        & 0xFF) * gainQ) >> 8);
-                    uint32_t og = tg + ((((o >> 8)  & 0xFF) * gainQ) >> 8);
-                    uint32_t orr = tr + ((((o >> 16) & 0xFF) * gainQ) >> 8);
-                    if (ob > 255) ob = 255;
-                    if (og > 255) og = 255;
-                    if (orr > 255) orr = 255;
-                    o = ob | (og << 8) | (orr << 16) | 0xFF000000u;
-                }
-            }
-            if (rttHdr && slotDeferred) s.mat->Flags |=  Mat_HdrReflection;
-            else                        s.mat->Flags &= ~Mat_HdrReflection;
-        }
-        // Linear RTT pixels → slot texture, re-tiled in place (the
-        // same one-way Sachletz the texture loader applies).
-        std::memcpy(s.mat->Txtr->Data, s_rttSurf.Data,
-                    size_t(s.texW) * size_t(s.texH) * 4);
-        Sachletz((dword*)s.mat->Txtr->Data, s.texW, s.texH);
-        // Adaptive res may have shrunk texW/texH below the allocated max;
-        // re-point the texture's dims (+log2 for the Txtr_Tiled masks) so
-        // the sampler reads exactly the filled region. Buffer (texWMax)
-        // unchanged. Dims are pow2, so log2 is a shift count.
-        auto log2p2 = [](int v) { int l = 0; while (v > 1) { v >>= 1; ++l; } return l; };
-        s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
-        s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
-        s.staleFrames = 0;
+        finishSlot(j, s, s_rttSurf.Data, s_rttSurf.Z16,
+                   rttHdr ? fds::g_hdrBuf.data() : nullptr,
+                   slotDeferred, int(CAll), &s_rttGB);
     }
 
     // ── Restore ─────────────────────────────────────────────────────
