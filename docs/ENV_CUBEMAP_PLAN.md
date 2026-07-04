@@ -380,6 +380,37 @@ Validated: user pose t=124 + ±60/±150 dolly — coherent, smooth tracking;
 flag-off pin byte-identical; gates 3/3 both states; bench 73.8 ms/iter
 (best measurement yet, still ≤ equirect's ~76).
 
+### Per-pixel city windows experiment (`--city_env_pixel`, default OFF)
+
+The "exact endgame" was tested: windows skip `Face_Reflective`, rasterize
+through Mekalele with their per-building cloned matID, and the deferred
+kernel's env compose reflects per pixel from the stores
+`EnvReflection_FramePrep` auto-bakes (Reflection>0 → per-clone cube store,
+centroid-deduped ≈ per building). Clone gets Reflection=40 (F0 0.4) +
+Glossiness=96 under the flag.
+
+**Findings:**
+- **Latent bug discovered: the OuterVec kernel has NO env compose** — on
+  scenes with `PreferOuterVec` (city), `--env_refl` has always been silently
+  inert. Env only works via the wave-1 scalar/vec kernel (chase) or the
+  wave-2 fill fallback. The experiment therefore requires
+  `FDS_DEFERRED_OUTER_VEC=0`.
+- **Look: excellent.** Smooth per-pixel reflection with Fresnel grazing
+  response, roughness mips, parallax correction; zero charts → nothing can
+  pop, by construction. More physically restrained than the stylized legacy
+  half-add (tunable via clone F0 / --env_refl_gain).
+- **Perf: confirms the historical "too slow" verdict, now quantified**
+  (city t=1961 bench): paraboloid+OuterVec 77.5 ms/iter; scalar kernel
+  alone 104.9 (+27 — the OuterVec switch, unrelated to env); + per-pixel
+  env 120.8 (+16 for the compose; ENV_NOFETCH ≈ same → math/plumbing-bound,
+  not fetch-bound). Net +56%. Adding a per-lane env compose INSIDE OuterVec
+  would drop the kernel-switch cost and land ≈ +16-20% — the follow-up if
+  per-pixel city glass is ever wanted for real.
+
+**Status: kept as an experiment flag** (`FDS_CITY_ENV_PIXEL=1` +
+`FDS_DEFERRED_OUTER_VEC=0 --env_refl`). Default OFF; the static paraboloid
+sheets remain the production path (temporally stable at ~zero cost).
+
 ## Deviations
 
 - **Separate cache FILE, not just a salted key** (slice C): the cache is a

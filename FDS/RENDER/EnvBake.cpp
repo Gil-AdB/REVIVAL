@@ -536,8 +536,12 @@ bool EnvReflection_FramePrep(Scene* sc) {
     // Refresh the matID table (IDs move when the editor rebuilds the table).
     std::memset(env.table, 0, sizeof(env.table));
     for (auto& [M, idx] : env.byMat)
-        if (idx >= 0 && M->RelScene == sc && M->ID < 256)
+        if (idx >= 0 && M->RelScene == sc && M->ID < 256) {
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
+            if (std::getenv("ENVDBG3") && M->Name && std::strstr(M->Name, "windows"))
+                std::fprintf(stderr, "[ENVDBG3] table[%u] = store %d  mat=%p '%s'\n",
+                             (unsigned)M->ID, idx, (void*)M, M->Name);
+        }
     return bakedAny;
 }
 

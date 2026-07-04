@@ -2083,8 +2083,15 @@ void Initialize_City()
 	// env_cube: six padded cube faces per building (forward reflective path).
 	// Keyed + cached separately (formatSalt + face dims) so it never collides
 	// with the legacy equirect cache; the equirect branch is byte-untouched.
+	// city_env_pixel: neither bake runs — windows reflect per-pixel through
+	// the deferred kernel via the auto-baked EnvReflection stores instead of
+	// any per-building forward artifact (see the windows loop below).
 	const bool useCube = fds::FeatureFlags::env_cube();
-	if (useCube && !skipCubeMap) {
+	const bool cityEnvPixel = fds::FeatureFlags::city_env_pixel();
+	if (cityEnvPixel) {
+		fprintf(stderr, "[CITY] city_env_pixel on — skipping forward env bake; "
+		        "windows go per-pixel through the deferred env compose\n");
+	} else if (useCube && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
 		const uint32_t cubeSalt = 0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f);
 		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
@@ -2238,8 +2245,10 @@ void Initialize_City()
 		if (Obj->Name == nullptr) { continue; }
 		if (!(Obj->Name[0] == 'b' && '0' <= Obj->Name[1] && Obj->Name[1] <= '9' && 0 == strcmp(Obj->Name + 2, ".lwo"))) { continue; }
 		// Obj->Reflection is set by the cube-map bake — null when SKIP_CUBEMAP=1
-		// or any other reason the bake didn't run.
-		if (!Obj->Reflection) continue;
+		// or any other reason the bake didn't run. city_env_pixel needs no
+		// forward bake: the clone/retarget below is what routes the windows'
+		// matID to the deferred env compose, so the loop must still run.
+		if (!Obj->Reflection && !cityEnvPixel) continue;
 
 		// Per-building dedup: same windows-base-mat shared across multiple
 		// faces on this building reuses one clone.
@@ -2250,16 +2259,36 @@ void Initialize_City()
 			if (!F->Txtr || !F->Txtr->Name) continue;
 			if (!strstr(F->Txtr->Name, "windows")) continue;
 
-			F->Flags |= Face_Reflective;
-			F->ReflectionTexture = Obj->Reflection->Txtr;
+			if (!cityEnvPixel) {
+				// Forward path: TEXTURETEXTURE filler composes tex + env
+				// per vertex-interpolated UVs (paraboloid sheets / equirect).
+				F->Flags |= Face_Reflective;
+				F->ReflectionTexture = Obj->Reflection->Txtr;
+			}
+			// city_env_pixel: NO Face_Reflective — the face rasterizes
+			// through Mekalele with the clone's matID, and the deferred
+			// kernel's env compose reflects per pixel from the material's
+			// auto-baked cube store.
 
 			Material *base = F->Txtr;
 			Material *clone = baseToClone[base];
 			if (!clone) {
+				if (cityEnvPixel && std::getenv("ENVDBG"))
+					fprintf(stderr, "[ENVDBG] windows base '%s' Flags=0x%x Lum=%.2f Diff=%.2f\n",
+					        base->Name ? base->Name : "?", (unsigned)base->Flags,
+					        base->Luminosity, base->Diffuse);
 				clone = getAlignedType<Material>(16);
 				std::memcpy(clone, base, sizeof(Material));
-				clone->EnvTexture = Obj->Reflection->Txtr;
+				clone->EnvTexture = Obj->Reflection ? Obj->Reflection->Txtr : nullptr;
 				clone->Reflection = 0.5f;       // 50% env blend (tunable)
+				if (cityEnvPixel) {
+					// Deferred env compose semantics: Reflection is a
+					// PERCENT (F0 = Reflection/100, dielectric floor 0.04)
+					// and Glossiness drives the roughness→mip pick. 40% +
+					// tight gloss ≈ the legacy half-add look with Fresnel.
+					clone->Reflection = 40.0f;
+					clone->Glossiness = 96.0f;
+				}
 				clone->ID = 0;                  // re-assigned by Scene_RebuildMatTable
 				clone->Prev = nullptr;
 				clone->Next = MatLib;
