@@ -592,7 +592,8 @@ void EnvReflection_DrawViz(Scene* sc) {
 
 int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     const uint32_t* faceMajor, int faceRes,
-                                    int storeRes, const Vector& bakePoint) {
+                                    int storeRes, const Vector& bakePoint,
+                                    float pullOpt) {
     if (!sc || !M || !faceMajor || faceRes < 64) return -1;
     if (storeRes > faceRes) storeRes = faceRes;
     SceneEnv& env = g_envByScene[sc];
@@ -611,6 +612,7 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
     }
     v.isCube = true;
     v.noParallax = true;
+    v.pullOpt = pullOpt;
     v.W = v.H = fr;
     v.numMips = EnvPanoLinear::kMaxMips;
     for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {

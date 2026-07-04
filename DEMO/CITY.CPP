@@ -2341,7 +2341,12 @@ void Initialize_City()
 							const int idx = fds::EnvReflection_RegisterCubeFaces(
 								CitySc, clone,
 								(const uint32_t*)bi->second->rawPanorama.data(),
-								512, 256, center);
+								512, 256, center,
+								// cv-pull damping parity with the forward
+								// path (authored reflection sweep rate);
+								// the bsphere radius plays the role of
+								// optimalDistFromPlane.
+								BT->BSphereRadius);
 							storeIdxByObj[Obj] = idx;
 						} else if (si->second >= 0) {
 							fds::EnvReflection_AliasMaterial(CitySc, clone, si->second);

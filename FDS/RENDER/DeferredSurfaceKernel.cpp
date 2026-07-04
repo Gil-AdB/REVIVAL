@@ -685,22 +685,80 @@ static inline void EnvSpecComposeScalar(
 {
 	// Incident ray d = pixel direction (view space, camera at
 	// origin); reflect about the (possibly nmap-perturbed) N.
-	const float dInv = fast_rsqrt(x*x + y*y + z*z);
-	const float dx = x * dInv, dy = y * dInv, dz = z * dInv;
-	const float dDotN = dx*nx + dy*ny + dz*nz;
-	const float rvx = dx - 2.0f * dDotN * nx;
-	const float rvy = dy - 2.0f * dDotN * ny;
-	const float rvz = dz - 2.0f * dDotN * nz;
+	float dInv = fast_rsqrt(x*x + y*y + z*z);
+	float dx = x * dInv, dy = y * dInv, dz = z * dInv;
+	float dDotN;
+	float rvx, rvy, rvz;
+	if (envP->pullOpt > 0.0f) {
+		// cv-pull damping (forward Transform.cpp parity): reflect from a
+		// virtual eye pulled toward the store's bake point by the same
+		// pow(d-opt,0.8)+opt law. Slows reflection sweep to the authored
+		// rate — full physical-rate per-pixel motion read as jumping
+		// against the rest of the scene. Pulled eye is per (store, frame):
+		// memoize per thread; the pow runs once per store per tile-run.
+		struct PullMemo { const fds::EnvPanoLinear* p; float ex, ey, ez; };
+		static thread_local PullMemo sMemo = { nullptr, 0, 0, 0 };
+		if (sMemo.p != envP) {
+			const float bx = envP->bakeX, by = envP->bakeY, bz = envP->bakeZ;
+			float vx_ = ctx.cameraWorldX - bx, vy_ = ctx.cameraWorldY - by,
+			      vz_ = ctx.cameraWorldZ - bz;
+			const float vD = std::sqrt(vx_*vx_ + vy_*vy_ + vz_*vz_);
+			float sScale = 1.0f;
+			if (vD > envP->pullOpt + 1.0f) {
+				const float hackD = std::pow(vD - envP->pullOpt, 0.8f) + envP->pullOpt;
+				sScale = hackD / vD;
+			}
+			sMemo.p = envP;
+			sMemo.ex = bx + vx_ * sScale;
+			sMemo.ey = by + vy_ * sScale;
+			sMemo.ez = bz + vz_ * sScale;
+		}
+		// World-space incident from the pulled eye; world normal from the
+		// (possibly nmap-perturbed) view-space N. Reflection + Fresnel run
+		// in world space; the view-space branch below is skipped.
+		const float nwx = ctx.viewToWorld[0][0]*nx + ctx.viewToWorld[0][1]*ny + ctx.viewToWorld[0][2]*nz;
+		const float nwy = ctx.viewToWorld[1][0]*nx + ctx.viewToWorld[1][1]*ny + ctx.viewToWorld[1][2]*nz;
+		const float nwz = ctx.viewToWorld[2][0]*nx + ctx.viewToWorld[2][1]*ny + ctx.viewToWorld[2][2]*nz;
+		const float swx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
+		const float swy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
+		const float swz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+		float wx = swx - sMemo.ex, wy = swy - sMemo.ey, wz = swz - sMemo.ez;
+		const float wInv = fast_rsqrt(wx*wx + wy*wy + wz*wz + 1e-12f);
+		wx *= wInv; wy *= wInv; wz *= wInv;
+		const float wDotN = wx*nwx + wy*nwy + wz*nwz;
+		// Store WORLD-space reflection in rv (the view→world rotate below
+		// must be skipped for this path); dDotN keeps the Fresnel sign
+		// convention (front-facing < 0).
+		rvx = wx - 2.0f * wDotN * nwx;
+		rvy = wy - 2.0f * wDotN * nwy;
+		rvz = wz - 2.0f * wDotN * nwz;
+		dDotN = wDotN;
+		// Overwrite the view-space d with the world incident so ENVPROBE's
+		// normal-probe substitution below still yields a world direction.
+		dx = nwx; dy = nwy; dz = nwz;   // (only used by sProbe)
+	} else {
+		dDotN = dx*nx + dy*ny + dz*nz;
+		rvx = dx - 2.0f * dDotN * nx;
+		rvy = dy - 2.0f * dDotN * ny;
+		rvz = dz - 2.0f * dDotN * nz;
+	}
 	// ENVPROBE=1: sample along the surface NORMAL instead of the
 	// reflection — turns any env surface into a direction probe for
 	// validating the pano/equirect/world mapping (diagnostic only).
 	static const bool sProbe = std::getenv("ENVPROBE") != nullptr;
 	// View → world rotation (viewToWorld is the transpose of the
 	// camera rotation; direction ⇒ no translation).
+	float rwx, rwy, rwz;
+	if (envP->pullOpt > 0.0f) {
+		// Pull path computed rv (and the probe normal, stashed in d) in
+		// WORLD space already — no rotation here.
+		rwx = sProbe ? dx : rvx; rwy = sProbe ? dy : rvy; rwz = sProbe ? dz : rvz;
+	} else {
 	const float pvx = sProbe ? nx : rvx, pvy = sProbe ? ny : rvy, pvz = sProbe ? nz : rvz;
-	float rwx = ctx.viewToWorld[0][0]*pvx + ctx.viewToWorld[0][1]*pvy + ctx.viewToWorld[0][2]*pvz;
-	float rwy = ctx.viewToWorld[1][0]*pvx + ctx.viewToWorld[1][1]*pvy + ctx.viewToWorld[1][2]*pvz;
-	float rwz = ctx.viewToWorld[2][0]*pvx + ctx.viewToWorld[2][1]*pvy + ctx.viewToWorld[2][2]*pvz;
+	rwx = ctx.viewToWorld[0][0]*pvx + ctx.viewToWorld[0][1]*pvy + ctx.viewToWorld[0][2]*pvz;
+	rwy = ctx.viewToWorld[1][0]*pvx + ctx.viewToWorld[1][1]*pvy + ctx.viewToWorld[1][2]*pvz;
+	rwz = ctx.viewToWorld[2][0]*pvx + ctx.viewToWorld[2][1]*pvy + ctx.viewToWorld[2][2]*pvz;
+	}
 	// Parallax correction: exit-t of ray sampleWorld + t·R against
 	// the AABB (slab method, per-axis far plane), hit point → the
 	// lookup direction from the BAKE point. t ≤ 0 (pixel outside

@@ -74,6 +74,14 @@ struct EnvPanoLinear {
     // (CITY: the whole-city AABB drew moving exit-face bands across
     // facades — the per-pixel experiment's "garbled and jumpy").
     bool noParallax = false;
+    // Forward-path cv-pull damping, ported per-pixel (CITY glass): when > 0,
+    // the reflection eye is pulled toward the bake point with the SAME
+    // pow(dist-opt, 0.8)+opt law Transform.cpp's Face_Reflective block uses.
+    // The authored city look depends on this: it slows reflection sweep to
+    // ~1/3 of physical at overview distances (full-rate per-pixel motion
+    // read as "jumps like crazy" against it). Value = the building bsphere
+    // radius (the forward hack's optimalDistFromPlane analog). 0 = physical.
+    float pullOpt = 0.0f;
     // Capture point (world) + the scene AABB proxy for parallax correction.
     float bakeX = 0, bakeY = 0, bakeZ = 0;
     float boxMinX = 0, boxMinY = 0, boxMinZ = 0;
@@ -113,7 +121,8 @@ int EnvReflection_Count(Scene* sc);
 // Returns the store index for AliasMaterial, or -1 on failure.
 int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     const uint32_t* faceMajor, int faceRes,
-                                    int storeRes, const Vector& bakePoint);
+                                    int storeRes, const Vector& bakePoint,
+                                    float pullOpt = 0.0f);
 
 // Map another material to an existing store (same building, second windows
 // base-mat clone) without duplicating the pixel data.
