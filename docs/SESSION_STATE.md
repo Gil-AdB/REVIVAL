@@ -89,23 +89,26 @@ pre-cone surf-checksum + ov.cam field print):
     Render_DeferredLighting's per-pixel lighting, NOT cones/HDR/tonemap.
   P=1 + same tick thread → thread-locals identical. RULED OUT: geometry,
   camera, all gbuffer planes, cones, HDR resolve, threading, vertex scratch.
-  * ViewLightsSoA (ov->lights, all 23 arrays x 117 lights): byte-IDENTICAL
-    (hash 75ff00b2b5f17ab6 both). mirrorMask empty in BOTH RTT gbuffers
-    (neither s_rttGB nor w.gb allocates it) → clone-cull symmetric.
-  CONCLUSION: EVERY enumerable kernel input — 5 gbuffer planes, full
-  camera ctx, the entire light SoA — is byte-identical, yet the pre-cone
-  lit surface differs. This is NOT a race (P=1, same thread) and NOT any
-  enumerable input. It's an uninitialized-read or buffer-provenance
-  dependence deep in the kernel tile/fill path (quarter-fill wave-2 reads
-  neighbours; s_rttSurf reused-across-jobs vs w.surf reused-per-worker
-  carry different residual in never-covered lanes the fill may touch), OR
-  a per-pixel codegen/order subtlety. CLOSING IT needs per-pixel
-  intermediate bisection (dump wave-1 vs wave-2 pixel masks + the fill's
-  neighbour reads for the diverging 36x58 region), a dedicated deep
-  session — NOT bounded probes. Given the prize is ~1-1.3ms of ~42ms on a
-  DEFAULT-OFF experiment, RECOMMENDATION: leave opt-in, revisit only if
-  the RTT serial cost becomes a priority. The fan + HdrTarget infra are
-  committed and correct-by-construction; only this residual gates default-on.
+  * ViewLightsSoA (ov->lights, ALL arrays incl sinOuter/forceCone/mirN*):
+    byte-IDENTICAL. mirrorMask empty in BOTH RTT gbuffers → clone-cull
+    symmetric. numLights=117 both.
+  ROOT LOCALIZED to buildTileLightLists OUTPUT: the per-tile light lists
+  differ (1760 vs 1592 light-tile entries; listHash differs) while
+  depthHash (tile zMin/zMax), emptyTiles(32), zcull/conecull flags,
+  camCtx (fovX/fovY/cntrEX/cntrEY probed), and every SoA field it reads
+  are ALL byte-identical. NOT the per-pixel loop and NOT the quarter-fill
+  (full-rate --no-deferred-quarter still diverges, same 36x58 region).
+  buildTileLightLists is a PURE fn of those inputs → the difference can
+  only be (a) its file-static chunk[]/sContribThr (recomputed each call
+  from identical data — shouldn't differ), or (b) per-worker buffer
+  aliasing/OOB write clobbering tileLights/chunk between the depth-bounds
+  fill and the light assignment. NEXT: dump per-tile .count for ser vs
+  P=1, find the differing tile(s), trace that tile's zCull/coneCull
+  rejections (add the reject-reason counter). Needs a debugger-grade
+  session, NOT bounded probes. Prize ~1-1.3ms of ~42ms, DEFAULT-OFF.
+  RECOMMENDATION: leave opt-in; the fan + HdrTarget infra are committed
+  and correct-by-construction; only this buildTileLightLists divergence
+  gates default-on. Same slot both (m1->m4, only active RTT at t=700).
 Perf prize when closed: ~1.0-1.3ms at ts=491 (serial RTT is 1.77-1.85ms).
 
 --- original design notes below ---
