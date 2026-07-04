@@ -598,6 +598,14 @@ void js_editorRebakeEnv()
 	rev::Editor_MarkDirty();
 }
 
+std::string js_editorReadPixel(int x, int y)
+{
+	if (!VPage || x < 0 || y < 0 || x >= XRes || y >= YRes) return "oob";
+	const dword p = reinterpret_cast<dword*>(VPage)[size_t(y) * XRes + x];
+	char buf[48];
+	std::snprintf(buf, sizeof buf, "%u,%u,%u", (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+	return buf;
+}
 int js_editorEnvPanoCount()
 {
 	return CurScene ? fds::EnvReflection_Count(CurScene) : 0;
@@ -806,6 +814,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
 	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);
 	emscripten::function("editorEnvPanoCount",   &js_editorEnvPanoCount);
+	emscripten::function("editorReadPixel",      &js_editorReadPixel);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);

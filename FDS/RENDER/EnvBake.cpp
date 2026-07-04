@@ -439,11 +439,14 @@ void EnvReflection_DrawViz(Scene* sc) {
                                                         : stores.size() - 1;
     const EnvPanoLinear& v = stores[idx]->view;
     if (!v.mip[0]) return;
-    // Fit into the top-right quarter of the frame (integer downscale).
+
+    // Fit into a quarter of the frame (integer downscale), TOP-CENTER:
+    // top-right hides under the editor's HTML side panel, top-left under
+    // the profiler HUD.
     int scale = 1;
     while (v.W / scale > XRes / 2 || v.H / scale > YRes / 2) ++scale;
     const int dw = v.W / scale, dh = v.H / scale;
-    const int x0 = XRes - dw - 8, y0 = 8;
+    const int x0 = (XRes - dw) / 2, y0 = 8;
     dword* out = reinterpret_cast<dword*>(VPage);
     for (int y = 0; y < dh; ++y) {
         dword* row = out + size_t(y0 + y) * XRes + x0;
