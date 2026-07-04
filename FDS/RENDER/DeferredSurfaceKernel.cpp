@@ -94,9 +94,6 @@ namespace renderns {
 static std::atomic<uint64_t> g_shadowProfSamples{0};
 static std::atomic<uint64_t> g_shadowProfLineTransitions{0};
 thread_local uintptr_t s_shadowProfLastLine = 0;
-// File-scope ctx shared by all deferred TUs; see DeferredCommon.h.
-DeferredLightingCtx g_deferredCtx{};
-
 // Runtime mip-level debug knobs. Defined here so FDS doesn't need a
 // symbol from DEMO. Declared in Rev.h; toggled by N / Shift+N keys.
 std::atomic<int>  g_forceMipLevel{-1};
@@ -2417,7 +2414,8 @@ int xparPeelPassesEffective() {
 // strip's slice (61 KB per layer at 1920 wide), raster the clump's
 // faces with clipper extents = strip rect, then composite the strip
 // rows via Render_DeferredTransparentLighting_Tile<Layer>.
-void RenderXparClumpInStrip(Face** faces, int count, bool front,
+void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
+                             Face** faces, int count, bool front,
                              int strip_y, int strip_h)
 {
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
@@ -2453,7 +2451,7 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 		meka::g_rasterStripClamp = savedClamp;
 
 		const int stripIdx = strip_y >> 3;  // TILELOG=3
-		DeferredLightingCtx stripCtx = g_deferredCtx;
+		DeferredLightingCtx stripCtx = dctx;
 		stripCtx.tileLights = g_stripLights;
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
@@ -4101,17 +4099,19 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 // tile-job lambda; the template + g_deferredCtx live here, so we expose
 // front/back wrappers it can forward into without seeing the template.
 
-void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2) {
+void renderDeferredTransparentTile_Front(const DeferredLightingCtx &ctx,
+                                          int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+		ctx, tileIdx, x1, y1, x2, y2);
 	// Release the renderns::tileDone permit on behalf of the inner
 	// template — see the comment in that template's body for why the
 	// release lives here instead of inside.
 	renderns::tileDone.release();
 }
-void renderDeferredTransparentTile_Back(int tileIdx, int x1, int y1, int x2, int y2) {
+void renderDeferredTransparentTile_Back(const DeferredLightingCtx &ctx,
+                                         int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+		ctx, tileIdx, x1, y1, x2, y2);
 	renderns::tileDone.release();
 }
 

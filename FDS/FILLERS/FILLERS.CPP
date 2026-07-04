@@ -1876,12 +1876,12 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 // unified, transparent face fragments too). At flush time we collect
 // entries into a scratch array, sort descending by renderZ
 // (back-to-front), and walk the sorted array dispatching each item.
-void TBR_Render(Scene *Sc)
+void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 {
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
 
-	dispatchIndexed(numTiles, &stripsDone, [Sc](int ii) {
+	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx](int ii) {
 			const mword i = mword(ii);
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
@@ -1939,9 +1939,14 @@ void TBR_Render(Scene *Sc)
 			};
 			auto flushXparClump = [&]() {
 				if (xparClump.empty()) return;
-				RenderXparClumpInStrip(xparClump.data(),
-				                       int(xparClump.size()),
-				                       clumpFront, strip_y_i, strip_h);
+				// dctx is null only on a non-deferred TBR frame (forward
+				// fountain fallback) — no transparent faces were routed
+				// into the strips there, so the clump is always empty.
+				if (dctx) {
+					RenderXparClumpInStrip(*dctx, xparClump.data(),
+					                       int(xparClump.size()),
+					                       clumpFront, strip_y_i, strip_h);
+				}
 				xparClump.clear();
 			};
 

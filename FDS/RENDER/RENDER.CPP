@@ -26,7 +26,7 @@
 #include "Base/VertexFrame.h"  // SoA Phase 4: F->frame access in xpar-ids debug path
 #include "Base/Scene.h"
 #include "Base/RenderContext.h"
-#include "DeferredCommon.h"   // DeferredLightingCtx + g_deferredCtx (publish for strip path)
+#include "DeferredCommon.h"   // DeferredLightingCtx (owned by renderFrame, threaded to all passes)
 #include "EnvBake.h"          // --env_refl: per-scene panorama bake + registry
 #include "OffscreenView.h"    // g_offscreenViewDepth (env_refl bake gate)
 #include "TailProf.h"         // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
@@ -43,7 +43,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // volumetric/fog orchestrators (RenderContext migration). DeferredLightingCtx
 // + Render_DeferredLighting (with its optional DeferredOverride) are declared
 // in DeferredCommon.h (included below).
-void Render_DeferredFogPass();
+void Render_DeferredFogPass(const DeferredLightingCtx &ctx);
 // Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
 void Render_SSAO();
 void Render_EdgeAA();
@@ -111,8 +111,10 @@ static bool useUnifiedVolumetric() {
 		return fds::FeatureFlags::volumetric_unified();
 	return CurScene && CurScene->PreferVolumetricUnified != 0;
 }
-void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2);
-void renderDeferredTransparentTile_Back (int tileIdx, int x1, int y1, int x2, int y2);
+void renderDeferredTransparentTile_Front(const DeferredLightingCtx &ctx,
+                                          int tileIdx, int x1, int y1, int x2, int y2);
+void renderDeferredTransparentTile_Back (const DeferredLightingCtx &ctx,
+                                          int tileIdx, int x1, int y1, int x2, int y2);
 
 // Defined in RenderInner.cpp.
 void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, float y2);
@@ -512,13 +514,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "gbuffer");
 
 	// Per-pass deferred lighting context, owned by renderFrame (RenderContext
-	// migration): Render_DeferredLighting fills it; it's threaded to the
-	// volumetric/fog orchestrators. Published to the file-scope g_deferredCtx
-	// after fill for the one remaining un-threaded reader —
-	// RenderXparClumpInStrip on FILLERS' TBR strip path (threading the
-	// deferred type through FILLERS is a separate, gate-uncovered step). Empty
-	// in forward mode → the volumetric passes no-op (null lights), which is
-	// also safer than the old stale-singleton read.
+	// migration): Render_DeferredLighting fills it; it's threaded to every
+	// downstream consumer — the volumetric/fog orchestrators, the legacy
+	// peel's transparent-tile wrappers, and (via TBR_Render) the TBR strip
+	// path. The old file-scope g_deferredCtx singleton is GONE. Empty in
+	// forward mode → the volumetric passes no-op (null lights).
 	DeferredLightingCtx dctx{};
 	if (deferred) {
 		// HDR (prototype): size + clear the radiance buffer BEFORE the deferred
@@ -544,7 +544,6 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
 		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
-		g_deferredCtx = dctx;
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
 		// pixels, BEFORE fog/volumetric so haze layers on top of the occluded
@@ -595,7 +594,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				else
 					Render_DeferredFastFogSkyPaint(dctx);
 			} else
-				Render_DeferredFogPass();
+				Render_DeferredFogPass(dctx);
 		}
 
 		// Fog-off HDR activation: a no-fog scene (greets) never ran the froxel
@@ -895,12 +894,12 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				const long long _cT = TailProf::nowNs();
 				s_xparRasterMs += double(_cT - _rT) / 1e6;
 				if (batchFront) {
-					runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-						renderDeferredTransparentTile_Front(tileIdx, x1, y1, x2, y2);
+					runTilePass([&dctx](int x1, int y1, int x2, int y2, int tileIdx) {
+						renderDeferredTransparentTile_Front(dctx, tileIdx, x1, y1, x2, y2);
 					});
 				} else {
-					runTilePass([](int x1, int y1, int x2, int y2, int tileIdx) {
-						renderDeferredTransparentTile_Back(tileIdx, x1, y1, x2, y2);
+					runTilePass([&dctx](int x1, int y1, int x2, int y2, int tileIdx) {
+						renderDeferredTransparentTile_Back(dctx, tileIdx, x1, y1, x2, y2);
 					});
 				}
 				const double _compMs = double(TailProf::nowNs() - _cT) / 1e6;
@@ -1043,7 +1042,7 @@ xpar_done: ;
 	// immediate (see The_MMX_Scalar) and its transparents took the peel.
 	if ((CurScene->Flags & Scn_SpriteTBR) && TBR_MatchesTarget(CurScene))
 	{
-		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene); }
+		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene, deferred ? &dctx : nullptr); }
 	}
 
 	// HDR (Phase 2 overlay reorg): the tonemap walks down the pipeline as each

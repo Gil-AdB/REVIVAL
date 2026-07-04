@@ -250,12 +250,6 @@ struct DeferredLightingCtx {
 	word                *xparZBack;    // transparent back depth
 };
 
-// File-scope ctx, populated each frame by Render_DeferredLighting and
-// also read by Render_DeferredTransparentLighting_Tile. Both kernels
-// share the same per-frame setup (matTable, tileLights, view-space
-// projection params, scene); rebuilding it per pass would double the
-// per-frame setup cost. Defined in DeferredSurfaceKernel.cpp.
-extern DeferredLightingCtx g_deferredCtx;
 
 // Per-target override for an OFFSCREEN deferred bake (mirror-shard
 // reflections): when passed to Render_DeferredLighting, every render-target /

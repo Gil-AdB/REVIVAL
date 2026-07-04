@@ -141,14 +141,13 @@ static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, flo
 //     per-vertex fog from TheOtherBarry and would double-fog otherwise.
 //   zEnc == 0 — no opaque pixel (sky-cube background, or empty Z).
 //     Sky already represents infinite distance; don't fog it.
-static void Render_DeferredFogPass_Tile(int x1, int y1, int x2, int y2,
+static void Render_DeferredFogPass_Tile(const DeferredLightingCtx &ctx,
+                                         int x1, int y1, int x2, int y2,
                                          float invFZP)
 {
 	// Render-target state from the per-frame ctx (populated by
 	// Render_DeferredLighting, which runs before any volumetric pass — see
 	// renderFrame order). Locals shadow the globals so the body is untouched.
-	// (g_deferredCtx is still file-scope; param-threading lands with renderFrame.)
-	const DeferredLightingCtx &ctx = g_deferredCtx;
 	const int XRes = ctx.xres;
 	byte *const VPage = ctx.vpage;
 	word *const ZPage16 = ctx.zpage16;
@@ -2720,7 +2719,7 @@ void Render_DeferredSkybox() {
     }
 }
 
-void Render_DeferredFogPass() {
+void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 	if (!CurScene || !(CurScene->Flags & Scn_Fogged)) return;
 	if (!g_gbuffer || !ZPage16 || !VPage) return;
 	const float invFZP = 1.0f / CurScene->FZP;
@@ -2730,11 +2729,11 @@ void Render_DeferredFogPass() {
 	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;
 	dispatchIndexed(numTilesX * numTilesY, nullptr,
-	    [tileSizeX, tileSizeY, invFZP](int t) {
+	    [&ctx, tileSizeX, tileSizeY, invFZP](int t) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
 		const int y1 = tileSizeY * j, y2 = std::min(y1 + tileSizeY, YRes);
 		const int x1 = tileSizeX * i, x2 = std::min(x1 + tileSizeX, XRes);
-		Render_DeferredFogPass_Tile(x1, y1, x2, y2, invFZP);
+		Render_DeferredFogPass_Tile(ctx, x1, y1, x2, y2, invFZP);
 		renderns::tileDone.release();
 	});
 	TailProf::drain(renderns::tileDone, numTilesX * numTilesY, "fog");
