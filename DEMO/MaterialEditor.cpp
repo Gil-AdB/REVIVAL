@@ -89,6 +89,8 @@ std::string Editor_GetSurfacesJSON()
 		appendNum(out, "parallaxScale",M->ParallaxScale);out += ",";
 		appendNum(out, "normalFlip",   fds::MaterialImport_GetNormalFlip(M)); out += ",";
 		out += M->NormalMap ? "\"hasNormalMap\":1," : "\"hasNormalMap\":0,";
+		out += (M->AoMap || (M->Flags & Mat_AoInAlpha)) ? "\"hasAoMap\":1," : "\"hasAoMap\":0,";
+		out += M->HeightMap ? "\"hasHeightMap\":1," : "\"hasHeightMap\":0,";
 		// Current UV mapping (as loaded / as last re-projected).
 		{
 			int proj = -1;   // -1 = unknown / not an image-mapped surface
@@ -696,6 +698,12 @@ std::string js_editorPick(float u, float v)
 	if (x < 0 || y < 0 || x >= XRes || y >= YRes) return "";
 	const size_t i = size_t(y) * size_t(XRes) + size_t(x);
 	if (i >= g_gbuffer->txtr.size()) return "";
+	// Pixels inside a mirror reflection carry a nonzero mirrorId — they show
+	// CLONE geometry (possibly of a surface behind you). Picking through the
+	// glass selected whatever happened to be reflected; reject instead.
+	if (!g_gbuffer->mirrorId.empty() && i < g_gbuffer->mirrorId.size()
+	    && g_gbuffer->mirrorId[i] != 0)
+		return "";
 	const unsigned mid = (g_gbuffer->txtr[i] >> 20) & 0xFF;
 	MatTable mt = Scene_GetMatTable(CurScene);
 	if (mid >= mt.count || !mt.data[mid] || !mt.data[mid]->Name) return "";

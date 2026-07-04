@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b48</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b49</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -653,7 +653,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b48); orbit/zoom embind =',
+        console.log('[editor] panel init (build b49); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -1416,10 +1416,18 @@
           var rg = EDITOR_RANGES[k] || [0,2];
           var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
           if (k === 'aoStrength') {
-            row.title = 'per-material AO-map strength (× global ao_map_strength). Only visible with an AO map + --ssao/--ao flags.';
+            row.title = 'per-material AO-map strength (x global ao_map_strength). Darkens the AMBIENT term only — subtle in direct-light-heavy scenes.';
+            if (!+s.hasAoMap) {
+              row.title = 'NO AO MAP on this surface — this dial does nothing until one is imported (ao role below).';
+              row.style.opacity = '0.45';
+            }
           }
           if (k === 'parallaxScale') {
-            row.title = 'per-material parallax depth (× global parallax_strength). Only visible with a height map + --parallax.';
+            row.title = 'per-material parallax depth (x global parallax_strength). Only visible with a height map + --parallax.';
+            if (!+s.hasHeightMap) {
+              row.title = 'NO HEIGHT MAP on this surface — this dial does nothing until one is imported (height role below).';
+              row.style.opacity = '0.45';
+            }
           }
           if (k === 'reflection') {
             row.title = 'env-specular reflection %. Renders when the env_refl render knob is ON (bakes a scene panorama at first use); persists to LWO/FLD.';

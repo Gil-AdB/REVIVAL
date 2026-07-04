@@ -510,6 +510,32 @@ static void editorMaybeSpawnInit()
 	});
 }
 
+// Mirror-clone meshes (GreetsMirror's "__mirrorClone_*" objects) duplicate
+// world geometry MIRRORED BEHIND the glass and reuse the base surface
+// names — any camera math that unions face/vertex positions by name must
+// skip them or the pivot lands between the real object and its phantom
+// reflection ("focus goes somewhere" with ?greets-mirror on).
+static bool editorMeshIsMirrorClone(const TriMesh *T)
+{
+	if (!CurScene) return false;
+	static const TriMesh *sCloneCache[64];
+	static int  sCloneCount = -1;
+	static const Scene *sCloneScene = nullptr;
+	if (sCloneScene != CurScene || sCloneCount < 0) {
+		sCloneScene = CurScene;
+		sCloneCount = 0;
+		for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
+			if (std::strncmp(Obj->Name, "__mirrorClone_", 14) != 0) continue;
+			if (sCloneCount < 64)
+				sCloneCache[sCloneCount++] = (const TriMesh *)Obj->Data;
+		}
+	}
+	for (int i = 0; i < sCloneCount; ++i)
+		if (sCloneCache[i] == T) return true;
+	return false;
+}
+
 // Auto-frame: world bbox of every mesh (RotMat·Pos + IPos — valid after the
 // first tick's Animate) → orbit pivot at the centre, distance to fit. Used by
 // scenes without a hand-tuned default pose (city/chase/fountain).
@@ -519,6 +545,7 @@ static void editorAutoFrame()
 	float lox = 1e30f, loy = 1e30f, loz = 1e30f, hix = -1e30f, hiy = -1e30f, hiz = -1e30f;
 	long n = 0;
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		if (editorMeshIsMirrorClone(T)) continue;
 		for (DWord v = 0; v < T->VIndex; ++v) {
 			Vector w;
 			MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
@@ -927,6 +954,7 @@ void editorFocusSurface(std::string name)
 	struct FBox { float lo[3], hi[3], c[3]; };
 	std::vector<FBox> boxes;
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		if (editorMeshIsMirrorClone(T)) continue;
 		for (DWord i = 0; i < T->FIndex; ++i) {
 			Face &F = T->Faces[i];
 			// Base-name match: floor's faces reference the "floor::mirUV"
