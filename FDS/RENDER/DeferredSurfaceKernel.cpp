@@ -698,7 +698,12 @@ static inline void EnvSpecComposeScalar(
 		// memoize per thread; the pow runs once per store per tile-run.
 		struct PullMemo { const fds::EnvPanoLinear* p; float cx, cy, cz;
 		                  float ex, ey, ez; };
-		static thread_local PullMemo sMemo = { nullptr, 0, 0, 0, 0, 0, 0 };
+		// 8-entry direct-mapped, pointer-hashed: adjacent buildings'
+		// stores interleave lane-to-lane across a tile row, and a single
+		// entry thrashed into a std::pow per PIXEL (measured as part of
+		// the 289 ms/iter city regression).
+		static thread_local PullMemo sMemoTab[8] = {};
+		PullMemo &sMemo = sMemoTab[(uintptr_t(envP) >> 6) & 7];
 		if (sMemo.p != envP || sMemo.cx != ctx.cameraWorldX
 		    || sMemo.cy != ctx.cameraWorldY || sMemo.cz != ctx.cameraWorldZ) {
 			const float bx = envP->bakeX, by = envP->bakeY, bz = envP->bakeZ;
@@ -2685,6 +2690,17 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const bool   quarter      = deferredLightingQuarterEnabled();
 	const bool   checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool   specGlobalOn = Specular_Factor > 0.0f;
+	// Env-specular state (--env_refl): OuterVec had NO env compose at all —
+	// --env_refl was silently inert on every PreferOuterVec scene (city).
+	// Env lanes ride the existing spec/water per-lane scalar fallback, which
+	// is where the shared EnvSpecComposeScalar is invoked (wave-1 parity).
+	// envTabG == null (env off) → lane_envP stays null → needsScalar mask
+	// unchanged → byte-identical to the pre-env kernel by construction.
+	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
+	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
+	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
+	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
+	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const TileLights &tl = ctx.tileLights[tileIndex];
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
 	const float  ambG_sc = float(ctx.Sc->Ambient.G);
@@ -2701,6 +2717,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	alignas(32) float    lane_gloss[8];
 	alignas(32) uint32_t lane_wantSpec[8];
 	alignas(32) uint32_t lane_isWater[8];
+	const fds::EnvPanoLinear* lane_envP[8];
+	alignas(32) uint32_t lane_hasEnv[8];
 	// Per-lane mirror id, widened uint8→uint32 once per 8-pixel block.
 	// The omni loop builds a per-lane mask against broadcast(tl.mirrorId[n]).
 	alignas(32) uint32_t lane_mirrorId[8];
@@ -2801,6 +2819,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
+					lane_envP[k] = nullptr; lane_hasEnv[k] = 0;
 					continue;
 				}
 				const uint32_t m = lane_mat32[k];
@@ -2816,6 +2835,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
+					lane_envP[k] = nullptr; lane_hasEnv[k] = 0;
 					continue;
 				}
 				const dword *texData = (const dword*)Mat->Txtr->Mipmap[mip];
@@ -2827,6 +2847,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
+					lane_envP[k] = nullptr; lane_hasEnv[k] = 0;
 					continue;
 				}
 				const dword tx = texData[uv];
@@ -2843,6 +2864,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				lane_gloss[k]   = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
 				lane_wantSpec[k]= (Mat->Specular > 0.0f && specGlobalOn) ? 0xFFFFFFFFu : 0u;
 				lane_isWater[k] = (int(matID) == ctx.waterMatID) ? 0xFFFFFFFFu : 0u;
+				// Env-specular lane (wave-1 gate parity: Reflection > 0 or a
+				// metal map). Joins the scalar fallback below.
+				lane_envP[k] = (envTabG && (Mat->Reflection > 0.0f
+				               || (metalMapOnG && Mat->MetallicMap)))
+				               ? envTabG[matID] : nullptr;
+				lane_hasEnv[k] = lane_envP[k] ? 0xFFFFFFFFu : 0u;
 				any_alive = true;
 			}
 			if (!any_alive) continue;
@@ -3192,6 +3219,35 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					float fdBs = lane_texB[k] * lBs * (1.0f / 256.0f);
 					float fdGs = lane_texG[k] * lGs * (1.0f / 256.0f);
 					float fdRs = lane_texR[k] * lRs * (1.0f / 256.0f);
+					// Env-specular compose (--env_refl): same shared helper +
+					// same position as wave-1 (after analytic spec, before the
+					// water blend). Third consumer of EnvSpecComposeScalar.
+					if (lane_envP[k]) {
+						const uint32_t m_   = lane_mat32[k];
+						const uint32_t mid_ = (m_ >> 20) & 0xFF;
+						const uint32_t mip_ = (m_ >> 28) & 0xF;
+						const uint32_t suv_ = m_ & 0xFFFFF;
+						Material *Mat_ = ctx.matTable.data[mid_];
+						float metalM_ = 0.0f;
+						if (metalMapOnG && Mat_->MetallicMap) {
+							const byte *md_ = (mip_ < Mat_->MetallicMap->numMipmaps)
+								? reinterpret_cast<const byte*>(Mat_->MetallicMap->Mipmap[mip_]) : nullptr;
+							if (md_) metalM_ = float(md_[suv_]) * (1.0f/255.0f);
+						}
+						const float swx_ = ctx.viewToWorld[0][0]*xs + ctx.viewToWorld[0][1]*ys
+						                 + ctx.viewToWorld[0][2]*zs + ctx.cameraWorldX;
+						const float swy_ = ctx.viewToWorld[1][0]*xs + ctx.viewToWorld[1][1]*ys
+						                 + ctx.viewToWorld[1][2]*zs + ctx.cameraWorldY;
+						const float swz_ = ctx.viewToWorld[2][0]*xs + ctx.viewToWorld[2][1]*ys
+						                 + ctx.viewToWorld[2][2]*zs + ctx.cameraWorldZ;
+						EnvSpecComposeScalar(ctx, lane_envP[k], Mat_, mip_, suv_,
+						                     xs, ys, zs, nxs, nys, nzs,
+						                     swx_, swy_, swz_,
+						                     lane_texB[k], lane_texG[k], lane_texR[k],
+						                     lane_gloss[k], metalM_,
+						                     roughMapOnG, envReflGainG,
+						                     sBs, sGs, sRs);
+					}
 					outB = int(fdBs) + int(sBs);
 					outG = int(fdGs) + int(sGs);
 					outR = int(fdRs) + int(sRs);
@@ -3205,6 +3261,42 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					outB = int(vfB[k]);
 					outG = int(vfG[k]);
 					outR = int(vfR[k]);
+					// Env-only lane (Reflection > 0, no spec, not water —
+					// city windows): the vec light loop already produced the
+					// diffuse; add ONLY the env-specular compose on top.
+					// Same shared helper + insertion point as wave-1; forcing
+					// these lanes through the full scalar-light redo instead
+					// measured 289 ms/iter on city (vs ~77 baseline) for
+					// nothing — the redo duplicated the vec loop's work.
+					if (lane_envP[k]) {
+						const uint32_t m_   = lane_mat32[k];
+						const uint32_t mid_ = (m_ >> 20) & 0xFF;
+						const uint32_t mip_ = (m_ >> 28) & 0xF;
+						const uint32_t suv_ = m_ & 0xFFFFF;
+						Material *Mat_ = ctx.matTable.data[mid_];
+						float metalM_ = 0.0f;
+						if (metalMapOnG && Mat_->MetallicMap) {
+							const byte *md_ = (mip_ < Mat_->MetallicMap->numMipmaps)
+								? reinterpret_cast<const byte*>(Mat_->MetallicMap->Mipmap[mip_]) : nullptr;
+							if (md_) metalM_ = float(md_[suv_]) * (1.0f/255.0f);
+						}
+						const float xs = ax[k], ys = ay[k], zs = az_lane[k];
+						const float swx_ = ctx.viewToWorld[0][0]*xs + ctx.viewToWorld[0][1]*ys
+						                 + ctx.viewToWorld[0][2]*zs + ctx.cameraWorldX;
+						const float swy_ = ctx.viewToWorld[1][0]*xs + ctx.viewToWorld[1][1]*ys
+						                 + ctx.viewToWorld[1][2]*zs + ctx.cameraWorldY;
+						const float swz_ = ctx.viewToWorld[2][0]*xs + ctx.viewToWorld[2][1]*ys
+						                 + ctx.viewToWorld[2][2]*zs + ctx.cameraWorldZ;
+						float sBs = 0, sGs = 0, sRs = 0;
+						EnvSpecComposeScalar(ctx, lane_envP[k], Mat_, mip_, suv_,
+						                     xs, ys, zs, anx[k], any_l[k], anz[k],
+						                     swx_, swy_, swz_,
+						                     lane_texB[k], lane_texG[k], lane_texR[k],
+						                     lane_gloss[k], metalM_,
+						                     roughMapOnG, envReflGainG,
+						                     sBs, sGs, sRs);
+						outB += int(sBs); outG += int(sGs); outR += int(sRs);
+					}
 				}
 				if (outB > 255) outB = 255; if (outB < 0) outB = 0;
 				if (outG > 255) outG = 255; if (outG < 0) outG = 0;
