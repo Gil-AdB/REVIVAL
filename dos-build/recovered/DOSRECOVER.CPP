@@ -53,10 +53,12 @@ extern "C" void Grid_Texture_MapASM(char *Texture,GridPoint *Points,char *VirScr
 // from its .LST (visually identical, just no MMX acceleration). ----
 void Grid_Texture_Mapper_320(GridPoint *GP,Image *Img,DWord *DAC)
 {
+  WobPointsHeight = YRes >> 3;    // ScreenHeight/8 — the ASM's row-loop count
   Grid_Texture_MapASM((char *)Img->Data,GP,(char *)DAC);
 }
 
 void Grid_Texture_Mapper_MMX(GridPoint *GP,Image *Img,DWord *DAC)
 {
+  WobPointsHeight = YRes >> 3;
   Grid_Texture_MapASM((char *)Img->Data,GP,(char *)DAC);
 }
