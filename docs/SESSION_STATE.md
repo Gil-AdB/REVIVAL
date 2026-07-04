@@ -68,48 +68,35 @@ fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
 OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
 still shadows the merged pinned 512KB one — user to decide.
 
-## STEP 5 UNIT: parallel mirror-RTT slots — SHIPPED opt-in, residual OPEN (2026-07-04)
+## STEP 5 UNIT: parallel mirror-RTT slots — DONE + DEFAULT ON (2026-07-04)
 
-STATUS: fan implemented + committed (bdeacfe prepass, 2206d49 HdrTarget
-override infra, cbc9220 the fan). DEFAULT SERIAL (byte-exact); the fan is
---mirror-rtt-parallel, OFF, because of an unresolved residual.
+SHIPPED, default-on, byte-identical to serial. RenderSecondOrderMirrors'
+deferred RTT bakes fan across the pool (ShardWorker pattern: per-worker
+camCtx/faces/scratch/gb/lights/tileLights/HDR target). Commits:
+bdeacfe (prepass hoist), 2206d49 (HdrTarget override), cbc9220 (fan),
+54a9d50 (THE fix), fc66664 (mirrortest cone + gate invariant),
+3cf9456 (default-on).
 
-RESIDUAL (the one thing left): at t=700 teleporter, the m1->m4 reflected
-panel differs from serial ~1600px screen / ~1870px in the 64² slot
-(max 58/137), surviving single-worker (FDS_MIRROR_RTT_P1=1, so NOT a race).
-DIAGNOSIS (probed 2026-07-04, all via the RTT dump kit + a transient
-pre-cone surf-checksum + ov.cam field print):
-  * Slot Z16, mat32, normal, lightmapMF, lightmapST planes: byte-IDENTICAL
-    to serial. So transform+clip+raster+gbuffer match EXACTLY.
-  * ov.cam fields (fovX/fovY/cntrEX/cntrEY/zScale/nearZ/cntrX/cntrY) +
-    dctx.viewToWorld[0][0]: byte-IDENTICAL between serial (ov.cam=
-    &g_mainCamera) and fan (ov.cam=&w.camCtx).
-  * The LIT SURFACE CHECKSUM DIFFERS *before cones run* (pre-cone surf
-    f174..bca serial vs 8d63..77e parallel). So the divergence is INSIDE
-    Render_DeferredLighting's per-pixel lighting, NOT cones/HDR/tonemap.
-  P=1 + same tick thread → thread-locals identical. RULED OUT: geometry,
-  camera, all gbuffer planes, cones, HDR resolve, threading, vertex scratch.
-  * ViewLightsSoA (ov->lights, ALL arrays incl sinOuter/forceCone/mirN*):
-    byte-IDENTICAL. mirrorMask empty in BOTH RTT gbuffers → clone-cull
-    symmetric. numLights=117 both.
-  ROOT LOCALIZED to buildTileLightLists OUTPUT: the per-tile light lists
-  differ (1760 vs 1592 light-tile entries; listHash differs) while
-  depthHash (tile zMin/zMax), emptyTiles(32), zcull/conecull flags,
-  camCtx (fovX/fovY/cntrEX/cntrEY probed), and every SoA field it reads
-  are ALL byte-identical. NOT the per-pixel loop and NOT the quarter-fill
-  (full-rate --no-deferred-quarter still diverges, same 36x58 region).
-  buildTileLightLists is a PURE fn of those inputs → the difference can
-  only be (a) its file-static chunk[]/sContribThr (recomputed each call
-  from identical data — shouldn't differ), or (b) per-worker buffer
-  aliasing/OOB write clobbering tileLights/chunk between the depth-bounds
-  fill and the light assignment. NEXT: dump per-tile .count for ser vs
-  P=1, find the differing tile(s), trace that tile's zCull/coneCull
-  rejections (add the reject-reason counter). Needs a debugger-grade
-  session, NOT bounded probes. Prize ~1-1.3ms of ~42ms, DEFAULT-OFF.
-  RECOMMENDATION: leave opt-in; the fan + HdrTarget infra are committed
-  and correct-by-construction; only this buildTileLightLists divergence
-  gates default-on. Same slot both (m1->m4, only active RTT at t=700).
-Perf prize when closed: ~1.0-1.3ms at ts=491 (serial RTT is 1.77-1.85ms).
+ROOT CAUSE (the "wrong with doubly-reflected mirrors + cones" bug, user-
+pinned): tileChunkSphere() — used ONLY by the spot-cone cull, in
+buildTileLightLists AND the volumetric cone binning — read the GLOBAL
+FOVX/FOVY/CntrEX/CntrEY instead of the render camera. Serial stamped
+those globals from the RTT camera (correct by accident); the fan uses
+per-worker camCtx and never touches globals → tileChunkSphere used the
+MAIN camera's projection → cone cull mis-culled spots in the reflection
+(1592 vs 1760 light-tile entries). FIX: pass the projection explicitly.
+Companion: buildTileLightLists' chunk[] was a file-static → cross-worker
+race; made per-call local. Diagnosis lesson: every PASSED input was
+byte-identical (gbuffer/camera/lightSoA/depth) — the bug was a global
+read that bypassed the parameters, invisible to input-checksumming; the
+tileLights-output checksum (1760 vs 1592) + the cone hint cracked it.
+
+VALIDATION: P=1 byte-exact; N-worker deterministic + serial-matching (7
+runs); warm corridor t=1800/1900/2014 exact vs FDS_MIRROR_RTT_SERIAL;
+TSan-clean; render gate 'rtt-parallel' invariant (FDS_MIRRORTEST_SPOT
+forced-cone beam in the RTT reflection, non-vacuous). PERF: serial RTT
+~1.9→1.7ms ts=491, ~1.0→0.7ms event window (scales with panel count).
+FDS_MIRROR_RTT_SERIAL=1 = A/B escape.
 
 --- original design notes below ---
 
