@@ -63,10 +63,14 @@ run_halo() {
 # the tileChunkSphere-reads-globals bug corrupted (serial worked by
 # accident; the fan used the main camera's projection → mis-culled spots).
 # Regression guard for commit 54a9d50.
+# NB: the serial leg MUST force FDS_MIRROR_RTT_SERIAL=1 — mirror_rtt_parallel
+# defaults ON since 3cf9456, so a flagless run is parallel and the check
+# would silently compare parallel to parallel.
 run_rtt_parallel_invariant() {
   local ser par
   rm -f /tmp/mt_view_*.ppm
-  FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest \
+  FDS_MIRROR_RTT_SERIAL=1 FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 \
+    ./DEMO --scene-mirrortest \
     --mirror-rtt --shard-deferred --hdr >/dev/null 2>&1
   ser=$(md5_of /tmp/mt_view_*.ppm)
   rm -f /tmp/mt_view_*.ppm
