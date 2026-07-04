@@ -1,0 +1,19 @@
+# Derived DOS build/run artifacts — reproducible from Original/dos-rev/.
+# Track only the reconstructed build scripts + this dir's README.
+runtime/
+rev/
+*.OBJ
+*.obj
+*.EXE
+*.exe
+*.LIB
+*.lib
+*.LOG
+*.log
+!build/**/*.sh
+ow/
+rev-build/
+_build/
+smoke/
+runtime-m8d/
+*.patch.orig

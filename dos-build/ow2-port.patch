@@ -1,0 +1,512 @@
+Binary files /Users/gil-ad/work/revival/Original/dos-rev/.DS_Store and rev-build/.DS_Store differ
+Binary files /Users/gil-ad/work/revival/Original/dos-rev/FDS/.DS_Store and rev-build/FDS/.DS_Store differ
+Binary files /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/.DS_Store and rev-build/FDS/SOURCE/.DS_Store differ
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/3DS/3DS_READ.CPP rev-build/FDS/SOURCE/3DS/3DS_READ.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/3DS/3DS_READ.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/3DS/3DS_READ.CPP	2026-07-04 20:19:00
+@@ -5,9 +5,9 @@
+ #include <DOS.H>
+ #include <StdIO.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ #include "I_Defs.H"
+ 
+ #include "FUtils.CPP"
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/CAMERAS/CAMERAS.CPP rev-build/FDS/SOURCE/CAMERAS/CAMERAS.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/CAMERAS/CAMERAS.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/CAMERAS/CAMERAS.CPP	2026-07-04 20:19:00
+@@ -4,9 +4,9 @@
+ #include <StdLib.H>
+ #include <StdIO.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ Camera      * View;
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/DPMI/DPMI.CPP rev-build/FDS/SOURCE/DPMI/DPMI.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/DPMI/DPMI.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/DPMI/DPMI.CPP	2026-07-04 20:19:00
+@@ -21,9 +21,9 @@
+ #include <StdLib.H>
+ #include <StdIO.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ 
+ Module_MB *DPMI_Core;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/DPMI/STUPDPMI.CPP rev-build/FDS/SOURCE/DPMI/STUPDPMI.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/DPMI/STUPDPMI.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/DPMI/STUPDPMI.CPP	2026-07-04 20:19:00
+@@ -8,9 +8,9 @@
+ #include <StdLib.H>
+ #include <StdIO.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ 
+ long Free_Memory(void)
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FDS_VARS.H rev-build/FDS/SOURCE/FDS_VARS.H
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FDS_VARS.H	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FDS_VARS.H	2026-07-04 20:19:00
+@@ -440,7 +440,7 @@
+   _Shot_ *Prev,*Next; //Linked list
+ } Shot;
+ 
+-extern "C" MMXState;
++extern "C" int MMXState;
+ 
+ extern char G_String[256]; //General string.
+ 
+@@ -657,7 +657,7 @@
+ 
+ // ISR variables and structures
+ const long Rate_Div = 1193180;
+-const Basic_Rate = 0xFFFF;
++const long Basic_Rate = 0xFFFF;
+ extern long Timer,Old_Int_Count,Old_Int_Rate;
+ extern char Keyboard[128];
+ 
+@@ -916,13 +916,13 @@
+ 
+ void RoundToInt(long *dest, float val);
+ #pragma aux RoundToInt=\
+-	"fistp DWORD [eax]"\
++	"fistp DWORD PTR [eax]"\
+ 	parm nomemory [eax] [8087]\
+ 	modify exact [eax 8087];
+ 
+ void RoundToDW(DWord *dest, float val);
+ #pragma aux RoundToDW=\
+-	"fistp DWORD [eax]"\
++	"fistp DWORD PTR [eax]"\
+ 	parm nomemory [eax] [8087]\
+ 	modify exact [eax 8087];
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/FILLERS.CPP rev-build/FDS/SOURCE/FILLERS/FILLERS.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/FILLERS.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FILLERS/FILLERS.CPP	2026-07-04 20:19:00
+@@ -5,9 +5,9 @@
+ #include <Math.H>
+ 
+ 
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
+-#include "..\FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
++#include "../FDS_Defs.H"
+ 
+ void Draw_Line_8Bit(Vertex *V1,Vertex *V2)
+ {
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/GOURMMX.ASM rev-build/FDS/SOURCE/FILLERS/GOURMMX.ASM
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/GOURMMX.ASM	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FILLERS/GOURMMX.ASM	2026-07-04 20:16:50
+@@ -1,4 +1,5 @@
+ .586p
++.mmx
+ _DATA   SEGMENT PARA PUBLIC 'DATA'
+ align 16
+ MMXTemp			dq  0
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/GOURMMXT.ASM rev-build/FDS/SOURCE/FILLERS/GOURMMXT.ASM
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/GOURMMXT.ASM	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FILLERS/GOURMMXT.ASM	2026-07-04 20:16:50
+@@ -1,4 +1,5 @@
+ .586p
++.mmx
+ _DATA   SEGMENT PARA PUBLIC 'DATA'
+ align 16
+ MMXTemp			dq  0
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/SCALEMMX.ASM rev-build/FDS/SOURCE/FILLERS/SCALEMMX.ASM
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FILLERS/SCALEMMX.ASM	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FILLERS/SCALEMMX.ASM	2026-07-04 20:16:50
+@@ -1,4 +1,5 @@
+ .586p
++.mmx
+ _DATA   SEGMENT DWORD PUBLIC 'DATA'
+ align 4
+ du          dd  0
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_CONV.CPP rev-build/FDS/SOURCE/FLD/FLD_CONV.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_CONV.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FLD/FLD_CONV.CPP	2026-07-04 20:19:00
+@@ -10,9 +10,9 @@
+ #include <STRING.H>
+ #include <MATH.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ #include "LWRead.H"
+ #include "FLD_Read.H"
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_MAT.CPP rev-build/FDS/SOURCE/FLD/FLD_MAT.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_MAT.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FLD/FLD_MAT.CPP	2026-07-04 20:19:00
+@@ -10,9 +10,9 @@
+ #include <STRING.H>
+ #include <MATH.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ #include "LWRead.H"
+ #include "FLD_Read.H"
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_READ.CPP rev-build/FDS/SOURCE/FLD/FLD_READ.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FLD/FLD_READ.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FLD/FLD_READ.CPP	2026-07-04 20:23:10
+@@ -10,9 +10,9 @@
+ #include <STRING.H>
+ #include <MATH.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ #include "LWRead.H"
+ #include "FLD_READ.H"
+@@ -183,7 +183,7 @@
+ 	for (i=0;i<Obj->NumOfFaces;i++)
+ 	{
+ 		fread(&Obj->Faces[i].FaceVerts,1,2,FLD);
+-		Obj->Faces[i].Verts=new short[Obj->Faces[i].FaceVerts];
++		Obj->Faces[i].Verts=new unsigned short[Obj->Faces[i].FaceVerts];
+ 		for (j=0;j<Obj->Faces[i].FaceVerts;j++)
+ 			fread(&Obj->Faces[i].Verts[j],1,2,FLD);
+ 		fread(&Obj->Faces[i].Surface,1,2,FLD);
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FRUSTRUM/FRUSTRUM.CPP rev-build/FDS/SOURCE/FRUSTRUM/FRUSTRUM.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/FRUSTRUM/FRUSTRUM.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/FRUSTRUM/FRUSTRUM.CPP	2026-07-04 20:19:00
+@@ -1,9 +1,9 @@
+ #include <StdIO.H>
+ #include <StdLIB.H>
+ 
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
+-#include "..\FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
++#include "../FDS_Defs.H"
+ 
+ float FOVX,FOVY;
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGCODE/IMGCODE.CPP rev-build/FDS/SOURCE/IMGCODE/IMGCODE.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGCODE/IMGCODE.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/IMGCODE/IMGCODE.CPP	2026-07-04 20:19:00
+@@ -5,9 +5,9 @@
+ #include <IO.H>
+ #include <String.H>
+ 
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
+-#include "..\FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
++#include "../FDS_Defs.H"
+ 
+ Material * MatLib = NULL; // Internal Material Library. This is global for
+                    // all Scenes.
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGGENR/IMGGENR.CPP rev-build/FDS/SOURCE/IMGGENR/IMGGENR.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGGENR/IMGGENR.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/IMGGENR/IMGGENR.CPP	2026-07-04 20:19:00
+@@ -8,9 +8,9 @@
+ 
+ 
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ DWord WOBPOINTSHEIGHT;
+ Material Flare_IR,Flare_IG,Flare_IB;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGPROC/IMGPROC.CPP rev-build/FDS/SOURCE/IMGPROC/IMGPROC.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/IMGPROC/IMGPROC.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/IMGPROC/IMGPROC.CPP	2026-07-04 20:19:00
+@@ -10,9 +10,9 @@
+ #include <Time.H>
+ 
+ 
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
+-#include "..\FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
++#include "../FDS_Defs.H"
+ 
+ struct Four_C
+ {
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/ISR/ISR.CPP rev-build/FDS/SOURCE/ISR/ISR.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/ISR/ISR.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/ISR/ISR.CPP	2026-07-04 20:19:00
+@@ -4,9 +4,9 @@
+ #include <DOS.H>
+ 
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ //Externals
+ long Timer,Old_Int_Count,Old_Int_Rate;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MATH/MATH.CPP rev-build/FDS/SOURCE/MATH/MATH.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MATH/MATH.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/MATH/MATH.CPP	2026-07-04 20:19:00
+@@ -9,9 +9,9 @@
+ #include <Math.H>
+ #include <StdIO.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ //Externals
+ float SinTab[1440];
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MDSPLAY/MDSPLAY.CPP rev-build/FDS/SOURCE/MDSPLAY/MDSPLAY.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MDSPLAY/MDSPLAY.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/MDSPLAY/MDSPLAY.CPP	2026-07-04 20:19:00
+@@ -7,9 +7,9 @@
+ 
+ #include "MidasDLL.H"
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ #pragma aux SetText =\
+ "mov ax,3"\
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/MOUSE.CPP rev-build/FDS/SOURCE/MISC/MOUSE.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/MOUSE.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/MISC/MOUSE.CPP	2026-07-04 20:19:00
+@@ -6,9 +6,9 @@
+ #include <DOS.H>
+ #include <i86.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ static long M_x,M_y;
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/PREPROC.CPP rev-build/FDS/SOURCE/MISC/PREPROC.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/PREPROC.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/MISC/PREPROC.CPP	2026-07-04 20:19:00
+@@ -7,9 +7,9 @@
+ #include <i86.H>
+ #include <Time.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ 
+ #pragma aux REPSTDW=\
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/TABLES.CPP rev-build/FDS/SOURCE/MISC/TABLES.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/MISC/TABLES.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/MISC/TABLES.CPP	2026-07-04 20:19:00
+@@ -4,9 +4,9 @@
+ #include <ConIO.H>
+ #include <Math.H>
+ 
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
+-#include "..\FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
++#include "../FDS_Defs.H"
+ 
+ float _t_fxfl;
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/PCLSYS/PCLSYS.CPP rev-build/FDS/SOURCE/PCLSYS/PCLSYS.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/PCLSYS/PCLSYS.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/PCLSYS/PCLSYS.CPP	2026-07-04 20:19:00
+@@ -3,9 +3,9 @@
+ #include <StdLib.H>
+ #include <String.H>
+ 
+-#include "Source\FDS_Defs.H"     // Definitions
+-#include "Source\FDS_Vars.H"     // Variables and structures
+-#include "Source\FDS_Decs.H"     // Declarations
++#include "Source/FDS_Defs.H"     // Definitions
++#include "Source/FDS_Vars.H"     // Variables and structures
++#include "Source/FDS_Decs.H"     // Declarations
+ 
+ // Explosion related particles, not associated with scene.
+ Particle *ExpPcls;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/RENDER/RENDER.CPP rev-build/FDS/SOURCE/RENDER/RENDER.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/RENDER/RENDER.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/RENDER/RENDER.CPP	2026-07-04 20:19:00
+@@ -9,9 +9,9 @@
+ #include <DOS.H>
+ #include <Time.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ Scene *CurScene;
+ Face **FList;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/V3D/V3D_READ.CPP rev-build/FDS/SOURCE/V3D/V3D_READ.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/V3D/V3D_READ.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/V3D/V3D_READ.CPP	2026-07-04 20:19:00
+@@ -5,9 +5,9 @@
+ #include <StdIO.H>
+ 
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ TriMesh *V3D_Object;
+ FILE *V3D_Mesh;
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/VESA/VESA.CPP rev-build/FDS/SOURCE/VESA/VESA.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/FDS/SOURCE/VESA/VESA.CPP	2026-04-21 11:45:09
++++ rev-build/FDS/SOURCE/VESA/VESA.CPP	2026-07-04 20:19:00
+@@ -10,9 +10,9 @@
+ #include <DOS.H>
+ #include <Math.H>
+ 
+-#include "..\FDS_Defs.H"
+-#include "..\FDS_Vars.H"
+-#include "..\FDS_Decs.H"
++#include "../FDS_Defs.H"
++#include "../FDS_Vars.H"
++#include "../FDS_Decs.H"
+ 
+ #include "VESA.H"
+ 
+Binary files /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/.DS_Store and rev-build/REVIVAL/.DS_Store differ
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/FDS_VARS.H rev-build/REVIVAL/FDS_VARS.H
+--- /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/FDS_VARS.H	2026-04-21 11:45:09
++++ rev-build/REVIVAL/FDS_VARS.H	2026-07-04 20:19:00
+@@ -450,7 +450,7 @@
+   _Shot_ *Prev,*Next; //Linked list
+ } Shot;
+ 
+-extern "C" MMXState;
++extern "C" int MMXState;
+ 
+ extern char G_String[256]; //General string.
+ 
+@@ -677,7 +677,7 @@
+ 
+ // ISR variables and structures
+ const long Rate_Div = 1193180;
+-const Basic_Rate = 0xFFFF;
++const long Basic_Rate = 0xFFFF;
+ extern long Timer,Old_Int_Count,Old_Int_Rate;
+ extern char Keyboard[128];
+ 
+@@ -936,13 +936,13 @@
+ 
+ void RoundToInt(long *dest, float val);
+ #pragma aux RoundToInt=\
+-	"fistp DWORD [eax]"\
++	"fistp DWORD PTR [eax]"\
+ 	parm nomemory [eax] [8087]\
+ 	modify exact [eax 8087];
+ 
+ void RoundToDW(DWord *dest, float val);
+ #pragma aux RoundToDW=\
+-	"fistp DWORD [eax]"\
++	"fistp DWORD PTR [eax]"\
+ 	parm nomemory [eax] [8087]\
+ 	modify exact [eax 8087];
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/FOUNTAIN.CPP rev-build/REVIVAL/FOUNTAIN.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/FOUNTAIN.CPP	2026-04-21 11:45:09
++++ rev-build/REVIVAL/FOUNTAIN.CPP	2026-07-04 20:23:11
+@@ -597,7 +597,8 @@
+ 	{
+ 		if (M->RelScene != FntSc) continue;
+ 		if (!M->Txtr) continue;
+-		for(Material *Mat = MatLib;Mat!=M;Mat=Mat->Next)
++		Material *Mat;
++		for(Mat = MatLib;Mat!=M;Mat=Mat->Next)
+ 			if (M->Txtr==Mat->Txtr) break;
+ 		if (M!=Mat) continue;
+ 
+Binary files /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/SCENES/.DS_Store and rev-build/REVIVAL/SCENES/.DS_Store differ
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/SHIT.CPP rev-build/REVIVAL/SHIT.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/SHIT.CPP	2026-04-21 11:45:09
++++ rev-build/REVIVAL/SHIT.CPP	2026-07-04 20:19:00
+@@ -18,9 +18,9 @@
+ #include <String.H>
+ #include <Math.H>
+ 
+-#include "Source\FDS_Defs.H"     // Definitions
+-#include "Source\FDS_Vars.H"     // Variables and structures
+-#include "Source\FDS_Decs.H"     // Declarations
++#include "Source/FDS_Defs.H"     // Definitions
++#include "Source/FDS_Vars.H"     // Variables and structures
++#include "Source/FDS_Decs.H"     // Declarations
+ 
+ char *ModuleBuf;
+ 
+diff --color -ruN --exclude=_build --exclude=*.o --exclude=*.EXE /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/TEMP/FDS.CPP rev-build/REVIVAL/TEMP/FDS.CPP
+--- /Users/gil-ad/work/revival/Original/dos-rev/REVIVAL/TEMP/FDS.CPP	2026-04-21 11:45:09
++++ rev-build/REVIVAL/TEMP/FDS.CPP	2026-07-04 20:19:00
+@@ -18,9 +18,9 @@
+ #include <String.H>
+ #include <Math.H>
+ 
+-#include "Source\FDS_Defs.H"     // Definitions
+-#include "Source\FDS_Vars.H"     // Variables and structures
+-#include "Source\FDS_Decs.H"     // Declarations
++#include "Source/FDS_Defs.H"     // Definitions
++#include "Source/FDS_Vars.H"     // Variables and structures
++#include "Source/FDS_Decs.H"     // Declarations
+ 
+ char *ModuleBuf;
+ 
