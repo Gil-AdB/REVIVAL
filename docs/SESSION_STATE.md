@@ -37,9 +37,17 @@ Ranked list (full reasoning in the 2026-07-04 conversation + below):
    read as a 7ms regression = machine load — ALWAYS interleave).
    The legacy peel remains ONLY as the offscreen fallback + escape
    flag; deleting it outright needs an offscreen story first.
-4. ⬜ **#1 RenderContext migration slices 3-5** (RENDER_CONTEXT_PLAN.md) —
-   THE remaining campaign; unlocks RTT/shadow-raster parallelism, ends
-   the global-swap bug family. Start here next session.
+4. 🟨 **#1 RenderContext migration — the g_deferredCtx SINGLETON IS
+   DELETED (f6519c7 + 5a9967f)**. renderFrame's stack dctx is the only
+   source; every reader takes ctx by param (fog pass, legacy-peel
+   transparent wrappers, RenderXparClumpInStrip via TBR_Render's new
+   ctx pointer — null on forward TBR frames). Shadow locals renamed dc.
+   Byte-identical on 4 scenes + gate. REMAINING (plan steps 4-5, the
+   ~400-site mechanical campaign): thread XRes/VPage/FList/CAll/
+   CurScene into RenderContext function-by-function (leaf-first, gate
+   each), then per-instance pipelines for offscreen parallelism
+   (RTT/shadow-raster). See RENDER_CONTEXT_PLAN.md "Revised remaining
+   steps" 4-5.
 5. ✅ **#4 mirror system promoted to FDS/RENDER (1e26fc5)** —
    GreetsMirror + MirrorShatter + SpotlightCones moved wholesale (they
    were already parameterized); canonical PickFillerForMaterial now
