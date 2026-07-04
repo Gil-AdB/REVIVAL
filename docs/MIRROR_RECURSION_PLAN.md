@@ -26,32 +26,42 @@ Depth-3 would need A's clone of (B's clone of C's panel) — a clone-of-clone
 that doesn't exist (clones are one level); compound cloning was rejected
 (see [[mirror-order2-rtt-plan]]).
 
-## Chosen approach: recursive portal render
+## Chosen approach: recursive RTT (live, no precomputed slots)
 
-Replace the fixed order-1/order-2 split with one recursive reflected-view
-renderer, standard planar-mirror recursion:
+This IS the mirror-RTT mechanism — just driven by a recursion instead of a
+fixed order-2 pair list. Each real mirror panel is a portal that displays a
+render-to-texture of its reflected view; inside that texture, other panels
+show their one-level-deeper textures.
 
 ```
-renderReflected(camera, depth):
-    render scene from `camera` into the current target (its footprint region)
-    if depth == 0: return
-    for each mirror M visible in this view:
+renderView(camera, depth):
+    render scene from `camera`                       # into a texture (or fb region)
+    if depth == 0: return                            # deepest level: no more bounces
+    for each mirror panel M visible in this view:
         vcam = reflect(camera) across M.plane
-        set scissor/stencil to M's screen footprint in this target
-        renderReflected(vcam, depth-1)
-        composite (half-silvered: text + reflection/2 for glass panels)
+        renderView(vcam, depth-1)  ->  into M's RTT texture     # DEEPEST-FIRST
+        draw M's REAL panel showing that texture (masked to its footprint;
+        half-silvered composite = text + reflection/2 for glass)
 ```
 
-The main frame is `renderReflected(mainCam, N)`. Each level clips to the
-parent mirror's footprint (stencil or scissor + per-pixel mirrorId mask,
-which we already compute). Reflected-view culling reuses
+The main frame is `renderView(mainCam, N)`. Reflected-view culling reuses
 `g_offAxisFrustumCull` (asymmetric frusta) and the `SetCurrentScene`
 re-stamp discipline the RTT path already established.
 
-Why not extend slots: slot sequences up to length N explode combinatorially
-(4 mirrors, depth 4 → 256 slots) and the clone-of-clone geometry doesn't
-exist. A recursive render is O(mirrors^depth) *only for visible* mirrors,
-prunes naturally by footprint, and needs no precomputed geometry.
+**It forces render order — deepest-first — and that's the point.** A
+mirror's texture must be finished before the view that displays it, so the
+depth passes are serial (parallel only *within* a pass). A reflection cycle
+(A→B→A→…) has no fixed point, so we cut at depth N; the deepest level shows
+the base scene with no further reflection (today's "black hole" = depth 0).
+
+**Why not just extend the existing RTT slots:** the current RTT precomputes
+a slot per ordered PAIR (A,B) and displays it on CLONE-of-B geometry inside
+A. Depth 3 that way needs clone-of-clone geometry (doesn't exist), and
+per-path slots explode (4 mirrors × depth 4 → up to 256). Live recursive RTT
+computes the reflected cameras on the fly and displays on the REAL panels —
+nothing per-path to precompute; O(visible-mirrors^depth), footprint-pruned.
+Same machinery (OffscreenViewScope, off-axis projection, texture-per-panel
+that first-order RTT already uses), recursion-driven.
 
 ## Slices
 
