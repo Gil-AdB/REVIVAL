@@ -1956,7 +1956,16 @@ void TBR_Render(Scene *Sc)
 
 					Vertex* V = F->A;
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
-					dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+					// Far-plane clamp matches The_MMX_Scalar's immediate path
+					// ("support no far clipping on omnilights"): beyond FZP the
+					// raw encoding wraps negative and the sprite would WIN every
+					// per-pixel z-test instead of losing them (city's distant
+					// beacons drew over their towers).
+					dword Z;
+					if (V->TPos_AOS.z < C_FZP)
+						Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+					else
+						Z = 1;
 					// Texture-res dispatch: particles are 32×32 and tinted by
 					// their vertex lighting; omni FLARES (diverted here by
 					// The_MMX_Scalar for TBR scenes) carry 256×256 textures
@@ -1964,8 +1973,26 @@ void TBR_Render(Scene *Sc)
 					// the immediate-draw path (the omni V's LR/LG/LB are not
 					// maintained and would tint the flare black).
 					if (F->Txtr->Txtr->SizeX == 256) {
+						// Fogged scene: dim the flare by depth — same colorize
+						// the immediate path applies (city beacons at distance;
+						// without this the TBR flares pop full-brightness).
+						dword Col = 0xFFFFFF;
+						if (CurScene->Flags & Scn_Fogged) {
+							const float fogRate = 1.0f - V->TPos_AOS.z * C_rFZP;
+							const int32_t iFog = Fist(255.0f * fogRate);
+							Col = iFog + (iFog << 8) + (iFog << 16);
+						}
+						// Center-point occlusion reject (Face_PointZTest), as
+						// in the immediate path.
+						if (F->Flags & Face_PointZTest) {
+							int32_t cx = int32_t(V->PX);
+							if (cx < 0) cx = 0; else if (cx > XRes-1) cx = XRes-1;
+							int32_t cy = int32_t(V->PY);
+							if (cy < 0) cy = 0; else if (cy > YRes-1) cy = YRes-1;
+							if (Z <= ZPage16[XRes*cy + cx]) continue;
+						}
 						SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen,
-							F->Txtr->Txtr->Data, VPage, 0xFFFFFF, Z,
+							F->Txtr->Txtr->Data, VPage, Col, Z,
 							0, spriteClipY1, XRes, spriteClipY2);
 					} else {
 						dword R = V->LR, G = V->LG, B = V->LB;

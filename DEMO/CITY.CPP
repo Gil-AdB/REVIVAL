@@ -2453,6 +2453,17 @@ struct CityScene : SceneDriver {
 
 	void init() override {
 		SetCurrentScene(CitySc);
+		// Unified-TBR transparent path (same wiring as greets — see the
+		// comment in GreetsScene::init). City's consumers: the water grid
+		// (Mat_Transparent) + omni flares (street lamps, and the mirrored
+		// pass-1 lamps). Both render passes are main-res so the strips
+		// stay valid; each pass's TBR_Render flushes + clears its own
+		// inserts. Rain particles are compiled out (CITY_RAIN) — the old
+		// "dont use TBR for rain" concern doesn't apply.
+		if (fds::FeatureFlags::deferred_unified_tbr()) {
+			TBR_EnsureInit(CitySc, 256);
+			CitySc->Flags |= Scn_SpriteTBR;
+		}
 		Calibrate_FreeCamera_ForScene(CitySc->FZP, CitySc->CameraHead);
 
 		// get the reflective water surface object
@@ -2493,6 +2504,10 @@ struct CityScene : SceneDriver {
 		// ESC is now "exit demo" (handled by runSceneBlocking via
 		// g_shouldQuit); Backspace is "skip to next scene".
 		if (Keyboard[ScBackSpace] || Timer >= CTPartTime) return false;
+
+		// Mid-scene resize: keep the TBR strips tracking YRes (two
+		// compares when current — same pattern as greets).
+		if (CitySc->Flags & Scn_SpriteTBR) TBR_EnsureInit(CitySc, 256);
 
 		numFrames++;
 
