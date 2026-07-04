@@ -1982,7 +1982,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const bool hdrLinear = hdrBufReady && fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
 	// Procedural water composite (Stage B) — fresnel mix of a deep colour and the
 	// reflection underlay, for the water matID only. Hoisted; per-pixel fresnel below.
-	const bool  waterProcOn = fds::FeatureFlags::water_procedural();
+	// The fresnel deep-colour composite is a separate opt-out from the
+	// procedural field: chase keeps the field (ripple/glints/caustics)
+	// but takes the forward-style lit-texel blend (its night-sky
+	// reflection underlay is black, so the deep colour reads as a dark
+	// view-angle band — the "chase water dark band").
+	const bool  waterProcOn = fds::FeatureFlags::water_procedural() &&
+	                          fds::FeatureFlags::water_fresnel_composite();
 	const float wDeepB = fds::FeatureFlags::water_deep_b();
 	const float wDeepG = fds::FeatureFlags::water_deep_g();
 	const float wDeepR = fds::FeatureFlags::water_deep_r();

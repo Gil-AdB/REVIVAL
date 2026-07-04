@@ -1775,23 +1775,40 @@ void InsertTransparentToTBR(Face *F)
 	const float *tpos_z    = ff->TPos_z;
 	const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
 
-	// Screen-Y bounds from projected vertex coords.
-	const float pyA = PY[ai], pyB = PY[bi], pyC = PY[ci];
-	float y_min = pyA;
-	float y_max = pyA;
-	if (pyB < y_min) y_min = pyB;
-	if (pyB > y_max) y_max = pyB;
-	if (pyC < y_min) y_min = pyC;
-	if (pyC > y_max) y_max = pyC;
-
-	if (y_min >= YRes || y_max < 0) return;
+	// A vertex at/behind the near plane never went through projection, so
+	// its PY is stale/meaningless. A camera-straddling face (chase's giant
+	// un-tessellated water quad is the canonical case) would compute its
+	// strip span from that garbage and land in the wrong strips — the water
+	// inserted only ABOVE the horizon and vanished from the deferred frame.
+	// Span from PY is only trustworthy when all three verts project;
+	// otherwise insert into every strip and let the per-strip clipper
+	// raster trim exactly.
+	const float tzA = tpos_z[ai], tzB = tpos_z[bi], tzC = tpos_z[ci];
+	const bool straddlesNear = (tzA < 1.0f) || (tzB < 1.0f) || (tzC < 1.0f);
 
 	int32_t numTiles = CurScene->NumTiles;
-	int s_lo = Fist(y_min * rTILESIZE - 0.999999f);
-	int s_hi = Fist(y_max * rTILESIZE);
-	if (s_lo < 0) s_lo = 0;
-	if (s_hi >= numTiles) s_hi = numTiles - 1;
-	if (s_lo > s_hi) return;
+	int s_lo, s_hi;
+	if (straddlesNear) {
+		s_lo = 0;
+		s_hi = numTiles - 1;
+	} else {
+		// Screen-Y bounds from projected vertex coords.
+		const float pyA = PY[ai], pyB = PY[bi], pyC = PY[ci];
+		float y_min = pyA;
+		float y_max = pyA;
+		if (pyB < y_min) y_min = pyB;
+		if (pyB > y_max) y_max = pyB;
+		if (pyC < y_min) y_min = pyC;
+		if (pyC > y_max) y_max = pyC;
+
+		if (y_min >= YRes || y_max < 0) return;
+
+		s_lo = Fist(y_min * rTILESIZE - 0.999999f);
+		s_hi = Fist(y_max * rTILESIZE);
+		if (s_lo < 0) s_lo = 0;
+		if (s_hi >= numTiles) s_hi = numTiles - 1;
+		if (s_lo > s_hi) return;
+	}
 
 	// Per-face front-facing test (matches the rest of the xpar pipeline).
 	const float Ax = tpos_x[ai], Ay = tpos_y[ai], Az = tpos_z[ai];
@@ -1806,7 +1823,17 @@ void InsertTransparentToTBR(Face *F)
 	const bool front = vd < 0.0f;
 
 	float renderZ;
-	if (front) {
+	if (straddlesNear) {
+		// A camera-straddling face spans the whole depth range, so a
+		// painter's-order key from its near surface (negative/near-0 Z)
+		// would sort it on top of every sprite in the strip — chase's
+		// water would composite over the explosion flares forward draws
+		// on top of it. Use the far surface: the face renders first and
+		// sprites/flares layer over it, matching the forward Z-sort.
+		renderZ = Az;
+		if (Bz > renderZ) renderZ = Bz;
+		if (Cz > renderZ) renderZ = Cz;
+	} else if (front) {
 		// Near surface — min vertex Z. Sorts later (= rendered LATER
 		// = on top of farther stuff).
 		renderZ = Az;
