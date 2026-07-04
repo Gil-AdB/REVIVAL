@@ -333,6 +333,23 @@ void Run_CloakTest() {
         CalcPersp(&FC);
         View = &FC;
 
+        // 'G' (rising edge): dump the current camera pose as a ready-to-paste
+        // Pose{} line (eye + lookAt one unit along forward) so a break pose
+        // can be reproduced exactly headless (FDS_CLOAK_DUMP + add to poses[]).
+        {
+            static bool gPrev = false;
+            const bool gNow = Keyboard[ScG] != 0;
+            if (gNow && !gPrev) {
+                const Vector &e = FC.ISource;
+                const float fx = FC.Mat[2][0], fy = FC.Mat[2][1], fz = FC.Mat[2][2];
+                std::fprintf(stderr,
+                    "[CLOAK-POSE] { Vector(%.2ff,%.2ff,%.2ff), "
+                    "Vector(%.2ff,%.2ff,%.2ff), \"probe\" },  // fwd=(%.2f,%.2f,%.2f)\n",
+                    e.x, e.y, e.z, e.x+fx*10, e.y+fy*10, e.z+fz*10, fx, fy, fz);
+            }
+            gPrev = gNow;
+        }
+
         std::memset(VPage, 0, PageSize);
         std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
         Animate_Objects(cs.sc, View);
@@ -347,7 +364,7 @@ void Run_CloakTest() {
         }
         std::snprintf(msg, sizeof(msg),
                       "CLOAK  Cam=(%.1f,%.1f,%.1f)  mirrors:%zu rtt:%zu  "
-                      "WASD/QE move, arrows look, ESC exit",
+                      "WASD/QE move, arrows look, G=dump pose, ESC exit",
                       FC.ISource.x, FC.ISource.y, FC.ISource.z,
                       cs.mirrors.size(), cs.rttSlots.size());
         OutTextXY(VPage, 0, 0, msg, 255);
