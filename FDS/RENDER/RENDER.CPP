@@ -45,7 +45,7 @@ bool IsFrontFacingInViewSpace(const Face* F);
 // in DeferredCommon.h (included below).
 void Render_DeferredFogPass(const DeferredLightingCtx &ctx);
 // Full-res SSAO post-pass (DeferredSSAO.cpp). Gated on --ssao; no-op otherwise.
-void Render_SSAO();
+void Render_SSAO(const DeferredLightingCtx &ctx);
 void Render_EdgeAA(const DeferredLightingCtx &ctx);
 // Render_VolumetricCones declared in DeferredCommon.h (with its inlineDispatch arg).
 void Render_OmniHalos(const DeferredLightingCtx& ctx);
@@ -551,7 +551,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// water-reflection underlay passes (cost + the static AO scratch buffer
 		// isn't re-entrant). No-op unless --ssao.
 		if (!skipVolumetric)
-			Render_SSAO();
+			Render_SSAO(dctx);
 
 		// --ssao-debug self-isolation: Render_SSAO has written the greyscale AO
 		// term to VPage; STOP here so the downstream compositing (skybox, fog,

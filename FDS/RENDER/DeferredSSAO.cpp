@@ -53,6 +53,13 @@
 #include "RENDER/Hdr.h"
 #include "Threads.h"
 
+// RenderContext migration: this TU is GLOBAL-CLEAN — every render pass
+// reads its target/projection state from the DeferredLightingCtx param,
+// never from the engine globals. The poison makes the compiler enforce
+// it (any new use of these names in this file is a build error; read
+// ctx, or take a param).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+
 // Shared tile-drain semaphore (defined in DeferredFastFog.cpp). Reused here;
 // SSAO and fog never run concurrently, so sharing the counter is safe.
 namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
@@ -146,13 +153,13 @@ std::vector<float> g_aoRaw, g_aoBlur, g_aoZ;
 
 } // namespace
 
-void Render_SSAO() {
+void Render_SSAO(const DeferredLightingCtx &ctx) {
 	if (!fds::FeatureFlags::ssao()) return;
-	if (!g_gbuffer) return;
+	if (!ctx.gb) return;
 
-	const int    W = (int)XRes, H = (int)YRes;
+	const int    W = ctx.xres, H = ctx.yres;
 	const size_t N = size_t(W) * size_t(H);
-	if (g_gbuffer->normal.size() < N) return;        // gbuffer not sized (forward path)
+	if (ctx.gb->normal.size() < N) return;           // gbuffer not sized (forward path)
 
 	const auto t0 = std::chrono::steady_clock::now();
 
@@ -183,12 +190,12 @@ void Render_SSAO() {
 	if (g_aoBlur.size() < lowN) g_aoBlur.resize(lowN);
 	if (g_aoZ.size()    < lowN) g_aoZ.resize(lowN);
 
-	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
-	const float invFOVX = 1.0f / FOVX, invFOVY = 1.0f / FOVY;
-	const float fovX = FOVX, fovY = FOVY;
-	const float cx = CntrEX, cy = CntrEY;
-	const word*  zEnc = ZPage16;
-	const meka::u16* nrm = g_gbuffer->normal.data();
+	const float invZScale = (ctx.zscale != 0.0f) ? 1.0f / ctx.zscale : 1.0f;
+	const float invFOVX = 1.0f / ctx.fovX, invFOVY = 1.0f / ctx.fovY;
+	const float fovX = ctx.fovX, fovY = ctx.fovY;
+	const float cx = ctx.cntrEX, cy = ctx.cntrEY;
+	const word*  zEnc = ctx.zpage16;
+	const meka::u16* nrm = ctx.gb->normal.data();
 	const float* kx = g_kx.data(); const float* ky = g_ky.data(); const float* kz = g_kz.data();
 	float* aoRaw  = g_aoRaw.data();
 	float* aoBlur = g_aoBlur.data();
@@ -201,7 +208,7 @@ void Render_SSAO() {
 	// activation runs later. LDR: multiply VPage in place.
 	const bool useHdr = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(W, H);
 	fds::hdrf* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
-	dword* out  = reinterpret_cast<dword*>(VPage);
+	dword* out  = reinterpret_cast<dword*>(ctx.vpage);
 
 	constexpr int numTilesX = 6, numTilesY = 4;
 
