@@ -74,6 +74,14 @@ extern int g_deferredWaterMatID;
 #include <atomic>
 #include <semaphore>
 #include <climits>
+
+// RenderContext migration: this TU is GLOBAL-CLEAN — every render pass
+// reads its target/projection state from the DeferredLightingCtx param
+// (or, in the orchestrator, from the sanctioned MainRenderTargetFromGlobals
+// / fds::g_mainCamera accessors on the ov==nullptr path), never from the
+// engine globals. The poison makes the compiler enforce it (any new use
+// of these names in this file is a build error; read ctx, or take a param).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
@@ -671,12 +679,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 {
 	// Render-target addressing from ctx, not globals (RenderContext
 	// migration). Locals shadow the engine globals so the body is untouched.
-	const int XRes = ctx.xres;
-	byte *const VPage = ctx.vpage;
-	word *const ZPage16 = ctx.zpage16;
-	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const int xres = ctx.xres;
+	byte *const vpage = ctx.vpage;
+	word *const zpage16 = ctx.zpage16;
+	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
-	dword *out = reinterpret_cast<dword *>(VPage);
+	dword *out = reinterpret_cast<dword *>(vpage);
 	// Hoist mode/global queries once per tile — a `getenv()`-backed
 	// cached bool still costs a function call + load + test that the
 	// compiler can't see through the std::function/lambda boundary.
@@ -689,8 +697,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const bool profShadowCache = fds::FeatureFlags::shadow_prof_cache();
 	// HDR Phase 3 B1: route the opaque lit radiance into g_hdrBuf UNCLAMPED so
 	// bright surfaces bloom/roll-off at the tonemap instead of clipping at the
-	// 8-bit VPage. The composite reads this back (coverage flag in h[3]) rather
-	// than lifting the already-clamped VPage. Gated on hdr(): when off, no write,
+	// 8-bit vpage. The composite reads this back (coverage flag in h[3]) rather
+	// than lifting the already-clamped vpage. Gated on hdr(): when off, no write,
 	// LDR byte-identical; when on but the froxel composite doesn't run, g_hdrActive
 	// stays false and the tonemap no-ops, so the buffer is harmlessly ignored.
 	// Hdr_WritableFor: only the MAIN pass (g_hdrBuf sized for these dims) may
@@ -804,8 +812,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			if (checker && ((px ^ py) & 1)) continue;
 			if (quarter && ((px | py) & 1)) continue;  // shade only (even, even)
 
-			const size_t i = size_t(py) * XRes + px;
-			const word zEnc = ZPage16[i];
+			const size_t i = size_t(py) * xres + px;
+			const word zEnc = zpage16[i];
 			if (zEnc == 0) continue;  // pixel not touched by Mekalele
 
 			// Per-pixel mirror id (0 = original world, >0 = mirror N's
@@ -1010,12 +1018,12 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				}
 			}
 
-			// Reconstruct view-space position. ZPage16 stores
+			// Reconstruct view-space position. zpage16 stores
 			// 0xFF80 - round(g_zscale * z), so:
 			//   z = (0xFF80 - zEnc) / g_zscale
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
-			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
-			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
+			const float x = (float(px) - cntrEX) * z * ctx.invFOVX;
+			const float y = (cntrEY - float(py)) * z * ctx.invFOVY;
 
 			// Ambient. Same expression as forward Lighting() — except
 			// here Mat is per-pixel, not per-mesh-Mat[0].
@@ -1781,11 +1789,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			// Water-mesh transparent blend. Forward draws the water plane
 			// with TheOtherBarry<TRANSPARENT> after a pass-1 mirrored-world
-			// draw + dispMap distortion has populated VPage with a wavy
+			// draw + dispMap distortion has populated vpage with a wavy
 			// reflection of the city. The transparent filler does
 			//   pixel = saturate(lit_water_texel + existing_VPage/2)
 			// (TheOtherBarry.h:392). We reproduce the same blend here:
-			// the existing VPage value at this pixel is the reflection
+			// the existing vpage value at this pixel is the reflection
 			// preserved across the inter-pass Z-clear (which lets pass-2
 			// deferred shading skip non-water-mesh pixels via zEnc check
 			// on the freshly-cleared depth buffer).
@@ -1804,8 +1812,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			// HDR B1/B2: stash the unclamped opaque radiance + coverage flag
 			// before the debug-viz stomp, so viz only affects the displayed (LDR)
-			// VPage. The froxel composite reads h[3] to take the scene from here
-			// (opaque) vs the VPage (sky/forward content the kernel never wrote).
+			// vpage. The froxel composite reads h[3] to take the scene from here
+			// (opaque) vs the vpage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
 				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
 				if (hdrLinear) {
@@ -1932,7 +1940,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 // MekaleleTransparent in RenderInnerDeferredTransparent for the closest
 // front-facing transparent at each pixel). Computes per-pixel ambient
 // + Lambertian + fog, modulates the texture sample, alpha-blends 50/50
-// onto VPage (matches TheOtherBarry<TRANSPARENT>'s blend rule). Specular
+// onto vpage (matches TheOtherBarry<TRANSPARENT>'s blend rule). Specular
 // + checkerboard / quarter-rate / vec paths omitted — transparent
 // coverage is small, scalar is fine until profiling says otherwise.
 // Templated on which transparent layer to light: Front reads
@@ -1949,10 +1957,10 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	// Addressing from ctx, not globals (RenderContext migration). The
 	// transparent-layer pointers (g_gbufferTransparent*/g_xparZ*) stay global
 	// for now — they migrate with the rest of the xpar path.
-	const int XRes = ctx.xres;
-	byte *const VPage = ctx.vpage;
-	word *const ZPage16 = ctx.zpage16;
-	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const int xres = ctx.xres;
+	byte *const vpage = ctx.vpage;
+	word *const zpage16 = ctx.zpage16;
+	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	meka::GBuffer *gbPtr;
 	uint16_t      *zPtr;
 	if constexpr (Layer == XparLayer::Front) {
@@ -1965,7 +1973,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	if (!gbPtr || !zPtr) return;
 	const meka::GBuffer &gbX = *gbPtr;
 	uint16_t *xparZ = zPtr;
-	dword *out = reinterpret_cast<dword *>(VPage);
+	dword *out = reinterpret_cast<dword *>(vpage);
 	// Conservative per-pixel light cull: bypasses the per-tile filter,
 	// useful for diagnosing whether observed lighting steps come from
 	// culling drift at tile seams.
@@ -1986,7 +1994,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
-			const size_t i = size_t(py) * XRes + px;
+			const size_t i = size_t(py) * xres + px;
 			const uint32_t mat32 = gbX.txtr[i];
 			if (mat32 == 0xFFFFFFFFu) continue;  // no transparent front
 			const word zEnc = xparZ[i];
@@ -1996,14 +2004,14 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// see only their own mirror's omnis).
 			const uint32_t pmid = gbX.mirrorId.empty()
 			    ? 0u : uint32_t(gbX.mirrorId[i]);
-			// Opaque-Z occlusion: if opaque ZPage16 has a larger z_candidate
+			// Opaque-Z occlusion: if opaque zpage16 has a larger z_candidate
 			// at this pixel, the opaque surface is CLOSER to camera than
 			// the transparent we wrote into xpr. Reject the transparent —
 			// it's hidden behind opaque. MekaleleTransparent doesn't see
 			// opaque Z during raster (its zbuffer points at xpr-Z) so we
 			// have to gate here. Without this, transparent surfaces show
 			// through opaque walls (Greets banding behind marble).
-			const word zOpaque = ZPage16[i];
+			const word zOpaque = zpage16[i];
 			if (zOpaque > zEnc) continue;
 
 			const uint32_t miplevel   = (mat32 >> 28) & 0xF;
@@ -2041,8 +2049,8 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			meka::oct_decode_u16(gbX.normal[i], nx, ny, nz);
 
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
-			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
-			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
+			const float x = (float(px) - cntrEX) * z * ctx.invFOVX;
+			const float y = (cntrEY - float(py)) * z * ctx.invFOVY;
 
 			float lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
 			float lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
@@ -2513,12 +2521,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
                                                    int x1, int y1, int x2, int y2)
 {
 	// Addressing from ctx, not globals (RenderContext migration).
-	const int XRes = ctx.xres;
-	byte *const VPage = ctx.vpage;
-	word *const ZPage16 = ctx.zpage16;
-	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const int xres = ctx.xres;
+	byte *const vpage = ctx.vpage;
+	word *const zpage16 = ctx.zpage16;
+	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
-	dword *out = reinterpret_cast<dword *>(VPage);
+	dword *out = reinterpret_cast<dword *>(vpage);
 	const bool   quarter      = deferredLightingQuarterEnabled();
 	const bool   checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool   specGlobalOn = Specular_Factor > 0.0f;
@@ -2547,7 +2555,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		int px = x1;
 		// Align start to 8-pixel boundary so loads from gb arrays are
 		// naturally aligned (gb.txtr/gb.normal are aligned at frame
-		// allocation; ZPage16 aligned by parallel_memset).
+		// allocation; zpage16 aligned by parallel_memset).
 		const int x_vec_start = (x1 + 7) & ~7;
 		// Scalar lead-in for unaligned pixels at tile start.
 		while (px < x_vec_start && px < x2) {
@@ -2557,7 +2565,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 		}
 
 		for (; px < x2; px += 8) {
-			const size_t i = size_t(py) * XRes + px;
+			const size_t i = size_t(py) * xres + px;
 			// Per-lane mirror id snapshot for this 8-pixel block. Used
 			// by the omni loop below to mask off lights whose mirrorId
 			// disagrees with the lane's. Plane is byte-sized, widened
@@ -2571,7 +2579,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 
 			// Load 8 lanes of Z (u16 → s32 zero-extend → float for the
 			// cmp; later use the int form too)
-			__m128i z16 = _mm_loadu_si128((const __m128i*)(ZPage16 + i));
+			__m128i z16 = _mm_loadu_si128((const __m128i*)(zpage16 + i));
 			__m256i zEncI = _mm256_cvtepu16_epi32(z16);
 
 			// Alive mask: zEnc != 0
@@ -2797,14 +2805,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256 zEncF = _mm256_cvtepi32_ps(zEncI);
 			__m256 zv = _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(float(0xFF80)), zEncF),
 			                           _mm256_set1_ps(ctx.invZScale));
-			// x = (px+lane - CntrEX) * z * invFOVX
+			// x = (px+lane - cntrEX) * z * invFOVX
 			__m256 px_lane_f = _mm256_add_ps(_mm256_set1_ps(float(px)),
 			                                  _mm256_setr_ps(0,1,2,3,4,5,6,7));
 			__m256 xv = _mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(px_lane_f,
-			                                                       _mm256_set1_ps(CntrEX)),
+			                                                       _mm256_set1_ps(cntrEX)),
 			                                         zv),
 			                           _mm256_set1_ps(ctx.invFOVX));
-			__m256 yv = _mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(CntrEY),
+			__m256 yv = _mm256_mul_ps(_mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(cntrEY),
 			                                                       _mm256_set1_ps(float(py))),
 			                                         zv),
 			                           _mm256_set1_ps(ctx.invFOVY));
@@ -3075,12 +3083,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
                                               int x1, int y1, int x2, int y2)
 {
 	// Addressing from ctx, not globals (RenderContext migration).
-	const int XRes = ctx.xres, YRes = ctx.yres;
-	byte *const VPage = ctx.vpage;
-	word *const ZPage16 = ctx.zpage16;
-	const float CntrEX = ctx.cntrEX, CntrEY = ctx.cntrEY;
+	const int xres = ctx.xres, yres = ctx.yres;
+	byte *const vpage = ctx.vpage;
+	word *const zpage16 = ctx.zpage16;
+	const float cntrEX = ctx.cntrEX, cntrEY = ctx.cntrEY;
 	const meka::GBuffer &gb = *ctx.gb;
-	dword *out = reinterpret_cast<dword *>(VPage);
+	dword *out = reinterpret_cast<dword *>(vpage);
 	const bool specGlobalOn = Specular_Factor > 0.0f;
 	const bool  roughMapOnG    = fds::FeatureFlags::roughness_map();   // see main kernel
 	const float roughStrengthG = fds::FeatureFlags::roughness_strength();
@@ -3118,8 +3126,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				if (((px ^ py) & 1) == 0) continue;
 			}
 
-			const size_t i = size_t(py) * XRes + px;
-			const word zEnc = ZPage16[i];
+			const size_t i = size_t(py) * xres + px;
+			const word zEnc = zpage16[i];
 			if (zEnc == 0) continue;
 
 			// Per-pixel mirror id — used by the wave-2 fallback shading
@@ -3130,10 +3138,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const uint32_t mat32  = gb.txtr[i];
 			// Forward content (reflective env disco ball, additive) writes Z
 			// but a sentinel matID -- wave-1 skips it, so it stays uncovered and
-			// is lifted from VPage in HDR. The fill must skip it too, else it
+			// is lifted from vpage in HDR. The fill must skip it too, else it
 			// shades the sentinel as garbage into g_hdrBuf at the wave-2 cells
 			// (deferred-quarter checker over the forward surface, HDR only; in
-			// LDR the forward filler overwrites VPage so it is invisible -> gate
+			// LDR the forward filler overwrites vpage so it is invisible -> gate
 			// on hdrWrite to keep the LDR fill byte-exact).
 			if (hdrWrite && (mat32 == 0xFFFFFFFFu || mat32 == 0xFFFFFFFEu)) continue;  // both forward sentinels
 			const uint32_t matIDc = (mat32 >> 20) & 0xFF;
@@ -3158,7 +3166,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// would smear edges.
 			auto neighborZOk = [&](size_t ni) -> bool {
 				if (!quarterZCheck) return true;
-				const word zN = ZPage16[ni];
+				const word zN = zpage16[ni];
 				if (zN == 0) return false;
 				const int diff = int(zN) - int(zEnc);
 				const int absDiff = diff < 0 ? -diff : diff;
@@ -3221,15 +3229,15 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				int    nc = 0;
 				if (odd_x && !odd_y) {
 					if (px > 0)        nidx[nc++] = i - 1;
-					if (px < XRes - 1) nidx[nc++] = i + 1;
+					if (px < xres - 1) nidx[nc++] = i + 1;
 				} else if (!odd_x && odd_y) {
-					if (py > 0)        nidx[nc++] = i - XRes;
-					if (py < YRes - 1) nidx[nc++] = i + XRes;
+					if (py > 0)        nidx[nc++] = i - xres;
+					if (py < yres - 1) nidx[nc++] = i + xres;
 				} else {
-					if (px > 0 && py > 0)               nidx[nc++] = i - XRes - 1;
-					if (px < XRes - 1 && py > 0)        nidx[nc++] = i - XRes + 1;
-					if (px > 0 && py < YRes - 1)        nidx[nc++] = i + XRes - 1;
-					if (px < XRes - 1 && py < YRes - 1) nidx[nc++] = i + XRes + 1;
+					if (px > 0 && py > 0)               nidx[nc++] = i - xres - 1;
+					if (px < xres - 1 && py > 0)        nidx[nc++] = i - xres + 1;
+					if (px > 0 && py < yres - 1)        nidx[nc++] = i + xres - 1;
+					if (px < xres - 1 && py < yres - 1) nidx[nc++] = i + xres + 1;
 				}
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
@@ -3315,7 +3323,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				size_t nidx[2];
 				int    nc = 0;
 				if (px > 0)        nidx[nc++] = i - 1;
-				if (px < XRes - 1) nidx[nc++] = i + 1;
+				if (px < xres - 1) nidx[nc++] = i + 1;
 				if (nc == 0) continue;
 				int sumR = 0, sumG = 0, sumB = 0;
 				float hsB = 0, hsG = 0, hsR = 0;   // HDR: parallel float-radiance average
@@ -3455,8 +3463,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			}
 
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
-			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
-			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
+			const float x = (float(px) - cntrEX) * z * ctx.invFOVX;
+			const float y = (cntrEY - float(py)) * z * ctx.invFOVY;
 
 			float lB, lG, lR;
 			if (Mat->Txtr) {
@@ -3617,7 +3625,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 
 // Per-frame setup + dispatch tile jobs across the ThreadPool. Same 6×4
 // split the rasterizer uses; tiles are independent (each writes a
-// disjoint slice of VPage). Reuses the renderns::tileCounter +
+// disjoint slice of vpage). Reuses the renderns::tileCounter +
 // condition variable that Render() already uses for the rasterizer
 // pass — fine because we wait synchronously between Render's tile
 // dispatch and our own.
