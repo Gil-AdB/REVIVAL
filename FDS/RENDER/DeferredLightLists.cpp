@@ -20,6 +20,12 @@
 #include "Base/FeatureFlags.h"
 #include "RENDER/DeferredCommon.h"
 
+// RenderContext migration: this TU is GLOBAL-CLEAN — the builders take
+// their dims + projection via parameters (xres/yres/cam), never the
+// engine globals. The poison makes the compiler enforce it (any new use
+// of these names in this file is a build error; take a param).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+
 // Zero a TileLights' padding slots (count..8-rounded) so the vec light
 // loop's over-read produces entries that contribute nothing: range2=0
 // fails the per-pixel `len2 <= range2` mask; mirrorId=0xffffffff never
@@ -196,8 +202,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
                                  const uint32_t *tileMirrorPresence,
                                  const fds::CameraContext &cam)
 {
-	const float FOVX = cam.fovX, FOVY = cam.fovY;
-	const float CntrEX = cam.cntrEX, CntrEY = cam.cntrEY;
+	const float fovX = cam.fovX, fovY = cam.fovY;
+	const float cntrEX = cam.cntrEX, cntrEY = cam.cntrEY;
 	const int numTiles = numTilesX * numTilesY;
 	for (int t = 0; t < numTiles; ++t) {
 		tileLights[t].count = 0;
@@ -244,7 +250,7 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const float vz_plus_r  = vz + r;
 
 		LightScreenRect sr;
-		if (!lightSphereScreenRect(vx, vy, vz, r, FOVX, FOVY, CntrEX, CntrEY,
+		if (!lightSphereScreenRect(vx, vy, vz, r, fovX, fovY, cntrEX, cntrEY,
 		                           xres, yres, sr)) continue;
 		if (!sr.full && (sr.x0 > sr.x1 || sr.y0 > sr.y1)) continue;
 
@@ -391,8 +397,8 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
                                   const uint32_t *stripMirrorPresence,
                                   const fds::CameraContext &cam)
 {
-	const float FOVY = cam.fovY;
-	const float CntrEY = cam.cntrEY;
+	const float fovY = cam.fovY;
+	const float cntrEY = cam.cntrEY;
 	if (numStrips > DEFERRED_MAX_STRIPS) numStrips = DEFERRED_MAX_STRIPS;
 	for (int s = 0; s < numStrips; ++s) {
 		g_stripLights[s].count = 0;
@@ -407,7 +413,7 @@ void buildStripLightLists(int numStrips, int stripHeight, int yres,
 		// Y-only: strips ignore X, so an off-screen-in-X light must
 		// still reach its Y strips (see lightSphereScreenRect docs).
 		LightScreenRect sr;
-		if (!lightSphereScreenRect(vx, vy, vz, r, 0.0f, FOVY, 0.0f, CntrEY,
+		if (!lightSphereScreenRect(vx, vy, vz, r, 0.0f, fovY, 0.0f, cntrEY,
 		                           1, yres, sr)) continue;
 		if (!sr.full && sr.y0 > sr.y1) continue;
 
