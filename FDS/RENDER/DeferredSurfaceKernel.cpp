@@ -690,59 +690,66 @@ static inline void EnvSpecComposeScalar(
 	float dDotN;
 	float rvx, rvy, rvz;
 	if (envP->pullOpt > 0.0f) {
-		// cv-pull damping (forward Transform.cpp parity): reflect from a
-		// virtual eye pulled toward the store's bake point by the same
-		// pow(d-opt,0.8)+opt law. Slows reflection sweep to the authored
-		// rate — full physical-rate per-pixel motion read as jumping
-		// against the rest of the scene. Pulled eye is per (store, frame):
-		// memoize per thread; the pow runs once per store per tile-run.
-		struct PullMemo { const fds::EnvPanoLinear* p; float cx, cy, cz;
-		                  float ex, ey, ez; };
-		// 8-entry direct-mapped, pointer-hashed: adjacent buildings'
-		// stores interleave lane-to-lane across a tile row, and a single
-		// entry thrashed into a std::pow per PIXEL (measured as part of
-		// the 289 ms/iter city regression).
-		static thread_local PullMemo sMemoTab[8] = {};
-		PullMemo &sMemo = sMemoTab[(uintptr_t(envP) >> 6) & 7];
-		if (sMemo.p != envP || sMemo.cx != ctx.cameraWorldX
-		    || sMemo.cy != ctx.cameraWorldY || sMemo.cz != ctx.cameraWorldZ) {
-			const float bx = envP->bakeX, by = envP->bakeY, bz = envP->bakeZ;
-			float vx_ = ctx.cameraWorldX - bx, vy_ = ctx.cameraWorldY - by,
-			      vz_ = ctx.cameraWorldZ - bz;
-			const float vD = std::sqrt(vx_*vx_ + vy_*vy_ + vz_*vz_);
-			float sScale = 1.0f;
-			if (vD > envP->pullOpt + 1.0f) {
-				const float hackD = std::pow(vD - envP->pullOpt, 0.8f) + envP->pullOpt;
-				sScale = hackD / vD;
-			}
-			sMemo.p = envP;
-			sMemo.cx = ctx.cameraWorldX; sMemo.cy = ctx.cameraWorldY;
-			sMemo.cz = ctx.cameraWorldZ;
-			sMemo.ex = bx + vx_ * sScale;
-			sMemo.ey = by + vy_ * sScale;
-			sMemo.ez = bz + vz_ * sScale;
-		}
-		// World-space incident from the pulled eye; world normal from the
-		// (possibly nmap-perturbed) view-space N. Reflection + Fresnel run
-		// in world space; the view-space branch below is skipped.
+		// cv-pull damping, FAITHFUL port of the forward hack (Transform.cpp
+		// Face_Reflective): distances measured TO THE SURFACE PLANE (per-
+		// pixel normal), pull applied along eye->bakePoint, and the forward
+		// path's degeneracy guard (skip when the pull direction is nearly
+		// parallel to the plane). The first port used POINT distance to the
+		// bake center, which has a closest-approach singularity: as the
+		// scripted camera flies PAST a tower, unit(E-B) sweeps up to 180deg
+		// and the pulled eye whips around the building -> the glass
+		// reflections lurch frame-to-frame ("textures jump back and forth"),
+		// per building, asynchronously. Plane distance is smooth through a
+		// flyby; the guard covers the remaining ill-conditioned geometry --
+		// both invariants are documented in the forward code for exactly
+		// this failure ("wildly wrong reflections that swing with small
+		// camera motions").
 		const float nwx = ctx.viewToWorld[0][0]*nx + ctx.viewToWorld[0][1]*ny + ctx.viewToWorld[0][2]*nz;
 		const float nwy = ctx.viewToWorld[1][0]*nx + ctx.viewToWorld[1][1]*ny + ctx.viewToWorld[1][2]*nz;
 		const float nwz = ctx.viewToWorld[2][0]*nx + ctx.viewToWorld[2][1]*ny + ctx.viewToWorld[2][2]*nz;
 		const float swx = ctx.viewToWorld[0][0]*x + ctx.viewToWorld[0][1]*y + ctx.viewToWorld[0][2]*z + ctx.cameraWorldX;
 		const float swy = ctx.viewToWorld[1][0]*x + ctx.viewToWorld[1][1]*y + ctx.viewToWorld[1][2]*z + ctx.cameraWorldY;
 		const float swz = ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y + ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
-		float wx = swx - sMemo.ex, wy = swy - sMemo.ey, wz = swz - sMemo.ez;
+		float epx = ctx.cameraWorldX, epy = ctx.cameraWorldY, epz = ctx.cameraWorldZ;
+		{
+			const float ux = envP->bakeX - epx, uy = envP->bakeY - epy,
+			            uz = envP->bakeZ - epz;
+			// Per-pixel plane distances (plane through sampleWorld, normal n).
+			const float planeD = std::fabs((epx - swx)*nwx + (epy - swy)*nwy
+			                             + (epz - swz)*nwz);
+			const float optD   = std::fabs((envP->bakeX - swx)*nwx
+			                             + (envP->bakeY - swy)*nwy
+			                             + (envP->bakeZ - swz)*nwz);
+			const float step = ux*nwx + uy*nwy + uz*nwz;
+			const float uLen2 = ux*ux + uy*uy + uz*uz;
+			// Forward-path guard: skip when pullDir is within ~5.7deg of the
+			// plane (step^2 <= 0.01*|u|^2) -- dividing by a tiny step blows
+			// the pulled eye out and the reflections swing.
+			if (planeD > optD + 1.0f && step*step > 0.01f * uLen2) {
+				// x^0.8 via exp2/log2-free approx: x^0.75 = sqrt(x*sqrt(x))
+				// (two Newton rsqrts, ~8 cycles vs ~30ns powf per pixel).
+				// Slightly stronger damping than the authored 0.8 -- visually
+				// equivalent for a stabilizer.
+				const float d0 = planeD - optD;
+				const float sq = d0 * fast_rsqrt(d0);            // sqrt(d0)
+				const float t  = d0 * sq;                        // d0^1.5
+				const float hackD = t * fast_rsqrt(t) + optD;    // d0^0.75 + optD
+				const float k = (hackD - planeD) / step;
+				epx += k * ux; epy += k * uy; epz += k * uz;
+			}
+		}
+		float wx = swx - epx, wy = swy - epy, wz = swz - epz;
 		const float wInv = fast_rsqrt(wx*wx + wy*wy + wz*wz + 1e-12f);
 		wx *= wInv; wy *= wInv; wz *= wInv;
 		const float wDotN = wx*nwx + wy*nwy + wz*nwz;
-		// Store WORLD-space reflection in rv (the view→world rotate below
+		// Store WORLD-space reflection in rv (the view->world rotate below
 		// must be skipped for this path); dDotN keeps the Fresnel sign
 		// convention (front-facing < 0).
 		rvx = wx - 2.0f * wDotN * nwx;
 		rvy = wy - 2.0f * wDotN * nwy;
 		rvz = wz - 2.0f * wDotN * nwz;
 		dDotN = wDotN;
-		// Overwrite the view-space d with the world incident so ENVPROBE's
+		// Overwrite the view-space d with the world normal so ENVPROBE's
 		// normal-probe substitution below still yields a world direction.
 		dx = nwx; dy = nwy; dz = nwz;   // (only used by sProbe)
 	} else {
@@ -4319,6 +4326,16 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	for (int r = 0; r < 3; ++r)
 		for (int c = 0; c < 3; ++c)
 			ctx.viewToWorld[r][c] = View->Mat[c][r];
+	if (std::getenv("FDS_CAMLOG")) {
+		static int sCamLogN = 0;
+		if (sCamLogN < 400)
+			std::fprintf(stderr, "[CAMLOG] n=%d t=%.1f cf=%.2f view=%p "
+			    "pos=(%.2f,%.2f,%.2f) fwd=(%.4f,%.4f,%.4f) fovx=%.2f cex=%.1f\n",
+			    sCamLogN++, double(Timer), double(CurFrame), (void*)View,
+			    View->ISource.x, View->ISource.y, View->ISource.z,
+			    View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+			    double(FOVX), double(CntrEX));
+	}
 	if (std::getenv("ENVDBG4")) {
 		const Camera* gv = fds::g_mainCamera.view;
 		if (gv && (gv != View
