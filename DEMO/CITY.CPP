@@ -20,6 +20,7 @@
 #include "FRUSTRUM.H"
 #include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
 #include <RENDER/EnvCube.h>        // env_cube: padded 6-face bake + convention
+#include <RENDER/EnvBake.h>        // city_env_pixel: register per-building env stores
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
@@ -2088,10 +2089,7 @@ void Initialize_City()
 	// any per-building forward artifact (see the windows loop below).
 	const bool useCube = fds::FeatureFlags::env_cube();
 	const bool cityEnvPixel = fds::FeatureFlags::city_env_pixel();
-	if (cityEnvPixel) {
-		fprintf(stderr, "[CITY] city_env_pixel on — skipping forward env bake; "
-		        "windows go per-pixel through the deferred env compose\n");
-	} else if (useCube && !skipCubeMap) {
+	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
 		const uint32_t cubeSalt = 0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f);
 		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
@@ -2130,6 +2128,14 @@ void Initialize_City()
 					CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
 			}
 		}
+		if (cityEnvPixel) {
+			// city_env_pixel: the SAME cached faces feed the deferred env
+			// compose per pixel — registered per windows-clone material in
+			// the windows loop below (rawPanorama kept alive until then).
+			// No sheets, no Materialize, no forward composite.
+			fprintf(stderr, "[CITY] city_env_pixel on — registering the "
+			        "per-building face bake as deferred env stores\n");
+		} else {
 		// Synthesize six PARABOLOID hemisphere sheets per building from the
 		// raw padded faces (no extra render, no extra cache) and Materialize
 		// them into TriMesh::EnvHemiSheets. Transform binds each reflective
@@ -2178,6 +2184,7 @@ void Initialize_City()
 				b.rawPanorama.clear();
 				b.rawPanorama.shrink_to_fit();
 			}
+		}
 		}
 	} else {
 	const bool envCacheEnabled = !skipCubeMap && fds::FeatureFlags::city_envmap_cache();
@@ -2240,6 +2247,17 @@ void Initialize_City()
 	// The forward path's TheOtherBarry uses F->ReflectionTexture (set
 	// alongside) and Face_Reflective so it keeps working unchanged.
 	int windowsCloned = 0;
+	// city_env_pixel: per-building store registration bookkeeping. The
+	// building entries still hold the raw (linear) 512^2 padded faces from
+	// the cube bake above; the FIRST windows clone of a building registers
+	// them as that material's deferred env store (downsampled to 256,
+	// noParallax — the city AABB proxy painted moving exit-face bands
+	// across facades), later clones of the SAME building alias the store.
+	std::map<Object*, fds::BuildingPanoramaEntry*> bldByObj;
+	std::map<Object*, int> storeIdxByObj;
+	const bool cityEnvPixelReg = cityEnvPixel && !skipCubeMap;
+	if (cityEnvPixelReg)
+		for (auto& b : buildings) bldByObj[b.obj] = &b;
 	for (Object* Obj = CitySc->ObjectHead; Obj != nullptr; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh) { continue; }
 		if (Obj->Name == nullptr) { continue; }
@@ -2289,6 +2307,23 @@ void Initialize_City()
 					clone->Reflection = 40.0f;
 					clone->Glossiness = 96.0f;
 				}
+				if (cityEnvPixelReg) {
+					auto bi = bldByObj.find(Obj);
+					if (bi != bldByObj.end() && !bi->second->rawPanorama.empty()) {
+						TriMesh* BT = (TriMesh*)Obj->Data;
+						const Vector center = BT->IPos + BT->BSphereCtr;
+						auto si = storeIdxByObj.find(Obj);
+						if (si == storeIdxByObj.end()) {
+							const int idx = fds::EnvReflection_RegisterCubeFaces(
+								CitySc, clone,
+								(const uint32_t*)bi->second->rawPanorama.data(),
+								512, 256, center);
+							storeIdxByObj[Obj] = idx;
+						} else if (si->second >= 0) {
+							fds::EnvReflection_AliasMaterial(CitySc, clone, si->second);
+						}
+					}
+				}
 				clone->ID = 0;                  // re-assigned by Scene_RebuildMatTable
 				clone->Prev = nullptr;
 				clone->Next = MatLib;
@@ -2301,6 +2336,14 @@ void Initialize_City()
 		}
 	}
 	fprintf(stderr, "[CITY] cloned %d windows-materials with EnvTexture set\n", windowsCloned);
+	if (cityEnvPixelReg) {
+		fprintf(stderr, "[CITY] registered %zu per-building env stores (256^2 faces, "
+		        "noParallax) from the cube bake\n", storeIdxByObj.size());
+		for (auto& b : buildings) {
+			b.rawPanorama.clear();
+			b.rawPanorama.shrink_to_fit();
+		}
+	}
 
 	// Pick up the new clones in matTable so the deferred lighting pass
 	// can resolve their matIDs.

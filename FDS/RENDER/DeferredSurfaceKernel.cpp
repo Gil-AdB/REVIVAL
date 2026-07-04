@@ -706,7 +706,7 @@ static inline void EnvSpecComposeScalar(
 	// lookup direction from the BAKE point. t ≤ 0 (pixel outside
 	// the proxy) falls back to the uncorrected direction.
 	static const bool sNoPara = std::getenv("ENVNOPARA") != nullptr;
-	if (!sNoPara) {
+	if (!sNoPara && !envP->noParallax) {
 		const float bigT = 1e30f;
 		const float tx_ = rwx > 1e-6f ? (envP->boxMaxX - sampleWorldX) / rwx
 		                : rwx < -1e-6f ? (envP->boxMinX - sampleWorldX) / rwx : bigT;
@@ -776,19 +776,51 @@ static inline void EnvSpecComposeScalar(
 	// ENV_NOFETCH=1: constant color instead of the pano loads —
 	// cost-attribution experiment (fetch-bound vs math-bound).
 	static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
-	uint32_t c0, c1;
+	float ecB, ecG, ecR;
 	if (sNoFetch) {
-		c0 = c1 = 0xFF808080u;
+		ecB = ecG = ecR = 128.0f;
 	} else if (envIsCube) {
-		// Face-major fetch: face f, level lvl at offset f*(fr*fr).
-		auto fc = [&](int lvl) -> uint32_t {
+		// Face-major BILINEAR fetch: per-pixel reflected dirs sweep
+		// continuously under camera motion, and nearest sampling made
+		// high-frequency store content shimmer frame-to-frame (the city
+		// per-pixel experiment's residual "jumpy"). The overscan padding
+		// (D2) makes an in-face clamped bilerp seam-free.
+		auto fcBil = [&](int lvl, float& B, float& G, float& R) {
 			const int fr = envP->W >> lvl;
-			int fx = int(cubeU * float(fr)); if (fx >= fr) fx = fr - 1;
-			int fy = int(cubeV * float(fr)); if (fy >= fr) fy = fr - 1;
-			return envP->mip[lvl][(size_t(cubeFace) * fr + size_t(fy)) * fr + fx];
+			float px = cubeU * float(fr) - 0.5f;
+			float py = cubeV * float(fr) - 0.5f;
+			if (px < 0.0f) px = 0.0f;
+			if (py < 0.0f) py = 0.0f;
+			int x0 = int(px), y0 = int(py);
+			if (x0 > fr - 2) x0 = fr - 2;
+			if (y0 > fr - 2) y0 = fr - 2;
+			const float ax = px - float(x0), ay = py - float(y0);
+			const uint32_t* base =
+				envP->mip[lvl] + size_t(cubeFace) * fr * fr;
+			const uint32_t p00 = base[size_t(y0) * fr + x0];
+			const uint32_t p10 = base[size_t(y0) * fr + x0 + 1];
+			const uint32_t p01 = base[size_t(y0 + 1) * fr + x0];
+			const uint32_t p11 = base[size_t(y0 + 1) * fr + x0 + 1];
+			auto ch = [&](int sh) -> float {
+				const float t0 = float((p00 >> sh) & 0xFF)
+				               + ax * (float((p10 >> sh) & 0xFF) - float((p00 >> sh) & 0xFF));
+				const float t1 = float((p01 >> sh) & 0xFF)
+				               + ax * (float((p11 >> sh) & 0xFF) - float((p01 >> sh) & 0xFF));
+				return t0 + ay * (t1 - t0);
+			};
+			B = ch(0); G = ch(8); R = ch(16);
 		};
-		c0 = fc(lvl0);
-		c1 = lvl1 != lvl0 ? fc(lvl1) : c0;
+		float b0, g0, r0;
+		fcBil(lvl0, b0, g0, r0);
+		if (lvl1 != lvl0) {
+			float b1, g1, r1;
+			fcBil(lvl1, b1, g1, r1);
+			ecB = b0 + lf * (b1 - b0);
+			ecG = g0 + lf * (g1 - g0);
+			ecR = r0 + lf * (r1 - r0);
+		} else {
+			ecB = b0; ecG = g0; ecR = r0;
+		}
 	} else {
 		auto fq = [&](int lvl) -> uint32_t {
 			const int lw = envP->W >> lvl, lh = envP->H >> lvl;
@@ -796,12 +828,12 @@ static inline void EnvSpecComposeScalar(
 			const int epy_ = int(evv * float(lh));
 			return envP->mip[lvl][size_t(epy_) * lw + epx];
 		};
-		c0 = fq(lvl0);
-		c1 = lvl1 != lvl0 ? fq(lvl1) : c0;
+		const uint32_t c0 = fq(lvl0);
+		const uint32_t c1 = lvl1 != lvl0 ? fq(lvl1) : c0;
+		ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
+		ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
+		ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
 	}
-	const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
-	const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
-	const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
 	// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
 	// d·N < 0). F0 = authored Reflection% with the dielectric
 	// floor, pulled to ~1 by metalness. F90 (the grazing limit)

@@ -590,6 +590,51 @@ void EnvReflection_DrawViz(Scene* sc) {
     }
 }
 
+int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
+                                    const uint32_t* faceMajor, int faceRes,
+                                    int storeRes, const Vector& bakePoint) {
+    if (!sc || !M || !faceMajor || faceRes < 64) return -1;
+    if (storeRes > faceRes) storeRes = faceRes;
+    SceneEnv& env = g_envByScene[sc];
+    auto store = std::make_unique<EnvPanoStore>();
+    EnvPanoLinear& v = store->view;
+    // Downsample the source faces to storeRes (e.g. CITY 512 -> 256: the
+    // env compose is roughness-blurred anyway and this keeps per-building
+    // memory at the auto-bake tier), then chain mips from there.
+    store->levels[0].assign(faceMajor, faceMajor + size_t(6) * faceRes * faceRes);
+    int fr = faceRes;
+    while (fr > storeRes) {
+        std::vector<uint32_t> half;
+        boxDownsampleCube(store->levels[0], fr, half);
+        store->levels[0] = std::move(half);
+        fr >>= 1;
+    }
+    v.isCube = true;
+    v.noParallax = true;
+    v.W = v.H = fr;
+    v.numMips = EnvPanoLinear::kMaxMips;
+    for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+        boxDownsampleCube(store->levels[k-1], fr, store->levels[k]);
+        fr >>= 1;
+    }
+    for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
+        v.mip[k] = store->levels[k].data();
+    v.bakeX = bakePoint.x; v.bakeY = bakePoint.y; v.bakeZ = bakePoint.z;
+    env.stores.push_back(std::move(store));
+    const int idx = int(env.stores.size()) - 1;
+    env.byMat[M] = idx;
+    if (M->ID < 256) env.table[M->ID] = &env.stores[size_t(idx)]->view;
+    return idx;
+}
+
+void EnvReflection_AliasMaterial(Scene* sc, Material* M, int storeIdx) {
+    if (!sc || !M) return;
+    SceneEnv& env = g_envByScene[sc];
+    if (storeIdx < 0 || storeIdx >= int(env.stores.size())) return;
+    env.byMat[M] = storeIdx;
+    if (M->ID < 256) env.table[M->ID] = &env.stores[size_t(storeIdx)]->view;
+}
+
 int EnvReflection_Count(Scene* sc) {
     auto it = g_envByScene.find(sc);
     return it == g_envByScene.end() ? 0 : int(it->second.stores.size());

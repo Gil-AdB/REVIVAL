@@ -13,9 +13,12 @@
 // panorama predate this and hand-roll the same dance — candidates for
 // adoption once this has proven out on the mirror shards.
 
+#include <cstdint>
+
 struct Scene;
 struct Vector;
 struct Texture;
+struct Material;
 
 namespace fds {
 
@@ -66,6 +69,11 @@ struct EnvPanoLinear {
     // f*(W>>k)*(W>>k). Sampled via EnvCube_DirToFaceUV — no equirect wrap, no
     // trig. When false, mip[k] is the legacy equirect image (W>>k × H>>k).
     bool isCube = false;
+    // Skip the AABB parallax correction for this store (direction-only,
+    // env-at-infinity). Set for stores whose proxy box would be a bad fit
+    // (CITY: the whole-city AABB drew moving exit-face bands across
+    // facades — the per-pixel experiment's "garbled and jumpy").
+    bool noParallax = false;
     // Capture point (world) + the scene AABB proxy for parallax correction.
     float bakeX = 0, bakeY = 0, bakeZ = 0;
     float boxMinX = 0, boxMinY = 0, boxMinZ = 0;
@@ -96,6 +104,20 @@ void EnvReflection_DrawViz(Scene* sc);
 
 // Number of baked panorama stores for the scene (viewer paging bound).
 int EnvReflection_Count(Scene* sc);
+
+// Register an EXTERNALLY baked padded-cube store for material M: takes the
+// face-major linear RGBA faces (6 x faceRes^2, EnvCube convention — e.g.
+// CITY's per-building bake, already disk-cached), box-downsamples to
+// storeRes if smaller, builds the mip chain, marks the store noParallax,
+// and maps M to it (FramePrep then skips M — no redundant centroid bake).
+// Returns the store index for AliasMaterial, or -1 on failure.
+int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
+                                    const uint32_t* faceMajor, int faceRes,
+                                    int storeRes, const Vector& bakePoint);
+
+// Map another material to an existing store (same building, second windows
+// base-mat clone) without duplicating the pixel data.
+void EnvReflection_AliasMaterial(Scene* sc, Material* M, int storeIdx);
 
 }  // namespace fds
 

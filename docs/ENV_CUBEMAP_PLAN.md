@@ -411,6 +411,34 @@ Glossiness=96 under the flag.
 `FDS_DEFERRED_OUTER_VEC=0 --env_refl`). Default OFF; the static paraboloid
 sheets remain the production path (temporally stable at ~zero cost).
 
+**v2/v3 (after live testing read "garbled, incorrect, jumpy"):**
+1. **Garbled bands** = the AABB parallax proxy: the whole-city box is a
+   hopeless fit for a street canyon; the reflected ray's box-exit-face
+   switch locus drew dark diagonal bands that crawled with the camera.
+   `EnvPanoLinear.noParallax` (per-store) now disables the correction —
+   verified clean via ENVNOPARA A/B.
+2. **Incorrect content** = FramePrep's auto-stores (256² bakes probed at
+   the material's LARGEST window cluster, possibly the building's far
+   side). Replaced: `EnvReflection_RegisterCubeFaces/AliasMaterial` feed
+   the kernel THE SAME per-building 512² padded faces the forward path
+   bakes (disk-cached, linear, building-centered), downsampled to 256²
+   stores, noParallax, one store per building aliased across its windows
+   clones. The 71 redundant auto-bakes are gone (7 legit ones remain:
+   cockpit, ambulance glass, ...).
+3. **Jumpy shimmer** = nearest-neighbor store sampling under continuously
+   sweeping per-pixel reflection dirs. The cube fetch is now BILINEAR
+   (in-face clamped 4-tap — the D2 padding makes it seam-free); the
+   equirect fetch is untouched (legacy byte-stability). Chase cube
+   reflections change by 55 px (mean 0.001) — strictly smoother.
+
+Residual 2-unit-dolly frame delta (50k px vs paraboloid's 30k) is
+LEGITIMATE reflection parallax on high-contrast per-pixel content (mean
+|Δ| near-equal, 3.72 vs 3.47) — physics, not popping. Perf unchanged
+(124.7 ms/iter; the compose is math-bound, so 8 taps ≈ free). The look:
+glass identity restored, city visible in the panes, zero discrete
+artifacts. Still gated by the OuterVec cost — the per-lane OuterVec env
+compose remains the ticket to production.
+
 ## Deviations
 
 - **Separate cache FILE, not just a salted key** (slice C): the cache is a
