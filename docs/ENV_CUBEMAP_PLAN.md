@@ -439,6 +439,18 @@ glass identity restored, city visible in the panes, zero discrete
 artifacts. Still gated by the OuterVec cost — the per-lane OuterVec env
 compose remains the ticket to production.
 
+**Live verdict (final):** free cam reads WELL (v2 rendering confirmed
+correct); the scripted demo cam does not — (a) ~120 ms/frame ≈ 8 fps
+turns the spline cam's fast moves/cuts into violent stutter (the same
+perf gap, made visceral), and (b) the demo's city shots were COMPOSED
+against the flat stylized `tex + refl/2` glass — per-pixel Fresnel
+redistributes brightness (dim head-on, bright grazing) and breaks the
+authored balance in a way no gain/F0 tweak restores. Experiment closed:
+technically validated, wrong for the demo. Flag stays default-off;
+paraboloid sheets (which keep the authored composite formula at full
+speed) are production. Revisit only if a NEW scene is authored around
+physical glass — then the OuterVec per-lane compose is the first task.
+
 ## Deviations
 
 - **Separate cache FILE, not just a salted key** (slice C): the cache is a
