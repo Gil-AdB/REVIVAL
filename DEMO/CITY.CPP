@@ -1767,6 +1767,17 @@ static void bakeBuildingCubeFaces(Object* Obj,
 	const dword flags = T->Flags;
 	T->Flags &= ~HTrack_Visible;
 
+	// Mute omni FLARE sprites for the bake: a searchlight flare near a
+	// building bakes as a giant white blob filling a large solid angle of
+	// the env store — invisible in the dim legacy pano, but per-pixel
+	// Fresnel at grazing reflects it near full strength (the scripted-cam
+	// "white bloom sweeping the facade"). Same trick as the mirror RTT.
+	std::vector<std::pair<Omni*, float>> mutedFlares;
+	for (Omni* O = CitySc->OmniHead; O; O = O->Next) {
+		mutedFlares.push_back({ O, O->ISize });
+		O->ISize = 0.0f;
+	}
+
 	rawFaces.assign(size_t(6) * faceRes * faceRes * 4, 0);
 	const int ratio = CUBE_MAP_XRES / faceRes;   // 1024/512 = 2
 	const int n = ratio * ratio;
@@ -1802,6 +1813,7 @@ static void bakeBuildingCubeFaces(Object* Obj,
 			}
 	}
 	T->Flags = flags;
+	for (auto& p : mutedFlares) p.first->ISize = p.second;
 
 	if (std::getenv("FDS_ENVBAKE_DUMP")) {
 		if (FILE* fp = std::fopen("/tmp/city_cube_faces.ppm", "wb")) {
@@ -2091,7 +2103,8 @@ void Initialize_City()
 	const bool cityEnvPixel = fds::FeatureFlags::city_env_pixel();
 	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
-		const uint32_t cubeSalt = 0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f);
+		const uint32_t cubeSalt = (0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f))
+		                          + 1u;   // v2: flares muted in the bake
 		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
 		fprintf(stderr, "[CITY] env_cube on — 6 padded faces/building @ %d^2 (fov %.1f)\n",
 		        CITY_CUBE_FACE_RES, fds::EnvCube_FaceFovDegrees());
@@ -2304,8 +2317,19 @@ void Initialize_City()
 					// PERCENT (F0 = Reflection/100, dielectric floor 0.04)
 					// and Glossiness drives the roughness→mip pick. 40% +
 					// tight gloss ≈ the legacy half-add look with Fresnel.
-					clone->Reflection = 40.0f;
+					clone->Reflection = fds::FeatureFlags::city_env_f0();
 					clone->Glossiness = 96.0f;
+					// Kill per-pixel dynamic lighting on the glass: the
+					// authored forward glass is vertex-Gouraud-lit, and on
+					// building-scale quads the omni pools between vertices
+					// vanish — deferred per-pixel lighting resurrected the
+					// sweeping searchlight pools as big blobs flashing
+					// across facades (the scripted-cam "jumps like crazy").
+					// Emissive texture + Fresnel reflection = the authored
+					// composite, computed per pixel.
+					clone->Diffuse = 0.0f;
+					clone->Luminosity = fds::FeatureFlags::city_env_lum();
+					clone->Specular = 0.0f;
 				}
 				if (cityEnvPixelReg) {
 					auto bi = bldByObj.find(Obj);

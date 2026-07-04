@@ -439,7 +439,26 @@ glass identity restored, city visible in the panes, zero discrete
 artifacts. Still gated by the OuterVec cost — the per-lane OuterVec env
 compose remains the ticket to production.
 
-**Live verdict (final):** free cam reads WELL (v2 rendering confirmed
+**Live verdict v2 — the scripted-cam jumping was DIAGNOSED and FIXED, not
+inherent:** consecutive-live-frame grids (multi-t snapshot = live ticking)
+showed a white bloom sweeping the big facades every frame in pixel mode.
+Two real defects, neither the reflection math:
+(a) windows became ordinary G-buffer surfaces, so the deferred kernel
+applied PER-PIXEL dynamic lighting — the sweeping searchlights painted
+animated pools across facades that the authored vertex-Gouraud glass never
+showed (pools vanish between building-scale verts). Fix: glass clones take
+Diffuse=0 + Luminosity≈0.45 (authored texel×ambient) — emissive texture +
+Fresnel reflection, i.e. the authored composite per pixel.
+(b) the city face bake captured omni FLARE sprites — giant white blobs in
+the stores that grazing Fresnel reflected near full strength. Fix: flares
+muted during bakeBuildingCubeFaces (mirror-RTT trick), cube cache salt
+bumped (benefits the paraboloid path's content too).
+Tuning knobs exposed: --city_env_f0 (default 40), --city_env_lum (0.45).
+After the fixes the live consecutive-frame stability matches the
+paraboloid path. Remaining gap to production is unchanged: perf (the
+OuterVec per-lane compose).
+
+**Earlier live verdict (superseded, kept for the record):** free cam reads WELL (v2 rendering confirmed
 correct); the scripted demo cam does not — (a) ~120 ms/frame ≈ 8 fps
 turns the spline cam's fast moves/cuts into violent stutter (the same
 perf gap, made visceral), and (b) the demo's city shots were COMPOSED

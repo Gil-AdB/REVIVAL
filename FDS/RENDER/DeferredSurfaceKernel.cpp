@@ -4165,6 +4165,20 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	for (int r = 0; r < 3; ++r)
 		for (int c = 0; c < 3; ++c)
 			ctx.viewToWorld[r][c] = View->Mat[c][r];
+	if (std::getenv("ENVDBG4")) {
+		const Camera* gv = fds::g_mainCamera.view;
+		if (gv && (gv != View
+		    || gv->ISource.x != View->ISource.x
+		    || gv->Mat[2][0] != View->Mat[2][0]
+		    || gv->Mat[2][2] != View->Mat[2][2]))
+			std::fprintf(stderr, "[ENVDBG4] ctx-vs-geometry camera MISMATCH: "
+			    "View=%p src(%.2f,%.2f,%.2f) fwd(%.3f,%.3f,%.3f) | "
+			    "gMain=%p src(%.2f,%.2f,%.2f) fwd(%.3f,%.3f,%.3f)\n",
+			    (void*)View, View->ISource.x, View->ISource.y, View->ISource.z,
+			    View->Mat[2][0], View->Mat[2][1], View->Mat[2][2],
+			    (void*)gv, gv->ISource.x, gv->ISource.y, gv->ISource.z,
+			    gv->Mat[2][0], gv->Mat[2][1], gv->Mat[2][2]);
+	}
 	ctx.cameraWorldX = View->ISource.x;
 	ctx.cameraWorldY = View->ISource.y;
 	ctx.cameraWorldZ = View->ISource.z;
