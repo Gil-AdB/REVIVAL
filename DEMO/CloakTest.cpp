@@ -64,25 +64,6 @@ void addWall(fds::scene_builder::SceneBuilder &b, const char *name,
     b.AddQuad(name, v, m);
 }
 
-// A double-sided mirror strip: the mirror face (R,L order → normal faces
-// the incoming side) PLUS an opaque back quad offset behind it, so the
-// panel is a visible solid from behind / above instead of an invisible
-// or garbage-rendered mirror. `backMat` colors the back (per-V color so
-// the two corners are distinguishable from above).
-void addMirror2(fds::scene_builder::SceneBuilder &b, const char *name,
-                float xR, float zR, float xL, float zL, float h,
-                Material *mir, Material *backMat) {
-    addWall(b, name, xR, zR, xL, zL, h, mir);
-    // Back = reversed winding (opposite normal), nudged 0.06 along -normal.
-    // normal(front) = normalize(zR-zL, 0, xL-xR).
-    float nx = zR - zL, nz = xL - xR;
-    const float L = std::sqrt(nx*nx + nz*nz);
-    if (L > 1e-6f) { nx /= L; nz /= L; }
-    const float e = 0.06f;
-    char bn[64]; std::snprintf(bn, sizeof bn, "%s_back", name);
-    addWall(b, bn, xL - nx*e, zL - nz*e, xR - nx*e, zR - nz*e, h, backMat);
-}
-
 // A 90-degree V-corner: two mirror panels joined at vertex (vx,vz), arms
 // at openDeg±45 (so 90deg between them), opening toward openDeg. Each panel
 // carries an opaque back. mirrorInner=true → the reflecting face is the
@@ -92,22 +73,34 @@ void addVCorner(fds::scene_builder::SceneBuilder &b, const char *prefix,
                 bool mirrorInner, Material *mirA, Material *mirB, Material *back) {
     const float br = openDeg * 3.14159265f / 180.0f;
     const float ndx = std::cos(br), ndz = std::sin(br);   // bisector (opening dir)
-    struct { float a; const char *suf; Material *m; } arms[2] = {
-        { openDeg + 45.0f, "_a", mirA }, { openDeg - 45.0f, "_b", mirB },
-    };
-    for (auto &ar : arms) {
-        const float a = ar.a * 3.14159265f / 180.0f;
-        const float ex = vx + arm * std::cos(a), ez = vz + arm * std::sin(a);
-        // addWall normal for R=vertex,L=end is n=(vz-ez, ex-vx). Choose the
-        // ordering so the mirror normal points toward (inner) or away from
-        // (outer) the bisector.
-        const float dotVR = (vz - ez) * ndx + (ex - vx) * ndz;
-        char nm[64];
-        std::snprintf(nm, sizeof nm, "%s%s", prefix, ar.suf);
-        if ((dotVR > 0.0f) == mirrorInner)
-            addMirror2(b, nm, vx, vz, ex, ez, h, ar.m, back);   // R=vertex
-        else
-            addMirror2(b, nm, ex, ez, vx, vz, h, ar.m, back);   // R=end
+    const float sgn = mirrorInner ? 1.0f : -1.0f;         // mirror faces sgn*bisector
+    const float gap = 0.06f;                              // opaque back set-back
+    Material *mir[2] = { mirA, mirB };
+    const char *suf[2] = { "_a", "_b" };
+    float ex[2], ez[2], nx[2], nz[2];  // arm ends + unit front normals
+    // 1) mirror fronts. Order (R,L) so the mirror normal faces sgn*bisector.
+    for (int i = 0; i < 2; ++i) {
+        const float a = (openDeg + (i ? -45.0f : 45.0f)) * 3.14159265f / 180.0f;
+        ex[i] = vx + arm * std::cos(a); ez[i] = vz + arm * std::sin(a);
+        const float dotVR = (vz - ez[i]) * (sgn*ndx) + (ex[i] - vx) * (sgn*ndz);
+        char nm[64]; std::snprintf(nm, sizeof nm, "%s%s", prefix, suf[i]);
+        float rx, rz, lx, lz;
+        if (dotVR > 0.0f) { rx=vx; rz=vz; lx=ex[i]; lz=ez[i]; }   // R=vertex
+        else              { rx=ex[i]; rz=ez[i]; lx=vx; lz=vz; }   // R=end
+        addWall(b, nm, rx, rz, lx, lz, h, mir[i]);
+        float n0 = rz - lz, n1 = lx - rx, L = std::sqrt(n0*n0 + n1*n1);
+        nx[i] = n0 / L; nz[i] = n1 / L;   // placed front normal (faces the mirror side)
+    }
+    // 2) opaque backs meeting at ONE shared point behind the vertex (avoids
+    // the two per-arm offsets crossing at the joined vertex). Back normal
+    // faces AWAY from the mirror (reversed winding).
+    float ax = nx[0]+nx[1], az = nz[0]+nz[1], al = std::sqrt(ax*ax+az*az);
+    if (al > 1e-6f) { ax/=al; az/=al; }
+    const float vbx = vx - ax*gap, vbz = vz - az*gap;   // shared back-vertex
+    for (int i = 0; i < 2; ++i) {
+        const float ebx = ex[i] - nx[i]*gap, ebz = ez[i] - nz[i]*gap;
+        char nm[64]; std::snprintf(nm, sizeof nm, "%s%s_back", prefix, suf[i]);
+        addWall(b, nm, ebx, ebz, vbx, vbz, h, back);   // reversed vs front → back-facing
     }
 }
 
@@ -297,6 +290,10 @@ void Run_CloakTest() {
         { Vector(-17.0f, 20.0f, 12.0f), Vector( 0.0f, 0.0f, 12.0f), "overhead" },
         // Reveal: the hero sphere in the right V's mouth, from the +x side.
         { Vector( 12.0f, 5.0f, 12.0f),  Vector( 3.6f, 1.0f, 12.0f), "reveal"   },
+        // User break poses: probe1 = a mirror shows the hero (should be
+        // hidden); probe2 = mirror-face intersection.
+        { Vector(1.70f,2.50f,11.65f), Vector(-8.30f,2.50f,11.84f), "probe1" },
+        { Vector(3.56f,9.70f,11.62f), Vector(-0.56f,0.59f,11.69f), "probe2" },
     };
     for (const Pose &p : poses) {
         char path[64];
