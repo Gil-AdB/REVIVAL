@@ -1892,9 +1892,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	if (fogFar <= 0.0f) return;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 
-	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-	const float (*w2)[3] = g_deferredCtx.viewToWorld;
-	const float camY = g_deferredCtx.cameraWorldY;
+	const DeferredLightingCtx &dc = ctx;
+	const float (*w2)[3] = dc.viewToWorld;
+	const float camY = dc.cameraWorldY;
 
 	FastFogParams P{};
 	P.invFOVX   = 1.0f / FOVX;
@@ -1909,9 +1909,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.w00 = w2[0][0]; P.w01 = w2[0][1]; P.w02 = w2[0][2];
 	P.w10 = w2[1][0]; P.w11 = w2[1][1]; P.w12 = w2[1][2];
 	P.w20 = w2[2][0]; P.w21 = w2[2][1]; P.w22 = w2[2][2];
-	P.camX = g_deferredCtx.cameraWorldX;
+	P.camX = dc.cameraWorldX;
 	P.camY = camY;
-	P.camZ = g_deferredCtx.cameraWorldZ;
+	P.camZ = dc.cameraWorldZ;
 	// Slab bounds in world Y. Defaults (±1e9) → unbounded → plain height fog.
 	P.slabY0 = fds::FeatureFlags::fast_fog_bottom();
 	P.slabY1 = fds::FeatureFlags::fast_fog_top();
@@ -1979,8 +1979,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.shadowEarlyOut    = fds::FeatureFlags::fast_fog_shadow_earlyout();
 	P.shadowAnalytic    = fds::FeatureFlags::fast_fog_shadow_analytic();
 	P.shadowPcf         = std::max(0, fds::FeatureFlags::fast_fog_shadow_pcf());
-	P.lights    = g_deferredCtx.lights;
-	P.numLights = g_deferredCtx.numLights;
+	P.lights    = dc.lights;
+	P.numLights = dc.numLights;
 	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
 	P.coarseStep  = adaptive ? std::max(2, fds::FeatureFlags::fast_fog_adaptive_step()) : 2;
 	P.adaptThresh = adaptive ? fds::FeatureFlags::fast_fog_adaptive_thresh() : 0.0f;
@@ -1998,14 +1998,14 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		const int tsx = (w + numTilesX - 1) / numTilesX;
 		const int tsy = (h + numTilesY - 1) / numTilesY;
 		renderns::tileCounter = 0;
-		for (int j = 0; j < numTilesY; ++j) {
+		constexpr int n = numTilesX * numTilesY;
+		dispatchIndexed(n, &renderns::tileDone, [&body, tsx, tsy, w, h](int t) {
+			const int j = t / numTilesX, i = t - j * numTilesX;
 			const int y1 = tsy * j, y2 = std::min(y1 + tsy, h);
-			for (int i = 0; i < numTilesX; ++i) {
-				const int x1 = tsx * i, x2 = std::min(x1 + tsx, w);
-				ThreadPool::instance().enqueue([=]() { body(x1, y1, x2, y2); renderns::tileDone.release(); });
-			}
-		}
-		for (int n = numTilesX * numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
+			const int x1 = tsx * i, x2 = std::min(x1 + tsx, w);
+			body(x1, y1, x2, y2);
+		});
+		for (int k = 0; k < n; ++k) renderns::tileDone.acquire();
 	};
 
 	if (fds::FeatureFlags::fast_fog_froxel()) {
@@ -2135,9 +2135,9 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	if (!CurScene || !ZPage16 || !VPage) return;
 	const float fogFar = CurScene->FZP;
 	if (fogFar <= 0.0f) return;
-	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-	const float (*w2)[3] = g_deferredCtx.viewToWorld;
-	const float camY    = g_deferredCtx.cameraWorldY;
+	const DeferredLightingCtx &dc = ctx;
+	const float (*w2)[3] = dc.viewToWorld;
+	const float camY    = dc.cameraWorldY;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 	const float sigma   = fds::FeatureFlags::fast_fog_density() / fogFar;
 	const float slabY0  = fds::FeatureFlags::fast_fog_bottom();
@@ -2163,11 +2163,13 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	constexpr int numTilesX = 6, numTilesY = 4;
 	const int tsx = (XRes + numTilesX - 1) / numTilesX;
 	const int tsy = (YRes + numTilesY - 1) / numTilesY;
-	for (int tj = 0; tj < numTilesY; ++tj) {
-		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
-		for (int ti = 0; ti < numTilesX; ++ti) {
+	{
+		constexpr int nJobs = numTilesX * numTilesY;
+		dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
+			const int tj = t / numTilesX, ti = t - tj * numTilesX;
+			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
 			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
-			ThreadPool::instance().enqueue([=]() {
+			{
 				for (int py = y1; py < y2; ++py) {
 					const float Y = (CntrEY - float(py)) * invFOVY;
 					const size_t row = size_t(py) * size_t(XRes);
@@ -2214,11 +2216,10 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 						out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
 					}
 				}
-				renderns::tileDone.release();
-			});
-		}
+			}
+		});
+		for (int k = 0; k < nJobs; ++k) renderns::tileDone.acquire();
 	}
-	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 
 // ─── Screen-space rain ────────────────────────────────────────────────────
@@ -2273,11 +2274,13 @@ void Render_ScreenSpaceRain() {
 	constexpr int numTilesX = 6, numTilesY = 4;
 	const int tsx = (XRes + numTilesX - 1) / numTilesX;
 	const int tsy = (YRes + numTilesY - 1) / numTilesY;
-	for (int tj = 0; tj < numTilesY; ++tj) {
-		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
-		for (int ti = 0; ti < numTilesX; ++ti) {
+	{
+		constexpr int nJobs = numTilesX * numTilesY;
+		dispatchIndexed(nJobs, &renderns::tileDone, [=](int tt) {
+			const int tj = tt / numTilesX, ti = tt - tj * numTilesX;
+			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
 			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
-			ThreadPool::instance().enqueue([=]() {
+			{
 				// COLUMN-major: streaks are sparse (one core ≤3 px wide per
 				// cellW-px column), so iterate the ~tileW/cellW columns per
 				// row and touch only each streak's own pixels. ~12× less
@@ -2367,11 +2370,10 @@ void Render_ScreenSpaceRain() {
 						}
 					}
 				}
-				renderns::tileDone.release();
-			});
-		}
+			}
+		});
+		for (int k = 0; k < nJobs; ++k) renderns::tileDone.acquire();
 	}
-	for (int n = numTilesX*numTilesY, k = 0; k < n; ++k) renderns::tileDone.acquire();
 }
 
 // ─── On-camera lens droplets ──────────────────────────────────────────────
@@ -3227,10 +3229,10 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_unified, &g_volProf.n_unified);
     if (!CurScene || !ZPage16 || !VPage) return;
 
-    const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    const DeferredLightingCtx &dc = ctx;
+    const ViewLightsSoA *const lights = dc.lights;
     if (!lights) return;
-    const int numLights = g_deferredCtx.numLights;
+    const int numLights = dc.numLights;
 
     // Pre-filter spot vs omni index lists.
     static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];
@@ -3270,26 +3272,24 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
 
     renderns::tileCounter = 0;
-    for (int j = 0; j < numTilesY; ++j) {
-        const int y1 = tileSizeY * j;
-        const int y2 = std::min(y1 + tileSizeY, YRes);
-        for (int i = 0; i < numTilesX; ++i) {
+    {
+        constexpr int nJobs = numTilesX * numTilesY;
+        const int *sP = spotIdx; const int sC = spotCount;
+        const int *oP = omniIdx; const int oC = omniCount;
+        dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
+            const int j = t / numTilesX, i = t - j * numTilesX;
+            const int y1 = tileSizeY * j;
+            const int y2 = std::min(y1 + tileSizeY, YRes);
             const int x1 = tileSizeX * i;
             const int x2 = std::min(x1 + tileSizeX, XRes);
-            const int *sP = spotIdx; const int sC = spotCount;
-            const int *oP = omniIdx; const int oC = omniCount;
-            ThreadPool::instance().enqueue([=]() {
-                Render_DeferredVolumetric_Tile(
-                    x1, y1, x2, y2, lights, sP, sC, oP, oC,
-                    invFOVX, invFOVY, invZScale,
-                    sigma, fogFar, fogR, fogG, fogB,
-                    coneDens, haloDens);
-                // One permit per completed tile (see renderns::tileDone).
-                renderns::tileDone.release();
-            });
+            Render_DeferredVolumetric_Tile(
+                x1, y1, x2, y2, lights, sP, sC, oP, oC,
+                invFOVX, invFOVY, invZScale,
+                sigma, fogFar, fogR, fogG, fogB,
+                coneDens, haloDens);
+        });
+        for (int _i = 0; _i < nJobs; ++_i) {
+            renderns::tileDone.acquire();
         }
-    }
-    for (int _i = 0, n = numTilesX * numTilesY; _i < n; ++_i) {
-        renderns::tileDone.acquire();
     }
 }

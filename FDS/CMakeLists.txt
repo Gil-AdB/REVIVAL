@@ -137,6 +137,12 @@ set(RENDER
     RENDER/EnvBake.cpp
     RENDER/EnvBake.h
     RENDER/GENERAL.H
+    RENDER/GreetsMirror.cpp
+    RENDER/GreetsMirror.h
+    RENDER/MirrorShatter.cpp
+    RENDER/MirrorShatter.h
+    RENDER/SpotlightCones.cpp
+    RENDER/SpotlightCones.h
     RENDER/Hdr.cpp
     RENDER/Hdr.h
     RENDER/Lighting.cpp

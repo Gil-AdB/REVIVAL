@@ -31,8 +31,6 @@ set(DEMO_SOURCES
     GREETS.H
     GreetsDisco.cpp
     GreetsDisco.h
-    GreetsMirror.cpp
-    GreetsMirror.h
     BlasterBolts.cpp
     BlasterBolts.h
     MainLoop.cpp
@@ -47,8 +45,6 @@ set(DEMO_SOURCES
     MaterialImport.h
     ProceduralWater.cpp
     ProceduralWater.h
-    MirrorShatter.cpp
-    MirrorShatter.h
     MirrorTestDriver.cpp
     MirrorTestDriver.h
     PhotonTracer.cpp
@@ -64,8 +60,6 @@ set(DEMO_SOURCES
     SceneBuilder.h
     SceneDriver.cpp
     SceneTick.h
-    SpotlightCones.cpp
-    SpotlightCones.h
     SDL2.cpp
     SDL2.h
     Snapshot.cpp

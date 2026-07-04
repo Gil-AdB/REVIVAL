@@ -23,8 +23,8 @@
 #include "GREETS.H"
 #include "GreetsDisco.h"
 #include "BlasterBolts.h"
-#include "GreetsMirror.h"
-#include "MirrorShatter.h"
+#include <RENDER/GreetsMirror.h>
+#include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
 #include "FillerTest.h"
 #include "MeshOps.h"
@@ -2244,6 +2244,19 @@ struct GreetsScene : SceneDriver {
 			timerStack[i] = Timer;
 
 		SetCurrentScene(GreetSc);
+		// Unified-TBR transparent path (structural push: retire the legacy
+		// per-mesh xpar peel). Greets never called TBR_Init — capability-wise
+		// the TBR strips handle peeled multi-layer + additive (fountain), it
+		// was only ever missing initialization here. Scn_SpriteTBR also
+		// routes omni flares through the strip sort, which fixes the known
+		// "flare draws over transparents" ordering bug (immediate flares
+		// can only be fully-before or fully-after the xpar composite).
+		// --no-deferred_unified_tbr restores the legacy peel exactly (no
+		// SBufferHead, no flare divert).
+		if (fds::FeatureFlags::deferred_unified_tbr()) {
+			TBR_EnsureInit(GreetSc, 256);
+			GreetSc->Flags |= Scn_SpriteTBR;
+		}
 		Calibrate_FreeCamera_ForScene(GreetSc->FZP, GreetSc->CameraHead);
 		for(Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh) continue;
@@ -2559,6 +2572,10 @@ struct GreetsScene : SceneDriver {
 	bool tick() override {
 		// ESC = exit demo (handled by runSceneBlocking); Backspace = skip scene.
 		if (Keyboard[ScBackSpace] || Timer >= CHPartTime) return false;
+
+		// Mid-scene resize: the TBR strip count tracks YRes (no on_resize
+		// hook here; the check is two compares when current).
+		if (GreetSc->Flags & Scn_SpriteTBR) TBR_EnsureInit(GreetSc, 256);
 
 		numFrames++;
 

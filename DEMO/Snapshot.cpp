@@ -7,7 +7,7 @@
 #include "Rev.h"
 #include "Scenes.h"
 #include "SceneTick.h"
-#include "SpotlightCones.h"
+#include <RENDER/SpotlightCones.h>
 
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
@@ -4194,7 +4194,7 @@ int RunLightmapTest(const SnapshotConfig& cfg, int xres, int yres) {
 // filename, half-silvered-glass path).
 // ============================================================
 
-#include "GreetsMirror.h"
+#include <RENDER/GreetsMirror.h>
 #include "SceneBuilder.h"
 
 extern void Compute_FaceVertexIndices(TriMesh *T);

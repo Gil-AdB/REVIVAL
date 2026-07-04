@@ -526,10 +526,13 @@ inline void SavePolyStats(const char * /*fileName*/) {}
 
 // Tile based rendering
 void TBR_Init(Scene *Sc, mword size);
+void TBR_EnsureInit(Scene *Sc, mword entriesPerStrip);
+bool TBR_MatchesTarget(const Scene *Sc);
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
                 const fds::RenderTarget& rt,
                 const fds::CameraContext& cam);
-void TBR_Render(Scene *Sc);
+struct DeferredLightingCtx;
+void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx);
 void InsertTransparentToTBR(Face *F);
 
 // Per-strip transparent rendering. Called from TBR_Render's per-strip
@@ -538,7 +541,8 @@ void InsertTransparentToTBR(Face *F);
 // front layer if front), rasterizes the clump's faces with clipper rect
 // limited to the strip, then composites that layer onto VPage strip rows
 // via the existing transparent lighting kernel.
-void RenderXparClumpInStrip(class Face** faces, int count, bool front,
+void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
+                            class Face** faces, int count, bool front,
                              int strip_y, int strip_h);
 
 bool deferredUnifiedTbrEnabled();

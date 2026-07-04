@@ -43,6 +43,13 @@
 #include "RENDER/DeferredCommon.h"
 #include "Threads.h"
 
+// RenderContext migration: this TU is GLOBAL-CLEAN — every render pass
+// reads its target/projection state from the DeferredLightingCtx param,
+// never from the engine globals. The poison makes the compiler enforce
+// it (any new use of these names in this file is a build error; read
+// ctx, or take a param).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
+
 // Shared tile-drain semaphore (defined in DeferredFastFog.cpp). AA never runs
 // concurrently with SSAO/fog, so sharing the counter is safe.
 namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
@@ -56,12 +63,12 @@ namespace {
 std::vector<dword> g_aaSrc;
 }
 
-void Render_EdgeAA() {
+void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 	if (!fds::FeatureFlags::aa()) return;
-	if (!g_gbuffer) return;
-	const int    W = (int)XRes, H = (int)YRes;
+	if (!ctx.gb) return;
+	const int    W = ctx.xres, H = ctx.yres;
 	const size_t N = size_t(W) * size_t(H);
-	if (g_gbuffer->normal.size() < N) return;          // forward path: no gbuffer
+	if (ctx.gb->normal.size() < N) return;             // forward path: no gbuffer
 
 	const auto t0 = std::chrono::steady_clock::now();
 
@@ -69,10 +76,10 @@ void Render_EdgeAA() {
 	if (strength < 0.0f) strength = 0.0f;
 	if (strength > 1.0f) strength = 1.0f;
 	const bool viz = fds::FeatureFlags::aa_viz();   // edge heatmap instead of blend
-	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
-	const meka::u16* nrm = g_gbuffer->normal.data();
-	const word*      zEnc = ZPage16;
-	dword*           out  = reinterpret_cast<dword*>(VPage);
+	const float invZScale = (ctx.zscale != 0.0f) ? 1.0f / ctx.zscale : 1.0f;
+	const meka::u16* nrm = ctx.gb->normal.data();
+	const word*      zEnc = ctx.zpage16;
+	dword*           out  = reinterpret_cast<dword*>(ctx.vpage);
 
 	if (g_aaSrc.size() < N) g_aaSrc.resize(N);
 	dword* src = g_aaSrc.data();

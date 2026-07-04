@@ -1440,7 +1440,8 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// drawing immediately — otherwise the particle TBR and the xpar clumps
 	// composite over the lamp glows (fountain vortex over the purple omni),
 	// and an immediate draw can only be fully-before or fully-after them.
-	if (CurScene->Flags & Scn_SpriteTBR) {
+	// TBR_MatchesTarget: offscreen passes (mirror RTT) draw immediate.
+	if ((CurScene->Flags & Scn_SpriteTBR) && TBR_MatchesTarget(CurScene)) {
 		TBR_Sprite(F, V, numVerts, miplevel, rt, cam);
 		return;
 	}
@@ -1674,6 +1675,35 @@ void TBR_Init(Scene *Sc, mword size)
 		Sc->SBufferHead[i] = -1;
 }
 
+// (Re)initialize the scene's TBR when it's missing or sized for a stale
+// YRes (mid-scene resize reallocates the framebuffer but scenes without
+// an explicit on_resize never re-ran TBR_Init — inserts past NumTiles
+// would corrupt). Cheap no-op when current; safe to call every tick.
+// entriesPerStrip sizes the span pool; InsertSpanToTBR drops overflow
+// gracefully, so this is a budget, not a hard bound.
+void TBR_EnsureInit(Scene *Sc, mword entriesPerStrip)
+{
+	const mword numTiles = (YRes+TILESIZE-1)>>TILELOG;
+	if (Sc->SBufferHead && Sc->NumTiles == numTiles) return;
+	delete[] Sc->SBuffer;
+	delete[] Sc->SBufferHead;
+	TBR_Init(Sc, numTiles * entriesPerStrip);
+}
+
+// True when the scene's TBR strips match the CURRENT render target.
+// Every TBR consumer (sprite divert, xpar routing, TBR_Render) must
+// check this, not just Scn_SpriteTBR: an offscreen pass (mirror RTT
+// via OffscreenViewScope, cube bakes) swaps the YRes global while
+// CurScene keeps its main-sized strip arrays — inserting there would
+// index strips with offscreen-space Y coords, and TBR_Render would
+// draw main-frame entries onto the small target. Offscreen passes
+// fall back to immediate sprites / the legacy peel.
+bool TBR_MatchesTarget(const Scene *Sc)
+{
+	return Sc->SBufferHead != nullptr &&
+	       Sc->NumTiles == mword((YRes+TILESIZE-1)>>TILELOG);
+}
+
 void InsertSpanToTBR(Face *F, dword tile, float renderZ)
 {
 	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
@@ -1804,6 +1834,23 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// flare image size is written as a floating pt.
 	Size *= F->FlareSize;
 
+	// Mirror-clone flare: drawable only inside its OWN mirror's stamped
+	// footprint (center-point test — same gate as The_MMX_Scalar's
+	// immediate path; see the comment there for why depth alone isn't
+	// enough). The mask is stamped before the FList sprite loop that
+	// inserts here, so it's valid at insert time. Without this, a TBR
+	// scene with mirrors (greets) re-grows the "clone flare through
+	// walls / in other mirrors" family the immediate path already fixed.
+	if (F->mirrorMaskTag != 0) {
+		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
+		int32_t mx = int32_t(_A->PX);
+		int32_t my = int32_t(_A->PY);
+		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+		    != F->mirrorMaskTag) return;
+	}
+
 	if (Size<=0) return;
 	if (F->Txtr&&F->Txtr->Txtr)
 	{
@@ -1820,30 +1867,22 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	}
 }
 
-namespace tbr {
-	std::mutex					tileCounterMutex;
-	std::atomic<int>			tileCounter;
-	std::condition_variable		condition;
-}
-
 // Execute/Clear sprite buffer
 //
 // Per-strip walk: each Y-strip (8 rows) is processed by one worker
-// thread. The linked list at SBufferHead[i] holds all sprite entries
-// that overlap this strip (and, once unified, transparent face
-// fragments too). At flush time we collect entries into a scratch
-// array, sort descending by renderZ (back-to-front), and walk the
-// sorted array dispatching each item.
-void TBR_Render(Scene *Sc)
+// thread (work-stealing dispatchIndexed — a task per strip cost one
+// enqueue mutex+notify per strip). The linked list at SBufferHead[i]
+// holds all sprite entries that overlap this strip (and, once
+// unified, transparent face fragments too). At flush time we collect
+// entries into a scratch array, sort descending by renderZ
+// (back-to-front), and walk the sorted array dispatching each item.
+void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 {
-	dword numTiles = Sc->NumTiles;
+	const int numTiles = int(Sc->NumTiles);
+	std::counting_semaphore<INT_MAX> stripsDone{0};
 
-	tbr::tileCounter = 0;
-
-	for (mword i = 0; i < numTiles; i++)
-	{
-
-		ThreadPool::instance().enqueue([i, Sc]() {
+	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx](int ii) {
+			const mword i = mword(ii);
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
 			if (spriteClipY2 > YRes) spriteClipY2 = YRes;
@@ -1900,9 +1939,14 @@ void TBR_Render(Scene *Sc)
 			};
 			auto flushXparClump = [&]() {
 				if (xparClump.empty()) return;
-				RenderXparClumpInStrip(xparClump.data(),
-				                       int(xparClump.size()),
-				                       clumpFront, strip_y_i, strip_h);
+				// dctx is null only on a non-deferred TBR frame (forward
+				// fountain fallback) — no transparent faces were routed
+				// into the strips there, so the clump is always empty.
+				if (dctx) {
+					RenderXparClumpInStrip(*dctx, xparClump.data(),
+					                       int(xparClump.size()),
+					                       clumpFront, strip_y_i, strip_h);
+				}
 				xparClump.clear();
 			};
 
@@ -1917,7 +1961,16 @@ void TBR_Render(Scene *Sc)
 
 					Vertex* V = F->A;
 					float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
-					dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+					// Far-plane clamp matches The_MMX_Scalar's immediate path
+					// ("support no far clipping on omnilights"): beyond FZP the
+					// raw encoding wraps negative and the sprite would WIN every
+					// per-pixel z-test instead of losing them (city's distant
+					// beacons drew over their towers).
+					dword Z;
+					if (V->TPos_AOS.z < C_FZP)
+						Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+					else
+						Z = 1;
 					// Texture-res dispatch: particles are 32×32 and tinted by
 					// their vertex lighting; omni FLARES (diverted here by
 					// The_MMX_Scalar for TBR scenes) carry 256×256 textures
@@ -1925,8 +1978,26 @@ void TBR_Render(Scene *Sc)
 					// the immediate-draw path (the omni V's LR/LG/LB are not
 					// maintained and would tint the flare black).
 					if (F->Txtr->Txtr->SizeX == 256) {
+						// Fogged scene: dim the flare by depth — same colorize
+						// the immediate path applies (city beacons at distance;
+						// without this the TBR flares pop full-brightness).
+						dword Col = 0xFFFFFF;
+						if (CurScene->Flags & Scn_Fogged) {
+							const float fogRate = 1.0f - V->TPos_AOS.z * C_rFZP;
+							const int32_t iFog = Fist(255.0f * fogRate);
+							Col = iFog + (iFog << 8) + (iFog << 16);
+						}
+						// Center-point occlusion reject (Face_PointZTest), as
+						// in the immediate path.
+						if (F->Flags & Face_PointZTest) {
+							int32_t cx = int32_t(V->PX);
+							if (cx < 0) cx = 0; else if (cx > XRes-1) cx = XRes-1;
+							int32_t cy = int32_t(V->PY);
+							if (cy < 0) cy = 0; else if (cy > YRes-1) cy = YRes-1;
+							if (Z <= ZPage16[XRes*cy + cx]) continue;
+						}
 						SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen,
-							F->Txtr->Txtr->Data, VPage, 0xFFFFFF, Z,
+							F->Txtr->Txtr->Data, VPage, Col, Z,
 							0, spriteClipY1, XRes, spriteClipY2);
 					} else {
 						dword R = V->LR, G = V->LG, B = V->LB;
@@ -1955,17 +2026,9 @@ void TBR_Render(Scene *Sc)
 			// Trailing flush.
 			flushXparClump();
 			Sc->SBufferHead[i] = -1;
+	});
 
-			std::unique_lock<std::mutex> lock(tbr::tileCounterMutex);
-			++tbr::tileCounter;
-			tbr::condition.notify_one();
-		});
-	}
-
-	{
-		std::unique_lock<std::mutex> lock(tbr::tileCounterMutex);
-		tbr::condition.wait(lock, [numTiles] {return tbr::tileCounter == numTiles; });
-	}
+	for (int k = 0; k < numTiles; ++k) stripsDone.acquire();
 
 	Sc->SBufferCur = 0;
 }

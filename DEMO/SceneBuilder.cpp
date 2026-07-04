@@ -151,21 +151,9 @@ Material *SceneBuilder::AddMaterial(const char *name, Texture *tex,
 // ── Filler picker ──────────────────────────────────────────────────
 
 RasterFunc SceneBuilder::PickFillerForMaterial(const Material *mat) {
-    if (!mat) {
-        return TheOtherBarry<barry::TBlendMode::OVERWRITE,
-                             barry::TTextureMode::NORMAL>;
-    }
-    // Transparent: blend mode TRANSPARENT, NORMAL texture lookup.
-    if (mat->Flags & Mat_Transparent) {
-        return TheOtherBarry<barry::TBlendMode::TRANSPARENT,
-                             barry::TTextureMode::NORMAL>;
-    }
-    // (Reflective materials use Face::Flags & Face_Reflective rather
-    // than a Material-level flag, so the picker can't route by mat
-    // alone — caller must stamp F.Filler directly for those.)
-    // Default opaque.
-    return TheOtherBarry<barry::TBlendMode::OVERWRITE,
-                         barry::TTextureMode::NORMAL>;
+    // Canonical picker lives with the fillers (TheOtherBarry.h) so
+    // engine-side consumers (MirrorShatter) don't reach into DEMO.
+    return ::PickFillerForMaterial(mat);
 }
 
 // ── Geometry ───────────────────────────────────────────────────────

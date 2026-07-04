@@ -182,3 +182,24 @@ Verdicts for the cluster:
   already exists (computeMirrorPresenceGrid) but inside footprint tiles
   every pixel still iterates the clone lights.
 User approved: "let's try to attack the cones/clones".
+
+## 2026-07-04 — clone-cone footprint cull SHIPPED (5a58269); clone-kernel lever measured DEAD
+
+FDS_CONE_ATTR revealed 40 of 50 cone spots were mirror clones, ~75% of the
+(tile × spot) volume; the cone/halo binning had no mirror-footprint cull
+(the kernel's list builder did). Fix: reuse computeMirrorPresenceGrid bits
+via ctx (copied BY VALUE — offscreen bakes recompute the static grid
+mid-frame). Exactly conservative (per-pixel gate is mmask==id): 9-pose
+warm sequence byte-identical, gate ALL PASS.
+
+Window t=1130-1162: cones wall 6.4-7.5 → 3.6-4.1 ms (busy 71-83 → 39-43),
+frame p50 −4 ms, matching the FDS_CONE_SKIP_CLONE ablation floor with the
+feature intact. ts=491: cones 2.5 → 1.2, frame ~−1.3 ms.
+
+**Clone lights in the KERNEL are already contained** — post-fix window
+measurement: numLights 33 → 117 with mirror on, but avg lights/tile 10.5
+vs 10.9 and w1 10.0 vs 10.1 ms (the pre-fix "10.8 vs ~8" gap was load
+noise). Don't build a clone-light cap. Remaining mirror delta in the
+window (~+2.5 min / +4 p50 ms) is machinery: xpar peel 1.3-1.5, RTT 0.93,
+StampMasks+grid 0.8, clone raster/transform — no single big lever left;
+next-largest single blocks frame-wide are unchanged (kernel, SSAO, post).

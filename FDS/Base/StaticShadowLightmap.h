@@ -92,7 +92,14 @@ struct StaticShadowLightmap {
     }
     inline void setCovers(int face, int lmOmniIdx) {
         const size_t bit = size_t(face) * size_t(numOmnis) + size_t(lmOmniIdx);
-        coverageBits[bit >> 3] |= uint8_t(1u << (bit & 7));
+        // Atomic OR: the bake fans faces across pool workers and adjacent
+        // faces share coverage bytes (bit = face*K + omni), so a plain |=
+        // is a cross-worker RMW that can drop a neighbouring face's bit —
+        // the kernel then skips an omni that DOES light that face
+        // (TSan-confirmed, nondeterministic shading). Relaxed is enough:
+        // readers only run after the bake thread is joined.
+        __atomic_fetch_or(&coverageBits[bit >> 3],
+                          uint8_t(1u << (bit & 7)), __ATOMIC_RELAXED);
     }
 
     // Sized allocation. Re-callable if scene contents change; existing

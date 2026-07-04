@@ -908,14 +908,15 @@ void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
 	// planes it needs are tiled.
 	if (sSwz && !swzMaps.empty()) {
 		const auto tSwzStart = clk::now();
-		for (size_t li : swzMaps) {
-			ShadowMap *smp = &g_shadowMaps[li];
+		{
+			const size_t *maps = swzMaps.data();
 			const bool dynPl = writeDynamicBuf;
-			ThreadPool::instance().enqueue([smp, dynPl]() {
+			dispatchIndexed(int(swzMaps.size()), &renderns::shadowDone,
+			                [maps, dynPl](int k) {
+				ShadowMap *smp = &g_shadowMaps[maps[k]];
 				ShadowMap_SwizzlePlanes(*smp, dynPl);
 				if (!dynPl && smp->depthDynSw.empty())
 					ShadowMap_SwizzlePlanes(*smp, true);   // one-shot zeroed dyn copy
-				renderns::shadowDone.release();
 			});
 		}
 		for (size_t k = 0; k < swzMaps.size(); ++k) renderns::shadowDone.acquire();

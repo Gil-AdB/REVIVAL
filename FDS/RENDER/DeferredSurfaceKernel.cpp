@@ -13,7 +13,7 @@
 //   renderDeferredTransparentTile_Front/Back() — wrappers for the per-tile
 //                                       transparent-layer composite that
 //                                       renderFrame calls inside a runTilePass
-//                                       lambda. The template + g_deferredCtx
+//                                       lambda. The template
 //                                       stay in this TU.
 //   RenderXparClumpInStrip()         — TBR-strip xpar batch dispatch
 
@@ -94,9 +94,6 @@ namespace renderns {
 static std::atomic<uint64_t> g_shadowProfSamples{0};
 static std::atomic<uint64_t> g_shadowProfLineTransitions{0};
 thread_local uintptr_t s_shadowProfLastLine = 0;
-// File-scope ctx shared by all deferred TUs; see DeferredCommon.h.
-DeferredLightingCtx g_deferredCtx{};
-
 // Runtime mip-level debug knobs. Defined here so FDS doesn't need a
 // symbol from DEMO. Declared in Rev.h; toggled by N / Shift+N keys.
 std::atomic<int>  g_forceMipLevel{-1};
@@ -2424,6 +2421,10 @@ bool deferredUnifiedTbrEnabled() {
 	if (!fds::FeatureFlags::deferred_unified_tbr()) return false;
 	if (!CurScene) return false;
 	if (!CurScene->SBufferHead || CurScene->NumTiles == 0) return false;
+	// Offscreen pass (mirror RTT, cube bake): the YRes global is swapped
+	// but the strip arrays are main-sized — fall back to the legacy peel
+	// there (see TBR_MatchesTarget).
+	if (!TBR_MatchesTarget(CurScene)) return false;
 	return true;
 }
 
@@ -2450,7 +2451,8 @@ int xparPeelPassesEffective() {
 // strip's slice (61 KB per layer at 1920 wide), raster the clump's
 // faces with clipper extents = strip rect, then composite the strip
 // rows via Render_DeferredTransparentLighting_Tile<Layer>.
-void RenderXparClumpInStrip(Face** faces, int count, bool front,
+void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
+                             Face** faces, int count, bool front,
                              int strip_y, int strip_h)
 {
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
@@ -2486,7 +2488,7 @@ void RenderXparClumpInStrip(Face** faces, int count, bool front,
 		meka::g_rasterStripClamp = savedClamp;
 
 		const int stripIdx = strip_y >> 3;  // TILELOG=3
-		DeferredLightingCtx stripCtx = g_deferredCtx;
+		DeferredLightingCtx stripCtx = dctx;
 		stripCtx.tileLights = g_stripLights;
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
@@ -4083,6 +4085,10 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	ctx.lights     = &lights;
 	ctx.numLights  = numLights;
 	ctx.tileLights = tileLights;
+	ctx.hasMirrorPresence = (tilePresence != nullptr);
+	if (tilePresence)
+		std::memcpy(ctx.tileMirrorPresence, tilePresence,
+		            sizeof(ctx.tileMirrorPresence));
 	ctx.invFOVX    = 1.0f / FOVX;
 	ctx.invFOVY    = 1.0f / FOVY;
 	ctx.invZScale  = 1.0f / float(g_zscale);
@@ -4138,24 +4144,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			renderns::tileDone.acquire();
 		}
 	} else {
-		// Work-stealing chunk dispatch: enqueue only W tasks, each pulling
-		// tiles off an atomic cursor. The old task-per-tile loop cost ~1.2 ms
-		// SERIAL per wave (96 × mutex+notify_one, and each woken worker
-		// contends the same queue mutex to pop). The tile kernel still
-		// releases tileDone once per tile, so the drain is unchanged; tiles
-		// write disjoint regions in any order → byte-identical.
-		auto cursor = std::make_shared<std::atomic<int>>(0);
-		const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
-		for (int k = 0; k < nTasks; ++k) {
-			ThreadPool::instance().enqueue([&ctx, useOuterVec, cursor, tileBounds]() {
-				int t;
-				while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
-					int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
-					if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
-					else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
-				}
-			});
-		}
+		// Work-stealing chunk dispatch via dispatchIndexed (the tile kernel
+		// releases tileDone itself → done=nullptr; drain unchanged). The old
+		// task-per-tile loop cost ~1.2 ms SERIAL per wave (96 ×
+		// mutex+notify_one, and each woken worker contends the same queue
+		// mutex to pop). Tiles write disjoint regions in any order →
+		// byte-identical.
+		dispatchIndexed(nTiles, nullptr, [&ctx, useOuterVec, tileBounds](int t) {
+			int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+			if (useOuterVec) Render_DeferredLighting_Tile_OuterVec(ctx, t, x1, y1, x2, y2);
+			else             Render_DeferredLighting_Tile(ctx, t, x1, y1, x2, y2);
+		});
 		TailProf::mark("w1-enqueue", _w1q);
 		TailProf::drain(renderns::tileDone, nTiles, "lighting-w1");
 	}
@@ -4172,18 +4171,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 				renderns::tileDone.acquire();
 			}
 		} else {
-			// Same work-stealing chunk dispatch as wave 1 (see above).
-			auto cursor = std::make_shared<std::atomic<int>>(0);
-			const int nTasks = std::min<int>((int)ThreadPool::instance().size(), nTiles);
-			for (int k = 0; k < nTasks; ++k) {
-				ThreadPool::instance().enqueue([&ctx, cursor, tileBounds]() {
-					int t;
-					while ((t = cursor->fetch_add(1, std::memory_order_relaxed)) < nTiles) {
-						int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
-						Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
-					}
-				});
-			}
+			// Same dispatchIndexed shape as wave 1 (see above).
+			dispatchIndexed(nTiles, nullptr, [&ctx, tileBounds](int t) {
+				int x1, y1, x2, y2; tileBounds(t, x1, y1, x2, y2);
+				Render_DeferredLighting_TileFill(ctx, t, x1, y1, x2, y2);
+			});
 			TailProf::drain(renderns::tileDone, nTiles, "lighting-w2");
 		}
 	}
@@ -4202,20 +4194,22 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
 // renderFrame in RENDER.CPP dispatches transparent-layer composites in a
-// tile-job lambda; the template + g_deferredCtx live here, so we expose
+// tile-job lambda; the template lives here, so we expose
 // front/back wrappers it can forward into without seeing the template.
 
-void renderDeferredTransparentTile_Front(int tileIdx, int x1, int y1, int x2, int y2) {
+void renderDeferredTransparentTile_Front(const DeferredLightingCtx &ctx,
+                                          int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+		ctx, tileIdx, x1, y1, x2, y2);
 	// Release the renderns::tileDone permit on behalf of the inner
 	// template — see the comment in that template's body for why the
 	// release lives here instead of inside.
 	renderns::tileDone.release();
 }
-void renderDeferredTransparentTile_Back(int tileIdx, int x1, int y1, int x2, int y2) {
+void renderDeferredTransparentTile_Back(const DeferredLightingCtx &ctx,
+                                         int tileIdx, int x1, int y1, int x2, int y2) {
 	Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-		g_deferredCtx, tileIdx, x1, y1, x2, y2);
+		ctx, tileIdx, x1, y1, x2, y2);
 	renderns::tileDone.release();
 }
 

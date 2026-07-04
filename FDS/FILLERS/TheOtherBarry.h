@@ -1106,3 +1106,21 @@ extern template void TheOtherBarry<barry::TBlendMode::ADDITIVE,     barry::TText
 // Per-pixel source-alpha blend — reusable primitive (no consumer yet). Compiled
 // here so it's ready; add BILINEAR / NONE / WriteZ=false variants when needed.
 extern template void TheOtherBarry<barry::TBlendMode::SRC_ALPHA,    barry::TTextureMode::NORMAL>        (Face*, Vertex**, dword, dword, const fds::RenderTarget&, const fds::CameraContext&);
+
+// Map a Material to its TheOtherBarry filler by flags — the single
+// canonical picker for hand-built / regenerated geometry (SceneBuilder
+// quads, shatter shards). Reflective faces route by Face::Flags &
+// Face_Reflective, which a Material-only picker can't see: the caller
+// stamps F.Filler directly for those.
+inline RasterFunc PickFillerForMaterial(const Material *mat) {
+	if (!mat) {
+		return TheOtherBarry<barry::TBlendMode::OVERWRITE,
+		                     barry::TTextureMode::NORMAL>;
+	}
+	if (mat->Flags & Mat_Transparent) {
+		return TheOtherBarry<barry::TBlendMode::TRANSPARENT,
+		                     barry::TTextureMode::NORMAL>;
+	}
+	return TheOtherBarry<barry::TBlendMode::OVERWRITE,
+	                     barry::TTextureMode::NORMAL>;
+}

@@ -1,24 +1,80 @@
-# SESSION STATE — mirror/xpar cost campaign (updated 2026-07-03, end of marathon session)
+# SESSION STATE — structural push (updated 2026-07-04)
 
 Read this when resuming. Branch feature/soa-vertex, all pushed.
-Perf floor at the ts=491 reference: **~40.4 ms min** (session start was 43.4;
-campaign start ~51). Bench recipe + load-sanity rules live in the memory file
+Perf floor at the ts=491 reference: **~40.4 ms min** on an idle box
+(machine-load drift makes day-to-day mins swing 41-44; always interleave
+A/B). Bench recipe + load-sanity rules live in the memory file
 `greets-bench-reference-frame` and docs/FRAME_PIPELINE_PLAN.md.
 
-## CURRENT TASK (user: "let's try to attack the cones/clones")
+## STRUCTURAL PUSH (user-approved campaign, 2026-07-04) — status
 
-The t=1130-1162 slow-cluster window was measured (FRAME_PIPELINE_PLAN.md
-2026-07-03 cluster entry): mirror = +3.3 min / +7 p50 ms there, but the
-xpar glass composite is only 0.6 ms at that framing — the glass fast path
-(below) got DEPRIORITIZED. The levers that pay at BOTH ts=491 and the
-cluster:
-1. **Cones** — 6.55 ms wall / 72.8 ms pool busy in-window (3x the ts=491
-   cone load): event beams + 12-spot bounce pool + clone beams. Attack =
-   per-category attribution first (which spots cost what), then cap/cull.
-2. **Clone lights in the kernel** (option c) — computeMirrorPresenceGrid
-   already culls clone omnis to footprint tiles, but inside those tiles
-   every pixel iterates them (per-pixel pmid filter rejects late, in the
-   loop). w1 = 10.8 in-window vs ~8 mirror-off.
+Ranked list (full reasoning in the 2026-07-04 conversation + below):
+1. ✅ **#3 dispatch consolidation (e1355f0)** — every pool fan now goes
+   through dispatchIndexed (was: task-per-tile loops, hand-rolled
+   cursor+semaphore fans, TBR_Render's mutex+condvar). Net −76 lines.
+   Validated: gate ALL PASS, city/fountain snapshots byte-identical,
+   greets diff == pre-existing noise floor, TSan clean, perf-neutral.
+2. ✅ **#2 binning helper (c786b1f)** — lightSphereScreenRect in
+   DeferredCommon.h replaces the 4 copied sphere→tile-range blocks
+   (kernel/strips/cones/halos; the clone-cone cull gap was exactly this
+   rot). zeroTileLightPadding folds the two padding blocks. Same
+   validation, all green.
+3. ✅ **TBR migration — ALL SCENES SHIPPED** (greets 800fc47, city
+   d24bb7f, chase 8c55e80). Every scene's transparents + flares now go
+   through the TBR strips (TBR_EnsureInit + Scn_SpriteTBR at scene init,
+   gated on --deferred_unified_tbr; --no-… = exact legacy). Holes closed
+   on the way: TBR_Sprite got the mirror-clone footprint gate; new
+   TBR_MatchesTarget guards all TBR consumers against offscreen passes
+   (forward RTT would cross-pollute the main strips); the city A/B
+   exposed 3 missing behaviors in TBR_Render's flare draw vs the
+   immediate path — fogged colorize, far-plane Z clamp (beyond-FZP
+   encoding WRAPS and the flare wins every z-test), Face_PointZTest —
+   all ported (fountain byte-identical vs pre-campaign binary).
+   Flares now sort by Z — fixes the known "flare over transparents"
+   bug. **USER EYEBALL PENDING live**: greets lamp flares through
+   glass (t=700), city beacon flares, chase/city water. Perf: greets
+   ~1ms faster, city ~0.4ms faster (interleaved; the first city bench
+   read as a 7ms regression = machine load — ALWAYS interleave).
+   The legacy peel remains ONLY as the offscreen fallback + escape
+   flag; deleting it outright needs an offscreen story first.
+4. 🟨 **#1 RenderContext migration — the g_deferredCtx SINGLETON IS
+   DELETED (f6519c7 + 5a9967f)**. renderFrame's stack dctx is the only
+   source; every reader takes ctx by param (fog pass, legacy-peel
+   transparent wrappers, RenderXparClumpInStrip via TBR_Render's new
+   ctx pointer — null on forward TBR frames). Shadow locals renamed dc.
+   Byte-identical on 4 scenes + gate. REMAINING (plan steps 4-5, the
+   ~400-site mechanical campaign): thread XRes/VPage/FList/CAll/
+   CurScene into RenderContext function-by-function (leaf-first, gate
+   each), then per-instance pipelines for offscreen parallelism
+   (RTT/shadow-raster). See RENDER_CONTEXT_PLAN.md "Revised remaining
+   steps" 4-5.
+5. ✅ **#4 mirror system promoted to FDS/RENDER (1e26fc5)** —
+   GreetsMirror + MirrorShatter + SpotlightCones moved wholesale (they
+   were already parameterized); canonical PickFillerForMaterial now
+   lives in TheOtherBarry.h (SceneBuilder delegates). Gate PASS,
+   teleporter smoke byte-identical, clean-tree build verified.
+
+Also fixed this session (before the push): lightmap-bake coverage-bit
+race (0df96a6, atomic OR — TSan-confirmed real, greets init now clean);
+teleporter-stone run-to-run nondeterminism is NOT it — still open,
+separate cause. DoF "not working" = user config had --dof_range=20 but
+the flag is a FRACTION of far-plane (0.03-0.1 sane); code is fine.
+fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
+OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
+still shadows the merged pinned 512KB one — user to decide.
+
+## CONES/CLONES CAMPAIGN — DONE 2026-07-04 (commit 5a58269)
+
+The t=1130-1162 cluster + attack results (full numbers in
+FRAME_PIPELINE_PLAN.md 2026-07-03/04 entries):
+1. **Clone-cone footprint cull SHIPPED**: 40/50 cone spots were mirror
+   clones with no tile-level footprint cull. Cones wall 6.4-7.5 → 3.6-4.1
+   in-window (p50 −4 ms), ts=491 −1.3 ms. Byte-identical + gate PASS.
+   Debug: FDS_NO_CONE_MIRROR_CULL / FDS_CONE_SKIP_* / FDS_CONE_ATTR.
+2. **Clone lights in the kernel: measured DEAD** — presence cull already
+   contains them (w1 10.0 vs 10.1 mirror off/on, avg lights/tile ~10.5
+   both). Don't build a cap. Remaining mirror delta (+2.5 min/+4 p50) is
+   spread machinery (peel 1.3-1.5, RTT 0.9, masks 0.8, clone raster).
 
 ## PREVIOUS NEXT-TASK (deprioritized 2026-07-03): xpar composite fast path
 
