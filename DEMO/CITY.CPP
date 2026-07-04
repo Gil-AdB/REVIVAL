@@ -2794,6 +2794,50 @@ struct CityScene : SceneDriver {
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
 
+		// CITYSNAP_VIEW="px,py,pz,fx,fy,fz[,ifov]" — LIVE-loop camera pin
+		// (dev/debug only; no-op unless the env var is set). Snapshot.cpp
+		// pins the same way for the offline harness, but the per-frame
+		// texture-oscillation repro only shows in the LIVE loop (real dTime
+		// + per-frame rand() flicker + threading). Pinning here freezes the
+		// camera so the world still animates (water, omni flicker, lights)
+		// while consecutive dumps stay spatially aligned — isolating the
+		// temporal shading difference from camera motion. Overrides View
+		// AFTER Dynamic_Camera so nothing downstream re-points it this frame.
+		{
+			static bool sPinInit = false;
+			static bool sPinOn   = false;
+			if (!sPinInit) {
+				sPinInit = true;
+				if (const char* s = std::getenv("CITYSNAP_VIEW")) {
+					float px, py, pz, fx = 0, fy = 0, fz = 1, fov = 0;
+					const int n = std::sscanf(s, "%f,%f,%f,%f,%f,%f,%f",
+					                          &px, &py, &pz, &fx, &fy, &fz, &fov);
+					if (n >= 6) {
+						if (fov <= 0) fov = View->IFOV;   // borrow spline cam's fov
+						// Pin via the global free camera FC: Animate_Objects skips
+						// its camera-spline walk when the passed cam == &FC (see
+						// Transform.cpp:255), so the pinned pose survives the tick
+						// without a zeroed-Spline deref. Same tactic as Snapshot.cpp.
+						FC.ISource = Vector(px, py, pz);
+						Vector fwd(fx, fy, fz); Vector_Norm(&fwd);
+						Vector worldUp(0.0f, 1.0f, 0.0f);
+						if (std::fabs(fwd.y) > 0.95f) worldUp = Vector(0.0f, 0.0f, 1.0f);
+						Vector right; Cross_Product(&worldUp, &fwd, &right); Vector_Norm(&right);
+						Vector up;    Cross_Product(&fwd, &right, &up);
+						FC.Mat[0][0]=right.x; FC.Mat[0][1]=right.y; FC.Mat[0][2]=right.z;
+						FC.Mat[1][0]=up.x;    FC.Mat[1][1]=up.y;    FC.Mat[1][2]=up.z;
+						FC.Mat[2][0]=fwd.x;   FC.Mat[2][1]=fwd.y;   FC.Mat[2][2]=fwd.z;
+						FC.IFOV = fov;
+						CalcPersp(&FC);
+						sPinOn = true;
+						fprintf(stderr, "[CITYSNAP-LIVE] view pinned pos=(%.0f,%.0f,%.0f) fwd=(%.3f,%.3f,%.3f) ifov=%.1f\n",
+						        px, py, pz, fwd.x, fwd.y, fwd.z, fov);
+					}
+				}
+			}
+			if (sPinOn) View = &FC;
+		}
+
 		// SkyCube uses the main camera; render it AFTER Dynamic_Camera
 		// so it tracks the current frame's view (previously was rendered
 		// one frame stale because it ran before camera update).

@@ -1188,7 +1188,12 @@ void CodeEntry(void *var)
 		Run_ConeTest();
 		goto demo_exit;
 	}
-	if (!skipToFountain) {
+	// FDS_SKIP_INTRO=1 (dev/debug only): skip the Glato intro + its
+	// wall-clock Timer<4000 gate and jump straight to City. Used to make
+	// the per-frame city-texture-oscillation repro captures cheap (the
+	// intro is ~150s of wall time). No effect on a normal run. Inlined
+	// (no local) so it doesn't cross the earlier goto demo_exit jumps.
+	if (!skipToFountain && std::getenv("FDS_SKIP_INTRO") == nullptr) {
 	Run_Glato();
 
 	t1.join();
