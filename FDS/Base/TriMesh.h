@@ -47,6 +47,15 @@ struct TriMesh
     float            BSphereRad     = 0.0f; // Bounding Sphere Radius, squared. kept for backward compatibility until pipeline code is updated
     DWord            Flags          = 0;
 
+    // env_cube (forward reflective path): six padded cube-face reflection
+    // textures for this mesh (Sachletz-tiled, pow2). Populated by CITY's
+    // per-building bake when --env_cube is on; Transform's Face_Reflective
+    // block picks ONE face per triangle (centroid dominant axis) and stamps
+    // F->ReflectionTexture = EnvCubeFaces[k]. Null (default) → the legacy
+    // equirect F->ReflectionTexture path runs unchanged. See RENDER/EnvCube.h.
+    Texture         *EnvCubeFaces[6] = { nullptr, nullptr, nullptr,
+                                         nullptr, nullptr, nullptr };
+
     // Per-shadow-bake-call cache. Written SERIALLY by Render_Deferred-
     // ShadowMaps' prime pass before it enqueues the parallel per-face
     // Transform_Objects tasks; the tasks read it only (valid when

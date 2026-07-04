@@ -49,7 +49,8 @@ uint64_t fnv1a(const void* data, size_t bytes, uint64_t seed = 0xcbf29ce48422232
 uint64_t ComputeCityPanoramaCacheKey(const char* fldPath,
                                      int panoramaX, int panoramaY,
                                      int cubeMapX, int cubeMapY,
-                                     const std::vector<BuildingPanoramaEntry>& buildings)
+                                     const std::vector<BuildingPanoramaEntry>& buildings,
+                                     uint32_t formatSalt)
 {
     std::ifstream f(fldPath, std::ios::binary);
     if (!f) return 0;
@@ -67,6 +68,9 @@ uint64_t ComputeCityPanoramaCacheKey(const char* fldPath,
     const uint32_t dims[4] = { uint32_t(panoramaX), uint32_t(panoramaY),
                                 uint32_t(cubeMapX),  uint32_t(cubeMapY) };
     h = fnv1a(dims, sizeof(dims), h);
+    // Fold in the storage-format salt ONLY when set (env_cube). Zero (the
+    // legacy equirect call) leaves the historical key untouched.
+    if (formatSalt) h = fnv1a(&formatSalt, sizeof(formatSalt), h);
     // Fold in the building names — adding/removing/renaming buildings
     // shifts panorama indices and must invalidate.
     for (const auto& b : buildings) {
@@ -79,9 +83,11 @@ uint64_t ComputeCityPanoramaCacheKey(const char* fldPath,
 
 bool TryLoadCityPanoramaCache(uint64_t key,
                                int panoramaX, int panoramaY,
-                               std::vector<BuildingPanoramaEntry>& buildings)
+                               std::vector<BuildingPanoramaEntry>& buildings,
+                               const char* cacheFile)
 {
-    std::ifstream f(kCachePath, std::ios::binary);
+    const char* path = cacheFile ? cacheFile : kCachePath;
+    std::ifstream f(path, std::ios::binary);
     if (!f) return false;
 
     Header hdr{};
@@ -115,24 +121,26 @@ bool TryLoadCityPanoramaCache(uint64_t key,
 
     std::fprintf(stderr,
         "[CITY-CACHE] loaded %zu building panoramas from %s\n",
-        buildings.size(), kCachePath);
+        buildings.size(), path);
     return true;
 }
 
 void WriteCityPanoramaCache(uint64_t key,
                              int panoramaX, int panoramaY,
-                             const std::vector<BuildingPanoramaEntry>& buildings)
+                             const std::vector<BuildingPanoramaEntry>& buildings,
+                             const char* cacheFile)
 {
+    const char* path = cacheFile ? cacheFile : kCachePath;
     std::error_code ec;
     std::filesystem::create_directories(kCacheDir, ec);
     // Best-effort: if we can't create the dir, fall through to fstream
     // open which will fail cleanly.
 
-    std::ofstream f(kCachePath, std::ios::binary | std::ios::trunc);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
         std::fprintf(stderr,
             "[CITY-CACHE] WARN: cannot open %s for write — cache disabled this run\n",
-            kCachePath);
+            path);
         return;
     }
 
@@ -160,12 +168,12 @@ void WriteCityPanoramaCache(uint64_t key,
     }
     if (!f) {
         std::fprintf(stderr,
-            "[CITY-CACHE] WARN: write to %s failed mid-stream\n", kCachePath);
+            "[CITY-CACHE] WARN: write to %s failed mid-stream\n", path);
         return;
     }
     std::fprintf(stderr,
         "[CITY-CACHE] wrote %zu building panoramas to %s (%.1f MiB)\n",
-        buildings.size(), kCachePath,
+        buildings.size(), path,
         double(sizeof(Header) + buildings.size() * (panoramaBytes + 8)) / (1024.0 * 1024.0));
 }
 

@@ -287,6 +287,68 @@ byte-compare cube output against equirect.)
   reflection-dominated scene; chase's env area is too small to isolate — the
   real signal comes with CITY (Slice C).
 
+### Slice C — forward per-vertex path + CITY  (DONE)
+- `TriMesh::EnvCubeFaces[6]` (null by default) carries the six Sachletz-tiled
+  face textures; Transform's `Face_Reflective` block gained an `env_cube &&
+  EnvCubeFaces[0]` branch: face selected ONCE per triangle from the summed
+  (centroid) reflected dir via `EnvCube_SelectFace`, all three vertex dirs
+  projected onto THAT face via `EnvCube_DirToUVOnFace` (overhang → padded
+  ring), `F->ReflectionTexture` swapped per frame. cv-pull hack kept verbatim;
+  the equirect branch (incl. U-wrap hack) preserved byte-for-byte in the else.
+- `TheOtherBarry` TEXTURETEXTURE: second-texture fixed-point scale + swizzle
+  masks now derive from `F->ReflectionTexture->LSizeX/LSizeY` (t0-pattern
+  `Log1Width/Log1Height`, default 10 = the old 1024² hardcode). Per-triangle
+  constants — zero per-pixel cost.
+- CITY: `bakeBuildingCubeFaces` renders the six padded faces on the existing
+  1024² surface and 2×2-box-downsamples to 512² (free supersampling), packs
+  face-major, `Materialize`s each face into `T->EnvCubeFaces`;
+  `Obj->Reflection` = face-0 material (non-null marker for the windows-stamp
+  loop; `Material::EnvTexture` verified inert in the deferred kernel).
+  Separate cache file `cache/city_envmap_cube.bin` + format salt in the key.
+- **Validation:**
+  - **Definitive flag-off exoneration**: fresh-bake (cacheless) `city@t=150`
+    rendered byte-identical WITH slice C vs WITHOUT it (stash/rebuild A/B) —
+    the earlier 13.3% drift vs the plan-start baseline was the repo's STALE
+    pre-branch `city_envmap.bin`, since reseeded.
+  - Cache round-trip byte-identical (fresh-bake render == cache-hit render);
+    cube/equirect caches coexist (flag-off after a cube run == fresh-bake
+    render); chase@500/1000 flag-off pins byte-identical; gate 3/3 PASS flag
+    OFF and ON.
+  - Flag-on `city@t=150`: no face-boundary seams, no orientation artifacts,
+    window reflections slightly sharper (PNGs: `/tmp/envcube/city_{off,on}_150.png`,
+    face grid `/tmp/envcube/city_cube_faces.png`).
+
+### Slice D — default flip
+
+All gates clean (B+C above), so `env_cube` defaults to **1**; `--no-env_cube`
+keeps the full equirect path for A/B.
+
+**Perf table (M-series, city, Release):**
+
+| metric | equirect (off) | cube (on) |
+|---|---|---|
+| steady-state `--bench=scene@scene=city,t=1961,iters=100` (3 runs) | 75.5 / 76.8 / 76.7 ms/iter | 74.6 / 75.8 / 76.2 ms/iter |
+| city init, cacheless bake (71 buildings, wall) | ~2.75 s | ~2.88 s |
+| cache size | 284 MiB | 426 MiB |
+| chase snapshot wall (slice B, deferred path) | 0.10–0.11 s | 0.10 s |
+
+Cube ≤ equirect on frame cost in all three bench pairs (~1% win — the
+per-vertex lookup drops two polynomial trig approximations for compares + one
+divide; the filler is unchanged). Init is a wash: the cube bake skips the
+equirect table reprojection but renders with a wider FOV and writes 1.5× the
+cache bytes.
+
 ## Deviations
 
-- (none yet)
+- **Separate cache FILE, not just a salted key** (slice C): the cache is a
+  single-record file, so cube and equirect bakes sharing one path would
+  overwrite each other on every flag flip. `cache/city_envmap_cube.bin` +
+  format salt gives true coexistence; legacy `city_envmap.bin` loads
+  unchanged when the flag is off.
+- **CITY faces are supersampled, not direct-rendered** (slice C): faces render
+  at the existing 1024² TmpSurf then box-downsample to 512² — reuses the
+  legacy surface plumbing and gets 2× supersampling for free, at the cost of
+  the same render resolution as before (the init-time "cheaper bake" claim
+  from the plan mostly cancels out; measured a wash).
+- **Deferred faceRes stays `env_refl_res/2`** (slice B, per plan suggestion):
+  256² faces at the default 512 — memory comparable to the old 512² equirect.

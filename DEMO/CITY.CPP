@@ -19,6 +19,7 @@
 #include <vector>
 #include "FRUSTRUM.H"
 #include <RENDER/OffscreenView.h>  // g_offscreenViewDepth (cube-map bake marks itself offscreen)
+#include <RENDER/EnvCube.h>        // env_cube: padded 6-face bake + convention
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 
 // PREPROC.CPP — stamp F->A/B/C_idx from F->A/B/C pointer offsets into
@@ -1748,6 +1749,78 @@ static void bakeBuildingPanorama(Object* Obj,
 #endif
 }
 
+// env_cube: bake six PADDED cube faces for one building using the EnvCube
+// convention (EnvCube_Basis + padded FOV), box-downsample each to faceRes, and
+// pack them FACE-MAJOR into `rawFaces` (6 × faceRes² RGBA). No equirect
+// reprojection — the faces go straight to Materialize + T->EnvCubeFaces, and
+// Transform's Face_Reflective block picks one per triangle. The caller must
+// have set the padded projection (EnvCam.IFOV = EnvCube_FaceFovDegrees(),
+// CalcPersp, FOVX/FOVY) before calling.
+static void bakeBuildingCubeFaces(Object* Obj,
+                                  Camera& envCam,
+                                  const VESA_Surface& tmpSurf,
+                                  int faceRes,
+                                  std::vector<uint8_t>& rawFaces)
+{
+	TriMesh* T = (TriMesh*)Obj->Data;
+	const dword flags = T->Flags;
+	T->Flags &= ~HTrack_Visible;
+
+	rawFaces.assign(size_t(6) * faceRes * faceRes * 4, 0);
+	const int ratio = CUBE_MAP_XRES / faceRes;   // 1024/512 = 2
+	const int n = ratio * ratio;
+
+	envCam.ISource = T->IPos + T->BSphereCtr;
+	for (int k = 0; k != 6; ++k) {
+		parallel_memset(VPage, 0, PageSize);
+		parallel_memset(ZPage16, 0, XRes * YRes * sizeof(word));
+		const fds::EnvCubeBasisT& B = fds::EnvCube_Basis(k);
+		envCam.Mat[0][0] = B.right[0]; envCam.Mat[0][1] = B.right[1]; envCam.Mat[0][2] = B.right[2];
+		envCam.Mat[1][0] = B.up[0];    envCam.Mat[1][1] = B.up[1];    envCam.Mat[1][2] = B.up[2];
+		envCam.Mat[2][0] = B.fwd[0];   envCam.Mat[2][1] = B.fwd[1];   envCam.Mat[2][2] = B.fwd[2];
+
+		RenderSkyCube(SkySc, View, true, /*ForceForward=*/true);
+		Reflected_Transform(CitySc);
+		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
+		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
+		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
+
+		// Box-downsample CUBE_MAP_XRES² → faceRes², force opaque alpha.
+		const uint32_t* src = (const uint32_t*)tmpSurf.Data;
+		uint32_t* dst = (uint32_t*)rawFaces.data() + size_t(k) * faceRes * faceRes;
+		for (int y = 0; y < faceRes; ++y)
+			for (int x = 0; x < faceRes; ++x) {
+				uint32_t sb = 0, sg = 0, sr = 0;
+				for (int yy = 0; yy < ratio; ++yy)
+					for (int xx = 0; xx < ratio; ++xx) {
+						const uint32_t p = src[size_t(y*ratio + yy) * CUBE_MAP_XRES + (x*ratio + xx)];
+						sb += p & 0xFF; sg += (p >> 8) & 0xFF; sr += (p >> 16) & 0xFF;
+					}
+				dst[size_t(y) * faceRes + x] = 0xFF000000u
+					| ((sb / n) & 0xFF) | (((sg / n) & 0xFF) << 8) | (((sr / n) & 0xFF) << 16);
+			}
+	}
+	T->Flags = flags;
+
+	if (std::getenv("FDS_ENVBAKE_DUMP")) {
+		if (FILE* fp = std::fopen("/tmp/city_cube_faces.ppm", "wb")) {
+			const int gw = faceRes * 3, gh = faceRes * 2;
+			std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
+			const uint32_t* rf = (const uint32_t*)rawFaces.data();
+			for (int y = 0; y < gh; ++y)
+				for (int x = 0; x < gw; ++x) {
+					const int f = (y / faceRes) * 3 + (x / faceRes);
+					const uint32_t p = rf[size_t(f)*faceRes*faceRes + size_t(y % faceRes)*faceRes + (x % faceRes)];
+					unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xFF),
+					                         (unsigned char)((p >> 8) & 0xFF),
+					                         (unsigned char)(p & 0xFF) };
+					std::fwrite(rgb, 1, 3, fp);
+				}
+			std::fclose(fp);
+		}
+	}
+}
+
 // ── Vehicle headlights ("for the lulz") ──────────────────────────────
 // Every vehicle-sized mover gets one warm spotlight welded to its nose,
 // re-aimed along its motion every frame. "Vehicle" = TriMesh with an
@@ -2007,6 +2080,68 @@ void Initialize_City()
 		}
 	}
 
+	// env_cube: six padded cube faces per building (forward reflective path).
+	// Keyed + cached separately (formatSalt + face dims) so it never collides
+	// with the legacy equirect cache; the equirect branch is byte-untouched.
+	const bool useCube = fds::FeatureFlags::env_cube();
+	if (useCube && !skipCubeMap) {
+		constexpr int CITY_CUBE_FACE_RES = 512;
+		const uint32_t cubeSalt = 0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f);
+		const size_t faceBytes = size_t(6) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4;
+		fprintf(stderr, "[CITY] env_cube on — 6 padded faces/building @ %d^2 (fov %.1f)\n",
+		        CITY_CUBE_FACE_RES, fds::EnvCube_FaceFovDegrees());
+
+		// Padded projection for the face renders (1024² surface).
+		EnvCam.IFOV = fds::EnvCube_FaceFovDegrees();
+		CalcPersp(&EnvCam);
+		FOVX = EnvCam.PerspX; FOVY = EnvCam.PerspY;
+
+		// SEPARATE cache file so the cube bake never overwrites the equirect
+		// cache (flag-off keeps hitting its own intact cache → byte-stable).
+		const char* kCubeCacheFile = "cache/city_envmap_cube.bin";
+		const bool cacheOn = fds::FeatureFlags::city_envmap_cache();
+		uint64_t ck = 0;
+		if (cacheOn)
+			ck = fds::ComputeCityPanoramaCacheKey("SCENES/CITY.FLD",
+				CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES,
+				CITY_CUBE_FACE_RES, CITY_CUBE_FACE_RES, buildings, cubeSalt);
+		const bool cubeHit = cacheOn && ck != 0
+			&& fds::TryLoadCityPanoramaCache(ck,
+				CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
+		if (cubeHit) {
+			building_count = int(buildings.size());
+		} else {
+			for (auto& b : buildings) {
+				if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
+				building_count++;
+				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES, b.rawPanorama);
+			}
+			if (cacheOn && ck != 0
+			    && !g_shouldQuit.load(std::memory_order_relaxed)
+			    && building_count == int(buildings.size())) {
+				fds::WriteCityPanoramaCache(ck,
+					CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
+			}
+		}
+		// Materialize each of the six faces → TriMesh::EnvCubeFaces; Obj->
+		// Reflection = the face-0 material so the window-stamp loop below runs
+		// (it just needs a non-null Reflection). Transform's Face_Reflective
+		// block swaps F->ReflectionTexture per triangle to the chosen face.
+		for (auto& b : buildings) {
+			if (b.rawPanorama.size() != faceBytes) continue;
+			TriMesh* T = (TriMesh*)b.obj->Data;
+			const uint8_t* base = b.rawPanorama.data();
+			for (int k = 0; k < 6; ++k) {
+				Material* fm = Materialize(
+					(void*)(base + size_t(k) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4),
+					CITY_CUBE_FACE_RES, CITY_CUBE_FACE_RES);
+				T->EnvCubeFaces[k] = fm->Txtr;
+				if (k == 0) b.obj->Reflection = fm;
+			}
+			b.rawPanorama.clear();
+			b.rawPanorama.shrink_to_fit();
+		}
+	} else {
 	const bool envCacheEnabled = !skipCubeMap && fds::FeatureFlags::city_envmap_cache();
 	uint64_t envCacheKey = 0;
 	if (envCacheEnabled) {
@@ -2056,6 +2191,7 @@ void Initialize_City()
 		// the Texture; release to free ~4 MB per building.
 		b.rawPanorama.clear();
 		b.rawPanorama.shrink_to_fit();
+	}
 	}
 
 	// For deferred-path env-map dispatch: the lighting pass has only

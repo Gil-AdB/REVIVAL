@@ -69,6 +69,7 @@
 #include "Base/FDS_VARS.H"
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
+#include "RENDER/EnvCube.h"   // env_cube: trig-free per-triangle face select
 #include "Base/Scene.h"
 #include "Base/TriMesh.h"
 #include "Base/Vertex.h"
@@ -1547,6 +1548,31 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				}
 				auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
 				Vector_Norm(&n);
+				if (fds::FeatureFlags::env_cube() && T->EnvCubeFaces[0]) {
+					// env_cube: pick ONE cube face per TRIANGLE from the
+					// centroid reflected dir (dominant axis, trig-free), then
+					// project all three vertex dirs gnomonically onto THAT
+					// face. Per-triangle face spanning lands in the padded
+					// ring (D2) — no U-wrap hack, no per-vertex face check,
+					// no trig. Stamp the chosen face's texture for the filler.
+					// Kept OUT of the equirect else-branch below so that path
+					// stays byte-identical (verbatim) when the flag is off.
+					Vector d3[3];
+					for (i = 0; i < 3; ++i) {
+						auto d = wsPos[i] - cv;
+						d -= (d * n) * 2.0f * n;
+						Vector_Norm(&d);
+						d3[i] = d;
+					}
+					const int k = fds::EnvCube_SelectFace(
+						d3[0].x + d3[1].x + d3[2].x,
+						d3[0].y + d3[1].y + d3[2].y,
+						d3[0].z + d3[1].z + d3[2].z);
+					for (int j = 0; j < 3; ++j)
+						fds::EnvCube_DirToUVOnFace(k, d3[j].x, d3[j].y, d3[j].z,
+						                           eu[j], ev[j]);
+					F->ReflectionTexture = T->EnvCubeFaces[k];
+				} else {
 				i = 0;
 				for (Vertex* v : { F->A, F->B, F->C }) {
 					auto d = wsPos[i] - cv;
@@ -1581,6 +1607,7 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 							eu[i] += 1;
 						}
 					}
+				}
 				}
 
 				F->EU1 = eu[0];

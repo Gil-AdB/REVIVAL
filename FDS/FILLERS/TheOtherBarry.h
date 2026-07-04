@@ -283,6 +283,13 @@ struct TileRasterizer {
 		const dword* TextureAddr1;
 		int32_t LogWidth;
 		int32_t LogHeight;
+		// Second (reflection) texture dims for TEXTURETEXTURE. Default 10 =
+		// the legacy 1024² equirect panorama (byte-identical to the old
+		// hardcode); set per-face from F->ReflectionTexture at bind time so
+		// env_cube's pow2 face textures (e.g. 512²) address correctly. Not
+		// a per-pixel cost — constant per triangle.
+		int32_t Log1Width = 10;
+		int32_t Log1Height = 10;
 		float UScaleFactor;
 		float VScaleFactor;
 		float du0zdx, du0zdy;
@@ -354,9 +361,9 @@ struct TileRasterizer {
 		int32_t t0_vmask = (1 << t0.LogHeight) - 1;
 		int32_t t0_umask_swizzled = swizzle_umask(t0.LogHeight, t0_umask);
 
-		int32_t t1_umask = (1 << 10) - 1;
-		int32_t t1_vmask = (1 << 10) - 1;
-		int32_t t1_umask_swizzled = swizzle_umask(10, t1_umask);
+		int32_t t1_umask = (1 << t0.Log1Width) - 1;
+		int32_t t1_vmask = (1 << t0.Log1Height) - 1;
+		int32_t t1_umask_swizzled = swizzle_umask(t0.Log1Height, t1_umask);
 
 		Vec8f p_rz = v8_from_arith_seq(tile.rz0, drzdx);
 		Vec8f p_uz = v8_from_arith_seq(tile.t0.uz0, t0.du0zdx);
@@ -513,8 +520,8 @@ struct TileRasterizer {
 						}
 					}
 					if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
-						Vec8i u1 = roundi(p_u1z * p_z * 1024.0f);
-						Vec8i v1 = roundi(p_v1z * p_z * 1024.0f);
+						Vec8i u1 = roundi(p_u1z * p_z * float(1 << t0.Log1Width));
+						Vec8i v1 = roundi(p_v1z * p_z * float(1 << t0.Log1Height));
 
 						// Sparse env sample (lane-pair UV dedup via permute8) was
 						// tested 2026-05-31 expecting cache-line win on the
@@ -526,7 +533,7 @@ struct TileRasterizer {
 						// most surfaces, and M-series L2 (16MB) trivially
 						// holds the 4MB env tex. Removed.
 
-						Vec8i tu1 = packed_tile_u(u1, 10, t1_umask_swizzled);
+						Vec8i tu1 = packed_tile_u(u1, t0.Log1Height, t1_umask_swizzled);
 						Vec8i tv1 = packed_tile_v(v1, t1_vmask);
 
 						auto p_offset1 = tu1 + tv1;
@@ -966,6 +973,11 @@ void TheOtherBarry(Face* F, Vertex** V, dword numVerts, dword miplevel,
 
 	if constexpr (TextureMode == barry::TTextureMode::TEXTURETEXTURE) {
 		r.t0.TextureAddr1 = (dword*)F->ReflectionTexture->Data;
+		// Drive the second-texture fixed-point scale/mask/tiling from the
+		// actual reflection texture (1024² equirect → Log 10, unchanged;
+		// 512² env_cube face → Log 9). Reflection textures are Nomip.
+		r.t0.Log1Width  = F->ReflectionTexture->LSizeX;
+		r.t0.Log1Height = F->ReflectionTexture->LSizeY;
 	}
 
 	Vertex vc[12];

@@ -88,6 +88,33 @@ inline void EnvCube_DirToFaceUV(float dx, float dy, float dz,
     if (v < 0.0f) v = 0.0f; else if (v > 0.99999994f) v = 0.99999994f;
 }
 
+// Which face a direction's dominant axis selects (0..5). Trig-free. Used by
+// the forward path to pick ONE face per TRIANGLE from the centroid direction.
+inline int EnvCube_SelectFace(float dx, float dy, float dz) {
+    const float ax = std::fabs(dx), ay = std::fabs(dy), az = std::fabs(dz);
+    if (ax >= ay && ax >= az) return dx > 0.0f ? 0 : 1;
+    if (ay >= az)             return dy > 0.0f ? 2 : 3;
+    return dz > 0.0f ? 4 : 5;
+}
+
+// Project a direction onto a SPECIFIC face's plane (gnomonic + pad), even if
+// that face isn't the direction's dominant axis. The forward path selects the
+// face once per triangle (from the centroid) then projects all three vertex
+// dirs onto THAT face: dirs straddling into the padded ring land at u,v beyond
+// the nominal ±1 window (still valid content), clamp beyond. u,v in [0,1).
+inline void EnvCube_DirToUVOnFace(int face, float dx, float dy, float dz,
+                                  float& u, float& v) {
+    const EnvCubeBasisT& B = EnvCube_Basis(face);
+    const float a = dx * B.right[0] + dy * B.right[1] + dz * B.right[2];
+    const float b = dx * B.up[0]    + dy * B.up[1]    + dz * B.up[2];
+    const float m = dx * B.fwd[0]   + dy * B.fwd[1]   + dz * B.fwd[2];
+    const float inv = (m > 1e-20f) ? (1.0f / m) : 0.0f;
+    u = 0.5f + (0.5f * kEnvCubeInvPad) * (a * inv);
+    v = 0.5f - (0.5f * kEnvCubeInvPad) * (b * inv);
+    if (u < 0.0f) u = 0.0f; else if (u > 0.99999994f) u = 0.99999994f;
+    if (v < 0.0f) v = 0.0f; else if (v > 0.99999994f) v = 0.99999994f;
+}
+
 // face + UV in [0,1] → unit direction. Exact algebraic inverse of
 // DirToFaceUV within the padded window; used by the bake (per-texel inverse)
 // and diagnostics. In the padded ring / overhang region the returned dir may
