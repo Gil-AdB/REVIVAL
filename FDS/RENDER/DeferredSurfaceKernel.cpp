@@ -1815,7 +1815,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// vpage. The froxel composite reads h[3] to take the scene from here
 			// (opaque) vs the vpage (sky/forward content the kernel never wrote).
 			if (hdrWrite) {
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::Hdr_BufData() + i * 4;
 				if (hdrLinear) {
 					// B2 + full coherence: linear lighting. albedo² (gamma-2.0
 					// decode) × light at power 1; specular is reflected light → a
@@ -2233,7 +2233,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// radiance into the wrong place and blows out. Clones fall back to the
 			// 8-bit panel texture (order-2 HDR reflection is a later extension).
 			const bool isHdrRefl = (Mat->Flags & Mat_HdrReflection) && Mat->hdrRefl
-			                       && fds::g_hdrActive && miplevel == 0 && pmid == 0
+			                       && fds::Hdr_Active() && miplevel == 0 && pmid == 0
 			                       && Mat->hdrReflW > 0 && Mat->hdrReflH > 0;
 			int litB, litG, litR;
 			if (isHdrRefl) {
@@ -2296,7 +2296,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				litG = int(float(litG)*T_ + aG_*accW);
 				litB = int(float(litB)*T_ + aB_*accW);
 			}
-			if (!fds::g_hdrActive) {     // HDR: leave unclamped so transparents bloom too
+			if (!fds::Hdr_Active()) {     // HDR: leave unclamped so transparents bloom too
 				if (litB > 255) litB = 255;
 				if (litG > 255) litG = 255;
 				if (litR > 255) litR = 255;
@@ -2320,8 +2320,8 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// the bolt/flash/fog visible THROUGH transparents blooms and rolls
 			// off at the tonemap instead of clipping. Gated on g_hdrActive so
 			// the LDR path (flag off, fog-off scenes) is byte-identical.
-			if (fds::g_hdrActive && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+			if (fds::Hdr_Active() && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
+				fds::hdrf* h = fds::Hdr_BufData() + i * 4;
 				const float dB = h[0], dG = h[1], dR = h[2];
 				if (Mat->XparBlendAlpha > 0.0f) {
 					const float a = Mat->XparBlendAlpha;
@@ -3252,7 +3252,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					const fds::hdrf* nh = hdrWrite ? (fds::Hdr_BufData() + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr;
@@ -3302,7 +3302,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
 					if (hdrWrite) {
-						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = fds::Hdr_BufData() + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
 							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
@@ -3342,7 +3342,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					sumB += int(p & 0xFF);
 					sumG += int((p >> 8) & 0xFF);
 					sumR += int((p >> 16) & 0xFF);
-					const fds::hdrf* nh = hdrWrite ? (fds::g_hdrBuf.data() + nidx[k]*4) : nullptr;
+					const fds::hdrf* nh = hdrWrite ? (fds::Hdr_BufData() + nidx[k]*4) : nullptr;
 					if (nh) { hsB += nh[0]; hsG += nh[1]; hsR += nh[2]; }
 					if (haveOwn) {
 						float nb, ng, nr, nrB, nrG, nrR;
@@ -3378,7 +3378,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						out[i] = dword(aB) | (dword(aG) << 8) | (dword(aR) << 16) | 0xFF000000u;
 					}
 					if (hdrWrite) {   // HDR float-radiance average (see quarter path)
-						fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+						fds::hdrf* h = fds::Hdr_BufData() + i*4;
 						if (haveOwn && nsharp > 0) {
 							const float invn = 1.0f / float(nsharp);
 							h[0] = fds::HdrClamp(ahB*invn); h[1] = fds::HdrClamp(ahG*invn); h[2] = fds::HdrClamp(ahR*invn);
@@ -3593,7 +3593,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 				hR += float(rR) * 0.5f;
 			}
 			if (hdrWrite) {
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+				fds::hdrf* h = fds::Hdr_BufData() + i * 4;
 				if (hdrLinear) {            // B2 + full coherence — see main kernel
 					const float kN = 1.0f / 255.0f;
 					const float aB = texB*kN, aG = texG*kN, aR = texR*kN;

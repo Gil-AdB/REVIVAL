@@ -112,7 +112,7 @@ static inline void ConeGlowSoftKnee(float &r, float &g, float &b, float glowMax)
 }
 
 static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, float aR) {
-    if (fds::g_hdrActive) {
+    if (fds::Hdr_Active()) {
         // Physical roll-off of the cone/halo glow before it enters the linear
         // HDR buffer (cached FeatureFlags reads — the sanctioned hot-loop toggle).
         if (fds::FeatureFlags::hdr_cone_softknee()) {
@@ -120,7 +120,7 @@ static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, flo
             if (gm <= 0.0f) gm = 200.0f;
             ConeGlowSoftKnee(aR, aG, aB, gm);
         }
-        fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
+        fds::hdrf* h = fds::Hdr_BufData() + i * 4;
         h[0] = fds::HdrClamp(float(h[0]) + aB); h[1] = fds::HdrClamp(float(h[1]) + aG); h[2] = fds::HdrClamp(float(h[2]) + aR);
         return;
     }

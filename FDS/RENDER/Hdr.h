@@ -52,9 +52,35 @@ void Hdr_DebugScan(const char* tag);
 // (keeps the two configurations rendering the same image).
 constexpr float kHdrMax = 60000.0f;
 static inline float HdrClamp(float v) { return v > kHdrMax ? kHdrMax : v; }
+
+// Per-thread HDR target override (parallel offscreen bakes — the RTT fan).
+// When a worker sets t_hdrOverride, every HDR read/write in the deferred
+// kernel and the volumetric composite resolves against ITS buffer instead
+// of the g_hdrBuf globals, so N offscreen bakes accumulate + tonemap HDR
+// concurrently without resizing the shared main-frame buffer. Null
+// (default, and always on the tick + main tile workers) = the globals —
+// the accessors below cost one TLS load, hoisted per tile in the hot
+// paths that care.
+struct HdrTarget {
+    hdrf* buf = nullptr;   // W*H*4 floats (B,G,R,coverage), worker-owned
+    int   w = 0, h = 0;
+    bool  active = false;  // this target's g_hdrActive
+};
+extern thread_local HdrTarget* t_hdrOverride;
+inline hdrf* Hdr_BufData() { return t_hdrOverride ? t_hdrOverride->buf : g_hdrBuf.data(); }
+inline bool  Hdr_Active()  { return t_hdrOverride ? t_hdrOverride->active : g_hdrActive; }
 inline bool Hdr_WritableFor(int xr, int yr) {
+    if (t_hdrOverride)
+        return t_hdrOverride->buf && xr == t_hdrOverride->w && yr == t_hdrOverride->h;
     return !g_hdrBuf.empty() && xr == g_hdrBufW && yr == g_hdrBufH;
 }
+// Worker-side (single-threaded) counterparts of Hdr_ActivateNoFog /
+// Render_TonemapToVPage for an explicit target: no pool dispatch (the
+// caller IS a pool worker), no MainRenderTargetFromGlobals, no
+// Mat_HdrEmissive boost (the RTT's mat32 plane never matched its target
+// dims, so the serial path's boost was a no-op there too).
+void Hdr_ActivateNoFogTarget(HdrTarget& ht, const uint32_t* vpage, int W, int H);
+void Render_TonemapToTarget(const HdrTarget& ht, uint32_t* vpage, int W, int H);
 
 // Phase 2.3: when true, renderFrame SKIPS its own end-of-pipeline tonemap — the
 // scene tonemaps later itself (the fountain tick tonemaps AFTER the bolt so the

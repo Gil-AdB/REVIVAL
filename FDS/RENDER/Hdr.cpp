@@ -34,6 +34,59 @@ std::vector<hdrf> g_hdrBuf;
 bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
 int g_hdrBufW = 0, g_hdrBufH = 0;
+thread_local HdrTarget* t_hdrOverride = nullptr;
+
+// Single-threaded target variants for pool-worker offscreen bakes (see
+// Hdr.h). Same math as Hdr_ActivateNoFog / Render_TonemapToVPage minus
+// the pool dispatch and the emissive boost (no-op for RTT targets).
+void Hdr_ActivateNoFogTarget(HdrTarget& ht, const uint32_t* vpage, int W, int H) {
+    if (!ht.buf || !vpage) return;
+    const bool  linear = FeatureFlags::hdr_linear();
+    const float kInv   = 1.0f / 255.0f;
+    for (int y = 0; y < H; ++y) {
+        const uint32_t* row = vpage + size_t(y) * size_t(W);
+        hdrf*           h   = ht.buf + size_t(y) * size_t(W) * 4;
+        for (int x = 0; x < W; ++x) {
+            if (h[x*4+3] != 0.0f) continue;   // covered: kernel already wrote radiance
+            const uint32_t p = row[x];
+            float b = float(p & 0xFFu), g = float((p >> 8) & 0xFFu), r = float((p >> 16) & 0xFFu);
+            if (linear) { b = b*b*kInv; g = g*g*kInv; r = r*r*kInv; }
+            h[x*4+0] = HdrClamp(b); h[x*4+1] = HdrClamp(g); h[x*4+2] = HdrClamp(r);
+        }
+    }
+    ht.active = true;
+}
+
+void Render_TonemapToTarget(const HdrTarget& ht, uint32_t* vpage, int W, int H) {
+    if (!ht.buf || !vpage || !ht.active) return;
+    const float exposure = FeatureFlags::hdr_exposure();
+    const float sat      = FeatureFlags::hdr_white();
+    const bool  linear   = FeatureFlags::hdr_linear();
+    const float kN = 1.0f / 255.0f;
+    const float kE = exposure * kN;
+    auto aces = [](float x) -> float {
+        x = (x * (2.51f*x + 0.03f)) / (x * (2.43f*x + 0.59f) + 0.14f);
+        return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+    };
+    auto q = [](float c){ int v = int(c*255.0f+0.5f); return uint32_t(v<0?0:(v>255?255:v)); };
+    for (int y = 0; y < H; ++y) {
+        uint32_t*   row = vpage  + size_t(y) * size_t(W);
+        const hdrf* h   = ht.buf + size_t(y) * size_t(W) * 4;
+        for (int x = 0; x < W; ++x) {
+            float b = aces(h[x*4+0]*kE), g = aces(h[x*4+1]*kE), r = aces(h[x*4+2]*kE);
+            if (sat != 1.0f) {
+                const float L = 0.0722f*b + 0.7152f*g + 0.2126f*r;
+                b = L + (b - L)*sat; g = L + (g - L)*sat; r = L + (r - L)*sat;
+            }
+            if (linear) {
+                b = b > 0.0f ? std::sqrt(b) : 0.0f;
+                g = g > 0.0f ? std::sqrt(g) : 0.0f;
+                r = r > 0.0f ? std::sqrt(r) : 0.0f;
+            }
+            row[x] = q(b) | (q(g) << 8) | (q(r) << 16) | 0xFF000000u;
+        }
+    }
+}
 
 void Hdr_BeginFramePass(int w, int h) {
     g_hdrActive = false;
