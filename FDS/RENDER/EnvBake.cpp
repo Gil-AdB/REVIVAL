@@ -136,7 +136,18 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
             Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
             if (CAll != 0) {
                 Radix_Sort(FList, SList, CAll);
-                Render(RenderPath::ForceForward);
+                // Full deferred pipeline for the bake: the pano should show
+                // what the viewer sees (per-pixel materials, shadows, PBR
+                // maps), not the Gouraud forward approximation — reflections
+                // of the room looked flat-shaded next to the room itself.
+                // One-time cost per surface, cube faces are small.
+                // skipVolumetric: no SSAO/fog/cones in the pano, and (key)
+                // no HDR activation — this is an LDR underlay; the kernel's
+                // g_hdrBuf writes are already size-gated off (bake res !=
+                // main res). Recursive FramePrep is impossible here: the
+                // renderFrame entry trigger requires g_offscreenViewDepth==0
+                // and we're inside an OffscreenViewScope.
+                Render(RenderPath::ForceDeferred, /*skipVolumetric=*/true);
             }
             if (std::getenv("FDS_ENVBAKE_DUMP"))
                 std::fprintf(stderr, "[ENVBAKE] face %d: CAll=%d NZP=%.2f FZP=%.2f "
@@ -371,6 +382,39 @@ bool EnvReflection_FramePrep(Scene* sc) {
         if (idx >= 0 && M->RelScene == sc && M->ID < 256)
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
     return bakedAny;
+}
+
+void EnvReflection_DrawViz(Scene* sc) {
+    const int want = FeatureFlags::env_refl_viz();
+    if (want <= 0 || !sc || !VPage || XRes <= 0 || YRes <= 0) return;
+    auto it = g_envByScene.find(sc);
+    if (it == g_envByScene.end() || it->second.stores.empty()) return;
+    auto& stores = it->second.stores;
+    const size_t idx = size_t(want - 1) < stores.size() ? size_t(want - 1)
+                                                        : stores.size() - 1;
+    const EnvPanoLinear& v = stores[idx]->view;
+    if (!v.mip[0]) return;
+    // Fit into the top-right quarter of the frame (integer downscale).
+    int scale = 1;
+    while (v.W / scale > XRes / 2 || v.H / scale > YRes / 2) ++scale;
+    const int dw = v.W / scale, dh = v.H / scale;
+    const int x0 = XRes - dw - 8, y0 = 8;
+    dword* out = reinterpret_cast<dword*>(VPage);
+    for (int y = 0; y < dh; ++y) {
+        dword* row = out + size_t(y0 + y) * XRes + x0;
+        const uint32_t* src = v.mip[0] + size_t(y) * scale * v.W;
+        for (int x = 0; x < dw; ++x)
+            row[x] = src[size_t(x) * scale] | 0xFF000000u;
+    }
+    // 1px frame so it reads as an overlay, not scene content.
+    for (int x = -1; x <= dw; ++x) {
+        out[size_t(y0 - 1) * XRes + x0 + x]  = 0xFF00FF00u;
+        out[size_t(y0 + dh) * XRes + x0 + x] = 0xFF00FF00u;
+    }
+    for (int y = -1; y <= dh; ++y) {
+        out[size_t(y0 + y) * XRes + x0 - 1]  = 0xFF00FF00u;
+        out[size_t(y0 + y) * XRes + x0 + dw] = 0xFF00FF00u;
+    }
 }
 
 const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {

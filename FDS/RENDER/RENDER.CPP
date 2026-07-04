@@ -1120,6 +1120,9 @@ xpar_done: ;
 	// Normal debug viz (--nmap_viz): geometric / TBN-shaded / raw-texel
 	// normals as RGB. Same post-tonemap slot for the same reason.
 	fds::Render_NormalViz(CurScene);
+	// Env-reflection pano viewer (--env_refl_viz=N): blit the Nth baked
+	// panorama over the frame's top-right corner. Same post-tonemap slot.
+	fds::EnvReflection_DrawViz(CurScene);
 
 	// FDS_XPAR_MIRRORVIZ — outline each mirror's stamped window (thick red) on
 	// the FINAL image. Must run HERE (after Render_TonemapToVPage + all post),

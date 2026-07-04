@@ -84,6 +84,11 @@ const EnvPanoLinear* const* EnvReflection_Table(Scene* sc);
 // (editor: after light/material edits that should show in reflections).
 void EnvReflection_Invalidate(Scene* sc);
 
+// --env_refl_viz=N: blit the Nth (1-based) baked panorama's mip 0 over the
+// frame's top-right corner (downscaled to fit) — post-tonemap debug viewer.
+// N beyond the store count clamps to the last one; 0 = off (no-op).
+void EnvReflection_DrawViz(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_ENV_BAKE_H_INCLUDED
