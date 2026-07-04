@@ -19,18 +19,24 @@ Ranked list (full reasoning in the 2026-07-04 conversation + below):
    (kernel/strips/cones/halos; the clone-cone cull gap was exactly this
    rot). zeroTileLightPadding folds the two padding blocks. Same
    validation, all green.
-3. 🟨 **TBR migration — greets slice SHIPPED (800fc47)**; city + peel
-   deletion remain. Greets now routes xpar + flares through the TBR
-   strips (TBR_EnsureInit + Scn_SpriteTBR in GreetsScene::init, gated on
-   --deferred_unified_tbr; --no-… = exact legacy). Two holes closed:
-   TBR_Sprite got the mirror-clone footprint gate; new TBR_MatchesTarget
-   guards all TBR consumers against offscreen passes (forward RTT would
-   have cross-polluted the main strip lists). Flares now sort by Z —
-   FIXES the known "flare over transparents" bug (eyeballed at t=700:
-   mirror content identical, lamp flares attenuate through glass —
-   USER EYEBALL PENDING live). ~1ms faster at ts=491 + the event window.
-   Remaining: city (rain-particle + water interactions — own slice);
-   the legacy peel can't be DELETED (offscreen fallback uses it).
+3. ✅ **TBR migration — ALL SCENES SHIPPED** (greets 800fc47, city
+   d24bb7f, chase 8c55e80). Every scene's transparents + flares now go
+   through the TBR strips (TBR_EnsureInit + Scn_SpriteTBR at scene init,
+   gated on --deferred_unified_tbr; --no-… = exact legacy). Holes closed
+   on the way: TBR_Sprite got the mirror-clone footprint gate; new
+   TBR_MatchesTarget guards all TBR consumers against offscreen passes
+   (forward RTT would cross-pollute the main strips); the city A/B
+   exposed 3 missing behaviors in TBR_Render's flare draw vs the
+   immediate path — fogged colorize, far-plane Z clamp (beyond-FZP
+   encoding WRAPS and the flare wins every z-test), Face_PointZTest —
+   all ported (fountain byte-identical vs pre-campaign binary).
+   Flares now sort by Z — fixes the known "flare over transparents"
+   bug. **USER EYEBALL PENDING live**: greets lamp flares through
+   glass (t=700), city beacon flares, chase/city water. Perf: greets
+   ~1ms faster, city ~0.4ms faster (interleaved; the first city bench
+   read as a 7ms regression = machine load — ALWAYS interleave).
+   The legacy peel remains ONLY as the offscreen fallback + escape
+   flag; deleting it outright needs an offscreen story first.
 4. ⬜ **#1 RenderContext migration slices 3-5** (RENDER_CONTEXT_PLAN.md) —
    the standing campaign; unlocks RTT/shadow-raster parallelism, ends the
    global-swap bug family.
