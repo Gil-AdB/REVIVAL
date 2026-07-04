@@ -1,6 +1,74 @@
 # SESSION STATE — structural push (updated 2026-07-04)
 
 Read this when resuming. Branch feature/soa-vertex, all pushed.
+
+## WORKDIR MOVE (2026-07-04): continue from the MAIN tree
+
+The user moved off the gbuffer worktree. Continue from
+`/Users/gil-ad/work/revival` (main tree, now on feature/soa-vertex,
+built). The gbuffer worktree (`.claude/worktrees/gbuffer`) is DETACHED
+and parked — its untracked artifacts (build dirs, scene experiments,
+Runtime/tasks_artifacts) are still there if needed; safe to
+`git worktree remove --force` once nothing in it is missed. fog-wt is
+untouched. Run `tools/render_gate.sh` at session start (ALL PASS as of
+the move).
+
+## NEXT TASK (OPEN): chase water dark band — deferred water path
+
+USER-REPORTED, unresolved. A sharp horizontal dark band covers the lower
+~30% of the chase screen. Screen-fixed under camera TRANSLATION, moves
+with PITCH (view-angle-dependent). Simplest repro: chase with plain
+`--deferred` (or `--hdr`) shows it; DEFAULT chase (forward path) renders
+uniform bright-blue water with NO band — forward is the reference look.
+
+DISPROVEN (do not revisit — each verified by LOOKING at rendered
+images, not metrics): --deferred-quarter (diff 0 in the user's exact
+config), water_procedural / water_bump (band with & without), --env_refl
+(only tints the water blue; band with & without), --dof. An attempted
+fix excluding water from env_refl at DeferredSurfaceKernel.cpp:1136
+(`envP = ... && !isWater`) was a REGRESSION (greyed the water, band
+stayed) and was REVERTED — nothing from this investigation is committed.
+
+VERIFICATION DISCIPLINE (cost several wrong claims): NEVER use
+row/frame MEAN brightness — the bright central explosion inflates means
+and fooled 3 straight bisections. Look at actual images; use per-column
+/ per-region analysis if a metric is needed.
+
+WHERE IT'S PINNED: the deferred isWater composite in
+FDS/RENDER/DeferredSurfaceKernel.cpp — isWater test ~line 1102
+(matID == ctx.waterMatID, set from CHASE.CPP SetDeferredWaterMatID);
+water gets ambient-only base (deliberate, comment ~1092) + planar
+reflection underlay/2 blend ~1800-1831 (+ hdrLinear variant ~1826).
+Forward reference: TheOtherBarry<TRANSPARENT> = lit water texel +
+VPage/2. Chase water render: DEMO/CHASE.CPP pass-1 reflection ~831
+(Reflected_Transform into VPage), pass-2 ~843, RenderGlints at 855
+(DEMO/ProceduralWater.cpp:177). Leading hypothesis: the deferred water
+base is missing the bright water-texture contribution forward has, so
+its brightness leans on the view-angle-dependent reflection term —
+which produces a screen-fixed horizon-like cut. NEXT STEP: side-by-side
+the two composites (deferred isWater vs forward TRANSPARENT blend),
+identify the divergent term, fix in the deferred path WITHOUT
+full-shade (user explicitly rejected that direction) — then eyeball +
+show the user, no mean metrics.
+
+Agreed follow-up (user: "it doesn't make sense to use the env refl on
+the built-in water reflection") — env_refl SHOULD eventually skip
+planar-reflection water, but the naive line-1136 exclusion is wrong
+(grey water); do it after the band root cause, correctly.
+
+## REVIEW PASS 2026-07-04 (post-RTT-campaign audit) — all claims re-verified
+
+Independent re-verification of the RTT campaign: 54a9d50 fix genuine
+(all 3 tileChunkSphere call sites ctx-fed, poisoned TUs), TRUE-serial
+(FDS_MIRROR_RTT_SERIAL=1) vs parallel byte-identical with the cone spot,
+spot non-vacuous, TSan 0 warnings at HEAD, no sneaky gate re-baselining
+(d3a06fb came from 348216c's documented dummy-driver switch). ONE real
+defect found+fixed (6e64abe): 3cf9456's default-ON flip made the gate's
+flagless "serial" leg run PARALLEL — the rtt-parallel invariant was
+comparing parallel to parallel. Serial leg now forces
+FDS_MIRROR_RTT_SERIAL=1. Lesson recorded: a default flip silently
+vacuates any A/B gate whose legacy leg is the flagless run — pin gate
+legs explicitly.
 Perf floor at the ts=491 reference: **~40.4 ms min** on an idle box
 (machine-load drift makes day-to-day mins swing 41-44; always interleave
 A/B). Bench recipe + load-sanity rules live in the memory file
