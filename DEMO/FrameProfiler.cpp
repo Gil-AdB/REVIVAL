@@ -165,6 +165,10 @@ void FrameProfiler::noteCounters(double renderedPolys, double fillerPixels) {
 }
 
 int FrameProfiler::drawOverlay(int scrollY) const {
+    // Overlay text is wall-clock derived — headless capture harnesses
+    // default it off (see profiler_overlay in FeatureFlags.def) so byte-
+    // compared snapshots stay deterministic while stats/dump keep running.
+    if (!fds::FeatureFlags::profiler_overlay()) return scrollY;
     char buf[128];
     snprintf(buf, sizeof(buf), "%.3f Mpx/frame", emaMPxPerFrame_);
     scrollY = OutTextXY(VPage, 0, scrollY + 15 * g_fontScale, buf, 255);

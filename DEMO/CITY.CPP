@@ -2694,13 +2694,17 @@ struct CityScene : SceneDriver {
 
 		if (g_profilerActive) {
 			int scroll = 15 * g_fontScale;  // start below the always-on indicator
-			float meanMs = prof.meanFrameMs();
-			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
-			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
-			scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
+			// Wall-clock FPS text: gated with the overlay (profiler_overlay)
+			// so headless captures stay byte-deterministic.
+			if (fds::FeatureFlags::profiler_overlay()) {
+				float meanMs = prof.meanFrameMs();
+				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
+				scroll = OutTextXY(VPage, 0, scroll, MSGStr, 255);
 
-			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
-			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+				snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
+				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			}
 
 			fds::RenderStats_Flush();
 			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);

@@ -156,6 +156,13 @@ bool initSnapshotEnvironment(int xres, int yres) {
     });
     FPU_LPrecision();
 
+    // Headless captures must be byte-deterministic: the on-screen profiler
+    // text is wall-clock derived and was the sole run-to-run diff in
+    // fountain/city snapshot frames. g_profilerActive=0 alone doesn't hold —
+    // FrameProfiler::beginFrame re-mirrors it from the `profiler` flag every
+    // frame — so default the overlay off at the source (stats collection and
+    // the end-of-scene dump stay on; --profiler_overlay forces it back).
+    fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::profiler_overlay, false);
     g_profilerActive = 0;
     return true;
 }

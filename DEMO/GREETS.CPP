@@ -3341,14 +3341,18 @@ struct GreetsScene : SceneDriver {
 			}
 		}
 		if (g_profilerActive) {
-			// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
-			float meanMs = prof.meanFrameMs();
-			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
-			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
 			int scroll = 0;
-			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
-			snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
-			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
+			// Wall-clock text: gated with the overlay (profiler_overlay) so
+			// headless captures stay byte-deterministic.
+			if (fds::FeatureFlags::profiler_overlay()) {
+				float meanMs = prof.meanFrameMs();
+				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
+				scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+				snprintf(MSGStr, sizeof(MSGStr), "Frame %f", CurFrame);
+				scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			}
 
 			fds::RenderStats_Flush();
 			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);

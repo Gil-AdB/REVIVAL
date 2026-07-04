@@ -2825,11 +2825,15 @@ struct FountainScene : SceneDriver {
 		if (g_profilerActive) {
 			int scroll = 0;
 			// FPS printer — sourced from FrameProfiler (steady_clock) so it
-			// agrees with TOTL/mean_fps in the scene-end dump.
-			float meanMs = prof.meanFrameMs();
-			float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
-			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
-			scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+			// agrees with TOTL/mean_fps in the scene-end dump. Wall-clock
+			// text: gated with the overlay (profiler_overlay) so headless
+			// captures stay byte-deterministic.
+			if (fds::FeatureFlags::profiler_overlay()) {
+				float meanMs = prof.meanFrameMs();
+				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
+				scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+			}
 
 			fds::RenderStats_Flush();
 			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
