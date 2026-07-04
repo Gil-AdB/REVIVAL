@@ -52,7 +52,7 @@ void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
 void Render_DeferredFastFog(const DeferredLightingCtx& ctx);
 void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx& ctx);
-void Render_ScreenSpaceRain();
+void Render_ScreenSpaceRain(const DeferredLightingCtx &ctx);
 void Render_LensDrops();
 void FastFog_BeginFrame();
 void Render_DeferredSkybox(const DeferredLightingCtx &ctx);
@@ -1076,7 +1076,7 @@ xpar_done: ;
 		// screen-space effect re-run from the mirror camera would rain
 		// upward in the water. Rain is scene radiance → in HDR it accumulates
 		// into g_hdrBuf (gated g_hdrActive) and is captured by the tonemap.
-		Render_ScreenSpaceRain();
+		Render_ScreenSpaceRain(dctx);
 
 		// HDR (Phase 2.x): tonemap now that ALL scene-radiance overlays (cones,
 		// halos, rain) have accumulated into g_hdrBuf. SKIPPED when

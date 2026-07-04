@@ -46,6 +46,14 @@ extern float fastPow2(float x);
 #include <atomic>
 #include <semaphore>
 #include <climits>
+
+// RenderContext migration: this TU is GLOBAL-CLEAN — the orchestrators
+// read the DeferredLightingCtx param and stamp target dims/addressing
+// into FastFogParams for the tile/froxel functions; Render_LensDrops is
+// target-polymorphic via MainRenderTargetFromGlobals (FOUNTAIN's tick
+// calls it outside renderFrame). The poison makes the compiler enforce
+// it (any new use of these names in this file is a build error).
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY CurScene VESA_BPSL
 namespace renderns {
 	extern std::counting_semaphore<INT_MAX> tileDone;
 	extern std::mutex                tileCounterMutex;
@@ -102,6 +110,13 @@ static inline float fogAntiderivG(float z, float m) {
 }
 
 struct FastFogParams {
+	// Target addressing + projection center (RenderContext migration):
+	// filled from the ctx by the orchestrators so the tile/froxel fns
+	// never read the engine globals.
+	int   xres = 0, yres = 0;
+	float cntrEX = 0, cntrEY = 0;
+	const word *zpage16 = nullptr;
+	byte *vpage = nullptr;
 	float invFOVX, invFOVY, invZScale;
 	float sigma, fogFar, kHeight, heightBase;
 	// viewToWorld rows (rotation): world ray dir = w·(X,Y,1).
@@ -695,8 +710,8 @@ static inline float fogAtDepth(const FastFogParams& P, int px, int py,
 {
 	glowR = glowG = glowB = 0.0f;
 	if (zMax <= 0.0f) return 0.0f;
-	const float Y  = (CntrEY - float(py)) * P.invFOVY;
-	const float X  = (float(px) - CntrEX) * P.invFOVX;
+	const float Y  = (P.cntrEY - float(py)) * P.invFOVY;
+	const float X  = (float(px) - P.cntrEX) * P.invFOVX;
 	const float uV = X*X + Y*Y + 1.0f;
 	const float Vlen = std::sqrt(uV);
 	const float gY = P.w10 * X + P.w11 * Y + P.w12;
@@ -799,8 +814,8 @@ static inline float fogAtDepth(const FastFogParams& P, int px, int py,
 static inline float fogAtPixel(const FastFogParams& P, int px, int py,
                                float& outZ, float& glowR, float& glowG, float& glowB)
 {
-	const uint16_t *zEnc = ZPage16;
-	const size_t i = size_t(py) * size_t(XRes) + size_t(px);
+	const uint16_t *zEnc = P.zpage16;
+	const size_t i = size_t(py) * size_t(P.xres) + size_t(px);
 	// Sky (no surface) fogs at the far plane so the horizon fades into the
 	// fog color; opaque surfaces clamp to FZP so fog saturates.
 	const float zSurf = float(0xFF80 - int(zEnc[i])) * P.invZScale;
@@ -839,7 +854,7 @@ static inline void fogComposite(const FastFogParams& P, size_t i, float amt,
                                 float gR, float gG, float gB)
 {
 	if (amt <= 0.0f && gR <= 0.0f && gG <= 0.0f && gB <= 0.0f) return;
-	dword *out = reinterpret_cast<dword*>(VPage);
+	dword *out = reinterpret_cast<dword*>(P.vpage);
 	const float keep = 1.0f - amt;
 	const dword pix = out[i];
 	// Triangular (TPDF) dither added before the 8-bit truncate, to dissolve the
@@ -878,7 +893,7 @@ static void Render_DeferredFastFog_Tile(int x1, int y1, int x2, int y2,
                                         const FastFogParams& P)
 {
 	for (int py = y1; py < y2; ++py) {
-		const size_t row = size_t(py) * size_t(XRes);
+		const size_t row = size_t(py) * size_t(P.xres);
 		for (int px = x1; px < x2; ++px) {
 			float z, gR, gG, gB;
 			const float amt = fogAtPixel(P, px, py, z, gR, gG, gB);
@@ -899,10 +914,10 @@ static void Render_DeferredFastFog_HalfTile(int hx1, int hy1, int hx2, int hy2,
 {
 	const int S = P.coarseStep;
 	for (int hy = hy1; hy < hy2; ++hy) {
-		const int py = std::min(S * hy, YRes - 1);
+		const int py = std::min(S * hy, P.yres - 1);
 		const size_t base = size_t(hy) * gFogHW;
 		for (int hx = hx1; hx < hx2; ++hx) {
-			const int px = std::min(S * hx, XRes - 1);
+			const int px = std::min(S * hx, P.xres - 1);
 			float z, gR, gG, gB;
 			gFogAmt[base + hx] = fogAtPixel(P, px, py, z, gR, gG, gB);
 			gFogZ [base + hx] = z;
@@ -918,11 +933,11 @@ static void Render_DeferredFastFog_HalfTile(int hx1, int hy1, int hx2, int hy2,
 static void Render_DeferredFastFog_RefineTile(int x1, int y1, int x2, int y2,
                                               const FastFogParams& P)
 {
-	const uint16_t *zEnc = ZPage16;
+	const uint16_t *zEnc = P.zpage16;
 	const int cw = gFogHW, ch = gFogHH, S = P.coarseStep;
 	const float invS = 1.0f / float(S);
 	for (int py = y1; py < y2; ++py) {
-		const size_t row = size_t(py) * size_t(XRes);
+		const size_t row = size_t(py) * size_t(P.xres);
 		const int cy0 = std::min(py / S, ch - 1);
 		const int cy1 = std::min(cy0 + 1, ch - 1);
 		const float fy = float(py - cy0 * S) * invS;
@@ -970,10 +985,10 @@ static void Render_DeferredFastFog_RefineTile(int x1, int y1, int x2, int y2,
 static void Render_DeferredFastFog_CompositeTile(int x1, int y1, int x2, int y2,
                                                  const FastFogParams& P)
 {
-	const uint16_t *zEnc = ZPage16;
+	const uint16_t *zEnc = P.zpage16;
 	const int hw = gFogHW, hh = gFogHH;
 	for (int py = y1; py < y2; ++py) {
-		const size_t row = size_t(py) * size_t(XRes);
+		const size_t row = size_t(py) * size_t(P.xres);
 		const int hy0 = std::min(py >> 1, hh - 1);
 		const int hy1 = std::min(hy0 + 1, hh - 1);
 		const float fy = (py & 1) ? 0.5f : 0.0f;
@@ -1016,6 +1031,8 @@ namespace {
 	std::vector<float> gFrAccR, gFrAccG, gFrAccB, gFrT;   // integrated cam→slice
 	std::vector<float> gFrZb;                             // slice boundaries [nz+1]
 	int   gFrX = 0, gFrY = 0, gFrZ = 0;
+	// Screen dims the grid was built for (FastFog_SampleGrid maps px->u).
+	int   gFrScreenX = 1, gFrScreenY = 1;
 	float gFrNear = 1.0f, gFrFar = 1.0f;
 	// Temporal: per-froxel raw scatter L·σ (rgb) + extinction σ, INTERLEAVED
 	// float4 per froxel (one cache line covers a corner-pair in the history
@@ -1076,7 +1093,7 @@ void FastFog_SampleGrid(int px, int py, float z,
                                float& aR, float& aG, float& aB, float& T)
 {
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
-	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
+	const float fnx = float(nx)/float(gFrScreenX), fny = float(ny)/float(gFrScreenY);
 	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
 	if (z < gFrNear) z = gFrNear;
 	if (z > gFrFar)  z = gFrFar;
@@ -1272,11 +1289,11 @@ static void Froxel_GlowTile(int cx0, int cy0, int cx1, int cy1, const FastFogPar
 	const float invNear = 1.0f / gFrNear;
 	const ViewLightsSoA* L = P.lights;
 	for (int cy = cy0; cy < cy1; ++cy) {
-		const float sy = (float(cy)+0.5f) * invGy * float(YRes);
-		const float Y  = (CntrEY - sy) * P.invFOVY;
+		const float sy = (float(cy)+0.5f) * invGy * float(P.yres);
+		const float Y  = (P.cntrEY - sy) * P.invFOVY;
 		for (int cx = cx0; cx < cx1; ++cx) {
-			const float sx = (float(cx)+0.5f) * invGx * float(XRes);
-			const float X  = (sx - CntrEX) * P.invFOVX;
+			const float sx = (float(cx)+0.5f) * invGx * float(P.xres);
+			const float X  = (sx - P.cntrEX) * P.invFOVX;
 			float* out = gGlow.data() + (size_t(cy)*gGlX + cx) * nz * 3;
 			std::memset(out, 0, size_t(nz) * 3 * sizeof(float));
 			const float uV = X*X + Y*Y + 1.0f;
@@ -1360,8 +1377,8 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	float*       sct  = gFrSct[cur].data();
 	const float* hist = gFrSct[prv].data();
 	const float fovX = 1.0f / P.invFOVX, fovY = 1.0f / P.invFOVY;
-	const float nxOverXRes = float(nx) / float(XRes);
-	const float nyOverYRes = float(ny) / float(YRes);
+	const float nxOverXRes = float(nx) / float(P.xres);
+	const float nyOverYRes = float(ny) / float(P.yres);
 	const float invLog2R = invLogR * 0.6931472f;   // slice idx per log2 unit
 	const float Ax = gFrPrevA[0], Ay = gFrPrevA[1], Az = gFrPrevA[2];
 	// Per-COLUMN jitter phase: the global Halton index is offset by a hash of
@@ -1377,15 +1394,15 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	float glowR[kFrMaxNz], glowG[kFrMaxNz], glowB[kFrMaxNz];
 	float flashGlowR[kFrMaxNz], flashGlowG[kFrMaxNz], flashGlowB[kFrMaxNz];  // transient (not historied)
 	for (int iy = iy0; iy < iy1; ++iy) {
-		const float syc = (float(iy)+0.5f) * invNy * float(YRes);
-		const float Yc  = (CntrEY - syc) * P.invFOVY;
+		const float syc = (float(iy)+0.5f) * invNy * float(P.yres);
+		const float Yc  = (P.cntrEY - syc) * P.invFOVY;
 		for (int ix = ix0; ix < ix1; ++ix) {
 			const uint32_t colPhase = gFrFrameIdx + cellHash(ix, iy, 0x5EED);
 			// Canonical (unjittered) ray for the history reprojection. The
 			// reprojected view pos is linear in slice depth: v = A + zc·B,
 			// A = Rprevᵀ·(cam−camPrev) (per frame), B = Rprevᵀ·Dc (here).
-			const float sxc = (float(ix)+0.5f) * invNx * float(XRes);
-			const float Xc  = (sxc - CntrEX) * P.invFOVX;
+			const float sxc = (float(ix)+0.5f) * invNx * float(P.xres);
+			const float Xc  = (sxc - P.cntrEX) * P.invFOVX;
 			const float Dxc = P.w00*Xc + P.w01*Yc + P.w02;
 			const float gYc = P.w10*Xc + P.w11*Yc + P.w12;
 			const float Dzc = P.w20*Xc + P.w21*Yc + P.w22;
@@ -1411,7 +1428,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 			//   • WORLD-space amplitude = min(froxel footprint, cell/4):
 			//     full sub-froxel near (the stairs live there), bounded far
 			//     so one sample can never hop the field's whole transition.
-			const float fpScale = float(XRes) * invNx * P.invFOVX;  // world units per froxel per z
+			const float fpScale = float(P.xres) * invNx * P.invFOVX;  // world units per froxel per z
 			const float jcap    = 0.25f * P.cell;
 			// 2-tap mode: average two HALF-CYCLE-APART phases per slice each
 			// frame (k and k+4) — halves the jitter cycle's amplitude and
@@ -1451,7 +1468,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					// masses and loses only the small-scale aliasing. Only for
 					// in-slab blob froxels (the slab/gap zeros must stay zero).
 					if (P.blobs && wy >= P.slabY0 && wy <= P.slabY1) {
-						const float fpXY = z * (float(XRes)*invNx) * P.invFOVX;
+						const float fpXY = z * (float(P.xres)*invNx) * P.invFOVX;
 						const float fpL = dz > fpXY ? dz : fpXY;
 						float lod = (fpL - P.cell) * (1.0f/P.cell);
 						lod = lod < 0.0f ? 0.0f : (lod > 1.0f ? 1.0f : lod);
@@ -1609,7 +1626,7 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 				// and history are both 0. Margin = 2 froxel extents so slab-
 				// edge froxels (where blending smooths the edge) still blend.
 				const float wyc = P.camY + zc*gYc;
-				const float fpY = zc * (float(YRes)*invNy) * P.invFOVY;
+				const float fpY = zc * (float(P.yres)*invNy) * P.invFOVY;
 				const float mar = 2.0f * (dzS0 > fpY ? dzS0 : fpY);
 				if (temporal && wyc >= P.slabY0 - mar && wyc <= P.slabY1 + mar) {
 					// Reproject the CANONICAL froxel center into the previous
@@ -1620,8 +1637,8 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 					const float vz = Az + zc*Bz;
 					if (vz > 0.0f) {
 						const float ivz = 1.0f / vz;
-						float fx = (vx*ivz*fovX + CntrEX) * nxOverXRes - 0.5f;
-						float fy = (CntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
+						float fx = (vx*ivz*fovX + P.cntrEX) * nxOverXRes - 0.5f;
+						float fy = (P.cntrEY - vy*ivz*fovY) * nyOverYRes - 0.5f;
 						float fz = frFastLog2(vz * invNear) * invLog2R - 0.5f;
 						// Accept the outer HALF-froxel band and CLAMP into
 						// the sample range instead of rejecting. A slice's
@@ -1727,10 +1744,10 @@ static inline float frDither(uint32_t s, float amp) {
 // from the stored acc difference scaled by the optical-depth fraction
 // (1-e^{-σ·partialDz})/(1-e^{-σ·dzSlice}) — no per-slice radiance stored.
 static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogParams& P) {
-	const uint16_t* zEnc = ZPage16;
-	dword* out = reinterpret_cast<dword*>(VPage);
+	const uint16_t* zEnc = P.zpage16;
+	dword* out = reinterpret_cast<dword*>(P.vpage);
 	const int nx = gFrX, ny = gFrY, nz = gFrZ;
-	const float fnx = float(nx)/float(XRes), fny = float(ny)/float(YRes);
+	const float fnx = float(nx)/float(P.xres), fny = float(ny)/float(P.yres);
 	const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
 	const float invNear  = 1.0f / gFrNear;
 	const float* zb = gFrZb.data();
@@ -1743,7 +1760,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 		else { o[0]=o[1]=o[2]=0.0f; o[3]=1.0f; }
 	};
 	for (int py = y1; py < y2; ++py) {
-		const size_t row = size_t(py) * size_t(XRes);
+		const size_t row = size_t(py) * size_t(P.xres);
 		const float fy = (float(py)+0.5f)*fny - 0.5f;
 		int iy0 = int(std::floor(fy)); float wy = fy - float(iy0);
 		if (iy0 < 0) { iy0 = 0; wy = 0.0f; } if (iy0 >= ny-1) { iy0 = ny>1?ny-2:0; wy = ny>1?1.0f:0.0f; }
@@ -1774,8 +1791,8 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 					if (zr) {
 						const float zm = float(0xFF80 - int(zr)) * P.invZScale;
 						if (zm > 0.0f && zm < gFrFar) {
-							const float Xc = (float(px) - CntrEX) * P.invFOVX;
-							const float Yc = (CntrEY - float(py)) * P.invFOVY;
+							const float Xc = (float(px) - P.cntrEX) * P.invFOVX;
+							const float Yc = (P.cntrEY - float(py)) * P.invFOVY;
 							const float gY = P.w10*Xc + P.w11*Yc + P.w12;
 							// Main-ray depth of the water plane.
 							float zw = zm;
@@ -1855,13 +1872,13 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 			if (P.hdr) {
 				// HDR: unclamped lit·T + in-scatter → radiance buffer (no dither/
 				// clamp; the tonemap rolls off later). g_hdrBuf is B,G,R,(pad)
-				// per pixel, contiguous (same i as VPage).
+				// per pixel, contiguous (same i as P.vpage).
 				//
 				// HDR B1: take the scene radiance from g_hdrBuf where the deferred
 				// kernel wrote it UNCLAMPED (coverage flag h[3] > 0) so bright
-				// surfaces bloom; fall back to the 8-bit VPage where it didn't —
+				// surfaces bloom; fall back to the 8-bit P.vpage where it didn't —
 				// sky / forward content (skycube, reflective windows, additive
-				// vortex) only ever lands in VPage.
+				// vortex) only ever lands in P.vpage.
 				fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 				float scnB, scnG, scnR;
 				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
@@ -1884,11 +1901,11 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 
 void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	if (!fds::FeatureFlags::fast_fog()) return;
-	if (!CurScene || !ZPage16 || !VPage) return;
+	if (!ctx.Sc || !ctx.zpage16 || !ctx.vpage) return;
 
 	// FZP is the fog "far plane" reference for σ. Non-fogged scenes still
 	// carry an FZP (the clip plane), so this works on clear scenes too.
-	const float fogFar = CurScene->FZP;
+	const float fogFar = ctx.Sc->FZP;
 	if (fogFar <= 0.0f) return;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 
@@ -1897,8 +1914,14 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	const float camY = dc.cameraWorldY;
 
 	FastFogParams P{};
-	P.invFOVX   = 1.0f / FOVX;
-	P.invFOVY   = 1.0f / FOVY;
+	P.xres    = ctx.xres;
+	P.yres    = ctx.yres;
+	P.cntrEX  = ctx.cntrEX;
+	P.cntrEY  = ctx.cntrEY;
+	P.zpage16 = ctx.zpage16;
+	P.vpage   = ctx.vpage;
+	P.invFOVX   = 1.0f / ctx.fovX;
+	P.invFOVY   = 1.0f / ctx.fovY;
 	P.invZScale = 1.0f / float(g_zscale);
 	P.sigma     = fds::FeatureFlags::fast_fog_density() / fogFar;
 	P.fogFar    = fogFar;
@@ -1915,9 +1938,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	// Slab bounds in world Y. Defaults (±1e9) → unbounded → plain height fog.
 	P.slabY0 = fds::FeatureFlags::fast_fog_bottom();
 	P.slabY1 = fds::FeatureFlags::fast_fog_top();
-	P.fogR   = float(CurScene->Ambient.R);
-	P.fogG   = float(CurScene->Ambient.G);
-	P.fogB   = float(CurScene->Ambient.B);
+	P.fogR   = float(ctx.Sc->Ambient.R);
+	P.fogG   = float(ctx.Sc->Ambient.G);
+	P.fogB   = float(ctx.Sc->Ambient.B);
 	P.blobs  = fds::FeatureFlags::fast_fog_blobs();
 	P.cell   = std::max(1.0f, fds::FeatureFlags::fast_fog_cell());
 	P.invCell= 1.0f / P.cell;
@@ -2013,6 +2036,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		const int nx = std::max(1, fds::FeatureFlags::fast_fog_froxel_x());
 		const int ny = std::max(1, fds::FeatureFlags::fast_fog_froxel_y());
 		const int nz = std::min(kFrMaxNz, std::max(2, fds::FeatureFlags::fast_fog_froxel_z()));
+		// Screen dims this grid maps to (FastFog_SampleGrid's px->u).
+		gFrScreenX = ctx.xres; gFrScreenY = ctx.yres;
 		if (gFrX != nx || gFrY != ny || gFrZ != nz) {
 			gFrX = nx; gFrY = ny; gFrZ = nz;
 			const size_t n = size_t(nx) * size_t(ny) * size_t(nz);
@@ -2022,7 +2047,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 			gFrSct[0].assign(n*4, 0.0f); gFrSct[1].assign(n*4, 0.0f);
 			gFrHistValid = false;          // grid changed → history invalid
 		}
-		const float newNear = std::max(1.0f, CurScene->NZP);
+		const float newNear = std::max(1.0f, ctx.Sc->NZP);
 		if (newNear != gFrNear || fogFar != gFrFar) gFrHistValid = false;
 		gFrNear = newNear;
 		gFrFar  = fogFar;
@@ -2031,7 +2056,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		// exists (it would blend the previous scene's fog into this one's
 		// first frames if grid dims/near/far happen to match).
 		static const Scene* sceneOfHistory = nullptr;
-		if (CurScene != sceneOfHistory) { gFrHistValid = false; sceneOfHistory = CurScene; }
+		if (ctx.Sc != sceneOfHistory) { gFrHistValid = false; sceneOfHistory = ctx.Sc; }
 		// Slice boundaries z_b(i) = near·(far/near)^(i/nz) — precomputed so the
 		// composite reads them instead of an exp per pixel.
 		{
@@ -2074,7 +2099,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); });
 		}
 		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
-		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
 		// This is the only path that populates g_hdrBuf; mark it so the tonemap
 		// runs (and doesn't blacken scenes/frames where the froxel composite
 		// never ran — e.g. greets with fog off, which would otherwise tonemap a
@@ -2103,7 +2128,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		// either bilateral upsample (half-res) or adaptive refine (recompute
 		// only at edges). Fog is low-frequency, so this is near-free quality.
 		const int S = P.coarseStep;
-		const int cw = (XRes + S - 1) / S + 1, ch = (YRes + S - 1) / S + 1;
+		const int cw = (ctx.xres + S - 1) / S + 1, ch = (ctx.yres + S - 1) / S + 1;
 		if (gFogHW != cw || gFogHH != ch) {
 			gFogHW = cw; gFogHH = ch;
 			const size_t n = size_t(cw) * ch;
@@ -2112,11 +2137,11 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		}
 		runTiles(cw, ch, [&](int a,int b,int c,int d){ Render_DeferredFastFog_HalfTile(a,b,c,d,P); });
 		if (adaptive)
-			runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_RefineTile(a,b,c,d,P); });
+			runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Render_DeferredFastFog_RefineTile(a,b,c,d,P); });
 		else
-			runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
+			runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Render_DeferredFastFog_CompositeTile(a,b,c,d,P); });
 	} else {
-		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Render_DeferredFastFog_Tile(a,b,c,d,P); });
+		runTiles(ctx.xres, ctx.yres, [&](int a,int b,int c,int d){ Render_DeferredFastFog_Tile(a,b,c,d,P); });
 	}
 }
 
@@ -2125,15 +2150,15 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 // (zEnc == 0) toward the fog color by the slab-clipped analytic fog amount
 // for that pixel's ray — the same [zA,zB] slab integral the screen-space
 // path uses, evaluated with this pass's (mirror) camera. The base under the
-// tint is the freshly drawn skybox (the city frame loop clears VPage before
+// tint is the freshly drawn skybox (the city frame loop clears ctx.vpage before
 // RenderSkyCube — see CITY.CPP; without that clear the base is STALE
 // framebuffer and no tint can hide it). Slab-clipped τ, not the saturated
 // far-plane amount: an upward mirrored ray exits the thin slab top quickly —
 // painting the full 1−e^{−density} made the whole mirrored sky glare
 // ambient-bright, which the water reflected as "white below the waterline".
 void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
-	if (!CurScene || !ZPage16 || !VPage) return;
-	const float fogFar = CurScene->FZP;
+	if (!ctx.Sc || !ctx.zpage16 || !ctx.vpage) return;
+	const float fogFar = ctx.Sc->FZP;
 	if (fogFar <= 0.0f) return;
 	const DeferredLightingCtx &dc = ctx;
 	const float (*w2)[3] = dc.viewToWorld;
@@ -2153,30 +2178,30 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	// real field around it and glares bright. (A point estimate; the real
 	// field can't be marched here without paying the full fog pass.)
 	const float meanDens = fds::FeatureFlags::fast_fog_blobs() ? 0.22f : 1.0f;
-	const float fogR = float(CurScene->Ambient.R);
-	const float fogG = float(CurScene->Ambient.G);
-	const float fogB = float(CurScene->Ambient.B);
-	const float invFOVX = 1.0f / FOVX, invFOVY = 1.0f / FOVY;
-	const uint16_t* zEnc = ZPage16;
-	dword* out = reinterpret_cast<dword*>(VPage);
+	const float fogR = float(ctx.Sc->Ambient.R);
+	const float fogG = float(ctx.Sc->Ambient.G);
+	const float fogB = float(ctx.Sc->Ambient.B);
+	const float invFOVX = 1.0f / ctx.fovX, invFOVY = 1.0f / ctx.fovY;
+	const uint16_t* zEnc = ctx.zpage16;
+	dword* out = reinterpret_cast<dword*>(ctx.vpage);
 
 	constexpr int numTilesX = 6, numTilesY = 4;
-	const int tsx = (XRes + numTilesX - 1) / numTilesX;
-	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	const int tsx = (ctx.xres + numTilesX - 1) / numTilesX;
+	const int tsy = (ctx.yres + numTilesY - 1) / numTilesY;
 	{
 		constexpr int nJobs = numTilesX * numTilesY;
 		dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
 			const int tj = t / numTilesX, ti = t - tj * numTilesX;
-			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
-			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)ctx.yres);
+			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)ctx.xres);
 			{
 				for (int py = y1; py < y2; ++py) {
-					const float Y = (CntrEY - float(py)) * invFOVY;
-					const size_t row = size_t(py) * size_t(XRes);
+					const float Y = (ctx.cntrEY - float(py)) * invFOVY;
+					const size_t row = size_t(py) * size_t(ctx.xres);
 					for (int px = x1; px < x2; ++px) {
 						const size_t i = row + size_t(px);
 						if (zEnc[i] != 0) continue;
-						const float X  = (float(px) - CntrEX) * invFOVX;
+						const float X  = (float(px) - ctx.cntrEX) * invFOVX;
 						const float uV = X*X + Y*Y + 1.0f;
 						const float gY = w2[1][0]*X + w2[1][1]*Y + w2[1][2];
 						// Slab clip (same as fogAtPixel) on [0, fogFar].
@@ -2233,10 +2258,10 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 // fog transmittance at the LAYER's depth, so distant rain dims into the
 // soup instead of punching through it. Scene time (g_FrameTime) drives the
 // fall — pause freezes rain mid-air like everything else.
-void Render_ScreenSpaceRain() {
+void Render_ScreenSpaceRain(const DeferredLightingCtx &ctx) {
 	if (!fds::FeatureFlags::rain()) return;
 	const float intensity = fds::FeatureFlags::rain_intensity();
-	if (intensity <= 0.0f || !ZPage16 || !VPage) return;
+	if (intensity <= 0.0f || !ctx.zpage16 || !ctx.vpage) return;
 
 	// Timer ticks at 100 Hz (TimerInit(100) in REV.CPP) — centiseconds.
 	const float t = float(g_FrameTime) * 0.01f * fds::FeatureFlags::rain_speed();
@@ -2245,11 +2270,11 @@ void Render_ScreenSpaceRain() {
 	const float density = intensity > 1.0f ? 1.0f : intensity;  // streak probability
 	const float opacity = (intensity > 1.0f ? intensity : 1.0f) * 0.8f; // >1 = heavier look
 	const float invZScale = 1.0f / float(g_zscale);
-	const float fogFar = CurScene ? CurScene->FZP : 0.0f;
+	const float fogFar = ctx.Sc ? ctx.Sc->FZP : 0.0f;
 	const bool froxelFog = FastFog_XparActive();
 	const bool ssFog     = !froxelFog && FastFog_SSActive();
-	const bool legacyFog = !froxelFog && !ssFog && CurScene
-	                       && (CurScene->Flags & Scn_Fogged) && fogFar > 0.0f;
+	const bool legacyFog = !froxelFog && !ssFog && ctx.Sc
+	                       && (ctx.Sc->Flags & Scn_Fogged) && fogFar > 0.0f;
 
 	struct Layer {
 		float depth;     // assumed view depth (world units) — z-test + fog
@@ -2268,18 +2293,18 @@ void Render_ScreenSpaceRain() {
 	// Rain color: cool pale blue, alpha-blended (reads on bright AND dark).
 	const float rainR = 165.0f, rainG = 185.0f, rainB = 225.0f;
 
-	const uint16_t* zEnc = ZPage16;
-	dword* out = reinterpret_cast<dword*>(VPage);
+	const uint16_t* zEnc = ctx.zpage16;
+	dword* out = reinterpret_cast<dword*>(ctx.vpage);
 
 	constexpr int numTilesX = 6, numTilesY = 4;
-	const int tsx = (XRes + numTilesX - 1) / numTilesX;
-	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	const int tsx = (ctx.xres + numTilesX - 1) / numTilesX;
+	const int tsy = (ctx.yres + numTilesY - 1) / numTilesY;
 	{
 		constexpr int nJobs = numTilesX * numTilesY;
 		dispatchIndexed(nJobs, &renderns::tileDone, [=](int tt) {
 			const int tj = tt / numTilesX, ti = tt - tj * numTilesX;
-			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
-			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+			const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)ctx.yres);
+			const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)ctx.xres);
 			{
 				// COLUMN-major: streaks are sparse (one core ≤3 px wide per
 				// cellW-px column), so iterate the ~tileW/cellW columns per
@@ -2292,7 +2317,7 @@ void Render_ScreenSpaceRain() {
 					const float scroll   = t * l.speed;
 					const int   salt     = 0x9A1B + li*0x611;
 					for (int py = y1; py < y2; ++py) {
-						const size_t row = size_t(py) * size_t(XRes);
+						const size_t row = size_t(py) * size_t(ctx.xres);
 						const float shear = float(py) * slant;     // px of x at this row
 						// Columns whose cores can land in [x1, x2):
 						// px = (col + xj)·cellW + shear, xj ∈ [0.15, 0.85].
@@ -2400,12 +2425,15 @@ int32_t  gLensPrevFT    = -1;
 }
 
 void Render_LensDrops() {
+	// Target-polymorphic (FOUNTAIN's tick drives this outside renderFrame,
+	// no ctx in scope) — same shape as the Hdr passes.
+	const fds::RenderTarget rt = fds::MainRenderTargetFromGlobals();
 	if (!fds::FeatureFlags::rain() || !fds::FeatureFlags::rain_lens()) {
 		gLensDrops.clear(); gLensPrevFT = -1;
 		return;
 	}
 	const float intensity = fds::FeatureFlags::rain_intensity();
-	if (!VPage) return;
+	if (!rt.vpage) return;
 
 	// Scene-time delta (Timer = centiseconds). Clamped: pause/scrub
 	// rollback gives 0 (drops freeze), big forward scrubs cap at 100ms.
@@ -2427,8 +2455,8 @@ void Render_LensDrops() {
 		const uint32_t s = gLensSpawnSeq++;
 		LensDrop d;
 		d.seed  = s;
-		d.x     = h01(s, 1) * float(XRes);
-		d.y     = h01(s, 2) * float(YRes) * 0.85f;
+		d.x     = h01(s, 1) * float(rt.xres);
+		d.y     = h01(s, 2) * float(rt.yres) * 0.85f;
 		d.r     = 4.0f + h01(s, 3) * 9.0f;
 		d.age   = 0.0f;
 		d.dwell = 0.25f + h01(s, 4) * 1.2f;
@@ -2438,7 +2466,7 @@ void Render_LensDrops() {
 		gLensDrops.push_back(d);
 	}
 
-	dword* out = reinterpret_cast<dword*>(VPage);
+	dword* out = reinterpret_cast<dword*>(rt.vpage);
 	static std::vector<dword> rect;       // per-drop source snapshot
 	for (size_t di = 0; di < gLensDrops.size(); ) {
 		LensDrop& d = gLensDrops[di];
@@ -2451,7 +2479,7 @@ void Render_LensDrops() {
 			d.x  += std::sin(d.age * 9.0f + d.wobPh) * d.r * 0.6f * dt;
 			d.r  -= d.r * 0.16f * dt;
 		}
-		if (d.age > d.life || d.r < 2.0f || d.y - d.r > float(YRes)) {
+		if (d.age > d.life || d.r < 2.0f || d.y - d.r > float(rt.yres)) {
 			gLensDrops[di] = gLensDrops.back();
 			gLensDrops.pop_back();
 			continue;
@@ -2476,13 +2504,13 @@ void Render_LensDrops() {
 		int xa = cx - int(padX), xb = cx + int(padX) + 1;
 		int ya = cy - int(padT), yb = cy + int(padB) + 1;
 		if (xa < 0) xa = 0; if (ya < 0) ya = 0;
-		if (xb > (int)XRes) xb = (int)XRes; if (yb > (int)YRes) yb = (int)YRes;
+		if (xb > (int)rt.xres) xb = (int)rt.xres; if (yb > (int)rt.yres) yb = (int)rt.yres;
 		if (xa >= xb || ya >= yb) { ++di; continue; }
 		const int rw = xb - xa, rh = yb - ya;
 		rect.resize(size_t(rw) * size_t(rh));
 		for (int y = 0; y < rh; ++y)
 			std::memcpy(rect.data() + size_t(y)*rw,
-			            out + size_t(ya+y)*XRes + xa,
+			            out + size_t(ya+y)*rt.xres + xa,
 			            size_t(rw) * sizeof(dword));
 		const float invR  = 1.0f / d.r;
 		const float invKB = 1.0f / kBot, invKT = 1.0f / kTop;
@@ -2533,7 +2561,7 @@ void Render_LensDrops() {
 				// Edge AA + spawn fade.
 				float a = fade;
 				if (t2 > 0.82f) a *= (1.0f - t2) * (1.0f/0.18f);
-				const size_t i = size_t(py)*XRes + size_t(px);
+				const size_t i = size_t(py)*rt.xres + size_t(px);
 				const dword pix = out[i];
 				const float keep = 1.0f - a;
 				const int nR = int(float((pix>>16)&0xFFu)*keep + sR*a);
@@ -2566,6 +2594,7 @@ void Render_LensDrops() {
 // contribution.
 
 static void Render_DeferredVolumetric_Tile(
+    const DeferredLightingCtx &ctx,
     int x1, int y1, int x2, int y2,
     const ViewLightsSoA *lights,
     const int *spotIdx, int spotCount,
@@ -2576,8 +2605,8 @@ static void Render_DeferredVolumetric_Tile(
     float fogR, float fogG, float fogB,
     float coneDensity, float omniHaloDensity)
 {
-    dword *out = reinterpret_cast<dword*>(VPage);
-    const uint16_t *zEnc = ZPage16;
+    dword *out = reinterpret_cast<dword*>(ctx.vpage);
+    const uint16_t *zEnc = ctx.zpage16;
     const int N_SAMPLES = std::max(1, fds::FeatureFlags::vol_n_samples());
     const float inv_N = 1.0f / float(N_SAMPLES);
     const bool vecPath = fds::FeatureFlags::vol_vec();
@@ -2594,8 +2623,8 @@ static void Render_DeferredVolumetric_Tile(
     const bool hasHalo = (omniCount > 0 && omniHaloDensity > 0.0f);
 
     for (int py = y1; py < y2; ++py) {
-        const float Y = (CntrEY - float(py)) * invFOVY;
-        const size_t row = size_t(py) * size_t(XRes);
+        const float Y = (ctx.cntrEY - float(py)) * invFOVY;
+        const size_t row = size_t(py) * size_t(ctx.xres);
         if (vecPath) {
             // Pixel-major SIMD — see Render_VolumetricCones_Tile for
             // rationale. Unified pass adds analytic Beer-Lambert fog
@@ -2620,7 +2649,7 @@ static void Render_DeferredVolumetric_Tile(
                 bool anyAlive = false;
                 for (int lane = 0; lane < laneCount; ++lane) {
                     const int px = pxBase + lane;
-                    const float X = (float(px) - CntrEX) * invFOVX;
+                    const float X = (float(px) - ctx.cntrEX) * invFOVX;
                     Xarr[lane]  = X;
                     uVarr[lane] = X*X + Y*Y + 1.0f;
                     uint32_t h = uint32_t(px) * 0x9E3779B9u
@@ -2993,7 +3022,7 @@ static void Render_DeferredVolumetric_Tile(
             continue;
         }
         for (int px = x1; px < x2; ++px) {
-            const float X = (float(px) - CntrEX) * invFOVX;
+            const float X = (float(px) - ctx.cntrEX) * invFOVX;
             const float uV = X*X + Y*Y + 1.0f;
 
             uint32_t pxHash = uint32_t(px) * 0x9E3779B9u
@@ -3227,7 +3256,7 @@ static void Render_DeferredVolumetric_Tile(
 
 void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_unified, &g_volProf.n_unified);
-    if (!CurScene || !ZPage16 || !VPage) return;
+    if (!ctx.Sc || !ctx.zpage16 || !ctx.vpage) return;
 
     const DeferredLightingCtx &dc = ctx;
     const ViewLightsSoA *const lights = dc.lights;
@@ -3249,17 +3278,17 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
         else                   omniIdx[omniCount++] = i;
     }
 
-    const float invFOVX  = 1.0f / FOVX;
-    const float invFOVY  = 1.0f / FOVY;
+    const float invFOVX  = 1.0f / ctx.fovX;
+    const float invFOVY  = 1.0f / ctx.fovY;
     const float invZScale= 1.0f / float(g_zscale);
-    const bool  fogged   = (CurScene->Flags & Scn_Fogged) != 0;
-    const float fogFar   = fogged ? CurScene->FZP : 1e30f;
+    const bool  fogged   = (ctx.Sc->Flags & Scn_Fogged) != 0;
+    const float fogFar   = fogged ? ctx.Sc->FZP : 1e30f;
     const float sigma    = fogged
-        ? fds::FeatureFlags::fog_sigma_mult() / CurScene->FZP
+        ? fds::FeatureFlags::fog_sigma_mult() / ctx.Sc->FZP
         : 0.0f;
-    const float fogR     = float(CurScene->Ambient.R);
-    const float fogG     = float(CurScene->Ambient.G);
-    const float fogB     = float(CurScene->Ambient.B);
+    const float fogR     = float(ctx.Sc->Ambient.R);
+    const float fogG     = float(ctx.Sc->Ambient.G);
+    const float fogB     = float(ctx.Sc->Ambient.B);
     const float coneDens = (spotCount > 0)
         ? fds::FeatureFlags::cone_strength() * 0.001f
           * (fds::FeatureFlags::hdr() ? fds::FeatureFlags::hdr_glow_scale() : 1.0f)  // glowMax cap off in HDR
@@ -3268,22 +3297,22 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
 
     constexpr int numTilesX = 6;
     constexpr int numTilesY = 4;
-    const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
-    const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
+    const int tileSizeX = (ctx.xres + numTilesX - 1) / numTilesX;
+    const int tileSizeY = (ctx.yres + numTilesY - 1) / numTilesY;
 
     renderns::tileCounter = 0;
     {
         constexpr int nJobs = numTilesX * numTilesY;
         const int *sP = spotIdx; const int sC = spotCount;
         const int *oP = omniIdx; const int oC = omniCount;
-        dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
+        dispatchIndexed(nJobs, &renderns::tileDone, [=, &ctx](int t) {
             const int j = t / numTilesX, i = t - j * numTilesX;
             const int y1 = tileSizeY * j;
-            const int y2 = std::min(y1 + tileSizeY, YRes);
+            const int y2 = std::min(y1 + tileSizeY, ctx.yres);
             const int x1 = tileSizeX * i;
-            const int x2 = std::min(x1 + tileSizeX, XRes);
+            const int x2 = std::min(x1 + tileSizeX, ctx.xres);
             Render_DeferredVolumetric_Tile(
-                x1, y1, x2, y2, lights, sP, sC, oP, oC,
+                ctx, x1, y1, x2, y2, lights, sP, sC, oP, oC,
                 invFOVX, invFOVY, invZScale,
                 sigma, fogFar, fogR, fogG, fogB,
                 coneDens, haloDens);
