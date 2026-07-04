@@ -2429,6 +2429,14 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         float          dist;   // C_B distance to B's plane
         bool           backSide = false;  // order-1: camera behind plane
         float          sw = 0, sh = 0;    // raw on-screen footprint px (adaptive res)
+        // Cached by the serial PREPASS (adaptive dims + UV stamp + off-axis
+        // projection) so the render fan uses identical values without
+        // recomputing or touching globals. See the prepass loop below.
+        Vector eN{}, eU{};                // side-aware plane basis
+        float  eU0 = 0, eU1 = 0;          // side-aware window U extents
+        float  cu = 0, cv = 0;            // camera in plane basis
+        float  fovX = 0, fovY = 0;        // off-axis projection constants
+        float  cntrEX = 0, cntrEY = 0;
     };
     std::vector<Job> jobs;
     auto projectToScreen = [&](const Vector &wp, float &sx, float &sy) -> bool {
@@ -2633,7 +2641,13 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         return p;
     };
 
-    for (const Job &j : jobs) {
+    // ── PREPASS (serial): adaptive dims, side-aware basis, off-axis
+    // projection constants and the panel UV stamp for EVERY selected job,
+    // before any render. The UV values are camera-independent (the
+    // projection terms cancel to pure window fractions), but slots view
+    // each other's panels — stamping them all up front means the render
+    // fan below never mutates shared vertex state.
+    for (Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
         const float D = j.dist;
         // Shrink this job's bake to its on-screen footprint (never above
@@ -2646,6 +2660,61 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
             s.texW = s.texWMax;
             s.texH = s.texHMax;
         }
+        // Side-aware basis: back-side jobs flip N and U (V kept) —
+        // flipping both keeps the basis right-handed, and the negated U
+        // makes the texture display correctly through the same UVs when
+        // the face is viewed from behind.
+        j.eN = j.backSide
+            ? Vector{ -s.bN.x, -s.bN.y, -s.bN.z } : s.bN;
+        j.eU = j.backSide
+            ? Vector{ -s.axisU.x, -s.axisU.y, -s.axisU.z } : s.axisU;
+        j.eU0 = j.backSide ? -s.u1 : s.u0;
+        j.eU1 = j.backSide ? -s.u0 : s.u1;
+        // TRUE off-axis projection: the panel window maps edge-to-edge
+        // onto the target, so the window gets every texel regardless of
+        // viewing angle:
+        //   screen_x =  FOVX*(pu - cu)/D + CntrEX  with  u0→0, u1→W
+        //   screen_y = -FOVY*(pv - cv)/D + CntrEY  with  v1→0, v0→H
+        // The projection center generally lies far outside the target;
+        // fds::g_offAxisFrustumCull keeps the engine's symmetric-frustum
+        // mesh cull from discarding everything. (The first cut centered
+        // a symmetric frustum on the camera's plane-foot instead — at
+        // oblique angles the window collapsed to a few dozen texels and
+        // smeared, the 'garbled 2nd mirror'.)
+        j.cu = j.camPos.x*j.eU.x + j.camPos.y*j.eU.y + j.camPos.z*j.eU.z;
+        j.cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
+        j.fovX   = float(s.texW) * D / (j.eU1 - j.eU0);
+        j.fovY   = float(s.texH) * D / (s.v1 - s.v0);
+        j.cntrEX = j.fovX * (j.cu - j.eU0) / D;
+        j.cntrEY = j.fovY * (s.v1 - j.cv) / D;
+        // Stamp this slot's UVs for the projection above. With the
+        // edge-to-edge mapping these are static in window space, but
+        // recomputing through the same formula keeps UV and projection
+        // trivially in lockstep.
+        static const bool kUv05 = std::getenv("FDS_MIRROR_RTT_UV05") != nullptr;
+        for (const MirrorRttSlot::SlotVert &sv : s.verts) {
+            const float epu = j.backSide ? -sv.pu : sv.pu;
+            float tu = ( j.fovX * (epu - j.cu) / D + j.cntrEX) / float(s.texW);
+            float tv = (-j.fovY * (sv.pv - j.cv) / D + j.cntrEY) / float(s.texH);
+            // Keep off the wrap seam (Txtr_Tiled wraps).
+            tu = std::min(std::max(tu, 0.002f), 0.998f);
+            tv = std::min(std::max(tv, 0.002f), 0.998f);
+            if (kUv05) { tu = 0.5f; tv = 0.5f; }
+            sv.v->U = tu;
+            sv.v->V = tv;
+        }
+        // The clipper re-stamps vertex UVs from Face::U1..V3
+        // (FRUSTRUM.CPP) — without syncing the face fields, the
+        // values above get overwritten with the source panel's
+        // authored UVs whenever the face clips (which is how the
+        // display stayed on the stale mapping no matter what the
+        // vertex stamp did).
+        for (Face *f : s.faces) f->uvFromVertices();
+    }
+
+    for (const Job &j : jobs) {
+        MirrorRttSlot &s = *j.slot;
+        const float D = j.dist;
         // Re-stamp the surface to this slot's aspect-matched dims
         // (same texel count, different shape) and republish globals.
         if (s_rttSurf.X != s.texW || s_rttSurf.Y != s.texH) {
@@ -2661,38 +2730,21 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // the real scene. With the view axis ⟂ the panel, the engine's
         // screen-parallel near plane IS the mirror plane: setting NZP
         // just past D clips everything behind the mirror exactly.
-        // Effective plane/basis: back-side jobs flip N and U (V kept)
-        // — flipping both keeps the basis right-handed, and the
-        // negated U makes the texture display correctly through the
-        // same UVs when the face is viewed from behind.
-        const Vector eN = j.backSide
-            ? Vector{ -s.bN.x, -s.bN.y, -s.bN.z } : s.bN;
-        const Vector eU = j.backSide
-            ? Vector{ -s.axisU.x, -s.axisU.y, -s.axisU.z } : s.axisU;
-        const float eU0 = j.backSide ? -s.u1 : s.u0;
-        const float eU1 = j.backSide ? -s.u0 : s.u1;
+        const Vector eN = j.eN;
+        const Vector eU = j.eU;
+        const float eU0 = j.eU0;
+        const float eU1 = j.eU1;
         std::memset(&s_rttCam, 0, sizeof(s_rttCam));
         s_rttCam.ISource = j.camPos;
         s_rttCam.Mat[0][0] = eU.x;      s_rttCam.Mat[0][1] = eU.y;      s_rttCam.Mat[0][2] = eU.z;
         s_rttCam.Mat[1][0] = s.axisV.x; s_rttCam.Mat[1][1] = s.axisV.y; s_rttCam.Mat[1][2] = s.axisV.z;
         s_rttCam.Mat[2][0] = eN.x;      s_rttCam.Mat[2][1] = eN.y;      s_rttCam.Mat[2][2] = eN.z;
-        // TRUE off-axis projection: the panel window maps edge-to-edge
-        // onto the kRttRes² target, so the window gets every texel
-        // regardless of viewing angle:
-        //   screen_x =  FOVX*(pu - cu)/D + CntrEX  with  u0→0, u1→W
-        //   screen_y = -FOVY*(pv - cv)/D + CntrEY  with  v1→0, v0→H
-        // The projection center generally lies far outside the target;
-        // fds::g_offAxisFrustumCull (set below) keeps the engine's
-        // symmetric-frustum mesh cull from discarding everything. (The
-        // first cut centered a symmetric frustum on the camera's
-        // plane-foot instead — at oblique angles the window collapsed
-        // to a few dozen texels and smeared, the 'garbled 2nd mirror'.)
-        const float cu = j.camPos.x*eU.x + j.camPos.y*eU.y + j.camPos.z*eU.z;
-        const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
-        FOVX   = float(s.texW) * D / (eU1 - eU0);
-        FOVY   = float(s.texH) * D / (s.v1 - s.v0);
-        CntrEX = FOVX * (cu - eU0) / D;
-        CntrEY = FOVY * (s.v1 - cv) / D;
+        const float cu = j.cu;
+        const float cv = j.cv;
+        FOVX   = j.fovX;
+        FOVY   = j.fovY;
+        CntrEX = j.cntrEX;
+        CntrEY = j.cntrEY;
         CntrX  = int32_t(std::min(std::max(CntrEX, -32000.0f), 32000.0f));
         CntrY  = int32_t(std::min(std::max(CntrEY, -32000.0f), 32000.0f));
         // Oblique mirror-plane clip: near plane just past the wall.
@@ -2701,29 +2753,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // un-clipped back-side twin of the panel was the black-mirror
         // bug (z written everywhere, color nowhere).
         view.setNearZ(D * 1.001f + 0.01f);
-        // Stamp this slot's UVs for the projection above. With the
-        // edge-to-edge mapping these are static in window space, but
-        // recomputing through the same formula keeps UV and projection
-        // trivially in lockstep.
-        static const bool kUv05 = std::getenv("FDS_MIRROR_RTT_UV05") != nullptr;
-        for (const MirrorRttSlot::SlotVert &sv : s.verts) {
-            const float epu = j.backSide ? -sv.pu : sv.pu;
-            float tu = ( FOVX * (epu - cu) / D + CntrEX) / float(s.texW);
-            float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(s.texH);
-            // Keep off the wrap seam (Txtr_Tiled wraps).
-            tu = std::min(std::max(tu, 0.002f), 0.998f);
-            tv = std::min(std::max(tv, 0.002f), 0.998f);
-            if (kUv05) { tu = 0.5f; tv = 0.5f; }
-            sv.v->U = tu;
-            sv.v->V = tv;
-        }
-        // The clipper re-stamps vertex UVs from Face::U1..V3
-        // (FRUSTRUM.CPP) — without syncing the face fields, the
-        // values above get overwritten with the source panel's
-        // authored UVs whenever the face clips (which is how the
-        // display stayed on the stale mapping no matter what the
-        // vertex stamp did).
-        for (Face *f : s.faces) f->uvFromVertices();
+        // (Panel UVs for every job were stamped in the prepass above.)
 
         std::memset(s_rttSurf.Data, 0, size_t(s_rttSurf.PageSize));
         std::memset(s_rttSurf.Z16, 0, sizeof(word) * size_t(s.texW) * size_t(s.texH));
