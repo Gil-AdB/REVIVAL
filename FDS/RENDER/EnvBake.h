@@ -61,6 +61,11 @@ struct EnvPanoLinear {
     const unsigned* mip[kMaxMips] = {};
     int W = 0, H = 0;               // mip 0 dims (level k = W>>k × H>>k)
     int numMips = 0;
+    // env_cube mode (D2): when true, each mip[k] is a FACE-MAJOR block of six
+    // padded cube faces, each (W>>k)×(W>>k) (W==H==faceRes), face f at offset
+    // f*(W>>k)*(W>>k). Sampled via EnvCube_DirToFaceUV — no equirect wrap, no
+    // trig. When false, mip[k] is the legacy equirect image (W>>k × H>>k).
+    bool isCube = false;
     // Capture point (world) + the scene AABB proxy for parallax correction.
     float bakeX = 0, bakeY = 0, bakeZ = 0;
     float boxMinX = 0, boxMinY = 0, boxMinZ = 0;

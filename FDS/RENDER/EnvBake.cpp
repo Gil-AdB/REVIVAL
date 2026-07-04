@@ -1,4 +1,5 @@
 #include "EnvBake.h"
+#include "EnvCube.h"
 #include "OffscreenView.h"
 
 #include <Base/FDS_VARS.H>   // MainSurf, View, FList/SList/CAll, CntrX, XRes...
@@ -91,15 +92,19 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 
 }  // namespace
 
-// Shared core: render the six cube faces from `center` and stitch them into
-// a LINEAR equirect panorama in `pano`. Returns false on alloc failure.
-static bool renderCubeAndStitch(Scene* sc, const Vector& center,
-                                const EnvBakeParams& params,
-                                std::vector<uint32_t>& pano,
-                                Material* skipMat = nullptr) {
+// Render the six axis-aligned cube faces from `center` at `fovDeg` full FOV
+// into faces[6] (each res*res ARGB, row-major, screen-y down). fovDeg = 90
+// gives the classic gutterless cube (equirect stitch); fovDeg =
+// EnvCube_FaceFovDegrees() gives the padded overscan (env_cube). The (right,
+// up, fwd) basis is EnvCube's kCubeFaces convention verbatim, so the same
+// image both bakes sample. FDS_ENVCUBE_PAINT replaces the scene render with
+// EnvCube_PaintDebugFace so orientation can be validated without geometry.
+// Returns false on alloc failure.
+static bool renderSixFaces(Scene* sc, const Vector& center, int res,
+                           float fovDeg, uint32_t voidColor,
+                           std::vector<uint32_t> faces[6], Material* skipMat) {
     if (!sc) return false;
-    const int res = params.cubeRes;
-    const int W = params.panoWidth, H = params.panoHeight;
+    static const bool sPaint = std::getenv("FDS_ENVCUBE_PAINT") != nullptr;
 
     // Offscreen render target for one cube face. Owns its own Data/Z16; the
     // OffscreenViewScope below points MainSurf here and republishes the
@@ -115,8 +120,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
     if (!surf.Data || !surf.Z16) { std::free(surf.Data); std::free(surf.Z16); return false; }
     Build_YOffs_Table(&surf);
 
-    std::vector<uint32_t> faces[6];
-    for (auto& fc : faces) fc.resize(size_t(res) * res);
+    for (int i = 0; i < 6; ++i) faces[i].resize(size_t(res) * res);
 
     {
         OffscreenViewScope view(sc, &surf);
@@ -127,9 +131,13 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
         g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
         g_envBakeSkipMaterial = skipMat;   // ...and so does the reflector itself
         for (int i = 0; i < 6; ++i) {
+            if (sPaint) {   // orientation self-check: painted debug faces
+                fds::EnvCube_PaintDebugFace(i, faces[i].data(), res);
+                continue;
+            }
             std::memset(&s_cam, 0, sizeof(s_cam));
             s_cam.ISource = center;
-            s_cam.IFOV = 90.0f;
+            s_cam.IFOV = fovDeg;
             const CubeFace& cf = kCubeFaces[i];
             s_cam.Mat[0][0] = cf.right.x; s_cam.Mat[0][1] = cf.right.y; s_cam.Mat[0][2] = cf.right.z;
             s_cam.Mat[1][0] = cf.up.x;    s_cam.Mat[1][1] = cf.up.y;    s_cam.Mat[1][2] = cf.up.z;
@@ -137,7 +145,7 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
             CalcPersp(&s_cam);
 
             // Clear to void color (each byte of voidColor) + empty Z.
-            std::memset(surf.Data, params.voidColor & 0xFF, size_t(res) * res * 4);
+            std::memset(surf.Data, voidColor & 0xFF, size_t(res) * res * 4);
             std::memset(surf.Z16, 0, size_t(res) * res * sizeof(word));
 
             Transform_Objects(sc, fds::g_mainCamera, fds::g_mainFaces);
@@ -168,6 +176,22 @@ static bool renderCubeAndStitch(Scene* sc, const Vector& center,
 
     std::free(surf.Data);
     std::free(surf.Z16);
+    return true;
+}
+
+// Shared core: render the six cube faces from `center` and stitch them into
+// a LINEAR equirect panorama in `pano`. Returns false on alloc failure.
+static bool renderCubeAndStitch(Scene* sc, const Vector& center,
+                                const EnvBakeParams& params,
+                                std::vector<uint32_t>& pano,
+                                Material* skipMat = nullptr) {
+    if (!sc) return false;
+    const int res = params.cubeRes;
+    const int W = params.panoWidth, H = params.panoHeight;
+
+    std::vector<uint32_t> faces[6];
+    if (!renderSixFaces(sc, center, res, 90.0f, params.voidColor, faces, skipMat))
+        return false;
 
     // Stitch to equirectangular. The (eu,ev)→direction mapping is the exact
     // inverse of the reflective lookup in RENDER/Transform.cpp, so a face
@@ -271,6 +295,70 @@ void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
         }
 }
 
+// Per-face 2×2 box downsample of a FACE-MAJOR cube buffer (6 faces of fr×fr →
+// 6 faces of (fr/2)²). Faces are downsampled INDEPENDENTLY — the padding ring
+// (D2) means the 2×2 box at a face edge already averages valid neighbour
+// content, so we never cross a face boundary in the filter.
+void boxDownsampleCube(const std::vector<uint32_t>& src, int fr,
+                       std::vector<uint32_t>& dst) {
+    const int dfr = fr >> 1;
+    dst.assign(size_t(6) * dfr * dfr, 0);
+    for (int f = 0; f < 6; ++f) {
+        const uint32_t* sp = src.data() + size_t(f) * fr * fr;
+        uint32_t* dp = dst.data() + size_t(f) * dfr * dfr;
+        for (int y = 0; y < dfr; ++y)
+            for (int x = 0; x < dfr; ++x) {
+                const uint32_t a = sp[size_t(2*y)   * fr + 2*x];
+                const uint32_t b = sp[size_t(2*y)   * fr + 2*x + 1];
+                const uint32_t c = sp[size_t(2*y+1) * fr + 2*x];
+                const uint32_t d = sp[size_t(2*y+1) * fr + 2*x + 1];
+                uint32_t out = 0;
+                for (int sh8 = 0; sh8 < 32; sh8 += 8) {
+                    const uint32_t s = ((a >> sh8) & 0xFF) + ((b >> sh8) & 0xFF)
+                                     + ((c >> sh8) & 0xFF) + ((d >> sh8) & 0xFF);
+                    out |= ((s + 2) >> 2) << sh8;
+                }
+                dp[size_t(y) * dfr + x] = out;
+            }
+    }
+}
+
+// Render six PADDED faces (env_cube) and pack them FACE-MAJOR into level0
+// (6 blocks of fr×fr). No equirect stitch — the sharp faces go straight to
+// the kernel. faceRes := params.cubeRes. FDS_ENVBAKE_DUMP writes a 3×2 grid.
+bool renderCubeFacesMajor(Scene* sc, const Vector& center,
+                          const EnvBakeParams& params,
+                          std::vector<uint32_t>& level0, int& faceRes,
+                          Material* skipMat) {
+    const int fr = params.cubeRes;
+    std::vector<uint32_t> faces[6];
+    if (!renderSixFaces(sc, center, fr, fds::EnvCube_FaceFovDegrees(),
+                        params.voidColor, faces, skipMat))
+        return false;
+    level0.resize(size_t(6) * fr * fr);
+    for (int f = 0; f < 6; ++f)
+        std::memcpy(level0.data() + size_t(f) * fr * fr, faces[f].data(),
+                    size_t(fr) * fr * 4);
+    faceRes = fr;
+    if (std::getenv("FDS_ENVBAKE_DUMP")) {
+        const int gw = fr * 3, gh = fr * 2;
+        if (FILE* fp = std::fopen("/tmp/envbake_cube.ppm", "wb")) {
+            std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
+            for (int y = 0; y < gh; ++y)
+                for (int x = 0; x < gw; ++x) {
+                    const int f = (y / fr) * 3 + (x / fr);
+                    const uint32_t p = faces[f][size_t(y % fr) * fr + (x % fr)];
+                    unsigned char rgb[3] = { (unsigned char)((p >> 16) & 0xFF),
+                                             (unsigned char)((p >> 8) & 0xFF),
+                                             (unsigned char)(p & 0xFF) };
+                    std::fwrite(rgb, 1, 3, fp);
+                }
+            std::fclose(fp);
+        }
+    }
+    return true;
+}
+
 // World-space centroid of every face using material M. False if none found
 // (material exists but no faces reference it — nothing to reflect anyway).
 bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
@@ -363,12 +451,36 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
     params.cubeRes = res / 2;
     params.panoWidth = res;
     params.panoHeight = res;
+    const bool useCube = fds::FeatureFlags::env_cube();
     auto store = std::make_unique<EnvPanoStore>();
+    EnvPanoLinear& v = store->view;
     g_envBakeInProgress = true;
+    if (useCube) {
+        // Padded 6-face cube (D2): no stitch. mip[k] is a face-major block of
+        // six (faceRes>>k)² faces; W==H==faceRes; per-face box downsample.
+        int faceRes = 0;
+        const bool ok = renderCubeFacesMajor(sc, center, params,
+                                             store->levels[0], faceRes, skipMat);
+        g_envBakeInProgress = false;
+        if (!ok) return nullptr;
+        v.isCube = true;
+        v.W = v.H = faceRes;
+        v.numMips = EnvPanoLinear::kMaxMips;
+        int fr = faceRes;
+        for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+            boxDownsampleCube(store->levels[k-1], fr, store->levels[k]);
+            fr >>= 1;
+        }
+        for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
+            v.mip[k] = store->levels[k].data();
+        v.bakeX = center.x; v.bakeY = center.y; v.bakeZ = center.z;
+        v.boxMinX = env.boxMin[0]; v.boxMinY = env.boxMin[1]; v.boxMinZ = env.boxMin[2];
+        v.boxMaxX = env.boxMax[0]; v.boxMaxY = env.boxMax[1]; v.boxMaxZ = env.boxMax[2];
+        return store;
+    }
     const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0], skipMat);
     g_envBakeInProgress = false;
     if (!ok) return nullptr;
-    EnvPanoLinear& v = store->view;
     v.W = params.panoWidth;
     v.H = params.panoHeight;
     v.numMips = EnvPanoLinear::kMaxMips;
@@ -442,17 +554,26 @@ void EnvReflection_DrawViz(Scene* sc) {
 
     // Fit into a quarter of the frame (integer downscale), TOP-CENTER:
     // top-right hides under the editor's HTML side panel, top-left under
-    // the profiler HUD.
+    // the profiler HUD. env_cube: lay the six faces out as a 3×2 grid.
+    const int srcW = v.isCube ? v.W * 3 : v.W;
+    const int srcH = v.isCube ? v.H * 2 : v.H;
     int scale = 1;
-    while (v.W / scale > XRes / 2 || v.H / scale > YRes / 2) ++scale;
-    const int dw = v.W / scale, dh = v.H / scale;
+    while (srcW / scale > XRes / 2 || srcH / scale > YRes / 2) ++scale;
+    const int dw = srcW / scale, dh = srcH / scale;
     const int x0 = (XRes - dw) / 2, y0 = 8;
     dword* out = reinterpret_cast<dword*>(VPage);
+    auto srcAt = [&](int sx, int sy) -> uint32_t {
+        if (v.isCube) {
+            const int fr = v.W;
+            const int f = (sy / fr) * 3 + (sx / fr);
+            return v.mip[0][size_t(f) * fr * fr + size_t(sy % fr) * fr + (sx % fr)];
+        }
+        return v.mip[0][size_t(sy) * v.W + sx];
+    };
     for (int y = 0; y < dh; ++y) {
         dword* row = out + size_t(y0 + y) * XRes + x0;
-        const uint32_t* src = v.mip[0] + size_t(y) * scale * v.W;
         for (int x = 0; x < dw; ++x)
-            row[x] = src[size_t(x) * scale] | 0xFF000000u;
+            row[x] = srcAt(x * scale, y * scale) | 0xFF000000u;
     }
     // 1px frame so it reads as an overlay, not scene content.
     for (int x = -1; x <= dw; ++x) {

@@ -57,6 +57,7 @@ extern float fastPow2(float x);
 #include "RENDER/LightmapBake.h"
 #include "RENDER/Hdr.h"  // HDR overlay reorg — xpar peel composites into g_hdrBuf
 #include "RENDER/EnvBake.h"  // --env_refl: per-scene panorama for env-specular
+#include "RENDER/EnvCube.h"  // --env_cube: trig-free padded cube-face lookup
 #include "TailProf.h"     // phase-1 barrier-tail instrumentation (FDS_TAIL_PROF)
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
@@ -734,13 +735,25 @@ static inline void EnvSpecComposeScalar(
 		if (std::strchr(sFlip, 'y')) rwy = -rwy;
 		if (std::strchr(sFlip, 'z')) rwz = -rwz;
 	}
-	const float lon = atan2_approx(-rwz, -rwx);
-	float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
-	const float lat = asin_approx(sy_);
-	float eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
-	eu -= std::floor(eu);
-	float evv = 0.5f - lat * (1.0f / 3.14159265359f);
-	if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
+	// Direction → lookup coords. env_cube: trig-free dominant-axis face select
+	// + gnomonic UV (EnvCube.h). Equirect: the atan2/asin panorama lookup
+	// (inverse of EnvBake's stitch). ONE branch on the bake's mode, hoisted to
+	// the same altitude the equirect math ran; ENVPROBE/ENVFLIP already applied
+	// to rwx/rwy/rwz above, so both diagnostics work in cube mode too.
+	const bool envIsCube = envP->isCube;
+	float eu = 0.0f, evv = 0.0f;
+	int   cubeFace = 0; float cubeU = 0.0f, cubeV = 0.0f;
+	if (envIsCube) {
+		fds::EnvCube_DirToFaceUV(rwx, rwy, rwz, cubeFace, cubeU, cubeV);
+	} else {
+		const float lon = atan2_approx(-rwz, -rwx);
+		float sy_ = rwy; if (sy_ > 1.0f) sy_ = 1.0f; if (sy_ < -1.0f) sy_ = -1.0f;
+		const float lat = asin_approx(sy_);
+		eu = (lon + 1.57079632679f) * (1.0f / 6.28318530718f) + 0.5f;
+		eu -= std::floor(eu);
+		evv = 0.5f - lat * (1.0f / 3.14159265359f);
+		if (evv < 0.0f) evv = 0.0f; if (evv > 0.9999f) evv = 0.9999f;
+	}
 	// Pre-filtered mip by per-pixel roughness (map texel, else the
 	// gloss-derived roughness the --pbr path uses).
 	float rough;
@@ -763,15 +776,29 @@ static inline void EnvSpecComposeScalar(
 	// ENV_NOFETCH=1: constant color instead of the pano loads —
 	// cost-attribution experiment (fetch-bound vs math-bound).
 	static const bool sNoFetch = std::getenv("ENV_NOFETCH") != nullptr;
-	auto fetchLvl = [&](int lvl) -> uint32_t {
-		if (sNoFetch) return 0xFF808080u;
-		const int lw = envP->W >> lvl, lh = envP->H >> lvl;
-		const int epx = int(eu * float(lw)) % lw;
-		const int epy_ = int(evv * float(lh));
-		return envP->mip[lvl][size_t(epy_) * lw + epx];
-	};
-	const uint32_t c0 = fetchLvl(lvl0);
-	const uint32_t c1 = lvl1 != lvl0 ? fetchLvl(lvl1) : c0;
+	uint32_t c0, c1;
+	if (sNoFetch) {
+		c0 = c1 = 0xFF808080u;
+	} else if (envIsCube) {
+		// Face-major fetch: face f, level lvl at offset f*(fr*fr).
+		auto fc = [&](int lvl) -> uint32_t {
+			const int fr = envP->W >> lvl;
+			int fx = int(cubeU * float(fr)); if (fx >= fr) fx = fr - 1;
+			int fy = int(cubeV * float(fr)); if (fy >= fr) fy = fr - 1;
+			return envP->mip[lvl][(size_t(cubeFace) * fr + size_t(fy)) * fr + fx];
+		};
+		c0 = fc(lvl0);
+		c1 = lvl1 != lvl0 ? fc(lvl1) : c0;
+	} else {
+		auto fq = [&](int lvl) -> uint32_t {
+			const int lw = envP->W >> lvl, lh = envP->H >> lvl;
+			const int epx = int(eu * float(lw)) % lw;
+			const int epy_ = int(evv * float(lh));
+			return envP->mip[lvl][size_t(epy_) * lw + epx];
+		};
+		c0 = fq(lvl0);
+		c1 = lvl1 != lvl0 ? fq(lvl1) : c0;
+	}
 	const float ecB = float(c0 & 0xFF)         + lf * (float(c1 & 0xFF)         - float(c0 & 0xFF));
 	const float ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
 	const float ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));

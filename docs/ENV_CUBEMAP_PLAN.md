@@ -250,6 +250,43 @@ byte-compare cube output against equirect.)
 - **Gate: 3/3 PASS** flag OFF and flag ON (nothing wired yet).
 - Flag-off pins: N/A (no render wiring yet; header + flag + startup hook only).
 
+### Slice B — deferred path  (DONE)
+- `EnvPanoLinear` gained `bool isCube`; in cube mode each `mip[k]` is a
+  FACE-MAJOR block of six `(W>>k)²` faces (`W==H==faceRes`, face `f` at
+  `f*(W>>k)²`).
+- `EnvBake.cpp`: extracted `renderSixFaces(...,fovDeg,...)` (equirect passes
+  90°, cube passes `EnvCube_FaceFovDegrees()≈102.68°`); new
+  `renderCubeFacesMajor` packs padded faces face-major (no stitch);
+  `boxDownsampleCube` downsamples each face independently (padding absorbs the
+  edge box); `bakeStore` branches on `env_cube`. `FDS_ENVBAKE_DUMP` writes a
+  3×2 grid `/tmp/envbake_cube.ppm`; `FDS_ENVCUBE_PAINT` overrides the render
+  with painted debug faces.
+- `EnvSpecComposeScalar`: ONE branch on `envP->isCube` at the direction-lookup
+  altitude — cube → `EnvCube_DirToFaceUV` + face-major fetch; equirect
+  unchanged. Parallax, roughness→mip trilinear, Fresnel, metal tint untouched.
+  `ENVPROBE`/`ENVFLIP`/`ENV_NOFETCH` apply to `rwx/rwy/rwz` before the branch →
+  work in cube mode.
+- `EnvReflection_DrawViz` (`--env_refl_viz`) lays the six faces out 3×2 in cube.
+- **Validation:**
+  - Painted debug-face grid dump: all 6 faces correct (tint, dot-count, green
+    (0,0) corner, red +u / blue +v bars, yellow padding rectangle).
+  - ENVPROBE + painted faces on chase cockpit: cube vs equirect probe renders
+    essentially identical (same environment orientation) and BOTH seamless —
+    confirms bake-camera orientation matches the convention, no face seams.
+    PNGs: `/tmp/envcube/probe_{cube,equi}_painted.png`.
+  - A/B chase (off vs on, real bake): differs by design (cube reflections are a
+    tiny screen contribution in chase — 125 bytes @ t=500). PPMs:
+    `/tmp/envcube/{off,on}/chase_t000500_color.ppm`.
+  - **Flag-OFF pins: BYTE-IDENTICAL** — `city@t=150`, `chase@t=500`,
+    `chase@t=1000` all 0-diff vs baseline. Gate 3/3 PASS flag OFF and ON.
+  - Bakes `256×256` faces at `env_refl_res=512` (faceRes = res/2), as planned.
+- **Perf:** coarse chase-snapshot wall-time (startup-dominated) OFF 0.10-0.11s
+  vs ON 0.10s — no regression; cube marginally faster (bake skips the equirect
+  stitch resample). Per-pixel math analytically cheaper (2-3 cmp + 1 div + 2
+  fma vs `atan2_approx`+`asin_approx`+wrap). A clean per-pass number needs a
+  reflection-dominated scene; chase's env area is too small to isolate — the
+  real signal comes with CITY (Slice C).
+
 ## Deviations
 
 - (none yet)
