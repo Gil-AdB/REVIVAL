@@ -68,7 +68,35 @@ fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
 OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
 still shadows the merged pinned 512KB one — user to decide.
 
-## STEP 5 UNIT: parallel mirror-RTT slots (designed 2026-07-04, next up)
+## STEP 5 UNIT: parallel mirror-RTT slots — SHIPPED opt-in, residual OPEN (2026-07-04)
+
+STATUS: fan implemented + committed (bdeacfe prepass, 2206d49 HdrTarget
+override infra, cbc9220 the fan). DEFAULT SERIAL (byte-exact); the fan is
+--mirror-rtt-parallel, OFF, because of an unresolved residual.
+
+RESIDUAL (the one thing left): at t=700 teleporter, one reflected panel
+differs from serial ~1600px screen / ~1870px in the 64² slot (max 58/137),
+surviving single-worker (FDS_MIRROR_RTT_P1=1). DIAGNOSIS NARROWED — the
+slot Z16 + mat32 planes are byte-IDENTICAL to serial (ZDUMP/MDUMP verified),
+so transform+clip+raster match EXACTLY. The divergence is entirely in the
+LIGHTING/CONE/HDR resolve, reading some non-geometry ctx state differently
+between serial's ov.cam=&fds::g_mainCamera and the fan's ov.cam=&w.camCtx.
+Ruled OUT by the identical planes: near-plane clip, off-axis cull, vertex
+scratch, zScale/fovX/cntrEX (those would perturb the planes). Still SUSPECT:
+a CameraContext field the kernel/cone read but raster doesn't
+(viewToWorld/cameraWorld are equal by construction — recheck), or a
+subtle HDR-resolve order difference (Hdr_ActivateNoFogTarget/
+Render_TonemapToTarget vs the global Hdr_ActivateNoFog/Render_TonemapToVPage
+— diff them line-by-line; note the global variants are THREADED via
+hdrDispatchRows while the Target variants are SERIAL — a float
+reduction-order/rounding difference there would produce exactly a
+low-amplitude broad delta like max=58). NEXT PROBE: printf ov.cam->* +
+the HDR buf checksum at kernel exit, serial vs P=1. Likely the fan is MORE
+correct (EdgeAA-pilot pattern); resolution is adopt-or-match, a judgment call.
+Perf prize when closed: ~1.0-1.3ms at ts=491 (serial RTT is 1.77-1.85ms).
+
+--- original design notes below ---
+
 
 RTT = 1.77-1.85 ms/f SERIAL at ts=491 (biggest reclaimable serial line;
 "serial tonemap-post/edge-aa" are internally-threaded, misleading label).
