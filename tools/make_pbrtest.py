@@ -132,18 +132,22 @@ def uv_sphere(cx, cy, cz, r, nseg=16, nring=12):
     polys = []
     def ring(j):                       # first vertex index of ring j (1-based rings)
         return 1 + (j - 1) * nseg
+    # Winding: outward-facing for the engine's cull/normal convention —
+    # the first cut had these reversed and the spheres rendered INSIDE-OUT
+    # (visible, but lit as if the normals pointed into the ball: lights
+    # above produced bottom-lit spheres — "normals upside down").
     for i in range(nseg):
-        polys.append([0, ring(1) + (i + 1) % nseg, ring(1) + i])
+        polys.append([0, ring(1) + i, ring(1) + (i + 1) % nseg])
     for j in range(1, nring - 1):
         for i in range(nseg):
             a = ring(j) + i
             b = ring(j) + (i + 1) % nseg
             c = ring(j + 1) + (i + 1) % nseg
             d = ring(j + 1) + i
-            polys.append([a, b, c, d])
+            polys.append([d, c, b, a])
     last = len(verts) - 1
     for i in range(nseg):
-        polys.append([last, ring(nring - 1) + i, ring(nring - 1) + (i + 1) % nseg])
+        polys.append([last, ring(nring - 1) + (i + 1) % nseg, ring(nring - 1) + i])
     return verts, polys
 
 def box(cx, cy, cz, sx, sy, sz):
@@ -152,7 +156,7 @@ def box(cx, cy, cz, sx, sy, sz):
     z0, z1 = cz - sz / 2, cz + sz / 2
     v = [(x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
          (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)]
-    f = [[0,1,2,3],[5,4,7,6],[4,0,3,7],[1,5,6,2],[3,2,6,7],[4,5,1,0]]
+    f = [[3,2,1,0],[6,7,4,5],[7,3,0,4],[2,6,5,1],[7,6,2,3],[0,1,5,4]]
     return v, f
 
 # ── build the objects ────────────────────────────────────────────────────

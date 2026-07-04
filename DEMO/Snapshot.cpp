@@ -634,6 +634,23 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createPBRTestScene();
     driver->init();
 
+    // FDS_PBRTEST_CAM="px,py,pz,lx,ly,lz": posed free-cam (position +
+    // look-at) instead of the scene dolly — orbit shots for material
+    // verification. View=&FC → Animate_Objects leaves the camera alone.
+    if (const char* s = std::getenv("FDS_PBRTEST_CAM")) {
+        float px, py, pz, lx, ly, lz;
+        if (std::sscanf(s, "%f,%f,%f,%f,%f,%f", &px, &py, &pz, &lx, &ly, &lz) == 6) {
+            FC.ISource = Vector(px, py, pz);
+            Vector look(lx, ly, lz);
+            Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+            FC.IFOV = 60.0f;
+            CalcPersp(&FC);
+            View = &FC;
+            std::fprintf(stderr, "[PBRTESTSNAP] posed cam (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)\n",
+                         px, py, pz, lx, ly, lz);
+        }
+    }
+
     int produced = 0;
     for (int32_t ts : timestamps) {
         std::srand(0);
