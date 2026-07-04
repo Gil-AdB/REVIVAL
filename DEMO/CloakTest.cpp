@@ -214,6 +214,9 @@ void Run_CloakTest() {
     Specular_Factor = 1.0f;
     ImageSize = 1;
 
+    // FDS_CLOAK_DUMP=1: headless pose-dump mode (CI / verification).
+    // Default = INTERACTIVE free-cam so the scene can be explored live.
+    if (std::getenv("FDS_CLOAK_DUMP")) {
     struct Pose { Vector eye, lookAt; const char *tag; };
     const Pose poses[] = {
         // The sweet spot: panels mirror the side walls ≈ back wall,
@@ -232,5 +235,55 @@ void Run_CloakTest() {
         char path[64];
         std::snprintf(path, sizeof(path), "/tmp/cloak_view_%s.ppm", p.tag);
         renderPoseToPPM(cs, p.eye, p.lookAt, path);
+    }
+    return;
+    }
+
+    // ── Interactive loop ──────────────────────────────────────────────
+    // Free-cam from the on-axis sweet spot: standing here the cubes are
+    // invisible; strafe sideways (A/D) and they appear in the panels'
+    // seams. Same per-frame mirror flow as the mirrortest driver.
+    FC.ISource = Vector(0.0f, 2.5f, -10.0f);
+    {
+        Vector eye = FC.ISource, look(0.0f, 2.5f, 6.0f);
+        Kick_Camera(&eye, &look, 0.0f, FC.Mat);
+    }
+    FC.IFOV = 60.0f;
+    CalcPersp(&FC);
+    View = &FC;
+    std::fprintf(stderr,
+        "[CLOAKTEST] interactive — WASD/QE move, arrows look, ESC/Backspace exit. "
+        "Stand on-axis: cubes invisible; strafe: illusion breaks.%s\n",
+        cs.rttSlots.empty() ? " (pass --mirror-rtt for the seam retroreflection)" : "");
+    char msg[160];
+    float TTrd = -1.0f;
+    while (!Keyboard[ScESC] && !Keyboard[ScBackSpace] && !g_shouldQuit.load()) {
+        g_FrameTime = Timer;
+        if (TTrd > 0) dTime = (Timer - TTrd) * 0.25f;
+        else          dTime = 0;
+        TTrd = Timer;
+        Dynamic_Camera();
+        CalcPersp(&FC);
+        View = &FC;
+
+        std::memset(VPage, 0, PageSize);
+        std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+        Animate_Objects(cs.sc, View);
+        fds::RenderSecondOrderMirrors(cs.sc, cs.mirrors, cs.rttSlots);
+        Transform_Objects(cs.sc, fds::g_mainCamera, fds::g_mainFaces);
+        fds::UpdateAllMirrors(cs.sc, cs.mirrors);
+        fds::StampMirrorMasks(cs.sc, cs.mirrors);
+        Lighting(cs.sc);
+        if (CAll) {
+            Radix_Sort(FList, SList, CAll);
+            Render(RenderPath::ForceDeferred);   // clone mask = deferred-only
+        }
+        std::snprintf(msg, sizeof(msg),
+                      "CLOAK  Cam=(%.1f,%.1f,%.1f)  mirrors:%zu rtt:%zu  "
+                      "WASD/QE move, arrows look, ESC exit",
+                      FC.ISource.x, FC.ISource.y, FC.ISource.z,
+                      cs.mirrors.size(), cs.rttSlots.size());
+        OutTextXY(VPage, 0, 0, msg, 255);
+        Flip(MainSurf);
     }
 }
