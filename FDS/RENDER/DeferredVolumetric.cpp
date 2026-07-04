@@ -257,7 +257,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                          float fogZ, float invFogZ) {
     // Render state from the threaded ctx, not globals. Local refs/aliases
     // shadow the file-scope names so the (large) body is untouched.
-    const DeferredLightingCtx &g_deferredCtx = ctx;
+    const DeferredLightingCtx &dc = ctx;
     const meka::GBuffer *const g_gbuffer = ctx.gb;
     const int XRes = ctx.xres;
     byte *const VPage = ctx.vpage;
@@ -407,13 +407,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const float Nx = lights->mirNX[li];
                         const float Ny = lights->mirNY[li];
                         const float Nz = lights->mirNZ[li];
-                        const auto &VW = g_deferredCtx.viewToWorld;
+                        const auto &VW = dc.viewToWorld;
                         hsNx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
                         hsNy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
                         hsNz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
-                        hsD  = Nx*g_deferredCtx.cameraWorldX +
-                               Ny*g_deferredCtx.cameraWorldY +
-                               Nz*g_deferredCtx.cameraWorldZ +
+                        hsD  = Nx*dc.cameraWorldX +
+                               Ny*dc.cameraWorldY +
+                               Nz*dc.cameraWorldZ +
                                lights->mirD[li];
                         if (hsD == 0.0f) continue;  // camera on the glass
                     }
@@ -553,13 +553,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         const float Nx = lights->mirNX[li];
                         const float Ny = lights->mirNY[li];
                         const float Nz = lights->mirNZ[li];
-                        const auto &VW = g_deferredCtx.viewToWorld;
+                        const auto &VW = dc.viewToWorld;
                         nvx = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
                         nvy = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
                         nvz = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
-                        dv_pl = Nx*g_deferredCtx.cameraWorldX +
-                                Ny*g_deferredCtx.cameraWorldY +
-                                Nz*g_deferredCtx.cameraWorldZ +
+                        dv_pl = Nx*dc.cameraWorldX +
+                                Ny*dc.cameraWorldY +
+                                Nz*dc.cameraWorldZ +
                                 lights->mirD[li];
                     }
                     const ShadowMap *sm = (smIdx >= 0 && size_t(smIdx) < g_shadowMaps.size())
@@ -1168,13 +1168,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const float Nx = lights->mirNX[li];
                     const float Ny = lights->mirNY[li];
                     const float Nz = lights->mirNZ[li];
-                    const auto &VW = g_deferredCtx.viewToWorld;
+                    const auto &VW = dc.viewToWorld;
                     hsNx_s = VW[0][0]*Nx + VW[1][0]*Ny + VW[2][0]*Nz;
                     hsNy_s = VW[0][1]*Nx + VW[1][1]*Ny + VW[2][1]*Nz;
                     hsNz_s = VW[0][2]*Nx + VW[1][2]*Ny + VW[2][2]*Nz;
-                    hsD_s  = Nx*g_deferredCtx.cameraWorldX +
-                             Ny*g_deferredCtx.cameraWorldY +
-                             Nz*g_deferredCtx.cameraWorldZ +
+                    hsD_s  = Nx*dc.cameraWorldX +
+                             Ny*dc.cameraWorldY +
+                             Nz*dc.cameraWorldZ +
                              lights->mirD[li];
                     if (hsD_s == 0.0f) continue;
                 }
@@ -1502,7 +1502,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
 
     // Iterate the frame-global ViewLightsSoA built by Render_DeferredLighting
-    // (g_deferredCtx.lights / .numLights). The per-tile TileLights apply a
+    // (dc.lights / .numLights). The per-tile TileLights apply a
     // surface-z cull that's incorrect for volumetric integration — see the
     // note inside Render_VolumetricCones_Tile.
     const ViewLightsSoA *const lights = ctx.lights;

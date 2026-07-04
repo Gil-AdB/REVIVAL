@@ -1892,9 +1892,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	if (fogFar <= 0.0f) return;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 
-	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-	const float (*w2)[3] = g_deferredCtx.viewToWorld;
-	const float camY = g_deferredCtx.cameraWorldY;
+	const DeferredLightingCtx &dc = ctx;
+	const float (*w2)[3] = dc.viewToWorld;
+	const float camY = dc.cameraWorldY;
 
 	FastFogParams P{};
 	P.invFOVX   = 1.0f / FOVX;
@@ -1909,9 +1909,9 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.w00 = w2[0][0]; P.w01 = w2[0][1]; P.w02 = w2[0][2];
 	P.w10 = w2[1][0]; P.w11 = w2[1][1]; P.w12 = w2[1][2];
 	P.w20 = w2[2][0]; P.w21 = w2[2][1]; P.w22 = w2[2][2];
-	P.camX = g_deferredCtx.cameraWorldX;
+	P.camX = dc.cameraWorldX;
 	P.camY = camY;
-	P.camZ = g_deferredCtx.cameraWorldZ;
+	P.camZ = dc.cameraWorldZ;
 	// Slab bounds in world Y. Defaults (±1e9) → unbounded → plain height fog.
 	P.slabY0 = fds::FeatureFlags::fast_fog_bottom();
 	P.slabY1 = fds::FeatureFlags::fast_fog_top();
@@ -1979,8 +1979,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.shadowEarlyOut    = fds::FeatureFlags::fast_fog_shadow_earlyout();
 	P.shadowAnalytic    = fds::FeatureFlags::fast_fog_shadow_analytic();
 	P.shadowPcf         = std::max(0, fds::FeatureFlags::fast_fog_shadow_pcf());
-	P.lights    = g_deferredCtx.lights;
-	P.numLights = g_deferredCtx.numLights;
+	P.lights    = dc.lights;
+	P.numLights = dc.numLights;
 	const bool adaptive = fds::FeatureFlags::fast_fog_adaptive();
 	P.coarseStep  = adaptive ? std::max(2, fds::FeatureFlags::fast_fog_adaptive_step()) : 2;
 	P.adaptThresh = adaptive ? fds::FeatureFlags::fast_fog_adaptive_thresh() : 0.0f;
@@ -2135,9 +2135,9 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	if (!CurScene || !ZPage16 || !VPage) return;
 	const float fogFar = CurScene->FZP;
 	if (fogFar <= 0.0f) return;
-	const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-	const float (*w2)[3] = g_deferredCtx.viewToWorld;
-	const float camY    = g_deferredCtx.cameraWorldY;
+	const DeferredLightingCtx &dc = ctx;
+	const float (*w2)[3] = dc.viewToWorld;
+	const float camY    = dc.cameraWorldY;
 	const float kHeight = fds::FeatureFlags::fast_fog_height();
 	const float sigma   = fds::FeatureFlags::fast_fog_density() / fogFar;
 	const float slabY0  = fds::FeatureFlags::fast_fog_bottom();
@@ -3229,10 +3229,10 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
     VolProfScope _vp(&g_volProf.ms_unified, &g_volProf.n_unified);
     if (!CurScene || !ZPage16 || !VPage) return;
 
-    const DeferredLightingCtx &g_deferredCtx = ctx;  // shadow extern with param
-    const ViewLightsSoA *const lights = g_deferredCtx.lights;
+    const DeferredLightingCtx &dc = ctx;
+    const ViewLightsSoA *const lights = dc.lights;
     if (!lights) return;
-    const int numLights = g_deferredCtx.numLights;
+    const int numLights = dc.numLights;
 
     // Pre-filter spot vs omni index lists.
     static int spotIdx[DEFERRED_MAX_VIEW_LIGHTS];

@@ -13,7 +13,7 @@
 //   renderDeferredTransparentTile_Front/Back() — wrappers for the per-tile
 //                                       transparent-layer composite that
 //                                       renderFrame calls inside a runTilePass
-//                                       lambda. The template + g_deferredCtx
+//                                       lambda. The template
 //                                       stay in this TU.
 //   RenderXparClumpInStrip()         — TBR-strip xpar batch dispatch
 
@@ -4096,7 +4096,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 
 // ─── Wrappers for the renderFrame orchestrator ───────────────────────────
 // renderFrame in RENDER.CPP dispatches transparent-layer composites in a
-// tile-job lambda; the template + g_deferredCtx live here, so we expose
+// tile-job lambda; the template lives here, so we expose
 // front/back wrappers it can forward into without seeing the template.
 
 void renderDeferredTransparentTile_Front(const DeferredLightingCtx &ctx,
