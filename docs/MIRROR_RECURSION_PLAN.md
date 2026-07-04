@@ -162,21 +162,64 @@ is monotone: each +1 fills the next nested black core (off-axis pose 1→2 =
 structural convergence). Depth-0 gates: render_gate 3/3 PASS, greets build
 unchanged, all 9 V-cloak poses byte-identical.
 
-**Remaining limitation (→ slice 2/3):**
-- **Geometric approximation**: each panel is baked from its OWN order-1
-  reflected camera and shares ONE texture. That texture is only correct for
-  looking *directly* at the panel, not for the panel *seen through another*
-  mirror — so nested bounces are geometrically crude (parallel facing
-  mirrors happen to be the friendly case: the order-1 virtual camera is
-  nearly right on-axis, which is why the tunnel reads well). Exact nesting
-  needs per-context reflected cameras (the recursive `renderView(vcam,
-  depth-1)` tree in the pseudocode above).
-- **Slice 2: multiple mirrors per view.** Loop over all mirrors visible in
-  each reflected view; per-mirror scissor. Validate on cloaktest: the black
-  hole fills at depth 2, more at 3, and the bg pillar appears at depth 4.
+### Slice 2 — IMPLEMENTED: per-context recursive bake tree (this session)
+
+The flat N-pass approximation is replaced (recurse mode) by the true
+`renderView(vcam, depth-1)` tree from the pseudocode above, in
+`RenderSecondOrderMirrors`:
+
+1. **`bakeJob` extraction**: the per-job bake body (surface stamp, off-axis
+   projection, UV stamp, transform+render, composite, passthrough comp,
+   memcpy+Sachletz) is now a lambda shared verbatim by the legacy scheduled
+   path, the flat N-pass loop, and the tree — depth 0 is pure code motion
+   (render_gate 3/3 PASS, mirrortest golden byte-identical).
+2. **`bakeTree(slot, camPos, backSide, bounces)`**: children = panels whose
+   window projects with live footprint into the parent's off-axis target
+   rect (`childrenOf`, same projection formulas as the bake; corner behind
+   the near plane → conservative full-window footprint). Child context
+   camera = parent context eye reflected side-aware across the child's
+   plane. Children bake deepest-first; the parent then renders sampling
+   their textures.
+3. **Sibling texture stash/restore**: a texture is CONSUMED at the parent
+   bake, so one texture per slot suffices — but a later sibling's subtree
+   re-bakes shared panels in its own context, so each child's finished
+   texture is copied out and restored (plain byte copy — the tree bakes at
+   texWMax/texHMax, no adaptive res) before the parent renders. Same
+   stash/restore at top level before the main frame samples the textures.
+4. **Top level**: only panels with a real main-screen footprint; the flat
+   path's full-frame fallback for off-screen mirrors is obsolete here — an
+   off-screen mirror is baked as a CHILD of whichever view shows it.
+   `kRecurseMaxBakes=128` runaway guard (V^depth is footprint-pruned but
+   unbounded in principle). `FDS_MIRROR_RECURSE_FLAT=1` keeps the slice-1b
+   flat pass for A/B.
+
+**Validated — V-cloak (the slice-2 target)**, viewer pose, depths 1→4:
+central-band black falls 204k → 134k → 87k → 30k px, hero-red 0 at every
+depth, and the **bg pillar appears at depth 4** (16.5k green px) — the
+4-bounce periscope see-through resolves, exactly the plan's prediction.
+Depths 5/6 are byte-identical to 4 while performing MORE bakes (70/138/162
+dump-run bakes at d2/d4/d6): genuine structural convergence. The residual
+30k black = the self-cycling region (rays the retroreflector returns into
+mR_a's own view — a reflection cycle has no fixed point; cut at depth N by
+design, shows the reset-black panel base).
+
+**Validated — parallel tunnel**, 2 poses, depths 1→4: monotone deepening
+(pose-1 cross-depth diffs 120k → 36k → 11k px). Unlike the flat pass the
+tree keeps refining past depth 2 — nested repeats now carry correct
+per-context parallax at the off-axis pose. The tunnel's flanking regions
+render BLACK where the flat pass showed (wrong) wide-angle wall content:
+the test room is open-ended at z=±8, so deep grazing reflections exit into
+void — physically honest; close the room in CloakTest.cpp if the demo look
+ever matters there.
+
+**Remaining (→ slice 3/4):**
 - **Slice 3: perf + budget.** Depth/footprint budget (stop recursing when a
-  mirror's footprint < K px), reuse the RTT texture pool, measure. Wire the
-  half-silvered composite through the recursion.
+  mirror's footprint < K px — today only a 2 px² cutoff + the 128-bake cap),
+  per-mirror scissor instead of full-window child bakes, reuse the RTT
+  texture pool, measure. Wire the half-silvered composite through the
+  recursion. Mixed-side contexts share one UV stamp (a panel viewed from
+  BOTH sides inside one frame's tree displays one side mirrored) — punt
+  until a scene actually does this.
 - **Slice 4: fold order-1/2 into the recursive path** (or keep clones for
   depth-1 as the measured-faster base and recurse only ≥2 — decide by perf).
 

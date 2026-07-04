@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 
 #include <Base/FrameState.h>  // fds::g_mainCamera / g_mainFaces (RTT pass)
@@ -920,6 +921,10 @@ namespace {
 constexpr int kRttRes         = 256;  // initial/default surface edge (slots
                                       // are density-sized, see kRttMaxRes)
 constexpr int kRttPerFrame    = 2;    // most-visible slots re-rendered per frame
+constexpr int kRecurseMaxBakes = 128; // slice-2 tree runaway guard: total
+                                      // offscreen bakes per frame (V^depth is
+                                      // footprint-pruned but unbounded in
+                                      // principle; slice 3 adds a real budget)
 
 // Orthonormal in-plane basis for a mirror plane. Same construction the
 // probe uses — keep in sync (the slot UVs and the per-frame projection
@@ -2479,6 +2484,9 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         float          dist;   // C_B distance to B's plane
         bool           backSide = false;  // order-1: camera behind plane
         float          sw = 0, sh = 0;    // raw on-screen footprint px (adaptive res)
+        bool           offscreen = false; // recurse full-frame fallback (no
+                                          // MAIN-screen footprint) — flat-pass
+                                          // only; the slice-2 tree skips these
     };
     std::vector<Job> jobs;
     auto projectToScreen = [&](const Vector &wp, float &sx, float &sy) -> bool {
@@ -2531,8 +2539,10 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 }
             }
         }
+        bool offscreen = false;
         if (!anyAhead) {
             if (recurseDepth <= 0) continue;
+            offscreen = true;
             // Recurse: bake even when the panel has no MAIN-screen footprint.
             // A mirror is often visible ONLY inside another mirror's
             // reflection (the far wall of an infinity tunnel sits behind the
@@ -2580,7 +2590,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // first fill immediately.
         const float priority = area * (1.0f + float(s.staleFrames) * (1.0f / 30.0f));
         jobs.push_back({ &s, priority, cb, -sd, backSide,
-                         bx1 - bx0, by1 - by0 });
+                         bx1 - bx0, by1 - by0, offscreen });
     }
     if (jobs.empty()) return;
     std::sort(jobs.begin(), jobs.end(),
@@ -2696,24 +2706,21 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         return p;
     };
 
-    // Recursive reflection: bake the whole slot set N times. Each pass
-    // re-renders every panel while the OTHER panels show their latest
-    // texture (real RTT faces are NOT hidden in the bake, unlike clones),
-    // so a mirror-in-a-mirror gains one bounce per pass and depth N
-    // resolves in a single frame. Single-buffer in place: a later panel
-    // in a pass already sees earlier panels' new content, so this
-    // converges at least as fast as strict deepest-first. Legacy = 1 pass.
-    const int numPasses = recurseDepth > 0 ? recurseDepth : 1;
-    for (int pass = 0; pass < numPasses; ++pass)
-    for (const Job &j : jobs) {
-        MirrorRttSlot &s = *j.slot;
-        const float D = j.dist;
+    // One bake: render slot s's window view from `camPos` (distance-to-plane
+    // D, side-aware backSide) into its texture. swPx/shPx = raw on-screen
+    // footprint driving adaptive res, honoured only when `adaptive` — the
+    // slice-2 recursive tree bakes at max dims so the sibling texture
+    // stash/restore below is a constant-size byte copy. Shared verbatim by
+    // the legacy scheduled path, the flat N-pass recursion, and the tree.
+    auto bakeJob = [&](MirrorRttSlot &s, const Vector &camPos, const float D,
+                       const bool backSide, const float swPx, const float shPx,
+                       const bool adaptive) {
         // Shrink this job's bake to its on-screen footprint (never above
         // the allocated texWMax/texHMax). Aspect is preserved by sizing
         // each axis from its own projected extent.
-        if (rttAdaptive) {
-            s.texW = pow2clamp(j.sw * rttAdScale, 64, s.texWMax);
-            s.texH = pow2clamp(j.sh * rttAdScale, 64, s.texHMax);
+        if (rttAdaptive && adaptive) {
+            s.texW = pow2clamp(swPx * rttAdScale, 64, s.texWMax);
+            s.texH = pow2clamp(shPx * rttAdScale, 64, s.texHMax);
         } else {
             s.texW = s.texWMax;
             s.texH = s.texHMax;
@@ -2737,14 +2744,14 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // — flipping both keeps the basis right-handed, and the
         // negated U makes the texture display correctly through the
         // same UVs when the face is viewed from behind.
-        const Vector eN = j.backSide
+        const Vector eN = backSide
             ? Vector{ -s.bN.x, -s.bN.y, -s.bN.z } : s.bN;
-        const Vector eU = j.backSide
+        const Vector eU = backSide
             ? Vector{ -s.axisU.x, -s.axisU.y, -s.axisU.z } : s.axisU;
-        const float eU0 = j.backSide ? -s.u1 : s.u0;
-        const float eU1 = j.backSide ? -s.u0 : s.u1;
+        const float eU0 = backSide ? -s.u1 : s.u0;
+        const float eU1 = backSide ? -s.u0 : s.u1;
         std::memset(&s_rttCam, 0, sizeof(s_rttCam));
-        s_rttCam.ISource = j.camPos;
+        s_rttCam.ISource = camPos;
         s_rttCam.Mat[0][0] = eU.x;      s_rttCam.Mat[0][1] = eU.y;      s_rttCam.Mat[0][2] = eU.z;
         s_rttCam.Mat[1][0] = s.axisV.x; s_rttCam.Mat[1][1] = s.axisV.y; s_rttCam.Mat[1][2] = s.axisV.z;
         s_rttCam.Mat[2][0] = eN.x;      s_rttCam.Mat[2][1] = eN.y;      s_rttCam.Mat[2][2] = eN.z;
@@ -2759,8 +2766,8 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // first cut centered a symmetric frustum on the camera's
         // plane-foot instead — at oblique angles the window collapsed
         // to a few dozen texels and smeared, the 'garbled 2nd mirror'.)
-        const float cu = j.camPos.x*eU.x + j.camPos.y*eU.y + j.camPos.z*eU.z;
-        const float cv = j.camPos.x*s.axisV.x + j.camPos.y*s.axisV.y + j.camPos.z*s.axisV.z;
+        const float cu = camPos.x*eU.x + camPos.y*eU.y + camPos.z*eU.z;
+        const float cv = camPos.x*s.axisV.x + camPos.y*s.axisV.y + camPos.z*s.axisV.z;
         FOVX   = float(s.texW) * D / (eU1 - eU0);
         FOVY   = float(s.texH) * D / (s.v1 - s.v0);
         CntrEX = FOVX * (cu - eU0) / D;
@@ -2779,7 +2786,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         // trivially in lockstep.
         static const bool kUv05 = std::getenv("FDS_MIRROR_RTT_UV05") != nullptr;
         for (const MirrorRttSlot::SlotVert &sv : s.verts) {
-            const float epu = j.backSide ? -sv.pu : sv.pu;
+            const float epu = backSide ? -sv.pu : sv.pu;
             float tu = ( FOVX * (epu - cu) / D + CntrEX) / float(s.texW);
             float tv = (-FOVY * (sv.pv - cv) / D + CntrEY) / float(s.texH);
             // Keep off the wrap seam (Txtr_Tiled wraps).
@@ -2934,7 +2941,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                                  "(cam %.1f,%.1f,%.1f D=%.2f win %.1fx%.1f "
                                  "FOVX=%.0f FOVY=%.0f CntrE=%.0f,%.0f "
                                  "NZP=%.2f FZP=%.0f CAll=%d)\n",
-                                 path, j.camPos.x, j.camPos.y, j.camPos.z,
+                                 path, camPos.x, camPos.y, camPos.z,
                                  D, s.u1 - s.u0, s.v1 - s.v0,
                                  FOVX, FOVY, CntrEX, CntrEY,
                                  sc->NZP, sc->FZP, int(CAll));
@@ -2983,7 +2990,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 const float pv = s.v1 - (float(y) + 0.5f) * dv;
                 for (int x = 0; x < s.texW; ++x) {
                     const float epu = eU0 + (float(x) + 0.5f) * du;
-                    const float pu = j.backSide ? -epu : epu;
+                    const float pu = backSide ? -epu : epu;
                     const float fu = s.tA[0]*pu + s.tA[1]*pv + s.tA[2];
                     const float fv = s.tA[3]*pu + s.tA[4]*pv + s.tA[5];
                     const int iu = int(fu * float(tw)) & (tw - 1);
@@ -3048,6 +3055,156 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         s.mat->Txtr->SizeX = s.texW; s.mat->Txtr->LSizeX = log2p2(s.texW);
         s.mat->Txtr->SizeY = s.texH; s.mat->Txtr->LSizeY = log2p2(s.texH);
         s.staleFrames = 0;
+    };
+
+    // FDS_MIRROR_RECURSE_FLAT=1 keeps the slice-1b flat N-pass approximation
+    // (every panel baked from its OWN order-1 camera) for A/B comparison.
+    static const bool kRecurseFlat =
+        std::getenv("FDS_MIRROR_RECURSE_FLAT") != nullptr;
+    if (recurseDepth <= 0 || kRecurseFlat) {
+        // Flat N-pass recursion (slice 1b): bake the whole slot set N times.
+        // Each pass re-renders every panel while the OTHER panels show their
+        // latest texture, so a mirror-in-a-mirror gains one bounce per pass.
+        // Geometric approximation: every bake uses the panel's own order-1
+        // camera, so nested images lack the per-context parallax the tree
+        // below provides. Legacy scheduled path = 1 pass.
+        const int numPasses = recurseDepth > 0 ? recurseDepth : 1;
+        for (int pass = 0; pass < numPasses; ++pass)
+            for (const Job &j : jobs)
+                bakeJob(*j.slot, j.camPos, j.dist, j.backSide, j.sw, j.sh,
+                        /*adaptive=*/true);
+    } else {
+        // ── Slice 2: per-context recursive bake tree ────────────────────
+        // renderView(vcam, depth-1) from the plan: each panel visible in a
+        // view is baked deepest-first from THAT view's reflected camera, so
+        // nested bounces get exact per-context geometry instead of reusing
+        // the panel's own order-1 image. A texture is CONSUMED at the parent
+        // bake (memcpy'd pixels), so one texture per slot suffices as long
+        // as siblings' subtrees — which re-bake shared panels in their own
+        // context — are stashed and restored before the parent renders.
+        int bakesLeft = kRecurseMaxBakes;
+
+        // Side-aware eye reflection across slot t's plane (same rule as the
+        // top-level job selection). False = degenerate (eye on the plane).
+        auto reflectAcross = [](const MirrorRttSlot &t, const Vector &P,
+                                Vector &out, bool &backSide) -> bool {
+            const float sd = t.bN.x*P.x + t.bN.y*P.y + t.bN.z*P.z + t.bD;
+            backSide = (sd < 0.0f);
+            out = backSide
+                ? reflectPointAcross(P, { -t.bN.x, -t.bN.y, -t.bN.z }, -t.bD)
+                : reflectPointAcross(P, t.bN, t.bD);
+            float so = t.bN.x*out.x + t.bN.y*out.y + t.bN.z*out.z + t.bD;
+            if (backSide) so = -so;
+            return so < -0.01f;
+        };
+
+        // Panels visible inside slot s's window view from camPos: project
+        // each other slot's window corners through s's off-axis projection
+        // (the same formulas bakeJob stamps) and keep live footprints in the
+        // target rect. A corner behind the near plane makes the footprint
+        // conservative (full window) rather than dropping the panel.
+        auto childrenOf = [&](const MirrorRttSlot &s, const Vector &camPos,
+                              bool backSide) {
+            std::vector<MirrorRttSlot*> kids;
+            const Vector eN = backSide
+                ? Vector{ -s.bN.x, -s.bN.y, -s.bN.z } : s.bN;
+            const Vector eU = backSide
+                ? Vector{ -s.axisU.x, -s.axisU.y, -s.axisU.z } : s.axisU;
+            const float eU0 = backSide ? -s.u1 : s.u0;
+            const float eU1 = backSide ? -s.u0 : s.u1;
+            float sd = s.bN.x*camPos.x + s.bN.y*camPos.y + s.bN.z*camPos.z + s.bD;
+            if (backSide) sd = -sd;
+            const float D = -sd;
+            if (D <= 0.01f) return kids;
+            const float W = float(s.texWMax), H = float(s.texHMax);
+            const float fx = W * D / (eU1 - eU0);
+            const float fy = H * D / (s.v1 - s.v0);
+            const float cu = camPos.x*eU.x + camPos.y*eU.y + camPos.z*eU.z;
+            const float cv = camPos.x*s.axisV.x + camPos.y*s.axisV.y
+                           + camPos.z*s.axisV.z;
+            const float cx = fx * (cu - eU0) / D;
+            const float cy = fy * (s.v1 - cv) / D;
+            const float nearZ = D * 1.001f + 0.01f;
+            for (MirrorRttSlot &t : slots) {
+                if (&t == &s || t.order != 1) continue;
+                float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+                bool any = false, clippedNear = false;
+                for (int ci = 0; ci < 4; ++ci) {
+                    const float uu = (ci & 1) ? t.u1 : t.u0;
+                    const float vv = (ci & 2) ? t.v1 : t.v0;
+                    const Vector wp = {
+                        uu*t.axisU.x + vv*t.axisV.x - t.bD*t.bN.x,
+                        uu*t.axisU.y + vv*t.axisV.y - t.bD*t.bN.y,
+                        uu*t.axisU.z + vv*t.axisV.z - t.bD*t.bN.z };
+                    const float dx = wp.x - camPos.x, dy = wp.y - camPos.y,
+                                dz = wp.z - camPos.z;
+                    const float vz = eN.x*dx + eN.y*dy + eN.z*dz;
+                    if (vz <= nearZ) { clippedNear = true; continue; }
+                    const float vx = eU.x*dx + eU.y*dy + eU.z*dz;
+                    const float vy = s.axisV.x*dx + s.axisV.y*dy + s.axisV.z*dz;
+                    const float sx =  fx * vx / vz + cx;
+                    const float sy = -fy * vy / vz + cy;
+                    bx0 = std::min(bx0, sx); bx1 = std::max(bx1, sx);
+                    by0 = std::min(by0, sy); by1 = std::max(by1, sy);
+                    any = true;
+                }
+                if (!any) continue;      // fully behind the mirror plane
+                if (clippedNear) { bx0 = 0; by0 = 0; bx1 = W; by1 = H; }
+                bx0 = std::max(bx0, 0.0f); by0 = std::max(by0, 0.0f);
+                bx1 = std::min(bx1, W);    by1 = std::min(by1, H);
+                if ((bx1 - bx0) * (by1 - by0) < 2.0f) continue;
+                kids.push_back(&t);
+            }
+            return kids;
+        };
+
+        struct TexStash { MirrorRttSlot *t; std::vector<uint32_t> px; };
+        auto stashTex = [](std::vector<TexStash> &out, MirrorRttSlot *t) {
+            const uint32_t *d = (const uint32_t*)t->mat->Txtr->Data;
+            out.push_back({ t, std::vector<uint32_t>(
+                d, d + size_t(t->texW) * size_t(t->texH)) });
+        };
+
+        std::function<bool(MirrorRttSlot&, const Vector&, bool, int)> bakeTree =
+            [&](MirrorRttSlot &s, const Vector &camPos, bool backSide,
+                int bounces) -> bool {
+            if (bakesLeft <= 0) return false;
+            float sd = s.bN.x*camPos.x + s.bN.y*camPos.y + s.bN.z*camPos.z + s.bD;
+            if (backSide) sd = -sd;
+            if (sd >= -0.01f) return false;   // eye not behind the panel plane
+            if (bounces > 1) {
+                std::vector<TexStash> stash;
+                for (MirrorRttSlot *t : childrenOf(s, camPos, backSide)) {
+                    Vector cpos; bool cback;
+                    if (!reflectAcross(*t, camPos, cpos, cback)) continue;
+                    if (bakeTree(*t, cpos, cback, bounces - 1))
+                        stashTex(stash, t);
+                }
+                for (const TexStash &st : stash)
+                    std::memcpy(st.t->mat->Txtr->Data, st.px.data(),
+                                st.px.size() * sizeof(uint32_t));
+            }
+            --bakesLeft;
+            bakeJob(s, camPos, -sd, backSide, 0.0f, 0.0f, /*adaptive=*/false);
+            return true;
+        };
+
+        // Top level: only panels with a real main-screen footprint. An
+        // off-screen mirror (the flat path's full-frame fallback jobs) is
+        // baked by the tree as a CHILD of whichever view actually shows it.
+        std::vector<TexStash> stash;
+        for (const Job &j : jobs) {
+            if (j.offscreen) continue;
+            if (bakeTree(*j.slot, j.camPos, j.backSide, recurseDepth))
+                stashTex(stash, j.slot);
+        }
+        for (const TexStash &st : stash)
+            std::memcpy(st.t->mat->Txtr->Data, st.px.data(),
+                        st.px.size() * sizeof(uint32_t));
+        g_rttJobsLastFrame = kRecurseMaxBakes - bakesLeft;
+        if (bakesLeft <= 0)
+            std::fprintf(stderr, "[MIRROR-RTT] recurse bake cap (%d) hit — "
+                         "deepest views truncated\n", kRecurseMaxBakes);
     }
 
     // ── Restore ─────────────────────────────────────────────────────
