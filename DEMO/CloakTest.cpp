@@ -1,18 +1,26 @@
-// "Invisible mirror" (magician's Sphinx cabinet) test scene — the classic
-// recursive-mirror stressor. Four mirror panels form a W: two V-pairs whose
-// panels sit at 45° to the viewing axis. Each panel reflects the SIDE wall,
-// which carries the same checker as the back wall — so from the on-axis
-// sweet spot the panels read as empty room and the wedge BEHIND each V
-// (where a bright cube hides) is invisible. Where the two Vs meet in the
-// middle, the inner panels face each other at 90°: rays there bounce
-// mirror→mirror, which only renders correctly with second-order
-// reflections (--mirror-rtt) — that seam is the recursion test.
+// "Invisible mirror" cloak test — a 4-mirror periscope relay (the classic
+// diagram; geometry validated in a 2D ray-trace: 0 viewer rays hit the
+// object, central rays do the full 4-bounce detour). Two 45deg V-corners
+// SIDE BY SIDE: the LEFT V (x=0) is what the viewer sees; the RIGHT V
+// (x=5) hides behind an occluder wall and appears only in the left V's
+// reflection. A viewer ray at x~0 relays:
+//   A1 (+z->+x) -> A2 (+x->+z) -> A3 (+z->-x) -> A4 (-x->+z) -> back wall
+// detouring laterally AROUND a red cube parked in the left V's notch,
+// then returning to its original x. So the cube is cloaked by GEOMETRY
+// (any mirror order — even order 0 the near panel just occludes it).
 //
-// Snapshot-only driver (no interactivity): builds the scene, renders a
-// fixed pose set to /tmp/cloak_view_*.ppm, exits.
+// What it MEASURES is the recursion CEILING: the back wall behind the
+// cloak axis carries a MAGENTA marker with no direct sight-line (A1
+// blocks it). It only shows through when all four reflection bounces
+// resolve:
+//   order-1 clones     -> A1 reflects the corridor; right V = dead silver
+//   --mirror-rtt (o-2) -> A1's window onto A2 shows A3 as dead silver
+//   depth-4 recursion  -> magenta appears (the see-through completes)
+// Metrics: red px on-axis = 0 (cloak holds); magenta px = recursion depth.
+//
+// Default: interactive free-cam. FDS_CLOAK_DUMP=1 = headless 4-pose dump
+// to /tmp/cloak_view_*.ppm. FDS_CLOAK_NOMIRROR=1 = geometry ground truth.
 //   ./DEMO --scene-cloaktest [--mirror-rtt]
-// Poses: onaxis (illusion holds, cubes hidden), offside (illusion breaks),
-// overhead (cubes plainly visible), seam (close-up on the 90° corner).
 
 #include "FrameProfiler.h"
 #include <RENDER/GreetsMirror.h>
@@ -80,58 +88,69 @@ CloakScene buildCloakScene() {
     Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC0C0C0u);
     // One material PER PANEL — BuildMirror derives one plane per material.
     Material *matM[4];
-    const char *mNames[4] = { "cloak_m1", "cloak_m2", "cloak_m3", "cloak_m4" };
+    const char *mNames[4] = { "vis_l_lo", "hid_r_lo", "hid_r_hi", "vis_l_hi" };
     for (int i = 0; i < 4; ++i)
         matM[i] = b.AddMaterial(mNames[i], mirTex, {180,180,180,255}, 0);
-    Texture *redTex   = b.AddSolidColorTexture(8, 8, 0xFFFF2020u);
-    Texture *greenTex = b.AddSolidColorTexture(8, 8, 0xFF20FF20u);
-    Material *matRed   = b.AddMaterial("hidden_red",   redTex,   {255,32,32,255}, 0);
-    Material *matGreen = b.AddMaterial("hidden_green", greenTex, {32,255,32,255}, 0);
+    Texture *redTex = b.AddSolidColorTexture(8, 8, 0xFFFF2020u);
+    Material *matRed = b.AddMaterial("hidden_red", redTex, {255,32,32,255}, 0);
+    Texture *magTex = b.AddSolidColorTexture(8, 8, 0xFFE020E0u);
+    Material *matMagenta = b.AddMaterial("recursion_marker", magTex, {224,32,224,255}, 0);
 
-    // Floor 28x28 (winding per mirrortest: CCW from above → N=+Y).
+    // Floor spans the whole arena.
     const Vector floorV[4] = {
-        Vector(-14.0f, 0.0f, -14.0f), Vector(-14.0f, 0.0f, 14.0f),
-        Vector( 14.0f, 0.0f,  14.0f), Vector( 14.0f, 0.0f, -14.0f),
+        Vector(-14.0f, 0.0f, -14.0f), Vector(-14.0f, 0.0f, 26.0f),
+        Vector( 14.0f, 0.0f,  26.0f), Vector( 14.0f, 0.0f, -14.0f),
     };
     b.AddQuad("floor", floorV, matFloor);
 
-    // Room walls, height 8, normals INTO the room. Back wall faces -z
-    // (viewer side): left→right seen from the room is +x→-x at z=12.
+    // Room shell, height 8, normals into the room.
     const float H = 8.0f;
-    addWall(b, "wall_back",  14.0f, 12.0f, -14.0f, 12.0f, H, matWall);
-    // Left wall at x=-14 faces +x: seen from inside, left→right is z=12→z=-14.
-    addWall(b, "wall_left", -14.0f, 12.0f, -14.0f, -14.0f, H, matWall);
-    // Right wall at x=+14 faces -x.
-    addWall(b, "wall_right", 14.0f, -14.0f, 14.0f, 12.0f, H, matWall);
-    // BLUE wall BEHIND the camera (z=-14, faces +z). The central seam is
-    // a 90° retroreflector: rays that bounce panel->panel return toward
-    // the viewer side and land HERE. Single-bounce clones can't produce
-    // it — blue in the seam = second-order reflections working. Facing
-    // (0,0,+1): right = up x facing = -x, so right end first = x=-14.
-    Texture *blueTex = makeChecker(0xFF2040C0u, 0xFF102060u);
-    Material *matBlue = b.AddMaterial("wall_behind", blueTex, {32,64,192,255}, 0);
-    addWall(b, "wall_behind", -14.0f, -14.0f, 14.0f, -14.0f, H, matBlue);
+    addWall(b, "wall_back",   14.0f, 24.0f, -14.0f, 24.0f, H, matWall);   // faces -z
+    addWall(b, "wall_left",  -14.0f, 24.0f, -14.0f, -14.0f, H, matWall);  // faces +x
+    addWall(b, "wall_right",  14.0f, -14.0f, 14.0f,  24.0f, H, matWall);  // faces -x
 
-    // The W: V apexes toward the viewer at (±4, z=2); wings back to z=6.
-    // Panels at 45° to the z axis, height 5. Normals face the VIEWER
-    // (roughly -z): left→right as seen from the viewer.
+    // MAGENTA recursion marker on the back wall, dead ahead of the cloak
+    // axis (x -2..2, z=23.9). The relayed central rays return to their
+    // original x and hit the back wall here — so this is what a CORRECT
+    // 4-bounce see-through shows. Direct sight-lines to it are blocked by
+    // panel A1, so it can ONLY appear through the full detour.
+    addWall(b, "recursion_marker", 2.0f, 23.9f, -2.0f, 23.9f, 5.0f, matMagenta);
+
+    // ── The periscope relay (validated in tools 2D ray-trace) ─────────
+    // Two 45deg V-corners SIDE BY SIDE: the LEFT V at x=0 (panels A1 z=8,
+    // A4 z=16) is what the viewer sees; the RIGHT V at x=5 (A2 z=8, A3
+    // z=16) is hidden behind the occluder and appears only in A1's
+    // reflection. A viewer ray at x~0 relays A1(+z->+x) -> A2(+x->+z) ->
+    // A3(+z->-x) -> A4(-x->+z) -> back wall, detouring around the object
+    // in the LEFT V's notch. Endpoints ordered (R,L) so each panel's
+    // normal (addWall: n=(zR-zL,0,xL-xR)) faces its incoming leg.
     const float mh = 5.0f;
-    addWall(b, "cloak_p1", -4.0f, 2.0f, -8.0f, 6.0f, mh, matM[0]);
-    addWall(b, "cloak_p2",  0.0f, 6.0f, -4.0f, 2.0f, mh, matM[1]);
-    addWall(b, "cloak_p3",  4.0f, 2.0f,  0.0f, 6.0f, mh, matM[2]);
-    addWall(b, "cloak_p4",  8.0f, 6.0f,  4.0f, 2.0f, mh, matM[3]);
+    // A1 @ (0,8) slope+1, n=(+x,-z): deflect viewer +z -> +x.
+    addWall(b, "vis_l_lo", 1.414f, 9.414f, -1.414f, 6.586f, mh, matM[0]);
+    // A2 @ (5,8) slope+1, n=(-x,+z): deflect +x -> +z.
+    addWall(b, "hid_r_lo", 3.586f, 6.586f, 6.414f, 9.414f, mh, matM[1]);
+    // A3 @ (5,16) slope-1, n=(-x,-z): deflect +z -> -x.
+    addWall(b, "hid_r_hi", 6.414f, 14.586f, 3.586f, 17.414f, mh, matM[2]);
+    // A4 @ (0,16) slope-1, n=(+x,+z): deflect -x -> +z (back on axis).
+    addWall(b, "vis_l_hi", -1.414f, 17.414f, 1.414f, 14.586f, mh, matM[3]);
 
-    // Hidden cubes in the wedges behind each V (between the panels and
-    // z=6): invisible from on-axis if the illusion holds.
-    b.AddCube("hidden_red",   Vector(-4.0f, 1.2f, 4.6f), 1.2f, matRed);
-    b.AddCube("hidden_green", Vector( 4.0f, 1.2f, 4.6f), 1.2f, matGreen);
+    // Occluder: a z=2 wall (x 2..9, faces -z) that hides the RIGHT V from
+    // the viewer without touching the relay (whose legs are at z=8/z=16,
+    // beyond it) or the A1 aperture (x < 1.5). This IS the "wall the other
+    // mirror hides behind."
+    addWall(b, "wall_occluder", 9.0f, 2.0f, 2.0f, 2.0f, H, matWall);
 
-    // Lights: symmetric pair so the side walls are lit like the back wall
-    // (an asymmetric key light would break the illusion by brightness).
-    b.AddOmni(Vector(-7.0f, 7.0f, -6.0f), {255,255,255,0}, 1.0f, 60.0f);
-    b.AddOmni(Vector( 7.0f, 7.0f, -6.0f), {255,255,255,0}, 1.0f, 60.0f);
+    // The cloaked object: red cube in the LEFT V's notch (x=0, z=12),
+    // between A1 (z=8) and A4 (z=16). A1 blocks the direct view; the light
+    // detours around it out through the right V.
+    b.AddCube("hidden_red", Vector(0.0f, 1.2f, 12.0f), 1.2f, matRed);
 
-    b.SetCamera(Vector(0.0f, 2.5f, -10.0f), Vector(0.0f, 2.5f, 6.0f), 60.0f);
+    // Lights — symmetric-ish so both V's are lit comparably.
+    b.AddOmni(Vector(-4.0f, 7.0f, -6.0f), {255,255,255,0}, 1.0f, 80.0f);
+    b.AddOmni(Vector( 9.0f, 7.0f,  8.0f), {255,255,255,0}, 1.0f, 80.0f);
+    b.AddOmni(Vector( 0.0f, 7.0f, 20.0f), {255,255,255,0}, 0.9f, 80.0f);
+
+    b.SetCamera(Vector(0.0f, 2.5f, -12.0f), Vector(0.0f, 2.5f, 8.0f), 60.0f);
 
     b.Finalize();
     CloakScene cs;
@@ -188,7 +207,7 @@ void Run_CloakTest() {
     // FDS_CLOAK_NOMIRROR=1: skip mirror construction — pure-geometry
     // ground truth for debugging pose/winding questions.
     if (!std::getenv("FDS_CLOAK_NOMIRROR"))
-        for (const char *nm : { "cloak_m1", "cloak_m2", "cloak_m3", "cloak_m4" }) {
+        for (const char *nm : { "vis_l_lo", "hid_r_lo", "hid_r_hi", "vis_l_hi" }) {
             fds::Mirror m = fds::BuildMirror(cs.sc, nm);
             if (m.cloneMesh) cs.mirrors.push_back(std::move(m));
             else std::fprintf(stderr, "[CLOAKTEST] BuildMirror('%s') FAILED\n", nm);
@@ -219,17 +238,16 @@ void Run_CloakTest() {
     if (std::getenv("FDS_CLOAK_DUMP")) {
     struct Pose { Vector eye, lookAt; const char *tag; };
     const Pose poses[] = {
-        // The sweet spot: panels mirror the side walls ≈ back wall,
-        // cubes hidden. THE money shot.
-        { Vector( 0.0f, 2.5f, -10.0f), Vector(0.0f, 2.5f,  6.0f), "onaxis"   },
-        // Off to the side: the reflection angle no longer matches the
-        // background — the illusion breaks (panels visibly mirrors).
-        { Vector(-11.0f, 3.5f, -8.0f), Vector(0.0f, 2.0f,  5.0f), "offside"  },
-        // Overhead: look down into the wedges — both cubes plainly visible.
-        { Vector( 0.0f, 12.0f, -4.0f), Vector(0.0f, 0.0f,  4.5f), "overhead" },
-        // Close on the central 90° corner (p2/p3 seam): rays bounce
-        // mirror->mirror; correct only with --mirror-rtt (A/B this pose).
-        { Vector( 0.0f, 2.5f, -3.0f),  Vector(0.0f, 2.5f,  6.0f), "seam"     },
+        // Sweet spot: the left V fills the view; cube cloaked, reflection
+        // shows the detour (right V dead-silver at order-1; magenta if
+        // depth-4 recursion resolves).
+        { Vector( 0.0f, 2.5f, -12.0f), Vector( 0.0f, 2.5f,  8.0f), "onaxis"    },
+        // Look toward the right V (x=5): the occluder wall must hide it.
+        { Vector(-2.0f, 2.5f, -10.0f), Vector( 5.0f, 2.5f,  8.0f), "wallcheck" },
+        // High reveal: whole apparatus + the red cube in the notch.
+        { Vector(-11.0f, 12.0f, -6.0f), Vector( 3.0f, 0.0f, 12.0f), "reveal"    },
+        // Down the relay corridor (x=5, +z): looks along the A2->A3 leg.
+        { Vector( 5.0f, 2.5f,  4.0f),  Vector( 5.0f, 2.5f, 16.0f), "corridor"  },
     };
     for (const Pose &p : poses) {
         char path[64];
@@ -243,9 +261,9 @@ void Run_CloakTest() {
     // Free-cam from the on-axis sweet spot: standing here the cubes are
     // invisible; strafe sideways (A/D) and they appear in the panels'
     // seams. Same per-frame mirror flow as the mirrortest driver.
-    FC.ISource = Vector(0.0f, 2.5f, -10.0f);
+    FC.ISource = Vector(0.0f, 2.5f, -12.0f);
     {
-        Vector eye = FC.ISource, look(0.0f, 2.5f, 6.0f);
+        Vector eye = FC.ISource, look(0.0f, 2.5f, 8.0f);
         Kick_Camera(&eye, &look, 0.0f, FC.Mat);
     }
     FC.IFOV = 60.0f;
