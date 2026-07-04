@@ -299,6 +299,31 @@ void FlipNormalMapG(Texture *t) {
 	}
 }
 
+// Albedo tint: multiply ONE color channel of the texture in place, full
+// mip chain (works on block-tiled data — a per-texel multiply is position-
+// independent). Tracked per texture so material clones sharing the Texture*
+// apply exactly once, and changing the tint applies new/old ratio instead
+// of compounding. Saturation clamps lose information (a channel pushed to
+// 255 can't fully recover) — the editor keeps tints in [0,1] where the op
+// is exact up to rounding.
+static std::map<std::pair<Texture*,int>, float> g_appliedTint;
+void ApplyAlbedoChannelTint(Texture *t, int chanByte, float value) {
+	if (!t || !t->Mipmap[0] || t->numMipmaps == 0 || t->BPP != 32) return;
+	if (value < 0.0f) value = 0.0f;
+	float &applied = g_appliedTint.emplace(std::make_pair(t, chanByte), 1.0f).first->second;
+	if (applied == value) return;
+	const float ratio = applied > 1e-6f ? value / applied : value;
+	applied = value;
+	const size_t total = mipChainTexels(t);
+	uint32_t *px = reinterpret_cast<uint32_t *>(t->Mipmap[0]);
+	const int sh = chanByte * 8;
+	for (size_t i = 0; i < total; ++i) {
+		int c = int(((px[i] >> sh) & 0xFFu) * ratio + 0.5f);
+		if (c > 255) c = 255;
+		px[i] = (px[i] & ~(0xFFu << sh)) | (uint32_t(c) << sh);
+	}
+}
+
 Texture *BakeNormalMapFromDiffuse(Texture *diffuse, float strength) {
 	if (!diffuse || diffuse->BPP != 32 || !diffuse->Mipmap[0]) return nullptr;
 	const int W = diffuse->SizeX;

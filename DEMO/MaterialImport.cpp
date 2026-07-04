@@ -384,6 +384,23 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
 		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		// Albedo tint (engine-only, sidecar-persisted): multiply one channel
+		// of the surface's TEXTURE in place, full mip chain. This is how a
+		// textured surface changes color — the deferred path ignores BaseCol
+		// on textured materials (lit = texel * light). Value = multiplier
+		// (1 = untinted); tracked per TEXTURE so ::mirUV clones (which share
+		// the Texture*) tint exactly once, and re-tints apply the new/old
+		// ratio instead of compounding. Channel select: tintR/tintG/tintB.
+		else if (!std::strcmp(prop, "tintR") || !std::strcmp(prop, "tintG")
+		      || !std::strcmp(prop, "tintB")) {
+			if (M->Txtr) {
+				const int chan = prop[4] == 'R' ? 2 : prop[4] == 'G' ? 1 : 0; // BGRA byte order
+				ApplyAlbedoChannelTint(M->Txtr, chan, value);
+				if      (prop[4] == 'R') M->TintR = value;
+				else if (prop[4] == 'G') M->TintG = value;
+				else                     M->TintB = value;
+			}
+		}
 		else if (!std::strcmp(prop, "normalFlip")) {
 			// Green-channel convention toggle (OGL ↔ DX), value = desired
 			// parity (0/1 vs the file as loaded). The flip mutates the

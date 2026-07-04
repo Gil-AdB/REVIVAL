@@ -292,6 +292,42 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
         }
     if (!n) return false;
     out = { float(sx / n), float(sy / n), float(sz / n) };
+    // Multi-instance surfaces (the two greets mummies share one material):
+    // the global mean sits in the EMPTY SPACE BETWEEN instances — a probe
+    // from nowhere. Greedy-cluster the vertices by distance to the running
+    // cluster mean and re-centroid on the HEAVIEST cluster, so the probe is
+    // at least correct for one instance (per-instance correctness needs the
+    // editor's "split instances", which gives each its own material+probe).
+    {
+        struct Cl { double sx, sy, sz; long n; };
+        std::vector<Cl> cls;
+        const float kR2 = 8.0f * 8.0f;
+        for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+            for (DWord i = 0; i < T->FIndex; ++i) {
+                const Face& F = T->Faces[i];
+                if (F.Txtr != M || !F.A) continue;
+                Vector w;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&F.A->Pos), &w);
+                Vector_SelfAdd(&w, &T->IPos);
+                Cl* best = nullptr;
+                for (Cl& c : cls) {
+                    const float dx = float(c.sx / c.n) - w.x, dy = float(c.sy / c.n) - w.y,
+                                dz = float(c.sz / c.n) - w.z;
+                    if (dx*dx + dy*dy + dz*dz < kR2) { best = &c; break; }
+                }
+                if (!best) { cls.push_back({0, 0, 0, 0}); best = &cls.back(); }
+                best->sx += w.x; best->sy += w.y; best->sz += w.z; ++best->n;
+            }
+        if (cls.size() > 1) {
+            const Cl* heavy = &cls[0];
+            for (const Cl& c : cls) if (c.n > heavy->n) heavy = &c;
+            out = { float(heavy->sx / heavy->n), float(heavy->sy / heavy->n),
+                    float(heavy->sz / heavy->n) };
+            std::fprintf(stderr, "[ENVREFL] '%s': %zu instance clusters — probe at the"
+                " largest (%.1f %.1f %.1f); use split-instances for per-instance probes\n",
+                M->Name ? M->Name : "?", cls.size(), out.x, out.y, out.z);
+        }
+    }
     return true;
 }
 

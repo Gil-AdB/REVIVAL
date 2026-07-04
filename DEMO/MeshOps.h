@@ -54,6 +54,10 @@ Texture *MakeNormal16(Texture *src);
 // Involutive — flip twice = original.
 void FlipNormalMapG(Texture *t);
 
+// Multiply one color channel of the texture in place (full mip chain).
+// chanByte: BGRA byte index (0=B,1=G,2=R). Per-texture ratio-tracked.
+void ApplyAlbedoChannelTint(Texture *t, int chanByte, float value);
+
 // Register a hand-built mesh into a scene as a DYNAMIC, per-frame-updated mesh,
 // with all the plumbing the engine needs — each item below cost a debug session
 // when missed while adding custom geometry (disco ball, blaster bolts, ...):

@@ -66,6 +66,12 @@ struct Material
     // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
     // UV-tiled floors). Default 1.
     float                 ParallaxScale          = 1.0f;
+    // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
+    // mutates the shared Texture pixels; these echo the last applied values
+    // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).
+    float                 TintR                  = 1.0f;
+    float                 TintG                  = 1.0f;
+    float                 TintB                  = 1.0f;
     // Per-material AO-map strength multiplier (× the global --ao_map_strength),
     // same pattern as ParallaxScale. 1 = full effect; lower to tame an AO map
     // that reads too dark on one surface without dialing the whole scene.

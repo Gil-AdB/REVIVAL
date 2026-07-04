@@ -572,7 +572,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b52</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b53</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -654,7 +654,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b52); orbit/zoom embind =',
+        console.log('[editor] panel init (build b53); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
@@ -714,7 +714,7 @@
       // aoStrength/parallaxScale are engine-only dials (× the global
       // ao_map_strength / parallax_strength) — the server persists them to the
       // scene sidecar, the rest to LWO/FLD.
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -1429,6 +1429,35 @@
           };
           el.appendChild(spl);
         }
+        // Color: textured surfaces ignore BaseCol in the deferred path — their
+        // color comes from the albedo texels, so the picker drives an in-place
+        // albedo TINT (per-channel multiply, white = untinted, exact to undo
+        // within [0,1]). Untextured surfaces get BaseCol directly.
+        (function(){
+          var isTex = !!(s.texture && s.texture.length);
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lb = document.createElement('label');
+          lb.textContent = isTex ? 'tint (albedo)' : 'base color';
+          row.title = isTex
+            ? 'multiplies the albedo texture pixels (deferred ignores BaseCol on textured surfaces). White = original colors. Persists via sidecar.'
+            : 'BaseCol — the untextured surface color. Persists to LWO/FLD.';
+          row.appendChild(lb);
+          var inp = document.createElement('input'); inp.type = 'color';
+          function hex2(v){ v = Math.max(0, Math.min(255, Math.round(v))); return ('0'+v.toString(16)).slice(-2); }
+          inp.value = isTex
+            ? '#' + hex2((+s.tintR||1)*255) + hex2((+s.tintG||1)*255) + hex2((+s.tintB||1)*255)
+            : '#' + hex2(+s.baseR) + hex2(+s.baseG) + hex2(+s.baseB);
+          inp.oninput = function(){
+            var r = parseInt(inp.value.substr(1,2),16), g = parseInt(inp.value.substr(3,2),16), b = parseInt(inp.value.substr(5,2),16);
+            if (isTex) {
+              setProp(s.name, 'tintR', r/255); setProp(s.name, 'tintG', g/255); setProp(s.name, 'tintB', b/255);
+            } else {
+              setProp(s.name, 'baseR', r); setProp(s.name, 'baseG', g); setProp(s.name, 'baseB', b);
+            }
+          };
+          row.appendChild(inp);
+          el.appendChild(row);
+        })();
         ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
           var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
