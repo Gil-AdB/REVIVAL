@@ -2767,6 +2767,7 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 rctx.target.gbuffer          = &s_rttGB;
                 MekaleleFillRegionInline(rctx, 0, 0, float(s.texW), float(s.texH));
                 DeferredLightingCtx dctx{};
+                dctx.Sc = CurScene;   // kernel caller contract
                 DeferredOverride ov;
                 ov.gb         = &s_rttGB;
                 ov.cam        = &fds::g_mainCamera;

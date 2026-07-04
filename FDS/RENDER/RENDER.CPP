@@ -543,6 +543,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// G-buffer's per-pixel texture sample. Replaces the per-vertex
 		// Lighting() (skipped on the deferred path) plus the rasterizer's
 		// colorize step in one go.
+		dctx.Sc = CurScene;   // caller contract: the kernel no longer reads the global
 		{ TailProf::ScopeTimer _tp("DeferredLighting-call"); Render_DeferredLighting(dctx); } fds::Hdr_DebugScan("kernel");
 
 		// Full-res SSAO: darken contact creases over the deferred-lit opaque
@@ -645,7 +646,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// them would lose. Per-object peeling gives each mesh a fresh
 		// xpar G-buffer.
 
-		const bool unifiedTbr = deferredUnifiedTbrEnabled();
+		const bool unifiedTbr = deferredUnifiedTbrEnabled(CurScene);
 
 		// Unified-TBR path (task #9): insert every transparent face into
 		// the per-strip TBR linked lists. Sprites are still inserted in
@@ -771,7 +772,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		bool     batchOpen    = false;
 		int      batchFirst   = 0;
 		int      batchLastEnd = 0;
-		const int peelPasses = xparPeelPassesEffective();
+		const int peelPasses = xparPeelPassesEffective(CurScene);
 		auto flushBatch = [&]() {
 			if (!batchOpen) return;
 			TriMesh*    T   = batchMesh;

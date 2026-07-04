@@ -1170,6 +1170,7 @@ void MirrorShatter::renderShardIntoCell(Scene* sc, int si, ReflWorker& w,
 			ctx.target.gbuffer = &w.gb;
 			MekaleleFillRegionInline(ctx, 0, 0, float(texRes_), float(texRes_));
 			DeferredLightingCtx dctx{};
+			dctx.Sc = CurScene;   // kernel caller contract
 			DeferredOverride ov;
 			ov.gb         = &w.gb;
 			ov.cam        = &w.camCtx;

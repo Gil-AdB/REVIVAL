@@ -545,8 +545,8 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                             class Face** faces, int count, bool front,
                              int strip_y, int strip_h);
 
-bool deferredUnifiedTbrEnabled();
-int  xparPeelPassesEffective();
+bool deferredUnifiedTbrEnabled(const Scene *sc);
+int  xparPeelPassesEffective(const Scene *sc);
 
 #endif
 

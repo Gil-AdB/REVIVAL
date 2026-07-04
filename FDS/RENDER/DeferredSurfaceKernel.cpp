@@ -413,13 +413,13 @@ static bool deferredLightingVecEnabled() {
 // dominated by matte materials (city, fountain, crash) or by spec/nmap
 // shiny ones (greets — outer kernel pays per-lane nmap + scalar
 // fallback for most pixels).
-static bool deferredLightingOuterVecEnabled() {
+static bool deferredLightingOuterVecEnabled(const Scene *sc) {
 	// Tri-state: when set explicitly (CLI or env), the flag wins; otherwise
 	// fall back to the scene's PreferOuterVec policy. Greets sets it off
 	// because the outer kernel's per-lane nmap costs dominate most pixels.
 	if (fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::deferred_outer_vec))
 		return fds::FeatureFlags::deferred_outer_vec();
-	return CurScene && CurScene->PreferOuterVec != 0;
+	return sc && sc->PreferOuterVec != 0;
 }
 
 // FDS_DEFERRED_CHECKERBOARD=1 enables half-rate lighting: only pixels
@@ -2380,26 +2380,26 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 // SBufferHead would silently drop every transparent face, since
 // InsertTransparentToTBR bails when NumTiles==0. Only fountain
 // currently calls TBR_Init.
-bool deferredUnifiedTbrEnabled() {
+bool deferredUnifiedTbrEnabled(const Scene *sc) {
 	if (!fds::FeatureFlags::deferred_unified_tbr()) return false;
-	if (!CurScene) return false;
-	if (!CurScene->SBufferHead || CurScene->NumTiles == 0) return false;
+	if (!sc) return false;
+	if (!sc->SBufferHead || sc->NumTiles == 0) return false;
 	// Offscreen pass (mirror RTT, cube bake): the YRes global is swapped
 	// but the strip arrays are main-sized — fall back to the legacy peel
 	// there (see TBR_MatchesTarget).
-	if (!TBR_MatchesTarget(CurScene)) return false;
+	if (!TBR_MatchesTarget(sc)) return false;
 	return true;
 }
 
 // Effective transparent depth-peel passes (per side): the CLI/env flag wins
 // when explicitly set, otherwise the current scene's per-scene default
 // (Scene::XparPeelPasses; 0 → legacy 1). Used by both xpar dispatch paths.
-int xparPeelPassesEffective() {
+int xparPeelPassesEffective(const Scene *sc) {
 	if (fds::FeatureFlags::isSet(fds::FeatureFlags::IntId::xpar_peel_passes)) {
 		const int f = fds::FeatureFlags::xpar_peel_passes();
 		return f < 1 ? 1 : f;
 	}
-	const int p = CurScene ? int(CurScene->XparPeelPasses) : 0;
+	const int p = sc ? int(sc->XparPeelPasses) : 0;
 	return p < 1 ? 1 : p;
 }
 
@@ -2418,11 +2418,11 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                              Face** faces, int count, bool front,
                              int strip_y, int strip_h)
 {
-	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
-	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
-	const int peelPasses = xparPeelPassesEffective();
-	meka::GBuffer* sideGB = front ? g_gbufferTransparent : g_gbufferTransparentBack;
-	uint16_t*      sideZ  = front ? g_xparZ              : g_xparZBack;
+	const size_t rowStart  = size_t(strip_y) * size_t(dctx.xres);
+	const size_t rowCount  = size_t(strip_h) * size_t(dctx.xres);
+	const int peelPasses = xparPeelPassesEffective(dctx.Sc);
+	meka::GBuffer* sideGB = front ? dctx.gbXpar : g_gbufferTransparentBack;
+	uint16_t*      sideZ  = front ? dctx.xparZ  : dctx.xparZBack;
 
 	// Raster the clump's faces into the side layer, then composite the strip
 	// rows. Clipper extents pin the rasterizer to the strip; faces route to
@@ -2431,9 +2431,9 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 	// strip gets exactly the lights overlapping its 8 rows.
 	auto rasterAndComposite = [&]() {
 		FrustumClipper clipper;
-		clipper.InitViewport(CurScene);
+		clipper.InitViewport(dctx.Sc);
 		clipper.SetClippingExtents(0.0f, float(strip_y),
-		                            float(XRes), float(strip_y + strip_h));
+		                            float(dctx.xres), float(strip_y + strip_h));
 		const auto rt  = fds::MainRenderTargetFromGlobals();
 		const auto& cam = fds::g_mainCamera;
 		// Strip-clamp the rasterizer: a clipped tri whose max PY snapped to
@@ -2455,10 +2455,10 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		stripCtx.tileLights = g_stripLights;
 		if (front) {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Front>(
-				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
+				stripCtx, stripIdx, 0, strip_y, dctx.xres, strip_y + strip_h);
 		} else {
 			Render_DeferredTransparentLighting_Tile<XparLayer::Back>(
-				stripCtx, stripIdx, 0, strip_y, XRes, strip_y + strip_h);
+				stripCtx, stripIdx, 0, strip_y, dctx.xres, strip_y + strip_h);
 		}
 	};
 
@@ -3622,31 +3622,37 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 // pass — fine because we wait synchronously between Render's tile
 // dispatch and our own.
 void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *ov) {
-	// Override-or-global addressing. ov=nullptr (main frame) → engine globals,
-	// byte-identical. ov!=nullptr (offscreen shard bake) → ov's own G-buffer /
-	// camera / scratch buffers, so N bakes run concurrently on the pool. Shadow
-	// the legacy global names so the body below is unchanged.
-	meka::GBuffer *const gbPtr = (ov && ov->gb) ? ov->gb : g_gbuffer;
-	byte *const VPage   = ov ? ov->vpage   : ::VPage;
-	word *const ZPage16 = ov ? ov->zpage16 : ::ZPage16;
-	if (!gbPtr || !ZPage16 || !VPage) return;
+	// Override-or-main addressing. ov=nullptr (main frame) → the sanctioned
+	// main-target accessors (MainRenderTargetFromGlobals / fds::g_mainCamera —
+	// the same state, under names this poisoned TU may use), byte-identical.
+	// ov!=nullptr (offscreen shard bake) → ov's own G-buffer / camera /
+	// scratch buffers, so N bakes run concurrently on the pool.
+	// CALLER CONTRACT: ctx.Sc must be pre-filled with the scene to light
+	// (renderFrame and the offscreen bakes set it before calling).
+	const fds::RenderTarget mainRt =
+		ov ? fds::RenderTarget{} : fds::MainRenderTargetFromGlobals();
+	const fds::CameraContext &mainCam = fds::g_mainCamera;
+	meka::GBuffer *const gbPtr = (ov && ov->gb) ? ov->gb : mainRt.gbuffer;
+	byte *const vpage   = ov ? ov->vpage   : reinterpret_cast<byte*>(mainRt.vpage);
+	word *const zpage16 = ov ? ov->zpage16 : mainRt.zpage16;
+	if (!gbPtr || !zpage16 || !vpage) return;
 	const meka::GBuffer &gb = *gbPtr;
-	meka::GBuffer *const g_gbuffer = gbPtr;            // mirrorMask read below
-	Camera  *const View  = (ov && ov->cam) ? ov->cam->view   : ::View;
-	const float FOVX     = (ov && ov->cam) ? ov->cam->fovX   : ::FOVX;
-	const float FOVY     = (ov && ov->cam) ? ov->cam->fovY   : ::FOVY;
-	const float CntrEX   = (ov && ov->cam) ? ov->cam->cntrEX : ::CntrEX;
-	const float CntrEY   = (ov && ov->cam) ? ov->cam->cntrEY : ::CntrEY;
-	const float g_zscale = (ov && ov->cam) ? ov->cam->zScale : float(::g_zscale);
-	const int32_t XRes   = ov ? ov->xres : ::XRes;
-	const int32_t YRes   = ov ? ov->yres : ::YRes;
-	meka::GBuffer *const g_gbufferTransparent = ov ? ov->gbXpar   : ::g_gbufferTransparent;
-	word *const g_xparZ                       = ov ? ov->xparZ    : ::g_xparZ;
-	word *const g_xparZBack                   = ov ? ov->xparZBack : ::g_xparZBack;
-	const size_t numPixels = size_t(XRes) * size_t(YRes);
+	meka::GBuffer *const gbuf = gbPtr;                 // mirrorMask read below
+	Camera  *const view  = (ov && ov->cam) ? ov->cam->view   : mainCam.view;
+	const float fovX     = (ov && ov->cam) ? ov->cam->fovX   : mainCam.fovX;
+	const float fovY     = (ov && ov->cam) ? ov->cam->fovY   : mainCam.fovY;
+	const float cntrEX   = (ov && ov->cam) ? ov->cam->cntrEX : mainCam.cntrEX;
+	const float cntrEY   = (ov && ov->cam) ? ov->cam->cntrEY : mainCam.cntrEY;
+	const float zscale   = (ov && ov->cam) ? ov->cam->zScale : mainCam.zScale;
+	const int32_t xres   = ov ? ov->xres : mainRt.xres;
+	const int32_t yres   = ov ? ov->yres : mainRt.yres;
+	meka::GBuffer *const gbXpar = ov ? ov->gbXpar   : mainRt.gbufferTransparent;
+	word *const xparZ           = ov ? ov->xparZ    : mainRt.xparZ;
+	word *const xparZBack       = ov ? ov->xparZBack : mainRt.xparZBack;
+	const size_t numPixels = size_t(xres) * size_t(yres);
 	if (gb.normal.size() < numPixels || gb.txtr.size() < numPixels) return;
 
-	Scene *Sc = CurScene;
+	Scene *Sc = ctx.Sc;
 	if (!Sc) return;
 
 	MatTable matTable = Scene_GetMatTable(Sc);
@@ -3715,8 +3721,8 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	for (Omni *O = Sc->OmniHead; O && numLights < DEFERRED_MAX_VIEW_LIGHTS; O = O->Next) {
 		if (!(O->Flags & Omni_Active)) continue;
 		Vector u, w;
-		Vector_Sub(&O->IPos, &View->ISource, &u);
-		MatrixXVector(View->Mat, &u, &w);
+		Vector_Sub(&O->IPos, &view->ISource, &u);
+		MatrixXVector(view->Mat, &u, &w);
 		float Range = O->IRange;
 		if (maxRange > 0.0f && Range > maxRange) Range = maxRange;
 		lights.posX[numLights]   = w.x;
@@ -3740,11 +3746,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 		const float realRange = O->IRange;
 		lights.rRange[numLights] = (realRange > 0.0f) ? 1.0f / realRange : 0.0f;
 		// Spot light: rotate the cone axis (world space) into view space
-		// using the same View->Mat that placed posX/Y/Z. Pure rotation,
+		// using the same view->Mat that placed posX/Y/Z. Pure rotation,
 		// no translation — IDir is a direction not a point.
 		if (O->Type == Light_SpotLight) {
 			Vector dirView;
-			MatrixXVector(View->Mat, (Vector*)&O->IDir, &dirView);
+			MatrixXVector(view->Mat, (Vector*)&O->IDir, &dirView);
 			Vector_Norm(&dirView);
 			lights.dirX[numLights] = dirView.x;
 			lights.dirY[numLights] = dirView.y;
@@ -3875,38 +3881,38 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// Round tileSizeX up to the next multiple of 8 so the OuterVec
 	// kernel's 8-wide vec loop sees aligned tiles for all-but-the-last
 	// tile column. The last tile width can still be unaligned at non-
-	// multiple-of-8 XRes (rare on real displays — most are 8-aligned)
+	// multiple-of-8 xres (rare on real displays — most are 8-aligned)
 	// — handled by the lane-in-range mask inside OuterVec.
 	// tileSizeY doesn't need this because the kernels iterate rows one
 	// at a time, not in 8-tall groups.
-	const int rawTileX  = (XRes + (numTilesX - 1)) / numTilesX;
+	const int rawTileX  = (xres + (numTilesX - 1)) / numTilesX;
 	const int tileSizeX = (rawTileX + 7) & ~7;
-	const int tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
+	const int tileSizeY = (yres + (numTilesY - 1)) / numTilesY;
 
 	// Per-tile light culling: project each omni's bounding sphere
 	// into screen space, find which tiles it overlaps, populate
 	// indices[] per tile.
 	static TileLights s_tileLights[DEFERRED_NUM_TILES];
 	TileLights *const tileLights = (ov && ov->tileLights) ? ov->tileLights : s_tileLights;
-	const float invZScale = 1.0f / float(g_zscale);
+	const float invZScale = 1.0f / float(zscale);
 	const long long _lsetup = TailProf::nowNs();
 	computeTileDepthBounds(tileLights, numTilesX, numTilesY,
-	                       tileSizeX, tileSizeY, XRes, YRes,
-	                       invZScale, reinterpret_cast<const uint16_t*>(ZPage16));
+	                       tileSizeX, tileSizeY, xres, yres,
+	                       invZScale, reinterpret_cast<const uint16_t*>(zpage16));
 	TailProf::mark("depth-bounds", _lsetup);   // per-tile z-buffer scan (par-able)
 	// Mirror-footprint presence per tile/strip, for the clone-light
 	// cull in the list builders. Only computed when a scene actually
 	// activated the mask plane (GreetsMirror::BuildMirror).
 	const uint8_t *mirrorMaskPlane =
-		(g_gbuffer && g_gbuffer->mirrorMask.size() >= numPixels)
-		? g_gbuffer->mirrorMask.data() : nullptr;
+		(gbuf && gbuf->mirrorMask.size() >= numPixels)
+		? gbuf->mirrorMask.data() : nullptr;
 	// Main-frame only: an offscreen shard bake has no mirrorMask in its
 	// G-buffer, so mirrorMaskPlane is null below and this stays untouched.
 	static uint32_t tileMirrorPresence[DEFERRED_NUM_TILES];
 	const uint32_t *tilePresence = nullptr;
 	if (mirrorMaskPlane) {
 		const long long _mgrid = TailProf::nowNs();
-		computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
+		computeMirrorPresenceGrid(mirrorMaskPlane, xres, yres,
 		                          tileSizeX, tileSizeY,
 		                          numTilesX, numTilesY,
 		                          tileMirrorPresence);
@@ -3916,7 +3922,7 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	const fds::CameraContext &camCtx = (ov && ov->cam) ? *ov->cam : fds::g_mainCamera;
 	const long long _tcull = TailProf::nowNs();
 	buildTileLightLists(tileLights, numTilesX, numTilesY,
-	                    tileSizeX, tileSizeY, XRes, YRes,
+	                    tileSizeX, tileSizeY, xres, yres,
 	                    lights, numLights, tilePresence, camCtx);
 	TailProf::mark("tile-cull", _tcull);       // light-major append (harder to par)
 
@@ -3948,22 +3954,22 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// Per-strip light lists for the unified-TBR transparent path's
 	// RenderXparClumpInStrip. 1D Y-strips of TILESIZE rows; built only
 	// when the unified path is active to avoid the per-frame cost on
-	// the legacy path. (Strip count = ceil(YRes / TILESIZE), capped at
+	// the legacy path. (Strip count = ceil(yres / TILESIZE), capped at
 	// DEFERRED_MAX_STRIPS=512.)
-	if (!ov && deferredUnifiedTbrEnabled()) {   // strips are main-frame xpar only
+	if (!ov && deferredUnifiedTbrEnabled(Sc)) {   // strips are main-frame xpar only
 		constexpr int STRIP_H = 1 << 3;  // TILESIZE from FILLERS.CPP
-		const int numStrips = (YRes + STRIP_H - 1) >> 3;
+		const int numStrips = (yres + STRIP_H - 1) >> 3;
 		static uint32_t stripMirrorPresence[DEFERRED_MAX_STRIPS];  // main-frame only (see above)
 		const uint32_t *stripPresence = nullptr;
 		if (mirrorMaskPlane) {
-			computeMirrorPresenceGrid(mirrorMaskPlane, XRes, YRes,
-			                          XRes, STRIP_H,
+			computeMirrorPresenceGrid(mirrorMaskPlane, xres, yres,
+			                          xres, STRIP_H,
 			                          1, std::min(numStrips, DEFERRED_MAX_STRIPS),
 			                          stripMirrorPresence);
 			stripPresence = stripMirrorPresence;
 		}
 		const long long _slist = TailProf::nowNs();
-		buildStripLightLists(numStrips, STRIP_H, YRes, lights, numLights,
+		buildStripLightLists(numStrips, STRIP_H, yres, lights, numLights,
 		                     stripPresence, fds::g_mainCamera);
 		TailProf::mark("strip-lists", _slist);
 	}
@@ -3991,35 +3997,35 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	if (tilePresence)
 		std::memcpy(ctx.tileMirrorPresence, tilePresence,
 		            sizeof(ctx.tileMirrorPresence));
-	ctx.invFOVX    = 1.0f / FOVX;
-	ctx.invFOVY    = 1.0f / FOVY;
-	ctx.invZScale  = 1.0f / float(g_zscale);
+	ctx.invFOVX    = 1.0f / fovX;
+	ctx.invFOVY    = 1.0f / fovY;
+	ctx.invZScale  = 1.0f / float(zscale);
 	ctx.Sc         = Sc;
 	ctx.waterMatID = g_deferredWaterMatID;
-	// View → world (transpose of view rotation + camera origin). Used
+	// view → world (transpose of view rotation + camera origin). Used
 	// per pixel for cube shadow sampling to convert view-space sample
-	// to world for face selection. View.Mat is a pure rotation, so
+	// to world for face selection. view.Mat is a pure rotation, so
 	// transpose == inverse.
 	for (int r = 0; r < 3; ++r)
 		for (int c = 0; c < 3; ++c)
-			ctx.viewToWorld[r][c] = View->Mat[c][r];
-	ctx.cameraWorldX = View->ISource.x;
-	ctx.cameraWorldY = View->ISource.y;
-	ctx.cameraWorldZ = View->ISource.z;
+			ctx.viewToWorld[r][c] = view->Mat[c][r];
+	ctx.cameraWorldX = view->ISource.x;
+	ctx.cameraWorldY = view->ISource.y;
+	ctx.cameraWorldZ = view->ISource.z;
 	// Render-target addressing for the tile kernels (RenderContext migration):
 	// snapshot the globals here so the kernels read ctx, not the globals.
-	ctx.xres       = XRes;
-	ctx.yres       = YRes;
-	ctx.vpage      = VPage;
-	ctx.zpage16    = ZPage16;
-	ctx.cntrEX     = CntrEX;
-	ctx.cntrEY     = CntrEY;
-	ctx.fovX       = FOVX;
-	ctx.fovY       = FOVY;
-	ctx.zscale     = float(g_zscale);
-	ctx.gbXpar     = g_gbufferTransparent;
-	ctx.xparZ      = g_xparZ;
-	ctx.xparZBack  = g_xparZBack;
+	ctx.xres       = xres;
+	ctx.yres       = yres;
+	ctx.vpage      = vpage;
+	ctx.zpage16    = zpage16;
+	ctx.cntrEX     = cntrEX;
+	ctx.cntrEY     = cntrEY;
+	ctx.fovX       = fovX;
+	ctx.fovY       = fovY;
+	ctx.zscale     = float(zscale);
+	ctx.gbXpar     = gbXpar;
+	ctx.xparZ      = xparZ;
+	ctx.xparZBack  = xparZBack;
 
 	// Wave 1: shade even cells (full deferred kernel). When checkerboard
 	// is off, this is the entire pass and odd-cell skip is a no-op.
@@ -4028,15 +4034,15 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	// itself a pool thread doing a WHOLE render — no nested enqueue). The tile
 	// kernel releases renderns::tileDone at its end, so the inline path drains
 	// it per tile to stay net-zero on the shared semaphore.
-	const bool useOuterVec = deferredLightingOuterVecEnabled();
+	const bool useOuterVec = deferredLightingOuterVecEnabled(Sc);
 	const bool inlineDispatch = ov && ov->inlineDispatch;
 	if (!inlineDispatch) renderns::tileCounter = 0;
 	const long long _w1q = TailProf::nowNs();
 	constexpr int nTiles = DEFERRED_NUM_TILES;
-	auto tileBounds = [tileSizeX, tileSizeY, XRes, YRes](int t, int &x1, int &y1, int &x2, int &y2) {
+	auto tileBounds = [tileSizeX, tileSizeY, xres, yres](int t, int &x1, int &y1, int &x2, int &y2) {
 		const int j = t / numTilesX, i = t - j * numTilesX;
-		y1 = tileSizeY * j; y2 = std::min(y1 + tileSizeY, YRes);
-		x1 = tileSizeX * i; x2 = std::min(x1 + tileSizeX, XRes);
+		y1 = tileSizeY * j; y2 = std::min(y1 + tileSizeY, yres);
+		x1 = tileSizeX * i; x2 = std::min(x1 + tileSizeX, xres);
 	};
 	if (inlineDispatch) {
 		for (int t = 0; t < nTiles; ++t) {
