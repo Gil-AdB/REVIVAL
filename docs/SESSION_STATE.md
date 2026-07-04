@@ -74,25 +74,30 @@ STATUS: fan implemented + committed (bdeacfe prepass, 2206d49 HdrTarget
 override infra, cbc9220 the fan). DEFAULT SERIAL (byte-exact); the fan is
 --mirror-rtt-parallel, OFF, because of an unresolved residual.
 
-RESIDUAL (the one thing left): at t=700 teleporter, one reflected panel
-differs from serial ~1600px screen / ~1870px in the 64² slot (max 58/137),
-surviving single-worker (FDS_MIRROR_RTT_P1=1). DIAGNOSIS NARROWED — the
-slot Z16 + mat32 planes are byte-IDENTICAL to serial (ZDUMP/MDUMP verified),
-so transform+clip+raster match EXACTLY. The divergence is entirely in the
-LIGHTING/CONE/HDR resolve, reading some non-geometry ctx state differently
-between serial's ov.cam=&fds::g_mainCamera and the fan's ov.cam=&w.camCtx.
-Ruled OUT by the identical planes: near-plane clip, off-axis cull, vertex
-scratch, zScale/fovX/cntrEX (those would perturb the planes). Still SUSPECT:
-a CameraContext field the kernel/cone read but raster doesn't
-(viewToWorld/cameraWorld are equal by construction — recheck), or a
-subtle HDR-resolve order difference (Hdr_ActivateNoFogTarget/
-Render_TonemapToTarget vs the global Hdr_ActivateNoFog/Render_TonemapToVPage
-— diff them line-by-line; note the global variants are THREADED via
-hdrDispatchRows while the Target variants are SERIAL — a float
-reduction-order/rounding difference there would produce exactly a
-low-amplitude broad delta like max=58). NEXT PROBE: printf ov.cam->* +
-the HDR buf checksum at kernel exit, serial vs P=1. Likely the fan is MORE
-correct (EdgeAA-pilot pattern); resolution is adopt-or-match, a judgment call.
+RESIDUAL (the one thing left): at t=700 teleporter, the m1->m4 reflected
+panel differs from serial ~1600px screen / ~1870px in the 64² slot
+(max 58/137), surviving single-worker (FDS_MIRROR_RTT_P1=1, so NOT a race).
+DIAGNOSIS (probed 2026-07-04, all via the RTT dump kit + a transient
+pre-cone surf-checksum + ov.cam field print):
+  * Slot Z16, mat32, normal, lightmapMF, lightmapST planes: byte-IDENTICAL
+    to serial. So transform+clip+raster+gbuffer match EXACTLY.
+  * ov.cam fields (fovX/fovY/cntrEX/cntrEY/zScale/nearZ/cntrX/cntrY) +
+    dctx.viewToWorld[0][0]: byte-IDENTICAL between serial (ov.cam=
+    &g_mainCamera) and fan (ov.cam=&w.camCtx).
+  * The LIT SURFACE CHECKSUM DIFFERS *before cones run* (pre-cone surf
+    f174..bca serial vs 8d63..77e parallel). So the divergence is INSIDE
+    Render_DeferredLighting's per-pixel lighting, NOT cones/HDR/tonemap.
+  P=1 + same tick thread → thread-locals identical. RULED OUT: geometry,
+  camera, all gbuffer planes, cones, HDR resolve, threading, vertex scratch.
+  REMAINING SUSPECT (the only unverified kernel input): the ViewLightsSoA
+  that Render_DeferredLighting builds into ov->lights — serial fills
+  s_rttLights, fan fills w.lights. Every field SHOULD match (same scene
+  omnis, same View basis) but it's the one input not yet checksummed.
+  NEXT: checksum ov->lights (all SoA arrays) at the end of the build loop
+  inside DeferredSurfaceKernel, serial vs P=1; likely an uninitialized SoA
+  lane / a per-light field derived from residual state. Once found: likely
+  the fan is MORE correct (EdgeAA-pilot pattern) — adopt-or-match is a
+  judgment call needing the user's eye on the panel.
 Perf prize when closed: ~1.0-1.3ms at ts=491 (serial RTT is 1.77-1.85ms).
 
 --- original design notes below ---
