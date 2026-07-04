@@ -1440,7 +1440,8 @@ void The_MMX_Scalar(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	// drawing immediately — otherwise the particle TBR and the xpar clumps
 	// composite over the lamp glows (fountain vortex over the purple omni),
 	// and an immediate draw can only be fully-before or fully-after them.
-	if (CurScene->Flags & Scn_SpriteTBR) {
+	// TBR_MatchesTarget: offscreen passes (mirror RTT) draw immediate.
+	if ((CurScene->Flags & Scn_SpriteTBR) && TBR_MatchesTarget(CurScene)) {
 		TBR_Sprite(F, V, numVerts, miplevel, rt, cam);
 		return;
 	}
@@ -1674,6 +1675,35 @@ void TBR_Init(Scene *Sc, mword size)
 		Sc->SBufferHead[i] = -1;
 }
 
+// (Re)initialize the scene's TBR when it's missing or sized for a stale
+// YRes (mid-scene resize reallocates the framebuffer but scenes without
+// an explicit on_resize never re-ran TBR_Init — inserts past NumTiles
+// would corrupt). Cheap no-op when current; safe to call every tick.
+// entriesPerStrip sizes the span pool; InsertSpanToTBR drops overflow
+// gracefully, so this is a budget, not a hard bound.
+void TBR_EnsureInit(Scene *Sc, mword entriesPerStrip)
+{
+	const mword numTiles = (YRes+TILESIZE-1)>>TILELOG;
+	if (Sc->SBufferHead && Sc->NumTiles == numTiles) return;
+	delete[] Sc->SBuffer;
+	delete[] Sc->SBufferHead;
+	TBR_Init(Sc, numTiles * entriesPerStrip);
+}
+
+// True when the scene's TBR strips match the CURRENT render target.
+// Every TBR consumer (sprite divert, xpar routing, TBR_Render) must
+// check this, not just Scn_SpriteTBR: an offscreen pass (mirror RTT
+// via OffscreenViewScope, cube bakes) swaps the YRes global while
+// CurScene keeps its main-sized strip arrays — inserting there would
+// index strips with offscreen-space Y coords, and TBR_Render would
+// draw main-frame entries onto the small target. Offscreen passes
+// fall back to immediate sprites / the legacy peel.
+bool TBR_MatchesTarget(const Scene *Sc)
+{
+	return Sc->SBufferHead != nullptr &&
+	       Sc->NumTiles == mword((YRes+TILESIZE-1)>>TILELOG);
+}
+
 void InsertSpanToTBR(Face *F, dword tile, float renderZ)
 {
 	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
@@ -1803,6 +1833,23 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 
 	// flare image size is written as a floating pt.
 	Size *= F->FlareSize;
+
+	// Mirror-clone flare: drawable only inside its OWN mirror's stamped
+	// footprint (center-point test — same gate as The_MMX_Scalar's
+	// immediate path; see the comment there for why depth alone isn't
+	// enough). The mask is stamped before the FList sprite loop that
+	// inserts here, so it's valid at insert time. Without this, a TBR
+	// scene with mirrors (greets) re-grows the "clone flare through
+	// walls / in other mirrors" family the immediate path already fixed.
+	if (F->mirrorMaskTag != 0) {
+		if (!g_gbuffer || g_gbuffer->mirrorMask.empty()) return;
+		int32_t mx = int32_t(_A->PX);
+		int32_t my = int32_t(_A->PY);
+		if (mx < 0) mx = 0; else if (mx > XRes - 1) mx = XRes - 1;
+		if (my < 0) my = 0; else if (my > YRes - 1) my = YRes - 1;
+		if (g_gbuffer->mirrorMask[size_t(my) * size_t(XRes) + size_t(mx)]
+		    != F->mirrorMaskTag) return;
+	}
 
 	if (Size<=0) return;
 	if (F->Txtr&&F->Txtr->Txtr)

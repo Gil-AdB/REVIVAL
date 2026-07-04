@@ -1038,7 +1038,10 @@ xpar_done: ;
 		}
 	}
 
-	if (CurScene->Flags & Scn_SpriteTBR)
+	// TBR_MatchesTarget: an offscreen pass (mirror RTT) must not flush the
+	// main frame's strip lists onto its small target — its sprites drew
+	// immediate (see The_MMX_Scalar) and its transparents took the peel.
+	if ((CurScene->Flags & Scn_SpriteTBR) && TBR_MatchesTarget(CurScene))
 	{
 		{ TailProf::ScopeTimer _tp("TBR-render"); TBR_Render(CurScene); }
 	}

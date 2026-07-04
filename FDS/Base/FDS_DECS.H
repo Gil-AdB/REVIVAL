@@ -526,6 +526,8 @@ inline void SavePolyStats(const char * /*fileName*/) {}
 
 // Tile based rendering
 void TBR_Init(Scene *Sc, mword size);
+void TBR_EnsureInit(Scene *Sc, mword entriesPerStrip);
+bool TBR_MatchesTarget(const Scene *Sc);
 void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
                 const fds::RenderTarget& rt,
                 const fds::CameraContext& cam);

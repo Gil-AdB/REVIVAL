@@ -2387,6 +2387,10 @@ bool deferredUnifiedTbrEnabled() {
 	if (!fds::FeatureFlags::deferred_unified_tbr()) return false;
 	if (!CurScene) return false;
 	if (!CurScene->SBufferHead || CurScene->NumTiles == 0) return false;
+	// Offscreen pass (mirror RTT, cube bake): the YRes global is swapped
+	// but the strip arrays are main-sized — fall back to the legacy peel
+	// there (see TBR_MatchesTarget).
+	if (!TBR_MatchesTarget(CurScene)) return false;
 	return true;
 }
 
