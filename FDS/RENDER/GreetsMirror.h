@@ -256,10 +256,16 @@ Mirror BuildMirrorByTextureName(Scene *sc, const char *textureFileName);
 // greets display is surface "screen 3"); the small amudim screens ("screen 4")
 // and column panels ("screen2") are simply left off the list. Pass nullptr to
 // keep the legacy area-gated behaviour (any P_TEXT cluster >= min-area).
+// byMatName: match faces by Material NAME instead of texture filename
+// (textureFileName is then read as the material name). Lets a hand-built
+// scene route its named mirror panels through the RTT-slot builder — the
+// path recursive mirrors need (--mirror-recurse-depth demotes clones to
+// first-order RTT panels here). Default false = legacy texture-name match.
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                               std::vector<Mirror> &out,
                               std::vector<MirrorRttSlot> *rttSlots = nullptr,
-                              const std::vector<std::string> *allowedMatNames = nullptr);
+                              const std::vector<std::string> *allowedMatNames = nullptr,
+                              bool byMatName = false);
 
 // Depth-1 recursive: for each ordered pair (A, B) of already-built
 // base mirrors, append a compound mirror representing "looking at B

@@ -69,20 +69,81 @@ that first-order RTT already uses), recursion-driven.
   (`FDS_MIRROR_RECURSE_DEPTH`, default 0 = current behavior). Plan doc.
   cloaktest G-key pose dump already in for break-pose capture.
 - **Slice 1a (done, 3502dbb): `MirrorReflectedCamera` primitive** — reflected
-  eye + reflected basis (det=-1 → render with inverted back-face cull).
-- **Design decision:** use the **reflected-basis + cull-flip** portal (render
-  the real scene from `MirrorReflectedCamera`, invert cull, clip to the
-  mirror's screen footprint via the existing per-pixel `gb.mirrorId` mask),
-  NOT the existing RTT's forward-basis + panel-window projection. The
-  reflected-basis form generalizes to any mirror seen at any angle and
-  composes recursively without per-panel window bookkeeping. (Watch: the
-  rasterizer cull sign — Mekalele/TheOtherBarry — must be flippable per pass.)
-- **Slice 1b: single-mirror recursion render.** For each mirror visible in a
-  view, render the `MirrorReflectedCamera` view to an offscreen target,
-  composite into the mirror's `gb.mirrorId` pixels, recurse `depth`. Ignore
-  multiple-mirrors-per-view ordering first. Validate: two parallel facing
-  mirrors show the tunnel to depth N. **Needs interactive validation (G-key
-  poses) — the cloaktest dump only covers fixed angles.**
+  eye + reflected basis. Kept for reference/analytic use; the render path
+  below does NOT use its det=-1 basis (see the decision).
+
+- **Design decision — CHOSEN: forward-basis recursive RTT on the REAL panels**
+  (supersedes the earlier reflected-basis+cull-flip idea). A reflected-basis
+  camera has a det=-1 basis → flipped screen winding → fights the rasterizer's
+  back-face cull AND fill-area sign. The existing RTT path already avoids this
+  with a forward-facing basis + panel-window off-axis projection (proven,
+  no winding issues). So recurse THAT, not a reflected-basis portal:
+  - Every real mirror panel gets a first-order-style RTT material/texture
+    (like the existing order-1 RTT that retargets REAL panel faces — no clone
+    geometry, so no clone-of-clone and no combinatorial slots).
+  - Render **N deepest-first passes**. Pass k renders each panel's reflected
+    view (forward basis, panel window, near plane at the mirror) into its
+    texture, sampling the OTHER panels' pass-(k-1) textures. Pass 1's nested
+    panels show black = depth-0 (no further reflection); each pass adds a
+    bounce. Camera reflection lives in the ray geometry + shared UV stamp
+    (texel(W) = scene along camPos→W), exactly as order-1/2 RTT already does.
+  - Cost: N × (panels) offscreen renders; footprint-prune + adaptive res as
+    the existing RTT already does. Serial across passes (deepest-first).
+
+- **Slice 1b: implement the multi-pass recursive RTT.** (i) generalize
+  first-order RTT to cover every BuildMirror panel; (ii) wrap the slot render
+  in a deepest-first N-pass loop gated by `--mirror-recurse-depth`; (iii) at
+  pass boundaries keep panel textures from the previous pass visible.
+  Validate on cloaktest dump poses: probe1 hero occluded, back1-4 void panels
+  fill, viewer see-through deepens with depth (bg-green rises, black falls).
+
+### Slice 1b — IMPLEMENTED, partial (this session)
+
+Landed in `GreetsMirror.cpp` + `CloakTest.cpp`, all gated on
+`--mirror-recurse-depth>0` (depth 0 = byte-identical legacy; greets build
+verified unchanged: "3 mirrors + 0 RTT" at depth 0):
+
+1. **Verdict demotion** (`BuildMirrorsByTextureName`): when `recurse>0`, a
+   would-be CLONE mirror (`verdict 'built'`) is demoted to a first-order RTT
+   panel (`'rtt'`). Clones are hidden in every RTT bake (depth-0 dead end);
+   RTT panels are real faces that stay visible, so they can appear inside
+   each other's bakes.
+2. **`byMatName` option** on `BuildMirrorsByTextureName` — routes a hand-built
+   scene's *named* mirror panels through the RTT-slot builder (cloaktest uses
+   this instead of the clone-only `BuildMirror`).
+3. **Off-screen slot baking** (`RenderSecondOrderMirrors`): in recurse mode a
+   slot with no MAIN-screen footprint is still baked (full-frame) — a mirror
+   is usually visible only *inside another mirror* (the far wall of a tunnel
+   sits behind the camera). Without this the far mirror stays black forever.
+4. **Opaque recurse panels**: the RTT bake fills only the OPAQUE G-buffer, so
+   the greets `Mat_Transparent` glass panels are invisible inside each other's
+   bakes. Recurse panels are made OPAQUE so a mirror renders into every bake.
+5. **N-pass bake loop**: `numPasses = recurseDepth`; single-buffer in place, so
+   a later panel in a pass already sees earlier panels' new textures.
+
+**Validation scene**: `--scene-cloaktest FDS_CLOAK_PARALLEL=1` — two mirrors
+facing each other (infinity tunnel), the *unambiguous* recursion test. (The
+V-cloak can't validate: its two V's present opaque BACKS to each other's
+reflected cameras — nothing to bounce — which is the "unresolved cloak optics"
+noted in memory, a scene-geometry problem, not the engine.)
+
+**Result**: recursion WORKS but is limited. depth 1→2 changes the tunnel by
+~367k px (a real extra bounce), then it **converges** (depth 2 == depth 4,
+byte-identical): the panel textures reach a fixed point after ONE extra bounce
+because a bezel-less mirror reflecting a fairly uniform room has no
+high-contrast recursive detail to carry deeper.
+
+**Two limitations found (→ slice 2/3):**
+- **Re-lighting washout**: opaque RTT panels are RE-LIT by scene omnis on each
+  bounce, so the reflection over-brightens toward white. Need a true
+  emissive/unlit passthrough for the RTT texel (Lum=1 overshoots with several
+  lights). This dominates the visual and hides tunnel structure.
+- **Geometric approximation**: each panel is baked from its OWN order-1
+  reflected camera and shares ONE texture. That texture is only correct for
+  looking *directly* at the panel, not for the panel *seen through another*
+  mirror — so nested bounces are geometrically crude. A crisp receding tunnel
+  needs per-context reflected cameras (the recursive `renderView(vcam,depth-1)`
+  tree in the pseudocode above), plus bezels/high-contrast content to read.
 - **Slice 2: multiple mirrors per view.** Loop over all mirrors visible in
   each reflected view; per-mirror scissor. Validate on cloaktest: the black
   hole fills at depth 2, more at 3, and the bg pillar appears at depth 4.

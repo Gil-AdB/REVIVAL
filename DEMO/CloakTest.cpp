@@ -115,6 +115,8 @@ struct CloakScene {
     Scene *sc = nullptr;
     std::vector<fds::Mirror> mirrors;
     std::vector<fds::MirrorRttSlot> rttSlots;
+    std::vector<const char*> mirNames;   // per-panel mirror material names
+    bool parallel = false;               // two-facing-mirror tunnel variant
 };
 
 CloakScene buildCloakScene() {
@@ -207,6 +209,64 @@ CloakScene buildCloakScene() {
     b.Finalize();
     CloakScene cs;
     cs.sc = b.scene();
+    cs.mirNames = { "mL_a", "mL_b", "mR_a", "mR_b" };
+    return cs;
+}
+
+// Two parallel mirrors facing each other along z — a classic infinity
+// tunnel, and the UNAMBIGUOUS recursion test. Unlike the V-cloak (whose
+// mirrors present their opaque BACKS to each other's reflected cameras, so
+// there is nothing to bounce), here mirror A (z=-4, reflective side +z) and
+// mirror B (z=+4, reflective side -z) face each other front-to-front: A's
+// reflected camera looks straight into B's front, which shows A, ... The
+// tunnel must gain one nested repeat per --mirror-recurse-depth level.
+// Enable with FDS_CLOAK_PARALLEL=1.
+CloakScene buildParallelMirrorScene() {
+    using namespace fds::scene_builder;
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 300.0f);
+    // Dim ambient + omnis: opaque RTT panels get RE-LIT each recursion
+    // bounce, so a bright room saturates the reflection to white by depth 2
+    // and hides any deeper deepening. Keep the room dim so the tunnel reads.
+    b.SetAmbient(40, 40, 40);
+
+    Texture *wallTex  = makeChecker(0xFF9AA6C0u, 0xFF4A5578u);   // cool
+    Texture *floorTex = makeChecker(0xFFB0A090u, 0xFF5E5348u);   // warm
+    Material *matWall  = b.AddMaterial("wall_mat",  wallTex,  {154,166,192,255}, 0);
+    Material *matFloor = b.AddMaterial("floor_mat", floorTex, {176,160,144,255}, 0);
+    Texture  *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC8CCD4u);
+    Material *pmA = b.AddMaterial("pmA", mirTex, {200,204,212,255}, 0);
+    Material *pmB = b.AddMaterial("pmB", mirTex, {200,204,212,255}, 0);
+
+    // Enclosure so the tunnel reflects a structured room, not the void.
+    const Vector floorV[4] = { Vector(-8,0,-8), Vector(-8,0,8), Vector(8,0,8), Vector(8,0,-8) };
+    b.AddQuad("floor", floorV, matFloor);
+    const Vector ceilV[4]  = { Vector(-8,7,-8), Vector(8,7,-8), Vector(8,7,8), Vector(-8,7,8) };
+    b.AddQuad("ceiling", ceilV, matWall);
+    addWall(b, "wall_left",  -8.0f, 8.0f, -8.0f, -8.0f, 7.0f, matWall);   // faces +x
+    addWall(b, "wall_right",  8.0f, -8.0f, 8.0f,  8.0f, 7.0f, matWall);   // faces -x
+
+    // Two facing mirrors. addWall normal = (zR-zL, 0, xL-xR).
+    addWall(b, "pmA", -3.0f, -4.0f,  3.0f, -4.0f, 6.0f, pmA);  // normal (0,0,+6): faces +z toward B
+    addWall(b, "pmB",  3.0f,  4.0f, -3.0f,  4.0f, 6.0f, pmB);  // normal (0,0,-6): faces -z toward A
+
+    // Objects between the mirrors, off the center axis so their repeats recede.
+    Material *matHero = b.AddMaterial("hero", b.AddSolidColorTexture(8,8,0xFFE04030u), {224,64,48,255}, 0);
+    matHero->Specular = 0.5f; matHero->Glossiness = 48;
+    b.AddCube("hero", Vector( 1.2f, 1.0f, 0.0f), 0.6f, matHero);
+    Material *matMark = b.AddMaterial("mark", b.AddSolidColorTexture(8,8,0xFF30E060u), {48,224,96,255}, 0);
+    b.AddCube("mark", Vector(-1.4f, 2.4f, 0.6f), 0.4f, matMark);
+
+    b.AddOmni(Vector(-3.0f, 5.0f, 0.0f), {255,232,200,0}, 0.45f, 36.0f);   // warm
+    b.AddOmni(Vector( 3.0f, 5.0f, 0.0f), {200,224,255,0}, 0.45f, 36.0f);   // cool
+
+    // Look into mirror A from an angle so the tunnel recedes off-center.
+    b.SetCamera(Vector(2.5f, 3.0f, 2.6f), Vector(-0.5f, 1.6f, -4.0f), 60.0f);
+    b.Finalize();
+    CloakScene cs;
+    cs.sc = b.scene();
+    cs.mirNames = { "pmA", "pmB" };
+    cs.parallel = true;
     return cs;
 }
 
@@ -252,19 +312,25 @@ void renderPoseToPPM(CloakScene &cs, Vector eye, Vector lookAt, const char *path
 } // namespace
 
 void Run_CloakTest() {
-    CloakScene cs = buildCloakScene();
+    const bool parallel = std::getenv("FDS_CLOAK_PARALLEL") != nullptr;
+    CloakScene cs = parallel ? buildParallelMirrorScene() : buildCloakScene();
     SetCurrentScene(cs.sc);
     Calibrate_FreeCamera_ForScene(cs.sc->FZP, cs.sc->CameraHead);
 
     // FDS_CLOAK_NOMIRROR=1: skip mirror construction — pure-geometry
     // ground truth for debugging pose/winding questions.
     if (!std::getenv("FDS_CLOAK_NOMIRROR"))
-        for (const char *nm : { "mL_a", "mL_b", "mR_a", "mR_b" }) {
-            fds::Mirror m = fds::BuildMirror(cs.sc, nm);
-            if (m.cloneMesh) cs.mirrors.push_back(std::move(m));
-            else std::fprintf(stderr, "[CLOAKTEST] BuildMirror('%s') FAILED\n", nm);
+        for (const char *nm : cs.mirNames) {
+            // Route the named panels through the RTT-slot builder (byMatName):
+            // at --mirror-recurse-depth>0 each demotes to a first-order RTT
+            // panel (real faces, NOT a hidden clone) so the mirrors reflect
+            // each other across the N-pass bake; at depth 0 it builds an
+            // ordinary clone mirror, exactly like the legacy BuildMirror path.
+            fds::BuildMirrorsByTextureName(cs.sc, nm, cs.mirrors, &cs.rttSlots,
+                                           nullptr, /*byMatName=*/true);
         }
-    std::fprintf(stderr, "[CLOAKTEST] %zu mirrors built\n", cs.mirrors.size());
+    std::fprintf(stderr, "[CLOAKTEST] %zu clone mirrors, %zu first-order RTT panels\n",
+                 cs.mirrors.size(), cs.rttSlots.size());
     fds::TagFacesBehindMirrors(cs.sc, cs.mirrors);
 
     // Face-list sizing must cover the 4 clone meshes.
@@ -289,6 +355,20 @@ void Run_CloakTest() {
     // Default = INTERACTIVE free-cam so the scene can be explored live.
     if (std::getenv("FDS_CLOAK_DUMP")) {
     struct Pose { Vector eye, lookAt; const char *tag; };
+    // Parallel-tunnel variant: look into mirror A; the tunnel of nested
+    // repeats must deepen with --mirror-recurse-depth.
+    if (cs.parallel) {
+        const Pose pposes[] = {
+            { Vector(2.5f,3.0f,2.6f), Vector(-0.5f,1.6f,-4.0f), "tunnel"  }, // off-axis (SetCamera)
+            { Vector(0.0f,3.4f,3.2f), Vector( 0.0f,2.0f,-4.0f), "tunnel2" }, // near on-axis
+        };
+        for (const Pose &p : pposes) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/tmp/cloak_view_%s.ppm", p.tag);
+            renderPoseToPPM(cs, p.eye, p.lookAt, path);
+        }
+        return;
+    }
     const Pose poses[] = {
         // The money shot: the viewer pose, looking up into the right V.
         { Vector( 3.5f, 2.5f, 4.0f), Vector( 3.5f, 2.5f, 40.0f), "viewer"   },

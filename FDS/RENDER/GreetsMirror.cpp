@@ -937,7 +937,8 @@ inline void planeBasis(const Vector &n, Vector &u, Vector &v) {
 int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
                               std::vector<Mirror> &out,
                               std::vector<MirrorRttSlot> *rttSlots,
-                              const std::vector<std::string> *allowedMatNames)
+                              const std::vector<std::string> *allowedMatNames,
+                              bool byMatName)
 {
     if (!sc || !textureFileName) return 0;
 
@@ -952,8 +953,7 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         Vector   ctr;  // world-space face centroid (for spatial clustering)
     };
     std::vector<WallSample> samples;
-    walkWallFacesIf(sc, textureNameSelector(textureFileName),
-                    [&](TriMesh *T, Face &F, const Vector &wN) {
+    auto collect = [&](TriMesh *T, Face &F, const Vector &wN) {
         Vector u = wN;
         u.normalize();
         auto worldPos = [&](const Vertex *v) {
@@ -974,7 +974,9 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
         const Vector ctr{ (wA.x+wB.x+wC.x)/3.0f, (wA.y+wB.y+wC.y)/3.0f, (wA.z+wB.z+wC.z)/3.0f };
         samples.push_back({&F, T, u,
                            -(u.x*wA.x + u.y*wA.y + u.z*wA.z), area, ctr});
-    });
+    };
+    if (byMatName) walkWallFacesIf(sc, matNameSelector(textureFileName),   collect);
+    else           walkWallFacesIf(sc, textureNameSelector(textureFileName), collect);
     if (samples.empty()) {
         std::fprintf(stderr, "[MIRROR-CLUSTER '%s'] no faces found\n",
                      textureFileName);
@@ -1039,7 +1041,12 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
     // slot. Only end-screen CLONES (>=2.0) survive as first-order mirrors;
     // second-order/recursive RTT is built separately. Set 0.2 to re-include.
     const float kMinRttArea = fds::FeatureFlags::greets_mirror_rtt_min_area();
-    const bool wantRtt = rttSlots && fds::FeatureFlags::mirror_rtt();
+    // Recursive mirrors are built on first-order RTT panels (see the
+    // verdict demotion below), so --mirror-recurse-depth>0 implies the
+    // RTT path even without an explicit --mirror-rtt.
+    const bool recurse = fds::FeatureFlags::mirror_recurse_depth() > 0;
+    const bool wantRtt =
+        rttSlots && (fds::FeatureFlags::mirror_rtt() || recurse);
 
     int added = 0, addedRtt = 0, skippedSlivers = 0, skippedHorizontal = 0;
     for (int c = 0; c < numClusters; ++c) {
@@ -1164,6 +1171,14 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             if (aspect > kMaxDisplayAspect)      verdict = "edge";      // thin box-side cap
             else if (facesWall)                  verdict = "occluded";  // back, mounted on wall
         }
+        // Recursive mirrors need first-order RTT panels: the RTT bake
+        // hides every CLONE mesh (so a clone can't appear inside another
+        // mirror's texture → depth-0 dead end), but RTT panels are real
+        // faces retargeted to an RTT material and stay visible. Demote a
+        // would-be clone to RTT when --mirror-recurse-depth>0 so mirrors
+        // reflect each other across the N-pass bake. Edge/occluded/sliver
+        // verdicts are left alone (still not mirrors).
+        if (recurse && verdict[0] == 'b') verdict = "rtt";
         std::fprintf(stderr,
             "[CLUSTER %2d] mat='%s' ctr=(%.0f,%.0f,%.0f) N=(%5.2f,%5.2f,%5.2f) d=%8.3f faces=%zu "
             "area=%6.2f ext=%.2fx%.2f aspect=%.1f facesWall=%d -> %s\n",
@@ -1247,18 +1262,28 @@ int BuildMirrorsByTextureName(Scene *sc, const char *textureFileName,
             // backface-culls into a hole showing the box interior
             // (mirrored text of the far sheet). The per-frame job
             // renders the side the camera is actually on.
-            // Mat_Transparent: the panel is a SEMI-TRANSPARENT display
-            // — it rides the xpar peel and the deferred transparent
-            // kernel composites texel + behind/2 (XparBlendAlpha=0 →
-            // the legacy glass formula the original screens used), so
-            // free-standing column panels show the scene through the
-            // glass under the text + reflection.
-            slot.mat->Flags     |= Mat_TwoSided | Mat_Transparent;
-            // Blend ratio: panel*a + behind*(1-a) via the kernel's
-            // XparBlendAlpha lerp. Runtime knob --mirror-rtt-alpha;
-            // the additive texel+behind/2 default read too windowy.
-            slot.mat->XparBlendAlpha =
-                fds::FeatureFlags::mirror_rtt_alpha();
+            slot.mat->Flags |= Mat_TwoSided;
+            if (recurse) {
+                // Recursive mirrors must be OPAQUE. The RTT bake fills only
+                // the OPAQUE G-buffer (MekaleleFillRegionInline), so a
+                // transparent panel is invisible INSIDE another panel's bake
+                // — no mirror ever sees another and the tunnel never
+                // deepens. A solid opaque mirror renders into every bake, so
+                // panel A picks up panel B's texture on the next pass.
+            } else {
+                // Mat_Transparent: the panel is a SEMI-TRANSPARENT display
+                // — it rides the xpar peel and the deferred transparent
+                // kernel composites texel + behind/2 (XparBlendAlpha=0 →
+                // the legacy glass formula the original screens used), so
+                // free-standing column panels show the scene through the
+                // glass under the text + reflection.
+                slot.mat->Flags |= Mat_Transparent;
+                // Blend ratio: panel*a + behind*(1-a) via the kernel's
+                // XparBlendAlpha lerp. Runtime knob --mirror-rtt-alpha;
+                // the additive texel+behind/2 default read too windowy.
+                slot.mat->XparBlendAlpha =
+                    fds::FeatureFlags::mirror_rtt_alpha();
+            }
             slot.mat->RelScene   = sc;
             {
                 char nm[64];
@@ -2427,6 +2452,10 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     if (!sc || slots.empty()) return;
     const Camera *mainCam = ::View ? ::View : sc->CameraHead;
     if (!mainCam) return;
+    // Recursive reflection depth (0 = legacy scheduled path). Read once up
+    // front — the job selection, the per-frame cap, and the bake-pass count
+    // all branch on it.
+    const int recurseDepth = fds::FeatureFlags::mirror_recurse_depth();
     // Age every slot once per pass — the scheduler trades footprint
     // area against staleness so the 2-jobs/frame cap round-robins
     // across visible slots instead of starving the small ones.
@@ -2495,11 +2524,20 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                 }
             }
         }
-        if (!anyAhead) continue;
+        if (!anyAhead) {
+            if (recurseDepth <= 0) continue;
+            // Recurse: bake even when the panel has no MAIN-screen footprint.
+            // A mirror is often visible ONLY inside another mirror's
+            // reflection (the far wall of an infinity tunnel sits behind the
+            // camera), yet its texture must be current for that reflection to
+            // resolve. Full-frame footprint → bakes at full resolution.
+            bx0 = 0.0f; by0 = 0.0f;
+            bx1 = float(::XRes); by1 = float(::YRes);
+        }
         bx0 = std::max(bx0, 0.0f); by0 = std::max(by0, 0.0f);
         bx1 = std::min(bx1, float(::XRes)); by1 = std::min(by1, float(::YRes));
         const float area = (bx1 - bx0) * (by1 - by0);
-        if (area <= 1.0f) continue;
+        if (area <= 1.0f && recurseDepth <= 0) continue;
         // Virtual camera: order 1 reflects ONCE across the panel's own
         // plane; order 2 reflects through A then B. Either way it must
         // land BEHIND the panel plane (in front = camera on the back
@@ -2540,7 +2578,11 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
     if (jobs.empty()) return;
     std::sort(jobs.begin(), jobs.end(),
               [](const Job &a, const Job &b) { return a.area > b.area; });
-    if (int(jobs.size()) > kRttPerFrame) jobs.resize(kRttPerFrame);
+    // Recursive mode bakes EVERY slot each pass (a mirror must be current in
+    // every other mirror's view); the per-frame cap + staleness round-robin
+    // only apply to the legacy scheduled path.
+    if (recurseDepth <= 0 && int(jobs.size()) > kRttPerFrame)
+        jobs.resize(kRttPerFrame);
     g_rttJobsLastFrame = int(jobs.size());
     g_mirrorProf.rttJobsSum += int(jobs.size());
 
@@ -2647,6 +2689,15 @@ void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
         return p;
     };
 
+    // Recursive reflection: bake the whole slot set N times. Each pass
+    // re-renders every panel while the OTHER panels show their latest
+    // texture (real RTT faces are NOT hidden in the bake, unlike clones),
+    // so a mirror-in-a-mirror gains one bounce per pass and depth N
+    // resolves in a single frame. Single-buffer in place: a later panel
+    // in a pass already sees earlier panels' new content, so this
+    // converges at least as fast as strict deepest-first. Legacy = 1 pass.
+    const int numPasses = recurseDepth > 0 ? recurseDepth : 1;
+    for (int pass = 0; pass < numPasses; ++pass)
     for (const Job &j : jobs) {
         MirrorRttSlot &s = *j.slot;
         const float D = j.dist;
