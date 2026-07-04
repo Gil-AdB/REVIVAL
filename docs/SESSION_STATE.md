@@ -38,9 +38,13 @@ Ranked list (full reasoning in the 2026-07-04 conversation + below):
    The legacy peel remains ONLY as the offscreen fallback + escape
    flag; deleting it outright needs an offscreen story first.
 4. ⬜ **#1 RenderContext migration slices 3-5** (RENDER_CONTEXT_PLAN.md) —
-   the standing campaign; unlocks RTT/shadow-raster parallelism, ends the
-   global-swap bug family.
-5. ⬜ **#4 promote GreetsMirror/MirrorShatter to FDS/RENDER** — mechanical.
+   THE remaining campaign; unlocks RTT/shadow-raster parallelism, ends
+   the global-swap bug family. Start here next session.
+5. ✅ **#4 mirror system promoted to FDS/RENDER (1e26fc5)** —
+   GreetsMirror + MirrorShatter + SpotlightCones moved wholesale (they
+   were already parameterized); canonical PickFillerForMaterial now
+   lives in TheOtherBarry.h (SceneBuilder delegates). Gate PASS,
+   teleporter smoke byte-identical, clean-tree build verified.
 
 Also fixed this session (before the push): lightmap-bake coverage-bit
 race (0df96a6, atomic OR — TSan-confirmed real, greets init now clean);
