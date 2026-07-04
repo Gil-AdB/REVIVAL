@@ -467,6 +467,7 @@ material global ID or ptr
 #include <float.h>
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
+#include <RENDER/EnvCube.h>
 #include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
@@ -1394,6 +1395,17 @@ int main(int argc, const char *argv[])
 	// flags fall through to snapshot/bench parsing; those parsers ignore
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
+
+	// Env-cube convention self-test (FDS_ENV_CUBE_SELFTEST=1): dir→face/uv→dir
+	// round-trip + central uv→dir→uv check. Aborts on gross failure so an
+	// orientation bug is caught before any real bake. No-op otherwise.
+	if (std::getenv("FDS_ENV_CUBE_SELFTEST")) {
+		if (!fds::EnvCube_SelfTest()) {
+			std::fprintf(stderr, "[ENVCUBE-SELFTEST] FAILED — aborting.\n");
+			return 3;
+		}
+	}
+
 	fds::TuneServer_Start();
 
 	SnapshotConfig snap;

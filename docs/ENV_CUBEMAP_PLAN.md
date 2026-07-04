@@ -211,3 +211,45 @@ the final slice after A/B validation. `render_gate.sh` scenes don't enable
 - Memory: 6×512²×4×1.33 ≈ 8.4 MB per reflective material (deferred) /
   per building (city, no mips ≈ 6.3 MB). Comparable to today's 1024²
   panoramas; `env_refl_res` remains the knob.
+
+## Validation log (living)
+
+### Flag-off legacy-env-path pins + noise floor (established before slice B)
+
+The render gate (mirrortest/conetest/halotest) exercises the SHARED deferred
+path but NOT either env consumer (env_refl defaults 0; no gate scene has
+`Face_Reflective` faces). So the gate proves shared plumbing didn't drift; the
+legacy env path is pinned separately by snapshotting with `--env_refl` ON and
+`env_cube` OFF, diffing against a committed baseline under `/tmp/envcube/`.
+
+Noise-floor measurement (same pose rendered ≥3× with the flag off,
+`tools`-style byte diff via `/tmp/envcube/ppmdiff.py`):
+
+| pose | determinism | usable as flag-off pin? |
+|---|---|---|
+| `city@t=150` (forward reflective path) | **byte-exact** across 3 runs | YES — tolerance 0 |
+| `chase@t=500`, `chase@t=1000` | **byte-exact** | YES — tolerance 0 |
+| `city@t=300` | **nondeterministic** (~64% bytes differ on re-run; moving ships/headlights/timing) | NO — dropped |
+
+Flag-off regression rule per slice: re-render `city@t=150`, `chase@t=500`,
+`chase@t=1000` with `env_cube` OFF and `--env_refl`; require **byte-identical**
+to `/tmp/envcube/baseline/`. Any nonzero diff = a regression in shared plumbing
+(filler t1 masks, EnvPanoLinear/table shape, CityPanoramaCache load) → stop and
+fix. (Deferred-consumer flag-on validation is structural + visual A/B only; NEVER
+byte-compare cube output against equirect.)
+
+### Slice A — EnvCube.h foundation + flag  (DONE)
+- `FDS/RENDER/EnvCube.h`: convention (basis = EnvBake's kCubeFaces),
+  `kEnvCubePad=1.25`, trig-free `EnvCube_DirToFaceUV`, inverse
+  `EnvCube_FaceUVToDir`, `EnvCube_SelfTest`, `EnvCube_PaintDebugFace`.
+- Flag `env_cube` (default 0) added after `env_refl_viz`.
+- Self-test hook in `REV.CPP` after parseArgs, gated by `FDS_ENV_CUBE_SELFTEST`.
+- **Self-test: PASS** — `dir→uv→dir maxAngErr=5.98e-4 rad` (that magnitude is
+  `acos`-near-1 ill-conditioning; true dir error ~1e-7), `central uv→dir→uv
+  maxErr=5.96e-8`, `faceMiss=0`.
+- **Gate: 3/3 PASS** flag OFF and flag ON (nothing wired yet).
+- Flag-off pins: N/A (no render wiring yet; header + flag + startup hook only).
+
+## Deviations
+
+- (none yet)
