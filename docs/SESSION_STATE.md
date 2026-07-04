@@ -89,15 +89,23 @@ pre-cone surf-checksum + ov.cam field print):
     Render_DeferredLighting's per-pixel lighting, NOT cones/HDR/tonemap.
   P=1 + same tick thread → thread-locals identical. RULED OUT: geometry,
   camera, all gbuffer planes, cones, HDR resolve, threading, vertex scratch.
-  REMAINING SUSPECT (the only unverified kernel input): the ViewLightsSoA
-  that Render_DeferredLighting builds into ov->lights — serial fills
-  s_rttLights, fan fills w.lights. Every field SHOULD match (same scene
-  omnis, same View basis) but it's the one input not yet checksummed.
-  NEXT: checksum ov->lights (all SoA arrays) at the end of the build loop
-  inside DeferredSurfaceKernel, serial vs P=1; likely an uninitialized SoA
-  lane / a per-light field derived from residual state. Once found: likely
-  the fan is MORE correct (EdgeAA-pilot pattern) — adopt-or-match is a
-  judgment call needing the user's eye on the panel.
+  * ViewLightsSoA (ov->lights, all 23 arrays x 117 lights): byte-IDENTICAL
+    (hash 75ff00b2b5f17ab6 both). mirrorMask empty in BOTH RTT gbuffers
+    (neither s_rttGB nor w.gb allocates it) → clone-cull symmetric.
+  CONCLUSION: EVERY enumerable kernel input — 5 gbuffer planes, full
+  camera ctx, the entire light SoA — is byte-identical, yet the pre-cone
+  lit surface differs. This is NOT a race (P=1, same thread) and NOT any
+  enumerable input. It's an uninitialized-read or buffer-provenance
+  dependence deep in the kernel tile/fill path (quarter-fill wave-2 reads
+  neighbours; s_rttSurf reused-across-jobs vs w.surf reused-per-worker
+  carry different residual in never-covered lanes the fill may touch), OR
+  a per-pixel codegen/order subtlety. CLOSING IT needs per-pixel
+  intermediate bisection (dump wave-1 vs wave-2 pixel masks + the fill's
+  neighbour reads for the diverging 36x58 region), a dedicated deep
+  session — NOT bounded probes. Given the prize is ~1-1.3ms of ~42ms on a
+  DEFAULT-OFF experiment, RECOMMENDATION: leave opt-in, revisit only if
+  the RTT serial cost becomes a priority. The fan + HdrTarget infra are
+  committed and correct-by-construction; only this residual gates default-on.
 Perf prize when closed: ~1.0-1.3ms at ts=491 (serial RTT is 1.77-1.85ms).
 
 --- original design notes below ---
