@@ -1568,10 +1568,34 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 						d3[0].x + d3[1].x + d3[2].x,
 						d3[0].y + d3[1].y + d3[2].y,
 						d3[0].z + d3[1].z + d3[2].z);
+					bool inWindow = true;
 					for (int j = 0; j < 3; ++j)
-						fds::EnvCube_DirToUVOnFace(k, d3[j].x, d3[j].y, d3[j].z,
-						                           eu[j], ev[j]);
-					F->ReflectionTexture = T->EnvCubeFaces[k];
+						inWindow &= fds::EnvCube_DirToUVOnFace(
+							k, d3[j].x, d3[j].y, d3[j].z, eu[j], ev[j]);
+					if (inWindow) {
+						F->ReflectionTexture = T->EnvCubeFaces[k];
+					} else {
+						// Wide-span triangle: a vertex dir backfaces or
+						// overhangs the padded window — gnomonic UVs would
+						// clamp/collapse and smear the whole triangle (the
+						// close-up-tower artifact). Equirect handles any
+						// span; sample the fallback pano synthesized from
+						// these same faces. Same math as the legacy branch
+						// below (incl. the U-wrap), only the texture differs.
+						for (int j = 0; j < 3; ++j) {
+							const float lat = asin_approx(d3[j].y);
+							const float lon = atan2_approx(-d3[j].z, -d3[j].x);
+							eu[j] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
+							ev[j] = 0.5 - 0.5 * lat / (PI / 2.0);
+						}
+						if (std::max({ eu[0], eu[1], eu[2] })
+						    - std::min({ eu[0], eu[1], eu[2] }) > 0.8) {
+							for (int j = 0; j < 3; ++j)
+								if (eu[j] < 0.5) eu[j] += 1;
+						}
+						F->ReflectionTexture = T->EnvFallbackPano
+							? T->EnvFallbackPano : T->EnvCubeFaces[k];
+					}
 				} else {
 				i = 0;
 				for (Vertex* v : { F->A, F->B, F->C }) {

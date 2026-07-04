@@ -55,6 +55,12 @@ struct TriMesh
     // equirect F->ReflectionTexture path runs unchanged. See RENDER/EnvCube.h.
     Texture         *EnvCubeFaces[6] = { nullptr, nullptr, nullptr,
                                          nullptr, nullptr, nullptr };
+    // Wide-span fallback for the cube path: an equirect pano (synthesized at
+    // init from the padded faces — no extra render) that Transform swaps in
+    // for triangles whose vertex reflection dirs BACKFACE or OVERHANG the
+    // selected face's padded window; per-triangle gnomonic UVs would clamp /
+    // collapse there and smear the interpolation (close-up city towers).
+    Texture         *EnvFallbackPano = nullptr;
 
     // Per-shadow-bake-call cache. Written SERIALLY by Render_Deferred-
     // ShadowMaps' prime pass before it enqueues the parallel per-face

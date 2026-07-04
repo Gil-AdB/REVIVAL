@@ -338,6 +338,29 @@ divide; the filler is unchanged). Init is a wash: the cube bake skips the
 equirect table reprojection but renders with a wider FOV and writes 1.5× the
 cache bytes.
 
+### Post-slice-D fix — close-up smear (user repro, CITYSNAP_VIEW t=124)
+
+Wide-span triangles broke the per-triangle gnomonic projection: close to a
+tower the reflected eye sits near the glass, vertex reflection dirs span tens
+of degrees, and two defects compounded — (1) dirs >~103° off the chosen
+face's axis hit the `m<=0` guard in `EnvCube_DirToUVOnFace` and collapsed to
+the FACE CENTER (0.5,0.5), smearing whole facades toward one texel; (2) dirs
+past the padded window hard-clamped, flat-lining interpolation. Baked faces
+verified clean (grid dump) — lookup-side only.
+
+**Fix: hybrid fallback.** `EnvCube_DirToUVOnFace` now returns in-window
+validity (backface or |tangent|>pad → false). Transform uses the cube face
+only when ALL THREE vertex dirs project inside the padded window — the
+common case (distant/moderate facades, sharp + trig-free). Otherwise the
+triangle falls back to the legacy equirect formula (incl. U-wrap) sampling
+`TriMesh::EnvFallbackPano` — a 512² pano synthesized AT INIT from the same
+padded faces by inverting the exact lookup formulas (no extra render, no
+extra cache, conventions locked by construction).
+
+Validated: user pose t=124 clean (streaks gone, content coherent); ±150-unit
+dolly along view fwd — smooth parallax, no snapping; flag-off pin still
+byte-identical; gates 3/3 both states; bench 75.4 ms/iter (still ≤ equirect).
+
 ## Deviations
 
 - **Separate cache FILE, not just a salted key** (slice C): the cache is a

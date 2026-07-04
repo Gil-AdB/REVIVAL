@@ -102,17 +102,32 @@ inline int EnvCube_SelectFace(float dx, float dy, float dz) {
 // face once per triangle (from the centroid) then projects all three vertex
 // dirs onto THAT face: dirs straddling into the padded ring land at u,v beyond
 // the nominal ±1 window (still valid content), clamp beyond. u,v in [0,1).
-inline void EnvCube_DirToUVOnFace(int face, float dx, float dy, float dz,
+//
+// Returns false when the direction has NO valid projection on this face:
+// backfacing (m ≤ 0 — gnomonic projection through the center, u/v would be
+// the antipode) or outside the padded window (|tangent| > pad — the clamp
+// would flat-line the UV and smear interpolation across the triangle). The
+// caller must then take the wide-span fallback for the WHOLE triangle; the
+// u,v written in that case are the clamped best-effort (diagnostic only).
+// The original slice-C cut returned void and mapped backfacing dirs to the
+// face CENTER (inv=0 → 0.5,0.5) — on close-up city towers, whose reflected
+// dirs routinely exceed 90° off the centroid face, every such vertex
+// collapsed to one texel and entire facades smeared toward it (the
+// "wrong mapping, changes when moving" bug).
+inline bool EnvCube_DirToUVOnFace(int face, float dx, float dy, float dz,
                                   float& u, float& v) {
     const EnvCubeBasisT& B = EnvCube_Basis(face);
     const float a = dx * B.right[0] + dy * B.right[1] + dz * B.right[2];
     const float b = dx * B.up[0]    + dy * B.up[1]    + dz * B.up[2];
     const float m = dx * B.fwd[0]   + dy * B.fwd[1]   + dz * B.fwd[2];
-    const float inv = (m > 1e-20f) ? (1.0f / m) : 0.0f;
-    u = 0.5f + (0.5f * kEnvCubeInvPad) * (a * inv);
-    v = 0.5f - (0.5f * kEnvCubeInvPad) * (b * inv);
+    if (m <= 1e-20f) { u = 0.5f; v = 0.5f; return false; }
+    const float inv = 1.0f / m;
+    const float ta = a * inv, tb = b * inv;
+    u = 0.5f + (0.5f * kEnvCubeInvPad) * ta;
+    v = 0.5f - (0.5f * kEnvCubeInvPad) * tb;
     if (u < 0.0f) u = 0.0f; else if (u > 0.99999994f) u = 0.99999994f;
     if (v < 0.0f) v = 0.0f; else if (v > 0.99999994f) v = 0.99999994f;
+    return std::fabs(ta) <= kEnvCubePad && std::fabs(tb) <= kEnvCubePad;
 }
 
 // face + UV in [0,1] → unit direction. Exact algebraic inverse of
