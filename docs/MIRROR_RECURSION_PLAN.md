@@ -1,0 +1,94 @@
+# Recursive mirror reflection — campaign plan
+
+Goal: reflections that resolve to arbitrary depth N, so a mirror seen in a
+mirror seen in a mirror … renders correctly. Motivating + validation scene:
+`--scene-cloaktest` (the 4-mirror periscope cloak), whose see-through needs
+**4 reflection bounces** and today renders as a patchwork with black holes.
+
+## Where we are (order ≤ 2)
+
+Two mechanisms, in `FDS/RENDER/GreetsMirror.cpp`:
+
+1. **Order-1 = geometry clones.** `BuildMirror` clones every other mesh with
+   world positions reflected across the mirror plane (winding swapped), plus
+   reflected omnis. The main deferred pass draws the clones, masked to the
+   mirror's screen footprint via `gb.mirrorId == mirrorTag` (Mekalele).
+2. **Order-2 = RTT slots.** `PrepareSecondOrderMirrorRtt` builds a slot per
+   ordered pair (A,B): the faces are *A's clones of B's panel*, retargeted to
+   a material whose texture `RenderSecondOrderMirrors` re-renders each frame
+   from the **doubly-reflected** virtual camera.
+
+**The hard cap** (GreetsMirror.cpp ~2588): the RTT render *hides every clone
+mesh* ("the RTT view must show the REAL scene only"), so inside a mirror's
+texture there are no further reflections. Order-2 is the ceiling, and even
+that only for the specific A→B panel pairs the slot generator enumerates.
+Depth-3 would need A's clone of (B's clone of C's panel) — a clone-of-clone
+that doesn't exist (clones are one level); compound cloning was rejected
+(see [[mirror-order2-rtt-plan]]).
+
+## Chosen approach: recursive portal render
+
+Replace the fixed order-1/order-2 split with one recursive reflected-view
+renderer, standard planar-mirror recursion:
+
+```
+renderReflected(camera, depth):
+    render scene from `camera` into the current target (its footprint region)
+    if depth == 0: return
+    for each mirror M visible in this view:
+        vcam = reflect(camera) across M.plane
+        set scissor/stencil to M's screen footprint in this target
+        renderReflected(vcam, depth-1)
+        composite (half-silvered: text + reflection/2 for glass panels)
+```
+
+The main frame is `renderReflected(mainCam, N)`. Each level clips to the
+parent mirror's footprint (stencil or scissor + per-pixel mirrorId mask,
+which we already compute). Reflected-view culling reuses
+`g_offAxisFrustumCull` (asymmetric frusta) and the `SetCurrentScene`
+re-stamp discipline the RTT path already established.
+
+Why not extend slots: slot sequences up to length N explode combinatorially
+(4 mirrors, depth 4 → 256 slots) and the clone-of-clone geometry doesn't
+exist. A recursive render is O(mirrors^depth) *only for visible* mirrors,
+prunes naturally by footprint, and needs no precomputed geometry.
+
+## Slices
+
+- **Slice 0 (this commit): foundation.** `--mirror-recurse-depth=N` flag
+  (`FDS_MIRROR_RECURSE_DEPTH`, default 0 = current behavior). Plan doc.
+  cloaktest G-key pose dump already in for break-pose capture.
+- **Slice 1: single-mirror recursion.** One reflected-view render into a
+  mirror footprint via the existing OffscreenViewScope + a screen-rect
+  scissor, recursing `depth` times straight down (ignore multiple mirrors
+  per view first). Validate: a mirror-facing-a-mirror shows the tunnel to
+  depth N. Test scene: two parallel facing mirrors (add to mirrortest).
+- **Slice 2: multiple mirrors per view.** Loop over all mirrors visible in
+  each reflected view; per-mirror scissor. Validate on cloaktest: the black
+  hole fills at depth 2, more at 3, and the bg pillar appears at depth 4.
+- **Slice 3: perf + budget.** Depth/footprint budget (stop recursing when a
+  mirror's footprint < K px), reuse the RTT texture pool, measure. Wire the
+  half-silvered composite through the recursion.
+- **Slice 4: fold order-1/2 into the recursive path** (or keep clones for
+  depth-1 as the measured-faster base and recurse only ≥2 — decide by perf).
+
+## Validation harness
+
+- `--scene-cloaktest` + `FDS_CLOAK_DUMP=1`: pose dump. Metrics: viewer-pose
+  green(bg) px should rise with depth; hero-red stays 0; central-band black
+  px should fall. `FDS_CLOAK_NOMIRROR=1` = geometry ground truth.
+- `tools/render_gate.sh` mirrortest golden must stay byte-identical at
+  depth=0 (the flag off is the gate).
+- G key (cloaktest interactive) prints `Pose{}` lines for break cases.
+
+## Hard-won facts to respect (from the order-2 work)
+
+- Writing `Sc->NZP` alone never moves the near plane — re-stamp via
+  `SetCurrentScene` (OffscreenViewScope.setNearZ does this).
+- Mesh frustum cull is symmetric-only; off-axis reflected frusta need
+  `g_offAxisFrustumCull`.
+- Face U1..V3 are authoritative; re-stamp with `uvFromVertices()` after
+  poking verts.
+- `g_engineSurfaceMutex` is non-reentrant; nested offscreen renders must not
+  relock it (gate on `g_offscreenViewDepth`). Recursion needs a depth-aware
+  scope, not N nested locks.
