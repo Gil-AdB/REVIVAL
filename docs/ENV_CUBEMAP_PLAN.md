@@ -348,18 +348,37 @@ the FACE CENTER (0.5,0.5), smearing whole facades toward one texel; (2) dirs
 past the padded window hard-clamped, flat-lining interpolation. Baked faces
 verified clean (grid dump) — lookup-side only.
 
-**Fix: hybrid fallback.** `EnvCube_DirToUVOnFace` now returns in-window
-validity (backface or |tangent|>pad → false). Transform uses the cube face
-only when ALL THREE vertex dirs project inside the padded window — the
-common case (distant/moderate facades, sharp + trig-free). Otherwise the
-triangle falls back to the legacy equirect formula (incl. U-wrap) sampling
-`TriMesh::EnvFallbackPano` — a 512² pano synthesized AT INIT from the same
-padded faces by inverting the exact lookup formulas (no extra render, no
-extra cache, conventions locked by construction).
+**Fix v1 (hybrid fallback — superseded):** cube face when all 3 vertex dirs
+fit the padded window, else per-triangle fallback to an equirect pano. Fixed
+the smear but still POPPED: the cube/fallback decision and the face pick are
+camera-dependent, so triangles swapped charts discretely while moving, and
+neighboring quads could disagree ("still jumping").
 
-Validated: user pose t=124 clean (streaks gone, content coherent); ±150-unit
-dolly along view fwd — smooth parallax, no snapping; flag-off pin still
-byte-identical; gates 3/3 both states; bench 75.4 ms/iter (still ≤ equirect).
+**Fix v2 (landed): static paraboloid hemisphere sheets.** The chart choice
+must not depend on the camera. Per building, six PARABOLOID sheets
+(`uv=(a,b)/(1+m)`, one divide, no trig — EnvCube_DirToParaboloidUV), each
+covering the full hemisphere about one axis, synthesized at init from the
+padded cube faces via a precomputed building-independent gather table (no
+extra render, no extra cache). Transform binds each reflective triangle to
+the sheet of its PANEL NORMAL's dominant axis (viewer-side-corrected) —
+static for static geometry. Every physically possible reflected ray off a
+panel lies in that normal's hemisphere, so one chart always suffices: no
+fallback, no clamp threshold, no U-wrap, and coplanar quads share exact UVs.
+The gnomonic per-triangle path (`EnvCube_DirToUVOnFace`) and
+`TriMesh::EnvCubeFaces`/`EnvFallbackPano` were replaced by
+`TriMesh::EnvHemiSheets[6]`.
+
+Trade: sheet sharpness ~2.8 px/deg (≈ a CORRECT 1024 equirect; the legacy
+bake's actual output was zoom-bugged below that) vs the gnomonic faces'
+5.0 — temporal stability bought with some sharpness. The exact endgame, if
+ever wanted: per-PIXEL env for city windows through the deferred kernel's
+cube path (slice B) — no interpolation at all + parallax correction.
+
+Validated: user pose t=124 + ±60/±150 dolly — coherent, smooth tracking;
+2-unit micro-dolly frame delta 30.3k px (mean 3.47) vs legacy equirect's
+36.2k px (mean 3.77) at the same pose — temporally MORE stable than legacy;
+flag-off pin byte-identical; gates 3/3 both states; bench 73.8 ms/iter
+(best measurement yet, still ≤ equirect's ~76).
 
 ## Deviations
 

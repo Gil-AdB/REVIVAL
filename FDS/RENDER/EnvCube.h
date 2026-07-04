@@ -130,6 +130,52 @@ inline bool EnvCube_DirToUVOnFace(int face, float dx, float dy, float dz,
     return std::fabs(ta) <= kEnvCubePad && std::fabs(tb) <= kEnvCubePad;
 }
 
+// ── Paraboloid hemisphere sheets (forward per-vertex path) ────────────────
+// A gnomonic face can never cover the reflected-ray range of a planar mirror
+// (a full hemisphere about the panel normal), so any camera-dependent chart
+// choice pops when the choice flips (the "still jumping" bug of the hybrid
+// cube/equirect fallback). A paraboloid sheet DOES cover a hemisphere in one
+// chart at the same cost class (one divide, no trig):  uv = (a,b)/(1+m),
+// with (a,b,m) the dir in the sheet basis. The forward path binds the sheet
+// to the PANEL NORMAL's dominant axis — static for static geometry — so the
+// chart NEVER changes with the camera and coplanar quads share exact UVs:
+// nothing is left to jump. Rim (m→0) maps to the unit disc edge; content
+// slightly beyond the hemisphere lands in the square's corners.
+
+// dir → sheet UV in [0,1). `face` is the sheet axis (EnvCube_Basis order).
+// Continuous over the whole sphere except near the antipode (denom clamp).
+inline void EnvCube_DirToParaboloidUV(int face, float dx, float dy, float dz,
+                                      float& u, float& v) {
+    const EnvCubeBasisT& B = EnvCube_Basis(face);
+    const float a = dx * B.right[0] + dy * B.right[1] + dz * B.right[2];
+    const float b = dx * B.up[0]    + dy * B.up[1]    + dz * B.up[2];
+    const float m = dx * B.fwd[0]   + dy * B.fwd[1]   + dz * B.fwd[2];
+    float denom = 1.0f + m;
+    if (denom < 0.05f) denom = 0.05f;      // antipode guard (can't occur for
+    const float inv = 1.0f / denom;        // reflections off the bound panel)
+    u = 0.5f + 0.5f * (a * inv);
+    v = 0.5f - 0.5f * (b * inv);
+    if (u < 0.0f) u = 0.0f; else if (u > 0.99999994f) u = 0.99999994f;
+    if (v < 0.0f) v = 0.0f; else if (v > 0.99999994f) v = 0.99999994f;
+}
+
+// Exact inverse (unit dir, algebraically normalized):
+//   r² = pa²+pb²,  m = (1−r²)/(1+r²),  (a,b) = (1+m)·(pa,pb).
+// Used by the init-time sheet synthesis from the padded cube faces.
+inline void EnvCube_ParaboloidUVToDir(int face, float u, float v,
+                                      float& dx, float& dy, float& dz) {
+    const float pa = (u - 0.5f) * 2.0f;
+    const float pb = (0.5f - v) * 2.0f;
+    const float r2 = pa * pa + pb * pb;
+    const float m  = (1.0f - r2) / (1.0f + r2);
+    const float s  = 1.0f + m;
+    const float a = s * pa, b = s * pb;
+    const EnvCubeBasisT& B = EnvCube_Basis(face);
+    dx = a * B.right[0] + b * B.up[0] + m * B.fwd[0];
+    dy = a * B.right[1] + b * B.up[1] + m * B.fwd[1];
+    dz = a * B.right[2] + b * B.up[2] + m * B.fwd[2];
+}
+
 // face + UV in [0,1] → unit direction. Exact algebraic inverse of
 // DirToFaceUV within the padded window; used by the bake (per-texel inverse)
 // and diagnostics. In the padded ring / overhang region the returned dir may

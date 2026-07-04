@@ -47,20 +47,16 @@ struct TriMesh
     float            BSphereRad     = 0.0f; // Bounding Sphere Radius, squared. kept for backward compatibility until pipeline code is updated
     DWord            Flags          = 0;
 
-    // env_cube (forward reflective path): six padded cube-face reflection
-    // textures for this mesh (Sachletz-tiled, pow2). Populated by CITY's
-    // per-building bake when --env_cube is on; Transform's Face_Reflective
-    // block picks ONE face per triangle (centroid dominant axis) and stamps
-    // F->ReflectionTexture = EnvCubeFaces[k]. Null (default) → the legacy
+    // env_cube (forward reflective path): six PARABOLOID hemisphere sheets
+    // (Sachletz-tiled, pow2), one per axis direction, synthesized at init
+    // from the padded cube-face bake. Transform's Face_Reflective block
+    // binds each triangle to the sheet of its PANEL NORMAL's dominant axis
+    // — static for static geometry, so the chart never changes with the
+    // camera (the camera-dependent cube-face pick + wide-span fallback both
+    // popped as charts flipped while moving). Null (default) → the legacy
     // equirect F->ReflectionTexture path runs unchanged. See RENDER/EnvCube.h.
-    Texture         *EnvCubeFaces[6] = { nullptr, nullptr, nullptr,
-                                         nullptr, nullptr, nullptr };
-    // Wide-span fallback for the cube path: an equirect pano (synthesized at
-    // init from the padded faces — no extra render) that Transform swaps in
-    // for triangles whose vertex reflection dirs BACKFACE or OVERHANG the
-    // selected face's padded window; per-triangle gnomonic UVs would clamp /
-    // collapse there and smear the interpolation (close-up city towers).
-    Texture         *EnvFallbackPano = nullptr;
+    Texture         *EnvHemiSheets[6] = { nullptr, nullptr, nullptr,
+                                          nullptr, nullptr, nullptr };
 
     // Per-shadow-bake-call cache. Written SERIALLY by Render_Deferred-
     // ShadowMaps' prime pass before it enqueues the parallel per-face

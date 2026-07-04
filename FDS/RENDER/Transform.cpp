@@ -1548,54 +1548,36 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 				}
 				auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
 				Vector_Norm(&n);
-				if (fds::FeatureFlags::env_cube() && T->EnvCubeFaces[0]) {
-					// env_cube: pick ONE cube face per TRIANGLE from the
-					// centroid reflected dir (dominant axis, trig-free), then
-					// project all three vertex dirs gnomonically onto THAT
-					// face. Per-triangle face spanning lands in the padded
-					// ring (D2) — no U-wrap hack, no per-vertex face check,
-					// no trig. Stamp the chosen face's texture for the filler.
-					// Kept OUT of the equirect else-branch below so that path
-					// stays byte-identical (verbatim) when the flag is off.
-					Vector d3[3];
+				if (fds::FeatureFlags::env_cube() && T->EnvHemiSheets[0]) {
+					// env_cube: paraboloid hemisphere sheet bound to the
+					// PANEL NORMAL's dominant axis — STATIC for static
+					// geometry, so the chart never flips with camera motion
+					// (a camera-dependent chart choice pops the frame it
+					// changes; that was the close-up "jumping"). Every
+					// physically possible reflected ray off this panel lies
+					// in the viewer-side normal's hemisphere, which the
+					// sheet covers in ONE chart: no fallback, no clamp
+					// threshold, no U-wrap. One divide per vertex, no trig.
+					// Kept OUT of the equirect else-branch below so that
+					// path stays byte-identical when the flag is off.
+					//
+					// Viewer-side normal: `n` comes from the winding and can
+					// point either way; reflected dirs satisfy d·n_view > 0,
+					// so flip n to the side the camera is on before the
+					// sheet pick (one dot against the first incident ray).
+					const Vector w0 = wsPos[0] - cv;
+					const float nSide =
+						(w0.x*n.x + w0.y*n.y + w0.z*n.z) > 0.0f ? -1.0f : 1.0f;
+					const int k = fds::EnvCube_SelectFace(
+						nSide * n.x, nSide * n.y, nSide * n.z);
 					for (i = 0; i < 3; ++i) {
 						auto d = wsPos[i] - cv;
 						d -= (d * n) * 2.0f * n;
 						Vector_Norm(&d);
-						d3[i] = d;
+						fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z,
+						                               eu[i], ev[i]);
 					}
-					const int k = fds::EnvCube_SelectFace(
-						d3[0].x + d3[1].x + d3[2].x,
-						d3[0].y + d3[1].y + d3[2].y,
-						d3[0].z + d3[1].z + d3[2].z);
-					bool inWindow = true;
-					for (int j = 0; j < 3; ++j)
-						inWindow &= fds::EnvCube_DirToUVOnFace(
-							k, d3[j].x, d3[j].y, d3[j].z, eu[j], ev[j]);
-					if (inWindow) {
-						F->ReflectionTexture = T->EnvCubeFaces[k];
-					} else {
-						// Wide-span triangle: a vertex dir backfaces or
-						// overhangs the padded window — gnomonic UVs would
-						// clamp/collapse and smear the whole triangle (the
-						// close-up-tower artifact). Equirect handles any
-						// span; sample the fallback pano synthesized from
-						// these same faces. Same math as the legacy branch
-						// below (incl. the U-wrap), only the texture differs.
-						for (int j = 0; j < 3; ++j) {
-							const float lat = asin_approx(d3[j].y);
-							const float lon = atan2_approx(-d3[j].z, -d3[j].x);
-							eu[j] = 0.5 + 0.5 * (lon + PI / 2.0) / PI;
-							ev[j] = 0.5 - 0.5 * lat / (PI / 2.0);
-						}
-						if (std::max({ eu[0], eu[1], eu[2] })
-						    - std::min({ eu[0], eu[1], eu[2] }) > 0.8) {
-							for (int j = 0; j < 3; ++j)
-								if (eu[j] < 0.5) eu[j] += 1;
-						}
-						F->ReflectionTexture = T->EnvFallbackPano
-							? T->EnvFallbackPano : T->EnvCubeFaces[k];
-					}
+					F->ReflectionTexture = T->EnvHemiSheets[k];
 				} else {
 				i = 0;
 				for (Vertex* v : { F->A, F->B, F->C }) {

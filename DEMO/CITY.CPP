@@ -2123,56 +2123,54 @@ void Initialize_City()
 					CITY_CUBE_FACE_RES, 6 * CITY_CUBE_FACE_RES, buildings, kCubeCacheFile);
 			}
 		}
-		// Materialize each of the six faces → TriMesh::EnvCubeFaces, plus a
-		// 512² equirect fallback pano SYNTHESIZED from the same raw faces (no
-		// extra render, no extra cache — content-consistent by construction).
-		// Transform's Face_Reflective block picks the face per triangle and
-		// swaps to the pano for wide-span triangles (backface/overhang of the
-		// padded window), where gnomonic UVs would clamp and smear.
-		// Obj->Reflection = the pano material (non-null marker for the
-		// window-stamp loop, and the initial F->ReflectionTexture it stamps
-		// is a valid full-sphere map until Transform's first per-frame pick).
-		constexpr int kFbPanoRes = 512;
-		std::vector<uint32_t> fbPano(size_t(kFbPanoRes) * kFbPanoRes);
-		for (auto& b : buildings) {
-			if (b.rawPanorama.size() != faceBytes) continue;
-			TriMesh* T = (TriMesh*)b.obj->Data;
-			const uint8_t* base = b.rawPanorama.data();
-			for (int k = 0; k < 6; ++k) {
-				Material* fm = Materialize(
-					(void*)(base + size_t(k) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES * 4),
-					CITY_CUBE_FACE_RES, CITY_CUBE_FACE_RES);
-				T->EnvCubeFaces[k] = fm->Txtr;
-			}
-			// Equirect synth: invert the EXACT lookup formulas Transform's
-			// fallback uses (eu = 0.5 + 0.5(lon + π/2)/π with lon =
-			// atan2(-z,-x); ev = 0.5 - 0.5·lat/(π/2) with lat = asin(y)),
-			// then sample the padded faces along that dir. Conventions can't
-			// drift: both ends are the same two functions.
-			const uint32_t* faces32 = (const uint32_t*)base;
-			for (int py = 0; py < kFbPanoRes; ++py) {
-				const float ev = (float(py) + 0.5f) / float(kFbPanoRes);
-				const float lat = (0.5f - ev) * PI;                 // asin(y) inverse
-				const float dy = std::sin(lat), c = std::cos(lat);
-				for (int px = 0; px < kFbPanoRes; ++px) {
-					const float eu = (float(px) + 0.5f) / float(kFbPanoRes);
-					const float lon = (eu - 0.5f) * 2.0f * PI - PI * 0.5f;
-					const float dx = -std::cos(lon) * c;
-					const float dz = -std::sin(lon) * c;
-					int face; float fu, fv;
-					fds::EnvCube_DirToFaceUV(dx, dy, dz, face, fu, fv);
-					const int sx = int(fu * CITY_CUBE_FACE_RES);
-					const int sy = int(fv * CITY_CUBE_FACE_RES);
-					fbPano[size_t(py) * kFbPanoRes + px] = faces32[
-						size_t(face) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES
-						+ size_t(sy) * CITY_CUBE_FACE_RES + sx];
+		// Synthesize six PARABOLOID hemisphere sheets per building from the
+		// raw padded faces (no extra render, no extra cache) and Materialize
+		// them into TriMesh::EnvHemiSheets. Transform binds each reflective
+		// triangle to the sheet of its panel normal's dominant axis — a
+		// STATIC choice, so reflections never pop as the camera moves (the
+		// gnomonic per-triangle face pick + wide-span fallback both flipped
+		// charts with the view and visibly jumped). Per sheet texel:
+		// paraboloid-inverse → world dir → padded-face lookup — the same
+		// EnvCube helpers Transform samples with, so conventions can't drift.
+		// The (sheet, texel)→(face, src-texel) map is building-independent;
+		// precompute it once and reuse as a gather table for all 71.
+		constexpr int kSheetRes = 512;
+		{
+			std::vector<uint32_t> sheetGather(size_t(6) * kSheetRes * kSheetRes);
+			for (int k = 0; k < 6; ++k)
+				for (int py = 0; py < kSheetRes; ++py)
+					for (int px = 0; px < kSheetRes; ++px) {
+						const float su = (float(px) + 0.5f) / float(kSheetRes);
+						const float sv = (float(py) + 0.5f) / float(kSheetRes);
+						float dx, dy, dz;
+						fds::EnvCube_ParaboloidUVToDir(k, su, sv, dx, dy, dz);
+						int face; float fu, fv;
+						fds::EnvCube_DirToFaceUV(dx, dy, dz, face, fu, fv);
+						sheetGather[(size_t(k) * kSheetRes + py) * kSheetRes + px] =
+							uint32_t(face) * CITY_CUBE_FACE_RES * CITY_CUBE_FACE_RES
+							+ uint32_t(fv * CITY_CUBE_FACE_RES) * CITY_CUBE_FACE_RES
+							+ uint32_t(fu * CITY_CUBE_FACE_RES);
+					}
+			std::vector<uint32_t> sheet(size_t(kSheetRes) * kSheetRes);
+			for (auto& b : buildings) {
+				if (b.rawPanorama.size() != faceBytes) continue;
+				TriMesh* T = (TriMesh*)b.obj->Data;
+				const uint32_t* faces32 = (const uint32_t*)b.rawPanorama.data();
+				for (int k = 0; k < 6; ++k) {
+					const uint32_t* g =
+						&sheetGather[size_t(k) * kSheetRes * kSheetRes];
+					for (size_t t = 0; t < sheet.size(); ++t)
+						sheet[t] = faces32[g[t]];
+					Material* sm = Materialize(sheet.data(), kSheetRes, kSheetRes);
+					T->EnvHemiSheets[k] = sm->Txtr;
+					// Non-null marker for the window-stamp loop below; the
+					// texture it stamps is overwritten by Transform's
+					// per-triangle sheet pick on the first frame.
+					if (k == 0) b.obj->Reflection = sm;
 				}
+				b.rawPanorama.clear();
+				b.rawPanorama.shrink_to_fit();
 			}
-			Material* pm = Materialize(fbPano.data(), kFbPanoRes, kFbPanoRes);
-			T->EnvFallbackPano = pm->Txtr;
-			b.obj->Reflection = pm;
-			b.rawPanorama.clear();
-			b.rawPanorama.shrink_to_fit();
 		}
 	} else {
 	const bool envCacheEnabled = !skipCubeMap && fds::FeatureFlags::city_envmap_cache();
