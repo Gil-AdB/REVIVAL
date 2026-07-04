@@ -97,12 +97,13 @@ void addVCorner(fds::scene_builder::SceneBuilder &b, const char *prefix,
     for (auto &ar : arms) {
         const float a = ar.a * 3.14159265f / 180.0f;
         const float ex = vx + arm * std::cos(a), ez = vz + arm * std::sin(a);
-        // Order (R,L) so addWall normal (zR-zL, xL-xR) dots + with bisector.
-        // Try R=vertex,L=end: n=(vz-ez, ex-vx).
+        // Order (R,L) so the mirror normal faces AWAY from the bisector
+        // (outward / convex side) — flipped from the opening-facing default.
+        // n(R=vertex) = (vz-ez, ex-vx).
         float nx = vz - ez, nz = ex - vx;
         char nm[64];
         std::snprintf(nm, sizeof nm, "%s%s", prefix, ar.suf);
-        if (nx * ndx + nz * ndz >= 0.0f)
+        if (nx * ndx + nz * ndz < 0.0f)
             addMirror2(b, nm, vx, vz, ex, ez, h, ar.m, back);   // R=vertex
         else
             addMirror2(b, nm, ex, ez, vx, vz, h, ar.m, back);   // R=end
