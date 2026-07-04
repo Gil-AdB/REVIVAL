@@ -74,7 +74,7 @@ void addVCorner(fds::scene_builder::SceneBuilder &b, const char *prefix,
     const float br = openDeg * 3.14159265f / 180.0f;
     const float ndx = std::cos(br), ndz = std::sin(br);   // bisector (opening dir)
     const float sgn = mirrorInner ? 1.0f : -1.0f;         // mirror faces sgn*bisector
-    const float gap = 0.06f;                              // opaque back set-back
+    const float gap = 0.08f;                              // opaque back set-back (mirror thickness)
     Material *mir[2] = { mirA, mirB };
     const char *suf[2] = { "_a", "_b" };
     float ex[2], ez[2], nx[2], nz[2];  // arm ends + unit front normals
@@ -100,7 +100,14 @@ void addVCorner(fds::scene_builder::SceneBuilder &b, const char *prefix,
     for (int i = 0; i < 2; ++i) {
         const float ebx = ex[i] - nx[i]*gap, ebz = ez[i] - nz[i]*gap;
         char nm[64]; std::snprintf(nm, sizeof nm, "%s%s_back", prefix, suf[i]);
-        addWall(b, nm, ebx, ebz, vbx, vbz, h, back);   // reversed vs front → back-facing
+        // DOUBLE-SIDED: two coincident quads, opposite windings. A single-
+        // sided back is culled at grazing/behind angles, letting the mirror
+        // FRONT show through black from behind (the "disappearing back"
+        // poses). Both windings guarantee the back always occludes the
+        // mirror face from its back side, at any view angle.
+        addWall(b, nm, ebx, ebz, vbx, vbz, h, back);
+        char nm2[64]; std::snprintf(nm2, sizeof nm2, "%s%s_back2", prefix, suf[i]);
+        addWall(b, nm2, vbx, vbz, ebx, ebz, h, back);
     }
 }
 
@@ -294,6 +301,11 @@ void Run_CloakTest() {
         // hidden); probe2 = mirror-face intersection.
         { Vector(1.70f,2.50f,11.65f), Vector(-8.30f,2.50f,11.84f), "probe1" },
         { Vector(3.56f,9.70f,11.62f), Vector(-0.56f,0.59f,11.69f), "probe2" },
+        // "mirror back side disappearing" poses:
+        { Vector(8.11f,3.82f,0.43f),   Vector(3.98f,3.33f,9.52f),  "back1" },
+        { Vector(11.70f,3.82f,10.64f), Vector(1.71f,3.33f,10.33f), "back2" },
+        { Vector(-2.18f,3.56f,22.16f), Vector(-3.16f,3.07f,12.22f), "back3" },
+        { Vector(2.36f,3.56f,15.80f),  Vector(-6.62f,3.07f,11.43f), "back4" },
     };
     for (const Pose &p : poses) {
         char path[64];
