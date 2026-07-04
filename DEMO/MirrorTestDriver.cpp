@@ -3,6 +3,7 @@
 #include "FrameProfiler.h"
 #include <RENDER/GreetsMirror.h>
 #include <RENDER/MirrorShatter.h>
+#include <RENDER/SpotlightCones.h>   // MakeSpotLight — cone regression coverage
 #include "Rev.h"
 #include "SceneBuilder.h"
 #include "SceneTick.h"
@@ -177,6 +178,23 @@ Scene *BuildInteractiveMirrorTestScene(fds::MirrorShatter &shatter) {
     b.AddOmni(Vector(-2.0f, 5.0f, -1.0f),
               {255.0f, 240.0f, 220.0f, 255.0f},
               /*intensity=*/2.0f, /*range=*/30.0f);
+
+    // FDS_MIRRORTEST_SPOT=1: add a forced-cone spotlight aimed at the back
+    // wall so its volumetric beam appears in the second-order RTT
+    // reflection. This is the regression coverage for the
+    // --mirror-rtt-parallel doubly-reflected-cone bug (tileChunkSphere
+    // reading the projection globals): the beam in the RTT reflection is
+    // exactly what the buggy cone cull mis-culled. Env-gated so the default
+    // mirrortest golden (no cone) is untouched. Force-cone so it renders
+    // without a scene-wide --draw_cones.
+    if (std::getenv("FDS_MIRRORTEST_SPOT")) {
+        Omni *sp = fds::MakeSpotLight(b.scene(),
+            255.0f, 220.0f, 255.0f, /*intensity=*/3.0f, /*range=*/30.0f,
+            Vector(-1.5f, 4.5f, -1.0f), Vector(0.3f, -0.4f, 1.0f),
+            /*hotInnerDeg=*/8.0f, /*fallOuterDeg=*/16.0f,
+            /*shadowMapRes=*/0, /*castsShadow=*/false);
+        if (sp) sp->Flags |= Omni_ForceVolCone;   // render the cone even without --draw_cones
+    }
 
     // Starting camera looking at the mirror panel.
     b.SetCamera(Vector(-3.5f, 3.0f, -3.0f),

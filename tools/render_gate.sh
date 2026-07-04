@@ -56,8 +56,27 @@ run_halo() {
   ./DEMO --snapshot=halotest --out="$OUT" --deferred --omni_halo_strength=0.5 >/dev/null 2>&1
   md5_of "$OUT"/halotest_*.ppm
 }
+# INVARIANT (not a fixed golden): the second-order mirror RTT must render
+# IDENTICALLY whether the deferred bakes run serially or fanned across the
+# pool (--mirror-rtt-parallel). Uses the FDS_MIRRORTEST_SPOT forced-cone
+# beam so the RTT reflection contains a volumetric cone — the exact case
+# the tileChunkSphere-reads-globals bug corrupted (serial worked by
+# accident; the fan used the main camera's projection → mis-culled spots).
+# Regression guard for commit 54a9d50.
+run_rtt_parallel_invariant() {
+  local ser par
+  rm -f /tmp/mt_view_*.ppm
+  FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest \
+    --mirror-rtt --shard-deferred --hdr >/dev/null 2>&1
+  ser=$(md5_of /tmp/mt_view_*.ppm)
+  rm -f /tmp/mt_view_*.ppm
+  FDS_MIRRORTEST_SPOT=1 FDS_MIRRORTEST_MULTI_DUMP=1 ./DEMO --scene-mirrortest \
+    --mirror-rtt --shard-deferred --hdr --mirror-rtt-parallel >/dev/null 2>&1
+  par=$(md5_of /tmp/mt_view_*.ppm)
+  [ "$ser" = "$par" ] && echo "MATCH" || echo "MISMATCH(ser=$ser par=$par)"
+}
 
-M=$(run_mirror); C=$(run_cone); H=$(run_halo)
+M=$(run_mirror); C=$(run_cone); H=$(run_halo); RTTP=$(run_rtt_parallel_invariant)
 
 if [ "${1:-}" = "--update" ]; then
   echo "mirrortest: $M"
@@ -75,5 +94,6 @@ echo "render gate:"
 chk mirrortest "$M" "$BASE_MIRROR"
 chk conetest   "$C" "$BASE_CONE"
 chk halotest   "$H" "$BASE_HALO"
+chk rtt-parallel "$RTTP" "MATCH"
 [ $rc -eq 0 ] && echo "ALL PASS" || echo "GATE FAILED"
 exit $rc
