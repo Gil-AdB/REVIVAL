@@ -68,11 +68,21 @@ that first-order RTT already uses), recursion-driven.
 - **Slice 0 (this commit): foundation.** `--mirror-recurse-depth=N` flag
   (`FDS_MIRROR_RECURSE_DEPTH`, default 0 = current behavior). Plan doc.
   cloaktest G-key pose dump already in for break-pose capture.
-- **Slice 1: single-mirror recursion.** One reflected-view render into a
-  mirror footprint via the existing OffscreenViewScope + a screen-rect
-  scissor, recursing `depth` times straight down (ignore multiple mirrors
-  per view first). Validate: a mirror-facing-a-mirror shows the tunnel to
-  depth N. Test scene: two parallel facing mirrors (add to mirrortest).
+- **Slice 1a (done, 3502dbb): `MirrorReflectedCamera` primitive** — reflected
+  eye + reflected basis (det=-1 → render with inverted back-face cull).
+- **Design decision:** use the **reflected-basis + cull-flip** portal (render
+  the real scene from `MirrorReflectedCamera`, invert cull, clip to the
+  mirror's screen footprint via the existing per-pixel `gb.mirrorId` mask),
+  NOT the existing RTT's forward-basis + panel-window projection. The
+  reflected-basis form generalizes to any mirror seen at any angle and
+  composes recursively without per-panel window bookkeeping. (Watch: the
+  rasterizer cull sign — Mekalele/TheOtherBarry — must be flippable per pass.)
+- **Slice 1b: single-mirror recursion render.** For each mirror visible in a
+  view, render the `MirrorReflectedCamera` view to an offscreen target,
+  composite into the mirror's `gb.mirrorId` pixels, recurse `depth`. Ignore
+  multiple-mirrors-per-view ordering first. Validate: two parallel facing
+  mirrors show the tunnel to depth N. **Needs interactive validation (G-key
+  poses) — the cloaktest dump only covers fixed angles.**
 - **Slice 2: multiple mirrors per view.** Loop over all mirrors visible in
   each reflected view; per-mirror scissor. Validate on cloaktest: the black
   hole fills at depth 2, more at 3, and the bg pillar appears at depth 4.
