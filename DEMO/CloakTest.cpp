@@ -158,8 +158,8 @@ CloakScene buildCloakScene() {
     // the left V's reflection. FIRST-DRAFT placement — tune from the
     // overhead view (FDS_CLOAK_DUMP writes /tmp/cloak_view_overhead.ppm).
     const float mh = 5.0f, arm = 4.0f;
-    addVCorner(b, "vL", -3.0f, 15.0f, 270.0f, arm, mh, mL_a, mL_b, backL);
-    addVCorner(b, "vR",  3.0f, 15.0f, 270.0f, arm, mh, mR_a, mR_b, backR);
+    addVCorner(b, "vL", -3.0f, 15.0f, 0.0f, arm, mh, mL_a, mL_b, backL);
+    addVCorner(b, "vR",  3.0f, 15.0f, 0.0f, arm, mh, mR_a, mR_b, backR);
 
     // Occluder: a z=5 wall (x 0.5..10, faces -z) hiding the RIGHT V from
     // the viewer while leaving the left V and the inter-V reflection open.
