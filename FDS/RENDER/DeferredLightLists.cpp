@@ -227,7 +227,11 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 		const char *e = std::getenv("FDS_CONTRIB_CULL_THR");
 		return (e && *e) ? float(std::atof(e)) : 0.0f;
 	}();
-	static TileChunkSphere chunk[DEFERRED_NUM_TILES];
+	// Per-call (NOT static): the parallel mirror-RTT fan calls this on
+	// several pool workers at once, each baking its own slot — a shared
+	// static chunk[] would be a cross-worker data race. 96×20B on the
+	// stack is free and it's fully overwritten every call anyway.
+	TileChunkSphere chunk[DEFERRED_NUM_TILES];
 	if (coneCull || sContribThr > 0.0f) {
 		for (int j = 0; j < numTilesY; ++j) {
 			for (int i = 0; i < numTilesX; ++i) {
@@ -235,7 +239,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 				chunk[idx] = tileChunkSphere(
 					float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
 					float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
-					tileLights[idx].zMin, tileLights[idx].zMax);
+					tileLights[idx].zMin, tileLights[idx].zMax,
+					cntrEX, cntrEY, fovX, fovY);
 			}
 		}
 	}
@@ -316,7 +321,8 @@ void buildTileLightLists(TileLights *tileLights, int numTilesX, int numTilesY,
 					const TileChunkSphere cs = tileChunkSphere(
 					    float(i * tileSizeX), float(std::min((i+1) * tileSizeX, xres)),
 					    float(j * tileSizeY), float(std::min((j+1) * tileSizeY, yres)),
-					    zLoC, zHiC);
+					    zLoC, zHiC,
+					    cntrEX, cntrEY, fovX, fovY);
 					if (cs.valid &&
 					    sphereOutsideCone(cs.cx, cs.cy, cs.cz, cs.R,
 					                      Lpx, Lpy, Lpz, Ldx, Ldy, Ldz,

@@ -1651,7 +1651,8 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                     const TileChunkSphere cs = tileChunkSphere(
                         float(i * tileSizeX), float(std::min((i+1) * tileSizeX, int(xres))),
                         float(j * tileSizeY), float(std::min((j+1) * tileSizeY, int(yres))),
-                        zLoC, zHiC);
+                        zLoC, zHiC,
+                        cntrEX, cntrEY, ctx.fovX, ctx.fovY);
                     if (cs.valid &&
                         sphereOutsideCone(cs.cx, cs.cy, cs.cz, cs.R,
                                           vx, vy, vz,

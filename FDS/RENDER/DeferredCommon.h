@@ -374,15 +374,25 @@ static inline bool sphereOutsideCone(float cx, float cy, float cz, float R,
 // Bounding sphere of a tile's view-space frustum chunk: the screen
 // rect [x0,x1]×[y0,y1] swept over depth [zLo,zHi].
 struct TileChunkSphere { float cx, cy, cz, R; bool valid; };
+// The projection (cntrEX/cntrEY/fovX/fovY) is passed EXPLICITLY, not read
+// from the FOVX/CntrEX globals: an offscreen pass (mirror RTT, shard bake)
+// renders with a per-context camera while the globals still hold the MAIN
+// camera's projection. Reading the globals here silently used the wrong
+// projection for the tile chunk sphere → the cone cull rejected the wrong
+// spots in RTT reflections (the --mirror-rtt-parallel doubly-reflected-
+// mirror-with-cones bug: serial happened to work only because it stamped
+// the globals from the RTT camera; the parallel fan never touches globals).
 static inline TileChunkSphere tileChunkSphere(float x0, float x1,
                                               float y0, float y1,
-                                              float zLo, float zHi)
+                                              float zLo, float zHi,
+                                              float cntrEX, float cntrEY,
+                                              float fovX, float fovY)
 {
 	TileChunkSphere t{0, 0, 0, 0, false};
 	if (!(zHi >= zLo) || zHi <= 0.0f) return t;
 	if (zLo < 0.05f) zLo = 0.05f;
-	const float xn0 = (x0 - CntrEX) / FOVX, xn1 = (x1 - CntrEX) / FOVX;
-	const float yn0 = (CntrEY - y1) / FOVY, yn1 = (CntrEY - y0) / FOVY;
+	const float xn0 = (x0 - cntrEX) / fovX, xn1 = (x1 - cntrEX) / fovX;
+	const float yn0 = (cntrEY - y1) / fovY, yn1 = (cntrEY - y0) / fovY;
 	float px[8], py[8], pz[8];
 	int n = 0;
 	for (float z : { zLo, zHi })
