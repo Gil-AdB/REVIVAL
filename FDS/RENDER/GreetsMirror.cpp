@@ -2405,6 +2405,20 @@ int PrepareSecondOrderMirrorRtt(Scene *sc, std::vector<Mirror> &mirrors,
 // to this pass — when no slot re-rendered, the next tick can skip it.
 int g_rttJobsLastFrame = 0;
 
+Camera MirrorReflectedCamera(const Camera &src, const Vector &N, float d)
+{
+    Camera out = src;                       // copy FOV, roll, splines, etc.
+    out.ISource = reflectPointAcross(src.ISource, N, d);
+    // Reflect each basis row (a direction). Reflection has det = -1, so the
+    // basis becomes left-handed — the caller renders with inverted cull.
+    for (int r = 0; r < 3; ++r) {
+        const Vector row{ src.Mat[r][0], src.Mat[r][1], src.Mat[r][2] };
+        const Vector rr = reflectDirAcross(row, N);
+        out.Mat[r][0] = rr.x; out.Mat[r][1] = rr.y; out.Mat[r][2] = rr.z;
+    }
+    return out;
+}
+
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots)
 {

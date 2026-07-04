@@ -33,6 +33,7 @@ struct Material;
 struct Object;
 struct Omni;
 struct Scene;
+struct Camera;
 struct TriMesh;
 struct Texture;
 struct Vertex;
@@ -315,6 +316,15 @@ extern int g_rttJobsLastFrame;
 
 void RenderSecondOrderMirrors(Scene *sc, std::vector<Mirror> &mirrors,
                               std::vector<MirrorRttSlot> &slots);
+
+// Recursion primitive (mirror-recursion campaign, docs/MIRROR_RECURSION_PLAN.md):
+// the virtual camera whose view of the REAL scene equals `src`'s view of the
+// reflection in the mirror plane (N·x + d = 0). Position is mirrored; the
+// basis is `src`'s basis with each row reflected across N — a det = -1
+// (left-handed) basis, so a view rendered with it is winding-flipped and MUST
+// be rasterized with inverted back-face culling (the reflection reverses
+// handedness). Forward = row 2, as everywhere in the engine.
+Camera MirrorReflectedCamera(const Camera &src, const Vector &N, float d);
 
 // Per-frame probe for second-order ("mirror in mirror") pairs, gated
 // by --mirror-rtt-probe. For each ordered pair (A, B) of ACTIVE base
