@@ -61,7 +61,7 @@ void VolProf_Tick();
 // Defined in LightmapBake.cpp.
 namespace fds { void Render_LightmapViz(struct Scene *Sc); void Render_NormalViz(struct Scene *Sc); }
 // HDR prototype (docs/fountain_hdr_plan.md) — defined in Hdr.cpp.
-namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render_HdrBrightPass(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
+namespace fds { void Hdr_BeginFramePass(int w, int h); void Render_TonemapToVPage(); void Render_HdrBrightPass(); void Render_BloomPass(); void Render_AnamorphicPass(); void Render_DoFPass(); void Render_LensGhostPass(); void Render_LensPostPass(); void Render_GradeGrainPass(); void Hdr_ActivateNoFog(); extern bool g_hdrDeferTonemap; }
 
 // LWO editor: per-matID highlight flags. The outline pass at the end of the
 // deferred render reads these; Editor_SetHighlight (the Embind editorHighlight)
@@ -528,7 +528,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// precede Render_DeferredLighting (which writes it) and run exactly once
 		// per frame (clearing it again afterward would wipe the coverage). Gated
 		// on --hdr.
-		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFrame();
+		if (fds::FeatureFlags::hdr()) fds::Hdr_BeginFramePass(XRes, YRes);
 
 		// Stage A overlap (docs/THREADING_OVERLAP_PLAN.md): join the dynamic
 		// shadow bake here — as late as possible (after the gbuffer fill, which

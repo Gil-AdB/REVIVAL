@@ -66,7 +66,6 @@ extern bool g_hdrDeferTonemap;
 
 // Size g_hdrBuf to the current XRes*YRes and clear it. Call once per frame,
 // before any HDR write (Phase 1 wires this ahead of the deferred passes).
-void Hdr_BeginFrame();
 
 // Same, but for an arbitrary target resolution — the mirror RTT pass sizes
 // g_hdrBuf to its offscreen surface so its reflection accumulates + tonemaps

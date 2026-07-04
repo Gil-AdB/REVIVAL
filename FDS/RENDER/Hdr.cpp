@@ -14,6 +14,16 @@
 #include <semaphore>
 #include <climits>
 
+// RenderContext migration: this TU reads the CURRENT render target via
+// MainRenderTargetFromGlobals() — deliberately TARGET-POLYMORPHIC: the
+// mirror RTT swaps the surface globals and runs these passes on its own
+// target, and FOUNTAIN's tick drives the whole post stack outside
+// renderFrame (deferred-tonemap flow), so there is no ctx to thread.
+// CurScene / g_zscale (DoF's focus normalization) stay global for the
+// same reason. The poison covers the names that must NEVER appear bare
+// here — target state goes through rt or the (w, h) params.
+#pragma GCC poison XRes YRes VPage ZPage16 FOVX FOVY CntrEX CntrEY VESA_BPSL
+
 // Shared tile-completion semaphore (defined with the deferred passes; same
 // 6x4 tile-job model used by the fog composite / deferred kernel).
 namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
@@ -33,11 +43,6 @@ void Hdr_BeginFramePass(int w, int h) {
     if (g_hdrBuf.size() != n) g_hdrBuf.assign(n, 0.0f);
     else std::fill(g_hdrBuf.begin(), g_hdrBuf.end(), 0.0f);
 }
-
-// Main view: size g_hdrBuf to the global framebuffer. The mirror RTT calls
-// Hdr_BeginFramePass with its own (smaller) dims so its reflection blooms
-// through the same tonemap — see RenderSecondOrderMirrors.
-void Hdr_BeginFrame() { Hdr_BeginFramePass(XRes, YRes); }
 
 // Shared row-band tile dispatch (no write overlap: each job owns a row band of
 // the TARGET buffer). body(y1,y2) processes rows [y1,y2). Callers run on the
