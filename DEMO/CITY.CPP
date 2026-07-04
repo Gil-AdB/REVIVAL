@@ -2686,8 +2686,9 @@ struct CityScene : SceneDriver {
 		// Always show a tiny frame indicator (top-left, single line) so
 		// the user can pinpoint a Timer value to feed --snapshot=city@t=N
 		// when reproducing a visual issue. Cheap; small; doesn't need
-		// the full profiler overlay.
-		{
+		// the full profiler overlay. screen_text = master HUD switch
+		// (snapshot mode turns it off; the capture filename carries t).
+		if (fds::FeatureFlags::screen_text()) {
 			snprintf(MSGStr, sizeof(MSGStr), "t=%d  CurFrame=%.1f", (int)Timer, CurFrame);
 			OutTextXY(VPage, 0, 0, MSGStr, 255);
 		}
@@ -2695,8 +2696,10 @@ struct CityScene : SceneDriver {
 		if (g_profilerActive) {
 			int scroll = 15 * g_fontScale;  // start below the always-on indicator
 			// Wall-clock FPS text: gated with the overlay (profiler_overlay)
-			// so headless captures stay byte-deterministic.
-			if (fds::FeatureFlags::profiler_overlay()) {
+			// so headless captures stay byte-deterministic; screen_text is
+			// the master HUD switch.
+			if (fds::FeatureFlags::profiler_overlay() &&
+			    fds::FeatureFlags::screen_text()) {
 				float meanMs = prof.meanFrameMs();
 				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);

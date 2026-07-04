@@ -284,7 +284,9 @@ static void V_Flip(VESA_Surface *VS)
 	// Top-right resolution overlay. Draw into the surface's data buffer
 	// just before pushing to the SDL_Texture so it shows up regardless of
 	// which scene's surface is being flipped (MainSurf vs Glat's FinalSurf).
-	if (VS->Data && VS->X > 0 && VS->Y > 0) {
+	// screen_text = master HUD switch (--no-screen_text removes it).
+	if (fds::FeatureFlags::screen_text() &&
+	    VS->Data && VS->X > 0 && VS->Y > 0) {
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%dx%d", (int)VS->X, (int)VS->Y);
 		// Approximate per-char width is ~10 px at the native font; scales

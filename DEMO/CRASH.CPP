@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Base/FeatureFlags.h>
 #include <Threads.h>
 
 #include "CRASH.H"
@@ -99,13 +100,18 @@ struct CrashScene : SceneDriver {
 		Render();
 		prof.leave(PROF_RNDR);
 
-		dword scroll = 0;
-		snprintf(MSGStr, sizeof(MSGStr), "g_FrameTime %d", g_FrameTime);
-		scroll += OutTextXY(VPage, 0, scroll, MSGStr, 255);
-		snprintf(MSGStr, sizeof(MSGStr), "CrPartTime %d", CrPartTime);
-		scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
-		snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
-		scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+		// Frame counters — behind the master HUD switch (screen_text) so
+		// headless captures stay clean and --no-screen_text removes them
+		// at runtime.
+		if (fds::FeatureFlags::screen_text()) {
+			dword scroll = 0;
+			snprintf(MSGStr, sizeof(MSGStr), "g_FrameTime %d", g_FrameTime);
+			scroll += OutTextXY(VPage, 0, scroll, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "CrPartTime %d", CrPartTime);
+			scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "Frame %f/%f", CurFrame, CrashSc->EndFrame);
+			scroll += OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+		}
 
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);

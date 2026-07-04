@@ -156,13 +156,18 @@ bool initSnapshotEnvironment(int xres, int yres) {
     });
     FPU_LPrecision();
 
-    // Headless captures must be byte-deterministic: the on-screen profiler
-    // text is wall-clock derived and was the sole run-to-run diff in
-    // fountain/city snapshot frames. g_profilerActive=0 alone doesn't hold —
-    // FrameProfiler::beginFrame re-mirrors it from the `profiler` flag every
-    // frame — so default the overlay off at the source (stats collection and
-    // the end-of-scene dump stay on; --profiler_overlay forces it back).
+    // Headless captures must contain scene pixels ONLY. Two layers:
+    //  - profiler_overlay: the wall-clock profiler text (was the sole
+    //    run-to-run byte-diff in captured frames; g_profilerActive=0 alone
+    //    doesn't hold — FrameProfiler::beginFrame re-mirrors it from the
+    //    `profiler` flag every frame).
+    //  - screen_text: master HUD switch — also removes the deterministic
+    //    counters (crash frame counters, city's t= indicator, greets'
+    //    shadow-mode indicator, fountain's follower-omni labels).
+    // Stats collection and the end-of-scene dump stay on; --profiler_overlay
+    // / --screen_text force the text back for debugging.
     fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::profiler_overlay, false);
+    fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::screen_text, false);
     g_profilerActive = 0;
     return true;
 }

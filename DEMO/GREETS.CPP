@@ -3141,7 +3141,8 @@ struct GreetsScene : SceneDriver {
 
 		// Persistent render-mode indicator (top-right). Always visible
 		// outside shadow-viz mode so the active F3 mode is obvious.
-		if (!sShadowMapView) {
+		// screen_text = master HUD switch (off in headless captures).
+		if (!sShadowMapView && fds::FeatureFlags::screen_text()) {
 			const bool inPolyId = (g_shadowMode.load() == ShadowMode::PolyId);
 			snprintf(MSGStr, sizeof(MSGStr), "Shadow: %s [F3]",
 				inPolyId ? "PolyId" : "Depth");
@@ -3344,8 +3345,10 @@ struct GreetsScene : SceneDriver {
 			int scroll = 0;
 			// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
 			// Wall-clock text: gated with the overlay (profiler_overlay) so
-			// headless captures stay byte-deterministic.
-			if (fds::FeatureFlags::profiler_overlay()) {
+			// headless captures stay byte-deterministic; screen_text is the
+			// master HUD switch.
+			if (fds::FeatureFlags::profiler_overlay() &&
+			    fds::FeatureFlags::screen_text()) {
 				float meanMs = prof.meanFrameMs();
 				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);

@@ -1,4 +1,5 @@
 #include "Rev.h"
+#include <Base/FeatureFlags.h>
 #include "FrameProfiler.h"
 #include "GLAT.H"
 #include "IMGGENR/IMGGENR.H"
@@ -693,7 +694,10 @@ struct GlatoScene : SceneDriver {
 		//	_sleep((750 - Timer) / 5);
 		//}
 		// FPS printer — sourced from FrameProfiler so it agrees with TOTL.
-		if (g_profilerActive)
+		// Wall-clock text: same gating as the other scenes' FPS printers
+		// (profiler_overlay + the screen_text master HUD switch).
+		if (g_profilerActive && fds::FeatureFlags::profiler_overlay() &&
+		    fds::FeatureFlags::screen_text())
 		{
 			dword tm = Timer;
 			float meanMs = prof.meanFrameMs();

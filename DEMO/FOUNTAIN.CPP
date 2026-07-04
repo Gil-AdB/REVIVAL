@@ -2807,17 +2807,20 @@ struct FountainScene : SceneDriver {
 		fds::g_hdrDeferTonemap = false;
 
 		// Debug labels at each stream-head omni's screen position.
-		for (int i = 0; i < kNumFollowerOmnis; ++i) {
-			const FollowerOmni& f = g_FntFollowerOmnis[i];
-			const Omni* O = f.omni;
-			if (!O) continue;
-			if (O->V.TPos_AOS.z < FntSc->NZP || O->V.TPos_AOS.z > FntSc->FZP) continue;
-			int px = int(O->V.PX);
-			int py = int(O->V.PY);
-			if (px < 0 || px >= XRes || py < 0 || py >= YRes) continue;
-			char label[32];
-			std::snprintf(label, sizeof(label), "H%d/%d", f.track, f.rotIdx);
-			OutTextXY(VPage, px, py, label, 255);
+		// screen_text = master HUD switch (off in headless captures).
+		if (fds::FeatureFlags::screen_text()) {
+			for (int i = 0; i < kNumFollowerOmnis; ++i) {
+				const FollowerOmni& f = g_FntFollowerOmnis[i];
+				const Omni* O = f.omni;
+				if (!O) continue;
+				if (O->V.TPos_AOS.z < FntSc->NZP || O->V.TPos_AOS.z > FntSc->FZP) continue;
+				int px = int(O->V.PX);
+				int py = int(O->V.PY);
+				if (px < 0 || px >= XRes || py < 0 || py >= YRes) continue;
+				char label[32];
+				std::snprintf(label, sizeof(label), "H%d/%d", f.track, f.rotIdx);
+				OutTextXY(VPage, px, py, label, 255);
+			}
 		}
 
 		prof.leave(PROF_RNDR);
@@ -2827,8 +2830,10 @@ struct FountainScene : SceneDriver {
 			// FPS printer — sourced from FrameProfiler (steady_clock) so it
 			// agrees with TOTL/mean_fps in the scene-end dump. Wall-clock
 			// text: gated with the overlay (profiler_overlay) so headless
-			// captures stay byte-deterministic.
-			if (fds::FeatureFlags::profiler_overlay()) {
+			// captures stay byte-deterministic; screen_text is the master
+			// HUD switch.
+			if (fds::FeatureFlags::profiler_overlay() &&
+			    fds::FeatureFlags::screen_text()) {
 				float meanMs = prof.meanFrameMs();
 				float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
 				snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
