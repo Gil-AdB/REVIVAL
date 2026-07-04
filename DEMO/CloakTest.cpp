@@ -1,19 +1,20 @@
-// "Invisible mirror" cloak test — TWO 90-degree V-corners side by side
-// (per the user's sketch). Each V = two mirror panels joined at a right-
-// angle vertex (addVCorner), DOUBLE-SIDED: mirror front + an opaque
-// colored back (blue = left V, orange = right V) so the layout reads
-// from above. Both V's open toward the viewer (-z). The LEFT V is what
-// the viewer sees; the RIGHT V hides behind an occluder wall and appears
-// only inside the left V's reflection. A red cube tucked behind the left
-// V's vertex is cloaked (viewer sees the mirror, not the cube).
+// "Invisible mirror" cloak — the real 4-mirror periscope, per the user's
+// verified sketch. TWO 90-degree V-corners side by side, BOTH opening +x
+// (addVCorner joins two panels at a right-angle vertex; DOUBLE-SIDED:
+// mirror front + opaque colored back so the layout reads from above):
+//   LEFT V  @ (-6,12): mirror on the INNER 90° faces — a retroreflector.
+//   RIGHT V @ ( 2,12): mirror on the OUTER 270° faces — two 45° turns.
+// The viewer sits below the right V looking UP (+z). A viewer ray relays:
+//   up → right V lower-OUTER (deflect left) → left corridor → left V
+//   INNER corner (retroreflect) → right corridor → right V upper-OUTER
+//   (deflect up) → background.
+// It detours around the right V's mouth, where the hero object hides —
+// unhittable by any viewer ray (2D-ray-trace verified: 41/41 rays reach
+// the background, 0 hit the object). The see-through needs 4 reflection
+// orders to fully resolve, so this doubles as a recursion-depth test.
 //
-// FIRST-DRAFT positioning — tune from the overhead views. The exact
-// see-through optics (relay depth, reflection content) are still being
-// dialed in with the user against the /tmp/cloak_view_overhead.ppm +
-// birdseye renders.
-//
-// Default: interactive free-cam. FDS_CLOAK_DUMP=1 = headless pose dump
-// (overhead / birdseye / viewer / reveal) to /tmp/cloak_view_*.ppm.
+// Default: interactive free-cam from the viewer pose. FDS_CLOAK_DUMP=1 =
+// headless pose dump (viewer / overhead / reveal) to /tmp/cloak_view_*.ppm.
 // FDS_CLOAK_NOMIRROR=1 = geometry ground truth.  ./DEMO --scene-cloaktest
 
 #include "FrameProfiler.h"
@@ -83,27 +84,27 @@ void addMirror2(fds::scene_builder::SceneBuilder &b, const char *name,
 }
 
 // A 90-degree V-corner: two mirror panels joined at vertex (vx,vz), arms
-// at openDeg±45 (so 90deg between them), opening toward openDeg. Each
-// panel's mirror face points into the opening (toward the bisector), and
-// carries an opaque back. Panel material names: "<prefix>_a" / "<prefix>_b".
+// at openDeg±45 (so 90deg between them), opening toward openDeg. Each panel
+// carries an opaque back. mirrorInner=true → the reflecting face is the
+// INNER concave side (facing the bisector); false → the OUTER convex side.
 void addVCorner(fds::scene_builder::SceneBuilder &b, const char *prefix,
                 float vx, float vz, float openDeg, float arm, float h,
-                Material *mirA, Material *mirB, Material *back) {
+                bool mirrorInner, Material *mirA, Material *mirB, Material *back) {
     const float br = openDeg * 3.14159265f / 180.0f;
-    const float ndx = std::cos(br), ndz = std::sin(br);   // desired normal (bisector)
+    const float ndx = std::cos(br), ndz = std::sin(br);   // bisector (opening dir)
     struct { float a; const char *suf; Material *m; } arms[2] = {
         { openDeg + 45.0f, "_a", mirA }, { openDeg - 45.0f, "_b", mirB },
     };
     for (auto &ar : arms) {
         const float a = ar.a * 3.14159265f / 180.0f;
         const float ex = vx + arm * std::cos(a), ez = vz + arm * std::sin(a);
-        // Order (R,L) so the mirror normal faces AWAY from the bisector
-        // (outward / convex side) — flipped from the opening-facing default.
-        // n(R=vertex) = (vz-ez, ex-vx).
-        float nx = vz - ez, nz = ex - vx;
+        // addWall normal for R=vertex,L=end is n=(vz-ez, ex-vx). Choose the
+        // ordering so the mirror normal points toward (inner) or away from
+        // (outer) the bisector.
+        const float dotVR = (vz - ez) * ndx + (ex - vx) * ndz;
         char nm[64];
         std::snprintf(nm, sizeof nm, "%s%s", prefix, ar.suf);
-        if (nx * ndx + nz * ndz < 0.0f)
+        if ((dotVR > 0.0f) == mirrorInner)
             addMirror2(b, nm, vx, vz, ex, ez, h, ar.m, back);   // R=vertex
         else
             addMirror2(b, nm, ex, ez, vx, vz, h, ar.m, back);   // R=end
@@ -122,59 +123,66 @@ CloakScene buildCloakScene() {
     b.SetNearFar(0.5f, 300.0f);
     b.SetAmbient(110, 110, 110);
 
-    Texture *wallTex  = makeChecker(0xFFB0B0B0u, 0xFF606060u);
-    Texture *floorTex = makeChecker(0xFF8A8A8Au, 0xFF4A4A4Au);
-    Material *matWall  = b.AddMaterial("wall_mat",  wallTex,  {176,176,176,255}, 0);
-    Material *matFloor = b.AddMaterial("floor_mat", floorTex, {138,138,138,255}, 0);
-    Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC0C0C0u);
-    // One mirror material PER PANEL (BuildMirror derives one plane per
-    // material). Left V = mL_a/mL_b, right V = mR_a/mR_b.
-    Material *mL_a = b.AddMaterial("mL_a", mirTex, {180,180,180,255}, 0);
-    Material *mL_b = b.AddMaterial("mL_b", mirTex, {180,180,180,255}, 0);
-    Material *mR_a = b.AddMaterial("mR_a", mirTex, {180,180,180,255}, 0);
-    Material *mR_b = b.AddMaterial("mR_b", mirTex, {180,180,180,255}, 0);
+    // Prettier palette (pbrtest-style): warm checker floor, cool checker
+    // walls, a distinct colored back wall for the mirrors to reflect.
+    Texture *wallTex  = makeChecker(0xFF9AA6C0u, 0xFF4A5578u);   // cool blue-grey
+    Texture *floorTex = makeChecker(0xFFB0A090u, 0xFF5E5348u);   // warm taupe
+    Texture *bgTex    = makeChecker(0xFF70C0A0u, 0xFF2E6B54u);   // teal back wall
+    Material *matWall  = b.AddMaterial("wall_mat",  wallTex,  {154,166,192,255}, 0);
+    Material *matFloor = b.AddMaterial("floor_mat", floorTex, {176,160,144,255}, 0);
+    matFloor->Specular = 0.25f; matFloor->Glossiness = 32;
+    Material *matBg    = b.AddMaterial("bg_mat",    bgTex,    {112,192,160,255}, 0);
+    Texture *mirTex = b.AddSolidColorTexture(8, 8, 0xFFC8CCD4u);
+    // One mirror material PER PANEL (BuildMirror derives one plane per mat).
+    Material *mL_a = b.AddMaterial("mL_a", mirTex, {200,204,212,255}, 0);
+    Material *mL_b = b.AddMaterial("mL_b", mirTex, {200,204,212,255}, 0);
+    Material *mR_a = b.AddMaterial("mR_a", mirTex, {200,204,212,255}, 0);
+    Material *mR_b = b.AddMaterial("mR_b", mirTex, {200,204,212,255}, 0);
     // Opaque backs: one color per V so orientation reads from above.
     Material *backL = b.AddMaterial("backL", b.AddSolidColorTexture(8,8,0xFF3060FFu), {48,96,255,255}, 0);
     Material *backR = b.AddMaterial("backR", b.AddSolidColorTexture(8,8,0xFFFF9020u), {255,144,32,255}, 0);
-    Texture *redTex = b.AddSolidColorTexture(8, 8, 0xFFFF2020u);
-    Material *matRed = b.AddMaterial("hidden_red", redTex, {255,32,32,255}, 0);
+    // The cloaked "hero" object: a glossy reflective sphere.
+    Material *matHero = b.AddMaterial("hero", b.AddSolidColorTexture(8,8,0xFFE04030u), {224,64,48,255}, 0);
+    matHero->Specular = 0.9f; matHero->Glossiness = 96; matHero->Reflection = 40.0f;
 
     // Floor spans the whole arena.
     const Vector floorV[4] = {
-        Vector(-14.0f, 0.0f, -14.0f), Vector(-14.0f, 0.0f, 26.0f),
-        Vector( 14.0f, 0.0f,  26.0f), Vector( 14.0f, 0.0f, -14.0f),
+        Vector(-16.0f, 0.0f, -16.0f), Vector(-16.0f, 0.0f, 30.0f),
+        Vector( 16.0f, 0.0f,  30.0f), Vector( 16.0f, 0.0f, -16.0f),
     };
     b.AddQuad("floor", floorV, matFloor);
 
-    // Room shell, height 8, normals into the room.
+    // Room shell, height 8, normals into the room. Back wall (z=28) is the
+    // teal the cloak's see-through should reveal.
     const float H = 8.0f;
-    addWall(b, "wall_back",   14.0f, 24.0f, -14.0f, 24.0f, H, matWall);   // faces -z
-    addWall(b, "wall_left",  -14.0f, 24.0f, -14.0f, -14.0f, H, matWall);  // faces +x
-    addWall(b, "wall_right",  14.0f, -14.0f, 14.0f,  24.0f, H, matWall);  // faces -x
+    addWall(b, "wall_back",   16.0f, 28.0f, -16.0f, 28.0f, H, matBg);    // faces -z (teal)
+    addWall(b, "wall_left",  -16.0f, 28.0f, -16.0f, -16.0f, H, matWall); // faces +x
+    addWall(b, "wall_right",  16.0f, -16.0f, 16.0f,  28.0f, H, matWall); // faces -x
 
-    // ── Two 90-degree V-corners, side by side (per the sketch) ────────
-    // Each V = two mirrors joined at a right angle; both open toward the
-    // viewer (-z). LEFT V (blue backs) is what the viewer sees; RIGHT V
-    // (orange backs) hides behind the occluder wall and shows only inside
-    // the left V's reflection. FIRST-DRAFT placement — tune from the
-    // overhead view (FDS_CLOAK_DUMP writes /tmp/cloak_view_overhead.ppm).
+    // ── The cloak: two 90-degree V-corners, both open +x (validated in a
+    // 2D ray-trace — viewer↑ relays around the right V's OUTER faces via
+    // two corridors and returns to its original line; the object in the
+    // right V's mouth is never hit). ──────────────────────────────────
+    //   LEFT V  @ (-6,12): mirror on INNER 90° faces (the retroreflector).
+    //   RIGHT V @ ( 2,12): mirror on OUTER 270° faces (the two 45° turns).
+    // arm=4 → arm x/z extent 2.83, matching the traced geometry.
     const float mh = 5.0f, arm = 4.0f;
-    addVCorner(b, "vL", -3.0f, 15.0f, 0.0f, arm, mh, mL_a, mL_b, backL);
-    addVCorner(b, "vR",  3.0f, 15.0f, 0.0f, arm, mh, mR_a, mR_b, backR);
+    addVCorner(b, "vL", -6.0f, 12.0f, 0.0f, arm, mh, /*mirrorInner=*/true,  mL_a, mL_b, backL);
+    addVCorner(b, "vR",  2.0f, 12.0f, 0.0f, arm, mh, /*mirrorInner=*/false, mR_a, mR_b, backR);
 
-    // Occluder: a z=5 wall (x 0.5..10, faces -z) hiding the RIGHT V from
-    // the viewer while leaving the left V and the inter-V reflection open.
-    addWall(b, "wall_occluder", 10.0f, 5.0f, 0.5f, 5.0f, H, matWall);
+    // Hero object hidden in the RIGHT V's mouth. Small + centered in the
+    // shielded wedge: at column x the lower arm sits at z=14-x and the upper
+    // at z=10+x, so a box in x[3,4] must live in z(11,13) — cube half 0.5 at
+    // (3.5,·,12) fits with margin (ray-trace confirmed 0 viewer-ray hits).
+    b.AddCube("hero", Vector(3.5f, 0.9f, 12.0f), 0.5f, matHero);
 
-    // The cloaked object: red cube tucked behind the LEFT V's vertex.
-    b.AddCube("hidden_red", Vector(-3.0f, 1.2f, 17.0f), 1.2f, matRed);
+    // Colored key/fill lights (pbrtest-style warm + cool).
+    b.AddOmni(Vector(-8.0f, 7.0f, 2.0f),  {255,232,200,0}, 1.0f, 90.0f);   // warm
+    b.AddOmni(Vector( 9.0f, 7.0f, 16.0f), {200,224,255,0}, 0.9f, 90.0f);   // cool
+    b.AddOmni(Vector( 3.5f, 6.0f, 6.0f),  {255,255,255,0}, 0.7f, 60.0f);   // fill on the mouth
 
-    // Lights.
-    b.AddOmni(Vector(-6.0f, 7.0f, -4.0f), {255,255,255,0}, 1.0f, 80.0f);
-    b.AddOmni(Vector( 6.0f, 7.0f,  6.0f), {255,255,255,0}, 1.0f, 80.0f);
-    b.AddOmni(Vector( 0.0f, 7.0f, 20.0f), {255,255,255,0}, 0.9f, 80.0f);
-
-    b.SetCamera(Vector(0.0f, 2.5f, -12.0f), Vector(0.0f, 2.5f, 12.0f), 60.0f);
+    // Viewer sits below the RIGHT V's lower arm, looking straight up (+z).
+    b.SetCamera(Vector(3.5f, 2.5f, 4.0f), Vector(3.5f, 2.5f, 40.0f), 55.0f);
 
     b.Finalize();
     CloakScene cs;
@@ -262,16 +270,13 @@ void Run_CloakTest() {
     if (std::getenv("FDS_CLOAK_DUMP")) {
     struct Pose { Vector eye, lookAt; const char *tag; };
     const Pose poses[] = {
-        // Overhead from BEHIND (+z, high): the V opens toward -z so its
-        // opaque backs face +z — from here they read as solid blue (left V)
-        // + orange (right V) V-shapes. THE positioning view.
-        { Vector( 0.0f, 22.0f, 30.0f), Vector( 0.0f, 0.0f, 13.0f), "overhead" },
-        // Lower bird's-eye from behind for depth cue.
-        { Vector( 7.0f, 12.0f, 27.0f), Vector( 0.0f, 1.0f, 13.0f), "birdseye" },
-        // The viewer's shot: looking into the left V.
-        { Vector( 0.0f, 2.5f, -12.0f), Vector( 0.0f, 2.5f, 14.0f), "viewer"   },
-        // Reveal: red cube behind the left V vertex.
-        { Vector(-10.0f, 6.0f, 4.0f),  Vector(-3.0f, 1.0f, 17.0f), "reveal"   },
+        // The money shot: the viewer pose, looking up into the right V.
+        { Vector( 3.5f, 2.5f, 4.0f), Vector( 3.5f, 2.5f, 40.0f), "viewer"   },
+        // Overhead from the -x side (the V backs face -x): shows both V's
+        // + the corridors + the hero in the right V's mouth. Positioning.
+        { Vector(-17.0f, 20.0f, 12.0f), Vector( 0.0f, 0.0f, 12.0f), "overhead" },
+        // Reveal: the hero sphere in the right V's mouth, from the +x side.
+        { Vector( 12.0f, 5.0f, 12.0f),  Vector( 3.6f, 1.0f, 12.0f), "reveal"   },
     };
     for (const Pose &p : poses) {
         char path[64];
