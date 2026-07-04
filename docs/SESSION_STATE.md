@@ -309,6 +309,20 @@ Two concrete sub-targets, in order:
   since c340ffa — run the gate at session start).
 - ASan finds: SceneCorrections stack over-read (bounds-guarded).
 
+## Headless snapshots now run-to-run byte-identical (d8cd6e2, 2026-07-04)
+
+The fountain/city/greets snapshot "nondeterminism" that forced A/B
+comparisons to discard frames was ENTIRELY the on-screen profiler text
+(wall-clock FPS/ms). initSnapshotEnvironment's g_profilerActive=0 was
+being silently re-armed every frame by FrameProfiler::beginFrame's
+flag mirror. New `profiler_overlay` flag (default ON, snapshots
+setDefault OFF, --profiler_overlay forces back) gates drawOverlay +
+the per-scene FPS printers; stats/dump/bench output unchanged.
+Verified: fountain all frames, greets t=700/1500, city t=5000 rr
+byte-identical; zero scene-pixel change vs pre-change binary.
+NOTE: the greets teleporter-stone run-to-run item may have been this —
+re-test it before investigating further.
+
 ## Known open items beyond the xpar task
 - User to eyeball live: temporal SSAO mech-contact-AO lag; f16/DoF look.
 - quarter-vs-checker default decision (above).
