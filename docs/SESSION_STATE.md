@@ -13,48 +13,46 @@ Runtime/tasks_artifacts) are still there if needed; safe to
 untouched. Run `tools/render_gate.sh` at session start (ALL PASS as of
 the move).
 
-## NEXT TASK (OPEN): chase water dark band — deferred water path
+## RESOLVED 2026-07-04 (9902349): chase water dark band — two stacked defects
 
-USER-REPORTED, unresolved. A sharp horizontal dark band covers the lower
-~30% of the chase screen. Screen-fixed under camera TRANSLATION, moves
-with PITCH (view-angle-dependent). Simplest repro: chase with plain
-`--deferred` (or `--hdr`) shows it; DEFAULT chase (forward path) renders
-uniform bright-blue water with NO band — forward is the reference look.
+USER EYEBALL PENDING live; headless verified by images (t=1000/1500,
+--deferred and --hdr): water back to forward-reference bright blue, no
+band. Root causes (NOT the earlier hypotheses):
 
-DISPROVEN (do not revisit — each verified by LOOKING at rendered
-images, not metrics): --deferred-quarter (diff 0 in the user's exact
-config), water_procedural / water_bump (band with & without), --env_refl
-(only tints the water blue; band with & without), --dof. An attempted
-fix excluding water from env_refl at DeferredSurfaceKernel.cpp:1136
-(`envP = ... && !isWater`) was a REGRESSION (greyed the water, band
-stayed) and was REVERTED — nothing from this investigation is committed.
+1. TBR regression (8c55e80): InsertTransparentToTBR computed its strip
+   span from projected PY, garbage for verts at/behind the near plane.
+   Chase's giant un-tessellated water quad (4 verts, always camera-
+   straddling, near verts at tz≈-130k) inserted only into strips ABOVE
+   the horizon → the water NEVER RENDERED under --deferred. The visible
+   "water" was the pass-1 reflection underlay + RenderGlints; the band
+   was the edge of the mirrored-mountain content (pitch-tracking,
+   translation-fixed — matched every symptom). Fix: straddling faces
+   insert into ALL strips (per-strip clipper trims), renderZ = far
+   surface so flares still composite on top. Same fix brightened city's
+   deferred bottom-edge water rows (they straddle too; brighten-only,
+   max delta 24 — the only ref-vs-new diff on deterministic frames).
+2. The ORIGINAL band (pre-TBR, seen via --no-deferred_unified_tbr):
+   water_procedural's kernel composite (xpar kernel ~2100-2270, NOT the
+   opaque isWater at 1092 — water is Mat_Transparent!) replaces the lit
+   texel with wDeep*(1-fresnel) + underlay*fresnel. City-tuned: assumes
+   a BRIGHT reflection underlay. Chase reflects black night sky → dark
+   water + view-angle fresnel cut. Fix: new flag water_fresnel_composite
+   (default ON = city unchanged); chase factory defaults it OFF → chase
+   keeps procedural ripple/glints/caustics but uses the forward-formula
+   lit-texel + underlay blend (byte-matched shape: texel*l/256 + dst*dw).
+   City factory re-pins it ON for replay ordering.
 
-VERIFICATION DISCIPLINE (cost several wrong claims): NEVER use
-row/frame MEAN brightness — the bright central explosion inflates means
-and fooled 3 straight bisections. Look at actual images; use per-column
-/ per-region analysis if a metric is needed.
+Diagnosis trail that worked: forward vs deferred pixel sampling → water
+vertex-light stats (flat 128 from static bake = ambient) → xpar kernel
+debug print NEVER FIRED → walked the drop upstream (kernel → clump →
+strip insertion → PY garbage). The earlier "pinned at the isWater
+composite" note was wrong — chase water never reaches the OPAQUE kernel.
 
-WHERE IT'S PINNED: the deferred isWater composite in
-FDS/RENDER/DeferredSurfaceKernel.cpp — isWater test ~line 1102
-(matID == ctx.waterMatID, set from CHASE.CPP SetDeferredWaterMatID);
-water gets ambient-only base (deliberate, comment ~1092) + planar
-reflection underlay/2 blend ~1800-1831 (+ hdrLinear variant ~1826).
-Forward reference: TheOtherBarry<TRANSPARENT> = lit water texel +
-VPage/2. Chase water render: DEMO/CHASE.CPP pass-1 reflection ~831
-(Reflected_Transform into VPage), pass-2 ~843, RenderGlints at 855
-(DEMO/ProceduralWater.cpp:177). Leading hypothesis: the deferred water
-base is missing the bright water-texture contribution forward has, so
-its brightness leans on the view-angle-dependent reflection term —
-which produces a screen-fixed horizon-like cut. NEXT STEP: side-by-side
-the two composites (deferred isWater vs forward TRANSPARENT blend),
-identify the divergent term, fix in the deferred path WITHOUT
-full-shade (user explicitly rejected that direction) — then eyeball +
-show the user, no mean metrics.
-
-Agreed follow-up (user: "it doesn't make sense to use the env refl on
-the built-in water reflection") — env_refl SHOULD eventually skip
-planar-reflection water, but the naive line-1136 exclusion is wrong
-(grey water); do it after the band root cause, correctly.
+Still open (unchanged agreement): env_refl should skip planar-reflection
+water, done properly (the naive line-1136 exclusion greyed the water).
+Chase deferred water vs forward residual: deferred samples the water
+texture at rasterizer mip (crisper caustic web, slightly brighter);
+eyeball live before tuning anything.
 
 ## REVIEW PASS 2026-07-04 (post-RTT-campaign audit) — all claims re-verified
 
