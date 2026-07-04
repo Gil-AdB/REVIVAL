@@ -696,9 +696,11 @@ static inline void EnvSpecComposeScalar(
 		// rate — full physical-rate per-pixel motion read as jumping
 		// against the rest of the scene. Pulled eye is per (store, frame):
 		// memoize per thread; the pow runs once per store per tile-run.
-		struct PullMemo { const fds::EnvPanoLinear* p; float ex, ey, ez; };
-		static thread_local PullMemo sMemo = { nullptr, 0, 0, 0 };
-		if (sMemo.p != envP) {
+		struct PullMemo { const fds::EnvPanoLinear* p; float cx, cy, cz;
+		                  float ex, ey, ez; };
+		static thread_local PullMemo sMemo = { nullptr, 0, 0, 0, 0, 0, 0 };
+		if (sMemo.p != envP || sMemo.cx != ctx.cameraWorldX
+		    || sMemo.cy != ctx.cameraWorldY || sMemo.cz != ctx.cameraWorldZ) {
 			const float bx = envP->bakeX, by = envP->bakeY, bz = envP->bakeZ;
 			float vx_ = ctx.cameraWorldX - bx, vy_ = ctx.cameraWorldY - by,
 			      vz_ = ctx.cameraWorldZ - bz;
@@ -709,6 +711,8 @@ static inline void EnvSpecComposeScalar(
 				sScale = hackD / vD;
 			}
 			sMemo.p = envP;
+			sMemo.cx = ctx.cameraWorldX; sMemo.cy = ctx.cameraWorldY;
+			sMemo.cz = ctx.cameraWorldZ;
 			sMemo.ex = bx + vx_ * sScale;
 			sMemo.ey = by + vy_ * sScale;
 			sMemo.ez = bz + vz_ * sScale;

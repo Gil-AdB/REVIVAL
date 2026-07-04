@@ -2318,7 +2318,7 @@ void Initialize_City()
 					// and Glossiness drives the roughness→mip pick. 40% +
 					// tight gloss ≈ the legacy half-add look with Fresnel.
 					clone->Reflection = fds::FeatureFlags::city_env_f0();
-					clone->Glossiness = 96.0f;
+					clone->Glossiness = fds::FeatureFlags::city_env_gloss();
 					// Kill per-pixel dynamic lighting on the glass: the
 					// authored forward glass is vertex-Gouraud-lit, and on
 					// building-scale quads the omni pools between vertices
@@ -2986,8 +2986,21 @@ struct CityScene : SceneDriver {
 		{
 			static bool sGPrev = false;
 			static int  sDumpN = 0;
-			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0;
-			if (gNow && !sGPrev) {
+			// FDS_CITY_DUMP_RANGE="t0,t1": auto-dump every LIVE frame with
+			// t in [t0,t1] — the snapshot driver did NOT reproduce the
+			// per-pixel-env dancing, so the capture must come from the real
+			// loop (real dTime, threading, per-frame state carry).
+			static int sAutoT0 = -1, sAutoT1 = -1;
+			static bool sAutoInit = false;
+			if (!sAutoInit) {
+				sAutoInit = true;
+				if (const char* r = std::getenv("FDS_CITY_DUMP_RANGE"))
+					std::sscanf(r, "%d,%d", &sAutoT0, &sAutoT1);
+			}
+			const int tNow = int(Timer);
+			const bool autoNow = sAutoT0 >= 0 && tNow >= sAutoT0 && tNow <= sAutoT1;
+			const bool gNow = Keyboard[ScG] != 0 || Keyboard[ScF9] != 0 || autoNow;
+			if (gNow && (!sGPrev || autoNow)) {
 				char path[64];
 				snprintf(path, sizeof(path), "/tmp/city_dump_%d.ppm", sDumpN++);
 				std::FILE *f = std::fopen(path, "wb");
