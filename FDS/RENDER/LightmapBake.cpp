@@ -725,10 +725,10 @@ void Render_NormalViz(Scene *Sc)
     uint32_t *out = reinterpret_cast<uint32_t *>(VPage);
     const size_t n = std::min(size_t(XRes) * size_t(YRes), gb->normal.size());
     for (size_t i = 0; i < n; ++i) {
-        const meka::u16 packedN = gb->normal[i];
+        const meka::u32 packedN = gb->normal[i];
         if (packedN == 0) { out[i] = 0xFF101010u; continue; }   // sentinel / sky
         float nx, ny, nz;
-        meka::oct_decode_u16(packedN, nx, ny, nz);
+        meka::oct_decode_u32(packedN, nx, ny, nz);
 
         const uint32_t mat32 = gb->txtr[i];
         const uint32_t matId = (mat32 >> 20) & 0xFF;

@@ -188,7 +188,7 @@ void Render_SSAO() {
 	const float fovX = FOVX, fovY = FOVY;
 	const float cx = CntrEX, cy = CntrEY;
 	const word*  zEnc = ZPage16;
-	const meka::u16* nrm = g_gbuffer->normal.data();
+	const meka::u32* nrm = g_gbuffer->normal.data();
 	const float* kx = g_kx.data(); const float* ky = g_ky.data(); const float* kz = g_kz.data();
 	float* aoRaw  = g_aoRaw.data();
 	float* aoBlur = g_aoBlur.data();
@@ -250,7 +250,7 @@ void Render_SSAO() {
 						const float Px = (float(px) - cx) * z * invFOVX;
 						const float Py = (cy - float(py)) * z * invFOVY;
 						const float Pz = z;
-						float Nx, Ny, Nz; meka::oct_decode_u16(nrm[i], Nx, Ny, Nz);
+						float Nx, Ny, Nz; meka::oct_decode_u32(nrm[i], Nx, Ny, Nz);
 						if (Nx*Px + Ny*Py + Nz*Pz > 0.0f) { Nx=-Nx; Ny=-Ny; Nz=-Nz; }
 						const float vinv = fast_rsqrt(Px*Px + Py*Py + Pz*Pz + 1e-12f);
 						const float Vx = -Px*vinv, Vy = -Py*vinv, Vz = -Pz*vinv;
@@ -336,7 +336,7 @@ void Render_SSAO() {
 							const float z = float(0xFF80 - ze) * invZScale;
 							aoZ[lo] = z;
 							const float Px=(float(px)-cx)*z*invFOVX, Py=(cy-float(py))*z*invFOVY, Pz=z;
-							float Nx,Ny,Nz; meka::oct_decode_u16(nrm[i],Nx,Ny,Nz);
+							float Nx,Ny,Nz; meka::oct_decode_u32(nrm[i],Nx,Ny,Nz);
 							if (Nx*Px+Ny*Py+Nz*Pz>0.0f){Nx=-Nx;Ny=-Ny;Nz=-Nz;}
 							const float vinv=fast_rsqrt(Px*Px+Py*Py+Pz*Pz+1e-12f);
 							float sr=radius*fovX/z; if(sr<2.0f)sr=2.0f; else if(sr>256.0f)sr=256.0f;
@@ -475,7 +475,7 @@ void Render_SSAO() {
 						S.y = (cy - float(py)) * z * invFOVY;
 						aoZ[lo] = z;
 						float nx, ny, nz;
-						meka::oct_decode_u16(nrm[i], nx, ny, nz);
+						meka::oct_decode_u32(nrm[i], nx, ny, nz);
 						if (nx*S.x + ny*S.y + nz*z > 0.0f) { nx = -nx; ny = -ny; nz = -nz; }
 						float hx = 0.0f, hy = 0.0f, hz = 1.0f;
 						if (fabsf(nz) > 0.999f) { hx = 1.0f; hz = 0.0f; }

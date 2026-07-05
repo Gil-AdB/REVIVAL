@@ -29,6 +29,7 @@
 #include <map>
 #include <limits>
 #include <chrono>
+#include <atomic>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -674,6 +675,56 @@ static inline float computeMapShadowAtten(const TileLights& tl, int n,
 // previously had no env block at all, which rendered reflections as a
 // 1-of-4 dot grid on any surface whose neighbors fail the fill's
 // normal-similarity test (curved cockpit glass under --deferred-quarter).
+// FDS_ENVTRACE="sx,sy,r": diagnostic. Once per kernel invocation, print the
+// FULL env-compose term chain (world pos, normal, pull gate/k, reflected dir,
+// face/uv, mip, Fresnel, fetched color, contribution) for the first composed
+// pixel whose reconstructed screen position lands within r px of (sx,sy) —
+// the term that flips frame-to-frame while the camera is monotone is the bug.
+// Claimed atomically so exactly one line prints per invocation across tile
+// threads; the invocation counter is bumped in the per-frame ctx setup, so a
+// second setup line per frame would expose a second kernel pass.
+struct EnvTraceCfg { float sx, sy, r; float minY; };
+static std::atomic<uint32_t> g_envTraceInvoke{0};
+static std::atomic<uint32_t> g_envTraceClaim{~0u};
+// Per-invocation compose census (FDS_ENVTRACE only): how many pixels ran the
+// env compose, how many had mirrored-world positions (y<0), and the screen
+// bbox — printed and reset at the next setup, so each frame shows where each
+// pass actually composes.
+static std::atomic<uint32_t> g_envCensusN{0}, g_envCensusNegY{0};
+static std::atomic<int> g_envCensusX0{1<<30}, g_envCensusX1{-(1<<30)};
+static std::atomic<int> g_envCensusY0{1<<30}, g_envCensusY1{-(1<<30)};
+static inline void envCensusAdd(float scrX, float scrY, float worldY)
+{
+	g_envCensusN.fetch_add(1, std::memory_order_relaxed);
+	if (worldY < 0.0f) g_envCensusNegY.fetch_add(1, std::memory_order_relaxed);
+	const int xi = int(scrX), yi = int(scrY);
+	int v = g_envCensusX0.load(std::memory_order_relaxed);
+	while (xi < v && !g_envCensusX0.compare_exchange_weak(v, xi)) {}
+	v = g_envCensusX1.load(std::memory_order_relaxed);
+	while (xi > v && !g_envCensusX1.compare_exchange_weak(v, xi)) {}
+	v = g_envCensusY0.load(std::memory_order_relaxed);
+	while (yi < v && !g_envCensusY0.compare_exchange_weak(v, yi)) {}
+	v = g_envCensusY1.load(std::memory_order_relaxed);
+	while (yi > v && !g_envCensusY1.compare_exchange_weak(v, yi)) {}
+}
+static const EnvTraceCfg* EnvTraceGet()
+{
+	static EnvTraceCfg cfg;
+	static int state = 0;   // 0 = unparsed, 1 = off, 2 = on
+	if (state == 0) {
+		const char* s = std::getenv("FDS_ENVTRACE");
+		state = (s && std::sscanf(s, "%f,%f,%f", &cfg.sx, &cfg.sy, &cfg.r) == 3)
+		        ? 2 : 1;
+		// FDS_ENVTRACE_MINY: only claim pixels with world y above this —
+		// city's mirrored-world pass (y < 0) otherwise wins the per-
+		// invocation claim on most frames and starves the real facade.
+		cfg.minY = -1e30f;
+		if (const char* my = std::getenv("FDS_ENVTRACE_MINY"))
+			cfg.minY = float(std::atof(my));
+	}
+	return state == 2 ? &cfg : nullptr;
+}
+
 static inline void EnvSpecComposeScalar(
 	const DeferredLightingCtx &ctx, const fds::EnvPanoLinear *envP,
 	const Material *Mat, uint32_t miplevel, uint32_t swizzledUV,
@@ -683,10 +734,49 @@ static inline void EnvSpecComposeScalar(
 	float gloss, float metalM, bool roughMapOn, float envReflGain,
 	float &sB, float &sG, float &sR)
 {
+	// FDS_ENV_SKIP_NEGY=1 (diagnostic A/B): skip the compose entirely for
+	// pixels whose world y is negative — in CITY that is exactly the
+	// mirrored-world pass's geometry. If facades change at all with this
+	// set, mirror-pass compose output is leaking into the visible image.
+	static const bool sSkipNegY = std::getenv("FDS_ENV_SKIP_NEGY") != nullptr;
+	if (sSkipNegY && sampleWorldY < 0.0f) return;
+	// ── FDS_ENVTRACE claim (diagnostic, off = one static load + branch) ──
+	bool trWant = false;
+	float trScrX = 0.0f, trScrY = 0.0f;
+	if (const EnvTraceCfg* trc = EnvTraceGet()) {
+		if (z > 0.001f) {
+			trScrX = ctx.cntrEX + x / (z * ctx.invFOVX);
+			trScrY = ctx.cntrEY + y / (z * ctx.invFOVY);
+			envCensusAdd(trScrX, trScrY, sampleWorldY);
+			if (sampleWorldY >= trc->minY &&
+			    std::fabs(trScrX - trc->sx) <= trc->r &&
+			    std::fabs(trScrY - trc->sy) <= trc->r) {
+				const uint32_t inv = g_envTraceInvoke.load(std::memory_order_relaxed);
+				uint32_t cur = g_envTraceClaim.load(std::memory_order_relaxed);
+				if (cur != inv &&
+				    g_envTraceClaim.compare_exchange_strong(cur, inv))
+					trWant = true;
+			}
+		}
+	}
+	int   trPulled = -1;    // -1 = no-pull store, 0 = gate skipped, 1 = pulled
+	float trPlaneD = 0, trOptD = 0, trStep = 0, trK = 0;
+	float trEpX = 0, trEpY = 0, trEpZ = 0;
 	// Incident ray d = pixel direction (view space, camera at
 	// origin); reflect about the (possibly nmap-perturbed) N.
 	float dInv = fast_rsqrt(x*x + y*y + z*z);
 	float dx = x * dInv, dy = y * dInv, dz = z * dInv;
+	// Viewer-side normal (forward parity: Transform.cpp's nSide flip). The
+	// G-buffer normal's SIGN is unstable on double-sided glass — the z-fight
+	// winner alternates per frame, and ENVTRACE showed the composed color
+	// flapping with it (ndv 0.37<->0.00, Fresnel 0.61<->0.72, pull k
+	// +0.85<->-0.75 on the same surface). The reflect below is invariant
+	// under n->-n; only Fresnel and the cv-pull see the sign — flip to the
+	// camera side so an upstream sign flip cannot change the output.
+	{
+		const float dn0 = dx*nx + dy*ny + dz*nz;
+		if (dn0 > 0.0f) { nx = -nx; ny = -ny; nz = -nz; }
+	}
 	float dDotN;
 	float rvx, rvy, rvz;
 	if (envP->pullOpt > 0.0f) {
@@ -722,6 +812,7 @@ static inline void EnvSpecComposeScalar(
 			                             + (envP->bakeZ - swz)*nwz);
 			const float step = ux*nwx + uy*nwy + uz*nwz;
 			const float uLen2 = ux*ux + uy*uy + uz*uz;
+			trPulled = 0; trPlaneD = planeD; trOptD = optD; trStep = step;
 			// Forward-path guard: skip when pullDir is within ~5.7deg of the
 			// plane (step^2 <= 0.01*|u|^2) -- dividing by a tiny step blows
 			// the pulled eye out and the reflections swing.
@@ -734,10 +825,21 @@ static inline void EnvSpecComposeScalar(
 				const float sq = d0 * fast_rsqrt(d0);            // sqrt(d0)
 				const float t  = d0 * sq;                        // d0^1.5
 				const float hackD = t * fast_rsqrt(t) + optD;    // d0^0.75 + optD
-				const float k = (hackD - planeD) / step;
+				float k = (hackD - planeD) / step;
+				// The planeD gate is continuous (k -> 0 at the threshold), but
+				// the step^2 guard is not: forward skips BINARY, and when the
+				// per-pixel plane drifts across the boundary the whole facade
+				// pops between pulled and physical in one frame (measured as
+				// PULLGATE chatter in ENVTRACE). Ramp k to zero across
+				// [1x..4x] of the guard threshold instead.
+				const float g = step*step, gMin = 0.01f * uLen2;
+				if (g < 4.0f * gMin)
+					k *= (g - gMin) / (3.0f * gMin);
 				epx += k * ux; epy += k * uy; epz += k * uz;
+				trPulled = 1; trK = k;
 			}
 		}
+		trEpX = epx; trEpY = epy; trEpZ = epz;
 		float wx = swx - epx, wy = swy - epy, wz = swz - epz;
 		const float wInv = fast_rsqrt(wx*wx + wy*wy + wz*wz + 1e-12f);
 		wx *= wInv; wy *= wInv; wz *= wInv;
@@ -933,6 +1035,30 @@ static inline void EnvSpecComposeScalar(
 	sB += ecB * ek * tB;
 	sG += ecG * ek * tG;
 	sR += ecR * ek * tR;
+	if (trWant) {
+		std::fprintf(stderr,
+		    "[ENVTRACE] inv=%u t=%.1f scr=(%.0f,%.0f) cam=(%.2f,%.2f,%.2f) "
+		    "vp=(%.2f,%.2f,%.2f) sw=(%.1f,%.1f,%.1f) nV=(%.3f,%.3f,%.3f) "
+		    "pull=%d planeD=%.2f optD=%.2f step=%.2f k=%.5f ep=(%.1f,%.1f,%.1f) "
+		    "rw=(%.4f,%.4f,%.4f) face=%d fuv=(%.4f,%.4f) eq=(%.4f,%.4f) "
+		    "lvlF=%.2f mip=%u suv=%05x ndv=%.3f fres=%.3f ec=(%.0f,%.0f,%.0f) "
+		    "add=(%.1f,%.1f,%.1f) envP=%p bake=(%.0f,%.0f,%.0f)\n",
+		    g_envTraceInvoke.load(std::memory_order_relaxed), double(Timer),
+		    double(trScrX), double(trScrY),
+		    double(ctx.cameraWorldX), double(ctx.cameraWorldY), double(ctx.cameraWorldZ),
+		    double(x), double(y), double(z),
+		    double(sampleWorldX), double(sampleWorldY), double(sampleWorldZ),
+		    double(nx), double(ny), double(nz),
+		    trPulled, double(trPlaneD), double(trOptD), double(trStep), double(trK),
+		    double(trEpX), double(trEpY), double(trEpZ),
+		    double(rwx), double(rwy), double(rwz),
+		    cubeFace, double(cubeU), double(cubeV), double(eu), double(evv),
+		    double(lvlF), miplevel, swizzledUV,
+		    double(ndv), double(fres), double(ecB), double(ecG), double(ecR),
+		    double(ecB * ek * tB), double(ecG * ek * tG), double(ecR * ek * tR),
+		    (const void*)envP,
+		    double(envP->bakeX), double(envP->bakeY), double(envP->bakeZ));
+	}
 }
 
 static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
@@ -1189,7 +1315,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 
 			// Decode normal (view-space, unit-length).
 			float nx, ny, nz;
-			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+			meka::oct_decode_u32(gb.normal[i], nx, ny, nz);
 			// Save the geometric (vertex-interpolated, un-perturbed)
 			// normal before the normal-map block below mutates nx/ny/nz.
 			// Used by the shadow slope-bias so per-pixel bump-induced
@@ -2213,7 +2339,7 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			const float texR = float((texel >> 16) & 0xFF) * Mat->TintR;
 
 			float nx, ny, nz;
-			meka::oct_decode_u16(gbX.normal[i], nx, ny, nz);
+			meka::oct_decode_u32(gbX.normal[i], nx, ny, nz);
 
 			const float z = float(0xFF80 - zEnc) * ctx.invZScale;
 			const float x = (float(px) - CntrEX) * z * ctx.invFOVX;
@@ -2884,26 +3010,18 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// killed by mip-data null check above).
 			__m256i mask_alive_fresh = _mm256_load_si256((const __m256i*)lane_alive);
 
-			// Decode 8 normals in parallel. oct_decode_u16 form:
-			//   qx = sign-extend(low byte), qy = sign-extend(high byte)
-			//   ox = qx * (1/127), oy = qy * (1/127)
+			// Decode 8 normals in parallel. oct_decode_u32 form (16.16):
+			//   qx = sign-extend(low 16), qy = sign-extend(high 16)
+			//   ox = qx * (1/32767), oy = qy * (1/32767)
 			//   az = 1 - |ox| - |oy|
 			//   if (az < 0) fold ...
 			//   then normalize.
-			__m128i nrm16 = _mm_loadu_si128((const __m128i*)(gb.normal.data() + i));
-			// Split into low-byte and high-byte signed expansion.
-			__m128i nrm_qx_8 = _mm_and_si128(nrm16, _mm_set1_epi16(0xFF));
-			__m128i nrm_qy_8 = _mm_srli_epi16(nrm16, 8);
-			// sign-extend 8-bit to 16
-			nrm_qx_8 = _mm_slli_epi16(nrm_qx_8, 8);
-			nrm_qx_8 = _mm_srai_epi16(nrm_qx_8, 8);
-			nrm_qy_8 = _mm_slli_epi16(nrm_qy_8, 8);
-			nrm_qy_8 = _mm_srai_epi16(nrm_qy_8, 8);
-			__m256i qx32 = _mm256_cvtepi16_epi32(nrm_qx_8);
-			__m256i qy32 = _mm256_cvtepi16_epi32(nrm_qy_8);
-			__m256 inv127 = _mm256_set1_ps(1.0f / 127.0f);
-			__m256 ox = _mm256_mul_ps(_mm256_cvtepi32_ps(qx32), inv127);
-			__m256 oy = _mm256_mul_ps(_mm256_cvtepi32_ps(qy32), inv127);
+			__m256i nrm32 = _mm256_loadu_si256((const __m256i*)(gb.normal.data() + i));
+			__m256i qx32 = _mm256_srai_epi32(_mm256_slli_epi32(nrm32, 16), 16);
+			__m256i qy32 = _mm256_srai_epi32(nrm32, 16);
+			__m256 invQ = _mm256_set1_ps(1.0f / 32767.0f);
+			__m256 ox = _mm256_mul_ps(_mm256_cvtepi32_ps(qx32), invQ);
+			__m256 oy = _mm256_mul_ps(_mm256_cvtepi32_ps(qy32), invQ);
 			__m256 absox = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), ox);
 			__m256 absoy = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), oy);
 			__m256 az = _mm256_sub_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), absox), absoy);
@@ -3423,12 +3541,12 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			// full shading that we always decode (even if matID fails).
 			float ncX = 0, ncY = 0, ncZ = 0;
 			if (quarterNormalCheck) {
-				meka::oct_decode_u16(gb.normal[i], ncX, ncY, ncZ);
+				meka::oct_decode_u32(gb.normal[i], ncX, ncY, ncZ);
 			}
 			auto neighborNormalOk = [&](size_t ni) -> bool {
 				if (!quarterNormalCheck) return true;
 				float nx, ny, nz;
-				meka::oct_decode_u16(gb.normal[ni], nx, ny, nz);
+				meka::oct_decode_u32(gb.normal[ni], nx, ny, nz);
 				return (ncX*nx + ncY*ny + ncZ*nz) >= quarterNormalCos;
 			};
 			// Z-discontinuity check: relative depth diff vs center.
@@ -3685,7 +3803,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const float texR = float((texel >> 16) & 0xFF) * Mat->TintR;
 
 			float nx, ny, nz;
-			meka::oct_decode_u16(gb.normal[i], nx, ny, nz);
+			meka::oct_decode_u32(gb.normal[i], nx, ny, nz);
 
 			// Normal map sampling — mirrors the wave-1 kernel exactly so
 			// nmap materials that fall through the surface-similar test
@@ -4326,6 +4444,27 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	for (int r = 0; r < 3; ++r)
 		for (int c = 0; c < 3; ++c)
 			ctx.viewToWorld[r][c] = View->Mat[c][r];
+	// FDS_ENVTRACE: one invocation id per kernel setup — if the setup line
+	// prints twice for one Timer value, the kernel runs two passes per frame
+	// and the trace lines say which pass composed the traced pixel.
+	if (EnvTraceGet()) {
+		const uint32_t prev = g_envTraceInvoke.load(std::memory_order_relaxed);
+		const uint32_t n = g_envCensusN.exchange(0, std::memory_order_relaxed);
+		const uint32_t ny = g_envCensusNegY.exchange(0, std::memory_order_relaxed);
+		const int x0 = g_envCensusX0.exchange(1<<30);
+		const int x1 = g_envCensusX1.exchange(-(1<<30));
+		const int y0 = g_envCensusY0.exchange(1<<30);
+		const int y1 = g_envCensusY1.exchange(-(1<<30));
+		if (n)
+			std::fprintf(stderr, "[ENVCENSUS] inv=%u n=%u negY=%u "
+			    "bbox=(%d..%d,%d..%d)\n", prev, n, ny, x0, x1, y0, y1);
+		const uint32_t inv = g_envTraceInvoke.fetch_add(1,
+			std::memory_order_relaxed) + 1;
+		std::fprintf(stderr, "[ENVTRACE-SETUP] inv=%u ov=%d t=%.1f cam=(%.2f,%.2f,%.2f) "
+		    "fwd=(%.4f,%.4f,%.4f)\n", inv, ov ? 1 : 0, double(Timer),
+		    View->ISource.x, View->ISource.y, View->ISource.z,
+		    View->Mat[2][0], View->Mat[2][1], View->Mat[2][2]);
+	}
 	if (std::getenv("FDS_CAMLOG")) {
 		static int sCamLogN = 0;
 		if (sCamLogN < 400)

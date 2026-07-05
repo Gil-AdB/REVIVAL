@@ -28,9 +28,12 @@ cd "$RUN" || { echo "no Runtime/ dir at $RUN"; exit 2; }
 # + ce4f906 mirror clone wall-depth clamp. Verified 2026-07-04 on the merged
 # tree — matches soa-vertex's committed golden exactly, so the editor-branch
 # work does not perturb mirror output.
-BASE_MIRROR="d3a06fb97a01f8c5e250dad7e41f9f4d"
-BASE_CONE="8a82e21d53b0d050bbc1220b4fe137f0"
-BASE_HALO="a916347df504ab12a3add321747c2f08"
+# Re-baselined 2026-07-05 for the oct 16.16 normal G-buffer (Mekalele.h):
+# measured drift vs prior baseline is <=1 LSB on <1% of pixels (several
+# poses byte-identical) — pure precision change, no structural diff.
+BASE_MIRROR="4ac809e5f5323076de1a6d5ef2fb9e92"
+BASE_CONE="b41894f969d1f89dd2d7d794f160e286"
+BASE_HALO="166fa25a846668cc9b2d4dae2d800a7b"
 
 # HEADLESS: every DEMO run uses the SDL dummy driver — no window pops on the
 # desktop (the gate gets run a lot, incl. from bisects). Dummy output differs

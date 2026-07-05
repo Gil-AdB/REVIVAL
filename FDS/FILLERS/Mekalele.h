@@ -50,11 +50,19 @@ constexpr const i32 TILE_SIZE = 8;
 using TScreenCoord = i32;
 
 struct GBuffer {
-	// Octahedral-packed shading normal: 8-bit x, 8-bit y, decoded to
-	// (nx, ny, nz) on a unit sphere in the lighting pass. The lighting
-	// pass reconstructs view-space position from ZPage16 + screen XY,
-	// so we don't carry position here.
-	std::vector<u16> normal;
+	// Octahedral-packed shading normal: 16-bit x, 16-bit y (oct 16.16),
+	// decoded to (nx, ny, nz) on a unit sphere in the lighting pass. The
+	// lighting pass reconstructs view-space position from ZPage16 +
+	// screen XY, so we don't carry position here.
+	// Was 8.8 (u16): a ~0.8deg quantization cell is fine for diffuse N.L
+	// but NOT for specular reflection under camera ROTATION — the view-
+	// space code freezes inside its cell while viewToWorld keeps turning,
+	// so the reconstructed WORLD normal drifts at rotation rate and snaps
+	// back a cell later. The reflected ray doubles the error: measured
+	// 1.2–3.1deg/frame sawtooth on city glass (ENVTRACE dNv=0 rows with
+	// dRW>0) ≈ 25–65 px/frame of reflection judder. 16.16 cells are
+	// ~0.003deg — numerically gone.
+	std::vector<u32> normal;
 	// Octahedral-packed view-space tangent (Tier B normal map support).
 	// Same encoding as `normal`. The lighting kernel reads tangent only
 	// for normal-mapped materials; everything else ignores it. Optional
@@ -219,8 +227,76 @@ inline __m128i pack_lo16_x8(__m256i v) {
     return _mm_packus_epi32(lo, hi);
 }
 
+// 8-wide oct encode at 16.16 (shading NORMAL plane). Same fold as the u16
+// path; two differences: x32767 quantize into full 32-bit lane codes
+// (qx:16 | qy:16), and one Newton-Raphson refinement on the L1 reciprocal —
+// the raw ~12-bit rcp estimate was fine for 8-bit codes but would eat the
+// extra precision here (±0.0004 relative ≈ ±13 of 32767 codes).
+// Tangents stay on oct_encode_u16_x8 (nmap-only, 8.8 is plenty).
+inline __m256i oct_encode_u32_x8(__m256 nx, __m256 ny, __m256 nz) {
+    const __m256 vSignMask = _mm256_set1_ps(-0.0f);
+    const __m256 vZero     = _mm256_setzero_ps();
+    const __m256 vOne      = _mm256_set1_ps(1.0f);
+    const __m256 vNegOne   = _mm256_set1_ps(-1.0f);
+    const __m256 vQ        = _mm256_set1_ps(32767.0f);
+
+    const __m256 absX = _mm256_andnot_ps(vSignMask, nx);
+    const __m256 absY = _mm256_andnot_ps(vSignMask, ny);
+    const __m256 absZ = _mm256_andnot_ps(vSignMask, nz);
+    const __m256 sumAbs = _mm256_add_ps(absX, _mm256_add_ps(absY, absZ));
+    __m256 invL1 = _mm256_rcp_ps(sumAbs);
+    // One NR step: invL1 *= (2 - sumAbs*invL1)  → ~23-bit accurate.
+    invL1 = _mm256_mul_ps(invL1,
+        _mm256_fnmadd_ps(sumAbs, invL1, _mm256_set1_ps(2.0f)));
+    __m256 ox = _mm256_mul_ps(nx, invL1);
+    __m256 oy = _mm256_mul_ps(ny, invL1);
+
+    const __m256 zNeg   = _mm256_cmp_ps(nz, vZero, _CMP_LT_OQ);
+    const __m256 absOX  = _mm256_andnot_ps(vSignMask, ox);
+    const __m256 absOY  = _mm256_andnot_ps(vSignMask, oy);
+    const __m256 sgnX   = _mm256_blendv_ps(vNegOne, vOne,
+                            _mm256_cmp_ps(ox, vZero, _CMP_GE_OQ));
+    const __m256 sgnY   = _mm256_blendv_ps(vNegOne, vOne,
+                            _mm256_cmp_ps(oy, vZero, _CMP_GE_OQ));
+    const __m256 fx = _mm256_mul_ps(_mm256_sub_ps(vOne, absOY), sgnX);
+    const __m256 fy = _mm256_mul_ps(_mm256_sub_ps(vOne, absOX), sgnY);
+    ox = _mm256_blendv_ps(ox, fx, zNeg);
+    oy = _mm256_blendv_ps(oy, fy, zNeg);
+
+    __m256i qx = _mm256_cvtps_epi32(_mm256_mul_ps(ox, vQ));
+    __m256i qy = _mm256_cvtps_epi32(_mm256_mul_ps(oy, vQ));
+    const __m256i cmin = _mm256_set1_epi32(-32768);
+    const __m256i cmax = _mm256_set1_epi32(32767);
+    qx = _mm256_max_epi32(qx, cmin);
+    qx = _mm256_min_epi32(qx, cmax);
+    qy = _mm256_max_epi32(qy, cmin);
+    qy = _mm256_min_epi32(qy, cmax);
+    const __m256i mask16 = _mm256_set1_epi32(0xFFFF);
+    qx = _mm256_and_si256(qx, mask16);
+    qy = _mm256_and_si256(qy, mask16);
+    return _mm256_or_si256(qx, _mm256_slli_epi32(qy, 16));
+}
+
+// Inverse of oct_encode_u32_x8's per-lane code (normal plane).
+inline void oct_decode_u32(u32 packed, float &nx, float &ny, float &nz) {
+	int qx = int16_t(packed & 0xffff);
+	int qy = int16_t((packed >> 16) & 0xffff);
+	float ox = qx * (1.0f / 32767.0f);
+	float oy = qy * (1.0f / 32767.0f);
+	float az = 1.0f - std::fabs(ox) - std::fabs(oy);
+	if (az < 0.0f) {
+		float fx = (1.0f - std::fabs(oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
+		float fy = (1.0f - std::fabs(ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
+		ox = fx; oy = fy;
+	}
+	float invLen = fast_rsqrt(ox*ox + oy*oy + az*az);
+	nx = ox * invLen;
+	ny = oy * invLen;
+	nz = az * invLen;
+}
+
 // Inverse of oct_encode_u16. Output is unit-length (mod quantization
-// error). Used by the lighting pass and the debug visualization.
+// error). Used by the TANGENT plane and legacy callers.
 inline void oct_decode_u16(u16 packed, float &nx, float &ny, float &nz) {
 	int qx = int8_t(packed & 0xff);
 	int qy = int8_t((packed >> 8) & 0xff);
@@ -351,7 +427,7 @@ struct RasterStripClamp {
 inline thread_local RasterStripClamp g_rasterStripClamp;
 
 struct GBufferSpan {
-	u16 *normal;
+	u32 *normal;
 	u16 *tangent;
 	u32 *txtr;
 	u32 *lightmapMF;
@@ -807,7 +883,7 @@ struct TileRasterizer {
 					const Vec8f vnz = p_nz * vInvN;
 					alignas(32) uint32_t normalEnc[8];
 					_mm256_store_si256((__m256i*)normalEnc,
-						oct_encode_u16_x8(*(const __m256*)&vnx,
+						oct_encode_u32_x8(*(const __m256*)&vnx,
 						                  *(const __m256*)&vny,
 						                  *(const __m256*)&vnz));
 					alignas(32) uint32_t tangentEnc[8];
@@ -847,9 +923,9 @@ struct TileRasterizer {
 						// the dominant body of any tile that covers a wall
 						// or floor; partial-coverage stays on the scatter
 						// path below.
-						const __m128i n16 = pack_lo16_x8(
+						// Normal plane is 32-bit (oct 16.16): full-lane store.
+						_mm256_storeu_si256((__m256i*)span.normal,
 							_mm256_load_si256((const __m256i*)normalEnc));
-						_mm_storeu_si128((__m128i*)span.normal, n16);
 						if (wantTangent) {
 							const __m128i t16Raw = pack_lo16_x8(
 								_mm256_load_si256((const __m256i*)tangentEnc));
@@ -904,7 +980,7 @@ struct TileRasterizer {
 						}
 						for (int lane = 0; lane < 8; ++lane) {
 							if (!mask_l[lane]) continue;
-							span.normal[lane] = uint16_t(normalEnc[lane]);
+							span.normal[lane] = normalEnc[lane];
 							if (wantTangent) {
 								span.tangent[lane] = tValid[lane]
 									? uint16_t(tangentEnc[lane]) : uint16_t(0);
