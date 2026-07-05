@@ -3020,24 +3020,63 @@ struct CityScene : SceneDriver {
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
 			{
 				TailProf::ScopeTimer _tp("dispmap-resample");
-				memcpy(backBuffer.data(), VPage, PageSize);
-				dword* ptr = (dword*)VPage;
-				uint16_t* zbuffer_ptr = ZPage16;
-				// Capture the pass-1 Z through the SAME displacement the
-				// color takes: the froxel composite fogs the water's
-				// reflection underlay at this mirrored path length, giving
-				// the mirror the same fog gradient as the world above
+				// Row-band parallel resample (mirrors updateRippleDispMap's
+				// pool fan-out). Independence: the memcpy snapshots VPage into
+				// the immutable backBuffer; the gather then reads only
+				// backBuffer + ZPage16 (both read-only in the loop) and writes
+				// VPage[i]/zRefl[i] exactly once per i — so index bands are
+				// disjoint. displacements cross bands, so the copy is a HARD
+				// barrier: every band must finish its memcpy before ANY band
+				// starts gathering. Two waves, each joined.
+				// Capture the pass-1 Z through the SAME displacement the color
+				// takes: the froxel composite fogs the water's reflection
+				// underlay at this mirrored path length, giving the mirror the
+				// same fog gradient as the world above
 				// (|mirrorCam→building| = camera→water→building).
-				uint16_t* zr = zRefl.data();
-				size_t idx = 0;
-				for (auto displacement : dispMap) {
-					if (*zbuffer_ptr++ != 0) {
-						*ptr = backBuffer[displacement];
-						zr[idx] = ZPage16[displacement];
-					} else {
-						zr[idx] = 0;
+				dword* const vp = (dword*)VPage;
+				const dword* const bb = backBuffer.data();
+				uint16_t* const zr = zRefl.data();
+				const uint16_t* const zp = ZPage16;
+				const int* const dm = dispMap.data();
+				const int nPix = (int)dispMap.size();
+				auto copyBand = [=](int i0, int i1) {
+					memcpy(backBuffer.data() + i0, vp + i0,
+					       size_t(i1 - i0) * sizeof(dword));
+				};
+				auto gatherBand = [=](int i0, int i1) {
+					for (int i = i0; i < i1; ++i) {
+						if (zp[i] != 0) {
+							const int d = dm[i];
+							vp[i] = bb[d];
+							zr[i] = zp[d];
+						} else {
+							zr[i] = 0;
+						}
 					}
-					ptr++; ++idx;
+				};
+				auto& tp = ThreadPool::instance();
+				const int nThreads = (int)tp.size();
+				if (nThreads < 2 || nPix < 4096) {
+					copyBand(0, nPix);
+					gatherBand(0, nPix);
+				} else {
+					const int chunk = (nPix + nThreads - 1) / nThreads;
+					auto runWave = [&](auto&& band) {
+						auto remaining = std::make_shared<std::atomic<int>>(0);
+						for (int t = 0; t < nThreads; ++t) {
+							const int i0 = t * chunk; if (i0 >= nPix) break;
+							const int i1 = std::min(i0 + chunk, nPix);
+							remaining->fetch_add(1, std::memory_order_relaxed);
+							tp.enqueue([band, i0, i1, remaining]() {
+								band(i0, i1);
+								remaining->fetch_sub(1, std::memory_order_release);
+							});
+						}
+						while (remaining->load(std::memory_order_acquire) != 0)
+							std::this_thread::yield();
+					};
+					runWave(copyBand);    // wave 1: snapshot VPage → backBuffer
+					runWave(gatherBand);  // wave 2: displaced gather (barrier above)
 				}
 				FastFog_SetReflectionZ(zr, -RflSurfOfs);   // plane: N=(0,1,0), y = -ofs
 			}
