@@ -1043,6 +1043,78 @@ void City_Lighting()
 	}
 }
 
+// ── city_env_pixel: pass-1 (mirrored world) forward-reflective glass ──────
+// Pass-2 renders the windows through the deferred per-pixel env compose (no
+// Face_Reflective), which left the water's mirrored towers either with NO
+// reflection at all, or — worse — with the deferred kernel env-composing the
+// mirror pass: wrong by construction (real-world bake data against mirrored
+// positions) and 200–660k wasted composes/frame. Instead, give the MIRROR
+// pass the default path's cheap per-vertex method: before Reflected_Transform
+// runs, flag the window faces reflective and fill the per-vertex paraboloid-
+// sheet UVs exactly like Transform.cpp's Face_Reflective block (world-space
+// form of the same cv-pull + viewer-side sheet pick), from the current
+// camera. RenderInner then dispatches them to TheOtherBarry<OVERWRITE,
+// TEXTURETEXTURE> and Mekalele stamps the mat32 sentinel, so the mirror
+// pass's kernel never sees them. cityMirrorGlassRestore() clears the flag
+// again so pass-2 rasterizes the glass into the G-buffer as before.
+struct MirrorGlassFace { TriMesh* T; Face* F; };
+static std::vector<MirrorGlassFace> g_mirrorGlassFaces;
+
+static void cityMirrorGlassForward()
+{
+	for (auto& [T, F] : g_mirrorGlassFaces) {
+		if (!T->EnvHemiSheets[0]) continue;   // no sheets — leave deferred-only
+		Vector wsPos[3];
+		size_t i = 0;
+		for (Vertex* v : { F->A, F->B, F->C }) {
+			MatrixXVector(T->RotMat, &v->Pos, &wsPos[i]);
+			wsPos[i] += T->IPos;
+			++i;
+		}
+		// World-space face plane from the winding (Transform-block parity;
+		// equivalent to its object-space AP/N form for rigid+scale).
+		auto n = (wsPos[0] - wsPos[1]).cross(wsPos[2] - wsPos[1]);
+		Vector_Norm(&n);
+		Vector bsWorld;
+		MatrixXVector(T->RotMat, &T->BSphereCtr, &bsWorld);
+		bsWorld += T->IPos;
+		Vector cv = View->ISource;
+		const float planeD = fabsf((cv - wsPos[0]) * n);
+		const float optD   = fabsf((bsWorld - wsPos[0]) * n);
+		if (planeD > optD) {
+			const float hackD = powf(planeD - optD, 0.8f) + optD;
+			Vector pullDir = bsWorld - View->ISource;
+			const float step = pullDir * n;
+			// Same degeneracy guard as the forward block (pullDir within
+			// ~5.7° of the plane → skip, see Transform.cpp).
+			if (step * step > 0.01f * (pullDir * pullDir))
+				cv += (hackD - planeD) / step * pullDir;
+		}
+		const Vector w0 = wsPos[0] - cv;
+		const float nSide = (w0 * n) > 0.0f ? -1.0f : 1.0f;
+		const int k = fds::EnvCube_SelectFace(nSide * n.x, nSide * n.y,
+		                                      nSide * n.z);
+		float eu[3], ev[3];
+		for (i = 0; i < 3; ++i) {
+			Vector d = wsPos[i] - cv;
+			d -= (d * n) * 2.0f * n;
+			Vector_Norm(&d);
+			fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z, eu[i], ev[i]);
+		}
+		F->ReflectionTexture = T->EnvHemiSheets[k];
+		F->EU1 = eu[0]; F->EV1 = ev[0];
+		F->EU2 = eu[1]; F->EV2 = ev[1];
+		F->EU3 = eu[2]; F->EV3 = ev[2];
+		F->Flags |= Face_Reflective;
+	}
+}
+
+static void cityMirrorGlassRestore()
+{
+	for (auto& [T, F] : g_mirrorGlassFaces)
+		F->Flags &= ~dword(Face_Reflective);
+}
+
 void Reflective_AnimateTexture()
 {
 	TriMesh *T = (TriMesh *)(RflObj->Data);
@@ -2145,10 +2217,15 @@ void Initialize_City()
 			// city_env_pixel: the SAME cached faces feed the deferred env
 			// compose per pixel — registered per windows-clone material in
 			// the windows loop below (rawPanorama kept alive until then).
-			// No sheets, no Materialize, no forward composite.
+			// The paraboloid sheets below are STILL synthesized: the
+			// PASS-1 mirrored world renders the glass forward off them
+			// (cityMirrorGlassForward) so the water's reflected towers
+			// keep a reflection; only pass-2 glass is deferred.
 			fprintf(stderr, "[CITY] city_env_pixel on — registering the "
-			        "per-building face bake as deferred env stores\n");
-		} else {
+			        "per-building face bake as deferred env stores "
+			        "(+ sheets for the mirror pass)\n");
+		}
+		{
 		// Synthesize six PARABOLOID hemisphere sheets per building from the
 		// raw padded faces (no extra render, no extra cache) and Materialize
 		// them into TriMesh::EnvHemiSheets. Transform binds each reflective
@@ -2194,8 +2271,13 @@ void Initialize_City()
 					// per-triangle sheet pick on the first frame.
 					if (k == 0) b.obj->Reflection = sm;
 				}
-				b.rawPanorama.clear();
-				b.rawPanorama.shrink_to_fit();
+				// city_env_pixel: the windows loop below still needs the
+				// raw faces for EnvReflection_RegisterCubeFaces — it does
+				// the clear once the stores are registered.
+				if (!cityEnvPixel) {
+					b.rawPanorama.clear();
+					b.rawPanorama.shrink_to_fit();
+				}
 			}
 		}
 		}
@@ -2260,6 +2342,7 @@ void Initialize_City()
 	// The forward path's TheOtherBarry uses F->ReflectionTexture (set
 	// alongside) and Face_Reflective so it keeps working unchanged.
 	int windowsCloned = 0;
+	g_mirrorGlassFaces.clear();   // re-init safety (demo loop)
 	// city_env_pixel: per-building store registration bookkeeping. The
 	// building entries still hold the raw (linear) 512^2 padded faces from
 	// the cube bake above; the FIRST windows clone of a building registers
@@ -2362,6 +2445,10 @@ void Initialize_City()
 				++windowsCloned;
 			}
 			F->Txtr = clone;
+			// Pass-1 mirror glass: collected once; flagged reflective per
+			// frame around the mirrored-world render only.
+			if (cityEnvPixel)
+				g_mirrorGlassFaces.push_back({T, F});
 		}
 	}
 	fprintf(stderr, "[CITY] cloned %d windows-materials with EnvTexture set\n", windowsCloned);
@@ -2902,6 +2989,7 @@ struct CityScene : SceneDriver {
 		prof.switchTo(PROF_XFRM);
 
 		// render reflection of all objects except water
+		cityMirrorGlassForward();   // city_env_pixel: forward glass in the mirror pass
 		Reflected_Transform(CitySc);
 
 		prof.leave(PROF_XFRM);
@@ -2969,6 +3057,7 @@ struct CityScene : SceneDriver {
 		}
 
 		// render all objects normally
+		cityMirrorGlassRestore();   // pass-2: glass back to the deferred path
 		prof.enter(PROF_XFRM);
 		((TriMesh*)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
