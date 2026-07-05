@@ -2133,12 +2133,49 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 				a=_mm256_fmadd_ps(v11,w11,a);
 				return a; };
 			auto gA=[&](const float* base,__m256i idx){ return _mm256_i32gather_ps(base, idx, 4); };
+			// Uniform-group fast path: when all 8 lanes share (ix0, iz) —
+			// sky and flat/distant surfaces mostly do — every gather in this
+			// group reads the SAME 4 corner froxels, so the 32 emulated
+			// gathers (256 scalar load+insert µops on NEON; measured as this
+			// loop's cost center — an AoS repack of the froxel arrays moved
+			// nothing) collapse to 32 scalar loads + broadcasts. wsum4 op
+			// order and lane values are unchanged (an equal-index gather
+			// returns exactly the broadcast value), so the result stays
+			// bit-identical — including the iz==0 wsum4-of-constants forms
+			// the blendv path would produce.
+			alignas(32) int ix0A[8]; _mm256_store_si256((__m256i*)ix0A, ix0);
+			bool uni = true;
+			for (int L=1;L<8;++L) if (izA[L]!=izA[0] || ix0A[L]!=ix0A[0]) { uni=false; break; }
+			__m256 curR,curG,curB,ext,prevR,prevG,prevB,prevT;
+			if (uni) {
+				const int izs = izA[0], ixs = ix0A[0];
+				const int ix1s = std::min(ixs+1, nx-1);
+				const size_t c00=(size_t(iy0)*nx+ixs )*nz+izs, c10=(size_t(iy0)*nx+ix1s)*nz+izs;
+				const size_t c01=(size_t(iy1)*nx+ixs )*nz+izs, c11=(size_t(iy1)*nx+ix1s)*nz+izs;
+				auto B4=[&](const float* p,size_t a,size_t b,size_t c,size_t d){
+					return wsum4(_mm256_set1_ps(p[a]),_mm256_set1_ps(p[b]),
+					             _mm256_set1_ps(p[c]),_mm256_set1_ps(p[d])); };
+				curR=B4(accRp,c00,c10,c01,c11);
+				curG=B4(accGp,c00,c10,c01,c11);
+				curB=B4(accBp,c00,c10,c01,c11);
+				ext =B4(sctA,c00*4+3,c10*4+3,c01*4+3,c11*4+3);
+				if (izs > 0) {
+					prevR=B4(accRp,c00-1,c10-1,c01-1,c11-1);
+					prevG=B4(accGp,c00-1,c10-1,c01-1,c11-1);
+					prevB=B4(accBp,c00-1,c10-1,c01-1,c11-1);
+					prevT=B4(accTp,c00-1,c10-1,c01-1,c11-1);
+				} else {
+					const __m256 z4 = wsum4(vZero,vZero,vZero,vZero);
+					prevR=z4; prevG=z4; prevB=z4;
+					prevT=wsum4(vOne,vOne,vOne,vOne);
+				}
+			} else {
 			// cur (slice iz): RGB from acc*, ext from sctA[ic*4+3]
-			__m256 curR=wsum4(gA(accRp,ic00),gA(accRp,ic10),gA(accRp,ic01),gA(accRp,ic11));
-			__m256 curG=wsum4(gA(accGp,ic00),gA(accGp,ic10),gA(accGp,ic01),gA(accGp,ic11));
-			__m256 curB=wsum4(gA(accBp,ic00),gA(accBp,ic10),gA(accBp,ic01),gA(accBp,ic11));
+			curR=wsum4(gA(accRp,ic00),gA(accRp,ic10),gA(accRp,ic01),gA(accRp,ic11));
+			curG=wsum4(gA(accGp,ic00),gA(accGp,ic10),gA(accGp,ic01),gA(accGp,ic11));
+			curB=wsum4(gA(accBp,ic00),gA(accBp,ic10),gA(accBp,ic01),gA(accBp,ic11));
 			auto sIdx=[&](__m256i ic){ return _mm256_add_epi32(_mm256_slli_epi32(ic,2), _mm256_set1_epi32(3)); };
-			__m256 ext =wsum4(gA(sctA,sIdx(ic00)),gA(sctA,sIdx(ic10)),gA(sctA,sIdx(ic01)),gA(sctA,sIdx(ic11)));
+			ext =wsum4(gA(sctA,sIdx(ic00)),gA(sctA,sIdx(ic10)),gA(sctA,sIdx(ic01)),gA(sctA,sIdx(ic11)));
 			// prev (slice iz-1; iz==0 -> RGB 0, T 1). Clamp idx >=0 for safety.
 			auto pIdx=[&](__m256i ic){ return _mm256_max_epi32(_mm256_sub_epi32(ic,iOne), iZero); };
 			__m256i p00=pIdx(ic00),p10=pIdx(ic10),p01=pIdx(ic01),p11=pIdx(ic11);
@@ -2147,11 +2184,12 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 				             _mm256_blendv_ps(vZero,gA(base,p10),izPos),
 				             _mm256_blendv_ps(vZero,gA(base,p01),izPos),
 				             _mm256_blendv_ps(vZero,gA(base,p11),izPos)); };
-			__m256 prevR=prevRGB(accRp), prevG=prevRGB(accGp), prevB=prevRGB(accBp);
-			__m256 prevT=wsum4(_mm256_blendv_ps(vOne,gA(accTp,p00),izPos),
+			prevR=prevRGB(accRp); prevG=prevRGB(accGp); prevB=prevRGB(accBp);
+			prevT=wsum4(_mm256_blendv_ps(vOne,gA(accTp,p00),izPos),
 			                   _mm256_blendv_ps(vOne,gA(accTp,p10),izPos),
 			                   _mm256_blendv_ps(vOne,gA(accTp,p01),izPos),
 			                   _mm256_blendv_ps(vOne,gA(accTp,p11),izPos));
+			}
 			// Beer-Lambert tail. exp scalar-per-lane (ExpTable is file-static).
 			__m256 extPos=_mm256_cmp_ps(ext,_mm256_set1_ps(1e-8f),_CMP_GT_OQ);
 			alignas(32) float extA[8],pdA[8],dsA[8],tpA[8],tfA[8];
