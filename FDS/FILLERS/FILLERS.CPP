@@ -1876,12 +1876,51 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 // unified, transparent face fragments too). At flush time we collect
 // entries into a scratch array, sort descending by renderZ
 // (back-to-front), and walk the sorted array dispatching each item.
+// FDS_TBR_STATS=1: per-call wall vs summed worker-busy time + strip load
+// stats. The TailProf "serial TBR-render" scope is the orchestrator WALL
+// around this parallel dispatch (and sums both city passes per frame) —
+// these counters say how much actual work hides behind that wall and how
+// well it balances (busy/wall = effective parallelism; maxStrip = the
+// critical path).
+static const bool g_tbrStats = std::getenv("FDS_TBR_STATS") != nullptr;
+static std::atomic<uint64_t> g_tbrBusyNs{0}, g_tbrMaxStripNs{0};
+static std::atomic<uint64_t> g_tbrEntries{0}, g_tbrFlushes{0};
+// Per-material entry census (pointer-keyed open table; names printed).
+static std::atomic<const char*> g_tbrMatName[16];
+static std::atomic<uint64_t>    g_tbrMatCount[16];
+static inline void tbrCensus(const char* name)
+{
+	if (!name) name = "<null>";
+	for (int s = 0; s < 16; ++s) {
+		const char* cur = g_tbrMatName[s].load(std::memory_order_relaxed);
+		if (cur == name) { g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return; }
+		if (!cur) {
+			const char* expect = nullptr;
+			if (g_tbrMatName[s].compare_exchange_strong(expect, name)) {
+				g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return;
+			}
+			if (expect == name) { g_tbrMatCount[s].fetch_add(1, std::memory_order_relaxed); return; }
+		}
+	}
+}
+
 void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 {
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
 
+	const auto tbrWall0 = std::chrono::steady_clock::now();
+	if (g_tbrStats) {
+		g_tbrBusyNs.store(0, std::memory_order_relaxed);
+		g_tbrMaxStripNs.store(0, std::memory_order_relaxed);
+		g_tbrEntries.store(0, std::memory_order_relaxed);
+		g_tbrFlushes.store(0, std::memory_order_relaxed);
+	}
+
 	dispatchIndexed(numTiles, &stripsDone, [Sc, dctx](int ii) {
+			const auto tStrip0 = g_tbrStats
+				? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point{};
 			const mword i = mword(ii);
 			float spriteClipY1 = i << TILELOG;
 			float spriteClipY2 = (i + 1) << TILELOG;
@@ -1939,6 +1978,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			};
 			auto flushXparClump = [&]() {
 				if (xparClump.empty()) return;
+				if (g_tbrStats) g_tbrFlushes.fetch_add(1, std::memory_order_relaxed);
 				// dctx is null only on a non-deferred TBR frame (forward
 				// fountain fallback) — no transparent faces were routed
 				// into the strips there, so the clump is always empty.
@@ -1953,6 +1993,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			for (const TBREntry& e : scratch) {
 				Face*   F = e.F;
 				const bool isSprite = (F->A == F->B);
+				if (g_tbrStats)
+					tbrCensus(isSprite ? "<sprite>"
+					          : (F->Txtr ? F->Txtr->Name : nullptr));
 
 				if (isSprite) {
 					// Flush any open transparent clump first so it
@@ -2026,9 +2069,45 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			// Trailing flush.
 			flushXparClump();
 			Sc->SBufferHead[i] = -1;
+			if (g_tbrStats) {
+				const uint64_t ns = uint64_t(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - tStrip0).count());
+				g_tbrBusyNs.fetch_add(ns, std::memory_order_relaxed);
+				g_tbrEntries.fetch_add(scratch.size(), std::memory_order_relaxed);
+				uint64_t cur = g_tbrMaxStripNs.load(std::memory_order_relaxed);
+				while (ns > cur &&
+				       !g_tbrMaxStripNs.compare_exchange_weak(cur, ns)) {}
+			}
 	});
 
 	for (int k = 0; k < numTiles; ++k) stripsDone.acquire();
+
+	if (g_tbrStats) {
+		static int sCall = 0;
+		const double wallMs = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - tbrWall0).count();
+		if ((++sCall & 31) < 2) {  // two consecutive calls (= both city passes)
+			std::fprintf(stderr, "[TBR-STATS] call=%d strips=%d wall=%.2fms "
+			    "busy=%.2fms (par=%.1fx) maxStrip=%.2fms entries=%llu flushes=%llu\n",
+			    sCall, numTiles, wallMs,
+			    double(g_tbrBusyNs.load()) / 1e6,
+			    wallMs > 0 ? (double(g_tbrBusyNs.load()) / 1e6) / wallMs : 0.0,
+			    double(g_tbrMaxStripNs.load()) / 1e6,
+			    (unsigned long long)g_tbrEntries.load(),
+			    (unsigned long long)g_tbrFlushes.load());
+			for (int s2 = 0; s2 < 16; ++s2) {
+				const char* nm = g_tbrMatName[s2].load(std::memory_order_relaxed);
+				const uint64_t c = g_tbrMatCount[s2].exchange(0, std::memory_order_relaxed);
+				if (nm && c)
+					std::fprintf(stderr, "[TBR-STATS]   %8llu  %s\n",
+					    (unsigned long long)c, nm);
+			}
+		} else {
+			for (int s2 = 0; s2 < 16; ++s2)
+				g_tbrMatCount[s2].store(0, std::memory_order_relaxed);
+		}
+	}
 
 	Sc->SBufferCur = 0;
 }
