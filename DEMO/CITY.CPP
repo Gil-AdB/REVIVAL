@@ -3034,13 +3034,14 @@ struct CityScene : SceneDriver {
 				// same fog gradient as the world above
 				// (|mirrorCam→building| = camera→water→building).
 				dword* const vp = (dword*)VPage;
-				const dword* const bb = backBuffer.data();
+				dword* const bbw = backBuffer.data();
+				const dword* const bb = bbw;
 				uint16_t* const zr = zRefl.data();
 				const uint16_t* const zp = ZPage16;
 				const int* const dm = dispMap.data();
 				const int nPix = (int)dispMap.size();
 				auto copyBand = [=](int i0, int i1) {
-					memcpy(backBuffer.data() + i0, vp + i0,
+					memcpy(bbw + i0, vp + i0,
 					       size_t(i1 - i0) * sizeof(dword));
 				};
 				auto gatherBand = [=](int i0, int i1) {
