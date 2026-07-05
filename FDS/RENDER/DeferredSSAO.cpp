@@ -203,7 +203,7 @@ void Render_SSAO() {
 	fds::hdrf* hbuf = useHdr ? fds::g_hdrBuf.data() : nullptr;
 	dword* out  = reinterpret_cast<dword*>(VPage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 
 	const bool gtao = fds::FeatureFlags::ssao_gtao();
 

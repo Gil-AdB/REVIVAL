@@ -2378,8 +2378,8 @@ void Render_OmniHalos(const DeferredLightingCtx &ctx) {
     }
     if (omniCount == 0) return;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     constexpr int numTiles  = numTilesX * numTilesY;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
@@ -2555,8 +2555,8 @@ void Render_DeferredSkybox() {
     // cubemap UV change between adjacent pixels for mip selection.
     const float pixelAngle = (invFOVX_l > invFOVY_l) ? invFOVX_l : invFOVY_l;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
     renderns::tileCounter = 0;
@@ -2728,8 +2728,8 @@ void Render_DeferredFogPass(const DeferredLightingCtx &ctx) {
 	// (the old global-reading code silently fogged the WRONG target).
 	if (!ctx.gb || !ctx.vpage || !ctx.zpage16) return;
 	const float invFZP = 1.0f / CurScene->FZP;
-	constexpr auto numTilesX = 6;
-	constexpr auto numTilesY = 4;
+	constexpr auto numTilesX = 12;
+	constexpr auto numTilesY = 8;
 	const auto tileSizeX = (XRes + (numTilesX - 1)) / numTilesX;
 	const auto tileSizeY = (YRes + (numTilesY - 1)) / numTilesY;
 	renderns::tileCounter = 0;

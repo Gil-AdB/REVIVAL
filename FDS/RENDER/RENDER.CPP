@@ -450,6 +450,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	// skips matID >= count via the existing range check, leaving those
 	// forward-rendered pixels alone.
 	if (deferred && g_gbuffer) {
+		TailProf::ScopeTimer _tpClear("gbuf-clear");
 		const size_t numPixels = size_t(XRes) * size_t(YRes);
 		parallel_memset(g_gbuffer->txtr.data(), 0xFF, numPixels * sizeof(uint32_t));
 		// Lightmap planes: clear to 0 each frame (sentinel = "no
@@ -590,11 +591,11 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 				// otherwise keep stale VPage content (uninitialized on a
 				// scene's first frames) that the water then reflects.
 				if (!(skipVolumetric && fds::FeatureFlags::fast_fog_froxel()))
-					Render_DeferredFastFog(dctx);
+					{ TailProf::ScopeTimer _tp("fastfog"); Render_DeferredFastFog(dctx); }
 				else
-					Render_DeferredFastFogSkyPaint(dctx);
+					{ TailProf::ScopeTimer _tp("fog-skypaint"); Render_DeferredFastFogSkyPaint(dctx); }
 			} else
-				Render_DeferredFogPass(dctx);
+				{ TailProf::ScopeTimer _tp("fog-legacy"); Render_DeferredFogPass(dctx); }
 		}
 
 		// Fog-off HDR activation: a no-fog scene (greets) never ran the froxel

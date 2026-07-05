@@ -85,7 +85,7 @@ void Render_EdgeAA(const DeferredLightingCtx &ctx) {
 	dword* src = g_aaSrc.data();
 	std::memcpy(src, out, N * sizeof(dword));
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (W + numTilesX - 1) / numTilesX;
 	const int tsy = (H + numTilesY - 1) / numTilesY;
 

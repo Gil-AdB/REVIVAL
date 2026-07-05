@@ -14,6 +14,7 @@
 #include "SceneTick.h"
 #include "Scenes.h"
 #include <RENDER/SpotlightCones.h>
+#include <RENDER/TailProf.h>   // FDS_TAIL_PROF: dispMap-resample attribution
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -3018,6 +3019,7 @@ struct CityScene : SceneDriver {
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
 			{
+				TailProf::ScopeTimer _tp("dispmap-resample");
 				memcpy(backBuffer.data(), VPage, PageSize);
 				dword* ptr = (dword*)VPage;
 				uint16_t* zbuffer_ptr = ZPage16;

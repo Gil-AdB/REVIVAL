@@ -855,7 +855,7 @@ void Render_TonemapToVPage() {
     // 6x4 tile-job dispatch (Render()'s model). The tonemap is embarrassingly
     // parallel; callers run on the tick thread (not a pool worker), so
     // enqueue+wait can't deadlock.
-    constexpr int numTilesX = 6, numTilesY = 4;
+    constexpr int numTilesX = 12, numTilesY = 8;
     const int tsx = (W + numTilesX - 1) / numTilesX;
     const int tsy = (H + numTilesY - 1) / numTilesY;
     dispatchIndexed(numTilesX * numTilesY, &renderns::tileDone,

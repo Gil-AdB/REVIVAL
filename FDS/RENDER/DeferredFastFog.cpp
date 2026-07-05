@@ -33,6 +33,7 @@
 #include "Base/Camera.h"
 #include "FILLERS/Mekalele.h"
 #include "FILLERS/ShadowMap.h"
+#include "TailProf.h"   // FDS_TAIL_PROF: fog sub-phase attribution
 #include "RENDER/DeferredCommon.h"
 #include "RENDER/Hdr.h"
 #include "Threads.h"
@@ -1049,6 +1050,15 @@ namespace {
 	// pointer dangling into a freed buffer.
 	const uint16_t* gFrReflZ = nullptr;
 	float           gFrReflWaterY = 0.0f;   // mirror plane height (world Y)
+	// Composite hot-loop LUT: encoded Z → depth-slice index. iz is a pure
+	// function of ze given (near, far, nz, zscale) — building the table with
+	// the composite's EXACT float expression makes the lookup bit-identical
+	// to the per-pixel std::log it replaces (measured there: the log was the
+	// single biggest term in the 8.7ms/f composite). ze==0 entries evaluate
+	// to iz(gFrFar), which is exactly the composite's sky default.
+	std::vector<uint8_t> gFrIzLUT;          // [65536]
+	float gFrLutNear = -1.0f, gFrLutFar = -1.0f, gFrLutInvZ = -1.0f;
+	int   gFrLutNz = -1;
 }
 
 // See gFrReflZ. The city calls this after its dispMap wobble with the
@@ -1820,8 +1830,15 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 			int ix0 = int(std::floor(fx)); float wx = fx - float(ix0);
 			if (ix0 < 0) { ix0 = 0; wx = 0.0f; } if (ix0 >= nx-1) { ix0 = nx>1?nx-2:0; wx = nx>1?1.0f:0.0f; }
 			const int ix1 = std::min(ix0+1, nx-1);
-			int iz = int(std::log(z * invNear) * invLogFN * float(nz));
-			if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+			// Slice index from the LUT (bit-identical, see build site). Only
+			// the water-reflection branch produces a z the table can't key
+			// (zw is ray-dependent, not ze-dependent) — recompute for those.
+			int iz;
+			if (ze != 0 || z == gFrFar) iz = gFrIzLUT[ze];
+			else {
+				iz = int(std::log(z * invNear) * invLogFN * float(nz));
+				if (iz < 0) iz = 0; if (iz >= nz) iz = nz-1;
+			}
 			const float zb0 = zb[iz], dzSlice = zb[iz+1] - zb0;
 			const float partialDz = z - zb0;
 			// bilinear XY: accPrev(0..2), Tprev(3), accCur(4..6), ext(7)
@@ -1991,8 +2008,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	P.feather = (fth > 0.0f) ? fth : 0.2f * (P.slabY1 - P.slabY0);
 	P.invFeather = 1.0f / P.feather;
 
-	constexpr int numTilesX = 6;
-	constexpr int numTilesY = 4;
+	constexpr int numTilesX = 12;
+	constexpr int numTilesY = 8;
 
 	auto runTiles = [&](int w, int h, auto&& body) {
 		const int tsx = (w + numTilesX - 1) / numTilesX;
@@ -2039,6 +2056,28 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 			float zbv = gFrNear;
 			for (int k = 0; k <= nz; ++k) { gFrZb[k] = zbv; zbv *= rr; }
 		}
+		// ze → slice-index LUT (see decl): rebuilt only when the mapping's
+		// inputs change. Must mirror Froxel_CompositeTile's expression exactly.
+		if (gFrLutNear != gFrNear || gFrLutFar != gFrFar || gFrLutNz != nz
+		    || gFrLutInvZ != P.invZScale || gFrIzLUT.size() != 65536) {
+			gFrIzLUT.resize(65536);
+			const float invNear  = 1.0f / gFrNear;
+			const float invLogFN = 1.0f / std::log(gFrFar / gFrNear);
+			for (int ze = 0; ze < 65536; ++ze) {
+				float z;
+				if (ze == 0) z = gFrFar;   // composite's sky default
+				else {
+					const float zSurf = float(0xFF80 - ze) * P.invZScale;
+					z = zSurf > gFrFar ? gFrFar : zSurf;
+				}
+				if (z < gFrNear) z = gFrNear;
+				int iz = int(std::log(z * invNear) * invLogFN * float(nz));
+				if (iz < 0) iz = 0; if (iz >= nz) iz = nz - 1;
+				gFrIzLUT[ze] = uint8_t(iz);
+			}
+			gFrLutNear = gFrNear; gFrLutFar = gFrFar;
+			gFrLutNz = nz; gFrLutInvZ = P.invZScale;
+		}
 		// Temporal supersampling: Halton(2,3,5) sub-froxel jitter this frame;
 		// after the populate, this frame's camera/rotation + blended grid
 		// become the history the NEXT frame reprojects against.
@@ -2071,10 +2110,13 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 				gGlX = gx; gGlY = gy;
 				gGlow.assign(size_t(gx)*size_t(gy)*size_t(nz)*3, 0.0f);
 			}
-			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); });
+			{ TailProf::ScopeTimer _tp("fog-glow");
+			runTiles(gGlX, gGlY, [&](int a,int b,int c,int d){ Froxel_GlowTile(a,b,c,d,P); }); }
 		}
-		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); });
-		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); });
+		{ TailProf::ScopeTimer _tp("fog-columns");
+		runTiles(nx, ny, [&](int a,int b,int c,int d){ Froxel_ColumnTile(a,b,c,d,P); }); }
+		{ TailProf::ScopeTimer _tp("fog-composite");
+		runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); }); }
 		// This is the only path that populates g_hdrBuf; mark it so the tonemap
 		// runs (and doesn't blacken scenes/frames where the froxel composite
 		// never ran — e.g. greets with fog off, which would otherwise tonemap a
@@ -2160,7 +2202,7 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	const uint16_t* zEnc = ZPage16;
 	dword* out = reinterpret_cast<dword*>(VPage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (XRes + numTilesX - 1) / numTilesX;
 	const int tsy = (YRes + numTilesY - 1) / numTilesY;
 	{
@@ -2271,7 +2313,7 @@ void Render_ScreenSpaceRain() {
 	const uint16_t* zEnc = ZPage16;
 	dword* out = reinterpret_cast<dword*>(VPage);
 
-	constexpr int numTilesX = 6, numTilesY = 4;
+	constexpr int numTilesX = 12, numTilesY = 8;
 	const int tsx = (XRes + numTilesX - 1) / numTilesX;
 	const int tsy = (YRes + numTilesY - 1) / numTilesY;
 	{
@@ -3266,8 +3308,8 @@ void Render_DeferredVolumetric(const DeferredLightingCtx &ctx) {
         : 0.0f;
     const float haloDens = fds::FeatureFlags::omni_halo_strength() * 0.001f;
 
-    constexpr int numTilesX = 6;
-    constexpr int numTilesY = 4;
+    constexpr int numTilesX = 12;
+    constexpr int numTilesY = 8;
     const int tileSizeX = (XRes + numTilesX - 1) / numTilesX;
     const int tileSizeY = (YRes + numTilesY - 1) / numTilesY;
 
