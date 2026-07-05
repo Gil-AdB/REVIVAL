@@ -725,6 +725,45 @@ static const EnvTraceCfg* EnvTraceGet()
 	return state == 2 ? &cfg : nullptr;
 }
 
+// FDS_ENVVEC_STATS=1: per-callsite env-compose counters, printed every 64
+// kernel setups. Answers "which kernel actually composes the glass" —
+// the vec front-end only covers the OPAQUE OuterVec env-only lanes.
+static std::atomic<uint64_t> g_envCntWave1{0}, g_envCntXpar{0},
+	g_envCntOvScalar{0}, g_envCntOvEnvScalar{0}, g_envCntOvEnvVec{0};
+static const bool g_envVecStats = std::getenv("FDS_ENVVEC_STATS") != nullptr;
+
+// Face-major BILINEAR fetch from a padded-cube env store (in-face clamped —
+// the D2 overscan padding makes that seam-free). Shared by the scalar
+// compose and the OuterVec 8-wide env front-end so the two paths cannot
+// drift in sampling convention.
+static inline void EnvCubeFetchBil(const fds::EnvPanoLinear* envP, int lvl,
+                                   int face, float u, float v,
+                                   float& B, float& G, float& R)
+{
+	const int fr = envP->W >> lvl;
+	float px = u * float(fr) - 0.5f;
+	float py = v * float(fr) - 0.5f;
+	if (px < 0.0f) px = 0.0f;
+	if (py < 0.0f) py = 0.0f;
+	int x0 = int(px), y0 = int(py);
+	if (x0 > fr - 2) x0 = fr - 2;
+	if (y0 > fr - 2) y0 = fr - 2;
+	const float ax = px - float(x0), ay = py - float(y0);
+	const uint32_t* base = envP->mip[lvl] + size_t(face) * fr * fr;
+	const uint32_t p00 = base[size_t(y0) * fr + x0];
+	const uint32_t p10 = base[size_t(y0) * fr + x0 + 1];
+	const uint32_t p01 = base[size_t(y0 + 1) * fr + x0];
+	const uint32_t p11 = base[size_t(y0 + 1) * fr + x0 + 1];
+	auto ch = [&](int sh) -> float {
+		const float t0 = float((p00 >> sh) & 0xFF)
+		               + ax * (float((p10 >> sh) & 0xFF) - float((p00 >> sh) & 0xFF));
+		const float t1 = float((p01 >> sh) & 0xFF)
+		               + ax * (float((p11 >> sh) & 0xFF) - float((p01 >> sh) & 0xFF));
+		return t0 + ay * (t1 - t0);
+	};
+	B = ch(0); G = ch(8); R = ch(16);
+}
+
 static inline void EnvSpecComposeScalar(
 	const DeferredLightingCtx &ctx, const fds::EnvPanoLinear *envP,
 	const Material *Mat, uint32_t miplevel, uint32_t swizzledUV,
@@ -959,32 +998,10 @@ static inline void EnvSpecComposeScalar(
 		// Face-major BILINEAR fetch: per-pixel reflected dirs sweep
 		// continuously under camera motion, and nearest sampling made
 		// high-frequency store content shimmer frame-to-frame (the city
-		// per-pixel experiment's residual "jumpy"). The overscan padding
-		// (D2) makes an in-face clamped bilerp seam-free.
+		// per-pixel experiment's residual "jumpy"). Shared helper (also
+		// used by the OuterVec 8-wide env front-end).
 		auto fcBil = [&](int lvl, float& B, float& G, float& R) {
-			const int fr = envP->W >> lvl;
-			float px = cubeU * float(fr) - 0.5f;
-			float py = cubeV * float(fr) - 0.5f;
-			if (px < 0.0f) px = 0.0f;
-			if (py < 0.0f) py = 0.0f;
-			int x0 = int(px), y0 = int(py);
-			if (x0 > fr - 2) x0 = fr - 2;
-			if (y0 > fr - 2) y0 = fr - 2;
-			const float ax = px - float(x0), ay = py - float(y0);
-			const uint32_t* base =
-				envP->mip[lvl] + size_t(cubeFace) * fr * fr;
-			const uint32_t p00 = base[size_t(y0) * fr + x0];
-			const uint32_t p10 = base[size_t(y0) * fr + x0 + 1];
-			const uint32_t p01 = base[size_t(y0 + 1) * fr + x0];
-			const uint32_t p11 = base[size_t(y0 + 1) * fr + x0 + 1];
-			auto ch = [&](int sh) -> float {
-				const float t0 = float((p00 >> sh) & 0xFF)
-				               + ax * (float((p10 >> sh) & 0xFF) - float((p00 >> sh) & 0xFF));
-				const float t1 = float((p01 >> sh) & 0xFF)
-				               + ax * (float((p11 >> sh) & 0xFF) - float((p01 >> sh) & 0xFF));
-				return t0 + ay * (t1 - t0);
-			};
-			B = ch(0); G = ch(8); R = ch(16);
+			EnvCubeFetchBil(envP, lvl, cubeFace, cubeU, cubeV, B, G, R);
 		};
 		float b0, g0, r0;
 		fcBil(lvl0, b0, g0, r0);
@@ -2066,6 +2083,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// indexes the pano — floors/walls track position instead of
 			// wearing a pasted-on picture.
 			if (hasEnvRefl) {
+				if (g_envVecStats) g_envCntWave1.fetch_add(1, std::memory_order_relaxed);
 				EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
 				                     x, y, z, nx, ny, nz,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
@@ -2809,6 +2827,143 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 // accumulate, saturate, modulate — runs 8-wide. Specular and water
 // fall back to scalar tail when needed; checkerboard is handled by
 // dropping odd lanes via the alive mask.
+// 8-wide rsqrt matching fast_rsqrt's shape (estimate + one Newton-Raphson).
+static inline __m256 rsqrt8_nr(__m256 x)
+{
+	__m256 e = _mm256_rsqrt_ps(x);
+	const __m256 xe2 = _mm256_mul_ps(_mm256_mul_ps(x, e), e);
+	return _mm256_mul_ps(e, _mm256_fnmadd_ps(_mm256_set1_ps(0.5f), xe2,
+	                                          _mm256_set1_ps(1.5f)));
+}
+
+// 8-wide front-end of the env-specular compose for the OuterVec env-only
+// lanes — the CITY city_env_pixel case only: one UNIFORM cube store across
+// the group, noParallax, cv-pull on, no roughness/metal maps, env
+// diagnostics off (anything else falls back to EnvSpecComposeScalar).
+// Vectorizes the math-heavy chain: view-ray handling, viewer-side flip,
+// both view->world rotations, the full cv-pull (three rsqrts) with its
+// guard fade, the reflect, roughness->mip, and Schlick Fresnel. The face
+// pick + bilinear fetch stay on the scalar EnvCube helpers in the caller —
+// they are gathers either way, and sharing the helpers keeps sampling
+// convention parity with the scalar compose.
+//
+// Outputs per lane: world reflect dir (rvx/y/z), Fresnel*gain weight (ek),
+// and the float mip level (lvlF). Lanes without env produce junk — the
+// caller only consumes lanes with lane_envP set.
+static inline void EnvComposeCityVec8(const DeferredLightingCtx &ctx,
+	const fds::EnvPanoLinear* envP,
+	const float* ax, const float* ay, const float* az,
+	const float* anx, const float* any_, const float* anz,
+	const float* laneGloss, const float* laneF0, float envReflGain,
+	float* outRvx, float* outRvy, float* outRvz,
+	float* outEk, float* outLvlF)
+{
+	const __m256 x = _mm256_load_ps(ax);
+	const __m256 y = _mm256_load_ps(ay);
+	const __m256 z = _mm256_load_ps(az);
+	__m256 nx = _mm256_load_ps(anx);
+	__m256 ny = _mm256_load_ps(any_);
+	__m256 nz = _mm256_load_ps(anz);
+	const __m256 zero = _mm256_setzero_ps();
+	const __m256 one  = _mm256_set1_ps(1.0f);
+
+	// Viewer-side flip: sign(d.N) == sign(viewpos.N) (dInv > 0), so no
+	// normalize needed for the test.
+	{
+		const __m256 vDotN = _mm256_fmadd_ps(x, nx,
+			_mm256_fmadd_ps(y, ny, _mm256_mul_ps(z, nz)));
+		const __m256 flip = _mm256_cmp_ps(vDotN, zero, _CMP_GT_OQ);
+		const __m256 sgn  = _mm256_blendv_ps(one, _mm256_set1_ps(-1.0f), flip);
+		nx = _mm256_mul_ps(nx, sgn);
+		ny = _mm256_mul_ps(ny, sgn);
+		nz = _mm256_mul_ps(nz, sgn);
+	}
+
+	// View -> world rotations (viewToWorld broadcast).
+	const __m256 r00 = _mm256_set1_ps(ctx.viewToWorld[0][0]);
+	const __m256 r01 = _mm256_set1_ps(ctx.viewToWorld[0][1]);
+	const __m256 r02 = _mm256_set1_ps(ctx.viewToWorld[0][2]);
+	const __m256 r10 = _mm256_set1_ps(ctx.viewToWorld[1][0]);
+	const __m256 r11 = _mm256_set1_ps(ctx.viewToWorld[1][1]);
+	const __m256 r12 = _mm256_set1_ps(ctx.viewToWorld[1][2]);
+	const __m256 r20 = _mm256_set1_ps(ctx.viewToWorld[2][0]);
+	const __m256 r21 = _mm256_set1_ps(ctx.viewToWorld[2][1]);
+	const __m256 r22 = _mm256_set1_ps(ctx.viewToWorld[2][2]);
+	const __m256 nwx = _mm256_fmadd_ps(r00, nx, _mm256_fmadd_ps(r01, ny, _mm256_mul_ps(r02, nz)));
+	const __m256 nwy = _mm256_fmadd_ps(r10, nx, _mm256_fmadd_ps(r11, ny, _mm256_mul_ps(r12, nz)));
+	const __m256 nwz = _mm256_fmadd_ps(r20, nx, _mm256_fmadd_ps(r21, ny, _mm256_mul_ps(r22, nz)));
+	// Rotated view position rp = R^T * viewpos = sampleWorld - camera.
+	const __m256 rpx = _mm256_fmadd_ps(r00, x, _mm256_fmadd_ps(r01, y, _mm256_mul_ps(r02, z)));
+	const __m256 rpy = _mm256_fmadd_ps(r10, x, _mm256_fmadd_ps(r11, y, _mm256_mul_ps(r12, z)));
+	const __m256 rpz = _mm256_fmadd_ps(r20, x, _mm256_fmadd_ps(r21, y, _mm256_mul_ps(r22, z)));
+
+	// cv-pull (scalar-compose parity; see EnvSpecComposeScalar). u =
+	// bakePoint - camera is UNIFORM across the group.
+	const float uxs = envP->bakeX - ctx.cameraWorldX;
+	const float uys = envP->bakeY - ctx.cameraWorldY;
+	const float uzs = envP->bakeZ - ctx.cameraWorldZ;
+	const float uLen2s = uxs*uxs + uys*uys + uzs*uzs;
+	const __m256 ux = _mm256_set1_ps(uxs), uy = _mm256_set1_ps(uys), uz = _mm256_set1_ps(uzs);
+	const __m256 signMask = _mm256_set1_ps(-0.0f);
+	// planeD = |(cam - sw).nw| = |rp.nw| ; optD = |(u - rp).nw|
+	const __m256 rpDotN = _mm256_fmadd_ps(rpx, nwx, _mm256_fmadd_ps(rpy, nwy, _mm256_mul_ps(rpz, nwz)));
+	const __m256 planeD = _mm256_andnot_ps(signMask, rpDotN);
+	const __m256 step   = _mm256_fmadd_ps(ux, nwx, _mm256_fmadd_ps(uy, nwy, _mm256_mul_ps(uz, nwz)));
+	const __m256 optD   = _mm256_andnot_ps(signMask, _mm256_sub_ps(step, rpDotN));
+	const __m256 gMin   = _mm256_set1_ps(0.01f * uLen2s);
+	const __m256 g      = _mm256_mul_ps(step, step);
+	const __m256 gate   = _mm256_and_ps(
+		_mm256_cmp_ps(planeD, _mm256_add_ps(optD, one), _CMP_GT_OQ),
+		_mm256_cmp_ps(g, gMin, _CMP_GT_OQ));
+	// d0^0.75 via two NR rsqrts (scalar-compose parity); inputs clamped so
+	// masked-off lanes stay finite (blended away below).
+	const __m256 d0  = _mm256_max_ps(_mm256_sub_ps(planeD, optD), one);
+	const __m256 sq  = _mm256_mul_ps(d0, rsqrt8_nr(d0));            // sqrt(d0)
+	const __m256 t   = _mm256_mul_ps(d0, sq);                       // d0^1.5
+	const __m256 hackD = _mm256_fmadd_ps(t, rsqrt8_nr(t), optD);    // d0^0.75 + optD
+	const __m256 safeStep = _mm256_blendv_ps(one, step, gate);
+	__m256 k = _mm256_div_ps(_mm256_sub_ps(hackD, planeD), safeStep);
+	// Guard fade: k *= clamp((g - gMin) / (3*gMin), 0, 1).
+	const __m256 fade = _mm256_min_ps(one, _mm256_max_ps(zero,
+		_mm256_div_ps(_mm256_sub_ps(g, gMin), _mm256_mul_ps(_mm256_set1_ps(3.0f), gMin))));
+	k = _mm256_mul_ps(k, fade);
+	k = _mm256_and_ps(k, gate);
+	// w = sw - pulledEye = rp - k*u ; normalize; reflect about nw.
+	__m256 wx = _mm256_fnmadd_ps(k, ux, rpx);
+	__m256 wy = _mm256_fnmadd_ps(k, uy, rpy);
+	__m256 wz = _mm256_fnmadd_ps(k, uz, rpz);
+	const __m256 wLen2 = _mm256_fmadd_ps(wx, wx,
+		_mm256_fmadd_ps(wy, wy, _mm256_fmadd_ps(wz, wz, _mm256_set1_ps(1e-12f))));
+	const __m256 wInv = rsqrt8_nr(wLen2);
+	wx = _mm256_mul_ps(wx, wInv);
+	wy = _mm256_mul_ps(wy, wInv);
+	wz = _mm256_mul_ps(wz, wInv);
+	const __m256 wDotN = _mm256_fmadd_ps(wx, nwx, _mm256_fmadd_ps(wy, nwy, _mm256_mul_ps(wz, nwz)));
+	const __m256 twoWDotN = _mm256_add_ps(wDotN, wDotN);
+	_mm256_store_ps(outRvx, _mm256_fnmadd_ps(twoWDotN, nwx, wx));
+	_mm256_store_ps(outRvy, _mm256_fnmadd_ps(twoWDotN, nwy, wy));
+	_mm256_store_ps(outRvz, _mm256_fnmadd_ps(twoWDotN, nwz, wz));
+
+	// Roughness -> mip (no rough map on this path: gloss-derived).
+	const __m256 gloss = _mm256_load_ps(laneGloss);
+	const __m256 rough = rsqrt8_nr(_mm256_mul_ps(
+		_mm256_add_ps(gloss, _mm256_set1_ps(2.0f)), _mm256_set1_ps(0.5f)));
+	const __m256 maxLvl = _mm256_set1_ps(float(envP->numMips - 1));
+	_mm256_store_ps(outLvlF,
+		_mm256_min_ps(maxLvl, _mm256_max_ps(zero, _mm256_mul_ps(rough, maxLvl))));
+
+	// Schlick Fresnel (metal = 0 on this path), ek = fres * gain.
+	const __m256 ndv = _mm256_min_ps(one, _mm256_max_ps(zero,
+		_mm256_sub_ps(zero, wDotN)));
+	const __m256 f0  = _mm256_load_ps(laneF0);
+	const __m256 f90 = _mm256_max_ps(_mm256_sub_ps(one, rough), f0);
+	const __m256 omv = _mm256_sub_ps(one, ndv);
+	const __m256 omv2 = _mm256_mul_ps(omv, omv);
+	const __m256 omv5 = _mm256_mul_ps(_mm256_mul_ps(omv2, omv2), omv);
+	const __m256 fres = _mm256_fmadd_ps(_mm256_sub_ps(f90, f0), omv5, f0);
+	_mm256_store_ps(outEk, _mm256_mul_ps(fres, _mm256_set1_ps(envReflGain)));
+}
+
 static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx,
                                                    int tileIndex,
                                                    int x1, int y1, int x2, int y2)
@@ -3265,6 +3420,56 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			_mm256_store_ps(any_l, ny);
 			_mm256_store_ps(anz, nz);
 
+			// 8-wide env front-end (city case): engage when every env lane
+			// in this group shares ONE cube store with the city shape
+			// (noParallax + cv-pull) and no per-pixel map/diagnostic
+			// forces the scalar compose. See EnvComposeCityVec8.
+			static const bool sEnvVecDiagOff =
+				!std::getenv("ENVPROBE") && !std::getenv("ENVFLIP") &&
+				!std::getenv("ENV_NOFETCH") && !std::getenv("FDS_ENV_SKIP_NEGY") &&
+				!EnvTraceGet();
+			bool envVecReady = false;
+			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
+			alignas(32) float envEk[8], envLvlF[8], envF0[8];
+			if (sEnvVecDiagOff) {
+				const fds::EnvPanoLinear* uni = nullptr;
+				bool uniform = true;
+				for (int k = 0; k < 8; ++k) {
+					if (!lane_alive_now[k] || !lane_envP[k]) continue;
+					if (!uni) uni = lane_envP[k];
+					else if (uni != lane_envP[k]) { uniform = false; break; }
+				}
+				if (uni && uniform && uni->isCube && uni->noParallax
+				    && uni->pullOpt > 0.0f) {
+					// Per-MATERIAL map check — the rough/metal GLOBAL flags
+					// default ON; what matters is whether these lanes'
+					// materials carry maps (city glass doesn't).
+					bool mapsOff = true;
+					for (int k = 0; k < 8; ++k) {
+						float f0 = 0.04f;
+						if (lane_envP[k]) {
+							const Material* M =
+								ctx.matTable.data[(lane_mat32[k] >> 20) & 0xFF];
+							if ((roughMapOnG && M->RoughnessMap) ||
+							    (metalMapOnG && M->MetallicMap)) {
+								mapsOff = false;
+								break;
+							}
+							f0 = M->Reflection * 0.01f;
+							if (f0 < 0.04f) f0 = 0.04f;
+						}
+						envF0[k] = f0;
+					}
+					if (mapsOff) {
+						EnvComposeCityVec8(ctx, uni, ax, ay, az_lane,
+						                   anx, any_l, anz, lane_gloss, envF0,
+						                   envReflGainG,
+						                   envRvx, envRvy, envRvz, envEk, envLvlF);
+						envVecReady = true;
+					}
+				}
+			}
+
 			for (int k = 0; k < 8; ++k) {
 				if (!lane_alive_now[k]) continue;
 				int outB, outG, outR;
@@ -3348,6 +3553,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					// same position as wave-1 (after analytic spec, before the
 					// water blend). Third consumer of EnvSpecComposeScalar.
 					if (lane_envP[k]) {
+						if (g_envVecStats) g_envCntOvScalar.fetch_add(1, std::memory_order_relaxed);
 						const uint32_t m_   = lane_mat32[k];
 						const uint32_t mid_ = (m_ >> 20) & 0xFF;
 						const uint32_t mip_ = (m_ >> 28) & 0xF;
@@ -3393,7 +3599,33 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					// these lanes through the full scalar-light redo instead
 					// measured 289 ms/iter on city (vs ~77 baseline) for
 					// nothing — the redo duplicated the vec loop's work.
-					if (lane_envP[k]) {
+					if (lane_envP[k] && envVecReady) {
+						if (g_envVecStats) g_envCntOvEnvVec.fetch_add(1, std::memory_order_relaxed);
+						// Vec front-end already produced this lane's world
+						// reflect dir, Fresnel weight and mip; finish with
+						// the shared scalar face pick + bilinear fetch.
+						const fds::EnvPanoLinear* envP_ = lane_envP[k];
+						int face; float cu, cvv;
+						fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
+						                         envRvz[k], face, cu, cvv);
+						const float lvlF = envLvlF[k];
+						const int lvl0 = int(lvlF);
+						const int lvl1 = lvl0 + 1 < envP_->numMips ? lvl0 + 1 : lvl0;
+						const float lf = lvlF - float(lvl0);
+						float b0, g0, r0;
+						EnvCubeFetchBil(envP_, lvl0, face, cu, cvv, b0, g0, r0);
+						if (lvl1 != lvl0) {
+							float b1, g1, r1;
+							EnvCubeFetchBil(envP_, lvl1, face, cu, cvv, b1, g1, r1);
+							b0 += lf * (b1 - b0);
+							g0 += lf * (g1 - g0);
+							r0 += lf * (r1 - r0);
+						}
+						outB += int(b0 * envEk[k]);
+						outG += int(g0 * envEk[k]);
+						outR += int(r0 * envEk[k]);
+					} else if (lane_envP[k]) {
+						if (g_envVecStats) g_envCntOvEnvScalar.fetch_add(1, std::memory_order_relaxed);
 						const uint32_t m_   = lane_mat32[k];
 						const uint32_t mid_ = (m_ >> 20) & 0xFF;
 						const uint32_t mip_ = (m_ >> 28) & 0xF;
@@ -4002,6 +4234,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					const float sampleWorldZ =
 						ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
 						ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
+					if (g_envVecStats) g_envCntXpar.fetch_add(1, std::memory_order_relaxed);
 					EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
 					                     x, y, z, nx, ny, nz,
 					                     sampleWorldX, sampleWorldY, sampleWorldZ,
@@ -4444,6 +4677,17 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 	for (int r = 0; r < 3; ++r)
 		for (int c = 0; c < 3; ++c)
 			ctx.viewToWorld[r][c] = View->Mat[c][r];
+	if (g_envVecStats) {
+		static int sN = 0;
+		if ((++sN & 63) == 0)
+			std::fprintf(stderr, "[ENVVEC] wave1=%llu fill=%llu ovScalar=%llu "
+			    "ovEnvScalar=%llu ovEnvVec=%llu\n",
+			    (unsigned long long)g_envCntWave1.load(),
+			    (unsigned long long)g_envCntXpar.load(),
+			    (unsigned long long)g_envCntOvScalar.load(),
+			    (unsigned long long)g_envCntOvEnvScalar.load(),
+			    (unsigned long long)g_envCntOvEnvVec.load());
+	}
 	// FDS_ENVTRACE: one invocation id per kernel setup — if the setup line
 	// prints twice for one Timer value, the kernel runs two passes per frame
 	// and the trace lines say which pass composed the traced pixel.
