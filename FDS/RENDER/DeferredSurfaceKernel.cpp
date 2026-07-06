@@ -1054,9 +1054,9 @@ static inline void EnvSpecComposeScalar(
 	sR += ecR * ek * tR;
 	if (trWant) {
 		std::fprintf(stderr,
-		    "[ENVTRACE] inv=%u t=%.1f scr=(%.0f,%.0f) cam=(%.2f,%.2f,%.2f) "
-		    "vp=(%.2f,%.2f,%.2f) sw=(%.1f,%.1f,%.1f) nV=(%.3f,%.3f,%.3f) "
-		    "pull=%d planeD=%.2f optD=%.2f step=%.2f k=%.5f ep=(%.1f,%.1f,%.1f) "
+		    "[ENVTRACE] inv=%u t=%.1f scr=(%.0f,%.0f) cam=(%.4f,%.4f,%.4f) "
+		    "vp=(%.4f,%.4f,%.4f) sw=(%.4f,%.4f,%.4f) nV=(%.6f,%.6f,%.6f) "
+		    "pull=%d planeD=%.4f optD=%.4f step=%.4f k=%.7f ep=(%.4f,%.4f,%.4f) "
 		    "rw=(%.6f,%.6f,%.6f) face=%d fuv=(%.6f,%.6f) eq=(%.4f,%.4f) "
 		    "lvlF=%.2f mip=%u suv=%05x ndv=%.3f fres=%.3f ec=(%.0f,%.0f,%.0f) "
 		    "add=(%.1f,%.1f,%.1f) envP=%p bake=(%.0f,%.0f,%.0f)\n",
