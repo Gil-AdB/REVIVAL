@@ -158,3 +158,131 @@ won ~21% (sample-major was a wash). See `project_volumetric_simd_no_payoff` /
    `--snapshot=conetest@iters=60 ... ` and `git stash` between builds, 2-3 reps.
    Repro cam: `FDS_CONETEST_CAM="0.000,263.647,-332.871,0.000,-0.006,1.000"`.
 3. Watch `uptime` load average; throw out numbers taken while busy.
+
+---
+
+# Froxel COMPOSITE experiments (2026-07-06, arm64-measured, reverted)
+
+Second round, on the froxel path's full-screen composite
+(`Froxel_CompositeTileVec8` in `DeferredFastFog.cpp`), after the uniform-group
+broadcast fast path landed (commit `fc39d7e`, −0.75 ms/f, kept). Both
+experiments below were **bit-exact** (render gate ALL PASS; city snapshots
+@t=1961/@t=300 md5-identical) and **measured ≈ null on arm64**, so they were
+reverted from the tree per the null-result rule. They are preserved here
+verbatim because both attack costs that are NEON-emulation artifacts —
+**on AVX2 with hardware `VPGATHERDPS` the tradeoffs differ** and both are
+plausible wins there. The measured chain of evidence (SoA-repack null +
+arithmetic-SIMD small + exp/dither-vec null) localizes the composite's
+remaining ~5.7 ms/f in: emulated per-lane gathers on non-uniform groups,
+raw instruction volume, and the streaming framebuffer RMW (~0.3–0.5 ms floor).
+
+## Experiment A — packed AoS froxel record (composite-side mirror)
+
+**Idea:** the composite's 4-corner bilinear reads 8 values per corner from FIVE
+arrays (`gFrAccR/G/B`, `gFrT`, `gFrSct[cur]` ext) = ~20 line touches/pixel.
+Pack one 32B record per froxel `{accR,accG,accB,T,ext,pad×3}` written by
+`Froxel_ColumnTile`, so a corner is 1–2 lines.
+
+**arm64 result (4 interleaved pairs, city t=1961, env-pixel bench):**
+composite scope 6.47/6.45/6.59/6.62 → 6.77/6.87/6.95/6.92 ms/f — **slower in
+3/4 pairs**. The SoA working set was already L1-hot (neighboring pixels reuse
+the same columns); simde emulates each gather as 8 scalar load+inserts either
+way, and the `ic*8+k` index math added ops. Columns-pass extra store: wash.
+
+**Why retry on x64:** one `VPGATHERDPS` per field regardless of layout, but the
+packed layout turns 5 gather bases into 1 and makes corner pairs line-local —
+gather throughput on Intel/AMD is sensitive to line spread.
+
+**The change (against `fc39d7e`):**
+
+1. Decl (after `gFrSct[2]`):
+```cpp
+	std::vector<float> gFrPk;   // {accR,accG,accB,T,ext,pad×3} per froxel, 32B
+```
+2. Alloc in the grid-resize block (`Render_DeferredFastFog`):
+```cpp
+	gFrPk.assign(n * 8, 0.0f);
+	for (size_t f = 3; f < n * 8; f += 8) gFrPk[f] = 1.0f;   // T, as gFrT
+```
+3. Store in `Froxel_ColumnTile`'s integration loop, right after the
+   `gFrAccR/..gFrT[col+iz]` stores (`ext` there == `sct[cur][(col+iz)*4+3]`,
+   stored earlier in pass 3 and unmodified since — value-identical source):
+```cpp
+	float* pk8 = gFrPk.data() + (col+iz)*8;
+	pk8[0]=accR; pk8[1]=accG; pk8[2]=accB; pk8[3]=Tc; pk8[4]=ext;
+```
+4. Both scalar `col()` lambdas (`Froxel_CompositeTile`, `Froxel_CompositePixel`):
+```cpp
+	const float* pk = gFrPk.data() + ic*8;
+	o[4]=pk[0]; o[5]=pk[1]; o[6]=pk[2]; o[7]=pk[4];
+	if (iz > 0) { const float* pp = pk-8; o[0]=pp[0];o[1]=pp[1];o[2]=pp[2];o[3]=pp[3]; }
+	else { o[0]=o[1]=o[2]=0.0f; o[3]=1.0f; }
+```
+5. Vec kernel: drop the 5 base pointers for `const float* pkP = gFrPk.data();`,
+   add `auto f8=[&](__m256i ic,int k){ return _mm256_add_epi32(
+   _mm256_slli_epi32(ic,3), _mm256_set1_epi32(k)); };` and gather
+   `gA(pkP,f8(icXX,field))` — cur RGB = fields 0..2, cur ext = 4, prev
+   RGB/T = fields 0..3 at `pIdx` (ic−1). `wsum4` order unchanged → bit-exact.
+
+## Experiment B — vectorized fastExpNeg + frDither lanes
+
+**Idea:** the vec composite kept exp and dither scalar-per-lane through stack
+round-trips (16 `fastExpNeg` + 24 `frDither` per 8px group). Both vectorize
+BIT-EXACTLY:
+- `Fist` is `_mm_cvtt_ss2si` truncation == `_mm256_cvttps_epi32`.
+- `fastPow2` = 256-float LUT + `(i>>8)<<23` exponent stuff; export the table
+  (`const float* FastPow2Table() { return ExpTable; }` in FRUSTRUM.CPP) and
+  gather from it; `>>8` must be ARITHMETIC (`_mm256_srai_epi32`) — i ≤ 0 here.
+- `frDither`'s integer hash is exact in `_mm256_mullo_epi32`/xor/shift; the
+  float tail mirrors the scalar expression term-for-term so -ffp-contract
+  fuses identically.
+
+**arm64 result:** composite scope Δ = +0.01 / +0.06 ms in the two clean pairs
+(pairs 3–4 invalidated by a dosbox load spike) — **null**. The exp-table
+gathers are emulated (16 scalar loads either way) and NEON 2×128 halves
+nothing; the lanes were already latency-hidden.
+
+**Why retry on x64:** the ExpTable gather becomes one `VPGATHERDPS` from a
+1 KB L1-resident table ×2, and the dither hash drops from 24 scalar chains
+to 3×~6 native 256-bit int ops. This is pure instruction-count reduction.
+
+**The change (against `fc39d7e`), replacing the scalar exp loop:**
+```cpp
+	auto expNeg8=[&](__m256 x){
+		x=_mm256_min_ps(x,_mm256_set1_ps(50.0f));
+		x=_mm256_max_ps(x,_mm256_set1_ps(-50.0f));
+		const __m256 t=_mm256_mul_ps(x,_mm256_set1_ps(-1.4426950408889634f));
+		const __m256i i=_mm256_cvttps_epi32(_mm256_mul_ps(t,_mm256_set1_ps(256.0f)));
+		const __m256 e=_mm256_i32gather_ps(FastPow2Table(),
+		                   _mm256_and_si256(i,_mm256_set1_epi32(0xFF)),4);
+		return _mm256_castsi256_ps(_mm256_add_epi32(_mm256_castps_si256(e),
+		                   _mm256_slli_epi32(_mm256_srai_epi32(i,8),23)));
+	};
+	__m256 ToptPart=expNeg8(_mm256_mul_ps(ext,pDzv));
+	__m256 ToptFull=expNeg8(_mm256_mul_ps(ext,dSlv));
+```
+and the scalar dither loop:
+```cpp
+	const __m256i sdv=_mm256_add_epi32(_mm256_set1_epi32(int(uint32_t(i0))),lane);
+	auto dith8=[&](__m256i s){
+		__m256i h=_mm256_mullo_epi32(s,_mm256_set1_epi32((int)0x9E3779B9u));
+		h=_mm256_xor_si256(h,_mm256_srli_epi32(h,15));
+		h=_mm256_mullo_epi32(h,_mm256_set1_epi32((int)0x85EBCA6Bu));
+		h=_mm256_xor_si256(h,_mm256_srli_epi32(h,13));
+		const __m256i m16=_mm256_set1_epi32(0xFFFF);
+		const __m256 lo=_mm256_cvtepi32_ps(_mm256_and_si256(h,m16));
+		const __m256 hi=_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(h,16),m16));
+		const __m256 k=_mm256_set1_ps(1.0f/65536.0f);
+		return _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(_mm256_mul_ps(lo,k),
+		                                                 _mm256_mul_ps(hi,k)),vOne),
+		                     _mm256_set1_ps(da));
+	};
+	const __m256 drV=dith8(sdv);
+	const __m256 dgV=dith8(_mm256_xor_si256(sdv,_mm256_set1_epi32((int)0x68E31DA4u)));
+	const __m256 dbV=dith8(_mm256_xor_si256(sdv,_mm256_set1_epi32((int)0xB5297A4Du)));
+	// then: fR=_mm256_add_ps(_mm256_fmadd_ps(pr,Tpix,aR),drV);  etc.
+```
+
+Validation on x64: same as above — conetest + city snapshot md5 (both changes
+are bit-exact by construction; the gate proves it), then interleaved A/B on
+the city bench with `FDS_TAIL_PROF=1` watching the `fog-composite` scope.
