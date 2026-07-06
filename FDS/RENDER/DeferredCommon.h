@@ -17,6 +17,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <vector>
 #include "simde/x86/fma.h"
 
 #include "Base/FDS_DEFS.H"
@@ -27,6 +28,16 @@
 
 namespace meka { struct GBuffer; }
 struct Scene;
+
+// SSR (--env_ssr) previous-frame color copy. renderFrame memcpys VPage into
+// this at the FIRST deferred pass of each main frame (before that pass's
+// raster overwrites VPage, so it holds last frame's FINAL image); the env
+// compose's SSR march (EnvSpecComposeScalar) samples it — 1-frame-stale, since
+// sampling live VPage races the concurrent tile writes. Sized XRes*YRes*4
+// (BGRA dwords, == PageSize). g_ssrPrevW/H are the dims it was sized for; the
+// march only runs when ctx.xres/yres match (skips mismatched offscreen bakes).
+extern std::vector<uint8_t> g_ssrPrevColor;
+extern int g_ssrPrevW, g_ssrPrevH;
 
 constexpr int DEFERRED_MAX_LIGHTS = 128;
 // Scene-wide light capacity (ViewLightsSoA + the halo/volumetric index

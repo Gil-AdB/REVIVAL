@@ -1060,6 +1060,100 @@ static inline void EnvSpecComposeScalar(
 		ecG = float((c0 >> 8) & 0xFF)  + lf * (float((c1 >> 8) & 0xFF)  - float((c0 >> 8) & 0xFF));
 		ecR = float((c0 >> 16) & 0xFF) + lf * (float((c1 >> 16) & 0xFF) - float((c0 >> 16) & 0xFF));
 	}
+	// ── Short-range SCREEN-SPACE reflection (--env_ssr) ─────────────────
+	// Self-reflections (a building's own ledges / wings) are absent from the
+	// cube stores: the per-building bakes EXCLUDE the own building and are
+	// centroid-anchored, so a building can never see itself. March the
+	// reflected VIEW ray a few steps in screen space against the depth buffer;
+	// on the first crossing, blend the PREVIOUS-FRAME color into ec* HERE —
+	// before the Fresnel/roughness/metal weighting below — so the SSR hit
+	// rides exactly the same energy law as the cube it replaces. The cube (+
+	// sphere fake) stays as the fallback: SSR wins on hit and fades back to it
+	// at every failure mode (edge exit, thickness reject, max steps), each via
+	// a CONTINUOUS weight so the hit/miss boundary never seams. All math in
+	// view space, scalar; the reflection is computed LOCALLY (the world-space
+	// rv above may be cv-pulled). Exact div/sqrt only — an approximate rsqrt
+	// without an NR step lurched reflections here once (cee927d); fast_rsqrt is
+	// NR-corrected.
+	{
+		const int ssrSteps = fds::FeatureFlags::env_ssr();
+		if (ssrSteps > 0 && g_ssrPrevColor.data() &&
+		    g_ssrPrevW == ctx.xres && g_ssrPrevH == ctx.yres && z > 0.5f) {
+			// Reflect the VIEW incident dir about the VIEW normal n (n was
+			// already flipped to the camera side above → idn <= 0).
+			const float dvi = fast_rsqrt(x*x + y*y + z*z);   // NR-corrected
+			const float ivx = x * dvi, ivy = y * dvi, ivz = z * dvi;
+			const float idn = ivx*nx + ivy*ny + ivz*nz;
+			const float Rvx = ivx - 2.0f*idn*nx;
+			const float Rvy = ivy - 2.0f*idn*ny;
+			const float Rvz = ivz - 2.0f*idn*nz;
+			// Skip when the reflected ray heads back toward the camera: its
+			// screen projection immediately leaves the geometry (nothing to
+			// march), and forward t would cross the near plane at once.
+			if (Rvz > 1e-3f) {
+				const float stride = fds::FeatureFlags::env_ssr_stride();
+				const float thick  = fds::FeatureFlags::env_ssr_thick();
+				const float invZ0  = 1.0f / z;
+				// Screen-space projection gradient at t=0 → a constant view-
+				// space dt so each step advances ~`stride` px. FOVX==1/invFOVX.
+				const float gx = (Rvx*z - x*Rvz) * (invZ0*invZ0) / ctx.invFOVX;
+				const float gy = (Rvy*z - y*Rvz) * (invZ0*invZ0) / ctx.invFOVY;
+				const float gmag = std::sqrt(gx*gx + gy*gy);
+				if (gmag > 1e-4f && thick > 1e-3f) {
+					const float dt = stride / gmag;
+					const float invThick = 1.0f / thick;
+					const float bx = ctx.cntrEX, by = ctx.cntrEY;
+					const int   W = ctx.xres, H = ctx.yres;
+					const word* zp = ctx.zpage16;
+					const dword* prev =
+						reinterpret_cast<const dword*>(g_ssrPrevColor.data());
+					constexpr float edge = 48.0f;   // border-fade width (px)
+					float ssrB=0, ssrG=0, ssrR=0, ssrW=0;
+					// Self-occlusion guard: start ~1.5*stride out so the ray
+					// clears its own surface before the first depth test.
+					for (int s = 0; s < ssrSteps; ++s) {
+						const float t = (1.5f + float(s)) * dt;
+						const float Sx = x + t*Rvx, Sy = y + t*Rvy, Sz = z + t*Rvz;
+						if (Sz < 1.0f) break;                 // behind near plane → miss
+						const float invSz = 1.0f / Sz;
+						const float sxf = bx + Sx*invSz / ctx.invFOVX;
+						const float syf = by - Sy*invSz / ctx.invFOVY;
+						const int sxi = int(sxf), syi = int(syf);
+						if (sxi < 0 || sxi >= W || syi < 0 || syi >= H) break; // edge exit → miss
+						const word zEnc = zp[size_t(syi)*W + sxi];
+						if (zEnc == 0) continue;              // sky sample — keep marching
+						const float surfZ = float(0xFF80 - int(zEnc)) * ctx.invZScale;
+						const float dz = Sz - surfZ;          // >0: ray is behind the surface
+						if (dz > 0.0f && dz < thick) {
+							// HIT. Three CONTINUOUS fades so every failure mode
+							// (thickness edge, last step, screen border) drives
+							// the contribution to zero without a hard switch.
+							const float wThick = 1.0f - dz*invThick;                 // →0 at thickness edge
+							const float wStep  = 1.0f - float(s)/float(ssrSteps);    // later hits → cube
+							float wb = std::min(std::min(sxf, float(W-1)-sxf),
+							                    std::min(syf, float(H-1)-syf)) * (1.0f/edge);
+							if (wb < 0.0f) wb = 0.0f;
+							if (wb > 1.0f) wb = 1.0f;
+							const float w = wThick * wStep * wb;
+							if (w > 0.0f) {
+								const dword c = prev[size_t(syi)*W + sxi];
+								ssrB = float( c        & 0xFF);
+								ssrG = float((c >> 8)  & 0xFF);
+								ssrR = float((c >> 16) & 0xFF);
+								ssrW = w;
+							}
+							break;    // first crossing wins
+						}
+					}
+					if (ssrW > 0.0f) {
+						ecB += (ssrB - ecB) * ssrW;
+						ecG += (ssrG - ecG) * ssrW;
+						ecR += (ssrR - ecR) * ssrW;
+					}
+				}
+			}
+		}
+	}
 	// Schlick Fresnel. NdotV = -d·N (front-facing pixels have
 	// d·N < 0). F0 = authored Reflection% with the dielectric
 	// floor, pulled to ~1 by metalness. F90 (the grazing limit)
@@ -3503,7 +3597,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// EnvSpecComposeScalar; vectorizing them is the follow-up if
 			// the look is approved) — disengage the vec compose when on.
 			const bool envPosFakesOff =
-				fds::FeatureFlags::env_sphere_parallax() <= 0.0f;
+				fds::FeatureFlags::env_sphere_parallax() <= 0.0f &&
+				fds::FeatureFlags::env_ssr() <= 0;   // SSR march is scalar-only
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];

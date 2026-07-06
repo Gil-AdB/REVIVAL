@@ -34,6 +34,11 @@
 #include "VESA/Vesa.h"
 #include "FRUSTRUM.H"
 
+// SSR (--env_ssr) previous-frame color copy — declared in DeferredCommon.h,
+// read by the env compose's SSR march, written by renderFrame below.
+std::vector<uint8_t> g_ssrPrevColor;
+int g_ssrPrevW = 0, g_ssrPrevH = 0;
+
 // Defined in Transform.cpp — used by the deferred transparent path
 // (RenderXparClumpInStrip) and by the legacy xpar peel.
 bool IsFrontFacingInViewSpace(const Face* F);
@@ -459,6 +464,32 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 	else                                        deferred = deferredEnabled();
 	if (deferred && (!g_gbuffer || g_gbuffer->normal.size() < size_t(XRes) * size_t(YRes))) {
 		deferred = false;
+	}
+
+	// SSR (--env_ssr) previous-frame color capture. The env compose's SSR
+	// march samples last frame's FINAL image (sampling live VPage races the
+	// concurrent tile writes). City renders two deferred passes per frame
+	// (pass 1 = mirrored water underlay, skipVolumetric=true; pass 2 = the
+	// final view, skipVolumetric=false), and the glass env compose runs in
+	// pass 2 — so capture at the FIRST pass of the frame (VPage still holds
+	// last frame's final) and do NOT re-capture in pass 2 (that would store
+	// pass 1's underlay, which pass 2's SSR would then wrongly reflect).
+	// s_prevWasSkipVol tracks the two-pass structure; single-pass scenes
+	// (greets etc.) capture every frame. Main frame only (offscreen bakes use
+	// their own targets). ~0.19ms full-buffer memcpy at 1080p (measured) —
+	// scoped under TailProf.
+	if (deferred && fds::g_offscreenViewDepth == 0 &&
+	    fds::FeatureFlags::env_ssr() > 0 && VPage && PageSize > 0) {
+		static bool s_prevWasSkipVol = false;
+		const bool doCapture = skipVolumetric || !s_prevWasSkipVol;
+		s_prevWasSkipVol = skipVolumetric;
+		if (doCapture) {
+			TailProf::ScopeTimer _tp("ssr-prevcopy");
+			if ((int)g_ssrPrevColor.size() != PageSize)
+				g_ssrPrevColor.resize(size_t(PageSize));
+			g_ssrPrevW = XRes; g_ssrPrevH = YRes;
+			std::memcpy(g_ssrPrevColor.data(), VPage, size_t(PageSize));
+		}
 	}
 
 	// Clear G-buffer mat32 to a sentinel pattern before each deferred
