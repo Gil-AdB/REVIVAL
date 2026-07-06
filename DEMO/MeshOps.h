@@ -43,6 +43,17 @@ Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
 // Used for parallax height maps — the variable-texel-size pilot. Caller owns.
 Texture *MakeHeight8(Texture *src);
 
+// Tier-2 cone-step POM (--parallax_pom): bake a conservative cone-step map from
+// an 8-bit height texture (MakeHeight8 output). The result is an 8-bit texture
+// with the IDENTICAL tiled+mip layout, so the rasterizer's swizzled height
+// address also indexes the cone byte. Each texel stores min(dist_uv/heightDiff)
+// to any taller texel, quantized over [0,kPomConeMax] (Material.h). Baked
+// per-mip from a max-pooled coarse grid (conservative → the march never skips
+// geometry) with toroidal wrap (seamless for tiling walls). One-time offline
+// cost (~0.1-1s/material, threaded); only called when --parallax_pom is on.
+// Caller owns the returned Texture. Returns nullptr on a bad/empty source.
+Texture *MakeConeMap(Texture *height);
+
 // Pack a 32-bit BGRA tangent-space normal map to 16-bit RG (X,Y; Z reconstructed
 // in-shader), same layout (half the memory). BPP=16 marks the kernel decode.
 // Caller owns.

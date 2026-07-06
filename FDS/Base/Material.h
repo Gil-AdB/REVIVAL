@@ -5,6 +5,16 @@
 #include "Texture.h"
 #include "Vector.h"
 
+// Tier-2 cone-step POM: the maximum cone ratio a ConeMap byte encodes.
+// A texel storing 255 means cone ratio kPomConeMax (near-flat → the ray can
+// take a near-full step). Shared by the bake (MakeConeMap, DEMO/MeshOps.cpp)
+// and the runtime march (FDS/FILLERS/Mekalele.h) — they MUST agree or the
+// step size is wrong. Cone ratio = horizontal-UV-distance / height-difference
+// to the nearest taller texel; values above ~4 all give near-max steps at the
+// ≤~0.7 tangential ray speeds we hit, so 4 is a safe clamp with byte precision
+// (~0.016) where it matters most (small ratios, near tall features).
+inline constexpr float kPomConeMax = 4.0f;
+
 #pragma pack(push, 1)
 
 struct Scene;
@@ -66,6 +76,13 @@ struct Material
     // 1 = full; lower for surfaces where offset-parallax swims (grazing, densely
     // UV-tiled floors). Default 1.
     float                 ParallaxScale          = 1.0f;
+    // Tier-2 cone-step map companion to HeightMap (--parallax_pom). 8-bit
+    // single-channel, IDENTICAL tiled+mip layout to HeightMap so the SAME
+    // swizzled texel address indexes both — each texel stores a conservative
+    // cone ratio (quantized over [0,kPomConeMax]) = how far the view ray can
+    // advance without hitting the height field. Offline-baked once at material
+    // setup (MakeConeMap) only when --parallax_pom is on; null = no cone march.
+    Texture             * ConeMap                = nullptr;
     // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
     // mutates the shared Texture pixels; these echo the last applied values
     // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).

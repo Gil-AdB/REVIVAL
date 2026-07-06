@@ -449,6 +449,21 @@ struct TileRasterizerCtx {
 	// tangent-space view ray (no cone maps, no early-out) to anchor the
 	// honest per-tap cost. Populated from a cached getenv in the dispatcher.
 	int pomSpikeSteps = 0;
+
+	// Tier-2 cone-step POM (--parallax_pom). coneData = the material's ConeMap
+	// mip[miplevel] (8-bit, SAME tiled layout as heightData → same swizzled
+	// address). pomSteps = the flag's max cone-safe steps (0 = off). When both
+	// are set the march advances by the cone-safe distance c·gap/(c+dlen) each
+	// step, converging onto the surface in a few taps. Takes precedence over the
+	// naive pomSpikeSteps path. Null coneData / pomSteps==0 → single-shift.
+	const byte *coneData = nullptr;
+	int pomSteps = 0;
+	// STEP-3 LOD: view-Z (units) past which the cone-march result fades toward
+	// the tier-0 single shift; pure single-shift at ~2× this. 0 = no fade.
+	float pomLodDist = 0.0f;
+	// STEP-2 quarter-res offset field: march only even lanes/rows, reuse the UV
+	// offset for the odd neighbours. 0 = full-res march.
+	int pomQuarter = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -984,14 +999,50 @@ struct TileRasterizer {
 						Vec8f hc  = (H - Vec8f(0.5f)) * Vec8f(ctx.parallaxStrength);
 						uf += VtT * hc;
 						vf += VtB * hc;
-						// FDS_POM_SPIKE=N throwaway probe (docs/HEIGHTMAP_POM_PLAN.md
-						// mandatory first step): the single shift above runs UNCONDITIONALLY
-						// (N=0 stays byte-identical to the pre-spike path), then when N>0 we
-						// OVERWRITE uf/vf with a naive N-tap linear march of the tangent-space
-						// view ray (no cone maps, no per-lane early-out → all N taps run =
-						// honest worst-case per-tap cost). Disp spans the same ±0.5·strength
-						// envelope as the single shift, so the march is visually comparable.
-						if (ctx.pomSpikeSteps > 0) {
+						// Tier-2 CONE-STEP POM (--parallax_pom, docs/HEIGHTMAP_POM_PLAN.md):
+						// advance the tangent-space view ray by the cone-safe distance each
+						// step so it converges ONTO the height field (self-occluding relief,
+						// no fixed-step artifacts). Same centered ±0.5·strength envelope +
+						// base recovery as the naive spike → directly comparable. Wins over
+						// the naive path (fewer taps, lands on the surface). Takes precedence.
+						if (ctx.pomSteps > 0 && ctx.coneData) {
+							const int   N   = ctx.pomSteps;
+							const Vec8f dU  = VtT * Vec8f(ctx.parallaxStrength);
+							const Vec8f dV  = VtB * Vec8f(ctx.parallaxStrength);
+							const Vec8f dlen = sqrt(dU*dU + dV*dV);   // UV per unit rayH (exact)
+							const Vec8f baseU = uf - VtT * hc;        // un-shifted geometric UV
+							const Vec8f baseV = vf - VtB * hc;
+							Vec8f curU = baseU + dU * Vec8f(0.5f);    // t=0 ↔ rayH=1 (field top)
+							Vec8f curV = baseV + dV * Vec8f(0.5f);
+							Vec8f rayH = Vec8f(1.0f);
+							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f));
+							for (int s = 0; s < N; ++s) {
+								Vec8i mu = roundi(curU * UScaleFactor);
+								Vec8i mv = roundi(curV * VScaleFactor);
+								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
+								         + packed_tile_v(mv, t_vmask);
+								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
+								alignas(32) float mH[8], mC[8];
+								for (int k = 0; k < 8; ++k) {
+									const int a = mAd[k];
+									mH[k] = float(ctx.heightData[a]) * (1.0f / 255.0f);
+									mC[k] = float(ctx.coneData[a]);
+								}
+								Vec8f Hs; Hs.load_a(mH);
+								Vec8f Cb; Cb.load_a(mC);
+								const Vec8f cratio = Cb * coneScale;  // cone ratio ∈ [0,kPomConeMax]
+								// gap>0 while above surface; clamp≥0 freezes a crossed lane.
+								const Vec8f gap = max(rayH - Hs, Vec8f(0.0f));
+								// exact divide (no rcp approx — parallax hard rule). c=0 near a
+								// tall feature → dt=0 (blocked); dlen=0 (perp view) → dt=gap.
+								const Vec8f dt = cratio * gap / (cratio + dlen + Vec8f(1e-6f));
+								curU -= dU * dt;
+								curV -= dV * dt;
+								rayH -= dt;
+							}
+							uf = curU;
+							vf = curV;
+						} else if (ctx.pomSpikeSteps > 0) {
 							const int   N     = ctx.pomSpikeSteps;
 							const float invNf = 1.0f / float(N);
 							const Vec8f dU = VtT * Vec8f(ctx.parallaxStrength);
@@ -1462,6 +1513,16 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		if ((dword)miplevel < hm->numMipmaps && hm->Mipmap[miplevel])
 			heightData = reinterpret_cast<const byte*>(hm->Mipmap[miplevel]);
 	}
+	// Tier-2 cone-step POM: resolve the cone mip parallel to the height mip
+	// (same tiled layout → same swizzled address). Only when --parallax_pom>0
+	// AND the material carries a baked ConeMap; else the march stays single-shift.
+	const byte *coneData = nullptr;
+	const int pomSteps = fds::FeatureFlags::parallax_pom();
+	if (heightData && pomSteps > 0 && F->Txtr->ConeMap) {
+		Texture *cm = F->Txtr->ConeMap;
+		if ((dword)miplevel < cm->numMipmaps && cm->Mipmap[miplevel])
+			coneData = reinterpret_cast<const byte*>(cm->Mipmap[miplevel]);
+	}
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -1498,6 +1559,10 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.materialHasHeightMap = (F->Txtr->HeightMap != nullptr),
 		.pomSpikeSteps = [](){ static const int n = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
 		                       return e ? std::atoi(e) : 0; }(); return n; }(),
+		.coneData = coneData,
+		.pomSteps = coneData ? pomSteps : 0,
+		.pomLodDist = fds::FeatureFlags::parallax_pom_lod(),
+		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

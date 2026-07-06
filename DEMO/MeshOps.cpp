@@ -4,11 +4,13 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <Base/Scene.h>
+#include <Threads.h>              // dispatchIndexed — threaded cone-map bake
 
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <semaphore>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -234,6 +236,103 @@ Texture *MakeHeight8(Texture *src) {
 		h->Mipmap[i] = dst + texelOff;
 	}
 	return h;
+}
+
+// Tier-2 cone-step POM: bake a conservative cone-step map from an 8-bit height
+// texture. Same tiled+mip layout as the source (so ONE swizzled address indexes
+// both). Per mip: max-pool the height to a coarse grid (≤ kConeCoarseMax per
+// axis), compute the conservative cone ratio per coarse cell = min over the
+// field of dist_uv/heightDiff to any TALLER cell (toroidal wrap → seamless for
+// tiling), quantize over [0,kPomConeMax], then nearest-upsample back to the mip
+// resolution. Max-pooling makes the coarse cone conservative w.r.t. the fine
+// height the march hit-tests against (coarse ≥ fine → gaps under-estimated →
+// steps under-shoot → the ray never skips geometry). Tiny mips (< one block)
+// are left at 255 (flat) — only distant faces use them and LOD fades POM there.
+Texture *MakeConeMap(Texture *height) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
+		return nullptr;
+	const int blockX = height->blockSizeX, blockY = height->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	// Total texels across the mip chain (same walk as MakeHeight8).
+	size_t total = 0;
+	{ int cx = height->SizeX >> blockX, cy = height->SizeY >> blockY;
+	  for (dword i = 0; i < height->numMipmaps; ++i) {
+	      total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+	      cx = (cx + 1) >> 1; cy = (cy + 1) >> 1; } }
+	Texture *cone = new Texture;
+	*cone = *height;                 // dims/LSize/blockSize/numMipmaps/OptClass
+	cone->Pal = nullptr; cone->FileName = nullptr; cone->ID = 0; cone->Flags = height->Flags;
+	for (int i = 0; i < 16; ++i) cone->Mipmap[i] = nullptr;
+	byte *dst = (byte *)getAlignedBlock(total);
+	cone->Data = dst;
+	std::memset(dst, 255, total);    // default = flat (max cone = biggest steps)
+	const byte *h0 = height->Mipmap[0];
+	for (dword i = 0; i < height->numMipmaps; ++i)
+		cone->Mipmap[i] = dst + size_t(height->Mipmap[i] - h0);
+
+	constexpr int kConeCoarseMax = 128;   // cap coarse grid per axis (bake speed)
+	const float kQuant = 255.0f / kPomConeMax;
+	for (dword mip = 0; mip < height->numMipmaps; ++mip) {
+		const int mw = std::max(1, height->SizeX >> mip);
+		const int mh = std::max(1, height->SizeY >> mip);
+		if (mw < BX || mh < BY) continue;         // tiny mip → leave flat (255)
+		const int cw = std::min(mw, kConeCoarseMax);
+		const int ch = std::min(mh, kConeCoarseMax);
+		const int sx = mw / cw, sy = mh / ch;     // integer pool factor (mw%cw==0 for pow2)
+		const byte *hmip = height->Mipmap[mip];
+		// Max-pool the height mip into a coarse [0,1] field.
+		std::vector<float> Hc(size_t(cw) * ch, 0.0f);
+		for (int cy = 0; cy < ch; ++cy)
+			for (int cx = 0; cx < cw; ++cx) {
+				int m = 0;
+				for (int yy = cy * sy; yy < (cy + 1) * sy; ++yy)
+					for (int xx = cx * sx; xx < (cx + 1) * sx; ++xx) {
+						int v = hmip[SwizzledOffset(xx, yy, blockX, blockY, mh)];
+						if (v > m) m = v;
+					}
+				Hc[size_t(cy) * cw + cx] = float(m) * (1.0f / 255.0f);
+			}
+		// Conservative cone per coarse cell, threaded over rows.
+		std::vector<byte> Cc(size_t(cw) * ch, 255);
+		const float invCw = 1.0f / float(cw), invCh = 1.0f / float(ch);
+		const float minRatioSqClamp = kPomConeMax * kPomConeMax;
+		std::counting_semaphore<INT_MAX> done{0};
+		auto rowFn = [&](int cy) {
+			for (int cx = 0; cx < cw; ++cx) {
+				const float hp = Hc[size_t(cy) * cw + cx];
+				float minRatioSq = minRatioSqClamp;
+				for (int qy = 0; qy < ch; ++qy) {
+					int ady = std::abs(qy - cy); if (ady > ch - ady) ady = ch - ady;  // toroidal
+					const float dv = float(ady) * invCh;
+					const float dv2 = dv * dv;
+					const float *Hrow = &Hc[size_t(qy) * cw];
+					for (int qx = 0; qx < cw; ++qx) {
+						const float dh = Hrow[qx] - hp;
+						if (dh <= 0.0f) continue;
+						int adx = std::abs(qx - cx); if (adx > cw - adx) adx = cw - adx;
+						const float du = float(adx) * invCw;
+						const float ratioSq = (du * du + dv2) / (dh * dh);
+						if (ratioSq < minRatioSq) minRatioSq = ratioSq;
+					}
+				}
+				float c = std::sqrt(minRatioSq);            // ≤ kPomConeMax
+				int q = int(c * kQuant + 0.5f);
+				Cc[size_t(cy) * cw + cx] = byte(q > 255 ? 255 : q);
+			}
+		};
+		dispatchIndexed(ch, &done, rowFn);
+		for (int k = 0; k < ch; ++k) done.acquire();
+		// Nearest-upsample the coarse cone into the full mip (swizzled write).
+		byte *cmip = cone->Mipmap[mip];
+		for (int y = 0; y < mh; ++y) {
+			const int cyi = std::min(ch - 1, y * ch / mh);
+			for (int x = 0; x < mw; ++x) {
+				const int cxi = std::min(cw - 1, x * cw / mw);
+				cmip[SwizzledOffset(x, y, blockX, blockY, mh)] = Cc[size_t(cyi) * cw + cxi];
+			}
+		}
+	}
+	return cone;
 }
 
 // Pack a 32-bit (BGRA) tangent-space normal map down to 16-bit RG (X,Y only;
