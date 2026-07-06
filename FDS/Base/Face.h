@@ -97,6 +97,15 @@ struct Face
 	//     owning mirror's wall covered.
 	// 0 = not a mirror face, no mask write or check.
 	uint8_t          mirrorMaskTag = 0;
+	// Last mip level MiplevelClipper chose for this face (0xFF = none yet).
+	// Drives --mip-hysteresis: a face whose continuous mip metric sits near
+	// a level boundary otherwise flips levels frame-to-frame — visible
+	// texture-detail flicker, since the point-sampled fillers switch mips
+	// hard. Written from tile workers without synchronization: a lost
+	// update only weakens hysteresis for one frame, never correctness.
+	// (Mirror-clone faces are re-cloned per frame, so their state resets —
+	// their mip pops ride the water distortion anyway.)
+	uint8_t          LastMip = 0xFF;
 	// Per-face mirror identity, written into gb.mirrorId by Mekalele's
 	// commit path for every rasterized pixel (z-correct because the
 	// write only happens past p_mask, which already folds in zmask and

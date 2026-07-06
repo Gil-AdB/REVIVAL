@@ -3024,7 +3024,12 @@ struct CityScene : SceneDriver {
 			// skipVolumetric=true — the pass-1 output is consumed by the
 			// dispMap distortion below, so volumetric work (cones/halos)
 			// here is wasted CPU (≈60ms/frame on the cube omni halo).
+			// Freeze Face::LastMip during the mirrored pass — mirrored
+			// distances pick different mips; letting them overwrite the
+			// state would feed the main pass's mip hysteresis garbage.
+			g_mipLastMipWrite = false;
 			Render(RenderPath::Default, /*skipVolumetric=*/true);
+			g_mipLastMipWrite = true;
 			{
 				TailProf::ScopeTimer _tp("dispmap-resample");
 				// Row-band parallel resample (mirrors updateRippleDispMap's

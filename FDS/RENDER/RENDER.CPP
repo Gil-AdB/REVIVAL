@@ -189,6 +189,12 @@ int32_t g_FrameTime;
 // keeping captures deterministic.
 float g_FrameTimeF = 0.0f;
 bool  g_fineSceneClock = true;
+// Gate for Face::LastMip writes in MiplevelClipper. Scenes with a second
+// render pass per frame (city's water-reflection pass renders the MIRRORED
+// world → different distances → different mips) must disable writes during
+// that pass, or the mirror pass overwrites the state every frame and the
+// main pass's hysteresis compares against garbage.
+bool g_mipLastMipWrite = true;
 
 ////////////////
 // LIGHTING

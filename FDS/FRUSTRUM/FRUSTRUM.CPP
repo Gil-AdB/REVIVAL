@@ -7,6 +7,7 @@
 
 #include <Base/Scene.h>
 #include <Base/CameraContext.h>
+#include <Base/FeatureFlags.h>
 #include <Base/RenderStats.h>
 
 #include "FRUSTRUM.H"
@@ -24,7 +25,13 @@
 
 #define ClipAccurate
 #define COUNT_POLYS
-#define NO_MIPMAPS
+// NO_MIPMAPS: was force-disabling all mip selection (g_MipLevel=0 at
+// every decision site) — the resulting unfiltered minification is a
+// full-screen texel shimmer under camera motion (measured: ~10%-of-scale
+// mean per-frame diff across entire facades). Re-enabled behind the
+// mip_bias/mip_hysteresis flags; the historically-buggy split path is
+// still exercised — watch for traversal artifacts.
+//#define NO_MIPMAPS
 
 // FOVX, FOVY, C_FZP, C_rFZP, C_NZP, C_rNZP now live as fields of
 // fds::g_mainFrame (see FrameState.h). Legacy names defined as
@@ -581,7 +588,14 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 {
 	FDS_STATS_SCOPE();
 	FDS_STATS_INC_S(mipEntered);
-	const float mipBias = 0.5;
+	// --mip-bias (default 0.5 = the historical hardcoded constant) and
+	// --mip-hysteresis (default 0 = off). Hysteresis holds a face's
+	// previous level (F->LastMip) unless the continuous metric crosses
+	// the level boundary by the margin — otherwise a boundary-straddling
+	// face flips mip every frame, a hard texture-detail flicker with the
+	// point-sampled fillers.
+	const float mipBias = fds::FeatureFlags::mip_bias();
+	const float mipHyst = fds::FeatureFlags::mip_hysteresis();
 
 	Texture *Tx = F->Txtr->Txtr;
 	int32_t L = Tx->numMipmaps-1; // maximal level	
@@ -613,18 +627,25 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		if (Tx->Flags & Txtr_Nomip) {
 			g_MipLevel = 0;
 		} else {
-			int32_t mip = 0.5 * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
+			const float mipF = 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
+			int32_t mip = int32_t(mipF);
+			// Hysteresis: ±1-level transitions must clear the boundary
+			// (integer crossings of mipF) by the margin, else hold.
+			if (mipHyst > 0.0f && F->LastMip != 0xFF) {
+				const int32_t last = F->LastMip;
+				if (mip == last + 1 && mipF < float(last + 1) + mipHyst) mip = last;
+				else if (mip == last - 1 && mipF > float(last) - mipHyst) mip = last;
+			}
 			if (mip < 0) mip = 0;
 			if (mip > L) mip = L;
+			if (g_mipLastMipWrite) F->LastMip = uint8_t(mip);
 			g_MipLevel = mip;
 		}
 
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-#ifdef NO_MIPMAPS
-		g_MipLevel = 0;
-#endif
+		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -678,14 +699,23 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 	if (iml == iMl)
 	{
 		FDS_STATS_INC_S(mipFastUniform);
+		// Hysteresis (see the small-face branch): level L is active for
+		// ml ∈ (L, L+1], so the boundaries sit at integer ml — require a
+		// ±1 transition to clear them by the margin, else hold LastMip.
+		if (mipHyst > 0.0f && F->LastMip != 0xFF) {
+			const int32_t last = F->LastMip;
+			if (iml == last + 1 && ml < float(last + 1) + mipHyst) iml = last;
+			else if (iml == last - 1 && ml > float(last) - mipHyst) iml = last;
+			if (iml < 0) iml = 0;
+			if (iml > L) iml = L;
+		}
+		if (g_mipLastMipWrite) F->LastMip = uint8_t(iml);
 		g_MipLevel = iml;
 		if (g_MipLevel < 0) g_MipLevel = 0;
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-#ifdef NO_MIPMAPS
-		g_MipLevel = 0;
-#endif
+		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -762,9 +792,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-#ifdef NO_MIPMAPS
-		g_MipLevel = 0;
-#endif
+		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
 		filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 
 		// prepare new section - add last two intersection points
@@ -784,9 +812,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-#ifdef NO_MIPMAPS
-		g_MipLevel = 0;
-#endif
+		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -801,9 +827,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 #ifdef COUNT_POLYS
 	FDS_STATS_INC_POLYS_S();
 #endif
-#ifdef NO_MIPMAPS
-	g_MipLevel = 0;
-#endif
+	if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
 	filler(F, C_Tetr, numSectionVerts, g_MipLevel, rt, cam);
 }
 

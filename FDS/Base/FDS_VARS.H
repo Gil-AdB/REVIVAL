@@ -288,6 +288,7 @@ extern "C" float &g_zscale256;
 extern int32_t g_FrameTime;
 extern float   g_FrameTimeF;      // sub-tick scene clock — see RENDER.CPP
 extern bool    g_fineSceneClock;  // false in snapshot/bench (determinism)
+extern bool    g_mipLastMipWrite; // Face::LastMip write gate — see RENDER.CPP
 
 // Runtime toggles for hiding specific transparent objects, used to
 // dissect "object inside object" rendering. Default off. Set via the
