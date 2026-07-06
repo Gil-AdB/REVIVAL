@@ -1401,6 +1401,19 @@ int main(int argc, const char *argv[])
 	// anything they don't recognise.
 	fds::FeatureFlags::parseArgs(argc, argv);
 
+	// Flag implication: city_env_pixel routes the city glass through the
+	// deferred env-specular compose, which only has data when env_refl's
+	// FramePrep bakes ran — without it the glass is flat (loses even the
+	// legacy sheet reflections). Default env_refl ON in that case; an
+	// explicit --no-env-refl still wins (setDefault never overrides a
+	// user-set flag).
+	if (fds::FeatureFlags::city_env_pixel() && !fds::FeatureFlags::env_refl()) {
+		fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+		if (fds::FeatureFlags::env_refl())
+			std::fprintf(stderr, "[FLAGS] city_env_pixel: enabling env_refl "
+			             "(required for the per-pixel glass compose)\n");
+	}
+
 	// Env-cube convention self-test (FDS_ENV_CUBE_SELFTEST=1): dir→face/uv→dir
 	// round-trip + central uv→dir→uv check. Aborts on gross failure so an
 	// orientation bug is caught before any real bake. No-op otherwise.
