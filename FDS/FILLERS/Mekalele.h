@@ -1006,12 +1006,21 @@ struct TileRasterizer {
 						// base recovery as the naive spike → directly comparable. Wins over
 						// the naive path (fewer taps, lands on the surface). Takes precedence.
 						if (ctx.pomSteps > 0 && ctx.coneData) {
+							// STEP-3 LOD: uf/vf currently hold the tier-0 single shift =
+							// the FAR target. Skip the whole march on a row that is entirely
+							// past the fade (all lanes ≥ 2×lodDist) → most far/oblique
+							// parallax pixels pay nothing; near rows march + blend per lane.
+							const Vec8f ssU = uf, ssV = vf;
+							const float lod = ctx.pomLodDist;
+							const bool rowFar = lod > 0.0f &&
+								horizontal_and(p_z >= Vec8f(2.0f * lod));
+							if (!rowFar) {
 							const int   N   = ctx.pomSteps;
 							const Vec8f dU  = VtT * Vec8f(ctx.parallaxStrength);
 							const Vec8f dV  = VtB * Vec8f(ctx.parallaxStrength);
 							const Vec8f dlen = sqrt(dU*dU + dV*dV);   // UV per unit rayH (exact)
-							const Vec8f baseU = uf - VtT * hc;        // un-shifted geometric UV
-							const Vec8f baseV = vf - VtB * hc;
+							const Vec8f baseU = ssU - VtT * hc;       // un-shifted geometric UV
+							const Vec8f baseV = ssV - VtB * hc;
 							Vec8f curU = baseU + dU * Vec8f(0.5f);    // t=0 ↔ rayH=1 (field top)
 							Vec8f curV = baseV + dV * Vec8f(0.5f);
 							Vec8f rayH = Vec8f(1.0f);
@@ -1040,8 +1049,20 @@ struct TileRasterizer {
 								curV -= dV * dt;
 								rayH -= dt;
 							}
-							uf = curU;
-							vf = curV;
+							// STEP-3 LOD blend: continuous fade cone→single-shift as view-Z
+							// grows from lodDist (full cone) to 2×lodDist (pure single-shift).
+							// lod==0 → full cone everywhere (fade=0).
+							if (lod > 0.0f) {
+								const Vec8f fade = min(max(
+									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
+									Vec8f(0.0f)), Vec8f(1.0f));
+								uf = curU + (ssU - curU) * fade;
+								vf = curV + (ssV - curV) * fade;
+							} else {
+								uf = curU;
+								vf = curV;
+							}
+							}  // !rowFar
 						} else if (ctx.pomSpikeSteps > 0) {
 							const int   N     = ctx.pomSpikeSteps;
 							const float invNf = 1.0f / float(N);
