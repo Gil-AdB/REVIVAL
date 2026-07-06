@@ -14,6 +14,7 @@
 #include <Base/Material.h>
 #include <Threads.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -99,6 +100,46 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
     // Normal play leaves Timer free-running so no wall-clock ticks elapsed
     // during frame processing are dropped.
     if (pauseMode || scrubbed) Timer = sceneT;
+
+    // Smooth scene clock (see g_FrameTimeF). Two measured properties of the
+    // int Timer force this shape:
+    //   1. it resolves whole 10ms ticks → per-frame animation steps
+    //      quantize (30fps: 3,4,3,4);
+    //   2. its CADENCE is load-elastic — SDL_AddTimer callbacks reschedule
+    //      relative, so under render load Timer runs up to ~20% slower
+    //      than wall time (measured: PC-rate fine clock outran Timer ~1
+    //      tick/frame and any anchor snap re-created a sawtooth).
+    // So: advance a float clock by (wall delta × Timer's own average rate),
+    // where the rate is an EMA of dTimer/dWall. Steps are then smooth AND
+    // track the demo's actual (load-elastic) tempo; a gentle anchor plus a
+    // generous snap guard bound the offset without visible correction.
+    {
+        const uint64_t pc = SDL_GetPerformanceCounter();
+        if (pcFreq_ == 0) pcFreq_ = SDL_GetPerformanceFrequency();
+        const bool live = g_fineSceneClock && !pauseMode && !scrubbed;
+        if (live && fineT_ >= 0.0f && pcPrev_ != 0) {
+            const double dWall =
+                double(pc - pcPrev_) * 100.0 / double(pcFreq_);
+            const float dTimer = float(sceneT - lastSceneT_);
+            if (dWall > 0.0 && dWall <= 60.0 && dTimer >= 0.0f && dTimer <= 60.0f) {
+                float inst = float(dTimer / dWall);
+                if (inst < 0.2f) inst = 0.2f;
+                if (inst > 3.0f) inst = 3.0f;
+                rateEma_ += 0.05f * (inst - rateEma_);
+                fineT_ += float(dWall) * rateEma_;
+                fineT_ += 0.01f * (float(sceneT) - fineT_);   // gentle anchor
+                if (std::fabs(fineT_ - float(sceneT)) > 20.0f)
+                    fineT_ = float(sceneT);
+            } else {
+                fineT_ = float(sceneT);
+            }
+        } else {
+            fineT_ = float(sceneT);
+        }
+        pcPrev_ = pc;
+        lastSceneT_ = sceneT;
+        g_FrameTimeF = fineT_;
+    }
 
     g_FrameTime = TTrd = sceneT;
     return sceneT;

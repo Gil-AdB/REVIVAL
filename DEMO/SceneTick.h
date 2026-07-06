@@ -89,6 +89,15 @@ protected:
     int32_t tickSceneTimer(int32_t &TTrd, bool &pauseMode);
 
     bool tabPrev_ = false;
+    // Sub-tick scene clock state (see g_FrameTimeF in RENDER.CPP): the
+    // fractional part comes from the SDL performance counter; fineT_ is
+    // hard-anchored to the integer Timer (snap when they disagree > ~2
+    // ticks), so there is no filter lag and no unbounded drift.
+    float    fineT_  = -1.0f;
+    float    rateEma_ = 1.0f;     // EMA of dTimer/dWall (ticks per wall-tick)
+    int32_t  lastSceneT_ = 0;
+    uint64_t pcPrev_ = 0;
+    uint64_t pcFreq_ = 0;
 };
 
 // Initialize_X helpers — used by each scene's free Initialize function.

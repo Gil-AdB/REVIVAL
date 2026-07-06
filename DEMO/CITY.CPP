@@ -2878,7 +2878,14 @@ struct CityScene : SceneDriver {
 		// the race-free scene-time snapshot. dTime (set here) stays the
 		// wallclock delta the free camera / water scroll rely on in pause.
 		tickSceneTimer(TTrd, pause_mode);
-		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
+		// Sub-tick clock (g_FrameTimeF): same value as g_FrameTime plus the
+		// fractional ticks the int Timer floors away — kills the whole-tick
+		// quantization of the camera/animation step (at 30fps: dt=3,4,3,4).
+		// Falls back to the int clock in snapshot/bench (g_fineSceneClock
+		// off) so captures stay deterministic.
+		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame)
+		         * (g_fineSceneClock ? g_FrameTimeF : (float)g_FrameTime)
+		         / (float)CTPartTime;
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
 
@@ -3195,7 +3202,11 @@ struct CityScene : SceneDriver {
 						std::fwrite(row.data(), 1, row.size(), f);
 					}
 					std::fclose(f);
-					fprintf(stderr, "[CITY] dumped %s (t=%d)\n", path, (int)Timer);
+					// ftF/cf = the CONTENT time this frame was animated with
+					// (fine clock → CurFrame); t = Timer at dump time, which
+					// lags by the render duration — analysis must use cf.
+					fprintf(stderr, "[CITY] dumped %s (t=%d ftF=%.2f cf=%.2f)\n",
+					        path, (int)Timer, g_FrameTimeF, CurFrame);
 				}
 				fprintf(stderr,
 					"[CITY-CAM] CITYSNAP_VIEW=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\"\n",

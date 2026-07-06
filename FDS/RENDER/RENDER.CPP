@@ -177,6 +177,18 @@ float CurFrame;
 
 
 int32_t g_FrameTime;
+// Sub-tick scene clock (float ticks). The int Timer resolves 10ms, so the
+// per-displayed-frame animation step is quantized to whole ticks — at 30fps
+// that is dt=3,4,3,4 (±15%), at >=100fps duplicate frames. This is the SAME
+// clock value with the fractional part restored from the SDL performance
+// counter (SceneDriver::tickSceneTimer), hard-anchored to Timer: |fineT −
+// Timer| is kept under ~2 ticks and any disagreement snaps to Timer, so
+// music sync / scene-end semantics are untouched and there is no filter lag
+// (unlike the reverted EMA approach, bd226b9). Snapshot/bench set
+// g_fineSceneClock=false → g_FrameTimeF == float(g_FrameTime) exactly,
+// keeping captures deterministic.
+float g_FrameTimeF = 0.0f;
+bool  g_fineSceneClock = true;
 
 ////////////////
 // LIGHTING
