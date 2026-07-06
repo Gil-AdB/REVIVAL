@@ -2341,8 +2341,9 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 // and the dither/pack. iz (uint8 LUT), the zb slice boundaries, fastExpNeg
 // (file-static ExpTable in FRUSTRUM.CPP), and frDither stay scalar-per-lane —
 // they can't vectorize on this NEON target — and are assembled through the
-// stack. LDR only; HDR whole-pass, tile-edge partial groups, and any group
-// containing a water-reflection lane fall back to Froxel_CompositePixel.
+// stack. HDR runs the vectorized front-end with a scalar-per-lane fp16
+// output stage (see the P.hdr branch); tile-edge partial groups and any
+// group containing a water-reflection lane fall back to Froxel_CompositePixel.
 // Gated behind FDS_FOG_COMPOSITE_VEC; kept bit-identical to the scalar path
 // (matched op order + FMA sites under -ffp-contract=fast).
 static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastFogParams& P) {
@@ -2512,6 +2513,28 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			aG=_mm256_blendv_ps(prevG,aG,extPos);
 			aB=_mm256_blendv_ps(prevB,aB,extPos);
 			Tpix=_mm256_blendv_ps(prevT,Tpix,extPos);
+			if (P.hdr) {
+				// HDR output stage: the fp16 RMW (coverage-flag select, fma,
+				// HdrClamp, half round-on-store) runs scalar per lane with
+				// the EXACT scalar-path code — bit-identical by construction.
+				// The vectorized front-end above (bilinear gathers + the
+				// Beer-Lambert tail) is where the time was.
+				alignas(32) float aRA[8],aGA[8],aBA[8],TA[8];
+				_mm256_store_ps(aRA,aR); _mm256_store_ps(aGA,aG);
+				_mm256_store_ps(aBA,aB); _mm256_store_ps(TA,Tpix);
+				for (int L=0;L<8;++L) {
+					const size_t i=i0+size_t(L);
+					const dword pix=out[i];
+					fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
+					float scnB,scnG,scnR;
+					if (h[3] > 0.0f) { scnB=h[0]; scnG=h[1]; scnR=h[2]; }
+					else { scnR=float((pix>>16)&0xFFu); scnG=float((pix>>8)&0xFFu); scnB=float(pix&0xFFu); }
+					h[2]=fds::HdrClamp(scnR*TA[L]+aRA[L]);
+					h[1]=fds::HdrClamp(scnG*TA[L]+aGA[L]);
+					h[0]=fds::HdrClamp(scnB*TA[L]+aBA[L]);
+				}
+				continue;
+			}
 			// dither (scalar hash per lane) + pack.
 			__m256i pix=_mm256_loadu_si256((const __m256i*)&out[i0]);
 			__m256 pr=_mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(pix,16),iFF));
@@ -2753,7 +2776,7 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 		// SIMD composite is on by default (bit-identical to scalar; measured
 		// ~0.5 ms/f faster on fog-composite). FDS_FOG_COMPOSITE_VEC=0 opts out.
 		static const bool sFogVec = [](){ const char* e=getenv("FDS_FOG_COMPOSITE_VEC"); return !(e && e[0]=='0'); }();
-		const bool useVec = sFogVec && !P.hdr && nx>1 && ny>1;
+		const bool useVec = sFogVec && nx>1 && ny>1;
 		if (useVec) runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTileVec8(a,b,c,d,P); });
 		else        runTiles(XRes, YRes, [&](int a,int b,int c,int d){ Froxel_CompositeTile(a,b,c,d,P); }); }
 		// This is the only path that populates g_hdrBuf; mark it so the tonemap

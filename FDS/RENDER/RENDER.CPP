@@ -552,7 +552,7 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// water-reflection underlay passes (cost + the static AO scratch buffer
 		// isn't re-entrant). No-op unless --ssao.
 		if (!skipVolumetric)
-			Render_SSAO();
+			{ TailProf::ScopeTimer _tp("ssao"); Render_SSAO(); }
 
 		// --ssao-debug self-isolation: Render_SSAO has written the greyscale AO
 		// term to VPage; STOP here so the downstream compositing (skybox, fog,
