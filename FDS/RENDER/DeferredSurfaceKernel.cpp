@@ -1441,12 +1441,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				// Filtered albedo (bilinear/trilinear) when enabled — the
 				// nmap-as-diffuse dev viz still point-samples (the raster
 				// pass filtered the DIFFUSE, not the normal map). Heightmap
-				// (parallax) materials keep the suv fetch: the rasterizer
-				// shifts the UV before the swizzle pack, so the packed suv is
-				// the parallax-correct address; the albedo plane isn't written
-				// for them (see Mekalele wantAlbedo gate) → byte-identical.
+				// (parallax) materials are INCLUDED (Tier 1, filtered
+				// parallax): the rasterizer bilinear-samples at the
+				// parallax-SHIFTED uf/vf and writes gb.albedo for them too, so
+				// the kernel reads the filtered-at-shifted-UV texel here. The
+				// metal/rough/AO/normal map fetches below still use swizzledUV
+				// (point, parallax-shifted). texFilter==0 → byte-identical.
 				const dword texel =
-					(texFilterOn && !gb.albedo.empty() && !Mat->HeightMap
+					(texFilterOn && !gb.albedo.empty()
 					 && !(sNmapAsDiffuse && Mat->NormalMap))
 					? gb.albedo[i]
 					: texData[swizzledUV];
@@ -3286,9 +3288,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_envP[k] = nullptr; lane_hasEnv[k] = 0;
 					continue;
 				}
-				// Heightmap (parallax) materials keep the suv point fetch (see
-				// the scalar kernel) — the albedo plane isn't written for them.
-				const dword tx = (texFilterOn && !Mat->HeightMap)
+				// Heightmap (parallax) materials are INCLUDED now (Tier 1,
+				// filtered parallax) — the raster albedo plane holds the
+				// bilinear sample at the parallax-shifted UV (see scalar kernel).
+				const dword tx = texFilterOn
 					? gb.albedo[i + k] : texData[uv];
 				lane_texB[k] = float(tx & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
 				lane_texG[k] = float((tx >> 8) & 0xFF)  * Mat->TintG;

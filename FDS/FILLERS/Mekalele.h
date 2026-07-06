@@ -442,6 +442,13 @@ struct TileRasterizerCtx {
 	// parallax (bilinear at the shifted UV) is a follow-up. City has no
 	// heightmaps, so the shimmer target is unaffected.
 	bool materialHasHeightMap = false;
+
+	// FDS_POM_SPIKE=N throwaway probe (docs/HEIGHTMAP_POM_PLAN.md mandatory
+	// first step): 0 = single-shift parallax (default, byte-identical); N>0 =
+	// replace the single shift with a naive N-tap linear march of the
+	// tangent-space view ray (no cone maps, no early-out) to anchor the
+	// honest per-tap cost. Populated from a cached getenv in the dispatcher.
+	int pomSpikeSteps = 0;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -763,12 +770,14 @@ struct TileRasterizer {
 		// Texture filtering: sample the diffuse texel with the sub-texel
 		// fraction and write the blended BGRA to gbuffer.albedo. Only when
 		// the flag is on, the plane is allocated, and this mip has texels.
-		// Skip heightmap (parallax) materials — the kernel keeps its
-		// suv-based point fetch for those (byte-identical), so writing a
-		// filtered albedo would be wasted and inconsistent.
+		// Heightmap (parallax) materials are INCLUDED (Tier 1, filtered
+		// parallax): the parallax block above shifts uf/vf BEFORE this block,
+		// so the bilinear sample below lands at the parallax-SHIFTED UV — the
+		// float fraction is only present here at raster time. The kernel reads
+		// gb.albedo for these too (its !Mat->HeightMap exclusion was dropped in
+		// lockstep). texFilter==0 → this whole block is off → byte-identical.
 		const bool wantAlbedo = (texFilter > 0) && (span.albedo != nullptr)
-		                        && (albedoTex0 != nullptr)
-		                        && !ctx.materialHasHeightMap;
+		                        && (albedoTex0 != nullptr);
 		// mip+1 masks for the trilinear cross-mip blend.
 		const bool wantTri = wantAlbedo && (texFilter >= 2)
 		                     && (albedoTex1 != nullptr) && (mipFrac > 0.0f);
@@ -975,6 +984,47 @@ struct TileRasterizer {
 						Vec8f hc  = (H - Vec8f(0.5f)) * Vec8f(ctx.parallaxStrength);
 						uf += VtT * hc;
 						vf += VtB * hc;
+						// FDS_POM_SPIKE=N throwaway probe (docs/HEIGHTMAP_POM_PLAN.md
+						// mandatory first step): the single shift above runs UNCONDITIONALLY
+						// (N=0 stays byte-identical to the pre-spike path), then when N>0 we
+						// OVERWRITE uf/vf with a naive N-tap linear march of the tangent-space
+						// view ray (no cone maps, no per-lane early-out → all N taps run =
+						// honest worst-case per-tap cost). Disp spans the same ±0.5·strength
+						// envelope as the single shift, so the march is visually comparable.
+						if (ctx.pomSpikeSteps > 0) {
+							const int   N     = ctx.pomSpikeSteps;
+							const float invNf = 1.0f / float(N);
+							const Vec8f dU = VtT * Vec8f(ctx.parallaxStrength);
+							const Vec8f dV = VtB * Vec8f(ctx.parallaxStrength);
+							// base (un-shifted) UV recovered from the single shift.
+							const Vec8f baseU = uf - VtT * hc;
+							const Vec8f baseV = vf - VtB * hc;
+							Vec8f curU  = baseU + dU * Vec8f(0.5f);
+							Vec8f curV  = baseV + dV * Vec8f(0.5f);
+							Vec8f rayH  = Vec8f(1.0f);
+							Vec8f foundU = curU, foundV = curV;
+							Vec8fb found = Vec8fb(false);
+							for (int s = 0; s < N; ++s) {
+								curU -= dU * Vec8f(invNf);
+								curV -= dV * Vec8f(invNf);
+								rayH -= Vec8f(invNf);
+								Vec8i mu = roundi(curU * UScaleFactor);
+								Vec8i mv = roundi(curV * VScaleFactor);
+								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
+								         + packed_tile_v(mv, t_vmask);
+								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
+								alignas(32) float mH[8];
+								for (int k = 0; k < 8; ++k)
+									mH[k] = float(ctx.heightData[mAd[k]]) * (1.0f / 255.0f);
+								Vec8f Hs; Hs.load_a(mH);
+								Vec8fb hit = Vec8fb(rayH <= Hs) & (~found);
+								foundU = select(hit, curU, foundU);
+								foundV = select(hit, curV, foundV);
+								found |= hit;
+							}
+							uf = foundU;
+							vf = foundV;
+						}
 					}
 					Vec8i u = roundi(uf * UScaleFactor);
 					Vec8i v = roundi(vf * VScaleFactor);
@@ -1446,6 +1496,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.writeTangent = writeTangent,
 		.mipFrac = meka::g_tlsMipFrac,
 		.materialHasHeightMap = (F->Txtr->HeightMap != nullptr),
+		.pomSpikeSteps = [](){ static const int n = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
+		                       return e ? std::atoi(e) : 0; }(); return n; }(),
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

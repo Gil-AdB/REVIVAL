@@ -70,6 +70,30 @@ dominant light) roughly doubles the march cost; keep it a separate toggle.
   or tiny hero surfaces only, unless the whole march is SIMD'd 8-wide AND
   coverage is cut hard.
 
+## Spike results (2026-07-06, PARTIAL — agent crashed mid-run, NOT re-verified)
+
+An opus agent implemented the spike + Tier 1 (commit below) but hit a
+session limit before the visual/doc pass. What exists:
+- **`FDS_POM_SPIKE=N`** march landed in Mekalele.h (default 0 = byte-identical).
+- **Tier 1 filtered parallax** landed: the `!HeightMap` exclusion was dropped
+  in all three albedo-fetch sites so heightmap materials get bilinear-at-
+  shifted-UV under `FDS_TEXTURE_FILTER>0`.
+- **Per-tap cost (AGENT-MEASURED, DIRTY machine, gbuffer-barrier metric, NOT
+  reproduced by me):** single-shift 5.4–6.0 ms / N4 6.7–7.6 / N8 7.9–9.0
+  (non-overlapping) ⇒ the agent's ~0.33 ms/tap. Treat as a rough anchor only.
+- **Visual verdict: NONE.** I could not exercise parallax in the snapshot
+  harness afterward — `greets@t=5780` and `pbrtest` both show ZERO strength
+  sensitivity (0.1 vs 0.9 = 0 px changed), i.e. no heightmap geometry in
+  those frames. A live `--parallax` run (or a posed cam on the greets floor /
+  the momy mesh) is needed to confirm the march and Tier-1 filtering do
+  anything, and to judge whether the march reads as deeper relief.
+- **KNOWN RISK to verify before trusting the filter path on parallax scenes:**
+  the raster gate keys parallax on `F->Txtr->HeightMap`; the kernel's dropped
+  exclusion was on `Mat->HeightMap`. If those two ever disagree for a pixel,
+  the kernel reads `gb.albedo` where the raster didn't write it → stale/garbage
+  albedo. Harmless at `FDS_TEXTURE_FILTER=0` (default, proven byte-identical);
+  must be checked before `FDS_TEXTURE_FILTER>0` is used on greets/parallax.
+
 ## Mandatory first step (before ANY tier)
 
 Spike measurement to anchor the per-tap cost with real memory behavior:
