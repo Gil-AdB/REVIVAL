@@ -110,6 +110,7 @@ struct FastFogParams {
 	// plane (sentinel 0xFFFFFFFF = forward pixel, skipped like the legacy
 	// Render_DeferredFogPass).
 	float distDim = 0.0f;
+	float distDimInvFar = 0.0f;   // 1 / (dist_dim_far > 0 ? dist_dim_far : FZP)
 	const uint32_t* mat = nullptr;
 	// viewToWorld rows (rotation): world ray dir = w·(X,Y,1).
 	float w00, w01, w02, w10, w11, w12, w20, w21, w22;
@@ -2042,7 +2043,7 @@ static inline float frDistDim(const FastFogParams& P, size_t i, uint16_t ze) {
 	if (!P.mat || ze == 0) return 1.0f;
 	if (P.mat[i] == 0xFFFFFFFFu) return 1.0f;
 	const float z = float(0xFF80 - int(ze)) * P.invZScale;
-	float t = 1.0f - z * (1.0f / P.fogFar);
+	float t = 1.0f - z * P.distDimInvFar;
 	if (t < 0.0f) t = 0.0f;
 	return (1.0f - P.distDim) + P.distDim * std::sqrt(t);
 }
@@ -2539,7 +2540,7 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			if (P.distDim > 0.0f && P.mat) {
 				const __m256i m8=_mm256_loadu_si256((const __m256i*)&P.mat[i0]);
 				const __m256 fwdM=_mm256_castsi256_ps(_mm256_cmpeq_epi32(m8,_mm256_set1_epi32(-1)));
-				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(zSurf,_mm256_set1_ps(1.0f/P.fogFar)));
+				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(zSurf,_mm256_set1_ps(P.distDimInvFar)));
 				tt=_mm256_max_ps(tt,vZero);
 				const __m256 dv=_mm256_add_ps(_mm256_set1_ps(1.0f-P.distDim),
 				      _mm256_mul_ps(_mm256_set1_ps(P.distDim),_mm256_sqrt_ps(tt)));
@@ -2702,6 +2703,8 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	{
 		float s = fds::FeatureFlags::fast_fog_dist_dim();
 		P.distDim = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+		const float ddf = fds::FeatureFlags::fast_fog_dist_dim_far();
+		P.distDimInvFar = 1.0f / (ddf > 0.0f ? ddf : fogFar);
 		if (P.distDim > 0.0f && dc.gb) P.mat = dc.gb->txtr.data();
 	}
 
