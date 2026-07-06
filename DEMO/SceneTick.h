@@ -89,12 +89,6 @@ protected:
     int32_t tickSceneTimer(int32_t &TTrd, bool &pauseMode);
 
     bool tabPrev_ = false;
-    // Smoothed scene clock state (see g_FrameTimeSmooth in RENDER.CPP):
-    // EMA of the frame delta + gentle re-anchor to the raw clock. Reset
-    // (hard resync) on the first tick and around pause/scrub/jumps.
-    float smoothT_  = -1.0f;
-    float smoothDt_ = 0.0f;
-    int32_t lastSceneT_ = 0;
 };
 
 // Initialize_X helpers — used by each scene's free Initialize function.

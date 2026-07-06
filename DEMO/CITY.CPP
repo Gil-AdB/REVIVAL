@@ -2878,13 +2878,7 @@ struct CityScene : SceneDriver {
 		// the race-free scene-time snapshot. dTime (set here) stays the
 		// wallclock delta the free camera / water scroll rely on in pause.
 		tickSceneTimer(TTrd, pause_mode);
-		// Smoothed clock for the camera/animation time (see g_FrameTimeSmooth):
-		// kills the 10ms-quantized animation-step sawtooth that reads as
-		// reflection stutter on the authored flight. Raw clock in snapshot/
-		// bench (g_sceneTimeSmoothing=false) keeps captures deterministic.
-		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame)
-		         * (g_sceneTimeSmoothing ? g_FrameTimeSmooth : (float)g_FrameTime)
-		         / (float)CTPartTime;
+		CurFrame = CitySc->StartFrame + (CitySc->EndFrame - CitySc->StartFrame) * (float)g_FrameTime / (float)CTPartTime;
 		tickTabToggle(CitySc, "city");
 		Dynamic_Camera();
 
@@ -3201,12 +3195,7 @@ struct CityScene : SceneDriver {
 						std::fwrite(row.data(), 1, row.size(), f);
 					}
 					std::fclose(f);
-					// ft/cf are the CONTENT time of this frame (g_FrameTime
-					// sampled at tick start → CurFrame the animation used);
-					// t is the free-running Timer at dump time, which lags
-					// by the render duration — flow analysis must use cf.
-					fprintf(stderr, "[CITY] dumped %s (t=%d ft=%d cf=%.2f)\n",
-					        path, (int)Timer, (int)g_FrameTime, CurFrame);
+					fprintf(stderr, "[CITY] dumped %s (t=%d)\n", path, (int)Timer);
 				}
 				fprintf(stderr,
 					"[CITY-CAM] CITYSNAP_VIEW=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\"\n",

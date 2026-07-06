@@ -1430,9 +1430,6 @@ int main(int argc, const char *argv[])
 	if (ParseSnapshotArgs(argc, argv, snap)) {
 		// Headless deterministic dump path — no SDL window, no music.
 		// Used to diff native vs wasm at the pixel level / per-tick state.
-		// Raw (unsmoothed) scene clock: captures must be a pure function of
-		// the pinned Timer, not of the smoothing filter's warmup state.
-		g_sceneTimeSmoothing = false;
 		if (snap.scene == "city") {
 			return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
 		}
@@ -1491,7 +1488,6 @@ int main(int argc, const char *argv[])
 
 	BenchConfig bench;
 	if (ParseBenchArgs(argc, argv, bench)) {
-		g_sceneTimeSmoothing = false;   // deterministic clock (see snapshot path)
 		// Headless rasterizer benchmark — no SDL window, no music.
 		// Same flow as the snapshot harness but the inner loop times instead
 		// of dumping. Run under `node --cpu-prof DEMO_snapshot.js --bench=...`
