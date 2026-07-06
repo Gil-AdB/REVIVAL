@@ -1388,6 +1388,18 @@ void Unify_Textures(Scene *Sc)
 		"(skipped: other_scene=%u untextured=%u)%s\n",
 		(void *)Sc, matID, txtrID, skippedOtherScene, skippedUntextured,
 		matID > 256 ? "  *** OVER 8-BIT BUDGET ***" : "");
+	{	// mip-chain census: how many of this scene's textures actually
+		// carry chains (numMipmaps>1) vs single-level (Txtr_Nomip or
+		// non-square-limited). Diagnoses "mips flag does nothing".
+		int mipped = 0, single = 0, nomipFlag = 0;
+		for (Material *m = MatLib; m; m = m->Next) {
+			if (m->RelScene != Sc || !m->Txtr) continue;
+			if (m->Txtr->numMipmaps > 1) ++mipped; else ++single;
+			if (m->Txtr->Flags & Txtr_Nomip) ++nomipFlag;
+		}
+		fprintf(stderr, "[MAT] mip census: %d chained, %d single (%d Nomip-flagged)\n",
+		        mipped, single, nomipFlag);
+	}
 
 	// Histogram of materials per texture file for this scene. The 424:32
 	// mat:tex ratio in City means most textures are referenced by ~13
