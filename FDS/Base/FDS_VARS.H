@@ -286,6 +286,8 @@ extern "C" float &g_zscale;
 extern "C" float &g_zscale256;
 
 extern int32_t g_FrameTime;
+extern float   g_FrameTimeSmooth;    // see RENDER.CPP — jitter-filtered scene clock
+extern bool    g_sceneTimeSmoothing; // false in snapshot/bench (determinism)
 
 // Runtime toggles for hiding specific transparent objects, used to
 // dissect "object inside object" rendering. Default off. Set via the

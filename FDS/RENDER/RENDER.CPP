@@ -177,6 +177,19 @@ float CurFrame;
 
 
 int32_t g_FrameTime;
+// Smoothed scene clock (float ticks) — same average rate as g_FrameTime but
+// with the 10ms Timer quantization and frame-duration jitter filtered out
+// (SceneDriver::tickSceneTimer maintains it). The int Timer forces the
+// per-displayed-frame animation step to whole centiseconds: at 30fps that
+// is dt=3,4,3,4 — a ±15% sawtooth in every camera/animation step at rock-
+// steady fps, which reads as stutter on fast coherent content (window
+// reflections at ~2x camera rate show it first; measured via FDS_ENV_GRID
+// flow analysis: content-time motion is exactly smooth, so the jitter is
+// purely in the sampled clock). Scenes use this for CurFrame; snapshot /
+// bench harnesses set g_sceneTimeSmoothing=false so deterministic captures
+// keep the raw clock (baselines unchanged).
+float g_FrameTimeSmooth = 0.0f;
+bool  g_sceneTimeSmoothing = true;
 
 ////////////////
 // LIGHTING

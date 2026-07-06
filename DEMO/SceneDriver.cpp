@@ -100,6 +100,28 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
     // during frame processing are dropped.
     if (pauseMode || scrubbed) Timer = sceneT;
 
+    // Smoothed float scene clock. The int Timer quantizes every frame's
+    // animation step to whole 10ms ticks (at 30fps: dt=3,4,3,4 — a ±15%
+    // sawtooth at steady fps). EMA the delta, advance a float clock by it,
+    // and re-anchor gently toward the raw clock so music sync drift stays
+    // bounded (≲2 ticks). Hard resync when smoothing is off, on the first
+    // tick, and around pause/scrub/stall jumps.
+    {
+        const float rawDt = float(sceneT - lastSceneT_);
+        const bool resync = !g_sceneTimeSmoothing || smoothT_ < 0.0f ||
+                            pauseMode || scrubbed || rawDt <= 0.0f || rawDt > 60.0f;
+        if (resync) {
+            smoothT_  = float(sceneT);
+            smoothDt_ = (rawDt > 0.0f && rawDt <= 60.0f) ? rawDt : 0.0f;
+        } else {
+            smoothDt_ += 0.25f * (rawDt - smoothDt_);
+            smoothT_  += smoothDt_;
+            smoothT_  += 0.10f * (float(sceneT) - smoothT_);   // drift anchor
+        }
+        lastSceneT_ = sceneT;
+        g_FrameTimeSmooth = smoothT_;
+    }
+
     g_FrameTime = TTrd = sceneT;
     return sceneT;
 }
