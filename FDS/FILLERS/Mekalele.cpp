@@ -7,6 +7,9 @@ namespace meka {
 uint32_t* gbuffer_mat32_plane(GBuffer* gb) {
 	return gb ? gb->txtr.data() : nullptr;
 }
+// Continuous per-face mip fraction for trilinear albedo filtering, set by
+// FrustumClipper::MiplevelClipper before each filler call (see Mekalele.h).
+thread_local float g_tlsMipFrac = 0.0f;
 }
 
 // Engine-side G-buffers. Three of them:
@@ -74,6 +77,16 @@ void EngineGBuffer_Resize(int X, int Y) {
     // scenes still benefit when their materials set Material::ShadowMatID
     // (greets hull merge) or per-face F->ShadowMatID (greets wall split).
     s_engineGBuffer.shadowMatID.assign(numPixels, 0);
+    // Filtered-albedo plane — allocated only when FDS_TEXTURE_FILTER > 0.
+    // Holds the per-pixel bilinear/trilinear diffuse color the Mekalele
+    // pass samples at raster time (the sub-texel fraction is gone by the
+    // time the kernel sees the swizzled address in `txtr`). Empty → the
+    // deferred kernel falls back to point-sampling, byte-identical.
+    if (fds::FeatureFlags::texture_filter() > 0) {
+        s_engineGBuffer.albedo.assign(numPixels, 0);
+    } else {
+        s_engineGBuffer.albedo.clear();
+    }
     g_gbuffer = &s_engineGBuffer;
     // Transparent layers don't currently use tangent — leaving those
     // empty so GBufferSpan's nullptr-tangent path keeps the rasterizer

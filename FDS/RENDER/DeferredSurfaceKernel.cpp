@@ -1124,6 +1124,11 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// stage so a bench harness can measure its cost from the frame-time
 	// delta (see `--bench=scene@...`).
 	const bool profNoTex    = fds::FeatureFlags::prof_no_tex();
+	// Texture filtering (FDS_TEXTURE_FILTER > 0): the Mekalele raster pass
+	// wrote a filtered BGRA into gb.albedo; read that instead of point-
+	// sampling the packed texel address. Metal/rough/AO/normal maps keep
+	// using the suv address decoded from `txtr`.
+	const bool texFilterOn  = fds::FeatureFlags::texture_filter() > 0;
 	const bool profNoLights = fds::FeatureFlags::prof_no_lights();
 	const bool profNoSpec   = fds::FeatureFlags::prof_no_spec();
 	const bool profNoFog    = fds::FeatureFlags::prof_no_fog();
@@ -1306,7 +1311,18 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				if (sNmapAsDiffuse && Mat->NormalMap) srcTex = Mat->NormalMap;
 				const dword *texData = (const dword *)srcTex->Mipmap[miplevel];
 				if (!texData) continue;
-				const dword texel = texData[swizzledUV];
+				// Filtered albedo (bilinear/trilinear) when enabled — the
+				// nmap-as-diffuse dev viz still point-samples (the raster
+				// pass filtered the DIFFUSE, not the normal map). Heightmap
+				// (parallax) materials keep the suv fetch: the rasterizer
+				// shifts the UV before the swizzle pack, so the packed suv is
+				// the parallax-correct address; the albedo plane isn't written
+				// for them (see Mekalele wantAlbedo gate) → byte-identical.
+				const dword texel =
+					(texFilterOn && !gb.albedo.empty() && !Mat->HeightMap
+					 && !(sNmapAsDiffuse && Mat->NormalMap))
+					? gb.albedo[i]
+					: texData[swizzledUV];
 				texB = float(texel & 0xFF);
 				texG = float((texel >> 8) & 0xFF);
 				texR = float((texel >> 16) & 0xFF);
@@ -2978,6 +2994,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const bool   quarter      = deferredLightingQuarterEnabled();
 	const bool   checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool   specGlobalOn = Specular_Factor > 0.0f;
+	// Texture filtering: read the raster-time filtered albedo (see the
+	// scalar kernel). Only the diffuse texel moves to gb.albedo; the
+	// normal-map chase below keeps its suv address.
+	const bool   texFilterOn  = fds::FeatureFlags::texture_filter() > 0
+	                            && !gb.albedo.empty();
 	// Env-specular state (--env_refl): OuterVec had NO env compose at all —
 	// --env_refl was silently inert on every PreferOuterVec scene (city).
 	// Env lanes ride the existing spec/water per-lane scalar fallback, which
@@ -3138,7 +3159,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_envP[k] = nullptr; lane_hasEnv[k] = 0;
 					continue;
 				}
-				const dword tx = texData[uv];
+				// Heightmap (parallax) materials keep the suv point fetch (see
+				// the scalar kernel) — the albedo plane isn't written for them.
+				const dword tx = (texFilterOn && !Mat->HeightMap)
+					? gb.albedo[i + k] : texData[uv];
 				lane_texB[k] = float(tx & 0xFF)         * Mat->TintB;  // editor tint (see main kernel)
 				lane_texG[k] = float((tx >> 8) & 0xFF)  * Mat->TintG;
 				lane_texR[k] = float((tx >> 16) & 0xFF) * Mat->TintR;

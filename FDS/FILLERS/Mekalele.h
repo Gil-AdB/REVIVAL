@@ -47,6 +47,14 @@ using u16 = uint16_t;
 using i32 = int32_t;
 using u32 = uint32_t;
 constexpr const i32 TILE_SIZE = 8;
+
+// Continuous per-face mip FRACTION (∈ [0,1] toward mip+1), exported by
+// FrustumClipper::MiplevelClipper before each filler() call. The fixed
+// RasterFunc signature can't carry it, so it rides a thread_local (one
+// clipper instance per tile worker thread, matching the threading model).
+// Read by MekaleleImpl into TileRasterizerCtx::mipFrac for trilinear
+// (FDS_TEXTURE_FILTER == 2) blending. 0.0 when unknown / non-mip paths.
+extern thread_local float g_tlsMipFrac;
 using TScreenCoord = i32;
 
 struct GBuffer {
@@ -74,6 +82,15 @@ struct GBuffer {
 	// shadow mode (compared against ShadowMap::polyId, which stores
 	// matID+1 of the closest occluder).
 	std::vector<u32> txtr;
+	// Per-pixel FILTERED diffuse albedo (BGRA8), sampled at RASTER time
+	// with the sub-texel UV fraction that only exists before the swizzle
+	// pack in `txtr`. Written by Mekalele's apply_exact only when
+	// FDS_TEXTURE_FILTER > 0 (bilinear / trilinear); the deferred lighting
+	// kernel reads this instead of point-sampling the packed texel address,
+	// which kills the sub-texel facade crawl. Empty (point-sample) by
+	// default — allocated by EngineGBuffer_Resize only when the flag is on.
+	// Metal/rough/AO/normal maps keep using the `txtr` suv address.
+	std::vector<u32> albedo;
 	// Static-shadow lightmap address: meshLMId(16) | faceIdx(16).
 	// meshLMId is an index into Scene::staticLMTable (0 = no lightmap,
 	// sentinel; the deferred kernel falls back to per-pixel cube tap).
@@ -411,6 +428,20 @@ struct TileRasterizerCtx {
 	// tangent G-buffer write (the kernel reads the matID-gated material, so a
 	// stale tangent left in the plane is never sampled). Set by the dispatcher.
 	bool writeTangent = true;
+
+	// Continuous mip fraction for trilinear albedo filtering (snapshot of
+	// meka::g_tlsMipFrac at dispatch — ∈ [0,1] toward mip+1). 0 outside the
+	// trilinear path / when unknown.
+	float mipFrac = 0.0f;
+
+	// Material carries a heightmap (parallax offset mapping). When set, the
+	// texture-filter albedo plane is NOT written for this face and the
+	// deferred kernel keeps its suv-based point fetch — the rasterizer
+	// parallax path shifts the UV before the swizzle pack, and pre-resolving
+	// a filtered albedo here would change greets' parallax look. Filtered
+	// parallax (bilinear at the shifted UV) is a follow-up. City has no
+	// heightmaps, so the shimmer target is unaffected.
+	bool materialHasHeightMap = false;
 };
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
@@ -430,6 +461,7 @@ struct GBufferSpan {
 	u32 *normal;
 	u16 *tangent;
 	u32 *txtr;
+	u32 *albedo;      // filtered BGRA (nullptr when FDS_TEXTURE_FILTER off)
 	u32 *lightmapMF;
 	u16 *lightmapST;
 	u16 *shadowMatID;
@@ -443,6 +475,7 @@ struct GBufferSpan {
 		normal += offset;
 		tangent += offset;
 		txtr += offset;
+		if (albedo) albedo += offset;
 		if (lightmapMF) lightmapMF += offset;
 		if (lightmapST) lightmapST += offset;
 		if (shadowMatID) shadowMatID += offset;
@@ -462,6 +495,11 @@ struct GBufferSpan {
 		u16 *tangentPtr = gbuffer.tangent.empty()
 			? nullptr
 			: gbuffer.tangent.data() + offset;
+		// Filtered-albedo plane: optional (allocated only when
+		// FDS_TEXTURE_FILTER > 0). nullptr → inner loop skips the write.
+		u32 *albedoPtr = gbuffer.albedo.empty()
+			? nullptr
+			: gbuffer.albedo.data() + offset;
 		// Lightmap planes are also optional — allocated only when
 		// --shadow-lightmap is on (or when any scene has populated a
 		// staticLMTable). Inner loop checks before writing.
@@ -494,6 +532,7 @@ struct GBufferSpan {
 			gbuffer.normal.data() + offset,
 			tangentPtr,
 			gbuffer.txtr.data() + offset,
+			albedoPtr,
 			lmMFPtr,
 			lmSTPtr,
 			shadowMatIDPtr,
@@ -549,6 +588,40 @@ inline uint32_t tile_du(uint32_t u, uint32_t vbits, uint32_t umask) {
 	return tile_u(u, vbits, umask) | 0x800 | (((1 << vbits) - 1) << 14);
 }
 
+// 8-wide 4-tap bilinear texel fetch in the swizzled tile layout. Mirrors
+// TheOtherBarry's NORMAL_BILINEAR block: floor(u,v) + fractional weights,
+// 4 corner gathers via packed_tile_u/packed_tile_v (which wrap at the
+// texture edge through their &vmask / &swizzled_umask masking, exactly as
+// the point-sample roundi path does), blended in 16-bit. `ufTexels`/
+// `vfTexels` are UV already scaled to texel units for THIS mip. Returns
+// packed BGRA8 per lane. `vbits` = LogHeight for this mip.
+inline Vec8ui bilinear_sample_x8(Vec8f ufTexels, Vec8f vfTexels,
+                                 int32_t vbits, uint32_t umaskSwizzled,
+                                 int32_t vmask, const void *texData,
+                                 Vec8ib p_mask) {
+	Vec8i u0 = truncatei(ufTexels), v0 = truncatei(vfTexels);
+	Vec8i u1 = u0 + 1,              v1 = v0 + 1;
+	const Vec8i wu = truncatei((ufTexels - to_float(u0)) * 255.0f);
+	const Vec8i wv = truncatei((vfTexels - to_float(v0)) * 255.0f);
+	Vec8i tu0 = packed_tile_u(u0, vbits, umaskSwizzled);
+	Vec8i tu1 = packed_tile_u(u1, vbits, umaskSwizzled);
+	Vec8i tv0 = packed_tile_v(v0, (uint32_t)vmask);
+	Vec8i tv1 = packed_tile_v(v1, (uint32_t)vmask);
+	const Vec32us s00 = extend(Vec32uc(gather(Vec8ui(tu0 + tv0), texData, p_mask)));
+	const Vec32us s10 = extend(Vec32uc(gather(Vec8ui(tu1 + tv0), texData, p_mask)));
+	const Vec32us s01 = extend(Vec32uc(gather(Vec8ui(tu0 + tv1), texData, p_mask)));
+	const Vec32us s11 = extend(Vec32uc(gather(Vec8ui(tu1 + tv1), texData, p_mask)));
+	// Weights 0..255 replicated to all 4 bytes; each blend s*(255-w)+s*w
+	// stays <= 255*255 → fits u16.
+	const Vec32us wU = extend(Vec32uc(Vec8ui(wu) * Vec8ui(0x01010101u)));
+	const Vec32us wV = extend(Vec32uc(Vec8ui(wv) * Vec8ui(0x01010101u)));
+	const Vec32us iU = Vec32us(255) - wU;
+	const Vec32us top = (s00 * iU + s10 * wU) >> 8;
+	const Vec32us bot = (s01 * iU + s11 * wU) >> 8;
+	const Vec32us iV = Vec32us(255) - wV;
+	return Vec8ui(compress((top * iV + bot * wV) >> 8));
+}
+
 struct TileRasterizer {
 	GBuffer &gbuffer;
 	TileRasterizerCtx ctx; 
@@ -570,6 +643,21 @@ struct TileRasterizer {
 
 		UScaleFactor = (1 << LogWidth);
 		VScaleFactor = (1 << LogHeight);
+
+		// Texture filtering (FDS_TEXTURE_FILTER: 0 point, 1 bilinear, 2
+		// trilinear). When on, apply_exact samples the diffuse texel with
+		// the sub-texel fraction and writes the blended BGRA into
+		// gbuffer.albedo. albedoTex0 is THIS mip's texel table (dword
+		// BGRA); albedoTex1 is mip+1 for the trilinear cross-mip lerp.
+		texFilter  = fds::FeatureFlags::texture_filter();
+		albedoTex0 = reinterpret_cast<const u32*>(ctx.Txtr->Mipmap[ctx.miplevel]);
+		LogWidth1  = LogWidth  - 1;
+		LogHeight1 = LogHeight - 1;
+		albedoTex1 = ((ctx.miplevel + 1) < ctx.Txtr->numMipmaps
+		              && LogWidth1 >= 0 && LogHeight1 >= 0)
+		    ? reinterpret_cast<const u32*>(ctx.Txtr->Mipmap[ctx.miplevel + 1])
+		    : nullptr;
+		mipFrac = std::min(std::max(ctx.mipFrac, 0.0f), 1.0f);
 	}
 
 	// miplevel (4 bits) | txtr id (8 bit) | zeroes (20 bit)
@@ -578,6 +666,12 @@ struct TileRasterizer {
 	int32_t LogHeight;
 	float UScaleFactor;
 	float VScaleFactor;
+	// Texture filtering state (see constructor).
+	int texFilter = 0;
+	const u32 *albedoTex0 = nullptr;
+	const u32 *albedoTex1 = nullptr;
+	int32_t LogWidth1 = 0, LogHeight1 = 0;
+	float mipFrac = 0.0f;
 	float duzdx, duzdy;
 	float dvzdx, dvzdy;
 	float drzdx, drzdy;
@@ -665,6 +759,27 @@ struct TileRasterizer {
 		int32_t t_umask = (1 << LogWidth) - 1;
 		int32_t t_vmask = (1 << LogHeight) - 1;
 		int32_t t_umask_swizzled = swizzle_umask(LogHeight, t_umask);
+
+		// Texture filtering: sample the diffuse texel with the sub-texel
+		// fraction and write the blended BGRA to gbuffer.albedo. Only when
+		// the flag is on, the plane is allocated, and this mip has texels.
+		// Skip heightmap (parallax) materials — the kernel keeps its
+		// suv-based point fetch for those (byte-identical), so writing a
+		// filtered albedo would be wasted and inconsistent.
+		const bool wantAlbedo = (texFilter > 0) && (span.albedo != nullptr)
+		                        && (albedoTex0 != nullptr)
+		                        && !ctx.materialHasHeightMap;
+		// mip+1 masks for the trilinear cross-mip blend.
+		const bool wantTri = wantAlbedo && (texFilter >= 2)
+		                     && (albedoTex1 != nullptr) && (mipFrac > 0.0f);
+		int32_t t1_vmask = wantTri ? ((1 << LogHeight1) - 1) : 0;
+		int32_t t1_umask_swizzled = wantTri
+		    ? swizzle_umask(LogHeight1, (1 << LogWidth1) - 1) : 0;
+		// Per-mip trilinear weight replicated to all 4 bytes (0..255).
+		const Vec32us triW = wantTri
+		    ? extend(Vec32uc(Vec8ui(uint32_t(mipFrac * 255.0f) * 0x01010101u)))
+		    : Vec32us(0);
+		const Vec32us triIW = Vec32us(255) - triW;
 
 		Vec8f p_rz = v8_from_arith_seq(tile.rz0, drzdx);
 		Vec8f p_uz = v8_from_arith_seq(tile.uz0, duzdx);
@@ -870,6 +985,34 @@ struct TileRasterizer {
 					auto p_offset = tu + tv;
 					auto packedTxtrData = v8_TxtrIdMask | p_offset;
 					_mm256_maskstore_ps(span.txtr, *(__m256i*)(&p_mask), *(__m256*)(&packedTxtrData));
+
+					// Texture filtering: sample the diffuse texel with the
+					// sub-texel FRACTION (only present here, pre-swizzle-pack)
+					// and write the blended BGRA to gbuffer.albedo. The suv in
+					// span.txtr above is left untouched (roundi/point) so the
+					// kernel's metal/rough/AO map lookups are unchanged. Note
+					// uf/vf are the SAME (post-parallax) UV the point path packs.
+					if (wantAlbedo) {
+						const Vec8f ufTexels = uf * UScaleFactor;
+						const Vec8f vfTexels = vf * VScaleFactor;
+						Vec8ui albedoCol = bilinear_sample_x8(
+							ufTexels, vfTexels, LogHeight,
+							(uint32_t)t_umask_swizzled, t_vmask,
+							albedoTex0, p_mask);
+						if (wantTri) {
+							// mip+1 is half-res → texel coords ×0.5.
+							const Vec8ui albedoCol1 = bilinear_sample_x8(
+								ufTexels * 0.5f, vfTexels * 0.5f, LogHeight1,
+								(uint32_t)t1_umask_swizzled, t1_vmask,
+								albedoTex1, p_mask);
+							const Vec32us c0e = extend(Vec32uc(albedoCol));
+							const Vec32us c1e = extend(Vec32uc(albedoCol1));
+							albedoCol = Vec8ui(compress(
+								(c0e * triIW + c1e * triW) >> 8));
+						}
+						_mm256_maskstore_ps((float*)span.albedo,
+							*(__m256i*)(&p_mask), *(__m256*)(&albedoCol));
+					}
 
 					// Per-pixel nlerp + octahedral pack. Vec normalize +
 					// vec oct_encode_u16_x8 — formerly scalar per-lane.
@@ -1301,6 +1444,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.faceOwnerMirrorId = F->ownerMirrorId,
 		.faceBehindMirrorMask = F->behindMirrorMask,
 		.writeTangent = writeTangent,
+		.mipFrac = meka::g_tlsMipFrac,
+		.materialHasHeightMap = (F->Txtr->HeightMap != nullptr),
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

@@ -13,6 +13,12 @@
 #include "FRUSTRUM.H"
 #include "ClipperTileRect.h"
 #include <atomic>
+
+// Trilinear albedo filtering: export the continuous mip FRACTION to the
+// Mekalele rasterizer (which can't receive it through the fixed RasterFunc
+// signature) via a thread_local. Defined in Mekalele.cpp; ∈ [0,1] toward
+// mip+1. Reset to 0 on non-mip / unknown filler paths.
+namespace meka { extern thread_local float g_tlsMipFrac; }
 #include <climits>
 #include <mutex>
 
@@ -626,6 +632,7 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		FDS_STATS_INC_S(mipFastUniform);
 		if (Tx->Flags & Txtr_Nomip) {
 			g_MipLevel = 0;
+			meka::g_tlsMipFrac = 0.0f;
 		} else {
 			const float mipF = 0.5f * fastLog2(fabs(texArea * Tx->SizeX * Tx->SizeY / pixArea)) + mipBias;
 			int32_t mip = int32_t(mipF);
@@ -640,12 +647,15 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 			if (mip > L) mip = L;
 			if (g_mipLastMipWrite) F->LastMip = uint8_t(mip);
 			g_MipLevel = mip;
+			// Trilinear fraction toward mip+1 (int32_t(mipF) truncates, so
+			// level L is active for mipF ∈ [L, L+1)). Clamped in the filler.
+			meka::g_tlsMipFrac = mipF - float(mip);
 		}
 
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
+		if (!fds::FeatureFlags::mips()) { g_MipLevel = 0; meka::g_tlsMipFrac = 0.0f; }  // was NO_MIPMAPS
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
@@ -712,14 +722,22 @@ void FrustumClipper::MiplevelClipper(Face *F, RasterFunc filler,
 		if (g_mipLastMipWrite) F->LastMip = uint8_t(iml);
 		g_MipLevel = iml;
 		if (g_MipLevel < 0) g_MipLevel = 0;
+		// Trilinear fraction toward mip+1. Level L is active for the
+		// continuous metric ml ∈ (L, L+1] (see the hysteresis comment
+		// above), so frac = ml - L. Clamped to [0,1] in the filler.
+		meka::g_tlsMipFrac = ml - float(g_MipLevel);
 #ifdef COUNT_POLYS
 		FDS_STATS_INC_POLYS_S();
 #endif
-		if (!fds::FeatureFlags::mips()) g_MipLevel = 0;   // was NO_MIPMAPS
+		if (!fds::FeatureFlags::mips()) { g_MipLevel = 0; meka::g_tlsMipFrac = 0.0f; }  // was NO_MIPMAPS
 		filler(F, C_Prim, C_numVerts, g_MipLevel, rt, cam);
 		return;
 	}
 
+	// Poly-split path: each section rasterizes at a discrete mip; no
+	// cross-mip fraction is meaningful, so trilinear falls back to
+	// bilinear (frac 0) on these faces.
+	meka::g_tlsMipFrac = 0.0f;
 	FDS_STATS_INC_S(mipSplit);
 
 	// scanconversion
@@ -986,6 +1004,9 @@ void FrustumClipper::Render(Face *F, RasterFunc filler, bool isEnvCoords,
 #endif
 		// skipMipLevel callers (shadow rasterizer) don't care about the
 		// mip level — pass 0. The texture wouldn't be sampled anyway.
+		// Non-mip textured faces have no cross-mip fraction → trilinear
+		// falls back to bilinear (frac 0).
+		meka::g_tlsMipFrac = 0.0f;
 		filler(F, C_Scnd, C_numVerts, skipMipLevel ? 0u : g_MipLevel, rt, cam);
 	}
 	/*for(i=2; i<C_numVerts; i++)
