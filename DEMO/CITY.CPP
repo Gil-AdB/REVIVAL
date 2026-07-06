@@ -2824,11 +2824,6 @@ struct CityScene : SceneDriver {
 
 		// get the reflective water surface object
 		Reflective_Mapper_Setup();
-		// env_ground_parallax: the ground/water plane the downward-ray
-		// reflection correction intersects = the mirror plane (y = -ofs).
-		// setDefault → an explicit --env-ground-y still wins.
-		fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::env_ground_y,
-		                              -RflSurfOfs);
 		Setup_Water_Distort();
 		pwater::BuildField();    // procedural water field + caustic texture (shared with chase)
 

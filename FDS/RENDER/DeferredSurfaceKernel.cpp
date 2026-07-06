@@ -939,43 +939,37 @@ static inline void EnvSpecComposeScalar(
 			rwx = hx_ * hInv_; rwy = hy_ * hInv_; rwz = hz_ * hInv_;
 		}
 	}
-	// Position-aware fakes for centroid-anchored DIRECTION-ONLY stores
+	// Sphere-proxy parallax for centroid-anchored DIRECTION-ONLY stores
 	// (city: noParallax — the whole-city AABB proxy above is disabled for
-	// them; see docs/BACKLOG_PLANS.md #1). A mid-height bake can never
-	// index what is LOW in the world; two cheap corrections:
-	//  --env-ground-parallax: downward rays intersect the known ground/
-	//    water plane (env_ground_y; city auto-defaults it to the mirror
-	//    plane) and the lookup runs from the BAKE point to the hit —
-	//    geometrically exact for everything reflected off the ground
-	//    (building bases, waterline). Blended out over the last ~0.15 of
-	//    rw.y so the reflected horizon has no seam. The plane is a single
-	//    smooth surface, so unlike the AABB proxy it cannot band.
-	//  --env-vert-parallax=R: first-order sphere-proxy tilt for the
-	//    remaining rays, (bakeY − pixelY)/R.
+	// them; docs/BACKLOG_PLANS.md #1). A mid-height bake can never index
+	// what is LOW in the world by direction alone. Intersect the reflected
+	// ray FROM THE PIXEL with a sphere of radius R around the bake point
+	// and look up toward the hit: low pixels aim low (neighbor bases,
+	// waterline), and a sphere is edge-free so the correction is
+	// continuous everywhere — no AABB exit-face bands, no plane-horizon
+	// tearing (both prior attempts failed exactly there). Exact sqrtf on
+	// purpose: an approximate root here would re-introduce plateau
+	// stepping into the reflection chain (the cee927d lesson).
 	if (envP->noParallax) {
-		bool grounded = false;
-		if (fds::FeatureFlags::env_ground_parallax() && rwy < -1e-3f) {
-			const float gy  = fds::FeatureFlags::env_ground_y();
-			const float dyP = gy - sampleWorldY;      // pixel above plane ⇒ < 0
-			if (dyP < -1.0f) {
-				const float tHit = dyP / rwy;         // > 0
-				float lx = sampleWorldX + tHit * rwx - envP->bakeX;
-				float ly = gy                        - envP->bakeY;
-				float lz = sampleWorldZ + tHit * rwz - envP->bakeZ;
-				const float lInv = fast_rsqrt(lx*lx + ly*ly + lz*lz + 1e-12f);
-				lx *= lInv; ly *= lInv; lz *= lInv;
-				float w = -rwy * (1.0f / 0.15f);
-				if (w > 1.0f) w = 1.0f;
-				rwx += (lx - rwx) * w;
-				rwy += (ly - rwy) * w;
-				rwz += (lz - rwz) * w;
-				grounded = true;
+		const float sphR = fds::FeatureFlags::env_sphere_parallax();
+		if (sphR > 0.0f) {
+			const float px_ = sampleWorldX - envP->bakeX;
+			const float py_ = sampleWorldY - envP->bakeY;
+			const float pz_ = sampleWorldZ - envP->bakeZ;
+			const float dd = rwx*rwx + rwy*rwy + rwz*rwz;
+			const float dp = rwx*px_ + rwy*py_ + rwz*pz_;
+			const float pp = px_*px_ + py_*py_ + pz_*pz_;
+			const float R2 = sphR * sphR;
+			const float disc = dp*dp - dd*(pp - R2);
+			// Pixel inside the proxy (always true for sane R ≥ building
+			// extents) → one positive root; direction stays unnormalized
+			// (the cube lookup is scale-invariant).
+			if (disc > 0.0f && pp < R2) {
+				const float t = (-dp + std::sqrt(disc)) / dd;
+				rwx = px_ + t * rwx;
+				rwy = py_ + t * rwy;
+				rwz = pz_ + t * rwz;
 			}
-		}
-		if (!grounded) {
-			const float vertR = fds::FeatureFlags::env_vert_parallax();
-			if (vertR > 0.0f)
-				rwy += (envP->bakeY - sampleWorldY) / vertR;
 		}
 	}
 	// Equirect lookup — the exact inverse of EnvBake's stitch
@@ -3509,8 +3503,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// EnvSpecComposeScalar; vectorizing them is the follow-up if
 			// the look is approved) — disengage the vec compose when on.
 			const bool envPosFakesOff =
-				!fds::FeatureFlags::env_ground_parallax() &&
-				fds::FeatureFlags::env_vert_parallax() <= 0.0f;
+				fds::FeatureFlags::env_sphere_parallax() <= 0.0f;
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];
