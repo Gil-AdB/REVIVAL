@@ -104,3 +104,49 @@ Spike measurement to anchor the per-tap cost with real memory behavior:
 Bench harness: `--bench=scene@scene=greets,...` + FDS_TAIL_PROF=1; the
 whole session's measurement discipline applies (interleaved A/B, dummy
 video driver, absolute cmake paths, loop-aware dump captures).
+
+## Tier 2 EXECUTION LOG (2026-07-07)
+
+### STEP 0 — spike re-measured CLEAN (parallax now exercisable at greets@t=5780)
+
+Greets@t=5780 IS a wall-facing pose with large parallax coverage (stone-block
+corridor, both walls grazing + cobble floor; the walls fill most of the frame).
+Confirmed exercisable: `FDS_PARALLAX_STRENGTH` 0.1 vs 0.9 changes 80% of bytes.
+`FDS_POM_SPIKE=8` vs `=0` changes 81.5% of pixels (max Δ182) → the naive march
+engages materially (the prior "zero sensitivity" note is obsolete now that
+`--greets_stone_tex` is default-on and loads the wall height map in the snapshot).
+
+**Per-tap cost — MEASURED.** `--bench=scene@scene=greets,t=5780`, 1920×1080,
+interleaved POM_SPIKE 0/4/8. `POM_SPIKE=N` does 1 (single-shift) + N (march)
+8-bit height gathers/px; Δ(N−0) isolates N march taps.
+
+- SINGLE-THREAD (`FDS_THREADS=1`, whole-frame mean, 4 rounds, VERY STABLE ±0.5ms):
+  single-shift **336.4 ms** · N4 **345.5 ms** · N8 **352.3 ms**.
+  ⇒ **≈ 2.0 ms/tap SINGLE-THREAD** at t=5780 coverage ((352.3−336.4)/8).
+- THREADED (default pool, 8 rounds, machine DIRTY 56–94% bg load → noisy;
+  within-round paired Δ to cancel per-round contention): naive-8 march
+  ≈ **+2 ms/frame** over single-shift (paired Δ(8−0) median ~2, range 1.3–4,
+  one anomalous round). ⇒ **≈ 0.25 ms/tap THREADED**. Internally consistent
+  (2.0 ms/tap serial ÷ 8 physical cores) and confirms the prior agent's
+  ~0.33 ms/tap anchor (same order).
+
+**BUDGET RE-PROJECTION — the old estimate was ~20–35× too pessimistic.**
+This doc estimated "full-res naive 5-tap ≈ +45–70 ms — dead". MEASURED:
+full-res naive **8-tap ≈ +2 ms/frame THREADED** (+16 ms single-thread) at real
+greets t=5780 coverage. The taps are cheap because the height map is 8-bit
+(1 byte/texel), tiled (cache-friendly), point-sampled, and the march reuses the
+already-computed TBN/view dir. Implication: even NAIVE full-res POM is nearly
+affordable here; Tier-2 cone-step (fewer taps) + quarter-res (÷4 coverage) + LOD
+land the feature well under +1 ms. The "+2–5 ms showpiece budget" is comfortable.
+
+**VISUAL verdict (PNGs /tmp/pom_review2/, single-shift vs naive-8, wall-facing):**
+- At the DEFAULT strength 0.3 the difference is SUBTLE — offset-parallax already
+  captures most of the apparent shift; the march mainly refines where the ray
+  lands (less swim) and slightly deepens the mortar grooves.
+- At strength 0.7 (more relief) the march CLEARLY wins: mortar grooves read
+  deeper with a crisper top edge and correct occlusion into the recess, while the
+  single-shift shows softer, sheared/swimming offset on the block faces.
+- So the occlusion march is a real quality gain that GROWS with height amplitude;
+  offset parallax never changes silhouettes (by design), so the win is in-recess
+  depth + swim reduction, not a dramatic outline change. Honest: this is a
+  refinement at 0.3, a clear improvement at higher relief.
