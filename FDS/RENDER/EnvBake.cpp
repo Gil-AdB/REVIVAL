@@ -498,6 +498,53 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
 }
 }   // namespace
 
+// FDS_ENV_GRID=1 — measurement content: replace a baked cube store with a
+// synthetic pattern so reflection MOTION is objectively trackable:
+//   • per-face tint      → identifies which cube face a glass region samples
+//   • 8-texel checker    → strong texture for cross-correlation flow tracking
+//     (the city art is too low-contrast/aliased for reliable block matching)
+//   • 2-texel white face border → face-seam lines show directly in the glass
+// Applied to every level (the checker coarsens per mip, which is fine — the
+// city glass samples mip 0-1).
+static void fillEnvDebugGrid(EnvPanoStore& S) {
+    if (!S.view.isCube) return;
+    static const uint32_t tint[6] = {
+        0xFFD05050, 0xFF50D050, 0xFF5050D0,     // +X red, -X green, +Y blue
+        0xFFD0D050, 0xFFD050D0, 0xFF50D0D0 };   // -Y yellow, +Z magenta, -Z cyan
+    for (int l = 0; l < S.view.numMips; ++l) {
+        const int fr = S.view.W >> l;
+        for (int f = 0; f < 6; ++f) {
+            uint32_t* base = S.levels[l].data() + size_t(f) * fr * fr;
+            for (int y = 0; y < fr; ++y)
+                for (int x = 0; x < fr; ++x) {
+                    const bool border = x < 2 || y < 2 || x >= fr-2 || y >= fr-2;
+                    uint32_t c;
+                    if (border) c = 0xFFFFFFFF;
+                    else {
+                        // APERIODIC random 4-texel cells (face-tinted): a
+                        // periodic checker made block-matching measure flow
+                        // MODULO the cell period — sawtooth artifacts of the
+                        // instrument itself, not the renderer (same trap as
+                        // the earlier 64px phase-correlation detector).
+                        uint32_t h = (uint32_t(x >> 2) * 0x8DA6B343u)
+                                   ^ (uint32_t(y >> 2) * 0xD8163841u)
+                                   ^ (uint32_t(f) * 0xCB1AB31Fu);
+                        h ^= h >> 13; h *= 0x2C1B3C6Du; h ^= h >> 15;
+                        const uint32_t lum = 0x30 + (h & 0x9F);
+                        const uint32_t tb = (tint[f]      ) & 0xFF;
+                        const uint32_t tg = (tint[f] >>  8) & 0xFF;
+                        const uint32_t tr = (tint[f] >> 16) & 0xFF;
+                        c = 0xFF000000u
+                          | (((tr * lum) >> 8) << 16)
+                          | (((tg * lum) >> 8) <<  8)
+                          |  ((tb * lum) >> 8);
+                    }
+                    base[size_t(y) * fr + x] = c;
+                }
+        }
+    }
+}
+
 bool EnvReflection_FramePrep(Scene* sc) {
     if (!sc || g_envBakeInProgress) return false;
     SceneEnv& env = g_envByScene[sc];
@@ -524,6 +571,8 @@ bool EnvReflection_FramePrep(Scene* sc) {
         if (idx < 0) {
             auto store = bakeStore(sc, env, c, M);
             if (!store) { env.byMat[M] = -1; continue; }
+            static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
+            if (sGrid) fillEnvDebugGrid(*store);
             std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
                          store->view.W, store->view.H, store->view.numMips - 1,
                          M->Name ? M->Name : "?", c.x, c.y, c.z);
@@ -622,6 +671,11 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
         v.mip[k] = store->levels[k].data();
     v.bakeX = bakePoint.x; v.bakeY = bakePoint.y; v.bakeZ = bakePoint.z;
+    {   // measurement content — see fillEnvDebugGrid (city building stores
+        // register through HERE, not bakeStore: the panorama cache path).
+        static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
+        if (sGrid) fillEnvDebugGrid(*store);
+    }
     env.stores.push_back(std::move(store));
     const int idx = int(env.stores.size()) - 1;
     env.byMat[M] = idx;
