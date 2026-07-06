@@ -150,3 +150,84 @@ land the feature well under +1 ms. The "+2–5 ms showpiece budget" is comfortab
   offset parallax never changes silhouettes (by design), so the win is in-recess
   depth + swim reduction, not a dramatic outline change. Honest: this is a
   refinement at 0.3, a clear improvement at higher relief.
+
+### STEP 1 — cone-step march (`--parallax_pom=N`), SHIPPED + MEASURED
+
+Landed: `Material::ConeMap` + `MakeConeMap` (DEMO/MeshOps.cpp) + the cone march
+in Mekalele.h. Conservative cone map (max-pooled coarse grid, toroidal, per mip,
+8-bit, SAME tiled layout as the height map → one swizzled address). March step
+`dt = c·gap/(c+dlen)` (exact divide). Provably reduces to single-shift on flat
+surfaces → the win is entirely in relief.
+
+- **Bake** (one-time, threaded, only when the flag is on): rooms **62 ms**,
+  floor **230 ms**. Trivial; no disk cache needed for a default-off feature.
+- **Convergence** (vs a cone-16 reference, strength 0.7): cone-4 6.5% px /
+  **cone-6 2.2%** (mean 0.25/255 — imperceptible) / cone-8 0.84%. So **~6–8 cone
+  taps = converged**, vs the naive linear march needing **16–32** uniform steps
+  to approach the same (it lands on quantized rayH, never on the surface).
+- **Cost** (single-thread whole-frame median, greets t=5780, ±<1 ms):
+  single-shift 336.7 ms · cone-4 +17.7 · **cone-6 +28.7** · cone-8 +38.7 ms.
+  ⇒ **~4.8 ms/cone-step serial** vs **~1.75 ms/naive-tap** — a cone step is
+  **2.7×** a naive tap (2 gathers height+cone + an exact divide). Equal-quality:
+  cone-6 (converged, +28.7) ≈ naive-16 (+26.7, still coarse) ⇒ **cone = better
+  quality at ≈ equal cost**; not a raw speed win with 2 gathers, but converged,
+  artifact-free deep relief + correct occlusion.
+- Threaded: +28.7 ms serial ÷ ~8 physical cores ≈ **+3.6 ms/frame** — inside the
+  +2–5 ms budget on its own.
+- **Visual:** strength 0.3 cone ≈ single-shift (offset parallax is accurate at
+  low relief); 0.7 gives deep crisp grooves like naive-8 but SMOOTHER on the
+  faces (no fixed-step stepping) + clearly deeper than single-shift.
+
+### STEP 2 — quarter-res offset field (`--parallax_pom_quarter`), SHIPPED (½) + MEASURED
+
+Horizontal ÷2: gather height+cone only on EVEN raster lanes, share the sample to
+the odd neighbour (odd borrows the marched DEPTH, keeps its own view geometry →
+the parallax OFFSET is subsampled, color still fetched full-res). **Grid choice
+(documented):** rides the RASTER 8-wide grid, NOT `deferred_quarter` — parallax
+must run at G-buffer fill where the smooth float UV lives (the kernel only has
+the packed integer suv), so it's independent of the 1-of-4 lighting grid.
+
+- **Saving:** cone-6 +30.7 → **+26.3 ms** at t=5780 = **~14% of the march**.
+  MEASURED CORRECTION to the plan's ÷4 hope: the march is **arithmetic-bound**
+  (address swizzle + exact divide + 8-wide FP all run full-width), the scalar
+  gather is only ~30% of the step, so gather-subsampling saves ~14%, not 50%.
+  Corollary: a combined 16-bit height+cone map (1 gather/step) was **dropped** —
+  it would remove only the 2nd gather (~7%), not worth the churn (measured logic).
+- **Slip:** 5.5% px, mean 0.36/255 @ strength 0.7 — faint speckle on high-freq
+  stone edges only (floor cobbles / far wall); large blocks unaffected, no gross
+  artifacts. Default 0 = full-res (byte-identical; A/A greets max 0).
+- **STAGED:** vertical ÷2 (prev-row offset cache → the full ÷4) + a true
+  bilateral silhouette-aware upsample. The row cache needs a coverage-validity
+  mask (an odd row can't reuse an even row that didn't cover that lane).
+
+### STEP 3 — LOD fade (`--parallax_pom_lod=Z`), SHIPPED + MEASURED
+
+Continuous fade cone→single-shift as view-Z grows lodDist→2·lodDist; a raster row
+whose 8 lanes are ALL past 2·lodDist skips the march entirely.
+
+- At t=5780 (near walls) it saves **~0.3 ms** — the walls are close, so few rows
+  fully clear the fade. Its payoff is **framing-dependent**: a shot down a long
+  corridor (most parallax pixels far/oblique) skips the march on the far half.
+  Continuous, no pop; `--parallax_pom_lod=0` is BYTE-IDENTICAL to full cone.
+
+### Tier-2 bottom line (MEASURED vs the +2–5 ms estimate)
+
+At the real greets t=5780 framing (near walls, large coverage), DIRECTLY
+MEASURED THREADED (within-round paired Δ, 6 rounds, machine 59–90% dirty):
+**cone-6 = +4.2 ms/frame** (median ~4.4; serial +28.7 ÷ ~7× effective raster
+parallelism); **+quarter = +3.4 ms** (quarter saves ~0.8 ms ≈ 19% threaded);
+LOD trims distant framings further. **Inside the +2–5 ms budget**, delivering
+converged, artifact-free occlusion relief. The honest nuance the measurement
+adds: the coverage levers (quarter/LOD) buy LESS here than the plan's ÷4 math
+assumed, because (a) the march is arithmetic-bound not gather-bound, and (b) this
+framing's walls are near so LOD rarely engages — but the feature already fits
+the budget on cone-step alone. Default-off is byte-identical (gate ALL PASS,
+city@t=1961 md5 ae8e08d1b791a1707f304ce0a5425064).
+
+**Live command (see Tier 2):**
+```
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./DEMO --deferred --parallax_pom=6 [--parallax_pom_quarter=1] \
+  [--parallax_pom_lod=40] --snapshot=greets@t=5780 --out=/tmp/pom
+# raise --parallax_strength (0.5-0.7) to make the occlusion depth obvious.
+```
