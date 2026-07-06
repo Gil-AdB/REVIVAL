@@ -3211,11 +3211,25 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			__m256 sign_oy = _mm256_and_ps(oy, _mm256_set1_ps(-0.0f));
 			ox = _mm256_sub_ps(ox, _mm256_or_ps(t, sign_ox));
 			oy = _mm256_sub_ps(oy, _mm256_or_ps(t, sign_oy));
-			// Normalize via approx_rsqrt
+			// Normalize via approx_rsqrt + ONE Newton-Raphson step. The raw
+			// 12-bit rsqrt is ±0.3% and PIECEWISE-CONSTANT in its LUT — the
+			// stepping normal LENGTH couples into reflect()'s 2(w·n)n term
+			// (scales by |n|²) and snapped the reflected direction ~0.35°
+			// per LUT-cell crossing: THE per-facade "window reflections
+			// jump" on the authored city flight (root-caused by micro-dolly
+			// bisection, 2026-07: normal DIRECTION moved one oct cell,
+			// 0.0024°, while rw lurched 0.354° — 60x the reflect() bound;
+			// the ±0.3% |n| plateaus were the only term that fit). One NR
+			// brings |n| to ±6e-5, same as the scalar path's fast_rsqrt.
+			// Diffuse shading only ever saw this as ±0.3% brightness.
 			__m256 lenSq = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ox, ox),
 			                                            _mm256_mul_ps(oy, oy)),
 			                              _mm256_mul_ps(az, az));
 			__m256 invLenN = _mm256_rsqrt_ps(lenSq);
+			invLenN = _mm256_mul_ps(invLenN,
+			    _mm256_fnmadd_ps(_mm256_mul_ps(lenSq, _mm256_set1_ps(0.5f)),
+			                     _mm256_mul_ps(invLenN, invLenN),
+			                     _mm256_set1_ps(1.5f)));
 			__m256 nx = _mm256_mul_ps(ox, invLenN);
 			__m256 ny = _mm256_mul_ps(oy, invLenN);
 			__m256 nz = _mm256_mul_ps(az, invLenN);
