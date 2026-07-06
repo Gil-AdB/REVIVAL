@@ -105,6 +105,12 @@ static inline float fogAntiderivG(float z, float m) {
 struct FastFogParams {
 	float invFOVX, invFOVY, invZScale;
 	float sigma, fogFar, kHeight, heightBase;
+	// Legacy distance dim (fast_fog_dist_dim): scene *= 1-s+s*sqrt(1-z/FZP).
+	// mat==nullptr or distDim==0 → off. mat points at the G-buffer mat32
+	// plane (sentinel 0xFFFFFFFF = forward pixel, skipped like the legacy
+	// Render_DeferredFogPass).
+	float distDim = 0.0f;
+	const uint32_t* mat = nullptr;
 	// viewToWorld rows (rotation): world ray dir = w·(X,Y,1).
 	float w00, w01, w02, w10, w11, w12, w20, w21, w22;
 	float camX, camY, camZ;
@@ -2030,6 +2036,17 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 	}
 }
 
+// Legacy 1998 distance dim (fast_fog_dist_dim) — see FastFogParams::distDim.
+// Returns 1 (no dim) for sky, forward-filler pixels, or when off.
+static inline float frDistDim(const FastFogParams& P, size_t i, uint16_t ze) {
+	if (!P.mat || ze == 0) return 1.0f;
+	if (P.mat[i] == 0xFFFFFFFFu) return 1.0f;
+	const float z = float(0xFF80 - int(ze)) * P.invZScale;
+	float t = 1.0f - z * (1.0f / P.fogFar);
+	if (t < 0.0f) t = 0.0f;
+	return (1.0f - P.distDim) + P.distDim * std::sqrt(t);
+}
+
 // Per-channel TPDF dither (stable per pixel) for the froxel composite.
 static inline float frDither(uint32_t s, float amp) {
 	uint32_t h = s*0x9E3779B9u; h^=h>>15; h*=0x85EBCA6Bu; h^=h>>13;
@@ -2174,6 +2191,7 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				Tpix *= 1.0f - reflAmt2;
 			}
 			const dword pix = out[i];
+			const float dim = frDistDim(P, i, ze);   // legacy distance dim (1 = off)
 			if (P.hdr) {
 				// HDR: unclamped lit·T + in-scatter → radiance buffer (no dither/
 				// clamp; the tonemap rolls off later). g_hdrBuf is B,G,R,(pad)
@@ -2188,14 +2206,14 @@ static void Froxel_CompositeTile(int x1, int y1, int x2, int y2, const FastFogPa
 				float scnB, scnG, scnR;
 				if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
 				else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
-				h[2] = fds::HdrClamp(scnR*Tpix + aR);
-				h[1] = fds::HdrClamp(scnG*Tpix + aG);
-				h[0] = fds::HdrClamp(scnB*Tpix + aB);
+				h[2] = fds::HdrClamp(scnR*dim*Tpix + aR);
+				h[1] = fds::HdrClamp(scnG*dim*Tpix + aG);
+				h[0] = fds::HdrClamp(scnB*dim*Tpix + aB);
 			} else {
 			const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
-				int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
-			int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG + frDither(sd^0x68E31DA4u, da));
-			int nB = int(float( pix     &0xFFu)*Tpix + aB + frDither(sd^0xB5297A4Du, da));
+				int nR = int(float((pix>>16)&0xFFu)*dim*Tpix + aR + frDither(sd, da));
+			int nG = int(float((pix>> 8)&0xFFu)*dim*Tpix + aG + frDither(sd^0x68E31DA4u, da));
+			int nB = int(float( pix     &0xFFu)*dim*Tpix + aB + frDither(sd^0xB5297A4Du, da));
 				if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
 			if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 			out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
@@ -2317,19 +2335,20 @@ static inline void Froxel_CompositePixel(int px, int py, const FastFogParams& P)
 		Tpix *= 1.0f - reflAmt2;
 	}
 	const dword pix = out[i];
+	const float dim = frDistDim(P, i, ze);   // legacy distance dim (1 = off)
 	if (P.hdr) {
 		fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 		float scnB, scnG, scnR;
 		if (h[3] > 0.0f) { scnB = h[0]; scnG = h[1]; scnR = h[2]; }
 		else { scnR = float((pix>>16)&0xFFu); scnG = float((pix>>8)&0xFFu); scnB = float(pix&0xFFu); }
-		h[2] = fds::HdrClamp(scnR*Tpix + aR);
-		h[1] = fds::HdrClamp(scnG*Tpix + aG);
-		h[0] = fds::HdrClamp(scnB*Tpix + aB);
+		h[2] = fds::HdrClamp(scnR*dim*Tpix + aR);
+		h[1] = fds::HdrClamp(scnG*dim*Tpix + aG);
+		h[0] = fds::HdrClamp(scnB*dim*Tpix + aB);
 	} else {
 		const float da = P.ditherAmp; const uint32_t sd = uint32_t(i);
-		int nR = int(float((pix>>16)&0xFFu)*Tpix + aR + frDither(sd, da));
-		int nG = int(float((pix>> 8)&0xFFu)*Tpix + aG + frDither(sd^0x68E31DA4u, da));
-		int nB = int(float( pix     &0xFFu)*Tpix + aB + frDither(sd^0xB5297A4Du, da));
+		int nR = int(float((pix>>16)&0xFFu)*dim*Tpix + aR + frDither(sd, da));
+		int nG = int(float((pix>> 8)&0xFFu)*dim*Tpix + aG + frDither(sd^0x68E31DA4u, da));
+		int nB = int(float( pix     &0xFFu)*dim*Tpix + aB + frDither(sd^0xB5297A4Du, da));
 		if (nR<0)nR=0; if (nG<0)nG=0; if (nB<0)nB=0;
 		if (nR>255)nR=255; if (nG>255)nG=255; if (nB>255)nB=255;
 		out[i] = (dword(nR)<<16)|(dword(nG)<<8)|dword(nB)|0xFF000000u;
@@ -2513,6 +2532,19 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			aG=_mm256_blendv_ps(prevG,aG,extPos);
 			aB=_mm256_blendv_ps(prevB,aB,extPos);
 			Tpix=_mm256_blendv_ps(prevT,Tpix,extPos);
+			// Legacy distance dim (frDistDim mirror): sky + forward (mat
+			// sentinel) lanes get 1.0; uses the UNCLAMPED zSurf like the
+			// scalar (its z has no near/far clamps).
+			__m256 dimV = vOne;
+			if (P.distDim > 0.0f && P.mat) {
+				const __m256i m8=_mm256_loadu_si256((const __m256i*)&P.mat[i0]);
+				const __m256 fwdM=_mm256_castsi256_ps(_mm256_cmpeq_epi32(m8,_mm256_set1_epi32(-1)));
+				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(zSurf,_mm256_set1_ps(1.0f/P.fogFar)));
+				tt=_mm256_max_ps(tt,vZero);
+				const __m256 dv=_mm256_add_ps(_mm256_set1_ps(1.0f-P.distDim),
+				      _mm256_mul_ps(_mm256_set1_ps(P.distDim),_mm256_sqrt_ps(tt)));
+				dimV=_mm256_blendv_ps(dv,vOne,_mm256_or_ps(skyM,fwdM));
+			}
 			if (P.hdr) {
 				// HDR output stage: the fp16 RMW (coverage-flag select, fma,
 				// HdrClamp, half round-on-store) runs scalar per lane with
@@ -2525,13 +2557,14 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 				for (int L=0;L<8;++L) {
 					const size_t i=i0+size_t(L);
 					const dword pix=out[i];
+					const float dimL=frDistDim(P,i,uint16_t(zeA[L]));
 					fds::hdrf* h = fds::g_hdrBuf.data() + i*4;
 					float scnB,scnG,scnR;
 					if (h[3] > 0.0f) { scnB=h[0]; scnG=h[1]; scnR=h[2]; }
 					else { scnR=float((pix>>16)&0xFFu); scnG=float((pix>>8)&0xFFu); scnB=float(pix&0xFFu); }
-					h[2]=fds::HdrClamp(scnR*TA[L]+aRA[L]);
-					h[1]=fds::HdrClamp(scnG*TA[L]+aGA[L]);
-					h[0]=fds::HdrClamp(scnB*TA[L]+aBA[L]);
+					h[2]=fds::HdrClamp(scnR*dimL*TA[L]+aRA[L]);
+					h[1]=fds::HdrClamp(scnG*dimL*TA[L]+aGA[L]);
+					h[0]=fds::HdrClamp(scnB*dimL*TA[L]+aBA[L]);
 				}
 				continue;
 			}
@@ -2543,6 +2576,7 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			alignas(32) float drA[8],dgA[8],dbA[8];
 			for (int L=0;L<8;++L){ uint32_t sd=uint32_t(i0+L);
 				drA[L]=frDither(sd,da); dgA[L]=frDither(sd^0x68E31DA4u,da); dbA[L]=frDither(sd^0xB5297A4Du,da); }
+			pr=_mm256_mul_ps(pr,dimV); pg=_mm256_mul_ps(pg,dimV); pb=_mm256_mul_ps(pb,dimV);
 			__m256 fR=_mm256_add_ps(_mm256_fmadd_ps(pr,Tpix,aR),_mm256_load_ps(drA));
 			__m256 fG=_mm256_add_ps(_mm256_fmadd_ps(pg,Tpix,aG),_mm256_load_ps(dgA));
 			__m256 fB=_mm256_add_ps(_mm256_fmadd_ps(pb,Tpix,aB),_mm256_load_ps(dbA));
@@ -2664,6 +2698,12 @@ void Render_DeferredFastFog(const DeferredLightingCtx &ctx) {
 	const float fth = fds::FeatureFlags::fast_fog_feather();
 	P.feather = (fth > 0.0f) ? fth : 0.2f * (P.slabY1 - P.slabY0);
 	P.invFeather = 1.0f / P.feather;
+	// Legacy distance dim blend (fast_fog_dist_dim, 0 = off).
+	{
+		float s = fds::FeatureFlags::fast_fog_dist_dim();
+		P.distDim = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+		if (P.distDim > 0.0f && dc.gb) P.mat = dc.gb->txtr.data();
+	}
 
 	constexpr int numTilesX = 12;
 	constexpr int numTilesY = 8;
