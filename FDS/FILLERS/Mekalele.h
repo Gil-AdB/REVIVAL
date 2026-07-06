@@ -1025,6 +1025,17 @@ struct TileRasterizer {
 							Vec8f curV = baseV + dV * Vec8f(0.5f);
 							Vec8f rayH = Vec8f(1.0f);
 							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f));
+							// STEP-2 quarter-res offset field: with --parallax_pom_quarter,
+							// gather the height+cone only on the EVEN lanes and share the
+							// sample to the odd neighbour → ÷~2 the gather traffic (the
+							// march's gather-bound cost). The odd lane keeps its OWN view
+							// geometry (dU/base) and only borrows the sampled DEPTH, so the
+							// parallax OFFSET is what's subsampled (smooth) — not the color
+							// (fetched full-res below). This rides the raster 8-wide grid, NOT
+							// the deferred_quarter lighting grid: parallax must run here at
+							// G-buffer fill where the smooth float UV exists (the kernel only
+							// has the packed integer suv). Small 1-texel slip at silhouettes.
+							const int qStep = ctx.pomQuarter > 0 ? 2 : 1;
 							for (int s = 0; s < N; ++s) {
 								Vec8i mu = roundi(curU * UScaleFactor);
 								Vec8i mv = roundi(curV * VScaleFactor);
@@ -1032,10 +1043,11 @@ struct TileRasterizer {
 								         + packed_tile_v(mv, t_vmask);
 								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
 								alignas(32) float mH[8], mC[8];
-								for (int k = 0; k < 8; ++k) {
+								for (int k = 0; k < 8; k += qStep) {
 									const int a = mAd[k];
 									mH[k] = float(ctx.heightData[a]) * (1.0f / 255.0f);
 									mC[k] = float(ctx.coneData[a]);
+									if (qStep == 2) { mH[k + 1] = mH[k]; mC[k + 1] = mC[k]; }
 								}
 								Vec8f Hs; Hs.load_a(mH);
 								Vec8f Cb; Cb.load_a(mC);
