@@ -342,3 +342,23 @@ cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   --parallax_pom=8 --snapshot=greets@t=5780 --out=/tmp/cone       # fixed cone-8
 # diff the two greets_t005780_uv.bin (float32 [u,v]/px) → texel distance.
 ```
+
+## Relief mapping (tried 2026-07-07, NOT shipped — no perf win)
+
+Replaced the uniform naive march with relief mapping (Policarpo): K coarse
+linear steps to bracket the first crossing + M binary-refine steps. K=N/2,
+M to reach the 1/N target → 5 gathers vs the uniform 8 (37.5% fewer), output
+verified visually identical to naive-8 (mean 0.00-0.02, 0.04% scattered
+texel-edge pixels at the user's wall pose, all strengths 0.1-1.0).
+
+BUT: measured NO wall-clock win. The march is ARITHMETIC-bound, not
+memory-bound — the 8-bit tiled height map is tiny and cache-resident, so the
+gathers are nearly free, and relief's extra per-step bracket tracking (two
+endpoints, midpoint computes, more selects) cancels the fewer-gather savings.
+Single-thread (stable): march ~16 ms both (naive-8 361 vs single-shift 345;
+relief 361-362). Threaded (DIRTY): paired delta -6.6..+3.6 ms = pure noise,
+mean marginally slower. So fewer gathers != faster here.
+
+Kept the simple uniform naive march. If a future scene's parallax becomes
+genuinely bandwidth-bound (huge non-cache-resident height maps), revisit —
+but for the cache-resident greets stone, relief is complexity for nothing.
