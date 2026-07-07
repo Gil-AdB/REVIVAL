@@ -1383,6 +1383,194 @@
         };
         row.appendChild(r); row.appendChild(val); return row;
       }
+      // ── Map generation from albedo (client-side, canvas 2D) ─────────────
+      // Synthesize normal / height / AO maps from a surface's albedo and route
+      // the bytes through the SAME importFile path as a hand-authored import,
+      // so live-apply + Save persistence stay UNCHANGED — a generated map is
+      // just an import with synthesized bytes.
+      //
+      // The NORMAL encoding matches the engine's own BakeNormalMapFromDiffuse
+      // (DEMO/MeshOps.cpp) EXACTLY. That function bakes a tangent-space normal
+      // the deferred kernel then decodes, so copying its convention is the only
+      // guaranteed-correct choice (an abstract "OpenGL vs DirectX" guess is the
+      // classic inverted-green bug). Specifically:
+      //     lum = 0.299R + 0.587G + 0.114B          (Rec.601, raw 0-255)
+      //     gx  = (TR+2R+BR) - (TL+2L+BL)           (Sobel X, right-left)
+      //     gy  = (BL+2B+BR) - (TL+2T+TR)           (Sobel Y, bottom-top)
+      //     n   = normalize(-gx*s/255, -gy*s/255, 1)
+      //     RGB = (n*0.5+0.5)*255
+      // Imported at role 'normal' with NO green flip (MaterialImport_ApplyMapFile
+      // applies none by default), so it decodes identically to the engine's own
+      // bake. If a surface's relief still looks inverted, the existing 'normal G'
+      // toggle flips it (normalFlip, sidecar-persisted). bump-strength == the
+      // Sobel scale (engine FDS_NMAP_STRENGTH default 1.5); detail-blur == the
+      // pre-Sobel 3x3 box passes (engine FDS_NMAP_BLUR default 4).
+      //
+      // HEIGHT / AO are GRAYSCALE (R=G=B): the engine's MakeHeight8 keeps only
+      // the LOW byte (blue) of each texel, so any channel works when they're
+      // equal. Height = luminance (bright = raised) with a contrast knob; AO =
+      // a cheap cavity term (pixels darker than their local blurred average read
+      // as occluded), with strength + radius knobs.
+      var EDITOR_NMAP_STRENGTH_DEF = 1.5;   // == FeatureFlags nmap_strength default
+      var EDITOR_NMAP_BLUR_DEF     = 4;     // == FeatureFlags nmap_blur default
+      // Per-surface generation cache (decoded albedo + derived fields) so knob
+      // drags stay cheap, and per-surface knob state so a re-render (which
+      // rebuilds the panel to reveal a freshly-added map's controls) restores
+      // the slider positions instead of snapping them back to defaults.
+      var editorGenCache = {}, editorGenParams = {};
+      function editorGenP(name){
+        return editorGenParams[name] || (editorGenParams[name] = {
+          nStrength: EDITOR_NMAP_STRENGTH_DEF, nBlur: EDITOR_NMAP_BLUR_DEF,
+          hContrast: 1, hInvert: false, aoStrength: 1, aoRadius: 8 });
+      }
+      // Rec.601 luminance field (0-255), row-major — matches the engine's bake.
+      function editorLumField(img){
+        var W = img.width, H = img.height, d = img.data, L = new Float32Array(W * H);
+        for (var i = 0, p = 0; i < W * H; i++, p += 4)
+          L[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+        return L;
+      }
+      // Separable box blur of radius r (running-sum, O(N)), toroidal wrap at the
+      // edges (same wrap the engine's Sobel/blur use → seamless for tiling maps).
+      function editorBoxSep(L, W, H, r){
+        if (r <= 0) return Float32Array.from(L);
+        var win = 2 * r + 1, tmp = new Float32Array(W * H), out = new Float32Array(W * H);
+        for (var y = 0; y < H; y++){
+          var base = y * W, s = 0;
+          for (var k = -r; k <= r; k++) s += L[base + (((k % W) + W) % W)];
+          for (var x = 0; x < W; x++){
+            tmp[base + x] = s / win;
+            s += L[base + (((x + r + 1) % W + W) % W)] - L[base + (((x - r) % W + W) % W)];
+          }
+        }
+        for (var x2 = 0; x2 < W; x2++){
+          var s2 = 0;
+          for (var k2 = -r; k2 <= r; k2++) s2 += tmp[(((k2 % H) + H) % H) * W + x2];
+          for (var y2 = 0; y2 < H; y2++){
+            out[y2 * W + x2] = s2 / win;
+            s2 += tmp[(((y2 + r + 1) % H + H) % H) * W + x2] - tmp[(((y2 - r) % H + H) % H) * W + x2];
+          }
+        }
+        return out;
+      }
+      // N passes of 3x3 box blur == N applications of a separable radius-1 box
+      // (box blur is separable), which reproduces the engine's FDS_NMAP_BLUR.
+      function editorBlur3x3(L, W, H, passes){
+        var a = L;
+        for (var i = 0; i < passes; i++) a = editorBoxSep(a, W, H, 1);
+        return a;
+      }
+      // Sobel gradients of a (blurred) luminance field. gx = right-left,
+      // gy = bottom-top — the engine's convention (BakeNormalMapFromDiffuse).
+      function editorSobel(L, W, H){
+        var gx = new Float32Array(W * H), gy = new Float32Array(W * H);
+        function s(x, y){ x = ((x % W) + W) % W; y = ((y % H) + H) % H; return L[y * W + x]; }
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++){
+          var lTL = s(x-1,y-1), lT = s(x,y-1), lTR = s(x+1,y-1);
+          var lL = s(x-1,y),                    lR = s(x+1,y);
+          var lBL = s(x-1,y+1), lB = s(x,y+1), lBR = s(x+1,y+1);
+          var i = y * W + x;
+          gx[i] = (lTR + 2*lR + lBR) - (lTL + 2*lL + lBL);
+          gy[i] = (lBL + 2*lB + lBR) - (lTL + 2*lT + lTR);
+        }
+        return { gx: gx, gy: gy };
+      }
+      // Which albedo pixels to generate FROM: an albedo imported this session
+      // (pending bytes) wins; else the surface's current diffuse texture, fetched
+      // live from the dev server (Runtime/TEXTURES/…). null → no albedo.
+      function editorAlbedoSource(surfName){
+        var pend = editorPendingMaps[surfName] && editorPendingMaps[surfName].albedo;
+        if (pend && pend.bytes && pend.bytes.length)
+          return { sig: 'pend:' + pend.filename + ':' + pend.bytes.length, blob: new Blob([pend.bytes]) };
+        var s = editorSurfaces.find(function(x){ return x.name === surfName; });
+        if (s && s.texture){
+          var path = String(s.texture).replace(/^\/+/, '');   // relative to the page
+          return { sig: 'tex:' + path, url: path };
+        }
+        return null;
+      }
+      // Decode an albedo source to ImageData. Same-origin (localhost dev server
+      // or a Blob), so the canvas isn't tainted and getImageData is allowed. Cap
+      // the working size to 1024 (the engine's max; aux maps get resampled to
+      // the albedo's dims on import anyway — larger here just wastes time).
+      function editorDecodeImage(src){
+        return new Promise(function(resolve, reject){
+          var img = new Image(), obj = null;
+          img.onload = function(){
+            var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+            var sc = Math.min(1, 1024 / Math.max(w, h));
+            var W = Math.max(1, Math.round(w * sc)), H = Math.max(1, Math.round(h * sc));
+            var c = document.createElement('canvas'); c.width = W; c.height = H;
+            var ctx = c.getContext('2d'); ctx.drawImage(img, 0, 0, W, H);
+            var data;
+            try { data = ctx.getImageData(0, 0, W, H); }
+            catch(e){ if (obj) URL.revokeObjectURL(obj); reject(e); return; }
+            if (obj) URL.revokeObjectURL(obj);
+            resolve(data);
+          };
+          img.onerror = function(){ if (obj) URL.revokeObjectURL(obj); reject(new Error('albedo image load failed (is the editor server serving TEXTURES/?)')); };
+          if (src.blob){ obj = URL.createObjectURL(src.blob); img.src = obj; }
+          else img.src = src.url;
+        });
+      }
+      // Resolve + cache the albedo ImageData + luminance field for a surface.
+      function editorEnsureGen(surfName){
+        var src = editorAlbedoSource(surfName);
+        if (!src) return Promise.reject(new Error('no albedo on this surface'));
+        var c = editorGenCache[surfName];
+        if (c && c.sig === src.sig && c.lum) return Promise.resolve(c);
+        return editorDecodeImage(src).then(function(img){
+          var entry = { sig: src.sig, W: img.width, H: img.height,
+                        lum: editorLumField(img), nBlur: -1, gx: null, gy: null,
+                        aoRadius: -1, aoBlur: null };
+          editorGenCache[surfName] = entry;
+          return entry;
+        });
+      }
+      // ── Per-role pixel encoders (RGBA Uint8ClampedArray, W*H) ────────────
+      function editorEncodeNormal(c, strength, blur){
+        if (c.nBlur !== blur || !c.gx){
+          var g = editorSobel(editorBlur3x3(c.lum, c.W, c.H, blur), c.W, c.H);
+          c.gx = g.gx; c.gy = g.gy; c.nBlur = blur;
+        }
+        var W = c.W, H = c.H, gx = c.gx, gy = c.gy;
+        var out = new Uint8ClampedArray(W * H * 4), inv = strength / 255;
+        for (var i = 0, p = 0; i < W * H; i++, p += 4){
+          var nx = -gx[i] * inv, ny = -gy[i] * inv, nz = 1;
+          var il = 1 / Math.sqrt(nx*nx + ny*ny + nz*nz); nx *= il; ny *= il; nz *= il;
+          out[p] = (nx + 1) * 127.5; out[p+1] = (ny + 1) * 127.5; out[p+2] = (nz + 1) * 127.5; out[p+3] = 255;
+        }
+        return out;
+      }
+      function editorEncodeHeight(c, contrast, invert){
+        var W = c.W, H = c.H, lum = c.lum, out = new Uint8ClampedArray(W * H * 4);
+        for (var i = 0, p = 0; i < W * H; i++, p += 4){
+          var v = lum[i] / 255; if (invert) v = 1 - v; v = (v - 0.5) * contrast + 0.5;
+          var gv = v * 255; out[p] = gv; out[p+1] = gv; out[p+2] = gv; out[p+3] = 255;
+        }
+        return out;
+      }
+      function editorEncodeAO(c, strength, radius){
+        if (c.aoRadius !== radius || !c.aoBlur){ c.aoBlur = editorBoxSep(c.lum, c.W, c.H, radius); c.aoRadius = radius; }
+        var W = c.W, H = c.H, lum = c.lum, avg = c.aoBlur, out = new Uint8ClampedArray(W * H * 4);
+        for (var i = 0, p = 0; i < W * H; i++, p += 4){
+          var occ = (avg[i] - lum[i]) / 255 * strength * 3; if (occ < 0) occ = 0; if (occ > 1) occ = 1;
+          var gv = (1 - occ) * 255; out[p] = gv; out[p+1] = gv; out[p+2] = gv; out[p+3] = 255;
+        }
+        return out;
+      }
+      // RGBA pixels → PNG File (so it flows through importFile unchanged).
+      function editorPixelsToPngFile(pixels, W, H, name){
+        return new Promise(function(resolve, reject){
+          var c = document.createElement('canvas'); c.width = W; c.height = H;
+          var ctx = c.getContext('2d'), id = ctx.createImageData(W, H);
+          id.data.set(pixels); ctx.putImageData(id, 0, 0);
+          c.toBlob(function(blob){
+            if (!blob){ reject(new Error('toBlob failed')); return; }
+            resolve(new File([blob], name, { type: 'image/png' }));
+          }, 'image/png');
+        });
+      }
       function renderSurfaceProps(s, obj){
         var el = document.getElementById('editor-props'); el.innerHTML = '';
         var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin-bottom:4px;display:flex;justify-content:space-between;';
@@ -1699,6 +1887,112 @@
           row.appendChild(inp); imp.appendChild(row);
         });
         el.appendChild(imp);
+
+        // ── Generate PBR maps FROM the albedo (client-side, live) ─────────
+        // A generated map is just an import with synthesized bytes: each
+        // button/knob computes pixels (editorEncode*), PNG-encodes them, and
+        // hands the result to importFile — the exact same live-apply + Save
+        // path as a hand-authored import. Knob drags re-generate live.
+        var gen = document.createElement('div');
+        gen.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
+        var gh = document.createElement('div'); gh.style.cssText = 'color:#fff;margin-bottom:4px;';
+        gh.textContent = 'Generate maps from albedo'; gen.appendChild(gh);
+        var genSrc = editorAlbedoSource(s.name);
+        if (!genSrc){
+          var noSrc = document.createElement('div'); noSrc.className = 'surf-tex';
+          noSrc.textContent = 'no albedo on this surface — import an albedo (above) first, then generate';
+          gen.appendChild(noSrc);
+        } else {
+          var srcNote = document.createElement('div'); srcNote.className = 'surf-tex'; srcNote.style.marginBottom = '4px';
+          srcNote.textContent = 'source: ' + (genSrc.blob ? 'imported albedo (pending)' : genSrc.url);
+          gen.appendChild(srcNote);
+          var gp = editorGenP(s.name);
+          var genTimers = {};
+          // refresh=true → re-pull + re-render the panel so a freshly-added
+          // map's dependent controls appear (normal G flip, un-dimmed
+          // aoStrength/parallaxScale). Used for discrete actions (button /
+          // knob release) only — never mid-drag, which would tear out the
+          // slider being dragged. Live drags (refresh=false) rely on
+          // importFile's own updateSaveButton().
+          function runGen(role, makePixels, statusName, refresh){
+            editorStatus('generating ' + statusName + '…');
+            editorEnsureGen(s.name).then(function(c){
+              var px = makePixels(c);
+              var nm = s.name.replace(/[^A-Za-z0-9._-]+/g, '_') + '_' + role + '_gen.png';
+              return editorPixelsToPngFile(px, c.W, c.H, nm);
+            }).then(function(file){
+              importFile(role, file, function(ok){
+                editorStatus(ok ? (statusName + ' generated (' + role + ')') : (statusName + ' generate FAILED'));
+                if (ok && refresh) refreshSurfacesAndProps(s.name);
+              });
+            }).catch(function(e){
+              editorStatus('generate ' + statusName + ' failed: ' + (e && e.message || e));
+            });
+          }
+          function schedule(role, makePixels, statusName){
+            clearTimeout(genTimers[role]);
+            genTimers[role] = setTimeout(function(){ runGen(role, makePixels, statusName, false); }, 130);
+          }
+          // Slider + numeric twin. oninput = live drag (debounced, no re-render);
+          // release / number-box commit = final generate + panel refresh.
+          function genSlider(label, min, max, step, initial, onLive, onCommit){
+            var row = document.createElement('div'); row.className = 'prop-row';
+            var lab = document.createElement('label'); lab.textContent = label; lab.style.flex = '0 0 74px'; row.appendChild(lab);
+            var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = initial;
+            var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+initial).toFixed(3);
+            val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+            r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); onLive(v); };
+            r.onchange = function(){ onCommit(parseFloat(r.value)); };
+            val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return; r.value = v; onCommit(v); };
+            row.appendChild(r); row.appendChild(val); return row;
+          }
+          function genButton(text, onClick){
+            var b = document.createElement('button'); b.textContent = text;
+            b.style.cssText = 'flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:3px;cursor:pointer;font-size:11px;';
+            b.onclick = onClick; return b;
+          }
+          // NORMAL — bump strength (Sobel scale) + detail blur (pre-Sobel passes)
+          (function(){
+            function px(c){ return editorEncodeNormal(c, gp.nStrength, gp.nBlur); }
+            var row = document.createElement('div'); row.className = 'prop-row';
+            row.appendChild(genButton('Generate normal', function(){ runGen('normal', px, 'normal', true); }));
+            gen.appendChild(row);
+            gen.appendChild(genSlider('bump str', 0, 4, 0.05, gp.nStrength,
+              function(v){ gp.nStrength = v; schedule('normal', px, 'normal'); },
+              function(v){ gp.nStrength = v; runGen('normal', px, 'normal', true); }));
+            gen.appendChild(genSlider('detail blur', 0, 12, 1, gp.nBlur,
+              function(v){ gp.nBlur = Math.round(v); schedule('normal', px, 'normal'); },
+              function(v){ gp.nBlur = Math.round(v); runGen('normal', px, 'normal', true); }));
+          })();
+          // HEIGHT — luminance → grayscale height, contrast + invert
+          (function(){
+            function px(c){ return editorEncodeHeight(c, gp.hContrast, gp.hInvert); }
+            var row = document.createElement('div'); row.className = 'prop-row';
+            row.appendChild(genButton('Generate height', function(){ runGen('height', px, 'height', true); }));
+            var invl = document.createElement('label'); invl.style.cssText = 'flex:0 0 auto;margin-left:6px;font-size:10px;color:#aaa;cursor:pointer;';
+            var invc = document.createElement('input'); invc.type = 'checkbox'; invc.checked = gp.hInvert; invc.style.verticalAlign = '-2px';
+            invc.onchange = function(){ gp.hInvert = invc.checked; runGen('height', px, 'height', false); };
+            invl.appendChild(invc); invl.appendChild(document.createTextNode(' invert'));
+            row.appendChild(invl); gen.appendChild(row);
+            gen.appendChild(genSlider('contrast', 0.2, 4, 0.05, gp.hContrast,
+              function(v){ gp.hContrast = v; schedule('height', px, 'height'); },
+              function(v){ gp.hContrast = v; runGen('height', px, 'height', true); }));
+          })();
+          // AO — cavity from the luminance/height field, strength + radius
+          (function(){
+            function px(c){ return editorEncodeAO(c, gp.aoStrength, gp.aoRadius); }
+            var row = document.createElement('div'); row.className = 'prop-row';
+            row.appendChild(genButton('Generate AO', function(){ runGen('ao', px, 'AO', true); }));
+            gen.appendChild(row);
+            gen.appendChild(genSlider('ao str', 0, 2, 0.05, gp.aoStrength,
+              function(v){ gp.aoStrength = v; schedule('ao', px, 'AO'); },
+              function(v){ gp.aoStrength = v; runGen('ao', px, 'AO', true); }));
+            gen.appendChild(genSlider('ao radius', 1, 24, 1, gp.aoRadius,
+              function(v){ gp.aoRadius = Math.round(v); schedule('ao', px, 'AO'); },
+              function(v){ gp.aoRadius = Math.round(v); runGen('ao', px, 'AO', true); }));
+          })();
+        }
+        el.appendChild(gen);
       }
 
       // Camera orbit handled in JS on the canvas (SDL's in-browser mouse events

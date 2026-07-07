@@ -151,7 +151,11 @@ def pop_uv_props(surfaces, warnings):
 
 # Live-served paths: the wasm preload (DEMO.data) copy of these is link-time
 # stale, so the editor fetches them fresh from Runtime/ at boot. Prefix match.
-LIVE_PREFIXES = ("/SCENES/", "/TEXTURES/PBR/")
+# All of TEXTURES/ (not just TEXTURES/PBR/): the editor's "generate maps from
+# albedo" feature fetches a surface's current diffuse texture (e.g.
+# TEXTURES/greets_wall.png, TEXTURES/PELLOW.JPG) as the albedo source — those
+# baked textures live in DEMO.data, not on the wasm-root, so serve them here.
+LIVE_PREFIXES = ("/SCENES/", "/TEXTURES/")
 
 save_lock = threading.Lock()
 
@@ -684,7 +688,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if clean.startswith(LIVE_PREFIXES):
             rel = os.path.normpath(clean.lstrip("/"))
             live = os.path.join(RUNTIME, rel)
-            if rel.startswith(("SCENES", os.path.join("TEXTURES", "PBR"))) \
+            if rel.startswith(("SCENES", "TEXTURES")) \
                and os.path.isfile(live):
                 data = open(live, "rb").read()
                 self.send_response(200)
