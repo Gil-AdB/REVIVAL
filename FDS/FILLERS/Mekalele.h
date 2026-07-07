@@ -1556,6 +1556,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		if ((dword)miplevel < cm->numMipmaps && cm->Mipmap[miplevel])
 			coneData = reinterpret_cast<const byte*>(cm->Mipmap[miplevel]);
 	}
+	// The cone-step POM march (coneData path) is structurally broken: it returns
+	// the FINAL march position with no ray-surface CROSSING detection, so it
+	// under-converges to a view-dependent residual that SWIMS (measured
+	// byte-identical to single-shift at strength 1). So --parallax_pom drives the
+	// NAIVE occlusion march (which records the first rayH<=Hs crossing → features
+	// anchored to their true depth, no swim — the same march FDS_POM_SPIKE runs).
+	// FDS_POM_CONE=1 restores the cone path to debug it.
+	static const bool sPomCone     = std::getenv("FDS_POM_CONE") != nullptr;
+	static const int  sPomSpikeEnv = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
+	                                       return e ? std::atoi(e) : 0; }();
+	const int naiveSteps = sPomCone ? sPomSpikeEnv
+	                                : (sPomSpikeEnv > 0 ? sPomSpikeEnv : pomSteps);
+	const int coneSteps  = (sPomCone && coneData) ? pomSteps : 0;
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -1590,10 +1603,9 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.writeTangent = writeTangent,
 		.mipFrac = meka::g_tlsMipFrac,
 		.materialHasHeightMap = (F->Txtr->HeightMap != nullptr),
-		.pomSpikeSteps = [](){ static const int n = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
-		                       return e ? std::atoi(e) : 0; }(); return n; }(),
+		.pomSpikeSteps = naiveSteps,
 		.coneData = coneData,
-		.pomSteps = coneData ? pomSteps : 0,
+		.pomSteps = coneSteps,
 		.pomLodDist = fds::FeatureFlags::parallax_pom_lod(),
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
 	};
