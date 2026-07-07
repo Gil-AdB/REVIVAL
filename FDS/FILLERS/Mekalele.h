@@ -1145,13 +1145,24 @@ struct TileRasterizer {
 							}
 							}  // !rowFar
 						} else if (ctx.pomSpikeSteps > 0) {
+							// LOD (--parallax_pom_lod): single-shift (ssU/ssV) is the FAR
+							// target. Skip the whole march on a row entirely past 2x the fade
+							// distance, and blend march->single-shift as view-Z grows from lod
+							// to 2*lod. Far/oblique parallax pixels (most of a deep view) pay
+							// little/nothing. lod==0 (default) -> rowFar false + no blend =
+							// byte-identical to the plain march.
+							const Vec8f ssU = uf, ssV = vf;
+							const float lod = ctx.pomLodDist;
+							const bool rowFar = lod > 0.0f &&
+								horizontal_and(p_z >= Vec8f(2.0f * lod));
+							if (!rowFar) {
 							const int   N     = ctx.pomSpikeSteps;
 							const float invNf = 1.0f / float(N);
 							const Vec8f dU = VtT * Vec8f(ctx.parallaxStrength);
 							const Vec8f dV = VtB * Vec8f(ctx.parallaxStrength);
 							// base (un-shifted) UV recovered from the single shift.
-							const Vec8f baseU = uf - VtT * hc;
-							const Vec8f baseV = vf - VtB * hc;
+							const Vec8f baseU = ssU - VtT * hc;
+							const Vec8f baseV = ssV - VtB * hc;
 							Vec8f curU  = baseU + dU * Vec8f(0.5f);
 							Vec8f curV  = baseV + dV * Vec8f(0.5f);
 							Vec8f rayH  = Vec8f(1.0f);
@@ -1175,8 +1186,17 @@ struct TileRasterizer {
 								foundV = select(hit, curV, foundV);
 								found |= hit;
 							}
-							uf = foundU;
-							vf = foundV;
+							if (lod > 0.0f) {
+								const Vec8f fade = min(max(
+									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
+									Vec8f(0.0f)), Vec8f(1.0f));
+								uf = foundU + (ssU - foundU) * fade;
+								vf = foundV + (ssV - foundV) * fade;
+							} else {
+								uf = foundU;
+								vf = foundV;
+							}
+							}  // !rowFar
 						}
 						// Debug (FDS_DUMP_TXTR): record the finalized parallax UV for covered
 						// lanes so a headless A/B can diff the MARCH output directly.
