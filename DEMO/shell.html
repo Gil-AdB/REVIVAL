@@ -1403,16 +1403,25 @@
       // applies none by default), so it decodes identically to the engine's own
       // bake. If a surface's relief still looks inverted, the existing 'normal G'
       // toggle flips it (normalFlip, sidecar-persisted). bump-strength == the
-      // Sobel scale (engine FDS_NMAP_STRENGTH default 1.5); detail-blur == the
-      // pre-Sobel 3x3 box passes (engine FDS_NMAP_BLUR default 4).
+      // Sobel scale; detail-blur == the pre-Sobel 3x3 box passes.
+      //
+      // NOTE the defaults DELIBERATELY differ from the engine's FDS_NMAP_STRENGTH
+      // (1.5) / FDS_NMAP_BLUR (4): those are tuned for the high-contrast robot-
+      // hull bake and, on a low-contrast wall/floor albedo, the 4-pass blur +
+      // 1.5 scale flattens the relief to near-invisible (measured: ~0.7% frame
+      // delta vs a flat normal, i.e. it "looks like nothing applied"). str=4 /
+      // blur=1 lands at ~6% frame delta — comparable to the authored
+      // greets_wall_n (~4.7%) — so the generated relief is actually visible.
+      // Only the strength scalar + blur count differ; the ENCODE convention
+      // (ny=-gy, no green flip) still matches BakeNormalMapFromDiffuse exactly.
       //
       // HEIGHT / AO are GRAYSCALE (R=G=B): the engine's MakeHeight8 keeps only
       // the LOW byte (blue) of each texel, so any channel works when they're
       // equal. Height = luminance (bright = raised) with a contrast knob; AO =
       // a cheap cavity term (pixels darker than their local blurred average read
       // as occluded), with strength + radius knobs.
-      var EDITOR_NMAP_STRENGTH_DEF = 1.5;   // == FeatureFlags nmap_strength default
-      var EDITOR_NMAP_BLUR_DEF     = 4;     // == FeatureFlags nmap_blur default
+      var EDITOR_NMAP_STRENGTH_DEF = 4;     // visible relief on typical albedo (engine bake uses 1.5)
+      var EDITOR_NMAP_BLUR_DEF     = 1;     // keep detail (engine bake uses 4 for brick mortar)
       // Per-surface generation cache (decoded albedo + derived fields) so knob
       // drags stay cheap, and per-surface knob state so a re-render (which
       // rebuilds the panel to reveal a freshly-added map's controls) restores
@@ -1957,7 +1966,7 @@
             var row = document.createElement('div'); row.className = 'prop-row';
             row.appendChild(genButton('Generate normal', function(){ runGen('normal', px, 'normal', true); }));
             gen.appendChild(row);
-            gen.appendChild(genSlider('bump str', 0, 4, 0.05, gp.nStrength,
+            gen.appendChild(genSlider('bump str', 0, 16, 0.1, gp.nStrength,
               function(v){ gp.nStrength = v; schedule('normal', px, 'normal'); },
               function(v){ gp.nStrength = v; runGen('normal', px, 'normal', true); }));
             gen.appendChild(genSlider('detail blur', 0, 12, 1, gp.nBlur,
@@ -1977,6 +1986,9 @@
             gen.appendChild(genSlider('contrast', 0.2, 4, 0.05, gp.hContrast,
               function(v){ gp.hContrast = v; schedule('height', px, 'height'); },
               function(v){ gp.hContrast = v; runGen('height', px, 'height', true); }));
+            var hn = document.createElement('div'); hn.className = 'surf-tex';
+            hn.textContent = 'height shows as relief only with the parallax render knob ON (for visible bumps, generate a normal instead)';
+            gen.appendChild(hn);
           })();
           // AO — cavity from the luminance/height field, strength + radius
           (function(){
@@ -1990,6 +2002,9 @@
             gen.appendChild(genSlider('ao radius', 1, 24, 1, gp.aoRadius,
               function(v){ gp.aoRadius = Math.round(v); schedule('ao', px, 'AO'); },
               function(v){ gp.aoRadius = Math.round(v); runGen('ao', px, 'AO', true); }));
+            var an = document.createElement('div'); an.className = 'surf-tex';
+            an.textContent = 'AO darkens the ambient term only — subtle in direct-lit scenes; raise aoStrength above to boost it';
+            gen.appendChild(an);
           })();
         }
         el.appendChild(gen);
