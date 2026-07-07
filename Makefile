@@ -7,7 +7,7 @@ RUNTIME_DIR            := Runtime
 SERVE_PORT             := 8000
 
 .PHONY: help build build-debug install run clean \
-        wasm serve wasm-profile serve-profile \
+        wasm serve editor wasm-profile serve-profile \
         snapshot-city snapshot-glat-trace snapshot-filler \
         bench-native bench-wasm \
         bench-variants-native bench-variants-wasm \
@@ -23,7 +23,8 @@ help:
 	@echo "  clean              Remove $(BUILD_DIR) and $(WASM_BUILD_DIR)"
 	@echo ""
 	@echo "  wasm               (Re)configure with emcmake + build wasm artifacts"
-	@echo "  serve              Serve wasm build at http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "  serve              Serve wasm build (plain demo) at http://localhost:$(SERVE_PORT)/DEMO.html"
+	@echo "  editor             Serve for the LWO surface EDITOR (editor_server.py: COOP/COEP + save API)"
 	@echo "  wasm-profile       Like wasm, but with -g3 DWARF for Chrome profiling"
 	@echo "  serve-profile      Serve the profiling wasm build"
 	@echo ""
@@ -69,6 +70,13 @@ wasm:
 serve: wasm
 	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html"
 	cd $(WASM_BUILD_DIR)/DEMO && python3 $(abspath scripts/serve_nocache.py) $(SERVE_PORT)
+
+# EDITOR server: editor_server.py sends COOP/COEP headers directly (no
+# coi-serviceworker shim) AND handles the POST /api/<scene>/save write-back to
+# the LWO sources. Use this — NOT `serve` — for the ?editor UI, or saves 501.
+editor: wasm
+	@echo "Open http://localhost:$(SERVE_PORT)/DEMO.html?editor"
+	python3 $(abspath tools/editor_server.py) --port $(SERVE_PORT)
 
 # Optimized release wasm + full DWARF debug info. Larger binary (~3-5x);
 # use only for profiling sessions, not for shipping.
