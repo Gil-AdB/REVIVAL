@@ -8,3 +8,5 @@ momy|ao|TEXTURES/PBR/momy_ao.png
 momy|height|TEXTURES/PBR/momy_height.png
 momy|normal|TEXTURES/PBR/momy_normal.png
 momy|roughness|TEXTURES/PBR/momy_roughness.png
+siling|aoStrength|0
+siling|parallaxScale|0
