@@ -464,7 +464,24 @@ struct TileRasterizerCtx {
 	// STEP-2 quarter-res offset field: march only even lanes/rows, reuse the UV
 	// offset for the odd neighbours. 0 = full-res march.
 	int pomQuarter = 0;
+	// Cone march: binary-search refinement iterations after the cone steps
+	// bracket the first ray/height crossing. Each iteration is one height
+	// gather (no cone gather). 0 = no refine (return the 'below' bracket sample).
+	int pomRefine = 6;
+	// Cone relaxation: multiply the baked (conservative) cone ratio to widen the
+	// steps so the ray BRACKETS the crossing in fewer taps. >1 trades a small
+	// skip risk for speed; the binary refine recovers the crossing inside any
+	// bracket it lands. 1 = the raw conservative bake.
+	float pomRelax = 1.0f;
 };
+
+// Debug (snapshot FDS_DUMP_TXTR path): optional per-pixel dump of the finalized
+// parallax UV (uf,vf), 2 floats/pixel, row stride g_pomDbgStride px. nullptr =
+// off. Lets a headless A/B measure the MARCH output (which UV each pixel landed
+// on) directly, bypassing lighting/post amplification. Set by the snapshot.
+extern float *g_pomDbgUV;
+extern int    g_pomDbgStride;
+extern int    g_pomDbgH;
 
 // Strip clamp for the unified-TBR per-strip xpar dispatch. When set,
 // the rasterizer further clamps tile_my/tile_My to [tileYMin, tileYMax]
@@ -1000,16 +1017,21 @@ struct TileRasterizer {
 						uf += VtT * hc;
 						vf += VtB * hc;
 						// Tier-2 CONE-STEP POM (--parallax_pom, docs/HEIGHTMAP_POM_PLAN.md):
-						// advance the tangent-space view ray by the cone-safe distance each
-						// step so it converges ONTO the height field (self-occluding relief,
-						// no fixed-step artifacts). Same centered ±0.5·strength envelope +
-						// base recovery as the naive spike → directly comparable. Wins over
-						// the naive path (fewer taps, lands on the surface). Takes precedence.
+						// relaxed cone stepping (Policarpo, GPU Gems 3 ch.18). Advance the
+						// tangent-space view ray by the cone-safe distance c*gap/(c+dlen)
+						// each step until it BRACKETS the first ray/height crossing (first
+						// sample with rayH <= Hs), then binary-search-refine between the
+						// last-above and first-below sample to LAND on the crossing. Fixes
+						// the old under-converged march (which returned the final cone
+						// position with no crossing detection -> collapsed to the single
+						// shift). Same centered +-0.5*strength envelope + base recovery as
+						// the naive spike -> directly comparable; converges to the naive-inf
+						// crossing in far fewer taps than the naive linear march.
 						if (ctx.pomSteps > 0 && ctx.coneData) {
-							// STEP-3 LOD: uf/vf currently hold the tier-0 single shift =
-							// the FAR target. Skip the whole march on a row that is entirely
-							// past the fade (all lanes ≥ 2×lodDist) → most far/oblique
-							// parallax pixels pay nothing; near rows march + blend per lane.
+							// STEP-3 LOD: uf/vf currently hold the tier-0 single shift = the
+							// FAR target. Skip the whole march on a row entirely past the fade
+							// (all lanes >= 2x lodDist) -> far/oblique parallax pixels pay
+							// nothing; near rows march + blend per lane.
 							const Vec8f ssU = uf, ssV = vf;
 							const float lod = ctx.pomLodDist;
 							const bool rowFar = lod > 0.0f &&
@@ -1021,20 +1043,25 @@ struct TileRasterizer {
 							const Vec8f dlen = sqrt(dU*dU + dV*dV);   // UV per unit rayH (exact)
 							const Vec8f baseU = ssU - VtT * hc;       // un-shifted geometric UV
 							const Vec8f baseV = ssV - VtB * hc;
-							Vec8f curU = baseU + dU * Vec8f(0.5f);    // t=0 ↔ rayH=1 (field top)
+							Vec8f curU = baseU + dU * Vec8f(0.5f);    // t=0 <-> rayH=1 (field top)
 							Vec8f curV = baseV + dV * Vec8f(0.5f);
 							Vec8f rayH = Vec8f(1.0f);
-							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f));
+							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f) * ctx.pomRelax);
+							// Bracket of the first crossing. abo* = last sample confirmed ABOVE
+							// the surface (init = field top, always above since H<=1); bel* =
+							// first sample AT/below the surface. A lane that never crosses keeps
+							// bel* at the top start (minimal shift = the naive no-hit fallback).
+							Vec8f aboU = curU, aboV = curV, aboH = rayH;
+							Vec8f belU = curU, belV = curV, belH = rayH;
+							Vec8fb found = Vec8fb(false);
 							// STEP-2 quarter-res offset field: with --parallax_pom_quarter,
-							// gather the height+cone only on the EVEN lanes and share the
-							// sample to the odd neighbour → ÷~2 the gather traffic (the
-							// march's gather-bound cost). The odd lane keeps its OWN view
-							// geometry (dU/base) and only borrows the sampled DEPTH, so the
-							// parallax OFFSET is what's subsampled (smooth) — not the color
-							// (fetched full-res below). This rides the raster 8-wide grid, NOT
-							// the deferred_quarter lighting grid: parallax must run here at
-							// G-buffer fill where the smooth float UV exists (the kernel only
-							// has the packed integer suv). Small 1-texel slip at silhouettes.
+							// gather height+cone only on EVEN lanes and share to the odd
+							// neighbour -> ~half the gather traffic. The odd lane keeps its own
+							// view geometry and only borrows the sampled DEPTH, so the parallax
+							// OFFSET is subsampled (smooth), not the color (fetched full-res
+							// below). Rides the raster 8-wide grid, not the deferred_quarter
+							// lighting grid: parallax runs at G-buffer fill where the smooth
+							// float UV exists. Small 1-texel slip at silhouettes.
 							const int qStep = ctx.pomQuarter > 0 ? 2 : 1;
 							for (int s = 0; s < N; ++s) {
 								Vec8i mu = roundi(curU * UScaleFactor);
@@ -1051,28 +1078,71 @@ struct TileRasterizer {
 								}
 								Vec8f Hs; Hs.load_a(mH);
 								Vec8f Cb; Cb.load_a(mC);
-								const Vec8f cratio = Cb * coneScale;  // cone ratio ∈ [0,kPomConeMax]
-								// gap>0 while above surface; clamp≥0 freezes a crossed lane.
+								const Vec8fb hitNow = (rayH <= Hs) & (~found);
+								// First crossing: record this sample as the below bracket end.
+								belU = select(hitNow, curU, belU);
+								belV = select(hitNow, curV, belV);
+								belH = select(hitNow, rayH, belH);
+								found |= (rayH <= Hs);
+								// Lanes still searching: this above-sample is the new hi (above)
+								// bracket end for the refinement below.
+								const Vec8fb search = ~found;
+								aboU = select(search, curU, aboU);
+								aboV = select(search, curV, aboV);
+								aboH = select(search, rayH, aboH);
+								const Vec8f cratio = Cb * coneScale;  // cone ratio in [0,kPomConeMax]
+								// gap>0 while above surface; clamp>=0 freezes a crossed lane.
 								const Vec8f gap = max(rayH - Hs, Vec8f(0.0f));
-								// exact divide (no rcp approx — parallax hard rule). c=0 near a
-								// tall feature → dt=0 (blocked); dlen=0 (perp view) → dt=gap.
-								const Vec8f dt = cratio * gap / (cratio + dlen + Vec8f(1e-6f));
+								// exact divide (no rcp approx - parallax hard rule). c=0 near a tall
+								// feature -> dt=0 (blocked); dlen=0 (perp view) -> dt=gap.
+								Vec8f dt = cratio * gap / (cratio + dlen + Vec8f(1e-6f));
+								dt = select(search, dt, Vec8f(0.0f));   // frozen once bracketed
 								curU -= dU * dt;
 								curV -= dV * dt;
 								rayH -= dt;
 							}
-							// STEP-3 LOD blend: continuous fade cone→single-shift as view-Z
-							// grows from lodDist (full cone) to 2×lodDist (pure single-shift).
-							// lod==0 → full cone everywhere (fade=0).
+							// Binary search between the above/below bracket ends (both on the
+							// same ray, so the UV midpoint is exact). Each iteration samples the
+							// midpoint height and halves the interval; the below end converges to
+							// the true first crossing (sub-texel).
+							for (int r = 0; r < ctx.pomRefine; ++r) {
+								Vec8f mU = (aboU + belU) * Vec8f(0.5f);
+								Vec8f mV = (aboV + belV) * Vec8f(0.5f);
+								Vec8f mMH = (aboH + belH) * Vec8f(0.5f);
+								Vec8i mu = roundi(mU * UScaleFactor);
+								Vec8i mv = roundi(mV * VScaleFactor);
+								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
+								         + packed_tile_v(mv, t_vmask);
+								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
+								alignas(32) float mHs[8];
+								for (int k = 0; k < 8; k += qStep) {
+									mHs[k] = float(ctx.heightData[mAd[k]]) * (1.0f / 255.0f);
+									if (qStep == 2) mHs[k + 1] = mHs[k];
+								}
+								Vec8f Hs; Hs.load_a(mHs);
+								const Vec8fb below = mMH <= Hs;
+								belU = select(below, mU, belU);
+								belV = select(below, mV, belV);
+								belH = select(below, mMH, belH);
+								aboU = select(below, aboU, mU);
+								aboV = select(below, aboV, mV);
+								aboH = select(below, aboH, mMH);
+							}
+							// The refined below sample is the first crossing (matches the naive
+							// spike "first rayH<=Hs" convention, now sub-texel accurate).
+							const Vec8f resU = belU, resV = belV;
+							// STEP-3 LOD blend: continuous fade cone->single-shift as view-Z
+							// grows from lodDist (full cone) to 2x lodDist (pure single-shift).
+							// lod==0 -> full cone everywhere (fade=0).
 							if (lod > 0.0f) {
 								const Vec8f fade = min(max(
 									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
 									Vec8f(0.0f)), Vec8f(1.0f));
-								uf = curU + (ssU - curU) * fade;
-								vf = curV + (ssV - curV) * fade;
+								uf = resU + (ssU - resU) * fade;
+								vf = resV + (ssV - resV) * fade;
 							} else {
-								uf = curU;
-								vf = curV;
+								uf = resU;
+								vf = resV;
 							}
 							}  // !rowFar
 						} else if (ctx.pomSpikeSteps > 0) {
@@ -1108,6 +1178,22 @@ struct TileRasterizer {
 							}
 							uf = foundU;
 							vf = foundV;
+						}
+						// Debug (FDS_DUMP_TXTR): record the finalized parallax UV for covered
+						// lanes so a headless A/B can diff the MARCH output directly.
+						if (g_pomDbgUV) {
+							alignas(32) float dbgU[8], dbgV[8];
+							uf.store_a(dbgU); vf.store_a(dbgV);
+							alignas(32) int32_t dbgM[8]; Vec8i(p_mask).store_a(dbgM);
+							const int dbgBaseX = tile.x * TILE_SIZE;
+							const int dbgPy = tile.y * TILE_SIZE + y;
+							if (dbgPy < g_pomDbgH) for (int k = 0; k < 8; ++k) {
+								const int px = dbgBaseX + k;
+								if (dbgM[k] && px < g_pomDbgStride) {
+									const size_t di = (size_t(dbgPy) * g_pomDbgStride + px) * 2;
+									g_pomDbgUV[di] = dbgU[k]; g_pomDbgUV[di + 1] = dbgV[k];
+								}
+							}
 						}
 					}
 					Vec8i u = roundi(uf * UScaleFactor);
@@ -1556,16 +1642,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		if ((dword)miplevel < cm->numMipmaps && cm->Mipmap[miplevel])
 			coneData = reinterpret_cast<const byte*>(cm->Mipmap[miplevel]);
 	}
-	// The cone-step POM march (coneData path) is structurally broken: it returns
-	// the FINAL march position with no ray-surface CROSSING detection, so it
-	// under-converges to a view-dependent residual that SWIMS (measured
-	// byte-identical to single-shift at strength 1). So --parallax_pom drives the
-	// NAIVE occlusion march (which records the first rayH<=Hs crossing → features
-	// anchored to their true depth, no swim — the same march FDS_POM_SPIKE runs).
-	// FDS_POM_CONE=1 restores the cone path to debug it.
+	// Routing: --parallax_pom drives the NAIVE occlusion march by default (it
+	// records the first rayH<=Hs crossing -> features anchored to true depth, no
+	// swim). FDS_POM_CONE=1 selects the relaxed CONE march (cone-step bracket +
+	// binary-search refine, see the march block) which converges to the SAME
+	// crossing in fewer taps. FDS_POM_REFINE overrides the cone refine iterations
+	// (default 6); FDS_POM_SPIKE overrides the naive step count for A/B.
 	static const bool sPomCone     = std::getenv("FDS_POM_CONE") != nullptr;
 	static const int  sPomSpikeEnv = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
 	                                       return e ? std::atoi(e) : 0; }();
+	static const int  sPomRefine   = [](){ const char* e = std::getenv("FDS_POM_REFINE");
+	                                       return e ? std::atoi(e) : 6; }();
+	static const float sPomRelax   = [](){ const char* e = std::getenv("FDS_POM_RELAX");
+	                                       return e ? float(std::atof(e)) : 4.0f; }();
 	const int naiveSteps = sPomCone ? sPomSpikeEnv
 	                                : (sPomSpikeEnv > 0 ? sPomSpikeEnv : pomSteps);
 	const int coneSteps  = (sPomCone && coneData) ? pomSteps : 0;
@@ -1608,6 +1697,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomSteps = coneSteps,
 		.pomLodDist = fds::FeatureFlags::parallax_pom_lod(),
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
+		.pomRefine = sPomRefine,
+		.pomRelax = sPomRelax,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

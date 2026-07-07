@@ -499,6 +499,16 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         RunLightTestHook();
         RunUVTestHook();
 
+        // FDS_DUMP_TXTR: arm the per-pixel parallax-UV recorder for this tick so
+        // the rasterizer records where the march landed each covered pixel.
+        static std::vector<float> s_uvbuf;
+        if (std::getenv("FDS_DUMP_TXTR")) {
+            s_uvbuf.assign(size_t(xres) * yres * 2, -1.0e9f);
+            meka::g_pomDbgUV = s_uvbuf.data();
+            meka::g_pomDbgStride = xres;
+            meka::g_pomDbgH = yres;
+        }
+
         bool more = driver->tick();
         (void)more;
 
@@ -555,6 +565,24 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                       cfg.outDir.c_str(), ts);
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
+
+        // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
+        // march recorded during this tick (see g_pomDbgUV set before the tick).
+        // Diffing two runs' UV bins isolates the MARCH output (spatial texel
+        // distance) from all lighting/post — the only headless metric that is
+        // march-correctness-sensitive on this god-ray/bloom frame (final-color
+        // diffs are amplification-dominated).
+        if (meka::g_pomDbgUV) {
+            char tp[1024];
+            std::snprintf(tp, sizeof(tp), "%s/greets_t%06d_uv.bin", cfg.outDir.c_str(), ts);
+            if (FILE* f = std::fopen(tp, "wb")) {
+                std::fwrite(meka::g_pomDbgUV, sizeof(float),
+                            size_t(xres) * yres * 2, f);
+                std::fclose(f);
+                std::fprintf(stderr, "[GREETSSNAP] uv -> %s\n", tp);
+            }
+            meka::g_pomDbgUV = nullptr;
+        }
 
         // GBUF_PROBE="x1,y1,x2,y2": per-column-parity matID histogram over a
         // rect — diagnosis hook (e.g. which pixels are forward-sentinel vs

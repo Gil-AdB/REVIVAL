@@ -231,3 +231,114 @@ cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   [--parallax_pom_lod=40] --snapshot=greets@t=5780 --out=/tmp/pom
 # raise --parallax_strength (0.5-0.7) to make the occlusion depth obvious.
 ```
+
+## Tier-2 CONE MARCH — WAS BROKEN, NOW FIXED (2026-07-07)
+
+The STEP-1 cone march above was **structurally broken** and its "convergence"
+stats were measured against itself (cone-6 vs cone-16), never against a true
+crossing, so the breakage was missed. Re-measured and fixed this pass.
+
+### Root cause (three compounding bugs, all MEASURED)
+
+1. **No crossing detection / no refinement.** The march returned the FINAL cone
+   position (`uf = curU`). A conservative cone freezes where `gap = rayH - Hs → 0`
+   — i.e. at the LOCAL surface height under the ray's own column — which is
+   essentially the single-shift point, NOT the ray's first crossing. So the march
+   COLLAPSED to single-shift. Proven: cone-64 and cone-200 are byte-identical
+   (fully converged) yet sit 2.08 meanAbs from single-shift and 11.7 from the
+   naive crossing — it converged to the WRONG point.
+2. **The wall ('rooms') cone map baked to ALL 255 (flat).** `FDS_CONE_HIST=1`
+   histogram: every coarse cell = 255 = `kPomConeMax`. Max-pooling 8×8 blocks of
+   the wall height map saturates every coarse cell to the same max height → no
+   TALLER neighbour exists → `minRatioSq` never leaves its clamp → cone ratio
+   pinned at the max (near-flat). A near-flat cone takes a near-full step, so the
+   ray jumped straight to the local surface in one step = single-shift. This is
+   why cone==single-shift on the walls (which fill the frame).
+3. **The floor cone map was the opposite** — tiny ratios (meanByte 38, c≈0.6, many
+   cells c<0.1) → conservative CRAWL (many steps to reach the surface).
+
+### Why the acceptance metric had to change (measured)
+
+The planned "cone-K vs naive-32 final-COLOR diff < 2/255" is unusable at
+greets@t=5780: god-rays + bloom + HDR amplify sub-texel UV shifts into 5–15/255
+color swings, AND the naive march itself does not converge in color (naive-64 vs
+naive-256 = 8.8 meanAbs). The CLI post flags (`--no-hdr/--no-bloom/…`) are ignored
+by the greets snapshot, so the amplifiers can't be stripped. Built a march-only
+metric instead: **`FDS_DUMP_TXTR=1`** dumps the finalized per-pixel parallax UV
+(`greets_t*_uv.bin`); diff two runs = **spatial texel distance** of where each
+march landed, bypassing all lighting/post. This is the correctness gate.
+
+### The fix (Mekalele.h cone branch)
+
+Relaxed cone stepping per GPU Gems 3 ch.18: the cone step **brackets** the first
+`rayH <= Hs` crossing (records the last-above + first-below sample), then a
+**binary search** (default 6 iters, `FDS_POM_REFINE`) lands on it sub-texel. The
+step formula `dt = c·gap/(c+dlen)` was already correct (matches the reference).
+`FDS_POM_RELAX` (default 4) widens the conservative baked ratio so the ray
+brackets in few taps; the bisection recovers the crossing inside whatever bracket
+it lands. Routing unchanged: `--parallax_pom` = NAIVE by default, `FDS_POM_CONE=1`
+= the fixed cone.
+
+### Correctness — MARCH texel distance vs naive-256 truth (greets@t=5780, 1024² map)
+
+Fixed cone-8 (default relax 4 / refine 6) vs the current default naive-8:
+
+| strength | cone-8 median | cone-8 >4tex | naive-8 median |
+|---|---|---|---|
+| 0.1 | **0.35** | 0.3% | 10.8 |
+| 0.3 | **1.05** | 1.0% | 32.3 |
+| 0.6 | **2.11** | 2.2% | 64.6 |
+| 1.0 | **3.53** | 3.5% | 107.7 |
+
+The cone-8 residual TRACKS the truth's own 1/256 quantization (naive-256 vs
+naive-512 = 1.04 texel at strength 0.6), i.e. cone-8 is truth-limited, not
+cone-limited. Self-consistency: cone-8-relax4 vs an independent converged
+cone-20-relax1 agree to **median 0 texels**. The naive-8 default lands 11–108
+texels from the true crossing = the SWIM (its landing is quantized to 1/8 rayH,
+and 1/8·envelope is huge at grazing). A small cone tail (2–3.5% >4tex) is the
+relax=4 not fully collapsing on the steepest cells; `FDS_POM_RELAX=12` closes it
+(N8: >4tex 1.1%).
+
+### Speed — MEASURED (greets@t=5780, DIRTY machine ~50–95% bg)
+
+- **Single-thread** (iters=25, ±<1 ms): single-shift 336.0 · naive-8 351.3
+  (+15.3) · **cone-8 411.1 (+75.1 ms)**. ⇒ naive ≈ 1.9 ms/tap; cone-8's
+  8 cone-steps(2 gathers)+6 refine = 22 gathers cost +75 ms ≈ 5× the naive-8 march.
+- **Threaded** (default pool, iters=40, 2 interleaved rounds, consistent):
+  single-shift ~51.3 · naive-8 ~53.0 (**+1.7 ms**) · cone-8 ~60.7 (**+9.4 ms**).
+
+**Does the cone beat naive-8? NO on raw cost** (5× the march). **But naive-8 is
+not converged** (swims). For EQUAL converged/swim-free quality the naive needs
+~256 taps (~+486 ms single / ~+55 ms threaded), so **cone-8 reaches the true
+crossing ~6× cheaper than the equivalent naive**. The cone wins for *converged*
+quality, loses the *cheap-and-swimmy* tier to naive-8.
+
+### The honest cone-map finding
+
+At the relax needed to bracket in few taps, the per-texel cone ratio is nearly
+uniform (aggressive steps) — the **bracket + binary-refine does the work, the cone
+map barely contributes** and costs a 2nd gather/step for little benefit on this
+shallow-relief, mostly-solid stone (little empty space to skip). A PROPER relaxed
+cone bake (GPU Gems 3 Listing 18-1: per-pair *second-intersection* along the ray)
+would give real per-texel guidance so low relax converges, but it's ~100× the
+current O(N²) conservative bake (a march per texel pair) — too slow for the
+runtime material-setup budget without a disk cache. Deferred.
+
+### Recommendation
+
+Keep the **NAIVE march as the default** (cheap; the demo ships it). The cone is
+now **correct** under `FDS_POM_CONE=1` — verify swim-free relief IN MOTION, then
+decide whether the +7.7 ms threaded (over naive-8) for converged/no-swim relief
+is worth flipping the default. Default-off is byte-identical: render gate ALL
+PASS, greets naive-8 md5 7a2a694a…, city@t=1961 md5 ae8e08d1b791a1707f304ce0a5425064.
+
+**Validation command (march-only metric):**
+```
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_DUMP_TXTR=1 FDS_POM_SPIKE=256 ./DEMO --deferred --parallax_strength=0.3 \
+  --parallax_pom=8 --snapshot=greets@t=5780 --out=/tmp/truth      # naive-256 truth
+cd Runtime && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  FDS_DUMP_TXTR=1 FDS_POM_CONE=1 ./DEMO --deferred --parallax_strength=0.3 \
+  --parallax_pom=8 --snapshot=greets@t=5780 --out=/tmp/cone       # fixed cone-8
+# diff the two greets_t005780_uv.bin (float32 [u,v]/px) → texel distance.
+```

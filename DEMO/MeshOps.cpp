@@ -322,6 +322,15 @@ Texture *MakeConeMap(Texture *height) {
 		};
 		dispatchIndexed(ch, &done, rowFn);
 		for (int k = 0; k < ch; ++k) done.acquire();
+		// DEBUG (FDS_CONE_HIST): coarse cone-ratio byte histogram per mip.
+		if (std::getenv("FDS_CONE_HIST") && mip < 4) {
+			int hist[8] = {0}; double sum = 0;
+			for (byte b : Cc) { hist[std::min(7, b / 32)]++; sum += b; }
+			std::fprintf(stderr, "[CONE_HIST] mip=%u cells=%zu meanByte=%.1f  buckets[0-31,..,224-255]:",
+				mip, Cc.size(), sum / Cc.size());
+			for (int b = 0; b < 8; ++b) std::fprintf(stderr, " %d", hist[b]);
+			std::fprintf(stderr, "\n");
+		}
 		// Nearest-upsample the coarse cone into the full mip (swizzled write).
 		byte *cmip = cone->Mipmap[mip];
 		for (int y = 0; y < mh; ++y) {
