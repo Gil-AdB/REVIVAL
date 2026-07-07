@@ -1304,7 +1304,7 @@ void Initialize_Greets()
 					// Tier-2 cone-step POM (--parallax_pom): offline-bake a cone map
 					// companion (needs the 8-bit height layout). Only when the flag is
 					// on → default-off pays nothing and is byte-identical.
-					if (fds::FeatureFlags::parallax_pom() > 0 && M->HeightMap->BPP == 8) {
+					if (fds::FeatureFlags::parallax_pom_cone() && M->HeightMap->BPP == 8) {
 						auto t0 = std::chrono::high_resolution_clock::now();
 						M->ConeMap = MakeConeMap(M->HeightMap);
 						double ms = std::chrono::duration<double, std::milli>(

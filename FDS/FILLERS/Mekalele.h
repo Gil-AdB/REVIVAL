@@ -443,11 +443,10 @@ struct TileRasterizerCtx {
 	// heightmaps, so the shimmer target is unaffected.
 	bool materialHasHeightMap = false;
 
-	// FDS_POM_SPIKE=N throwaway probe (docs/HEIGHTMAP_POM_PLAN.md mandatory
-	// first step): 0 = single-shift parallax (default, byte-identical); N>0 =
-	// replace the single shift with a naive N-tap linear march of the
-	// tangent-space view ray (no cone maps, no early-out) to anchor the
-	// honest per-tap cost. Populated from a cached getenv in the dispatcher.
+	// Naive linear occlusion march step count (the default --parallax_pom path;
+	// the dispatcher sets this to parallax_pom() unless --parallax_pom_cone). 0 =
+	// single-shift (byte-identical); N>0 = N-tap linear march of the tangent-space
+	// view ray that records the first rayH<=Hs crossing (anchored, no swim).
 	int pomSpikeSteps = 0;
 
 	// Tier-2 cone-step POM (--parallax_pom). coneData = the material's ConeMap
@@ -1644,20 +1643,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	}
 	// Routing: --parallax_pom drives the NAIVE occlusion march by default (it
 	// records the first rayH<=Hs crossing -> features anchored to true depth, no
-	// swim). FDS_POM_CONE=1 selects the relaxed CONE march (cone-step bracket +
-	// binary-search refine, see the march block) which converges to the SAME
-	// crossing in fewer taps. FDS_POM_REFINE overrides the cone refine iterations
-	// (default 6); FDS_POM_SPIKE overrides the naive step count for A/B.
-	static const bool sPomCone     = std::getenv("FDS_POM_CONE") != nullptr;
-	static const int  sPomSpikeEnv = [](){ const char* e = std::getenv("FDS_POM_SPIKE");
-	                                       return e ? std::atoi(e) : 0; }();
-	static const int  sPomRefine   = [](){ const char* e = std::getenv("FDS_POM_REFINE");
-	                                       return e ? std::atoi(e) : 6; }();
-	static const float sPomRelax   = [](){ const char* e = std::getenv("FDS_POM_RELAX");
-	                                       return e ? float(std::atof(e)) : 4.0f; }();
-	const int naiveSteps = sPomCone ? sPomSpikeEnv
-	                                : (sPomSpikeEnv > 0 ? sPomSpikeEnv : pomSteps);
-	const int coneSteps  = (sPomCone && coneData) ? pomSteps : 0;
+	// swim). --parallax_pom_cone selects the relaxed CONE march (cone-step bracket
+	// + binary-search refine, see the march block) which converges to the SAME
+	// crossing in fewer taps. --parallax_pom_refine = cone bisection count,
+	// --parallax_pom_relax = cone step-width relax factor.
+	const bool useCone    = fds::FeatureFlags::parallax_pom_cone();
+	const int  naiveSteps = useCone ? 0 : pomSteps;
+	const int  coneSteps  = (useCone && coneData) ? pomSteps : 0;
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -1697,8 +1689,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomSteps = coneSteps,
 		.pomLodDist = fds::FeatureFlags::parallax_pom_lod(),
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
-		.pomRefine = sPomRefine,
-		.pomRelax = sPomRelax,
+		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
+		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
