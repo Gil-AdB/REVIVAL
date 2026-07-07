@@ -2096,7 +2096,14 @@ void Initialize_Greets()
 		}
 		ShadowMaps_Rebuild(GreetSc, 1024);
 		CubeShadowMaps_Rebuild(GreetSc, omniCubeRes);
-		ShadowMaps_BakeStatic(GreetSc);
+		// Force the static occluder bake even when --shadows isn't set yet:
+		// greets turns --shadows on at RUN (GreetsApplyRunDefaults), AFTER this
+		// init bake, so under bare --deferred shadows() is still off here. The
+		// static-shadow lightmap bake spawned below is likewise force-enabled
+		// (bakeForce) and READS these occluder maps; without the same force the
+		// maps stay empty and every lightmap texel bakes 100% lit (no static
+		// shadows). Same condition as bakeForce so the two stay in lockstep.
+		ShadowMaps_BakeStatic(GreetSc, /*forceEnable=*/!GreetsScenePreempted());
 		fds::LightmapStampOrigBary(GreetSc);
 		// NOTE: the lightmap bake thread is spawned LATER (after the mirror /
 		// shatter setup below), not here — LightmapBake_Static reads Materials,

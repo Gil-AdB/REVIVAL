@@ -460,8 +460,15 @@ enum class ShadowBakeMode {
 	DynamicOmnisPerFrame, // dynamic omnis + all meshes, write to depth/polyId (legacy per-frame)
 	DynamicMeshesPerFrame // static omnis + dynamic meshes only, write to depth_dynamic/polyId_dynamic
 };
+// forceEnable: honoured only by the StaticOnce bake. Bypasses the global
+// FeatureFlags::shadows() gate so a scene that turns shadows on at RUN time
+// (e.g. greets, whose GreetsApplyRunDefaults sets --shadows after the init
+// bake window) can still populate its static occluder maps at INIT — the
+// forced static-shadow lightmap bake reads them. Default false: per-frame
+// modes and other scenes keep the flag gate.
 void Render_DeferredShadowMaps(class Scene *Sc,
-                               ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame);
+                               ShadowBakeMode mode = ShadowBakeMode::DynamicOmnisPerFrame,
+                               bool forceEnable = false);
 
 // Stage A overlap (docs/THREADING_OVERLAP_PLAN.md). The greets per-frame
 // dynamic shadow bake. With --shadow-gbuffer-overlap, runs the bake(s) on a

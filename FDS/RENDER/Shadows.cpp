@@ -136,9 +136,13 @@ static void ShadowMap_SwizzlePlanes(ShadowMap &sm, bool dynPlanes)
 	else           { tile(sm.depth,         sm.depthSw);    tile(sm.polyId,         sm.polyIdSw);    }
 }
 
-void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode)
+void Render_DeferredShadowMaps(Scene *Sc, ShadowBakeMode mode, bool forceEnable)
 {
-	if (!shadowsEnabled()) return;
+	// forceEnable bypasses the global shadows() gate — only ever passed by the
+	// StaticOnce init bake (ShadowMaps_BakeStatic) for scenes that enable
+	// --shadows at RUN time but must fill static occluder maps at INIT. All
+	// per-frame callers leave it false, so the flag still gates the hot path.
+	if (!forceEnable && !shadowsEnabled()) return;
 	if (!Sc || g_shadowMaps.empty()) return;
 
 	// --shadow_bake_time: total wall-clock of the DYNAMIC bake stage (this whole

@@ -149,7 +149,13 @@ void ShadowMaps_Rebuild(struct Scene *Sc, int res);
 //
 // Dynamic lights (no Omni_StaticShadow flag) are unaffected — they
 // continue to rebake every frame via Render_DeferredShadowMaps.
-void ShadowMaps_BakeStatic(struct Scene *Sc);
+//
+// forceEnable (default false): bypass the global FeatureFlags::shadows()
+// gate for this bake. Needed by greets, which turns --shadows on only at
+// RUN time (after this init bake) but force-bakes its static-shadow
+// lightmap here — the lightmap reads these occluder maps, so they must be
+// populated even when shadows() is still off at init.
+void ShadowMaps_BakeStatic(struct Scene *Sc, bool forceEnable = false);
 
 // ─── Cube shadow maps (for Light_Omni shadow casters) ────────────────
 //
