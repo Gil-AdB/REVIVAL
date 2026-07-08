@@ -85,7 +85,11 @@ def scene_sidecar(scene):
     return os.path.join(RUNTIME, "SCENES", scene.upper() + ".MAT")
 
 ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
-                 "glossiness", "luminosity", "transparency", "reflection"}
+                 "glossiness", "luminosity", "transparency", "reflection",
+                 # smoothAngle is a NATIVE LWO/FLD field (MaxSmoothingAngle +
+                 # the Surf_Smoothing flag), so it round-trips through the FLD
+                 # patcher like diffuse/specular — NOT the engine-only sidecar.
+                 "smoothAngle"}
 # Engine-only per-material dials with no LWO/FLD field — persist as sidecar
 # surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
 SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB"}

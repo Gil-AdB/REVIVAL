@@ -1,5 +1,7 @@
 #include "MeshOps.h"
 
+#include "MaterialEditor.h"       // rev::Editor_BaseSurfName (collapse ::mirUV clones)
+#include <FLD/LWREAD.H>           // Surf_Smoothing flag (authored per-surface smoothing)
 #include <Base/FDS_VARS.H>
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
@@ -11,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <semaphore>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -27,6 +30,11 @@ namespace {
 // keys by TriMesh* so storage is naturally scoped to the scene that
 // owns the TriMesh.
 std::map<TriMesh*, std::vector<Vertex>> g_independentVerts;
+
+// Per-surface smoothing-angle overrides (base material name -> degrees).
+// Empty unless a sidecar sets one => default render is byte-identical. See
+// MeshOps.h for the semantics; consumed by MakeFacesIndependent below.
+std::map<std::string, float> g_surfaceSmoothAngle;
 
 // Returns true iff some pair of faces sharing a vertex has normals
 // more than `thresholdDegrees` apart. Cheap O(V * f²) where f is the
@@ -58,6 +66,25 @@ bool MeshHasCreases(TriMesh *T, float thresholdDegrees) {
 }
 
 } // namespace
+
+void MeshOps_SetSurfaceSmoothAngle(const char *surface, float angleDeg) {
+	if (!surface || !*surface) return;
+	if (angleDeg < 0.0f)   angleDeg = 0.0f;
+	if (angleDeg > 180.0f) angleDeg = 180.0f;
+	// Key by BASE name so the ::mirUV handedness clones of a surface share the
+	// override (they draw the same geometry — see rev::Editor_BaseSurfName).
+	g_surfaceSmoothAngle[rev::Editor_BaseSurfName(surface)] = angleDeg;
+}
+
+bool MeshOps_GetSurfaceSmoothAngle(const char *surface, float &angleDegOut) {
+	if (!surface || g_surfaceSmoothAngle.empty()) return false;
+	auto it = g_surfaceSmoothAngle.find(rev::Editor_BaseSurfName(surface));
+	if (it == g_surfaceSmoothAngle.end()) return false;
+	angleDegOut = it->second;
+	return true;
+}
+
+bool MeshOps_AnySurfaceSmoothAngle() { return !g_surfaceSmoothAngle.empty(); }
 
 void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	if (!T || T->FIndex == 0 || !T->Faces) return;
@@ -94,14 +121,51 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 		return f && f->Txtr && f->Txtr->Name && !std::strcmp(f->Txtr->Name, "momy");
 	};
 
+	// Per-surface smoothing angle. Two opt-in sources, both superseding the
+	// legacy momy/global-crease path for the affected surface and both
+	// restricting averaging to the surface's OWN incident faces (a material
+	// boundary is a hard edge — matches LightWave; keeps momy off the floor):
+	//   1. An explicit sidecar override (surface|smoothAngle|value). Wins.
+	//   2. The AUTHORED LWO/FLD angle (Material::MaxSmoothingAngle, radians)
+	//      when --surf_smoothing_authored is on and the surface is flagged
+	//      Surf_Smoothing (else that surface is left faceted).
+	// The effective angle then gates the fan: adj is averaged iff within it of
+	// THIS face's normal (180 => true shared normal / fully smooth, 0 =>
+	// faceted). Both sources are off by default => the block below is inert
+	// and the render is byte-identical.
+	const bool anyOverride = MeshOps_AnySurfaceSmoothAngle();
+	const bool useAuthored = fds::FeatureFlags::surf_smoothing_authored();
+	auto surfName = [](const Face *f) -> const char * {
+		return (f && f->Txtr && f->Txtr->Name) ? f->Txtr->Name : nullptr;
+	};
+
 	auto computeSmoothedNormal = [&](Vertex *origVtx, const Face *face) {
-		const bool momy = matIsMomy(face);
+		const char *fname = surfName(face);
+		float effAngle = 0.0f;
+		bool perSurf = false;
+		if (anyOverride && fname && MeshOps_GetSurfaceSmoothAngle(fname, effAngle)) {
+			perSurf = true;                     // explicit sidecar override
+		} else if (useAuthored && face->Txtr) {
+			effAngle = (face->Txtr->TFlags & Surf_Smoothing)
+				? face->Txtr->MaxSmoothingAngle * (180.0f / float(PI))   // rad -> deg
+				: 0.0f;                          // not authored smooth => faceted
+			perSurf = true;
+		}
+		const float cosPerSurf = perSurf
+			? std::cos(effAngle * float(PI) / 180.0f) : 0.0f;
+		const std::string fbase = perSurf
+			? rev::Editor_BaseSurfName(fname ? fname : "") : std::string();
+		const bool momy = !perSurf && matIsMomy(face);
 		Vector accum{};
 		Vector_Form(&accum, 0, 0, 0);
 		auto it = incident.find(origVtx);
 		if (it == incident.end()) return face->N;
 		for (Face *adj : it->second) {
-			if (momy) {
+			if (perSurf) {
+				const char *aname = surfName(adj);
+				if (!aname || rev::Editor_BaseSurfName(aname) != fbase) continue;
+				if (Dot_Product(&face->N, &adj->N) < cosPerSurf) continue;
+			} else if (momy) {
 				// True shared per-vertex normal: average EVERY incident momy
 				// face, with NO per-face-relative angle gate. The gate (used
 				// below for the architectural crease pass) is exactly what
@@ -620,14 +684,40 @@ Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
 	return t;
 }
 
+// True iff any face of the mesh belongs to a surface with a smoothing-angle
+// override. Used to force the face-clone pass on an otherwise-smooth mesh so
+// a low override angle can FACET it (a smooth mesh has no creases at the
+// global threshold and would otherwise be skipped). Fast no-op when the
+// override registry is empty.
+static bool MeshHasOverrideSurface(TriMesh *T) {
+	if (!MeshOps_AnySurfaceSmoothAngle() || !T || !T->Faces) return false;
+	float a;
+	for (int32_t i = 0; i < T->FIndex; ++i) {
+		const Face *F = &T->Faces[i];
+		if (F->Txtr && F->Txtr->Name && MeshOps_GetSurfaceSmoothAngle(F->Txtr->Name, a))
+			return true;
+	}
+	return false;
+}
+
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 	if (!Sc) return;
+	// Authored-angle mode re-derives every surface's smoothing from its LWO
+	// angle, so no mesh may be skipped. Off by default => the term drops out.
+	const bool useAuthored = fds::FeatureFlags::surf_smoothing_authored();
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces) continue;
-		if (!MeshHasCreases(T, thresholdDegrees)) continue;
+		// Process a mesh if it has hard creases at the global threshold, OR one
+		// of its surfaces carries an explicit smoothing-angle override (which
+		// may need to facet an otherwise-smooth mesh), OR authored-angle mode
+		// is on. With no override and the flag off, only the first term
+		// survives => byte-identical to before.
+		if (!MeshHasCreases(T, thresholdDegrees) && !MeshHasOverrideSurface(T)
+		    && !useAuthored) continue;
 		// Same threshold gates both: a face pair within `thresholdDegrees`
 		// is "smooth" (averaged normal); beyond is a "crease" (face
-		// normal alone).
+		// normal alone). Per-surface overrides are applied inside
+		// MakeFacesIndependent per face regardless of this threshold.
 		MakeFacesIndependent(T, thresholdDegrees);
 	}
 }

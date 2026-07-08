@@ -129,6 +129,31 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees = 30.0f);
 // breaking smooth meshes (Fountain crystal, Greets curved letters).
 void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees);
 
+// Per-surface smoothing-angle override registry (engine-only; no LWO/FLD
+// field). When a surface — addressed by BASE material name, "::mirUV"
+// handedness clones collapsed — has an angle set here, MakeFacesIndependent
+// rebuilds that surface's per-vertex normals by averaging ONLY its own
+// incident faces whose normal is within `angleDeg` of each face:
+//   180  = fully smooth  (every incident same-surface face averaged → a true
+//          shared normal, continuous Phong shading — like the 'momy' path)
+//   0    = fully faceted (each face keeps its own normal → hard edges)
+// This OVERRIDES both the global crease threshold and the built-in 'momy'
+// auto-smooth for that one surface, and (unlike the global gate) restricts
+// averaging to the surface's own faces so it can't bleed into neighbours.
+//
+// Populated from the scene sidecar line `surface|smoothAngle|value` by
+// MaterialImport_ApplySidecar, which runs BEFORE MakeFacesIndependentByAngle
+// at scene init — so the angle is in place when normals are built. The
+// registry is EMPTY unless a sidecar sets it, so the default render is
+// byte-identical. Angle is clamped to [0,180].
+//
+// NOTE (load-time only): the normal build flattens the mesh's shared-vertex
+// topology once at init, so an angle set live (editor) does not re-smooth an
+// already-built mesh — it takes effect on the next scene load.
+void  MeshOps_SetSurfaceSmoothAngle(const char *surface, float angleDeg);
+bool  MeshOps_GetSurfaceSmoothAngle(const char *surface, float &angleDegOut);
+bool  MeshOps_AnySurfaceSmoothAngle();
+
 // Phong-tessellate (curved PN-style) every face whose material name == matName,
 // `levels` times (each level = 1→4 split per target triangle, edge midpoints
 // displaced toward the smooth surface so the silhouette rounds). Crack-free

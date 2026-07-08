@@ -384,6 +384,13 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
 		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
+		// material field: recorded in the MeshOps registry and consumed when
+		// MakeFacesIndependent rebuilds this surface's vertex normals. That
+		// runs later at scene init (after the sidecar) — 180 = fully smooth,
+		// 0 = faceted. Set live (editor) it registers but needs a scene reload
+		// to re-run the normal build (topology is flattened once at init).
+		else if (!std::strcmp(prop, "smoothAngle")) MeshOps_SetSurfaceSmoothAngle(surface, value);
 		// Albedo tint (engine-only, sidecar-persisted): per-MATERIAL
 		// multipliers applied at the deferred texel fetch — NOT a texture
 		// mutation, since textures are deduped by filename and shared
