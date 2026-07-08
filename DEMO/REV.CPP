@@ -1564,6 +1564,14 @@ int main(int argc, const char *argv[])
 
     SDL_RaiseWindow(window.get());
 
+    // SDL2 starts with text input ACTIVE on macOS, routing key events through
+    // the Cocoa text-input (NSTextInputClient) path — so press-and-hold on a
+    // key (camera movement etc.) pops the macOS accent/glyph picker instead of
+    // repeating. The demo reads raw scancodes (Keyboard[]) and never needs text
+    // events, so stop text input: kills the accent popup, clean key repeats.
+    // Harmless on other platforms.
+    SDL_StopTextInput();
+
 	// _controlfp(_EM_INEXACT, _MCW_EM);
 	FPU_LPrecision();
 	const int internalXRes = g_demoXRes;
