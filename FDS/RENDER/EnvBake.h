@@ -113,6 +113,11 @@ void EnvReflection_DrawViz(Scene* sc);
 // Number of baked panorama stores for the scene (viewer paging bound).
 int EnvReflection_Count(Scene* sc);
 
+// Store index a material maps to (-1 = none / not reflective / not yet
+// baked). Editor UI: the surface panel's env-reflection state indicator and
+// the pano viewer's jump-to-selected-surface both key off this.
+int EnvReflection_StoreIndex(Scene* sc, const Material* M);
+
 // Register an EXTERNALLY baked padded-cube store for material M: takes the
 // face-major linear RGBA faces (6 x faceRes^2, EnvCube convention — e.g.
 // CITY's per-building bake, already disk-cached), box-downsamples to

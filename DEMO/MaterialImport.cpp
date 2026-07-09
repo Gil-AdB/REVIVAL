@@ -316,8 +316,18 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			if (Texture *m32 = loadTiled(metallic, false, aw, ah)) {
 				Texture *m8 = MakeHeight8(m32);
 				for (Material *m : mats) m->MetallicMap = m8 ? m8 : m32;
-				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; needs --env_refl for reflections)\n",
-				             metallic.c_str(), m8 ? "8-bit" : "32-bit");
+				// A metal without env reflections renders as a black hole
+				// (metalness kills diffuse; the env term needs --env_refl).
+				// Auto-default BOTH flags so the import visibly works out of
+				// the box — setDefault never overrides an explicit
+				// --no-env_refl / --no-env_bake_fix.
+				fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+				fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_bake_fix, true);
+				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; "
+				             "env_refl %s, env_bake_fix %s)\n",
+				             metallic.c_str(), m8 ? "8-bit" : "32-bit",
+				             fds::FeatureFlags::env_refl() ? "on" : "OFF (user override)",
+				             fds::FeatureFlags::env_bake_fix() ? "on" : "OFF (user override)");
 			}
 		}
 
@@ -576,7 +586,17 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	} else if (r == "ao") {
 		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
 	} else if (r == "metallic") {
-		if (Texture *m32 = loadTiled(path, false, aw, ah)) { Texture *m8 = MakeHeight8(m32); for (Material *M : mats) M->MetallicMap = m8 ? m8 : m32; ok = true; }
+		if (Texture *m32 = loadTiled(path, false, aw, ah)) {
+			Texture *m8 = MakeHeight8(m32);
+			for (Material *M : mats) M->MetallicMap = m8 ? m8 : m32;
+			// Metal without env reflections = black hole (diffuse killed,
+			// env term needs --env_refl). Auto-default the reflection flags
+			// so a metallic import — editor upload OR sidecar line at scene
+			// init — visibly works; explicit --no-* still wins.
+			fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_refl, true);
+			fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_bake_fix, true);
+			ok = true;
+		}
 	} else {
 		std::fprintf(stderr, "[MAT-IMPORT] unknown role '%s'\n", role); return false;
 	}

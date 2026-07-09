@@ -110,6 +110,8 @@ std::string Editor_GetSurfacesJSON()
 		out += M->NormalMap ? "\"hasNormalMap\":1," : "\"hasNormalMap\":0,";
 		out += (M->AoMap || (M->Flags & Mat_AoInAlpha)) ? "\"hasAoMap\":1," : "\"hasAoMap\":0,";
 		out += M->HeightMap ? "\"hasHeightMap\":1," : "\"hasHeightMap\":0,";
+		out += M->RoughnessMap ? "\"hasRoughnessMap\":1," : "\"hasRoughnessMap\":0,";
+		out += M->MetallicMap ? "\"hasMetallicMap\":1," : "\"hasMetallicMap\":0,";
 		// Current UV mapping (as loaded / as last re-projected).
 		{
 			int proj = -1;   // -1 = unknown / not an image-mapped surface
@@ -582,6 +584,20 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 	std::fwrite(data, 1, len, f);
 	std::fclose(f);
 	const bool ok = fds::MaterialImport_ApplyMapFile(CurScene, surface, role, tmp.c_str());
+	if (ok && !std::strcmp(role, "metallic")) {
+		// Metallic drives the ENV-reflection system (not the scalar
+		// `reflection` slider): ApplyMapFile just auto-defaulted env_refl +
+		// env_bake_fix on; drop the scene's baked panoramas so the next
+		// frame's FramePrep re-bakes them all with this surface's new metal
+		// look (and bakes a fresh probe for it). Without this the import
+		// looked like it did nothing — the #1 "metallic has no effect"
+		// report.
+		fds::EnvReflection_Invalidate(CurScene);
+		std::fprintf(stderr, "[EDITOR] metallic import on '%s': env_refl=%d "
+		             "env_bake_fix=%d — panoramas invalidated, re-baking next frame\n",
+		             surface, fds::FeatureFlags::env_refl() ? 1 : 0,
+		             fds::FeatureFlags::env_bake_fix() ? 1 : 0);
+	}
 	if (ok) Editor_MarkDirty();
 	return ok;
 }
@@ -635,6 +651,55 @@ void js_editorRebakeEnv()
 	rev::Editor_MarkDirty();
 }
 
+// Per-surface env-reflection state for the panel indicator + the pano
+// viewer's jump-to-surface: is env_refl on, does any material of this
+// surface carry a metalness map / Reflection > 0, and which baked store
+// (0-based; -1 = none yet) does it map to.
+std::string js_editorEnvInfo(std::string name)
+{
+	int store = -1, metal = 0, refl = 0;
+	if (CurScene) {
+		for (Material* M = MatLib; M; M = M->Next) {
+			if (M->RelScene != CurScene || !M->Name) continue;
+			if (rev::Editor_BaseSurfName(M->Name) != name) continue;
+			if (M->MetallicMap) metal = 1;
+			if (M->Reflection > 0.0f) refl = int(M->Reflection);
+			const int idx = fds::EnvReflection_StoreIndex(CurScene, M);
+			if (idx >= 0 && store < 0) store = idx;
+		}
+	}
+	char buf[160];
+	std::snprintf(buf, sizeof buf,
+	  "{\"on\":%d,\"fix\":%d,\"metal\":%d,\"reflection\":%d,\"store\":%d,\"count\":%d}",
+	  fds::FeatureFlags::env_refl() ? 1 : 0,
+	  fds::FeatureFlags::env_bake_fix() ? 1 : 0,
+	  metal, refl, store,
+	  CurScene ? fds::EnvReflection_Count(CurScene) : 0);
+	return buf;
+}
+// Which surfaces map to baked store `idx` (0-based) — the pano viewer's
+// truth label ("pano 2/5: momy"). Dedup'd editor base names.
+std::string js_editorEnvPanoInfo(int idx)
+{
+	std::set<std::string> names;
+	if (CurScene)
+		for (Material* M = MatLib; M; M = M->Next) {
+			if (M->RelScene != CurScene || !M->Name) continue;
+			if (fds::EnvReflection_StoreIndex(CurScene, M) == idx)
+				names.insert(rev::Editor_BaseSurfName(M->Name));
+		}
+	std::string out = "[";
+	bool first = true;
+	for (const std::string& n : names) {
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		rev::jsonEscape(out, n.c_str());
+		out += "\"";
+	}
+	out += "]";
+	return out;
+}
 std::string js_editorReadPixel(int x, int y)
 {
 	if (!VPage || x < 0 || y < 0 || x >= XRes || y >= YRes) return "oob";
@@ -852,6 +917,8 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
 	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);
 	emscripten::function("editorEnvPanoCount",   &js_editorEnvPanoCount);
+	emscripten::function("editorEnvInfo",        &js_editorEnvInfo);
+	emscripten::function("editorEnvPanoInfo",    &js_editorEnvPanoInfo);
 	emscripten::function("editorReadPixel",      &js_editorReadPixel);
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);

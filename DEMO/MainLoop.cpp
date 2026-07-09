@@ -268,8 +268,11 @@ void DemoBoot(ModplayerHandle modHandle)
 			// 'reflection' slider works out of the box (the panorama bake
 			// only fires for materials that actually set Reflection > 0 /
 			// carry a metalness map — free otherwise). The demo sequence
-			// keeps the flag's normal default (off).
-			"--env_refl",
+			// keeps the flag's normal default (off). env_bake_fix = the
+			// corrected auto-bake bundle (per-face projection, face-level
+			// self-exclusion, metal neutralization) — kept off in the demo
+			// only to preserve the pinned city baseline.
+			"--env_refl", "--env_bake_fix",
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8

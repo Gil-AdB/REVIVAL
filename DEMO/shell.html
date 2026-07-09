@@ -555,7 +555,12 @@
         overflow-y:auto; background:rgba(18,18,22,0.92); color:#ddd; box-sizing:border-box;
         font:12px/1.4 system-ui,sans-serif; z-index:10000; padding:8px; border-left:1px solid #333; }
       #editor-panel.hidden { display:none; }
-      #editor-panel h2 { font-size:13px; margin:4px 0 8px; color:#fff; }
+      #editor-panel h2 { font-size:13px; margin:4px 0 8px; color:#fff;
+        cursor:move; user-select:none; -webkit-user-select:none; }
+      /* Collapsed tool stack: just the header bar (drag handle + caret) */
+      #editor-panel.collapsed { overflow-y:hidden; }
+      #editor-panel.collapsed > *:not(h2) { display:none !important; }
+      #editor-panel.collapsed h2 { margin-bottom:4px; }
       #editor-search { width:100%; box-sizing:border-box; margin-bottom:6px;
         background:#222; color:#ddd; border:1px solid #444; padding:4px; }
       #editor-list { max-height:40vh; overflow-y:auto; }
@@ -657,6 +662,71 @@
         console.log('[editor] panel init (build b55); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
+        // ── Movable / collapsible tool stack ─────────────────────────────
+        // Drag the header (h2) to move the panel anywhere; ▾/▸ collapses it
+        // to just the header. Position + collapsed state persist per-browser
+        // (localStorage). Double-click the header re-docks it top-right.
+        (function(){
+          var panel = document.getElementById('editor-panel');
+          var h2 = panel.querySelector('h2');
+          var LS = 'revEditorPanel';
+          var st = {};
+          try { st = JSON.parse(localStorage.getItem(LS) || '{}') || {}; } catch(e){}
+          function save(){ try { localStorage.setItem(LS, JSON.stringify(st)); } catch(e){} }
+          var caret = document.createElement('a');
+          caret.href = '#'; caret.id = 'editor-collapse';
+          caret.style.cssText = 'float:right;color:#9cf;text-decoration:none;font-size:12px;padding:0 6px;';
+          caret.title = 'collapse / expand the editor tool stack (persists)';
+          h2.appendChild(caret);
+          function applyCollapsed(){
+            panel.classList.toggle('collapsed', !!st.collapsed);
+            caret.textContent = st.collapsed ? '▸' : '▾';
+          }
+          caret.onclick = function(e){
+            e.preventDefault(); e.stopPropagation();
+            st.collapsed = !st.collapsed; save(); applyCollapsed();
+          };
+          function applyPos(){
+            if (typeof st.x === 'number' && typeof st.y === 'number'){
+              // Clamp so the drag handle can never leave the viewport.
+              var x = Math.min(Math.max(st.x, 60 - panel.offsetWidth), window.innerWidth - 60);
+              var y = Math.min(Math.max(st.y, 0), window.innerHeight - 28);
+              panel.style.left = x + 'px'; panel.style.top = y + 'px';
+              panel.style.right = 'auto';
+              panel.style.maxHeight = (window.innerHeight - Math.max(y, 0)) + 'px';
+            } else {   // default dock: top-right, full-height scroll
+              panel.style.left = ''; panel.style.top = '';
+              panel.style.right = ''; panel.style.maxHeight = '';
+            }
+          }
+          h2.addEventListener('mousedown', function(e){
+            // Header controls (scene <select>, the caret) keep their behavior.
+            if (e.button !== 0 || e.target.tagName === 'SELECT' ||
+                e.target.tagName === 'OPTION' || e.target.tagName === 'A') return;
+            e.preventDefault();
+            var r = panel.getBoundingClientRect();
+            var dx = e.clientX - r.left, dy = e.clientY - r.top;
+            // Capture-phase window listeners: they run BEFORE the panel's
+            // stopPropagation guards and keep tracking when the cursor
+            // crosses the canvas (canvas orbit stays off — its mode is only
+            // armed by a mousedown on the canvas itself).
+            function mv(ev){ st.x = ev.clientX - dx; st.y = ev.clientY - dy; applyPos(); }
+            function up(){
+              window.removeEventListener('mousemove', mv, true);
+              window.removeEventListener('mouseup', up, true);
+              save();
+            }
+            window.addEventListener('mousemove', mv, true);
+            window.addEventListener('mouseup', up, true);
+          });
+          h2.addEventListener('dblclick', function(e){
+            if (e.target.tagName === 'SELECT' || e.target.tagName === 'A') return;
+            delete st.x; delete st.y; save(); applyPos();
+            editorStatus('tool stack re-docked (top-right)');
+          });
+          window.addEventListener('resize', applyPos);
+          applyCollapsed(); applyPos();
+        })();
         // Scene picker: navigating swaps ?scene= and reloads (the FLD +
         // sidecar live-fetch and scene init are boot-time).
         var ssel = document.getElementById('editor-scene-sel');
@@ -957,20 +1027,34 @@
           });
         }
       }
-      // Pano viewer: cycle env_refl_viz 0 -> 1 -> .. -> count -> 0. The
-      // overlay draws post-tonemap in the engine (green frame, top-right).
+      // Pano viewer: env_refl_viz overlay (draws post-tonemap in the engine,
+      // green frame, top-right). editorShowPano is SHARED by the header
+      // cycler here and the per-surface "pano" button in the props panel, so
+      // the "pano: N/COUNT" label always tells the truth about what's shown.
+      var editorPanoCur = 0;
+      function editorPanoNames(idx0){   // 0-based store index → "momy, floor"
+        try { return JSON.parse(Module.editorEnvPanoInfo(idx0)).join(', '); }
+        catch(e){ return ''; }
+      }
+      function editorShowPano(n){       // n = 1-based env_refl_viz index, 0 = off
+        var count = Module.editorEnvPanoCount ? Module.editorEnvPanoCount() : 0;
+        editorPanoCur = n;
+        Module.editorSetParam('env_refl_viz', String(n));
+        var el = document.getElementById('editor-pano-view');
+        if (el) el.textContent = n === 0 ? 'pano: off' : 'pano: ' + n + '/' + count;
+        if (n === 0) { editorStatus('pano overlay off'); return; }
+        var who = editorPanoNames(n - 1);
+        editorStatus('showing panorama ' + n + ' of ' + count + (who ? ' — ' + who : ''));
+      }
       (function(){
         var el = document.getElementById('editor-pano-view');
-        var cur = 0;
         el.onclick = function(e){
           e.preventDefault();
           if (!Module.editorSetParam) return;
           var count = Module.editorEnvPanoCount ? Module.editorEnvPanoCount() : 0;
           if (count === 0) { editorStatus('no panoramas baked yet — dial reflection up on a surface (env_refl bakes at first use)'); return; }
-          cur = e.shiftKey ? (cur - 1 + count + 1) % (count + 1) : (cur + 1) % (count + 1);
-          Module.editorSetParam('env_refl_viz', String(cur));
-          el.textContent = cur === 0 ? 'pano: off' : 'pano: ' + cur + '/' + count;
-          editorStatus(cur === 0 ? 'pano overlay off' : 'showing panorama ' + cur + ' of ' + count);
+          editorShowPano(e.shiftKey ? (editorPanoCur - 1 + count + 1) % (count + 1)
+                                    : (editorPanoCur + 1) % (count + 1));
         };
       })();
       document.getElementById('editor-rebake-env').onclick = function(e){
@@ -1869,7 +1953,52 @@
         }
         var imp = document.createElement('div');
         imp.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
-        var ih = document.createElement('div'); ih.style.cssText = 'color:#fff;margin-bottom:4px;'; ih.textContent = 'Import PBR maps'; imp.appendChild(ih);
+        var ih = document.createElement('div');
+        ih.style.cssText = 'color:#fff;margin-bottom:4px;display:flex;align-items:center;';
+        ih.appendChild(document.createTextNode('Import PBR maps'));
+        // Env-reflection truth for THIS surface (metallic routes through the
+        // ENV system — probe + env_refl — NOT the scalar reflection slider),
+        // plus a pano button that jumps the env_refl_viz overlay straight to
+        // this surface's own panorama (store index from the engine, so it's
+        // always the RIGHT one — no cycling and guessing).
+        var envSt = document.createElement('span');
+        envSt.style.cssText = 'font-size:10px;color:#8a8;font-weight:normal;margin-left:auto;margin-right:8px;';
+        var pv = document.createElement('a');
+        pv.textContent = 'pano'; pv.href = '#';
+        pv.style.cssText = 'color:#6c9;font-size:10px;text-decoration:none;font-weight:normal;';
+        pv.title = 'show THIS surface\'s baked env-reflection panorama as the on-screen overlay (env_refl_viz jumps to its store; click again to hide)';
+        function envInfo(){ try { return JSON.parse(Module.editorEnvInfo(s.name)); } catch(e){ return null; } }
+        function refreshEnvState(){
+          var info = envInfo();
+          if (!info) { envSt.textContent = ''; return; }
+          if (!info.on)             envSt.textContent = 'env refl: OFF';
+          else if (info.store >= 0) envSt.textContent = 'env probe #' + (info.store + 1) + '/' + info.count + (info.metal ? ' (metal)' : '');
+          else if (info.metal || info.reflection > 0) envSt.textContent = 'env probe: baking…';
+          else                      envSt.textContent = 'no env probe';
+          envSt.title = 'env-reflection state: env_refl ' + (info.on ? 'ON' : 'OFF (enable in Render knobs)') +
+                        ', bake fix ' + (info.fix ? 'ON' : 'OFF') +
+                        (info.metal ? ', metallic map present' : '') +
+                        (info.reflection > 0 ? ', reflection ' + info.reflection + '%' : '') +
+                        (info.store >= 0 ? ', baked panorama #' + (info.store + 1) + ' of ' + info.count
+                                         : ', no baked panorama yet (bakes at first use once reflection > 0 or a metallic map lands)');
+        }
+        refreshEnvState();
+        pv.onclick = function(e){
+          e.preventDefault();
+          var info = envInfo(); if (!info) return;
+          if (!info.on) { editorStatus('env_refl is OFF — enable it in Render knobs first'); return; }
+          if (info.store < 0) {
+            refreshEnvState();
+            editorStatus(info.metal || info.reflection > 0
+              ? 'no panorama for "' + s.name + '" yet — it bakes at first use (give it a frame, then click again)'
+              : 'no panorama for "' + s.name + '" — dial reflection up or import a metallic map first');
+            return;
+          }
+          editorShowPano(editorPanoCur === info.store + 1 ? 0 : info.store + 1);
+          refreshEnvState();
+        };
+        ih.appendChild(envSt); ih.appendChild(pv);
+        imp.appendChild(ih);
         // Whole-pack import: pick a folder (FreePBR/ambientCG layout) and each
         // map is role-detected by filename with the SAME native token rules as
         // --material-import (Module.editorClassifyMap). First match per role wins.

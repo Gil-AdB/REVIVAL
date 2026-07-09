@@ -13,13 +13,16 @@
 #include <Base/Texture.h>
 #include <Base/TriMesh.h>    // material centroids + scene AABB
 #include <Base/Vector.h>
+#include <FILLERS/Mekalele.h> // g_gbuffer->mirrorMask neutralization (bake)
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 // Build_YOffs_Table is commented out in FDS_DECS.H; declared extern wherever
@@ -34,10 +37,62 @@ namespace fds {
 // reflection at wherever it happened to stand on bake frame.
 bool g_envBakeSkipDynamic = false;
 
-// The material whose probe is currently baking — its own mesh(es) are
-// excluded from the capture (see Transform.cpp; classic local-cubemap
-// self-exclusion; null outside a bake).
-Material* g_envBakeSkipMaterial = nullptr;
+// FACE-level self-exclusion state for the probe currently baking (empty
+// outside a bake). The classic local-cubemap rule is "the reflector never
+// appears in its own probe" — but the OLD implementation skipped every
+// whole TriMesh containing ANY face of the baked material, and greets
+// merges momy + the entire room into single ~9k-face meshes: baking momy's
+// probe emptied the room out of it (near-black pano → "reflections have no
+// effect", sibling momy instances black). Now Transform_Objects skips only
+// the matching FACES (see EnvBake_FaceExcluded below).
+//
+// g_envBakeSkipMats: the baked material plus its same-surface clones
+// ("momy" + "momy::mirUV") — a surface often renders through both.
+// g_envBakeSkipR2 > 0: only exclude faces within that radius² of the bake
+// point. Multi-instance surfaces (two mummies sharing one material) set
+// this so the OTHER instance still renders in this instance's probe —
+// pre-split behavior; the editor's split-instances gives exact per-instance
+// materials and takes the R2 == 0 (exclude-whole-surface) path.
+std::vector<const Material*> g_envBakeSkipMats;
+float g_envBakeSkipR2 = 0.0f;
+float g_envBakeSkipCX = 0.0f, g_envBakeSkipCY = 0.0f, g_envBakeSkipCZ = 0.0f;
+
+// LEGACY (--no-env_bake_fix, the default): the old whole-mesh exclusion,
+// kept byte-identical for the pinned city baseline (its vehicle-glass
+// probes bake through this path). Null when the fix is active.
+Material* g_envBakeLegacySkipMat = nullptr;
+
+bool EnvBake_HasSkipFaces() { return !g_envBakeSkipMats.empty(); }
+
+// Legacy whole-mesh exclusion test (Transform.cpp mesh loop). Exactly the
+// pre-fix behavior: skip any mesh with >= 1 face of the baked material.
+bool EnvBake_LegacyMeshExcluded(TriMesh* T)
+{
+    if (!g_envBakeLegacySkipMat) return false;
+    for (DWord fi = 0; fi < T->FIndex; ++fi)
+        if (T->Faces[fi].Txtr == g_envBakeLegacySkipMat) return true;
+    return false;
+}
+
+// Called from Transform_Objects's face-submission loop during a bake render
+// (hoisted bool guard — zero cost outside bakes). World position math only
+// runs for faces of the baked surface itself.
+bool EnvBake_FaceExcluded(const Face* F, TriMesh* T)
+{
+    const Material* M = F->Txtr;
+    bool match = false;
+    for (const Material* S : g_envBakeSkipMats)
+        if (S == M) { match = true; break; }
+    if (!match) return false;
+    if (g_envBakeSkipR2 <= 0.0f || !F->A) return true;   // whole surface
+    Vector w;
+    MatrixXVector(T->RotMat, const_cast<Vector*>(&F->A->Pos), &w);
+    Vector_SelfAdd(&w, &T->IPos);
+    const float dx = w.x - g_envBakeSkipCX;
+    const float dy = w.y - g_envBakeSkipCY;
+    const float dz = w.z - g_envBakeSkipCZ;
+    return dx*dx + dy*dy + dz*dz < g_envBakeSkipR2;
+}
 
 namespace {
 
@@ -100,11 +155,49 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 // image both bakes sample. FDS_ENVCUBE_PAINT replaces the scene render with
 // EnvCube_PaintDebugFace so orientation can be validated without geometry.
 // Returns false on alloc failure.
+// publishProj: republish the per-face projection into the engine globals
+// (FOVX/FOVY from s_cam.PerspX/Y, AspectRatio ≈ 1 for square-pixel faces —
+// the exact dance CITY.CPP's validated per-building bake does at :2074/:2188).
+// Nothing else recomputes those during a bake — Animate_Objects only sets
+// them for the MAIN camera — so without this every face rendered with the
+// main window's perspective scale on a res-px surface: a few-degree
+// TELEPHOTO sliver instead of a 90°+ cube face (auto-baked probes were
+// mostly void with one magnified fragment; the editor's "reflection has no
+// effect" / "wrong panorama"). Opt-in because the mirrortest gate's
+// BakeEquirectPanorama baseline was captured with the legacy behavior.
 static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                            float fovDeg, uint32_t voidColor,
-                           std::vector<uint32_t> faces[6], Material* skipMat) {
+                           std::vector<uint32_t> faces[6], Material* skipMat,
+                           float skipRadius = 0.0f, bool publishProj = false) {
     if (!sc) return false;
     static const bool sPaint = std::getenv("FDS_ENVCUBE_PAINT") != nullptr;
+
+    // Face-level self-exclusion set: the baked material plus every clone of
+    // the same SURFACE ("momy::mirUV" — a surface's mirrored-UV half renders
+    // through its clone). Editor "#k" split clones are DIFFERENT instances
+    // and keep their own names, so they stay in the capture.
+    auto baseName = [](const char* n) {
+        std::string s = n ? n : "";
+        static const char suf[] = "::mirUV";
+        const size_t sl = sizeof(suf) - 1;
+        if (s.size() > sl && s.compare(s.size() - sl, sl, suf) == 0)
+            s.resize(s.size() - sl);
+        return s;
+    };
+    g_envBakeSkipMats.clear();
+    g_envBakeLegacySkipMat = nullptr;
+    if (skipMat && !publishProj) {
+        // Legacy mode (--no-env_bake_fix): whole-mesh exclusion, unchanged.
+        g_envBakeLegacySkipMat = skipMat;
+    } else if (skipMat) {
+        const std::string want = baseName(skipMat->Name);
+        for (Material* m = MatLib; m; m = m->Next)
+            if (m->RelScene == sc && m->Name && baseName(m->Name) == want)
+                g_envBakeSkipMats.push_back(m);
+        if (g_envBakeSkipMats.empty()) g_envBakeSkipMats.push_back(skipMat);
+    }
+    g_envBakeSkipR2 = skipRadius > 0.0f ? skipRadius * skipRadius : 0.0f;
+    g_envBakeSkipCX = center.x; g_envBakeSkipCY = center.y; g_envBakeSkipCZ = center.z;
 
     // Offscreen render target for one cube face. Owns its own Data/Z16; the
     // OffscreenViewScope below points MainSurf here and republishes the
@@ -122,14 +215,33 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
 
     for (int i = 0; i < 6; ++i) faces[i].resize(size_t(res) * res);
 
+    // Neutralize the planar-mirror pixel masks for the bake (greets
+    // teleporter): StampMirrorMasks stamps gb.mirrorMask for the MAIN
+    // camera's view, and Mekalele's behind-mirror lane cull would slice the
+    // probe's room along that stale window footprint — every pano rendered
+    // with the mirror active came out as fixed torn patches (most of the
+    // room missing). Mask 0 = no cull for real faces, and mirror CLONE
+    // faces (mirrorTag != 0 wants mask == tag) are fully rejected — clone
+    // geometry must not appear in probes anyway. Restored after the loop.
+    std::vector<uint8_t> savedMirrorMask;
+    if (publishProj && g_gbuffer && !g_gbuffer->mirrorMask.empty()) {
+        savedMirrorMask.assign(g_gbuffer->mirrorMask.begin(),
+                               g_gbuffer->mirrorMask.end());
+        std::fill(g_gbuffer->mirrorMask.begin(),
+                  g_gbuffer->mirrorMask.end(), uint8_t(0));
+    }
+
     {
         OffscreenViewScope view(sc, &surf);
         view.publishSurface();               // XRes/CntrX/... from surf
         static Camera s_cam;
         view.setView(&s_cam);
+        // Square-pixel projection for the cube faces (CITY.CPP:2074 uses
+        // the same 0.999). The scope's destructor restores AspectRatio.
+        if (publishProj) AspectRatio = 0.999f;
 
         g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
-        g_envBakeSkipMaterial = skipMat;   // ...and so does the reflector itself
+        // (the reflector's own faces stay out too — g_envBakeSkipMats above)
         for (int i = 0; i < 6; ++i) {
             if (sPaint) {   // orientation self-check: painted debug faces
                 fds::EnvCube_PaintDebugFace(i, faces[i].data(), res);
@@ -143,6 +255,10 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
             s_cam.Mat[1][0] = cf.up.x;    s_cam.Mat[1][1] = cf.up.y;    s_cam.Mat[1][2] = cf.up.z;
             s_cam.Mat[2][0] = cf.fwd.x;   s_cam.Mat[2][1] = cf.fwd.y;   s_cam.Mat[2][2] = cf.fwd.z;
             CalcPersp(&s_cam);
+            if (publishProj) {
+                FOVX = s_cam.PerspX;   // Transform/clipper/kernel read the
+                FOVY = s_cam.PerspY;   // globals; scope exit restores them
+            }
 
             // Clear to void color (each byte of voidColor) + empty Z.
             std::memset(surf.Data, voidColor & 0xFF, size_t(res) * res * 4);
@@ -164,15 +280,32 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                 // and we're inside an OffscreenViewScope.
                 Render(RenderPath::ForceDeferred, /*skipVolumetric=*/true);
             }
-            if (std::getenv("FDS_ENVBAKE_DUMP"))
-                std::fprintf(stderr, "[ENVBAKE] face %d: CAll=%d NZP=%.2f FZP=%.2f "
-                    "fwd=(%.0f,%.0f,%.0f)\n", i, int(CAll), sc->NZP, sc->FZP,
+            if (std::getenv("FDS_ENVBAKE_DUMP")) {
+                // Coverage census: how much of the face the raster actually
+                // touched (Z != 0) — distinguishes "faces culled upstream"
+                // from "rasterized but dark".
+                size_t zHit = 0;
+                const word* zp = reinterpret_cast<const word*>(surf.Z16);
+                for (size_t k = 0; k < size_t(res) * res; ++k)
+                    if (zp[k]) ++zHit;
+                std::fprintf(stderr, "[ENVBAKE] face %d: CAll=%d zCov=%.0f%% "
+                    "NZP=%.2f FZP=%.2f FOVX=%.1f XRes=%d fwd=(%.0f,%.0f,%.0f)\n",
+                    i, int(CAll), 100.0 * double(zHit) / (double(res) * res),
+                    sc->NZP, sc->FZP, (double)FOVX, (int)XRes,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
+            }
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
         }
         g_envBakeSkipDynamic = false;
-        g_envBakeSkipMaterial = nullptr;
+        g_envBakeSkipMats.clear();
+        g_envBakeLegacySkipMat = nullptr;
+        g_envBakeSkipR2 = 0.0f;
     }   // scope exit restores MainSurf/View/FOV/clip planes
+
+    if (!savedMirrorMask.empty() && g_gbuffer
+        && g_gbuffer->mirrorMask.size() == savedMirrorMask.size())
+        std::copy(savedMirrorMask.begin(), savedMirrorMask.end(),
+                  g_gbuffer->mirrorMask.begin());
 
     std::free(surf.Data);
     std::free(surf.Z16);
@@ -184,13 +317,16 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
 static bool renderCubeAndStitch(Scene* sc, const Vector& center,
                                 const EnvBakeParams& params,
                                 std::vector<uint32_t>& pano,
-                                Material* skipMat = nullptr) {
+                                Material* skipMat = nullptr,
+                                float skipRadius = 0.0f,
+                                bool publishProj = false) {
     if (!sc) return false;
     const int res = params.cubeRes;
     const int W = params.panoWidth, H = params.panoHeight;
 
     std::vector<uint32_t> faces[6];
-    if (!renderSixFaces(sc, center, res, 90.0f, params.voidColor, faces, skipMat))
+    if (!renderSixFaces(sc, center, res, 90.0f, params.voidColor, faces, skipMat,
+                        skipRadius, publishProj))
         return false;
 
     // Stitch to equirectangular. The (eu,ev)→direction mapping is the exact
@@ -329,11 +465,19 @@ void boxDownsampleCube(const std::vector<uint32_t>& src, int fr,
 bool renderCubeFacesMajor(Scene* sc, const Vector& center,
                           const EnvBakeParams& params,
                           std::vector<uint32_t>& level0, int& faceRes,
-                          Material* skipMat) {
+                          Material* skipMat, float skipRadius) {
     const int fr = params.cubeRes;
     std::vector<uint32_t> faces[6];
+    // publishProj (and with it the whole --env_bake_fix bundle inside
+    // renderSixFaces: per-face projection, FACE-level self-exclusion,
+    // mirror-mask neutralization) must be FLAG-GATED here exactly like the
+    // equirect path in bakeStore — an unconditional `true` leaked the fixed
+    // bake into the DEFAULT cube path (env_cube defaults ON) and broke the
+    // pinned city baseline (its vehicle-glass/window probes auto-bake
+    // through here with legacy projection).
     if (!renderSixFaces(sc, center, fr, fds::EnvCube_FaceFovDegrees(),
-                        params.voidColor, faces, skipMat))
+                        params.voidColor, faces, skipMat, skipRadius,
+                        /*publishProj=*/fds::FeatureFlags::env_bake_fix()))
         return false;
     level0.resize(size_t(6) * fr * fr);
     for (int f = 0; f < 6; ++f)
@@ -361,7 +505,18 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
 
 // World-space centroid of every face using material M. False if none found
 // (material exists but no faces reference it — nothing to reflect anyway).
-bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
+// excludeRadius (out, optional): how far around the probe the bake's
+// face-level self-exclusion should reach. 0 = unbounded (exclude every face
+// of the surface — the single-instance case). For MULTI-instance surfaces
+// (spatially separate clusters), a finite radius so the sibling instances
+// still render in this instance's probe: fragments within 2×kR of the probe
+// count as the probed instance; the nearest cluster beyond that is a
+// sibling, and the exclusion stops just under halfway to it (0.45×). A
+// heuristic — the editor's split-instances gives exact per-instance
+// materials and doesn't rely on it.
+bool materialCentroid(Scene* sc, const Material* M, Vector& out,
+                      float* excludeRadius = nullptr) {
+    if (excludeRadius) *excludeRadius = 0.0f;
     double sx = 0, sy = 0, sz = 0;
     long n = 0;
     for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
@@ -411,9 +566,28 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out) {
             for (const Cl& c : cls) if (c.n > heavy->n) heavy = &c;
             out = { float(heavy->sx / heavy->n), float(heavy->sy / heavy->n),
                     float(heavy->sz / heavy->n) };
+            if (excludeRadius) {
+                // Nearest cluster mean beyond 2×kR of the probe = the nearest
+                // SIBLING instance (nearer clusters are fragments of the
+                // probed instance — the greedy clustering splinters a single
+                // statue into several). Exclude out to just under halfway.
+                const float kGroup2 = 16.0f * 16.0f;   // (2×kR)²
+                float nearFar2 = 1e30f;
+                for (const Cl& c : cls) {
+                    const float dx = float(c.sx / c.n) - out.x;
+                    const float dy = float(c.sy / c.n) - out.y;
+                    const float dz = float(c.sz / c.n) - out.z;
+                    const float d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 > kGroup2 && d2 < nearFar2) nearFar2 = d2;
+                }
+                if (nearFar2 < 1e30f)
+                    *excludeRadius = 0.45f * std::sqrt(nearFar2);
+            }
             std::fprintf(stderr, "[ENVREFL] '%s': %zu instance clusters — probe at the"
-                " largest (%.1f %.1f %.1f); use split-instances for per-instance probes\n",
-                M->Name ? M->Name : "?", cls.size(), out.x, out.y, out.z);
+                " largest (%.1f %.1f %.1f), self-exclusion radius %.1f (0 = whole"
+                " surface); use split-instances for per-instance probes\n",
+                M->Name ? M->Name : "?", cls.size(), out.x, out.y, out.z,
+                excludeRadius ? *excludeRadius : 0.0f);
         }
     }
     return true;
@@ -440,7 +614,8 @@ void sceneAABB(Scene* sc, SceneEnv& env) {
 // Bake one panorama from `center` into a fresh store (mip chain + metadata).
 std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         const Vector& center,
-                                        Material* skipMat = nullptr) {
+                                        Material* skipMat = nullptr,
+                                        float skipRadius = 0.0f) {
     EnvBakeParams params;
     // --env_refl_res (default 512): reflections are roughness-blurred by eye
     // anyway, so half the CITY bake res reads fine. Clamp: the mip chain
@@ -452,15 +627,42 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
     params.panoWidth = res;
     params.panoHeight = res;
     const bool useCube = fds::FeatureFlags::env_cube();
+    // --env_bake_fix: the whole corrected-bake bundle (per-face projection
+    // publish, face-level self-exclusion, metal neutralization, mirror-mask
+    // neutralization). OFF by default so the pinned city baseline (vehicle
+    // glass probes bake through here) stays byte-identical; the editor and
+    // the metallic/sidecar import paths turn it on.
+    const bool fix = fds::FeatureFlags::env_bake_fix();
     auto store = std::make_unique<EnvPanoStore>();
     EnvPanoLinear& v = store->view;
     g_envBakeInProgress = true;
+    // HACK (accepted, documented): a metal surface whose OWN store hasn't
+    // been baked/tabled yet renders BLACK inside another surface's probe —
+    // metalness kills its diffuse and its env-specular term needs a pano the
+    // kernel can't have during the first bake round (the two momy statues
+    // reflecting each other as black holes). Neutralize the metalness of
+    // exactly those materials for the duration of THIS bake so they show
+    // their lit albedo instead. Bake-scoped mutation, restored before
+    // return; materials already in the kernel table keep their metal look
+    // (their reflections ride their own store — 1-bounce inter-reflection).
+    std::vector<std::pair<Material*, Texture*>> metalOff;
+    for (Material* m = fix ? MatLib : nullptr; m; m = m->Next) {
+        if (m->RelScene != sc || !m->MetallicMap) continue;
+        if (m->ID < 256 && env.table[m->ID]) continue;   // has a live store
+        metalOff.emplace_back(m, m->MetallicMap);
+        m->MetallicMap = nullptr;
+    }
+    auto restoreMetal = [&]() {
+        for (auto& mt : metalOff) mt.first->MetallicMap = mt.second;
+    };
     if (useCube) {
         // Padded 6-face cube (D2): no stitch. mip[k] is a face-major block of
         // six (faceRes>>k)² faces; W==H==faceRes; per-face box downsample.
         int faceRes = 0;
         const bool ok = renderCubeFacesMajor(sc, center, params,
-                                             store->levels[0], faceRes, skipMat);
+                                             store->levels[0], faceRes, skipMat,
+                                             skipRadius);
+        restoreMetal();
         g_envBakeInProgress = false;
         if (!ok) return nullptr;
         v.isCube = true;
@@ -478,7 +680,10 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
         v.boxMaxX = env.boxMax[0]; v.boxMaxY = env.boxMax[1]; v.boxMaxZ = env.boxMax[2];
         return store;
     }
-    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0], skipMat);
+    const bool ok = renderCubeAndStitch(sc, center, params, store->levels[0],
+                                        skipMat, skipRadius,
+                                        /*publishProj=*/fix);
+    restoreMetal();
     g_envBakeInProgress = false;
     if (!ok) return nullptr;
     v.W = params.panoWidth;
@@ -556,7 +761,8 @@ bool EnvReflection_FramePrep(Scene* sc) {
         if (!(M->Reflection > 0.0f || M->MetallicMap)) continue;
         if (env.byMat.count(M)) continue;
         Vector c;
-        if (!materialCentroid(sc, M, c)) { env.byMat[M] = -1; continue; }
+        float excludeR = 0.0f;
+        if (!materialCentroid(sc, M, c, &excludeR)) { env.byMat[M] = -1; continue; }
         if (std::getenv("ENVDBG"))
             std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
                          M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
@@ -569,7 +775,7 @@ bool EnvReflection_FramePrep(Scene* sc) {
             if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { idx = int(i); break; }
         }
         if (idx < 0) {
-            auto store = bakeStore(sc, env, c, M);
+            auto store = bakeStore(sc, env, c, M, excludeR);
             if (!store) { env.byMat[M] = -1; continue; }
             static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
             if (sGrid) fillEnvDebugGrid(*store);
@@ -581,6 +787,13 @@ bool EnvReflection_FramePrep(Scene* sc) {
             bakedAny = true;
         }
         env.byMat[M] = idx;
+        // Publish this store to the kernel table NOW (not just in the final
+        // refresh below): later bakes in this same round then render this
+        // material WITH its env reflections (1-bounce), and the metal-
+        // neutralize hack in bakeStore stops firing for it. Part of the
+        // --env_bake_fix bundle (bake order becomes content-relevant).
+        if (fds::FeatureFlags::env_bake_fix() && idx >= 0 && M->ID < 256)
+            env.table[M->ID] = &env.stores[size_t(idx)]->view;
     }
     // Refresh the matID table (IDs move when the editor rebuilds the table).
     std::memset(env.table, 0, sizeof(env.table));
@@ -597,6 +810,10 @@ bool EnvReflection_FramePrep(Scene* sc) {
 void EnvReflection_DrawViz(Scene* sc) {
     const int want = FeatureFlags::env_refl_viz();
     if (want <= 0 || !sc || !VPage || XRes <= 0 || YRes <= 0) return;
+    // Never inside an offscreen render: the env bake itself runs the full
+    // renderFrame per cube face, and the overlay was getting BAKED into
+    // every probe rendered while the viewer was open.
+    if (g_offscreenViewDepth > 0) return;
     auto it = g_envByScene.find(sc);
     if (it == g_envByScene.end() || it->second.stores.empty()) return;
     auto& stores = it->second.stores;
@@ -694,6 +911,14 @@ void EnvReflection_AliasMaterial(Scene* sc, Material* M, int storeIdx) {
 int EnvReflection_Count(Scene* sc) {
     auto it = g_envByScene.find(sc);
     return it == g_envByScene.end() ? 0 : int(it->second.stores.size());
+}
+
+int EnvReflection_StoreIndex(Scene* sc, const Material* M) {
+    if (!M) return -1;
+    auto it = g_envByScene.find(sc);
+    if (it == g_envByScene.end()) return -1;
+    auto jt = it->second.byMat.find(M);
+    return jt == it->second.byMat.end() ? -1 : jt->second;
 }
 
 const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {

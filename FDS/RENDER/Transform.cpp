@@ -510,9 +510,14 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 }
 
 // Defined in EnvBake.cpp: while an env-reflection panorama bake renders its
-// cube faces, moving meshes are excluded (see the inStaticBake predicate).
+// cube faces, moving meshes are excluded (see the inStaticBake predicate)
+// and the baked surface's own FACES are excluded (face-level — greets
+// merges momy + the whole room into single TriMeshes, so the old whole-mesh
+// skip emptied the room out of the probe).
 namespace fds { extern bool g_envBakeSkipDynamic;
-                 extern Material* g_envBakeSkipMaterial; }
+                bool EnvBake_HasSkipFaces();
+                bool EnvBake_FaceExcluded(const Face* F, TriMesh* T);
+                bool EnvBake_LegacyMeshExcluded(TriMesh* T); }
 
 // xresOverride / yresOverride: when >= 0, use these instead of the
 // global XRes / YRes for vertex visibility flags + face-level
@@ -741,17 +746,16 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 				    unsigned(T->Pos.NumKeys), unsigned(T->FIndex));
 			}
 		}
-		// Env-bake self-exclusion: skip the mesh(es) carrying the material
-		// being baked. The pano is captured from the material's centroid —
-		// often INSIDE its own object (mummy statue, sphere) — and concave
-		// self-geometry would smear across the whole capture. Classic
-		// local-cubemap rule: the reflector never appears in its own probe.
-		if (fds::g_envBakeSkipDynamic && fds::g_envBakeSkipMaterial) {
-			bool hasMat = false;
-			for (DWord fi = 0; fi < T->FIndex && !hasMat; ++fi)
-				hasMat = (T->Faces[fi].Txtr == fds::g_envBakeSkipMaterial);
-			if (hasMat) continue;
-		}
+		// Env-bake self-exclusion. Under --env_bake_fix it moved to FACE
+		// level (the face-submission loop below, EnvBake_FaceExcluded): the
+		// probe is captured from the material's centroid — often INSIDE its
+		// own object — so the reflector's own faces must not appear in it
+		// (classic local-cubemap rule), but skipping the whole MESH nuked
+		// every OTHER surface sharing the TriMesh (greets merges momy + the
+		// entire room into one mesh → near-black probes, black sibling
+		// instances). The LEGACY whole-mesh skip below is kept byte-identical
+		// for the default path (city vehicle-glass probes / pinned baseline).
+		if (fds::g_envBakeSkipDynamic && fds::EnvBake_LegacyMeshExcluded(T)) continue;
 		if (inStaticBake && meshDynForBake()) {
 			static std::atomic<int> sSkipLogged{0};
 			if (sSkipLogged.fetch_add(1) < 32) {
@@ -1488,7 +1492,12 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	// single-sided walls/sheets) — easier to just skip it.
 	extern thread_local bool g_inShadowPass;
 	const bool shadowNoBackface = g_inShadowPass && !fds::FeatureFlags::shadow_backface_cull();
+	// Env-reflection bake: the baked surface's own faces stay out of its
+	// probe (face-level; see the note at the mesh loop). Hoisted bool —
+	// false on every non-bake pass, so the per-face cost is one branch.
+	const bool envFaceSkip = fds::g_envBakeSkipDynamic && fds::EnvBake_HasSkipFaces();
 	for (F=tFaces;F<FEnd;F++) {
+		if (envFaceSkip && fds::EnvBake_FaceExcluded(F, T)) continue;
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;
 			if (hideInner && std::strstr(mn, "in shpere")) continue;
