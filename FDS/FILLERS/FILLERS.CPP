@@ -1756,6 +1756,40 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	}
 }
 
+// Deterministic, camera-INDEPENDENT ordering for the per-strip transparent
+// sort (TBR_Render and the glass-layered scheduler). The primary key is
+// renderZ descending — farthest-first, back-to-front — exactly as before, so
+// every pair with DISTINCT renderZ keeps its former order (byte-identical for
+// well-separated transparents: city beacons, fountain orbs, greets panels away
+// from coplanarity). The addition is the TIE-BREAK: when two fragments land at
+// the SAME renderZ (near-coplanar surfaces — a thin glass panel's front/back
+// faces, stacked decals), std::stable_sort otherwise falls back to the FList
+// insertion order, which is itself a function of the view (the Transform_Objects
+// radix key), so a coplanar front/back pair could swap composite order under a
+// sub-unit camera move. Instead we impose a fixed total order on the tie: back
+// surface before front (preserving the peel's far→near layering, matching the
+// max-Z / min-Z renderZ convention), then MeshFaceIdx — both camera-independent,
+// so a coplanar tie composites identically in every frame. The rank helper
+// derives facing from the same view-space winding the rest of the peel uses.
+static inline bool tbrXparOrderLess(const TBREntry &a, const TBREntry &b)
+{
+	if (a.renderZ != b.renderZ) return a.renderZ > b.renderZ;   // far → near
+	auto rank = [](Face *F) -> int {          // back(0) first, sprite(1), front(2) last
+		if (F->A == F->B || !F->frame) return 1;
+		const VertexFrame *ff = F->frame;
+		const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
+		const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+		const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
+		const float ex = tx[bi]-Ax, ey = ty[bi]-Ay, ez = tz[bi]-Az;
+		const float fx = tx[ci]-Ax, fy = ty[ci]-Ay, fz = tz[ci]-Az;
+		const float nx = ey*fz-ez*fy, ny = ez*fx-ex*fz, nz = ex*fy-ey*fx;
+		return (nx*Ax + ny*Ay + nz*Az) < 0.0f ? 2 : 0;
+	};
+	const int ra = rank(a.F), rb = rank(b.F);
+	if (ra != rb) return ra < rb;
+	return a.F->MeshFaceIdx < b.F->MeshFaceIdx;
+}
+
 // Insert a transparent face fragment into every Y-strip its screen
 // bounding box overlaps. Each strip's linked list (Sc->SBufferHead[i])
 // is the unified back-to-front list TBR_Render walks. Entry renderZ
@@ -2015,8 +2049,7 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 			scratch.clear();
 			sdword n = Sc->SBufferHead[i];
 			while (n != -1) { scratch.push_back(Sc->SBuffer[n]); n = Sc->SBuffer[n].next; }
-			std::stable_sort(scratch.begin(), scratch.end(),
-				[](const TBREntry& a, const TBREntry& b) { return a.renderZ > b.renderZ; });
+			std::stable_sort(scratch.begin(), scratch.end(), tbrXparOrderLess);
 
 			TriMesh* clumpMesh = nullptr; bool clumpFront = false; int openIdx = -1;
 			for (const TBREntry& e : scratch) {
@@ -2206,11 +2239,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 				scratch.push_back(Sc->SBuffer[n]);
 				n = Sc->SBuffer[n].next;
 			}
-			// Descending: largest renderZ (farthest) first.
-			std::stable_sort(scratch.begin(), scratch.end(),
-				[](const TBREntry& a, const TBREntry& b) {
-					return a.renderZ > b.renderZ;
-				});
+			// Descending: largest renderZ (farthest) first, then the
+			// deterministic camera-independent tie-break (see tbrXparOrderLess).
+			std::stable_sort(scratch.begin(), scratch.end(), tbrXparOrderLess);
 
 			// Walk the sorted strip items in back-to-front order. Two
 			// item types share the list:
