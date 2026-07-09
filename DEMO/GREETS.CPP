@@ -27,6 +27,9 @@
 #include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
 #include "FillerTest.h"
+
+// FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
+void Xtrace_WriteFile(const char*);
 #include "MeshOps.h"
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
@@ -3136,6 +3139,14 @@ struct GreetsScene : SceneDriver {
 					}
 					std::fclose(f);
 					std::fprintf(stderr, "[GREETS] dumped %s (t=%d)\n", path, dumpT);
+				}
+				// FDS_XPAR_TRACE: write the dumped frame's transparent composite
+				// census next to the pixel dump (same tag) for z-order forensics.
+				{
+					char tp[96];
+					std::snprintf(tp, sizeof tp, "/tmp/greets_xtrace_%d_t%d.txt",
+					              sDumpN - 1, dumpT);
+					Xtrace_WriteFile(tp);
 				}
 				// Also print the current camera pose + scene time so the
 				// user can reproduce this exact view headless:

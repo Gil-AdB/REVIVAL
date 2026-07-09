@@ -3126,6 +3126,40 @@ int xparPeelPassesEffective() {
 	return p < 1 ? 1 : p;
 }
 
+// ── FDS_XPAR_TRACE: live transparent-composite tracer (dev diagnostic) ──
+// When the env var is set, every frame records — lock-free, each strip's
+// worker writes only its own row — the per-strip clump composite SEQUENCE
+// (material, side, mirror tag, faces, filled pixels). Xtrace_WriteFile then
+// snapshots the LAST COMPLETED frame to a file; GREETS's F9 dump calls it so
+// a dumped frame carries its own composite census. Silent in the hot path
+// (a printf here would serialize the workers and mask scheduling effects).
+static constexpr int XT_STRIPS = 512, XT_SLOTS = 64;
+static bool        xt_on = false;
+static const char* xt_mat[XT_STRIPS][XT_SLOTS];
+static uint8_t     xt_front[XT_STRIPS][XT_SLOTS];
+static int16_t     xt_mtag[XT_STRIPS][XT_SLOTS];
+static uint16_t    xt_nfaces[XT_STRIPS][XT_SLOTS];
+static uint32_t    xt_filled[XT_STRIPS][XT_SLOTS];
+static int         xt_count[XT_STRIPS];
+void Xtrace_FrameBegin() {
+	static const bool want = std::getenv("FDS_XPAR_TRACE") != nullptr;
+	xt_on = want;
+	if (xt_on) std::memset(xt_count, 0, sizeof(xt_count));
+}
+void Xtrace_WriteFile(const char *path) {
+	if (!xt_on) { std::fprintf(stderr, "[XTRACE] not armed (set FDS_XPAR_TRACE=1)\n"); return; }
+	FILE *f = std::fopen(path, "wt");
+	if (!f) return;
+	for (int s = 0; s < XT_STRIPS; ++s)
+		for (int i = 0; i < xt_count[s]; ++i)
+			std::fprintf(f, "strip=%d seq=%d mat='%s' front=%d mtag=%d nfaces=%u filled=%u\n",
+			             s, i, xt_mat[s][i], int(xt_front[s][i]),
+			             int(xt_mtag[s][i]), unsigned(xt_nfaces[s][i]),
+			             unsigned(xt_filled[s][i]));
+	std::fclose(f);
+	std::fprintf(stderr, "[XTRACE] wrote %s\n", path);
+}
+
 // Per-strip xpar render helper, called from TBR_Render's per-strip walk
 // for each clump of consecutive same-(mesh, frontFacing) transparent
 // faces in the sorted item list. The strip covers rows [strip_y,
@@ -3187,6 +3221,27 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 			else       clipper.Render(F, MekaleleTransparentBack, false, rt, cam);
 		}
 		meka::g_rasterStripClamp = savedClamp;
+
+		// FDS_XPAR_TRACE census: record this clump in the strip's composite
+		// sequence (lock-free: this strip runs on one worker; slot row is ours).
+		if (xt_on) {
+			size_t filled = 0;
+			if (sideGB) {
+				const uint32_t* tx = sideGB->txtr.data() + rowStart;
+				for (size_t k = 0; k < rowCount; ++k) if (tx[k] != 0xFFFFFFFFu) ++filled;
+			}
+			const int s = strip_y >> 3;
+			if (s >= 0 && s < XT_STRIPS && xt_count[s] < XT_SLOTS) {
+				int &n = xt_count[s];
+				xt_mat[s][n]    = (count && faces[0] && faces[0]->Txtr && faces[0]->Txtr->Name)
+				                  ? faces[0]->Txtr->Name : "?";
+				xt_front[s][n]  = uint8_t(front);
+				xt_mtag[s][n]   = int16_t(count && faces[0] ? faces[0]->mirrorMaskTag : -1);
+				xt_nfaces[s][n] = uint16_t(count);
+				xt_filled[s][n] = uint32_t(filled);
+				++n;
+			}
+		}
 
 		const int stripIdx = strip_y >> 3;  // TILELOG=3
 		DeferredLightingCtx stripCtx = dctx;

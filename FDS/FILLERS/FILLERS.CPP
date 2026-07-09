@@ -2006,6 +2006,8 @@ static inline void composeStep(const DeferredLightingCtx *dctx, XparPlan& p, Xpa
 
 static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 {
+	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
+	Xtrace_FrameBegin();
 	using namespace tbrglass;
 	const dword numTiles = Sc->NumTiles;
 	if (g_plans.size() < numTiles) g_plans.resize(numTiles);
@@ -2191,6 +2193,9 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 		TBR_Render_GlassLayered(Sc, dctx);
 		return;
 	}
+
+	extern void Xtrace_FrameBegin();   // FDS_XPAR_TRACE dev diagnostic
+	Xtrace_FrameBegin();
 
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
