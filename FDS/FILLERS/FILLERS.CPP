@@ -2129,13 +2129,37 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 		// Coherent background (opaque + fog + all farther rounds + this round's
 		// non-glass) for the round's glass to refract.
 		glassSnapshotFull();
-		// Phase B: this round's GLASS steps, refracting the fresh snapshot.
+		// Phase B1: this round's BACK-facing glass, refracting the fresh snapshot.
+		// Split by side: a thin glass panel's front and back faces routinely land
+		// in the SAME band round (their clump depths dedupe within the band eps —
+		// which varies with camera range, so whether they split used to FLIP with
+		// sub-unit camera moves). With a single Phase B both faces refracted the
+		// pre-round snapshot, so the FRONT face's refracted background was missing
+		// its own BACK face (the panel's tint + rear text vanished — the greets
+		// screen "face pop"). Composite back glass, re-snapshot, THEN front glass:
+		// the front face always refracts a background containing its back face,
+		// regardless of how the bands fell.
 		tbr::tileCounter = 0;
 		for (mword i = 0; i < numTiles; i++) {
 			ThreadPool::instance().enqueue([i, dctx]() {
 				XparPlan& plan = g_plans[i];
 				for (size_t c = plan.roundStart; c < plan.cursor; c++)
-					if (plan.steps[c].isGlass)
+					if (plan.steps[c].isGlass && !plan.steps[c].front)
+						composeStep(dctx, plan, plan.steps[c]);
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
+		// Coherent background now includes the round's back glass.
+		glassSnapshotFull();
+		// Phase B2: this round's FRONT-facing glass.
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, dctx]() {
+				XparPlan& plan = g_plans[i];
+				for (size_t c = plan.roundStart; c < plan.cursor; c++)
+					if (plan.steps[c].isGlass && plan.steps[c].front)
 						composeStep(dctx, plan, plan.steps[c]);
 				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
 				++tbr::tileCounter; tbr::condition.notify_one();
