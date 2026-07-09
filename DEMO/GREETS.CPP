@@ -3141,8 +3141,13 @@ struct GreetsScene : SceneDriver {
 				// user can reproduce this exact view headless:
 				//   FDS_GREETS_CAM="px,py,pz,fx,fy,fz" ./DEMO --snapshot=greets@t=<t>
 				// pos = eye; fwd = the camera's forward (Mat row 2).
+				// %.9g: full float round-trip precision. 3 decimals was enough to
+				// re-frame a shot but NOT to reproduce facing-threshold bugs — a
+				// grazing face's front/back test (N·A ~ 0) can flip inside the
+				// truncation error, so the pinned headless repro landed on the
+				// other side of the flip than the live run being reported.
 				std::fprintf(stderr,
-					"[GREETS-CAM] FDS_GREETS_CAM=\"%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\" t=%d\n",
+					"[GREETS-CAM] FDS_GREETS_CAM=\"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\" t=%d\n",
 					View->ISource.x, View->ISource.y, View->ISource.z,
 					View->Mat[2][0], View->Mat[2][1], View->Mat[2][2], dumpT);
 				std::fflush(stderr);
