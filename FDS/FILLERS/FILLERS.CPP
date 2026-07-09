@@ -1704,7 +1704,7 @@ bool TBR_MatchesTarget(const Scene *Sc)
 	       Sc->NumTiles == mword((YRes+TILESIZE-1)>>TILELOG);
 }
 
-void InsertSpanToTBR(Face *F, dword tile, float renderZ)
+void InsertSpanToTBR(Face *F, dword tile, float renderZ, uint8_t rank)
 {
 	// SBufferSize is sized from typicalSpans = YRes * 30/1536, an estimate
 	// of the *average* tile-coverage per particle. Particles near the
@@ -1718,6 +1718,7 @@ void InsertSpanToTBR(Face *F, dword tile, float renderZ)
 	CurScene->SBuffer[n].F = F;
 	CurScene->SBuffer[n].next = h;
 	CurScene->SBuffer[n].renderZ = renderZ;
+	CurScene->SBuffer[n].rank = rank;
 	CurScene->SBufferHead[tile] = n;
 	CurScene->SBufferCur++;
 }
@@ -1752,7 +1753,7 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 	const float renderZ = F->A->TPos_AOS.z;
 	for (int i = y1; i <= y2; i++)
 	{
-		InsertSpanToTBR(F, i, renderZ);
+		InsertSpanToTBR(F, i, renderZ, /*rank=*/1);   // sprite
 	}
 }
 
@@ -1774,19 +1775,13 @@ void InsertSpriteToTBR(Face *F, float y, float Height)
 static inline bool tbrXparOrderLess(const TBREntry &a, const TBREntry &b)
 {
 	if (a.renderZ != b.renderZ) return a.renderZ > b.renderZ;   // far → near
-	auto rank = [](Face *F) -> int {          // back(0) first, sprite(1), front(2) last
-		if (F->A == F->B || !F->frame) return 1;
-		const VertexFrame *ff = F->frame;
-		const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
-		const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
-		const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
-		const float ex = tx[bi]-Ax, ey = ty[bi]-Ay, ez = tz[bi]-Az;
-		const float fx = tx[ci]-Ax, fy = ty[ci]-Ay, fz = tz[ci]-Az;
-		const float nx = ey*fz-ez*fy, ny = ez*fx-ex*fz, nz = ex*fy-ey*fx;
-		return (nx*Ax + ny*Ay + nz*Az) < 0.0f ? 2 : 0;
-	};
-	const int ra = rank(a.F), rb = rank(b.F);
-	if (ra != rb) return ra < rb;
+	// Tie-break on the PRECOMPUTED entry rank (back 0 < sprite 1 < front 2),
+	// then MeshFaceIdx (load-time constant). No live TPos/frame reads here:
+	// the comparator runs inside per-strip sorts that overlap OTHER strips'
+	// raster/composite work — re-deriving facing from shared vertex data
+	// mid-walk was nondeterministic (greets mirror screens flashed pink,
+	// ~1-in-8 frames at peel>=2; see TBREntry::rank).
+	if (a.rank != b.rank) return a.rank < b.rank;
 	return a.F->MeshFaceIdx < b.F->MeshFaceIdx;
 }
 
@@ -1855,7 +1850,7 @@ void InsertTransparentToTBR(Face *F)
 	}
 
 	for (int s = s_lo; s <= s_hi; s++) {
-		InsertSpanToTBR(F, s, renderZ);
+		InsertSpanToTBR(F, s, renderZ, front ? uint8_t(2) : uint8_t(0));
 	}
 }
 
@@ -1968,18 +1963,6 @@ struct XparPlan {
 };
 static std::vector<XparPlan> g_plans;
 
-// Same view-space facing test the walk uses (inline hot helper).
-static inline bool faceFront(Face* F) {
-	const VertexFrame *ff = F->frame;
-	const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
-	const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
-	const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
-	const float ex = tx[bi] - Ax, ey = ty[bi] - Ay, ez = tz[bi] - Az;
-	const float fx = tx[ci] - Ax, fy = ty[ci] - Ay, fz = tz[ci] - Az;
-	const float nx = ey * fz - ez * fy, ny = ez * fx - ex * fz, nz = ex * fy - ey * fx;
-	return (nx * Ax + ny * Ay + nz * Az) < 0.0f;
-}
-
 // Full-frame snapshot of the accumulated background into the stable buffers the
 // refraction sampler reads. Main thread, between round barriers → race-free.
 static void glassSnapshotFull() {
@@ -2061,7 +2044,7 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 					continue;
 				}
 				TriMesh* meshHere = F->ParentTri;
-				const bool frontHere = faceFront(F);
+				const bool frontHere = (e.rank == 2);   // precomputed at insert (see TBREntry::rank)
 				if (openIdx >= 0 && (meshHere != clumpMesh || frontHere != clumpFront))
 					openIdx = -1;
 				if (openIdx < 0) {
@@ -2261,22 +2244,6 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 			const int strip_y_i  = int(i) << TILELOG;
 			const int strip_h    = int(spriteClipY2) - strip_y_i;
 
-			auto computeFront = [](Face* F) -> bool {
-				// SoA Phase 4: same math as IsFrontFacingInViewSpace,
-				// kept inline here as a hot per-clump helper in the
-				// unified-TBR strip walk.
-				const VertexFrame *ff = F->frame;
-				const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
-				const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
-				const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
-				const float ex = tx[bi] - Ax, ey = ty[bi] - Ay, ez = tz[bi] - Az;
-				const float fx = tx[ci] - Ax, fy = ty[ci] - Ay, fz = tz[ci] - Az;
-				const float nx = ey * fz - ez * fy;
-				const float ny = ez * fx - ex * fz;
-				const float nz = ex * fy - ey * fx;
-				const float vd = nx * Ax + ny * Ay + nz * Az;
-				return vd < 0.0f;
-			};
 			auto flushXparClump = [&]() {
 				if (xparClump.empty()) return;
 				if (g_tbrStats) g_tbrFlushes.fetch_add(1, std::memory_order_relaxed);
@@ -2356,7 +2323,7 @@ void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 				// Transparent face. Open / extend / flush+restart a
 				// clump based on (ParentTri, frontFacing).
 				TriMesh*  meshHere = F->ParentTri;
-				const bool frontHere = computeFront(F);
+				const bool frontHere = (e.rank == 2);   // precomputed at insert (see TBREntry::rank)
 				if (!xparClump.empty() &&
 				    (meshHere != clumpMesh || frontHere != clumpFront)) {
 					flushXparClump();
