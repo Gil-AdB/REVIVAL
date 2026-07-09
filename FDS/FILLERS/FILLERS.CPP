@@ -2078,17 +2078,29 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 		}
 	}
 
-	// ── Phase 3: execute rounds; snapshot the coherent frame between bands ──
+	// ── Phase 3: execute rounds, TWO-PHASE within each round ──
+	// Within a round, composite NON-GLASS steps (opaque-behind transparents:
+	// additive glow, plain blends) FIRST, snapshot the now-coherent frame, THEN
+	// composite the round's GLASS steps so each refracts a snapshot that already
+	// contains the same-round transparents behind it. Without this, a glass shell
+	// refracts a snapshot taken before the concentric/co-equatorial additive
+	// near-hemisphere composited, so the glass OVERWRITES that glow with the
+	// refracted opaque box → the additive glow over the box vanishes through the
+	// glass. (Works now that the refractive flag classifies the additive sphere
+	// as NON-glass; when it was wrongly a glass step this split was a no-op.)
 	const size_t m = T.size();
 	for (size_t r = 0; r <= m; r++) {
 		const float low = (r < m) ? T[r] : -3.0e38f;
+		// Phase A: this round's NON-glass steps.
 		tbr::tileCounter = 0;
 		for (mword i = 0; i < numTiles; i++) {
 			ThreadPool::instance().enqueue([i, low, dctx]() {
 				XparPlan& plan = g_plans[i];
+				plan.roundStart = plan.cursor;
 				while (plan.cursor < plan.steps.size() &&
 				       plan.steps[plan.cursor].renderZ > low) {
-					composeStep(dctx, plan, plan.steps[plan.cursor]);
+					if (!plan.steps[plan.cursor].isGlass)
+						composeStep(dctx, plan, plan.steps[plan.cursor]);
 					plan.cursor++;
 				}
 				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
@@ -2096,7 +2108,22 @@ static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
 			});
 		}
 		drain(numTiles);
-		if (r < m) glassSnapshotFull();
+		// Coherent background (opaque + fog + all farther rounds + this round's
+		// non-glass) for the round's glass to refract.
+		glassSnapshotFull();
+		// Phase B: this round's GLASS steps, refracting the fresh snapshot.
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, dctx]() {
+				XparPlan& plan = g_plans[i];
+				for (size_t c = plan.roundStart; c < plan.cursor; c++)
+					if (plan.steps[c].isGlass)
+						composeStep(dctx, plan, plan.steps[c]);
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
 	}
 
 	Sc->SBufferCur = 0;
