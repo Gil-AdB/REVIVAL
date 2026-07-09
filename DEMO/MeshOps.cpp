@@ -248,6 +248,124 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	}
 }
 
+// LIVE per-surface re-smooth: recompute the per-vertex normals of `surface` on
+// the CURRENT rendered meshes for a new angle, without touching geometry — so a
+// browser slider drag re-shades next frame with no reload. The rasterizer reads
+// Vertex::N indirectly: Transform_Objects recomputes the view-space Vertex::TN
+// from N every frame and the deferred G-buffer normal is the interpolated TN,
+// so overwriting N is all that's needed.
+//
+// Adjacency = a GLOBAL spatial hash of the surface's face corners across every
+// current mesh, keyed by EXACT position bits. This is deliberately NOT the
+// per-mesh original-vertex grouping used at init, because greets copies the
+// smoothed meshes into per-cell CHUNKS after init (GREETS.CPP), and it is those
+// chunk copies — not the source mesh init smoothed — that actually render. A
+// vertex's incident faces therefore span multiple chunk meshes, so the
+// adjacency has to be rebuilt scene-wide on the live geometry. Exact position
+// bits (not a tolerance grid) are safe because the chunk copy is bitwise, so
+// vertices that were one shared point still compare equal.
+//
+// This averages MakeFacesIndependent's per-surface rule (same base-surface
+// only, angle gate Dot(F.N,adj.N) >= cos(angle), area-weighted, EPSILON
+// fallback to the face normal) so the LIVE look tracks a reload closely. Two
+// residual departures from a bit-identical reload are inherent to rebuilding
+// adjacency from geometry instead of init's Vertex* map, and are documented in
+// MeshOps.h: (1) at coincident-but-distinct authored vertices (e.g. the momy
+// lathe's UV seams) init keeps the vertices apart while a position hash merges
+// them, slightly over-smoothing there; (2) the accumulation order differs, so
+// area-weighted sums round to within ~1 LSB. Both are sub-visual.
+void MeshOps_ResmoothSurface(const char *surface, float angleDeg) {
+	if (!surface || !*surface || !CurScene) return;
+	if (angleDeg < 0.0f)   angleDeg = 0.0f;
+	if (angleDeg > 180.0f) angleDeg = 180.0f;
+	const std::string base = rev::Editor_BaseSurfName(surface);
+	const float cosThr = std::cos(angleDeg * float(PI) / 180.0f);
+	auto surfBaseEq = [&](const Face *f) {
+		return f && f->Txtr && f->Txtr->Name
+		    && rev::Editor_BaseSurfName(f->Txtr->Name) == base;
+	};
+
+	// Collect every corner of every target-surface face across all meshes.
+	struct Corner { TriMesh *T; Vertex *V; const Face *F; };
+	std::vector<Corner> corners;
+	std::vector<TriMesh *> touched;   // meshes needing a tangent rebuild
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		bool any = false;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face *F = &T->Faces[i];
+			if (!surfBaseEq(F) || !F->A || !F->B || !F->C) continue;
+			corners.push_back({ T, F->A, F });
+			corners.push_back({ T, F->B, F });
+			corners.push_back({ T, F->C, F });
+			any = true;
+		}
+		if (any) touched.push_back(T);
+	}
+	if (corners.empty()) return;
+
+	// Spatial bucket by exact position bits: verts that were one shared point
+	// have bit-identical Pos, so they land together (= incident to one vertex).
+	struct PosKey {
+		uint32_t x, y, z;
+		bool operator==(const PosKey &o) const { return x == o.x && y == o.y && z == o.z; }
+	};
+	struct PosHash {
+		size_t operator()(const PosKey &k) const {
+			return (size_t(k.x) * 73856093u) ^ (size_t(k.y) * 19349663u) ^ (size_t(k.z) * 83492791u);
+		}
+	};
+	auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+	auto keyOf = [&](const Vector &p) { return PosKey{ bits(p.x), bits(p.y), bits(p.z) }; };
+	std::unordered_map<PosKey, std::vector<int>, PosHash> bucket;
+	bucket.reserve(corners.size() * 2);
+	for (int i = 0; i < int(corners.size()); ++i)
+		bucket[keyOf(corners[i].V->Pos)].push_back(i);
+
+	// Recompute each corner's normal from its position-bucket's incident faces.
+	// Face::N (not Vertex::N) is what gets averaged, so no read-after-write
+	// hazard; still, write into a scratch and commit at the end for clarity.
+	std::vector<Vector> out(corners.size());
+	for (int i = 0; i < int(corners.size()); ++i) {
+		const Corner &c = corners[i];
+		const Vector &fN = c.F->N;
+		Vector accum; Vector_Form(&accum, 0, 0, 0);
+		for (int j : bucket[keyOf(c.V->Pos)]) {
+			const Face *adj = corners[j].F;
+			if (Dot_Product(&fN, &adj->N) < cosThr) continue;
+			Vector w;
+			Vector_Scale(&adj->N,
+			             Tri_Surface(&adj->A->Pos, &adj->B->Pos, &adj->C->Pos), &w);
+			Vector_SelfAdd(&accum, &w);
+		}
+		if (Vector_Length(&accum) < EPSILON) { out[i] = fN; continue; }
+		Vector_Norm(&accum);
+		out[i] = accum;
+	}
+	// Commit. On a per-face-split mesh (all greets geometry, and any mesh
+	// MakeFacesIndependent touched) each Vertex is referenced by exactly one
+	// corner, so this writes out[i] verbatim. On a SHARED-vertex mesh (a
+	// crease-free surface never split at init) several corners target the same
+	// Vertex; average them instead of letting the last write win, so the vertex
+	// degrades gracefully to a single smoothed normal (it can't be faceted
+	// without a re-split — the documented live/reload gap) rather than garbage.
+	std::unordered_map<Vertex *, std::pair<Vector, int>> acc;
+	for (int i = 0; i < int(corners.size()); ++i) {
+		auto &e = acc[corners[i].V];
+		if (e.second == 0) { e.first = out[i]; e.second = 1; }
+		else { Vector_SelfAdd(&e.first, &out[i]); ++e.second; }
+	}
+	for (auto &kv : acc) {
+		Vector n = kv.second.first;
+		if (kv.second.second > 1 && Vector_Length(&n) >= EPSILON) Vector_Norm(&n);
+		kv.first->N = n;
+	}
+
+	// New normals => new tangent basis (per-face-split verts, so each mesh's
+	// tangents recompute purely from its own faces + the updated normals).
+	for (TriMesh *T : touched) Compute_Vertex_Tangents(T);
+}
+
 // Translate linear (x, y) pixel coordinate into the swizzled byte
 // offset used by Generate_Mipmaps' block-tiled layout. Outer loop is
 // block columns (x), inner is block rows (y); within each block,

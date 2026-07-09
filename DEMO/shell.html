@@ -1387,6 +1387,26 @@
         };
         row.appendChild(r); row.appendChild(val); return row;
       }
+      // Live per-surface normal re-smooth (smoothAngle slider). The generic
+      // setSurfaceProp path only REGISTERS the angle (it re-shaded at scene
+      // init) — this re-smooths the current mesh normals so the drag shows next
+      // frame. The heavy native re-smooth is debounced (trailing edge, like the
+      // map-gen knobs); the JS-model + Save-button bookkeeping runs immediately
+      // so Save still persists smoothAngle through the unchanged sidecar path.
+      var smoothLiveTimer = null;
+      function setSmoothLive(name, v){
+        editSurfNames(name).forEach(function(n){
+          var s = editorSurfaces.find(function(x){ return x.name === n; });
+          if (s) s.smoothAngle = v;   // keep model in sync (Save reads editorSurfaces)
+        });
+        updateSaveButton();
+        clearTimeout(smoothLiveTimer);
+        smoothLiveTimer = setTimeout(function(){
+          try { Module.editorSetSmoothAngleLive(name, v); }
+          catch(e){ editorStatus('re-smooth failed: ' + e); return; }
+          editorStatus('smoothAngle = ' + (+v).toFixed(0) + '° (live)');
+        }, 60);
+      }
       // ── Map generation from albedo (client-side, canvas 2D) ─────────────
       // Synthesize normal / height / AO maps from a surface's albedo and route
       // the bytes through the SAME importFile path as a hand-authored import,
@@ -1665,11 +1685,17 @@
           var row = propRow(s, k, rg[0], rg[1], k === 'smoothAngle' ? 1 : (rg[1]-rg[0]) / 200);
           if (k === 'smoothAngle') {
             // Per-surface normal-smoothing threshold (deg). 0 = faceted,
-            // 180 = fully smooth. The engine rebuilds vertex normals from this
-            // ONLY at scene init — no live re-smooth — so it is persist-on-Save:
-            // set it, Save, then Reload scene to see it. greets/city/crash
-            // rebuild normals by angle; fountain/chase do not.
-            row.title = 'per-surface normal smoothing angle (degrees): 0 = faceted, 180 = fully smooth. Applied when mesh normals rebuild at scene INIT — set it, Save, then Reload scene to see it (no live re-smooth). greets/city/crash honor it; fountain/chase don\'t rebuild normals.';
+            // 180 = fully smooth. LIVE: dragging re-smooths the mesh normals in
+            // place and re-shades the next frame (no reload). Save still
+            // persists it via the sidecar. Smoothing (raising the angle) applies
+            // to all geometry live; faceting fully applies live on most
+            // surfaces, but a few merged meshes only facet completely after a
+            // Save + Reload.
+            row.title = 'per-surface normal smoothing angle (degrees): 0 = faceted, 180 = fully smooth. LIVE — drag to re-shade instantly (no reload). Save persists it. greets/city/crash honor it; fountain/chase don\'t rebuild normals. (Smoothing applies live everywhere; a few merged meshes only facet completely after Save + Reload.)';
+            var sr = row.querySelector('input[type=range]');
+            var sn = row.querySelector('input[type=number]');
+            sr.oninput = function(){ var v = parseFloat(sr.value); sn.value = +v.toFixed(3); setSmoothLive(s.name, v); };
+            sn.onchange = function(){ var v = parseFloat(sn.value); if (isNaN(v)) return; sr.value = v; setSmoothLive(s.name, v); };
           }
           if (k === 'aoStrength') {
             row.title = 'per-material AO-map strength (x global ao_map_strength). Darkens the AMBIENT term only — subtle in direct-light-heavy scenes.';

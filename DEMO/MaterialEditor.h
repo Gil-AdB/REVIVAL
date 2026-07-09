@@ -42,6 +42,13 @@ std::string Editor_GetObjectsJSON();
 // A successful edit marks the view dirty (see below).
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value);
 
+// LIVE per-surface normal-smoothing-angle edit (0=faceted .. 180=fully smooth).
+// Registers the override (so it round-trips + persists on Save) AND re-smooths
+// the current mesh normals so the shading changes on the NEXT frame — no scene
+// reload. Bit-identical to a reload at the same angle for meshes split at init
+// (see MeshOps_ResmoothSurface). Marks the view dirty.
+void Editor_SetSmoothAngleLive(const char* surface, float angleDeg);
+
 // Re-render request signaling for the editor's idle throttle. The render loop
 // renders only while the view is dirty and idles otherwise (a static frozen
 // frame doesn't need re-drawing at rAF rate). Any surface edit marks dirty; the

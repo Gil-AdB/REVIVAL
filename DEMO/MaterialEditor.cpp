@@ -222,6 +222,21 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	return any;
 }
 
+// LIVE per-surface smoothing-angle edit (slider drag). Registers the override
+// AND re-smooths the current mesh normals so the shading updates next frame —
+// the reason this exists separate from the generic setSurfaceProp path, which
+// only registered the angle (it took effect at scene init / reload). Save still
+// persists smoothAngle through the normal sidecar path (shell.html keeps it in
+// EDITOR_SAVE_PROPS), so this changes only WHEN the re-smooth happens, not how
+// it persists. Marks the view dirty so the idle-throttled loop repaints.
+void Editor_SetSmoothAngleLive(const char* surface, float angleDeg)
+{
+	if (!surface || !*surface) return;
+	MeshOps_SetSurfaceSmoothAngle(surface, angleDeg);   // register (round-trip + Save)
+	MeshOps_ResmoothSurface(surface, angleDeg);         // rebuild normals on live topology
+	Editor_MarkDirty();
+}
+
 std::string Editor_SplitInstances(const char* name)
 {
 	if (!CurScene || !name || !*name) return "[]";
@@ -597,6 +612,12 @@ bool js_editorSetSurfaceProp(std::string name, std::string key, float value)
 {
 	return rev::Editor_SetSurfaceProp(name.c_str(), key.c_str(), value);
 }
+// Live normal re-smooth for the smoothAngle slider (register + re-smooth +
+// dirty). Save still persists via editorSetSurfaceProp/the sidecar.
+void js_editorSetSmoothAngleLive(std::string name, float angleDeg)
+{
+	rev::Editor_SetSmoothAngleLive(name.c_str(), angleDeg);
+}
 std::string js_editorSplitInstances(std::string name)
 {
 	return rev::Editor_SplitInstances(name.c_str());
@@ -817,6 +838,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetSurfaces",    &js_editorGetSurfaces);
 	emscripten::function("editorGetObjects",     &js_editorGetObjects);
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
+	emscripten::function("editorSetSmoothAngleLive", &js_editorSetSmoothAngleLive);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
 	emscripten::function("editorMatDebug",       &js_editorMatDebug);
 	emscripten::function("editorHighlight",      &js_editorHighlight);

@@ -147,12 +147,46 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees);
 // registry is EMPTY unless a sidecar sets it, so the default render is
 // byte-identical. Angle is clamped to [0,180].
 //
-// NOTE (load-time only): the normal build flattens the mesh's shared-vertex
-// topology once at init, so an angle set live (editor) does not re-smooth an
-// already-built mesh — it takes effect on the next scene load.
 void  MeshOps_SetSurfaceSmoothAngle(const char *surface, float angleDeg);
 bool  MeshOps_GetSurfaceSmoothAngle(const char *surface, float &angleDegOut);
 bool  MeshOps_AnySurfaceSmoothAngle();
+
+// LIVE re-smooth: recompute `surface`'s per-vertex normals on the CURRENT
+// rendered meshes at `angleDeg`, so an editor slider drag re-shades the next
+// frame with NO scene reload. Does NOT change topology. Applies
+// MakeFacesIndependent's per-surface averaging rule (same-surface faces only,
+// area-weighted, gated by Dot(faceN,adjN) >= cos(angle), EPSILON fallback to
+// the face normal), rebuilding adjacency from a scene-wide spatial hash of the
+// surface's face corners keyed by exact position bits.
+//
+// The spatial rebuild (rather than init's per-mesh Vertex* adjacency) is
+// required because greets copies/merges the init-smoothed source meshes into
+// other meshes (per-cell CHUNKS and per-round face subsets) and those copies
+// are what render — a vertex's incident faces span several of them, so
+// adjacency must be gathered scene-wide on the live geometry.
+//
+// The live look tracks a reload closely but is NOT guaranteed bit-identical;
+// the departures are all inherent to editing in place instead of re-running the
+// init split + re-baking:
+//   • Per-face-split meshes (each Vertex used by one face — the norm for
+//     anything MakeFacesIndependent touched, and greets' Piramid chunks) get
+//     the full per-face treatment and match a reload to within ~1 LSB (the
+//     area-weighted sums differ only in summation order), except a few pixels
+//     at coincident-but-distinct authored vertices (e.g. the momy lathe's UV
+//     seams) that the position hash merges but init keeps apart.
+//   • SHARED-vertex meshes (a vertex used by several faces — greets' big merged
+//     per-round meshes, some detail models) have only one normal per vertex, so
+//     this can SMOOTH them (raise the angle) but cannot FACET them: each shared
+//     vertex is written the average of its corners' results, degrading
+//     gracefully to a smooth normal rather than an order-dependent facet. A
+//     reload, which re-splits, DOES facet them — so faceting such a surface
+//     live shows less change than the reload will (documented gap; the affected
+//     pixels stay put rather than corrupting).
+//
+// Register the angle with MeshOps_SetSurfaceSmoothAngle first (so it
+// round-trips + persists on Save). Off any hot path — safe to call once per
+// slider event (debounce in the UI).
+void  MeshOps_ResmoothSurface(const char *surface, float angleDeg);
 
 // Phong-tessellate (curved PN-style) every face whose material name == matName,
 // `levels` times (each level = 1→4 split per target triangle, edge midpoints
