@@ -869,6 +869,17 @@ void Initialize_Fountain()
 			M->Specular   = 1.0f;
 			M->Glossiness = 128;
 		}
+		// Refraction OPT-IN (Mat_Refractive): the real glass SHELLS refract the
+		// background under --glass_refract — the central 'mizraka glass' crystal
+		// sphere and the 'f_sphere' outer spire-orb shells (their curved geometric
+		// normals lens-refract even without --glass_test; glass_test adds relief
+		// ripple on top). The fiery 'f in shpere' orb CORE is deliberately left
+		// UNMARKED so it composites/glows (Fire2 texture, layered through the
+		// glass) instead of refracting the opaque box behind it.
+		if (M->Name && (std::strcmp(M->Name, "mizraka glass") == 0 ||
+		                std::strcmp(M->Name, "f_sphere") == 0)) {
+			M->Flags |= Mat_Refractive;
+		}
 	}
 	Add_Vortex_ToScene();
 
@@ -893,6 +904,33 @@ void Initialize_Fountain()
 	// Persisted editor overrides (PBR maps + numeric surface props) — the
 	// browser editor's "Save" writes this sidecar; no-op when absent.
 	fds::MaterialImport_ApplySidecar(FntSc, "SCENES/FOUNTAIN.MAT");
+
+	// [glass_test] Attach a baked relief normal map to the fountain glass (the
+	// central "mizraka glass" sphere + the spire orbs) so --glass_refract has a
+	// normal-mapped transparent surface — with the fountain scene behind it — to
+	// warp. Default OFF → materials byte-unchanged. Runs AFTER Preprocess_Scene so
+	// each material's diffuse is unified (32bpp + block mips); the normal is baked
+	// from that OWN diffuse so it shares the diffuse's dimensions + swizzle (the
+	// transparent kernel indexes NormalMap by the diffuse's swizzledUV). The orb
+	// spheres also lens-refract via their curved geometric normals even without
+	// this; the baked relief adds high-frequency ripple on top.
+	if (fds::FeatureFlags::glass_test()) {
+		for (M = MatLib; M; M = M->Next) {
+			if (M->RelScene != FntSc || !M->Name || M->NormalMap) continue;
+			const bool isGlass = std::strcmp(M->Name, "mizraka glass") == 0
+			                  || std::strcmp(M->Name, "f_sphere") == 0
+			                  || std::strstr(M->Name, "in shpere") != nullptr;
+			if (!isGlass) continue;
+			Texture *dif = M->Txtr;
+			if (!dif || !dif->Mipmap[0]) continue;
+			if (dif->BPP != 32) BPPConvert_Texture(dif, 32);
+			if (Texture *n = BakeNormalMapFromDiffuse(dif, 8.0f)) {
+				M->NormalMap = n;
+				std::fprintf(stderr, "[glass_test] baked relief normal for '%s' (%dx%d)\n",
+				             M->Name, dif->SizeX, dif->SizeY);
+			}
+		}
+	}
 
 	// The portal/vortex is an additive sky glow on a square quad whose texture
 	// is transparent (black) outside the swirl. Assign_Fillers gave it the plain

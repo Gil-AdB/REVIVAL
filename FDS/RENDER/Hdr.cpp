@@ -21,6 +21,8 @@ namespace renderns { extern std::counting_semaphore<INT_MAX> tileDone; }
 namespace fds {
 
 std::vector<hdrf> g_hdrBuf;
+std::vector<hdrf>     g_glassRefrHdr;   // glass_refract: stable opaque HDR snapshot (matches g_hdrBuf storage)
+std::vector<uint32_t> g_glassRefrLdr;   // glass_refract: stable opaque VPage snapshot
 bool g_hdrActive = false;
 bool g_hdrDeferTonemap = false;
 int g_hdrBufW = 0, g_hdrBufH = 0;

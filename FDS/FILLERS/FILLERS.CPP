@@ -1867,6 +1867,241 @@ void TBR_Sprite(Face* F, Vertex **V, dword numVerts, dword miplevel,
 	}
 }
 
+// TBR barrier primitives used by the glass scheduler's drain() (see
+// TBR_Render_GlassLayered). fog-wt's default TBR_Render uses a local
+// counting_semaphore instead, so these are only referenced by the glass path.
+namespace tbr {
+	std::mutex					tileCounterMutex;
+	std::atomic<int>			tileCounter;
+	std::condition_variable		condition;
+}
+
+// ── Barrier-per-layer glass scheduler (--glass_refract) ──────────────────────
+//
+// The default per-strip TBR walk composites each strip's clumps back-to-front
+// on its OWN worker with NO cross-strip coordination. Glass refraction there had
+// to snapshot only the strip's own row band and CLAMP the vertical refracted
+// fetch to that band (else it would read a neighbour strip mid-composite) → an
+// 8-px vertical stair-step on every refracted surface.
+//
+// Glass is a WHOLE-SCREEN effect: a refracted fetch offsets up to glass_refract_max
+// pixels in ANY direction, so it needs a coherent full-frame background. This
+// scheduler hoists the per-strip layer sequencing to a GLOBAL barrier per depth
+// band (same model the legacy per-mesh peel uses — tiled-parallel within a layer,
+// sequenced + snapshotted between layers):
+//
+//   1. PLAN  (parallel per strip): collect + sort the strip's items back-to-front
+//      and segment them into steps (a sprite, or a clump of consecutive
+//      same-(mesh,front) transparent faces — identical to the legacy walk). Glass
+//      steps (refracting transparents) contribute their depth to the band set.
+//   2. BAND thresholds (main thread): the distinct glass depths (deduped within an
+//      epsilon, capped) become the barrier depths T[0] > T[1] > …
+//   3. EXECUTE rounds r = 0..m: every strip composites, IN PARALLEL, all its steps
+//      with renderZ > T[r] (whole steps, never split — a clump's band key is its
+//      farthest face's renderZ). BARRIER (all strips done) → full-frame snapshot of
+//      the now-coherent g_hdrBuf/VPage into g_glassRefr{Hdr,Ldr} → next round.
+//
+// Glass in round r composites AFTER the snapshot taken at the end of round r-1,
+// which holds everything with renderZ > T[r-1] = everything strictly behind it
+// (opaque + fog + every farther transparent/glass layer). It refracts that
+// full-frame snapshot (glassBandOn stays false → the kernel sampler reads
+// g_glassRefr*), so the fetch is whole-screen coherent (no per-strip clamp → NO
+// stair-step) AND correctly layered (inner glass shows through outer). Non-glass
+// steps (sprites / water / mirror clones) compose in their exact back-to-front
+// slot, so their output is byte-identical to the plain walk; only glass pixels
+// change. The snapshot is a main-thread memcpy taken while all strips are drained
+// → race-free and frame-to-frame deterministic (no flicker).
+//
+// FUTURE perf lever (NOT implemented): a per-strip max-displacement cap so strips
+// whose glass can't reach a neighbour's band skip that barrier, and merging
+// screen-disjoint glass layers so non-overlapping objects share one snapshot.
+namespace tbrglass {
+
+struct XparStep {
+	bool               isSprite = false;
+	Face*              spriteF  = nullptr;   // sprite path
+	std::vector<Face*> faces;                // clump path
+	bool               front    = false;
+	bool               isGlass  = false;     // refracting transparent → band depth
+	float              renderZ  = 0.0f;      // band key = farthest entry's renderZ
+};
+struct XparPlan {
+	std::vector<XparStep> steps;
+	size_t                cursor = 0;
+	size_t                roundStart = 0;    // first step index of the current round
+	int                   strip_y = 0, strip_h = 0;
+	float                 clipY1 = 0.0f, clipY2 = 0.0f;
+};
+static std::vector<XparPlan> g_plans;
+
+// Same view-space facing test the walk uses (inline hot helper).
+static inline bool faceFront(Face* F) {
+	const VertexFrame *ff = F->frame;
+	const float *tx = ff->TPos_x, *ty = ff->TPos_y, *tz = ff->TPos_z;
+	const uint32_t ai = F->A_idx, bi = F->B_idx, ci = F->C_idx;
+	const float Ax = tx[ai], Ay = ty[ai], Az = tz[ai];
+	const float ex = tx[bi] - Ax, ey = ty[bi] - Ay, ez = tz[bi] - Az;
+	const float fx = tx[ci] - Ax, fy = ty[ci] - Ay, fz = tz[ci] - Az;
+	const float nx = ey * fz - ez * fy, ny = ez * fx - ex * fz, nz = ex * fy - ey * fx;
+	return (nx * Ax + ny * Ay + nz * Az) < 0.0f;
+}
+
+// Full-frame snapshot of the accumulated background into the stable buffers the
+// refraction sampler reads. Main thread, between round barriers → race-free.
+static void glassSnapshotFull() {
+	const size_t np = size_t(XRes) * size_t(YRes), n4 = np * 4;
+	if (fds::g_hdrActive && fds::g_hdrBuf.size() >= n4) {
+		if (fds::g_glassRefrHdr.size() < n4) fds::g_glassRefrHdr.resize(n4);
+		memcpy(fds::g_glassRefrHdr.data(), fds::g_hdrBuf.data(), n4 * sizeof(fds::hdrf));
+	}
+	if (VPage) {
+		if (fds::g_glassRefrLdr.size() < np) fds::g_glassRefrLdr.resize(np);
+		memcpy(fds::g_glassRefrLdr.data(), VPage, np * 4);
+	}
+}
+
+static void drawSprite(Face* F, float clipY1, float clipY2) {
+	Vertex* V = F->A;
+	float edgeLen = ImageSize * V->RZ * View->PerspX * F->FlareSize * 2.0f;
+	dword Z = 0xFF80 - Fist(g_zscale * V->TPos_AOS.z);
+	if (F->Txtr->Txtr->SizeX == 256) {
+		SpriterRT<256>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
+		               0xFFFFFF, Z, 0, clipY1, XRes, clipY2);
+	} else {
+		dword R = V->LR, G = V->LG, B = V->LB;
+		dword Color = (R << 16) + (G << 8) + B;
+		SpriterRT<32>(V->PX, V->PY, edgeLen, edgeLen, F->Txtr->Txtr->Data, VPage,
+		              Color, Z, 0, clipY1, XRes, clipY2);
+	}
+}
+
+// dctx is threaded from TBR_Render (fog-wt's TBR refactor passes a
+// DeferredLightingCtx to the strip xpar dispatcher). It may be null on a
+// non-deferred TBR frame, in which case no transparent clumps were routed —
+// only sprites compose.
+static inline void composeStep(const DeferredLightingCtx *dctx, XparPlan& p, XparStep& s) {
+	if (s.isSprite) drawSprite(s.spriteF, p.clipY1, p.clipY2);
+	else if (dctx) RenderXparClumpInStrip(*dctx, s.faces.data(), int(s.faces.size()), s.front,
+	                            p.strip_y, p.strip_h, /*bandSnapshot=*/false);
+}
+
+} // namespace tbrglass
+
+static void TBR_Render_GlassLayered(Scene *Sc, const DeferredLightingCtx *dctx)
+{
+	using namespace tbrglass;
+	const dword numTiles = Sc->NumTiles;
+	if (g_plans.size() < numTiles) g_plans.resize(numTiles);
+
+	auto drain = [&](dword n) {
+		std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+		tbr::condition.wait(lk, [n] { return tbr::tileCounter == (int)n; });
+	};
+
+	// ── Phase 1: plan (parallel per strip) ──
+	tbr::tileCounter = 0;
+	for (mword i = 0; i < numTiles; i++) {
+		ThreadPool::instance().enqueue([i, Sc]() {
+			XparPlan& plan = g_plans[i];
+			plan.steps.clear();
+			plan.cursor = 0;
+			float clipY1 = i << TILELOG, clipY2 = (i + 1) << TILELOG;
+			if (clipY2 > YRes) clipY2 = YRes;
+			plan.clipY1 = clipY1; plan.clipY2 = clipY2;
+			plan.strip_y = int(i) << TILELOG;
+			plan.strip_h = int(clipY2) - plan.strip_y;
+
+			thread_local std::vector<TBREntry> scratch;
+			scratch.clear();
+			sdword n = Sc->SBufferHead[i];
+			while (n != -1) { scratch.push_back(Sc->SBuffer[n]); n = Sc->SBuffer[n].next; }
+			std::stable_sort(scratch.begin(), scratch.end(),
+				[](const TBREntry& a, const TBREntry& b) { return a.renderZ > b.renderZ; });
+
+			TriMesh* clumpMesh = nullptr; bool clumpFront = false; int openIdx = -1;
+			for (const TBREntry& e : scratch) {
+				Face* F = e.F;
+				if (F->A == F->B) {                 // sprite: closes any open clump
+					openIdx = -1;
+					XparStep s; s.isSprite = true; s.spriteF = F; s.renderZ = e.renderZ;
+					plan.steps.push_back(std::move(s));
+					continue;
+				}
+				TriMesh* meshHere = F->ParentTri;
+				const bool frontHere = faceFront(F);
+				if (openIdx >= 0 && (meshHere != clumpMesh || frontHere != clumpFront))
+					openIdx = -1;
+				if (openIdx < 0) {
+					clumpMesh = meshHere; clumpFront = frontHere;
+					XparStep s; s.isSprite = false; s.front = frontHere; s.renderZ = e.renderZ;
+					// Refracting glass = a transparent OPT-IN-marked Mat_Refractive
+					// that is NOT a mirror clone (mirrorMaskTag). Only marked glass
+					// (fountain 'mizraka glass' + 'f_sphere' orb shells, greets
+					// 'amudim' panels) becomes a band step that adds a snapshot
+					// barrier; every other transparent (the fiery 'f in shpere' orb
+					// core, additive glows, mirror-mask walls) keeps its exact
+					// composite slot and no barrier — it blends/glows normally,
+					// layered by the peel. F->Txtr is the same Material* the kernel
+					// reads as Mat, so the Mat_Refractive bit matches there.
+				s.isGlass = (F->Txtr && F->mirrorMaskTag == 0 &&
+					             (F->Txtr->Flags & Mat_Refractive) != 0);
+					plan.steps.push_back(std::move(s));
+					openIdx = int(plan.steps.size()) - 1;
+				}
+				plan.steps[openIdx].faces.push_back(F);
+			}
+			Sc->SBufferHead[i] = -1;
+			std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+			++tbr::tileCounter; tbr::condition.notify_one();
+		});
+	}
+	drain(numTiles);
+
+	// ── Phase 2: gather glass depths → dedupe/cap → barrier thresholds ──
+	static std::vector<float> depths; depths.clear();
+	for (mword i = 0; i < numTiles; i++)
+		for (auto& s : g_plans[i].steps)
+			if (s.isGlass) depths.push_back(s.renderZ);
+	static std::vector<float> T; T.clear();
+	if (!depths.empty()) {
+		std::sort(depths.begin(), depths.end(), [](float a, float b) { return a > b; });
+		const int maxBands = 16;
+		float eps = 0.5f;
+		const float range = depths.front() - depths.back();
+		if (range > 0.0f) eps = std::max(eps, range / float(maxBands));
+		for (float z : depths) if (T.empty() || (T.back() - z) > eps) T.push_back(z);
+		if ((int)T.size() > maxBands) {   // safety coarsen (rare)
+			std::vector<float> T2;
+			const int stride = ((int)T.size() + maxBands - 1) / maxBands;
+			for (size_t k = 0; k < T.size(); k += stride) T2.push_back(T[k]);
+			T.swap(T2);
+		}
+	}
+
+	// ── Phase 3: execute rounds; snapshot the coherent frame between bands ──
+	const size_t m = T.size();
+	for (size_t r = 0; r <= m; r++) {
+		const float low = (r < m) ? T[r] : -3.0e38f;
+		tbr::tileCounter = 0;
+		for (mword i = 0; i < numTiles; i++) {
+			ThreadPool::instance().enqueue([i, low, dctx]() {
+				XparPlan& plan = g_plans[i];
+				while (plan.cursor < plan.steps.size() &&
+				       plan.steps[plan.cursor].renderZ > low) {
+					composeStep(dctx, plan, plan.steps[plan.cursor]);
+					plan.cursor++;
+				}
+				std::unique_lock<std::mutex> lk(tbr::tileCounterMutex);
+				++tbr::tileCounter; tbr::condition.notify_one();
+			});
+		}
+		drain(numTiles);
+		if (r < m) glassSnapshotFull();
+	}
+
+	Sc->SBufferCur = 0;
+}
+
 // Execute/Clear sprite buffer
 //
 // Per-strip walk: each Y-strip (8 rows) is processed by one worker
@@ -1906,6 +2141,14 @@ static inline void tbrCensus(const char* name)
 
 void TBR_Render(Scene *Sc, const DeferredLightingCtx *dctx)
 {
+	// Glass refraction on → route through the barrier-per-layer scheduler for
+	// whole-screen-coherent (non-blocky) layered glass. Flag off → the plain
+	// per-strip walk below runs unchanged (byte-identical).
+	if (fds::FeatureFlags::glass_refract() > 0.0f) {
+		TBR_Render_GlassLayered(Sc, dctx);
+		return;
+	}
+
 	const int numTiles = int(Sc->NumTiles);
 	std::counting_semaphore<INT_MAX> stripsDone{0};
 

@@ -1404,6 +1404,19 @@ void Initialize_Greets()
 				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
 			}
 		}
+		// Refraction OPT-IN (Mat_Refractive): mark the greets glass display panels
+		// so they keep refracting the room behind them under --glass_refract once
+		// refraction is per-material opt-in. These are the transparent (Mat_Transparent
+		// from the FLD) half-silvered "amudim"/column glass screens sharing the P_TEXT
+		// design plus the glass lamp cover — the ONLY greets transparents that refracted
+		// under the old blanket gate ('screen 4' is the display opposite the teleporter
+		// and the sole visible refractor at the greets snapshot pose; 'screen2' is the
+		// column panel; 'lamp light' the lamp glass). Marking exactly this set keeps the
+		// shipped --glass-refract look unchanged. ('amudim' itself is opaque MARB4 marble —
+		// not glass; the room walls / mirror-mask clones stay unmarked → no refraction.)
+		if (!std::strcmp(n, "screen 4") || !std::strcmp(n, "screen2") ||
+		    !std::strcmp(n, "lamp light"))
+			M->Flags |= Mat_Refractive;
 	}
 
 	gg->Init();

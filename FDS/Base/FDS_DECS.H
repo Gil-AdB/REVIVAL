@@ -550,7 +550,7 @@ void InsertTransparentToTBR(Face *F);
 // via the existing transparent lighting kernel.
 void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                             class Face** faces, int count, bool front,
-                             int strip_y, int strip_h);
+                             int strip_y, int strip_h, bool bandSnapshot = true);
 
 bool deferredUnifiedTbrEnabled();
 int  xparPeelPassesEffective();

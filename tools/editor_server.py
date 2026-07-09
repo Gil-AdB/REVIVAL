@@ -92,7 +92,7 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "smoothAngle"}
 # Engine-only per-material dials with no LWO/FLD field — persist as sidecar
 # surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB"}
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive"}
 
 
 def split_surface_sidecar_keys(scene, surfaces, warnings):

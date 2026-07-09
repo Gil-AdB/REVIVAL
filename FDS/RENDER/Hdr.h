@@ -27,6 +27,14 @@ using hdrf = float;
 #endif
 extern std::vector<hdrf> g_hdrBuf;
 
+// Glass refraction (--glass_refract) reads a STABLE snapshot of the finalized
+// opaque background: the transparent peel writes g_hdrBuf/VPage concurrently
+// across tiles, so refracting the LIVE buffer at an offset raced (offset read
+// vs another tile mid-write) → flicker. renderFrame copies into these once
+// post-fog / pre-peel when the flag is on; sampleBgHdr/sampleBgLdr read them.
+extern std::vector<hdrf>     g_glassRefrHdr;   // opaque HDR snapshot (B,G,R,cov ×N) — matches g_hdrBuf storage
+extern std::vector<uint32_t> g_glassRefrLdr;   // opaque VPage snapshot (BGRA ×N)
+
 // Set true by the froxel composite (the only writer of g_hdrBuf) when it runs in
 // HDR mode; reset by Hdr_BeginFrame. The tonemap no-ops when false, so frames
 // that never populated the buffer (fog off, non-froxel paths) render normally

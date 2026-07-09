@@ -83,6 +83,56 @@ namespace renderns {
 	extern std::condition_variable   condition;
 }
 
+// ── Glass refraction (--glass_refract) — LAYERED / per-layer snapshot support ──
+//
+// LEGACY per-mesh peel: renderFrame re-snapshots the accumulated background
+// into fds::g_glassRefrHdr / g_glassRefrLdr right BEFORE each GLASS (normal-
+// mapped) transparent batch composites, so each glass layer refracts a stable
+// buffer that already holds everything behind it (opaque + earlier transparent
+// layers). The batch loop is serial with a tile-drain barrier between batches,
+// so the snapshot is taken on a quiescent buffer on the main thread → race-free.
+//
+// UNIFIED-TBR peel: each strip composites its own clumps back-to-front on its
+// OWN worker thread — there is no global pre-layer barrier. A full-frame per-
+// clump snapshot would race (other strips are mid-composite in their bands) and
+// be non-deterministic. Instead, before a GLASS clump composites, the strip
+// snapshots ONLY its own row band into these thread_local buffers (the strip
+// exclusively owns those rows → race-free, deterministic). The refraction
+// sampler then reads the band snapshot for in-band rows (correct layering =
+// everything behind this clump in this strip) and the immutable pre-TBR opaque
+// snapshot (g_glassRefrHdr/Ldr) for out-of-band rows (large vertical offsets
+// crossing into a neighbour strip, which is being composited concurrently and
+// cannot be read safely). Both sources are stable → 0% frame-to-frame diff.
+static thread_local std::vector<fds::hdrf> t_glassBandHdr;   // strip band HDR (B,G,R,cov ×N) — matches g_hdrBuf storage
+static thread_local std::vector<uint32_t> t_glassBandLdr;   // strip band VPage (BGRA ×N)
+static thread_local int t_glassBandY0 = 0;                  // inclusive
+static thread_local int t_glassBandY1 = 0;                  // exclusive; ==Y0 ⇒ inactive (legacy path)
+
+// Snapshot the strip's row band of the accumulated background just BEFORE a
+// glass clump composites. Sets the band bounds the sampler branches on.
+static void glassBandSnapshotBegin(int strip_y, int strip_h) {
+	const int y0 = strip_y < 0 ? 0 : strip_y;
+	const int y1 = std::min(strip_y + strip_h, int(YRes));
+	if (y1 <= y0) { t_glassBandY0 = t_glassBandY1 = 0; return; }
+	const size_t bandRows = size_t(y1 - y0);
+	const size_t bandPx   = bandRows * size_t(XRes);
+	const size_t fullN4   = size_t(YRes) * size_t(XRes) * 4;
+	if (fds::g_hdrActive && fds::g_hdrBuf.size() >= fullN4) {
+		if (t_glassBandHdr.size() < bandPx * 4) t_glassBandHdr.resize(bandPx * 4);
+		std::memcpy(t_glassBandHdr.data(),
+		            fds::g_hdrBuf.data() + size_t(y0) * size_t(XRes) * 4,
+		            bandPx * 4 * sizeof(fds::hdrf));
+	}
+	if (VPage) {
+		if (t_glassBandLdr.size() < bandPx) t_glassBandLdr.resize(bandPx);
+		std::memcpy(t_glassBandLdr.data(),
+		            reinterpret_cast<const uint32_t*>(VPage) + size_t(y0) * size_t(XRes),
+		            bandPx * sizeof(uint32_t));
+	}
+	t_glassBandY0 = y0; t_glassBandY1 = y1;
+}
+static void glassBandSnapshotEnd() { t_glassBandY0 = t_glassBandY1 = 0; }
+
 // Cache-line transition stats for shadow-map sampling (gated on
 // --shadow_prof_cache). Atomic accumulation across tile workers with
 // relaxed ordering; a thread-local tracks the last sample's cache-line
@@ -2448,6 +2498,111 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
 
+	// ── Screen-space glass refraction (--glass_refract). When off, glassRefrOn
+	//    is false and NONE of the offset math runs — the composite below reads
+	//    the background straight-through (byte-identical). See FeatureFlags.def. ──
+	const int   YRes         = ctx.yres;
+	const float glassRefr    = fds::FeatureFlags::glass_refract();
+	const bool  glassRefrOn  = glassRefr > 0.0f;
+	const float glassIor     = fds::FeatureFlags::glass_refract_ior();
+	const float glassEta     = glassIor > 0.0f ? 1.0f / glassIor : 1.0f;
+	const float glassMax     = fds::FeatureFlags::glass_refract_max();
+	const float glassBlur    = fds::FeatureFlags::glass_refract_rough_blur();
+	const float glassF0lin   = (glassIor - 1.0f) / (glassIor + 1.0f);
+	const float glassF0      = glassF0lin * glassF0lin;
+	const float glassFOVX    = ctx.invFOVX != 0.0f ? 1.0f / ctx.invFOVX : 0.0f;
+	const float glassFOVY    = ctx.invFOVY != 0.0f ? 1.0f / ctx.invFOVY : 0.0f;
+	auto glassClampX = [XRes](int v) { return v < 0 ? 0 : (v >= XRes ? XRes - 1 : v); };
+	auto glassClampY = [YRes](int v) { return v < 0 ? 0 : (v >= YRes ? YRes - 1 : v); };
+	// Refracted background fetch (optionally roughness-blurred), HDR float path.
+	// LEGACY peel: refract the per-layer snapshot renderFrame captured before this
+	// glass batch (g_glassRefrHdr) — a stable full-frame buffer holding everything
+	// behind this layer. TBR peel: refract the strip's own per-clump band snapshot
+	// (t_glassBandHdr, layered) for in-band rows and the immutable pre-TBR opaque
+	// snapshot for out-of-band rows. Reading the live buffer at an offset would race
+	// the concurrent peel → flicker, so both sources are stable snapshots.
+	const fds::hdrf *glassBgHdr = fds::g_glassRefrHdr.empty()
+	                          ? fds::g_hdrBuf.data() : fds::g_glassRefrHdr.data();
+	const dword *glassBgLdr = fds::g_glassRefrLdr.empty()
+	                          ? out : fds::g_glassRefrLdr.data();
+	// TBR strip-band snapshot (see glassBandSnapshotBegin). Inactive on the legacy
+	// path (thread_local bounds are 0 there), so its sampler code is byte-identical.
+	const bool   glassBandOn  = (t_glassBandY1 > t_glassBandY0);
+	const int    glassBandY0  = t_glassBandY0;
+	const int    glassBandY1  = t_glassBandY1;
+	const fds::hdrf *glassBandHdr = glassBandOn ? t_glassBandHdr.data() : nullptr;
+	const dword *glassBandLdr = glassBandOn ? t_glassBandLdr.data() : nullptr;
+	// Per-tap address in TBR band mode. The layered background only exists for
+	// THIS strip's rows (the neighbour strips are being composited concurrently
+	// and can't be read); refracting a vertical offset that leaves the strip would
+	// fall back to the OPAQUE snapshot and, because in-band=layered vs
+	// out-of-band=opaque differ, paint a hard 8px seam (visible horizontal
+	// striping). So CLAMP the vertical sample into the strip band: horizontal
+	// refraction is unrestricted (full-width layered), vertical refraction is
+	// capped at the strip so the fetch stays continuous and layered (inner shows
+	// through outer) with NO seam. This is the deterministic, artefact-free TBR
+	// approximation; full-range vertical layering needs the barrier the per-strip
+	// parallel peel doesn't have (see notes above / the report).
+	auto glassBandClampY = [&](int sy) {
+		if (sy < glassBandY0) return glassBandY0;
+		if (sy >= glassBandY1) return glassBandY1 - 1;
+		return sy;
+	};
+	auto glassTapHdr = [&](int sx, int sy) -> const fds::hdrf* {
+		sx = glassClampX(sx); sy = glassBandClampY(sy);
+		return glassBandHdr + (size_t(sy - glassBandY0) * XRes + sx) * 4;
+	};
+	auto glassTapLdr = [&](int sx, int sy) -> dword {
+		sx = glassClampX(sx); sy = glassBandClampY(sy);
+		return glassBandLdr[size_t(sy - glassBandY0) * XRes + sx];
+	};
+	auto sampleBgHdr = [&](int sx, int sy, float r, float &oB, float &oG, float &oR) {
+		if (glassBandOn) {
+			const int ri = int(r + 0.5f);
+			if (ri <= 0) { const fds::hdrf *p = glassTapHdr(sx, sy); oB = p[0]; oG = p[1]; oR = p[2]; return; }
+			const int ox[5] = {0, -ri, ri, 0, 0}, oy[5] = {0, 0, 0, -ri, ri};
+			float aB = 0, aG = 0, aR = 0;
+			for (int t = 0; t < 5; ++t) { const fds::hdrf *p = glassTapHdr(sx + ox[t], sy + oy[t]); aB += p[0]; aG += p[1]; aR += p[2]; }
+			oB = aB * 0.2f; oG = aG * 0.2f; oR = aR * 0.2f; return;
+		}
+		const fds::hdrf *base = glassBgHdr;
+		const int ri = int(r + 0.5f);
+		if (ri <= 0) {
+			const fds::hdrf *p = base + (size_t(sy) * XRes + sx) * 4;
+			oB = p[0]; oG = p[1]; oR = p[2]; return;
+		}
+		const int ox[5] = {0, -ri, ri, 0, 0}, oy[5] = {0, 0, 0, -ri, ri};
+		float aB = 0, aG = 0, aR = 0;
+		for (int t = 0; t < 5; ++t) {
+			const fds::hdrf *p = base + (size_t(glassClampY(sy + oy[t])) * XRes + glassClampX(sx + ox[t])) * 4;
+			aB += p[0]; aG += p[1]; aR += p[2];
+		}
+		oB = aB * 0.2f; oG = aG * 0.2f; oR = aR * 0.2f;
+	};
+	// Refracted background fetch (optionally roughness-blurred), LDR VPage path.
+	auto sampleBgLdr = [&](int sx, int sy, float r, int &oB, int &oG, int &oR) {
+		if (glassBandOn) {
+			const int ri = int(r + 0.5f);
+			if (ri <= 0) { const dword e = glassTapLdr(sx, sy); oB = int(e & 0xFF); oG = int((e >> 8) & 0xFF); oR = int((e >> 16) & 0xFF); return; }
+			const int ox[5] = {0, -ri, ri, 0, 0}, oy[5] = {0, 0, 0, -ri, ri};
+			int aB = 0, aG = 0, aR = 0;
+			for (int t = 0; t < 5; ++t) { const dword e = glassTapLdr(sx + ox[t], sy + oy[t]); aB += int(e & 0xFF); aG += int((e >> 8) & 0xFF); aR += int((e >> 16) & 0xFF); }
+			oB = aB / 5; oG = aG / 5; oR = aR / 5; return;
+		}
+		const int ri = int(r + 0.5f);
+		if (ri <= 0) {
+			const dword e = glassBgLdr[size_t(sy) * XRes + sx];
+			oB = int(e & 0xFF); oG = int((e >> 8) & 0xFF); oR = int((e >> 16) & 0xFF); return;
+		}
+		const int ox[5] = {0, -ri, ri, 0, 0}, oy[5] = {0, 0, 0, -ri, ri};
+		int aB = 0, aG = 0, aR = 0;
+		for (int t = 0; t < 5; ++t) {
+			const dword e = glassBgLdr[size_t(glassClampY(sy + oy[t])) * XRes + glassClampX(sx + ox[t])];
+			aB += int(e & 0xFF); aG += int((e >> 8) & 0xFF); aR += int((e >> 16) & 0xFF);
+		}
+		oB = aB / 5; oG = aG / 5; oR = aR / 5;
+	};
+
 	for (int py = y1; py < y2; ++py) {
 		for (int px = x1; px < x2; ++px) {
 			const size_t i = size_t(py) * XRes + px;
@@ -2552,6 +2707,98 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				const float c5 = c*c*c*c*c;
 				wFres = wFresBase + (wRefl - wFresBase) * c5;
 				if (wFres < 0.0f) wFres = 0.0f; if (wFres > 1.0f) wFres = 1.0f;
+			}
+
+			// ── Glass refraction: pick the background sample pixel for this
+			//    fragment. Off / non-glass → straight through (byte-identical
+			//    composite below). See FeatureFlags::glass_refract. ──
+			int   refrSX = px, refrSY = py;
+			float refrBlurRad = 0.0f;
+			// Refract EVERY non-water transparent (flat OR normal-mapped). A flat
+			// glass facet (no NormalMap — e.g. greets 'amudim' screens) refracts
+			// through its GEOMETRIC normal: a uniform screen offset across the whole
+			// facet by its tilt, exactly what flat glass should do. Normal-mapped
+			// glass adds the relief ripple on top. Both stay LAYERED because the
+			// per-layer snapshot (legacy: renderFrame's per-batch snapshotGlassBg;
+			// TBR: the barrier-per-layer full-frame snapshot) captures everything
+			// already composited behind this layer. (The earlier NormalMap gate was
+			// an interim fix for the pre-layered single-opaque-snapshot collapse.)
+			// Refraction is OPT-IN per material (Mat_Refractive): only surfaces the
+			// scene marked as real glass (fountain 'mizraka glass' + 'f_sphere' orb
+			// shells, greets 'amudim' panels) refract. Every OTHER transparent —
+			// notably the fountain's fiery 'f in shpere' orb core (plain transparent,
+			// no Mat_Additive) — composites/blends normally so it GLOWS layered
+			// through the glass instead of refracting the box behind it. Water and
+			// additive glows never carried Mat_Refractive, so they never refract.
+			// NOTE: the deeper foreground-occlusion guard (a displaced fetch can grab
+			// a pixel IN FRONT of the glass, which a plain transparent's z-test would
+			// hide) is a separate depth-guard TODO.
+			const bool glassRefrPx = glassRefrOn && !isWater
+			                         && (Mat->Flags & Mat_Refractive) != 0;
+			if (glassRefrPx) {
+				// Perturbed view-space normal from the material normal map via an
+				// on-the-fly (Mikkelsen) tangent — the transparent G-buffer carries
+				// no tangent plane, and the exact tangent rotation is irrelevant to
+				// the relief-warp magnitude. No normal map → geometric normal (flat
+				// facets refract uniformly through the facet tilt).
+				float pnx = nx, pny = ny, pnz = nz;
+				if (Mat->NormalMap) {
+					float nmX, nmY, nmZ;
+					if (decodeNormalTexel(Mat->NormalMap, miplevel, swizzledUV, nmX, nmY, nmZ)) {
+						float rfx, rfy, rfz;
+						if (std::fabs(ny) < 0.9f) { rfx = 0.0f; rfy = 1.0f; rfz = 0.0f; }
+						else                      { rfx = 1.0f; rfy = 0.0f; rfz = 0.0f; }
+						float tx = rfy*nz - rfz*ny, ty = rfz*nx - rfx*nz, tz = rfx*ny - rfy*nx;
+						const float tinv = fast_rsqrt(tx*tx + ty*ty + tz*tz);
+						tx *= tinv; ty *= tinv; tz *= tinv;
+						const float bx = ny*tz - nz*ty, by = nz*tx - nx*tz, bz = nx*ty - ny*tx;
+						float vnx = tx*nmX + bx*nmY + nx*nmZ;
+						float vny = ty*nmX + by*nmY + ny*nmZ;
+						float vnz = tz*nmX + bz*nmY + nz*nmZ;
+						const float vinv = fast_rsqrt(vnx*vnx + vny*vny + vnz*vnz);
+						pnx = vnx*vinv; pny = vny*vinv; pnz = vnz*vinv;
+					}
+				}
+				// Unit view ray (eye → pixel; view-space camera at the origin).
+				const float vl2  = x*x + y*y + z*z;
+				const float dinv = fast_rsqrt(vl2 > 0.0f ? vl2 : 1.0f);
+				const float dx = x*dinv, dy = y*dinv, dz = z*dinv;
+				// Viewer-side normal (dot(N,d) < 0), matching the env-compose flip.
+				if (pnx*dx + pny*dy + pnz*dz > 0.0f) { pnx = -pnx; pny = -pny; pnz = -pnz; }
+				const float cosi = -(pnx*dx + pny*dy + pnz*dz);            // ≥ 0
+				const float kk = 1.0f - glassEta*glassEta*(1.0f - cosi*cosi);
+				if (kk > 0.0f && z > 1e-3f) {                              // else TIR → straight
+					const float nds = glassEta*cosi - std::sqrt(kk);
+					const float tX = glassEta*dx + nds*pnx;
+					const float tY = glassEta*dy + nds*pny;
+					const float tZ = glassEta*dz + nds*pnz;
+					if (tZ > 1e-3f) {
+						// Schlick Fresnel (F0 from IOR): scale the offset by 1-F so
+						// head-on refracts most, grazing least (reflection dominates).
+						const float om   = 1.0f - cosi;
+						const float fres = glassF0 + (1.0f - glassF0) * (om*om*om*om*om);
+						const float sc   = glassRefr * (1.0f - fres);
+						// Offset = (pixel the refracted ray points at) − (this pixel,
+						// = the straight-through ray). Depth-independent angular
+						// projection: px = CntrEX + FOVX·(dx/dz).
+						float dpx =  glassFOVX * (tX/tZ - dx/dz) * sc;
+						float dpy = -glassFOVY * (tY/tZ - dy/dz) * sc;
+						if (dpx >  glassMax) dpx =  glassMax; else if (dpx < -glassMax) dpx = -glassMax;
+						if (dpy >  glassMax) dpy =  glassMax; else if (dpy < -glassMax) dpy = -glassMax;
+						refrSX = glassClampX(px + int(dpx));
+						refrSY = glassClampY(py + int(dpy));
+						// Frosted-glass blur radius, scaled by per-pixel roughness.
+						if (glassBlur > 0.0f) {
+							float rough = 1.0f;
+							if (Mat->RoughnessMap && miplevel < Mat->RoughnessMap->numMipmaps
+							    && Mat->RoughnessMap->Mipmap[miplevel]) {
+								rough = float(reinterpret_cast<const byte*>(
+									Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+							}
+							refrBlurRad = glassBlur * rough;
+						}
+					}
+				}
 			}
 
 			// Light loop. Default: per-tile compacted list. Diagnostic
@@ -2777,8 +3024,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			// off at the tonemap instead of clipping. Gated on g_hdrActive so
 			// the LDR path (flag off, fog-off scenes) is byte-identical.
 			if (fds::g_hdrActive && hdrBufReady) {   // hdrBufReady: skip in the mirror RTT
-				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;
-				const float dB = h[0], dG = h[1], dR = h[2];
+				fds::hdrf* h = fds::g_hdrBuf.data() + i * 4;   // write target stays at this pixel
+				// Background (dst) = the finished opaque radiance, read at the
+				// refracted offset for glass (straight-through when the flag is off).
+				// hdrf->float on read; the writes below store float->hdrf as before.
+				float dB, dG, dR;
+				if (glassRefrPx) sampleBgHdr(refrSX, refrSY, refrBlurRad, dB, dG, dR);
+				else { dB = h[0]; dG = h[1]; dR = h[2]; }
 				if (Mat->XparBlendAlpha > 0.0f) {
 					const float a = Mat->XparBlendAlpha;
 					const float ia = 1.0f - a;
@@ -2799,10 +3051,17 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					h[2] = float(litR) + dR * dw;
 				}
 			} else {
-			const dword existing = out[i];
-			const int dB = int((existing      ) & 0xFF);
-			const int dG = int((existing >>  8) & 0xFF);
-			const int dR = int((existing >> 16) & 0xFF);
+			// Background (dst) read at the refracted offset for glass
+			// (straight-through when the flag is off → byte-identical).
+			int dB, dG, dR;
+			if (glassRefrPx) {
+				sampleBgLdr(refrSX, refrSY, refrBlurRad, dB, dG, dR);
+			} else {
+				const dword existing = out[i];
+				dB = int((existing      ) & 0xFF);
+				dG = int((existing >>  8) & 0xFF);
+				dR = int((existing >> 16) & 0xFF);
+			}
 			int outB, outG, outR;
 			if (Mat->XparBlendAlpha > 0.0f) {
 				const float a = Mat->XparBlendAlpha;
@@ -2880,13 +3139,28 @@ int xparPeelPassesEffective() {
 // rows via Render_DeferredTransparentLighting_Tile<Layer>.
 void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
                              Face** faces, int count, bool front,
-                             int strip_y, int strip_h)
+                             int strip_y, int strip_h, bool bandSnapshot)
 {
 	const size_t rowStart  = size_t(strip_y) * size_t(XRes);
 	const size_t rowCount  = size_t(strip_h) * size_t(XRes);
 	const int peelPasses = xparPeelPassesEffective();
 	meka::GBuffer* sideGB = front ? g_gbufferTransparent : g_gbufferTransparentBack;
 	uint16_t*      sideZ  = front ? g_xparZ              : g_xparZBack;
+
+	// LEGACY per-strip band snapshot (blocky): only used when bandSnapshot=true.
+	// The barrier-per-layer TBR scheduler (TBR_Render_GlassLayered) passes
+	// bandSnapshot=false — glass then refracts the WHOLE-FRAME g_glassRefr* snapshot
+	// taken at the per-band barrier (coherent, no per-strip vertical clamp → no 8px
+	// stair-stepping). glassBandOn stays false, so the kernel sampler reads the
+	// full-frame snapshot. See TBR_Render_GlassLayered for the design.
+	bool glassClump = false;
+	if (bandSnapshot && fds::FeatureFlags::glass_refract() > 0.0f) {
+		for (int i = 0; i < count; ++i) {
+			Face* F = faces[i];
+			if (F && F->Txtr && F->Txtr->NormalMap) { glassClump = true; break; }
+		}
+	}
+	if (glassClump) glassBandSnapshotBegin(strip_y, strip_h);
 
 	// Raster the clump's faces into the side layer, then composite the strip
 	// rows. Clipper extents pin the rasterizer to the strip; faces route to
@@ -2936,6 +3210,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		if (sideGB) std::memset(sideGB->txtr.data() + rowStart, 0xFF, rowCount * sizeof(uint32_t));
 		if (sideZ)  std::memset(sideZ + rowStart, 0, rowCount * sizeof(uint16_t));
 		rasterAndComposite();
+		if (glassClump) glassBandSnapshotEnd();
 		return;
 	}
 
@@ -2954,6 +3229,7 @@ void RenderXparClumpInStrip(const DeferredLightingCtx &dctx,
 		if (sideZ)  std::memset(sideZ + rowStart, 0xFF, rowCount * sizeof(uint16_t));
 		rasterAndComposite();
 	}
+	if (glassClump) glassBandSnapshotEnd();
 }
 
 // Wave-2 of checkerboard: fills the odd (skipped) cells. For each odd

@@ -380,6 +380,15 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 			else              M->Flags &= ~Mat_Transparent;
 		}
 		else if (!std::strcmp(prop, "reflection"))   M->Reflection = value;
+		else if (!std::strcmp(prop, "refractive")) {
+			// Screen-space glass refraction OPT-IN (Mat_Refractive). Engine-only
+			// per-material flag (no LWO/FLD field) — persisted via the scene
+			// sidecar so glass is editor-settable. Consumed by the deferred
+			// transparent kernel + the TBR glass scheduler under --glass_refract.
+			// >0 marks the surface as refracting glass; 0 clears it.
+			if (value > 0.0f) M->Flags |=  Mat_Refractive;
+			else              M->Flags &= ~Mat_Refractive;
+		}
 		// Engine-only per-material dials (no LWO/FLD field — persist via the
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;

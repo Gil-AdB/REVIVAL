@@ -658,6 +658,32 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		if (fds::FeatureFlags::hdr() && !fds::g_hdrActive && !skipVolumetric)
 			{ TailProf::ScopeTimer _tp("hdr-activate"); fds::Hdr_ActivateNoFog(); } fds::Hdr_DebugScan("activate");
 
+		// Glass refraction (--glass_refract): snapshot the current accumulated
+		// background into the STABLE read-only buffers g_glassRefrHdr/Ldr that the
+		// refraction sampler reads. The peel writes g_hdrBuf/VPage concurrently
+		// across tiles, so refracting the LIVE buffer at an offset raced (offset
+		// read vs another tile mid-write) → flicker; a snapshot is race-free.
+		//
+		// LAYERED glass: this is now re-taken PER GLASS LAYER (before each glass
+		// batch composites, in the legacy flushBatch below) so each glass layer
+		// refracts everything already behind it — opaque AND earlier transparent
+		// layers — instead of only the opaque background. The unified-TBR path
+		// takes ONE opaque snapshot here (its out-of-band base) and per-strip band
+		// snapshots per glass clump (see glassBandSnapshotBegin). Gated on the flag
+		// so default-off is byte-identical; main pass only (skipVolumetric = RTT).
+		auto snapshotGlassBg = [&]() {
+			const size_t np = size_t(XRes) * size_t(YRes), n4 = np * 4;
+			if (fds::g_hdrActive && fds::g_hdrBuf.size() >= n4) {
+				if (fds::g_glassRefrHdr.size() < n4) fds::g_glassRefrHdr.resize(n4);
+				std::memcpy(fds::g_glassRefrHdr.data(), fds::g_hdrBuf.data(), n4 * sizeof(fds::hdrf));
+			}
+			if (VPage) {
+				if (fds::g_glassRefrLdr.size() < np) fds::g_glassRefrLdr.resize(np);
+				std::memcpy(fds::g_glassRefrLdr.data(), VPage, np * 4);
+			}
+		};
+		const bool glassRefrFrame = fds::FeatureFlags::glass_refract() > 0.0f && !skipVolumetric;
+
 		// HDR (Phase 2 overlay reorg): the tonemap used to run HERE (right after
 		// fog), forcing every overlay below to composite LDR over the tonemapped
 		// base. It now walks down the pipeline — the transparent peel + sprites
@@ -705,6 +731,13 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		// kept (used in strip-scoped form by RenderXparClumpInStrip per
 		// clump of consecutive same-(mesh, frontFacing) entries).
 		if (unifiedTbr) {
+			// Glass refraction (--glass_refract) in the unified-TBR peel is handled
+			// entirely per-strip: before each glass clump composites,
+			// RenderXparClumpInStrip snapshots the strip's own row band and the
+			// refraction sampler reads that (clamped to the band). No frame-wide
+			// pre-peel snapshot is needed here — the sampler never reads g_glassRefr*
+			// on this path (glass pixels always have an active band). See
+			// glassBandSnapshotBegin / the report for the strip-height trade-off.
 			for (int32_t k = 0; k < CAll; ++k) {
 				Face* F = FList[k].face;
 				if (!F || !F->Txtr) continue;
@@ -830,6 +863,30 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 			const int first = batchFirst;
 			const int count = batchLastEnd - batchFirst;
 			const bool reverseMode = (peelPasses > 1);
+
+			// LAYERED glass (--glass_refract): re-snapshot the accumulated
+			// background NOW — before this batch composites — so it refracts
+			// everything already behind it (opaque + every earlier transparent
+			// batch), not just the opaque background. The batch loop is serial with
+			// a tile-drain barrier between batches (runTilePass drains), so the
+			// buffer is quiescent here on the main thread → the memcpy is race-free.
+			// The kernel now refracts EVERY non-water transparent (flat facets via
+			// the geometric normal, not just normal-mapped relief), so the snapshot
+			// must fire for flat glass too (greets 'amudim' screens). Skip mirror
+			// CLONE geometry (mirrorMaskTag != 0: reflected room in mirror space) and
+			// mirror-MASK walls (XparBlendAlpha < 0): they don't refract, and greets
+			// has many of them — snapshotting each would be pure cost.
+			if (glassRefrFrame) {
+				bool glassBatch = false;
+				for (int k = first; k < batchLastEnd; ++k) {
+					Face* F = FList[k].face;
+					if (!F || !F->Txtr) continue;
+					if (F->mirrorMaskTag != 0) continue;
+					if (F->Txtr->XparBlendAlpha < 0.0f) continue;
+					glassBatch = true; break;
+				}
+				if (glassBatch) snapshotGlassBg();
+			}
 
 			// CLONE batch (reflected mirror geometry): bound by the mirror's
 			// stamped window, not the clone's own projection. The clone lives in
