@@ -597,6 +597,12 @@
       <div id="editor-knobs-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
         <span>Render knobs <span id="editor-knobs-count" style="color:#6c8;font-size:10px;"></span></span>
         <span style="font-weight:normal;">
+          <select id="editor-bake-res" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;margin-right:6px;vertical-align:-1px;cursor:pointer;" title="env-reflection bake resolution, pixels per cube face (env_bake_res render knob). Picking a size re-bakes EVERY panorama at the new resolution on the next frame (same as rebake refl). City per-building stores cap at their 512² source bake.">
+            <option value="128">128²</option>
+            <option value="256" selected>256²</option>
+            <option value="512">512²</option>
+            <option value="1024">1024²</option>
+          </select>
           <a id="editor-rebake-env" href="#" style="color:#69c;font-size:10px;text-decoration:none;margin-right:8px;" title="re-bake the env-reflection panoramas with the CURRENT lights/materials (they capture the scene once, at first use)">rebake refl</a>
           <a id="editor-pano-view" href="#" style="color:#6c9;font-size:10px;text-decoration:none;margin-right:8px;" title="page through the baked env-reflection panoramas as an on-screen overlay (env_refl_viz; click to cycle, shift-click to go back, reaches 'off' after the last one)">pano: off</a>
           <a id="editor-knobs-resetall" href="#" style="color:#c96;font-size:10px;text-decoration:none;margin-right:8px;" title="reset every explicitly-set knob to its default">reset all</a>
@@ -943,6 +949,8 @@
           editorParamsPristine = {};
           editorParams.forEach(function(p){ editorParamsPristine[p.name] = p.value; });
         }
+        // Keep the header's bake-res dropdown honest (CLI/env/knob edits).
+        if (window.editorSyncBakeRes) window.editorSyncBakeRes();
       }
       function knobPristine(p){
         return (editorParamsPristine && p.name in editorParamsPristine)
@@ -1062,11 +1070,39 @@
         try { Module.editorRebakeEnv(); editorStatus('env reflections invalidated — re-baking next frame'); }
         catch(err){ editorStatus('rebake failed: ' + err); }
       };
+      // Bake-res dropdown: env_bake_res knob + live rebake. Picking a size
+      // sets the flag through the same write path as the CLI (editorSetParam
+      // marks it explicitly set — the engine's isSet gate) and invalidates
+      // every panorama so the NEXT frame re-bakes at the new resolution.
+      window.editorSyncBakeRes = function(){
+        var sel = document.getElementById('editor-bake-res');
+        if (!sel || !editorParams.length) return;
+        var p = editorParams.find(function(x){ return x.name === 'env_bake_res'; });
+        if (p && ['128','256','512','1024'].indexOf(String(+p.value)) >= 0)
+          sel.value = String(+p.value);
+      };
+      (function(){
+        var sel = document.getElementById('editor-bake-res');
+        if (!sel) return;
+        sel.onclick = function(e){ e.stopPropagation(); };   // not a header toggle
+        sel.onchange = function(){
+          var v = parseInt(sel.value, 10);
+          if (!Module.editorSetParam) return;
+          try {
+            Module.editorSetParam('env_bake_res', String(v));
+            Module.editorRebakeEnv();
+            editorStatus('bake res = ' + v + '² — re-baking every env panorama next frame');
+          } catch(err){ editorStatus('bake res failed: ' + err); }
+        };
+      })();
       document.getElementById('editor-knobs-hdr').onclick = function(e){
         if (e.target && (e.target.id === 'editor-knobs-all' ||
                          e.target.id === 'editor-knobs-resetall' ||
                          e.target.id === 'editor-rebake-env' ||
                          e.target.id === 'editor-pano-view' ||
+                         e.target.id === 'editor-bake-res' ||
+                         e.target.tagName === 'SELECT' ||
+                         e.target.tagName === 'OPTION' ||
                          e.target.tagName === 'LABEL')) return;   // controls, not a toggle
         var el = document.getElementById('editor-knobs');
         var opening = el.style.display === 'none';
