@@ -277,6 +277,11 @@ void DemoBoot(ModplayerHandle modHandle)
 			// surfaces (greets screens, fountain glass) show their real look
 			// while editing. The demo keeps the flag's normal default (off).
 			"--glass-refract=1",
+			// Editor-only default: PBR-shaded transparents, so dialing the
+			// transparency slider up on a PBR material keeps its normal-map/
+			// AO/roughness/metallic look instead of degrading to a flat
+			// transparent texture. The demo keeps the flag's default (off).
+			"--xpar-pbr",
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8

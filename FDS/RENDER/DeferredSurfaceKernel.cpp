@@ -2494,6 +2494,18 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const float wDeepR = fds::FeatureFlags::water_deep_r();
 	const float wRefl  = fds::FeatureFlags::water_reflectivity();
 	const float wFresBase = fds::FeatureFlags::water_fresnel_base();   // reflection floor looking down
+	// ── --xpar-pbr: PBR-shaded transparents (see the per-pixel block below).
+	//    Hoisted once per tile like the opaque kernel's flag cache; when the
+	//    flag is off every gate below is false and the path costs nothing. ──
+	const bool  xparPbrOn       = fds::FeatureFlags::xpar_pbr();
+	const bool  xpNmapOn        = xparPbrOn && !fds::FeatureFlags::no_nmap();
+	const int   xpNmapFadeStart = fds::FeatureFlags::nmap_lod_fade_start();
+	const float xpNmapFadeStep  = fds::FeatureFlags::nmap_lod_fade_step();
+	const bool  xpAoOn          = xparPbrOn && fds::FeatureFlags::ao_map();
+	const float xpAoK           = fds::FeatureFlags::ao_map_strength();
+	const bool  xpRoughOn       = xparPbrOn && fds::FeatureFlags::roughness_map();
+	const float xpRoughK        = fds::FeatureFlags::roughness_strength();
+	const bool  xpMetalOn       = xparPbrOn && fds::FeatureFlags::metal_map();
 	const TileLights &tlTile = ctx.tileLights[tileIndex];
 	const ViewLightsSoA *vlAll = ctx.lights;
 	const int allCount = ctx.numLights;
@@ -2709,6 +2721,90 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				if (wFres < 0.0f) wFres = 0.0f; if (wFres > 1.0f) wFres = 1.0f;
 			}
 
+			// ── --xpar-pbr: PBR-shaded transparents (default OFF = byte-
+			//    identical). Bring the opaque kernel's per-pixel PBR stack to
+			//    the transparent LIT inputs — the alpha/additive blend math
+			//    below is untouched. Here: (1) NormalMap perturbs the shading
+			//    normal used by the light loop + specular (same decode + LOD
+			//    fade + TBN as the opaque kernel; tangent is the Mikkelsen
+			//    fallback since the xpar G-buffer carries no tangent plane);
+			//    (2) AO (albedo-alpha or separate AoMap) attenuates the
+			//    ambient term BEFORE the omni loop adds direct light — the
+			//    opaque convention (direct light is shadowed, not AO'd).
+			//    Roughness/metallic follow after the light loop. Water keeps
+			//    its dedicated path (fresnel/deep-colour, no PBR maps). ──
+			const bool xparPbrPx = xparPbrOn && !isWater;
+			bool xparPbrNormApplied = false;
+			if (xparPbrPx) {
+				if (xpNmapOn && Mat->NormalMap) {
+					float nmX, nmY, nmZ;
+					if (decodeNormalTexel(Mat->NormalMap, miplevel, swizzledUV, nmX, nmY, nmZ)) {
+						// LOD-aware bump fade — mirrors the opaque kernel
+						// (averaged normal mips turn into lighting noise).
+						if (int(miplevel) >= xpNmapFadeStart) {
+							const int   over = int(miplevel) - xpNmapFadeStart + 1;
+							const float fade = 1.0f - float(over) * xpNmapFadeStep;
+							const float s = fade > 0.0f ? fade : 0.0f;
+							nmX *= s; nmY *= s;
+						}
+						// Mikkelsen on-the-fly tangent (the opaque kernel's
+						// fallback; same reconstruction the glass-refraction
+						// block uses — which reuses THIS perturbed normal
+						// instead of re-deriving, see xparPbrNormApplied).
+						float rfx, rfy, rfz;
+						if (std::fabs(ny) < 0.9f) { rfx = 0.0f; rfy = 1.0f; rfz = 0.0f; }
+						else                      { rfx = 1.0f; rfy = 0.0f; rfz = 0.0f; }
+						float tx = rfy*nz - rfz*ny, ty = rfz*nx - rfx*nz, tz = rfx*ny - rfy*nx;
+						const float tinv = fast_rsqrt(tx*tx + ty*ty + tz*tz);
+						tx *= tinv; ty *= tinv; tz *= tinv;
+						// B = handedness·(N×T) — matches the opaque kernel's
+						// mirrored-UV handling (rooms/floor clones carry -1).
+						const float hsign = Mat->TbnHandedness;
+						const float bx = (ny*tz - nz*ty) * hsign;
+						const float by = (nz*tx - nx*tz) * hsign;
+						const float bz = (nx*ty - ny*tx) * hsign;
+						float vnx = tx*nmX + bx*nmY + nx*nmZ;
+						float vny = ty*nmX + by*nmY + ny*nmZ;
+						float vnz = tz*nmX + bz*nmY + nz*nmZ;
+						const float vinv = fast_rsqrt(vnx*vnx + vny*vny + vnz*vnz);
+						nx = vnx*vinv; ny = vny*vinv; nz = vnz*vinv;
+						xparPbrNormApplied = true;
+					}
+				}
+				if (xpAoOn) {
+					const bool aoInAlpha = (Mat->Flags & Mat_AoInAlpha) != 0;
+					float ao = 1.0f;
+					bool haveAo = false;
+					if (aoInAlpha) {
+						ao = float((texel >> 24) & 0xFF) * (1.0f/255.0f);  // free (albedo alpha)
+						haveAo = true;
+					} else if (Mat->AoMap && miplevel < Mat->AoMap->numMipmaps
+					           && Mat->AoMap->Mipmap[miplevel]) {
+						// Separate AoMap: 8-bit (MakeHeight8 import) reads the
+						// byte directly; 32-bit BGRA takes the luminance like
+						// the opaque kernel. Same swizzledUV/miplevel as the
+						// diffuse (import enforces matching dims); a missing
+						// mip skips gracefully (haveAo stays false).
+						if (Mat->AoMap->BPP == 8) {
+							ao = float(reinterpret_cast<const byte*>(
+								Mat->AoMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+						} else {
+							const dword aoTexel = reinterpret_cast<const dword*>(
+								Mat->AoMap->Mipmap[miplevel])[swizzledUV];
+							ao = (float(aoTexel & 0xFF)         * 0.114f
+							    + float((aoTexel >> 8)  & 0xFF) * 0.587f
+							    + float((aoTexel >> 16) & 0xFF) * 0.299f) * (1.0f/255.0f);
+						}
+						haveAo = true;
+					}
+					if (haveAo) {
+						// Global dial × per-material dial — opaque convention.
+						ao = 1.0f - xpAoK * Mat->AoStrength * (1.0f - ao);
+						lB *= ao; lG *= ao; lR *= ao;
+					}
+				}
+			}
+
 			// ── Glass refraction: pick the background sample pixel for this
 			//    fragment. Off / non-glass → straight through (byte-identical
 			//    composite below). See FeatureFlags::glass_refract. ──
@@ -2741,8 +2837,11 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				// no tangent plane, and the exact tangent rotation is irrelevant to
 				// the relief-warp magnitude. No normal map → geometric normal (flat
 				// facets refract uniformly through the facet tilt).
+				// --xpar-pbr already perturbed nx/ny/nz with the same
+				// reconstruction (xparPbrNormApplied) — reuse it, don't
+				// perturb twice. Flag off → false → byte-identical.
 				float pnx = nx, pny = ny, pnz = nz;
-				if (Mat->NormalMap) {
+				if (Mat->NormalMap && !xparPbrNormApplied) {
 					float nmX, nmY, nmZ;
 					if (decodeNormalTexel(Mat->NormalMap, miplevel, swizzledUV, nmX, nmY, nmZ)) {
 						float rfx, rfy, rfz;
@@ -2970,6 +3069,49 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				// is blended in the screen-space water pass, not the swizzled kernel.
 				const float k = 1.0f - wFres;
 				litB = int(wDeepB * k); litG = int(wDeepG * k); litR = int(wDeepR * k);
+			}
+			// ── --xpar-pbr (continued): metallic + roughness on the lit
+			//    inputs, matching the opaque kernel's order — metal kills
+			//    diffuse (litRGB here = the texture-modulated lit colour,
+			//    both LDR and hdr-linear encodes), roughness dims the
+			//    specular accumulator, then metal tints the surviving spec
+			//    by the albedo. The opaque kernel's THIRD metal term (env
+			//    reflection tinted at F0→1) has no counterpart here — the
+			//    xpar composite carries no env term — so a full metal
+			//    transparent is diffuse-killed + albedo-tinted spec only.
+			//    Skipped for the HDR-mirror panels (hdrRefl already carries
+			//    the full baked radiance) and water (own path). Same
+			//    swizzledUV/miplevel + numMipmaps guards as the opaque
+			//    fetches — absent maps/mips skip gracefully. ──
+			if (xparPbrPx && !isHdrRefl) {
+				float metalM = 0.0f;
+				if (xpMetalOn && Mat->MetallicMap
+				    && miplevel < Mat->MetallicMap->numMipmaps
+				    && Mat->MetallicMap->Mipmap[miplevel]) {
+					metalM = float(reinterpret_cast<const byte*>(
+						Mat->MetallicMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f);
+					if (metalM > 0.0f) {
+						const float dk = 1.0f - metalM;
+						litB = int(float(litB) * dk);
+						litG = int(float(litG) * dk);
+						litR = int(float(litR) * dk);
+					}
+				}
+				if (xpRoughOn && Mat->RoughnessMap
+				    && (sB != 0.0f || sG != 0.0f || sR != 0.0f)
+				    && miplevel < Mat->RoughnessMap->numMipmaps
+				    && Mat->RoughnessMap->Mipmap[miplevel]) {
+					float specMul = 1.0f - xpRoughK * (float(reinterpret_cast<const byte*>(
+						Mat->RoughnessMap->Mipmap[miplevel])[swizzledUV]) * (1.0f/255.0f));
+					if (specMul < 0.0f) specMul = 0.0f;
+					sB *= specMul; sG *= specMul; sR *= specMul;
+				}
+				if (metalM > 0.0f) {
+					const float inv255 = 1.0f / 255.0f;
+					sB *= 1.0f - metalM + metalM * texB * inv255;
+					sG *= 1.0f - metalM + metalM * texG * inv255;
+					sR *= 1.0f - metalM + metalM * texR * inv255;
+				}
 			}
 			// Specular added on top — independent of base color tint. Skipped for
 			// the HDR-reflection path (hdrRefl already carries the full radiance).
