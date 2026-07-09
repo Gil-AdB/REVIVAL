@@ -87,12 +87,22 @@ def scene_sidecar(scene):
 ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "glossiness", "luminosity", "transparency", "reflection",
                  # smoothAngle is a NATIVE LWO/FLD field (MaxSmoothingAngle +
-                 # the Surf_Smoothing flag), so it round-trips through the FLD
-                 # patcher like diffuse/specular — NOT the engine-only sidecar.
+                 # the Surf_Smoothing flag), so on FLD-patched scenes (city/
+                 # crash) it round-trips through fldpatch like diffuse/specular.
+                 # But the LWO patcher (authoring scenes: greets/chase/fountain)
+                 # has no smoothing chunk, so there it is peeled to the sidecar
+                 # instead — see split_surface_sidecar_keys / SMOOTH_SIDECAR.
                  "smoothAngle"}
 # Engine-only per-material dials with no LWO/FLD field — persist as sidecar
 # surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
 SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive"}
+# smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
+# scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
+# persists to the sidecar there instead: the engine honors a
+# 'surface|smoothAngle|value' override at the init normal rebuild
+# (MakeFacesIndependent) regardless of --surf_smoothing_authored — the override
+# always wins. FLD-patched scenes keep the native fldpatch path.
+SMOOTH_SIDECAR = {"smoothAngle"}
 
 
 def split_surface_sidecar_keys(scene, surfaces, warnings):
@@ -104,12 +114,15 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         return []
     sidecar = scene_sidecar(scene)
     entries = read_sidecar(sidecar)
+    # Authoring scenes have no LWO smoothing chunk — route smoothAngle to the
+    # sidecar there (see SMOOTH_SIDECAR); FLD scenes patch it natively.
+    keys = SURF_SIDECAR_KEYS | (SMOOTH_SIDECAR if SCENES[scene].get("authoring") else set())
     saved = []
     for name in list(surfaces):
         props = surfaces[name]
         if not isinstance(props, dict):
             continue
-        side = {k: props.pop(k) for k in list(props) if k in SURF_SIDECAR_KEYS}
+        side = {k: props.pop(k) for k in list(props) if k in keys}
         base = re.sub(r"#\d+$", "", name)
         for k, v in side.items():
             entries[(base, k)] = f"{float(v):.6g}"

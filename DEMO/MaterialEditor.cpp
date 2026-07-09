@@ -1,5 +1,6 @@
 #include "MaterialEditor.h"
 #include "MaterialImport.h"   // MaterialImport_ApplyMapFile
+#include "MeshOps.h"          // MeshOps_GetSurfaceSmoothAngle (live smoothing override)
 
 #include <Base/FDS_VARS.H>   // MatLib, CurScene
 #include <Base/Material.h>
@@ -91,6 +92,21 @@ std::string Editor_GetSurfacesJSON()
 		appendNum(out, "tintG",        M->TintG);        out += ",";
 		appendNum(out, "tintB",        M->TintB);        out += ",";
 		appendNum(out, "normalFlip",   fds::MaterialImport_GetNormalFlip(M)); out += ",";
+		// Glass refraction opt-in (Mat_Refractive). Under --glass_refract only
+		// surfaces carrying this bit refract the opaque background; the editor
+		// checkbox flips it (setProp -> MaterialImport_SetSurfaceProp), persisted
+		// via the scene sidecar ('refractive' in SURF_SIDECAR_KEYS).
+		appendNum(out, "refractive",   (M->Flags & Mat_Refractive) ? 1 : 0); out += ",";
+		// Per-surface smoothing angle (degrees). Show the LIVE sidecar override
+		// if one is registered (so it round-trips after Save + reload), else the
+		// authored Material::MaxSmoothingAngle (stored in radians). Consumed by
+		// MakeFacesIndependent at scene init (see MeshOps.cpp).
+		{
+			float smoothDeg;
+			if (!MeshOps_GetSurfaceSmoothAngle(base.c_str(), smoothDeg))
+				smoothDeg = M->MaxSmoothingAngle * (180.0f / 3.14159265358979323846f);
+			appendNum(out, "smoothAngle", smoothDeg); out += ",";
+		}
 		out += M->NormalMap ? "\"hasNormalMap\":1," : "\"hasNormalMap\":0,";
 		out += (M->AoMap || (M->Flags & Mat_AoInAlpha)) ? "\"hasAoMap\":1," : "\"hasAoMap\":0,";
 		out += M->HeightMap ? "\"hasHeightMap\":1," : "\"hasHeightMap\":0,";

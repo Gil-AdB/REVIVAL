@@ -714,7 +714,10 @@
       // aoStrength/parallaxScale are engine-only dials (× the global
       // ao_map_strength / parallax_strength) — the server persists them to the
       // scene sidecar, the rest to LWO/FLD.
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB'];
+      // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
+      // per-surface normal-smoothing threshold (native FLD field on city/crash,
+      // sidecar on authoring scenes — the server routes it per scene).
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -1367,7 +1370,8 @@
       // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
                             transparency:[0,100], reflection:[0,100],
-                            aoStrength:[0,2], parallaxScale:[0,3] };
+                            aoStrength:[0,2], parallaxScale:[0,3],
+                            smoothAngle:[0,180] };
       // Slider + numeric twin. The number box accepts values beyond the slider
       // range (type an exact 3.5 even if the slider tops out at 2).
       function propRow(s, key, min, max, step){
@@ -1656,9 +1660,17 @@
           row.appendChild(inp);
           el.appendChild(row);
         })();
-        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale'].forEach(function(k){
+        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale','smoothAngle'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
-          var row = propRow(s, k, rg[0], rg[1], (rg[1]-rg[0]) / 200);
+          var row = propRow(s, k, rg[0], rg[1], k === 'smoothAngle' ? 1 : (rg[1]-rg[0]) / 200);
+          if (k === 'smoothAngle') {
+            // Per-surface normal-smoothing threshold (deg). 0 = faceted,
+            // 180 = fully smooth. The engine rebuilds vertex normals from this
+            // ONLY at scene init — no live re-smooth — so it is persist-on-Save:
+            // set it, Save, then Reload scene to see it. greets/city/crash
+            // rebuild normals by angle; fountain/chase do not.
+            row.title = 'per-surface normal smoothing angle (degrees): 0 = faceted, 180 = fully smooth. Applied when mesh normals rebuild at scene INIT — set it, Save, then Reload scene to see it (no live re-smooth). greets/city/crash honor it; fountain/chase don\'t rebuild normals.';
+          }
           if (k === 'aoStrength') {
             row.title = 'per-material AO-map strength (x global ao_map_strength). Darkens the AMBIENT term only — subtle in direct-light-heavy scenes.';
             if (!+s.hasAoMap) {
@@ -1678,6 +1690,21 @@
           }
           el.appendChild(row);
         });
+        // REFRACTIVE (glass): mark this material as screen-space-refracting
+        // glass. Under the --glass_refract render knob, ONLY surfaces carrying
+        // this flag refract the opaque background behind them (others blend as
+        // usual). Live-applies (Mat_Refractive set on the live material → shows
+        // next frame under --glass_refract); persists via the scene sidecar.
+        (function(){
+          var rr = document.createElement('div'); rr.className = 'prop-row';
+          var rl = document.createElement('label'); rl.textContent = 'refractive';
+          rr.title = 'mark as refracting GLASS: under the --glass_refract render knob (Render section), only surfaces with this flag refract the opaque background behind them — others just blend. Best on transparent surfaces with a normal/height map (below), which drives the refraction displacement. Live-applies; persists via sidecar.';
+          rr.appendChild(rl);
+          var rc = document.createElement('input'); rc.type = 'checkbox'; rc.checked = !!(+s.refractive);
+          rc.onchange = function(){ setProp(s.name, 'refractive', rc.checked ? 1 : 0); };
+          rr.appendChild(rc);
+          el.appendChild(rr);
+        })();
         // Normal-map controls: G-channel convention flip (OGL↔DX) + viz
         // shortcut. Only meaningful when the surface HAS a normal map.
         if (+s.hasNormalMap) {
