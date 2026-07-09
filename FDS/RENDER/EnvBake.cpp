@@ -16,6 +16,7 @@
 #include <FILLERS/Mekalele.h> // g_gbuffer->mirrorMask neutralization (bake)
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -410,6 +411,30 @@ struct SceneEnv {
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
 
+// --env-bake-res: explicit FACE resolution for the deferred env-reflection
+// stores (bakeStore probes AND RegisterCubeFaces imports). Returns 0 when the
+// user did NOT set it (CLI/env) — callers then keep their legacy sizing
+// (env_refl_res/2 for probes, the caller's storeRes for imports), which keeps
+// the pinned baselines byte-identical. Sanitized: clamped to [64,1024] and
+// rounded DOWN to a power of two — the 4-level mip chain and the samplers'
+// shift-indexed dims (envP->W >> lvl) need cleanly halvable sizes. The value
+// is read at BAKE time only; every consumer reads dims from the store's own
+// recorded W/H/numMips, so mixed-res stores coexist safely.
+int envBakeResOverride() {
+    if (!FeatureFlags::isSet(FeatureFlags::IntId::env_bake_res)) return 0;
+    const int want = FeatureFlags::env_bake_res();
+    const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
+    int p2 = 64;
+    while (p2 * 2 <= clamped) p2 <<= 1;
+    static int noted = INT_MIN;
+    if (p2 != want && noted != want) {
+        noted = want;
+        std::fprintf(stderr, "[ENVREFL] env_bake_res=%d invalid (want a power"
+                     " of two in 64..1024) — using %d\n", want, p2);
+    }
+    return p2;
+}
+
 // 2×2 box downsample (per-channel average), ARGB.
 void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
                    std::vector<uint32_t>& dst) {
@@ -617,15 +642,22 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         Material* skipMat = nullptr,
                                         float skipRadius = 0.0f) {
     EnvBakeParams params;
-    // --env_refl_res (default 512): reflections are roughness-blurred by eye
-    // anyway, so half the CITY bake res reads fine. Clamp: the mip chain
-    // needs res ≥ 64; cap at 1024.
-    int res = fds::FeatureFlags::env_refl_res();
-    if (res < 64) res = 64;
-    if (res > 1024) res = 1024;
-    params.cubeRes = res / 2;
-    params.panoWidth = res;
-    params.panoHeight = res;
+    // Bake sizing: --env-bake-res (explicit FACE res, pow2 64..1024) wins;
+    // else the legacy --env_refl_res sizing (default 512): reflections are
+    // roughness-blurred by eye anyway, so half the CITY bake res reads fine.
+    // Clamp: the mip chain needs res ≥ 64; cap at 1024.
+    if (const int face = envBakeResOverride()) {
+        params.cubeRes = face;                    // cube stores: W=H=face res
+        params.panoWidth  = face * 2;             // equirect stores keep the
+        params.panoHeight = face * 2;             // legacy 2×face pano size
+    } else {
+        int res = fds::FeatureFlags::env_refl_res();
+        if (res < 64) res = 64;
+        if (res > 1024) res = 1024;
+        params.cubeRes = res / 2;
+        params.panoWidth = res;
+        params.panoHeight = res;
+    }
     const bool useCube = fds::FeatureFlags::env_cube();
     // --env_bake_fix: the whole corrected-bake bundle (per-face projection
     // publish, face-level self-exclusion, metal neutralization, mirror-mask
@@ -861,6 +893,19 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     int storeRes, const Vector& bakePoint,
                                     float pullOpt) {
     if (!sc || !M || !faceMajor || faceRes < 64) return -1;
+    // --env-bake-res set explicitly: override the caller's store resolution
+    // (CITY passes a hardcoded 256). Capped at faceRes below — the source
+    // faces are what they are (CITY bakes 512²); we only ever downsample.
+    if (const int face = envBakeResOverride()) {
+        static bool noted = false;
+        if (!noted && face != storeRes) {
+            noted = true;
+            std::fprintf(stderr, "[ENVREFL] env_bake_res=%d overrides"
+                         " registered-store res (caller asked %d^2; capped at"
+                         " the %d^2 source faces)\n", face, storeRes, faceRes);
+        }
+        storeRes = face;
+    }
     if (storeRes > faceRes) storeRes = faceRes;
     SceneEnv& env = g_envByScene[sc];
     auto store = std::make_unique<EnvPanoStore>();
