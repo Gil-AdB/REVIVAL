@@ -273,6 +273,10 @@ void DemoBoot(ModplayerHandle modHandle)
 			// self-exclusion, metal neutralization) — kept off in the demo
 			// only to preserve the pinned city baseline.
 			"--env_refl", "--env_bake_fix",
+			// Editor-only default: glass refraction ON so refractive-marked
+			// surfaces (greets screens, fountain glass) show their real look
+			// while editing. The demo keeps the flag's normal default (off).
+			"--glass-refract=1",
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8
@@ -298,12 +302,13 @@ void DemoBoot(ModplayerHandle modHandle)
 		for (auto &a : args) argv.push_back(a.c_str());
 		fds::FeatureFlags::parseArgs((int)argv.size(), argv.data());
 		// Mirrors default OFF in the editor (historical wasm-memory caution —
-		// the measured overhead is now ~15 MB, so an EXPLICIT ?editor&greets-mirror
-		// /&mirror-rtt in the URL is honored; without one they stay off).
+		// Editor default: mirrors ON (user request) — the clone/bake overhead is
+		// ~15 MB now, well inside the wasm heap. ?editor&no-greets-mirror /
+		// &no-mirror-rtt in the URL still win (isSet guards both directions).
 		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::greets_mirror))
-			fds::FeatureFlags::setParamFromText("greets_mirror", "0");
+			fds::FeatureFlags::setParamFromText("greets_mirror", "1");
 		if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::mirror_rtt))
-			fds::FeatureFlags::setParamFromText("mirror_rtt", "0");
+			fds::FeatureFlags::setParamFromText("mirror_rtt", "1");
 		fprintf(stderr, "[EDITOR] %s editor: full native pipeline (%d flags), mirror %s\n",
 		        g_editorScene->name, (int)args.size() - 1,
 		        fds::FeatureFlags::greets_mirror() ? "ON (URL opt-in)" : "off (default)");
