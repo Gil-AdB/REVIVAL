@@ -1339,6 +1339,32 @@ void Initialize_Greets()
 
 	Preprocess_Scene(GreetSc, "GREETS");
 
+	// Refraction OPT-IN (Mat_Refractive) — CODE DEFAULTS: mark the greets glass
+	// display panels so they keep refracting the room behind them under
+	// --glass_refract now that refraction is per-material opt-in. These are the
+	// transparent (Mat_Transparent from the FLD) half-silvered "amudim"/column
+	// glass screens sharing the P_TEXT design plus the glass lamp cover — the
+	// ONLY greets transparents that refracted under the old blanket gate
+	// ('screen 4' is the display opposite the teleporter and the sole visible
+	// refractor at the greets snapshot pose; 'screen2' is the column panel;
+	// 'lamp light' the lamp glass). ('amudim' itself is opaque MARB4 marble —
+	// not glass; the room walls / mirror-mask clones stay unmarked.)
+	//
+	// ORDER MATTERS: this must run BEFORE MaterialImport_ApplySidecar below.
+	// 'refractive' is a SURF_SIDECAR_KEYS prop the editor persists (e.g.
+	// "screen 4|refractive|0" in GREETS.MAT) — the sidecar is the USER's
+	// override of these code defaults, so defaults-first / sidecar-last is the
+	// only order where a saved toggle survives the next scene load. (This block
+	// used to live inside the normal-map-bake loop after the sidecar and
+	// silently re-marked surfaces the user had un-marked.) FOUNTAIN.CPP already
+	// follows this order for its glass set.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != GreetSc || !M->Name) continue;
+		if (!std::strcmp(M->Name, "screen 4") || !std::strcmp(M->Name, "screen2") ||
+		    !std::strcmp(M->Name, "lamp light"))
+			M->Flags |= Mat_Refractive;
+	}
+
 	// Persisted PBR map assignments (the editor's "Save" writes this sidecar —
 	// LWO1 can't hold map paths, so they live here). Before the CLI overlay so
 	// an explicit --material-import still wins for testing.
@@ -1407,19 +1433,9 @@ void Initialize_Greets()
 				std::fprintf(stderr, "[GREETS] baked tangent-space normal map for '%s'\n", n);
 			}
 		}
-		// Refraction OPT-IN (Mat_Refractive): mark the greets glass display panels
-		// so they keep refracting the room behind them under --glass_refract once
-		// refraction is per-material opt-in. These are the transparent (Mat_Transparent
-		// from the FLD) half-silvered "amudim"/column glass screens sharing the P_TEXT
-		// design plus the glass lamp cover — the ONLY greets transparents that refracted
-		// under the old blanket gate ('screen 4' is the display opposite the teleporter
-		// and the sole visible refractor at the greets snapshot pose; 'screen2' is the
-		// column panel; 'lamp light' the lamp glass). Marking exactly this set keeps the
-		// shipped --glass-refract look unchanged. ('amudim' itself is opaque MARB4 marble —
-		// not glass; the room walls / mirror-mask clones stay unmarked → no refraction.)
-		if (!std::strcmp(n, "screen 4") || !std::strcmp(n, "screen2") ||
-		    !std::strcmp(n, "lamp light"))
-			M->Flags |= Mat_Refractive;
+		// NOTE: the Mat_Refractive opt-in marking that used to live here moved
+		// ABOVE MaterialImport_ApplySidecar — a sidecar-persisted 'refractive'
+		// override must not be stomped by code defaults (see the comment there).
 	}
 
 	gg->Init();
