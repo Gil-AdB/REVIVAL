@@ -166,14 +166,6 @@ std::string Editor_GetSurfacesJSON()
 	return out;
 }
 
-// Objects can't be derived from meshes here: greets' big per-round meshes mix
-// room AND mech faces in one TriMesh (verified via the DUMP_MESHES snapshot
-// hook), and surface names are reused across models (the room hull is also
-// called "hull"). The one well-defined multi-part model is the robot-clone
-// naming scheme itself: "X.lwo::surf[_body|_upper]" materials exist precisely
-// to give a multi-mesh animated model per-part materials. So the hierarchy is
-// name-derived: one parent object per clone-file family (the mech), with a
-// child object per file (Hull.lwo, L_leg1.lwo, …), each listing its surfaces.
 static void appendSurfArray(std::string& out, const std::set<std::string>& names)
 {
 	out += "\"surfaces\":[";
@@ -188,43 +180,152 @@ static void appendSurfArray(std::string& out, const std::set<std::string>& names
 	out += "]";
 }
 
-// Fallback hierarchy for scenes WITHOUT the clone-file material naming
-// (city/chase/fountain/crash): the FLD OBJECT TREE. Unlike greets' merged
-// per-round meshes, those scenes keep one Object per model instance, each
-// carrying its authored name ("SHIP1.lwo", 21 × "b1.lwo") and — for assembled
-// models like the city trains — a resolved Parent link (tra_vagn → tra_frnt).
-// General rule, no scene-specific cases:
-//   • instances dedupe by object name (one entry per distinct name);
-//   • each object belongs to its ROOT ancestor's group (follow Obj->Parent
-//     up); roots with several part names become a "<stem> (model)" entry
-//     with one child per part (the trains), single-part roots list their
-//     surfaces directly (ships, taxis, buildings);
-//   • "__mirrorClone_*" phantoms and face-less helpers (camera targets)
-//     are skipped.
-// Output shape matches the clone-family path: [{name, meshes, surfaces
-// [,children:[{name, surfaces}]]}] — `children` optional (the shell treats a
-// missing array as a leaf object and lists the surfaces).
-static std::string editorObjectsFromSceneTree()
+// Strip the static-bake mesh-splitting chunk suffix ("Piramid.lwo:c17" →
+// "Piramid.lwo") so all chunks of one authored object collapse into a single
+// editor entry. Greets' room is split into ~130 such chunk objects at init
+// (MeshOps chunking); scenes without splitting have no ':c<N>' names.
+std::string Editor_ChunkBaseObjName(const char *n)
 {
+	std::string s = n ? n : "";
+	const size_t colon = s.rfind(":c");
+	if (colon != std::string::npos && colon + 2 < s.size()) {
+		bool digits = true;
+		for (size_t i = colon + 2; i < s.size(); ++i)
+			if (s[i] < '0' || s[i] > '9') { digits = false; break; }
+		if (digits) s.resize(colon);
+	}
+	return s;
+}
+
+// Engine-generated helper meshes ("__mirrorClone_*" phantoms are skipped
+// outright; "__discoBall" and the unnamed 2-face shard_refl_atlas* meshes are
+// foldable) — anything the FLD didn't author under a real object name.
+static bool editorObjNameIsEngine(const char *n)
+{
+	return !n || !n[0] || (n[0] == '_' && n[1] == '_');
+}
+
+// UNIFIED object hierarchy for every scene: PRIMARY source is the FLD OBJECT
+// TREE (Obj->Name + resolved Parent links), with collapsing rules that tame
+// the noisy trees left behind by init-time mesh surgery:
+//   • ':c<N>' chunk suffixes collapse (greets' ~130 'Piramid.lwo:c<N>' static
+//     bake chunks → one 'Piramid' object);
+//   • instances dedupe by (chunk-collapsed) object name; each object belongs
+//     to its ROOT ancestor's group (follow Obj->Parent up); roots with
+//     several part names become a "<stem> (model)" entry with one child per
+//     part (city trains, the greets mech's 'mech  null' root), single-part
+//     roots list their surfaces directly (ships, taxis, buildings);
+//   • "__mirrorClone_*" phantoms and face-less helpers (camera targets) are
+//     skipped;
+//   • unnamed/engine-generated meshes (obj name empty or '__*') fold into the
+//     single named object that already carries ALL their surfaces when that
+//     is unambiguous, else into one trailing '(engine)' bucket the shell
+//     hides by default ("engine":1);
+//   • ENRICHMENT: the clone-file material naming ("Hull.lwo::hull" — the
+//     robot-clone scheme that gives greets' multi-mesh mech per-part
+//     materials) is merged in, not discarded: a part whose object name
+//     matches the family file gains the family's full surface set (covers
+//     zero-face clone materials like 'Hull2.lwo::hull' that dedup onto
+//     another file's Material), and families with no matching tree object
+//     get their own entry.
+// Output: [{name, obj, meshes, surfaces[, children:[{name, obj, surfaces}]]
+//           [, engine:1]}] — `children` optional (the shell treats a missing
+// array as a leaf and lists the surfaces); `obj` is the raw (chunk-collapsed)
+// engine object name — the key Editor_SetObjectScale takes.
+std::string Editor_GetObjectsJSON()
+{
+	if (!CurScene) return "[]";
 	struct Part { std::set<std::string> surfaces; long meshes = 0; };
 	std::map<std::string, std::map<std::string, Part>> roots;  // root → part → info
 	std::vector<std::string> rootOrder;                        // scene file order
+	std::vector<std::set<std::string>> engineMeshes;           // foldable helpers
+	long engineBucketMeshes = 0;
 	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
-		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name || !Obj->Name[0]) continue;
-		if (!std::strncmp(Obj->Name, "__mirrorClone_", 14)) continue;
+		if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+		if (Obj->Name && !std::strncmp(Obj->Name, "__mirrorClone_", 14)) continue;
 		TriMesh *T = (TriMesh *)Obj->Data;
 		if (!T->FIndex) continue;                   // camera targets, helpers
-		const Object *R = Obj;                      // root ancestor (cycle-guarded)
-		for (int hops = 0; R->Parent && hops < 64; ++hops) R = R->Parent;
-		const char *rootName = (R->Name && R->Name[0]) ? R->Name : Obj->Name;
-		if (!roots.count(rootName)) rootOrder.push_back(rootName);
-		Part &P = roots[rootName][Obj->Name];
-		++P.meshes;
+		std::set<std::string> surfs;
 		for (DWord f = 0; f < T->FIndex; ++f)
 			if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
-				P.surfaces.insert(Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+				surfs.insert(Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+		if (editorObjNameIsEngine(Obj->Name)) {
+			if (!surfs.empty()) engineMeshes.push_back(std::move(surfs));
+			continue;
+		}
+		const Object *R = Obj;                      // root ancestor (cycle-guarded)
+		for (int hops = 0; R->Parent && hops < 64; ++hops) R = R->Parent;
+		const std::string rootName = Editor_ChunkBaseObjName(
+			(R->Name && R->Name[0]) ? R->Name : Obj->Name);
+		if (!roots.count(rootName)) rootOrder.push_back(rootName);
+		Part &P = roots[rootName][Editor_ChunkBaseObjName(Obj->Name)];
+		++P.meshes;
+		P.surfaces.insert(surfs.begin(), surfs.end());
 	}
-	if (rootOrder.empty()) return "[]";
+	// Clone-family ENRICHMENT: file → its material surfaces (dedup'd base
+	// names). Merged into the matching tree part; leftover families become
+	// their own entries (the tree may lack an object for a naming-only file).
+	{
+		std::map<std::string, std::set<std::string>> families;
+		for (Material* M = MatLib; M; M = M->Next) {
+			if (M->RelScene != CurScene || !M->Name) continue;
+			const std::string base = Editor_BaseSurfName(M->Name);
+			const size_t sep = base.find("::");
+			if (sep == std::string::npos) continue;   // plain surface — not a model part
+			families[base.substr(0, sep)].insert(base);
+		}
+		for (auto& [file, surfs] : families) {
+			Part *hit = nullptr;
+			for (auto& [rootName, parts] : roots) {
+				auto it = parts.find(file);
+				if (it != parts.end()) { hit = &it->second; break; }
+			}
+			if (hit) {
+				hit->surfaces.insert(surfs.begin(), surfs.end());
+			} else {
+				if (!roots.count(file)) rootOrder.push_back(file);
+				Part &P = roots[file][file];
+				P.surfaces.insert(surfs.begin(), surfs.end());
+			}
+		}
+	}
+	// Fold engine helpers: a helper whose surfaces are ALL carried by exactly
+	// one named part belongs to that part; ambiguous/orphan helpers pool into
+	// one trailing '(engine)' bucket (hidden by default in the shell).
+	std::set<std::string> engineBucket;
+	for (const std::set<std::string> &surfs : engineMeshes) {
+		Part *owner = nullptr;
+		int owners = 0;
+		for (auto& [rootName, parts] : roots)
+			for (auto& [partName, P] : parts) {
+				bool allIn = true;
+				for (const std::string &s : surfs)
+					if (!P.surfaces.count(s)) { allIn = false; break; }
+				if (allIn) { ++owners; owner = &P; }
+			}
+		if (owners == 1) ++owner->meshes;   // surfaces already listed there
+		else { engineBucket.insert(surfs.begin(), surfs.end()); ++engineBucketMeshes; }
+	}
+	if (rootOrder.empty() && engineBucket.empty()) {
+		// Diagnostic for the wasm editor's "objects panel empty" reports: say
+		// WHY the tree came back empty while surfaces are enumerable (visible
+		// in the browser console via stderr).
+		long mats = 0, objs = 0, tri = 0, named = 0, faced = 0;
+		for (Material* M = MatLib; M; M = M->Next)
+			if (M->RelScene == CurScene && M->Name) ++mats;
+		for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+			++objs;
+			if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+			++tri;
+			if (Obj->Name && Obj->Name[0]) ++named;
+			if (((TriMesh *)Obj->Data)->FIndex) ++faced;
+		}
+		std::fprintf(stderr, "[EDITOR] objects: EMPTY tree (scene=%p mats=%ld "
+		             "objects=%ld trimesh=%ld named=%ld withFaces=%ld) — scene "
+		             "still initializing?\n", (void*)CurScene, mats, objs, tri,
+		             named, faced);
+		return "[]";
+	}
 	auto stem = [](const std::string &n) {
 		const size_t dot = n.find_last_of('.');
 		return dot == std::string::npos ? n : n.substr(0, dot);
@@ -245,6 +346,8 @@ static std::string editorObjectsFromSceneTree()
 		const bool multi = parts.size() > 1;
 		out += "{\"name\":\"";
 		jsonEscape(out, (multi ? stem(rootName) + " (model)" : stem(rootName)).c_str());
+		out += "\",\"obj\":\"";
+		jsonEscape(out, rootName.c_str());
 		out += "\",";
 		char buf[48];
 		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,", meshes);
@@ -258,6 +361,8 @@ static std::string editorObjectsFromSceneTree()
 				firstKid = false;
 				out += "{\"name\":\"";
 				jsonEscape(out, part.c_str());
+				out += "\",\"obj\":\"";
+				jsonEscape(out, part.c_str());
 				out += "\",";
 				appendSurfArray(out, P.surfaces);
 				out += "}";
@@ -266,66 +371,17 @@ static std::string editorObjectsFromSceneTree()
 		}
 		out += "}";
 	}
-	out += "]";
-	return out;
-}
-
-std::string Editor_GetObjectsJSON()
-{
-	if (!CurScene) return "[]";
-	// Clone-file → its surfaces (dedup'd editor base names).
-	std::map<std::string, std::set<std::string>> parts;
-	std::set<std::string> all;
-	for (Material* M = MatLib; M; M = M->Next) {
-		if (M->RelScene != CurScene || !M->Name) continue;
-		const std::string base = Editor_BaseSurfName(M->Name);
-		const size_t sep = base.find("::");
-		if (sep == std::string::npos) continue;   // plain surface — not a model part
-		parts[base.substr(0, sep)].insert(base);
-		all.insert(base);
-	}
-	// No clone-family naming (city & co.) → derive the hierarchy from the FLD
-	// object tree instead. Greets keeps its clone-family output untouched.
-	if (parts.empty()) return editorObjectsFromSceneTree();
-	// Face tally per file so the model is named after its heaviest part's stem
-	// ("Hull.lwo" → "Hull") — the engine has no authored object names.
-	std::map<std::string, long> fileFaces;
-	for (TriMesh* T = CurScene->TriMeshHead; T; T = T->Next)
-		for (DWord f = 0; f < T->FIndex; ++f) {
-			Material* M = T->Faces[f].Txtr;
-			if (!M || !M->Name) continue;
-			const std::string base = Editor_BaseSurfName(M->Name);
-			const size_t sep = base.find("::");
-			if (sep != std::string::npos) ++fileFaces[base.substr(0, sep)];
-		}
-	std::string heavy;
-	long heavyFaces = -1;
-	for (auto& [file, cnt] : fileFaces)
-		if (cnt > heavyFaces) { heavyFaces = cnt; heavy = file; }
-	if (heavy.empty()) heavy = parts.begin()->first;
-	std::string stem = heavy;
-	const size_t dot = stem.find_last_of('.');
-	if (dot != std::string::npos) stem.resize(dot);
-
-	std::string out = "[{\"name\":\"";
-	jsonEscape(out, (stem + " (model)").c_str());
-	out += "\",";
-	char buf[48];
-	std::snprintf(buf, sizeof buf, "\"meshes\":%zu,", parts.size());
-	out += buf;
-	appendSurfArray(out, all);
-	out += ",\"children\":[";
-	bool first = true;
-	for (auto& [file, names] : parts) {
-		if (!first) out += ",";
-		first = false;
-		out += "{\"name\":\"";
-		jsonEscape(out, file.c_str());
-		out += "\",";
-		appendSurfArray(out, names);
+	if (!engineBucket.empty()) {
+		if (!firstObj) out += ",";
+		firstObj = false;
+		out += "{\"name\":\"(engine)\",\"obj\":\"\",\"engine\":1,";
+		char buf[48];
+		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,", engineBucketMeshes);
+		out += buf;
+		appendSurfArray(out, engineBucket);
 		out += "}";
 	}
-	out += "]}]";
+	out += "]";
 	return out;
 }
 

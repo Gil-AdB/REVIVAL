@@ -228,6 +228,10 @@ bool ParseSnapshotArgs(int argc, const char* argv[], SnapshotConfig& cfg) {
 
 static void buildLookAt(const Vector& eye, const Vector& target, Matrix outM);
 
+// Defined below the fountain loop; the editor dump/test-hook vehicle is shared
+// by every scene snapshot loop (fountain/crash/chase call it forward).
+static void RunEditorDumpHooks();
+
 int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -295,6 +299,10 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Post-tick editor dump/test-hook vehicle ([OBJECTS]/DUMP_MESHES +
+        // OBJSCALE_TEST & co.) — same as the greets/city loops.
+        RunEditorDumpHooks();
 
         if (overrideCam) {
             View->ISource = camPos;
@@ -658,6 +666,9 @@ int RunCrashSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
         driver->tick();   // on-screen "Frame N/M" confirms the mapping
 
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
+
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/crash_f%04d_color.ppm",
                       cfg.outDir.c_str(), fr);
@@ -797,6 +808,9 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         Timer = ts;
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
         driver->tick();   // clears VPage, renders both passes + glints, noop-flips
+
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/chase_t%06d_color.ppm",

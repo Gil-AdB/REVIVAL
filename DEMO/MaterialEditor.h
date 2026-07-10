@@ -27,15 +27,23 @@ std::string Editor_BaseSurfName(const char* name);
 // applies to every material sharing the name).
 std::string Editor_GetSurfacesJSON();
 
+// Collapse a static-bake chunk object name ("Piramid.lwo:c17") onto its
+// authored object name ("Piramid.lwo") — same idea as Editor_BaseSurfName but
+// for the ':c<N>' suffix MeshOps chunk-splitting appends at scene init.
+std::string Editor_ChunkBaseObjName(const char *name);
+
 // JSON array of the scene's OBJECTS — groups of surfaces that belong to one
-// logical model (the mech, the room, …):
-//   [{name, meshes, surfaces:[...names as in GetSurfacesJSON...]}, ...]
-// The engine has no object names at runtime (TriMesh carries none), so objects
-// are derived: meshes that share a surface TOKEN are one object. The token is
-// the surface's base identity across the robot-clone naming scheme — base name
-// (::mirUV collapsed), then the part after "X.lwo::", minus the _body/_upper
-// clone suffixes. E.g. Hull.lwo + the four leg meshes all use token "hull", so
-// they union into one object (the mech); the room mesh's surfaces form another.
+// logical model (the mech, the room, a city ship …), derived from the FLD
+// OBJECT TREE (Obj->Name + Parent links) in EVERY scene, with collapsing
+// rules for init-time mesh surgery (':c<N>' chunk suffixes, engine helper
+// meshes → a hidden '(engine)' bucket) and the greets clone-file material
+// naming merged in as enrichment:
+//   [{name, obj, meshes, surfaces:[...names as in GetSurfacesJSON...]
+//     [, children:[{name, obj, surfaces}]] [, engine:1]}, ...]
+// `obj` is the raw (chunk-collapsed) engine object name — the key that
+// Editor_SetObjectScale takes ("" on the '(engine)' bucket). Multi-part roots
+// (city trains, the mech's null root) read "<stem> (model)" and carry one
+// child per part; instances (8 taxis) dedupe into one entry.
 std::string Editor_GetObjectsJSON();
 
 // Set one float property (key) on every CurScene material whose Name matches.

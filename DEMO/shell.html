@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b57</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b58</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -665,7 +665,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b57); orbit/zoom embind =',
+        console.log('[editor] panel init (build b58); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -762,13 +762,52 @@
               editorLightsPristine = {};
               editorLights.forEach(function(l){ editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l)); });
             } catch(e){ console.warn('[editor] lights enumerate failed', e); }
-            try {
-              editorObjects = JSON.parse(Module.editorGetObjects ? Module.editorGetObjects() : '[]');
-            } catch(e){ console.warn('[editor] objects enumerate failed', e); }
+            refreshObjects();
             editorStatus(list.length+' surfaces'); renderObjectList(); renderSurfaceList(); renderLightList(); updateSaveButton();
+            // Objects (and lights) can lag the surface list: the engine
+            // publishes CurScene MID-INIT (e.g. Initialize_City's panorama
+            // bake), so this poll can land while the object tree isn't
+            // enumerable yet. Surfaces retried until non-empty; objects were
+            // fetched exactly ONCE — the "Objects panel empty in the browser,
+            // fine natively" bug. Retry until they arrive (or give up loudly).
+            if (!editorObjects.length) {
+              console.warn('[editor] objects empty while ' + list.length +
+                           ' surfaces present — retrying (scene still initializing?)');
+              var otries = 0;
+              var oiv = setInterval(function(){
+                if (editorObjects.length || ++otries > 60) {
+                  clearInterval(oiv);
+                  if (!editorObjects.length)
+                    console.warn('[editor] objects still empty after ' + otries +
+                                 ' retries — check JSON.parse(Module.editorGetObjects()) in the console');
+                  return;
+                }
+                refreshObjects();
+                if (editorObjects.length) {
+                  console.log('[editor] objects arrived after ' + otries + ' retries');
+                  if (!editorLights.length) {
+                    try {
+                      editorLights = JSON.parse(Module.editorGetLights());
+                      editorLightsPristine = {};
+                      editorLights.forEach(function(l){ editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l)); });
+                    } catch(e){}
+                  }
+                  renderObjectList(); renderLightList();
+                }
+              }, 1000);
+            }
           }
           else if (tries > 60){ clearInterval(iv); editorStatus('no surfaces — scene not up?'); }
         }, 500);
+      }
+      // (Re-)pull the object tree from the engine. Safe to call any time; keeps
+      // editorObjects as-is when the engine hands back an empty/broken list so
+      // an established panel never regresses to blank.
+      function refreshObjects(){
+        try {
+          var fresh = JSON.parse(Module.editorGetObjects ? Module.editorGetObjects() : '[]');
+          if (fresh.length || !editorObjects.length) editorObjects = fresh;
+        } catch(e){ console.warn('[editor] objects enumerate failed', e); }
       }
       var editorPristine = {};
       // PBR maps imported this session, pending persistence: surface -> role ->
@@ -1223,9 +1262,15 @@
       function groupHasAll(names){
         return names.length > 0 && names.every(inGroup);
       }
+      // Engine-generated helper buckets ("(engine)": mirror shards, the disco
+      // ball mesh — entries carrying engine:1) hide by default; a small toggle
+      // row at the bottom of the list reveals them.
+      var editorShowEngine = false;
       function renderObjectList(){
+        var visObjs = editorObjects.filter(function(o){ return !o.engine || editorShowEngine; });
+        var engHidden = editorObjects.length - visObjs.length;
         var cnt = document.getElementById('editor-objects-count');
-        if (cnt) cnt.textContent = editorObjects.length ? ('(' + editorObjects.length + ')') : '';
+        if (cnt) cnt.textContent = visObjs.length ? ('(' + visObjs.length + ')') : '';
         var inv = document.getElementById('editor-invert-sel');
         if (inv) inv.style.display = editorGroup ? '' : 'none';
         var el = document.getElementById('editor-objects'); if (!el) return;
@@ -1269,7 +1314,18 @@
             });
           }
         }
-        editorObjects.forEach(function(o, i){ addObjRow(o, 0, o.name + i, null); });
+        visObjs.forEach(function(o, i){ addObjRow(o, 0, o.name + i, null); });
+        // Toggle row for the hidden engine bucket(s) — and to hide them again.
+        if (engHidden || editorShowEngine) {
+          var t = document.createElement('div');
+          t.className = 'surf-item';
+          t.style.color = '#777';
+          t.textContent = editorShowEngine ? '· hide engine helpers'
+                                           : '· show engine helpers (' + engHidden + ')';
+          t.title = 'engine-generated helper meshes (mirror shard atlases, disco ball) — not authored objects';
+          t.onclick = function(){ editorShowEngine = !editorShowEngine; renderObjectList(); };
+          el.appendChild(t);
+        }
       }
       // Apply the current editorGroup: props panel (first member's values),
       // group highlight + framing, list refresh, status.
@@ -1355,6 +1411,11 @@
           else { editorSurfaces.push(ns); }
           if (!editorPristine[ns.name]) editorPristine[ns.name] = JSON.parse(JSON.stringify(ns));
         });
+        // The object tree can change too (instance splits add surfaces; a
+        // late-settling scene init populates it) — re-pull it alongside.
+        var hadObjs = editorObjects.length;
+        refreshObjects();
+        if (editorObjects.length !== hadObjs) renderObjectList();
         renderSurfaceList();
         var cur = editorSurfaces.find(function(x){ return x.name === (editorSelected || selName); });
         if (cur) renderSurfaceProps(cur, editorGroup ? { name: 'selection', surfaces: editorGroup } : undefined);
