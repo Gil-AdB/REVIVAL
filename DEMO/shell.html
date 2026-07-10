@@ -864,11 +864,30 @@
           d.onclick = function(){
             editorSelectedLight = l.i; renderLightList(); renderLightProps(l);
             // Frame the orbit on the light (same as clicking a surface row).
-            if (Module.editorFocusLight) Module.editorFocusLight(l.i);
+            // rawI, not i: editorFocusLight counts the UNFILTERED
+            // Omni_SceneAuthored walk (mirror clones included), while i is the
+            // authored index — they differ when ?greets-mirror clones exist.
+            if (Module.editorFocusLight) Module.editorFocusLight(l.rawI !== undefined ? l.rawI : l.i);
             editorStatus('light ' + l.i + ' — focused (' + l.x + ',' + l.y + ',' + l.z + ')');
           };
           el.appendChild(d);
         });
+      }
+      // Canvas light-pick landed on light i (editorPickLight): open the Lights
+      // section, select + scroll to its row, show its sliders. Returns false if
+      // the index isn't in the enumerated list (stale/foreign) so the caller
+      // can fall through to the surface pick.
+      function selectLightFromPick(i){
+        var l = editorLights.find(function(x){ return x.i === i; });
+        if (!l) return false;
+        editorSelectedLight = l.i;
+        var el = document.getElementById('editor-lights');
+        if (el) el.style.display = 'block';
+        renderLightList(); renderLightProps(l);
+        var row = el && el.children[editorLights.indexOf(l)];
+        if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+        editorStatus('picked light ' + l.i + ' (' + l.x + ',' + l.y + ',' + l.z + ')');
+        return true;
       }
       function setLightProp(l, key, v){
         var ok = false;
@@ -2352,6 +2371,18 @@
           if (!uv) return null;
           try { return Module.editorPick(uv.u, uv.v) || null; } catch (err) { return null; }
         }
+        // Light under the cursor (authored index, matching editorGetLights'
+        // "i"), or -1. Tried BEFORE the surface pick so a click near a light
+        // flare selects the light; surfaces keep working when no light is near.
+        function pickLightAt(e){
+          if (!Module.editorPickLight) return -1;
+          var uv = canvasToEngineUV(e);
+          if (!uv) return -1;
+          try {
+            var r = Module.editorPickLight(uv.u, uv.v);
+            return (typeof r === 'number') ? r : -1;
+          } catch (err) { return -1; }
+        }
         canvasEl.addEventListener('mouseup', function(e){
           // Releasing a PANEL slider drag with the cursor over the canvas used
           // to land here with stale dragged/down state from the PREVIOUS
@@ -2359,6 +2390,8 @@
           // onto the floor) mid-edit. Only pick when the press began here.
           if (!downOnCanvas) return;
           if (dragged || e.button !== 0 || e.shiftKey) return;
+          var li = pickLightAt(e);
+          if (li >= 0 && selectLightFromPick(li)) return;
           var name = pickAt(e);
           if (!name) { editorStatus('pick: no surface here'); return; }
           // pick=object: promote the picked surface to its owning object so
@@ -2371,8 +2404,15 @@
           var s = editorSurfaces.find(function(x){ return x.name === name; });
           if (s) { selectSurface(s, /*alsoFocus=*/false); editorStatus('picked: ' + name); }
         });
-        // Double-click = pick AND frame the orbit on it.
+        // Double-click = pick AND frame the orbit on it (light or surface).
         canvasEl.addEventListener('dblclick', function(e){
+          var li = pickLightAt(e);
+          if (li >= 0 && selectLightFromPick(li)) {
+            var l = editorLights.find(function(x){ return x.i === li; });
+            if (l && Module.editorFocusLight)
+              Module.editorFocusLight(l.rawI !== undefined ? l.rawI : l.i);
+            return;
+          }
           var name = pickAt(e);
           if (name && Module.editorFocusSurface) Module.editorFocusSurface(name);
         });

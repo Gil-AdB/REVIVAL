@@ -79,11 +79,33 @@ std::string Editor_SetUVMapping(const char *name, int proj,
                                 float sx, float sy, float sz, int axis);
 
 // Set one property on the i-th scene-authored light (Omni_SceneAuthored, file
-// order — the same index the LWS/FLD write-back patchers use). Keys: r/g/b
-// (0-255; also re-points the omni's flare sprite at a texture baked for the
-// new color), intensity, range (splines — every key set), flareScale (sprite
-// size multiplier on top of intensity; 0 = legacy).
+// order — the same index the LWS/FLD write-back patchers use; mirror-clone
+// omnis are excluded from the walk, so the index space stays the FLD/LWS file
+// order even with mirrors built). Keys: r/g/b (0-255; also re-points the
+// omni's flare sprite at a texture baked for the new color), intensity, range
+// (splines — every key set), flareScale (sprite size multiplier on top of
+// intensity; 0 = legacy).
 bool Editor_SetLightProp(int index, const char *key, float value);
+
+// JSON array of the scene's AUTHORED lights (mirror-clone omnis excluded —
+// BuildMirror's memcpy'd clones inherit Omni_SceneAuthored and are prepended
+// to OmniHead, so an unfiltered walk lists ~4x phantom clones first). Entry
+// fields: i (authored index — Editor_SetLightProp / LWS write-back space),
+// rawI (position in the legacy unfiltered Omni_SceneAuthored walk — the index
+// MainLoop's editorFocusLight still counts), r/g/b, intensity, range,
+// flareScale, x/y/z, type, shadow, posKeys/sizeKeys/rangeKeys.
+std::string Editor_GetLightsJSON();
+
+// Resolve the surface under a click. (u,v) normalized [0,1] over the engine
+// surface. Opaque surfaces resolve through the G-buffer matID plane exactly as
+// before; Mat_Transparent surfaces (which never write it) resolve through a
+// view-space ray cast against the scene's transparent faces, accepted when the
+// hit is nearer than the opaque depth at that pixel (ZPage16). "" = nothing.
+std::string Editor_PickSurface(float u, float v);
+
+// Nearest authored light whose screen projection is within ~14 px (1080p-
+// scaled) of the click; returns its authored index ("i" above), -1 = none.
+int Editor_PickLight(float u, float v);
 
 // Import a PBR map onto a surface from raw image-file bytes (a browser upload),
 // by role: "albedo" | "normal" | "height" | "roughness" | "ao". Writes the bytes

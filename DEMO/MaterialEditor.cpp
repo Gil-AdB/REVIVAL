@@ -15,6 +15,7 @@
 
 #include <Base/TriMesh.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -61,8 +62,19 @@ static void appendNum(std::string& out, const char* key, double v)
 	out += buf;
 }
 
+#ifndef __EMSCRIPTEN__
+static void editorRunPickTestHook();   // defined below the pick core
+#endif
+
 std::string Editor_GetSurfacesJSON()
 {
+#ifndef __EMSCRIPTEN__
+	// PICK_TEST native validation (see the definition below): the pick needs a
+	// RENDERED frame (live ZPage16 / G-buffer / camera), and Snapshot.cpp's only
+	// post-tick call into this file is the DUMP_SURFACES hook → this function.
+	// So the check rides here: no-op unless PICK_TEST is set; fires once.
+	editorRunPickTestHook();
+#endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
 	bool first = true;
@@ -382,12 +394,30 @@ std::string Editor_SplitInstances(const char* name)
 // snapshot hook) ────────────────────────────────────────────────────────────
 // Scene-authored omnis only (Omni_SceneAuthored = the i-th FLD/LWS light, in
 // list order — the same index the server's LWS/FLD patchers use).
+//
+// Mirror-clone omnis are EXCLUDED: GreetsMirror's BuildMirror memcpy()s each
+// source omni (so the clone inherits Omni_SceneAuthored — the FDS_DEFS.H
+// "code-created lights never carry it" comment predates that path) and then
+// PREPENDS the clone to OmniHead. With mirrors on, a raw Omni_SceneAuthored
+// walk therefore enumerates ~4×11 clones BEFORE the 11 authored lights —
+// the "~50 lights" list, wrong LWS write-back indices, edits landing on
+// phantom reflected lights. Clones carry Omni_MirrorClone + mirrorId>0
+// (set only by mirror code); filtering them restores the FLD/LWS file order.
+// (Bounce-cone spots REPLACE their Flags wholesale, so they never carry
+// Omni_SceneAuthored — the extra tests are belt and braces.)
+static bool isAuthoredNonCloneOmni(const Omni *O)
+{
+	return (O->Flags & Omni_SceneAuthored)
+	    && !(O->Flags & (Omni_MirrorClone | Omni_BounceCone))
+	    && O->mirrorId == 0;
+}
+
 static Omni *lightByIndex(int want)
 {
 	if (!CurScene) return nullptr;
 	int i = 0;
 	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
-		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		if (!isAuthoredNonCloneOmni(O)) continue;
 		if (i == want) return O;
 		++i;
 	}
@@ -567,6 +597,321 @@ bool Editor_SetLightProp(int index, const char *key, float value)
 	Editor_MarkDirty();
 	return true;
 }
+
+// ── Lights JSON (shared native/wasm) ────────────────────────────────────────
+// Color lives in Omni::L (0-255); intensity/range are 1-key-per-value splines
+// whose scalar sits in Keys[].Pos.x — Animate_Objects re-interpolates ISize/
+// IRange from them every tick, so a key edit shows on the next rendered frame.
+// Authored lights only (isAuthoredNonCloneOmni — mirror clones excluded, see
+// above). Each entry carries TWO indices:
+//   i    — authored index (this file's lightByIndex / the LWS write-back space)
+//   rawI — the light's position in the legacy unfiltered Omni_SceneAuthored
+//          walk, which is what MainLoop.cpp's editorFocusLight still counts.
+//          With mirrors off they're equal; with mirrors on the shell must pass
+//          rawI to editorFocusLight or it would focus a clone's phantom pos.
+std::string Editor_GetLightsJSON()
+{
+	std::string out = "[";
+	int i = 0, raw = 0;
+	if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!(O->Flags & Omni_SceneAuthored)) continue;
+		const int rawIdx = raw++;               // editorFocusLight's index space
+		if (!isAuthoredNonCloneOmni(O)) continue;
+		char buf[380];
+		std::snprintf(buf, sizeof buf,
+		  "%s{\"i\":%d,\"rawI\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
+		  "\"intensity\":%.4g,\"range\":%.4g,\"flareScale\":%.4g,"
+		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
+		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u}",
+		  i ? "," : "", i, rawIdx, O->L.R, O->L.G, O->L.B,
+		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
+		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
+		  O->FlareScale > 0.0f ? O->FlareScale : 1.0f,
+		  O->IPos.x, O->IPos.y, O->IPos.z,
+		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
+		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
+		out += buf;
+		++i;
+	}
+	out += "]";
+	return out;
+}
+
+// ── Click picking (shared native/wasm) ──────────────────────────────────────
+// The (u,v) input is normalized [0,1] over the ENGINE surface. Pixel↔ray
+// mapping is the canonical deferred-kernel math (docs/GRAPHICS_PIPELINE.md §5):
+//   view-space z  = (0xFF80 - ZPage16[i]) / g_zscale        (0 = untouched/sky)
+//   pixel → ray   d = ((px - CntrEX)/FOVX, (CntrEY - py)/FOVY, 1)
+//   point → pixel spx = CntrEX + x/z·FOVX ; spy = CntrEY - y/z·FOVY
+// with view = View->Mat · (world - View->ISource) and world = RotMat·Pos + IPos
+// (the same chain Editor_SplitInstances / editorFocusSurface use).
+
+// Möller–Trumbore in view space: ray origin (0,0,0), direction (dx,dy,1),
+// TWO-SIDED (glass panels are Mat_TwoSided / viewed from either face). Since
+// dir.z == 1, the returned t IS the hit's view-space z — directly comparable
+// with the decoded opaque depth.
+static bool rayHitsTriViewSpace(const Vector &A, const Vector &B, const Vector &C,
+                                float dx, float dy, float &tOut)
+{
+	const float e1x = B.x - A.x, e1y = B.y - A.y, e1z = B.z - A.z;
+	const float e2x = C.x - A.x, e2y = C.y - A.y, e2z = C.z - A.z;
+	// p = d × e2
+	const float px = dy * e2z - e2y;
+	const float py = e2x - dx * e2z;
+	const float pz = dx * e2y - dy * e2x;
+	const float det = e1x * px + e1y * py + e1z * pz;
+	if (std::fabs(det) < 1e-12f) return false;        // parallel / degenerate
+	const float inv = 1.0f / det;
+	const float sx = -A.x, sy = -A.y, sz = -A.z;      // origin - A
+	const float uu = (sx * px + sy * py + sz * pz) * inv;
+	if (uu < -1e-4f || uu > 1.0001f) return false;
+	// q = s × e1
+	const float qx = sy * e1z - sz * e1y;
+	const float qy = sz * e1x - sx * e1z;
+	const float qz = sx * e1y - sy * e1x;
+	const float vv = (dx * qx + dy * qy + qz) * inv;
+	if (vv < -1e-4f || uu + vv > 1.0001f) return false;
+	const float t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+	if (t <= 0.05f) return false;                      // behind / at the eye
+	tOut = t;
+	return true;
+}
+
+// Nearest Mat_Transparent face along the view ray (dx,dy,1). Skips
+// GreetsMirror's "__mirrorClone_*" meshes — they duplicate world geometry
+// (including transparent screens) MIRRORED BEHIND the glass and would shadow
+// real surfaces along rays that pass a mirror. Single-threaded editor pick
+// reading the frame's immutable RotMat/IPos — race-free by construction.
+static bool editorXparRayNearest(float dx, float dy, float &bestT, const Material *&bestMat)
+{
+	bestT = 3.0e38f;
+	bestMat = nullptr;
+	if (!CurScene || !View) return false;
+	const TriMesh *cloneMeshes[64];
+	int cloneCount = 0;
+	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
+		if (std::strncmp(Obj->Name, "__mirrorClone_", 14) != 0) continue;
+		if (cloneCount < 64) cloneMeshes[cloneCount++] = (const TriMesh *)Obj->Data;
+	}
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		bool isClone = false;
+		for (int c = 0; c < cloneCount; ++c) if (cloneMeshes[c] == T) { isClone = true; break; }
+		if (isClone) continue;
+		for (DWord f = 0; f < T->FIndex; ++f) {
+			Face &F = T->Faces[f];
+			if (!F.Txtr || !(F.Txtr->Flags & Mat_Transparent)) continue;
+			if (!F.A || !F.B || !F.C) continue;
+			Vertex *vs[3] = { F.A, F.B, F.C };
+			Vector vp[3];
+			for (int k = 0; k < 3; ++k) {
+				Vector w, rel;
+				MatrixXVector(T->RotMat, &vs[k]->Pos, &w);   // object → world
+				Vector_SelfAdd(&w, &T->IPos);
+				Vector_Sub(&w, &View->ISource, &rel);        // world → view
+				MatrixXVector(View->Mat, &rel, &vp[k]);
+			}
+			float t;
+			if (rayHitsTriViewSpace(vp[0], vp[1], vp[2], dx, dy, t) && t < bestT) {
+				bestT = t;
+				bestMat = F.Txtr;
+			}
+		}
+	}
+	return bestMat != nullptr;
+}
+
+// Optional diagnostics for the native PICK_TEST hook.
+struct PickDebug {
+	float zOpaque = -1.0f;      // decoded opaque depth at the pixel (3e38 = sky)
+	float tXpar = -1.0f;        // nearest transparent hit's view z (-1 = none)
+	const Material *xparMat = nullptr;
+	bool usedXpar = false;      // the returned name came from the fallback
+	bool mirrorPx = false;      // pixel rejected by the mirrorId gate
+};
+
+static std::string editorPickCore(float u, float v, PickDebug *dbg)
+{
+	if (!CurScene) return "";
+	const float pxf = u * float(XRes);
+	const float pyf = v * float(YRes);
+	const int x = int(pxf);
+	const int y = int(pyf);
+	if (x < 0 || y < 0 || x >= XRes || y >= YRes) return "";
+	const size_t i = size_t(y) * size_t(XRes) + size_t(x);
+
+	// Opaque depth at the click pixel. ZPage16 == 0 → rasterizer never touched
+	// the pixel (sky) → "infinitely far", so glass against sky still picks.
+	float zOpaque = 3.0e38f;
+	if (ZPage16 && g_zscale > 0.0f) {
+		const word zEnc = ZPage16[i];
+		if (zEnc != 0) zOpaque = float(0xFF80 - zEnc) / g_zscale;
+	}
+	if (dbg) dbg->zOpaque = zOpaque;
+
+	// Transparent fallback: transparent surfaces never write the opaque
+	// G-buffer matID plane, so a click on glass historically fell through to
+	// the wall behind. Cast the pixel's view ray at the scene's Mat_Transparent
+	// faces; if the nearest hit is NEARER than the opaque depth, that surface
+	// wins. Tolerance covers 16-bit depth quantization + glass mounted flush
+	// against opaque geometry (panel ≈ wall depth).
+	if (View && FOVX != 0.0f && FOVY != 0.0f) {
+		const float dx = (pxf - CntrEX) / FOVX;
+		const float dy = (CntrEY - pyf) / FOVY;
+		float tHit;
+		const Material *hitMat;
+		if (editorXparRayNearest(dx, dy, tHit, hitMat)) {
+			if (dbg) { dbg->tXpar = tHit; dbg->xparMat = hitMat; }
+			const float tol = (g_zscale > 0.0f)
+				? std::max(2.0f / g_zscale, zOpaque * 0.005f)
+				: zOpaque * 0.005f;
+			if (tHit <= zOpaque + tol && hitMat->Name) {
+				if (dbg) dbg->usedXpar = true;
+				return Editor_BaseSurfName(hitMat->Name);
+			}
+		}
+	}
+
+	// Opaque path — unchanged from the original G-buffer-only pick.
+	if (!g_gbuffer || g_gbuffer->txtr.empty()) return "";
+	if (i >= g_gbuffer->txtr.size()) return "";
+	// Pixels inside a mirror reflection carry a nonzero mirrorId — they show
+	// CLONE geometry (possibly of a surface behind you). Picking through the
+	// glass selected whatever happened to be reflected; reject instead.
+	if (!g_gbuffer->mirrorId.empty() && i < g_gbuffer->mirrorId.size()
+	    && g_gbuffer->mirrorId[i] != 0) {
+		if (dbg) dbg->mirrorPx = true;
+		return "";
+	}
+	const unsigned mid = (g_gbuffer->txtr[i] >> 20) & 0xFF;
+	MatTable mt = Scene_GetMatTable(CurScene);
+	if (mid >= mt.count || !mt.data[mid] || !mt.data[mid]->Name) return "";
+	return Editor_BaseSurfName(mt.data[mid]->Name);
+}
+
+std::string Editor_PickSurface(float u, float v)
+{
+	return editorPickCore(u, v, nullptr);
+}
+
+// Project one omni to pixel coordinates (false = behind the camera).
+static bool projectOmniToScreen(const Omni *O, float &spx, float &spy)
+{
+	if (!View) return false;
+	Vector rel, vp;
+	Vector_Sub(const_cast<Vector *>(&O->IPos), &View->ISource, &rel);
+	MatrixXVector(View->Mat, &rel, &vp);
+	if (vp.z <= 0.05f) return false;
+	spx = CntrEX + vp.x / vp.z * FOVX;
+	spy = CntrEY - vp.y / vp.z * FOVY;
+	return true;
+}
+
+// Light picking: nearest authored (non-clone) omni whose screen projection is
+// within ~14 px (at 1080p, resolution-scaled) of the click. Returns the
+// AUTHORED light index (Editor_GetLightsJSON's "i" / lightByIndex's space),
+// -1 = no light near → caller falls back to the surface pick.
+int Editor_PickLight(float u, float v)
+{
+	if (!CurScene || !View || FOVX == 0.0f || FOVY == 0.0f) return -1;
+	const float pxf = u * float(XRes);
+	const float pyf = v * float(YRes);
+	const float radius = std::max(6.0f, 14.0f * float(YRes) / 1080.0f);
+	float bestD2 = radius * radius;
+	int best = -1, i = 0;
+	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!isAuthoredNonCloneOmni(O)) continue;
+		const int idx = i++;
+		float spx, spy;
+		if (!projectOmniToScreen(O, spx, spy)) continue;
+		const float dx = spx - pxf, dy = spy - pyf;
+		const float d2 = dx * dx + dy * dy;
+		if (d2 < bestD2) { bestD2 = d2; best = idx; }
+	}
+	return best;
+}
+
+#ifndef __EMSCRIPTEN__
+// PICK_TEST — native validation for the click-pick + lights paths, same env-
+// hook convention as Snapshot.cpp's LIGHT_TEST/IMPORT_TEST (test hooks, not
+// runtime tunables). Invoked from Editor_GetSurfacesJSON so it runs when the
+// DUMP_SURFACES snapshot hook fires (post-tick — frame data is live).
+//   PICK_TEST=scan          grid-sweep; prints every cell where the transparent
+//                           fallback fired (locates glass panels headlessly)
+//   PICK_TEST="u,v[;u,v..]" point probes with full diagnostics
+// Always prints the raw-vs-filtered omni counts + lights JSON and a light-pick
+// projection round-trip (run with --greets_mirror to exercise clone filtering).
+static void editorRunPickTestHook()
+{
+	const char *spec = std::getenv("PICK_TEST");
+	if (!spec) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	{
+		int total = 0, flagged = 0;
+		if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+			++total;
+			if (O->Flags & Omni_SceneAuthored) ++flagged;
+		}
+		const std::string lj = Editor_GetLightsJSON();
+		int n = 0;
+		for (size_t p = lj.find("{\"i\""); p != std::string::npos; p = lj.find("{\"i\"", p + 1)) ++n;
+		std::fprintf(stderr, "[PICKTEST] omnis: total=%d sceneAuthored-flagged=%d authored(filtered)=%d\n",
+		             total, flagged, n);
+		std::fprintf(stderr, "[PICKTEST] lights json: %s\n", lj.c_str());
+		// Light-pick round trip: project each authored light, pick at its pixel.
+		int li = 0;
+		if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+			if (!isAuthoredNonCloneOmni(O)) continue;
+			const int idx = li++;
+			float spx, spy;
+			if (!projectOmniToScreen(O, spx, spy)) continue;
+			if (spx < 0 || spy < 0 || spx >= float(XRes) || spy >= float(YRes)) continue;
+			const int got = Editor_PickLight(spx / float(XRes), spy / float(YRes));
+			std::fprintf(stderr, "[PICKTEST] light %d at px(%.0f,%.0f) -> pickLight=%d%s\n",
+			             idx, spx, spy, got,
+			             got == idx ? "" : "  (nearer light overlaps)");
+		}
+	}
+	if (!std::strcmp(spec, "scan")) {
+		int hits = 0;
+		for (int gy = 1; gy < 24; ++gy)
+			for (int gx = 1; gx < 40; ++gx) {
+				const float u = gx / 40.0f, v = gy / 24.0f;
+				PickDebug d;
+				const std::string r = editorPickCore(u, v, &d);
+				if (!d.usedXpar) continue;
+				++hits;
+				std::fprintf(stderr,
+				    "[PICKSCAN] u=%.3f v=%.3f px(%d,%d) -> '%s' t=%.2f zOpq=%.2f\n",
+				    u, v, int(u * float(XRes)), int(v * float(YRes)), r.c_str(), d.tXpar,
+				    d.zOpaque >= 1e37f ? -1.0f : d.zOpaque);
+			}
+		std::fprintf(stderr, "[PICKSCAN] %d grid cells picked a transparent surface\n", hits);
+		return;
+	}
+	std::string all = spec;
+	size_t pos = 0;
+	while (pos <= all.size()) {
+		size_t semi = all.find(';', pos);
+		if (semi == std::string::npos) semi = all.size();
+		const std::string s = all.substr(pos, semi - pos);
+		pos = semi + 1;
+		if (s.empty()) continue;
+		float u, v;
+		if (std::sscanf(s.c_str(), "%f,%f", &u, &v) != 2) continue;
+		PickDebug d;
+		const std::string r = editorPickCore(u, v, &d);
+		std::fprintf(stderr,
+		    "[PICKTEST] u=%.4f v=%.4f -> '%s'%s  zOpq=%.2f tXpar=%.2f xparMat='%s'%s\n",
+		    u, v, r.c_str(), d.usedXpar ? " [XPAR]" : "",
+		    d.zOpaque >= 1e37f ? -1.0f : d.zOpaque, d.tXpar,
+		    (d.xparMat && d.xparMat->Name) ? d.xparMat->Name : "",
+		    d.mirrorPx ? " [mirrorPx]" : "");
+	}
+}
+#endif // !__EMSCRIPTEN__
 
 static std::atomic<bool> g_editorDirty{true};   // first frame renders
 void Editor_MarkDirty()    { g_editorDirty.store(true, std::memory_order_relaxed); }
@@ -749,33 +1094,12 @@ std::string js_editorMatDebug(std::string name)
 	return buf;
 }
 // ── Light enumeration ──────────────────────────────────────────────────────
-// Color lives in Omni::L (0-255); intensity/range are 1-key-per-value splines
-// whose scalar sits in Keys[].Pos.x — Animate_Objects re-interpolates ISize/
-// IRange from them every tick, so a key edit shows on the next rendered frame.
+// Authored (non-mirror-clone) lights only — see rev::Editor_GetLightsJSON for
+// the index-space contract ("i" = LWS write-back order, "rawI" = the legacy
+// unfiltered walk editorFocusLight counts).
 std::string js_editorGetLights()
 {
-	std::string out = "[";
-	int i = 0;
-	if (CurScene) for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
-		if (!(O->Flags & Omni_SceneAuthored)) continue;
-		char buf[360];
-		std::snprintf(buf, sizeof buf,
-		  "%s{\"i\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
-		  "\"intensity\":%.4g,\"range\":%.4g,\"flareScale\":%.4g,"
-		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
-		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u}",
-		  i ? "," : "", i, O->L.R, O->L.G, O->L.B,
-		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
-		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
-		  O->FlareScale > 0.0f ? O->FlareScale : 1.0f,
-		  O->IPos.x, O->IPos.y, O->IPos.z,
-		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
-		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
-		out += buf;
-		++i;
-	}
-	out += "]";
-	return out;
+	return rev::Editor_GetLightsJSON();
 }
 
 bool js_editorSetLightProp(int index, std::string key, float value)
@@ -815,27 +1139,19 @@ std::string js_editorClassifyMap(std::string filename)
 // Phase 2 click-to-pick: resolve the surface under a canvas click. (u,v) are
 // normalized [0,1] over the ENGINE surface (shell.html undoes the canvas
 // letterbox using Module.__floodTexW/H — the same math Wasm_PresentGL uses to
-// draw it). Reads the last rendered frame's G-buffer matID plane; returns the
-// base surface name ("" = no surface: sentinel pixel, forward-rendered, or
-// out of range).
+// draw it). Reads the last rendered frame's G-buffer matID plane, with a
+// geometric ray-cast fallback for Mat_Transparent surfaces (which never write
+// it) — see rev::Editor_PickSurface. Returns the base surface name ("" = no
+// surface: sentinel pixel, forward-rendered, or out of range).
 std::string js_editorPick(float u, float v)
 {
-	if (!g_gbuffer || g_gbuffer->txtr.empty() || !CurScene) return "";
-	const int x = int(u * float(XRes));
-	const int y = int(v * float(YRes));
-	if (x < 0 || y < 0 || x >= XRes || y >= YRes) return "";
-	const size_t i = size_t(y) * size_t(XRes) + size_t(x);
-	if (i >= g_gbuffer->txtr.size()) return "";
-	// Pixels inside a mirror reflection carry a nonzero mirrorId — they show
-	// CLONE geometry (possibly of a surface behind you). Picking through the
-	// glass selected whatever happened to be reflected; reject instead.
-	if (!g_gbuffer->mirrorId.empty() && i < g_gbuffer->mirrorId.size()
-	    && g_gbuffer->mirrorId[i] != 0)
-		return "";
-	const unsigned mid = (g_gbuffer->txtr[i] >> 20) & 0xFF;
-	MatTable mt = Scene_GetMatTable(CurScene);
-	if (mid >= mt.count || !mt.data[mid] || !mt.data[mid]->Name) return "";
-	return rev::Editor_BaseSurfName(mt.data[mid]->Name);
+	return rev::Editor_PickSurface(u, v);
+}
+// Light picking: authored-light index within a click radius of (u,v), or -1.
+// shell.html tries this BEFORE editorPick and selects the light row on a hit.
+int js_editorPickLight(float u, float v)
+{
+	return rev::Editor_PickLight(u, v);
 }
 // Diagnostic: the live render-flag state the kernel actually sees, so we can tell
 // from JS whether the editor's flag overrides (deferred / shadow_lightmap off /
@@ -920,6 +1236,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorFlags",          &js_editorFlags);
 	emscripten::function("editorProbe",          &js_editorProbe);
 	emscripten::function("editorPick",           &js_editorPick);
+	emscripten::function("editorPickLight",      &js_editorPickLight);
 	emscripten::function("editorClassifyMap",    &js_editorClassifyMap);
 	emscripten::function("editorGetLights",      &js_editorGetLights);
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
