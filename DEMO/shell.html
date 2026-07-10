@@ -2258,51 +2258,140 @@
           // albedo from one, normal from another (scrambled relief). Bucket
           // files by their containing directory and import from ONE pack: the
           // dir with the most distinct roles, albedo-bearing dirs preferred.
-          var dirs = {};   // dirPath -> { role -> file }
+          var dirs = {};      // dirPath -> { role -> file }
+          var previews = {};  // dirPath -> [preview image Files] (classify-skipped)
           files.forEach(function(f){
-            var role = '';
-            try { role = Module.editorClassifyMap(f.name); } catch(e){}
-            if (!role) return;
             var rel = f.webkitRelativePath || f.name;
             var dir = rel.indexOf('/') >= 0 ? rel.substring(0, rel.lastIndexOf('/')) : '';
-            if (!dirs[dir]) dirs[dir] = {};
-            if (!dirs[dir][role]) dirs[dir][role] = f;
+            var role = '';
+            try { role = Module.editorClassifyMap(f.name); } catch(e){}
+            if (role) {
+              if (!dirs[dir]) dirs[dir] = {};
+              if (!dirs[dir][role]) dirs[dir][role] = f;
+              return;
+            }
+            // FreePBR-style pack previews: "<name>_preview.jpg" INSIDE the
+            // material folder, or a SIBLING of it in the category folder.
+            if (/preview|thumb/i.test(f.name) && /\.(png|jpe?g|gif|bmp)$/i.test(f.name))
+              (previews[dir] = previews[dir] || []).push(f);
           });
-          var best = null, bestKey = null, nDirs = 0;
-          Object.keys(dirs).forEach(function(k){
-            nDirs++;
-            var score = Object.keys(dirs[k]).length + (dirs[k].albedo ? 100 : 0);
-            var bestScore = best ? Object.keys(best).length + (best.albedo ? 100 : 0) : -1;
-            if (score > bestScore) { best = dirs[k]; bestKey = k; }
-          });
-          if (!best) { editorStatus('pack: no recognizable maps in folder'); return; }
-          var slots = best;
-          var roles = Object.keys(slots);
-          var packName = bestKey ? bestKey.split('/').pop() : '(folder)';
           // Albedo first: it defines the material's texel layout; the engine
           // resamples the other maps to it (and drops stale mismatched ones).
-          roles.sort(function(a,b){ return (a==='albedo'?0:1) - (b==='albedo'?0:1); });
-          editorStatus('pack ' + packName + ': importing ' + roles.join(', ') + '…'
-                       + (nDirs > 1 ? ' (' + nDirs + ' folders seen, using ' + packName + ')' : ''));
-          var doneCount = 0, okCount = 0, applied = [];
-          var chain = Promise.resolve();
-          roles.forEach(function(role){
-            chain = chain.then(function(){ return new Promise(function(res){
-              importFile(role, slots[role], function(ok){
-                if (ok) { okCount++; applied.push(role + '=' + slots[role].name); }
-                if (++doneCount === roles.length) {
-                  editorStatus('pack ' + packName + ': ' + okCount + '/' + roles.length
-                               + ' applied — ' + applied.join(', '));
-                  // The panel renders map-dependent controls (the 'normal G'
-                  // flip row only exists when the surface HAS a normal map) —
-                  // refresh the surface model + re-render so the new maps'
-                  // knobs appear without a reload.
-                  refreshSurfacesAndProps(s.name);
-                }
-                res();
-              });
-            }); });
-          });
+          function importPack(slots, packName){
+            var roles = Object.keys(slots);
+            roles.sort(function(a,b){ return (a==='albedo'?0:1) - (b==='albedo'?0:1); });
+            editorStatus('pack ' + packName + ': importing ' + roles.join(', ') + '…');
+            var doneCount = 0, okCount = 0, applied = [];
+            var chain = Promise.resolve();
+            roles.forEach(function(role){
+              chain = chain.then(function(){ return new Promise(function(res){
+                importFile(role, slots[role], function(ok){
+                  if (ok) { okCount++; applied.push(role + '=' + slots[role].name); }
+                  if (++doneCount === roles.length) {
+                    editorStatus('pack ' + packName + ': ' + okCount + '/' + roles.length
+                                 + ' applied — ' + applied.join(', '));
+                    // The panel renders map-dependent controls (the 'normal G'
+                    // flip row only exists when the surface HAS a normal map) —
+                    // refresh the surface model + re-render so the new maps'
+                    // knobs appear without a reload.
+                    refreshSurfacesAndProps(s.name);
+                  }
+                  res();
+                });
+              }); });
+            });
+          }
+          // Match a material dir to its preview: a preview file inside the
+          // dir wins; else a sibling in the PARENT (category) dir whose
+          // normalized name prefixes the folder's (FreePBR previews sit next
+          // to the folder and their names drift: "alien-metal_preview.jpg"
+          // vs "alien-metal1-bl/", "aluminum-scuffed-preview2-3.jpg" vs
+          // "Aluminum-Scuffed_bl/").
+          function normName(x){ return x.toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+          function previewFor(dirKey){
+            var inside = previews[dirKey];
+            if (inside && inside.length) return inside[0];
+            var parent = dirKey.indexOf('/') >= 0 ? dirKey.substring(0, dirKey.lastIndexOf('/')) : '';
+            var folder = normName((dirKey.split('/').pop() || '').replace(/[-_]?bl$/i, ''));
+            var sibs = previews[parent] || [];
+            for (var i = 0; i < sibs.length; i++) {
+              var base = sibs[i].name.replace(/\.[^.]+$/, '');
+              var cut = base.search(/[-_]?preview/i);
+              var p = normName(cut >= 0 ? base.substring(0, cut) : base);
+              if (p && folder && (p.indexOf(folder) === 0 || folder.indexOf(p) === 0)) return sibs[i];
+            }
+            return null;
+          }
+          function showPackPicker(entries){
+            var ov = document.createElement('div');
+            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;overflow:auto;padding:20px;';
+            var box = document.createElement('div');
+            box.style.cssText = 'max-width:1140px;margin:0 auto;';
+            var head = document.createElement('div');
+            head.style.cssText = 'display:flex;align-items:center;color:#fff;margin-bottom:10px;';
+            var ht = document.createElement('div');
+            ht.textContent = 'Pick a material for "' + s.name + '" — ' + entries.length + ' pack(s) found';
+            ht.style.cssText = 'flex:1;font-size:14px;';
+            var hx = document.createElement('button');
+            hx.textContent = '✕ cancel';
+            hx.style.cssText = 'font-size:12px;padding:2px 10px;background:#411;color:#fbb;border:1px solid #633;border-radius:2px;cursor:pointer;';
+            head.appendChild(ht); head.appendChild(hx); box.appendChild(head);
+            var grid = document.createElement('div');
+            grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;';
+            box.appendChild(grid); ov.appendChild(box);
+            var urls = [];
+            function close(){
+              urls.forEach(function(u){ URL.revokeObjectURL(u); });
+              document.removeEventListener('keydown', onKey);
+              ov.remove();
+            }
+            function onKey(ev){ if (ev.key === 'Escape') close(); }
+            hx.onclick = close;
+            ov.onclick = function(ev){ if (ev.target === ov) close(); };
+            document.addEventListener('keydown', onKey);
+            entries.forEach(function(e){
+              var cell = document.createElement('div');
+              cell.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:6px;cursor:pointer;text-align:center;';
+              cell.onmouseenter = function(){ cell.style.borderColor = '#7af'; };
+              cell.onmouseleave = function(){ cell.style.borderColor = '#333'; };
+              if (e.preview) {
+                var img = document.createElement('img');
+                var u = URL.createObjectURL(e.preview); urls.push(u);
+                img.src = u;
+                img.style.cssText = 'width:100%;height:110px;object-fit:cover;border-radius:2px;background:#000;';
+                cell.appendChild(img);
+              } else {
+                var ph = document.createElement('div');
+                ph.textContent = 'no preview';
+                ph.style.cssText = 'width:100%;height:110px;display:flex;align-items:center;justify-content:center;color:#555;background:#111;border-radius:2px;font-size:11px;';
+                cell.appendChild(ph);
+              }
+              var nm = document.createElement('div');
+              nm.textContent = e.name;
+              nm.style.cssText = 'color:#cde;font-size:11px;margin-top:4px;word-break:break-all;';
+              cell.appendChild(nm);
+              var rl = document.createElement('div');
+              rl.textContent = Object.keys(e.slots).sort().join(' ');
+              rl.style.cssText = 'color:#697;font-size:9px;margin-top:2px;';
+              cell.appendChild(rl);
+              cell.onclick = function(){ close(); importPack(e.slots, e.name); };
+              grid.appendChild(cell);
+            });
+            document.body.appendChild(ov);
+          }
+          var keys = Object.keys(dirs);
+          if (!keys.length) { editorStatus('pack: no recognizable maps in folder'); return; }
+          if (keys.length === 1) {
+            // A single material folder — import it directly, as before.
+            importPack(dirs[keys[0]], keys[0].split('/').pop() || '(folder)');
+            return;
+          }
+          // Multiple material folders (a category dir / the whole library):
+          // visual picker with each pack's intended preview render.
+          var entries = keys.map(function(k){
+            return { name: k.split('/').pop() || k, slots: dirs[k], preview: previewFor(k) };
+          }).sort(function(a, b){ return a.name.localeCompare(b.name); });
+          showPackPicker(entries);
         };
         pr.appendChild(pinp); imp.appendChild(pr);
         ['albedo','normal','height','roughness','ao','metallic'].forEach(function(role){
