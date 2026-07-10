@@ -933,19 +933,76 @@
         var el = document.getElementById('editor-lights');
         el.style.display = (el.style.display === 'none') ? 'block' : 'none';
       };
+      // ── Light multi-selection ──────────────────────────────────────────
+      // editorLightSel = authored indices being edited together ([] = none).
+      // Click = single select (+focus); ctrl/cmd-click = toggle into the set;
+      // shift-click = range in the rendered order; a parent group header
+      // selects all of an object's lights at once. Group edits are ABSOLUTE:
+      // every slider sets the same value on every selected light (each light
+      // then dirty-tracks and persists exactly like a single edit).
+      var editorLightSel = [];
+      var editorLightFlat = [];   // rendered order, for shift-range
+      function lightSelHas(i){ return editorLightSel.indexOf(i) >= 0; }
+      function selectedLightObjs(){
+        return editorLightSel.map(function(i){
+          return editorLights.find(function(x){ return x.i === i; });
+        }).filter(Boolean);
+      }
+      function applyLightSelection(label){
+        var ls = selectedLightObjs();
+        if (!ls.length) {
+          editorLightSel = [];
+          renderLightList();
+          document.getElementById('editor-light-props').innerHTML = '';
+          if (label) editorStatus(label);
+          return;
+        }
+        editorSelectedLight = ls[0].i;
+        renderLightList(); renderLightProps(ls[0], ls);
+        if (label) editorStatus(label);
+      }
       function renderLightList(){
         document.getElementById('editor-lights-count').textContent = editorLights.length ? ('(' + editorLights.length + ')') : '';
         var el = document.getElementById('editor-lights'); el.innerHTML = '';
+        editorLightFlat = [];
+        // Group by owning object (the engine's authored parent link — FLD
+        // lights are Object-tree nodes; '' = unparented).
+        var groups = {}, order = [];
         editorLights.forEach(function(l){
+          var p = l.parent || '';
+          if (!(p in groups)) { groups[p] = []; order.push(p); }
+          groups[p].push(l);
+        });
+        function addRow(l, indent){
+          editorLightFlat.push(l.i);
           var d = document.createElement('div');
-          d.className = 'surf-item' + (editorSelectedLight === l.i ? ' sel' : '');
+          d.className = 'surf-item' + ((lightSelHas(l.i) || (!editorLightSel.length && editorSelectedLight === l.i)) ? ' sel' : '');
+          if (indent) d.style.marginLeft = indent + 'px';
           d.innerHTML = '<div><span style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:rgb(' + l.r + ',' + l.g + ',' + l.b + ')"></span>' +
-            'Light ' + l.i + (l.type ? ' (spot)' : '') + (l.shadow ? ' ◘' : '') +
+            'Light ' + l.i + (l.name ? ' — ' + l.name : '') + (l.type ? ' (spot)' : '') + (l.shadow ? ' ◘' : '') +
             (lightDirty(l) ? ' <span style="color:#fa5">●</span>' : '') + '</div>' +
             '<div class="surf-tex">pos ' + l.x + ',' + l.y + ',' + l.z +
             ' • int ' + (+l.intensity).toFixed(2) + ' • range ' + (+l.range).toFixed(1) + '</div>';
-          d.onclick = function(){
-            editorSelectedLight = l.i; renderLightList(); renderLightProps(l);
+          d.onclick = function(ev){
+            if (ev.ctrlKey || ev.metaKey) {
+              // Extend from the current single selection, like the surface UX.
+              if (!editorLightSel.length && editorSelectedLight !== null && editorSelectedLight !== l.i)
+                editorLightSel = [editorSelectedLight];
+              if (lightSelHas(l.i)) editorLightSel = editorLightSel.filter(function(x){ return x !== l.i; });
+              else editorLightSel.push(l.i);
+              applyLightSelection('selection: ' + editorLightSel.length + ' light(s) — edits apply to all');
+              return;
+            }
+            if (ev.shiftKey && editorSelectedLight !== null) {
+              var a = editorLightFlat.indexOf(editorSelectedLight), b = editorLightFlat.indexOf(l.i);
+              if (a >= 0 && b >= 0) {
+                editorLightSel = editorLightFlat.slice(Math.min(a, b), Math.max(a, b) + 1);
+                applyLightSelection('range: ' + editorLightSel.length + ' light(s) — edits apply to all');
+                return;
+              }
+            }
+            editorLightSel = [l.i];
+            editorSelectedLight = l.i; renderLightList(); renderLightProps(l, [l]);
             // Frame the orbit on the light (same as clicking a surface row).
             // rawI, not i: editorFocusLight counts the UNFILTERED
             // Omni_SceneAuthored walk (mirror clones included), while i is the
@@ -954,6 +1011,23 @@
             editorStatus('light ' + l.i + ' — focused (' + l.x + ',' + l.y + ',' + l.z + ')');
           };
           el.appendChild(d);
+        }
+        order.forEach(function(p){
+          var g = groups[p];
+          if (p) {
+            var h = document.createElement('div');
+            var allIn = g.every(function(l){ return lightSelHas(l.i); }) && editorLightSel.length;
+            h.className = 'surf-item' + (allIn ? ' sel' : '');
+            h.style.color = '#adc';
+            h.innerHTML = '<div>◐ ' + p + ' — lights (' + g.length + ')</div>';
+            h.title = 'click: select all ' + g.length + ' lights of ' + p + ' and edit them together';
+            h.onclick = function(){
+              editorLightSel = g.map(function(l){ return l.i; });
+              applyLightSelection('all lights of "' + p + '" (' + g.length + ') — edits apply to all');
+            };
+            el.appendChild(h);
+          }
+          g.forEach(function(l){ addRow(l, p ? 14 : 0); });
         });
       }
       // Canvas light-pick landed on light i (editorPickLight): open the Lights
@@ -963,11 +1037,12 @@
       function selectLightFromPick(i){
         var l = editorLights.find(function(x){ return x.i === i; });
         if (!l) return false;
+        editorLightSel = [l.i];
         editorSelectedLight = l.i;
         var el = document.getElementById('editor-lights');
         if (el) el.style.display = 'block';
-        renderLightList(); renderLightProps(l);
-        var row = el && el.children[editorLights.indexOf(l)];
+        renderLightList(); renderLightProps(l, [l]);
+        var row = el && el.querySelector('.surf-item.sel');
         if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
         editorStatus('picked light ' + l.i + ' (' + l.x + ',' + l.y + ',' + l.z + ')');
         return true;
@@ -988,22 +1063,34 @@
       var EDITOR_LIGHT_RANGES = { r:[0,255,1], g:[0,255,1], b:[0,255,1],
                                   intensity:[0,4,0.01], range:[0,100,0.5],
                                   flareScale:[0.05,4,0.01] };
-      function renderLightProps(l){
+      // `group` (optional) = every light the sliders apply to; length > 1 means
+      // a multi-selection group edit. ABSOLUTE semantics: a slider sets the
+      // same value on every member (stated in the panel title); values shown
+      // are the FIRST member's. Each member dirty-tracks/persists exactly as a
+      // single-light edit does.
+      function renderLightProps(l, group){
+        var ls = (group && group.length) ? group : [l];
         var el = document.getElementById('editor-light-props'); el.innerHTML = '';
         var h = document.createElement('div'); h.style.cssText = 'color:#fff;margin:4px 0;display:flex;justify-content:space-between;';
         var hn = document.createElement('span');
-        hn.textContent = 'Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : '');
+        hn.textContent = ls.length > 1
+          ? (ls.length + ' lights — absolute edit (sets every selected light)')
+          : ('Light ' + l.i + (l.sizeKeys > 1 ? ' (animated — edits flatten keys)' : ''));
+        if (ls.length > 1) hn.title = 'editing lights ' + ls.map(function(x){ return x.i; }).join(', ') +
+          ' together. Values shown are light ' + l.i + '’s; moving a slider sets that ABSOLUTE value on all of them.';
         h.appendChild(hn);
         var rst = document.createElement('a');
         rst.textContent = 'reset'; rst.href = '#';
         rst.style.cssText = 'color:#c96;font-size:10px;text-decoration:none;';
         rst.onclick = function(e){
           e.preventDefault();
-          var p = editorLightsPristine[l.i]; if (!p) return;
-          EDITOR_LIGHT_PROPS.forEach(function(k){
-            if (Math.abs((+l[k]) - (+p[k])) > 1e-9) setLightProp(l, k, +p[k]);
+          ls.forEach(function(g){
+            var p = editorLightsPristine[g.i]; if (!p) return;
+            EDITOR_LIGHT_PROPS.forEach(function(k){
+              if (Math.abs((+g[k]) - (+p[k])) > 1e-9) setLightProp(g, k, +p[k]);
+            });
           });
-          renderLightList(); renderLightProps(l); updateSaveButton();
+          renderLightList(); renderLightProps(l, ls); updateSaveButton();
         };
         h.appendChild(rst); el.appendChild(h);
         EDITOR_LIGHT_PROPS.forEach(function(k){
@@ -1015,13 +1102,19 @@
           var val = document.createElement('input'); val.type = 'number'; val.step = rg[2];
           val.value = +(+l[k]).toFixed(3);
           val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          function applyAll(v){
+            ls.forEach(function(g){ setLightProp(g, k, v); });
+            if (ls.length > 1)
+              editorStatus('set ' + k + ' = ' + (+v).toFixed(2) + ' on ' + ls.length + ' lights (absolute)');
+            renderLightList();
+          }
           r.oninput = function(){
             var v = parseFloat(r.value); val.value = +v.toFixed(3);
-            setLightProp(l, k, v); renderLightList();
+            applyAll(v);
           };
           val.onchange = function(){
             var v = parseFloat(val.value); if (isNaN(v)) return;
-            r.value = v; setLightProp(l, k, v); renderLightList();
+            r.value = v; applyAll(v);
           };
           row.appendChild(r); row.appendChild(val); el.appendChild(row);
         });

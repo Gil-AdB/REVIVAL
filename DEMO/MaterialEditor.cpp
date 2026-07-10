@@ -69,6 +69,7 @@ static void editorRunSplitTestHook();  // defined below Editor_SplitInstances
 static void editorRunClearMapTestHook();  // defined next to the split hook
 static void editorRunFocusTestHook();  // defined below the focus core
 static void editorRunObjScaleTestHook();  // defined below Editor_SetObjectScale
+static void editorRunLightGroupTestHook();  // defined below Editor_GetLightsJSON
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -88,6 +89,8 @@ std::string Editor_GetSurfacesJSON()
 	editorRunFocusTestHook();
 	// OBJSCALE_TEST=<object>:<scale> validates the per-object scale knob.
 	editorRunObjScaleTestHook();
+	// LIGHTGROUP_TEST=<object> validates light→object grouping + group edit.
+	editorRunLightGroupTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -905,6 +908,20 @@ bool Editor_SetLightProp(int index, const char *key, float value)
 	return true;
 }
 
+// Each FLD light is wrapped in an Object node at load (FLD_CONV.CPP AddOmni:
+// Type=Obj_Omni, Data=the Omni, Name=the authored light name, ParentID
+// resolved to Obj->Parent) — the SAME tree the object hierarchy uses, so a
+// light's owning object ("bilding flare" → b2.lwo) is real authored data,
+// not a heuristic. Code-created omnis (camera light, bounce cones, mirror
+// clones) have no wrapper and resolve to null.
+static const Object *editorOmniWrapper(const Omni *O)
+{
+	if (!CurScene) return nullptr;
+	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next)
+		if (Obj->Type == Obj_Omni && Obj->Data == (const void *)O) return Obj;
+	return nullptr;
+}
+
 // ── Lights JSON (shared native/wasm) ────────────────────────────────────────
 // Color lives in Omni::L (0-255); intensity/range are 1-key-per-value splines
 // whose scalar sits in Keys[].Pos.x — Animate_Objects re-interpolates ISize/
@@ -916,6 +933,9 @@ bool Editor_SetLightProp(int index, const char *key, float value)
 //          walk, which is what MainLoop.cpp's editorFocusLight still counts.
 //          With mirrors off they're equal; with mirrors on the shell must pass
 //          rawI to editorFocusLight or it would focus a clone's phantom pos.
+// plus the authored name ("bilding flare", "" when the FLD carries none) and
+// parent — the owning OBJECT's chunk-collapsed name ("" = unparented), which
+// is what the shell's light grouping and LIGHTGROUP_TEST key on.
 std::string Editor_GetLightsJSON()
 {
 	std::string out = "[";
@@ -924,12 +944,17 @@ std::string Editor_GetLightsJSON()
 		if (!(O->Flags & Omni_SceneAuthored)) continue;
 		const int rawIdx = raw++;               // editorFocusLight's index space
 		if (!isAuthoredNonCloneOmni(O)) continue;
+		const Object *W = editorOmniWrapper(O);
+		std::string name, parent;
+		if (W && W->Name) name = W->Name;
+		if (W && W->Parent && W->Parent->Name)
+			parent = Editor_ChunkBaseObjName(W->Parent->Name);
 		char buf[380];
 		std::snprintf(buf, sizeof buf,
 		  "%s{\"i\":%d,\"rawI\":%d,\"r\":%.0f,\"g\":%.0f,\"b\":%.0f,"
 		  "\"intensity\":%.4g,\"range\":%.4g,\"flareScale\":%.4g,"
 		  "\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,"
-		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u}",
+		  "\"type\":%d,\"shadow\":%d,\"posKeys\":%u,\"sizeKeys\":%u,\"rangeKeys\":%u,",
 		  i ? "," : "", i, rawIdx, O->L.R, O->L.G, O->L.B,
 		  O->Size.NumKeys ? O->Size.Keys[0].Pos.x : 0.0f,
 		  O->Range.NumKeys ? O->Range.Keys[0].Pos.x : 0.0f,
@@ -938,11 +963,86 @@ std::string Editor_GetLightsJSON()
 		  int(O->Type), (O->Flags & Omni_CastsShadow) ? 1 : 0,
 		  (unsigned)O->Pos.NumKeys, (unsigned)O->Size.NumKeys, (unsigned)O->Range.NumKeys);
 		out += buf;
+		out += "\"name\":\"";
+		jsonEscape(out, name.c_str());
+		out += "\",\"parent\":\"";
+		jsonEscape(out, parent.c_str());
+		out += "\"}";
 		++i;
 	}
 	out += "]";
 	return out;
 }
+
+// Authored-light indices belonging to `objName` (chunk-collapsed object name,
+// ancestors included — a light parented to a train wagon groups under the
+// train root too). Shared by LIGHTGROUP_TEST; the shell groups by the JSON's
+// 'parent' field directly.
+static int editorLightsOfObject(const char *objName, int *out, int max)
+{
+	int n = 0, i = 0;
+	if (!CurScene || !objName || !*objName) return 0;
+	for (Omni *O = CurScene->OmniHead; O; O = O->Next) {
+		if (!isAuthoredNonCloneOmni(O)) continue;
+		const int idx = i++;
+		const Object *W = editorOmniWrapper(O);
+		for (const Object *A = W ? W->Parent : nullptr; A; A = A->Parent)
+			if (A->Name && Editor_ChunkBaseObjName(A->Name) == objName) {
+				if (n < max) out[n] = idx;
+				++n;
+				break;
+			}
+	}
+	return n;
+}
+
+#ifndef __EMSCRIPTEN__
+// LIGHTGROUP_TEST=<object> — native validation for light→object grouping +
+// group edit (PICK_TEST convention; rides the snapshot loops' DUMP_SURFACES
+// hook). Prints the resolved authored-light indices for the object, then
+// runs the group-edit smoke: r=255 on every member via Editor_SetLightProp
+// and asserts Editor_GetLightsJSON reflects it on all of them. e.g.:
+//   LIGHTGROUP_TEST="b2.lwo" DUMP_SURFACES=1 ./DEMO --deferred \
+//     --snapshot=city@t=300
+static void editorRunLightGroupTestHook()
+{
+	const char *spec = std::getenv("LIGHTGROUP_TEST");
+	if (!spec || !*spec || !CurScene) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	int idx[256];
+	const int n = editorLightsOfObject(spec, idx, 256);
+	std::string list;
+	for (int k = 0; k < n && k < 256; ++k) {
+		if (!list.empty()) list += ",";
+		list += std::to_string(idx[k]);
+	}
+	std::fprintf(stderr, "[LIGHTGROUP] '%s': %d light(s): [%s]\n", spec, n, list.c_str());
+	if (!n) return;
+	for (int k = 0; k < n && k < 256; ++k)
+		if (!Editor_SetLightProp(idx[k], "r", 255.0f))
+			std::fprintf(stderr, "[LIGHTGROUP] set r on light %d FAILED\n", idx[k]);
+	const std::string lj = Editor_GetLightsJSON();
+	int ok = 0;
+	for (int k = 0; k < n && k < 256; ++k) {
+		char probe[32];
+		std::snprintf(probe, sizeof probe, "{\"i\":%d,", idx[k]);
+		const size_t at = lj.find(probe);
+		bool good = false;
+		if (at != std::string::npos) {
+			const size_t rAt = lj.find("\"r\":", at);
+			const size_t end = lj.find('}', at);
+			if (rAt != std::string::npos && rAt < end)
+				good = std::atoi(lj.c_str() + rAt + 4) == 255;
+		}
+		if (good) ++ok;
+		else std::fprintf(stderr, "[LIGHTGROUP] light %d: r != 255 after group edit\n", idx[k]);
+	}
+	std::fprintf(stderr, "[LIGHTGROUP] group edit r=255: %d/%d reflected — %s\n",
+	             ok, n, ok == n ? "PASS" : "FAIL");
+}
+#endif // !__EMSCRIPTEN__
 
 // ── Click picking (shared native/wasm) ──────────────────────────────────────
 // The (u,v) input is normalized [0,1] over the ENGINE surface. Pixel↔ray
