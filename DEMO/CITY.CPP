@@ -1907,67 +1907,249 @@ static void bakeBuildingCubeFaces(Object* Obj,
 	}
 }
 
-// ── Vehicle headlights ("for the lulz") ──────────────────────────────
-// Every vehicle-sized mover gets one warm spotlight welded to its nose,
-// re-aimed along its motion every frame. "Vehicle" = TriMesh with an
-// animated Pos spline (>1 key) and a vehicle-scale bounding sphere —
-// the city traffic system: taxis, buses, trams, police, cars, bike,
-// ambulance, plus the two AlignToPath ships. The size gate excludes the
-// movers that are NOT vehicles (water.lwo r=1061, the b1.lwo building
-// r=709, the r=0 camera target). Cones read as volumetric beams under
-// --draw_cones and glow in the froxel fog; surface lighting paints
-// whatever they sweep. No shadows (~30 moving shadow maps would eat
-// the frame budget). The police car strobes red/blue, obviously.
+// ── Vehicle headlights ────────────────────────────────────────────────
+// Two schemes share one vehicle census ("vehicle" = TriMesh with an
+// animated Pos spline (>1 key) and a vehicle-scale bounding sphere; the
+// size gate excludes water.lwo r=1061, the moving b1.lwo building r=709
+// and the r=0 camera target — census: taxi ×8, bus ×5, car2 ×2, poliece,
+// bike, abulans, tra_frnt ×3, tra_vagn ×5, SHIP1, shp2):
+//
+//   LEGACY (--city-headlights, DEFAULT ON — the city pin was established
+//   with this look): one warm spot welded to the nose, re-aimed along
+//   frame-to-frame motion each tick.
+//
+//   FRONT-ROW (--city-headlights-front, default OFF): the legacy nose
+//   spot is replaced by a PAIR of spots per vehicle, seated on the front
+//   face of the local-space AABB at ±35% of the body width, slightly
+//   below mid-height, aimed along the vehicle's LOCAL +Z. +Z-is-forward
+//   was measured, not assumed: sampling each mover's Pos spline motion
+//   at 4 phases and pulling it into local space through the authored
+//   rotation gives local ≈ (0,0,+1) for every vehicle type (transient
+//   x-drift mid-turn is the rotation keys lagging the motion keys); for
+//   the two AlignToPath ships UnscaledRotMat·(0,0,1) IS the path heading
+//   by construction. Each spot omni is PARENTED to its vehicle Object
+//   through a code-created Obj_Omni wrapper (the same shape AddOmni
+//   builds for FLD lights): its single-key Pos spline holds the LOCAL
+//   mount offset, Animate_Objects' hierarchy pass then composes
+//   parent.Rot(scaled)·local + parent.Pos every frame — so position
+//   tracks the animated vehicle (incl. the ×18.9-scaled SHIP1) with no
+//   per-frame code. Omni IDir is NOT touched by the hierarchy pass
+//   (omni wrappers alias the shared Mat_ID identity), so aim alone is
+//   refreshed per tick from UnscaledRotMat column 2. Tram WAGONS
+//   (tra_vagn — trailing cars, no cab) are excluded; the tra_frnt cab
+//   keeps its pair (it shuttles back and forth, so on the return leg the
+//   beams face away from motion — like a real back-to-back tram cab).
+//   ll_pas/pas2/lll_pas ("train truck" track/pipe scenery) are static
+//   (NumKeys<=1) and never enter the census.
+//
+// Neither scheme sets Omni_SceneAuthored (the editor's lights list and
+// the LWS/FLD light index space see only authored lights); tuning goes
+// through the FeatureFlags render-flags panel (city_headlight_intensity,
+// city_headlight_range). No shadow casting, no volumetric cones by
+// default (--draw_cones opts in scene-wide) — ~30-46 moving shadow maps
+// would eat the frame budget. The police car strobes red/blue, obviously.
 namespace {
-struct VehicleHeadlight {
+struct VehicleHeadlight {          // legacy scheme
 	TriMesh* T;
 	Omni*    spot;
 	Vector   lastDir;
 	Vector   prevPos;
 	bool     hasPrev;   // delta heading needs one animated frame first
 	bool     police;
+	const char* name;
 };
 std::vector<VehicleHeadlight> g_headlights;
+
+struct VehicleFrontLights {        // front-row scheme
+	TriMesh* T;
+	Omni*    spot[2];   // left / right
+	bool     police;
+	const char* name;
+};
+std::vector<VehicleFrontLights> g_frontLights;
+
+// Shared census gate. Returns nullptr if this Object is not a vehicle.
+TriMesh *headlightVehicle(Object *O)
+{
+	if (O->Type != Obj_TriMesh) return nullptr;
+	TriMesh *T = (TriMesh *)O->Data;
+	if (T->Pos.NumKeys <= 1) return nullptr;               // parked scenery
+	if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
+		return nullptr;               // water / moving building / camera target
+	return T;
+}
+
+// FDS_HEADLIGHT_AXIS_DUMP=1 — one-shot native investigation hook (PICK_TEST
+// convention): per vehicle, print the local AABB + authored scale, and the
+// motion direction pulled into local space at 4 spline phases (the
+// snapshot tick freezes scene time, so frame-delta motion is useless for
+// this). This is how the +Z front axis and the mount offsets were derived.
+void headlightAxisDump(const char *name, TriMesh *T)
+{
+	if (!std::getenv("FDS_HEADLIGHT_AXIS_DUMP") || T->VIndex == 0) return;
+	Vector mn = T->Verts[0].Pos, mx = T->Verts[0].Pos;
+	for (DWord v = 1; v < T->VIndex; ++v) {
+		const Vector &p = T->Verts[v].Pos;
+		mn.x = std::min(mn.x, p.x); mx.x = std::max(mx.x, p.x);
+		mn.y = std::min(mn.y, p.y); mx.y = std::max(mx.y, p.y);
+		mn.z = std::min(mn.z, p.z); mx.z = std::max(mx.z, p.z);
+	}
+	Vector sc0; Spline_Calc_3D(&T->Scale, T->Pos.Keys[0].Frame + 1.0f, &sc0);
+	fprintf(stderr, "[HL-AABB] %-14s r=%7.1f aabb=(%.1f,%.1f,%.1f)..(%.1f,%.1f,%.1f) keys=%d align=%d euler=%d scale=(%.2f,%.2f,%.2f)\n",
+	        name, T->BSphereRadius, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z,
+	        (int)T->Pos.NumKeys, (T->Flags & Tri_AlignToPath) ? 1 : 0,
+	        (T->Flags & Tri_Euler) ? 1 : 0, sc0.x, sc0.y, sc0.z);
+	const int nk = (int)T->Pos.NumKeys;
+	const float f0 = T->Pos.Keys[0].Frame, f1 = T->Pos.Keys[nk-1].Frame;
+	for (float frac : {0.15f, 0.35f, 0.55f, 0.75f}) {
+		const float f = f0 + (f1 - f0) * frac;
+		Vector p0, p1, mo;
+		Spline_Calc_3D(&T->Pos, f,        &p0);
+		Spline_Calc_3D(&T->Pos, f + 1.0f, &p1);
+		Vector_Sub(&p1, &p0, &mo);
+		const float l = Vector_Length(&mo);
+		if (l < 1e-4f) continue;
+		Vector_SelfScale(&mo, 1.0f / l);
+		Matrix R;
+		if (T->Flags & Tri_Euler) {
+			Vector e; Spline_Calc_3D(&T->Rotate, f, &e);
+			Euler_Angles(R, e.x, e.y, e.z);
+		} else {
+			Quaternion q; Spline_Calc_4D_Alt(&T->Rotate, f, &q);
+			Convert_Quat2Mat(&q, R);
+		}
+		Vector lo;
+		lo.x = R[0][0]*mo.x + R[1][0]*mo.y + R[2][0]*mo.z;
+		lo.y = R[0][1]*mo.x + R[1][1]*mo.y + R[2][1]*mo.z;
+		lo.z = R[0][2]*mo.x + R[1][2]*mo.y + R[2][2]*mo.z;
+		fprintf(stderr, "[HL-AXIS] %-14s f=%7.1f world=(%+.2f,%+.2f,%+.2f) local=(%+.2f,%+.2f,%+.2f)\n",
+		        name, f, mo.x, mo.y, mo.z, lo.x, lo.y, lo.z);
+	}
+}
 }
 
 static void Setup_Vehicle_Headlights()
 {
 	g_headlights.clear();
-	if (!fds::FeatureFlags::city_headlights()) return;
+	g_frontLights.clear();
+	if (!fds::FeatureFlags::city_headlights() &&
+	    !fds::FeatureFlags::city_headlights_front()) return;
+	const bool front = fds::FeatureFlags::city_headlights_front();
 	int omnis = 0;
 	for (Omni *o = CitySc->OmniHead; o; o = o->Next) ++omnis;
+	// Tail of the object list — front-mode wrapper Objects are APPENDED so
+	// they iterate AFTER their parent vehicle in Animate_Objects' hierarchy
+	// pass (parents' Pos/Rot must already be composed).
+	Object *tail = CitySc->ObjectHead;
+	while (tail && tail->Next) tail = tail->Next;
 	for (Object *O = CitySc->ObjectHead; O; O = O->Next) {
-		if (O->Type != Obj_TriMesh) continue;
-		TriMesh *T = (TriMesh *)O->Data;
-		if (T->Pos.NumKeys <= 1) continue;                     // parked scenery
-		if (T->BSphereRadius <= 0.0f || T->BSphereRadius > 200.0f)
-			continue;                                          // water / moving building / camera target
+		TriMesh *T = headlightVehicle(O);
+		if (!T) continue;
 		const char *name = O->Name ? O->Name : "?";
 		const bool police = std::strstr(name, "poliece") != nullptr;
-		Omni *spot = fds::MakeSpotLight(
-			CitySc,
-			/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
-			fds::FeatureFlags::city_headlight_intensity(),
-			/*range*/ 1600.0f,                               // ~16m at 1cm/unit
-			T->IPos, Vector(0.0f, 0.0f, 1.0f),
-			/*hot=*/6.0f, /*outer=*/16.0f,
-			/*shadowMapRes=*/0, /*castsShadow=*/false);
-		g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
-		                        Vector(0.0f, 0.0f, 0.0f), false, police});
-		fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
-		        police ? " (strobe)" : "");
+		headlightAxisDump(name, T);
+
+		if (!front) {
+			// LEGACY: one nose spot, re-aimed along motion per tick.
+			Omni *spot = fds::MakeSpotLight(
+				CitySc,
+				/*RGB*/ 255.0f, 235.0f, 185.0f,                  // warm halogen
+				fds::FeatureFlags::city_headlight_intensity(),
+				/*range*/ 1600.0f,                               // ~16m at 1cm/unit
+				T->IPos, Vector(0.0f, 0.0f, 1.0f),
+				/*hot=*/6.0f, /*outer=*/16.0f,
+				/*shadowMapRes=*/0, /*castsShadow=*/false);
+			g_headlights.push_back({T, spot, Vector(0.0f, 0.0f, 0.0f),
+			                        Vector(0.0f, 0.0f, 0.0f), false, police, name});
+			fprintf(stderr, "[CITY] headlight on '%s'%s\n", name,
+			        police ? " (strobe)" : "");
+			continue;
+		}
+
+		// FRONT-ROW: skip the trailing tram wagons (no cab, no lights).
+		if (std::strstr(name, "tra_vagn")) continue;
+
+		// Local-space AABB → mount points on the front (+Z) face.
+		Vector mn = T->Verts[0].Pos, mx = T->Verts[0].Pos;
+		for (DWord v = 1; v < T->VIndex; ++v) {
+			const Vector &p = T->Verts[v].Pos;
+			mn.x = std::min(mn.x, p.x); mx.x = std::max(mx.x, p.x);
+			mn.y = std::min(mn.y, p.y); mx.y = std::max(mx.y, p.y);
+			mn.z = std::min(mn.z, p.z); mx.z = std::max(mx.z, p.z);
+		}
+		const float W = mx.x - mn.x, H = mx.y - mn.y, L = mx.z - mn.z;
+		const float mountY = 0.5f * (mn.y + mx.y) - 0.15f * H;  // slightly below mid-height
+		const float mountZ = mx.z + 0.02f * L;                  // just ahead of the nose
+
+		// Beam range scales with the vehicle's WORLD size (the ships are
+		// Scale-splined ×18.9 / ×7.8 — sample the spline; IScale isn't
+		// evaluated yet at init). Reference: a 50-unit-radius mid-size
+		// vehicle gets exactly city_headlight_range.
+		Vector sc; Spline_Calc_3D(&T->Scale, T->Pos.Keys[0].Frame + 1.0f, &sc);
+		const float worldR = T->BSphereRadius * (sc.x > 0.0f ? sc.x : 1.0f);
+		float sizeF = worldR / 50.0f;
+		// Clamp 0.5x-1.5x: at 2.5x the x18.9-scaled SHIP1 (worldR 158 →
+		// range 4000) floodlit half the basin's water — tuned by snapshot.
+		sizeF = sizeF < 0.5f ? 0.5f : (sizeF > 1.5f ? 1.5f : sizeF);
+		const float range = fds::FeatureFlags::city_headlight_range() * sizeF;
+
+		VehicleFrontLights fl{T, {nullptr, nullptr}, police, name};
+		for (int s = 0; s < 2; ++s) {
+			const float mountX = (s ? 0.35f : -0.35f) * W;   // "along the front row"
+			Omni *spot = fds::MakeSpotLight(
+				CitySc,
+				/*RGB*/ 255.0f, 235.0f, 185.0f,              // warm halogen
+				fds::FeatureFlags::city_headlight_intensity(),
+				range,
+				/*pos = LOCAL mount (see wrapper below)*/
+				Vector(mountX, mountY, mountZ),
+				/*dir*/ Vector(0.0f, 0.0f, 1.0f),
+				/*hot=*/15.0f, /*outer=*/30.0f,
+				/*shadowMapRes=*/0, /*castsShadow=*/false);
+			// Parent wrapper: the same Object shape AddOmni gives FLD
+			// lights (Pos aliases the omni's IPos; Rot aliases the shared
+			// identity — Animate_Objects deliberately skips the rotation
+			// compose for omnis). Each frame the omni's single-key Pos
+			// spline re-loads the LOCAL mount into IPos and the hierarchy
+			// pass composes parent.Rot·local + parent.Pos on top. NOT
+			// Omni_SceneAuthored → invisible to the editor's authored-light
+			// index space.
+			Object *Wr = new Object;
+			Wr->Data = spot;
+			Wr->Type = Obj_Omni;
+			Wr->Pos  = &spot->IPos;
+			Wr->Rot  = &Mat_ID;
+			Wr->Parent   = O;
+			Wr->ParentID = -1;      // parent resolved by pointer, not by load-time ID
+			Wr->Name = strdup("city headlight");
+			Wr->Number = tail ? tail->Number + 1 : 0;
+			Wr->Prev = tail;
+			if (tail) tail->Next = Wr; else CitySc->ObjectHead = Wr;
+			tail = Wr;
+			fl.spot[s] = spot;
+		}
+		g_frontLights.push_back(fl);
+		fprintf(stderr, "[CITY] front headlights on '%s'%s worldR=%.0f range=%.0f mount=(±%.1f,%.1f,%.1f)\n",
+		        name, police ? " (strobe)" : "", worldR, range,
+		        0.35f * W, mountY, mountZ);
 	}
-	fprintf(stderr, "[CITY] %zu vehicle headlights (%d scene omnis before; deferred cap %d)\n",
-	        g_headlights.size(), omnis, 128);
+	fprintf(stderr, "[CITY] %zu nose + %zu front-pair vehicle headlights (%d scene omnis before; per-tile cap 128, view cap 256)\n",
+	        g_headlights.size(), g_frontLights.size() * 2, omnis);
 }
 
-// Re-aim after Animate_Objects (which re-evaluates each spot's single-key
-// Pos spline back to its creation pos — overwrite wins, same pattern as
-// the greets robot spots).
+// Per-tick refresh, after Animate_Objects.
+//   legacy: Animate re-evaluates each spot's single-key Pos spline back to
+//     its creation pos — the nose re-mount + motion re-aim overwrite wins
+//     (same pattern as the greets robot spots).
+//   front-row: POSITION is already composed by the hierarchy pass (parented
+//     wrapper) — only the aim needs refreshing, since the hierarchy pass
+//     never rotates omni IDir: world front = UnscaledRotMat · (0,0,1) =
+//     column 2 (pure rotation incl. the AlignToPath ships' path alignment).
 static void Update_Vehicle_Headlights()
 {
+	const float baseIntensity = fds::FeatureFlags::city_headlight_intensity();
 	const float intensity = fds::FeatureFlags::city_headlights()
-	    ? fds::FeatureFlags::city_headlight_intensity() : 0.0f;
+	    ? baseIntensity : 0.0f;
 	for (VehicleHeadlight &h : g_headlights) {
 		TriMesh *T = h.T;
 		// Heading: AlignToPath meshes (the ships) maintain T->Heading with
@@ -2012,6 +2194,30 @@ static void Update_Vehicle_Headlights()
 			h.spot->L.R = red ? 255.0f : 40.0f;
 			h.spot->L.G = 40.0f;
 			h.spot->L.B = red ? 40.0f : 255.0f;
+		}
+	}
+	// Front-row pairs: aim + live intensity only (position is parented).
+	const float frontIntensity = fds::FeatureFlags::city_headlights_front()
+	    ? baseIntensity : 0.0f;
+	for (VehicleFrontLights &h : g_frontLights) {
+		TriMesh *T = h.T;
+		const float (*M)[3] = T->UnscaledRotMat;
+		Vector dir(M[0][2], M[1][2], M[2][2]);   // R·(0,0,1): local +Z in world
+		const float l2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+		if (l2 > 1e-12f) {
+			const float il = 1.0f / std::sqrt(l2);
+			dir.x *= il; dir.y *= il; dir.z *= il;
+		}
+		const float on = (T->Flags & HTrack_Visible) ? frontIntensity : 0.0f;
+		for (Omni *spot : h.spot) {
+			spot->IDir  = dir;
+			spot->ISize = on;
+			if (h.police) {
+				const bool red = ((int32_t)Timer / 250) & 1;
+				spot->L.R = red ? 255.0f : 40.0f;
+				spot->L.G = 40.0f;
+				spot->L.B = red ? 40.0f : 255.0f;
+			}
 		}
 	}
 }
