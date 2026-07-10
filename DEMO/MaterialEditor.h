@@ -46,6 +46,16 @@ std::string Editor_ChunkBaseObjName(const char *name);
 // child per part; instances (8 taxis) dedupe into one entry.
 std::string Editor_GetObjectsJSON();
 
+// LIVE per-object uniform scale multiplier (the objects panel's scale knob).
+// `objName` = an objects-JSON entry's 'obj' field (raw chunk-collapsed engine
+// object name — 'SHIP1.lwo', 'taxi.lwo', 'mech  null'). Applies to EVERY
+// instance of the name and composes into child objects (model roots scale the
+// whole assembly around their pivot); takes effect on the next Animate tick.
+// Returns the LIVE (non-static-baked) mesh count set; 0 = no effect. Native
+// validation: OBJSCALE_TEST=<object>:<scale>. Persisted via the scene
+// sidecar's 'obj:<name>|scale|v' lines (MaterialImport.h).
+int Editor_SetObjectScale(const char *objName, float scale);
+
 // Set one float property (key) on every CurScene material whose Name matches.
 // Keys: baseR/baseG/baseB, diffuse, specular, glossiness, luminosity,
 // transparency, reflection. Returns true if at least one material was updated.

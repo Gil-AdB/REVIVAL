@@ -299,6 +299,47 @@ def save_props_to_sidecar(scene, surfaces, warnings):
     return saved
 
 
+# Per-OBJECT overrides — engine-only (TriMesh::EditorScale), persisted as
+# sidecar "obj:<name>|scale|<v>" lines for EVERY scene type (authoring and
+# FLD-patched alike; there is no LWO slot, and rewriting every LWS keyframe's
+# scale channel was judged more invasive than the sidecar). <name> is the
+# entry's 'obj' field from editorGetObjects (raw chunk-collapsed FLD object
+# name). A scale of 1 DELETES the line (authored default).
+OBJECT_KEYS = {"scale"}
+
+
+def save_objects_to_sidecar(scene, objects, warnings):
+    """{"<obj-name>": {"scale": v}} -> sidecar obj: lines. Returns summary."""
+    if not objects or not isinstance(objects, dict):
+        return []
+    sidecar = scene_sidecar(scene)
+    entries = read_sidecar(sidecar)
+    saved = []
+    changed = False
+    for name, props in objects.items():
+        if not isinstance(props, dict):
+            warnings.append(f"objects['{name}']: bad shape — skipped")
+            continue
+        bad = set(props) - OBJECT_KEYS
+        if bad:
+            warnings.append(f"object '{name}': unknown keys {sorted(bad)} — skipped")
+            continue
+        for k, v in props.items():
+            key = (f"obj:{name}", k)
+            if k == "scale" and abs(float(v) - 1.0) < 1e-6:
+                if key in entries:      # back to authored — drop the override
+                    del entries[key]
+                    changed = True
+                    saved.append({"object": name, "key": k, "deleted": True})
+                continue
+            entries[key] = f"{float(v):.6g}"
+            changed = True
+            saved.append({"object": name, "key": k})
+    if changed:
+        write_sidecar(sidecar, entries)
+    return saved
+
+
 LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
 # Engine-only per-light extensions: no LWS/FLD field exists, so they persist
 # as sidecar "light:<i>|<key>|<value>" lines (applied at scene init by
@@ -490,12 +531,33 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
 
 
 def do_save(scene, payload):
+    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...},
+    "objects": {...}}. Object props (scale) go to the sidecar for every
+    scene type; the rest routes per scene — see do_save_main."""
+    if scene not in SCENES:
+        return 404, {"ok": False, "error": f"unknown scene '{scene}'"}
+    obj_warnings = []
+    saved_objects = save_objects_to_sidecar(scene, payload.get("objects") or {},
+                                            obj_warnings)
+    rest = dict(payload)
+    rest.pop("objects", None)
+    code, resp = do_save_main(scene, rest)
+    if saved_objects:
+        # An objects-only save legitimately has nothing else in the payload.
+        if not resp.get("ok") and "no surfaces" in str(resp.get("error", "")):
+            code, resp = 200, {"ok": True, "patched": [], "warnings": []}
+        resp["objects"] = saved_objects
+        resp["sidecar"] = os.path.relpath(scene_sidecar(scene), REPO)
+    if obj_warnings:
+        resp.setdefault("warnings", []).extend(obj_warnings)
+    return code, resp
+
+
+def do_save_main(scene, payload):
     """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}}.
     greets: patch LWOs + LWS, regen + install the FLD.
     other scenes (no pinned sources): surfaces persist as sidecar prop lines,
     lights are live-only (warned). Maps go to the scene sidecar either way."""
-    if scene not in SCENES:
-        return 404, {"ok": False, "error": f"unknown scene '{scene}'"}
     surfaces = payload.get("surfaces") or {}
     maps = payload.get("maps") or {}
     lights = payload.get("lights") or {}

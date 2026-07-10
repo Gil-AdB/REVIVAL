@@ -68,6 +68,7 @@ static void editorRunPickTestHook();   // defined below the pick core
 static void editorRunSplitTestHook();  // defined below Editor_SplitInstances
 static void editorRunClearMapTestHook();  // defined next to the split hook
 static void editorRunFocusTestHook();  // defined below the focus core
+static void editorRunObjScaleTestHook();  // defined below Editor_SetObjectScale
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -85,6 +86,8 @@ std::string Editor_GetSurfacesJSON()
 	editorRunClearMapTestHook();
 	// FOCUS_TEST=<surface[;surface…]> validates the click-to-focus framing.
 	editorRunFocusTestHook();
+	// OBJSCALE_TEST=<object>:<scale> validates the per-object scale knob.
+	editorRunObjScaleTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -349,8 +352,9 @@ std::string Editor_GetObjectsJSON()
 		out += "\",\"obj\":\"";
 		jsonEscape(out, rootName.c_str());
 		out += "\",";
-		char buf[48];
-		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,", meshes);
+		char buf[64];
+		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,\"scale\":%.4g,", meshes,
+		              fds::ObjectImport_GetObjectScale(CurScene, rootName.c_str()));
 		out += buf;
 		appendSurfArray(out, all);
 		if (multi) {
@@ -364,6 +368,9 @@ std::string Editor_GetObjectsJSON()
 				out += "\",\"obj\":\"";
 				jsonEscape(out, part.c_str());
 				out += "\",";
+				std::snprintf(buf, sizeof buf, "\"scale\":%.4g,",
+				              fds::ObjectImport_GetObjectScale(CurScene, part.c_str()));
+				out += buf;
 				appendSurfArray(out, P.surfaces);
 				out += "}";
 			}
@@ -383,6 +390,22 @@ std::string Editor_GetObjectsJSON()
 	}
 	out += "]";
 	return out;
+}
+
+// LIVE per-object uniform scale (the objects-panel knob). Thin wrapper over
+// ObjectImport_SetObjectScale on the rendered scene: sets every instance of
+// the (chunk-collapsed) object name; Animate_Objects folds the multiplier in
+// on the next tick, pivoting on the object pivot and composing into children
+// (a model root scales the whole assembly). Returns the LIVE mesh count set
+// (0 = no such object / fully static-baked). Persistence is the server's
+// 'obj:<name>|scale|v' sidecar line — see MaterialImport.h.
+int Editor_SetObjectScale(const char *objName, float scale)
+{
+	const int n = fds::ObjectImport_SetObjectScale(CurScene, objName, scale);
+	if (n > 0) Editor_MarkDirty();
+	std::fprintf(stderr, "[EDITOR] scale '%s' = %.4g -> %d live mesh(es)\n",
+	             objName ? objName : "", scale, n);
+	return n;
 }
 
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
@@ -1378,6 +1401,118 @@ static void editorRunFocusTestHook()
 	    spx, spy, CntrEX, CntrEY, centered ? "PASS" : "FAIL",
 	    outside ? "PASS" : "FAIL");
 }
+
+// OBJSCALE_TEST=<object>:<scale> — native validation for the per-object
+// scale knob (PICK_TEST convention; rides the snapshot loops' DUMP_SURFACES
+// hook, post-tick). Measures the FIRST matching instance's world AABB
+// (subtree included — children compose the parent's scaled matrix), applies
+// Editor_SetObjectScale, re-runs Animate_Objects (which folds EditorScale
+// into the transform), measures again, and asserts the bounding radius grew
+// by the requested factor (±5%). Instance-anchored on purpose: a name-keyed
+// union over the 8 city taxis only grows marginally (each instance scales
+// around its OWN pivot; their spacing doesn't). Then frames the camera on
+// the PRE-scale bbox and re-renders (the FOCUS_TEST recipe: geometry only)
+// so the snapshot PPM SHOWS the scaled object — px-diff an x1 vs xN run
+// pair for pixel evidence. e.g.:
+//   OBJSCALE_TEST="SHIP1.lwo:2" DUMP_SURFACES=1 ./DEMO --deferred \
+//     --snapshot=city@t=300
+static void editorRunObjScaleTestHook()
+{
+	const char *spec = std::getenv("OBJSCALE_TEST");
+	if (!spec || !*spec || !CurScene || !View) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	const std::string s = spec;
+	const size_t colon = s.rfind(':');
+	float scale = 0.0f;
+	if (colon == std::string::npos
+	    || std::sscanf(s.c_str() + colon + 1, "%f", &scale) != 1 || scale <= 0.0f) {
+		std::fprintf(stderr, "[OBJSCALE] bad spec '%s' (want object:scale)\n", spec);
+		return;
+	}
+	const std::string obj = s.substr(0, colon);
+	// Anchor: the first Object carrying the (chunk-collapsed) name.
+	const Object *anchor = nullptr;
+	for (Object *O = CurScene->ObjectHead; O && !anchor; O = O->Next)
+		if (O->Type == Obj_TriMesh && O->Data && O->Name
+		    && Editor_ChunkBaseObjName(O->Name) == obj)
+			anchor = O;
+	if (!anchor) {
+		std::fprintf(stderr, "[OBJSCALE] '%s': no such object — FAIL\n", obj.c_str());
+		return;
+	}
+	// World AABB of the anchor's subtree (anchor + descendants; other
+	// instances of the name are separate Objects and stay out).
+	auto subtreeRadius = [&](Vector &centre) -> float {
+		float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+		long nv = 0;
+		for (Object *O = CurScene->ObjectHead; O; O = O->Next) {
+			if (O->Type != Obj_TriMesh || !O->Data) continue;
+			bool inSubtree = false;
+			for (const Object *A = O; A; A = A->Parent)
+				if (A == anchor) { inSubtree = true; break; }
+			if (!inSubtree) continue;
+			TriMesh *T = (TriMesh *)O->Data;
+			for (DWord v = 0; v < T->VIndex; ++v) {
+				Vector w;
+				MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
+				Vector_SelfAdd(&w, &T->IPos);
+				const float p[3] = { w.x, w.y, w.z };
+				for (int a = 0; a < 3; ++a) {
+					if (p[a] < lo[a]) lo[a] = p[a];
+					if (p[a] > hi[a]) hi[a] = p[a];
+				}
+				++nv;
+			}
+		}
+		if (!nv) return -1.0f;
+		centre.x = (lo[0] + hi[0]) * 0.5f;
+		centre.y = (lo[1] + hi[1]) * 0.5f;
+		centre.z = (lo[2] + hi[2]) * 0.5f;
+		const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
+		return 0.5f * std::sqrt(dx*dx + dy*dy + dz*dz);
+	};
+	Vector c0, c1;
+	const float r0 = subtreeRadius(c0);
+	if (r0 <= 0.0f) {
+		std::fprintf(stderr, "[OBJSCALE] '%s': no verts — FAIL\n", obj.c_str());
+		return;
+	}
+	const int n = Editor_SetObjectScale(obj.c_str(), scale);
+	// Fold the multiplier into RotMat/IPos (what the next tick would do).
+	Animate_Objects(CurScene, nullptr);
+	const float r1 = subtreeRadius(c1);
+	const float ratio = r1 / r0;
+	const bool pass = n > 0 && std::fabs(ratio - scale) <= 0.05f * scale;
+	std::fprintf(stderr,
+	    "[OBJSCALE] '%s' x%.3g: %d live mesh(es), radius %.3f -> %.3f "
+	    "(x%.3f, want x%.3g) centre (%.1f %.1f %.1f)->(%.1f %.1f %.1f): %s\n",
+	    obj.c_str(), scale, n, r0, r1, ratio, scale,
+	    c0.x, c0.y, c0.z, c1.x, c1.y, c1.z, pass ? "PASS" : "FAIL");
+	// Frame the camera on the PRE-scale bbox (c0/r0 → identical pose whatever
+	// the scale, so an x1 vs x2 run pair px-diffs to just the object), then
+	// re-render so the written snapshot SHOWS the scaled object.
+	Vector dir(c0.x - View->ISource.x, c0.y - View->ISource.y, c0.z - View->ISource.z);
+	const float len = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+	if (len > 1e-4f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+	else             { dir.x = 0.0f; dir.y = 0.0f; dir.z = 1.0f; }
+	const float dist = r0 * 2.5f < 6.0f ? 6.0f : r0 * 2.5f;
+	FC.ISource = Vector(c0.x - dir.x * dist, c0.y - dir.y * dist, c0.z - dir.z * dist);
+	Vector look = c0;
+	Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+	if (FC.IFOV <= 0.0f) FC.IFOV = (View->IFOV > 0.0f) ? View->IFOV : 65.0f;
+	CalcPersp(&FC);
+	View = &FC;
+	FOVX = View->PerspX;
+	FOVY = View->PerspY;
+	if (VPage && ZPage16 && CurScene) {
+		std::memset(VPage, 0, PageSize);
+		std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+		Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+		if (CAll) { Radix_Sort(FList, SList, CAll); Render(); }
+	}
+}
 #endif // !__EMSCRIPTEN__
 
 static std::atomic<bool> g_editorDirty{true};   // first frame renders
@@ -1618,6 +1753,13 @@ void js_editorSetSmoothAngleLive(std::string name, float angleDeg)
 std::string js_editorSplitInstances(std::string name)
 {
 	return rev::Editor_SplitInstances(name.c_str());
+}
+// Per-object uniform scale knob (objects panel). `name` is the entry's 'obj'
+// field (raw chunk-collapsed engine object name). Returns the LIVE mesh count
+// set — 0 means no such object or fully static-baked (the shell reports it).
+int js_editorSetObjectScale(std::string name, float scale)
+{
+	return rev::Editor_SetObjectScale(name.c_str(), scale);
 }
 std::string js_editorSetUVMapping(std::string name, int proj,
                                   float sx, float sy, float sz, int axis)
@@ -1889,6 +2031,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetLights",      &js_editorGetLights);
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
 	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
+	emscripten::function("editorSetObjectScale", &js_editorSetObjectScale);
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
 	emscripten::function("editorVizMap",         &js_editorVizMap);
 	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);

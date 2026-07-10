@@ -77,6 +77,19 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 //   surface|prop|value                      (prop: diffuse/specular/glossiness/
 //                                            luminosity/transparency/reflection/
 //                                            baseR/baseG/baseB — engine scale)
+//   light:<i>|key|value                     (per-light engine-only extensions;
+//                                            <i> = authored light index in
+//                                            FLD/LWS file order; currently
+//                                            flareScale)
+//   obj:<name>|scale|value                  (per-OBJECT overrides; <name> =
+//                                            chunk-collapsed FLD object name,
+//                                            e.g. 'SHIP1.lwo', 'taxi.lwo',
+//                                            'mech  null'. scale = uniform
+//                                            multiplier on the object's Scale
+//                                            spline, 1 = authored; applies to
+//                                            every instance of the name and
+//                                            composes into child objects —
+//                                            see ObjectImport_SetObjectScale)
 // '|' separator because surface names contain spaces ("hull not smooth").
 // Map lines go through MaterialImport_ApplyMapFile (same load/convert/assign/
 // tangent-recompute as the CLI path, ::mirUV clones included); prop lines go
@@ -97,6 +110,17 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 // loaded, 1 = flipped). Set via SetSurfaceProp("normalFlip", 0|1); tracked per
 // TEXTURE so shared clones flip once and the editor UI reads a truthful state.
 int MaterialImport_GetNormalFlip(const Material *M);
+
+// Per-object uniform scale multiplier (the editor's objects-panel scale knob;
+// persisted via 'obj:<name>|scale|v' sidecar lines). Sets TriMesh::EditorScale
+// on every object whose chunk-collapsed name matches; Animate_Objects folds it
+// into the Scale-spline result, so it pivots on the object pivot and composes
+// down the parent→child chain (scaling a model root scales the assembly).
+// Returns the number of LIVE (non-Tri_Possessed) meshes set — 0 means the
+// object doesn't exist or is fully static-baked (greets' chunked room).
+int   ObjectImport_SetObjectScale(Scene *sc, const char *objName, float scale);
+// Read-back (first matching mesh; unset → 1.0) for the objects JSON.
+float ObjectImport_GetObjectScale(Scene *sc, const char *objName);
 
 } // namespace fds
 

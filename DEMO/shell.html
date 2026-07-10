@@ -807,7 +807,49 @@
         try {
           var fresh = JSON.parse(Module.editorGetObjects ? Module.editorGetObjects() : '[]');
           if (fresh.length || !editorObjects.length) editorObjects = fresh;
+          seedObjPristine(editorObjects);
         } catch(e){ console.warn('[editor] objects enumerate failed', e); }
+      }
+      // ── Per-object scale knob ─────────────────────────────────────────
+      // o.scale arrives with the objects JSON (engine TriMesh::EditorScale,
+      // 1 = authored — sidecar-persisted values show up here after a reload).
+      // Pristine = first-seen values; Save ships dirty ones as
+      // payload.objects → 'obj:<name>|scale|v' sidecar lines (every scene).
+      var editorObjPristine = {};
+      function seedObjPristine(list){
+        (list || []).forEach(function(o){
+          if (o.obj && editorObjPristine[o.obj] === undefined)
+            editorObjPristine[o.obj] = (o.scale !== undefined) ? +o.scale : 1;
+          seedObjPristine(o.children);
+        });
+      }
+      function setObjectScale(o, v){
+        v = +v;
+        if (!(v > 0)) return;
+        var n = 0;
+        try { n = Module.editorSetObjectScale ? Module.editorSetObjectScale(o.obj, v) : 0; }
+        catch(e){ editorStatus('scale failed: ' + e); return; }
+        // Sync EVERY entry sharing the engine object (a model root and its
+        // matching part row carry the same obj key).
+        (function sync(list){ (list || []).forEach(function(x){
+          if (x.obj === o.obj) x.scale = v;
+          sync(x.children);
+        }); })(editorObjects);
+        if (n > 0) editorStatus('scale ' + o.obj + ' = ' + v.toFixed(2) + ' (' + n + ' mesh' + (n > 1 ? 'es' : '') + ')');
+        else editorStatus('scale ' + o.obj + ': no live meshes (static-baked object) — the knob can\'t affect it');
+        updateSaveButton();
+      }
+      function collectDirtyObjects(){
+        var out = {};
+        (function walk(list){ (list || []).forEach(function(o){
+          if (o.obj) {
+            var p = (editorObjPristine[o.obj] !== undefined) ? editorObjPristine[o.obj] : 1;
+            var cur = (o.scale !== undefined) ? +o.scale : 1;
+            if (Math.abs(cur - p) > 1e-4) out[o.obj] = { scale: cur };
+          }
+          walk(o.children);
+        }); })(editorObjects);
+        return out;
       }
       var editorPristine = {};
       // PBR maps imported this session, pending persistence: surface -> role ->
@@ -877,10 +919,12 @@
       function updateSaveButton(){
         var b = document.getElementById('editor-save'); if (!b) return;
         var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
-            L = Object.keys(collectDirtyLights()).length;
-        b.disabled = !(n || m || L);
-        b.textContent = (n || m || L)
-          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '']
+            L = Object.keys(collectDirtyLights()).length,
+            O = Object.keys(collectDirtyObjects()).length;
+        b.disabled = !(n || m || L || O);
+        b.textContent = (n || m || L || O)
+          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '',
+                         O ? O + ' obj' : '']
                .filter(Boolean).join(', ') + ')')
           : 'Save to LWO';
       }
@@ -1282,8 +1326,10 @@
           var d = document.createElement('div');
           d.className = 'surf-item' + (isSel ? ' sel' : '');
           d.style.marginLeft = (depth * 14) + 'px';
+          var scaled = o.obj && o.scale !== undefined && Math.abs(o.scale - 1) > 1e-4;
           d.innerHTML = '<div><span class="obj-exp" style="display:inline-block;width:14px;cursor:pointer;color:#8ac;">' +
-            (open ? '▾' : '▸') + '</span>⬚ ' + o.name + '</div>' +
+            (open ? '▾' : '▸') + '</span>⬚ ' + o.name +
+            (scaled ? ' <span style="color:#fa5">×' + (+o.scale).toFixed(2) + '</span>' : '') + '</div>' +
             '<div class="surf-tex" style="margin-left:14px;">' + o.surfaces.length + ' surface(s)' +
             (kids.length ? ', ' + kids.length + ' part(s)' : '') + '</div>';
           d.querySelector('.obj-exp').onclick = function(ev){
@@ -1297,6 +1343,40 @@
           };
           el.appendChild(d);
           if (!open) return;
+          // Expanded + a real engine object → uniform scale knob (log-feel
+          // slider 0.1..10 + free number box; 1 = authored). Applies live to
+          // every instance; persists via the scene sidecar on Save.
+          if (o.obj) {
+            var sr = document.createElement('div');
+            sr.className = 'prop-row';
+            sr.style.marginLeft = ((depth + 1) * 14 + 4) + 'px';
+            sr.title = 'uniform object scale (1 = authored; slider 0.1–10, box takes any value >0). Scales every instance of ' + o.obj + ' around its pivot; child parts follow. Persists via the scene sidecar on Save.';
+            var slab = document.createElement('label'); slab.textContent = 'scale';
+            var srange = document.createElement('input'); srange.type = 'range';
+            srange.min = -1; srange.max = 1; srange.step = 0.01;   // 10^x
+            var cur = (o.scale !== undefined) ? +o.scale : 1;
+            srange.value = Math.log10(Math.min(10, Math.max(0.1, cur)));
+            var snum = document.createElement('input'); snum.type = 'number'; snum.step = 0.05;
+            snum.value = +cur.toFixed(3);
+            snum.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+            srange.oninput = function(){
+              var v = Math.pow(10, parseFloat(srange.value));
+              v = +v.toFixed(2);
+              snum.value = v;
+              setObjectScale(o, v);
+            };
+            snum.onchange = function(){
+              var v = parseFloat(snum.value);
+              if (isNaN(v) || v <= 0) return;
+              srange.value = Math.log10(Math.min(10, Math.max(0.1, v)));
+              setObjectScale(o, v);
+            };
+            ['mousedown','click','pointerdown'].forEach(function(t){
+              sr.addEventListener(t, function(e){ e.stopPropagation(); });
+            });
+            sr.appendChild(slab); sr.appendChild(srange); sr.appendChild(snum);
+            el.appendChild(sr);
+          }
           if (kids.length) {
             kids.forEach(function(c, i){ addObjRow(c, depth + 1, key + '/' + c.name + i, container || o); });
           } else {
@@ -1479,11 +1559,15 @@
         var nMaps = pendingMapCount();
         var dirtyLights = collectDirtyLights();
         var lightIdx = Object.keys(dirtyLights);
-        if (!names.length && !nMaps && !lightIdx.length) return;
-        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' + lightIdx.length + ' light(s)…');
+        var dirtyObjects = collectDirtyObjects();
+        var objNames = Object.keys(dirtyObjects);
+        if (!names.length && !nMaps && !lightIdx.length && !objNames.length) return;
+        editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' +
+                     lightIdx.length + ' light(s), ' + objNames.length + ' object(s)…');
         var payload = { surfaces: dirty };
         if (nMaps) payload.maps = maps;
         if (lightIdx.length) payload.lights = dirtyLights;
+        if (objNames.length) payload.objects = dirtyObjects;
         fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
@@ -1492,6 +1576,7 @@
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
             if (res.fld) bits.push(res.fld.split('/').pop());
             if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
+            if (res.objects && res.objects.length) bits.push(res.objects.length + ' object(s) → sidecar');
             if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → FLD');
             editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
@@ -1506,6 +1591,7 @@
               var l = editorLights.find(function(x){ return String(x.i) === String(i); });
               if (l) editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l));
             });
+            objNames.forEach(function(n){ editorObjPristine[n] = dirtyObjects[n].scale; });
             editorPendingMaps = {};
             renderSurfaceList(); renderLightList(); updateSaveButton();
           })

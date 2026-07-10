@@ -9,6 +9,8 @@
 #include <Base/Material.h>
 #include <Base/Omni.h>               // FlareScale (sidecar light: lines)
 #include <Base/Scene.h>
+#include <Base/Object.h>             // Object tree (sidecar obj: lines)
+#include <Base/TriMesh.h>            // EditorScale (sidecar obj: lines)
 #include <Base/FeatureFlags.h>
 
 #include <cstdio>
@@ -456,6 +458,67 @@ static bool sidecarIsMapRole(const char *role) {
 	    || !std::strcmp(role, "ao")     || !std::strcmp(role, "metallic");
 }
 
+// ── Object-level overrides ("obj:" sidecar lines / the editor scale knob) ──
+// Set the per-object uniform scale multiplier on every scene object whose
+// chunk-collapsed name (Editor_ChunkBaseObjName — 'Piramid.lwo:c17' →
+// 'Piramid.lwo') matches `objName`. Multi-instance objects (8 × taxi.lwo) are
+// separate Objects sharing the name — all of them are set. Subtree semantics
+// come free: Animate_Objects composes the parent's (scaled) rotation matrix
+// into children, so scaling a model's ROOT object ('mech  null',
+// 'tra_frnt.lwo') scales the whole assembly around the root's pivot.
+// Returns the number of LIVE meshes set; static-baked (Tri_Possessed) meshes
+// are still stamped but never re-run Animate_Objects, so they're reported on
+// stderr instead of counted (greets' chunked room can't scale live).
+int ObjectImport_SetObjectScale(Scene *sc, const char *objName, float scale) {
+	if (!sc || !objName || !*objName) return 0;
+	if (scale <= 0.0f) scale = 1.0f;
+	const std::string want = objName;
+	int applied = 0, possessed = 0;
+	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name) continue;
+		if (rev::Editor_ChunkBaseObjName(Obj->Name) != want) continue;
+		TriMesh *T = (TriMesh *)Obj->Data;
+		T->EditorScale = scale;
+		if (T->Flags & Tri_Possessed) ++possessed;
+		else ++applied;
+	}
+	if (possessed)
+		std::fprintf(stderr, "[OBJ-IMPORT] scale '%s'=%.3g: %d static-baked "
+		             "(Tri_Possessed) mesh(es) skip Animate_Objects — live scale "
+		             "can't reach them\n", objName, scale, possessed);
+	return applied;
+}
+
+// Read-back for the editor's objects JSON: the object's current scale
+// multiplier (first matching mesh; 0-sentinel resolved to 1.0).
+float ObjectImport_GetObjectScale(Scene *sc, const char *objName) {
+	if (!sc || !objName || !*objName) return 1.0f;
+	const std::string want = objName;
+	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name) continue;
+		if (rev::Editor_ChunkBaseObjName(Obj->Name) != want) continue;
+		const TriMesh *T = (const TriMesh *)Obj->Data;
+		return T->EditorScale > 0.0f ? T->EditorScale : 1.0f;
+	}
+	return 1.0f;
+}
+
+// Sidecar object lines: "obj:<name>|<key>|<value>" — per-OBJECT overrides
+// with no writable LWO/FLD slot (currently: scale). <name> is the
+// chunk-collapsed FLD object name (see ObjectImport_SetObjectScale above).
+static bool sidecarSetObjectProp(Scene *sc, const char *objName,
+                                 const char *key, float value) {
+	if (std::strcmp(key, "scale") != 0) return false;   // unknown per-object key
+	// Count ALL matches (a persisted scale on a fully static-baked object is
+	// applied-but-inert; don't fail the sidecar line over it).
+	ObjectImport_SetObjectScale(sc, objName, value);
+	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next)
+		if (Obj->Type == Obj_TriMesh && Obj->Data && Obj->Name
+		    && rev::Editor_ChunkBaseObjName(Obj->Name) == objName)
+			return true;
+	return false;   // no such object
+}
+
 // Sidecar light lines: "light:<i>|<key>|<value>" — engine-only per-light
 // extensions with no LWS/FLD field (currently flareScale). <i> indexes the
 // scene-authored omnis in file order, the SAME mapping the editor and the
@@ -495,6 +558,11 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 			ok = sidecarSetLightProp(sc, std::atoi(surface + 6), key,
 			                         std::strtof(value, nullptr));
 			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such light / key\n",
+			                      surface, key);
+		} else if (!std::strncmp(surface, "obj:", 4)) {
+			ok = sidecarSetObjectProp(sc, surface + 4, key,
+			                          std::strtof(value, nullptr));
+			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such object / key\n",
 			                      surface, key);
 		} else if (sidecarIsMapRole(key)) {
 			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);

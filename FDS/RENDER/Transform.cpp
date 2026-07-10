@@ -184,6 +184,12 @@ void Animate_Objects(Scene *Sc, Camera *cam)
 		Spline_Calc_3D(&T->Pos,CurFrame,&T->IPos);
 		Spline_Calc_3D(&T->Scale,CurFrame,&T->IScale);
 		//    Vector_Form(&T->IScale,1,1,1); // until i get it right
+		// Editor per-object scale knob (TriMesh.h): 0 = unset → authored
+		// scale, guarded so the default path stays byte-identical. Applied
+		// to the spline RESULT, so it pivots on the object pivot (IPos is
+		// offset by Rot·Pivot in the hierarchy pass below) and composes
+		// into children through the parent→child matrix chain.
+		if (T->EditorScale > 0.0f) Vector_SelfScale(&T->IScale, T->EditorScale);
 		
 		if (T->Flags&Tri_Euler)
 		{

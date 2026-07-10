@@ -104,6 +104,17 @@ struct TriMesh
     // consumers off the AoS Vertex transformed fields.
     VertexFrame     *frame              = nullptr;
 
+    // Editor per-object uniform scale multiplier (browser editor scale knob /
+    // 'obj:<name>|scale|v' sidecar lines — see DEMO/MaterialImport.h). Same
+    // 0-sentinel convention as Omni::FlareScale: 0 = unset → authored 1.0,
+    // so the many memset(0) TriMesh creation sites (FLD convert, mirror
+    // clones, chunk splits) keep their look byte-identically. >0 multiplies
+    // the Scale-spline result in Animate_Objects — the scale pivots on the
+    // object pivot and composes down the parent→child matrix chain exactly
+    // like authored scale. Static (Tri_Possessed) meshes never re-run
+    // Animate_Objects, so the knob cannot affect them (greets' baked room).
+    float            EditorScale        = 0.0f;
+
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
 
