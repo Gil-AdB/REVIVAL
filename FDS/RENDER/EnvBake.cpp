@@ -65,6 +65,44 @@ Material* g_envBakeLegacySkipMat = nullptr;
 
 bool EnvBake_HasSkipFaces() { return !g_envBakeSkipMats.empty(); }
 
+// Mirror-clone geometry must be INVISIBLE to the env-probe machinery.
+// BuildMirror (GreetsMirror.cpp) wires a reflected copy of every mesh into
+// the scene as an Object named "__mirrorClone_*" whose faces reference the
+// ORIGINAL materials. Left in, the clones break the probes three ways
+// (the editor's "borked pano" the day mirrors defaulted ON there):
+//   • materialCentroid's instance clustering counts the clone statues as
+//     extra "instances" and can pick a CLONE cluster as the heaviest — the
+//     probe then bakes from BEHIND the mirror wall, outside the room, and
+//     every face comes out mostly void with floating fragments of the room
+//     interior seen through the walls' backfaces (measured: momy probe at
+//     z=-77 / amudim at z=-91 for a room at z≈-21; faces 0–32% coverage
+//     vs 100% with mirrors off);
+//   • sceneAABB inflates the parallax proxy box with the mirrored
+//     half-space (~2× the room), skewing every parallax-corrected lookup;
+//   • during the bake render itself the clones are at best per-pixel
+//     mask-rejected (wasted raster), at worst committed (stale/absent mask).
+// True while a --env_bake_fix probe bake renders its cube faces:
+// Transform_Objects then skips clone meshes wholesale (bake-scoped; the
+// legacy bake path and the disco-ball pano keep their behavior).
+bool g_envBakeSkipMirrorClones = false;
+
+bool EnvBake_IsMirrorCloneObj(const Object* O)
+{
+    return O && O->Name && std::strncmp(O->Name, "__mirrorClone_", 14) == 0;
+}
+
+namespace {
+// The TriMeshes owned by "__mirrorClone_*" objects (empty when mirrors are
+// off — every non-mirror scene pays one null ObjectHead walk).
+void collectMirrorCloneMeshes(Scene* sc, std::vector<const TriMesh*>& out)
+{
+    out.clear();
+    for (Object* o = sc->ObjectHead; o; o = o->Next)
+        if (o->Type == Obj_TriMesh && o->Data && EnvBake_IsMirrorCloneObj(o))
+            out.push_back(static_cast<const TriMesh*>(o->Data));
+}
+}  // namespace
+
 // Legacy whole-mesh exclusion test (Transform.cpp mesh loop). Exactly the
 // pre-fix behavior: skip any mesh with >= 1 face of the baked material.
 bool EnvBake_LegacyMeshExcluded(TriMesh* T)
@@ -243,6 +281,10 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
 
         g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
         // (the reflector's own faces stay out too — g_envBakeSkipMats above)
+        // Fix-bundle probes: mirror-clone meshes stay out STRUCTURALLY
+        // (see g_envBakeSkipMirrorClones above). publishProj-gated so the
+        // legacy bake path and the disco-ball pano stay byte-identical.
+        g_envBakeSkipMirrorClones = publishProj;
         for (int i = 0; i < 6; ++i) {
             if (sPaint) {   // orientation self-check: painted debug faces
                 fds::EnvCube_PaintDebugFace(i, faces[i].data(), res);
@@ -298,6 +340,7 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
         }
         g_envBakeSkipDynamic = false;
+        g_envBakeSkipMirrorClones = false;
         g_envBakeSkipMats.clear();
         g_envBakeLegacySkipMat = nullptr;
         g_envBakeSkipR2 = 0.0f;
@@ -542,9 +585,20 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
 bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                       float* excludeRadius = nullptr) {
     if (excludeRadius) *excludeRadius = 0.0f;
+    // Mirror-clone meshes reference the ORIGINAL materials — without this
+    // skip the instance clustering below counts the mirrored copies as
+    // extra instances and can put the probe in the mirrored half-space
+    // (outside the room → mostly-void pano). See g_envBakeSkipMirrorClones.
+    std::vector<const TriMesh*> cloneMeshes;
+    collectMirrorCloneMeshes(sc, cloneMeshes);
+    auto isClone = [&](const TriMesh* T) {
+        return std::find(cloneMeshes.begin(), cloneMeshes.end(), T)
+               != cloneMeshes.end();
+    };
     double sx = 0, sy = 0, sz = 0;
     long n = 0;
-    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
+        if (isClone(T)) continue;
         for (DWord i = 0; i < T->FIndex; ++i) {
             const Face& F = T->Faces[i];
             if (F.Txtr != M) continue;
@@ -558,6 +612,7 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 ++n;
             }
         }
+    }
     if (!n) return false;
     out = { float(sx / n), float(sy / n), float(sz / n) };
     // Multi-instance surfaces (the two greets mummies share one material):
@@ -570,7 +625,8 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
         struct Cl { double sx, sy, sz; long n; };
         std::vector<Cl> cls;
         const float kR2 = 8.0f * 8.0f;
-        for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+        for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
+            if (isClone(T)) continue;
             for (DWord i = 0; i < T->FIndex; ++i) {
                 const Face& F = T->Faces[i];
                 if (F.Txtr != M || !F.A) continue;
@@ -586,6 +642,7 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 if (!best) { cls.push_back({0, 0, 0, 0}); best = &cls.back(); }
                 best->sx += w.x; best->sy += w.y; best->sz += w.z; ++best->n;
             }
+        }
         if (cls.size() > 1) {
             const Cl* heavy = &cls[0];
             for (const Cl& c : cls) if (c.n > heavy->n) heavy = &c;
@@ -620,8 +677,15 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
 
 void sceneAABB(Scene* sc, SceneEnv& env) {
     if (env.boxValid) return;
+    // Parallax proxy box: real geometry only — mirror-clone meshes would
+    // stretch it across the mirrored half-space (~2× the room) and skew
+    // every parallax-corrected env lookup.
+    std::vector<const TriMesh*> cloneMeshes;
+    collectMirrorCloneMeshes(sc, cloneMeshes);
     float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
-    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next)
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
+        if (std::find(cloneMeshes.begin(), cloneMeshes.end(), T)
+            != cloneMeshes.end()) continue;
         for (DWord v = 0; v < T->VIndex; ++v) {
             Vector w;
             MatrixXVector(T->RotMat, &T->Verts[v].Pos, &w);
@@ -632,6 +696,7 @@ void sceneAABB(Scene* sc, SceneEnv& env) {
                 if (p[a] > hi[a]) hi[a] = p[a];
             }
         }
+    }
     for (int a = 0; a < 3; ++a) { env.boxMin[a] = lo[a]; env.boxMax[a] = hi[a]; }
     env.boxValid = true;
 }

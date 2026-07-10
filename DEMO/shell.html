@@ -951,6 +951,8 @@
         }
         // Keep the header's bake-res dropdown honest (CLI/env/knob edits).
         if (window.editorSyncBakeRes) window.editorSyncBakeRes();
+        // Keep the rebake button's bake-fix warning honest too.
+        if (window.editorSyncBakeWarn) window.editorSyncBakeWarn();
       }
       function knobPristine(p){
         return (editorParamsPristine && p.name in editorParamsPristine)
@@ -967,6 +969,11 @@
           try { ok = Module.editorSetParam(p.name, String(v)); } catch(e){}
           editorStatus((ok ? 'flag ' : 'flag FAILED ') + p.name + ' = ' + v);
           p.set = true; lab.style.color = '#fc8';
+          // Toggling env_refl / env_bake_fix must update the rebake button's
+          // ⚠ immediately — a fix-off session silently re-baking sliver
+          // panos is the "rebake does nothing" report.
+          if ((p.name === 'env_refl' || p.name === 'env_bake_fix') &&
+              window.editorSyncBakeWarn) window.editorSyncBakeWarn();
         }
         if (p.type === 'bool') {
           var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!p.value;
@@ -1065,9 +1072,49 @@
                                     : (editorPanoCur + 1) % (count + 1));
         };
       })();
+      // Rebake re-renders with the CURRENT flag state. A session that toggled
+      // env_bake_fix off (e.g. to A/B the legacy bake) keeps re-baking legacy
+      // telephoto-sliver panos — which reads as "rebake does nothing". Never
+      // let that happen silently: read the live flags fresh (not the possibly
+      // stale editorParams cache) and warn in the status line, plus keep a
+      // persistent ⚠ on the button itself (editorSyncBakeWarn).
+      function editorEnvBakeFlags(){
+        try {
+          var ps = JSON.parse(Module.editorGetParams());
+          var on = ps.find(function(x){ return x.name === 'env_refl'; });
+          var fx = ps.find(function(x){ return x.name === 'env_bake_fix'; });
+          return { on: !on || !!(+on.value), fix: !fx || !!(+fx.value) };
+        } catch(e){ return { on: true, fix: true }; }
+      }
+      var REBAKE_TITLE = 're-bake the env-reflection panoramas with the CURRENT lights/materials (they capture the scene once, at first use)';
+      window.editorSyncBakeWarn = function(){
+        var el = document.getElementById('editor-rebake-env');
+        if (!el) return;
+        var st = editorEnvBakeFlags();
+        var bad = !st.on || !st.fix;
+        el.textContent = bad ? 'rebake refl ⚠' : 'rebake refl';
+        el.style.color = bad ? '#e66' : '#69c';
+        el.title = bad
+          ? (!st.on ? 'env_refl is OFF — panoramas will NOT re-bake until it is enabled (Render knobs). '
+                    : 'env_bake_fix is OFF — every rebake produces the LEGACY bake: telephoto-sliver panos, mostly void. Turn it back on (Render knobs → all). ') + REBAKE_TITLE
+          : REBAKE_TITLE;
+      };
+      // Boot-time sync: a URL like ?editor&no-env_bake_fix should show the ⚠
+      // without waiting for the knob list to be opened (refreshParams is lazy).
+      (function warmBakeWarn(){
+        if (Module && Module.editorGetParams) { window.editorSyncBakeWarn(); return; }
+        setTimeout(warmBakeWarn, 1000);
+      })();
       document.getElementById('editor-rebake-env').onclick = function(e){
         e.preventDefault(); e.stopPropagation();
-        try { Module.editorRebakeEnv(); editorStatus('env reflections invalidated — re-baking next frame'); }
+        try {
+          Module.editorRebakeEnv();
+          var st = editorEnvBakeFlags();
+          if (!st.on)       editorStatus('panoramas dropped — but env_refl is OFF, nothing re-bakes (enable it in Render knobs)');
+          else if (!st.fix) editorStatus('re-baking next frame with env_bake_fix OFF — the legacy bake renders telephoto-sliver panos (mostly void); turn it back on in Render knobs → all');
+          else              editorStatus('env reflections invalidated — re-baking next frame');
+          window.editorSyncBakeWarn();
+        }
         catch(err){ editorStatus('rebake failed: ' + err); }
       };
       // Bake-res dropdown: env_bake_res knob + live rebake. Picking a size
@@ -1091,7 +1138,11 @@
           try {
             Module.editorSetParam('env_bake_res', String(v));
             Module.editorRebakeEnv();
-            editorStatus('bake res = ' + v + '² — re-baking every env panorama next frame');
+            var st = editorEnvBakeFlags();
+            if (!st.on)       editorStatus('bake res = ' + v + '² — but env_refl is OFF, nothing re-bakes (enable it in Render knobs)');
+            else if (!st.fix) editorStatus('bake res = ' + v + '² — re-baking with env_bake_fix OFF (legacy sliver bake!); turn it back on in Render knobs → all');
+            else              editorStatus('bake res = ' + v + '² — re-baking every env panorama next frame');
+            if (window.editorSyncBakeWarn) window.editorSyncBakeWarn();
           } catch(err){ editorStatus('bake res failed: ' + err); }
         };
       })();
@@ -1832,9 +1883,23 @@
             }
           }
           if (k === 'reflection') {
-            row.title = 'env-specular reflection %. Renders when the env_refl render knob is ON (bakes a scene panorama at first use); persists to LWO/FLD.';
+            // Be explicit about WHAT this knob drives: the SCALAR reflection
+            // amount (how strongly the surface mixes in the baked scene
+            // panorama). Metallic maps route env reflections through the
+            // same probe INDEPENDENTLY — importing one changes the look
+            // without this slider moving, which used to read as "the knob
+            // controls everything" confusion. The env-probe truth line next
+            // to 'Import PBR maps' below shows the shared probe state.
+            row.querySelector('label').textContent = 'refl (scalar)';
+            row.title = 'SCALAR reflection amount, 0–100%: how strongly this surface mixes in the baked scene panorama (env probe). Needs the env_refl render knob (auto-enabled when dialed up); persists to LWO/FLD. INDEPENDENT of metallic: a metallic map drives env reflections through the same probe on its own — this slider is the extra scalar mix for non-metal looks. Probe state: see the "env probe" line next to Import PBR maps below.';
           }
           el.appendChild(row);
+          if (k === 'reflection') {
+            var note = document.createElement('div');
+            note.style.cssText = 'font-size:9px;color:#789;margin:-2px 0 3px 70px;';
+            note.textContent = 'scalar panorama mix — metallic maps drive env reflections independently';
+            el.appendChild(note);
+          }
         });
         // REFRACTIVE (glass): mark this material as screen-space-refracting
         // glass. Under the --glass_refract render knob, ONLY surfaces carrying
@@ -2011,8 +2076,14 @@
           else if (info.store >= 0) envSt.textContent = 'env probe #' + (info.store + 1) + '/' + info.count + (info.metal ? ' (metal)' : '');
           else if (info.metal || info.reflection > 0) envSt.textContent = 'env probe: baking…';
           else                      envSt.textContent = 'no env probe';
+          // bake-fix OFF on a surface that uses the probe = every (re)bake
+          // renders the LEGACY telephoto-sliver pano. Never show that state
+          // quietly in green.
+          var badFix = info.on && !info.fix && (info.metal || info.reflection > 0);
+          if (badFix) envSt.textContent += ' — bake-fix OFF';
+          envSt.style.color = !info.on || badFix ? '#e66' : '#8a8';
           envSt.title = 'env-reflection state: env_refl ' + (info.on ? 'ON' : 'OFF (enable in Render knobs)') +
-                        ', bake fix ' + (info.fix ? 'ON' : 'OFF') +
+                        ', bake fix ' + (info.fix ? 'ON' : 'OFF (LEGACY bake — sliver panos; turn env_bake_fix on in Render knobs → all)') +
                         (info.metal ? ', metallic map present' : '') +
                         (info.reflection > 0 ? ', reflection ' + info.reflection + '%' : '') +
                         (info.store >= 0 ? ', baked panorama #' + (info.store + 1) + ' of ' + info.count

@@ -515,9 +515,11 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 // merges momy + the whole room into single TriMeshes, so the old whole-mesh
 // skip emptied the room out of the probe).
 namespace fds { extern bool g_envBakeSkipDynamic;
+                extern bool g_envBakeSkipMirrorClones;
                 bool EnvBake_HasSkipFaces();
                 bool EnvBake_FaceExcluded(const Face* F, TriMesh* T);
-                bool EnvBake_LegacyMeshExcluded(TriMesh* T); }
+                bool EnvBake_LegacyMeshExcluded(TriMesh* T);
+                bool EnvBake_IsMirrorCloneObj(const Object* O); }
 
 // xresOverride / yresOverride: when >= 0, use these instead of the
 // global XRes / YRes for vertex visibility flags + face-level
@@ -756,6 +758,15 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// instances). The LEGACY whole-mesh skip below is kept byte-identical
 		// for the default path (city vehicle-glass probes / pinned baseline).
 		if (fds::g_envBakeSkipDynamic && fds::EnvBake_LegacyMeshExcluded(T)) continue;
+		// --env_bake_fix probe bakes: mirror-clone meshes ("__mirrorClone_*",
+		// the reflected copy of the whole room) stay out of the probe
+		// STRUCTURALLY. They'd only ever be per-pixel mask-rejected (clone
+		// faces need gb.mirrorId == their tag, and the bake neutralizes the
+		// mask to 0) — wasted raster at best, committed clone pixels if the
+		// mask isn't stamped yet. Flag is bake-scoped (set only while a
+		// publishProj bake renders its faces), so the legacy bake path and
+		// the disco-ball panorama stay byte-identical.
+		if (fds::g_envBakeSkipMirrorClones && fds::EnvBake_IsMirrorCloneObj(Obj)) continue;
 		if (inStaticBake && meshDynForBake()) {
 			static std::atomic<int> sSkipLogged{0};
 			if (sSkipLogged.fetch_add(1) < 32) {

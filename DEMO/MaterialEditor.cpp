@@ -648,6 +648,16 @@ std::string js_editorSetUVMapping(std::string name, int proj,
 void js_editorRebakeEnv()
 {
 	fds::EnvReflection_Invalidate(CurScene);
+	// Rebake re-renders with the CURRENT flag state — a session that
+	// explicitly toggled env_bake_fix off keeps re-baking legacy sliver
+	// panos, which reads as "rebake does nothing". Say so where it can be
+	// seen (the shell mirrors this warning in the status line / button).
+	std::fprintf(stderr, "[EDITOR] rebake refl: panoramas invalidated "
+	             "(env_refl=%d env_bake_fix=%d%s)\n",
+	             fds::FeatureFlags::env_refl() ? 1 : 0,
+	             fds::FeatureFlags::env_bake_fix() ? 1 : 0,
+	             fds::FeatureFlags::env_bake_fix()
+	                 ? "" : " — LEGACY bake, expect sliver panos");
 	rev::Editor_MarkDirty();
 }
 
