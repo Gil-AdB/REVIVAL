@@ -131,6 +131,13 @@ int Editor_PickLight(float u, float v);
 bool Editor_ImportTexture(const char* surface, const char* role,
                           const char* filename, const unsigned char* data, unsigned long len);
 
+// Reset a surface's (role) map to its authored default — undoes editor imports
+// (incl. the procedural displacement generator) and sidecar-applied overrides
+// for this run. Persisting the removal is the shell's job (it tombstones the
+// role so Save deletes the sidecar line). Returns true incl. the already-
+// default no-op case; false for unknown surface/role.
+bool Editor_ClearMap(const char* surface, const char* role);
+
 } // namespace rev
 
 #endif // REVIVAL_MATERIAL_EDITOR_H

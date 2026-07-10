@@ -281,6 +281,18 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         Timer = ts;
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
 
+        // Same native editor-hook vehicle as the greets loop below
+        // (PICK_TEST/SPLIT_TEST/CLEARMAP_TEST ride Editor_GetSurfacesJSON) —
+        // BEFORE the tick so a CLEARMAP_TEST reset lands in the dumped frame.
+        if (std::getenv("DUMP_SURFACES")) {
+            static bool dumped = false;
+            if (!dumped) {
+                dumped = true;
+                std::fprintf(stderr, "[SURFACES] %s\n",
+                             rev::Editor_GetSurfacesJSON().c_str());
+            }
+        }
+
         bool more = driver->tick();
         (void)more;
 

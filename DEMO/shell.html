@@ -1410,7 +1410,9 @@
         Object.keys(editorPendingMaps).forEach(function(surf){
           Object.keys(editorPendingMaps[surf]).forEach(function(role){
             var m = editorPendingMaps[surf][role];
-            (maps[surf] = maps[surf] || {})[role] = { filename: m.filename, data: b64FromBytes(m.bytes) };
+            // null = "reset map" tombstone → server deletes the sidecar line.
+            (maps[surf] = maps[surf] || {})[role] =
+              m ? { filename: m.filename, data: b64FromBytes(m.bytes) } : null;
           });
         });
         var nMaps = pendingMapCount();
@@ -2316,7 +2318,32 @@
               if (ok) refreshSurfacesAndProps(s.name);
             });
           };
-          row.appendChild(inp); imp.appendChild(row);
+          row.appendChild(inp);
+          // Reset the role to its authored default: undoes live imports (incl.
+          // the generated displacement, which lives in normal+height) AND the
+          // sidecar override applied at load. The null tombstone makes Save
+          // delete the sidecar line so the reset persists across reloads.
+          var clr = document.createElement('button');
+          clr.textContent = '✕';
+          clr.title = 'reset ' + role + ' map to the authored default (removes the imported/generated override; Save persists the removal)';
+          clr.style.cssText = 'flex:0 0 auto;font-size:10px;padding:0 6px;background:#411;color:#fbb;border:1px solid #633;border-radius:2px;cursor:pointer;';
+          clr.onclick = function(){
+            if (!Module.editorClearMap) { editorStatus('reset: engine build too old (no editorClearMap)'); return; }
+            var names = editSurfNames(s.name), okAll = true;
+            names.forEach(function(n){
+              var ok = false;
+              try { ok = Module.editorClearMap(n, role); }
+              catch(e){ editorStatus('reset failed: ' + e); console.error('editorClearMap', e); okAll = false; return; }
+              if (ok) (editorPendingMaps[n] = editorPendingMaps[n] || {})[role] = null;
+              okAll = okAll && ok;
+            });
+            editorStatus(okAll ? (role + ' map reset to default — Save removes it from the sidecar')
+                               : (role + ' reset FAILED (unknown surface/role?)'));
+            refreshSurfacesAndProps(s.name);
+            updateSaveButton();
+          };
+          row.appendChild(clr);
+          imp.appendChild(row);
         });
         el.appendChild(imp);
 

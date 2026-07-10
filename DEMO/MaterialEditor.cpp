@@ -66,6 +66,7 @@ static void appendNum(std::string& out, const char* key, double v)
 #ifndef __EMSCRIPTEN__
 static void editorRunPickTestHook();   // defined below the pick core
 static void editorRunSplitTestHook();  // defined below Editor_SplitInstances
+static void editorRunClearMapTestHook();  // defined next to the split hook
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -79,6 +80,8 @@ std::string Editor_GetSurfacesJSON()
 	// Same convention: SPLIT_TEST=<surface> runs Editor_SplitInstances once
 	// post-tick (needs live meshes/materials) and prints the result JSON.
 	editorRunSplitTestHook();
+	// CLEARMAP_TEST=<surface>:<role> resets a map override once post-tick.
+	editorRunClearMapTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -492,6 +495,29 @@ static void editorRunSplitTestHook()
 	done = true;
 	const std::string r = Editor_SplitInstances(spec);
 	std::fprintf(stderr, "[SPLITTEST] split '%s' -> %s\n", spec, r.c_str());
+}
+
+// CLEARMAP_TEST=<surface>:<role> — native validation for the editor "reset
+// map" (same env-hook convention as PICK_TEST/SPLIT_TEST): reset the role
+// once, post-tick, and print the result. Pair with a sidecar map line to
+// verify the frame reverts to the no-override baseline byte-for-byte.
+static void editorRunClearMapTestHook()
+{
+	const char *spec = std::getenv("CLEARMAP_TEST");
+	if (!spec || !*spec) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	std::string s = spec;
+	const size_t colon = s.rfind(':');
+	if (colon == std::string::npos) {
+		std::fprintf(stderr, "[CLEARTEST] bad spec '%s' (want surface:role)\n", spec);
+		return;
+	}
+	const std::string surf = s.substr(0, colon), role = s.substr(colon + 1);
+	const bool ok = Editor_ClearMap(surf.c_str(), role.c_str());
+	std::fprintf(stderr, "[CLEARTEST] reset '%s' %s -> %s\n",
+	             surf.c_str(), role.c_str(), ok ? "ok" : "FAILED");
 }
 #endif
 
@@ -1047,6 +1073,22 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 	return ok;
 }
 
+// Editor "reset map": restore a surface's (role) map slot to its authored
+// default (MaterialImport keeps a pre-override stash). Mirrors the metallic
+// side effect of Editor_ImportTexture: dropping a metallic map changes the
+// env-reflection look, so the baked panoramas are invalidated for a re-bake.
+bool Editor_ClearMap(const char* surface, const char* role)
+{
+	if (!surface || !role) return false;
+	const bool ok = fds::MaterialImport_ClearSurfaceMap(CurScene, surface, role);
+	if (ok && !std::strcmp(role, "metallic")) {
+		fds::EnvReflection_Invalidate(CurScene);
+		std::fprintf(stderr, "[EDITOR] metallic reset on '%s' — panoramas invalidated\n", surface);
+	}
+	if (ok) Editor_MarkDirty();
+	return ok;
+}
+
 // ── Map-inspector overlay ("map viz") ───────────────────────────────────────
 // Inspect a surface's maps on screen: blit the selected map's mip0 into the
 // TOP-CENTER quarter of the final frame — the EnvReflection_DrawViz pano-
@@ -1335,6 +1377,10 @@ bool js_editorImportTexture(std::string surface, std::string role,
 	return rev::Editor_ImportTexture(surface.c_str(), role.c_str(),
 	                                 filename.c_str(), buf.data(), buf.size());
 }
+bool js_editorClearMap(std::string surface, std::string role)
+{
+	return rev::Editor_ClearMap(surface.c_str(), role.c_str());
+}
 // Diagnostic: does the matTable instance the kernel renders == the MatLib
 // instance the editor mutates?
 std::string js_editorMatDebug(std::string name)
@@ -1491,6 +1537,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetSurfaceProp", &js_editorSetSurfaceProp);
 	emscripten::function("editorSetSmoothAngleLive", &js_editorSetSmoothAngleLive);
 	emscripten::function("editorImportTexture",  &js_editorImportTexture);
+	emscripten::function("editorClearMap",       &js_editorClearMap);
 	emscripten::function("editorMatDebug",       &js_editorMatDebug);
 	emscripten::function("editorHighlight",      &js_editorHighlight);
 	emscripten::function("editorFlags",          &js_editorFlags);

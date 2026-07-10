@@ -250,6 +250,14 @@ def save_maps(scene, maps, warnings):
             if role not in ALLOWED_ROLES:
                 warnings.append(f"maps['{surface}']['{role}']: unknown role — skipped")
                 continue
+            if spec is None:
+                # Editor "reset map": delete the sidecar override so the next
+                # load keeps the authored default. The PBR file (if any) stays
+                # on disk — unreferenced, and a later re-import overwrites it.
+                if (surface, role) in entries:
+                    del entries[(surface, role)]
+                    written.append({"surface": surface, "role": role, "deleted": True})
+                continue
             fname = os.path.basename(spec.get("filename") or "")
             ext = os.path.splitext(fname)[1].lower() or ".png"
             data = base64.b64decode(spec.get("data") or "")

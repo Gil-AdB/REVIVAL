@@ -53,6 +53,13 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName);
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path);
 
+// Editor "reset map": restore the surface's (role) slot to its authored
+// default — the value it held before the first ApplyMapFile override this
+// run (live import or sidecar apply at scene init). Success when the surface
+// exists and the role is known, including the never-overridden no-op case.
+bool MaterialImport_ClearSurfaceMap(Scene *sc, const char *matName,
+                                    const char *role);
+
 // Classify a map filename into its role using the same token rules as the CLI
 // dir scan (see the table above). Returns "albedo" | "normal" | "height" |
 // "roughness" | "ao" | "" (unrecognized / non-image / preview-skip / metallic —

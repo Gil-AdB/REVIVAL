@@ -516,6 +516,28 @@ const char *MaterialImport_ClassifyRole(const char *filename) {
 	}
 }
 
+// Original-slot stash for the editor's "reset map": records a (material, role)
+// slot's texture the FIRST time an import overrides it — whether from a live
+// editor upload or the sidecar apply at scene init — so
+// MaterialImport_ClearSurfaceMap can restore the authored default. emplace()
+// keeps the first (authored) value across repeated re-imports of the slot.
+static std::map<std::pair<Material *, std::string>, Texture *> s_mapOrig;
+static void stashOrigMap(Material *M, const char *role, Texture *cur) {
+	s_mapOrig.emplace(std::make_pair(M, std::string(role)), cur);
+}
+// Pre-import per-vertex tangents, stashed the first time an import triggers
+// Compute_Vertex_Tangents on a mesh. A surface with no authored normal/height
+// map ships with the loader's tangents (zeros); the recompute is one-way, and
+// the glass-refraction path reads the tangent frame even without a map — so a
+// texel-exact "reset map" must restore these, not recompute.
+static std::map<TriMesh *, std::vector<Vector>> s_tanOrig;
+static void stashOrigTangents(TriMesh *T) {
+	auto &orig = s_tanOrig[T];
+	if (!orig.empty() || T->VIndex <= 0) return;   // first import wins
+	orig.resize(T->VIndex);
+	for (int32_t v = 0; v < T->VIndex; ++v) orig[v] = T->Verts[v].Tangent;
+}
+
 bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
                                  const char *role, const char *path) {
 	if (!sc || !matName || !role || !path) return false;
@@ -540,6 +562,7 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	if (r == "albedo") {
 		if (Texture *t = loadTiled(path, false)) {
 			for (Material *M : mats) {
+				stashOrigMap(M, "albedo", M->Txtr);
 				M->Txtr = t;
 				// New albedo = new texel layout. Aux maps sized for the OLD
 				// layout would read scrambled — drop them (re-import from the
@@ -549,6 +572,7 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 					if (slot && (slot->SizeX != t->SizeX || slot->SizeY != t->SizeY)) {
 						std::fprintf(stderr, "    [drop] stale %s map (%dx%d vs new albedo %dx%d)\n",
 						             what, slot->SizeX, slot->SizeY, t->SizeX, t->SizeY);
+						stashOrigMap(M, what, slot);
 						slot = nullptr;
 					}
 				};
@@ -565,15 +589,16 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 		// convention, honoring the global --material-import-flip-normal override.
 		if (Texture *t = loadTiled(path, g_forceFlipNormal, aw, ah)) {
 			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
-			for (Material *M : mats) M->NormalMap = t;
+			for (Material *M : mats) { stashOrigMap(M, "normal", M->NormalMap); M->NormalMap = t; }
 			tangentMap = true; ok = true;
 		}
 	} else if (r == "height") {
-		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) M->HeightMap = h8 ? h8 : h32; tangentMap = true; ok = true; }
+		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) { stashOrigMap(M, "height", M->HeightMap); M->HeightMap = h8 ? h8 : h32; } tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
 		if (Texture *r32 = loadTiled(path, false, aw, ah)) {
 			Texture *r8 = MakeHeight8(r32);
 			for (Material *M : mats) {
+				stashOrigMap(M, "roughness", M->RoughnessMap);
 				M->RoughnessMap = r8 ? r8 : r32;
 				// Same defaulting as the CLI dir-scan path: a roughness map
 				// implies a specular surface, but many FLD materials ship
@@ -589,11 +614,11 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 			ok = true;
 		}
 	} else if (r == "ao") {
-		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) M->AoMap = a8 ? a8 : a32; ok = true; }
+		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) { stashOrigMap(M, "ao", M->AoMap); M->AoMap = a8 ? a8 : a32; } ok = true; }
 	} else if (r == "metallic") {
 		if (Texture *m32 = loadTiled(path, false, aw, ah)) {
 			Texture *m8 = MakeHeight8(m32);
-			for (Material *M : mats) M->MetallicMap = m8 ? m8 : m32;
+			for (Material *M : mats) { stashOrigMap(M, "metallic", M->MetallicMap); M->MetallicMap = m8 ? m8 : m32; }
 			// Metal without env reflections = black hole (diffuse killed,
 			// env term needs --env_refl). Auto-default the reflection flags
 			// so a metallic import — editor upload OR sidecar line at scene
@@ -615,10 +640,82 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
 				for (Material *M : mats)
 					if (T->Faces[i].Txtr == M) { uses = true; break; }
-			if (uses) Compute_Vertex_Tangents(T);
+			if (uses) { stashOrigTangents(T); Compute_Vertex_Tangents(T); }
 		}
 	}
 	return ok;
+}
+
+// Editor "reset map": restore a surface's (role) texture slot to what it held
+// BEFORE the first import override this run — the authored default, whether
+// the override came from a live editor upload or the sidecar apply at scene
+// init (the stash records the pre-sidecar value). A surface that was never
+// overridden is a successful no-op ("already default"). The old override
+// Texture is intentionally leaked, same as re-imports — Texture blocks aren't
+// refcounted and a few MB until scene teardown beats a dangling shared ptr
+// (mirUV clones share the Texture*).
+bool MaterialImport_ClearSurfaceMap(Scene *sc, const char *matName,
+                                    const char *role) {
+	if (!sc || !matName || !role) return false;
+	const std::string r = role;
+	auto slotOf = [&r](Material *M) -> Texture ** {
+		if (r == "albedo")    return &M->Txtr;
+		if (r == "normal")    return &M->NormalMap;
+		if (r == "height")    return &M->HeightMap;
+		if (r == "roughness") return &M->RoughnessMap;
+		if (r == "ao")        return &M->AoMap;
+		if (r == "metallic")  return &M->MetallicMap;
+		return nullptr;
+	};
+	// Same material collection as ApplyMapFile: exact name + handedness clones.
+	std::vector<Material *> mats;
+	for (Material *M = MatLib; M; M = M->Next)
+		if (M->RelScene == sc && M->Name &&
+		    (matName == std::string(M->Name) || rev::Editor_BaseSurfName(M->Name) == matName))
+			mats.push_back(M);
+	if (mats.empty()) { std::fprintf(stderr, "[MAT-IMPORT] reset: '%s' not in scene\n", matName); return false; }
+	if (!slotOf(mats[0])) { std::fprintf(stderr, "[MAT-IMPORT] reset: unknown role '%s'\n", role); return false; }
+	int restored = 0;
+	for (Material *M : mats) {
+		auto it = s_mapOrig.find(std::make_pair(M, r));
+		if (it == s_mapOrig.end()) continue;   // never overridden — already default
+		*slotOf(M) = it->second;
+		s_mapOrig.erase(it);
+		++restored;
+	}
+	std::fprintf(stderr, "[MAT-IMPORT] '%s' reset %s map to default (%d of %zu material(s) had an override)\n",
+	             matName, role, restored, mats.size());
+	// Undo the tangent side of the import: if no material on the mesh still
+	// holds a LIVE normal/height override (s_mapOrig entries live until
+	// cleared), restore the stashed pre-import tangents — texel-exact revert
+	// (the glass-refraction frame reads tangents even without a map). If some
+	// other surface on the mesh still has an override, recompute instead.
+	if (restored && (r == "normal" || r == "height")) {
+		for (TriMesh *T = sc->TriMeshHead; T; T = T->Next) {
+			bool uses = false;
+			for (int32_t i = 0; i < T->FIndex && !uses; ++i)
+				for (Material *M : mats)
+					if (T->Faces[i].Txtr == M) { uses = true; break; }
+			if (!uses) continue;
+			bool otherOverride = false;
+			for (int32_t i = 0; i < T->FIndex && !otherOverride; ++i) {
+				Material *FM = T->Faces[i].Txtr;
+				if (!FM) continue;
+				otherOverride = s_mapOrig.count(std::make_pair(FM, std::string("normal"))) != 0 ||
+				                s_mapOrig.count(std::make_pair(FM, std::string("height"))) != 0;
+			}
+			auto ti = s_tanOrig.find(T);
+			if (!otherOverride && ti != s_tanOrig.end() &&
+			    (int32_t)ti->second.size() == T->VIndex) {
+				for (int32_t v = 0; v < T->VIndex; ++v)
+					T->Verts[v].Tangent = ti->second[v];
+				s_tanOrig.erase(ti);
+			} else {
+				Compute_Vertex_Tangents(T);
+			}
+		}
+	}
+	return true;
 }
 
 } // namespace fds
