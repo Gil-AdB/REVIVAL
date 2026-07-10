@@ -86,6 +86,13 @@ static float  g_camPitch = 0.45f;
 static float  g_camDist  = 48.0f;
 static Vector g_camTarget;               // set in DemoBoot (greets room centre)
 
+// Dynamic_Camera's momentum state + per-scene auto-calibrated base speed
+// (FDS/CAMERAS/CAMERAS.CPP — plain globals, no header declares them). The
+// editor tick zeroes FV/FT each frame so the free-cam responds instantly
+// (see the editor-mode block in editorTick).
+extern Vector FV, FT;
+extern float  Vel_Speed;
+
 // ── Editor scene registry ───────────────────────────────────────────────
 // ?editor&scene=<name> picks which scene the editor boots (default greets).
 // camTarget: fixed default orbit pivot; autoFrame=true computes it from the
@@ -658,7 +665,25 @@ static void editorTick()
 			// (a "milliseconds" value pasted into Timer-tick units) made one
 			// held-arrow frame rotate 0.045*16 ≈ 41°: rotation read as broken.
 			dTime = 0.25f;             // (Timer is frozen → no scene dTime)
+			// EDITOR-ONLY instant response: Dynamic_Camera's exponential
+			// velocity decay carries momentum across frames — fine at demo
+			// frame rates, but under the editor's render-on-demand loop the
+			// leftover FV from the LAST key burst lurches the camera in the
+			// old direction when a new key lands. Zero the carried velocity
+			// (translation FV + angular FT) so each tick's motion is rebuilt
+			// from the CURRENT key state alone, and compensate the lost
+			// steady-state accumulation by boosting the per-key add by
+			// 1/(1-exp(-Vel_FallOff*dTime)) (Vel_FallOff = 5*Vel_Speed inside
+			// Dynamic_Camera) — cruise speed matches the demo free-cam feel,
+			// but direction changes and stops are immediate. The native demo
+			// path (TAB free-cam) is untouched — this only runs in editorTick.
+			FV.x = FV.y = FV.z = 0.0f;
+			FT.x = FT.y = FT.z = 0.0f;
+			const float velSaved = Vel_Speed;
+			const float kDecay = 1.0f - std::exp(-5.0f * Vel_Speed * dTime);
+			if (kDecay > 1e-6f && kDecay < 1.0f) Vel_Speed /= kDecay;
 			Dynamic_Camera();          // keyboard fly + look (the TAB free-cam)
+			Vel_Speed = velSaved;      // boost was for this tick's add only
 			CalcPersp(&FC);
 			View = &FC;
 			syncOrbitFromFC();         // orbit pivot tracks where we flew

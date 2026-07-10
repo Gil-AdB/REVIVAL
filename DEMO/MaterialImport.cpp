@@ -403,6 +403,11 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
 		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		// Per-material glass-refraction IOR (engine-only, sidecar-persisted).
+		// 0 = unset -> the kernel falls back to the global glass_refract_ior;
+		// >0 = this material's Snell bend + Schlick F0 use this value. Only
+		// meaningful on Mat_Refractive surfaces under --glass_refract.
+		else if (!std::strcmp(prop, "refractIor"))    M->RefractIor = value < 0.0f ? 0.0f : value;
 		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
 		// material field: recorded in the MeshOps registry and consumed when
 		// MakeFacesIndependent rebuilds this surface's vertex normals. That

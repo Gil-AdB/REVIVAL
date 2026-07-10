@@ -73,6 +73,10 @@ namespace fds { void Hdr_BeginFrame(); void Render_TonemapToVPage(); void Render
 // sets them on surface-select by resolving a surface name to its matID(s).
 bool g_editorHL[256] = { false };
 bool g_editorHLActive = false;
+// LWO editor map-inspector overlay (DEMO/MaterialEditor.cpp installs
+// rev::Editor_DrawMapViz here at static init). A hook, not a direct call, so
+// FDS-only binaries (clipper_test) keep linking with it left null.
+void (*g_editorDrawMapViz)() = nullptr;
 // A surface can render through per-handedness mirror-UV clones named
 // "<surface>::mirUV" (e.g. floor renders only as "floor::mirUV"). Treat the
 // clone and its base as the same editor surface so a select/edit covers both.
@@ -1235,6 +1239,9 @@ xpar_done: ;
 	// Env-reflection pano viewer (--env_refl_viz=N): blit the Nth baked
 	// panorama over the frame's top-right corner. Same post-tonemap slot.
 	fds::EnvReflection_DrawViz(CurScene);
+	// Editor map-inspector overlay (a surface's albedo/normal/height/… map
+	// blitted top-center — rev::Editor_SetMapViz). Same post-tonemap slot.
+	if (g_editorDrawMapViz) g_editorDrawMapViz();
 
 	// FDS_XPAR_MIRRORVIZ — outline each mirror's stamped window (thick red) on
 	// the FINAL image. Must run HERE (after Render_TonemapToVPage + all post),

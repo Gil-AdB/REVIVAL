@@ -95,7 +95,9 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  "smoothAngle"}
 # Engine-only per-material dials with no LWO/FLD field — persist as sidecar
 # surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive"}
+# refractIor: per-surface glass-refraction IOR (0 = unset -> the global
+# glass_refract_ior render knob).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor"}
 # smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
 # scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
 # persists to the sidecar there instead: the engine honors a
@@ -123,7 +125,10 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         if not isinstance(props, dict):
             continue
         side = {k: props.pop(k) for k in list(props) if k in keys}
-        base = re.sub(r"#\d+$", "", name)
+        # Strip the WHOLE trailing (#k)+ chain: the runtime split renames the
+        # primary "<name>#1" too, and a re-split of a part can chain suffixes
+        # ("momy#2#2") — every one of them persists onto the base surface.
+        base = re.sub(r"(#\d+)+$", "", name)
         for k, v in side.items():
             entries[(base, k)] = f"{float(v):.6g}"
             saved.append({"surface": base, "key": k})
@@ -161,9 +166,9 @@ def pop_uv_props(surfaces, warnings):
         if proj < 0 or proj > 3:
             warnings.append(f"'{name}': uvProj {proj} out of range — skipped")
             continue
-        out[re.sub(r"#\d+$", "", name)] = (proj, float(uv["uvScaleX"]),
-                                           float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
-                                           int(uv["uvAxis"]))
+        out[re.sub(r"(#\d+)+$", "", name)] = (proj, float(uv["uvScaleX"]),
+                                              float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
+                                              int(uv["uvAxis"]))
     return out
 
 # Live-served paths: the wasm preload (DEMO.data) copy of these is link-time
@@ -191,6 +196,11 @@ def ensure_lwsread():
 def map_surface_name(name):
     """editor surface name -> (lwo_filename or None, surf_name)."""
     name = re.sub(r"::mirUV$", "", name)
+    # Runtime instance-split parts ("momy#1"/"momy#2", possibly chained) are
+    # live-only clones of ONE authored surface — patch the base. Note the
+    # split now renames the primary to "#1" too, so without this collapse the
+    # primary's own edits would stop reaching the .lwo.
+    name = re.sub(r"(#\d+)+$", "", name)
     if "::" in name:
         obj, surf = name.split("::", 1)
         surf = re.sub(r"_(body|upper)$", "", surf)
@@ -407,9 +417,10 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
         bad = set(props) - ALLOWED_PROPS
         if bad:
             return 400, {"ok": False, "error": f"'{name}': unknown props {sorted(bad)}"}
-        # Editor names are base-collapsed already; strip a runtime "#k"
-        # instance-split suffix (live-only clones — the FLD has one surface).
-        base = re.sub(r"#\d+$", "", name)
+        # Editor names are base-collapsed already; strip a runtime (#k)+
+        # instance-split suffix chain (live-only clones, incl. the renamed
+        # "#1" primary — the FLD has one surface).
+        base = re.sub(r"(#\d+)+$", "", name)
         if base != name:
             warnings.append(f"'{name}' is a runtime instance split — patched the "
                             f"base surface '{base}' (splits are live-only)")
@@ -529,6 +540,9 @@ def do_save(scene, payload):
         if bad:
             return 400, {"ok": False, "error": f"'{name}': unknown props {sorted(bad)}"}
         fname, surf = map_surface_name(name)
+        if re.search(r"(#\d+)+$", re.sub(r"::mirUV$", "", name)):
+            warnings.append(f"'{name}' is a runtime instance split — patching the "
+                            f"base surface '{surf}' (splits are live-only)")
         targets = []
         if fname is not None:
             lwo = lwos.get(fname)

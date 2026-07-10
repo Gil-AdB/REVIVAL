@@ -59,14 +59,30 @@ bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 // Split a surface's spatially-separate INSTANCES into independent surfaces so
 // they can be edited apart (two mummies share the material "momy" — editing
 // one edits both). Faces are clustered by world position (grid single-linkage,
-// radius ~15% of the union diagonal); the biggest cluster keeps the original
-// material(s), every other cluster gets clones named "<name>#2", "#3", …
-// (::mirUV handedness clones are cloned alongside and keep their suffix, so
-// all name-keyed ops collapse correctly). Appends to MatLib + rebuilds the
-// scene mat table. LIVE-ONLY: the LWO has one shared surface, so saves apply
-// to the base name. Returns a JSON array of the NEW base names ([] = nothing
-// to split — only one instance found).
+// radius ~15% of the union diagonal); mirror-clone ("__mirrorClone_*") meshes
+// are EXCLUDED (their faces reference the same materials at mirrored positions
+// behind the wall — clustering them inflated the radius and chain-linked real
+// instances into one blob). The biggest cluster keeps the original material(s)
+// but is RENAMED "<name>#1"; every other cluster gets clones named "<name>#2",
+// "#3", … (::mirUV handedness clones are cloned alongside and keep their
+// suffix OUTSIDE the "#k", so all name-keyed ops collapse correctly). Appends
+// to MatLib + rebuilds the scene mat table. LIVE-ONLY: the LWO has one shared
+// surface; the server's save path strips the whole trailing (#k)+ chain, so
+// "#1" and "#2" both persist onto the base name. Returns a JSON OBJECT:
+//   {"clusters":C, "faces":F, "names":["<name>#1","<name>#2",…]}
+// names is empty when nothing was split (C==1: all faces are one spatial
+// cluster; C==0: surface not found / no faces) so the UI can say why.
 std::string Editor_SplitInstances(const char* name);
+
+// Map-inspector overlay: draw `surface`'s `role` map (albedo|normal|height|
+// roughness|ao|metallic) mip0 into the top-center quarter of the final frame
+// (EnvReflection_DrawViz pano-viewer pattern; orange frame). role "off" or an
+// empty surface hides it. Returns "on" / "off" / "no map". The draw itself
+// (Editor_DrawMapViz) runs in RENDER.CPP's post-tonemap tail via the
+// g_editorDrawMapViz hook; natively MAPVIZ_TEST=surface:role arms it for
+// headless snapshot validation.
+std::string Editor_SetMapViz(const char* surface, const char* role);
+void Editor_DrawMapViz();
 
 // Re-project a surface's texture coordinates live: proj 0=planar 1=cylindrical
 // 2=spherical 3=cubic (LightWave's projections — UVs are baked at FLD load

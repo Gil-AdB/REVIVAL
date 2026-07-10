@@ -2522,6 +2522,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const float glassBlur    = fds::FeatureFlags::glass_refract_rough_blur();
 	const float glassF0lin   = (glassIor - 1.0f) / (glassIor + 1.0f);
 	const float glassF0      = glassF0lin * glassF0lin;
+	// Per-material IOR override (Material::RefractIor > 0, editor/sidecar
+	// 'refractIor'). eta/F0 are memoized on the last glass material seen so a
+	// facet's pixel run pays the divide once, not per pixel; materials with no
+	// override recompute the same 1/ior + Schlick F0 expressions from the
+	// global IOR — identical inputs, identical ops → byte-identical output.
+	const Material *glassIorMat = nullptr;
+	float glassEtaPx = glassEta, glassF0Px = glassF0;
 	const float glassFOVX    = ctx.invFOVX != 0.0f ? 1.0f / ctx.invFOVX : 0.0f;
 	const float glassFOVY    = ctx.invFOVY != 0.0f ? 1.0f / ctx.invFOVY : 0.0f;
 	auto glassClampX = [XRes](int v) { return v < 0 ? 0 : (v >= XRes ? XRes - 1 : v); };
@@ -2832,6 +2839,15 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 			const bool glassRefrPx = glassRefrOn && !isWater
 			                         && (Mat->Flags & Mat_Refractive) != 0;
 			if (glassRefrPx) {
+				// Per-material IOR: Mat->RefractIor > 0 overrides the global
+				// glass_refract_ior (see the memo comment at the hoist above).
+				if (Mat != glassIorMat) {
+					glassIorMat = Mat;
+					const float ior = Mat->RefractIor > 0.0f ? Mat->RefractIor : glassIor;
+					glassEtaPx = ior > 0.0f ? 1.0f / ior : 1.0f;
+					const float f0l = (ior - 1.0f) / (ior + 1.0f);
+					glassF0Px = f0l * f0l;
+				}
 				// Perturbed view-space normal from the material normal map via an
 				// on-the-fly (Mikkelsen) tangent — the transparent G-buffer carries
 				// no tangent plane, and the exact tangent rotation is irrelevant to
@@ -2865,17 +2881,17 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				// Viewer-side normal (dot(N,d) < 0), matching the env-compose flip.
 				if (pnx*dx + pny*dy + pnz*dz > 0.0f) { pnx = -pnx; pny = -pny; pnz = -pnz; }
 				const float cosi = -(pnx*dx + pny*dy + pnz*dz);            // ≥ 0
-				const float kk = 1.0f - glassEta*glassEta*(1.0f - cosi*cosi);
+				const float kk = 1.0f - glassEtaPx*glassEtaPx*(1.0f - cosi*cosi);
 				if (kk > 0.0f && z > 1e-3f) {                              // else TIR → straight
-					const float nds = glassEta*cosi - std::sqrt(kk);
-					const float tX = glassEta*dx + nds*pnx;
-					const float tY = glassEta*dy + nds*pny;
-					const float tZ = glassEta*dz + nds*pnz;
+					const float nds = glassEtaPx*cosi - std::sqrt(kk);
+					const float tX = glassEtaPx*dx + nds*pnx;
+					const float tY = glassEtaPx*dy + nds*pny;
+					const float tZ = glassEtaPx*dz + nds*pnz;
 					if (tZ > 1e-3f) {
 						// Schlick Fresnel (F0 from IOR): scale the offset by 1-F so
 						// head-on refracts most, grazing least (reflection dominates).
 						const float om   = 1.0f - cosi;
-						const float fres = glassF0 + (1.0f - glassF0) * (om*om*om*om*om);
+						const float fres = glassF0Px + (1.0f - glassF0Px) * (om*om*om*om*om);
 						const float sc   = glassRefr * (1.0f - fres);
 						// Offset = (pixel the refracted ray points at) − (this pixel,
 						// = the straight-through ray). Depth-independent angular

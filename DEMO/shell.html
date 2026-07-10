@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b55</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b56</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -665,7 +665,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b55); orbit/zoom embind =',
+        console.log('[editor] panel init (build b56); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -793,7 +793,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -1644,7 +1644,48 @@
       function editorGenP(name){
         return editorGenParams[name] || (editorGenParams[name] = {
           nStrength: EDITOR_NMAP_STRENGTH_DEF, nBlur: EDITOR_NMAP_BLUR_DEF,
-          hContrast: 1, hInvert: false, aoStrength: 1, aoRadius: 8 });
+          hContrast: 1, hInvert: false, aoStrength: 1, aoRadius: 8,
+          // Procedural displacement knobs (FBM value noise — see the
+          // 'Generate displacement' block in renderSurfaceProps).
+          dispScale: 4, dispOct: 4, dispStrength: 5, dispSeed: 1 });
+      }
+      // Tileable FBM value noise, seeded — the procedural-displacement height
+      // field. Lattice value noise per octave (hash on WRAPPED lattice coords,
+      // so the map tiles by construction), smoothstep interpolation, 0.5
+      // persistence. Returns a Rec.601-style luminance field (0-255) so the
+      // existing editorEncodeNormal / editorEncodeHeight encoders consume it
+      // exactly like an albedo-derived field.
+      function editorFbmField(W, H, scale, octaves, seed){
+        function h2(ix, iy, os){   // integer hash → [0,1)
+          var h = (Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263) ^ Math.imul(os, 974634617)) | 0;
+          h = Math.imul(h ^ (h >>> 13), 1274126177);
+          return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+        }
+        var L = new Float32Array(W * H);
+        var norm = 0, amp = 1;
+        for (var o = 0; o < octaves; o++){ norm += amp; amp *= 0.5; }
+        amp = 1;
+        var freq = Math.max(1, Math.round(scale));
+        for (var oct = 0; oct < octaves; oct++){
+          var f = freq, os = (seed | 0) * 131 + oct;
+          for (var y = 0; y < H; y++){
+            var v = y * f / H, iy = Math.floor(v), fy = v - iy;
+            fy = fy * fy * (3 - 2 * fy);
+            var y0 = iy % f, y1 = (iy + 1) % f, row = y * W;
+            for (var x = 0; x < W; x++){
+              var u = x * f / W, ix = Math.floor(u), fx = u - ix;
+              fx = fx * fx * (3 - 2 * fx);
+              var x0 = ix % f, x1 = (ix + 1) % f;
+              var a = h2(x0, y0, os), b = h2(x1, y0, os),
+                  c = h2(x0, y1, os), d = h2(x1, y1, os);
+              L[row + x] += amp * ((a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy);
+            }
+          }
+          amp *= 0.5; freq *= 2;
+        }
+        var k = 255 / norm;
+        for (var i = 0; i < W * H; i++) L[i] *= k;
+        return L;
       }
       // Rec.601 luminance field (0-255), row-major — matches the engine's bake.
       function editorLumField(img){
@@ -1826,18 +1867,30 @@
           spl.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;display:block;margin-bottom:4px;';
           spl.onclick = function(e){
             e.preventDefault();
-            var names = [];
-            try { names = JSON.parse(Module.editorSplitInstances(s.name)); } catch(err){}
-            if (!names.length) { editorStatus('split: only one instance of "' + s.name + '" found'); return; }
-            // Re-enumerate: the clones are new surfaces (own matIDs — canvas
-            // pick now resolves each instance separately).
+            var res = null;
+            try { res = JSON.parse(Module.editorSplitInstances(s.name)); } catch(err){}
+            if (!res) { editorStatus('split "' + s.name + '" failed (see console)'); return; }
+            var names = res.names || [];
+            if (!names.length) {
+              // Say WHY nothing split instead of silently doing nothing.
+              editorStatus(res.clusters === 1
+                ? 'split "' + s.name + '": all ' + res.faces + ' faces form 1 spatial cluster — nothing to split'
+                : 'split "' + s.name + '": no faces found');
+              return;
+            }
+            // Re-enumerate: the parts are new surfaces (own matIDs — canvas
+            // pick now resolves each instance separately). The ORIGINAL name
+            // is gone (the primary is renamed "<name>#1" so the parts read as
+            // siblings) — select the primary part in its place.
             editorSurfaces = JSON.parse(Module.editorGetSurfaces());
             editorSurfaces.forEach(function(x){
               if (!editorPristine[x.name]) editorPristine[x.name] = JSON.parse(JSON.stringify(x));
             });
             renderSurfaceList();
-            editorStatus('split "' + s.name + '" → ' + names.join(', ') +
-                         ' (live-only; Save writes the base surface)');
+            editorStatus('split "' + s.name + '" → ' + names.join(', ') + ' (' + res.clusters +
+                         ' spatial clusters; live-only — Save writes the base surface)');
+            var s1 = editorSurfaces.find(function(x){ return x.name === names[0]; });
+            if (s1) selectSurface(s1, /*alsoFocus=*/false);
           };
           el.appendChild(spl);
         }
@@ -1931,9 +1984,35 @@
           rr.title = 'mark as refracting GLASS: under the --glass_refract render knob (Render section), only surfaces with this flag refract the opaque background behind them — others just blend. Best on transparent surfaces with a normal/height map (below), which drives the refraction displacement. Live-applies; persists via sidecar.';
           rr.appendChild(rl);
           var rc = document.createElement('input'); rc.type = 'checkbox'; rc.checked = !!(+s.refractive);
-          rc.onchange = function(){ setProp(s.name, 'refractive', rc.checked ? 1 : 0); };
+          rc.onchange = function(){
+            setProp(s.name, 'refractive', rc.checked ? 1 : 0);
+            renderSurfaceProps(s, obj);   // reveal/hide the refractIor row
+          };
           rr.appendChild(rc);
           el.appendChild(rr);
+          // Per-surface glass IOR — only meaningful on refractive surfaces.
+          // 0 (via the number box) = unset -> the global glass_refract_ior
+          // render knob (1.5 = glass). Persists via the sidecar.
+          if (+s.refractive) {
+            var xr = document.createElement('div'); xr.className = 'prop-row';
+            xr.title = 'per-surface index of refraction for the glass refraction (Snell bend + Fresnel F0). Overrides the global glass_refract_ior render knob for THIS surface; type 0 in the number box to unset (fall back to the global, default 1.5). Persists via sidecar.';
+            var xl = document.createElement('label'); xl.textContent = 'refractIor'; xr.appendChild(xl);
+            var xrr = document.createElement('input'); xrr.type = 'range';
+            xrr.min = 1.0; xrr.max = 2.5; xrr.step = 0.01;
+            xrr.value = +s.refractIor > 0 ? +s.refractIor : 1.5;
+            var xv = document.createElement('input'); xv.type = 'number'; xv.step = 0.01;
+            xv.value = +s.refractIor > 0 ? +(+s.refractIor).toFixed(3) : 0;
+            xv.title = '0 = unset (use the global glass_refract_ior)';
+            xv.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+            xrr.oninput = function(){ var v = parseFloat(xrr.value); xv.value = +v.toFixed(3); setProp(s.name, 'refractIor', v); };
+            xv.onchange = function(){
+              var v = parseFloat(xv.value); if (isNaN(v) || v < 0) return;
+              if (v > 0) xrr.value = v;
+              setProp(s.name, 'refractIor', v);
+            };
+            xr.appendChild(xrr); xr.appendChild(xv);
+            el.appendChild(xr);
+          }
         })();
         // Normal-map controls: G-channel convention flip (OGL↔DX) + viz
         // shortcut. Only meaningful when the surface HAS a normal map.
@@ -2125,6 +2204,42 @@
         };
         ih.appendChild(envSt); ih.appendChild(pv);
         imp.appendChild(ih);
+        // Map-inspector overlay: blit one of this surface's maps (mip0, as
+        // the engine samples it) over the frame top-center, pano-viewer style
+        // (editorVizMap → the engine's post-tonemap overlay pass, orange
+        // frame). Pick 'off' (or switch surface and pick a map there) to
+        // change/hide; the selection survives panel re-renders.
+        (function(){
+          var vr = document.createElement('div'); vr.className = 'prop-row';
+          vr.title = 'inspect this surface\'s maps on screen: overlays the chosen map (mip0, exactly the texels the kernel samples) top-center over the render, orange frame. "off" hides it.';
+          var vl = document.createElement('label'); vl.textContent = 'map viz'; vr.appendChild(vl);
+          var vs = document.createElement('select');
+          [['off', true],
+           ['albedo',    !!(s.texture && s.texture.length)],
+           ['normal',    !!+s.hasNormalMap],
+           ['height',    !!+s.hasHeightMap],
+           ['roughness', !!+s.hasRoughnessMap],
+           ['ao',        !!+s.hasAoMap],
+           ['metallic',  !!+s.hasMetallicMap]].forEach(function(rr){
+            var o = document.createElement('option'); o.value = rr[0];
+            o.textContent = rr[1] ? rr[0] : rr[0] + ' (none)';
+            o.disabled = !rr[1];
+            vs.appendChild(o);
+          });
+          if (window.editorVizState && window.editorVizState.surf === s.name)
+            vs.value = window.editorVizState.role;
+          vs.onchange = function(){
+            if (!Module.editorVizMap) { editorStatus('map viz: engine build too old (no editorVizMap)'); return; }
+            var off = vs.value === 'off';
+            var st = '?';
+            try { st = Module.editorVizMap(off ? '' : s.name, vs.value); }
+            catch(e){ editorStatus('map viz failed: ' + e); return; }
+            window.editorVizState = off ? null : { surf: s.name, role: vs.value };
+            editorStatus(off ? 'map viz off'
+                             : 'map viz: ' + s.name + ' ' + vs.value + ' → ' + st);
+          };
+          vr.appendChild(vs); imp.appendChild(vr);
+        })();
         // Whole-pack import: pick a folder (FreePBR/ambientCG layout) and each
         // map is role-detected by filename with the SAME native token rules as
         // --material-import (Module.editorClassifyMap). First match per role wins.
@@ -2214,6 +2329,28 @@
         gen.style.cssText = 'margin-top:8px;border-top:1px solid #333;padding-top:6px;';
         var gh = document.createElement('div'); gh.style.cssText = 'color:#fff;margin-bottom:4px;';
         gh.textContent = 'Generate maps from albedo'; gen.appendChild(gh);
+        // Shared by the albedo-driven generators below AND the procedural
+        // displacement block (which needs no albedo): per-surface knob state
+        // + the slider/button builders.
+        var gp = editorGenP(s.name);
+        // Slider + numeric twin. oninput = live drag (debounced, no re-render);
+        // release / number-box commit = final generate + panel refresh.
+        function genSlider(label, min, max, step, initial, onLive, onCommit){
+          var row = document.createElement('div'); row.className = 'prop-row';
+          var lab = document.createElement('label'); lab.textContent = label; lab.style.flex = '0 0 74px'; row.appendChild(lab);
+          var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = initial;
+          var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+initial).toFixed(3);
+          val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); onLive(v); };
+          r.onchange = function(){ onCommit(parseFloat(r.value)); };
+          val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return; r.value = v; onCommit(v); };
+          row.appendChild(r); row.appendChild(val); return row;
+        }
+        function genButton(text, onClick){
+          var b = document.createElement('button'); b.textContent = text;
+          b.style.cssText = 'flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:3px;cursor:pointer;font-size:11px;';
+          b.onclick = onClick; return b;
+        }
         var genSrc = editorAlbedoSource(s.name);
         if (!genSrc){
           var noSrc = document.createElement('div'); noSrc.className = 'surf-tex';
@@ -2223,7 +2360,6 @@
           var srcNote = document.createElement('div'); srcNote.className = 'surf-tex'; srcNote.style.marginBottom = '4px';
           srcNote.textContent = 'source: ' + (genSrc.blob ? 'imported albedo (pending)' : genSrc.url);
           gen.appendChild(srcNote);
-          var gp = editorGenP(s.name);
           var genTimers = {};
           // refresh=true → re-pull + re-render the panel so a freshly-added
           // map's dependent controls appear (normal G flip, un-dimmed
@@ -2249,24 +2385,6 @@
           function schedule(role, makePixels, statusName){
             clearTimeout(genTimers[role]);
             genTimers[role] = setTimeout(function(){ runGen(role, makePixels, statusName, false); }, 130);
-          }
-          // Slider + numeric twin. oninput = live drag (debounced, no re-render);
-          // release / number-box commit = final generate + panel refresh.
-          function genSlider(label, min, max, step, initial, onLive, onCommit){
-            var row = document.createElement('div'); row.className = 'prop-row';
-            var lab = document.createElement('label'); lab.textContent = label; lab.style.flex = '0 0 74px'; row.appendChild(lab);
-            var r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = initial;
-            var val = document.createElement('input'); val.type = 'number'; val.step = step; val.value = +(+initial).toFixed(3);
-            val.style.cssText = 'background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
-            r.oninput = function(){ var v = parseFloat(r.value); val.value = +v.toFixed(3); onLive(v); };
-            r.onchange = function(){ onCommit(parseFloat(r.value)); };
-            val.onchange = function(){ var v = parseFloat(val.value); if (isNaN(v)) return; r.value = v; onCommit(v); };
-            row.appendChild(r); row.appendChild(val); return row;
-          }
-          function genButton(text, onClick){
-            var b = document.createElement('button'); b.textContent = text;
-            b.style.cssText = 'flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:3px;cursor:pointer;font-size:11px;';
-            b.onclick = onClick; return b;
           }
           // NORMAL — bump strength (Sobel scale) + detail blur (pre-Sobel passes)
           (function(){
@@ -2315,6 +2433,79 @@
             gen.appendChild(an);
           })();
         }
+        // ── Procedural displacement (no albedo needed) ─────────────────────
+        // "generate displacement": a tileable FBM value-noise height field
+        // (seeded, knobs for scale/octaves/strength/seed) imported through the
+        // SAME importFile path as an upload, as this surface's NORMAL map
+        // (derived from the field with the engine's Sobel convention — that's
+        // what drives glass-refraction relief) + HEIGHT map (the raw field,
+        // for --parallax). Works with or without an existing albedo; the
+        // engine resamples both to the albedo's texel layout on import.
+        (function(){
+          var ph = document.createElement('div');
+          ph.style.cssText = 'color:#fff;margin:8px 0 4px;border-top:1px solid #2a2a33;padding-top:6px;';
+          ph.textContent = 'Generate displacement (procedural)';
+          gen.appendChild(ph);
+          var dispTimer = null;
+          function runDisp(refresh){
+            editorStatus('generating displacement…');
+            setTimeout(function(){   // let the status paint before the crunch
+              try {
+                var W = 512, H = 512;
+                var L = editorFbmField(W, H, gp.dispScale, gp.dispOct, gp.dispSeed);
+                // Pseudo gen-cache entry: the existing encoders consume it
+                // exactly like an albedo-derived luminance field.
+                var c = { W: W, H: H, lum: L, nBlur: -1, gx: null, gy: null };
+                var np = editorEncodeNormal(c, gp.dispStrength, 0);
+                var hp = editorEncodeHeight(c, 1, false);
+                var nm = s.name.replace(/[^A-Za-z0-9._-]+/g, '_');
+                Promise.all([
+                  editorPixelsToPngFile(np, W, H, nm + '_disp_normal_gen.png'),
+                  editorPixelsToPngFile(hp, W, H, nm + '_disp_height_gen.png')
+                ]).then(function(files){
+                  importFile('normal', files[0], function(okN){
+                    importFile('height', files[1], function(okH){
+                      editorStatus('displacement generated → normal ' + (okN ? 'ok' : 'FAILED') +
+                                   ', height ' + (okH ? 'ok' : 'FAILED') +
+                                   ' (scale ' + gp.dispScale + ', ' + gp.dispOct + ' oct, str ' +
+                                   (+gp.dispStrength).toFixed(1) + ', seed ' + gp.dispSeed + ')');
+                      if ((okN || okH) && refresh) refreshSurfacesAndProps(s.name);
+                    });
+                  });
+                }).catch(function(e){ editorStatus('displacement generate failed: ' + (e && e.message || e)); });
+              } catch(e){ editorStatus('displacement generate failed: ' + (e && e.message || e)); }
+            }, 10);
+          }
+          function schedDisp(){ clearTimeout(dispTimer); dispTimer = setTimeout(function(){ runDisp(false); }, 250); }
+          var brow = document.createElement('div'); brow.className = 'prop-row';
+          brow.appendChild(genButton('Generate displacement', function(){ runDisp(true); }));
+          gen.appendChild(brow);
+          gen.appendChild(genSlider('noise scale', 1, 32, 1, gp.dispScale,
+            function(v){ gp.dispScale = Math.round(v); schedDisp(); },
+            function(v){ gp.dispScale = Math.round(v); runDisp(true); }));
+          gen.appendChild(genSlider('octaves', 1, 8, 1, gp.dispOct,
+            function(v){ gp.dispOct = Math.round(v); schedDisp(); },
+            function(v){ gp.dispOct = Math.round(v); runDisp(true); }));
+          gen.appendChild(genSlider('strength', 0, 16, 0.1, gp.dispStrength,
+            function(v){ gp.dispStrength = v; schedDisp(); },
+            function(v){ gp.dispStrength = v; runDisp(true); }));
+          var srow = document.createElement('div'); srow.className = 'prop-row';
+          var slab = document.createElement('label'); slab.textContent = 'seed'; slab.style.flex = '0 0 74px'; srow.appendChild(slab);
+          var sinp = document.createElement('input'); sinp.type = 'number'; sinp.step = 1; sinp.value = gp.dispSeed;
+          sinp.style.cssText = 'flex:0 0 64px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          sinp.onchange = function(){ var v = parseInt(sinp.value, 10); if (!isNaN(v)) { gp.dispSeed = v; runDisp(true); } };
+          srow.appendChild(sinp);
+          var rb = genButton('reroll', function(){
+            gp.dispSeed = (Math.random() * 1e6) | 0;
+            sinp.value = gp.dispSeed;
+            runDisp(true);
+          });
+          srow.appendChild(rb);
+          gen.appendChild(srow);
+          var dn = document.createElement('div'); dn.className = 'surf-tex';
+          dn.textContent = 'tileable FBM noise → normal (+height) map; on refractive glass the normal drives the refraction relief';
+          gen.appendChild(dn);
+        })();
         el.appendChild(gen);
       }
 

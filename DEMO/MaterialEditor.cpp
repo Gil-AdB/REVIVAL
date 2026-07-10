@@ -12,6 +12,7 @@
 #include <Base/FeatureFlags.h>
 #include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
 #include <RENDER/EnvBake.h>   // EnvReflection_Invalidate (rebake button)
+#include <RENDER/OffscreenView.h> // g_offscreenViewDepth (map-viz overlay guard)
 
 #include <Base/TriMesh.h>
 
@@ -64,6 +65,7 @@ static void appendNum(std::string& out, const char* key, double v)
 
 #ifndef __EMSCRIPTEN__
 static void editorRunPickTestHook();   // defined below the pick core
+static void editorRunSplitTestHook();  // defined below Editor_SplitInstances
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -74,6 +76,9 @@ std::string Editor_GetSurfacesJSON()
 	// post-tick call into this file is the DUMP_SURFACES hook → this function.
 	// So the check rides here: no-op unless PICK_TEST is set; fires once.
 	editorRunPickTestHook();
+	// Same convention: SPLIT_TEST=<surface> runs Editor_SplitInstances once
+	// post-tick (needs live meshes/materials) and prints the result JSON.
+	editorRunSplitTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -109,6 +114,10 @@ std::string Editor_GetSurfacesJSON()
 		// checkbox flips it (setProp -> MaterialImport_SetSurfaceProp), persisted
 		// via the scene sidecar ('refractive' in SURF_SIDECAR_KEYS).
 		appendNum(out, "refractive",   (M->Flags & Mat_Refractive) ? 1 : 0); out += ",";
+		// Per-material glass-refraction IOR override (0 = unset -> the global
+		// glass_refract_ior). Editor slider on refractive surfaces; persists
+		// via the sidecar ('refractIor' in SURF_SIDECAR_KEYS).
+		appendNum(out, "refractIor",   M->RefractIor); out += ",";
 		// Per-surface smoothing angle (degrees). Show the LIVE sidecar override
 		// if one is registered (so it round-trips after Save + reload), else the
 		// authored Material::MaxSmoothingAngle (stored in radians). Consumed by
@@ -251,17 +260,70 @@ void Editor_SetSmoothAngleLive(const char* surface, float angleDeg)
 	Editor_MarkDirty();
 }
 
+// GreetsMirror's BuildMirror clones every mesh as an "__mirrorClone_*" object
+// whose faces REFERENCE THE ORIGINAL MATERIALS at positions mirrored behind
+// the wall. Any editor pass that gathers faces by material must skip those
+// meshes (same exclusion the pick fallback below and MainLoop's focus
+// clustering use) or the phantom geometry contaminates the result.
+static int editorCollectMirrorCloneMeshes(const TriMesh **buf, int max)
+{
+	int n = 0;
+	if (!CurScene) return 0;
+	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
+		if (std::strncmp(Obj->Name, "__mirrorClone_", 14) != 0) continue;
+		if (n < max) buf[n++] = (const TriMesh *)Obj->Data;
+	}
+	return n;
+}
+
+// JSON result helper for Editor_SplitInstances: {"clusters":C,"faces":F,
+// "names":[...]} — names empty when nothing was split, so the UI can say WHY
+// (C==1: all faces form one spatial cluster; C==0: surface not found).
+static std::string splitResultJson(long clusters, long faces,
+                                   const std::set<std::string> &names)
+{
+	std::string out;
+	char buf[64];
+	std::snprintf(buf, sizeof buf, "{\"clusters\":%ld,\"faces\":%ld,\"names\":[", clusters, faces);
+	out += buf;
+	bool first = true;
+	for (const std::string &nn : names) {
+		if (!first) out += ",";
+		first = false;
+		out += "\"";
+		jsonEscape(out, nn.c_str());
+		out += "\"";
+	}
+	out += "]}";
+	return out;
+}
+
 std::string Editor_SplitInstances(const char* name)
 {
-	if (!CurScene || !name || !*name) return "[]";
+	const std::set<std::string> none;
+	if (!CurScene || !name || !*name) return splitResultJson(0, 0, none);
+	// Mirror-clone meshes duplicate every face of this surface (same
+	// Material*) MIRRORED BEHIND the wall: clustering them inflates the union
+	// bbox (so R blows up) and chain-links the real instances through the
+	// mirror into one blob — the "momy has nothing to split" regression with
+	// mirrors ON. Skip their faces entirely; the clones keep rendering the
+	// primary's material either way (they reference it by pointer).
+	const TriMesh *cloneMeshes[64];
+	const int cloneCount = editorCollectMirrorCloneMeshes(cloneMeshes, 64);
+	long cloneFacesSkipped = 0;
 	// Faces of this surface (any of its materials — base + ::mirUV clones),
 	// with world-space centres.
 	struct FRef { Face* F; float c[3]; };
 	std::vector<FRef> refs;
-	for (TriMesh* T = CurScene->TriMeshHead; T; T = T->Next)
+	for (TriMesh* T = CurScene->TriMeshHead; T; T = T->Next) {
+		bool isClone = false;
+		for (int c = 0; c < cloneCount; ++c)
+			if (cloneMeshes[c] == T) { isClone = true; break; }
 		for (DWord i = 0; i < T->FIndex; ++i) {
 			Face& F = T->Faces[i];
 			if (!F.Txtr || !F.Txtr->Name || Editor_BaseSurfName(F.Txtr->Name) != name) continue;
+			if (isClone) { ++cloneFacesSkipped; continue; }
 			Vertex* vs[3] = { F.A, F.B, F.C };
 			float c[3] = { 0, 0, 0 };
 			int nv = 0;
@@ -276,7 +338,11 @@ std::string Editor_SplitInstances(const char* name)
 			if (!nv) continue;
 			refs.push_back({ &F, { c[0]/nv, c[1]/nv, c[2]/nv } });
 		}
-	if (refs.size() < 2) return "[]";
+	}
+	if (cloneFacesSkipped)
+		std::fprintf(stderr, "[EDITOR] split '%s': skipped %ld mirror-clone faces (%d clone meshes)\n",
+		             name, cloneFacesSkipped, cloneCount);
+	if (refs.size() < 2) return splitResultJson(refs.empty() ? 0 : 1, long(refs.size()), none);
 
 	// Cluster radius from the union bbox (same scale the focus clustering uses).
 	float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
@@ -315,7 +381,11 @@ std::string Editor_SplitInstances(const char* name)
 
 	std::map<int, long> clusterSize;
 	for (size_t i = 0; i < n; ++i) ++clusterSize[find(int(i))];
-	if (clusterSize.size() < 2) return "[]";
+	if (clusterSize.size() < 2) {
+		std::fprintf(stderr, "[EDITOR] split '%s': %zu faces form 1 spatial cluster — nothing to split\n",
+		             name, n);
+		return splitResultJson(1, long(n), none);
+	}
 	int primary = -1; long primarySize = -1;
 	for (auto& [root, sz] : clusterSize)
 		if (sz > primarySize) { primarySize = sz; primary = root; }
@@ -367,19 +437,34 @@ std::string Editor_SplitInstances(const char* name)
 		}
 		refs[i].F->Txtr = it->second;
 	}
-	// New base names for the caller (dedup'd across mir/non-mir clones).
-	std::set<std::string> newNames;
-	for (auto& [key, C] : clones) newNames.insert(Editor_BaseSurfName(C->Name));
-	std::string out = "[";
-	bool first = true;
-	for (const std::string& nn : newNames) {
-		if (!first) out += ",";
-		first = false;
-		out += "\"";
-		jsonEscape(out, nn.c_str());
-		out += "\"";
+	// Symmetric naming (user request): the primary cluster does NOT keep the
+	// bare name — its materials are renamed "<name>#1" (::mirUV suffix kept
+	// OUTSIDE the "#k", as for the clones) so split parts read as siblings
+	// (momy#1 / momy#2 / …). Saves still collapse: the server strips the whole
+	// trailing (#k)+ chain back to the base surface (split_surface_sidecar_keys
+	// and the FLD/UV patchers), so "#1" lands on "momy" like every other part.
+	// The primary keeps the ORIGINAL Material* (mirror-clone faces reference it
+	// by pointer, so the mirror keeps rendering the primary's look).
+	static const std::string mirSuf2 = "::mirUV";
+	for (Material* M = MatLib; M; M = M->Next) {
+		if (M->RelScene != CurScene || !M->Name) continue;
+		if (Editor_BaseSurfName(M->Name) != name) continue;
+		const std::string old = M->Name;
+		const bool isMir = old.size() > mirSuf2.size() &&
+		                   old.compare(old.size() - mirSuf2.size(), mirSuf2.size(), mirSuf2) == 0;
+		char nm[220];
+		std::snprintf(nm, sizeof nm, "%s#1%s", name, isMir ? mirSuf2.c_str() : "");
+		M->Name = strdup(nm);   // old name leaked — runtime edit, engine convention
 	}
-	out += "]";
+	// New base names for the caller (primary "#1" + dedup'd cluster clones).
+	std::set<std::string> newNames;
+	{
+		char p1[200];
+		std::snprintf(p1, sizeof p1, "%s#1", name);
+		newNames.insert(p1);
+	}
+	for (auto& [key, C] : clones) newNames.insert(Editor_BaseSurfName(C->Name));
+	const std::string out = splitResultJson(long(clusterSize.size()), long(n), newNames);
 	// New MatLib entries → matIDs + table (post-load materials are invisible
 	// to the deferred kernel until the table is rebuilt — the greets mirror
 	// "yellow tint" lesson).
@@ -389,6 +474,26 @@ std::string Editor_SplitInstances(const char* name)
 	             name, n, clusterSize.size(), primarySize, out.c_str());
 	return out;
 }
+
+#ifndef __EMSCRIPTEN__
+// SPLIT_TEST=<surface> — native validation for the instance split (same env-
+// hook convention as PICK_TEST below): runs Editor_SplitInstances once, post-
+// tick (live meshes/materials), and prints the result JSON. Run with
+// --greets_mirror to exercise the mirror-clone exclusion (the regression this
+// verifies), e.g.:
+//   SPLIT_TEST=momy DUMP_SURFACES=1 ./DEMO --deferred --greets-mirror \
+//     --snapshot=greets@t=600
+static void editorRunSplitTestHook()
+{
+	const char *spec = std::getenv("SPLIT_TEST");
+	if (!spec || !*spec) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	const std::string r = Editor_SplitInstances(spec);
+	std::fprintf(stderr, "[SPLITTEST] split '%s' -> %s\n", spec, r.c_str());
+}
+#endif
 
 // ── Light editing (shared native/wasm — native uses it via the LIGHT_TEST
 // snapshot hook) ────────────────────────────────────────────────────────────
@@ -688,12 +793,7 @@ static bool editorXparRayNearest(float dx, float dy, float &bestT, const Materia
 	bestMat = nullptr;
 	if (!CurScene || !View) return false;
 	const TriMesh *cloneMeshes[64];
-	int cloneCount = 0;
-	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
-		if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
-		if (std::strncmp(Obj->Name, "__mirrorClone_", 14) != 0) continue;
-		if (cloneCount < 64) cloneMeshes[cloneCount++] = (const TriMesh *)Obj->Data;
-	}
+	const int cloneCount = editorCollectMirrorCloneMeshes(cloneMeshes, 64);
 	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
 		bool isClone = false;
 		for (int c = 0; c < cloneCount; ++c) if (cloneMeshes[c] == T) { isClone = true; break; }
@@ -947,7 +1047,160 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 	return ok;
 }
 
+// ── Map-inspector overlay ("map viz") ───────────────────────────────────────
+// Inspect a surface's maps on screen: blit the selected map's mip0 into the
+// TOP-CENTER quarter of the final frame — the EnvReflection_DrawViz pano-
+// viewer pattern (post-tonemap, pre-flip; RENDER.CPP calls Editor_DrawMapViz
+// through the g_editorDrawMapViz hook installed at the bottom of this file).
+// Off by default; Editor_SetMapViz("",...) / role "off" hides it again.
+static std::string g_mapVizSurf;   // empty = overlay off
+static std::string g_mapVizRole;
+
+static const Texture *editorMapVizResolve()
+{
+	if (g_mapVizSurf.empty() || !CurScene) return nullptr;
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != CurScene || !M->Name) continue;
+		if (Editor_BaseSurfName(M->Name) != g_mapVizSurf) continue;
+		const Texture *t = nullptr;
+		if      (g_mapVizRole == "albedo")                              t = M->Txtr;
+		else if (g_mapVizRole == "normal")                              t = M->NormalMap;
+		else if (g_mapVizRole == "height")                              t = M->HeightMap;
+		else if (g_mapVizRole == "roughness" || g_mapVizRole == "rough") t = M->RoughnessMap;
+		else if (g_mapVizRole == "ao")                                  t = M->AoMap;
+		else if (g_mapVizRole == "metallic" || g_mapVizRole == "metal")  t = M->MetallicMap;
+		if (t && t->Mipmap[0] && t->SizeX > 0 && t->SizeY > 0) return t;
+	}
+	return nullptr;   // surface has no such map (::mirUV clones share Texture*s)
+}
+
+std::string Editor_SetMapViz(const char *surface, const char *role)
+{
+	g_mapVizSurf = surface ? surface : "";
+	g_mapVizRole = role ? role : "";
+	if (g_mapVizSurf.empty() || g_mapVizRole.empty() || g_mapVizRole == "off") {
+		g_mapVizSurf.clear();
+		g_mapVizRole.clear();
+		Editor_MarkDirty();
+		return "off";
+	}
+	Editor_MarkDirty();
+	const Texture *t = editorMapVizResolve();
+	std::fprintf(stderr, "[EDITOR] map viz: '%s' %s -> %s\n",
+	             g_mapVizSurf.c_str(), g_mapVizRole.c_str(),
+	             t ? "on" : "no such map");
+	if (t) return "on";
+	// Keep the state armed anyway: an import can land the map a moment later
+	// (the draw pass re-resolves every frame), but tell the caller the truth.
+	return "no map";
+}
+
+// Linear (x,y) → Generate_Mipmaps' block-tiled texel index (outer loop block
+// COLUMNS, inner block rows; rows-then-columns inside a block). Mirrors
+// IMGCODE.CPP:1573-1594 / MeshOps.cpp::SwizzledOffset.
+static inline size_t editorSwizzledOffset(int x, int y, int bsx, int bsy, int sizeY)
+{
+	const int BX = 1 << bsx, BY = 1 << bsy;
+	const int blockRowsPerCol = sizeY >> bsy;
+	const int bx = x >> bsx, by = y >> bsy;
+	const int k = x & (BX - 1), j = y & (BY - 1);
+	return (size_t(bx) * blockRowsPerCol + by) * size_t(BX * BY) + size_t(j) * BX + k;
+}
+
+void Editor_DrawMapViz()
+{
+#ifndef __EMSCRIPTEN__
+	// MAPVIZ_TEST=surface:role — native headless validation (PICK_TEST env-
+	// hook convention): arm the overlay once so a snapshot run captures it.
+	{
+		static bool armed = false;
+		if (!armed) {
+			armed = true;
+			if (const char *spec = std::getenv("MAPVIZ_TEST")) {
+				const std::string s = spec;
+				const size_t c = s.find(':');
+				if (c != std::string::npos) {
+					const std::string st =
+					    Editor_SetMapViz(s.substr(0, c).c_str(), s.substr(c + 1).c_str());
+					std::fprintf(stderr, "[MAPVIZ] test hook '%s' -> %s\n", spec, st.c_str());
+				} else {
+					std::fprintf(stderr, "[MAPVIZ] want MAPVIZ_TEST=surface:role\n");
+				}
+			}
+		}
+	}
+#endif
+	if (g_mapVizSurf.empty()) return;
+	if (!VPage || XRes <= 0 || YRes <= 0) return;
+	// Never inside an offscreen render (env-probe bake / mirror RTT) — same
+	// guard as EnvReflection_DrawViz, or the overlay bakes into every probe.
+	if (fds::g_offscreenViewDepth > 0) return;
+	const Texture *t = editorMapVizResolve();
+	if (!t) return;
+	const int srcW = t->SizeX, srcH = t->SizeY;
+	// Fit the map into the top-center quarter (≤ half width, ≤ half height),
+	// nearest sampling both ways (a 64² map upscales, a 1024² one downscales).
+	int dw = XRes / 2;
+	int dh = int((long long)dw * srcH / srcW);
+	if (dh > YRes / 2) { dh = YRes / 2; dw = int((long long)dh * srcW / srcH); }
+	if (dw < 2 || dh < 2) return;
+	const int x0 = (XRes - dw) / 2, y0 = 8;
+	if (x0 < 1 || y0 + dh + 1 >= YRes) return;
+	const bool tiled = t->blockSizeX > 0 || t->blockSizeY > 0;
+	const byte *src = t->Mipmap[0];
+	dword *out = reinterpret_cast<dword *>(VPage);
+	for (int y = 0; y < dh; ++y) {
+		dword *row = out + size_t(y0 + y) * XRes + x0;
+		const int sy = int((long long)y * srcH / dh);
+		for (int x = 0; x < dw; ++x) {
+			const int sx = int((long long)x * srcW / dw);
+			const size_t idx = tiled
+			    ? editorSwizzledOffset(sx, sy, t->blockSizeX, t->blockSizeY, srcH)
+			    : size_t(sy) * srcW + sx;
+			dword c;
+			if (t->BPP == 32) {
+				c = reinterpret_cast<const dword *>(src)[idx];   // BGRA as stored
+			} else if (t->BPP == 16) {
+				// MakeNormal16 RG pack (R | G<<8): show R/G raw, reconstruct
+				// B (=Z) so the overlay reads like the source normal map.
+				const uint16_t v = reinterpret_cast<const uint16_t *>(src)[idx];
+				const float nX = float(v & 0xFF) * (1.0f / 127.5f) - 1.0f;
+				const float nY = float((v >> 8) & 0xFF) * (1.0f / 127.5f) - 1.0f;
+				const float z2 = 1.0f - nX * nX - nY * nY;
+				const float nZ = z2 > 0.0f ? std::sqrt(z2) : 0.0f;
+				const dword b = dword((nZ * 0.5f + 0.5f) * 255.0f);
+				c = (dword(v & 0xFF) << 16) | (dword((v >> 8) & 0xFF) << 8) | b;
+			} else {
+				// 8-bit single-channel (MakeHeight8 height/rough/ao/metal).
+				const dword g = src[idx];
+				c = (g << 16) | (g << 8) | g;
+			}
+			row[x] = c | 0xFF000000u;
+		}
+	}
+	// 1px ORANGE frame — the env pano viewer frames in green; keep them apart.
+	const dword fc = 0xFFFF8800u;
+	for (int x = -1; x <= dw; ++x) {
+		out[size_t(y0 - 1) * XRes + x0 + x]  = fc;
+		out[size_t(y0 + dh) * XRes + x0 + x] = fc;
+	}
+	for (int y = -1; y <= dh; ++y) {
+		out[size_t(y0 + y) * XRes + x0 - 1]  = fc;
+		out[size_t(y0 + y) * XRes + x0 + dw] = fc;
+	}
+}
+
 } // namespace rev
+
+// RENDER.CPP's post-tonemap tail calls the overlay through this hook so FDS
+// never hard-references a DEMO symbol (FDS-only binaries — clipper_test —
+// keep linking with the hook left null). Installed at static init; the pass
+// is a no-op until Editor_SetMapViz arms it.
+extern void (*g_editorDrawMapViz)();
+[[maybe_unused]] static const bool s_mapVizHookInstalled = [] {
+	g_editorDrawMapViz = &rev::Editor_DrawMapViz;
+	return true;
+}();
 
 // ── Browser (Embind) surface API ───────────────────────────────────────────
 // Exposed to JS as Module.editorGetSurfaces() / Module.editorSetSurfaceProp().
@@ -987,6 +1240,13 @@ std::string js_editorSetUVMapping(std::string name, int proj,
                                   float sx, float sy, float sz, int axis)
 {
 	return rev::Editor_SetUVMapping(name.c_str(), proj, sx, sy, sz, axis);
+}
+// Map-inspector overlay: show `surface`'s map for `role` (albedo|normal|
+// height|roughness|ao|metallic) as the top-center on-screen blit; role "off"
+// (or an empty surface) hides it. Returns "on" / "off" / "no map".
+std::string js_editorVizMap(std::string surface, std::string role)
+{
+	return rev::Editor_SetMapViz(surface.c_str(), role.c_str());
 }
 // Drop every env-reflection panorama for the scene; the next frame's
 // FramePrep re-bakes them with the CURRENT lights/materials/positions.
@@ -1242,6 +1502,7 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorSetLightProp",   &js_editorSetLightProp);
 	emscripten::function("editorSplitInstances", &js_editorSplitInstances);
 	emscripten::function("editorSetUVMapping",   &js_editorSetUVMapping);
+	emscripten::function("editorVizMap",         &js_editorVizMap);
 	emscripten::function("editorRebakeEnv",      &js_editorRebakeEnv);
 	emscripten::function("editorEnvPanoCount",   &js_editorEnvPanoCount);
 	emscripten::function("editorEnvInfo",        &js_editorEnvInfo);

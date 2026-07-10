@@ -112,6 +112,14 @@ struct Material
     char                * ReflectionImage       = nullptr;
     float                 ReflectionSeamAngle   = 0.0f;
     float                 RefractiveIndex       = 0.0f;
+    // Per-material screen-space glass-refraction IOR override (engine-only,
+    // sidecar-persisted 'refractIor' — no LWO/FLD field; distinct from the
+    // authored RefractiveIndex above, which FLD ships but nothing consumes).
+    // 0 = unset -> the deferred transparent kernel uses the global
+    // FeatureFlags glass_refract_ior; >0 = this material Snell-bends (and
+    // derives its Schlick F0) with THIS value. Read only inside the kernel's
+    // Mat_Refractive glass block, so non-glass materials never pay for it.
+    float                 RefractIor            = 0.0f;
     float                 EdgeTransparency      = 0.0f;
     float                 MaxSmoothingAngle     = 0.0f;
     // ─── COLD: texture filename + projection params (init-time) ──────
