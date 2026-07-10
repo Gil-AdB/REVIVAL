@@ -1799,8 +1799,12 @@
         };
       })();
       // Per-property ranges — the engine stores these on different scales:
-      // diffuse/specular ~0..1, luminosity ~0..2, transparency/reflection 0..100.
-      var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,2],
+      // diffuse/specular ~0..1, transparency/reflection 0..100. luminosity is
+      // a 0..1 emissive fraction where >1 = over-bright (blooms under HDR;
+      // the LDR path caps at ~250 by design, so >1 shows no change there) —
+      // slider to 8, the number box takes anything. NOTE the legacy-converter
+      // scenes (chase/fountain) author luminosity on a 0..100 scale.
+      var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,8],
                             transparency:[0,100], reflection:[0,100],
                             aoStrength:[0,2], parallaxScale:[0,3],
                             smoothAngle:[0,180] };
@@ -2181,6 +2185,9 @@
             var sn = row.querySelector('input[type=number]');
             sr.oninput = function(){ var v = parseFloat(sr.value); sn.value = +v.toFixed(3); setSmoothLive(s.name, v); };
             sn.onchange = function(){ var v = parseFloat(sn.value); if (isNaN(v)) return; sr.value = v; setSmoothLive(s.name, v); };
+          }
+          if (k === 'luminosity') {
+            row.title = 'emissive strength: 1 = full self-lit. Values >1 over-bright the surface — they BLOOM under HDR (the editor default); in LDR the kernel caps at ~250, so >1 shows no change there. Number box takes any value. Legacy scenes (chase/fountain) author this on a 0–100 scale.';
           }
           if (k === 'aoStrength') {
             row.title = 'per-material AO-map strength (x global ao_map_strength). Darkens the AMBIENT term only — subtle in direct-light-heavy scenes.';

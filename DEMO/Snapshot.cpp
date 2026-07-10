@@ -721,6 +721,9 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         std::memset((void*)Keyboard, 0, sizeof(Keyboard));
         driver->tick();
 
+        // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
+        RunEditorDumpHooks();
+
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/pbrtest_t%06d_color.ppm",
                       cfg.outDir.c_str(), ts);

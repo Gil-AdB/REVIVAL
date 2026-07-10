@@ -3013,9 +3013,17 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 				}
 			}
 
-			if (lB > 250.0f) lB = 250.0f;
-			if (lG > 250.0f) lG = 250.0f;
-			if (lR > 250.0f) lR = 250.0f;
+			// Saturation cap — 8-bit rollover guard only, same rule as the
+			// main kernel: when this pixel's composite lands in the float HDR
+			// buffer (the write at the bottom gates on g_hdrActive &&
+			// hdrBufReady) the UPPER cap is lifted so emissive transparents
+			// (luminosity > 1 screens/glass) exceed 255 and bloom; the mirror
+			// RTT / LDR path keeps the cap (byte-identical).
+			if (!(fds::g_hdrActive && hdrBufReady)) {
+				if (lB > 250.0f) lB = 250.0f;
+				if (lG > 250.0f) lG = 250.0f;
+				if (lR > 250.0f) lR = 250.0f;
+			}
 			if (lB < 0.0f) lB = 0.0f;
 			if (lG < 0.0f) lG = 0.0f;
 			if (lR < 0.0f) lR = 0.0f;
@@ -3628,6 +3636,14 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
+	// HDR: same rule as the scalar kernel — the 250 lit-cap is an 8-bit
+	// rollover guard, lifted under HDR so luminosity > 1 isn't flattened
+	// before the texel multiply. NOTE this kernel still stores 8-bit only
+	// (the final pack clamps at 255 and Hdr_ActivateNoFog seeds the float
+	// buffer FROM that); radiance > 255 on PreferOuterVec scenes needs the
+	// scalar kernel. Lifting the cap here still recovers the 250→255 band
+	// and keeps vec/scalar lit math consistent pre-pack.
+	const bool  hdrWrite = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);
 	const TileLights &tl = ctx.tileLights[tileIndex];
 	const float  ambB_sc = float(ctx.Sc->Ambient.B);
 	const float  ambG_sc = float(ctx.Sc->Ambient.G);
@@ -4033,12 +4049,18 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				lR = _mm256_fmadd_ps(intensity, _mm256_set1_ps(tl.colR[n]), lR);
 			}
 
-			// Saturate to 250
-			__m256 sat = _mm256_set1_ps(250.0f);
+			// Saturate to 250 — 8-bit rollover guard; upper cap lifted under
+			// HDR (see hdrWrite above), lower 0-clamp always.
 			__m256 zero = _mm256_setzero_ps();
-			lB = _mm256_max_ps(zero, _mm256_min_ps(lB, sat));
-			lG = _mm256_max_ps(zero, _mm256_min_ps(lG, sat));
-			lR = _mm256_max_ps(zero, _mm256_min_ps(lR, sat));
+			if (!hdrWrite) {
+				__m256 sat = _mm256_set1_ps(250.0f);
+				lB = _mm256_min_ps(lB, sat);
+				lG = _mm256_min_ps(lG, sat);
+				lR = _mm256_min_ps(lR, sat);
+			}
+			lB = _mm256_max_ps(zero, lB);
+			lG = _mm256_max_ps(zero, lG);
+			lR = _mm256_max_ps(zero, lR);
 
 			// Fog moved to Render_DeferredFogPass (post-lighting).
 
@@ -4206,9 +4228,16 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 							}
 						}
 					}
-					if (lBs > 250.0f) lBs = 250.0f; if (lBs < 0) lBs = 0;
-					if (lGs > 250.0f) lGs = 250.0f; if (lGs < 0) lGs = 0;
-					if (lRs > 250.0f) lRs = 250.0f; if (lRs < 0) lRs = 0;
+					// Same rollover-guard rule as the vec body: upper cap
+					// lifted under HDR, 0-clamp always.
+					if (!hdrWrite) {
+						if (lBs > 250.0f) lBs = 250.0f;
+						if (lGs > 250.0f) lGs = 250.0f;
+						if (lRs > 250.0f) lRs = 250.0f;
+					}
+					if (lBs < 0) lBs = 0;
+					if (lGs < 0) lGs = 0;
+					if (lRs < 0) lRs = 0;
 					float fdBs = lane_texB[k] * lBs * (1.0f / 256.0f);
 					float fdGs = lane_texG[k] * lGs * (1.0f / 256.0f);
 					float fdRs = lane_texR[k] * lRs * (1.0f / 256.0f);
