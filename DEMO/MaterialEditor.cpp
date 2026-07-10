@@ -67,6 +67,7 @@ static void appendNum(std::string& out, const char* key, double v)
 static void editorRunPickTestHook();   // defined below the pick core
 static void editorRunSplitTestHook();  // defined below Editor_SplitInstances
 static void editorRunClearMapTestHook();  // defined next to the split hook
+static void editorRunFocusTestHook();  // defined below the focus core
 #endif
 
 std::string Editor_GetSurfacesJSON()
@@ -82,6 +83,8 @@ std::string Editor_GetSurfacesJSON()
 	editorRunSplitTestHook();
 	// CLEARMAP_TEST=<surface>:<role> resets a map override once post-tick.
 	editorRunClearMapTestHook();
+	// FOCUS_TEST=<surface[;surface…]> validates the click-to-focus framing.
+	editorRunFocusTestHook();
 #endif
 	std::string out = "[";
 	std::unordered_set<std::string> seen;
@@ -121,6 +124,9 @@ std::string Editor_GetSurfacesJSON()
 		// glass_refract_ior). Editor slider on refractive surfaces; persists
 		// via the sidecar ('refractIor' in SURF_SIDECAR_KEYS).
 		appendNum(out, "refractIor",   M->RefractIor); out += ",";
+		// Tri-state env-reflection probe override (-1 off / 0 auto / 1 on) —
+		// editor 3-way control near the reflection slider; sidecar 'envRefl'.
+		appendNum(out, "envRefl",      M->EnvReflMode); out += ",";
 		// Per-surface smoothing angle (degrees). Show the LIVE sidecar override
 		// if one is registered (so it round-trips after Save + reload), else the
 		// authored Material::MaxSmoothingAngle (stored in radians). Consumed by
@@ -182,6 +188,88 @@ static void appendSurfArray(std::string& out, const std::set<std::string>& names
 	out += "]";
 }
 
+// Fallback hierarchy for scenes WITHOUT the clone-file material naming
+// (city/chase/fountain/crash): the FLD OBJECT TREE. Unlike greets' merged
+// per-round meshes, those scenes keep one Object per model instance, each
+// carrying its authored name ("SHIP1.lwo", 21 × "b1.lwo") and — for assembled
+// models like the city trains — a resolved Parent link (tra_vagn → tra_frnt).
+// General rule, no scene-specific cases:
+//   • instances dedupe by object name (one entry per distinct name);
+//   • each object belongs to its ROOT ancestor's group (follow Obj->Parent
+//     up); roots with several part names become a "<stem> (model)" entry
+//     with one child per part (the trains), single-part roots list their
+//     surfaces directly (ships, taxis, buildings);
+//   • "__mirrorClone_*" phantoms and face-less helpers (camera targets)
+//     are skipped.
+// Output shape matches the clone-family path: [{name, meshes, surfaces
+// [,children:[{name, surfaces}]]}] — `children` optional (the shell treats a
+// missing array as a leaf object and lists the surfaces).
+static std::string editorObjectsFromSceneTree()
+{
+	struct Part { std::set<std::string> surfaces; long meshes = 0; };
+	std::map<std::string, std::map<std::string, Part>> roots;  // root → part → info
+	std::vector<std::string> rootOrder;                        // scene file order
+	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
+		if (Obj->Type != Obj_TriMesh || !Obj->Data || !Obj->Name || !Obj->Name[0]) continue;
+		if (!std::strncmp(Obj->Name, "__mirrorClone_", 14)) continue;
+		TriMesh *T = (TriMesh *)Obj->Data;
+		if (!T->FIndex) continue;                   // camera targets, helpers
+		const Object *R = Obj;                      // root ancestor (cycle-guarded)
+		for (int hops = 0; R->Parent && hops < 64; ++hops) R = R->Parent;
+		const char *rootName = (R->Name && R->Name[0]) ? R->Name : Obj->Name;
+		if (!roots.count(rootName)) rootOrder.push_back(rootName);
+		Part &P = roots[rootName][Obj->Name];
+		++P.meshes;
+		for (DWord f = 0; f < T->FIndex; ++f)
+			if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
+				P.surfaces.insert(Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+	}
+	if (rootOrder.empty()) return "[]";
+	auto stem = [](const std::string &n) {
+		const size_t dot = n.find_last_of('.');
+		return dot == std::string::npos ? n : n.substr(0, dot);
+	};
+	std::string out = "[";
+	bool firstObj = true;
+	for (const std::string &rootName : rootOrder) {
+		auto &parts = roots[rootName];
+		long meshes = 0;
+		std::set<std::string> all;
+		for (auto& [part, P] : parts) {
+			meshes += P.meshes;
+			all.insert(P.surfaces.begin(), P.surfaces.end());
+		}
+		if (all.empty()) continue;
+		if (!firstObj) out += ",";
+		firstObj = false;
+		const bool multi = parts.size() > 1;
+		out += "{\"name\":\"";
+		jsonEscape(out, (multi ? stem(rootName) + " (model)" : stem(rootName)).c_str());
+		out += "\",";
+		char buf[48];
+		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,", meshes);
+		out += buf;
+		appendSurfArray(out, all);
+		if (multi) {
+			out += ",\"children\":[";
+			bool firstKid = true;
+			for (auto& [part, P] : parts) {
+				if (!firstKid) out += ",";
+				firstKid = false;
+				out += "{\"name\":\"";
+				jsonEscape(out, part.c_str());
+				out += "\",";
+				appendSurfArray(out, P.surfaces);
+				out += "}";
+			}
+			out += "]";
+		}
+		out += "}";
+	}
+	out += "]";
+	return out;
+}
+
 std::string Editor_GetObjectsJSON()
 {
 	if (!CurScene) return "[]";
@@ -196,7 +284,9 @@ std::string Editor_GetObjectsJSON()
 		parts[base.substr(0, sep)].insert(base);
 		all.insert(base);
 	}
-	if (parts.empty()) return "[]";
+	// No clone-family naming (city & co.) → derive the hierarchy from the FLD
+	// object tree instead. Greets keeps its clone-family output untouched.
+	if (parts.empty()) return editorObjectsFromSceneTree();
 	// Face tally per file so the model is named after its heaviest part's stem
 	// ("Hull.lwo" → "Hull") — the engine has no authored object names.
 	std::map<std::string, long> fileFaces;
@@ -244,6 +334,13 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	// Shared setter (also used by the sidecar's numeric prop lines): sets on
 	// every CurScene material whose base name matches, ::mirUV clones included.
 	const bool any = fds::MaterialImport_SetSurfaceProp(CurScene, name, key, value);
+	// envRefl flips which materials bake/publish env probes — same invalidation
+	// as the metallic import/reset paths (Editor_ImportTexture) so the next
+	// frame's FramePrep re-bakes/drops probes under the new rule. The sidecar's
+	// scene-INIT apply goes straight to MaterialImport_SetSurfaceProp (nothing
+	// baked yet), so hooking the live-editor path here is sufficient.
+	if (any && !std::strcmp(key, "envRefl"))
+		fds::EnvReflection_Invalidate(CurScene);
 	if (any) Editor_MarkDirty();
 	return any;
 }
@@ -957,6 +1054,123 @@ int Editor_PickLight(float u, float v)
 	return best;
 }
 
+// ── Focus framing core (shared native/wasm) ─────────────────────────────────
+// World-space centre + bounding radius for a ';'-separated surface-name
+// selection: gather every matching face's world bbox (base-name match, mirror-
+// clone meshes excluded), then single-linkage-cluster from the face nearest
+// `nearPos` and frame only that cluster. A surface like "lamp" — or a multi-
+// instance city object like the eight taxis — appears all over the scene;
+// framing the union parked the camera "from afar" over a mid-air pivot
+// (nothing near it → the object read as isolated and the orbit felt broken).
+// Clustering applies to GROUP selections too now: a connected model's parts
+// sit within R of each other so its focus still covers the whole model (the
+// greets mech), while scattered instances resolve to the nearest one.
+// MainLoop.cpp's editorFocusSurface (wasm) and the FOCUS_TEST native hook both
+// place the camera from this: eye = centre − viewDir·max(2.5·radius, 6), which
+// centres the object at ~1/3 of the view WITHOUT hiding the rest of the scene.
+bool Editor_ComputeFocus(const char *names, const Vector &nearPos,
+                         Vector &outCenter, float &outRadius,
+                         long *outUsedFaces, unsigned long *outTotalFaces)
+{
+	if (outUsedFaces)  *outUsedFaces = 0;
+	if (outTotalFaces) *outTotalFaces = 0;
+	if (!CurScene || !names || !*names) return false;
+	std::vector<std::string> wants;
+	const std::string all = names;
+	for (size_t pos = 0; pos <= all.size(); ) {
+		size_t semi = all.find(';', pos);
+		if (semi == std::string::npos) semi = all.size();
+		if (semi > pos) wants.push_back(all.substr(pos, semi - pos));
+		pos = semi + 1;
+	}
+	const TriMesh *cloneMeshes[64];
+	const int cloneCount = editorCollectMirrorCloneMeshes(cloneMeshes, 64);
+	struct FBox { float lo[3], hi[3], c[3]; };
+	std::vector<FBox> boxes;
+	for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next) {
+		bool isClone = false;
+		for (int c = 0; c < cloneCount; ++c)
+			if (cloneMeshes[c] == T) { isClone = true; break; }
+		if (isClone) continue;
+		for (DWord i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			// Base-name match: floor's faces reference the "floor::mirUV"
+			// handedness clone, so an exact compare finds no faces at all.
+			if (!F.Txtr || !F.Txtr->Name) continue;
+			const std::string base = Editor_BaseSurfName(F.Txtr->Name);
+			if (std::find(wants.begin(), wants.end(), base) == wants.end()) continue;
+			FBox b = { { 1e30f, 1e30f, 1e30f }, { -1e30f, -1e30f, -1e30f }, { 0, 0, 0 } };
+			Vertex *vs[3] = { F.A, F.B, F.C };
+			int nv = 0;
+			for (int k = 0; k < 3; ++k) {
+				Vertex *v = vs[k]; if (!v) continue;
+				Vector w; MatrixXVector(T->RotMat, &v->Pos, &w); Vector_SelfAdd(&w, &T->IPos);
+				const float p[3] = { w.x, w.y, w.z };
+				for (int a = 0; a < 3; ++a) {
+					if (p[a] < b.lo[a]) b.lo[a] = p[a];
+					if (p[a] > b.hi[a]) b.hi[a] = p[a];
+					b.c[a] += p[a];
+				}
+				++nv;
+			}
+			if (!nv) continue;
+			for (int a = 0; a < 3; ++a) b.c[a] /= float(nv);
+			boxes.push_back(b);
+		}
+	}
+	if (boxes.empty()) return false;
+	// Union bbox — the cluster threshold scale.
+	float ulo[3] = { 1e30f, 1e30f, 1e30f }, uhi[3] = { -1e30f, -1e30f, -1e30f };
+	for (const FBox &b : boxes)
+		for (int a = 0; a < 3; ++a) {
+			if (b.lo[a] < ulo[a]) ulo[a] = b.lo[a];
+			if (b.hi[a] > uhi[a]) uhi[a] = b.hi[a];
+		}
+	// Single-linkage growth from the face nearest `nearPos`: include any face
+	// whose centre is within R of the growing cluster bbox. R scales with the
+	// union diagonal so far-apart instances stay separate.
+	const float ud[3] = { uhi[0]-ulo[0], uhi[1]-ulo[1], uhi[2]-ulo[2] };
+	const float uDiag = std::sqrt(ud[0]*ud[0] + ud[1]*ud[1] + ud[2]*ud[2]);
+	const float R = std::max(uDiag * 0.15f, 2.0f), R2 = R * R;
+	size_t seed = 0; float bestD = 1e30f;
+	const float cam[3] = { nearPos.x, nearPos.y, nearPos.z };
+	for (size_t i = 0; i < boxes.size(); ++i) {
+		const float d0 = boxes[i].c[0]-cam[0], d1 = boxes[i].c[1]-cam[1], d2 = boxes[i].c[2]-cam[2];
+		const float d = d0*d0 + d1*d1 + d2*d2;
+		if (d < bestD) { bestD = d; seed = i; }
+	}
+	std::vector<char> in(boxes.size(), 0);
+	in[seed] = 1;
+	float lo[3], hi[3];
+	for (int a = 0; a < 3; ++a) { lo[a] = boxes[seed].lo[a]; hi[a] = boxes[seed].hi[a]; }
+	for (bool grew = true; grew; ) {
+		grew = false;
+		for (size_t i = 0; i < boxes.size(); ++i) {
+			if (in[i]) continue;
+			float d2sum = 0.0f;
+			for (int a = 0; a < 3; ++a) {
+				const float v = boxes[i].c[a] < lo[a] ? lo[a] - boxes[i].c[a]
+				              : boxes[i].c[a] > hi[a] ? boxes[i].c[a] - hi[a] : 0.0f;
+				d2sum += v * v;
+			}
+			if (d2sum > R2) continue;
+			in[i] = 1; grew = true;
+			for (int a = 0; a < 3; ++a) {
+				if (boxes[i].lo[a] < lo[a]) lo[a] = boxes[i].lo[a];
+				if (boxes[i].hi[a] > hi[a]) hi[a] = boxes[i].hi[a];
+			}
+		}
+	}
+	outCenter.x = (lo[0] + hi[0]) * 0.5f;
+	outCenter.y = (lo[1] + hi[1]) * 0.5f;
+	outCenter.z = (lo[2] + hi[2]) * 0.5f;
+	const float dx = hi[0]-lo[0], dy = hi[1]-lo[1], dz = hi[2]-lo[2];
+	outRadius = 0.5f * std::sqrt(dx*dx + dy*dy + dz*dz);
+	if (outUsedFaces)  *outUsedFaces = long(std::count(in.begin(), in.end(), 1));
+	if (outTotalFaces) *outTotalFaces = (unsigned long)boxes.size();
+	return true;
+}
+
 #ifndef __EMSCRIPTEN__
 // PICK_TEST — native validation for the click-pick + lights paths, same env-
 // hook convention as Snapshot.cpp's LIGHT_TEST/IMPORT_TEST (test hooks, not
@@ -1036,6 +1250,77 @@ static void editorRunPickTestHook()
 		    (d.xparMat && d.xparMat->Name) ? d.xparMat->Name : "",
 		    d.mirrorPx ? " [mirrorPx]" : "");
 	}
+}
+
+// FOCUS_TEST=<surface[;surface;…]> — native validation for the click-to-focus
+// framing (PICK_TEST convention; rides Editor_GetSurfacesJSON under the
+// snapshot loops' DUMP_SURFACES hook). Runs the shared Editor_ComputeFocus
+// core on the live scene, places the camera exactly the way MainLoop.cpp's
+// editorFocusSurface does — eye = centre − viewDir·max(2.5·radius, 6),
+// looking at the centre, approaching from the direction the camera already
+// was — then RE-RENDERS the frame from that pose (the CITYSNAP_POS recipe:
+// geometry only, no post passes) so the snapshot PPM written after this hook
+// shows the focused view IN CONTEXT. Asserts (a) the object centre projects
+// to the screen centre and (b) the camera sits OUTSIDE the bounding radius.
+// Fires once.
+static void editorRunFocusTestHook()
+{
+	const char *spec = std::getenv("FOCUS_TEST");
+	if (!spec || !View) return;
+	static bool done = false;
+	if (done) return;
+	done = true;
+	Vector c; float r = 0; long used = 0; unsigned long total = 0;
+	if (!Editor_ComputeFocus(spec, View->ISource, c, r, &used, &total)) {
+		std::fprintf(stderr, "[FOCUSTEST] '%s': no faces — FAIL\n", spec);
+		return;
+	}
+	const float dist = r * 2.5f < 6.0f ? 6.0f : r * 2.5f;
+	Vector dir(c.x - View->ISource.x, c.y - View->ISource.y, c.z - View->ISource.z);
+	const float len = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+	if (len > 1e-4f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+	else             { dir.x = 0.0f; dir.y = 0.0f; dir.z = 1.0f; }
+	FC.ISource = Vector(c.x - dir.x * dist, c.y - dir.y * dist, c.z - dir.z * dist);
+	Vector look = c;
+	Kick_Camera(&FC.ISource, &look, 0.0f, FC.Mat);
+	if (FC.IFOV <= 0.0f) FC.IFOV = (View->IFOV > 0.0f) ? View->IFOV : 65.0f;
+	CalcPersp(&FC);
+	View = &FC;
+	FOVX = View->PerspX;
+	FOVY = View->PerspY;
+	// Re-render from the focused pose — enough to SEE whether the scene
+	// around the object stays visible in the written snapshot.
+	if (VPage && ZPage16 && CurScene) {
+		std::memset(VPage, 0, PageSize);
+		std::memset(ZPage16, 0, size_t(XRes) * size_t(YRes) * sizeof(word));
+		Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+		if (CAll) { Radix_Sort(FList, SList, CAll); Render(); }
+	}
+	// Assertions: projection of the focus centre + camera outside the radius.
+	Vector rel, vp;
+	Vector_Sub(&c, &View->ISource, &rel);
+	MatrixXVector(View->Mat, &rel, &vp);
+	float spx = -1.0f, spy = -1.0f;
+	const bool inFront = vp.z > 0.05f;
+	if (inFront) {
+		spx = CntrEX + vp.x / vp.z * FOVX;
+		spy = CntrEY - vp.y / vp.z * FOVY;
+	}
+	const bool centered = inFront && std::fabs(spx - CntrEX) < 2.0f
+	                              && std::fabs(spy - CntrEY) < 2.0f;
+	const bool outside = dist > r;
+	std::fprintf(stderr,
+	    "[FOCUSTEST] '%s': %ld/%lu faces  centre (%.2f %.2f %.2f)  radius %.2f\n",
+	    spec, used, total, c.x, c.y, c.z, r);
+	std::fprintf(stderr,
+	    "[FOCUSTEST] cam pos (%.2f %.2f %.2f) fwd (%.3f %.3f %.3f) dist %.2f (%.2fx radius)\n",
+	    FC.ISource.x, FC.ISource.y, FC.ISource.z, dir.x, dir.y, dir.z,
+	    dist, r > 0.0f ? dist / r : -1.0f);
+	std::fprintf(stderr,
+	    "[FOCUSTEST] centre -> px (%.1f, %.1f), screen centre (%.1f, %.1f): "
+	    "centered %s; camera outside radius %s\n",
+	    spx, spy, CntrEX, CntrEY, centered ? "PASS" : "FAIL",
+	    outside ? "PASS" : "FAIL");
 }
 #endif // !__EMSCRIPTEN__
 

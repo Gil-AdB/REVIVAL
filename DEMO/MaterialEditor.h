@@ -3,6 +3,8 @@
 
 #include <string>
 
+struct Vector;   // Base/Vector.h — Editor_ComputeFocus in/out params
+
 // Live surface editor core (LWO surface editor, Phase 1). Plain C++ so it can
 // be unit-checked natively; the browser exposes these through Embind. Operates
 // on the materials of the currently-rendered scene (CurScene) in the global
@@ -122,6 +124,21 @@ std::string Editor_PickSurface(float u, float v);
 // Nearest authored light whose screen projection is within ~14 px (1080p-
 // scaled) of the click; returns its authored index ("i" above), -1 = none.
 int Editor_PickLight(float u, float v);
+
+// Focus-framing core (shared native/wasm — MainLoop.cpp's editorFocusSurface
+// and the native FOCUS_TEST hook). World-space centre + bounding radius for a
+// ';'-separated surface-name selection: matching faces gather by editor base
+// name (mirror-clone meshes excluded) and are single-linkage-clustered from
+// the face nearest `nearPos`; only that cluster is framed, so multi-instance
+// surfaces/objects (city taxis, greets lamps) resolve to the instance nearest
+// the camera instead of a mid-air union centroid. Callers place the camera at
+// centre − viewDir·max(2.5·radius, 6) — object centred, ~1/3 of the view,
+// nothing hidden. Returns false when no faces match. outUsedFaces/
+// outTotalFaces (optional) report cluster/total matching face counts.
+bool Editor_ComputeFocus(const char *names, const Vector &nearPos,
+                         Vector &outCenter, float &outRadius,
+                         long *outUsedFaces = nullptr,
+                         unsigned long *outTotalFaces = nullptr);
 
 // Import a PBR map onto a surface from raw image-file bytes (a browser upload),
 // by role: "albedo" | "normal" | "height" | "roughness" | "ao". Writes the bytes

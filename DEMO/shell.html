@@ -793,7 +793,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -1973,6 +1973,22 @@
             note.style.cssText = 'font-size:9px;color:#789;margin:-2px 0 3px 70px;';
             note.textContent = 'scalar panorama mix — metallic maps drive env reflections independently';
             el.appendChild(note);
+            // ENV PROBE tri-state: per-surface override of WHETHER this
+            // surface gets an env-reflection probe at all (independent of the
+            // scalar amount above). Live-applies (probes re-bake next frame);
+            // persists via the scene sidecar ('envRefl').
+            var er = document.createElement('div'); er.className = 'prop-row';
+            er.title = 'env-reflection probe override: auto = bake when reflection>0 or a metallic map is present; on = always bake (strength still comes from the reflection knob / metallic map); off = never bake, no env term even with a metallic map. Live-applies (re-bakes next frame); persists via sidecar.';
+            var erl = document.createElement('label'); erl.textContent = 'env probe'; er.appendChild(erl);
+            var ers = document.createElement('select');
+            [['0','auto'],['1','on'],['-1','off']].forEach(function(o){
+              var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
+              if (+o[0] === (+s.envRefl || 0)) op.selected = true;
+              ers.appendChild(op);
+            });
+            ers.onchange = function(){ setProp(s.name, 'envRefl', +ers.value); };
+            er.appendChild(ers);
+            el.appendChild(er);
           }
         });
         // REFRACTIVE (glass): mark this material as screen-space-refracting

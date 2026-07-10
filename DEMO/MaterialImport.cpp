@@ -408,6 +408,13 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// >0 = this material's Snell bend + Schlick F0 use this value. Only
 		// meaningful on Mat_Refractive surfaces under --glass_refract.
 		else if (!std::strcmp(prop, "refractIor"))    M->RefractIor = value < 0.0f ? 0.0f : value;
+		// Tri-state env-reflection override (engine-only, sidecar-persisted):
+		// -1 = never bake/publish an env probe for this material, 0 = auto
+		// (the Reflection>0 || MetallicMap rule), 1 = force-bake. Values
+		// arrive as FLOATS here (sidecar lines parse with strtof), so
+		// classify by range instead of exact compare.
+		else if (!std::strcmp(prop, "envRefl"))
+			M->EnvReflMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
 		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
 		// material field: recorded in the MeshOps registry and consumed when
 		// MakeFacesIndependent rebuilds this surface's vertex normals. That

@@ -855,7 +855,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
     // few world units share a store (clone materials, adjacent panels).
     for (Material* M = MatLib; M; M = M->Next) {
         if (M->RelScene != sc) continue;
-        if (!(M->Reflection > 0.0f || M->MetallicMap)) continue;
+        // Per-material tri-state override (Material::EnvReflMode): 1 forces a
+        // bake, -1 suppresses it, 0 keeps the historical qualification rule.
+        if (!(M->EnvReflMode > 0 ||
+              (M->EnvReflMode == 0 && (M->Reflection > 0.0f || M->MetallicMap))))
+            continue;
         if (env.byMat.count(M)) continue;
         Vector c;
         float excludeR = 0.0f;
@@ -893,9 +897,12 @@ bool EnvReflection_FramePrep(Scene* sc) {
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
     }
     // Refresh the matID table (IDs move when the editor rebuilds the table).
+    // EnvReflMode < 0 (forced off) never publishes — even when a stale store
+    // for this material still sits in byMat from before the override landed —
+    // so the kernel sees no env term for it at all.
     std::memset(env.table, 0, sizeof(env.table));
     for (auto& [M, idx] : env.byMat)
-        if (idx >= 0 && M->RelScene == sc && M->ID < 256) {
+        if (idx >= 0 && M->RelScene == sc && M->ID < 256 && M->EnvReflMode >= 0) {
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
             if (std::getenv("ENVDBG3") && M->Name && std::strstr(M->Name, "windows"))
                 std::fprintf(stderr, "[ENVDBG3] table[%u] = store %d  mat=%p '%s'\n",

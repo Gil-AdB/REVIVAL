@@ -163,6 +163,17 @@ struct Material
     // boundary with positive-det faces. Faces are split onto a handedness=-1
     // material clone so the kernel can flip B per pixel. +1 = normal.
     float                 TbnHandedness          = 1.0f;
+
+    // Tri-state override of the env-reflection probe qualification
+    // (EnvReflection_FramePrep). 0 = auto: bake when Reflection > 0 or a
+    // MetallicMap is present (the historical rule). 1 = force-bake: always
+    // bake + publish a probe (the env term's strength still comes from the
+    // Reflection scalar / metallic map, so forcing a probe on a 0-reflection
+    // dielectric changes nothing visibly until one of those is dialed up).
+    // -1 = off: never bake AND never publish a store for this material, even
+    // with a metallic map. Engine-only (no LWO/FLD field) — persisted via the
+    // scene sidecar as 'envRefl' (see MaterialImport_SetSurfaceProp).
+    int8_t                EnvReflMode            = 0;
 };
 
 #pragma pack(pop)

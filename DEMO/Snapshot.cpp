@@ -336,6 +336,41 @@ int RunFountainSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     return produced > 0 ? 0 : 5;
 }
 
+// DUMP_SURFACES=1 — native validation hook for the surface-editor core: print
+// the live surface list + object hierarchy once after a tick (frame data is
+// live) so the Embind path can be checked headless. Shared by the greets and
+// city snapshot loops; it is also the vehicle the PICK_TEST/SPLIT_TEST/
+// CLEARMAP_TEST/FOCUS_TEST env hooks ride (they fire inside
+// Editor_GetSurfacesJSON). DUMP_MESHES=1 adds one line per scene OBJECT —
+// its name / number / parent / face count / distinct surface set — ground
+// truth for the editor's object-grouping heuristics.
+static void RunEditorDumpHooks() {
+    if (!std::getenv("DUMP_SURFACES")) return;
+    static bool dumped = false;
+    if (dumped) return;
+    dumped = true;
+    std::fprintf(stderr, "[SURFACES] %s\n", rev::Editor_GetSurfacesJSON().c_str());
+    std::fprintf(stderr, "[OBJECTS] %s\n", rev::Editor_GetObjectsJSON().c_str());
+    if (std::getenv("DUMP_MESHES") && CurScene) {
+        int oi = 0;
+        for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next, ++oi) {
+            if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+            TriMesh *T = (TriMesh *)Obj->Data;
+            std::set<std::string> names;
+            for (DWord f = 0; f < T->FIndex; ++f)
+                if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
+                    names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
+            std::string line;
+            for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
+            std::fprintf(stderr, "[MESH %3d] obj='%s' num=%u parent='%s' %u faces: %s\n",
+                         oi, Obj->Name ? Obj->Name : "",
+                         (unsigned)Obj->Number,
+                         (Obj->Parent && Obj->Parent->Name) ? Obj->Parent->Name : "",
+                         (unsigned)T->FIndex, line.c_str());
+        }
+    }
+}
+
 // IMPORT_TEST=surface:role:path — exercise the RUNTIME map-import path
 // (rev::Editor_ImportTexture / MaterialImport_ApplyMapFile, the browser
 // editor's code) natively, as opposed to the CLI --material-import which
@@ -527,30 +562,7 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         // Native validation hook for the surface-editor core (Phase 1): with
         // DUMP_SURFACES=1 print the live surface list once after a tick (when
         // CurScene == GreetSc) so the Embind path can be checked headless.
-        if (std::getenv("DUMP_SURFACES")) {
-            static bool dumped = false;
-            if (!dumped) {
-                dumped = true;
-                std::fprintf(stderr, "[SURFACES] %s\n",
-                             rev::Editor_GetSurfacesJSON().c_str());
-                std::fprintf(stderr, "[OBJECTS] %s\n",
-                             rev::Editor_GetObjectsJSON().c_str());
-                // DUMP_MESHES=1: one line per mesh — its distinct surface set.
-                // Ground truth for the editor's object-grouping heuristics.
-                if (std::getenv("DUMP_MESHES")) {
-                    int mi = 0;
-                    for (TriMesh *T = CurScene->TriMeshHead; T; T = T->Next, ++mi) {
-                        std::set<std::string> names;
-                        for (DWord f = 0; f < T->FIndex; ++f)
-                            if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
-                                names.insert(rev::Editor_BaseSurfName(T->Faces[f].Txtr->Name));
-                        std::string line;
-                        for (const std::string &s : names) { if (!line.empty()) line += " | "; line += s; }
-                        std::fprintf(stderr, "[MESH %3d] %u faces: %s\n", mi, (unsigned)T->FIndex, line.c_str());
-                    }
-                }
-            }
-        }
+        RunEditorDumpHooks();
         // EDIT_TEST: does a surface edit persist across a render tick? (snap-back
         // hunt) Set cockpit specular to a marker, print it, tick again, reprint.
         if (std::getenv("EDIT_TEST")) {
@@ -882,6 +894,11 @@ int RunCitySnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         bool more = driver->tick();
         (void)more;
+
+        // Same DUMP_SURFACES/[OBJECTS]/DUMP_MESHES + editor-test-hook vehicle
+        // as the greets loop — city object-hierarchy/pick/focus work needs a
+        // headless view of the live scene too.
+        RunEditorDumpHooks();
 
         // Pose anchor for CITYSNAP_VIEW hunts: where the camera is.
         std::fprintf(stderr,
