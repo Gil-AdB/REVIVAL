@@ -316,6 +316,29 @@ void Animate_Objects(Scene *Sc, Camera *cam)
 			if (Obj->Type != Obj_Omni) {
 				MatrixXMatrix(*Obj->Parent->Rot,*Obj->Rot,M);
 				Matrix_Copy(*Obj->Rot,M);
+			} else {
+				// ... except authored SPOT omnis (FLD "LightType 2",
+				// ConvertOmni sets Type=Light_SpotLight): their aim is
+				// the wrapper-local +Z, so compose it through the
+				// parent's rotation each frame — IDir = parentRot·(0,0,1)
+				// = parent Rot column 2, normalized to strip the scale
+				// the RotMat rows carry (uniform-scale parents; same
+				// math as the retired code-created city headlights'
+				// UnscaledRotMat read). Unparented spots keep their
+				// conversion-time IDir; point omnis have no aim at all.
+				Omni *SpotOm = (Omni *)Obj->Data;
+				if (SpotOm && SpotOm->Type == Light_SpotLight) {
+					Vector d;
+					d.x = (*Obj->Parent->Rot)[0][2];
+					d.y = (*Obj->Parent->Rot)[1][2];
+					d.z = (*Obj->Parent->Rot)[2][2];
+					const float l2 = d.x*d.x + d.y*d.y + d.z*d.z;
+					if (l2 > 1e-12f) {
+						const float il = 1.0f / sqrtf(l2);
+						d.x *= il; d.y *= il; d.z *= il;
+						SpotOm->IDir = d;
+					}
+				}
 			}
 		}
 	}

@@ -1,13 +1,19 @@
 # city — scene sources (FULLY PINNED: byte-identical regeneration)
 
-The city fly-through. Ships as `Runtime/SCENES/CITY.FLD` (977,234 bytes, FldVersion 0.113).
+The city fly-through. Ships as `Runtime/SCENES/CITY.FLD` (986,342 bytes,
+FldVersion 0.113, md5 `4de91e22443cda70fd78fab2511c4561` — includes the 46
+authored vehicle headlights, see below).
 
 ## TL;DR parity status
 
 - **BYTE-PARITY ACHIEVED.** From this directory,
   `../../tools/lwsread/build/lwsread_legacy CITY1.LWS CITY.FLD` produces a file
-  **byte-identical to the shipping `Runtime/SCENES/CITY.FLD`**
-  (md5 `2a773c317ce14a53afe4561f34e112fa`).
+  **byte-identical to the shipping `Runtime/SCENES/CITY.FLD`** (md5
+  `4de91e22443cda70fd78fab2511c4561`). The pre-headlight 1998-content FLD
+  (977,234 B, md5 `2a773c317ce14a53afe4561f34e112fa`) was reproduced
+  byte-identically first (that acceptance is what pinned the sources); it is
+  preserved at `Runtime/SCENES/.backups/CITY.FLD.pre-lws-promotion` and in git
+  history (last commit carrying it: the "city stage 2" commit).
 - **Scene definition (`CITY1.LWS`)** is the vintage dos-rev scene, identified by
   its light set (`shp1 engine glow` ×4 among 30 lights) and validated by
   byte-identical reproduction of the vintage `city1.FLD` before the building
@@ -33,6 +39,37 @@ cmp CITY.FLD ../../Runtime/SCENES/CITY.FLD   # byte-identical
 
 Legacy-VLUM build is required (the shipping FLD predates the `b441da6`
 luminosity-unit fix), same as chase/fountain.
+
+## Authored vehicle headlights (2026-07-11)
+
+`CITY1.LWS` carries 46 authored spotlights ("city headlight L"/"city headlight
+R"): a pair per vehicle for all 23 census vehicles (taxi ×8, bus ×5, car2 ×2,
+poliece, bike, abulans, tra_frnt ×3, SHIP1, shp2 — trailing tram wagons
+excluded). They replace the code-created `--city-headlights[-front]` schemes
+(both flags now default OFF, kept for A/B). Each block:
+
+- `LightType 2` (spot) + `ConeAngle 30` → engine 15°/30° cones (the FLD
+  converter treats the FLD ConeAngle as the OUTER angle, hotspot = half).
+- `ParentObject <n>` (1-based FLD object index) + a single LightMotion key
+  holding the LOCAL mount offset (front-AABB face, ±35% width, 0.15·H below
+  mid, 2%·L ahead — computed exactly from each mesh's vertices).
+- Warm white 255/235/185, `LgtIntensity 1.2`, `LightRange` = 1600 × clamp
+  (worldR/50, 0.5..1.5) per vehicle (879..2400).
+- Aim: engine convention — an authored FLD spot points along its wrapper-local
+  +Z; `Animate_Objects` composes the parent's rotation per frame
+  (FDS/RENDER/Transform.cpp), matching the retired code scheme's
+  UnscaledRotMat·(0,0,1). No LensFlare line → no flare sprite.
+
+Engine support for FLD spot lights (`FLD_CONV.CPP` conversion + `PREPROC.CPP`
+flare-filler skip + the Transform.cpp aim compose) landed with this change —
+before it the converter silently DROPPED LightType-2 records (no shipping FLD
+contained one). Differences vs the retired code scheme: no police strobe
+(authored lights are static-colored) and no HTrack visibility gating
+(authored beams stay lit if a vehicle is ever hidden); measured impact
+0.35–5.1% of pixels vs the code scheme at t=300/1000/1961, mean Δ ≤ 103/765.
+
+City pin (t=1961, `FDS_CITY_ENV_PIXEL=1 --deferred`):
+`e61f13ea56cfc6521c5145f77b9b7485` (4/4 runs), superseding `9e08d65d…`.
 
 ## Files
 

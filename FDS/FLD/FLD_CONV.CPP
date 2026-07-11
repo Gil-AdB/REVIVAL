@@ -116,7 +116,18 @@ void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 	Vector_Form(&Om->IPos,0,0,0);
 	// Lights are active + flare-rendered by default; SceneAuthored marks this
 	// as the i-th FLD/LWS light for the editor's enumeration + LWS write-back.
-	Om->Flags = Omni_Active | Omni_Flare | Omni_SceneAuthored;
+	// Spots get NO flare sprite: a headlight is a beam, not a glow quad (and
+	// the code-created city headlights they replace never flared either).
+	// The no-op Filler matters: Transform.cpp's flare pass inserts every
+	// omni's F face regardless of flags, and PREPROC.CPP skips spots when
+	// stamping the sprite blitter — without this lambda the renderer would
+	// call a null Filler. Same pattern as fds::MakeSpotLight.
+	Om->Flags = Omni_Active | Omni_SceneAuthored
+	          | (Om->Type == Light_SpotLight ? 0u : (DWord)Omni_Flare);
+	if (Om->Type == Light_SpotLight)
+		Om->F.Filler = [](Face*, Vertex**, DWord, DWord,
+		                  const fds::RenderTarget&,
+		                  const fds::CameraContext&) {};
 	Om->F.A = Om->F.B = Om->F.C = &Om->V;
 
 	if (Sc->OmniHead)
@@ -529,6 +540,32 @@ Omni *ConvertOmni(FldLight *Src)
 	if (Src->Flags&EndBehavior_Repeat)
 		OL->Pos.Flags=TrackREPEAT;
 
+	// FLD spot lights (LWS "LightType 2"). Until 2026-07 the converter DROPPED
+	// spot records entirely (ConvertFLD only admitted Light_Point), so no
+	// shipping FLD contains one — this branch is provably inert for legacy
+	// content (verified across every Runtime/SCENES/*.FLD). Convention:
+	//   - the authored aim is the light's LOCAL +Z (LightWave's zero-rotation
+	//     direction). Authored light-rotation keys remain unsupported, same
+	//     as they always were for point lights.
+	//   - the FLD ConeAngle envelope's first key is the OUTER cone angle in
+	//     degrees; the hotspot (inner) cone is half of it — the same 15/30
+	//     ratio the code-created city headlights used (SpotlightCones.h).
+	//   - parented spots must never be Omni_Stationary: their single-key Pos
+	//     spline holds a LOCAL mount offset and the hierarchy pass composes
+	//     the moving parent on top each frame (Transform.cpp), so a static-
+	//     lighting bake would freeze them at the wrong place.
+	if (Src->Flags & Light_Spot)
+	{
+		OL->Type = Light_SpotLight;
+		float coneDeg = 30.0f;
+		if (Src->ConeAngle && Src->ConeAngle->Keys && Src->ConeAngle->Key)
+			coneDeg = Src->ConeAngle->Key[0].Channel[0];
+		OL->FallOff = cosf(coneDeg * (3.14159265f / 180.0f));
+		OL->HotSpot = cosf(0.5f * coneDeg * (3.14159265f / 180.0f));
+		Vector_Form(&OL->IDir, 0.0f, 0.0f, 1.0f);
+		stationary = false;
+	}
+
 	if (stationary)
 		OL->Flags |= Omni_Stationary;
 
@@ -571,7 +608,7 @@ Scene *ConvertFLD(FldScene *FLD)
 
 	for (SourceLgt=FLD->Light;SourceLgt;SourceLgt=SourceLgt->Next)
 	{
-		if (SourceLgt->Flags&Light_Point)
+		if (SourceLgt->Flags&(Light_Point|Light_Spot))
 		{
 			 OL=ConvertOmni(SourceLgt);
 			 AddOmni(Sc,OL,SourceLgt->Name);

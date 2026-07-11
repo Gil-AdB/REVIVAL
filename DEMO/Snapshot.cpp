@@ -359,6 +359,11 @@ static void RunEditorDumpHooks() {
     dumped = true;
     std::fprintf(stderr, "[SURFACES] %s\n", rev::Editor_GetSurfacesJSON().c_str());
     std::fprintf(stderr, "[OBJECTS] %s\n", rev::Editor_GetObjectsJSON().c_str());
+    // Authored-light inventory (index/name/parent/type) — the native ground
+    // truth for the editor's lights list + light-groups feature (added for
+    // the city authored-headlights verification: 76 lights, 46 grouped
+    // under their parent vehicles).
+    std::fprintf(stderr, "[LIGHTS] %s\n", rev::Editor_GetLightsJSON().c_str());
     if (std::getenv("DUMP_MESHES") && CurScene) {
         int oi = 0;
         for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next, ++oi) {

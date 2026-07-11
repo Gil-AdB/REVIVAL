@@ -1123,9 +1123,15 @@ void Assign_Fillers(Scene *Sc)
 	} else {
 		for(O=Sc->OmniHead;O;O=O->Next)
 		{
+			// Spot lights are beams, not flare sprites: keep the no-op
+			// filler AddOmni/MakeSpotLight installed. (The flare pass in
+			// Transform.cpp inserts EVERY omni's F face unconditionally,
+			// so stamping the sprite blitter here would draw a giant
+			// ISize-scaled white blob per authored headlight.)
+			if (O->Type == Light_SpotLight) continue;
 			switch (BPP)
 			{
-			case 32: 
+			case 32:
 				O->F.Filler = &The_MMX_Scalar;
 				break;
 			}

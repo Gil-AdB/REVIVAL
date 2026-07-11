@@ -2289,6 +2289,834 @@ FlareRandStreakDens 50.000000
 FlareRandStreakSharp 6.000000
 ShadowType 1
 
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 78
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 78
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 80
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 80
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 81
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 81
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 82
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 82
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 83
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 83
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 84
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 84
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -8.0042 -2.1440 30.3246 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 85
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1050.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  8.0042 -2.1440 30.3246 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 85
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1050.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 86
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 86
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 87
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 87
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -15.8681 -2.4936 29.8014 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 88
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1153.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  15.8681 -2.4936 29.8014 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 88
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1153.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 89
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 89
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 90
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  10.2340 -2.6316 30.4096 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 90
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1022.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -5.5480 -2.3755 18.9865 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 91
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 800.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  5.5480 -2.3755 18.9865 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 91
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 800.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 92
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 92
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 93
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 93
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 94
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 94
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 95
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  31.0722 -3.2182 59.2444 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 95
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2243.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -8.0042 -2.1440 30.3246 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 96
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1050.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  8.0042 -2.1440 30.3246 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 96
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1050.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -14.6811 -3.7751 39.9884 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 97
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1466.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  14.6811 -3.7751 39.9884 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 97
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 1466.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1.7806 -0.5433 5.3909 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 98
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2400.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1.7806 -0.5433 5.3909 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 98
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2400.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -4.6104 -0.2685 6.0465 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 99
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2047.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  4.6104 -0.2685 6.0465 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 99
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 2047.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 101
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 101
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
+AddLight
+LightName city headlight L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 105
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
+AddLight
+LightName city headlight R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  3.2375 1.6213 26.2145 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 5
+ParentObject 105
+LightColor 255 235 185
+LgtIntensity 1.200000
+LightType 2
+ConeAngle 30.000000
+LightRange 879.000000
+ShadowType 1
+
 ShowCamera 1 7
 CameraMotion (unnamed)
   9

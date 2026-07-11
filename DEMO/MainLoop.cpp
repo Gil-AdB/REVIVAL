@@ -289,14 +289,12 @@ void DemoBoot(ModplayerHandle modHandle)
 			// AO/roughness/metallic look instead of degrading to a flat
 			// transparent texture. The demo keeps the flag's default (off).
 			"--xpar-pbr",
-			// Editor-only default: the front-row vehicle headlight pairs in
-			// the city scene (two parented spots per vehicle). The demo keeps
-			// the flag's default (off) — the pinned city baseline predates
-			// the scheme. Tuned via the render-flags panel
-			// (city_headlight_intensity / city_headlight_range); the lights
-			// are code-created (not Omni_SceneAuthored) so they deliberately
-			// do NOT appear in the lights list.
-			"--city-headlights-front",
+			// (city headlights: the front-row pairs are AUTHORED lights now —
+			// 46 parented "city headlight L/R" spots in CITY1.LWS / CITY.FLD,
+			// Omni_SceneAuthored, so they appear in the lights list grouped
+			// under their vehicles and are LWS-persistable. The retired code
+			// schemes remain behind --city-headlights /
+			// --city-headlights-front for A/B comparison.)
 		};
 		for (const char *d : def) args.push_back(d);
 		// URL query flags applied AFTER the defaults so ?editor&no-bloom&dof_range=8
