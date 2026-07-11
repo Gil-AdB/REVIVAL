@@ -122,16 +122,35 @@ int32_t SceneDriver::tickSceneTimer(int32_t &TTrd, bool &pauseMode)
                 double(pc - pcPrev_) * 100.0 / double(pcFreq_);
             const float dTimer = float(sceneT - lastSceneT_);
             if (dWall > 0.0 && dWall <= 60.0 && dTimer >= 0.0f && dTimer <= 60.0f) {
-                float inst = float(dTimer / dWall);
-                if (inst < 0.2f) inst = 0.2f;
-                if (inst > 3.0f) inst = 3.0f;
-                rateEma_ += 0.05f * (inst - rateEma_);
-                fineT_ += float(dWall) * rateEma_;
-                fineT_ += 0.01f * (float(sceneT) - fineT_);   // gentle anchor
-                if (std::fabs(fineT_ - float(sceneT)) > 20.0f)
+                // Rate = EMA(dTimer)/EMA(dWall) — ratio of MEANS. The old
+                // EMA of the instantaneous ratio was Jensen-biased ~10%
+                // HIGH under spiky frame times, so fineT_ steadily outran
+                // Timer and every hitch discharged the accumulated lead as
+                // a visible jump back (city, ~10 content-frames at t≈240).
+                dTimerEma_ += 0.05f * (dTimer       - dTimerEma_);
+                dWallEma_  += 0.05f * (float(dWall) - dWallEma_);
+                float rate = (dWallEma_ > 1e-3f) ? dTimerEma_ / dWallEma_ : 1.0f;
+                if (rate < 0.2f) rate = 0.2f;
+                if (rate > 3.0f) rate = 3.0f;
+                fineT_ += float(dWall) * rate;
+                // Anchor: gentle 1%/frame normally; firm 10%/frame once the
+                // offset exceeds 8 ticks. Continuous in both regimes — the
+                // offset shrinks across frames, never in one step (a hard
+                // snap here is exactly the sawtooth this clock exists to
+                // remove). A true snap remains only for pathological
+                // divergence (>120 ticks: scene switch / debugger stall).
+                const float off = float(sceneT) - fineT_;
+                fineT_ += (std::fabs(off) > 8.0f ? 0.10f : 0.01f) * off;
+                if (std::fabs(off) > 120.0f)
                     fineT_ = float(sceneT);
             } else {
-                fineT_ = float(sceneT);
+                // Hitch (>600ms wall stall or timer leap): follow the
+                // integer timer RELATIVELY — the fineT_-vs-sceneT offset is
+                // preserved and bleeds out through the anchor on later
+                // frames. Snapping to sceneT here zeroed the offset in one
+                // frame — the user-visible "camera jumps back". The outlier
+                // deltas also stay OUT of the rate EMAs.
+                if (dTimer > 0.0f) fineT_ += dTimer;
             }
         } else {
             fineT_ = float(sceneT);

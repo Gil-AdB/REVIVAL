@@ -89,12 +89,17 @@ protected:
     int32_t tickSceneTimer(int32_t &TTrd, bool &pauseMode);
 
     bool tabPrev_ = false;
-    // Sub-tick scene clock state (see g_FrameTimeF in RENDER.CPP): the
-    // fractional part comes from the SDL performance counter; fineT_ is
-    // hard-anchored to the integer Timer (snap when they disagree > ~2
-    // ticks), so there is no filter lag and no unbounded drift.
+    // Sub-tick scene clock state (see g_FrameTimeF in RENDER.CPP and the
+    // block comment in tickSceneTimer): fineT_ advances by wall delta ×
+    // (EMA(dTimer)/EMA(dWall)) — ratio of MEANS, not mean of ratios: the
+    // per-frame instantaneous dTimer/dWall is spiky, and Jensen's
+    // inequality biases an EMA of that ratio ~10% high, which made fineT_
+    // outrun Timer until a hitch snapped it back (the "camera jumps back"
+    // sawtooth). Hitches HOLD the current offset (advance by dTimer)
+    // rather than snapping fineT_ onto sceneT.
     float    fineT_  = -1.0f;
-    float    rateEma_ = 1.0f;     // EMA of dTimer/dWall (ticks per wall-tick)
+    float    dTimerEma_ = 1.0f;   // EMA of per-frame Timer delta (ticks)
+    float    dWallEma_  = 1.0f;   // EMA of per-frame wall delta (tick units)
     int32_t  lastSceneT_ = 0;
     uint64_t pcPrev_ = 0;
     uint64_t pcFreq_ = 0;
