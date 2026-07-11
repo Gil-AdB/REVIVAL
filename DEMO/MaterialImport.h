@@ -95,6 +95,14 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 //                                            Keys (all float-valued):
 //                                              boltFlashPeak   → bolt_flash_peak
 //                                              boltFlashRange  → bolt_flash_range
+//                                              fastFogBottom   → fast_fog_bottom
+//                                              fastFogTop      → fast_fog_top
+//                                              fastFogCell     → fast_fog_cell
+//                                            Note: SCRIPTS/<scene>.params lines
+//                                            for the same flag still win (the
+//                                            per-frame script yields only to
+//                                            explicitly-SET flags, and scene:
+//                                            defaults deliberately don't mark).
 //                                            Caveat: flags are process-global —
 //                                            a scene's authored default persists
 //                                            into later scenes unless they author

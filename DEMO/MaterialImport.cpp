@@ -557,6 +557,15 @@ static const SceneDefaultKey kSceneDefaultKeys[] = {
 	// so its authorable per-light quantities live here; see DEMO/FOUNTAIN.CPP).
 	{ "boltFlashPeak",  fds::FeatureFlags::FloatId::bolt_flash_peak  },
 	{ "boltFlashRange", fds::FeatureFlags::FloatId::bolt_flash_range },
+	// fast_fog slab bounds + blob cell — world-space scene geometry (the fog
+	// slab's floor/ceiling Y and blob spacing belong to the scene, not the
+	// command line). Consumed by DeferredFastFog via the FeatureFlags reads it
+	// already does — this is just another setter path, so an explicit CLI
+	// --fast_fog_* still wins, and SCRIPTS/<scene>.params lines for the same
+	// flag (per-frame, script yields only to SET marks) also still win.
+	{ "fastFogBottom",  fds::FeatureFlags::FloatId::fast_fog_bottom  },
+	{ "fastFogTop",     fds::FeatureFlags::FloatId::fast_fog_top     },
+	{ "fastFogCell",    fds::FeatureFlags::FloatId::fast_fog_cell    },
 };
 
 static bool sidecarSetSceneDefault(const char *key, float value) {
