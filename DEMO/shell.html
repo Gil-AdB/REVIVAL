@@ -20,7 +20,17 @@
          the viewport. */
       canvas { background: #000; display: block; image-rendering: pixelated;
                width: auto; height: auto;
-               max-width: 100vw; max-height: 100vh; }
+               max-width: calc(100vw - var(--rev-reserve, 0px)); max-height: 100vh; }
+      /* Editor mode: reserve the panel's width on the right so the render
+         canvas is letterboxed into the FREE region beside the panel instead of
+         sitting behind it. --rev-reserve is driven by updateCanvasFit() (0 when
+         the panel is hidden/collapsed/floated away from the right edge).
+         box-sizing:border-box shifts the flex-centered canvas left by the
+         reserve; the canvas max-width above caps its width to the free region.
+         Engine render resolution is unchanged (pure CSS scale) — see the
+         updateCanvasFit comment for the aspect caveat. */
+      body.rev-editor { box-sizing: border-box; width: 100vw;
+                        padding-right: var(--rev-reserve, 0px); }
       /* Bottom-right control bar: mute / HiDPI / fullscreen. Stays on top
          of the canvas (z-index) and ignores its own click events from
          reaching the demo (each button only flips its own state). */
@@ -589,7 +599,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b64</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b65</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -680,7 +690,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = 'b64';
+      var REV_BUILD = 'b65';
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -732,6 +742,32 @@
         setT('sb-build', REV_BUILD);
         setT('sb-msg', window.editorLastMsg || '');
       }
+      // ── Canvas fit: keep the render view out from under the panel ────────
+      // Option (a): pure CSS. Reserve the panel's width on the right (via the
+      // --rev-reserve custom property, read by the canvas max-width + body
+      // padding rules) so the browser scales the render canvas to fit the FREE
+      // region beside the panel, correct-aspect and fully visible, instead of
+      // the panel covering its right edge. The ENGINE render resolution is
+      // unchanged — the canvas backing store is window-AR (resizeCanvasToWindow)
+      // and the WebGL present already letterboxes the engine surface inside it,
+      // so beside the panel the view is letterbox-FITTED (black bars), not
+      // stretched. Making it FILL the free region would need option (b) —
+      // feeding (innerWidth - reserve) into Module._SDL2_RequestSize to resize
+      // the engine framebuffer to the free-region AR — deliberately not done
+      // here (heavier; needs the engine resize path). Reserve is 0 (full width)
+      // when the panel is hidden, collapsed, or floated away from the right
+      // edge, so a moved/minimized panel never shrinks the view.
+      function updateCanvasFit(){
+        if (!revEditorMode) return;
+        var panel = document.getElementById('editor-panel');
+        var reserve = 0;
+        if (panel && !panel.classList.contains('hidden') && !panel.classList.contains('collapsed')) {
+          var r = panel.getBoundingClientRect();
+          if (r.right >= window.innerWidth - 2)   // hugging the right edge
+            reserve = Math.min(r.width, window.innerWidth * 0.6);
+        }
+        document.documentElement.style.setProperty('--rev-reserve', reserve + 'px');
+      }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
       // window and preventDefault()s every key (they feed the engine's Keyboard[]
       // array), so an <input> never receives the character — the filter box was
@@ -762,7 +798,9 @@
         console.log('[editor] panel init (build ' + REV_BUILD + '); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
+        document.body.classList.add('rev-editor');   // reserve panel width for the canvas
         updateStatusBar();   // paint the strip as soon as the panel shows
+        updateCanvasFit();
         // ── Movable / collapsible tool stack ─────────────────────────────
         // Drag the header (h2) to move the panel anywhere; ▾/▸ collapses it
         // to just the header. Position + collapsed state persist per-browser
@@ -782,6 +820,7 @@
           function applyCollapsed(){
             panel.classList.toggle('collapsed', !!st.collapsed);
             caret.textContent = st.collapsed ? '▸' : '▾';
+            updateCanvasFit();   // collapsed panel frees the reserved width
           }
           caret.onclick = function(e){
             e.preventDefault(); e.stopPropagation();
@@ -799,6 +838,7 @@
               panel.style.left = ''; panel.style.top = '';
               panel.style.right = ''; panel.style.maxHeight = '';
             }
+            updateCanvasFit();   // dock/undock changes the free region
           }
           h2.addEventListener('mousedown', function(e){
             // Header controls (scene <select>, the caret) keep their behavior.
