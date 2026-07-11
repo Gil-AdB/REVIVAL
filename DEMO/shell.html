@@ -575,9 +575,32 @@
       .prop-row input[type=number] { flex:0 0 46px; }
       .prop-row .val { flex:0 0 36px; text-align:right; color:#9cf; }
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
+      /* Persistent status strip: sticks to the top of the scrolling panel so
+         scene / time / selection / dirty / last-save stay visible while the
+         body scrolls. Hidden when the panel is collapsed (h2 still carries the
+         scene + build tag). */
+      #editor-statusbar { position:sticky; top:0; z-index:5; margin:0 0 6px;
+        padding:4px 6px; background:#0d0d12; border:1px solid #2a2a33;
+        border-radius:3px; font-size:10px; color:#89a; line-height:1.5; }
+      #editor-statusbar .sb-fields { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
+      #editor-statusbar b { color:#cde; font-weight:600; }
+      #editor-statusbar .sb-dirty { color:#fc8; }
+      #editor-statusbar .sb-msg { color:#6a8; margin-top:2px; overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b63</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b64</span></h2>
+      <div id="editor-statusbar">
+        <div class="sb-fields">
+          <span>scene <b id="sb-scene">—</b></span>
+          <span>t <b id="sb-time">—</b></span>
+          <span>sel <b id="sb-sel">none</b></span>
+          <span class="sb-dirty">· <b id="sb-dirty">clean</b></span>
+          <span>save <b id="sb-save">—</b></span>
+          <span id="sb-build" style="margin-left:auto;color:#6c8;"></span>
+        </div>
+        <div class="sb-msg" id="sb-msg"></div>
+      </div>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -654,7 +677,61 @@
       // (ctrl/cmd-click rows to toggle). editorGroupObj = the containing
       // object (scopes "invert"; null = scope is all surfaces).
       var editorObjects = [], editorGroup = null, editorGroupObj = null;
-      function editorStatus(t){ var e=document.getElementById('editor-status'); if(e) e.textContent=t||''; }
+      // Build tag — single source of truth for the console log + status bar
+      // (the h2 header carries its own literal copy). Bump with every shell
+      // change so the user can confirm page freshness.
+      var REV_BUILD = 'b64';
+      // editorStatus doubles as the status bar's "last message" feed: it sets
+      // the transient one-liner AND refreshes the persistent strip.
+      function editorStatus(t){
+        var e=document.getElementById('editor-status'); if(e) e.textContent=t||'';
+        if (t != null) window.editorLastMsg = t;
+        updateStatusBar();
+      }
+      // Current-selection label for the status bar, set by the select paths
+      // (surface / object-group / light) so the strip always names what the
+      // props panel is editing.
+      function setEditorSel(label){ window.editorSel = label || 'none'; updateStatusBar(); }
+      // Dirty tally shared by the Save button + status bar (one place computes
+      // it). Each field is a count of dirty items in that category.
+      function editorDirtyCounts(){
+        return { surf: Object.keys(collectDirty()).length, map: pendingMapCount(),
+                 light: Object.keys(collectDirtyLights()).length,
+                 obj: Object.keys(collectDirtyObjects()).length,
+                 split: Object.keys(currentSplitsPayload()).length,
+                 env: sceneEnvDirty() ? 1 : 0 };
+      }
+      // Repaint the persistent status strip. Cheap + idempotent; safe to call
+      // from any event (selection/dirty/time/save/status). No-ops before the
+      // bar exists in the DOM.
+      function updateStatusBar(){
+        var bar = document.getElementById('editor-statusbar'); if (!bar) return;
+        var setT = function(id, v){ var e = document.getElementById(id); if (e) e.textContent = v; };
+        setT('sb-scene', revEditorScene);
+        var t = '—';
+        try { if (Module && Module.editorSceneTime) t = String(Math.round(Module.editorSceneTime())); } catch(e){}
+        setT('sb-time', t);
+        setT('sb-sel', (window.editorSel && window.editorSel.length) ? window.editorSel : 'none');
+        var c, total = 0;
+        try {
+          c = editorDirtyCounts();
+          total = c.surf + c.map + c.light + c.obj + c.split + c.env;
+        } catch(e){ c = null; }
+        var dEl = document.getElementById('sb-dirty');
+        if (dEl) {
+          dEl.textContent = total
+            ? (total + ' dirty')
+            : 'clean';
+          dEl.title = c && total
+            ? [c.surf ? c.surf + ' surf' : '', c.map ? c.map + ' map' : '', c.light ? c.light + ' light' : '',
+               c.obj ? c.obj + ' obj' : '', c.split ? c.split + ' split' : '', c.env ? 'scene env' : '']
+                .filter(Boolean).join(', ')
+            : 'no unsaved changes';
+        }
+        setT('sb-save', window.editorLastSave || '—');
+        setT('sb-build', REV_BUILD);
+        setT('sb-msg', window.editorLastMsg || '');
+      }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
       // window and preventDefault()s every key (they feed the engine's Keyboard[]
       // array), so an <input> never receives the character — the filter box was
@@ -682,9 +759,10 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b63); orbit/zoom embind =',
+        console.log('[editor] panel init (build ' + REV_BUILD + '); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
+        updateStatusBar();   // paint the strip as soon as the panel shows
         // ── Movable / collapsible tool stack ─────────────────────────────
         // Drag the header (h2) to move the panel anywhere; ▾/▸ collapses it
         // to just the header. Position + collapsed state persist per-browser
@@ -961,18 +1039,18 @@
         return out;
       }
       function updateSaveButton(){
-        var b = document.getElementById('editor-save'); if (!b) return;
-        var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
-            L = Object.keys(collectDirtyLights()).length,
-            O = Object.keys(collectDirtyObjects()).length,
-            S = Object.keys(currentSplitsPayload()).length,
-            E = sceneEnvDirty() ? 1 : 0;
-        b.disabled = !(n || m || L || O || S || E);
-        b.textContent = (n || m || L || O || S || E)
-          ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '',
-                         O ? O + ' obj' : '', S ? S + ' split' : '', E ? 'scene env' : '']
-               .filter(Boolean).join(', ') + ')')
-          : 'Save to LWO';
+        var b = document.getElementById('editor-save');
+        var c = editorDirtyCounts();
+        var any = c.surf || c.map || c.light || c.obj || c.split || c.env;
+        if (b) {
+          b.disabled = !any;
+          b.textContent = any
+            ? ('Save (' + [c.surf ? c.surf + ' surf' : '', c.map ? c.map + ' map' : '', c.light ? c.light + ' light' : '',
+                           c.obj ? c.obj + ' obj' : '', c.split ? c.split + ' split' : '', c.env ? 'scene env' : '']
+                 .filter(Boolean).join(', ') + ')')
+            : 'Save to LWO';
+        }
+        updateStatusBar();
       }
       // ── Lights UI ─────────────────────────────────────────────────────
       document.getElementById('editor-lights-hdr').onclick = function(){
@@ -1004,6 +1082,7 @@
           return;
         }
         editorSelectedLight = ls[0].i;
+        setEditorSel(ls.length > 1 ? (ls.length + ' lights') : ('light ' + ls[0].i));
         renderLightList(); renderLightProps(ls[0], ls);
         if (label) editorStatus(label);
       }
@@ -1048,7 +1127,7 @@
               }
             }
             editorLightSel = [l.i];
-            editorSelectedLight = l.i; renderLightList(); renderLightProps(l, [l]);
+            editorSelectedLight = l.i; setEditorSel('light ' + l.i); renderLightList(); renderLightProps(l, [l]);
             // Frame the orbit on the light (same as clicking a surface row).
             // rawI, not i: editorFocusLight counts the UNFILTERED
             // Omni_SceneAuthored walk (mirror clones included), while i is the
@@ -1084,7 +1163,7 @@
         var l = editorLights.find(function(x){ return x.i === i; });
         if (!l) return false;
         editorLightSel = [l.i];
-        editorSelectedLight = l.i;
+        editorSelectedLight = l.i; setEditorSel('light ' + l.i);
         var el = document.getElementById('editor-lights');
         if (el) el.style.display = 'block';
         renderLightList(); renderLightProps(l, [l]);
@@ -1605,11 +1684,14 @@
         if (!names.length) {
           editorGroup = null; editorGroupObj = null;
           renderObjectList(); renderSurfaceList();
+          setEditorSel('none');
           editorStatus('selection empty');
           return;
         }
         editorGroup = names;
         editorSelected = names[0];
+        setEditorSel(editorGroupObj ? ('obj ' + editorGroupObj.name + ' (' + names.length + ' surf)')
+                                    : (names.length + ' surfaces'));
         var s = editorSurfaces.find(function(x){ return x.name === names[0]; });
         renderObjectList(); renderSurfaceList();
         renderSurfaceProps(s, { name: label, surfaces: names });
@@ -1649,7 +1731,8 @@
       // viewport click would fight the user's framing).
       function selectSurface(s, alsoFocus){
         editorGroup = null; editorGroupObj = null;   // single-surface mode
-        editorSelected = s.name; renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
+        editorSelected = s.name; setEditorSel('surf ' + s.name);
+        renderObjectList(); renderSurfaceList(); renderSurfaceProps(s);
         if (alsoFocus && Module.editorFocusSurface) Module.editorFocusSurface(s.name);  // orbit around it
         if (Module.editorHighlight) Module.editorHighlight(s.name);                     // outline it in the render
         var sel = document.querySelector('#editor-list .surf-item.sel');
@@ -1881,7 +1964,7 @@
         fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
-            if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); renderSaveReceipt(saveDiff, [], true); return; }
+            if (!res.ok) { window.editorLastSave = '✕ failed'; editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); renderSaveReceipt(saveDiff, [], true); return; }
             var bits = (res.patched || []).map(function(p){ return p.file; });
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
             if (res.fld) bits.push(res.fld.split('/').pop());
@@ -1905,6 +1988,7 @@
                          ((res.split_baked || []).length ? ' — Reload scene to edit the baked surfaces' : '') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
+            window.editorLastSave = '✓ ' + new Date().toTimeString().slice(0, 5);
             console.log('[editor] save ok:', res);
             // Saved values/maps/lights are the new baseline (raw live names —
             // editorSurfaces still uses '#k' until the reload).
@@ -1926,7 +2010,7 @@
             renderSurfaceList(); renderLightList(); updateSaveButton();
             renderSaveReceipt(saveDiff, bits, false);
           })
-          .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); renderSaveReceipt(saveDiff, [], true); });
+          .catch(function(e){ window.editorLastSave = '✕ failed'; editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); renderSaveReceipt(saveDiff, [], true); });
       };
       document.getElementById('editor-reload').onclick = function(){ location.reload(); };
       // Scene-time scrub: the editor freezes the animation clock; step it to
@@ -1943,6 +2027,7 @@
           if (len > 0 && +timeBar.max !== len) timeBar.max = len;
         }
         if (!timeBarDragging) timeBar.value = t;
+        updateStatusBar();
       }
       function timeStep(d){
         if (!Module.editorTimeStep) return;
@@ -1958,6 +2043,7 @@
         if (!Module.editorTimeSet) return;
         var t = Module.editorTimeSet(+timeBar.value);
         document.getElementById('editor-time-val').textContent = Math.round(t);
+        updateStatusBar();
       });
       // Size the bar as soon as the scene driver is up (its partTime is 0
       // until then) — otherwise the max stays at the placeholder until the
