@@ -210,6 +210,24 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   remaining SURF_SIDECAR_KEYS + light:/obj:/scene: keys to LWO SURF
   sub-chunks / LWS keywords → FLD payloads, rewrite editor Save, retire the
   sidecar reader (writers first; user re-saves greets once; then reader dies).
+  **INCLUDES: rip out the `#k` split-marker scaffolding** (user-confirmed
+  2026-07-11). `#k` is vestigial — it exists only because the OLD sidecar/
+  live-only-split path couldn't bake, so a `momy#2` edit had to COLLAPSE back
+  to the real `momy` surface (the 7 `re.sub(r"(#\d+)+$","")` sites in
+  editor_server.py: lines ~146/271/287/389/424/761/932/958). Two facts make
+  it dead once sidecars go: (1) splits now BAKE into the LWO → parts are real
+  surfaces, nothing transient to collapse; (2) the shell sends explicit
+  `payload.splits` with per-part world centroids and bake_splits matches
+  parts GEOMETRICALLY, never by parsing `#k` from the name. So in the
+  migration those collapse sites get DELETED (not guarded), and a split
+  becomes "make a real surface, reassign polygons, any plain name". Do NOT
+  add existence-aware-collapse or build further on `#k`. Post-migration the
+  only transient label needed is cosmetic (the live window between "split"
+  and "Save") — nothing functional keys off it. That also dissolves the
+  momy#1/#2-vs-momy2 naming question (currently unresolved, left as-is on
+  purpose): naming becomes a free cosmetic choice, not a load-bearing
+  convention. Engine side is already clean — Editor_BaseSurfName strips only
+  ::mirUV, never `#`.
 
 ## Where the rest of the knowledge lives
 
