@@ -100,7 +100,9 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
 # refractIor: per-surface glass-refraction IOR (0 = unset -> the global
 # glass_refract_ior render knob).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl"}
+# waterProcedural: tri-state procedural-water override on the scene's water
+# surface (-1 off / 0 auto -> global --water_procedural / 1 on).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "waterProcedural"}
 # smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
 # scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
 # persists to the sidecar there instead: the engine honors a

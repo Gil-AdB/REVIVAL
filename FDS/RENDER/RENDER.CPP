@@ -380,6 +380,23 @@ void fds::RenderPipeline::setDeferredWaterMatID(int id) {
 	g_deferredWaterMatID = id;
 }
 
+// Per-surface procedural-water resolve (see FDS_DECS.H). The water material's
+// tri-state WaterProcMode (scene sidecar 'waterProcedural') overrides the
+// global --water_procedural flag; 0/missing material = auto → the flag, so
+// behaviour is byte-identical when no sidecar line exists.
+bool WaterProceduralEffective() {
+	const int id = g_deferredWaterMatID;
+	if (id >= 0 && CurScene) {
+		MatTable t = Scene_GetMatTable(CurScene);
+		if (t.data && dword(id) < t.count && t.data[id]) {
+			const int8_t m = t.data[id]->WaterProcMode;
+			if (m > 0) return true;
+			if (m < 0) return false;
+		}
+	}
+	return fds::FeatureFlags::water_procedural();
+}
+
 // Phase A deferred lighting pass. Replaces the per-vertex Lighting() +
 // per-pixel colorize() pipeline with one per-pixel pass: decode mat32 →
 // Material*, sample texture, decode oct normal, reconstruct view-space

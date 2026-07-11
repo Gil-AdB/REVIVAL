@@ -417,6 +417,13 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// classify by range instead of exact compare.
 		else if (!std::strcmp(prop, "envRefl"))
 			M->EnvReflMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
+		// Tri-state procedural-water override (engine-only, sidecar-persisted;
+		// same -1/0/1 classification as envRefl). Only meaningful on the
+		// scene's water material (SetDeferredWaterMatID); 0 = auto → the
+		// global --water_procedural flag decides, so a scene with no sidecar
+		// line renders byte-identically.
+		else if (!std::strcmp(prop, "waterProcedural"))
+			M->WaterProcMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
 		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
 		// material field: recorded in the MeshOps registry and consumed when
 		// MakeFacesIndependent rebuilds this surface's vertex normals. That

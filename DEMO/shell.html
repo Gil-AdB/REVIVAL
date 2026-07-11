@@ -874,7 +874,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','waterProcedural','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -2278,6 +2278,25 @@
             xr.appendChild(xrr); xr.appendChild(xv);
             el.appendChild(xr);
           }
+        })();
+        // PROCEDURAL WATER (scene water surface only): tri-state override of
+        // the fresnel/deep-colour water composite. Checkbox shows the
+        // EFFECTIVE state (explicit ±1 override, else the global
+        // --water_procedural render knob); toggling writes an explicit 1/-1
+        // (surface-pinned — 'reset' restores auto/0). Persists via sidecar.
+        if (+s.isWater) (function(){
+          var wr = document.createElement('div'); wr.className = 'prop-row';
+          var wl = document.createElement('label'); wl.textContent = 'procedural water';
+          wr.title = 'procedural water composite for THIS surface: fresnel mix of a deep colour with the reflection (vs the legacy albedo+reflection blend). Unedited = auto (the global water_procedural render knob decides — city/chase default it ON); toggling pins it on/off for this surface. Persists via sidecar (waterProcedural).';
+          wr.appendChild(wl);
+          var wc = document.createElement('input'); wc.type = 'checkbox';
+          var mode = +s.waterProcedural;
+          var globalOn = 0;
+          try { globalOn = +(JSON.parse(Module.editorGetParams()).find(function(p){ return p.name === 'water_procedural'; }) || {}).value || 0; } catch(err){}
+          wc.checked = mode !== 0 ? mode > 0 : !!globalOn;
+          wc.onchange = function(){ setProp(s.name, 'waterProcedural', wc.checked ? 1 : -1); };
+          wr.appendChild(wc);
+          el.appendChild(wr);
         })();
         // Normal-map controls: G-channel convention flip (OGL↔DX) + viz
         // shortcut. Only meaningful when the surface HAS a normal map.

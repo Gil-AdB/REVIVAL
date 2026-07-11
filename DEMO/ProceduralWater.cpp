@@ -182,7 +182,10 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 	const float scale = fds::FeatureFlags::water_bump_scale();
 	// Field-warped albedo texture (only in procedural mode): the SAME field
 	// distorts the texture sample → the texture ripples with the waves.
-	const float texMix   = fds::FeatureFlags::water_procedural() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
+	// WaterProceduralEffective = the water material's per-surface tri-state
+	// (sidecar 'waterProcedural') with the global flag as the auto fallback —
+	// keeps this pass in lockstep with the deferred kernel's waterProc hoist.
+	const float texMix   = WaterProceduralEffective() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
 	const float texScale = fds::FeatureFlags::water_tex_scale();
 	const float texWarp  = fds::FeatureFlags::water_tex_warp();
 	const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();

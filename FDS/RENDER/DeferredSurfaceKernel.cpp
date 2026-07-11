@@ -2488,7 +2488,17 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	const bool hdrLinear = hdrBufReady && fds::FeatureFlags::hdr() && fds::FeatureFlags::hdr_linear();  // HDR C2
 	// Procedural water composite (Stage B) — fresnel mix of a deep colour and the
 	// reflection underlay, for the water matID only. Hoisted; per-pixel fresnel below.
-	const bool  waterProcOn = fds::FeatureFlags::water_procedural();
+	// Per-SURFACE opt-in/out: the water material's tri-state WaterProcMode
+	// (sidecar 'waterProcedural': -1 off / 0 auto / 1 on) wins; auto falls back
+	// to the global --water_procedural flag (byte-identical when no sidecar
+	// line exists). Same tri-state pattern as EnvReflMode.
+	bool waterProcOn = fds::FeatureFlags::water_procedural();
+	if (ctx.waterMatID >= 0 && dword(ctx.waterMatID) < ctx.matTable.count) {
+		if (const Material *WM = ctx.matTable.data[ctx.waterMatID]) {
+			if      (WM->WaterProcMode > 0) waterProcOn = true;
+			else if (WM->WaterProcMode < 0) waterProcOn = false;
+		}
+	}
 	const float wDeepB = fds::FeatureFlags::water_deep_b();
 	const float wDeepG = fds::FeatureFlags::water_deep_g();
 	const float wDeepR = fds::FeatureFlags::water_deep_r();

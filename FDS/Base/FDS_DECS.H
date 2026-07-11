@@ -441,6 +441,12 @@ void RenderForwardRegionInline(const fds::RenderContext& ctx,
 void MekaleleFillRegionInline(const fds::RenderContext& ctx,
                               float x1, float y1, float x2, float y2);
 void SetDeferredWaterMatID(int id);
+// Effective procedural-water state for the CURRENT scene's water material:
+// the material's tri-state WaterProcMode (sidecar 'waterProcedural', -1 off /
+// 0 auto / 1 on) wins; auto falls back to the global --water_procedural flag.
+// The per-surface twin of FeatureFlags::water_procedural() — use this in any
+// water consumer outside the deferred kernel (which resolves via its ctx).
+bool WaterProceduralEffective();
 bool deferredEnabled();
 // Shadow-map depth pre-pass. Walks Omni_CastsShadow lights, builds a
 // temp camera per light, re-transforms the scene into the light's POV,

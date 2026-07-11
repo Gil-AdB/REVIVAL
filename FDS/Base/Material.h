@@ -174,6 +174,17 @@ struct Material
     // with a metallic map. Engine-only (no LWO/FLD field) — persisted via the
     // scene sidecar as 'envRefl' (see MaterialImport_SetSurfaceProp).
     int8_t                EnvReflMode            = 0;
+
+    // Tri-state override of the procedural-water composite for THIS surface
+    // (only meaningful on the scene's water material — the matID registered
+    // via SetDeferredWaterMatID). 0 = auto: follow the global
+    // --water_procedural flag (city/chase default it on in their factories).
+    // 1 = force the procedural fresnel/deep-colour composite; -1 = force the
+    // legacy albedo+reflection blend. Engine-only (no LWO/FLD field) —
+    // persisted via the scene sidecar as 'waterProcedural'. Same pattern as
+    // EnvReflMode above; consumed by the deferred transparent kernel's
+    // waterProc hoist and WaterProceduralEffective() (glint/albedo-warp pass).
+    int8_t                WaterProcMode          = 0;
 };
 
 #pragma pack(pop)

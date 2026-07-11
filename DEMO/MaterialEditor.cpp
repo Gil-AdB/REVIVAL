@@ -13,6 +13,7 @@
 #include <FILLERS/Mekalele.h> // meka::GBuffer, g_gbuffer (matID G-buffer plane)
 #include <RENDER/EnvBake.h>   // EnvReflection_Invalidate (rebake button)
 #include <RENDER/OffscreenView.h> // g_offscreenViewDepth (map-viz overlay guard)
+#include <RENDER/RenderPipeline.h> // deferredWaterMatID (isWater in surfaces JSON)
 
 #include <Base/TriMesh.h>
 
@@ -133,6 +134,14 @@ std::string Editor_GetSurfacesJSON()
 		// Tri-state env-reflection probe override (-1 off / 0 auto / 1 on) —
 		// editor 3-way control near the reflection slider; sidecar 'envRefl'.
 		appendNum(out, "envRefl",      M->EnvReflMode); out += ",";
+		// Procedural-water composite override, tri-state like envRefl (-1 off /
+		// 0 auto→global --water_procedural / 1 on); sidecar 'waterProcedural'.
+		// isWater marks the scene's registered water material (the only surface
+		// the toggle means anything on) so the panel can show it there only.
+		appendNum(out, "waterProcedural", M->WaterProcMode); out += ",";
+		appendNum(out, "isWater",
+		          (int)M->ID == fds::RenderPipeline::instance().deferredWaterMatID() ? 1 : 0);
+		out += ",";
 		// Per-surface smoothing angle (degrees). Show the LIVE sidecar override
 		// if one is registered (so it round-trips after Save + reload), else the
 		// authored Material::MaxSmoothingAngle (stored in radians). Consumed by
