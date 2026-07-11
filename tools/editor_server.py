@@ -61,7 +61,10 @@ SCENES = {
     "greets":   {"authoring": True,  "dir": "greets",   "lws": "JENINPYR-new-2.LWS",   "legacy": False},
     "chase":    {"authoring": True,  "dir": "chase",    "lws": "CHASE.LWS",            "legacy": True},
     "fountain": {"authoring": True,  "dir": "fountain", "lws": "FOUNTAIN - final.LWS", "legacy": True},
-    "city":     {"authoring": False},
+    # city: pinned 2026-07-11 — Authoring/city/CITY1.LWS + 20 objects regenerate
+    # the shipping CITY.FLD byte-identically with lwsread_legacy (b1/b3/b6 are
+    # FLD-recovered LWOs, see Authoring/city/README.md).
+    "city":     {"authoring": True,  "dir": "city",     "lws": "CITY1.LWS",            "legacy": True},
     "crash":    {"authoring": False},
     "pbrtest":  {"authoring": True,  "dir": "pbrtest",  "lws": "PBRTEST.LWS",          "legacy": False},
 }
