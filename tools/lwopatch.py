@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import datetime
+import math
 import os
 import shutil
 import struct
@@ -175,6 +176,244 @@ class LwoFile:
                 return s
         return None
 
+    # ── Instance-split bake (SRFS/POLS/PNTS surgery) ──────────────────────
+    # Persist the editor's runtime "split instances" (two mummies share one
+    # 'momy' surface) by making the split REAL in the authoring source: the
+    # polygons of every spatially-separate cluster beyond the primary are
+    # reassigned to a fresh surface (SRFS append + SURF clone of the base),
+    # so the regenerated FLD carries 'momy' + 'momy2' as ordinary authored
+    # surfaces and nothing at runtime needs to re-split.
+    #
+    # The clustering REPLICATES Editor_SplitInstances (DEMO/MaterialEditor
+    # .cpp) at the LWO polygon level: grid single-linkage on poly centroids,
+    # cell size R = 15% of the union-bbox diagonal, primary = biggest cluster
+    # (tie -> the cluster of the earliest poly), other clusters numbered 2..
+    # in first-seen poly order. Since the FLD converter preserves polygon
+    # order and rigid transforms don't change cluster structure, cluster k
+    # here corresponds to the runtime part "<name>#k" (verified empirically
+    # via FOCUS_TEST centroids). Only single-mesh instances split this way —
+    # LWS-instanced copies (two LoadObject lines of one file) present a
+    # single spatial cluster here and return None (live-only split remains).
+
+    def _raw_chunk(self, cid):
+        for i, (c, body) in enumerate(self.chunks):
+            if c == cid and c != "SURF":
+                return i, body
+        return -1, None
+
+    def srfs_names(self):
+        """SRFS surface names in file order (1-based POLS indices)."""
+        _, body = self._raw_chunk("SRFS")
+        if body is None:
+            return []
+        names, p = [], 0
+        while p < len(body):
+            z = body.index(b"\x00", p)
+            names.append(body[p:z].decode("latin-1"))
+            p = z + 1
+            if p % 2:
+                p += 1
+        return names
+
+    def points(self):
+        """PNTS as [(x,y,z)] in raw LWO coordinates (no YZ swap — clustering
+        only needs relative positions, which are swap-invariant)."""
+        _, body = self._raw_chunk("PNTS")
+        if body is None:
+            return []
+        n = len(body) // 12
+        flat = struct.unpack(f">{n * 3}f", body[:n * 12])
+        return [(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]) for i in range(n)]
+
+    def polys(self):
+        """POLS as [(vert_indices, surf_1based, surf_field_offset)] — the
+        offset indexes the u16 surface field inside the POLS body so
+        split_surface can rewrite it in place. Detail polygons (negative
+        surface) are rejected, same as the converter."""
+        _, body = self._raw_chunk("POLS")
+        if body is None:
+            return []
+        out, p = [], 0
+        while p + 4 <= len(body):
+            (nv,) = struct.unpack_from(">H", body, p)
+            p += 2
+            verts = struct.unpack_from(f">{nv}H", body, p)
+            p += 2 * nv
+            (surf,) = struct.unpack_from(">h", body, p)
+            if surf < 0:
+                raise ValueError("detail polygons are not supported")
+            out.append((verts, surf, p))
+            p += 2
+        return out
+
+    @staticmethod
+    def _cluster(cents):
+        """Grid single-linkage union-find, replicating Editor_SplitInstances:
+        returns (roots_per_index, R). Union direction matches the C++
+        (parent[find(i)] = find(cell_rep)) so tie-breaks agree."""
+        n = len(cents)
+        lo = [min(c[a] for c in cents) for a in range(3)]
+        hi = [max(c[a] for c in cents) for a in range(3)]
+        diag = math.sqrt(sum((hi[a] - lo[a]) ** 2 for a in range(3)))
+        R = max(diag * 0.15, 1e-6)
+        parent = list(range(n))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        cell = {}
+        for i, c in enumerate(cents):
+            g = (math.floor(c[0] / R), math.floor(c[1] / R), math.floor(c[2] / R))
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    for oz in (-1, 0, 1):
+                        r = cell.get((g[0] + ox, g[1] + oy, g[2] + oz))
+                        if r is not None:
+                            a, b = find(r), find(i)
+                            if a != b:
+                                parent[b] = a
+            cell[g] = find(i)
+        return [find(i) for i in range(n)], R
+
+    def analyze_split(self, name):
+        """Cluster surface `name`'s polygons WITHOUT touching the file.
+        Returns None when there is nothing to split (surface missing /
+        <2 polys / one spatial cluster — e.g. LWS-instanced copies), else
+          {"clusters": [{"polys": n, "centroid": (x,y,z)} ...],  # first-seen order
+           "radius": R,
+           ...private keys for commit_split...}
+        Centroids are RAW LWO coordinates. Note the FLD converter's SwapYZ is
+        a no-op, so for identity-motion objects these ARE engine world
+        coordinates (plus the object's keyframe-0 offset)."""
+        srfs = self.srfs_names()
+        if name not in srfs:
+            return None
+        si = srfs.index(name) + 1          # POLS surface indices are 1-based
+        pts = self.points()
+        mine = [(verts, off) for (verts, surf, off) in self.polys() if surf == si]
+        if len(mine) < 2:
+            return None
+        cents = []
+        for verts, _ in mine:
+            xs = [pts[v] for v in verts if v < len(pts)]
+            m = len(xs) or 1
+            cents.append((sum(p[0] for p in xs) / m,
+                          sum(p[1] for p in xs) / m,
+                          sum(p[2] for p in xs) / m))
+        roots, R = self._cluster(cents)
+        order = []                          # first-seen cluster order
+        seen = {}
+        for r in roots:
+            if r not in seen:
+                seen[r] = len(order)
+                order.append(r)
+        if len(order) < 2:
+            return None
+        clusters = []
+        for r in order:
+            idxs = [i for i, rr in enumerate(roots) if rr == r]
+            cx = sum(cents[i][0] for i in idxs) / len(idxs)
+            cy = sum(cents[i][1] for i in idxs) / len(idxs)
+            cz = sum(cents[i][2] for i in idxs) / len(idxs)
+            clusters.append({"polys": len(idxs), "centroid": (cx, cy, cz)})
+        return {"clusters": clusters, "radius": R,
+                "_name": name, "_srfs": srfs, "_mine": mine,
+                "_roots": roots, "_order": order}
+
+    def default_split_parts(self, analysis):
+        """The order-based part numbering Editor_SplitInstances uses when no
+        geometric matching is available: part 1 (keeps the base name) = the
+        biggest cluster (tie -> earliest), parts 2.. in first-seen order.
+        Returns {cluster_index: part_number}."""
+        clusters = analysis["clusters"]
+        primary = max(range(len(clusters)),
+                      key=lambda i: (clusters[i]["polys"], -i))
+        parts = {primary: 1}
+        k = 2
+        for i in range(len(clusters)):
+            if i != primary:
+                parts[i] = k
+                k += 1
+        return parts
+
+    def commit_split(self, analysis, parts_by_cluster):
+        """Apply the split: cluster with part number 1 keeps the base name;
+        every other cluster's polygons move to a fresh REAL surface named
+        '<base><k>' ('momy2' — clean authored names, no '#k'), SRFS-appended
+        with a SURF clone of the base. parts_by_cluster maps cluster index
+        (analyze_split order) -> part number. Returns
+          {"parts": {k: surface-name}, "polys": {k: count},
+           "centroids": {k: (x,y,z)}, "radius": R}."""
+        name = analysis["_name"]
+        srfs = analysis["_srfs"]
+        mine = analysis["_mine"]
+        roots = analysis["_roots"]
+        order = analysis["_order"]
+        clusters = analysis["clusters"]
+        primary_ci = next(ci for ci, k in parts_by_cluster.items() if k == 1)
+        # Fresh names, collide-avoided against SRFS.
+        taken = set(srfs)
+        parts = {1: name}
+        polys_per = {1: clusters[primary_ci]["polys"]}
+        centroids = {1: clusters[primary_ci]["centroid"]}
+        new_names = {}                      # part k -> new surface name
+        for ci, k in sorted(parts_by_cluster.items(), key=lambda kv: kv[1]):
+            if k == 1:
+                continue
+            cand = f"{name}{k}"
+            n2 = 2
+            while cand in taken:
+                cand = f"{name}{k}_{n2}"
+                n2 += 1
+            taken.add(cand)
+            new_names[k] = cand
+            parts[k] = cand
+            polys_per[k] = clusters[ci]["polys"]
+            centroids[k] = clusters[ci]["centroid"]
+        # SRFS: append the new names (each NUL-terminated, padded to even) —
+        # existing bytes untouched.
+        srfs_i, srfs_body = self._raw_chunk("SRFS")
+        add = b""
+        for k in sorted(new_names):
+            nb = new_names[k].encode("latin-1") + b"\x00"
+            if len(nb) % 2:
+                nb += b"\x00"
+            add += nb
+        self.chunks[srfs_i] = ("SRFS", srfs_body + add)
+        # SURF: clone the base surface's subchunks under each new name and
+        # append at the end of the file (converters match SURF by name).
+        base_surf = self.surface(name)
+        for k in sorted(new_names):
+            self.chunks.append(("SURF", Surf(new_names[k],
+                                             list(base_surf.subchunks))))
+        # POLS: reassign every non-primary cluster poly to its new surface
+        # index (1-based position in the extended SRFS).
+        pols_i, pols_body = self._raw_chunk("POLS")
+        body = bytearray(pols_body)
+        new_index = {k: len(srfs) + i + 1
+                     for i, k in enumerate(sorted(new_names))}
+        root_part = {order[ci]: k for ci, k in parts_by_cluster.items()}
+        for (verts, off), root in zip(mine, roots):
+            k = root_part[root]
+            if k == 1:
+                continue
+            struct.pack_into(">h", body, off, new_index[k])
+        self.chunks[pols_i] = ("POLS", bytes(body))
+        return {"parts": parts, "polys": polys_per,
+                "centroids": centroids, "radius": analysis["radius"]}
+
+    def split_surface(self, name):
+        """analyze + commit with the default order-based part numbering (the
+        no-live-centroids path; the editor server matches clusters to the
+        live '#k' parts geometrically and calls commit_split itself)."""
+        analysis = self.analyze_split(name)
+        if analysis is None:
+            return None
+        return self.commit_split(analysis, self.default_split_parts(analysis))
+
     def serialize(self):
         out = b""
         for cid, c in self.chunks:
@@ -206,6 +445,9 @@ def main():
                     metavar="SURF:PROP=VALUE",
                     help="e.g. 'rooms:specular=0.1' (engine scale; repeatable)")
     ap.add_argument("--list", action="store_true", help="list surfaces + values")
+    ap.add_argument("--split", metavar="SURF",
+                    help="bake the spatial instance-split of SURF into the file "
+                         "(new real surfaces '<SURF>2', ... — see split_surface)")
     ap.add_argument("--backup-dir", help="copy the original here before writing")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-o", "--out", help="write to OUT instead of in place")
@@ -228,6 +470,17 @@ def main():
         return
 
     touched = False
+    if args.split:
+        res = lwo.split_surface(args.split)
+        if res is None:
+            sys.exit(f"{args.file}: '{args.split}' has nothing to split "
+                     "(missing surface, <2 polys, or one spatial cluster)")
+        print(f"split '{args.split}': parts={res['parts']} polys={res['polys']} "
+              f"R={res['radius']:.3f}")
+        for k, c in sorted(res["centroids"].items()):
+            print(f"  part {k} ('{res['parts'][k]}') centroid raw-LWO "
+                  f"({c[0]:.2f} {c[1]:.2f} {c[2]:.2f})")
+        touched = True
     for spec in args.set:
         surf_name, _, kv = spec.rpartition(":")
         prop, _, value = kv.partition("=")

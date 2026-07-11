@@ -117,8 +117,10 @@ SMOOTH_SIDECAR = {"smoothAngle"}
 def split_surface_sidecar_keys(scene, surfaces, warnings):
     """Strip SURF_SIDECAR_KEYS out of the save payload's surface dicts and
     persist them as sidecar prop lines. Mutates `surfaces` (drops entries that
-    become empty). Runtime '#k' instance-split names collapse to the base
-    surface (splits are live-only). Returns a summary list."""
+    become empty). Runtime '#k' instance-split names that were NOT baked by
+    bake_splits (crash / LWS-instanced / multi-file surfaces — baked ones were
+    already rewritten onto their real names) collapse to the base surface.
+    Returns a summary list."""
     if not surfaces:
         return []
     sidecar = scene_sidecar(scene)
@@ -145,6 +147,211 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         write_sidecar(sidecar, entries)
     return saved
 ALLOWED_ROLES = {"albedo", "normal", "height", "roughness", "ao", "metallic"}
+
+
+# ── Instance-split BAKE (persist runtime splits into the LWO sources) ──────
+# The editor's "split instances" is a LIVE mechanism (Editor_SplitInstances
+# clusters faces at runtime; parts are named "<base>#k"). On Save, when the
+# payload carries split parts, the split is BAKED into the authoring .lwo:
+# lwopatch.split_surface reassigns each non-primary polygon cluster to a
+# fresh REAL surface ('momy' -> 'momy' + 'momy2'), the FLD is regenerated,
+# and every '#k' key in the same payload is REWRITTEN onto the real name
+# (momy#2 props/maps -> momy2|...). After a reload the parts are ordinary
+# authored surfaces — no runtime split needed, and the '#k' collapse below
+# never fires for them.
+#
+# Live<->LWO part matching is GEOMETRIC: the shell ships each live part's
+# world centroid (Editor_SplitInstances "centroids"); the LWO clusters are
+# matched by nearest distance (raw LWO coords + the object's LWS keyframe-0
+# position — the converter's SwapYZ is a no-op). Engine face order differs
+# from LWO polygon order (init chunking reorders), so order-based matching
+# would swap identical-size parts (the two-mummies tie). Without centroids
+# (old shell / missing data) the bake falls back to the order-based mapping
+# with a warning to verify visually.
+#
+# NOT baked (fall back to the legacy '#k'-collapse-with-warning):
+#   - scenes without authoring sources (crash) — splits stay live-only
+#   - LWS-instanced copies (2x LoadObject of one file): one spatial cluster
+#     per file, nothing to reassign (known follow-up: duplicate the LWO and
+#     repoint the second LoadObject)
+#   - a surface spanning multiple .lwo files, chained re-splits ("momy#2#2"),
+#     objects with authored rotation/scale when centroids are required
+
+
+def lws_object_key0(scene, lwo_fname):
+    """(#LoadObject occurrences of `lwo_fname`, key0 (pos, rot, scale)) from
+    the scene's LWS — the object-space -> world offset for centroid matching.
+    (0, None) when the file isn't referenced."""
+    path = os.path.join(scene_authoring_dir(scene), SCENES[scene]["lws"])
+    try:
+        lines = open(path, encoding="latin-1").read().splitlines()
+    except OSError:
+        return 0, None
+    count, key0 = 0, None
+    want = lwo_fname.lower()
+    for i, raw in enumerate(lines):
+        ln = raw.strip()
+        if not ln.lower().startswith("loadobject"):
+            continue
+        nm = os.path.basename(ln.split(None, 1)[1].strip()).lower() if " " in ln else ""
+        if nm != want:
+            continue
+        count += 1
+        for j in range(i + 1, len(lines)):
+            s = lines[j].strip()
+            if s.startswith("ObjectMotion"):
+                try:            # channels line, keys line, then key0's 9 floats
+                    vals = lines[j + 3].split()
+                    key0 = ([float(v) for v in vals[0:3]],
+                            [float(v) for v in vals[3:6]],
+                            [float(v) for v in vals[6:9]])
+                except (IndexError, ValueError):
+                    pass
+                break
+            if s.lower().startswith(("loadobject", "addnullobject")):
+                break
+    return count, key0
+
+
+def _match_split_parts(analysis, live_cents, key0, warnings, base):
+    """cluster index -> part number, matching live '#k' centroids to LWO
+    clusters by nearest distance. None -> caller uses the order-based map."""
+    if not live_cents:
+        return None
+    pos, rot, scale = key0 if key0 else ([0, 0, 0], [0, 0, 0], [1, 1, 1])
+    if any(abs(r) > 0.01 for r in rot) or any(abs(s - 1) > 0.01 for s in scale):
+        warnings.append(f"split '{base}': object has authored rotation/scale — "
+                        "using order-based part mapping, VERIFY the parts "
+                        "landed on the right instances")
+        return None
+    parts = {}
+    claimed = set()
+    world = [tuple(c + p for c, p in zip(cl["centroid"], pos))
+             for cl in analysis["clusters"]]
+    for name in sorted(live_cents, key=lambda n: int(n.rsplit("#", 1)[1])):
+        k = int(name.rsplit("#", 1)[1])
+        lc = live_cents[name]
+        best, bd = -1, None
+        for ci, wc in enumerate(world):
+            if ci in claimed:
+                continue
+            d = sum((a - b) ** 2 for a, b in zip(wc, lc)) ** 0.5
+            if bd is None or d < bd:
+                best, bd = ci, d
+        if best < 0:
+            warnings.append(f"split '{base}': more live parts than LWO clusters "
+                            f"('{name}' unmatched) — using order-based mapping")
+            return None
+        if bd > max(2.0 * analysis["radius"], 1.0):
+            warnings.append(f"split '{base}': live part '{name}' is {bd:.1f} "
+                            "units from the nearest LWO cluster — using "
+                            "order-based mapping, VERIFY visually")
+            return None
+        claimed.add(best)
+        parts[best] = k
+    # Unmatched clusters (live session had fewer parts) get the next numbers.
+    nxt = max(parts.values(), default=1) + 1
+    for ci in range(len(analysis["clusters"])):
+        if ci not in parts:
+            parts[ci] = nxt
+            nxt += 1
+    if 1 not in parts.values():
+        warnings.append(f"split '{base}': no live '#1' centroid — using "
+                        "order-based mapping")
+        return None
+    return parts
+
+
+SPLIT_CHAIN_RE = re.compile(r"^(.*?)((?:#\d+)+)$")
+
+
+def bake_splits(scene, payload, warnings):
+    """Bake every split the payload references into the authoring .lwo files
+    and REWRITE the payload's '#k' surface/map keys onto the real baked
+    names. Mutates payload['surfaces'] / payload['maps'] in place. Returns
+    the bake summary list (empty = nothing baked; '#k' keys then fall back
+    to the legacy collapse-onto-base behavior)."""
+    surfaces = payload.get("surfaces") or {}
+    maps = payload.get("maps") or {}
+    splits = payload.get("splits") or {}
+    bases = {}
+    for b, info in splits.items():
+        bases[b] = info if isinstance(info, dict) else {"clusters": info}
+    for nm in list(surfaces) + list(maps):
+        m = SPLIT_CHAIN_RE.match(nm)
+        if not m:
+            continue
+        segs = m.group(2).count("#")
+        if segs > 1:
+            warnings.append(f"'{nm}': chained re-split — bake not supported, "
+                            "the keys collapse onto the base surface")
+            continue
+        bases.setdefault(m.group(1), {})
+    if not bases:
+        return []
+    if not SCENES[scene].get("authoring"):
+        warnings.append("scene has no authoring sources — instance splits stay "
+                        "live-only ('#k' keys collapse onto the base surface)")
+        return []
+    adir = scene_authoring_dir(scene)
+    lwos = {f: lwopatch.LwoFile(os.path.join(adir, f))
+            for f in sorted(os.listdir(adir)) if f.lower().endswith(".lwo")}
+    baked = []
+    renames = {}
+    for base, info in sorted(bases.items()):
+        carriers = [f for f, lwo in lwos.items() if lwo.surface(base)]
+        if not carriers:
+            warnings.append(f"split '{base}': surface not in any .lwo — not baked")
+            continue
+        if len(carriers) > 1:
+            warnings.append(f"split '{base}': surface spans {carriers} — bake "
+                            "not supported, keys collapse onto the base")
+            continue
+        fname = carriers[0]
+        nload, key0 = lws_object_key0(scene, fname)
+        if nload > 1:
+            warnings.append(f"split '{base}': {fname} is LWS-instanced x{nload} "
+                            "— bake not supported (live-only split; known "
+                            "follow-up: duplicate the LWO per instance)")
+            continue
+        lwo = lwos[fname]
+        analysis = lwo.analyze_split(base)
+        if analysis is None:
+            warnings.append(f"split '{base}': one spatial cluster in {fname} — "
+                            "nothing to bake")
+            continue
+        want = info.get("clusters")
+        if want and int(want) != len(analysis["clusters"]):
+            warnings.append(f"split '{base}': LWO clustering found "
+                            f"{len(analysis['clusters'])} clusters, the live "
+                            f"session had {want} — VERIFY the parts")
+        mapping = _match_split_parts(analysis, info.get("centroids"), key0,
+                                     warnings, base)
+        if mapping is None:
+            mapping = lwo.default_split_parts(analysis)
+            if not info.get("centroids"):
+                warnings.append(f"split '{base}': no live part centroids — "
+                                "order-based part mapping, VERIFY the parts "
+                                "landed on the right instances")
+        res = lwo.commit_split(analysis, mapping)
+        path = os.path.join(adir, fname)
+        bak = lwopatch.backup(path, scene_backup_dir(scene))
+        with open(path, "wb") as f:
+            f.write(lwo.serialize())
+        baked.append({"file": fname, "surface": base, "parts": res["parts"],
+                      "polys": res["polys"],
+                      "backup": os.path.relpath(bak, REPO)})
+        for k, real in res["parts"].items():
+            renames[f"{base}#{k}"] = real
+    # Rewrite the payload's '#k' keys onto the baked real names.
+    for d in (surfaces, maps):
+        for old in [k for k in d if k in renames]:
+            new = renames[old]
+            if new in d and isinstance(d[new], dict) and isinstance(d[old], dict):
+                d[new].update(d.pop(old))
+            else:
+                d[new] = d.pop(old)
+    return baked
 
 # UV mapping pseudo-props: routed to lwopatch.set_uv_mapping (greets) /
 # fldpatch.patch_material_uv (FLD scenes). The editor sends the FULL set
@@ -203,10 +410,11 @@ def ensure_lwsread():
 def map_surface_name(name):
     """editor surface name -> (lwo_filename or None, surf_name)."""
     name = re.sub(r"::mirUV$", "", name)
-    # Runtime instance-split parts ("momy#1"/"momy#2", possibly chained) are
-    # live-only clones of ONE authored surface — patch the base. Note the
-    # split now renames the primary to "#1" too, so without this collapse the
-    # primary's own edits would stop reaching the .lwo.
+    # Runtime instance-split parts ("momy#1"/"momy#2", possibly chained) that
+    # bake_splits did NOT bake (baked ones were rewritten onto real names
+    # before routing) are live-only clones of ONE authored surface — patch
+    # the base. Note the split renames the primary to "#1" too, so without
+    # this collapse the primary's own edits would stop reaching the .lwo.
     name = re.sub(r"(#\d+)+$", "", name)
     if "::" in name:
         obj, surf = name.split("::", 1)
@@ -539,24 +747,47 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
 
 def do_save(scene, payload):
     """Apply {"surfaces": {...}, "maps": {...}, "lights": {...},
-    "objects": {...}}. Object props (scale) go to the sidecar for every
-    scene type; the rest routes per scene — see do_save_main."""
+    "objects": {...}, "splits": {...}}. Object props (scale) go to the
+    sidecar for every scene type; splits are BAKED into the .lwo sources
+    (bake_splits — payload '#k' keys are rewritten onto the real baked
+    names before routing); the rest routes per scene — see do_save_main."""
     if scene not in SCENES:
         return 404, {"ok": False, "error": f"unknown scene '{scene}'"}
     obj_warnings = []
     saved_objects = save_objects_to_sidecar(scene, payload.get("objects") or {},
                                             obj_warnings)
+    split_warnings = []
+    split_baked = bake_splits(scene, payload, split_warnings)
     rest = dict(payload)
     rest.pop("objects", None)
+    rest.pop("splits", None)
     code, resp = do_save_main(scene, rest)
+    if split_baked:
+        # A splits-only save legitimately has nothing else in the payload.
+        if not resp.get("ok") and "no surfaces" in str(resp.get("error", "")):
+            code, resp = 200, {"ok": True, "patched": [], "warnings": []}
+        if code == 200:
+            resp["split_baked"] = split_baked
+            resp["patched"] = (resp.get("patched") or []) + [
+                {"file": b["file"], "surfaces": sorted(b["parts"].values()),
+                 "backup": b["backup"]} for b in split_baked]
+            # The split changed the .lwo — the shipping FLD must pick it up
+            # even when nothing else in the payload triggered a regen.
+            if not resp.get("fld"):
+                rcode, rresp = regen_fld(scene, [])
+                if rcode != 200:
+                    rresp.setdefault("warnings", []).extend(split_warnings)
+                    return rcode, rresp
+                resp["fld"] = rresp["fld"]
+                resp["fld_bytes"] = rresp.get("fld_bytes")
     if saved_objects:
         # An objects-only save legitimately has nothing else in the payload.
         if not resp.get("ok") and "no surfaces" in str(resp.get("error", "")):
             code, resp = 200, {"ok": True, "patched": [], "warnings": []}
         resp["objects"] = saved_objects
         resp["sidecar"] = os.path.relpath(scene_sidecar(scene), REPO)
-    if obj_warnings:
-        resp.setdefault("warnings", []).extend(obj_warnings)
+    if obj_warnings or split_warnings:
+        resp.setdefault("warnings", []).extend(split_warnings + obj_warnings)
     return code, resp
 
 

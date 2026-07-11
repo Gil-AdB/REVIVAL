@@ -516,13 +516,20 @@ static int editorCollectMirrorCloneMeshes(const TriMesh **buf, int max)
 }
 
 // JSON result helper for Editor_SplitInstances: {"clusters":C,"faces":F,
-// "names":[...]} — names empty when nothing was split, so the UI can say WHY
-// (C==1: all faces form one spatial cluster; C==0: surface not found).
+// "names":[...],"centroids":{name:[x,y,z]}} — names empty when nothing was
+// split, so the UI can say WHY (C==1: all faces form one spatial cluster;
+// C==0: surface not found). centroids = per-part WORLD-space face-centroid
+// means; the editor ships them with the save payload so the server's split
+// BAKE (lwopatch split_surface) can match its LWO polygon clusters to the
+// live "#k" parts geometrically — engine face order differs from LWO poly
+// order (init chunking/surgery reorders), so order-based matching would
+// swap identical-size parts (the two-mummies tie).
 static std::string splitResultJson(long clusters, long faces,
-                                   const std::set<std::string> &names)
+                                   const std::set<std::string> &names,
+                                   const std::map<std::string, Vector> *centroids = nullptr)
 {
 	std::string out;
-	char buf[64];
+	char buf[96];
 	std::snprintf(buf, sizeof buf, "{\"clusters\":%ld,\"faces\":%ld,\"names\":[", clusters, faces);
 	out += buf;
 	bool first = true;
@@ -533,7 +540,22 @@ static std::string splitResultJson(long clusters, long faces,
 		jsonEscape(out, nn.c_str());
 		out += "\"";
 	}
-	out += "]}";
+	out += "]";
+	if (centroids && !centroids->empty()) {
+		out += ",\"centroids\":{";
+		first = true;
+		for (const auto &kv : *centroids) {
+			if (!first) out += ",";
+			first = false;
+			out += "\"";
+			jsonEscape(out, kv.first.c_str());
+			std::snprintf(buf, sizeof buf, "\":[%.3f,%.3f,%.3f]",
+			              kv.second.x, kv.second.y, kv.second.z);
+			out += buf;
+		}
+		out += "}";
+	}
+	out += "}";
 	return out;
 }
 
@@ -702,7 +724,28 @@ std::string Editor_SplitInstances(const char* name)
 		newNames.insert(p1);
 	}
 	for (auto& [key, C] : clones) newNames.insert(Editor_BaseSurfName(C->Name));
-	const std::string out = splitResultJson(long(clusterSize.size()), long(n), newNames);
+	// Per-part world centroids (face-centroid means) for the save-time bake's
+	// geometric live↔LWO cluster matching (see splitResultJson).
+	std::map<std::string, Vector> partCentroids;
+	{
+		std::map<int, Vector> sum;
+		std::map<int, long>   cnt;
+		for (size_t i = 0; i < n; ++i) {
+			const int root = find(int(i));
+			Vector &s = sum[root];
+			s.x += refs[i].c[0]; s.y += refs[i].c[1]; s.z += refs[i].c[2];
+			++cnt[root];
+		}
+		for (auto& [root, s] : sum) {
+			char pn[220];
+			std::snprintf(pn, sizeof pn, "%s#%d", name,
+			              root == primary ? 1 : clusterK[root]);
+			Vector c = { s.x / cnt[root], s.y / cnt[root], s.z / cnt[root] };
+			partCentroids[pn] = c;
+		}
+	}
+	const std::string out = splitResultJson(long(clusterSize.size()), long(n), newNames,
+	                                        &partCentroids);
 	// New MatLib entries → matIDs + table (post-load materials are invisible
 	// to the deferred kernel until the table is rebuilt — the greets mirror
 	// "yellow tint" lesson).

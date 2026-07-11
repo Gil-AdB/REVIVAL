@@ -86,12 +86,19 @@ bool Editor_ConsumeDirty();   // true if marked since the last call; clears it
 // but is RENAMED "<name>#1"; every other cluster gets clones named "<name>#2",
 // "#3", … (::mirUV handedness clones are cloned alongside and keep their
 // suffix OUTSIDE the "#k", so all name-keyed ops collapse correctly). Appends
-// to MatLib + rebuilds the scene mat table. LIVE-ONLY: the LWO has one shared
-// surface; the server's save path strips the whole trailing (#k)+ chain, so
-// "#1" and "#2" both persist onto the base name. Returns a JSON OBJECT:
-//   {"clusters":C, "faces":F, "names":["<name>#1","<name>#2",…]}
+// to MatLib + rebuilds the scene mat table. LIVE mechanism: the LWO still has
+// one shared surface until the editor's Save BAKES the split into it (server
+// lwopatch split_surface — the parts become real authored surfaces like
+// 'momy2'); scenes without authoring sources (crash) stay live-only and the
+// server collapses their (#k)+ names onto the base. Returns a JSON OBJECT:
+//   {"clusters":C, "faces":F, "names":["<name>#1","<name>#2",…],
+//    "centroids":{"<name>#k":[x,y,z], …}}
 // names is empty when nothing was split (C==1: all faces are one spatial
 // cluster; C==0: surface not found / no faces) so the UI can say why.
+// centroids = per-part WORLD face-centroid means — the shell ships them with
+// the save payload so the bake can match its LWO polygon clusters to the
+// live parts geometrically (engine face order != LWO poly order once init
+// chunking reorders faces, so order alone would swap same-size parts).
 std::string Editor_SplitInstances(const char* name);
 
 // Map-inspector overlay: draw `surface`'s `role` map (albedo|normal|height|

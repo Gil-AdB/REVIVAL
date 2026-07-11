@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b60</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b61</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -665,7 +665,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b60); orbit/zoom embind =',
+        console.log('[editor] panel init (build b61); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -852,6 +852,33 @@
         return out;
       }
       var editorPristine = {};
+      // Live instance-splits this session: base surface -> the engine's split
+      // result ({clusters, centroids}). Save ships them as payload.splits so
+      // the server BAKES the split into the .lwo (real surfaces momy/momy2);
+      // the centroids let it match LWO polygon clusters to the live '#k'
+      // parts geometrically (engine face order != LWO poly order).
+      var editorLiveSplits = {};
+      // After a successful bake: '#k' live name -> real baked surface name
+      // (subsequent saves this session rewrite their keys through this), and
+      // the baked bases (excluded from further splits payloads).
+      var editorBakedRenames = {}, editorBakedBases = {};
+      function currentSplitsPayload(){
+        var out = {};
+        editorSurfaces.forEach(function(s){
+          var m = /^(.*?)#(\d+)$/.exec(s.name);
+          if (!m || editorBakedBases[m[1]]) return;
+          var base = m[1];
+          if (!out[base]) {
+            var live = editorLiveSplits[base] || {};
+            out[base] = { clusters: 0, centroids: live.centroids || {} };
+          }
+          out[base].clusters++;
+        });
+        return out;
+      }
+      function renameBaked(name){
+        return editorBakedRenames[name] || name;
+      }
       // PBR maps imported this session, pending persistence: surface -> role ->
       // {filename, bytes:Uint8Array}. Applied live at import time (MEMFS);
       // "Save" ships them to the server, which stores the files under
@@ -920,11 +947,12 @@
         var b = document.getElementById('editor-save'); if (!b) return;
         var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
             L = Object.keys(collectDirtyLights()).length,
-            O = Object.keys(collectDirtyObjects()).length;
-        b.disabled = !(n || m || L || O);
-        b.textContent = (n || m || L || O)
+            O = Object.keys(collectDirtyObjects()).length,
+            S = Object.keys(currentSplitsPayload()).length;
+        b.disabled = !(n || m || L || O || S);
+        b.textContent = (n || m || L || O || S)
           ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '',
-                         O ? O + ' obj' : '']
+                         O ? O + ' obj' : '', S ? S + ' split' : '']
                .filter(Boolean).join(', ') + ')')
           : 'Save to LWO';
       }
@@ -1640,14 +1668,19 @@
       // the FLD into Runtime/SCENES. "Reload scene" then re-boots the page —
       // the editor fetches the fresh FLD at boot, so the saved values persist.
       document.getElementById('editor-save').onclick = function(){
-        var dirty = collectDirty();
+        // Keys go through renameBaked: after an earlier bake this session the
+        // live '#k' parts persist under their REAL surface names (momy2).
+        var dirtyRaw = collectDirty();
+        var dirty = {};
+        Object.keys(dirtyRaw).forEach(function(k){ dirty[renameBaked(k)] = dirtyRaw[k]; });
         var names = Object.keys(dirty);
         var maps = {};
         Object.keys(editorPendingMaps).forEach(function(surf){
           Object.keys(editorPendingMaps[surf]).forEach(function(role){
             var m = editorPendingMaps[surf][role];
+            var key = renameBaked(surf);
             // null = "reset map" tombstone → server deletes the sidecar line.
-            (maps[surf] = maps[surf] || {})[role] =
+            (maps[key] = maps[key] || {})[role] =
               m ? { filename: m.filename, data: b64FromBytes(m.bytes) } : null;
           });
         });
@@ -1656,13 +1689,17 @@
         var lightIdx = Object.keys(dirtyLights);
         var dirtyObjects = collectDirtyObjects();
         var objNames = Object.keys(dirtyObjects);
-        if (!names.length && !nMaps && !lightIdx.length && !objNames.length) return;
+        var splits = currentSplitsPayload();
+        var splitBases = Object.keys(splits);
+        if (!names.length && !nMaps && !lightIdx.length && !objNames.length && !splitBases.length) return;
         editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' +
-                     lightIdx.length + ' light(s), ' + objNames.length + ' object(s)…');
+                     lightIdx.length + ' light(s), ' + objNames.length + ' object(s)' +
+                     (splitBases.length ? ', ' + splitBases.length + ' split(s)' : '') + '…');
         var payload = { surfaces: dirty };
         if (nMaps) payload.maps = maps;
         if (lightIdx.length) payload.lights = dirtyLights;
         if (objNames.length) payload.objects = dirtyObjects;
+        if (splitBases.length) payload.splits = splits;
         fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
@@ -1673,12 +1710,27 @@
             if (res.maps && res.maps.length) bits.push(res.maps.length + ' map(s) → sidecar');
             if (res.objects && res.objects.length) bits.push(res.objects.length + ' object(s) → sidecar');
             if (res.props && res.props.length) bits.push(res.props.length + ' surface(s) → FLD');
+            // Instance splits baked into the .lwo: the parts are REAL authored
+            // surfaces now. Remember the '#k' -> real-name map so later saves
+            // this session persist onto the baked names, and stop shipping
+            // the split itself.
+            (res.split_baked || []).forEach(function(b){
+              editorBakedBases[b.surface] = 1;
+              Object.keys(b.parts || {}).forEach(function(k){
+                editorBakedRenames[b.surface + '#' + k] = b.parts[k];
+              });
+              bits.push('split ' + b.surface + ' → ' +
+                        Object.keys(b.parts || {}).map(function(k){ return b.parts[k]; }).join('/') +
+                        ' baked into ' + b.file);
+            });
             editorStatus('saved → ' + (bits.join(', ') || 'no changes') +
+                         ((res.split_baked || []).length ? ' — Reload scene to edit the baked surfaces' : '') +
                          (res.warnings && res.warnings.length ? ' (' + res.warnings.length + ' warnings — see console)' : ''));
             if (res.warnings && res.warnings.length) console.warn('[editor] save warnings:', res.warnings);
             console.log('[editor] save ok:', res);
-            // Saved values/maps/lights are the new baseline.
-            names.forEach(function(n){
+            // Saved values/maps/lights are the new baseline (raw live names —
+            // editorSurfaces still uses '#k' until the reload).
+            Object.keys(dirtyRaw).forEach(function(n){
               var s = editorSurfaces.find(function(x){ return x.name === n; });
               if (s) editorPristine[n] = JSON.parse(JSON.stringify(s));
             });
@@ -2106,12 +2158,12 @@
         };
         h.appendChild(rst); el.appendChild(h);
         // Split spatially-separate instances (two mummies share one material —
-        // editing one edits both). Live-only: the LWO has ONE shared surface,
-        // so persisted saves apply to the base name.
+        // editing one edits both). Live immediately; Save BAKES the split into
+        // the authoring .lwo (the parts become real surfaces like 'momy2').
         if (!obj) {
           var spl = document.createElement('a');
           spl.textContent = 'split instances'; spl.href = '#';
-          spl.title = 'give each spatially-separate copy of this surface its own editable material (live-only — Save writes the base surface)';
+          spl.title = 'give each spatially-separate copy of this surface its own editable material (Save bakes each part into the .lwo as a real surface)';
           spl.style.cssText = 'color:#69c;font-size:10px;text-decoration:none;display:block;margin-bottom:4px;';
           spl.onclick = function(e){
             e.preventDefault();
@@ -2126,6 +2178,11 @@
                 : 'split "' + s.name + '": no faces found');
               return;
             }
+            // Remember the split (+ the engine's per-part world centroids) so
+            // Save can BAKE it into the .lwo with the parts geometrically
+            // matched to the LWO's polygon clusters.
+            editorLiveSplits[s.name] = { clusters: res.clusters,
+                                         centroids: res.centroids || {} };
             // Re-enumerate: the parts are new surfaces (own matIDs — canvas
             // pick now resolves each instance separately). The ORIGINAL name
             // is gone (the primary is renamed "<name>#1" so the parts read as
@@ -2136,7 +2193,8 @@
             });
             renderSurfaceList();
             editorStatus('split "' + s.name + '" → ' + names.join(', ') + ' (' + res.clusters +
-                         ' spatial clusters; live-only — Save writes the base surface)');
+                         ' spatial clusters; Save bakes them into the .lwo as real surfaces)');
+            updateSaveButton();
             var s1 = editorSurfaces.find(function(x){ return x.name === names[0]; });
             if (s1) selectSurface(s1, /*alsoFocus=*/false);
           };
