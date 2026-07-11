@@ -205,32 +205,42 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
 
 ## Queued next (user-requested, 2026-07-11)
 
-- **Editor UX batch** (NOW UNBLOCKED — shell.html free after 6c6c972):
-  (a) Save shows WHAT changed — pre-save diff summary (surface/prop/old→new,
-  maps, lights, splits) and/or post-save receipt; (b) a status bar (persistent
-  strip: scene, t, selection, dirty count, last save, build tag — replaces the
-  transient editorStatus one-liner); (c) render view must not be covered by
-  the panel — resize/letterbox the canvas to the free width instead of
-  overlapping (check how canvas size vs engine XRes interact — the panel is
-  an HTML overlay today); (d) the render-flags/settings panel is overwhelming
-  — add find-as-you-type filter, collapsible category hierarchy (registry
-  categories exist: atmos/ssao/deferred/scene/…), better groupings, possibly
-  "changed-from-default only" view. Pins b6x tag bump as usual.
+- **Editor UX batch** — DONE (2026-07-12, d5a6ae9, tag b66): solid
+  metallic/roughness generators (the mech-metallic recipe), Save "what
+  changed" receipt, persistent status bar, canvas-fits-beside-panel (letterbox
+  via CSS; fill=engine-resize deferred), settings find/category-groups/
+  changed-only. shell.html-only; native/pins untouched.
 - **Chase upgrade** — plan in docs/CHASE_UPGRADE_PLAN.md. **C0 + S0 landed
-  (2026-07-12, fog-wt).** C0: chase gate pins (table above) + stale-comment fix
-  + regen-parity baseline. S0: `tools/build_beatmap.py` + `Authoring/chase/
-  chase.beatmap` (placement-agnostic — chase has NO track slot yet, arbitrary
-  song+start-order scaffolding), `DEMO/ChaseEvents.{h,cpp}` (beat-map +
-  event-table loader + pure-`t` `Events_ActiveAt` — the §8.B contract), flag
-  `chase_event_test` (default off) + the RunChaseSnapshot determinism proof
-  (flag-off = pins byte-identical; flag-on marks the event's t only, 3×
-  identical, clears at t±1). **Getter DEFERRED:** the modplayer migration to
-  `feat/s3m-refactor` is BLOCKED — that branch dropped the embedder FFI
-  (external-audio feature, Modplayer_SetDisplay/FillBuffer/FillBufferPlanar),
-  so it breaks native+wasm until re-ported. Submodule left at master (e6429cf),
-  pointer un-bumped. `Modplayer_GetPosition` design settled (lock-free atomics;
-  play_thread holds the song mutex for the whole track). Next: decide the
-  modplayer migration path, then land the getter + author real events.
+  (2026-07-12, fog-wt).** C0 (b72e7a9): chase gate pins (table above,
+  RECIPE-FRAGILE) + stale-comment fix + regen-parity baseline. S0 (30a9c2e):
+  `tools/build_beatmap.py` + `Authoring/chase/chase.beatmap` (placement-
+  agnostic — chase has NO track slot yet, arbitrary song+start-order
+  scaffolding), `DEMO/ChaseEvents.{h,cpp}` (beat-map + event-table loader +
+  pure-`t` `Events_ActiveAt` — the §8.B contract), flag `chase_event_test`
+  (default off) + RunChaseSnapshot determinism proof.
+- **`Modplayer_GetPosition` — LANDED on master** (2026-07-12): decision (b),
+  decoupled from the refactor migration. Parent ce615c2 bumps submodule
+  e6429cf → **9d2a1ca** + adds the header decl. Pure lock-free FFI accessor
+  over the EXISTING display triple-buffer (`SongState::get_position` reads the
+  `TripleBuffer<PlayData>` the display path already publishes — NO new atomics,
+  per the user's correction). Fields: order/row/tickInRow + songTick =
+  **milliseconds-since-start** (PlayData has no u64 tick; ms is the monotonic
+  clock; add total_samples to PlayData if sample-exact ever needed). **Getter
+  requires `Modplayer_SetDisplay(handle,true)`** — the demo currently sets it
+  FALSE (REV.CPP:1077/1619) for perf, so a sync consumer must re-enable it.
+  Verified monotonic under playback; dead-stripped from DEMO (0 refs → pins
+  unchanged); both builds link.
+  **ACTION NEEDED FROM USER: merge modplayer PR #20**
+  (github.com/Gil-AdB/modplayer/pull/20 — direct push to origin/master was
+  branch-protected, so 9d2a1ca is on branch `feat/modplayer-getposition`). If
+  it SQUASH-merges to a new SHA, re-bump the parent pointer to the merged
+  commit (noted in ce615c2's message).
+- **DEFERRED: modplayer `feat/s3m-refactor` adoption** — a more accurate S3M
+  player, but it PREDATES the embedder FFI (verified: has Create/Start/
+  SetOrder; MISSING SetDisplay/FillBuffer/FillBufferPlanar + the external-audio
+  cargo feature). Adopting = a full re-port of the embedder audio layer onto
+  the refactored core, its own focused task. Pick up when S3M playback
+  accuracy becomes the priority.
 - **Sidecar-elimination migration** (the big one): now that all scenes are
   source-authored and the scene-env keywords proved the pattern, migrate the
   remaining SURF_SIDECAR_KEYS + light:/obj:/scene: keys to LWO SURF
