@@ -156,7 +156,8 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   Bounded impact: subtle pano slivers; frames deterministic with bakes off.
 - Env-bake content varies run-to-run (same root cause family).
 - The user's GREETS.MAT `momy#2|*` lines are DROPPED at load until he
-  re-splits + re-saves (accepted; split-bake work in flight).
+  re-splits + re-saves in the editor (split-bake landed 6c6c972 — re-save now
+  bakes momy2 into the LWO as a real surface; accepted, he regenerates).
 - volumetric_unified (default-off Beer-Lambert pass) ignores per-light cone
   gain + turbulence.
 - Mirror clones don't reflect a live object re-scale; tram return-leg beams
@@ -166,25 +167,49 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
 - CITY.CPP line ~1575 unused `using std::min` (clang-tidy noise, off-limits
   era leftover — fine to fix opportunistically).
 
-## In-flight at write time (check `git log` / agent reports)
+## Recently landed (was in-flight — verified + committed)
 
-1. **Split persistence via SOURCE BAKE** (not sidecar): editor Save bakes
-   splits into LWO/LWS (case A: duplicate LWO + repoint LoadObject; case B:
-   SRFS/SURF surgery + polygon-level clustering), #k names become real
-   authored surfaces (clean names, e.g. momy2). + **Scene-wide env defaults
-   as LWS keywords** (FdsSceneEnvRefl / FdsSceneEnvBakeRes style) via the
-   extension mechanism. User recipe once landed: re-split momy → Save →
-   reload → real surfaces with his maps.
-2. ~~Crash scene source hunt~~ **DONE (470d7f1): crash sources FOUND with
-   byte-parity** — the scene is the vintage "END" laptop scene
-   (Original/dos-rev/.../SCENES/END/); lt_scr shipped as a newer revision
-   (screen panel ΔZ, nowhere in any archive) and was recovered from the FLD
-   via tools/fld2lwo/fld2lwo_crash.py. `Authoring/crash/` regen is
-   byte-identical to shipping (md5 4f8aac84…). EVERY scene now has authoring
-   sources — the fldpatch fallback in the sidecar-elimination plan is dead.
-   Registry flip still pending (editor_server.py owned by agent #1 at write
-   time): `"crash": {"authoring": True, "dir": "crash", "lws": "CRASH.LWS",
-   "legacy": True}`.
+1. **Split persistence via SOURCE BAKE** (6c6c972): editor Save bakes runtime
+   instance-splits into the LWO sources (lwopatch.split_surface reassigns
+   non-primary polygon clusters to new real surfaces; bake_splits in
+   editor_server.py matches live cluster centroids to source polygons). After
+   reload the #k names are real authored surfaces. Crash/no-source scenes
+   stay live-only. Recipe: re-split momy → Save → reload → momy/momy2 real
+   surfaces with maps. Editor-flow verified by inspection (pieces + pins);
+   NOT yet driven through a live browser split-save round trip.
+2. **Scene-wide env defaults as LWS keywords** (6c6c972): FdsSceneEnvRefl /
+   FdsSceneEnvBakeRes → bit-2048 conditional FLD payload → Scene fields →
+   FramePrep. VERIFIED end-to-end (round-trip +8B; live read-back envRefl=1/
+   res=512 → 133 probes at 512). Editor 'scene env defaults' row, tag b61.
+3. **Crash sources + registry flip DONE** (470d7f1 + 6c6c972): vintage "END"
+   laptop scene, lt_scr FLD-recovered via fld2lwo_crash.py, byte-parity regen
+   (md5 4f8aac84…). crash promoted to authoring. EVERY scene is now
+   source-authored — the fldpatch fallback in the sidecar-elimination plan is
+   dead.
+4. **Chase upgrade plan** (docs/CHASE_UPGRADE_PLAN.md): 612-line staged plan
+   (blasters, hit particles, camera, movement, lighting + more) — planning
+   only, awaiting user stage-selection before any implementation.
+
+## Queued next (user-requested, 2026-07-11)
+
+- **Editor UX batch** (NOW UNBLOCKED — shell.html free after 6c6c972):
+  (a) Save shows WHAT changed — pre-save diff summary (surface/prop/old→new,
+  maps, lights, splits) and/or post-save receipt; (b) a status bar (persistent
+  strip: scene, t, selection, dirty count, last save, build tag — replaces the
+  transient editorStatus one-liner); (c) render view must not be covered by
+  the panel — resize/letterbox the canvas to the free width instead of
+  overlapping (check how canvas size vs engine XRes interact — the panel is
+  an HTML overlay today); (d) the render-flags/settings panel is overwhelming
+  — add find-as-you-type filter, collapsible category hierarchy (registry
+  categories exist: atmos/ssao/deferred/scene/…), better groupings, possibly
+  "changed-from-default only" view. Pins b6x tag bump as usual.
+- **Chase upgrade** — plan written (docs/CHASE_UPGRADE_PLAN.md); awaiting
+  user stage-selection, then implement the chosen slices.
+- **Sidecar-elimination migration** (the big one): now that all scenes are
+  source-authored and the scene-env keywords proved the pattern, migrate the
+  remaining SURF_SIDECAR_KEYS + light:/obj:/scene: keys to LWO SURF
+  sub-chunks / LWS keywords → FLD payloads, rewrite editor Save, retire the
+  sidecar reader (writers first; user re-saves greets once; then reader dies).
 
 ## Where the rest of the knowledge lives
 
