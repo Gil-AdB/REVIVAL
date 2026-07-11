@@ -723,7 +723,16 @@ bool DemoTick()
 			if (h) h.remove();
 		});
 		fprintf(stderr, "[DEMO] user gesture observed, starting demo\n");
-		if (g_modHandle) {
+		// Editor mode is silent: it never runs the demo sequence, and starting
+		// the modplayer feeds the SDL AudioWorklet, whose callback locks the
+		// Rust modplayer mutex. Under -sALLOW_MEMORY_GROWTH + -pthread a
+		// memory-growth event (baking env probes in a long editor session)
+		// detaches the worklet thread's SharedArrayBuffer view, so the next
+		// lock traps on an unaligned atomic ("operation does not support
+		// unaligned accesses" in futex Mutex::lock). No music in the editor =
+		// no worklet = no trap. (The comment at DemoBoot already intended
+		// "skip audio" in editor mode; this is where it wasn't honored.)
+		if (g_modHandle && !g_editorMode) {
 			Modplayer_Start(g_modHandle);
 			SDL2_StartMusic(g_modHandle);
 		}
