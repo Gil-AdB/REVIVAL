@@ -217,8 +217,29 @@ bool BuildDiscoBall(Scene *sc)
                                     // distinct G-buffer sentinel so the HDR lift
                                     // boosts the ball past 255 → it over-blooms.
     M->RelScene   = sc;
-    M->ID         = 0;  // forward env path — never commits a G-buffer matID
+    M->ID         = 0;  // reassigned by Scene_RebuildMatTable below; inert
+                        // either way — the forward env filler never commits
+                        // a G-buffer matID for the ball.
     M->Name       = strdup("disco_ball");
+    // Link into MatLib at the TAIL (Scene_RebuildMatTable assigns matIDs in
+    // list order — appending keeps every pre-existing material's ID stable;
+    // same convention as GreetsMirror's wall clone). An ORPHAN material
+    // rendered fine (faces hold the Material* directly) but was invisible to
+    // everything that enumerates MatLib — notably the editor's surface list
+    // (Editor_GetSurfacesJSON), which made the ball's objects-list entry
+    // unselectable: the shell filtered 'disco_ball' out of every click and
+    // click-to-focus never fired.
+    M->Next = nullptr;
+    if (!MatLib) {
+        M->Prev = nullptr;
+        MatLib = M;
+    } else {
+        Material *tail = MatLib;
+        while (tail->Next) tail = tail->Next;
+        tail->Next = M;
+        M->Prev = tail;
+    }
+    Scene_RebuildMatTable(sc);
 
     // ── Faceted sphere mesh (local space, centered at origin) ───────
     const int maxVerts = kRings * kSegs * 4;

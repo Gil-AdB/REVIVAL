@@ -234,8 +234,12 @@ static bool editorObjNameIsEngine(const char *n)
 //     skipped;
 //   • unnamed/engine-generated meshes (obj name empty or '__*') fold into the
 //     single named object that already carries ALL their surfaces when that
-//     is unambiguous, else into one trailing '(engine)' bucket the shell
-//     hides by default ("engine":1);
+//     is unambiguous; a NAMED code mesh ('__discoBall') whose surfaces no
+//     authored part carries is genuinely selectable (faces + real materials)
+//     and gets its own VISIBLE entry (name minus the '__') — hiding it in
+//     the engine bucket made the disco ball unreachable; the rest (unnamed
+//     shard atlases, ambiguous helpers) pool into one trailing '(engine)'
+//     bucket the shell hides by default ("engine":1);
 //   • ENRICHMENT: the clone-file material naming ("Hull.lwo::hull" — the
 //     robot-clone scheme that gives greets' multi-mesh mech per-part
 //     materials) is merged in, not discarded: a part whose object name
@@ -253,7 +257,8 @@ std::string Editor_GetObjectsJSON()
 	struct Part { std::set<std::string> surfaces; long meshes = 0; };
 	std::map<std::string, std::map<std::string, Part>> roots;  // root → part → info
 	std::vector<std::string> rootOrder;                        // scene file order
-	std::vector<std::set<std::string>> engineMeshes;           // foldable helpers
+	struct EngMesh { std::string name; std::set<std::string> surfs; };
+	std::vector<EngMesh> engineMeshes;                         // foldable helpers
 	long engineBucketMeshes = 0;
 	for (Object *Obj = CurScene->ObjectHead; Obj; Obj = Obj->Next) {
 		if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
@@ -265,7 +270,9 @@ std::string Editor_GetObjectsJSON()
 			if (T->Faces[f].Txtr && T->Faces[f].Txtr->Name)
 				surfs.insert(Editor_BaseSurfName(T->Faces[f].Txtr->Name));
 		if (editorObjNameIsEngine(Obj->Name)) {
-			if (!surfs.empty()) engineMeshes.push_back(std::move(surfs));
+			if (!surfs.empty())
+				engineMeshes.push_back({ Obj->Name ? Obj->Name : "",
+				                         std::move(surfs) });
 			continue;
 		}
 		const Object *R = Obj;                      // root ancestor (cycle-guarded)
@@ -305,23 +312,37 @@ std::string Editor_GetObjectsJSON()
 		}
 	}
 	// Fold engine helpers: a helper whose surfaces are ALL carried by exactly
-	// one named part belongs to that part; ambiguous/orphan helpers pool into
-	// one trailing '(engine)' bucket (hidden by default in the shell).
+	// one named part belongs to that part. Of the rest, a NAMED code mesh
+	// ('__discoBall') is a real, selectable object the engine built at init —
+	// it gets its own visible entry (dedup'd by name, '__' stripped for
+	// display) so its surfaces stay clickable; only unnamed/ambiguous helpers
+	// pool into the trailing '(engine)' bucket (hidden by default).
 	std::set<std::string> engineBucket;
-	for (const std::set<std::string> &surfs : engineMeshes) {
+	struct Promoted { std::set<std::string> surfaces; long meshes = 0; };
+	std::map<std::string, Promoted> promoted;   // raw '__name' → entry
+	std::vector<std::string> promotedOrder;
+	for (const EngMesh &em : engineMeshes) {
 		Part *owner = nullptr;
 		int owners = 0;
 		for (auto& [rootName, parts] : roots)
 			for (auto& [partName, P] : parts) {
 				bool allIn = true;
-				for (const std::string &s : surfs)
+				for (const std::string &s : em.surfs)
 					if (!P.surfaces.count(s)) { allIn = false; break; }
 				if (allIn) { ++owners; owner = &P; }
 			}
-		if (owners == 1) ++owner->meshes;   // surfaces already listed there
-		else { engineBucket.insert(surfs.begin(), surfs.end()); ++engineBucketMeshes; }
+		if (owners == 1) { ++owner->meshes; continue; }  // surfaces already listed there
+		if (em.name.size() > 2) {                        // named: "__" + something
+			if (!promoted.count(em.name)) promotedOrder.push_back(em.name);
+			Promoted &P = promoted[em.name];
+			++P.meshes;
+			P.surfaces.insert(em.surfs.begin(), em.surfs.end());
+			continue;
+		}
+		engineBucket.insert(em.surfs.begin(), em.surfs.end());
+		++engineBucketMeshes;
 	}
-	if (rootOrder.empty() && engineBucket.empty()) {
+	if (rootOrder.empty() && promoted.empty() && engineBucket.empty()) {
 		// Diagnostic for the wasm editor's "objects panel empty" reports: say
 		// WHY the tree came back empty while surfaces are enumerable (visible
 		// in the browser console via stderr).
@@ -388,6 +409,27 @@ std::string Editor_GetObjectsJSON()
 			}
 			out += "]";
 		}
+		out += "}";
+	}
+	// Promoted code meshes ('__discoBall' → "discoBall"): visible leaf entries.
+	// `obj` keeps the RAW engine name — Editor_SetObjectScale matches meshes by
+	// chunk-collapsed Obj->Name, so the scale knob keys on it (Tri_Possessed
+	// meshes report themselves live-unscalable on stderr, which is honest).
+	for (const std::string &nm : promotedOrder) {
+		const Promoted &P = promoted[nm];
+		if (P.surfaces.empty()) continue;
+		if (!firstObj) out += ",";
+		firstObj = false;
+		out += "{\"name\":\"";
+		jsonEscape(out, nm.substr(2).c_str());
+		out += "\",\"obj\":\"";
+		jsonEscape(out, nm.c_str());
+		out += "\",";
+		char buf[64];
+		std::snprintf(buf, sizeof buf, "\"meshes\":%ld,\"scale\":%.4g,", P.meshes,
+		              fds::ObjectImport_GetObjectScale(CurScene, nm.c_str()));
+		out += buf;
+		appendSurfArray(out, P.surfaces);
 		out += "}";
 	}
 	if (!engineBucket.empty()) {

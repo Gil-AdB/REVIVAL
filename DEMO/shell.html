@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b58</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b59</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -665,7 +665,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b58); orbit/zoom embind =',
+        console.log('[editor] panel init (build b59); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -1399,9 +1399,11 @@
       function groupHasAll(names){
         return names.length > 0 && names.every(inGroup);
       }
-      // Engine-generated helper buckets ("(engine)": mirror shards, the disco
-      // ball mesh — entries carrying engine:1) hide by default; a small toggle
-      // row at the bottom of the list reveals them.
+      // Engine-generated helper buckets ("(engine)": mirror shard atlases and
+      // other unnamed/ambiguous helpers — entries carrying engine:1) hide by
+      // default; a small toggle row at the bottom of the list reveals them.
+      // NAMED code meshes (the disco ball) arrive as normal visible entries —
+      // the engine promotes them out of the bucket (Editor_GetObjectsJSON).
       var editorShowEngine = false;
       function renderObjectList(){
         var visObjs = editorObjects.filter(function(o){ return !o.engine || editorShowEngine; });
@@ -1495,7 +1497,7 @@
           t.style.color = '#777';
           t.textContent = editorShowEngine ? '· hide engine helpers'
                                            : '· show engine helpers (' + engHidden + ')';
-          t.title = 'engine-generated helper meshes (mirror shard atlases, disco ball) — not authored objects';
+          t.title = 'engine-generated helper meshes (mirror shard atlases and other unnamed helpers) — not authored objects';
           t.onclick = function(){ editorShowEngine = !editorShowEngine; renderObjectList(); };
           el.appendChild(t);
         }
