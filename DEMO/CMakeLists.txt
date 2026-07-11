@@ -34,6 +34,8 @@ set(DEMO_SOURCES
     GreetsDisco.h
     BlasterBolts.cpp
     BlasterBolts.h
+    ChaseEvents.cpp
+    ChaseEvents.h
     MainLoop.cpp
     MainLoop.h
     ImageCompression.cpp

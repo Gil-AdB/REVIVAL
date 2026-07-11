@@ -647,12 +647,16 @@ modplayer`, it already tracks this internally to play) + the C header.
 
 **The design that makes sync and determinism the same thing:**
 1. **Beat-map** (authoring-time, deterministic, checked in): a table mapping
-   song position (order:row) → chase scene-tick, built once by scanning the
-   song's tempo/speed schedule from chase's start order (MOD/XM tempo can
-   change mid-song, so this can't be a constant BPM — it's a scan). Ship it
-   as `Authoring/chase/chase.beatmap` (or generate at load from the getter +
-   a pinned start order). A small tool builds/refreshes it (add_city_beam
-   family).
+   song position (order:row) → scene-tick, built by scanning the song's
+   tempo/speed schedule from a start order (MOD/XM tempo can change mid-song,
+   so this can't be a constant BPM — it's a scan). **Placement-agnostic**:
+   chase has no slot in the track (it never shipped in 1998), so the builder
+   takes an *arbitrary* song + start order as parameters — it does NOT encode
+   "chase's slice". Shipped as `tools/build_beatmap.py` →
+   `Authoring/chase/chase.beatmap` (S0, done: a full-song scan of REVIVAL.XM
+   from order 0 as scaffolding). When chase's music/placement is later chosen,
+   the slice is a sub-range and the timing can be re-validated against
+   `Modplayer_GetPosition`.
 2. **Event table** keyed in **musical units** (bar/beat or order:row):
    `{musicPos, kind(fire/hit/cut/camfx), params}`. Resolved through the
    beat-map to **scene-tick offsets at load**.
@@ -724,31 +728,66 @@ Ship1's four glows into fewer (2?) and/or drop the additive intensity, so
 the fix addresses the overlap, not only the per-sprite footprint. Judge at
 t=400/800/1200 where the fusion is worst.
 
-### 8.G — Pacing is a music decision, not a free number
+### 8.G — Pacing: NO TRACK SLOT YET (placement is future work)
 
-The 3.3× playback (§1.1) and the pacing question (M1.3, decision #1) are now
-constrained: chase's duration should match **its slice of the track**.
-Establish where chase sits in the song (start order → end order for the
-scene's musical phrase) via `Modplayer_GetPosition` + the beat-map, then the
-scene length falls out of the music instead of taste. The finale-restoration
-(+60 frames) then either fits the phrase or gets its own musical cue.
+**Corrected 2026-07-12 (user):** chase has **no slot in the track** — it never
+made the 1998 demo, so its musical placement is *undecided, yet-to-be-decided*
+future work. There is therefore **no "chase's slice of the track" to establish
+and no music-derived pacing answer** — the earlier framing (duration falls out
+of chase's musical phrase) is withdrawn.
+
+What S0 delivers instead is **placement-agnostic infra/scaffolding**: a
+beat-map builder that takes any song + any start order, and an event table
+keyed to musical units relative to a scene-*configurable* music-start
+(`FDS_CHASE_MUSIC_START_TICK`, default 0). When the user later decides chase's
+music and where it sits, that infra is ready — the pacing/placement decision is
+made then, by ear/taste, not derived here. The 3.3× playback (§1.1) and the
+finale-restoration (M1.3) remain open pacing questions to arbitrate at that
+point.
 
 ### Stage S0 — music-sync foundation (NEW, lands after C0)
 
-**Goal:** the getter + beat-map + event-table spine, proving out 8.A/8.B
-with zero visual change (default-off; no events authored yet).
-**Ships:** `Modplayer_GetPosition` (Rust submodule + header + cargo rebuild
-path already wired), the beat-map builder tool + `Authoring/chase/chase.
-beatmap`, the event-table loader (musical-units → resolved scene-ticks), and
-a pure-`t` reconstruction harness proven on a throwaway test event.
-**Verification:** getter returns monotonic position under live play (manual/
-logged); beat-map resolves a known order:row to the expected tick; a test
-"fire at bar N" event reconstructs identically across a 3-run jump-to-t
-snapshot (the determinism proof for 8.B); default chase pins byte-identical
-(nothing authored yet). Submodule change → note the modplayer commit SHA in
-the FLD/asset provenance.
-**Size: M.** **Risk: low-medium** — Rust submodule edit + cargo rebuild is
-the only unusual surface; the getter is a read of existing playback state.
-**Decision points:** beat-map granularity (row vs beat vs bar) for authoring
-events; whether live-tightening is worth it or pre-resolved timing is enough
-(recommend pre-resolved only, add live later if drift shows).
+**Goal:** the beat-map + event-table spine + the getter, proving out 8.A/8.B
+with zero visual change (default-off; no events authored; placement-agnostic).
+
+**Status (2026-07-12): LANDED except the getter (below).** Shipped:
+- `tools/build_beatmap.py` — placement-agnostic XM tempo-schedule scanner
+  (arbitrary song + start order) → `Authoring/chase/chase.beatmap` (full-song
+  scan of REVIVAL.XM from order 0, scaffolding). Handles Fxx speed/BPM changes;
+  deterministic.
+- `DEMO/ChaseEvents.{h,cpp}` — beat-map loader + event-table loader
+  (musical `order:row` → resolved scene-tick windows via the beat-map + a
+  scene-configurable `FDS_CHASE_MUSIC_START_TICK`, default 0) + the pure-`t`
+  `Events_ActiveAt(t)` reconstruction (the §8.B contract B1/B2 build on).
+- Flag `chase_event_test` (default OFF) + the RunChaseSnapshot proof harness.
+  **Determinism proved:** flag-off = C0 pins byte-identical; flag-on marks the
+  event's t only, 3× byte-identical, clears at t±1 (self-contained test table
+  AND the file-loader path: `0:100` → tick 521, marked at 521 only).
+- `Authoring/chase/chase.events.example` — the musical-units format (no events
+  authored; empty table = no-op).
+
+**Getter — DEFERRED (modplayer migration blocked).** The user chose to move the
+`Modplayer/modplayer` submodule to `feat/s3m-refactor` (S3M/IT rewrite) and add
+`Modplayer_GetPosition(order,row,tickInRow,songTick)` there. That branch
+**drops the embedder FFI the demo depends on**: no `external-audio` cargo
+feature, no `Modplayer_SetDisplay` / `Modplayer_FillBuffer` /
+`Modplayer_FillBufferPlanar` (it diverged before PR #18 + the planar-audio
+FFI). Adopting it therefore breaks BOTH native link (SetDisplay) and the wasm
+build (external-audio) until that audio layer is re-ported — a larger migration
+than "add a func". Per the S0 fallback, the submodule was **left at master
+(e6429cf), pointer un-bumped**, and the getter is deferred pending the migration
+decision. The getter design is settled and branch-agnostic: publish
+`song_position`/`row`/`tick`/`total_samples` (all still present on the refactor
+branch's `Song`) to shared atomics the FFI reads **lock-free** — the native
+play_thread holds the song mutex for the whole track, so a lock-based getter
+would deadlock.
+
+**Verification:** beat-map resolves a known order:row to the expected tick
+(0:100→521); the test event reconstructs identically across 3 jump-to-t
+snapshots (the 8.B proof); default chase pins byte-identical.
+**Size: M.** **Risk:** low for the landed scaffolding; the modplayer migration
+is the real risk surface (audio swap).
+**Decision points:** (a) how to handle the modplayer migration — re-port the
+embedder FFI onto `feat/s3m-refactor` (bigger job) vs add the getter to current
+master vs stay put; (b) beat-map granularity for authoring events; (c)
+live-tightening vs pre-resolved timing (recommend pre-resolved only).

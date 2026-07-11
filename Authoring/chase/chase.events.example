@@ -1,0 +1,25 @@
+# chase event table — EXAMPLE / format documentation (Stage S0).
+#
+# Events are authored in MUSICAL units (order:row) and resolved to scene-tick
+# windows at load via a beat-map (tools/build_beatmap.py -> chase.beatmap) plus
+# a scene-configurable music-start offset (FDS_CHASE_MUSIC_START_TICK, 0 today).
+# Loaded by DEMO/ChaseEvents.cpp (Events_Load). Runtime reconstruction is a
+# PURE FUNCTION of t (Events_ActiveAt) — the §8.B determinism contract.
+#
+# NO EVENTS ARE AUTHORED YET — chase has no slot in the track (undecided). This
+# file only demonstrates the format; the shipped default is an empty table
+# (no-op). Point FDS_CHASE_EVENTS at a copy to exercise the loader.
+#
+# Line format ('#' = comment, blank lines ignored):
+#     <order>:<row>  <kind>  <durTicks>  [p0 p1 p2 p3]
+#   order:row   musical position (must exist in the beat-map)
+#   kind        integer event kind (opaque in S0; B1/B2 define fire/hit/camfx…)
+#   durTicks    window length in scene-ticks; event active over [tStart,tEnd)
+#   p0..p3      optional float params (S0's marker reads p0..p2 as R,G,B)
+#
+# Example (uncommented so the demonstration below resolves a visible marker):
+# order 0 row 100 -> scene-tick 521 with the shipped chase.beatmap; kind 1,
+# 1-tick window [521,522), red marker (p0=1). Verified: FDS_CHASE_EVENT_TEST=1
+# with FDS_CHASE_BEATMAP=chase.beatmap FDS_CHASE_EVENTS=this file marks t=521
+# only (t=519/520 clear).
+0:100  1  1  1 0 0

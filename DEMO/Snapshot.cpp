@@ -1,6 +1,7 @@
 #include "Snapshot.h"
 
 #include "CITY.H"
+#include "ChaseEvents.h"
 #include "MaterialEditor.h"
 #include "FillerTest.h"
 #include "GLAT.H"
@@ -800,6 +801,25 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 // values (centiseconds; chase runs 0..1698 — frames 1..1699 @ CHPartTime;
 // re-dumps the last rendered VPage past 1699). Driver-based: createChaseScene
 // applies the cinematic + water_procedural defaults, exactly like the live demo.
+// S0 (§8.B) determinism proof: stamp a deterministic marker for one resolved
+// event into the final VPage. Pure function of the event data — same bytes
+// every run. Writes ARGB8888 dwords straight to MainSurf->Data (post-tonemap),
+// exactly the buffer write_ppm reads.
+static void stampChaseEventMarker(const chase::Event* e, int xres, int yres) {
+    if (!e || !MainSurf || !MainSurf->Data) return;
+    const int side = 24;
+    const int x0 = 16 + (e->kind & 7) * 8;   // separate co-active events
+    const int y0 = 16;
+    const dword col = 0xFF000000u
+        | (dword(e->p[0] > 1.f ? 255 : int(e->p[0] * 255.f + 0.5f)) << 16)
+        | (dword(e->p[1] > 1.f ? 255 : int(e->p[1] * 255.f + 0.5f)) << 8)
+        |  dword(e->p[2] > 1.f ? 255 : int(e->p[2] * 255.f + 0.5f));
+    for (int y = y0; y < y0 + side && y < yres; ++y) {
+        dword* row = reinterpret_cast<dword*>(MainSurf->Data + size_t(y) * MainSurf->BPSL);
+        for (int x = x0; x < x0 + side && x < xres; ++x) row[x] = col;
+    }
+}
+
 int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);
     if (!initSnapshotEnvironment(xres, yres)) return 3;
@@ -811,6 +831,28 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createChaseScene();
     driver->init();
 
+    // S0 music-sync foundation (default-off; flag-off leaves everything below
+    // untouched, so the chase pins are byte-identical). When on, resolve an
+    // event table (a beatmap+events file pair if present, else a self-contained
+    // throwaway table active only at t=800) and mark whatever is active at t.
+    const bool eventTest = fds::FeatureFlags::chase_event_test();
+    std::vector<chase::Event> events;
+    if (eventTest) {
+        chase::Beatmap bm;
+        const char* bmPath = std::getenv("FDS_CHASE_BEATMAP");
+        const char* evPath = std::getenv("FDS_CHASE_EVENTS");
+        int32_t musicStart = 0;
+        if (const char* ms = std::getenv("FDS_CHASE_MUSIC_START_TICK")) musicStart = std::atoi(ms);
+        bool haveFile = false;
+        if (bmPath && chase::Beatmap_Load(bmPath, bm) && evPath) {
+            haveFile = chase::Events_Load(evPath, bm, musicStart, events) && !events.empty();
+        }
+        if (!haveFile) events = chase::Events_TestTable(/*anchor=*/800);
+        std::fprintf(stderr, "[CHASEEVENT] chase_event_test on: %zu event(s) "
+                     "(source=%s, musicStart=%d)\n",
+                     events.size(), haveFile ? "beatmap+table" : "test-table", musicStart);
+    }
+
     int produced = 0;
     for (int32_t ts : timestamps) {
         std::srand(0);
@@ -820,6 +862,15 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 
         // Editor dump/test-hook vehicle (see RunEditorDumpHooks).
         RunEditorDumpHooks();
+
+        if (eventTest) {
+            // PURE FUNCTION of t — reconstruct active set from the resolved
+            // table (no accumulation), then stamp. This is the §8.B contract.
+            std::vector<const chase::Event*> active;
+            chase::Events_ActiveAt(events, ts, active);
+            for (const chase::Event* e : active) stampChaseEventMarker(e, xres, yres);
+            std::fprintf(stderr, "[CHASEEVENT] t=%d active=%zu\n", ts, active.size());
+        }
 
         char colorPath[1024];
         std::snprintf(colorPath, sizeof(colorPath), "%s/chase_t%06d_color.ppm",

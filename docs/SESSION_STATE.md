@@ -211,8 +211,21 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   — add find-as-you-type filter, collapsible category hierarchy (registry
   categories exist: atmos/ssao/deferred/scene/…), better groupings, possibly
   "changed-from-default only" view. Pins b6x tag bump as usual.
-- **Chase upgrade** — plan written (docs/CHASE_UPGRADE_PLAN.md); awaiting
-  user stage-selection, then implement the chosen slices.
+- **Chase upgrade** — plan in docs/CHASE_UPGRADE_PLAN.md. **C0 + S0 landed
+  (2026-07-12, fog-wt).** C0: chase gate pins (table above) + stale-comment fix
+  + regen-parity baseline. S0: `tools/build_beatmap.py` + `Authoring/chase/
+  chase.beatmap` (placement-agnostic — chase has NO track slot yet, arbitrary
+  song+start-order scaffolding), `DEMO/ChaseEvents.{h,cpp}` (beat-map +
+  event-table loader + pure-`t` `Events_ActiveAt` — the §8.B contract), flag
+  `chase_event_test` (default off) + the RunChaseSnapshot determinism proof
+  (flag-off = pins byte-identical; flag-on marks the event's t only, 3×
+  identical, clears at t±1). **Getter DEFERRED:** the modplayer migration to
+  `feat/s3m-refactor` is BLOCKED — that branch dropped the embedder FFI
+  (external-audio feature, Modplayer_SetDisplay/FillBuffer/FillBufferPlanar),
+  so it breaks native+wasm until re-ported. Submodule left at master (e6429cf),
+  pointer un-bumped. `Modplayer_GetPosition` design settled (lock-free atomics;
+  play_thread holds the song mutex for the whole track). Next: decide the
+  modplayer migration path, then land the getter + author real events.
 - **Sidecar-elimination migration** (the big one): now that all scenes are
   source-authored and the scene-env keywords proved the pattern, migrate the
   remaining SURF_SIDECAR_KEYS + light:/obj:/scene: keys to LWO SURF
