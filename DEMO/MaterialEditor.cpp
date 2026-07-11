@@ -134,6 +134,10 @@ std::string Editor_GetSurfacesJSON()
 		// Tri-state env-reflection probe override (-1 off / 0 auto / 1 on) —
 		// editor 3-way control near the reflection slider; sidecar 'envRefl'.
 		appendNum(out, "envRefl",      M->EnvReflMode); out += ",";
+		// Per-surface env-probe bake face resolution (0 = unset -> global
+		// env_bake_res chain) — 'probe res' select next to the env probe
+		// control; sidecar 'envBakeRes'.
+		appendNum(out, "envBakeRes",   M->EnvBakeRes); out += ",";
 		// Procedural-water composite override, tri-state like envRefl (-1 off /
 		// 0 auto→global --water_procedural / 1 on); sidecar 'waterProcedural'.
 		// isWater marks the scene's registered water material (the only surface
@@ -467,12 +471,13 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	// Shared setter (also used by the sidecar's numeric prop lines): sets on
 	// every CurScene material whose base name matches, ::mirUV clones included.
 	const bool any = fds::MaterialImport_SetSurfaceProp(CurScene, name, key, value);
-	// envRefl flips which materials bake/publish env probes — same invalidation
-	// as the metallic import/reset paths (Editor_ImportTexture) so the next
-	// frame's FramePrep re-bakes/drops probes under the new rule. The sidecar's
-	// scene-INIT apply goes straight to MaterialImport_SetSurfaceProp (nothing
-	// baked yet), so hooking the live-editor path here is sufficient.
-	if (any && !std::strcmp(key, "envRefl"))
+	// envRefl flips which materials bake/publish env probes, envBakeRes their
+	// bake size — same invalidation as the metallic import/reset paths
+	// (Editor_ImportTexture) so the next frame's FramePrep re-bakes/drops
+	// probes under the new rule. The sidecar's scene-INIT apply goes straight
+	// to MaterialImport_SetSurfaceProp (nothing baked yet), so hooking the
+	// live-editor path here is sufficient.
+	if (any && (!std::strcmp(key, "envRefl") || !std::strcmp(key, "envBakeRes")))
 		fds::EnvReflection_Invalidate(CurScene);
 	if (any) Editor_MarkDirty();
 	return any;

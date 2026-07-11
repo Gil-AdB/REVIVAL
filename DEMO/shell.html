@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b59</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b60</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -665,7 +665,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b59); orbit/zoom embind =',
+        console.log('[editor] panel init (build b60); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -874,7 +874,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','waterProcedural','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -2238,6 +2238,22 @@
             ers.onchange = function(){ setProp(s.name, 'envRefl', +ers.value); };
             er.appendChild(ers);
             el.appendChild(er);
+            // PROBE RES: per-surface env-probe bake FACE resolution. 'global'
+            // (0) = unset -> the env_bake_res render knob / legacy sizing.
+            // Live-applies (probes re-bake next frame); persists via the
+            // scene sidecar ('envBakeRes').
+            var br = document.createElement('div'); br.className = 'prop-row';
+            br.title = 'env-probe bake FACE resolution for THIS surface (power of two). global = the env_bake_res render knob (else the legacy sizing). Probes are SHARED between surfaces within 4 world units — a shared store bakes at the LARGEST per-surface wish. City per-building window stores are sized once at scene init from the first registering surface and cap at their 512^2 source bake (reload the scene to apply there). Live-applies to auto-baked probes (re-bake next frame); persists via sidecar (envBakeRes).';
+            var brl = document.createElement('label'); brl.textContent = 'probe res'; br.appendChild(brl);
+            var brs = document.createElement('select');
+            [['0','global'],['64','64'],['128','128'],['256','256'],['512','512'],['1024','1024']].forEach(function(o){
+              var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1];
+              if (+o[0] === (+s.envBakeRes || 0)) op.selected = true;
+              brs.appendChild(op);
+            });
+            brs.onchange = function(){ setProp(s.name, 'envBakeRes', +brs.value); };
+            br.appendChild(brs);
+            el.appendChild(br);
           }
         });
         // REFRACTIVE (glass): mark this material as screen-space-refracting

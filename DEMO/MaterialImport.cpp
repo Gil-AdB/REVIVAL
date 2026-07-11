@@ -370,6 +370,22 @@ int MaterialImport_GetNormalFlip(const Material *M) {
 bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
                                    const char *prop, float value) {
 	if (!sc || !surface || !prop) return false;
+	// envBakeRes arrives as any number (sidecar strtof / editor select) but
+	// the env-store mip chain + shift-indexed samplers need a power of two in
+	// 64..1024 — sanitize ONCE up front (clamp + round down to a pow2, same
+	// rule as EnvBake's envBakeResOverride) so every matching material clone
+	// below gets the validated value. <= 0 stays 0 = unset (global chain).
+	if (!std::strcmp(prop, "envBakeRes") && value > 0.0f) {
+		const int want = (int)value;
+		const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
+		int p2 = 64;
+		while (p2 * 2 <= clamped) p2 <<= 1;
+		if (p2 != want)
+			std::fprintf(stderr, "[MAT-IMPORT] '%s' envBakeRes=%d invalid (want"
+			             " a power of two in 64..1024) — using %d\n",
+			             surface, want, p2);
+		value = (float)p2;
+	}
 	bool any = false;
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != sc) continue;
@@ -417,6 +433,13 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// classify by range instead of exact compare.
 		else if (!std::strcmp(prop, "envRefl"))
 			M->EnvReflMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
+		// Per-surface env-probe bake FACE resolution (engine-only, sidecar-
+		// persisted; sanitized to a pow2 in 64..1024 above). 0 = unset -> the
+		// global env_bake_res / legacy sizing chain. Read at bake time
+		// (EnvBake.cpp); the live-editor path invalidates the scene's probes
+		// on set so the next FramePrep re-bakes at the new size.
+		else if (!std::strcmp(prop, "envBakeRes"))
+			M->EnvBakeRes = value <= 0.0f ? 0 : (int)value;
 		// Tri-state procedural-water override (engine-only, sidecar-persisted;
 		// same -1/0/1 classification as envRefl). Only meaningful on the
 		// scene's water material (SetDeferredWaterMatID); 0 = auto → the

@@ -102,7 +102,9 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # glass_refract_ior render knob).
 # waterProcedural: tri-state procedural-water override on the scene's water
 # surface (-1 off / 0 auto -> global --water_procedural / 1 on).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "waterProcedural"}
+# envBakeRes: per-surface env-probe bake face resolution (pow2 64..1024;
+# 0 = unset -> the global env_bake_res / legacy sizing chain).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural"}
 # smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
 # scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
 # persists to the sidecar there instead: the engine honors a

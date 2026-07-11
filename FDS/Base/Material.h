@@ -185,6 +185,20 @@ struct Material
     // EnvReflMode above; consumed by the deferred transparent kernel's
     // waterProc hoist and WaterProceduralEffective() (glint/albedo-warp pass).
     int8_t                WaterProcMode          = 0;
+
+    // Per-surface env-probe bake FACE resolution override. 0 = unset → the
+    // global chain (an EXPLICIT --env-bake-res, else the legacy
+    // env_refl_res/2 probe sizing / the city stores' caller-chosen res).
+    // Engine-only (no LWO/FLD field) — set via the editor's 'probe res'
+    // control / the scene sidecar 'envBakeRes', validated to a power of two
+    // in 64..1024 at set time (MaterialImport_SetSurfaceProp). Read at BAKE
+    // time only (EnvBake.cpp); consumers read dims from the store itself, so
+    // mixed-res stores coexist. Probes are SHARED between materials whose
+    // centroids sit within 4 world units — for a shared store the LARGEST
+    // per-material wish wins (rebake-on-upgrade). City per-building
+    // registered stores size from the FIRST windows clone that registers the
+    // building (materials map n:1 onto them) and cap at their 512² source.
+    int                   EnvBakeRes             = 0;
 };
 
 #pragma pack(pop)

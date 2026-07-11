@@ -443,6 +443,15 @@ namespace {
 struct EnvPanoStore {
     std::vector<uint32_t> levels[EnvPanoLinear::kMaxMips];
     EnvPanoLinear view;
+    // Bake provenance, for the largest-wish-wins res upgrade of SHARED
+    // stores (FramePrep): the original probe material + self-exclusion
+    // radius, so a re-bake at a bigger face res reproduces the original
+    // content exactly. `imported` marks RegisterCubeFaces stores (city
+    // per-building) — their content came from a caller import and cannot
+    // be re-baked here.
+    Material* bakedSkipMat = nullptr;
+    float     bakedSkipR   = 0.0f;
+    bool      imported     = false;
 };
 struct SceneEnv {
     // Owning stores + Material* → store index (materials with near-identical
@@ -480,6 +489,21 @@ int envBakeResOverride() {
         std::fprintf(stderr, "[ENVREFL] env_bake_res=%d invalid (want a power"
                      " of two in 64..1024) — using %d\n", want, p2);
     }
+    return p2;
+}
+
+// Per-material FACE-res wish: Material::EnvBakeRes wins over the global
+// --env-bake-res (more specific beats scene-wide); 0/unset defers to the
+// global (which itself returns 0 when not explicitly set — the legacy
+// sizing chain). EnvBakeRes is sanitized to a pow2 in 64..1024 at set time
+// (MaterialImport_SetSurfaceProp); re-sanitized here defensively since the
+// mip chain would crash on a rogue value.
+int envFaceResForMat(const Material* M) {
+    if (!M || M->EnvBakeRes <= 0) return envBakeResOverride();
+    const int want = M->EnvBakeRes;
+    const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
+    int p2 = 64;
+    while (p2 * 2 <= clamped) p2 <<= 1;
     return p2;
 }
 
@@ -707,16 +731,24 @@ void sceneAABB(Scene* sc, SceneEnv& env) {
 }
 
 // Bake one panorama from `center` into a fresh store (mip chain + metadata).
+// faceResWant > 0 = the per-material Material::EnvBakeRes wish (already a
+// sanitized pow2) — it wins the sizing chain below.
 std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         const Vector& center,
                                         Material* skipMat = nullptr,
-                                        float skipRadius = 0.0f) {
+                                        float skipRadius = 0.0f,
+                                        int faceResWant = 0) {
     EnvBakeParams params;
-    // Bake sizing: --env-bake-res (explicit FACE res, pow2 64..1024) wins;
-    // else the legacy --env_refl_res sizing (default 512): reflections are
-    // roughness-blurred by eye anyway, so half the CITY bake res reads fine.
-    // Clamp: the mip chain needs res ≥ 64; cap at 1024.
-    if (const int face = envBakeResOverride()) {
+    // Bake sizing: per-surface EnvBakeRes wish, then --env-bake-res (explicit
+    // global FACE res, pow2 64..1024); else the legacy --env_refl_res sizing
+    // (default 512): reflections are roughness-blurred by eye anyway, so half
+    // the CITY bake res reads fine. Clamp: the mip chain needs res ≥ 64; cap
+    // at 1024.
+    if (faceResWant > 0) {
+        params.cubeRes    = faceResWant;
+        params.panoWidth  = faceResWant * 2;   // legacy equirect stores keep
+        params.panoHeight = faceResWant * 2;   // the 2×face pano sizing
+    } else if (const int face = envBakeResOverride()) {
         params.cubeRes = face;                    // cube stores: W=H=face res
         params.panoWidth  = face * 2;             // equirect stores keep the
         params.panoHeight = face * 2;             // legacy 2×face pano size
@@ -874,15 +906,57 @@ bool EnvReflection_FramePrep(Scene* sc) {
                          M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
                          c.x, c.y, c.z);
         sceneAABB(sc, env);
+        // Per-surface face-res wish (Material::EnvBakeRes, else the explicit
+        // global env_bake_res; 0 = legacy sizing inside bakeStore).
+        const int wantFace = envFaceResForMat(M);
         int idx = -1;
         for (size_t i = 0; i < env.stores.size(); ++i) {
             const EnvPanoLinear& v = env.stores[i]->view;
             const float dx = v.bakeX - c.x, dy = v.bakeY - c.y, dz = v.bakeZ - c.z;
             if (dx*dx + dy*dy + dz*dz < 4.0f * 4.0f) { idx = int(i); break; }
         }
+        // Probe SHARING vs per-surface res: stores are shared within 4 world
+        // units, so two surfaces can wish DIFFERENT resolutions onto one
+        // store — the LARGEST wins. A shared store smaller than this
+        // material's wish is re-baked in place at the bigger size: same
+        // center, same original self-exclusion (recorded provenance), only
+        // the res changes. Imported stores (city per-building registrations)
+        // keep their content — their res is decided at registration.
+        if (idx >= 0 && wantFace > 0 && !env.stores[size_t(idx)]->imported) {
+            EnvPanoStore& S = *env.stores[size_t(idx)];
+            const int haveFace = S.view.isCube ? S.view.W : S.view.W / 2;
+            if (wantFace > haveFace) {
+                const Vector bc = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+                auto bigger = bakeStore(sc, env, bc, S.bakedSkipMat,
+                                        S.bakedSkipR, wantFace);
+                if (bigger) {
+                    bigger->bakedSkipMat = S.bakedSkipMat;
+                    bigger->bakedSkipR   = S.bakedSkipR;
+                    static const bool sGrid2 = std::getenv("FDS_ENV_GRID") != nullptr;
+                    if (sGrid2) fillEnvDebugGrid(*bigger);
+                    std::fprintf(stderr, "[ENVREFL] shared store re-baked %d->%d"
+                                 " face res for '%s' (largest per-surface wish"
+                                 " wins)\n", haveFace, wantFace,
+                                 M->Name ? M->Name : "?");
+                    env.stores[size_t(idx)] = std::move(bigger);
+                    bakedAny = true;
+                    // The replacement invalidated &view pointers published
+                    // for THIS index earlier in the round (env_bake_fix's
+                    // 1-bounce publication) — repoint them before any later
+                    // bake reads the table. The full refresh below fixes the
+                    // rest.
+                    for (auto& [M2, i2] : env.byMat)
+                        if (i2 == idx && M2->ID < 256 && M2->EnvReflMode >= 0
+                            && env.table[M2->ID])
+                            env.table[M2->ID] = &env.stores[size_t(idx)]->view;
+                }
+            }
+        }
         if (idx < 0) {
-            auto store = bakeStore(sc, env, c, M, excludeR);
+            auto store = bakeStore(sc, env, c, M, excludeR, wantFace);
             if (!store) { env.byMat[M] = -1; continue; }
+            store->bakedSkipMat = M;
+            store->bakedSkipR   = excludeR;
             static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
             if (sGrid) fillEnvDebugGrid(*store);
             std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
@@ -970,10 +1044,27 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                                     int storeRes, const Vector& bakePoint,
                                     float pullOpt) {
     if (!sc || !M || !faceMajor || faceRes < 64) return -1;
-    // --env-bake-res set explicitly: override the caller's store resolution
-    // (CITY passes a hardcoded 256). Capped at faceRes below — the source
-    // faces are what they are (CITY bakes 512²); we only ever downsample.
-    if (const int face = envBakeResOverride()) {
+    // Res override precedence: the per-surface Material::EnvBakeRes wish,
+    // then an explicit global --env-bake-res, then the caller's storeRes
+    // (CITY passes a hardcoded 256). Everything is capped at faceRes below —
+    // the source faces are what they are (CITY bakes 512²); we only ever
+    // downsample. NOTE these stores are per-BUILDING and materials map n:1
+    // onto them: the FIRST windows clone registering a building sizes its
+    // store; later clones of the same building alias it
+    // (EnvReflection_AliasMaterial) regardless of their own wish — in
+    // practice the clones inherit one base surface's EnvBakeRes anyway.
+    if (M->EnvBakeRes > 0) {
+        const int face = envFaceResForMat(M);
+        static bool notedMat = false;
+        if (!notedMat && face != storeRes) {
+            notedMat = true;
+            std::fprintf(stderr, "[ENVREFL] envBakeRes=%d on '%s' overrides"
+                         " registered-store res (caller asked %d^2; capped at"
+                         " the %d^2 source faces)\n", face,
+                         M->Name ? M->Name : "?", storeRes, faceRes);
+        }
+        storeRes = face;
+    } else if (const int face = envBakeResOverride()) {
         static bool noted = false;
         if (!noted && face != storeRes) {
             noted = true;
@@ -986,6 +1077,7 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
     if (storeRes > faceRes) storeRes = faceRes;
     SceneEnv& env = g_envByScene[sc];
     auto store = std::make_unique<EnvPanoStore>();
+    store->imported = true;   // caller-provided faces — never re-baked here
     EnvPanoLinear& v = store->view;
     // Downsample the source faces to storeRes (e.g. CITY 512 -> 256: the
     // env compose is roughness-blurred anyway and this keeps per-building

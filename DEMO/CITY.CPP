@@ -2856,8 +2856,10 @@ void Initialize_City()
 	}
 	fprintf(stderr, "[CITY] cloned %d windows-materials with EnvTexture set\n", windowsCloned);
 	if (cityEnvPixelReg) {
-		fprintf(stderr, "[CITY] registered %zu per-building env stores (256^2 faces, "
-		        "noParallax) from the cube bake\n", storeIdxByObj.size());
+		fprintf(stderr, "[CITY] registered %zu per-building env stores (default "
+		        "256^2 faces — per-surface envBakeRes / --env-bake-res override, "
+		        "capped at the 512^2 source; noParallax) from the cube bake\n",
+		        storeIdxByObj.size());
 		for (auto& b : buildings) {
 			b.rawPanorama.clear();
 			b.rawPanorama.shrink_to_fit();
