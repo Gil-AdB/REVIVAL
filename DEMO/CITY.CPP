@@ -1823,6 +1823,129 @@ static void bakeBuildingPanorama(Object* Obj,
 #endif
 }
 
+// ── env_live_water_shade: procedural-water re-shade of one baked face ──────
+// The default probe bake shows the water as its STATIC authored texture (the
+// forward transparent composite over the mirrored world, lit + dst/2) —
+// visibly wrong against a --water_procedural main view, which replaces that
+// with the deferred fresnel composite of a deep colour and the reflection
+// underlay (DeferredSurfaceKernel's waterProc block) plus the screen-space
+// caustic-cell modulation (pwater::RenderGlints' texMix block). When the bake
+// gate is on (see the env_cube branch in Initialize_City), the water MESH is
+// hidden for the whole bake — pass 2 leaves the pure mirrored world as the
+// reflection underlay — and this pass re-shades, at full render res before
+// the downsample, every texel whose probe ray hits the water plane
+// unoccluded, with the main view's own formula:
+//
+//     cos = -dy of the normalized texel ray             (plane normal = +Y)
+//     F   = fresnelBase + (refl - base)*(1-cos)^5       (kernel waterProc)
+//     out = deep*(1-F) + underlay*F                     (kernel LDR blend)
+//     out = out*mod + blueAdd*(1, .40, .08)             (caustic cell, t=0)
+//
+// The wave clock is FROZEN at 0: the bake runs once at init, and live motion
+// comes from the env_live_water sample-time perturb — exactly how the main
+// view animates its static pass-1 image with the dispMap ripple. Specular
+// GLINTS are deliberately NOT baked: they are view-dependent sparkle and
+// would freeze into noise glued to the reflected content (documented drop).
+// Froxel-fog inscatter over distant water is a main-view-only term too (the
+// bake's underlay carries only the forward fog of its own render).
+//
+// Occlusion mask = RenderGlints' ray-cast trick: the plane hit's view-z vs
+// the opaque ZPage16. Mirrored (pass-1) geometry can never mask — a virtual
+// image lies BEYOND the plane hit along any ray — so exactly the real
+// below-horizon geometry (neighbour building bases, piers) keeps its texels.
+// Row-parallel with disjoint row bands → deterministic output.
+static void reshadeFaceWaterProcedural(const Camera& envCam)
+{
+	const float ey = envCam.ISource.y;
+	const float wY = g_waterY;
+	if (ey <= wY) return;                                  // probe under water
+	const float wDeepB    = fds::FeatureFlags::water_deep_b();
+	const float wDeepG    = fds::FeatureFlags::water_deep_g();
+	const float wDeepR    = fds::FeatureFlags::water_deep_r();
+	const float wRefl     = fds::FeatureFlags::water_reflectivity();
+	const float wFresBase = fds::FeatureFlags::water_fresnel_base();
+	const float texMix    = fds::FeatureFlags::water_albedo_mix();
+	const float texScale  = fds::FeatureFlags::water_tex_scale();
+	const float texWarp   = fds::FeatureFlags::water_tex_warp();
+	const float scale     = fds::FeatureFlags::water_bump_scale();
+	const float tWave     = 0.0f;                          // frozen (see above)
+	const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+	const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+	const float cex = CntrEX, cey = CntrEY;
+	// Camera world→view rotation rows = camera axes → columns give view→world.
+	const float m00=envCam.Mat[0][0], m10=envCam.Mat[1][0], m20=envCam.Mat[2][0];
+	const float m01=envCam.Mat[0][1], m11=envCam.Mat[1][1], m21=envCam.Mat[2][1];
+	const float m02=envCam.Mat[0][2], m12=envCam.Mat[1][2], m22=envCam.Mat[2][2];
+	const float ex=envCam.ISource.x, ez=envCam.ISource.z;
+	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	const float fzp = (CitySc && CitySc->FZP > 0.0f) ? CitySc->FZP : 1e30f;
+	dword* const vp = (dword*)VPage;
+	const uint16_t* const oz = ZPage16;
+	const int xr = XRes;
+	auto band = [=](int y0, int y1) {
+		for (int y = y0; y < y1; ++y) {
+			dword* row = vp + size_t(y) * size_t(xr);
+			const uint16_t* orow = oz + size_t(y) * size_t(xr);
+			for (int x = 0; x < xr; ++x) {
+				const float xn = (float(x) - cex) * invFX;
+				const float yn = (cey - float(y)) * invFY;
+				const float D = m01*xn + m11*yn + m21;     // d(world.y)/d(view-z)
+				if (D >= 0.0f) continue;                   // at/above horizon
+				const float sd = (wY - ey) / D;            // view-z of the plane hit
+				if (sd <= 1.0f || sd >= fzp) continue;     // behind eye / past far plane
+				const uint16_t oe = orow[x];               // opaque-Z occlusion
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;
+				const float dx = m00*xn + m10*yn + m20;    // world ray per view-z
+				const float dz = m02*xn + m12*yn + m22;
+				// Fresnel from the normalized ray vs the +Y plane normal —
+				// the kernel's Schlick form (cos > 0 here since D < 0).
+				const float cosT = -D / std::sqrt(dx*dx + D*D + dz*dz);
+				const float c = 1.0f - cosT;
+				const float c5 = c*c*c*c*c;
+				float F = wFresBase + (wRefl - wFresBase) * c5;
+				if (F < 0.0f) F = 0.0f; if (F > 1.0f) F = 1.0f;
+				const dword p = row[x];
+				const float k = 1.0f - F;
+				float oB = wDeepB * k + float(p & 0xFFu)         * F;
+				float oG = wDeepG * k + float((p >>  8) & 0xFFu) * F;
+				float oR = wDeepR * k + float((p >> 16) & 0xFFu) * F;
+				// Caustic-cell modulation at the plane hit (same block as the
+				// main view's screen pass, frozen clock, no flow).
+				const float wx = ex + sd * dx;
+				const float wz = ez + sd * dz;
+				float mod, blue;
+				if (pwater::CausticModulation(wx, wz, tWave, scale, texMix,
+				                              texScale, texWarp, 0.0f, 0.0f,
+				                              mod, blue)) {
+					oB = oB * mod + blue;
+					oG = oG * mod + blue * 0.40f;
+					oR = oR * mod + blue * 0.08f;
+				}
+				int nb = int(oB), ng = int(oG), nr = int(oR);
+				if (nb < 0) nb = 0; if (nb > 255) nb = 255;
+				if (ng < 0) ng = 0; if (ng > 255) ng = 255;
+				if (nr < 0) nr = 0; if (nr > 255) nr = 255;
+				row[x] = dword(nb) | (dword(ng) << 8) | (dword(nr) << 16) | 0xFF000000u;
+			}
+		}
+	};
+	auto& tp = ThreadPool::instance();
+	const int nT = (int)tp.size();
+	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
+	const int chunk = (YRes + nT - 1) / nT;
+	auto remaining = std::make_shared<std::atomic<int>>(0);
+	for (int i = 0; i < nT; ++i) {
+		const int y0 = i * chunk; if (y0 >= YRes) break;
+		const int y1 = std::min(y0 + chunk, YRes);
+		remaining->fetch_add(1, std::memory_order_relaxed);
+		tp.enqueue([band, y0, y1, remaining]() {
+			band(y0, y1);
+			remaining->fetch_sub(1, std::memory_order_release);
+		});
+	}
+	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+}
+
 // env_cube: bake six PADDED cube faces for one building using the EnvCube
 // convention (EnvCube_Basis + padded FOV), box-downsample each to faceRes, and
 // pack them FACE-MAJOR into `rawFaces` (6 × faceRes² RGBA). No equirect
@@ -1834,7 +1957,8 @@ static void bakeBuildingCubeFaces(Object* Obj,
                                   Camera& envCam,
                                   const VESA_Surface& tmpSurf,
                                   int faceRes,
-                                  std::vector<uint8_t>& rawFaces)
+                                  std::vector<uint8_t>& rawFaces,
+                                  bool procWaterShade)
 {
 	TriMesh* T = (TriMesh*)Obj->Data;
 	const dword flags = T->Flags;
@@ -1870,6 +1994,12 @@ static void bakeBuildingCubeFaces(Object* Obj,
 		Transform_Objects(CitySc, fds::g_mainCamera, fds::g_mainFaces);
 		if (0 != CAll) { Radix_Sort(FList, SList, CAll); Render(RenderPath::ForceForward); }
 
+		// env_live_water_shade: the water mesh was hidden for this bake (the
+		// caller cleared HTrack_Visible on RflObj) — re-shade the exposed
+		// mirrored underlay as procedural water before the downsample.
+		if (procWaterShade)
+			reshadeFaceWaterProcedural(envCam);
+
 		// Box-downsample CUBE_MAP_XRES² → faceRes², force opaque alpha.
 		const uint32_t* src = (const uint32_t*)tmpSurf.Data;
 		uint32_t* dst = (uint32_t*)rawFaces.data() + size_t(k) * faceRes * faceRes;
@@ -1888,8 +2018,23 @@ static void bakeBuildingCubeFaces(Object* Obj,
 	T->Flags = flags;
 	for (auto& p : mutedFlares) p.first->ISize = p.second;
 
-	if (std::getenv("FDS_ENVBAKE_DUMP")) {
-		if (FILE* fp = std::fopen("/tmp/city_cube_faces.ppm", "wb")) {
+	// FDS_ENVBAKE_DUMP dev hook: "1" keeps the legacy single-path dump (last
+	// building baked wins); "all" writes one file per building; any other
+	// value is an object-name filter (e.g. "b12.lwo"). Per-building paths
+	// carry the name so before/after crops of a specific probe are trivial.
+	const char* dumpSel = std::getenv("FDS_ENVBAKE_DUMP");
+	if (dumpSel && (!std::strcmp(dumpSel, "1") || !std::strcmp(dumpSel, "all")
+	                || !std::strcmp(dumpSel, Obj->Name))) {
+		const bool legacy = !std::strcmp(dumpSel, "1");
+		char dumpPath[256];
+		if (legacy)
+			std::snprintf(dumpPath, sizeof(dumpPath), "/tmp/city_cube_faces.ppm");
+		else
+			std::snprintf(dumpPath, sizeof(dumpPath), "/tmp/city_cube_faces_%s.ppm", Obj->Name);
+		std::fprintf(stderr, "[ENVBAKE-DUMP] %s center=(%.1f, %.1f, %.1f) waterY=%.1f -> %s\n",
+		             Obj->Name, envCam.ISource.x, envCam.ISource.y, envCam.ISource.z,
+		             g_waterY, dumpPath);
+		if (FILE* fp = std::fopen(dumpPath, "wb")) {
 			const int gw = faceRes * 3, gh = faceRes * 2;
 			std::fprintf(fp, "P6\n%d %d\n255\n", gw, gh);
 			const uint32_t* rf = (const uint32_t*)rawFaces.data();
@@ -2380,6 +2525,33 @@ void Initialize_City()
 	// any per-building forward artifact (see the windows loop below).
 	const bool useCube = fds::FeatureFlags::env_cube();
 	const bool cityEnvPixel = fds::FeatureFlags::city_env_pixel();
+
+	// ── env_live_water_shade bake gate (see reshadeFaceWaterProcedural) ──
+	// The city look defaults water_procedural ON at scene start
+	// (createCityScene / RunCitySnapshot both setDefault it AFTER this init
+	// runs) — resolve the flag with the SAME default here so the bake and
+	// the main view agree in bare runs. Read via isSet rather than a global
+	// setDefault: Initialize_City also runs inside OTHER scenes' snapshot
+	// harnesses (fountain needs SkySc), and flipping the global default
+	// from here would leak city semantics into their kernels. An explicit
+	// --no-water_procedural still wins, and the water material's sidecar
+	// tri-state (WaterProcMode) wins over the flag. (No CITY.MAT ships
+	// today; if one ever sets 'waterProcedural' it is applied at scene
+	// start — after this bake — so only a tri-state already present here is
+	// honored.) Gate additionally requires env_live_water (default OFF →
+	// flag-off runs are byte-identical, cache path included).
+	bool bakeWaterProcEff = fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::water_procedural)
+	    ? fds::FeatureFlags::water_procedural()
+	    : true;                                  // the city factory's default
+	if (RflObj) {
+		const Material* WM = ((TriMesh*)RflObj->Data)->Faces[0].Txtr;
+		if (WM && WM->WaterProcMode) bakeWaterProcEff = WM->WaterProcMode > 0;
+	}
+	const bool liveWaterShade = fds::FeatureFlags::env_live_water()
+	    && fds::FeatureFlags::env_live_water_shade()
+	    && bakeWaterProcEff
+	    && RflObj && g_waterMaxX > g_waterMinX;
+
 	if ((useCube || cityEnvPixel) && !skipCubeMap) {
 		constexpr int CITY_CUBE_FACE_RES = 512;
 		const uint32_t cubeSalt = (0xC0BE0CBEu ^ uint32_t(fds::kEnvCubePad * 1000.0f))
@@ -2395,8 +2567,15 @@ void Initialize_City()
 
 		// SEPARATE cache file so the cube bake never overwrites the equirect
 		// cache (flag-off keeps hitting its own intact cache → byte-stable).
+		// env_live_water_shade: the cube cache is BYPASSED entirely (no read,
+		// no write) — the gate-on bake produces DIFFERENT content (water mesh
+		// hidden + procedural re-shade), the on-disk file must stay the
+		// pristine static bake for flag-off byte-identity, and a second
+		// salted file would double a ~450 MB artifact. Fresh bake ≈ 4 s at
+		// init; the re-shade itself depends on live water_* flag values, so
+		// re-deriving it each run also keeps those tunables live.
 		const char* kCubeCacheFile = "cache/city_envmap_cube.bin";
-		const bool cacheOn = fds::FeatureFlags::city_envmap_cache();
+		const bool cacheOn = fds::FeatureFlags::city_envmap_cache() && !liveWaterShade;
 		uint64_t ck = 0;
 		if (cacheOn)
 			ck = fds::ComputeCityPanoramaCacheKey("SCENES/CITY.FLD",
@@ -2408,11 +2587,28 @@ void Initialize_City()
 		if (cubeHit) {
 			building_count = int(buildings.size());
 		} else {
+			// env_live_water_shade: hide the water mesh for the WHOLE bake
+			// (pass 2 then leaves the pure mirrored world as the water
+			// region's reflection underlay — the static authored texture
+			// never composites) and build the wave field + caustic texture
+			// the re-shade samples (idempotent; init() rebuilds the same
+			// deterministic data at scene start).
+			TriMesh* lwWaterT = liveWaterShade ? (TriMesh*)RflObj->Data : nullptr;
+			dword lwWaterFlags = 0;
+			if (lwWaterT) {
+				fprintf(stderr, "[CITY] env_live_water_shade on — baking the "
+				        "probes' water region as procedural water (cache bypassed)\n");
+				pwater::BuildField();
+				lwWaterFlags = lwWaterT->Flags;
+				lwWaterT->Flags &= ~HTrack_Visible;
+			}
 			for (auto& b : buildings) {
 				if (g_shouldQuit.load(std::memory_order_relaxed)) { break; }
 				building_count++;
-				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES, b.rawPanorama);
+				bakeBuildingCubeFaces(b.obj, EnvCam, TmpSurf, CITY_CUBE_FACE_RES,
+				                      b.rawPanorama, liveWaterShade);
 			}
+			if (lwWaterT) lwWaterT->Flags = lwWaterFlags;
 			if (cacheOn && ck != 0
 			    && !g_shouldQuit.load(std::memory_order_relaxed)
 			    && building_count == int(buildings.size())) {

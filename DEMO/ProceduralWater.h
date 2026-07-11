@@ -33,4 +33,19 @@ void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz)
 // unset / no View. Row-parallel across the thread pool.
 void RenderGlints(float waterY, float minX, float maxX, float minZ, float maxZ);
 
+// Caustic-cell modulation factors at world XZ — the EXACT formula of
+// RenderGlints' texMix block (keep in lockstep; not shared with that hot loop
+// so the screen pass keeps its single wave-slope evaluation per pixel), for
+// callers that shade water OUTSIDE the screen pass (the city env-bake
+// procedural water re-shade). On return the caller applies:
+//     B = B*mod + blueAdd;  G = G*mod + blueAdd*0.40;  R = R*mod + blueAdd*0.08
+// `t` is the wave clock, `scale` = water_bump_scale, texMix/texScale/texWarp =
+// the water_albedo_mix/water_tex_scale/water_tex_warp values resolved by the
+// caller, flowU/flowV = the caustic UV translation (0 for a frozen bake).
+// Returns false (factors untouched) when texMix<=0 or BuildField hasn't run.
+bool CausticModulation(float wx, float wz, float t, float scale,
+                       float texMix, float texScale, float texWarp,
+                       float flowU, float flowV,
+                       float& mod, float& blueAdd);
+
 }  // namespace pwater

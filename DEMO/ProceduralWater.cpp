@@ -165,6 +165,28 @@ void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz)
 	waterWaveSlope(wx, wz, t, scale, /*nOct=*/0, bnx, bnz);
 }
 
+// See ProceduralWater.h — RenderGlints' texMix block as a standalone helper
+// (same constants, same all-octaves slope warp) for the city env-bake water
+// re-shade. Kept OUT of RenderGlints' loop so the screen pass still computes
+// its wave slope once per pixel for both the warp and the glint normal.
+bool CausticModulation(float wx, float wz, float t, float scale,
+                       float texMix, float texScale, float texWarp,
+                       float flowU, float flowV,
+                       float& mod, float& blueAdd)
+{
+	if (texMix <= 0.0f || g_waterTexW <= 0 || g_waterNrm.empty()) return false;
+	float bnx, bnz;
+	waterWaveSlope(wx, wz, t, scale, /*nOct=*/6, bnx, bnz);
+	float cb, cg, cr;
+	sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
+	               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
+	const float cell   = (cb + cg + cr) * (1.0f/765.0f);   // 0..1 cell value
+	const float cellHi = cell - 0.40f;                     // + on lines, - in base
+	mod     = 1.0f + cellHi * 2.0f * texMix * 0.6f;
+	blueAdd = (cellHi > 0.0f ? cellHi : 0.0f) * texMix * 220.0f;
+	return true;
+}
+
 // Bump-mapped specular GLINTS on the water surface — the "bump" proper, vs the
 // reflection-displacement ripple. The deferred kernel skips lighting on the
 // water, so it has no specular response; this adds it. Per pixel we RAY-CAST
