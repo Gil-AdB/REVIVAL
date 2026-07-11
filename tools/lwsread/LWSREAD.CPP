@@ -511,6 +511,32 @@ int Temp;
 #endif
 }
 
+// Authored volumetric headlight/beam flags — LightWave-style per-light
+// keys ("VolumetricLight 1" / "VolumetricLightIntensity 0.05"). The flag
+// sets FLD light-flag bit 2048 (Light_VolumetricCone — 512 is taken by
+// EndBehavior, see LWREAD.H); the intensity is the per-light beam gain
+// written as a conditional payload gated on that bit (see FLDSAVE.CPP
+// SaveLight). Engine: bit 2048 → Omni_ForceVolCone, gain multiplies the
+// volumetric cone density (0/unset → 1.0).
+void ReadLightVolumetricFlag(void)
+{
+int Temp;
+
+	fscanf(LWS,"%i",&Temp);
+	if (Temp) CurLight->Flags |= Light_VolumetricCone;
+#ifdef SceneDebugMode
+	printf("Light volumetric flag: %i\n",Temp);
+#endif
+}
+
+void ReadLightVolumetricIntensity(void)
+{
+	fscanf(LWS,"%f",&CurLight->VolBeamGain);
+#ifdef SceneDebugMode
+	printf("Light volumetric intensity: %f\n",CurLight->VolBeamGain);
+#endif
+}
+
 void ReadCameraMotion(void)
 {
 uint32_t      Keys,Channels;
@@ -620,6 +646,8 @@ struct
 	{"ConeAngle"			 , ReadLightConeAngle},    	// Envelope
 	{"LightRange"				, ReadLightRange},    	// Envelope
 	{"LensFlare" 			 , ReadLightLensFlareFlag},
+	{"VolumetricLight"		 , ReadLightVolumetricFlag},
+	{"VolumetricLightIntensity", ReadLightVolumetricIntensity},
 // Camera section
 	{"CameraMotion"		 , ReadCameraMotion},
 	{"ZoomFactor"			 , ReadCameraZoomFactor},   // Envelope

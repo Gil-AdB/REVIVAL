@@ -192,6 +192,15 @@ void SaveLight(FldLight *Light)
 	if (Light->Flags&4) SaveEnvelope(Light->Falloff);
 	if (Light->Flags&8) SaveEnvelope(Light->ConeAngle);
 	if (Light->Flags&16) SaveEnvelope(Light->Range);
+	// Bit 2048 (Light_VolumetricCone, LWS "VolumetricLight 1"): authored
+	// volumetric beam. Conditional payload = one float, the per-light beam
+	// gain (LWS "VolumetricLightIntensity"; 0 = unset → engine 1.0). Same
+	// backward-compatible extension mechanism as the conditional fields
+	// above: FLDs whose lights don't carry the bit are byte-identical to
+	// the pre-extension format, and old loaders never see the extra bytes
+	// unless the bit is set. (512 was NOT free — EndBehavior bits 256/512/
+	// 1024 share this Flags word; see Light_VolumetricCone in LWREAD.H.)
+	if (Light->Flags&Light_VolumetricCone) fwrite(&Light->VolBeamGain,1,4,FLD);
 }
 
 void SaveCamera(FldCamera *Cam)

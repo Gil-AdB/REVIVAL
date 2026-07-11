@@ -122,8 +122,14 @@ void AddOmni(Scene *Sc,Omni *Om,char *ObjName)
 	// omni's F face regardless of flags, and PREPROC.CPP skips spots when
 	// stamping the sprite blitter — without this lambda the renderer would
 	// call a null Filler. Same pattern as fds::MakeSpotLight.
+	// Preserve mask: ConvertOmni runs BEFORE AddOmni and may have set the
+	// authored volumetric-beam opt-in (FLD bit 512 → Omni_ForceVolCone) —
+	// the policy assignment below must not clobber it. (Legacy FLDs never
+	// set the bit, so the preserved term is 0 and the assignment is
+	// unchanged for them.)
 	Om->Flags = Omni_Active | Omni_SceneAuthored
-	          | (Om->Type == Light_SpotLight ? 0u : (DWord)Omni_Flare);
+	          | (Om->Type == Light_SpotLight ? 0u : (DWord)Omni_Flare)
+	          | (Om->Flags & (DWord)Omni_ForceVolCone);
 	if (Om->Type == Light_SpotLight)
 		Om->F.Filler = [](Face*, Vertex**, DWord, DWord,
 		                  const fds::RenderTarget&,
@@ -564,6 +570,16 @@ Omni *ConvertOmni(FldLight *Src)
 		OL->HotSpot = cosf(0.5f * coneDeg * (3.14159265f / 180.0f));
 		Vector_Form(&OL->IDir, 0.0f, 0.0f, 1.0f);
 		stationary = false;
+	}
+
+	// Authored volumetric beam (FLD bit 2048, LWS "VolumetricLight 1"):
+	// per-light cone-pass opt-in + gain, no scene-wide --draw_cones needed.
+	// VolBeamGain 0 = unset → 1.0 at consumption (SoA build). The flag must
+	// survive AddOmni's Flags policy assignment — see the preserve mask there.
+	if (Src->Flags & Light_VolumetricCone)
+	{
+		OL->Flags |= Omni_ForceVolCone;
+		OL->VolBeamGain = Src->VolBeamGain;
 	}
 
 	if (stationary)

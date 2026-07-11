@@ -1993,6 +1993,9 @@ static void UpdateBounceSpots(Scene *sc, std::vector<Mirror> &mirrors)
             b->rRange = 1.0f / b->IRange;
             b->HotSpot = O->HotSpot;
             b->FallOff = O->FallOff;
+            // Inherit the source beam's authored gain (0 = unset → 1.0 at
+            // SoA build) so a dimmed authored beam bounces dimmed too.
+            b->VolBeamGain = O->VolBeamGain;
             b->Flags  = Omni_Active | Omni_ForceVolCone | Omni_BounceCone;
             b->mirrorId = 0;
             b->mirrorSrcOmni = O;

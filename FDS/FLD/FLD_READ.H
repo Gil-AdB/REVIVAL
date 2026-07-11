@@ -124,6 +124,10 @@ typedef struct FldLgt
 	FldEnv        *Falloff;
 	FldEnv        *ConeAngle;
 	FldEnv        *Range;
+	// Per-light volumetric beam gain — conditional field, only present in
+	// the FLD when Flags carries Light_VolumetricCone (2048). 0 = unset →
+	// converter/engine treat as 1.0 (FlareScale/HaloIntensity convention).
+	float          VolBeamGain;
 	FldLgt        *Next;
 } FldLight;
 

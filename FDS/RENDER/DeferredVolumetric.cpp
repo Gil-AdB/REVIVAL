@@ -1100,9 +1100,14 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     // invisibility).
                     const float nNorm = useAnalytic
                         ? 1.0f : float(N_SAMPLES) / float(nSamp);
+                    // Per-spot beam gain (authored VolumetricLightIntensity;
+                    // unset → 1.0, exact ×1.0 keeps legacy content bit-
+                    // identical). Applied as a trailing factor so gain-free
+                    // lights evaluate the identical expression as before.
+                    const float coneGain = lights->coneGain[li];
                     for (int lane = 0; lane < 8; ++lane) {
                         if (accArr[lane] <= 0.0f) continue;
-                        const float w = accArr[lane] * density * nNorm;
+                        const float w = accArr[lane] * density * nNorm * coneGain;
                         accB[lane] += w * colB;
                         accG[lane] += w * colG;
                         accR[lane] += w * colR;
@@ -1420,7 +1425,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                 // inverse-square distAtten above gives roughly position-
                 // invariant brightness, biased toward close cones — matches
                 // the "flashlight in fog" mental model.
-                const float w = acc * density;
+                // Trailing per-spot beam gain: unset → 1.0 (exact), same as
+                // the vec path.
+                const float w = acc * density * lights->coneGain[li];
                 accB += w * lights->colB[li];
                 accG += w * lights->colG[li];
                 accR += w * lights->colR[li];

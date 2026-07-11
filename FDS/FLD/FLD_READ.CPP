@@ -258,6 +258,12 @@ void ReadLight(FldLight *Light)
 	if (Light->Flags&4) Light->Falloff=ReadEnvelope();
 	if (Light->Flags&8) Light->ConeAngle=ReadEnvelope();
 	if (Light->Flags&16) Light->Range=ReadEnvelope(); //v0.114
+	// Bit 2048 = Light_VolumetricCone (authored volumetric beam): one float,
+	// the per-light beam gain (0 = unset → 1.0). Written conditionally by
+	// tools/lwsread FLDSAVE.CPP — legacy FLD writers only ever set bits
+	// ≤1024 (EndBehavior tops out the word), so this branch is provably
+	// inert for legacy content (Light is memset(0) by the caller).
+	if (Light->Flags&Light_VolumetricCone) fread(&Light->VolBeamGain,1,4,FLD);
 }
 
 void ReadCamera(FldCamera *Cam)

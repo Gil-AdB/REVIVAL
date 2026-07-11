@@ -55,6 +55,13 @@ enum LightWave_Constants
 	Light_Point							=	64,
 	Light_Spot							= 128,
 	Light_LensFlare					= 256,
+	// Authored volumetric beam (LWS "VolumetricLight 1", tools/lwsread).
+	// Gates a conditional per-light gain float in the FLD light record —
+	// see FLD_READ.CPP ReadLight. FLDs without the bit are byte-identical
+	// to the pre-extension format. NOT 512: light Flags double as the
+	// EndBehavior store (256/512/1024 — "EndBehavior 1" = 512 on nearly
+	// every authored light), so 2048 is the first free bit.
+	Light_VolumetricCone		= 2048,
 // Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2

@@ -121,6 +121,11 @@ struct ViewLightsSoA {
 	alignas(32) float    haloRange     [DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float    haloRange2    [DEFERRED_MAX_VIEW_LIGHTS];
 	alignas(32) float    haloRRange    [DEFERRED_MAX_VIEW_LIGHTS];
+	// Per-spot volumetric-cone density multiplier (haloDensityMul's cone
+	// sibling). Filled from Omni::VolBeamGain in the SoA build (0 = unset
+	// → 1.0), consumed by Render_VolumetricCones_Tile — scalar and vec
+	// integration paths both multiply the accumulated integral by it.
+	alignas(32) float    coneGain      [DEFERRED_MAX_VIEW_LIGHTS];
 	// Per-light mirror id (0 = original world; >0 = clone of mirror
 	// with that id). The kernels read gb.mirrorId[pixel] once per
 	// pixel and skip any light whose mirrorId disagrees, so original-

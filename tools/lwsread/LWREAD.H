@@ -59,6 +59,13 @@ enum LightWave_Constants
 	Light_Point						=	64,
 	Light_Spot						= 128,
 	Light_LensFlare					= 256,
+	// Authored volumetric beam (LWS "VolumetricLight 1"). FLD extension bit:
+	// SaveLight writes a conditional per-light gain float when set — FLDs
+	// without the bit are byte-identical to the pre-extension format.
+	// NOT 512: light Flags double as the EndBehavior store (ReadEndBehavior
+	// ORs 256/512/1024 into CurLight->Flags — "EndBehavior 1" = 512 on
+	// nearly every authored light), so 2048 is the first free bit.
+	Light_VolumetricCone			= 2048,
 	// Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2
@@ -182,6 +189,10 @@ typedef struct FldLgt
 	FldEnv				*Falloff;
 	FldEnv				*ConeAngle;
 	FldEnv				*Range;
+	// Per-light volumetric beam gain (LWS "VolumetricLightIntensity").
+	// Only serialized when Flags carries Light_VolumetricCone (2048);
+	// 0 = unset → engine treats as 1.0.
+	float					 VolBeamGain;
 	FldLgt				*Next;
 } FldLight;
 

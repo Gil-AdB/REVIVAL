@@ -5226,6 +5226,11 @@ void Render_DeferredLighting(DeferredLightingCtx &ctx, const DeferredOverride *o
 			haloRange = baseRange * (rangeMult > 0.0f ? rangeMult : 1.0f);
 		}
 		lights.haloDensityMul[numLights] = haloMul;
+		// Cone sibling of haloMul: per-spot volumetric beam gain (authored
+		// via LWS VolumetricLightIntensity → Omni::VolBeamGain). 0 = unset
+		// → 1.0, so code-created beams (greets disco, bounce pool) and
+		// legacy content are bit-exact (×1.0 is exact in float).
+		lights.coneGain      [numLights] = (O->VolBeamGain > 0.0f) ? O->VolBeamGain : 1.0f;
 		lights.haloRange     [numLights] = haloRange;
 		lights.haloRange2    [numLights] = haloRange * haloRange;
 		lights.haloRRange    [numLights] = (haloRange > 0.0f) ? 1.0f / haloRange : 0.0f;
