@@ -1,0 +1,9 @@
+# ── greets-beams ─────────────────────────────────────────────────────────
+# User-tuned volumetric beam turbulence/swirl for the greets disco shafts
+# (tuned live in the editor render panel, 2026-07-11 — values from GB).
+# Usage: ./DEMO --flags-file=PRESETS/greets-beams.flags   (compose after
+# your main preset; later tokens win).
+cone_turbulence=0.64
+cone_turb_scale=0.6
+cone_turb_speed=0.5
+cone_swirl=1.26
