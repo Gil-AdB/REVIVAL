@@ -797,7 +797,8 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 }
 
 // --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
-// values (centiseconds; chase runs ~0..2500). Driver-based: createChaseScene
+// values (centiseconds; chase runs 0..1698 — frames 1..1699 @ CHPartTime;
+// re-dumps the last rendered VPage past 1699). Driver-based: createChaseScene
 // applies the cinematic + water_procedural defaults, exactly like the live demo.
 int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     ensureOutDir(cfg.outDir);

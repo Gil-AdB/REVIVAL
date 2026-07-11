@@ -13,6 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
+| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `d83691f287da1d402a421128fd146021`<br>t400 `2ff509602db964263462074d75f458bc`<br>t800 `72a7dd800f72a7ebf883678a7adcfe0b`<br>t1200 `b5439eb7a3a6f148cd949502aa59e417`<br>t1600 `f56805faf05b98e0654140f531f4e7c9` |
+| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
 
@@ -28,6 +30,12 @@ Traps:
   Those files are his: never stage, never overwrite, never `git add -A`.
 - Editor page freshness: build tag in the panel header (currently b60/b61);
   bump it with every shell.html change or staleness is undiagnosable.
+- **chase**: no bakes, no known nondeterminism (pinned srand, fine clock off
+  in snapshots). Both pins above confirmed byte-identical over 3 runs each
+  (2026-07-12, C0). Valid snapshot range **t=0..1698** (past 1699 the harness
+  re-dumps the last rendered VPage). Regen from `Authoring/chase/` via
+  `pin_scene.py --legacy-vlum` is byte-identical to the shipping FLD (delta=0,
+  747,511 B) — the pre-edit baseline for later authored chase stages.
 
 ## The big architecture decision (2026-07-11, user-set direction)
 
