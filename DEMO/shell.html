@@ -599,7 +599,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b65</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b66</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -660,6 +660,12 @@
           <option value="1024">1024²</option>
         </select>
       </div>
+      <div id="editor-knobs-controls" style="display:none;gap:6px;align-items:center;margin-top:4px;">
+        <input id="editor-knobs-search" placeholder="find a flag…" title="filter flags by name or help text (live)" style="flex:1;min-width:0;background:#222;color:#ddd;border:1px solid #444;padding:3px 5px;font-size:11px;">
+        <label style="font-size:10px;color:#aaa;cursor:pointer;white-space:nowrap;" title="show only flags whose value differs from default (or explicitly set)">
+          <input type="checkbox" id="editor-knobs-changed" style="vertical-align:-2px;"> changed only
+        </label>
+      </div>
       <div id="editor-knobs" style="display:none;"></div>
       <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
         <span style="flex:0 0 64px;">scene time</span>
@@ -690,7 +696,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = 'b65';
+      var REV_BUILD = 'b66';
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1378,29 +1384,84 @@
         row.appendChild(rst);
         return row;
       }
+      // Category display order + friendlier group labels (registry categories
+      // are terse: atmos/ssao/deferred/scene/parallax/engine/…). Unknown
+      // categories fall to the end, alphabetical, labelled by their raw name.
+      var EDITOR_CAT_ORDER = ['scene','deferred','hdr','tonemap','bloom','post',
+                              'lens','dof','ssao','ao','atmos','fog','env','glass',
+                              'shadow','parallax','nmap','engine','debug','misc'];
+      var EDITOR_CAT_LABELS = {
+        scene:'Scene', deferred:'Deferred pipeline', hdr:'HDR / tonemap',
+        tonemap:'Tonemap', bloom:'Bloom', post:'Post FX', lens:'Lens FX',
+        dof:'Depth of field', ssao:'SSAO / ambient occlusion', ao:'Ambient occlusion',
+        atmos:'Atmosphere', fog:'Fog', env:'Env reflections', glass:'Glass / refraction',
+        shadow:'Shadows', parallax:'Parallax', nmap:'Normal maps', engine:'Engine',
+        debug:'Debug / viz', misc:'Misc' };
+      // "changed from default": value differs from the compile default, or the
+      // flag was explicitly set (CLI/env/editor). Both drive the ● marker, the
+      // auto-expand of categories that contain changes, and the "changed only"
+      // filter (registry gives value/def/set per flag).
+      function knobChanged(p){ return !!p.set || String(p.value) !== String(p.def); }
+      function knobMatches(p, q){
+        if (!q) return true;
+        return (p.name && p.name.toLowerCase().indexOf(q) >= 0) ||
+               (p.help && p.help.toLowerCase().indexOf(q) >= 0);
+      }
+      // Per-category user-toggled open state (overrides the default, which is
+      // "open iff the category contains a changed flag"). A search / changed-
+      // only view auto-expands everything so matches are visible.
+      var editorKnobCatOpen = {};
       function renderKnobList(){
         var el = document.getElementById('editor-knobs'); if (!el) return;
         var all = document.getElementById('editor-knobs-all').checked;
+        var changedOnly = !!(document.getElementById('editor-knobs-changed') || {}).checked;
+        var q = (((document.getElementById('editor-knobs-search') || {}).value) || '').trim().toLowerCase();
         el.innerHTML = '';
         var cnt = document.getElementById('editor-knobs-count');
-        if (cnt) cnt.textContent = editorParams.length ? ('(' + (all ? editorParams.length : EDITOR_KNOBS.length) + ')') : '';
-        if (!editorParams.length) return;
-        if (all) {
-          var byCat = {};
-          editorParams.forEach(function(p){ (byCat[p.cat || 'misc'] = byCat[p.cat || 'misc'] || []).push(p); });
-          Object.keys(byCat).sort().forEach(function(cat){
-            var h = document.createElement('div');
-            h.style.cssText = 'color:#8ac;font-size:10px;margin-top:6px;border-bottom:1px solid #234;';
-            h.textContent = cat;
-            el.appendChild(h);
-            byCat[cat].forEach(function(p){ el.appendChild(knobRow(p)); });
-          });
-        } else {
-          EDITOR_KNOBS.forEach(function(name){
-            var p = editorParams.find(function(x){ return x.name === name; });
-            if (p) el.appendChild(knobRow(p));
-          });
+        if (!editorParams.length) { if (cnt) cnt.textContent = ''; return; }
+        // Working set: curated important flags for the default browse; but a
+        // search query OR "changed only" (OR "all") widens to EVERY flag, so a
+        // find never misses one and "changed only" surfaces all changes — not
+        // just the curated subset. Then apply the changed + query filters.
+        var pool = (all || changedOnly || q) ? editorParams
+                       : editorParams.filter(function(p){ return EDITOR_KNOBS.indexOf(p.name) >= 0; });
+        var work = pool.filter(function(p){ return (!changedOnly || knobChanged(p)) && knobMatches(p, q); });
+        if (cnt) cnt.textContent = '(' + work.length + '/' + editorParams.length + ')';
+        var byCat = {};
+        work.forEach(function(p){ (byCat[p.cat || 'misc'] = byCat[p.cat || 'misc'] || []).push(p); });
+        var cats = Object.keys(byCat).sort(function(a, b){
+          var ia = EDITOR_CAT_ORDER.indexOf(a), ib = EDITOR_CAT_ORDER.indexOf(b);
+          if (ia < 0) ia = 999; if (ib < 0) ib = 999;
+          return (ia - ib) || a.localeCompare(b);
+        });
+        if (!cats.length) {
+          var none = document.createElement('div'); none.className = 'surf-tex';
+          none.textContent = q ? ('no flags match “' + q + '”')
+                               : (changedOnly ? 'no flags changed from default' : 'no flags');
+          el.appendChild(none);
+          return;
         }
+        var autoExpand = !!q || changedOnly;   // filtering → show matches open
+        cats.forEach(function(cat){
+          var members = byCat[cat];
+          var hasChanged = members.some(knobChanged);
+          var open = autoExpand ? true
+                   : (cat in editorKnobCatOpen ? editorKnobCatOpen[cat] : hasChanged);
+          var label = EDITOR_CAT_LABELS[cat] || cat;
+          var h = document.createElement('div');
+          h.style.cssText = 'color:#8ac;font-size:10px;margin-top:6px;border-bottom:1px solid #234;cursor:pointer;user-select:none;';
+          h.innerHTML = (open ? '▾ ' : '▸ ') + label +
+            ' <span style="color:#567;">(' + members.length + ')</span>' +
+            (hasChanged ? ' <span style="color:#fc8;">●</span>' : '');
+          h.title = (open ? 'collapse' : 'expand') + ' ' + label + (autoExpand ? ' (auto-expanded while filtering)' : '');
+          h.onclick = function(){
+            var cur = (cat in editorKnobCatOpen) ? editorKnobCatOpen[cat] : hasChanged;
+            editorKnobCatOpen[cat] = !cur;
+            renderKnobList();
+          };
+          el.appendChild(h);
+          if (open) members.forEach(function(p){ el.appendChild(knobRow(p)); });
+        });
       }
       // Pano viewer: env_refl_viz overlay (draws post-tonemap in the engine,
       // green frame, top-right). editorShowPano is SHARED by the header
@@ -1563,11 +1624,19 @@
                          e.target.tagName === 'OPTION' ||
                          e.target.tagName === 'LABEL')) return;   // controls, not a toggle
         var el = document.getElementById('editor-knobs');
+        var ctl = document.getElementById('editor-knobs-controls');
         var opening = el.style.display === 'none';
         el.style.display = opening ? 'block' : 'none';
+        if (ctl) ctl.style.display = opening ? 'flex' : 'none';
         if (opening) { refreshParams(); renderKnobList(); }
       };
       document.getElementById('editor-knobs-all').onchange = function(){ renderKnobList(); };
+      (function(){
+        var sb = document.getElementById('editor-knobs-search');
+        if (sb) sb.oninput = function(){ renderKnobList(); };
+        var cc = document.getElementById('editor-knobs-changed');
+        if (cc) cc.onchange = function(){ renderKnobList(); };
+      })();
       document.getElementById('editor-knobs-resetall').onclick = function(e){
         e.preventDefault();
         refreshParams();
