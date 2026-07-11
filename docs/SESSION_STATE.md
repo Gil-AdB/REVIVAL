@@ -1,160 +1,191 @@
-# SESSION STATE — structural push (updated 2026-07-04)
+# SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
-Read this when resuming. Branch feature/soa-vertex, all pushed.
-Perf floor at the ts=491 reference: **~40.4 ms min** on an idle box
-(machine-load drift makes day-to-day mins swing 41-44; always interleave
-A/B). Bench recipe + load-sanity rules live in the memory file
-`greets-bench-reference-frame` and docs/FRAME_PIPELINE_PLAN.md.
+Read this when resuming. Branch **fog-wt**, nothing pushed. Previous campaign
+(structural push): docs/posts/SESSION_STATE_2026-07-04_structural.md.
+Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
 
-## STRUCTURAL PUSH (user-approved campaign, 2026-07-04) — status
+## Verification protocol (THE gates — run before/after everything)
 
-Ranked list (full reasoning in the 2026-07-04 conversation + below):
-1. ✅ **#3 dispatch consolidation (e1355f0)** — every pool fan now goes
-   through dispatchIndexed (was: task-per-tile loops, hand-rolled
-   cursor+semaphore fans, TBR_Render's mutex+condvar). Net −76 lines.
-   Validated: gate ALL PASS, city/fountain snapshots byte-identical,
-   greets diff == pre-existing noise floor, TSan clean, perf-neutral.
-2. ✅ **#2 binning helper (c786b1f)** — lightSphereScreenRect in
-   DeferredCommon.h replaces the 4 copied sphere→tile-range blocks
-   (kernel/strips/cones/halos; the clone-cone cull gap was exactly this
-   rot). zeroTileLightPadding folds the two padding blocks. Same
-   validation, all green.
-3. ✅ **TBR migration — ALL SCENES SHIPPED** (greets 800fc47, city
-   d24bb7f, chase 8c55e80). Every scene's transparents + flares now go
-   through the TBR strips (TBR_EnsureInit + Scn_SpriteTBR at scene init,
-   gated on --deferred_unified_tbr; --no-… = exact legacy). Holes closed
-   on the way: TBR_Sprite got the mirror-clone footprint gate; new
-   TBR_MatchesTarget guards all TBR consumers against offscreen passes
-   (forward RTT would cross-pollute the main strips); the city A/B
-   exposed 3 missing behaviors in TBR_Render's flare draw vs the
-   immediate path — fogged colorize, far-plane Z clamp (beyond-FZP
-   encoding WRAPS and the flare wins every z-test), Face_PointZTest —
-   all ported (fountain byte-identical vs pre-campaign binary).
-   Flares now sort by Z — fixes the known "flare over transparents"
-   bug. **USER EYEBALL PENDING live**: greets lamp flares through
-   glass (t=700), city beacon flares, chase/city water. Perf: greets
-   ~1ms faster, city ~0.4ms faster (interleaved; the first city bench
-   read as a 7ms regression = machine load — ALWAYS interleave).
-   The legacy peel remains ONLY as the offscreen fallback + escape
-   flag; deleting it outright needs an offscreen story first.
-4. 🟨 **#1 RenderContext migration — the g_deferredCtx SINGLETON IS
-   DELETED (f6519c7 + 5a9967f)**. renderFrame's stack dctx is the only
-   source; every reader takes ctx by param (fog pass, legacy-peel
-   transparent wrappers, RenderXparClumpInStrip via TBR_Render's new
-   ctx pointer — null on forward TBR frames). Shadow locals renamed dc.
-   Byte-identical on 4 scenes + gate. REMAINING (plan steps 4-5, the
-   ~400-site mechanical campaign): thread XRes/VPage/FList/CAll/
-   CurScene into RenderContext function-by-function (leaf-first, gate
-   each), then per-instance pipelines for offscreen parallelism
-   (RTT/shadow-raster). See RENDER_CONTEXT_PLAN.md "Revised remaining
-   steps" 4-5.
-5. ✅ **#4 mirror system promoted to FDS/RENDER (1e26fc5)** —
-   GreetsMirror + MirrorShatter + SpotlightCones moved wholesale (they
-   were already parameterized); canonical PickFillerForMaterial now
-   lives in TheOtherBarry.h (SceneBuilder delegates). Gate PASS,
-   teleporter smoke byte-identical, clean-tree build verified.
+All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 
-Also fixed this session (before the push): lightmap-bake coverage-bit
-race (0df96a6, atomic OR — TSan-confirmed real, greets init now clean);
-teleporter-stone run-to-run nondeterminism is NOT it — still open,
-separate cause. DoF "not working" = user config had --dof_range=20 but
-the flag is a FRACTION of far-plane (0.03-0.1 sane); code is fine.
-fog-wt merged in (2578dcb): editor write-back, env_refl/PBR (default
-OFF), authoring pins. User's local Runtime/SCENES/FOUNTAIN.FLD (80KB)
-still shadows the merged pinned 512KB one — user to decide.
+| gate | recipe | pin |
+|---|---|---|
+| city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
+| greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
+| fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
+| gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
+| wasm | `make wasm` | links |
 
-## CONES/CLONES CAMPAIGN — DONE 2026-07-04 (commit 5a58269)
+Traps:
+- **greets flips ~1-in-12** to a random hash (unresolved kernel-internal
+  nondeterminism, see Known Issues). Majority over 3+ runs decides; a single
+  mismatch means rerun, not failure. Rate conclusions need the binomial
+  (24-run gates for race claims — see memory `measurement-tool-traps`).
+- **city cache**: `cache/city_envmap_cube.bin` is keyed on CITY.FLD bytes.
+  After ANY CITY.FLD install, discard the first run (cache rebuild), then hash.
+- Greets pin includes the USER'S UNCOMMITTED files (GREETS.FLD/MAT, momy
+  textures, Piramid.lwo, Hull.lwo) — a clean checkout hashes differently.
+  Those files are his: never stage, never overwrite, never `git add -A`.
+- Editor page freshness: build tag in the panel header (currently b60/b61);
+  bump it with every shell.html change or staleness is undiagnosable.
 
-The t=1130-1162 cluster + attack results (full numbers in
-FRAME_PIPELINE_PLAN.md 2026-07-03/04 entries):
-1. **Clone-cone footprint cull SHIPPED**: 40/50 cone spots were mirror
-   clones with no tile-level footprint cull. Cones wall 6.4-7.5 → 3.6-4.1
-   in-window (p50 −4 ms), ts=491 −1.3 ms. Byte-identical + gate PASS.
-   Debug: FDS_NO_CONE_MIRROR_CULL / FDS_CONE_SKIP_* / FDS_CONE_ATTR.
-2. **Clone lights in the kernel: measured DEAD** — presence cull already
-   contains them (w1 10.0 vs 10.1 mirror off/on, avg lights/tile ~10.5
-   both). Don't build a cap. Remaining mirror delta (+2.5 min/+4 p50) is
-   spread machinery (peel 1.3-1.5, RTT 0.9, masks 0.8, clone raster).
+## The big architecture decision (2026-07-11, user-set direction)
 
-## PREVIOUS NEXT-TASK (deprioritized 2026-07-03): xpar composite fast path
+**Sidecars are being eliminated.** Persistence belongs in the authoring
+sources: per-surface → custom LWO SURF sub-chunks; per-light / per-object /
+scene-level → LWS keywords; everything flows through tools/lwsread into the
+FLD via **flag-bit + conditional payload** records (the proven extension
+idiom — see next section). Crash (no sources yet) falls back to fldpatch
+writing the same extended records. Sequencing constraint: writers first, user
+re-saves greets once (his GREETS.MAT is the only record of the momy map
+assignments), THEN the sidecar reader dies. In-flight work (see bottom)
+already follows this; a full migration campaign (all SURF_SIDECAR_KEYS +
+light:/obj:/scene: keys, editor Save rewrite, reader retirement) is the next
+major batch.
 
-The mirror cost anatomy is fully measured (FRAME_PIPELINE_PLAN.md 2026-07-03
-entry): full-screen mirror = +18 ms, and the xpar peel's share is 5.1 ms which
-decomposes (new FDS_TAIL_PROF `xpar-phases` line, commit 5b71911) as:
+## The FLD/LWS extension mechanism (use this for every new authored property)
 
-    clear 0.39 + raster 0.73 + COMPOSITE 2.94 + ~1.0 serial mirWin scan
+Proven end-to-end by the volumetric-beam work (9172c5d):
+1. LWS text keyword(s) per light/object/scene (e.g. `VolumetricLight 1`,
+   `VolumetricLightIntensity 3.0`) parsed in tools/lwsread/LWSREAD.CPP
+   (BOTH build variants: lwsread + lwsread_legacy — same source).
+2. FLDSAVE.CPP writes a NEW flag bit + conditional payload after the record
+   (bit-gated fields are the FLD's native extension shape; FLDs without the
+   bit stay byte-identical — prove with a regen diff).
+   **TRAP: bits 256/512/1024 of the light flags are OR-contaminated by
+   ReadEndBehavior — bit 512 was NOT free. Headlight beams use bit 2048.
+   Always check what ORs into a flag word before claiming a bit.**
+3. Engine FLD loader (FDS/FLD/FLD_CONV.CPP) reads the conditional payload
+   into an Omni/Material/Scene field (0-sentinel = unset → legacy default;
+   GreetsMirror clones inherit via memcpy — sane by construction).
+4. Editor write-back: tools/editor_server.py patches the LWS/LWO, regen via
+   the scene's lwsread variant (legacy for chase/fountain/city — VLUM×100
+   era), installs the FLD (backup to Runtime/SCENES/.backups/ first).
 
-Reference pose for all of this work:
-    FDS_GREETS_CAM='0.0,2.5,-2.5,0.0,0.0,1.0'  --bench=scene@scene=greets,ts=700
-    (teleporter mirror fills the screen; mirror on/off A/B = --greets-mirror /
-    --no-greets-mirror; full user config in FRAME_PIPELINE_PLAN.md)
+## What landed (grouped; commit msgs carry the detail)
 
-Two concrete sub-targets, in order:
+### Authoring recovery — city is a full authoring scene
+- Sources found IN-REPO (Original/dos-rev/.../CITY/): CITY1.LWS identified by
+  light-set fingerprint; 17/20 objects byte-exact. b1/b3/b6 shipped higher-
+  poly than any surviving LWO → recovered FROM the shipping FLD via
+  tools/fld2lwo/ (byte-parity regen: CITY1.LWS → shipping CITY.FLD exact).
+  Authoring/city/README.md has provenance + regen commands. (d60f5ab,
+  cc6244e, 4f943a1)
+- **Search lessons** (for the crash hunt + future archaeology): match by
+  embedded SRFS surface-name sets, not filenames (the b3 slot holds a "b7"
+  building); list ARJ archives (first sweep missed them); lwsread maps LWO
+  points 1:1 to FLD verts — NO seam splitting, count-matching is valid.
+- 46 authored headlight spotlights baked into CITY1.LWS (two per vehicle,
+  parented, warm 255/235/185, 15°/30°), engine gained LightType-2 spot
+  conversion + parented aim + flare-stamp skip. Code headlight schemes
+  retired (default off, kept for A/B). (48d57e5, e4e34cf)
+- Authored volumetric beams: per-light `VolumetricLightIntensity` gain
+  (gain 3.0 shipped); retune = tools/add_city_beam_flags.py + regen. (9172c5d,
+  1275dea)
 
-1. **The composite (2.94 ms)** = renderDeferredTransparentTile_Front/Back →
-   the transparent lighting kernel (DeferredSurfaceKernel.cpp xpar peel
-   template) running the FULL per-pixel light loop over every covered pixel,
-   3 batches/frame at the pose (clone back + clone front + portal glass).
-   Options considered:
-   a. Quarter/checker rate for the xpar composite (mirror content tolerates
-      it; needs a fill pass like the opaque C-fill — biggest but most work).
-   b. Cheap-glass path: the half-silvered glass material has Diffuse=0
-      (GreetsMirror.cpp ~614-668: lit = Lum*255, silver tint) so the light
-      loop contributes ONLY specular there — a spec-only (or skip-loop)
-      branch for Diffuse==0 materials is small and targeted, but only covers
-      the glass batch, not the clone batches.
-   c. Cap/cull lights harder for clone-tagged xpar pixels.
-   MEASURED (per-batch print landed): the GLASS batch (tag=0 front, 4 faces)
-   is 2.645 ms of the 2.94 composite; clone batches are 0.30 combined. So
-   option (a) is DEAD (don't build quarter-rate xpar) and (b) is the task:
-   cheap path for Diffuse==0 glass — either skip the light loop entirely
-   (if the spec sheen isn't load-bearing — EYEBALL at the t=700 pose, gates
-   can't judge it) or a spec-only loop (skips diffuse+shadow work). ~2.5 ms
-   at full mirror coverage; ~0 at ts=491 (coverage-scaled).
+### Determinism
+- `srand(time(NULL))` → pinned seed (GENERAL.H). The Omni_Rand flare twinkle
+  made every run unique — bakes-on frames all-distinct, bakes-off glass-band
+  flips. (5f325d4)
+- TBR transparent order: facing rank precomputed at insert (torn reads in the
+  concurrent sort flipped front/back). (1e91306, fb3a302)
+- Glass band scheduler: B1/B2 back/front sub-phases fixed the deterministic
+  greets "face pop". (8539e8f → 8539e8)
+- Scene clock sawtooth (user-visible "city camera jumps back"): rate was an
+  EMA of instantaneous dTimer/dWall (Jensen-biased ~10% high) + hard snaps on
+  hitches. Now ratio-of-EMAs + hitch-hold + continuous anchor. (2541c32)
 
-2. **The ~1 ms serial mirWin scan** (RENDER.CPP peel preamble ~line 680:
-   full-screen gb.mirrorId byte scan building per-mirror bboxes). Either
-   parallelize (dispatchIndexed row bands + per-band bbox merge) or derive
-   from StampMirrorMasks' stamp loop (it already touches exactly those
-   pixels — accumulate bboxes there for free).
+### Rendering features (all default-off unless noted)
+- Screen-space glass refraction stack (Mat_Refractive opt-in, per-material
+  IOR, band scheduler w/ barriers) — editor ON by default. (f4d470a..)
+- HDR: 250 lit-cap now HDR-gated in vec+transparent kernels too → luminosity
+  >1 blooms (was scalar-only; editor edits were silently capped). LDR keeps
+  the cap. NOTE: OuterVec still stores 8-bit — radiance >255 needs the scalar
+  kernel on PreferOuterVec scenes. (f6ec404)
+- Cone turbulence/swirl: world-space value noise + helical swirl in ALL
+  three cone integration paths, SIMD (+3.2ms greets); user's tuned values in
+  Runtime/PRESETS/greets-beams.flags. TRAP: reshaping the fmadd chain moves
+  hashes by ulps even at neutral values — off path keeps the exact legacy
+  expression. (ab9a9c1, 189eeec)
+- Env live water (city): probe bake hides the water mesh, re-shades plane
+  texels with the main-view procedural formula (Schlick + caustic cells);
+  sample-time WaveSlope perturb animates. Bypasses the pristine cache when
+  on (~4s init, 0 per-frame). Glints not baked (view-dependent). (5d28db7,
+  0162d3b)
+- fastfog dist-dim slice 4: sky dims at horizon + forward pixels dim
+  (inert at default 0). (8acf8cd)
 
-## Validation kit for that work
-- tools/render_gate.sh (now HEADLESS — SDL_VIDEODRIVER=dummy inside) must
-  stay ALL PASS; it covers the xpar kernel via mirrortest.
-- The t=700 teleporter pose above: fixed-vs-variant snapshot must be
-  zero-pixel for gated-off, eyeball for quality changes.
-- Warm-sequence repro rule: mirror state accumulates across the timeline —
-  cold snapshot jumps show NOTHING (clone-lanes=0). Use
-  --snapshot=greets@t=1800,1850,...,2014 style sequences.
-  FDS_MIRROR_CLAMP_STATS=1 prints clone-lanes/rejected per frame.
-- Machine load creeps mid-session: re-run a known config (quarter+C ts=491 =
-  ~40.4 idle) before trusting any new number; interleave A/B variants.
+### Flags / presets
+- `--flags-file=<path>` (nestable, comments, CLI-after-file wins) + unknown
+  `--flag` WARNING (was silent — a typo'd `--fast-fog-blob` ran slab fog for
+  weeks). Runtime/PRESETS/city-noir.flags = the user's city look, cinematic-
+  based, measured byte-equivalent to his old 40-token line + blobs fix.
+  (2482013)
+- Per-surface migrations of former globals: waterProcedural (tri-state),
+  envRefl (tri-state), envBakeRes (pow2, largest-wins on shared probes),
+  RefractIor; scene-level sidecar defaults for boltFlash/fastFog bounds —
+  NOTE: these sidecar forms are transitional; the LWS/LWO migration
+  supersedes them. Precedence everywhere: per-surface > CLI/env > scene
+  default > compile default. `SCRIPTS/<scene>.params` lines still override
+  scene defaults (per-frame scripts yield only to explicit-set marks).
 
-## What shipped this session (all pushed, see git log 44fdef5..5b71911)
-- HDR regressions (f16 clamp, bright-pass revert, C-fill trust region).
-- checkerC greets default + C ported to checker fill (NOTE: real cost vs
-  quarter is +6 ms at ts=491 — the +0.5-1 reading was load-contaminated;
-  user runs --deferred-quarter explicitly; default flip-back is one line in
-  GreetsApplyRunDefaults, still pending a user decision).
-- Half-res DoF (default), moving-omni-128 default, bake mesh cache,
-  temporal SSAO (--ssao_temporal, default off, user now runs it).
-- Frame-pipeline verdict: DON'T build tick∥render (ceiling ~3 ms, bandwidth
-  kills overlaps — 3 variants measured dead). Parallel Lighting shipped.
-- dispatchIndexed (Threads.h): work-stealing chunk dispatch engine-wide,
-  −3 ms; TWO lifetime traps documented in its comments (temporary fn dies
-  before the drain → copy fn by value; thread_local vectors re-resolve on
-  the worker inside [&] lambdas → snapshot .data()).
-- P-core-only scheduling measured: LOSES (~+2.7 ms); E-cores net-positive.
-- Profiler prints top-10 slowest frames' scene-t (`slowest frames (ms@t)`).
-- Mirror-through-wall moire FIXED (ce4f906): clone wall-depth clamp
-  (z_candidate vs mirrorMaskZ+16). FDS_NO_MIRROR_WALLZ_CLAMP=1 = A/B escape.
-- render_gate.sh headless + mirrortest golden rebaselined (was silently red
-  since c340ffa — run the gate at session start).
-- ASan finds: SceneCorrections stack over-read (bounds-guarded).
+### Editor (browser, `make editor` → :8099/DEMO.html?editor&scene=<name>)
+- Objects: FLD-tree hierarchy in all scenes (chunk-collapse `:cN`, engine
+  helpers pooled in hidden "(engine)"; NAMED engine meshes with faces get
+  visible entries — that's how the disco ball became reachable, plus its
+  material needed MatLib linkage). Per-object scale knob (EditorScale on the
+  Scale spline — pivots correctly, all instances; Tri_Possessed meshes are
+  honestly inert). Focus = nearest-instance, in-context (2.5× radius).
+- Lights: grouped by parent object, multi-select (ctrl/shift), group edit,
+  click-to-select in viewport; authored city headlights appear grouped per
+  vehicle.
+- Surfaces: split w/ mirrors + #1/#2 naming (persistence via source-bake in
+  flight — see below), map reset ✕ (restores authored incl. tangents), pack
+  picker with FreePBR preview renders (98.7% coverage), procedural
+  displacement generator (FBM), map-viz overlay, live smoothing, xpar PBR.
+- Editor camera: instant (no momentum) in editor mode only.
+- Boot race fixed: objects list retries (city published CurScene mid-init);
+  console.warn when objects empty while surfaces exist.
 
-## Known open items beyond the xpar task
-- User to eyeball live: temporal SSAO mech-contact-AO lag; f16/DoF look.
-- quarter-vs-checker default decision (above).
-- RTT pass (1.68 ms serial) blocked on RenderContext migration tail
-  (RENDER_CONTEXT_PLAN.md) — the migration's first payoff when taken up.
-- x86 measurements (vec light loop default ON there, never measured).
+## Known issues / deferred (honest list)
+
+- **Greets ~1-in-12 flip**: kernel-internal nondeterminism, survives
+  1-thread/noaslr/prescribble/pinned-seed with ALL kernel inputs
+  hash-verified identical. Full evidence matrix + next probe (per-pixel term
+  dump at amudim bake face 0 px 242,122) in memory `measurement-tool-traps`.
+  Bounded impact: subtle pano slivers; frames deterministic with bakes off.
+- Env-bake content varies run-to-run (same root cause family).
+- The user's GREETS.MAT `momy#2|*` lines are DROPPED at load until he
+  re-splits + re-saves (accepted; split-bake work in flight).
+- volumetric_unified (default-off Beer-Lambert pass) ignores per-light cone
+  gain + turbulence.
+- Mirror clones don't reflect a live object re-scale; tram return-leg beams
+  face backwards (real shuttle behavior); fast_fog_blob_overlap clamps at
+  1.5 (3×3×3 neighborhood); police strobe not in the authored lights.
+- Legacy equirect env path (--no-env_cube) keeps static bake water.
+- CITY.CPP line ~1575 unused `using std::min` (clang-tidy noise, off-limits
+  era leftover — fine to fix opportunistically).
+
+## In-flight at write time (check `git log` / agent reports)
+
+1. **Split persistence via SOURCE BAKE** (not sidecar): editor Save bakes
+   splits into LWO/LWS (case A: duplicate LWO + repoint LoadObject; case B:
+   SRFS/SURF surgery + polygon-level clustering), #k names become real
+   authored surfaces (clean names, e.g. momy2). + **Scene-wide env defaults
+   as LWS keywords** (FdsSceneEnvRefl / FdsSceneEnvBakeRes style) via the
+   extension mechanism. User recipe once landed: re-split momy → Save →
+   reload → real surfaces with his maps.
+2. **Crash scene source hunt** (the last scene without authoring sources) —
+   city-hunt method; if found, every scene bakes uniformly and the fldpatch
+   fallback dies.
+
+## Where the rest of the knowledge lives
+
+- Cross-session traps + pins history: memory `measurement-tool-traps`
+  (~/.claude/.../memory/) — race-hunt methodology, instrument pitfalls,
+  binomial rule, pin re-pin log with justifications.
+- Authoring provenance: Authoring/city/README.md (parity math, regen).
+- Pipeline wiring: docs/GRAPHICS_PIPELINE.md, docs/ENGINE.md (pre-campaign
+  but still accurate for the core).
+- Old shipping FLDs: Runtime/SCENES/.backups/ + git history (last commit
+  carrying each noted in the promotion commit messages).
