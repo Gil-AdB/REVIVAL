@@ -127,6 +127,9 @@ std::unique_ptr<SceneDriver> createCrashScene()
 {
 	// Dark by design (the register/crash dump) → keep it moody, lift slightly.
 	ApplyCinematicProfile(cine::kCrash);
+	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
+	// the profile so authored values beat it; explicit CLI/env still wins.
+	fds::MaterialImport_ApplySceneDefaults("SCENES/CRASH.MAT");
 	return std::make_unique<CrashScene>();
 }
 

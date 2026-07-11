@@ -184,6 +184,11 @@ static Omni*  g_BoltFlashOmni = nullptr;
 static Vector g_BoltFlashPos;
 static float  g_BoltFlashInt = 0.0f;        // own envelope (faster than ambient)
 // Peak/range/decay are CLI- + script-tunable: --bolt_flash_peak/_range/_decay.
+// Peak + range are also AUTHORABLE per scene: SCENES/FOUNTAIN.MAT lines
+// `scene:|boltFlashPeak|v` / `scene:|boltFlashRange|v` (applied as setDefault
+// in createFountainScene — an explicit CLI/env flag still wins). The omni is
+// code-created (position tracks each strike), so it has no LWS/FLD light to
+// carry these; the scene sidecar is its authoring surface.
 
 void Particle_Rast(Vertex *A,Vertex *B,Vertex *C)
 {
@@ -2910,6 +2915,10 @@ std::unique_ptr<SceneDriver> createFountainScene()
 	// Bloom-only profile (no fog/anamorphic): the discrete lights bloom
 	// gorgeously, but anamorphic's bars smear the bright orbs/spray.
 	ApplyCinematicProfile(cine::kFountain);
+	// Authored scene-level defaults (scene:|key|value sidecar lines — e.g.
+	// the bolt-flash light's boltFlashPeak/boltFlashRange) AFTER the profile
+	// so authored values beat it; explicit CLI/env flags still win.
+	fds::MaterialImport_ApplySceneDefaults("SCENES/FOUNTAIN.MAT");
 	return std::make_unique<FountainScene>();
 }
 

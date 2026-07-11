@@ -534,6 +534,60 @@ static bool sidecarSetLightProp(Scene *sc, int index, const char *key, float val
 	return false;       // index out of range
 }
 
+// Sidecar scene lines: "scene:|<key>|<value>" — authored SCENE-level defaults
+// for engine quantities that live in global FeatureFlags (world-space fog slab
+// geometry, the fountain bolt-flash light's peak/range, ...). Applied through
+// FeatureFlags::setDefault so the flag keeps working as an override: explicit
+// CLI/env wins, the authored value replaces the compile-time default when
+// nothing was passed. Key table only — a sidecar must not be able to set
+// arbitrary global flags (that's what SCRIPTS/<scene>.params is for).
+struct SceneDefaultKey {
+	const char *key;
+	fds::FeatureFlags::FloatId id;
+};
+static const SceneDefaultKey kSceneDefaultKeys[] = {
+	// Fountain strike-flash light (code-created Omni — no LWS/FLD identity,
+	// so its authorable per-light quantities live here; see DEMO/FOUNTAIN.CPP).
+	{ "boltFlashPeak",  fds::FeatureFlags::FloatId::bolt_flash_peak  },
+	{ "boltFlashRange", fds::FeatureFlags::FloatId::bolt_flash_range },
+};
+
+static bool sidecarSetSceneDefault(const char *key, float value) {
+	for (const SceneDefaultKey &k : kSceneDefaultKeys) {
+		if (std::strcmp(key, k.key) != 0) continue;
+		fds::FeatureFlags::setDefault(k.id, value);
+		return true;
+	}
+	return false;   // unknown scene: key
+}
+
+void MaterialImport_ApplySceneDefaults(const char *path) {
+	if (!path) return;
+	FILE *f = std::fopen(path, "r");
+	if (!f) return;   // no sidecar for this scene — fine
+	char line[512];
+	int applied = 0;
+	while (std::fgets(line, sizeof line, f)) {
+		line[std::strcspn(line, "\r\n")] = 0;
+		if (std::strncmp(line, "scene:", 6) != 0) continue;
+		char *sep1 = std::strchr(line, '|');
+		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
+		if (!sep1 || !sep2) {
+			std::fprintf(stderr, "[MAT-SIDECAR] bad scene line (want scene:|key|value): %s\n", line);
+			continue;
+		}
+		*sep1 = 0;
+		*sep2 = 0;
+		const char *key = sep1 + 1, *value = sep2 + 1;
+		if (sidecarSetSceneDefault(key, std::strtof(value, nullptr))) ++applied;
+		else std::fprintf(stderr, "[MAT-SIDECAR] scene:.%s: unknown scene key\n", key);
+	}
+	std::fclose(f);
+	if (applied)
+		std::fprintf(stderr, "[MAT-SIDECAR] %s: %d scene default(s) applied "
+		             "(CLI/env-set flags still win)\n", path, applied);
+}
+
 void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 	if (!sc || !path) return;
 	FILE *f = std::fopen(path, "r");
@@ -554,7 +608,13 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 		*sep2 = 0;
 		const char *surface = line, *key = sep1 + 1, *value = sep2 + 1;
 		bool ok;
-		if (!std::strncmp(surface, "light:", 6)) {
+		if (!std::strncmp(surface, "scene:", 6)) {
+			// Scene-level defaults are applied at the scene FACTORY (after
+			// ApplyCinematicProfile) via MaterialImport_ApplySceneDefaults —
+			// applying them here (scene init) would let the profile stomp
+			// them. Skip without counting.
+			continue;
+		} else if (!std::strncmp(surface, "light:", 6)) {
 			ok = sidecarSetLightProp(sc, std::atoi(surface + 6), key,
 			                         std::strtof(value, nullptr));
 			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such light / key\n",

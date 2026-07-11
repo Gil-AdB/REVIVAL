@@ -876,6 +876,9 @@ std::unique_ptr<SceneDriver> createChaseScene()
 {
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
 	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
+	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
+	// the profile so authored values beat it; explicit CLI/env still wins.
+	fds::MaterialImport_ApplySceneDefaults("SCENES/CHASE.MAT");
 	return std::make_unique<ChaseScene>();
 }
 

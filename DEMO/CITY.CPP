@@ -3460,6 +3460,9 @@ std::unique_ptr<SceneDriver> createCityScene()
 	// for), independent of --cinematic. --no-water_procedural still disables it.
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
 	ApplyCinematicProfile(cine::kCity);          // storm-city look (fog/rain/post)
+	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
+	// the profile so authored values beat it; explicit CLI/env still wins.
+	fds::MaterialImport_ApplySceneDefaults("SCENES/CITY.MAT");
 	return std::make_unique<CityScene>();
 }
 

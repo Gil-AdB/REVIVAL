@@ -81,6 +81,24 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 //                                            <i> = authored light index in
 //                                            FLD/LWS file order; currently
 //                                            flareScale)
+//   scene:|key|value                        (SCENE-level authored defaults for
+//                                            world-space / scene-owned engine
+//                                            quantities that live in global
+//                                            FeatureFlags; applied via
+//                                            FeatureFlags::setDefault at the
+//                                            scene FACTORY — after the scene's
+//                                            ApplyCinematicProfile, so authored
+//                                            values beat the profile, while an
+//                                            explicit CLI/env --flag still wins.
+//                                            NOT handled by ApplySidecar; see
+//                                            MaterialImport_ApplySceneDefaults.
+//                                            Keys (all float-valued):
+//                                              boltFlashPeak   → bolt_flash_peak
+//                                              boltFlashRange  → bolt_flash_range
+//                                            Caveat: flags are process-global —
+//                                            a scene's authored default persists
+//                                            into later scenes unless they author
+//                                            or profile the same key.)
 //   obj:<name>|scale|value                  (per-OBJECT overrides; <name> =
 //                                            chunk-collapsed FLD object name,
 //                                            e.g. 'SHIP1.lwo', 'taxi.lwo',
@@ -99,6 +117,18 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 // a silent no-op; a bad line inside one logs and skips that line.
 // The editor's dev server (tools/editor_server.py) writes this file on Save.
 void MaterialImport_ApplySidecar(Scene *sc, const char *path);
+
+// Apply ONLY the sidecar's `scene:|key|value` lines (authored scene-level
+// defaults for FeatureFlags-backed quantities — see the format table above).
+// Values go through FeatureFlags::setDefault, so an explicit CLI/env flag
+// still wins. Call from the scene FACTORY, immediately AFTER its
+// ApplyCinematicProfile, so authored values override the cinematic profile's
+// setDefaults (precedence: CLI/env > scene: sidecar > cinematic profile >
+// compile default). A missing sidecar is a silent no-op; an unknown scene:
+// key logs and skips. Separate from MaterialImport_ApplySidecar because
+// scene init (where the sidecar's surface lines apply) runs BEFORE the
+// factory's profile — scene: lines applied there would be stomped by it.
+void MaterialImport_ApplySceneDefaults(const char *path);
 
 // Set one numeric property (engine scale) on every material of `sc` whose
 // base name (::mirUV collapsed) matches `surface`. The shared setter under
