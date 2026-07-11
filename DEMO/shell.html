@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b61</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b62</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -681,7 +681,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b61); orbit/zoom embind =',
+        console.log('[editor] panel init (build b62); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -2021,7 +2021,10 @@
           hContrast: 1, hInvert: false, aoStrength: 1, aoRadius: 8,
           // Procedural displacement knobs (FBM value noise — see the
           // 'Generate displacement' block in renderSurfaceProps).
-          dispScale: 4, dispOct: 4, dispStrength: 5, dispSeed: 1 });
+          dispScale: 4, dispOct: 4, dispStrength: 5, dispSeed: 1,
+          // Solid metallic / roughness values (uniform per surface — see the
+          // 'Generate solid metallic / roughness' block in renderSurfaceProps).
+          metalVal: 1, roughVal: 0.5 });
       }
       // Tileable FBM value noise, seeded — the procedural-displacement height
       // field. Lattice value noise per octave (hash on WRAPPED lattice coords,
@@ -2194,6 +2197,19 @@
         for (var i = 0, p = 0; i < W * H; i++, p += 4){
           var occ = (avg[i] - lum[i]) / 255 * strength * 3; if (occ < 0) occ = 0; if (occ > 1) occ = 1;
           var gv = (1 - occ) * 255; out[p] = gv; out[p+1] = gv; out[p+2] = gv; out[p+3] = 255;
+        }
+        return out;
+      }
+      // Constant-value grayscale RGBA (R=G=B=value, value 0-255, opaque).
+      // Metallic and roughness are UNIFORM per surface (a whole hull is metal;
+      // a surface is equally rough all over), so a FLAT map is the correct
+      // synthesis — it needs no albedo input, and PNG encodes a constant image
+      // losslessly, so it decodes back to the exact same constant texel.
+      function editorConstPixels(value255, W, H){
+        var out = new Uint8ClampedArray(W * H * 4);
+        var v = Math.max(0, Math.min(255, Math.round(value255)));
+        for (var i = 0, p = 0; i < W * H; i++, p += 4){
+          out[p] = v; out[p+1] = v; out[p+2] = v; out[p+3] = 255;
         }
         return out;
       }
@@ -3053,6 +3069,62 @@
           var dn = document.createElement('div'); dn.className = 'surf-tex';
           dn.textContent = 'tileable FBM noise → normal (+height) map; on refractive glass the normal drives the refraction relief';
           gen.appendChild(dn);
+        })();
+        // ── Generate SOLID metallic / roughness (uniform, no albedo) ────────
+        // Metallic and roughness are UNIFORM per surface, so a CONSTANT-value
+        // grayscale map is the right synthesis — no albedo needed (works on a
+        // bare surface, like the displacement generator). Each button
+        // synthesizes a flat value×255 PNG at the albedo's dims (or 512² with
+        // no albedo — a constant image is dimension-independent and the engine
+        // resamples aux maps to the albedo layout on import) and routes it
+        // through the SAME importFile pipeline as a hand-authored map. Importing
+        // 'metallic' auto-routes to env_refl + a probe re-bake natively
+        // (Editor_ImportTexture's metallic branch), so the surface reflects the
+        // room. Slider picks the value; the button imports (importing runs the
+        // whole native pipeline incl. the probe re-bake, so it is button-driven,
+        // not live-on-drag).
+        (function(){
+          var ph = document.createElement('div');
+          ph.style.cssText = 'color:#fff;margin:8px 0 4px;border-top:1px solid #2a2a33;padding-top:6px;';
+          ph.textContent = 'Generate solid metallic / roughness';
+          gen.appendChild(ph);
+          // Target dims per generate: albedo dims if this surface has one, else
+          // 512² (constant image → dimension-independent; engine resamples anyway).
+          function solidDims(){
+            if (!editorAlbedoSource(s.name)) return Promise.resolve({ W: 512, H: 512 });
+            return editorEnsureGen(s.name)
+              .then(function(c){ return { W: c.W, H: c.H }; })
+              .catch(function(){ return { W: 512, H: 512 }; });
+          }
+          function runSolid(role, value01, statusName){
+            editorStatus('generating solid ' + statusName + '…');
+            solidDims().then(function(d){
+              var px = editorConstPixels(value01 * 255, d.W, d.H);
+              var nm = s.name.replace(/[^A-Za-z0-9._-]+/g, '_') + '_' + role + '_solid.png';
+              return editorPixelsToPngFile(px, d.W, d.H, nm);
+            }).then(function(file){
+              importFile(role, file, function(ok){
+                editorStatus(ok ? ('solid ' + statusName + ' = ' + (+value01).toFixed(2) + ' generated (' + role + ')')
+                                : ('solid ' + statusName + ' generate FAILED'));
+                if (ok) refreshSurfacesAndProps(s.name);
+              });
+            }).catch(function(e){ editorStatus('generate solid ' + statusName + ' failed: ' + (e && e.message || e)); });
+          }
+          var mrow = document.createElement('div'); mrow.className = 'prop-row';
+          mrow.appendChild(genButton('Generate solid metallic', function(){ runSolid('metallic', gp.metalVal, 'metallic'); }));
+          gen.appendChild(mrow);
+          gen.appendChild(genSlider('metalness', 0, 1, 0.01, gp.metalVal,
+            function(v){ gp.metalVal = v; },
+            function(v){ gp.metalVal = v; }));
+          var rrow = document.createElement('div'); rrow.className = 'prop-row';
+          rrow.appendChild(genButton('Generate solid roughness', function(){ runSolid('roughness', gp.roughVal, 'roughness'); }));
+          gen.appendChild(rrow);
+          gen.appendChild(genSlider('roughness', 0, 1, 0.01, gp.roughVal,
+            function(v){ gp.roughVal = v; },
+            function(v){ gp.roughVal = v; }));
+          var mn = document.createElement('div'); mn.className = 'surf-tex';
+          mn.textContent = 'uniform value maps (no albedo needed). Metallic → the surface reflects the room via the auto-baked env probe (env_refl auto-enables); pair with low roughness for mirror-metal.';
+          gen.appendChild(mn);
         })();
         el.appendChild(gen);
       }
