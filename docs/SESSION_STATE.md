@@ -175,9 +175,16 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
    as LWS keywords** (FdsSceneEnvRefl / FdsSceneEnvBakeRes style) via the
    extension mechanism. User recipe once landed: re-split momy → Save →
    reload → real surfaces with his maps.
-2. **Crash scene source hunt** (the last scene without authoring sources) —
-   city-hunt method; if found, every scene bakes uniformly and the fldpatch
-   fallback dies.
+2. ~~Crash scene source hunt~~ **DONE (470d7f1): crash sources FOUND with
+   byte-parity** — the scene is the vintage "END" laptop scene
+   (Original/dos-rev/.../SCENES/END/); lt_scr shipped as a newer revision
+   (screen panel ΔZ, nowhere in any archive) and was recovered from the FLD
+   via tools/fld2lwo/fld2lwo_crash.py. `Authoring/crash/` regen is
+   byte-identical to shipping (md5 4f8aac84…). EVERY scene now has authoring
+   sources — the fldpatch fallback in the sidecar-elimination plan is dead.
+   Registry flip still pending (editor_server.py owned by agent #1 at write
+   time): `"crash": {"authoring": True, "dir": "crash", "lws": "CRASH.LWS",
+   "legacy": True}`.
 
 ## Where the rest of the knowledge lives
 
