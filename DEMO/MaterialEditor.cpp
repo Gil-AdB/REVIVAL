@@ -2117,6 +2117,26 @@ bool js_editorUnsetParam(std::string name)
 	if (ok) rev::Editor_MarkDirty();
 	return ok;
 }
+// Scene-wide env-reflection defaults, EFFECTIVE values: the live flag
+// (env_refl_scene_mode / env_bake_res_scene) when explicitly set, else the
+// AUTHORED FLD scene-header value (Scene::EnvReflSceneMode/EnvBakeResScene,
+// from the LWS FdsSceneEnvRefl/FdsSceneEnvBakeRes keywords). The editor's
+// 'scene env defaults' row reads its truth from here; edits go through
+// editorSetParam on the flags (live) and persist as payload.sceneEnv (the
+// server patches the LWS + regens the FLD).
+std::string js_editorGetSceneEnv()
+{
+	using FF = fds::FeatureFlags;
+	int refl = 0, res = 0;
+	if (FF::isSet(FF::IntId::env_refl_scene_mode)) refl = FF::env_refl_scene_mode();
+	else if (CurScene) refl = (int)CurScene->EnvReflSceneMode;
+	if (FF::isSet(FF::IntId::env_bake_res_scene)) res = FF::env_bake_res_scene();
+	else if (CurScene) res = (int)CurScene->EnvBakeResScene;
+	char buf[80];
+	std::snprintf(buf, sizeof buf, "{\"refl\":%d,\"res\":%d}",
+	              refl < 0 ? -1 : refl > 0 ? 1 : 0, res);
+	return buf;
+}
 // Pack upload: classify one filename into its map role with the native token
 // rules (albedo/normal/height/roughness/ao, "" = skip) so the browser's
 // load-a-whole-folder flow detects roles identically to --material-import.
@@ -2241,5 +2261,6 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);
+	emscripten::function("editorGetSceneEnv",    &js_editorGetSceneEnv);
 }
 #endif // __EMSCRIPTEN__

@@ -152,6 +152,10 @@ typedef struct
   float         FramesPerSecond;
   FldEnv       *AmbientColor;
 	FldEnv       *AmbientIntensity;
+  // Authored scene-wide env-reflection defaults (Scene_EnvDefaults-gated
+  // conditional header payload; 0 = unset). See LWREAD.H + FLD_READ.CPP.
+  int32_t       EnvReflSceneMode;   // -1 none / 0 auto / 1 all
+  int32_t       EnvBakeResScene;    // probe face res (pow2 64..1024), 0 unset
 } FldScene;
 
 extern FldScene *ReadFLD(const char *FileName);

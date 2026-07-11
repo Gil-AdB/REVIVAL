@@ -611,6 +611,12 @@ Scene *ConvertFLD(FldScene *FLD)
 	memset(Sc,0,sizeof(Scene));
 	Sc->StartFrame = FLD->FirstFrame;
 	Sc->EndFrame   = FLD->LastFrame;
+	// Authored scene-wide env-reflection defaults (FLD header extension —
+	// see FLD_READ.CPP ReadGeneralSceneData; 0 = unset). LoadFLD memcpy's
+	// this Scene over the caller's, so the fields survive into the live
+	// scene for EnvReflection_FramePrep.
+	Sc->EnvReflSceneMode = FLD->EnvReflSceneMode;
+	Sc->EnvBakeResScene  = FLD->EnvBakeResScene;
 
 	// Used to walk MatLib to seek to the tail so AddMaterial could append
 	// linearly. AddMaterial now head-inserts and dedupes via a hash map

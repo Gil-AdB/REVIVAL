@@ -611,6 +611,22 @@
           </label>
         </span>
       </div>
+      <div id="editor-scene-env" style="display:flex;gap:6px;align-items:center;font-size:10px;color:#aaa;margin-top:3px;">
+        <span title="AUTHORED scene-wide env-reflection defaults — persisted as LWS keywords (FdsSceneEnvRefl / FdsSceneEnvBakeRes) into the FLD scene header on Save. envRefl: default probe qualification for surfaces whose own envRefl is 'auto' (all = every auto surface bakes a probe, none = no auto surface does; per-surface envRefl always wins, and the env_refl master knob still gates the pass). res: the scene's default probe face resolution (per-surface envBakeRes and an explicit env_bake_res knob both win).">scene env defaults:</span>
+        <select id="editor-scene-envrefl" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;cursor:pointer;">
+          <option value="0">auto</option>
+          <option value="1">all</option>
+          <option value="-1">none</option>
+        </select>
+        <select id="editor-scene-envres" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:10px;cursor:pointer;">
+          <option value="0">default res</option>
+          <option value="64">64²</option>
+          <option value="128">128²</option>
+          <option value="256">256²</option>
+          <option value="512">512²</option>
+          <option value="1024">1024²</option>
+        </select>
+      </div>
       <div id="editor-knobs" style="display:none;"></div>
       <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
         <span style="flex:0 0 64px;">scene time</span>
@@ -948,11 +964,12 @@
         var n = Object.keys(collectDirty()).length, m = pendingMapCount(),
             L = Object.keys(collectDirtyLights()).length,
             O = Object.keys(collectDirtyObjects()).length,
-            S = Object.keys(currentSplitsPayload()).length;
-        b.disabled = !(n || m || L || O || S);
-        b.textContent = (n || m || L || O || S)
+            S = Object.keys(currentSplitsPayload()).length,
+            E = sceneEnvDirty() ? 1 : 0;
+        b.disabled = !(n || m || L || O || S || E);
+        b.textContent = (n || m || L || O || S || E)
           ? ('Save (' + [n ? n + ' surf' : '', m ? m + ' map' : '', L ? L + ' light' : '',
-                         O ? O + ' obj' : '', S ? S + ' split' : '']
+                         O ? O + ' obj' : '', S ? S + ' split' : '', E ? 'scene env' : '']
                .filter(Boolean).join(', ') + ')')
           : 'Save to LWO';
       }
@@ -1369,6 +1386,53 @@
           } catch(err){ editorStatus('bake res failed: ' + err); }
         };
       })();
+      // ── Scene env defaults row (AUTHORED scene-wide envRefl/envBakeRes) ──
+      // Truth comes from editorGetSceneEnv (the live flag when explicitly
+      // set, else the FLD-authored Scene:: fields). Edits apply LIVE through
+      // the env_refl_scene_mode / env_bake_res_scene flags and persist on
+      // Save as payload.sceneEnv -> top-level LWS keywords + FLD regen.
+      var editorSceneEnvPristine = null, editorSceneEnvCur = null;
+      function sceneEnvDirty(){
+        return !!(editorSceneEnvPristine && editorSceneEnvCur &&
+                  (editorSceneEnvCur.refl !== editorSceneEnvPristine.refl ||
+                   editorSceneEnvCur.res  !== editorSceneEnvPristine.res));
+      }
+      (function(){
+        var selR = document.getElementById('editor-scene-envrefl');
+        var selN = document.getElementById('editor-scene-envres');
+        if (!selR || !selN) return;
+        (function boot(){
+          if (!Module || !Module.editorGetSceneEnv) { setTimeout(boot, 1000); return; }
+          var v;
+          try { v = JSON.parse(Module.editorGetSceneEnv()); } catch(e){ v = { refl: 0, res: 0 }; }
+          editorSceneEnvPristine = { refl: +v.refl || 0, res: +v.res || 0 };
+          editorSceneEnvCur = { refl: +v.refl || 0, res: +v.res || 0 };
+          selR.value = String(editorSceneEnvCur.refl);
+          selN.value = String(editorSceneEnvCur.res);
+        })();
+        selR.onchange = function(){
+          var v = parseInt(selR.value, 10);
+          if (!editorSceneEnvCur) return;
+          editorSceneEnvCur.refl = v;
+          try { Module.editorSetParam('env_refl_scene_mode', String(v)); } catch(e){}
+          editorStatus('scene env default = ' + (v > 0 ? 'ALL auto surfaces bake probes'
+                        : v < 0 ? 'NO auto surface bakes' : 'auto (per-material rule)') +
+                       ' — Save persists it into the LWS');
+          updateSaveButton();
+        };
+        selN.onchange = function(){
+          var v = parseInt(selN.value, 10);
+          if (!editorSceneEnvCur) return;
+          editorSceneEnvCur.res = v;
+          try {
+            Module.editorSetParam('env_bake_res_scene', String(v));
+            Module.editorRebakeEnv();
+          } catch(e){}
+          editorStatus('scene default bake res = ' + (v ? v + '² (re-baking)' : 'legacy sizing') +
+                       ' — Save persists it into the LWS');
+          updateSaveButton();
+        };
+      })();
       document.getElementById('editor-knobs-hdr').onclick = function(e){
         if (e.target && (e.target.id === 'editor-knobs-all' ||
                          e.target.id === 'editor-knobs-resetall' ||
@@ -1691,15 +1755,20 @@
         var objNames = Object.keys(dirtyObjects);
         var splits = currentSplitsPayload();
         var splitBases = Object.keys(splits);
-        if (!names.length && !nMaps && !lightIdx.length && !objNames.length && !splitBases.length) return;
+        var envDirty = sceneEnvDirty();
+        if (!names.length && !nMaps && !lightIdx.length && !objNames.length &&
+            !splitBases.length && !envDirty) return;
         editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' +
                      lightIdx.length + ' light(s), ' + objNames.length + ' object(s)' +
-                     (splitBases.length ? ', ' + splitBases.length + ' split(s)' : '') + '…');
+                     (splitBases.length ? ', ' + splitBases.length + ' split(s)' : '') +
+                     (envDirty ? ', scene env defaults' : '') + '…');
         var payload = { surfaces: dirty };
         if (nMaps) payload.maps = maps;
         if (lightIdx.length) payload.lights = dirtyLights;
         if (objNames.length) payload.objects = dirtyObjects;
         if (splitBases.length) payload.splits = splits;
+        if (envDirty) payload.sceneEnv = { envRefl: editorSceneEnvCur.refl,
+                                           envBakeRes: editorSceneEnvCur.res };
         fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
@@ -1739,6 +1808,11 @@
               if (l) editorLightsPristine[l.i] = JSON.parse(JSON.stringify(l));
             });
             objNames.forEach(function(n){ editorObjPristine[n] = dirtyObjects[n].scale; });
+            // Scene env defaults: adopt the just-saved values as the new
+            // baseline so sceneEnvDirty() clears (else the Save button stays
+            // lit on 'scene env' after a successful save).
+            if (envDirty && editorSceneEnvCur)
+              editorSceneEnvPristine = { refl: editorSceneEnvCur.refl, res: editorSceneEnvCur.res };
             editorPendingMaps = {};
             renderSurfaceList(); renderLightList(); updateSaveButton();
           })

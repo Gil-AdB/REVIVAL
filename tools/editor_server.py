@@ -65,7 +65,13 @@ SCENES = {
     # the shipping CITY.FLD byte-identically with lwsread_legacy (b1/b3/b6 are
     # FLD-recovered LWOs, see Authoring/city/README.md).
     "city":     {"authoring": True,  "dir": "city",     "lws": "CITY1.LWS",            "legacy": True},
-    "crash":    {"authoring": False},
+    # crash: pinned 2026-07-11 (470d7f1) — the vintage END laptop scene;
+    # Authoring/crash/CRASH.LWS regenerates the shipping CRASH.FLD
+    # byte-identically (verified with BOTH converter variants — the scene has
+    # no luminous materials, so the VLUM era doesn't matter; legacy matches
+    # the other pre-b441da6 shipping FLDs). EVERY scene now has authoring
+    # sources — the fldpatch fallback below only remains as a safety net.
+    "crash":    {"authoring": True,  "dir": "crash",    "lws": "CRASH.LWS",            "legacy": True},
     "pbrtest":  {"authoring": True,  "dir": "pbrtest",  "lws": "PBRTEST.LWS",          "legacy": False},
 }
 
@@ -648,6 +654,74 @@ def patch_lws_lights(scene, lights, warnings):
     return patched
 
 
+# Scene-wide env-reflection defaults: authored as TOP-LEVEL LWS KEYWORDS
+# (the VolumetricLight precedent), parsed by tools/lwsread into a flag-gated
+# conditional payload in the FLD scene header (Scene_EnvDefaults bit on the
+# AmbientIntensity envelope's EndBehavior), read at FLD load into
+# Scene::EnvReflSceneMode/EnvBakeResScene, consumed by
+# EnvReflection_FramePrep. NOT sidecar keys — sidecars are being eliminated;
+# persistence belongs in the LWO/LWS sources.
+SCENE_ENV_LWS_KEYS = {"envRefl": "FdsSceneEnvRefl",
+                      "envBakeRes": "FdsSceneEnvBakeRes"}
+
+
+def patch_lws_scene_env(scene, scene_env, warnings):
+    """{'envRefl': -1|0|1, 'envBakeRes': N} -> top-level LWS keyword lines
+    (value 0 DELETES the line = back to unauthored). Returns the list of
+    patched keys ([] = nothing changed); writes the LWS with a backup."""
+    if not scene_env or not isinstance(scene_env, dict):
+        return []
+    bad = set(scene_env) - set(SCENE_ENV_LWS_KEYS)
+    if bad:
+        warnings.append(f"sceneEnv: unknown keys {sorted(bad)} — skipped")
+    path = os.path.join(scene_authoring_dir(scene), SCENES[scene]["lws"])
+    text = open(path, encoding="latin-1").read()
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    patched = []
+    for key in sorted(set(scene_env) & set(SCENE_ENV_LWS_KEYS)):
+        kw = SCENE_ENV_LWS_KEYS[key]
+        try:
+            val = int(float(scene_env[key]))
+        except (TypeError, ValueError):
+            warnings.append(f"sceneEnv.{key}: bad value {scene_env[key]!r} — skipped")
+            continue
+        if key == "envRefl" and val not in (-1, 0, 1):
+            warnings.append(f"sceneEnv.envRefl: {val} not in -1/0/1 — skipped")
+            continue
+        if key == "envBakeRes" and val != 0 and val not in (64, 128, 256, 512, 1024):
+            warnings.append(f"sceneEnv.envBakeRes: {val} not a pow2 in 64..1024 — skipped")
+            continue
+        idx = next((i for i, ln in enumerate(lines)
+                    if ln.split(None, 1)[:1] == [kw]), None)
+        if val == 0:
+            if idx is not None:
+                del lines[idx]
+                patched.append(key)
+            continue
+        newline = f"{kw} {val}"
+        if idx is not None:
+            if lines[idx] != newline:
+                lines[idx] = newline
+                patched.append(key)
+        else:
+            # Insert after the FramesPerSecond line (every scene LWS has one)
+            # so the keyword sits in the top-level scene section.
+            at = next((i for i, ln in enumerate(lines)
+                       if ln.split(None, 1)[:1] == ["FramesPerSecond"]),
+                      len(lines) - 1) + 1
+            lines.insert(at, newline)
+            patched.append(key)
+    if patched:
+        bak = lwopatch.backup(path, scene_backup_dir(scene))
+        with open(path, "w", encoding="latin-1", newline="") as f:
+            f.write(nl.join(lines) + nl)
+        warnings.append(f"scene env defaults -> {os.path.basename(path)} "
+                        f"({', '.join(patched)}; backup "
+                        f"{os.path.relpath(bak, REPO)})")
+    return patched
+
+
 def regen_fld(scene, patched):
     """Rerun the scene's converter (legacy for pre-b441da6 shipping FLDs —
     the VLUM x100 era) and install the FLD. Returns (code, response-dict)."""
@@ -792,15 +866,17 @@ def do_save(scene, payload):
 
 
 def do_save_main(scene, payload):
-    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...}}.
-    greets: patch LWOs + LWS, regen + install the FLD.
-    other scenes (no pinned sources): surfaces persist as sidecar prop lines,
-    lights are live-only (warned). Maps go to the scene sidecar either way."""
+    """Apply {"surfaces": {...}, "maps": {...}, "lights": {...},
+    "sceneEnv": {...}}. Authoring scenes (all of them now): patch LWOs + LWS,
+    regen + install the FLD; sceneEnv lands as top-level LWS keywords.
+    Non-authoring fallback: surfaces persist as sidecar prop lines, lights
+    are live-only (warned). Maps go to the scene sidecar either way."""
     surfaces = payload.get("surfaces") or {}
     maps = payload.get("maps") or {}
     lights = payload.get("lights") or {}
+    scene_env = payload.get("sceneEnv") or {}
     if not isinstance(surfaces, dict) or not isinstance(lights, dict) \
-       or (not surfaces and not maps and not lights):
+       or (not surfaces and not maps and not lights and not scene_env):
         return 400, {"ok": False, "error": "no surfaces, maps, or lights in payload"}
 
     warnings = []
@@ -817,17 +893,22 @@ def do_save_main(scene, payload):
     uv_by_name = pop_uv_props(surfaces, warnings)
 
     if not SCENES[scene]["authoring"]:
+        if scene_env:
+            warnings.append("sceneEnv: scene has no authoring sources — scene "
+                            "env defaults need LWS write-back, skipped")
         return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
 
+    patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
     patched_lights = patch_lws_lights(scene, lights, warnings)
     if not surfaces and not uv_by_name:
-        if patched_lights:
-            # Lights changed -> the FLD must be regenerated (it embeds them).
+        if patched_lights or patched_scene_env:
+            # Lights / scene env defaults changed -> the FLD must be
+            # regenerated (it embeds them).
             code, resp = regen_fld(scene, [])
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
-                         "warnings": warnings})
+                         "sceneEnv": patched_scene_env, "warnings": warnings})
             return 200, resp
         # Maps-only save: no FLD regen needed (map paths live in the sidecar;
         # the FLD doesn't reference them).
@@ -887,12 +968,14 @@ def do_save_main(scene, payload):
         lwos[fname].surface(surf).set_uv_mapping(*uv)
 
     if not per_file and not uv_targets:
-        if saved_maps or patched_lights:   # surface edits all missed, but these landed
-            code, resp = (regen_fld(scene, []) if patched_lights
+        if saved_maps or patched_lights or patched_scene_env:
+            # surface edits all missed, but these landed
+            code, resp = (regen_fld(scene, []) if (patched_lights or patched_scene_env)
                           else (200, {"ok": True, "patched": []}))
             if code != 200:
                 return code, resp
             resp.update({"maps": saved_maps, "lights": patched_lights,
+                         "sceneEnv": patched_scene_env,
                          "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                          "warnings": warnings})
             return 200, resp
@@ -921,6 +1004,7 @@ def do_save_main(scene, payload):
     if code != 200:
         return code, resp
     resp.update({"maps": saved_maps, "lights": patched_lights,
+                 "sceneEnv": patched_scene_env,
                  "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                  "warnings": warnings})
     return 200, resp

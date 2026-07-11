@@ -49,6 +49,15 @@ void SaveEnvelope(FldEnv *Env)
 
 void SaveGeneralSceneData(FldScene *Scene)
 {
+	// Authored scene-wide env-reflection defaults (LWS "FdsSceneEnvRefl" /
+	// "FdsSceneEnvBakeRes"): the scene header has no flags word, so the
+	// extension bit rides the AmbientIntensity envelope's EndBehavior
+	// (legacy values there top out at 1024 — bit 2048 is free, the same
+	// idiom as Light_VolumetricCone below). Payload = two int32s appended
+	// after the "OML" names triplet, written ONLY when authored, so FLDs
+	// without the keywords stay byte-identical to the pre-extension format.
+	if (Scene->EnvReflSceneMode || Scene->EnvBakeResScene)
+		Scene->AmbientIntensity->EndBehavior |= Scene_EnvDefaults;
 	fprintf(FLD,"Flood3D");
 	fwrite(&FldVersion,1,4,FLD);
 	fwrite(&Scene->FirstFrame,1,4,FLD);
@@ -72,6 +81,11 @@ void SaveGeneralSceneData(FldScene *Scene)
 #else
 	fprintf(FLD,"X");
 #endif
+	if (Scene->AmbientIntensity->EndBehavior & Scene_EnvDefaults)
+	{
+		fwrite(&Scene->EnvReflSceneMode,1,4,FLD);
+		fwrite(&Scene->EnvBakeResScene,1,4,FLD);
+	}
 }
 
 void SaveString(char *Str)

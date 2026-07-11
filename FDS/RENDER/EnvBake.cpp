@@ -468,43 +468,78 @@ struct SceneEnv {
 std::map<Scene*, SceneEnv> g_envByScene;
 bool g_envBakeInProgress = false;   // bake renders through Render() → guard
 
-// --env-bake-res: explicit FACE resolution for the deferred env-reflection
-// stores (bakeStore probes AND RegisterCubeFaces imports). Returns 0 when the
-// user did NOT set it (CLI/env) — callers then keep their legacy sizing
-// (env_refl_res/2 for probes, the caller's storeRes for imports), which keeps
-// the pinned baselines byte-identical. Sanitized: clamped to [64,1024] and
-// rounded DOWN to a power of two — the 4-level mip chain and the samplers'
-// shift-indexed dims (envP->W >> lvl) need cleanly halvable sizes. The value
-// is read at BAKE time only; every consumer reads dims from the store's own
-// recorded W/H/numMips, so mixed-res stores coexist safely.
-int envBakeResOverride() {
-    if (!FeatureFlags::isSet(FeatureFlags::IntId::env_bake_res)) return 0;
-    const int want = FeatureFlags::env_bake_res();
+// Clamp to [64,1024] + round DOWN to a power of two — the 4-level mip chain
+// and the samplers' shift-indexed dims (envP->W >> lvl) need cleanly
+// halvable sizes.
+static int sanitizeFaceRes(int want) {
     const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
     int p2 = 64;
     while (p2 * 2 <= clamped) p2 <<= 1;
+    return p2;
+}
+
+// Global/scene FACE resolution for the deferred env-reflection stores
+// (bakeStore probes AND RegisterCubeFaces imports). THE SIZING CHAIN (top
+// wins; the per-surface Material::EnvBakeRes wish sits above all of it in
+// envFaceResForMat):
+//   1. explicit --env-bake-res            (CLI/env/editor — isSet-gated)
+//   2. explicit --env-bake-res-scene      (live/CLI override of the scene
+//                                          default; isSet-gated, 0 cancels)
+//   3. Scene::EnvBakeResScene             (AUTHORED — FLD scene header from
+//                                          the LWS 'FdsSceneEnvBakeRes'
+//                                          keyword; 0 = not authored)
+//   4. return 0 = the legacy sizing       (env_refl_res/2 for probes, the
+//                                          caller's storeRes for imports),
+//                                          which keeps the pinned baselines
+//                                          byte-identical.
+// The value is read at BAKE time only; every consumer reads dims from the
+// store's own recorded W/H/numMips, so mixed-res stores coexist safely.
+int envBakeResOverride(const Scene* sc) {
+    int want = 0;
+    if (FeatureFlags::isSet(FeatureFlags::IntId::env_bake_res))
+        want = FeatureFlags::env_bake_res();
+    else if (FeatureFlags::isSet(FeatureFlags::IntId::env_bake_res_scene))
+        want = FeatureFlags::env_bake_res_scene();
+    else if (sc && sc->EnvBakeResScene > 0)
+        want = (int)sc->EnvBakeResScene;
+    if (want <= 0) return 0;
+    const int p2 = sanitizeFaceRes(want);
     static int noted = INT_MIN;
     if (p2 != want && noted != want) {
         noted = want;
-        std::fprintf(stderr, "[ENVREFL] env_bake_res=%d invalid (want a power"
+        std::fprintf(stderr, "[ENVREFL] env bake res %d invalid (want a power"
                      " of two in 64..1024) — using %d\n", want, p2);
     }
     return p2;
 }
 
-// Per-material FACE-res wish: Material::EnvBakeRes wins over the global
-// --env-bake-res (more specific beats scene-wide); 0/unset defers to the
-// global (which itself returns 0 when not explicitly set — the legacy
-// sizing chain). EnvBakeRes is sanitized to a pow2 in 64..1024 at set time
+// Per-material FACE-res wish: Material::EnvBakeRes wins over the global/
+// scene chain (most specific first); 0/unset defers to envBakeResOverride
+// (which returns 0 when nothing applies — the legacy sizing chain).
+// EnvBakeRes is sanitized to a pow2 in 64..1024 at set time
 // (MaterialImport_SetSurfaceProp); re-sanitized here defensively since the
 // mip chain would crash on a rogue value.
 int envFaceResForMat(const Material* M) {
-    if (!M || M->EnvBakeRes <= 0) return envBakeResOverride();
-    const int want = M->EnvBakeRes;
-    const int clamped = want < 64 ? 64 : (want > 1024 ? 1024 : want);
-    int p2 = 64;
-    while (p2 * 2 <= clamped) p2 <<= 1;
-    return p2;
+    if (!M || M->EnvBakeRes <= 0) return envBakeResOverride(M ? M->RelScene : nullptr);
+    return sanitizeFaceRes(M->EnvBakeRes);
+}
+
+// Effective env-reflection mode for a material: the per-surface tri-state
+// (Material::EnvReflMode) when set, else the SCENE-WIDE default — the
+// env_refl_scene_mode flag when explicitly set (live/CLI), else the
+// AUTHORED Scene::EnvReflSceneMode (FLD scene header, LWS 'FdsSceneEnvRefl').
+// -1 = never bake/publish, 0 = the historical auto qualification rule
+// (Reflection > 0 || MetallicMap), 1 = force-bake. Nothing authored/set →
+// 0 everywhere → byte-identical legacy behavior.
+static int envEffModeFor(const Material* M) {
+    if (!M) return 0;
+    if (M->EnvReflMode != 0) return M->EnvReflMode;
+    int s;
+    if (FeatureFlags::isSet(FeatureFlags::IntId::env_refl_scene_mode))
+        s = FeatureFlags::env_refl_scene_mode();
+    else
+        s = M->RelScene ? (int)M->RelScene->EnvReflSceneMode : 0;
+    return s < 0 ? -1 : s > 0 ? 1 : 0;
 }
 
 // 2×2 box downsample (per-channel average), ARGB.
@@ -748,7 +783,7 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
         params.cubeRes    = faceResWant;
         params.panoWidth  = faceResWant * 2;   // legacy equirect stores keep
         params.panoHeight = faceResWant * 2;   // the 2×face pano sizing
-    } else if (const int face = envBakeResOverride()) {
+    } else if (const int face = envBakeResOverride(sc)) {
         params.cubeRes = face;                    // cube stores: W=H=face res
         params.panoWidth  = face * 2;             // equirect stores keep the
         params.panoHeight = face * 2;             // legacy 2×face pano size
@@ -892,10 +927,13 @@ bool EnvReflection_FramePrep(Scene* sc) {
     // few world units share a store (clone materials, adjacent panels).
     for (Material* M = MatLib; M; M = M->Next) {
         if (M->RelScene != sc) continue;
-        // Per-material tri-state override (Material::EnvReflMode): 1 forces a
-        // bake, -1 suppresses it, 0 keeps the historical qualification rule.
-        if (!(M->EnvReflMode > 0 ||
-              (M->EnvReflMode == 0 && (M->Reflection > 0.0f || M->MetallicMap))))
+        // EFFECTIVE tri-state (envEffModeFor): the per-material override
+        // (Material::EnvReflMode) when set, else the scene-wide default
+        // (env_refl_scene_mode flag / FLD-authored Scene::EnvReflSceneMode).
+        // 1 forces a bake, -1 suppresses it, 0 keeps the historical rule.
+        const int effMode = envEffModeFor(M);
+        if (!(effMode > 0 ||
+              (effMode == 0 && (M->Reflection > 0.0f || M->MetallicMap))))
             continue;
         if (env.byMat.count(M)) continue;
         Vector c;
@@ -946,7 +984,7 @@ bool EnvReflection_FramePrep(Scene* sc) {
                     // bake reads the table. The full refresh below fixes the
                     // rest.
                     for (auto& [M2, i2] : env.byMat)
-                        if (i2 == idx && M2->ID < 256 && M2->EnvReflMode >= 0
+                        if (i2 == idx && M2->ID < 256 && envEffModeFor(M2) >= 0
                             && env.table[M2->ID])
                             env.table[M2->ID] = &env.stores[size_t(idx)]->view;
                 }
@@ -976,12 +1014,13 @@ bool EnvReflection_FramePrep(Scene* sc) {
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
     }
     // Refresh the matID table (IDs move when the editor rebuilds the table).
-    // EnvReflMode < 0 (forced off) never publishes — even when a stale store
-    // for this material still sits in byMat from before the override landed —
-    // so the kernel sees no env term for it at all.
+    // Effective mode < 0 (forced off per-surface OR by the scene-wide
+    // default) never publishes — even when a stale store for this material
+    // still sits in byMat from before the override landed — so the kernel
+    // sees no env term for it at all.
     std::memset(env.table, 0, sizeof(env.table));
     for (auto& [M, idx] : env.byMat)
-        if (idx >= 0 && M->RelScene == sc && M->ID < 256 && M->EnvReflMode >= 0) {
+        if (idx >= 0 && M->RelScene == sc && M->ID < 256 && envEffModeFor(M) >= 0) {
             env.table[M->ID] = &env.stores[size_t(idx)]->view;
             if (std::getenv("ENVDBG3") && M->Name && std::strstr(M->Name, "windows"))
                 std::fprintf(stderr, "[ENVDBG3] table[%u] = store %d  mat=%p '%s'\n",
@@ -1064,11 +1103,11 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
                          M->Name ? M->Name : "?", storeRes, faceRes);
         }
         storeRes = face;
-    } else if (const int face = envBakeResOverride()) {
+    } else if (const int face = envBakeResOverride(sc)) {
         static bool noted = false;
         if (!noted && face != storeRes) {
             noted = true;
-            std::fprintf(stderr, "[ENVREFL] env_bake_res=%d overrides"
+            std::fprintf(stderr, "[ENVREFL] env bake res %d overrides"
                          " registered-store res (caller asked %d^2; capped at"
                          " the %d^2 source faces)\n", face, storeRes, faceRes);
         }

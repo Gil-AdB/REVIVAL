@@ -107,6 +107,22 @@ void ReadGeneralSceneData(FldScene *Sc)
 	ReadObjectNames=(Names[0]=='O');
 	ReadMaterialNames=(Names[1]=='M');
 	ReadLightNames=(Names[2]=='L');
+	// Bit 2048 = Scene_EnvDefaults (authored scene-wide env-reflection
+	// defaults, LWS "FdsSceneEnvRefl"/"FdsSceneEnvBakeRes"): two int32s,
+	// written conditionally by tools/lwsread FLDSAVE.CPP. Same provably-
+	// inert-for-legacy extension idiom as Light_VolumetricCone — legacy
+	// writers only ever store EndBehavior values <= 1024 here. The bit is
+	// STRIPPED after reading so anything consuming the envelope's
+	// EndBehavior sees the legacy value (Sc is memset(0) by the caller,
+	// so bit-free files leave both fields 0 = unset).
+	if (Sc->AmbientIntensity->EndBehavior & Scene_EnvDefaults)
+	{
+		fread(&Sc->EnvReflSceneMode,1,4,FLD);
+		fread(&Sc->EnvBakeResScene,1,4,FLD);
+		Sc->AmbientIntensity->EndBehavior &= ~(uint32_t)Scene_EnvDefaults;
+		printf("[FLD] scene env defaults: envRefl=%d envBakeRes=%d\n",
+		       (int)Sc->EnvReflSceneMode, (int)Sc->EnvBakeResScene);
+	}
 }
 
 void ReadMaterial(FldMat *Mat)

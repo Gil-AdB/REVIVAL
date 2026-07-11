@@ -66,6 +66,16 @@ enum LightWave_Constants
 	// ORs 256/512/1024 into CurLight->Flags — "EndBehavior 1" = 512 on
 	// nearly every authored light), so 2048 is the first free bit.
 	Light_VolumetricCone			= 2048,
+	// Authored SCENE-wide env-reflection defaults (LWS "FdsSceneEnvRefl -1|1"
+	// / "FdsSceneEnvBakeRes N"). The FLD scene header has no flags word, so
+	// the extension bit rides the AmbientIntensity envelope's EndBehavior
+	// (legacy writers only ever store 0/256/512/1024 there — 2048 is free,
+	// same idiom as Light_VolumetricCone). Payload = two conditional int32s
+	// (EnvReflSceneMode, EnvBakeResScene) appended after the "OML" names
+	// triplet; the loader STRIPS the bit after reading so EndBehavior
+	// consumers never see it. FLDs without authored values are byte-
+	// identical to the pre-extension format.
+	Scene_EnvDefaults				= 2048,
 	// Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2
@@ -217,6 +227,12 @@ typedef struct
 	float					FramesPerSecond;
 	FldEnv		   *AmbientColor;
 	FldEnv       *AmbientIntensity;
+	// Authored scene-wide env-reflection defaults (LWS "FdsSceneEnvRefl" /
+	// "FdsSceneEnvBakeRes"; 0 = unset). Serialized only when either is
+	// nonzero, as a Scene_EnvDefaults-gated conditional payload — see the
+	// enum note above.
+	int32_t       EnvReflSceneMode;   // -1 none / 0 auto / 1 all
+	int32_t       EnvBakeResScene;    // probe face res (pow2 64..1024), 0 = unset
 } FldScene;
 
 #pragma pack (pop)

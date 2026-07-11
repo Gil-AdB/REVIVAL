@@ -62,6 +62,15 @@ enum LightWave_Constants
 	// EndBehavior store (256/512/1024 — "EndBehavior 1" = 512 on nearly
 	// every authored light), so 2048 is the first free bit.
 	Light_VolumetricCone		= 2048,
+	// Authored SCENE-wide env-reflection defaults (LWS "FdsSceneEnvRefl" /
+	// "FdsSceneEnvBakeRes", tools/lwsread). The FLD scene header has no
+	// flags word, so this extension bit rides the AmbientIntensity
+	// envelope's EndBehavior (legacy values top out at 1024 — 2048 free,
+	// the Light_VolumetricCone idiom). Gates two conditional int32s after
+	// the header's "OML" names triplet (EnvReflSceneMode, EnvBakeResScene);
+	// ReadGeneralSceneData STRIPS the bit after reading so EndBehavior
+	// consumers never see it. Bit-free FLDs are byte-identical legacy.
+	Scene_EnvDefaults				= 2048,
 // Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2

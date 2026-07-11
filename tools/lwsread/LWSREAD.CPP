@@ -101,6 +101,28 @@ void ReadFPS(void)
 #endif
 }
 
+// Authored SCENE-wide env-reflection defaults — engine-extension top-level
+// LWS keywords, named in the VolumetricLight style:
+//   FdsSceneEnvRefl -1|1     every auto-mode surface skips/bakes an env
+//                            probe by default (0/absent = auto — the
+//                            per-material Reflection>0 || MetallicMap rule;
+//                            per-surface envRefl overrides always win)
+//   FdsSceneEnvBakeRes N     default probe FACE resolution for the scene
+//                            (pow2 64..1024; absent = legacy sizing chain)
+// Serialized as a Scene_EnvDefaults-gated conditional payload in the FLD
+// scene header (see FLDSAVE.CPP SaveGeneralSceneData + LWREAD.H).
+void ReadSceneEnvRefl(void)
+{
+	fscanf(LWS,"%i",&Scene->EnvReflSceneMode);
+	printf("Scene env-refl default: %i\n",Scene->EnvReflSceneMode);
+}
+
+void ReadSceneEnvBakeRes(void)
+{
+	fscanf(LWS,"%i",&Scene->EnvBakeResScene);
+	printf("Scene env bake res default: %i\n",Scene->EnvBakeResScene);
+}
+
 static int objNum = 1;
 static int lightNum = 1;
 
@@ -623,6 +645,8 @@ struct
 #endif
 	{"FrameStep"			 , ReadFrameStep},
 	{"FramesPerSecond" , ReadFPS},
+	{"FdsSceneEnvRefl"	 , ReadSceneEnvRefl},		// engine extension (scene env defaults)
+	{"FdsSceneEnvBakeRes", ReadSceneEnvBakeRes},	// engine extension (scene env defaults)
 // Object section
 	{"LoadObject"			 , AddObject},
 	{"AddNullObject"   , AddNullObject},
