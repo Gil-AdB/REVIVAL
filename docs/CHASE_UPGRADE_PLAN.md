@@ -7,6 +7,12 @@ snapshot survey). Builds on the campaign architecture in
 flag-bit + conditional-payload extension idiom), FeatureFlags (never raw
 getenv), default-off code paths until user approval, headless md5 gates.
 
+**REVISED 2026-07-12** after a code-grounded review pass — six gaps folded in
+and **music sync committed** (was a punt). See **§8 Review revisions** for the
+deltas; they modify C0/M1/C1/B1/B2/L1 and add **Stage S0 (music-sync
+foundation)**. Read §8 alongside each stage — where §8 and an original stage
+disagree, §8 wins.
+
 The user's ask, verbatim:
 
 > "I want to have blasters firing, I want to improve the camera work and
@@ -545,18 +551,23 @@ per-light opt-in); perf check with cones on.
 
 ---
 
-## 5. Proposed landing order
+## 5. Proposed landing order (REVISED — see §8)
 
 ```
-C0  infra: pins + parity check + stale comment          (S)
-L1  flare sanity + SceneCorrections retire + sky + atmosphere  (M)
-M1  banking / heading / pacing / finale                 (M)
-B1  blasters firing                                     (M)
-B2  hit particles + flashes + splashes                  (M–L)
-C1  camera storyboard + shake/FOV polish                (L authoring, S code)
+C0  infra: pins + parity + stale comment + occlusion + determinism  (S→M)
+S0  music-sync foundation: Modplayer_GetPosition + beat-map + event table (M)
+L1  flare sanity (+fusion) + SceneCorrections retire + sky + atmosphere  (M)
+M1  banking / heading / pacing(from music) / finale     (M)
+B1  blasters firing (event-table-driven, occluded, HDR-parity)  (M)
+B2  hit particles + flashes + splashes (occluded, reflect-capped)  (M–L)
+C1  camera storyboard (TCB-cut params) + shake/FOV polish  (L authoring, S code)
 L2  lighting redesign (engine cones, key, bloom tune)   (M)
 X1  cherry-picks per user taste                         (S each)
 ```
+
+S0 lands right after C0 because the beat-map + event table is the spine both
+combat stages and the camera cuts hang off (§8.A). Its two-layer design also
+*is* the fix for the snapshot-determinism gap (§8.B), so it must precede B1.
 
 Rationale:
 - **L1 before everything visual**: no point judging blasters or camera work
@@ -577,8 +588,14 @@ Rationale:
 
 ## 6. Decision summary for the user (look choices, not implementation)
 
+0. **Music sync**: DECIDED (2026-07-12) — YES, do it. Events (fire/hit/cut)
+   lock to the track via a beat-map (§8.A). This also reframes #1: pacing
+   should follow the **music length for chase's slot**, not a free taste
+   number — see §8.G.
 1. **Pacing**: keep the frantic 17 s, or slow to ~25 s (and restore the
-   authored climb-out finale — recommended)?
+   authored climb-out finale — recommended)? Now constrained by the music
+   (§8.G): the "right" duration is however long chase's segment of the track
+   runs. Establish that first, then this becomes "keep vs restore finale".
 2. **Combat story**: ship2 hunts Ship1 one-sided, or an exchange with one
    return-fire beat? Does Ship1 take a visible hit (venting-trail damage
    through act 3) or stay untouchable?
@@ -610,3 +627,128 @@ Rationale:
   flip or the city env cache; chase has no bakes. New traps to watch: TBR
   span budget (256/strip today) once bolts+bursts land, and the
   `Reflected_Transform` particle insert doubling sprite counts when enabled.
+
+---
+
+## 8. Review revisions (2026-07-12) — six gaps folded in + music sync
+
+A code-grounded review found six things the original stages under-addressed.
+Two are correctness/methodology holes (B, C) that must be resolved before the
+stages that depend on them; one is a committed new capability (A, music sync);
+three are refinements (D/E/F). Verified against the code, not assumed.
+
+### 8.A — Music sync (DECIDED: do it) + the unifying event-table design
+
+The modplayer interface (`Modplayer/Modplayer.h`) has `Modplayer_SetOrder`
+(jump the track) but **no position getter** — so today event timing can only
+be authored by ear. Fix is small: add **`Modplayer_GetPosition(handle) ->
+{order,row,tickInRow, songTick}`** to the Rust submodule (`Modplayer/
+modplayer`, it already tracks this internally to play) + the C header.
+
+**The design that makes sync and determinism the same thing:**
+1. **Beat-map** (authoring-time, deterministic, checked in): a table mapping
+   song position (order:row) → chase scene-tick, built once by scanning the
+   song's tempo/speed schedule from chase's start order (MOD/XM tempo can
+   change mid-song, so this can't be a constant BPM — it's a scan). Ship it
+   as `Authoring/chase/chase.beatmap` (or generate at load from the getter +
+   a pinned start order). A small tool builds/refreshes it (add_city_beam
+   family).
+2. **Event table** keyed in **musical units** (bar/beat or order:row):
+   `{musicPos, kind(fire/hit/cut/camfx), params}`. Resolved through the
+   beat-map to **scene-tick offsets at load**.
+3. **Runtime = pure function of `t`.** Per frame, bolts/particles/camera-fx
+   state is **reconstructed from the resolved event table** at the current
+   CurFrame — NOT accumulated across ticks. So a bolt in flight at t is
+   "event fired at t_fire, position = lerp along its path by (t−t_fire)",
+   computed fresh. This is beat-locked (times came from the beat-map) AND
+   snapshot-deterministic (jump-to-t reproduces it — see 8.B).
+4. **Live tightening (demo only, not snapshots):** optionally read
+   `Modplayer_GetPosition` live to correct drift; the authoritative timing
+   stays the pre-resolved table so snapshots and live agree.
+
+This is **Stage S0** in the landing order, right after C0.
+
+### 8.B — Snapshot determinism for stateful systems (BLOCKING for B1/B2)
+
+Verified: `RunChaseSnapshot` (Snapshot.cpp:816-818) does `Timer=ts;
+tick()` — **jumps to t and ticks ONCE**, no simulation from 0. Splines
+survive (pure function of Timer); a stateful bolt/particle POOL would not (a
+bolt fired at 1400, alive at 1410, wouldn't exist). The original B1/B2
+"3-run md5 at firing windows" gate is therefore **unworkable against a
+pool-based module.** Resolution = 8.A.3: reconstruct bolt/particle state as
+a pure function of `t` from the event table. The existing `BlasterBolts`
+module is a stateful spawn/update pool — S0 either wraps it with a
+stateless "which bolts are alive at t & where" reconstruction, or the chase
+combat path drives a pure-`t` variant. Decide in S0; **B1 cannot be gated
+until this is in place.** (Alternative — make the chase snapshot simulate
+from 0 — is heavier and fights the dt-from-Timer snapshot model; rejected
+unless S0's pure-`t` reconstruction proves impractical.)
+
+### 8.C — Bolt/particle depth occlusion vs terrain (BLOCKING for B1/B2 look)
+
+Verified: `BlasterBolts_Draw` (BlasterBolts.cpp:197) projects the bolt quad
+and blits it **post-tonemap, additive, with only a near-plane clip — no
+scene-depth test**. Fine in greets (open space); over chase's mountains a
+bolt/particle behind a peak will render **in front** of it. Fold into B1
+(bolts) and B2 (sprites): sample `ZPage16` at the fragment (or per-vertex
+depth-reject the quad against the tile's depth) so combat elements occlude
+against terrain and ships. The bolt quad already carries per-vertex RZ, so
+the data is there; the draw just doesn't test it. Small but non-optional —
+without it the whole combat layer reads as an overlay, not in-world.
+
+### 8.D — TCB hard cuts need spline-param control, not just 1-frame spacing
+
+The original C1 "1-frame discontinuity = clean cut" is incomplete: TCB keys
+take tangents from **neighboring** keys, so two keys 1 frame apart still
+produce a fast smooth *swoop* unless the cut keys are authored with
+**tension = 1 (or linear continuity)** at the boundary. C1's "2-key probe"
+must specifically validate the tension/continuity params that kill the
+tangent, not just the spacing. If the FLD camera format / lwsread doesn't
+carry per-key TCB params through, that's the real work item to surface early.
+
+### 8.E — Water-reflection cost: reflect bolts, cap particles
+
+Enabling the CHASE.CPP:491 reflection insert re-runs `Reflected_Transform`
+(re-transforms every mesh + omni) over the added elements. 48 bolts ≈ fine;
+B2's ~2048 impact particles → ~4096 reflected sprites through that pass is a
+perf cliff. **Reflect the bolts (cheap, big visual win); do NOT reflect
+dense impact bursts** — or cap reflected particles to the nearest-N / the
+water-splash columns only (which are the ones that read in reflection
+anyway). Measure at max simultaneous burst (`--profiler`).
+
+### 8.F — Flare fix is additive fusion, not just size
+
+L1's `flareScale`-down helps but six co-located additive engine glows still
+**fuse into a blob** at intensity. Alongside the size reduction: consolidate
+Ship1's four glows into fewer (2?) and/or drop the additive intensity, so
+the fix addresses the overlap, not only the per-sprite footprint. Judge at
+t=400/800/1200 where the fusion is worst.
+
+### 8.G — Pacing is a music decision, not a free number
+
+The 3.3× playback (§1.1) and the pacing question (M1.3, decision #1) are now
+constrained: chase's duration should match **its slice of the track**.
+Establish where chase sits in the song (start order → end order for the
+scene's musical phrase) via `Modplayer_GetPosition` + the beat-map, then the
+scene length falls out of the music instead of taste. The finale-restoration
+(+60 frames) then either fits the phrase or gets its own musical cue.
+
+### Stage S0 — music-sync foundation (NEW, lands after C0)
+
+**Goal:** the getter + beat-map + event-table spine, proving out 8.A/8.B
+with zero visual change (default-off; no events authored yet).
+**Ships:** `Modplayer_GetPosition` (Rust submodule + header + cargo rebuild
+path already wired), the beat-map builder tool + `Authoring/chase/chase.
+beatmap`, the event-table loader (musical-units → resolved scene-ticks), and
+a pure-`t` reconstruction harness proven on a throwaway test event.
+**Verification:** getter returns monotonic position under live play (manual/
+logged); beat-map resolves a known order:row to the expected tick; a test
+"fire at bar N" event reconstructs identically across a 3-run jump-to-t
+snapshot (the determinism proof for 8.B); default chase pins byte-identical
+(nothing authored yet). Submodule change → note the modplayer commit SHA in
+the FLD/asset provenance.
+**Size: M.** **Risk: low-medium** — Rust submodule edit + cargo rebuild is
+the only unusual surface; the getter is a read of existing playback state.
+**Decision points:** beat-map granularity (row vs beat vs bar) for authoring
+events; whether live-tightening is worth it or pre-resolved timing is enough
+(recommend pre-resolved only, add live later if drift shows).
