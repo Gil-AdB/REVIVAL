@@ -1,6 +1,7 @@
 #include "FeatureFlags.h"
 
 #include <array>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -123,10 +124,93 @@ void printRow(std::FILE *out, const char *cliName, const char *envVar,
                  envVar, defaultStr, category, help);
 }
 
+// Tokens the OTHER argv parsers own (DEMO/REV.CPP pre-scans, Snapshot.cpp's
+// ParseSnapshotArgs/ParseBenchArgs, MaterialImport_ParseArgs). They flow
+// through parseArgs too, so the unknown-flag warning must not fire on them.
+// Names are compared AFTER dash→underscore normalization and after the
+// `=value` split, so exact matching is enough (e.g. `--snapshot=city@t=1`
+// arrives here as name "snapshot").
+bool ownedByOtherParser(const char *name) {
+    static const char *const kKnownElsewhere[] = {
+        "snapshot",                    // DEMO/Snapshot.cpp ParseSnapshotArgs + REV.CPP headless scan
+        "out",                         // DEMO/Snapshot.cpp ParseSnapshotArgs
+        "bench",                       // DEMO/Snapshot.cpp ParseBenchArgs + REV.CPP headless scan
+        "material_import",             // DEMO/MaterialImport.cpp MaterialImport_ParseArgs
+        "material_import_flip_normal",
+        "material_import_no_mips",
+        "print_completion",            // DEMO/REV.CPP (exits before parseArgs, listed for safety)
+    };
+    for (const char *k : kKnownElsewhere)
+        if (std::strcmp(name, k) == 0) return true;
+    return false;
+}
+
+bool applyOneToken(State &s, const char *arg);   // fwd (flags-file recursion)
+
+// ── --flags-file=<path> ─────────────────────────────────────────────────
+// Reads a text file of flag tokens, one per line, and applies each through
+// applyOneToken in file order. Canonical line form is the bare token WITHOUT
+// the `--` prefix (`hdr`, `no-bloom`, `fast_fog_density=30`); a leading `--`
+// is accepted too so a CLI line can be pasted verbatim. `#` comments and
+// blank lines are skipped; leading/trailing whitespace is trimmed; ONE token
+// per line (no intra-line splitting, so values may contain spaces). A line
+// may itself be `flags-file=<other>` — nesting is capped at kFlagsFileMaxDepth
+// and include cycles are detected (both log and skip). Precedence is pure
+// parse order: a `--flag` AFTER `--flags-file=` on the command line overrides
+// the file's value; a flag INSIDE the file overrides tokens before the
+// include point. Paths are relative to the CWD (Runtime/ at demo runtime).
+constexpr int kFlagsFileMaxDepth = 4;
+int         g_flagsFileDepth = 0;
+std::string g_flagsFileStack[kFlagsFileMaxDepth];
+
+void applyFlagsFile(State &s, const char *path) {
+    if (g_flagsFileDepth >= kFlagsFileMaxDepth) {
+        std::fprintf(stderr, "[FLAGS] flags-file '%s': include depth cap (%d) hit — skipped\n",
+                     path, kFlagsFileMaxDepth);
+        return;
+    }
+    // Cycle check on the canonicalized path (falls back to the raw path when
+    // realpath fails — e.g. dangling relative path; fopen will complain next).
+    char realBuf[PATH_MAX];
+    const char *key = realpath(path, realBuf) ? realBuf : path;
+    for (int i = 0; i < g_flagsFileDepth; ++i) {
+        if (g_flagsFileStack[i] == key) {
+            std::fprintf(stderr, "[FLAGS] flags-file '%s': include cycle — skipped\n", path);
+            return;
+        }
+    }
+    std::FILE *f = std::fopen(path, "r");
+    if (!f) {
+        std::fprintf(stderr, "[FLAGS] cannot open flags file '%s'\n", path);
+        return;
+    }
+    g_flagsFileStack[g_flagsFileDepth++] = key;
+    char line[512];
+    while (std::fgets(line, sizeof line, f)) {
+        line[std::strcspn(line, "\r\n")] = 0;
+        char *tok = line;
+        while (*tok == ' ' || *tok == '\t') ++tok;
+        for (char *e = tok + std::strlen(tok); e > tok && (e[-1] == ' ' || e[-1] == '\t'); )
+            *--e = 0;
+        if (!tok[0] || tok[0] == '#') continue;
+        char withDashes[560];
+        if (!(tok[0] == '-' && tok[1] == '-')) {
+            std::snprintf(withDashes, sizeof withDashes, "--%s", tok);
+            tok = withDashes;
+        }
+        applyOneToken(s, tok);   // --help inside a file is ignored by design
+    }
+    --g_flagsFileDepth;
+    std::fclose(f);
+}
+
 // Apply a single `--foo` / `--foo=value` / `--no-foo` token to the State.
 // Returns true if the token requested --help / -h; the public parseArgs
-// uses that to forward to printHelp. Unknown tokens are silently ignored
-// so this parser composes with the snapshot / bench parsers.
+// uses that to forward to printHelp. `--flags-file=<path>` is handled here
+// (see applyFlagsFile above) so it works on the CLI, in FDS_BAKED_ARGS and
+// nested inside another flags file. Unknown tokens are skipped so this
+// parser composes with the snapshot / bench parsers — but tokens no parser
+// owns now warn on stderr (suppress via --no-warn-unknown-flags / env).
 bool applyOneToken(State &s, const char *arg) {
     if (!arg || arg[0] != '-' || arg[1] != '-') return false;
     const char *body = arg + 2;
@@ -149,6 +233,15 @@ bool applyOneToken(State &s, const char *arg) {
         nameBuf[n] = '\0';
         name = nameBuf;
         if (eq) value = eq + 1;
+    }
+    // Flags-file include — not a registry entry (it's an action, not state).
+    if (std::strcmp(name, "flags_file") == 0) {
+        if (!value || !*value) {
+            std::fprintf(stderr, "flag --flags-file requires a value (path)\n");
+            return false;
+        }
+        applyFlagsFile(s, value);
+        return false;
     }
     // Lookup-first / strip-no-second: handle ambiguity between
     // `--no-foo` as the negation of `foo`, and `--no-foo` as the
@@ -189,7 +282,17 @@ bool applyOneToken(State &s, const char *arg) {
         s.intSet[ii]  = true;
         return false;
     }
-    // Unknown --foo: silently skipped (see header comment).
+    // Unknown --foo: skipped. Warn (once per token instance) unless the token
+    // belongs to one of the other argv parsers or warnings are suppressed —
+    // an unknown flag used to vanish silently, which turned a typo like
+    // `--fast-fog-blob` (for fast_fog_blobs) into a hard-to-spot no-op.
+    // Read the warn flag straight from the State (the g_* accessor globals
+    // aren't bound yet when this runs from the state() init lambda for
+    // FDS_BAKED_ARGS).
+    static const int kWarnIdx = findBoolByCliName("warn_unknown_flags");
+    if (kWarnIdx >= 0 && s.boolVals[kWarnIdx] && !ownedByOtherParser(name)) {
+        std::fprintf(stderr, "[FLAGS] unknown flag '%s' (ignored)\n", arg);
+    }
     return false;
 }
 
@@ -289,7 +392,17 @@ void FeatureFlags::printHelp(std::FILE *out) {
         "                    --no-<flag>       disable bool\n"
         "                    --<flag>=VALUE    set value (or explicit bool, 0/1/true/false/no)\n"
         "  2. Environment:   the listed env var; \"1\" is on, anything else off.\n"
-        "  3. Compile-time:  the default shown below (WASM flips a few via -D).\n\n");
+        "  3. Compile-time:  the default shown below (WASM flips a few via -D).\n"
+        "\n"
+        "  --flags-file=FILE loads flag tokens from FILE (path relative to the\n"
+        "  CWD, i.e. Runtime/), one per line. Canonical line form is the token\n"
+        "  without the `--` prefix (`hdr`, `no-bloom`, `fast_fog_density=30`);\n"
+        "  a leading `--` is accepted too. `#` comments / blank lines skipped.\n"
+        "  Precedence is parse order = position on the command line: tokens\n"
+        "  AFTER --flags-file= override the file, tokens inside the file\n"
+        "  override what came before it. Files can include other files via a\n"
+        "  flags-file= line (depth capped at 4, cycles detected).\n"
+        "  Starter preset: --flags-file=PRESETS/city-noir.flags\n\n");
     // Print by category, in table order. Walk both bool + value lists once
     // per distinct category we see, in order of first appearance.
     auto printedCategory = [](const char *cat, const char **seen, int seenCount) {
@@ -383,7 +496,7 @@ void FeatureFlags::printCompletion(std::FILE *out, const char *shell) {
     // accepted too at parse time, but the public/preferred form is dashes).
     std::fprintf(out, "_demo_flags=(\n");
     std::fprintf(out, "  --help -h --print-completion=bash --print-completion=zsh\n");
-    std::fprintf(out, "  --snapshot= --bench= --out=\n");
+    std::fprintf(out, "  --snapshot= --bench= --out= --flags-file=\n");
     char buf[128];
     for (int i = 0; i < kNumBool; ++i) {
         const char *n = toCliForm(buf, sizeof(buf), kBoolDefs[i].name);
