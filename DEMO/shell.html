@@ -577,7 +577,7 @@
       #editor-status { color:#9c9; font-size:11px; margin-top:6px; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b62</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b63</span></h2>
       <input id="editor-search" placeholder="filter…" oninput="renderSurfaceList()">
       <div id="editor-objects-hdr" style="color:#fff;cursor:pointer;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center;">
         <span>Objects <span id="editor-objects-count" style="color:#6c8;font-size:10px;"></span></span>
@@ -640,6 +640,7 @@
         <button id="editor-save" style="flex:1;background:#243;color:#cfc;border:1px solid #486;border-radius:3px;padding:5px;cursor:pointer;" disabled>Save to LWO</button>
         <button id="editor-reload" style="flex:1;background:#234;color:#ccf;border:1px solid #468;border-radius:3px;padding:5px;cursor:pointer;">Reload scene</button>
       </div>
+      <div id="editor-save-changes" style="display:none;margin-top:6px;"></div>
       <div id="editor-backups-hdr" style="margin-top:6px;color:#c96;font-size:10px;cursor:pointer;display:none;">Backups…</div>
       <div id="editor-backups" style="display:none;"></div>
       <div id="editor-status"></div>
@@ -681,7 +682,7 @@
       // Greets isn't CurScene until it inits + first ticks, so poll editorGetSurfaces
       // until it returns a non-empty list (then it's safe to read/edit).
       function initEditorPanel(){
-        console.log('[editor] panel init (build b62); orbit/zoom embind =',
+        console.log('[editor] panel init (build b63); orbit/zoom embind =',
                     typeof Module.editorOrbit, typeof Module.editorSetSurfaceProp);
         document.getElementById('editor-panel').classList.remove('hidden');
         // ── Movable / collapsible tool stack ─────────────────────────────
@@ -1727,6 +1728,111 @@
         updateSaveButton();
         return okAll;
       }
+      // ── "What changed" receipt ─────────────────────────────────────────
+      // Human-readable diff of everything a Save is writing, built from the
+      // dirty collections + the pristine baselines. Real old→new values (not
+      // counts), grouped by category. Called at save time (pristine is still
+      // the OLD baseline — the .then handler updates it only after the POST
+      // resolves), and rendered as a compact expandable panel in the success
+      // handler alongside the server's confirmation of what it actually wrote.
+      // Post-save (not a pre-save confirm) is the lower-friction choice: no
+      // extra click, never blocks the save, and it can pair the intended diff
+      // with the server's real write result.
+      function editorFmtV(v){
+        if (v === undefined || v === null) return '—';
+        if (typeof v === 'boolean') return v ? '1' : '0';
+        var n = +v;
+        if (!isFinite(n)) return String(v);
+        return (Math.abs(n - Math.round(n)) < 1e-6) ? String(Math.round(n)) : n.toFixed(3);
+      }
+      function buildSaveDiff(dirtyRaw, maps, dirtyLights, dirtyObjects, splits, envDirty){
+        var groups = [];
+        var surfNames = Object.keys(dirtyRaw || {});
+        if (surfNames.length){
+          var items = [];
+          surfNames.forEach(function(n){
+            var p = editorPristine[n] || {};
+            Object.keys(dirtyRaw[n]).forEach(function(k){
+              items.push(n + ' · ' + k + ': ' + editorFmtV(p[k]) + ' → ' + editorFmtV(dirtyRaw[n][k]));
+            });
+          });
+          groups.push({ title: surfNames.length + ' surface(s)', items: items });
+        }
+        var mapItems = [];
+        Object.keys(maps || {}).forEach(function(surf){
+          Object.keys(maps[surf]).forEach(function(role){
+            var m = maps[surf][role];
+            mapItems.push(surf + ' · ' + role + ': ' + (m ? ('set ' + m.filename) : 'reset to authored default'));
+          });
+        });
+        if (mapItems.length) groups.push({ title: mapItems.length + ' map(s)', items: mapItems });
+        var lightIdx = Object.keys(dirtyLights || {});
+        if (lightIdx.length){
+          var li = [];
+          lightIdx.forEach(function(i){
+            var p = editorLightsPristine[i] || {};
+            Object.keys(dirtyLights[i]).forEach(function(k){
+              li.push('light ' + i + ' · ' + k + ': ' + editorFmtV(p[k]) + ' → ' + editorFmtV(dirtyLights[i][k]));
+            });
+          });
+          groups.push({ title: lightIdx.length + ' light(s)', items: li });
+        }
+        var objNames = Object.keys(dirtyObjects || {});
+        if (objNames.length){
+          groups.push({ title: objNames.length + ' object(s)', items: objNames.map(function(n){
+            var oldv = (editorObjPristine[n] !== undefined) ? editorObjPristine[n] : 1;
+            return n + ' · scale: ' + editorFmtV(oldv) + ' → ' + editorFmtV(dirtyObjects[n].scale);
+          }) });
+        }
+        var splitBases = Object.keys(splits || {});
+        if (splitBases.length){
+          groups.push({ title: splitBases.length + ' split(s)', items: splitBases.map(function(b){
+            return b + ': ' + splits[b].clusters + ' part(s) → baked as real surfaces';
+          }) });
+        }
+        if (envDirty && editorSceneEnvCur && editorSceneEnvPristine){
+          var reflName = function(v){ return v > 0 ? 'all' : v < 0 ? 'none' : 'auto'; };
+          var ei = [];
+          if (editorSceneEnvCur.refl !== editorSceneEnvPristine.refl)
+            ei.push('envRefl: ' + reflName(editorSceneEnvPristine.refl) + ' → ' + reflName(editorSceneEnvCur.refl));
+          if (editorSceneEnvCur.res !== editorSceneEnvPristine.res)
+            ei.push('bake res: ' + (editorSceneEnvPristine.res || 'default') + ' → ' + (editorSceneEnvCur.res || 'default'));
+          if (ei.length) groups.push({ title: 'scene env defaults', items: ei });
+        }
+        return groups;
+      }
+      function renderSaveReceipt(diffGroups, serverBits, failed){
+        var host = document.getElementById('editor-save-changes');
+        if (!host) return;
+        host.innerHTML = ''; host.style.display = 'block';
+        var det = document.createElement('details'); det.open = true;
+        det.style.cssText = 'background:#12140f;border:1px solid #354;border-radius:3px;padding:3px 6px;';
+        var total = diffGroups.reduce(function(a, g){ return a + g.items.length; }, 0);
+        var sum = document.createElement('summary');
+        sum.style.cssText = 'cursor:pointer;font-size:11px;user-select:none;color:' + (failed ? '#f99' : '#cfc') + ';';
+        sum.textContent = failed
+          ? '✕ save FAILED — what was attempted'
+          : ('✓ saved ' + total + ' change' + (total === 1 ? '' : 's') + ' — what changed');
+        det.appendChild(sum);
+        var body = document.createElement('div'); body.style.marginTop = '3px';
+        diffGroups.forEach(function(g){
+          var h = document.createElement('div'); h.style.cssText = 'color:#8ac;font-size:10px;margin-top:3px;'; h.textContent = g.title;
+          body.appendChild(h);
+          g.items.forEach(function(it){
+            var d = document.createElement('div'); d.style.cssText = 'color:#bcb;font-size:10px;margin-left:6px;word-break:break-word;'; d.textContent = it;
+            body.appendChild(d);
+          });
+        });
+        if (serverBits && serverBits.length){
+          var sh = document.createElement('div'); sh.style.cssText = 'color:#786;font-size:10px;margin-top:5px;border-top:1px solid #243;padding-top:3px;'; sh.textContent = 'server wrote:';
+          body.appendChild(sh);
+          serverBits.forEach(function(b){
+            var d = document.createElement('div'); d.style.cssText = 'color:#9a9;font-size:10px;margin-left:6px;word-break:break-word;'; d.textContent = b;
+            body.appendChild(d);
+          });
+        }
+        det.appendChild(body); host.appendChild(det);
+      }
       // Save to LWO: POST the dirty props to the dev server, which patches the
       // Authoring/greets .lwo files (with backups), reruns lwsread, and installs
       // the FLD into Runtime/SCENES. "Reload scene" then re-boots the page —
@@ -1758,6 +1864,9 @@
         var envDirty = sceneEnvDirty();
         if (!names.length && !nMaps && !lightIdx.length && !objNames.length &&
             !splitBases.length && !envDirty) return;
+        // Snapshot the human-readable old→new diff NOW, before the .then
+        // handler advances the pristine baselines.
+        var saveDiff = buildSaveDiff(dirtyRaw, maps, dirtyLights, dirtyObjects, splits, envDirty);
         editorStatus('saving ' + names.length + ' surface(s), ' + nMaps + ' map(s), ' +
                      lightIdx.length + ' light(s), ' + objNames.length + ' object(s)' +
                      (splitBases.length ? ', ' + splitBases.length + ' split(s)' : '') +
@@ -1772,7 +1881,7 @@
         fetch('api/' + revEditorScene + '/save', { method: 'POST', body: JSON.stringify(payload) })
           .then(function(r){ return r.json(); })
           .then(function(res){
-            if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); return; }
+            if (!res.ok) { editorStatus('save FAILED: ' + (res.error || '?')); console.error('[editor] save', res); renderSaveReceipt(saveDiff, [], true); return; }
             var bits = (res.patched || []).map(function(p){ return p.file; });
             if (res.lights && res.lights.length) bits.push(res.lights.length + ' light(s) → LWS');
             if (res.fld) bits.push(res.fld.split('/').pop());
@@ -1815,8 +1924,9 @@
               editorSceneEnvPristine = { refl: editorSceneEnvCur.refl, res: editorSceneEnvCur.res };
             editorPendingMaps = {};
             renderSurfaceList(); renderLightList(); updateSaveButton();
+            renderSaveReceipt(saveDiff, bits, false);
           })
-          .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); });
+          .catch(function(e){ editorStatus('save failed: ' + e + ' (is tools/editor_server.py running?)'); renderSaveReceipt(saveDiff, [], true); });
       };
       document.getElementById('editor-reload').onclick = function(){ location.reload(); };
       // Scene-time scrub: the editor freezes the animation clock; step it to
