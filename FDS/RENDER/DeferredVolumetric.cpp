@@ -126,6 +126,263 @@ static inline void VolCompositeAdd(dword* out, size_t i, float aB, float aG, flo
     out[i] = (dword(newR) << 16) | (dword(newG) << 8) | dword(newB) | 0xFF000000u;
 }
 
+// ─── Cone turbulence (cone_turbulence / cone_swirl flags) ───────────────
+//
+// Animated internal structure for the volumetric beams: per-sample (ray-
+// march) / per-segment (analytic hybrid) density modulation by a cheap
+// self-contained 3D value noise, evaluated in WORLD space so a moving or
+// rotating beam sweeps through a static drifting medium (the "flashlight
+// through smoke" read; cone-space sampling would glue the pattern to the
+// beam, which looks like a gobo, not smoke). Optional swirl pre-rotates
+// each sample around the beam axis by an angle proportional to the axial
+// distance + scene time, which shears the world field into helical
+// streaks that ride the beam.
+//
+// Determinism: every term derives from g_FrameTime (scene clock, pinned
+// in snapshots) and pure position hashes — no rand()/wall time. All
+// per-frame constants are computed once per Render_VolumetricCones call
+// (orchestrator side) and passed down by value; tiles never write shared
+// state.
+struct ConeTurb {
+	bool  on = false;
+	float amp = 0.0f;         // modulation amplitude (flag × 2.2 contrast)
+	float invCell = 1.0f;     // 1 / cone_turb_scale (world units → cells)
+	float driftX = 0.0f, driftY = 0.0f, driftZ = 0.0f;  // cell offset (×t)
+	float swirl = 0.0f;       // cone_swirl (0 = no axis rotation)
+	float twistK = 0.0f;      // rad per world unit of axial distance
+	float phase = 0.0f;       // rad, time term of the swirl angle
+	int   octaves = 1;
+	// view→world copied from the ctx (world = M·view + cam).
+	float M[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+	float camX = 0.0f, camY = 0.0f, camZ = 0.0f;
+};
+
+// Integer-lattice hash → [0,1). Same avalanching recipe as the pixel
+// jitter hash above; pure function of the lattice coords.
+static inline float ConeTurbHash3(int x, int y, int z) {
+	uint32_t h = uint32_t(x) * 0x8DA6B343u
+	           + uint32_t(y) * 0xD8163841u
+	           + uint32_t(z) * 0xCB1AB31Fu;
+	h ^= h >> 13; h *= 0xC2B2AE35u; h ^= h >> 16;
+	return float(h & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+}
+
+// Trilinear value noise, smoothstep-faded, → [0,1).
+static inline float ConeTurbNoise3(float x, float y, float z) {
+	const float fx = std::floor(x), fy = std::floor(y), fz = std::floor(z);
+	const int ix = int(fx), iy = int(fy), iz = int(fz);
+	float tx = x - fx, ty = y - fy, tz = z - fz;
+	tx = tx * tx * (3.0f - 2.0f * tx);
+	ty = ty * ty * (3.0f - 2.0f * ty);
+	tz = tz * tz * (3.0f - 2.0f * tz);
+	const float c000 = ConeTurbHash3(ix,     iy,     iz    );
+	const float c100 = ConeTurbHash3(ix + 1, iy,     iz    );
+	const float c010 = ConeTurbHash3(ix,     iy + 1, iz    );
+	const float c110 = ConeTurbHash3(ix + 1, iy + 1, iz    );
+	const float c001 = ConeTurbHash3(ix,     iy,     iz + 1);
+	const float c101 = ConeTurbHash3(ix + 1, iy,     iz + 1);
+	const float c011 = ConeTurbHash3(ix,     iy + 1, iz + 1);
+	const float c111 = ConeTurbHash3(ix + 1, iy + 1, iz + 1);
+	const float x00 = c000 + (c100 - c000) * tx;
+	const float x10 = c010 + (c110 - c010) * tx;
+	const float x01 = c001 + (c101 - c001) * tx;
+	const float x11 = c011 + (c111 - c011) * tx;
+	const float y0  = x00 + (x10 - x00) * ty;
+	const float y1  = x01 + (x11 - x01) * ty;
+	return y0 + (y1 - y0) * tz;
+}
+
+// Density modulation factor at a view-space sample point (sx,sy,sz) inside
+// the cone (apex P, unit axis D, both view space). Mean ≈ 1 so overall
+// beam brightness is preserved; the noise redistributes it into wisps.
+static inline float ConeTurbFactor(const ConeTurb &tp,
+                                   float sx, float sy, float sz,
+                                   float Px, float Py, float Pz,
+                                   float Dx, float Dy, float Dz)
+{
+	if (tp.swirl != 0.0f) {
+		// Rotate the sample around the beam axis by φ(axialDist, t):
+		// r' = r·cosφ + (D×r)·sinφ (r ⊥ D so Rodrigues collapses).
+		const float Wx = sx - Px, Wy = sy - Py, Wz = sz - Pz;
+		const float ta = Dx*Wx + Dy*Wy + Dz*Wz;
+		const float rx = Wx - ta*Dx, ry = Wy - ta*Dy, rz = Wz - ta*Dz;
+		const float phi = tp.swirl * (tp.twistK * ta) + tp.phase;
+		const float cs = std::cos(phi), sn = std::sin(phi);
+		const float cxv = Dy*rz - Dz*ry;
+		const float cyv = Dz*rx - Dx*rz;
+		const float czv = Dx*ry - Dy*rx;
+		sx = Px + ta*Dx + rx*cs + cxv*sn;
+		sy = Py + ta*Dy + ry*cs + cyv*sn;
+		sz = Pz + ta*Dz + rz*cs + czv*sn;
+	}
+	const float wx = tp.M[0][0]*sx + tp.M[0][1]*sy + tp.M[0][2]*sz + tp.camX;
+	const float wy = tp.M[1][0]*sx + tp.M[1][1]*sy + tp.M[1][2]*sz + tp.camY;
+	const float wz = tp.M[2][0]*sx + tp.M[2][1]*sy + tp.M[2][2]*sz + tp.camZ;
+	const float nx = wx * tp.invCell + tp.driftX;
+	const float ny = wy * tp.invCell + tp.driftY;
+	const float nz = wz * tp.invCell + tp.driftZ;
+	float n = ConeTurbNoise3(nx, ny, nz);
+	if (tp.octaves >= 2)
+		n = 0.65f * n + 0.35f * ConeTurbNoise3(nx * 2.03f + 37.2f,
+		                                       ny * 2.03f + 11.7f,
+		                                       nz * 2.03f +  5.9f);
+	const float m = 1.0f + tp.amp * (2.0f * n - 1.0f);
+	return m > 0.0f ? m : 0.0f;
+}
+
+// ─── 8-wide turbulence (lanes = 8 pixels, same layout as the cone
+// integration). A scalar-per-lane version of the factor cost the greets
+// cone pass +35 ms/frame (measured); this vector version keeps it in
+// the low single digits. Math mirrors the scalar helper (same lattice
+// hash / fade / octave weights); the swirl sin/cos uses the standard
+// parabola approx (~0.1% err — invisible at density-modulation gain).
+static inline __m256 ConeTurbAbs_x8(__m256 x) {
+	return _mm256_andnot_ps(_mm256_set1_ps(-0.0f), x);
+}
+// sin over [-π,π]: y = B·r + C·r·|r|, refined y += 0.225(y·|y| − y).
+static inline __m256 ConeTurbSin_x8(__m256 r) {
+	const __m256 B = _mm256_set1_ps(1.27323954f);
+	const __m256 C = _mm256_set1_ps(-0.405284735f);
+	__m256 y = _mm256_fmadd_ps(_mm256_mul_ps(C, r), ConeTurbAbs_x8(r),
+	                           _mm256_mul_ps(B, r));
+	y = _mm256_fmadd_ps(_mm256_set1_ps(0.225f),
+	                    _mm256_fmsub_ps(y, ConeTurbAbs_x8(y), y), y);
+	return y;
+}
+// Wrap x to [-π,π].
+static inline __m256 ConeTurbWrapPi_x8(__m256 x) {
+	const __m256 inv2pi = _mm256_set1_ps(0.15915494f);
+	const __m256 twopi  = _mm256_set1_ps(6.2831853f);
+	const __m256 n = _mm256_round_ps(_mm256_mul_ps(x, inv2pi), 0 + 8);
+	return _mm256_fnmadd_ps(n, twopi, x);
+}
+// One octave of 8-wide value noise — the vector twin of ConeTurbNoise3
+// (identical lattice hash constants and avalanche).
+static inline __m256 ConeTurbNoise3_x8(__m256 x, __m256 y, __m256 z) {
+	const __m256 fx = _mm256_floor_ps(x);
+	const __m256 fy = _mm256_floor_ps(y);
+	const __m256 fz = _mm256_floor_ps(z);
+	__m256 tx = _mm256_sub_ps(x, fx);
+	__m256 ty = _mm256_sub_ps(y, fy);
+	__m256 tz = _mm256_sub_ps(z, fz);
+	const __m256 three = _mm256_set1_ps(3.0f), two = _mm256_set1_ps(2.0f);
+	tx = _mm256_mul_ps(_mm256_mul_ps(tx, tx), _mm256_fnmadd_ps(two, tx, three));
+	ty = _mm256_mul_ps(_mm256_mul_ps(ty, ty), _mm256_fnmadd_ps(two, ty, three));
+	tz = _mm256_mul_ps(_mm256_mul_ps(tz, tz), _mm256_fnmadd_ps(two, tz, three));
+	const __m256i K1 = _mm256_set1_epi32((int)0x8DA6B343u);
+	const __m256i K2 = _mm256_set1_epi32((int)0xD8163841u);
+	const __m256i K3 = _mm256_set1_epi32((int)0xCB1AB31Fu);
+	const __m256i ix = _mm256_cvttps_epi32(fx);
+	const __m256i iy = _mm256_cvttps_epi32(fy);
+	const __m256i iz = _mm256_cvttps_epi32(fz);
+	// base = ix·K1 + iy·K2 + iz·K3; the 8 corners are base + subset sums
+	// of {K1,K2,K3} — adds only, 3 mullo total.
+	const __m256i base = _mm256_add_epi32(
+	    _mm256_add_epi32(_mm256_mullo_epi32(ix, K1), _mm256_mullo_epi32(iy, K2)),
+	    _mm256_mullo_epi32(iz, K3));
+	const __m256i k12  = _mm256_add_epi32(K1, K2);
+	// Avalanche + 24-bit → float [0,1): h^=h>>13; h*=K; h^=h>>16.
+	const __m256i AV = _mm256_set1_epi32((int)0xC2B2AE35u);
+	const __m256i M24 = _mm256_set1_epi32(0x00FFFFFF);
+	const __m256 inv24 = _mm256_set1_ps(1.0f / 16777216.0f);
+	auto corner = [&](__m256i h) -> __m256 {
+		h = _mm256_xor_si256(h, _mm256_srli_epi32(h, 13));
+		h = _mm256_mullo_epi32(h, AV);
+		h = _mm256_xor_si256(h, _mm256_srli_epi32(h, 16));
+		return _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_and_si256(h, M24)), inv24);
+	};
+	const __m256 c000 = corner(base);
+	const __m256 c100 = corner(_mm256_add_epi32(base, K1));
+	const __m256 c010 = corner(_mm256_add_epi32(base, K2));
+	const __m256 c110 = corner(_mm256_add_epi32(base, k12));
+	const __m256i baseZ = _mm256_add_epi32(base, K3);
+	const __m256 c001 = corner(baseZ);
+	const __m256 c101 = corner(_mm256_add_epi32(baseZ, K1));
+	const __m256 c011 = corner(_mm256_add_epi32(baseZ, K2));
+	const __m256 c111 = corner(_mm256_add_epi32(baseZ, k12));
+	auto lerp = [&](__m256 a, __m256 b, __m256 t) -> __m256 {
+		return _mm256_fmadd_ps(_mm256_sub_ps(b, a), t, a);
+	};
+	const __m256 x00 = lerp(c000, c100, tx);
+	const __m256 x10 = lerp(c010, c110, tx);
+	const __m256 x01 = lerp(c001, c101, tx);
+	const __m256 x11 = lerp(c011, c111, tx);
+	const __m256 y0  = lerp(x00, x10, ty);
+	const __m256 y1  = lerp(x01, x11, ty);
+	return lerp(y0, y1, tz);
+}
+
+// Vector twin of ConeTurbFactor: 8 view-space sample points at once.
+static inline __m256 ConeTurbFactor_x8(const ConeTurb &tp,
+                                       __m256 sx, __m256 sy, __m256 sz,
+                                       float Px, float Py, float Pz,
+                                       float Dx, float Dy, float Dz)
+{
+	if (tp.swirl != 0.0f) {
+		const __m256 vPx = _mm256_set1_ps(Px), vPy = _mm256_set1_ps(Py),
+		             vPz = _mm256_set1_ps(Pz);
+		const __m256 vDx = _mm256_set1_ps(Dx), vDy = _mm256_set1_ps(Dy),
+		             vDz = _mm256_set1_ps(Dz);
+		const __m256 Wx = _mm256_sub_ps(sx, vPx);
+		const __m256 Wy = _mm256_sub_ps(sy, vPy);
+		const __m256 Wz = _mm256_sub_ps(sz, vPz);
+		const __m256 ta = _mm256_fmadd_ps(vDx, Wx,
+		                  _mm256_fmadd_ps(vDy, Wy, _mm256_mul_ps(vDz, Wz)));
+		const __m256 rx = _mm256_fnmadd_ps(ta, vDx, Wx);
+		const __m256 ry = _mm256_fnmadd_ps(ta, vDy, Wy);
+		const __m256 rz = _mm256_fnmadd_ps(ta, vDz, Wz);
+		const __m256 phi = _mm256_fmadd_ps(
+		    _mm256_set1_ps(tp.swirl * tp.twistK), ta,
+		    _mm256_set1_ps(tp.phase));
+		const __m256 rphi = ConeTurbWrapPi_x8(phi);
+		const __m256 sn = ConeTurbSin_x8(rphi);
+		const __m256 cs = ConeTurbSin_x8(ConeTurbWrapPi_x8(
+		    _mm256_add_ps(rphi, _mm256_set1_ps(1.57079633f))));
+		const __m256 cxv = _mm256_fmsub_ps(vDy, rz, _mm256_mul_ps(vDz, ry));
+		const __m256 cyv = _mm256_fmsub_ps(vDz, rx, _mm256_mul_ps(vDx, rz));
+		const __m256 czv = _mm256_fmsub_ps(vDx, ry, _mm256_mul_ps(vDy, rx));
+		sx = _mm256_add_ps(_mm256_fmadd_ps(ta, vDx, vPx),
+		     _mm256_fmadd_ps(rx, cs, _mm256_mul_ps(cxv, sn)));
+		sy = _mm256_add_ps(_mm256_fmadd_ps(ta, vDy, vPy),
+		     _mm256_fmadd_ps(ry, cs, _mm256_mul_ps(cyv, sn)));
+		sz = _mm256_add_ps(_mm256_fmadd_ps(ta, vDz, vPz),
+		     _mm256_fmadd_ps(rz, cs, _mm256_mul_ps(czv, sn)));
+	}
+	const __m256 wx = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[0][2]), sz,
+	                                  _mm256_set1_ps(tp.camX))));
+	const __m256 wy = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[1][2]), sz,
+	                                  _mm256_set1_ps(tp.camY))));
+	const __m256 wz = _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][0]), sx,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][1]), sy,
+	                  _mm256_fmadd_ps(_mm256_set1_ps(tp.M[2][2]), sz,
+	                                  _mm256_set1_ps(tp.camZ))));
+	const __m256 nx = _mm256_fmadd_ps(wx, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftX));
+	const __m256 ny = _mm256_fmadd_ps(wy, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftY));
+	const __m256 nz = _mm256_fmadd_ps(wz, _mm256_set1_ps(tp.invCell),
+	                                  _mm256_set1_ps(tp.driftZ));
+	__m256 n = ConeTurbNoise3_x8(nx, ny, nz);
+	if (tp.octaves >= 2) {
+		const __m256 s2 = _mm256_set1_ps(2.03f);
+		n = _mm256_fmadd_ps(n, _mm256_set1_ps(0.65f),
+		    _mm256_mul_ps(_mm256_set1_ps(0.35f),
+		    ConeTurbNoise3_x8(
+		        _mm256_fmadd_ps(nx, s2, _mm256_set1_ps(37.2f)),
+		        _mm256_fmadd_ps(ny, s2, _mm256_set1_ps(11.7f)),
+		        _mm256_fmadd_ps(nz, s2, _mm256_set1_ps( 5.9f)))));
+	}
+	const __m256 m = _mm256_fmadd_ps(
+	    _mm256_set1_ps(tp.amp),
+	    _mm256_fmsub_ps(_mm256_set1_ps(2.0f), n, _mm256_set1_ps(1.0f)),
+	    _mm256_set1_ps(1.0f));
+	return _mm256_max_ps(m, _mm256_setzero_ps());
+}
+
 // Full-screen distance fog over opaque pixels. Runs after
 // Render_DeferredLighting writes finished colors to VPage; before the
 // transparent peel composites. 1998 used `sqrt(1 - z/FZP)` per VERTEX;
@@ -254,7 +511,8 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                          const int *spotIdx, int spotCount,
                                          float invFOVX, float invFOVY,
                                          float invZScale, float density,
-                                         float fogZ, float invFogZ) {
+                                         float fogZ, float invFogZ,
+                                         const ConeTurb &turb) {
     // Render state from the threaded ctx, not globals. Local refs/aliases
     // shadow the file-scope names so the (large) body is untouched.
     const DeferredLightingCtx &dc = ctx;
@@ -394,6 +652,12 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                     const bool  narrowCone = cosO > 0.985f;
                     const int   nSamp      = narrowCone ? 16 : N_SAMPLES;
                     const float inv_nSamp  = narrowCone ? (1.0f / 16.0f) : inv_N;
+                    // Turbulence needs per-segment density taps, which the
+                    // wide-cone single closed form doesn't have — route
+                    // turbulent wide cones through the segmented hybrid
+                    // too. turb.on=false → segPath==narrowCone → the
+                    // legacy branch structure, byte-identical.
+                    const bool  segPath    = narrowCone || turb.on;
                     // Clone spot: beam reflection, confined to its
                     // mirror's footprint below.
                     const uint32_t omid = lights->mirrorId[li];
@@ -728,7 +992,7 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             return _mm256_blendv_ps(sm, vOne_v, mIn);
                         };
                         __m256 vIntegral;
-                        if (!narrowCone) {
+                        if (!segPath) {
                             // Wide cones: single closed form. coneAtten
                             // is applied at the midpoint further below.
                             vIntegral = _mm256_mul_ps(
@@ -811,9 +1075,31 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                     }
                                     shv = _mm256_load_ps(shA);
                                 }
-                                vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
-                                       _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
-                                                     shv), vSum);
+                                // Per-segment turbulent density tap —
+                                // 8-wide across lanes (a scalar-per-lane
+                                // version cost +35 ms/frame on greets).
+                                // Dead lanes compute on zm≈0 — finite,
+                                // masked by mAlive downstream. Branch
+                                // (not a ×1.0 blend): the off path must
+                                // keep the EXACT legacy expression —
+                                // simde maps these intrinsics to plain
+                                // vector ops on arm64, and reshaping the
+                                // chain shifts fma contraction (flipped
+                                // the greets pin by a few ulps).
+                                if (turb.on) {
+                                    const __m256 tbv = ConeTurbFactor_x8(
+                                        turb,
+                                        _mm256_mul_ps(zm, vX_v),
+                                        _mm256_mul_ps(zm, vY_v), zm,
+                                        Px, Py_l, Pz, Dx, Dy, Dz);
+                                    vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
+                                           _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
+                                                         _mm256_mul_ps(shv, tbv)), vSum);
+                                } else {
+                                    vSum = _mm256_fmadd_ps(atanDiff(uk, uPrev),
+                                           _mm256_mul_ps(_mm256_mul_ps(coneAttenAt(zm), sf),
+                                                         shv), vSum);
+                                }
                                 uPrev = uk;
                             }
                             vIntegral = _mm256_mul_ps(
@@ -856,17 +1142,17 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                                                 _mm256_sub_ps(vThree_v,
                                                   _mm256_mul_ps(vTwo_v, t_m)));
                         const __m256 mInner_m = _mm256_cmp_ps(cosT_m, vCosI_v, _CMP_GE_OQ);
-                        // Narrow cones already folded coneAtten in per
+                        // Segmented cones already folded coneAtten in per
                         // segment — don't apply the midpoint one again.
-                        const __m256 coneAtten_m = narrowCone
+                        const __m256 coneAtten_m = segPath
                             ? vOne_v
                             : _mm256_blendv_ps(smooth_m, vOne_v, mInner_m);
                         // surfaceFade at midpoint.
                         const __m256 mFade_m  = _mm256_cmp_ps(vZMid, vFadeStart_v, _CMP_GT_OQ);
                         const __m256 fadeVal_m = _mm256_mul_ps(
                                                  _mm256_sub_ps(vZMax_v, vZMid), vInvDz_v);
-                        // Narrow cones folded the fade per segment.
-                        const __m256 surfaceFade_m = narrowCone
+                        // Segmented cones folded the fade per segment.
+                        const __m256 surfaceFade_m = segPath
                             ? vOne_v
                             : _mm256_blendv_ps(vOne_v, fadeVal_m, mFade_m);
 
@@ -926,9 +1212,9 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         // shadow boundaries; tolerated because halos
                         // are diffuse. Mirrors the in-loop sm path
                         // above but uses zMid instead of per-sample z.
-                        if (sm && !narrowCone) {
-                            // (narrow cones fold shadow per segment in
-                            // the hybrid above)
+                        if (sm && !segPath) {
+                            // (segmented cones fold shadow per segment
+                            // in the hybrid above)
                             alignas(32) float maskArr_s[8], zArr_s[8];
                             _mm256_store_ps(maskArr_s, m);
                             _mm256_store_ps(zArr_s, vZMid);
@@ -1080,6 +1366,16 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                         __m256 contrib = _mm256_mul_ps(
                             _mm256_mul_ps(coneAtten, distAtten),
                             _mm256_mul_ps(fogAtten, surfaceFade));
+                        // Per-sample turbulent density — 8-wide across
+                        // lanes (masked-out lanes compute on harmless
+                        // finite values; the and-mask drops them).
+                        if (turb.on) {
+                            contrib = _mm256_mul_ps(contrib,
+                                ConeTurbFactor_x8(turb,
+                                    _mm256_mul_ps(vZ, vX_v),
+                                    _mm256_mul_ps(vZ, vY_v), vZ,
+                                    Px, Py_l, Pz, Dx, Dy, Dz));
+                        }
                         contrib = _mm256_and_ps(contrib, mask);
                         accV = _mm256_add_ps(accV, contrib);
                     }
@@ -1415,7 +1711,13 @@ static void Render_VolumetricCones_Tile(const DeferredLightingCtx &ctx,
                             }
                         }
                     }
-                    acc += coneAtten * distAtten * fogAtten * surfaceFade;
+                    // Turbulent density modulation (world-space noise ×
+                    // optional axis swirl) — scalar path.
+                    float turbF = 1.0f;
+                    if (turb.on)
+                        turbF = ConeTurbFactor(turb, z*X, z*Y, z,
+                                               Px, Py, Pz, Dx, Dy, Dz);
+                    acc += coneAtten * distAtten * fogAtten * surfaceFade * turbF;
                 }
                 if (acc <= 0.0f) continue;
                 // No dz scaling — the path-integral form (acc × dz) gave
@@ -1507,6 +1809,43 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
     // already fully fogged out. fogZ <= 0 disables (unfogged scenes).
     const float fogZ    = (CurScene->Flags & Scn_Fogged) ? CurScene->FZP : 0.0f;
     const float invFogZ = (fogZ > 0.0f) ? 1.0f / fogZ : 0.0f;
+
+    // Cone turbulence: all per-frame constants derived ONCE here on the
+    // dispatching thread (g_FrameTime is the deterministic scene clock —
+    // fixed-t snapshots repeat exactly; tiles get a const ref, no shared
+    // mutable state). Local because concurrent shard bakes call this
+    // reentrantly with their own ctx (viewToWorld differs per shard).
+    ConeTurb turb;
+    {
+        const float amp = fds::FeatureFlags::cone_turbulence();
+        if (amp > 0.0f) {
+            turb.on  = true;
+            // 2-octave value noise concentrates near 0.5, so the raw
+            // flag reads weak; ×2.2 makes flag=1 span ≈[0..2.7]× density
+            // (mean stays ≈1 — turbulence redistributes, not dims).
+            turb.amp = amp * 2.2f;
+            const float cell = std::max(0.05f, fds::FeatureFlags::cone_turb_scale());
+            turb.invCell = 1.0f / cell;
+            const float tsec = float(g_FrameTime) * 0.01f;
+            const float spd  = fds::FeatureFlags::cone_turb_speed();
+            // Fixed world drift direction (mostly lateral + a slight
+            // rise), in noise cells/s — the fast-fog wind convention.
+            turb.driftX = (0.60f * spd) * tsec;
+            turb.driftY = (0.25f * spd) * tsec;
+            turb.driftZ = (0.35f * spd) * tsec;
+            turb.swirl  = fds::FeatureFlags::cone_swirl();
+            // swirl=1 → one full twist per 8 noise cells along the axis;
+            // the phase rotates the helix over time (rate rides spd).
+            turb.twistK = 6.2831853f / (8.0f * cell);
+            turb.phase  = 1.2f * spd * tsec;
+            turb.octaves = std::max(1, std::min(2,
+                fds::FeatureFlags::cone_turb_octaves()));
+            std::memcpy(turb.M, ctx.viewToWorld, sizeof(turb.M));
+            turb.camX = ctx.cameraWorldX;
+            turb.camY = ctx.cameraWorldY;
+            turb.camZ = ctx.cameraWorldZ;
+        }
+    }
 
     // Iterate the frame-global ViewLightsSoA built by Render_DeferredLighting
     // (dc.lights / .numLights). The per-tile TileLights apply a
@@ -1694,7 +2033,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
                                          invFOVX,invFOVY,invZScale,density,
-                                         fogZ,invFogZ);
+                                         fogZ,invFogZ, turb);
         }
     } else {
         // Work-stealing chunk dispatch via dispatchIndexed (fn releases
@@ -1709,7 +2048,7 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
             Render_VolumetricCones_Tile(ctx, x1,y1,x2,y2, lights,
                                          tileSpotIdx[t], tileSpotCount[t],
                                          invFOVX,invFOVY,invZScale,density,
-                                         fogZ,invFogZ);
+                                         fogZ,invFogZ, turb);
             TailProf::addBusy(_tp);   // before release → race-free idle metric
             renderns::tileDone.release();
         });
