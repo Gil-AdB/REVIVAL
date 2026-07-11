@@ -32,10 +32,15 @@ Traps:
   bump it with every shell.html change or staleness is undiagnosable.
 - **chase**: no bakes, no known nondeterminism (pinned srand, fine clock off
   in snapshots). Both pins above confirmed byte-identical over 3 runs each
-  (2026-07-12, C0). Valid snapshot range **t=0..1698** (past 1699 the harness
-  re-dumps the last rendered VPage). Regen from `Authoring/chase/` via
-  `pin_scene.py --legacy-vlum` is byte-identical to the shipping FLD (delta=0,
-  747,511 B) — the pre-edit baseline for later authored chase stages.
+  (2026-07-12, C0). **RECIPE-FRAGILE**: chase accumulates snapshot state across
+  the timestamp-list loop, so a given t's hash depends on the WHOLE list —
+  the pins are ONLY valid for the exact recipe `t=100,400,800,1200,1600` (and
+  the cinematic `t=800,1600`). Running a subset/superset gives different (still
+  deterministic) hashes — NOT a regression. Always gate with the exact list.
+  Valid snapshot range **t=0..1698** (past 1699 the harness re-dumps the last
+  rendered VPage). Regen from `Authoring/chase/` via `pin_scene.py
+  --legacy-vlum` is byte-identical to the shipping FLD (delta=0, 747,511 B) —
+  the pre-edit baseline for later authored chase stages.
 
 ## The big architecture decision (2026-07-11, user-set direction)
 
