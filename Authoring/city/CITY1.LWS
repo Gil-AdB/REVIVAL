@@ -2305,6 +2305,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2323,6 +2325,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2341,6 +2345,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2359,6 +2365,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2377,6 +2385,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2395,6 +2405,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2413,6 +2425,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2431,6 +2445,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2449,6 +2465,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2467,6 +2485,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2485,6 +2505,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2503,6 +2525,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2521,6 +2545,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1050.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2539,6 +2565,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1050.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2557,6 +2585,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2575,6 +2605,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2593,6 +2625,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2611,6 +2645,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2629,6 +2665,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1153.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2647,6 +2685,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1153.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2665,6 +2705,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2683,6 +2725,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2701,6 +2745,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2719,6 +2765,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1022.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2737,6 +2785,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 800.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2755,6 +2805,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 800.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2773,6 +2825,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2791,6 +2845,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2809,6 +2865,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2827,6 +2885,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2845,6 +2905,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2863,6 +2925,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2881,6 +2945,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2899,6 +2965,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2243.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2917,6 +2985,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1050.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2935,6 +3005,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1050.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2953,6 +3025,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1466.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2971,6 +3045,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 1466.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -2989,6 +3065,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2400.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3007,6 +3085,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2400.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3025,6 +3105,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2047.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3043,6 +3125,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 2047.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3061,6 +3145,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3079,6 +3165,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3097,6 +3185,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 AddLight
@@ -3115,6 +3205,8 @@ LgtIntensity 1.200000
 LightType 2
 ConeAngle 30.000000
 LightRange 879.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.000000
 ShadowType 1
 
 ShowCamera 1 7

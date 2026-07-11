@@ -1,15 +1,17 @@
 # city — scene sources (FULLY PINNED: byte-identical regeneration)
 
-The city fly-through. Ships as `Runtime/SCENES/CITY.FLD` (986,342 bytes,
-FldVersion 0.113, md5 `4de91e22443cda70fd78fab2511c4561` — includes the 46
-authored vehicle headlights, see below).
+The city fly-through. Ships as `Runtime/SCENES/CITY.FLD` (986,526 bytes,
+FldVersion 0.113, md5 `c190766baacf831c588718a1a838d888` — includes the 46
+authored vehicle headlights with volumetric beams, see below. The pre-beams
+FLD, 986,342 B md5 `4de91e22443cda70fd78fab2511c4561`, is preserved at
+`Runtime/SCENES/.backups/CITY.FLD.pre-volbeams`).
 
 ## TL;DR parity status
 
 - **BYTE-PARITY ACHIEVED.** From this directory,
   `../../tools/lwsread/build/lwsread_legacy CITY1.LWS CITY.FLD` produces a file
   **byte-identical to the shipping `Runtime/SCENES/CITY.FLD`** (md5
-  `4de91e22443cda70fd78fab2511c4561`). The pre-headlight 1998-content FLD
+  `c190766baacf831c588718a1a838d888`). The pre-headlight 1998-content FLD
   (977,234 B, md5 `2a773c317ce14a53afe4561f34e112fa`) was reproduced
   byte-identically first (that acceptance is what pinned the sources); it is
   preserved at `Runtime/SCENES/.backups/CITY.FLD.pre-lws-promotion` and in git
@@ -68,8 +70,34 @@ contained one). Differences vs the retired code scheme: no police strobe
 (authored beams stay lit if a vehicle is ever hidden); measured impact
 0.35–5.1% of pixels vs the code scheme at t=300/1000/1961, mean Δ ≤ 103/765.
 
+### Volumetric beams (2026-07-11)
+
+Each headlight block additionally carries LightWave-style per-light keys:
+
+    VolumetricLight 1
+    VolumetricLightIntensity 3.000000
+
+`VolumetricLight 1` → FLD light-flag **bit 2048** (`Light_VolumetricCone` —
+512 was NOT free, the light Flags word doubles as the EndBehavior store) →
+engine `Omni_ForceVolCone`: the spot renders a volumetric cone without the
+scene-wide `--draw_cones`. `VolumetricLightIntensity` is a per-light gain on
+the cone pass's density, serialized as a conditional 4-byte payload gated on
+bit 2048 (FLDs without the bit are byte-identical to the pre-extension
+format; all other scenes are bit-free — verified by regen + render gates).
+Gain sentinel: 0/unset → 1.0 (FlareScale/HaloIntensity convention).
+
+Retune with `tools/add_city_beam_flags.py <gain>` (idempotent; rewrites the
+46 blocks) + the regen command above. Gain 3.0 measured (warm panorama
+cache, clean A/B): editor config (`--hdr --deferred-quarter
+--cone-strength=2`) max Δ 120/255 at t=150, soft canyon haze at t=2200;
+native defaults (`--deferred`, cone_strength 0.05) max Δ 12/255 — a whisper.
+The editor's LWS write-back (`tools/editor_server.py patch_lws_lights`)
+patches only known key lines in place and preserves these keys (verified).
+
 City pin (t=1961, `FDS_CITY_ENV_PIXEL=1 --deferred`):
-`e61f13ea56cfc6521c5145f77b9b7485` (4/4 runs), superseding `9e08d65d…`.
+`37e62845c4d30eefa321730c5bb7e0b8` (5/5 runs), superseding `e61f13ea…`.
+NOTE: `cache/city_envmap*.bin` is keyed on CITY.FLD bytes — after installing
+a new FLD, discard the first (cache-rebuild) run before reading the pin.
 
 ## Files
 
