@@ -2905,7 +2905,12 @@ struct CityScene : SceneDriver {
 	// summed cross-axis per pixel to drive dispMap. See updateRippleDispMap.
 	std::vector<float> rip_gx1, rip_gx2, rip_gy1, rip_gy2;
 
-	~CityScene() override { Destroy_Scene(CitySc); }
+	~CityScene() override {
+		// Retract the live-water env state — it points at CITY's water
+		// plane/extent and must not leak into later scenes' env lookups.
+		fds::g_envLiveWater = fds::EnvLiveWaterState{};
+		Destroy_Scene(CitySc);
+	}
 
 	// Rebuild the per-resolution displacement and back buffers. dispMap
 	// stores precomputed source-pixel indices for the water-distort effect;
@@ -3164,6 +3169,31 @@ struct CityScene : SceneDriver {
 		// leaves the static warp baked by rebuildDispBuffers untouched.
 		if (fds::FeatureFlags::water_ripple())
 			updateRippleDispMap((float)g_FrameTime);
+
+		// Live water in the BAKED env reflections (--env_live_water): publish
+		// this frame's wave state for the env samplers (forward per-vertex
+		// sheets + deferred env compose) — the window reflections' frozen
+		// water then undulates with the SAME field/clock as the dispMap
+		// ripple above. Published on the tick thread before Transform/Render
+		// (tiles only read); t from g_FrameTime → snapshot-deterministic.
+		// Gated on water_ripple too: if the main-view reflection is static,
+		// the env stays the static bake (exact no-op — helper early-out).
+		{
+			fds::EnvLiveWaterState &lw = fds::g_envLiveWater;
+			lw.active = fds::FeatureFlags::env_live_water()
+			         && fds::FeatureFlags::water_ripple()
+			         && g_waterMaxX > g_waterMinX;
+			if (lw.active) {
+				lw.waterY = g_waterY;
+				lw.minX = g_waterMinX; lw.maxX = g_waterMaxX;
+				lw.minZ = g_waterMinZ; lw.maxZ = g_waterMaxZ;
+				lw.amp   = fds::FeatureFlags::env_live_water_amp();
+				lw.t     = (float)g_FrameTime * 0.02f
+				         * fds::FeatureFlags::water_ripple_speed();
+				lw.scale = fds::FeatureFlags::water_bump_scale();
+				lw.slopeFn = &pwater::WaveSlope;
+			}
+		}
 
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 

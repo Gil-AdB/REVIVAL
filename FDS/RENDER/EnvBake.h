@@ -133,6 +133,70 @@ int EnvReflection_RegisterCubeFaces(Scene* sc, Material* M,
 // base-mat clone) without duplicating the pixel data.
 void EnvReflection_AliasMaterial(Scene* sc, Material* M, int storeIdx);
 
+// ── Live water in baked env reflections (--env_live_water) ────────────────
+// The city env bakes are one-shot statics: the water region in every
+// building's cube faces is a FROZEN flat-mirror image, visibly dead against
+// the live main-view water (ripple dispMap + glints). Instead of touching
+// the baked texels (two consumer representations, occlusion-unaware water
+// masks, per-frame texel churn — evaluated and rejected), the SAMPLERS
+// perturb the lookup direction: when the ray from the store's bake point
+// hits the water plane, the direction is tilted by the same animated
+// wave-slope field the main-view reflection ripple uses (pwater::WaveSlope
+// — the scene publishes a function pointer, FDS cannot link DEMO code).
+// Exactly the dispMap trick, in env space.
+//
+// The scene's tick publishes this every frame BEFORE renderFrame (same
+// thread ordering as the rest of the frame state; tiles only read it).
+// t derives from g_FrameTime → fixed-t snapshots are md5-stable. Scenes
+// that never publish leave active=false and every consumer no-ops.
+struct EnvLiveWaterState {
+    bool  active = false;
+    float waterY = 0.0f;
+    float minX = 0.0f, maxX = 0.0f, minZ = 0.0f, maxZ = 0.0f;
+    float amp = 0.0f;          // direction-perturb amplitude (env_live_water_amp)
+    float t = 0.0f;            // wave clock: g_FrameTime * 0.02 * ripple_speed
+    float scale = 1.0f;        // wave spatial scale: water_bump_scale
+    void (*slopeFn)(float wx, float wz, float t, float scale,
+                    float& sx, float& sz) = nullptr;
+};
+extern EnvLiveWaterState g_envLiveWater;
+
+// Perturb an env lookup direction (world space, any scale) in place when it
+// hits the live-water plane. bakeX/Y/Z = the capture point the content was
+// baked from (EnvPanoLinear::bake* for the deferred stores, the building
+// probe center for the forward sheets). Inline: the callers are per-pixel /
+// per-vertex hot paths and the inactive case must stay a single branch.
+inline void EnvLiveWater_PerturbDir(float bakeX, float bakeY, float bakeZ,
+                                    float& dx, float& dy, float& dz)
+{
+    const EnvLiveWaterState& lw = g_envLiveWater;
+    if (!lw.active) return;
+    if (dy >= -1e-6f) return;                       // above horizon
+    if (bakeY <= lw.waterY) return;                 // probe under water: n/a
+    // Plane hit from the bake point — UNBOUNDED, like the main view's
+    // dispMap ripple (updateRippleDispMap ray-casts every pixel to the
+    // plane with no extent test; the flooded city reads as water in every
+    // below-horizon direction). Baked non-water content below the horizon
+    // (bridges, piers) wobbles too — accepted approximation: the bake has
+    // no depth / water mask to tell them apart, and the wobble amplitude
+    // is a few texels. dx/dy/dz may be UNNORMALIZED (the cube lookup is
+    // scale-invariant): the hit point is scale-invariant (t·d), and the
+    // tilt k = amp·|dy| scales WITH the vector so the angular perturbation
+    // is scale-invariant as well.
+    const float t = (lw.waterY - bakeY) / dy;       // dy<0 → t>0
+    const float hx = bakeX + t * dx;
+    const float hz = bakeZ + t * dz;
+    float sx = 0.0f, sz = 0.0f;
+    lw.slopeFn(hx, hz, lw.t, lw.scale, sx, sz);
+    // Tilt ∝ |dy| so grazing rays (huge t, tiny dy) don't overshoot: the
+    // same slope reads as a gentler direction change near the horizon,
+    // which also fades the effect exactly where the plane hit is least
+    // certain (occluders far from the probe).
+    const float k = lw.amp * -dy;
+    dx += k * sx;
+    dz += k * sz;
+}
+
 }  // namespace fds
 
 #endif  // FDS_ENV_BAKE_H_INCLUDED

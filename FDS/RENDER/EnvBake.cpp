@@ -58,6 +58,11 @@ std::vector<const Material*> g_envBakeSkipMats;
 float g_envBakeSkipR2 = 0.0f;
 float g_envBakeSkipCX = 0.0f, g_envBakeSkipCY = 0.0f, g_envBakeSkipCZ = 0.0f;
 
+// Live-water env perturbation state (--env_live_water). Published by the
+// scene tick (CITY) before renderFrame; consumed read-only by the deferred
+// env compose + the forward reflective vertex pass. See EnvBake.h.
+EnvLiveWaterState g_envLiveWater;
+
 // LEGACY (--no-env_bake_fix, the default): the old whole-mesh exclusion,
 // kept byte-identical for the pinned city baseline (its vehicle-glass
 // probes bake through this path). Null when the fix is active.

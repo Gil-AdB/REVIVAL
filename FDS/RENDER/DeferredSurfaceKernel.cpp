@@ -1033,6 +1033,12 @@ static inline void EnvSpecComposeScalar(
 		if (std::strchr(sFlip, 'y')) rwy = -rwy;
 		if (std::strchr(sFlip, 'z')) rwz = -rwz;
 	}
+	// Live water (--env_live_water): rays that hit the water plane get the
+	// lookup direction tilted by the animated wave slope — the frozen
+	// mirror content in the bake undulates in sync with the main-view
+	// ripple. Inactive = one branch inside the helper.
+	fds::EnvLiveWater_PerturbDir(envP->bakeX, envP->bakeY, envP->bakeZ,
+	                             rwx, rwy, rwz);
 	// Direction → lookup coords. env_cube: trig-free dominant-axis face select
 	// + gnomonic UV (EnvCube.h). Equirect: the atan2/asin panorama lookup
 	// (inverse of EnvBake's stitch). ONE branch on the bake's mode, hoisted to
@@ -4307,6 +4313,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						// reflect dir, Fresnel weight and mip; finish with
 						// the shared scalar face pick + bilinear fetch.
 						const fds::EnvPanoLinear* envP_ = lane_envP[k];
+						// Live water: same lookup-dir perturbation as the
+						// scalar compose (parity between the two paths).
+						fds::EnvLiveWater_PerturbDir(
+						    envP_->bakeX, envP_->bakeY, envP_->bakeZ,
+						    envRvx[k], envRvy[k], envRvz[k]);
 						int face; float cu, cvv;
 						fds::EnvCube_DirToFaceUV(envRvx[k], envRvy[k],
 						                         envRvz[k], face, cu, cvv);

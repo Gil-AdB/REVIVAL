@@ -70,6 +70,7 @@
 #include "Base/FDS_DECS.H"
 #include "Base/FeatureFlags.h"
 #include "RENDER/EnvCube.h"   // env_cube: trig-free per-triangle face select
+#include "RENDER/EnvBake.h"   // --env_live_water: animated water in env lookups
 #include "Base/Scene.h"
 #include "Base/TriMesh.h"
 #include "Base/Vertex.h"
@@ -1619,10 +1620,19 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 						(w0.x*n.x + w0.y*n.y + w0.z*n.z) > 0.0f ? -1.0f : 1.0f;
 					const int k = fds::EnvCube_SelectFace(
 						nSide * n.x, nSide * n.y, nSide * n.z);
+					// Live water (--env_live_water): probe center of THIS
+					// building's sheet bake (CITY bakes from IPos +
+					// BSphereCtr, no rotation). Inactive = one branch in
+					// the helper per vertex.
+					const float lwPX = T->IPos.x + T->BSphereCtr.x;
+					const float lwPY = T->IPos.y + T->BSphereCtr.y;
+					const float lwPZ = T->IPos.z + T->BSphereCtr.z;
 					for (i = 0; i < 3; ++i) {
 						auto d = wsPos[i] - cv;
 						d -= (d * n) * 2.0f * n;
 						Vector_Norm(&d);
+						fds::EnvLiveWater_PerturbDir(lwPX, lwPY, lwPZ,
+						                             d.x, d.y, d.z);
 						fds::EnvCube_DirToParaboloidUV(k, d.x, d.y, d.z,
 						                               eu[i], ev[i]);
 					}
