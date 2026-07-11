@@ -2038,14 +2038,19 @@ static void Froxel_ColumnTile(int ix0, int iy0, int ix1, int iy1, const FastFogP
 }
 
 // Legacy 1998 distance dim (fast_fog_dist_dim) — see FastFogParams::distDim.
-// Returns 1 (no dim) for sky, forward-filler pixels, or when off. Distance is
-// RADIAL (z·|V|, |V|=sqrt(X²+Y²+1)) so the falloff is view-angle independent —
-// pitching the camera doesn't shift where a given world distance dims to.
+// Distance is RADIAL (z·|V|, |V|=sqrt(X²+Y²+1)) so the falloff is view-angle
+// independent — pitching the camera doesn't shift where a given world
+// distance dims to. Sky (ze==0) dims at the horizon distance (fogFar): the
+// fogged background must darken WITH the distant buildings, or the horizon
+// stays a bright white wall over a dimmed skyline. (The legacy pass skipped
+// sky because pre-fog sky was a dark starfield; forward pixels dim by their
+// own depth now — no mat-sentinel exclusion.)
 static inline float frDistDim(const FastFogParams& P, int px, int py,
                               size_t i, uint16_t ze) {
-	if (!P.mat || ze == 0) return 1.0f;
-	if (P.mat[i] == 0xFFFFFFFFu) return 1.0f;
-	const float z = float(0xFF80 - int(ze)) * P.invZScale;
+	(void)i;
+	if (P.distDim <= 0.0f) return 1.0f;
+	const float z = (ze == 0) ? P.fogFar
+	                          : float(0xFF80 - int(ze)) * P.invZScale;
 	const float X = (float(px) - CntrEX) * P.invFOVX;
 	const float Y = (CntrEY - float(py)) * P.invFOVY;
 	const float vlen = std::sqrt(X*X + Y*Y + 1.0f);
@@ -2539,13 +2544,11 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 			aG=_mm256_blendv_ps(prevG,aG,extPos);
 			aB=_mm256_blendv_ps(prevB,aB,extPos);
 			Tpix=_mm256_blendv_ps(prevT,Tpix,extPos);
-			// Legacy distance dim (frDistDim mirror): sky + forward (mat
-			// sentinel) lanes get 1.0; uses the UNCLAMPED zSurf like the
-			// scalar (its z has no near/far clamps).
+			// Legacy distance dim (frDistDim mirror): sky lanes dim at the
+			// horizon distance; uses the UNCLAMPED zSurf like the scalar.
 			__m256 dimV = vOne;
-			if (P.distDim > 0.0f && P.mat) {
-				const __m256i m8=_mm256_loadu_si256((const __m256i*)&P.mat[i0]);
-				const __m256 fwdM=_mm256_castsi256_ps(_mm256_cmpeq_epi32(m8,_mm256_set1_epi32(-1)));
+			if (P.distDim > 0.0f) {
+				const __m256 zIn=_mm256_blendv_ps(zSurf,vFar,skyM);
 				// Radial distance z*|V| (frDistDim mirror; X from the integer
 				// pixel column like the scalar, no half-texel offset).
 				const __m256 Xd=_mm256_mul_ps(_mm256_sub_ps(
@@ -2554,12 +2557,11 @@ static void Froxel_CompositeTileVec8(int x1, int y1, int x2, int y2, const FastF
 				const __m256 Yd=_mm256_set1_ps((CntrEY - float(py)) * P.invFOVY);
 				const __m256 vl=_mm256_sqrt_ps(_mm256_add_ps(_mm256_add_ps(
 				      _mm256_mul_ps(Xd,Xd),_mm256_mul_ps(Yd,Yd)),vOne));
-				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(_mm256_mul_ps(zSurf,vl),
+				__m256 tt=_mm256_sub_ps(vOne,_mm256_mul_ps(_mm256_mul_ps(zIn,vl),
 				      _mm256_set1_ps(P.distDimInvFar)));
 				tt=_mm256_max_ps(tt,vZero);
-				const __m256 dv=_mm256_add_ps(_mm256_set1_ps(1.0f-P.distDim),
+				dimV=_mm256_add_ps(_mm256_set1_ps(1.0f-P.distDim),
 				      _mm256_mul_ps(_mm256_set1_ps(P.distDim),_mm256_sqrt_ps(tt)));
-				dimV=_mm256_blendv_ps(dv,vOne,_mm256_or_ps(skyM,fwdM));
 			}
 			if (P.hdr) {
 				// HDR output stage: the fp16 RMW (coverage-flag select, fma,
