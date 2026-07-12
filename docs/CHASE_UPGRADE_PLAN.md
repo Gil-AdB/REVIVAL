@@ -745,6 +745,29 @@ made then, by ear/taste, not derived here. The 3.3× playback (§1.1) and the
 finale-restoration (M1.3) remain open pacing questions to arbitrate at that
 point.
 
+### Queued chase batch 2 (user-requested 2026-07-12; lands AFTER M1 — shares CHASE.LWS/CHASE.CPP, so sequential not parallel)
+
+- **Camera-clip fix** (C1 subset): the look-at dolly (TargetObject 79 = Ship1,
+  18 keys, NZP=2) grazes the canyon walls — a mountain clips the frame/near
+  plane "a bit". Fix = author dolly-key clearance from the canyon walls (and/or
+  a small NZP/path nudge); characterize WHERE on the timeline it clips first
+  (snapshot sweep), then adjust the camera keys. Authored (CHASE.LWS camera
+  keys). Pairs naturally with the rest of C1 (storyboard/cuts) but the clip is
+  the priority defect.
+- **Colored canyon spot lighting** (L2 subset): authored `LightType 2` colored
+  spots aimed at the mountain/canyon walls (warm/cool contrast), optional
+  `VolumetricLight` beams via the bit-2048 mechanism (city precedent) + cone
+  turbulence for atmosphere. Adds mood/drama to the currently-flat canyon.
+  Requires L1's SceneCorrections retirement (done) so new lights survive load.
+- **Sky-cube consistency rework** (supersedes L1.3's gradient): chase should
+  render sky via the SAME `CreateSkyCube`/`RenderSkyCube` (EnvCube) system
+  city/fountain use, NOT the new gradient pass L1.3 added. Route chase sky
+  through the sky cube for consistency; improve the cube if wanted. L1.3's
+  `sky_gradient` flag stays default-off/harmless until superseded.
+- **Pacing note** (confirmed by user): the time-span IS the speed knob — the
+  frame-keyed splines play out over the scene DURATION; no separate speed
+  system. M1.2's dial is the duration, decided when placement/music lands.
+
 ### Stage S0 — music-sync foundation (NEW, lands after C0)
 
 **Goal:** the beat-map + event-table spine + the getter, proving out 8.A/8.B
