@@ -12,9 +12,44 @@
 #include "Scenes.h"
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <memory>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
+
+namespace {
+// M1.3 engine-glow throttle (default-off chase_engine_mod). The maneuver signal
+// is a pure function of CurFrame — the ship rotation-spline angular rate (deg
+// per frame, central difference; FLD meshes are always Tri_Euler so Rotate is
+// Euler H/P/B). No accumulation → jump-to-t reproduces it exactly (snapshot-safe).
+constexpr float kEngineModD = 2.0f;   // finite-difference half-window (frames)
+
+float chaseAngRate(TriMesh *T, float frame, float D)
+{
+	if (!T || T->Rotate.NumKeys < 2) return 0.0f;
+	Vector a, b;
+	Spline_Calc_3D(&T->Rotate, frame - D, &a);
+	Spline_Calc_3D(&T->Rotate, frame + D, &b);
+	float dh = b.x - a.x, dp = b.y - a.y, db = b.z - a.z;
+	return std::sqrt(dh * dh + dp * dp + db * db) / (2.0f * D);
+}
+
+// P90 of |angular rate| over the frame range — a robust per-ship peak that
+// normalises the punch (deterministic: positions/rotations are immutable).
+float chaseAngRateRef(TriMesh *T, int32_t f0, int32_t f1, float D)
+{
+	if (!T) return 1.0f;
+	std::vector<float> v;
+	for (int32_t f = f0; f <= f1; f += 2) v.push_back(chaseAngRate(T, (float)f, D));
+	if (v.empty()) return 1.0f;
+	std::sort(v.begin(), v.end());
+	float r = v[(size_t)(v.size() * 0.90)];
+	return r > 1e-4f ? r : 1e-4f;
+}
+} // namespace
 
 static int32_t CHPartTime = 25.0f*100;
 
@@ -789,6 +824,10 @@ struct ChaseScene : SceneDriver {
 	FrameProfiler prof{"chase"};
 	int32_t TTrd = 0;          // shared transport state (pause / scrub)
 	bool    pause_mode = false;
+	// M1.3 engine-glow throttle state (chase_engine_mod): the two ship meshes
+	// + their P90 angular-rate reference, resolved once at init.
+	TriMesh *ship1M = nullptr, *ship2M = nullptr;
+	float    ship1Ref = 1.0f, ship2Ref = 1.0f;
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
@@ -815,6 +854,17 @@ struct ChaseScene : SceneDriver {
 			if (wT && wT->Faces && wT->Faces->Txtr)
 				SetDeferredWaterMatID((int)wT->Faces->Txtr->ID);
 		}
+		// M1.3: locate the ship meshes (by name) + precompute their maneuver
+		// reference for the engine-glow throttle. Init-time only; inert unless
+		// chase_engine_mod is turned on in tick().
+		ship1M = ship2M = nullptr;
+		for (Object *o = ChaseSc->ObjectHead; o; o = o->Next) {
+			if (!o->Name || !o->Data) continue;
+			if (std::strstr(o->Name, "hip1")) ship1M = (TriMesh *)o->Data;
+			else if (std::strstr(o->Name, "hip2")) ship2M = (TriMesh *)o->Data;
+		}
+		ship1Ref = chaseAngRateRef(ship1M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
+		ship2Ref = chaseAngRateRef(ship2M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		TTrd = Timer;
 	}
 
@@ -842,6 +892,31 @@ struct ChaseScene : SceneDriver {
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
 
 		Animate_Objects(ChaseSc, View);
+
+		// M1.3 engine-glow throttle (default-off). Animate_Objects has just
+		// re-set each omni's ISize from its (constant) Size spline, so this
+		// per-frame multiply is a clean override — no accumulation. It runs
+		// before Lighting + both Transform passes, so the punched ISize flows
+		// into the light contribution AND the flare sprite (F.FlareSize =
+		// ISize x FlareScale) in the main and reflected views alike.
+		if (fds::FeatureFlags::chase_engine_mod()) {
+			const float gain = fds::FeatureFlags::chase_engine_mod_gain();
+			auto punch = [&](TriMesh *M, float ref) -> float {
+				if (!M) return 1.0f;
+				float n = chaseAngRate(M, CurFrame, kEngineModD) / ref;
+				if (n > 1.0f) n = 1.0f;
+				return 1.0f + gain * n;
+			};
+			const float mul1 = punch(ship1M, ship1Ref);
+			const float mul2 = punch(ship2M, ship2Ref);
+			for (Omni *O = ChaseSc->OmniHead; O; O = O->Next) {
+				// warm engine glows only (253,65,2) — the white moon (255,255,255)
+				// fails the green test and is left untouched.
+				if (O->L.R < 200.0f || O->L.G > 130.0f || O->L.B > 60.0f) continue;
+				const float z = O->Pos.NumKeys ? O->Pos.Keys[0].Pos.z : 0.0f;
+				O->ISize *= (z < -76.0f) ? mul1 : mul2;   // -88 Ship1 / -64 ship2
+			}
+		}
 
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
