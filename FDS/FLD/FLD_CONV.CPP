@@ -582,6 +582,13 @@ Omni *ConvertOmni(FldLight *Src)
 		OL->VolBeamGain = Src->VolBeamGain;
 	}
 
+	// Authored per-light flare-sprite size multiplier (FLD bit 4096, LWS
+	// "FdsFlareScale <f>"): decouple the lens-flare sprite size from ISize.
+	// 0 = unset → 1.0 at consumption (F.FlareSize = ISize × FlareScale, both
+	// render passes). Same 0-sentinel convention as VolBeamGain / HaloIntensity.
+	if (Src->Flags & Light_FlareScale)
+		OL->FlareScale = Src->FlareScale;
+
 	if (stationary)
 		OL->Flags |= Omni_Stationary;
 

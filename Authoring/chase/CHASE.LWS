@@ -1046,6 +1046,7 @@ LightMotion (unnamed)
   1
   28 21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.22
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
@@ -1074,6 +1075,7 @@ LightMotion (unnamed)
   1
   28 -21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.22
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
@@ -1102,6 +1104,7 @@ LightMotion (unnamed)
   1
   -28 21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.22
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
@@ -1130,6 +1133,7 @@ LightMotion (unnamed)
   1
   -28 -21 -88 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.22
 EndBehavior 1
 LockedChannels 5
 ParentObject 79
@@ -1158,6 +1162,7 @@ LightMotion (unnamed)
   1
   -15 0 -64 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.30
 EndBehavior 1
 LockedChannels 5
 ParentObject 80
@@ -1186,6 +1191,7 @@ LightMotion (unnamed)
   1
   15 0 -64 0 0 0 1 1 1
   0 0 0 0 0
+FdsFlareScale 0.30
 EndBehavior 1
 LockedChannels 5
 ParentObject 80

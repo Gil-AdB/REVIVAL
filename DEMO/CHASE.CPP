@@ -462,7 +462,11 @@ static void Reflected_Transform(Scene *Sc)
 			//dz +=0x7FFFFFFF;
 			//RoundToInt(&O->Face.SortZ.DW,dz);
 
-			O->F.FlareSize = O->ISize;
+			// FlareScale parity with the main pass (Transform.cpp:1835 /
+			// CITY.CPP:823): decouple the reflected flare sprite from ISize so
+			// authored FdsFlareScale shrinks the flare in the water reflection
+			// too, not just the direct view. 0 = legacy 1.0 (byte-identical).
+			O->F.FlareSize = O->ISize * (O->FlareScale > 0.0f ? O->FlareScale : 1.0f);
 #ifdef FRONT_TO_BACK_SORTING
 			O->F.SortZ.F = 2 * fzp - dz;
 #else

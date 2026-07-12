@@ -280,6 +280,13 @@ void ReadLight(FldLight *Light)
 	// ≤1024 (EndBehavior tops out the word), so this branch is provably
 	// inert for legacy content (Light is memset(0) by the caller).
 	if (Light->Flags&Light_VolumetricCone) fread(&Light->VolBeamGain,1,4,FLD);
+	// Bit 4096 = Light_FlareScale (authored per-light flare-sprite size, LWS
+	// "FdsFlareScale <f>"): one float, the sprite-size multiplier (0 = unset →
+	// 1.0). Written conditionally AND LAST by tools/lwsread FLDSAVE.CPP (after
+	// the VolBeamGain field), read in the same order here. Provably inert for
+	// legacy content — no shipping FLD light carries 4096 (PathAlignment is
+	// object-section in every scene; Light is memset(0) by the caller).
+	if (Light->Flags&Light_FlareScale) fread(&Light->FlareScale,1,4,FLD);
 }
 
 void ReadCamera(FldCamera *Cam)

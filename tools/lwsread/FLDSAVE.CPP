@@ -215,6 +215,13 @@ void SaveLight(FldLight *Light)
 	// unless the bit is set. (512 was NOT free — EndBehavior bits 256/512/
 	// 1024 share this Flags word; see Light_VolumetricCone in LWREAD.H.)
 	if (Light->Flags&Light_VolumetricCone) fwrite(&Light->VolBeamGain,1,4,FLD);
+	// Bit 4096 (Light_FlareScale, LWS "FdsFlareScale <f>"): authored flare-
+	// sprite size multiplier. Conditional payload = one float. Written LAST,
+	// after the VolBeamGain field, so the byte order is unambiguous and lights
+	// without the bit stay byte-identical to the pre-extension format (a light
+	// can carry neither, either, or both bits — the reader walks them in the
+	// same order). Same 0 → 1.0 sentinel as VolBeamGain / Omni::FlareScale.
+	if (Light->Flags&Light_FlareScale) fwrite(&Light->FlareScale,1,4,FLD);
 }
 
 void SaveCamera(FldCamera *Cam)

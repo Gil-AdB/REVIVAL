@@ -128,6 +128,10 @@ typedef struct FldLgt
 	// the FLD when Flags carries Light_VolumetricCone (2048). 0 = unset →
 	// converter/engine treat as 1.0 (FlareScale/HaloIntensity convention).
 	float          VolBeamGain;
+	// Per-light flare-sprite size multiplier — conditional field, only present
+	// in the FLD when Flags carries Light_FlareScale (4096). 0 = unset →
+	// engine treats as 1.0 (mapped to Omni::FlareScale in FLD_CONV.CPP).
+	float          FlareScale;
 	FldLgt        *Next;
 } FldLight;
 

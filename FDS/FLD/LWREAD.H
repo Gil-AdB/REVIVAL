@@ -62,6 +62,15 @@ enum LightWave_Constants
 	// EndBehavior store (256/512/1024 — "EndBehavior 1" = 512 on nearly
 	// every authored light), so 2048 is the first free bit.
 	Light_VolumetricCone		= 2048,
+	// Authored per-light flare-sprite size multiplier (LWS "FdsFlareScale <f>",
+	// tools/lwsread). Gates a conditional per-light gain float in the FLD light
+	// record — see FLD_READ.CPP ReadLight, mapped to Omni::FlareScale in
+	// FLD_CONV.CPP. FLDs without the bit are byte-identical to the pre-
+	// extension format. 4096 is free on the LIGHT flag word (Object_AlignToPath
+	// = 4096 is the OBJECT word; no authored LWS sets PathAlignment inside a
+	// light section — object-section across every scene — so a light never
+	// carries 4096), reused here in light context.
+	Light_FlareScale			= 4096,
 	// Authored SCENE-wide env-reflection defaults (LWS "FdsSceneEnvRefl" /
 	// "FdsSceneEnvBakeRes", tools/lwsread). The FLD scene header has no
 	// flags word, so this extension bit rides the AmbientIntensity

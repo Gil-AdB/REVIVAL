@@ -559,6 +559,21 @@ void ReadLightVolumetricIntensity(void)
 #endif
 }
 
+// Authored per-light flare-sprite size multiplier — LWS keyword
+// "FdsFlareScale <f>" (named in the VolumetricLight/FdsScene style). Sets FLD
+// light-flag bit 4096 (Light_FlareScale); the multiplier is written as a
+// conditional payload gated on that bit (see FLDSAVE.CPP SaveLight). Engine:
+// bit 4096 → Omni::FlareScale, decoupling the lens-flare sprite size from the
+// light's ISize (F.FlareSize = ISize × FlareScale; 0/unset → 1.0).
+void ReadLightFlareScale(void)
+{
+	fscanf(LWS,"%f",&CurLight->FlareScale);
+	CurLight->Flags |= Light_FlareScale;
+#ifdef SceneDebugMode
+	printf("Light flare scale: %f\n",CurLight->FlareScale);
+#endif
+}
+
 void ReadCameraMotion(void)
 {
 uint32_t      Keys,Channels;
@@ -672,6 +687,7 @@ struct
 	{"LensFlare" 			 , ReadLightLensFlareFlag},
 	{"VolumetricLight"		 , ReadLightVolumetricFlag},
 	{"VolumetricLightIntensity", ReadLightVolumetricIntensity},
+	{"FdsFlareScale"	 , ReadLightFlareScale},		// engine extension (per-light flare sprite size)
 // Camera section
 	{"CameraMotion"		 , ReadCameraMotion},
 	{"ZoomFactor"			 , ReadCameraZoomFactor},   // Envelope

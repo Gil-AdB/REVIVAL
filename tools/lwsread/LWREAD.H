@@ -66,6 +66,17 @@ enum LightWave_Constants
 	// ORs 256/512/1024 into CurLight->Flags — "EndBehavior 1" = 512 on
 	// nearly every authored light), so 2048 is the first free bit.
 	Light_VolumetricCone			= 2048,
+	// Authored per-light flare-sprite size multiplier (LWS "FdsFlareScale <f>").
+	// Decouples the lens-flare SPRITE size from the light's ISize
+	// (F.FlareSize = ISize × FlareScale) so a bright engine glow keeps its
+	// illumination while its flare shrinks below the ship silhouette. FLD
+	// extension bit: SaveLight writes a conditional gain float when set — FLDs
+	// without the bit are byte-identical to the pre-extension format. 4096 is
+	// free on the LIGHT flag word (Object_AlignToPath = 4096 is the OBJECT
+	// word; no authored LWS sets PathAlignment inside a light section —
+	// verified object-section across city/greets/fountain/chase — so a light
+	// never carries 4096), reused here in light context.
+	Light_FlareScale				= 4096,
 	// Authored SCENE-wide env-reflection defaults (LWS "FdsSceneEnvRefl -1|1"
 	// / "FdsSceneEnvBakeRes N"). The FLD scene header has no flags word, so
 	// the extension bit rides the AmbientIntensity envelope's EndBehavior
@@ -203,6 +214,10 @@ typedef struct FldLgt
 	// Only serialized when Flags carries Light_VolumetricCone (2048);
 	// 0 = unset → engine treats as 1.0.
 	float					 VolBeamGain;
+	// Per-light flare-sprite size multiplier (LWS "FdsFlareScale").
+	// Only serialized when Flags carries Light_FlareScale (4096);
+	// 0 = unset → engine treats as 1.0 (Omni::FlareScale convention).
+	float					 FlareScale;
 	FldLgt				*Next;
 } FldLight;
 
