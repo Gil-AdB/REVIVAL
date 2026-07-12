@@ -112,12 +112,6 @@ struct Scene
     // fills them in.
     std::vector<struct TriMesh*> *staticLMTable = nullptr;
 
-    // Authored playback rate (LWS "FramesPerSecond", read into the FLD but
-    // historically dropped at conversion). Appended at the end so the struct
-    // layout is undisturbed; 0 = unset (memset-zeroed Scenes). Only the chase
-    // driver consults it (CHPartTime = frames*100/fps); every other scene keeps
-    // its own CHPartTime, so this is inert for city/greets/fountain.
-    float            FramesPerSecond = 0.0f;
 };
 
 #pragma pack(pop)
