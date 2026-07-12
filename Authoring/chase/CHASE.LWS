@@ -1034,7 +1034,7 @@ LightMotion (unnamed)
   0 0 0 0 0
 EndBehavior 1
 LightColor 255 255 255
-LgtIntensity 1.000000
+LgtIntensity 0.100000
 LightType 1
 ShadowType 1
 
@@ -1051,10 +1051,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1080,10 +1080,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1109,10 +1109,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1138,10 +1138,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 79
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.500000
 FlareDissolve 0.000000
@@ -1167,10 +1167,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 80
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.200000
 FlareDissolve 0.000000
@@ -1196,10 +1196,10 @@ EndBehavior 1
 LockedChannels 5
 ParentObject 80
 LightColor 253 65 2
-LgtIntensity 0.500000
+LgtIntensity 0.050000
 LightType 1
 LightFalloff 1
-LightRange 50.000000
+LightRange 5000000.000000
 LensFlare 1
 FlareIntensity 0.200000
 FlareDissolve 0.000000

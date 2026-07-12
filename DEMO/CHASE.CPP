@@ -757,7 +757,13 @@ void Initialize_Chase()
 
 	Reflective_Surface_Setup();
 
-	SceneCorrections();
+	// Legacy 1998 load-time omni fixup — retired: the effective Size/Range
+	// values are now authored in CHASE.LWS (LgtIntensity x0.1, LightRange
+	// x100000). Default OFF; --chase-legacy-omni-hack re-applies it (only
+	// correct against an un-baked LWS/FLD — it double-applies on the shipped
+	// baked scene). See FeatureFlags.def.
+	if (fds::FeatureFlags::chase_legacy_omni_hack())
+		SceneCorrections();
 	Preprocess_Scene(ChaseSc, "CHASE");
 
 	// Persisted editor overrides (PBR maps + numeric surface props) — the
