@@ -427,7 +427,21 @@
       }
       function resizeCanvasToWindow() {
         var dpr = effectiveDpr();
-        var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
+        // Editor: render the engine at the FREE-REGION width (window minus the
+        // panel reserve) so the canvas backing store equals its displayed size
+        // — 1:1 device pixels, no browser downsample. The old canvas-fit only
+        // set a CSS max-width, which DOWNSCALED the window-sized backing store;
+        // nearest-neighbour downsampling of the high-frequency editor passes
+        // (deferred-quarter checkerboard, grain, chromatic) aliased into an RGB
+        // moiré grid. --rev-reserve (set by updateCanvasFit, kept current on
+        // panel show/collapse/dock) is the single source of truth for the
+        // reserve; 0 outside the editor.
+        var reserve = 0;
+        if (revEditorMode) {
+          reserve = parseFloat(getComputedStyle(document.documentElement)
+                      .getPropertyValue('--rev-reserve')) || 0;
+        }
+        var w = Math.max(1, Math.floor((window.innerWidth - reserve) * dpr));
         var h = Math.max(1, Math.floor(window.innerHeight * dpr));
         // Route through SDL_SetWindowSize once the wasm is ready — it
         // updates window->w/h, calls emscripten_set_canvas_element_size
@@ -599,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b66</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b67</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -696,7 +710,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = 'b66';
+      var REV_BUILD = "b67";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -753,16 +767,16 @@
       // --rev-reserve custom property, read by the canvas max-width + body
       // padding rules) so the browser scales the render canvas to fit the FREE
       // region beside the panel, correct-aspect and fully visible, instead of
-      // the panel covering its right edge. The ENGINE render resolution is
-      // unchanged — the canvas backing store is window-AR (resizeCanvasToWindow)
-      // and the WebGL present already letterboxes the engine surface inside it,
-      // so beside the panel the view is letterbox-FITTED (black bars), not
-      // stretched. Making it FILL the free region would need option (b) —
-      // feeding (innerWidth - reserve) into Module._SDL2_RequestSize to resize
-      // the engine framebuffer to the free-region AR — deliberately not done
-      // here (heavier; needs the engine resize path). Reserve is 0 (full width)
-      // when the panel is hidden, collapsed, or floated away from the right
-      // edge, so a moved/minimized panel never shrinks the view.
+      // the panel covering its right edge. This is OPTION (b): the engine
+      // framebuffer is RESIZED to the free region (resizeCanvasToWindow feeds
+      // innerWidth-reserve into SDL2_RequestSize), so the canvas backing store
+      // equals its displayed size — 1:1 device pixels, no browser downsample.
+      // (The earlier option (a) left the backing at window size and CSS-scaled
+      // it down, which nearest-neighbour-downsampled the high-frequency editor
+      // passes — deferred-quarter checkerboard / grain / chromatic — into an
+      // RGB moiré grid. Fixed.) Reserve is 0 (full width) when the panel is
+      // hidden, collapsed, or floated away from the right edge, so a
+      // moved/minimized panel never shrinks the view.
       function updateCanvasFit(){
         if (!revEditorMode) return;
         var panel = document.getElementById('editor-panel');
@@ -773,6 +787,10 @@
             reserve = Math.min(r.width, window.innerWidth * 0.6);
         }
         document.documentElement.style.setProperty('--rev-reserve', reserve + 'px');
+        // Resize the ENGINE framebuffer to the free region (backing==display,
+        // no downsample moiré). Panel show/collapse/dock are infrequent, so
+        // an occasional EngineResize here is fine.
+        resizeCanvasToWindow();
       }
       // Typing in panel inputs: Emscripten/SDL registers keyboard listeners on
       // window and preventDefault()s every key (they feed the engine's Keyboard[]
