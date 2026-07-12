@@ -744,7 +744,18 @@ static void Reflective_Surface_Setup()
 void Initialize_Chase()
 {
 	ChaseSc = loadSceneAligned("SCENES/CHASE.FLD");
-	CHPartTime = 25.0*(ChaseSc->EndFrame-ChaseSc->StartFrame)/25.0f;
+	// Playback duration in Timer ticks (10 ms each → 100/sec) at the AUTHORED
+	// frame rate: frames * 100 / fps. The FLD carries the LWS "FramesPerSecond"
+	// (now plumbed through Scene::FramesPerSecond); chase honours it instead of
+	// the old 1-authored-frame-per-tick assumption, which played the 30 fps
+	// animation at ~3.3x (100 fps) and amputated the finale. At 1759 frames /
+	// 30 fps this is ~5863 ticks ≈ 58.6 s, so the full authored 1..1760 range —
+	// including Ship1's climb-out — plays. (Same shape as greets GREETS.CPP,
+	// but read from the FLD rather than hardcoded /30.) The duration IS the
+	// speed knob: motion speed = spline-distance / duration; to re-time later,
+	// change the authored frame range or FramesPerSecond — no code/flag.
+	CHPartTime = (int32_t)((ChaseSc->EndFrame - ChaseSc->StartFrame) * 100.0f
+	                       / (ChaseSc->FramesPerSecond > 0.0f ? ChaseSc->FramesPerSecond : 30.0f));
 	ChaseSc->FZP = 50000.0f;
 	ChaseSc->NZP = 2.0f;
 	ChaseSc->Flags |= Scn_Fogged | Scn_ZBuffer;

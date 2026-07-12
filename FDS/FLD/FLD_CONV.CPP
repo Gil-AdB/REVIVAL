@@ -618,6 +618,9 @@ Scene *ConvertFLD(FldScene *FLD)
 	memset(Sc,0,sizeof(Scene));
 	Sc->StartFrame = FLD->FirstFrame;
 	Sc->EndFrame   = FLD->LastFrame;
+	// Authored playback rate (was read into the FLD but dropped here). Only the
+	// chase driver reads it; other scenes keep their own CHPartTime → inert.
+	Sc->FramesPerSecond = FLD->FramesPerSecond;
 	// Authored scene-wide env-reflection defaults (FLD header extension —
 	// see FLD_READ.CPP ReadGeneralSceneData; 0 = unset). LoadFLD memcpy's
 	// this Scene over the caller's, so the fields survive into the live

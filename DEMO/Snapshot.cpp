@@ -798,8 +798,14 @@ int RunPBRTestSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
 }
 
 // --snapshot=chase[@t=N1,N2,...] — drive the chase scene driver at pinned Timer
-// values (centiseconds; chase runs 0..1698 — frames 1..1699 @ CHPartTime;
-// re-dumps the last rendered VPage past 1699). Driver-based: createChaseScene
+// values (centiseconds). Chase now plays at the AUTHORED 30 fps (Scene::
+// FramesPerSecond): CHPartTime = frames*100/fps = 1759*100/30 ≈ 5863 ticks
+// (~58.6 s), so CurFrame = StartFrame + (EndFrame-StartFrame)*t/CHPartTime =
+// 1 + 0.3·t. Valid range 0..CHPartTime-1 (~0..5862, frames 1..1760 incl. the
+// climb-out finale); re-dumps the last rendered VPage past the end. NOTE: the
+// pin recipe t=100,400,800,1200,1600 now samples CurFrame≈31..481 (early
+// scene) — widen the timestamps for full-scene coverage. Driver-based:
+// createChaseScene
 // applies the cinematic + water_procedural defaults, exactly like the live demo.
 // S0 (§8.B) determinism proof: stamp a deterministic marker for one resolved
 // event into the final VPage. Pure function of the event data — same bytes
