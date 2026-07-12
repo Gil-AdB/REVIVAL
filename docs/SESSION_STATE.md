@@ -13,7 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `d83691f287da1d402a421128fd146021`<br>t400 `2ff509602db964263462074d75f458bc`<br>t800 `72a7dd800f72a7ebf883678a7adcfe0b`<br>t1200 `b5439eb7a3a6f148cd949502aa59e417`<br>t1600 `f56805faf05b98e0654140f531f4e7c9` |
+| chase (default, POST-L1) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `5138252a8b8e7307595433844a3a074b`<br>t400 `5da496b7194039d49b4f526134cf7b5a`<br>t800 `194186e97de283fa418f9da635a5493d`<br>t1200 `edbb8b1819ad0301214f47f393bfa130`<br>t1600 `1834be26b32745ca3789052145bb5c37` |
+| chase (`--sky-gradient`, candidate) | same + `--sky-gradient` | t100 `06c8e19f`<br>t400 `7fd93b41`<br>t800 `6f2dbc94`<br>t1200 `350f0511`<br>t1600 `54f14d02` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
@@ -210,9 +211,24 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   changed" receipt, persistent status bar, canvas-fits-beside-panel (letterbox
   via CSS; fill=engine-resize deferred), settings find/category-groups/
   changed-only. shell.html-only; native/pins untouched.
-- **Chase upgrade** — plan in docs/CHASE_UPGRADE_PLAN.md. **C0 + S0 landed
-  (2026-07-12, fog-wt).** C0 (b72e7a9): chase gate pins (table above,
-  RECIPE-FRAGILE) + stale-comment fix + regen-parity baseline. S0 (30a9c2e):
+- **Chase upgrade** — plan in docs/CHASE_UPGRADE_PLAN.md. Provenance: chase is
+  a scene BUILT-BUT-CUT in 1998 (lack of tuning time), hand-corrected in the
+  revival — **NO sacred 1998 baseline; free to retune for look** (user,
+  2026-07-12). **C0 + S0 + L1 landed (2026-07-12, fog-wt).**
+  L1 (4a54af5/3bb68ea/4cb7513): flare sanity + SceneCorrections retirement +
+  sky gradient. New identifiers: LWS `FdsFlareScale` → light-bit **4096**
+  (Light_FlareScale) → Omni::FlareScale; LWS `ZenithColor/SkyColor/
+  GroundColor/NadirColor` → scene-header bit **4096** (Scene_SkyColors, on
+  AmbientIntensity EndBehavior — distinct word from the light bit) →
+  Scene::Sky*; flags `chase_legacy_omni_hack` (default OFF, retired hack
+  escape-hatch), `sky_gradient` (default OFF — the CANDIDATE, generic: would
+  paint city/crash void sky too). Chase default pin RE-BASELINED (table above).
+  Sky is opt-in pending look-approval + a default flip / chase preset (can't
+  use SCRIPTS/chase.params — protected). Moon light is degenerate (IRange=0,
+  no contribution) — preserved from the hack, future tuning target.
+  Authoring/chase/README.md now STALE ("byte-parity 1998" no longer true) —
+  small doc-pass TODO. C0 (b72e7a9): chase gate pins (RECIPE-FRAGILE) +
+  stale-comment fix. S0 (30a9c2e):
   `tools/build_beatmap.py` + `Authoring/chase/chase.beatmap` (placement-
   agnostic — chase has NO track slot yet, arbitrary song+start-order
   scaffolding), `DEMO/ChaseEvents.{h,cpp}` (beat-map + event-table loader +
