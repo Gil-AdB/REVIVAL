@@ -80,6 +80,13 @@ enum LightWave_Constants
 	// ReadGeneralSceneData STRIPS the bit after reading so EndBehavior
 	// consumers never see it. Bit-free FLDs are byte-identical legacy.
 	Scene_EnvDefaults				= 2048,
+	// Authored backdrop GRADIENT colors (LWS ZenithColor/SkyColor/GroundColor/
+	// NadirColor, tools/lwsread). Same scene-header extension idiom as
+	// Scene_EnvDefaults — the bit rides the AmbientIntensity envelope's
+	// EndBehavior (4096 free; 2048 = env-defaults). Gates a 4-FldColor payload
+	// after the env-defaults int32s; ReadGeneralSceneData STRIPS the bit after
+	// reading. Bit-free FLDs byte-identical. Painted by default-off sky_gradient.
+	Scene_SkyColors					= 4096,
 // Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2

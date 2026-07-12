@@ -2985,6 +2985,54 @@ void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx &ctx) {
 	}
 }
 
+// ─── Authored backdrop gradient (sky_gradient) ────────────────────────────
+// Paint the scene's authored vertical sky gradient (LWS ZenithColor/SkyColor/
+// GroundColor/NadirColor → Scene::Sky*) into VOID pixels (zEnc==0, where no
+// geometry drew) BEFORE the fog composite, replacing the black void. Four
+// vertical stops keyed on screen Y: zenith at the top of the frame → sky →
+// ground → nadir at the bottom. Writes VPage only — void pixels carry
+// g_hdrBuf coverage 0, so the fog composite reads this base back from VPage
+// under --hdr (see the composite's h[3]==0 branch) and folds aerial fog on
+// top. Gated at the call site (sky_gradient flag) + HasSkyGradient here, so
+// the untouched path is byte-identical. Tiled 12x8 like the SkyPaint stand-in.
+void Render_DeferredSkyGradient() {
+	if (!CurScene || !CurScene->HasSkyGradient || !ZPage16 || !VPage) return;
+	// Four stops top→bottom (QColor holds BGRA bytes).
+	const QColor stop[4] = { CurScene->SkyZenith, CurScene->SkySky,
+	                         CurScene->SkyGround, CurScene->SkyNadir };
+	const uint16_t* zEnc = ZPage16;
+	dword* out = reinterpret_cast<dword*>(VPage);
+	const float invH = (YRes > 1) ? 1.0f / float(YRes - 1) : 0.0f;
+
+	constexpr int numTilesX = 12, numTilesY = 8;
+	const int tsx = (XRes + numTilesX - 1) / numTilesX;
+	const int tsy = (YRes + numTilesY - 1) / numTilesY;
+	constexpr int nJobs = numTilesX * numTilesY;
+	dispatchIndexed(nJobs, &renderns::tileDone, [=](int t) {
+		const int tj = t / numTilesX, ti = t - tj * numTilesX;
+		const int y1 = tsy*tj, y2 = std::min(y1+tsy, (int)YRes);
+		const int x1 = tsx*ti, x2 = std::min(x1+tsx, (int)XRes);
+		for (int py = y1; py < y2; ++py) {
+			// Vertical 4-stop blend: seg in [0,3), zenith(0)->sky(1)->ground(2)->nadir(3).
+			float seg = float(py) * invH * 3.0f;
+			int k = int(seg); if (k > 2) k = 2; if (k < 0) k = 0;
+			const float f = seg - float(k);
+			const QColor &a = stop[k]; const QColor &b = stop[k+1];
+			const int R = int(float(a.R) + (float(b.R) - float(a.R)) * f + 0.5f);
+			const int G = int(float(a.G) + (float(b.G) - float(a.G)) * f + 0.5f);
+			const int B = int(float(a.B) + (float(b.B) - float(a.B)) * f + 0.5f);
+			const dword pix = 0xFF000000u | (dword(R)<<16) | (dword(G)<<8) | dword(B);
+			const size_t row = size_t(py) * size_t(XRes);
+			for (int px = x1; px < x2; ++px) {
+				const size_t i = row + size_t(px);
+				if (zEnc[i] != 0) continue;
+				out[i] = pix;
+			}
+		}
+	});
+	for (int k = 0; k < nJobs; ++k) renderns::tileDone.acquire();
+}
+
 // ─── Screen-space rain ────────────────────────────────────────────────────
 // Procedural streaks as a tile-parallel post pass — no particles, no face
 // list. Three layers at fixed view depths give parallax: each layer is a

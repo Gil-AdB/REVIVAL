@@ -123,6 +123,23 @@ void ReadSceneEnvBakeRes(void)
 	printf("Scene env bake res default: %i\n",Scene->EnvBakeResScene);
 }
 
+// Authored backdrop GRADIENT colors — standard LightWave backdrop keys
+// (ZenithColor/SkyColor/GroundColor/NadirColor) the 1998 pipeline dropped.
+// Each is "R G B" (0..255). Any one sets SkyColorsSet → the four are
+// serialized as a Scene_SkyColors-gated scene-header payload (FLDSAVE.CPP)
+// and painted by the engine's default-off sky_gradient pass. See LWREAD.H.
+static void ReadColorTriple(FldColor *c)
+{
+	int R, G, B;
+	fscanf(LWS,"%i %i %i",&R,&G,&B);
+	c->Red = R; c->Green = G; c->Blue = B;
+	Scene->SkyColorsSet = 1;
+}
+void ReadZenithColor(void) { ReadColorTriple(&Scene->ZenithColor); }
+void ReadSkyColor(void)    { ReadColorTriple(&Scene->SkyColor); }
+void ReadGroundColor(void) { ReadColorTriple(&Scene->GroundColor); }
+void ReadNadirColor(void)  { ReadColorTriple(&Scene->NadirColor); }
+
 static int objNum = 1;
 static int lightNum = 1;
 
@@ -662,6 +679,10 @@ struct
 	{"FramesPerSecond" , ReadFPS},
 	{"FdsSceneEnvRefl"	 , ReadSceneEnvRefl},		// engine extension (scene env defaults)
 	{"FdsSceneEnvBakeRes", ReadSceneEnvBakeRes},	// engine extension (scene env defaults)
+	{"ZenithColor"		 , ReadZenithColor},		// authored backdrop gradient (sky_gradient)
+	{"SkyColor"			 , ReadSkyColor},
+	{"GroundColor"		 , ReadGroundColor},
+	{"NadirColor"		 , ReadNadirColor},
 // Object section
 	{"LoadObject"			 , AddObject},
 	{"AddNullObject"   , AddNullObject},

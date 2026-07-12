@@ -87,6 +87,14 @@ enum LightWave_Constants
 	// consumers never see it. FLDs without authored values are byte-
 	// identical to the pre-extension format.
 	Scene_EnvDefaults				= 2048,
+	// Authored backdrop GRADIENT colors (LWS "ZenithColor"/"SkyColor"/
+	// "GroundColor"/"NadirColor" — standard LightWave backdrop keys the 1998
+	// pipeline dropped). Same scene-header extension idiom as Scene_EnvDefaults:
+	// the bit rides the AmbientIntensity envelope's EndBehavior (legacy values
+	// top out at 1024; 2048 taken by env-defaults; 4096 free). Payload = four
+	// FldColor triples (12 bytes) after the env-defaults payload; the loader
+	// STRIPS the bit after reading. FLDs without the keys are byte-identical.
+	Scene_SkyColors					= 4096,
 	// Camera flags
 	Camera_Parent						= 1,
 	Camera_TargetObject			= 2
@@ -248,6 +256,14 @@ typedef struct
 	// enum note above.
 	int32_t       EnvReflSceneMode;   // -1 none / 0 auto / 1 all
 	int32_t       EnvBakeResScene;    // probe face res (pow2 64..1024), 0 = unset
+	// Authored backdrop gradient (LWS ZenithColor/SkyColor/GroundColor/
+	// NadirColor). SkyColorsSet != 0 when any of the four was parsed →
+	// serialized as a Scene_SkyColors-gated conditional payload (4 FldColor).
+	int32_t       SkyColorsSet;
+	FldColor      ZenithColor;        // straight up
+	FldColor      SkyColor;           // upper sky
+	FldColor      GroundColor;        // lower / toward horizon-ground
+	FldColor      NadirColor;         // straight down
 } FldScene;
 
 #pragma pack (pop)

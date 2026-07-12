@@ -123,6 +123,24 @@ void ReadGeneralSceneData(FldScene *Sc)
 		printf("[FLD] scene env defaults: envRefl=%d envBakeRes=%d\n",
 		       (int)Sc->EnvReflSceneMode, (int)Sc->EnvBakeResScene);
 	}
+	// Bit 4096 = Scene_SkyColors (authored backdrop gradient): four FldColor
+	// triples, written after the env-defaults payload by tools/lwsread. Same
+	// provably-inert-for-legacy idiom — legacy writers never set >1024 (env-
+	// defaults aside) on this envelope's EndBehavior, and Sc is memset(0) by
+	// the caller so a bit-free FLD leaves SkyColorsSet=0 (legacy black void).
+	// Strip the bit so EndBehavior consumers never see it.
+	if (Sc->AmbientIntensity->EndBehavior & Scene_SkyColors)
+	{
+		fread(&Sc->ZenithColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->SkyColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->GroundColor,1,sizeof(FldColor),FLD);
+		fread(&Sc->NadirColor,1,sizeof(FldColor),FLD);
+		Sc->SkyColorsSet = 1;
+		Sc->AmbientIntensity->EndBehavior &= ~(uint32_t)Scene_SkyColors;
+		printf("[FLD] scene sky gradient: zenith=(%d,%d,%d) nadir=(%d,%d,%d)\n",
+		       Sc->ZenithColor.Red, Sc->ZenithColor.Green, Sc->ZenithColor.Blue,
+		       Sc->NadirColor.Red, Sc->NadirColor.Green, Sc->NadirColor.Blue);
+	}
 }
 
 void ReadMaterial(FldMat *Mat)

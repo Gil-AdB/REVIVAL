@@ -58,6 +58,12 @@ void SaveGeneralSceneData(FldScene *Scene)
 	// without the keywords stay byte-identical to the pre-extension format.
 	if (Scene->EnvReflSceneMode || Scene->EnvBakeResScene)
 		Scene->AmbientIntensity->EndBehavior |= Scene_EnvDefaults;
+	// Authored backdrop gradient (LWS ZenithColor/SkyColor/GroundColor/
+	// NadirColor): same scene-header extension idiom — the bit rides the
+	// AmbientIntensity envelope's EndBehavior (4096 is free; 2048 is env-
+	// defaults). Payload written below after the env-defaults int32s.
+	if (Scene->SkyColorsSet)
+		Scene->AmbientIntensity->EndBehavior |= Scene_SkyColors;
 	fprintf(FLD,"Flood3D");
 	fwrite(&FldVersion,1,4,FLD);
 	fwrite(&Scene->FirstFrame,1,4,FLD);
@@ -85,6 +91,16 @@ void SaveGeneralSceneData(FldScene *Scene)
 	{
 		fwrite(&Scene->EnvReflSceneMode,1,4,FLD);
 		fwrite(&Scene->EnvBakeResScene,1,4,FLD);
+	}
+	// Backdrop gradient payload (4 FldColor triples) — after the env-defaults
+	// payload so the read order (FLD_READ.CPP) is unambiguous; a scene can
+	// carry neither, either, or both bits. FLDs without the bit are unchanged.
+	if (Scene->AmbientIntensity->EndBehavior & Scene_SkyColors)
+	{
+		fwrite(&Scene->ZenithColor,1,sizeof(FldColor),FLD);
+		fwrite(&Scene->SkyColor,1,sizeof(FldColor),FLD);
+		fwrite(&Scene->GroundColor,1,sizeof(FldColor),FLD);
+		fwrite(&Scene->NadirColor,1,sizeof(FldColor),FLD);
 	}
 }
 

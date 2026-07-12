@@ -88,6 +88,18 @@ struct Scene
     sdword           EnvReflSceneMode;
     sdword           EnvBakeResScene;
 
+    // Authored backdrop gradient (LWS ZenithColor/SkyColor/GroundColor/
+    // NadirColor → FLD Scene_SkyColors payload → here). Painted into
+    // void/sky pixels top→bottom by the default-off sky_gradient pass
+    // (Render_SkyGradient). HasSkyGradient == 0 → unset (legacy black void).
+    // Stored as QColor (BGRA byte) — the four vertical stops, zenith at the
+    // top of the frame, nadir at the bottom.
+    sdword           HasSkyGradient;
+    QColor           SkyZenith;   // straight up  (top of frame)
+    QColor           SkySky;      // upper sky
+    QColor           SkyGround;   // lower / toward horizon-ground
+    QColor           SkyNadir;    // straight down (bottom of frame)
+
     // Static-shadow lightmap table populated by LightmapBake_Static.
     // Index 0 is reserved sentinel (nullptr) so Mekalele's per-pixel
     // staticLMMeshId == 0 means "no lightmap for this pixel". Indices

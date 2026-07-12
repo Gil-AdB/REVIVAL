@@ -57,6 +57,7 @@ void Render_OmniHalos(const DeferredLightingCtx& ctx);
 void Render_DeferredVolumetric(const DeferredLightingCtx& ctx);
 void Render_DeferredFastFog(const DeferredLightingCtx& ctx);
 void Render_DeferredFastFogSkyPaint(const DeferredLightingCtx& ctx);
+void Render_DeferredSkyGradient();
 void Render_ScreenSpaceRain();
 void Render_LensDrops();
 void FastFog_BeginFrame();
@@ -642,6 +643,14 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		if (fds::FeatureFlags::deferred_skybox()) {
 			Render_DeferredSkybox();
 		}
+
+		// Authored vertical backdrop gradient over void (zEnc==0) pixels,
+		// UNDER the fog (painted before the composite). No-op unless the scene
+		// authored sky colors (Scene::HasSkyGradient). !skipVolumetric mirrors
+		// the SSAO/fog guard so reflection/RTT passes are untouched → flag-off
+		// (default) is byte-identical.
+		if (!skipVolumetric && fds::FeatureFlags::sky_gradient())
+			{ TailProf::ScopeTimer _tp("sky-gradient"); Render_DeferredSkyGradient(); }
 
 		// Full-screen distance fog over deferred-lit opaque pixels. Runs
 		// BEFORE the transparent peel AND before the cone/halo volumetric

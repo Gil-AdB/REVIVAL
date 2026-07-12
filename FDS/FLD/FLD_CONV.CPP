@@ -625,6 +625,18 @@ Scene *ConvertFLD(FldScene *FLD)
 	Sc->EnvReflSceneMode = FLD->EnvReflSceneMode;
 	Sc->EnvBakeResScene  = FLD->EnvBakeResScene;
 
+	// Authored backdrop gradient (FLD Scene_SkyColors payload → Scene). QColor
+	// stores BGRA bytes; A left 0 (unused by the paint). HasSkyGradient gates
+	// the default-off sky_gradient pass (Render_SkyGradient).
+	Sc->HasSkyGradient = FLD->SkyColorsSet;
+	if (FLD->SkyColorsSet)
+	{
+		Sc->SkyZenith.R = FLD->ZenithColor.Red; Sc->SkyZenith.G = FLD->ZenithColor.Green; Sc->SkyZenith.B = FLD->ZenithColor.Blue;
+		Sc->SkySky.R    = FLD->SkyColor.Red;    Sc->SkySky.G    = FLD->SkyColor.Green;    Sc->SkySky.B    = FLD->SkyColor.Blue;
+		Sc->SkyGround.R = FLD->GroundColor.Red; Sc->SkyGround.G = FLD->GroundColor.Green; Sc->SkyGround.B = FLD->GroundColor.Blue;
+		Sc->SkyNadir.R  = FLD->NadirColor.Red;  Sc->SkyNadir.G  = FLD->NadirColor.Green;  Sc->SkyNadir.B  = FLD->NadirColor.Blue;
+	}
+
 	// Used to walk MatLib to seek to the tail so AddMaterial could append
 	// linearly. AddMaterial now head-inserts and dedupes via a hash map
 	// (FLD_MAT.CPP), so the prologue is a no-op.
