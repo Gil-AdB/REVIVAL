@@ -228,6 +228,23 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   (expected). Authored for the OLD camera; the trail-follow redesign may have
   reframed off the lit walls. Verify they show in the canyon with the new camera;
   realign if needed. Blocked on same (chase files + build).
+- **EDITOR STABILITY (2 issues, user 2026-07-14; blocked on build = blasters
+  agent finishing):**
+  (a) `unaligned memory access` crash on texture import (e.g. roughness on
+  R_leg1.lwo::hull) — same trap class as the audio crash: a wasm ATOMIC op on
+  a misaligned address, under the editor's `-pthread + ALLOW_MEMORY_GROWTH`
+  build when an import allocation triggers a HEAP GROW while threadpool workers
+  are live (emscripten#17816/#23806, already noted in DEMO/CMakeLists.txt).
+  INITIAL_MEMORY=128MB → grows on every import. Mitigations: raise
+  INITIAL_MEMORY so typical imports don't grow; and/or run the material apply
+  single-threaded so no worker is mid-atomic during a grow.
+  (b) **Material/texture NOT reused across objects** — same material re-decoded
+  + re-allocated per object instead of sharing one loaded Texture. Wasteful AND
+  a direct cause of (a): N copies = N allocs = more grow events = more crashes.
+  Fix: a texture dedup cache keyed by source path in the import path (the code
+  `new Texture` + re-decodes each ApplyMapFile). Do this FIRST — highest value,
+  verifiable, and it cuts the crash rate. Distinct from the metallic-import OOM
+  (8d936e0, already fixed).
 
 - **Editor UX batch** — DONE (2026-07-12, d5a6ae9, tag b66): solid
   metallic/roughness generators (the mech-metallic recipe), Save "what
