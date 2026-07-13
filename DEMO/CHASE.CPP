@@ -791,9 +791,17 @@ void Initialize_Chase()
 	ChaseSc->NZP = 2.0f;
 	ChaseSc->Flags |= Scn_Fogged | Scn_ZBuffer;
 
-	ChaseSc->Ambient.R = 4 * 2;
-	ChaseSc->Ambient.G = 4 * 2;
-	ChaseSc->Ambient.B = 64 * 2;
+	// L2 mood fix: the 1998 ambient was (8,8,128) — a near-pure dark blue that
+	// crushed every surface's albedo R/G to ~3% while blue sat at 50% (pixel =
+	// texel x light / 256), so everything not directly lit read as flat navy
+	// ("too dark, too blue"). Rebalanced to a desaturated cool grey-blue: R/G
+	// lifted so surface albedo reads, blue dominance dropped so it's a night
+	// tone not a blue filter. Directional shape now comes from the (revived)
+	// moon key light (CHASE.LWS "Light": real LightRange + cool-white) rather
+	// than from a saturated ambient wash.
+	ChaseSc->Ambient.R = 47;
+	ChaseSc->Ambient.G = 55;
+	ChaseSc->Ambient.B = 76;
 
 	tagSceneMaterials(ChaseSc, /*restrictToScene=*/true);
 

@@ -1033,9 +1033,10 @@ LightMotion (unnamed)
   -2 20127 -2 45 35 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
-LightColor 255 255 255
-LgtIntensity 0.100000
+LightColor 205 222 255
+LgtIntensity 0.550000
 LightType 1
+LightRange 300000.000000
 ShadowType 1
 
 AddLight
