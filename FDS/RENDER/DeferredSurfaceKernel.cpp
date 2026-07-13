@@ -2522,7 +2522,13 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 	// (sidecar 'waterProcedural': -1 off / 0 auto / 1 on) wins; auto falls back
 	// to the global --water_procedural flag (byte-identical when no sidecar
 	// line exists). Same tri-state pattern as EnvReflMode.
-	bool waterProcOn = fds::FeatureFlags::water_procedural();
+	// The fresnel deep-colour composite is a separate opt-out from the
+	// procedural field: chase keeps the field (ripple/glints/caustics) but
+	// takes the forward-style lit-texel blend — its night-sky reflection
+	// underlay is black, so the deep colour reads as a dark view-angle band
+	// (the "chase water dark band"; soa-vertex 9902349).
+	bool waterProcOn = fds::FeatureFlags::water_procedural() &&
+	                   fds::FeatureFlags::water_fresnel_composite();
 	if (ctx.waterMatID >= 0 && dword(ctx.waterMatID) < ctx.matTable.count) {
 		if (const Material *WM = ctx.matTable.data[ctx.waterMatID]) {
 			if      (WM->WaterProcMode > 0) waterProcOn = true;

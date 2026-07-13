@@ -3687,6 +3687,10 @@ std::unique_ptr<SceneDriver> createCityScene()
 	// Procedural caustic water on by default (the scene the feature was built
 	// for), independent of --cinematic. --no-water_procedural still disables it.
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
+	// Re-pin the fresnel deep-colour composite: chase's factory defaults it
+	// OFF (black night-sky underlay), so a chase→city replay must restore the
+	// city look here (soa-vertex 9902349).
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, true);
 	ApplyCinematicProfile(cine::kCity);          // storm-city look (fog/rain/post)
 	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
 	// the profile so authored values beat it; explicit CLI/env still wins.

@@ -1138,6 +1138,11 @@ struct ChaseScene : SceneDriver {
 std::unique_ptr<SceneDriver> createChaseScene()
 {
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_procedural, true);
+	// Procedural FIELD only (ripple/glints/caustics): the kernel's fresnel
+	// deep-colour composite assumes a bright reflection underlay (city); chase
+	// reflects a black night sky, so it must keep the forward-style lit-texel
+	// blend or the water goes dark with a view-angle band (soa-vertex 9902349).
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, false);
 	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
 	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
 	// the profile so authored values beat it; explicit CLI/env still wins.
