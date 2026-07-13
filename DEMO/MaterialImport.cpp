@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -177,6 +178,58 @@ Texture *loadTiled(const std::string &path, bool flipGreen,
 	return t;
 }
 
+// ── Imported-texture dedup cache ────────────────────────────────────────────
+// Applying the SAME PBR map to multiple surfaces/objects used to `new Texture` +
+// re-decode the PNG (Load_Texture) + re-tile/mip AND re-run MakeNormal16/
+// MakeHeight8 on EVERY application — pure waste, and each redundant allocation is
+// another chance for a wasm heap-grow to fire mid-atomic and trap ("unaligned
+// memory access", emscripten#17816/#23806, under the editor's -pthread +
+// ALLOW_MEMORY_GROWTH build). Cache the FULLY-PROCESSED texture keyed by every
+// input that changes its decoded bytes: source path + role + green-flip + the
+// target (albedo-matched) dimensions. A second application of the same map to a
+// different surface reuses the cached Texture* — zero decode, zero alloc, and the
+// two surfaces literally share one Texture object (true reuse).
+//
+// LIFETIME: process-global, never freed — matches the existing convention. The
+// editor session is short-lived, Texture blocks aren't refcounted, and
+// re-imports/reset already leak the previous Texture on purpose (see
+// MaterialImport_ClearSurfaceMap). The cached texture is aliased across every
+// surface that imports the same map; the one in-place mutation of a shared
+// imported map is the normalFlip toggle (FlipNormalMapG), whose parity is tracked
+// per-Texture (g_nmapFlipParity) — surfaces sharing one source normal map share
+// its convention, which is correct (convention is a property of the source file).
+std::unordered_map<std::string, Texture*> g_importCache;
+
+// Load + role-convert a map, deduped by (path, role, flip, targetW, targetH).
+// Returns the shared, ready-to-assign Texture: albedo -> tiled 32bpp; normal ->
+// +MakeNormal16 when nmap_16bit; height/roughness/ao/metallic -> +MakeHeight8
+// (falls back to the 32bpp texture if MakeHeight8 can't allocate).
+Texture *loadRoleMapCached(const std::string &path, const char *role,
+                           bool flipGreen, int targetW, int targetH) {
+	char suffix[96];
+	std::snprintf(suffix, sizeof suffix, "|%s|%d|%dx%d",
+	              role, flipGreen ? 1 : 0, targetW, targetH);
+	const std::string key = path + suffix;
+	auto it = g_importCache.find(key);
+	if (it != g_importCache.end()) {
+		std::fprintf(stderr, "    [reuse] %s (%s%s%s) — cached, no re-decode\n",
+		             path.c_str(), role, flipGreen ? ", flipG" : "",
+		             (targetW > 0 && targetH > 0) ? ", albedo-matched" : "");
+		return it->second;
+	}
+	Texture *t = loadTiled(path, flipGreen, targetW, targetH);
+	if (!t) return nullptr;
+	if (!std::strcmp(role, "normal")) {
+		if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+	} else if (std::strcmp(role, "albedo") != 0) {
+		// height / roughness / ao / metallic -> single-channel 8-bit.
+		if (Texture *t8 = MakeHeight8(t)) t = t8;
+	}
+	g_importCache[key] = t;
+	std::fprintf(stderr, "    [load] %s (%s) decoded + cached\n", path.c_str(), role);
+	return t;
+}
+
 } // namespace
 
 void MaterialImport_ParseArgs(int argc, const char *const *argv) {
@@ -258,7 +311,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 		             sceneName ? sceneName : "?", spec.matName.c_str(), spec.dir.c_str());
 
 		if (!albedo.empty()) {
-			if (Texture *t = loadTiled(albedo, false)) {
+			if (Texture *t = loadRoleMapCached(albedo, "albedo", false, 0, 0)) {
 				for (Material *m : mats) m->Txtr = t;
 				std::fprintf(stderr, "    albedo    %s (%dx%d)\n", albedo.c_str(), t->SizeX, t->SizeY);
 			}
@@ -273,18 +326,16 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			const bool srcOGL = normalSourceIsOGL(stemLower(normal));
 			bool flip = (srcOGL != kEngineExpectsOGL);
 			if (g_forceFlipNormal) flip = !flip;
-			if (Texture *t = loadTiled(normal, flip, aw, ah)) {
-				if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+			if (Texture *t = loadRoleMapCached(normal, "normal", flip, aw, ah)) {
 				for (Material *m : mats) m->NormalMap = t;
 				std::fprintf(stderr, "    normal    %s (src=%s, flipG=%d%s)\n", normal.c_str(),
 				             srcOGL ? "OGL" : "DX", flip, g_forceFlipNormal ? ", forced" : "");
 			}
 		}
 		if (!rough.empty()) {
-			if (Texture *r32 = loadTiled(rough, false, aw, ah)) {
-				Texture *r8 = MakeHeight8(r32);
-				for (Material *m : mats) m->RoughnessMap = r8 ? r8 : r32;
-				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), r8 ? "8-bit" : "32-bit");
+			if (Texture *t = loadRoleMapCached(rough, "roughness", false, aw, ah)) {
+				for (Material *m : mats) m->RoughnessMap = t;
+				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), t->BPP == 8 ? "8-bit" : "32-bit");
 				// A roughness map implies the surface is meant to be specular, but
 				// many FLD materials (e.g. greets 'momy') ship Specular=0 → the
 				// roughness map would modulate a highlight that never appears. Give
@@ -300,24 +351,21 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			}
 		}
 		if (!height.empty()) {
-			if (Texture *h32 = loadTiled(height, false, aw, ah)) {
-				Texture *h8 = MakeHeight8(h32);
-				for (Material *m : mats) m->HeightMap = h8 ? h8 : h32;
-				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), h8 ? "8-bit" : "32-bit",
+			if (Texture *t = loadRoleMapCached(height, "height", false, aw, ah)) {
+				for (Material *m : mats) m->HeightMap = t;
+				std::fprintf(stderr, "    height    %s (%s)%s\n", height.c_str(), t->BPP == 8 ? "8-bit" : "32-bit",
 				             fds::FeatureFlags::parallax() ? "" : "  [--parallax off: loaded but inactive]");
 			}
 		}
 		if (!ao.empty()) {
-			if (Texture *a32 = loadTiled(ao, false, aw, ah)) {
-				Texture *a8 = MakeHeight8(a32);
-				for (Material *m : mats) m->AoMap = a8 ? a8 : a32;
-				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), a8 ? "8-bit" : "32-bit");
+			if (Texture *t = loadRoleMapCached(ao, "ao", false, aw, ah)) {
+				for (Material *m : mats) m->AoMap = t;
+				std::fprintf(stderr, "    ao        %s (%s, separate AoMap)\n", ao.c_str(), t->BPP == 8 ? "8-bit" : "32-bit");
 			}
 		}
 		if (!metallic.empty()) {
-			if (Texture *m32 = loadTiled(metallic, false, aw, ah)) {
-				Texture *m8 = MakeHeight8(m32);
-				for (Material *m : mats) m->MetallicMap = m8 ? m8 : m32;
+			if (Texture *t = loadRoleMapCached(metallic, "metallic", false, aw, ah)) {
+				for (Material *m : mats) m->MetallicMap = t;
 				// A metal without env reflections renders as a black hole
 				// (metalness kills diffuse; the env term needs --env_refl).
 				// Auto-default BOTH flags so the import visibly works out of
@@ -327,7 +375,7 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 				fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::env_bake_fix, true);
 				std::fprintf(stderr, "    metallic  %s (%s — kills diffuse, tints spec+env by albedo; "
 				             "env_refl %s, env_bake_fix %s)\n",
-				             metallic.c_str(), m8 ? "8-bit" : "32-bit",
+				             metallic.c_str(), t->BPP == 8 ? "8-bit" : "32-bit",
 				             fds::FeatureFlags::env_refl() ? "on" : "OFF (user override)",
 				             fds::FeatureFlags::env_bake_fix() ? "on" : "OFF (user override)");
 			}
@@ -734,7 +782,7 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	if (mats[0]->Txtr) { aw = mats[0]->Txtr->SizeX; ah = mats[0]->Txtr->SizeY; }
 	bool tangentMap = false, ok = false;
 	if (r == "albedo") {
-		if (Texture *t = loadTiled(path, false)) {
+		if (Texture *t = loadRoleMapCached(path, "albedo", false, 0, 0)) {
 			for (Material *M : mats) {
 				stashOrigMap(M, "albedo", M->Txtr);
 				M->Txtr = t;
@@ -761,19 +809,17 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 	} else if (r == "normal") {
 		// No filename convention to sniff here; default to the engine (OGL)
 		// convention, honoring the global --material-import-flip-normal override.
-		if (Texture *t = loadTiled(path, g_forceFlipNormal, aw, ah)) {
-			if (fds::FeatureFlags::nmap_16bit()) { if (Texture *t16 = MakeNormal16(t)) t = t16; }
+		if (Texture *t = loadRoleMapCached(path, "normal", g_forceFlipNormal, aw, ah)) {
 			for (Material *M : mats) { stashOrigMap(M, "normal", M->NormalMap); M->NormalMap = t; }
 			tangentMap = true; ok = true;
 		}
 	} else if (r == "height") {
-		if (Texture *h32 = loadTiled(path, false, aw, ah)) { Texture *h8 = MakeHeight8(h32); for (Material *M : mats) { stashOrigMap(M, "height", M->HeightMap); M->HeightMap = h8 ? h8 : h32; } tangentMap = true; ok = true; }
+		if (Texture *t = loadRoleMapCached(path, "height", false, aw, ah)) { for (Material *M : mats) { stashOrigMap(M, "height", M->HeightMap); M->HeightMap = t; } tangentMap = true; ok = true; }
 	} else if (r == "roughness") {
-		if (Texture *r32 = loadTiled(path, false, aw, ah)) {
-			Texture *r8 = MakeHeight8(r32);
+		if (Texture *t = loadRoleMapCached(path, "roughness", false, aw, ah)) {
 			for (Material *M : mats) {
 				stashOrigMap(M, "roughness", M->RoughnessMap);
-				M->RoughnessMap = r8 ? r8 : r32;
+				M->RoughnessMap = t;
 				// Same defaulting as the CLI dir-scan path: a roughness map
 				// implies a specular surface, but many FLD materials ship
 				// Specular=0 — the map would modulate a highlight that never
@@ -788,11 +834,10 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 			ok = true;
 		}
 	} else if (r == "ao") {
-		if (Texture *a32 = loadTiled(path, false, aw, ah)) { Texture *a8 = MakeHeight8(a32); for (Material *M : mats) { stashOrigMap(M, "ao", M->AoMap); M->AoMap = a8 ? a8 : a32; } ok = true; }
+		if (Texture *t = loadRoleMapCached(path, "ao", false, aw, ah)) { for (Material *M : mats) { stashOrigMap(M, "ao", M->AoMap); M->AoMap = t; } ok = true; }
 	} else if (r == "metallic") {
-		if (Texture *m32 = loadTiled(path, false, aw, ah)) {
-			Texture *m8 = MakeHeight8(m32);
-			for (Material *M : mats) { stashOrigMap(M, "metallic", M->MetallicMap); M->MetallicMap = m8 ? m8 : m32; }
+		if (Texture *t = loadRoleMapCached(path, "metallic", false, aw, ah)) {
+			for (Material *M : mats) { stashOrigMap(M, "metallic", M->MetallicMap); M->MetallicMap = t; }
 			// Metal without env reflections = black hole (diffuse killed,
 			// env term needs --env_refl). Auto-default the reflection flags
 			// so a metallic import — editor upload OR sidecar line at scene
