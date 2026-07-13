@@ -745,7 +745,19 @@ made then, by ear/taste, not derived here. The 3.3× playback (§1.1) and the
 finale-restoration (M1.3) remain open pacing questions to arbitrate at that
 point.
 
-### Queued chase batch 2 (user-requested 2026-07-12; lands AFTER M1 — shares CHASE.LWS/CHASE.CPP, so sequential not parallel)
+### CREATIVE LATITUDE (user, 2026-07-13)
+The user grants free rein on chase: "welcome to change the camera and ship splines and path as needed, add stuff, etc." So the camera + motion batches may REDESIGN paths/splines and ADD elements, not just tweak authored keys. Chase has no sacred baseline. Optimize for a great-looking fast-paced sequence.
+
+### Queued chase batch 2 (user-requested 2026-07-12/13; lands AFTER the lighting batch — shares CHASE.LWS/CHASE.CPP, so sequential not parallel)
+
+- **Mountains on sea level** (do BEFORE/with the camera fix — moving the canyon
+  changes where the camera clips). The water plane is Y=0 but every mountain
+  instance floats a different small amount above it (m1 +11, m2 +36, m3 +29.5,
+  m4 +42, mm7 +111.5, m5 +21.5, big_m +1535) — hand-placed in 1998, never
+  leveled. Fix via a tool (chase_bank.py family): per instance, find the mesh's
+  local base-Y, shift the instance so its base sits AT or JUST BELOW the water
+  (slightly submerged → clean waterline, no hairline gap / z-fight). Authored
+  (CHASE.LWS instance Ys), ~76 instances across 9 LWOs (m1-m5/mm7/big_m).
 
 - **Camera-clip fix** (C1 subset): the look-at dolly (TargetObject 79 = Ship1,
   18 keys, NZP=2) grazes the canyon walls — a mountain clips the frame/near
