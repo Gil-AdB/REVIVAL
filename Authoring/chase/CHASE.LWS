@@ -1213,6 +1213,38 @@ FlareRandStreakDens 50.000000
 FlareRandStreakSharp 6.000000
 ShadowType 1
 
+AddLight
+LightName canyon warm spot
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -22000 4000 -8000 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 255 138 52
+LgtIntensity 1.650000
+LightType 2
+ConeAngle 60.000000
+LightRange 44000.000000
+ShadowType 1
+
+AddLight
+LightName canyon cool spot
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -30000 4000 0 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 70 150 235
+LgtIntensity 1.650000
+LightType 2
+ConeAngle 60.000000
+LightRange 44000.000000
+ShadowType 1
+
 ShowCamera 1 7
 CameraMotion (unnamed)
   9
