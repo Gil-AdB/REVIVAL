@@ -83,5 +83,3 @@ cone_strength=4
 bolt_flash_peak=10000
 bolt_flash_range=600
 
-# Greets: blaster-bolt test system.
-greets_blasters
