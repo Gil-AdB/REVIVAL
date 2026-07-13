@@ -821,6 +821,7 @@ static inline void EnvSpecComposeScalar(
 	float sampleWorldX, float sampleWorldY, float sampleWorldZ,
 	float texB, float texG, float texR,
 	float gloss, float metalM, bool roughMapOn, float envReflGain,
+	bool envBrdfAnalytic,
 	float &sB, float &sG, float &sR)
 {
 	// FDS_ENV_SKIP_NEGY=1 (diagnostic A/B): skip the compose entirely for
@@ -1221,12 +1222,33 @@ static inline void EnvSpecComposeScalar(
 	float f0 = Mat->Reflection * 0.01f;
 	if (f0 < 0.04f) f0 = 0.04f;
 	f0 = f0 + (0.98f - f0) * metalM;
-	float f90 = 1.0f - rough;
-	if (f90 < f0) f90 = f0;
-	const float omv = 1.0f - ndv;
-	const float omv2 = omv * omv;
-	const float fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
-	const float ek = fres * envReflGain;
+	float fres, ek;
+	if (envBrdfAnalytic) {
+		// Analytic split-sum env-BRDF (Karis "Mobile" approximation,
+		// SIGGRAPH 2014): a polynomial fit to the pre-integrated GGX
+		// environment BRDF LUT. Replaces the ad-hoc f90=1-rough Schlick
+		// weight in the else-branch with the split-sum scale+bias
+		// envBrdf = f0*A + B, so rough reflections carry the correct
+		// roughness-dependent grazing response (energy-correct rough IBL)
+		// instead of a hand-tuned Fresnel falloff. fres is set to envBrdf
+		// so the ENVTRACE dump below and the metal-tinted sB/sG/sR add
+		// (which read fres/ek) stay valid. f0 already = Reflection% pulled
+		// toward ~0.98 by metalness above.
+		const float rx = -1.0f*rough + 1.0f,    ry = -0.0275f*rough + 0.0425f;
+		const float rz = -0.572f*rough + 1.04f, rw =  0.022f*rough + -0.04f;
+		const float a004 = std::min(rx*rx, std::exp2(-9.28f*ndv))*rx + ry;
+		const float A = -1.04f*a004 + rz,  B = 1.04f*a004 + rw;
+		const float envBrdf = f0*A + B;
+		fres = envBrdf;
+		ek   = envBrdf * envReflGain;
+	} else {
+		float f90 = 1.0f - rough;
+		if (f90 < f0) f90 = f0;
+		const float omv = 1.0f - ndv;
+		const float omv2 = omv * omv;
+		fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
+		ek   = fres * envReflGain;
+	}
 	const float inv255 = 1.0f / 255.0f;
 	// Metal tint: reflection takes the albedo's color.
 	const float tB = 1.0f - metalM + metalM * texB * inv255;
@@ -1344,6 +1366,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// Raw gain: the material's Reflection% now enters through Fresnel F0
 	// (F0 = Reflection/100), so the gain is a plain multiplier on top.
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
+	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
@@ -2289,7 +2312,8 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				                     x, y, z, nx, ny, nz,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
 				                     texB, texG, texR, gloss, metalM,
-				                     roughMapOnG, envReflGainG, sB, sG, sR);
+				                     roughMapOnG, envReflGainG,
+				                     envBrdfAnalyticG, sB, sG, sR);
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
@@ -3650,6 +3674,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
 	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
+	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	// HDR: same rule as the scalar kernel — the 250 lit-cap is an 8-bit
@@ -4128,7 +4153,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			// the look is approved) — disengage the vec compose when on.
 			const bool envPosFakesOff =
 				fds::FeatureFlags::env_sphere_parallax() <= 0.0f &&
-				fds::FeatureFlags::env_ssr() <= 0;   // SSR march is scalar-only
+				fds::FeatureFlags::env_ssr() <= 0 &&   // SSR march is scalar-only
+				!envBrdfAnalyticG;                     // analytic env-BRDF is scalar-only (no AVX2 exp2)
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];
@@ -4285,7 +4311,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     sBs, sGs, sRs);
+						                     envBrdfAnalyticG, sBs, sGs, sRs);
 					}
 					outB = int(fdBs) + int(sBs);
 					outG = int(fdGs) + int(sGs);
@@ -4364,7 +4390,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     sBs, sGs, sRs);
+						                     envBrdfAnalyticG, sBs, sGs, sRs);
 						outB += int(sBs); outG += int(sGs); outR += int(sRs);
 					}
 				}
@@ -4415,6 +4441,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const fds::EnvPanoLinear *const *envTabG = fds::FeatureFlags::env_refl()
 	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
+	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
@@ -4952,7 +4979,8 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					                     x, y, z, nx, ny, nz,
 					                     sampleWorldX, sampleWorldY, sampleWorldZ,
 					                     texB, texG, texR, gloss, metalM,
-					                     roughMapOnG, envReflGainG, sB, sG, sR);
+					                     roughMapOnG, envReflGainG,
+					                     envBrdfAnalyticG, sB, sG, sR);
 				}
 			}
 			int outB = int(fdB) + int(sB);
