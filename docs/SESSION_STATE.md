@@ -13,8 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default, POST-L2, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `a9d38ae197629db44b2be9787fdd1287`<br>t400 `9b99137751fdecf49a7fb69c2fce2301`<br>t800 `46c32944c2d4c9a53fe7c3a856ae2dab`<br>t1200 `e8da00a02f753625ce9ee9e5db673b44`<br>t1600 `88a025cab5accc32ca30d5627f02e89f` |
-| chase (cinematic, POST-L2) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `193a05a512016c92f4dd38763b8fc5be`<br>t1600 `490a524f99307e10962689a48e27e0f4` |
+| chase (default, POST batch-2.1 mountains, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `d92882c3fd898928ec0f705e60e2b4e3`<br>t400 `5525c6e39a5b5ec5f189da9b1a1c7a56`<br>t800 `d360917fc266d1b7f3ad7ff53b6fe733`<br>t1200 `b766e15a22c1978b1b54cfe5e6787544`<br>t1600 `88a025cab5accc32ca30d5627f02e89f` |
+| chase (cinematic, POST batch-2.1) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `61480e0720ad5b69b7928572b733495d`<br>t1600 `490a524f99307e10962689a48e27e0f4` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
