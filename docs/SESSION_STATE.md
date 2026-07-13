@@ -13,8 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default, POST batch-2.1 mountains, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `d92882c3fd898928ec0f705e60e2b4e3`<br>t400 `5525c6e39a5b5ec5f189da9b1a1c7a56`<br>t800 `d360917fc266d1b7f3ad7ff53b6fe733`<br>t1200 `b766e15a22c1978b1b54cfe5e6787544`<br>t1600 `88a025cab5accc32ca30d5627f02e89f` |
-| chase (cinematic, POST batch-2.1) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `61480e0720ad5b69b7928572b733495d`<br>t1600 `490a524f99307e10962689a48e27e0f4` |
+| chase (default, POST camera redesign, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `953135720c5f7a1c3977f3cfefe1b3de`<br>t400 `6e5935a65591a08fccea2c460ac94839`<br>t800 `20dd1a81f1806aac471e2a59af7a0dfd`<br>t1200 `0f3651509b69c784e1ad07df641d9c03`<br>t1600 `efd36808bbb330e19428e25e7e398635` |
+| chase (cinematic, POST camera) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `5c540964c181d6ea294d414fd5502c9a`<br>t1600 `7c91851b27084acf8793f45dddd3906c` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
