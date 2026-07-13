@@ -42,6 +42,12 @@ void BlasterBolts_ResetActive();
 void BlasterBolts_Place(const Vector &pos, const Vector &dir,
                         float r, float g, float b);
 
+// Set the bolt billboard world dimensions (half-length + half-width) used by
+// Draw/DrawReflected. Chase bumps these to scene scale so tracer streaks read
+// against the far-larger chase geometry; greets never calls it (bolts stay at
+// the built-in greets-scale default). <=0 leaves a dimension unchanged.
+void BlasterBolts_SetBoltSize(float halfLen, float halfWidth);
+
 // ── Muzzle / impact flashes (fountain bolt_flash envelope, pooled) ─────────
 // A pool of transient, non-stationary Omni_FogTransient lights (like the
 // fountain strike-flash) that light nearby geometry + the froxel fog at muzzles

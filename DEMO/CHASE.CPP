@@ -951,6 +951,18 @@ struct ChaseScene : SceneDriver {
 		const float t = CurFrame;
 		const auto &table = chase::BlasterFireTable();
 
+		// Bolt streak size scales with the current ship2→Ship1 gap so tracers
+		// read at chase scale (ships tens of units, water spans thousands) —
+		// full bolt ≈ 12% of the gap, width a slim fraction of that.
+		{
+			const Vector s2 = chaseShipCenter(ship2M, t);
+			const Vector s1 = chaseShipCenter(ship1M, t);
+			const float dx=s1.x-s2.x, dy=s1.y-s2.y, dz=s1.z-s2.z;
+			float half = 0.06f * std::sqrt(dx*dx + dy*dy + dz*dz);
+			if (half < 2.0f) half = 2.0f;
+			fds::BlasterBolts_SetBoltSize(half, 0.14f * half);
+		}
+
 		// Ship1 world bounding radius at a frame (for miss-offset scaling).
 		auto ship1Radius = [&](float f) -> float {
 			Vector s; Spline_Calc_3D(&ship1M->Scale, f, &s);

@@ -43,6 +43,13 @@ Bolt      s_bolts[kMaxBolts];
 Material *s_mat    = nullptr;
 bool      s_inited = false;
 
+// Bolt world dimensions. Default to the greets-scale constants; the chase driver
+// bumps them per-frame (BlasterBolts_SetBoltSize) so tracer streaks read at the
+// far larger chase scale (ships tens of units, water spans thousands). Greets
+// never calls the setter → its bolts stay byte-identical.
+float     s_boltHalfLen   = kHalfLen;
+float     s_boltHalfWidth = kHalfWidth;
+
 // ── Transient bolt-lights ─────────────────────────────────────────────────
 // Each live bolt drives a non-stationary coloured Omni so the deferred kernel
 // lights nearby geometry with a moving pool (and the froxel fog in-scatters it
@@ -166,6 +173,11 @@ void BlasterBolts_ResetActive() {
 	for (int i = 0; i < kMaxBolts; ++i) s_bolts[i].active = false;
 }
 
+void BlasterBolts_SetBoltSize(float halfLen, float halfWidth) {
+	if (halfLen   > 1e-4f) s_boltHalfLen   = halfLen;
+	if (halfWidth > 1e-4f) s_boltHalfWidth = halfWidth;
+}
+
 void BlasterBolts_Place(const Vector &pos, const Vector &dir,
                         float r, float g, float b) {
 	if (!s_inited) return;
@@ -243,8 +255,8 @@ void BlasterBolts_Draw() {
 		// drawBoltQuad path), then build a screen-space quad: U across width,
 		// V along length, matching the baked texture's orientation.
 		const Vector &d = B.dir;
-		const Vector A { B.pos.x-d.x*kHalfLen, B.pos.y-d.y*kHalfLen, B.pos.z-d.z*kHalfLen };
-		const Vector Bp{ B.pos.x+d.x*kHalfLen, B.pos.y+d.y*kHalfLen, B.pos.z+d.z*kHalfLen };
+		const Vector A { B.pos.x-d.x*s_boltHalfLen, B.pos.y-d.y*s_boltHalfLen, B.pos.z-d.z*s_boltHalfLen };
+		const Vector Bp{ B.pos.x+d.x*s_boltHalfLen, B.pos.y+d.y*s_boltHalfLen, B.pos.z+d.z*s_boltHalfLen };
 		Vector va, vb, t;
 		Vector_Sub(const_cast<Vector*>(&A),  &View->ISource, &t); MatrixXVector(View->Mat, &t, &va);
 		Vector_Sub(const_cast<Vector*>(&Bp), &View->ISource, &t); MatrixXVector(View->Mat, &t, &vb);
@@ -256,7 +268,7 @@ void BlasterBolts_Draw() {
 		if (len < 1.0f) continue;
 		ddx/=len; ddy/=len;
 		const float nx = -ddy, ny = ddx;
-		float hwA = kHalfWidth*rzA*FOVX, hwB = kHalfWidth*rzB*FOVX;
+		float hwA = s_boltHalfWidth*rzA*FOVX, hwB = s_boltHalfWidth*rzB*FOVX;
 		if (hwA < 2.0f) hwA = 2.0f; if (hwA > 300.0f) hwA = 300.0f;
 		if (hwB < 2.0f) hwB = 2.0f; if (hwB > 300.0f) hwB = 300.0f;
 
@@ -334,8 +346,8 @@ void BlasterBolts_DrawReflected(float waterY) {
 		// Mirror position + direction across the water plane.
 		const Vector mp{ B.pos.x, 2.0f*waterY - B.pos.y, B.pos.z };
 		const Vector d { B.dir.x, -B.dir.y, B.dir.z };
-		const Vector A { mp.x-d.x*kHalfLen, mp.y-d.y*kHalfLen, mp.z-d.z*kHalfLen };
-		const Vector Bp{ mp.x+d.x*kHalfLen, mp.y+d.y*kHalfLen, mp.z+d.z*kHalfLen };
+		const Vector A { mp.x-d.x*s_boltHalfLen, mp.y-d.y*s_boltHalfLen, mp.z-d.z*s_boltHalfLen };
+		const Vector Bp{ mp.x+d.x*s_boltHalfLen, mp.y+d.y*s_boltHalfLen, mp.z+d.z*s_boltHalfLen };
 		Vector va, vb, t;
 		Vector_Sub(const_cast<Vector*>(&A),  &View->ISource, &t); MatrixXVector(View->Mat, &t, &va);
 		Vector_Sub(const_cast<Vector*>(&Bp), &View->ISource, &t); MatrixXVector(View->Mat, &t, &vb);
@@ -347,7 +359,7 @@ void BlasterBolts_DrawReflected(float waterY) {
 		if (len < 1.0f) continue;
 		ddx/=len; ddy/=len;
 		const float nx = -ddy, ny = ddx;
-		float hwA = kHalfWidth*rzA*FOVX, hwB = kHalfWidth*rzB*FOVX;
+		float hwA = s_boltHalfWidth*rzA*FOVX, hwB = s_boltHalfWidth*rzB*FOVX;
 		if (hwA < 2.0f) hwA = 2.0f; if (hwA > 300.0f) hwA = 300.0f;
 		if (hwB < 2.0f) hwB = 2.0f; if (hwB > 300.0f) hwB = 300.0f;
 
