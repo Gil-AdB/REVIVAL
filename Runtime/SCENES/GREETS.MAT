@@ -3,10 +3,42 @@
 # Format: surface|role|path-relative-to-Runtime (PBR map)
 #         surface|prop|value                    (numeric override)
 
+amudim|albedo|TEXTURES/PBR/amudim_albedo.png
+amudim|ao|TEXTURES/PBR/amudim_ao.png
+amudim|envBakeRes|64
+amudim|metallic|TEXTURES/PBR/amudim_metallic.png
+amudim|normal|TEXTURES/PBR/amudim_normal.png
+amudim|roughness|TEXTURES/PBR/amudim_roughness.png
+amudim|smoothAngle|104
 momy|albedo|TEXTURES/PBR/momy_albedo.png
 momy|ao|TEXTURES/PBR/momy_ao.png
 momy|height|TEXTURES/PBR/momy_height.png
+momy|metallic|TEXTURES/PBR/momy_metallic.png
 momy|normal|TEXTURES/PBR/momy_normal.png
 momy|roughness|TEXTURES/PBR/momy_roughness.png
+momy|smoothAngle|30
+momy#2|albedo|TEXTURES/PBR/momy_2_albedo.png
+momy#2|metallic|TEXTURES/PBR/momy_2_metallic.png
+momy#2|normal|TEXTURES/PBR/momy_2_normal.png
+momy#2|roughness|TEXTURES/PBR/momy_2_roughness.png
+screen 4|refractive|0
+screen emiter|albedo|TEXTURES/PBR/screen_emiter_albedo.png
+screen emiter|metallic|TEXTURES/PBR/screen_emiter_metallic.png
+screen emiter|normal|TEXTURES/PBR/screen_emiter_normal.png
+screen emiter|roughness|TEXTURES/PBR/screen_emiter_roughness.png
+screen emiter|smoothAngle|180
 siling|aoStrength|0
 siling|parallaxScale|0
+stairs|albedo|TEXTURES/PBR/stairs_albedo.png
+stairs|ao|TEXTURES/PBR/stairs_ao.png
+stairs|aoStrength|1.61
+stairs|envBakeRes|512
+stairs|envRefl|1
+stairs|height|TEXTURES/PBR/stairs_height.png
+stairs|metallic|TEXTURES/PBR/stairs_metallic.png
+stairs|normal|TEXTURES/PBR/stairs_normal.png
+stairs|parallaxScale|0
+stairs|roughness|TEXTURES/PBR/stairs_roughness.png
+stairs|smoothAngle|54
+teleporter|height|TEXTURES/PBR/teleporter_height.png
+teleporter|normal|TEXTURES/PBR/teleporter_normal.png
