@@ -1167,8 +1167,8 @@ FdsFlareScale 0.40
 EndBehavior 1
 LockedChannels 5
 ParentObject 80
-LightColor 253 65 2
-LgtIntensity 0.050000
+LightColor 255 140 60
+LgtIntensity 0.130000
 LightType 1
 LightFalloff 1
 LightRange 5000000.000000
@@ -1196,8 +1196,8 @@ FdsFlareScale 0.40
 EndBehavior 1
 LockedChannels 5
 ParentObject 80
-LightColor 253 65 2
-LgtIntensity 0.050000
+LightColor 255 140 60
+LgtIntensity 0.130000
 LightType 1
 LightFalloff 1
 LightRange 5000000.000000
