@@ -1,6 +1,7 @@
 #include "ChaseEvents.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -106,6 +107,77 @@ std::vector<Event> Events_TestTable(int32_t anchor) {
     e.kind   = 1;
     e.p[0] = 1.0f;           // marker channel (red), see the snapshot stamp
     return {e};
+}
+
+// ── Stage B1: blaster fire table ────────────────────────────────────────────
+const std::vector<BlasterBurst>& BlasterFireTable() {
+    // ship2 fires hot orange/red (contrasts the blue water). Bursts are placed
+    // so bolts are in flight / impacting through Ship1's authored evasive
+    // clusters (dense rotation keys at ~1408, ~1495, ~1623 — that IS why it
+    // wiggles there). Miss offsets are in Ship1-bounding-radius fractions
+    // (resolved to world in the driver); a negative Y drops near-misses toward
+    // the water. Palette + cadence are user picks later; these are sane defaults.
+    static const std::vector<BlasterBurst> kTable = {
+        // fireFrame count spacing lead flight   miss(x,y,z)          colour(r,g,b)
+        { 980.0f,   4,  8.0f,  45.0f, 34.0f,   0.60f, -1.20f,  0.30f,  1.00f, 0.34f, 0.07f }, // opening sighting shots
+        { 1380.0f,  5,  6.0f,  42.0f, 30.0f,  -0.45f, -1.50f,  0.20f,  1.00f, 0.30f, 0.06f }, // cluster 1 (~1408)
+        { 1470.0f,  6,  5.0f,  38.0f, 28.0f,   0.30f,  0.15f, -0.40f,  1.00f, 0.40f, 0.10f }, // cluster 2 (~1495) — closer
+        { 1595.0f,  7,  5.0f,  46.0f, 32.0f,  -0.55f, -1.00f,  0.50f,  1.00f, 0.28f, 0.05f }, // cluster 3 (~1623)
+    };
+    return kTable;
+}
+
+void BlasterBoltsAliveAt(const std::vector<BlasterBurst>& table, float t,
+                         std::vector<BoltState>& outBolts) {
+    outBolts.clear();
+    for (const BlasterBurst& b : table) {
+        for (int i = 0; i < b.count; ++i) {
+            const float fFire = b.fireFrame + float(i) * b.spacingFrames;
+            const float age   = t - fFire;
+            if (age < 0.0f || age >= b.flightFrames) continue;
+            BoltState s;
+            s.fireFrame = fFire;
+            s.aimFrame  = fFire + b.leadFrames;
+            s.u         = b.flightFrames > 0.0f ? age / b.flightFrames : 0.0f;
+            s.wing      = i & 1;
+            s.missX = b.missX; s.missY = b.missY; s.missZ = b.missZ;
+            s.r = b.r; s.g = b.g; s.b = b.b;
+            outBolts.push_back(s);
+        }
+    }
+}
+
+void BlasterFlashesAt(const std::vector<BlasterBurst>& table, float t,
+                      float decay, float window,
+                      std::vector<FlashState>& outFlashes) {
+    outFlashes.clear();
+    for (const BlasterBurst& b : table) {
+        for (int i = 0; i < b.count; ++i) {
+            const float fFire       = b.fireFrame + float(i) * b.spacingFrames;
+            const float aimFrame    = fFire + b.leadFrames;
+            const float impactFrame = fFire + b.flightFrames;
+            // Muzzle flash at the shot leaving ship2.
+            const float ageM = t - fFire;
+            if (ageM >= 0.0f && ageM < window) {
+                FlashState f;
+                f.kind = 0; f.fireFrame = fFire; f.aimFrame = aimFrame; f.wing = i & 1;
+                f.missX = b.missX; f.missY = b.missY; f.missZ = b.missZ;
+                f.intensity = std::exp(-decay * ageM);
+                f.r = b.r; f.g = b.g; f.b = b.b;
+                outFlashes.push_back(f);
+            }
+            // Impact flash at the (fixed, fire-time) aim point.
+            const float ageI = t - impactFrame;
+            if (ageI >= 0.0f && ageI < window) {
+                FlashState f;
+                f.kind = 1; f.fireFrame = fFire; f.aimFrame = aimFrame; f.wing = i & 1;
+                f.missX = b.missX; f.missY = b.missY; f.missZ = b.missZ;
+                f.intensity = std::exp(-decay * ageI);
+                f.r = b.r; f.g = b.g; f.b = b.b;
+                outFlashes.push_back(f);
+            }
+        }
+    }
 }
 
 } // namespace chase

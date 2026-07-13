@@ -84,4 +84,67 @@ void Events_ActiveAt(const std::vector<Event>& evs, int32_t t,
 // the pure-t reconstruction appears/clears deterministically at a boundary.
 std::vector<Event> Events_TestTable(int32_t anchor);
 
+// ── Stage B1: blaster fire table (pure function of CurFrame) ────────────────
+// The combat spine. A BURST is ship2 firing `count` bolts at Ship1, one every
+// `spacingFrames`, starting at `fireFrame` (frames == CurFrame; chase plays
+// 1 authored frame ≈ 1 tick). Each bolt aims at Ship1's spline position
+// `leadFrames` ahead of ITS OWN fire time, plus an authored miss offset
+// expressed in TARGET-BOUNDING-RADIUS fractions (resolved to world units in the
+// chase driver — this header stays engine-free). A bolt reaches its aim in
+// `flightFrames`. Everything here is data; the driver evaluates the ship splines.
+//
+// Determinism: state is never accumulated. "Which bolts/flashes exist at t and
+// where" is reconstructed from this table each frame (BlasterBoltsAliveAt /
+// BlasterFlashesAt), so a snapshot that jumps Timer to t reproduces it exactly.
+struct BlasterBurst {
+    float fireFrame;      // CurFrame at which the burst's first bolt fires
+    int   count;          // bolts in the burst
+    float spacingFrames;  // frames between consecutive bolts
+    float leadFrames;     // aim at target spline (bolt fireFrame + this)
+    float flightFrames;   // frames the bolt takes to reach its aim point
+    float missX, missY, missZ;  // aim offset, in target bounding-radius fractions
+    float r, g, b;        // bolt colour (ship2 fires hot orange by default)
+};
+
+// The default chase fire table: bursts aligned to Ship1's authored evasive
+// clusters (t≈1408, 1495, 1623) plus an opening sighting burst. Deterministic,
+// hardcoded (the FdsMuzzle keyword + authored fire events are a later batch).
+const std::vector<BlasterBurst>& BlasterFireTable();
+
+// One bolt reconstructed at frame t. The driver resolves the world endpoints:
+//   muzzle = ship2 world transform @ fireFrame, applied to wing `wing`
+//   aim    = ship1 centre @ aimFrame  +  miss·(ship1 world radius)
+//   pos    = lerp(muzzle, aim, u),  dir = normalize(aim - muzzle)
+struct BoltState {
+    float fireFrame;   // ship2 transform sample frame (this bolt's muzzle)
+    float aimFrame;    // ship1 transform sample frame (fireFrame + leadFrames)
+    float u;           // 0..1 fraction along the flight at t
+    int   wing;        // 0/1 muzzle selector (alternates per bolt)
+    float missX, missY, missZ;
+    float r, g, b;
+};
+
+// One flash reconstructed at frame t (fountain bolt_flash envelope, pure-t).
+struct FlashState {
+    int   kind;        // 0 = muzzle (ship2 @ fireFrame, wing), 1 = impact (aim)
+    float fireFrame;   // muzzle sample frame
+    float aimFrame;    // impact sample frame (= fireFrame + leadFrames)
+    int   wing;
+    float missX, missY, missZ;
+    float intensity;   // 0..1 exp-decay envelope value at t
+    float r, g, b;
+};
+
+// Fill `outBolts` with every bolt alive at frame t (0 ≤ t-fireFrame <
+// flightFrames); clears it first. Pure function of t.
+void BlasterBoltsAliveAt(const std::vector<BlasterBurst>& table, float t,
+                         std::vector<BoltState>& outBolts);
+
+// Fill `outFlashes` with every muzzle/impact flash active at frame t (clears it
+// first). `decay` = exp rate per frame, `window` = frames after the event past
+// which the flash is dropped. intensity = exp(-decay · age) for 0 ≤ age < window.
+void BlasterFlashesAt(const std::vector<BlasterBurst>& table, float t,
+                      float decay, float window,
+                      std::vector<FlashState>& outFlashes);
+
 } // namespace chase

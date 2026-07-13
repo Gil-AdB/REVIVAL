@@ -10,6 +10,8 @@
 #include "ProceduralWater.h"
 #include "SceneTick.h"
 #include "Scenes.h"
+#include "BlasterBolts.h"      // B1: blaster combat (chase_blasters)
+#include "ChaseEvents.h"       // B1: pure-t fire table + reconstruction
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
 #include <memory>
 #include <vector>
@@ -54,6 +56,56 @@ float chaseAngRateRef(TriMesh *T, int32_t f0, int32_t f1, float D)
 	std::sort(v.begin(), v.end());
 	float r = v[(size_t)(v.size() * 0.90)];
 	return r > 1e-4f ? r : 1e-4f;
+}
+
+// ── B1 blaster combat (chase_blasters) ──────────────────────────────────────
+// World transform of a ship mesh at an ARBITRARY frame (not necessarily the
+// current one): reconstruct IPos + the scaled RotMat straight from the
+// Pos/Rotate/Scale splines exactly as Animate_Objects does (FLD ship meshes are
+// Tri_Euler). Writes into locals only — never T->IPos/T->RotMat, which the live
+// render pass owns. This is what makes the fire table a pure function of t.
+void chaseShipXform(TriMesh *T, float frame, Vector &outPos, Matrix outRot)
+{
+	Vector u, s;
+	Spline_Calc_3D(&T->Pos, frame, &outPos);
+	Spline_Calc_3D(&T->Scale, frame, &s);
+	if (T->EditorScale > 0.0f) Vector_SelfScale(&s, T->EditorScale);
+	Spline_Calc_3D(&T->Rotate, frame, &u);
+	Euler_Angles(outRot, u.x, u.y, u.z);
+	Vector *W = (Vector *)outRot;
+	Vector_SelfScale(W, s.x); ++W;
+	Vector_SelfScale(W, s.y); ++W;
+	Vector_SelfScale(W, s.z);
+}
+
+// World centre of a ship at `frame` (bounding-sphere centre through the scaled
+// rotation + position) — the aim anchor for the target ship.
+Vector chaseShipCenter(TriMesh *T, float frame)
+{
+	Vector pos; Matrix rot;
+	chaseShipXform(T, frame, pos, rot);
+	Vector off;
+	MatrixXVector(rot, &T->BSphereCtr, &off);
+	return Vector{ pos.x + off.x, pos.y + off.y, pos.z + off.z };
+}
+
+// ship2 wing-muzzle world position at `frame`. Local offsets are fractions of
+// the ship's model bounding radius about its bounding centre (scale-robust); the
+// two wings straddle local X. INTERIM hardcode — the FdsMuzzle LWS keyword
+// (parent-local muzzle coords in the FLD object record, flag-bit + payload) is
+// the later refinement noted in the plan.
+Vector chaseMuzzleWorld(TriMesh *T, float frame, int wing)
+{
+	Vector pos; Matrix rot;
+	chaseShipXform(T, frame, pos, rot);
+	const float R = T->BSphereRadius;
+	Vector local = T->BSphereCtr;
+	local.x += (wing ? +0.55f : -0.55f) * R;   // right / left wing
+	local.y += 0.10f * R;                        // just above the hull
+	local.z += 0.35f * R;                        // toward the nose
+	Vector off;
+	MatrixXVector(rot, &local, &off);
+	return Vector{ pos.x + off.x, pos.y + off.y, pos.z + off.z };
 }
 } // namespace
 
@@ -831,6 +883,11 @@ void Initialize_Chase()
 	// here so RunChaseSnapshot (which inits chase in isolation, never city)
 	// gets it too. Rendered per-frame in tick() BEFORE the reflection pass.
 	ChaseSkySc = CreateSkyCube(0);
+
+	// B1: blaster bolts (ship2 fires at Ship1) — bake the bolt texture. Gated so
+	// flag-off leaves the scene byte-identical (no texture, no omnis, no draw).
+	if (fds::FeatureFlags::chase_blasters())
+		fds::BlasterBolts_Init();
 }
 
 namespace {
@@ -881,6 +938,60 @@ struct ChaseScene : SceneDriver {
 		ship1Ref = chaseAngRateRef(ship1M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		ship2Ref = chaseAngRateRef(ship2M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		TTrd = Timer;
+	}
+
+	// B1: reconstruct the blaster combat as a PURE FUNCTION of CurFrame (§8.B) —
+	// which bolts/flashes exist at t and where, rebuilt from the fire table every
+	// frame (no accumulation → the jump-to-t snapshot reproduces it exactly).
+	// Places bolts, drives the transient bolt-lights + muzzle/impact flashes.
+	// MUST run after Animate_Objects (ship IPos/RotMat + omni IPos are set) and
+	// before Lighting + Reflected_Transform (so the bolt omnis light + reflect).
+	void driveBlasters() {
+		if (!fds::FeatureFlags::chase_blasters() || !ship1M || !ship2M) return;
+		const float t = CurFrame;
+		const auto &table = chase::BlasterFireTable();
+
+		// Ship1 world bounding radius at a frame (for miss-offset scaling).
+		auto ship1Radius = [&](float f) -> float {
+			Vector s; Spline_Calc_3D(&ship1M->Scale, f, &s);
+			float sc = ship1M->EditorScale > 0.0f ? ship1M->EditorScale : 1.0f;
+			return ship1M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
+		};
+
+		// Bolts: place each live bolt at its lerped muzzle→aim position.
+		std::vector<chase::BoltState> bolts;
+		chase::BlasterBoltsAliveAt(table, t, bolts);
+		fds::BlasterBolts_ResetActive();
+		for (const chase::BoltState &bs : bolts) {
+			const Vector muzzle = chaseMuzzleWorld(ship2M, bs.fireFrame, bs.wing);
+			Vector aim = chaseShipCenter(ship1M, bs.aimFrame);
+			const float R = ship1Radius(bs.aimFrame);
+			aim.x += bs.missX * R; aim.y += bs.missY * R; aim.z += bs.missZ * R;
+			const Vector pos{ muzzle.x + (aim.x-muzzle.x)*bs.u,
+			                  muzzle.y + (aim.y-muzzle.y)*bs.u,
+			                  muzzle.z + (aim.z-muzzle.z)*bs.u };
+			const Vector dir{ aim.x-muzzle.x, aim.y-muzzle.y, aim.z-muzzle.z };
+			fds::BlasterBolts_Place(pos, dir, bs.r, bs.g, bs.b);
+		}
+		fds::BlasterBolts_EmitLights(ChaseSc);
+
+		// Muzzle + impact flashes (fountain bolt_flash envelope, pure-t).
+		const float decay  = fds::FeatureFlags::blaster_flash_decay();
+		constexpr float kFlashWindow = 26.0f;   // frames
+		std::vector<chase::FlashState> flashes;
+		chase::BlasterFlashesAt(table, t, decay, kFlashWindow, flashes);
+		fds::BlasterBolts_ResetFlashes(ChaseSc);
+		for (const chase::FlashState &fs : flashes) {
+			Vector p;
+			if (fs.kind == 0) {
+				p = chaseMuzzleWorld(ship2M, fs.fireFrame, fs.wing);
+			} else {
+				p = chaseShipCenter(ship1M, fs.aimFrame);
+				const float R = ship1Radius(fs.aimFrame);
+				p.x += fs.missX * R; p.y += fs.missY * R; p.z += fs.missZ * R;
+			}
+			fds::BlasterBolts_AddFlash(p, fs.intensity, fs.r, fs.g, fs.b);
+		}
 	}
 
 	bool tick() override {
@@ -943,6 +1054,11 @@ struct ChaseScene : SceneDriver {
 			}
 		}
 
+		// B1: pure-t blaster reconstruction — after Animate_Objects (ship poses
+		// + omni IPos set, engine-glow punch applied), before Lighting +
+		// Reflected_Transform so the bolt omnis + flashes light and reflect.
+		driveBlasters();
+
 		((TriMesh *)(RflObj->Data))->Flags &= 0xFFFFFFFF - HTrack_Visible;
 
 		prof.switchTo(PROF_LGHT);
@@ -960,6 +1076,13 @@ struct ChaseScene : SceneDriver {
 			prof.leave(PROF_RNDR);
 		}
 
+		// B1 (§8.E): reflect the bolt streaks on the water — mirrored, dimmed
+		// additive billboards drawn AFTER the reflection Render and BEFORE the
+		// main pass, so the transparent water composites over them like the
+		// reflected world. Bolts only (cheap); dense particles are NOT reflected.
+		if (fds::FeatureFlags::chase_blasters())
+			fds::BlasterBolts_DrawReflected(g_chaseWaterY);
+
 		prof.enter(PROF_XFRM);
 		((TriMesh *)(RflObj->Data))->Flags |= HTrack_Visible;
 		Transform_Objects(ChaseSc, fds::g_mainCamera, fds::g_mainFaces);
@@ -976,6 +1099,13 @@ struct ChaseScene : SceneDriver {
 		if (fds::FeatureFlags::water_bump())
 			pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
 			                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+
+		// B1: blaster bolts — additive screen-space draw over the finished frame
+		// (post-tonemap, like greets). Occluded against terrain/ships by the
+		// filler's built-in ZPage16 Z-test (§8.C: WriteZ=false still gates on
+		// depth). Drawn last so bolts glow over the composited scene + glints.
+		if (fds::FeatureFlags::chase_blasters())
+			fds::BlasterBolts_Draw();
 
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
