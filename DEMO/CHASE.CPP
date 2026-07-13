@@ -19,6 +19,12 @@
 
 #define FRONT_TO_BACK_SORTING
 static Scene *ChaseSc;
+// L2.4 sky: chase-local sky cube (the shared starfield/nebula skybox city and
+// fountain use, via CreateSkyCube/RenderSkyCube). Replaces the L1 ad-hoc
+// gradient + the black void — a lit sky above the horizon that the transparent
+// water also reflects. Chase-owned (not city's global SkySc) so the chase
+// snapshot, which never inits city, still has one.
+static Scene *ChaseSkySc = nullptr;
 
 namespace {
 // M1.3 engine-glow throttle (default-off chase_engine_mod). The maneuver signal
@@ -820,6 +826,11 @@ void Initialize_Chase()
 	// browser editor's "Save" writes this sidecar; no-op when absent.
 	fds::MaterialImport_ApplySidecar(ChaseSc, "SCENES/CHASE.MAT");
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
+
+	// L2.4: build the sky cube (same SB*.JPG starfield skybox as city). Loaded
+	// here so RunChaseSnapshot (which inits chase in isolation, never city)
+	// gets it too. Rendered per-frame in tick() BEFORE the reflection pass.
+	ChaseSkySc = CreateSkyCube(0);
 }
 
 namespace {
@@ -894,6 +905,16 @@ struct ChaseScene : SceneDriver {
 		prof.switchTo(PROF_ANIM);
 		Dynamic_Camera();
 		if (Keyboard[ScC]) { FC.ISource = View->ISource; Matrix_Copy(FC.Mat, View->Mat); FC.IFOV = View->IFOV; }
+
+		// L2.4 sky cube: paint the starfield backdrop into VPage now — BEFORE
+		// the reflection + main passes. Rendered first (like city), it fills
+		// every no-geometry pixel and clears the Z-buffer, so: (a) above the
+		// horizon the main geometry draws over the sky, sky where nothing does;
+		// (b) below the horizon the reflection pass draws mirrored geometry over
+		// the sky, and the transparent water then blends the reflected sky where
+		// no mirrored geometry covers it — the sky reflects on the water for
+		// free. Uses the current-frame View (set by Dynamic_Camera above).
+		RenderSkyCube(ChaseSkySc, View, false);
 
 		Animate_Objects(ChaseSc, View);
 
