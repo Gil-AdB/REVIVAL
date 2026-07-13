@@ -36,7 +36,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  1660 11 -78620 10.2 0 0 1 1 1
+  1660 -12.1667 -78620 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 53
@@ -47,7 +47,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  6460 11 -77310 -32.3 0 0 1 1 1
+  6460 -12.1667 -77310 -32.3 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -58,7 +58,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10660 18 -81767.5 23 0 0 1 1 1
+  10660 -12.1667 -81767.5 23 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -69,7 +69,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -3390 17.5 -76959.5 24.5 0 0 1 1 1
+  -3390 -12.1667 -76959.5 24.5 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -80,7 +80,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  3120 19.5 -72554.5 -20.7 -0.6 0 1 1 1
+  3120 -1.6946 -72554.5 -20.7 -0.6 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -91,7 +91,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  8250 19.5 -71396.5 -16 0 0 1 1 1
+  8250 -12.1667 -71396.5 -16 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -102,7 +102,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -1210 16 -71370 19.7 0.2 0 1 1 1
+  -1210 -8.676 -71370 19.7 0.2 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -112,18 +112,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  3560 21 -65373 62.59999 0 0 1 1 1
-  0 0 0 0 0
-EndBehavior 1
-LockedChannels 48
-ShadowOptions 7
-
-LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
-ShowObject 8 7
-ObjectMotion (unnamed)
-  9
-  1
-  -5490 21 -65338 28.6 0 0 1 1 1
+  3560 -12.1667 -65373 62.59999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -134,7 +123,18 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10920 24 -63069.5 0 0 0 1 1 1
+  -5490 -12.1667 -65338 28.6 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 48
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  10920 -12.1667 -63069.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -144,7 +144,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  12180 22.5 -69478.5 0 0 0 1 1 1
+  12180 -12.1667 -69478.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -154,7 +154,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -5250 18.5 -60075 0 0 0 1 1 1
+  -5250 -12.1667 -60075 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -164,7 +164,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  2370 25 -61169 0 0 0 1 1 1
+  2370 -12.1667 -61169 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -174,7 +174,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  1170 26 -58318.5 0 0 0 1 1 1
+  1170 -12.1667 -58318.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -184,7 +184,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4770 26 -56171 0 0 0 1 1 1
+  -4770 -12.1667 -56171 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -194,7 +194,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  900 36 -53208.5 0 0 0 1 1 1
+  900 -8 -53208.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -204,7 +204,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4620 27.5 -51480.5 0 0 0 1 1 1
+  -4620 -8 -51480.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -214,7 +214,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  530 32.5 -45580 0 0 0 1 1 1
+  530 -8 -45580 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 5
@@ -225,7 +225,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -4290 43.5 -44763 0 0 0 1 1 1
+  -4290 -8 -44763 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -235,7 +235,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  320 32 -37788.5 0 0 0 1 1 1
+  320 -8 -37788.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -245,7 +245,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -5680 32.5 -37613.5 0 0 0 1 1 1
+  -5680 -8 -37613.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -255,7 +255,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  10 24 -28220.5 0 0 0 1 1 1
+  10 -8 -28220.5 0 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -265,7 +265,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -6830 26 -30521.5 -26.2 0 0 1 1 1
+  -6830 -8 -30521.5 -26.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -276,7 +276,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -2950 29.5 -19780 40.09999 0 0 1 1 1
+  -2950 -8 -19780 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 61
@@ -287,7 +287,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -10200 42 -24929.5 -21.1 -0.6999999 0 1 1 1
+  -10200 4.217 -24929.5 -21.1 -0.6999999 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -297,18 +297,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -13320 22.5 -20379.5 40.09999 0 0 1 1 1
-  0 0 0 0 0
-EndBehavior 1
-LockedChannels 56
-ShadowOptions 7
-
-LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
-ShowObject 8 7
-ObjectMotion (unnamed)
-  9
-  1
-  -26200 29.5 26900.5 0 0 0 1 1 1
+  -13320 -8 -20379.5 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 56
@@ -319,7 +308,18 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -2950 17.5 -19780 40.09999 0 0 1 1 1
+  -26200 -8 26900.5 0 0 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 56
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2950 -8 -19780 40.09999 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 61
@@ -330,7 +330,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -7180 24 -48519.5 10.2 0 0 1 1 1
+  -7180 -12.1667 -48519.5 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -341,7 +341,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  4710 25.5 -48171 10.2 0 0 1 1 1
+  4710 -12.1667 -48171 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -352,7 +352,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  6240 35 -51649.5 10.2 0 0 1 1 1
+  6240 -12.1667 -51649.5 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -363,7 +363,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -6070 34 -24700 10.2 0 0 1 1 1
+  -6070 -12.1667 -24700 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -374,7 +374,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -12270 38.5 -28992 10.2 0 0 1 1 1
+  -12270 -12.1667 -28992 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -385,7 +385,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  5440 22 -34500 10.2 0 0 1 1 1
+  5440 -12.1667 -34500 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -396,7 +396,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -11950 24.5 -35992 10.2 0 0 1 1 1
+  -11950 -12.1667 -35992 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -407,7 +407,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  11335 17.5 -53923 10.2 0 0 1 1 1
+  11335 -12.1667 -53923 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -418,7 +418,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -18065 26.5 -53241 10.2 0 0 1 1 1
+  -18065 -12.1667 -53241 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -429,7 +429,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -17015 28.5 -35867 10.2 0 0 1 1 1
+  -17015 -12.1667 -35867 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -440,7 +440,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -14875 111.5 -6800 -25.7 0 0 1 1 1
+  -14875 134.0074 -6800 -25.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 53
@@ -451,7 +451,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -24075 20.5 3766.5 -21.1 0 0 1 1 1
+  -24075 -8 3766.5 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -462,7 +462,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -18500 15.5 4894 -205.8 0 0 1 1 1
+  -18500 -8 4894 -205.8 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -473,7 +473,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -26975 25.5 6345 -21.1 0 0 1 1 1
+  -26975 -8 6345 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -484,7 +484,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -19625 28 7770 -200.3 0 0 1 1 1
+  -19625 -8 7770 -200.3 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -495,7 +495,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -21875 28 10668.5 -200.7 0 0 1 1 1
+  -21875 -8 10668.5 -200.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -506,7 +506,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -26625 24 10294 -21.1 0 0 1 1 1
+  -26625 -8 10294 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -517,7 +517,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -22250 27.5 15543 -201.2 0 0 1 1 1
+  -22250 -8 15543 -201.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -528,7 +528,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28925 32 13420 -21.1 0 0 1 1 1
+  -28925 -8 13420 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -539,7 +539,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -23850 16.5 19345 -197.8 0 0 1 1 1
+  -23850 -8 19345 -197.8 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -550,7 +550,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28975 28.5 18393.5 -21.1 0 0 1 1 1
+  -28975 -8 18393.5 -21.1 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -561,7 +561,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -35540 17 13179 10.2 0 0 1 1 1
+  -35540 -12.1667 13179 10.2 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -572,7 +572,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -31575 21.5 4599.5 0 0 0 2.256 2.256 2.256
+  -31575 -8 4599.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -582,7 +582,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -13475 32 7223 0 0 0 2.256 2.256 2.256
+  -13475 -8 7223 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -592,7 +592,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -14325 21 18573 0 0 0 2.256 2.256 2.256
+  -14325 -8 18573 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -602,7 +602,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30725 28 8746.5 0 0 0 2.256 2.256 2.256
+  -30725 -8 8746.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -612,7 +612,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -41900 18.5 23500 0 0 0 2.256 2.256 2.256
+  -41900 -8 23500 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -622,7 +622,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  8725 22 -11526 0 0 0 2.256 2.256 2.256
+  8725 -8 -11526 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -632,7 +632,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30100 14.5 -7225.5 0 0 0 2.256 2.256 2.256
+  -30100 -8 -7225.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -642,7 +642,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -15250 11.5 12951.5 0 0 0 2.256 2.256 2.256
+  -15250 -8 12951.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -652,7 +652,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -47450 11.5 15347.5 0 0 0 2.256 2.256 2.256
+  -47450 -8 15347.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -662,7 +662,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -17175 17 24673.5 0 0 0 2.256 2.256 2.256
+  -17175 -8 24673.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -672,7 +672,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -56600 12 29551 0 0 0 2.256 2.256 2.256
+  -56600 -8 29551 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -682,7 +682,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -10600 13.5 -40326 0 0 0 2.256 2.256 2.256
+  -10600 -8 -40326 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -692,7 +692,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  5850 14 -40699 0 0 0 2.256 2.256 2.256
+  5850 -8 -40699 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -702,7 +702,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -9250 19 -80499.5 0 0 0 2.256 2.256 2.256
+  -9250 -8 -80499.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -712,7 +712,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -8950 18 -44599.5 0 0 0 2.256 2.256 2.256
+  -8950 -8 -44599.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -722,7 +722,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -21775 17.5 45000.5 0 0 0 2.256 2.256 2.256
+  -21775 -8 45000.5 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -732,7 +732,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -34500 17 36599 0 0 0 2.256 2.256 2.256
+  -34500 -8 36599 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -742,7 +742,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -60675 15 44875 0 0 0 2.256 2.256 2.256
+  -60675 -8 44875 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -752,7 +752,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -41600 19.5 47378 0 0 0 2.256 2.256 2.256
+  -41600 -8 47378 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -762,7 +762,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -36175 26 44300 0 0 0 2.256 2.256 2.256
+  -36175 -8 44300 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -772,7 +772,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -28125 19 -15325 0 0 0 2.256 2.256 2.256
+  -28125 -8 -15325 0 0 0 2.256 2.256 2.256
   0 0 0 0 0
 EndBehavior 1
 ShadowOptions 7
@@ -782,7 +782,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -34090 17.5 20700 -61.40001 0 0 1 1 1
+  -34090 -8 20700 -61.40001 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -793,7 +793,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -38065 18.5 25925 -5.4 0 0 1 1 1
+  -38065 -8 25925 -5.4 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -804,7 +804,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -30515 18.5 32676 -38.7 0 0 1 1 1
+  -30515 -8 32676 -38.7 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 8
@@ -815,7 +815,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -43015 17 32028.5 -35.6 0 0 1 1 1
+  -43015 -8 32028.5 -35.6 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
@@ -826,7 +826,7 @@ ShowObject 8 7
 ObjectMotion (unnamed)
   9
   1
-  -50390 20 40301 -36.5 0 0 1 1 1
+  -50390 -8 40301 -36.5 0 0 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LockedChannels 48
