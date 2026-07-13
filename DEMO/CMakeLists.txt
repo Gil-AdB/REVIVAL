@@ -145,7 +145,20 @@ if(EMSCRIPTEN)
         # opt in explicitly.
         -sALLOW_BLOCKING_ON_MAIN_THREAD=1
         -sALLOW_MEMORY_GROWTH=1
-        -sINITIAL_MEMORY=128MB
+        # INITIAL_MEMORY=512MB (up from 128MB): the editor's texture IMPORT is
+        # the crash trigger. Each import decodes a PNG + builds a tiled mip chain
+        # + an 8/16-bit variant — several MB per map — and at 128MB a fresh scene
+        # is already close to the ceiling, so nearly every import forced a HEAP
+        # GROW. Growing SHARED (-pthread) memory while another thread (the audio
+        # worklet, or an idle-but-present ThreadPool worker) is mid-atomic traps
+        # as "unaligned memory access" (emscripten#17816 / #23806). 512MB gives
+        # a typical editor session enough headroom that imports no longer grow
+        # the heap → the grow-during-atomic race almost never arms. Cheap and
+        # wasm-only (native + DEMO_snapshot unaffected); combined with the
+        # import-texture dedup cache (MaterialImport.cpp) it removes both the
+        # per-object re-decode and most of the residual grow pressure. Still
+        # under MAXIMUM_MEMORY=4GB, so heavy scenes can grow further if needed.
+        -sINITIAL_MEMORY=512MB
         # Greets with mirrors on (clones every mesh reflected) + the lightmap
         # bake + deferred buffers exceeds wasm's default 2GB cap. wasm32 can
         # address up to 4GB; raise the ceiling so the heaviest scene fits.
