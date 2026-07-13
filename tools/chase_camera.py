@@ -35,6 +35,14 @@ Usage:
     --side  lateral offset (LW units); +right of travel. Default 300.
     --zoom  ZoomFactor to write (narrower = more presence). Default keep (3.2).
     --step  frames between authored camera keys. Default 34.
+    --narrow F0,F1  frame window (the mm7 gorge) where lift/side ease down to
+                    --narrow-lift / --narrow-side so the camera hugs the valley
+                    floor the ships thread (prior-agent insight: drop height,
+                    side~0, to clear the ridge). A --narrow-ramp margin blends
+                    smoothly to/from the global lift/side.
+    --narrow-lift N   lift inside the window. Default 170.
+    --narrow-side N   side inside the window. Default 0.
+    --narrow-ramp F   ramp (frames) either side of the window. Default 45.
     --dry-run  print keys, write nothing.
 """
 import os, sys, math, argparse
@@ -158,8 +166,32 @@ def main():
     ap.add_argument("--side", type=float, default=300.0)
     ap.add_argument("--zoom", type=float, default=None)
     ap.add_argument("--step", type=int, default=34)
+    ap.add_argument("--narrow", type=str, default=None,
+                    help="F0,F1 gorge window where lift/side ease down")
+    ap.add_argument("--narrow-lift", type=float, default=170.0)
+    ap.add_argument("--narrow-side", type=float, default=0.0)
+    ap.add_argument("--narrow-ramp", type=float, default=45.0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    nwin = None
+    if args.narrow:
+        a, b = args.narrow.split(",")
+        nwin = (float(a), float(b))
+
+    def narrow_w(cf):
+        """1.0 fully inside the gorge window, 0.0 outside, linear in the ramp."""
+        if nwin is None:
+            return 0.0
+        f0, f1 = nwin
+        r = max(args.narrow_ramp, 1e-6)
+        if cf < f0 - r or cf > f1 + r:
+            return 0.0
+        if cf < f0:
+            return (cf - (f0 - r)) / r
+        if cf > f1:
+            return ((f1 + r) - cf) / r
+        return 1.0
 
     raw = open(LWS, encoding="latin-1").read()
     lines = raw.split("\n")
@@ -183,9 +215,12 @@ def main():
         Lh = math.sqrt(dh[0]**2 + dh[2]**2) or 1.0
         dh = (dh[0] / Lh, 0.0, dh[2] / Lh)
         right = (dh[2], 0.0, -dh[0])   # rotate travel +90 about Y
-        cam = (base[0] + right[0] * args.side,
-               base[1] + args.lift,
-               base[2] + right[2] * args.side)
+        w = narrow_w(cf)
+        lift = args.lift * (1.0 - w) + args.narrow_lift * w
+        side = args.side * (1.0 - w) + args.narrow_side * w
+        cam = (base[0] + right[0] * side,
+               base[1] + lift,
+               base[2] + right[2] * side)
         keys.append((cf, cam))
 
     # emit block
