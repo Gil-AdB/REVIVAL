@@ -6,7 +6,7 @@ WASM_BENCH_BUILD_DIR   := build-wasm-bench
 RUNTIME_DIR            := Runtime
 SERVE_PORT             := 8000
 
-.PHONY: help build build-debug install run clean \
+.PHONY: help build build-debug install run clean _fix-node-options \
         wasm serve editor wasm-profile serve-profile \
         snapshot-city snapshot-glat-trace snapshot-filler \
         bench-native bench-wasm \
@@ -59,7 +59,19 @@ run: install
 clean:
 	rm -rf $(BUILD_DIR) $(WASM_BUILD_DIR) $(WASM_PROFILE_BUILD_DIR)
 
-wasm:
+# Some session harnesses inject NODE_OPTIONS=--require=<tmp>/restore-node-options.cjs
+# but don't always create that file; a missing --require target makes EVERY
+# `node` invocation (and thus emscripten / `make wasm`) crash with "Cannot find
+# module". Self-heal: if NODE_OPTIONS points --require at a missing file, drop a
+# harmless no-op stub there. No-op when NODE_OPTIONS is unset or the file exists.
+_fix-node-options:
+	@f=$$(printf '%s' "$$NODE_OPTIONS" | sed -n 's/.*--require[= ]\([^ ]*restore-node-options\.cjs\).*/\1/p'); \
+	if [ -n "$$f" ] && [ ! -f "$$f" ]; then \
+		mkdir -p "$$(dirname "$$f")" && : > "$$f" && \
+		echo "[make] created missing NODE_OPTIONS --require stub: $$f"; \
+	fi
+
+wasm: _fix-node-options
 	@command -v emcmake >/dev/null 2>&1 || { \
 		echo "emcmake not on PATH — source your emsdk_env.sh (e.g. 'source /opt/homebrew/Cellar/emscripten/*/libexec/emsdk_env.sh') or 'brew install emscripten'"; \
 		exit 1; \
