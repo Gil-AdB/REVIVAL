@@ -206,6 +206,29 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
 
 ## Queued next (user-requested, 2026-07-11)
 
+- **CHASE WATER DARK BAND — port the known fix** (user 2026-07-14; blocked on
+  the B1 blasters agent freeing CHASE.CPP/FeatureFlags.def, tree non-compiling
+  mid-edit). The "lower missing water layer" (horizontal seam, dark band below)
+  is the documented `chase water dark band` bug, FIXED on ~/work/revival
+  `feature/soa-vertex` commit **9902349**. Two defects: (1) InsertTransparentToTBR
+  (FDS/FILLERS/FILLERS.CPP ~1796) computed the strip span from projected PY,
+  garbage for the camera-STRADDLING water quad → water inserted only above the
+  horizon, vanished below (the band = mirrored-mountain underlay). Fix: verts
+  in front of near plane → insert into EVERY strip, sort by FAR surface.
+  (2) water_procedural kernel composite darkens vs chase's black night-sky
+  reflection → new flag `water_fresnel_composite` (default ON=city), chase
+  factory sets it OFF, city re-pins ON. fog-wt CONFIRMED at the exact
+  before-state (FILLERS.CPP:1807/1816 old PY code, DeferredSurfaceKernel.cpp:2525
+  waterProcOn, no flag yet, CHASE.CPP:996-999 factory). Port all 5 files
+  (FILLERS.CPP, DeferredSurfaceKernel.cpp, FeatureFlags.def, CHASE.CPP, CITY.CPP),
+  verify chase water bright/no-band + city/fountain byte-identical (fixes city's
+  bottom-strip band too, brighten-only).
+- **CHASE SPOTS verify/realign** (user "not seeing the spotlights"): L2.3 canyon
+  spots are canyon-LOCAL (t≈1000-1300, mm7 gap) — invisible in open-water frames
+  (expected). Authored for the OLD camera; the trail-follow redesign may have
+  reframed off the lit walls. Verify they show in the canyon with the new camera;
+  realign if needed. Blocked on same (chase files + build).
+
 - **Editor UX batch** — DONE (2026-07-12, d5a6ae9, tag b66): solid
   metallic/roughness generators (the mech-metallic recipe), Save "what
   changed" receipt, persistent status bar, canvas-fits-beside-panel (letterbox
