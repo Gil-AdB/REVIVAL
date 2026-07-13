@@ -103,7 +103,21 @@ const EnvPanoLinear* const* EnvReflection_Table(Scene* sc);
 
 // Drop every bake for the scene so the next FramePrep re-renders them
 // (editor: after light/material edits that should show in reflections).
+// Whole-scene — use only for the "rebake all" button and global flag changes
+// that really do affect every probe.
 void EnvReflection_Invalidate(Scene* sc);
+
+// TARGETED invalidate: drop ONLY the probe store material M maps to, plus
+// every material that SHARES that store (the FramePrep 4-world-unit sharing
+// group — ::mirUV clones, co-located panels), so the next FramePrep re-bakes
+// just that one probe. Per-surface editor edits (metallic import/reset,
+// envRefl/envBakeRes) call this instead of the whole-scene drop: in the 4GB
+// wasm editor, greets now carries many reflective surfaces and re-baking them
+// ALL at once (each probe = a color surface + Z16 + 6 face buffers) OOM'd the
+// browser. One store re-bake instead of N. No-op if M has no store yet
+// (FramePrep bakes it fresh anyway). The dropped store's own surface still
+// re-bakes — the "metallic has no effect" fix is preserved.
+void EnvReflection_InvalidateSurface(Scene* sc, const Material* M);
 
 // --env_refl_viz=N: blit the Nth (1-based) baked panorama's mip 0 over the
 // frame's top-right corner (downscaled to fit) — post-tonemap debug viewer.

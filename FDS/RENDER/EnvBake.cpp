@@ -478,6 +478,34 @@ static int sanitizeFaceRes(int want) {
     return p2;
 }
 
+// Editor/wasm bake-res safety ceiling (env_bake_res_cap). The wasm editor is
+// capped at 4GB and greets sits near it; re-baking every reflective surface at
+// 512²+ can spike a probe's transient (~30·res² bytes: color surface + Z16 +
+// six face buffers) past the ceiling → wasm "memory access out of bounds".
+// Under wasm we clamp every probe's FACE res to a memory-safe ceiling; native
+// is uncapped by default (no 4GB limit → the pinned baselines stay
+// byte-identical, since capFaceRes/the bakeStore clamp become no-ops), but the
+// flag can force a cap natively for testing. Returns 0 = no cap.
+static int bakeResCap() {
+    if (FeatureFlags::isSet(FeatureFlags::IntId::env_bake_res_cap)) {
+        const int c = FeatureFlags::env_bake_res_cap();
+        return c > 0 ? sanitizeFaceRes(c) : 0;
+    }
+#ifdef __EMSCRIPTEN__
+    return 256;   // wasm default ceiling (editor + web demo) ≈ 2MB/probe
+#else
+    return 0;     // native default: uncapped
+#endif
+}
+
+// Clamp a face-res value to the cap (0 wish = "no explicit size", passed
+// through untouched so the legacy sizing inside bakeStore still applies —
+// bakeStore caps its own final params.cubeRes as the authoritative net).
+static int capFaceRes(int face) {
+    const int cap = bakeResCap();
+    return (cap > 0 && face > cap) ? cap : face;
+}
+
 // Global/scene FACE resolution for the deferred env-reflection stores
 // (bakeStore probes AND RegisterCubeFaces imports). THE SIZING CHAIN (top
 // wins; the per-surface Material::EnvBakeRes wish sits above all of it in
@@ -795,6 +823,15 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
         params.panoWidth = res;
         params.panoHeight = res;
     }
+    // Editor/wasm safety ceiling (authoritative net for every sizing branch,
+    // including the legacy path above and any per-surface wish). pano dims are
+    // 2×cubeRes in all branches, so keep that ratio when clamping. No-op on
+    // native (cap 0) → pinned baselines unaffected.
+    if (const int cap = bakeResCap(); cap > 0 && params.cubeRes > cap) {
+        params.cubeRes    = cap;
+        params.panoWidth  = cap * 2;
+        params.panoHeight = cap * 2;
+    }
     const bool useCube = fds::FeatureFlags::env_cube();
     // --env_bake_fix: the whole corrected-bake bundle (per-face projection
     // publish, face-level self-exclusion, metal neutralization, mirror-mask
@@ -945,8 +982,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
                          c.x, c.y, c.z);
         sceneAABB(sc, env);
         // Per-surface face-res wish (Material::EnvBakeRes, else the explicit
-        // global env_bake_res; 0 = legacy sizing inside bakeStore).
-        const int wantFace = envFaceResForMat(M);
+        // global env_bake_res; 0 = legacy sizing inside bakeStore). Cap it to
+        // the editor/wasm ceiling BEFORE the largest-wins comparison below:
+        // bakeStore records the capped size, so an uncapped wish would read as
+        // "wish > have" every frame and re-bake the shared store forever.
+        const int wantFace = capFaceRes(envFaceResForMat(M));
         int idx = -1;
         for (size_t i = 0; i < env.stores.size(); ++i) {
             const EnvPanoLinear& v = env.stores[i]->view;
@@ -1180,5 +1220,44 @@ const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {
 }
 
 void EnvReflection_Invalidate(Scene* sc) { g_envByScene.erase(sc); }
+
+void EnvReflection_InvalidateSurface(Scene* sc, const Material* M) {
+    if (!sc || !M) return;
+    auto it = g_envByScene.find(sc);
+    if (it == g_envByScene.end()) return;           // no bakes yet
+    SceneEnv& env = it->second;
+    auto jt = env.byMat.find(M);
+    if (jt == env.byMat.end()) return;              // not baked — FramePrep bakes it fresh
+    const int si = jt->second;
+    if (si < 0) { env.byMat.erase(jt); return; }    // stale "no centroid" marker — clear + retry
+
+    // Every material mapped to store si shares that one probe (::mirUV clone,
+    // co-located panel within the 4-unit sharing radius): dropping the store
+    // for one member means ALL of them must re-bake together — they read the
+    // same panorama. Collect + drop the whole group from byMat and null their
+    // kernel-table slots (the store's view pointer is about to dangle).
+    // Surviving stores keep their heap addresses (unique_ptr owns them), so
+    // their table entries stay valid; FramePrep re-publishes the table anyway.
+    int groupN = 0;
+    for (auto k = env.byMat.begin(); k != env.byMat.end(); ) {
+        if (k->second == si) {
+            if (k->first->ID < 256) env.table[k->first->ID] = nullptr;
+            k = env.byMat.erase(k);
+            ++groupN;
+        } else {
+            ++k;
+        }
+    }
+    // Remove the store; every byMat index after it shifts down by one.
+    env.stores.erase(env.stores.begin() + si);
+    for (auto& kv : env.byMat) if (kv.second > si) --kv.second;
+
+    std::fprintf(stderr, "[ENVREFL] targeted invalidate: '%s' (id %u) dropped "
+                 "store %d shared by %d surface%s; %zu store%s kept — re-bakes "
+                 "next FramePrep (vs whole-scene drop of all)\n",
+                 M->Name ? M->Name : "?", (unsigned)M->ID, si, groupN,
+                 groupN == 1 ? "" : "s", env.stores.size(),
+                 env.stores.size() == 1 ? "" : "s");
+}
 
 }  // namespace fds

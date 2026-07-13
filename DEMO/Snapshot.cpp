@@ -395,6 +395,15 @@ static void RunImportTestHook() {
     if (!spec) return;
     static bool done = false;
     if (done) return;
+    // IMPORT_TEST_AFTER=N (default 0): hold the import until N ticks have
+    // already run, so probes are baked BEFORE the edit. Lets an env-reflection
+    // test see the TARGETED-invalidate re-bake (one store, not the whole
+    // scene) in the [ENVREFL] log — with the default 0 the import fires before
+    // the first tick as before (first frame shows the map).
+    static int calls = 0;
+    const char *afterEnv = std::getenv("IMPORT_TEST_AFTER");
+    const int after = afterEnv ? std::atoi(afterEnv) : 0;
+    if (calls++ < after) return;
     done = true;
     // Semicolon-separated list of surface:role:path entries.
     std::string all = spec, s;

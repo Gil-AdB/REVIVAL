@@ -466,6 +466,25 @@ int Editor_SetObjectScale(const char *objName, float scale)
 	return n;
 }
 
+// TARGETED env-probe invalidation for a single edited surface. Drops ONLY
+// this surface's baked probe store(s) — its base material, ::mirUV clone, and
+// any co-located surface sharing the same store — so the next FramePrep
+// re-bakes just that one probe instead of every reflective surface in the
+// scene. That whole-scene re-bake (the old EnvReflection_Invalidate here) is
+// what OOM'd the 4GB wasm editor: greets now carries many reflective surfaces
+// and re-baking them ALL at once spiked past the ceiling ("memory access out
+// of bounds"). Idempotent across a surface's clones (they collapse to one
+// store drop). The surface's OWN probe still refreshes, so the "metallic has
+// no effect" fix this invalidate originally provided is preserved.
+static void editorInvalidateSurfaceEnv(const char* surface)
+{
+	if (!surface || !*surface || !CurScene) return;
+	for (Material* M = MatLib; M; M = M->Next)
+		if (M->RelScene == CurScene && M->Name &&
+		    Editor_BaseSurfName(M->Name) == surface)
+			fds::EnvReflection_InvalidateSurface(CurScene, M);
+}
+
 bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 {
 	// Shared setter (also used by the sidecar's numeric prop lines): sets on
@@ -474,11 +493,12 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	// envRefl flips which materials bake/publish env probes, envBakeRes their
 	// bake size — same invalidation as the metallic import/reset paths
 	// (Editor_ImportTexture) so the next frame's FramePrep re-bakes/drops
-	// probes under the new rule. The sidecar's scene-INIT apply goes straight
-	// to MaterialImport_SetSurfaceProp (nothing baked yet), so hooking the
-	// live-editor path here is sufficient.
+	// probes under the new rule. TARGETED to just this surface's store(s): a
+	// per-surface edit must not force a whole-scene re-bake (the wasm OOM). The
+	// sidecar's scene-INIT apply goes straight to MaterialImport_SetSurfaceProp
+	// (nothing baked yet), so hooking the live-editor path here is sufficient.
 	if (any && (!std::strcmp(key, "envRefl") || !std::strcmp(key, "envBakeRes")))
-		fds::EnvReflection_Invalidate(CurScene);
+		editorInvalidateSurfaceEnv(name);
 	if (any) Editor_MarkDirty();
 	return any;
 }
@@ -1733,14 +1753,16 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 	if (ok && !std::strcmp(role, "metallic")) {
 		// Metallic drives the ENV-reflection system (not the scalar
 		// `reflection` slider): ApplyMapFile just auto-defaulted env_refl +
-		// env_bake_fix on; drop the scene's baked panoramas so the next
-		// frame's FramePrep re-bakes them all with this surface's new metal
-		// look (and bakes a fresh probe for it). Without this the import
-		// looked like it did nothing — the #1 "metallic has no effect"
-		// report.
-		fds::EnvReflection_Invalidate(CurScene);
+		// env_bake_fix on; drop THIS surface's baked probe store(s) so the
+		// next frame's FramePrep re-bakes it with the new metal look (and
+		// bakes a fresh probe for it). TARGETED, not whole-scene: re-baking
+		// every reflective surface at once OOM'd the 4GB wasm editor on
+		// greets. Without any invalidate the import looked like it did
+		// nothing — the #1 "metallic has no effect" report.
+		editorInvalidateSurfaceEnv(surface);
 		std::fprintf(stderr, "[EDITOR] metallic import on '%s': env_refl=%d "
-		             "env_bake_fix=%d — panoramas invalidated, re-baking next frame\n",
+		             "env_bake_fix=%d — this surface's probe invalidated, "
+		             "re-baking next frame\n",
 		             surface, fds::FeatureFlags::env_refl() ? 1 : 0,
 		             fds::FeatureFlags::env_bake_fix() ? 1 : 0);
 	}
@@ -1757,8 +1779,8 @@ bool Editor_ClearMap(const char* surface, const char* role)
 	if (!surface || !role) return false;
 	const bool ok = fds::MaterialImport_ClearSurfaceMap(CurScene, surface, role);
 	if (ok && !std::strcmp(role, "metallic")) {
-		fds::EnvReflection_Invalidate(CurScene);
-		std::fprintf(stderr, "[EDITOR] metallic reset on '%s' — panoramas invalidated\n", surface);
+		editorInvalidateSurfaceEnv(surface);   // targeted, not whole-scene (wasm OOM)
+		std::fprintf(stderr, "[EDITOR] metallic reset on '%s' — this surface's probe invalidated\n", surface);
 	}
 	if (ok) Editor_MarkDirty();
 	return ok;
