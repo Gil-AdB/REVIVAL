@@ -43,6 +43,13 @@ Usage:
     --narrow-lift N   lift inside the window. Default 170.
     --narrow-side N   side inside the window. Default 0.
     --narrow-ramp F   ramp (frames) either side of the window. Default 45.
+    --finale F0,F1  frame window (the finale, where the ships fly up to the
+                    towering big_m peak) over which `back` and `lift` ease to
+                    --finale-back / --finale-lift — a gentle crane back+up so
+                    the camera clears the peak face instead of skimming it.
+    --finale-back N   back inside the finale window. Default 1050.
+    --finale-lift N   lift inside the finale window. Default 780.
+    --finale-ramp F   ramp (frames) at the window's leading edge. Default 70.
     --dry-run  print keys, write nothing.
 """
 import os, sys, math, argparse
@@ -171,6 +178,11 @@ def main():
     ap.add_argument("--narrow-lift", type=float, default=170.0)
     ap.add_argument("--narrow-side", type=float, default=0.0)
     ap.add_argument("--narrow-ramp", type=float, default=45.0)
+    ap.add_argument("--finale", type=str, default=None,
+                    help="F0,F1 finale window where back/lift ease up (crane)")
+    ap.add_argument("--finale-back", type=float, default=1050.0)
+    ap.add_argument("--finale-lift", type=float, default=780.0)
+    ap.add_argument("--finale-ramp", type=float, default=70.0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -178,6 +190,11 @@ def main():
     if args.narrow:
         a, b = args.narrow.split(",")
         nwin = (float(a), float(b))
+
+    fwin = None
+    if args.finale:
+        a, b = args.finale.split(",")
+        fwin = (float(a), float(b))
 
     def narrow_w(cf):
         """1.0 fully inside the gorge window, 0.0 outside, linear in the ramp."""
@@ -191,6 +208,18 @@ def main():
             return (cf - (f0 - r)) / r
         if cf > f1:
             return ((f1 + r) - cf) / r
+        return 1.0
+
+    def finale_w(cf):
+        """1.0 inside the finale window, 0.0 before its leading ramp."""
+        if fwin is None:
+            return 0.0
+        f0, f1 = fwin
+        r = max(args.finale_ramp, 1e-6)
+        if cf < f0 - r:
+            return 0.0
+        if cf < f0:
+            return (cf - (f0 - r)) / r
         return 1.0
 
     raw = open(LWS, encoding="latin-1").read()
@@ -207,7 +236,9 @@ def main():
 
     keys = []
     for cf in frames:
-        s = arc2[cf] - args.back
+        fw = finale_w(cf)
+        back = args.back * (1.0 - fw) + args.finale_back * fw
+        s = arc2[cf] - back
         base, srcf = point_at_arc(pos2, arc2, s)
         # travel dir & right vector at the trail point
         d = dir_at(pos2, srcf)
@@ -217,6 +248,7 @@ def main():
         right = (dh[2], 0.0, -dh[0])   # rotate travel +90 about Y
         w = narrow_w(cf)
         lift = args.lift * (1.0 - w) + args.narrow_lift * w
+        lift = lift * (1.0 - fw) + args.finale_lift * fw
         side = args.side * (1.0 - w) + args.narrow_side * w
         cam = (base[0] + right[0] * side,
                base[1] + lift,
