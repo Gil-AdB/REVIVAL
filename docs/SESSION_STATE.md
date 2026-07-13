@@ -13,8 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default, POST camera redesign, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `953135720c5f7a1c3977f3cfefe1b3de`<br>t400 `6e5935a65591a08fccea2c460ac94839`<br>t800 `20dd1a81f1806aac471e2a59af7a0dfd`<br>t1200 `0f3651509b69c784e1ad07df641d9c03`<br>t1600 `efd36808bbb330e19428e25e7e398635` |
-| chase (cinematic, POST camera) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `5c540964c181d6ea294d414fd5502c9a`<br>t1600 `7c91851b27084acf8793f45dddd3906c` |
+| chase (default, POST water-band fix, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `9cc80e9e399d9987f97986645aa4d7cc`<br>t400 `7e8f9ac897c17daf41ee1dffe0e3d68e`<br>t800 `e7dbcded307de32019c96a5d5708feb2`<br>t1200 `825f353fec8d7899324ba7b7e7b215c8`<br>t1600 `5cff86e138231157d304da2d49100a27` |
+| chase (cinematic, POST water-band) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `b6930869de0377f9c727c1e8fa623a37`<br>t1600 `354c130cec3a1e37c0be8cc880ec3941` |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
@@ -206,9 +206,11 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
 
 ## Queued next (user-requested, 2026-07-11)
 
-- **CHASE WATER DARK BAND — port the known fix** (user 2026-07-14; blocked on
-  the B1 blasters agent freeing CHASE.CPP/FeatureFlags.def, tree non-compiling
-  mid-edit). The "lower missing water layer" (horizontal seam, dark band below)
+- **CHASE WATER DARK BAND — DONE (604fd43).** Ported soa-vertex 9902349; chase
+  water now bright/uniform, no band (t1600 verified); chase pins re-baselined
+  (table above); city/fountain byte-identical; render_gate PASS; wasm links.
+  Original note kept for context:
+  The "lower missing water layer" (horizontal seam, dark band below)
   is the documented `chase water dark band` bug, FIXED on ~/work/revival
   `feature/soa-vertex` commit **9902349**. Two defects: (1) InsertTransparentToTBR
   (FDS/FILLERS/FILLERS.CPP ~1796) computed the strip span from projected PY,
