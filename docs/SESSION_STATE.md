@@ -235,13 +235,23 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   against the moon, and try visible VolumetricLight beams (bit-2048; L2.3 dropped
   them as near-invisible — tighter cones + higher gain, esp. under cinematic
   fog). Deliver beams-vs-no-beams A/B. Chase-only (CHASE.LWS + regen).
-- **CHASE BLASTERS B1+B2 — LANDED** (22963db denser barrage t≈340-1700 + ff821a2
-  impact-spark particles, both gated on `chase_blasters` default OFF). Pure-t
-  deterministic; OFF byte-identical (chase pins unchanged 9cc80e9e…). Awaiting
-  user look-approval before default-on. Flags: chase_blasters, chase_spark_size
-  (0.00005), chase_spark_bright (255). Caveats: sparks read modest (ships small
-  in frame + Ship1's oversized L1 flare washes nearby impacts); no debris/scorch;
-  FdsMuzzle keyword still deferred (muzzles hardcoded).
+- **CHASE COMBAT — LANDED, all default-OFF, gated, deterministic, inert**
+  (blasters agent a3471e22, resumed repeatedly): 22963db denser barrage
+  t≈340-1700 · ff821a2 B2 impact-spark particles · 1e55078 C1 `chase_cam_fx`
+  camera shake + FOV punch on hits · ecc3359 chase-scale bolt-light reach
+  (blaster_light_range 90, intensity 260, via setDefault in createChaseScene).
+  All pure-t (snapshot-safe), OFF byte-identical (chase pins unchanged
+  9cc80e9e…), city/fountain unmoved. Flags: chase_blasters, chase_spark_size
+  (0.00005), chase_spark_bright (255), chase_cam_fx, chase_cam_shake_gain
+  (0.04), chase_cam_fov_kick (5). Awaiting user look-approval before default-on.
+  **KEY readability finding (agent):** combat reads subtle because ships are
+  small in frame + Ship1's oversized L1 engine flare washes nearby sparks —
+  the real levers are the FLARE TAME + closer combat FRAMING, not the bolts.
+  Deferred combat follow-ups: water-splash columns (need bolt↔water-plane
+  intersect), act-3 return-fire + venting hit, FdsMuzzle keyword, bloom-threshold
+  tune for bolt cores. NOTE: this agent kept getting resumed and committing
+  autonomously — verify+reconcile each time; consider routing chase work through
+  one path.
 - **EDITOR STABILITY — DONE** (30c2931 texture dedup by path + 339c65a wasm
   INITIAL_MEMORY 128→512MB). Fixes material-reuse + the unaligned-atomic import
   crash. Native pins byte-identical; user confirms in-browser (make editor →
