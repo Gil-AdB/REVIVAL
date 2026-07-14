@@ -183,6 +183,11 @@ def main():
     ap.add_argument("--finale-back", type=float, default=1050.0)
     ap.add_argument("--finale-lift", type=float, default=780.0)
     ap.add_argument("--finale-ramp", type=float, default=70.0)
+    ap.add_argument("--aim", type=float, default=None,
+                    help="aim WEIGHT toward Ship1 (0.5=midpoint of both ships, "
+                         "1=Ship1 only). When set, the camera aims via explicit "
+                         "H/P rotation at that point (TargetObject disabled) so "
+                         "BOTH ships stay framed on turns. Omit = keep TargetObject.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -229,6 +234,20 @@ def main():
     pos2 = sample_path(s2)
     arc2 = build_arc(pos2)
 
+    # for explicit midpoint aim we also need Ship1's per-frame position
+    pos1 = sample_path(parse_ship_keys(lines, "ship1.lwo")) if args.aim is not None else None
+
+    def aim_hp(cam, cf):
+        """H,P (deg) to look from cam at the weighted point between the ships."""
+        a1 = pos1[cf]; a2 = pos2[cf]
+        w = args.aim
+        aim = (a2[0] + w*(a1[0]-a2[0]), a2[1] + w*(a1[1]-a2[1]), a2[2] + w*(a1[2]-a2[2]))
+        dx = aim[0]-cam[0]; dy = aim[1]-cam[1]; dz = aim[2]-cam[2]
+        horiz = math.sqrt(dx*dx + dz*dz) or 1e-6
+        H = math.degrees(math.atan2(dx, dz))     # LW heading about +Y
+        P = math.degrees(math.atan2(-dy, horiz)) # LW pitch (nose-down positive)
+        return H, P
+
     # camera key frames: FIRST_FRAME..LAST_FRAME every `step`, always include LAST
     frames = list(range(FIRST_FRAME, LAST_FRAME + 1, args.step))
     if frames[-1] != LAST_FRAME:
@@ -258,7 +277,12 @@ def main():
     # emit block
     out = ["CameraMotion (unnamed)", "  9", "  %d" % len(keys)]
     for cf, cam in keys:
-        out.append("  %s %s %s 0 0 0 1 1 1" % (fmt(cam[0]), fmt(cam[1]), fmt(cam[2])))
+        if args.aim is not None:
+            H, P = aim_hp(cam, cf)
+            rot = "%s %s 0" % (fmt(H), fmt(P))
+        else:
+            rot = "0 0 0"
+        out.append("  %s %s %s %s 1 1 1" % (fmt(cam[0]), fmt(cam[1]), fmt(cam[2]), rot))
         out.append("  %d 0 0 0 0" % cf)
 
     if args.dry_run:
@@ -285,6 +309,14 @@ def main():
         for i in range(ei, min(ei + 20, len(new_lines))):
             if new_lines[i].strip().startswith("ZoomFactor"):
                 new_lines[i] = "ZoomFactor %f" % args.zoom
+                break
+
+    # explicit-aim: disable TargetObject so the engine uses our H/P rotation
+    # (FLD_CONV.CPP:365 `if (!Src->TargetObject)` -> rotation-driven aim)
+    if args.aim is not None:
+        for i in range(ei, min(ei + 40, len(new_lines))):
+            if new_lines[i].strip().startswith("TargetObject"):
+                new_lines[i] = "TargetObject 0"
                 break
 
     text = "\n".join(new_lines)
