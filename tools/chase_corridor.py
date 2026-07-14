@@ -80,6 +80,27 @@ def lwo_radius_xz(name):
     return r
 
 
+# ── camera path parse (CameraMotion block) ───────────────────────────────────
+def parse_camera_keys(lines):
+    n = len(lines); li = 0
+    while li < n:
+        if lines[li].strip().startswith("CameraMotion"):
+            def nxt(m):
+                while m < n and lines[m].strip() == "": m += 1
+                return m
+            k = nxt(li + 1); k = nxt(k + 1)          # channels, then nkeys
+            nk = int(lines[k].split()[0]); k = nxt(k + 1)
+            keys = []
+            for _ in range(nk):
+                vals = [float(x) for x in lines[k].split()]
+                k2 = nxt(k + 1); fr = int(float(lines[k2].split()[0]))
+                keys.append((fr, vals[0], vals[1], vals[2]))
+                k = nxt(k2 + 1)
+            return keys
+        li += 1
+    sys.exit("no CameraMotion")
+
+
 # ── ship path parse (from chase_camera.py) ───────────────────────────────────
 def parse_ship_keys(lines, want_base):
     n = len(lines); li = 0
@@ -174,6 +195,10 @@ def main():
     ap.add_argument("--amp-clear", type=float, default=780.0)
     ap.add_argument("--wavelen", type=float, default=140.0)
     ap.add_argument("--min-face", type=float, default=1250.0)
+    ap.add_argument("--min-face-cam", type=float, default=2800.0,
+                    help="hard minimum near-face clearance from the CAMERA path "
+                         "(the trailing cam swings wide on turns; a wall inside "
+                         "this radius fills the frame / buries the shot)")
     ap.add_argument("--count", type=int, default=-1,
                     help="0 = remove the corridor block entirely (revert)")
     ap.add_argument("--dry-run", action="store_true")
@@ -204,8 +229,18 @@ def main():
         guard.append(pos1[max(FIRST_FRAME, min(LAST_FRAME, f))])
         guard.append(pos2[max(FIRST_FRAME, min(LAST_FRAME, f))])
 
+    # dense CAMERA-path point cloud — the trailing cam swings wide on turns and
+    # is what buried the shot last time. Clear it by a larger margin.
+    cam = parse_camera_keys(lines); posC = sample_path(cam)
+    cam_guard = [posC[max(FIRST_FRAME, min(LAST_FRAME, f))]
+                 for f in range(args.f0 - 120, args.f1 + 120)]
+
     def face_clear(cx, cz, rworld):
         dmin = min(math.hypot(cx - g[0], cz - g[2]) for g in guard)
+        return dmin - rworld
+
+    def face_clear_cam(cx, cz, rworld):
+        dmin = min(math.hypot(cx - g[0], cz - g[2]) for g in cam_guard)
         return dmin - rworld
 
     def clearance(f, side):
@@ -230,8 +265,10 @@ def main():
             cx = p[0] + side * nx * off
             cz = p[2] + side * nz * off
             # safety: push outward until the near face clears both ship paths
-            for _ in range(24):
-                if face_clear(cx, cz, rworld) >= args.min_face:
+            # AND the (wider) camera path
+            for _ in range(48):
+                if (face_clear(cx, cz, rworld) >= args.min_face and
+                        face_clear_cam(cx, cz, rworld) >= args.min_face_cam):
                     break
                 cx += side * nx * 200.0; cz += side * nz * 200.0
             h = headTan if orient else (hash01(idx*11+5) * 360.0 - 180.0)
@@ -246,8 +283,9 @@ def main():
             clr = 1500.0
             off = clr + rworld
             cx = p[0] + side * nx * off; cz = p[2] + side * nz * off
-            for _ in range(24):
-                if face_clear(cx, cz, rworld) >= args.min_face:
+            for _ in range(48):
+                if (face_clear(cx, cz, rworld) >= args.min_face and
+                        face_clear_cam(cx, cz, rworld) >= args.min_face_cam):
                     break
                 cx += side * nx * 200.0; cz += side * nz * 200.0
             h = hash01(idx*17+2) * 360.0 - 180.0
