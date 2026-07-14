@@ -225,11 +225,27 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   (FILLERS.CPP, DeferredSurfaceKernel.cpp, FeatureFlags.def, CHASE.CPP, CITY.CPP),
   verify chase water bright/no-band + city/fountain byte-identical (fixes city's
   bottom-strip band too, brighten-only).
-- **CHASE SPOTS verify/realign** (user "not seeing the spotlights"): L2.3 canyon
-  spots are canyon-LOCAL (t≈1000-1300, mm7 gap) — invisible in open-water frames
-  (expected). Authored for the OLD camera; the trail-follow redesign may have
-  reframed off the lit walls. Verify they show in the canyon with the new camera;
-  realign if needed. Blocked on same (chase files + build).
+- **CHASE SPOTS realign — NEEDS REDO** (user "not seeing the spotlights").
+  CONFIRMED: L2.3 canyon spots don't visibly light the mountains with the new
+  trail-follow camera (verified at t=1200 — moonlit grey, no warm/cool). A
+  realign agent (aa4f40da) DIED at the session limit mid-work; its uncommitted
+  variant-a checkpoint (surface-wash) did NOT make them visible (still grey) and
+  was DISCARDED (reverted to HEAD). Redo needs: re-aim at the mountains the new
+  camera frames (t≈1100-1300), BOOST intensity/contrast so warm/cool reads
+  against the moon, and try visible VolumetricLight beams (bit-2048; L2.3 dropped
+  them as near-invisible — tighter cones + higher gain, esp. under cinematic
+  fog). Deliver beams-vs-no-beams A/B. Chase-only (CHASE.LWS + regen).
+- **CHASE BLASTERS B1+B2 — LANDED** (22963db denser barrage t≈340-1700 + ff821a2
+  impact-spark particles, both gated on `chase_blasters` default OFF). Pure-t
+  deterministic; OFF byte-identical (chase pins unchanged 9cc80e9e…). Awaiting
+  user look-approval before default-on. Flags: chase_blasters, chase_spark_size
+  (0.00005), chase_spark_bright (255). Caveats: sparks read modest (ships small
+  in frame + Ship1's oversized L1 flare washes nearby impacts); no debris/scorch;
+  FdsMuzzle keyword still deferred (muzzles hardcoded).
+- **EDITOR STABILITY — DONE** (30c2931 texture dedup by path + 339c65a wasm
+  INITIAL_MEMORY 128→512MB). Fixes material-reuse + the unaligned-atomic import
+  crash. Native pins byte-identical; user confirms in-browser (make editor →
+  import same map on 2 surfaces = 1 decode + [reuse]; roughness import = no crash).
 - **EDITOR STABILITY (2 issues, user 2026-07-14; blocked on build = blasters
   agent finishing):**
   (a) `unaligned memory access` crash on texture import (e.g. roughness on
