@@ -147,4 +147,23 @@ void BlasterFlashesAt(const std::vector<BlasterBurst>& table, float t,
                       float decay, float window,
                       std::vector<FlashState>& outFlashes);
 
+// ── Stage B2: impact particle bursts (pure-t) ───────────────────────────────
+// One bolt impact, active while its spawned particles live. The driver resolves
+// the impact world point (Ship1 centre @ aimFrame + miss·radius) and spawns a
+// deterministic ballistic spray seeded by `seed` — pos(k) reconstructed from
+// (seed,k,age) every frame, never integrated, so snapshots reproduce it.
+struct ImpactState {
+    float aimFrame;                 // ship1 sample frame (impact anchor)
+    float missX, missY, missZ;      // aim offset in target-radius fractions
+    float age;                      // t - impactFrame (>= 0)
+    float life;                     // particle lifetime in frames
+    uint32_t seed;                  // per-impact deterministic seed
+    float r, g, b;                  // spark tint (bolt colour)
+};
+
+// Fill `outImpacts` with every impact whose particle window [impactFrame,
+// impactFrame+particleLife) contains t (clears it first). Pure function of t.
+void BlasterImpactsAt(const std::vector<BlasterBurst>& table, float t,
+                      float particleLife, std::vector<ImpactState>& outImpacts);
+
 } // namespace chase

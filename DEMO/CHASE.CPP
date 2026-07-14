@@ -107,6 +107,45 @@ Vector chaseMuzzleWorld(TriMesh *T, float frame, int wing)
 	MatrixXVector(rot, &local, &off);
 	return Vector{ pos.x + off.x, pos.y + off.y, pos.z + off.z };
 }
+
+// Deterministic hash → [0,1). Pure — the impact spray is reconstructed from
+// (seed,k) every frame (no rand state), so snapshots reproduce it.
+inline float chaseHash01(uint32_t x) {
+	x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+	return float(x & 0x00FFFFFFu) / float(0x01000000u);
+}
+
+// Build the 32×32 radial additive disc for impact-spark sprites (the fountain
+// particle-texture recipe: white radial falloff, tinted per-particle via the
+// vertex LR/LG/LB the sprite filler reads). Linear buffer — TBR_Sprite samples
+// it directly (unlike the swizzled deferred textures).
+Material *g_chaseSparkMat = nullptr;
+Material *buildChaseSparkMat() {
+	Texture *T = new Texture;
+	std::memset(T, 0, sizeof(Texture));
+	T->BPP = 32;
+	T->SizeX = 32; T->LSizeX = 5;
+	T->SizeY = 32; T->LSizeY = 5;
+	DWord *px = new DWord[32 * 32];
+	for (int y = 0; y < 32; ++y) {
+		const float fy = 1.0f - 2.0f * (float(y) + 0.5f) / 32.0f;
+		for (int x = 0; x < 32; ++x) {
+			const float fx = -1.0f + 2.0f * (float(x) + 0.5f) / 32.0f;
+			const float r2 = fx * fx + fy * fy;
+			DWord c = 0;
+			if (r2 < 1.0f) {
+				const float f = (1.0f - r2);
+				c = 0x010101u * (DWord)(f * f * 255.0f);   // soft core
+			}
+			px[x + 32 * y] = c;
+		}
+	}
+	T->Data = (byte *)px;
+	Material *M = new Material;
+	*M = Material{};
+	M->Txtr = T;
+	return M;
+}
 } // namespace
 
 static int32_t CHPartTime = 25.0f*100;
@@ -938,6 +977,25 @@ struct ChaseScene : SceneDriver {
 		ship1Ref = chaseAngRateRef(ship1M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		ship2Ref = chaseAngRateRef(ship2M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		TTrd = Timer;
+
+		// B2: impact-spark particle pool (chase_blasters only). Reconstructed
+		// pure-t in driveBlasters from the impact events; TBR_Sprite additive
+		// discs. Not allocated when the flag is off → NumOfParticles stays 0 and
+		// the engine's particle loops are no-ops (default chase byte-identical).
+		if (fds::FeatureFlags::chase_blasters() && !ChaseSc->Pcl) {
+			if (!g_chaseSparkMat) g_chaseSparkMat = buildChaseSparkMat();
+			const int N = 1536;
+			ChaseSc->NumOfParticles = N;
+			ChaseSc->Pcl = new Particle[N];
+			std::memset(ChaseSc->Pcl, 0, sizeof(Particle) * N);
+			for (int i = 0; i < N; ++i) {
+				Particle &P = ChaseSc->Pcl[i];
+				P.F.A = P.F.B = &P.V;
+				P.F.Filler = TBR_Sprite;
+				P.F.Txtr = g_chaseSparkMat;
+				P.Flags = 0;
+			}
+		}
 	}
 
 	// B1: reconstruct the blaster combat as a PURE FUNCTION of CurFrame (§8.B) —
@@ -1003,6 +1061,59 @@ struct ChaseScene : SceneDriver {
 				p.x += fs.missX * R; p.y += fs.missY * R; p.z += fs.missZ * R;
 			}
 			fds::BlasterBolts_AddFlash(p, fs.intensity, fs.r, fs.g, fs.b);
+		}
+
+		// B2: impact-spark particles — a deterministic ballistic spray per bolt
+		// impact, reconstructed pure-t (positions are f(seed,k,age), never
+		// integrated). Sparks burst up-and-out from the impact point and fall
+		// under gravity; near-miss water hits (miss.y < 0 → impact near the sea)
+		// read as splash columns. Additive TBR_Sprite discs tinted by bolt colour.
+		if (ChaseSc->Pcl) {
+			constexpr float kPclLife = 50.0f;   // frames
+			constexpr int   kPerImpact = 24;
+			// TBR_Sprite screen size = ImageSize(1000)·RZ·PerspX·FlareSize, so a
+			// world-space disc of radius w has FlareSize ≈ w/1000. Sparks are a
+			// small fraction of the target ship radius; size + brightness are
+			// tunable FeatureFlags, spread + gravity baked to the ship scale.
+			const float szK = fds::FeatureFlags::chase_spark_size();
+			const float brK = fds::FeatureFlags::chase_spark_bright();
+			constexpr float spK = 0.008f;   // spread speed  (× shipRadius / frame)
+			constexpr float gK  = 0.0004f;  // gravity       (× shipRadius / frame^2)
+			std::vector<chase::ImpactState> impacts;
+			chase::BlasterImpactsAt(table, t, kPclLife, impacts);
+			const int N = ChaseSc->NumOfParticles;
+			Particle *Pcl = ChaseSc->Pcl;
+			int slot = 0;
+			for (const chase::ImpactState &im : impacts) {
+				Vector P = chaseShipCenter(ship1M, im.aimFrame);
+				const float R = ship1Radius(im.aimFrame);
+				P.x += im.missX * R; P.y += im.missY * R; P.z += im.missZ * R;
+				const float lifeFrac = im.age / im.life;
+				const float fade = 1.0f - lifeFrac;              // brightness/size decay
+				const float g = R * gK;                          // gravity (world/frame^2)
+				for (int k = 0; k < kPerImpact && slot < N; ++k) {
+					const uint32_t base = im.seed + uint32_t(k) * 40503u;
+					const float r1 = chaseHash01(base + 1u);
+					const float r2 = chaseHash01(base + 2u);
+					const float r3 = chaseHash01(base + 3u);
+					const float az = r1 * 6.2831853f;
+					const float ct = 0.15f + 0.85f * r2;         // up-biased cos(theta)
+					const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
+					const Vector dir{ st * std::cos(az), ct, st * std::sin(az) };
+					const float speed = R * spK * (0.5f + 0.5f * r3);
+					Particle &pc = Pcl[slot++];
+					pc.V.Pos.x = P.x + dir.x * speed * im.age;
+					pc.V.Pos.y = P.y + dir.y * speed * im.age - 0.5f * g * im.age * im.age;
+					pc.V.Pos.z = P.z + dir.z * speed * im.age;
+					const float bright = brK * fade;
+					pc.V.LR = (0.5f + 0.5f * im.r) * bright;      // hot-white core + tint
+					pc.V.LG = (0.5f + 0.5f * im.g) * bright;
+					pc.V.LB = (0.5f + 0.5f * im.b) * bright;
+					pc.F.FlareSize = R * szK * (0.35f + 0.65f * fade);
+					pc.Flags = Particle_Active;
+				}
+			}
+			for (int i = slot; i < N; ++i) Pcl[i].Flags &= ~Particle_Active;
 		}
 	}
 

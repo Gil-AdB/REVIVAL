@@ -193,4 +193,26 @@ void BlasterFlashesAt(const std::vector<BlasterBurst>& table, float t,
     }
 }
 
+void BlasterImpactsAt(const std::vector<BlasterBurst>& table, float t,
+                      float particleLife, std::vector<ImpactState>& outImpacts) {
+    outImpacts.clear();
+    uint32_t bolt = 0;   // running index → unique per-impact seed
+    for (const BlasterBurst& b : table) {
+        for (int i = 0; i < b.count; ++i, ++bolt) {
+            const float fFire       = b.fireFrame + float(i) * b.spacingFrames;
+            const float impactFrame = fFire + b.flightFrames;
+            const float age = t - impactFrame;
+            if (age < 0.0f || age >= particleLife) continue;
+            ImpactState s;
+            s.aimFrame = fFire + b.leadFrames;
+            s.missX = b.missX; s.missY = b.missY; s.missZ = b.missZ;
+            s.age = age;
+            s.life = particleLife;
+            s.seed = bolt * 2654435761u + 0x9e3779b9u;
+            s.r = b.r; s.g = b.g; s.b = b.b;
+            outImpacts.push_back(s);
+        }
+    }
+}
+
 } // namespace chase
