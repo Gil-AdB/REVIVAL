@@ -852,7 +852,8 @@ static inline void EnvSpecComposeScalar(
 	float texB, float texG, float texR,
 	float gloss, float metalM, bool roughMapOn, float envReflGain,
 	bool envBrdfAnalytic,
-	float &sB, float &sG, float &sR)
+	float &sB, float &sG, float &sR,
+	float *fresOut = nullptr)
 {
 	// FDS_ENV_SKIP_NEGY=1 (diagnostic A/B): skip the compose entirely for
 	// pixels whose world y is negative — in CITY that is exactly the
@@ -1279,6 +1280,11 @@ static inline void EnvSpecComposeScalar(
 		fres = f0 + (f90 - f0) * omv2 * omv2 * omv;
 		ek   = fres * envReflGain;
 	}
+	// (1-F) diffuse energy conservation (--diffuse_energy): hand the caller
+	// this exact per-pixel Fresnel so it can scale the diffuse accumulator by
+	// (1-fres). Set only when requested; the caller inits its own to 0 so an
+	// early return (sSkipNegY diagnostic, no env added) leaves diffuse at full.
+	if (fresOut) *fresOut = fres;
 	const float inv255 = 1.0f / 255.0f;
 	// Metal tint: reflection takes the albedo's color.
 	const float tB = 1.0f - metalM + metalM * texB * inv255;
@@ -1398,6 +1404,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
+	const bool  diffuseEnergyG  = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: per-scene L2 SH irradiance coefficients (null = flag off /
 	// not yet baked → the flat Sc->Ambient path below runs byte-identically).
 	const float* shCoefG        = fds::FeatureFlags::sh_ambient()
@@ -2362,12 +2369,20 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// wearing a pasted-on picture.
 			if (hasEnvRefl) {
 				if (g_envVecStats) g_envCntWave1.fetch_add(1, std::memory_order_relaxed);
+				float fresEC = 0.0f;
 				EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
 				                     x, y, z, nx, ny, nz,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
 				                     texB, texG, texR, gloss, metalM,
 				                     roughMapOnG, envReflGainG,
-				                     envBrdfAnalyticG, sB, sG, sR);
+				                     envBrdfAnalyticG, sB, sG, sR, &fresEC);
+				// (1-F) diffuse energy conservation: the Fresnel-reflected
+				// fraction can't also diffuse. Scales BOTH the LDR combine
+				// (int(fdB)) and the HDR radiance (fdB+sB) below.
+				if (diffuseEnergyG) {
+					const float dc = 1.0f - fresEC;
+					fdB *= dc; fdG *= dc; fdR *= dc;
+				}
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
@@ -3598,7 +3613,7 @@ static inline void EnvComposeCityVec8(const DeferredLightingCtx &ctx,
 	const float* anx, const float* any_, const float* anz,
 	const float* laneGloss, const float* laneF0, float envReflGain,
 	float* outRvx, float* outRvy, float* outRvz,
-	float* outEk, float* outLvlF)
+	float* outEk, float* outLvlF, float* outFres = nullptr)
 {
 	const __m256 x = _mm256_load_ps(ax);
 	const __m256 y = _mm256_load_ps(ay);
@@ -3704,6 +3719,9 @@ static inline void EnvComposeCityVec8(const DeferredLightingCtx &ctx,
 	const __m256 omv5 = _mm256_mul_ps(_mm256_mul_ps(omv2, omv2), omv);
 	const __m256 fres = _mm256_fmadd_ps(_mm256_sub_ps(f90, f0), omv5, f0);
 	_mm256_store_ps(outEk, _mm256_mul_ps(fres, _mm256_set1_ps(envReflGain)));
+	// (1-F) diffuse energy conservation (--diffuse_energy): expose the raw
+	// per-lane Fresnel so the caller can scale diffuse by (1-fres).
+	if (outFres) _mm256_store_ps(outFres, fres);
 }
 
 static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx,
@@ -3737,6 +3755,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
+	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
 	// the lane_ambB rewrite after the normal decode below.
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
@@ -4244,6 +4263,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			bool envVecReady = false;
 			alignas(32) float envRvx[8], envRvy[8], envRvz[8];
 			alignas(32) float envEk[8], envLvlF[8], envF0[8];
+			alignas(32) float envFres[8] = {0};   // (1-F) diffuse energy conservation
 			if (sEnvVecDiagOff && envPosFakesOff) {
 				const fds::EnvPanoLinear* uni = nullptr;
 				bool uniform = true;
@@ -4277,7 +4297,8 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						EnvComposeCityVec8(ctx, uni, ax, ay, az_lane,
 						                   anx, any_l, anz, lane_gloss, envF0,
 						                   envReflGainG,
-						                   envRvx, envRvy, envRvz, envEk, envLvlF);
+						                   envRvx, envRvy, envRvz, envEk, envLvlF,
+						                   envFres);
 						envVecReady = true;
 					}
 				}
@@ -4391,13 +4412,19 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                 + ctx.viewToWorld[1][2]*zs + ctx.cameraWorldY;
 						const float swz_ = ctx.viewToWorld[2][0]*xs + ctx.viewToWorld[2][1]*ys
 						                 + ctx.viewToWorld[2][2]*zs + ctx.cameraWorldZ;
+						float fresEC = 0.0f;
 						EnvSpecComposeScalar(ctx, lane_envP[k], Mat_, mip_, suv_,
 						                     xs, ys, zs, nxs, nys, nzs,
 						                     swx_, swy_, swz_,
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, sBs, sGs, sRs);
+						                     envBrdfAnalyticG, sBs, sGs, sRs, &fresEC);
+						// (1-F) diffuse energy conservation (see wave-1).
+						if (diffuseEnergyG) {
+							const float dc = 1.0f - fresEC;
+							fdBs *= dc; fdGs *= dc; fdRs *= dc;
+						}
 					}
 					outB = int(fdBs) + int(sBs);
 					outG = int(fdGs) + int(sGs);
@@ -4412,6 +4439,9 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					outB = int(vfB[k]);
 					outG = int(vfG[k]);
 					outR = int(vfR[k]);
+					// (1-F) diffuse energy conservation: capture this lane's
+					// Fresnel from whichever env path runs, apply below.
+					float fresLane = 0.0f;
 					// Env-only lane (Reflection > 0, no spec, not water —
 					// city windows): the vec light loop already produced the
 					// diffuse; add ONLY the env-specular compose on top.
@@ -4449,6 +4479,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						outB += int(b0 * envEk[k]);
 						outG += int(g0 * envEk[k]);
 						outR += int(r0 * envEk[k]);
+						fresLane = envFres[k];
 					} else if (lane_envP[k]) {
 						if (g_envVecStats) g_envCntOvEnvScalar.fetch_add(1, std::memory_order_relaxed);
 						const uint32_t m_   = lane_mat32[k];
@@ -4476,8 +4507,18 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, sBs, sGs, sRs);
+						                     envBrdfAnalyticG, sBs, sGs, sRs, &fresLane);
 						outB += int(sBs); outG += int(sGs); outR += int(sRs);
+					}
+					// (1-F) diffuse energy conservation: the diffuse landed in
+					// out* as int(vf*[k]) above; re-weight it by (1-fres) with
+					// an additive integer correction so the OFF path (gated) is
+					// untouched byte-for-byte. Only env lanes carry a Fresnel.
+					if (diffuseEnergyG && lane_envP[k]) {
+						const float dc = 1.0f - fresLane;
+						outB += int(vfB[k] * dc) - int(vfB[k]);
+						outG += int(vfG[k] * dc) - int(vfG[k]);
+						outR += int(vfR[k] * dc) - int(vfR[k]);
 					}
 				}
 				if (outB > 255) outB = 255; if (outB < 0) outB = 0;
@@ -4529,6 +4570,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
+	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked).
 	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
 		? fds::SHAmbient_Coeffs(ctx.Sc) : nullptr;
@@ -5081,12 +5123,19 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						ctx.viewToWorld[2][0]*x + ctx.viewToWorld[2][1]*y +
 						ctx.viewToWorld[2][2]*z + ctx.cameraWorldZ;
 					if (g_envVecStats) g_envCntXpar.fetch_add(1, std::memory_order_relaxed);
+					float fresEC = 0.0f;
 					EnvSpecComposeScalar(ctx, envP, Mat, miplevel, swizzledUV,
 					                     x, y, z, nx, ny, nz,
 					                     sampleWorldX, sampleWorldY, sampleWorldZ,
 					                     texB, texG, texR, gloss, metalM,
 					                     roughMapOnG, envReflGainG,
-					                     envBrdfAnalyticG, sB, sG, sR);
+					                     envBrdfAnalyticG, sB, sG, sR, &fresEC);
+					// (1-F) diffuse energy conservation (see wave-1); scales
+					// the LDR combine and the HDR radiance below.
+					if (diffuseEnergyG) {
+						const float dc = 1.0f - fresEC;
+						fdB *= dc; fdG *= dc; fdR *= dc;
+					}
 				}
 			}
 			int outB = int(fdB) + int(sB);
