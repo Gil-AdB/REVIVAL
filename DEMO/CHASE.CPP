@@ -998,6 +998,74 @@ struct ChaseScene : SceneDriver {
 		}
 	}
 
+	// Ship world bounding radius at a frame (miss-offset + fx scaling). Shared
+	// by the blaster spawner and the camera-fx proximity math.
+	float shipWorldRadius(TriMesh *M, float f) {
+		if (!M) return 1.0f;
+		Vector s; Spline_Calc_3D(&M->Scale, f, &s);
+		const float sc = M->EditorScale > 0.0f ? M->EditorScale : 1.0f;
+		return M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
+	}
+
+	// C1: deterministic camera FX (chase_cam_fx) — shake + FOV punch on hits.
+	// Applied AFTER Animate_Objects (which set View's base pose + FOVX/FOVY) so
+	// the perturbation rides on the authored dolly; reconstructed pure-t from the
+	// impact table (amplitude decays after each hit, scaled by camera proximity),
+	// so snapshots reproduce it and flag-off / no-active-hit leaves View untouched.
+	void applyCameraFx() {
+		if (!fds::FeatureFlags::chase_cam_fx() || !ship1M || !View) return;
+		const float t = CurFrame;
+		constexpr float kShakeWin = 12.0f;   // frames a hit shakes the camera
+		std::vector<chase::ImpactState> impacts;
+		chase::BlasterImpactsAt(chase::BlasterFireTable(), t, kShakeWin, impacts);
+		if (impacts.empty()) return;
+
+		const Vector cam = View->ISource;
+		float amp = 0.0f;
+		for (const chase::ImpactState &im : impacts) {
+			Vector P = chaseShipCenter(ship1M, im.aimFrame);
+			const float R = shipWorldRadius(ship1M, im.aimFrame);
+			P.x += im.missX * R; P.y += im.missY * R; P.z += im.missZ * R;
+			const float dx = P.x-cam.x, dy = P.y-cam.y, dz = P.z-cam.z;
+			const float dist = std::sqrt(dx*dx + dy*dy + dz*dz) + 1e-3f;
+			const float decay = 1.0f - im.age / kShakeWin;    // 1 at hit → 0
+			float prox = (6.0f * R) / dist; if (prox > 1.5f) prox = 1.5f;
+			amp += decay * decay * prox;
+		}
+		if (amp < 1e-3f) return;
+		if (amp > 2.0f) amp = 2.0f;
+
+		const float R0 = shipWorldRadius(ship1M, t);
+		const float m  = amp * fds::FeatureFlags::chase_cam_shake_gain() * R0;
+		const float ph = t;
+		const float sx = std::sin(ph*2.9f)      * 0.55f + std::sin(ph*6.1f+1.3f) * 0.45f;
+		const float sy = std::sin(ph*3.7f+0.7f) * 0.55f + std::sin(ph*7.3f+2.1f) * 0.45f;
+		const float sz = std::sin(ph*3.3f+2.7f);
+		View->ISource.x += sx * m;
+		View->ISource.y += sy * m * 0.7f;   // less vertical jitter
+		View->ISource.z += sz * m;
+
+		// Roll about the view forward axis: rotate Mat rows 0 (right) / 1 (up).
+		const float rollAng = amp * 0.012f * std::sin(ph*4.3f + 0.9f);   // radians
+		const float cr = std::cos(rollAng), sr = std::sin(rollAng);
+		for (int c = 0; c < 3; ++c) {
+			const float r0 = View->Mat[0][c], r1 = View->Mat[1][c];
+			View->Mat[0][c] =  cr*r0 + sr*r1;
+			View->Mat[1][c] = -sr*r0 + cr*r1;
+		}
+
+		// FOV punch inward on the hit (brief zoom), recovering as amp decays.
+		// Re-set the FOVX/FOVY globals after CalcPersp exactly like Animate_Objects.
+		const float kick = fds::FeatureFlags::chase_cam_fov_kick();
+		if (kick != 0.0f) {
+			View->IFOV -= kick * (amp > 1.0f ? 1.0f : amp);
+			if (View->IFOV < 4.0f) View->IFOV = 4.0f;
+			CalcPersp(View);
+			FOVX = View->PerspX;
+			FOVY = View->PerspY;
+		}
+	}
+
 	// B1: reconstruct the blaster combat as a PURE FUNCTION of CurFrame (§8.B) —
 	// which bolts/flashes exist at t and where, rebuilt from the fire table every
 	// frame (no accumulation → the jump-to-t snapshot reproduces it exactly).
@@ -1022,11 +1090,7 @@ struct ChaseScene : SceneDriver {
 		}
 
 		// Ship1 world bounding radius at a frame (for miss-offset scaling).
-		auto ship1Radius = [&](float f) -> float {
-			Vector s; Spline_Calc_3D(&ship1M->Scale, f, &s);
-			float sc = ship1M->EditorScale > 0.0f ? ship1M->EditorScale : 1.0f;
-			return ship1M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
-		};
+		auto ship1Radius = [&](float f) -> float { return shipWorldRadius(ship1M, f); };
 
 		// Bolts: place each live bolt at its lerped muzzle→aim position.
 		std::vector<chase::BoltState> bolts;
@@ -1176,6 +1240,11 @@ struct ChaseScene : SceneDriver {
 				O->ISize *= (z < -76.0f) ? mul1 : mul2;   // -88 Ship1 / -64 ship2
 			}
 		}
+
+		// C1: camera shake / FOV punch on hits (default-off chase_cam_fx).
+		// After Animate_Objects (View's base pose + FOVX/FOVY are set), before the
+		// reflection + main transforms so every pass uses the perturbed camera.
+		applyCameraFx();
 
 		// B1: pure-t blaster reconstruction — after Animate_Objects (ship poses
 		// + omni IPos set, engine-glow punch applied), before Lighting +
