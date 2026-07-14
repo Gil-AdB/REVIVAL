@@ -851,7 +851,7 @@ static inline void EnvSpecComposeScalar(
 	float sampleWorldX, float sampleWorldY, float sampleWorldZ,
 	float texB, float texG, float texR,
 	float gloss, float metalM, bool roughMapOn, float envReflGain,
-	bool envBrdfAnalytic,
+	bool envBrdfAnalytic, bool multiScatter,
 	float &sB, float &sG, float &sR,
 	float *fresOut = nullptr)
 {
@@ -1272,6 +1272,25 @@ static inline void EnvSpecComposeScalar(
 		const float envBrdf = f0*A + B;
 		fres = envBrdf;
 		ek   = envBrdf * envReflGain;
+		// Multi-scatter energy compensation (Fdez-Aguera 2019,
+		// --pbr_multiscatter). The split-sum env-BRDF above is SINGLE-scatter
+		// only — it drops the energy that repeated microfacet bounces would
+		// return, so rough metals read too dark. Add it back from the SAME A,B
+		// this branch already computed (a few ALU ops, no new gather): Ess=A+B
+		// is the single-scatter energy (the split-sum integrated at F0=1); Favg
+		// is Fresnel's hemispherical average; Fms is the multi-scatter
+		// multiplier. Scales ONLY the specular energy (ek), by
+		// 1 + Fms*(1-Ess)/Ess. fres (single-scatter, handed to --diffuse_energy)
+		// is left untouched. No-op unless envBrdfAnalytic is on (needs A,B) — so
+		// the flag is inert without --env_brdf_analytic, and OFF here is
+		// byte-identical (ek unchanged). Ess in [~0.45,1], denom >= ~0.45 for
+		// this A,B polynomial (F0<=1) → no divide guard needed.
+		if (multiScatter) {
+			const float Ess  = A + B;
+			const float Favg = f0 + (1.0f - f0) * (1.0f / 21.0f);
+			const float Fms  = Favg * Ess / (1.0f - Favg * (1.0f - Ess));
+			ek *= 1.0f + Fms * (1.0f - Ess) / Ess;
+		}
 	} else {
 		float f90 = 1.0f - rough;
 		if (f90 < f0) f90 = f0;
@@ -1403,6 +1422,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	// (F0 = Reflection/100), so the gain is a plain multiplier on top.
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
+	const bool  multiScatterG   = fds::FeatureFlags::pbr_multiscatter();
 	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG  = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: per-scene L2 SH irradiance coefficients (null = flag off /
@@ -2375,7 +2395,7 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 				                     sampleWorldX, sampleWorldY, sampleWorldZ,
 				                     texB, texG, texR, gloss, metalM,
 				                     roughMapOnG, envReflGainG,
-				                     envBrdfAnalyticG, sB, sG, sR, &fresEC);
+				                     envBrdfAnalyticG, multiScatterG, sB, sG, sR, &fresEC);
 				// (1-F) diffuse energy conservation: the Fresnel-reflected
 				// fraction can't also diffuse. Scales BOTH the LDR combine
 				// (int(fdB)) and the HDR radiance (fdB+sB) below.
@@ -3753,6 +3773,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
+	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
@@ -4419,7 +4440,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, sBs, sGs, sRs, &fresEC);
+						                     envBrdfAnalyticG, multiScatterG, sBs, sGs, sRs, &fresEC);
 						// (1-F) diffuse energy conservation (see wave-1).
 						if (diffuseEnergyG) {
 							const float dc = 1.0f - fresEC;
@@ -4507,7 +4528,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_texB[k], lane_texG[k], lane_texR[k],
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
-						                     envBrdfAnalyticG, sBs, sGs, sRs, &fresLane);
+						                     envBrdfAnalyticG, multiScatterG, sBs, sGs, sRs, &fresLane);
 						outB += int(sBs); outG += int(sGs); outR += int(sRs);
 					}
 					// (1-F) diffuse energy conservation: the diffuse landed in
@@ -4569,6 +4590,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	    ? fds::EnvReflection_Table(ctx.Sc) : nullptr;
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
+	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked).
@@ -5129,7 +5151,7 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 					                     sampleWorldX, sampleWorldY, sampleWorldZ,
 					                     texB, texG, texR, gloss, metalM,
 					                     roughMapOnG, envReflGainG,
-					                     envBrdfAnalyticG, sB, sG, sR, &fresEC);
+					                     envBrdfAnalyticG, multiScatterG, sB, sG, sR, &fresEC);
 					// (1-F) diffuse energy conservation (see wave-1); scales
 					// the LDR combine and the HDR radiance below.
 					if (diffuseEnergyG) {
