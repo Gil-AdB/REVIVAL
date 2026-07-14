@@ -104,10 +104,14 @@ struct BlasterBurst {
     float flightFrames;   // frames the bolt takes to reach its aim point
     float missX, missY, missZ;  // aim offset, in target bounding-radius fractions
     float r, g, b;        // bolt colour (ship2 fires hot orange by default)
-    // water==1: the aim point is ON the water plane near Ship1's ground
-    // projection (x,z = ship1 + miss·R, y = waterY); the impact spawns a
-    // vertical splash column instead of hull sparks — the "near-miss water
-    // hits marching toward Ship1" money shot. missY is ignored for water.
+    // Aim/impact KIND (field kept named `water` for back-compat; treat as enum):
+    //   0 = HULL     — aim = Ship1 centre + miss·R; impact = hull sparks.
+    //   1 = WATER    — aim = sea beside Ship1 (x,z = ship1 + miss·R, y = waterY);
+    //                  impact = a tall vertical splash column. missY ignored.
+    //   2 = MOUNTAIN — aim = the nearest canyon-wall surface point to Ship1 (the
+    //                  driver resolves it against the captured mountain instances);
+    //                  impact = a spark burst sprayed off the rock. miss nudges
+    //                  the point tangentially. The "bolts spark off the walls" beat.
     int   water = 0;
 };
 

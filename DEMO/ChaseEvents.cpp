@@ -118,20 +118,24 @@ const std::vector<BlasterBurst>& BlasterFireTable() {
     // (resolved to world in the driver); a negative Y drops near-misses toward
     // the water. Palette + cadence are user picks later; these are sane defaults.
     static const std::vector<BlasterBurst> kTable = {
-        // fireFrame count spacing lead flight   miss(x,y,z)          colour(r,g,b)     water
+        // fireFrame count spacing lead flight   miss(x,y,z)          colour(r,g,b)     kind
         // A near-continuous pursuit barrage across the scene — bursts every
         // ~90-150 frames, denser + longer through the authored evasive clusters
         // (t≈1408/1495/1623). Mix of hull near-hits (small offset), hull sparks,
-        // and WATER near-misses (water=1: aim the sea beside/ahead of Ship1 →
-        // vertical splash columns marching toward it).
+        // WATER near-misses (kind=1: aim the sea beside/ahead of Ship1 → vertical
+        // splash columns marching toward it), and — through the mm7 gorge
+        // (t≈1074-1300) — MOUNTAIN hits (kind=2: bolts that overshoot the ship
+        // spark off the nearest canyon wall; the driver resolves the wall point).
         {  340.0f,  4,  9.0f,  46.0f, 36.0f,   0.55f, -1.30f,  0.35f,  1.00f, 0.34f, 0.07f      }, // opening range-finding (hull miss)
         {  420.0f,  5,  7.0f,  50.0f, 40.0f,   0.90f,  0.00f,  0.70f,  0.75f, 0.85f, 1.00f, 1   }, // WATER near-miss column
         {  600.0f,  5,  7.0f,  42.0f, 32.0f,   0.35f,  0.20f,  0.40f,  1.00f, 0.42f, 0.11f      }, // near-hit
         {  720.0f,  6,  7.0f,  44.0f, 33.0f,  -0.60f, -1.40f,  0.25f,  1.00f, 0.30f, 0.06f      },
         {  830.0f,  6,  6.0f,  52.0f, 42.0f,  -1.00f,  0.00f,  0.50f,  0.70f, 0.85f, 1.00f, 1   }, // WATER near-miss march
         {  980.0f,  6,  7.0f,  45.0f, 34.0f,   0.60f, -1.20f,  0.30f,  1.00f, 0.34f, 0.07f      },
-        { 1110.0f,  6,  6.0f,  42.0f, 31.0f,  -0.40f,  0.10f,  0.35f,  1.00f, 0.42f, 0.11f      }, // near-hit
+        { 1075.0f,  6,  6.0f,  40.0f, 30.0f,   0.30f,  0.20f,  0.25f,  1.00f, 0.40f, 0.10f, 2   }, // MOUNTAIN — enter the gorge, walk fire up the wall
+        { 1160.0f,  7,  5.0f,  38.0f, 28.0f,  -0.40f,  0.30f, -0.20f,  1.00f, 0.36f, 0.08f, 2   }, // MOUNTAIN — the other wall
         { 1230.0f,  6,  6.0f,  48.0f, 40.0f,   0.85f,  0.00f, -0.80f,  0.72f, 0.86f, 1.00f, 1   }, // WATER near-miss column
+        { 1285.0f,  6,  5.0f,  40.0f, 30.0f,   0.55f,  0.25f,  0.30f,  1.00f, 0.38f, 0.09f, 2   }, // MOUNTAIN — parting gorge wall
         { 1340.0f,  7,  5.0f,  42.0f, 30.0f,  -0.45f, -1.30f,  0.20f,  1.00f, 0.30f, 0.06f      }, // cluster 1 (~1408)
         { 1440.0f,  8,  5.0f,  40.0f, 29.0f,   0.20f,  0.10f, -0.30f,  1.00f, 0.44f, 0.12f      }, // cluster 1→2, near-hit
         { 1540.0f,  8,  5.0f,  40.0f, 30.0f,  -0.35f, -0.20f,  0.35f,  1.00f, 0.40f, 0.10f      }, // cluster 2 (~1495-1560)

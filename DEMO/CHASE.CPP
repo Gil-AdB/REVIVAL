@@ -939,6 +939,11 @@ struct ChaseScene : SceneDriver {
 	// + their P90 angular-rate reference, resolved once at init.
 	TriMesh *ship1M = nullptr, *ship2M = nullptr;
 	float    ship1Ref = 1.0f, ship2Ref = 1.0f;
+	// B2 mountain-hit aim: world centre + radius of every canyon-wall instance,
+	// captured at init (static single-key meshes). resolveAimPoint(kind=2) picks
+	// the wall whose SURFACE is nearest Ship1 and aims a spark burst at it.
+	struct MtnInst { Vector ctr; float rad; };
+	std::vector<MtnInst> mountains;
 
 	~ChaseScene() override { Destroy_Scene(ChaseSc); }
 
@@ -969,10 +974,19 @@ struct ChaseScene : SceneDriver {
 		// reference for the engine-glow throttle. Init-time only; inert unless
 		// chase_engine_mod is turned on in tick().
 		ship1M = ship2M = nullptr;
+		mountains.clear();
 		for (Object *o = ChaseSc->ObjectHead; o; o = o->Next) {
 			if (!o->Name || !o->Data) continue;
 			if (std::strstr(o->Name, "hip1")) ship1M = (TriMesh *)o->Data;
 			else if (std::strstr(o->Name, "hip2")) ship2M = (TriMesh *)o->Data;
+			// Canyon walls: m1..m5, mm7, big_m — static single-key meshes. Capture
+			// their world centre + radius once (any frame; motion is constant) for
+			// the B2 mountain-hit aim. Only needed when combat is on.
+			else if (fds::FeatureFlags::chase_blasters() &&
+			         (o->Name[0] == 'm' || o->Name[0] == 'M')) {
+				TriMesh *M = (TriMesh *)o->Data;
+				mountains.push_back({ chaseShipCenter(M, 0.0f), shipWorldRadius(M, 0.0f) });
+			}
 		}
 		ship1Ref = chaseAngRateRef(ship1M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
 		ship2Ref = chaseAngRateRef(ship2M, ChaseSc->StartFrame, ChaseSc->EndFrame, kEngineModD);
@@ -984,7 +998,7 @@ struct ChaseScene : SceneDriver {
 		// the engine's particle loops are no-ops (default chase byte-identical).
 		if (fds::FeatureFlags::chase_blasters() && !ChaseSc->Pcl) {
 			if (!g_chaseSparkMat) g_chaseSparkMat = buildChaseSparkMat();
-			const int N = 1536;
+			const int N = 2560;
 			ChaseSc->NumOfParticles = N;
 			ChaseSc->Pcl = new Particle[N];
 			std::memset(ChaseSc->Pcl, 0, sizeof(Particle) * N);
@@ -1007,14 +1021,65 @@ struct ChaseScene : SceneDriver {
 		return M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
 	}
 
-	// Resolve a bolt's aim / impact world point. water → the sea beside Ship1
-	// (x,z = ship1 + miss·R, y = the water plane), else ship-relative (ship1
-	// centre + miss·R). One place so bolts, flashes, sparks and camera-fx agree.
-	Vector resolveAimPoint(int water, float aimFrame, float mx, float my, float mz) {
+	// Resolve a bolt's aim / impact world point. kind (the fire-table `water`
+	// field): 0 hull → ship1 centre + miss·R; 1 water → the sea beside Ship1
+	// (x,z = ship1 + miss·R, y = the water plane); 2 mountain → the nearest
+	// canyon-wall surface point to Ship1 (miss nudges it tangentially). One place
+	// so bolts, flashes, sparks and camera-fx agree.
+	Vector resolveAimPoint(int kind, float aimFrame, float mx, float my, float mz) {
 		const Vector c = chaseShipCenter(ship1M, aimFrame);
 		const float R = shipWorldRadius(ship1M, aimFrame);
-		if (water) return Vector{ c.x + mx * R, g_chaseWaterY, c.z + mz * R };
+		if (kind == 1) return Vector{ c.x + mx * R, g_chaseWaterY, c.z + mz * R };
+		if (kind == 2) return resolveMountainPoint(c, R, mx, my, mz);
 		return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
+	}
+
+	// Nearest canyon-wall surface point to Ship1 centre `c`. Picks the mountain
+	// whose bounding-sphere SURFACE is closest, then a point on that sphere facing
+	// the ship (so sparks read as landing ON the rock). miss·R nudges it along the
+	// wall so a burst walks fire; my raises it up the face. Falls back to a hull-
+	// style point if no mountain was captured (combat off, or none in scene).
+	Vector resolveMountainPoint(const Vector &c, float R, float mx, float my, float mz) {
+		if (mountains.empty()) return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
+		int best = -1; float bestD = 1e30f;
+		for (size_t i = 0; i < mountains.size(); ++i) {
+			const Vector &m = mountains[i].ctr;
+			const float d = std::sqrt((m.x-c.x)*(m.x-c.x) + (m.y-c.y)*(m.y-c.y) +
+			                          (m.z-c.z)*(m.z-c.z)) - mountains[i].rad;
+			if (d < bestD) { bestD = d; best = (int)i; }
+		}
+		const MtnInst &M = mountains[best];
+		// Direction from the wall centre toward the ship → the near face. Place the
+		// burst JUST OUTSIDE the bounding sphere toward the ship (×1.0) so it sits
+		// on/in front of the rock and is never occluded by it. A tangential/vertical
+		// nudge (miss·R, R = ship radius) scatters bursts along the wall.
+		float dx = c.x-M.ctr.x, dy = c.y-M.ctr.y, dz = c.z-M.ctr.z;
+		float L = std::sqrt(dx*dx + dy*dy + dz*dz); if (L < 1e-3f) L = 1e-3f;
+		dx /= L; dy /= L; dz /= L;
+		Vector p{ M.ctr.x + dx * M.rad,
+		          M.ctr.y + dy * M.rad,
+		          M.ctr.z + dz * M.rad };
+		p.x += mx * R; p.z += mz * R;
+		p.y += (my + 0.5f) * R;                 // bias up the face
+		if (p.y < g_chaseWaterY) p.y = g_chaseWaterY;
+		return p;
+	}
+
+	// Bounding radius of the canyon wall a mountain-hit lands on (nearest-surface
+	// to Ship1 @ frame). Used to scale the spark burst to the WALL, not the ship —
+	// a ship-radius burst is an invisible speck on a thousand-unit rock. Returns a
+	// sane fallback if no mountains were captured.
+	float nearestMountainRadius(float aimFrame) {
+		if (mountains.empty()) return 1.0f;
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
+		int best = -1; float bestD = 1e30f;
+		for (size_t i = 0; i < mountains.size(); ++i) {
+			const Vector &m = mountains[i].ctr;
+			const float d = std::sqrt((m.x-c.x)*(m.x-c.x) + (m.y-c.y)*(m.y-c.y) +
+			                          (m.z-c.z)*(m.z-c.z)) - mountains[i].rad;
+			if (d < bestD) { bestD = d; best = (int)i; }
+		}
+		return mountains[best].rad;
 	}
 
 	// C1: deterministic camera FX (chase_cam_fx) — shake + FOV punch on hits.
@@ -1131,12 +1196,12 @@ struct ChaseScene : SceneDriver {
 
 		// B2: impact-spark particles — a deterministic ballistic spray per bolt
 		// impact, reconstructed pure-t (positions are f(seed,k,age), never
-		// integrated). Sparks burst up-and-out from the impact point and fall
-		// under gravity; near-miss water hits (miss.y < 0 → impact near the sea)
-		// read as splash columns. Additive TBR_Sprite discs tinted by bolt colour.
+		// integrated). HULL hits burst up-and-out and fall; WATER near-misses
+		// (kind 1) throw a TALL vertical splash column; MOUNTAIN hits (kind 2)
+		// spray sparks off the rock. Additive TBR_Sprite discs tinted by bolt.
 		if (ChaseSc->Pcl) {
-			constexpr float kPclLife = 50.0f;   // frames
-			constexpr int   kPerImpact = 24;
+			constexpr float kPclLife = 52.0f;   // frames
+			constexpr int   kPerImpact = 30;
 			// TBR_Sprite screen size = ImageSize(1000)·RZ·PerspX·FlareSize, so a
 			// world-space disc of radius w has FlareSize ≈ w/1000. Sparks are a
 			// small fraction of the target ship radius; size + brightness are
@@ -1152,33 +1217,51 @@ struct ChaseScene : SceneDriver {
 			int slot = 0;
 			for (const chase::ImpactState &im : impacts) {
 				const Vector P = resolveAimPoint(im.water, im.aimFrame, im.missX, im.missY, im.missZ);
-				const float R = ship1Radius(im.aimFrame);
+				const bool  isWater = (im.water == 1);
+				const bool  isMtn   = (im.water == 2);
+				// Burst scale: ship-radius for hull/water sparks; a fraction of the
+				// CANYON-WALL radius for mountain hits (a ship-sized burst is an
+				// invisible speck on a thousand-unit rock — scale it to the wall).
+				float R = ship1Radius(im.aimFrame);
+				if (isMtn) { const float mr = nearestMountainRadius(im.aimFrame);
+				             R = mr * 0.13f;      // spread scale (fly distance)
+				             if (R < 180.0f) R = 180.0f; else if (R > 650.0f) R = 650.0f; }
 				const float lifeFrac = im.age / im.life;
 				const float fade = 1.0f - lifeFrac;              // brightness/size decay
-				// Water splash columns rise near-vertically with heavier gravity
-				// (up then fall back = a column); hull sparks burst up-and-out.
-				const float g = R * gK * (im.water ? 2.4f : 1.0f);
+				// Water columns rise high on a lighter gravity (tall spout, up then
+				// fall); mountain sparks fly off the wall on light gravity; hull
+				// sparks burst up-and-out.
+				const float g = R * gK * (isWater ? 1.5f : (isMtn ? 0.7f : 1.0f));
 				for (int k = 0; k < kPerImpact && slot < N; ++k) {
 					const uint32_t base = im.seed + uint32_t(k) * 40503u;
 					const float r1 = chaseHash01(base + 1u);
 					const float r2 = chaseHash01(base + 2u);
 					const float r3 = chaseHash01(base + 3u);
 					const float az = r1 * 6.2831853f;
-					const float ct = im.water ? (0.80f + 0.20f * r2)   // near-vertical column
-					                          : (0.15f + 0.85f * r2);  // up-biased hemisphere
+					const float ct = isWater ? (0.92f + 0.08f * r2)    // tall near-vertical column
+					               : isMtn   ? (0.05f + 0.95f * r2)     // wide spray off the rock
+					                         : (0.15f + 0.85f * r2);    // up-biased hemisphere
 					const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
 					const Vector dir{ st * std::cos(az), ct, st * std::sin(az) };
-					const float speed = R * spK * (im.water ? (0.9f + 0.7f * r3)
-					                                        : (0.5f + 0.5f * r3));
+					const float speed = R * spK * (isWater ? (1.9f + 1.3f * r3)   // taller column
+					                             : isMtn   ? (0.7f + 0.9f * r3)
+					                                       : (0.5f + 0.5f * r3));
 					Particle &pc = Pcl[slot++];
 					pc.V.Pos.x = P.x + dir.x * speed * im.age;
 					pc.V.Pos.y = P.y + dir.y * speed * im.age - 0.5f * g * im.age * im.age;
 					pc.V.Pos.z = P.z + dir.z * speed * im.age;
-					const float bright = brK * fade;
-					pc.V.LR = (0.5f + 0.5f * im.r) * bright;      // hot-white core + tint
-					pc.V.LG = (0.5f + 0.5f * im.g) * bright;
-					pc.V.LB = (0.5f + 0.5f * im.b) * bright;
-					pc.F.FlareSize = R * szK * (im.water ? 1.35f : 1.0f) * (0.35f + 0.65f * fade);
+					// Water columns stay bright longer (slower fade); mountain sparks
+					// are dimmer + more saturated (many small discs over a wide spray
+					// must NOT additively blow to a white ball). brK = FeatureFlags peak.
+					const float bright = brK * (isWater ? (0.42f + 0.45f * fade)
+					                          : isMtn   ? (0.40f * fade)
+					                                    : fade);
+					// hull/water: hot-white core + tint; mountain: warmer/less white.
+					const float coreW = isMtn ? 0.25f : 0.5f;
+					pc.V.LR = (coreW + (1.0f - coreW) * im.r) * bright;
+					pc.V.LG = (coreW + (1.0f - coreW) * im.g) * bright;
+					pc.V.LB = (coreW + (1.0f - coreW) * im.b) * bright;
+					pc.F.FlareSize = R * szK * (isWater ? 1.35f : (isMtn ? 0.30f : 1.0f)) * (0.35f + 0.65f * fade);
 					pc.Flags = Particle_Active;
 				}
 			}
