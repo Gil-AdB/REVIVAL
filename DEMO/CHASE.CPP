@@ -1026,14 +1026,9 @@ struct ChaseScene : SceneDriver {
 	// (x,z = ship1 + miss·R, y = the water plane); 2 mountain → the nearest
 	// canyon-wall surface point to Ship1 (miss nudges it tangentially). One place
 	// so bolts, flashes, sparks and camera-fx agree.
-	// ROLE FIX: ship2 is actually the ship AHEAD (the fleeing leader), Ship1 is
-	// BEHIND (the pursuer). So the pursuer Ship1 fires FORWARD at the target
-	// ship2 — aim resolves against ship2 (the target), muzzle is on Ship1 (the
-	// shooter). (Previously ship2 fired at Ship1 = backward → bolts came from
-	// the front + the "chaser" wasn't the foreground ship.)
 	Vector resolveAimPoint(int kind, float aimFrame, float mx, float my, float mz) {
-		const Vector c = chaseShipCenter(ship2M, aimFrame);
-		const float R = shipWorldRadius(ship2M, aimFrame);
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
+		const float R = shipWorldRadius(ship1M, aimFrame);
 		if (kind == 1) return Vector{ c.x + mx * R, g_chaseWaterY, c.z + mz * R };
 		if (kind == 2) return resolveMountainPoint(c, R, mx, my, mz);
 		return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
@@ -1076,7 +1071,7 @@ struct ChaseScene : SceneDriver {
 	// sane fallback if no mountains were captured.
 	float nearestMountainRadius(float aimFrame) {
 		if (mountains.empty()) return 1.0f;
-		const Vector c = chaseShipCenter(ship2M, aimFrame);   // target = leader ship2
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
 		int best = -1; float bestD = 1e30f;
 		for (size_t i = 0; i < mountains.size(); ++i) {
 			const Vector &m = mountains[i].ctr;
@@ -1176,7 +1171,7 @@ struct ChaseScene : SceneDriver {
 		chase::BlasterBoltsAliveAt(table, t, bolts);
 		fds::BlasterBolts_ResetActive();
 		for (const chase::BoltState &bs : bolts) {
-			const Vector muzzle = chaseMuzzleWorld(ship1M, bs.fireFrame, bs.wing);  // shooter = pursuer Ship1
+			const Vector muzzle = chaseMuzzleWorld(ship2M, bs.fireFrame, bs.wing);
 			const Vector aim = resolveAimPoint(bs.water, bs.aimFrame, bs.missX, bs.missY, bs.missZ);
 			const Vector pos{ muzzle.x + (aim.x-muzzle.x)*bs.u,
 			                  muzzle.y + (aim.y-muzzle.y)*bs.u,
@@ -1194,7 +1189,7 @@ struct ChaseScene : SceneDriver {
 		fds::BlasterBolts_ResetFlashes(ChaseSc);
 		for (const chase::FlashState &fs : flashes) {
 			const Vector p = (fs.kind == 0)
-				? chaseMuzzleWorld(ship1M, fs.fireFrame, fs.wing)
+				? chaseMuzzleWorld(ship2M, fs.fireFrame, fs.wing)
 				: resolveAimPoint(fs.water, fs.aimFrame, fs.missX, fs.missY, fs.missZ);
 			fds::BlasterBolts_AddFlash(p, fs.intensity, fs.r, fs.g, fs.b);
 		}
