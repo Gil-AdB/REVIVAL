@@ -32,6 +32,12 @@ void WaveSlope(float wx, float wz, float t, float scale, float& bnx, float& bnz)
 // only as a "water set up yet" early-out). No-op when water_bump is off / extent
 // unset / no View. Row-parallel across the thread pool.
 void RenderGlints(float waterY, float minX, float maxX, float minZ, float maxZ);
+// water_variation ON variant (chase): same pass with a low-frequency swell + a
+// 3rd ripple octave on the wave field and multi-scale caustics so the sea reads
+// varied, not a uniform repeating field. Separate fn (not a flag branch inside
+// RenderGlints) so the default path stays byte-identical. Dispatched at the call
+// site on FeatureFlags::water_variation().
+void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float maxZ);
 
 // Caustic-cell modulation factors at world XZ — the EXACT formula of
 // RenderGlints' texMix block (keep in lockstep; not shared with that hot loop

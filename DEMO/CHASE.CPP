@@ -1376,9 +1376,16 @@ struct ChaseScene : SceneDriver {
 
 		// Procedural caustic texture + specular glints over the water plane
 		// (shared with city). Screen-space, peel-independent, occlusion-tested.
-		if (fds::FeatureFlags::water_bump())
-			pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
-			                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+		if (fds::FeatureFlags::water_bump()) {
+			// drama-5: chase opts into the varied (less-regular) sea. Call-site
+			// dispatch keeps the default RenderGlints byte-identical for city.
+			if (fds::FeatureFlags::water_variation())
+				pwater::RenderGlintsVaried(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+				                           g_chaseWaterMinZ, g_chaseWaterMaxZ);
+			else
+				pwater::RenderGlints(g_chaseWaterY, g_chaseWaterMinX, g_chaseWaterMaxX,
+				                     g_chaseWaterMinZ, g_chaseWaterMaxZ);
+		}
 
 		// B1: blaster bolts — additive screen-space draw over the finished frame
 		// (post-tonemap, like greets). Occluded against terrain/ships by the
@@ -1411,6 +1418,11 @@ std::unique_ptr<SceneDriver> createChaseScene()
 	// reflects a black night sky, so it must keep the forward-style lit-texel
 	// blend or the water goes dark with a view-angle band (soa-vertex 9902349).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, false);
+	// Varied, less-regular sea (drama-5): layer a low-frequency swell + an extra
+	// rotated ripple octave on the wave field and sum multi-scale caustics so
+	// chase's open water reads natural instead of a uniform repeating field.
+	// Default-off flag → city/fountain byte-identical; chase opts in here.
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_variation, true);
 	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
 	// Chase-scale bolt-light reach (B1): the module default (range 14) is
 	// greets-room scale — invisible here where ships are hundreds of units

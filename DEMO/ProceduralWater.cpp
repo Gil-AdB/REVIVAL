@@ -84,6 +84,36 @@ static inline void waterWaveSlope(float wx, float wz, float t, float scale, int 
 	bnz = (n1z + n2z*0.6f) * 1.6f;
 }
 
+// VARIED wave slope (water_variation ON — chase only). A SEPARATE function from
+// the byte-identical waterWaveSlope() above (touching that reshapes its fmadd
+// chain under -ffp-contract=fast+LTO → city moves). Adds a low-frequency world
+// SWELL + a 3rd rotated ripple octave the 128-texel tile can't hold, so the sea
+// gets large-scale structure and stops reading as a uniform repeating field.
+static inline void waterWaveSlopeVaried(float wx, float wz, float t, float scale,
+                                        float& bnx, float& bnz) {
+	if (g_waterNrm.empty()) { bnx = bnz = 0.0f; return; }
+	const float base = 0.02f * scale;
+	float n1x, n1z; sampleWaterNrm(wx*base + t*16.0f, wz*base - t*12.0f, n1x, n1z);
+	const float ca = 0.87f, sa = 0.5f;
+	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
+	float n2x, n2z; sampleWaterNrm(rx*base*1.7f - t*10.0f, rz*base*1.7f + t*14.0f, n2x, n2z);
+	bnx = (n1x + n2x*0.6f) * 1.6f;
+	bnz = (n1z + n2z*0.6f) * 1.6f;
+	// (1) Large-scale swell (wavelengths of thousands of units, slow drift).
+	const float td = t * 0.5f;
+	bnx += 0.85f * std::cos(wx*0.00034f + wz*0.00019f + td*1.6f);
+	bnz += 0.85f * std::cos(wz*0.00050f - wx*0.00024f - td*1.3f);
+	// a slower, longer macro roll (~6-9k unit wavelength).
+	bnx += 0.55f * std::cos(wx*0.00015f - wz*0.00011f + td*0.7f);
+	bnz += 0.55f * std::sin(wz*0.00013f + wx*0.00009f - td*0.85f);
+	// (2) a 3rd ripple octave at a different scale + rotation (off the tile period).
+	const float e = base * 2.55f;
+	const float qx = wx*0.62f - wz*0.78f, qz = wx*0.78f + wz*0.62f;   // ~51 deg
+	float n3x, n3z; sampleWaterNrm(qx*e + t*23.0f, qz*e - t*17.0f, n3x, n3z);
+	bnx += n3x * 0.5f;
+	bnz += n3z * 0.5f;
+}
+
 // Procedural water-detail texture (row-major), sampled by the screen-space water
 // pass at a field-WARPED UV per pixel. Generated at init (buildWaterDetail) —
 // replaces de-swizzling the original low-res albedo (no swizzle dependence, no
@@ -152,6 +182,29 @@ static inline void sampleWaterTex(float u, float v, float& cb, float& cg, float&
 		return (A*(1-du)+B*du)*(1-dv) + (C*(1-du)+D*du)*dv;
 	};
 	cb = lerp4(0); cg = lerp4(8); cr = lerp4(16);
+}
+
+// VARIED caustic cell value (water_variation ON — chase only). SEPARATE from the
+// callers' byte-identical inline. Sums THREE scales/rotations (base + a finer
+// rotated octave + a coarse macro octave) so the Worley network stops visibly
+// tiling at texScale.
+static inline float causticCellVaried(float wx, float wz, float bnx, float bnz,
+                                      float texScale, float texWarp,
+                                      float flowU, float flowV) {
+	float cb, cg, cr;
+	sampleWaterTex(wx*texScale + bnx*texWarp + flowU,
+	               wz*texScale + bnz*texWarp + flowV, cb, cg, cr);
+	const float cell = (cb + cg + cr) * (1.0f/765.0f);
+	const float ca = 0.80f, sa = 0.60f;
+	const float rx = wx*ca - wz*sa, rz = wx*sa + wz*ca;
+	float c2b, c2g, c2r, c3b, c3g, c3r;
+	sampleWaterTex(rx*texScale*2.3f + bnx*texWarp*0.7f + flowU*1.6f,
+	               rz*texScale*2.3f + bnz*texWarp*0.7f - flowV*1.2f, c2b, c2g, c2r);
+	sampleWaterTex(wx*texScale*0.45f + bnx*texWarp*1.6f - flowU*0.5f,
+	               wz*texScale*0.45f + bnz*texWarp*1.6f + flowV*0.5f, c3b, c3g, c3r);
+	const float c2 = (c2b + c2g + c2r) * (1.0f/765.0f);
+	const float c3 = (c3b + c3g + c3r) * (1.0f/765.0f);
+	return cell*0.5f + c2*0.28f + c3*0.22f;
 }
 
 // ───────── Public API ─────────
@@ -301,6 +354,106 @@ void RenderGlints(float waterY, float minX, float maxX, float minZ, float /*maxZ
 				const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
 				Nx*=nInv; Ny*=nInv; Nz*=nInv;
 				float Vx = ex-wx, Vy = ey-wYplane, Vz = ez-wz;   // view dir (worldPos.y = plane)
+				const float vInv = 1.0f / std::sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
+				Vx*=vInv; Vy*=vInv; Vz*=vInv;
+				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
+				const float hInv = 1.0f / std::sqrt(Hx*Hx + Hy*Hy + Hz*Hz);
+				const float ndh = (Nx*Hx + Ny*Hy + Nz*Hz) * hInv;
+				if (ndh <= 0.0f) continue;
+				const float g = std::pow(ndh, shin) * strength * distFade;
+				int add = int(g * 255.0f + 0.5f); if (add <= 0) continue; if (add > 255) add = 255;
+				const dword p = row[x];
+				int B = int(p & 0xFFu) + add, G = int((p>>8)&0xFFu) + add, R = int((p>>16)&0xFFu) + add;
+				if (B>255)B=255; if (G>255)G=255; if (R>255)R=255;
+				row[x] = dword(B) | (dword(G)<<8) | (dword(R)<<16) | 0xFF000000u;
+			}
+		}
+	};
+	auto& tp = ThreadPool::instance();
+	const int nT = (int)tp.size();
+	if (nT < 2 || YRes < 64) { band(0, YRes); return; }
+	const int chunk = (YRes + nT - 1) / nT;
+	auto remaining = std::make_shared<std::atomic<int>>(0);
+	for (int i = 0; i < nT; ++i) {
+		const int y0 = i * chunk; if (y0 >= YRes) break;
+		const int y1 = std::min(y0 + chunk, YRes);
+		remaining->fetch_add(1, std::memory_order_relaxed);
+		tp.enqueue([band, y0, y1, remaining]() { band(y0, y1); remaining->fetch_sub(1, std::memory_order_release); });
+	}
+	while (remaining->load(std::memory_order_acquire) != 0) std::this_thread::yield();
+}
+
+// water_variation ON path (chase). A full COPY of RenderGlints() that swaps the
+// two per-pixel operations for their varied forms (waterWaveSlopeVaried +
+// causticCellVaried) — kept as a separate function, dispatched at the call site,
+// so RenderGlints() above stays byte-for-byte identical (city/fountain gate).
+void RenderGlintsVaried(float waterY, float minX, float maxX, float minZ, float /*maxZ*/) {
+	const float strength = fds::FeatureFlags::water_bump_strength();
+	if (strength <= 0.0f || !View) return;
+	if (maxX <= minX) return;
+	const float shin  = std::max(1.0f, fds::FeatureFlags::water_bump_shininess());
+	const float scale = fds::FeatureFlags::water_bump_scale();
+	const float texMix   = WaterProceduralEffective() ? fds::FeatureFlags::water_albedo_mix() : 0.0f;
+	const float texScale = fds::FeatureFlags::water_tex_scale();
+	const float texWarp  = fds::FeatureFlags::water_tex_warp();
+	const float t = (float)Timer * 0.02f * fds::FeatureFlags::water_ripple_speed();
+	const float wnBase = 0.02f * scale;
+	const float flowK  = (wnBase > 0.0f) ? (texScale / wnBase) * fds::FeatureFlags::water_tex_flow() : 0.0f;
+	const float flowU  =  t * 16.0f * flowK;
+	const float flowV  = -t * 12.0f * flowK;
+	const float invZScale = (g_zscale != 0.0f) ? 1.0f / g_zscale : 1.0f;
+	const float invFX = (FOVX != 0.0f) ? 1.0f / FOVX : 0.0f;
+	const float invFY = (FOVY != 0.0f) ? 1.0f / FOVY : 0.0f;
+	const float cex = CntrEX, cey = CntrEY;
+	const float m00=View->Mat[0][0], m10=View->Mat[1][0], m20=View->Mat[2][0];
+	const float m01=View->Mat[0][1], m11=View->Mat[1][1], m21=View->Mat[2][1];
+	const float m02=View->Mat[0][2], m12=View->Mat[1][2], m22=View->Mat[2][2];
+	const float ex=View->ISource.x, ey=View->ISource.y, ez=View->ISource.z;
+	float Lx=0.35f, Ly=0.82f, Lz=0.42f; { const float l=std::sqrt(Lx*Lx+Ly*Ly+Lz*Lz); Lx/=l;Ly/=l;Lz/=l; }
+	const float bumpAmp = 1.7f;
+	const float wYplane = waterY;
+	const float fzp = (CurScene && CurScene->FZP > 0.0f) ? CurScene->FZP : 1e30f;
+	const float fadeStart = fzp * 0.55f;
+	const float invFadeRange = 1.0f / std::max(1.0f, fzp - fadeStart);
+	dword* const vp = (dword*)VPage;
+	const uint16_t* const oz = ZPage16;
+	const int xr = XRes;
+	auto band = [=](int y0, int y1) {
+		for (int y = y0; y < y1; ++y) {
+			dword* row = vp + size_t(y) * size_t(xr);
+			const uint16_t* orow = oz + size_t(y) * size_t(xr);
+			for (int x = 0; x < xr; ++x) {
+				const float xn = (float(x) - cex) * invFX;
+				const float yn = (cey - float(y)) * invFY;
+				const float D = m01*xn + m11*yn + m21;
+				if (D == 0.0f) continue;
+				const float sd = (wYplane - ey) / D;
+				if (sd <= 1.0f || sd >= fzp) continue;
+				const float distFade = sd <= fadeStart ? 1.0f : (fzp - sd) * invFadeRange;
+				const float wx = ex + sd * (m00*xn + m10*yn + m20);
+				const float wz = ez + sd * (m02*xn + m12*yn + m22);
+				const uint16_t oe = orow[x];
+				if (oe != 0 && float(0xFF80 - int(oe)) * invZScale < sd) continue;
+				float bnx, bnz;
+				waterWaveSlopeVaried(wx, wz, t, scale, bnx, bnz);   // swell + 3rd octave
+				if (texMix > 0.0f && g_waterTexW > 0) {
+					// multi-scale caustics → breaks the tiling repeat.
+					const float cell = causticCellVaried(wx, wz, bnx, bnz, texScale, texWarp, flowU, flowV);
+					const float cellHi = cell - 0.40f;
+					const float mod = 1.0f + cellHi * 2.0f * texMix * 0.6f;
+					const float blueLine = (cellHi > 0.0f ? cellHi : 0.0f) * texMix * 220.0f;
+					const dword p = row[x];
+					int nb = int(float(p & 0xFFu)     * mod + blueLine);
+					int ng = int(float((p>>8)&0xFFu)  * mod + blueLine * 0.40f);
+					int nr = int(float((p>>16)&0xFFu) * mod + blueLine * 0.08f);
+					if (nb<0)nb=0; if (ng<0)ng=0; if (nr<0)nr=0;
+					if (nb>255)nb=255; if (ng>255)ng=255; if (nr>255)nr=255;
+					row[x] = dword(nb) | (dword(ng)<<8) | (dword(nr)<<16) | 0xFF000000u;
+				}
+				float Nx = bnx * bumpAmp, Ny = 1.0f, Nz = bnz * bumpAmp;
+				const float nInv = 1.0f / std::sqrt(Nx*Nx + Ny*Ny + Nz*Nz);
+				Nx*=nInv; Ny*=nInv; Nz*=nInv;
+				float Vx = ex-wx, Vy = ey-wYplane, Vz = ez-wz;
 				const float vInv = 1.0f / std::sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
 				Vx*=vInv; Vy*=vInv; Vz*=vInv;
 				float Hx = Vx+Lx, Hy = Vy+Ly, Hz = Vz+Lz;
