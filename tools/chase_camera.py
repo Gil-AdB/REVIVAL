@@ -183,6 +183,9 @@ def main():
     ap.add_argument("--finale-back", type=float, default=1050.0)
     ap.add_argument("--finale-lift", type=float, default=780.0)
     ap.add_argument("--finale-ramp", type=float, default=70.0)
+    ap.add_argument("--loop-track", type=str, default=None,
+                    help="frame window(s) 'f0,f1[;f0,f1]' where the camera locks "
+                         "onto Ship1 (aim->1.0) so a looping ship stays centred.")
     ap.add_argument("--aim", type=float, default=None,
                     help="aim WEIGHT toward Ship1 (0.5=midpoint of both ships, "
                          "1=Ship1 only). When set, the camera aims via explicit "
@@ -237,10 +240,30 @@ def main():
     # for explicit midpoint aim we also need Ship1's per-frame position
     pos1 = sample_path(parse_ship_keys(lines, "ship1.lwo")) if args.aim is not None else None
 
-    def aim_hp(cam, cf):
-        """H,P (deg) to look from cam at the weighted point between the ships."""
-        a1 = pos1[cf]; a2 = pos2[cf]
+    # loop-track windows: during a ship's loop the camera locks onto Ship1
+    # (aim weight ramps 0.5->1.0) so the looping ship stays CENTRED and the
+    # world rotates around it (the classic locked-on loop shot) instead of the
+    # ship flying up out of frame. Format: "f0,f1[;f0,f1...]", ramp = 30 frames.
+    loopwins = []
+    if args.loop_track:
+        for seg in args.loop_track.split(";"):
+            a, b = seg.split(","); loopwins.append((float(a), float(b)))
+
+    def aim_weight(cf):
         w = args.aim
+        for f0, f1 in loopwins:
+            r = 30.0
+            if f0 - r <= cf <= f1 + r:
+                if cf < f0:   k = (cf - (f0 - r)) / r
+                elif cf > f1: k = ((f1 + r) - cf) / r
+                else:         k = 1.0
+                w = max(w, args.aim + (1.0 - args.aim) * max(0.0, min(1.0, k)))
+        return w
+
+    def aim_hp(cam, cf):
+        """H,P (deg) to look from cam at the per-frame weighted aim point."""
+        a1 = pos1[cf]; a2 = pos2[cf]
+        w = aim_weight(cf)
         aim = (a2[0] + w*(a1[0]-a2[0]), a2[1] + w*(a1[1]-a2[1]), a2[2] + w*(a1[2]-a2[2]))
         dx = aim[0]-cam[0]; dy = aim[1]-cam[1]; dz = aim[2]-cam[2]
         horiz = math.sqrt(dx*dx + dz*dz) or 1e-6
