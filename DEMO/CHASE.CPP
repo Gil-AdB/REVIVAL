@@ -1007,6 +1007,16 @@ struct ChaseScene : SceneDriver {
 		return M->BSphereRadius * sc * (s.x > 1e-4f ? s.x : 1.0f);
 	}
 
+	// Resolve a bolt's aim / impact world point. water → the sea beside Ship1
+	// (x,z = ship1 + miss·R, y = the water plane), else ship-relative (ship1
+	// centre + miss·R). One place so bolts, flashes, sparks and camera-fx agree.
+	Vector resolveAimPoint(int water, float aimFrame, float mx, float my, float mz) {
+		const Vector c = chaseShipCenter(ship1M, aimFrame);
+		const float R = shipWorldRadius(ship1M, aimFrame);
+		if (water) return Vector{ c.x + mx * R, g_chaseWaterY, c.z + mz * R };
+		return Vector{ c.x + mx * R, c.y + my * R, c.z + mz * R };
+	}
+
 	// C1: deterministic camera FX (chase_cam_fx) — shake + FOV punch on hits.
 	// Applied AFTER Animate_Objects (which set View's base pose + FOVX/FOVY) so
 	// the perturbation rides on the authored dolly; reconstructed pure-t from the
@@ -1023,9 +1033,8 @@ struct ChaseScene : SceneDriver {
 		const Vector cam = View->ISource;
 		float amp = 0.0f;
 		for (const chase::ImpactState &im : impacts) {
-			Vector P = chaseShipCenter(ship1M, im.aimFrame);
+			const Vector P = resolveAimPoint(im.water, im.aimFrame, im.missX, im.missY, im.missZ);
 			const float R = shipWorldRadius(ship1M, im.aimFrame);
-			P.x += im.missX * R; P.y += im.missY * R; P.z += im.missZ * R;
 			const float dx = P.x-cam.x, dy = P.y-cam.y, dz = P.z-cam.z;
 			const float dist = std::sqrt(dx*dx + dy*dy + dz*dz) + 1e-3f;
 			const float decay = 1.0f - im.age / kShakeWin;    // 1 at hit → 0
@@ -1098,9 +1107,7 @@ struct ChaseScene : SceneDriver {
 		fds::BlasterBolts_ResetActive();
 		for (const chase::BoltState &bs : bolts) {
 			const Vector muzzle = chaseMuzzleWorld(ship2M, bs.fireFrame, bs.wing);
-			Vector aim = chaseShipCenter(ship1M, bs.aimFrame);
-			const float R = ship1Radius(bs.aimFrame);
-			aim.x += bs.missX * R; aim.y += bs.missY * R; aim.z += bs.missZ * R;
+			const Vector aim = resolveAimPoint(bs.water, bs.aimFrame, bs.missX, bs.missY, bs.missZ);
 			const Vector pos{ muzzle.x + (aim.x-muzzle.x)*bs.u,
 			                  muzzle.y + (aim.y-muzzle.y)*bs.u,
 			                  muzzle.z + (aim.z-muzzle.z)*bs.u };
@@ -1116,14 +1123,9 @@ struct ChaseScene : SceneDriver {
 		chase::BlasterFlashesAt(table, t, decay, kFlashWindow, flashes);
 		fds::BlasterBolts_ResetFlashes(ChaseSc);
 		for (const chase::FlashState &fs : flashes) {
-			Vector p;
-			if (fs.kind == 0) {
-				p = chaseMuzzleWorld(ship2M, fs.fireFrame, fs.wing);
-			} else {
-				p = chaseShipCenter(ship1M, fs.aimFrame);
-				const float R = ship1Radius(fs.aimFrame);
-				p.x += fs.missX * R; p.y += fs.missY * R; p.z += fs.missZ * R;
-			}
+			const Vector p = (fs.kind == 0)
+				? chaseMuzzleWorld(ship2M, fs.fireFrame, fs.wing)
+				: resolveAimPoint(fs.water, fs.aimFrame, fs.missX, fs.missY, fs.missZ);
 			fds::BlasterBolts_AddFlash(p, fs.intensity, fs.r, fs.g, fs.b);
 		}
 
@@ -1149,22 +1151,25 @@ struct ChaseScene : SceneDriver {
 			Particle *Pcl = ChaseSc->Pcl;
 			int slot = 0;
 			for (const chase::ImpactState &im : impacts) {
-				Vector P = chaseShipCenter(ship1M, im.aimFrame);
+				const Vector P = resolveAimPoint(im.water, im.aimFrame, im.missX, im.missY, im.missZ);
 				const float R = ship1Radius(im.aimFrame);
-				P.x += im.missX * R; P.y += im.missY * R; P.z += im.missZ * R;
 				const float lifeFrac = im.age / im.life;
 				const float fade = 1.0f - lifeFrac;              // brightness/size decay
-				const float g = R * gK;                          // gravity (world/frame^2)
+				// Water splash columns rise near-vertically with heavier gravity
+				// (up then fall back = a column); hull sparks burst up-and-out.
+				const float g = R * gK * (im.water ? 2.4f : 1.0f);
 				for (int k = 0; k < kPerImpact && slot < N; ++k) {
 					const uint32_t base = im.seed + uint32_t(k) * 40503u;
 					const float r1 = chaseHash01(base + 1u);
 					const float r2 = chaseHash01(base + 2u);
 					const float r3 = chaseHash01(base + 3u);
 					const float az = r1 * 6.2831853f;
-					const float ct = 0.15f + 0.85f * r2;         // up-biased cos(theta)
+					const float ct = im.water ? (0.80f + 0.20f * r2)   // near-vertical column
+					                          : (0.15f + 0.85f * r2);  // up-biased hemisphere
 					const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
 					const Vector dir{ st * std::cos(az), ct, st * std::sin(az) };
-					const float speed = R * spK * (0.5f + 0.5f * r3);
+					const float speed = R * spK * (im.water ? (0.9f + 0.7f * r3)
+					                                        : (0.5f + 0.5f * r3));
 					Particle &pc = Pcl[slot++];
 					pc.V.Pos.x = P.x + dir.x * speed * im.age;
 					pc.V.Pos.y = P.y + dir.y * speed * im.age - 0.5f * g * im.age * im.age;
@@ -1173,7 +1178,7 @@ struct ChaseScene : SceneDriver {
 					pc.V.LR = (0.5f + 0.5f * im.r) * bright;      // hot-white core + tint
 					pc.V.LG = (0.5f + 0.5f * im.g) * bright;
 					pc.V.LB = (0.5f + 0.5f * im.b) * bright;
-					pc.F.FlareSize = R * szK * (0.35f + 0.65f * fade);
+					pc.F.FlareSize = R * szK * (im.water ? 1.35f : 1.0f) * (0.35f + 0.65f * fade);
 					pc.Flags = Particle_Active;
 				}
 			}

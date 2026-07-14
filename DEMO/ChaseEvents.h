@@ -104,6 +104,11 @@ struct BlasterBurst {
     float flightFrames;   // frames the bolt takes to reach its aim point
     float missX, missY, missZ;  // aim offset, in target bounding-radius fractions
     float r, g, b;        // bolt colour (ship2 fires hot orange by default)
+    // water==1: the aim point is ON the water plane near Ship1's ground
+    // projection (x,z = ship1 + miss·R, y = waterY); the impact spawns a
+    // vertical splash column instead of hull sparks — the "near-miss water
+    // hits marching toward Ship1" money shot. missY is ignored for water.
+    int   water = 0;
 };
 
 // The default chase fire table: bursts aligned to Ship1's authored evasive
@@ -122,6 +127,7 @@ struct BoltState {
     int   wing;        // 0/1 muzzle selector (alternates per bolt)
     float missX, missY, missZ;
     float r, g, b;
+    int   water;       // aim point resolution (see BlasterBurst::water)
 };
 
 // One flash reconstructed at frame t (fountain bolt_flash envelope, pure-t).
@@ -133,6 +139,7 @@ struct FlashState {
     float missX, missY, missZ;
     float intensity;   // 0..1 exp-decay envelope value at t
     float r, g, b;
+    int   water;       // impact aim resolution (see BlasterBurst::water)
 };
 
 // Fill `outBolts` with every bolt alive at frame t (0 ≤ t-fireFrame <
@@ -159,6 +166,7 @@ struct ImpactState {
     float life;                     // particle lifetime in frames
     uint32_t seed;                  // per-impact deterministic seed
     float r, g, b;                  // spark tint (bolt colour)
+    int   water;                    // 1 → splash column at the water plane
 };
 
 // Fill `outImpacts` with every impact whose particle window [impactFrame,
