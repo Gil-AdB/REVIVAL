@@ -1917,16 +1917,16 @@ ShowLight 1 7
 LightMotion (unnamed)
   9
   1
-  -22000 4000 -8000 0 0 0 1 1 1
+  -14000 4200 -5000 20 0 78 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LightColor 255 138 52
-LgtIntensity 1.650000
+LgtIntensity 5.000000
 LightType 2
-ConeAngle 28.000000
-LightRange 44000.000000
+ConeAngle 52.000000
+LightRange 17000.000000
 VolumetricLight 1
-VolumetricLightIntensity 5.000000
+VolumetricLightIntensity 34.000000
 ShadowType 1
 
 AddLight
@@ -1935,16 +1935,16 @@ ShowLight 1 7
 LightMotion (unnamed)
   9
   1
-  -30000 4000 0 0 0 0 1 1 1
+  -24000 4200 10000 -20 0 78 1 1 1
   0 0 0 0 0
 EndBehavior 1
 LightColor 70 150 235
-LgtIntensity 1.650000
+LgtIntensity 5.000000
 LightType 2
-ConeAngle 28.000000
-LightRange 44000.000000
+ConeAngle 52.000000
+LightRange 17000.000000
 VolumetricLight 1
-VolumetricLightIntensity 5.000000
+VolumetricLightIntensity 34.000000
 ShadowType 1
 
 ShowCamera 1 7

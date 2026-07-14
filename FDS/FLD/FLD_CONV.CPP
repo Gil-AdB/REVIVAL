@@ -568,7 +568,26 @@ Omni *ConvertOmni(FldLight *Src)
 			coneDeg = Src->ConeAngle->Key[0].Channel[0];
 		OL->FallOff = cosf(coneDeg * (3.14159265f / 180.0f));
 		OL->HotSpot = cosf(0.5f * coneDeg * (3.14159265f / 180.0f));
-		Vector_Form(&OL->IDir, 0.0f, 0.0f, 1.0f);
+		// Cone axis = local +Z rotated by the light's AUTHORED first-key rotation
+		// (H/P/B), using the same Euler convention as object motion (ConvertKey:
+		// engine RX=-rot.y, RY=-rot.x, RZ=-rot.z, radians). The world direction of
+		// local +Z is matrix column 2 — identical to the per-frame parented-spot
+		// aim (Transform.cpp reads Rot col 2). Parented spots overwrite IDir each
+		// frame; NON-parented authored spots (e.g. chase canyon spots) now honor
+		// their aim instead of a hardcoded +Z. H=P=B=0 reproduces (0,0,1) exactly,
+		// so unrotated spots are byte-identical (this is inert until aim is authored).
+		if (Src->Keys > 0) {
+			Matrix rm;
+			Euler_Angles(rm,
+			             -Src->KF[0].Rotation.y * Rad2Deg,
+			             -Src->KF[0].Rotation.x * Rad2Deg,
+			             -Src->KF[0].Rotation.z * Rad2Deg);
+			OL->IDir.x = rm[0][2];
+			OL->IDir.y = rm[1][2];
+			OL->IDir.z = rm[2][2];
+		} else {
+			Vector_Form(&OL->IDir, 0.0f, 0.0f, 1.0f);
+		}
 		stationary = false;
 	}
 
