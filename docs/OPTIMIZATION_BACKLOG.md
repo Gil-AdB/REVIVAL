@@ -16,6 +16,13 @@ The engine is standard in the big decisions (additive diffuse+specular, GGX,
 Schlick, metalness→F0, roughness-mip reflection); it simplifies in 3 places —
 each is a candidate below.
 
+**SERIES COMPLETE (2026-07-14):** all four increments (#1 analytic split-sum
+env-BRDF, #2 SH irradiance ambient, #3 (1−F) diffuse energy, #4 multi-scatter
+compensation) have LANDED on fog-wt, each default-OFF and each measured
+effectively free (within the frame noise floor). All four await user
+look-approval before any default flip. The env-BRDF LUT and diffuse-cubemap
+items below stay PARKED.
+
 - **#1 analytic split-sum env-BRDF** — DONE (e0640fe, flag `env_brdf_analytic`,
   default OFF). Measured +0.72 ms on greets = within noise → effectively free.
   Retires the `f90=1-rough` hack. Awaiting user look-approval to default ON.
@@ -68,8 +75,37 @@ each is a candidate below.
   (F0≈0.04) it's the subtle grazing-only darkening the canonical BRDF intends.
   NB fountain shows zero change at its pin (its glass spheres are TRANSPARENT =
   no env term). Awaiting user look-approval to default ON.
-- **#4 multi-scatter compensation** (Fdez-Agüera) — TODO, after #1. A few ALU
-  ops using the env-BRDF terms; rough metals stop reading too dark. Free add-on.
+- **#4 multi-scatter compensation** (Fdez-Agüera) — DONE (2718046, flag
+  `pbr_multiscatter`, default OFF). The split-sum env-BRDF (#1) is single-scatter
+  only — it drops the energy returned by repeated microfacet bounces, so rough
+  metals read too dark. Adds it back from the SAME A,B `env_brdf_analytic`
+  already computes in `EnvSpecComposeScalar` (a few ALU ops on reflective pixels
+  only, NO new gather): `Ess=A+B` (single-scatter energy), `Favg=F0+(1-F0)/21`
+  (avg Fresnel), `Fms=Favg*Ess/(1-Favg*(1-Ess))`, then `ek *= 1+Fms*(1-Ess)/Ess`
+  (scales the SPECULAR energy only; the single-scatter Fresnel handed to #3 is
+  left untouched). **DEPENDS ON `--env_brdf_analytic`** — it needs the A,B terms,
+  so it's a NO-OP with that flag off (lives inside the analytic branch; the
+  ad-hoc Schlick else-branch computes no A,B). `--env_brdf_analytic` already
+  routes city glass off the OuterVec fast path to the scalar compose, so only
+  `EnvSpecComposeScalar` needed wiring (4 call sites, 3 flag decls; no
+  `EnvComposeCityVec8` touch). **Measured (arm64, 1920×1080, city@t=1961,
+  iters=60, 10 interleaved OFF/ON rounds, `--env_brdf_analytic` as the baseline
+  in BOTH to isolate #4 from #1, min-of-each):** OFF min 102.569 ms → ON min
+  102.271 ms → Δ = **−0.298 ms** (ON marginally faster = noise/thermal, OFF ran
+  first each round; noise floor max−min = 14.1 ms) → **within noise = effectively
+  free**. Flag-OFF byte-identical: city `37e62845…`, fountain `51fff7cd…`
+  (verified default AND `--pbr_multiscatter`-alone with `env_brdf_analytic` off).
+  A/B (city glass, deterministic, `--env_brdf_analytic` baseline): reflective
+  facades brighten — 19.2% of pixels change, **100% brighten / 0% darken**, mean
+  +2.08 luma at the authored `city_env_gloss=24` (rough≈0.28, F0=0.6 → +10%
+  specular), rising to +8.66 luma at a rougher `city_env_gloss=6` (the effect
+  scales with roughness exactly as the compensation intends — characterized:
+  F0=0.04 dielectric barely moves 1.00–1.05×, a true rough metal rough=0.8/F0=1.0
+  → 1.79×, rough=1.0 → 2.22×). Non-reflective surfaces (concrete pillar,
+  emissive window-lights) unchanged. NB city glass is a moderately-rough high-F0
+  DIELECTRIC (metalM=0), not a true rough metal, so its brightening is modest;
+  the effect is authored-material-dependent and pronounced only on rough metals.
+  Awaiting user look-approval to default ON.
 - **env-BRDF LUT (texture) vs analytic** — PARKED. The analytic (#1) is free +
   needs no memory; a real (F0·A+B) LUT is 1 cached tap. Only revisit if the
   analytic precision ever proves insufficient.
