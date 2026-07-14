@@ -41,9 +41,33 @@ each is a candidate below.
   barely move (ambient is a small fraction there, HDR-compressed). Awaiting
   user look-approval to default ON. NB the one-shot bake renders the scene →
   nondeterministic on greets, so md5 pins must gate with the flag OFF.
-- **#3 (1−F) diffuse energy conservation** — TODO. Multiply diffuse `fd` by
-  `(1-fres)` at the combine (fres already computed). ~1 op, fixes grazing-edge
-  over-brightness. Trivial.
+- **#3 (1−F) diffuse energy conservation** — DONE (ccc0229, flag
+  `diffuse_energy`, default OFF). Scales the deferred DIFFUSE accumulator by
+  `(1-fres)` at the combine, where `fres` is the SAME per-pixel Schlick Fresnel
+  the env-specular reflection already computes. Light reflected specularly (F)
+  can't also diffuse; the engine scaled diffuse by `(1-metalness)` but skipped
+  `(1-F)`, double-counting at grazing (full diffuse AND a strong Fresnel
+  reflection). `EnvSpecComposeScalar` + `EnvComposeCityVec8` now expose `fres`
+  via an optional out-param; wired at ALL opaque env-compose sites — scalar
+  wave-1 (greets/fountain), TileFill, and OuterVec (both scalar-fallback lanes
+  multiply the float diffuse; the vec fast-path uses an additive INTEGER
+  correction `int(vf*(1-fres)) - int(vf)` so the flag-OFF path is byte-for-byte
+  untouched). Transparent kernel carries no env term → out of scope (keeps full
+  diffuse), same as #2. Only pixels with a reflection (Reflection>0 / metal)
+  pay. **Measured (arm64, 1920×1080, city OuterVec, --snapshot=city@t=1961,
+  iters=60, 8 interleaved OFF/ON rounds, min-of-each):** OFF min 100.344 ms →
+  ON min 100.333 ms → Δ = **−0.011 ms** (ON marginally faster = noise; OFF
+  noise floor min→max = 8.4 ms) → **within noise = effectively free** (it's ~4
+  ALU ops per reflective pixel). Flag-OFF byte-identical: city
+  `37e62845…`, fountain `51fff7cd…`. A/B (city glass, deterministic): reflective
+  facades darken at grazing angles (blue windowed building + red facade go
+  noticeably darker ON; 19.3% of pixels change, 100% darkened, mean luma −30.6,
+  no pixel brightens), while the matte concrete pillar + emissive window-lights
+  (no env term) stay byte-identical. Effect is PRONOUNCED on city because its
+  glass has a high authored F0 (`city_env_f0=60`); on true dielectrics
+  (F0≈0.04) it's the subtle grazing-only darkening the canonical BRDF intends.
+  NB fountain shows zero change at its pin (its glass spheres are TRANSPARENT =
+  no env term). Awaiting user look-approval to default ON.
 - **#4 multi-scatter compensation** (Fdez-Agüera) — TODO, after #1. A few ALU
   ops using the env-BRDF terms; rough metals stop reading too dark. Free add-on.
 - **env-BRDF LUT (texture) vs analytic** — PARKED. The analytic (#1) is free +
