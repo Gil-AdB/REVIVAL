@@ -14,14 +14,16 @@ What it does (only the two animated ships, obj 79 Ship1 / obj 80 ship2):
     bank = BANK_SIGN * gain * clamp(rate/ref).  An aircraft rolls INTO its
     turn; the sign is validated visually (flip BANK_SIGN if ships bank the
     wrong way).  Near-vertical / near-stationary keys (finale climb) get 0.
-  * Heading fill (H channel, ship2 ONLY): ship2's authored heading is ~0 for
-    most of the scene (it slides through turns without yawing).  Every key
-    whose authored |H| < EPS is replaced with the tangent heading so ship2
-    faces its direction of travel.  Its glows are parented, so they follow.
+  * Heading fill (H channel, BOTH ships): every non-whitelisted key is set to
+    the tangent heading so the ship faces its direction of travel (so the bank,
+    derived from that same tangent, reads as banking INTO the visible turn).
+    Ship1's authored heading pointed it off its flight path (it "looked weird")
+    — head-filling both ships keeps heading and bank on the same path basis.
+    Glows are parented, so they follow.
 
 Preserved verbatim (never overwritten), matching the authored flourishes:
   * bank: Ship1 -15.4 @frame460; ship2 -37 @460, -39.5 @547 (PRESERVE_BANK).
-  * heading: any ship2 key with authored |H| >= EPS (its manual turn-1 yaws).
+  * heading: ship2's manual turn-1 yaws @286/388/460 (PRESERVE_HEAD).
 
 Idempotence / determinism:
   * The bank whitelist is keyed on (object, frame) — every NON-whitelisted key
@@ -46,7 +48,7 @@ LWS = os.path.join(REPO, "Authoring", "chase", "CHASE.LWS")
 
 # object basename -> what to author on it
 SHIPS = {
-    "ship1.lwo": {"bank": True,  "headfill": False},
+    "ship1.lwo": {"bank": True,  "headfill": True},
     "ship2.lwo": {"bank": True,  "headfill": True},
 }
 # authored bank/roll flourishes to keep verbatim: (basename_lower, frame)
