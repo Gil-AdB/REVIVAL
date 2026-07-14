@@ -13,8 +13,7 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default, POST flare-tame+framing, fast ~17.6s) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | t100 `adfc61f3…`<br>t400 `1be2d492…`<br>t800 `3d8b9670…`<br>t1200 `7e6447b2…`<br>t1600 `69c803ec…` |
-| chase (cinematic, POST flare-tame+framing) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `ba7a1f5f9947631a6b04315520d67294`<br>t1600 `01a867661d0ede360eb55a9163da2c0b` |
+| chase (default) **IN FLUX — drama batch WIP** | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | 1766fd0 (cam-pullback): t100 `a1afd26d…` t400 `875e34f8…` t800 `016f39f9…` t1200 `d2a26cc1…` t1600 `e9c2f359…` — moves again with ship-scale/beams/hits/path; agent to re-baseline at batch end |
 | chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
