@@ -1324,6 +1324,13 @@ std::unique_ptr<SceneDriver> createChaseScene()
 	// blend or the water goes dark with a view-angle band (soa-vertex 9902349).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, false);
 	ApplyCinematicProfile(cine::kChase);          // same cityscape atmosphere as city
+	// Chase-scale bolt-light reach (B1): the module default (range 14) is
+	// greets-room scale — invisible here where ships are hundreds of units
+	// apart. Give the travelling bolt-lights a scene-appropriate reach so they
+	// pool moving glows on the water. setDefault → explicit CLI/env still wins,
+	// and it only matters under --chase_blasters (EmitLights is gated on it).
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_range, 90.0f);
+	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_intensity, 260.0f);
 	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
 	// the profile so authored values beat it; explicit CLI/env still wins.
 	fds::MaterialImport_ApplySceneDefaults("SCENES/CHASE.MAT");
