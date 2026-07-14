@@ -192,6 +192,36 @@ static inline __m256 sq(__m256 x) { return _mm256_mul_ps(x, x); }
 static inline float  fmul(float  a, float  b) { return a * b; }
 static inline __m256 fmul(__m256 a, __m256 b) { return _mm256_mul_ps(a, b); }
 
+// --sh_ambient: evaluate the scene's baked L2 SH irradiance along a
+// WORLD-space normal (nx,ny,nz). `c` is the 27-float channel-major coefficient
+// block from SHAmbient_Coeffs (B[0..8], G[9..17], R[18..26]); the A_l cosine
+// convolution / π is already folded in at bake, so this is a direct
+// env-colour-scaled irradiance. ~9 FMAs/channel, no texture read. Output is
+// clamped >=0 (low-order SH can ring negative). Basis order matches the bake:
+// Y00, Y1-1(y), Y10(z), Y11(x), Y2-2(xy), Y2-1(yz), Y20(3z²-1), Y21(xz),
+// Y22(x²-y²).
+static inline void shEvalIrradiance(const float* c, float x, float y, float z,
+                                    float& outB, float& outG, float& outR) {
+	const float b0 = 0.282095f;
+	const float b1 = 0.488603f * y;
+	const float b2 = 0.488603f * z;
+	const float b3 = 0.488603f * x;
+	const float b4 = 1.092548f * (x * y);
+	const float b5 = 1.092548f * (y * z);
+	const float b6 = 0.315392f * (3.0f * z * z - 1.0f);
+	const float b7 = 1.092548f * (x * z);
+	const float b8 = 0.546274f * (x * x - y * y);
+	float B = c[0]*b0 + c[1]*b1 + c[2]*b2 + c[3]*b3 + c[4]*b4
+	        + c[5]*b5 + c[6]*b6 + c[7]*b7 + c[8]*b8;
+	float G = c[9]*b0 + c[10]*b1 + c[11]*b2 + c[12]*b3 + c[13]*b4
+	        + c[14]*b5 + c[15]*b6 + c[16]*b7 + c[17]*b8;
+	float R = c[18]*b0 + c[19]*b1 + c[20]*b2 + c[21]*b3 + c[22]*b4
+	        + c[23]*b5 + c[24]*b6 + c[25]*b7 + c[26]*b8;
+	outB = B > 0.0f ? B : 0.0f;
+	outG = G > 0.0f ? G : 0.0f;
+	outR = R > 0.0f ? R : 0.0f;
+}
+
 template<int N, typename T>
 static inline T pow_squaring(T x) {
 	static_assert(N >= 1, "pow_squaring: N must be a positive integer");
@@ -1368,6 +1398,10 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float envReflGainG    = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG     = fds::FeatureFlags::metal_map();
+	// --sh_ambient: per-scene L2 SH irradiance coefficients (null = flag off /
+	// not yet baked → the flat Sc->Ambient path below runs byte-identically).
+	const float* shCoefG        = fds::FeatureFlags::sh_ambient()
+		? fds::SHAmbient_Coeffs(ctx.Sc) : nullptr;
 	const int  kShadowBiasG     = fds::FeatureFlags::shadow_bias();
 	const int  kSlopeBiasG      = fds::FeatureFlags::shadow_slope_bias();
 	// Lightmap kernel gate. Historically --shadow-dynamic disabled the
@@ -1662,7 +1696,27 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			// Ambient. Same expression as forward Lighting() — except
 			// here Mat is per-pixel, not per-mesh-Mat[0].
 			float lB, lG, lR;
-			if (Mat->Txtr) {
+			if (shCoefG) {
+				// --sh_ambient: directional SH irradiance along the (post
+				// normal-map) shading normal, in place of the flat
+				// Sc->Ambient constant. World normal = viewToWorld·viewN
+				// (rotation only). Mirrors the flat branches below exactly,
+				// only Sc->Ambient.{B,G,R} → E(n).{B,G,R}.
+				const float wnx = ctx.viewToWorld[0][0]*nx + ctx.viewToWorld[0][1]*ny + ctx.viewToWorld[0][2]*nz;
+				const float wny = ctx.viewToWorld[1][0]*nx + ctx.viewToWorld[1][1]*ny + ctx.viewToWorld[1][2]*nz;
+				const float wnz = ctx.viewToWorld[2][0]*nx + ctx.viewToWorld[2][1]*ny + ctx.viewToWorld[2][2]*nz;
+				float eB, eG, eR;
+				shEvalIrradiance(shCoefG, wnx, wny, wnz, eB, eG, eR);
+				if (Mat->Txtr) {
+					lB = Mat->Luminosity * 255.0f + Mat->Diffuse * eB;
+					lG = Mat->Luminosity * 255.0f + Mat->Diffuse * eG;
+					lR = Mat->Luminosity * 255.0f + Mat->Diffuse * eR;
+				} else {
+					lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * eB;
+					lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * eG;
+					lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * eR;
+				}
+			} else if (Mat->Txtr) {
 				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
 				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
 				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;
@@ -3683,6 +3737,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
+	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
+	// the lane_ambB rewrite after the normal decode below.
+	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
+		? fds::SHAmbient_Coeffs(ctx.Sc) : nullptr;
 	// HDR: same rule as the scalar kernel — the 250 lit-cap is an 8-bit
 	// rollover guard, lifted under HDR so luminosity > 1 isn't flattened
 	// before the texel multiply. NOTE this kernel still stores 8-bit only
@@ -3981,6 +4039,28 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 			nx = _mm256_load_ps(nx_lane);
 			ny = _mm256_load_ps(ny_lane);
 			nz = _mm256_load_ps(nz_lane);
+
+			// --sh_ambient: rewrite the flat Diff*Sc->Ambient term baked into
+			// lane_ambB (Lumin*255 + Diff*ambB_sc) as Lumin*255 + Diff*E(n),
+			// where E(n) is the SH irradiance along the per-lane (post nmap)
+			// world-space shading normal. Both the vec load (lB below) and the
+			// per-lane scalar fallback (lBs = lane_ambB[k]) then pick it up.
+			// Null coeffs (flag off) → skipped → byte-identical.
+			if (shCoefG) {
+				for (int k = 0; k < 8; ++k) {
+					if (!lane_alive[k]) continue;
+					const float lnx = nx_lane[k], lny = ny_lane[k], lnz = nz_lane[k];
+					const float wnx = ctx.viewToWorld[0][0]*lnx + ctx.viewToWorld[0][1]*lny + ctx.viewToWorld[0][2]*lnz;
+					const float wny = ctx.viewToWorld[1][0]*lnx + ctx.viewToWorld[1][1]*lny + ctx.viewToWorld[1][2]*lnz;
+					const float wnz = ctx.viewToWorld[2][0]*lnx + ctx.viewToWorld[2][1]*lny + ctx.viewToWorld[2][2]*lnz;
+					float eB, eG, eR;
+					shEvalIrradiance(shCoefG, wnx, wny, wnz, eB, eG, eR);
+					const float d = lane_diffuse[k];
+					lane_ambB[k] += d * (eB - ambB_sc);
+					lane_ambG[k] += d * (eG - ambG_sc);
+					lane_ambR[k] += d * (eR - ambR_sc);
+				}
+			}
 
 			// Reconstruct view-space pos for 8 lanes.
 			// z = (0xFF80 - zEnc) * invZScale
@@ -4449,6 +4529,9 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 	const float envReflGainG = fds::FeatureFlags::env_refl_gain();
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
+	// --sh_ambient: SH irradiance coefficients (null = off / not baked).
+	const float* shCoefG     = fds::FeatureFlags::sh_ambient()
+		? fds::SHAmbient_Coeffs(ctx.Sc) : nullptr;
 	const bool quarter      = deferredLightingQuarterEnabled();
 	const bool checker      = deferredLightingCheckerboardEnabled() && !quarter;
 	const bool hdrWrite     = fds::FeatureFlags::hdr() && fds::Hdr_WritableFor(ctx.xres, ctx.yres);   // HDR B1: see main kernel
@@ -4837,7 +4920,24 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 			const float y = (CntrEY - float(py)) * z * ctx.invFOVY;
 
 			float lB, lG, lR;
-			if (Mat->Txtr) {
+			if (shCoefG) {
+				// --sh_ambient (see main kernel): directional SH irradiance
+				// along the shading normal in place of the flat Sc->Ambient.
+				const float wnx = ctx.viewToWorld[0][0]*nx + ctx.viewToWorld[0][1]*ny + ctx.viewToWorld[0][2]*nz;
+				const float wny = ctx.viewToWorld[1][0]*nx + ctx.viewToWorld[1][1]*ny + ctx.viewToWorld[1][2]*nz;
+				const float wnz = ctx.viewToWorld[2][0]*nx + ctx.viewToWorld[2][1]*ny + ctx.viewToWorld[2][2]*nz;
+				float eB, eG, eR;
+				shEvalIrradiance(shCoefG, wnx, wny, wnz, eB, eG, eR);
+				if (Mat->Txtr) {
+					lB = Mat->Luminosity * 255.0f + Mat->Diffuse * eB;
+					lG = Mat->Luminosity * 255.0f + Mat->Diffuse * eG;
+					lR = Mat->Luminosity * 255.0f + Mat->Diffuse * eR;
+				} else {
+					lB = Mat->Luminosity * Mat->BaseCol.B + Mat->Diffuse * eB;
+					lG = Mat->Luminosity * Mat->BaseCol.G + Mat->Diffuse * eG;
+					lR = Mat->Luminosity * Mat->BaseCol.R + Mat->Diffuse * eR;
+				}
+			} else if (Mat->Txtr) {
 				lB = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.B;
 				lG = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.G;
 				lR = Mat->Luminosity * 255.0f + Mat->Diffuse * ctx.Sc->Ambient.R;

@@ -101,6 +101,26 @@ bool EnvReflection_FramePrep(Scene* sc);
 // not yet baked). Rebuilt by FramePrep; stable within a frame.
 const EnvPanoLinear* const* EnvReflection_Table(Scene* sc);
 
+// ── SH irradiance ambient (--sh_ambient) ──────────────────────────────────
+// One-shot per-scene bake of a 9-coefficient L2 spherical-harmonic RGB
+// irradiance probe. Renders a small (kSHFaceRes²) environment cube from the
+// scene's AABB centre through the SAME deferred cube-face path the env-
+// reflection probes use, then projects it into 27 floats with the standard
+// cosine-convolution A_l coefficients folded in (divided by pi, so a uniform
+// environment of colour C evaluates back to C — magnitude-comparable to the
+// flat Sc->Ambient it replaces). Coefficient layout is channel-major:
+// c[0..8] = B basis 0..8, c[9..17] = G, c[18..26] = R. Basis order is
+// Y00, Y1-1(y), Y10(z), Y11(x), Y2-2(xy), Y2-1(yz), Y20(3z²-1), Y21(xz),
+// Y22(x²-y²) with the usual normalisation constants (see the kernel's shEval).
+//
+// EnsureBaked returns true only on the frame it actually baked (renders six
+// cube faces → clobbers the transformed frame state, so the caller must
+// re-Transform + re-sort, exactly like EnvReflection_FramePrep). Cached
+// afterwards. Coeffs returns the 27 floats, or null if not yet baked / the
+// bake failed. Called from renderFrame's main-camera pass only (never nested).
+bool SHAmbient_EnsureBaked(Scene* sc);
+const float* SHAmbient_Coeffs(Scene* sc);
+
 // Drop every bake for the scene so the next FramePrep re-renders them
 // (editor: after light/material edits that should show in reflections).
 // Whole-scene — use only for the "rebake all" button and global flag changes

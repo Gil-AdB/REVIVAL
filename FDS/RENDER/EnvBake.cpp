@@ -1219,7 +1219,127 @@ const EnvPanoLinear* const* EnvReflection_Table(Scene* sc) {
     return it == g_envByScene.end() ? nullptr : it->second.table;
 }
 
-void EnvReflection_Invalidate(Scene* sc) { g_envByScene.erase(sc); }
+// ── SH irradiance ambient (--sh_ambient) ──────────────────────────────────
+namespace {
+
+struct SHProbe {
+    bool  baked = false;
+    float c[27] = {};   // channel-major: B[0..8], G[9..17], R[18..26]
+};
+std::map<Scene*, SHProbe> g_shByScene;
+
+// Face resolution for the SH capture. SH-L2 is a very low-frequency signal —
+// a 32² cube is far more than the 9 coefficients can represent, so this is
+// plenty (and the six full-pipeline face renders are the cost, not the
+// projection). One-shot per scene, cached.
+constexpr int kSHFaceRes = 32;
+
+// Real L2 SH basis (with normalisation constants), evaluated at unit dir
+// (x,y,z). Order matches SHAmbient_Coeffs / the kernel's shEval.
+inline void shBasis9(float x, float y, float z, float Y[9]) {
+    Y[0] = 0.282095f;
+    Y[1] = 0.488603f * y;
+    Y[2] = 0.488603f * z;
+    Y[3] = 0.488603f * x;
+    Y[4] = 1.092548f * (x * y);
+    Y[5] = 1.092548f * (y * z);
+    Y[6] = 0.315392f * (3.0f * z * z - 1.0f);
+    Y[7] = 1.092548f * (x * z);
+    Y[8] = 0.546274f * (x * x - y * y);
+}
+
+}  // namespace
+
+const float* SHAmbient_Coeffs(Scene* sc) {
+    auto it = g_shByScene.find(sc);
+    return (it != g_shByScene.end() && it->second.baked) ? it->second.c : nullptr;
+}
+
+bool SHAmbient_EnsureBaked(Scene* sc) {
+    if (!sc || g_envBakeInProgress) return false;
+    SHProbe& p = g_shByScene[sc];
+    if (p.baked) return false;
+
+    // Probe centre = scene AABB centre (reuses the tested clone-aware AABB the
+    // env-reflection parallax proxy uses). An interior room's centre sees the
+    // floor below and walls/ceiling around — exactly the directional split SH
+    // captures.
+    SceneEnv& env = g_envByScene[sc];
+    sceneAABB(sc, env);
+    Vector center;
+    center.x = (env.boxMin[0] + env.boxMax[0]) * 0.5f;
+    center.y = (env.boxMin[1] + env.boxMax[1]) * 0.5f;
+    center.z = (env.boxMin[2] + env.boxMax[2]) * 0.5f;
+
+    EnvBakeParams params;   // default voidColor for untouched (sky-less) texels
+    std::vector<uint32_t> faces[6];
+    g_envBakeInProgress = true;
+    // publishProj=true → each face rendered with a real 90° projection (not
+    // the main window's telephoto FOV); skipMat=null → whole scene captured.
+    const bool ok = renderSixFaces(sc, center, kSHFaceRes, 90.0f,
+                                   params.voidColor, faces,
+                                   /*skipMat=*/nullptr, /*skipRadius=*/0.0f,
+                                   /*publishProj=*/true);
+    g_envBakeInProgress = false;
+    if (!ok) return false;
+
+    // Project the six faces to 9 RGB SH coefficients. Per texel: direction is
+    // the inverse of sampleCube's (sx,sy)→(a,b) mapping; the differential
+    // solid angle ∝ (1+a²+b²)^-1.5 (orthonormal face basis), normalised so the
+    // total over the cube is 4π.
+    const int res = kSHFaceRes;
+    double acc[27] = {};
+    double wsum = 0.0;
+    for (int f = 0; f < 6; ++f) {
+        const CubeFace& cf = kCubeFaces[f];
+        for (int sy = 0; sy < res; ++sy) {
+            const float b = 1.0f - 2.0f * (float(sy) + 0.5f) / float(res);
+            for (int sx = 0; sx < res; ++sx) {
+                const float a = 2.0f * (float(sx) + 0.5f) / float(res) - 1.0f;
+                float dx = cf.fwd.x + a * cf.right.x + b * cf.up.x;
+                float dy = cf.fwd.y + a * cf.right.y + b * cf.up.y;
+                float dz = cf.fwd.z + a * cf.right.z + b * cf.up.z;
+                const float ilen = 1.0f / std::sqrt(dx * dx + dy * dy + dz * dz);
+                dx *= ilen; dy *= ilen; dz *= ilen;
+                const float w = ilen * ilen * ilen;   // (1+a²+b²)^-1.5
+                const uint32_t col = faces[f][size_t(sy) * res + sx];
+                const float B = float(col & 0xFF);
+                const float G = float((col >> 8) & 0xFF);
+                const float R = float((col >> 16) & 0xFF);
+                float Y[9];
+                shBasis9(dx, dy, dz, Y);
+                for (int i = 0; i < 9; ++i) {
+                    const double wy = double(w) * double(Y[i]);
+                    acc[i]      += double(B) * wy;
+                    acc[9 + i]  += double(G) * wy;
+                    acc[18 + i] += double(R) * wy;
+                }
+                wsum += double(w);
+            }
+        }
+    }
+    // Normalise the solid-angle weights to sum 4π, then fold the cosine-
+    // convolution A_l divided by π (A0/π=1, A1/π=2/3, A2/π=1/4) into each
+    // coefficient so E(n)=Σ c_i Y_i(n) is a direct, env-colour-scaled
+    // irradiance (uniform env → its own colour).
+    const double norm = wsum > 0.0 ? (4.0 * M_PI) / wsum : 0.0;
+    static const double Al[9] = { 1.0,
+                                  2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0,
+                                  0.25, 0.25, 0.25, 0.25, 0.25 };
+    for (int ch = 0; ch < 3; ++ch)
+        for (int i = 0; i < 9; ++i)
+            p.c[ch * 9 + i] = float(acc[ch * 9 + i] * norm * Al[i]);
+    p.baked = true;
+
+    std::fprintf(stderr, "[SHAMB] baked scene-center SH probe at (%.1f %.1f %.1f)"
+                 " res %d²×6; DC ambient B/G/R = %.1f/%.1f/%.1f (flat was"
+                 " %.0f/%.0f/%.0f)\n", center.x, center.y, center.z, res,
+                 p.c[0], p.c[9], p.c[18],
+                 (double)sc->Ambient.B, (double)sc->Ambient.G, (double)sc->Ambient.R);
+    return true;
+}
+
+void EnvReflection_Invalidate(Scene* sc) { g_envByScene.erase(sc); g_shByScene.erase(sc); }
 
 void EnvReflection_InvalidateSurface(Scene* sc, const Material* M) {
     if (!sc || !M) return;

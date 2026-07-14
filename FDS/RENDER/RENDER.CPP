@@ -480,6 +480,20 @@ void fds::RenderPipeline::renderFrame(RenderPath path, bool skipVolumetric)
 		}
 	}
 
+	// SH irradiance ambient (--sh_ambient): one-shot per-scene bake of a
+	// scene-center environment cube → 9 RGB SH coefficients the deferred
+	// surface kernel evaluates per pixel. Same main-camera / g_offscreenViewDepth
+	// gate + re-Transform-after-bake contract as EnvReflection_FramePrep (the
+	// probe renders six cube faces through the deferred pipeline, clobbering the
+	// frame's transformed state).
+	if (fds::FeatureFlags::sh_ambient() && CurScene && View
+	    && fds::g_offscreenViewDepth == 0) {
+		if (fds::SHAmbient_EnsureBaked(CurScene)) {
+			Transform_Objects(CurScene, fds::g_mainCamera, fds::g_mainFaces);
+			if (CAll != 0) Radix_Sort(FList, SList, CAll);
+		}
+	}
+
 	bool deferred;
 	if (path == RenderPath::ForceForward)       deferred = false;
 	else if (path == RenderPath::ForceDeferred) deferred = true;
