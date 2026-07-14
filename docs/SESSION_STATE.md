@@ -239,7 +239,10 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   (blasters agent a3471e22, resumed repeatedly): 22963db denser barrage
   t≈340-1700 · ff821a2 B2 impact-spark particles · 1e55078 C1 `chase_cam_fx`
   camera shake + FOV punch on hits · ecc3359 chase-scale bolt-light reach
-  (blaster_light_range 90, intensity 260, via setDefault in createChaseScene).
+  (blaster_light_range 90, intensity 260, via setDefault in createChaseScene) ·
+  2d33373 B2 near-miss water-splash columns (a `water` aim mode in the fire
+  table — tracers punch the sea, vertical spray). Combat CODE side is now
+  feature-complete.
   All pure-t (snapshot-safe), OFF byte-identical (chase pins unchanged
   9cc80e9e…), city/fountain unmoved. Flags: chase_blasters, chase_spark_size
   (0.00005), chase_spark_bright (255), chase_cam_fx, chase_cam_shake_gain
