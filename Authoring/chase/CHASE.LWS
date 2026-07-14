@@ -1023,6 +1023,702 @@ ShadowOptions 7
 
 
 
+FDSCORRIDORBEGIN
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10840.816 -8 -26071.2164 -39.863 0 0 1.2602 1.2602 1.2602
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -510.1345 -8 -17444.7675 -178.164 0 0 0.8845 0.8845 0.8845
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -1620.7104 -15.1183 -18372.1339 161.3515 0 0 1.7084 1.7084 1.7084
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -11060.8529 -17.5108 -24314.817 130.5046 0 0 2.2826 2.2826 2.2826
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -590.7785 -8 -15571.9706 -39.863 0 0 1.5891 1.5891 1.5891
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13291.1766 -8 -24237.0712 132.7738 0 0 1.045 1.045 1.045
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4034.8161 -8 -16507.7147 -103.7731 0 0 2.0388 2.0388 2.0388
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -4429.8603 -8 -16837.5892 -104.075 0 0 1.5947 1.5947 1.5947
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -14104.1259 -8 -23052.9792 -40.5201 0 0 1.4753 1.4753 1.4753
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -2971.396 -8 -13537.9742 176.5763 0 0 0.958 0.958 0.958
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12554.6135 -8 -19690.513 -167.9274 0 0 1.8033 1.8033 1.8033
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5792.1018 -14.1621 -13910.6788 -2.7119 0 0 1.4789 1.4789 1.4789
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -5454.921 -8 -13622.4946 38.7367 0 0 1.8353 1.8353 1.8353
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15848.4074 -8 -20467.5602 -108.1637 0 0 0.9464 0.9464 0.9464
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6909.8335 -8 -12827.8728 153.0262 0 0 2.5205 2.5205 2.5205
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15667.9054 -13.995 -16584.8198 -141.4603 0 0 1.4388 1.4388 1.4388
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -6013.7702 -8 -11370.1774 -28.3755 0 0 1.0235 1.0235 1.0235
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16166.9497 -15.9654 -16854.3766 -18.0982 0 0 1.9117 1.9117 1.9117
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15919.8889 -8 -14647.0511 103.8264 0 0 2.0995 2.0995 2.0995
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7686.1401 -14.9766 -10199.6247 -89.8538 0 0 1.6744 1.6744 1.6744
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19518.7099 -8 -14626.1969 -28.7676 0 0 1.5378 1.5378 1.5378
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7566.5017 -8 -8064.2002 -100.1761 0 0 0.7283 0.7283 0.7283
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16499.6463 -8 -12968.6717 -169.5125 0 0 1.7095 1.7095 1.7095
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -18189.4479 -15.2408 -11878.3217 49.8536 0 0 1.7378 1.7378 1.7378
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -7882.4309 -8 -6219.5672 -28.7676 0 0 1.2141 1.2141 1.2141
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -19880.1391 -8 -10276.0867 -27.0029 0 0 0.7221 0.7221 0.7221
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -10639.3455 -8 -5520.1868 -18.0982 0 0 2.2484 2.2484 2.2484
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9681.6169 -8 -5027.2787 -142.1296 0 0 1.9987 1.9987 1.9987
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21817.7813 -8 -8288.0971 -27.2332 0 0 1.2709 1.2709 1.2709
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -9416.3747 -8 -1905.5447 -170.5116 0 0 0.943 0.943 0.943
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -20813.5366 -8 -4786.0254 -157.1796 0 0 2.1785 2.1785 2.1785
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -11799.3965 -17.2575 -146.7757 147.3643 0 0 2.2218 2.2218 2.2218
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12337.6108 -15.3879 -423.775 -76.2755 0 0 1.7731 1.7731 1.7731
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24177.0165 -8 -3531.8625 -40.767 0 0 0.8783 0.8783 0.8783
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -13921.8181 -8 1746.1147 167.4961 0 0 2.626 2.626 2.626
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24660.9744 -17.1112 -713.3788 -32.8405 0 0 2.1867 2.1867 2.1867
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -12435.326 -8 5368.9187 -26.4505 0 0 1.5703 1.5703 1.5703
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15902.6057 -8 3643.9365 89.4911 0 0 1.5083 1.5083 1.5083
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24708.5854 -8 2211.2574 -132.5966 0 0 2.2669 2.2669 2.2669
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15353.6887 -17.415 6865.3471 -27.7193 0 0 2.2596 2.2596 2.2596
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28410.137 -8 3318.0469 -26.4505 0 0 1.3905 1.3905 1.3905
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -16484.5407 -8 9251.0676 -21.0786 0 0 0.7146 0.7146 0.7146
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -27221.5423 -8 3909.3764 87.5327 0 0 2.2878 2.2878 2.2878
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -27644.5192 -14.5154 6610.7926 162.0232 0 0 1.5637 1.5637 1.5637
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -15807.1876 -8 11815.4102 -23.734 0 0 1.6033 1.6033 1.6033
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -29861.7539 -8 8020.4257 157.0723 0 0 0.8474 0.8474 0.8474
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -20011.2262 -8 12351.4888 70.0775 0 0 1.9865 1.9865 1.9865
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -28209.5649 -13.9192 8746.8573 -28.1902 0 0 1.4206 1.4206 1.4206
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -31555.0125 -8 9660.4397 -23.734 0 0 1.4558 1.4558 1.4558
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -17781.4397 -8 15716.3806 -14.7954 0 0 1.0637 1.0637 1.0637
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -29972.6022 -8 12740.6942 39.0794 0 0 2.4083 2.4083 2.4083
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21150.2704 -14.5612 16619.6819 -53.2152 0 0 1.5747 1.5747 1.5747
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21994.6073 -8 16248.4453 -126.252 0 0 1.7886 1.7886 1.7886
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33297.5103 -8 13663.3074 176.5562 0 0 0.9373 0.9373 0.9373
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -22418.9385 -8 18446.3792 81.2987 0 0 2.1773 2.1773 2.1773
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33052.538 -17.4921 15244.2458 129.562 0 0 2.2781 2.2781 2.2781
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -21947.409 -8 22180.0807 -31.9873 0 0 1.2847 1.2847 1.2847
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m4.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -23542.0808 -8 21184.1103 35.3269 0 0 1.8044 1.8044 1.8044
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m5.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -33003.3941 -8 17976.1115 73.5861 0 0 2.4748 2.4748 2.4748
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24787.5473 -15.2008 23107.4122 83.7235 0 0 1.7282 1.7282 1.7282
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m2.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -35569.0584 -8 19074.8688 -31.9873 0 0 1.0922 1.0922 1.0922
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m3.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -24169.1399 -8 26194.8179 -27.1722 0 0 0.9994 0.9994 0.9994
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+LoadObject MY_OBJEC\DEMO\chasing\m1.lwo
+ShowObject 8 7
+ObjectMotion (unnamed)
+  9
+  1
+  -34709.2486 -15.3916 19611.8728 -13.5364 0 0 1.774 1.774 1.774
+  0 0 0 0 0
+EndBehavior 1
+LockedChannels 8
+ShadowOptions 7
+
+FDSCORRIDOREND
+
 AmbientColor 255 255 255
 AmbIntensity 0.250000
 

@@ -56,6 +56,7 @@ FldObject *CurObj;			// Current object
 FldLight	*CurLight;		// Current light
 FldCamera	*Camera;			// Current camera
 char			 ReadNext;
+char			 LastWordTerm;		// char that terminated the last ReadWord (10 = newline)
 
 char 	 *ReadWord(void);		    // Forward declaration
 char 	 *ReadString(void);	    // Forward declaration
@@ -837,6 +838,7 @@ int   a=0;
 	}
 	Temp[a]=0;
 	Temp[a+1]=ch;
+	LastWordTerm=ch;   // remember whether the word ended at a space or a newline
 	return Temp;
 }
 
@@ -872,7 +874,13 @@ signed int CurFunc;
 			Function[CurFunc].Reader();
 		// Some functions don't require next line reading, i.e. "AddLight"
 		}
-		if (ReadNext && strcmp(ID, "") != 0) NextLine(); else ReadNext = 1;
+		// An UNKNOWN keyword alone on its line (e.g. FDSCORRIDORBEGIN) is fully
+		// consumed by ReadWord — it already ate the trailing newline. Calling
+		// NextLine() here would eat the FOLLOWING line (which silently dropped
+		// the corridor's first LoadObject and mis-assigned its ObjectMotion to
+		// the previous object). Only skip a line when args remain unread.
+		if (CurFunc < 0 && LastWordTerm == 10) ReadNext = 1;
+		else if (ReadNext && strcmp(ID, "") != 0) NextLine(); else ReadNext = 1;
 	}
 	delete(ID);
 }
