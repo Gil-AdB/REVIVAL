@@ -19,12 +19,28 @@ each is a candidate below.
 - **#1 analytic split-sum env-BRDF** — DONE (e0640fe, flag `env_brdf_analytic`,
   default OFF). Measured +0.72 ms on greets = within noise → effectively free.
   Retires the `f90=1-rough` hack. Awaiting user look-approval to default ON.
-- **#2 SH irradiance ambient** — TODO (the big look win). Replace the flat
-  `Ambient` constant with 9-coeff L2 SH evaluated per-pixel along the normal
-  (~9 FMAs, no gather). Project the scene's sky-cube → 27 floats at bake. Gives
-  directional colored fill (sky tint from above); ties the chase sky-cube into
-  actual scene lighting — directly attacks "dark/flat". Measure per-pixel eval
-  cost (hits every lit pixel, not just reflective). Highest quality-per-cost.
+- **#2 SH irradiance ambient** — DONE (d29302a, flag `sh_ambient`, default
+  OFF). Replaces the flat `Sc->Ambient` constant with 9-coeff L2 RGB SH
+  irradiance evaluated per-pixel along the (post normal-map) shading normal
+  (~9 FMA/channel, no gather; clamped >=0). `SHAmbient_EnsureBaked`
+  (EnvBake.cpp) projects a scene-center 32²×6 env cube — rendered through the
+  same deferred cube-face path the env-reflection probes use — into 27 floats,
+  A_l/π folded in so a uniform env evaluates back to its own colour
+  (magnitude-comparable to the flat ambient). Injected at all three opaque
+  kernel ambient sites (scalar wave-1 = greets; OuterVec vec-fill = city,
+  covers its scalar fallback via `lane_ambB`; TileFill quarter/checker).
+  Transparent kernel keeps flat ambient (out of scope). **Measured (arm64,
+  1920×1080, whole-frame, 8 interleaved OFF/ON rounds, min-of-each):**
+  greets scalar Δ = **+0.84 ms** (min 73.53→74.38; noise floor 6.3 ms) →
+  within noise = **effectively free**; city OuterVec Δ = **+3.47 ms** (min
+  103.26→106.73; noise floor 9.8 ms; city renders two deferred passes and the
+  OuterVec SH is a per-lane *scalar* loop, hence the larger — still
+  sub-noise-floor — delta). Flag-OFF byte-identical: city `37e62845…`,
+  fountain `51fff7cd…`. A/B: matte pillars/walls gain directional 3D form
+  (flat dead silhouette OFF → shaped fill ON); heavily-lit/emissive regions
+  barely move (ambient is a small fraction there, HDR-compressed). Awaiting
+  user look-approval to default ON. NB the one-shot bake renders the scene →
+  nondeterministic on greets, so md5 pins must gate with the flag OFF.
 - **#3 (1−F) diffuse energy conservation** — TODO. Multiply diffuse `fd` by
   `(1-fres)` at the combine (fres already computed). ~1 op, fixes grazing-edge
   over-brightness. Trivial.
