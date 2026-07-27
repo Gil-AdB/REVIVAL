@@ -562,17 +562,35 @@ def save_objects_to_sidecar(scene, objects, warnings):
 
 
 LIGHT_KEYS = {"r", "g", "b", "intensity", "range"}
-# Engine-only per-light extensions: no LWS/FLD field exists, so they persist
-# as sidecar "light:<i>|<key>|<value>" lines (applied at scene init by
-# MaterialImport_ApplySidecar).
-LIGHT_SIDECAR_KEYS = {"flareScale"}
+# Per-light engine extensions authored as LWS keywords INSIDE the light's
+# AddLight block (the FdsFlareScale precedent — the whole FLD light-flag +
+# conditional-payload + engine path already exists: Light_FlareScale bit 4096
+# in tools/lwsread + FDS/FLD/FLD_READ.CPP → Omni::FlareScale). Migrated OFF the
+# sidecar (sidecar-elimination, docs/SIDECAR_MIGRATION_PLAN.md §1c). key -> LWS
+# keyword name. See pop_light_lws_keys / patch_lws_light_ext.
+LIGHT_LWS_KEYS = {"flareScale": "FdsFlareScale"}
+# Per key: the value that means "authored default / unset". Writing it DELETES
+# the keyword instead of emitting it, so a light dialed back to default
+# regenerates a byte-identical FLD (no flag bit, no payload). FlareScale 0/1
+# both mean 1.0 in the engine (Omni::FlareScale sentinel); 1.0 is the editor's
+# neutral, so treat it as unset.
+LIGHT_LWS_IDENTITY = {"flareScale": 1.0}
+# Non-authoring fallback (dead: every scene is source-authored now — see the
+# plan §2) has no LWS to write, so it still peels engine-only light keys to the
+# sidecar. Only reached when a scene has no authoring sources.
+LIGHT_SIDECAR_KEYS = set(LIGHT_LWS_KEYS)
 
 
 def split_light_sidecar_keys(scene, lights, warnings):
-    """Strip LIGHT_SIDECAR_KEYS out of the save payload's light dicts and
-    persist them as sidecar light: lines. Mutates `lights` (drops entries
-    that become empty). Returns a summary list."""
+    """Strip engine-only light keys to sidecar light: lines — ONLY for the dead
+    non-authoring fallback. Authoring scenes route them to LWS keywords instead
+    (pop_light_lws_keys / patch_lws_light_ext), so nothing is stripped there.
+    Mutates `lights` (drops entries that become empty). Returns a summary list."""
     if not lights:
+        return []
+    # Authoring scenes: keep the keys in the payload for the LWS-keyword path.
+    keys = set() if SCENES[scene].get("authoring") else LIGHT_SIDECAR_KEYS
+    if not keys:
         return []
     sidecar = scene_sidecar(scene)
     entries = read_sidecar(sidecar)
@@ -581,7 +599,7 @@ def split_light_sidecar_keys(scene, lights, warnings):
         props = lights[idx_s]
         if not isinstance(props, dict):
             continue
-        side = {k: props.pop(k) for k in list(props) if k in LIGHT_SIDECAR_KEYS}
+        side = {k: props.pop(k) for k in list(props) if k in keys}
         for k, v in side.items():
             entries[(f"light:{int(idx_s)}", k)] = f"{float(v):.6g}"
             saved.append({"light": int(idx_s), "key": k})
@@ -590,6 +608,92 @@ def split_light_sidecar_keys(scene, lights, warnings):
     if saved:
         write_sidecar(sidecar, entries)
     return saved
+
+
+def pop_light_lws_keys(lights):
+    """Pull LWS-keyword light props (flareScale) out of the light dicts so
+    patch_lws_lights (native AddLight-block fields only) doesn't reject them as
+    unknown. Mutates `lights` (drops entries that become empty). Returns
+    {idx_str: {key: value}} for patch_lws_light_ext."""
+    out = {}
+    for idx_s in list(lights):
+        props = lights[idx_s]
+        if not isinstance(props, dict):
+            continue
+        ext = {k: props.pop(k) for k in list(props) if k in LIGHT_LWS_KEYS}
+        if ext:
+            out[idx_s] = ext
+        if not props:
+            del lights[idx_s]
+    return out
+
+
+def patch_lws_light_ext(scene, light_ext, warnings):
+    """{idx_str: {flareScale: v}} -> per-light LWS keyword lines inside the
+    light's AddLight block (e.g. 'FdsFlareScale 0.15'). A value equal to the
+    key's LIGHT_LWS_IDENTITY DELETES the keyword (keeps the regenerated FLD
+    byte-identical to an unauthored light). Returns [{index, keys, file,
+    backup}]; writes + backs up the LWS only if something changed.
+
+    Processes light blocks HIGHEST index first so an insert (a light that had
+    no such keyword yet) never shifts a lower block's precomputed span."""
+    if not light_ext:
+        return []
+    lws_name = SCENES[scene]["lws"]
+    path = os.path.join(scene_authoring_dir(scene), lws_name)
+    orig = open(path, encoding="latin-1").read()
+    lines = orig.split("\n")
+    starts = [i for i, l in enumerate(lines) if l.strip() == "AddLight"]
+    patched = []
+    for idx_s in sorted(light_ext, key=lambda s: int(s), reverse=True):
+        idx = int(idx_s)
+        if idx < 0 or idx >= len(starts):
+            warnings.append(f"light {idx}: LWS has {len(starts)} AddLight blocks — skipped")
+            continue
+        lo = starts[idx]
+        hi = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        done = []
+        for key, val in light_ext[idx_s].items():
+            kw = LIGHT_LWS_KEYS[key]
+            try:
+                fv = float(val)
+            except (TypeError, ValueError):
+                warnings.append(f"light {idx}.{key}: bad value {val!r} — skipped")
+                continue
+            fi = next((i for i in range(lo, hi)
+                       if lines[i].split(None, 1)[:1] == [kw]), None)
+            if abs(fv - LIGHT_LWS_IDENTITY[key]) < 1e-6:   # back to default → drop
+                if fi is not None:
+                    del lines[fi]
+                    done.append(key)
+                continue
+            newline = f"{kw} {fv:.6g}"
+            if fi is not None:
+                if lines[fi] != newline:
+                    lines[fi] = newline
+                    done.append(key)
+            else:
+                # Insert after LgtIntensity (present in every AddLight block),
+                # else right after the AddLight line — the parser only needs the
+                # keyword somewhere inside the light section (sets CurLight).
+                at = next((i for i in range(lo, hi)
+                           if lines[i].split(None, 1)[:1] == ["LgtIntensity"]), lo)
+                lines.insert(at + 1, newline)
+                done.append(key)
+        if done:
+            patched.append({"index": idx, "keys": sorted(done)})
+    if patched:
+        new = "\n".join(lines)
+        if new != orig:
+            bak = lwopatch.backup(path, scene_backup_dir(scene))
+            with open(path, "w", encoding="latin-1") as f:
+                f.write(new)
+            for p in patched:
+                p["file"] = lws_name
+                p["backup"] = os.path.relpath(bak, REPO)
+        else:
+            patched = []
+    return patched
 
 
 def patch_lws_lights(scene, lights, warnings):
@@ -898,8 +1002,12 @@ def do_save_main(scene, payload):
                             "env defaults need LWS write-back, skipped")
         return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
 
+    # Engine-only per-light keys (flareScale) → LWS keywords in the light block,
+    # popped BEFORE patch_lws_lights so it doesn't reject them (sidecar-elim §1c).
+    light_ext = pop_light_lws_keys(lights)
     patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
     patched_lights = patch_lws_lights(scene, lights, warnings)
+    patched_lights += patch_lws_light_ext(scene, light_ext, warnings)
     if not surfaces and not uv_by_name:
         if patched_lights or patched_scene_env:
             # Lights / scene env defaults changed -> the FLD must be
