@@ -210,12 +210,22 @@ sourceless scene.)
 
 ```
 Phase 1 (writers; reader untouched; every FLD + gate byte-identical)
-  1.1  light flareScale → FdsFlareScale        (editor_server only; FLD path exists)
-  1.2  scene: keys      → FdsFastFog*/FdsBoltFlash*  (LWS+lwsread+FLD reader+conv+editor)
-  1.3  object scale     → FdsObjectScale        (LWS+lwsread+FLD reader+conv+editor)
-  1.4  per-surface RVSF → Surf_RevExt payload   (LWO+lwsread+FLD reader+conv+lwopatch+editor)
-  1.5  smoothAngle      → native SMAN           (lwopatch+engine smoothing-source fix)
-  1.6  PBR maps + normalFlip → RVSF strings (§1e, option A)   [deferrable]
+  ✅ 1.1  light flareScale → FdsFlareScale     DONE (9022823) — editor_server only.
+  ✅ 1.2  per-surface RVSF → Surf_RevExt payload  DONE (bc3e8f7) — the HIGH-VALUE
+          slice (holds the real GREETS.MAT data: envBakeRes/aoStrength/
+          parallaxScale/envRefl/refractive). Prioritized ahead of the zero-data
+          scene/object slices below. Full chain: lwopatch RVSF sub-chunk +
+          lwsread (LWOREAD read / FLDSAVE write) + engine (FLD_READ/FLD_MAT) +
+          editor routing. normalFlip + smoothAngle deliberately left on sidecar.
+  ⬜ 1.3  scene: keys   → FdsFastFog*/FdsBoltFlash*  (LWS+lwsread+FLD hdr+conv+
+          factory setDefault wiring). ZERO current data (no sidecar/editor writer
+          exists) — low urgency; mirrors the proven FdsSceneEnvRefl scene-header
+          idiom (new bit Scene_FdsSceneDefaults=8192).
+  ⬜ 1.4  object scale  → FdsObjectScale (new Object_FdsExt=8192 payload). ZERO
+          current data. Low risk (object record read once per object).
+  ⬜ 1.5  smoothAngle   → native SMAN. REAL data (GREETS.MAT: amudim=104/momy=30/
+          stairs=54/screen emiter=180). NOT a drop-in — see the finding below.
+  ⬜ 1.6  PBR maps + normalFlip → RVSF strings (§1e option A). Largest; deferrable.
 
   ── writers all landed; sidecar reader STILL LIVE; both paths coexist ──
 
@@ -226,6 +236,23 @@ Phase 2 (STOP boundary for this campaign — do NOT start here)
   2.2  retire the sidecar reader (MaterialImport_ApplySidecar / _ApplySceneDefaults)
   2.3  DELETE the 7 `#k` collapse sites (§5) — not guard, DELETE
 ```
+
+**Slice 1.5 finding (smoothAngle is NOT a clean SMAN drop-in).** The engine's
+authored-smoothing path (`MakeFacesIndependent`, DEMO/MeshOps.cpp:136-146)
+honors `Material::MaxSmoothingAngle` (loaded from the LWO/FLD `SMAN`) ONLY when
+the `surf_smoothing_authored` FeatureFlag is ON — and it is **default OFF** (kept
+so for byte-identical legacy: without it, MakeFacesIndependent uses a global 30°
+crease + a 'momy' special-case). The editor `smoothAngle` override, by contrast,
+goes to the `MeshOps` registry and "always wins" regardless of that flag. So
+migrating `smoothAngle` to native `SMAN` requires either (a) turning
+`surf_smoothing_authored` ON for the scene — which re-smooths EVERY surface to
+its authored `MaxSmoothingAngle`, a global LOOK change, not just the
+editor-touched ones — or (b) seeding the `MeshOps` registry from
+`MaxSmoothingAngle` at scene init so only authored angles apply while the legacy
+default holds elsewhere. Option (b) is the correct migration but is a real
+engine change with LOOK verification needed — and greets (where the data lives)
+is nondeterministic here (§6), so this slice needs its own careful treatment,
+not a rushed one. lwopatch also needs `SMAN` write support (degrees→radians).
 
 ### ★ USER CHECKPOINT — required before Phase 2 (reader retirement) ★
 
@@ -284,6 +311,26 @@ Traps carried from SESSION_STATE: city cache (discard first run after any
 CITY.FLD install); greets 1-in-12 flip (here worse — §6); never `git add -A`
 (stage explicitly; GREETS.FLD/MAT, momy textures, Piramid.lwo, Hull.lwo,
 Authoring/chase/CHASE.FLD are sacred/uncommitted).
+
+**lwsread regen-output baseline (golden md5s of a fresh regen from the unchanged
+authoring sources, captured 2026-07-28 before slice 1.2; any lwsread source
+change MUST leave these unchanged for sources without the new keyword/sub-chunk):**
+
+| scene | variant | md5 |
+|---|---|---|
+| greets | lwsread | `3ed7a253803c868178ceb0c66c79a233` |
+| chase | lwsread_legacy | `a5e7beb3886065fe314482e44c6b5fec` |
+| fountain | lwsread_legacy | `a0fbf4c75062ed1455c19ba0702f9f8f` |
+| city | lwsread_legacy | `31eedf549d45af5695b22aa8466c18f5` |
+| crash | lwsread_legacy | `f7c6de555998171cbd9c270bb6801458` |
+| pbrtest | lwsread | `19444b410a5ebad3ad1b77cd72659e6d` |
+
+Note the shipping `FOUNTAIN.FLD` was built with a THIRD variant `lwsread_ofir`
+(`OFIR_LASTFRAME`), so `lwsread_legacy` fountain regen differs from the shipping
+FLD by 12 header bytes (the LastFrame field) — but both render **identically** at
+the fountain pin t=2500 (verified: legacy-regen fountain → `51fff7cd`). So
+"regen == shipping" is NOT the fountain inertness check; "regen == this baseline"
+is.
 
 **New-path proof (the writers actually work):** since the shipping-FLD gates only
 prove *inertness*, each slice ALSO proves the authored path offline without
