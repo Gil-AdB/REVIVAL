@@ -48,6 +48,23 @@ typedef struct
 	float          Opacity;
 	float					 TFP0;
 	float					 TFP1;
+	// Revival per-surface extension — Surf_RevExt(0x8000)-gated conditional
+	// payload after the material record (u16 RevExtMask + only the authored
+	// fields, ascending mask-bit order). Read in FLD_READ.CPP ReadMaterial,
+	// mapped to Material in FLD_MAT.CPP AddMaterial. Bit order MUST match
+	// tools/lwsread (FLDSAVE.CPP / LWOREAD.CPP). memset(0) = no extension.
+	// See docs/SIDECAR_MIGRATION_PLAN.md §1a.
+	uint16_t       RevExtMask;      // 0 = none
+	float          AoStrength;      // bit 0x001
+	float          ParallaxScale;   // bit 0x002
+	float          TintR;           // bit 0x004
+	float          TintG;           // bit 0x008
+	float          TintB;           // bit 0x010
+	float          RefractIor;      // bit 0x020
+	uint8_t        Refractive;      // bit 0x040 -> Mat_Refractive
+	int8_t         EnvReflMode;     // bit 0x080
+	int32_t        EnvBakeRes;      // bit 0x100
+	int8_t         WaterProcMode;   // bit 0x200
 } FldMat;
 
 typedef struct _FldKeyFrame_

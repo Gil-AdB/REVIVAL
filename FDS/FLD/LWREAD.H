@@ -18,6 +18,13 @@ enum LightWave_Constants
 	Surf_DoubleSided		 	  = 256,
 	Surf_Additive				 	  = 512,
 	Surf_ShadowAlpha			  = 1024,
+	// Revival per-surface extension marker — set on the material FLAG word by
+	// tools/lwsread (LWOREAD parsing the custom LWO SURF "RVSF" sub-chunk). Gates
+	// a conditional per-material payload after the material record in the FLD (see
+	// FLD_READ.CPP ReadMaterial). FLDs without the bit are byte-identical legacy.
+	// 0x0800..0x8000 free in the 16-bit LWOB FLAG word; 0x4000 earmarked
+	// Rev_SingleShadowId. See docs/SIDECAR_MIGRATION_PLAN.md §1a.
+	Surf_RevExt					= 0x8000,
 // Texture flags
 	Texture_XAxis					  = 1,
 	Texture_YAxis           = 2,

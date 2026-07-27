@@ -152,6 +152,26 @@ void SaveMaterial(FldMat *Mat)
 	fwrite(&Mat->Opacity,1,4,FLD);
 	fwrite(&Mat->TFP0, 1, 4, FLD);
 	fwrite(&Mat->TFP1, 1, 4, FLD);
+	// Revival per-surface extension (LWS/LWO "RVSF" -> Surf_RevExt bit): a
+	// conditional payload written ONLY when the material carries the bit —
+	// u16 RevExtMask + only the authored fields, in ascending mask-bit order.
+	// Materials without the bit stay byte-identical to the pre-extension format
+	// (the read side in FDS/FLD/FLD_READ.CPP walks the same order). LWOREAD sets
+	// Surf_RevExt on Flags when it parses an RVSF sub-chunk. See LWREAD.H.
+	if (Mat->Flags & Surf_RevExt)
+	{
+		fwrite(&Mat->RevExtMask,1,2,FLD);
+		if (Mat->RevExtMask & 0x001) fwrite(&Mat->AoStrength,1,4,FLD);
+		if (Mat->RevExtMask & 0x002) fwrite(&Mat->ParallaxScale,1,4,FLD);
+		if (Mat->RevExtMask & 0x004) fwrite(&Mat->TintR,1,4,FLD);
+		if (Mat->RevExtMask & 0x008) fwrite(&Mat->TintG,1,4,FLD);
+		if (Mat->RevExtMask & 0x010) fwrite(&Mat->TintB,1,4,FLD);
+		if (Mat->RevExtMask & 0x020) fwrite(&Mat->RefractIor,1,4,FLD);
+		if (Mat->RevExtMask & 0x040) fwrite(&Mat->Refractive,1,1,FLD);
+		if (Mat->RevExtMask & 0x080) fwrite(&Mat->EnvReflMode,1,1,FLD);
+		if (Mat->RevExtMask & 0x100) fwrite(&Mat->EnvBakeRes,1,4,FLD);
+		if (Mat->RevExtMask & 0x200) fwrite(&Mat->WaterProcMode,1,1,FLD);
+	}
 }
 
 void SaveObject(FldObject *Obj)

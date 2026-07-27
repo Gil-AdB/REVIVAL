@@ -190,6 +190,28 @@ void ReadMaterial(FldMat *Mat)
 	fread(&Mat->Opacity,1,4,FLD);
 	fread(&Mat->TFP0,1,4,FLD);
 	fread(&Mat->TFP1,1,4,FLD);
+	// Revival per-surface extension: conditional payload gated on Surf_RevExt
+	// (0x8000) in the material FLAG word — u16 RevExtMask + only the authored
+	// fields, ascending mask-bit order (matches tools/lwsread FLDSAVE.CPP). The
+	// FldMat is not zero-initialized (new FldMat[] on a POD), so gate on the
+	// disk-read Flags bit, not on RevExtMask, and read RevExtMask from disk only
+	// when the bit is set. Legacy FLDs never carry the bit (LWOB FLAG tops out at
+	// 1024), so this branch is provably inert for shipping content. Mapped to the
+	// live Material in FLD_MAT.CPP AddMaterial. See docs/SIDECAR_MIGRATION_PLAN.md.
+	if (Mat->Flags & Surf_RevExt)
+	{
+		fread(&Mat->RevExtMask,1,2,FLD);
+		if (Mat->RevExtMask & 0x001) fread(&Mat->AoStrength,1,4,FLD);
+		if (Mat->RevExtMask & 0x002) fread(&Mat->ParallaxScale,1,4,FLD);
+		if (Mat->RevExtMask & 0x004) fread(&Mat->TintR,1,4,FLD);
+		if (Mat->RevExtMask & 0x008) fread(&Mat->TintG,1,4,FLD);
+		if (Mat->RevExtMask & 0x010) fread(&Mat->TintB,1,4,FLD);
+		if (Mat->RevExtMask & 0x020) fread(&Mat->RefractIor,1,4,FLD);
+		if (Mat->RevExtMask & 0x040) fread(&Mat->Refractive,1,1,FLD);
+		if (Mat->RevExtMask & 0x080) fread(&Mat->EnvReflMode,1,1,FLD);
+		if (Mat->RevExtMask & 0x100) fread(&Mat->EnvBakeRes,1,4,FLD);
+		if (Mat->RevExtMask & 0x200) fread(&Mat->WaterProcMode,1,1,FLD);
+	}
 #ifdef DebugMode
 	FLDLOG("---S---|Color texture = %s\n",Mat->ColorTexture);
 	FLDLOG("---u---|Diffuse texture = %s\n",Mat->DiffuseTexture);

@@ -596,6 +596,38 @@ void ReadTFP1(unsigned int EndPos)
 #endif
 }
 
+// Revival per-surface extension — custom LWO SURF sub-chunk "RVSF" (big-endian
+// IFF body): u16 RevExtMask + only the authored fields, in ascending mask-bit
+// order. Written by tools/lwopatch.py; carried into the FLD as a Surf_RevExt-
+// gated material payload (FLDSAVE.CPP). Bit order MUST match FLDSAVE +
+// FDS/FLD/FLD_READ.CPP. See docs/SIDECAR_MIGRATION_PLAN.md §1a. Unknown to
+// stock LightWave (dropped on a stock re-save — acceptable, the editor is the
+// author of record).
+void ReadSurfaceRevExt(unsigned int EndPos)
+{
+	unsigned short mask;
+	fread(&mask,1,2,LWO); SwapW(&mask);
+	Surf->RevExtMask = mask;
+	Surf->Flags |= Surf_RevExt;
+	if (mask & 0x001) { fread(&Surf->AoStrength,1,4,LWO);    SwapDW(&Surf->AoStrength); }
+	if (mask & 0x002) { fread(&Surf->ParallaxScale,1,4,LWO); SwapDW(&Surf->ParallaxScale); }
+	if (mask & 0x004) { fread(&Surf->TintR,1,4,LWO);         SwapDW(&Surf->TintR); }
+	if (mask & 0x008) { fread(&Surf->TintG,1,4,LWO);         SwapDW(&Surf->TintG); }
+	if (mask & 0x010) { fread(&Surf->TintB,1,4,LWO);         SwapDW(&Surf->TintB); }
+	if (mask & 0x020) { fread(&Surf->RefractIor,1,4,LWO);    SwapDW(&Surf->RefractIor); }
+	if (mask & 0x040) { fread(&Surf->Refractive,1,1,LWO); }        // u8
+	if (mask & 0x080) { fread(&Surf->EnvReflMode,1,1,LWO); }       // i8
+	if (mask & 0x100) { fread(&Surf->EnvBakeRes,1,4,LWO);    SwapDW(&Surf->EnvBakeRes); }
+	if (mask & 0x200) { fread(&Surf->WaterProcMode,1,1,LWO); }     // i8
+#ifdef ObjectDebugMode
+	printf("  RVSF mask=%04Xh ao=%.3f par=%.3f tint=%.3f/%.3f/%.3f ior=%.3f "
+	       "refr=%d env=%d bakeRes=%d water=%d\n", mask, Surf->AoStrength,
+	       Surf->ParallaxScale, Surf->TintR, Surf->TintG, Surf->TintB,
+	       Surf->RefractIor, Surf->Refractive, Surf->EnvReflMode,
+	       Surf->EnvBakeRes, Surf->WaterProcMode);
+#endif
+}
+
 void ReadSurfaceColorTexture(unsigned int EndPos)
 {
 	ReadAsciiZ(&Surf->ColorTexture);
@@ -697,7 +729,8 @@ struct
 	{"TAAS"	,	ReadSurfaceAntialiasingStrength},
 	{"TOPC"	,	ReadSurfaceTextureOpacity},
 	{"TFP0"	,	ReadTFP0},
-	{"TFP1"	,	ReadTFP1}
+	{"TFP1"	,	ReadTFP1},
+	{"RVSF" ,	ReadSurfaceRevExt}   // Revival per-surface extension (RVSF)
 };
 
 FldMat *FindMat(char *Name)

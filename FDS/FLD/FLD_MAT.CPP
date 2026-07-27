@@ -222,6 +222,30 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 			printf("WARNING! World coordinates are currently unsupported!\n (%s)", candidate.Name);
 	}
 
+	// Revival per-surface extension (Surf_RevExt-gated FLD payload -> Material).
+	// The engine-only per-material dials that used to arrive via the .MAT
+	// sidecar (aoStrength / parallaxScale / tintR/G/B / refractIor / refractive /
+	// envRefl / envBakeRes / waterProcedural). Only the authored fields
+	// (RevExtMask bits) override the Material defaults. Applied OUTSIDE the
+	// TextureImage block (untextured glass surfaces still need Mat_Refractive)
+	// and BEFORE makeKey, so Mat_Refractive participates in dedup — a glass
+	// surface never collapses onto a non-glass one. See
+	// docs/SIDECAR_MIGRATION_PLAN.md §1a. Legacy FLDs never carry the bit.
+	if (OrgMat->Flags & Surf_RevExt) {
+		const uint16_t m = OrgMat->RevExtMask;
+		if (m & 0x001) candidate.AoStrength    = OrgMat->AoStrength;
+		if (m & 0x002) candidate.ParallaxScale = OrgMat->ParallaxScale;
+		if (m & 0x004) candidate.TintR         = OrgMat->TintR;
+		if (m & 0x008) candidate.TintG         = OrgMat->TintG;
+		if (m & 0x010) candidate.TintB         = OrgMat->TintB;
+		if (m & 0x020) candidate.RefractIor    = OrgMat->RefractIor;
+		if (m & 0x040) { if (OrgMat->Refractive) candidate.Flags |=  Mat_Refractive;
+		                 else                     candidate.Flags &= ~(DWord)Mat_Refractive; }
+		if (m & 0x080) candidate.EnvReflMode   = OrgMat->EnvReflMode;
+		if (m & 0x100) candidate.EnvBakeRes    = OrgMat->EnvBakeRes;
+		if (m & 0x200) candidate.WaterProcMode = OrgMat->WaterProcMode;
+	}
+
 	// Dedup on the runtime-relevant subset. Two FldMat entries with
 	// matching key collapse to one canonical Material* — the second
 	// caller gets the first one back, no allocation, no MatLib link.

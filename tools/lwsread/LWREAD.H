@@ -22,6 +22,15 @@ enum LightWave_Constants
 	Surf_DoubleSided		 	  = 256,
 	Surf_Additive				 	  = 512,
 	Surf_ShadowAlpha			  = 1024,
+	// Revival per-surface extension marker (custom LWO SURF sub-chunk "RVSF").
+	// 0x0800..0x8000 are free in the 16-bit LWOB surface FLAG word (standard
+	// LWOB uses only 1..1024). When set on FldMat::Flags, SaveMaterial writes a
+	// conditional payload (u16 RevExtMask + only the authored fields) after the
+	// material record — see FLDSAVE.CPP / docs/SIDECAR_MIGRATION_PLAN.md §1a.
+	// FLDs whose materials don't carry the bit stay byte-identical to the
+	// pre-extension format. 0x0800/0x1000/0x2000/0x4000 reserved for future
+	// boolean surface markers (0x4000 earmarked Rev_SingleShadowId).
+	Surf_RevExt					= 0x8000,
 // Texture flags
 	Texture_XAxis					  = 1,
 	Texture_YAxis           = 2,
@@ -154,6 +163,23 @@ typedef struct
 	float					 Opacity;
 	float					 TFP0;
 	float					 TFP1;
+	// Revival per-surface extension (custom LWO SURF sub-chunk "RVSF" ->
+	// Surf_RevExt(0x8000)-gated FLD material payload). RevExtMask bit i = field
+	// i authored (only authored fields are serialized). Bit order MUST match the
+	// LWO reader (LWOREAD ReadSurfaceRevExt), the FLD writer (FLDSAVE
+	// SaveMaterial) and the engine FLD reader (FDS/FLD/FLD_READ.CPP ReadMaterial).
+	// See docs/SIDECAR_MIGRATION_PLAN.md §1a.
+	uint16_t       RevExtMask;   // 0 = no extension
+	float          AoStrength;      // bit 0x001
+	float          ParallaxScale;   // bit 0x002
+	float          TintR;           // bit 0x004
+	float          TintG;           // bit 0x008
+	float          TintB;           // bit 0x010
+	float          RefractIor;      // bit 0x020
+	uint8_t        Refractive;      // bit 0x040 (-> Mat_Refractive)
+	int8_t         EnvReflMode;     // bit 0x080 (-1/0/1)
+	int32_t        EnvBakeRes;      // bit 0x100 (pow2 64..1024)
+	int8_t         WaterProcMode;   // bit 0x200 (-1/0/1)
 } FldMat;
 
 typedef struct

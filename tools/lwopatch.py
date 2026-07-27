@@ -45,8 +45,32 @@ CANON = ["COLR", "FLAG",
          "RFLT", "RIMG", "RSAN", "RIND", "EDGE", "SMAN",
          "CTEX", "DTEX", "STEX", "RTEX", "TTEX", "BTEX",
          "TIMG", "TFLG", "TSIZ", "TCTR", "TFAL", "TVEL", "TCLR", "TVAL",
-         "TAMP", "TFRQ", "TALP", "TWRP", "TAAS", "TOPC", "TIP0", "TFP0", "TFP1"]
+         "TAMP", "TFRQ", "TALP", "TWRP", "TAAS", "TOPC", "TIP0", "TFP0", "TFP1",
+         # Revival per-surface extension — appended last (a custom sub-chunk;
+         # stock LightWave drops it on re-save, the editor is author of record).
+         "RVSF"]
 CANON_POS = {c: i for i, c in enumerate(CANON)}
+
+# Revival per-surface extension — custom LWO SURF sub-chunk "RVSF"
+# (docs/SIDECAR_MIGRATION_PLAN.md §1a). Body = u16 RevExtMask + only the
+# authored fields, in ASCENDING mask-bit order, big-endian (LWO IFF). The bit
+# order + field widths MUST match tools/lwsread (LWOREAD ReadSurfaceRevExt,
+# FLDSAVE SaveMaterial) and the engine (FDS/FLD/FLD_READ.CPP ReadMaterial).
+# Each: (editor-key, mask-bit, struct-format). Carries the engine-only
+# per-material dials that used to live in the .MAT sidecar.
+RVSF_FIELDS = [
+    ("aoStrength",      0x001, ">f"),
+    ("parallaxScale",   0x002, ">f"),
+    ("tintR",           0x004, ">f"),
+    ("tintG",           0x008, ">f"),
+    ("tintB",           0x010, ">f"),
+    ("refractIor",      0x020, ">f"),
+    ("refractive",      0x040, ">B"),   # 0/1 -> Mat_Refractive
+    ("envRefl",         0x080, ">b"),   # -1/0/1
+    ("envBakeRes",      0x100, ">i"),   # pow2 64..1024
+    ("waterProcedural", 0x200, ">b"),   # -1/0/1
+]
+RVSF_KEYS = {k for (k, _, _) in RVSF_FIELDS}
 
 # prop -> (int_chunk, float_chunk, engine->fraction divisor)
 VALUE_PROPS = {
@@ -102,6 +126,58 @@ class Surf:
         flags = struct.unpack(">H", self.subchunks[i][1])[0] if i >= 0 else 0
         flags = (flags & ~0x7) | (int(axis) & 0x7)
         self.set_chunk("TFLG", struct.pack(">H", flags))
+
+    def rev_ext(self):
+        """Parse the RVSF sub-chunk into {key: value} (empty dict if none)."""
+        i = self._find("RVSF")
+        if i < 0:
+            return {}
+        body = self.subchunks[i][1]
+        if len(body) < 2:
+            return {}
+        mask = struct.unpack_from(">H", body, 0)[0]
+        out, p = {}, 2
+        for key, bit, fmt in RVSF_FIELDS:
+            if mask & bit:
+                (v,) = struct.unpack_from(fmt, body, p)
+                out[key] = v
+                p += struct.calcsize(fmt)
+        return out
+
+    def set_rev_ext(self, props):
+        """Merge {key: value} RVSF props into this surface's RVSF sub-chunk,
+        preserving fields the caller didn't touch. A value of None drops that
+        field. When the merged set is empty the RVSF sub-chunk is removed (the
+        surface reverts to no extension, so the regenerated FLD carries no
+        Surf_RevExt bit — byte-identical to an unauthored surface)."""
+        cur = self.rev_ext()
+        for k, v in props.items():
+            if k not in RVSF_KEYS:
+                raise ValueError(f"unknown RVSF key '{k}'")
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        i = self._find("RVSF")
+        if not cur:
+            if i >= 0:
+                del self.subchunks[i]
+            return
+        mask, body = 0, b""
+        for key, bit, fmt in RVSF_FIELDS:
+            if key not in cur:
+                continue
+            mask |= bit
+            if fmt == ">B":
+                val = int(round(float(cur[key]))) & 0xFF
+            elif fmt == ">b":
+                val = max(-128, min(127, int(round(float(cur[key])))))
+            elif fmt == ">i":
+                val = int(round(float(cur[key])))
+            else:
+                val = float(cur[key])
+            body += struct.pack(fmt, val)
+        self.set_chunk("RVSF", struct.pack(">H", mask) + body)
 
     def set_prop(self, prop, value):
         if prop in VALUE_PROPS:

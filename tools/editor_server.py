@@ -111,6 +111,11 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # envBakeRes: per-surface env-probe bake face resolution (pow2 64..1024;
 # 0 = unset -> the global env_bake_res / legacy sizing chain).
 SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural"}
+# Of those, the ones that migrate to the LWO RVSF sub-chunk (sidecar-elim §1a),
+# for authoring scenes. = SURF_SIDECAR_KEYS minus normalFlip, which pairs with
+# the normal-map assignment (§1e) and stays on the sidecar for now. lwopatch's
+# RVSF_FIELDS is the on-disk field table this maps onto.
+RVSF_SURF_KEYS = SURF_SIDECAR_KEYS - {"normalFlip"}
 # smoothAngle has no LWO surface chunk the lwopatch understands, so on AUTHORING
 # scenes it can't take the native FLD path (lwopatch.set_prop would raise). It
 # persists to the sidecar there instead: the engine honors a
@@ -131,9 +136,15 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         return []
     sidecar = scene_sidecar(scene)
     entries = read_sidecar(sidecar)
-    # Authoring scenes have no LWO smoothing chunk — route smoothAngle to the
-    # sidecar there (see SMOOTH_SIDECAR); FLD scenes patch it natively.
-    keys = SURF_SIDECAR_KEYS | (SMOOTH_SIDECAR if SCENES[scene].get("authoring") else set())
+    # Authoring scenes: RVSF_SURF_KEYS now go to the LWO SURF sub-chunk (see
+    # pop_rev_ext_props / lwopatch.set_rev_ext), so only the not-yet-migrated
+    # per-surface keys stay on the sidecar — normalFlip (pairs with the
+    # normal-map assignment, §1e) and smoothAngle (native SMAN migration, §1b).
+    # The dead non-authoring fallback still peels every SURF_SIDECAR_KEYS.
+    if SCENES[scene].get("authoring"):
+        keys = (SURF_SIDECAR_KEYS - RVSF_SURF_KEYS) | SMOOTH_SIDECAR
+    else:
+        keys = SURF_SIDECAR_KEYS
     saved = []
     for name in list(surfaces):
         props = surfaces[name]
@@ -390,6 +401,25 @@ def pop_uv_props(surfaces, warnings):
                                               float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
                                               int(uv["uvAxis"]))
     return out
+
+def pop_rev_ext_props(surfaces):
+    """Pull RVSF_SURF_KEYS (engine-only per-surface dials) out of the surface
+    payload into {name: {key: value}} for the LWO RVSF sub-chunk writer
+    (lwopatch.set_rev_ext). Removes emptied surface entries. Authoring scenes
+    only — the dead non-authoring fallback already sidecar'd them. See
+    docs/SIDECAR_MIGRATION_PLAN.md §1a."""
+    out = {}
+    for name in list(surfaces):
+        props = surfaces[name]
+        if not isinstance(props, dict):
+            continue
+        ext = {k: props.pop(k) for k in list(props) if k in RVSF_SURF_KEYS}
+        if ext:
+            out[name] = ext
+        if not props:
+            del surfaces[name]
+    return out
+
 
 # Live-served paths: the wasm preload (DEMO.data) copy of these is link-time
 # stale, so the editor fetches them fresh from Runtime/ at boot. Prefix match.
@@ -1002,13 +1032,17 @@ def do_save_main(scene, payload):
                             "env defaults need LWS write-back, skipped")
         return do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings)
 
+    # Engine-only per-surface keys (aoStrength/parallaxScale/tint/refractIor/
+    # refractive/envRefl/envBakeRes/waterProcedural) → LWO RVSF sub-chunk,
+    # popped BEFORE the ALLOWED_PROPS resolution (sidecar-elim §1a).
+    rev_ext_by_name = pop_rev_ext_props(surfaces)
     # Engine-only per-light keys (flareScale) → LWS keywords in the light block,
     # popped BEFORE patch_lws_lights so it doesn't reject them (sidecar-elim §1c).
     light_ext = pop_light_lws_keys(lights)
     patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
     patched_lights = patch_lws_lights(scene, lights, warnings)
     patched_lights += patch_lws_light_ext(scene, light_ext, warnings)
-    if not surfaces and not uv_by_name:
+    if not surfaces and not uv_by_name and not rev_ext_by_name:
         if patched_lights or patched_scene_env:
             # Lights / scene env defaults changed -> the FLD must be
             # regenerated (it embeds them).
@@ -1060,6 +1094,30 @@ def do_save_main(scene, payload):
                                     f"({slot[p]} vs {v}) — using {v}")
                 slot[p] = v
 
+    # RVSF (engine-only per-surface) props: same editor-name → .lwo resolution
+    # as the numeric props above, applied via lwopatch.set_rev_ext.
+    per_file_ext = {}   # (fname, surf) -> {rvsf_key: value}
+    for name, props in rev_ext_by_name.items():
+        fname, surf = map_surface_name(name)
+        if fname is not None:
+            lwo = lwos.get(fname)
+            targets = [(fname, surf)] if (lwo and lwo.surface(surf) is not None) else []
+            if not targets:
+                warnings.append(f"'{name}': no surface '{surf}' in {fname} (RVSF) — skipped")
+                continue
+        else:
+            targets = [(f, surf) for f, lwo in lwos.items() if lwo.surface(surf)]
+            if not targets:
+                warnings.append(f"'{name}': RVSF surface not found in any .lwo — skipped")
+                continue
+        for key in targets:
+            slot = per_file_ext.setdefault(key, {})
+            for p, v in props.items():
+                if p in slot and slot[p] != v:
+                    warnings.append(f"{key[0]}:{key[1]}.{p}: conflicting RVSF values "
+                                    f"({slot[p]} vs {v}) — using {v}")
+                slot[p] = v
+
     # UV mapping edits: resolve names the same way, patch CTEX/TSIZ/TFLG.
     uv_targets = {}   # (fname, surf) -> uv tuple
     for name, uv in uv_by_name.items():
@@ -1075,7 +1133,7 @@ def do_save_main(scene, payload):
     for (fname, surf), uv in sorted(uv_targets.items()):
         lwos[fname].surface(surf).set_uv_mapping(*uv)
 
-    if not per_file and not uv_targets:
+    if not per_file and not uv_targets and not per_file_ext:
         if saved_maps or patched_lights or patched_scene_env:
             # surface edits all missed, but these landed
             code, resp = (regen_fld(scene, []) if (patched_lights or patched_scene_env)
@@ -1094,7 +1152,10 @@ def do_save_main(scene, payload):
     for (fname, surf), props in sorted(per_file.items()):
         for p, v in props.items():
             lwos[fname].surface(surf).set_prop(p, v)
-    for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}):
+    for (fname, surf), props in sorted(per_file_ext.items()):
+        lwos[fname].surface(surf).set_rev_ext(props)   # RVSF sub-chunk (§1a)
+    for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}
+                        | {f for (f, _) in per_file_ext}):
         path = os.path.join(adir, fname)
         new = lwos[fname].serialize()
         if new == open(path, "rb").read():
@@ -1104,7 +1165,8 @@ def do_save_main(scene, payload):
             f.write(new)
         patched.append({"file": fname,
                         "surfaces": sorted({s for (f, s) in per_file if f == fname}
-                                           | {s for (f, s) in uv_targets if f == fname}),
+                                           | {s for (f, s) in uv_targets if f == fname}
+                                           | {s for (f, s) in per_file_ext if f == fname}),
                         "backup": os.path.relpath(bak, REPO)})
 
     # Regenerate + install the FLD.
