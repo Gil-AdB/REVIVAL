@@ -13,9 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | **STALE — re-baseline** (invalidated 2026-07-14 by combat-geometry revert + head-fill both ships + camera-guarded corridor redo, commits eeda2b6/182f8b1/3fb1dc2). Prior de185db pins no longer valid. Re-pin after user approves the look. |
-| chase (cinematic) POST drama batch | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | **STALE — re-baseline** (same 2026-07-14 batch). |
-| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | t800 `7be2c67b4d98613c3cae2900646050c0`<br>t1600 `a718c07fada5297879e59bd1559a483f` |
+| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (e496e51 merge: loop-align + gorge fix + lighthouse-beacon runway + review tooling; user-approved look, 3-run stable):<br>t100 `6cf96c797dcffe7c5306efb2f42b5c81` t400 `17ca6a15c650dbec82a1208735a75a87` t800 `ef7880321e0315e19a32c368d160f61a` t1200 `cd3d3be3464fe2feb0b53eedc161fcc3` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
+| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (same merge, 3-run stable): t800 `eeaa0456523e40a943f205892df36717` t1600 `1cbde501c26d231a4295632dfbebd34b` |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
 
