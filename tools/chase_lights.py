@@ -489,12 +489,12 @@ def _beacon_frames(n, bands):
     return out
 
 
-def _beacon_rotor(idx, pos, pitch, turns, phase):
+def _beacon_rotor(name, pos, pitch, turns, phase):
     """Object block: a null at the lamp, heading = phase + turns*360 over the
     scene (turns=0 → a static aim), pitch = fixed downward rake. The parented
     spot rides this heading, so the beam sweeps (or holds)."""
     NKEYS, LAST = 9, 1760
-    out = ["AddNullObject fds_beacon_rotor_%d" % idx,
+    out = ["AddNullObject %s" % name,
            "ShowObject 8 7", "ObjectMotion (unnamed)", "  9", "  %d" % NKEYS]
     for k in range(NKEYS):
         f = int(round(LAST * k / (NKEYS - 1)))
@@ -573,20 +573,23 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
     keys = parse_ship_keys(lines, "ship1.lwo")
     n = max(1, args.runway_beacons)
     offset = args.runway_offset
-    # Auto-scale the model so its lamp-house lands --runway-lamp-height above
-    # the WATER for a sea-level tower, regardless of the mesh's native size —
-    # a downloaded model of any scale slots in. ONE scale for all beacons
-    # (uniform architecture); island towers simply ride higher on the rock.
-    # --runway-scale > 0 forces a fixed scale instead. --runway-stock widens
-    # X/Z only (stockier silhouette vs the slender source mesh).
+    # Auto-scale the model from the lamp-height targets, regardless of the
+    # mesh's native size — a downloaded model of any scale slots in. TWO
+    # scales: sea-level towers use --runway-lamp-height-water (LOWER — the
+    # user's "lighthouses directly on water need to be lower"), island-rock
+    # towers keep the taller --runway-lamp-height (grand lighthouses on the
+    # islands, harbour-marker size in the open sea). --runway-scale > 0
+    # forces one fixed scale for all instead. --runway-stock widens X/Z only
+    # (stockier silhouette vs the slender source mesh).
     if args.runway_scale > 0:
-        scale = args.runway_scale
+        scale_water = scale_rock = args.runway_scale
     else:
-        scale = (args.runway_lamp_height + args.runway_sink) / (lamp_local or 1.0)
+        scale_water = (args.runway_lamp_height_water + args.runway_sink) / (lamp_local or 1.0)
+        scale_rock = (args.runway_lamp_height + args.runway_sink) / (lamp_local or 1.0)
     stock = args.runway_stock
-    lamp_y_local = lamp_local * scale
-    # world footprint radius (source footprint ~6 units across → r≈3.2 local)
-    foot_r = 3.2 * scale * stock
+    # footprint radius for terrain sampling (source footprint ~6 units across
+    # → r≈3.2 local); sample with the LARGER candidate scale — conservative.
+    foot_r = 3.2 * max(scale_water, scale_rock) * stock
     gain, cone = args.runway_gain, args.runway_cone
     pitch = args.runway_pitch
     turns = args.runway_turns
@@ -608,6 +611,8 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
         t_min, t_max = footprint_terrain(terrain, ex, ez, foot_r)
         on_rock = t_max > 5.0
         sink = args.runway_rock_sink if on_rock else args.runway_sink
+        scale = scale_rock if on_rock else scale_water
+        lamp_y_local = lamp_local * scale
         base_y = t_min - sink
         lamp_world_y = base_y + lamp_y_local
         print("  beacon %d @f%-4d (%.0f, %.0f)  terrain %.0f..%.0f %s base=%.0f lamp=%.0f"
@@ -637,30 +642,44 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
             "ShadowOptions 7",
         ]
         idx += 1                            # tower object index (unused as parent)
-        # rotor null at the lamp
-        obj_block += _beacon_rotor(i, (ex, lamp_world_y, ez), pitch, b_turns, b_phase)
-        idx += 1
-        rotor_num = idx                     # 1-based index of the rotor just added
-        # Colored spot(s) parented to the rotor. Dual mode (default): two
+        # Rotor null(s) at the lamp. DOUBLE-CONE (default, the classic
+        # lighthouse optic): a second rotor at heading+180 carries the OPPOSED
+        # beam — both sweep together, two shafts sweeping from one lamp. A
+        # parented spot's aim comes only from its parent's rotation, so the
+        # opposed beam needs its own anti-heading rotor (same spot envelopes:
+        # one lamp, one colour, both windows).
+        rotor_phases = [(("fds_beacon_rotor_%d" % i), b_phase)]
+        if args.runway_double:
+            rotor_phases.append((("fds_beacon_rotor_%db" % i), b_phase + 180.0))
+        rotor_nums = []
+        for rname, rphase in rotor_phases:
+            obj_block += _beacon_rotor(rname, (ex, lamp_world_y, ez), pitch,
+                                       b_turns, rphase)
+            idx += 1
+            rotor_nums.append(idx)
+        # Colored spot(s) parented to each rotor. Dual mode (default): two
         # anti-phase envelope spots crossfade the beam colour; single mode:
-        # one colour with a breathing envelope.
+        # one colour with a breathing envelope. The opposed rotor repeats the
+        # SAME colours/envelopes (one lamp — both beams always agree).
         colA = BEAM_PALETTE[i % len(BEAM_PALETTE)]
         colB = BEAM_PALETTE[(i + 3) % len(BEAM_PALETTE)]
         period = args.runway_pulse
         step = max(20, period // 8)
         e_phase = i * period / max(1, n) * 1.7   # stagger the crossfades
         hi, lo = args.runway_int_hi, args.runway_int_lo
-        if args.runway_dual:
-            envA = intensity_env_lines(hi, lo, period, e_phase, step)
-            envB = intensity_env_lines(hi, lo, period, e_phase + period * 0.5, step)
-            lgt_block += _beacon_spot("fds runway %dA" % i, rotor_num, colA,
-                                      cone, gain, envA)
-            lgt_block += _beacon_spot("fds runway %dB" % i, rotor_num, colB,
-                                      cone, gain, envB)
-        else:
-            envA = intensity_env_lines(hi, max(lo, 0.35 * hi), period, e_phase, step)
-            lgt_block += _beacon_spot("fds runway %dA" % i, rotor_num, colA,
-                                      cone, gain, envA)
+        for ri, rotor_num in enumerate(rotor_nums):
+            sfx = "" if ri == 0 else "2"
+            if args.runway_dual:
+                envA = intensity_env_lines(hi, lo, period, e_phase, step)
+                envB = intensity_env_lines(hi, lo, period, e_phase + period * 0.5, step)
+                lgt_block += _beacon_spot("fds runway %dA%s" % (i, sfx), rotor_num,
+                                          colA, cone, gain, envA)
+                lgt_block += _beacon_spot("fds runway %dB%s" % (i, sfx), rotor_num,
+                                          colB, cone, gain, envB)
+            else:
+                envA = intensity_env_lines(hi, max(lo, 0.35 * hi), period, e_phase, step)
+                lgt_block += _beacon_spot("fds runway %dA%s" % (i, sfx), rotor_num,
+                                          colA, cone, gain, envA)
     return obj_block, lgt_block, idx
 
 
@@ -890,7 +909,13 @@ def main():
     ap.add_argument("--runway-model", choices=["lighthouse", "proc"], default="lighthouse",
                     help="beacon mesh: the real CC0 lighthouse (default) or the procedural tower")
     ap.add_argument("--runway-lamp-height", type=float, default=1400.0,
-                    help="world-Y the lamp-house (beam origin) is auto-scaled to sit at")
+                    help="ROCK towers: lamp height target above the water plane (island lighthouses)")
+    ap.add_argument("--runway-lamp-height-water", type=float, default=850.0,
+                    help="WATER towers: lamp height target — LOWER than the rock towers "
+                         "(harbour-marker scale; 'lighthouses directly on water need to be lower')")
+    ap.add_argument("--runway-double", type=int, default=1,
+                    help="1 = classic double-cone optic: an opposed (heading+180) beam per lamp "
+                         "on its own anti-rotor, same colours/envelopes; 0 = single beam")
     ap.add_argument("--runway-scale", type=float, default=0.0,
                     help="force a fixed uniform tower scale (0 = auto from --runway-lamp-height)")
     ap.add_argument("--runway-stock", type=float, default=1.35,

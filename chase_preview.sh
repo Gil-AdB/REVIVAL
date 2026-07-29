@@ -51,3 +51,5 @@ echo "  loop:        cd Runtime && ./DEMO --scene-chase --deferred --chase-start
 echo "  runway/gorge: cd Runtime && ./DEMO --scene-chase --deferred --cinematic --chase-start=340"
 echo "  full chase:  cd Runtime && ./DEMO --scene-chase --deferred --cinematic"
 echo "  + COMBAT:    add  --flags-file=PRESETS/chase-combat.flags  to any of the above"
+echo "  + PROFILER:  add  --profiler   (per-section ms/FPS overlay in the corner)"
+echo "  + CAM DUMP:  add  --chase_cam_dump   ([CHASECAM] per-frame camera/ship trace on stderr)"

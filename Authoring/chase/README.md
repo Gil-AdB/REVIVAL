@@ -52,23 +52,33 @@ python3 ../../tools/pin_scene.py CHASE.LWS ../../Runtime/SCENES/CHASE.FLD --lega
 `tools/chase_lights.py --runway` authors a colonnade of **anchored, sweeping,
 colour-shifting red-and-white lighthouses** into `CHASE.LWS` (idempotent,
 between `FDSLIGHTS_*` sentinel markers). Each beacon = a static striped
-`lighthouse.lwo` tower (LoadObject) + a spinning `AddNullObject` rotor + **two**
-LightType-2 volumetric spots **parented to the rotor** (Transform.cpp:330
-re-derives the cone axis per frame → the beam sweeps). The two spots carry a
-colour pair from the tool's `BEAM_PALETTE` and anti-phase half-wave
-`LgtIntensity  (envelope)` keys (note the TWO spaces — that's how the 1998
-envelope parser detects one), so each beam continuously switches colour — the
-engine re-evaluates the intensity spline every frame (Transform.cpp:255).
-Placement is **terrain-aware**: the tower footprint samples the mountain
-meshes and the base is buried under the water / inside the island rock
-(`--runway-sink` / `--runway-rock-sink`); island towers stand on the rock with
-their lamps riding higher. Beacons alternate sides down the open-water lane
+`lighthouse.lwo` tower (LoadObject) + spinning `AddNullObject` rotor(s) +
+LightType-2 volumetric spots **parented to the rotors** (Transform.cpp:330
+re-derives the cone axis per frame → the beams sweep). The **double-cone
+optic** (default, `--runway-double`) adds an opposed rotor at heading+180 so
+each lamp throws TWO opposed sweeping shafts, like a real lighthouse. Per
+rotor, two spots carry a colour pair from the tool's `BEAM_PALETTE` with
+anti-phase half-wave `LgtIntensity  (envelope)` keys (note the TWO spaces —
+that's how the 1998 envelope parser detects one), so each beam continuously
+switches colour — the engine re-evaluates the intensity spline every frame
+(Transform.cpp:255). Placement is **terrain-aware**: the tower footprint
+samples the mountain meshes and the base is buried under the water / inside
+the island rock (`--runway-sink` / `--runway-rock-sink`). Two size classes:
+sea-level towers are LOWER (`--runway-lamp-height-water`, harbour-marker
+scale) while island-rock towers keep the grander `--runway-lamp-height` and
+ride higher on the rock. Beacons alternate sides down the open-water lane
 (the gorge is skipped); sweep and colour phases are staggered. Modest count
 (default 8 — +63 objects once miscounted ship2's motion keys, commit 2969679).
 Visible through the `--cinematic` fog band; towers render in plain
 `--deferred`. See `ASSETS.md` for the model/texture provenance and license, and
-the tool's `--runway-*` knobs (turns/phase/pitch/dual/pulse/lamp-height/model/
-stock/sink/…).
+the tool's `--runway-*` knobs (turns/phase/pitch/dual/double/pulse/
+lamp-height[-water]/model/stock/sink/…).
+
+Debugging: `--profiler` draws the per-section ms / FPS overlay inside the
+chase loop (interactive; snapshots suppress a cfg-seeded profiler so pin
+bytes stay deterministic — an explicit `--profiler` still wins), and
+`--chase_cam_dump` prints a per-frame `[CHASECAM]` line (t, CurFrame, camera
+pose/FOV, both ship centres) to stderr in every chase mode.
 
 After ANY regen, validate ship2 still animates (30 motion keys) — the primary
 `+objects` hazard. Then reinstall the FLD as below.
