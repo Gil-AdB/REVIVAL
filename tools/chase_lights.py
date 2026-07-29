@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Author ENVIRONMENTAL-LIGHT DRAMA into Authoring/chase/CHASE.LWS: a rotating
-lighthouse beam and/or a gauntlet of crisscrossing laser beams along the
-passage, plus a re-aim of the two existing (invisible) canyon spots.
+"""Author ENVIRONMENTAL-LIGHT DRAMA into Authoring/chase/CHASE.LWS.
+
+PRIMARY variant --runway: a string of dim, evenly-spaced COOL spot cones lining
+the flight lane (auto-placed from Ship1's ground track — a light on each side at
+every sample, elevated and raking down+forward along its own side), a runway /
+tunnel-guidance colonnade of god-ray shafts receding down the corridor. LOW gain
+by design: atmosphere, not a stage show. Secondary --lighthouse (a slow rotating
+warm accent, retuned WAY down). --lasers is the legacy sky-fan gauntlet, tamed
+hard and no longer in the default variant set. --realign re-aims the two existing
+canyon spots.
 
 Family: tools/chase_bank.py / chase_camera.py / chase_loop.py — in-place,
 idempotent, parameterized, re-runnable. Authored-first: the result is LWS lights
@@ -35,16 +42,20 @@ Idempotence
     params (recomputed each run → idempotent).
 
 Usage
-  tools/chase_lights.py [--lighthouse] [--lasers N] [--realign] [--clear]
-  tools/chase_lights.py --lighthouse                 # rotating beam only
-  tools/chase_lights.py --lasers 8                   # laser gauntlet only
-  tools/chase_lights.py --lighthouse --lasers 8 --realign   # the works
+  tools/chase_lights.py [--runway] [--lighthouse] [--lasers N] [--realign] [--clear]
+  tools/chase_lights.py --runway                     # PRIMARY: the runway colonnade
+  tools/chase_lights.py --runway --lighthouse        # runway + a warm accent beam
+  tools/chase_lights.py --lighthouse                 # rotating beam only (secondary)
   tools/chase_lights.py --clear                      # strip all fds lights
 
+  Runway knobs:      --runway-pairs N  --runway-gain G  --runway-cone DEG
+                     --runway-offset U  --runway-height U  --runway-ahead U
+                     --runway-color R G B
   Lighthouse knobs:  --lh-pos X Y Z  --lh-pitch DEG  --lh-turns T
                      --lh-gain G  --lh-cone DEG  --lh-color R G B
   Laser knobs:       --laser-gain G  --laser-cone DEG
-Then: regen (lwsread_legacy) + install (see Authoring/chase/README.md).
+Then: regen (lwsread_legacy) + install (see Authoring/chase/README.md), or run
+./chase_preview.sh {runway|runway+lighthouse|lighthouse|off}.
 """
 import os, sys, math, argparse
 
@@ -92,6 +103,115 @@ def aim_hp(src, tgt):
     return H, P
 
 
+# ── flight-path sampling (for the runway: auto-place from Ship1's motion) ─────
+FIRST_FRAME, LAST_FRAME = 0, 1760
+
+
+def parse_ship_keys(lines, want_base):
+    """(frame, x, y, z) list for a ship's ObjectMotion — same walker as
+    chase_corridor.py / chase_camera.py."""
+    n = len(lines); li = 0
+    while li < n:
+        s = lines[li].strip()
+        if s.startswith("LoadObject") and \
+                s[len("LoadObject"):].replace("/", "\\").split("\\")[-1].strip().lower() == want_base:
+            j = li + 1; mo = None
+            while j < n:
+                t = lines[j].strip()
+                if t.startswith(("LoadObject", "AddLight")):
+                    break
+                if t.startswith("ObjectMotion"):
+                    mo = j; break
+                j += 1
+            if mo is None:
+                sys.exit("no ObjectMotion for %s" % want_base)
+            def nxt(m):
+                while m < n and lines[m].strip() == "": m += 1
+                return m
+            k = nxt(mo + 1); k = nxt(k + 1)
+            nk = int(lines[k].split()[0]); k = nxt(k + 1)
+            keys = []
+            for _ in range(nk):
+                vals = [float(x) for x in lines[k].split()]
+                k2 = nxt(k + 1); fr = int(float(lines[k2].split()[0]))
+                keys.append((fr, vals[0], vals[1], vals[2]))
+                k = nxt(k2 + 1)
+            return keys
+        li += 1
+    sys.exit("no LoadObject %s" % want_base)
+
+
+def path_at(keys, f):
+    if f <= keys[0][0]:
+        return keys[0][1:]
+    if f >= keys[-1][0]:
+        return keys[-1][1:]
+    for i in range(len(keys) - 1):
+        a, b = keys[i], keys[i + 1]
+        if a[0] <= f <= b[0]:
+            t = (f - a[0]) / (b[0] - a[0]) if b[0] != a[0] else 0.0
+            return tuple(a[1 + c] + t * (b[1 + c] - a[1 + c]) for c in range(3))
+    return keys[-1][1:]
+
+
+def path_tangent_xz(keys, f):
+    a = path_at(keys, max(FIRST_FRAME, f - 10))
+    b = path_at(keys, min(LAST_FRAME, f + 10))
+    dx, dz = b[0] - a[0], b[2] - a[2]
+    L = math.hypot(dx, dz) or 1.0
+    return dx / L, dz / L
+
+
+# ── runway: dim cool volumetric spots lining the flight lane ──────────────────
+# Auto-placed from Ship1's ground track: at N evenly-spaced sample frames, a
+# spot on EACH side of the lane, elevated and aimed DOWN + slightly ALONG the
+# path — a runway / tunnel-guidance colonnade of god-ray shafts. Cool colour,
+# LOW gain: they read as ATMOSPHERE flanking the lane, not a stage show. Same
+# LightType-2 volumetric-cone mechanism as the lasers/lighthouse (no new
+# keywords). Emitters sit at a FIXED lane altitude (not the ship's Y), so the
+# colonnade stays even while the ship loops/climbs above it.
+def build_runway(lines, pairs, gain, cone, color, offset, height, ahead):
+    keys = parse_ship_keys(lines, "ship1.lwo")
+    f0, f1 = 140, 1640                    # skip the very start/finale tails
+    LANE_Y = 150.0                        # nominal lane height (near the water)
+    out = []
+    n = max(2, pairs)
+    for i in range(n):
+        f = f0 + (f1 - f0) * i / (n - 1)
+        p = path_at(keys, f)
+        tx, tz = path_tangent_xz(keys, f)
+        lx, lz = tz, -tx                  # right-hand lateral (horizontal)
+        for side in (+1.0, -1.0):
+            emit = (p[0] + side * lx * offset, LANE_Y + height, p[2] + side * lz * offset)
+            # aim down + slightly forward along the SAME side (not the centre) so
+            # the left row and right row stay distinct — two receding colonnades
+            # flanking the lane, not one merged central wash.
+            aim = (p[0] + side * lx * offset + tx * ahead, LANE_Y,
+                   p[2] + side * lz * offset + tz * ahead)
+            H, P = aim_hp(emit, aim)
+            out += [
+                "AddLight",
+                "LightName fds runway %d%s" % (i, "R" if side > 0 else "L"),
+                "ShowLight 1 7",
+                "LightMotion (unnamed)",
+                "  9",
+                "  1",
+                "  %s %s %s %s %s 0 1 1 1" % (fmt(emit[0]), fmt(emit[1]), fmt(emit[2]),
+                                              fmt(H), fmt(P)),
+                "  0 0 0 0 0",
+                "EndBehavior 1",
+                "LightColor %d %d %d" % (color[0], color[1], color[2]),
+                "LgtIntensity 1.600000",
+                "LightType 2",
+                "ConeAngle %f" % cone,
+                "LightRange 30000.000000",
+                "VolumetricLight 1",
+                "VolumetricLightIntensity %f" % gain,
+                "ShadowType 1",
+            ]
+    return out
+
+
 # ── lighthouse: a spinning null (object) + a parented volumetric spot (light) ──
 def build_lighthouse_null(objnum_unused, pos, pitch, turns):
     """Object-section block: a null spinning its heading `turns` times over the
@@ -129,7 +249,7 @@ def build_lighthouse_light(parent_num, gain, cone, color):
         "EndBehavior 1",
         "ParentObject %d" % parent_num,
         "LightColor %d %d %d" % (color[0], color[1], color[2]),
-        "LgtIntensity 6.000000",
+        "LgtIntensity 2.400000",
         "LightType 2",
         "ConeAngle %f" % cone,
         "LightRange 60000.000000",
@@ -193,7 +313,7 @@ def build_lasers(count, gain, cone):
             "  0 0 0 0 0",
             "EndBehavior 1",
             "LightColor %d %d %d" % col,
-            "LgtIntensity 4.000000",
+            "LgtIntensity 1.600000",
             "LightType 2",
             "ConeAngle %f" % cone,
             "LightRange 40000.000000",
@@ -269,17 +389,37 @@ def insert_before(lines, needle, block):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lighthouse", action="store_true")
-    ap.add_argument("--lasers", type=int, default=0, metavar="N")
+    ap.add_argument("--runway", action="store_true",
+                    help="PRIMARY: dim cool spot colonnade lining the flight lane")
+    ap.add_argument("--lighthouse", action="store_true",
+                    help="secondary accent: a slow rotating warm beam")
+    ap.add_argument("--lasers", type=int, default=0, metavar="N",
+                    help="legacy sky-fan lasers (tamed; off by default)")
     ap.add_argument("--realign", action="store_true")
     ap.add_argument("--clear", action="store_true")
+    # runway knobs — LOW gain by design (atmosphere, not stage show)
+    ap.add_argument("--runway-pairs", type=int, default=16,
+                    help="number of light PAIRS along the lane (x2 = light count)")
+    ap.add_argument("--runway-gain", type=float, default=3.4,
+                    help="VolumetricLightIntensity — keep low; the beams are ambience")
+    ap.add_argument("--runway-cone", type=float, default=9.0)
+    ap.add_argument("--runway-offset", type=float, default=2300.0,
+                    help="lateral distance of each row from the lane centreline")
+    ap.add_argument("--runway-height", type=float, default=1250.0,
+                    help="emitter height above the lane (beams rake down)")
+    ap.add_argument("--runway-ahead", type=float, default=2400.0,
+                    help="how far along the path each beam aims (rake)")
+    ap.add_argument("--runway-color", type=int, nargs=3, default=[135, 185, 230],
+                    help="cool blue-white by default")
+    # lighthouse — retuned WAY down (secondary accent, not the show)
     ap.add_argument("--lh-pos", type=float, nargs=3, default=[-15000, 2600, 8000])
     ap.add_argument("--lh-pitch", type=float, default=40.0)
     ap.add_argument("--lh-turns", type=float, default=8.5)
-    ap.add_argument("--lh-gain", type=float, default=32.0)
-    ap.add_argument("--lh-cone", type=float, default=15.0)
+    ap.add_argument("--lh-gain", type=float, default=8.0)
+    ap.add_argument("--lh-cone", type=float, default=14.0)
     ap.add_argument("--lh-color", type=int, nargs=3, default=[255, 206, 128])
-    ap.add_argument("--laser-gain", type=float, default=20.0)
+    # lasers — tamed hard (legacy; not in the default variant set)
+    ap.add_argument("--laser-gain", type=float, default=7.0)
     ap.add_argument("--laser-cone", type=float, default=6.0)
     args = ap.parse_args()
 
@@ -292,7 +432,7 @@ def main():
         c = realign_spots(lines)
         print("realigned %d existing canyon spot(s)" % c)
 
-    if args.clear and not (args.lighthouse or args.lasers):
+    if args.clear and not (args.lighthouse or args.lasers or args.runway):
         open(LWS, "w", encoding="latin-1").write("\n".join(lines))
         print("cleared all fds lights")
         return
@@ -300,6 +440,11 @@ def main():
     base_objs = count_objects(lines)
 
     obj_block, lgt_block = [], []
+    if args.runway:
+        lgt_block += build_runway(lines, args.runway_pairs, args.runway_gain,
+                                  args.runway_cone, args.runway_color,
+                                  args.runway_offset, args.runway_height,
+                                  args.runway_ahead)
     if args.lighthouse:
         rotor_num = base_objs + 1
         obj_block += build_lighthouse_null(rotor_num, args.lh_pos,
@@ -320,8 +465,9 @@ def main():
                               [LGT_BEGIN] + lgt_block + [LGT_END])
 
     open(LWS, "w", encoding="latin-1").write("\n".join(lines))
-    print("wrote lights: lighthouse=%s lasers=%d realign=%s (base objs=%d)"
-          % (args.lighthouse, args.lasers, args.realign, base_objs))
+    print("wrote lights: runway=%s(%d pairs) lighthouse=%s lasers=%d realign=%s (base objs=%d)"
+          % (args.runway, args.runway_pairs if args.runway else 0,
+             args.lighthouse, args.lasers, args.realign, base_objs))
     print("NOW: regen (lwsread_legacy) + install")
 
 

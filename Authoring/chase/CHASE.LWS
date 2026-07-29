@@ -1979,6 +1979,552 @@ VolumetricLight 1
 VolumetricLightIntensity 5.000000
 ShadowType 1
 
+FDSLIGHTS_LGT_BEGIN
+AddLight
+LightName fds runway 0R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  6347.3339 1400 -76853.251 -44.4085 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 0L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  3061.2361 1400 -80072.189 -44.4085 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 1R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  3869.6956 1400 -73304.9758 -13.7413 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 1L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -598.643 1400 -74397.6558 -13.7413 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 2R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  2299.0278 1400 -66758.2414 -17.9535 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 2L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -2076.9848 1400 -68176.1672 -17.9535 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 3R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  1093.9827 1400 -60153.1792 -5.045 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 3L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -3488.1964 1400 -60557.6975 -5.045 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 4R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -3825.2156 1400 -53787.8394 177.6346 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 4L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  770.865 1400 -53597.9896 177.6346 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 5R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  496.4472 1400 -46954.5953 -2.3654 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 5L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -4099.6334 1400 -47144.445 -2.3654 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 6R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  251.6716 1400 -40193.2438 -1.934 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 6L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -4345.7081 1400 -40348.484 -1.934 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 7R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -120.7449 1400 -33046.6032 -6.1028 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 7L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -4694.6757 1400 -33535.6398 -6.1028 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 8R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -1119.7526 1400 -25137.4032 -15.7068 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 8L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -5547.987 1400 -26382.6904 -15.7068 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 9R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -6906.7755 1400 -16222.1214 -40.5201 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 9L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -10403.5948 1400 -19210.8091 -40.5201 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 10R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -12714.9836 1400 -6575.8507 -27.5121 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 10L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -16794.7836 1400 -8700.758 -27.5121 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 11R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -20569.0673 1400 8967.5379 -24.6612 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 11L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -24749.5041 1400 7048.1764 -24.6612 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 12R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -27325.1285 1400 22422.9277 -31.9873 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 12L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -31226.6896 1400 19986.1632 -31.9873 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 13R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -35937.4928 1400 33215.6638 -39.055 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 13L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -39509.5851 1400 30317.3615 -39.055 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 14R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -42106.322 1400 42662.4164 -36.2475 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 14L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -45816.0874 1400 39942.556 -36.2475 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 15R
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -48436.5136 1400 51560.876 -22.9566 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+AddLight
+LightName fds runway 15L
+ShowLight 1 7
+LightMotion (unnamed)
+  9
+  1
+  -52672.1975 1400 49766.724 -22.9566 27.512 0 1 1 1
+  0 0 0 0 0
+EndBehavior 1
+LightColor 135 185 230
+LgtIntensity 1.600000
+LightType 2
+ConeAngle 9.000000
+LightRange 30000.000000
+VolumetricLight 1
+VolumetricLightIntensity 3.400000
+ShadowType 1
+FDSLIGHTS_LGT_END
 ShowCamera 1 7
 CameraMotion (unnamed)
   9
