@@ -1188,6 +1188,20 @@ void CodeEntry(void *var)
 		Run_ConeTest();
 		goto demo_exit;
 	}
+	if (fds::FeatureFlags::scene_chase()) {
+		// Chase-only review mode (loop alignment / light-drama judging).
+		// Join-first for the same g_mainFaces realloc race as the others.
+		// Music (started above when enabled) plays from song start — fine
+		// for look review. --chase-start=T warps the clock so the loop
+		// (t~500) or the island stretch (t~1200) is reachable immediately;
+		// a cold jump skips pre-T accumulated state (bolts/events), which
+		// is acceptable here and touches nothing outside this branch.
+		if (t1.joinable()) t1.join();
+		if (fds::FeatureFlags::chase_start() > 0)
+			Timer = fds::FeatureFlags::chase_start();
+		Run_Chase();
+		goto demo_exit;
+	}
 	// FDS_SKIP_INTRO=1 (dev/debug only): skip the Glato intro + its
 	// wall-clock Timer<4000 gate and jump straight to City. Used to make
 	// the per-frame city-texture-oscillation repro captures cheap (the

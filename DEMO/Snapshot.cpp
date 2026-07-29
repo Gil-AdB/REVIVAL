@@ -844,6 +844,23 @@ int RunChaseSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
     auto driver = createChaseScene();
     driver->init();
 
+    // The chase driver draws the interactive profiler overlay inside tick()
+    // when the `profiler` flag is on — and rev.cfg's ProfilerEnable=1 seeds
+    // that flag. Zeroing g_profilerActive here is NOT enough: FrameProfiler::
+    // beginFrame() re-mirrors the flag into the global EVERY frame (the
+    // P-key-less toggle path), so the overlay would come back on tick 1.
+    // The overlay's wall-clock timing text is non-deterministic and must
+    // never land in snapshot bytes (the first tick prints a constant 0-FPS
+    // line, every later tick prints real timings — pins would flip every
+    // run). Clear the FLAG, but only when it was cfg-seeded (unmarked): an
+    // EXPLICIT --profiler on a snapshot run stays honored, same precedence
+    // idiom as the rev.cfg seeding in REV.CPP.
+    if (!fds::FeatureFlags::isSet(fds::FeatureFlags::BoolId::profiler)) {
+        fds::FeatureFlags::setParamFromText("profiler", "0");
+        fds::FeatureFlags::clearSetMark("profiler");
+    }
+    g_profilerActive = fds::FeatureFlags::profiler();
+
     // S0 music-sync foundation (default-off; flag-off leaves everything below
     // untouched, so the chase pins are byte-identical). When on, resolve an
     // event table (a beatmap+events file pair if present, else a self-contained
