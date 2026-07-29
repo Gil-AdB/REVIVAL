@@ -13,10 +13,12 @@
 #include "BlasterBolts.h"      // B1: blaster combat (chase_blasters)
 #include "ChaseEvents.h"       // B1: pure-t fire table + reconstruction
 #include <Base/VertexFrame.h>  // Reflected_Transform dual-write to T->frame
+#include <Base/RenderStats.h>  // RenderStats_Flush for the profiler overlay
 #include <memory>
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>              // [CHASECAM] camera dump (chase_cam_dump)
 #include <cstring>
 
 #define FRONT_TO_BACK_SORTING
@@ -1334,6 +1336,26 @@ struct ChaseScene : SceneDriver {
 		// reflection + main transforms so every pass uses the perturbed camera.
 		applyCameraFx();
 
+		// Debug camera dump (--chase_cam_dump): one [CHASECAM] line per frame,
+		// captured AFTER the full camera chain (Dynamic_Camera + chase_cam_fx)
+		// so the printed pose is exactly what this frame renders with. stderr,
+		// so headless snapshot logs carry it alongside [CHASESNAP]; grep
+		// '\[CHASECAM\]' for a framing trace. Pure observer — no state touched.
+		if (fds::FeatureFlags::chase_cam_dump()) {
+			Vector s1{}, s2{};
+			if (ship1M) s1 = chaseShipCenter(ship1M, CurFrame);
+			if (ship2M) s2 = chaseShipCenter(ship2M, CurFrame);
+			std::fprintf(stderr,
+				"[CHASECAM] t=%ld f=%.1f cam=(%.1f %.1f %.1f) tgt=(%.1f %.1f %.1f) "
+				"roll=%.3f fov=%.2f ship1=(%.1f %.1f %.1f) ship2=(%.1f %.1f %.1f)\n",
+				(long)g_FrameTime, (double)CurFrame,
+				(double)View->ISource.x, (double)View->ISource.y, (double)View->ISource.z,
+				(double)View->ITarget.x, (double)View->ITarget.y, (double)View->ITarget.z,
+				(double)View->IRoll, (double)View->IFOV,
+				(double)s1.x, (double)s1.y, (double)s1.z,
+				(double)s2.x, (double)s2.y, (double)s2.z);
+		}
+
 		// B1: pure-t blaster reconstruction — after Animate_Objects (ship poses
 		// + omni IPos set, engine-glow punch applied), before Lighting +
 		// Reflected_Transform so the bolt omnis + flashes light and reflect.
@@ -1393,6 +1415,23 @@ struct ChaseScene : SceneDriver {
 		// depth). Drawn last so bolts glow over the composited scene + glints.
 		if (fds::FeatureFlags::chase_blasters())
 			fds::BlasterBolts_Draw();
+
+		// On-screen profiler overlay (--profiler / rev.cfg ProfilerEnable) —
+		// the same block city/greets draw, so chase can be profiled
+		// interactively (per-section ms, FPS, polys/Mpx). Drawn onto VPage
+		// right before the flip; prof.dump() at scene end already existed.
+		if (g_profilerActive) {
+			char MSGStr[128];
+			const float meanMs = prof.meanFrameMs();
+			const float fps = meanMs > 0 ? 1000.0f / meanMs : 0.0f;
+			snprintf(MSGStr, sizeof(MSGStr), "%f FPS", fps);
+			int scroll = OutTextXY(VPage, 0, 0, MSGStr, 255);
+			snprintf(MSGStr, sizeof(MSGStr), "%f frame", CurFrame);
+			scroll = OutTextXY(VPage, 0, scroll + 15 * g_fontScale, MSGStr, 255);
+			fds::RenderStats_Flush();
+			prof.noteCounters((double)g_renderedPolys, (double)FillerPixelcount);
+			scroll = prof.drawOverlay(scroll);
+		}
 
 		prof.enter(PROF_FLIP);
 		Flip(MainSurf);
