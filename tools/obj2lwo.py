@@ -43,9 +43,19 @@ def _sub(sid, body):
     return sid + struct.pack(">H", len(body)) + body + (b"\x00" if len(body) & 1 else b"")
 
 
-def _surf(name, colr, vlum, vdif, tex):
-    """SURF body: name + COLR/FLAG/LUMI/VLUM/DIFF/VDIF + Cubic texture block.
-    The texture makes Mat->Txtr non-null so the deferred kernel shades it."""
+PROJ_NAMES = {"planar": "Planar Image Map", "cyl": "Cylindrical Image Map",
+              "sph": "Spherical Image Map", "cubic": "Cubic Image Map"}
+AXIS_BITS = {"x": 1, "y": 2, "z": 4}
+
+
+def _surf(name, colr, vlum, vdif, tex, proj="cubic", axis="x",
+          tsiz=(100.0, 100.0, 100.0), tctr=(0.0, 0.0, 0.0)):
+    """SURF body: name + COLR/FLAG/LUMI/VLUM/DIFF/VDIF + texture block.
+    The texture makes Mat->Txtr non-null so the deferred kernel shades it.
+    proj/axis/tsiz/tctr drive the engine's Get_UV bake (FLD_MAT.CPP:310):
+    e.g. planar/x maps V = -(localY - tctr.y)/tsiz.y + 0.5 — texture rows
+    follow the mesh HEIGHT, which is how the lighthouse gets its horizontal
+    red/white stripes (a U-uniform stripe texture has no cylindrical seam)."""
     b = _sub(b"COLR", bytes([colr[0], colr[1], colr[2], 0]))
     b += _sub(b"FLAG", struct.pack(">H", 1 if vlum > 0 else 0))   # Surf_Luminous when emissive
     if vlum > 0:
@@ -53,16 +63,14 @@ def _surf(name, colr, vlum, vdif, tex):
         b += _sub(b"VLUM", struct.pack(">f", vlum))
     b += _sub(b"DIFF", struct.pack(">H", max(0, min(0xFFFF, round(vdif * 256)))))
     b += _sub(b"VDIF", struct.pack(">f", vdif))
-    # Cubic projection block, mirroring the chase mountains' SURF (m1.lwo). For a
-    # solid-colour texture the projection is cosmetically irrelevant, but a valid
-    # CTEX/TIMG/TFLG/TSIZ/TCTR set is what makes Get_Mapping + the loader wire the
-    # Texture up. TIMG basename resolves against Runtime/TEXTURES.
-    b += _sub(b"CTEX", _asciiz("Cubic Image Map"))
+    # TIMG basename resolves against Runtime/TEXTURES. TFLG = axis bit +
+    # 0x20 (pixel blending), mirroring the chase mountains' m1.lwo SURF.
+    b += _sub(b"CTEX", _asciiz(PROJ_NAMES[proj]))
     b += _sub(b"TIMG", _asciiz(tex))
     b += _sub(b"TWRP", struct.pack(">HH", 2, 2))
-    b += _sub(b"TFLG", struct.pack(">H", 0x0021))
-    b += _sub(b"TSIZ", struct.pack(">3f", 100.0, 100.0, 100.0))
-    b += _sub(b"TCTR", struct.pack(">3f", 0.0, 0.0, 0.0))
+    b += _sub(b"TFLG", struct.pack(">H", 0x0020 | AXIS_BITS[axis]))
+    b += _sub(b"TSIZ", struct.pack(">3f", *tsiz))
+    b += _sub(b"TCTR", struct.pack(">3f", *tctr))
     return _asciiz(name) + b
 
 
@@ -115,20 +123,30 @@ def main():
     verts, faces, mats_order = parse_obj(args.obj)
     kd = parse_mtl_kd(os.path.splitext(args.obj)[0] + ".mtl")
 
-    # material -> (surfname, colr, vlum, vdif, tex)
+    # material -> dict(name, colr, vlum, vdif, tex [, proj, axis, tsiz, tctr]).
+    # Positional: surf,R,G,B,vlum,vdif,TEX; optional trailing key=vals:
+    #   proj=planar|cyl|sph|cubic  axis=x|y|z  tsiz=X:Y:Z  tctr=X:Y:Z
     spec = {}
     for m in args.map:
         key, _, rest = m.partition("=")
         f = rest.split(",")
-        spec[key] = (f[0], (int(f[1]), int(f[2]), int(f[3])),
-                     float(f[4]), float(f[5]), f[6])
-    surfaces = []          # ordered (surfname, colr, vlum, vdif, tex)
+        d = dict(name=f[0], colr=(int(f[1]), int(f[2]), int(f[3])),
+                 vlum=float(f[4]), vdif=float(f[5]), tex=f[6])
+        for extra in f[7:]:
+            k, _, v = extra.partition("=")
+            if k in ("tsiz", "tctr"):
+                d[k] = tuple(float(x) for x in v.split(":"))
+            else:
+                d[k] = v
+        spec[key] = d
+    surfaces = []          # ordered surface dicts
     surf_index = {}        # objmat -> 1-based surface index
     for m in mats_order:
         if m in spec:
             s = spec[m]
         else:
-            s = (m or "surf", kd.get(m, (200, 200, 200)), 0.0, 1.0, args.default_tex)
+            s = dict(name=m or "surf", colr=kd.get(m, (200, 200, 200)),
+                     vlum=0.0, vdif=1.0, tex=args.default_tex)
         surf_index[m] = len(surfaces) + 1
         surfaces.append(s)
 
@@ -140,7 +158,7 @@ def main():
     verts = [(v[0] - ox, v[1] - oy, v[2] - oz) for v in verts]
 
     pnts = b"".join(struct.pack(">3f", *v) for v in verts)
-    srfs = b"".join(_asciiz(s[0]) for s in surfaces)
+    srfs = b"".join(_asciiz(s["name"]) for s in surfaces)
     pols = b""
     for idx, m in faces:
         vi = list(reversed(idx)) if args.flip_winding else idx
@@ -149,7 +167,11 @@ def main():
         pols += struct.pack(">H", surf_index[m])
     body = _chunk(b"PNTS", pnts) + _chunk(b"SRFS", srfs) + _chunk(b"POLS", pols)
     for s in surfaces:
-        body += _chunk(b"SURF", _surf(*s))
+        body += _chunk(b"SURF", _surf(s["name"], s["colr"], s["vlum"], s["vdif"],
+                                      s["tex"], s.get("proj", "cubic"),
+                                      s.get("axis", "x"),
+                                      s.get("tsiz", (100.0, 100.0, 100.0)),
+                                      s.get("tctr", (0.0, 0.0, 0.0))))
     data = b"FORM" + struct.pack(">I", len(body) + 4) + b"LWOB" + body
     with open(args.lwo, "wb") as fh:
         fh.write(data)
@@ -159,8 +181,9 @@ def main():
     for si, s in enumerate(surfaces, 1):
         sy = [verts[v][1] for idx, m in faces if surf_index[m] == si for v in idx]
         if sy:
-            print("  surf %d '%s' colr=%s vlum=%s Y %.2f..%.2f (centre %.2f)"
-                  % (si, s[0], s[1], s[2], min(sy), max(sy), 0.5 * (min(sy) + max(sy))))
+            print("  surf %d '%s' colr=%s vlum=%s tex=%s Y %.2f..%.2f (centre %.2f)"
+                  % (si, s["name"], s["colr"], s["vlum"], s["tex"],
+                     min(sy), max(sy), 0.5 * (min(sy) + max(sy))))
 
 
 if __name__ == "__main__":

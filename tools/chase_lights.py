@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """Author ENVIRONMENTAL-LIGHT DRAMA into Authoring/chase/CHASE.LWS.
 
-PRIMARY variant --runway: a colonnade of ANCHORED, slowly-SWEEPING lighthouse
-beacons lining the flight lane (auto-placed from Ship1's ground track, alternating
-sides, in the open-water stretches). Each beam springs from a REAL structure — a
-faceted beacon.lwo tower standing in the water with a luminous lamp-house cap —
-and the beam SWEEPS, because its spot is parented to a spinning null rotor
-(phases staggered so the sweeps travel down the corridor, not strobe in unison).
-LOW gain by design: atmosphere, not a stage show. This answers the user note
-"the spot lights are not anchored to anything - there should be at least a
-lighthouse model or something, and they should rotate?". Secondary --lighthouse
-(a slow rotating warm accent, retuned WAY down). --lasers is the legacy sky-fan
-gauntlet, tamed hard and no longer in the default variant set. --realign re-aims
-the two existing canyon spots. --runway (re)writes Authoring/chase/beacon.lwo.
+PRIMARY variant --runway: a colonnade of ANCHORED, SWEEPING, COLOUR-SHIFTING
+red-and-white lighthouses lining the flight lane (auto-placed from Ship1's
+ground track, alternating sides, open-water stretches only — the gorge is
+skipped). Per beacon:
+  * a REAL striped lighthouse tower (lighthouse.lwo, CC0 — see ASSETS.md;
+    --runway-model proc regenerates the faceted beacon.lwo fallback), seated
+    TERRAIN-AWARE: the footprint samples the mountain meshes and the base is
+    buried under the water / inside the island rock (--runway-sink /
+    --runway-rock-sink), so island towers stand on the rock, sea towers in the
+    water ("lighthouses height need to consider the terrain").
+  * a spinning null rotor + spot(s) PARENTED to it → the beam sweeps
+    (Transform.cpp:330 re-derives the cone axis per frame; phases staggered).
+  * COLOURED beams with DYNAMIC CHANGES: two co-located spots per rotor with
+    anti-phase half-wave 'LgtIntensity  (envelope)' keys crossfade the beam
+    between a BEAM_PALETTE colour pair (engine evaluates the intensity spline
+    every frame — Transform.cpp:255 → ISize → light SoA colour). NO engine
+    change; --runway-dual 0 = single-colour breathing beams instead.
+Secondary --lighthouse (a slow rotating warm accent, retuned WAY down).
+--lasers is the legacy sky-fan gauntlet, tamed hard and no longer in the
+default variant set. --realign re-aims the two existing canyon spots.
 
 Family: tools/chase_bank.py / chase_camera.py / chase_loop.py — in-place,
 idempotent, parameterized, re-runnable. Authored-first: the result is LWS lights
@@ -53,10 +61,13 @@ Usage
   tools/chase_lights.py --clear                      # strip all fds lights
 
   Runway knobs:      --runway-beacons N  --runway-gain G  --runway-cone DEG
-                     --runway-offset U  --runway-color R G B
-                     --runway-turns T  --runway-phase DEG  --runway-pitch DEG
-                     --runway-fixed-alt  --runway-tower-height U
-                     --runway-base-r/-top-r/-lamp-r U  --runway-lamp-lum F
+                     --runway-offset U  --runway-turns T  --runway-phase DEG
+                     --runway-pitch DEG  --runway-fixed-alt
+                     --runway-dual 0|1  --runway-pulse FRAMES
+                     --runway-int-hi F  --runway-int-lo F
+                     --runway-model lighthouse|proc  --runway-lamp-height U
+                     --runway-scale S  --runway-stock S
+                     --runway-sink U  --runway-rock-sink U
   Lighthouse knobs:  --lh-pos X Y Z  --lh-pitch DEG  --lh-turns T
                      --lh-gain G  --lh-cone DEG  --lh-color R G B
   Laser knobs:       --laser-gain G  --laser-cone DEG
@@ -312,6 +323,136 @@ def lamp_center_from_lwo(path, surfname="lamp"):
     return 0.5 * (min(ys) + max(ys))
 
 
+# ── terrain sampler: mountain height under a world (x,z) ──────────────────────
+# The tower BASE must sit under the water / inside the island rock (user note:
+# "lighthouses height need to consider the terrain"). Sample the mountain
+# meshes' world triangles at the tower footprint and seat the base below the
+# LOWEST footprint sample. Transform per instance follows the engine
+# (Transform.cpp / chase_sea_level.py): world = pos + s*R(u - pivot), with the
+# LightWave rotation order bank(Z) → pitch(X) → heading(Y); heading 0 = +Z,
+# H = atan2(x, z) (the aim_hp convention validated by the beams).
+MOUNTAIN_BASES = {"m1.lwo", "m2.lwo", "m3.lwo", "m4.lwo", "m5.lwo",
+                  "mm7.lwo", "big_m.lwo"}
+_mesh_cache = {}
+
+
+def _load_lwo_tris(path):
+    """[(v0,v1,v2)] raw-local triangles (fan-triangulated LWO polys)."""
+    if path in _mesh_cache:
+        return _mesh_cache[path]
+    d = open(path, "rb").read()
+    off, end = 12, 8 + struct.unpack(">I", d[4:8])[0]
+    pnts = pols = None
+    while off < end:
+        cid = d[off:off + 4]
+        ln = struct.unpack(">I", d[off + 4:off + 8])[0]
+        if cid == b"PNTS":
+            pnts = d[off + 8:off + 8 + ln]
+        elif cid == b"POLS":
+            pols = d[off + 8:off + 8 + ln]
+        off += 8 + ln + (ln & 1)
+    n = len(pnts) // 12
+    verts = [struct.unpack_from(">3f", pnts, i * 12) for i in range(n)]
+    tris = []
+    p = 0
+    while p + 4 <= len(pols):
+        nv = struct.unpack_from(">H", pols, p)[0]; p += 2
+        idx = struct.unpack_from(">%dH" % nv, pols, p); p += 2 * nv + 2
+        for i in range(1, nv - 1):
+            tris.append((verts[idx[0]], verts[idx[i]], verts[idx[i + 1]]))
+    _mesh_cache[path] = tris
+    return tris
+
+
+def _rot_lw(u, h, p, b):
+    """R(H,P,B)*u — bank about Z, then pitch about X, then heading about Y."""
+    x, y, z = u
+    br, pr, hr = math.radians(b), math.radians(p), math.radians(h)
+    x, y = x * math.cos(br) - y * math.sin(br), x * math.sin(br) + y * math.cos(br)
+    y, z = y * math.cos(pr) - z * math.sin(pr), y * math.sin(pr) + z * math.cos(pr)
+    x, z = x * math.cos(hr) + z * math.sin(hr), -x * math.sin(hr) + z * math.cos(hr)
+    return x, y, z
+
+
+def build_terrain(lines):
+    """World-space triangle soup of every mountain instance in the LWS."""
+    tris = []
+    n = len(lines)
+    li = 0
+    while li < n:
+        s = lines[li].strip()
+        if s.startswith("LoadObject"):
+            base = s[len("LoadObject"):].replace("/", "\\").split("\\")[-1].strip().lower()
+            j = li + 1
+            mo = None
+            pivot = (0.0, 0.0, 0.0)
+            while j < n:
+                t = lines[j].strip()
+                if t.startswith(("LoadObject", "AddLight", "AddNullObject",
+                                 "AmbientColor", "ShowCamera")):
+                    break
+                if t.startswith("ObjectMotion") and mo is None:
+                    mo = j
+                if t.startswith("PivotPoint"):
+                    pv = t.split()[1:]
+                    pivot = (float(pv[0]), float(pv[1]), float(pv[2]))
+                j += 1
+            if base in MOUNTAIN_BASES and mo is not None:
+                k = mo + 1
+                def nxt(m):
+                    while m < n and lines[m].strip() == "": m += 1
+                    return m
+                k = nxt(k); k = nxt(k + 1); vi = nxt(k + 1)
+                v = [float(x) for x in lines[vi].split()]
+                pos, rot, scl = v[0:3], v[3:6], v[6:9]
+                local = _load_lwo_tris(os.path.join(os.path.dirname(LWS), base))
+                for (a, bb, c) in local:
+                    w = []
+                    for u in (a, bb, c):
+                        r = _rot_lw((u[0] - pivot[0], u[1] - pivot[1], u[2] - pivot[2]),
+                                    rot[0], rot[1], rot[2])
+                        w.append((pos[0] + scl[0] * r[0],
+                                  pos[1] + scl[1] * r[1],
+                                  pos[2] + scl[2] * r[2]))
+                    tris.append(tuple(w))
+            li = j
+            continue
+        li += 1
+    return tris
+
+
+def terrain_height(tris, x, z):
+    """Max triangle-surface Y at world (x,z); 0.0 (the water plane) if none."""
+    best = 0.0
+    for (a, b, c) in tris:
+        if x < min(a[0], b[0], c[0]) or x > max(a[0], b[0], c[0]):
+            continue
+        if z < min(a[2], b[2], c[2]) or z > max(a[2], b[2], c[2]):
+            continue
+        d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2])
+        if abs(d) < 1e-9:
+            continue
+        w0 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d
+        w1 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d
+        w2 = 1.0 - w0 - w1
+        if w0 < -1e-6 or w1 < -1e-6 or w2 < -1e-6:
+            continue
+        y = w0 * a[1] + w1 * b[1] + w2 * c[1]
+        if y > best:
+            best = y
+    return best
+
+
+def footprint_terrain(tris, x, z, radius):
+    """(min, max) terrain over the tower footprint (centre + 8 ring samples)."""
+    hs = [terrain_height(tris, x, z)]
+    for k in range(8):
+        a = 2.0 * math.pi * k / 8
+        hs.append(terrain_height(tris, x + radius * math.cos(a),
+                                 z + radius * math.sin(a)))
+    return min(hs), max(hs)
+
+
 # ── runway: a colonnade of ANCHORED, slowly-SWEEPING lighthouse beacons ────────
 # Auto-placed from Ship1's ground track: N beacons (default 8, modest — the +63
 # corridor once broke ship2's key count, 2969679) alternate L/R down the OPEN-
@@ -365,23 +506,91 @@ def _beacon_rotor(idx, pos, pitch, turns, phase):
     return out
 
 
+# Colour palette for the beacon beams (user: "colored spotlights, with dynamic
+# changes"). Each beacon gets a PAIR (i, i+3): two co-located spots on the same
+# rotor whose LgtIntensity ENVELOPES crossfade in anti-phase, so the beam (and
+# its water pool) continuously shifts colour. The engine re-evaluates the
+# intensity spline every frame (Transform.cpp:255 Spline_Calc_1D → ISize) and
+# the light SoA colour is L * ISize (DeferredSurfaceKernel.cpp:5328), so the
+# authored envelope IS the dynamic change — no engine work.
+BEAM_PALETTE = [
+    (255,  40,  40),   # red
+    ( 40, 170, 255),   # cyan-blue
+    (255, 160,  40),   # amber
+    ( 60, 255, 110),   # green
+    (255,  70, 220),   # magenta
+    ( 90, 110, 255),   # indigo
+]
+SCENE_LAST = 1760
+
+
+def intensity_env_lines(hi, lo, period, phase, step):
+    """'LgtIntensity  (envelope)' block spanning the whole scene (no repeat —
+    ConvertOmni honours EndBehavior only for Pos, so the keys must cover
+    0..1760 explicitly). TWO spaces before '(' — ReadEnvelope detects an
+    envelope by Temp[1]=='(' after the keyword's first space.
+    Curve = HALF-WAVE-RECTIFIED cosine: the light holds near `lo` for half the
+    period and peaks at `hi` in the other half. Paired with an anti-phase twin
+    this makes the beam SWITCH colour with brief blends, instead of spending
+    half the cycle in a desaturated 50/50 mix (a plain cos crossfade reads
+    grey-ish through the white fog in-scatter)."""
+    out = ["LgtIntensity  (envelope)", "  1"]
+    frames = list(range(0, SCENE_LAST + 1, step))
+    if frames[-1] != SCENE_LAST:
+        frames.append(SCENE_LAST)
+    out.append("  %d" % len(frames))
+    for f in frames:
+        c = math.cos(2.0 * math.pi * (f - phase) / period)
+        v = lo + (hi - lo) * (max(0.0, c) ** 1.2)
+        out.append("  %s" % fmt(max(lo * 0.5, v)))
+        out.append("  %d 0 0 0 0" % f)
+    out.append("EndBehavior 1")
+    return out
+
+
+def _beacon_spot(name, rotor_num, color, cone, gain, env_lines):
+    return (["AddLight",
+             "LightName %s" % name,
+             "ShowLight 1 7",
+             "LightMotion (unnamed)",
+             "  9",
+             "  1",
+             "  0 0 0 0 0 0 1 1 1",
+             "  0 0 0 0 0",
+             "EndBehavior 1",
+             "ParentObject %d" % rotor_num,
+             "LightColor %d %d %d" % (color[0], color[1], color[2])]
+            + env_lines
+            + ["LightType 2",
+               "ConeAngle %f" % cone,
+               "LightRange 30000.000000",
+               "VolumetricLight 1",
+               "VolumetricLightIntensity %f" % gain,
+               "ShadowType 1"])
+
+
 def build_runway(lines, args, start_idx, model_base, lamp_local):
     keys = parse_ship_keys(lines, "ship1.lwo")
     n = max(1, args.runway_beacons)
     offset = args.runway_offset
-    place_y = -args.runway_sink            # tower base sits just under the water
-    # Auto-scale the model so its lamp-house lands at --runway-lamp-height (the
-    # beam origin), regardless of the mesh's native size — a downloaded model of
-    # any scale slots in. --runway-scale > 0 forces a fixed uniform scale instead.
+    # Auto-scale the model so its lamp-house lands --runway-lamp-height above
+    # the WATER for a sea-level tower, regardless of the mesh's native size —
+    # a downloaded model of any scale slots in. ONE scale for all beacons
+    # (uniform architecture); island towers simply ride higher on the rock.
+    # --runway-scale > 0 forces a fixed scale instead. --runway-stock widens
+    # X/Z only (stockier silhouette vs the slender source mesh).
     if args.runway_scale > 0:
         scale = args.runway_scale
     else:
-        scale = (args.runway_lamp_height - place_y) / (lamp_local or 1.0)
+        scale = (args.runway_lamp_height + args.runway_sink) / (lamp_local or 1.0)
+    stock = args.runway_stock
     lamp_y_local = lamp_local * scale
+    # world footprint radius (source footprint ~6 units across → r≈3.2 local)
+    foot_r = 3.2 * scale * stock
     gain, cone = args.runway_gain, args.runway_cone
-    color = args.runway_color
     pitch = args.runway_pitch
     turns = args.runway_turns
+    terrain = build_terrain(lines)
     frames = _beacon_frames(n, OPEN_BANDS)
     obj_block, lgt_block = [], []
     idx = start_idx
@@ -392,7 +601,18 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
         side = +1.0 if (i % 2 == 0) else -1.0
         ex = p[0] + side * lx * offset
         ez = p[2] + side * lz * offset
-        lamp_world_y = place_y + lamp_y_local
+        # Terrain-aware seating: the base must sit under the water / inside
+        # the island rock. Sample the mountains over the footprint and put the
+        # base below the LOWEST sample; sink deeper on rock so the base bevel
+        # is fully buried in the slope.
+        t_min, t_max = footprint_terrain(terrain, ex, ez, foot_r)
+        on_rock = t_max > 5.0
+        sink = args.runway_rock_sink if on_rock else args.runway_sink
+        base_y = t_min - sink
+        lamp_world_y = base_y + lamp_y_local
+        print("  beacon %d @f%-4d (%.0f, %.0f)  terrain %.0f..%.0f %s base=%.0f lamp=%.0f"
+              % (i, f, ex, ez, t_min, t_max, "ROCK " if on_rock else "water",
+                 base_y, lamp_world_y))
         # this beacon rotates unless --runway-fixed-alt makes the odd ones hold
         rotating = not (args.runway_fixed_alt and (i % 2 == 1))
         if rotating:
@@ -400,7 +620,7 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
             b_phase = i * args.runway_phase
         else:
             b_turns = 0.0                   # static: aim its cone across the lane
-            aim = (p[0] + tx * args.runway_ahead, place_y, p[2] + tz * args.runway_ahead)
+            aim = (p[0] + tx * args.runway_ahead, 0.0, p[2] + tz * args.runway_ahead)
             b_phase, _pfree = aim_hp((ex, lamp_world_y, ez), aim)
         # tower (static) — a real structure the beam springs from
         obj_block += [
@@ -409,8 +629,9 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
             "ObjectMotion (unnamed)",
             "  9",
             "  1",
-            "  %s %s %s 0 0 0 %s %s %s" % (fmt(ex), fmt(place_y), fmt(ez),
-                                           fmt(scale), fmt(scale), fmt(scale)),
+            "  %s %s %s 0 0 0 %s %s %s" % (fmt(ex), fmt(base_y), fmt(ez),
+                                           fmt(scale * stock), fmt(scale),
+                                           fmt(scale * stock)),
             "  0 0 0 0 0",
             "EndBehavior 1",
             "ShadowOptions 7",
@@ -420,27 +641,26 @@ def build_runway(lines, args, start_idx, model_base, lamp_local):
         obj_block += _beacon_rotor(i, (ex, lamp_world_y, ez), pitch, b_turns, b_phase)
         idx += 1
         rotor_num = idx                     # 1-based index of the rotor just added
-        # spot parented to the rotor → beam emanates from the lamp and sweeps
-        lgt_block += [
-            "AddLight",
-            "LightName fds runway %d%s" % (i, "R" if side > 0 else "L"),
-            "ShowLight 1 7",
-            "LightMotion (unnamed)",
-            "  9",
-            "  1",
-            "  0 0 0 0 0 0 1 1 1",
-            "  0 0 0 0 0",
-            "EndBehavior 1",
-            "ParentObject %d" % rotor_num,
-            "LightColor %d %d %d" % (color[0], color[1], color[2]),
-            "LgtIntensity 1.600000",
-            "LightType 2",
-            "ConeAngle %f" % cone,
-            "LightRange 30000.000000",
-            "VolumetricLight 1",
-            "VolumetricLightIntensity %f" % gain,
-            "ShadowType 1",
-        ]
+        # Colored spot(s) parented to the rotor. Dual mode (default): two
+        # anti-phase envelope spots crossfade the beam colour; single mode:
+        # one colour with a breathing envelope.
+        colA = BEAM_PALETTE[i % len(BEAM_PALETTE)]
+        colB = BEAM_PALETTE[(i + 3) % len(BEAM_PALETTE)]
+        period = args.runway_pulse
+        step = max(20, period // 8)
+        e_phase = i * period / max(1, n) * 1.7   # stagger the crossfades
+        hi, lo = args.runway_int_hi, args.runway_int_lo
+        if args.runway_dual:
+            envA = intensity_env_lines(hi, lo, period, e_phase, step)
+            envB = intensity_env_lines(hi, lo, period, e_phase + period * 0.5, step)
+            lgt_block += _beacon_spot("fds runway %dA" % i, rotor_num, colA,
+                                      cone, gain, envA)
+            lgt_block += _beacon_spot("fds runway %dB" % i, rotor_num, colB,
+                                      cone, gain, envB)
+        else:
+            envA = intensity_env_lines(hi, max(lo, 0.35 * hi), period, e_phase, step)
+            lgt_block += _beacon_spot("fds runway %dA" % i, rotor_num, colA,
+                                      cone, gain, envA)
     return obj_block, lgt_block, idx
 
 
@@ -636,15 +856,24 @@ def main():
     ap.add_argument("--runway-beacons", "--runway-pairs", dest="runway_beacons",
                     type=int, default=8,
                     help="number of anchored beacons along the lane (modest — keep <=~10)")
-    ap.add_argument("--runway-gain", type=float, default=3.4,
+    ap.add_argument("--runway-gain", type=float, default=7.0,
                     help="VolumetricLightIntensity — keep low; the beams are ambience")
     ap.add_argument("--runway-cone", type=float, default=9.0)
     ap.add_argument("--runway-offset", type=float, default=2300.0,
                     help="lateral distance of each beacon from the lane centreline")
     ap.add_argument("--runway-ahead", type=float, default=2400.0,
                     help="fixed beacons: how far along the path the cone aims (rake)")
-    ap.add_argument("--runway-color", type=int, nargs=3, default=[135, 185, 230],
-                    help="cool blue-white by default")
+    # colour + dynamics (user: "colored spotlights, with dynamic changes").
+    # Colours come from BEAM_PALETTE per beacon; dual anti-phase intensity
+    # envelopes crossfade each beam between its colour pair.
+    ap.add_argument("--runway-dual", type=int, default=1,
+                    help="1 = two crossfading colour spots per beacon (default), 0 = single pulsing")
+    ap.add_argument("--runway-pulse", type=int, default=440,
+                    help="colour-crossfade / pulse period in frames")
+    ap.add_argument("--runway-int-hi", type=float, default=1.6,
+                    help="LgtIntensity envelope peak")
+    ap.add_argument("--runway-int-lo", type=float, default=0.2,
+                    help="LgtIntensity envelope floor")
     # rotation — SLOW + staggered so sweeps travel down the corridor (user asked
     # for rotation; the user vetoed bright/messy, so keep it stately).
     ap.add_argument("--runway-turns", type=float, default=3.0,
@@ -664,8 +893,12 @@ def main():
                     help="world-Y the lamp-house (beam origin) is auto-scaled to sit at")
     ap.add_argument("--runway-scale", type=float, default=0.0,
                     help="force a fixed uniform tower scale (0 = auto from --runway-lamp-height)")
+    ap.add_argument("--runway-stock", type=float, default=1.35,
+                    help="X/Z-only widening of the tower (stockier than the slender source mesh)")
     ap.add_argument("--runway-sink", type=float, default=35.0,
-                    help="how far the tower base sits under the water plane (no z-fight)")
+                    help="how far the tower base sits under the WATER plane (no z-fight)")
+    ap.add_argument("--runway-rock-sink", type=float, default=90.0,
+                    help="deeper sink when the footprint lands on island rock (bury the base bevel)")
     # procedural-tower geometry (only used with --runway-model proc; real world
     # units, sea level = Y 0, ship hull radius ~175-264)
     ap.add_argument("--runway-tower-height", type=float, default=1400.0)

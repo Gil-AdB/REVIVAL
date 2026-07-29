@@ -13,13 +13,15 @@
 # (e.g. ./chase_preview.sh runway --runway-gain 4.5 --runway-turns 2 --runway-fixed-alt,
 #  or ./chase_preview.sh runway --runway-model proc  for the procedural-tower fallback).
 #
-# The PRIMARY runway variant plants a real CC0 lighthouse (Authoring/chase/
-# lighthouse.lwo) at each emitter and PARENTS its cool volumetric beam to a
-# spinning null so the beam SWEEPS (phases staggered down the lane). The beams
-# are VOLUMETRIC cones — visible only through the CINEMATIC fog band, so launch
-# with --cinematic to judge them; the towers themselves render in plain
-# --deferred too. Beacons line the open water; the loop is t~500-580, the gorge
-# t~1060-1200 (kept clear of towers).
+# The PRIMARY runway variant plants a real red/white-striped CC0 lighthouse
+# (Authoring/chase/lighthouse.lwo) at each emitter, seated TERRAIN-AWARE (base
+# buried under the water / inside the island rock), and PARENTS two coloured
+# volumetric spots to a spinning null: the beam SWEEPS and its colour SHIFTS
+# (anti-phase LgtIntensity envelopes crossfade a palette pair per beacon; all
+# phases staggered down the lane). The beams are VOLUMETRIC cones — visible
+# only through the CINEMATIC fog band, so launch with --cinematic to judge
+# them; the towers themselves render in plain --deferred too. Beacons line the
+# open water; the loop is t~500-580, the gorge t~1060-1200 (kept clear).
 #
 # COMBAT (ship2 fires at Ship1) is an orthogonal runtime flag, not baked into the
 # FLD — add --flags-file=PRESETS/chase-combat.flags to any launch below to see it.
