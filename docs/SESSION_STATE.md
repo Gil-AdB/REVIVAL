@@ -213,7 +213,10 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   --cone-swirl=0.7 --env-brdf-analytic --sh-ambient --diffuse_energy
   --pbr_multiscatter` — note NO --mirror-recurse-depth (order-1/2 RTT path,
   not the recursion), and --deferred-quarter + --hdr are in play (the known
-  wave-2/HDR checkerboard interaction family). Parked deliberately
+  wave-2/HDR checkerboard interaction family). **Does NOT repro on bare
+  ./DEMO** (user-confirmed) — flag-gated; first bisect candidates when
+  picked up: --shard-deferred, --hdr/--hdr-linear/--hdr-refl-gain=4,
+  --deferred-quarter, --cone-fine-tiles. Parked deliberately
   ("finish the other threads first").
 
 - **Greets ~1-in-12 flip**: kernel-internal nondeterminism, survives
