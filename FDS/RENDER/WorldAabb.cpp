@@ -126,6 +126,8 @@ inline void addPlane(Frustum& f, const float right[3], const float up[3],
 
 }  // namespace
 
+bool WorldAabb_MeshIsDynamic(Object* obj) { return meshIsDynamic(obj); }
+
 void WorldAabb_UpdateScene(Scene* sc) {
     if (!sc) return;
     // Design note: static meshes get their world box ONCE (post first

@@ -25,8 +25,15 @@
 struct Scene;
 struct TriMesh;
 struct Material;
+struct Object;
 
 namespace fds {
+
+// The static/dynamic partition used everywhere (shadow bakes, env bakes, the
+// world-AABB build): true iff this object's — or an ancestor's — Pos spline
+// spans > 0.1 world units or its Rotate spline spans > 0.01. Exposed so the
+// dynamic-env overlay can gather the movers' bspheres with the same rule.
+bool WorldAabb_MeshIsDynamic(Object* obj);
 
 // A world-space axis-aligned bounding box.
 struct WorldAabb {

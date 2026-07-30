@@ -101,6 +101,17 @@ bool EnvReflection_FramePrep(Scene* sc);
 // not yet baked). Rebuilt by FramePrep; stable within a frame.
 const EnvPanoLinear* const* EnvReflection_Table(Scene* sc);
 
+// ── Dynamic-mesh reflection overlay (--env_dynamic, ENVDYN Workstream A3) ──
+// For each env probe flagged Material::EnvDynamic (A1) whose static capture
+// was retained (A2), re-render the scene's DYNAMIC meshes (the mech) into the
+// probe's touched cube faces and composite them over the static master, so
+// movers appear LIVE in the reflection. Ordered like RenderSecondOrderMirrors
+// — call from the scene tick BEFORE the main Transform, on the main-camera
+// path (NOT inside FramePrep). Per-frame budget = env_dynamic_budget flagged
+// probes. No-op unless --env_dynamic (+ --env_refl / --env_cube) and at least
+// one flagged, on-screen, mech-relevant probe exists — byte-null otherwise.
+void EnvDynamic_Overlay(Scene* sc);
+
 // ── SH irradiance ambient (--sh_ambient) ──────────────────────────────────
 // One-shot per-scene bake of a 9-coefficient L2 spherical-harmonic RGB
 // irradiance probe. Renders a small (kSHFaceRes²) environment cube from the

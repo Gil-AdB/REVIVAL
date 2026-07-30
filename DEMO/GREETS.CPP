@@ -2992,6 +2992,13 @@ struct GreetsScene : SceneDriver {
 		if (fds::FeatureFlags::draw_aabbs())
 			fds::WorldAabb_UpdateScene(GreetSc);
 
+		// ENVDYN Workstream A3: live dynamic-mesh reflection overlay — the
+		// mech rendered into flagged env probes, composited over their static
+		// capture. Ordered here (post-Animate, post-RTT, PRE main Transform),
+		// like RenderSecondOrderMirrors — NOT inside FramePrep. No-op unless
+		// --env_dynamic and a flagged/relevant probe exists.
+		fds::EnvDynamic_Overlay(GreetSc);
+
 		// --bake_tick_overlap: dispatch the per-frame shadow bake NOW — its
 		// pool tasks run underneath the serial Transform/Lighting/Radix
 		// chunk below (complementary resources: the pool is otherwise

@@ -1,6 +1,7 @@
 #include "EnvBake.h"
 #include "EnvCube.h"
 #include "OffscreenView.h"
+#include "WorldAabb.h"
 
 #include <Base/FDS_VARS.H>   // MainSurf, View, FList/SList/CAll, CntrX, XRes...
 #include <Base/FDS_DECS.H>   // Render, Radix_Sort, Transform_Objects, CalcPersp,
@@ -16,6 +17,7 @@
 #include <FILLERS/Mekalele.h> // g_gbuffer->mirrorMask neutralization (bake)
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -37,6 +39,13 @@ namespace fds {
 // are skipped, so the panorama doesn't freeze a moving object into the
 // reflection at wherever it happened to stand on bake frame.
 bool g_envBakeSkipDynamic = false;
+
+// ENVDYN A3: the INVERSE filter — read by Transform_Objects while the dynamic-
+// mesh env overlay renders. True → static meshes are skipped and ONLY dynamic
+// meshes (the mech) are submitted, so the overlay draws just the movers over
+// the probe's retained static capture. Set/cleared around the overlay's face
+// renders; never both this and g_envBakeSkipDynamic true at once.
+bool g_envOverlayDynamicOnly = false;
 
 // FACE-level self-exclusion state for the probe currently baking (empty
 // outside a bake). The classic local-cubemap rule is "the reflector never
@@ -213,10 +222,15 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                            float fovDeg, uint32_t voidColor,
                            std::vector<uint32_t> faces[6], Material* skipMat,
                            float skipRadius = 0.0f, bool publishProj = false,
-                           std::vector<uint16_t>* facesZOut = nullptr) {
+                           std::vector<uint16_t>* facesZOut = nullptr,
+                           bool dynamicOnly = false,
+                           const bool* faceMask = nullptr) {
     // facesZOut (ENVDYN A2): optional per-face depth capture (6 vectors of
     // res², filled from surf.Z16 before it is freed). nullptr = no capture,
     // byte-identical to the legacy bake.
+    // dynamicOnly (ENVDYN A3): render ONLY dynamic meshes (the overlay) — the
+    // inverse of the static-only bake. faceMask (6 bools, nullptr = all faces):
+    // render only the touched faces. Both default off → the legacy bake path.
     if (!sc) return false;
     static const bool sPaint = std::getenv("FDS_ENVCUBE_PAINT") != nullptr;
 
@@ -288,13 +302,18 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
         // the same 0.999). The scope's destructor restores AspectRatio.
         if (publishProj) AspectRatio = 0.999f;
 
-        g_envBakeSkipDynamic = true;   // moving meshes stay out of the pano
+        // Static-only bake (default) vs dynamic-only overlay (ENVDYN A3). Never
+        // both true at once — the overlay skips STATIC meshes, keeping the
+        // movers, and the static capture already lives in the store (A2).
+        g_envBakeSkipDynamic     = !dynamicOnly;
+        g_envOverlayDynamicOnly  =  dynamicOnly;
         // (the reflector's own faces stay out too — g_envBakeSkipMats above)
         // Fix-bundle probes: mirror-clone meshes stay out STRUCTURALLY
         // (see g_envBakeSkipMirrorClones above). publishProj-gated so the
         // legacy bake path and the disco-ball pano stay byte-identical.
         g_envBakeSkipMirrorClones = publishProj;
         for (int i = 0; i < 6; ++i) {
+            if (faceMask && !faceMask[i]) continue;   // overlay: touched faces only
             if (sPaint) {   // orientation self-check: painted debug faces
                 fds::EnvCube_PaintDebugFace(i, faces[i].data(), res);
                 continue;
@@ -353,6 +372,7 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
             }
         }
         g_envBakeSkipDynamic = false;
+        g_envOverlayDynamicOnly = false;
         g_envBakeSkipMirrorClones = false;
         g_envBakeSkipMats.clear();
         g_envBakeLegacySkipMat = nullptr;
@@ -1130,6 +1150,146 @@ bool EnvReflection_FramePrep(Scene* sc) {
                              (unsigned)M->ID, idx, (void*)M, M->Name);
         }
     return bakedAny;
+}
+
+// ── Dynamic-mesh reflection overlay (--env_dynamic, ENVDYN A3) ─────────────
+namespace {
+
+// Render the dynamic meshes into store S's touched cube faces and composite
+// them over S's retained static master (A2). Occlusion vs static geometry is
+// the per-face depth compare (ZPage16: larger zEnc = nearer, 0 = untouched).
+void overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
+    const int fr = S.view.W;
+    const Vector bake = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+    std::vector<uint32_t> mech[6];
+    std::vector<uint16_t> mechZ[6];
+    // g_envBakeInProgress: block any re-entrant FramePrep/SH bake while the
+    // overlay renders (belt-and-braces atop the g_offscreenViewDepth gate).
+    g_envBakeInProgress = true;
+    const bool ok = renderSixFaces(sc, bake, fr, fds::EnvCube_FaceFovDegrees(),
+                                   0xFF202020u, mech,
+                                   /*skipMat=*/nullptr, /*skipRadius=*/0.0f,
+                                   /*publishProj=*/true, mechZ,
+                                   /*dynamicOnly=*/true, faceMask);
+    g_envBakeInProgress = false;
+    if (!ok) return;
+    for (int f = 0; f < 6; ++f) {
+        if (!faceMask[f] || mechZ[f].empty()) continue;
+        uint32_t* dst          = S.levels[0].data()          + size_t(f) * fr * fr;
+        const uint32_t* master = S.staticColorMaster.data()  + size_t(f) * fr * fr;
+        const uint16_t* sZ     = S.staticFaceZ.data()        + size_t(f) * fr * fr;
+        const uint32_t* mc     = mech[f].data();
+        const uint16_t* mZ     = mechZ[f].data();
+        for (int i = 0; i < fr * fr; ++i)
+            dst[i] = (mZ[i] != 0 && mZ[i] >= sZ[i]) ? mc[i] : master[i];
+    }
+    // Per-face mip refilter (REQUIRED — rough surfaces sample mips; without it
+    // the mech vanishes on rough metals). boxDownsampleCube filters each face
+    // independently. level0 was composited in place; rebuild 1..3 and re-point
+    // the view pointers (the level vectors may reallocate).
+    int frl = fr;
+    for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
+        boxDownsampleCube(S.levels[k-1], frl, S.levels[k]);
+        frl >>= 1;
+    }
+    for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
+        S.view.mip[k] = S.levels[k].data();
+}
+
+}  // namespace
+
+void EnvDynamic_Overlay(Scene* sc) {
+    if (!sc || g_envBakeInProgress) return;
+    if (!fds::FeatureFlags::env_dynamic()) return;
+    if (g_offscreenViewDepth > 0) return;             // main-camera path only
+    const int budget = fds::FeatureFlags::env_dynamic_budget();
+    if (budget <= 0) return;
+    auto it = g_envByScene.find(sc);
+    if (it == g_envByScene.end() || it->second.stores.empty()) return;
+    SceneEnv& env = it->second;
+
+    // Cheap pre-scan: any flagged, retained cube store? (byte-null fast exit
+    // when the scene has none — nothing authored.)
+    bool anyFlagged = false;
+    for (auto& s : env.stores)
+        if (s->envDynamic && s->view.isCube && !s->staticColorMaster.empty()) {
+            anyFlagged = true; break;
+        }
+    if (!anyFlagged) return;
+
+    // Gather the movers' world-space bspheres (same dynamic predicate as F /
+    // the bakes). ObjectHead walk for the parent-chain test.
+    struct DynBS { float c[3]; float r; };
+    std::vector<DynBS> movers;
+    for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh* T = (TriMesh*)Obj->Data;
+        if (!T || T->FIndex == 0) continue;
+        if (!fds::WorldAabb_MeshIsDynamic(Obj)) continue;
+        Vector wc;
+        MatrixXVector(T->RotMat, &T->BSphereCtr, &wc);
+        wc.x += T->IPos.x; wc.y += T->IPos.y; wc.z += T->IPos.z;
+        movers.push_back({ { wc.x, wc.y, wc.z }, T->BSphereRadius });
+    }
+    if (movers.empty()) return;   // no movers this frame → nothing to reflect
+
+    // Owner-visibility gate needs current world AABBs + the main frustum.
+    fds::WorldAabb_UpdateScene(sc);
+    const Frustum cam = fds::Frustum_FromMainCamera(sc);
+
+    // Per-face pyramid far range: the scene box diagonal (the mech is always
+    // inside the scene). The 4 side planes do the angular cull; the far plane
+    // only bounds pathological far spheres.
+    sceneAABB(sc, env);
+    float diag2 = 0.0f;
+    for (int a = 0; a < 3; ++a) { const float e = env.boxMax[a] - env.boxMin[a]; diag2 += e * e; }
+    const float range = std::sqrt(diag2) * 2.0f + 1.0f;
+
+    static const bool sProf = std::getenv("FDS_ENVDYN_PROF") != nullptr;
+    const auto tProf0 = std::chrono::high_resolution_clock::now();
+
+    static int cursor = 0;   // round-robin start so >budget probes share frames
+    const size_t N = env.stores.size();
+    int processed = 0, facesTotal = 0;
+    for (size_t k = 0; k < N && processed < budget; ++k) {
+        const size_t si = (size_t(cursor) + k) % N;
+        EnvPanoStore& S = *env.stores[si];
+        if (!S.envDynamic || !S.view.isCube || S.staticColorMaster.empty()) continue;
+
+        // (1) owner-mesh AABB vs camera frustum — offscreen owner ⇒ skip.
+        if (S.bakedSkipMat) {
+            const WorldAabb owner = fds::WorldAabb_ForMaterial(sc, S.bakedSkipMat);
+            if (owner.valid && fds::Frustum_CullsAabb(cam, owner)) continue;
+        }
+
+        // (2) mech relevance + which cube faces the movers touch (padded-face
+        // pyramid cull, Foundation F).
+        const float bake[3] = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+        bool faceMask[6] = {}; bool anyTouch = false;
+        for (int f = 0; f < 6; ++f) {
+            const Frustum fp = fds::Frustum_FromProbeFace(bake, f, range);
+            for (const auto& m : movers)
+                if (!fds::Frustum_CullsSphere(fp, m.c, m.r)) {
+                    faceMask[f] = true; anyTouch = true; break;
+                }
+        }
+        if (!anyTouch) continue;
+
+        // (3) render dynamic-only into the touched faces + composite + refilter.
+        overlayComposite(sc, S, faceMask);
+        ++processed;
+        for (int f = 0; f < 6; ++f) facesTotal += faceMask[f] ? 1 : 0;
+    }
+    if (N) cursor = int((size_t(cursor) + size_t(processed) + 1) % N);
+
+    if (sProf && processed > 0) {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - tProf0).count();
+        std::fprintf(stderr, "[ENVDYN-PROF] overlay: %d probe(s), %d face(s), "
+                     "%d mover(s), faceRes %d -> %.3f ms\n",
+                     processed, facesTotal, (int)movers.size(),
+                     env.stores.empty() ? 0 : env.stores[0]->view.W, ms);
+    }
 }
 
 void EnvReflection_DrawViz(Scene* sc) {
