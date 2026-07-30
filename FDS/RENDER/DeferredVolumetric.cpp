@@ -1972,12 +1972,29 @@ void Render_VolumetricCones(const DeferredLightingCtx &ctx, bool inlineDispatch)
                     continue;
                 }
                 if (coneCull) {
+                    // Far bound of the tile's volumetric chunk. A cone's
+                    // in-scatter reaches a pixel along [near, thatPixel's ray
+                    // far]. For an OPAQUE pixel the ray ends at its surface;
+                    // for a SKY / background pixel it runs out to the fog
+                    // cutoff (where the cone fades to zero). tileLights.zMax
+                    // is the farthest *opaque surface* only (sky pixels are
+                    // excluded in computeTileDepthBounds), so a tile that
+                    // MIXES surface + sky must extend the chunk to the fog
+                    // cutoff — otherwise a beam glowing in the tile's sky
+                    // portion is clipped away here and reappears in the
+                    // adjacent pure-sky tile, drawing a rectangular seam
+                    // (the "missing light on the rect" tiled-deferred bug).
                     float zHiT = -1e30f;
                     for (int sj = 0; sj < scaleY; ++sj)
                         for (int si = 0; si < scaleX; ++si) {
                             const int st = (j*scaleY + sj) * DEFERRED_NUM_TILES_X + (i*scaleX + si);
-                            const float zm = ctx.tileLights[st].zMax;
-                            zHiT = std::max(zHiT, (zm > 0.0f && zm < 1e30f) ? zm : fzpFar);
+                            const TileLights &stl = ctx.tileLights[st];
+                            const float zm = stl.zMax;
+                            // hasSky OR no valid surface → the ray reaches the
+                            // fog cutoff; else the farthest opaque surface.
+                            const float far = (stl.hasSky || !(zm > 0.0f && zm < 1e30f))
+                                              ? fzpFar : zm;
+                            zHiT = std::max(zHiT, far);
                         }
                     const float pad  = r * sinO_cull;
                     const float dirZ = lights->dirZ[li];

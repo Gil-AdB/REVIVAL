@@ -213,8 +213,16 @@ struct TileLights {
 	int             count;          // active entries
 	int             paddedCount;    // (count + 7) & ~7, ≤ DEFERRED_MAX_LIGHTS
 	float           zMin;           // view-space z of closest pixel in tile
-	float           zMax;           // view-space z of farthest pixel in tile
-	                                // (+inf / -inf when tile has no geometry)
+	float           zMax;           // view-space z of farthest OPAQUE surface
+	                                // pixel in tile (+inf / -inf when the tile
+	                                // has no geometry). SKY / untouched pixels
+	                                // are NOT counted — see hasSky.
+	bool            hasSky;         // ≥1 pixel had no geometry (zEnc==0). Such
+	                                // pixels' rays run to the fog cutoff, so the
+	                                // volumetric cone cull must extend its far
+	                                // bound past zMax for these tiles (else it
+	                                // clips beams glowing in the sky part → a
+	                                // rectangular per-tile seam).
 };
 
 // Per-frame setup shared across all tile jobs. Captured by reference

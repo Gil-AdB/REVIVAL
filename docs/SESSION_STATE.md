@@ -13,8 +13,8 @@ All runs headless from Runtime/: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`.
 | city | `FDS_CITY_ENV_PIXEL=1 ./DEMO --snapshot=city@t=1961 --out=<dir> --deferred` | `37e62845c4d30eefa321730c5bb7e0b8` |
 | greets | `FDS_GREETS_CAM="-0.616376519,2.79000092,-24.4848595,0.164780021,-0.314234257,0.93493551" ./DEMO --snapshot=greets@t=1588 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --xpar-peel-passes=4 --profiler=0 --no-env_refl` | majority `de3e9a5fb3aa39e008ef41b83f2b8d1b` |
 | fountain | `./DEMO --snapshot=fountain@t=2500 --out=<dir> --deferred --hdr --glass-refract=1 --glass-test --profiler=0` | `51fff7cd38767d619280afe0498a6f24` |
-| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (e496e51 merge: loop-align + gorge fix + lighthouse-beacon runway + review tooling; user-approved look, 3-run stable):<br>t100 `6cf96c797dcffe7c5306efb2f42b5c81` t400 `17ca6a15c650dbec82a1208735a75a87` t800 `ef7880321e0315e19a32c368d160f61a` t1200 `cd3d3be3464fe2feb0b53eedc161fcc3` t1600 `7265d7855bdaae74e39f3c21d4f7e612` |
-| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (same merge, 3-run stable): t800 `eeaa0456523e40a943f205892df36717` t1600 `1cbde501c26d231a4295632dfbebd34b` |
+| chase (default) | `./DEMO --snapshot=chase@t=100,400,800,1200,1600 --out=<dir> --deferred` | per-frame color-PPM md5, re-pinned 2026-07-30 (cone-tile sky-clip fix — see below; 3-run stable, byte==spot_cone_cull=0 ground truth):<br>t100 `f1a567133a3d20e6f3702c5c560a1299` t400 `2adfb0e8f783c01ec0714b9b396c82f0` t800 `0e2a8804f4feef1bf56f6ee9102a11b9` t1200 `7cefbdb062517865ba29ca88965e999f` t1600 `7265d7855bdaae74e39f3c21d4f7e612` (t1600 unchanged) |
+| chase (cinematic) | `./DEMO --cinematic --deferred --snapshot=chase@t=800,1600 --out=<dir>` | re-pinned 2026-07-30 (cone-tile sky-clip fix; 3-run stable, byte==cull-off): t800 `28e5a2a78d64ae98a1fcc4b739991be2` t1600 `1cbde501c26d231a4295632dfbebd34b` (t1600 unchanged) |
 | gate suite | `./tools/render_gate.sh` (repo root, dummy drivers) | ALL PASS |
 | wasm | `make wasm` | links |
 
@@ -41,6 +41,23 @@ Traps:
   rendered VPage). Regen from `Authoring/chase/` via `pin_scene.py
   --legacy-vlum` is byte-identical to the shipping FLD (delta=0, 747,511 B) —
   the pre-edit baseline for later authored chase stages.
+- **Chase cone-tile "missing light on the rect" — FIXED (2026-07-30).** User
+  saw rectangular seams in the lighthouse beams during chase (~t=211,
+  cinematic). Root cause: the volumetric cone-pass tile cull
+  (`Render_VolumetricCones`, `--spot_cone_cull`) computed each tile's far
+  bound `zHiT` from `tileLights.zMax` = the farthest **opaque surface** only.
+  `computeTileDepthBounds` excludes sky/untouched pixels from `zMax`, so a tile
+  that MIXES surface + sky under-estimated its volumetric depth: a beam glowing
+  in the tile's sky portion (rays that run to the fog cutoff) got clipped away
+  there but kept in the adjacent pure-sky tile → a rectangular per-tile seam.
+  Fix: `TileLights.hasSky` (set in `computeTileDepthBounds` when any pixel
+  `zEnc==0`); the cone cull extends the far bound to the fog cutoff for
+  has-sky tiles (tight opaque `zMax` retained for fully-covered tiles, so
+  covered scenes keep the cull's perf). Result byte-== `--spot_cone_cull=0`
+  ground truth at every pose; the chase pin move above IS this fix. Cone-pass
+  cost +~1–2 ms at t≈211/700 (the previously-dropped correct beam work); still
+  ~6–10 ms cheaper than no cull. city/fountain pins byte-unchanged (no
+  mixed-sky cone tiles); render_gate 3/3 (conetest byte-identical).
 
 ## The big architecture decision (2026-07-11, user-set direction)
 

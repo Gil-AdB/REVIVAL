@@ -96,8 +96,10 @@ void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY
 
 			__m128i vMaxZ = _mm_setzero_si128();           // chasing max
 			__m128i vMinZ = _mm_set1_epi16(int16_t(0xFFFF)); // chasing min (zeros mapped up)
+			__m128i vMinRaw = _mm_set1_epi16(int16_t(0xFFFF)); // min INCLUDING zeros → sky detect
 			uint16_t maxZ = 0;
 			uint16_t minZ = 0xFFFF;
+			uint16_t minRaw = 0xFFFF;
 
 			for (int py = y_lo; py < y_hi; ++py) {
 				const uint16_t *row = zp + size_t(py) * xres + x_lo;
@@ -111,22 +113,31 @@ void computeTileDepthBounds(TileLights *tileLights, int numTilesX, int numTilesY
 					__m128i vForMin = _mm_or_si128(v, isZero);
 					vMaxZ = _mm_max_epu16(vMaxZ, v);
 					vMinZ = _mm_min_epu16(vMinZ, vForMin);
+					vMinRaw = _mm_min_epu16(vMinRaw, v); // raw min → 0 iff any sky
 				}
 				for (; px < width; ++px) {
 					uint16_t z = row[px];
 					if (z > maxZ) maxZ = z;
 					if (z != 0 && z < minZ) minZ = z;
+					if (z < minRaw) minRaw = z;
 				}
 			}
 			// Horizontal reduce the SIMD halves.
-			alignas(16) uint16_t mx[8], mn[8];
+			alignas(16) uint16_t mx[8], mn[8], mr[8];
 			_mm_store_si128((__m128i*)mx, vMaxZ);
 			_mm_store_si128((__m128i*)mn, vMinZ);
+			_mm_store_si128((__m128i*)mr, vMinRaw);
 			for (int k = 0; k < 8; ++k) {
 				if (mx[k] > maxZ) maxZ = mx[k];
 				if (mn[k] < minZ) minZ = mn[k];
+				if (mr[k] < minRaw) minRaw = mr[k];
 			}
 
+			// A tile spanning fewer pixels than its full extent (right/bottom
+			// edge) still has "sky" only where a real pixel was untouched —
+			// the loop bounds are clamped to xres/yres so minRaw only sees
+			// real pixels. minRaw==0 ⇔ ≥1 sky pixel in the tile.
+			tileLights[idx].hasSky = (minRaw == 0);
 			if (maxZ == 0) {
 				tileLights[idx].zMin = std::numeric_limits<float>::infinity();
 				tileLights[idx].zMax = -std::numeric_limits<float>::infinity();
