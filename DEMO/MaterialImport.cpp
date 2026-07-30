@@ -536,6 +536,25 @@ static bool sidecarIsMapRole(const char *role) {
 	    || !std::strcmp(role, "ao")     || !std::strcmp(role, "metallic");
 }
 
+// RETIRED sidecar keys (sidecar-elimination Phase 2, docs/
+// SIDECAR_MIGRATION_PLAN.md §1a): the ten numeric per-surface dials are
+// authored in the LWO 'RVSF' SURF sub-chunk and arrive through the FLD's
+// Surf_RevExt-gated material payload (FDS/FLD/FLD_READ.CPP → FLD_MAT.CPP),
+// so a sidecar line for one of them is a stale leftover. ApplySidecar skips
+// them (with a stderr note) instead of applying — the FLD-authored value
+// must not be shadowable by a forgotten sidecar. Map roles, smoothAngle and
+// normalFlip are NOT migrated yet (§1b/§1e) and still apply above/below.
+static bool sidecarIsRetiredRvsfKey(const char *key) {
+	static const char *const rvsf[] = {
+		"aoStrength", "parallaxScale", "tintR", "tintG", "tintB",
+		"refractIor", "refractive", "envRefl", "envBakeRes",
+		"waterProcedural",
+	};
+	for (const char *k : rvsf)
+		if (!std::strcmp(key, k)) return true;
+	return false;
+}
+
 // ── Object-level overrides ("obj:" sidecar lines / the editor scale knob) ──
 // Set the per-object uniform scale multiplier on every scene object whose
 // chunk-collapsed name (Editor_ChunkBaseObjName — 'Piramid.lwo:c17' →
@@ -713,6 +732,14 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 			                      surface, key);
 		} else if (sidecarIsMapRole(key)) {
 			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);
+		} else if (sidecarIsRetiredRvsfKey(key)) {
+			// Migrated to the LWO RVSF sub-chunk → FLD Surf_RevExt payload.
+			// Ignore (neither applied nor failed) so the source-authored
+			// value can never be shadowed by a stale sidecar line.
+			std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: retired numeric key "
+			             "(now LWO/FLD-authored) — line IGNORED, trim the sidecar\n",
+			             surface, key);
+			continue;
 		} else {
 			ok = MaterialImport_SetSurfaceProp(sc, surface, key, std::strtof(value, nullptr));
 			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: no match / unknown prop\n",
