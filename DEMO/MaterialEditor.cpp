@@ -1752,7 +1752,19 @@ bool Editor_ImportTexture(const char* surface, const char* role,
 	if (!surface || !role || !data || len == 0) return false;
 	// Preserve the uploaded extension so the image loader picks the right codec.
 	const char* dot = filename ? std::strrchr(filename, '.') : nullptr;
-	std::string tmp = std::string("/tmp/ed_import") + (dot ? dot : ".png");
+	// CONTENT-ADDRESSED temp name. MaterialImport's loadRoleMapCached dedups by
+	// the source PATH (path == texture identity — correct for the CLI dir scan and
+	// the RVSM set-dir loader, whose paths are stable). A FIXED "/tmp/ed_import.EXT"
+	// broke that invariant: a SECOND, DIFFERENT editor upload of the same extension
+	// overwrote the file but produced the SAME cache key, so it reused the FIRST
+	// upload's Texture — the "loading a second material shows the first" bug. Hash
+	// the bytes into the name: distinct uploads → distinct paths → distinct cache
+	// entries, while a re-upload of the SAME bytes still dedups (the reuse the
+	// cache exists for — the wasm heap-grow OOM fix, SESSION_STATE editor stability).
+	unsigned long long h = 1469598103934665603ULL;           // FNV-1a 64-bit
+	for (unsigned long i = 0; i < len; ++i) { h ^= data[i]; h *= 1099511628211ULL; }
+	char stem[24]; std::snprintf(stem, sizeof stem, "%016llx", h);
+	std::string tmp = std::string("/tmp/ed_import_") + stem + (dot ? dot : ".png");
 	FILE* f = std::fopen(tmp.c_str(), "wb");
 	if (!f) { std::fprintf(stderr, "[EDITOR] import: can't open %s\n", tmp.c_str()); return false; }
 	std::fwrite(data, 1, len, f);
