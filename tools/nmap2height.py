@@ -4,7 +4,12 @@ Frankot-Chellappa FFT integration (periodic boundary == tiled texture).
 Sign of the green channel is auto-calibrated against the albedo: mortar
 (dark albedo lines) must be LOW, brick faces HIGH.
 
-usage: nmap2height.py normal.png albedo.png out.png
+usage: nmap2height.py normal.png albedo.png out.png [match_mean match_std]
+
+The optional stats pair remaps the result's histogram (POM in this engine is
+calibrated for shallow maps — the old wall map was mean 0.549 / std 0.105;
+full-range output doubles the historical UV offsets and smears at grazing
+angles — the 2026-07-31 "weird artifacts").
 """
 import sys
 import numpy as np
@@ -55,6 +60,10 @@ if c <= 0:
 # robust normalize (clip 0.5% tails) to 0..255
 lo, hi = np.quantile(h, 0.005), np.quantile(h, 0.995)
 h8 = np.clip((h - lo) / (hi - lo), 0, 1)
+if len(sys.argv) > 5:
+    m, s_ = float(sys.argv[4]), float(sys.argv[5])
+    h8 = np.clip((h8 - h8.mean()) * (s_ / h8.std()) + m, 0, 1)
+    print(f"stats-matched to mean={m} std={s_}")
 Image.fromarray((h8 * 255.0 + 0.5).astype(np.uint8), mode="L").save(sys.argv[3])
 st = (h8.mean(), h8.std())
 print(f"chosen gy_sign={gy:+.0f}, corr={c:+.4f}, out mean={st[0]:.3f} std={st[1]:.3f} -> {sys.argv[3]}")
