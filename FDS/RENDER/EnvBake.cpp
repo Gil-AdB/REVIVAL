@@ -212,7 +212,11 @@ uint32_t sampleCube(const Vector& d, const std::vector<uint32_t> faces[6],
 static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                            float fovDeg, uint32_t voidColor,
                            std::vector<uint32_t> faces[6], Material* skipMat,
-                           float skipRadius = 0.0f, bool publishProj = false) {
+                           float skipRadius = 0.0f, bool publishProj = false,
+                           std::vector<uint16_t>* facesZOut = nullptr) {
+    // facesZOut (ENVDYN A2): optional per-face depth capture (6 vectors of
+    // res², filled from surf.Z16 before it is freed). nullptr = no capture,
+    // byte-identical to the legacy bake.
     if (!sc) return false;
     static const bool sPaint = std::getenv("FDS_ENVCUBE_PAINT") != nullptr;
 
@@ -343,6 +347,10 @@ static bool renderSixFaces(Scene* sc, const Vector& center, int res,
                     kCubeFaces[i].fwd.x, kCubeFaces[i].fwd.y, kCubeFaces[i].fwd.z);
             }
             std::memcpy(faces[i].data(), surf.Data, size_t(res) * res * 4);
+            if (facesZOut) {
+                const word* zp = reinterpret_cast<const word*>(surf.Z16);
+                facesZOut[i].assign(zp, zp + size_t(res) * res);
+            }
         }
         g_envBakeSkipDynamic = false;
         g_envBakeSkipMirrorClones = false;
@@ -452,6 +460,19 @@ struct EnvPanoStore {
     Material* bakedSkipMat = nullptr;
     float     bakedSkipR   = 0.0f;
     bool      imported     = false;
+
+    // ── ENVDYN Workstream A2: static retention for flagged probes ─────────
+    // Allocated ONLY when the owning material has Material::EnvDynamic (an
+    // authored envDynamic RVSF flag) AND the store is a padded cube store.
+    // The dynamic-mesh overlay (A3) composites the live mech OVER this
+    // pristine static capture each frame, so the static content must survive
+    // the writeback into levels[0]. staticColorMaster = the bake's face-major
+    // colour (a copy of levels[0] at bake time); staticFaceZ = the per-face
+    // depth the bake would otherwise FREE (renderSixFaces), face-major
+    // (6·faceRes² u16), used to occlude the mech behind static geometry.
+    bool                  envDynamic = false;
+    std::vector<uint32_t> staticColorMaster;   // 6·faceRes² (cube stores)
+    std::vector<uint16_t> staticFaceZ;         // 6·faceRes² (cube stores)
 };
 struct SceneEnv {
     // Owning stores + Material* → store index (materials with near-identical
@@ -570,6 +591,14 @@ static int envEffModeFor(const Material* M) {
     return s < 0 ? -1 : s > 0 ? 1 : 0;
 }
 
+// ENVDYN A2/A3: does this material's probe opt into the live dynamic-mesh
+// overlay? The authored per-surface Material::EnvDynamic flag, gated to the
+// padded cube-store path (env_cube) — the overlay renders/composites cube
+// faces, and legacy equirect / imported (city) stores have no retained depth.
+static bool envDynamicForMat(const Material* M) {
+    return M && M->EnvDynamic && fds::FeatureFlags::env_cube();
+}
+
 // 2×2 box downsample (per-channel average), ARGB.
 void boxDownsample(const std::vector<uint32_t>& src, int sw, int sh,
                    std::vector<uint32_t>& dst) {
@@ -625,9 +654,14 @@ void boxDownsampleCube(const std::vector<uint32_t>& src, int fr,
 bool renderCubeFacesMajor(Scene* sc, const Vector& center,
                           const EnvBakeParams& params,
                           std::vector<uint32_t>& level0, int& faceRes,
-                          Material* skipMat, float skipRadius) {
+                          Material* skipMat, float skipRadius,
+                          std::vector<uint16_t>* faceZMajorOut = nullptr) {
     const int fr = params.cubeRes;
     std::vector<uint32_t> faces[6];
+    // faceZMajorOut (ENVDYN A2): when non-null, capture the per-face depth and
+    // pack it FACE-MAJOR (6·fr² u16) alongside level0's colour — the overlay's
+    // mech-vs-static occlusion test needs it.
+    std::vector<uint16_t> facesZ[6];
     // publishProj (and with it the whole --env_bake_fix bundle inside
     // renderSixFaces: per-face projection, FACE-level self-exclusion,
     // mirror-mask neutralization) must be FLAG-GATED here exactly like the
@@ -637,12 +671,19 @@ bool renderCubeFacesMajor(Scene* sc, const Vector& center,
     // through here with legacy projection).
     if (!renderSixFaces(sc, center, fr, fds::EnvCube_FaceFovDegrees(),
                         params.voidColor, faces, skipMat, skipRadius,
-                        /*publishProj=*/fds::FeatureFlags::env_bake_fix()))
+                        /*publishProj=*/fds::FeatureFlags::env_bake_fix(),
+                        faceZMajorOut ? facesZ : nullptr))
         return false;
     level0.resize(size_t(6) * fr * fr);
     for (int f = 0; f < 6; ++f)
         std::memcpy(level0.data() + size_t(f) * fr * fr, faces[f].data(),
                     size_t(fr) * fr * 4);
+    if (faceZMajorOut) {
+        faceZMajorOut->resize(size_t(6) * fr * fr);
+        for (int f = 0; f < 6; ++f)
+            std::memcpy(faceZMajorOut->data() + size_t(f) * fr * fr,
+                        facesZ[f].data(), size_t(fr) * fr * sizeof(uint16_t));
+    }
     faceRes = fr;
     if (std::getenv("FDS_ENVBAKE_DUMP")) {
         const int gw = fr * 3, gh = fr * 2;
@@ -800,7 +841,11 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
                                         const Vector& center,
                                         Material* skipMat = nullptr,
                                         float skipRadius = 0.0f,
-                                        int faceResWant = 0) {
+                                        int faceResWant = 0,
+                                        bool retainStatic = false) {
+    // retainStatic (ENVDYN A2): keep a pristine static colour master + the
+    // per-face depth for the dynamic-mesh overlay (A3). Cube stores only;
+    // ignored for the legacy equirect path (the overlay renders cube faces).
     EnvBakeParams params;
     // Bake sizing: per-surface EnvBakeRes wish, then --env-bake-res (explicit
     // global FACE res, pow2 64..1024); else the legacy --env_refl_res sizing
@@ -867,13 +912,21 @@ std::unique_ptr<EnvPanoStore> bakeStore(Scene* sc, const SceneEnv& env,
         int faceRes = 0;
         const bool ok = renderCubeFacesMajor(sc, center, params,
                                              store->levels[0], faceRes, skipMat,
-                                             skipRadius);
+                                             skipRadius,
+                                             retainStatic ? &store->staticFaceZ
+                                                          : nullptr);
         restoreMetal();
         g_envBakeInProgress = false;
         if (!ok) return nullptr;
         v.isCube = true;
         v.W = v.H = faceRes;
         v.numMips = EnvPanoLinear::kMaxMips;
+        // A2 retention: snapshot the pristine static colour (level0) BEFORE the
+        // overlay ever writes back; staticFaceZ was filled by the bake above.
+        if (retainStatic) {
+            store->envDynamic = true;
+            store->staticColorMaster = store->levels[0];
+        }
         int fr = faceRes;
         for (int k = 1; k < EnvPanoLinear::kMaxMips; ++k) {
             boxDownsampleCube(store->levels[k-1], fr, store->levels[k]);
@@ -1005,8 +1058,11 @@ bool EnvReflection_FramePrep(Scene* sc) {
             const int haveFace = S.view.isCube ? S.view.W : S.view.W / 2;
             if (wantFace > haveFace) {
                 const Vector bc = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
+                // Preserve the group's dynamic retention across the res upgrade
+                // (S already flagged, or M flags it now). (ENVDYN A2)
                 auto bigger = bakeStore(sc, env, bc, S.bakedSkipMat,
-                                        S.bakedSkipR, wantFace);
+                                        S.bakedSkipR, wantFace,
+                                        S.envDynamic || envDynamicForMat(M));
                 if (bigger) {
                     bigger->bakedSkipMat = S.bakedSkipMat;
                     bigger->bakedSkipR   = S.bakedSkipR;
@@ -1031,10 +1087,17 @@ bool EnvReflection_FramePrep(Scene* sc) {
             }
         }
         if (idx < 0) {
-            auto store = bakeStore(sc, env, c, M, excludeR, wantFace);
+            auto store = bakeStore(sc, env, c, M, excludeR, wantFace,
+                                   envDynamicForMat(M));   // ENVDYN A2 retention
             if (!store) { env.byMat[M] = -1; continue; }
             store->bakedSkipMat = M;
             store->bakedSkipR   = excludeR;
+            if (store->envDynamic)
+                std::fprintf(stderr, "[ENVDYN] retained static Z+colour master "
+                             "for flagged probe '%s' (%zu KB)\n",
+                             M->Name ? M->Name : "?",
+                             (store->staticFaceZ.size() * sizeof(uint16_t) +
+                              store->staticColorMaster.size() * sizeof(uint32_t)) / 1024);
             static const bool sGrid = std::getenv("FDS_ENV_GRID") != nullptr;
             if (sGrid) fillEnvDebugGrid(*store);
             std::fprintf(stderr, "[ENVREFL] baked %dx%d pano (+%d mips) for '%s' at its centroid (%.1f %.1f %.1f)\n",
