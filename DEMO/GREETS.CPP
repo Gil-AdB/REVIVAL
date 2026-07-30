@@ -1379,6 +1379,20 @@ void Initialize_Greets()
 	// Before the CLI overlay so an explicit --material-import still wins.
 	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
 
+	// Authored per-surface smoothing angles (native LWO SMAN -> Material::
+	// MaxSmoothingAngle -> the MeshOps registry, sidecar-elim §1.5). Seeds only
+	// surfaces whose authored SMAN differs from greets' 89.5° global default (the
+	// value every stock Piramid.lwo surface carries), reproducing the retired
+	// `surface|smoothAngle|value` sidecar lines from the source. Runs before
+	// MakeFacesIndependentByAngle below (which consumes the registry). INERT
+	// until a surface's SMAN is authored away from 89.5° (registry stays empty).
+	{
+		const int nSeed = MeshOps_SeedAuthoredSmoothAngles(GreetSc, 89.5f, 0.05f);
+		if (nSeed)
+			std::fprintf(stderr, "[GREETS] seeded %d authored per-surface smoothing "
+			             "angle(s) from native SMAN (sidecar-elim §1.5)\n", nSeed);
+	}
+
 	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders
 	// onto named materials for testing. After Preprocess (textures loaded), so
 	// it replaces the loaded maps directly. No-op without the flag.

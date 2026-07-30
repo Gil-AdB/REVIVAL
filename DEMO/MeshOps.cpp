@@ -86,6 +86,23 @@ bool MeshOps_GetSurfaceSmoothAngle(const char *surface, float &angleDegOut) {
 
 bool MeshOps_AnySurfaceSmoothAngle() { return !g_surfaceSmoothAngle.empty(); }
 
+int MeshOps_SeedAuthoredSmoothAngles(Scene *sc, float defaultDeg, float epsDeg) {
+	if (!sc) return 0;
+	int seeded = 0;
+	// Convert authored SMAN (radians) -> degrees with the SAME expression
+	// MakeFacesIndependent's authored path uses, so the seeded value and any
+	// future flag-on read agree bit-for-bit.
+	for (Material *M = MatLib; M; M = M->Next) {
+		if (M->RelScene != sc || !M->Name) continue;
+		if (!(M->TFlags & Surf_Smoothing)) continue;    // not authored smooth
+		const float deg = M->MaxSmoothingAngle * (180.0f / float(PI));
+		if (std::fabs(deg - defaultDeg) <= epsDeg) continue;   // at the default
+		MeshOps_SetSurfaceSmoothAngle(M->Name, deg);
+		++seeded;
+	}
+	return seeded;
+}
+
 void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	if (!T || T->FIndex == 0 || !T->Faces) return;
 

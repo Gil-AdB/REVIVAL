@@ -151,6 +151,18 @@ void  MeshOps_SetSurfaceSmoothAngle(const char *surface, float angleDeg);
 bool  MeshOps_GetSurfaceSmoothAngle(const char *surface, float &angleDegOut);
 bool  MeshOps_AnySurfaceSmoothAngle();
 
+// Seed the smooth-angle registry from AUTHORED native SMAN (sidecar-elim §1.5).
+// For every material in `sc` that carries Surf_Smoothing AND whose
+// MaxSmoothingAngle (radians) converts to a degree value differing from the
+// scene's default `defaultDeg` by more than `epsDeg`, register that authored
+// angle — reproducing what the retired `surface|smoothAngle|value` sidecar lines
+// did, but from the LWO/FLD source. Surfaces AT the default are left to the
+// legacy global-crease / momy special-case path (no per-surface override), so
+// only the authored surfaces change. Call BEFORE MakeFacesIndependentByAngle.
+// INERT when every material sits at the default (registry stays empty). Returns
+// the number of surfaces seeded.
+int   MeshOps_SeedAuthoredSmoothAngles(Scene *sc, float defaultDeg, float epsDeg);
+
 // LIVE re-smooth: recompute `surface`'s per-vertex normals on the CURRENT
 // rendered meshes at `angleDeg`, so an editor slider drag re-shades the next
 // frame with NO scene reload. Does NOT change topology. Applies

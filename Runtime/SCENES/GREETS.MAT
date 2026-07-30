@@ -2,9 +2,3 @@
 # "Save"), loaded at scene init by MaterialImport_ApplySidecar.
 # Format: surface|role|path-relative-to-Runtime (PBR map)
 #         surface|prop|value                    (numeric override)
-
-amudim|smoothAngle|104
-momy-1|smoothAngle|30
-momy-2|smoothAngle|30
-screen emiter|smoothAngle|180
-stairs|smoothAngle|54

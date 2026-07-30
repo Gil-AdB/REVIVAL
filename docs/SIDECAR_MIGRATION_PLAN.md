@@ -251,9 +251,19 @@ Phase 1 (writers; reader untouched; every FLD + gate byte-identical)
           idiom (new bit Scene_FdsSceneDefaults=8192).
   ⬜ 1.4  object scale  → FdsObjectScale (new Object_FdsExt=8192 payload). ZERO
           current data. Low risk (object record read once per object).
-  ⬜ 1.5  smoothAngle   → native SMAN. REAL data (GREETS.MAT: amudim=104/momy=30/
-          stairs=54/screen emiter=180). NOT a drop-in — see the finding below.
-  ⬜ 1.6  PBR maps + normalFlip → RVSF strings (§1e option A). Largest; deferrable.
+  ✅ 1.5  smoothAngle   → native SMAN. DONE 2026-07-31. Option (b): a greets-only
+          scene-init seed (MeshOps_SeedAuthoredSmoothAngles) registers the
+          authored SMAN of every surface whose angle differs from greets' 89.5°
+          default (amudim=104/momy-1=30/momy-2=30/stairs=54/screen emiter=180),
+          reproducing the retired sidecar registry from the source. surf_
+          smoothing_authored stays OFF (turning it on would re-smooth every
+          surface — the global change the finding below warns against). IDENTITY
+          PROVEN: momy close-cam byte-identical (7d05a1be 3/3), pin + stairs
+          stable-pixel 5v5 = 0 mismatches (the 54° rad→deg round-trip's 1e-7 cos
+          delta perturbs no stable pixel). GREETS.MAT smoothAngle lines removed
+          (the user's uncommitted momy-2|smoothAngle|30 migrated to SMAN).
+  ✅ 1.6  PBR maps + normalFlip → LWO RVSM (directory-per-set, §1e). DONE
+          2026-07-31 (f1a304d). Byte-identical migration + rooms→wall_stone3.
 
   ── writers all landed; sidecar reader STILL LIVE; both paths coexist ──
 
