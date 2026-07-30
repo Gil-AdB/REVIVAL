@@ -179,6 +179,21 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
 
 ## Known issues / deferred (honest list)
 
+- **Greets mirror: cones leak through wall + doubled screen text
+  (2026-07-30, user-reported, NOT yet investigated).** Repro:
+  `FDS_GREETS_CAM="-6.75174379,3.12747574,-51.7348709,-0.0600466765,-0.148574546,-0.987076521"`
+  t=3430, looking at a text-screen mirror panel. Two symptoms in one frame:
+  (a) volumetric cone shafts/blooms visible INSIDE the mirror view where a
+  wall should occlude them — suspicion set: the eb36c1f hasSky far-bound
+  extension interacting with the mirror RTT bake's G-buffer, or the RTT
+  bake's cone pass integrating behind its near plane; (b) the greets text
+  ("kombat") rendered TWICE — one crisp, one ghosted/offset below — likely
+  the half-silvered composite (text + reflection) meeting a second text
+  source (base panel texture vs RTT/recursion path; the recursion-composite
+  interaction is a known open item from MIRROR_RECURSION_PLAN slice 3).
+  User's exact launch flags for the repro NOT captured — re-ask when
+  picking this up. Parked deliberately ("finish the other threads first").
+
 - **Greets ~1-in-12 flip**: kernel-internal nondeterminism, survives
   1-thread/noaslr/prescribble/pinned-seed with ALL kernel inputs
   hash-verified identical. Full evidence matrix + next probe (per-pixel term
