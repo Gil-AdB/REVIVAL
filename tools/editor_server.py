@@ -1362,6 +1362,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_json(200, {"ok": True, "backups": list_backups(scene)[:30]})
             return
+        # Installed PBR-set catalog (dir-per-set §1e): the sets already on disk
+        # under Runtime/TEXTURES/PBR/<set>/, with which roles each has. The shell
+        # renders a preview picker (albedo thumbnail via the /TEXTURES/ live route
+        # + role badges) so a set can be eyeballed BEFORE it is applied.
+        if clean == "/api/pbrsets":
+            sets = []
+            if os.path.isdir(PBR_DIR):
+                for name in sorted(os.listdir(PBR_DIR)):
+                    d = os.path.join(PBR_DIR, name)
+                    if not os.path.isdir(d):
+                        continue
+                    roles = [r for r in ("albedo", "normal", "height",
+                                         "roughness", "ao", "metallic")
+                             if os.path.exists(os.path.join(d, r + ".png"))]
+                    if roles:
+                        sets.append({"set": name, "roles": roles,
+                                     "albedo": (f"TEXTURES/PBR/{name}/albedo.png"
+                                                if "albedo" in roles else None)})
+            self.send_json(200, {"ok": True, "sets": sets})
+            return
         # Live routes — always the current Runtime/ copy, never the staged one.
         if clean.startswith(LIVE_PREFIXES):
             rel = os.path.normpath(clean.lstrip("/"))

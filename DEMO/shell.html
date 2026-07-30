@@ -710,7 +710,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b69";
+      var REV_BUILD = "b70";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -3179,6 +3179,95 @@
           showPackPicker(entries);
         };
         pr.appendChild(pinp); imp.appendChild(pr);
+        // ── Browse INSTALLED PBR sets (server catalog, dir-per-set §1e) ──────
+        // Preview picker for the sets already on disk under Runtime/TEXTURES/PBR/
+        // <set>/: albedo thumbnail + which roles exist, shown BEFORE you apply,
+        // so you can see what you're getting. Clicking one imports its role files
+        // onto this surface (live preview + queued for Save), the same
+        // editorImportTexture path as a local pack. (Minimal version — it copies
+        // the set's bytes onto this surface's own set on Save; a fuller version
+        // would assign the shared set by NAME via RVSM without re-copying.)
+        function applySetBytes(role, filename, bytes){
+          var names = editSurfNames(s.name), ok = false;
+          names.forEach(function(n){
+            var one = false;
+            try { one = Module.editorImportTexture(n, role, filename, bytes); }
+            catch(e){ editorStatus('import failed: ' + e); return; }
+            if (one) { (editorPendingMaps[n] = editorPendingMaps[n] || {})[role] =
+                         { filename: filename, bytes: bytes }; ok = true; }
+          });
+          return ok;
+        }
+        function applyServerSet(setName, roles){
+          roles = roles.slice().sort(function(a,b){ return (a==='albedo'?0:1)-(b==='albedo'?0:1); });
+          editorStatus('set "' + setName + '": importing ' + roles.join(', ') + '…');
+          var chain = Promise.resolve(), okCount = 0;
+          roles.forEach(function(role){
+            chain = chain.then(function(){
+              return fetch('/TEXTURES/PBR/' + encodeURIComponent(setName) + '/' + role + '.png')
+                .then(function(r){ return r.arrayBuffer(); })
+                .then(function(buf){ if (applySetBytes(role, role + '.png', new Uint8Array(buf))) okCount++; })
+                .catch(function(e){ console.error('set fetch', role, e); });
+            });
+          });
+          chain.then(function(){
+            editorStatus('set "' + setName + '": ' + okCount + '/' + roles.length + ' applied');
+            updateSaveButton(); refreshSurfacesAndProps(s.name);
+          });
+        }
+        function showSetPicker(sets){
+          var ov = document.createElement('div');
+          ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;overflow:auto;padding:20px;';
+          var box = document.createElement('div'); box.style.cssText = 'max-width:1140px;margin:0 auto;';
+          var head = document.createElement('div'); head.style.cssText = 'display:flex;align-items:center;color:#fff;margin-bottom:10px;';
+          var ht = document.createElement('div'); ht.textContent = 'Installed PBR sets for "' + s.name + '" — ' + sets.length + ' set(s)';
+          ht.style.cssText = 'flex:1;font-size:14px;';
+          var hx = document.createElement('button'); hx.textContent = '✕ cancel';
+          hx.style.cssText = 'font-size:12px;padding:2px 10px;background:#411;color:#fbb;border:1px solid #633;border-radius:2px;cursor:pointer;';
+          head.appendChild(ht); head.appendChild(hx); box.appendChild(head);
+          var grid = document.createElement('div');
+          grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;';
+          box.appendChild(grid); ov.appendChild(box);
+          function close(){ document.removeEventListener('keydown', onKey); ov.remove(); }
+          function onKey(ev){ if (ev.key === 'Escape') close(); }
+          hx.onclick = close; ov.onclick = function(ev){ if (ev.target === ov) close(); };
+          document.addEventListener('keydown', onKey);
+          sets.forEach(function(e){
+            var cell = document.createElement('div');
+            cell.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:6px;cursor:pointer;text-align:center;';
+            cell.onmouseenter = function(){ cell.style.borderColor = '#7af'; };
+            cell.onmouseleave = function(){ cell.style.borderColor = '#333'; };
+            if (e.albedo) {
+              var img = document.createElement('img'); img.src = '/' + e.albedo; img.loading = 'lazy';
+              img.style.cssText = 'width:100%;height:110px;object-fit:cover;border-radius:2px;background:#000;';
+              cell.appendChild(img);
+            } else {
+              var ph = document.createElement('div'); ph.textContent = 'no albedo';
+              ph.style.cssText = 'width:100%;height:110px;display:flex;align-items:center;justify-content:center;color:#555;background:#111;border-radius:2px;font-size:11px;';
+              cell.appendChild(ph);
+            }
+            var nm = document.createElement('div'); nm.textContent = e.set;
+            nm.style.cssText = 'color:#cde;font-size:11px;margin-top:4px;word-break:break-all;';
+            cell.appendChild(nm);
+            var rl = document.createElement('div'); rl.textContent = (e.roles || []).join(' ');
+            rl.style.cssText = 'color:#697;font-size:9px;margin-top:2px;';
+            cell.appendChild(rl);
+            cell.onclick = function(){ close(); applyServerSet(e.set, e.roles); };
+            grid.appendChild(cell);
+          });
+          document.body.appendChild(ov);
+        }
+        var setBtn = document.createElement('button');
+        setBtn.textContent = 'Browse installed PBR sets…';
+        setBtn.style.cssText = 'font-size:11px;padding:2px 8px;margin-top:4px;background:#123;color:#9cf;border:1px solid #345;border-radius:2px;cursor:pointer;';
+        setBtn.title = 'Preview the texture sets already under Runtime/TEXTURES/PBR/ (albedo thumbnail + which roles exist) and apply one to this surface';
+        setBtn.onclick = function(){
+          fetch('/api/pbrsets').then(function(r){ return r.json(); }).then(function(j){
+            if (!j.ok || !j.sets || !j.sets.length) { editorStatus('no installed PBR sets found under Runtime/TEXTURES/PBR/'); return; }
+            showSetPicker(j.sets);
+          }).catch(function(e){ editorStatus('PBR set list failed: ' + e); });
+        };
+        imp.appendChild(setBtn);
         ['albedo','normal','height','roughness','ao','metallic'].forEach(function(role){
           var row = document.createElement('div'); row.className = 'prop-row';
           var lab = document.createElement('label'); lab.textContent = role; row.appendChild(lab);
