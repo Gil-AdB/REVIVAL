@@ -17,10 +17,10 @@ momy|metallic|TEXTURES/PBR/momy_metallic.png
 momy|normal|TEXTURES/PBR/momy_normal.png
 momy|roughness|TEXTURES/PBR/momy_roughness.png
 momy|smoothAngle|30
-momy#2|albedo|TEXTURES/PBR/momy_2_albedo.png
-momy#2|metallic|TEXTURES/PBR/momy_2_metallic.png
-momy#2|normal|TEXTURES/PBR/momy_2_normal.png
-momy#2|roughness|TEXTURES/PBR/momy_2_roughness.png
+momy2|albedo|TEXTURES/PBR/momy2_albedo.png
+momy2|metallic|TEXTURES/PBR/momy2_metallic.png
+momy2|normal|TEXTURES/PBR/momy2_normal.png
+momy2|roughness|TEXTURES/PBR/momy2_roughness.png
 screen 4|refractive|0
 screen emiter|albedo|TEXTURES/PBR/screen_emiter_albedo.png
 screen emiter|metallic|TEXTURES/PBR/screen_emiter_metallic.png
