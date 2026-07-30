@@ -28,9 +28,18 @@ enum LightWave_Constants
 	// conditional payload (u16 RevExtMask + only the authored fields) after the
 	// material record — see FLDSAVE.CPP / docs/SIDECAR_MIGRATION_PLAN.md §1a.
 	// FLDs whose materials don't carry the bit stay byte-identical to the
-	// pre-extension format. 0x0800/0x1000/0x2000/0x4000 reserved for future
+	// pre-extension format. 0x1000/0x2000/0x4000 reserved for future
 	// boolean surface markers (0x4000 earmarked Rev_SingleShadowId).
 	Surf_RevExt					= 0x8000,
+	// Revival per-surface PBR map-role extension marker — set on the FLAG word
+	// by tools/lwsread (LWOREAD parsing the custom LWO SURF "RVSM" sub-chunk).
+	// Gates a SECOND conditional per-material payload (u16 RevMapMask +
+	// NUL-terminated role paths + normalFlip byte) AFTER the RVSF numeric
+	// payload — see FLDSAVE.CPP / FLD_READ.CPP. A SIBLING of RVSF (not folded
+	// in): variable-length strings stay apart from the fixed-width numeric
+	// parse, and the u16 RevExtMask lacks free bits for the 7 map fields.
+	// 0x0800 is free in the LWOB FLAG word. See SIDECAR_MIGRATION_PLAN §1e.
+	Surf_RevMaps				= 0x0800,
 // Texture flags
 	Texture_XAxis					  = 1,
 	Texture_YAxis           = 2,
@@ -180,8 +189,17 @@ typedef struct
 	int8_t         EnvReflMode;     // bit 0x080 (-1/0/1)
 	int32_t        EnvBakeRes;      // bit 0x100 (pow2 64..1024)
 	int8_t         WaterProcMode;   // bit 0x200 (-1/0/1)
-	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1;
-	                                // 0x800+ reserved for sidecar map-roles (§1.6)
+	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
+	// Revival per-surface PBR map-SET extension (custom LWO SURF sub-chunk
+	// "RVSM" -> Surf_RevMaps(0x0800)-gated FLD payload). Directory-per-set:
+	// MapSet names a texture set; the engine resolves TEXTURES/PBR/<set>/
+	// <role>.png at FLD time via MaterialImport_ApplyMapFile (§1e). RevMapMask
+	// bit i = field i authored. Bit order MUST match tools/lwopatch RVSM_FIELDS,
+	// FLDSAVE SaveMaterial and the engine reader (FDS/FLD/FLD_READ.CPP).
+	// NormalFlip pairs with the normal map (green-channel convention).
+	uint16_t       RevMapMask;      // 0 = no map extension
+	char          *MapSet;          // bit 0x01 (texture set name)
+	uint8_t        NormalFlip;      // bit 0x40 (0/1)
 } FldMat;
 
 typedef struct

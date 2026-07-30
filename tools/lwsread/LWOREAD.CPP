@@ -629,6 +629,39 @@ void ReadSurfaceRevExt(unsigned int EndPos)
 #endif
 }
 
+// Read a NUL-terminated string from the current file position WITHOUT the
+// LWO even-alignment padding ReadAsciiZ applies — the RVSM body concatenates
+// its role paths tightly (only the whole sub-chunk is even-padded, handled by
+// the outer ReadChunk seek). Mirrors tools/lwopatch RVSM_FIELDS + FLDSAVE.
+static char *ReadRevMapStr()
+{
+	char Temp[512];
+	int a = 0;
+	do { fread(&Temp[a++], 1, 1, LWO); } while (Temp[a - 1] && a < (int)sizeof(Temp));
+	Temp[a < (int)sizeof(Temp) ? a : (int)sizeof(Temp) - 1] = 0;
+	return strdup(Temp);
+}
+
+// Revival per-surface PBR map-SET extension — custom LWO SURF sub-chunk
+// "RVSM" (big-endian IFF body): u16 RevMapMask + for each set bit, in
+// ascending order, the texture-set name (NUL-terminated, bit 0x01) or one
+// byte (normalFlip parity, bit 0x40). Directory-per-set (§1e): the engine
+// resolves TEXTURES/PBR/<set>/<role>.png. Carried into the FLD as a
+// Surf_RevMaps-gated payload (FLDSAVE.CPP). Bit order MUST match tools/lwopatch
+// + FDS/FLD/FLD_READ.CPP. See docs/SIDECAR_MIGRATION_PLAN.md §1e.
+void ReadSurfaceRevMaps(unsigned int EndPos)
+{
+	unsigned short mask;
+	fread(&mask, 1, 2, LWO); SwapW(&mask);
+	Surf->RevMapMask = mask;
+	Surf->Flags |= Surf_RevMaps;
+	if (mask & 0x01) Surf->MapSet = ReadRevMapStr();
+	if (mask & 0x40) { fread(&Surf->NormalFlip, 1, 1, LWO); }
+#ifdef ObjectDebugMode
+	printf("  RVSM mask=%04Xh set=%s flip=%d\n", mask, Surf->MapSet, Surf->NormalFlip);
+#endif
+}
+
 void ReadSurfaceColorTexture(unsigned int EndPos)
 {
 	ReadAsciiZ(&Surf->ColorTexture);
@@ -731,7 +764,8 @@ struct
 	{"TOPC"	,	ReadSurfaceTextureOpacity},
 	{"TFP0"	,	ReadTFP0},
 	{"TFP1"	,	ReadTFP1},
-	{"RVSF" ,	ReadSurfaceRevExt}   // Revival per-surface extension (RVSF)
+	{"RVSF" ,	ReadSurfaceRevExt},  // Revival per-surface numeric extension (RVSF)
+	{"RVSM" ,	ReadSurfaceRevMaps}  // Revival per-surface PBR map-role extension (RVSM)
 };
 
 FldMat *FindMat(char *Name)

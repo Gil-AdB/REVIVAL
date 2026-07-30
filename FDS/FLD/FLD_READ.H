@@ -66,6 +66,16 @@ typedef struct
 	int32_t        EnvBakeRes;      // bit 0x100
 	int8_t         WaterProcMode;   // bit 0x200
 	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
+	// Revival per-surface PBR map-SET extension — Surf_RevMaps(0x0800)-gated
+	// conditional payload AFTER the RVSF numeric payload (u16 RevMapMask +
+	// set-name string bit 0x01 + normalFlip byte bit 0x40). Directory-per-set:
+	// MapSet names a texture set; the engine resolves TEXTURES/PBR/<set>/
+	// <role>.png. Read in FLD_READ.CPP ReadMaterial, collected in FLD_MAT.CPP
+	// AddMaterial, applied at scene init via MaterialImport_ApplyMapFile. Bit
+	// order MUST match tools/lwsread / tools/lwopatch. memset(0) = no extension.
+	uint16_t       RevMapMask;      // 0 = none
+	char          *MapSet;          // bit 0x01 (texture set name)
+	uint8_t        NormalFlip;      // bit 0x40 (0/1)
 } FldMat;
 
 typedef struct _FldKeyFrame_
@@ -196,3 +206,20 @@ extern Scene *ConvertFLD(FldScene *FLD);
 extern Material *AddMaterial(FldMat *OrgMat, Scene *SceneGroup);
 extern void Get_Mapping(Face *F,FldMat *Mat);
 extern void DumpMaterialDedupStats();
+
+// Revival per-surface PBR map-role extension (sidecar-elim §1e). AddMaterial
+// records one entry per Surf_RevMaps material into a process-global list;
+// MaterialImport_ApplyRevMaps (DEMO) reads it back at scene init and calls
+// MaterialImport_ApplyMapFile for each authored role — the SAME apply path the
+// .MAT sidecar used, so a scene reproduces its maps from the FLD alone. Strings
+// are owned copies valid until FldRevMapClear (returned via c_str()); a NULL
+// role field = not authored, normalFlip = -1 = not authored.
+struct RevMapAssignment {
+	Scene      *scene;
+	const char *matName;
+	const char *set;          // texture set name -> TEXTURES/PBR/<set>/<role>.png
+	int         normalFlip;   // -1 unset, else 0/1
+};
+extern int  FldRevMapCount();
+extern const RevMapAssignment *FldRevMapAt(int i);
+extern void FldRevMapClear();

@@ -1366,9 +1366,17 @@ void Initialize_Greets()
 			M->Flags |= Mat_Refractive;
 	}
 
-	// Persisted PBR map assignments (the editor's "Save" writes this sidecar —
-	// LWO1 can't hold map paths, so they live here). Before the CLI overlay so
-	// an explicit --material-import still wins for testing.
+	// Source-authored PBR map assignments (custom LWO 'RVSM' sub-chunk → FLD
+	// Surf_RevMaps payload → FldRevMap* — sidecar-elim §1e). The successor to
+	// the GREETS.MAT map lines: same MaterialImport_ApplyMapFile path, driven
+	// from the FLD instead of the sidecar. Runs at the same point as (and just
+	// before) the sidecar so a CLI --material-import below still wins. No-op
+	// until the maps are authored into the LWO (FLD carries no RVSM payload).
+	fds::MaterialImport_ApplyRevMaps(GreetSc, "greets");
+
+	// Persisted overrides still on the sidecar (smoothAngle; the migrated
+	// numeric/map keys are IGNORED as retired). The editor's "Save" writes it.
+	// Before the CLI overlay so an explicit --material-import still wins.
 	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
 
 	// CLI material import (--material-import=MAT:DIR): overlay PBR map folders

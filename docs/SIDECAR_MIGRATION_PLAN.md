@@ -144,22 +144,50 @@ NOT `SURF_SIDECAR_KEYS`; these are the map-file assignments (`ALLOWED_ROLES`).
 **LWO1 has no PBR-map slots**, and these are the values the greets CHECKPOINT
 protects ("his GREETS.MAT is the only record of the momy map assignments").
 
-Two viable destinations:
-- **(A, recommended for full sidecar death)** carry the six role paths as
-  NUL-terminated strings inside the `RVSF` sub-chunk (mask bits + string block),
-  mirror them through `FldMat` → FLD material payload → and load them at FLD
-  time via the existing `MaterialImport_ApplyMapFile` path. Lets the sidecar die
-  completely.
-- **(B, minimal)** keep a **map-only sidecar** permanently (numeric + light/obj/
-  scene keys all leave; only the six role→path lines remain). Cheaper, but the
-  sidecar reader never fully dies.
+**DONE 2026-07-31 — option (A) via a directory-per-SET layout (user design).**
+Chosen realization + rationale:
 
-The plan targets **(A)**, but it is the largest and least-critical sub-slice
-(the maps render fine via the sidecar today), so it is sequenced LAST in Phase 1
-and may be deferred to a follow-up without blocking the numeric/light/obj/scene
-migration. `normalFlip` (§1a) rides with the normal-map assignment here (it is a
-mutation of the assigned normal texture, not a scalar), so it is implemented
-alongside (A).
+- **Sibling sub-chunk `RVSM`, NOT folded into `RVSF`.** RVSF is the hottest FLD
+  record, fixed-width and field-order-locked (§1a warns a single desync corrupts
+  the whole parse); variable-length strings stay in their own chunk gated on a
+  distinct FLAG bit (`Surf_RevMaps` = 0x0800, free in the LWOB FLAG word). Also
+  the u16 `RevExtMask` has only 5 free bits — too few for per-role fields. A
+  material can carry maps with no numeric dials (e.g. `teleporter`) and vice
+  versa, so the two payloads are independently gated.
+- **Directory-per-set** (user decision 2026-07-31, over per-role paths): the
+  payload names ONE texture **set**; the engine resolves
+  `TEXTURES/PBR/<set>/<role>.png` (fixed role filenames albedo/normal/height/
+  roughness/metallic/ao) and loads whichever roles exist. Sets are shareable
+  assets, decoupled from the surface name. RVSM body = `u16 mask` + set-name
+  string (0x01) + optional normalFlip byte (0x40).
+- **Load path is the retired sidecar's own** `MaterialImport_ApplyMapFile`,
+  called at the same GREETS.CPP point (`MaterialImport_ApplyRevMaps`), albedo
+  first — so a scene that carried per-file sidecar paths reproduces
+  byte-identically. Chain: lwopatch `set_rev_maps` → LWOREAD `ReadSurfaceRevMaps`
+  → FLDSAVE → FLD_READ → FLD_MAT collects (`FldRevMap*`) → ApplyRevMaps.
+- `normalFlip` (§1a) rides RVSM (bit 0x40, applied after the normal map). No
+  greets data carries it today — path wired, unexercised.
+
+**Migration result (greets):** the 27 sidecar map lines (amudim/momy-1/momy-2/
+screen emiter/stairs/teleporter) → set dirs `TEXTURES/PBR/{amudim,momy,momy2,
+screen_emiter,stairs,teleporter}/`; the 27 flat files were MOVED into them.
+Verified byte-identical: momy close-cam `35f19efc` pre==post (3/3), pin-cam
+stable-pixel 5v5 = 0 mismatches (4.03M stable bytes). render_gate 3/3, city
+`37e62845` / fountain `51fff7cd` byte-equal. lwsread regen inert (golden md5s).
+
+**momy set-sharing finding:** `momy2_*.png` are byte-identical copies of
+`momy_*.png`, but `momy-2` used only 4 roles (no ao/height) while `momy-1` used
+6. The user asked both to share set "momy". MEASURED: giving `momy-2` the ao+
+height roles both CHANGES the momy close-cam AND makes it nondeterministic (3/3
+distinct hashes) — so `momy-2` kept its own byte-safe 4-role set `momy2`. True
+full-set sharing is a deliberate content+determinism decision left to the user.
+
+**`rooms` → set `wall_stone3` (2026-07-31, coordinator-directed content add,
+NOT part of the byte-identical migration):** the first canonical set dir. It
+supersedes the flag-gated `greets_stone_tex` code path for `rooms` and GAINS an
+`ao` role (deliberate look improvement — `ao_map_strength` applies). Deterministic
+(momy close-cam `35f19efc` → `7d05a1be`, 3/3), a visible WALL look change that
+needs the user's eye. Trivially reverted (drop the `rooms` RVSM).
 
 ### 1f. Scene-level — `kSceneDefaultKeys` (`scene:` lines, MaterialImport.cpp:626)
 

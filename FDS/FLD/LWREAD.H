@@ -22,9 +22,16 @@ enum LightWave_Constants
 	// tools/lwsread (LWOREAD parsing the custom LWO SURF "RVSF" sub-chunk). Gates
 	// a conditional per-material payload after the material record in the FLD (see
 	// FLD_READ.CPP ReadMaterial). FLDs without the bit are byte-identical legacy.
-	// 0x0800..0x8000 free in the 16-bit LWOB FLAG word; 0x4000 earmarked
+	// 0x1000..0x8000 free in the 16-bit LWOB FLAG word; 0x4000 earmarked
 	// Rev_SingleShadowId. See docs/SIDECAR_MIGRATION_PLAN.md §1a.
 	Surf_RevExt					= 0x8000,
+	// Revival per-surface PBR map-role extension marker (custom LWO SURF "RVSM"
+	// sub-chunk, tools/lwsread). Gates a SECOND conditional per-material payload
+	// (u16 RevMapMask + NUL-terminated role paths + normalFlip byte) AFTER the
+	// RVSF numeric payload in the FLD — FLD_READ.CPP ReadMaterial, applied via
+	// MaterialImport_ApplyMapFile. FLDs without the bit are byte-identical.
+	// 0x0800 free in the LWOB FLAG word. See SIDECAR_MIGRATION_PLAN §1e.
+	Surf_RevMaps				= 0x0800,
 // Texture flags
 	Texture_XAxis					  = 1,
 	Texture_YAxis           = 2,

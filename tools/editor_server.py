@@ -489,11 +489,68 @@ def write_sidecar(path, entries):
         f.write("\n".join(lines) + "\n")
 
 
+# PBR map SET layout (sidecar-elim §1e, USER DESIGN 2026-07-31): a texture set
+# is a directory TEXTURES/PBR/<set>/ holding FIXED role filenames; a surface's
+# LWO RVSM sub-chunk names ONE set, and the engine loads whichever role files
+# exist. The editor default set = the surface's base name (dir-per-material);
+# sets are shareable (two surfaces may name the same set). See
+# MaterialImport_ApplyRevMaps.
+def map_set_name(surface):
+    """editor surface name -> texture-set dir name (base name, filesystem-safe)."""
+    base = re.sub(r"(#\d+)+$", "", re.sub(r"::mirUV$", "", surface))
+    if "::" in base:
+        base = base.split("::", 1)[1]
+        base = re.sub(r"_(body|upper)$", "", base)
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+
+
+def save_maps_setdirs(scene, maps, warnings):
+    """Authoring-scene map save (§1e): write role files into
+    Runtime/TEXTURES/PBR/<set>/<role>.png (set = surface base name) and return
+    (written, rvsm) where rvsm = {surface: set-name or None-to-clear} to drive
+    the LWO RVSM write-back. No sidecar map lines — the assignment lives in the
+    LWO. A role reset (spec None) deletes that role file; when the set dir has
+    no role files left, the surface's RVSM is cleared (set -> None)."""
+    written, rvsm = [], {}
+    for surface, roles in (maps or {}).items():
+        if not isinstance(roles, dict):
+            warnings.append(f"maps['{surface}']: bad shape — skipped")
+            continue
+        st = map_set_name(surface)
+        setdir = os.path.join(PBR_DIR, st)
+        for role, spec in roles.items():
+            if role not in ALLOWED_ROLES:
+                warnings.append(f"maps['{surface}']['{role}']: unknown role — skipped")
+                continue
+            dst = os.path.join(setdir, role + ".png")
+            if spec is None:                       # editor "reset map"
+                if os.path.exists(dst):
+                    os.remove(dst)
+                    written.append({"surface": surface, "set": st, "role": role, "deleted": True})
+                continue
+            data = base64.b64decode(spec.get("data") or "")
+            if not data:
+                warnings.append(f"maps['{surface}']['{role}']: empty data — skipped")
+                continue
+            os.makedirs(setdir, exist_ok=True)
+            with open(dst, "wb") as f:
+                f.write(data)
+            written.append({"surface": surface, "set": st, "role": role,
+                            "path": f"TEXTURES/PBR/{st}/{role}.png", "bytes": len(data)})
+        # RVSM: point the surface at its set, or clear it if the set dir is now
+        # empty of role files (all roles reset).
+        have = os.path.isdir(setdir) and any(
+            os.path.exists(os.path.join(setdir, r + ".png")) for r in ALLOWED_ROLES)
+        rvsm[surface] = st if have else None
+    return written, rvsm
+
+
 def save_maps(scene, maps, warnings):
     """{"<surface>": {"<role>": {"filename": ..., "data": base64}}} -> write the
     bytes under Runtime/TEXTURES/PBR/ and update the scene sidecar. Returns the
     list of written entries. Deterministic filenames so a re-import of the same
-    slot overwrites instead of accumulating files."""
+    slot overwrites instead of accumulating files. (Non-authoring fallback only;
+    authoring scenes use save_maps_setdirs -> LWO RVSM.)"""
     written = []
     sidecar = scene_sidecar(scene)
     entries = read_sidecar(sidecar)
@@ -1018,7 +1075,13 @@ def do_save_main(scene, payload):
         return 400, {"ok": False, "error": "no surfaces, maps, or lights in payload"}
 
     warnings = []
-    saved_maps = save_maps(scene, maps, warnings)
+    # PBR maps: authoring scenes → set dirs + LWO RVSM (§1e); the dead
+    # non-authoring fallback keeps the sidecar. map_rvsm = {surface: set|None}.
+    map_rvsm = {}
+    if SCENES[scene].get("authoring"):
+        saved_maps, map_rvsm = save_maps_setdirs(scene, maps, warnings)
+    else:
+        saved_maps = save_maps(scene, maps, warnings)
     # Engine-only keys (light flareScale, surface aoStrength/parallaxScale) →
     # sidecar, for every scene type; what remains goes to the LWS/LWO/FLD
     # patchers below.
@@ -1046,7 +1109,7 @@ def do_save_main(scene, payload):
     patched_scene_env = patch_lws_scene_env(scene, scene_env, warnings)
     patched_lights = patch_lws_lights(scene, lights, warnings)
     patched_lights += patch_lws_light_ext(scene, light_ext, warnings)
-    if not surfaces and not uv_by_name and not rev_ext_by_name:
+    if not surfaces and not uv_by_name and not rev_ext_by_name and not map_rvsm:
         if patched_lights or patched_scene_env:
             # Lights / scene env defaults changed -> the FLD must be
             # regenerated (it embeds them).
@@ -1056,8 +1119,8 @@ def do_save_main(scene, payload):
             resp.update({"maps": saved_maps, "lights": patched_lights,
                          "sceneEnv": patched_scene_env, "warnings": warnings})
             return 200, resp
-        # Maps-only save: no FLD regen needed (map paths live in the sidecar;
-        # the FLD doesn't reference them).
+        # Nothing for the LWO/FLD (non-authoring maps went to the sidecar, or
+        # the payload had nothing map/surface-shaped): no FLD regen.
         return 200, {"ok": True, "patched": [], "maps": saved_maps,
                      "sidecar": os.path.relpath(scene_sidecar(scene), REPO) if saved_maps else None,
                      "warnings": warnings}
@@ -1122,6 +1185,26 @@ def do_save_main(scene, payload):
                                     f"({slot[p]} vs {v}) — using {v}")
                 slot[p] = v
 
+    # RVSM (PBR map SET) assignments (§1e): resolve editor surface -> .lwo the
+    # same way, apply via lwopatch.set_rev_maps. set-name -> {'set': name};
+    # None (all roles reset -> empty set dir) -> {'set': None} clears the RVSM.
+    per_file_rvsm = {}   # (fname, surf) -> set-name or None
+    for name, st in map_rvsm.items():
+        fname, surf = map_surface_name(name)
+        if fname is not None:
+            targets = ([(fname, surf)] if (lwos.get(fname)
+                       and lwos[fname].surface(surf) is not None) else [])
+            if not targets:
+                warnings.append(f"'{name}': no surface '{surf}' in {fname} (RVSM) — skipped")
+                continue
+        else:
+            targets = [(f, surf) for f, lwo in lwos.items() if lwo.surface(surf)]
+            if not targets:
+                warnings.append(f"'{name}': RVSM surface not found in any .lwo — skipped")
+                continue
+        for key in targets:
+            per_file_rvsm[key] = st
+
     # UV mapping edits: resolve names the same way, patch CTEX/TSIZ/TFLG.
     uv_targets = {}   # (fname, surf) -> uv tuple
     for name, uv in uv_by_name.items():
@@ -1137,7 +1220,7 @@ def do_save_main(scene, payload):
     for (fname, surf), uv in sorted(uv_targets.items()):
         lwos[fname].surface(surf).set_uv_mapping(*uv)
 
-    if not per_file and not uv_targets and not per_file_ext:
+    if not per_file and not uv_targets and not per_file_ext and not per_file_rvsm:
         if saved_maps or patched_lights or patched_scene_env:
             # surface edits all missed, but these landed
             code, resp = (regen_fld(scene, []) if (patched_lights or patched_scene_env)
@@ -1158,8 +1241,10 @@ def do_save_main(scene, payload):
             lwos[fname].surface(surf).set_prop(p, v)
     for (fname, surf), props in sorted(per_file_ext.items()):
         lwos[fname].surface(surf).set_rev_ext(props)   # RVSF sub-chunk (§1a)
+    for (fname, surf), st in sorted(per_file_rvsm.items()):
+        lwos[fname].surface(surf).set_rev_maps({"set": st})  # RVSM sub-chunk (§1e)
     for fname in sorted({f for (f, _) in per_file} | {f for (f, _) in uv_targets}
-                        | {f for (f, _) in per_file_ext}):
+                        | {f for (f, _) in per_file_ext} | {f for (f, _) in per_file_rvsm}):
         path = os.path.join(adir, fname)
         new = lwos[fname].serialize()
         if new == open(path, "rb").read():
@@ -1170,7 +1255,8 @@ def do_save_main(scene, payload):
         patched.append({"file": fname,
                         "surfaces": sorted({s for (f, s) in per_file if f == fname}
                                            | {s for (f, s) in uv_targets if f == fname}
-                                           | {s for (f, s) in per_file_ext if f == fname}),
+                                           | {s for (f, s) in per_file_ext if f == fname}
+                                           | {s for (f, s) in per_file_rvsm if f == fname}),
                         "backup": os.path.relpath(bak, REPO)})
 
     # Regenerate + install the FLD.

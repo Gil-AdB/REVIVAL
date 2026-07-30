@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "Base/FDS_DEFS.H"
 #include "Base/FDS_VARS.H"
@@ -106,6 +107,19 @@ struct MatKeyHash {
 };
 
 std::unordered_map<MatKey, Material*, MatKeyHash> g_dedupMap;
+
+// Revival per-surface PBR map-role assignments (sidecar-elim §1e). One entry
+// per Surf_RevMaps material, owning std::string copies of the role paths; the
+// public RevMapAssignment (FLD_READ.H) borrows their c_str(). Consumed at scene
+// init by MaterialImport_ApplyRevMaps (DEMO). Process-global, cleared per scene
+// load by FldRevMapClear (called before ConvertFLD).
+struct RevMapEntryOwned {
+	Scene       *scene;
+	std::string  matName, set;
+	int          normalFlip;
+	RevMapAssignment view;
+};
+std::vector<RevMapEntryOwned> g_revMapEntries;
 
 // Texture lookup is keyed on (filename, scene). Replaces the O(n²)
 // linked-list walk that AddMaterial used to do per call.
@@ -247,6 +261,21 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 		if (m & 0x400) candidate.EnvDynamic    = OrgMat->EnvDynamic;   // ENVDYN A1
 	}
 
+	// Revival per-surface PBR map-role extension (§1e): record the authored role
+	// paths for MaterialImport_ApplyRevMaps to load at scene init (the same
+	// MaterialImport_ApplyMapFile path the .MAT sidecar drove). NOT part of the
+	// dedup key — map-carrying surfaces have unique names (already in the key),
+	// so they never collapse; the assignment keys on the surface name + scene.
+	if ((OrgMat->Flags & Surf_RevMaps) && (OrgMat->RevMapMask & 0x01)
+	    && OrgMat->MapSet) {
+		RevMapEntryOwned e{};
+		e.scene      = SceneGroup;
+		e.matName    = OrgMat->Name ? OrgMat->Name : "";
+		e.set        = OrgMat->MapSet;
+		e.normalFlip = (OrgMat->RevMapMask & 0x40) ? (int)OrgMat->NormalFlip : -1;
+		g_revMapEntries.push_back(std::move(e));
+	}
+
 	// Dedup on the runtime-relevant subset. Two FldMat entries with
 	// matching key collapse to one canonical Material* — the second
 	// caller gets the first one back, no allocation, no MatLib link.
@@ -269,6 +298,22 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 	g_dedupMap.emplace(key, M);
 	return M;
 }
+
+// ── Revival PBR map-role assignment accessors (sidecar-elim §1e) ──────────
+int FldRevMapCount() { return (int)g_revMapEntries.size(); }
+
+const RevMapAssignment *FldRevMapAt(int i) {
+	if (i < 0 || i >= (int)g_revMapEntries.size()) return nullptr;
+	RevMapEntryOwned &e = g_revMapEntries[i];
+	// Refresh the borrowing view (vector may have reallocated since push_back).
+	e.view.scene      = e.scene;
+	e.view.matName    = e.matName.c_str();
+	e.view.set        = e.set.empty() ? nullptr : e.set.c_str();
+	e.view.normalFlip = e.normalFlip;
+	return &e.view;
+}
+
+void FldRevMapClear() { g_revMapEntries.clear(); }
 
 void DumpMaterialDedupStats() {
 	for (const auto& [scene, stats] : g_dedupStats) {

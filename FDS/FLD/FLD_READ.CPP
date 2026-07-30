@@ -213,6 +213,20 @@ void ReadMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x200) fread(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fread(&Mat->EnvDynamic,1,1,FLD);
 	}
+	// Revival per-surface PBR map-SET extension: a SECOND conditional payload
+	// gated on Surf_RevMaps (0x0800), written AFTER the RVSF numeric payload by
+	// tools/lwsread FLDSAVE.CPP — u16 RevMapMask + set-name string (0x01) +
+	// normalFlip byte (0x40), ascending mask-bit order. Directory-per-set: the
+	// engine resolves TEXTURES/PBR/<set>/<role>.png. Independent of Surf_RevExt
+	// (a surface can carry maps with no numeric dials, e.g. 'teleporter').
+	// Legacy FLDs never carry the bit. Collected in FLD_MAT.CPP + applied at
+	// scene init via MaterialImport_ApplyMapFile. See SIDECAR_MIGRATION_PLAN §1e.
+	if (Mat->Flags & Surf_RevMaps)
+	{
+		fread(&Mat->RevMapMask,1,2,FLD);
+		if (Mat->RevMapMask & 0x01) ReadString(&Mat->MapSet);
+		if (Mat->RevMapMask & 0x40) fread(&Mat->NormalFlip,1,1,FLD);
+	}
 #ifdef DebugMode
 	FLDLOG("---S---|Color texture = %s\n",Mat->ColorTexture);
 	FLDLOG("---u---|Diffuse texture = %s\n",Mat->DiffuseTexture);

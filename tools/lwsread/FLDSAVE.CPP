@@ -173,6 +173,19 @@ void SaveMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x200) fwrite(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fwrite(&Mat->EnvDynamic,1,1,FLD);   // ENVDYN A1
 	}
+	// Revival per-surface PBR map-SET extension (LWO "RVSM" -> Surf_RevMaps
+	// bit): a SECOND conditional payload written ONLY when the material carries
+	// the bit, AFTER the RVSF numeric payload — u16 RevMapMask + only the
+	// authored fields (set-name string bit 0x01, normalFlip byte bit 0x40) in
+	// ascending mask-bit order. Directory-per-set: the engine resolves
+	// TEXTURES/PBR/<set>/<role>.png. Materials without the bit stay byte-
+	// identical. LWOREAD sets Surf_RevMaps when it parses RVSM. See §1e.
+	if (Mat->Flags & Surf_RevMaps)
+	{
+		fwrite(&Mat->RevMapMask,1,2,FLD);
+		if (Mat->RevMapMask & 0x01) SaveString(Mat->MapSet);
+		if (Mat->RevMapMask & 0x40) fwrite(&Mat->NormalFlip,1,1,FLD);
+	}
 }
 
 void SaveObject(FldObject *Obj)

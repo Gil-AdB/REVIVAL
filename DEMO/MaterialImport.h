@@ -126,6 +126,16 @@ const char *MaterialImport_ClassifyRole(const char *filename);
 // The editor's dev server (tools/editor_server.py) writes this file on Save.
 void MaterialImport_ApplySidecar(Scene *sc, const char *path);
 
+// Apply the PBR map-role assignments AUTHORED IN THE LWO/FLD (custom RVSM
+// sub-chunk → Surf_RevMaps FLD payload → FldRevMap* accessors), for materials
+// whose RelScene == `sc`. The source-authored successor to the sidecar's
+// `surface|role|path` map lines (sidecar-elim §1e): same MaterialImport_
+// ApplyMapFile load/convert/assign/tangent path, applied in albedo-first order,
+// with normalFlip applied after the normal map. Call at scene init at the SAME
+// point MaterialImport_ApplySidecar runs (BEFORE MaterialImport_Apply, so a CLI
+// --material-import still wins). No-op when the FLD carried no RVSM payload.
+void MaterialImport_ApplyRevMaps(Scene *sc, const char *sceneName);
+
 // Apply ONLY the sidecar's `scene:|key|value` lines (authored scene-level
 // defaults for FeatureFlags-backed quantities — see the format table above).
 // Values go through FeatureFlags::setDefault, so an explicit CLI/env flag

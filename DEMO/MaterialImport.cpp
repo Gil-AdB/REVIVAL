@@ -12,6 +12,7 @@
 #include <Base/Object.h>             // Object tree (sidecar obj: lines)
 #include <Base/TriMesh.h>            // EditorScale (sidecar obj: lines)
 #include <Base/FeatureFlags.h>
+#include <FLD/FLD_READ.H>            // FldRevMap* — LWO/FLD-authored PBR map roles (§1e)
 
 #include <cstdio>
 #include <cstdlib>
@@ -756,6 +757,54 @@ void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
 	std::fclose(f);
 	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d entrie(s) applied%s\n",
 	             path, applied, failed ? " (some FAILED, see above)" : "");
+}
+
+// True if a file exists + is readable (relative to the demo CWD = Runtime/).
+static bool fileExists(const std::string &path) {
+	if (FILE *f = std::fopen(path.c_str(), "rb")) { std::fclose(f); return true; }
+	return false;
+}
+
+void MaterialImport_ApplyRevMaps(Scene *sc, const char *sceneName) {
+	if (!sc) return;
+	// Directory-per-set (§1e): a material names ONE texture SET; the engine
+	// resolves TEXTURES/PBR/<set>/<role>.png and loads whichever roles exist.
+	// albedo FIRST (it sets the texel layout aux maps resample to, and dropIf
+	// keys off it); the rest in the retired sidecar's stable alphabetical order
+	// so a scene that carried per-file sidecar paths reproduces byte-identically.
+	static const char *const kRoles[] = {
+		"albedo", "ao", "height", "metallic", "normal", "roughness" };
+	const int n = FldRevMapCount();
+	int applied = 0, missing = 0;
+	for (int i = 0; i < n; ++i) {
+		const RevMapAssignment *e = FldRevMapAt(i);
+		if (!e || e->scene != sc || !e->matName || !e->set || !*e->set) continue;
+		const std::string dir = std::string("TEXTURES/PBR/") + e->set;
+		if (!fileExists(dir + "/albedo.png") && !fileExists(dir + "/normal.png")
+		 && !fileExists(dir + "/height.png") && !fileExists(dir + "/roughness.png")
+		 && !fileExists(dir + "/metallic.png") && !fileExists(dir + "/ao.png")) {
+			std::fprintf(stderr, "[MAT-REVMAP] %s: '%s' -> set '%s' has NO role "
+			             "files under %s — nothing applied\n",
+			             sceneName ? sceneName : "?", e->matName, e->set, dir.c_str());
+			++missing;
+			continue;
+		}
+		for (const char *role : kRoles) {
+			const std::string path = dir + "/" + role + ".png";
+			if (fileExists(path)) {
+				MaterialImport_ApplyMapFile(sc, e->matName, role, path.c_str());
+				++applied;
+			}
+		}
+		// normalFlip AFTER the normal map (it mutates the assigned NormalMap).
+		if (e->normalFlip >= 0)
+			MaterialImport_SetSurfaceProp(sc, e->matName, "normalFlip",
+			                              (float)e->normalFlip);
+	}
+	if (applied || missing)
+		std::fprintf(stderr, "[MAT-REVMAP] %s: %d LWO/FLD-authored map(s) applied"
+		             "%s\n", sceneName ? sceneName : "?", applied,
+		             missing ? " (some sets MISSING, see above)" : "");
 }
 
 const char *MaterialImport_ClassifyRole(const char *filename) {

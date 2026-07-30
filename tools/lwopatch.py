@@ -46,9 +46,10 @@ CANON = ["COLR", "FLAG",
          "CTEX", "DTEX", "STEX", "RTEX", "TTEX", "BTEX",
          "TIMG", "TFLG", "TSIZ", "TCTR", "TFAL", "TVEL", "TCLR", "TVAL",
          "TAMP", "TFRQ", "TALP", "TWRP", "TAAS", "TOPC", "TIP0", "TFP0", "TFP1",
-         # Revival per-surface extension — appended last (a custom sub-chunk;
-         # stock LightWave drops it on re-save, the editor is author of record).
-         "RVSF"]
+         # Revival per-surface extensions — appended last (custom sub-chunks;
+         # stock LightWave drops them on re-save, the editor is author of record).
+         # RVSF = numeric dials (§1a); RVSM = PBR map-role paths + normalFlip (§1e).
+         "RVSF", "RVSM"]
 CANON_POS = {c: i for i, c in enumerate(CANON)}
 
 # Revival per-surface extension — custom LWO SURF sub-chunk "RVSF"
@@ -76,6 +77,31 @@ RVSF_FIELDS = [
     ("envDynamic",      0x400, ">B"),   # 0/1 -> Material::EnvDynamic
 ]
 RVSF_KEYS = {k for (k, _, _) in RVSF_FIELDS}
+
+# Revival per-surface PBR map-SET extension — custom LWO SURF sub-chunk "RVSM"
+# ("ReViVal Surface Maps", docs/SIDECAR_MIGRATION_PLAN.md §1e). LWO1 has no PBR
+# map slots, so the editor used to persist role->path assignments in the .MAT
+# sidecar; this carries them in the authoring source instead. USER DESIGN
+# (2026-07-31): a directory-per-set layout — the payload names ONE texture SET,
+# and the engine resolves TEXTURES/PBR/<set>/<role>.png (fixed role filenames:
+# albedo/normal/height/roughness/metallic/ao) and loads whichever roles exist.
+# The set is decoupled from the surface name so sets are shareable assets.
+# Body (LWO, big-endian IFF): u16 mapMask + for each set bit in ASCENDING order
+# the set name (NUL-terminated string) or one byte (normalFlip parity). A
+# SIBLING of RVSF, not folded in: variable-length strings stay apart from the
+# fixed-width, field-order-locked numeric parse (the hottest FLD record). Bit
+# order + kinds MUST match tools/lwsread (LWOREAD ReadSurfaceRevMaps, FLDSAVE
+# SaveMaterial) and the engine (FDS/FLD/FLD_READ.CPP ReadMaterial).
+# Each: (editor-key, mask-bit, kind) where kind is "str" (set name) or "u8".
+RVSM_FIELDS = [
+    ("set",        0x01, "str"),
+    ("normalFlip", 0x40, "u8"),   # 0/1 green-channel convention parity (§1e)
+]
+RVSM_KEYS = {k for (k, _, _) in RVSM_FIELDS}
+# Fixed role filenames inside a set dir (the engine probes these; the editor
+# import normalizes uploaded files to them). Role order = albedo FIRST (sets
+# the aux-map texel layout), then the retired sidecar's alphabetical order.
+RVSM_ROLE_FILES = ["albedo", "ao", "height", "metallic", "normal", "roughness"]
 
 # prop -> (int_chunk, float_chunk, engine->fraction divisor)
 VALUE_PROPS = {
@@ -184,7 +210,71 @@ class Surf:
             body += struct.pack(fmt, val)
         self.set_chunk("RVSF", struct.pack(">H", mask) + body)
 
+    def rev_maps(self):
+        """Parse the RVSM sub-chunk into {role: path, 'normalFlip': int}
+        (empty dict if none)."""
+        i = self._find("RVSM")
+        if i < 0:
+            return {}
+        body = self.subchunks[i][1]
+        if len(body) < 2:
+            return {}
+        mask = struct.unpack_from(">H", body, 0)[0]
+        out, p = {}, 2
+        for key, bit, kind in RVSM_FIELDS:
+            if not (mask & bit):
+                continue
+            if kind == "u8":
+                out[key] = body[p]
+                p += 1
+            else:                       # NUL-terminated string
+                z = body.index(b"\x00", p)
+                out[key] = body[p:z].decode("latin-1")
+                p = z + 1
+        return out
+
+    def set_rev_maps(self, props):
+        """Merge {role: path | None, 'normalFlip': 0/1 | None} into this
+        surface's RVSM sub-chunk, preserving untouched fields. A value of None
+        drops that field. An empty merged set removes the RVSM sub-chunk (the
+        regenerated FLD then carries no Surf_RevMaps bit — byte-identical to an
+        unauthored surface). Paths are stored verbatim (relative-to-Runtime)."""
+        cur = self.rev_maps()
+        for k, v in props.items():
+            if k not in RVSM_KEYS:
+                raise ValueError(f"unknown RVSM key '{k}'")
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        i = self._find("RVSM")
+        if not cur:
+            if i >= 0:
+                del self.subchunks[i]
+            return
+        mask, body = 0, b""
+        for key, bit, kind in RVSM_FIELDS:
+            if key not in cur:
+                continue
+            mask |= bit
+            if kind == "u8":
+                body += struct.pack(">B", int(round(float(cur[key]))) & 0xFF)
+            else:
+                body += str(cur[key]).encode("latin-1") + b"\x00"
+        self.set_chunk("RVSM", struct.pack(">H", mask) + body)
+
     def set_prop(self, prop, value):
+        if prop == "smoothAngle":
+            # Native LightWave SMAN chunk (MaxSmoothingAngle), stored in RADIANS
+            # on disk; the editor works in degrees (sidecar-elim §1b). Rides the
+            # existing MaxSmoothingAngle FLD field — no new bit. Also SET the
+            # Surf_Smoothing FLAG bit so the engine's authored-smoothing path
+            # honors it (MakeFacesIndependent gates on Surf_Smoothing).
+            self.set_chunk("SMAN", struct.pack(">f", float(value) * math.pi / 180.0))
+            i = self._find("FLAG")
+            flags = struct.unpack(">H", self.subchunks[i][1])[0] if i >= 0 else 0
+            self.set_chunk("FLAG", struct.pack(">H", flags | 0x0004))  # Surf_Smoothing
+            return
         if prop in VALUE_PROPS:
             ichunk, fchunk, div = VALUE_PROPS[prop]
             frac = float(value) / div
