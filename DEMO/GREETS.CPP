@@ -1281,7 +1281,15 @@ void Initialize_Greets()
 			M->Txtr->FileName = strdup(albedo);   // old name leaks (init-time, tiny)
 			M->Txtr->BPP = 0;                     // force (re)load by Unify_Textures
 			M->Flags |= Mat_AoInAlpha;            // albedo alpha = baked AO
-			M->ParallaxScale = pxScale;
+			// Code-default parallax depth for the legacy stone-tex path — but only
+			// when the surface DIDN'T author one. The editor persists per-material
+			// parallaxScale into the LWO 'RVSF' sub-chunk (loaded into
+			// Material::ParallaxScale at FLD time); stomping it here unconditionally
+			// made editor parallax edits on 'rooms'/'floor' silently do nothing
+			// (they saved to RVSF but never rendered — the "parallax changes aren't
+			// being saved" report). Honor an authored value (!= the 1.0 default);
+			// floor's unauthored default still gets its dialed-down 0.25.
+			if (M->ParallaxScale == 1.0f) M->ParallaxScale = pxScale;
 			// Roughness map (--roughness_map): per-pixel specular intensity. 8-bit
 			// single-channel (MakeHeight8), same layout as albedo → same swizzled UV.
 			if (rough) {
