@@ -110,15 +110,20 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	}
 	const float cosSmoothing = std::cos(smoothingThresholdDegrees * float(PI) / 180.0f);
 
-	// The mummy ('momy-1') is an organic lathe that LightWave authored as
-	// smooth (Surf_Smoothing, MaxSmoothingAngle ~1.6 rad ≈ 92°). The global
-	// architectural crease threshold (30°, tuned for hard edges like the City
-	// corners) splits its radial facets and the whole body goes faceted. For
-	// that one surface, honor its authored smoothing angle instead, and smooth
-	// only among its own faces so it can't bleed into the floor it sits on.
-	// Every other surface keeps the global threshold => other scenes unchanged.
+	// The two mummies ('momy-1'/'momy-2') are identical organic lathes that
+	// LightWave authored as smooth (Surf_Smoothing, MaxSmoothingAngle ~1.6 rad
+	// ≈ 92°). The global architectural crease threshold (30°, tuned for hard
+	// edges like the City corners) splits their radial facets and the bodies go
+	// faceted. For those surfaces, honor the authored smoothing instead, and
+	// smooth only among each surface's own faces so it can't bleed into the
+	// floor it sits on. Both mummies belong (per-surface case; the 2026-07-30
+	// split-bake made the second a distinct surface — without it that mummy
+	// re-facets). Every other surface keeps the global threshold => other
+	// scenes unchanged.
 	auto matIsMomy = [](const Face *f) {
-		return f && f->Txtr && f->Txtr->Name && !std::strcmp(f->Txtr->Name, "momy-1");
+		if (!f || !f->Txtr || !f->Txtr->Name) return false;
+		const char *n = f->Txtr->Name;
+		return !std::strcmp(n, "momy-1") || !std::strcmp(n, "momy-2");
 	};
 
 	// Per-surface smoothing angle. Two opt-in sources, both superseding the

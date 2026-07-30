@@ -1628,12 +1628,17 @@ void Initialize_Greets()
 		// a unique ShadowMatID per facet → at each poly edge the light-view and
 		// camera-view faces carry different ids → the PolyId equality test reports
 		// a spurious self-shadow → a dark line on every facet edge. The mummy
-		// ('momy-1') is a curved lathe in Piramid.lwo, so force its whole
-		// surface to a single id (it then self-matches everywhere → no acne lines).
-		// Same idea as the hull/robot single-id merge. Add curved alcove mats here
-		// when we tackle those (concave, so it's a softer trade-off — real
-		// self-shadowing inside the alcove is lost along with the artifact).
-		static const std::set<std::string> kSingleShadowIdMats = { "momy-1" };
+		// The two mummies ('momy-1' and 'momy-2') are identical curved lathes in
+		// Piramid.lwo (mirror copies, 336 polys each), so force each whole surface
+		// to a single id (it then self-matches everywhere → no acne lines). BOTH
+		// belong here: the special-case is per-SURFACE (keyed on the material name
+		// per face), and the 2026-07-30 split-bake made the second mummy a distinct
+		// surface — without membership its facets get per-plane ids → the per-facet
+		// self-shadow acne this list exists to kill. Same idea as the hull/robot
+		// single-id merge. Add curved alcove mats here when we tackle those
+		// (concave, so it's a softer trade-off — real self-shadowing inside the
+		// alcove is lost along with the artifact).
+		static const std::set<std::string> kSingleShadowIdMats = { "momy-1", "momy-2" };
 
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;
