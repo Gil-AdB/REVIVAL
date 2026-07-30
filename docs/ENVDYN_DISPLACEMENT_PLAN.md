@@ -265,8 +265,12 @@ only, flags default-off until the user approves looks.
       [x] B4 residual · [~] B5 tile pre-reject (measured non-required at
       L=2; only for an L=3 ambition, alongside a shadow-bake cull).
       WORKSTREAM B COMPLETE except the conditional B5 (declined on the
-      B2 numbers). Open content item: reinstate a real greets_wall_h.png
-      (shipping one is all-white — user's call).
+      B2 numbers). Content item RESOLVED (2026-07-31): greets_wall_h.png regenerated from
+      the stone3 normal map via tools/nmap2height.py (Frankot-Chellappa FFT
+      integration, sign auto-calibrated bricks-high/mortar-low against the
+      albedo, polarity matches the POM march's white=protruding convention).
+      The old pre-stone3 358KB map did NOT match the stone3 brick pattern —
+      restoring it would have put grooves in the wrong places.
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`
