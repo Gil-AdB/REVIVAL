@@ -199,6 +199,16 @@ struct Material
     // registered stores size from the FIRST windows clone that registers the
     // building (materials map n:1 onto them) and cap at their 512² source.
     int                   EnvBakeRes             = 0;
+
+    // Authored per-surface flag (ENVDYN Workstream A1, docs/
+    // ENVDYN_DISPLACEMENT_PLAN.md): 1 = this material's env-reflection probe
+    // opts into the LIVE dynamic-mesh overlay (the mech reflected in it), 0 =
+    // static probe (default). Authored in the LWO 'RVSF' SURF sub-chunk (bit
+    // 0x400) → FLD Surf_RevExt payload → here; also editor-settable via the
+    // 'envDynamic' Material-panel checkbox. Nothing flagged → the whole
+    // workstream is inert (byte-null). Consumed by EnvBake.cpp (store
+    // retention A2 + the overlay pass A3), never by the static bake.
+    int8_t                EnvDynamic             = 0;
 };
 
 #pragma pack(pop)

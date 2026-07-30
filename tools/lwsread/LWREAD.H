@@ -180,6 +180,8 @@ typedef struct
 	int8_t         EnvReflMode;     // bit 0x080 (-1/0/1)
 	int32_t        EnvBakeRes;      // bit 0x100 (pow2 64..1024)
 	int8_t         WaterProcMode;   // bit 0x200 (-1/0/1)
+	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1;
+	                                // 0x800+ reserved for sidecar map-roles (§1.6)
 } FldMat;
 
 typedef struct

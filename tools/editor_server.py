@@ -110,7 +110,11 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # surface (-1 off / 0 auto -> global --water_procedural / 1 on).
 # envBakeRes: per-surface env-probe bake face resolution (pow2 64..1024;
 # 0 = unset -> the global env_bake_res / legacy sizing chain).
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural"}
+# envDynamic: 0/1 authored flag (ENVDYN Workstream A1, docs/
+# ENVDYN_DISPLACEMENT_PLAN.md) marking this material's env probe for the live
+# dynamic-mesh reflection overlay. RVSF-only (mask bit 0x400) — routed exactly
+# like the other RVSF dials via RVSF_SURF_KEYS/pop_rev_ext_props below.
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural", "envDynamic"}
 # Of those, the ones that migrate to the LWO RVSF sub-chunk (sidecar-elim §1a),
 # for authoring scenes. = SURF_SIDECAR_KEYS minus normalFlip, which pairs with
 # the normal-map assignment (§1e) and stays on the sidecar for now. lwopatch's

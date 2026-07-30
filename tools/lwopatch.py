@@ -69,6 +69,11 @@ RVSF_FIELDS = [
     ("envRefl",         0x080, ">b"),   # -1/0/1
     ("envBakeRes",      0x100, ">i"),   # pow2 64..1024
     ("waterProcedural", 0x200, ">b"),   # -1/0/1
+    # 0x400 reserved by ENVDYN Workstream A1 (docs/ENVDYN_DISPLACEMENT_PLAN.md):
+    # per-surface authored flag marking this material's env-reflection probe for
+    # the live dynamic-mesh overlay. Ascending-mask-order convention (§1a) — the
+    # sidecar map-role migration (slice 1.6) takes 0x800 and up.
+    ("envDynamic",      0x400, ">B"),   # 0/1 -> Material::EnvDynamic
 ]
 RVSF_KEYS = {k for (k, _, _) in RVSF_FIELDS}
 
