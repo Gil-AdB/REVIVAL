@@ -191,8 +191,30 @@ Proven end-to-end by the volumetric-beam work (9172c5d):
   the half-silvered composite (text + reflection) meeting a second text
   source (base panel texture vs RTT/recursion path; the recursion-composite
   interaction is a known open item from MIRROR_RECURSION_PLAN slice 3).
-  User's exact launch flags for the repro NOT captured — re-ask when
-  picking this up. Parked deliberately ("finish the other threads first").
+  User's exact launch flags (2026-07-30): `FDS_POM_CONE=1 FDS_TEXTURE_FILTER=1
+  FDS_POM_SPIKE=8 FDS_PARALLAX_STRENGTH=3 ./DEMO --shadows
+  --greets-omni-shadows --greets-omni-default-range=30
+  --greets-omni-shadow-res=256 --shadow-skip-animated --greets-spots
+  --shadow-dynamic --shadow-lightmap-planar --shadow-lightmap-res=64
+  --shadow-lightmap --greets-mirror --mirror-rtt --greets-mirror
+  --mirror-rtt-density=1024 --cone-strength=5 --bloom --disco-bloom=0
+  --shard-deferred --greets-shard-fall-speed=1 --greets-shard-randomness=0.8
+  --hdr-linear --greets-shard-res=64 --bloom-intensity=1.5 --hdr-refl-gain=4
+  --cone-fine-tiles --anamorphic --anamorphic_intensity=1.5
+  --anamorphic_vert=0 --anamorphic_decay=0.3 --anamorphic_passes=2
+  --lens_ghosts --lens_ghost_intensity=0.05 --lens_ghost_count=0
+  --lens_ghost_dispersal=0.01 --lens_ghost_halo=0.01 --chromatic
+  --chromatic_amount=3 --vignette --vignette_strength=1 --dof --dof_range=20
+  --dof_max=4 --greets-stone-tex --ssao-downscale=2 --ssao-gtao
+  --ao_map_strength=1 --parallax_strength=0.1 --parallax --nmap_16bit --hdr
+  --ssao --shadow_bake_time --aa --pbr --shadow_cube_face_cull
+  --deferred-quarter --ssao_temporal --parallax --parallax_pom_lod
+  --glass-refract=1 --glass-test --xpar-peel-passes=4 --cone-turbulence=3.5
+  --cone-swirl=0.7 --env-brdf-analytic --sh-ambient --diffuse_energy
+  --pbr_multiscatter` — note NO --mirror-recurse-depth (order-1/2 RTT path,
+  not the recursion), and --deferred-quarter + --hdr are in play (the known
+  wave-2/HDR checkerboard interaction family). Parked deliberately
+  ("finish the other threads first").
 
 - **Greets ~1-in-12 flip**: kernel-internal nondeterminism, survives
   1-thread/noaslr/prescribble/pinned-seed with ALL kernel inputs
