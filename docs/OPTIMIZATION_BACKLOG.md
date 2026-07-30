@@ -145,6 +145,19 @@ not shading. Biggest levers, in order:
   depth maps every frame. Cache/skip static portions.
 - **Mirror RTT (teleporter, 2nd-order recursive)** — a full second scene
   render. Density/recursion knobs (`mirror_rtt_density`) are the lever.
+- **Vectorize the general env-specular compose** (2026-07-31, user-queued).
+  `EnvSpecComposeScalar` runs scalar per pixel for everything except the
+  city-glass shape (`EnvComposeCityVec8` engages only for: uniform cube
+  store across the 8-lane group + noParallax + cv-pull + no rough/metal
+  maps + no env diagnostics + none of sphere-parallax/SSR/analytic-BRDF).
+  Greets env surfaces are always scalar (per-material probes break the
+  uniformity gate; AABB parallax; rough/metal maps). The math chain is the
+  same one CityVec8 already vectorizes — per-lane stores become
+  mask-selected, parallax correction is a few more vector ops; the
+  gathers (face fetch) don't vectorize away regardless (ENV_NOFETCH
+  attribution). MEASURE FIRST: only worth it if the env compose is a
+  material slice of a greets frame vs the cube-shadow/cone elephants
+  above.
 
 ## Correctness/determinism (blocks the gate, not just perf)
 - **Greets env-bake non-determinism** — TODO, now URGENT-ish. Greets renders
