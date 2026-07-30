@@ -191,9 +191,14 @@ void  MeshOps_ResmoothSurface(const char *surface, float angleDeg);
 // Phong-tessellate (curved PN-style) every face whose material name == matName,
 // `levels` times (each level = 1→4 split per target triangle, edge midpoints
 // displaced toward the smooth surface so the silhouette rounds). Crack-free
-// (shared edge midpoints), non-target faces untouched. Run after Preprocess
-// (needs vertex normals) and before MakeFacesIndependentByAngle.
-void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels);
+// (shared edge midpoints; crease-guarded projection + fold relaxation +
+// per-face NormProd recompute — see the .cpp), non-target faces untouched.
+// Run after Preprocess (needs vertex normals) and before
+// MakeFacesIndependentByAngle. `phong=false` keeps midpoints LINEAR (pure
+// density split, base surface bit-unchanged) — for the stone displacement
+// bake, where PN rounding would bow flat walls near corners.
+void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels,
+                            bool phong = true);
 
 struct Texture;
 

@@ -1407,6 +1407,23 @@ void Initialize_Greets()
 		}
 	}
 
+	// Stone displacement workstream (docs/ENVDYN_DISPLACEMENT_PLAN.md, B):
+	// tessellate the wall ('rooms') + floor ('floor') for the height-map
+	// displacement bake — LINEAR midpoints (pure density; PN rounding would
+	// bow the flat walls near corners where smoothed vertex normals tilt).
+	// Same hook point as the momy subdiv: per-vertex normals exist
+	// (Preprocess), and MakeFacesIndependentByAngle below re-derives normals
+	// on the finer mesh; the Piramid chunk split further down then wraps the
+	// subdivided (and later displaced) verts in its chunk bounds. Default 0
+	// = the call never runs (byte-identical).
+	{
+		const int L = fds::FeatureFlags::greets_stone_subdiv();
+		if (L > 0) {
+			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
+			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
+		}
+	}
+
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);

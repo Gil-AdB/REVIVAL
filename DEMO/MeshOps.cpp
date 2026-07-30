@@ -861,7 +861,7 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 // T->Verts/T->Faces and restamps A_idx exactly like MakeFacesIndependent, so the
 // downstream count change is handled the same proven way. Old arrays are leaked
 // (init-time, matches MakeFacesIndependent).
-void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
+void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels, bool phong) {
 	if (!Sc || !matName || levels <= 0) return;
 	auto isTarget = [&](const Face *F) {
 		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
@@ -993,7 +993,7 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				float dispx = 0.0f, dispy = 0.0f, dispz = 0.0f;
 				const float laN = std::sqrt(A.N.x*A.N.x + A.N.y*A.N.y + A.N.z*A.N.z);
 				const float lbN = std::sqrt(B.N.x*B.N.x + B.N.y*B.N.y + B.N.z*B.N.z);
-				if (laN > 1e-6f && lbN > 1e-6f) {
+				if (phong && laN > 1e-6f && lbN > 1e-6f) {
 					const float ax = A.N.x/laN, ay = A.N.y/laN, az = A.N.z/laN;
 					const float bx = B.N.x/lbN, by = B.N.y/lbN, bz = B.N.z/lbN;
 					float w = ax*bx + ay*by + az*bz;
@@ -1058,7 +1058,8 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				targetTuples.push_back({ia, ib, ic, mab, mbc, mca});
 			}
 
-			// FOLD RELAXATION. Even crease-guarded, a Phong-displaced midpoint can
+			// FOLD RELAXATION (Phong mode only — linear midpoints cannot fold).
+			// Even crease-guarded, a Phong-displaced midpoint can
 			// fold a sub-face over (sliver parents: the sagitta of a long edge
 			// exceeds the triangle's width) — the rasterizer's screen-winding cull
 			// then renders it from the wrong side → a hole (this + the unguarded
@@ -1071,7 +1072,7 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 			// Midpoints are shared, so reverting one face can newly fold a
 			// neighbour: iterate to fixpoint (monotone — displacement only ever
 			// gets removed — so it terminates; ≤2 passes in practice).
-			{
+			if (phong) {
 				auto windN = [&](uint32_t i0, uint32_t i1, uint32_t i2, Vector &out) {
 					const Vector &A = verts[i0].Pos, &B = verts[i1].Pos, &C = verts[i2].Pos;
 					const float e1x = B.x-A.x, e1y = B.y-A.y, e1z = B.z-A.z;

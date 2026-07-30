@@ -148,12 +148,34 @@ POM keeps the fine detail from a residual map.
   Note for B3: 'rooms'/'floor' walls have hard 90° corners — the crease
   guard makes those edges subdivide LINEARLY (dot=0 → w=0), so the bake
   will not round wall corners; verify with FDS_SUBDIV_DIAG on contact.
-- **B2. Spike (measure before building).** Enable subdiv on
-  'rooms'/'floor' (post slice-0 names unchanged — these are wall/floor
-  materials, not momy), read `[SUBDIV]` exact counts, `--bench`/profiler
-  at L=1/2/3 at the POM-plan wall pose (greets t=5780). Decision gate:
-  pick L from measured serial-transform + tile-walk cost, not estimates
-  (prior estimate: L=2 ≈ +15-30k tris ≈ few ms; L=3 needs B5).
+- **B2. Spike — DONE (2026-07-30), MEASURED. Decision: L=2.**
+  Knob: `--greets_stone_subdiv=N` (LINEAR midpoints — no PN rounding on
+  flat walls; a `phong=false` mode added to SubdivideMaterialFaces).
+  `[SUBDIV]` counts (Piramid mesh, base 5532 faces): 'rooms' 196 →
+  784 (L1) → 3136 (L2) → 12544 (L3) faces; 'floor' 30 → 120 → 480 →
+  1920. Total added: **+678 (L1) / +3390 (L2) / +14238 (L3)** — the
+  prior "+15-30k @ L=2" estimate was 4-8× high.
+  Cost, wall pose `--bench=scene@scene=greets,t=5780` 1080p (whole-frame
+  mean; single-thread ±0.5 ms over 3 interleaved rounds; threaded = 3
+  rounds, 40 iters, load ~10-17 bg):
+  | L | ST frame | Δ | THR frame | Δ | ST p50 Δ: RNDR / BAKE / XFRM / SORT |
+  |---|---|---|---|---|---|
+  | 0 | 340.2 | — | 48.4 | — | — |
+  | 1 | 343.7 | +3.5 | 49.2 | +0.9 | +1.4 / +1.4 / +0.07 / +0.004 |
+  | 2 | 355.0 | +14.7 | 51.0 | +2.3 | +9.5 / +4.4 / +0.30 / +0.02 |
+  | 3 | 385.4 | +45.2 | 60.1 | +11.5 | +28.0 / +14.3 / +1.27 / +0.11 |
+  Pin pose (t=1588, SESSION_STATE cam; noisier): ST L2 +10.5 / L3 +38.5;
+  threaded paired-Δ medians L2 ≈ +5.7 (0.2-7.8), L3 ≈ +9 (8.6-26). Here
+  BAKE dominates (ST p50 Δ +4.6 L2 / +15.9 L3) — the per-frame shadow
+  bake re-rasters the subdivided walls regardless of camera; RNDR delta
+  is pose-dependent (walls off-center → small).
+  RNDR delta ≈ 2-2.8 µs/face SERIAL (per-face fixed cost — tile
+  walk/clipper entry — not pixel work; these sub-faces add no coverage).
+  **Decision: L=2 ships as the displacement density (+2.3 ms threaded at
+  the worst pose). L=3 (+11.5 ms) is out: it needs BOTH B5 (RNDR share)
+  AND a shadow-bake face-cull (BAKE share — B5 does not touch it), so
+  B5 alone cannot rescue it. B5 verdict: NOT required at L=2 (threaded
+  RNDR share ≈ +1.4 ms); optional, revisit only if L=3 is wanted.**
 - **B3. Displacement bake at init** (at the FDS_MOMY_SUBDIV hook point:
   after material/HeightMap load, BEFORE `MakeFacesIndependentByAngle` and
   the chunk split so chunk bounds wrap displaced verts): weld → subdiv L →
@@ -199,6 +221,8 @@ only, flags default-off until the user approves looks.
 - [ ] A1 editor-flagged probes  · [ ] A2 store retention · [ ] A3 overlay
       · [ ] A4 city depth cache (optional)
 - [x] B1 subdivision holes (weld premise disproven; Phong guard +
-      fold-relax + NormProd recompute) · [ ] B2 spike (numbers → here) ·
-      [ ] B3 displace · [ ] B4 residual · [ ] B5 tile pre-reject
-      (conditional)
+      fold-relax + NormProd recompute) · [x] B2 spike (numbers in B2
+      above; decision L=2, B5 not required at L=2) ·
+      [ ] B3 displace · [ ] B4 residual · [~] B5 tile pre-reject
+      (measured non-required at L=2; only for an L=3 ambition, alongside
+      a shadow-bake cull)
