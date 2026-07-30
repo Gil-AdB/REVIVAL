@@ -1351,14 +1351,13 @@ void Initialize_Greets()
 	// 'lamp light' the lamp glass). ('amudim' itself is opaque MARB4 marble —
 	// not glass; the room walls / mirror-mask clones stay unmarked.)
 	//
-	// ORDER MATTERS: this must run BEFORE MaterialImport_ApplySidecar below.
-	// 'refractive' is a SURF_SIDECAR_KEYS prop the editor persists (e.g.
-	// "screen 4|refractive|0" in GREETS.MAT) — the sidecar is the USER's
-	// override of these code defaults, so defaults-first / sidecar-last is the
-	// only order where a saved toggle survives the next scene load. (This block
-	// used to live inside the normal-map-bake loop after the sidecar and
-	// silently re-marked surfaces the user had un-marked.) FOUNTAIN.CPP already
-	// follows this order for its glass set.
+	// Code-default glass set: mark the half-silvered greets transparents as
+	// Mat_Refractive so --glass_refract warps the scene behind them. Per-material
+	// 'refractive' is otherwise authored in the LWO 'RVSF' sub-chunk (loaded into
+	// Mat_Refractive at FLD time, FLD_MAT.CPP); this block is the scene's built-in
+	// default for its known glass surfaces. FOUNTAIN.CPP marks its glass set the
+	// same way. (This block used to live inside the normal-map-bake loop below,
+	// which silently re-marked surfaces — kept up here, run once.)
 	for (Material *M = MatLib; M; M = M->Next) {
 		if (M->RelScene != GreetSc || !M->Name) continue;
 		if (!std::strcmp(M->Name, "screen 4") || !std::strcmp(M->Name, "screen2") ||
@@ -1368,16 +1367,12 @@ void Initialize_Greets()
 
 	// Source-authored PBR map assignments (custom LWO 'RVSM' sub-chunk → FLD
 	// Surf_RevMaps payload → FldRevMap* — sidecar-elim §1e). The successor to
-	// the GREETS.MAT map lines: same MaterialImport_ApplyMapFile path, driven
-	// from the FLD instead of the sidecar. Runs at the same point as (and just
-	// before) the sidecar so a CLI --material-import below still wins. No-op
-	// until the maps are authored into the LWO (FLD carries no RVSM payload).
+	// the retired GREETS.MAT map lines: same MaterialImport_ApplyMapFile path,
+	// driven from the FLD instead of the sidecar. Before the CLI overlay so an
+	// explicit --material-import below still wins. No-op when the FLD carries no
+	// RVSM payload. (The .MAT sidecar reader is retired — every per-surface value
+	// the sidecar carried now rides the LWO RVSF/RVSM/SMAN sources.)
 	fds::MaterialImport_ApplyRevMaps(GreetSc, "greets");
-
-	// Persisted overrides still on the sidecar (smoothAngle; the migrated
-	// numeric/map keys are IGNORED as retired). The editor's "Save" writes it.
-	// Before the CLI overlay so an explicit --material-import still wins.
-	fds::MaterialImport_ApplySidecar(GreetSc, "SCENES/GREETS.MAT");
 
 	// Authored per-surface smoothing angles (native LWO SMAN -> Material::
 	// MaxSmoothingAngle -> the MeshOps registry, sidecar-elim §1.5). Seeds only
@@ -1514,8 +1509,8 @@ void Initialize_Greets()
 			}
 		}
 		// NOTE: the Mat_Refractive opt-in marking that used to live here moved
-		// ABOVE MaterialImport_ApplySidecar — a sidecar-persisted 'refractive'
-		// override must not be stomped by code defaults (see the comment there).
+		// to the code-default glass block above (see the comment there); the
+		// per-material 'refractive' authored value rides the LWO RVSF sub-chunk.
 	}
 
 	gg->Init();

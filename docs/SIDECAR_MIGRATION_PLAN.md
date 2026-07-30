@@ -1,8 +1,28 @@
 # Sidecar-elimination migration plan
 
-The `.MAT` sidecar (`Runtime/SCENES/<SCENE>.MAT`, read by
+> **✅ CAMPAIGN COMPLETE (2026-07-31).** The `.MAT` sidecar READER is retired:
+> `MaterialImport_ApplySidecar` + `MaterialImport_ApplySceneDefaults` and all
+> their helpers are DELETED from `DEMO/MaterialImport.cpp`; every scene calls
+> `MaterialImport_ApplyRevMaps` (LWO RVSM maps) in their place. `GREETS.MAT` (the
+> last, data-empty, header-comment-only sidecar) is DELETED; no scene ships
+> sidecar data. The 7 (+1) `#k` split-marker collapse sites in
+> `tools/editor_server.py` are DELETED — a split now bakes real surfaces via
+> `payload.splits` world centroids (geometric match), nothing keys off `#k`.
+> Save-completeness proven headlessly (see the checkpoint / §5 note): an
+> idempotent editor Save regenerates `GREETS.FLD` BYTE-IDENTICALLY
+> (`7e508f24…`); a combined Save makes a surface GAIN RVSF+RVSM+SMAN records;
+> a split bakes `momy → momy+momy2` and rewrites the `#k` payload keys onto the
+> baked names, WITHOUT the collapse code, and the regenerated FLD renders.
+> Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd` byte-equal;
+> momy close-cam `7d05a1be` (3/3). **Still on the write side, not yet
+> FLD-backed (see §1d/§1e + §4 note):** `obj:scale` and `normalFlip` — the
+> editor writes them to a `.MAT` that nothing loads; their FLD-record designs
+> below stay for a future authored-property slice. `scene:` keys never had a
+> writer.
+
+The `.MAT` sidecar (`Runtime/SCENES/<SCENE>.MAT`, formerly read by
 `MaterialImport_ApplySidecar` / `MaterialImport_ApplySceneDefaults` in
-`DEMO/MaterialImport.cpp`) is being retired. Every editor-authored property it
+`DEMO/MaterialImport.cpp`) has been retired. Every editor-authored property it
 persists moves into the **authoring sources** — per-surface values into a
 custom LWO `SURF` sub-chunk, per-light / per-object / scene-level values into
 LWS keywords — and flows through `tools/lwsread` into the `.FLD` using the
@@ -269,8 +289,7 @@ Phase 1 (writers; reader untouched; every FLD + gate byte-identical)
 
   ★ USER CHECKPOINT — ✅ DONE 2026-07-30 (see below) ★
 
-Phase 2 — NUMERIC SLICE DONE 2026-07-30 (e8098fe / 000c59b / c11261d);
-remainder BLOCKED on slices 1.5/1.6:
+Phase 2 — COMPLETE 2026-07-31 (reader retired + #k rip-out; endgame slice):
   ✅ 2.1  greets renders the RVSF numeric dials from LWO/LWS alone — proven
           with the retired reader + untrimmed sidecar (8 IGNORED notices,
           renders byte-stable: momy2-cam 3/3 identical, pin + stairs-cam
@@ -440,9 +459,25 @@ further on `#k`. This also dissolves the momy#1/#2-vs-momy2 naming question
 (becomes a free cosmetic choice). Engine side is already clean —
 `Editor_BaseSurfName` strips only `::mirUV`, never `#`.
 
-**Constraint:** do not delete these while the Save rewrite is unproven — a
-half-migrated Save that still emits `#k` names needs the collapse to route them.
-They are load-bearing until §3's checkpoint + reader retirement, hence Phase 2.
+**✅ DONE 2026-07-31 (endgame).** All 7 sites above — PLUS an 8th that post-dated
+this list, the `#k` collapse in `map_set_name` (added by the §1e RVSM migration) —
+are DELETED (not guarded). `bake_splits` no longer scans surface/map keys for a
+`#k` suffix (the `SPLIT_CHAIN_RE` const + its loop are gone); it drives entirely
+off `payload['splits']` and matches parts geometrically. `map_surface_name` /
+`map_set_name` keep only the `::mirUV` strip. The payload's `#k` keys still get
+rewritten onto the baked real names inside `bake_splits` via the exact-match
+`renames` dict (`f"{base}#{k}" -> real`) — a rename, not a collapse, and it stays.
+**Save-completeness proof (headless, throwaway greets copy, reader retired + `#k`
+deleted):** (A) an idempotent numeric+smoothAngle Save regenerates `GREETS.FLD`
+byte-identically (`7e508f24…`), and a 512→256→512 envBakeRes change round-trips;
+(B) one combined Save makes surface `sss` GAIN RVSF `{parallaxScale}` + RVSM
+`{set}` + SMAN in a single call; (C) a `payload.splits` split of the pre-split
+`momy` bakes `momy → momy+momy2` (real surfaces, geometric centroid match,
+`momy#2` keys rewritten onto `momy2`) with NO `#k` code, and the regenerated FLD
+renders (engine loads the post-split RVSF/RVSM, no desync).
+
+**Original constraint (now satisfied):** these were load-bearing until the reader
+retirement + a proven-complete Save; both landed in the endgame slice.
 
 ---
 

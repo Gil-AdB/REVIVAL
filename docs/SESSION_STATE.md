@@ -61,6 +61,20 @@ Traps:
 
 ## The big architecture decision (2026-07-11, user-set direction)
 
+> **✅ DONE 2026-07-31 — the sidecar-elimination campaign is COMPLETE.** The
+> `.MAT` reader (`MaterialImport_ApplySidecar` + `_ApplySceneDefaults` + helpers)
+> is DELETED; every scene now calls `MaterialImport_ApplyRevMaps` (LWO RVSM) in
+> its place. `Runtime/SCENES/GREETS.MAT` (last sidecar, data-empty) is DELETED —
+> no scene ships sidecar data. The 7 (+1) `#k` split-collapse sites in
+> `tools/editor_server.py` are DELETED; splits bake real surfaces via
+> `payload.splits` geometric centroids. Save-completeness proven headlessly
+> (byte-identical FLD idempotent regen + combined RVSF/RVSM/SMAN gain + split
+> without `#k`). Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd`,
+> momy close-cam `7d05a1be` byte-equal. Leftover WRITE-only, not-yet-FLD-backed
+> (editor writes a `.MAT` nothing loads, warned): `obj:scale` (§1d FdsObjectScale
+> unimplemented) and `normalFlip` (§1e RVSM write-back unimplemented). See
+> docs/SIDECAR_MIGRATION_PLAN.md. Original direction preserved below.
+
 **Sidecars are being eliminated.** Persistence belongs in the authoring
 sources: per-surface → custom LWO SURF sub-chunks; per-light / per-object /
 scene-level → LWS keywords; everything flows through tools/lwsread into the

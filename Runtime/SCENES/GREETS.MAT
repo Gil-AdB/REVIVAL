@@ -1,4 +1,0 @@
-# Editor overrides — written by tools/editor_server.py (editor
-# "Save"), loaded at scene init by MaterialImport_ApplySidecar.
-# Format: surface|role|path-relative-to-Runtime (PBR map)
-#         surface|prop|value                    (numeric override)

@@ -35,8 +35,9 @@ void Initialize_PBRTest()
 
 	Preprocess_Scene(PbrSc, "PBRTEST");
 
-	// Editor persistence: PBR maps + prop overrides saved for this scene.
-	fds::MaterialImport_ApplySidecar(PbrSc, "SCENES/PBRTEST.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(PbrSc, "pbrtest");
 }
 
 namespace {

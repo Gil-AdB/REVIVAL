@@ -141,10 +141,11 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees);
 // auto-smooth for that one surface, and (unlike the global gate) restricts
 // averaging to the surface's own faces so it can't bleed into neighbours.
 //
-// Populated from the scene sidecar line `surface|smoothAngle|value` by
-// MaterialImport_ApplySidecar, which runs BEFORE MakeFacesIndependentByAngle
-// at scene init — so the angle is in place when normals are built. The
-// registry is EMPTY unless a sidecar sets it, so the default render is
+// Populated from the authored native LWO 'SMAN' angle by
+// MeshOps_SeedAuthoredSmoothAngles (greets, sidecar-elim §1.5) and by the live
+// editor smoothing edit — both BEFORE MakeFacesIndependentByAngle at scene init,
+// so the angle is in place when normals are built. The registry is EMPTY unless
+// an authored SMAN differs from the scene default, so the default render is
 // byte-identical. Angle is clamped to [0,180].
 //
 void  MeshOps_SetSurfaceSmoothAngle(const char *surface, float angleDeg);

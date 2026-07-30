@@ -102,8 +102,9 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
                  # has no smoothing chunk, so there it is peeled to the sidecar
                  # instead — see split_surface_sidecar_keys / SMOOTH_SIDECAR.
                  "smoothAngle"}
-# Engine-only per-material dials with no LWO/FLD field — persist as sidecar
-# surface|prop|value lines (MaterialImport_ApplySidecar sets them at init).
+# Engine-only per-material dials. On authoring scenes these ride the LWO 'RVSF'
+# sub-chunk → FLD → Material (RVSF_SURF_KEYS below); the .MAT sidecar path is the
+# dead non-authoring fallback (its reader is retired, sidecar-elim endgame).
 # refractIor: per-surface glass-refraction IOR (0 = unset -> the global
 # glass_refract_ior render knob).
 # waterProcedural: tri-state procedural-water override on the scene's water
@@ -132,10 +133,8 @@ SMOOTH_SIDECAR = {"smoothAngle"}
 def split_surface_sidecar_keys(scene, surfaces, warnings):
     """Strip SURF_SIDECAR_KEYS out of the save payload's surface dicts and
     persist them as sidecar prop lines. Mutates `surfaces` (drops entries that
-    become empty). Runtime '#k' instance-split names that were NOT baked by
-    bake_splits (crash / LWS-instanced / multi-file surfaces — baked ones were
-    already rewritten onto their real names) collapse to the base surface.
-    Returns a summary list."""
+    become empty). Returns a summary list. (Authoring scenes peel only
+    normalFlip here — the numeric dials go to the LWO RVSF; see do_save_main.)"""
     if not surfaces:
         return []
     sidecar = scene_sidecar(scene)
@@ -157,10 +156,10 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         if not isinstance(props, dict):
             continue
         side = {k: props.pop(k) for k in list(props) if k in keys}
-        # Strip the WHOLE trailing (#k)+ chain: the runtime split renames the
-        # primary "<name>#1" too, and a re-split of a part can chain suffixes
-        # ("momy#2#2") — every one of them persists onto the base surface.
-        base = re.sub(r"(#\d+)+$", "", name)
+        # Names are real surfaces here: bake_splits already rewrote any split
+        # '#k' key onto its baked real name before routing (sidecar-elim
+        # endgame: the '#k' collapse is retired).
+        base = name
         for k, v in side.items():
             entries[(base, k)] = f"{float(v):.6g}"
             saved.append({"surface": base, "key": k})
@@ -285,31 +284,20 @@ def _match_split_parts(analysis, live_cents, key0, warnings, base):
     return parts
 
 
-SPLIT_CHAIN_RE = re.compile(r"^(.*?)((?:#\d+)+)$")
-
-
 def bake_splits(scene, payload, warnings):
     """Bake every split the payload references into the authoring .lwo files
     and REWRITE the payload's '#k' surface/map keys onto the real baked
     names. Mutates payload['surfaces'] / payload['maps'] in place. Returns
-    the bake summary list (empty = nothing baked; '#k' keys then fall back
-    to the legacy collapse-onto-base behavior)."""
+    the bake summary list (empty = nothing baked). The bake is driven ENTIRELY
+    by payload['splits'] (base name -> {clusters, centroids}); parts are matched
+    GEOMETRICALLY (_match_split_parts), never by parsing a '#k' suffix off a
+    name (sidecar-elim endgame: the '#k' collapse scaffolding is retired)."""
     surfaces = payload.get("surfaces") or {}
     maps = payload.get("maps") or {}
     splits = payload.get("splits") or {}
     bases = {}
     for b, info in splits.items():
         bases[b] = info if isinstance(info, dict) else {"clusters": info}
-    for nm in list(surfaces) + list(maps):
-        m = SPLIT_CHAIN_RE.match(nm)
-        if not m:
-            continue
-        segs = m.group(2).count("#")
-        if segs > 1:
-            warnings.append(f"'{nm}': chained re-split — bake not supported, "
-                            "the keys collapse onto the base surface")
-            continue
-        bases.setdefault(m.group(1), {})
     if not bases:
         return []
     if not SCENES[scene].get("authoring"):
@@ -403,9 +391,9 @@ def pop_uv_props(surfaces, warnings):
         if proj < 0 or proj > 3:
             warnings.append(f"'{name}': uvProj {proj} out of range — skipped")
             continue
-        out[re.sub(r"(#\d+)+$", "", name)] = (proj, float(uv["uvScaleX"]),
-                                              float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
-                                              int(uv["uvAxis"]))
+        out[name] = (proj, float(uv["uvScaleX"]),
+                     float(uv["uvScaleY"]), float(uv["uvScaleZ"]),
+                     int(uv["uvAxis"]))
     return out
 
 def pop_rev_ext_props(surfaces):
@@ -452,12 +440,9 @@ def ensure_lwsread():
 def map_surface_name(name):
     """editor surface name -> (lwo_filename or None, surf_name)."""
     name = re.sub(r"::mirUV$", "", name)
-    # Runtime instance-split parts ("momy#1"/"momy#2", possibly chained) that
-    # bake_splits did NOT bake (baked ones were rewritten onto real names
-    # before routing) are live-only clones of ONE authored surface — patch
-    # the base. Note the split renames the primary to "#1" too, so without
-    # this collapse the primary's own edits would stop reaching the .lwo.
-    name = re.sub(r"(#\d+)+$", "", name)
+    # Names are real surfaces: bake_splits rewrote any split '#k' key onto its
+    # baked real name before routing (sidecar-elim endgame — '#k' collapse
+    # retired).
     if "::" in name:
         obj, surf = name.split("::", 1)
         surf = re.sub(r"_(body|upper)$", "", surf)
@@ -481,10 +466,19 @@ def read_sidecar(path):
 
 
 def write_sidecar(path, entries):
-    lines = ["# Editor overrides — written by tools/editor_server.py (editor",
-             "# \"Save\"), loaded at scene init by MaterialImport_ApplySidecar.",
-             "# Format: surface|role|path-relative-to-Runtime (PBR map)",
-             "#         surface|prop|value                    (numeric override)", ""]
+    # The .MAT sidecar READER is retired (sidecar-elim endgame): the migrated
+    # per-surface values ride the LWO RVSF/RVSM/SMAN sources, not this file.
+    # Only the not-yet-FLD-backed leftovers still land here (obj:<name>|scale,
+    # surface|normalFlip — SIDECAR_MIGRATION_PLAN §1d/§1e), and NOTHING loads
+    # them at runtime today; a Save touching only those keys writes a file the
+    # engine ignores. Kept so those write paths don't crash pending their FLD
+    # records; the non-authoring fallback (dead — every scene is authored) also
+    # still uses it.
+    lines = ["# Editor leftovers — written by tools/editor_server.py (editor",
+             "# \"Save\"). The .MAT reader is RETIRED (sidecar-elim endgame): the",
+             "# engine does NOT load this file. Only not-yet-FLD-backed keys land",
+             "# here (obj scale / normalFlip); they do not persist to the render.",
+             "# Format: surface|prop|value  /  obj:<name>|scale|value", ""]
     for (surface, key), value in sorted(entries.items()):
         lines.append(f"{surface}|{key}|{value}")
     with open(path, "w", encoding="utf-8") as f:
@@ -498,8 +492,10 @@ def write_sidecar(path, entries):
 # sets are shareable (two surfaces may name the same set). See
 # MaterialImport_ApplyRevMaps.
 def map_set_name(surface):
-    """editor surface name -> texture-set dir name (base name, filesystem-safe)."""
-    base = re.sub(r"(#\d+)+$", "", re.sub(r"::mirUV$", "", surface))
+    """editor surface name -> texture-set dir name (base name, filesystem-safe).
+    Names are real surfaces here (bake_splits rewrote split '#k' keys onto their
+    baked real names before routing — the '#k' collapse is retired)."""
+    base = re.sub(r"::mirUV$", "", surface)
     if "::" in base:
         base = base.split("::", 1)[1]
         base = re.sub(r"_(body|upper)$", "", base)
@@ -651,6 +647,11 @@ def save_objects_to_sidecar(scene, objects, warnings):
             saved.append({"object": name, "key": k})
     if changed:
         write_sidecar(sidecar, entries)
+        # The .MAT reader is retired (sidecar-elim endgame) and FdsObjectScale
+        # (SIDECAR_MIGRATION_PLAN §1d) is not implemented, so this scale is NOT
+        # loaded back at runtime yet — say so rather than fail silently.
+        warnings.append("object scale saved to .MAT but NOT loaded at runtime "
+                        "(reader retired; FdsObjectScale unimplemented, §1d)")
     return saved
 
 
@@ -952,18 +953,13 @@ def do_save_fld(scene, surfaces, lights, uv_by_name, saved_maps, warnings):
         bad = set(props) - ALLOWED_PROPS
         if bad:
             return 400, {"ok": False, "error": f"'{name}': unknown props {sorted(bad)}"}
-        # Editor names are base-collapsed already; strip a runtime (#k)+
-        # instance-split suffix chain (live-only clones, incl. the renamed
-        # "#1" primary — the FLD has one surface).
-        base = re.sub(r"(#\d+)+$", "", name)
-        if base != name:
-            warnings.append(f"'{name}' is a runtime instance split — patched the "
-                            f"base surface '{base}' (splits are live-only)")
-        n = fld.patch_material(base, props)
+        # Names are real surfaces: bake_splits rewrote any split '#k' key onto
+        # its baked real name before routing (sidecar-elim endgame).
+        n = fld.patch_material(name, props)
         if n == 0:
             warnings.append(f"'{name}': no material record in {os.path.basename(fld_path)} — skipped")
         else:
-            patched_surfaces.append({"surface": base, "records": n, "props": sorted(props)})
+            patched_surfaces.append({"surface": name, "records": n, "props": sorted(props)})
 
     for name, uv in (uv_by_name or {}).items():
         n = fld.patch_material_uv(name, *uv)
@@ -1089,10 +1085,10 @@ def do_save_main(scene, payload):
     # patchers below.
     saved_light_side = split_light_sidecar_keys(scene, lights, warnings)
     if saved_light_side:
-        warnings.append(f"{len(saved_light_side)} light key(s) → sidecar (engine-only, no LWS/FLD field)")
+        warnings.append(f"{len(saved_light_side)} light key(s) → .MAT (non-authoring fallback; the .MAT reader is RETIRED — not loaded)")
     saved_surf_side = split_surface_sidecar_keys(scene, surfaces, warnings)
     if saved_surf_side:
-        warnings.append(f"{len(saved_surf_side)} surface key(s) → sidecar (engine-only, no LWO/FLD field)")
+        warnings.append(f"{len(saved_surf_side)} surface key(s) (normalFlip) → .MAT — NOT loaded (reader retired; normalFlip's RVSM write-back is unimplemented, SIDECAR_MIGRATION_PLAN §1e)")
     uv_by_name = pop_uv_props(surfaces, warnings)
 
     if not SCENES[scene]["authoring"]:
@@ -1140,9 +1136,6 @@ def do_save_main(scene, payload):
         if bad:
             return 400, {"ok": False, "error": f"'{name}': unknown props {sorted(bad)}"}
         fname, surf = map_surface_name(name)
-        if re.search(r"(#\d+)+$", re.sub(r"::mirUV$", "", name)):
-            warnings.append(f"'{name}' is a runtime instance split — patching the "
-                            f"base surface '{surf}' (splits are live-only)")
         targets = []
         if fname is not None:
             lwo = lwos.get(fname)

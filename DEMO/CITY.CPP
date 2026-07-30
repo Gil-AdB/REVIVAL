@@ -2390,9 +2390,9 @@ void Initialize_City()
 
 	Preprocess_Scene(CitySc, "CITY");
 
-	// Persisted editor overrides (PBR maps + numeric surface props) — the
-	// browser editor's "Save" writes this sidecar; no-op when absent.
-	fds::MaterialImport_ApplySidecar(CitySc, "SCENES/CITY.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(CitySc, "city");
 
 	//for(M = MatLib;M;M=M->Next)
 	//{
@@ -3692,9 +3692,6 @@ std::unique_ptr<SceneDriver> createCityScene()
 	// city look here (soa-vertex 9902349).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::BoolId::water_fresnel_composite, true);
 	ApplyCinematicProfile(cine::kCity);          // storm-city look (fog/rain/post)
-	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
-	// the profile so authored values beat it; explicit CLI/env still wins.
-	fds::MaterialImport_ApplySceneDefaults("SCENES/CITY.MAT");
 	return std::make_unique<CityScene>();
 }
 

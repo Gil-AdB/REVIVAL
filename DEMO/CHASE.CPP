@@ -915,9 +915,9 @@ void Initialize_Chase()
 		SceneCorrections();
 	Preprocess_Scene(ChaseSc, "CHASE");
 
-	// Persisted editor overrides (PBR maps + numeric surface props) — the
-	// browser editor's "Save" writes this sidecar; no-op when absent.
-	fds::MaterialImport_ApplySidecar(ChaseSc, "SCENES/CHASE.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(ChaseSc, "chase");
 	//	printf("Scene-Proc MEM = %d\n",DPMI_Free_Memory());
 
 	// L2.4: build the sky cube (same SB*.JPG starfield skybox as city). Loaded
@@ -1479,9 +1479,6 @@ std::unique_ptr<SceneDriver> createChaseScene()
 	// and it only matters under --chase_blasters (EmitLights is gated on it).
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_range, 90.0f);
 	fds::FeatureFlags::setDefault(fds::FeatureFlags::FloatId::blaster_light_intensity, 260.0f);
-	// Authored scene-level defaults (scene:|key|value sidecar lines) AFTER
-	// the profile so authored values beat it; explicit CLI/env still wins.
-	fds::MaterialImport_ApplySceneDefaults("SCENES/CHASE.MAT");
 	return std::make_unique<ChaseScene>();
 }
 

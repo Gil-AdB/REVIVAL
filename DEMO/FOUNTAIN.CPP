@@ -906,9 +906,9 @@ void Initialize_Fountain()
 	Initialize_Particles(FntSc);
 	Preprocess_Scene(FntSc, "FOUNTAIN");
 
-	// Persisted editor overrides (PBR maps + numeric surface props) — the
-	// browser editor's "Save" writes this sidecar; no-op when absent.
-	fds::MaterialImport_ApplySidecar(FntSc, "SCENES/FOUNTAIN.MAT");
+	// Source-authored PBR map assignments (LWO RVSM → FLD; the .MAT sidecar
+	// reader is retired, sidecar-elim endgame). No-op when none are authored.
+	fds::MaterialImport_ApplyRevMaps(FntSc, "fountain");
 
 	// [glass_test] Attach a baked relief normal map to the fountain glass (the
 	// central "mizraka glass" sphere + the spire orbs) so --glass_refract has a
@@ -2915,10 +2915,6 @@ std::unique_ptr<SceneDriver> createFountainScene()
 	// Bloom-only profile (no fog/anamorphic): the discrete lights bloom
 	// gorgeously, but anamorphic's bars smear the bright orbs/spray.
 	ApplyCinematicProfile(cine::kFountain);
-	// Authored scene-level defaults (scene:|key|value sidecar lines — e.g.
-	// the bolt-flash light's boltFlashPeak/boltFlashRange) AFTER the profile
-	// so authored values beat it; explicit CLI/env flags still win.
-	fds::MaterialImport_ApplySceneDefaults("SCENES/FOUNTAIN.MAT");
 	return std::make_unique<FountainScene>();
 }
 

@@ -7,10 +7,9 @@
 #include <Base/FDS_DEFS.H>           // DEFAULT_BLOCKSIZEX/Y, Txtr_Tiled, Mat_AoInAlpha
 #include <Base/Texture.h>
 #include <Base/Material.h>
-#include <Base/Omni.h>               // FlareScale (sidecar light: lines)
 #include <Base/Scene.h>
-#include <Base/Object.h>             // Object tree (sidecar obj: lines)
-#include <Base/TriMesh.h>            // EditorScale (sidecar obj: lines)
+#include <Base/Object.h>             // Object tree (editor scale knob)
+#include <Base/TriMesh.h>            // EditorScale (editor scale knob)
 #include <Base/FeatureFlags.h>
 #include <FLD/FLD_READ.H>            // FldRevMap* — LWO/FLD-authored PBR map roles (§1e)
 
@@ -537,32 +536,7 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 	return any;
 }
 
-static bool sidecarIsMapRole(const char *role) {
-	return !std::strcmp(role, "albedo") || !std::strcmp(role, "normal")
-	    || !std::strcmp(role, "height") || !std::strcmp(role, "roughness")
-	    || !std::strcmp(role, "ao")     || !std::strcmp(role, "metallic");
-}
-
-// RETIRED sidecar keys (sidecar-elimination Phase 2, docs/
-// SIDECAR_MIGRATION_PLAN.md §1a): the ten numeric per-surface dials are
-// authored in the LWO 'RVSF' SURF sub-chunk and arrive through the FLD's
-// Surf_RevExt-gated material payload (FDS/FLD/FLD_READ.CPP → FLD_MAT.CPP),
-// so a sidecar line for one of them is a stale leftover. ApplySidecar skips
-// them (with a stderr note) instead of applying — the FLD-authored value
-// must not be shadowable by a forgotten sidecar. Map roles, smoothAngle and
-// normalFlip are NOT migrated yet (§1b/§1e) and still apply above/below.
-static bool sidecarIsRetiredRvsfKey(const char *key) {
-	static const char *const rvsf[] = {
-		"aoStrength", "parallaxScale", "tintR", "tintG", "tintB",
-		"refractIor", "refractive", "envRefl", "envBakeRes",
-		"waterProcedural", "envDynamic",
-	};
-	for (const char *k : rvsf)
-		if (!std::strcmp(key, k)) return true;
-	return false;
-}
-
-// ── Object-level overrides ("obj:" sidecar lines / the editor scale knob) ──
+// ── Object-level overrides (the editor scale knob) ──────────────────────────
 // Set the per-object uniform scale multiplier on every scene object whose
 // chunk-collapsed name (Editor_ChunkBaseObjName — 'Piramid.lwo:c17' →
 // 'Piramid.lwo') matches `objName`. Multi-instance objects (8 × taxi.lwo) are
@@ -605,158 +579,6 @@ float ObjectImport_GetObjectScale(Scene *sc, const char *objName) {
 		return T->EditorScale > 0.0f ? T->EditorScale : 1.0f;
 	}
 	return 1.0f;
-}
-
-// Sidecar object lines: "obj:<name>|<key>|<value>" — per-OBJECT overrides
-// with no writable LWO/FLD slot (currently: scale). <name> is the
-// chunk-collapsed FLD object name (see ObjectImport_SetObjectScale above).
-static bool sidecarSetObjectProp(Scene *sc, const char *objName,
-                                 const char *key, float value) {
-	if (std::strcmp(key, "scale") != 0) return false;   // unknown per-object key
-	// Count ALL matches (a persisted scale on a fully static-baked object is
-	// applied-but-inert; don't fail the sidecar line over it).
-	ObjectImport_SetObjectScale(sc, objName, value);
-	for (Object *Obj = sc->ObjectHead; Obj; Obj = Obj->Next)
-		if (Obj->Type == Obj_TriMesh && Obj->Data && Obj->Name
-		    && rev::Editor_ChunkBaseObjName(Obj->Name) == objName)
-			return true;
-	return false;   // no such object
-}
-
-// Sidecar light lines: "light:<i>|<key>|<value>" — engine-only per-light
-// extensions with no LWS/FLD field (currently flareScale). <i> indexes the
-// scene-authored omnis in file order, the SAME mapping the editor and the
-// LWS/FLD light patchers use.
-static bool sidecarSetLightProp(Scene *sc, int index, const char *key, float value) {
-	int i = 0;
-	for (Omni *O = sc->OmniHead; O; O = O->Next) {
-		if (!(O->Flags & Omni_SceneAuthored)) continue;
-		if (i++ != index) continue;
-		if (!std::strcmp(key, "flareScale")) { O->FlareScale = value; return true; }
-		return false;   // unknown per-light sidecar key
-	}
-	return false;       // index out of range
-}
-
-// Sidecar scene lines: "scene:|<key>|<value>" — authored SCENE-level defaults
-// for engine quantities that live in global FeatureFlags (world-space fog slab
-// geometry, the fountain bolt-flash light's peak/range, ...). Applied through
-// FeatureFlags::setDefault so the flag keeps working as an override: explicit
-// CLI/env wins, the authored value replaces the compile-time default when
-// nothing was passed. Key table only — a sidecar must not be able to set
-// arbitrary global flags (that's what SCRIPTS/<scene>.params is for).
-struct SceneDefaultKey {
-	const char *key;
-	fds::FeatureFlags::FloatId id;
-};
-static const SceneDefaultKey kSceneDefaultKeys[] = {
-	// Fountain strike-flash light (code-created Omni — no LWS/FLD identity,
-	// so its authorable per-light quantities live here; see DEMO/FOUNTAIN.CPP).
-	{ "boltFlashPeak",  fds::FeatureFlags::FloatId::bolt_flash_peak  },
-	{ "boltFlashRange", fds::FeatureFlags::FloatId::bolt_flash_range },
-	// fast_fog slab bounds + blob cell — world-space scene geometry (the fog
-	// slab's floor/ceiling Y and blob spacing belong to the scene, not the
-	// command line). Consumed by DeferredFastFog via the FeatureFlags reads it
-	// already does — this is just another setter path, so an explicit CLI
-	// --fast_fog_* still wins, and SCRIPTS/<scene>.params lines for the same
-	// flag (per-frame, script yields only to SET marks) also still win.
-	{ "fastFogBottom",  fds::FeatureFlags::FloatId::fast_fog_bottom  },
-	{ "fastFogTop",     fds::FeatureFlags::FloatId::fast_fog_top     },
-	{ "fastFogCell",    fds::FeatureFlags::FloatId::fast_fog_cell    },
-};
-
-static bool sidecarSetSceneDefault(const char *key, float value) {
-	for (const SceneDefaultKey &k : kSceneDefaultKeys) {
-		if (std::strcmp(key, k.key) != 0) continue;
-		fds::FeatureFlags::setDefault(k.id, value);
-		return true;
-	}
-	return false;   // unknown scene: key
-}
-
-void MaterialImport_ApplySceneDefaults(const char *path) {
-	if (!path) return;
-	FILE *f = std::fopen(path, "r");
-	if (!f) return;   // no sidecar for this scene — fine
-	char line[512];
-	int applied = 0;
-	while (std::fgets(line, sizeof line, f)) {
-		line[std::strcspn(line, "\r\n")] = 0;
-		if (std::strncmp(line, "scene:", 6) != 0) continue;
-		char *sep1 = std::strchr(line, '|');
-		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
-		if (!sep1 || !sep2) {
-			std::fprintf(stderr, "[MAT-SIDECAR] bad scene line (want scene:|key|value): %s\n", line);
-			continue;
-		}
-		*sep1 = 0;
-		*sep2 = 0;
-		const char *key = sep1 + 1, *value = sep2 + 1;
-		if (sidecarSetSceneDefault(key, std::strtof(value, nullptr))) ++applied;
-		else std::fprintf(stderr, "[MAT-SIDECAR] scene:.%s: unknown scene key\n", key);
-	}
-	std::fclose(f);
-	if (applied)
-		std::fprintf(stderr, "[MAT-SIDECAR] %s: %d scene default(s) applied "
-		             "(CLI/env-set flags still win)\n", path, applied);
-}
-
-void MaterialImport_ApplySidecar(Scene *sc, const char *path) {
-	if (!sc || !path) return;
-	FILE *f = std::fopen(path, "r");
-	if (!f) return;   // no sidecar for this scene — fine
-	char line[512];
-	int applied = 0, failed = 0;
-	while (std::fgets(line, sizeof line, f)) {
-		// strip newline / CR; skip blanks + comments
-		line[std::strcspn(line, "\r\n")] = 0;
-		if (!line[0] || line[0] == '#') continue;
-		char *sep1 = std::strchr(line, '|');
-		char *sep2 = sep1 ? std::strchr(sep1 + 1, '|') : nullptr;
-		if (!sep1 || !sep2) {
-			std::fprintf(stderr, "[MAT-SIDECAR] bad line (want surface|key|value): %s\n", line);
-			continue;
-		}
-		*sep1 = 0;
-		*sep2 = 0;
-		const char *surface = line, *key = sep1 + 1, *value = sep2 + 1;
-		bool ok;
-		if (!std::strncmp(surface, "scene:", 6)) {
-			// Scene-level defaults are applied at the scene FACTORY (after
-			// ApplyCinematicProfile) via MaterialImport_ApplySceneDefaults —
-			// applying them here (scene init) would let the profile stomp
-			// them. Skip without counting.
-			continue;
-		} else if (!std::strncmp(surface, "light:", 6)) {
-			ok = sidecarSetLightProp(sc, std::atoi(surface + 6), key,
-			                         std::strtof(value, nullptr));
-			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such light / key\n",
-			                      surface, key);
-		} else if (!std::strncmp(surface, "obj:", 4)) {
-			ok = sidecarSetObjectProp(sc, surface + 4, key,
-			                          std::strtof(value, nullptr));
-			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] %s.%s: no such object / key\n",
-			                      surface, key);
-		} else if (sidecarIsMapRole(key)) {
-			ok = MaterialImport_ApplyMapFile(sc, surface, key, value);
-		} else if (sidecarIsRetiredRvsfKey(key)) {
-			// Migrated to the LWO RVSF sub-chunk → FLD Surf_RevExt payload.
-			// Ignore (neither applied nor failed) so the source-authored
-			// value can never be shadowed by a stale sidecar line.
-			std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: retired numeric key "
-			             "(now LWO/FLD-authored) — line IGNORED, trim the sidecar\n",
-			             surface, key);
-			continue;
-		} else {
-			ok = MaterialImport_SetSurfaceProp(sc, surface, key, std::strtof(value, nullptr));
-			if (!ok) std::fprintf(stderr, "[MAT-SIDECAR] '%s'.%s: no match / unknown prop\n",
-			                      surface, key);
-		}
-		if (ok) ++applied; else ++failed;
-	}
-	std::fclose(f);
-	std::fprintf(stderr, "[MAT-SIDECAR] %s: %d entrie(s) applied%s\n",
-	             path, applied, failed ? " (some FAILED, see above)" : "");
 }
 
 // True if a file exists + is readable (relative to the demo CWD = Runtime/).
