@@ -1157,6 +1157,212 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels, bool pho
 	}
 }
 
+// Bilinear sample of an 8-bit block-tiled height map mip at a normalized UV
+// (u=1.0 spans the tile; toroidal wrap, matching the rasterizer's masked
+// addressing). Returns h in [0,1].
+static float SampleHeight8Bilinear(const Texture *hm, int mip, float u, float v) {
+	const int mw = std::max(1, int(hm->SizeX) >> mip);
+	const int mh = std::max(1, int(hm->SizeY) >> mip);
+	const byte *data = hm->Mipmap[mip];
+	// Texel-center convention: u*mw - 0.5 puts u=0.5/mw at texel 0's center.
+	const float x = u * float(mw) - 0.5f;
+	const float y = v * float(mh) - 0.5f;
+	const float fxf = std::floor(x), fyf = std::floor(y);
+	const float fx = x - fxf, fy = y - fyf;
+	// Positive modulo (UVs may be negative or span many tiles).
+	auto wrap = [](int a, int m) { int r = a % m; return r < 0 ? r + m : r; };
+	const int x0 = wrap(int(fxf), mw), x1 = wrap(int(fxf) + 1, mw);
+	const int y0 = wrap(int(fyf), mh), y1 = wrap(int(fyf) + 1, mh);
+	const int bx = hm->blockSizeX, by = hm->blockSizeY;
+	const float h00 = data[SwizzledOffset(x0, y0, bx, by, mh)];
+	const float h10 = data[SwizzledOffset(x1, y0, bx, by, mh)];
+	const float h01 = data[SwizzledOffset(x0, y1, bx, by, mh)];
+	const float h11 = data[SwizzledOffset(x1, y1, bx, by, mh)];
+	const float top = h00 + (h10 - h00) * fx;
+	const float bot = h01 + (h11 - h01) * fx;
+	return (top + (bot - top) * fy) * (1.0f / 255.0f);
+}
+
+// Height-map displacement bake (docs/ENVDYN_DISPLACEMENT_PLAN.md, B3): push
+// every INTERIOR vertex of `matName`'s faces along its smooth vertex normal by
+// amp*(h-mipMean) (mean of the sampled mip - zero-mean relief, no DC bulge
+// against the pinned borders), h bilinear-sampled at `mip`
+// at the PER-FACE UV (ENGINE.md rule — per-vertex U/V is clobbered at shared
+// corners), averaged over the vertex's incident target faces (different faces
+// may map the vertex differently across projection seams; the average keeps
+// one deterministic offset for the one shared position).
+//
+// Crack safety: verts on the target patch BORDER are pinned (zero
+// displacement). A border vert is any endpoint of an edge used by exactly ONE
+// target face (wall/ceiling + wall-floor junction lines, doorway jambs, open
+// borders — this also catches subdivision midpoints created ON a border edge,
+// whose T-junction against the unsplit non-target neighbour would otherwise
+// open), plus any vert incident to a non-target face (so non-target geometry
+// never moves). Relief fades to the authored edge there.
+//
+// Runs at the stone-subdiv hook: AFTER SubdivideMaterialFaces (density) and
+// BEFORE MakeFacesIndependentByAngle (which re-derives per-vertex normals from
+// the face normals this bake recomputes) and the Piramid chunk split (chunk
+// bsphere bounds then wrap the displaced verts). Face N + NormProd are
+// re-derived here for every target face (displaced planes; stale NormProd
+// mis-culls — the B1 lesson). Tangents recompute downstream as today
+// (Compute_Vertex_Tangents inside MakeFacesIndependent).
+void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip) {
+	if (!Sc || !matName || amp == 0.0f) return;
+	auto isTarget = [&](const Face *F) {
+		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
+	};
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		const Texture *hm = nullptr;
+		int nTarget = 0;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!isTarget(&F)) continue;
+			++nTarget;
+			if (!hm && F.Txtr->HeightMap) hm = F.Txtr->HeightMap;
+		}
+		if (nTarget == 0) continue;
+		if (!hm || hm->BPP != 8 || !hm->Mipmap[0]) {
+			std::fprintf(stderr, "[DISPLACE] '%s': no 8-bit HeightMap on the material "
+			             "(need --greets_stone_tex + --parallax) — skipped\n", matName);
+			continue;
+		}
+		// Clamp mip to levels that are (a) present and (b) still block-tileable
+		// (below one block the swizzled layout degenerates — same guard as
+		// MakeConeMap's tiny-mip skip).
+		int useMip = mip;
+		if (useMip >= int(hm->numMipmaps)) useMip = int(hm->numMipmaps) - 1;
+		if (useMip < 0) useMip = 0;
+		while (useMip > 0 &&
+		       ((std::max(1, int(hm->SizeX) >> useMip) < (1 << hm->blockSizeX)) ||
+		        (std::max(1, int(hm->SizeY) >> useMip) < (1 << hm->blockSizeY))))
+			--useMip;
+
+		// Degenerate-map guard + mip MEAN: a (near-)constant height map carries
+		// no relief — displacing by it would just push the whole surface out
+		// uniformly against the pinned borders (a bulge, not detail). Skip with
+		// a log. Real case: the shipping greets_wall_h.png is ALL-WHITE (a
+		// placeholder from the stone3 texture swap; the real map sits in the
+		// user's _bak_greets_wall_* dirs) — walls displace only once a real map
+		// is installed (or overlaid via --material-import=rooms:DIR).
+		// The same scan computes the mip's MEAN: displacement is centered on it
+		// — d = amp*(h - mean) — so a map whose average isn't 0.5 (the floor's
+		// is ~0.34) yields zero-mean RELIEF instead of a DC sink/bulge fighting
+		// the pinned borders. (B4's residual uses the same convention.)
+		float mipMean = 0.5f;
+		{
+			const int mw = std::max(1, int(hm->SizeX) >> useMip);
+			const int mh = std::max(1, int(hm->SizeY) >> useMip);
+			const byte *d = hm->Mipmap[useMip];
+			byte lo = 255, hi = 0;
+			uint64_t sum = 0;
+			const size_t n = size_t(mw) * size_t(mh);
+			for (size_t i = 0; i < n; ++i) {
+				const byte b = d[i];
+				if (b < lo) lo = b;
+				if (b > hi) hi = b;
+				sum += b;
+			}
+			if (hi - lo < 2) {
+				std::fprintf(stderr, "[DISPLACE] '%s': height map mip%d is (near-)constant "
+				             "(%d..%d) — no relief to bake, skipped\n", matName, useMip, lo, hi);
+				continue;
+			}
+			mipMean = float(double(sum) / double(n)) * (1.0f / 255.0f);
+		}
+
+		Vertex *const V = T->Verts;
+		auto vidx = [&](const Vertex *v) { return uint32_t(v - V); };
+
+		// Border detection: edge-use counts over target faces + non-target
+		// incidence.
+		std::vector<char> pinned(size_t(T->VIndex), 0);
+		{
+			std::map<std::pair<uint32_t, uint32_t>, int> edgeUse;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C) continue;
+				const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+				if (a >= uint32_t(T->VIndex) || b >= uint32_t(T->VIndex) ||
+				    c >= uint32_t(T->VIndex)) continue;   // defensive
+				if (!isTarget(&F)) {
+					pinned[a] = pinned[b] = pinned[c] = 1;   // non-target incidence
+					continue;
+				}
+				auto add = [&](uint32_t x, uint32_t y) {
+					edgeUse[{std::min(x, y), std::max(x, y)}]++; };
+				add(a, b); add(b, c); add(c, a);
+			}
+			for (const auto &kv : edgeUse)
+				if (kv.second == 1) {   // patch-border edge
+					pinned[kv.first.first] = 1;
+					pinned[kv.first.second] = 1;
+				}
+		}
+
+		// Per-vertex height accumulation at per-FACE corner UVs.
+		std::vector<float> hSum(size_t(T->VIndex), 0.0f);
+		std::vector<int>   hCnt(size_t(T->VIndex), 0);
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+			const uint32_t vi[3] = { vidx(F.A), vidx(F.B), vidx(F.C) };
+			const float cu[3] = { F.U1, F.U2, F.U3 };
+			const float cv[3] = { F.V1, F.V2, F.V3 };
+			for (int k = 0; k < 3; ++k) {
+				if (vi[k] >= uint32_t(T->VIndex) || pinned[vi[k]]) continue;
+				hSum[vi[k]] += SampleHeight8Bilinear(hm, useMip, cu[k], cv[k]);
+				hCnt[vi[k]] += 1;
+			}
+		}
+
+		// Displace along the (unit) smooth vertex normal.
+		int nMoved = 0;
+		float dMin = 1e30f, dMax = -1e30f;
+		for (int32_t i = 0; i < T->VIndex; ++i) {
+			if (pinned[i] || hCnt[i] == 0) continue;
+			const Vector &N = V[i].N;
+			const float nl = std::sqrt(N.x*N.x + N.y*N.y + N.z*N.z);
+			if (nl < 1e-6f) continue;                    // degenerate: pin
+			const float h = hSum[i] / float(hCnt[i]);
+			const float d = amp * (h - mipMean);
+			V[i].Pos.x += N.x / nl * d;
+			V[i].Pos.y += N.y / nl * d;
+			V[i].Pos.z += N.z / nl * d;
+			if (d < dMin) dMin = d;
+			if (d > dMax) dMax = d;
+			++nMoved;
+		}
+
+		// Re-derive target-face plane data from the displaced positions:
+		// geometric N (sign-aligned to the old normal — engine handedness) +
+		// NormProd (stale plane constants mis-cull near grazing; B1 lesson).
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+			const Vector &A = F.A->Pos, &B = F.B->Pos, &C = F.C->Pos;
+			const float e1x = B.x - A.x, e1y = B.y - A.y, e1z = B.z - A.z;
+			const float e2x = C.x - A.x, e2y = C.y - A.y, e2z = C.z - A.z;
+			float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z, gz = e1x*e2y - e1y*e2x;
+			const float gl = std::sqrt(gx*gx + gy*gy + gz*gz);
+			if (gl > 1e-6f) {
+				gx /= gl; gy /= gl; gz /= gl;
+				if (gx*F.N.x + gy*F.N.y + gz*F.N.z < 0.0f) { gx = -gx; gy = -gy; gz = -gz; }
+				F.N.x = gx; F.N.y = gy; F.N.z = gz;
+			}
+			F.NormProd = -(F.N.x*A.x + F.N.y*A.y + F.N.z*A.z);
+		}
+		if (nMoved == 0) { dMin = 0.0f; dMax = 0.0f; }
+		std::fprintf(stderr,
+			"[DISPLACE] '%s' amp=%.3f mip=%d(%dx%d): %d/%d verts displaced "
+			"[%+.3f..%+.3f], %d faces re-planed\n",
+			matName, (double)amp, useMip,
+			std::max(1, int(hm->SizeX) >> useMip), std::max(1, int(hm->SizeY) >> useMip),
+			nMoved, T->VIndex, (double)dMin, (double)dMax, nTarget);
+	}
+}
+
 #include <Base/Object.h>
 #include <Base/TriMesh.h>
 #include <Base/Vector.h>

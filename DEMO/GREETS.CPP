@@ -1410,17 +1410,27 @@ void Initialize_Greets()
 	// Stone displacement workstream (docs/ENVDYN_DISPLACEMENT_PLAN.md, B):
 	// tessellate the wall ('rooms') + floor ('floor') for the height-map
 	// displacement bake — LINEAR midpoints (pure density; PN rounding would
-	// bow the flat walls near corners where smoothed vertex normals tilt).
-	// Same hook point as the momy subdiv: per-vertex normals exist
-	// (Preprocess), and MakeFacesIndependentByAngle below re-derives normals
-	// on the finer mesh; the Piramid chunk split further down then wraps the
-	// subdivided (and later displaced) verts in its chunk bounds. Default 0
-	// = the call never runs (byte-identical).
+	// bow the flat walls near corners where smoothed vertex normals tilt) —
+	// then (--greets_displace) push interior verts along their smooth normals
+	// by the low-mip height sample. Same hook point as the momy subdiv:
+	// per-vertex normals exist (Preprocess), per-face UVs are final
+	// (GreetsRetileFloor ran), MakeFacesIndependentByAngle below re-derives
+	// vertex normals + tangents on the displaced mesh, and the Piramid chunk
+	// split further down wraps the displaced verts in its chunk bounds.
+	// Defaults (subdiv 0, displace 0) = neither call runs (byte-identical).
 	{
-		const int L = fds::FeatureFlags::greets_stone_subdiv();
+		int L = fds::FeatureFlags::greets_stone_subdiv();
+		const bool displace = fds::FeatureFlags::greets_displace();
+		if (displace && L <= 0) L = 2;   // B2-measured default density
 		if (L > 0) {
 			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
 			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
+		}
+		if (displace) {
+			const float amp = fds::FeatureFlags::greets_displace_amp();
+			const int   mip = fds::FeatureFlags::greets_displace_mip();
+			DisplaceMaterialVertices(GreetSc, "rooms", amp, mip);
+			DisplaceMaterialVertices(GreetSc, "floor", amp, mip);
 		}
 	}
 

@@ -176,13 +176,44 @@ POM keeps the fine detail from a residual map.
   AND a shadow-bake face-cull (BAKE share — B5 does not touch it), so
   B5 alone cannot rescue it. B5 verdict: NOT required at L=2 (threaded
   RNDR share ≈ +1.4 ms); optional, revisit only if L=3 is wanted.**
-- **B3. Displacement bake at init** (at the FDS_MOMY_SUBDIV hook point:
-  after material/HeightMap load, BEFORE `MakeFacesIndependentByAngle` and
-  the chunk split so chunk bounds wrap displaced verts): weld → subdiv L →
-  per-vertex sample HeightMap at low mip (4-5) at the per-FACE UV → push
-  along vertex normal by `displace_amp*(h-0.5)` (world-unit flag; the
-  UV-space ParallaxScale is not reusable). Normals re-derived by the
-  existing MakeFacesIndependentByAngle; tangents downstream as today.
+- **B3. Displacement bake at init — DONE (2026-07-31).**
+  `--greets_displace` (default 0, byte-null off) at the momy hook point:
+  linear subdiv (L = greets_stone_subdiv, or the B2 default 2 when unset)
+  → `DisplaceMaterialVertices` pushes interior verts along their smooth
+  vertex normal by `greets_displace_amp*(h − mipMean)`, h bilinear-sampled
+  from the material's 8-bit HeightMap at `greets_displace_mip` (default 4
+  = 64²) at the per-FACE UVs, averaged over incident target faces.
+  Design deltas from the sketch (all evidence-driven):
+  - **No weld** (B1 disproved the premise). **Mean-centering** replaces
+    (h−0.5): the floor map's mean is 0.34 — centering on 0.5 gave a DC
+    sink fighting the pinned borders instead of relief.
+  - **Border pinning**: any endpoint of an edge used by exactly one
+    target face (patch border: wall-ceiling/wall-floor junctions, jambs
+    — also catches subdivision midpoints on the border whose T-junction
+    against the unsplit neighbour would crack) + any vert incident to a
+    non-target face is pinned at zero displacement. Relief fades to the
+    authored edges; junction verified continuous at t=5780.
+  - **Face N + NormProd re-derived** for displaced faces (B1 lesson);
+    vertex normals + tangents re-derived downstream by
+    MakeFacesIndependentByAngle as today.
+  - **Degenerate-map guard**: near-constant height mips skip the bake.
+    FOUND: the shipping `greets_wall_h.png` is ALL-WHITE (5.5 KB
+    placeholder from the stone3 swap; the real 358 KB map sits in the
+    user's `_bak_greets_wall_*` dirs — his call to reinstate; it also
+    means wall POM has been marching a constant field). Walls therefore
+    displace only via `--material-import=rooms:DIR` overlay or once a
+    real map ships; the floor displaces on shipping content.
+  - `greets_displace_amp` default **0.3** (world units): chosen by A/B
+    at t=5780 with the real wall map — 0.1 invisible, 0.3 reads as
+    uneven stone courses without distortion, 0.6 strong. Floor relief
+    stays subtle (low-contrast map, ±0.022 at 0.3).
+  Numbers: shadow-cluster inflation 2183→2925 (no acne seen); SL
+  (per-vertex static-light) delta at L=2 ≈ 2221 verts × 16 B ≈ 35.5 KB.
+  Flag-on deterministic (momy close-cam 2/2 byte-identical); flag-off
+  byte-null vs HEAD binary (19ba82cf…, re-baselined after the user's
+  GREETS.MAT `momy-2|smoothAngle|30` edit moved greets content mid-work);
+  render_gate 3/3, city/fountain pins byte-equal, wasm links. A/B PNGs
+  under /tmp/displace/.
 - **B4. Residual height map**: full-res height minus upsampled displaced
   component (via MakeHeight8/Scene_MakeTiledTexture), installed as the
   POM input so relief isn't double-counted; re-run MakeConeMap when cone

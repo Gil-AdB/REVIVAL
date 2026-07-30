@@ -200,6 +200,15 @@ void  MeshOps_ResmoothSurface(const char *surface, float angleDeg);
 void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels,
                             bool phong = true);
 
+// Height-map displacement bake (docs/ENVDYN_DISPLACEMENT_PLAN.md B3): push
+// interior verts of matName's faces along their smooth vertex normal by
+// amp*(h-mipMean), h bilinear-sampled from the material's 8-bit HeightMap at `mip`
+// at the per-FACE UVs (averaged over incident target faces). Patch-border
+// verts are pinned (no T-junction/cross-material cracks); face N + NormProd
+// re-derived. Run after SubdivideMaterialFaces (density) and before
+// MakeFacesIndependentByAngle (re-derives vertex normals) + the chunk split.
+void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip);
+
 struct Texture;
 
 // Bake an object-space normal map from a 32-bpp diffuse texture's
