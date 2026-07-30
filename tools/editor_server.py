@@ -140,13 +140,15 @@ def split_surface_sidecar_keys(scene, surfaces, warnings):
         return []
     sidecar = scene_sidecar(scene)
     entries = read_sidecar(sidecar)
-    # Authoring scenes: RVSF_SURF_KEYS now go to the LWO SURF sub-chunk (see
-    # pop_rev_ext_props / lwopatch.set_rev_ext), so only the not-yet-migrated
-    # per-surface keys stay on the sidecar — normalFlip (pairs with the
-    # normal-map assignment, §1e) and smoothAngle (native SMAN migration, §1b).
-    # The dead non-authoring fallback still peels every SURF_SIDECAR_KEYS.
+    # Authoring scenes: RVSF_SURF_KEYS -> LWO RVSF (pop_rev_ext_props), maps ->
+    # LWO RVSM (save_maps_setdirs), and smoothAngle -> native LWO SMAN
+    # (ALLOWED_PROPS -> lwopatch.set_prop('smoothAngle'), sidecar-elim §1.5). So
+    # the ONLY per-surface key still peeled to the sidecar is normalFlip (a
+    # green-channel parity on the assigned normal map, §1e — no authored data
+    # today; RVSM carries a normalFlip byte for when it's driven). The dead
+    # non-authoring fallback still peels every SURF_SIDECAR_KEYS.
     if SCENES[scene].get("authoring"):
-        keys = (SURF_SIDECAR_KEYS - RVSF_SURF_KEYS) | SMOOTH_SIDECAR
+        keys = SURF_SIDECAR_KEYS - RVSF_SURF_KEYS - SMOOTH_SIDECAR   # = {normalFlip}
     else:
         keys = SURF_SIDECAR_KEYS
     saved = []
