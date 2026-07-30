@@ -1387,15 +1387,24 @@ void Initialize_Greets()
 
 	GreetSc->PathingMinVelocity = 0.01;
 
-	// EXPERIMENTAL geometry fix for the mummy ('momy-1'): Phong-tessellate the
-	// coarse lathe to round the silhouette. DEFAULT OFF (FDS_MOMY_SUBDIV=N to
-	// enable) — the current impl CRACKS the mesh at its UV/duplicate-vertex
-	// seams (edge-midpoint sharing is keyed by vertex index and doesn't merge
-	// coincident verts), so it needs a vertex-weld pass before it's usable.
+	// Geometry fix for the mummies ('momy-1' + its mirror 'momy-2'):
+	// Phong-tessellate the coarse lathes to round the silhouette. DEFAULT OFF
+	// (FDS_MOMY_SUBDIV=N to enable). The old "cracks at UV/duplicate-vertex
+	// seams" note here was a MISDIAGNOSIS — the lathe is index-closed (no
+	// unshared coincident verts; measured via FDS_SUBDIV_DIAG, boundary-edges
+	// raw=0), and the holes were the unguarded Phong projection inverting
+	// sub-triangles at the cap rim / pole where endpoint normals disagree.
+	// Fixed 2026-07-30 in SubdivideMaterialFaces (crease-guarded projection);
+	// SUBDIV=2 renders closed at the deterministic momy close-cam
+	// (FDS_GREETS_CAM="-12.1,3.2,-27,0,-0.06,-1", which frames momy-2 — both
+	// mummies are subdivided so that pose is a valid gate).
 	{
 		const char *lv = std::getenv("FDS_MOMY_SUBDIV");
 		const int levels = lv ? std::atoi(lv) : 0;
-		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy-1", levels);
+		if (levels > 0) {
+			SubdivideMaterialFaces(GreetSc, "momy-1", levels);
+			SubdivideMaterialFaces(GreetSc, "momy-2", levels);
+		}
 	}
 
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to

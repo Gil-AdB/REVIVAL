@@ -122,9 +122,32 @@ marks — today it is structurally absent from every probe.
 Goal: real silhouettes + true self-shadowing for the block-scale relief;
 POM keeps the fine detail from a residual map.
 
-- **B1. Weld fix** in `SubdivideMaterialFaces` (midpoint sharing keyed by
-  vertex index misses coincident verts → the documented momy cracks).
-  Independent value: fixes `FDS_MOMY_SUBDIV` too.
+- **B1. Subdivision hole fix — DONE (2026-07-30), and the weld premise was
+  WRONG.** Measured (`FDS_SUBDIV_DIAG`): the momy lathe is index-closed —
+  boundary-edges raw=0, every edge keyed by raw vertex index is shared by
+  exactly 2 faces, seam included — so "midpoint sharing misses coincident
+  verts" never applied (position-welding actually CREATES non-manifold
+  edges; do not weld). The real holes were three stacked defects in
+  `SubdivideMaterialFaces`, all fixed:
+  1. **Unguarded Phong projection** at creases/poles (4 edges with endpoint
+     normals >90° apart, 165 >45°, one |N|=0 pole vert) displaced midpoints
+     wildly → fixed by normalizing endpoint normals + fading the projection
+     by agreement (w=clamp(dot,0,1)²; linear midpoint at creases).
+  2. **Fold-over on sliver faces** (sagitta > triangle width) → fixed by an
+     iterative fold-relaxation pass (folded sub-face ⇒ its midpoints revert
+     to the linear split; monotone, converges ≤3 passes).
+  3. **Stale `F->NormProd`** — the rebuild recomputed sub-face N but kept
+     the PARENT's plane constant; the backface cull (Transform.cpp:1554)
+     evaluates (N, NormProd) as a plane equation → wrong culls near grazing
+     = the visible notches. Fixed: NormProd = -(N·A.Pos) per rebuilt face.
+     This was the dominant visible mechanism.
+  Proof: momy close-cam t=1588, `FDS_MOMY_SUBDIV=2` (hook now subdivides
+  both mummies) renders closed + rounded, byte-deterministic 3/3
+  (e08ab911…); flag-off byte-null (1d937118… = pre-change baseline);
+  render_gate 3/3, city/fountain pins byte-equal, wasm links.
+  Note for B3: 'rooms'/'floor' walls have hard 90° corners — the crease
+  guard makes those edges subdivide LINEARLY (dot=0 → w=0), so the bake
+  will not round wall corners; verify with FDS_SUBDIV_DIAG on contact.
 - **B2. Spike (measure before building).** Enable subdiv on
   'rooms'/'floor' (post slice-0 names unchanged — these are wall/floor
   materials, not momy), read `[SUBDIV]` exact counts, `--bench`/profiler
@@ -171,9 +194,11 @@ only, flags default-off until the user approves looks.
 
 ## Status
 
-- [ ] Slice 0 rename
+- [x] Slice 0 rename (f4f2e38 + 0808bd1)
 - [ ] F AABB foundation
 - [ ] A1 editor-flagged probes  · [ ] A2 store retention · [ ] A3 overlay
       · [ ] A4 city depth cache (optional)
-- [ ] B1 weld · [ ] B2 spike (numbers → here) · [ ] B3 displace ·
-      [ ] B4 residual · [ ] B5 tile pre-reject (conditional)
+- [x] B1 subdivision holes (weld premise disproven; Phong guard +
+      fold-relax + NormProd recompute) · [ ] B2 spike (numbers → here) ·
+      [ ] B3 displace · [ ] B4 residual · [ ] B5 tile pre-reject
+      (conditional)

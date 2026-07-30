@@ -851,7 +851,10 @@ void MakeFacesIndependentByAngle(Scene *Sc, float thresholdDegrees) {
 // vertex normals (project the linear midpoint onto each endpoint's tangent plane,
 // average) so the silhouette rounds out instead of staying a flat polygon. Edge
 // midpoints are shared between adjacent target faces (keyed by sorted vertex
-// index) so the mesh stays crack-free. Non-target faces are copied verbatim.
+// index) so the mesh stays crack-free; the projection is crease-guarded (faded
+// out where endpoint normals disagree / are degenerate — see edgeMid) so folds
+// and lathe poles don't invert sub-triangles. Non-target faces are copied
+// verbatim.
 //
 // Must run AFTER per-vertex normals exist (Preprocess) and BEFORE
 // MakeFacesIndependentByAngle (which then re-smooths the finer mesh). Rebuilds
@@ -876,6 +879,93 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 			std::map<std::pair<uint32_t, uint32_t>, uint32_t> midOf;
 			auto vidx = [&](const Vertex *v) { return uint32_t(v - oldV); };
 
+			// FDS_SUBDIV_DIAG: topology + normal-quality report for the target
+			// surface. Settled a long-standing misdiagnosis (2026-07-30): the momy
+			// "seam cracks" were NOT unshared coincident verts — the lathe is
+			// index-closed (boundary-edges raw=0: every edge, keyed by raw vertex
+			// index, is shared by exactly 2 faces, seam included), and welding by
+			// quantized position actually CREATED non-manifold edges. The real
+			// artifact was the unguarded Phong projection (see edgeMid below):
+			// |N|=0 at a pole + edges whose endpoint normals disagree >45..90°
+			// (4 neg-dot + 165 low-dot edges on momy) displaced midpoints until
+			// sub-triangles inverted and got backface-culled → holes. Kept as a
+			// measurement tool for future targets ('rooms'/'floor' displacement):
+			// boundary-edges raw>0 with canon==0 would mean position-coincident
+			// seam duplicates DO exist there and need seam-aware handling.
+			if (std::getenv("FDS_SUBDIV_DIAG")) {
+				std::vector<uint32_t> canon(size_t(T->VIndex));
+				for (int32_t i = 0; i < T->VIndex; ++i) canon[i] = uint32_t(i);
+				constexpr float kWeldGrid = 1.0f / 1e-4f;
+				auto qkey = [&](const Vector &p) {
+					return std::array<int64_t, 3>{
+						int64_t(std::llround(p.x * kWeldGrid)),
+						int64_t(std::llround(p.y * kWeldGrid)),
+						int64_t(std::llround(p.z * kWeldGrid)) };
+				};
+				std::map<std::array<int64_t, 3>, uint32_t> firstOf;
+				for (int32_t i = 0; i < T->FIndex; ++i) {
+					const Face &F = T->Faces[i];
+					if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+					const Vertex *tri[3] = { F.A, F.B, F.C };
+					for (const Vertex *vp : tri) {
+						const uint32_t vi = vidx(vp);
+						if (vi >= uint32_t(T->VIndex)) continue;   // defensive
+						const auto k = qkey(oldV[vi].Pos);
+						auto it = firstOf.find(k);
+						if (it == firstOf.end()) firstOf.emplace(k, vi);
+						else canon[vi] = it->second;
+					}
+				}
+				auto countBoundary = [&](bool useCanon) {
+					std::map<std::pair<uint32_t,uint32_t>, int> ec;
+					for (int32_t i = 0; i < T->FIndex; ++i) {
+						const Face &F = T->Faces[i];
+						if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+						uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+						if (useCanon) { a = canon[a]; b = canon[b]; c = canon[c]; }
+						auto add = [&](uint32_t x, uint32_t y){
+							ec[{std::min(x,y),std::max(x,y)}]++; };
+						add(a,b); add(b,c); add(c,a);
+					}
+					int bnd = 0, nonManifold = 0;
+					for (auto &kv : ec) { if (kv.second == 1) ++bnd; else if (kv.second > 2) ++nonManifold; }
+					return std::make_pair(bnd, nonManifold);
+				};
+				int nCoin = 0;
+				for (int32_t i = 0; i < T->VIndex; ++i) if (canon[i] != uint32_t(i)) ++nCoin;
+				auto raw = countBoundary(false);
+				auto can = countBoundary(true);
+				int dotNeg = 0, dotLow = 0, dotOk = 0, nZero = 0;
+				std::map<std::pair<uint32_t,uint32_t>, char> seen;
+				for (int32_t i = 0; i < T->FIndex; ++i) {
+					const Face &F = T->Faces[i];
+					if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+					const uint32_t v[3] = { vidx(F.A), vidx(F.B), vidx(F.C) };
+					for (int e = 0; e < 3; ++e) {
+						uint32_t x = v[e], y = v[(e+1)%3];
+						auto k = std::make_pair(std::min(x,y), std::max(x,y));
+						if (seen.count(k)) continue;
+						seen[k] = 1;
+						const Vector &NA = oldV[x].N, &NB = oldV[y].N;
+						const float la = std::sqrt(NA.x*NA.x+NA.y*NA.y+NA.z*NA.z);
+						const float lb = std::sqrt(NB.x*NB.x+NB.y*NB.y+NB.z*NB.z);
+						if (la < 1e-6f || lb < 1e-6f) { ++nZero; continue; }
+						const float d = (NA.x*NB.x+NA.y*NB.y+NA.z*NB.z)/(la*lb);
+						if (d < 0.0f) ++dotNeg; else if (d < 0.7f) ++dotLow; else ++dotOk;
+					}
+				}
+				std::fprintf(stderr,
+					"[SUBDIV-DIAG] '%s' lvl%d verts=%d coincident=%d boundary-edges raw=%d "
+					"pos-welded=%d (nonmanifold raw=%d welded=%d) edge-normal-dot: "
+					"zeroN=%d neg=%d low(<0.7)=%d ok=%d\n",
+					matName, lvl, T->VIndex, nCoin, raw.first, can.first,
+					raw.second, can.second, nZero, dotNeg, dotLow, dotOk);
+			}
+
+			// Linear position of each created midpoint, for the fold-relaxation
+			// pass below (id-indexed alongside `verts`).
+			std::map<uint32_t, Vector> midLinear;
+
 			auto edgeMid = [&](uint32_t ia, uint32_t ib) -> uint32_t {
 				const auto key = std::make_pair(std::min(ia, ib), std::max(ia, ib));
 				auto it = midOf.find(key);
@@ -885,12 +975,40 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				const float lx = (A.Pos.x + B.Pos.x) * 0.5f;
 				const float ly = (A.Pos.y + B.Pos.y) * 0.5f;
 				const float lz = (A.Pos.z + B.Pos.z) * 0.5f;
-				// Project the linear midpoint onto each endpoint's tangent plane.
-				const float da = (lx - A.Pos.x) * A.N.x + (ly - A.Pos.y) * A.N.y + (lz - A.Pos.z) * A.N.z;
-				const float db = (lx - B.Pos.x) * B.N.x + (ly - B.Pos.y) * B.N.y + (lz - B.Pos.z) * B.N.z;
-				m.Pos.x = lx - 0.5f * (da * A.N.x + db * B.N.x);
-				m.Pos.y = ly - 0.5f * (da * A.N.y + db * B.N.y);
-				m.Pos.z = lz - 0.5f * (da * A.N.z + db * B.N.z);
+				// Phong projection, CREASE-GUARDED (fixed 2026-07-30 — this was the
+				// "momy crack" root cause, previously misattributed to unshared
+				// coincident seam verts; the mesh is index-closed, see the DIAG note
+				// above). The raw formula assumes unit endpoint normals that roughly
+				// agree; at the lathe's cap rim / profile folds the endpoint normals
+				// disagree by 45–>90° (and one pole vert has |N|=0), so projecting
+				// onto both tangent planes displaced the midpoint enough to invert
+				// sub-triangles — which the rasterizer backface-culls → holes with
+				// the background showing through. Guard: normalize the endpoint
+				// normals (skip if degenerate), and fade the projection out by
+				// their agreement w = clamp(dot(nA,nB),0,1)² — full PN rounding on
+				// smooth edges (dot→1), pure linear midpoint across creases/folds
+				// (dot≤0) where "the surface implied by the normals" is undefined
+				// anyway. Verified: momy close-cam cap renders closed at SUBDIV=2,
+				// silhouette rounding preserved on the smooth barrel.
+				float dispx = 0.0f, dispy = 0.0f, dispz = 0.0f;
+				const float laN = std::sqrt(A.N.x*A.N.x + A.N.y*A.N.y + A.N.z*A.N.z);
+				const float lbN = std::sqrt(B.N.x*B.N.x + B.N.y*B.N.y + B.N.z*B.N.z);
+				if (laN > 1e-6f && lbN > 1e-6f) {
+					const float ax = A.N.x/laN, ay = A.N.y/laN, az = A.N.z/laN;
+					const float bx = B.N.x/lbN, by = B.N.y/lbN, bz = B.N.z/lbN;
+					float w = ax*bx + ay*by + az*bz;
+					w = (w < 0.0f) ? 0.0f : w;
+					w *= w;
+					// Project the linear midpoint onto each endpoint's tangent plane.
+					const float da = (lx - A.Pos.x)*ax + (ly - A.Pos.y)*ay + (lz - A.Pos.z)*az;
+					const float db = (lx - B.Pos.x)*bx + (ly - B.Pos.y)*by + (lz - B.Pos.z)*bz;
+					dispx = -0.5f * w * (da*ax + db*bx);
+					dispy = -0.5f * w * (da*ay + db*by);
+					dispz = -0.5f * w * (da*az + db*bz);
+				}
+				m.Pos.x = lx + dispx;
+				m.Pos.y = ly + dispy;
+				m.Pos.z = lz + dispz;
 				float nx = A.N.x + B.N.x, ny = A.N.y + B.N.y, nz = A.N.z + B.N.z;
 				const float nl = std::sqrt(nx * nx + ny * ny + nz * nz);
 				if (nl > 1e-6f) { m.N.x = nx / nl; m.N.y = ny / nl; m.N.z = nz / nl; }
@@ -899,6 +1017,7 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				const uint32_t id = uint32_t(verts.size());
 				verts.push_back(m);
 				midOf[key] = id;
+				midLinear[id] = Vector{lx, ly, lz};
 				return id;
 			};
 
@@ -916,6 +1035,10 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				fIdx.push_back({i0, i1, i2});
 			};
 
+			// Target-face vertex tuples [ia,ib,ic,mab,mbc,mca] for the
+			// fold-relaxation pass below.
+			std::vector<std::array<uint32_t, 6>> targetTuples;
+			targetTuples.reserve(size_t(nTarget));
 			for (int32_t i = 0; i < T->FIndex; ++i) {
 				Face &F = T->Faces[i];
 				if (!F.A || !F.B || !F.C || !isTarget(&F)) {
@@ -932,6 +1055,64 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 				emit(F, mab, ib,  mbc, uab, vab, F.U2, F.V2, ubc, vbc);
 				emit(F, mca, mbc, ic,  uca, vca, ubc, vbc, F.U3, F.V3);
 				emit(F, mab, mbc, mca, uab, vab, ubc, vbc, uca, vca);
+				targetTuples.push_back({ia, ib, ic, mab, mbc, mca});
+			}
+
+			// FOLD RELAXATION. Even crease-guarded, a Phong-displaced midpoint can
+			// fold a sub-face over (sliver parents: the sagitta of a long edge
+			// exceeds the triangle's width) — the rasterizer's screen-winding cull
+			// then renders it from the wrong side → a hole (this + the unguarded
+			// projection were the REAL "momy cracks"; the mesh topology was never
+			// cracked). Detect: a sub-face whose winding normal dots negative
+			// against its parent's (same cross convention both sides, so the
+			// engine's stored-N handedness doesn't matter), or collapses to zero
+			// area. Fix: revert ALL midpoints of the offending face to the plain
+			// linear split — linear subdivision of a valid triangle cannot fold.
+			// Midpoints are shared, so reverting one face can newly fold a
+			// neighbour: iterate to fixpoint (monotone — displacement only ever
+			// gets removed — so it terminates; ≤2 passes in practice).
+			{
+				auto windN = [&](uint32_t i0, uint32_t i1, uint32_t i2, Vector &out) {
+					const Vector &A = verts[i0].Pos, &B = verts[i1].Pos, &C = verts[i2].Pos;
+					const float e1x = B.x-A.x, e1y = B.y-A.y, e1z = B.z-A.z;
+					const float e2x = C.x-A.x, e2y = C.y-A.y, e2z = C.z-A.z;
+					out.x = e1y*e2z - e1z*e2y; out.y = e1z*e2x - e1x*e2z; out.z = e1x*e2y - e1y*e2x;
+					return std::sqrt(out.x*out.x + out.y*out.y + out.z*out.z);
+				};
+				int relaxedMids = 0, foldedFaces = 0, iters = 0;
+				for (bool changed = true; changed && iters < 16; ++iters) {
+					changed = false;
+					for (const auto &t : targetTuples) {
+						Vector pn; const float pl = windN(t[0], t[1], t[2], pn);
+						if (pl < 1e-12f) continue;   // degenerate parent: leave as-is
+						const uint32_t sub[4][3] = {
+							{t[0],t[3],t[5]}, {t[3],t[1],t[4]},
+							{t[5],t[4],t[2]}, {t[3],t[4],t[5]} };
+						bool folded = false;
+						for (auto &s : sub) {
+							Vector sn; const float sl = windN(s[0], s[1], s[2], sn);
+							if (sl < 1e-12f * pl ||
+							    pn.x*sn.x + pn.y*sn.y + pn.z*sn.z < 0.0f) { folded = true; break; }
+						}
+						if (!folded) continue;
+						++foldedFaces;
+						for (int k = 3; k < 6; ++k) {
+							auto lin = midLinear.find(t[k]);
+							if (lin == midLinear.end()) continue;
+							Vector &P = verts[t[k]].Pos;
+							if (P.x != lin->second.x || P.y != lin->second.y || P.z != lin->second.z) {
+								P = lin->second;
+								++relaxedMids;
+								changed = true;
+							}
+						}
+					}
+				}
+				if (std::getenv("FDS_SUBDIV_DIAG"))
+					std::fprintf(stderr,
+						"[SUBDIV-DIAG] '%s' lvl%d fold-relax: %d face-visits folded, "
+						"%d midpoints reverted to linear, %d passes\n",
+						matName, lvl, foldedFaces, relaxedMids, iters);
 			}
 
 			Vertex *nv = new Vertex[verts.size()];
@@ -954,6 +1135,15 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels) {
 					if (gx * faces[i].N.x + gy * faces[i].N.y + gz * faces[i].N.z < 0.0f) { gx = -gx; gy = -gy; gz = -gz; }
 					nf[i].N.x = gx; nf[i].N.y = gy; nf[i].N.z = gz;
 				}
+				// Re-derive the plane constant for the (possibly new) plane. The
+				// backface cull (Transform.cpp: AP·N < NormProd) evaluates (N,
+				// NormProd) as a plane equation; sub-faces displaced off the
+				// parent plane but carrying the PARENT's NormProd cull wrongly
+				// near grazing → pinprick/notch holes on the rounded surface
+				// (the last visible piece of the "momy cracks", after the crease
+				// guard + fold relaxation). Convention per PREPROC.CPP:113 /
+				// GreetsMirror: NormProd = -(N · A.Pos).
+				nf[i].NormProd = -(nf[i].N.x * A.x + nf[i].N.y * A.y + nf[i].N.z * A.z);
 			}
 			T->Verts  = nv; T->VIndex = int32_t(verts.size());
 			T->Faces  = nf; T->FIndex = int32_t(faces.size());
