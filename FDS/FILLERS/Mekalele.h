@@ -368,6 +368,11 @@ struct TileRasterizerCtx {
 	// nudge the UV before the texel pack. 8-bit single-channel (1 byte/texel).
 	const byte *heightData = nullptr;
 	float parallaxStrength  = 0.0f;
+	// --parallax_max_offset: clamp the final parallax UV offset (post single-
+	// shift / post march) to at most this many TEXELS from the geometric UV.
+	// 0 = no clamp (byte-identical). Bounds the diagonal-streak over-drive at
+	// strength >> the tuned value. Set by the dispatcher from the flag.
+	float parallaxMaxOffset = 0.0f;
 	float cntrEX = 0.0f, cntrEY = 0.0f, invFOVX = 0.0f, invFOVY = 0.0f;
 	// Depth-peel floor (transparent passes only; nullptr for opaque). A
 	// fragment is accepted only when z_candidate < peelFloor[i] — strictly
@@ -477,6 +482,25 @@ struct TileRasterizerCtx {
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
 	// the texture-filter albedo path, so it needs --texture_filter >= 1.
 	bool pomViz = false;
+	// --pom_mip_viz: tint the albedo by THIS face's miplevel (color hash) so
+	// the mipmap-via-subdivision sub-face boundaries — the diagonal-seam cause —
+	// read directly. Rides the same filtered-albedo path as pomViz.
+	bool pomMipViz = false;
+
+	// Height-map addressing for the parallax gathers, threaded SEPARATELY from
+	// the albedo mip (ctx.Txtr / ctx.miplevel). The height map shares the
+	// albedo's tiled layout but --pom_height_mip can PIN it to a fixed level so
+	// the sampled height stays continuous across sub-faces at different albedo
+	// mips (the diagonal-seam fix). Legacy (pin off) sets these EXACTLY to the
+	// albedo mip's LogWidth/LogHeight/scale/mask → byte-identical. Used by every
+	// height (and cone) gather; the final albedo/normal fetch still uses the
+	// albedo mip. Only meaningful when heightData != nullptr.
+	int32_t  heightLogW  = 0;
+	int32_t  heightLogH  = 0;
+	float    heightUScale = 0.0f;
+	float    heightVScale = 0.0f;
+	int32_t  heightUmaskSwizzled = 0;
+	int32_t  heightVmask = 0;
 };
 
 // Debug (snapshot FDS_DUMP_TXTR path): optional per-pixel dump of the finalized
@@ -985,13 +1009,18 @@ struct TileRasterizer {
 					Vec8f uf = p_uz * p_z;
 					Vec8f vf = p_vz * p_z;
 					if (ctx.heightData && wantTangent) {
-						// Sample height at the un-offset UV (reuse the texel-pack
-						// swizzle; height shares the albedo tiled layout). Low byte =
-						// grayscale height; scalar gather (no sub-32 SIMD gather).
-						Vec8i hu0 = roundi(uf * UScaleFactor);
-						Vec8i hv0 = roundi(vf * VScaleFactor);
-						Vec8i haddr = packed_tile_u(hu0, LogHeight, t_umask_swizzled)
-						            + packed_tile_v(hv0, t_vmask);
+						// Geometric (un-shifted) UV, kept for --parallax_max_offset:
+						// the clamp bounds |final - geometric| in texels below.
+						const Vec8f ufGeo = uf, vfGeo = vf;
+						// Sample height at the un-offset UV. The height map has its
+						// OWN mip addressing (ctx.height*), threaded separately from
+						// the albedo mip so --pom_height_mip can pin it to a fixed
+						// level (seam fix); legacy = the albedo mip's params exactly.
+						// Low byte = grayscale height; scalar gather (no sub-32 SIMD).
+						Vec8i hu0 = roundi(uf * ctx.heightUScale);
+						Vec8i hv0 = roundi(vf * ctx.heightVScale);
+						Vec8i haddr = packed_tile_u(hu0, ctx.heightLogH, ctx.heightUmaskSwizzled)
+						            + packed_tile_v(hv0, ctx.heightVmask);
 						alignas(32) int32_t aA[8]; haddr.store_a(aA);
 						alignas(32) float hA[8];
 						for (int k = 0; k < 8; ++k)
@@ -1068,10 +1097,10 @@ struct TileRasterizer {
 							// float UV exists. Small 1-texel slip at silhouettes.
 							const int qStep = ctx.pomQuarter > 0 ? 2 : 1;
 							for (int s = 0; s < N; ++s) {
-								Vec8i mu = roundi(curU * UScaleFactor);
-								Vec8i mv = roundi(curV * VScaleFactor);
-								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
-								         + packed_tile_v(mv, t_vmask);
+								Vec8i mu = roundi(curU * ctx.heightUScale);
+								Vec8i mv = roundi(curV * ctx.heightVScale);
+								Vec8i ma = packed_tile_u(mu, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								         + packed_tile_v(mv, ctx.heightVmask);
 								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
 								alignas(32) float mH[8], mC[8];
 								for (int k = 0; k < 8; k += qStep) {
@@ -1113,10 +1142,10 @@ struct TileRasterizer {
 								Vec8f mU = (aboU + belU) * Vec8f(0.5f);
 								Vec8f mV = (aboV + belV) * Vec8f(0.5f);
 								Vec8f mMH = (aboH + belH) * Vec8f(0.5f);
-								Vec8i mu = roundi(mU * UScaleFactor);
-								Vec8i mv = roundi(mV * VScaleFactor);
-								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
-								         + packed_tile_v(mv, t_vmask);
+								Vec8i mu = roundi(mU * ctx.heightUScale);
+								Vec8i mv = roundi(mV * ctx.heightVScale);
+								Vec8i ma = packed_tile_u(mu, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								         + packed_tile_v(mv, ctx.heightVmask);
 								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
 								alignas(32) float mHs[8];
 								for (int k = 0; k < 8; k += qStep) {
@@ -1177,10 +1206,10 @@ struct TileRasterizer {
 								curU -= dU * Vec8f(invNf);
 								curV -= dV * Vec8f(invNf);
 								rayH -= Vec8f(invNf);
-								Vec8i mu = roundi(curU * UScaleFactor);
-								Vec8i mv = roundi(curV * VScaleFactor);
-								Vec8i ma = packed_tile_u(mu, LogHeight, t_umask_swizzled)
-								         + packed_tile_v(mv, t_vmask);
+								Vec8i mu = roundi(curU * ctx.heightUScale);
+								Vec8i mv = roundi(curV * ctx.heightVScale);
+								Vec8i ma = packed_tile_u(mu, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								         + packed_tile_v(mv, ctx.heightVmask);
 								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
 								alignas(32) float mH[8];
 								for (int k = 0; k < 8; ++k)
@@ -1202,6 +1231,24 @@ struct TileRasterizer {
 								vf = foundV;
 							}
 							}  // !rowFar
+						}
+						// --parallax_max_offset: bound the final offset to N TEXELS
+						// from the geometric UV (single-shift AND march). At strength
+						// >> the tuned value the offset over-drives and the stone
+						// blocks tear into diagonal smears; this caps the streak
+						// length without disabling the effect. 0 = no clamp (byte-
+						// identical). Isotropic in texel space; U and V scaled by the
+						// same factor to keep the offset direction. Before the debug/
+						// pom_viz taps below so they see the clamped UV.
+						if (ctx.parallaxMaxOffset > 0.0f) {
+							const Vec8f duT = (uf - ufGeo) * Vec8f(UScaleFactor);
+							const Vec8f dvT = (vf - vfGeo) * Vec8f(VScaleFactor);
+							const Vec8f len = sqrt(duT*duT + dvT*dvT);
+							const Vec8f maxT = Vec8f(ctx.parallaxMaxOffset);
+							const Vec8f s = select(len > maxT,
+								maxT / max(len, Vec8f(1e-6f)), Vec8f(1.0f));
+							uf = ufGeo + (uf - ufGeo) * s;
+							vf = vfGeo + (vf - vfGeo) * s;
 						}
 						// Debug (FDS_DUMP_TXTR): record the finalized parallax UV for covered
 						// lanes so a headless A/B can diff the MARCH output directly.
@@ -1257,9 +1304,13 @@ struct TileRasterizer {
 						// --pom_viz: swap the albedo for the height field at the
 						// FINAL (post-march) UV — the parallax result rendered
 						// directly (domes/mortar/march terracing). Debug only.
+						// Sampled through the height map's OWN addressing (ctx.height*)
+						// so a pinned mip (--pom_height_mip) is visualised faithfully.
 						if (ctx.pomViz && ctx.heightData) {
-							Vec8i hva = packed_tile_u(u, LogHeight, t_umask_swizzled)
-							          + packed_tile_v(v, t_vmask);
+							Vec8i hu = roundi(uf * ctx.heightUScale);
+							Vec8i hv = roundi(vf * ctx.heightVScale);
+							Vec8i hva = packed_tile_u(hu, ctx.heightLogH, ctx.heightUmaskSwizzled)
+							          + packed_tile_v(hv, ctx.heightVmask);
 							alignas(32) int32_t hAd[8]; hva.store_a(hAd);
 							alignas(32) uint32_t g8[8];
 							for (int k = 0; k < 8; ++k) {
@@ -1273,6 +1324,19 @@ struct TileRasterizer {
 								      | (uint32_t(g) << 8) | uint32_t(g);
 							}
 							albedoCol.load_a(g8);
+						}
+						// --pom_mip_viz: tint by THIS face's miplevel so the
+						// mipmap-via-subdivision sub-face boundaries (the diagonal
+						// seams' cause) read directly. A tiny fixed palette keyed on
+						// ctx.miplevel; applies to every textured face.
+						if (ctx.pomMipViz) {
+							static const uint32_t kMipPal[8] = {
+								0xFFE03030u, 0xFF30E030u, 0xFF3060E0u, 0xFFE0E030u,
+								0xFFE030E0u, 0xFF30E0E0u, 0xFFE08030u, 0xFF808080u };
+							const uint32_t c = kMipPal[ctx.miplevel & 7];
+							alignas(32) uint32_t t8[8];
+							for (int k = 0; k < 8; ++k) t8[k] = c;
+							albedoCol.load_a(t8);
 						}
 						_mm256_maskstore_ps((float*)span.albedo,
 							*(__m256i*)(&p_mask), *(__m256*)(&albedoCol));
@@ -1667,24 +1731,61 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	} else {
 		shadowMatId = uint16_t(F->Txtr->ID + 1);
 	}
-	// Parallax: resolve the material's height mip for THIS miplevel (shares the
-	// albedo's tiled layout, so the rasterizer's swizzled texel address indexes
-	// it). Null unless --parallax + a HeightMap with that mip present.
+	// Parallax: resolve the material's height mip. Legacy = THIS face's albedo
+	// miplevel (the height shares the albedo tiled layout). --pom_height_mip>=0
+	// PINS the height mip to a fixed level for EVERY face instead — the fix for
+	// the diagonal seams: adjacent sub-faces (mipmap-via-subdivision, diagonal
+	// edges) otherwise sample the height at different mip resolutions, so the
+	// parallax UV offset jumps across the boundary. Pinning keeps the sampled
+	// height continuous (height is low-frequency). The gathers use the height
+	// map's OWN dims/mask/scale at heightMipUsed (threaded via ctx below), so
+	// a pinned level with different dims than the face's albedo mip is fine.
 	const byte *heightData = nullptr;
+	dword heightMipUsed = miplevel;
+	const int pomHeightPin = fds::FeatureFlags::pom_height_mip();
 	if (fds::FeatureFlags::parallax() && F->Txtr->HeightMap) {
 		Texture *hm = F->Txtr->HeightMap;
-		if ((dword)miplevel < hm->numMipmaps && hm->Mipmap[miplevel])
-			heightData = reinterpret_cast<const byte*>(hm->Mipmap[miplevel]);
+		dword lvl = miplevel;
+		if (pomHeightPin >= 0) {
+			lvl = (dword)pomHeightPin;
+			if (lvl >= hm->numMipmaps) lvl = hm->numMipmaps ? hm->numMipmaps - 1 : 0;
+		}
+		if (lvl < hm->numMipmaps && hm->Mipmap[lvl]) {
+			heightData = reinterpret_cast<const byte*>(hm->Mipmap[lvl]);
+			heightMipUsed = lvl;
+		}
 	}
-	// Tier-2 cone-step POM: resolve the cone mip parallel to the height mip
+	// Tier-2 cone-step POM: resolve the cone mip at the SAME level as the height
 	// (same tiled layout → same swizzled address). Only when --parallax_pom>0
 	// AND the material carries a baked ConeMap; else the march stays single-shift.
 	const byte *coneData = nullptr;
 	const int pomSteps = fds::FeatureFlags::parallax_pom();
 	if (heightData && pomSteps > 0 && F->Txtr->ConeMap) {
 		Texture *cm = F->Txtr->ConeMap;
-		if ((dword)miplevel < cm->numMipmaps && cm->Mipmap[miplevel])
-			coneData = reinterpret_cast<const byte*>(cm->Mipmap[miplevel]);
+		if (heightMipUsed < cm->numMipmaps && cm->Mipmap[heightMipUsed])
+			coneData = reinterpret_cast<const byte*>(cm->Mipmap[heightMipUsed]);
+	}
+	// Height-map addressing threaded to the rasterizer's parallax gathers,
+	// independent of the albedo mip. Legacy (pin off) = the albedo mip's exact
+	// LogWidth/LogHeight/scale/mask (ctx.Txtr = F->Txtr->Txtr, ctx.miplevel) →
+	// byte-identical to before. Pinned = the HeightMap's own dims at
+	// heightMipUsed. Only read when heightData != nullptr.
+	int32_t heightLogW = 0, heightLogH = 0;
+	float   heightUScale = 0.0f, heightVScale = 0.0f;
+	int32_t heightUmaskSwizzled = 0, heightVmask = 0;
+	if (heightData) {
+		if (pomHeightPin < 0) {
+			heightLogW = F->Txtr->Txtr->LSizeX - (int32_t)miplevel;
+			heightLogH = F->Txtr->Txtr->LSizeY - (int32_t)miplevel;
+		} else {
+			Texture *hm = F->Txtr->HeightMap;
+			heightLogW = hm->LSizeX - (int32_t)heightMipUsed;
+			heightLogH = hm->LSizeY - (int32_t)heightMipUsed;
+		}
+		heightUScale = float(1 << heightLogW);
+		heightVScale = float(1 << heightLogH);
+		heightVmask  = (1 << heightLogH) - 1;
+		heightUmaskSwizzled = (int32_t)swizzle_umask(heightLogH, (1 << heightLogW) - 1);
 	}
 	// Routing: --parallax_pom drives the NAIVE occlusion march by default (it
 	// records the first rayH<=Hs crossing -> features anchored to true depth, no
@@ -1715,6 +1816,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.zScale = cam.zScale,
 		.heightData = heightData,
 		.parallaxStrength = fds::FeatureFlags::parallax_strength() * F->Txtr->ParallaxScale,
+		.parallaxMaxOffset = fds::FeatureFlags::parallax_max_offset(),
 		.cntrEX = cam.cntrEX,
 		.cntrEY = cam.cntrEY,
 		.invFOVX = (cam.fovX != 0.0f) ? 1.0f / cam.fovX : 0.0f,
@@ -1737,6 +1839,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
 		.pomViz = fds::FeatureFlags::pom_viz(),
+		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
+		.heightLogW = heightLogW,
+		.heightLogH = heightLogH,
+		.heightUScale = heightUScale,
+		.heightVScale = heightVScale,
+		.heightUmaskSwizzled = heightUmaskSwizzled,
+		.heightVmask = heightVmask,
 	};
 	meka::TileRasterizer r(*gb, ctx);
 

@@ -1452,6 +1452,10 @@ void Initialize_Greets()
 			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
 			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
 		}
+		if (!displace && fds::FeatureFlags::displace_viz())
+			std::fprintf(stderr, "[DISPLACE-VIZ] --displace_viz is on but "
+				"--greets_displace is OFF — no bake runs, so the overlay has "
+				"nothing to draw. Add --greets_displace.\n");
 		if (displace) {
 			const float amp = fds::FeatureFlags::greets_displace_amp();
 			const int   mip = fds::FeatureFlags::greets_displace_mip();
@@ -3306,6 +3310,12 @@ struct GreetsScene : SceneDriver {
 		// Foundation F world-AABB / frustum overlay (--draw_aabbs).
 		if (fds::FeatureFlags::draw_aabbs())
 			fds::WorldAabb_DrawOverlay(GreetSc);
+
+		// Stone-displacement bake wireframe (--displace_viz): the geometry
+		// DisplaceMaterialVertices added/moved, tinted by displacement
+		// magnitude. No-op (byte-null) unless --displace_viz is on.
+		if (fds::FeatureFlags::displace_viz())
+			fds::DisplaceViz_DrawOverlay(GreetSc);
 
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);

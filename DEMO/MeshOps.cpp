@@ -6,6 +6,7 @@
 #include <Base/FDS_DECS.H>
 #include <Base/FeatureFlags.h>
 #include <Base/Scene.h>
+#include <RENDER/WorldAabb.h>     // DisplaceViz_Record (--displace_viz overlay)
 #include <Threads.h>              // dispatchIndexed — threaded cone-map bake
 
 #include <array>
@@ -1232,11 +1233,13 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
 		const Texture *hm = nullptr;
+		const Material *targetMat = nullptr;
 		int nTarget = 0;
 		for (int32_t i = 0; i < T->FIndex; ++i) {
 			const Face &F = T->Faces[i];
 			if (!isTarget(&F)) continue;
 			++nTarget;
+			if (!targetMat) targetMat = F.Txtr;
 			if (!hm && F.Txtr->HeightMap) hm = F.Txtr->HeightMap;
 		}
 		if (nTarget == 0) continue;
@@ -1350,6 +1353,11 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 			if (d < dMin) dMin = d;
 			if (d > dMax) dMax = d;
 			++nMoved;
+			// --displace_viz: record the FINAL (post-displacement) position +
+			// |offset| so the overlay can wireframe this geometry. No-op unless
+			// the flag is on (the recorder self-gates); keyed by position bits,
+			// which survive the greets chunk copy + per-face split downstream.
+			fds::DisplaceViz_Record(targetMat, V[i].Pos, std::fabs(d));
 		}
 
 		// Re-derive target-face plane data from the displaced positions:

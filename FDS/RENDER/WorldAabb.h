@@ -26,6 +26,7 @@ struct Scene;
 struct TriMesh;
 struct Material;
 struct Object;
+struct Vector;
 
 namespace fds {
 
@@ -92,6 +93,29 @@ bool Frustum_CullsSphere(const Frustum& f, const float c[3], float r);
 // gates on FeatureFlags::draw_aabbs(); no-op when VPage/camera aren't ready
 // or inside an offscreen pass.
 void WorldAabb_DrawOverlay(Scene* sc);
+
+// ── --displace_viz: stone-displacement bake overlay ────────────────────────
+// A debug view of the geometry the height-map displacement bake
+// (DisplaceMaterialVertices, docs/ENVDYN_DISPLACEMENT_PLAN.md B3) actually
+// added/moved. The bake records each displaced vertex here; the overlay draws
+// the target materials' post-bake triangles as a wireframe, tinted by
+// per-vertex displacement magnitude. Both no-op unless --displace_viz is on.
+
+// Called by the bake for every displaced vertex: `M` = the target material,
+// `localPos` = the vertex's FINAL (post-displacement) model-space position
+// (keyed by exact bits, so the per-cell chunk COPIES the greets init makes
+// after the bake still resolve — the copy is bitwise), `dispAbs` = |offset|
+// along the normal (world units). Only records when FeatureFlags::displace_viz
+// is set (the bake gates the call), so the flag-off path allocates nothing.
+void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs);
+
+// Draw the recorded displaced materials' triangles as a wireframe over VPage
+// (post-tonemap), projected through the main camera, edge colour = per-vertex
+// displacement magnitude (cool blue = 0 / pinned borders → warm red = the
+// bake's max). Front-facing + near-plane culled; no depth test (far walls
+// show through, like --draw_aabbs). No-op (with a one-shot stderr hint) when
+// nothing was recorded — i.e. --displace_viz on but --greets_displace off.
+void DisplaceViz_DrawOverlay(Scene* sc);
 
 }  // namespace fds
 

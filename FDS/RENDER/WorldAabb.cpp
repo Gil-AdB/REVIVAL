@@ -13,6 +13,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace fds {
 
@@ -321,6 +324,118 @@ void WorldAabb_DrawOverlay(Scene* sc) {
         for (auto& e : edges)
             if (ok[e[0]] && ok[e[1]])
                 drawLine(sx[e[0]], sy[e[0]], sx[e[1]], sy[e[1]], col);
+    }
+}
+
+// ── --displace_viz overlay ────────────────────────────────────────────────
+namespace {
+
+// Per-vertex displacement magnitude, keyed by EXACT model-space position bits.
+// Position bits survive the greets per-cell chunk copy (bitwise) and the
+// per-face MakeFacesIndependent split (Pos copied verbatim), so a render-time
+// chunk vertex resolves back to what the bake recorded. Collisions between two
+// truly-coincident verts are harmless for a debug tint.
+struct DispPosKey {
+    uint32_t x, y, z;
+    bool operator==(const DispPosKey& o) const { return x==o.x && y==o.y && z==o.z; }
+};
+struct DispPosHash {
+    size_t operator()(const DispPosKey& k) const {
+        return (size_t(k.x)*73856093u) ^ (size_t(k.y)*19349663u) ^ (size_t(k.z)*83492791u);
+    }
+};
+std::unordered_map<DispPosKey, float, DispPosHash> g_dispMag;   // pos bits -> |offset|
+std::unordered_set<const Material*>                g_dispMats;  // displaced materials
+float g_dispMax = 0.0f;                                          // for normalization
+
+inline uint32_t f2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+inline DispPosKey posKey(const Vector& p) { return { f2bits(p.x), f2bits(p.y), f2bits(p.z) }; }
+
+// Cool→warm ramp (blue=0 → green → red=1). Returns 0x00RRGGBB (drawLine ORs
+// the alpha). Matches the flag help's "cool=0, warm=max".
+inline uint32_t rampColor(float t) {
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    int r, g, b;
+    if (t < 0.5f) { const float u = t * 2.0f;         r = 0;               g = int(255.0f*u);       b = int(255.0f*(1.0f-u)); }
+    else          { const float u = (t - 0.5f) * 2.0f; r = int(255.0f*u);  g = int(255.0f*(1.0f-u)); b = 0; }
+    return (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+}
+
+}  // namespace
+
+void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs) {
+    if (!FeatureFlags::displace_viz()) return;   // flag-off: record nothing
+    if (M) g_dispMats.insert(M);
+    const DispPosKey k = posKey(localPos);
+    auto it = g_dispMag.find(k);
+    if (it == g_dispMag.end() || dispAbs > it->second) g_dispMag[k] = dispAbs;
+    if (dispAbs > g_dispMax) g_dispMax = dispAbs;
+}
+
+void DisplaceViz_DrawOverlay(Scene* sc) {
+    if (!sc || !View || !VPage || XRes <= 0 || YRes <= 0) return;
+    if (g_offscreenViewDepth > 0) return;
+    if (g_dispMats.empty()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr, "[DISPLACE-VIZ] nothing to show: no displaced "
+                "geometry was recorded. --displace_viz needs --greets_displace "
+                "(the stone-displacement bake) ON.\n");
+        }
+        return;
+    }
+    const Matrix& VM = View->Mat;
+    const Vector  P  = View->ISource;
+    const float   nearZ  = sc->NZP > 0.01f ? sc->NZP : 0.01f;
+    const float   invMax = g_dispMax > 1e-9f ? (1.0f / g_dispMax) : 0.0f;
+
+    for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh) continue;
+        TriMesh* T = (TriMesh*)Obj->Data;
+        if (!T || T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+        for (DWord fi = 0; fi < T->FIndex; ++fi) {
+            const Face& F = T->Faces[fi];
+            if (!F.A || !F.B || !F.C) continue;
+            if (g_dispMats.find(F.Txtr) == g_dispMats.end()) continue;  // not a displaced material
+            Vertex* const corner[3] = { F.A, F.B, F.C };
+
+            // Local → world (RotMat * Pos + IPos) then project like the AABB
+            // overlay. Back-face + near-plane cull to cut clutter.
+            Vector w[3];
+            int sx[3], sy[3]; bool ok[3];
+            float cog[3] = { 0, 0, 0 };
+            for (int k = 0; k < 3; ++k) {
+                const Vector& lp = corner[k]->Pos;
+                MatrixXVector(T->RotMat, &lp, &w[k]);
+                w[k].x += T->IPos.x; w[k].y += T->IPos.y; w[k].z += T->IPos.z;
+                cog[0] += w[k].x; cog[1] += w[k].y; cog[2] += w[k].z;
+            }
+            // World face normal (RotMat * F.N); skip faces pointing away.
+            Vector wn; MatrixXVector(T->RotMat, &F.N, &wn);
+            const float vx = cog[0]/3.0f - P.x, vy = cog[1]/3.0f - P.y, vz = cog[2]/3.0f - P.z;
+            if (wn.x*vx + wn.y*vy + wn.z*vz > 0.0f) continue;   // back-facing
+
+            float mag[3];
+            for (int k = 0; k < 3; ++k) {
+                Vector d = { w[k].x - P.x, w[k].y - P.y, w[k].z - P.z };
+                Vector s; MatrixXVector(VM, &d, &s);
+                if (s.z > nearZ) {
+                    sx[k] = int(CntrEX + FOVX * s.x / s.z + 0.5f);
+                    sy[k] = int(CntrEY - FOVY * s.y / s.z + 0.5f);
+                    ok[k] = true;
+                } else {
+                    ok[k] = false;
+                }
+                auto it = g_dispMag.find(posKey(corner[k]->Pos));
+                mag[k] = (it != g_dispMag.end()) ? it->second * invMax : 0.0f;
+            }
+            static const int e3[3][2] = { {0,1}, {1,2}, {2,0} };
+            for (auto& e : e3)
+                if (ok[e[0]] && ok[e[1]])
+                    drawLine(sx[e[0]], sy[e[0]], sx[e[1]], sy[e[1]],
+                             rampColor(0.5f * (mag[e[0]] + mag[e[1]])));
+        }
     }
 }
 
