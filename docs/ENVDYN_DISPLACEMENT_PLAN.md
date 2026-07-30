@@ -214,10 +214,20 @@ POM keeps the fine detail from a residual map.
   GREETS.MAT `momy-2|smoothAngle|30` edit moved greets content mid-work);
   render_gate 3/3, city/fountain pins byte-equal, wasm links. A/B PNGs
   under /tmp/displace/.
-- **B4. Residual height map**: full-res height minus upsampled displaced
-  component (via MakeHeight8/Scene_MakeTiledTexture), installed as the
-  POM input so relief isn't double-counted; re-run MakeConeMap when cone
-  POM is enabled.
+- **B4. Residual height map — DONE (2026-07-31).** `MakeResidualHeight`
+  (MeshOps): res[m](x,y) = clamp(h[m] − bilinear(h[lowMip], uv) +
+  mean_low) evaluated per mip (mips ≥ lowMip flatten toward the mean —
+  geometry carries those scales; sub-block mips byte-copied), same 8-bit
+  tiled+mip layout so the kernel's swizzled index works unchanged.
+  Installed as `M->HeightMap` for 'rooms'/'floor' when `greets_displace`
+  is on; `MakeConeMap` re-baked from the residual when cone POM is
+  active. Degenerate sources return null (bake skipped them; original
+  map stays — the all-white shipping wall map case). Verified at t=5780
+  close-up: POM grooves persist on top of the displaced geometry, and
+  the double-counted state (displacement + full-map POM, captured
+  pre-residual) showed ragged doubled grooves that the residual removes.
+  Displacement OFF leaves the original map untouched (wiring is inside
+  the displace branch; flag-off byte-null re-proven).
 - **B5 (conditional on B2, independent perf win)**: per-face screen-bbox
   pre-reject in the tile walk (`RenderInner.cpp:220-247`) — 4 compares
   against the tile rect before clipper entry. Do it if L=3 is wanted OR
@@ -254,6 +264,9 @@ only, flags default-off until the user approves looks.
 - [x] B1 subdivision holes (weld premise disproven; Phong guard +
       fold-relax + NormProd recompute) · [x] B2 spike (numbers in B2
       above; decision L=2, B5 not required at L=2) ·
-      [ ] B3 displace · [ ] B4 residual · [~] B5 tile pre-reject
-      (measured non-required at L=2; only for an L=3 ambition, alongside
-      a shadow-bake cull)
+      [x] B3 displace (--greets_displace, default OFF, amp 0.3) ·
+      [x] B4 residual · [~] B5 tile pre-reject (measured non-required at
+      L=2; only for an L=3 ambition, alongside a shadow-bake cull).
+      WORKSTREAM B COMPLETE except the conditional B5 (declined on the
+      B2 numbers). Open content item: reinstate a real greets_wall_h.png
+      (shipping one is all-white — user's call).

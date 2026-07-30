@@ -209,6 +209,13 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels,
 // MakeFacesIndependentByAngle (re-derives vertex normals) + the chunk split.
 void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip);
 
+// B4 residual height map: full-res height minus the bilinear-upsampled lowMip
+// band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
+// displaced material, so geometry + parallax don't double-count the relief.
+// nullptr for degenerate (constant-at-lowMip) sources, matching the bake's
+// skip. Caller owns; re-run MakeConeMap on it when cone POM is active.
+Texture *MakeResidualHeight(Texture *height, int lowMip);
+
 struct Texture;
 
 // Bake an object-space normal map from a 32-bpp diffuse texture's

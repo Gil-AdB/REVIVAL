@@ -1363,6 +1363,101 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 	}
 }
 
+// B4 residual height map (docs/ENVDYN_DISPLACEMENT_PLAN.md): the POM input for
+// a DISPLACED material. Geometry now carries the low band of the relief
+// (amp*(h_lowMip - mean)), so if POM keeps marching the ORIGINAL map the block
+// relief is counted twice — once as real silhouette, once as parallax shift.
+// The residual removes the geometry's band:
+//     res[m](x,y) = clamp(h[m](x,y) − bilinear(h[lowMip], uv) + mean_low)
+// evaluated PER MIP at each texel's UV center, so every mip is consistent with
+// the same subtraction (mips ≥ lowMip flatten toward mean_low — correct: at
+// those scales the geometry carries everything). Same 8-bit tiled+mip layout as
+// the source (the rasterizer's swizzled index works unchanged). Mips smaller
+// than one tile block are byte-copied verbatim (layout degenerates below the
+// block; MakeConeMap skips them for the same reason). Degenerate (constant)
+// source at lowMip → nullptr (nothing was displaced — see the bake's guard —
+// so the original map must stay installed).
+// Caller owns the returned Texture; re-run MakeConeMap on it when cone POM is
+// active (the cone geometry changed with the heights).
+Texture *MakeResidualHeight(Texture *height, int lowMip) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
+		return nullptr;
+	const int blockX = height->blockSizeX, blockY = height->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	// Clamp lowMip exactly like the displacement bake (same band).
+	int useMip = lowMip;
+	if (useMip >= int(height->numMipmaps)) useMip = int(height->numMipmaps) - 1;
+	if (useMip < 0) useMip = 0;
+	while (useMip > 0 &&
+	       ((std::max(1, int(height->SizeX) >> useMip) < BX) ||
+	        (std::max(1, int(height->SizeY) >> useMip) < BY)))
+		--useMip;
+	// Degenerate guard + mean of the low mip (identical to the bake's scan).
+	float meanLow = 0.5f;
+	{
+		const int mw = std::max(1, int(height->SizeX) >> useMip);
+		const int mh = std::max(1, int(height->SizeY) >> useMip);
+		const byte *d = height->Mipmap[useMip];
+		byte lo = 255, hi = 0;
+		uint64_t sum = 0;
+		const size_t n = size_t(mw) * size_t(mh);
+		for (size_t i = 0; i < n; ++i) {
+			const byte b = d[i];
+			if (b < lo) lo = b;
+			if (b > hi) hi = b;
+			sum += b;
+		}
+		if (hi - lo < 2) return nullptr;   // bake skipped this map too
+		meanLow = float(double(sum) / double(n)) * (1.0f / 255.0f);
+	}
+	// Allocate the full chain (same walk as MakeHeight8/MakeConeMap).
+	size_t total = 0;
+	{ int cx = height->SizeX >> blockX, cy = height->SizeY >> blockY;
+	  for (dword i = 0; i < height->numMipmaps; ++i) {
+	      total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+	      cx = (cx + 1) >> 1; cy = (cy + 1) >> 1; } }
+	Texture *res = new Texture;
+	*res = *height;
+	res->Pal = nullptr; res->FileName = nullptr; res->ID = 0;
+	for (int i = 0; i < 16; ++i) res->Mipmap[i] = nullptr;
+	byte *dst = (byte *)getAlignedBlock(total);
+	res->Data = dst;
+	const byte *h0 = height->Mipmap[0];
+	for (dword i = 0; i < height->numMipmaps; ++i)
+		res->Mipmap[i] = dst + size_t(height->Mipmap[i] - h0);
+
+	for (dword m = 0; m < height->numMipmaps; ++m) {
+		const int mw = std::max(1, int(height->SizeX) >> m);
+		const int mh = std::max(1, int(height->SizeY) >> m);
+		const byte *src = height->Mipmap[m];
+		byte *out = res->Mipmap[m];
+		const size_t mipBytes = (m + 1 < height->numMipmaps)
+			? size_t(height->Mipmap[m + 1] - height->Mipmap[m])
+			: total - size_t(height->Mipmap[m] - h0);
+		if (mw < BX || mh < BY) {           // sub-block mip: copy verbatim
+			std::memcpy(out, src, mipBytes);
+			continue;
+		}
+		for (int y = 0; y < mh; ++y) {
+			const float v = (float(y) + 0.5f) / float(mh);
+			for (int x = 0; x < mw; ++x) {
+				const float u = (float(x) + 0.5f) / float(mw);
+				const size_t off = SwizzledOffset(x, y, blockX, blockY, mh);
+				const float hFull = float(src[off]) * (1.0f / 255.0f);
+				const float hLow  = SampleHeight8Bilinear(height, useMip, u, v);
+				float r = hFull - hLow + meanLow;
+				if (r < 0.0f) r = 0.0f;
+				if (r > 1.0f) r = 1.0f;
+				out[off] = byte(r * 255.0f + 0.5f);
+			}
+		}
+	}
+	std::fprintf(stderr,
+		"[DISPLACE] residual height map: %dx%d mips=%u, lowMip=%d meanLow=%.3f\n",
+		height->SizeX, height->SizeY, height->numMipmaps, useMip, (double)meanLow);
+	return res;
+}
+
 #include <Base/Object.h>
 #include <Base/TriMesh.h>
 #include <Base/Vector.h>

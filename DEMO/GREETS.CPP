@@ -1431,6 +1431,27 @@ void Initialize_Greets()
 			const int   mip = fds::FeatureFlags::greets_displace_mip();
 			DisplaceMaterialVertices(GreetSc, "rooms", amp, mip);
 			DisplaceMaterialVertices(GreetSc, "floor", amp, mip);
+			// B4 residual: geometry now carries the low band of the relief, so
+			// POM must march the RESIDUAL (full − upsampled low band) or the
+			// blocks get counted twice (geometry bump + parallax shift of the
+			// same edges). Degenerate maps return null (the bake skipped them
+			// — original map stays, e.g. the all-white shipping wall map).
+			// Cone POM's map is rebaked from the residual heights when active.
+			for (Material *M = MatLib; M; M = M->Next) {
+				if (M->RelScene != GreetSc || !M->Name || !M->HeightMap) continue;
+				if (std::strcmp(M->Name, "rooms") && std::strcmp(M->Name, "floor"))
+					continue;
+				if (Texture *resid = MakeResidualHeight(M->HeightMap, mip)) {
+					M->HeightMap = resid;   // original leaks (init-time, matches loaders)
+					if (M->ConeMap) {
+						M->ConeMap = MakeConeMap(M->HeightMap);
+						std::fprintf(stderr, "[DISPLACE] '%s' cone map rebaked "
+						             "from the residual\n", M->Name);
+					}
+					std::fprintf(stderr, "[DISPLACE] '%s' POM input -> residual "
+					             "height map\n", M->Name);
+				}
+			}
 		}
 	}
 
