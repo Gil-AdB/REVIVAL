@@ -1387,7 +1387,7 @@ void Initialize_Greets()
 
 	GreetSc->PathingMinVelocity = 0.01;
 
-	// EXPERIMENTAL geometry fix for the mummy ('momy'): Phong-tessellate the
+	// EXPERIMENTAL geometry fix for the mummy ('momy-1'): Phong-tessellate the
 	// coarse lathe to round the silhouette. DEFAULT OFF (FDS_MOMY_SUBDIV=N to
 	// enable) — the current impl CRACKS the mesh at its UV/duplicate-vertex
 	// seams (edge-midpoint sharing is keyed by vertex index and doesn't merge
@@ -1395,7 +1395,7 @@ void Initialize_Greets()
 	{
 		const char *lv = std::getenv("FDS_MOMY_SUBDIV");
 		const int levels = lv ? std::atoi(lv) : 0;
-		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy", levels);
+		if (levels > 0) SubdivideMaterialFaces(GreetSc, "momy-1", levels);
 	}
 
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
@@ -1628,12 +1628,12 @@ void Initialize_Greets()
 		// a unique ShadowMatID per facet → at each poly edge the light-view and
 		// camera-view faces carry different ids → the PolyId equality test reports
 		// a spurious self-shadow → a dark line on every facet edge. The mummy
-		// ('momy') is the one curved lathe in Piramid.lwo, so force its whole
+		// ('momy-1') is a curved lathe in Piramid.lwo, so force its whole
 		// surface to a single id (it then self-matches everywhere → no acne lines).
 		// Same idea as the hull/robot single-id merge. Add curved alcove mats here
 		// when we tackle those (concave, so it's a softer trade-off — real
 		// self-shadowing inside the alcove is lost along with the artifact).
-		static const std::set<std::string> kSingleShadowIdMats = { "momy" };
+		static const std::set<std::string> kSingleShadowIdMats = { "momy-1" };
 
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;

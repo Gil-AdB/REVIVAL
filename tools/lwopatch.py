@@ -490,6 +490,45 @@ class LwoFile:
             return None
         return self.commit_split(analysis, self.default_split_parts(analysis))
 
+    def rename_surface(self, old, new):
+        """Rename a surface end-to-end: the SURF chunk name AND its SRFS entry.
+        POLS surface indices reference the SRFS *position* (1-based), which is
+        preserved — only the name string bytes change — so every polygon keeps
+        its material. The SRFS body is rewritten surgically (only the matching
+        entry's bytes change; every other entry is copied through verbatim), so
+        the on-disk byte-diff is exactly the name change + its NUL/even-pad +
+        the SURF/SRFS/FORM length-field adjustments, nothing else. Raises if
+        `old` is absent or `new` already exists (name collisions break the
+        SURF<->SRFS FindMat match)."""
+        s = self.surface(old)
+        if s is None:
+            raise ValueError(f"no surface '{old}'")
+        if self.surface(new) is not None:
+            raise ValueError(f"surface '{new}' already exists")
+        s.name = new                        # SURF chunk (serialize() re-pads)
+        srfs_i, body = self._raw_chunk("SRFS")
+        if body is None:
+            raise ValueError("no SRFS chunk")
+        out = bytearray()
+        p, replaced = 0, False
+        while p < len(body):
+            z = body.index(b"\x00", p)      # names are NUL-terminated,
+            end = z + 1                      # then even-padded within the chunk
+            if end % 2:
+                end += 1
+            if not replaced and body[p:z].decode("latin-1") == old:
+                nb = new.encode("latin-1") + b"\x00"
+                if len(nb) % 2:
+                    nb += b"\x00"
+                out += nb
+                replaced = True
+            else:
+                out += body[p:end]           # untouched entry: byte-verbatim
+            p = end
+        if not replaced:
+            raise ValueError(f"surface '{old}' not in SRFS")
+        self.chunks[srfs_i] = ("SRFS", bytes(out))
+
     def serialize(self):
         out = b""
         for cid, c in self.chunks:
@@ -524,6 +563,8 @@ def main():
     ap.add_argument("--split", metavar="SURF",
                     help="bake the spatial instance-split of SURF into the file "
                          "(new real surfaces '<SURF>2', ... — see split_surface)")
+    ap.add_argument("--rename", action="append", default=[], metavar="OLD=NEW",
+                    help="rename a surface (SURF + SRFS name); repeatable")
     ap.add_argument("--backup-dir", help="copy the original here before writing")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-o", "--out", help="write to OUT instead of in place")
@@ -556,6 +597,16 @@ def main():
         for k, c in sorted(res["centroids"].items()):
             print(f"  part {k} ('{res['parts'][k]}') centroid raw-LWO "
                   f"({c[0]:.2f} {c[1]:.2f} {c[2]:.2f})")
+        touched = True
+    for spec in args.rename:
+        old_name, _, new_name = spec.partition("=")
+        if not old_name or not new_name:
+            sys.exit(f"bad --rename '{spec}' (want OLD=NEW)")
+        try:
+            lwo.rename_surface(old_name, new_name)
+        except ValueError as e:
+            sys.exit(f"{args.file}: {e}")
+        print(f"renamed surface '{old_name}' -> '{new_name}'")
         touched = True
     for spec in args.set:
         surf_name, _, kv = spec.rpartition(":")

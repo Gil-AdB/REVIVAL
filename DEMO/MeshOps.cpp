@@ -110,7 +110,7 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	}
 	const float cosSmoothing = std::cos(smoothingThresholdDegrees * float(PI) / 180.0f);
 
-	// The mummy ('momy') is an organic lathe that LightWave authored as
+	// The mummy ('momy-1') is an organic lathe that LightWave authored as
 	// smooth (Surf_Smoothing, MaxSmoothingAngle ~1.6 rad ≈ 92°). The global
 	// architectural crease threshold (30°, tuned for hard edges like the City
 	// corners) splits its radial facets and the whole body goes faceted. For
@@ -118,7 +118,7 @@ void MakeFacesIndependent(TriMesh *T, float smoothingThresholdDegrees) {
 	// only among its own faces so it can't bleed into the floor it sits on.
 	// Every other surface keeps the global threshold => other scenes unchanged.
 	auto matIsMomy = [](const Face *f) {
-		return f && f->Txtr && f->Txtr->Name && !std::strcmp(f->Txtr->Name, "momy");
+		return f && f->Txtr && f->Txtr->Name && !std::strcmp(f->Txtr->Name, "momy-1");
 	};
 
 	// Per-surface smoothing angle. Two opt-in sources, both superseding the
