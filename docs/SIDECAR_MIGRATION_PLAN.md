@@ -229,12 +229,27 @@ Phase 1 (writers; reader untouched; every FLD + gate byte-identical)
 
   ── writers all landed; sidecar reader STILL LIVE; both paths coexist ──
 
-  ★ USER CHECKPOINT (below) ★
+  ★ USER CHECKPOINT — ✅ DONE 2026-07-30 (see below) ★
 
-Phase 2 (STOP boundary for this campaign — do NOT start here)
-  2.1  re-verify greets renders from LWO/LWS alone (sidecar empty/deleted)
-  2.2  retire the sidecar reader (MaterialImport_ApplySidecar / _ApplySceneDefaults)
-  2.3  DELETE the 7 `#k` collapse sites (§5) — not guard, DELETE
+Phase 2 — NUMERIC SLICE DONE 2026-07-30 (e8098fe / 000c59b / c11261d);
+remainder BLOCKED on slices 1.5/1.6:
+  ✅ 2.1  greets renders the RVSF numeric dials from LWO/LWS alone — proven
+          with the retired reader + untrimmed sidecar (8 IGNORED notices,
+          renders byte-stable: momy2-cam 3/3 identical, pin + stairs-cam
+          stable-pixel gates 5v5 = 0 mismatches). (c11261d)
+  ✅ 2.2  reader retired for the TEN RVSF numeric keys ONLY
+          (MaterialImport_ApplySidecar sidecarIsRetiredRvsfKey → line
+          IGNORED + trim hint). STILL LIVE on the sidecar, by design:
+          map-role lines (§1e), smoothAngle (§1b), normalFlip (§1e),
+          light:/obj:/scene: records, and MaterialImport_ApplySceneDefaults
+          (§1f — its keys never migrated). GREETS.MAT numeric lines trimmed
+          (8 removed); map roles + 4 smoothAngle lines remain. (c11261d)
+  ⛔ 2.3  the 7 `#k` collapse sites (§5) NOT deleted — blocked on the
+          remaining writer slices (1.5 smoothAngle, 1.6 PBR maps +
+          normalFlip) and on a proven COMPLETE editor Save rewrite (the
+          §5 constraint: a Save that still emits `#k` names needs the
+          collapse to route them). Same block applies to retiring the
+          map-role reader path.
 ```
 
 **Slice 1.5 finding (smoothAngle is NOT a clean SMAN drop-in).** The engine's
@@ -254,7 +269,23 @@ engine change with LOOK verification needed — and greets (where the data lives
 is nondeterministic here (§6), so this slice needs its own careful treatment,
 not a rushed one. lwopatch also needs `SMAN` write support (degrees→radians).
 
-### ★ USER CHECKPOINT — required before Phase 2 (reader retirement) ★
+### ★ USER CHECKPOINT — ✅ DONE 2026-07-30, by the user himself ★
+
+Completed through the browser editor in three Saves (00:47 / 01:35 / 01:36,
+editor_server backups in Authoring/greets/.backups/): (a) 00:47 baked the
+momy split into Piramid.lwo — `momy2` is a real authored surface (336+336
+polys, geometric centroid matching); (b) 01:35 assigned the second mummy's
+maps onto `momy2` under canonical names (momy2_*.png, byte-identical to the
+momy_2_* originals) — map roles stay sidecar-carried until §1e; (c) 01:36
+authored RVSF envBakeRes=512 on momy+momy2 via the editor — the FIRST
+live-authored RVSF sub-chunks, proving the slice-1.2 writer end-to-end.
+The remaining GREETS.MAT numeric dials (amudim/screen 4/siling/stairs) were
+transcribed programmatically (user-authorized) in 000c59b, with the FLD
+byte-diff decoded and value-verified. Committed: e8098fe + 000c59b.
+The four dead `momy#2|` lines were removed in e8098fe (after the bake no
+load can match a `#k` name — each mummy is a single spatial cluster now).
+
+Original checkpoint text kept below for provenance:
 
 The sidecar reader cannot be retired until the user re-saves greets **once**
 through the browser editor, because the live `Runtime/SCENES/GREETS.MAT` holds
@@ -401,3 +432,16 @@ They are load-bearing until §3's checkpoint + reader retirement, hence Phase 2.
 - **`smoothAngle` is native, not engine-only** (§1b) — it maps to `SMAN` /
   `MaxSmoothingAngle`, not RVSF, but needs the authoring-scene smoothing source
   switched from the MeshOps override to the material's `MaxSmoothingAngle`.
+- **Greets equivalence gating that actually works (Phase 2, 2026-07-30):**
+  raw hash-majority at the SESSION_STATE pin is DEAD in this tree — all 5
+  runs of any state hash distinct (the glowing greets-screen face's glow/text
+  phase is wall-clock-driven, plus RTT/bake speckle; ~15-30% of pixels churn
+  run-to-run). Two gates replaced it: (1) a **stable-pixel gate**
+  (scratch ppmgate.py pattern): pixels byte-identical across all 5 runs of
+  state A AND all 5 of state B must be equal between A and B — volatile
+  pixels are excluded and visually attributed; 0-mismatch = pass. (2) the
+  **momy2 close-cam is fully deterministic**
+  (`FDS_GREETS_CAM="-12.1,3.2,-27.0,0,-0.06,-1"` + the pin recipe's flags,
+  t=1588): 3/3 byte-identical every state — a real byte-gate for greets
+  material work. A stairs close-cam (`"35,4,-55,0.72,-0.17,-0.68"`) probes
+  aoStrength/parallaxScale via the stable-pixel gate.
