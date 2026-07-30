@@ -138,6 +138,10 @@ std::string Editor_GetSurfacesJSON()
 		// env_bake_res chain) — 'probe res' select next to the env probe
 		// control; sidecar 'envBakeRes'.
 		appendNum(out, "envBakeRes",   M->EnvBakeRes); out += ",";
+		// Authored dynamic-env-reflection flag (0/1; ENVDYN Workstream A1) —
+		// editor checkbox near the env probe controls; RVSF sub-chunk bit 0x400
+		// ('envDynamic' in SURF_SIDECAR_KEYS/RVSF_SURF_KEYS).
+		appendNum(out, "envDynamic",   M->EnvDynamic); out += ",";
 		// Procedural-water composite override, tri-state like envRefl (-1 off /
 		// 0 auto→global --water_procedural / 1 on); sidecar 'waterProcedural'.
 		// isWater marks the scene's registered water material (the only surface
@@ -497,7 +501,11 @@ bool Editor_SetSurfaceProp(const char* name, const char* key, float value)
 	// per-surface edit must not force a whole-scene re-bake (the wasm OOM). The
 	// sidecar's scene-INIT apply goes straight to MaterialImport_SetSurfaceProp
 	// (nothing baked yet), so hooking the live-editor path here is sufficient.
-	if (any && (!std::strcmp(key, "envRefl") || !std::strcmp(key, "envBakeRes")))
+	// envDynamic (ENVDYN A1) also changes what the store must retain (A2's
+	// static Z + colour master) — drop the probe so FramePrep re-bakes it
+	// under the new retention rule.
+	if (any && (!std::strcmp(key, "envRefl") || !std::strcmp(key, "envBakeRes")
+	            || !std::strcmp(key, "envDynamic")))
 		editorInvalidateSurfaceEnv(name);
 	if (any) Editor_MarkDirty();
 	return any;

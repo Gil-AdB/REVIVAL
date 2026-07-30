@@ -65,6 +65,7 @@ typedef struct
 	int8_t         EnvReflMode;     // bit 0x080
 	int32_t        EnvBakeRes;      // bit 0x100
 	int8_t         WaterProcMode;   // bit 0x200
+	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
 } FldMat;
 
 typedef struct _FldKeyFrame_

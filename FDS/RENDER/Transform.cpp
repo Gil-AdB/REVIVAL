@@ -546,6 +546,9 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 // skip emptied the room out of the probe).
 namespace fds { extern bool g_envBakeSkipDynamic;
                 extern bool g_envBakeSkipMirrorClones;
+                extern bool g_envOverlayDynamicOnly;   // ENVDYN A3: invert the
+                    // static-only env bake — render DYNAMIC meshes only, static
+                    // skipped (mirrors g_inDynamicShadowBake for the env overlay)
                 bool EnvBake_HasSkipFaces();
                 bool EnvBake_FaceExcluded(const Face* F, TriMesh* T);
                 bool EnvBake_LegacyMeshExcluded(TriMesh* T);
@@ -632,7 +635,12 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		&& !g_inDynamicShadowBake
 		&& fds::FeatureFlags::shadow_skip_animated())
 		|| fds::g_envBakeSkipDynamic;
-	const bool inDynamicBake = g_inShadowPass && g_inDynamicShadowBake;
+	// inDynamicBake keeps DYNAMIC meshes only, skipping static ones. The
+	// shadow dynamic bake sets it via g_inDynamicShadowBake; the ENVDYN env
+	// overlay (A3) sets it via g_envOverlayDynamicOnly (not a shadow pass, so
+	// gate independently of g_inShadowPass).
+	const bool inDynamicBake = (g_inShadowPass && g_inDynamicShadowBake)
+		|| fds::g_envOverlayDynamicOnly;
 	// Normalize the cone axis once: the shadow lighting kernel does the
 	// same for its per-pixel cone test (see StaticLighting), so the
 	// authored IDir is not guaranteed unit-length in world space.

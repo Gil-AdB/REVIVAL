@@ -258,9 +258,6 @@ only, flags default-off until the user approves looks.
 ## Status
 
 - [x] Slice 0 rename (f4f2e38 + 0808bd1)
-- [ ] F AABB foundation
-- [ ] A1 editor-flagged probes  · [ ] A2 store retention · [ ] A3 overlay
-      · [ ] A4 city depth cache (optional)
 - [x] B1 subdivision holes (weld premise disproven; Phong guard +
       fold-relax + NormProd recompute) · [x] B2 spike (numbers in B2
       above; decision L=2, B5 not required at L=2) ·
@@ -270,3 +267,46 @@ only, flags default-off until the user approves looks.
       WORKSTREAM B COMPLETE except the conditional B5 (declined on the
       B2 numbers). Open content item: reinstate a real greets_wall_h.png
       (shipping one is all-white — user's call).
+- [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
+      frame from posed local-AABB corners) + world-space `Frustum` (main
+      camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`
+      overlay. `FDS/RENDER/WorldAabb.{h,cpp}`. Flag-off byte-null (render_gate
+      3/3 + city/fountain pins). (commit 0d8f217)
+- [x] **A1 editor-flagged probes** — `envDynamic` RVSF bit **0x400** (ascending
+      order; 0x800+ reserved for slice 1.6) → `Material::EnvDynamic`, editor
+      'dynamic env' checkbox. lwsread regen inert (city/crash/pbrtest golden
+      md5s); authored path proven (FLD +3B, Surf_RevExt set). (13a700b)
+    · [x] **A2 store retention** — `EnvPanoStore` keeps a pristine static colour
+      master + the per-face depth the bake used to free, allocated ONLY for
+      `EnvDynamic` cube probes. **~2.25 MB / 256² probe** (768 KB Z + 1.5 MB
+      colour). (c7dcfc6)
+    · [x] **A3 overlay** — `--env_dynamic` (default 0) + `--env_dynamic_budget`
+      (2). Per flagged probe: camera-frustum owner gate → mover-bsphere /
+      padded-face-pyramid touch cull → dynamic-only raster+shade per touched
+      face → composite over static (depth-occluded) → per-face mip refilter.
+      **BENCH (measured, not estimated):** greets pin pose, throwaway `floor`
+      probe flagged, mech adjacent → **1 probe / 1 touched face / 7 movers /
+      256² face = ~1.3–1.6 ms** (`FDS_ENVDYN_PROF`). A/B: env_dynamic ON vs
+      OFF moves 2042 stable floor-reflection px (the live mech). Flag-off
+      byte-null (render_gate 3/3 + city/fountain + greets momy2-cam 3/3
+      `38518154`). (33ba879)
+    · [ ] **A4 city depth cache (optional) — SKIPPED.** A1–A3 do not depend on
+      it (city `imported` stores simply carry no retained depth, so a flagged
+      city surface gets no overlay until this lands). Deferred: extend
+      `city_envmap*.bin` with per-face depth behind a format-tag bump so city
+      probes can be flagged later.
+
+### Foundation-F padded-face-pyramid cull derivation (A3 step 2)
+
+`Frustum_FromProbeFace` builds the **tight 4-plane** pyramid for a padded cube
+face, not a circumscribed cone: the padded face half-FOV has `tan θ =
+kEnvCubePad = 1.25`, so the four side planes have view-frame inward normals
+`(±1,0,pad)` / `(0,±1,pad)` — an exact sphere-vs-plane test the F frustum
+machinery already provides, strictly tighter than a cone. For reference, the
+**re-derived circumscribed cone** (had we mirrored Shadows.cpp's 90° form,
+which the plan warns against copying): a square pyramid's corner sits at angle
+`atan(√2·tanθ)` off the axis, so for the padded face `tanα = √2·1.25 =
+1.76777`, `cosα = 1/√(1+2·pad²) = 1/√4.125 = 0.49237`, `1/cosα = 2.03101`
+(vs Shadows.cpp's 90°-pyramid `√2 / 0.57735 / √3`). The 4-plane test is used;
+these constants are recorded so the padded face is never conflated with 90°.
+

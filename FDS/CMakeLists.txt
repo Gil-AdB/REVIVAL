@@ -136,6 +136,8 @@ set(RENDER
     RENDER/DeferredVolumetric.cpp
     RENDER/EnvBake.cpp
     RENDER/EnvBake.h
+    RENDER/WorldAabb.cpp
+    RENDER/WorldAabb.h
     RENDER/GENERAL.H
     RENDER/GreetsMirror.cpp
     RENDER/GreetsMirror.h

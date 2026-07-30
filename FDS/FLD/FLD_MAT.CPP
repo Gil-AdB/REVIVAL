@@ -244,6 +244,7 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 		if (m & 0x080) candidate.EnvReflMode   = OrgMat->EnvReflMode;
 		if (m & 0x100) candidate.EnvBakeRes    = OrgMat->EnvBakeRes;
 		if (m & 0x200) candidate.WaterProcMode = OrgMat->WaterProcMode;
+		if (m & 0x400) candidate.EnvDynamic    = OrgMat->EnvDynamic;   // ENVDYN A1
 	}
 
 	// Dedup on the runtime-relevant subset. Two FldMat entries with

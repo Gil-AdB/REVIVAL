@@ -171,6 +171,7 @@ void SaveMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x080) fwrite(&Mat->EnvReflMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x100) fwrite(&Mat->EnvBakeRes,1,4,FLD);
 		if (Mat->RevExtMask & 0x200) fwrite(&Mat->WaterProcMode,1,1,FLD);
+		if (Mat->RevExtMask & 0x400) fwrite(&Mat->EnvDynamic,1,1,FLD);   // ENVDYN A1
 	}
 }
 

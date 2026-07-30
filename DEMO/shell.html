@@ -613,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b67</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b68</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -710,7 +710,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b67";
+      var REV_BUILD = "b68";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1060,7 +1060,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','envDynamic','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -2725,6 +2725,20 @@
             brs.onchange = function(){ setProp(s.name, 'envBakeRes', +brs.value); };
             br.appendChild(brs);
             el.appendChild(br);
+            // DYNAMIC ENV (ENVDYN Workstream A1): mark this surface's env probe
+            // for the LIVE dynamic-mesh reflection overlay (the mech appears in
+            // it). Off = static probe (default). Needs the env_dynamic render
+            // knob ON to take visible effect. Live-applies (probe re-bakes with
+            // static-Z/colour retention); persists via the LWO RVSF sub-chunk
+            // (bit 0x400, 'envDynamic'). This is the authored control the whole
+            // dynamic-reflection workstream keys off — nothing flagged = inert.
+            var dy = document.createElement('div'); dy.className = 'prop-row';
+            dy.title = 'dynamic env reflection: mark THIS surface’s reflection probe so moving meshes (the mech) render live into it via the overlay pass. Needs the env_dynamic render knob ON. Off = static probe (default). Persists in the LWO RVSF sub-chunk (envDynamic).';
+            var dyl = document.createElement('label'); dyl.textContent = 'dynamic env'; dy.appendChild(dyl);
+            var dyc = document.createElement('input'); dyc.type = 'checkbox'; dyc.checked = !!(+s.envDynamic);
+            dyc.onchange = function(){ setProp(s.name, 'envDynamic', dyc.checked ? 1 : 0); };
+            dy.appendChild(dyc);
+            el.appendChild(dy);
           }
         });
         // REFRACTIVE (glass): mark this material as screen-space-refracting

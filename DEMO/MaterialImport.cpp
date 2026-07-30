@@ -495,6 +495,12 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// line renders byte-identically.
 		else if (!std::strcmp(prop, "waterProcedural"))
 			M->WaterProcMode = value < -0.5f ? int8_t(-1) : value > 0.5f ? int8_t(1) : int8_t(0);
+		// Authored dynamic-env-reflection flag (ENVDYN Workstream A1). 0/1;
+		// persisted via the LWO 'RVSF' sub-chunk (bit 0x400) → FLD, and set
+		// live here for the editor's Material-panel checkbox. Marks this
+		// material's env probe for the live dynamic-mesh overlay (A2/A3).
+		else if (!std::strcmp(prop, "envDynamic"))
+			M->EnvDynamic = value > 0.5f ? int8_t(1) : int8_t(0);
 		// Per-surface smoothing (normal-averaging) angle. Engine-only, no
 		// material field: recorded in the MeshOps registry and consumed when
 		// MakeFacesIndependent rebuilds this surface's vertex normals. That
@@ -548,7 +554,7 @@ static bool sidecarIsRetiredRvsfKey(const char *key) {
 	static const char *const rvsf[] = {
 		"aoStrength", "parallaxScale", "tintR", "tintG", "tintB",
 		"refractIor", "refractive", "envRefl", "envBakeRes",
-		"waterProcedural",
+		"waterProcedural", "envDynamic",
 	};
 	for (const char *k : rvsf)
 		if (!std::strcmp(key, k)) return true;
