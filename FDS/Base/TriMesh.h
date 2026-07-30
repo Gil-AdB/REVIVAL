@@ -115,6 +115,21 @@ struct TriMesh
     // Animate_Objects, so the knob cannot affect them (greets' baked room).
     float            EditorScale        = 0.0f;
 
+    // World-space axis-aligned bounding box (Foundation F, docs/
+    // ENVDYN_DISPLACEMENT_PLAN.md). Maintained by WorldAabb_UpdateScene:
+    // LocalAabb* is the model-space box, computed ONCE from Verts;
+    // WorldAabb* is the posed box. Static meshes compute the world box
+    // once (post first transform); dynamic meshes (isDynamicForBake)
+    // recompute it each frame by transforming the eight LocalAabb corners
+    // through RotMat + IPos (conservative under rotation). Consumed by the
+    // frustum-vs-AABB reject (main camera / probe face pyramid) and the
+    // --draw_aabbs overlay. Zero-init (memset TriMesh sites) leaves both
+    // Valid flags 0 = "not yet computed"; no effect until F/A code reads it.
+    Vector           LocalAabbMin, LocalAabbMax;
+    Vector           WorldAabbMin, WorldAabbMax;
+    uint8_t          LocalAabbValid = 0;   // model-space box computed
+    uint8_t          WorldAabbValid = 0;   // world box valid (static: once)
+
     // this is a temporary hack and will be removed in the future
     dword			 SortPriorityBias   = 0; // '1' value causes object to always be rendered first
 

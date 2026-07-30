@@ -26,6 +26,7 @@
 #include <RENDER/GreetsMirror.h>
 #include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
+#include "RENDER/WorldAabb.h"
 #include "FillerTest.h"
 
 // FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
@@ -2982,6 +2983,15 @@ struct GreetsScene : SceneDriver {
 		fds::RenderSecondOrderMirrors(GreetSc, g_greetsMirrors,
 		                              g_greetsRttSlots); }
 
+		// Foundation F (docs/ENVDYN_DISPLACEMENT_PLAN.md): refresh world
+		// AABBs after Animate_Objects (pose current) and before the main
+		// Transform, so the frustum-vs-AABB machinery + the --draw_aabbs
+		// overlay see this frame's boxes. Only walked when a consumer is
+		// live (the debug overlay for now); flag-off = never called = byte-
+		// null.
+		if (fds::FeatureFlags::draw_aabbs())
+			fds::WorldAabb_UpdateScene(GreetSc);
+
 		// --bake_tick_overlap: dispatch the per-frame shadow bake NOW — its
 		// pool tasks run underneath the serial Transform/Lighting/Radix
 		// chunk below (complementary resources: the pool is otherwise
@@ -3198,6 +3208,10 @@ struct GreetsScene : SceneDriver {
 		if (fds::FeatureFlags::greets_mirror_debug_mask()) {
 			fds::DebugOverlayMirrorMask(GreetSc);
 		}
+
+		// Foundation F world-AABB / frustum overlay (--draw_aabbs).
+		if (fds::FeatureFlags::draw_aabbs())
+			fds::WorldAabb_DrawOverlay(GreetSc);
 
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
