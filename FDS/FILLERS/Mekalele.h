@@ -472,6 +472,11 @@ struct TileRasterizerCtx {
 	// skip risk for speed; the binary refine recovers the crossing inside any
 	// bracket it lands. 1 = the raw conservative bake.
 	float pomRelax = 1.0f;
+	// --pom_viz: replace the albedo with the height field sampled at the FINAL
+	// (post-march) UV, grayscale — the parallax result made directly visible
+	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
+	// the texture-filter albedo path, so it needs --texture_filter >= 1.
+	bool pomViz = false;
 };
 
 // Debug (snapshot FDS_DUMP_TXTR path): optional per-pixel dump of the finalized
@@ -1249,6 +1254,26 @@ struct TileRasterizer {
 							albedoCol = Vec8ui(compress(
 								(c0e * triIW + c1e * triW) >> 8));
 						}
+						// --pom_viz: swap the albedo for the height field at the
+						// FINAL (post-march) UV — the parallax result rendered
+						// directly (domes/mortar/march terracing). Debug only.
+						if (ctx.pomViz && ctx.heightData) {
+							Vec8i hva = packed_tile_u(u, LogHeight, t_umask_swizzled)
+							          + packed_tile_v(v, t_vmask);
+							alignas(32) int32_t hAd[8]; hva.store_a(hAd);
+							alignas(32) uint32_t g8[8];
+							for (int k = 0; k < 8; ++k) {
+								// Contrast-stretch around the calibrated midband
+								// (the shipping maps are ~mean 140 / sigma 27 in
+								// 8-bit) so the narrow height histogram reads.
+								const int32_t raw = int32_t(ctx.heightData[hAd[k]]);
+								int32_t g = (raw - 140) * 3 + 128;
+								if (g < 0) g = 0; else if (g > 255) g = 255;
+								g8[k] = 0xFF000000u | (uint32_t(g) << 16)
+								      | (uint32_t(g) << 8) | uint32_t(g);
+							}
+							albedoCol.load_a(g8);
+						}
 						_mm256_maskstore_ps((float*)span.albedo,
 							*(__m256i*)(&p_mask), *(__m256*)(&albedoCol));
 					}
@@ -1711,6 +1736,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
 		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
+		.pomViz = fds::FeatureFlags::pom_viz(),
 	};
 	meka::TileRasterizer r(*gb, ctx);
 
