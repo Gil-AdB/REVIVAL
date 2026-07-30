@@ -121,6 +121,19 @@ items below stay PARKED.
   city-glass AVX2 fast path (disabled today when the flag is on) could stay on.
   Measured free at greets scale, so LOW priority — do only if a profile shows it.
 
+- **B5 per-face screen-bbox tile-walk pre-reject + shadow-bake face cull**
+  (deferred 2026-07-31, ENVDYN plan workstream B). The B2 spike measured the
+  per-face fixed cost of extra faces at ~2-2.8 µs/face SERIAL in RNDR (tile
+  walk/clipper entry, `RenderInner.cpp:220-247` — no pre-reject exists) and a
+  comparable BAKE share (the per-frame shadow bake re-rasters every subdivided
+  face per light, camera-independent). At the shipped L=2 stone-subdiv density
+  (+3.4k faces) the total is +2.3 ms threaded at the worst pose — declined as
+  not material. Wanted only if L=3 (+14.2k faces = +11.5 ms threaded) is ever
+  desired: then BOTH the walk pre-reject (4 compares vs the tile rect before
+  clipper entry) AND a shadow-bake cull are needed — B5 alone can't rescue L=3
+  because BAKE (+14-16 ms serial at L3) doesn't go through the tile walk.
+  Numbers: docs/ENVDYN_DISPLACEMENT_PLAN.md B2 table.
+
 ## Perf (measured bottlenecks — from docs/PERF_STATE.md + the 15fps analysis)
 The greets frame is ~2.5–3× a "generic deferred" frame; the fat is shadowing,
 not shading. Biggest levers, in order:
