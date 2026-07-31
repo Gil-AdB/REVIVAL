@@ -710,7 +710,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b70";
+      var REV_BUILD = "b71";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -3215,57 +3215,188 @@
             updateSaveButton(); refreshSurfacesAndProps(s.name);
           });
         }
-        function showSetPicker(sets){
+        // Two-section picker: sets INSTALLED under Runtime/TEXTURES/PBR/ and
+        // CANDIDATE sets from a server-scanned import dir (default the FreePBR
+        // library; text field + rescan point it anywhere). Candidates install
+        // on choose (POST /api/pbrinstall: copy + normalize to <role>.png,
+        // tif/jpg converted server-side) and then apply like an installed set.
+        // 600+ candidates: category groups build their cards ONLY on expand,
+        // and thumbs are lazy — opening the dialog fetches no thumbnails.
+        function showSetPicker(installed, cand){
           var ov = document.createElement('div');
           ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;overflow:auto;padding:20px;';
           var box = document.createElement('div'); box.style.cssText = 'max-width:1140px;margin:0 auto;';
-          var head = document.createElement('div'); head.style.cssText = 'display:flex;align-items:center;color:#fff;margin-bottom:10px;';
-          var ht = document.createElement('div'); ht.textContent = 'Installed PBR sets for "' + s.name + '" — ' + sets.length + ' set(s)';
+          var head = document.createElement('div'); head.style.cssText = 'display:flex;align-items:center;color:#fff;margin-bottom:8px;';
+          var ht = document.createElement('div');
+          ht.textContent = 'PBR sets for "' + s.name + '" — ' + installed.length + ' installed, '
+                         + (cand.sets || []).length + ' available';
           ht.style.cssText = 'flex:1;font-size:14px;';
           var hx = document.createElement('button'); hx.textContent = '✕ cancel';
           hx.style.cssText = 'font-size:12px;padding:2px 10px;background:#411;color:#fbb;border:1px solid #633;border-radius:2px;cursor:pointer;';
           head.appendChild(ht); head.appendChild(hx); box.appendChild(head);
-          var grid = document.createElement('div');
-          grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;';
-          box.appendChild(grid); ov.appendChild(box);
+          // import-dir row: where the server scans for candidates + rescan + filter
+          var dr = document.createElement('div');
+          dr.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:8px;';
+          var dl = document.createElement('span'); dl.textContent = 'import dir';
+          dl.style.cssText = 'color:#89a;font-size:11px;';
+          var di = document.createElement('input'); di.type = 'text'; di.value = cand.dir || '';
+          di.style.cssText = 'flex:1;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:2px 4px;';
+          di.title = 'directory the server scans for candidate sets (subdirs or category/set trees with albedo/normal/… files). macOS may deny ~/Downloads to the server (TCC) — copy packs elsewhere or grant access.';
+          var rb = document.createElement('button'); rb.textContent = 'rescan';
+          rb.style.cssText = 'font-size:11px;padding:2px 8px;background:#123;color:#9cf;border:1px solid #345;border-radius:2px;cursor:pointer;';
+          var fi = document.createElement('input'); fi.type = 'text'; fi.placeholder = 'filter…';
+          fi.style.cssText = 'width:130px;background:#111;color:#cd9;border:1px solid #345;border-radius:2px;font-size:11px;padding:2px 4px;';
+          dr.appendChild(dl); dr.appendChild(di); dr.appendChild(rb); dr.appendChild(fi); box.appendChild(dr);
+          if (cand.errors && cand.errors.length) {
+            var er = document.createElement('div');
+            er.textContent = cand.errors.join('  |  ');
+            er.style.cssText = 'color:#ea5;font-size:11px;margin-bottom:8px;';
+            box.appendChild(er);
+          }
           function close(){ document.removeEventListener('keydown', onKey); ov.remove(); }
           function onKey(ev){ if (ev.key === 'Escape') close(); }
           hx.onclick = close; ov.onclick = function(ev){ if (ev.target === ov) close(); };
           document.addEventListener('keydown', onKey);
-          sets.forEach(function(e){
+          rb.onclick = function(){
+            rb.textContent = 'scanning…';
+            fetch('/api/pbrcandidates?dir=' + encodeURIComponent(di.value))
+              .then(function(r){ return r.json(); })
+              .then(function(j){ close(); showSetPicker(installed, j); })
+              .catch(function(e){ rb.textContent = 'rescan'; editorStatus('scan failed: ' + e); });
+          };
+          function newGrid(){
+            var g = document.createElement('div');
+            g.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;';
+            return g;
+          }
+          function card(o){   // {thumb,name,roles,badge,dashed,onclick}
             var cell = document.createElement('div');
-            cell.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:6px;cursor:pointer;text-align:center;';
+            cell.style.cssText = 'background:#1a1a1a;border:1px ' + (o.dashed ? 'dashed #875' : 'solid #333')
+                               + ';border-radius:3px;padding:6px;cursor:pointer;text-align:center;';
             cell.onmouseenter = function(){ cell.style.borderColor = '#7af'; };
-            cell.onmouseleave = function(){ cell.style.borderColor = '#333'; };
-            if (e.albedo) {
-              var img = document.createElement('img'); img.src = '/' + e.albedo; img.loading = 'lazy';
+            cell.onmouseleave = function(){ cell.style.borderColor = o.dashed ? '#875' : '#333'; };
+            if (o.thumb) {
+              var img = document.createElement('img'); img.src = o.thumb; img.loading = 'lazy';
               img.style.cssText = 'width:100%;height:110px;object-fit:cover;border-radius:2px;background:#000;';
               cell.appendChild(img);
             } else {
-              var ph = document.createElement('div'); ph.textContent = 'no albedo';
+              var ph = document.createElement('div'); ph.textContent = 'no preview';
               ph.style.cssText = 'width:100%;height:110px;display:flex;align-items:center;justify-content:center;color:#555;background:#111;border-radius:2px;font-size:11px;';
               cell.appendChild(ph);
             }
-            var nm = document.createElement('div'); nm.textContent = e.set;
+            var nm = document.createElement('div'); nm.textContent = o.name;
             nm.style.cssText = 'color:#cde;font-size:11px;margin-top:4px;word-break:break-all;';
             cell.appendChild(nm);
-            var rl = document.createElement('div'); rl.textContent = (e.roles || []).join(' ');
-            rl.style.cssText = 'color:#697;font-size:9px;margin-top:2px;';
+            var rl = document.createElement('div');
+            rl.textContent = (o.roles || []).join(' ') + (o.badge ? '  · ' + o.badge : '');
+            rl.style.cssText = 'color:' + (o.badge ? '#a97' : '#697') + ';font-size:9px;margin-top:2px;';
             cell.appendChild(rl);
-            cell.onclick = function(){ close(); applyServerSet(e.set, e.roles); };
-            grid.appendChild(cell);
+            cell.onclick = o.onclick;
+            return cell;
+          }
+          function label(txt){
+            var l = document.createElement('div'); l.textContent = txt;
+            l.style.cssText = 'color:#8ac;font-size:12px;margin:12px 0 6px;border-bottom:1px solid #234;padding-bottom:2px;';
+            return l;
+          }
+          function candThumb(c){
+            var p = c.preview || (c.roles.albedo ? { dir: c.dir, file: c.roles.albedo } : null);
+            return p ? '/api/pbrthumb?dir=' + encodeURIComponent(p.dir) + '&file=' + encodeURIComponent(p.file) : null;
+          }
+          function chooseCand(c){
+            if (c.installed) {                 // same-named set already installed:
+              var inst = installed.find(function(e){ return e.set === c.set; });
+              close();                         // apply IT — never overwrite silently
+              applyServerSet(c.set, inst ? inst.roles : Object.keys(c.roles));
+              return;
+            }
+            editorStatus('installing set "' + c.set + '"…');
+            fetch('/api/pbrinstall', { method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({ dir: c.dir, name: c.name, roles: c.roles }) })
+              .then(function(r){ return r.json(); })
+              .then(function(j){
+                if (!j.ok) { editorStatus('install failed: ' + (j.error || '?')); return; }
+                if (j.warnings && j.warnings.length) console.warn('[pbr-install]', j.warnings);
+                editorStatus('installed "' + j.set + '" (' + j.roles.join(', ') + ')'
+                             + (j.warnings && j.warnings.length ? ' — ' + j.warnings.length + ' warning(s), see console' : ''));
+                close();
+                applyServerSet(j.set, j.roles);
+              })
+              .catch(function(e){ editorStatus('install failed: ' + e); });
+          }
+          function candCard(c){
+            return card({ thumb: candThumb(c), name: c.name, roles: Object.keys(c.roles).sort(),
+                          badge: c.installed ? 'installed' : null, dashed: true,
+                          onclick: function(){ chooseCand(c); } });
+          }
+          // Installed section
+          box.appendChild(label('Installed — Runtime/TEXTURES/PBR/ (' + installed.length + ')'));
+          var ig = newGrid(); box.appendChild(ig);
+          installed.forEach(function(e){
+            ig.appendChild(card({ thumb: e.albedo ? '/' + e.albedo : null, name: e.set, roles: e.roles,
+                                  onclick: function(){ close(); applyServerSet(e.set, e.roles); } }));
           });
+          // Available (not installed) section: category groups, cards built on expand
+          var cands = cand.sets || [];
+          box.appendChild(label('Available — not installed (' + cands.length + ' from ' + (cand.dir || '?') + ')'));
+          var catWrap = document.createElement('div'); box.appendChild(catWrap);
+          var flatWrap = document.createElement('div'); flatWrap.style.display = 'none'; box.appendChild(flatWrap);
+          var byCat = {};
+          cands.forEach(function(c){ (byCat[c.category || '(top level)'] = byCat[c.category || '(top level)'] || []).push(c); });
+          Object.keys(byCat).sort().forEach(function(catName){
+            var list = byCat[catName];
+            var hd = document.createElement('div');
+            hd.textContent = '▸ ' + catName + ' (' + list.length + ')';
+            hd.style.cssText = 'color:#bda;font-size:12px;padding:4px 2px;cursor:pointer;user-select:none;';
+            var body = document.createElement('div'); body.style.display = 'none';
+            var built = false;
+            hd.onclick = function(){
+              var open = body.style.display === 'none';
+              if (open && !built) {           // lazy: build cards on first expand
+                var g = newGrid(); list.forEach(function(c){ g.appendChild(candCard(c)); });
+                body.appendChild(g); built = true;
+              }
+              body.style.display = open ? '' : 'none';
+              hd.textContent = (open ? '▾ ' : '▸ ') + catName + ' (' + list.length + ')';
+            };
+            catWrap.appendChild(hd); catWrap.appendChild(body);
+          });
+          fi.oninput = function(){
+            var q = fi.value.trim().toLowerCase();
+            flatWrap.innerHTML = '';
+            if (!q) { flatWrap.style.display = 'none'; catWrap.style.display = ''; return; }
+            catWrap.style.display = 'none'; flatWrap.style.display = '';
+            var hits = cands.filter(function(c){ return c.name.toLowerCase().indexOf(q) >= 0
+                                                     || (c.category || '').toLowerCase().indexOf(q) >= 0; });
+            var g = newGrid();
+            hits.slice(0, 60).forEach(function(c){ g.appendChild(candCard(c)); });
+            flatWrap.appendChild(g);
+            if (hits.length > 60) {
+              var more = document.createElement('div');
+              more.textContent = '… ' + (hits.length - 60) + ' more — narrow the filter';
+              more.style.cssText = 'color:#789;font-size:11px;margin-top:6px;';
+              flatWrap.appendChild(more);
+            }
+          };
+          ov.appendChild(box);
           document.body.appendChild(ov);
         }
         var setBtn = document.createElement('button');
-        setBtn.textContent = 'Browse installed PBR sets…';
+        setBtn.textContent = 'Browse PBR sets…';
         setBtn.style.cssText = 'font-size:11px;padding:2px 8px;margin-top:4px;background:#123;color:#9cf;border:1px solid #345;border-radius:2px;cursor:pointer;';
-        setBtn.title = 'Preview the texture sets already under Runtime/TEXTURES/PBR/ (albedo thumbnail + which roles exist) and apply one to this surface';
+        setBtn.title = 'Preview installed sets (Runtime/TEXTURES/PBR/) AND candidate sets from the server\'s import dir (FreePBR library layout supported) — thumbnails + role badges before applying; candidates install on choose';
         setBtn.onclick = function(){
-          fetch('/api/pbrsets').then(function(r){ return r.json(); }).then(function(j){
-            if (!j.ok || !j.sets || !j.sets.length) { editorStatus('no installed PBR sets found under Runtime/TEXTURES/PBR/'); return; }
-            showSetPicker(j.sets);
-          }).catch(function(e){ editorStatus('PBR set list failed: ' + e); });
+          setBtn.textContent = 'Browse PBR sets… (loading)';
+          Promise.all([
+            fetch('/api/pbrsets').then(function(r){ return r.json(); }),
+            fetch('/api/pbrcandidates').then(function(r){ return r.json(); })
+          ]).then(function(res){
+            setBtn.textContent = 'Browse PBR sets…';
+            showSetPicker((res[0] && res[0].sets) || [], res[1] || { sets: [], errors: ['candidate scan failed'] });
+          }).catch(function(e){
+            setBtn.textContent = 'Browse PBR sets…';
+            editorStatus('PBR set list failed: ' + e);
+          });
         };
         imp.appendChild(setBtn);
         ['albedo','normal','height','roughness','ao','metallic'].forEach(function(role){

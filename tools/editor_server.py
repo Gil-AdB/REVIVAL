@@ -29,6 +29,7 @@ Then:   http://localhost:<port>/DEMO.html?editor
 import argparse
 import base64
 import http.server
+import io
 import json
 import os
 import re
@@ -37,6 +38,12 @@ import socketserver
 import subprocess
 import sys
 import threading
+import urllib.parse
+
+try:                     # optional (thumbnails + tif/jpg -> png conversion for
+    from PIL import Image  # the PBR-set install flow); the server runs without it
+except ImportError:
+    Image = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lwopatch  # noqa: E402
@@ -1331,6 +1338,333 @@ def do_restore(scene, payload):
     return 200, resp
 
 
+# ── PBR-set catalog + candidate import (browse-not-installed, editor b71) ──
+# The picker shows two sections: sets INSTALLED under Runtime/TEXTURES/PBR/
+# (pbr_installed_sets) and CANDIDATE sets found in a user-pointed import dir
+# (pbr_scan_candidates) that can be installed on choose (pbr_install: copy +
+# normalize to <set>/<role>.png, tif/jpg converted via PIL, 16-bit height
+# preserved). Default import dir: ~/Downloads WHEN READABLE — macOS TCC often
+# denies it to terminal processes ('Operation not permitted', hit live this
+# session) — else /tmp. Per-dir read errors are surfaced to the UI, never
+# swallowed.
+
+IMPORT_DIR = None          # set by main(); default_import_dir() when unset
+
+ROLE_NAMES = ("albedo", "normal", "height", "roughness", "ao", "metallic")
+CAND_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".bmp")
+# Mirrors the engine's filename classifier (MaterialImport_ClassifyRole /
+# classify() token rules): token list per role, FIRST match wins, in the same
+# order; a token matches only on separator boundaries (start/end, '_', '-',
+# ' '; digits allowed after: normal2, roughness-2k).
+_ROLE_TOKENS = [
+    (None,        ("preview", "thumb", "thumbnail", "sphere", "render")),  # skip
+    ("albedo",    ("basecolor", "base_color", "base-color", "albedo", "diffuse", "color")),
+    ("normal",    ("normal", "nrm", "nor")),
+    ("roughness", ("roughness", "rough", "rgh")),
+    ("height",    ("height", "disp", "displacement", "bump")),
+    ("metallic",  ("metallic", "metalness", "metal")),
+    ("ao",        ("ao", "occlusion", "ambientocclusion")),
+]
+
+
+def _token_at(stem, tok):
+    """First boundary-respecting occurrence of tok in stem, or -1."""
+    pos = 0
+    while True:
+        pos = stem.find(tok, pos)
+        if pos < 0:
+            return -1
+        left_ok = pos == 0 or stem[pos - 1] in "_- "
+        end = pos + len(tok)
+        right_ok = end == len(stem) or stem[end] in "_- " or stem[end].isdigit()
+        if left_ok and right_ok:
+            return pos
+        pos = end
+
+
+def classify_role_name(fname):
+    """filename -> (role or None, group-prefix). Fixed role names ('albedo.png')
+    and suffix conventions ('wall_stone3_albedo.png') both classify; the prefix
+    (stem before the matched token) groups loose files into a candidate set."""
+    stem, ext = os.path.splitext(os.path.basename(fname))
+    if ext.lower() not in CAND_EXTS:
+        return None, ""
+    stem = stem.lower()
+    if stem in ROLE_NAMES:
+        return stem, ""
+    for role, toks in _ROLE_TOKENS:
+        for tok in toks:
+            pos = _token_at(stem, tok)
+            if pos >= 0:
+                return (role, stem[:pos].rstrip("_- ")) if role else (None, "")
+    return None, ""
+
+
+def pbr_installed_sets():
+    """Sets installed under Runtime/TEXTURES/PBR/<set>/ with their roles."""
+    sets = []
+    if os.path.isdir(PBR_DIR):
+        for name in sorted(os.listdir(PBR_DIR)):
+            d = os.path.join(PBR_DIR, name)
+            if not os.path.isdir(d):
+                continue
+            roles = [r for r in ROLE_NAMES
+                     if os.path.exists(os.path.join(d, r + ".png"))]
+            if roles:
+                sets.append({"set": name, "roles": roles,
+                             "albedo": (f"TEXTURES/PBR/{name}/albedo.png"
+                                        if "albedo" in roles else None)})
+    return sets
+
+
+_PREVIEW_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".bmp")
+_PREVIEW_RE = re.compile(r"preview|thumb", re.I)
+
+
+def _norm_key(s):
+    """Normalize for preview<->set-dir matching: lowercase alnum, the FreePBR
+    '-bl'/'_bl' suffix stripped ('Iron-Scuffed_bl' ~ 'iron-scuffed-preview2-2')."""
+    return re.sub(r"[^a-z0-9]+", "", re.sub(r"[-_]bl$", "", s, flags=re.I).lower())
+
+
+def _is_preview(fname):
+    stem, ext = os.path.splitext(fname)
+    return ext.lower() in _PREVIEW_EXTS and _PREVIEW_RE.search(stem) is not None
+
+
+def _dir_roles(files):
+    """(roles{role: filename}, in-dir preview filename or None) for a file list.
+    Role matching is case-insensitive (classify lowercases) and maps the
+    FreePBR suffix zoo — basecolor/albedo, Normal-ogl -> normal, Height/
+    Metallic/Roughness capitalized, '-ao' — via the shared token classifier."""
+    roles, preview = {}, None
+    for f in files:
+        if preview is None and _is_preview(f):
+            preview = f
+        r, _pre = classify_role_name(f)
+        if r and r not in roles:
+            roles[r] = f
+    return roles, preview
+
+
+def _sibling_preview(dirname, parent_previews):
+    """Category-level '<set>_preview.jpg' sibling for a set dir, tolerant of
+    FreePBR name drift ('iron-scuffed-preview2-2.jpg' vs 'Iron-Scuffed_bl')."""
+    key = _norm_key(dirname)
+    for pf in parent_previews:
+        stem = os.path.splitext(pf)[0]
+        cut = _PREVIEW_RE.search(stem)
+        p = _norm_key(stem[:cut.start()] if cut else stem)
+        if p and key and (p.startswith(key) or key.startswith(p)):
+            return pf
+    return None
+
+
+def pbr_scan_candidates(root):
+    """Scan `root` for CANDIDATE sets, TWO levels deep (the FreePBR-Premium
+    layout: <root>/<category>/<set_dir>/<set>_<role>.png):
+      - a level-1 subdirectory holding role files is itself a set;
+      - a level-1 subdirectory WITHOUT role files is treated as a CATEGORY and
+        its subdirectories are scanned as sets (candidate['category'] = its
+        name — the natural grouping for the browse UI);
+      - loose file groups in `root` sharing a prefix ('brick_albedo.jpg' +
+        'brick_normal.png'), >=2 roles to qualify.
+    Ready-made '<set>_preview.jpg' files (in the set dir, or category-level
+    siblings with FreePBR name drift) ride each candidate as its thumbnail
+    source. Root clutter (.blend/.gltf/.txt/.pdf) has no image-role extension
+    and is ignored. Returns (candidates, errors) — read failures (macOS TCC
+    EPERM on ~/Downloads etc.) become UI-visible error strings, never a
+    silent empty."""
+    root = os.path.expanduser(root or "")
+    errors = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError as e:
+        return [], [f"cannot read {root} — {e.strerror or e}: grant access or copy the packs elsewhere (e.g. /tmp)"]
+    installed = {s["set"] for s in pbr_installed_sets()}
+    out = []
+
+    def add(name, src_dir, roles, preview=None, category=None):
+        if not roles:
+            return
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "set"
+        out.append({"name": name, "set": safe, "dir": src_dir,
+                    "roles": roles,           # role -> source filename
+                    "preview": preview,       # {dir, file} or None
+                    "category": category,
+                    "installed": safe in installed})
+
+    loose = {}
+    for name in entries:
+        p = os.path.join(root, name)
+        if os.path.isdir(p):
+            try:
+                files = sorted(os.listdir(p))
+            except OSError as e:
+                errors.append(f"cannot read {p} — {e.strerror or e}")
+                continue
+            roles, prev = _dir_roles(files)
+            if roles:                          # level-1 set dir
+                add(name, p, roles,
+                    {"dir": p, "file": prev} if prev else None)
+                continue
+            # category dir: scan its subdirs as sets (level 2)
+            cat_previews = [f for f in files if _is_preview(f)]
+            for sub in files:
+                sp = os.path.join(p, sub)
+                if not os.path.isdir(sp):
+                    continue
+                try:
+                    sfiles = sorted(os.listdir(sp))
+                except OSError as e:
+                    errors.append(f"cannot read {sp} — {e.strerror or e}")
+                    continue
+                sroles, sprev = _dir_roles(sfiles)
+                if not sroles:
+                    continue
+                if sprev:
+                    preview = {"dir": sp, "file": sprev}
+                else:
+                    pf = _sibling_preview(sub, cat_previews)
+                    preview = {"dir": p, "file": pf} if pf else None
+                add(sub, sp, sroles, preview, category=name)
+        else:
+            r, pre = classify_role_name(name)
+            if r:
+                loose.setdefault(pre or os.path.basename(root.rstrip("/")), {}) \
+                     .setdefault(r, name)
+    for pre, roles in sorted(loose.items()):
+        if len(roles) >= 2:       # one stray color file is not a set
+            add(pre, root, roles)
+    return out, errors
+
+
+def _pow2(n):
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _install_role_file(src, out, role, warnings):
+    """Copy/convert one source map to <set>/<role>.png. PNG copies verbatim;
+    tif/jpg/tga/bmp convert via PIL. 16-bit grayscale sources (the wall_stone3-
+    style 16-bit TIF heights) are saved as 16-bit PNG — stb_image reads those;
+    note that the engine's height consumer (MakeHeight8) currently reduces to
+    8-bit at load, so the extra depth is preserved on disk for the 16-bit-aware
+    paths (--nmap_16bit) rather than exploited by height yet."""
+    if src.lower().endswith(".png"):
+        shutil.copy2(src, out)
+        return True
+    if Image is None:
+        warnings.append(f"{os.path.basename(src)}: PIL not installed — cannot convert to .png, role skipped (pip install pillow)")
+        return False
+    img = Image.open(src)
+    if img.mode in ("I;16", "I;16B", "I;16L", "I"):
+        if img.mode != "I;16":
+            img = img.convert("I;16")
+        img.save(out, format="PNG")   # 16-bit grayscale PNG
+    elif img.mode in ("RGBA", "LA", "P", "PA"):
+        img.convert("RGBA").save(out, format="PNG")
+    elif img.mode == "L":
+        img.save(out, format="PNG")
+    else:
+        if img.mode not in ("RGB",):
+            warnings.append(f"{os.path.basename(src)}: mode {img.mode} flattened to 8-bit RGB")
+        img.convert("RGB").save(out, format="PNG")
+    return True
+
+
+def pbr_install(src_dir, name, roles):
+    """Install a candidate set into Runtime/TEXTURES/PBR/<set>/: role files
+    copied + normalized to the fixed <role>.png names, license/README files
+    copied along, pow2 sanity check surfaced as warnings. Returns (code, resp);
+    on ok the set is immediately visible to /api/pbrsets + the engine's
+    dir-per-set loader (MaterialImport_ApplyRevMaps)."""
+    if not src_dir or not name or not isinstance(roles, dict) or not roles:
+        return 400, {"ok": False, "error": "want {dir, name, roles:{role: filename}}"}
+    src_dir = os.path.expanduser(src_dir)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "set"
+    dst = os.path.join(PBR_DIR, safe)
+    warnings = []
+    if os.path.isdir(dst) and any(os.path.exists(os.path.join(dst, r + ".png"))
+                                  for r in ROLE_NAMES):
+        warnings.append(f"set '{safe}' already installed — overwriting the provided roles")
+    os.makedirs(dst, exist_ok=True)
+    done = []
+    for role, fname in sorted(roles.items()):
+        if role not in ALLOWED_ROLES:
+            warnings.append(f"unknown role '{role}' — skipped")
+            continue
+        src = os.path.join(src_dir, os.path.basename(str(fname)))
+        if not os.path.isfile(src):
+            warnings.append(f"{role}: source {os.path.basename(str(fname))} missing — skipped")
+            continue
+        out = os.path.join(dst, role + ".png")
+        try:
+            if not _install_role_file(src, out, role, warnings):
+                continue
+        except OSError as e:
+            warnings.append(f"{role}: {e.strerror or e} — skipped")
+            continue
+        if Image is not None:
+            try:
+                with Image.open(out) as im:
+                    w, h = im.size
+                if not (_pow2(w) and _pow2(h)):
+                    warnings.append(f"{role}: {w}x{h} is not power-of-two — the engine resamples/caps at load; a pow2 source renders crisper")
+            except OSError:
+                pass
+        done.append(role)
+    if not done:
+        return 400, {"ok": False, "error": "no role file could be installed", "warnings": warnings}
+    # Keep the pack's license/readme/attribution with the installed set.
+    try:
+        for f in sorted(os.listdir(src_dir)):
+            if re.match(r"(license|licence|readme|attribution|credit)", f, re.I) \
+               and os.path.isfile(os.path.join(src_dir, f)):
+                shutil.copy2(os.path.join(src_dir, f), os.path.join(dst, f))
+    except OSError:
+        pass
+    return 200, {"ok": True, "set": safe, "roles": done,
+                 "dir": os.path.relpath(dst, REPO), "warnings": warnings}
+
+
+def pbr_thumb_png(src, max_dim=256):
+    """Downscaled PNG thumbnail bytes for a candidate's source albedo (tif/tga
+    sources browsers can't render get converted here), or None."""
+    if Image is None or not os.path.isfile(src):
+        return None
+    try:
+        with Image.open(src) as im:
+            # Resize needs a displayable mode; a preview only needs 8-bit
+            # (16-bit gray -> high byte, palette/other -> RGB).
+            if im.mode in ("I;16", "I;16B", "I;16L", "I"):
+                # point() on mode 'I' accepts only affine expressions — scale
+                # the 16-bit range down with a multiply, not a shift.
+                im = im.convert("I").point(lambda v: v * (255.0 / 65535.0)).convert("L")
+            elif im.mode not in ("RGB", "RGBA", "L"):
+                im = im.convert("RGB")
+            im.thumbnail((max_dim, max_dim))
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except (OSError, ValueError):
+        return None
+
+
+def default_import_dir():
+    """First READABLE of: ~/work/Blender (the user's FreePBR-Premium library —
+    verified readable), ~/Downloads, /tmp. macOS TCC denies ~/Downloads to many
+    terminal-spawned processes (verified live) — probing avoids defaulting the
+    UI onto a dir that scans to a permission error."""
+    for d in (os.path.expanduser("~/work/Blender"),
+              os.path.expanduser("~/Downloads"), "/tmp"):
+        try:
+            os.listdir(d)
+            return d
+        except OSError:
+            continue
+    return REPO
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=WASM_ROOT, **k)
@@ -1367,20 +1701,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # renders a preview picker (albedo thumbnail via the /TEXTURES/ live route
         # + role badges) so a set can be eyeballed BEFORE it is applied.
         if clean == "/api/pbrsets":
-            sets = []
-            if os.path.isdir(PBR_DIR):
-                for name in sorted(os.listdir(PBR_DIR)):
-                    d = os.path.join(PBR_DIR, name)
-                    if not os.path.isdir(d):
-                        continue
-                    roles = [r for r in ("albedo", "normal", "height",
-                                         "roughness", "ao", "metallic")
-                             if os.path.exists(os.path.join(d, r + ".png"))]
-                    if roles:
-                        sets.append({"set": name, "roles": roles,
-                                     "albedo": (f"TEXTURES/PBR/{name}/albedo.png"
-                                                if "albedo" in roles else None)})
-            self.send_json(200, {"ok": True, "sets": sets})
+            self.send_json(200, {"ok": True, "sets": pbr_installed_sets()})
+            return
+        # CANDIDATE sets (browse-not-installed): scan the import dir (?dir=
+        # override, else --import-dir / default_import_dir) for installable
+        # sets. Read errors (TCC EPERM etc.) ride the response for the UI.
+        if clean == "/api/pbrcandidates":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            d = (q.get("dir") or [None])[0] or IMPORT_DIR or default_import_dir()
+            cands, errors = pbr_scan_candidates(d)
+            self.send_json(200, {"ok": True, "dir": d, "sets": cands,
+                                 "errors": errors, "pil": Image is not None})
+            return
+        # Thumbnail for a candidate's source map (tif/tga converted to PNG,
+        # downscaled) — installed sets use the /TEXTURES/ live route instead.
+        if clean == "/api/pbrthumb":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            d = (q.get("dir") or [""])[0]
+            f = os.path.basename((q.get("file") or [""])[0])
+            png = pbr_thumb_png(os.path.join(os.path.expanduser(d), f)) if d and f else None
+            if png is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png)))
+            self.end_headers()
+            self.wfile.write(png)
             return
         # Live routes — always the current Runtime/ copy, never the staged one.
         if clean.startswith(LIVE_PREFIXES):
@@ -1399,6 +1746,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         clean = self.path.split("?")[0]
+        # Install a candidate PBR set: {dir, name, roles:{role: filename}} ->
+        # copy+normalize into Runtime/TEXTURES/PBR/<set>/ (see pbr_install).
+        if clean == "/api/pbrinstall":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                with save_lock:
+                    code, resp = pbr_install(payload.get("dir"),
+                                             payload.get("name"),
+                                             payload.get("roles") or {})
+            except Exception as e:
+                code, resp = 500, {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            print(f"[pbr-install] {code}: {resp.get('set')} roles={resp.get('roles')}"
+                  + (f" warnings={resp['warnings']}" if resp.get("warnings") else "")
+                  + ("" if resp.get("ok") else f" ERROR={resp.get('error')}"))
+            self.send_json(code, resp)
+            return
         m = re.match(r"^/api/(\w+)/(save|restore)$", clean)
         if not m:
             self.send_error(404)
@@ -1436,7 +1800,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8099)
+    ap.add_argument("--import-dir", default=None, metavar="DIR",
+                    help="directory scanned for CANDIDATE PBR sets (browse-"
+                         "not-installed picker). Default: ~/Downloads when "
+                         "readable, else /tmp (macOS TCC often denies "
+                         "~/Downloads to terminal processes — copy packs to "
+                         "/tmp or point the picker's dir field anywhere)")
     args = ap.parse_args()
+    global IMPORT_DIR
+    IMPORT_DIR = os.path.expanduser(args.import_dir) if args.import_dir \
+        else default_import_dir()
+    print(f"[server] PBR import dir: {IMPORT_DIR}"
+          + ("" if args.import_dir else " (default; override with --import-dir"
+             " or the picker's dir field)")
+          + ("" if Image is not None else "  [PIL missing: no tif/jpg install"
+             " conversion, no candidate thumbnails — pip install pillow]"))
     ensure_lwsread()
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", args.port), Handler) as httpd:
