@@ -493,6 +493,17 @@ struct EnvPanoStore {
     bool                  envDynamic = false;
     std::vector<uint32_t> staticColorMaster;   // 6·faceRes² (cube stores)
     std::vector<uint16_t> staticFaceZ;         // 6·faceRes² (cube stores)
+
+    // ── ENVDYN A3 owner-visibility gate fix ───────────────────────────────
+    // Tight world AABB of bakedSkipMat's OWN faces — NOT the whole-MESH union
+    // WorldAabb_ForMaterial returns. Greets merges every reflective surface
+    // (momy / stairs / screen / room) into ONE chunked Piramid mesh, so the
+    // whole-mesh union is the entire scene box for EVERY flagged material: the
+    // owner gate could then never cull an off-screen probe, and off-screen
+    // probes stole the per-frame overlay budget from the one actually in view.
+    // Computed once (the reflective owner geometry is static) and cached.
+    WorldAabb             ownerFaceAabb;
+    bool                  ownerFaceAabbDone = false;
 };
 struct SceneEnv {
     // Owning stores + Material* → store index (materials with near-identical
@@ -823,6 +834,13 @@ bool materialCentroid(Scene* sc, const Material* M, Vector& out,
                 " surface); use split-instances for per-instance probes\n",
                 M->Name ? M->Name : "?", cls.size(), out.x, out.y, out.z,
                 excludeRadius ? *excludeRadius : 0.0f);
+            if (std::getenv("ENVDBG"))
+                for (size_t ci = 0; ci < cls.size(); ++ci)
+                    std::fprintf(stderr, "[ENVDBG]   '%s' cluster %zu: n=%ld centroid"
+                        " (%.1f %.1f %.1f)%s\n", M->Name ? M->Name : "?", ci,
+                        cls[ci].n, float(cls[ci].sx/cls[ci].n),
+                        float(cls[ci].sy/cls[ci].n), float(cls[ci].sz/cls[ci].n),
+                        (&cls[ci] == heavy) ? "  <-- PROBE (heaviest)" : "");
         }
     }
     return true;
@@ -1042,16 +1060,52 @@ bool EnvReflection_FramePrep(Scene* sc) {
         // (env_refl_scene_mode flag / FLD-authored Scene::EnvReflSceneMode).
         // 1 forces a bake, -1 suppresses it, 0 keeps the historical rule.
         const int effMode = envEffModeFor(M);
-        if (!(effMode > 0 ||
-              (effMode == 0 && (M->Reflection > 0.0f || M->MetallicMap))))
+        bool qualifies = (effMode > 0) ||
+                         (effMode == 0 && (M->Reflection > 0.0f || M->MetallicMap));
+        // ── ENVDYN screen-emiter UX gap (deliverable 3) ───────────────────
+        // A surface the user flagged 'dynamic env' (Material::EnvDynamic) but
+        // that does NOT otherwise qualify for a probe (no envRefl force, no
+        // Reflection, no metallic map) would silently get no probe → the
+        // dynamic overlay has nothing to composite into → the flag is a no-op.
+        // envDynamic MEANS "I want the mech reflected here", so it implies an
+        // env-refl opt-in: treat it like a force-bake (effMode>0), which is
+        // exactly EnvReflMode==1's semantics — the env term's strength still
+        // comes from Reflection/metallic, so forcing a probe on a flat surface
+        // costs a bake but changes nothing visible until reflectivity is dialed
+        // in (same caveat as the force-bake path). Gated on --env_dynamic so
+        // the flag stays fully inert (byte-null) when the feature is off. The
+        // ONE case we do NOT override: env-refl EXPLICITLY suppressed
+        // (effMode<0) — that is a real authoring conflict, so we honour the
+        // off and warn instead of baking behind the user's back.
+        if (!qualifies && M->EnvDynamic) {
+            static std::vector<const Material*> warned;   // one line per material
+            const bool first = std::find(warned.begin(), warned.end(), M) == warned.end();
+            if (first) warned.push_back(M);
+            if (effMode >= 0 && fds::FeatureFlags::env_dynamic()) {
+                qualifies = true;   // envDynamic implies a probe
+                if (first)
+                    std::fprintf(stderr, "[ENVDYN] '%s': envDynamic set on a "
+                        "surface with no envRefl/Reflection/metallic — treating "
+                        "the flag as an env-refl opt-in (forcing a probe) so the "
+                        "dynamic overlay has a target\n", M->Name ? M->Name : "?");
+            } else if (first) {
+                std::fprintf(stderr, "[ENVDYN] WARNING: envDynamic set but no "
+                    "probe%s — flag ignored: '%s' (add envRefl / a Reflection or "
+                    "metallic map, or run --env_dynamic)\n",
+                    effMode < 0 ? " (env-refl explicitly OFF for this surface)" : "",
+                    M->Name ? M->Name : "?");
+            }
+        }
+        if (!qualifies)
             continue;
         if (env.byMat.count(M)) continue;
         Vector c;
         float excludeR = 0.0f;
         if (!materialCentroid(sc, M, c, &excludeR)) { env.byMat[M] = -1; continue; }
         if (std::getenv("ENVDBG"))
-            std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d centroid (%.1f %.1f %.1f)\n",
+            std::fprintf(stderr, "[ENVDBG] mat '%s' id=%u refl=%.0f metal=%d envDyn=%d reflMode=%d effMode=%d centroid (%.1f %.1f %.1f)\n",
                          M->Name ? M->Name : "?", (unsigned)M->ID, M->Reflection, M->MetallicMap ? 1 : 0,
+                         (int)M->EnvDynamic, (int)M->EnvReflMode, envEffModeFor(M),
                          c.x, c.y, c.z);
         sceneAABB(sc, env);
         // Per-surface face-res wish (Material::EnvBakeRes, else the explicit
@@ -1155,10 +1209,52 @@ bool EnvReflection_FramePrep(Scene* sc) {
 // ── Dynamic-mesh reflection overlay (--env_dynamic, ENVDYN A3) ─────────────
 namespace {
 
+// Tight world AABB of just the FACES that use material M — the owner-
+// visibility gate input (fix for the whole-chunked-mesh WorldAabb_ForMaterial
+// problem, see EnvPanoStore::ownerFaceAabb). Mirror-clone meshes excluded (the
+// probe bake excludes them too). Same face walk + world transform as
+// materialCentroid, so the bounds line up exactly with the probe's own
+// geometry. Empty (valid=false) if no live face references M.
+WorldAabb materialFaceAabb(Scene* sc, const Material* M) {
+    WorldAabb out;
+    if (!sc || !M) return out;
+    std::vector<const TriMesh*> cloneMeshes;
+    collectMirrorCloneMeshes(sc, cloneMeshes);
+    float lo[3] = {  1e30f,  1e30f,  1e30f };
+    float hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (TriMesh* T = sc->TriMeshHead; T; T = T->Next) {
+        if (std::find(cloneMeshes.begin(), cloneMeshes.end(), T)
+            != cloneMeshes.end()) continue;
+        for (DWord i = 0; i < T->FIndex; ++i) {
+            const Face& F = T->Faces[i];
+            if (F.Txtr != M) continue;
+            const Vertex* vs[3] = { F.A, F.B, F.C };
+            for (int k = 0; k < 3; ++k) {
+                if (!vs[k]) continue;
+                Vector w;
+                MatrixXVector(T->RotMat, const_cast<Vector*>(&vs[k]->Pos), &w);
+                Vector_SelfAdd(&w, &T->IPos);
+                const float p[3] = { w.x, w.y, w.z };
+                for (int a = 0; a < 3; ++a) {
+                    if (p[a] < lo[a]) lo[a] = p[a];
+                    if (p[a] > hi[a]) hi[a] = p[a];
+                }
+                out.valid = true;
+            }
+        }
+    }
+    if (out.valid)
+        for (int a = 0; a < 3; ++a) { out.mn[a] = lo[a]; out.mx[a] = hi[a]; }
+    return out;
+}
+
 // Render the dynamic meshes into store S's touched cube faces and composite
 // them over S's retained static master (A2). Occlusion vs static geometry is
 // the per-face depth compare (ZPage16: larger zEnc = nearer, 0 = untouched).
-void overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
+// Returns the count of texels where the live mech won the depth compare and
+// was composited over the static master — the headless "is the mech actually
+// in the reflection now?" metric (0 = nothing composited).
+int overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
     const int fr = S.view.W;
     const Vector bake = { S.view.bakeX, S.view.bakeY, S.view.bakeZ };
     std::vector<uint32_t> mech[6];
@@ -1172,7 +1268,8 @@ void overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
                                    /*publishProj=*/true, mechZ,
                                    /*dynamicOnly=*/true, faceMask);
     g_envBakeInProgress = false;
-    if (!ok) return;
+    if (!ok) return 0;
+    int mechTexels = 0, mechRendered = 0;
     for (int f = 0; f < 6; ++f) {
         if (!faceMask[f] || mechZ[f].empty()) continue;
         uint32_t* dst          = S.levels[0].data()          + size_t(f) * fr * fr;
@@ -1180,9 +1277,22 @@ void overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
         const uint16_t* sZ     = S.staticFaceZ.data()        + size_t(f) * fr * fr;
         const uint32_t* mc     = mech[f].data();
         const uint16_t* mZ     = mechZ[f].data();
-        for (int i = 0; i < fr * fr; ++i)
-            dst[i] = (mZ[i] != 0 && mZ[i] >= sZ[i]) ? mc[i] : master[i];
+        for (int i = 0; i < fr * fr; ++i) {
+            const bool rendered = (mZ[i] != 0);
+            const bool win = (rendered && mZ[i] >= sZ[i]);
+            dst[i] = win ? mc[i] : master[i];
+            mechTexels   += win ? 1 : 0;
+            mechRendered += rendered ? 1 : 0;
+        }
     }
+    // Distinguish "mech never rasterised into the probe" (relevance/coverage)
+    // from "mech rendered but lost the depth test" (occluded by static geometry
+    // between the probe and the mech).
+    static const bool sProf = std::getenv("FDS_ENVDYN_PROF") != nullptr;
+    if (sProf && mechRendered > mechTexels)
+        std::fprintf(stderr, "[ENVDYN-WHY]   ...mech rasterised %d texel(s) but "
+            "%d were OCCLUDED by static geometry nearer the probe (%d survived)\n",
+            mechRendered, mechRendered - mechTexels, mechTexels);
     // Per-face mip refilter (REQUIRED — rough surfaces sample mips; without it
     // the mech vanishes on rough metals). boxDownsampleCube filters each face
     // independently. level0 was composited in place; rebuild 1..3 and re-point
@@ -1194,6 +1304,7 @@ void overlayComposite(Scene* sc, EnvPanoStore& S, const bool faceMask[6]) {
     }
     for (int k = 0; k < EnvPanoLinear::kMaxMips; ++k)
         S.view.mip[k] = S.levels[k].data();
+    return mechTexels;
 }
 
 }  // namespace
@@ -1207,6 +1318,43 @@ void EnvDynamic_Overlay(Scene* sc) {
     auto it = g_envByScene.find(sc);
     if (it == g_envByScene.end() || it->second.stores.empty()) return;
     SceneEnv& env = it->second;
+
+    // FDS_ENVDYN_PROF (deliverable 1): per-frame WHY trace — for every authored
+    // envDynamic material, log why its probe did / did not overlay this frame.
+    // Gated on the existing env var (no new FeatureFlags entry): stderr only,
+    // zero effect on rendered output → the flag-off byte-null contract holds.
+    static const bool sProf = std::getenv("FDS_ENVDYN_PROF") != nullptr;
+    if (sProf) {
+        for (Material* M = MatLib; M; M = M->Next) {
+            if (M->RelScene != sc || !M->EnvDynamic) continue;
+            const char* nm = M->Name ? M->Name : "?";
+            auto jt = env.byMat.find(M);
+            if (jt == env.byMat.end()) {
+                std::fprintf(stderr, "[ENVDYN-WHY] '%s': NO-STORE (envDynamic set but"
+                    " no probe — did the material qualify for env-refl? envRefl/"
+                    "Reflection>0/metallic, and --env_cube on?)\n", nm);
+                continue;
+            }
+            if (jt->second < 0) {
+                std::fprintf(stderr, "[ENVDYN-WHY] '%s': NO-STORE (no centroid / no"
+                    " faces reference this material)\n", nm);
+                continue;
+            }
+            const EnvPanoStore& S = *env.stores[size_t(jt->second)];
+            const char* bad =
+                !S.view.isCube                 ? "NOT-RETAINED (equirect/imported store — no cube faces / retained depth)"
+              : !S.envDynamic                  ? "NOT-RETAINED (store owner is a non-flagged material sharing this centroid — dedup owner mismatch)"
+              : S.staticColorMaster.empty()    ? "NOT-RETAINED (static colour master empty)"
+              : S.staticFaceZ.empty()          ? "NOT-RETAINED (static depth empty)"
+              : nullptr;
+            if (bad)
+                std::fprintf(stderr, "[ENVDYN-WHY] '%s': store %d %s\n", nm, jt->second, bad);
+            else
+                std::fprintf(stderr, "[ENVDYN-WHY] '%s': store %d RETAINED, "
+                    "bake@(%.1f,%.1f,%.1f) faceRes %d — relevance evaluated below\n",
+                    nm, jt->second, S.view.bakeX, S.view.bakeY, S.view.bakeZ, S.view.W);
+        }
+    }
 
     // Cheap pre-scan: any flagged, retained cube store? (byte-null fast exit
     // when the scene has none — nothing authored.)
@@ -1230,8 +1378,15 @@ void EnvDynamic_Overlay(Scene* sc) {
         MatrixXVector(T->RotMat, &T->BSphereCtr, &wc);
         wc.x += T->IPos.x; wc.y += T->IPos.y; wc.z += T->IPos.z;
         movers.push_back({ { wc.x, wc.y, wc.z }, T->BSphereRadius });
+        if (sProf)
+            std::fprintf(stderr, "[ENVDYN-WHY] mover '%s' bsphere c=(%.1f,%.1f,%.1f) r=%.1f\n",
+                Obj->Name ? Obj->Name : "?", wc.x, wc.y, wc.z, T->BSphereRadius);
     }
-    if (movers.empty()) return;   // no movers this frame → nothing to reflect
+    if (movers.empty()) {
+        if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] NO MOVERS this frame — "
+            "no mesh passed WorldAabb_MeshIsDynamic (mech Pos/Rotate spline static?)\n");
+        return;   // no movers this frame → nothing to reflect
+    }
 
     // Owner-visibility gate needs current world AABBs + the main frustum.
     fds::WorldAabb_UpdateScene(sc);
@@ -1245,21 +1400,44 @@ void EnvDynamic_Overlay(Scene* sc) {
     for (int a = 0; a < 3; ++a) { const float e = env.boxMax[a] - env.boxMin[a]; diag2 += e * e; }
     const float range = std::sqrt(diag2) * 2.0f + 1.0f;
 
-    static const bool sProf = std::getenv("FDS_ENVDYN_PROF") != nullptr;
     const auto tProf0 = std::chrono::high_resolution_clock::now();
 
     static int cursor = 0;   // round-robin start so >budget probes share frames
     const size_t N = env.stores.size();
     int processed = 0, facesTotal = 0;
-    for (size_t k = 0; k < N && processed < budget; ++k) {
+    // Loop bound: normally stop once the budget is spent (byte-identical to the
+    // original). Under sProf keep scanning so BUDGET-DEFERRED probes are still
+    // reported — the extra iterations only run the (cheap) gates, never
+    // overlayComposite, so the rendered output is unchanged.
+    for (size_t k = 0; k < N && (processed < budget || sProf); ++k) {
         const size_t si = (size_t(cursor) + k) % N;
         EnvPanoStore& S = *env.stores[si];
         if (!S.envDynamic || !S.view.isCube || S.staticColorMaster.empty()) continue;
+        const char* nm = S.bakedSkipMat && S.bakedSkipMat->Name ? S.bakedSkipMat->Name : "?";
 
-        // (1) owner-mesh AABB vs camera frustum — offscreen owner ⇒ skip.
+        // (1) owner-visibility gate: the OWNING FACES' world AABB vs the camera
+        // frustum — offscreen owner ⇒ skip (so the budget goes to the probes
+        // the camera can actually see). Uses the per-faces bounds, NOT
+        // WorldAabb_ForMaterial's whole-chunked-mesh union which is the entire
+        // scene box for every greets flagged material (see ownerFaceAabb).
+        // Cached: the reflective owner geometry is static.
         if (S.bakedSkipMat) {
-            const WorldAabb owner = fds::WorldAabb_ForMaterial(sc, S.bakedSkipMat);
-            if (owner.valid && fds::Frustum_CullsAabb(cam, owner)) continue;
+            if (!S.ownerFaceAabbDone) {
+                S.ownerFaceAabb = materialFaceAabb(sc, S.bakedSkipMat);
+                S.ownerFaceAabbDone = true;
+            }
+            const WorldAabb& owner = S.ownerFaceAabb;
+            if (sProf && owner.valid) std::fprintf(stderr, "[ENVDYN-WHY] '%s' "
+                "(store %zu): owner-faces AABB [%.1f,%.1f,%.1f]..[%.1f,%.1f,%.1f] "
+                "(extent %.1f x %.1f x %.1f)\n", nm, si,
+                owner.mn[0], owner.mn[1], owner.mn[2],
+                owner.mx[0], owner.mx[1], owner.mx[2],
+                owner.mx[0]-owner.mn[0], owner.mx[1]-owner.mn[1], owner.mx[2]-owner.mn[2]);
+            if (owner.valid && fds::Frustum_CullsAabb(cam, owner)) {
+                if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): "
+                    "OWNER-OFFSCREEN — owner faces outside the camera frustum, skip\n", nm, si);
+                continue;
+            }
         }
 
         // (2) mech relevance + which cube faces the movers touch (padded-face
@@ -1273,12 +1451,31 @@ void EnvDynamic_Overlay(Scene* sc) {
                     faceMask[f] = true; anyTouch = true; break;
                 }
         }
-        if (!anyTouch) continue;
+        if (!anyTouch) {
+            if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): "
+                "NO-MOVER-RELEVANCE — no mover sphere falls in any of the probe's "
+                "6 padded-face pyramids from bake@(%.1f,%.1f,%.1f), skip\n",
+                nm, si, bake[0], bake[1], bake[2]);
+            continue;
+        }
 
         // (3) render dynamic-only into the touched faces + composite + refilter.
-        overlayComposite(sc, S, faceMask);
+        // Budget cap: when spent, later relevant probes wait for a future frame
+        // (round-robin). Under sProf we still reach here to REPORT the defer.
+        if (processed >= budget) {
+            if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): "
+                "BUDGET-DEFERRED — relevant but budget %d already spent this "
+                "frame (round-robins in next frame)\n", nm, si, budget);
+            continue;
+        }
+        const int mechTexels = overlayComposite(sc, S, faceMask);
         ++processed;
-        for (int f = 0; f < 6; ++f) facesTotal += faceMask[f] ? 1 : 0;
+        int nf = 0; for (int f = 0; f < 6; ++f) nf += faceMask[f] ? 1 : 0;
+        facesTotal += nf;
+        if (sProf) std::fprintf(stderr, "[ENVDYN-WHY] '%s' (store %zu): OK — "
+            "overlaid the mech into %d touched face(s), %d mech texel(s) "
+            "composited over static%s\n", nm, si, nf, mechTexels,
+            mechTexels == 0 ? " (mech occluded / off-probe — nothing visible)" : "");
     }
     if (N) cursor = int((size_t(cursor) + size_t(processed) + 1) % N);
 
