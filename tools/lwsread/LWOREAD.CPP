@@ -620,12 +620,13 @@ void ReadSurfaceRevExt(unsigned int EndPos)
 	if (mask & 0x100) { fread(&Surf->EnvBakeRes,1,4,LWO);    SwapDW(&Surf->EnvBakeRes); }
 	if (mask & 0x200) { fread(&Surf->WaterProcMode,1,1,LWO); }     // i8
 	if (mask & 0x400) { fread(&Surf->EnvDynamic,1,1,LWO); }        // u8 (ENVDYN A1)
+	if (mask & 0x800) { fread(&Surf->SpecMul,1,4,LWO);       SwapDW(&Surf->SpecMul); }
 #ifdef ObjectDebugMode
 	printf("  RVSF mask=%04Xh ao=%.3f par=%.3f tint=%.3f/%.3f/%.3f ior=%.3f "
-	       "refr=%d env=%d bakeRes=%d water=%d envDyn=%d\n", mask, Surf->AoStrength,
+	       "refr=%d env=%d bakeRes=%d water=%d envDyn=%d specMul=%.3f\n", mask, Surf->AoStrength,
 	       Surf->ParallaxScale, Surf->TintR, Surf->TintG, Surf->TintB,
 	       Surf->RefractIor, Surf->Refractive, Surf->EnvReflMode,
-	       Surf->EnvBakeRes, Surf->WaterProcMode, Surf->EnvDynamic);
+	       Surf->EnvBakeRes, Surf->WaterProcMode, Surf->EnvDynamic, Surf->SpecMul);
 #endif
 }
 

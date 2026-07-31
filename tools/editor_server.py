@@ -122,7 +122,10 @@ ALLOWED_PROPS = {"baseR", "baseG", "baseB", "diffuse", "specular",
 # ENVDYN_DISPLACEMENT_PLAN.md) marking this material's env probe for the live
 # dynamic-mesh reflection overlay. RVSF-only (mask bit 0x400) — routed exactly
 # like the other RVSF dials via RVSF_SURF_KEYS/pop_rev_ext_props below.
-SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural", "envDynamic"}
+# specMul: per-material specular RESPONSE multiplier (scales the final deferred
+# specular incl. env-specular; RVSF bit 0x800 — the author-side dial for
+# sources whose specular reads wrong, e.g. the Polyhaven sandstone).
+SURF_SIDECAR_KEYS = {"aoStrength", "parallaxScale", "normalFlip", "tintR", "tintG", "tintB", "refractive", "refractIor", "envRefl", "envBakeRes", "waterProcedural", "envDynamic", "specMul"}
 # Of those, the ones that migrate to the LWO RVSF sub-chunk (sidecar-elim §1a),
 # for authoring scenes. = SURF_SIDECAR_KEYS minus normalFlip, which pairs with
 # the normal-map assignment (§1e) and stays on the sidecar for now. lwopatch's
@@ -1353,17 +1356,27 @@ IMPORT_DIR = None          # set by main(); default_import_dir() when unset
 ROLE_NAMES = ("albedo", "normal", "height", "roughness", "ao", "metallic")
 CAND_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".bmp")
 # Mirrors the engine's filename classifier (MaterialImport_ClassifyRole /
-# classify() token rules): token list per role, FIRST match wins, in the same
-# order; a token matches only on separator boundaries (start/end, '_', '-',
-# ' '; digits allowed after: normal2, roughness-2k).
+# classify() token rules), extended for the Polyhaven convention: token list
+# per role, FIRST match wins, in the same order; a token matches only on
+# separator boundaries (start/end, '_', '-', ' '; digits allowed after:
+# normal2, roughness-2k). Polyhaven additions ('sandstone_blocks_05_diff_1k'
+# et al): 'diff' -> albedo, 'nor' already covers nor_gl (OpenGL convention —
+# the engine's expected one, imported unflipped), 'disp' -> height, and 'arm'
+# = the glTF PACKED AO/Roughness/Metallic map (R=AO, G=Roughness, B=Metallic)
+# — a pseudo-role the installer SPLITS per channel (see pbr_install). 'spec'
+# maps to NO role: the engine has no specular-map slot — the per-material
+# specular response dial is the RVSF 'specMul' (skip-listed so a spec file
+# can't misclassify).
 _ROLE_TOKENS = [
-    (None,        ("preview", "thumb", "thumbnail", "sphere", "render")),  # skip
-    ("albedo",    ("basecolor", "base_color", "base-color", "albedo", "diffuse", "color")),
+    (None,        ("preview", "thumb", "thumbnail", "sphere", "render",
+                   "spec", "specular")),                                   # skip
+    ("albedo",    ("basecolor", "base_color", "base-color", "albedo", "diffuse", "diff", "color")),
     ("normal",    ("normal", "nrm", "nor")),
     ("roughness", ("roughness", "rough", "rgh")),
     ("height",    ("height", "disp", "displacement", "bump")),
     ("metallic",  ("metallic", "metalness", "metal")),
     ("ao",        ("ao", "occlusion", "ambientocclusion")),
+    ("arm",       ("arm",)),        # packed AO/Rough/Metal — split at install
 ]
 
 
@@ -1382,22 +1395,54 @@ def _token_at(stem, tok):
         pos = end
 
 
-def classify_role_name(fname):
-    """filename -> (role or None, group-prefix). Fixed role names ('albedo.png')
-    and suffix conventions ('wall_stone3_albedo.png') both classify; the prefix
-    (stem before the matched token) groups loose files into a candidate set."""
+_RES_K_RE = re.compile(r"[-_](\d+)k(?=[-_.]|$)")
+
+
+def _res_k(fname):
+    """Resolution-suffix rank: '..._diff_2k.png' -> 2, no suffix -> 0."""
+    m = _RES_K_RE.search(os.path.basename(fname).lower())
+    return int(m.group(1)) if m else 0
+
+
+def _classify_full(fname):
+    """filename -> (role or None, group-prefix, matched-token). Fixed role
+    names ('albedo.png') and suffix conventions ('wall_stone3_albedo.png',
+    Polyhaven 'sandstone_blocks_05_diff_1k.png') both classify; the prefix
+    (stem before the matched token, resolution suffix stripped) groups loose
+    files into a candidate set.
+
+    The RIGHTMOST matching token wins (ties: earlier role row). Role tokens
+    are suffixes by convention, while a SET NAME may itself contain a token
+    word — 'blue_metal_plate_ao_1k' must classify as ao by its suffix, not as
+    metallic via the 'metal' inside the set name (first-row-wins misfiled the
+    whole Polyhaven blue_metal_plate set: ao->metallic, arm dropped). NOTE:
+    the engine's own MaterialImport_ClassifyRole keeps first-row-wins — it
+    only ever sees fixed-name <role>.png files from installed sets (and the
+    legacy CLI dir scan), so the divergence is confined to raw library
+    filenames, which only this scanner touches."""
     stem, ext = os.path.splitext(os.path.basename(fname))
     if ext.lower() not in CAND_EXTS:
-        return None, ""
+        return None, "", ""
     stem = stem.lower()
     if stem in ROLE_NAMES:
-        return stem, ""
-    for role, toks in _ROLE_TOKENS:
+        return stem, "", stem
+    best = None                    # (pos, -row, role, tok)
+    for row, (role, toks) in enumerate(_ROLE_TOKENS):
         for tok in toks:
             pos = _token_at(stem, tok)
-            if pos >= 0:
-                return (role, stem[:pos].rstrip("_- ")) if role else (None, "")
-    return None, ""
+            if pos >= 0 and (best is None or (pos, -row) > (best[0], best[1])):
+                best = (pos, -row, role, tok)
+    if best is None:
+        return None, "", ""
+    pos, _nrow, role, tok = best
+    pre = _RES_K_RE.sub("", stem[:pos]).rstrip("_- ")
+    return (role, pre, tok) if role else (None, pre, tok)
+
+
+def classify_role_name(fname):
+    """filename -> (role or None, group-prefix). See _classify_full."""
+    r, pre, _tok = _classify_full(fname)
+    return r, pre
 
 
 def pbr_installed_sets():
@@ -1433,18 +1478,90 @@ def _is_preview(fname):
 
 
 def _dir_roles(files):
-    """(roles{role: filename}, in-dir preview filename or None) for a file list.
-    Role matching is case-insensitive (classify lowercases) and maps the
-    FreePBR suffix zoo — basecolor/albedo, Normal-ogl -> normal, Height/
-    Metallic/Roughness capitalized, '-ao' — via the shared token classifier."""
-    roles, preview = {}, None
+    """(roles{role: filename}, in-dir preview filename or None, extras) for a
+    file list. Role matching is case-insensitive (classify lowercases) and maps
+    the FreePBR suffix zoo — basecolor/albedo, Normal-ogl -> normal, Height/
+    Metallic/Roughness capitalized, '-ao' — plus the Polyhaven one (diff/
+    nor_gl/disp/rough/arm) via the shared token classifier. When several files
+    map to one role, rank decides: 'disp'/'height' beat 'bump' for the height
+    slot (bump is a different, high-frequency signal — only used when nothing
+    better exists), and a larger _<N>k resolution suffix beats a smaller one
+    (multi-resolution dumps pick the largest; the engine caps at 1024 on load
+    anyway). `extras` lists recognized-but-unused map kinds (currently 'spec':
+    Polyhaven's own .mtlx ignores its spec map — standard_surface uses constant
+    specular=1 + IOR 1.5 with the rough map doing the shaping — so it is
+    surfaced in the UI as present-but-unused, never installed as a role)."""
+    roles, preview, extras = {}, None, []      # roles: role -> (rank, filename)
     for f in files:
         if preview is None and _is_preview(f):
             preview = f
-        r, _pre = classify_role_name(f)
-        if r and r not in roles:
-            roles[r] = f
-    return roles, preview
+        r, _pre, tok = _classify_full(f)
+        if not r:
+            if tok in ("spec", "specular") and "spec" not in extras:
+                extras.append("spec")
+            continue
+        rank = (0 if tok == "bump" else 1, _res_k(f))
+        if r not in roles or rank > roles[r][0]:
+            roles[r] = (rank, f)
+    return {r: f for r, (_rank, f) in roles.items()}, preview, extras
+
+
+def pbr_parse_mtlx(path):
+    """Lightweight MaterialX scrape (plain ElementTree, NO MaterialX library):
+    pull the authored constants an install should remember — displacement
+    scale (the physical amplitude of the full height range, e.g. Polyhaven's
+    0.01), normal-map scale, the standard_surface specular/IOR/metalness
+    constants. These land in the installed set's set.meta.json (provenance +
+    future seeds for displace_amp / ParallaxScale suggestions). Returns {} on
+    any parse trouble — the meta is advisory, never load-bearing.
+
+    Colorspace note (recorded in the meta): .mtlx marks albedo srgb_texture
+    and the data maps linear. The engine loads all bytes uniformly (stb) and
+    treats albedo as gamma-encoded (the HDR-linear path decodes with a
+    gamma-2.0 square; data maps are consumed linearly) — consistent with the
+    convention, approximate vs true sRGB. Noted, not fixed here."""
+    import xml.etree.ElementTree as ET
+    out = {}
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return {}
+
+    def fval(inp):
+        v = inp.get("value")
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    for node in root.iter():
+        tag = node.tag.split("}")[-1]
+        if tag == "displacement":
+            for inp in node:
+                if inp.get("name") == "scale":
+                    v = fval(inp)
+                    if v is not None:
+                        out["displacementScale"] = v
+        elif tag == "normalmap":
+            for inp in node:
+                if inp.get("name") == "scale":
+                    v = fval(inp)
+                    if v is not None:
+                        out["normalScale"] = v
+        elif tag == "standard_surface":
+            for inp in node:
+                nm, v = inp.get("name"), fval(inp)
+                if v is None:
+                    continue
+                if nm == "specular":
+                    out["specular"] = v
+                elif nm == "specular_IOR":
+                    out["specularIor"] = v
+                elif nm == "metalness":
+                    out["metalness"] = v
+    return out
 
 
 def _sibling_preview(dirname, parent_previews):
@@ -1460,15 +1577,31 @@ def _sibling_preview(dirname, parent_previews):
     return None
 
 
+# Category recursion depth: the user's canonical materials root needs 3
+# (~/work/materials -> Blender -> <category>-bl -> <set>_bl) and the FreePBR
+# library ships one doubly-nested quirk (floors-bl/spaced-tiles1-bl/
+# spaced-tiles1-bl/ — the role files sit in a same-named inner dir), so 4.
+# The cap exists to keep a mistaken scan of a huge tree bounded.
+_MAX_SCAN_DEPTH = 4
+
+
 def pbr_scan_candidates(root):
-    """Scan `root` for CANDIDATE sets, TWO levels deep (the FreePBR-Premium
-    layout: <root>/<category>/<set_dir>/<set>_<role>.png):
-      - a level-1 subdirectory holding role files is itself a set;
-      - a level-1 subdirectory WITHOUT role files is treated as a CATEGORY and
-        its subdirectories are scanned as sets (candidate['category'] = its
-        name — the natural grouping for the browse UI);
+    """Scan `root` for CANDIDATE sets. Recognizes BOTH library shapes under
+    one root (the user's ~/work/materials):
+      - FreePBR:   <root>/Blender/<category>-bl/<set>_bl/<set>_<role>.png —
+        role files directly in the set dir;
+      - Polyhaven: <root>/polyhaven/<set>_<res>/textures/<set>_<role>_<res>.png
+        with the sidecar <set>_<res>.mtlx NEXT TO textures/ — a dir whose role
+        files live in a `textures/` child is that ONE set (name from the
+        parent dir; the .mtlx references textures/*.jpg/.exr whose extensions
+        may differ from the shipped pngs — only its CONSTANTS are scraped, so
+        that mismatch is irrelevant);
       - loose file groups in `root` sharing a prefix ('brick_albedo.jpg' +
         'brick_normal.png'), >=2 roles to qualify.
+    A dir with neither shape is a CATEGORY and is recursed (depth-capped);
+    candidate['category'] is the root-relative parent path ('Blender/
+    concrete-bl', 'polyhaven') — the browse UI's grouping. Install names
+    strip the resolution suffix (sandstone_blocks_05_1k -> sandstone_blocks_05).
     Ready-made '<set>_preview.jpg' files (in the set dir, or category-level
     siblings with FreePBR name drift) ride each candidate as its thumbnail
     source. Root clutter (.blend/.gltf/.txt/.pdf) has no image-role extension
@@ -1484,58 +1617,103 @@ def pbr_scan_candidates(root):
     installed = {s["set"] for s in pbr_installed_sets()}
     out = []
 
-    def add(name, src_dir, roles, preview=None, category=None):
+    def find_mtlx(files):
+        return next((f for f in files if f.lower().endswith(".mtlx")), None)
+
+    def add(name, src_dir, roles, preview=None, category=None, extras=None,
+            mtlx=None, mtlx_dir=None):
         if not roles:
             return
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "set"
+        # Install name: resolution suffix stripped (…_1k -> …), then sanitized.
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                      re.sub(r"[-_]\d+k$", "", name, flags=re.I)) or "set"
+        meta = pbr_parse_mtlx(os.path.join(mtlx_dir or src_dir, mtlx)) if mtlx else {}
         out.append({"name": name, "set": safe, "dir": src_dir,
                     "roles": roles,           # role -> source filename
                     "preview": preview,       # {dir, file} or None
                     "category": category,
+                    "extras": extras or [],   # present-but-unused kinds (spec)
+                    "mtlx": mtlx,             # sidecar MaterialX, if any
+                    "mtlxDir": mtlx_dir,      # where the mtlx lives (set dir)
+                    "meta": meta,             # scraped mtlx constants
                     "installed": safe in installed})
 
-    loose = {}
+    def scan_dir(path, name, category, parent_path, parent_previews, depth):
+        """Detect `path` as a set (direct role files OR a textures/ child) or
+        recurse it as a category. Returns True when handled as a set."""
+        try:
+            files = sorted(os.listdir(path))
+        except OSError as e:
+            errors.append(f"cannot read {path} — {e.strerror or e}")
+            return True                      # handled (error surfaced)
+        roles, prev, extras = _dir_roles(files)
+        if roles:                            # set dir, role files inside
+            if prev:
+                preview = {"dir": path, "file": prev}
+            else:
+                pf = _sibling_preview(name, parent_previews)
+                preview = {"dir": parent_path, "file": pf} if pf else None
+            add(name, path, roles, preview, category=category,
+                extras=extras, mtlx=find_mtlx(files), mtlx_dir=path)
+            return True
+        # Polyhaven shape: role files one level down in textures/, the .mtlx
+        # sibling here; the whole dir is ONE candidate named after this dir.
+        tex = next((f for f in files if f.lower() == "textures"
+                    and os.path.isdir(os.path.join(path, f))), None)
+        if tex:
+            tp = os.path.join(path, tex)
+            try:
+                tfiles = sorted(os.listdir(tp))
+            except OSError as e:
+                errors.append(f"cannot read {tp} — {e.strerror or e}")
+                return True
+            troles, tprev, textras = _dir_roles(tfiles)
+            if troles:
+                pv = ({"dir": tp, "file": tprev} if tprev else
+                      ({"dir": path, "file": prev} if prev else None))
+                add(name, tp, troles, pv, category=category,
+                    extras=textras, mtlx=find_mtlx(files), mtlx_dir=path)
+                return True
+        # Category: recurse the subdirectories (depth-capped).
+        if depth >= _MAX_SCAN_DEPTH:
+            return False
+        cat_previews = [f for f in files if _is_preview(f)]
+        sub_cat = name if not category else category + "/" + name
+        handled = False
+        for sub in files:
+            sp = os.path.join(path, sub)
+            if os.path.isdir(sp):
+                handled |= scan_dir(sp, sub, sub_cat, path, cat_previews,
+                                    depth + 1)
+        return handled
+
+    loose, loose_extras = {}, {}
+    root_mtlx = [f for f in entries if f.lower().endswith(".mtlx")
+                 and os.path.isfile(os.path.join(root, f))]
+    root_previews = [f for f in entries if _is_preview(f)
+                     and os.path.isfile(os.path.join(root, f))]
     for name in entries:
         p = os.path.join(root, name)
         if os.path.isdir(p):
-            try:
-                files = sorted(os.listdir(p))
-            except OSError as e:
-                errors.append(f"cannot read {p} — {e.strerror or e}")
-                continue
-            roles, prev = _dir_roles(files)
-            if roles:                          # level-1 set dir
-                add(name, p, roles,
-                    {"dir": p, "file": prev} if prev else None)
-                continue
-            # category dir: scan its subdirs as sets (level 2)
-            cat_previews = [f for f in files if _is_preview(f)]
-            for sub in files:
-                sp = os.path.join(p, sub)
-                if not os.path.isdir(sp):
-                    continue
-                try:
-                    sfiles = sorted(os.listdir(sp))
-                except OSError as e:
-                    errors.append(f"cannot read {sp} — {e.strerror or e}")
-                    continue
-                sroles, sprev = _dir_roles(sfiles)
-                if not sroles:
-                    continue
-                if sprev:
-                    preview = {"dir": sp, "file": sprev}
-                else:
-                    pf = _sibling_preview(sub, cat_previews)
-                    preview = {"dir": p, "file": pf} if pf else None
-                add(sub, sp, sroles, preview, category=name)
+            scan_dir(p, name, None, root, root_previews, 1)
         else:
-            r, pre = classify_role_name(name)
+            r, pre, tok = _classify_full(name)
+            key = pre or os.path.basename(root.rstrip("/"))
             if r:
-                loose.setdefault(pre or os.path.basename(root.rstrip("/")), {}) \
-                     .setdefault(r, name)
+                g = loose.setdefault(key, {})
+                rank = (0 if tok == "bump" else 1, _res_k(name))
+                if r not in g or rank > g[r][0]:
+                    g[r] = (rank, name)     # same rank rules as _dir_roles
+            elif tok in ("spec", "specular"):
+                loose_extras.setdefault(key, []).append("spec")
     for pre, roles in sorted(loose.items()):
         if len(roles) >= 2:       # one stray color file is not a set
-            add(pre, root, roles)
+            # A root-level .mtlx belongs to the group whose prefix it shares.
+            mtlx = next((f for f in root_mtlx
+                         if os.path.splitext(f)[0].lower().startswith(pre.lower())), None)
+            add(pre, root, {r: f for r, (_rank, f) in roles.items()},
+                extras=sorted(set(loose_extras.get(pre, []))), mtlx=mtlx,
+                mtlx_dir=root)
     return out, errors
 
 
@@ -1572,23 +1750,33 @@ def _install_role_file(src, out, role, warnings):
     return True
 
 
-def pbr_install(src_dir, name, roles):
+def pbr_install(src_dir, name, roles, meta=None, mtlx=None):
     """Install a candidate set into Runtime/TEXTURES/PBR/<set>/: role files
-    copied + normalized to the fixed <role>.png names, license/README files
-    copied along, pow2 sanity check surfaced as warnings. Returns (code, resp);
-    on ok the set is immediately visible to /api/pbrsets + the engine's
-    dir-per-set loader (MaterialImport_ApplyRevMaps)."""
+    copied + normalized to the fixed <role>.png names, a packed 'arm' map
+    (R=AO/G=Rough/B=Metallic) split into whichever of those roles no standalone
+    file provided, license/README files copied along, pow2 sanity check
+    surfaced as warnings. When the candidate carried .mtlx-scraped constants
+    (`meta`, see pbr_parse_mtlx) they are written to <set>/set.meta.json —
+    advisory provenance (displacement scale etc.) a later slice can seed the
+    editor dials from. Returns (code, resp); on ok the set is immediately
+    visible to /api/pbrsets + the engine's dir-per-set loader
+    (MaterialImport_ApplyRevMaps)."""
     if not src_dir or not name or not isinstance(roles, dict) or not roles:
         return 400, {"ok": False, "error": "want {dir, name, roles:{role: filename}}"}
     src_dir = os.path.expanduser(src_dir)
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "set"
+    # Same install-name rule as the scanner: resolution suffix stripped
+    # (sandstone_blocks_05_1k -> sandstone_blocks_05), then sanitized.
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                  re.sub(r"[-_]\d+k$", "", name, flags=re.I)) or "set"
     dst = os.path.join(PBR_DIR, safe)
     warnings = []
     if os.path.isdir(dst) and any(os.path.exists(os.path.join(dst, r + ".png"))
                                   for r in ROLE_NAMES):
         warnings.append(f"set '{safe}' already installed — overwriting the provided roles")
     os.makedirs(dst, exist_ok=True)
-    done = []
+    done, notes = [], []
+    roles = dict(roles)
+    arm_src = roles.pop("arm", None)   # packed AO/Rough/Metal — split below
     for role, fname in sorted(roles.items()):
         if role not in ALLOWED_ROLES:
             warnings.append(f"unknown role '{role}' — skipped")
@@ -1613,6 +1801,31 @@ def pbr_install(src_dir, name, roles):
             except OSError:
                 pass
         done.append(role)
+    # Packed 'arm' map (glTF convention: R=AO, G=Roughness, B=Metallic): split
+    # the channels into the missing role slots. Standalone ao/rough files are
+    # PREFERRED when present (full-range single-channel sources beat the packed
+    # 8-bit channel); in practice metallic often exists ONLY as arm.B.
+    if arm_src is not None:
+        src = os.path.join(src_dir, os.path.basename(str(arm_src)))
+        if Image is None:
+            warnings.append("arm map present but PIL is not installed — cannot split channels (pip install pillow)")
+        elif not os.path.isfile(src):
+            warnings.append(f"arm: source {os.path.basename(str(arm_src))} missing — skipped")
+        else:
+            try:
+                with Image.open(src) as arm_img:
+                    arm_rgb = arm_img.convert("RGB")
+                    for role, ch, chname in (("ao", 0, "R"), ("roughness", 1, "G"),
+                                             ("metallic", 2, "B")):
+                        if role in done:
+                            notes.append(f"arm.{chname} skipped — standalone {role} file installed (higher fidelity than the packed 8-bit channel)")
+                            continue
+                        arm_rgb.getchannel(ch).save(
+                            os.path.join(dst, role + ".png"), format="PNG")
+                        done.append(role)
+                        notes.append(f"arm.{chname} -> {role}.png (split from the packed AO/Rough/Metal map)")
+            except OSError as e:
+                warnings.append(f"arm: {e.strerror or e} — channels not split")
     if not done:
         return 400, {"ok": False, "error": "no role file could be installed", "warnings": warnings}
     # Keep the pack's license/readme/attribution with the installed set.
@@ -1623,8 +1836,28 @@ def pbr_install(src_dir, name, roles):
                 shutil.copy2(os.path.join(src_dir, f), os.path.join(dst, f))
     except OSError:
         pass
-    return 200, {"ok": True, "set": safe, "roles": done,
-                 "dir": os.path.relpath(dst, REPO), "warnings": warnings}
+    # Advisory per-set metadata (mtlx-scraped constants + provenance). The
+    # engine ignores it; the picker shows it; a later slice can seed
+    # displace_amp / ParallaxScale suggestions from displacementScale.
+    if isinstance(meta, dict) and meta:
+        meta_out = dict(meta)
+        meta_out["source"] = {"dir": src_dir, "mtlx": mtlx}
+        meta_out["colorspaceNote"] = (
+            "mtlx declares albedo srgb_texture + data maps linear; the engine "
+            "loads bytes uniformly and treats albedo as gamma-encoded "
+            "(HDR-linear path decodes gamma-2.0), data maps linear — "
+            "consistent, approximate vs true sRGB")
+        try:
+            with open(os.path.join(dst, "set.meta.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(meta_out, f, indent=1)
+            notes.append("set.meta.json written (mtlx constants: "
+                         + ", ".join(f"{k}={v}" for k, v in sorted(meta.items())) + ")")
+        except OSError as e:
+            warnings.append(f"set.meta.json: {e.strerror or e}")
+    return 200, {"ok": True, "set": safe, "roles": sorted(done),
+                 "dir": os.path.relpath(dst, REPO),
+                 "warnings": warnings, "notes": notes}
 
 
 def pbr_thumb_png(src, max_dim=256):
@@ -1651,11 +1884,14 @@ def pbr_thumb_png(src, max_dim=256):
 
 
 def default_import_dir():
-    """First READABLE of: ~/work/Blender (the user's FreePBR-Premium library —
-    verified readable), ~/Downloads, /tmp. macOS TCC denies ~/Downloads to many
-    terminal-spawned processes (verified live) — probing avoids defaulting the
-    UI onto a dir that scans to a permission error."""
-    for d in (os.path.expanduser("~/work/Blender"),
+    """First READABLE of: ~/work/materials (the user's canonical source root —
+    Blender/ = the FreePBR library + polyhaven/ = official Polyhaven layout),
+    ~/work/Blender (the library's pre-restructure home, in case of rollback),
+    ~/Downloads, /tmp. macOS TCC denies ~/Downloads to many terminal-spawned
+    processes (verified live) — probing avoids defaulting the UI onto a dir
+    that scans to a permission error."""
+    for d in (os.path.expanduser("~/work/materials"),
+              os.path.expanduser("~/work/Blender"),
               os.path.expanduser("~/Downloads"), "/tmp"):
         try:
             os.listdir(d)
@@ -1755,7 +1991,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with save_lock:
                     code, resp = pbr_install(payload.get("dir"),
                                              payload.get("name"),
-                                             payload.get("roles") or {})
+                                             payload.get("roles") or {},
+                                             meta=payload.get("meta"),
+                                             mtlx=payload.get("mtlx"))
             except Exception as e:
                 code, resp = 500, {"ok": False, "error": f"{type(e).__name__}: {e}"}
             print(f"[pbr-install] {code}: {resp.get('set')} roles={resp.get('roles')}"

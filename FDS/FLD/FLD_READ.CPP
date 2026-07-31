@@ -212,6 +212,7 @@ void ReadMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x100) fread(&Mat->EnvBakeRes,1,4,FLD);
 		if (Mat->RevExtMask & 0x200) fread(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fread(&Mat->EnvDynamic,1,1,FLD);
+		if (Mat->RevExtMask & 0x800) fread(&Mat->SpecMul,1,4,FLD);
 	}
 	// Revival per-surface PBR map-SET extension: a SECOND conditional payload
 	// gated on Surf_RevMaps (0x0800), written AFTER the RVSF numeric payload by

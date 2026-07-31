@@ -66,6 +66,10 @@ typedef struct
 	int32_t        EnvBakeRes;      // bit 0x100
 	int8_t         WaterProcMode;   // bit 0x200
 	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
+	float          SpecMul;         // bit 0x800 — specular response multiplier
+	// (bits 0x1000/0x2000/0x4000/0x8000 remain free in the RVSF u16 for future
+	//  per-material response multipliers — e.g. roughMul/metalMul siblings;
+	//  aoStrength already covers the AO one. Map roles live in RVSM, not here.)
 	// Revival per-surface PBR map-SET extension — Surf_RevMaps(0x0800)-gated
 	// conditional payload AFTER the RVSF numeric payload (u16 RevMapMask +
 	// set-name string bit 0x01 + normalFlip byte bit 0x40). Directory-per-set:

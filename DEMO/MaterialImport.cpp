@@ -469,6 +469,11 @@ bool MaterialImport_SetSurfaceProp(Scene *sc, const char *surface,
 		// scene sidecar). Both multiply their global FeatureFlags strength.
 		else if (!std::strcmp(prop, "aoStrength"))    M->AoStrength = value;
 		else if (!std::strcmp(prop, "parallaxScale")) M->ParallaxScale = value;
+		// Per-material specular RESPONSE multiplier (RVSF bit 0x800): scales
+		// the deferred kernels' FINAL specular term (analytic + env-specular)
+		// after roughness/metal modulation. 1 = authored default (byte-null);
+		// clamp negatives (a negative response is nonsense).
+		else if (!std::strcmp(prop, "specMul"))       M->SpecMul = value < 0.0f ? 0.0f : value;
 		// Per-material glass-refraction IOR (engine-only, sidecar-persisted).
 		// 0 = unset -> the kernel falls back to the global glass_refract_ior;
 		// >0 = this material's Snell bend + Schlick F0 use this value. Only

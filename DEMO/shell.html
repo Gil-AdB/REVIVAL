@@ -710,7 +710,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b71";
+      var REV_BUILD = "b72";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1060,7 +1060,7 @@
       // refractive = glass opt-in (sidecar, SURF_SIDECAR_KEYS). smoothAngle =
       // per-surface normal-smoothing threshold (native FLD field on city/crash,
       // sidecar on authoring scenes — the server routes it per scene).
-      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','envDynamic','smoothAngle'];
+      var EDITOR_SAVE_PROPS = ['baseR','baseG','baseB','diffuse','specular','glossiness','luminosity','transparency','reflection','aoStrength','parallaxScale','specMul','normalFlip','tintR','tintG','tintB','refractive','refractIor','envRefl','envBakeRes','waterProcedural','envDynamic','smoothAngle'];
       // UV mapping is a grouped edit: if ANY of these differs from pristine,
       // ALL five are sent (the server patches CTEX/TSIZ/TFLG as one unit).
       var EDITOR_UV_PROPS = ['uvProj','uvScaleX','uvScaleY','uvScaleZ','uvAxis'];
@@ -2258,7 +2258,7 @@
       var EDITOR_RANGES = { diffuse:[0,1], specular:[0,2], luminosity:[0,8],
                             transparency:[0,100], reflection:[0,100],
                             aoStrength:[0,2], parallaxScale:[0,3],
-                            smoothAngle:[0,180] };
+                            specMul:[0,4], smoothAngle:[0,180] };
       // Slider + numeric twin. The number box accepts values beyond the slider
       // range (type an exact 3.5 even if the slider tops out at 2).
       function propRow(s, key, min, max, step){
@@ -2642,7 +2642,7 @@
           row.appendChild(inp);
           el.appendChild(row);
         })();
-        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale','smoothAngle'].forEach(function(k){
+        ['diffuse','specular','luminosity','transparency','reflection','aoStrength','parallaxScale','specMul','smoothAngle'].forEach(function(k){
           var rg = EDITOR_RANGES[k] || [0,2];
           var row = propRow(s, k, rg[0], rg[1], k === 'smoothAngle' ? 1 : (rg[1]-rg[0]) / 200);
           if (k === 'smoothAngle') {
@@ -2668,6 +2668,9 @@
               row.title = 'NO AO MAP on this surface — this dial does nothing until one is imported (ao role below).';
               row.style.opacity = '0.45';
             }
+          }
+          if (k === 'specMul') {
+            row.title = 'specular RESPONSE multiplier: scales this material\'s FINAL specular term — analytic highlights AND env reflections — without touching roughness. 1 = authored default; <1 tames a specular that reads too hot/weird (e.g. imported PBR sets), 0 kills it. LIVE + persists to the LWO (RVSF).';
           }
           if (k === 'parallaxScale') {
             row.title = 'per-material parallax depth (x global parallax_strength). Only visible with a height map + --parallax.';
@@ -3312,7 +3315,8 @@
             }
             editorStatus('installing set "' + c.set + '"…');
             fetch('/api/pbrinstall', { method: 'POST', headers: {'Content-Type': 'application/json'},
-                                       body: JSON.stringify({ dir: c.dir, name: c.name, roles: c.roles }) })
+                                       body: JSON.stringify({ dir: c.dir, name: c.name, roles: c.roles,
+                                                              meta: c.meta || null, mtlx: c.mtlx || null }) })
               .then(function(r){ return r.json(); })
               .then(function(j){
                 if (!j.ok) { editorStatus('install failed: ' + (j.error || '?')); return; }
@@ -3325,8 +3329,15 @@
               .catch(function(e){ editorStatus('install failed: ' + e); });
           }
           function candCard(c){
+            // Info badges: 'installed' (name collision), present-but-unused
+            // map kinds ('spec (unused)' — Polyhaven's own mtlx ignores its
+            // spec map), and the mtlx-scraped displacement scale when known.
+            var badges = [];
+            if (c.installed) badges.push('installed');
+            (c.extras || []).forEach(function(x){ badges.push(x + ' (unused)'); });
+            if (c.meta && c.meta.displacementScale !== undefined) badges.push('disp ' + c.meta.displacementScale);
             return card({ thumb: candThumb(c), name: c.name, roles: Object.keys(c.roles).sort(),
-                          badge: c.installed ? 'installed' : null, dashed: true,
+                          badge: badges.length ? badges.join(' · ') : null, dashed: true,
                           onclick: function(){ chooseCand(c); } });
           }
           // Installed section

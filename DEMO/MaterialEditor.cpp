@@ -118,6 +118,7 @@ std::string Editor_GetSurfacesJSON()
 		appendNum(out, "reflection",   M->Reflection);   out += ",";
 		appendNum(out, "aoStrength",   M->AoStrength);   out += ",";
 		appendNum(out, "parallaxScale",M->ParallaxScale);out += ",";
+		appendNum(out, "specMul",      M->SpecMul);      out += ",";
 		appendNum(out, "tintR",        M->TintR);        out += ",";
 		appendNum(out, "tintG",        M->TintG);        out += ",";
 		appendNum(out, "tintB",        M->TintB);        out += ",";

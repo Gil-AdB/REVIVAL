@@ -93,6 +93,16 @@ struct Material
     // same pattern as ParallaxScale. 1 = full effect; lower to tame an AO map
     // that reads too dark on one surface without dialing the whole scene.
     float                 AoStrength             = 1.0f;
+    // Per-material specular RESPONSE multiplier (RVSF bit 0x800, editor
+    // 'specMul' dial). Scales the FINAL accumulated specular term — analytic
+    // highlights AND the env-specular reflection compose — in the deferred
+    // kernels, applied AFTER the roughness-map/metal modulation so it never
+    // distorts roughness, only the response amplitude. 1 = authored default
+    // (multiplying by 1.0f is an exact float identity → byte-null); 0 kills
+    // the specular response entirely. For sources whose specular reads wrong
+    // on this engine (the Polyhaven sandstone's 'spec' map has no slot here —
+    // this dial is the author-side control instead).
+    float                 SpecMul                = 1.0f;
     // Per-material roughness map (PBR). Grayscale, 8-bit single-channel, same
     // tiled/mip layout as the albedo (sampled at the same swizzled UV/miplevel
     // — incl. the parallax-shifted UV). White = rough → LESS specular. Cheap

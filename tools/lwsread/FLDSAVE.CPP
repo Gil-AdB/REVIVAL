@@ -172,6 +172,7 @@ void SaveMaterial(FldMat *Mat)
 		if (Mat->RevExtMask & 0x100) fwrite(&Mat->EnvBakeRes,1,4,FLD);
 		if (Mat->RevExtMask & 0x200) fwrite(&Mat->WaterProcMode,1,1,FLD);
 		if (Mat->RevExtMask & 0x400) fwrite(&Mat->EnvDynamic,1,1,FLD);   // ENVDYN A1
+		if (Mat->RevExtMask & 0x800) fwrite(&Mat->SpecMul,1,4,FLD);      // spec response ×
 	}
 	// Revival per-surface PBR map-SET extension (LWO "RVSM" -> Surf_RevMaps
 	// bit): a SECOND conditional payload written ONLY when the material carries

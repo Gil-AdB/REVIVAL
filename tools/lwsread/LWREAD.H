@@ -190,6 +190,8 @@ typedef struct
 	int32_t        EnvBakeRes;      // bit 0x100 (pow2 64..1024)
 	int8_t         WaterProcMode;   // bit 0x200 (-1/0/1)
 	uint8_t        EnvDynamic;      // bit 0x400 (0/1) — ENVDYN Workstream A1
+	float          SpecMul;         // bit 0x800 — specular response multiplier
+	// (bits 0x1000..0x8000 free for future response multipliers; maps -> RVSM)
 	// Revival per-surface PBR map-SET extension (custom LWO SURF sub-chunk
 	// "RVSM" -> Surf_RevMaps(0x0800)-gated FLD payload). Directory-per-set:
 	// MapSet names a texture set; the engine resolves TEXTURES/PBR/<set>/

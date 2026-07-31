@@ -2404,6 +2404,14 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 					fdB *= dc; fdG *= dc; fdR *= dc;
 				}
 			}
+			// Per-material specular response multiplier (Material::SpecMul,
+			// RVSF 0x800, editor 'specMul'): scales the FINAL specular —
+			// analytic highlights AND the env compose above — after the
+			// roughness/metal modulation, so it never distorts roughness.
+			// Default 1.0f is skipped (and would be an exact float identity).
+			if (Mat->SpecMul != 1.0f) {
+				sB *= Mat->SpecMul; sG *= Mat->SpecMul; sR *= Mat->SpecMul;
+			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);
 			int outR = int(fdR) + int(sR);
@@ -3271,6 +3279,11 @@ static void Render_DeferredTransparentLighting_Tile(const DeferredLightingCtx &c
 					sG *= 1.0f - metalM + metalM * texG * inv255;
 					sR *= 1.0f - metalM + metalM * texR * inv255;
 				}
+				// Per-material specular response multiplier (see wave-1);
+				// scales every later consumer (LDR add + HDR radiance).
+				if (Mat->SpecMul != 1.0f) {
+					sB *= Mat->SpecMul; sG *= Mat->SpecMul; sR *= Mat->SpecMul;
+				}
 			}
 			// Specular added on top — independent of base color tint. Skipped for
 			// the HDR-reflection path (hdrRefl already carries the full radiance).
@@ -3802,6 +3815,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	alignas(32) float    lane_ambB[8], lane_ambG[8], lane_ambR[8];
 	alignas(32) float    lane_diffuse[8];
 	alignas(32) float    lane_specular[8];
+	// Per-lane specular response multiplier (Material::SpecMul, RVSF 0x800):
+	// scales the lane's FINAL specular — analytic redo accumulators and the
+	// env compose adds — 1.0f = exact float identity (byte-null default).
+	alignas(32) float    lane_specMul[8];
 	alignas(32) float    lane_gloss[8];
 	alignas(32) uint32_t lane_wantSpec[8];
 	alignas(32) uint32_t lane_isWater[8];
@@ -3904,6 +3921,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
 					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
 					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_specMul[k] = 1.0f;
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
@@ -3920,6 +3938,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
 					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
 					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_specMul[k] = 1.0f;
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
@@ -3932,6 +3951,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					lane_texB[k] = lane_texG[k] = lane_texR[k] = 0;
 					lane_ambB[k] = lane_ambG[k] = lane_ambR[k] = 0;
 					lane_diffuse[k] = lane_specular[k] = 0;
+					lane_specMul[k] = 1.0f;
 					lane_gloss[k] = 32.0f;
 					lane_wantSpec[k] = 0;
 					lane_isWater[k] = 0;
@@ -3953,6 +3973,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 				lane_ambR[k]    = Lumin * 255.0f + Diff * ambR_sc;
 				lane_diffuse[k] = Diff;
 				lane_specular[k]= Mat->Specular;
+				lane_specMul[k] = Mat->SpecMul;
 				lane_gloss[k]   = Mat->Glossiness > 0 ? float(Mat->Glossiness) : 32.0f;
 				lane_wantSpec[k]= (Mat->Specular > 0.0f && specGlobalOn) ? 0xFFFFFFFFu : 0u;
 				lane_isWater[k] = (int(matID) == ctx.waterMatID) ? 0xFFFFFFFFu : 0u;
@@ -4447,6 +4468,11 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 							fdBs *= dc; fdGs *= dc; fdRs *= dc;
 						}
 					}
+					// Per-material specular response multiplier (see wave-1):
+					// covers the redo lane's analytic + env-composed spec.
+					if (lane_specMul[k] != 1.0f) {
+						sBs *= lane_specMul[k]; sGs *= lane_specMul[k]; sRs *= lane_specMul[k];
+					}
 					outB = int(fdBs) + int(sBs);
 					outG = int(fdGs) + int(sGs);
 					outR = int(fdRs) + int(sRs);
@@ -4497,9 +4523,12 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 							g0 += lf * (g1 - g0);
 							r0 += lf * (r1 - r0);
 						}
-						outB += int(b0 * envEk[k]);
-						outG += int(g0 * envEk[k]);
-						outR += int(r0 * envEk[k]);
+						// ×lane_specMul: the env-specular IS this lane's whole
+						// specular term (×1.0f = exact identity, byte-null).
+						const float ekS = envEk[k] * lane_specMul[k];
+						outB += int(b0 * ekS);
+						outG += int(g0 * ekS);
+						outR += int(r0 * ekS);
 						fresLane = envFres[k];
 					} else if (lane_envP[k]) {
 						if (g_envVecStats) g_envCntOvEnvScalar.fetch_add(1, std::memory_order_relaxed);
@@ -4529,7 +4558,10 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 						                     lane_gloss[k], metalM_,
 						                     roughMapOnG, envReflGainG,
 						                     envBrdfAnalyticG, multiScatterG, sBs, sGs, sRs, &fresLane);
-						outB += int(sBs); outG += int(sGs); outR += int(sRs);
+						// ×lane_specMul (see the vec env lane above).
+						outB += int(sBs * lane_specMul[k]);
+						outG += int(sGs * lane_specMul[k]);
+						outR += int(sRs * lane_specMul[k]);
 					}
 					// (1-F) diffuse energy conservation: the diffuse landed in
 					// out* as int(vf*[k]) above; re-weight it by (1-fres) with
@@ -5159,6 +5191,10 @@ static void Render_DeferredLighting_TileFill(const DeferredLightingCtx &ctx,
 						fdB *= dc; fdG *= dc; fdR *= dc;
 					}
 				}
+			}
+			// Per-material specular response multiplier (see wave-1).
+			if (Mat->SpecMul != 1.0f) {
+				sB *= Mat->SpecMul; sG *= Mat->SpecMul; sR *= Mat->SpecMul;
 			}
 			int outB = int(fdB) + int(sB);
 			int outG = int(fdG) + int(sG);

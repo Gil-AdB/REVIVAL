@@ -259,6 +259,7 @@ Material* AddMaterial(FldMat *OrgMat, Scene *SceneGroup)
 		if (m & 0x100) candidate.EnvBakeRes    = OrgMat->EnvBakeRes;
 		if (m & 0x200) candidate.WaterProcMode = OrgMat->WaterProcMode;
 		if (m & 0x400) candidate.EnvDynamic    = OrgMat->EnvDynamic;   // ENVDYN A1
+		if (m & 0x800) candidate.SpecMul       = OrgMat->SpecMul;      // spec response ×
 	}
 
 	// Revival per-surface PBR map-role extension (§1e): record the authored role
