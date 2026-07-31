@@ -1796,6 +1796,12 @@ def pbr_install(src_dir, name, roles, meta=None, mtlx=None):
             try:
                 with Image.open(out) as im:
                     w, h = im.size
+                    # All-zero standalone metallic: same dielectric skip as the
+                    # arm.B split below — presence alone enables env-specular.
+                    if role == "metallic" and im.convert("L").getextrema()[1] == 0:
+                        os.remove(out)
+                        notes.append("standalone metallic is all-zero -> NOT installed (dielectric set; avoids the phantom env-specular a black MetallicMap would enable)")
+                        continue
                 if not (_pow2(w) and _pow2(h)):
                     warnings.append(f"{role}: {w}x{h} is not power-of-two — the engine resamples/caps at load; a pow2 source renders crisper")
             except OSError:
@@ -1820,8 +1826,19 @@ def pbr_install(src_dir, name, roles, meta=None, mtlx=None):
                         if role in done:
                             notes.append(f"arm.{chname} skipped — standalone {role} file installed (higher fidelity than the packed 8-bit channel)")
                             continue
-                        arm_rgb.getchannel(ch).save(
-                            os.path.join(dst, role + ".png"), format="PNG")
+                        chan = arm_rgb.getchannel(ch)
+                        # An ALL-ZERO metal channel is a dielectric set
+                        # (Polyhaven sandstone/blue_metal_plate): installing a
+                        # black metallic.png buys nothing but engine side
+                        # effects — a MetallicMap's mere PRESENCE enables the
+                        # env-specular compose + auto-defaults env_refl/
+                        # env_bake_fix, i.e. a phantom grazing sheen on a
+                        # matte set. Skip it (the dial for real spec control
+                        # is specMul).
+                        if role == "metallic" and chan.getextrema()[1] == 0:
+                            notes.append("arm.B all-zero -> metallic NOT installed (dielectric set; avoids the phantom env-specular a black MetallicMap would enable)")
+                            continue
+                        chan.save(os.path.join(dst, role + ".png"), format="PNG")
                         done.append(role)
                         notes.append(f"arm.{chname} -> {role}.png (split from the packed AO/Rough/Metal map)")
             except OSError as e:

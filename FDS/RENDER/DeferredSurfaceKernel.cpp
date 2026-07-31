@@ -3788,6 +3788,7 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 	const bool  envBrdfAnalyticG = fds::FeatureFlags::env_brdf_analytic();
 	const bool  multiScatterG  = fds::FeatureFlags::pbr_multiscatter();
 	const bool  roughMapOnG  = fds::FeatureFlags::roughness_map();
+	const float roughStrengthG = fds::FeatureFlags::roughness_strength();  // redo-lane rough attenuation (see wave-1)
 	const bool  metalMapOnG  = fds::FeatureFlags::metal_map();
 	const bool  diffuseEnergyG = fds::FeatureFlags::diffuse_energy();
 	// --sh_ambient: SH irradiance coefficients (null = off / not baked). See
@@ -4432,6 +4433,27 @@ static void Render_DeferredLighting_Tile_OuterVec(const DeferredLightingCtx &ctx
 					float fdBs = lane_texB[k] * lBs * (1.0f / 256.0f);
 					float fdGs = lane_texG[k] * lGs * (1.0f / 256.0f);
 					float fdRs = lane_texR[k] * lRs * (1.0f / 256.0f);
+					// Roughness map (cheap tier): per-pixel specular intensity
+					// attenuation — same block + same position as wave-1
+					// (after the analytic accumulation, BEFORE the env
+					// compose). The redo lane previously skipped it, so a
+					// rough-mapped material's analytic highlight was NOT
+					// broken up on OuterVec scenes; scenes without rough maps
+					// (stock city) are byte-untouched.
+					if (roughMapOnG && (sBs != 0.0f || sGs != 0.0f || sRs != 0.0f)) {
+						Material *MatR_ = ctx.matTable.data[(lane_mat32[k] >> 20) & 0xFF];
+						if (MatR_ && MatR_->RoughnessMap) {
+							const uint32_t mipR_ = (lane_mat32[k] >> 28) & 0xF;
+							const byte *rd_ = (mipR_ < MatR_->RoughnessMap->numMipmaps)
+								? reinterpret_cast<const byte*>(MatR_->RoughnessMap->Mipmap[mipR_]) : nullptr;
+							if (rd_) {
+								float rAtt = 1.0f - roughStrengthG *
+									(float(rd_[lane_mat32[k] & 0xFFFFF]) * (1.0f/255.0f));
+								if (rAtt < 0.0f) rAtt = 0.0f;
+								sBs *= rAtt; sGs *= rAtt; sRs *= rAtt;
+							}
+						}
+					}
 					// Env-specular compose (--env_refl): same shared helper +
 					// same position as wave-1 (after analytic spec, before the
 					// water blend). Third consumer of EnvSpecComposeScalar.

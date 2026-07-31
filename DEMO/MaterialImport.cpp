@@ -13,6 +13,8 @@
 #include <Base/FeatureFlags.h>
 #include <FLD/FLD_READ.H>            // FldRevMap* — LWO/FLD-authored PBR map roles (§1e)
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -230,6 +232,55 @@ Texture *loadRoleMapCached(const std::string &path, const char *role,
 	return t;
 }
 
+// Mean roughness (0..1) of a loaded roughness texture's base level: 8-bit
+// single-channel (MakeHeight8) or the 32bpp fallback (low/blue byte — the
+// same byte the kernel's attenuation samples).
+float roughnessMapMean(const Texture *t) {
+	if (!t) return 0.5f;
+	const byte *d = (t->numMipmaps > 0 && t->Mipmap[0]) ? t->Mipmap[0] : t->Data;
+	if (!d) return 0.5f;
+	const size_t n = size_t(t->SizeX) * size_t(t->SizeY);
+	if (!n) return 0.5f;
+	uint64_t sum = 0;
+	if (t->BPP == 8)       for (size_t i = 0; i < n; ++i) sum += d[i];
+	else if (t->BPP == 32) for (size_t i = 0; i < n; ++i) sum += d[i * 4];
+	else return 0.5f;
+	return float(sum) / (255.0f * float(n));
+}
+
+// DIELECTRIC specular seed for a surface whose author left Specular at 0 and
+// that just gained a ROUGHNESS map (both import paths call this). The old
+// blanket Specular=0.5/Glossiness=32 turned every matte surface SHINY the
+// moment a rough dielectric set (Polyhaven sandstone) landed on it — 0.5 is
+// ~12x a dielectric's F0 (4%), and gloss 32 is a tight lobe regardless of how
+// rough the map says the surface is (the map only ATTENUATES intensity in the
+// kernel's cheap tier; under --pbr the GGX lobe derives its roughness from
+// Glossiness, not the map). Seed instead:
+//   Specular   = 0.08  (~2x the 4% dielectric F0 — Blinn's unnormalized lobe
+//                needs a little headroom to read at all; specMul is the dial)
+//   Glossiness = from the MAP's mean roughness via the engine's own
+//                documented mapping (rough = sqrt(2/(gloss+2)), inverted:
+//                gloss = 2/rough^2 - 2), snapped to the nearest vectorized
+//                spec-loop case so a big seeded surface stays on the vec path.
+// Only fires when the author left BOTH at 0 — authored values always win.
+void seedDielectricSpecular(Material *M, const Texture *rough, const char *ctx) {
+	if (M->Specular > 0.0f) return;
+	M->Specular = 0.08f;
+	if (M->Glossiness == 0) {
+		float r = roughnessMapMean(rough);
+		if (r < 0.05f) r = 0.05f;
+		const float g = 2.0f / (r * r) - 2.0f;
+		static const unsigned short kVecCases[] = { 4, 8, 16, 32, 48, 64, 128 };
+		unsigned short best = kVecCases[0];
+		for (unsigned short c : kVecCases)
+			if (std::fabs(float(c) - g) < std::fabs(float(best) - g)) best = c;
+		M->Glossiness = best;
+	}
+	std::fprintf(stderr, "    [spec] roughness map + Specular was 0 -> dielectric "
+	             "seed Specular=%.2f Glossiness=%u (gloss from the map's mean "
+	             "roughness; %s)\n", M->Specular, M->Glossiness, ctx);
+}
+
 } // namespace
 
 void MaterialImport_ParseArgs(int argc, const char *const *argv) {
@@ -336,18 +387,11 @@ void MaterialImport_Apply(Scene *sc, const char *sceneName) {
 			if (Texture *t = loadRoleMapCached(rough, "roughness", false, aw, ah)) {
 				for (Material *m : mats) m->RoughnessMap = t;
 				std::fprintf(stderr, "    roughness %s (%s)\n", rough.c_str(), t->BPP == 8 ? "8-bit" : "32-bit");
-				// A roughness map implies the surface is meant to be specular, but
-				// many FLD materials (e.g. greets 'momy') ship Specular=0 → the
-				// roughness map would modulate a highlight that never appears. Give
-				// the material a sensible base Specular/Glossiness so the map shows.
-				// Only when the author left them at 0 (don't stomp a tuned value).
-				if (M->Specular <= 0.0f) {
-					M->Specular = 0.5f;
-					if (M->Glossiness == 0) M->Glossiness = 32;
-					std::fprintf(stderr, "    [spec] roughness map present + Specular was 0 -> "
-					             "default Specular=0.5 Glossiness=%u (roughness map modulates it)\n",
-					             M->Glossiness);
-				}
+				// A roughness map implies a specular response, but many FLD
+				// materials ship Specular=0 — seed DIELECTRIC scalars from the
+				// map so the response reads matte-correct (see the helper; the
+				// old 0.5/32 seed made every matte target shiny).
+				seedDielectricSpecular(M, t, "CLI dir-scan import");
 			}
 		}
 		if (!height.empty()) {
@@ -729,16 +773,9 @@ bool MaterialImport_ApplyMapFile(Scene *sc, const char *matName,
 			for (Material *M : mats) {
 				stashOrigMap(M, "roughness", M->RoughnessMap);
 				M->RoughnessMap = t;
-				// Same defaulting as the CLI dir-scan path: a roughness map
-				// implies a specular surface, but many FLD materials ship
-				// Specular=0 — the map would modulate a highlight that never
-				// renders. Only when the author left it at 0.
-				if (M->Specular <= 0.0f) {
-					M->Specular = 0.5f;
-					if (M->Glossiness == 0) M->Glossiness = 32;
-					std::fprintf(stderr, "    [spec] roughness map + Specular was 0 -> "
-					             "default Specular=0.5 Glossiness=%u\n", M->Glossiness);
-				}
+				// Same DIELECTRIC seeding as the CLI dir-scan path (shared
+				// helper): only when the author left Specular at 0.
+				seedDielectricSpecular(M, t, "editor/RVSM apply");
 			}
 			ok = true;
 		}
