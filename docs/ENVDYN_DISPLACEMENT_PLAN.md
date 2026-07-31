@@ -299,6 +299,42 @@ only, flags default-off until the user approves looks.
       city surface gets no overlay until this lands). Deferred: extend
       `city_envmap*.bin` with per-face depth behind a format-tag bump so city
       probes can be flagged later.
+    · [x] **A3 fix (2026-08-01, 837c584): owner gate on the owning FACES' AABB.**
+      User bug "stairs/screen dynamic bake doesn't work". Root cause (measured
+      via the new `FDS_ENVDYN_PROF` per-probe WHY trace — NO-STORE /
+      NOT-RETAINED / OWNER-OFFSCREEN / NO-MOVER-RELEVANCE / BUDGET-DEFERRED /
+      OK + a composited-mech-texel census): the A3 step-1 owner-visibility gate
+      used `WorldAabb_ForMaterial` = the union of whole-MESH AABBs, and greets
+      merges every flagged surface into the chunked Piramid mesh — every
+      probe's "owner box" was the whole scene (124×18×203), the gate never
+      culled, and with 5 flagged retained stores vs budget 2 the round-robin
+      spent slots on OFF-SCREEN probes (~6.7–9.1 ms/frame of invisible work;
+      a framed probe refreshed only intermittently). Fixed: the gate now tests
+      the probe's owning FACES' world AABB (`materialFaceAabb`, cached in the
+      store). Per-face overlay cost unchanged (~1.2–1.9 ms per 256² face —
+      the A3 bench number; ~2.2–2.4 ms per authored 512² face); total cost
+      strictly drops (only visible probes refresh).
+      **Timing caveat (user-corrected):** the mech reaches the stairs only at
+      END of scene — its path sits in the main rooms (z −10..−53) until
+      t≈6000, then walks to the staircase and parks ABOVE it at
+      (44.8, 4.6, −62.4) from t≈7500 on. Early/mid-scene the stairs/screen
+      probes correctly show NO mech (census: 100 % of rasterised mech texels
+      z-culled by the walls between — physically right, not a bug). Verified
+      at t=7500, stairs framed: stairs composites ~1,673–1,686 mech texels
+      (3 faces), stairs::mirUV 862, screen emiter ~12,500 (6 faces); on-screen
+      A/B (env_dynamic ON vs OFF, bake-noise-stable pixels only) moves 18,335
+      px concentrated on the staircase reflection under the mech (noise floor
+      91,883 raw / 0 on the stable set). Repro trap: `--snapshot` runs ONE
+      tick and probes bake inside that tick's render, so the overlay never
+      fires there — use `--bench=scene@scene=greets,t=…` or a two-timestamp
+      snapshot (`--snapshot=greets@t=7400,7500`; the 2nd frame overlays).
+      Also landed with the fix: `envDynamic` on a surface with no
+      envRefl/Reflection/metallic now IMPLIES probe qualification under
+      `--env_dynamic` (EnvReflMode==1 force-bake semantics; explicit
+      envRefl=−1 stays honoured) + a one-line stderr warning names any
+      surface whose flag would otherwise be a silent no-op. EDITOR follow-up
+      (open, other agent): the 'dynamic env' checkbox should imply/require
+      envRefl on save and flag the envRefl=−1 conflict inline.
 
 ### Foundation-F padded-face-pyramid cull derivation (A3 step 2)
 
