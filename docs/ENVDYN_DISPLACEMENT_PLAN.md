@@ -271,6 +271,94 @@ only, flags default-off until the user approves looks.
       albedo, polarity matches the POM march's white=protruding convention).
       The old pre-stone3 358KB map did NOT match the stone3 brick pattern —
       restoring it would have put grooves in the wrong places.
+- [x] **S1/S2/S3 — symmetric ADAPTIVE displacement (diagonal-grain fix). DONE
+      (2026-08-01).** Replaces the B3 two-step (linear `SubdivideMaterialFaces`
+      + `DisplaceMaterialVertices`) for the greets stone with ONE pass,
+      `DisplaceStoneSubdiv` (`DEMO/MeshOps.cpp`). Fixes the PROVEN diagonal
+      grain (commit 4633aeb): every stone quad = two triangles on one shared
+      diagonal, so displacing the interior put a roof-ridge along every quad
+      diagonal (uniform grain). Now each coplanar/UV-agreeing quad is paired
+      across its longest edge and retriangulated as a symmetric 2^L grid whose
+      relief cells become 4-triangle CENTRE fans (dome peak lands on a vertex,
+      not a shared edge); monotone-slope cells keep a field-following diagonal,
+      flat cells the shortest — orientation varies with content, no uniform
+      grain. Lone triangles get symmetric barycentric subdivision.
+  - **S1 (ridge kill) — VERIFIED.** User pose `FDS_GREETS_CAM=-4.99491215,
+    2.2463572,-35.3489342,-0.0635922998,-0.116912566,-0.991104245` t=1867,
+    amp 0.6. OLD path (HEAD 4788b69 `--greets_displace`) shows the repeating
+    diagonal roof-ridges on the left wall; NEW path is organic stone, grain
+    GONE. `--displace_viz` overlay shows per-cell radial fans / centre verts
+    (X per relief cell), not uniform diagonals. A/B PNGs `/tmp/displace3/`
+    (base / wip_amp06 / head_amp06 / viz_amp06). NOTE: `--no-parallax` is NOT
+    usable to isolate — the greets height-map load is gated on `parallax()`
+    (GREETS.CPP:1307), so `--no-parallax` skips the bake entirely; parallax
+    stays ON (default) and the grain is gone in the shaded POM result too
+    (the B4 residual carries the fine band; POM is per-pixel, not tied to the
+    triangulation).
+  - **S2 (adaptive depth).** Per-quad level 0..3 from the height map's
+    refinement error under the quad's UV footprint (bilinear-vs-true at 9
+    probes/cell; a level passes at ≤12% bad cells; `greets_displace_adapt`
+    scales the epsilon, >1 = deeper). Measured at t=5780, 1920×1080, threaded,
+    40 iters (`[STONE]` log + scene bench):
+    | mode | rooms Lhist (L0/1/2/3) | mesh faces | frame ms | T-junc pins |
+    |---|---|---|---|---|
+    | adaptive (adapt 1.0) | 24/1/91/13 | 10233 | 60.685 | 209 |
+    | uniform L2 (`greets_stone_subdiv=2`) | 0/0/129/0 | 10348 | 64.405 | 0 |
+    Adaptive is **−3.7 ms and −115 faces** vs uniform-L2 while killing the
+    grain: it spends L3 on the 13 busy block-edge patches and stays L0 on the
+    24 flat mortar patches (single-run means, ±1-2 ms noise). `adapt` gain
+    shifts the bulk monotonically: rooms L0 count 8 (adapt 2.0) / 24 (1.0) /
+    56 (0.5). Level-boundary CRACKS closed by pinning the finer side's edge
+    verts onto the coarser side's straight displaced segment — crack-checked
+    at amp 1.5 / adapt 2.0 (mixed L0/L2/L3): deep clean relief, no gaps/holes
+    (`/tmp/displace3/crack_stress`).
+  - **FACETING fix — weld-aware smooth normals + tangents**
+    (`DisplaceStoneSmoothNormals`, `greets_displace_smooth` default 80°).
+    `MakeFacesIndependentByAngle` (30° crease) SPLITS every displaced cell
+    whose neighbours tilt past 30°, so each cell shaded flat → visible
+    faceting / disco-ball (user-reported). A flat-base-normal restore did NOT
+    fix it (it left a per-triangle TANGENT split → normal-map/POM seam that
+    survives continuous normals, measured at any amp). The fix re-smooths the
+    displaced surface: a scene-wide position-bucket WELD of the material's
+    corners averaging the DISPLACED face normals AND per-face tangents within
+    `greets_displace_smooth` (area-weighted, Gram-Schmidt'd) — coincident
+    verts share the whole TBN frame, so both faceting and the normal-map seam
+    go. Angle < 90° keeps authored 90° wall corners hard; material borders are
+    hard for free (bucketed per base surface). Editor `MeshOps_ResmoothSurface`
+    machinery, scoped to init scene + material. Replaced the base-normal
+    registry entirely.
+  - **ACNE fix — single shadow-id for displaced walls** (`GREETS.CPP`, behind
+    the `greets_displace` guard). ROOT CAUSE of the residual grazing hairlines
+    (user: "acne only on wrong subdivision"): the greets shadow bake clusters
+    ShadowMatIDs per **(material, PLANE)**. A flat wall is coplanar → one
+    cluster → no self-shadow; displacement tilts EVERY facet onto its own
+    plane → each facet gets a unique ShadowMatID → adjacent facets self-shadow
+    → per-facet acne (the fan-X + cell outlines, worst at grazing). Proven:
+    `--no-shadows` removes them, depth-bias (even 12288 slope) does NOT (it's
+    the PolyId identity test, not depth acne). Fix = add `rooms`/`floor` to
+    `kSingleShadowIdMats` when displacement is on (the same remedy the mummies
+    use, documented there as "killing the per-facet self-shadow acne"); block
+    relief shading now rides the normal map + POM + AO per pixel. VERIFIED
+    clean at 3 poses (S1 frontal t=1867 + two grazing incl. the user's
+    `-10,3,-45,0.7,-0.1,-0.7`) — `/tmp/displace3/{s1_fixed,graze_sid,graze2}`.
+  - **`--displace_viz` now DEPTH-TESTS** (`drawLineZ`, `WorldAabb.cpp`):
+    line view-z interpolated, compared vs `ZPage16` (enc `0xFF80 −
+    zscale*z`, pulled 1% nearer so a wireframe ON its surface wins instead of
+    z-fighting); occluded far walls no longer show through, so the looked-at
+    wall's fan structure is readable. Falls back to draw-through when
+    `ZPage16` isn't live.
+  - **S3 (default amp).** Swept 0.3/0.45/0.6 at two poses (t=1867, t=1588);
+    all grain-free. Kept the shipped default **0.3** (the user's approved
+    B3 look); 0.45 for more presence, 0.6 bold. Not changed in code — a look
+    call for the user. PNGs `/tmp/displace3/amp_*`.
+  - New flags `greets_displace_adapt` (1.0) + `greets_displace_smooth` (80°),
+    both greets cat, both read only when `--greets_displace` is on. Flags-off
+    byte-null proven by IN-PLACE isolation (stash the 6 files, hold the
+    concurrent tree fixed): greets momy2 close-cam `61f09196` identical with
+    and without the change; city `37e62845`, fountain `51fff7cd`, render_gate
+    3/3, wasm links. (Isolation needed because a concurrent agent's uncommitted
+    FLD_READ/Material/Deferred work perturbs whole-binary hashes vs a clean
+    HEAD — orthogonal to this change.)
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`

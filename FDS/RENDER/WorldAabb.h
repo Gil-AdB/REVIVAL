@@ -112,9 +112,13 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
 // Draw the recorded displaced materials' triangles as a wireframe over VPage
 // (post-tonemap), projected through the main camera, edge colour = per-vertex
 // displacement magnitude (cool blue = 0 / pinned borders → warm red = the
-// bake's max). Front-facing + near-plane culled; no depth test (far walls
-// show through, like --draw_aabbs). No-op (with a one-shot stderr hint) when
-// nothing was recorded — i.e. --displace_viz on but --greets_displace off.
+// bake's max). Front-facing + near-plane culled, and DEPTH-TESTED against the
+// frame's opaque Z (ZPage16; the line z is pulled 1% nearer so a wireframe
+// lying on the surface it annotates wins instead of z-fighting) — hidden
+// walls stay hidden, so the fan/diagonal structure at the looked-at wall is
+// readable. Falls back to draw-through when ZPage16 isn't live. No-op (with
+// a one-shot stderr hint) when nothing was recorded — i.e. --displace_viz on
+// but --greets_displace off.
 void DisplaceViz_DrawOverlay(Scene* sc);
 
 }  // namespace fds

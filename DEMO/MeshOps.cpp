@@ -9,6 +9,7 @@
 #include <RENDER/WorldAabb.h>     // DisplaceViz_Record (--displace_viz overlay)
 #include <Threads.h>              // dispatchIndexed — threaded cone-map bake
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -1386,6 +1387,740 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 			std::max(1, int(hm->SizeX) >> useMip), std::max(1, int(hm->SizeY) >> useMip),
 			nMoved, T->VIndex, (double)dMin, (double)dMax, nTarget);
 	}
+}
+
+// ── Symmetric adaptive stone subdivision + displacement ─────────────────────
+// docs/ENVDYN_DISPLACEMENT_PLAN.md workstream B, slices S1/S2. Replaces the
+// old two-step "SubdivideMaterialFaces(linear) + DisplaceMaterialVertices" for
+// the greets stone. Fixes the PROVEN diagonal-ridge artifact (commit 4633aeb):
+// every stone quad was two triangles sharing one diagonal, so displacing the
+// interior put a roof-ridge along every quad diagonal — a uniform diagonal
+// grain. Here each quad is retriangulated SYMMETRICALLY (a 2^L grid whose relief
+// cells become 4-triangle centre fans, so a block's height peak lands on a
+// vertex — a dome — not on a shared edge); lone triangles (unpaired halves) get
+// symmetric triangular subdivision (no consistent diagonal). Subdivision DEPTH
+// is chosen per quad from the height map's local busyness (S2): flat mortar
+// cells stay coarse, block-edge cells go deep. Level-boundary cracks are closed
+// by pinning the finer side's extra edge verts onto the coarser neighbour's
+// straight segment (a generalisation of the authored-border pinning).
+//
+// Runs at the momy/stone hook: after Preprocess (per-vertex normals exist) +
+// GreetsRetileFloor (per-face UVs final), before MakeFacesIndependentByAngle
+// (re-derives vertex normals + tangents on the displaced mesh) and the Piramid
+// chunk split. Face N + NormProd re-derived here (B1 lesson).
+//
+// uniformLevel > 0 forces that level on every patch (the uniform-L2 baseline
+// the S2 measurement compares against); <= 0 selects adaptive depth 0..maxLevel
+// from busyness scaled by `adapt` (higher = deeper). amp/mip as
+// DisplaceMaterialVertices. Records to --displace_viz.
+namespace {
+inline uint32_t meshF2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+inline float meshLerpf(float a, float b, float t) { return a + (b - a) * t; }
+}  // namespace
+
+void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
+                         float amp, int mip, float adapt) {
+	if (!Sc || !matName) return;
+	auto isTarget = [&](const Face *F) {
+		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
+	};
+	const int kMaxLevel = 3;
+	// Adaptive depth = the smallest level whose REFINEMENT ERROR is small
+	// enough: at level L the patch is a 2^L×2^L cell grid; each cell's error is
+	// the max deviation of the true height (probed at 9 interior/edge points)
+	// from the bilinear of its 4 corner heights — exactly the relief the
+	// GEOMETRY at that level cannot carry (POM's B4 residual carries it
+	// instead, so the epsilon is literally the geometry/POM split point). A
+	// level passes when ≤12% of its cells exceed the epsilon (a lone busy
+	// corner shouldn't force a whole quad deep). This discriminates feature
+	// DENSITY, which a max-gradient bar cannot: one tall block edge is
+	// resolved by a coarse level (error collapses once the edge lands on cell
+	// borders), while densely repeating blocks keep the error high until the
+	// cells reach the block pitch. `adapt` scales the epsilon (>1 = stricter =
+	// deeper).
+	const float kRefineEps  = 0.07f * (adapt > 1e-3f ? 1.0f / adapt : 1.0f);
+	const float kRefineFrac = 0.12f;
+	// A cell with corner+centre height spread below this carries no visible
+	// relief (amp 0.3 → <9mm world): 2 triangles, shortest diagonal.
+	const float kCellFlatEps = 0.03f;
+	// A cell fans (centre vertex, 4 triangles) only when the centre height
+	// genuinely DEVIATES from the corner plane by this much — the actual
+	// roof-ridge error of a 2-triangle split. Monotone slope cells stay 2
+	// triangles with a field-following diagonal (orientation varies with
+	// content — no uniform grain).
+	const float kCellDomeEps = 0.04f;
+
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		const Texture *hm = nullptr;
+		int nTarget = 0;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!isTarget(&F)) continue;
+			++nTarget;
+			if (!hm && F.Txtr->HeightMap) hm = F.Txtr->HeightMap;
+		}
+		if (nTarget == 0) continue;
+		if (!hm || hm->BPP != 8 || !hm->Mipmap[0]) {
+			std::fprintf(stderr, "[STONE] '%s': no 8-bit HeightMap (need "
+			             "--greets_stone_tex + --parallax) — skipped\n", matName);
+			continue;
+		}
+		// Clamp mip to a present, block-tileable level (same guard as elsewhere).
+		int useMip = mip;
+		if (useMip >= int(hm->numMipmaps)) useMip = int(hm->numMipmaps) - 1;
+		if (useMip < 0) useMip = 0;
+		while (useMip > 0 &&
+		       ((std::max(1, int(hm->SizeX) >> useMip) < (1 << hm->blockSizeX)) ||
+		        (std::max(1, int(hm->SizeY) >> useMip) < (1 << hm->blockSizeY))))
+			--useMip;
+		// Degenerate-map guard + mip mean (relief is zero-mean about it).
+		float mipMean = 0.5f;
+		{
+			const int mw = std::max(1, int(hm->SizeX) >> useMip);
+			const int mh = std::max(1, int(hm->SizeY) >> useMip);
+			const byte *d = hm->Mipmap[useMip];
+			byte lo = 255, hi = 0; uint64_t sum = 0;
+			const size_t n = size_t(mw) * size_t(mh);
+			for (size_t i = 0; i < n; ++i) { const byte b = d[i];
+				if (b < lo) lo = b; if (b > hi) hi = b; sum += b; }
+			if (hi - lo < 2) {
+				std::fprintf(stderr, "[STONE] '%s': height mip%d (near-)constant "
+				             "(%d..%d) — no relief, skipped\n", matName, useMip, lo, hi);
+				continue;
+			}
+			mipMean = float(double(sum) / double(n)) * (1.0f / 255.0f);
+		}
+
+		Vertex *const oldV = T->Verts;
+		const uint32_t nOrig = uint32_t(T->VIndex);
+		auto vidx = [&](const Vertex *v) { return uint32_t(v - oldV); };
+
+		// Per-face corner UV for a given original vertex index (per-face UVs are
+		// authoritative — per-vertex U/V is clobbered at shared corners).
+		auto cornerUV = [&](const Face &F, uint32_t vi, float &u, float &v) {
+			if (vi == vidx(F.A)) { u = F.U1; v = F.V1; }
+			else if (vi == vidx(F.B)) { u = F.U2; v = F.V2; }
+			else { u = F.U3; v = F.V3; }
+		};
+
+		// ── original-mesh topology: edge-use over target faces + non-target
+		// incidence (the AUTHORED patch boundary — unaffected by subdivision) ──
+		std::map<std::pair<uint32_t,uint32_t>, int> origEdgeUse;   // target faces only
+		std::vector<char> origNonTargetVert(nOrig, 0);
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C) continue;
+			const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+			if (a >= nOrig || b >= nOrig || c >= nOrig) continue;
+			if (!isTarget(&F)) { origNonTargetVert[a] = origNonTargetVert[b] = origNonTargetVert[c] = 1; continue; }
+			auto add = [&](uint32_t x, uint32_t y){ origEdgeUse[{std::min(x,y),std::max(x,y)}]++; };
+			add(a,b); add(b,c); add(c,a);
+		}
+		auto isBorderEdge = [&](uint32_t x, uint32_t y) {
+			auto it = origEdgeUse.find({std::min(x,y),std::max(x,y)});
+			return it != origEdgeUse.end() && it->second == 1;   // used by exactly one target face
+		};
+
+		// ── longest-edge quad pairing (greedy by descending shared-edge length:
+		// the diagonal of a quad-from-triangulation is its longest edge) ──
+		std::map<std::pair<uint32_t,uint32_t>, std::vector<int32_t>> edgeTargets;
+		std::vector<int32_t> targetFaces;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			const Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+			targetFaces.push_back(i);
+			const uint32_t a = vidx(F.A), b = vidx(F.B), c = vidx(F.C);
+			auto add = [&](uint32_t x, uint32_t y){ edgeTargets[{std::min(x,y),std::max(x,y)}].push_back(i); };
+			add(a,b); add(b,c); add(c,a);
+		}
+		auto edgeLenSq = [&](uint32_t x, uint32_t y) {
+			const Vector &p = oldV[x].Pos, &q = oldV[y].Pos;
+			return (p.x-q.x)*(p.x-q.x)+(p.y-q.y)*(p.y-q.y)+(p.z-q.z)*(p.z-q.z);
+		};
+		// candidate diagonals: interior edges (2 target faces), scored by length.
+		struct Cand { float len; uint32_t a, b; int32_t f, g; };
+		std::vector<Cand> cands;
+		for (auto &kv : edgeTargets) {
+			if (kv.second.size() != 2) continue;   // border or non-manifold
+			cands.push_back({ edgeLenSq(kv.first.first, kv.first.second),
+			                  kv.first.first, kv.first.second, kv.second[0], kv.second[1] });
+		}
+		std::sort(cands.begin(), cands.end(),
+		          [](const Cand &x, const Cand &y){ return x.len > y.len; });
+		std::map<int32_t,int32_t> quadPartner;   // face -> its quad partner
+		std::map<int32_t,std::pair<uint32_t,uint32_t>> quadDiag;
+		{
+			std::map<int32_t,char> taken;
+			// Per-face corner UV helper usable before cornerUV's declaration order
+			// (duplicated tiny lambda — keeps the pairing self-contained).
+			auto cuv = [&](const Face &F, uint32_t vi, float &u, float &v) {
+				if (vi == vidx(F.A)) { u = F.U1; v = F.V1; }
+				else if (vi == vidx(F.B)) { u = F.U2; v = F.V2; }
+				else { u = F.U3; v = F.V3; }
+			};
+			for (const Cand &c : cands) {
+				if (taken.count(c.f) || taken.count(c.g)) continue;
+				// only pair across each face's OWN longest edge (true diagonal)
+				const Face &Ff = T->Faces[c.f]; const Face &Fg = T->Faces[c.g];
+				auto longest = [&](const Face &F){
+					uint32_t a=vidx(F.A),b=vidx(F.B),cc=vidx(F.C);
+					float dab=edgeLenSq(a,b),dbc=edgeLenSq(b,cc),dca=edgeLenSq(cc,a);
+					return std::max(dab,std::max(dbc,dca));
+				};
+				const float diag = c.len;
+				if (diag < longest(Ff)*0.999f || diag < longest(Fg)*0.999f) continue;
+				// UV charts must AGREE along the diagonal (per-face UVs; a seam
+				// across the diagonal would smear the quad's bilinear UV grid) —
+				// mismatched pairs fall back to two lone triangles.
+				float fu0,fv0,fu1,fv1,gu0,gv0,gu1,gv1;
+				cuv(Ff,c.a,fu0,fv0); cuv(Ff,c.b,fu1,fv1);
+				cuv(Fg,c.a,gu0,gv0); cuv(Fg,c.b,gu1,gv1);
+				const float kUvEps = 1e-4f;
+				if (std::fabs(fu0-gu0)>kUvEps || std::fabs(fv0-gv0)>kUvEps ||
+				    std::fabs(fu1-gu1)>kUvEps || std::fabs(fv1-gv1)>kUvEps) continue;
+				// Coplanarity: the roof-ridge fix retriangulates the pair as ONE
+				// bilinear cell — only valid when the two triangles share a plane
+				// (authored stone quads do; a genuinely creased pair must keep its
+				// authored edge). 1° tolerance.
+				if (Ff.N.x*Fg.N.x + Ff.N.y*Fg.N.y + Ff.N.z*Fg.N.z < 0.99985f) continue;
+				taken[c.f]=1; taken[c.g]=1;
+				quadPartner[c.f]=c.g; quadPartner[c.g]=c.f;
+				quadDiag[c.f]={c.a,c.b}; quadDiag[c.g]={c.a,c.b};
+			}
+		}
+
+		// ── build the subdivided mesh ──
+		std::vector<Vertex> verts(oldV, oldV + nOrig);   // originals kept in place
+		std::vector<char>   pinnedZero(nOrig, 0);        // authored-border verts
+		for (uint32_t i = 0; i < nOrig; ++i) if (origNonTargetVert[i]) pinnedZero[i] = 1;
+		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
+		std::map<std::array<uint32_t,3>, uint32_t> edgeVertMap;
+		auto edgeVert = [&](uint32_t ia, uint32_t ib, float t) -> uint32_t {
+			uint32_t lo = ia, hi = ib; float p = t;
+			if (ia > ib) { lo = ib; hi = ia; p = 1.0f - t; }
+			std::array<uint32_t,3> key{ lo, hi, meshF2bits(p) };
+			auto it = edgeVertMap.find(key); if (it != edgeVertMap.end()) return it->second;
+			Vertex m = oldV[lo];
+			const Vector &A = oldV[lo].Pos, &B = oldV[hi].Pos;
+			m.Pos.x = meshLerpf(A.x,B.x,p); m.Pos.y = meshLerpf(A.y,B.y,p); m.Pos.z = meshLerpf(A.z,B.z,p);
+			const Vector &NA = oldV[lo].N, &NB = oldV[hi].N;
+			float nx = meshLerpf(NA.x,NB.x,p), ny = meshLerpf(NA.y,NB.y,p), nz = meshLerpf(NA.z,NB.z,p);
+			const float nl = std::sqrt(nx*nx+ny*ny+nz*nz);
+			if (nl > 1e-6f) { m.N.x = nx/nl; m.N.y = ny/nl; m.N.z = nz/nl; }
+			const uint32_t id = uint32_t(verts.size()); verts.push_back(m);
+			edgeVertMap[key] = id;
+			if (isBorderEdge(lo, hi)) { if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0); pinnedZero[id] = 1; }
+			return id;
+		};
+		auto newInterior = [&](const Vector &pos, const Vector &nrm) -> uint32_t {
+			Vertex m = oldV[0]; m.Pos = pos;
+			float nx=nrm.x,ny=nrm.y,nz=nrm.z; const float nl=std::sqrt(nx*nx+ny*ny+nz*nz);
+			if (nl>1e-6f){ m.N.x=nx/nl; m.N.y=ny/nl; m.N.z=nz/nl; }
+			const uint32_t id=uint32_t(verts.size()); verts.push_back(m);
+			if (id >= pinnedZero.size()) pinnedZero.resize(id+1,0);
+			return id;
+		};
+
+		std::vector<Face> faces;
+		std::vector<std::array<uint32_t,3>> fIdx;
+		faces.reserve(size_t(T->FIndex) * 4);
+		fIdx.reserve(faces.capacity());
+		auto emit = [&](const Face &proto, uint32_t i0, uint32_t i1, uint32_t i2,
+		                float u0,float v0,float u1,float v1,float u2,float v2){
+			Face f = proto; f.frame = nullptr;
+			f.U1=u0;f.V1=v0;f.U2=u1;f.V2=v1;f.U3=u2;f.V3=v2;
+			f.EU1=u0;f.EV1=v0;f.EU2=u1;f.EV2=v1;f.EU3=u2;f.EV3=v2;
+			faces.push_back(f); fIdx.push_back({i0,i1,i2});
+		};
+
+		// Smallest level whose refinement error passes (see kRefineEps above).
+		// Evaluated over the patch's UV bounding box (stone quads map affinely,
+		// so the bbox ≈ the true footprint). metricVals records each patch's
+		// L3-residual error fraction at the CHOSEN level for the
+		// FDS_SUBDIV_DIAG distribution print.
+		std::vector<float> metricVals;
+		auto refineLevel = [&](float u0,float u1,float v0,float v1)->int{
+			if (uniformLevel > 0) { metricVals.push_back(-1.0f); return std::min(uniformLevel, kMaxLevel); }
+			// 9 probe offsets inside a cell (edge midpoints + centre + quarter
+			// points) vs the bilinear of the cell's 4 corners.
+			static const float P[9][2] = {
+				{0.5f,0.0f},{0.0f,0.5f},{1.0f,0.5f},{0.5f,1.0f},{0.5f,0.5f},
+				{0.25f,0.25f},{0.75f,0.25f},{0.25f,0.75f},{0.75f,0.75f} };
+			float fracAt[4] = {1,1,1,1};
+			int converged = -1;
+			for (int L=0; L<=kMaxLevel; ++L) {
+				const int n = 1<<L;
+				int bad = 0;
+				for (int j=0;j<n;++j) for (int i=0;i<n;++i) {
+					const float cs0=float(i)/n, cs1=float(i+1)/n;
+					const float ct0=float(j)/n, ct1=float(j+1)/n;
+					auto uvAt=[&](float s,float t,float&u,float&v){
+						u=u0+(u1-u0)*s; v=v0+(v1-v0)*t; };
+					float u,v;
+					uvAt(cs0,ct0,u,v); const float c00=SampleHeight8Bilinear(hm,useMip,u,v);
+					uvAt(cs1,ct0,u,v); const float c10=SampleHeight8Bilinear(hm,useMip,u,v);
+					uvAt(cs0,ct1,u,v); const float c01=SampleHeight8Bilinear(hm,useMip,u,v);
+					uvAt(cs1,ct1,u,v); const float c11=SampleHeight8Bilinear(hm,useMip,u,v);
+					float err = 0.0f;
+					for (auto &p : P) {
+						const float s=cs0+(cs1-cs0)*p[0], t=ct0+(ct1-ct0)*p[1];
+						uvAt(s,t,u,v);
+						const float h=SampleHeight8Bilinear(hm,useMip,u,v);
+						const float bil=(c00*(1-p[0])+c10*p[0])*(1-p[1])
+						               +(c01*(1-p[0])+c11*p[0])*p[1];
+						err=std::max(err,std::fabs(h-bil));
+					}
+					if (err > kRefineEps) ++bad;
+				}
+				fracAt[L] = float(bad)/float(n*n);
+				if (fracAt[L] <= kRefineFrac) { converged = L; break; }
+			}
+			// Converged → that level. Never-converging = the map is uniformly
+			// dense under this patch (block pitch ≈/below the L3 cell size), a
+			// BUDGET question, not a convergence one: cap at L2 — the density
+			// B2 measured and shipped; the B4 POM residual carries what the
+			// geometry leaves by construction. Spend L3 only where it NEARLY
+			// completes the refinement (≤35% cells still bad) — there the last
+			// level buys real structure instead of uniformly-dense noise.
+			int chosen;
+			if (converged >= 0)                 chosen = converged;
+			else if (fracAt[3] <= 0.35f)        chosen = 3;
+			else                                chosen = 2;
+			metricVals.push_back(fracAt[chosen]);
+			return chosen;
+		};
+		auto busyLevel = refineLevel;   // call-site name
+
+		// Ordered side registry for level-boundary crack pinning: cornerEdge
+		// (min,max) → list of (patchLevel, cornerLo, cornerHi). We record the two
+		// SIDE CORNERS + level; the shared verts along it are recovered via the
+		// canonical edgeVert map, so mismatched levels are pinned deterministically.
+		struct SideRec { int level; uint32_t clo, chi; };
+		std::map<std::pair<uint32_t,uint32_t>, std::vector<SideRec>> sideReg;
+		auto regSide = [&](uint32_t ca, uint32_t cb, int level){
+			if (isBorderEdge(ca,cb)) return;   // authored border: pinned to zero, no transition
+			sideReg[{std::min(ca,cb),std::max(ca,cb)}].push_back({level,ca,cb});
+		};
+
+		int builtQuads = 0, builtLones = 0, fanCells = 0, flatCells = 0;
+		int lvlHist[4] = {0,0,0,0};
+
+		// Per-quad (consume both faces) then per remaining lone triangle, emit a
+		// symmetric subdivision into `faces`. Non-target faces copied verbatim by
+		// the loop after.
+		std::vector<char> consumed(T->FIndex, 0);
+		auto uvBil = [](const float cu[4], const float cv[4], float s, float t,
+		                float &u, float &v){
+			const float w0=(1-s)*(1-t), w1=s*(1-t), w2=s*t, w3=(1-s)*t;
+			u = cu[0]*w0+cu[1]*w1+cu[2]*w2+cu[3]*w3;
+			v = cv[0]*w0+cv[1]*w1+cv[2]*w2+cv[3]*w3;
+		};
+		auto posBil = [&](const uint32_t cn[4], float s, float t)->Vector{
+			const float w0=(1-s)*(1-t), w1=s*(1-t), w2=s*t, w3=(1-s)*t;
+			const Vector &A=oldV[cn[0]].Pos,&B=oldV[cn[1]].Pos,&C=oldV[cn[2]].Pos,&D=oldV[cn[3]].Pos;
+			return Vector{ A.x*w0+B.x*w1+C.x*w2+D.x*w3,
+			               A.y*w0+B.y*w1+C.y*w2+D.y*w3,
+			               A.z*w0+B.z*w1+C.z*w2+D.z*w3 };
+		};
+		auto nrmBil = [&](const uint32_t cn[4], float s, float t)->Vector{
+			const float w0=(1-s)*(1-t), w1=s*(1-t), w2=s*t, w3=(1-s)*t;
+			const Vector &A=oldV[cn[0]].N,&B=oldV[cn[1]].N,&C=oldV[cn[2]].N,&D=oldV[cn[3]].N;
+			return Vector{ A.x*w0+B.x*w1+C.x*w2+D.x*w3,
+			               A.y*w0+B.y*w1+C.y*w2+D.y*w3,
+			               A.z*w0+B.z*w1+C.z*w2+D.z*w3 };
+		};
+
+		for (auto &kv : quadPartner) {
+			const int32_t f = kv.first, g = kv.second;
+			if (f > g) continue;              // once per quad
+			if (consumed[f] || consumed[g]) continue;
+			consumed[f] = consumed[g] = 1;
+			const Face &Ff = T->Faces[f], &Fg = T->Faces[g];
+			const uint32_t d0 = quadDiag[f].first, d1 = quadDiag[f].second;
+			auto apexOf = [&](const Face &F)->uint32_t{
+				uint32_t a=vidx(F.A),b=vidx(F.B),c=vidx(F.C);
+				if (a!=d0&&a!=d1) return a; if (b!=d0&&b!=d1) return b; return c; };
+			const uint32_t e1 = apexOf(Ff), e2 = apexOf(Fg);
+			// cyclic corners C0=d0, C1=e1, C2=d1, C3=e2
+			uint32_t cn[4] = { d0, e1, d1, e2 };
+			float cu[4], cv[4];
+			cornerUV(Ff, d0, cu[0], cv[0]); cornerUV(Ff, e1, cu[1], cv[1]);
+			cornerUV(Ff, d1, cu[2], cv[2]); cornerUV(Fg, e2, cu[3], cv[3]);
+			// Make the cyclic order wind like Ff's VERTEX ORDER so emitted cells
+			// inherit the authored winding (the commit pass sign-aligns N to the
+			// proto, but the raster path also cares about vertex winding; compare
+			// against Ff's own A→B→C cross, not its stored N, in case they ever
+			// disagree).
+			{
+				auto windOf = [&](const Vector &A, const Vector &B, const Vector &C,
+				                  float &wx, float &wy, float &wz) {
+					const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+					const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+					wx=e1y*e2z-e1z*e2y; wy=e1z*e2x-e1x*e2z; wz=e1x*e2y-e1y*e2x;
+				};
+				float fwx,fwy,fwz, qwx,qwy,qwz;
+				windOf(Ff.A->Pos, Ff.B->Pos, Ff.C->Pos, fwx,fwy,fwz);
+				windOf(oldV[cn[0]].Pos, oldV[cn[1]].Pos, oldV[cn[2]].Pos, qwx,qwy,qwz);
+				if (fwx*qwx + fwy*qwy + fwz*qwz < 0.0f) {
+					std::swap(cn[1], cn[3]);
+					std::swap(cu[1], cu[3]); std::swap(cv[1], cv[3]);
+				}
+			}
+			// UV footprint → level
+			float u0=std::min(std::min(cu[0],cu[1]),std::min(cu[2],cu[3]));
+			float u1=std::max(std::max(cu[0],cu[1]),std::max(cu[2],cu[3]));
+			float v0=std::min(std::min(cv[0],cv[1]),std::min(cv[2],cv[3]));
+			float v1=std::max(std::max(cv[0],cv[1]),std::max(cv[2],cv[3]));
+			const int L = busyLevel(u0,u1,v0,v1);
+			lvlHist[L]++; ++builtQuads;
+			const int n = 1 << L;
+			// register 4 sides
+			regSide(cn[0],cn[1],L); regSide(cn[1],cn[2],L);
+			regSide(cn[2],cn[3],L); regSide(cn[3],cn[0],L);
+			// grid vertex ids
+			std::vector<uint32_t> gid(size_t(n+1)*(n+1));
+			auto GID=[&](int i,int j)->uint32_t&{ return gid[size_t(j)*(n+1)+i]; };
+			for (int j=0;j<=n;++j) for (int i=0;i<=n;++i){
+				const bool bi = (i==0||i==n), bj = (j==0||j==n);
+				if (bi&&bj){ // corner
+					GID(i,j)= (i==0&&j==0)?cn[0] : (i==n&&j==0)?cn[1] : (i==n&&j==n)?cn[2] : cn[3];
+				} else if (j==0){ GID(i,j)=edgeVert(cn[0],cn[1], float(i)/n); }
+				else if (j==n){ GID(i,j)=edgeVert(cn[3],cn[2], float(i)/n); }
+				else if (i==0){ GID(i,j)=edgeVert(cn[0],cn[3], float(j)/n); }
+				else if (i==n){ GID(i,j)=edgeVert(cn[1],cn[2], float(j)/n); }
+				else { GID(i,j)=newInterior(posBil(cn,float(i)/n,float(j)/n), nrmBil(cn,float(i)/n,float(j)/n)); }
+			}
+			// cells
+			for (int j=0;j<n;++j) for (int i=0;i<n;++i){
+				const float s0=float(i)/n, s1=float(i+1)/n, tt0=float(j)/n, tt1=float(j+1)/n;
+				const uint32_t a=GID(i,j), b=GID(i+1,j), c=GID(i+1,j+1), d=GID(i,j+1);
+				float uu[4],vv[4];
+				uvBil(cu,cv,s0,tt0,uu[0],vv[0]); uvBil(cu,cv,s1,tt0,uu[1],vv[1]);
+				uvBil(cu,cv,s1,tt1,uu[2],vv[2]); uvBil(cu,cv,s0,tt1,uu[3],vv[3]);
+				float sc=(s0+s1)*0.5f, tc=(tt0+tt1)*0.5f, ucen,vcen; uvBil(cu,cv,sc,tc,ucen,vcen);
+				// Cell triangulation by what the height field DOES inside the cell.
+				// The ridge error of a 2-triangle split is the centre's deviation
+				// from the corner plane: dome = |hc − mean(corners)|. Only cells
+				// that genuinely dome get the 4-triangle centre fan (peak lands on
+				// a VERTEX); monotone-slope cells keep 2 triangles whose diagonal
+				// FOLLOWS the field (the diagonal whose midpoint height is nearer
+				// hc — orientation varies with content, so no uniform grain);
+				// no-relief cells split on the shortest diagonal.
+				const float h0=SampleHeight8Bilinear(hm,useMip,uu[0],vv[0]);
+				const float h1=SampleHeight8Bilinear(hm,useMip,uu[1],vv[1]);
+				const float h2=SampleHeight8Bilinear(hm,useMip,uu[2],vv[2]);
+				const float h3=SampleHeight8Bilinear(hm,useMip,uu[3],vv[3]);
+				const float hc=SampleHeight8Bilinear(hm,useMip,ucen,vcen);
+				const float hlo=std::min(std::min(h0,h1),std::min(std::min(h2,h3),hc));
+				const float hhi=std::max(std::max(h0,h1),std::max(std::max(h2,h3),hc));
+				const float domeErr = std::fabs(hc - 0.25f*(h0+h1+h2+h3));
+				if (hhi-hlo >= kCellFlatEps && domeErr >= kCellDomeEps) {
+					// domes/dips: 4-triangle centre fan (apex on the centre vertex)
+					++fanCells;
+					const uint32_t cc = newInterior(posBil(cn,sc,tc), nrmBil(cn,sc,tc));
+					emit(Ff,a,b,cc, uu[0],vv[0],uu[1],vv[1],ucen,vcen);
+					emit(Ff,b,c,cc, uu[1],vv[1],uu[2],vv[2],ucen,vcen);
+					emit(Ff,c,d,cc, uu[2],vv[2],uu[3],vv[3],ucen,vcen);
+					emit(Ff,d,a,cc, uu[3],vv[3],uu[0],vv[0],ucen,vcen);
+				} else {
+					++flatCells;
+					bool useAC;
+					if (hhi-hlo < kCellFlatEps) {
+						// no relief: shortest diagonal from the CURRENT (subdivided)
+						// positions (a/b/c/d may be new verts — never index oldV).
+						auto d2v=[&](uint32_t x,uint32_t y){ const Vector&p=verts[x].Pos,&q=verts[y].Pos;
+							return (p.x-q.x)*(p.x-q.x)+(p.y-q.y)*(p.y-q.y)+(p.z-q.z)*(p.z-q.z); };
+						useAC = d2v(a,c) <= d2v(b,d);
+					} else {
+						// slope: the diagonal that better carries the field through
+						// the centre (its height midpoint nearer the true centre h).
+						useAC = std::fabs(0.5f*(h0+h2)-hc) <= std::fabs(0.5f*(h1+h3)-hc);
+					}
+					if (useAC) {
+						emit(Ff,a,b,c, uu[0],vv[0],uu[1],vv[1],uu[2],vv[2]);
+						emit(Ff,a,c,d, uu[0],vv[0],uu[2],vv[2],uu[3],vv[3]);
+					} else {
+						emit(Ff,a,b,d, uu[0],vv[0],uu[1],vv[1],uu[3],vv[3]);
+						emit(Ff,b,c,d, uu[1],vv[1],uu[2],vv[2],uu[3],vv[3]);
+					}
+				}
+			}
+		}
+
+		// Lone triangles — symmetric triangular subdivision (no diagonal bias).
+		for (int32_t fi : targetFaces) {
+			if (consumed[fi]) continue;
+			consumed[fi] = 1; ++builtLones;
+			const Face &F = T->Faces[fi];
+			const uint32_t c0=vidx(F.A), c1=vidx(F.B), c2=vidx(F.C);
+			float cu[3],cv[3]; cornerUV(F,c0,cu[0],cv[0]); cornerUV(F,c1,cu[1],cv[1]); cornerUV(F,c2,cu[2],cv[2]);
+			const float u0=std::min(cu[0],std::min(cu[1],cu[2])), u1=std::max(cu[0],std::max(cu[1],cu[2]));
+			const float v0=std::min(cv[0],std::min(cv[1],cv[2])), v1=std::max(cv[0],std::max(cv[1],cv[2]));
+			const int L = busyLevel(u0,u1,v0,v1); lvlHist[L]++;
+			const int n = 1<<L;
+			regSide(c0,c1,L); regSide(c1,c2,L); regSide(c2,c0,L);
+			// barycentric grid ids: (i,j), i+j<=n. weight0=(n-i-j)/n on c0,
+			// weight1=i/n on c1, weight2=j/n on c2.
+			auto pos3=[&](int i,int j)->Vector{ const float w0=float(n-i-j)/n,w1=float(i)/n,w2=float(j)/n;
+				const Vector&A=oldV[c0].Pos,&B=oldV[c1].Pos,&C=oldV[c2].Pos;
+				return Vector{A.x*w0+B.x*w1+C.x*w2,A.y*w0+B.y*w1+C.y*w2,A.z*w0+B.z*w1+C.z*w2}; };
+			auto nrm3=[&](int i,int j)->Vector{ const float w0=float(n-i-j)/n,w1=float(i)/n,w2=float(j)/n;
+				const Vector&A=oldV[c0].N,&B=oldV[c1].N,&C=oldV[c2].N;
+				return Vector{A.x*w0+B.x*w1+C.x*w2,A.y*w0+B.y*w1+C.y*w2,A.z*w0+B.z*w1+C.z*w2}; };
+			auto uv3=[&](int i,int j,float&u,float&v){ const float w0=float(n-i-j)/n,w1=float(i)/n,w2=float(j)/n;
+				u=cu[0]*w0+cu[1]*w1+cu[2]*w2; v=cv[0]*w0+cv[1]*w1+cv[2]*w2; };
+			std::vector<uint32_t> gid(size_t(n+1)*(n+1), UINT32_MAX);
+			auto GID=[&](int i,int j)->uint32_t&{ return gid[size_t(j)*(n+1)+i]; };
+			for (int j=0;j<=n;++j) for (int i=0;i+j<=n;++i){
+				const bool onC0C1=(j==0), onC1C2=(i+j==n), onC2C0=(i==0);
+				const bool isC0=(i==0&&j==0), isC1=(i==n&&j==0), isC2=(i==0&&j==n);
+				if (isC0) GID(i,j)=c0; else if (isC1) GID(i,j)=c1; else if (isC2) GID(i,j)=c2;
+				else if (onC0C1) GID(i,j)=edgeVert(c0,c1,float(i)/n);
+				else if (onC1C2) GID(i,j)=edgeVert(c1,c2,float(j)/n);
+				else if (onC2C0) GID(i,j)=edgeVert(c0,c2,float(j)/n);
+				else GID(i,j)=newInterior(pos3(i,j), nrm3(i,j));
+			}
+			auto emit3=[&](uint32_t A,uint32_t B,uint32_t C,int ia,int ja,int ib,int jb,int ic,int jc){
+				float ua,va,ub,vb,uc,vc; uv3(ia,ja,ua,va); uv3(ib,jb,ub,vb); uv3(ic,jc,uc,vc);
+				emit(F,A,B,C, ua,va,ub,vb,uc,vc); };
+			for (int j=0;j<n;++j) for (int i=0;i+j<n;++i){
+				emit3(GID(i,j),GID(i+1,j),GID(i,j+1), i,j, i+1,j, i,j+1);        // up
+				if (i+j < n-1)
+					emit3(GID(i+1,j),GID(i+1,j+1),GID(i,j+1), i+1,j, i+1,j+1, i,j+1); // down
+			}
+		}
+
+		// Copy non-target + any faces not consumed (defensive) verbatim.
+		for (int32_t i=0;i<T->FIndex;++i){
+			const Face &F=T->Faces[i];
+			if (isTarget(&F) && i < int32_t(consumed.size()) && consumed[i]) continue;
+			faces.push_back(F);
+			fIdx.push_back({ F.A?vidx(F.A):0u, F.B?vidx(F.B):0u, F.C?vidx(F.C):0u });
+		}
+
+		// ── displacement (per-vertex height averaged over incident target faces,
+		// pushed along the vertex normal; authored-border verts pinned to zero) ──
+		const uint32_t nV = uint32_t(verts.size());
+		if (pinnedZero.size() < nV) pinnedZero.resize(nV, 0);
+		std::vector<float> hSum(nV, 0.0f); std::vector<int> hCnt(nV, 0);
+		auto isTargetNew=[&](const Face &F){ return F.Txtr && F.Txtr->Name && !std::strcmp(F.Txtr->Name,matName); };
+		for (size_t i=0;i<faces.size();++i){
+			const Face &F=faces[i]; if (!isTargetNew(F)) continue;
+			const uint32_t vi[3]={fIdx[i][0],fIdx[i][1],fIdx[i][2]};
+			const float cu2[3]={F.U1,F.U2,F.U3}, cv2[3]={F.V1,F.V2,F.V3};
+			for (int k=0;k<3;++k){ if (vi[k]>=nV||pinnedZero[vi[k]]) continue;
+				hSum[vi[k]]+=SampleHeight8Bilinear(hm,useMip,cu2[k],cv2[k]); hCnt[vi[k]]+=1; }
+		}
+		std::vector<Vector> basePos(nV);
+		for (uint32_t i=0;i<nV;++i) basePos[i]=verts[i].Pos;
+		int nMoved=0; float dMin=1e30f,dMax=-1e30f;
+		for (uint32_t i=0;i<nV;++i){
+			if (pinnedZero[i]||hCnt[i]==0) continue;
+			const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
+			if (nl<1e-6f) continue;
+			const float h=hSum[i]/float(hCnt[i]); const float dsp=amp*(h-mipMean);
+			verts[i].Pos.x+=N.x/nl*dsp; verts[i].Pos.y+=N.y/nl*dsp; verts[i].Pos.z+=N.z/nl*dsp;
+			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
+		}
+
+		// ── level-boundary crack pinning: on each interior side shared by two
+		// patches of differing level, snap the finer side's extra verts onto the
+		// coarser side's straight segment (generalised border pinning) ──
+		int nTJ=0;
+		auto sideVid=[&](uint32_t clo,uint32_t chi,float param)->uint32_t{
+			if (param<=0.0f) return clo; if (param>=1.0f) return chi;
+			return edgeVert(clo,chi,param);   // canonical → already-created shared vert
+		};
+		for (auto &kv : sideReg){
+			const auto &recs = kv.second; if (recs.size()!=2) continue;
+			int La=recs[0].level, Lb=recs[1].level; if (La==Lb) continue;
+			const SideRec &coarse = (La<Lb)?recs[0]:recs[1];
+			const SideRec &fine   = (La<Lb)?recs[1]:recs[0];
+			const int nc=1<<coarse.level, nf=1<<fine.level;
+			// walk in the canonical (min-corner→max-corner) direction
+			const uint32_t clo=std::min(kv.first.first,kv.first.second);
+			const uint32_t chi=std::max(kv.first.first,kv.first.second);
+			for (int m=1;m<nf;++m){
+				const float p=float(m)/nf; const float pc=p*nc;
+				const float pcr=std::floor(pc+0.5f);
+				if (std::fabs(pc-pcr)<1e-4f) continue;   // coincides with a coarse vert
+				const int kk=int(std::floor(pc));
+				const float c0=float(kk)/nc, c1=float(kk+1)/nc;
+				const float local=(p-c0)/(c1-c0);
+				const uint32_t fv=sideVid(clo,chi,p), v0=sideVid(clo,chi,c0), v1=sideVid(clo,chi,c1);
+				if (fv>=nV||v0>=nV||v1>=nV) continue;
+				verts[fv].Pos.x=meshLerpf(verts[v0].Pos.x,verts[v1].Pos.x,local);
+				verts[fv].Pos.y=meshLerpf(verts[v0].Pos.y,verts[v1].Pos.y,local);
+				verts[fv].Pos.z=meshLerpf(verts[v0].Pos.z,verts[v1].Pos.z,local);
+				++nTJ;
+			}
+		}
+
+		// ── viz record (magnitude = |final − base|, T-junction pins included) ──
+		const Material *targetMat=nullptr;
+		for (size_t i=0;i<faces.size();++i) if (isTargetNew(faces[i])){ targetMat=faces[i].Txtr; break; }
+		{
+			std::vector<char> tv(nV,0);
+			for (size_t i=0;i<faces.size();++i){ if(!isTargetNew(faces[i])) continue;
+				for (int k=0;k<3;++k) if (fIdx[i][k]<nV) tv[fIdx[i][k]]=1; }
+			for (uint32_t i=0;i<nV;++i) if (tv[i]){
+				const float dx=verts[i].Pos.x-basePos[i].x,dy=verts[i].Pos.y-basePos[i].y,dz=verts[i].Pos.z-basePos[i].z;
+				fds::DisplaceViz_Record(targetMat, verts[i].Pos, std::sqrt(dx*dx+dy*dy+dz*dz)); }
+		}
+
+		// Commit new arrays.
+		Vertex *nv = new Vertex[verts.size()];
+		std::memcpy(nv, verts.data(), verts.size()*sizeof(Vertex));
+		Face *nf = new Face[faces.size()];
+		for (size_t i=0;i<faces.size();++i){
+			nf[i]=faces[i]; nf[i].A=&nv[fIdx[i][0]]; nf[i].B=&nv[fIdx[i][1]]; nf[i].C=&nv[fIdx[i][2]];
+			if (!isTargetNew(nf[i])) continue;   // non-target keeps its authored N/NormProd
+			const Vector &A=nf[i].A->Pos,&B=nf[i].B->Pos,&C=nf[i].C->Pos;
+			const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z, e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+			float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+			const float gl=std::sqrt(gx*gx+gy*gy+gz*gz);
+			if (gl>1e-6f){ gx/=gl;gy/=gl;gz/=gl;
+				if (gx*faces[i].N.x+gy*faces[i].N.y+gz*faces[i].N.z<0.0f){gx=-gx;gy=-gy;gz=-gz;}
+				nf[i].N.x=gx;nf[i].N.y=gy;nf[i].N.z=gz; }
+			nf[i].NormProd = -(nf[i].N.x*A.x+nf[i].N.y*A.y+nf[i].N.z*A.z);
+		}
+		T->Verts=nv; T->VIndex=int32_t(verts.size());
+		T->Faces=nf; T->FIndex=int32_t(faces.size());
+		Compute_FaceVertexIndices(T);
+		if (T->Flags & Tri_Stationary)
+			T->SL=(Color*)getAlignedBlock(sizeof(Color)*T->VIndex, 16);
+		if (nMoved==0){ dMin=0.0f; dMax=0.0f; }
+		if (std::getenv("FDS_SUBDIV_DIAG") && !metricVals.empty()) {
+			std::vector<float> mv = metricVals;
+			std::sort(mv.begin(), mv.end());
+			auto pct=[&](double p){ return mv[size_t(p*(mv.size()-1))]; };
+			std::fprintf(stderr,
+				"[STONE-DIAG] '%s' chosen-level bad-cell frac n=%zu "
+				"p10/25/50/75/90/max = %.3f/%.3f/%.3f/%.3f/%.3f/%.3f "
+				"(eps=%.3f allowFrac=%.2f)\n",
+				matName, mv.size(), pct(0.10),pct(0.25),pct(0.50),pct(0.75),pct(0.90),
+				mv.back(), (double)kRefineEps, (double)kRefineFrac);
+		}
+		std::fprintf(stderr,
+			"[STONE] '%s' %s L%s amp=%.3f mip=%d: quads=%d lones=%d cells(fan/flat)=%d/%d "
+			"Lhist=%d/%d/%d/%d -> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins\n",
+			matName, uniformLevel>0?"uniform":"adaptive",
+			uniformLevel>0?std::to_string(uniformLevel).c_str():"0..3",
+			(double)amp, useMip, builtQuads, builtLones, fanCells, flatCells,
+			lvlHist[0],lvlHist[1],lvlHist[2],lvlHist[3],
+			int(T->VIndex), int(T->FIndex), nMoved, (double)dMin, (double)dMax, nTJ);
+	}
+}
+
+// Re-SMOOTH the displaced stone surface's vertex normals. After displacement,
+// MakeFacesIndependentByAngle sees the new relief cells' face planes differing
+// by more than its 30° architectural-crease threshold, so it SPLITS every such
+// edge and each cell keeps its own flat face normal — the mesh reads as facets
+// and the triangulation shows through as hairline seams (and, because the
+// tangent basis splits with the normal, as normal-map noise on top; cf. the
+// crease-tangent note in MakeFacesIndependent). The fix is a true smooth
+// normal across the displaced patch: a scene-wide position-bucket WELD of the
+// material's face corners (verts that were one point have bit-identical Pos —
+// the greets chunk copy is bitwise), averaging the DISPLACED Face::N (area-
+// weighted) over incident faces within `smoothAngleDeg` of each corner's face.
+// Continuous normals ⇒ continuous Gouraud shading AND a continuous Gram-Schmidt
+// tangent basis, so BOTH the geometric faceting and the normal-map seam vanish;
+// the geometry still carries the true silhouette. The angle gate keeps authored
+// HARD creases hard: wall-to-wall 90° corners survive for any angle < 90° (the
+// cross-corner faces are ~90° apart, so they don't average), and material
+// boundaries (wall↔floor↔ceiling) are hard for free (bucketed per base surface,
+// so a 'rooms' corner never averages a 'floor'/ceiling face). This is the
+// editor's MeshOps_ResmoothSurface machinery, scoped to the init scene + one
+// material. Call AFTER MakeFacesIndependentByAngle at the greets hook.
+void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngleDeg) {
+	if (!Sc || !matName) return;
+	if (smoothAngleDeg < 0.0f)   smoothAngleDeg = 0.0f;
+	if (smoothAngleDeg > 180.0f) smoothAngleDeg = 180.0f;
+	const std::string base = rev::Editor_BaseSurfName(matName);
+	const float cosThr = std::cos(smoothAngleDeg * float(PI) / 180.0f);
+	auto surfBaseEq = [&](const Face *f) {
+		return f && f->Txtr && f->Txtr->Name
+		    && rev::Editor_BaseSurfName(f->Txtr->Name) == base;   // catches ::mirUV clones
+	};
+	// Corners of every target-surface face across every mesh in the scene
+	// (greets copies the smoothed mesh into per-cell chunks, so adjacency is
+	// scene-wide — same reasoning as MeshOps_ResmoothSurface).
+	struct Corner { Vertex *V; const Face *F; };
+	std::vector<Corner> corners;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face *F = &T->Faces[i];
+			if (!surfBaseEq(F) || !F->A || !F->B || !F->C) continue;
+			corners.push_back({F->A, F}); corners.push_back({F->B, F}); corners.push_back({F->C, F});
+		}
+	}
+	if (corners.empty()) return;
+	// Position-bucket by exact bits (bitwise chunk copy => coincident verts key together).
+	struct PK { uint32_t x, y, z; bool operator==(const PK &o) const { return x==o.x&&y==o.y&&z==o.z; } };
+	struct PH { size_t operator()(const PK &k) const {
+		return (size_t(k.x)*73856093u) ^ (size_t(k.y)*19349663u) ^ (size_t(k.z)*83492791u); } };
+	auto keyOf = [&](const Vector &p) { return PK{ meshF2bits(p.x), meshF2bits(p.y), meshF2bits(p.z) }; };
+	std::unordered_map<PK, std::vector<int>, PH> bucket;
+	bucket.reserve(corners.size() * 2);
+	for (int i = 0; i < int(corners.size()); ++i) bucket[keyOf(corners[i].V->Pos)].push_back(i);
+
+	// Per-face tangent from the per-FACE UV gradient (matches Compute_Vertex_Tangents,
+	// incl. its degenerate-UV fallback to the per-vertex UVs). Returns false if the
+	// face has no usable UV gradient.
+	auto faceTangent = [](const Face *F, Vector &t) -> bool {
+		const Vector &p0 = F->A->Pos, &p1 = F->B->Pos, &p2 = F->C->Pos;
+		const float e1x=p1.x-p0.x,e1y=p1.y-p0.y,e1z=p1.z-p0.z;
+		const float e2x=p2.x-p0.x,e2y=p2.y-p0.y,e2z=p2.z-p0.z;
+		float du1=F->U2-F->U1, dv1=F->V2-F->V1, du2=F->U3-F->U1, dv2=F->V3-F->V1;
+		if (std::fabs(du1*dv2 - du2*dv1) < 1e-8f) {
+			const float vdu1=F->B->U-F->A->U, vdv1=F->B->V-F->A->V, vdu2=F->C->U-F->A->U, vdv2=F->C->V-F->A->V;
+			if (std::fabs(vdu1*vdv2 - vdu2*vdv1) >= 1e-8f) { du1=vdu1;dv1=vdv1;du2=vdu2;dv2=vdv2; }
+		}
+		const float denom = du1*dv2 - du2*dv1;
+		if (std::fabs(denom) < 1e-8f) return false;
+		const float r = 1.0f/denom;
+		t.x=(e1x*dv2-e2x*dv1)*r; t.y=(e1y*dv2-e2y*dv1)*r; t.z=(e1z*dv2-e2z*dv1)*r;
+		return true;
+	};
+
+	// Weld BOTH the normal AND the tangent over each corner's gated position bucket.
+	// A split mesh (greets, post-MakeFacesIndependent) gives every corner its OWN
+	// per-face tangent, so coincident corners get DIFFERENT tangents (per-cell
+	// bilinear UV + displaced positions differ per triangle) → a TBN flip at every
+	// edge → a normal-map/POM seam that survives even continuous normals (visible
+	// at any amp). Averaging the tangent over the same gated neighbourhood as the
+	// normal makes the whole TBN frame continuous, so the last hairlines go too.
+	std::vector<Vector> outN(corners.size()), outT(corners.size());
+	for (int i = 0; i < int(corners.size()); ++i) {
+		const Vector &fN = corners[i].F->N;
+		Vector nAcc, tAcc; Vector_Form(&nAcc, 0, 0, 0); Vector_Form(&tAcc, 0, 0, 0);
+		for (int j : bucket[keyOf(corners[i].V->Pos)]) {
+			const Face *adj = corners[j].F;
+			if (Dot_Product(&fN, &adj->N) < cosThr) continue;   // crease: keep hard
+			const float area = Tri_Surface(&adj->A->Pos, &adj->B->Pos, &adj->C->Pos);
+			Vector w; Vector_Scale(&adj->N, area, &w); Vector_SelfAdd(&nAcc, &w);
+			Vector ta; if (faceTangent(adj, ta)) { Vector_Scale(&ta, area, &w); Vector_SelfAdd(&tAcc, &w); }
+		}
+		Vector n;
+		if (Vector_Length(&nAcc) < EPSILON) n = fN; else { Vector_Norm(&nAcc); n = nAcc; }
+		outN[i] = n;
+		// Gram-Schmidt the tangent against the smoothed normal (T ⟂ N), like PREPROC.
+		const float TdotN = Dot_Product(&tAcc, &n);
+		tAcc.x -= TdotN*n.x; tAcc.y -= TdotN*n.y; tAcc.z -= TdotN*n.z;
+		if (Vector_Length(&tAcc) > EPSILON) { Vector_Norm(&tAcc); outT[i] = tAcc; }
+		else {   // no usable UV gradient: any vector ⟂ N (matches PREPROC's fallback)
+			if (std::fabs(n.y) < 0.9f) { outT[i].x=-n.z; outT[i].y=0.0f; outT[i].z=n.x; }
+			else                       { outT[i].x=0.0f; outT[i].y=n.z; outT[i].z=-n.y; }
+			Vector_Norm(&outT[i]);
+		}
+	}
+	// Commit (split mesh: exactly one corner per Vertex).
+	for (int i = 0; i < int(corners.size()); ++i) { corners[i].V->N = outN[i]; corners[i].V->Tangent = outT[i]; }
+	std::fprintf(stderr, "[STONE] '%s' re-smoothed %zu displaced corners @ %.0f deg "
+	             "(weld-aware normals + tangents; hard creases + material borders kept)\n",
+	             matName, corners.size(), (double)smoothAngleDeg);
 }
 
 // B4 residual height map (docs/ENVDYN_DISPLACEMENT_PLAN.md): the POM input for

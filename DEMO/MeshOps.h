@@ -222,6 +222,42 @@ void SubdivideMaterialFaces(Scene *Sc, const char *matName, int levels,
 // MakeFacesIndependentByAngle (re-derives vertex normals) + the chunk split.
 void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip);
 
+// Symmetric ADAPTIVE stone subdivision + displacement (S1/S2 of the diagonal-
+// grain fix, docs/ENVDYN_DISPLACEMENT_PLAN.md workstream B). Replaces the
+// SubdivideMaterialFaces(linear)+DisplaceMaterialVertices pair for the greets
+// stone when --greets_displace is on: pairs each stone quad's two coplanar
+// triangles across their shared (longest-edge) diagonal and retriangulates the
+// quad as a symmetric 2^L×2^L grid whose relief cells are 4-triangle CENTRE
+// fans — the height peak lands on a vertex (dome), not on a shared diagonal
+// (the proven roof-ridge / uniform diagonal grain of commit 4633aeb). Unpaired
+// lone triangles get symmetric barycentric subdivision (no diagonal bias).
+// L is chosen PER QUAD from the height map's local max-gradient under the
+// quad's UV footprint at `mip` (flat mortar stays coarse, busy block edges go
+// deep, 0..3), scaled by `adapt` (>1 = deeper); uniformLevel > 0 forces that
+// level everywhere (the uniform baseline for cost comparison). Authored patch
+// borders are pinned at zero displacement (as DisplaceMaterialVertices);
+// LEVEL-BOUNDARY edges are crack-free by pinning the finer side's inserted
+// edge verts onto the coarser side's straight displaced segment. Face N +
+// NormProd re-derived; records to --displace_viz. Same hook contract as
+// SubdivideMaterialFaces (after Preprocess + GreetsRetileFloor, before
+// MakeFacesIndependentByAngle + the chunk split).
+void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
+                         float amp, int mip, float adapt);
+
+// Companion post-pass, called AFTER MakeFacesIndependentByAngle: re-SMOOTH the
+// displaced stone surface's vertex normals. That pass facets the displaced
+// relief (adjacent cell faces exceed its 30° crease threshold → split → flat
+// per-face normals → the triangulation shows as hairline/facet seams, plus a
+// split tangent basis → normal-map noise). This does a scene-wide position-
+// bucket weld of the material's corners and averages the DISPLACED face normals
+// (area-weighted) within `smoothAngleDeg`, so shading AND the Gram-Schmidt
+// tangent basis are continuous — faceting and the normal-map seam both vanish.
+// The angle gate (< 90°) keeps authored HARD creases hard (wall-to-wall 90°
+// corners); material boundaries are hard for free (bucketed per base surface).
+// Same machinery as the editor's MeshOps_ResmoothSurface, scoped to one scene +
+// material. No-op when the material has no faces in the scene.
+void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngleDeg);
+
 // B4 residual height map: full-res height minus the bilinear-upsampled lowMip
 // band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
 // displaced material, so geometry + parallax don't double-count the relief.

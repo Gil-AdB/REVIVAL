@@ -276,6 +276,42 @@ void drawLine(int x0, int y0, int x1, int y1, uint32_t col) {
     }
 }
 
+// Depth-tested variant for --displace_viz: interpolate view-space z along the
+// line and reject pixels the frame's OPAQUE geometry occludes (ZPage16, enc
+// zEnc = 0xFF80 - g_zscale*z, larger = nearer, 0 = untouched/sky — never
+// occludes). The line's own z is pulled 1% nearer before encoding so a
+// wireframe lying exactly ON the surface it annotates wins the compare
+// instead of z-fighting; genuinely hidden geometry (a far wall behind a near
+// one) stays hidden — the readability fix over the old draw-through overlay.
+// Falls back to the depth-free draw when ZPage16 isn't live.
+void drawLineZ(int x0, int y0, float z0, int x1, int y1, float z1, uint32_t col) {
+    if (!ZPage16) { drawLine(x0, y0, x1, y1, col); return; }
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const word* zb = ZPage16;
+    const float zs = float(g_zscale);
+    int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    const int steps = std::max(dx, -dy);
+    const float invSteps = steps > 0 ? 1.0f / float(steps) : 0.0f;
+    int err = dx + dy;
+    int step = 0;
+    for (int guard = 0; guard < 8192; ++guard) {
+        if (x0 >= 0 && x0 < XRes && y0 >= 0 && y0 < YRes) {
+            const float z = (z0 + (z1 - z0) * (float(step) * invSteps)) * 0.99f;
+            int zEnc = 0xFF80 - int(zs * z);
+            if (zEnc < 0) zEnc = 0; else if (zEnc > 0xFFFF) zEnc = 0xFFFF;
+            const word surf = zb[size_t(y0) * XRes + x0];
+            if (surf == 0 || word(zEnc) >= surf)
+                out[size_t(y0) * XRes + x0] = col | 0xFF000000u;
+        }
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+        ++step;   // one Bresenham iteration == one major-axis step
+    }
+}
+
 }  // namespace
 
 void WorldAabb_DrawOverlay(Scene* sc) {
@@ -416,7 +452,7 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
             const float vx = cog[0]/3.0f - P.x, vy = cog[1]/3.0f - P.y, vz = cog[2]/3.0f - P.z;
             if (wn.x*vx + wn.y*vy + wn.z*vz > 0.0f) continue;   // back-facing
 
-            float mag[3];
+            float mag[3], vzs[3];
             for (int k = 0; k < 3; ++k) {
                 Vector d = { w[k].x - P.x, w[k].y - P.y, w[k].z - P.z };
                 Vector s; MatrixXVector(VM, &d, &s);
@@ -427,14 +463,16 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
                 } else {
                     ok[k] = false;
                 }
+                vzs[k] = s.z;
                 auto it = g_dispMag.find(posKey(corner[k]->Pos));
                 mag[k] = (it != g_dispMag.end()) ? it->second * invMax : 0.0f;
             }
             static const int e3[3][2] = { {0,1}, {1,2}, {2,0} };
             for (auto& e : e3)
                 if (ok[e[0]] && ok[e[1]])
-                    drawLine(sx[e[0]], sy[e[0]], sx[e[1]], sy[e[1]],
-                             rampColor(0.5f * (mag[e[0]] + mag[e[1]])));
+                    drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
+                              sx[e[1]], sy[e[1]], vzs[e[1]],
+                              rampColor(0.5f * (mag[e[0]] + mag[e[1]])));
         }
     }
 }

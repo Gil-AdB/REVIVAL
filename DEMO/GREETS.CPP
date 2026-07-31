@@ -1445,10 +1445,10 @@ void Initialize_Greets()
 	// split further down wraps the displaced verts in its chunk bounds.
 	// Defaults (subdiv 0, displace 0) = neither call runs (byte-identical).
 	{
-		int L = fds::FeatureFlags::greets_stone_subdiv();
+		const int  L        = fds::FeatureFlags::greets_stone_subdiv();
 		const bool displace = fds::FeatureFlags::greets_displace();
-		if (displace && L <= 0) L = 2;   // B2-measured default density
-		if (L > 0) {
+		if (!displace && L > 0) {
+			// Legacy pure-density knob (no bake): linear midpoint split only.
 			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
 			SubdivideMaterialFaces(GreetSc, "floor", L, /*phong=*/false);
 		}
@@ -1457,10 +1457,16 @@ void Initialize_Greets()
 				"--greets_displace is OFF — no bake runs, so the overlay has "
 				"nothing to draw. Add --greets_displace.\n");
 		if (displace) {
-			const float amp = fds::FeatureFlags::greets_displace_amp();
-			const int   mip = fds::FeatureFlags::greets_displace_mip();
-			DisplaceMaterialVertices(GreetSc, "rooms", amp, mip);
-			DisplaceMaterialVertices(GreetSc, "floor", amp, mip);
+			const float amp   = fds::FeatureFlags::greets_displace_amp();
+			const int   mip   = fds::FeatureFlags::greets_displace_mip();
+			const float adapt = fds::FeatureFlags::greets_displace_adapt();
+			// Symmetric adaptive subdivision + displacement in ONE pass (S1/S2
+			// of the diagonal-grain fix — the old linear-subdiv + interior-
+			// displace pair put a roof-ridge on every stone quad's diagonal).
+			// greets_stone_subdiv > 0 forces that UNIFORM level (the cost-
+			// comparison baseline); 0 = adaptive 0..3 by height-map busyness.
+			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt);
+			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt);
 			// B4 residual: geometry now carries the low band of the relief, so
 			// POM must march the RESIDUAL (full − upsampled low band) or the
 			// blocks get counted twice (geometry bump + parallax shift of the
@@ -1488,6 +1494,20 @@ void Initialize_Greets()
 	// Auto-detect creased meshes (e.g. wall panels) and switch them to
 	// per-face vertex normals; smooth meshes (curved letters) untouched.
 	MakeFacesIndependentByAngle(GreetSc, 30.0f);
+
+	// Displaced stone: re-SMOOTH the displaced surface normals. The pass above
+	// (MakeFacesIndependentByAngle, 30°) facets the new relief — adjacent cell
+	// faces exceed the crease threshold, split, and the triangulation shows as
+	// hairline/facet seams (plus a split tangent basis → normal-map noise). A
+	// scene-wide position-bucket weld averages the displaced face normals within
+	// greets_displace_smooth degrees, so shading + tangents go continuous and
+	// the seams vanish, while authored 90° corners (and material borders) stay
+	// hard. No-op when --greets_displace is off.
+	if (fds::FeatureFlags::greets_displace()) {
+		const float sm = fds::FeatureFlags::greets_displace_smooth();
+		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
+		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
+	}
 
 	// Specular/Glossiness are AUTHORED IN THE LWO SOURCES now (Authoring/
 	// greets — stairs/amudim/floor/hull/cockpit at spec 0.4 gloss 48, the
@@ -1725,7 +1745,20 @@ void Initialize_Greets()
 		// single-id merge. Add curved alcove mats here when we tackle those
 		// (concave, so it's a softer trade-off — real self-shadowing inside the
 		// alcove is lost along with the artifact).
-		static const std::set<std::string> kSingleShadowIdMats = { "momy-1", "momy-2" };
+		std::set<std::string> kSingleShadowIdMats = { "momy-1", "momy-2" };
+		// Displaced stone: the per-(material, PLANE) clustering below assumes the
+		// wall is coplanar (one flat 'rooms' plane => one ShadowMatID => no self-
+		// shadow). Displacement tilts/offsets EVERY facet onto its own plane, so
+		// each facet would get a UNIQUE ShadowMatID and self-shadow its neighbours
+		// — the per-facet hairline acne on the subdivided walls (worst at grazing).
+		// Collapse the displaced walls to a single shadow id (as the mummies do),
+		// so the surface self-matches everywhere; block-relief shading still comes
+		// from the normal map + POM + AO per pixel. Only when the bake ran — with
+		// --greets_displace off the coplanar flat-wall clustering is byte-identical.
+		if (fds::FeatureFlags::greets_displace()) {
+			kSingleShadowIdMats.insert("rooms");
+			kSingleShadowIdMats.insert("floor");
+		}
 
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;
