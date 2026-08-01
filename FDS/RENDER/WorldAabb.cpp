@@ -475,11 +475,16 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
     if (dispAbs > g_dispMax) g_dispMax = dispAbs;
 }
 
-void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, float signedErr) {
+// signedErrFrac is PRE-NORMALIZED by the bake to an absolute fraction where
+// ±1 = the map's full peak-to-valley relief missing (see MeshOps viz-2 record).
+// We store it as-is and tint by the absolute value — no global-max rescale (the
+// old 1/g_dispErrMax wash let a single worst edge cell flatten everything to
+// green). g_dispErrMax is kept only for the stderr summary line.
+void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, float signedErrFrac) {
     if (FeatureFlags::displace_viz() != 2) return;   // mode 0/1: record nothing
     if (M) g_dispMats.insert(M);
-    g_dispErr[posKey(centroidLocal)] = signedErr;
-    const float a = std::fabs(signedErr);
+    g_dispErr[posKey(centroidLocal)] = signedErrFrac;
+    const float a = std::fabs(signedErrFrac);
     if (a > g_dispErrMax) g_dispErrMax = a;
 }
 
@@ -501,13 +506,19 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
     const Vector  P  = View->ISource;
     const float   nearZ  = sc->NZP > 0.01f ? sc->NZP : 0.01f;
     const float   invMax = g_dispMax    > 1e-9f ? (1.0f / g_dispMax)    : 0.0f;
-    const float   invErr = g_dispErrMax > 1e-9f ? (1.0f / g_dispErrMax) : 0.0f;
+    // --displace_viz=2 fill rule: error is an absolute fraction of the map's
+    // relief. Matched cells (|frac| < kMatchThresh) get NO fill — the wireframe
+    // alone reads them, so the eye is drawn only to where geometry FAILS the
+    // map. Above the threshold the fill fades in (fainter → stronger) and tints
+    // RED (under-carries) / BLUE (over).
+    const float kMatchThresh = 0.15f;   // <15% of block relief missing = "matched"
     if (mode == 2) {
         static bool once = false;
         if (!once) { once = true;
-            std::fprintf(stderr, "[DISPLACE-VIZ] mode 2 (height error): max|truth-carried| "
-                "= %.4f world units; RED=under-carries (missing relief), BLUE=over, "
-                "GREEN=matched.\n", (double)g_dispErrMax); }
+            std::fprintf(stderr, "[DISPLACE-VIZ] mode 2 (height error): worst |truth-carried| "
+                "= %.2f of the map's peak-to-valley relief; RED=under-carries (missing "
+                "relief), BLUE=over, unfilled=matched (<%.0f%%).\n",
+                (double)g_dispErrMax, (double)(kMatchThresh * 100.0f)); }
     }
 
     for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
@@ -560,12 +571,19 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
                                         (corner[0]->Pos.y + corner[1]->Pos.y + corner[2]->Pos.y) / 3.0f,
                                         (corner[0]->Pos.z + corner[1]->Pos.z + corner[2]->Pos.z) / 3.0f };
                 auto it = g_dispErr.find(posKey(clocal));
-                if (it != g_dispErr.end() && ok[0] && ok[1] && ok[2])
-                    fillTriZ(sx, sy, vzs, divergeColor(it->second * invErr), 0.55f);
+                if (it != g_dispErr.end() && ok[0] && ok[1] && ok[2]) {
+                    const float frac = it->second;              // signed, absolute scale
+                    const float m = std::fabs(frac);
+                    if (m >= kMatchThresh) {                     // matched → no fill
+                        const float t = (m - kMatchThresh) / (1.0f - kMatchThresh);
+                        const float alpha = 0.22f + 0.50f * (t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t);
+                        fillTriZ(sx, sy, vzs, divergeColor(frac), alpha);
+                    }
+                }
                 for (auto& e : e3)
                     if (ok[e[0]] && ok[e[1]])
                         drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
-                                  sx[e[1]], sy[e[1]], vzs[e[1]], 0x00202020u);
+                                  sx[e[1]], sy[e[1]], vzs[e[1]], 0x00303030u);
             } else {
                 for (auto& e : e3)
                     if (ok[e[0]] && ok[e[1]])

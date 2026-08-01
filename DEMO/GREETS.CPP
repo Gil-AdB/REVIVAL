@@ -1460,13 +1460,14 @@ void Initialize_Greets()
 			const float amp   = fds::FeatureFlags::greets_displace_amp();
 			const int   mip   = fds::FeatureFlags::greets_displace_mip();
 			const float adapt = fds::FeatureFlags::greets_displace_adapt();
+			const float cpb   = fds::FeatureFlags::greets_displace_cpb();
 			// Symmetric adaptive subdivision + displacement in ONE pass (S1/S2
 			// of the diagonal-grain fix — the old linear-subdiv + interior-
 			// displace pair put a roof-ridge on every stone quad's diagonal).
 			// greets_stone_subdiv > 0 forces that UNIFORM level (the cost-
 			// comparison baseline); 0 = adaptive 0..3 by height-map busyness.
-			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt);
-			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt);
+			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb);
+			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb);
 			// B4 residual: geometry now carries the low band of the relief, so
 			// POM must march the RESIDUAL (full − upsampled low band) or the
 			// blocks get counted twice (geometry bump + parallax shift of the

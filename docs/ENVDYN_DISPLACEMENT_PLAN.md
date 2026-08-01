@@ -359,6 +359,57 @@ only, flags default-off until the user approves looks.
     3/3, wasm links. (Isolation needed because a concurrent agent's uncommitted
     FLD_READ/Material/Deferred work perturbs whole-binary hashes vs a clean
     HEAD — orthogonal to this change.)
+- [x] **BLOCK-PITCH adaptive depth + honest metric + legible viz. DONE
+      (2026-08-02).** User verdict at a NEW pose (gray-block wall left of the
+      civax screen, `FDS_GREETS_CAM=-12.8872108,2.7451086,-52.5132828,
+      0.991839349,-0.0319343321,-0.123432674` t=2145): "the viz is still not
+      great, and the subdivision is worthless" — ON ≈ OFF, no per-block relief.
+      Three coupled root causes + fixes (all in `DisplaceStoneSubdiv` /
+      `WorldAabb.cpp`, behind the same default-OFF flags):
+  - **Depth cap was absolute, not map-relative.** The S2 metric capped at L3
+    (8×8 cells/quad). This wall's quads span 2-3 UV tiles (block pitch 0.25 UV
+    = 4 blocks/tile), so L3 left cells 1-1.5 blocks wide → geometry carried no
+    per-block relief. FIX: estimate the block pitch in TEXELS per material by
+    gradient-sum AUTOCORRELATION of the height map (`EstimateBlockPitch`;
+    measured 64×64 texels @ mip2 for `rooms`, 43×43 for `floor`), and drive a
+    PER-QUAD depth cap so each quad's cell footprint ≤ (pitch / cellsPerBlock)
+    texels — map-relative, so however many tiles a quad spans, its cells land
+    at block scale. kMaxLevel raised 3→5 (safety cap; the per-quad block cap
+    bounds it). `--greets_displace_cpb` (default **1.0** = one centre-fan dome
+    per block, mortar recessed at the shared cell border; blocks pop at the
+    lowest cost). ON now clearly ≠ OFF at the user pose — blocks pop, mortar
+    recessed, self-shadowed (`/tmp/displace6/on_cpb1.0`).
+  - **The refinement + viz metrics ALIASED.** Both probed a sparse fixed
+    stencil (9-pt refine / 4-pt viz); on a coarse cell the probes fell on
+    similar-height block interiors and MISSED the mortar → read "matched"
+    while carrying no relief. FIX: both now scan the cell/triangle's FULL
+    texel footprint (strided) at the bake mip, max |truth − carried|.
+  - **Viz green wash → legible.** Old `--displace_viz=2` filled every triangle
+    at α0.55 tinted by error/global-max — the single worst edge cell washed
+    everything green. FIX: error is a pre-normalized ABSOLUTE fraction of the
+    map's peak-to-valley relief; matched cells (|err|<15%) get NO fill (thin
+    wireframe only), meaningful error fades in RED (under) / BLUE (over). Now
+    reads as "where geometry fails the map" at a glance.
+  - **COST — measured, honest (t=5780, 1080p, threaded, iters=25/40).** The
+    depth increase is expensive; `_cpb` is the dial. Baseline (old L≤3, ~10k
+    faces) frame p50 **56 ms**. cpb=1.0 (**43k** faces): **74 ms (+18)**, RNDR
+    +6 / BAKE +9 (per-frame shadow re-raster) / XFRM +3; init lightmap bake
+    2.1s→~6s. cpb=1.5 (54k): 79 ms. cpb=2.0 half-block (103k, crispest flat
+    tops): **121 ms (+65)**, init bake 15s — hero close-ups only. Shipped
+    default 1.0 (pops well, best cost); the shadow-bake + XFRM share would want
+    the deferred B5 face-cull to go higher. Flag stays default-OFF so the demo
+    is unaffected; this is the ON-experience cost, reported not hidden.
+  - **No regression** of the fixed artifacts at the prior poses (frontal
+    t=1867 yellow wall, grazing `-10,3,-45,0.7,-0.1,-0.7`): no diagonal grain,
+    no faceting, no acne, straight mortar, clean corners (one slightly wavy
+    mortar joint at grazing — the cpb=1.0 one-cell-per-block tradeoff).
+    A/B `/tmp/displace6/`.
+  - Flags-off byte-null: render_gate mirror+cone baseline-identical (halotest
+    + fountain mismatch the OLD pins but are byte-== pure HEAD 8474205 —
+    pre-existing pin drift, proven by stash-isolation); city `37e62845` exact;
+    greets stable-pixel 5v5 byte-null by majority (MINE set2 == HEAD both sets
+    = 0; one 114-px batch was the documented ±1-LSB "1-in-12" greets race,
+    maxΔ=1); wasm links.
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`

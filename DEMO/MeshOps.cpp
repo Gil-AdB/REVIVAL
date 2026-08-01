@@ -1202,6 +1202,56 @@ static float SampleHeight8Bilinear(const Texture *hm, int mip, float u, float v)
 	return (top + (bot - top) * fy) * (1.0f / 255.0f);
 }
 
+// Estimate the dominant BLOCK PITCH (mortar-to-mortar period) of a height map,
+// in TEXELS at `mip`, per axis. Mortar lines are ridges of the height gradient;
+// summing |∂h| down each column gives a 1-D signal in x whose period is the
+// vertical-mortar pitch (and the row sum gives the horizontal pitch). The
+// dominant period is the highest local maximum of that signal's normalized
+// autocorrelation in [tile/16, tile/2] (i.e. a block is between 1/16 and 1/2 of
+// a UV tile). This is map-RELATIVE: the pitch is a property of the height field,
+// independent of how a wall is UV-mapped, so a subdivision cell whose texel
+// footprint is ≤ ~half this pitch resolves one block regardless of how many
+// tiles a quad spans (the fix for "cells span 2-3 blocks on the finely-tiled
+// wall"). Returns false with no clear periodicity (caller falls back to a fixed
+// texel target). Cheap + one-time (per material at bake).
+static bool EstimateBlockPitch(const Texture *hm, int mip,
+                               float &pitchXtex, float &pitchYtex) {
+	pitchXtex = pitchYtex = 0.0f;
+	if (!hm || !hm->Mipmap[mip]) return false;
+	const int mw = std::max(1, int(hm->SizeX) >> mip);
+	const int mh = std::max(1, int(hm->SizeY) >> mip);
+	if (mw < 16 || mh < 16) return false;
+	const byte *data = hm->Mipmap[mip];
+	const int bx = hm->blockSizeX, by = hm->blockSizeY;
+	auto TX = [&](int x, int y) -> float { return float(data[SwizzledOffset(x, y, bx, by, mh)]); };
+	std::vector<float> colsig(mw, 0.0f), rowsig(mh, 0.0f);
+	for (int y = 0; y < mh; ++y)
+		for (int x = 0; x + 1 < mw; ++x) colsig[x] += std::fabs(TX(x + 1, y) - TX(x, y));
+	for (int y = 0; y + 1 < mh; ++y)
+		for (int x = 0; x < mw; ++x)     rowsig[y] += std::fabs(TX(x, y + 1) - TX(x, y));
+	auto dominant = [](const std::vector<float> &s, int n) -> float {
+		double m = 0; for (int i = 0; i < n; ++i) m += s[i]; m /= n;
+		std::vector<double> d(n); double a0 = 0;
+		for (int i = 0; i < n; ++i) { d[i] = double(s[i]) - m; a0 += d[i] * d[i]; }
+		if (a0 < 1e-9) return 0.0f;                       // flat signal: no mortar grid
+		const int lo = std::max(4, n / 16), hi = n / 2;
+		std::vector<double> ac(hi + 2, 0.0);
+		for (int lag = lo - 1; lag <= hi + 1 && lag < n; ++lag) {
+			double s2 = 0; for (int i = 0; i + lag < n; ++i) s2 += d[i] * d[i + lag];
+			ac[lag] = s2 / a0;
+		}
+		double bestVal = -1e30; int bestLag = 0;
+		for (int lag = lo; lag <= hi; ++lag)
+			if (ac[lag] >= ac[lag - 1] && ac[lag] >= ac[lag + 1] && ac[lag] > bestVal) {
+				bestVal = ac[lag]; bestLag = lag;
+			}
+		return bestVal > 0.15 ? float(bestLag) : 0.0f;   // require a clear peak
+	};
+	pitchXtex = dominant(colsig, mw);
+	pitchYtex = dominant(rowsig, mh);
+	return pitchXtex > 0.0f && pitchYtex > 0.0f;
+}
+
 // Height-map displacement bake (docs/ENVDYN_DISPLACEMENT_PLAN.md, B3): push
 // every INTERIOR vertex of `matName`'s faces along its smooth vertex normal by
 // amp*(h-mipMean) (mean of the sampled mip - zero-mean relief, no DC bulge
@@ -1419,25 +1469,33 @@ inline float meshLerpf(float a, float b, float t) { return a + (b - a) * t; }
 }  // namespace
 
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
-                         float amp, int mip, float adapt) {
+                         float amp, int mip, float adapt, float cellsPerBlock) {
 	if (!Sc || !matName) return;
+	if (cellsPerBlock < 0.25f) cellsPerBlock = 0.25f;
 	auto isTarget = [&](const Face *F) {
 		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
 	};
-	const int kMaxLevel = 3;
+	// Hard ceiling on subdivision depth. Was 3 (8×8 cells/quad) — too coarse
+	// for walls whose quads span several UV tiles: at the finely-tiled wall
+	// (block pitch 0.25 UV, but quads covering 2-3 tiles) L3 leaves each cell
+	// spanning 1-1.5 whole blocks, so the geometry carries no per-block relief
+	// (ON≈OFF). The real depth is now driven PER QUAD by the block pitch (see
+	// blockLevelCap below); this is only the safety cap so a pathological quad
+	// can't run away. L5 = 32×32 cells resolves ~half-block on a 4-tile quad.
+	const int kMaxLevel = 5;
 	// Adaptive depth = the smallest level whose REFINEMENT ERROR is small
-	// enough: at level L the patch is a 2^L×2^L cell grid; each cell's error is
-	// the max deviation of the true height (probed at 9 interior/edge points)
-	// from the bilinear of its 4 corner heights — exactly the relief the
-	// GEOMETRY at that level cannot carry (POM's B4 residual carries it
-	// instead, so the epsilon is literally the geometry/POM split point). A
-	// level passes when ≤12% of its cells exceed the epsilon (a lone busy
-	// corner shouldn't force a whole quad deep). This discriminates feature
-	// DENSITY, which a max-gradient bar cannot: one tall block edge is
-	// resolved by a coarse level (error collapses once the edge lands on cell
-	// borders), while densely repeating blocks keep the error high until the
-	// cells reach the block pitch. `adapt` scales the epsilon (>1 = stricter =
-	// deeper).
+	// enough, but never deeper than the block-pitch cap. At level L the patch
+	// is a 2^L×2^L cell grid; each cell's error is the max deviation of the
+	// true height, probed over the cell's FULL texel footprint (strided) at the
+	// bake mip, from the bilinear of its 4 corner heights — the relief the
+	// GEOMETRY at that level cannot carry (POM's B4 residual carries it, so the
+	// epsilon is literally the geometry/POM split point). Probing the whole
+	// footprint (not a fixed 9-point stencil) is what makes the metric HONEST:
+	// a coarse cell spanning whole blocks used to alias — its stencil landed on
+	// similar-height block interiors and missed the mortar, so the cell read
+	// "matched" while carrying no relief. A level passes when ≤12% of its cells
+	// exceed the epsilon (a lone busy corner shouldn't force a whole quad
+	// deeper). `adapt` scales the epsilon (>1 = stricter = deeper).
 	const float kRefineEps  = 0.07f * (adapt > 1e-3f ? 1.0f / adapt : 1.0f);
 	const float kRefineFrac = 0.12f;
 	// A cell with corner+centre height spread below this carries no visible
@@ -1474,8 +1532,11 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		       ((std::max(1, int(hm->SizeX) >> useMip) < (1 << hm->blockSizeX)) ||
 		        (std::max(1, int(hm->SizeY) >> useMip) < (1 << hm->blockSizeY))))
 			--useMip;
-		// Degenerate-map guard + mip mean (relief is zero-mean about it).
+		// Degenerate-map guard + mip mean (relief is zero-mean about it) + the
+		// map's peak-to-valley height range (drives the viz's absolute error
+		// scale: ±full range = "geometry carries none of the block relief").
 		float mipMean = 0.5f;
+		float reliefRange01 = 0.0f;   // (hi-lo)/255 at the bake mip
 		{
 			const int mw = std::max(1, int(hm->SizeX) >> useMip);
 			const int mh = std::max(1, int(hm->SizeY) >> useMip);
@@ -1490,7 +1551,33 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				continue;
 			}
 			mipMean = float(double(sum) / double(n)) * (1.0f / 255.0f);
+			reliefRange01 = float(hi - lo) * (1.0f / 255.0f);
 		}
+
+		// Block pitch (mortar period) in useMip texels → the TARGET cell texel
+		// footprint (≤ half a block, so a block gets ~2 cells across and its
+		// interior pops out with the mortar recessed at the cell boundary). This
+		// is what drives the per-quad depth cap below: map-relative, so however
+		// many UV tiles a quad covers, its cells land at block scale. Falls back
+		// to a fixed target when the map has no clear grid.
+		const int useMipW = std::max(1, int(hm->SizeX) >> useMip);
+		const int useMipH = std::max(1, int(hm->SizeY) >> useMip);
+		float pitchXtex = 0.0f, pitchYtex = 0.0f;
+		const bool havePitch = EstimateBlockPitch(hm, useMip, pitchXtex, pitchYtex);
+		// Target cell texel footprint = block pitch / cellsPerBlock, clamped to a
+		// sane texel range. Without a pitch, aim for ~cellsPerBlock cells per
+		// 1/6-tile (a reasonable stone scale) as a fixed fallback.
+		const float invCpb = 1.0f / cellsPerBlock;
+		const float kFallbackTargetTex = std::max(2.0f, float(useMipW) * (1.0f/6.0f) * invCpb);
+		const float targetTexX = havePitch ? std::max(2.0f, invCpb * pitchXtex) : kFallbackTargetTex;
+		const float targetTexY = havePitch ? std::max(2.0f, invCpb * pitchYtex) : kFallbackTargetTex;
+		std::fprintf(stderr,
+			"[STONE] '%s' block pitch %s: %.0fx%.0f texels @ mip%d (%.2fx%.2f blocks/tile) "
+			"-> target cell ≤ %.0fx%.0f texels\n", matName,
+			havePitch ? "estimated" : "FALLBACK", (double)pitchXtex, (double)pitchYtex,
+			useMip, havePitch ? double(useMipW) / std::max(1.0f, pitchXtex) : 0.0,
+			havePitch ? double(useMipH) / std::max(1.0f, pitchYtex) : 0.0,
+			(double)targetTexX, (double)targetTexY);
 
 		Vertex *const oldV = T->Verts;
 		const uint32_t nOrig = uint32_t(T->VIndex);
@@ -1634,23 +1721,46 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			faces.push_back(f); fIdx.push_back({i0,i1,i2});
 		};
 
-		// Smallest level whose refinement error passes (see kRefineEps above).
-		// Evaluated over the patch's UV bounding box (stone quads map affinely,
-		// so the bbox ≈ the true footprint). metricVals records each patch's
-		// L3-residual error fraction at the CHOSEN level for the
-		// FDS_SUBDIV_DIAG distribution print.
+		// Smallest level whose refinement error passes (see kRefineEps above),
+		// bounded by the per-quad BLOCK-PITCH cap. Evaluated over the patch's UV
+		// bounding box (stone quads map affinely, so the bbox ≈ the true
+		// footprint). metricVals records each patch's bad-cell fraction at the
+		// CHOSEN level for the FDS_SUBDIV_DIAG distribution print; lcapHist below
+		// records the depth ceiling the block pitch imposed.
 		std::vector<float> metricVals;
+		int lcapHist[kMaxLevel + 1] = {0};
 		auto refineLevel = [&](float u0,float u1,float v0,float v1)->int{
+			// Block-pitch cap: enough levels that the quad's texel footprint is
+			// cut into ≤ half-block cells (targetTexX/Y). This is the map-relative
+			// depth that makes per-block relief representable however many tiles
+			// the quad spans — the fix for "cells span 2-3 blocks". Never exceeds
+			// kMaxLevel (the runaway safety cap).
+			const float footTexU = std::fabs(u1-u0) * float(useMipW);
+			const float footTexV = std::fabs(v1-v0) * float(useMipH);
+			const float need = std::max(footTexU/targetTexX, footTexV/targetTexY);
+			int Lcap = 0;
+			while ((1<<Lcap) < need && Lcap < kMaxLevel) ++Lcap;
+			lcapHist[Lcap]++;
 			if (uniformLevel > 0) { metricVals.push_back(-1.0f); return std::min(uniformLevel, kMaxLevel); }
-			// 9 probe offsets inside a cell (edge midpoints + centre + quarter
-			// points) vs the bilinear of the cell's 4 corners.
-			static const float P[9][2] = {
-				{0.5f,0.0f},{0.0f,0.5f},{1.0f,0.5f},{0.5f,1.0f},{0.5f,0.5f},
-				{0.25f,0.25f},{0.75f,0.25f},{0.25f,0.75f},{0.75f,0.75f} };
-			float fracAt[4] = {1,1,1,1};
+			// HONEST cost/benefit: at each candidate level, a cell is "bad" when
+			// its bilinear-of-4-corners deviates from the true height by more than
+			// kRefineEps ANYWHERE in the cell's texel footprint. We scan that
+			// footprint on a strided grid (≥ every ~2 texels, capped at 12×12/cell)
+			// instead of a fixed 9-point stencil — the stencil aliased on coarse
+			// cells (probes fell on similar-height block interiors, mortar missed),
+			// which is exactly why coarse cells used to read "matched" while
+			// carrying no relief. Climb 0..Lcap; first level that passes wins,
+			// else settle at Lcap (block resolution — the residual POM carries the
+			// sub-cell sharpness by construction).
+			float fracAt[kMaxLevel + 1];
+			for (int L = 0; L <= kMaxLevel; ++L) fracAt[L] = 1.0f;
 			int converged = -1;
-			for (int L=0; L<=kMaxLevel; ++L) {
+			for (int L=0; L<=Lcap; ++L) {
 				const int n = 1<<L;
+				const float cellTexU = footTexU/float(n), cellTexV = footTexV/float(n);
+				// probe samples per axis: ~one per 2 texels, in [2,12].
+				int su = int(cellTexU*0.5f + 0.999f); if (su<2) su=2; if (su>12) su=12;
+				int sv = int(cellTexV*0.5f + 0.999f); if (sv<2) sv=2; if (sv>12) sv=12;
 				int bad = 0;
 				for (int j=0;j<n;++j) for (int i=0;i<n;++i) {
 					const float cs0=float(i)/n, cs1=float(i+1)/n;
@@ -1663,12 +1773,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					uvAt(cs0,ct1,u,v); const float c01=SampleHeight8Bilinear(hm,useMip,u,v);
 					uvAt(cs1,ct1,u,v); const float c11=SampleHeight8Bilinear(hm,useMip,u,v);
 					float err = 0.0f;
-					for (auto &p : P) {
-						const float s=cs0+(cs1-cs0)*p[0], t=ct0+(ct1-ct0)*p[1];
+					for (int pj=0; pj<sv; ++pj) for (int pi=0; pi<su; ++pi) {
+						const float ps=(su>1)?float(pi)/float(su-1):0.5f;
+						const float pt=(sv>1)?float(pj)/float(sv-1):0.5f;
+						const float s=cs0+(cs1-cs0)*ps, t=ct0+(ct1-ct0)*pt;
 						uvAt(s,t,u,v);
 						const float h=SampleHeight8Bilinear(hm,useMip,u,v);
-						const float bil=(c00*(1-p[0])+c10*p[0])*(1-p[1])
-						               +(c01*(1-p[0])+c11*p[0])*p[1];
+						const float bil=(c00*(1-ps)+c10*ps)*(1-pt)
+						               +(c01*(1-ps)+c11*ps)*pt;
 						err=std::max(err,std::fabs(h-bil));
 					}
 					if (err > kRefineEps) ++bad;
@@ -1676,17 +1788,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				fracAt[L] = float(bad)/float(n*n);
 				if (fracAt[L] <= kRefineFrac) { converged = L; break; }
 			}
-			// Converged → that level. Never-converging = the map is uniformly
-			// dense under this patch (block pitch ≈/below the L3 cell size), a
-			// BUDGET question, not a convergence one: cap at L2 — the density
-			// B2 measured and shipped; the B4 POM residual carries what the
-			// geometry leaves by construction. Spend L3 only where it NEARLY
-			// completes the refinement (≤35% cells still bad) — there the last
-			// level buys real structure instead of uniformly-dense noise.
-			int chosen;
-			if (converged >= 0)                 chosen = converged;
-			else if (fracAt[3] <= 0.35f)        chosen = 3;
-			else                                chosen = 2;
+			const int chosen = (converged >= 0) ? converged : Lcap;
 			metricVals.push_back(fracAt[chosen]);
 			return chosen;
 		};
@@ -1704,7 +1806,7 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		};
 
 		int builtQuads = 0, builtLones = 0, fanCells = 0, flatCells = 0;
-		int lvlHist[4] = {0,0,0,0};
+		int lvlHist[kMaxLevel + 1] = {0};
 
 		// Per-quad (consume both faces) then per remaining lone triangle, emit a
 		// symmetric subdivision into `faces`. Non-target faces copied verbatim by
@@ -1970,19 +2072,20 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		}
 
 		// ── viz record (--displace_viz=2 HEIGHT-ERROR field): per emitted target
-		// triangle, the SIGNED error truth − carried at the centroid + 3 edge
-		// midpoints (max-abs, signed), where truth = the FINE-mip (mip1) relief
-		// amp*(h − mipMean) and carried = the barycentric interp of the vertices'
-		// applied along-normal displacement. Exposes BOTH the bake-mip blur
-		// (vertices sampled at useMip vs the mip1 truth) and the intra-cell error
-		// (a linear triangle can't follow the map). Zero cost otherwise. ──
+		// triangle, the SIGNED error (truth − carried) that has the largest
+		// magnitude ANYWHERE in the triangle's texel footprint at the BAKE mip.
+		// truth = amp*(h − mipMean); carried = the barycentric interp of the
+		// triangle's vertices' applied along-normal offset (what the geometry
+		// actually provides). The old 4-point (centroid + edge-midpoint) probe
+		// ALIASED exactly like the old refinement stencil — on a coarse cell the
+		// four points fell on similar-height block interiors, missing the mortar,
+		// so the cell read "matched" (green) while carrying no relief. Scanning
+		// the whole footprint (strided ~every 2 texels) makes the tint honest.
+		// The value stored is PRE-NORMALIZED to a signed fraction where ±1 = the
+		// map's full peak-to-valley relief missing (an ABSOLUTE, self-calibrating
+		// scale — the old overlay normalized by the single worst edge cell, which
+		// washed everything green). Zero cost unless the mode is on. ──
 		if (fds::FeatureFlags::displace_viz() == 2) {
-			int fineMip = 1;
-			if (fineMip >= int(hm->numMipmaps)) fineMip = int(hm->numMipmaps) - 1;
-			while (fineMip > 0 &&
-			       ((std::max(1, int(hm->SizeX) >> fineMip) < (1 << hm->blockSizeX)) ||
-			        (std::max(1, int(hm->SizeY) >> fineMip) < (1 << hm->blockSizeY))))
-				--fineMip;
 			std::vector<float> carriedV(nV, 0.0f);
 			for (uint32_t i=0;i<nV;++i){
 				const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
@@ -1990,27 +2093,45 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				const float dx=verts[i].Pos.x-basePos[i].x,dy=verts[i].Pos.y-basePos[i].y,dz=verts[i].Pos.z-basePos[i].z;
 				carriedV[i]=(dx*N.x+dy*N.y+dz*N.z)/nl;   // signed along-normal offset
 			}
-			static const float BC[4][3] = {
-				{1.0f/3,1.0f/3,1.0f/3},{0.5f,0.5f,0.0f},{0.0f,0.5f,0.5f},{0.5f,0.0f,0.5f} };
+			const float refRelief = amp * std::max(reliefRange01, 1e-4f);   // world units, ±1 scale
 			for (size_t i=0;i<faces.size();++i){
 				const Face &F=faces[i]; if(!isTargetNew(F)) continue;
 				const uint32_t a=fIdx[i][0],b=fIdx[i][1],c=fIdx[i][2];
 				if (a>=nV||b>=nV||c>=nV) continue;
 				const float cu3[3]={F.U1,F.U2,F.U3}, cv3[3]={F.V1,F.V2,F.V3};
 				const float cd3[3]={carriedV[a],carriedV[b],carriedV[c]};
+				const float umin=std::min(cu3[0],std::min(cu3[1],cu3[2]));
+				const float umax=std::max(cu3[0],std::max(cu3[1],cu3[2]));
+				const float vmin=std::min(cv3[0],std::min(cv3[1],cv3[2]));
+				const float vmax=std::max(cv3[0],std::max(cv3[1],cv3[2]));
+				int nu=int(std::fabs(umax-umin)*float(useMipW)*0.5f)+2; if(nu>16)nu=16;
+				int nv=int(std::fabs(vmax-vmin)*float(useMipH)*0.5f)+2; if(nv>16)nv=16;
+				// affine barycentric from UV (planar tri, affine UV) → carried + inside test
+				const float den=(cv3[1]-cv3[2])*(cu3[0]-cu3[2])+(cu3[2]-cu3[1])*(cv3[0]-cv3[2]);
+				const float invDen = std::fabs(den)>1e-12f ? 1.0f/den : 0.0f;
 				float bestSigned=0.0f, bestAbs=-1.0f;
-				for (auto &w : BC){
-					const float u=cu3[0]*w[0]+cu3[1]*w[1]+cu3[2]*w[2];
-					const float v=cv3[0]*w[0]+cv3[1]*w[1]+cv3[2]*w[2];
-					const float truth=amp*(SampleHeight8Bilinear(hm,fineMip,u,v)-mipMean);
-					const float carried=cd3[0]*w[0]+cd3[1]*w[1]+cd3[2]*w[2];
+				auto probe=[&](float u,float v){
+					const float w0=((cv3[1]-cv3[2])*(u-cu3[2])+(cu3[2]-cu3[1])*(v-cv3[2]))*invDen;
+					const float w1=((cv3[2]-cv3[0])*(u-cu3[2])+(cu3[0]-cu3[2])*(v-cv3[2]))*invDen;
+					const float w2=1.0f-w0-w1;
+					if (w0<-0.02f||w1<-0.02f||w2<-0.02f) return;   // outside triangle
+					const float truth=amp*(SampleHeight8Bilinear(hm,useMip,u,v)-mipMean);
+					const float carried=cd3[0]*w0+cd3[1]*w1+cd3[2]*w2;
 					const float e=truth-carried;
 					if (std::fabs(e)>bestAbs){ bestAbs=std::fabs(e); bestSigned=e; }
+				};
+				for (int pj=0;pj<nv;++pj) for (int pi=0;pi<nu;++pi){
+					const float su=(nu>1)?float(pi)/float(nu-1):0.5f;
+					const float sv=(nv>1)?float(pj)/float(nv-1):0.5f;
+					probe(umin+(umax-umin)*su, vmin+(vmax-vmin)*sv);
 				}
+				// always include the 3 corners + centroid (thin tris the grid may skip)
+				for (int k=0;k<3;++k) probe(cu3[k],cv3[k]);
+				probe((cu3[0]+cu3[1]+cu3[2])/3.0f,(cv3[0]+cv3[1]+cv3[2])/3.0f);
 				const Vector ctr={ (verts[a].Pos.x+verts[b].Pos.x+verts[c].Pos.x)/3.0f,
 				                   (verts[a].Pos.y+verts[b].Pos.y+verts[c].Pos.y)/3.0f,
 				                   (verts[a].Pos.z+verts[b].Pos.z+verts[c].Pos.z)/3.0f };
-				fds::DisplaceViz_RecordError(targetMat, ctr, bestSigned);
+				fds::DisplaceViz_RecordError(targetMat, ctr, bestSigned / refRelief);
 			}
 		}
 
@@ -2049,11 +2170,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		}
 		std::fprintf(stderr,
 			"[STONE] '%s' %s L%s amp=%.3f mip=%d: quads=%d lones=%d cells(fan/flat)=%d/%d "
-			"Lhist=%d/%d/%d/%d -> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins\n",
+			"Lhist=%d/%d/%d/%d/%d/%d Lcap=%d/%d/%d/%d/%d/%d "
+			"-> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins\n",
 			matName, uniformLevel>0?"uniform":"adaptive",
-			uniformLevel>0?std::to_string(uniformLevel).c_str():"0..3",
+			uniformLevel>0?std::to_string(uniformLevel).c_str():"0..5",
 			(double)amp, useMip, builtQuads, builtLones, fanCells, flatCells,
-			lvlHist[0],lvlHist[1],lvlHist[2],lvlHist[3],
+			lvlHist[0],lvlHist[1],lvlHist[2],lvlHist[3],lvlHist[4],lvlHist[5],
+			lcapHist[0],lcapHist[1],lcapHist[2],lcapHist[3],lcapHist[4],lcapHist[5],
 			int(T->VIndex), int(T->FIndex), nMoved, (double)dMin, (double)dMax, nTJ);
 	}
 }

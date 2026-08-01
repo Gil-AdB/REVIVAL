@@ -242,7 +242,7 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 // SubdivideMaterialFaces (after Preprocess + GreetsRetileFloor, before
 // MakeFacesIndependentByAngle + the chunk split).
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
-                         float amp, int mip, float adapt);
+                         float amp, int mip, float adapt, float cellsPerBlock);
 
 // Companion post-pass, called AFTER MakeFacesIndependentByAngle: re-SMOOTH the
 // displaced stone surface's vertex normals. That pass facets the displaced
