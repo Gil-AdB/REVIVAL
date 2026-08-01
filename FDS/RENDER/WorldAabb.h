@@ -109,6 +109,17 @@ void WorldAabb_DrawOverlay(Scene* sc);
 // is set (the bake gates the call), so the flag-off path allocates nothing.
 void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs);
 
+// --displace_viz=2 (HEIGHT-ERROR field): called by the bake once per emitted
+// displaced triangle with its FINAL centroid (model space, exact bits — same
+// keying rationale as DisplaceViz_Record) and the SIGNED height error there =
+// truth − carried (world units): truth = the height map's relief at a FINE mip
+// (mip 1) probed inside the triangle, carried = the barycentric interp of the
+// three vertices' applied displacement. Positive = geometry UNDER-carries the
+// map (missing relief → warm), negative = OVER-carries (→ cold). Only records
+// when FeatureFlags::displace_viz()==2 (the bake gates the call), so mode 0/1
+// allocate nothing for it.
+void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, float signedErr);
+
 // Draw the recorded displaced materials' triangles as a wireframe over VPage
 // (post-tonemap), projected through the main camera, edge colour = per-vertex
 // displacement magnitude (cool blue = 0 / pinned borders → warm red = the

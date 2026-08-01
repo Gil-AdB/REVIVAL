@@ -383,6 +383,10 @@ struct DispPosHash {
 std::unordered_map<DispPosKey, float, DispPosHash> g_dispMag;   // pos bits -> |offset|
 std::unordered_set<const Material*>                g_dispMats;  // displaced materials
 float g_dispMax = 0.0f;                                          // for normalization
+// --displace_viz=2: per-displaced-triangle SIGNED height error (truth − carried,
+// world units), keyed by the triangle's final centroid position bits.
+std::unordered_map<DispPosKey, float, DispPosHash> g_dispErr;
+float g_dispErrMax = 0.0f;                                       // max |err| for normalization
 
 inline uint32_t f2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 inline DispPosKey posKey(const Vector& p) { return { f2bits(p.x), f2bits(p.y), f2bits(p.z) }; }
@@ -397,6 +401,69 @@ inline uint32_t rampColor(float t) {
     return (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
 }
 
+// Diverging error ramp for --displace_viz=2, signed error e in [-1,1]:
+// GREEN at 0 (geometry matches the map) → RED at +1 (UNDER-carries, missing
+// relief) → BLUE at -1 (OVER-carries). Returns 0x00RRGGBB.
+inline uint32_t divergeColor(float e) {
+    if (e < -1.0f) e = -1.0f; else if (e > 1.0f) e = 1.0f;
+    const float m = std::fabs(e);
+    int r, g, b;
+    if (e >= 0.0f) { r = int(255.0f*m); g = int(255.0f*(1.0f-m)); b = 0; }          // green→red
+    else           { b = int(255.0f*m); g = int(255.0f*(1.0f-m)); r = 0; }          // green→blue
+    return (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+}
+
+// Depth-tested, alpha-blended flat triangle fill for --displace_viz=2. Screen
+// verts + per-vertex view-space z; each covered pixel interpolates z (screen-
+// linear barycentric — matches drawLineZ), rejects where the frame's opaque Z
+// (ZPage16, enc 0xFF80 − g_zscale*z; the fill z pulled 1% nearer so a triangle
+// ON its own surface wins) is nearer, then blends `col` at `alpha` over VPage.
+// Falls back to no depth test when ZPage16 isn't live.
+void fillTriZ(const int px[3], const int py[3], const float pz[3],
+              uint32_t col, float alpha) {
+    dword* out = reinterpret_cast<dword*>(VPage);
+    const word* zb = ZPage16;
+    const float zs = float(g_zscale);
+    int xmin = std::min(px[0], std::min(px[1], px[2]));
+    int xmax = std::max(px[0], std::max(px[1], px[2]));
+    int ymin = std::min(py[0], std::min(py[1], py[2]));
+    int ymax = std::max(py[0], std::max(py[1], py[2]));
+    if (xmin < 0) xmin = 0; if (ymin < 0) ymin = 0;
+    if (xmax >= XRes) xmax = XRes - 1; if (ymax >= YRes) ymax = YRes - 1;
+    if (xmin > xmax || ymin > ymax) return;
+    const float ax = float(px[0]), ay = float(py[0]);
+    const float bx = float(px[1]), by = float(py[1]);
+    const float cx = float(px[2]), cy = float(py[2]);
+    const float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (std::fabs(area) < 1e-3f) return;
+    const float invArea = 1.0f / area;
+    const int cr = int((col >> 16) & 0xFF), cg = int((col >> 8) & 0xFF), cb = int(col & 0xFF);
+    for (int y = ymin; y <= ymax; ++y) {
+        const float fy = float(y) + 0.5f;
+        for (int x = xmin; x <= xmax; ++x) {
+            const float fx = float(x) + 0.5f;
+            const float w0 = ((bx - fx) * (cy - fy) - (cx - fx) * (by - fy)) * invArea;
+            const float w1 = ((cx - fx) * (ay - fy) - (ax - fx) * (cy - fy)) * invArea;
+            const float w2 = 1.0f - w0 - w1;
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;   // outside
+            const size_t idx = size_t(y) * XRes + x;
+            if (zb) {
+                const float z = (w0 * pz[0] + w1 * pz[1] + w2 * pz[2]) * 0.99f;
+                int zEnc = 0xFF80 - int(zs * z);
+                if (zEnc < 0) zEnc = 0; else if (zEnc > 0xFFFF) zEnc = 0xFFFF;
+                const word surf = zb[idx];
+                if (surf != 0 && word(zEnc) < surf) continue;    // occluded
+            }
+            const dword d = out[idx];
+            const int dr = int((d >> 16) & 0xFF), dg = int((d >> 8) & 0xFF), db = int(d & 0xFF);
+            const int rr = int(cr * alpha + dr * (1.0f - alpha));
+            const int rg = int(cg * alpha + dg * (1.0f - alpha));
+            const int rb = int(cb * alpha + db * (1.0f - alpha));
+            out[idx] = 0xFF000000u | (uint32_t(rr) << 16) | (uint32_t(rg) << 8) | uint32_t(rb);
+        }
+    }
+}
+
 }  // namespace
 
 void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs) {
@@ -406,6 +473,14 @@ void DisplaceViz_Record(const Material* M, const Vector& localPos, float dispAbs
     auto it = g_dispMag.find(k);
     if (it == g_dispMag.end() || dispAbs > it->second) g_dispMag[k] = dispAbs;
     if (dispAbs > g_dispMax) g_dispMax = dispAbs;
+}
+
+void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, float signedErr) {
+    if (FeatureFlags::displace_viz() != 2) return;   // mode 0/1: record nothing
+    if (M) g_dispMats.insert(M);
+    g_dispErr[posKey(centroidLocal)] = signedErr;
+    const float a = std::fabs(signedErr);
+    if (a > g_dispErrMax) g_dispErrMax = a;
 }
 
 void DisplaceViz_DrawOverlay(Scene* sc) {
@@ -421,10 +496,19 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
         }
         return;
     }
+    const int     mode   = FeatureFlags::displace_viz();   // 1 = magnitude, 2 = error
     const Matrix& VM = View->Mat;
     const Vector  P  = View->ISource;
     const float   nearZ  = sc->NZP > 0.01f ? sc->NZP : 0.01f;
-    const float   invMax = g_dispMax > 1e-9f ? (1.0f / g_dispMax) : 0.0f;
+    const float   invMax = g_dispMax    > 1e-9f ? (1.0f / g_dispMax)    : 0.0f;
+    const float   invErr = g_dispErrMax > 1e-9f ? (1.0f / g_dispErrMax) : 0.0f;
+    if (mode == 2) {
+        static bool once = false;
+        if (!once) { once = true;
+            std::fprintf(stderr, "[DISPLACE-VIZ] mode 2 (height error): max|truth-carried| "
+                "= %.4f world units; RED=under-carries (missing relief), BLUE=over, "
+                "GREEN=matched.\n", (double)g_dispErrMax); }
+    }
 
     for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
         if (Obj->Type != Obj_TriMesh) continue;
@@ -468,11 +552,27 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
                 mag[k] = (it != g_dispMag.end()) ? it->second * invMax : 0.0f;
             }
             static const int e3[3][2] = { {0,1}, {1,2}, {2,0} };
-            for (auto& e : e3)
-                if (ok[e[0]] && ok[e[1]])
-                    drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
-                              sx[e[1]], sy[e[1]], vzs[e[1]],
-                              rampColor(0.5f * (mag[e[0]] + mag[e[1]])));
+            if (mode == 2) {
+                // HEIGHT-ERROR field: fill the triangle tinted by its centroid's
+                // signed error (recorded at bake), then trace dim edges so the
+                // cell grid stays legible over the fill.
+                const Vector clocal = { (corner[0]->Pos.x + corner[1]->Pos.x + corner[2]->Pos.x) / 3.0f,
+                                        (corner[0]->Pos.y + corner[1]->Pos.y + corner[2]->Pos.y) / 3.0f,
+                                        (corner[0]->Pos.z + corner[1]->Pos.z + corner[2]->Pos.z) / 3.0f };
+                auto it = g_dispErr.find(posKey(clocal));
+                if (it != g_dispErr.end() && ok[0] && ok[1] && ok[2])
+                    fillTriZ(sx, sy, vzs, divergeColor(it->second * invErr), 0.55f);
+                for (auto& e : e3)
+                    if (ok[e[0]] && ok[e[1]])
+                        drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
+                                  sx[e[1]], sy[e[1]], vzs[e[1]], 0x00202020u);
+            } else {
+                for (auto& e : e3)
+                    if (ok[e[0]] && ok[e[1]])
+                        drawLineZ(sx[e[0]], sy[e[0]], vzs[e[0]],
+                                  sx[e[1]], sy[e[1]], vzs[e[1]],
+                                  rampColor(0.5f * (mag[e[0]] + mag[e[1]])));
+            }
         }
     }
 }

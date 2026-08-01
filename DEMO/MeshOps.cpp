@@ -1969,6 +1969,51 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				fds::DisplaceViz_Record(targetMat, verts[i].Pos, std::sqrt(dx*dx+dy*dy+dz*dz)); }
 		}
 
+		// ── viz record (--displace_viz=2 HEIGHT-ERROR field): per emitted target
+		// triangle, the SIGNED error truth − carried at the centroid + 3 edge
+		// midpoints (max-abs, signed), where truth = the FINE-mip (mip1) relief
+		// amp*(h − mipMean) and carried = the barycentric interp of the vertices'
+		// applied along-normal displacement. Exposes BOTH the bake-mip blur
+		// (vertices sampled at useMip vs the mip1 truth) and the intra-cell error
+		// (a linear triangle can't follow the map). Zero cost otherwise. ──
+		if (fds::FeatureFlags::displace_viz() == 2) {
+			int fineMip = 1;
+			if (fineMip >= int(hm->numMipmaps)) fineMip = int(hm->numMipmaps) - 1;
+			while (fineMip > 0 &&
+			       ((std::max(1, int(hm->SizeX) >> fineMip) < (1 << hm->blockSizeX)) ||
+			        (std::max(1, int(hm->SizeY) >> fineMip) < (1 << hm->blockSizeY))))
+				--fineMip;
+			std::vector<float> carriedV(nV, 0.0f);
+			for (uint32_t i=0;i<nV;++i){
+				const Vector &N=verts[i].N; const float nl=std::sqrt(N.x*N.x+N.y*N.y+N.z*N.z);
+				if (nl<1e-6f) continue;
+				const float dx=verts[i].Pos.x-basePos[i].x,dy=verts[i].Pos.y-basePos[i].y,dz=verts[i].Pos.z-basePos[i].z;
+				carriedV[i]=(dx*N.x+dy*N.y+dz*N.z)/nl;   // signed along-normal offset
+			}
+			static const float BC[4][3] = {
+				{1.0f/3,1.0f/3,1.0f/3},{0.5f,0.5f,0.0f},{0.0f,0.5f,0.5f},{0.5f,0.0f,0.5f} };
+			for (size_t i=0;i<faces.size();++i){
+				const Face &F=faces[i]; if(!isTargetNew(F)) continue;
+				const uint32_t a=fIdx[i][0],b=fIdx[i][1],c=fIdx[i][2];
+				if (a>=nV||b>=nV||c>=nV) continue;
+				const float cu3[3]={F.U1,F.U2,F.U3}, cv3[3]={F.V1,F.V2,F.V3};
+				const float cd3[3]={carriedV[a],carriedV[b],carriedV[c]};
+				float bestSigned=0.0f, bestAbs=-1.0f;
+				for (auto &w : BC){
+					const float u=cu3[0]*w[0]+cu3[1]*w[1]+cu3[2]*w[2];
+					const float v=cv3[0]*w[0]+cv3[1]*w[1]+cv3[2]*w[2];
+					const float truth=amp*(SampleHeight8Bilinear(hm,fineMip,u,v)-mipMean);
+					const float carried=cd3[0]*w[0]+cd3[1]*w[1]+cd3[2]*w[2];
+					const float e=truth-carried;
+					if (std::fabs(e)>bestAbs){ bestAbs=std::fabs(e); bestSigned=e; }
+				}
+				const Vector ctr={ (verts[a].Pos.x+verts[b].Pos.x+verts[c].Pos.x)/3.0f,
+				                   (verts[a].Pos.y+verts[b].Pos.y+verts[c].Pos.y)/3.0f,
+				                   (verts[a].Pos.z+verts[b].Pos.z+verts[c].Pos.z)/3.0f };
+				fds::DisplaceViz_RecordError(targetMat, ctr, bestSigned);
+			}
+		}
+
 		// Commit new arrays.
 		Vertex *nv = new Vertex[verts.size()];
 		std::memcpy(nv, verts.data(), verts.size()*sizeof(Vertex));
