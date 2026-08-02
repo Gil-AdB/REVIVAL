@@ -2026,6 +2026,11 @@ void Initialize_Greets()
 	// cube face → ~5× reduction in mech-omni xform cost.
 	{
 		const int chunkGrid = fds::FeatureFlags::greets_piramid_chunk_grid();
+		// Phase A (docs/VISIBILITY_PLAN.md §7): size-based granularity override.
+		// >0 = near-cubic cells of ~chunkSize world units per side (resolution-
+		// independent, so the cell size doesn't grow 20x under displacement). 0 =
+		// legacy uniform N^3 grid (byte-identical). See greets_chunk_size help.
+		const float chunkSize = fds::FeatureFlags::greets_chunk_size();
 		// Chunking is a deferred-path optimization — splits the Piramid
 		// into smaller TriMeshes so the per-cube-face bsphere cull in
 		// shadow Transform_Objects can reject most cells per face. The
@@ -2039,7 +2044,7 @@ void Initialize_Greets()
 		// reproduces at grid≥4 on greets fwd (2026-05-30). Until
 		// Lighting() is rewritten to use per-face ambient, skip chunking
 		// entirely in forward mode.
-		if (chunkGrid > 0 && fds::FeatureFlags::deferred()) {
+		if ((chunkGrid > 0 || chunkSize > 0.0f) && fds::FeatureFlags::deferred()) {
 			// Find Piramid.lwo
 			Object *piramidObj = nullptr;
 			TriMesh *piramid = nullptr;
@@ -2071,14 +2076,25 @@ void Initialize_Greets()
 				const float spanX = std::max(0.001f, xmax - xmin);
 				const float spanY = std::max(0.001f, ymax - ymin);
 				const float spanZ = std::max(0.001f, zmax - zmin);
+				// Per-axis cell counts. chunkSize==0 -> gx=gy=gz=chunkGrid, which
+				// makes cellOf + the index formula BYTE-IDENTICAL to the legacy
+				// uniform-N^3 path (same int() truncation, same clamp, same
+				// (iz*N+iy)*N+ix). chunkSize>0 -> near-cubic cells sized in world
+				// units, independent of the mesh's face count (Phase A).
+				int gx = chunkGrid, gy = chunkGrid, gz = chunkGrid;
+				if (chunkSize > 0.0f) {
+					gx = std::max(1, int(std::ceil(spanX / chunkSize)));
+					gy = std::max(1, int(std::ceil(spanY / chunkSize)));
+					gz = std::max(1, int(std::ceil(spanZ / chunkSize)));
+				}
 				auto cellOf = [&](float fx, float fy, float fz) -> int64_t {
-					int ix = std::clamp(int((fx - xmin) / spanX * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					int iy = std::clamp(int((fy - ymin) / spanY * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					int iz = std::clamp(int((fz - zmin) / spanZ * float(chunkGrid)),
-					                    0, chunkGrid - 1);
-					return (int64_t(iz) * chunkGrid + iy) * chunkGrid + ix;
+					int ix = std::clamp(int((fx - xmin) / spanX * float(gx)),
+					                    0, gx - 1);
+					int iy = std::clamp(int((fy - ymin) / spanY * float(gy)),
+					                    0, gy - 1);
+					int iz = std::clamp(int((fz - zmin) / spanZ * float(gz)),
+					                    0, gz - 1);
+					return (int64_t(iz) * gy + iy) * gx + ix;
 				};
 				// Bucket faces by cell (face centroid).
 				std::map<int64_t, std::vector<DWord>> cellFaces;
@@ -2190,11 +2206,28 @@ void Initialize_Greets()
 					// (already baked in). Safe because chunk is
 					// Tri_Possessed (RotMat / IPos won't change per frame).
 					chunk->worldVerts = new Vector[chunkVerts];
+					float wmnx=FLT_MAX, wmny=FLT_MAX, wmnz=FLT_MAX;
+					float wmxx=-FLT_MAX, wmxy=-FLT_MAX, wmxz=-FLT_MAX;
 					for (DWord i = 0; i < chunkVerts; ++i) {
 						MatrixXVector(chunk->RotMat, &chunk->Verts[i].Pos,
 						              &chunk->worldVerts[i]);
 						Vector_SelfAdd(&chunk->worldVerts[i], &chunk->IPos);
+						const Vector &w = chunk->worldVerts[i];
+						if (w.x<wmnx) wmnx=w.x; if (w.x>wmxx) wmxx=w.x;
+						if (w.y<wmny) wmny=w.y; if (w.y>wmxy) wmxy=w.y;
+						if (w.z<wmnz) wmnz=w.z; if (w.z>wmxz) wmxz=w.z;
 					}
+					// World + local AABB for the Phase-B chunk-occlusion cull
+					// (docs/VISIBILITY_PLAN.md §7). Derived from worldVerts (the
+					// exact transform the shipping cube-face cull uses), and marked
+					// valid so WorldAabb_UpdateScene leaves these static boxes alone.
+					// Inert unless --chunk_occlusion reads them.
+					chunk->WorldAabbMin = { wmnx, wmny, wmnz };
+					chunk->WorldAabbMax = { wmxx, wmxy, wmxz };
+					chunk->WorldAabbValid = 1;
+					chunk->LocalAabbMin = { cxmin, cymin, czmin };
+					chunk->LocalAabbMax = { cxmax, cymax, czmax };
+					chunk->LocalAabbValid = 1;
 					chunk->Flags = piramid->Flags;
 					// Tri_Possessed: skip TriMeshHead loop in Animate_Objects.
 					// Without it, Spline_Calc_3D on the chunk's empty
@@ -2256,13 +2289,22 @@ void Initialize_Greets()
 				// reader.
 				const DWord origVerts = piramid->VIndex;
 				piramid->FIndex = 0;
-				std::fprintf(stderr,
-				    "[PIRAMID-CHUNKS] grid=%d³ → %d chunks  "
-				    "(orig %u faces / %u verts → %u total chunk verts; "
-				    "%u faces with null vertex skipped)\n",
-				    chunkGrid, chunksCreated,
-				    unsigned(origFaces), unsigned(origVerts),
-				    unsigned(totalChunkVerts), unsigned(degen));
+				if (chunkSize > 0.0f)
+					std::fprintf(stderr,
+					    "[PIRAMID-CHUNKS] size=%.2f (grid=%dx%dx%d) → %d chunks  "
+					    "(orig %u faces / %u verts → %u total chunk verts; "
+					    "%u faces with null vertex skipped)\n",
+					    chunkSize, gx, gy, gz, chunksCreated,
+					    unsigned(origFaces), unsigned(origVerts),
+					    unsigned(totalChunkVerts), unsigned(degen));
+				else
+					std::fprintf(stderr,
+					    "[PIRAMID-CHUNKS] grid=%d³ → %d chunks  "
+					    "(orig %u faces / %u verts → %u total chunk verts; "
+					    "%u faces with null vertex skipped)\n",
+					    chunkGrid, chunksCreated,
+					    unsigned(origFaces), unsigned(origVerts),
+					    unsigned(totalChunkVerts), unsigned(degen));
 				if (g_stoneProxyMesh)
 					std::fprintf(stderr, "[STONE-PROXY] shadow-skip census: %d pure "
 					    "displaced chunks (%d faces) NoShadowCast; %d mixed chunks "
