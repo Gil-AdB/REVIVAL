@@ -1466,6 +1466,28 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 namespace {
 inline uint32_t meshF2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 inline float meshLerpf(float a, float b, float t) { return a + (b - a) * t; }
+
+// Edge-aligned tessellation (the flat-top fix): the mortar-groove grid of a
+// stone height map, detected in MAP space at the bake mip. A groove RUN is a
+// below-threshold interval of a mean-height profile (mortar is recessed, so
+// the bimodal plateau/mortar field splits at the profile's min/max midpoint).
+// Horizontal runs are GLOBAL (one per-row profile); vertical runs are PER BAND
+// — the block row between two horizontal grooves — so running bond, where the
+// vertical mortar phase alternates per block row, lands naturally as per-band
+// positions. Runs are straight lines through the band: a few texels of organic
+// wander is absorbed by the transition-band shoulder pads, not modeled.
+struct StoneGRun { float lo, hi; };                  // texels at the bake mip, lo<hi
+struct StoneGrooveGrid {
+	bool valid = false;
+	std::vector<StoneGRun> h;                        // horizontal grooves (y runs)
+	std::vector<std::pair<float,float>> bandY;       // band k y-range; second may exceed extent (wrap)
+	std::vector<std::vector<StoneGRun>> vPerBand;    // per band: vertical grooves (x runs)
+};
+// One v-period of the edge-aligned ROW layout (built from the h-grooves +
+// shoulder pads): type 0 = plateau (flat block row), 1 = step (transition band
+// carrying the wall), 2 = floor (flat mortar floor). bandA/bandB are the
+// adjacent block-row bands whose vertical grooves the row's columns follow.
+struct StoneRowT { float y0, y1; int type; int bandA, bandB; };
 }  // namespace
 
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
@@ -1578,6 +1600,152 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			useMip, havePitch ? double(useMipW) / std::max(1.0f, pitchXtex) : 0.0,
 			havePitch ? double(useMipH) / std::max(1.0f, pitchYtex) : 0.0,
 			(double)targetTexX, (double)targetTexY);
+
+		// ── mortar-groove grid detection (edge-aligned tessellation, the
+		// flat-top fix; --greets_displace_edge). Cell borders will SNAP onto
+		// these groove lines: block plateaus become single FLAT cells, the step
+		// down/up rides a narrow transition band at each groove — instead of
+		// the centre-fan dome the uniform 2^L grid made of every block
+		// (--scene-displacetest: FLAT-TOP 0% at cpb=1). Detection is skipped
+		// (grid.valid=false → the adaptive fan path below is used unchanged)
+		// when the pitch estimator failed (structure-free maps: the smooth
+		// control must stay coarse), the profile isn't bimodal, or the run
+		// layout fails sanity — and the uniform baseline bypasses it. ──
+		const bool edgeMode = fds::FeatureFlags::greets_displace_edge() && uniformLevel <= 0;
+		StoneGrooveGrid grid;
+		const float kPadTex = 1.25f;       // shoulder pad, texels at the bake mip
+		const float kMinFloorTex = 1.5f;   // min flat floor width to earn its own row
+		std::vector<StoneRowT> rowTpl;     // one v-period, ascending, contiguous
+		std::vector<std::vector<float>> colTpl;   // per band: column LINE x-positions, one period
+		if (edgeMode && havePitch) {
+			const byte *gdat = hm->Mipmap[useMip];
+			const int gbx = hm->blockSizeX, gby = hm->blockSizeY;
+			auto GTX = [&](int x, int y) -> float {
+				return float(gdat[SwizzledOffset(x, y, gbx, gby, useMipH)]) * (1.0f/255.0f); };
+			// below-threshold runs of a mean-height profile, wrap-aware
+			auto profileRuns = [&](const std::vector<float> &prof, float pitchTex,
+			                       std::vector<StoneGRun> &runs) -> bool {
+				const int n = int(prof.size());
+				runs.clear();
+				if (pitchTex < 4.0f || n < 8) return false;
+				float lo = 1e30f, hi = -1e30f;
+				for (float v : prof) { lo = std::min(lo, v); hi = std::max(hi, v); }
+				if (hi - lo < 0.06f) return false;              // no groove contrast
+				const float thr = lo + 0.5f * (hi - lo);
+				std::vector<char> low(size_t(n), 0);
+				int nLow = 0;
+				for (int i = 0; i < n; ++i) { low[i] = prof[i] < thr; nLow += low[i]; }
+				if (nLow == 0 || nLow > n / 2) return false;    // mortar must be the minority
+				int s0 = 0;
+				for (int i = 0; i < n; ++i) if (!low[i]) { s0 = i; break; }
+				int i = 0;
+				while (i < n) {
+					if (!low[(s0 + i) % n]) { ++i; continue; }
+					int j = i;
+					while (j < n && low[(s0 + j) % n]) ++j;
+					float rlo = float(s0 + i), rhi = float(s0 + j);
+					if (rhi - rlo >= 1.0f) {
+						if (rhi - rlo > 0.6f * pitchTex) return false;   // too wide: not mortar
+						while (rlo >= float(n)) { rlo -= float(n); rhi -= float(n); }
+						runs.push_back({rlo, rhi});
+					}
+					i = j;
+				}
+				if (runs.empty()) return false;
+				if (float(runs.size()) > float(n) / pitchTex * 2.0f + 2.0f) return false;
+				std::sort(runs.begin(), runs.end(),
+				          [](const StoneGRun &a, const StoneGRun &b){ return a.lo < b.lo; });
+				return true;
+			};
+			std::vector<float> rowProf(size_t(useMipH), 0.0f);
+			for (int y = 0; y < useMipH; ++y) {
+				float s = 0.0f;
+				for (int x = 0; x < useMipW; ++x) s += GTX(x, y);
+				rowProf[y] = s / float(useMipW);
+			}
+			const bool hOK = profileRuns(rowProf, pitchYtex, grid.h);
+			if (!hOK) grid.h.clear();
+			// bands between consecutive horizontal grooves (wrapping); with no
+			// horizontal grooves (vertical planks) one band spans the extent.
+			if (grid.h.empty()) grid.bandY.push_back({0.0f, float(useMipH)});
+			else for (size_t g = 0; g < grid.h.size(); ++g) {
+				const float y0 = grid.h[g].hi;
+				float y1 = grid.h[(g + 1) % grid.h.size()].lo;
+				if (y1 <= y0) y1 += float(useMipH);
+				grid.bandY.push_back({y0, y1});
+			}
+			grid.vPerBand.resize(grid.bandY.size());
+			bool anyV = false;
+			for (size_t b = 0; b < grid.bandY.size(); ++b) {
+				std::vector<float> colProf(size_t(useMipW), 0.0f);
+				const int yy0 = int(std::ceil(grid.bandY[b].first));
+				const int rows = std::max(1, int(std::floor(grid.bandY[b].second)) - yy0);
+				for (int x = 0; x < useMipW; ++x) {
+					float s = 0.0f;
+					for (int y = yy0; y < yy0 + rows; ++y) s += GTX(x, ((y % useMipH) + useMipH) % useMipH);
+					colProf[x] = s / float(rows);
+				}
+				if (profileRuns(colProf, pitchXtex, grid.vPerBand[b])) anyV = true;
+				else grid.vPerBand[b].clear();
+			}
+			grid.valid = hOK || anyV;
+			// row template (one v-period): step/floor/step per wide groove (a
+			// flat mortar floor between the pads), step/step around the centre
+			// for narrow grooves, plateau rows shoulder-to-shoulder between.
+			if (grid.valid && !grid.h.empty()) {
+				const int nh = int(grid.h.size());
+				for (int g = 0; g < nh; ++g) {
+					const int bAbove = (g + nh - 1) % nh;
+					const int bBelow = g;
+					const float lo = grid.h[g].lo, hi = grid.h[g].hi;
+					const float A = lo - kPadTex, B = lo + kPadTex;
+					const float C = hi - kPadTex, D = hi + kPadTex;
+					if (C - B >= kMinFloorTex) {
+						rowTpl.push_back({A, B, 1, bAbove, bAbove});
+						rowTpl.push_back({B, C, 2, bAbove, bBelow});
+						rowTpl.push_back({C, D, 1, bBelow, bBelow});
+					} else {
+						const float M = 0.5f * (lo + hi);
+						rowTpl.push_back({A, M, 1, bAbove, bAbove});
+						rowTpl.push_back({M, D, 1, bBelow, bBelow});
+					}
+					float nA = grid.h[(g + 1) % nh].lo - kPadTex;
+					if (g + 1 == nh) nA += float(useMipH);
+					rowTpl.push_back({D, nA, 0, bBelow, bBelow});
+				}
+			} else if (grid.valid) {
+				rowTpl.push_back({0.0f, float(useMipH), 0, 0, 0});
+			}
+			// column line template per band (same construction along x)
+			colTpl.resize(grid.vPerBand.size());
+			for (size_t b = 0; b < grid.vPerBand.size() && grid.valid; ++b) {
+				for (const StoneGRun &r : grid.vPerBand[b]) {
+					const float A = r.lo - kPadTex, B = r.lo + kPadTex;
+					const float C = r.hi - kPadTex, D = r.hi + kPadTex;
+					colTpl[b].push_back(A);
+					if (C - B >= kMinFloorTex) { colTpl[b].push_back(B); colTpl[b].push_back(C); }
+					else                         colTpl[b].push_back(0.5f * (r.lo + r.hi));
+					colTpl[b].push_back(D);
+				}
+				std::sort(colTpl[b].begin(), colTpl[b].end());
+				for (size_t i = 1; i < colTpl[b].size(); ++i)
+					if (colTpl[b][i] - colTpl[b][i-1] < 0.25f) { grid.valid = false; break; }
+			}
+			// sanity: rows strictly ascending + contiguous (overlapping shoulder
+			// pads from grooves closer than 2*pad would fold the layout) —
+			// pathological content falls back to the adaptive fan path.
+			for (size_t i = 0; i < rowTpl.size() && grid.valid; ++i) {
+				if (rowTpl[i].y1 - rowTpl[i].y0 < 0.05f) { grid.valid = false; break; }
+				if (i + 1 < rowTpl.size() &&
+				    std::fabs(rowTpl[i+1].y0 - rowTpl[i].y1) > 0.01f) { grid.valid = false; break; }
+			}
+			std::fprintf(stderr,
+				"[STONE] '%s' groove grid %s: %zu h-grooves, %zu bands, v-grooves/band",
+				matName, grid.valid ? "DETECTED" : "rejected", grid.h.size(), grid.bandY.size());
+			for (const auto &vb : grid.vPerBand) std::fprintf(stderr, " %zu", vb.size());
+			std::fprintf(stderr, " (edge-aligned tessellation %s)\n",
+				grid.valid ? "ON" : "off -> fan path");
+		}
 
 		Vertex *const oldV = T->Verts;
 		const uint32_t nOrig = uint32_t(T->VIndex);
@@ -1794,15 +1962,34 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		};
 		auto busyLevel = refineLevel;   // call-site name
 
-		// Ordered side registry for level-boundary crack pinning: cornerEdge
-		// (min,max) → list of (patchLevel, cornerLo, cornerHi). We record the two
-		// SIDE CORNERS + level; the shared verts along it are recovered via the
-		// canonical edgeVert map, so mismatched levels are pinned deterministically.
-		struct SideRec { int level; uint32_t clo, chi; };
+		// Ordered side registry for cross-patch crack pinning, generalized from
+		// the old per-LEVEL form to an arbitrary PARAM LIST per side (the edge-
+		// aligned path places groove-line verts at arbitrary params, not i/2^L).
+		// Params are stored CANONICALLY: measured from the side's min-corner,
+		// interior only (0/1 excluded), sorted ascending, and produced by the
+		// IDENTICAL float expression edgeVert canonicalizes with (`1.0f - t` when
+		// flipped) so a pin lookup hits the exact created vertex key. Two records
+		// with differing lists are healed after displacement: the non-anchor
+		// side's extra verts are snapped onto the anchor's displaced polyline
+		// (anchor = fewer params = the coarser side; deterministic tie-break).
+		struct SideRec { std::vector<float> params; };
 		std::map<std::pair<uint32_t,uint32_t>, std::vector<SideRec>> sideReg;
-		auto regSide = [&](uint32_t ca, uint32_t cb, int level){
+		auto regSideP = [&](uint32_t ca, uint32_t cb, const std::vector<float> &fromCa){
 			if (isBorderEdge(ca,cb)) return;   // authored border: pinned to zero, no transition
-			sideReg[{std::min(ca,cb),std::max(ca,cb)}].push_back({level,ca,cb});
+			SideRec r;
+			r.params.reserve(fromCa.size());
+			for (float t : fromCa)
+				if (t > 1e-6f && t < 1.0f - 1e-6f)
+					r.params.push_back(ca > cb ? 1.0f - t : t);
+			std::sort(r.params.begin(), r.params.end());
+			sideReg[{std::min(ca,cb),std::max(ca,cb)}].push_back(std::move(r));
+		};
+		auto regSide = [&](uint32_t ca, uint32_t cb, int level){
+			std::vector<float> p;
+			const int n = 1 << level;
+			p.reserve(size_t(n));
+			for (int i = 1; i < n; ++i) p.push_back(float(i)/float(n));
+			regSideP(ca, cb, p);
 		};
 
 		int builtQuads = 0, builtLones = 0, fanCells = 0, flatCells = 0;
@@ -1831,6 +2018,228 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			return Vector{ A.x*w0+B.x*w1+C.x*w2+D.x*w3,
 			               A.y*w0+B.y*w1+C.y*w2+D.y*w3,
 			               A.z*w0+B.z*w1+C.z*w2+D.z*w3 };
+		};
+
+		// ── edge-aligned quad emitter (the flat-top fix). Returns false when
+		// this quad can't take the groove-aligned path — non-parallelogram or
+		// rotated/skewed UV chart, degenerate mapping, runaway line count — and
+		// the caller falls back to the adaptive fan grid. Layout: ROWS between
+		// the horizontal groove lines (instanced across the quad's v footprint);
+		// each row's COLUMN breaks come from its band's vertical grooves — step
+		// rows carry their adjacent band's breaks so vertical walls stay sharp
+		// through block corners; floor rows take both bands' union (their cells
+		// all sit at groove depth, so the extra verts stay flat). Each internal
+		// line's vertex set is the UNION of the two adjacent rows' break sets
+		// and rows are triangulated by a two-pointer march between their two
+		// lines: crack-free by construction, no interior T-junctions. Line
+		// params are quantized to a 1/2048 lattice so two quads sharing a side
+		// derive bit-identical edgeVert keys from the same map-space groove line.
+		int edgeQuads = 0, edgePlateauC = 0, edgeStepC = 0, edgeFloorC = 0;
+		auto edgeAlignedQuad = [&](const uint32_t cn[4], const float cu[4],
+		                           const float cv[4], const Face &Ff) -> bool {
+			// parallelogram + axis-alignment (up to u/v swap and sign flips)
+			const float us=cu[1]-cu[0], vs=cv[1]-cv[0];
+			const float ut=cu[3]-cu[0], vt=cv[3]-cv[0];
+			const float scale = std::fabs(us)+std::fabs(vs)+std::fabs(ut)+std::fabs(vt);
+			if (scale < 1e-6f) return false;
+			if (std::fabs(cu[0]+us+ut-cu[2]) + std::fabs(cv[0]+vs+vt-cv[2]) > 0.002f*scale)
+				return false;                            // not a parallelogram in UV
+			const float tol = 0.005f;
+			bool swapAxes;
+			if (std::fabs(vs) <= tol*std::fabs(us) && std::fabs(ut) <= tol*std::fabs(vt))
+				swapAxes = false;                        // s carries u, t carries v
+			else if (std::fabs(us) <= tol*std::fabs(vs) && std::fabs(vt) <= tol*std::fabs(ut))
+				swapAxes = true;                         // s carries v, t carries u
+			else return false;                           // rotated/skewed chart
+			const float duP = swapAxes ? ut : us;        // ∂u/∂(param carrying u)
+			const float dvP = swapAxes ? vs : vt;        // ∂v/∂(param carrying v)
+			if (std::fabs(duP) < 1e-7f || std::fabs(dvP) < 1e-7f) return false;
+			auto qz  = [](float p){ return std::floor(p*2048.0f + 0.5f)*(1.0f/2048.0f); };
+			auto puOf= [&](float u){ return (u - cu[0]) / duP; };
+			auto pvOf= [&](float v){ return (v - cv[0]) / dvP; };
+			auto uOf = [&](float pu){ return cu[0] + duP*pu; };
+			auto vOf = [&](float pv){ return cv[0] + dvP*pv; };
+
+			// rows: instance the per-period row template across the v footprint
+			const float vRLo = std::min(vOf(0.0f), vOf(1.0f));
+			const float vRHi = std::max(vOf(0.0f), vOf(1.0f));
+			struct Row { float pv0, pv1; int type, bandA, bandB; };
+			std::vector<Row> rows;
+			{
+				struct Seg { float v0, v1; int type, bandA, bandB; };
+				std::vector<Seg> segs;
+				const float mhF = float(useMipH);
+				const int k0 = int(std::floor(vRLo)) - 1, k1 = int(std::ceil(vRHi)) + 1;
+				for (int k = k0; k <= k1; ++k)
+					for (const StoneRowT &r : rowTpl) {
+						const float a = float(k) + r.y0/mhF, b = float(k) + r.y1/mhF;
+						if (b <= vRLo + 1e-6f || a >= vRHi - 1e-6f) continue;
+						segs.push_back({std::max(a, vRLo), std::min(b, vRHi),
+						                r.type, r.bandA, r.bandB});
+					}
+				if (segs.empty() || segs.size() > 220) return false;
+				std::sort(segs.begin(), segs.end(),
+				          [](const Seg &x, const Seg &y){ return x.v0 < y.v0; });
+				for (const Seg &sg : segs) {
+					float a = pvOf(sg.v0), b = pvOf(sg.v1);
+					if (a > b) std::swap(a, b);
+					a = std::max(0.0f, qz(a)); b = std::min(1.0f, qz(b));
+					if (b - a < 2e-4f) continue;         // sub-lattice sliver row
+					rows.push_back({a, b, sg.type, sg.bandA, sg.bandB});
+				}
+				if (dvP < 0.0f) std::reverse(rows.begin(), rows.end());
+				if (rows.empty()) return false;
+				rows.front().pv0 = 0.0f; rows.back().pv1 = 1.0f;
+			}
+
+			// per-row pu break lists from the band column templates
+			const float uRLo = std::min(uOf(0.0f), uOf(1.0f));
+			const float uRHi = std::max(uOf(0.0f), uOf(1.0f));
+			auto rowBreaks = [&](const Row &r) -> std::vector<float> {
+				std::vector<float> b;
+				const float mwF = float(useMipW);
+				auto addBand = [&](int band){
+					if (band < 0 || band >= int(colTpl.size())) return;
+					const int k0 = int(std::floor(uRLo)) - 1, k1 = int(std::ceil(uRHi)) + 1;
+					for (int k = k0; k <= k1; ++k)
+						for (float x : colTpl[band]) {
+							const float u = float(k) + x/mwF;
+							if (u <= uRLo + 1e-6f || u >= uRHi - 1e-6f) continue;
+							const float p = qz(puOf(u));
+							if (p > 1e-6f && p < 1.0f - 1e-6f) b.push_back(p);
+						}
+				};
+				addBand(r.bandA);
+				if (r.bandB != r.bandA) addBand(r.bandB);
+				b.push_back(0.0f); b.push_back(1.0f);
+				std::sort(b.begin(), b.end());
+				b.erase(std::unique(b.begin(), b.end(),
+				        [](float x, float y){ return std::fabs(x-y) < 1e-5f; }), b.end());
+				return b;
+			};
+			const size_t nR = rows.size();
+			std::vector<std::vector<float>> rowPu(nR);
+			size_t maxB = 0;
+			for (size_t i = 0; i < nR; ++i) {
+				rowPu[i] = rowBreaks(rows[i]);
+				maxB = std::max(maxB, rowPu[i].size());
+			}
+			if (maxB > 300) return false;                // runaway safety → fallback
+
+			// lines: line i at rows[i].pv0 (plus the final top line at 1);
+			// vertex set = union of the adjacent rows' break sets.
+			std::vector<float> linePv(nR + 1);
+			std::vector<std::vector<float>> linePu(nR + 1);
+			for (size_t i = 0; i < nR; ++i) linePv[i] = rows[i].pv0;
+			linePv[nR] = rows[nR-1].pv1;
+			for (size_t i = 0; i <= nR; ++i) {
+				std::vector<float> m;
+				if (i > 0)  m.insert(m.end(), rowPu[i-1].begin(), rowPu[i-1].end());
+				if (i < nR) m.insert(m.end(), rowPu[i].begin(),  rowPu[i].end());
+				std::sort(m.begin(), m.end());
+				m.erase(std::unique(m.begin(), m.end(),
+				        [](float x, float y){ return std::fabs(x-y) < 1e-5f; }), m.end());
+				linePu[i] = std::move(m);
+			}
+
+			// vertices per line (shared by the rows on both sides)
+			auto stOf = [&](float pu, float pv, float &s, float &t){
+				if (swapAxes) { s = pv; t = pu; } else { s = pu; t = pv; } };
+			auto vidAt = [&](float pu, float pv) -> uint32_t {
+				float s, t; stOf(pu, pv, s, t);
+				const bool sIs0=(s<=1e-6f), sIs1=(s>=1.0f-1e-6f);
+				const bool tIs0=(t<=1e-6f), tIs1=(t>=1.0f-1e-6f);
+				if (sIs0&&tIs0) return cn[0];
+				if (sIs1&&tIs0) return cn[1];
+				if (sIs1&&tIs1) return cn[2];
+				if (sIs0&&tIs1) return cn[3];
+				if (tIs0) return edgeVert(cn[0],cn[1], s);
+				if (tIs1) return edgeVert(cn[3],cn[2], s);
+				if (sIs0) return edgeVert(cn[0],cn[3], t);
+				if (sIs1) return edgeVert(cn[1],cn[2], t);
+				return newInterior(posBil(cn,s,t), nrmBil(cn,s,t));
+			};
+			std::vector<std::vector<uint32_t>> lineVid(nR + 1);
+			for (size_t i = 0; i <= nR; ++i) {
+				lineVid[i].reserve(linePu[i].size());
+				for (float pu : linePu[i]) lineVid[i].push_back(vidAt(pu, linePv[i]));
+			}
+
+			// emit: two-pointer march between each row's bottom and top line
+			auto triST = [&](uint32_t va, float sa, float ta,
+			                 uint32_t vb, float sb, float tb,
+			                 uint32_t vc, float sc, float tc){
+				if ((sb-sa)*(tc-ta) - (tb-ta)*(sc-sa) < 0.0f) {   // keep quad winding
+					std::swap(vb, vc); std::swap(sb, sc); std::swap(tb, tc);
+				}
+				float ua,vaU,ub,vbU,uc,vcU;
+				uvBil(cu,cv,sa,ta,ua,vaU); uvBil(cu,cv,sb,tb,ub,vbU); uvBil(cu,cv,sc,tc,uc,vcU);
+				emit(Ff, va, vb, vc, ua,vaU, ub,vbU, uc,vcU);
+			};
+			for (size_t r = 0; r < nR; ++r) {
+				const std::vector<float> &A = linePu[r], &B = linePu[r+1];
+				const std::vector<uint32_t> &VA = lineVid[r], &VB = lineVid[r+1];
+				const float pva = linePv[r], pvb = linePv[r+1];
+				size_t ia = 0, ib = 0;
+				int cellsHere = 0;
+				while (ia + 1 < A.size() || ib + 1 < B.size()) {
+					const bool cA = ia + 1 < A.size(), cB = ib + 1 < B.size();
+					const float nA = cA ? A[ia+1] : 2.0f, nB = cB ? B[ib+1] : 2.0f;
+					float s0,t0,s1,t1,s2,t2,s3,t3;
+					if (cA && cB && std::fabs(nA - nB) < 1e-5f) {
+						// matched rectangle: the diagonal follows the height field
+						// so a lone off-level corner is isolated on one flat + one
+						// sloped triangle (block corners) instead of two sloped.
+						const float h00 = SampleHeight8Bilinear(hm, useMip, uOf(A[ia]), vOf(pva));
+						const float h10 = SampleHeight8Bilinear(hm, useMip, uOf(nA),    vOf(pva));
+						const float h11 = SampleHeight8Bilinear(hm, useMip, uOf(nB),    vOf(pvb));
+						const float h01 = SampleHeight8Bilinear(hm, useMip, uOf(B[ib]), vOf(pvb));
+						const float hc  = SampleHeight8Bilinear(hm, useMip,
+							uOf(0.5f*(A[ia]+nA)), vOf(0.5f*(pva+pvb)));
+						const bool useAC = std::fabs(0.5f*(h00+h11) - hc)
+						                <= std::fabs(0.5f*(h10+h01) - hc);
+						stOf(A[ia],pva,s0,t0); stOf(nA,pva,s1,t1);
+						stOf(nB,pvb,s2,t2);    stOf(B[ib],pvb,s3,t3);
+						if (useAC) {
+							triST(VA[ia],s0,t0, VA[ia+1],s1,t1, VB[ib+1],s2,t2);
+							triST(VA[ia],s0,t0, VB[ib+1],s2,t2, VB[ib],s3,t3);
+						} else {
+							triST(VA[ia],s0,t0, VA[ia+1],s1,t1, VB[ib],s3,t3);
+							triST(VA[ia+1],s1,t1, VB[ib+1],s2,t2, VB[ib],s3,t3);
+						}
+						++ia; ++ib;
+					} else if (nA < nB) {
+						stOf(A[ia],pva,s0,t0); stOf(nA,pva,s1,t1); stOf(B[ib],pvb,s2,t2);
+						triST(VA[ia],s0,t0, VA[ia+1],s1,t1, VB[ib],s2,t2);
+						++ia;
+					} else {
+						stOf(A[ia],pva,s0,t0); stOf(nB,pvb,s1,t1); stOf(B[ib],pvb,s2,t2);
+						triST(VA[ia],s0,t0, VB[ib+1],s1,t1, VB[ib],s2,t2);
+						++ib;
+					}
+					++cellsHere;
+				}
+				if      (rows[r].type == 0) edgePlateauC += cellsHere;
+				else if (rows[r].type == 1) edgeStepC    += cellsHere;
+				else                        edgeFloorC   += cellsHere;
+			}
+
+			// side registration for the cross-patch pin (params along each side)
+			{
+				std::vector<float> pvL(linePv.begin(), linePv.end());
+				if (!swapAxes) {
+					regSideP(cn[0], cn[1], linePu[0]);
+					regSideP(cn[3], cn[2], linePu[nR]);
+					regSideP(cn[0], cn[3], pvL);
+					regSideP(cn[1], cn[2], pvL);
+				} else {
+					regSideP(cn[0], cn[1], pvL);
+					regSideP(cn[3], cn[2], pvL);
+					regSideP(cn[0], cn[3], linePu[0]);
+					regSideP(cn[1], cn[2], linePu[nR]);
+				}
+			}
+			return true;
 		};
 
 		for (auto &kv : quadPartner) {
@@ -1868,6 +2277,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 					std::swap(cn[1], cn[3]);
 					std::swap(cu[1], cu[3]); std::swap(cv[1], cv[3]);
 				}
+			}
+			// Edge-aligned tessellation first (the flat-top fix): cells snapped
+			// onto the detected groove lines, flat plateaus, narrow step bands.
+			// Falls through to the adaptive fan grid when the quad's UV chart
+			// can't take it (rotated/skewed) or no grid was detected.
+			if (grid.valid && edgeAlignedQuad(cn, cu, cv, Ff)) {
+				++builtQuads; ++edgeQuads;
+				continue;
 			}
 			// UV footprint → level
 			float u0=std::min(std::min(cu[0],cu[1]),std::min(cu[2],cu[3]));
@@ -2026,9 +2443,13 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
 
-		// ── level-boundary crack pinning: on each interior side shared by two
-		// patches of differing level, snap the finer side's extra verts onto the
-		// coarser side's straight segment (generalised border pinning) ──
+		// ── cross-patch crack pinning: on each interior side shared by two
+		// patches whose vertex PARAM LISTS differ (level boundary, or edge-
+		// aligned vs fallback tessellation), snap the non-anchor side's extra
+		// verts onto the anchor side's displaced POLYLINE. Anchor = the record
+		// with fewer params (the coarser side — the straight-segment rule the
+		// old level pinning used, generalized), lexicographic tie-break so the
+		// choice never depends on registration order. ──
 		int nTJ=0;
 		auto sideVid=[&](uint32_t clo,uint32_t chi,float param)->uint32_t{
 			if (param<=0.0f) return clo; if (param>=1.0f) return chi;
@@ -2036,19 +2457,28 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		};
 		for (auto &kv : sideReg){
 			const auto &recs = kv.second; if (recs.size()!=2) continue;
-			int La=recs[0].level, Lb=recs[1].level; if (La==Lb) continue;
-			const SideRec &coarse = (La<Lb)?recs[0]:recs[1];
-			const SideRec &fine   = (La<Lb)?recs[1]:recs[0];
-			const int nc=1<<coarse.level, nf=1<<fine.level;
-			// walk in the canonical (min-corner→max-corner) direction
-			const uint32_t clo=std::min(kv.first.first,kv.first.second);
-			const uint32_t chi=std::max(kv.first.first,kv.first.second);
-			for (int m=1;m<nf;++m){
-				const float p=float(m)/nf; const float pc=p*nc;
-				const float pcr=std::floor(pc+0.5f);
-				if (std::fabs(pc-pcr)<1e-4f) continue;   // coincides with a coarse vert
-				const int kk=int(std::floor(pc));
-				const float c0=float(kk)/nc, c1=float(kk+1)/nc;
+			const std::vector<float> &Pa = recs[0].params, &Pb = recs[1].params;
+			if (Pa == Pb) continue;
+			const bool aAnchor = Pa.size() != Pb.size()
+				? Pa.size() < Pb.size()
+				: std::lexicographical_compare(Pa.begin(),Pa.end(),Pb.begin(),Pb.end());
+			const std::vector<float> &anchor = aAnchor ? Pa : Pb;
+			const std::vector<float> &other  = aAnchor ? Pb : Pa;
+			const uint32_t clo=kv.first.first, chi=kv.first.second;
+			// anchor polyline nodes (params 0..1 inclusive)
+			std::vector<float> nodes;
+			nodes.reserve(anchor.size()+2);
+			nodes.push_back(0.0f);
+			for (float q : anchor) nodes.push_back(q);
+			nodes.push_back(1.0f);
+			for (float p : other){
+				bool onAnchor=false;
+				for (float q : nodes) if (std::fabs(p-q) < 1e-5f) { onAnchor=true; break; }
+				if (onAnchor) continue;
+				int kk=0;
+				while (kk+1 < int(nodes.size())-1 && nodes[kk+1] < p) ++kk;
+				const float c0=nodes[kk], c1=nodes[kk+1];
+				if (c1-c0 < 1e-6f) continue;
 				const float local=(p-c0)/(c1-c0);
 				const uint32_t fv=sideVid(clo,chi,p), v0=sideVid(clo,chi,c0), v1=sideVid(clo,chi,c1);
 				if (fv>=nV||v0>=nV||v1>=nV) continue;
@@ -2169,12 +2599,14 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				mv.back(), (double)kRefineEps, (double)kRefineFrac);
 		}
 		std::fprintf(stderr,
-			"[STONE] '%s' %s L%s amp=%.3f mip=%d: quads=%d lones=%d cells(fan/flat)=%d/%d "
+			"[STONE] '%s' %s L%s amp=%.3f mip=%d: quads=%d (edge-aligned %d: "
+			"plat/step/floor cells %d/%d/%d) lones=%d cells(fan/flat)=%d/%d "
 			"Lhist=%d/%d/%d/%d/%d/%d Lcap=%d/%d/%d/%d/%d/%d "
 			"-> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins\n",
 			matName, uniformLevel>0?"uniform":"adaptive",
 			uniformLevel>0?std::to_string(uniformLevel).c_str():"0..5",
-			(double)amp, useMip, builtQuads, builtLones, fanCells, flatCells,
+			(double)amp, useMip, builtQuads, edgeQuads,
+			edgePlateauC, edgeStepC, edgeFloorC, builtLones, fanCells, flatCells,
 			lvlHist[0],lvlHist[1],lvlHist[2],lvlHist[3],lvlHist[4],lvlHist[5],
 			lcapHist[0],lcapHist[1],lcapHist[2],lcapHist[3],lcapHist[4],lcapHist[5],
 			int(T->VIndex), int(T->FIndex), nMoved, (double)dMin, (double)dMax, nTJ);

@@ -304,6 +304,17 @@ void reportMetrics(const DTestScene &d, int mapId, float span) {
     const float flatEps = 0.10f * range;
     const float loBand = dzMin + 0.25f * range, hiBand = dzMax - 0.25f * range;
     int nFlatPlateau = 0, nFlatGroove = 0, nFlatBorder = 0, nSloped = 0;
+    // FRONTAL-PROJECTED-area flatness alongside the per-face count: an edge-
+    // aligned mesh spends its flat budget on a few LARGE plateau/floor faces
+    // and its sloped budget on many NARROW step faces, so the count under-reads
+    // the surface (a perfect square wave with 2-triangle plateaus sits near
+    // ~50% by count). Raw 3D area ALSO under-reads: at test amps the step walls
+    // are tall (amp-dependent), so their slant area dominates. Projecting onto
+    // the wall's base plane (weight |n·z| = the |cz| cross term) measures what
+    // the eye sees head-on — steps project to ~nothing, plateaus + floors to
+    // their footprint — and is amp-invariant. A true square wave reads ~85%+;
+    // all-domes reads ~0%.
+    double areaFlat = 0.0, areaTotal = 0.0;
     for (int i = 0; i < d.wall->FIndex; ++i) {
         const Face &F = d.wall->Faces[i];
         if (!F.A || !F.B || !F.C) continue;
@@ -311,13 +322,21 @@ void reportMetrics(const DTestScene &d, int mapId, float span) {
         const float fmin = std::min(za, std::min(zb, zc));
         const float fmax = std::max(za, std::max(zb, zc));
         const float favg = (za + zb + zc) / 3.0f;
+        const Vector &pa = F.A->Pos, &pb = F.B->Pos, &pc = F.C->Pos;
+        const float e1x = pb.x-pa.x, e1y = pb.y-pa.y, e1z = pb.z-pa.z;
+        const float e2x = pc.x-pa.x, e2y = pc.y-pa.y, e2z = pc.z-pa.z;
+        const float cz = e1x*e2y-e1y*e2x;    // projected onto the base (z=0) plane
+        const double area = 0.5 * std::fabs(double(cz));
+        areaTotal += area;
         if (fmax - fmin >= flatEps) { ++nSloped; continue; }
+        areaFlat += area;
         if      (favg <= loBand)          ++nFlatPlateau;   // flat block top
         else if (favg >= hiBand)          ++nFlatGroove;    // flat groove floor
         else                              ++nFlatBorder;    // flat at authored level (~0)
     }
     const int nF = nFlatPlateau + nFlatGroove + nFlatBorder + nSloped;
     const float flatPct = nF > 0 ? 100.0f * (nF - nSloped) / nF : 0.0f;
+    const float flatAreaPct = areaTotal > 0.0 ? float(100.0 * areaFlat / areaTotal) : 0.0f;
 
     std::fprintf(stderr,
         "[DTEST] map=%d(%s) span=%.1f amp=%.2f mip=%d\n"
@@ -326,13 +345,14 @@ void reportMetrics(const DTestScene &d, int mapId, float span) {
         "        mesh:  verts=%d faces=%d\n"
         "        disp z: [%+.3f .. %+.3f]  p2v=%.3f (expect %.3f = %.0f%%)\n"
         "        faces: flat plateau=%d groove=%d border=%d | sloped=%d "
-        "-> FLAT-TOP frac=%.0f%% (square-wave high, all-dome ~0%%)\n",
+        "-> FLAT-TOP frac=%.0f%% (square-wave high, all-dome ~0%%) | "
+        "flat FRONTAL-AREA frac=%.0f%%\n",
         mapId, mapName(mapId), span, amp, mip,
         px0, py0, have0 ? "OK" : "NONE", mip, pxm, pym, havem ? "OK" : "NONE",
         lo01, hi01, mean01,
         nVerts, d.wall->FIndex,
         dzMin, dzMax, p2vMeas, p2vExp, p2vExp > 1e-6f ? 100.0f * p2vMeas / p2vExp : 0.0f,
-        nFlatPlateau, nFlatGroove, nFlatBorder, nSloped, flatPct);
+        nFlatPlateau, nFlatGroove, nFlatBorder, nSloped, flatPct, flatAreaPct);
 }
 
 // ── headless pose render ────────────────────────────────────────────────────
