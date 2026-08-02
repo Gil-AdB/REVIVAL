@@ -1409,6 +1409,9 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 	const float roughStrengthG  = fds::FeatureFlags::roughness_strength();
 	const bool  aoMapOnG        = fds::FeatureFlags::ao_map();
 	const float aoStrengthG     = fds::FeatureFlags::ao_map_strength();
+	// S4b: move the AO multiply from ambient-only to the final combined diffuse.
+	const bool  aoDirectG       = fds::FeatureFlags::ao_direct();
+	const float aoDirectStrG    = fds::FeatureFlags::ao_direct_strength();
 	const bool nmapDisabledG    = fds::FeatureFlags::no_nmap();
 	const bool deferredNoSpecG  = fds::FeatureFlags::deferred_no_spec();
 	const bool sPbr             = fds::FeatureFlags::pbr();
@@ -1853,25 +1856,31 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 			const bool useVecHere = useVec
 				&& (sVecForce || (!hasNormalMap && !(hasAoMap && !aoInAlpha)));
 
-			// Ambient occlusion: darken ONLY the ambient term (lB/lG/lR before
-			// the direct-light loop adds to them) — direct light is occluded by
-			// shadows, not AO.
+			// Ambient occlusion. DEFAULT: darken ONLY the ambient term (lB/lG/lR
+			// before the direct-light loop adds to them) — direct light is
+			// occluded by shadows, not AO. S4b (--ao_direct): MOVE the multiply
+			// off the ambient-only term to the FINAL combined diffuse after the
+			// light loop (below) — a static, acne-free stand-in for the per-block
+			// mortar self-shadow the single-shadow-id collapse removed. Here we
+			// only fetch the raw occlusion; the two applications share it.
+			float aoRaw = 1.0f;                       // map occlusion [0,1] (1=open)
 			if (hasAoMap) {
-				float ao;
 				if (aoInAlpha) {
-					ao = texA * (1.0f/255.0f);            // free (albedo alpha)
+					aoRaw = texA * (1.0f/255.0f);        // free (albedo alpha)
 				} else {
 					const Texture *aoTex = Mat->AoMap ? Mat->AoMap : Mat->Txtr;
 					const dword *aoData = (const dword *)aoTex->Mipmap[miplevel];
 					const dword aoTexel = aoData ? aoData[swizzledUV] : 0xFFFFFFFFu;
-					ao = (float(aoTexel & 0xFF)         * 0.114f
-					    + float((aoTexel >> 8)  & 0xFF)  * 0.587f
-					    + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
+					aoRaw = (float(aoTexel & 0xFF)         * 0.114f
+					       + float((aoTexel >> 8)  & 0xFF)  * 0.587f
+					       + float((aoTexel >> 16) & 0xFF)  * 0.299f) * (1.0f/255.0f);
 				}
-				// Global dial × per-material dial (Mat->AoStrength defaults 1 —
-				// the ParallaxScale pattern).
-				ao = 1.0f - aoStrengthG * Mat->AoStrength * (1.0f - ao);
-				lB *= ao; lG *= ao; lR *= ao;
+				if (!aoDirectG) {
+					// ambient-only (canonical): Global dial × per-material dial
+					// (Mat->AoStrength defaults 1 — the ParallaxScale pattern).
+					const float ao = 1.0f - aoStrengthG * Mat->AoStrength * (1.0f - aoRaw);
+					lB *= ao; lG *= ao; lR *= ao;
+				}
 			}
 
 			// Sample's world-space position. Computed here (outside the
@@ -2311,6 +2320,16 @@ static void Render_DeferredLighting_Tile(const DeferredLightingCtx &ctx,
 						}
 					}
 				}
+			}
+
+			// S4b: AO on the FINAL combined diffuse (ambient + direct). Only when
+			// --ao_direct moved it here off the ambient-only term above. Uses its
+			// own dial (ao_direct_strength); specular (sB/sG/sR, added at the
+			// compose) is a highlight and is left un-occluded — the shadow-proxy
+			// intent is diffuse groove occlusion, not dulled highlights.
+			if (hasAoMap && aoDirectG) {
+				const float aoD = 1.0f - aoDirectStrG * Mat->AoStrength * (1.0f - aoRaw);
+				lB *= aoD; lG *= aoD; lR *= aoD;
 			}
 
 			// Saturation cap (matches forward at 250). The 250/255 caps are
