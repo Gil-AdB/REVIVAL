@@ -177,6 +177,15 @@ enum TrimeshFlags
 	// disco ball, whose facets would throw a hard blob instead of reading as a
 	// reflective ball). Gated in Transform_Objects on g_inShadowPass.
 	Tri_NoShadowCast	= 1 << 15,
+
+	// S1 offscreen proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md): this mesh renders
+	// ONLY in offscreen/bake passes (shadow bake, mirror RTT, env probe) and is
+	// skipped from the main camera. The flat pre-displacement stand-in for the
+	// greets stone walls: the mortar relief is invisible in cast shadows and
+	// sub-texel in reflections, so offscreen consumers rasterise the ~226 flat
+	// faces instead of the ~81k displaced detail. Gated in Transform_Objects on
+	// the offscreen predicate (g_inShadowPass || g_offscreenViewDepth > 0).
+	Tri_OffscreenProxy	= 1 << 16,
 };
 
 enum SortPriority
@@ -211,6 +220,14 @@ enum SortPriority
 #define Face_Transparent 0x0010
 #define Face_PointZTest  0x0020
 #define Face_Reflective  0x0040
+// S1 offscreen proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md): this face is the
+// DISPLACED stone detail — it renders ONLY in the main camera pass and is
+// skipped from every offscreen/bake pass (shadow, mirror RTT, env probe),
+// where the flat Tri_OffscreenProxy stand-in casts instead. Set on the
+// greets 'rooms'/'floor' displaced faces; survives the chunk split (copied by
+// the per-face struct copy). Gated in Transform_Objects on the offscreen
+// predicate (g_inShadowPass || g_offscreenViewDepth > 0).
+#define Face_MainOnly    0x0080
 
 // Camera Flags.
 #define Cam_Euler        0x0001

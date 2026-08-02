@@ -544,7 +544,9 @@ static float QuadAwareMaxViewZ(const Face* F, const Face* facesBase, DWord faces
 // and the baked surface's own FACES are excluded (face-level — greets
 // merges momy + the whole room into single TriMeshes, so the old whole-mesh
 // skip emptied the room out of the probe).
-namespace fds { extern bool g_envBakeSkipDynamic;
+namespace fds { extern int  g_offscreenViewDepth;   // >0 inside a mirror RTT /
+                    // env-probe / disco / shatter offscreen render (OffscreenView.cpp)
+                extern bool g_envBakeSkipDynamic;
                 extern bool g_envBakeSkipMirrorClones;
                 extern bool g_envOverlayDynamicOnly;   // ENVDYN A3: invert the
                     // static-only env bake — render DYNAMIC meshes only, static
@@ -572,6 +574,14 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// in the body. Caching here turns it into a register read inside the
 	// per-vertex `if (!_inShadowPass)` checks at the three sites below.
 	const bool _inShadowPass = g_inShadowPass;
+	// S1 offscreen proxy predicate: true in the shadow bake AND in any
+	// mirror-RTT / env-probe / disco / shatter offscreen render. The greets
+	// displaced-stone proxy swap keys on this — offscreen consumers rasterise
+	// the flat Tri_OffscreenProxy stand-in and skip the Face_MainOnly displaced
+	// detail; the main camera does the reverse. Cheap register read; the flags
+	// it gates are only set under --greets_displace, so default scenes never
+	// carry either flag and this is inert.
+	const bool _offscreenPass = g_inShadowPass || (fds::g_offscreenViewDepth > 0);
 	const bool coneCull = g_inShadowPass
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
@@ -689,6 +699,12 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		// excluded from every shadow occluder pass. _inShadowPass covers the
 		// static bake, the dynamic per-frame bake, and moving-omni cube re-bakes.
 		if (_inShadowPass && (T->Flags & Tri_NoShadowCast)) continue;
+
+		// S1 offscreen proxy: the flat stone stand-in renders ONLY offscreen
+		// (shadow / RTT / env). Skip it in the main camera pass so it never
+		// double-draws over the displaced detail. Inert unless --greets_displace
+		// built one (nothing sets Tri_OffscreenProxy otherwise).
+		if (!_offscreenPass && (T->Flags & Tri_OffscreenProxy)) continue;
 
 		uint32_t frustumFlags = 0;  // Tri_Invisible | Tri_Ahead | Tri_Inside, racy
 		                            // when T->Flags is shared across N parallel
@@ -1559,6 +1575,11 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 		return int16_t(v);
 	};
 	for (F=tFaces;F<FEnd;F++) {
+		// S1 offscreen proxy: the displaced stone detail (Face_MainOnly) is
+		// main-camera only. In any offscreen/bake pass the flat proxy mesh
+		// casts/reflects instead, so drop these faces here. Inert unless
+		// --greets_displace tagged them.
+		if (_offscreenPass && (F->Flags & Face_MainOnly)) continue;
 		if (envFaceSkip && fds::EnvBake_FaceExcluded(F, T)) continue;
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
 			const char* mn = F->Txtr->Name;

@@ -1237,6 +1237,158 @@ static void GreetsFixBitangentHandedness(Scene *sc)
 // Compute_Vertex_Tangents. See docs/ENGINE.md.)
 
 
+// ── S1 offscreen shadow proxy (docs/ENVDYN_DISPLACEMENT_PLAN.md) ────────────
+// The displaced stone (rooms/floor, ~81k detail faces under --greets_displace)
+// is main-camera-only; every offscreen consumer (per-frame shadow bake, mirror
+// RTT, env probe) rasterises this FLAT stand-in instead. Mortar relief is
+// invisible in cast shadows and sub-texel in reflections, so the proxy carries
+// the ~226 pre-displacement faces — cutting the per-frame shadow re-raster of
+// moving disco spots from ~81k faces to ~226.
+//
+// Snapshot is captured BEFORE the displace/subdiv/smooth-weld runs (flat geom
+// with final UVs); the mesh is built AFTER them so DisplaceStoneSmoothNormals'
+// position-bucket weld (per rooms/floor material) can't fold the proxy verts
+// into the displaced surface. The proxy is NOT Tri_Stationary (no per-vertex SL
+// buffer needed) but IS Tri_Possessed (skip the animate spline walk) and
+// Tri_OffscreenProxy (skip the main pass). ShadowMatIDs are stamped from the
+// displaced walls' single-id cluster AFTER the Piramid clustering, so the
+// deferred PolyId self-shadow test matches between the displaced G-buffer
+// pixels and this flat caster.
+// S1 diagnostics (chunk shadow-skip census).
+int g_s1PureChunks = 0, g_s1PureChunkFaces = 0, g_s1MixedChunks = 0, g_s1MixedMainFaces = 0;
+
+struct StoneProxySnapshot {
+    std::vector<Vertex>   verts;
+    std::vector<Face>     faces;   // A/B/C repointed at build time
+    std::vector<uint32_t> fidx;    // 3 vert indices per face
+    bool captured = false;
+};
+
+static void CaptureStoneProxySnapshot(Scene *Sc, StoneProxySnapshot &snap) {
+    snap.verts.clear(); snap.faces.clear(); snap.fidx.clear(); snap.captured = false;
+    TriMesh *piramid = nullptr;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (std::strstr(Obj->Name, "Piramid")) { piramid = (TriMesh*)Obj->Data; break; }
+    }
+    if (!piramid) return;
+    std::map<Vertex*, uint32_t> vmap;
+    for (DWord i = 0; i < piramid->FIndex; ++i) {
+        Face &f = piramid->Faces[i];
+        if (!f.A || !f.B || !f.C || !f.Txtr || !f.Txtr->Name) continue;
+        if (std::strcmp(f.Txtr->Name, "rooms") && std::strcmp(f.Txtr->Name, "floor"))
+            continue;
+        uint32_t vi[3];
+        Vertex *src[3] = { f.A, f.B, f.C };
+        for (int k = 0; k < 3; ++k) {
+            auto it = vmap.find(src[k]);
+            if (it == vmap.end()) {
+                vi[k] = uint32_t(snap.verts.size());
+                vmap[src[k]] = vi[k];
+                snap.verts.push_back(*src[k]);
+            } else vi[k] = it->second;
+        }
+        snap.faces.push_back(f);
+        snap.fidx.push_back(vi[0]); snap.fidx.push_back(vi[1]); snap.fidx.push_back(vi[2]);
+    }
+    snap.captured = !snap.faces.empty();
+}
+
+static TriMesh *BuildStoneProxyMesh(Scene *Sc, const StoneProxySnapshot &snap) {
+    if (!snap.captured) return nullptr;
+    Object *piramidObj = nullptr;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (std::strstr(Obj->Name, "Piramid")) { piramidObj = Obj; break; }
+    }
+    if (!piramidObj) return nullptr;
+    TriMesh *piramid = (TriMesh*)piramidObj->Data;
+    const uint32_t nV = uint32_t(snap.verts.size());
+    const uint32_t nF = uint32_t(snap.faces.size());
+    TriMesh *proxy = new TriMesh();
+    proxy->VIndex = nV;
+    proxy->FIndex = nF;
+    proxy->Verts = new Vertex[nV];
+    proxy->Faces = new Face[nF];
+    std::memcpy(proxy->Verts, snap.verts.data(), nV * sizeof(Vertex));
+    float xmin=FLT_MAX,xmax=-FLT_MAX,ymin=FLT_MAX,ymax=-FLT_MAX,zmin=FLT_MAX,zmax=-FLT_MAX;
+    for (uint32_t i = 0; i < nF; ++i) {
+        Face &d = proxy->Faces[i];
+        d = snap.faces[i];
+        d.A = &proxy->Verts[snap.fidx[3*i+0]];
+        d.B = &proxy->Verts[snap.fidx[3*i+1]];
+        d.C = &proxy->Verts[snap.fidx[3*i+2]];
+        d.A_idx = snap.fidx[3*i+0]; d.B_idx = snap.fidx[3*i+1]; d.C_idx = snap.fidx[3*i+2];
+        d.ParentTri = proxy;
+        d.Flags &= ~Face_MainOnly;   // the PROXY casts; it must not be dropped offscreen
+        for (Vertex *v : { d.A, d.B, d.C }) {
+            if (v->Pos.x<xmin) xmin=v->Pos.x; if (v->Pos.x>xmax) xmax=v->Pos.x;
+            if (v->Pos.y<ymin) ymin=v->Pos.y; if (v->Pos.y>ymax) ymax=v->Pos.y;
+            if (v->Pos.z<zmin) zmin=v->Pos.z; if (v->Pos.z>zmax) zmax=v->Pos.z;
+        }
+    }
+    proxy->BSphereCtr.x=(xmin+xmax)*0.5f; proxy->BSphereCtr.y=(ymin+ymax)*0.5f; proxy->BSphereCtr.z=(zmin+zmax)*0.5f;
+    float r2max=0.0f;
+    for (uint32_t i=0;i<nV;++i){ float dx=proxy->Verts[i].Pos.x-proxy->BSphereCtr.x,
+        dy=proxy->Verts[i].Pos.y-proxy->BSphereCtr.y, dz=proxy->Verts[i].Pos.z-proxy->BSphereCtr.z;
+        float r2=dx*dx+dy*dy+dz*dz; if (r2>r2max) r2max=r2; }
+    proxy->BSphereRadius=std::sqrt(r2max); proxy->BSphereRad=r2max;
+    proxy->IPos=piramid->IPos; proxy->IScale=piramid->IScale; proxy->IRot=piramid->IRot;
+    Matrix_Copy(proxy->RotMat, piramid->RotMat);
+    Matrix_Copy(proxy->UnscaledRotMat, piramid->UnscaledRotMat);
+    // Inherit Piramid flags but: drop Tri_Stationary (no SL buffer allocated),
+    // add Tri_Possessed (empty splines → skip Animate), add Tri_OffscreenProxy.
+    proxy->Flags = (piramid->Flags & ~Tri_Stationary) | Tri_Possessed | Tri_OffscreenProxy;
+    Object *proxyObj = new Object();
+    proxyObj->Type = Obj_TriMesh;
+    proxyObj->Data = proxy;
+    proxyObj->Pos = new Vector(*piramidObj->Pos);
+    struct MatrixHolder { Matrix m; };
+    MatrixHolder *holder = new MatrixHolder();
+    proxyObj->Rot = &holder->m;
+    Matrix_Copy(*proxyObj->Rot, *piramidObj->Rot);
+    proxyObj->Pivot = piramidObj->Pivot;
+    proxyObj->Parent = piramidObj->Parent;
+    proxyObj->ParentID = piramidObj->ParentID;
+    proxyObj->Name = strdup("stone_shadow_proxy");   // no "Piramid" → clustering/chunk skip it
+    proxyObj->Next = piramidObj->Next;
+    proxyObj->Prev = piramidObj;
+    if (piramidObj->Next) piramidObj->Next->Prev = proxyObj;
+    piramidObj->Next = proxyObj;
+    proxy->Next = Sc->TriMeshHead; proxy->Prev = nullptr;
+    if (Sc->TriMeshHead) Sc->TriMeshHead->Prev = proxy;
+    Sc->TriMeshHead = proxy;
+    std::fprintf(stderr, "[STONE-PROXY] built flat shadow proxy: %u verts / %u faces "
+        "(rooms+floor pre-displace) — offscreen-only\n", nV, nF);
+    return proxy;
+}
+
+// Tag every displaced rooms/floor face main-only (skip in offscreen passes) and
+// stamp the flat proxy's faces with the displaced walls' single shadow-cluster
+// id so the PolyId self-shadow test matches. Called after the Piramid clustering.
+static void FinalizeStoneProxy(Scene *Sc, TriMesh *proxy) {
+    uint16_t roomsId = 0, floorId = 0;
+    for (Object *Obj = Sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+        if (!std::strstr(Obj->Name, "Piramid")) continue;
+        TriMesh *T = (TriMesh*)Obj->Data;
+        for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+            if (!F->Txtr || !F->Txtr->Name) continue;
+            if (!std::strcmp(F->Txtr->Name, "rooms")) { if (!roomsId) roomsId = F->ShadowMatID; }
+            else if (!std::strcmp(F->Txtr->Name, "floor")) { if (!floorId) floorId = F->ShadowMatID; }
+        }
+    }
+    if (proxy) {
+        for (Face *F = proxy->Faces; F < proxy->Faces + proxy->FIndex; ++F) {
+            if (!F->Txtr || !F->Txtr->Name) continue;
+            if (!std::strcmp(F->Txtr->Name, "rooms")) F->ShadowMatID = roomsId;
+            else if (!std::strcmp(F->Txtr->Name, "floor")) F->ShadowMatID = floorId;
+        }
+        std::fprintf(stderr, "[STONE-PROXY] stamped shadow ids rooms=0x%04x floor=0x%04x "
+            "onto proxy caster\n", roomsId, floorId);
+    }
+}
+
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
@@ -1444,9 +1596,15 @@ void Initialize_Greets()
 	// vertex normals + tangents on the displaced mesh, and the Piramid chunk
 	// split further down wraps the displaced verts in its chunk bounds.
 	// Defaults (subdiv 0, displace 0) = neither call runs (byte-identical).
+	// S1 offscreen shadow proxy: captured here (rooms/floor still FLAT), built
+	// after the displace/smooth passes below, finalized after the clustering.
+	StoneProxySnapshot g_stoneProxySnap;
+	TriMesh *g_stoneProxyMesh = nullptr;
 	{
 		const int  L        = fds::FeatureFlags::greets_stone_subdiv();
 		const bool displace = fds::FeatureFlags::greets_displace();
+		if (displace && fds::FeatureFlags::greets_shadow_proxy())
+			CaptureStoneProxySnapshot(GreetSc, g_stoneProxySnap);
 		if (!displace && L > 0) {
 			// Legacy pure-density knob (no bake): linear midpoint split only.
 			SubdivideMaterialFaces(GreetSc, "rooms", L, /*phong=*/false);
@@ -1508,6 +1666,29 @@ void Initialize_Greets()
 		const float sm = fds::FeatureFlags::greets_displace_smooth();
 		DisplaceStoneSmoothNormals(GreetSc, "rooms", sm);
 		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
+	}
+
+	// S1 offscreen proxy: NOW that the displace + face-independence + smooth-weld
+	// passes are done, (1) tag every displaced rooms/floor face main-only so the
+	// offscreen/bake passes skip the ~81k detail, and (2) build the flat proxy
+	// mesh from the pre-displace snapshot so those passes rasterise the ~226 flat
+	// faces instead. The tag propagates through the Piramid chunk split (per-face
+	// struct copy). Both no-op unless --greets_displace captured a snapshot.
+	if (g_stoneProxySnap.captured) {
+		int tagged = 0;
+		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
+			if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
+			if (!std::strstr(Obj->Name, "Piramid")) continue;
+			TriMesh *T = (TriMesh*)Obj->Data;
+			for (Face *F = T->Faces; F < T->Faces + T->FIndex; ++F) {
+				if (!F->Txtr || !F->Txtr->Name) continue;
+				if (!std::strcmp(F->Txtr->Name, "rooms") ||
+				    !std::strcmp(F->Txtr->Name, "floor")) { F->Flags |= Face_MainOnly; ++tagged; }
+			}
+		}
+		g_stoneProxyMesh = BuildStoneProxyMesh(GreetSc, g_stoneProxySnap);
+		std::fprintf(stderr, "[STONE-PROXY] tagged %d displaced rooms/floor faces "
+			"Face_MainOnly (offscreen passes use the flat proxy)\n", tagged);
 	}
 
 	// Specular/Glossiness are AUTHORED IN THE LWO SOURCES now (Authoring/
@@ -1827,6 +2008,11 @@ void Initialize_Greets()
 			"(per-face F->ShadowMatID; no Material clones)\n",
 			totalClusters, totalTaggedFaces);
 	}
+	// S1 offscreen proxy: stamp the displaced walls' (single-id) shadow cluster
+	// onto the flat proxy caster so the deferred PolyId self-shadow test matches
+	// between the displaced G-buffer pixels and the flat occluder. Must run AFTER
+	// the clustering above assigned the ids. No-op unless the proxy was built.
+	if (g_stoneProxyMesh) FinalizeStoneProxy(GreetSc, g_stoneProxyMesh);
 	// Piramid spatial chunk split: partition Piramid.lwo's faces into a
 	// 3D spatial grid; each non-empty cell becomes its own TriMesh + Object
 	// with a tight bsphere. The original Piramid is "retired" (FIndex=0)
@@ -1942,10 +2128,17 @@ void Initialize_Greets()
 					float cxmin=FLT_MAX, cxmax=-FLT_MAX;
 					float cymin=FLT_MAX, cymax=-FLT_MAX;
 					float czmin=FLT_MAX, czmax=-FLT_MAX;
+					// S1: count displaced (Face_MainOnly) faces. A chunk that is
+					// ENTIRELY displaced rooms/floor casts no shadow itself (the
+					// flat proxy does) — so mark it Tri_NoShadowCast to skip its
+					// per-vertex transform in the shadow bake too (the per-face
+					// skip alone only drops the raster, not Phase-A transform).
+					DWord mainOnlyFaces = 0;
 					for (DWord i = 0; i < chunkFaces; ++i) {
 						const Face &srcF = piramid->Faces[faceIndices[i]];
 						Face &dstF = chunk->Faces[i];
 						dstF = srcF;
+						if (srcF.Flags & Face_MainOnly) ++mainOnlyFaces;
 						dstF.A = srcF.A ? &chunk->Verts[vertMap[srcF.A]] : nullptr;
 						dstF.B = srcF.B ? &chunk->Verts[vertMap[srcF.B]] : nullptr;
 						dstF.C = srcF.C ? &chunk->Verts[vertMap[srcF.C]] : nullptr;
@@ -2007,6 +2200,17 @@ void Initialize_Greets()
 					// Without it, Spline_Calc_3D on the chunk's empty
 					// (NumKeys=0) Pos spline derefs null Keys and hangs.
 					chunk->Flags |= Tri_Possessed;
+					// S1: a chunk that is 100% displaced rooms/floor doesn't cast
+					// its own shadow — the flat proxy does. Skip the whole chunk
+					// (incl. its per-vertex transform) from the shadow bake. Mixed
+					// chunks (some non-target siling/momy) still cast; their
+					// displaced faces are dropped per-face by Face_MainOnly.
+					if (mainOnlyFaces > 0 && mainOnlyFaces == chunkFaces) {
+						chunk->Flags |= Tri_NoShadowCast;
+						++g_s1PureChunks; g_s1PureChunkFaces += int(chunkFaces);
+					} else if (mainOnlyFaces > 0) {
+						++g_s1MixedChunks; g_s1MixedMainFaces += int(mainOnlyFaces);
+					}
 					// Wrap in Object. Allocate per-chunk Pos vector + Rot
 					// matrix — Animate_Objects's Object loop writes to
 					// Obj->Pos when reconciling parent transforms; sharing
@@ -2059,6 +2263,11 @@ void Initialize_Greets()
 				    chunkGrid, chunksCreated,
 				    unsigned(origFaces), unsigned(origVerts),
 				    unsigned(totalChunkVerts), unsigned(degen));
+				if (g_stoneProxyMesh)
+					std::fprintf(stderr, "[STONE-PROXY] shadow-skip census: %d pure "
+					    "displaced chunks (%d faces) NoShadowCast; %d mixed chunks "
+					    "keep %d displaced faces (Phase-A transform still paid)\n",
+					    g_s1PureChunks, g_s1PureChunkFaces, g_s1MixedChunks, g_s1MixedMainFaces);
 			}
 		}
 	}
