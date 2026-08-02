@@ -410,6 +410,50 @@ only, flags default-off until the user approves looks.
     greets stable-pixel 5v5 byte-null by majority (MINE set2 == HEAD both sets
     = 0; one 114-px batch was the documented ±1-LSB "1-in-12" greets race,
     maxΔ=1); wasm links.
+- [x] **ISOLATED TEST RIG `--scene-displacetest` + defect it exposes. DONE
+      (2026-08-02).** `DEMO/DisplaceTest.cpp`: ONE flat 8×8 quad, ONE material
+      with an 8-bit height map, running the EXACT production bake
+      (`DisplaceStoneSubdiv` on material `dtest`, greets flags verbatim) — an
+      analytically-checkable rig for "is the subdivision honouring the map?"
+      without a 100-block multi-tile wall in a full scene. Height map via
+      `FDS_DISPLACETEST_MAP=0`(4×4 synthetic blocks) `/1`(triangle-wave, smooth)
+      `/2`(real `greets_wall_h.png`) `/3`(running bond, ½-block row offset);
+      `FDS_DISPLACETEST_SPAN=N` tiles the map over N UV tiles (N·4 blocks/axis —
+      span 3 ≈ the real multi-tile greets wall). `FDS_DISPLACETEST_DUMP=1` prints
+      the `[DTEST]` metric matrix over (map, span) then renders the selected
+      combo from 4 poses (frontal/45/grazing/edge-on **top-down silhouette**) ×
+      3 styles (lit / viz-1 / viz-2) to `/tmp/displacetest_*.ppm`; default =
+      interactive free-cam. `EstimateBlockPitch` exposed in `MeshOps.h` so the
+      rig measures with the PRODUCTION estimator (no runtime-consumer change;
+      render_gate 3/3, city `37e62845`, fountain `51fff7cd` byte-equal; wasm
+      links).
+  - **Estimator VALIDATED.** Synthetic 4×4 blocks → pitch **256×256 tex @ mip0 /
+    64×64 @ mip2** (exact); running bond → **128×256** (the ½-block offset read
+    as 8 vertical positions); the REAL `greets_wall_h.png` → **255×256 @ mip0** —
+    exactly the 256-texel period measured independently. Triangle-wave "smooth"
+    map → no pitch (fallback) and stays **L1** (verts 9 / faces 8) at span 1:
+    smooth slopes correctly do NOT over-subdivide. (A plain LINEAR ramp instead
+    over-subdivides — but only because it is a SAWTOOTH once tiled, discontinuous
+    at the u=1 wrap; correct sampler behaviour, not a bake defect, hence the
+    triangle-wave control.)
+  - **DEFECT crisply reproduced — the default `cpb=1` DOMES every block; there
+    are NO flat plateaus.** New honest metric = fraction of target FACES that are
+    actually flat (3 verts share a level) vs sloped. Map 0, default flags:
+    **FLAT-TOP frac = 0 %** (all 64 faces sloped — a centre-fan dome per block),
+    viz-2 worst error **0.81 of peak-to-valley**, top-down silhouette a
+    DOME/triangle wave (pointed peaks), NOT the square wave the map demands;
+    viz-1 shows UNIFORM one-fan-per-block, not "coarse plateaus + fine groove
+    edges". Raising density: `cpb=2` is STILL 0 % flat (each ½-block cell still
+    straddles the mortar edge) — you need **`cpb=4`** (27 % flat faces) before
+    real flat block tops appear on this map at mip 2, i.e. the shipped default is
+    two steps too coarse to represent flat-topped ashlar. This is the geometric
+    root of the t=2145 "subdivision is worthless / ON≈OFF" verdict: at cpb=1 the
+    block IS displaced (p2v 75 % of amp·range) but as a pyramid, so grazing/frontal
+    read as bumpy-but-not-blocky. Running-bond span 3 (closest real-wall analog)
+    maxes out at L5 and still lands **17 % flat / jagged spiky top-down / dense
+    viz-2 error** — max depth does NOT rescue flat tops; only flat-topped cells
+    (higher cpb, or a plateau-aware cell instead of a centre fan) would. The rig
+    is the standing regression check for any future flat-top fix.
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`

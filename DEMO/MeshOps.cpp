@@ -1214,8 +1214,8 @@ static float SampleHeight8Bilinear(const Texture *hm, int mip, float u, float v)
 // tiles a quad spans (the fix for "cells span 2-3 blocks on the finely-tiled
 // wall"). Returns false with no clear periodicity (caller falls back to a fixed
 // texel target). Cheap + one-time (per material at bake).
-static bool EstimateBlockPitch(const Texture *hm, int mip,
-                               float &pitchXtex, float &pitchYtex) {
+bool EstimateBlockPitch(const Texture *hm, int mip,
+                        float &pitchXtex, float &pitchYtex) {
 	pitchXtex = pitchYtex = 0.0f;
 	if (!hm || !hm->Mipmap[mip]) return false;
 	const int mw = std::max(1, int(hm->SizeX) >> mip);

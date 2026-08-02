@@ -43,6 +43,14 @@ Texture *Scene_MakeTiledTexture(int width, int height, const uint32_t *pixels,
 // Used for parallax height maps — the variable-texel-size pilot. Caller owns.
 Texture *MakeHeight8(Texture *src);
 
+// Estimate the dominant BLOCK PITCH (mortar-to-mortar period, TEXELS at `mip`,
+// per axis) of an 8-bit height map by gradient autocorrelation — the exact
+// map-relative metric DisplaceStoneSubdiv uses to drive its per-quad depth cap.
+// Returns false when the field carries no clear periodic grid. Exposed for the
+// --scene-displacetest rig so it can report what the PRODUCTION estimator
+// measures (docs/ENVDYN_DISPLACEMENT_PLAN.md); no runtime consumer changes.
+bool EstimateBlockPitch(const Texture *hm, int mip, float &pitchXtex, float &pitchYtex);
+
 // Tier-2 cone-step POM (--parallax_pom): bake a conservative cone-step map from
 // an 8-bit height texture (MakeHeight8 output). The result is an 8-bit texture
 // with the IDENTICAL tiled+mip layout, so the rasterizer's swizzled height

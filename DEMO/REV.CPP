@@ -1188,6 +1188,14 @@ void CodeEntry(void *var)
 		Run_ConeTest();
 		goto demo_exit;
 	}
+	if (fds::FeatureFlags::scene_displacetest()) {
+		// Minimal stone-displacement bake rig (one quad + a height map). Join
+		// the init thread first (same g_mainFaces realloc race as the others).
+		extern void Run_DisplaceTest();
+		if (t1.joinable()) t1.join();
+		Run_DisplaceTest();
+		goto demo_exit;
+	}
 	if (fds::FeatureFlags::scene_chase()) {
 		// Chase-only review mode (loop alignment / light-drama judging).
 		// Join-first for the same g_mainFaces realloc race as the others.
