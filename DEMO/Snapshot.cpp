@@ -613,6 +613,20 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
         write_ppm(colorPath, MainSurf->Data, xres, yres, MainSurf->BPSL);
         std::fprintf(stderr, "[GREETSSNAP] t=%d -> %s\n", ts, colorPath);
 
+        // FDS_SNAPSHOT_ZDUMP: raw ZPage16 depth (word[xres*yres]) beside the color
+        // PPM. Deterministic (geometry, not the noisy shading) — the far-z leak
+        // detector for the S4a seam-hole hunt: z==0 = nothing rasterised there =
+        // background peeking through. Env-gated → inert (no gate touches it).
+        if (std::getenv("FDS_SNAPSHOT_ZDUMP") && ZPage16) {
+            char zp[1024];
+            std::snprintf(zp, sizeof(zp), "%s/greets_t%06d_depth.z16", cfg.outDir.c_str(), ts);
+            if (FILE* zf = std::fopen(zp, "wb")) {
+                std::fwrite(ZPage16, sizeof(word), size_t(xres) * yres, zf);
+                std::fclose(zf);
+                std::fprintf(stderr, "[GREETSSNAP] depth -> %s\n", zp);
+            }
+        }
+
         // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
         // march recorded during this tick (see g_pomDbgUV set before the tick).
         // Diffing two runs' UV bins isolates the MARCH output (spatial texel

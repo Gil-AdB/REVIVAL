@@ -2418,6 +2418,126 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			fIdx.push_back({ F.A?vidx(F.A):0u, F.B?vidx(F.B):0u, F.C?vidx(F.C):0u });
 		}
 
+		// canonical vertex on the shared side at `param` (used by both the S4a
+		// union-conform below and the level-boundary heal after displacement).
+		auto sideVid=[&](uint32_t clo,uint32_t chi,float param)->uint32_t{
+			if (param<=0.0f) return clo; if (param>=1.0f) return chi;
+			return edgeVert(clo,chi,param);   // canonical → already-created shared vert
+		};
+
+		// ── S4a: fan↔edge SEAM-HOLE fix (union triangulation at the shared side).
+		// The cross-patch heal below only REPOSITIONS the finer side's verts onto
+		// the coarser polyline; where the two sides' param lists have NO subset
+		// relation (a fan/lone patch's i/2^L side meeting an edge-aligned patch's
+		// groove side) the repositioned chord bypasses the other side's groove
+		// KINK → a hairline hole. Fix: for such sides, UNION both param lists and
+		// make BOTH patches carry a vertex at every union param — by fan-splitting
+		// the boundary triangle of each of a patch's own segments that a union
+		// param falls inside. Both boundary polylines then pass through the
+		// identical shared-vertex set → watertight, and the heal below no-ops on
+		// these sides (their records are set equal to the union). SUBSET sides
+		// (level boundaries) are LEFT to the heal, so adaptive levels stay
+		// byte-identical. Runs BEFORE displacement so the inserted verts displace.
+		// Behind greets_displace_seam_union (default on; --no- = pre-fix behavior).
+		const bool seamUnion = fds::FeatureFlags::greets_displace_seam_union();
+		int nSeamHoleSides = 0, nSeamSplits = 0;
+		{
+			auto isSubset=[](const std::vector<float>&sub,const std::vector<float>&sup){
+				size_t j=0;
+				for (float s : sub){
+					while (j<sup.size() && sup[j] < s-1e-5f) ++j;
+					if (j>=sup.size() || std::fabs(sup[j]-s) > 1e-5f) return false;
+				}
+				return true;
+			};
+			// Fan-split the ONE boundary triangle carrying side-edge (v@lo,v@hi)
+			// into a strip through the inserted params (ascending, all in (lo,hi)),
+			// preserving winding + affine-along-edge UVs. `edgeFace` maps the
+			// current target faces' undirected edges → face index (rebuilt per
+			// side, so a corner face split on an adjacent side is re-found here).
+			for (auto &kv : sideReg){
+				auto &recs = kv.second; if (recs.size()!=2) continue;
+				const std::vector<float> Pa = recs[0].params, Pb = recs[1].params;
+				if (Pa == Pb) continue;
+				if (isSubset(Pa,Pb) || isSubset(Pb,Pa)) continue;   // level boundary → heal
+				++nSeamHoleSides;
+				if (!seamUnion) continue;
+				const uint32_t clo=kv.first.first, chi=kv.first.second;
+				// union of the two interior param lists
+				std::vector<float> U; U.reserve(Pa.size()+Pb.size());
+				U.insert(U.end(),Pa.begin(),Pa.end()); U.insert(U.end(),Pb.begin(),Pb.end());
+				std::sort(U.begin(),U.end());
+				U.erase(std::unique(U.begin(),U.end(),
+					[](float x,float y){return std::fabs(x-y)<1e-5f;}),U.end());
+				// undirected edge → target-face index over the CURRENT faces
+				std::map<std::pair<uint32_t,uint32_t>,int> edgeFace;
+				for (size_t fi=0; fi<faces.size(); ++fi){
+					if (!isTarget(&faces[fi])) continue;
+					const uint32_t v[3]={fIdx[fi][0],fIdx[fi][1],fIdx[fi][2]};
+					for (int e=0;e<3;++e){ uint32_t a=v[e],b=v[(e+1)%3];
+						edgeFace[{std::min(a,b),std::max(a,b)}]=int(fi); }
+				}
+				auto fanSplit=[&](float lo,float hi,const std::vector<float>&insideU){
+					const uint32_t vLo=sideVid(clo,chi,lo), vHi=sideVid(clo,chi,hi);
+					auto it=edgeFace.find({std::min(vLo,vHi),std::max(vLo,vHi)});
+					if (it==edgeFace.end()) return;             // defensive: no clean edge
+					const int fi=it->second;
+					const Face proto=faces[fi];
+					const uint32_t tri[3]={fIdx[fi][0],fIdx[fi][1],fIdx[fi][2]};
+					const float triU[3]={proto.U1,proto.U2,proto.U3};
+					const float triV[3]={proto.V1,proto.V2,proto.V3};
+					int ei=-1;                                   // tri[ei]→tri[ei+1] is the edge
+					for (int i=0;i<3;++i){ uint32_t p=tri[i],q=tri[(i+1)%3];
+						if ((p==vLo&&q==vHi)||(p==vHi&&q==vLo)){ ei=i; break; } }
+					if (ei<0) return;
+					const int e1i=(ei+1)%3, xi=(ei+2)%3;
+					const uint32_t e0=tri[ei], e1=tri[e1i], X=tri[xi];
+					const float pe0=(e0==vLo)?lo:hi, pe1=(e1==vLo)?lo:hi;
+					// boundary sequence e0 → (inserted, ordered pe0→pe1) → e1
+					struct SV{ uint32_t id; float u,v; };
+					std::vector<SV> seq;
+					seq.push_back({e0,triU[ei],triV[ei]});
+					std::vector<float> ins=insideU;             // ascending
+					if (pe1<pe0) std::reverse(ins.begin(),ins.end());
+					for (float p : ins){
+						const float frac=(p-pe0)/(pe1-pe0);
+						seq.push_back({ edgeVert(clo,chi,p),
+							meshLerpf(triU[ei],triU[e1i],frac),
+							meshLerpf(triV[ei],triV[e1i],frac) });
+					}
+					seq.push_back({e1,triU[e1i],triV[e1i]});
+					const float Xu=triU[xi], Xv=triV[xi];
+					for (size_t i=0;i+1<seq.size();++i){
+						if (i==0){
+							Face &f=faces[fi]; f.frame=nullptr;
+							fIdx[fi]={seq[0].id,seq[1].id,X};
+							f.U1=seq[0].u;f.V1=seq[0].v; f.U2=seq[1].u;f.V2=seq[1].v; f.U3=Xu;f.V3=Xv;
+							f.EU1=f.U1;f.EV1=f.V1; f.EU2=f.U2;f.EV2=f.V2; f.EU3=f.U3;f.EV3=f.V3;
+						} else {
+							emit(proto, seq[i].id,seq[i+1].id,X,
+								seq[i].u,seq[i].v, seq[i+1].u,seq[i+1].v, Xu,Xv);
+						}
+						++nSeamSplits;
+					}
+				};
+				// conform BOTH patches: for each, split each own segment that a
+				// union param falls strictly inside.
+				for (const std::vector<float> *Pp : {&Pa,&Pb}){
+					std::vector<float> nodes; nodes.reserve(Pp->size()+2);
+					nodes.push_back(0.0f);
+					nodes.insert(nodes.end(),Pp->begin(),Pp->end());
+					nodes.push_back(1.0f);
+					for (size_t s=0;s+1<nodes.size();++s){
+						const float lo=nodes[s], hi=nodes[s+1];
+						std::vector<float> insideU;
+						for (float u : U) if (u>lo+1e-5f && u<hi-1e-5f) insideU.push_back(u);
+						if (!insideU.empty()) fanSplit(lo,hi,insideU);
+					}
+				}
+				recs[0].params = U; recs[1].params = U;   // heal now no-ops this side
+			}
+		}
+
 		// ── displacement (per-vertex height averaged over incident target faces,
 		// pushed along the vertex normal; authored-border verts pinned to zero) ──
 		const uint32_t nV = uint32_t(verts.size());
@@ -2449,12 +2569,10 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// verts onto the anchor side's displaced POLYLINE. Anchor = the record
 		// with fewer params (the coarser side — the straight-segment rule the
 		// old level pinning used, generalized), lexicographic tie-break so the
-		// choice never depends on registration order. ──
+		// choice never depends on registration order. ── S4a-conformed sides
+		// (fan↔edge, non-subset) had their two records set equal to the union
+		// above, so they hit the Pa==Pb skip and no-op here.
 		int nTJ=0;
-		auto sideVid=[&](uint32_t clo,uint32_t chi,float param)->uint32_t{
-			if (param<=0.0f) return clo; if (param>=1.0f) return chi;
-			return edgeVert(clo,chi,param);   // canonical → already-created shared vert
-		};
 		for (auto &kv : sideReg){
 			const auto &recs = kv.second; if (recs.size()!=2) continue;
 			const std::vector<float> &Pa = recs[0].params, &Pb = recs[1].params;
@@ -2602,14 +2720,16 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			"[STONE] '%s' %s L%s amp=%.3f mip=%d: quads=%d (edge-aligned %d: "
 			"plat/step/floor cells %d/%d/%d) lones=%d cells(fan/flat)=%d/%d "
 			"Lhist=%d/%d/%d/%d/%d/%d Lcap=%d/%d/%d/%d/%d/%d "
-			"-> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins\n",
+			"-> verts %d faces %d, %d displaced [%+.3f..%+.3f], %d T-junction pins, "
+			"%d fan↔edge seam-hole sides (%s: %d splits)\n",
 			matName, uniformLevel>0?"uniform":"adaptive",
 			uniformLevel>0?std::to_string(uniformLevel).c_str():"0..5",
 			(double)amp, useMip, builtQuads, edgeQuads,
 			edgePlateauC, edgeStepC, edgeFloorC, builtLones, fanCells, flatCells,
 			lvlHist[0],lvlHist[1],lvlHist[2],lvlHist[3],lvlHist[4],lvlHist[5],
 			lcapHist[0],lcapHist[1],lcapHist[2],lcapHist[3],lcapHist[4],lcapHist[5],
-			int(T->VIndex), int(T->FIndex), nMoved, (double)dMin, (double)dMax, nTJ);
+			int(T->VIndex), int(T->FIndex), nMoved, (double)dMin, (double)dMax, nTJ,
+			nSeamHoleSides, seamUnion?"union-welded":"heal-only", nSeamSplits);
 	}
 }
 

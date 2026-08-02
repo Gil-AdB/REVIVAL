@@ -55,6 +55,7 @@
 #include <Base/FeatureFlags.h>
 #include <Base/Material.h>
 #include <Base/Object.h>
+#include <Base/Spline.h>
 #include <Base/Texture.h>
 #include <Base/TriMesh.h>
 
@@ -67,6 +68,8 @@
 #include <vector>
 
 extern void Scene_RebuildMatTable(Scene *Sc);
+extern void Compute_FaceVertexIndices(TriMesh *T);
+extern void StampSingleKey(Spline &sp, float x, float y, float z, float w);
 
 namespace {
 
@@ -268,6 +271,146 @@ DTestScene build(int mapId, float span, int vizMode) {
     return d;
 }
 
+// ── S4a fan↔edge SEAM-HOLE rig ───────────────────────────────────────────────
+// The single-quad scene above pairs its two triangles into ONE edge-aligned
+// quad — it can never make a fan↔edge junction. This builds TWO quads in ONE
+// TriMesh (so they share vertex indices → the bake registers the shared side):
+// a LEFT quad with axis-aligned UVs (→ edge-aligned path) and a RIGHT quad with
+// 45°-ROTATED UVs (→ adaptive fan path), sharing the vertical edge at x=0.
+// Their shared-side param lists (groove rows vs i/2^L) have no subset relation,
+// so the pre-fix heal leaves a hairline hole; --greets_displace_seam_union welds
+// them. buildJunction reuses AddQuad for the LEFT quad's full engine setup
+// (splines, Filler, Object registration) then extends the arrays to 6 verts /
+// 4 faces and stamps the two per-quad UV charts by hand.
+DTestScene buildJunction(int mapId, int vizMode) {
+    using namespace fds::scene_builder;
+    FF::setDefault(FF::IntId::displace_viz, vizMode);
+
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 300.0f);
+    b.SetAmbient(60, 60, 60);
+
+    Texture *hm = makeHeight8(mapId);
+    Texture *tex = b.AddSolidColorTexture(8, 8, 0xFFB0B0B0u);
+    Material *mat = b.AddMaterial("dtest", tex, {176, 176, 176, 255}, 0);
+    mat->HeightMap = hm;
+
+    // LEFT quad x∈[-4,0], y∈[0,8], facing -z. AddQuad sets up the full mesh.
+    const Vector leftV[4] = {
+        Vector(0.0f, 0.0f, 0.0f), Vector(-4.0f, 0.0f, 0.0f),
+        Vector(-4.0f, 8.0f, 0.0f), Vector(0.0f, 8.0f, 0.0f),
+    };
+    TriMesh *T = b.AddQuad("junction", leftV, mat);
+
+    // Extend to 6 verts (add v4=(4,8,0), v5=(4,0,0)) and 4 faces (RIGHT quad
+    // verts {0,3,4,5} → tris (0,3,4),(0,4,5), also facing -z).
+    Vertex *nv = new Vertex[6];
+    std::memcpy(nv, T->Verts, sizeof(Vertex) * 4);
+    delete[] T->Verts;
+    T->Verts = nv; T->VIndex = 6;
+    const Vector rExtra[2] = { Vector(4.0f, 8.0f, 0.0f), Vector(4.0f, 0.0f, 0.0f) };
+    for (int k = 0; k < 2; ++k) {
+        Vertex &V = nv[4 + k];
+        std::memset(&V, 0, sizeof(Vertex));
+        V.Pos = rExtra[k];
+        V.N = nv[0].N; V.TN = nv[0].N;             // -z, same as the left quad
+        V.LR = V.LG = V.LB = 200; V.LA = 255;
+    }
+    Face *nf = new Face[4];
+    std::memcpy(nf, T->Faces, sizeof(Face) * 2);
+    delete[] T->Faces;
+    T->Faces = nf; T->FIndex = 4;
+    // rebind the 2 left faces to the new Verts array (indices unchanged 0..3)
+    const int leftIdx[2][3] = { {0,1,2}, {0,2,3} };
+    for (int f = 0; f < 2; ++f) {
+        nf[f].A = nv + leftIdx[f][0]; nf[f].B = nv + leftIdx[f][1]; nf[f].C = nv + leftIdx[f][2];
+    }
+    // LEFT per-face UVs: axis-aligned u=-x/4, v=y/8 (edge-aligned path).
+    auto uvL = [](const Vector &p, float &u, float &v){ u = -p.x * 0.25f; v = p.y * 0.125f; };
+    // RIGHT per-face UVs: 45°-rotated u=(x+y)/8, v=(y-x)/8 (fails axis-align → fan).
+    auto uvR = [](const Vector &p, float &u, float &v){ u = (p.x + p.y) * 0.125f; v = (p.y - p.x) * 0.125f; };
+    auto stampF = [&](Face &F, int ai, int bi, int ci, bool rot){
+        F.A = nv + ai; F.B = nv + bi; F.C = nv + ci;
+        F.Txtr = mat; F.Filler = nf[0].Filler; F.frame = nullptr;
+        auto uv = rot ? uvR : uvL;
+        uv(nv[ai].Pos, F.U1, F.V1); uv(nv[bi].Pos, F.U2, F.V2); uv(nv[ci].Pos, F.U3, F.V3);
+        F.EU1=F.U1;F.EV1=F.V1; F.EU2=F.U2;F.EV2=F.V2; F.EU3=F.U3;F.EV3=F.V3;
+        F.N = nv[0].N;
+        F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+    };
+    stampF(nf[0], 0, 1, 2, false); stampF(nf[1], 0, 2, 3, false);   // LEFT axis-aligned
+    stampF(nf[2], 0, 3, 4, true);  stampF(nf[3], 0, 4, 5, true);    // RIGHT rotated
+    // loose bsphere over all 6
+    Vector ctr{0,0,0}; for (int i=0;i<6;++i){ ctr.x+=nv[i].Pos.x; ctr.y+=nv[i].Pos.y; ctr.z+=nv[i].Pos.z; }
+    ctr.x/=6; ctr.y/=6; ctr.z/=6; float radSq=0;
+    for (int i=0;i<6;++i){ const float dx=nv[i].Pos.x-ctr.x,dy=nv[i].Pos.y-ctr.y,dz=nv[i].Pos.z-ctr.z; radSq=std::max(radSq,dx*dx+dy*dy+dz*dz); }
+    T->BSphereCtr=ctr; T->BSphereRad=radSq; T->BSphereRadius=std::sqrt(radSq);
+    Compute_FaceVertexIndices(T);
+
+    // Dim floor for orientation (own material — bake never touches it).
+    Texture *ftex = b.AddSolidColorTexture(8, 8, 0xFF404040u);
+    Material *fmat = b.AddMaterial("dtestfloor", ftex, {64, 64, 64, 255}, 0);
+    const Vector floorV[4] = {
+        Vector(-20.0f, 0.0f, -20.0f), Vector(-20.0f, 0.0f, 40.0f),
+        Vector( 20.0f, 0.0f,  40.0f), Vector( 20.0f, 0.0f, -20.0f),
+    };
+    b.AddQuad("dtest_floor", floorV, fmat);
+    b.AddOmni(Vector(11.0f, 9.0f, -6.0f), {255, 255, 255, 0}, 1.6f, 80.0f);
+    b.SetCamera(Vector(0.0f, 4.0f, -13.0f), Vector(0.0f, 4.0f, 0.0f), 55.0f);
+    b.Finalize();
+
+    DTestScene d; d.sc = b.scene(); d.wall = T; d.hm = hm;
+
+    const int   L     = FF::greets_stone_subdiv();
+    const float amp   = FF::greets_displace_amp();
+    const int   mip   = FF::greets_displace_mip();
+    const float adapt = FF::greets_displace_adapt();
+    const float cpb   = FF::greets_displace_cpb();
+    DisplaceStoneSubdiv(d.sc, "dtest", L, amp, mip, adapt, cpb);
+    MakeFacesIndependentByAngle(d.sc, 30.0f);
+    Scene_RebuildMatTable(d.sc);
+    return d;
+}
+
+// Count "enclosed background" pixels in ZPage16: z==0 pixels that have a
+// rendered (z>0) pixel BOTH to their left and right in the same row — i.e.
+// background showing THROUGH the geometry (a hole), not the silhouette. Also
+// captures the z-buffer into `zOut` (XRes*YRes words) when non-null.
+long scanEnclosedBg(word *zOut) {
+    const int xr = (int)XRes, yr = (int)YRes;
+    const word *z = ZPage16;
+    if (zOut) std::memcpy(zOut, z, size_t(xr) * yr * sizeof(word));
+    long n = 0;
+    for (int y = 0; y < yr; ++y) {
+        const word *row = z + size_t(y) * xr;
+        int lo = -1, hi = -1;
+        for (int x = 0; x < xr; ++x) if (row[x]) { if (lo < 0) lo = x; hi = x; }
+        if (lo < 0) continue;
+        for (int x = lo + 1; x < hi; ++x) if (row[x] == 0) ++n;
+    }
+    return n;
+}
+
+// Given a saved OFF z-buffer, count pixels the fix FILLED (off bg → on wall) and
+// OPENED (off wall → on bg), restricted to enclosed columns (off had wall left
+// and right in the row) so silhouette differences don't register.
+void scanHoleDelta(const word *zOff, long &filled, long &opened) {
+    const int xr = (int)XRes, yr = (int)YRes;
+    const word *zOn = ZPage16;
+    filled = opened = 0;
+    for (int y = 0; y < yr; ++y) {
+        const word *ro = zOff + size_t(y) * xr;
+        const word *rn = zOn  + size_t(y) * xr;
+        int lo = -1, hi = -1;
+        for (int x = 0; x < xr; ++x) if (ro[x] || rn[x]) { if (lo < 0) lo = x; hi = x; }
+        if (lo < 0) continue;
+        for (int x = lo + 1; x < hi; ++x) {
+            if (ro[x] == 0 && rn[x] != 0) ++filled;
+            if (ro[x] != 0 && rn[x] == 0) ++opened;
+        }
+    }
+}
+
 // ── [DTEST] metrics — the pass/fail essence, computed from the baked mesh ────
 void reportMetrics(const DTestScene &d, int mapId, float span) {
     const float amp = FF::greets_displace_amp();
@@ -421,6 +564,67 @@ void Run_DisplaceTest() {
 
     Ambient_Factor = 1.0f; Diffusive_Factor = 1.0f; Specular_Factor = 1.0f;
     ImageSize = 1;
+
+    // ── S4a fan↔edge SEAM-HOLE headless A/B (FDS_DISPLACETEST_JUNCTION=1) ──
+    // Bakes the two-quad junction twice (--greets_displace_seam_union off, then
+    // on), renders each pose, and reports per-pose FILLED (holes the fix closed)
+    // vs OPENED (wall the fix removed — should be ~0). Also dumps lit PPMs.
+    if (std::getenv("FDS_DISPLACETEST_JUNCTION")) {
+        const int jmap = std::getenv("FDS_DISPLACETEST_MAP")
+                             ? std::atoi(std::getenv("FDS_DISPLACETEST_MAP")) : 0;
+        struct Pose { Vector eye, look; float fov; const char *tag; };
+        const Pose poses[] = {
+            { Vector(0.0f, 4.0f, -13.0f), Vector( 0.0f, 4.0f, 0.0f), 55.0f, "frontal" },
+            { Vector(10.0f, 5.0f, -10.0f), Vector( 0.0f, 4.0f, 0.0f), 55.0f, "diag45" },
+            { Vector(12.0f, 4.5f, -2.5f), Vector(-3.0f, 4.0f, 0.0f), 55.0f, "grazing" },
+            { Vector(0.0f, 20.0f, 0.6f), Vector(0.0f, 3.5f, 0.0f), 40.0f, "topdown" },
+        };
+        const int nPoses = int(sizeof(poses) / sizeof(poses[0]));
+        std::vector<std::vector<word>> zOff(nPoses);
+
+        std::fprintf(stderr, "[DTEST-JUNCTION] map=%d(%s) — baking seam_union OFF\n",
+                     jmap, mapName(jmap));
+        FF::setParamFromText("greets_displace_seam_union", "0");
+        {
+            DTestScene d = buildJunction(jmap, /*vizMode=*/0);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            for (int p = 0; p < nPoses; ++p) {
+                char path[96];
+                std::snprintf(path, sizeof(path), "/tmp/displace_junction_%s_OFF.ppm", poses[p].tag);
+                renderPose(d, poses[p].eye, poses[p].look, poses[p].fov, 0, path);
+                zOff[p].resize(size_t(XRes) * YRes);
+                std::memcpy(zOff[p].data(), ZPage16, zOff[p].size() * sizeof(word));
+                std::fprintf(stderr, "[DTEST-JUNCTION] %-10s OFF enclosed-bg=%ld  (%s)\n",
+                             poses[p].tag, scanEnclosedBg(nullptr), path);
+            }
+        }
+
+        std::fprintf(stderr, "[DTEST-JUNCTION] baking seam_union ON\n");
+        FF::setParamFromText("greets_displace_seam_union", "1");
+        {
+            DTestScene d = buildJunction(jmap, /*vizMode=*/0);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            long totFilled = 0, totOpened = 0;
+            for (int p = 0; p < nPoses; ++p) {
+                char path[96];
+                std::snprintf(path, sizeof(path), "/tmp/displace_junction_%s_ON.ppm", poses[p].tag);
+                renderPose(d, poses[p].eye, poses[p].look, poses[p].fov, 0, path);
+                long filled = 0, opened = 0;
+                scanHoleDelta(zOff[p].data(), filled, opened);
+                totFilled += filled; totOpened += opened;
+                std::fprintf(stderr, "[DTEST-JUNCTION] %-10s ON  enclosed-bg=%ld  "
+                             "FILLED(off-bg→on-wall)=%ld  OPENED(off-wall→on-bg)=%ld  (%s)\n",
+                             poses[p].tag, scanEnclosedBg(nullptr), filled, opened, path);
+            }
+            std::fprintf(stderr, "[DTEST-JUNCTION] TOTAL filled=%ld opened=%ld — "
+                         "%s\n", totFilled, totOpened,
+                         totFilled > 0 && totOpened == 0
+                             ? "PASS (fix closed holes, removed no wall)"
+                             : (totFilled == 0 ? "no holes detected at these poses"
+                                               : "REVIEW (fix removed wall pixels)"));
+        }
+        return;
+    }
 
     if (std::getenv("FDS_DISPLACETEST_DUMP")) {
         if (FF::isSet(FF::IntId::displace_viz))
