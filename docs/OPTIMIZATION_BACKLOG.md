@@ -121,18 +121,83 @@ items below stay PARKED.
   city-glass AVX2 fast path (disabled today when the flag is on) could stay on.
   Measured free at greets scale, so LOW priority — do only if a profile shows it.
 
-- **B5 per-face screen-bbox tile-walk pre-reject + shadow-bake face cull**
-  (deferred 2026-07-31, ENVDYN plan workstream B). The B2 spike measured the
-  per-face fixed cost of extra faces at ~2-2.8 µs/face SERIAL in RNDR (tile
-  walk/clipper entry, `RenderInner.cpp:220-247` — no pre-reject exists) and a
-  comparable BAKE share (the per-frame shadow bake re-rasters every subdivided
-  face per light, camera-independent). At the shipped L=2 stone-subdiv density
-  (+3.4k faces) the total is +2.3 ms threaded at the worst pose — declined as
-  not material. Wanted only if L=3 (+14.2k faces = +11.5 ms threaded) is ever
-  desired: then BOTH the walk pre-reject (4 compares vs the tile rect before
-  clipper entry) AND a shadow-bake cull are needed — B5 alone can't rescue L=3
-  because BAKE (+14-16 ms serial at L3) doesn't go through the tile walk.
-  Numbers: docs/ENVDYN_DISPLACEMENT_PLAN.md B2 table.
+- **B5 per-face screen-bbox tile-walk pre-reject — DONE (2026-08-02, S2,
+  commit 9b6d70d, `--tile_bbox_cull` default ON).** Each face's projected
+  screen bbox (int16, floor/ceil+1px, from the face's own A/B/C PX/PY) is
+  stamped into its `FListEntry` at FList-build time (Transform.cpp push); the
+  tile walk (`RenderInnerMekalele`/`RenderInner`) 4-compare-rejects a face whose
+  bbox misses the tile rect BEFORE the Face deref — a rejected face costs only
+  the sequential FListEntry read (skips the 3 scattered Vertex flag loads + the
+  clipper entry). PURE reject (the clipper already clips to the tile →
+  byte-identical); near-plane-straddling faces (any vert behind nearZ) keep a
+  cover-all sentinel and are never rejected. **Measured (t=5780, 1080p, threaded,
+  40-iter p50, cull OFF→ON):** edge-displaced greets (86.6k faces) frame
+  99.3→86.85 (−12.5), RNDR 63.66→51.63 (−12.0); t=2145 108.8→100.0 (−8.8);
+  flags-off greets 47.5→47.0 (−0.5); city 95.1→94.1 (−1.0). Byte-null: city
+  37e62845 + fountain 51fff7cd exact, render_gate 3/3, displaced-greets
+  stable-pixel 1px/2.07M (greets race), wasm links. TRAP found: `frame->PX` is
+  NOT populated by `VertexFrame_DumpFromAoS` (only PY), and conetest's giant
+  quad has unpopulated `*_idx` — hence the fill reads AoS `F->A->PX` directly.
+- **B5 shadow-bake face cull — SUPERSEDED by S1 offscreen proxy** (commit
+  376f826, `--greets_shadow_proxy`, opt-in). Instead of per-face rejecting
+  displaced faces in the shadow raster, the whole displaced detail is
+  main-camera-only (Face_MainOnly) and a FLAT ~226-face proxy casts/reflects in
+  every offscreen pass. **Measured: BAKE 27.3→21.5 (−5.8), frame 92.8→88.1
+  (−4.7) at t=5780.** The win is BOUNDED — the shadow cube-face cull already
+  limited per-frame wall rastering, and mixed chunks (rooms+siling) still pay
+  Phase-A transform of ~22k displaced verts (only 151 pure-displaced chunks /
+  59k faces are fully Tri_NoShadowCast'd). Default OFF: the flat caster's
+  shadows differ from the displaced walls' on the looked-at wall (~1% px,
+  maxD 142 — NOT invisible, a look call) and a flat caster carries no relief so
+  it does NOT fix the reported light-bleeding.
+
+- **S3 mesh-level AABB-vs-frustum cull — MEASURED, NOT WORTH IT (2026-08-02).**
+  XFRM (the per-vertex transform, where a pre-transform AABB reject would save
+  work) is 0.70 ms flags-off greets / 2.31 ms city / 7.8 ms edge-displaced
+  greets — all tiny vs the RNDR (50-80 ms) + BAKE (20-30 ms) elephants. The
+  existing bsphere cull + the greets Piramid chunk split already reject most
+  off-screen geometry (XFRM would be an order of magnitude higher if they
+  weren't firing — they are). An AABB is a tighter bound but its ceiling is a
+  fraction of XFRM (sub-ms). At the heavy displaced pose the walls are ON-screen
+  (that's why they're displaced) so an AABB wouldn't cull them either.
+  Foundation-F AABBs stay consumed only by the env overlay; skip.
+
+- **S4(a) fan↔edge seam holes — SPEC (not landed; risk vs budget).** The
+  cross-patch heal (`MeshOps.cpp:2446-2490`) only REPOSITIONS the finer side's
+  verts onto the coarser (anchor) polyline; it never INSERTS a vert on the finer
+  side at an anchor kink it lacks. Fan(i/2^L params)↔edge(groove params)
+  junctions have no subset relation → the fan chord bypasses the edge's groove
+  kink → hairline hole. FIX = union the two sides' param lists at TRIANGULATION
+  time (both sides emit `edgeVert` at every union param → welded, heal becomes a
+  no-op) — a two-phase change to the tessellator (register-all-params, then
+  re-emit), too invasive to retrofit safely late. First step: a diagnostic
+  counting sides where neither param list ⊆ the other (the true un-healable
+  count) next to the `%d T-junction pins` log.
+
+- **S4(b) stone light-bleeding — SPEC (AO-on-direct; S1 does NOT fix it).**
+  Bleeding = DIRECT disco light on mortar that the single-shadow-id collapse
+  (acne fix) left un-self-shadowed. A FLAT proxy has no relief so it cannot
+  restore per-block mortar self-shadow (the coordinator's S1-fixes-bleeding
+  premise is geometrically wrong — verified). The map's grooves ARE the missing
+  occlusion. AO already exists (rooms/floor carry it in albedo-alpha,
+  `Mat_AoInAlpha`) but is applied to AMBIENT ONLY
+  (`DeferredSurfaceKernel.cpp:1856-1874`). FIX = behind a default-off greets flag,
+  for `Mat_AoInAlpha` displaced mats, move the AO multiply from ambient-only to
+  the FINAL (ambient+direct) color after the light loop → static, acne-free
+  groove darkening under direct light. Hot-kernel change (scalar path covers
+  greets); flag-gated for byte-null; strength is a user look call. Tuning-only
+  fallback: raise `ao_map_strength` (deepens ambient grooves, won't fully stop
+  the direct leak).
+
+- **S5 chunk-level LOD (flat+POM near/edge-displaced far) — DESIGN NOTE.**
+  Largely SUBSUMED by S1: the offscreen proxy already IS the flat LOD for every
+  non-main view. A camera-distance main-pass LOD would bake both meshes per
+  chunk and swap by distance via the existing chunk machinery — but the S1
+  Face_MainOnly/Tri_OffscreenProxy split + the proxy mesh are exactly the dual
+  representation an LOD needs; extending it to swap in the MAIN pass by distance
+  is the remaining step. Low priority: RNDR is pixel-bound at these poses (the
+  displaced faces add little coverage — B2's ~2-2.8 µs/face is fixed cost, which
+  S2 already reclaimed), so a main-pass geometric LOD buys little beyond S2+S1.
 
 ## Perf (measured bottlenecks — from docs/PERF_STATE.md + the 15fps analysis)
 The greets frame is ~2.5–3× a "generic deferred" frame; the fat is shadowing,
