@@ -454,6 +454,86 @@ only, flags default-off until the user approves looks.
     viz-2 error** — max depth does NOT rescue flat tops; only flat-topped cells
     (higher cpb, or a plateau-aware cell instead of a centre fan) would. The rig
     is the standing regression check for any future flat-top fix.
+- [x] **EDGE-ALIGNED TESSELLATION — the flat-top fix (2026-08-02, commit
+      120ae7e + follow-up).** The rig-proven centre-fan DOME defect is fixed
+      terrain-engine style: subdivision cell borders SNAP onto the height
+      map's mortar-groove lines; block plateaus become single FLAT cells (2
+      triangles, zero interior tessellation); the step down/up rides a narrow
+      transition band (~1.25-texel shoulder pads at the bake mip). New flag
+      `--greets_displace_edge` (default 1, read only under `--greets_displace`;
+      0 = the legacy dome path for A/B).
+  - **Groove detection** (per material, MAP space, bake mip): mortar lines =
+    below-threshold runs of mean-height profiles (threshold = min/max midpoint
+    of the bimodal field, wrap-aware, sanity-gated against the block pitch).
+    Horizontal grooves from the per-row profile (global); vertical grooves
+    from the per-BAND column profile (band = block row between two horizontal
+    grooves) — running bond's alternating phases land naturally as per-band
+    positions (the real `greets_wall_h` IS running bond: 4 h-grooves, 4 bands,
+    4 v-grooves each at alternating phase; the floor reads 12 bands × 10-13).
+    Wander is absorbed by the pads, not modeled — straight lines per band.
+  - **Cell layout** (per quad, axis-aligned UV charts only): rows between
+    h-groove lines — wide grooves get step/floor/step rows (flat mortar
+    floor), narrow ones step/step around the centre; per-row column breaks
+    from the row's band (step rows carry their band's breaks so vertical
+    walls stay sharp through block corners; floor rows take both bands'
+    union). Internal line vertex set = union of the two adjacent rows' break
+    sets; rows triangulated by a two-pointer march — crack-free by
+    construction. Matched-rect diagonals follow the height field. Params
+    quantized to a 1/2048 lattice for cross-quad bit-identity.
+  - **Kept**: the adaptive fan path for lone triangles, rotated/skewed UV
+    charts, structure-free maps (smooth control stays L1) and the
+    `greets_stone_subdiv` uniform baseline; the side registry generalized
+    from per-LEVEL to per-PARAM-LIST with polyline pinning (level boundaries
+    AND edge-vs-fan seams heal identically); authored-border zero-pinning;
+    single-shadow-id acne fix; TBN smooth weld (80° keeps the new ~90° step
+    edges hard).
+  - **Rig ([DTEST])**: map 0 span 1 default flags: 64 faces / FLAT-TOP 0%
+    (all domes) → **578 faces / 50% by count / 86% by frontal-projected
+    area**, p2v 75% → **100%**, square-wave silhouette + crisp flat blocks,
+    viz-2 plateaus unfilled. Running bond span 3: 3808 @ 17% → **7106 @
+    53% / 84%**, clean 12×12 running-bond wall. Smooth control byte-
+    unchanged. Real map: running bond reproduced, flat tilted slabs, no
+    domes. NOTE the count-based FLAT-TOP metric ceilings near ~50%
+    structurally (a square wave spends few LARGE faces on plateaus, many
+    NARROW ones on steps); the rig now also prints the amp-invariant
+    FRONTAL-PROJECTED-AREA fraction — the honest instrument (86% vs the
+    old path's domes ~0%).
+  - **Greets (all behind the default-OFF --greets_displace)**: rooms takes
+    the edge path on 60/67 quads (real wall grid detected: 4 h-grooves ×
+    4 bands × 4 v-grooves, running bond), floor on 10/11 (12 bands ×
+    10-13); lones + the rest stay fan; edge↔fan seams healed by the
+    generalized pin (455 T-junction pins). A/B at the three campaign poses
+    (`/tmp/displace7/`): blocks pop with FLAT faces + straight recessed
+    mortar; no diagonal grain, no faceting, no acne, no cracks; the gray
+    wall (t=2145) noticeably crisper than the dome path.
+  - **COST — measured, honest (t=5780, 1920×1080, threaded, iters=40,
+    same session)**: flags-off 52.5 ms · dome path 42.9k faces / 72.5 ms ·
+    edge path **86.6k faces / 107.0 ms**. Same ms-per-face curve as ever
+    (74@43k, 121@103k measured in the cpb round) — the edge carve is not
+    slower per face, it makes MORE faces: a true square wave needs ~24
+    tris/block (flat top + step walls + corners) vs the dome's 4-tri fan
+    that failed the silhouette test outright. The "fewer faces" hope held
+    only against the EQUAL-FIDELITY baseline (cpb=2: 103k/121 ms and still
+    no flat tops; cpb=4 unaffordable) — vs the shipped-but-wrong cpb=1 it
+    costs +34.5 ms. The demo default (flag off) is unaffected; the
+    ON-experience dial is `--no-greets_displace_edge` (72.5 ms domes) /
+    OFF (52.5 ms). cpb is not read by the edge path (the groove graph sets
+    the density); it still drives the fan fallback. Going faster wants the
+    deferred B5 tile pre-reject + shadow-bake face cull, as before.
+  - **Flags-off byte-null — proven, with a new documented trap.** Gates:
+    render_gate 3/3, city `37e62845` + fountain `51fff7cd` byte-equal,
+    wasm links. Greets (raw hash-majority is dead): stable-pixel gate at
+    CONSTANT content, code A vs code B in one build lineage — head+this
+    change vs pure head = **1 px** (the documented ±1-LSB residual race);
+    fresh-build twin proof 0 px; fresh builds byte-reproducible per
+    source-state. TRAP (cost 90 min, now in the traps memory): a binary
+    built in a git WORKTREE chdirs to the worktree's OWN Runtime
+    (`ChdirToAssetRoot` probes `<bindir>/../../Runtime`) and silently
+    renders COMMITTED content — vs the main Runtime's user-uncommitted
+    GREETS.FLD that the greets pin includes — faking a 150-186k-px
+    "regression" that survived every code bisect (all arms 0-1 px once
+    content was held constant). To gate a worktree binary, copy it INTO
+    the target Runtime.
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`
