@@ -92,8 +92,15 @@ void RenderInner(const fds::RenderContext& ctx, float x1, float y1, float x2, fl
 
 	Vertex* V[4];
 
+	// S2 / B5 tile pre-reject (see RenderInnerMekalele for the rationale).
+	const bool bboxCull = fds::FeatureFlags::tile_bbox_cull();
+	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
+
 	while (I--) {
-		Face* F = (FLS++)->face;
+		const fds::FListEntry* ep = FLS++;
+		if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+		                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
+		Face* F = ep->face;
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;
@@ -223,8 +230,20 @@ void RenderInnerMekalele(float x1, float y1, float x2, float y2) {
 
 	Vertex* V[4];
 
+	// S2 / B5 tile pre-reject: skip faces whose stamped screen bbox
+	// (Transform.cpp FList build) misses this tile rect BEFORE touching the
+	// Face — a rejected face costs only the sequential FListEntry read, not
+	// the three scattered Vertex loads the visibility test needs. Pure reject
+	// (the clipper already clips to the tile), gated for A/B; flag-off faces
+	// carry the cover-all sentinel so the test never fires.
+	const bool bboxCull = fds::FeatureFlags::tile_bbox_cull();
+	const int tx1 = int(x1), ty1 = int(y1), tx2 = int(x2), ty2 = int(y2);
+
 	while (I--) {
-		Face* F = (FLS++)->face;
+		const fds::FListEntry* ep = FLS++;
+		if (bboxCull && (ep->bbMaxX < tx1 || ep->bbMinX >= tx2 ||
+		                 ep->bbMaxY < ty1 || ep->bbMinY >= ty2)) continue;
+		Face* F = ep->face;
 
 		// Get Mapping Coordinates from the rendered face.
 		A = F->A; B = F->B;

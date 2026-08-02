@@ -84,6 +84,7 @@ FDS_FLAG_BOOL(rast_inside_template,     "FDS_RAST_INSIDE_TEMPLATE",     1,      
 
 // ─── sort ────────────────────────────────────────────────────────────────
 FDS_FLAG_BOOL(no_sort,                  "FDS_NO_SORT",                  0,                              "sort",     "Bypass Radix_SortingASM — dispatch FList in transform order (correctness depends on the rasterizer being order-independent)")
+FDS_FLAG_BOOL(tile_bbox_cull,           "FDS_TILE_BBOX_CULL",           1,                              "sort",     "S2/B5 per-tile face pre-reject: at FList-build time stamp each face's projected screen bbox into its FListEntry; the per-tile rasterizer walk (RenderInnerMekalele/RenderInner) 4-compare-rejects faces whose bbox misses the tile rect BEFORE dereferencing the Face — a rejected face costs only the sequential FListEntry read (skips the 3 scattered Vertex flag loads + the clipper entry). PURE reject (the clipper already clips to the tile → byte-identical output; near-plane-straddling faces keep the cover-all sentinel and are never rejected). Default ON; --no-tile_bbox_cull restores the un-culled walk for A/B + the byte-null baseline. General win at the 400k-poly poses (city/chase/displaced greets); scales with face count.")
 
 // ─── transparency ────────────────────────────────────────────────────────
 FDS_FLAG_BOOL(no_quad_sort,             "FDS_NO_QUAD_SORT",             0,                              "xpar",     "Skip quad reorder during sort")

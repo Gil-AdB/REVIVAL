@@ -17,9 +17,26 @@ namespace fds {
 // sortKey is a copy of Face::SortZ.DW (the 32-bit IEEE float bit pattern
 // — the radix sort treats it as an unsigned integer key, which works
 // because all values written to SortZ.F at fill time are non-negative).
+//
+// bbMinX/Y..bbMaxX/Y — the face's screen-space bounding box (quantized to
+// int16, floor/ceil with a 1px margin), stamped at FList-build time from
+// the projected PX/PY (docs/ENVDYN_DISPLACEMENT_PLAN.md B5 / S2 tile
+// pre-reject). The tile-walk rasterizer dispatchers (RenderInner*) reject
+// a face whose bbox misses the tile rect BEFORE dereferencing the Face —
+// so a rejected face costs only this sequential read, not the three
+// scattered Vertex loads the visibility test would do. Kept inline in the
+// FListEntry so the reject reads the same 16-byte-ish slot the walk
+// already streams (co-located with sortKey/face). Default = "covers all"
+// (INT16_MIN..INT16_MAX) so the reject never fires unless the box was
+// filled: near-plane-straddling faces (PX/PY invalid) and every non-main
+// pass that doesn't fill it stay conservatively un-rejected — byte-safe.
+// This is a PURE reject (the clipper already clips to the tile rect, so
+// output is byte-identical); --tile_bbox_cull gates it for A/B.
 struct FListEntry {
     uint32_t sortKey;
     Face*    face;
+    int16_t  bbMinX = -32768, bbMinY = -32768;
+    int16_t  bbMaxX =  32767, bbMaxY =  32767;
 };
 
 // Per-pass face list + counters. The main pass and each shadow pass

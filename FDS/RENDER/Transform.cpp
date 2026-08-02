@@ -1545,6 +1545,19 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 	// probe (face-level; see the note at the mesh loop). Hoisted bool —
 	// false on every non-bake pass, so the per-face cost is one branch.
 	const bool envFaceSkip = fds::g_envBakeSkipDynamic && fds::EnvBake_HasSkipFaces();
+	// S2 / B5 tile pre-reject (docs/ENVDYN_DISPLACEMENT_PLAN.md): stamp each
+	// pushed face's projected screen bbox into its FListEntry so the per-tile
+	// rasterizer walk can 4-compare-reject it before the Face deref. Filled
+	// only when the flag is on (flag-off leaves the FListEntry's cover-all
+	// default -> the walk never rejects -> today's exact path, byte-identical).
+	// Read the flag + nearZ once per mesh.
+	const bool tileBboxCull = fds::FeatureFlags::tile_bbox_cull();
+	const float bboxNearZ   = cam.nearZ;
+	auto satI16 = [](float v) -> int16_t {
+		if (v < -32768.0f) return -32768;
+		if (v >  32767.0f) return  32767;
+		return int16_t(v);
+	};
 	for (F=tFaces;F<FEnd;F++) {
 		if (envFaceSkip && fds::EnvBake_FaceExcluded(F, T)) continue;
 		if ((hideInner || hideOuter) && F->Txtr && F->Txtr->Name) {
@@ -1792,7 +1805,46 @@ AfterXForm:FEnd=tFaces+T->FIndex;
 			// captures the final value (legacy layout could push
 			// the Face* first since the radix sort dereffed back
 			// through it; the new FListEntry has sortKey inline).
-			*Ins++ = { F->SortZ.DW, F };
+			fds::FListEntry* e = Ins++;
+			e->sortKey = F->SortZ.DW;
+			e->face    = F;
+			// S2 tile pre-reject bbox. Read the projected PX/PY straight off
+			// the face's own Vertex pointers (A/B/C — exactly what the clipper
+			// + rasterizer read), so this is robust even for meshes whose SoA
+			// F->*_idx aren't populated (e.g. the conetest giant quad, whose
+			// wrong index only perturbs the Z-buffered SortZ harmlessly but
+			// would give a degenerate bbox from frame->PX[0]). PX/PY/TPos_AOS
+			// all sit in the Vertex's first cache line. Valid only when all
+			// three verts are in FRONT of the near plane: behind-near PX/PY are
+			// stale (the projection skips the divide there), so those faces get
+			// the cover-all box and are never rejected — the near-plane-clipped
+			// fragments the clipper would still produce are kept. The box is a
+			// conservative superset of the un-clipped triangle (floor/ceil +
+			// 1px margin, int16-saturated); the clipper only SHRINKS coverage,
+			// so a box that misses the tile means zero output there → the
+			// reject is byte-identical to clipping.
+			if (tileBboxCull) {
+				const Vertex* va = F->A; const Vertex* vb = F->B; const Vertex* vc = F->C;
+				const float za = va->TPos_AOS.z, zb = vb->TPos_AOS.z, zc = vc->TPos_AOS.z;
+				if (za > bboxNearZ && zb > bboxNearZ && zc > bboxNearZ) {
+					const float pxa = va->PX, pxb = vb->PX, pxc = vc->PX;
+					const float pya = va->PY, pyb = vb->PY, pyc = vc->PY;
+					const float minx = std::min(std::min(pxa, pxb), pxc);
+					const float maxx = std::max(std::max(pxa, pxb), pxc);
+					const float miny = std::min(std::min(pya, pyb), pyc);
+					const float maxy = std::max(std::max(pya, pyb), pyc);
+					e->bbMinX = satI16(floorf(minx) - 1.0f);
+					e->bbMinY = satI16(floorf(miny) - 1.0f);
+					e->bbMaxX = satI16(ceilf (maxx) + 1.0f);
+					e->bbMaxY = satI16(ceilf (maxy) + 1.0f);
+				} else {
+					e->bbMinX = e->bbMinY = -32768;
+					e->bbMaxX = e->bbMaxY =  32767;
+				}
+			} else {
+				e->bbMinX = e->bbMinY = -32768;
+				e->bbMaxX = e->bbMaxY =  32767;
+			}
 		}
 	}  // close per-face loop body opened above
 	}
