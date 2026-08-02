@@ -27,6 +27,7 @@
 #include <RENDER/MirrorShatter.h>
 #include "RENDER/EnvBake.h"
 #include "RENDER/WorldAabb.h"
+#include "RENDER/ChunkOcclusion.h"
 #include "FillerTest.h"
 
 // FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
@@ -3399,6 +3400,14 @@ struct GreetsScene : SceneDriver {
 		// PROFILER: XFRM phase.
 		prof.switchTo(PROF_XFRM);
 
+		// Phase B: arm the prev-frame chunk-occlusion cull (poses are current
+		// post-Animate) BEFORE the transform. The depth capture itself happens
+		// in ChunkOcclusion_EndFrame below (post-Render — ZPage16 is cleared
+		// before Transform, so it can't be read here). AABB refresh cost lands
+		// in XFRM; the min-pool lands in RNDR and is reported by --vis_stats.
+		// No-op unless --chunk_occlusion (or --vis_stats).
+		fds::ChunkOcclusion_BeginFrame(GreetSc);
+
 		_tickT = TailProf::nowNs();
 		Transform_Objects(GreetSc, fds::g_mainCamera, fds::g_mainFaces);
 		TailProf::mark("Tick-Xfrm", _tickT); _tickT = TailProf::nowNs();
@@ -3513,6 +3522,12 @@ struct GreetsScene : SceneDriver {
 		} else {
 			Render();
 		}
+
+		// Phase B: capture this frame's final opaque depth (ZPage16 is live
+		// right after Render) as the NEXT frame's occluder, run the
+		// --chunk_occl_verify over-cull audit on this frame's culled chunks,
+		// report --vis_stats, reset.
+		fds::ChunkOcclusion_EndFrame(GreetSc);
 
 		// F9: one-shot PPM frame dump to /tmp/greets_dump_N.ppm. Edge-
 		// triggered so a held key only fires once. Lets the user fly

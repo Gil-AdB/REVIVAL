@@ -468,6 +468,7 @@ material global ID or ptr
 #include <Base/TriMesh.h>
 #include <Base/FeatureFlags.h>
 #include <RENDER/EnvCube.h>
+#include <RENDER/ChunkOcclusion.h>  // g_occlSnapshotInert: pin dumps keep the cull inert
 #include <Base/TuneServer.h>
 #include "Config.h"
 #include "Threads.h"
@@ -1455,6 +1456,13 @@ int main(int argc, const char *argv[])
 		// Integer scene clock only: captures must be a pure function of the
 		// pinned Timer, not of wall-clock fractions (see g_FrameTimeF).
 		g_fineSceneClock = false;
+		// Pin dumps must stay a pure function of Timer: the prev-frame chunk
+		// occlusion cull (ChunkOcclusion.h) would make ticks 2..N of a multi-t
+		// recipe depend on the PREVIOUS timestamp's depth — recipe-fragile
+		// pins would move. Force it inert for every snapshot scene; the bench
+		// harness (timing + verify sweep) keeps it live. --chunk_occl_snapshot_force
+		// ([dev]) re-enables it for the temporal-pop ground-truth pixel rig.
+		fds::g_occlSnapshotInert = !fds::FeatureFlags::chunk_occl_snapshot_force();
 		if (snap.scene == "city") {
 			return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
 		}

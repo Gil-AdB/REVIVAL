@@ -71,6 +71,7 @@
 #include "Base/FeatureFlags.h"
 #include "RENDER/EnvCube.h"   // env_cube: trig-free per-triangle face select
 #include "RENDER/EnvBake.h"   // --env_live_water: animated water in env lookups
+#include "RENDER/ChunkOcclusion.h"  // Phase B: conservative main-view chunk occlusion cull
 #include "Base/Scene.h"
 #include "Base/TriMesh.h"
 #include "Base/Vertex.h"
@@ -582,6 +583,12 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 	// it gates are only set under --greets_displace, so default scenes never
 	// carry either flag and this is inert.
 	const bool _offscreenPass = g_inShadowPass || (fds::g_offscreenViewDepth > 0);
+	// Phase B chunk occlusion + vis-stats: MAIN VIEW ONLY (off-axis mirror RTT
+	// sets g_offAxisFrustumCull; offscreen bakes set _offscreenPass). Cached once
+	// so the per-mesh hot loop pays a register read, not a flag/TLS lookup.
+	const bool _mainView   = !_offscreenPass && !fds::g_offAxisFrustumCull;
+	const bool _occlCull   = _mainView && fds::g_chunkOcclActive;
+	const bool _visStats   = _mainView && fds::g_visStatsActive;
 	const bool coneCull = g_inShadowPass
 		&& fds::FeatureFlags::shadow_cone_cull()
 		&& g_currentShadowOmni
@@ -711,6 +718,14 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 		                            // shadow-render tasks. Hold locally per call.
 
 		if (!(T->Flags&HTrack_Visible)) {frustumFlags|=Tri_Invisible; continue;}
+
+		// vis-stats: count every main-view mesh that is a real transform
+		// candidate (past the proxy/visibility skips), before the frustum +
+		// occlusion culls. meshesXformed is stamped after both culls below.
+		if (_visStats) {
+			++fds::g_chunkVisStats.meshesSeen;
+			fds::g_chunkVisStats.vertsSeen += T->VIndex;
+		}
 
 		// Static-bake filter: skip meshes whose *position* animates
 		// (Pos spline has more than 1 key). Their t=0 silhouette would
@@ -1079,8 +1094,28 @@ void Transform_Objects(Scene *Sc, fds::CameraContext &cam, fds::FaceListContext 
 			if (frustumFlags&Tri_Ahead) frustumFlags &=~Tri_Inside;
 		}
 		}
+		// Phase B: conservative chunk occlusion cull (docs/VISIBILITY_PLAN.md
+		// §7). Runs AFTER the frustum cull (cheap out-of-view reject first),
+		// BEFORE the per-vertex transform + FList build (the work we reclaim).
+		// MAIN VIEW ONLY. Skips only meshes whose world AABB is provably fully
+		// hidden by the flat occluder hi-Z — byte-identical to not culling
+		// (the faces would have z-failed every pixel anyway). Needs a valid
+		// world box (chunks carry one from the Phase-A split; other meshes get
+		// one from WorldAabb_UpdateScene in ChunkOcclusion_BeginFrame).
+		if (_occlCull && T->WorldAabbValid) {
+			const float bmn[3] = { T->WorldAabbMin.x, T->WorldAabbMin.y, T->WorldAabbMin.z };
+			const float bmx[3] = { T->WorldAabbMax.x, T->WorldAabbMax.y, T->WorldAabbMax.z };
+			if (fds::ChunkOcclusion_CullsAabb(bmn, bmx, int(T->VIndex), int(T->FIndex))) {
+				frustumFlags |= Tri_Invisible;
+				continue;
+			}
+		}
+		if (_visStats) {
+			++fds::g_chunkVisStats.meshesXformed;
+			fds::g_chunkVisStats.vertsXformed += T->VIndex;
+		}
 		VEnd=tVerts+T->VIndex;
-		
+
 		/*    FEnd=T->Face+T->NumOfFaces;
 		for (F=T->Face;F<FEnd;F++)
 		if (!(F->Txtr->Flags&Mat_TwoSided))
