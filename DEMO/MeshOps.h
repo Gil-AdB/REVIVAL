@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 struct TriMesh;
 struct Scene;
@@ -249,8 +251,37 @@ void DisplaceMaterialVertices(Scene *Sc, const char *matName, float amp, int mip
 // NormProd re-derived; records to --displace_viz. Same hook contract as
 // SubdivideMaterialFaces (after Preprocess + GreetsRetileFloor, before
 // MakeFacesIndependentByAngle + the chunk split).
+//
+// CROSS-MATERIAL SEAM PINNING (--greets_displace_neighbor_pin, default on):
+// authored borders are also detected by POSITION-COINCIDENCE with NON-DISPLACED
+// geometry, not just by shared vertex index / single-target-face edges. A wall
+// meeting a lintel/ceiling of a different material is usually authored as
+// separate geometry (its own duplicate verts at the same coordinates, possibly
+// another mesh) — those target boundary verts are never index-classified as
+// borders, so without this they displace and the seam opens (the sliver-gap
+// bug). `displacedSet`, when non-null, lists EVERY displaced material name
+// (must include matName): coincidence with a face in that set is IGNORED so a
+// displaced↔displaced junction (e.g. greets rooms↔floor) keeps its relief.
+// When null, only matName is treated as displaced (single-material rigs).
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
-                         float amp, int mip, float adapt, float cellsPerBlock);
+                         float amp, int mip, float adapt, float cellsPerBlock,
+                         const std::vector<std::string> *displacedSet = nullptr);
+
+// PARENT-PLANE registry for the displaced stone's shadow clustering
+// (--greets_displace_shadow_planes). DisplaceStoneSubdiv records, per target
+// material, the set of AUTHORED (pre-displacement) face planes — deduped on the
+// same quantization grid the greets shadow clustering uses — and stamps each
+// emitted target face's ShadowMatID with its parent plane's 1-based ordinal
+// (a TRANSIENT tag; the greets clustering consumes it and overwrites the field
+// with the real cluster id). This lets the clustering key displaced facets by
+// the PARENT plane instead of collapsing the whole material to one id: facets
+// of one flat wall still share one id (no per-facet acne), but DIFFERENT walls
+// get different ids, so an occluding wall shadows a receiver wall again (the
+// single-id collapse made the PolyId identity test skip every rooms-vs-rooms
+// occlusion = the light bleed). Returns null when the material has no registry
+// (bake didn't run) or ordinal is 0/out of range.
+struct StoneParentPlane { float nx, ny, nz, d; };   // unit normal + n·p distance
+const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal);
 
 // Companion post-pass, called AFTER MakeFacesIndependentByAngle: re-SMOOTH the
 // displaced stone surface's vertex normals. That pass facets the displaced

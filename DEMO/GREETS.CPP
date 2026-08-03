@@ -1624,8 +1624,13 @@ void Initialize_Greets()
 			// displace pair put a roof-ridge on every stone quad's diagonal).
 			// greets_stone_subdiv > 0 forces that UNIFORM level (the cost-
 			// comparison baseline); 0 = adaptive 0..3 by height-map busyness.
-			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb);
-			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb);
+			// The displaced-material set (rooms+floor) lets the cross-material
+			// seam pin (--greets_displace_neighbor_pin) tell a NON-displaced
+			// neighbour (siling/lintel — pin against it) from the sibling
+			// displaced junction (rooms<->floor — leave relieved).
+			static const std::vector<std::string> kDisplacedMats = { "rooms", "floor" };
+			DisplaceStoneSubdiv(GreetSc, "rooms", L, amp, mip, adapt, cpb, &kDisplacedMats);
+			DisplaceStoneSubdiv(GreetSc, "floor", L, amp, mip, adapt, cpb, &kDisplacedMats);
 			// B4 residual: geometry now carries the low band of the relief, so
 			// POM must march the RESIDUAL (full − upsampled low band) or the
 			// blocks get counted twice (geometry bump + parallax shift of the
@@ -1933,17 +1938,33 @@ void Initialize_Greets()
 		// shadow). Displacement tilts/offsets EVERY facet onto its own plane, so
 		// each facet would get a UNIQUE ShadowMatID and self-shadow its neighbours
 		// — the per-facet hairline acne on the subdivided walls (worst at grazing).
-		// Collapse the displaced walls to a single shadow id (as the mummies do),
-		// so the surface self-matches everywhere; block-relief shading still comes
-		// from the normal map + POM + AO per pixel. Only when the bake ran — with
-		// --greets_displace off the coplanar flat-wall clustering is byte-identical.
-		if (fds::FeatureFlags::greets_displace()) {
+		//
+		// PARENT-PLANE inheritance (--greets_displace_shadow_planes, default on):
+		// key each displaced facet by its PARENT (pre-displacement authored)
+		// plane — the bake stamped the parent's registry ordinal into
+		// F->ShadowMatID (transient tag; see MeshOps_StoneParentPlane). Facets of
+		// one flat wall share one id (no per-facet acne, same as the collapse
+		// WITHIN a wall) but DIFFERENT walls get different ids, so an occluding
+		// wall shadows a receiver wall again. The previous whole-material
+		// single-id collapse made every rooms-vs-rooms occlusion self-match in
+		// the deferred PolyId identity test — an omni behind a wall lit the next
+		// wall straight through it (the reported light bleed). --no- restores
+		// the collapse (momy-style) for A/B.
+		const bool planeInherit = fds::FeatureFlags::greets_displace() &&
+		                          fds::FeatureFlags::greets_displace_shadow_planes();
+		if (fds::FeatureFlags::greets_displace() && !planeInherit) {
 			kSingleShadowIdMats.insert("rooms");
 			kSingleShadowIdMats.insert("floor");
 		}
+		auto isDisplacedStone = [&](const Material *M) {
+			return planeInherit && M && M->Name &&
+			       (!std::strcmp(M->Name, "rooms") || !std::strcmp(M->Name, "floor"));
+		};
 
 		int totalClusters = 0;
 		int totalTaggedFaces = 0;
+		// all meshes' clusters (the proxy stamping below needs cross-mesh lookup)
+		std::map<std::pair<Material*, PlaneKey>, uint16_t> allClusters;
 		for (Object *Obj = GreetSc->ObjectHead; Obj; Obj = Obj->Next) {
 			if (Obj->Type != Obj_TriMesh || !Obj->Name) continue;
 			if (!std::strstr(Obj->Name, "Piramid")) continue;
@@ -1976,12 +1997,25 @@ void Initialize_Greets()
 				// surface lands in ONE cluster (one ShadowMatID) → self-matches
 				// everywhere, killing the per-facet self-shadow acne lines.
 				const bool singleId = src->Name && kSingleShadowIdMats.count(src->Name) > 0;
-				PlaneKey key = singleId
-				    ? PlaneKey{ 0, 0, 0, 0 }
-				    : PlaneKey{ quantize(nx, kNormalQ),
-				                quantize(ny, kNormalQ),
-				                quantize(nz, kNormalQ),
-				                quantize(d,  kDistanceQ) };
+				PlaneKey key;
+				if (const StoneParentPlane *pp = isDisplacedStone(src)
+				        ? MeshOps_StoneParentPlane(src->Name, F->ShadowMatID) : nullptr) {
+					// displaced stone: cluster by the PARENT authored plane the
+					// bake stamped (facet planes are per-facet noise).
+					key = PlaneKey{ quantize(pp->nx, kNormalQ),
+					                quantize(pp->ny, kNormalQ),
+					                quantize(pp->nz, kNormalQ),
+					                quantize(pp->d,  kDistanceQ) };
+				} else if (singleId || (isDisplacedStone(src) && F->ShadowMatID == 0)) {
+					// single-id collapse; also the unstamped-displaced fallback
+					// (degenerate parent normal) so those faces still self-match.
+					key = PlaneKey{ 0, 0, 0, 0 };
+				} else {
+					key = PlaneKey{ quantize(nx, kNormalQ),
+					                quantize(ny, kNormalQ),
+					                quantize(nz, kNormalQ),
+					                quantize(d,  kDistanceQ) };
+				}
 				auto mk = std::make_pair(src, key);
 				auto it = clusters.find(mk);
 				if (it == clusters.end()) {
@@ -2002,17 +2036,47 @@ void Initialize_Greets()
 				"(%d tagged, %d degen skipped)\n",
 				Obj->Name, unsigned(T->FIndex), clusters.size(),
 				meshTaggedFaces, degenFaceCount);
+			allClusters.insert(clusters.begin(), clusters.end());
 		}
 		std::fprintf(stderr,
 			"[PIRAMID-SPLIT] total clusters: %d  tagged faces: %d  "
 			"(per-face F->ShadowMatID; no Material clones)\n",
 			totalClusters, totalTaggedFaces);
+		// S1 offscreen proxy under parent-plane inheritance: the flat proxy IS
+		// the parent geometry, so each proxy face's OWN authored plane quantizes
+		// to exactly the parent key its displaced facets clustered under — stamp
+		// per face by lookup (the id must match per WALL now, not per material).
+		if (g_stoneProxyMesh && planeInherit) {
+			int hit = 0, miss = 0;
+			for (Face *F = g_stoneProxyMesh->Faces;
+			     F < g_stoneProxyMesh->Faces + g_stoneProxyMesh->FIndex; ++F) {
+				if (!F->Txtr || !isDisplacedStone(F->Txtr)) continue;
+				const float len = std::sqrt(F->N.x*F->N.x + F->N.y*F->N.y + F->N.z*F->N.z);
+				if (!(len > 1e-4f)) continue;
+				const float inv = 1.0f / len;
+				// same d convention as the bake registry: n̂·A = −NormProd/|N|
+				const float d = -F->NormProd * inv;
+				const PlaneKey key{ quantize(F->N.x*inv, kNormalQ),
+				                    quantize(F->N.y*inv, kNormalQ),
+				                    quantize(F->N.z*inv, kNormalQ),
+				                    quantize(d, kDistanceQ) };
+				auto it = allClusters.find(std::make_pair(F->Txtr, key));
+				if (it != allClusters.end()) { F->ShadowMatID = it->second; ++hit; }
+				else ++miss;
+			}
+			std::fprintf(stderr, "[STONE-PROXY] parent-plane ids stamped onto the "
+				"proxy caster: %d matched, %d unmatched\n", hit, miss);
+		}
 	}
-	// S1 offscreen proxy: stamp the displaced walls' (single-id) shadow cluster
-	// onto the flat proxy caster so the deferred PolyId self-shadow test matches
-	// between the displaced G-buffer pixels and the flat occluder. Must run AFTER
-	// the clustering above assigned the ids. No-op unless the proxy was built.
-	if (g_stoneProxyMesh) FinalizeStoneProxy(GreetSc, g_stoneProxyMesh);
+	// S1 offscreen proxy (single-id collapse path): stamp the displaced walls'
+	// single shadow cluster onto the flat proxy caster so the deferred PolyId
+	// self-shadow test matches between the displaced G-buffer pixels and the
+	// flat occluder. Must run AFTER the clustering above assigned the ids.
+	// No-op unless the proxy was built; the parent-plane path stamped per-face
+	// ids inside the block above instead.
+	if (g_stoneProxyMesh && !(fds::FeatureFlags::greets_displace() &&
+	                          fds::FeatureFlags::greets_displace_shadow_planes()))
+		FinalizeStoneProxy(GreetSc, g_stoneProxyMesh);
 	// Piramid spatial chunk split: partition Piramid.lwo's faces into a
 	// 3D spatial grid; each non-empty cell becomes its own TriMesh + Object
 	// with a tight bsphere. The original Piramid is "retired" (FIndex=0)
