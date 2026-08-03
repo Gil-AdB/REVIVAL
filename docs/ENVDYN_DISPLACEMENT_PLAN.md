@@ -534,6 +534,70 @@ only, flags default-off until the user approves looks.
     "regression" that survived every code bisect (all arms 0-1 px once
     content was held constant). To gate a worktree binary, copy it INTO
     the target Runtime.
+- [x] **S4c — the t=6097 SLIVER GAP (fold/inversion) + the LIGHT BLEED
+      (shadow-id collapse). DONE (2026-08-03, worktree branch).** User repro:
+      `FDS_GREETS_CAM="18.4499683,5.16043377,-57.6482239,-0.824408829,
+      -0.544822097,-0.153357133"` t=6097 `--greets_displace` — a long thin
+      see-through sliver at a displaced wall's top edge (z==0 scan: 52 px
+      through the wall), plus light lancing along the seam.
+  - **Gap root cause — NOT a border-pin miss (three hypotheses disproven by
+    measurement):** position-coincident cross-material verts (census: rooms
+    48 coincident / 0 newly pinned — the single-target-face rule already pins
+    the whole outer ring), index-duplicated verts (16/3704, weld no-op), and
+    hard-crease pinning (44 edges pinned, gap byte-identical) all ruled out.
+    The gap is a FOLD: a narrow authored return strip (x=17.898, 0.127 tall)
+    has verts whose Preprocess-smoothed normals diverge across the corner;
+    mean-centred recession moves them 0.02 vs 0.135 world → faces twist past
+    90° → the commit's authored-sign N flip leaves N opposing the WINDING →
+    the Transform plane cull rejects them while they front the camera.
+    PROOF: force-two-sided closes the sliver with no other change (52→1 px);
+    recess-only clamp reproduces it, protrude-only closes it; all
+    position-keyed edges at the crack are sealed (the geometry is watertight
+    — it's a CULL hole, not an opening).
+  - **Fix `--greets_displace_fold_relax` (default ON):** B1-style iterative
+    fold relaxation in DisplaceStoneSubdiv — halve the displacement of every
+    vert of a face whose displaced winding crossed its own BASE plane
+    (g_disp·g_base < 0; convention-FREE — an authored-N criterion flattened
+    the SceneBuilder rig, whose winding-vs-N convention is opposite to FLD
+    content, and at first marked the healthy −1 mass = the whole carve),
+    before the cross-patch heal. Population: 3,882/63k rooms + 62 floor faces.
+  - **Sweep (z==0, 1920×1080, ON vs OFF):** repro 52→1 (the 1 px pre-exists),
+    frontal t=1867 104→2, graze −10,3,−45 624→1, gray t=2145 793→0, floor
+    graze 1728→1, t=100..5780 timeline 590/391/135/137/145/3870 → 144/2/3/2/
+    0/4; opened=0 at every enclosed pose; the two vista poses' "opened" px
+    hug silhouettes (OFF's twisted slivers jutted past the authored edge).
+    Carve look unchanged at the campaign poses (frontal/gray/graze crops).
+  - **Bleed root cause:** the acne fix's whole-material single-ShadowMatID
+    collapse made every rooms-vs-rooms occlusion self-match in the deferred
+    PolyId identity test — the shadow pass renders two-sided, so the occluding
+    wall IS in the omni's cube, it just carried the receiver's own id → an
+    omni behind a wall lit the next wall through it.
+  - **Fix `--greets_displace_shadow_planes` (default ON):** PARENT-PLANE
+    ShadowMatID inheritance — the bake stamps each emitted face with its
+    parent (pre-displacement authored) plane's registry ordinal
+    (MeshOps_StoneParentPlane; transient tag), and the greets clustering
+    resolves it to the standard quantized plane key: one id per WALL (acne
+    stays fixed within a wall — same semantics as the flat clustering) but
+    different walls occlude each other again. Clusters 2133 (collapse) →
+    2183 = exactly the flags-off flat count. The S1 proxy gets per-face
+    plane-matched ids. A/B at the repro pose (no --ao_direct): the bright
+    band lancing along the wall seam is GONE with parent-plane ids and
+    UNCHANGED by the gap fix alone — the bleeding was the shadow identity
+    skip, not (mostly) the geometric gap; --ao_direct remains a taste dial
+    for per-groove micro-shadow only. Acne pose (−10,3,−45) stays clean.
+  - **Also `--greets_displace_neighbor_pin` (default ON):** position-
+    coincidence border pinning against non-displaced geometry (scene-wide
+    1e-4 vert+edge grid), the class originally hypothesized. Inert on current
+    content (census 0 newly pinned) but correct — proven by the new rig.
+  - **Rigs (`--scene-displacetest`):** `FDS_DISPLACETEST_NEIGHBOR=1` — a
+    2-quad wall whose interior mid-edge is coincident with a separate
+    non-displaced lintel: mid-line max|disp| OFF=0.48 → ON=0.0000 (PASS).
+    `FDS_DISPLACETEST_FOLD=1` — REAL greets_wall_h.png, the SHIPPED amp 0.3,
+    corner-smoothed normals on a 0.15-deep return strip: inverted faces
+    OFF=1 → ON=0 (PASS; classifier groups by the parent-plane stamps).
+  - **Gates:** render_gate 3/3 vs committed baselines; city `37e62845` +
+    fountain `51fff7cd` byte-exact; wasm links; greets flags-off structurally
+    inert (clustering byte-path identical, clusters 2183).
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`

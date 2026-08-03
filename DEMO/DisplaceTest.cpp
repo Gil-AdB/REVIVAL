@@ -38,6 +38,9 @@
 // (map, span) combos, then renders the selected combo from 4 poses (frontal,
 // 45°, grazing, edge-on SILHOUETTE) × 3 styles (lit, viz-1 wireframe, viz-2
 // error) to /tmp/displacetest_<pose>_<style>.ppm and exits.
+// FDS_DISPLACETEST_JUNCTION=1: fan↔edge seam-hole A/B (seam_union off vs on).
+// FDS_DISPLACETEST_NEIGHBOR=1: cross-material coincident-seam A/B
+// (neighbor_pin off vs on; numeric mid-line assert + lit PPMs).
 //
 //   ./DEMO --scene-displacetest                       (interactive, map 0)
 //   FDS_DISPLACETEST_DUMP=1 ./DEMO --scene-displacetest
@@ -65,6 +68,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <vector>
 
 extern void Scene_RebuildMatTable(Scene *Sc);
@@ -372,6 +376,199 @@ DTestScene buildJunction(int mapId, int vizMode) {
     return d;
 }
 
+// ── FOLD/INVERSION rig (--greets_displace_fold_relax) — the t=6097 sliver ────
+// Reproduces the REAL greets mechanism (measured at the repro pose): a NARROW
+// RETURN strip at a wall corner whose verts carry corner-SMOOTHED vertex
+// normals (Preprocess averages across the 90° crease), so the mean-centered
+// relief recesses adjacent verts along DIVERGING directions by different
+// amounts and twists strip faces past 90° — the committed N then opposes the
+// winding and the plane cull rejects the face while it still fronts the
+// camera: a see-through sliver. Modeled faithfully: the REAL greets wall map
+// (map 2), the SHIPPED amp 0.3 (not the rig's punchy 0.8), mean-centered
+// displacement, a strip one small step deep (0.15 — the greets return was
+// 0.127), corner column shared BY INDEX with 45°-averaged normals.
+// NOT modeled (documented per review): the full greets context — multi-tile
+// UV charts, the Piramid chunk split, shadows/POM/deferred shading, and the
+// exact repro camera (the rig checks the MESH invariant instead: with
+// fold_relax OFF the bake must produce inverted faces; ON must produce none —
+// counted convention-free by majority winding sign per flat piece).
+DTestScene buildFold() {
+    using namespace fds::scene_builder;
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 300.0f);
+    b.SetAmbient(60, 60, 60);
+
+    Texture *hm = makeHeight8(2);                      // REAL greets_wall_h.png
+    Texture *tex = b.AddSolidColorTexture(8, 8, 0xFFB0B0B0u);
+    Material *mat = b.AddMaterial("dtest", tex, {176, 176, 176, 255}, 0);
+    mat->HeightMap = hm;
+
+    // Front wall x∈[-4,4], y∈[0,5], z=0, facing -z.
+    const Vector wV[4] = {
+        Vector(4.0f, 0.0f, 0.0f), Vector(-4.0f, 0.0f, 0.0f),
+        Vector(-4.0f, 5.0f, 0.0f), Vector(4.0f, 5.0f, 0.0f),
+    };
+    TriMesh *T = b.AddQuad("fold", wV, mat);
+
+    // Extend: return strip at x=4, z∈[0,-0.15], sharing corner column verts
+    // 0 (y=0) and 3 (y=5) BY INDEX. Corner normals = 45°-averaged (the
+    // Preprocess smoothing greets has); far column pure +x.
+    Vertex *nv = new Vertex[6];
+    std::memcpy(nv, T->Verts, sizeof(Vertex) * 4);
+    delete[] T->Verts;
+    T->Verts = nv; T->VIndex = 6;
+    const float s2 = 0.70710678f;
+    nv[0].N = Vector(s2, 0.0f, -s2); nv[0].TN = nv[0].N;   // corner col: averaged
+    nv[3].N = Vector(s2, 0.0f, -s2); nv[3].TN = nv[3].N;
+    for (int k = 0; k < 2; ++k) {
+        Vertex &V = nv[4 + k];
+        std::memset(&V, 0, sizeof(Vertex));
+        V.Pos = (k == 0) ? Vector(4.0f, 0.0f, -0.15f) : Vector(4.0f, 5.0f, -0.15f);
+        V.N = Vector(1.0f, 0.0f, 0.0f); V.TN = V.N;
+        V.LR = V.LG = V.LB = 200; V.LA = 255;
+    }
+    Face *nf = new Face[4];
+    std::memcpy(nf, T->Faces, sizeof(Face) * 2);
+    delete[] T->Faces;
+    T->Faces = nf; T->FIndex = 4;
+    const int wIdx[2][3] = { {0,1,2}, {0,2,3} };
+    for (int f = 0; f < 2; ++f) {
+        nf[f].A = nv + wIdx[f][0]; nf[f].B = nv + wIdx[f][1]; nf[f].C = nv + wIdx[f][2];
+    }
+    // wall UV: one tile over 8x5; strip UV: its own axis-aligned chart (u from
+    // z so the strip footprint crosses the same horizontal grooves as greets').
+    auto uvW = [](const Vector &p, float &u, float &v){ u = (4.0f - p.x) * 0.125f; v = p.y * 0.2f; };
+    auto uvS = [](const Vector &p, float &u, float &v){ u = -p.z * 0.125f; v = p.y * 0.2f; };
+    auto stampF = [&](Face &F, int ai, int bi, int ci, const Vector &N,
+                      void (*uv)(const Vector&, float&, float&)){
+        F.A = nv + ai; F.B = nv + bi; F.C = nv + ci;
+        F.Txtr = mat; F.Filler = nf[0].Filler; F.frame = nullptr;
+        uv(nv[ai].Pos, F.U1, F.V1); uv(nv[bi].Pos, F.U2, F.V2); uv(nv[ci].Pos, F.U3, F.V3);
+        F.EU1=F.U1;F.EV1=F.V1; F.EU2=F.U2;F.EV2=F.V2; F.EU3=F.U3;F.EV3=F.V3;
+        F.N = N;
+        F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+    };
+    stampF(nf[0], 0, 1, 2, Vector(0,0,-1), uvW);
+    stampF(nf[1], 0, 2, 3, Vector(0,0,-1), uvW);
+    stampF(nf[2], 0, 4, 5, Vector(1,0,0), uvS);      // return strip
+    stampF(nf[3], 0, 5, 3, Vector(1,0,0), uvS);
+    Vector ctr{0,0,0}; for (int i=0;i<6;++i){ ctr.x+=nv[i].Pos.x; ctr.y+=nv[i].Pos.y; ctr.z+=nv[i].Pos.z; }
+    ctr.x/=6; ctr.y/=6; ctr.z/=6; float radSq=0;
+    for (int i=0;i<6;++i){ const float dx=nv[i].Pos.x-ctr.x,dy=nv[i].Pos.y-ctr.y,dz=nv[i].Pos.z-ctr.z; radSq=std::max(radSq,dx*dx+dy*dy+dz*dz); }
+    T->BSphereCtr=ctr; T->BSphereRad=radSq; T->BSphereRadius=std::sqrt(radSq);
+    Compute_FaceVertexIndices(T);
+
+    b.AddOmni(Vector(11.0f, 9.0f, -6.0f), {255, 255, 255, 0}, 1.6f, 80.0f);
+    b.SetCamera(Vector(0.0f, 2.5f, -13.0f), Vector(0.0f, 2.5f, 0.0f), 55.0f);
+    b.Finalize();
+
+    DTestScene d; d.sc = b.scene(); d.wall = T; d.hm = hm;
+    DisplaceStoneSubdiv(d.sc, "dtest", FF::greets_stone_subdiv(),
+                        FF::greets_displace_amp(), FF::greets_displace_mip(),
+                        FF::greets_displace_adapt(), FF::greets_displace_cpb());
+    MakeFacesIndependentByAngle(d.sc, 30.0f);
+    Scene_RebuildMatTable(d.sc);
+    return d;
+}
+
+// ── cross-material NEIGHBOR-seam rig (--greets_displace_neighbor_pin) ────────
+// The bug class: a DISPLACED wall's INTERIOR edge is position-coincident with
+// the edge of a separate NON-displaced piece (a lintel/shelf authored as its
+// own geometry with DUPLICATE verts — not index-shared). The old border rule
+// (edge used by one target face / non-target incidence by INDEX) cannot see the
+// neighbour, so the wall's seam verts displace and the junction tears. The
+// outer wall boundary can never test this (single-target-face edges are always
+// pinned), so the rig makes the seam INTERIOR: a wall of TWO stacked quads
+// sharing the horizontal mid edge at y=4, plus a slab whose attachment edge
+// duplicates that line. Verification is NUMERIC (renders can't isolate it):
+// with the pin the mid-line verts must not displace; without it they must.
+DTestScene buildNeighbor(int mapId) {
+    using namespace fds::scene_builder;
+    SceneBuilder b;
+    b.SetNearFar(0.5f, 300.0f);
+    b.SetAmbient(60, 60, 60);
+
+    Texture *hm = makeHeight8(mapId);
+    Texture *tex = b.AddSolidColorTexture(8, 8, 0xFFB0B0B0u);
+    Material *mat = b.AddMaterial("dtest", tex, {176, 176, 176, 255}, 0);
+    mat->HeightMap = hm;
+    Texture *ltex = b.AddSolidColorTexture(8, 8, 0xFF806040u);
+    Material *lmat = b.AddMaterial("dtestlin", ltex, {128, 96, 64, 255}, 0);
+
+    // LOWER wall quad W1: x∈[-4,4], y∈[0,4], facing -z (AddQuad full setup).
+    const Vector w1V[4] = {
+        Vector(4.0f, 0.0f, 0.0f), Vector(-4.0f, 0.0f, 0.0f),
+        Vector(-4.0f, 4.0f, 0.0f), Vector(4.0f, 4.0f, 0.0f),
+    };
+    TriMesh *T = b.AddQuad("neighbor", w1V, mat);
+
+    // Extend to 10 verts / 6 faces: UPPER quad W2 shares the mid edge (verts
+    // 2,3) by INDEX (one wall — its mid edge is interior, 2 target faces);
+    // the LINTEL duplicates the mid-line endpoints as verts 6,7 (coincident by
+    // POSITION only) and hangs a slab toward -z.
+    Vertex *nv = new Vertex[10];
+    std::memcpy(nv, T->Verts, sizeof(Vertex) * 4);
+    delete[] T->Verts;
+    T->Verts = nv; T->VIndex = 10;
+    const Vector extra[6] = {
+        Vector(-4.0f, 8.0f, 0.0f), Vector(4.0f, 8.0f, 0.0f),           // 4,5 wall top
+        Vector(-4.0f, 4.0f, 0.0f), Vector(4.0f, 4.0f, 0.0f),           // 6,7 lintel @ wall (DUPES of 2,3)
+        Vector(4.0f, 4.0f, -2.0f), Vector(-4.0f, 4.0f, -2.0f),         // 8,9 lintel front
+    };
+    for (int k = 0; k < 6; ++k) {
+        Vertex &V = nv[4 + k];
+        std::memset(&V, 0, sizeof(Vertex));
+        V.Pos = extra[k];
+        V.N = (k < 2) ? nv[0].N : Vector(0.0f, 1.0f, 0.0f);
+        V.TN = V.N;
+        V.LR = V.LG = V.LB = 200; V.LA = 255;
+    }
+    Face *nf = new Face[6];
+    std::memcpy(nf, T->Faces, sizeof(Face) * 2);
+    delete[] T->Faces;
+    T->Faces = nf; T->FIndex = 6;
+    const int w1Idx[2][3] = { {0,1,2}, {0,2,3} };
+    for (int f = 0; f < 2; ++f) {
+        nf[f].A = nv + w1Idx[f][0]; nf[f].B = nv + w1Idx[f][1]; nf[f].C = nv + w1Idx[f][2];
+    }
+    // axis-aligned UVs, one tile over the 8x8 wall (u right-to-left like the
+    // junction rig, v up): the edge-aligned bake path applies.
+    auto uvW = [](const Vector &p, float &u, float &v){ u = (4.0f - p.x) * 0.125f; v = p.y * 0.125f; };
+    auto stampF = [&](Face &F, int ai, int bi, int ci, Material *m, const Vector &N,
+                      void (*uv)(const Vector&, float&, float&)){
+        F.A = nv + ai; F.B = nv + bi; F.C = nv + ci;
+        F.Txtr = m; F.Filler = nf[0].Filler; F.frame = nullptr;
+        uv(nv[ai].Pos, F.U1, F.V1); uv(nv[bi].Pos, F.U2, F.V2); uv(nv[ci].Pos, F.U3, F.V3);
+        F.EU1=F.U1;F.EV1=F.V1; F.EU2=F.U2;F.EV2=F.V2; F.EU3=F.U3;F.EV3=F.V3;
+        F.N = N;
+        F.NormProd = -(F.N.x*F.A->Pos.x + F.N.y*F.A->Pos.y + F.N.z*F.A->Pos.z);
+    };
+    auto uvL = [](const Vector &p, float &u, float &v){ u = (4.0f - p.x) * 0.125f; v = -p.z * 0.5f; };
+    stampF(nf[0], 0, 1, 2, mat, nv[0].N, uvW);            // W1 (re-stamp keeps
+    stampF(nf[1], 0, 2, 3, mat, nv[0].N, uvW);            //  UVs consistent)
+    stampF(nf[2], 3, 2, 4, mat, nv[0].N, uvW);            // W2 upper quad
+    stampF(nf[3], 3, 4, 5, mat, nv[0].N, uvW);
+    stampF(nf[4], 6, 7, 8, lmat, Vector(0,1,0), uvL);     // lintel slab (top)
+    stampF(nf[5], 6, 8, 9, lmat, Vector(0,1,0), uvL);
+    Vector ctr{0,0,0}; for (int i=0;i<10;++i){ ctr.x+=nv[i].Pos.x; ctr.y+=nv[i].Pos.y; ctr.z+=nv[i].Pos.z; }
+    ctr.x/=10; ctr.y/=10; ctr.z/=10; float radSq=0;
+    for (int i=0;i<10;++i){ const float dx=nv[i].Pos.x-ctr.x,dy=nv[i].Pos.y-ctr.y,dz=nv[i].Pos.z-ctr.z; radSq=std::max(radSq,dx*dx+dy*dy+dz*dz); }
+    T->BSphereCtr=ctr; T->BSphereRad=radSq; T->BSphereRadius=std::sqrt(radSq);
+    Compute_FaceVertexIndices(T);
+
+    b.AddOmni(Vector(11.0f, 9.0f, -6.0f), {255, 255, 255, 0}, 1.6f, 80.0f);
+    b.SetCamera(Vector(0.0f, 4.0f, -13.0f), Vector(0.0f, 4.0f, 0.0f), 55.0f);
+    b.Finalize();
+
+    DTestScene d; d.sc = b.scene(); d.wall = T; d.hm = hm;
+    DisplaceStoneSubdiv(d.sc, "dtest", FF::greets_stone_subdiv(),
+                        FF::greets_displace_amp(), FF::greets_displace_mip(),
+                        FF::greets_displace_adapt(), FF::greets_displace_cpb());
+    MakeFacesIndependentByAngle(d.sc, 30.0f);
+    Scene_RebuildMatTable(d.sc);
+    return d;
+}
+
 // Count "enclosed background" pixels in ZPage16: z==0 pixels that have a
 // rendered (z>0) pixel BOTH to their left and right in the same row — i.e.
 // background showing THROUGH the geometry (a hole), not the silhouette. Also
@@ -564,6 +761,143 @@ void Run_DisplaceTest() {
 
     Ambient_Factor = 1.0f; Diffusive_Factor = 1.0f; Specular_Factor = 1.0f;
     ImageSize = 1;
+
+    // ── FOLD/INVERSION headless A/B (FDS_DISPLACETEST_FOLD=1) ────────────────
+    // Bakes the wall+return-strip scene (buildFold: REAL greets map, shipped
+    // amp 0.3, corner-smoothed normals) twice — fold_relax OFF then ON — and
+    // asserts on the MESH invariant: inverted faces (winding opposite the
+    // majority sign of their flat piece — wall keyed by g_z, strip by g_x)
+    // must exist with the relax OFF and be zero with it ON. Also renders a
+    // grazing pose down the strip per mode and reports raw z==0 counts (the
+    // visible sliver needs the exact greets view/occlusion context, so the
+    // render numbers are REPORTED, not asserted).
+    if (std::getenv("FDS_DISPLACETEST_FOLD")) {
+        FF::setDefault(FF::FloatId::greets_displace_amp, 0.3f);   // the SHIPPED amp
+        auto invertedCount = [](const DTestScene &d) -> int {
+            // Group faces by their bake-stamped PARENT-PLANE ordinal (the
+            // ShadowMatID transient tag; exact piece identity — a spatial
+            // classifier misreads displaced cells near the corner), signed by
+            // g·n̂_parent; the majority sign per group is the healthy winding
+            // convention, the minority are inverted.
+            std::map<uint16_t, std::pair<long,long>> pmCnt;   // ordinal → (pos,neg)
+            std::vector<float>    sgn(d.wall->FIndex, 0.0f);
+            std::vector<uint16_t> ord(d.wall->FIndex, 0);
+            for (int i = 0; i < d.wall->FIndex; ++i) {
+                const Face &F = d.wall->Faces[i];
+                if (!F.A || !F.B || !F.C || !F.Txtr || !F.Txtr->Name ||
+                    std::strcmp(F.Txtr->Name, "dtest")) continue;
+                const StoneParentPlane *pp = MeshOps_StoneParentPlane("dtest", F.ShadowMatID);
+                if (!pp) continue;
+                const Vector &A=F.A->Pos, &B=F.B->Pos, &C=F.C->Pos;
+                const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+                const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+                const float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+                const float s = gx*pp->nx + gy*pp->ny + gz*pp->nz;
+                if (s == 0.0f) continue;
+                sgn[i] = s; ord[i] = F.ShadowMatID;
+                auto &pc = pmCnt[F.ShadowMatID];
+                (s > 0 ? pc.first : pc.second)++;
+            }
+            int inv = 0;
+            for (int i = 0; i < d.wall->FIndex; ++i) {
+                if (sgn[i] == 0.0f) continue;
+                const auto &pc = pmCnt[ord[i]];
+                const float maj = (pc.first >= pc.second) ? 1.0f : -1.0f;
+                if (sgn[i] * maj < 0.0f) ++inv;
+            }
+            return inv;
+        };
+        auto zZero = []() -> long {
+            long n = 0;
+            for (size_t i = 0, e = size_t(XRes) * YRes; i < e; ++i) if (!ZPage16[i]) ++n;
+            return n;
+        };
+        int invOff = 0, invOn = 0; long zOff2 = 0, zOn2 = 0;
+        std::fprintf(stderr, "[DTEST-FOLD] real map, amp=%.2f — baking fold_relax OFF\n",
+                     (double)FF::greets_displace_amp());
+        FF::setParamFromText("greets_displace_fold_relax", "0");
+        {
+            DTestScene d = buildFold();
+            invOff = invertedCount(d);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            renderPose(d, Vector(5.2f, 4.2f, -3.0f), Vector(3.95f, 2.0f, -0.1f), 55.0f, 0,
+                       "/tmp/displace_fold_graze_OFF.ppm");
+            zOff2 = zZero();
+        }
+        std::fprintf(stderr, "[DTEST-FOLD] baking fold_relax ON\n");
+        FF::setParamFromText("greets_displace_fold_relax", "1");
+        {
+            DTestScene d = buildFold();
+            invOn = invertedCount(d);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            renderPose(d, Vector(5.2f, 4.2f, -3.0f), Vector(3.95f, 2.0f, -0.1f), 55.0f, 0,
+                       "/tmp/displace_fold_graze_ON.ppm");
+            zOn2 = zZero();
+        }
+        const bool pass = invOff > 0 && invOn == 0;
+        std::fprintf(stderr, "[DTEST-FOLD] inverted faces OFF=%d ON=%d; grazing-pose "
+                     "z==0 OFF=%ld ON=%ld — %s\n", invOff, invOn, zOff2, zOn2,
+                     pass ? "PASS (bake reproduces the inversion; relax removes it)"
+                          : (invOff == 0 ? "VACUOUS (rig produced no inversion — the "
+                                           "mechanism needs conditions the rig lacks; "
+                                           "greets t=6097 is the ground truth)"
+                                         : "FAIL (relax left inverted faces)"));
+        return;
+    }
+
+    // ── cross-material NEIGHBOR-seam headless A/B (FDS_DISPLACETEST_NEIGHBOR=1)
+    // Bakes the wall+lintel scene twice (--greets_displace_neighbor_pin off,
+    // then on) and asserts NUMERICALLY on the coincident interior mid-line
+    // (y=4): its subdivision verts must displace with the pin OFF (the seam
+    // would tear against the lintel) and must be PINNED to zero with it ON.
+    // A vert is "on the line" when y≈4 and |z| below the lintel depth (wall
+    // displacement is along -z, so line verts keep y; the lintel's own verts
+    // sit at z=0 / z=-2 and never move — z=0 ones read 0 and can't fake a
+    // failure). Renders a lit frontal + top-grazing PPM per mode for the eye.
+    if (std::getenv("FDS_DISPLACETEST_NEIGHBOR")) {
+        const int nmap = std::getenv("FDS_DISPLACETEST_MAP")
+                             ? std::atoi(std::getenv("FDS_DISPLACETEST_MAP")) : 0;
+        auto lineMaxDisp = [](const DTestScene &d, int &nLine) -> float {
+            float mx = 0.0f; nLine = 0;
+            for (int i = 0; i < d.wall->VIndex; ++i) {
+                const Vector &p = d.wall->Verts[i].Pos;
+                if (std::fabs(p.y - 4.0f) > 1e-3f) continue;   // not on the line
+                if (std::fabs(p.x) > 3.999f) continue;         // corners pinned by the old rule anyway
+                if (std::fabs(p.z) > 1.0f) continue;           // lintel front edge
+                ++nLine;
+                mx = std::max(mx, std::fabs(p.z));             // wall displaces along -z only
+            }
+            return mx;
+        };
+        float dOff = 0.0f, dOn = 0.0f; int nOff = 0, nOn = 0;
+        std::fprintf(stderr, "[DTEST-NEIGHBOR] map=%d(%s) — baking neighbor_pin OFF\n",
+                     nmap, mapName(nmap));
+        FF::setParamFromText("greets_displace_neighbor_pin", "0");
+        {
+            DTestScene d = buildNeighbor(nmap);
+            dOff = lineMaxDisp(d, nOff);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            renderPose(d, Vector(0,4,-13), Vector(0,4,0), 55.0f, 0, "/tmp/displace_neighbor_frontal_OFF.ppm");
+            renderPose(d, Vector(0,7.5f,-9), Vector(0,3.2f,0), 55.0f, 0, "/tmp/displace_neighbor_graze_OFF.ppm");
+        }
+        std::fprintf(stderr, "[DTEST-NEIGHBOR] baking neighbor_pin ON\n");
+        FF::setParamFromText("greets_displace_neighbor_pin", "1");
+        {
+            DTestScene d = buildNeighbor(nmap);
+            dOn = lineMaxDisp(d, nOn);
+            SetCurrentScene(d.sc); sizeFaceLists(d.sc);
+            renderPose(d, Vector(0,4,-13), Vector(0,4,0), 55.0f, 0, "/tmp/displace_neighbor_frontal_ON.ppm");
+            renderPose(d, Vector(0,7.5f,-9), Vector(0,3.2f,0), 55.0f, 0, "/tmp/displace_neighbor_graze_ON.ppm");
+        }
+        const bool pass = (dOn <= 1e-5f) && (dOff > 1e-3f);
+        std::fprintf(stderr, "[DTEST-NEIGHBOR] mid-line verts OFF=%d ON=%d max|disp|: "
+                     "OFF=%.4f ON=%.4f — %s\n",
+                     nOff, nOn, dOff, dOn,
+                     pass ? "PASS (pin zeroes the coincident seam; without it the seam tears)"
+                          : (dOff <= 1e-3f ? "VACUOUS (line did not displace with the pin off — rig broken?)"
+                                           : "FAIL (pin left the seam displaced)"));
+        return;
+    }
 
     // ── S4a fan↔edge SEAM-HOLE headless A/B (FDS_DISPLACETEST_JUNCTION=1) ──
     // Bakes the two-quad junction twice (--greets_displace_seam_union off, then

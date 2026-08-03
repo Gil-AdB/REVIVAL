@@ -15,8 +15,10 @@
 #include <cstring>
 #include <map>
 #include <semaphore>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1467,6 +1469,12 @@ namespace {
 inline uint32_t meshF2bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 inline float meshLerpf(float a, float b, float t) { return a + (b - a) * t; }
 
+// Parent-plane registry (see MeshOps.h MeshOps_StoneParentPlane): per target
+// material, the deduped authored planes of the displaced faces + the quantized-
+// key index used for dedup. Rebuilt per DisplaceStoneSubdiv call.
+std::map<std::string, std::vector<StoneParentPlane>> g_stoneParentPlanes;
+std::map<std::string, std::map<std::array<int,4>, uint16_t>> g_stoneParentPlaneKeys;
+
 // Edge-aligned tessellation (the flat-top fix): the mortar-groove grid of a
 // stone height map, detected in MAP space at the bake mip. A groove RUN is a
 // below-threshold interval of a mean-height profile (mortar is recessed, so
@@ -1490,12 +1498,33 @@ struct StoneGrooveGrid {
 struct StoneRowT { float y0, y1; int type; int bandA, bandB; };
 }  // namespace
 
+const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t ordinal) {
+	if (!matName || ordinal == 0) return nullptr;
+	auto it = g_stoneParentPlanes.find(matName);
+	if (it == g_stoneParentPlanes.end()) return nullptr;
+	if (size_t(ordinal) > it->second.size()) return nullptr;
+	return &it->second[ordinal - 1];
+}
+
 void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
-                         float amp, int mip, float adapt, float cellsPerBlock) {
+                         float amp, int mip, float adapt, float cellsPerBlock,
+                         const std::vector<std::string> *displacedSet) {
 	if (!Sc || !matName) return;
 	if (cellsPerBlock < 0.25f) cellsPerBlock = 0.25f;
+	g_stoneParentPlanes[matName].clear();       // fresh registry per bake call
+	g_stoneParentPlaneKeys[matName].clear();
 	auto isTarget = [&](const Face *F) {
 		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
+	};
+	// A face is "displaced" (a sibling of the target, or the target itself) if its
+	// material is in displacedSet; when no set is supplied only matName counts.
+	// Non-displaced faces are the neighbours the seam-pin classifies against.
+	auto isDisplacedMat = [&](const char *nm) -> bool {
+		if (!nm) return false;
+		if (!std::strcmp(nm, matName)) return true;
+		if (!displacedSet) return false;
+		for (const std::string &s : *displacedSet) if (s == nm) return true;
+		return false;
 	};
 	// Hard ceiling on subdivision depth. Was 3 (8×8 cells/quad) — too coarse
 	// for walls whose quads span several UV tiles: at the finely-tiled wall
@@ -1529,6 +1558,53 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 	// triangles with a field-following diagonal (orientation varies with
 	// content — no uniform grain).
 	const float kCellDomeEps = 0.04f;
+
+	// ── scene-wide NON-DISPLACED position index (cross-material seam pinning) ──
+	// Built ONCE per call over EVERY mesh's faces whose material is not displaced
+	// (isDisplacedMat). Two structures, keyed by a fine world-space grid so
+	// authored-coincident verts (bit-identical, or a sub-lattice apart) collide:
+	//   ndVert  — the set of non-displaced vertex positions.
+	//   ndEdge  — the set of non-displaced face EDGES (ordered grid-key pairs).
+	// A target vertex coincident with an ndVert, or a target edge coincident with
+	// an ndEdge, is an authored border → pinned to zero (see the per-mesh use
+	// below). Only ever ADDS pins, so with the seam-pin flag off it's inert.
+	const bool seamPin = fds::FeatureFlags::greets_displace_neighbor_pin();
+	constexpr double kSeamGrid = 1.0e4;   // 1e-4 world-unit cells (matches SUBDIV-DIAG)
+	auto seamKey = [](const Vector &p) -> uint64_t {
+		// pack rounded (x,y,z) into 64 bits via a mix — 21 bits/axis is ample for
+		// the ~±10^3 unit scene at 1e-4 resolution collision-free-enough for a set.
+		const int64_t xi = int64_t(std::llround(double(p.x) * kSeamGrid));
+		const int64_t yi = int64_t(std::llround(double(p.y) * kSeamGrid));
+		const int64_t zi = int64_t(std::llround(double(p.z) * kSeamGrid));
+		uint64_t h = 1469598103934665603ull;
+		for (int64_t v : { xi, yi, zi }) { h ^= uint64_t(v); h *= 1099511628211ull; }
+		return h;
+	};
+	auto edgeKey = [&](const Vector &a, const Vector &b) -> uint64_t {
+		uint64_t ka = seamKey(a), kb = seamKey(b);
+		if (ka > kb) std::swap(ka, kb);
+		return (ka * 1099511628211ull) ^ (kb + 0x9e3779b97f4a7c15ull);
+	};
+	std::unordered_set<uint64_t> ndVert, ndEdge;
+	std::unordered_map<uint64_t, const char *> ndVertMat;   // audit: which neighbour
+	if (seamPin) {
+		for (TriMesh *M = Sc->TriMeshHead; M; M = M->Next) {
+			if (M->FIndex == 0 || !M->Faces || !M->Verts) continue;
+			for (int32_t i = 0; i < M->FIndex; ++i) {
+				const Face &F = M->Faces[i];
+				if (!F.A || !F.B || !F.C) continue;
+				const char *nm = (F.Txtr && F.Txtr->Name) ? F.Txtr->Name : nullptr;
+				if (isDisplacedMat(nm)) continue;
+				const Vector &pa = F.A->Pos, &pb = F.B->Pos, &pc = F.C->Pos;
+				const uint64_t ka = seamKey(pa), kb = seamKey(pb), kc = seamKey(pc);
+				ndVert.insert(ka); ndVert.insert(kb); ndVert.insert(kc);
+				if (nm) { ndVertMat.emplace(ka, nm); ndVertMat.emplace(kb, nm); ndVertMat.emplace(kc, nm); }
+				ndEdge.insert(edgeKey(pa, pb));
+				ndEdge.insert(edgeKey(pb, pc));
+				ndEdge.insert(edgeKey(pc, pa));
+			}
+		}
+	}
 
 	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
 		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
@@ -1772,10 +1848,67 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			auto add = [&](uint32_t x, uint32_t y){ origEdgeUse[{std::min(x,y),std::max(x,y)}]++; };
 			add(a,b); add(b,c); add(c,a);
 		}
+		// Cross-material SEAM classification (position-coincidence; the sliver-gap
+		// fix). A target ORIGINAL vertex coincident with non-displaced geometry is
+		// a border; a target EDGE coincident with a non-displaced face edge is a
+		// border edge — so the subdivision verts created ALONG it (edgeVert keys on
+		// the original corner pair) pin too, closing the mid-span the user saw open.
+		// Purely additive to the index/single-target-face test below.
+		std::vector<char> coincidentOrig(nOrig, 0);
+		if (seamPin && !ndVert.empty())
+			for (uint32_t i = 0; i < nOrig; ++i)
+				if (ndVert.count(seamKey(oldV[i].Pos))) coincidentOrig[i] = 1;
+		auto isSeamBorderEdge = [&](uint32_t x, uint32_t y) -> bool {
+			if (!seamPin || ndEdge.empty() || x >= nOrig || y >= nOrig) return false;
+			return ndEdge.count(edgeKey(oldV[x].Pos, oldV[y].Pos)) != 0;
+		};
 		auto isBorderEdge = [&](uint32_t x, uint32_t y) {
 			auto it = origEdgeUse.find({std::min(x,y),std::max(x,y)});
-			return it != origEdgeUse.end() && it->second == 1;   // used by exactly one target face
+			if (it != origEdgeUse.end() && it->second == 1) return true;   // used by exactly one target face
+			return isSeamBorderEdge(x, y);                                 // coincident with a non-displaced edge
 		};
+
+		// AUDIT (init-time census): the population the position-coincidence
+		// border classification adds over the OLD index/single-target-face rule.
+		if (seamPin && !ndVert.empty()) {
+			// old classification: origNonTargetVert OR endpoint of an OLD border
+			// edge (single-target-face); the seam terms are what this fix adds.
+			std::vector<char> oldPinned(nOrig, 0);
+			for (uint32_t i = 0; i < nOrig; ++i) if (origNonTargetVert[i]) oldPinned[i] = 1;
+			for (auto &kv : origEdgeUse)
+				if (kv.second == 1) { oldPinned[kv.first.first] = oldPinned[kv.first.second] = 1; }
+			std::vector<char> isTargetVert(nOrig, 0);
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				const Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const uint32_t a=vidx(F.A), b=vidx(F.B), c=vidx(F.C);
+				if (a<nOrig) isTargetVert[a]=1; if (b<nOrig) isTargetVert[b]=1; if (c<nOrig) isTargetVert[c]=1;
+			}
+			int newlyPinned = 0, coincTotal = 0;
+			std::unordered_set<std::string> neighMats;
+			for (uint32_t i = 0; i < nOrig; ++i) {
+				if (!isTargetVert[i] || !coincidentOrig[i]) continue;
+				++coincTotal;
+				if (!oldPinned[i]) {
+					++newlyPinned;
+					auto it = ndVertMat.find(seamKey(oldV[i].Pos));
+					if (it != ndVertMat.end() && it->second) neighMats.insert(it->second);
+				}
+			}
+			int seamEdges = 0;
+			for (auto &kv : origEdgeUse)
+				if (kv.second == 2 && isSeamBorderEdge(kv.first.first, kv.first.second)) ++seamEdges;
+			if (coincTotal || seamEdges) {
+				std::string nb;
+				for (const std::string &m : neighMats) { if (!nb.empty()) nb += ","; nb += m; }
+				std::fprintf(stderr,
+					"[STONE-SEAM] '%s': %d target verts coincident w/ non-displaced geom; "
+					"%d NEWLY pinned (were unpinned = the gap population), %d interior "
+					"edges lie on a non-displaced edge (now border-pinned). neighbours: %s\n",
+					matName, coincTotal, newlyPinned, seamEdges,
+					nb.empty() ? "(none via vert map)" : nb.c_str());
+			}
+		}
 
 		// ── longest-edge quad pairing (greedy by descending shared-edge length:
 		// the diagonal of a quad-from-triangulation is its longest edge) ──
@@ -1848,7 +1981,8 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 		// ── build the subdivided mesh ──
 		std::vector<Vertex> verts(oldV, oldV + nOrig);   // originals kept in place
 		std::vector<char>   pinnedZero(nOrig, 0);        // authored-border verts
-		for (uint32_t i = 0; i < nOrig; ++i) if (origNonTargetVert[i]) pinnedZero[i] = 1;
+		for (uint32_t i = 0; i < nOrig; ++i)
+			if (origNonTargetVert[i] || coincidentOrig[i]) pinnedZero[i] = 1;
 		// canonical shared edge vertex (keyed by min-corner, max-corner, param bits)
 		std::map<std::array<uint32_t,3>, uint32_t> edgeVertMap;
 		auto edgeVert = [&](uint32_t ia, uint32_t ib, float t) -> uint32_t {
@@ -2563,6 +2697,117 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 			if (dsp<dMin)dMin=dsp; if (dsp>dMax)dMax=dsp; ++nMoved;
 		}
 
+		// ── FOLD RELAXATION (--greets_displace_fold_relax, default on) — the
+		// t=6097 SLIVER-GAP fix. A displaced target face whose geometric normal
+		// no longer agrees with its authored plane has FOLDED: typically a narrow
+		// return face (e.g. a jamb/pilaster side one shoulder-band tall) whose
+		// verts recede by very different amounts along differently-averaged
+		// vertex normals, twisting the strip past 90°. The commit below keeps the
+		// AUTHORED orientation sign for N/NormProd, so a folded face's plane
+		// equation opposes its actual winding and the backface cull rejects it
+		// from the FRONT — a see-through slit through topologically sealed
+		// geometry (measured at the repro pose: 4 folded slivers, dot(geomN,
+		// authN) −0.14..−0.70, culled → background through the wall). Same defect
+		// class B1 fixed in SubdivideMaterialFaces with fold-relaxation; adapted
+		// here: iteratively HALVE the displacement of every vert of a folded
+		// face until every target face agrees with its authored plane (offsets →
+		// 0 restores the authored geometry, so convergence is monotone); a final
+		// pass zeroes any straggler. Runs BEFORE the cross-patch heal so healed
+		// polylines land on the relaxed anchors. Relief loss is confined to the
+		// folded slivers (everything else keeps full displacement).
+		//
+		// POPULATION (measured on the shipping greets bake, g = (B−A)×(C−A)):
+		// healthy displaced faces sit at g·authN ≈ −1 (FLD winding convention),
+		// the carve's tilted step faces spread toward 0, and the INVERTED faces
+		// are the far positive tail (~3.9k of 63k rooms faces at the repro) —
+		// exactly the faces whose commit picks N against their winding, so the
+		// plane cull rejects them while they still front the camera (proven:
+		// force-two-sided closes the sliver with no other change; z==0 52 → 1).
+		// DIAG (FDS_STONE_FOLD_HIST): g·authN histogram over the displaced target
+		// faces — shows that population structure on new content. NOTE the
+		// histogram is in AUTHORED-N terms (convention-dependent, diagnostic
+		// only); the relax criterion below is convention-free.
+		if (std::getenv("FDS_STONE_FOLD_HIST")) {
+			static const float edges[] = {-1.f,-0.5f,-0.2f,-0.1f,-0.05f,-0.01f,-0.001f,0.f,0.001f,0.01f,0.05f,0.1f,0.2f,0.5f,1.01f};
+			int cnt[14] = {0}; int nT=0;
+			for (size_t i=0;i<faces.size();++i){
+				const Face &F=faces[i]; if(!isTargetNew(F)) continue;
+				const uint32_t a=fIdx[i][0],b=fIdx[i][1],c=fIdx[i][2];
+				if (a>=nV||b>=nV||c>=nV) continue;
+				const Vector &A=verts[a].Pos,&B=verts[b].Pos,&C=verts[c].Pos;
+				const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z,e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+				float gx=e1y*e2z-e1z*e2y,gy=e1z*e2x-e1x*e2z,gz=e1x*e2y-e1y*e2x;
+				const float gl=std::sqrt(gx*gx+gy*gy+gz*gz); if (gl<1e-9f) continue;
+				const float d=(gx*F.N.x+gy*F.N.y+gz*F.N.z)/gl; ++nT;
+				for (int k=0;k<14;++k) if (d<edges[k+1]) { ++cnt[k]; break; }
+			}
+			std::fprintf(stderr,"[FOLD-HIST] '%s' n=%d:",matName,nT);
+			for (int k=0;k<14;++k) std::fprintf(stderr," [%g,%g)=%d",edges[k],edges[k+1],cnt[k]);
+			std::fprintf(stderr,"\n");
+		}
+		int nFoldFaces = 0, nFoldPasses = 0;
+		if (fds::FeatureFlags::greets_displace_fold_relax()) {
+			// CONVENTION-FREE criterion: a face is inverted when its DISPLACED
+			// winding normal opposes its own BASE (pre-displacement) winding
+			// normal — g_disp·g_base < 0, i.e. the face rotated past 90° from
+			// its undisplaced self. Comparing against the face's own base (not
+			// the authored parent N) makes the test independent of the mesh's
+			// winding-vs-N convention: FLD-loaded greets walls and the
+			// SceneBuilder test rigs have OPPOSITE conventions (measured — an
+			// authored-N criterion flattened the rig's entire bake), and an
+			// undisplaced winding-odd face has g_disp = g_base → never marked.
+			// Precompute each target face's base winding normal once.
+			std::vector<std::array<float,3>> gBase(faces.size(), {0,0,0});
+			for (size_t i = 0; i < faces.size(); ++i) {
+				if (!isTargetNew(faces[i])) continue;
+				const uint32_t a=fIdx[i][0], b=fIdx[i][1], c=fIdx[i][2];
+				if (a>=nV||b>=nV||c>=nV) continue;
+				const Vector &A=basePos[a],&B=basePos[b],&C=basePos[c];
+				const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+				const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+				gBase[i] = { e1y*e2z-e1z*e2y, e1z*e2x-e1x*e2z, e1x*e2y-e1y*e2x };
+			}
+			for (int pass = 0; pass < 8; ++pass) {
+				std::vector<char> mark(nV, 0);
+				int nFold = 0;
+				for (size_t i = 0; i < faces.size(); ++i) {
+					if (!isTargetNew(faces[i])) continue;
+					const uint32_t a=fIdx[i][0], b=fIdx[i][1], c=fIdx[i][2];
+					if (a>=nV||b>=nV||c>=nV) continue;
+					const float bx=gBase[i][0], by=gBase[i][1], bz=gBase[i][2];
+					if (bx*bx+by*by+bz*bz < 1e-18f) continue;   // base-degenerate
+					const Vector &A=verts[a].Pos,&B=verts[b].Pos,&C=verts[c].Pos;
+					const float e1x=B.x-A.x,e1y=B.y-A.y,e1z=B.z-A.z;
+					const float e2x=C.x-A.x,e2y=C.y-A.y,e2z=C.z-A.z;
+					const float gx=e1y*e2z-e1z*e2y, gy=e1z*e2x-e1x*e2z, gz=e1x*e2y-e1y*e2x;
+					if (gx*bx+gy*by+gz*bz >= 0.0f) continue;    // still on its base side
+					bool canRelax=false;
+					for (uint32_t vi2 : {a,b,c})
+						if (!pinnedZero[vi2] && (verts[vi2].Pos.x!=basePos[vi2].x ||
+						     verts[vi2].Pos.y!=basePos[vi2].y || verts[vi2].Pos.z!=basePos[vi2].z))
+							{ mark[vi2]=1; canRelax=true; }
+					if (canRelax) ++nFold;
+					if (pass==0 && canRelax) ++nFoldFaces;
+				}
+				if (!nFold) break;
+				nFoldPasses = pass + 1;
+				const float s = (pass == 7) ? 0.0f : 0.5f;
+				for (uint32_t i2 = 0; i2 < nV; ++i2) {
+					if (!mark[i2]) continue;
+					verts[i2].Pos.x = basePos[i2].x + s*(verts[i2].Pos.x - basePos[i2].x);
+					verts[i2].Pos.y = basePos[i2].y + s*(verts[i2].Pos.y - basePos[i2].y);
+					verts[i2].Pos.z = basePos[i2].z + s*(verts[i2].Pos.z - basePos[i2].z);
+				}
+			}
+			if (nFoldFaces)
+				std::fprintf(stderr, "[STONE-FOLD] '%s': %d INVERTED faces relaxed "
+					"(%d halving passes; inverted = displaced winding crossed its "
+					"own base plane, so the committed N opposes the winding and "
+					"the plane cull rejects the face while it still fronts the "
+					"camera — the see-through sliver)\n",
+					matName, nFoldFaces, nFoldPasses);
+		}
+
 		// ── cross-patch crack pinning: on each interior side shared by two
 		// patches whose vertex PARAM LISTS differ (level boundary, or edge-
 		// aligned vs fallback tessellation), snap the non-anchor side's extra
@@ -2680,6 +2925,37 @@ void DisplaceStoneSubdiv(Scene *Sc, const char *matName, int uniformLevel,
 				                   (verts[a].Pos.y+verts[b].Pos.y+verts[c].Pos.y)/3.0f,
 				                   (verts[a].Pos.z+verts[b].Pos.z+verts[c].Pos.z)/3.0f };
 				fds::DisplaceViz_RecordError(targetMat, ctr, bestSigned / refRelief);
+			}
+		}
+
+		// ── PARENT-PLANE stamping (--greets_displace_shadow_planes; see
+		// MeshOps.h) — must run BEFORE the commit below overwrites N/NormProd
+		// with the displaced facet plane: at this point every emitted target
+		// face still carries its PARENT's authored N/NormProd (emit copies the
+		// proto face). Record each distinct parent plane (deduped on the greets
+		// shadow clustering's own quantization grid: normal 1/16 ≈ 3.5°,
+		// distance 1/2 unit) and stamp the face's ShadowMatID with the plane's
+		// 1-based ordinal — a transient tag the clustering resolves and
+		// replaces. Registry is per material, shared across meshes.
+		{
+			auto &reg    = g_stoneParentPlanes[matName];
+			auto &keyIdx = g_stoneParentPlaneKeys[matName];
+			auto q = [](float v, float s){ return int(std::floor(v*s + 0.5f)); };
+			for (size_t i = 0; i < faces.size(); ++i) {
+				Face &F = faces[i];
+				if (!isTargetNew(F)) continue;
+				const float len = std::sqrt(F.N.x*F.N.x + F.N.y*F.N.y + F.N.z*F.N.z);
+				if (!(len > 1e-4f)) { F.ShadowMatID = 0; continue; }
+				const float inv = 1.0f/len;
+				const float nx = F.N.x*inv, ny = F.N.y*inv, nz = F.N.z*inv;
+				const float d  = -F.NormProd*inv;    // NormProd = -(N·A) → n̂·A
+				const std::array<int,4> key{ q(nx,16.0f), q(ny,16.0f), q(nz,16.0f), q(d,2.0f) };
+				auto it = keyIdx.find(key);
+				if (it == keyIdx.end()) {
+					reg.push_back({nx, ny, nz, d});
+					it = keyIdx.emplace(key, uint16_t(reg.size())).first;   // 1-based
+				}
+				F.ShadowMatID = it->second;
 			}
 		}
 
