@@ -2108,6 +2108,25 @@ void Initialize_Greets()
 					const float cz = (f.A->Pos.z + f.B->Pos.z + f.C->Pos.z) * (1.0f/3.0f);
 					cellFaces[cellOf(cx, cy, cz)].push_back(i);
 				}
+				// --vis_stats: per-chunk face-count histogram (Phase A census).
+				if (fds::FeatureFlags::vis_stats()) {
+					// pow2 buckets: [1,2) [2,4) ... [2^k, 2^(k+1))
+					int hist[16] = {0};
+					size_t fmin = SIZE_MAX, fmax = 0, ftot = 0;
+					for (const auto& kv : cellFaces) {
+						const size_t n = kv.second.size();
+						if (!n) continue;
+						fmin = std::min(fmin, n); fmax = std::max(fmax, n); ftot += n;
+						int b = 0; size_t v = n;
+						while (v > 1 && b < 15) { v >>= 1; ++b; }
+						++hist[b];
+					}
+					std::fprintf(stderr, "[CHUNK-HIST] cells=%zu faces min/mean/max=%zu/%.0f/%zu buckets(pow2):",
+					    cellFaces.size(), fmin, cellFaces.empty()?0.0:double(ftot)/cellFaces.size(), fmax);
+					for (int b = 0; b < 16; ++b)
+						if (hist[b]) std::fprintf(stderr, " [%d-%d):%d", 1<<b, 1<<(b+1), hist[b]);
+					std::fprintf(stderr, "\n");
+				}
 				// Build per-cell chunks.
 				int chunksCreated = 0;
 				DWord totalChunkVerts = 0;

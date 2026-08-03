@@ -1,6 +1,9 @@
 # Visibility culling — research + campaign plan
 
-Status: **research complete, 2026-08-02.** Prompted by the user direction: *"it's
+Status: **research complete, 2026-08-02; §0's verdict CHALLENGED by the user and
+RE-TESTED WITH CODE 2026-08-03 — see §7 for the experiment (finer chunking + a
+prev-frame hi-Z occlusion cull, both landed default-OFF) and the revised verdict.**
+Prompted by the user direction: *"it's
 about time to seriously think about visibility culling (bsp? bvh? something better?)
 even before we start transforming the polys — this is becoming a very big chunk of
 the work, and I think this will greatly help later stages of the pipeline."*
@@ -288,3 +291,153 @@ flag, two `Face` fields, counters in `Mekalele.h` / `Transform.cpp` /
 **reverted** — the research remit was to measure and plan, and the numbers now live
 here. Slice 0 (§5) is the clean re-land recipe if a permanent diagnostic is wanted;
 it carries the gate obligations listed there. This document is the deliverable.
+
+---
+
+## 7. ADDENDUM 2026-08-03 — the chunk-granularity challenge, tested with code
+
+Status: **experiment complete.** The user rejected §0's pre-transform reading
+with a sharp argument: the displaced-greets tessellation costs ~40 ms of pure
+per-poly front-end, ~89 % of those faces are fully occluded in-frustum, and §2's
+"only 3–27 % of transformed verts live in fully-occluded chunks" FROZE the chunk
+granularity — grid-8 cells sized for the flat mesh hold ~406 faces each once
+displacement multiplies the walls ~20×, so the ~10 % figure could be an artifact
+of coarse chunks rather than a property of occlusion. Directive: *"check this
+with actual code before declaring this won't work."* This section is that code,
+its measurements, and the revised verdict.
+
+### 7a. What was built (committed, all default-OFF, byte-null off)
+
+- **Phase A (1739e95): `--greets_chunk_size=S`** — size-based near-cubic chunk
+  cells (per-axis grid = ceil(span/S)) replacing the uniform N³ grid, so cell
+  size is independent of face count. 0 = legacy grid, byte-identical. Chunks
+  also store world/local AABBs (from the same worldVerts the cube cull uses).
+  `--vis_stats` prints a per-chunk face histogram + a per-frame visibility
+  census (the §5 Slice-0 diagnostic, landed for real this time).
+- **Phase B (5bcd6cc): `--chunk_occlusion`** — a PREVIOUS-FRAME hi-Z occlusion
+  cull BEFORE transform. Design pivot mid-experiment (user direction): instead
+  of rasterising the S1 flat-proxy occluders in a current-frame prepass (built
+  first; byte-neutral but pays its own raster), reuse the frame's own opaque
+  depth. Engine subtlety: the tick CLEARS ZPage16 before Transform, so the
+  final depth is captured at END of frame (post-Render) together with its
+  camera; the next frame's Transform tests each mesh/chunk world AABB (after
+  the frustum cull, before the per-vertex transform) against the min-pooled
+  hi-Z (240×135 at 1080p), projected with the CAPTURED prev camera — exact for
+  static geometry; rotation-revealed chunks land off-buffer and are kept;
+  depth margin = `--chunk_occl_bias` + 2× the camera translation delta.
+  Occluders = the REAL scene depth (displaced walls, mummies, robot) for free.
+  MAIN-VIEW-ONLY (shadow / RTT / env / off-axis passes untouched); first frame
+  inert; snapshot pin dumps force it inert (`--chunk_occl_snapshot_force`
+  [dev] overrides for the pop rig); `--chunk_occl_verify` (FDS_OCCL_VERIFY)
+  audits every culled chunk against the final current-frame depth.
+
+### 7b. Phase A: finer granularity alone is pure overhead
+
+Displaced Piramid, 87,256 faces / 261,768 verts (1080p, this machine):
+
+| chunking | chunks | faces/chunk mean / max | XFRM p50 @ t=5780 |
+|---|--:|--:|--:|
+| grid-8 (ship) | 215 | 406 / 2,095 | ~7.9–8.5 ms |
+| size=2 | 1,770 | 49 / 359 | ~8.4–8.7 ms |
+| size=1 | 6,669 | 13 / 170 | ~9.2–9.6 ms (**+~13 %**) |
+
+More chunks = more per-mesh transform setup + FList entries, and nothing
+rejects them at an in-room pose. Granularity only pays through a rejection
+mechanism — which is Phase B's job.
+
+### 7c. Phase B census: the cull works — and the catch stays small at every granularity
+
+`--vis_stats`, displaced greets, prev-frame cull ON (final build; "frustum-
+surviving" = verts the existing bsphere cull already kept, ~830–960 k/frame):
+
+| pose | chunking | in-frustum chunks tested | occl-culled | verts culled | % of frustum-surviving |
+|---|---|--:|--:|--:|--:|
+| t=5780 (into room) | grid-8 | 109 | 17 | 25,944 | 2.8 % |
+| t=5780 | size=2 | 764 | 339 | 63,183 | **6.7 %** |
+| t=5780 | size=1 | 2,847 | 1,588 | 72,198 | **7.7 %** |
+| t=2145 (faces wall) | size=2 | 173 | 9 | 2,403 | **0.3 %** |
+| t=6097 (corridor) | size=2 | 428 | 250 | 41,688 | 5.0 % |
+
+This is the decisive number. §2 measured ~10 % occluded-mesh verts at coarse
+chunks; the challenge predicted fine chunks would blow that open. Measured:
+**8× more chunks than ship moves the occludable fraction to 6.7 %; 31× more
+moves it to 7.7 %.** Granularity was NOT the bottleneck. At t=2145 the reason
+is structural: the camera faces a wall, so the frustum cull already rejects
+1,606 of 1,782 chunks — the hidden geometry is OUT-of-frustum, not in-frustum-
+occluded. And at t=5780 the ~93 % of transformed verts that remain are the
+displaced wall the camera is LOOKING AT. Occlusion cannot reclaim on-screen
+work; only LOD / a faster transform can.
+
+### 7d. Cost/benefit + the prev-frame trade, measured
+
+Timing (40-iter p50, interleaved OFF/ON reps; the box was shared with another
+session's renders for part of the run — contaminated pairs [frame p50 > 120 ms
+or an obviously inflated section] discarded; XFRM/SORT deltas were consistent
+across every clean pair, frame-level deltas are noise-limited):
+
+| pose | chunking | OFF frame / XFRM / SORT / RNDR | ON frame / XFRM / SORT / RNDR | Δframe |
+|---|---|---|---|--:|
+| t=5780 | grid-8 | 94.5 / 8.06 / 0.61 / 57.3 | 95.2 / 7.76 / 0.56 / 58.0 | +0.7 |
+| t=5780 | size=2 (r1) | 100.2 / 8.71 / 0.65 / 60.9 | 90.2 / 8.06 / 0.49 / 53.8 | −10.0 |
+| t=5780 | size=2 (r2) | 96.3 / 8.53 / 0.61 / 58.4 | 96.7 / 7.96 / 0.49 / 58.0 | +0.4 |
+| t=5780 | size=1 (r1) | 101.9 / 9.33 / 0.63 / 57.4 | 100.9 / 8.87 / 0.48 / 56.4 | −1.1 |
+| t=5780 | size=1 (r3) | 94.3 / 8.66 / 0.59 / 52.7 | 91.9 / 8.37 / 0.45 / 50.8 | −2.5 |
+| t=2145 | size=2 | 101.5 / 6.74 / 0.42 / 66.1 | 102.6 / 6.51 / 0.41 / 67.4 | **+1.1** |
+| t=6097 | size=2 (r1) | 79.1 / 6.80 / 0.14 / 43.4 | 77.8 / 6.22 / 0.07 / 43.0 | −1.3 |
+| t=6097 | size=2 (r2) | 71.0 / 6.13 / 0.13 / 38.0 | 72.3 / 5.85 / 0.06 / 39.2 | +1.3 |
+
+Consistent signal: **XFRM −0.2…−0.65 ms, SORT −0.05…−0.16 ms** (fewer FList
+entries; t=6097 halves SORT). Against that, the hi-Z min-pool costs **~0.8 ms**
+per frame (inside RNDR at EndFrame). Net frame delta: within measurement noise
+at the poses where the cull catches, and a ~+1 ms LOSS at wall-facing t=2145
+where it catches nothing. There is no pose where the cull buys a resolvable
+frame-level win.
+
+Temporal-pop audit (the prev-frame design's honest cost):
+- Fixed camera, 60 frames: **0 violations** (the static-world prev-frame test
+  is exact).
+- Real-frame-delta camera sweep (9 ticks/frame, t=2000..6100): **8.1
+  violations/frame** (audit upper bound — the rect test is loose at
+  silhouettes). Bias 0.5→4.0 barely moves it (661→595 over a 111-frame
+  window): structural disocclusion, not margin. Violations occur even at
+  <0.05 units of camera delta (dynamic occluders + audit looseness).
+- **Ground truth** (2-timestamp snapshot rig at the two worst audit poses,
+  N=4 OFF/ON, systematic-byte metric that excludes the known ~1-in-12 kernel
+  flip): 2918→2927 = 1,545 systematic bytes (~515 px, **0.025 %** of the
+  frame); 2972→2981 = 2,454 (~818 px, **0.039 %**). The pops are REAL,
+  single-frame, small, concentrated at fast-camera segments.
+
+Gates: flags-off is byte-null — city `37e62845` exact, fountain `51fff7cd`
+exact, render_gate 3/3, wasm links; snapshot pins cannot move (harness-forced
+inert). Scope: the cull is wired into the greets tick; city/chase never call
+it (the mechanism is scene-agnostic — prev-frame ZPage16 exists everywhere —
+but city's two-deferred-passes-per-frame structure needs its own
+which-pass-depth audit before wiring, deliberately not attempted here).
+
+### 7e. Revised verdict
+
+**§0's ceiling is CONFIRMED — now with code instead of extrapolation — with
+one honest correction in the user's favor.**
+
+- The user was right that §2's occluded-vert figure was granularity-bound at
+  the top end, and right to demand code: ship grid-8 chunks catch only 2.8 %
+  where size-2 chunks catch 6.7 % at the same pose. Coarse chunks DID
+  understate the catch.
+- But the ceiling saturates immediately: 31× more chunks buys 6.7 %→7.7 %,
+  squarely inside §2's 3–27 % envelope, because the transformed verts are the
+  looked-at wall. "A lot of perf headroom" is REFUTED by measurement: gross
+  reclaim (XFRM+SORT ≈ 0.4–0.8 ms) ≈ the hi-Z pool cost (~0.8 ms) at the best
+  poses, a net LOSS at wall-facing poses, plus a real (small) temporal pop and
+  +13 % XFRM overhead if fine chunking is left on without the cull.
+- The ~40 ms displaced front-end the user is feeling remains real — and
+  remains pointed at **chunk LOD (backlog S5)** and the **SoA transform**,
+  exactly as §5 concluded. B5 already banked the face-front-end; the deferred
+  shade-once + Z-early-reject already banked the pixels.
+
+What survives (kept in-tree, default-OFF): `--greets_chunk_size` (the knob
+chunk-LOD will want anyway), `--chunk_occlusion` + `--chunk_occl_verify` +
+`--vis_stats` (§5's Slice 0/1 machinery, now real code with a free occluder
+source and a working audit), and this measured record. If a future scene is
+genuinely geometry-front-end-bound with true in-frustum occlusion (deep
+portals, street-level city canyons), the §3 trip-wire now has a working
+prototype to light up instead of a research doc.
