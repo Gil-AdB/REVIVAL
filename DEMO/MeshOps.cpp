@@ -555,6 +555,277 @@ Texture *MakeConeMap(Texture *height) {
 	return cone;
 }
 
+// ── S1 P1: EXACT PER-TEXEL CONE BAKE (--pom_cone_exact) ────────────────────
+// MakeConeMap above bakes the cone from a MAX-POOLED 128² coarse grid. Two
+// measured consequences (docs/S1_DISCREPANCY_INVENTORY.md §9):
+//   1. the max over an 8×8 block of a stone height map is near 255 almost
+//      everywhere, so almost no coarse cell has a TALLER cell to be bounded by
+//      and the baked cone comes out enormous — mean byte 38.6 = cone ratio 0.61
+//      before the ×4 relax, against a competing dlen ≤ ~0.7. The march then
+//      takes a near-full gap every step and the cone map barely steers it
+//      (--parallax_pom_relax 1 / 4 / 16 move the t=6097 error by <5 %);
+//   2. lateral distance is quantised to 1/128 UV, so a texel one texel away
+//      from a cliff is told the cliff is EIGHT texels away.
+//
+// This bakes the cone per TEXEL at the mip's own resolution instead, following
+// Bán/Valasek/Bálint/Vad, "Robust Cone Step Mapping", EGSR 2024
+// (github.com/Bundas102/robust-cone-map) — with one deliberate deviation:
+//
+//   THE PAPER'S CONSTRUCTION IS FOR A BILINEARLY INTERPOLATED HEIGHT FIELD.
+//   OUR MARCH POINT-SAMPLES (roundi → nearest texel), so the surface it
+//   actually intersects is piecewise CONSTANT over texel cells. The exact
+//   conservative cone for that surface measures distance to the NEAREST POINT
+//   OF THE TEXEL'S CELL, not to its centre — a ray reaches a neighbour's cell
+//   half a texel before it reaches the neighbour's sample point. Using centre
+//   distance (what the paper does, correctly, for bilinear) would over-state
+//   the safe distance by half a texel, which at r=1 is a 100 % error on the
+//   tightest constraint there is. So: dist = |max(|Δ|−½, 0)| / size, and the
+//   paper's falling-edge (limiting-vertex) prune — which is a statement about
+//   bilinear patches — is dropped in favour of the band bound below, which is
+//   exact for this surface and prunes just as hard in practice.
+//
+// Two modes, both exact for the point-sampled surface:
+//   1 CONSERVATIVE — the cone contains no geometry at all. c = min over q of
+//     dist(p, cell(q)) / (h(q) − h(p)) for every taller q.
+//   2 RELAXED (Policarpo, GPU Gems 3 ch.18, as corrected by the EGSR'24 paper)
+//     — the cone may PENETRATE the field, and is bounded instead by where the
+//     ray LEAVES it again, which is what guarantees the bracket the march finds
+//     is the FIRST crossing. Wider cones, so fewer steps, same landing.
+//
+// Band bound (the early-out that makes this O(texels × small)): every texel on
+// ring r is at least (r−½)/size away and can be at most (1 − h(p)) taller, so
+// nothing at radius ≥ r can beat (r−½)/(size·(1−h(p))). Stop when that exceeds
+// the best cone so far. For a texel at the top of the field (h≈1) the bound is
+// immediately infinite and the scan stops at r=1.
+//
+// Quantisation is by TRUNCATION over [0, kPomConeExactMax] — rounding could
+// round a cone UP and a too-wide cone is exactly what makes a march skip
+// geometry. Toroidal wrap, as the coarse bake does, keeps a tiling map seamless.
+// Threaded over rows. Caller owns the result.
+namespace {
+
+// Hard ceiling on the ring scan. The band bound normally stops it in a handful
+// of rings; this only bites on unusually smooth regions, and beyond it the same
+// band bound is applied as a CONSERVATIVE cap on the answer, so truncating the
+// scan can only ever make the cone narrower (safe), never wider.
+constexpr int kConeExactMaxRadius = 48;
+
+// Relaxed cone: walk the ray that comes straight down onto the apex and passes
+// through the candidate's surface point, past the candidate, until it emerges
+// from the field again. The cone is then bounded by the EXIT point rather than
+// the entry, which is what makes a relaxed cone wider than a conservative one
+// while still guaranteeing a single crossing for any ray inside it.
+inline float RelaxedConeExitRatio(const unsigned char *H, int mw, int mh,
+                                  float px, float py, float baseH,
+                                  float qx, float qy, float qh) {
+	// src = directly above the apex at the top of the field; dst = the
+	// candidate's surface point. Scale the direction so one unit of parameter
+	// drops exactly one unit of height, then continue from dst down to h = 0.
+	const float dz = qh - 1.0f;                  // < 0 (qh <= 1)
+	if (dz >= -1e-6f) return 1.0f;               // candidate at the very top
+	const float invW = 1.0f / float(mw), invH = 1.0f / float(mh);
+	// Direction per unit height DROP, in UV.
+	const float du = ((qx - px) * invW) / (-dz);
+	const float dv = ((qy - py) * invH) / (-dz);
+	// Remaining travel from the candidate down to h = 0.
+	const float lat = std::sqrt(du * du + dv * dv) * qh;
+	int steps = int(lat * float(mw)) + 1;        // ~one texel of lateral travel
+	if (steps < 2) steps = 2;
+	if (steps > 256) steps = 256;
+	const float stepH = qh / float(steps);
+	float ru = qx * invW, rv = qy * invH, rh = qh;
+	for (int i = 0; i < steps; ++i) {
+		ru -= du * stepH; rv -= dv * stepH; rh -= stepH;
+		int sx = int(std::floor(ru * float(mw))) % mw; if (sx < 0) sx += mw;
+		int sy = int(std::floor(rv * float(mh))) % mh; if (sy < 0) sy += mh;
+		const float hs = float(H[size_t(sy) * mw + sx]) * (1.0f / 255.0f);
+		if (hs < rh) break;                      // the ray has left the field
+	}
+	if (rh <= baseH) return 1.0f;                // exited below the apex
+	const float ddu = (ru - px * invW), ddv = (rv - py * invH);
+	return std::sqrt(ddu * ddu + ddv * ddv) / (rh - baseH);
+}
+
+}  // namespace
+
+Texture *MakeConeMapExact(Texture *height, int mode) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
+		return nullptr;
+	if (mode != 1 && mode != 2) return nullptr;
+	const int blockX = height->blockSizeX, blockY = height->blockSizeY;
+	const int BX = 1 << blockX, BY = 1 << blockY;
+	size_t total = 0;
+	{ int cx = height->SizeX >> blockX, cy = height->SizeY >> blockY;
+	  for (dword i = 0; i < height->numMipmaps; ++i) {
+	      total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+	      cx = (cx + 1) >> 1; cy = (cy + 1) >> 1; } }
+	Texture *cone = new Texture;
+	*cone = *height;
+	cone->Pal = nullptr; cone->FileName = nullptr; cone->ID = 0; cone->Flags = height->Flags;
+	for (int i = 0; i < 16; ++i) cone->Mipmap[i] = nullptr;
+	byte *dst = (byte *)getAlignedBlock(total);
+	cone->Data = dst;
+	std::memset(dst, 255, total);                 // default = flat (max cone)
+	const byte *h0 = height->Mipmap[0];
+	for (dword i = 0; i < height->numMipmaps; ++i)
+		cone->Mipmap[i] = dst + size_t(height->Mipmap[i] - h0);
+
+	const float kQuant = 255.0f / kPomConeExactMax;
+	for (dword mip = 0; mip < height->numMipmaps; ++mip) {
+		const int mw = std::max(1, height->SizeX >> mip);
+		const int mh = std::max(1, height->SizeY >> mip);
+		if (mw < BX || mh < BY) continue;         // tiny mip → leave flat (255)
+		const byte *hmip = height->Mipmap[mip];
+		// Un-swizzle once into a linear plane: the scan touches each texel from
+		// many apexes, and SwizzledOffset per access would dominate the bake.
+		std::vector<unsigned char> H(size_t(mw) * mh);
+		for (int y = 0; y < mh; ++y)
+			for (int x = 0; x < mw; ++x)
+				H[size_t(y) * mw + x] = hmip[SwizzledOffset(x, y, blockX, blockY, mh)];
+		std::vector<byte> C(size_t(mw) * mh, 255);
+		const float invW = 1.0f / float(mw), invH = 1.0f / float(mh);
+		std::counting_semaphore<INT_MAX> done{0};
+		auto rowFn = [&](int y) {
+			for (int x = 0; x < mw; ++x) {
+				const float baseH = float(H[size_t(y) * mw + x]) * (1.0f / 255.0f);
+				float minTan = kPomConeExactMax;
+				const float headroom = 1.0f - baseH;
+				if (headroom > 1e-6f) {
+					const float bandK = invW / headroom;     // (r-½) multiplier
+					int r = 1;
+					for (; r <= kConeExactMaxRadius; ++r) {
+						if ((float(r) - 0.5f) * bandK >= minTan) break;
+						// Square ring of radius r, toroidal.
+						for (int dy = -r; dy <= r; ++dy) {
+							const bool edgeRow = (dy == -r || dy == r);
+							for (int dx = -r; dx <= r; dx += (edgeRow ? 1 : 2 * r)) {
+								int qx = (x + dx) % mw; if (qx < 0) qx += mw;
+								int qy = (y + dy) % mh; if (qy < 0) qy += mh;
+								const float qh = float(H[size_t(qy) * mw + qx]) * (1.0f / 255.0f);
+								const float dh = qh - baseH;
+								if (dh <= 0.0f) continue;
+								// Distance to the nearest point of the CELL (the
+								// march point-samples, so the cell is what the ray
+								// actually enters), in UV.
+								const float ax = std::max(0.0f, std::fabs(float(dx)) - 0.5f) * invW;
+								const float ay = std::max(0.0f, std::fabs(float(dy)) - 0.5f) * invH;
+								const float dist = std::sqrt(ax * ax + ay * ay);
+								if (dist >= minTan * dh) continue;   // already inside the cone
+								const float c = (mode == 2)
+								    ? RelaxedConeExitRatio(H.data(), mw, mh,
+								          float(x), float(y), baseH,
+								          float(x + dx), float(y + dy), qh)
+								    : dist / dh;
+								if (c < minTan) minTan = c;
+							}
+						}
+					}
+					// Truncating the scan can only be allowed to NARROW the cone:
+					// clamp by the band bound at the radius we stopped at.
+					const float bound = (float(r) - 0.5f) * bandK;
+					if (bound < minTan) minTan = bound;
+				}
+				// TRUNCATE, never round: a cone rounded UP lets the march skip.
+				int q = int(minTan * kQuant);
+				C[size_t(y) * mw + x] = byte(q < 0 ? 0 : (q > 255 ? 255 : q));
+			}
+		};
+		dispatchIndexed(mh, &done, rowFn);
+		for (int k = 0; k < mh; ++k) done.acquire();
+		if (std::getenv("FDS_CONE_HIST") && mip < 4) {
+			int hist[8] = {0}; double sum = 0;
+			for (byte b : C) { hist[std::min(7, b / 32)]++; sum += b; }
+			std::fprintf(stderr, "[CONE_HIST-EXACT%d] mip=%u texels=%zu meanByte=%.1f "
+				"buckets[0-31,..,224-255]:", mode, mip, C.size(), sum / C.size());
+			for (int b = 0; b < 8; ++b) std::fprintf(stderr, " %d", hist[b]);
+			std::fprintf(stderr, "\n");
+		}
+		byte *cmip = cone->Mipmap[mip];
+		for (int y = 0; y < mh; ++y)
+			for (int x = 0; x < mw; ++x)
+				cmip[SwizzledOffset(x, y, blockX, blockY, mh)] = C[size_t(y) * mw + x];
+	}
+	return cone;
+}
+
+// Disk cache for the exact bake, same self-validating single-file shape as the
+// horizon cache: the key is the height field's own mip-0 bytes plus every bake
+// parameter, so changing the map, the mode or the encode ceiling moves the key
+// and a stale cache is impossible without a version bump.
+static uint64_t ConeExactCacheKey(const Texture *height, int mode) {
+	uint64_t h = 1469598103934665603ull;                       // FNV-1a
+	auto mix = [&](const void *p, size_t n) {
+		const unsigned char *b = (const unsigned char *)p;
+		for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+	};
+	mix(height->Mipmap[0], size_t(height->SizeX) * size_t(height->SizeY));
+	const int32_t dims[5] = { height->SizeX, height->SizeY, int32_t(height->numMipmaps),
+	                          mode, kConeExactMaxRadius };
+	mix(dims, sizeof(dims));
+	const float enc = kPomConeExactMax;
+	mix(&enc, sizeof(enc));
+	return h;
+}
+
+Texture *LoadOrBakeConeMapExact(Texture *height, int mode, const char *tag) {
+	if (!height || height->BPP != 8 || !height->Mipmap[0]) return nullptr;
+	constexpr uint32_t kMagic = 0x31454E43u;      // "CNE1"
+	const uint64_t key = ConeExactCacheKey(height, mode);
+	char path[512];
+	std::snprintf(path, sizeof(path), "cache/pom_cone_exact_%016llx.bin",
+	              (unsigned long long)key);
+	// Total texels across the chain (the cone map mirrors the height layout).
+	size_t total = 0;
+	{ const int BX = 1 << height->blockSizeX, BY = 1 << height->blockSizeY;
+	  int cx = height->SizeX >> height->blockSizeX, cy = height->SizeY >> height->blockSizeY;
+	  for (dword i = 0; i < height->numMipmaps; ++i) {
+	      total += size_t(cx) * size_t(cy) * size_t(BX) * size_t(BY);
+	      cx = (cx + 1) >> 1; cy = (cy + 1) >> 1; } }
+	if (FILE *f = std::fopen(path, "rb")) {
+		uint32_t magic = 0; uint64_t texels = 0;
+		if (std::fread(&magic, 4, 1, f) == 1 && magic == kMagic
+		    && std::fread(&texels, 8, 1, f) == 1 && size_t(texels) == total) {
+			Texture *cone = new Texture;
+			*cone = *height;
+			cone->Pal = nullptr; cone->FileName = nullptr; cone->ID = 0;
+			for (int i = 0; i < 16; ++i) cone->Mipmap[i] = nullptr;
+			byte *dst = (byte *)getAlignedBlock(total);
+			cone->Data = dst;
+			if (std::fread(dst, 1, total, f) == total) {
+				const byte *h0 = height->Mipmap[0];
+				for (dword i = 0; i < height->numMipmaps; ++i)
+					cone->Mipmap[i] = dst + size_t(height->Mipmap[i] - h0);
+				std::fclose(f);
+				std::fprintf(stderr, "[POM-CONE-EXACT] '%s': cache hit %s\n", tag, path);
+				return cone;
+			}
+			delete cone;
+		}
+		std::fclose(f);
+	}
+	auto t0 = std::chrono::high_resolution_clock::now();
+	Texture *cone = MakeConeMapExact(height, mode);
+	const double ms = std::chrono::duration<double, std::milli>(
+		std::chrono::high_resolution_clock::now() - t0).count();
+	if (!cone) {
+		std::fprintf(stderr, "[POM-CONE-EXACT] '%s': bake FAILED (mode %d)\n", tag, mode);
+		return nullptr;
+	}
+	std::fprintf(stderr, "[POM-CONE-EXACT] '%s': mode %d (%s), %d x %d, %zu texels, "
+		"encode ceiling %.3f (%.0f ms) -> %s\n", tag, mode,
+		mode == 2 ? "relaxed" : "conservative", height->SizeX, height->SizeY,
+		total, (double)kPomConeExactMax, ms, path);
+	std::filesystem::create_directories("cache");
+	if (FILE *f = std::fopen(path, "wb")) {
+		const uint64_t texels = total;
+		std::fwrite(&kMagic, 4, 1, f);
+		std::fwrite(&texels, 8, 1, f);
+		std::fwrite(cone->Mipmap[0], 1, total, f);
+		std::fclose(f);
+	}
+	return cone;
+}
+
 // ── S1c HORIZON MAP BAKE (--pom_horizon) ───────────────────────────────────
 // Per texel of an 8-bit height map, the elevation of the relief's own horizon
 // in kPomHorizonAzimuths evenly spaced tangent-space azimuths, as u8

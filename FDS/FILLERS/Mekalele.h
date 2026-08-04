@@ -539,6 +539,26 @@ struct TileRasterizerCtx {
 	// skip risk for speed; the binary refine recovers the crossing inside any
 	// bracket it lands. 1 = the raw conservative bake.
 	float pomRelax = 1.0f;
+	// Decode scale for one ConeMap byte: byte × coneUnit = the cone ratio the
+	// march steps by (UV distance per unit normalized height), relaxation
+	// already folded in. The legacy coarse bake (MakeConeMap) encodes over
+	// [0, kPomConeMax]; the exact per-texel bake (--pom_cone_exact) encodes over
+	// [0, kPomConeExactMax], which is ~an order finer because the real cone
+	// ratios of a 1024² stone map live near 1/1024 per unit height, not near 4.
+	// One field so the kernel never has to know WHICH bake produced the map.
+	float coneUnit = kPomConeMax * (1.0f / 255.0f);
+	// --pom_cone_min_step (default 0 = off): floor on the cone step, expressed
+	// as TEXELS of lateral advance. A cone byte of 0 makes the cone step
+	// c·gap/(c+dlen) exactly ZERO, so the march FREEZES and the lane falls back
+	// to the un-shifted entry UV (for the shell: the flat lid). A minimum
+	// lateral advance is the EGSR'24 "artifact-free minimum step size" and
+	// bounds the number of steps needed to cross the slab.
+	float pomConeMinStepTexels = 0.0f;
+	// --pom_march_earlyout: break the march loop once EVERY lane has bracketed
+	// its crossing. Byte-exact by construction (a bracketed lane's dt is already
+	// forced to 0 and all of its bracket state is frozen behind `search`), so
+	// this is purely the cost of the steps nobody needed.
+	bool pomEarlyOut = false;
 	// --pom_depth_write (S1a, docs/DISPLACEMENT_RESEARCH.md): write the marched
 	// intersection's view depth to the Z buffer instead of the flat plane's.
 	// Set by the dispatcher ONLY when the flag is on AND a march is configured
@@ -1355,6 +1375,10 @@ struct TileRasterizer {
 								prevV = select(go, curV, prevV);
 								prevH = select(go, rayH, prevH);
 								prevF = select(go, f, prevF);
+								// --pom_march_earlyout, BYTE-EXACT: with every lane found,
+								// hitNow is false and `go` is false, so hit*/prev* are all
+								// frozen and cur*/rayH are never read after the loop.
+								if (ctx.pomEarlyOut && horizontal_and(found)) break;
 							}
 							uf = hitU;
 							vf = hitV;
@@ -1389,7 +1413,23 @@ struct TileRasterizer {
 							Vec8f curU = baseU + dU * (hStart - hEnter);
 							Vec8f curV = baseV + dV * (hStart - hEnter);
 							Vec8f rayH = hStart;
-							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f) * ctx.pomRelax);
+							const Vec8f coneScale = Vec8f(ctx.coneUnit * ctx.pomRelax);
+								// --pom_cone_min_step (default 0 = off): minimum LATERAL
+								// advance per cone step, in TEXELS, converted to a height
+								// step by dividing by the lateral texels travelled per unit
+								// height (dlen × texels-per-UV). A cone byte of 0 makes the
+								// step c·gap/(c+dlen) exactly ZERO and the march FREEZES —
+								// the lane then keeps the un-shifted entry UV, which for the
+								// shell is the flat lid. This is the EGSR'24 "artifact-free
+								// minimum step size"; it also bounds the step count needed to
+								// cross the slab. dlen==0 (perpendicular view) travels no
+								// texels at all and already takes the whole gap in one step,
+								// so the floor is switched off there rather than made huge.
+								const bool useMinStep = ctx.pomConeMinStepTexels > 0.0f;
+								const Vec8f minStepH = useMinStep
+								    ? Vec8f(ctx.pomConeMinStepTexels)
+								      / max(dlen * Vec8f(ctx.heightUScale), Vec8f(1e-6f))
+								    : Vec8f(0.0f);
 							// Bracket of the first crossing. abo* = last sample confirmed ABOVE
 							// the surface (init = field top, always above since H<=1); bel* =
 							// first sample AT/below the surface. A lane that never crosses keeps
@@ -1439,10 +1479,21 @@ struct TileRasterizer {
 								// exact divide (no rcp approx - parallax hard rule). c=0 near a tall
 								// feature -> dt=0 (blocked); dlen=0 (perp view) -> dt=gap.
 								Vec8f dt = cratio * gap / (cratio + dlen + Vec8f(1e-6f));
+								// --pom_cone_min_step: floor the step at one minimum lateral
+								// advance, but never further than the gap the ray is standing
+								// over, so the floor only ever overrides a FROZEN (byte-0)
+								// cone and never steps deeper into the surface than the cone
+								// itself would have allowed. Off by default -> dt unchanged.
+								if (useMinStep) dt = max(dt, min(minStepH, gap));
 								dt = select(search, dt, Vec8f(0.0f));   // frozen once bracketed
 								curU -= dU * dt;
 								curV -= dV * dt;
 								rayH -= dt;
+								// --pom_march_earlyout, BYTE-EXACT: with every lane bracketed,
+								// each remaining iteration computes hitNow = false, search =
+								// false and dt = 0, so it leaves every bracket variable and
+								// every ray variable that is read after the loop untouched.
+								if (ctx.pomEarlyOut && horizontal_and(found)) break;
 							}
 							// Binary search between the above/below bracket ends (both on the
 							// same ray, so the UV midpoint is exact). Each iteration samples the
@@ -1567,6 +1618,10 @@ struct TileRasterizer {
 								found |= hit;
 								if (shell)
 									pomCrossed = found;
+								// --pom_march_earlyout, BYTE-EXACT: every later iteration
+								// computes hit = false and leaves foundU/foundV/pomHitH/
+								// pomCrossed exactly as they stand.
+								if (ctx.pomEarlyOut && horizontal_and(found)) break;
 							}
 							if (lod > 0.0f) {
 								const Vec8f fade = min(max(
@@ -2482,6 +2537,15 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomQuarter = fds::FeatureFlags::parallax_pom_quarter(),
 		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
+		// Decode scale for one ConeMap byte. Which encode the resident map uses
+		// is decided ONCE, at scene setup, by --pom_cone_exact (the same flag
+		// that chose the bake), so the runtime never has to inspect the map.
+		// Flag off -> kPomConeMax * 1/255, the identical constant expression the
+		// kernel used to fold in-line.
+		.coneUnit = (fds::FeatureFlags::pom_cone_exact() > 0
+		             ? kPomConeExactMax : kPomConeMax) * (1.0f / 255.0f),
+		.pomConeMinStepTexels = fds::FeatureFlags::pom_cone_min_step(),
+		.pomEarlyOut = fds::FeatureFlags::pom_march_earlyout(),
 		.pomDepthWrite = pomDepthWrite,
 		.pomShell = pomShellFace,
 		.pomShellUvAmp = pomShellFace ? PomShellFaceUvAmp(F) : 0.0f,

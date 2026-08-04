@@ -1471,11 +1471,17 @@ void Initialize_Greets()
 					// on → default-off pays nothing and is byte-identical.
 					if (fds::FeatureFlags::parallax_pom_cone() && M->HeightMap->BPP == 8) {
 						auto t0 = std::chrono::high_resolution_clock::now();
-						M->ConeMap = MakeConeMap(M->HeightMap);
+						// --pom_cone_exact (S1 P1): per-texel EGSR'24-style bake
+						// through a disk cache, instead of the max-pooled 128²
+						// grid. Default 0 = the legacy bake, byte-identical.
+						const int coneExact = fds::FeatureFlags::pom_cone_exact();
+						M->ConeMap = coneExact > 0
+						    ? LoadOrBakeConeMapExact(M->HeightMap, coneExact, M->Name)
+						    : MakeConeMap(M->HeightMap);
 						double ms = std::chrono::duration<double, std::milli>(
 							std::chrono::high_resolution_clock::now() - t0).count();
-						std::fprintf(stderr, "[GREETS] parallax_pom '%s' -> cone map %s (%.0f ms)\n",
-						             M->Name, M->ConeMap ? "baked" : "FAILED", ms);
+						std::fprintf(stderr, "[GREETS] parallax_pom '%s' -> cone map %s (exact=%d, %.0f ms)\n",
+						             M->Name, M->ConeMap ? "baked" : "FAILED", coneExact, ms);
 					}
 					// S1c (--pom_horizon): bake the relief self-shadow horizon
 					// HERE, off the FULL height field — the --greets_displace
@@ -1686,9 +1692,12 @@ void Initialize_Greets()
 				if (Texture *resid = MakeResidualHeight(M->HeightMap, mip)) {
 					M->HeightMap = resid;   // original leaks (init-time, matches loaders)
 					if (M->ConeMap) {
-						M->ConeMap = MakeConeMap(M->HeightMap);
+						const int coneExact = fds::FeatureFlags::pom_cone_exact();
+						M->ConeMap = coneExact > 0
+						    ? LoadOrBakeConeMapExact(M->HeightMap, coneExact, M->Name)
+						    : MakeConeMap(M->HeightMap);
 						std::fprintf(stderr, "[DISPLACE] '%s' cone map rebaked "
-						             "from the residual\n", M->Name);
+						             "from the residual (exact=%d)\n", M->Name, coneExact);
 					}
 					std::fprintf(stderr, "[DISPLACE] '%s' POM input -> residual "
 					             "height map\n", M->Name);

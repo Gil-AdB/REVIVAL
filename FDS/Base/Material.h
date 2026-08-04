@@ -15,6 +15,31 @@
 // (~0.016) where it matters most (small ratios, near tall features).
 inline constexpr float kPomConeMax = 4.0f;
 
+// --pom_cone_exact (S1 P1): encode ceiling for the EXACT per-texel cone bake
+// (MakeConeMapExact). It is a different number from kPomConeMax because the two
+// bakes produce different distributions and the byte has to resolve the range
+// that actually decides a step.
+//
+// MEASURED, greets 1024² wall map, legacy coarse bake: mean byte 38.6, i.e.
+// mean cone ratio 38.6 × 4/255 = 0.61 BEFORE the ×4 --parallax_pom_relax. The
+// march's competing quantity is dlen = uvAmp × tan(incidence) ≤ ~0.7, so the
+// baked cone is larger than anything it is compared against and the step
+// c·gap/(c+dlen) is a near-full gap almost everywhere — the cone map barely
+// steers the march at all (confirmed: --parallax_pom_relax 1 / 4 / 16 move the
+// t=6097 error by <5 %). That is what max-pooling the height to a 128² grid
+// does: the max over an 8×8 stone block is near 255 nearly everywhere, so there
+// are almost no TALLER cells left to bound the cone with.
+//
+// An exact per-texel cone of a 1024² map lives near 1/1024 UV per unit height
+// (the neighbouring texel, one texel away, half a height range taller), i.e.
+// 0.002..0.05 — two decades BELOW the legacy byte's 4/255 = 0.0157 quantum.
+// 0.5 puts the quantum at 0.00196 = two texels per unit height and still lets a
+// clamped (0.5) cone take ≥42 % of the gap at the steepest incidence the shell
+// cap allows, so the clamp costs steps only in genuinely open relief. Cones
+// BELOW the quantum truncate to 0, which freezes the march — that is what
+// --pom_cone_min_step exists to floor.
+inline constexpr float kPomConeExactMax = 0.5f;
+
 // S1c HORIZON MAP (--pom_horizon, docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1c):
 // per texel of a height map, the elevation of the relief's own horizon in
 // kPomHorizonAzimuths evenly spaced tangent-space azimuths, stored as

@@ -65,6 +65,20 @@ bool EstimateBlockPitch(const Texture *hm, int mip, float &pitchXtex, float &pit
 // Caller owns the returned Texture. Returns nullptr on a bad/empty source.
 Texture *MakeConeMap(Texture *height);
 
+// --pom_cone_exact (S1 P1): EXACT PER-TEXEL cone bake at the mip's own
+// resolution instead of MakeConeMap's max-pooled 128² grid, after Bán et al.,
+// "Robust Cone Step Mapping", EGSR 2024, adapted to our POINT-SAMPLED height
+// field (distance is measured to the nearest point of a texel's CELL, not to
+// its centre). mode 1 = conservative (the cone contains no geometry), mode 2 =
+// relaxed (the cone may penetrate; bounded by where the ray leaves the field
+// again, so the first bracket is still the first crossing). Quantised by
+// TRUNCATION over [0, kPomConeExactMax] — a cone rounded UP is exactly what
+// makes a march skip geometry. Caller owns; nullptr on a bad source or mode.
+Texture *MakeConeMapExact(Texture *height, int mode);
+// Same, through a disk cache under Runtime/cache/ keyed on the height field's
+// bytes + mode + encode ceiling + scan radius (the horizon-map cache pattern).
+Texture *LoadOrBakeConeMapExact(Texture *height, int mode, const char *tag);
+
 // Pack a 32-bit BGRA tangent-space normal map to 16-bit RG (X,Y; Z reconstructed
 // in-shader), same layout (half the memory). BPP=16 marks the kernel decode.
 // Caller owns.
