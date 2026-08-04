@@ -62,6 +62,7 @@ DEFS=""
 [ -n "${FDS_FNTLIGHTS:-}" ] && DEFS="$DEFS -dFDS_FNTLIGHTS"          # fountain stream lights (omnis riding the 3 orbiting emitters)
 [ -n "${FDS_XPARPROF:-}" ] && DEFS="$DEFS -dFDS_XPARPROF"            # split cost of the 2-pass transparent textured-gouraud pair
 [ -n "${FNT_STREAM_LIGHTS:-}" ] && DEFS="$DEFS -dFNT_STREAM_LIGHTS=$FNT_STREAM_LIGHTS"  # per emitter (1..3)
+[ -n "${FNT_LIGHT_GAIN:-}" ] && DEFS="$DEFS -dFNT_LIGHT_GAIN=$FNT_LIGHT_GAIN"          # stream-light magnitude (default 55000)
 # LOGSYNC = fflush instead of close+reopen. DEFAULT ON: 482 of those fire while CITY.FLD
 # loads and each is a FAT dir search + flush + seek-to-end via int21. Measured on 86Box:
 # LoadFLD 10.24s -> 1.15s, whole startup 20.47s -> 8.00s. The only thing lost is log

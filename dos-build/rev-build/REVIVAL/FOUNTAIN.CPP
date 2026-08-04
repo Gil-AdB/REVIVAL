@@ -153,6 +153,9 @@ void Particle_Rast(Vertex *A,Vertex *B,Vertex *C)
 #ifndef FNT_STREAM_LIGHTS
 #define FNT_STREAM_LIGHTS 1        // per emitter; 3 emitters -> 3 lights. 3 -> 9.
 #endif
+#ifndef FNT_LIGHT_GAIN
+#define FNT_LIGHT_GAIN 55000.0f    // blue-channel magnitude; falloff table above
+#endif
 #define FNT_STREAM_LIGHTS_MAX (FNT_STREAM_LIGHTS*3)
 static Omni *FntStreamLight[FNT_STREAM_LIGHTS_MAX];
 static long  FntStreamLightN = 0;
@@ -172,13 +175,18 @@ static void Fnt_MakeStreamLights(Scene *Sc)
 		// in Animate_Objects leaves IPos alone when NumKeys==0, and we overwrite it anyway.
 		O->Pos.NumKeys = 0;
 		O->Pos.Keys    = NULL;
-		// Cool water-white. The DOS forward Lighting() is LR += L*cos*384/dist^2, so the
-		// magnitude is the same scale ConvertOmni uses (255*56.86 ~ 14500) knocked well down:
-		// these sit INSIDE the basin, metres from the geometry, where 1/dist^2 is enormous.
-		O->L.R = 1400.0f;
-		O->L.G = 2000.0f;
-		O->L.B = 2600.0f;
-		O->Flags |= Flare_LightSource;
+		// Cool water-white. FntLighting's live branch is  LR += L.rgb * ISize / dist^2
+		// (gated on Dot>0), and the measured scene scale is dist ~40-70 units with
+		// Ambient_Factor = 32 (FNTSCALE probe). A contribution comparable to ambient at ~40
+		// units therefore needs L ~ 32*40^2 ~ 50000. The first attempt used 1400, which
+		// lands under 1 against ambient 32 -- which is why nothing was visible.
+		//   dist 20 -> ~75/105/137   dist 40 -> ~19/26/34   dist 80 -> ~5/7/9
+		O->L.R = FNT_LIGHT_GAIN*0.55f;
+		O->L.G = FNT_LIGHT_GAIN*0.76f;
+		O->L.B = FNT_LIGHT_GAIN*1.00f;
+		// Deliberately NOT Flare_LightSource: that flag gates the flare SPRITE in Render(),
+		// and ISize doubles as the sprite size. FntLighting's omni loop ignores the flag
+		// (if(1)//O->Flags&Flare_LightSource), so these light without drawing anything.
 		AddOmni(Sc,O,"fnt stream light");
 		// AddOmni stamps Obj->Parent = (Object *)CurParent -- a raw FLD parent INDEX that only
 		// ConvertFLD's resolve pass turns into a pointer. Calling it after the load means no
@@ -195,10 +203,16 @@ static void Fnt_MakeStreamLights(Scene *Sc)
 // Park each light on a live particle of its emitter, spaced through the group so the lights
 // sit at different ages -- i.e. spread along the arc rather than bunched at the nozzle.
 // Call AFTER Animate_Objects and BEFORE lighting.
+static float FntLightISize = 0.0f, FntLightIRange = 0.0f;
+
 static void Fnt_PlaceStreamLights(Scene *Sc)
 {
 	long e,k;
 	if (!FntStreamLightN) return;
+	// Every FLD omni in this scene has ISize/IRange = 0, so there is no authored scale to
+	// borrow -- which also means FntLighting's omni loop contributes nothing for ANY of them:
+	// its IRange==0 branch multiplies by O->IRange, zero by definition there. Set both.
+	if (FntLightISize==0.0f) { FntLightISize=1.0f; FntLightIRange=1.0f; }
 	for (e=0;e<3;e++)
 	{
 		long off = g_PclGroupOff[1+e], n = g_PclGroupN[1+e];
@@ -210,10 +224,31 @@ static void Fnt_PlaceStreamLights(Scene *Sc)
 			for (j=0;j<n;j++)                       // first live particle from that slot on
 			{ long c = off + ((start-off)+j)%n;
 			  if (Sc->Pcl[c].Flags & Particle_Active) { idx=c; break; } }
-			if (idx<0)                              // emitter momentarily empty: park it dark
-			{ O->Flags &= 0xFFFFFFFF-Flare_LightSource; continue; }
-			O->Flags |= Flare_LightSource;
+			if (idx<0)                              // emitter momentarily empty: contribute nothing
+			{ O->ISize = 0.0f; continue; }   // emitter empty: contribute nothing this frame
+			// FntLighting multiplies EVERY omni contribution by O->ISize, and its IRange!=0
+			// branch is the only one that can produce light at all (the else branch multiplies
+			// by O->IRange, which is zero by definition there). Both come from the Size/Range
+			// splines via Animate_Objects, and these lights have no splines -- so they stayed
+			// at the memset 0 and contributed exactly nothing. Borrow the scale from an
+			// authored omni rather than inventing one.
+			O->ISize  = FntLightISize;
+			O->IRange = FntLightIRange;
 			Vector_Copy(&O->IPos,&Sc->Pcl[idx].V.Pos);
+			// One-shot scale probe: what distances are we actually working at, and how big is
+			// ambient? Contribution is L.R/dist^2, so both numbers set the required magnitude.
+			{ static long _sp=0;
+			  if (!_sp && e==0 && k==0)
+			  { TriMesh *T; float best=1e30f; const char *bn="?"; Object *_o;
+			    for(_o=Sc->ObjectHead;_o;_o=_o->Next)
+			    { if(_o->Type!=Obj_TriMesh||!_o->Data) continue;
+			      T=(TriMesh *)_o->Data;
+			      { Vector D; Vector_Sub(&T->IPos,&O->IPos,&D);
+			        float d=(float)sqrt(Dot_Product(&D,&D));
+			        if(d<best){best=d;bn=_o->Name?_o->Name:"?";} } }
+			    fprintf(LogFile,"FNTSCALE lightPos=(%.1f,%.1f,%.1f) nearestMesh='%s' dist=%.1f Ka=%.1f Kd=%.1f\n",
+			      O->IPos.X,O->IPos.Y,O->IPos.Z,bn,best,(float)Ambient_Factor,(float)Diffusive_Factor);
+			    fflush(LogFile); _sp=1; } }
 		}
 	}
 }
