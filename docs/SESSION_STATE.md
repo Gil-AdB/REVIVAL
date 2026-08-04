@@ -1,5 +1,19 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-04 (later) — S1a AND S1b ARE IN.** `--pom_depth_write` (S1a,
+> c2616e4) and `--pom_shell` (S1b, c556148) both land default OFF and
+> byte-null (render_gate 3/3, city `37e62845`, fountain `51fff7cd`). S1b is
+> the silhouette stage: the shell march discards rays that leave the
+> contiguous coplanar PATCH before crossing the height field, which is the
+> mechanism that lets the geometry behind show through at block edges (a
+> plain "miss" never happens inside a height field — see the S1b entry in
+> docs/S1_PIXEL_DISPLACEMENT_PLAN.md, which now records every deviation from
+> the original sketch and why). Measured at t=5780: tessellation 123.9 ms vs
+> shell-cone 63.0 ms. OPEN: the floor's deep slab still opens ~6 k px of void
+> at extreme grazing (candidates listed in the plan); tuning of
+> `--pom_shell_cap` is the main dial; S1c (horizon-map self-shadow) not
+> started.
+>
 > **2026-08-04 — ACTIVE CAMPAIGN REDIRECT:** the current campaign is
 > **S1 per-pixel shell displacement** — read `docs/S1_PIXEL_DISPLACEMENT_PLAN.md`
 > FIRST (mission, stages S1a/S1b/S1c, validation battery, discipline). Research
