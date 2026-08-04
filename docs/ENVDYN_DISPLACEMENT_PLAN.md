@@ -598,6 +598,46 @@ only, flags default-off until the user approves looks.
   - **Gates:** render_gate 3/3 vs committed baselines; city `37e62845` +
     fountain `51fff7cd` byte-exact; wasm links; greets flags-off structurally
     inert (clustering byte-path identical, clusters 2183).
+- [x] **S5 — the GRAZING ZIGZAG (`--greets_displace_line_height`, default ON).
+      DONE (2026-08-04).** User repro: `FDS_GREETS_CAM="-7.38721609,2.72471762,
+      -50.8239441,0.817980111,-0.113630958,0.563911617"` t=2845 — a vertical
+      mortar joint sawtoothing ±25 px at a grazing view. The initial diagnosis
+      (independent mid-slope samples on DETECTED groove-line verts) was
+      **partially wrong** and corrected by causal measurement:
+  - **Mechanism (measured, causal):** the artifact wall's authored UV chart is
+    a 4:1 TRAPEZOID (non-affine) → `edgeAlignedQuad` rejects it
+    (non-parallelogram) → block-pitch FAN lattice, which cannot represent a
+    few-texel groove; the smeared pseudo-carve (recessed lattice column at
+    ~13-texel row pitch + alternating field-following diagonals) shears into a
+    128-px-period chevron sawtooth under the ~20× grazing magnification.
+    Making the strip's heights merely CONSISTENT does **not** straighten it
+    (measured — bit-identical depth in the artifact region); zeroing just the
+    strip's displacement does (zigzag tracer std 7.5→3.7, look intact). POM,
+    fold-relax, per-face mips (`--mips` default 0) and rasterizer UV transport
+    (perspective-correct per pixel) all exonerated.
+  - **Fix (bake-time only, one principle — verts tracing a groove displace
+    consistently):** (1) EDGE-aligned patches: every groove-line vert takes the
+    line's rep = MEDIAN of the height field along that line (min at crossings);
+    keeps the carve, kills along-line variance — this also straightens the
+    long-known "wavy mortar joint at grazing" on the edge path (graze pose
+    `-10,3,-45` t=1867: dramatic A/B). (2) FAN/LONE fallback patches: verts
+    within 2.5 texels of any groove line pin to the groove's PLATEAU reference
+    (median along an inset line pad+1.25 texels outside the groove — the pad
+    lines themselves read mid-slope 0.37 vs true plateau 0.60 at mip2 blur):
+    the fallback does not carve what it cannot represent; the joint reads via
+    albedo/normal map/POM exactly as before. Plateau interiors untouched.
+  - **Results:** repro zigzag lateral deviation std 8.33 px → 4.40 (straight
+    no-displace reference 3.08); census rooms 28,533 edge-snapped + 700
+    plateau-pinned, floor 8,570 + 308; fold-relax 3,882→3,818 rooms / 62→57
+    floor, converges as before. Look poses (frontal t=1867 / gray t=2145 /
+    graze t=1867): relief, block pitch, carve depth unchanged. Pinhole sweep
+    (5 poses + 6-t timeline, ON vs OFF): absolute counts stay 0–4 px/frame;
+    the ±1 px deltas are single-pixel triangle-junction coverage flicker with
+    CONTINUOUS depth across (verified per pixel), not cull holes. Rigs:
+    DTEST FOLD PASS (1→0), NEIGHBOR PASS (0.48→0.0000), metric matrix
+    byte-identical (map0 578 faces 50%/86%, runbond span3 7106 53%/84%).
+    Flag-off: [STONE] bake summaries byte-identical to pre-change (verts
+    36500/68513 faces, 30472 displaced [-0.164..+0.033], fold census 3882/62).
 - [x] **F AABB foundation** — TriMesh world AABB (static once / dynamic per-
       frame from posed local-AABB corners) + world-space `Frustum` (main
       camera OR padded probe face) + AABB/sphere reject + `--draw_aabbs`
