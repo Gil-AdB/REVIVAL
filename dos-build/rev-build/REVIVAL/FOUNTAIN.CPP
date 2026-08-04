@@ -154,7 +154,7 @@ void Particle_Rast(Vertex *A,Vertex *B,Vertex *C)
 #define FNT_STREAM_LIGHTS 1        // per emitter; 3 emitters -> 3 lights. 3 -> 9.
 #endif
 #ifndef FNT_LIGHT_GAIN
-#define FNT_LIGHT_GAIN 55000.0f    // blue-channel magnitude; falloff table above
+#define FNT_LIGHT_GAIN 260000.0f   // blue-channel magnitude; see the measured table below
 #endif
 #define FNT_STREAM_LIGHTS_MAX (FNT_STREAM_LIGHTS*3)
 static Omni *FntStreamLight[FNT_STREAM_LIGHTS_MAX];
@@ -175,12 +175,15 @@ static void Fnt_MakeStreamLights(Scene *Sc)
 		// in Animate_Objects leaves IPos alone when NumKeys==0, and we overwrite it anyway.
 		O->Pos.NumKeys = 0;
 		O->Pos.Keys    = NULL;
-		// Cool water-white. FntLighting's live branch is  LR += L.rgb * ISize / dist^2
-		// (gated on Dot>0), and the measured scene scale is dist ~40-70 units with
-		// Ambient_Factor = 32 (FNTSCALE probe). A contribution comparable to ambient at ~40
-		// units therefore needs L ~ 32*40^2 ~ 50000. The first attempt used 1400, which
-		// lands under 1 against ambient 32 -- which is why nothing was visible.
-		//   dist 20 -> ~75/105/137   dist 40 -> ~19/26/34   dist 80 -> ~5/7/9
+		// Cool water-white. FntLighting's live branch is  LR += L.rgb * ISize / dist^2,
+		// gated on Dot>0. MEASURED (FNTLIT probe, lights live): the fountain geometry sits
+		// 75-114 units from the arcs, with Ambient_Factor = 32. An earlier estimate of ~40
+		// units came from a probe that measured to CameraTarget -- a NULL object's pivot, not
+		// real geometry -- and under-scaled the gain by ~5x, which is why the first two
+		// attempts looked like nothing.
+		//   dist 40 -> ~89/123/162   dist 75 -> ~25/35/46   dist 115 -> ~11/15/20
+		// 1/d^2 with no range window means near vertices clamp; if that reads badly, the
+		// better model is city's linear range falloff (CITY_MASTER_LIGHT, k=(N.L)(1-d/Range)).
 		O->L.R = FNT_LIGHT_GAIN*0.55f;
 		O->L.G = FNT_LIGHT_GAIN*0.76f;
 		O->L.B = FNT_LIGHT_GAIN*1.00f;
@@ -209,9 +212,12 @@ static void Fnt_PlaceStreamLights(Scene *Sc)
 {
 	long e,k;
 	if (!FntStreamLightN) return;
-	// Every FLD omni in this scene has ISize/IRange = 0, so there is no authored scale to
-	// borrow -- which also means FntLighting's omni loop contributes nothing for ANY of them:
-	// its IRange==0 branch multiplies by O->IRange, zero by definition there. Set both.
+	// ISize/IRange must be set BY SCENE CODE. The FLD path never carries them: ConvertOmni
+	// builds only the Pos spline, and Animate_Objects evaluates only Spline_Calc_3D(Pos).
+	// The Size/Range Spline members exist in the struct but nothing ever fills or reads them.
+	// City does the same thing by hand (CITY.CPP CITY_MASTER_LIGHT, per-omni Range/ISize by
+	// colour) precisely because of this; fountain never did, which is why all 8 of its
+	// authored omnis sit at ISize=IRange=0 and its omni loop is inert.
 	if (FntLightISize==0.0f) { FntLightISize=1.0f; FntLightIRange=1.0f; }
 	for (e=0;e<3;e++)
 	{
@@ -2027,6 +2033,26 @@ void Run_Fountain()
 		tf1=RDTSC(); dS=(unsigned long)(tf1-tf0); tf0=tf1;
 
 		FntLighting(FntSc);
+#ifdef FDS_FNTLIGHTS
+		// Did any stream light actually reach geometry? maxLB == Ka means nothing landed,
+		// i.e. a reach/gating problem rather than a magnitude one.
+		{ static long _flp=0;
+		  // Only once a stream light is actually live -- the first frames have no spawned
+		  // particles yet, so every light is legitimately parked at ISize=0 there.
+		  if (_flp<12 && FntStreamLight[0]->ISize!=0.0f)
+		  { TriMesh *_T; Object *_o;
+		    for(_o=FntSc->ObjectHead;_o && _flp<12;_o=_o->Next)
+		    { if(_o->Type!=Obj_TriMesh||!_o->Data) continue;
+		      _T=(TriMesh *)_o->Data; if(!_T->VIndex||!_T->Verts) continue;
+		      { Vertex *v,*ve=_T->Verts+_T->VIndex; float mx=-1e30f; long nlit=0;
+		        for(v=_T->Verts;v<ve;v++){ if(v->LB>mx)mx=v->LB; if(v->LB>(float)Ambient_Factor+0.5f)nlit++; }
+		        { float nl=(float)sqrt(Dot_Product(&_T->Verts[0].N,&_T->Verts[0].N));
+		          Vector _D; Vector_Sub(&_T->IPos,&FntStreamLight[0]->IPos,&_D);
+		          fprintf(LogFile,"FNTLIT '%s' V=%ld maxLB=%.1f Ka=%.1f lit=%ld |N[0]|=%.3f distToL0=%.1f ISize=%.3f IRange=%.3f\n",
+		            _o->Name?_o->Name:"?",(long)_T->VIndex,mx,(float)Ambient_Factor,nlit,nl,
+		            (float)sqrt(Dot_Product(&_D,&_D)),FntStreamLight[0]->ISize,FntStreamLight[0]->IRange); }
+		        fflush(LogFile); _flp++; } } } }
+#endif
 		tf1=RDTSC(); dL=(unsigned long)(tf1-tf0); tf0=tf1;
 
 		if (!CAll) continue;
