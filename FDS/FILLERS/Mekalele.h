@@ -518,6 +518,16 @@ struct TileRasterizerCtx {
 	// needed and the shared diagonal is never treated as a boundary.
 	float shellUMin = 0.0f, shellUMax = 0.0f;
 	float shellVMin = 0.0f, shellVMax = 0.0f;
+	// --pom_shell_merge_uv: the SIBLING boxes of this face's patch — the other
+	// patches on the same plane whose UV rects abut it (4 floats each,
+	// uMin,uMax,vMin,vMax; own box excluded, it is shellU/VMin/Max above). The
+	// lateral-exit test passes if the hit is inside the own box OR any sibling,
+	// i.e. the domain is the UNION of the boxes and NOT their bounding box — an
+	// authoring cut through one physical surface (greets' doorway thresholds)
+	// stops discarding, a real opening between coplanar patches still does.
+	// Evaluated only for lanes that failed the own box (horizontal_and early-out).
+	const float *shellSibs = nullptr;
+	int shellSibCount = 0;
 	// --pom_viz: replace the albedo with the height field sampled at the FINAL
 	// (post-march) UV, grayscale — the parallax result made directly visible
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
@@ -1473,10 +1483,23 @@ struct TileRasterizer {
 						if (shell) {
 							Vec8fb keep = pomCrossed;
 							if (ctx.pomShellDomain) {
-								keep &= (uf >= Vec8f(ctx.shellUMin))
-								      & (uf <= Vec8f(ctx.shellUMax))
-								      & (vf >= Vec8f(ctx.shellVMin))
-								      & (vf <= Vec8f(ctx.shellVMax));
+								Vec8fb ins = (uf >= Vec8f(ctx.shellUMin))
+								           & (uf <= Vec8f(ctx.shellUMax))
+								           & (vf >= Vec8f(ctx.shellVMin))
+								           & (vf <= Vec8f(ctx.shellVMax));
+								// Sibling patches on the same plane (ctx.shellSibs,
+								// --pom_shell_merge_uv): the domain is the UNION of
+								// the boxes, never their bounding box. Skipped while
+								// every lane is already inside its own box — the
+								// overwhelming majority of covered pixels — so the
+								// multi-box domain costs nothing away from a border.
+								for (int sb = 0; sb < ctx.shellSibCount
+								     && !horizontal_and(ins); ++sb) {
+									const float *bx = ctx.shellSibs + 4 * sb;
+									ins |= (uf >= Vec8f(bx[0])) & (uf <= Vec8f(bx[1]))
+									     & (vf >= Vec8f(bx[2])) & (vf <= Vec8f(bx[3]));
+								}
+								keep &= ins;
 							}
 							p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
 						}
@@ -2066,11 +2089,25 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	    && (F->Txtr->PomShellUvAmp > 0.0f);
 	const bool pomDepthWrite = (fds::FeatureFlags::pom_depth_write() || pomShellFace)
 	    && marchArmed;
-	// Patch domain for the lateral-exit test (see Face::PomShellGroup).
+	// Patch domain for the lateral-exit test (see Face::PomShellGroup), plus the
+	// patch's SIBLING boxes — the other patches on the same plane whose UV rects
+	// abut it (Material::PomShellSibBoxes, built when --pom_shell_merge_uv > 0).
+	// The domain is the UNION OF THOSE BOXES, not their bounding box: a floor cut
+	// into patches by doorway thresholds stops discarding across the cuts, while a
+	// genuine opening between two coplanar patches still discards.
 	const float *pomShellDom = nullptr;
+	const float *pomShellSibs = nullptr;
+	int pomShellSibCount = 0;
 	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellDomains
-	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount)
+	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount) {
 		pomShellDom = F->Txtr->PomShellDomains + 4 * (F->PomShellGroup - 1);
+		if (F->Txtr->PomShellSibBoxes && F->Txtr->PomShellSibOfs) {
+			const uint32_t o0 = F->Txtr->PomShellSibOfs[F->PomShellGroup - 1];
+			const uint32_t o1 = F->Txtr->PomShellSibOfs[F->PomShellGroup];
+			pomShellSibs = F->Txtr->PomShellSibBoxes + 4 * o0;
+			pomShellSibCount = int(o1 - o0);
+		}
+	}
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -2127,6 +2164,8 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.shellUMax = pomShellDom ? pomShellDom[1] : (pomShellFace ? std::max({F->U1, F->U2, F->U3}) : 0.0f),
 		.shellVMin = pomShellDom ? pomShellDom[2] : (pomShellFace ? std::min({F->V1, F->V2, F->V3}) : 0.0f),
 		.shellVMax = pomShellDom ? pomShellDom[3] : (pomShellFace ? std::max({F->V1, F->V2, F->V3}) : 0.0f),
+		.shellSibs = pomShellSibs,
+		.shellSibCount = pomShellSibCount,
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
 		.heightLogW = heightLogW,

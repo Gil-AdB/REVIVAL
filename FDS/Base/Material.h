@@ -103,6 +103,22 @@ struct Material
     // null = no table, faces fall back to their own UV box.
     float               * PomShellDomains        = nullptr;
     unsigned              PomShellDomainCount    = 0;
+    // S1b MULTI-BOX domain (--pom_shell_merge_uv): the patches on the SAME
+    // PLANE whose UV rects abut/overlap are one physical surface even when no
+    // edge joins them (greets' floor is one plane cut into 6 patches by the
+    // doorway thresholds). The domain test is then "inside my own box OR inside
+    // any of my siblings'" — the UNION OF THE BOXES, never their bounding box,
+    // so a genuine opening between two coplanar patches (a doorway in a wall)
+    // still discards. CSR: PomShellSibOfs[g]..[g+1] index quads of
+    // PomShellSibBoxes (uMin,uMax,vMin,vMax), own box excluded (the kernel
+    // tests it first and early-outs). Both null = single-box domains.
+    float               * PomShellSibBoxes       = nullptr;
+    uint32_t            * PomShellSibOfs         = nullptr;
+    // Hot-loop bound on the sibling list (a patch with more coplanar abutting
+    // neighbours than this keeps the first kPomShellMaxSibs — dropping siblings
+    // can only ADD discards, never holes-by-omission of a real box, and the
+    // build prints CLAMPED when it happens so it is never silent).
+    static constexpr unsigned kPomShellMaxSibs = 12;
     // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
     // mutates the shared Texture pixels; these echo the last applied values
     // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).

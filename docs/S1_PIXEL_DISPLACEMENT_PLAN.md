@@ -130,16 +130,10 @@ re-implement per the above (its worktree branch may hold partial work).
 > poses** (they are enclosed) — so "see the geometry behind" means revealing
 > other SURFACES, not sky, and that is what the discard does.
 >
-> **OPEN (next session):** the remaining void at t=5780 is the FLOOR, whose
-> slab is ~6× deeper than the walls' (ParallaxScale 0.25 → A ≈ 1.1 world vs
-> 0.18) and which is seen at extreme grazing, so its rays travel up to 0.6 UV
-> = ~9 world units and no fixed-step march resolves that. Candidates, in
-> order: (a) merge coplanar patches whose UV rects abut even when not
-> edge-adjacent (the floor is split into 6 patches by doorway thresholds —
-> this is what the remaining bands sit on); (b) a per-material cap, or a cap
-> derived from a texels-per-step budget; (c) shell the walls only. Also open:
-> the p=6097 close-up shows the discard changing coverage over a LARGE band
-> at a wall corner — audit whether that reads as "eaten wall" on screen.
+> **✅ FLOOR VOID CLOSED + CORNER BAND ADJUDICATED (2026-08-04, session 3).**
+> See "S1b follow-ups" below. Void at t=5780: **6 175 → 404 px**; the t=6097
+> corner band is measured to be the discard CORRECTING the lid's
+> over-coverage, not eating wall.
 >
 > **Perf [M]**, greets t=5780, `--bench=scene`, iters=40, interleaved pairs,
 > machine load 2.6–6.1 (noisy, ±4 ms run-to-run — treat as "inside the
@@ -159,6 +153,75 @@ re-implement per the above (its worktree branch may hold partial work).
 > per-pixel path renders this frame in about HALF the time.
 >
 > Original sketch below, kept for the record.
+
+### S1b follow-ups (session 3, 2026-08-04)
+
+**New instrument — the discard CLASSIFIER.** `FDS_SNAPSHOT_GBUFDUMP=1` (greets
+snapshot, env-gated like `FDS_SNAPSHOT_ZDUMP`) writes the raw G-buffer material
+plane (`greets_t%06d_mat.u32`, `mip:4|matID:8|swizUV:20`) plus a
+`[GBUFDUMP] id=N name=…` table on stderr. With the z16 dump that answers, for
+every pixel a discard killed, WHICH surface won it instead. The discard set is
+`--pom_shell` vs `--pom_shell --no-pom_shell_domain` at the SAME pose — the only
+pair that isolates the discard from the lid geometry and the depth write.
+**Trap it exposed:** `rooms::mirUV` / `floor::mirUV` are NOT mirror-world
+clones, they are `GreetsFixBitangentHandedness`'s UV-handedness clones
+(`*c = *M`), so they inherit `PomShellUvAmp` + `PomShellDomains` and their faces
+keep `PomShellGroup` — they are shell faces too and any analysis that filters on
+the base names alone misses most of the stone.
+
+**(1) Floor void — CLOSED by a MULTI-BOX domain, not by merging boxes.**
+`--pom_shell_merge_uv` (default **0.05 UV**, 0 = old behaviour). Diagnosis
+confirmed by the classifier: at t=5780 the void was 92 % `floor::mirUV` in one
+horizontal band at the far doorway — exactly a doorway threshold, where the
+floor's 6 edge-adjacency patches are cut apart although the stone continues.
+First attempt merged such patches into one UNION box; measured: void
+6 175 → 384 px **but it destroyed the t=6097 corner silhouette** (the union box
+also swallows the genuine openings between coplanar patches, so the discard
+stopped firing there entirely — wall mask went from `shell` to exactly
+`shellnd`). The landed design instead keeps each patch's own tight box and gives
+it a SIBLING LIST (`Material::PomShellSibBoxes/SibOfs`, CSR, capped at
+`kPomShellMaxSibs = 12`): patches on the same plane whose UV rects abut within
+`merge_uv`, transitively. The domain test is "inside my box OR any sibling's" =
+the **union of the boxes, never their bounding box**, so an authoring cut stops
+discarding while a real opening still does. Kernel cost: one extra compare group
+per sibling, evaluated only for lanes that failed their own box
+(`horizontal_and` early-out). **Bake trap:** the plane test must use the
+AUTHORED plane — `PomShell_Build` re-planes every face onto the LID, and the
+lid's plane constant varies with per-face UV density (greets' floor: one
+authored plane becomes six lid planes 0.0087 apart, silently failing a 1e-3
+coplanarity test). `refPlane[]` snapshots it before the move.
+
+| t=5780 (cone, cap 2) | void px | wall-mask xor vs tess | over | under |
+|---|---|---|---|---|
+| flat POM | 0 | 5 239 | 5 238 | 1 |
+| shell, single box | 6 175 | 31 657 | 19 335 | 12 322 |
+| shell, UNION box (rejected) | 384 | 35 956 | 19 337 | 16 619 |
+| **shell, MULTI-box (landed)** | **404** | **31 942** | 19 335 | 12 607 |
+
+At t=6097 the multi-box result is pixel-identical to the single-box one (wall
+xor 14 041 both) — the corner silhouette is fully preserved. Grouping is driven
+by patches whose boxes already OVERLAP, so `merge_uv` 0.02 and 0.20 give the
+SAME grouping (rooms 67→55 plane groups, floor 6→1) and the same pixels: the
+default is not knife-edge. `--pom_shell_patch_dump` prints the patch table.
+
+**(2) t=6097 corner band — VERDICT: the discard is CORRECTING the lid, not
+eating wall.** Rendered tessellation / flat POM / shell / shell-no-discard at
+IDENTICAL framing (one `FDS_GREETS_CAM`, one script) and classified every
+discarded pixel:
+
+- discard-affected 178 802 px; **VOID 0 (0.0 %)**, drawn-FARTHER 178 802
+  (100 %), drawn-NEARER 0. Winners: `rooms` 155 183 px, `floor::mirUV` 23 619.
+  Reveal depth median 1 971 zEnc codes ≈ 5.0 world units — a real surface at a
+  plausible depth, never background.
+- The reference framing settles it: tess and flat POM have **identical** wall
+  masks here (xor 0). `shellnd` over-covers by **35 436 px** (that is the LID
+  inflating the silhouette at extreme grazing); `shell` over-covers by
+  **12 162 px** and under-covers 1 879. So the discard removes ~23 k px of
+  lid over-coverage and lands 2.6× closer to the reference than the
+  un-discarded lid. It is a correction, not damage.
+- Why the earlier eyeball was undecidable: the two crops being compared
+  (`x_shellnd_s.png` vs `x_shellcone_s.png`) differed in TWO variables at once
+  (naive vs cone march AND domain on/off), not one.
 
 Goal: true block-edge silhouettes. When a ray misses all stone, the pixel is
 DISCARDED and the geometry behind shows through — the user named this the one

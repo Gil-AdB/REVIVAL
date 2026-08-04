@@ -3422,6 +3422,12 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	};
 	struct FaceRef { TriMesh *T; int fi; };
 	std::vector<FaceRef> refs;
+	// The AUTHORED plane of each target face, snapshotted here because the
+	// vertex move below re-planes every face onto the LID — whose plane constant
+	// varies with the per-face UV density (measured on greets' floor: one
+	// authored plane becomes six lid planes 0.0087 world apart, which silently
+	// fails any 1e-3 coplanarity test done afterwards).
+	std::vector<std::array<float,4>> refPlane;
 	{
 		std::map<EdgeKey, std::vector<int>> edges;
 		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
@@ -3431,6 +3437,7 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
 				const int id = int(refs.size());
 				refs.push_back({ T, i });
+				refPlane.push_back({ F.N.x, F.N.y, F.N.z, F.NormProd });
 				uf.push_back(id);
 				const Vector *pv[3] = { &F.A->Pos, &F.B->Pos, &F.C->Pos };
 				for (int e = 0; e < 3; ++e) {
@@ -3604,6 +3611,121 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 				domUMax = std::max(domUMax, (double)table[4*g+1]);
 				domVMin = std::min(domVMin, (double)table[4*g+2]);
 				domVMax = std::max(domVMax, (double)table[4*g+3]);
+			}
+			// ── PLANE GROUPS: the multi-box domain (--pom_shell_merge_uv) ────
+			// Edge adjacency alone leaves ONE physical surface split wherever the
+			// authoring interrupts it without sharing an edge. Measured on
+			// greets: the floor is one plane cut into 6 patches by the doorway
+			// thresholds, and the residual grazing void sat exactly on those
+			// cuts — a ray crossing a threshold in UV left its patch and was
+			// discarded, although the stone physically continues.
+			//
+			// The fix is NOT to merge the boxes into their union: that union
+			// also swallows the genuine OPENINGS between coplanar patches (a
+			// doorway in a wall), and measured at t=6097 it killed the corner
+			// silhouette outright (the discard went from correcting 23 k px of
+			// lid over-coverage to correcting none). Instead each patch keeps
+			// its own tight box and gains a SIBLING LIST: the other patches on
+			// its plane whose UV rects abut/overlap within pom_shell_merge_uv.
+			// The domain test becomes "inside my box OR inside any sibling's" —
+			// the union of the boxes, never their bounding box, so a gap that no
+			// patch covers still discards. Runtime cost is one extra compare
+			// group per sibling and only for lanes that failed their own box
+			// (horizontal_and early-out); bake cost is O(patches^2), trivial at
+			// these counts.
+			const float mergeUv = fds::FeatureFlags::pom_shell_merge_uv();
+			if (mergeUv > 0.0f && nGroups > 1) {
+				// Plane of each group (first face's; the union-find guarantees
+				// the members agree to the same tolerance used below).
+				std::vector<std::array<float,4>> gPlane(nGroups, { 0,0,0,0 });
+				std::vector<char> gHave(nGroups, 0);
+				for (size_t i = 0; i < refs.size(); ++i) {
+					const Face &F = refs[i].T->Faces[refs[i].fi];
+					const unsigned g = F.PomShellGroup - 1u;
+					if (g < nGroups && !gHave[g]) {
+						gPlane[g] = refPlane[i];      // AUTHORED plane, pre-lid
+						gHave[g] = 1;
+					}
+				}
+				const float pad = mergeUv * 0.5f;
+				// Transitive closure over "same plane AND boxes within pad":
+				// a chain of patches across several thresholds is one surface.
+				std::vector<int> pg(nGroups);
+				for (unsigned g = 0; g < nGroups; ++g) pg[g] = int(g);
+				std::function<int(int)> pfind = [&](int x) {
+					while (pg[x] != x) { pg[x] = pg[pg[x]]; x = pg[x]; }
+					return x;
+				};
+				auto touches = [&](unsigned a, unsigned b) {
+					const auto &pa = gPlane[a], &pb = gPlane[b];
+					if (pa[0]*pb[0] + pa[1]*pb[1] + pa[2]*pb[2] < 0.999f) return false;
+					if (std::fabs(pa[3] - pb[3]) > 1e-3f) return false;
+					const float *A = table.data() + 4*a, *B = table.data() + 4*b;
+					if (A[0] - pad > B[1] + pad || B[0] - pad > A[1] + pad) return false;
+					if (A[2] - pad > B[3] + pad || B[2] - pad > A[3] + pad) return false;
+					return true;
+				};
+				for (unsigned a = 0; a < nGroups; ++a)
+					for (unsigned b = a + 1; b < nGroups; ++b)
+						if (touches(a, b)) {
+							const int ra = pfind(int(a)), rb = pfind(int(b));
+							if (ra != rb) pg[ra] = rb;
+						}
+				// CSR sibling boxes per group (own box excluded — it is tested
+				// first in the kernel, which is what makes the early-out pay).
+				std::vector<unsigned> members;
+				std::vector<uint32_t> ofs(nGroups + 1, 0);
+				std::vector<float> sib;
+				long long nSib = 0; unsigned maxSib = 0;
+				for (unsigned g = 0; g < nGroups; ++g) {
+					ofs[g] = uint32_t(sib.size() / 4);
+					const int r = pfind(int(g));
+					unsigned k = 0;
+					for (unsigned h = 0; h < nGroups; ++h) {
+						if (h == g || pfind(int(h)) != r) continue;
+						if (k >= Material::kPomShellMaxSibs) break;   // bounded hot loop
+						const float *B = table.data() + 4*h;
+						sib.insert(sib.end(), { B[0], B[1], B[2], B[3] });
+						++k;
+					}
+					nSib += k; maxSib = std::max(maxSib, k);
+				}
+				ofs[nGroups] = uint32_t(sib.size() / 4);
+				if (!sib.empty()) {
+					mat->PomShellSibBoxes = new float[sib.size()];
+					std::memcpy(mat->PomShellSibBoxes, sib.data(), sib.size() * sizeof(float));
+					mat->PomShellSibOfs = new uint32_t[nGroups + 1];
+					std::memcpy(mat->PomShellSibOfs, ofs.data(), (nGroups + 1) * sizeof(uint32_t));
+				}
+				unsigned nPlaneGroups = 0;
+				for (unsigned g = 0; g < nGroups; ++g) if (pfind(int(g)) == int(g)) ++nPlaneGroups;
+				std::fprintf(stderr, "[POM-SHELL] '%s': %u patches -> %u plane groups "
+					"(merge_uv=%.3f), %lld sibling boxes, max %u/patch%s\n",
+					matName, nGroups, nPlaneGroups, (double)mergeUv, nSib, maxSib,
+					maxSib >= Material::kPomShellMaxSibs ? " (CLAMPED)" : "");
+			}
+			// --pom_shell_patch_dump: the per-patch table (this is how you see
+			// what --pom_shell_merge_uv did, and which UV seams remain).
+			if (fds::FeatureFlags::pom_shell_patch_dump()) {
+				std::vector<int> gFaces(nGroups, 0);
+				std::vector<std::array<float,4>> gPlane(nGroups, { 0,0,0,0 });
+				for (size_t i = 0; i < refs.size(); ++i) {
+					const Face &F = refs[i].T->Faces[refs[i].fi];
+					if (!F.PomShellGroup) continue;
+					const unsigned g = F.PomShellGroup - 1u;
+					if (!gFaces[g]) gPlane[g] = { F.N.x, F.N.y, F.N.z, F.NormProd };
+					++gFaces[g];
+				}
+				for (unsigned g = 0; g < nGroups; ++g)
+					std::fprintf(stderr,
+						"[POM-SHELL-PATCH] '%s' g=%u faces=%d N=(%.3f,%.3f,%.3f) d=%.3f "
+						"u[%.4f..%.4f] v[%.4f..%.4f] (%.3f x %.3f UV)\n",
+						matName, g + 1, gFaces[g], (double)gPlane[g][0],
+						(double)gPlane[g][1], (double)gPlane[g][2], (double)gPlane[g][3],
+						(double)table[4*g+0], (double)table[4*g+1],
+						(double)table[4*g+2], (double)table[4*g+3],
+						(double)(table[4*g+1] - table[4*g+0]),
+						(double)(table[4*g+3] - table[4*g+2]));
 			}
 		}
 	}

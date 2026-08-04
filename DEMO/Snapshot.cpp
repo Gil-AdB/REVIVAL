@@ -630,6 +630,29 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
             }
         }
 
+        // FDS_SNAPSHOT_GBUFDUMP: raw deferred G-buffer material plane
+        // (uint32[xres*yres], packed mip:4|matID:8|swizzledUV:20; the forward
+        // sentinels 0xFFFFFFFF/0xFFFFFFFE pass through) plus the matID -> name
+        // table on stderr. This is the S1b/S1c CLASSIFIER instrument: with the
+        // z16 dump it says, for every pixel a --pom_shell discard killed, WHICH
+        // surface won the pixel instead (another wall at a plausible depth =
+        // correct see-through; the floor; nothing = eaten wall). Env-gated →
+        // inert (no gate touches it), same pattern as FDS_SNAPSHOT_ZDUMP.
+        if (std::getenv("FDS_SNAPSHOT_GBUFDUMP") && g_gbuffer
+            && g_gbuffer->txtr.size() >= size_t(xres) * yres) {
+            char gp[1024];
+            std::snprintf(gp, sizeof(gp), "%s/greets_t%06d_mat.u32", cfg.outDir.c_str(), ts);
+            if (FILE* gf = std::fopen(gp, "wb")) {
+                std::fwrite(g_gbuffer->txtr.data(), sizeof(uint32_t), size_t(xres) * yres, gf);
+                std::fclose(gf);
+                std::fprintf(stderr, "[GREETSSNAP] gbuf-mat -> %s\n", gp);
+            }
+            const MatTable mt = Scene_GetMatTable(CurScene);
+            for (dword i = 0; i < mt.count; ++i)
+                std::fprintf(stderr, "[GBUFDUMP] id=%u name=%s\n", (unsigned)i,
+                             (mt.data[i] && mt.data[i]->Name) ? mt.data[i]->Name : "(unnamed)");
+        }
+
         // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
         // march recorded during this tick (see g_pomDbgUV set before the tick).
         // Diffing two runs' UV bins isolates the MARCH output (spatial texel
