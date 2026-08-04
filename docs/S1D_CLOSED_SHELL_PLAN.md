@@ -289,6 +289,19 @@ must be a SUBSET of the clamped mask. Measured over all 13 review poses:
 to the digit: **20 244 at t=5958** (§10.1's grazing-smear number) and
 **85 065 at t=5743** (§10.6's `recW18` "if it discarded instead" column).
 
+**One measured caveat on "they are the same pixels."** The proof at the top of
+this file — recess-only `edge=0` (0 void) vs `edge=2` (20 244 void), same
+geometry, same march — reproduces EXACTLY, and my clamped mask is a strict
+superset of that void. But the LID arm is a *different* comparison and does NOT
+give the same pixel set: over the 13 poses the lid arm voids 413 100 px of which
+only **79 420 (19 %)** are inside the recess arm's clamped mask, and 333 680 lid
+voids fall outside it (worst: p5963, 101 518 px; p5958b, 107 012 px). That is
+expected — the lid arm moves every wall vertex `amp/2` along its smooth normal
+and adds `--pom_shell_base_clip`, so its discard population is not the recess
+arm's — but it means "the holes and the smears are the same pixels" is proven
+*within one geometry*, not across the lid/recess fork. Recorded because it would
+be easy to over-read.
+
 ### The census, all 13 review poses
 
 `clamped` = pixels the march could not answer. `void` = the subset that goes
