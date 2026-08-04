@@ -43,6 +43,8 @@ set(DEMO_SOURCES
     ImageCompression.h
     MeshOps.cpp
     MeshOps.h
+    DisplaceRebuild.cpp
+    DisplaceRebuild.h
     MaterialEditor.cpp
     MaterialEditor.h
     MaterialImport.cpp

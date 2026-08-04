@@ -33,6 +33,7 @@
 // FDS_XPAR_TRACE dev diagnostic (defined in DeferredSurfaceKernel.cpp).
 void Xtrace_WriteFile(const char*);
 #include "MeshOps.h"
+#include "DisplaceRebuild.h"   // live shell rebuild (editor displacement panel)
 #include "MaterialImport.h"
 #include "MISC/PREPROC.H"
 #include "SceneTick.h"
@@ -61,6 +62,13 @@ static Scene *GreetSc;
 // call at scene init; per-frame `UpdateAllMirrors` re-mirrors every
 // dynamic source mesh + cloned omni for each.
 static std::vector<fds::Mirror> g_greetsMirrors;
+// Handed to the live displacement rebuild (DEMO/DisplaceRebuild.cpp), which
+// has to exclude the clone meshes from the shell build and re-stamp each clone
+// face's patch id from its source afterwards. Null when no mirror was built.
+std::vector<fds::Mirror> *Greets_MirrorList()
+{
+	return g_greetsMirrors.empty() ? nullptr : &g_greetsMirrors;
+}
 // Second-order RTT slots (one per outer-mirror × inner-panel pair),
 // prepared at init when --mirror-rtt is on; textures re-rendered per
 // frame by RenderSecondOrderMirrors before the main transform.
@@ -1046,6 +1054,39 @@ static void GreetsApplyRunDefaults()
 	// Per-pixel lightmap SAMPLE gate — set at RUN (not init) so it doesn't
 	// leak onto earlier scenes; the bake itself was force-enabled at init.
 	FF::setDefault(FF::BoolId::shadow_lightmap,         true);
+	// PBR shading stack (deferred surface kernel, global render path). This is
+	// the set the user launches greets with every time; making them scene
+	// defaults is a deliberate LOOK MOVE — the greets render changes.
+	//   pbr               DeferredSurfaceKernel.cpp:1429 -> Cook-Torrance (GGX D +
+	//                     Smith-Schlick G + Schlick F) instead of Blinn-Phong, in
+	//                     BOTH the scalar per-light path (:2400) and the 8-wide vec
+	//                     path (:2156). The flag's help still says "vec path only";
+	//                     that is stale — greets' normal-mapped pixels take the
+	//                     scalar branch and DO get GGX.
+	//   env_brdf_analytic Karis split-sum env-BRDF (ek = (f0*A+B)*gain) in place of
+	//                     the ad-hoc f90=1-rough Schlick weight (:1439).
+	//   pbr_multiscatter  Fdez-Aguera energy compensation built from the A,B terms
+	//                     env_brdf_analytic computes (:1440) — a NO-OP without it,
+	//                     which is why the two ship together.
+	//   diffuse_energy    (1-F) diffuse weighting using the same per-pixel Fresnel
+	//                     the env compose already produced (:1442).
+	//   sh_ambient        L2 SH irradiance in place of the flat Sc->Ambient constant
+	//                     (:1445 + RENDER.CPP:489's one-shot probe bake).
+	// The middle three need --env_refl to change a pixel; greets gets it for free
+	// because its RVSM metallic-map imports (momy / amudim / screen emiter / ...)
+	// call setDefault(env_refl,true) in MaterialImport at scene init — measured in
+	// the init log, not assumed. metal_map / roughness_map / ao_map are already
+	// compile-default ON (FeatureFlags.def), so they need nothing here.
+	// Deliberately NOT included: pbr_roughness and deferred_vec_force ([test]
+	// knobs — fixed-roughness override and a cost-measurement path that throws
+	// away the normal map), and xpar_pbr, which is not a dependent of pbr at all
+	// (the transparent kernel reads it independently at :2785 and never reads
+	// pbr()) — that is a separate look call on the glass panels.
+	FF::setDefault(FF::BoolId::pbr,                     true);
+	FF::setDefault(FF::BoolId::env_brdf_analytic,       true);
+	FF::setDefault(FF::BoolId::pbr_multiscatter,        true);
+	FF::setDefault(FF::BoolId::diffuse_energy,          true);
+	FF::setDefault(FF::BoolId::sh_ambient,              true);
 	// HDR + bloom + cones (global render path).
 	FF::setDefault(FF::BoolId::hdr,                     true);
 	FF::setDefault(FF::BoolId::hdr_linear,              true);
@@ -1393,6 +1434,10 @@ static void FinalizeStoneProxy(Scene *Sc, TriMesh *proxy) {
 void Initialize_Greets()
 {
 	GreetsApplyInitDefaults();   // greets-specific build/bake flags, before any init read
+	// --pom_rebuild (editor): defer a requested --pom_shell past init so the
+	// pristine snapshot taken at the end of this function is genuinely pristine.
+	// No-op without the flag (the shipping demo path is untouched).
+	rev::DisplaceRebuild_BeginInit();
 	GreetSc = loadSceneAligned("SCENES/GREETS.FLD");
 
 	gg = new GreetsGenerator;
@@ -2780,6 +2825,13 @@ void Initialize_Greets()
 				ms);
 		});
 	}
+
+	// --pom_rebuild (editor): snapshot the stone's PRISTINE geometry on the
+	// FINAL rendered meshes (post chunk split, post mirror clone) and apply any
+	// deferred shell mode through the same rebuild path the editor panel drives.
+	// No-op without the flag. Last thing in init so the snapshot sees exactly
+	// the vertices the rasterizer will read.
+	rev::DisplaceRebuild_EndInit(GreetSc);
 }
 
 //void MMXClear(void *Page, dword Len)

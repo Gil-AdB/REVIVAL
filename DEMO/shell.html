@@ -613,7 +613,7 @@
         text-overflow:ellipsis; white-space:nowrap; }
     </style>
     <div id="editor-panel" class="hidden">
-      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b68</span></h2>
+      <h2>Surfaces — <select id="editor-scene-sel" title="switch scene (reloads the page)" style="background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:12px;"></select> <span style="color:#6c8;font-size:10px;font-weight:normal">build b73</span></h2>
       <div id="editor-statusbar">
         <div class="sb-fields">
           <span>scene <b id="sb-scene">—</b></span>
@@ -681,6 +681,20 @@
         </label>
       </div>
       <div id="editor-knobs" style="display:none;"></div>
+      <!-- ── Displacement (S1 shell family) ──────────────────────────────
+           A MODE selector, not loose booleans: every mode has companions it
+           looks broken without (recess-only without pom_shell_world_amp_set
+           mottles the floor; without pom_normal the blocks read flat), so
+           picking a mode writes the whole coherent set. Dials are tagged LIVE
+           (next frame) or REBUILD (init-time — moves vertices or re-bakes a
+           map, and the rebuild fires automatically). -->
+      <div id="editor-disp-hdr" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;color:#fff;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+        <span>Displacement <span id="editor-disp-mode" style="color:#6c8;font-size:10px;">—</span></span>
+        <span style="font-weight:normal;">
+          <a id="editor-disp-rebuild" href="#" style="color:#69c;font-size:10px;text-decoration:none;" title="restore the stone's pristine geometry and re-run the displacement bake with the CURRENT flags (--pom_shell moves vertices; the cone / horizon maps are baked once). Fires automatically when you change a REBUILD dial.">rebuild</a>
+        </span>
+      </div>
+      <div id="editor-disp" style="display:none;"></div>
       <div id="editor-time" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;display:flex;gap:6px;align-items:center;">
         <span style="flex:0 0 64px;">scene time</span>
         <button id="editor-time-back" title="step back ([ key; shift = bigger step)" style="background:#223;color:#ccf;border:1px solid #446;border-radius:3px;padding:2px 10px;cursor:pointer;">◀</button>
@@ -710,7 +724,7 @@
       // Build tag — single source of truth for the console log + status bar
       // (the h2 header carries its own literal copy). Bump with every shell
       // change so the user can confirm page freshness.
-      var REV_BUILD = "b72";
+      var REV_BUILD = "b73";
       // editorStatus doubles as the status bar's "last message" feed: it sets
       // the transient one-liner AND refreshes the persistent strip.
       function editorStatus(t){
@@ -1654,6 +1668,326 @@
         if (sb) sb.oninput = function(){ renderKnobList(); };
         var cc = document.getElementById('editor-knobs-changed');
         if (cc) cc.onchange = function(){ renderKnobList(); };
+      })();
+      // ══ Displacement panel ═══════════════════════════════════════════════
+      // The problem this solves: --pom_shell and the cone/horizon bake flags
+      // are consumed ONCE, inside Initialize_Greets. Setting them through the
+      // knob list flips a bool the engine never re-reads (the shell march is
+      // gated on Material::PomShellUvAmp, which only PomShell_Build stamps), or
+      // — worse — half-applies (--pom_cone_exact also picks the cone-byte
+      // DECODE scale, so on its own it reinterprets the OLD bake). So the panel
+      // pairs every INIT-TIME edit with editorDisplaceRebuild(), which restores
+      // the stone's pristine geometry and re-runs that bake path.
+      //
+      // Modes, not loose booleans: each one carries the companions the campaign
+      // measured it needs. recess-only without --pom_shell_world_amp_set=0.18
+      // mottles the floor; without --pom_normal the blocks read flat; without
+      // the cone march at 32 steps the relief under-resolves. Picking a mode
+      // writes the WHOLE set.
+      //
+      // Scope: the shell family only. The tessellation bake
+      // (--greets_displace) subdivides the mesh in place before the chunk
+      // split, so it cannot be undone live — it stays a launch-time flag, and a
+      // scene booted with it shows as "external / tessellation" here.
+      var DISP_BASE = { parallax_pom_cone:1, pom_cone_exact:1, pom_cone_min_step:1,
+                        pom_march_earlyout:1, pom_horizon:0 };
+      var DISP_MODES = [
+        { id:'off', label:'OFF — no relief march',
+          is:function(f){ return !f.pom_shell && f.parallax_pom <= 0; },
+          hint:'flat surface: the normal map and the shipping offset-parallax only, no POM march and no shell.',
+          set:{ pom_shell:0, pom_recess_only:0, parallax_pom:0, parallax_pom_cone:0,
+                pom_normal:0, pom_shell_world_amp:0, pom_shell_world_amp_set:0,
+                pom_horizon:0 } },
+        { id:'pom', label:'POM — flat parallax, no shell',
+          is:function(f){ return !f.pom_shell && f.parallax_pom > 0; },
+          hint:'per-pixel cone march on the authored plane. No geometry moves, so nothing occludes at a silhouette; grazing angles smear.',
+          set:Object.assign({}, DISP_BASE, { pom_shell:0, pom_recess_only:0,
+                parallax_pom:32, pom_normal:1, pom_shell_cap:8,
+                pom_shell_world_amp:0, pom_shell_world_amp_set:0 }) },
+        { id:'recess', label:'SHELL / recess-only',
+          is:function(f){ return !!f.pom_shell && !!f.pom_recess_only; },
+          hint:'the authored wall IS the top of the relief and everything carves inward. No vertex moves, so the shadow bake / mirror / env probes see the true wall and the void goes to zero; the cost is that stone can never stand proud and 0.8-8.5% of the frame clamps to flat at patch seams.',
+          set:Object.assign({}, DISP_BASE, { pom_shell:1, pom_recess_only:1,
+                parallax_pom:32, pom_normal:1, pom_shell_cap:16,
+                pom_shell_world_amp:1, pom_shell_world_amp_set:0.18,
+                pom_recess_edge:0 }) },
+        { id:'lid', label:'SHELL / lid',
+          is:function(f){ return !!f.pom_shell && !f.pom_recess_only; },
+          hint:'vertices pushed OUT to the lid of a slab that straddles the authored plane, so relief can break the silhouette — but a ray leaving its patch must be discarded, which is where the black gashes between wall panels come from.',
+          set:Object.assign({}, DISP_BASE, { pom_shell:1, pom_recess_only:0,
+                parallax_pom:32, pom_normal:1, pom_shell_cap:16,
+                pom_shell_world_amp:0, pom_shell_world_amp_set:0 }) }
+      ];
+      // name → true when the flag is INIT-TIME (a rebuild has to follow).
+      // Everything else in the list is read at raster time, per face or per
+      // pixel, and shows on the next frame.
+      var DISP_REBUILD_FLAGS = {
+        pom_shell:1, pom_recess_only:1, parallax_pom_cone:1, pom_cone_exact:1,
+        pom_horizon:1, pom_horizon_radius:1, pom_shell_world_amp:1,
+        pom_shell_world_amp_set:1, pom_shell_pin:1, pom_shell_merge_uv:1,
+        pom_shell_lid_probe:1, pom_seam_viz:1, pom_seam_census:1,
+        pom_shell_side_faces:1, parallax_strength:1
+      };
+      var DISP_DIALS = [
+        ['parallax_pom',            'march steps'],
+        ['pom_shell_cap',           'grazing cap'],
+        ['pom_cone_min_step',       'min cone step'],
+        ['pom_march_earlyout',      'march early-out'],
+        ['pom_normal',              'height-field normals'],
+        ['pom_normal_strength',     'normal strength'],
+        ['pom_recess_edge',         'off-patch ray'],
+        ['pom_shell_world_amp_set', 'world amplitude'],
+        ['parallax_strength',       'relief amplitude'],
+        ['pom_cone_exact',          'cone bake'],
+        ['pom_horizon',             'relief self-shadow'],
+        ['pom_horizon_strength',    'self-shadow gain'],
+        ['pom_horizon_soft',        'self-shadow softness']
+      ];
+      var DISP_DIAGS = [
+        ['poly_viz',      'per-polygon ownership'],
+        ['pom_viz',       'parallax / height viz'],
+        ['pom_seam_viz',  'patch-seam classes'],
+        ['pom_horizon_viz','horizon term'],
+        ['pom_mip_viz',   'per-face miplevel'],
+        ['displace_viz',  'tessellation overlay (needs --greets-displace at launch)']
+      ];
+      var dispState = null, dispBusy = false, dispPendingRebuild = null;
+      function dispReadState(){
+        try { dispState = JSON.parse(Module.editorDisplaceState()); }
+        catch(e){ dispState = null; }
+        return dispState;
+      }
+      function dispFlag(n){
+        if (!dispState || !dispState.flags) return null;
+        var v = dispState.flags[n];
+        return (v === undefined) ? null : +v;
+      }
+      // Which mode the live flags spell. An exact match on every flag the mode
+      // writes; anything else is "custom" (and says so rather than lying).
+      function dispCurrentMode(){
+        if (!dispState || !dispState.flags) return null;
+        var f = {}; for (var k in dispState.flags) f[k] = +dispState.flags[k];
+        for (var i = 0; i < DISP_MODES.length; i++)
+          if (DISP_MODES[i].is(f)) return DISP_MODES[i];
+        return null;
+      }
+      // Does the live state ALSO carry the mode's full companion set? A mode
+      // whose companions were tweaked is still that mode (the identity above is
+      // the shell/march topology), but the panel says so — "recess-only" with
+      // pom_shell_world_amp_set back at 0 is the mottled floor, and silence
+      // there is exactly how the campaign kept mis-attributing looks.
+      function dispModeCompanionsOk(m){
+        for (var k in m.set) {
+          var live = dispFlag(k);
+          if (live === null) continue;
+          if (Math.abs(live - m.set[k]) > 1e-4) return false;
+        }
+        return true;
+      }
+      // The rebuild is the slow half (a cone re-bake is hundreds of ms, a
+      // horizon bake can be seconds), so paint "rebuilding…" and yield a frame
+      // before the synchronous call — otherwise the UI just freezes silently.
+      function dispRebuild(why){
+        if (dispBusy) return;
+        dispBusy = true;
+        var hdr = document.getElementById('editor-disp-rebuild');
+        if (hdr) { hdr.textContent = 'rebuilding…'; hdr.style.color = '#fc8'; }
+        editorStatus('displacement rebuild: ' + (why || 'restoring pristine geometry…'));
+        setTimeout(function(){
+          var ok = false, err = null;
+          try { ok = Module.editorDisplaceRebuild(); } catch(e){ err = e; }
+          dispBusy = false;
+          if (hdr) { hdr.textContent = 'rebuild'; hdr.style.color = '#69c'; }
+          dispReadState();
+          if (err)       editorStatus('displacement rebuild FAILED: ' + err);
+          else if (!ok)  editorStatus('displacement rebuild refused — ' +
+                            (dispState && dispState.tessellated
+                             ? 'the scene was launched with --greets-displace (tessellation); its geometry cannot be restored live'
+                             : 'the rebuild is not armed (relaunch the editor)'));
+          else           editorStatus('displacement rebuild done in ' +
+                            (dispState ? dispState.lastMs.toFixed(1) : '?') + ' ms — ' +
+                            (dispState && dispState.shellBuilt ? 'shell built' : 'no shell'));
+          renderDispPanel();
+        }, 30);
+      }
+      function dispQueueRebuild(why){
+        if (dispPendingRebuild) clearTimeout(dispPendingRebuild);
+        dispPendingRebuild = setTimeout(function(){
+          dispPendingRebuild = null; dispRebuild(why);
+        }, 250);   // debounce a slider drag into one rebuild
+      }
+      function dispSetFlag(name, value){
+        try { Module.editorSetParam(name, String(value)); } catch(e){}
+      }
+      function dispApplyMode(m){
+        var names = [];
+        for (var k in m.set) { dispSetFlag(k, m.set[k]); names.push(k); }
+        editorStatus('displacement mode "' + m.id + '" — set ' + names.length +
+                     ' flags; rebuilding');
+        dispRebuild('mode ' + m.id);
+      }
+      function dispParamMeta(name){
+        for (var i = 0; i < editorParams.length; i++)
+          if (editorParams[i].name === name) return editorParams[i];
+        return null;
+      }
+      // One dial row. `label` is the human name; the flag name and its registry
+      // help ride the tooltip, and the LIVE / REBUILD badge says what an edit
+      // costs — which is the whole point of the panel being legible.
+      function dispDialRow(name, label){
+        var p = dispParamMeta(name);
+        if (!p) return null;
+        var needsRebuild = !!DISP_REBUILD_FLAGS[name];
+        var row = document.createElement('div'); row.className = 'prop-row';
+        row.title = name + (p.help ? ' — ' + p.help : '');
+        var lab = document.createElement('label');
+        lab.textContent = label;
+        lab.style.cssText = 'flex:0 0 108px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        row.appendChild(lab);
+        var badge = document.createElement('span');
+        badge.textContent = needsRebuild ? 'RB' : 'LV';
+        badge.title = needsRebuild
+          ? 'INIT-TIME: changing this moves vertices or re-bakes a map, so it triggers a displacement rebuild'
+          : 'LIVE: read at raster time, shows on the next frame';
+        badge.style.cssText = 'flex:0 0 18px;font-size:9px;text-align:center;border-radius:2px;' +
+          (needsRebuild ? 'color:#fc8;border:1px solid #653;' : 'color:#6c9;border:1px solid #364;');
+        row.appendChild(badge);
+        function commit(v){
+          dispSetFlag(name, v);
+          dispReadState();
+          if (needsRebuild) dispQueueRebuild(name + ' = ' + v);
+          else editorStatus('flag ' + name + ' = ' + v + ' (live)');
+          dispSyncHeader();
+        }
+        if (p.type === 'bool') {
+          var cb = document.createElement('input'); cb.type = 'checkbox';
+          cb.checked = !!(+p.value); cb.style.flex = '1';
+          cb.onchange = function(){ p.value = cb.checked; commit(cb.checked ? 1 : 0); };
+          row.appendChild(cb);
+        } else {
+          var d = Math.abs(+p.def) || 1;
+          var r = document.createElement('input'); r.type = 'range';
+          var hi = Math.max(4 * d, 2.5 * Math.abs(+p.value), 1);
+          r.min = 0; r.max = hi; r.step = (p.type === 'int') ? 1 : hi / 200;
+          r.value = +p.value;
+          var val = document.createElement('input'); val.type = 'number'; val.step = r.step;
+          val.value = +(+p.value).toFixed(3);
+          val.style.cssText = 'flex:0 0 52px;background:#111;color:#9cf;border:1px solid #345;border-radius:2px;font-size:11px;padding:1px 2px;';
+          r.oninput = function(){
+            var v = (p.type === 'int') ? parseInt(r.value, 10) : parseFloat(r.value);
+            val.value = v; p.value = v; commit(v);
+          };
+          val.onchange = function(){
+            var v = parseFloat(val.value); if (isNaN(v)) return;
+            if (v > +r.max) r.max = v;
+            r.value = v; p.value = v; commit(v);
+          };
+          row.appendChild(r); row.appendChild(val);
+        }
+        return row;
+      }
+      function dispSyncHeader(){
+        var el = document.getElementById('editor-disp-mode');
+        if (!el) return;
+        if (!dispState) { el.textContent = '(unavailable)'; el.style.color = '#a66'; return; }
+        if (dispState.tessellated) {
+          el.textContent = 'external / tessellation';
+          el.style.color = '#c9a';
+          el.title = 'the scene was launched with --greets-displace: the stone is subdivided geometry, ' +
+                     'not a per-pixel shell. The mode selector is disabled so it cannot clobber that.';
+          return;
+        }
+        if (!dispState.armed) { el.textContent = '(not armed)'; el.style.color = '#a66'; return; }
+        var m = dispCurrentMode();
+        var full = m && dispModeCompanionsOk(m);
+        el.textContent = m ? (m.label.split(' —')[0] + (full ? '' : ' *')) : 'custom';
+        el.style.color = m ? (full ? '#6c8' : '#fc8') : '#fc8';
+        el.title = m ? (m.hint + (full ? '' : '\n\n* one or more of this mode\'s companion flags has been changed from the known-good set — click the mode again to restore it.'))
+                     : 'the live flags do not spell any of the four modes';
+      }
+      function renderDispPanel(){
+        var el = document.getElementById('editor-disp'); if (!el) return;
+        el.innerHTML = '';
+        if (!dispState) dispReadState();
+        dispSyncHeader();
+        var note = document.createElement('div');
+        note.className = 'surf-tex';
+        note.style.cssText = 'color:#89a;font-size:10px;margin:2px 0 4px;line-height:1.4;';
+        if (!dispState) {
+          note.textContent = 'editorDisplaceState() unavailable — this build predates the displacement panel.';
+          el.appendChild(note); return;
+        }
+        if (dispState.tessellated) {
+          note.innerHTML = 'This scene was launched with <b>--greets-displace</b> — the stone is ' +
+            'subdivided GEOMETRY, and its bake runs before the chunk split, so it cannot be undone ' +
+            'live. The shell modes below are disabled. Relaunch without the flag ' +
+            '(<code>?editor</code>) to use them; the per-pixel dials still apply.';
+          note.style.color = '#c9a';
+          el.appendChild(note);
+        } else if (!dispState.armed) {
+          note.innerHTML = 'The displacement rebuild is NOT armed — the scene came up without a ' +
+            'pristine snapshot. Reload the editor (the boot flag <code>--pom_rebuild</code> is set ' +
+            'automatically).';
+          note.style.color = '#a66';
+          el.appendChild(note);
+        } else {
+          note.textContent = 'Pristine snapshot: ' + dispState.verts + ' verts / ' +
+            dispState.faces + ' stone faces, ' + (dispState.bytes/1024).toFixed(1) + ' KB. ' +
+            (dispState.rebuilds ? dispState.rebuilds + ' rebuild(s), last ' +
+              dispState.lastMs.toFixed(1) + ' ms.' : '');
+          el.appendChild(note);
+        }
+        // Mode selector
+        var modeWrap = document.createElement('div');
+        modeWrap.style.cssText = 'margin:4px 0 6px;';
+        var cur = dispCurrentMode();
+        DISP_MODES.forEach(function(m){
+          var b = document.createElement('button');
+          var on = cur && cur.id === m.id;
+          b.textContent = m.label;
+          b.title = m.hint + '\n\nSets: ' + Object.keys(m.set).map(function(k){
+            return k + '=' + m.set[k]; }).join(', ');
+          b.disabled = !!dispState.tessellated || !dispState.armed || dispBusy;
+          b.style.cssText = 'display:block;width:100%;text-align:left;margin:2px 0;padding:4px 6px;' +
+            'font-size:11px;border-radius:3px;cursor:' + (b.disabled ? 'default' : 'pointer') + ';' +
+            (on ? 'background:#2b4436;color:#cfc;border:1px solid #5a8;'
+                : 'background:#1c1c24;color:#bbc;border:1px solid #345;') +
+            (b.disabled ? 'opacity:0.45;' : '');
+          b.onclick = function(){ if (!b.disabled) dispApplyMode(m); };
+          modeWrap.appendChild(b);
+        });
+        el.appendChild(modeWrap);
+        // Dials + diagnostics
+        function section(title, list){
+          var h = document.createElement('div');
+          h.style.cssText = 'color:#8ac;font-size:10px;margin-top:6px;border-bottom:1px solid #234;';
+          h.textContent = title;
+          el.appendChild(h);
+          list.forEach(function(d){
+            var row = dispDialRow(d[0], d[1]);
+            if (row) el.appendChild(row);
+          });
+        }
+        refreshParams();   // dial values must reflect what the mode just wrote
+        section('Dials  (LV = next frame · RB = rebuilds)', DISP_DIALS);
+        section('Diagnostics', DISP_DIAGS);
+      }
+      document.getElementById('editor-disp-hdr').onclick = function(e){
+        if (e.target && e.target.id === 'editor-disp-rebuild') return;
+        var el = document.getElementById('editor-disp');
+        var opening = el.style.display === 'none';
+        el.style.display = opening ? 'block' : 'none';
+        if (opening) { refreshParams(); dispReadState(); renderDispPanel(); }
+      };
+      document.getElementById('editor-disp-rebuild').onclick = function(e){
+        e.preventDefault(); e.stopPropagation();
+        dispRebuild('manual');
+      };
+      // Keep the collapsed header honest about the mode without opening the
+      // section (a CLI/URL-set mode should be visible the moment the scene is up).
+      (function warmDisp(){
+        if (Module && Module.editorDisplaceState) { dispReadState(); dispSyncHeader(); return; }
+        setTimeout(warmDisp, 1000);
       })();
       document.getElementById('editor-knobs-resetall').onclick = function(e){
         e.preventDefault();

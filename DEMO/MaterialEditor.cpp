@@ -1,6 +1,7 @@
 #include "MaterialEditor.h"
 #include "MaterialImport.h"   // MaterialImport_ApplyMapFile
 #include "MeshOps.h"          // MeshOps_GetSurfaceSmoothAngle (live smoothing override)
+#include "DisplaceRebuild.h" // live displacement modes (editor Displacement panel)
 
 #include <Base/FDS_VARS.H>   // MatLib, CurScene
 #include <Base/Material.h>
@@ -2160,6 +2161,24 @@ bool js_editorUnsetParam(std::string name)
 	if (ok) rev::Editor_MarkDirty();
 	return ok;
 }
+// ── Displacement modes (DEMO/DisplaceRebuild.h) ────────────────────────────
+// The shell family's flags are INIT-TIME: --pom_shell moves the stone's
+// vertices (PomShell_Build) and --parallax_pom_cone / --pom_cone_exact /
+// --pom_horizon select an offline bake. Setting them through editorSetParam
+// alone changes a bool nothing re-reads. This is the other half: restore the
+// pristine geometry the scene loaded with and re-run that bake path. Same
+// shape as editorRebakeEnv — an explicit action, not a side effect of a knob.
+bool js_editorDisplaceRebuild()
+{
+	return rev::DisplaceRebuild_Apply();
+}
+// Panel truth: is the rebuild armed, is the scene tessellated (in which case
+// the shell modes are launch-time only), is a shell currently stamped, what did
+// the last rebuild cost, and the live value of every flag the panel drives.
+std::string js_editorDisplaceState()
+{
+	return rev::DisplaceRebuild_StateJson();
+}
 // Scene-wide env-reflection defaults, EFFECTIVE values: the live flag
 // (env_refl_scene_mode / env_bake_res_scene) when explicitly set, else the
 // AUTHORED FLD scene-header value (Scene::EnvReflSceneMode/EnvBakeResScene,
@@ -2304,6 +2323,8 @@ EMSCRIPTEN_BINDINGS(rev_material_editor)
 	emscripten::function("editorGetParams",      &js_editorGetParams);
 	emscripten::function("editorSetParam",       &js_editorSetParam);
 	emscripten::function("editorUnsetParam",     &js_editorUnsetParam);
+	emscripten::function("editorDisplaceRebuild",&js_editorDisplaceRebuild);
+	emscripten::function("editorDisplaceState",  &js_editorDisplaceState);
 	emscripten::function("editorGetSceneEnv",    &js_editorGetSceneEnv);
 }
 #endif // __EMSCRIPTEN__

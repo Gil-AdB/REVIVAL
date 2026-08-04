@@ -289,6 +289,15 @@ void DemoBoot(ModplayerHandle modHandle)
 			// AO/roughness/metallic look instead of degrading to a flat
 			// transparent texture. The demo keeps the flag's default (off).
 			"--xpar-pbr",
+				// Editor-only default: arm the live displacement rebuild, so the
+				// Displacement panel's mode buttons actually take. Without it
+				// --pom_shell and the cone / horizon bake flags are consumed once
+				// at scene init and a live edit changes a bool nothing re-reads.
+				// The flag renders nothing differently on its own: it takes a
+				// PRISTINE snapshot of the stone at the end of init and defers a
+				// requested --pom_shell into the rebuild path, so repeated mode
+				// switches cannot compound the lid offset. The demo keeps it off.
+				"--pom_rebuild",
 			// (city headlights: the front-row pairs are AUTHORED lights now —
 			// 46 parented "city headlight L/R" spots in CITY1.LWS / CITY.FLD,
 			// Omni_SceneAuthored, so they appear in the lights list grouped
