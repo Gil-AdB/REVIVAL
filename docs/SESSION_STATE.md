@@ -66,6 +66,48 @@
 > pin could not be re-taken — greets is currently 100 % nondeterministic, before
 > and after this change. See the trap in the verification protocol.**
 
+> **2026-08-05 — S1d-2 CLOSED SHELL (SIDE FACES) IS IN, all flags default OFF.**
+> Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-2. Flags: `--pom_shell_side_faces`
+> (0/1/2) and `--pom_shell_side_edge` (0/1/2).
+> - **PROVENANCE WARNING:** the code, the doc section and `docs/img/s1d_side/`
+>   were swept into commits `3712f00` and `2c54ae9` ("editor: displacement
+>   panel …") by a concurrent session running `git add -A` in the same worktree
+>   while this stage was finishing. The commit titles do not describe the
+>   S1d-2 content they carry. Nothing is lost; the log is misleading.
+> - **Step 1 (side faces).** At a convex ridge the side face is the neighbour's
+>   plane and it LEANS: the solid is the intersection of the half-spaces, so the
+>   material reaches cot(fold)·depth past the ridge and the vertical UV box cuts
+>   it off there. Four leaning half-planes, baked from S1d-1's topology.
+>   Measured over all 13 review poses: pixels the march cannot answer
+>   **809 415 → 629 711 (−22 %)**; the subset that goes BLACK
+>   **231 073 → 129 579 (−44 %)**; at the user's gash pose t=5743
+>   **85 065 → 28 634 (−66 %)**; at the smear pose t=5958b
+>   **20 244 → 4 115 (−80 %)**. Void stays at 5 (tess 13, flat POM 5).
+> - **LOOK is NOT a clean win.** The gash narrows to a sliver and the t=5958
+>   mortar joint tightens toward tess — but at t=5743 the recovered band renders
+>   as a **saturated rust stripe**: the lean puts the ray in the right place and
+>   then samples patch A's chart EXTRAPOLATED (up to 0.06 UV = 61 texels = 0.36
+>   world) where the content belongs to patch B. That is S1d-2c's hand-off,
+>   now a measured argument rather than a projected one.
+> - **Step 2 (per-class edge policy) is the cheapest win.** Keyed on a per-side
+>   TRUE-BOUNDARY SUB-INTERVAL, not the dominant class — a free edge is 0.5 % of
+>   `rooms` boundary length but owns 11.9 % of the unanswered pixels, so the
+>   dominant-class version fired on **0 pixels**. With the interval:
+>   **100 570 px at t=6097 (4.85 % of frame) at ZERO void cost**, and the corner
+>   silhouette moves toward the tessellation reference.
+> - **PROTRUSION IS NOT RESTORED.** Side faces make the lid arm WORSE: void
+>   413 100 → 468 868 (clip kept) / 933 535 (clip replaced). Mechanism: the same
+>   lean that widens the shell below the authored plane narrows it above, and my
+>   side faces are only a domain TEST — a lid ray they reject is killed instead
+>   of ENTERING the shell lower down through the side face. Side-face ENTRY (a
+>   per-lane march start height) is the next increment and protrusion needs it.
+> - Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd`, greets recess
+>   arm depth byte-identical at all 13 review poses, wasm links, 0 bad flags in
+>   299 run logs. Crops: `docs/img/s1d_side/`.
+> - **Process note:** `DEMO/CMakeLists.txt` copies the freshly-linked binary into
+>   `Runtime/DEMO` on every `cmake --build build`. Never build while a render
+>   batch is in flight — it cost me one arm that looked like a regression.
+
 > **2026-08-05 — S1d-1 SEAM CENSUS DONE, and it OVERTURNS the S1d plan's
 > premise.** Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-1. Two new flags,
 > **both default OFF, byte-null**: `--pom_seam_census` (patch-boundary topology
