@@ -109,6 +109,23 @@ struct GBuffer {
 	// without exceeding the 8-bit matID encoded in `txtr`. Optional —
 	// when empty, the receiver falls back to `uint16_t(matID + 1)`.
 	std::vector<u16> shadowMatID;
+	// DIAGNOSTIC per-pixel FACE identity (--face_id_dump, default OFF; empty
+	// otherwise so the hot loop skips the write). matID is far too coarse to
+	// answer "which surface owns this pixel" — every greets wall shares one id,
+	// so a (matID before, matID after) classification cannot distinguish "the
+	// neighbouring wall won the pixel" from "the same wall shaded differently",
+	// and it certainly cannot say whether the winner is a face that ought to
+	// have been occluded. This plane carries a stable per-TRIANGLE key:
+	//   bits 31..4 = the Face*'s address >> 4 (28 bits, unique per authored
+	//                polygon for any heap inside a 4 GB window)
+	//   bits  3..0 = the fan sub-triangle index within that Face
+	// The Face pointer survives the frustum clipper AND the mipmap poly-split
+	// (both pass Face* through unchanged), so the key names the AUTHORED polygon
+	// no matter how it was subdivided on the way to the tile. Snapshot dumps it
+	// beside the z16/matID planes and prints a resolution table (key -> material,
+	// mesh, face index, world plane, vertex positions) so a suspect pixel can be
+	// traced to a real polygon, with key collisions reported explicitly.
+	std::vector<u32> faceId;
 	// Per-pixel 8-bit planar-mirror identity. Used by DEMO/GreetsMirror's
 	// Per-pixel mirror ownership, WRITTEN by Mekalele's commit path
 	// from ctx.faceOwnerMirrorId. Read by the deferred lighting pass
@@ -458,6 +475,15 @@ struct TileRasterizerCtx {
 	// view ray that records the first rayH<=Hs crossing (anchored, no swim).
 	int pomSpikeSteps = 0;
 
+	// --pom_ref_march (DIAGNOSTIC, default OFF): step count of the CONVERGED
+	// BRUTE-FORCE reference march. 0 = off. When > 0 it REPLACES both the naive
+	// and the cone march: N uniform steps down the whole slab plus a secant
+	// solve on the bracketing pair, no LOD fade, no quarter-res sharing, no cone
+	// map. It exists to build a ground-truth image of the height field's true
+	// surface that neither the shipping march nor the tessellation bake is, so
+	// both can be measured against something instead of against each other.
+	int pomRefSteps = 0;
+
 	// Tier-2 cone-step POM (--parallax_pom). coneData = the material's ConeMap
 	// mip[miplevel] (8-bit, SAME tiled layout as heightData → same swizzled
 	// address). pomSteps = the flag's max cone-safe steps (0 = off). When both
@@ -599,6 +625,7 @@ struct GBufferSpan {
 	u32 *lightmapMF;
 	u16 *lightmapST;
 	u16 *shadowMatID;
+	u32 *faceId;      // DIAGNOSTIC per-triangle key (nullptr = --face_id_dump off)
 	u8  *mirrorId;
 	const u8 *mirrorMask;
 	const u16 *mirrorMaskZ;
@@ -613,6 +640,7 @@ struct GBufferSpan {
 		if (lightmapMF) lightmapMF += offset;
 		if (lightmapST) lightmapST += offset;
 		if (shadowMatID) shadowMatID += offset;
+		if (faceId) faceId += offset;
 		if (mirrorId) mirrorId += offset;
 		if (mirrorMask) mirrorMask += offset;
 		if (mirrorMaskZ) mirrorMaskZ += offset;
@@ -649,6 +677,10 @@ struct GBufferSpan {
 		u16 *shadowMatIDPtr = gbuffer.shadowMatID.empty()
 			? nullptr
 			: gbuffer.shadowMatID.data() + offset;
+		// DIAGNOSTIC face-id plane: allocated only under --face_id_dump.
+		u32 *faceIdPtr = gbuffer.faceId.empty()
+			? nullptr
+			: gbuffer.faceId.data() + offset;
 		// mirrorId plane: allocated only when a scene actually uses
 		// planar mirrors (DEMO/GreetsMirror's allocator). When null,
 		// the inner-loop mask check below short-circuits and clone
@@ -670,6 +702,7 @@ struct GBufferSpan {
 			lmMFPtr,
 			lmSTPtr,
 			shadowMatIDPtr,
+			faceIdPtr,
 			mirrorIdPtr,
 			mirrorMaskPtr,
 			mirrorMaskZPtr,
@@ -845,6 +878,11 @@ struct TileRasterizer {
 	// the hue, shell-lid vs not in the brightness, per-triangle hash in a small
 	// jitter so triangle boundaries read. Set per triangle beside the amp above.
 	uint32_t polyVizColor = 0;
+	// --face_id_dump (DIAGNOSTIC, default OFF): this TRIANGLE's stable
+	// identity key, written per pixel into GBuffer::faceId. bits 31..4 =
+	// Face* >> 4, bits 3..0 = the fan sub-triangle index. 0 = plane not
+	// allocated / write skipped. Set per triangle beside polyVizColor.
+	uint32_t faceIdKey = 0;
 	// --pom_shell: the slab amplitude expressed in UV units for THIS triangle
 	// = Material::PomShellUvAmp × (world-per-UV-tile). The march's lateral travel
 	// per unit height drop is this × the tangent-space view direction, so the
@@ -899,6 +937,10 @@ struct TileRasterizer {
 		// kernel falls back to matID+1 when the plane is empty.
 		const u16 packedShadowMatId = ctx.shadowMatId;
 		const bool wantShadowMatId = (span.shadowMatID != nullptr);
+		// DIAGNOSTIC per-triangle face identity (--face_id_dump). Written on
+		// exactly the same p_mask as every other G-buffer plane, so a lane the
+		// shell discard killed leaves the id of whoever really won the pixel.
+		const bool wantFaceId = (span.faceId != nullptr) && (faceIdKey != 0);
 		// Diagnostic gates. Cached once at function entry so the per-row
 		// hot loop reads a register, not the flag registry. See
 		// FeatureFlags.def for the on/off contract.
@@ -1218,7 +1260,81 @@ struct TileRasterizer {
 						// shift). Same centered +-0.5*strength envelope + base recovery as
 						// the naive spike -> directly comparable; converges to the naive-inf
 						// crossing in far fewer taps than the naive linear march.
-						if (ctx.pomSteps > 0 && ctx.coneData) {
+						// ── CONVERGED REFERENCE MARCH (--pom_ref_march) ──────
+						// DIAGNOSTIC ONLY, default OFF. Neither the shipping march
+						// nor the tessellation bake is ground truth for the relief:
+						// the cone march converges in few taps but through a baked,
+						// approximate cone map with a step budget; the bake carries
+						// the height field only at its subdivision lattice, samples
+						// it at a low mip, and pins patch borders to zero. So the
+						// inventory needs a third thing to measure BOTH against —
+						// this: N uniform steps down the entire slab, no cone map,
+						// no LOD fade, no quarter-res lane sharing, plus one secant
+						// solve on the bracketing pair so the landing is exact to
+						// float precision rather than to a step. At N in the high
+						// hundreds the residual is the height map's own point
+						// sampling, not the march. Cost is ~N gathers per covered
+						// pixel — which is exactly why it is a reference, not a mode.
+						if (ctx.pomRefSteps > 0) {
+							const int   N     = ctx.pomRefSteps;
+							const float invNf = 1.0f / float(N);
+							const Vec8f dU = VtT * rayScale;
+							const Vec8f dV = VtB * rayScale;
+							const Vec8f baseU = uf - VtT * hc;   // un-shifted geometric UV
+							const Vec8f baseV = vf - VtB * hc;
+							Vec8f curU = baseU + dU * (hStart - hEnter);
+							Vec8f curV = baseV + dV * (hStart - hEnter);
+							Vec8f rayH = hStart;
+							const Vec8f stepH = hStart * Vec8f(invNf);
+							auto sampleH = [&](const Vec8f &U, const Vec8f &V) {
+								Vec8i mu = roundi(U * ctx.heightUScale);
+								Vec8i mv = roundi(V * ctx.heightVScale);
+								Vec8i ma = packed_tile_u(mu, ctx.heightLogH, ctx.heightUmaskSwizzled)
+								         + packed_tile_v(mv, ctx.heightVmask);
+								alignas(32) int32_t mAd[8]; ma.store_a(mAd);
+								alignas(32) float mH[8];
+								for (int k = 0; k < 8; ++k)
+									mH[k] = float(ctx.heightData[mAd[k]]) * (1.0f / 255.0f);
+								Vec8f Hs; Hs.load_a(mH);
+								return Hs;
+							};
+							// f = rayH - h(uv): > 0 above the surface, <= 0 inside it.
+							Vec8f prevU = curU, prevV = curV, prevH = rayH;
+							Vec8f prevF = rayH - sampleH(curU, curV);
+							Vec8f hitU = curU, hitV = curV, hitH = rayH;
+							Vec8fb found = Vec8fb(false);
+							for (int s = 0; s < N; ++s) {
+								curU -= dU * stepH;
+								curV -= dV * stepH;
+								rayH -= stepH;
+								const Vec8f f = rayH - sampleH(curU, curV);
+								const Vec8fb hitNow = (f <= Vec8f(0.0f)) & (~found);
+								// Secant on the bracketing pair: both endpoints lie on
+								// the SAME ray, so a linear solve in the step parameter
+								// is simultaneously the solve in UV and in height.
+								const Vec8f den = max(prevF - f, Vec8f(1e-12f));
+								const Vec8f tt  = min(max(prevF / den, Vec8f(0.0f)), Vec8f(1.0f));
+								hitU = select(hitNow, prevU - dU * stepH * tt, hitU);
+								hitV = select(hitNow, prevV - dV * stepH * tt, hitV);
+								hitH = select(hitNow, prevH - stepH * tt, hitH);
+								found |= hitNow;
+								const Vec8fb go = ~found;
+								prevU = select(go, curU, prevU);
+								prevV = select(go, curV, prevV);
+								prevH = select(go, rayH, prevH);
+								prevF = select(go, f, prevF);
+							}
+							uf = hitU;
+							vf = hitV;
+							if (pomZ)
+								pomHitH = select(found, hitH, hEnter);
+							// A uniform march over the WHOLE slab that never crossed has
+							// genuinely passed under all the stone — unlike the cone march
+							// there is no "ran out of steps" ambiguity here, which is
+							// precisely what makes this usable as a reference.
+							if (shell)
+								pomCrossed = found;
+						} else if (ctx.pomSteps > 0 && ctx.coneData) {
 							// STEP-3 LOD: uf/vf currently hold the tier-0 single shift = the
 							// FAR target. Skip the whole march on a row entirely past the fade
 							// (all lanes >= 2x lodDist) -> far/oblique parallax pixels pay
@@ -1855,6 +1971,10 @@ struct TileRasterizer {
 							_mm_storeu_si128((__m128i*)span.shadowMatID,
 								_mm_set1_epi16(int16_t(packedShadowMatId)));
 						}
+						if (wantFaceId) {
+							_mm256_storeu_si256((__m256i*)span.faceId,
+								_mm256_set1_epi32(int32_t(faceIdKey)));
+						}
 						if (span.mirrorId) {
 							// 8 bytes (one per lane). The committed value
 							// overrides the 2D pre-stamped mask at every
@@ -1891,6 +2011,9 @@ struct TileRasterizer {
 							}
 							if (wantShadowMatId) {
 								span.shadowMatID[lane] = packedShadowMatId;
+							}
+							if (wantFaceId) {
+								span.faceId[lane] = faceIdKey;
 							}
 							if (span.mirrorId) {
 								span.mirrorId[lane] = ctx.faceOwnerMirrorId;
@@ -2221,8 +2344,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// crossing in fewer taps. --parallax_pom_refine = cone bisection count,
 	// --parallax_pom_relax = cone step-width relax factor.
 	const bool useCone    = fds::FeatureFlags::parallax_pom_cone();
-	const int  naiveSteps = useCone ? 0 : pomSteps;
-	const int  coneSteps  = (useCone && coneData) ? pomSteps : 0;
+	// --pom_ref_march (DIAGNOSTIC, default OFF): the converged brute-force
+	// reference. It takes precedence over BOTH shipping marches — the point of a
+	// reference is that none of their approximations are in it.
+	const bool useRef     = fds::FeatureFlags::pom_ref_march() && (heightData != nullptr);
+	const int  refSteps   = useRef ? std::max(1, fds::FeatureFlags::pom_ref_steps()) : 0;
+	const int  naiveSteps = (useCone || useRef) ? 0 : pomSteps;
+	const int  coneSteps  = (useCone && coneData && !useRef) ? pomSteps : 0;
 	// --pom_depth_write (S1a): armed only when a march is actually configured
 	// for this face — the depth written must be the MARCHED crossing, and
 	// single-shift-only faces have no crossing to write. apply_exact keys its
@@ -2233,7 +2361,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// the marched depth by construction (the lid's own plane depth is A/2 in
 	// front of everything), so it ARMS pom_depth_write implicitly.
 	const bool marchArmed = (heightData != nullptr)
-	    && (naiveSteps > 0 || (coneSteps > 0 && coneData != nullptr));
+	    && (refSteps > 0 || naiveSteps > 0 || (coneSteps > 0 && coneData != nullptr));
 	const bool pomShellFace = fds::FeatureFlags::pom_shell() && marchArmed
 	    && (F->Txtr->PomShellUvAmp > 0.0f);
 	const bool pomDepthWrite = (fds::FeatureFlags::pom_depth_write() || pomShellFace)
@@ -2293,6 +2421,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.mipFrac = meka::g_tlsMipFrac,
 		.materialHasHeightMap = (F->Txtr->HeightMap != nullptr),
 		.pomSpikeSteps = naiveSteps,
+		.pomRefSteps = refSteps,
 		.coneData = coneData,
 		.pomSteps = coneSteps,
 		.pomLodDist = fds::FeatureFlags::parallax_pom_lod(),
@@ -2448,6 +2577,16 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 				o |= uint32_t(v) << (8 * ch);
 			}
 			r.polyVizColor = o;
+		}
+		// --face_id_dump (DIAGNOSTIC, default OFF): stable per-TRIANGLE key.
+		// The Face* survives the frustum clipper and the mipmap poly-split
+		// unchanged, so bits 31..4 name the AUTHORED polygon however it was
+		// subdivided; bits 3..0 name the fan sub-triangle. Snapshot prints the
+		// key -> (material, mesh, face index, world plane) table, and reports
+		// any key collision rather than hiding it.
+		if (fds::FeatureFlags::face_id_dump()) {
+			const uint32_t fkey = uint32_t(uintptr_t(F) >> 4) & 0x0FFFFFFFu;
+			r.faceIdKey = (fkey << 4) | uint32_t(i & 0xF);
 		}
 		if (ctx.pomDepthWrite || ctx.pomShell) {
 			float w = 0.0f, wAniso = 1.0f;

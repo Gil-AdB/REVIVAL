@@ -1463,6 +1463,19 @@ int main(int argc, const char *argv[])
 		// harness (timing + verify sweep) keeps it live. --chunk_occl_snapshot_force
 		// ([dev]) re-enables it for the temporal-pop ground-truth pixel rig.
 		fds::g_occlSnapshotInert = !fds::FeatureFlags::chunk_occl_snapshot_force();
+		// --snapshot_ss (DIAGNOSTIC, default 1): render the snapshot at N times
+		// the configured resolution per axis. Used to build a SUPERSAMPLED
+		// converged reference for the displacement inventory
+		// (docs/S1_DISCREPANCY_INVENTORY.md) — the arms under test always render
+		// at 1x, and the 4x reference is box-downsampled offline. Snapshot path
+		// only; it never touches the live window's resolution.
+		const int ssN = fds::FeatureFlags::snapshot_ss();
+		if (ssN > 1) {
+			g_demoXRes *= ssN;
+			g_demoYRes *= ssN;
+			std::fprintf(stderr, "[SNAPSHOT] --snapshot_ss=%d -> %dx%d\n",
+			             ssN, (int)g_demoXRes, (int)g_demoYRes);
+		}
 		if (snap.scene == "city") {
 			return RunCitySnapshot(snap, g_demoXRes, g_demoYRes);
 		}

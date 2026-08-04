@@ -653,6 +653,59 @@ int RunGreetsSnapshot(const SnapshotConfig& cfg, int xres, int yres) {
                              (mt.data[i] && mt.data[i]->Name) ? mt.data[i]->Name : "(unnamed)");
         }
 
+        // --face_id_dump: DIAGNOSTIC per-pixel FACE ownership. matID is one byte
+        // shared by every wall in the scene, so it cannot answer "which polygon
+        // won this pixel, and should it have been occluded?". The faceId plane
+        // carries (Face* >> 4) << 4 | fanSubTriangle. Dump the plane, then walk
+        // the scene and print a resolution table for exactly the keys that
+        // actually appear on screen (the full face list would be tens of
+        // thousands of lines). Key collisions are REPORTED, not hidden — the key
+        // is only unique while the heap stays inside a 4 GB window.
+        if (g_gbuffer && !g_gbuffer->faceId.empty()
+            && g_gbuffer->faceId.size() >= size_t(xres) * yres) {
+            char fp[1024];
+            std::snprintf(fp, sizeof(fp), "%s/greets_t%06d_face.u32", cfg.outDir.c_str(), ts);
+            if (FILE* ff = std::fopen(fp, "wb")) {
+                std::fwrite(g_gbuffer->faceId.data(), sizeof(uint32_t),
+                            size_t(xres) * yres, ff);
+                std::fclose(ff);
+                std::fprintf(stderr, "[GREETSSNAP] faceid -> %s\n", fp);
+            }
+            std::set<uint32_t> present;   // face keys (already >> 4, no sub-tri)
+            for (size_t i = 0, n = size_t(xres) * yres; i < n; ++i) {
+                const uint32_t k = g_gbuffer->faceId[i];
+                if (k) present.insert(k >> 4);
+            }
+            int printed = 0, collisions = 0;
+            std::set<uint32_t> seen;
+            for (Object *Obj = CurScene ? CurScene->ObjectHead : nullptr; Obj; Obj = Obj->Next) {
+                if (Obj->Type != Obj_TriMesh || !Obj->Data) continue;
+                TriMesh *T = (TriMesh*)Obj->Data;
+                for (int32_t fi = 0; fi < T->FIndex; ++fi) {
+                    Face *F = &T->Faces[fi];
+                    const uint32_t key = uint32_t(uintptr_t(F) >> 4) & 0x0FFFFFFFu;
+                    if (!present.count(key)) continue;
+                    if (!seen.insert(key).second) { ++collisions; }
+                    std::fprintf(stderr,
+                        "[FACEID] key=%u mesh=%s fi=%d mat=%s N=(%.4f,%.4f,%.4f) d=%.4f"
+                        " A=(%.3f,%.3f,%.3f) B=(%.3f,%.3f,%.3f) C=(%.3f,%.3f,%.3f)"
+                        " uv=(%.3f,%.3f)(%.3f,%.3f)(%.3f,%.3f) grp=%u\n",
+                        (unsigned)key, Obj->Name ? Obj->Name : "(unnamed)", (int)fi,
+                        (F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "(none)",
+                        F->N.x, F->N.y, F->N.z, F->NormProd,
+                        F->A ? F->A->Pos.x : 0.f, F->A ? F->A->Pos.y : 0.f, F->A ? F->A->Pos.z : 0.f,
+                        F->B ? F->B->Pos.x : 0.f, F->B ? F->B->Pos.y : 0.f, F->B ? F->B->Pos.z : 0.f,
+                        F->C ? F->C->Pos.x : 0.f, F->C ? F->C->Pos.y : 0.f, F->C ? F->C->Pos.z : 0.f,
+                        F->U1, F->V1, F->U2, F->V2, F->U3, F->V3,
+                        (unsigned)F->PomShellGroup);
+                    ++printed;
+                }
+            }
+            std::fprintf(stderr, "[FACEID] %zu distinct keys on screen, %d resolved, "
+                         "%d KEY COLLISIONS (two faces sharing a key — treat those "
+                         "rows as ambiguous)\n", present.size(), printed, collisions);
+        }
+
         // FDS_DUMP_TXTR: dump the finalized per-pixel parallax UV (uf,vf) that the
         // march recorded during this tick (see g_pomDbgUV set before the tick).
         // Diffing two runs' UV bins isolates the MARCH output (spatial texel

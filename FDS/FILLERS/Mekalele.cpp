@@ -78,6 +78,14 @@ void EngineGBuffer_Resize(int X, int Y) {
     // scenes still benefit when their materials set Material::ShadowMatID
     // (greets hull merge) or per-face F->ShadowMatID (greets wall split).
     s_engineGBuffer.shadowMatID.assign(numPixels, 0);
+    // DIAGNOSTIC per-pixel face identity (--face_id_dump). Allocated only when
+    // the flag is on; empty otherwise, which is what makes the rasterizer skip
+    // the write (GBufferSpan hands the inner loop a nullptr).
+    if (fds::FeatureFlags::face_id_dump()) {
+        s_engineGBuffer.faceId.assign(numPixels, 0);
+    } else {
+        s_engineGBuffer.faceId.clear();
+    }
     // Filtered-albedo plane — allocated only when FDS_TEXTURE_FILTER > 0.
     // Holds the per-pixel bilinear/trilinear diffuse color the Mekalele
     // pass samples at raster time (the sub-texel fraction is gone by the

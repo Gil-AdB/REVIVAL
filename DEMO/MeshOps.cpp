@@ -3716,7 +3716,16 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 			if (nl < 1e-6f) { ++nPinned; continue; }
 			const float wv  = wSum[i]  / float(cnt[i]);
 			const float ndv = ndSum[i] / float(cnt[i]);
-			const float off = uvAmp * wv * 0.5f;
+			// --pom_shell_lid_probe (DIAGNOSTIC, default OFF): force the lid
+			// offset to ZERO. Everything else about the shell — ShellH, the
+			// material amplitude, the patch domains, the sibling boxes, every
+			// kernel path — is left bit-for-bit identical, so differencing this
+			// against the real shell attributes a discrepancy to the MOVED
+			// VERTICES (it vanishes) or to the MARCH (it survives). Not a
+			// rendering proposal: with the geometry unmoved the relief hangs
+			// entirely below the authored plane instead of straddling it.
+			const float off = fds::FeatureFlags::pom_shell_lid_probe()
+			                ? 0.0f : (uvAmp * wv * 0.5f);
 			V[i].Pos.x += vn.x / nl * off;
 			V[i].Pos.y += vn.y / nl * off;
 			V[i].Pos.z += vn.z / nl * off;
