@@ -12,9 +12,25 @@ rev/
 *.log
 !build/**/*.sh
 ow/
-rev-build/
+# rev-build/ is the working DOS source tree. Its DERIVED output stays out of git, but the
+# SOURCES are tracked: ow2-port.patch (2026-07-04) was the old mechanism and is long stale --
+# it predates FDS_NGON/FDS_ZBUF/FDS_GOURCHUNK/FDS_JPEG6/FDS_FASTLOG, so the tree was the only
+# copy of several sessions of work. Textures/scenes/binaries are excluded by extension.
+rev-build/**
+!rev-build/**/
+!rev-build/**/*.CPP
+!rev-build/**/*.H
+!rev-build/**/*.ASM
+!rev-build/**/*.c
+!rev-build/**/*.h
+!rev-build/**/*.md
+!rev-build/**/README*
+!rev-build/**/*.wat
+rev-build/_build/**
+rev-build/REVIVAL/Source/**
 _build/
 smoke/
 runtime-m8d/
 *.patch.orig
 !recovered/
+rev-build/REVIVAL/TEMP/**
