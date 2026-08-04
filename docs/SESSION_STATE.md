@@ -1,5 +1,31 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-05 — S1 P2-A: `--pom_recess_only` IS IN, default OFF.** Read
+> `docs/S1_DISCREPANCY_INVENTORY.md` §10. The user's BLACK HOLES (full-height
+> gashes between wall panels, black bar in the mirror) are the LID model's
+> mandatory lateral-exit discard firing at internal patch seams; the converged
+> reference shares that boundary model, so **every P1 number was scored by a
+> yardstick blind to it**. VOID (z==0 px) is now a mandatory column on every arm.
+> Void at the user's t=5743 pose: tessellation **3**, lid shell **98 371**,
+> recess-only **0** — and 0 at all seven poses measured.
+> - Recess-only moves NO vertex; the height field's max sits at the authored
+>   plane and all relief carves inward; a ray leaving the patch CLAMPS
+>   (`--pom_recess_edge=2` restores the discard as a diagnostic and voids
+>   68 k–130 k px on identical geometry, which is how the mechanism was pinned).
+> - VERIFIED: shadow cube vs the no-shell arm **0 of 13 533 184 texels** (lid:
+>   29.88 %) → C6 zero by construction; **0 px frame-wide drawn nearer than the
+>   authored plane** at six poses (lid: 26–74 %) → S1a's ordering hazard retired.
+> - COSTS: 0.8–8.5 % of the frame renders FLAT (the clamp) in bands along the
+>   seams; the surface recedes half a slab (pair with
+>   `--pom_shell_world_amp_set=0.18`); nothing can stand proud of the authored
+>   plane ever again. Perf: no measured cost (−0.8 ± 0.9 ms vs the lid arm).
+> - It is the cheap correct-by-construction option, NOT the literature one —
+>   a CLOSED shell (Hirche'04 side faces + cross-patch march) is S1d.
+> - Recipe: `--no-greets_displace --parallax_pom_cone --pom_shell
+>   --pom_recess_only --pom_shell_cap=16 --parallax_pom=32 --pom_cone_exact=1
+>   --pom_cone_min_step=1 --pom_march_earlyout --pom_shell_world_amp
+>   --pom_shell_world_amp_set=0.18 --pom_normal`. Crops: `docs/img/s1_p2a/`.
+
 > **2026-08-04 (session 3) — S1a + S1b + S1c ARE ALL IN, all default OFF, all
 > byte-null** (render_gate 3/3, city `37e62845`, fountain `51fff7cd`, wasm
 > links). Read `docs/S1_PIXEL_DISPLACEMENT_PLAN.md` for the full record.

@@ -1660,6 +1660,7 @@ a far cheaper artefact than a void, but it is an artefact, and the literature fi
 | `F_p4200_{tess,best,recW18}.png` | the vista. Black bar beside the doorway in `best`, absent in `recW18`. |
 | `CLAMP_p5743_recW18.png` | §10.6's clamp map (red = clamped). |
 | `Z_p2845_{tess,recW18}.png` | grazing close-up, ×2. Mortar groove and block face are equivalent; recess's groove is straighter. |
+| `EDGE_p5743_{tess,recW18,recW18pn}.png` | **the trade, ×4, extreme grazing on the near wall.** `tess` has wide, dark, bevelled joints (its blocks rise above the mean surface and occlude across the joint); `recW18` alone reads flat and its grooves are thin; `recW18pn` (with `--pom_normal`) gets the bevel back and lands close to `tess`, but the joints stay shallower — a groove that can only sink is not the same as a block that can rise. |
 
 My own read, having looked at all of them: **the wall reads as carved, and at
 the block scale it is competitive with tessellation** — but only with two
