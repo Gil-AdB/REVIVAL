@@ -1,5 +1,18 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-04 — ACTIVE CAMPAIGN REDIRECT:** the current campaign is
+> **S1 per-pixel shell displacement** — read `docs/S1_PIXEL_DISPLACEMENT_PLAN.md`
+> FIRST (mission, stages S1a/S1b/S1c, validation battery, discipline). Research
+> basis: `docs/DISPLACEMENT_RESEARCH.md` (07b72c7). In flight at write time:
+> (a) S1a `--pom_depth_write` agent in a worktree; (b) groove-line zigzag fix
+> agent in the main tree (tessellation path; diagnosis correction: the sawtooth
+> verts were NEVER snapped groove-line verts — re-scoping via --displace_viz).
+> Recently landed on fog-wt: chunk-occlusion experiment (VISIBILITY_PLAN §7 —
+> occlusion refuted, default OFF), displacement fold-relax + parent-plane
+> shadow ids + neighbor pin (all default ON; bleed root cause was the PolyId
+> single-id collapse, fixed by `greets_displace_shadow_planes`). User note:
+> bare `--parallax_pom_lod` in their flag list parses to NOTHING (needs =value).
+
 Read this when resuming. Branch **fog-wt**, nothing pushed. Previous campaign
 (structural push): docs/posts/SESSION_STATE_2026-07-04_structural.md.
 Range covered here: `1ca269d..7282f7a` (~60 commits, 2026-07-08..11).
