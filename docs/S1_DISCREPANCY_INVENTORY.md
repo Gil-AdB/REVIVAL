@@ -1353,14 +1353,25 @@ same order. **The march's depth error is now two to three orders of magnitude
 below the geometry classes it was competing with**, so lid-vs-recess-vs-border-
 taper is no longer being decided against a moving surface.
 
-**On colour, not yet, and the honest reason is that I have not localised the
-residual.** 46 k–113 k pixels still differ by >12/255. §1 says the reference
-itself is only converged to ±1 march step on the dithered grazing mortar bands
-(49 301 px at t=6097 between 512 and 1024 reference steps), and the residual is
-the same order as that band at t=6097 — but I did **not** measure the overlap,
-so I cannot claim the residual *is* the reference's own uncertainty. That is
-the obvious next measurement and it is one render (`--pom_ref_steps=1024`
-against the BEST arm) plus one mask intersection.
+**On colour, partly — and now measured rather than guessed.** 46 k–113 k pixels
+still differ by >12/255. §1 warns that the reference itself is only converged to
+±1 march step on the dithered grazing mortar bands, so I rendered
+`--pom_ref_steps=1024` at both poses and intersected the masks:
+
+| pose | reference 512-vs-1024 disagrees | arm | residual >12/255 | of it, inside the reference's own band | **outside the band** |
+|---|---|---|---|---|---|
+| t=6097 | 49 570 px | BASE | 217 217 | 23 654 (10.9 %) | 193 563 |
+| | | **BEST** | 70 407 | 22 281 (**31.6 %**) | **48 126** |
+| t=4200 | 81 066 px | BASE | 621 446 | 63 843 (10.3 %) | 557 603 |
+| | | **BEST** | 113 302 | 45 559 (**40.2 %**) | **67 743** |
+
+So **a third to two fifths of what is left is the reference's own uncertainty,
+not the arm's error** — and the honest, attributable colour residual is 48 126
+px at t=6097 (**4.0×** better than today's 193 563) and 67 743 at the vista
+(**8.2×** better than 557 603). Those remain the largest per-pixel-path numbers
+in the inventory and I have not resolved what they are beyond "grazing mortar
+bands"; the reference cannot be pushed much further without a supersampled
+capture, which §1 excluded on purpose.
 
 **What this section does NOT settle.** C2 (17 326 px of corner
 interpenetration), C3 (143 835 px of raw lid over-coverage), C6 (30 % of the
