@@ -155,6 +155,32 @@ shading term. This answers the user's "attack the shadow quality angle".
 Acceptance: disco-spot sweep pose — groove shadows must MOVE with the light;
 grazing acne pose stays clean; before/after crops at the battery; perf number.
 
+## Curved surfaces — DESIGN CONSTRAINT on S1b, future stage S1d
+
+The user wants curved-surface support eventually (alcoves, curved props).
+Therefore S1b MUST be built the generalizable way from the start:
+
+- Per-pixel texture-space entry/exit rays: the rasterizer interpolates the
+  texture-space entry point (u,v,h) and exit point across the rastered shell
+  face; the march runs entry→exit. Do NOT take the per-face constant-ray
+  shortcut even though flat walls would allow it — flat is the degenerate
+  case (entry ray constant across the face) of the same code path.
+- This means one extra interpolated channel (shell height h) in the Mekalele
+  interpolant setup alongside U/V, and per-vertex TBN through the fill.
+
+S1d proper (later, Hirche '04 prism tracing — see DISPLACEMENT_RESEARCH.md):
+shell geometry builder extrudes triangles along SMOOTH VERTEX normals into
+prisms (top + boundary/silhouette side faces; extrusion clamped by local
+curvature radius against prism self-intersection); raster the hull; the
+warped-linear march is unchanged. Horizon maps (S1c) transfer as-is (local
+tangent frame). Content rule: curved UV charts must be near-affine per
+triangle — the t=2845 trapezoid-chart lesson (fan-fallback artifacts)
+applies doubly on curved charts. Cheap middle tier for gently curved props:
+per-pixel-TBN POM without a shell (relief, no silhouettes) — may suffice for
+the alcoves; offer it in the comparison. Est. cost of S1d over flat S1b:
++10–30% on the same covered pixels (setup + slightly larger hull area; the
+march dominates and is unchanged) — estimate, to be measured.
+
 ## Stage S3 — march quality (optional, after S1b lands)
 
 EGSR 2024 exact relaxed-cone bake (Bán et al., impl:
