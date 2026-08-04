@@ -297,6 +297,22 @@ const StoneParentPlane *MeshOps_StoneParentPlane(const char *matName, uint16_t o
 // material. No-op when the material has no faces in the scene.
 void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngleDeg);
 
+// S1b POM SHELL builder (docs/S1_PIXEL_DISPLACEMENT_PLAN.md §S1b): turn
+// matName's flat faces into the LID of a relief slab — push every vertex they
+// use out along its normal by (uvAmp × that face's world-per-UV-tile)/2 and
+// stamp Vertex::ShellH with the slab height it reached (1 = lid), then record
+// uvAmp on the material (Material::PomShellUvAmp) so the rasterizer's
+// --pom_shell march enters through this surface, marches DOWN through the slab
+// and discards rays that leave the patch (= the silhouette). uvAmp is in UV
+// units — pass the same effective parallax strength the march runs at
+// (parallax_strength × Material::ParallaxScale). pinCrossMaterial leaves verts
+// shared with non-target faces alone (no junction can be pulled apart, at the
+// cost of relief there — and on un-subdivided quads it can pin a whole face).
+// Run after MakeFacesIndependentByAngle (final vertex normals, per-face verts)
+// and before any chunk split. Returns the amp stamped (0 = nothing built).
+float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
+                     bool pinCrossMaterial = false);
+
 // B4 residual height map: full-res height minus the bilinear-upsampled lowMip
 // band (per mip, clamped, same 8-bit tiled+mip layout) — the POM input for a
 // displaced material, so geometry + parallax don't double-count the relief.

@@ -309,6 +309,9 @@ void FrustumClipper::Near()
 		// screen-affine t separately.
 		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
 		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
+		// S1b shell entry height (--pom_shell) — another object-space
+		// per-vertex attribute, same linear treatment as OrigBary here.
+		newVert->ShellH = _IA->ShellH + t * (_IB->ShellH - _IA->ShellH);
 
 		newVert->PX = newVert->TPos_AOS.x * C_VP.iNearZ;
 		newVert->PY = newVert->TPos_AOS.y * C_VP.iNearZ;
@@ -370,6 +373,7 @@ void FrustumClipper::Far()
 		// is the object-space parameter from TPos_AOS.z).
 		newVert->OrigBaryB = _IA->OrigBaryB + t * (_IB->OrigBaryB - _IA->OrigBaryB);
 		newVert->OrigBaryC = _IA->OrigBaryC + t * (_IB->OrigBaryC - _IA->OrigBaryC);
+		newVert->ShellH    = _IA->ShellH + t * (_IB->ShellH - _IA->ShellH);
 		Calc_Flags(newVert);
 		C_Scnd[j++] = newVert++;
 	}
@@ -443,6 +447,16 @@ void FrustumClipper::FInterpolator(Vertex *V, float t)
 		const float obCZ = aCZ + t * (bCZ - aCZ);
 		V->OrigBaryB = float(obBZ * V->TPos_AOS.z);
 		V->OrigBaryC = float(obCZ * V->TPos_AOS.z);
+	}
+	// S1b shell entry height (--pom_shell): perspective-correct exactly like
+	// OrigBary/UV — the rasterizer interpolates ShellH*RZ across the tile and
+	// divides by per-pixel Z, so the clip vertex must carry the true
+	// object-space value at the clip point.
+	{
+		const float aHZ = _IA->ShellH * _IA->RZ;
+		const float bHZ = _IB->ShellH * _IB->RZ;
+		const float hZ  = aHZ + t * (bHZ - aHZ);
+		V->ShellH = float(hZ * V->TPos_AOS.z);
 	}
 }
 

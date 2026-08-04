@@ -173,6 +173,12 @@ void _2DClipper::lerp(const Vertex& IA, const Vertex& IB, Vertex& V, float t) co
 		const float invRZ = (V.RZ != 0.0f) ? 1.0f / V.RZ : 0.0f;
 		V.OrigBaryB = obBZ * invRZ;
 		V.OrigBaryC = obCZ * invRZ;
+		// S1b shell entry height (--pom_shell): same perspective-correct
+		// treatment (lerp ShellH*RZ, divide by the clip vertex's RZ).
+		const float aHZ = IA.ShellH * IA.RZ;
+		const float bHZ = IB.ShellH * IB.RZ;
+		const float hZ  = aHZ + t * (bHZ - aHZ);
+		V.ShellH = hZ * invRZ;
 	}
 }
 

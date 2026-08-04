@@ -73,6 +73,11 @@
 
 extern void Scene_RebuildMatTable(Scene *Sc);
 extern void Compute_FaceVertexIndices(TriMesh *T);
+// SceneBuilder::Finalize does NOT run Scene_Computations, so rig meshes have no
+// object-space tangents — and the parallax/POM march needs them (a zero tangent
+// normalizes to NaN, which silently poisons every marched UV). Called explicitly
+// by the shell arm below.
+extern void Compute_Vertex_Tangents(TriMesh *T);
 extern void StampSingleKey(Spline &sp, float x, float y, float z, float w);
 
 namespace {
@@ -133,7 +138,7 @@ void genRunningBond(std::vector<uint8_t> &g) {
 // Generate_Mipmaps), then MakeHeight8 → the 8-bit HeightMap the bake wants.
 // Bypasses Scene_MakeTiledTexture (which clamps to 256²) so the synthetic maps
 // keep the real map's 1024² scale.
-Texture *makeSyntheticHeight8(const std::vector<uint8_t> &grid) {
+Texture *makeSyntheticTiled32(const std::vector<uint8_t> &grid) {
     Texture *t = new Texture;
     std::memset(t, 0, sizeof(Texture));
     t->BPP   = 32;
@@ -148,7 +153,28 @@ Texture *makeSyntheticHeight8(const std::vector<uint8_t> &grid) {
     t->Data = (byte *)px;
     t->Flags |= Txtr_Tiled;
     Generate_Mipmaps(t, DEFAULT_BLOCKSIZEX, DEFAULT_BLOCKSIZEY, 1);  // steals + retiles Data
-    return MakeHeight8(t);
+    return t;
+}
+
+Texture *makeSyntheticHeight8(const std::vector<uint8_t> &grid) {
+    return MakeHeight8(makeSyntheticTiled32(grid));
+}
+
+// The SAME field as a visible grayscale ALBEDO. Without it the rig's wall is a
+// solid colour, and then per-pixel parallax is INVISIBLE by construction (the
+// march shifts the UV of a uniform texture) — the geometric bake shows relief
+// only because its normals are real. Any honest tessellation-vs-POM comparison
+// needs surface detail the UV shift can move.
+Texture *makeSyntheticAlbedo(int mapId) {
+    std::vector<uint8_t> grid(size_t(kMapSize) * kMapSize);
+    switch (mapId) {
+        case 1: genRamp(grid); break;
+        case 3: genRunningBond(grid); break;
+        default: genBlocks(grid); break;
+    }
+    // Lift + spread so lighting has somewhere to go (grooves ~60, blocks ~230).
+    for (auto &b : grid) b = uint8_t(40 + (int(b) * 200) / 255);
+    return makeSyntheticTiled32(grid);
 }
 
 // Real map — exactly greets' GreetsLoadFullTexture path, then MakeHeight8.
@@ -209,7 +235,8 @@ void stampSpan(TriMesh *T, float span) {
 
 // Build the one-wall scene for (mapId, span), run the production bake on 'dtest'.
 // vizMode gates what the bake RECORDS (2 = both magnitude + error fields).
-DTestScene build(int mapId, float span, int vizMode) {
+DTestScene build(int mapId, float span, int vizMode, bool bake = true,
+                 bool backdrop = false, bool blockAlbedo = false) {
     using namespace fds::scene_builder;
     // The bake's viz recorders read this at bake time; set before the bake.
     FF::setDefault(FF::IntId::displace_viz, vizMode);
@@ -224,6 +251,7 @@ DTestScene build(int mapId, float span, int vizMode) {
     Texture *tex = b.AddSolidColorTexture(8, 8, 0xFFB0B0B0u);
     Material *mat = b.AddMaterial("dtest", tex, {176, 176, 176, 255}, 0);
     mat->HeightMap = hm;   // the bake displaces along this
+    if (blockAlbedo && mapId != 2) mat->Txtr = makeSyntheticAlbedo(mapId);
 
     // The wall: 8×8, in the z=0 plane, normal facing -z (toward the camera + key
     // light on the -z side). Winding (4,0,0)(-4,0,0)(-4,8,0)(4,8,0) → N=(0,0,-1);
@@ -244,6 +272,30 @@ DTestScene build(int mapId, float span, int vizMode) {
     };
     b.AddQuad("dtest_floor", floorV, fmat);
 
+    // S1b SHELL rig: a loud BACKDROP a few units behind the wall, wider and
+    // taller than it. Anything that shows through the relief — a silhouette
+    // gap at the wall's edge, a discarded ray — reads as saturated green, so
+    // "does the geometry BEHIND show?" is a colour test, not a judgement call.
+    if (backdrop) {
+        Texture *btex = b.AddSolidColorTexture(8, 8, 0xFF00C000u);
+        Material *bmat = b.AddMaterial("dtestback", btex, {0, 192, 0, 255}, 0);
+        // Same winding sense as the wall (4,0,0)(-4,0,0)(-4,8,0)(4,8,0) so the
+        // normal points -z, toward the camera, and it isn't back-face culled.
+        const Vector backV[4] = {
+            Vector( 14.0f,  0.0f, 6.0f), Vector(-14.0f,  0.0f, 6.0f),
+            Vector(-14.0f, 14.0f, 6.0f), Vector( 14.0f, 14.0f, 6.0f),
+        };
+        b.AddQuad("dtest_back", backV, bmat);
+        // Second panel at x = -12 facing +x: the edge-on poses look ALONG the
+        // wall (down -x), where the z = 6 panel is invisible, so without this
+        // the silhouette has a black background and the green metric reads 0.
+        const Vector sideV[4] = {
+            Vector(-12.0f,  0.0f, -12.0f), Vector(-12.0f,  0.0f, 12.0f),
+            Vector(-12.0f, 14.0f, 12.0f),  Vector(-12.0f, 14.0f, -12.0f),
+        };
+        b.AddQuad("dtest_backside", sideV, bmat);
+    }
+
     // ONE omni, placed high + off to the +x side so it GRAZES the wall face:
     // groove side-walls then catch/lose light and read as lines in the lit view
     // (a head-on light on shallow relief washes flat). Ambient lifts the grooves
@@ -260,7 +312,8 @@ DTestScene build(int mapId, float span, int vizMode) {
     const int   mip   = FF::greets_displace_mip();
     const float adapt = FF::greets_displace_adapt();
     const float cpb   = FF::greets_displace_cpb();
-    DisplaceStoneSubdiv(d.sc, "dtest", L, amp, mip, adapt, cpb);
+    if (bake)
+        DisplaceStoneSubdiv(d.sc, "dtest", L, amp, mip, adapt, cpb);
     // Facet the relief (per-face normals) so the lit view reads the ACTUAL
     // subdivided geometry — each cell shows its true plane, grooves pop. This is
     // greets' first post-bake pass. Greets then runs DisplaceStoneSmoothNormals
@@ -697,7 +750,7 @@ void reportMetrics(const DTestScene &d, int mapId, float span) {
 
 // ── headless pose render ────────────────────────────────────────────────────
 void renderPose(DTestScene &d, Vector eye, Vector lookAt, float fov,
-                int drawVizMode, const char *path) {
+                int drawVizMode, const char *path, bool deferred = false) {
     FF::setDefault(FF::IntId::displace_viz, drawVizMode);   // draw-time overlay mode
 
     FC.ISource = eye;
@@ -714,7 +767,10 @@ void renderPose(DTestScene &d, Vector eye, Vector lookAt, float fov,
     Lighting(d.sc);
     if (CAll) {
         Radix_Sort(FList, SList, CAll);
-        Render(RenderPath::ForceForward);   // no deferred/HDR — read raw geometry
+        // Deferred is REQUIRED for anything per-pixel (POM / shell POM run in
+        // the Mekalele G-buffer fill); the geometry arms stay forward so the
+        // bake's raw triangles are what gets read.
+        Render(deferred ? RenderPath::ForceDeferred : RenderPath::ForceForward);
     }
     if (drawVizMode)   // viz-1/2 overlay over the finished frame
         fds::DisplaceViz_DrawOverlay(d.sc);
@@ -956,6 +1012,96 @@ void Run_DisplaceTest() {
                              ? "PASS (fix closed holes, removed no wall)"
                              : (totFilled == 0 ? "no holes detected at these poses"
                                                : "REVIEW (fix removed wall pixels)"));
+        }
+        return;
+    }
+
+    // ── S1b SHELL-POM comparison rig (FDS_DISPLACETEST_SHELL=1) ─────────────
+    // The prize test, on ONE quad with a loud green backdrop 6 units behind it:
+    // does the per-pixel shell open real silhouettes at the wall's edge, and
+    // does what shows through match the tessellation bake? Four arms, same
+    // poses, all rendered DEFERRED (POM only exists in the G-buffer fill):
+    //   tess   — the geometric bake (today's shipping look), POM off
+    //   flat   — flat quad + plain POM (no shell): relief, no silhouettes
+    //   shell  — flat quad pushed out to the lid + shell march + discard
+    //   shellnd— shell with --no-pom_shell_domain: lid + marched depth, NO
+    //            discard. The (shell − shellnd) diff IS the discard viz.
+    // Every arm writes /tmp/dtshell_<arm>_<pose>.ppm; the per-arm green-pixel
+    // count (the backdrop showing through the wall's screen area) is the
+    // numeric silhouette metric.
+    if (std::getenv("FDS_DISPLACETEST_SHELL")) {
+        struct Pose { Vector eye, look; float fov; const char *tag; };
+        const Pose poses[] = {
+            { Vector(0.0f, 4.0f, -13.0f),  Vector( 0.0f, 4.0f, 0.0f), 55.0f, "frontal" },
+            { Vector(10.0f, 5.0f, -10.0f), Vector( 0.0f, 4.0f, 0.0f), 55.0f, "diag45"  },
+            { Vector(10.0f, 4.5f, -5.0f),  Vector(-3.0f, 4.0f, 0.0f), 55.0f, "grazing" },
+            // Edge-on from the +x side, looking ACROSS the wall: the relief
+            // profile pokes past the authored edge here, so this is where a
+            // silhouette either exists or doesn't.
+            { Vector(9.0f, 4.0f, -2.5f),   Vector(-9.0f, 4.0f, -2.5f), 40.0f, "silhouette" },
+            { Vector(0.0f, 20.0f, 0.6f),   Vector(0.0f, 3.5f, 0.0f),  40.0f, "topdown" },
+        };
+        // Count backdrop-green pixels: (g > 100) & (r < 60) & (b < 60).
+        auto greenCount = [](const char *path) -> long {
+            std::FILE *f = std::fopen(path, "rb");
+            if (!f) return -1;
+            int w = 0, h = 0, mx = 0;
+            if (std::fscanf(f, "P6 %d %d %d", &w, &h, &mx) != 3) { std::fclose(f); return -1; }
+            std::fgetc(f);
+            std::vector<unsigned char> px(size_t(w) * size_t(h) * 3);
+            const size_t got = std::fread(px.data(), 1, px.size(), f);
+            std::fclose(f);
+            long n = 0;
+            for (size_t i = 0; i + 2 < got; i += 3)
+                if (px[i+1] > 100 && px[i] < 60 && px[i+2] < 60) ++n;
+            return n;
+        };
+        struct Arm { const char *tag; bool bake; bool shell; bool domain; bool pom; };
+        const Arm arms[] = {
+            { "tess",    true,  false, false, false },
+            { "flat",    false, false, false, true  },
+            { "shell",   false, true,  true,  true  },
+            { "shellnd", false, true,  false, true  },
+        };
+        std::fprintf(stderr, "[DTSHELL] map=%d(%s) span=%.1f amp=%.2f "
+                     "parallax_strength=%.2f pom=%d cone=%d cap=%.1f\n",
+                     mapId, mapName(mapId), (double)span,
+                     (double)FF::greets_displace_amp(),
+                     (double)FF::parallax_strength(), FF::parallax_pom(),
+                     (int)FF::parallax_pom_cone(), (double)FF::pom_shell_cap());
+        for (const Arm &a : arms) {
+            FF::setParamFromText("pom_shell", a.shell ? "1" : "0");
+            FF::setParamFromText("pom_shell_domain", a.domain ? "1" : "0");
+            FF::setParamFromText("parallax", a.pom ? "1" : "0");
+            DTestScene d = build(mapId, span, /*vizMode=*/0, a.bake, /*backdrop=*/true,
+                                 /*blockAlbedo=*/true);
+            if (a.shell) {
+                // Same effective strength the march runs at.
+                const float amp = FF::parallax_strength()
+                                * (d.wall->Faces[0].Txtr ? d.wall->Faces[0].Txtr->ParallaxScale : 1.0f);
+                PomShell_Build(d.sc, "dtest", amp, /*pinCrossMaterial=*/false);
+            }
+            if (a.pom && FF::parallax_pom_cone() && d.wall->Faces[0].Txtr
+                && d.wall->Faces[0].Txtr->HeightMap
+                && !d.wall->Faces[0].Txtr->ConeMap) {
+                d.wall->Faces[0].Txtr->ConeMap =
+                    MakeConeMap(d.wall->Faces[0].Txtr->HeightMap);
+            }
+            // Tangents for EVERY arm (see the extern above): without them the
+            // march's tangent-space view direction is NaN and every marched UV
+            // is garbage — invisible on a solid-colour texture, fatal to the
+            // shell's domain test.
+            for (TriMesh *T = d.sc->TriMeshHead; T; T = T->Next)
+                Compute_Vertex_Tangents(T);
+            SetCurrentScene(d.sc);
+            sizeFaceLists(d.sc);
+            for (const Pose &p : poses) {
+                char path[96];
+                std::snprintf(path, sizeof(path), "/tmp/dtshell_%s_%s.ppm", a.tag, p.tag);
+                renderPose(d, p.eye, p.look, p.fov, 0, path, /*deferred=*/true);
+                std::fprintf(stderr, "[DTSHELL] %-8s %-11s green=%ld  %s\n",
+                             a.tag, p.tag, greenCount(path), path);
+            }
         }
         return;
     }

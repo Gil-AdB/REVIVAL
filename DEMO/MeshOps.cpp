@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <semaphore>
 #include <set>
@@ -3357,6 +3358,270 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 // so the original map must stay installed).
 // Caller owns the returned Texture; re-run MakeConeMap on it when cone POM is
 // active (the cone geometry changed with the heights).
+// ── S1b POM SHELL builder (docs/S1_PIXEL_DISPLACEMENT_PLAN.md) ──────────────
+// Turn matName's flat faces into the LID of a relief slab: push every vertex
+// they use OUT along its normal by half the relief amplitude and stamp
+// Vertex::ShellH with the slab height it landed at (1 = lid). The rasterizer's
+// shell march (--pom_shell) then enters through this surface and marches DOWN
+// through the slab, discarding rays that leave the patch — which is what makes
+// silhouettes. See Material::PomShellUvAmp for why the amplitude is carried in
+// UV units and not world units.
+//
+// The offset is per FACE UV DENSITY: amp (UV units) × that face's
+// world-per-UV-tile (the Lengyel |dP/du|,|dP/dv| geometric mean — the same
+// solve the rasterizer's depth write does per triangle, computed here in OBJECT
+// space, which matches as long as the mesh scale is uniform). A vertex shared by
+// faces of differing density or normal direction (a hard corner) gets the mean,
+// and ShellH records the height it ACTUALLY reached relative to its incident
+// faces' planes (0.5 + mean(N_v·N_face)/2) — so a corner or a pinned border
+// enters the march at its true geometric height instead of a fictitious h = 1.
+// That is the whole point of carrying ShellH as an interpolant.
+//
+// pinCrossMaterial: leave verts that non-target faces also use where they are
+// (ShellH 0.5, no offset) so a cross-material junction can't be pulled apart.
+// Costs relief near those borders and, on un-subdivided quads, can pin an
+// entire face — hence a flag, not a default.
+//
+// Run AFTER the vertex normals are final (MakeFacesIndependentByAngle) and
+// before any chunk split (both copy Vertex/Face structs wholesale, so ShellH
+// and the moved positions propagate). Returns the amp stamped on the material
+// (0 = nothing built).
+float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
+                     bool pinCrossMaterial) {
+	if (!Sc || !matName || uvAmp <= 0.0f) return 0.0f;
+	auto isTarget = [&](const Face *F) {
+		return F && F->Txtr && F->Txtr->Name && !std::strcmp(F->Txtr->Name, matName);
+	};
+	Material *mat = nullptr;
+	long long nMoved = 0, nPinned = 0, nCorner = 0, nFaces = 0;
+	// ── PATCH GROUPING (the lateral-exit domain) ────────────────────────────
+	// The march discards a ray that leaves the patch's UV box before crossing
+	// the height field — that discard IS the silhouette. The patch must
+	// therefore be the whole CONTIGUOUS COPLANAR wall, not the authored quad:
+	// measured on greets, wall quads are 0.4-2.1 UV tiles wide while a grazing
+	// shell ray travels up to amp*cap ~= 0.24 UV, so per-quad domains fired the
+	// discard mid-wall and punched holes in every wall and the whole floor.
+	// Union-find over target faces joined by a POSITION-COINCIDENT edge with
+	// (near-)equal planes; the group's UV box is the union of its faces'. A
+	// coplanar neighbour across a UV chart SEAM merges too — the failure mode
+	// there is a missing discard (a smear, exactly like plain POM), never a
+	// hole, which is the right way round.
+	struct EdgeKey {
+		long long a, b;
+		bool operator<(const EdgeKey &o) const { return a != o.a ? a < o.a : b < o.b; }
+	};
+	auto qpos = [](const Vector &p) {
+		auto q = [](float v) { return (long long)std::llround(v * 10000.0); };
+		// Pack 3 quantized coords into one key (21 bits each, +-1e5 range).
+		return ((q(p.x) & 0x1FFFFF) << 42) ^ ((q(p.y) & 0x1FFFFF) << 21) ^ (q(p.z) & 0x1FFFFF);
+	};
+	std::vector<int> uf;                       // union-find parent, per (mesh,face)
+	std::function<int(int)> find = [&](int x) {
+		while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; }
+		return x;
+	};
+	struct FaceRef { TriMesh *T; int fi; };
+	std::vector<FaceRef> refs;
+	{
+		std::map<EdgeKey, std::vector<int>> edges;
+		for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+			if (T->FIndex == 0 || !T->Faces) continue;
+			for (int32_t i = 0; i < T->FIndex; ++i) {
+				Face &F = T->Faces[i];
+				if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+				const int id = int(refs.size());
+				refs.push_back({ T, i });
+				uf.push_back(id);
+				const Vector *pv[3] = { &F.A->Pos, &F.B->Pos, &F.C->Pos };
+				for (int e = 0; e < 3; ++e) {
+					long long ka = qpos(*pv[e]), kb = qpos(*pv[(e + 1) % 3]);
+					if (ka > kb) std::swap(ka, kb);
+					edges[{ ka, kb }].push_back(id);
+				}
+			}
+		}
+		for (const auto &kv : edges) {
+			for (size_t j = 1; j < kv.second.size(); ++j) {
+				const Face &F0 = refs[kv.second[0]].T->Faces[refs[kv.second[0]].fi];
+				const Face &Fj = refs[kv.second[j]].T->Faces[refs[kv.second[j]].fi];
+				const float nd = F0.N.x*Fj.N.x + F0.N.y*Fj.N.y + F0.N.z*Fj.N.z;
+				if (nd < 0.999f) continue;                       // not coplanar-parallel
+				if (std::fabs(F0.NormProd - Fj.NormProd) > 1e-3f) continue;   // parallel but offset
+				const int ra = find(kv.second[0]), rb = find(kv.second[j]);
+				if (ra != rb) uf[ra] = rb;
+			}
+		}
+	}
+	float offMin = 1e30f, offMax = -1e30f, wMin = 1e30f, wMax = -1e30f;
+	float hMinStamp = 1e30f;
+	for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+		if (T->FIndex == 0 || !T->Faces || !T->Verts) continue;
+		Vertex *const V = T->Verts;
+		auto vidx = [&](const Vertex *v) { return uint32_t(v - V); };
+		const uint32_t nV = uint32_t(T->VIndex);
+		std::vector<float>  wSum(nV, 0.0f);      // world-per-UV over incident target faces
+		std::vector<float>  ndSum(nV, 0.0f);     // N_v·N_face over the same
+		std::vector<int>    cnt(nV, 0);
+		std::vector<char>   nonTarget(nV, 0);
+		int nTargetHere = 0;
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C) continue;
+			const uint32_t vi[3] = { vidx(F.A), vidx(F.B), vidx(F.C) };
+			if (vi[0] >= nV || vi[1] >= nV || vi[2] >= nV) continue;   // defensive
+			if (!isTarget(&F)) {
+				nonTarget[vi[0]] = nonTarget[vi[1]] = nonTarget[vi[2]] = 1;
+				continue;
+			}
+			++nTargetHere;
+			if (!mat) mat = F.Txtr;
+			// world(object)-per-UV-tile for this face: invert the UV Jacobian to
+			// get dP/du, dP/dv, take the geometric mean of their lengths (the
+			// march applies ONE amplitude to both axes).
+			const Vector &pa = F.A->Pos, &pb = F.B->Pos, &pc = F.C->Pos;
+			const float du1 = F.U2 - F.U1, dv1 = F.V2 - F.V1;
+			const float du2 = F.U3 - F.U1, dv2 = F.V3 - F.V1;
+			const float det = du1 * dv2 - du2 * dv1;
+			float w = 0.0f;
+			if (std::fabs(det) > 1e-12f) {
+				const float inv = 1.0f / det;
+				const float e1x = pb.x - pa.x, e1y = pb.y - pa.y, e1z = pb.z - pa.z;
+				const float e2x = pc.x - pa.x, e2y = pc.y - pa.y, e2z = pc.z - pa.z;
+				const float tx = (e1x * dv2 - e2x * dv1) * inv;
+				const float ty = (e1y * dv2 - e2y * dv1) * inv;
+				const float tz = (e1z * dv2 - e2z * dv1) * inv;
+				const float bx = (e2x * du1 - e1x * du2) * inv;
+				const float by = (e2y * du1 - e1y * du2) * inv;
+				const float bz = (e2z * du1 - e1z * du2) * inv;
+				const float t2 = tx*tx + ty*ty + tz*tz;
+				const float b2 = bx*bx + by*by + bz*bz;
+				w = std::sqrt(std::sqrt(t2 * b2));
+			}
+			if (w <= 0.0f) continue;             // degenerate chart: no lid here
+			if (w < wMin) wMin = w;
+			if (w > wMax) wMax = w;
+			++nFaces;
+			for (int k = 0; k < 3; ++k) {
+				const Vector &vn = V[vi[k]].N;
+				const float nl = std::sqrt(vn.x*vn.x + vn.y*vn.y + vn.z*vn.z);
+				const float nd = (nl > 1e-6f)
+				    ? ((vn.x*F.N.x + vn.y*F.N.y + vn.z*F.N.z) / nl) : 0.0f;
+				wSum[vi[k]]  += w;
+				ndSum[vi[k]] += nd;
+				cnt[vi[k]]   += 1;
+			}
+		}
+		if (nTargetHere == 0) continue;
+		for (uint32_t i = 0; i < nV; ++i) {
+			if (cnt[i] == 0) continue;
+			if (pinCrossMaterial && nonTarget[i]) { ++nPinned; continue; }
+			const Vector &vn = V[i].N;
+			const float nl = std::sqrt(vn.x*vn.x + vn.y*vn.y + vn.z*vn.z);
+			if (nl < 1e-6f) { ++nPinned; continue; }
+			const float wv  = wSum[i]  / float(cnt[i]);
+			const float ndv = ndSum[i] / float(cnt[i]);
+			const float off = uvAmp * wv * 0.5f;
+			V[i].Pos.x += vn.x / nl * off;
+			V[i].Pos.y += vn.y / nl * off;
+			V[i].Pos.z += vn.z / nl * off;
+			// Height actually reached, measured against the incident faces'
+			// planes (ndv = 1 on a flat patch → exactly the lid at h = 1).
+			V[i].ShellH = 0.5f + 0.5f * ndv;
+			if (V[i].ShellH < hMinStamp) hMinStamp = V[i].ShellH;
+			if (ndv < 0.99f) ++nCorner;
+			if (off < offMin) offMin = off;
+			if (off > offMax) offMax = off;
+			++nMoved;
+		}
+		// Re-plane the moved faces (NormProd is a plane CONSTANT — stale values
+		// mis-cull at grazing, the B1 lesson). N itself is unchanged for a rigid
+		// offset but re-derive it anyway for the corner-averaged cases.
+		for (int32_t i = 0; i < T->FIndex; ++i) {
+			Face &F = T->Faces[i];
+			if (!F.A || !F.B || !F.C || !isTarget(&F)) continue;
+			const Vector &A = F.A->Pos, &B = F.B->Pos, &C = F.C->Pos;
+			const float e1x = B.x - A.x, e1y = B.y - A.y, e1z = B.z - A.z;
+			const float e2x = C.x - A.x, e2y = C.y - A.y, e2z = C.z - A.z;
+			float gx = e1y*e2z - e1z*e2y, gy = e1z*e2x - e1x*e2z, gz = e1x*e2y - e1y*e2x;
+			const float gl = std::sqrt(gx*gx + gy*gy + gz*gz);
+			if (gl > 1e-6f) {
+				gx /= gl; gy /= gl; gz /= gl;
+				if (gx*F.N.x + gy*F.N.y + gz*F.N.z < 0.0f) { gx = -gx; gy = -gy; gz = -gz; }
+				F.N.x = gx; F.N.y = gy; F.N.z = gz;
+			}
+			F.NormProd = -(F.N.x*A.x + F.N.y*A.y + F.N.z*A.z);
+		}
+		// The lid sticks out past the authored bsphere by at most the offset.
+		if (offMax > 0.0f) {
+			T->BSphereRadius += offMax;
+			T->BSphereRad     = T->BSphereRadius * T->BSphereRadius;
+		}
+	}
+	if (!mat || nMoved == 0) {
+		std::fprintf(stderr, "[POM-SHELL] '%s': nothing built (%lld target faces, "
+		             "%lld verts pinned) — no shell\n", matName, nFaces, nPinned);
+		return 0.0f;
+	}
+	// Collapse the union-find into 1-based group ids, union each group's UV box
+	// (from the AUTHORED per-face UVs, which the rasterizer also reads), and
+	// publish the table on the material.
+	double domUMin = 1e30, domUMax = -1e30, domVMin = 1e30, domVMax = -1e30;
+	unsigned nGroups = 0;
+	{
+		std::map<int, int> rootToGroup;
+		std::vector<float> table;
+		for (size_t i = 0; i < refs.size(); ++i) {
+			const int r = find(int(i));
+			auto it = rootToGroup.find(r);
+			int g;
+			if (it == rootToGroup.end()) {
+				g = int(rootToGroup.size()) + 1;
+				rootToGroup[r] = g;
+				table.insert(table.end(), { 1e30f, -1e30f, 1e30f, -1e30f });
+			} else {
+				g = it->second;
+			}
+			Face &F = refs[i].T->Faces[refs[i].fi];
+			F.PomShellGroup = uint16_t(g);
+			float *d = table.data() + 4 * (g - 1);
+			d[0] = std::min({ d[0], F.U1, F.U2, F.U3 });
+			d[1] = std::max({ d[1], F.U1, F.U2, F.U3 });
+			d[2] = std::min({ d[2], F.V1, F.V2, F.V3 });
+			d[3] = std::max({ d[3], F.V1, F.V2, F.V3 });
+		}
+		nGroups = unsigned(rootToGroup.size());
+		if (nGroups > 65535) {   // uint16 group id
+			std::fprintf(stderr, "[POM-SHELL] '%s': %u patches exceeds the 16-bit "
+			             "group id — domains disabled for this material\n", matName, nGroups);
+			for (auto &rf : refs) rf.T->Faces[rf.fi].PomShellGroup = 0;
+			nGroups = 0;
+		} else if (nGroups) {
+			mat->PomShellDomains = new float[table.size()];
+			std::memcpy(mat->PomShellDomains, table.data(), table.size() * sizeof(float));
+			mat->PomShellDomainCount = nGroups;
+			for (unsigned g = 0; g < nGroups; ++g) {
+				domUMin = std::min(domUMin, (double)table[4*g+0]);
+				domUMax = std::max(domUMax, (double)table[4*g+1]);
+				domVMin = std::min(domVMin, (double)table[4*g+2]);
+				domVMax = std::max(domVMax, (double)table[4*g+3]);
+			}
+		}
+	}
+	mat->PomShellUvAmp = uvAmp;
+	std::fprintf(stderr,
+		"[POM-SHELL] '%s' amp=%.3f UV: %lld verts moved [%.4f..%.4f world] over "
+		"%lld faces, worldPerUV %.3f..%.3f, %lld corner verts (ShellH min %.3f), "
+		"%lld pinned%s; %u coplanar patches, UV span u[%.2f..%.2f] v[%.2f..%.2f], "
+		"max lateral travel %.3f UV\n",
+		matName, (double)uvAmp, nMoved, (double)offMin, (double)offMax, nFaces,
+		(double)wMin, (double)wMax, nCorner,
+		(double)(hMinStamp < 1e29f ? hMinStamp : 1.0f), nPinned,
+		pinCrossMaterial ? " (cross-material pinning ON)" : "",
+		nGroups, domUMin, domUMax, domVMin, domVMax,
+		(double)(uvAmp * fds::FeatureFlags::pom_shell_cap()));
+	return uvAmp;
+}
+
 Texture *MakeResidualHeight(Texture *height, int lowMip) {
 	if (!height || height->BPP != 8 || !height->Mipmap[0] || height->numMipmaps == 0)
 		return nullptr;

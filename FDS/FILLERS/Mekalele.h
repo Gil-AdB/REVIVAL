@@ -351,6 +351,10 @@ struct Tile {
 	// linearly interpolated across the tile then divided by per-pixel Z to
 	// recover object-space bary on the original face's (A, B, C).
 	float obBZ0, obCZ0;
+	// Per-tile origin of ShellH*RZ (--pom_shell). Same family as uz0/vz0:
+	// interpolated linearly across the tile, divided by per-pixel Z to recover
+	// the shell ENTRY height at the pixel.
+	float shz0;
 };
 
 struct TileRasterizerCtx {
@@ -484,6 +488,36 @@ struct TileRasterizerCtx {
 	// its deferred Z store off this alone. The per-face world scale lives in
 	// TileRasterizer::pomDepthWorldAmp (set per triangle with the gradients).
 	bool pomDepthWrite = false;
+	// --pom_shell (S1b, docs/S1_PIXEL_DISPLACEMENT_PLAN.md): this face belongs
+	// to a POM SHELL. The rastered surface is the LID (top of the relief slab,
+	// Vertex::ShellH = 1); the march runs from the per-pixel interpolated entry
+	// height DOWN through the slab along the TRUE view ray, and a lane whose
+	// ray leaves the authored face's UV domain before crossing the height field
+	// is DISCARDED (the silhouette). Set only when the material carries a
+	// PomShellUvAmp (i.e. PomShell_Build ran) and a march is configured; implies
+	// pomDepthWrite. false = the legacy centered (h−0.5) march, byte-identical.
+	bool  pomShell = false;
+	// The slab's amplitude for the full 0..1 height range in UV units, straight
+	// from Material::PomShellUvAmp — the amplitude the GEOMETRY was built with,
+	// so the lid height and the march's height range agree by construction. Its
+	// world equivalent is pomShellUvAmp × world-per-UV = the per-triangle
+	// pomDepthWorldAmp, which the shell depth write reuses.
+	float pomShellUvAmp = 0.0f;
+	// --pom_shell_cap: bound on 1/(V·N) in the true-ray march (grazing guard).
+	float pomShellCap = 8.0f;
+	// --pom_shell_domain: off = lid + marched depth but NO lateral-exit
+	// discard. The on/off pair IS the discard viz (the changed pixels are
+	// exactly the discarded ones) at zero hot-loop cost.
+	bool  pomShellDomain = true;
+	// AUTHORED face UV bounding box (from Face::U1..V3 — NOT the post-clip /
+	// post-poly-split vertex set, both of which pass the Face through
+	// unchanged, so this stays the authored patch's domain at every
+	// subdivision level). The shell's lateral-exit test compares the marched
+	// hit UV against it. For an axis-aligned rectangular UV chart either
+	// triangle of the quad spans the whole quad's box, so no quad pairing is
+	// needed and the shared diagonal is never treated as a boundary.
+	float shellUMin = 0.0f, shellUMax = 0.0f;
+	float shellVMin = 0.0f, shellVMax = 0.0f;
 	// --pom_viz: replace the albedo with the height field sampled at the FINAL
 	// (post-march) UV, grayscale — the parallax result made directly visible
 	// (block domes, mortar cuts, march terracing/banding). Debug only; rides
@@ -769,6 +803,10 @@ struct TileRasterizer {
 	// positions (which can be junk if a vertex is behind the camera).
 	float dobBdx, dobBdy;
 	float dobCdx, dobCdy;
+	// Per-pixel shell-entry-height gradients (--pom_shell). Perspective-correct
+	// like UZ/VZ: transport ShellH*RZ linearly in screen space, divide by
+	// per-pixel RZ. Zero when the face isn't a shell face.
+	float dshzdx, dshzdy;
 
 	// --pom_depth_write: the marched relief's WORLD amplitude for the FULL
 	// height range 0..1, per face = ctx.parallaxStrength (UV units, incl. the
@@ -777,6 +815,13 @@ struct TileRasterizer {
 	// UVs — the same Lengyel solve tangents come from). Zero when the depth
 	// write is off or the face's UV mapping is degenerate → flat depth.
 	float pomDepthWorldAmp = 0.0f;
+	// --pom_shell: the slab amplitude expressed in UV units for THIS triangle
+	// = Material::PomShellUvAmp × (world-per-UV-tile). The march's lateral travel
+	// per unit height drop is this × the tangent-space view direction, so the
+	// UV the march samples and the world height the geometry carries stay
+	// consistent even where texel density varies between faces. Falls back to
+	// ctx.parallaxStrength when the UV mapping is degenerate (w = 0).
+	float pomShellUvAmp = 0.0f;
 
 	uint32_t umask;// = (1 << LogWidth) - 1);
 	uint32_t vmask;// = (1 << LogHeight) - 1);
@@ -879,6 +924,12 @@ struct TileRasterizer {
 		// runs ⟺ the Z store is DEFERRED to the end of the parallax block.
 		const bool pomZ = ctx.pomDepthWrite && (ctx.heightData != nullptr)
 		                  && wantTangent;
+		// --pom_shell (S1b): the rastered surface is the shell LID. Same gate
+		// as pomZ plus the material's shell arm; the dispatcher already forced
+		// pomDepthWrite on for shell faces, so shell ⟹ pomZ.
+		const bool shell = ctx.pomShell && pomZ;
+		// ShellH*RZ across the tile row (only shell faces pay for it).
+		Vec8f p_shz = shell ? v8_from_arith_seq(tile.shz0, dshzdx) : Vec8f(0.0f);
 		Vec8f p_tx = wantTangent ? v8_from_arith_seq(tile.tx0, dtxdx) : Vec8f(0.0f);
 		Vec8f p_ty = wantTangent ? v8_from_arith_seq(tile.ty0, dtydx) : Vec8f(0.0f);
 		Vec8f p_tz = wantTangent ? v8_from_arith_seq(tile.tz0, dtzdx) : Vec8f(0.0f);
@@ -1073,14 +1124,46 @@ struct TileRasterizer {
 						// grazing). Centre at h=0.5 so mid-height = no shift.
 						Vec8f VtT = Vx*Tx + Vy*Ty + Vz*Tz;
 						Vec8f VtB = Vx*Bx + Vy*By + Vz*Bz;
-						Vec8f hc  = (H - Vec8f(0.5f)) * Vec8f(ctx.parallaxStrength);
+						// V·N per lane. Hoisted out of the depth-write block at the
+						// end (which used to compute it) because the SHELL march needs
+						// it for the true-ray direction. Same expression, same value.
+						const Vec8f VtN = Vx*Nx + Vy*Ny + Vz*Nz;
+						// ── shell parametrization (--pom_shell, S1b) ──────────
+						// hEnter = the height the RASTERED surface sits at inside the
+						// slab, interpolated PER PIXEL (1 = lid, 0.5 = a pinned border,
+						// so a tapered lid marches from its true geometric height).
+						// Legacy = the authored plane, 0.5, constant. hStart = where the
+						// march begins: the entry point itself for the shell (the ray
+						// enters through the lid), the field top for the legacy centered
+						// march. rayScale = UV travelled per unit height DROP; the shell
+						// uses the TRUE view ray (÷V·N, capped by --pom_shell_cap)
+						// because offset limiting bounds lateral travel at `strength`
+						// whatever the angle, and grazing lateral travel is exactly what
+						// silhouettes are made of. Its amplitude comes from the GEOMETRY
+						// (Material::PomShellUvAmp × world-per-UV), never from the live
+						// strength flag, so march and lid can't disagree.
+						const Vec8f hEnter = shell ? (p_shz * p_z) : Vec8f(0.5f);
+						const Vec8f hStart = shell ? hEnter : Vec8f(1.0f);
+						const Vec8f invVtN = shell
+						    ? min(Vec8f(1.0f) / max(VtN, Vec8f(1.0f / 64.0f)),
+						          Vec8f(ctx.pomShellCap))
+						    : Vec8f(1.0f);
+						const Vec8f rayScale = shell
+						    ? (Vec8f(ctx.pomShellUvAmp) * invVtN)
+						    : Vec8f(ctx.parallaxStrength);
+						Vec8f hc  = (H - hEnter) * rayScale;
 						uf += VtT * hc;
 						vf += VtB * hc;
 						// --pom_depth_write: crossing height the march landed on
-						// (0.5 = the flat plane; <0.5 recess, >0.5 protrusion).
-						// Stays 0.5 (flat depth) when no march ran on this row
+						// (0.5 = the flat plane; <0.5 recess, >0.5 protrusion; for the
+						// shell, hEnter = the lid it entered through). Stays at the
+						// ENTRY height (flat depth) when no march ran on this row
 						// (rowFar LOD skip) or a lane never bracketed a crossing.
-						Vec8f pomHitH(0.5f);
+						Vec8f pomHitH = hEnter;
+						// --pom_shell: did this lane's ray actually CROSS the height
+						// field inside the slab? Seeded true so a row that skipped the
+						// march entirely (LOD rowFar) is never discarded.
+						Vec8fb pomCrossed = Vec8fb(true);
 						// Tier-2 CONE-STEP POM (--parallax_pom, docs/HEIGHTMAP_POM_PLAN.md):
 						// relaxed cone stepping (Policarpo, GPU Gems 3 ch.18). Advance the
 						// tangent-space view ray by the cone-safe distance c*gap/(c+dlen)
@@ -1103,14 +1186,18 @@ struct TileRasterizer {
 								horizontal_and(p_z >= Vec8f(2.0f * lod));
 							if (!rowFar) {
 							const int   N   = ctx.pomSteps;
-							const Vec8f dU  = VtT * Vec8f(ctx.parallaxStrength);
-							const Vec8f dV  = VtB * Vec8f(ctx.parallaxStrength);
+							const Vec8f dU  = VtT * rayScale;
+							const Vec8f dV  = VtB * rayScale;
 							const Vec8f dlen = sqrt(dU*dU + dV*dV);   // UV per unit rayH (exact)
 							const Vec8f baseU = ssU - VtT * hc;       // un-shifted geometric UV
 							const Vec8f baseV = ssV - VtB * hc;
-							Vec8f curU = baseU + dU * Vec8f(0.5f);    // t=0 <-> rayH=1 (field top)
-							Vec8f curV = baseV + dV * Vec8f(0.5f);
-							Vec8f rayH = Vec8f(1.0f);
+							// Start of the ray: the field top (h=1) for the legacy centered
+							// march; the ENTRY POINT ITSELF for the shell (hStart == hEnter,
+							// so the offset below vanishes and the march begins exactly at
+							// the interpolated lid UV — the per-pixel texture-space entry).
+							Vec8f curU = baseU + dU * (hStart - hEnter);
+							Vec8f curV = baseV + dV * (hStart - hEnter);
+							Vec8f rayH = hStart;
 							const Vec8f coneScale = Vec8f(kPomConeMax * (1.0f / 255.0f) * ctx.pomRelax);
 							// Bracket of the first crossing. abo* = last sample confirmed ABOVE
 							// the surface (init = field top, always above since H<=1); bel* =
@@ -1203,7 +1290,16 @@ struct TileRasterizer {
 							// depth for a lane whose texel fell back to minimal shift
 							// would punch a false near-plateau into the Z relief.
 							if (pomZ)
-								pomHitH = select(found, belH, Vec8f(0.5f));
+								pomHitH = select(found, belH, hEnter);
+							// --pom_shell: only a ray that ran the WHOLE slab without
+							// crossing has genuinely passed under all the stone. A cone
+							// march that simply ran out of steps (rayH still inside the
+							// slab) is UNRESOLVED, not a miss — discarding it would punch
+							// holes wherever the bracket search is slow (grazing rays,
+							// which travel farthest). Unresolved lanes keep the entry UV
+							// (bel* never moved), i.e. they degrade to no-shift.
+							if (shell)
+								pomCrossed = found | (rayH > Vec8f(0.0f));
 							// STEP-3 LOD blend: continuous fade cone->single-shift as view-Z
 							// grows from lodDist (full cone) to 2x lodDist (pure single-shift).
 							// lod==0 -> full cone everywhere (fade=0).
@@ -1211,12 +1307,17 @@ struct TileRasterizer {
 								const Vec8f fade = min(max(
 									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
 									Vec8f(0.0f)), Vec8f(1.0f));
+								// --pom_shell + LOD: a lane faded ALL the way to the
+								// single shift shows the flat lid, so it must never be
+								// discarded (no relief left to make a silhouette out of).
+								if (shell)
+									pomCrossed |= (fade >= Vec8f(1.0f));
 								uf = resU + (ssU - resU) * fade;
 								vf = resV + (ssV - resV) * fade;
 								// Depth fades in lockstep with the UV blend: pure
 								// single-shift (fade=1) writes the flat plane again.
 								if (pomZ)
-									pomHitH += (Vec8f(0.5f) - pomHitH) * fade;
+									pomHitH += (hEnter - pomHitH) * fade;
 							} else {
 								uf = resU;
 								vf = resV;
@@ -1236,20 +1337,25 @@ struct TileRasterizer {
 							if (!rowFar) {
 							const int   N     = ctx.pomSpikeSteps;
 							const float invNf = 1.0f / float(N);
-							const Vec8f dU = VtT * Vec8f(ctx.parallaxStrength);
-							const Vec8f dV = VtB * Vec8f(ctx.parallaxStrength);
+							const Vec8f dU = VtT * rayScale;
+							const Vec8f dV = VtB * rayScale;
 							// base (un-shifted) UV recovered from the single shift.
 							const Vec8f baseU = ssU - VtT * hc;
 							const Vec8f baseV = ssV - VtB * hc;
-							Vec8f curU  = baseU + dU * Vec8f(0.5f);
-							Vec8f curV  = baseV + dV * Vec8f(0.5f);
-							Vec8f rayH  = Vec8f(1.0f);
+							// Legacy: start at the field top (h=1). Shell: start AT the
+							// interpolated entry point on the lid (hStart == hEnter) and
+							// spread the same N steps over the slab below it, so the
+							// sampling density per unit height is unchanged.
+							Vec8f curU  = baseU + dU * (hStart - hEnter);
+							Vec8f curV  = baseV + dV * (hStart - hEnter);
+							Vec8f rayH  = hStart;
+							const Vec8f stepH = hStart * Vec8f(invNf);
 							Vec8f foundU = curU, foundV = curV;
 							Vec8fb found = Vec8fb(false);
 							for (int s = 0; s < N; ++s) {
-								curU -= dU * Vec8f(invNf);
-								curV -= dV * Vec8f(invNf);
-								rayH -= Vec8f(invNf);
+								curU -= dU * stepH;
+								curV -= dV * stepH;
+								rayH -= stepH;
 								Vec8i mu = roundi(curU * ctx.heightUScale);
 								Vec8i mv = roundi(curV * ctx.heightVScale);
 								Vec8i ma = packed_tile_u(mu, ctx.heightLogH, ctx.heightUmaskSwizzled)
@@ -1268,16 +1374,23 @@ struct TileRasterizer {
 								if (pomZ)
 									pomHitH = select(hit, rayH, pomHitH);
 								found |= hit;
+								if (shell)
+									pomCrossed = found;
 							}
 							if (lod > 0.0f) {
 								const Vec8f fade = min(max(
 									(p_z - Vec8f(lod)) * Vec8f(1.0f / lod),
 									Vec8f(0.0f)), Vec8f(1.0f));
+								// --pom_shell + LOD: a lane faded ALL the way to the
+								// single shift shows the flat lid, so it must never be
+								// discarded (no relief left to make a silhouette out of).
+								if (shell)
+									pomCrossed |= (fade >= Vec8f(1.0f));
 								uf = foundU + (ssU - foundU) * fade;
 								vf = foundV + (ssV - foundV) * fade;
 								// Depth fades with the UV blend (flat at fade=1).
 								if (pomZ)
-									pomHitH += (Vec8f(0.5f) - pomHitH) * fade;
+									pomHitH += (hEnter - pomHitH) * fade;
 							} else {
 								uf = foundU;
 								vf = foundV;
@@ -1338,11 +1451,45 @@ struct TileRasterizer {
 						// continuous, so seam pixels agree. Z consumers (SSAO/GTAO,
 						// fog, DoF, quarter-res reconstruction, z-dumps) simply see the
 						// relief — that is the point of the flag.
+						// --pom_shell (S1b): THE SILHOUETTE. Kill every lane whose ray
+						// left the authored patch before crossing the height field. A
+						// downward ray inside a height field always crosses it (h >= 0
+						// everywhere), so a plain "miss" is not what opens silhouettes —
+						// LATERAL EXIT is. The march is a straight line in UV and the
+						// authored UV box is convex, so the FIRST crossing lies inside
+						// the box iff the ray crossed before exiting: one test on the
+						// FINAL uv, no per-step work. The lid covers more screen than the
+						// authored plane (it is offset by A/2 along N), and it is exactly
+						// in that extra band that discarded lanes let the geometry BEHIND
+						// win the pixel — the jagged block-edge see-through the
+						// tessellation bake gets from protruding verts.
+						//
+						// The kill is folded into p_mask HERE, before the deferred Z store
+						// below and before every G-buffer plane store further down (all of
+						// them are p_mask-gated, and the full-row vector-store path is
+						// gated on all_lanes_set, so it self-disables on a partial kill).
+						// Z is left untouched for killed lanes, which is what lets a
+						// FARTHER face rasterized later win them (front-to-back order).
+						if (shell) {
+							Vec8fb keep = pomCrossed;
+							if (ctx.pomShellDomain) {
+								keep &= (uf >= Vec8f(ctx.shellUMin))
+								      & (uf <= Vec8f(ctx.shellUMax))
+								      & (vf >= Vec8f(ctx.shellVMin))
+								      & (vf <= Vec8f(ctx.shellVMax));
+							}
+							p_mask &= Vec8ib(_mm256_castps_si256(__m256(keep)));
+						}
 						if (pomZ) {
-							const Vec8f VtN = Vx*Nx + Vy*Ny + Vz*Nz;
-							const Vec8f dz  = (pomHitH - Vec8f(0.5f))
+							// Shell depth uses the TRUE-ray form: the hit sits Δh·A below
+							// the entry along the view ray, so Δz = Δh·A·Vz/(V·N) with the
+							// same capped 1/(V·N) the march travelled with — depth and
+							// texels stay consistent, and the cap bounds |Δz| ≤ A·cap.
+							const Vec8f dz  = shell
+							    ? ((pomHitH - hEnter) * Vec8f(pomDepthWorldAmp) * Vz * invVtN)
+							    : ((pomHitH - Vec8f(0.5f))
 							                * Vec8f(pomDepthWorldAmp)
-							                * (Vz + Nz * (Vec8f(1.0f) - VtN));
+							                * (Vz + Nz * (Vec8f(1.0f) - VtN)));
 							// Near guard: a protrusion written from a wall the camera
 							// is nearly touching must not cross z<=0 (encode wrap /
 							// negative-z reconstruction downstream). Clamp the DEPTH,
@@ -1596,6 +1743,9 @@ struct TileRasterizer {
 				p_obBZ += Vec8f(dobBdy);
 				p_obCZ += Vec8f(dobCdy);
 			}
+			if (shell) {
+				p_shz += Vec8f(dshzdy);
+			}
 
 			if constexpr (!Inside) {
 				p_a += Vec8i(tile.dady);
@@ -1727,6 +1877,7 @@ struct TileRasterizer {
 						.tz0 = v1.TTangent.z + dx * dtzdx + dy * dtzdy,
 						.obBZ0 = v1.OrigBaryB * v1.RZ + dx * dobBdx + dy * dobBdy,
 						.obCZ0 = v1.OrigBaryC * v1.RZ + dx * dobCdx + dy * dobCdy,
+						.shz0  = v1.ShellH * v1.RZ + dx * dshzdx + dy * dshzdy,
 					};
 					const bool useInsideTpl = fds::FeatureFlags::rast_inside_template();
 					if (tile_inside && useInsideTpl) apply_exact<true>(tile);
@@ -1904,9 +2055,22 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 	// for this face — the depth written must be the MARCHED crossing, and
 	// single-shift-only faces have no crossing to write. apply_exact keys its
 	// deferred Z store off ctx.pomDepthWrite alone (plus its own tangent gate).
-	const bool pomDepthWrite = fds::FeatureFlags::pom_depth_write()
-	    && (heightData != nullptr)
+	// --pom_shell (S1b): this face is part of a shell only if the geometry was
+	// actually built as one (Material::PomShellUvAmp > 0, stamped by
+	// PomShell_Build at scene init) AND a march is configured. The shell needs
+	// the marched depth by construction (the lid's own plane depth is A/2 in
+	// front of everything), so it ARMS pom_depth_write implicitly.
+	const bool marchArmed = (heightData != nullptr)
 	    && (naiveSteps > 0 || (coneSteps > 0 && coneData != nullptr));
+	const bool pomShellFace = fds::FeatureFlags::pom_shell() && marchArmed
+	    && (F->Txtr->PomShellUvAmp > 0.0f);
+	const bool pomDepthWrite = (fds::FeatureFlags::pom_depth_write() || pomShellFace)
+	    && marchArmed;
+	// Patch domain for the lateral-exit test (see Face::PomShellGroup).
+	const float *pomShellDom = nullptr;
+	if (pomShellFace && F->PomShellGroup != 0 && F->Txtr->PomShellDomains
+	    && F->PomShellGroup <= F->Txtr->PomShellDomainCount)
+		pomShellDom = F->Txtr->PomShellDomains + 4 * (F->PomShellGroup - 1);
 	// Per-pixel tangent (TBN) is needed by: the deferred kernel's normal-map
 	// path (reads gb.tangent only when Mat->NormalMap), AND the rasterizer's
 	// parallax UV offset (needs tangent-space view dir). Skip the tangent
@@ -1950,6 +2114,19 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		.pomRefine = fds::FeatureFlags::parallax_pom_refine(),
 		.pomRelax = fds::FeatureFlags::parallax_pom_relax(),
 		.pomDepthWrite = pomDepthWrite,
+		.pomShell = pomShellFace,
+		.pomShellUvAmp = pomShellFace ? F->Txtr->PomShellUvAmp : 0.0f,
+		.pomShellCap = fds::FeatureFlags::pom_shell_cap(),
+		.pomShellDomain = fds::FeatureFlags::pom_shell_domain(),
+		// The lateral-exit domain: the PATCH's UV box (Face::PomShellGroup ->
+		// Material::PomShellDomains) when PomShell_Build grouped this face,
+		// else the authored face's own box. Either way it comes off the Face,
+		// which the frustum clipper and the mipmap poly-split pass through
+		// unchanged — so it stays the authored domain at every subdivision.
+		.shellUMin = pomShellDom ? pomShellDom[0] : (pomShellFace ? std::min({F->U1, F->U2, F->U3}) : 0.0f),
+		.shellUMax = pomShellDom ? pomShellDom[1] : (pomShellFace ? std::max({F->U1, F->U2, F->U3}) : 0.0f),
+		.shellVMin = pomShellDom ? pomShellDom[2] : (pomShellFace ? std::min({F->V1, F->V2, F->V3}) : 0.0f),
+		.shellVMax = pomShellDom ? pomShellDom[3] : (pomShellFace ? std::max({F->V1, F->V2, F->V3}) : 0.0f),
 		.pomViz = fds::FeatureFlags::pom_viz(),
 		.pomMipViz = fds::FeatureFlags::pom_mip_viz(),
 		.heightLogW = heightLogW,
@@ -2008,6 +2185,13 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 			da[7] = v2.TTangent.y - v1.TTangent.y; db[7] = v3.TTangent.y - v1.TTangent.y;
 			da[8] = v2.TTangent.z - v1.TTangent.z; db[8] = v3.TTangent.z - v1.TTangent.z;
 		}
+		if (ctx.pomShell) {
+			// S1b shell entry height, perspective-correct like UZ/VZ: transport
+			// ShellH*RZ linearly in screen space, divide by per-pixel RZ.
+			const float shZ1 = v1.ShellH * v1.RZ;
+			da[11] = v2.ShellH * v2.RZ - shZ1;
+			db[11] = v3.ShellH * v3.RZ - shZ1;
+		}
 		if (faceWantLm) {
 			// OrigBary*RZ (perspective-correct transport). Stamped at scene
 			// init (A→(0,0), B→(1,0), C→(0,1)); the kernel divides by per-pixel
@@ -2039,6 +2223,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		r.dtzdx = gdx[8];  r.dtzdy = gdy[8];
 		r.dobBdx = gdx[9];  r.dobBdy = gdy[9];
 		r.dobCdx = gdx[10]; r.dobCdy = gdy[10];
+		r.dshzdx = gdx[11]; r.dshzdy = gdy[11];
 
 		r.umask = (1 << r.LogWidth) - 1;
 		r.vmask = (1 << r.LogHeight) - 1;
@@ -2051,7 +2236,7 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 		// lengths of one UV tile along each axis; geometric mean because the
 		// march applies one strength to both axes. Degenerate mapping (zero UV
 		// area, behind-camera junk) → w = 0 → flat depth for this triangle.
-		if (ctx.pomDepthWrite) {
+		if (ctx.pomDepthWrite || ctx.pomShell) {
 			float w = 0.0f;
 			if (v1.RZ > 0.0f && v2.RZ > 0.0f && v3.RZ > 0.0f) {
 				const float z1 = 1.0f / v1.RZ, z2 = 1.0f / v2.RZ, z3 = 1.0f / v3.RZ;
@@ -2077,7 +2262,40 @@ inline void MekaleleImpl(Face* F, Vertex** V, dword numVerts, dword miplevel,
 					w = std::sqrt(std::sqrt(t2 * b2));
 				}
 			}
-			r.pomDepthWorldAmp = ctx.parallaxStrength * w;
+			// Shell faces take the amplitude from the GEOMETRY (the UV amp the
+			// lid was built with) instead of the live strength flag, so the
+			// depth the march writes is exactly the slab the lid stands on and
+			// a live --parallax_strength change can never desync the march from
+			// the built geometry.
+			r.pomDepthWorldAmp = (ctx.pomShell ? ctx.pomShellUvAmp
+			                                   : ctx.parallaxStrength) * w;
+			// --pom_shell_stats: w is the one term that can blow up here (a
+			// near-degenerate post-clip sliver divides by a vanishing UV
+			// determinant), and it scales BOTH the shell depth and the march,
+			// so this is the first thing to check when either looks unbounded.
+			if (ctx.pomShell && fds::FeatureFlags::pom_shell_stats()) {
+				static std::atomic<int> shown{0};
+				static std::atomic<uint32_t> wLo{0x7f7fffffu}, wHi{0};
+				const uint32_t wb = *reinterpret_cast<const uint32_t*>(&w);
+				uint32_t prev = wLo.load(std::memory_order_relaxed);
+				while (wb < prev && !wLo.compare_exchange_weak(prev, wb)) {}
+				prev = wHi.load(std::memory_order_relaxed);
+				while (wb > prev && !wHi.compare_exchange_weak(prev, wb)) {}
+				const int n = shown.fetch_add(1, std::memory_order_relaxed);
+				if ((n < 24) || (n % 20000 == 0)) {
+					const uint32_t loB = wLo.load(), hiB = wHi.load();
+					const float lo = *reinterpret_cast<const float*>(&loB);
+					const float hi = *reinterpret_cast<const float*>(&hiB);
+					std::fprintf(stderr, "[POM-SHELL-STATS] #%d mat=%s w=%.4f A=%.4f "
+						"(running w %.4f..%.4f) dom u[%.3f..%.3f] v[%.3f..%.3f] "
+						"screenArea=%.0f\n", n,
+						(F->Txtr && F->Txtr->Name) ? F->Txtr->Name : "?",
+						(double)w, (double)r.pomDepthWorldAmp, (double)lo, (double)hi,
+						(double)ctx.shellUMin, (double)ctx.shellUMax,
+						(double)ctx.shellVMin, (double)ctx.shellVMax,
+						(double)std::fabs(det) * 0.5);
+				}
+			}
 		}
 
 		r.rasterize_triangle(v1, v2, v3);

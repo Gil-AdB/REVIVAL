@@ -86,6 +86,16 @@ struct Face
 	// distinct clusters greets needs without inflating matTable past
 	// the 8-bit matID cap).
 	uint16_t         ShadowMatID = 0;
+	// S1b SHELL POM (--pom_shell): 1-based index into
+	// Material::PomShellDomains — the UV bounding box of the CONTIGUOUS
+	// COPLANAR PATCH this face belongs to, not of the authored quad. The
+	// march's lateral-exit discard tests against that box, so a ray crossing
+	// into a sibling patch of the same wall (where the height field simply
+	// continues) is NOT a silhouette, while a ray leaving the wall entirely
+	// is. Measured on greets: authored wall quads are only ~0.4-2.1 UV tiles
+	// wide, so per-quad domains discarded mid-wall everywhere. 0 = ungrouped
+	// (the rasterizer falls back to this face's own U1..V3 box).
+	uint16_t         PomShellGroup = 0;
 	// Planar-mirror identity (DEMO/GreetsMirror.cpp). Per Mirror, a unique
 	// 1..255 id assigned at scene init. Two distinct roles depending on
 	// the face's purpose in the mirror system:

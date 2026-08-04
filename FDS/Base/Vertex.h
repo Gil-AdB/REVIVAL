@@ -70,6 +70,17 @@ struct  Vertex
 	// (same perspective-correct machinery as UV) to recover the lightmap
 	// atlas address. Read-only outside of scene init + clipper.
 	float			OrigBaryB = 0.0f, OrigBaryC = 0.0f;
+	// S1b SHELL POM (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md): this
+	// vertex's height inside the relief SLAB, in units where 0 = the slab
+	// floor (authored plane − amp/2), 0.5 = the authored plane, 1 = the LID
+	// (authored plane + amp/2). PomShell_Build stamps 1.0 on the verts it
+	// pushes out to the lid and leaves 0.5 on pinned/tapered ones; the two
+	// clippers interpolate it perspective-correctly (same treatment as
+	// OrigBary) and the rasterizer interpolates it per pixel to get the
+	// march's ENTRY height. Only read for faces whose material carries a
+	// PomShellUvAmp, so 0.5 (= "on the authored plane", no offset) is the safe
+	// default for every other vertex in the engine.
+	float			ShellH = 0.5f;
 
 //	dword			align16[3]; // this structure requires 16-byte alignment
 	//  Word           Faces,FRem; // Faces = How many faces share that perticular

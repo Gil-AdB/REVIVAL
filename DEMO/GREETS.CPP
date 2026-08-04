@@ -1674,6 +1674,39 @@ void Initialize_Greets()
 		DisplaceStoneSmoothNormals(GreetSc, "floor", sm);
 	}
 
+	// S1b PER-PIXEL SHELL (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md):
+	// push the stone out to the LID of a relief slab so the POM march has
+	// something to enter and can DISCARD rays that leave the patch (= real
+	// block-edge silhouettes with the geometry behind showing through). Runs
+	// here because vertex normals are final (MakeFacesIndependentByAngle above
+	// split the creased walls per face, so each wall's verts are its own) and
+	// the Piramid chunk split further down copies Vertex/Face structs wholesale.
+	// The campaign's per-pixel mode is --no-greets_displace (the march carries
+	// the FULL height map); combined with --greets_displace the shell would sit
+	// on the already-displaced surface with the RESIDUAL map as its input, which
+	// is a different (unvalidated) configuration — warn but allow.
+	if (fds::FeatureFlags::pom_shell()) {
+		if (fds::FeatureFlags::greets_displace())
+			std::fprintf(stderr, "[POM-SHELL] WARNING: --pom_shell together with "
+				"--greets_displace — the shell is being built on the DISPLACED "
+				"surface and marches the RESIDUAL map. The campaign's per-pixel "
+				"mode is --no-greets_displace.\n");
+		const bool pin = fds::FeatureFlags::pom_shell_pin();
+		for (const char *nm : { "rooms", "floor" }) {
+			Material *M = nullptr;
+			for (Material *m = MatLib; m; m = m->Next)
+				if (m->RelScene == GreetSc && m->Name && !std::strcmp(m->Name, nm)) { M = m; break; }
+			if (!M || !M->HeightMap) {
+				std::fprintf(stderr, "[POM-SHELL] '%s': no height map — no shell "
+					"(needs --greets_stone_tex + --parallax)\n", nm);
+				continue;
+			}
+			// The amplitude the march runs at, consumed once here.
+			PomShell_Build(GreetSc, nm,
+			               fds::FeatureFlags::parallax_strength() * M->ParallaxScale, pin);
+		}
+	}
+
 	// S1 offscreen proxy: NOW that the displace + face-independence + smooth-weld
 	// passes are done, (1) tag every displaced rooms/floor face main-only so the
 	// offscreen/bake passes skip the ~81k detail, and (2) build the flat proxy

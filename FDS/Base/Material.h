@@ -83,6 +83,26 @@ struct Material
     // advance without hitting the height field. Offline-baked once at material
     // setup (MakeConeMap) only when --parallax_pom is on; null = no cone march.
     Texture             * ConeMap                = nullptr;
+    // S1b SHELL POM (--pom_shell, docs/S1_PIXEL_DISPLACEMENT_PLAN.md): the
+    // relief slab's amplitude for the full 0..1 height range, in UV UNITS
+    // (= the effective parallax strength the shell was BUILT with, i.e.
+    // parallax_strength × ParallaxScale at build time). > 0 only after
+    // PomShell_Build has pushed this material's geometry out to the lid — each
+    // vertex by (amp × that face's world-per-UV-tile)/2 along its normal, with
+    // Vertex::ShellH stamped to the height it landed at. UV units (not world)
+    // makes it scale- and texel-density-independent: the rasterizer multiplies
+    // by the SAME per-triangle world-per-UV solve the depth write uses, so the
+    // march, the depth and the lid geometry cannot disagree, and the live
+    // --parallax_strength can no longer desync from the built geometry
+    // (strength is consumed once, at build time). 0 = not a shell material →
+    // the legacy centered march runs.
+    float                 PomShellUvAmp          = 0.0f;
+    // S1b: per-patch UV domain table for this material, 4 floats per patch
+    // (uMin, uMax, vMin, vMax), indexed by Face::PomShellGroup - 1. Built by
+    // PomShell_Build (union-find over edge-adjacent coplanar target faces);
+    // null = no table, faces fall back to their own UV box.
+    float               * PomShellDomains        = nullptr;
+    unsigned              PomShellDomainCount    = 0;
     // Applied albedo tint (per-channel multipliers, 1 = untinted). The tint
     // mutates the shared Texture pixels; these echo the last applied values
     // for the editor UI + sidecar round-trip (see MaterialImport tintR/G/B).
