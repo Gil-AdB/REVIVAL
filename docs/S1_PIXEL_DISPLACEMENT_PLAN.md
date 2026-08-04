@@ -1,5 +1,16 @@
 # S1 — Per-Pixel Shell Displacement Campaign Plan
 
+> **⚠ READ `docs/S1_DISCREPANCY_INVENTORY.md` FIRST (2026-08-04, commit 5c72bb4).**
+> Every acceptance number in THIS file was measured against `--greets_displace`.
+> That is invalid — the tessellation bake is an approximation with its own
+> measured errors (at t=6097 one of its triangles covers a 600×400 wall region
+> carrying **zero** relief depth). The inventory re-measures both paths against a
+> converged brute-force reference (`--pom_ref_march`, default OFF), classifies
+> every differing pixel by its OWNING FACE (`--face_id_dump`), and separates
+> moved-geometry error from march error with a zero-lid probe
+> (`--pom_shell_lid_probe`). Notably it does **not** reproduce this file's
+> "8 801 px" residual-interpenetration figure (independent count: 17 326 px).
+
 Status: ACTIVE campaign plan, written 2026-08-04 as a handoff for a long-running
 implementation agent. Read this whole file before touching code. The research
 basis is `docs/DISPLACEMENT_RESEARCH.md` (commit 07b72c7) — its §S1 sketch is
