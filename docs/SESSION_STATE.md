@@ -1,5 +1,32 @@
 # SESSION STATE — glass / editor / authoring campaign (updated 2026-07-11)
 
+> **2026-08-05 — S1d-1 SEAM CENSUS DONE, and it OVERTURNS the S1d plan's
+> premise.** Read `docs/S1D_CLOSED_SHELL_PLAN.md` §S1d-1. Two new flags,
+> **both default OFF, byte-null**: `--pom_seam_census` (patch-boundary topology
+> + classification, init-time print) and `--pom_seam_viz` (class-coloured
+> boundary overlay).
+> - Of the **800 513 px** the march cannot answer across all 13 review poses,
+>   **31 (0.004 %) sit at a COPLANAR seam.** 72.9 % sit at a CONVEX angled ridge,
+>   15.1 % at a concave fold, 11.9 % at a true boundary. Of the 231 064 px that
+>   actually go BLACK: 0.013 % coplanar, 66.8 % convex ridge, 33.2 % concave.
+> - **Coplanar continuation is already shipping** as `--pom_shell_merge_uv`'s
+>   sibling boxes (measured: carries 70 585 px, up to 67.6 % of the would-be
+>   population at the mirror poses) and the coplanar UV transform is the
+>   **IDENTITY** (worst disagreement 1e-6 UV). So S1d's option (A) as scoped is
+>   already done and worth 31 more pixels.
+> - **(B) side faces dominate**: 84.9 % of clamped / 66.8 % of void. The user's
+>   "full-height black gash on the right wall" at t=5743 is ONE convex ridge
+>   (`rooms` g=9, 27° fold) owning 482 171 of the 800 513 px.
+> - TRUE boundaries void ZERO under a discard — there the discard is already
+>   right and the recess arm's CLAMP is the bug. Cheapest available win.
+> - Angled continuation is the expensive path: 27 fold angles, 71 distinct
+>   (fold, scale, mirror) transforms, **41.8 % MIRRORED charts**, and 5.4 % of
+>   its targets point at the unshelled ceiling. One hop suffices (p99 = 232
+>   texels past the boundary).
+> - Gates: render_gate 3/3, city `37e62845`, fountain `51fff7cd`, greets
+>   shell/tess/flat t=6097 all byte-exact, wasm links. Crops:
+>   `docs/img/s1d_seams/`.
+
 > **2026-08-05 — S1 P2-A: `--pom_recess_only` IS IN, default OFF.** Read
 > `docs/S1_DISCREPANCY_INVENTORY.md` §10. The user's BLACK HOLES (full-height
 > gashes between wall panels, black bar in the mirror) are the LID model's

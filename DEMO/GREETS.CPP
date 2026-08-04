@@ -3783,6 +3783,12 @@ struct GreetsScene : SceneDriver {
 		if (fds::FeatureFlags::displace_viz())
 			fds::DisplaceViz_DrawOverlay(GreetSc);
 
+		// S1d-1 patch-boundary seam classification (--pom_seam_viz): every
+		// classified boundary edge, coloured by class, depth-tested. No-op
+		// (byte-null) unless --pom_seam_viz > 0.
+		if (fds::FeatureFlags::pom_seam_viz() > 0)
+			fds::PomSeamViz_DrawOverlay(GreetSc);
+
 		// PROFILER: FLIP phase. also contains display of runtime stats
 		prof.leave(PROF_RNDR);
 

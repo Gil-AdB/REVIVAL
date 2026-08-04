@@ -595,4 +595,79 @@ void DisplaceViz_DrawOverlay(Scene* sc) {
     }
 }
 
+// ── --pom_seam_viz overlay (S1d-1) ────────────────────────────────────────
+namespace {
+struct SeamSeg { Vector a, b; int cls; };
+std::vector<SeamSeg> g_seamSegs;
+// Class colours. Deliberately saturated and far apart in hue — the point of
+// this overlay is that the classification can be eyeballed, not trusted.
+inline uint32_t seamColor(int cls) {
+    switch (cls) {
+    case 0:  return 0x0000FF40u;   // COPLANAR      — green
+    case 1:  return 0x00FF9000u;   // ANGLED_IN     — orange
+    case 2:  return 0x00FF00FFu;   // ANGLED_OUT    — magenta
+    default: return 0x00FF2020u;   // TRUE_BOUNDARY — red
+    }
+}
+}  // namespace
+
+void PomSeamViz_Record(const Vector& aLocal, const Vector& bLocal, int cls) {
+    if (g_seamSegs.size() > 200000) return;    // debug guard
+    g_seamSegs.push_back({ aLocal, bLocal, cls });
+}
+
+void PomSeamViz_DrawOverlay(Scene* sc) {
+    if (!sc || !View || !VPage || XRes <= 0 || YRes <= 0) return;
+    if (g_offscreenViewDepth > 0) return;
+    const int mode = FeatureFlags::pom_seam_viz();
+    if (mode <= 0) return;
+    if (g_seamSegs.empty()) {
+        static bool warned = false;
+        if (!warned) { warned = true;
+            std::fprintf(stderr, "[POM-SEAM-VIZ] nothing recorded: --pom_seam_viz "
+                "needs --pom_shell (PomShell_Build is what builds the patches). "
+                "Run it with --pom_recess_only so the topology is the authored one.\n"); }
+        return;
+    }
+    // The seams were recorded in the Piramid mesh's MODEL space, before the
+    // chunk split; every chunk inherits that object's transform, so one lookup
+    // places all of them.
+    const TriMesh* ref = nullptr;
+    for (Object* Obj = sc->ObjectHead; Obj; Obj = Obj->Next) {
+        if (Obj->Type != Obj_TriMesh || !Obj->Name || !Obj->Data) continue;
+        if (std::strstr(Obj->Name, "Piramid")) { ref = (const TriMesh*)Obj->Data; break; }
+    }
+    if (!ref) return;
+    const Matrix& VM = View->Mat;
+    const Vector  P  = View->ISource;
+    const float   nearZ = sc->NZP > 0.01f ? sc->NZP : 0.01f;
+    static bool once = false;
+    if (!once) { once = true;
+        std::fprintf(stderr, "[POM-SEAM-VIZ] drawing %zu classified patch-boundary "
+            "edges (mode %d): GREEN=coplanar continuation, ORANGE=angled-in "
+            "(enter the neighbour), MAGENTA=angled-out (true silhouette), "
+            "RED=true boundary (side faces belong here)\n", g_seamSegs.size(), mode); }
+    for (const SeamSeg& s : g_seamSegs) {
+        if (mode == 2 && s.cls != 0) continue;
+        if (mode == 3 && !(s.cls == 1 || s.cls == 2)) continue;
+        if (mode == 4 && s.cls != 3) continue;
+        const Vector* lp[2] = { &s.a, &s.b };
+        int sx[2], sy[2]; float vz[2]; bool ok[2];
+        for (int k = 0; k < 2; ++k) {
+            Vector w; MatrixXVector(ref->RotMat, lp[k], &w);
+            w.x += ref->IPos.x; w.y += ref->IPos.y; w.z += ref->IPos.z;
+            Vector dv = { w.x - P.x, w.y - P.y, w.z - P.z };
+            Vector sv; MatrixXVector(VM, &dv, &sv);
+            if (sv.z > nearZ) {
+                sx[k] = int(CntrEX + FOVX * sv.x / sv.z + 0.5f);
+                sy[k] = int(CntrEY - FOVY * sv.y / sv.z + 0.5f);
+                ok[k] = true;
+            } else ok[k] = false;
+            vz[k] = sv.z;
+        }
+        if (ok[0] && ok[1])
+            drawLineZ(sx[0], sy[0], vz[0], sx[1], sy[1], vz[1], seamColor(s.cls));
+    }
+}
+
 }  // namespace fds

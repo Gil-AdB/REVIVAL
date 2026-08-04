@@ -132,6 +132,19 @@ void DisplaceViz_RecordError(const Material* M, const Vector& centroidLocal, flo
 // but --greets_displace off.
 void DisplaceViz_DrawOverlay(Scene* sc);
 
+// ── S1d-1 SEAM VIZ (--pom_seam_viz, docs/S1D_CLOSED_SHELL_PLAN.md) ──────────
+// PomShell_Build's seam census records every classified patch-boundary edge
+// here (model-space endpoints of the Piramid mesh, authored positions), and the
+// overlay draws them over the final frame, depth-tested against the frame's
+// opaque Z exactly like DisplaceViz's wireframe. Colour = class:
+//   GREEN   coplanar continuation (the surface carries on; a hole here is wrong)
+//   ORANGE  angled-in  (concave fold — the ray should enter the neighbour)
+//   MAGENTA angled-out (convex fold — exit is a TRUE silhouette)
+//   RED     true boundary (nothing continues — where side faces belong)
+// Both no-op unless --pom_seam_viz > 0, so the flag-off path is byte-null.
+void PomSeamViz_Record(const Vector& aLocal, const Vector& bLocal, int cls);
+void PomSeamViz_DrawOverlay(Scene* sc);
+
 }  // namespace fds
 
 #endif  // FDS_RENDER_WORLD_AABB_H_INCLUDED

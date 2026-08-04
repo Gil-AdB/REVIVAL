@@ -3895,6 +3895,121 @@ void DisplaceStoneSmoothNormals(Scene *Sc, const char *matName, float smoothAngl
 // so the original map must stay installed).
 // Caller owns the returned Texture; re-run MakeConeMap on it when cone POM is
 // active (the cone geometry changed with the heights).
+// ── S1d-1 PATCH-BOUNDARY TOPOLOGY + SEAM CLASSIFICATION ─────────────────────
+// (--pom_seam_census, DIAGNOSTIC, default OFF, docs/S1D_CLOSED_SHELL_PLAN.md)
+//
+// The march has no valid answer once a ray leaves its patch's UV domain: killing
+// it gives holes, clamping gives grazing smears, and both are the SAME pixels.
+// The literature's answer is a CLOSED shell where a ray exits only at a true
+// silhouette. Which of the two repairs — cross-patch march continuation (A) or
+// side faces at true boundaries (B) — is worth building depends on what the
+// patch boundaries actually ARE, and nobody had counted them. This is that
+// count. It changes no pixel: it only reads the mesh and prints.
+//
+// Everything here keys on POSITION (quantized to 1e-4 world), never on face
+// index: face indices are not comparable across arms (the Piramid chunk split
+// re-bins them) and MakeFacesIndependentByAngle has already duplicated the
+// vertex OBJECTS at every crease, so pointer identity is not adjacency either.
+// It must therefore run with the lid offset ZERO (--pom_recess_only or
+// --pom_shell_lid_probe): a non-zero offset moves the two copies of a corner
+// vertex along DIFFERENT smooth normals and position coincidence — the whole
+// basis of the topology — is gone. PomShell_Build warns when that is violated.
+namespace {
+
+struct SeamFace {
+	TriMesh        *T   = nullptr;
+	int32_t         fi  = 0;
+	const Material *M   = nullptr;
+	Vector          P[3];              // AUTHORED positions (captured pre-move)
+	float           U[3] = {0,0,0}, V[3] = {0,0,0};
+	Vector          N;                 // authored plane normal
+	float           d   = 0.0f;        // authored plane constant (N·P + d = 0)
+	Vector          dPdu, dPdv;        // chart basis (0 length ⇒ degenerate chart)
+	bool            chartOk = false;
+	Vector          bbLo, bbHi;        // AABB, so the outward probe can reject fast
+};
+
+struct SeamEdgeKey {
+	long long a, b;
+	bool operator<(const SeamEdgeKey &o) const { return a != o.a ? a < o.a : b < o.b; }
+};
+
+enum SeamClass {
+	SC_COPLANAR = 0,    // the surface carries on in the same plane — a hole here is always wrong
+	SC_ANGLED_IN,       // concave fold: the neighbouring surface is what the ray runs into
+	SC_ANGLED_OUT,      // convex fold: the surface turns away — exit is a TRUE silhouette
+	SC_TRUE,            // nothing continues — the free edge where side faces belong
+	SC_N
+};
+static const char *SeamClassName(int c) {
+	switch (c) {
+	case SC_COPLANAR:   return "COPLANAR";
+	case SC_ANGLED_IN:  return "ANGLED_IN";
+	case SC_ANGLED_OUT: return "ANGLED_OUT";
+	default:            return "TRUE_BOUNDARY";
+	}
+}
+
+// Solve a face's UV chart: P(u,v) = P0 + dPdu·(u−U1) + dPdv·(v−V1). Same Lengyel
+// inversion the amplitude census and the shell's own density solve use.
+static bool SeamChart(SeamFace &f) {
+	const float du1 = f.U[1] - f.U[0], dv1 = f.V[1] - f.V[0];
+	const float du2 = f.U[2] - f.U[0], dv2 = f.V[2] - f.V[0];
+	const float det = du1 * dv2 - du2 * dv1;
+	if (std::fabs(det) < 1e-12f) return false;
+	const float inv = 1.0f / det;
+	const Vector e1 = { f.P[1].x-f.P[0].x, f.P[1].y-f.P[0].y, f.P[1].z-f.P[0].z };
+	const Vector e2 = { f.P[2].x-f.P[0].x, f.P[2].y-f.P[0].y, f.P[2].z-f.P[0].z };
+	f.dPdu = { (e1.x*dv2 - e2.x*dv1)*inv, (e1.y*dv2 - e2.y*dv1)*inv, (e1.z*dv2 - e2.z*dv1)*inv };
+	f.dPdv = { (e2.x*du1 - e1.x*du2)*inv, (e2.y*du1 - e1.y*du2)*inv, (e2.z*du1 - e1.z*du2)*inv };
+	return true;
+}
+
+// Inverse chart: world point (assumed on/near the face's plane) → (u,v).
+static void SeamUVofPoint(const SeamFace &f, const Vector &x, float &u, float &v) {
+	const Vector r = { x.x - f.P[0].x, x.y - f.P[0].y, x.z - f.P[0].z };
+	const float a = f.dPdu.x*f.dPdu.x + f.dPdu.y*f.dPdu.y + f.dPdu.z*f.dPdu.z;
+	const float b = f.dPdu.x*f.dPdv.x + f.dPdu.y*f.dPdv.y + f.dPdu.z*f.dPdv.z;
+	const float c = f.dPdv.x*f.dPdv.x + f.dPdv.y*f.dPdv.y + f.dPdv.z*f.dPdv.z;
+	const float p = f.dPdu.x*r.x + f.dPdu.y*r.y + f.dPdu.z*r.z;
+	const float q = f.dPdv.x*r.x + f.dPdv.y*r.y + f.dPdv.z*r.z;
+	const float det = a*c - b*b;
+	if (std::fabs(det) < 1e-20f) { u = f.U[0]; v = f.V[0]; return; }
+	u = f.U[0] + ( c*p - b*q) / det;
+	v = f.V[0] + (-b*p + a*q) / det;
+}
+
+static Vector SeamCentroid(const SeamFace &f) {
+	return { (f.P[0].x+f.P[1].x+f.P[2].x)/3.0f,
+	         (f.P[0].y+f.P[1].y+f.P[2].y)/3.0f,
+	         (f.P[0].z+f.P[1].z+f.P[2].z)/3.0f };
+}
+
+// Point-in-triangle within tol of the face's plane (the outward probe's test).
+static bool SeamPointOnFace(const SeamFace &f, const Vector &Q, float planeTol) {
+	const float pd = f.N.x*Q.x + f.N.y*Q.y + f.N.z*Q.z + f.d;
+	if (std::fabs(pd) > planeTol) return false;
+	// Project out the plane distance, then barycentric.
+	const Vector X = { Q.x - f.N.x*pd, Q.y - f.N.y*pd, Q.z - f.N.z*pd };
+	const Vector v0 = { f.P[1].x-f.P[0].x, f.P[1].y-f.P[0].y, f.P[1].z-f.P[0].z };
+	const Vector v1 = { f.P[2].x-f.P[0].x, f.P[2].y-f.P[0].y, f.P[2].z-f.P[0].z };
+	const Vector v2 = { X.x-f.P[0].x, X.y-f.P[0].y, X.z-f.P[0].z };
+	const float d00 = v0.x*v0.x+v0.y*v0.y+v0.z*v0.z;
+	const float d01 = v0.x*v1.x+v0.y*v1.y+v0.z*v1.z;
+	const float d11 = v1.x*v1.x+v1.y*v1.y+v1.z*v1.z;
+	const float d20 = v2.x*v0.x+v2.y*v0.y+v2.z*v0.z;
+	const float d21 = v2.x*v1.x+v2.y*v1.y+v2.z*v1.z;
+	const float den = d00*d11 - d01*d01;
+	if (std::fabs(den) < 1e-20f) return false;
+	const float bv = (d11*d20 - d01*d21) / den;
+	const float bw = (d00*d21 - d01*d20) / den;
+	const float bu = 1.0f - bv - bw;
+	const float e = -1e-3f;
+	return bu >= e && bv >= e && bw >= e;
+}
+
+}  // namespace
+
 // ── S1b POM SHELL builder (docs/S1_PIXEL_DISPLACEMENT_PLAN.md) ──────────────
 // Turn matName's flat faces into the LID of a relief slab: push every vertex
 // they use OUT along its normal by half the relief amplitude and stamp
@@ -3979,6 +4094,14 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 	const bool recessOnly = fds::FeatureFlags::pom_recess_only();
 	const bool censusPrint = fds::FeatureFlags::pom_shell_census();
 	const bool census = censusPrint || worldAmpMode;      // fill the table
+	// --pom_seam_census / --pom_seam_viz (S1d-1): snapshot EVERY face in the
+	// scene, authored positions and all, so the boundary classification below
+	// runs on the mesh as authored. Captured here for the same reason the
+	// amplitude census is: the vertex move further down is what would destroy it.
+	const bool seamCensus = fds::FeatureFlags::pom_seam_census()
+	                     || fds::FeatureFlags::pom_seam_viz() > 0;
+	std::vector<SeamFace> seamAll;
+	std::map<SeamEdgeKey, std::vector<int>> seamEdges;
 	struct CensusFace { float wu, wv, w, area; };
 	std::vector<CensusFace> cenF;                       // parallel to refs
 	std::map<std::pair<const TriMesh*, int32_t>, int> refIdx;
@@ -4031,6 +4154,40 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 					long long ka = qpos(*pv[e]), kb = qpos(*pv[(e + 1) % 3]);
 					if (ka > kb) std::swap(ka, kb);
 					edges[{ ka, kb }].push_back(id);
+				}
+			}
+		}
+		// S1d-1: the same walk, over EVERY face of every mesh (not just this
+		// material's), because a patch boundary's neighbour is usually a
+		// DIFFERENT surface — the ceiling, the floor, a column — and the
+		// classification has to see it. Positions are still authored here.
+		if (seamCensus) {
+			for (TriMesh *T = Sc->TriMeshHead; T; T = T->Next) {
+				if (T->FIndex == 0 || !T->Faces) continue;
+				for (int32_t i = 0; i < T->FIndex; ++i) {
+					Face &F = T->Faces[i];
+					if (!F.A || !F.B || !F.C) continue;
+					SeamFace sf;
+					sf.T = T; sf.fi = i; sf.M = F.Txtr;
+					sf.P[0] = F.A->Pos; sf.P[1] = F.B->Pos; sf.P[2] = F.C->Pos;
+					sf.U[0] = F.U1; sf.V[0] = F.V1;
+					sf.U[1] = F.U2; sf.V[1] = F.V2;
+					sf.U[2] = F.U3; sf.V[2] = F.V3;
+					sf.N = F.N; sf.d = F.NormProd;
+					sf.chartOk = SeamChart(sf);
+					sf.bbLo = { std::min({sf.P[0].x,sf.P[1].x,sf.P[2].x}),
+					            std::min({sf.P[0].y,sf.P[1].y,sf.P[2].y}),
+					            std::min({sf.P[0].z,sf.P[1].z,sf.P[2].z}) };
+					sf.bbHi = { std::max({sf.P[0].x,sf.P[1].x,sf.P[2].x}),
+					            std::max({sf.P[0].y,sf.P[1].y,sf.P[2].y}),
+					            std::max({sf.P[0].z,sf.P[1].z,sf.P[2].z}) };
+					const int id = int(seamAll.size());
+					seamAll.push_back(sf);
+					for (int e = 0; e < 3; ++e) {
+						long long ka = qpos(sf.P[e]), kb = qpos(sf.P[(e + 1) % 3]);
+						if (ka > kb) std::swap(ka, kb);
+						seamEdges[{ ka, kb }].push_back(id);
+					}
 				}
 			}
 		}
@@ -4386,6 +4543,282 @@ float PomShell_Build(Scene *Sc, const char *matName, float uvAmp,
 						(double)table[4*g+2], (double)table[4*g+3],
 						(double)(table[4*g+1] - table[4*g+0]),
 						(double)(table[4*g+3] - table[4*g+2]));
+			}
+		}
+	}
+	// ── S1d-1 SEAM CENSUS (--pom_seam_census / --pom_seam_viz, default OFF) ──
+	// Classify every boundary edge of every patch. See the SeamFace block above
+	// for the method and for why this must run with the lid offset at zero.
+	if (seamCensus && nGroups && !seamAll.empty()) {
+		const bool moved = (offMax > 1e-6f);
+		if (moved)
+			std::fprintf(stderr, "[POM-SEAM] '%s' WARNING: the lid offset is %.4f "
+				"world, NOT zero. The angle-split corner vertices have been moved "
+				"along DIFFERENT smooth normals, so position coincidence — the whole "
+				"basis of this topology — is broken. Re-run with --pom_recess_only "
+				"or --pom_shell_lid_probe.\n", matName, (double)offMax);
+		const float *dom = mat->PomShellDomains;
+		// Per-face group id, read back from the Faces (assigned just above).
+		auto grpOf = [&](const SeamFace &sf) -> unsigned {
+			if (sf.M != mat) return 0u;
+			return (unsigned)sf.T->Faces[sf.fi].PomShellGroup;
+		};
+		// Per-class tallies, and per-class tallies of who the neighbour was.
+		long long nEdge[SC_N] = {0,0,0,0};
+		double    lEdge[SC_N] = {0,0,0,0};
+		long long nInShelled = 0, nInUnshelled = 0;   // ANGLED_IN neighbour material
+		double    lInShelled = 0.0, lInUnshelled = 0.0;
+		long long nBackfaceOnly = 0, nProbeFound = 0, nNoNeighbour = 0;
+		long long nCoplanarSameEdge = 0, nCoplanarProbe = 0;
+		// Per-patch class length, for the [POM-SEAM-PATCH] rows.
+		std::vector<std::array<double,SC_N>> pLen(nGroups, {0.0,0.0,0.0,0.0});
+		std::vector<std::array<int,SC_N>>    pCnt(nGroups, {0,0,0,0});
+		// Distinct UV transforms across CONTINUATION seams (the S1d-2 cost).
+		std::map<std::string, long long> xformHist;
+		double maxCoplanarUvErr = 0.0;
+		int nMirroredChart = 0, nChartOk = 0;
+		for (int ai = 0; ai < int(seamAll.size()); ++ai) {
+			const SeamFace &fa = seamAll[ai];
+			const unsigned g = grpOf(fa);
+			if (!g || g > nGroups) continue;             // not a patch face of this material
+			for (int e = 0; e < 3; ++e) {
+				const int i0 = e, i1 = (e + 1) % 3, i2 = (e + 2) % 3;
+				long long ka = qpos(fa.P[i0]), kb = qpos(fa.P[i1]);
+				if (ka > kb) std::swap(ka, kb);
+				auto it = seamEdges.find({ ka, kb });
+				if (it == seamEdges.end()) continue;     // impossible, defensive
+				const std::vector<int> &lst = it->second;
+				bool interior = false;
+				for (int bi : lst)
+					if (bi != ai && grpOf(seamAll[bi]) == g) { interior = true; break; }
+				if (interior) continue;                  // inside the patch, not a boundary
+				// ── this IS a patch-boundary edge ──
+				const Vector &Pa = fa.P[i0], &Pb = fa.P[i1], &Pc = fa.P[i2];
+				const Vector mid = { (Pa.x+Pb.x)*0.5f, (Pa.y+Pb.y)*0.5f, (Pa.z+Pb.z)*0.5f };
+				Vector ed = { Pb.x-Pa.x, Pb.y-Pa.y, Pb.z-Pa.z };
+				const float elen = std::sqrt(ed.x*ed.x + ed.y*ed.y + ed.z*ed.z);
+				if (elen < 1e-6f) continue;
+				ed.x /= elen; ed.y /= elen; ed.z /= elen;
+				Vector inw = { Pc.x-mid.x, Pc.y-mid.y, Pc.z-mid.z };
+				const float pr = inw.x*ed.x + inw.y*ed.y + inw.z*ed.z;
+				inw.x -= ed.x*pr; inw.y -= ed.y*pr; inw.z -= ed.z*pr;
+				const float il = std::sqrt(inw.x*inw.x + inw.y*inw.y + inw.z*inw.z);
+				if (il < 1e-6f) continue;
+				const Vector out = { -inw.x/il, -inw.y/il, -inw.z/il };
+				int   clsShared = -1, nbShared = -1;
+				bool  sawBackface = false;
+				float dotShared = 0.0f;
+				int   cls = -1, nbIdx = -1;
+				float bestDot = 0.0f;
+				auto consider = [&](int bi, bool viaProbe) {
+					const SeamFace &fb = seamAll[bi];
+					const float nd = fa.N.x*fb.N.x + fa.N.y*fb.N.y + fa.N.z*fb.N.z;
+					int c;
+					if (nd >= 0.999f && std::fabs(fa.d - fb.d) <= 1e-3f) {
+						c = SC_COPLANAR;
+					} else if (nd <= -0.999f && std::fabs(fa.d + fb.d) <= 1e-3f) {
+						sawBackface = true;              // the sheet's own reverse face
+						return;
+					} else {
+						// A plane hinged on the shared edge lies entirely on ONE
+						// side of this patch's plane, so the neighbour centroid's
+						// side IS the fold direction: in FRONT of us (concave, the
+						// material continues under the ray) or BEHIND (convex, the
+						// material ends and the ray leaves the solid).
+						const Vector cb = SeamCentroid(fb);
+						const float side = fa.N.x*cb.x + fa.N.y*cb.y + fa.N.z*cb.z + fa.d;
+						c = (side > 1e-4f) ? SC_ANGLED_IN : SC_ANGLED_OUT;
+					}
+					if (cls < 0 || c < cls) { cls = c; nbIdx = bi; bestDot = nd;
+						if (c == SC_COPLANAR) { if (viaProbe) ++nCoplanarProbe; else ++nCoplanarSameEdge; } }
+				};
+				for (int bi : lst) if (bi != ai) consider(bi, false);
+				clsShared = cls; nbShared = nbIdx; dotShared = bestDot;
+				if (clsShared < 0) { if (sawBackface) ++nBackfaceOnly; else ++nNoNeighbour; }
+				// A shared-edge partner is EXACT and applies to the whole edge. A
+				// probe is a point sample, and greets has 18-world edges whose
+				// neighbour changes along their length (the x=17.898 wall carries a
+				// coplanar panel over its top half and an opening under it). So
+				// probe-classified edges are SUBDIVIDED and each piece classified on
+				// its own — without this the whole edge takes the midpoint's class
+				// and the screen weighting inherits the error.
+				// 0.25 world per piece: the measured screen population at the
+				// t=6097 corner sits within 0.8 world of a class transition, so a
+				// 1-world subdivision was still coarse enough to mislabel most of it.
+				const int K = (clsShared >= 0)
+				            ? 1 : std::min(128, std::max(1, int(std::ceil(elen / 0.25f))));
+				for (int kseg = 0; kseg < K; ++kseg) {
+				const float t0 = float(kseg) / float(K), t1 = float(kseg + 1) / float(K);
+				const Vector Psa = { Pa.x + (Pb.x-Pa.x)*t0, Pa.y + (Pb.y-Pa.y)*t0, Pa.z + (Pb.z-Pa.z)*t0 };
+				const Vector Psb = { Pa.x + (Pb.x-Pa.x)*t1, Pa.y + (Pb.y-Pa.y)*t1, Pa.z + (Pb.z-Pa.z)*t1 };
+				const float tm = 0.5f * (t0 + t1);
+				const Vector smid = { Pa.x + (Pb.x-Pa.x)*tm, Pa.y + (Pb.y-Pa.y)*tm, Pa.z + (Pb.z-Pa.z)*tm };
+				const float slen = elen / float(K);
+				cls = clsShared; nbIdx = nbShared; bestDot = dotShared;
+				// No continuing neighbour on the shared edge. Probe outward, in the
+				// patch's own plane, for a surface that abuts without sharing an
+				// edge — the doorway thresholds and every T-junction live here.
+				if (cls < 0) {
+					static const float kProbe[3] = { 0.02f, 0.10f, 0.35f };
+					for (int s = 0; s < 3 && cls < 0; ++s) {
+						const Vector Q = { smid.x + out.x*kProbe[s],
+						                   smid.y + out.y*kProbe[s],
+						                   smid.z + out.z*kProbe[s] };
+						for (int bi = 0; bi < int(seamAll.size()); ++bi) {
+							if (bi == ai) continue;
+							const SeamFace &fb = seamAll[bi];
+							if (Q.x < fb.bbLo.x - 0.06f || Q.x > fb.bbHi.x + 0.06f ||
+							    Q.y < fb.bbLo.y - 0.06f || Q.y > fb.bbHi.y + 0.06f ||
+							    Q.z < fb.bbLo.z - 0.06f || Q.z > fb.bbHi.z + 0.06f) continue;
+							if (grpOf(fb) == g) continue;         // our own patch
+							const float nd = fa.N.x*fb.N.x + fa.N.y*fb.N.y + fa.N.z*fb.N.z;
+							if (nd <= -0.999f && std::fabs(fa.d + fb.d) <= 1e-3f) continue;  // reverse sheet
+							if (!SeamPointOnFace(fb, Q, 0.06f)) continue;
+							consider(bi, true);
+							if (cls >= 0) { ++nProbeFound; break; }
+						}
+					}
+				}
+				if (cls < 0) cls = SC_TRUE;
+				nEdge[cls] += 1; lEdge[cls] += slen;
+				pCnt[g-1][cls] += 1; pLen[g-1][cls] += slen;
+				const Material *nbM = (nbIdx >= 0) ? seamAll[nbIdx].M : nullptr;
+				const bool nbShelled = nbM && (nbM->PomShellUvAmp > 0.0f
+				                       || (nbM->Name && (!std::strcmp(nbM->Name, "rooms")
+				                                      || !std::strcmp(nbM->Name, "floor"))));
+				if (cls == SC_ANGLED_IN) {
+					if (nbShelled) { ++nInShelled; lInShelled += slen; }
+					else           { ++nInUnshelled; lInUnshelled += slen; }
+				}
+				// UV of the sub-segment in OUR chart (the chart is affine, so the
+				// edge's UVs interpolate exactly) — what a hand-off would start from.
+				const float uA = fa.U[i0] + (fa.U[i1]-fa.U[i0])*t0;
+				const float vA = fa.V[i0] + (fa.V[i1]-fa.V[i0])*t0;
+				const float uB = fa.U[i0] + (fa.U[i1]-fa.U[i0])*t1;
+				const float vB = fa.V[i0] + (fa.V[i1]-fa.V[i0])*t1;
+				// ── the transform a continuation would have to apply ──
+				char xf[96] = "n/a";
+				if (nbIdx >= 0 && seamAll[nbIdx].chartOk && fa.chartOk) {
+					const SeamFace &fb = seamAll[nbIdx];
+					float nuA, nvA, nuB, nvB;
+					SeamUVofPoint(fb, Psa, nuA, nvA);
+					SeamUVofPoint(fb, Psb, nuB, nvB);
+					if (cls == SC_COPLANAR) {
+						const double err = std::max(std::max(std::fabs(nuA-uA), std::fabs(nvA-vA)),
+						                            std::max(std::fabs(nuB-uB), std::fabs(nvB-vB)));
+						maxCoplanarUvErr = std::max(maxCoplanarUvErr, err);
+						std::snprintf(xf, sizeof(xf), err < 1e-3 ? "IDENTITY" : "COPLANAR_OFFSET");
+					} else {
+						// Scale ratio of the two charts + handedness. A chart's
+						// handedness is the sign of (dPdu × dPdv)·N.
+						const Vector ca = { fa.dPdu.y*fa.dPdv.z - fa.dPdu.z*fa.dPdv.y,
+						                    fa.dPdu.z*fa.dPdv.x - fa.dPdu.x*fa.dPdv.z,
+						                    fa.dPdu.x*fa.dPdv.y - fa.dPdu.y*fa.dPdv.x };
+						const Vector cbv= { fb.dPdu.y*fb.dPdv.z - fb.dPdu.z*fb.dPdv.y,
+						                    fb.dPdu.z*fb.dPdv.x - fb.dPdu.x*fb.dPdv.z,
+						                    fb.dPdu.x*fb.dPdv.y - fb.dPdu.y*fb.dPdv.x };
+						const float ha = ca.x*fa.N.x + ca.y*fa.N.y + ca.z*fa.N.z;
+						const float hb = cbv.x*fb.N.x + cbv.y*fb.N.y + cbv.z*fb.N.z;
+						const float wa = std::sqrt(std::sqrt(
+							(fa.dPdu.x*fa.dPdu.x+fa.dPdu.y*fa.dPdu.y+fa.dPdu.z*fa.dPdu.z) *
+							(fa.dPdv.x*fa.dPdv.x+fa.dPdv.y*fa.dPdv.y+fa.dPdv.z*fa.dPdv.z)));
+						const float wb = std::sqrt(std::sqrt(
+							(fb.dPdu.x*fb.dPdu.x+fb.dPdu.y*fb.dPdu.y+fb.dPdu.z*fb.dPdu.z) *
+							(fb.dPdv.x*fb.dPdv.x+fb.dPdv.y*fb.dPdv.y+fb.dPdv.z*fb.dPdv.z)));
+						const bool mirrored = (ha * hb) < 0.0f;
+						if (mirrored) ++nMirroredChart;
+						++nChartOk;
+						std::snprintf(xf, sizeof(xf), "FOLD%.0fdeg scale%.3f%s",
+							(double)(std::acos(std::max(-1.0f, std::min(1.0f, bestDot)))
+							         * 57.29578f),
+							(double)(wb > 1e-9f ? wa / wb : 0.0f),
+							mirrored ? " MIRRORED" : "");
+					}
+				}
+				{
+					char kbuf[160];
+					std::snprintf(kbuf, sizeof(kbuf), "%s|%s|%s", SeamClassName(cls),
+						nbM && nbM->Name ? nbM->Name : "(none)", xf);
+					xformHist[kbuf] += 1;
+				}
+				if (fds::FeatureFlags::pom_seam_census())
+					std::fprintf(stderr,
+						"[POM-SEAM] '%s' g=%u cls=%s len=%.4f A=(%.4f,%.4f,%.4f) "
+						"B=(%.4f,%.4f,%.4f) uvA=(%.5f,%.5f) uvB=(%.5f,%.5f) "
+						"nb=%s nbdot=%.4f xf=%s%s\n",
+						matName, g, SeamClassName(cls), (double)slen,
+						(double)Psa.x, (double)Psa.y, (double)Psa.z,
+						(double)Psb.x, (double)Psb.y, (double)Psb.z,
+						(double)uA, (double)vA, (double)uB, (double)vB,
+						nbM && nbM->Name ? nbM->Name : "(none)", (double)bestDot, xf,
+						sawBackface ? " +backface" : "");
+				if (fds::FeatureFlags::pom_seam_viz() > 0)
+					fds::PomSeamViz_Record(Psa, Psb, cls);
+				}   // sub-segment loop
+			}
+		}
+		double lTot = 0.0; long long nTot = 0;
+		for (int c = 0; c < SC_N; ++c) { lTot += lEdge[c]; nTot += nEdge[c]; }
+		std::fprintf(stderr,
+			"[POM-SEAM-SUM] '%s' %u patches, %lld boundary SEGMENTS (edges subdivided where the class was decided by a probe), %.2f world total\n",
+			matName, nGroups, nTot, lTot);
+		for (int c = 0; c < SC_N; ++c)
+			std::fprintf(stderr,
+				"[POM-SEAM-SUM] '%s'   %-14s edges=%5lld (%5.1f%%)  length=%9.3f (%5.1f%%)\n",
+				matName, SeamClassName(c), nEdge[c],
+				nTot ? 100.0*double(nEdge[c])/double(nTot) : 0.0,
+				lEdge[c], lTot > 0 ? 100.0*lEdge[c]/lTot : 0.0);
+		std::fprintf(stderr,
+			"[POM-SEAM-SUM] '%s'   ANGLED_IN neighbour SHELLED: %lld edges / %.3f world; "
+			"UNSHELLED: %lld / %.3f\n", matName, nInShelled, lInShelled,
+			nInUnshelled, lInUnshelled);
+		std::fprintf(stderr,
+			"[POM-SEAM-SUM] '%s'   edges whose only shared-edge partner was the "
+			"REVERSE sheet: %lld; with no partner at all: %lld; resolved by the "
+			"outward probe: %lld\n", matName, nBackfaceOnly, nNoNeighbour, nProbeFound);
+		std::fprintf(stderr,
+			"[POM-SEAM-SUM] '%s'   COPLANAR found via a shared edge: %lld, via the "
+			"probe (T-junction / non-adjacent abutment): %lld; worst UV disagreement "
+			"across a coplanar seam: %.6f UV; charts mirrored across an angled seam: "
+			"%d of %d\n", matName, nCoplanarSameEdge, nCoplanarProbe,
+			maxCoplanarUvErr, nMirroredChart, nChartOk);
+		for (const auto &kv : xformHist)
+			std::fprintf(stderr, "[POM-SEAM-XFORM] '%s' %-64s x%lld\n",
+				matName, kv.first.c_str(), kv.second);
+		if (fds::FeatureFlags::pom_seam_census()) {
+			for (unsigned g = 0; g < nGroups; ++g)
+				std::fprintf(stderr,
+					"[POM-SEAM-PATCH] '%s' g=%u cop=%d/%.3f in=%d/%.3f out=%d/%.3f "
+					"true=%d/%.3f\n", matName, g + 1,
+					pCnt[g][0], pLen[g][0], pCnt[g][1], pLen[g][1],
+					pCnt[g][2], pLen[g][2], pCnt[g][3], pLen[g][3]);
+			// Machine-readable domain table for the offline screen-weighting:
+			// each patch's own UV box followed by its sibling boxes (the domain
+			// the kernel actually tests is the UNION of them).
+			for (unsigned g = 0; g < nGroups; ++g) {
+				std::fprintf(stderr, "[POM-SEAM-DOMAIN] '%s' g=%u box=%.6f,%.6f,%.6f,%.6f",
+					matName, g + 1, (double)dom[4*g+0], (double)dom[4*g+1],
+					(double)dom[4*g+2], (double)dom[4*g+3]);
+				if (mat->PomShellSibBoxes && mat->PomShellSibOfs) {
+					const uint32_t o0 = mat->PomShellSibOfs[g], o1 = mat->PomShellSibOfs[g+1];
+					for (uint32_t s = o0; s < o1; ++s)
+						std::fprintf(stderr, " sib=%.6f,%.6f,%.6f,%.6f",
+							(double)mat->PomShellSibBoxes[4*s+0],
+							(double)mat->PomShellSibBoxes[4*s+1],
+							(double)mat->PomShellSibBoxes[4*s+2],
+							(double)mat->PomShellSibBoxes[4*s+3]);
+				}
+				std::fprintf(stderr, "\n");
+			}
+			// Every patch face's UV triangle — lets the offline pass ask "is this
+			// landed UV inside the patch's actual footprint, or only inside its
+			// bounding box?", which the kernel's box test cannot distinguish.
+			for (const auto &sf : seamAll) {
+				const unsigned g = grpOf(sf);
+				if (!g || g > nGroups) continue;
+				std::fprintf(stderr, "[POM-SEAM-TRI] '%s' g=%u uv=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+					matName, g, (double)sf.U[0], (double)sf.V[0], (double)sf.U[1],
+					(double)sf.V[1], (double)sf.U[2], (double)sf.V[2]);
 			}
 		}
 	}
